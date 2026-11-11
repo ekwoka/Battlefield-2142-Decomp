@@ -991,8 +991,9 @@ struct DeviationBuildUp {
 //   - the stance's modifier (Stand, Crouch, Lie), and zoomed devModZoom
 //     on the whole and minDevModZoom on minDev (else 1 and 1).
 // The deviation = (minDev x minDevModZoom + misc + turn + speed + fire)
-// x zoom x stance. (Its +0x44 extra, added on a condition of the holder's
-// slot 0x1a0 not decoded, is left out.)
+// x zoom x stance. Its +0x44 (set by slot 0xac, 0x00680290: the bots'
+// setAiDeviation) is added while the holder is an AI (the holder's +0x1a0
+// slot 0x6c, then slot 0x68; 0x005de980's end): Player::aiDeviation.
 struct SoldierDeviation {
 	DeviationBuildUp fire;
 	float turnMax = 0, turnPitch = 0, turnYaw = 0, turnDecay = 0;

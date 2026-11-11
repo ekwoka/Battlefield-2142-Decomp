@@ -140,6 +140,10 @@ private:
 		bool looping = false;
 		bool burst = false;
 		int lastTick = 0;
+		// The component's +0x41: set by every reload event but state 2
+		// (0x005dbfe0's end), cleared by the draw (0x005dc1d0) and by the
+		// click it turns into a BoltClick (0x005dc160).
+		bool reloaded = false;
 	};
 	ISound* create(const std::string& templateName, uint32_t owner);
 	void release(WeaponState& state);

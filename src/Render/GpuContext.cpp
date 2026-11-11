@@ -441,16 +441,26 @@ void GpuContext::releaseWorldPipelines(WorldPipelines& world)
 	world = {};
 }
 
+std::vector<uint32_t> GpuContext::sampleCounts() const
+{
+	std::vector<uint32_t> counts;
+	for (const uint32_t count : {2u, 4u, 8u}) {
+		if (SDL_GPUTextureSupportsSampleCount(m_device, m_colorFormat, sampleCountOf(count)) &&
+			SDL_GPUTextureSupportsSampleCount(m_device, m_depthFormat, sampleCountOf(count))) {
+			counts.push_back(count);
+		}
+	}
+	return counts;
+}
+
 uint32_t GpuContext::setWorldSamples(uint32_t requested)
 {
 	// The most samples at or below the request both targets' formats take
 	// (the original lists the device's multisample types, 0x1000fb60).
 	uint32_t samples = 1;
-	for (const uint32_t count : {8u, 4u, 2u}) {
-		if (count <= requested && SDL_GPUTextureSupportsSampleCount(m_device, m_colorFormat, sampleCountOf(count)) &&
-			SDL_GPUTextureSupportsSampleCount(m_device, m_depthFormat, sampleCountOf(count))) {
+	for (const uint32_t count : sampleCounts()) {
+		if (count <= requested) {
 			samples = count;
-			break;
 		}
 	}
 	if (samples > 1 && samples != m_multisampledCount) {

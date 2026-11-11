@@ -53,6 +53,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <set>
@@ -92,21 +93,30 @@ int GameWorld::targetChannel(const std::string& name)
 
 // The medic's means for TCLocalTeamMedic: 0x004a6f70 asks the receiver's
 // soldier for its interface 0xc4d7 (the soldier's +0x18c, 0x00585af0),
-// whose slot 0x58 (0x005afc00) is its kit (+0x228), and the kit's +0x74's
-// slot 0x38 for a flag; that flag's setter wasn't traced. The rewrite
-// takes a kit carrying a healing gadget (ammo.replenishingType RTHeal: the
-// medic hub, the defibrillator's kit) as having it.
+// whose slot 0x58 (0x005afc00) is its kit (+0x228), and the kit's +0x74
+// (the object's component of interface 0xc4b1, kept by 0x006f99e0: the
+// Ability component, vtable 0x00988e50) for its slot 0x38 (0x00658590:
+// the template's +0x10), ability.hasHealingAbility (+0x10 of hasHealing,
+// hasRepairing, hasAmmo, showPlayers, showVehicles, radialRadar, then
+// radarRadius +0x18, which the component's constructor 0x00656550 reads).
+// Shipped: EU_Assault and Pac_Assault.
 bool GameWorld::carriesHealing(const Player& player) const
 {
-	for (const Player::Carried& item : player.carried) {
-		const world::ObjectTemplate* t = m_templates.find(item.name);
-		Ability ability;
-		bool whileFiring = false;
-		if (t && abilityOf(*t, ability, whileFiring) && !ability.ammo) {
-			return true;
-		}
+	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
+	const world::ObjectTemplate* kit = worn && worn->objectTemplate() ? worn->objectTemplate()
+		: player.kitTemplate.empty()                                   ? nullptr
+																		: m_templates.find(player.kitTemplate);
+	if (!kit) {
+		return false;
 	}
-	return false;
+	const auto& components = kit->components();
+	const bool ability = std::any_of(components.begin(), components.end(), [](const std::string& c) {
+		return c.size() == 7 && std::equal(c.begin(), c.end(), "ability", [](char a, char b) {
+			return std::tolower(static_cast<unsigned char>(a)) == b;
+		});
+	});
+	const auto healing = kit->settings().find("ability.hasHealingAbility");
+	return ability && healing != kit->settings().end() && std::atoi(healing->second.c_str()) != 0;
 }
 
 bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value) const

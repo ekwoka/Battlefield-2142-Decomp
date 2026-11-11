@@ -436,7 +436,10 @@ struct ItemListInput {
 	// unless the weapon in hand is zoomed (its firearm's slot 300), in a
 	// vehicle only with the control object's vehicleHud.useSelectionIcons
 	// (block +0xbc); never in a demo. The active weapon's +0x14 bit 0,
-	// which also forbids it, isn't traced.
+	// which also forbids it, is the object's disabled flag (0x006f68f0
+	// flag 1: a soldier's firearm's disable 0x005c42f0 sets it, its enable
+	// 0x005c47d0, run when it is made active, clears it); the rewrite's
+	// active weapons are never disabled in place, so it is left out.
 	bool allowed = false;
 	std::vector<SelectItem> items; // 0x0079c470's list
 	int inHand = -1;               // the item index in hand (selected at opening)

@@ -167,6 +167,83 @@ TEST(HudLists_KitMenu)
 	CHECK(hud.number("Kit0Branch0UnlockLevel") == 0.25f && hud.number("Kit0Branch0MaxUnlockLevel") == 0.125f);
 }
 
+// The spawn screen's ability icons (0x00798b20, from the rebuild while
+// the soldier is dead): the player's ability block after the kit build
+// (0x00570ab0: each owned container's Ability), addExtraAmmoItem's flag,
+// +8 and +4 lighting Ability0..2Active (only ever set; the full reset
+// clears them), the sprint use and recharge modifiers, the overheat pairs
+// and the beacon modifier Ability3..6Active.
+TEST(HudLists_KitMenuAbilityIcons)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	const auto make = [&](const char* type, const char* name, std::vector<std::pair<const char*, const char*>> settings,
+						  std::vector<const char*> children = {}) {
+		world::ObjectTemplate* t = templates.create(type, name);
+		for (const auto& [key, value] : settings) {
+			t->settings()[key] = value;
+		}
+		for (const char* child : children) {
+			t->children().push_back({child, {}, {}});
+		}
+	};
+	make("GenericFireArm", "rifle", {{"weaponHud.weaponIcon", "rifle_icon.tga"}});
+	make("GenericFireArm", "ability_item", {});
+	make("ItemContainer", "Player0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_Player"}, {"replaceWithoutEquip", "1"},
+		{"ability.addExtraAmmoItem.list", "item_dummy 0 0 1;"}}, {"ability_item"});
+	make("ItemContainer", "Player1", {{"unlockLevel", "1"}, {"unlockBranch", "UB_Player"}, {"ability.SprintUseModifier", "0.66"}},
+		{"ability_item"});
+	make("ItemContainer", "Player2", {{"unlockLevel", "2"}, {"unlockBranch", "UB_Player"},
+		{"ability.SprintRechargeModifier", "1.5"}}, {"ability_item"});
+	make("ItemContainer", "Player3", {{"unlockLevel", "3"}, {"unlockBranch", "UB_Player"},
+		{"ability.addExtraAmmoItem.list", "as_handgun 3 0 0;"}}, {"ability_item"});
+	make("ItemContainer", "Player4", {{"unlockLevel", "4"}, {"unlockBranch", "UB_Player"},
+		{"ability.addExtraAmmoItem.list", "unl_grenade_emp 0 1 1;unl_grenade_frag 0 1 1;"}}, {"ability_item"});
+	make("ItemContainer", "Camo", {{"unlockLevel", "2"}, {"ability.setOverheatMod.list", "Unl_Active_Camo 0.72;"}},
+		{"ability_item"});
+	make("ItemContainer", "Leader", {{"unlockLevel", "4"}, {"unlockBranch", "UB_SquadLeader"},
+		{"ability.beaconSpawnTimeMod", "0.8"}}, {"ability_item"});
+	make("Kit", "Recon", {}, {"rifle", "Player0", "Player1", "Player2", "Player3", "Player4", "Camo", "Leader"});
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(1).kits.push_back({"Recon", "soldier", "heavy_soldier"});
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	const auto lit = [&] {
+		std::string on;
+		for (int i = 0; i < 7; ++i) {
+			on += hud.number("Ability" + std::to_string(i) + "Active") != 0 ? '1' : '0';
+		}
+		return on;
+	};
+	// Owned, chosen or not: the grenades' flag and the sprint use.
+	kits.setUnlocked({"Player0", "Player1"}, false);
+	kits.update(1);
+	CHECK(lit() == "1001000");
+	// The extra sidearm clip (+8, its first number) lights Ability1, the
+	// extra grenade (+4) Ability2, as the script's nodes have them.
+	kits.setUnlocked({"Player0", "Player1", "Player3"}, false);
+	kits.update(1);
+	CHECK(lit() == "1101000");
+	kits.setUnlocked({"Player4", "Player2", "Camo", "Leader"}, false);
+	kits.update(1);
+	CHECK(lit() == "1110111"); // 0..2 stay set
+	// Alive: not worked out again.
+	kits.setAlive(true);
+	kits.setUnlocked({}, false);
+	kits.update(1);
+	CHECK(lit() == "1110111");
+	kits.setAlive(false);
+	kits.resetAbilityIcons();
+	kits.setUnlocked({"Player2"}, false);
+	kits.update(1);
+	CHECK(lit() == "0000100");
+	// Every one with "all unlocked".
+	kits.setUnlocked({}, true);
+	kits.update(1);
+	CHECK(lit() == "1111111");
+}
+
 TEST(HudLists_Awards)
 {
 	const std::string script = "awards.setData 100_2 \"6,1, ,20\" \"9,23,ktt-3,54000\"\n"

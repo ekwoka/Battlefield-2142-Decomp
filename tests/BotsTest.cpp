@@ -3092,6 +3092,23 @@ TEST(Radio_TargetChannelsReachTheirHearers)
 	CHECK(!w.hearsRadio(11, me, mate)); // on foot: no vehicle to share
 	// Ground vehicles' channel: 15 m for anyone, else teammates aboard.
 	CHECK(w.hearsRadio(7, me, enemy) && !w.hearsRadio(7, me, mate) && !w.hearsRadio(8, me, enemy));
+	// TCLocalTeamMedic: teammates within 100 m whose kit's Ability
+	// component has hasHealingAbility (the kit's +0x74, interface 0xc4b1,
+	// slot 0x38: template +0x10), as EU_Assault's and Pac_Assault's.
+	f.templates.registerType(6, "Kit");
+	world::ObjectTemplate* medic = f.templates.create("Kit", "Radio_Medic");
+	medic->components().push_back("Ability");
+	medic->settings()["ability.hasHealingAbility"] = "1";
+	world::ObjectTemplate* plain = f.templates.create("Kit", "Radio_Plain");
+	plain->components().push_back("Ability");
+	CHECK(!w.hearsRadio(6, me, mate));
+	w.setKit(mate, "Radio_Plain", "");
+	CHECK(!w.hearsRadio(6, me, mate));
+	w.setKit(mate, "Radio_Medic", "");
+	w.setKit(far, "Radio_Medic", "");
+	w.setKit(enemy, "Radio_Medic", "");
+	// Past 100 m no; anyone within 15 m as AutoLocalRevive.
+	CHECK(w.hearsRadio(6, me, mate) && !w.hearsRadio(6, me, far) && w.hearsRadio(6, me, enemy));
 	// The hand-out: each hearer once, in player order.
 	w.radioMessage(me, 10, "roger_that");
 	const auto heard = w.takeRadioHeard();
@@ -5122,14 +5139,16 @@ TEST(Bots_HumanJoiningKicksABot)
 
 // The Turret sensing pattern (0x1008c120): a tank's driver with nothing
 // to fight looks about with the turret, by the look-around's sectors; with
-// the Null pattern the turret stays where it is.
+// the Null pattern the turret stays where it is; a ControlInfo with
+// camera-relative yaw limits keeps the sectors within them (0x100d5440).
 TEST(Bots_TurretLooksAround)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
 	}
-	for (const bool turretPattern : {true, false}) {
+	for (const int mode : {0, 1, 2}) {
+		const bool turretPattern = mode != 1;
 		CarField field(gameDir);
 		world::ObjectTemplate* tank = field.templates.create("PlayerControlObject", "tank");
 		for (const auto& [key, value] : field.templates.find("car")->settings()) {
@@ -5160,6 +5179,15 @@ TEST(Bots_TurretLooksAround)
 		field.console.execute(turretPattern ? "aiSettings.addSensingAgentPattern Tank Turret"
 											: "aiSettings.addSensingAgentPattern Tank Null",
 			out);
+		if (mode == 2) {
+			// Held to -40..40 degrees of the hull (as as_apc's pod cannons,
+			// 0x100d5440): only the hull's own sector (+z) may be chosen by
+			// weight (a random pick may still fall outside, as the
+			// original's; the gun's bundle limits hold it).
+			field.console.execute("aiTemplatePlugIn.active TestTank_Ctrl", out);
+			field.console.execute("aiTemplatePlugIn.setCameraRelativeMinRotationDeg -40/-20/0", out);
+			field.console.execute("aiTemplatePlugIn.setCameraRelativeMaxRotationDeg 40/35/0", out);
+		}
 		const uint32_t id = field.objects.create(tank, {3, 1.2f, 0}, {0, 0, 0})->id();
 		const int bot = field.soldier("Bot", true, 0, 0);
 		field.ticks(90);
@@ -5177,9 +5205,14 @@ TEST(Bots_TurretLooksAround)
 			planned = planned || bots.lookPlanned(bot);
 		}
 		std::printf("  %s pattern: the turret turned up to %.1f degrees off the hull, looked %d\n",
-			turretPattern ? "Turret" : "Null", most, planned);
+			mode == 2 ? "Limited Turret" : turretPattern ? "Turret" : "Null", most, planned);
 		CHECK(planned == turretPattern);
-		CHECK(turretPattern ? most > 20 : most < 1);
+		CHECK(mode == 2 || (turretPattern ? most > 20 : most < 1));
+		// The sectors (+z, +x, -z, -x, +x+z, +x-z, -x-z, -x+z) against the
+		// hull facing +z: within 40 degrees only +z.
+		for (int sector = 0; sector < 8; ++sector) {
+			CHECK(bots.lookSectorAllowed(bot, sector) == (mode != 2 || sector == 0));
+		}
 	}
 }
 

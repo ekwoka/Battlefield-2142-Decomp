@@ -176,6 +176,9 @@ public:
 	// ascending; wider than 4:3 only with "+widescreen 1"), and a new size
 	// for the window.
 	std::vector<std::string> displayModes(bool wideScreen) const;
+	// The antialiasing modes the video options list ("Off", then
+	// "<n>Samples" for each count the GPU takes; listAntialiasingModes).
+	std::vector<std::string> antialiasingModes() const;
 	void setSize(int width, int height);
 
 	// A menu drawn alone between other work (the loading screen while a

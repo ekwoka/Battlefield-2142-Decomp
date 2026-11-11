@@ -996,6 +996,8 @@ public:
 	int respawnPoint(int player) const;
 	// The sensing agent's chosen sector (-1 none) and whether a look plan runs.
 	int lookSector(int player) const;
+	// Whether the look-around may face sector 0..7 (sectorAllowed).
+	bool lookSectorAllowed(int player, int sector) const;
 	bool lookPlanned(int player) const;
 	// Whether a bot may advance (bot +400, vt+0x128 / 0x12c: set by the
 	// squad's bounding and flanking; read by the look-around 0x100d7840,
@@ -1517,6 +1519,7 @@ private:
 	// (0x1008c120: the vehicle's equipment type names Turret, the seat's
 	// controlled object has its ControlInfo and the seat aims a gun).
 	bool turretLooks(const GameWorld::PlayerInfo& self) const;
+	bool sectorAllowed(const GameWorld::PlayerInfo& self, int sector) const;
 	// The squads (BotsSquad.cpp): the manager's round robin (0x1008a910),
 	// one squad's update (0x100c4240) and its parts.
 	void updateSquads();

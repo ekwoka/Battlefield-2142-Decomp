@@ -161,9 +161,7 @@ public:
 	// level's own areas'.
 	virtual float combatAreaTimeLeft() const { return -1; }
 	// The ability bar's inputs (GameWorld::abilityBar) for the local player:
-	// a local round's. A joined game's: none (the server networks the
-	// players' gift flags, player networkable bits read by 0x00596ed0, but
-	// not their ticks or the tools' targets).
+	// a local round's, or a joined game's (RemoteHudWorld::abilityBar).
 	virtual bool abilityBar(game::GameWorld::AbilityBarInfo& out) const
 	{
 		(void)out;
@@ -277,6 +275,28 @@ public:
 	bool soldierJumpHold() const override { return ownJumpHold && ownJumpHold(); }
 	// The spawn group the local player asked for (6/6), -1 none.
 	int chosenSpawn = -1;
+	// Our soldier's ability battery as the prediction has it (the control
+	// record's, filled between records); false: none.
+	std::function<bool(float& battery)> ownBattery;
+	// The scan of our tool in hand, run here as the exe's client runs the
+	// ReplenishingAmmoComp's update (0x005d8ac0 on every machine; only the
+	// treating is the server's, game logic slot 0x144): while the tool
+	// works (a hub in hand; the repair tool while firing, `fire`), every
+	// second with no targets and every two with some (0x00a6db70 /
+	// 0x00a6db68), the targets of 0x005d8740 (a sphere of abilityRadius
+	// round the hands: our team's soldiers on foot; the objects of our team
+	// or none that can be mended, 0x005d7d40) or of 0x005d84a0 (the first
+	// object along the look within abilityRadius), as GameWorld's own scan.
+	void stepAbility(float seconds, bool fire);
+	// The bar's inputs (0x007c3af0 runs on the client too): our own state's
+	// gift flags (0x00596ed0: +0x16a, +0x168, +0x169) without their ticks
+	// (nothing sends +0x15c / +0x160, and the constructor's 0 keeps the
+	// vehicle branch off), the kit's and the tool's flags, our battery, and
+	// the targets: a soldier's networked health or an object's hit points
+	// over maxHitPoints; for the ammo kit 15 each, as no networkable
+	// carries another soldier's magazines (what the exe's client's copies
+	// of their weapons hold for 0x00588ba0 isn't traced).
+	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override;
 	// Our hit indicator's alpha: 1 when our own state's flag comes
 	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
 	// (0x005912c0); PlayerInfo::hitIndicator of the local player.
@@ -324,6 +344,12 @@ public:
 
 private:
 	void fill(const net::RemotePlayer& p, PlayerInfo& out) const;
+	std::vector<uint32_t> scanAbilityTargets(const PlayerInfo& me, float radius, bool ammo, bool whileFiring) const;
+	struct AbilityScan {
+		bool active = false; // the tool works (abilityActive)
+		float timer = 0;
+		std::vector<uint32_t> targets;
+	} m_abilityScan;
 	const net::RemoteWorld& m_world;
 	game::GameWorld& m_round;
 	const std::map<uint16_t, uint32_t>& m_ghostObjects;

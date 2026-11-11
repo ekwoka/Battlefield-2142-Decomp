@@ -261,6 +261,10 @@ public:
 	// the first time a count is asked for). Returns the count in effect.
 	uint32_t setWorldSamples(uint32_t requested);
 	uint32_t worldSamples() const { return m_worldSamples; }
+	// The sample counts above one that both formats take (SDL GPU's 2, 4
+	// and 8), ascending: what the video options offer, as RendDX9 lists
+	// the multisample types the device accepts (0x10007e30, 0x1000fb60).
+	std::vector<uint32_t> sampleCounts() const;
 	// A colour (or with `depth` a depth-stencil) target of the world's
 	// sample count, for the multisampled world pass.
 	SDL_GPUTexture* createMultisampleTarget(uint32_t width, uint32_t height, bool depth);

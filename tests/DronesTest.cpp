@@ -52,6 +52,13 @@ struct Field {
 				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev",
 				"autoControllerTemplateName"});
 		std::string out;
+		// The sentry drone's siren (Vehicles_server.zip's Car_horn_Alt, a
+		// root child of unl_drone_sentry before its gun): a GenericFireArm
+		// on PIAltFire with no projectile, which the auto controller's gun
+		// is not.
+		if (world::ObjectTemplate* horn = templates.create("GenericFireArm", "Car_horn_Alt")) {
+			horn->settings()["fire.fireInput"] = "PIAltFire";
+		}
 		for (const char* script : {"Objects/Weapons/Handheld/unl_drone_recon/unl_drone_recon.con",
 				 "Objects/Weapons/Handheld/Unl_Drone_Recon_Detonator/Unl_Drone_Recon_Detonator.con",
 				 "Objects/Weapons/Handheld/unl_drone_sentry/unl_drone_sentry.con",

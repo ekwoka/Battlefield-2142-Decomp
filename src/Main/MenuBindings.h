@@ -262,6 +262,9 @@ public:
 
 	// The display modes the video page offers ("1280x720@60Hz").
 	void setDisplayModes(const std::vector<std::string>& modes);
+	// The antialiasing modes the video page offers (Window::antialiasingModes;
+	// "Off" alone until told).
+	void setAntialiasingModes(std::vector<std::string> modes) { m_antialiasingModes = std::move(modes); }
 
 	// The levels the map lists offer (all game modes; the menu filters).
 	void setMaps(std::vector<MenuMap> maps);
@@ -525,6 +528,7 @@ private:
 	void log(const std::string& line) const;
 
 	ui::NativeRegistry& m_natives;
+	std::vector<std::string> m_antialiasingModes {"Off"};
 	MenuServices m_services;
 
 	// Startup checks.

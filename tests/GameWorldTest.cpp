@@ -2675,9 +2675,12 @@ TEST(GameWorld_UnlockSprintHeatAndBeaconModifiers)
 	CHECK(plain > 1 && std::fabs(onBeacon - plain * 0.8f) < 0.05f);
 }
 
-// An unlock's Ability lists: ability.addExtraAmmoItem gives the rifle
-// two more magazines, ability.setMaterialDamageMod cuts the damage of the
-// rifle's projectile material (69 here) to the soldier by a quarter.
+// An unlock's Ability lists: ability.addExtraAmmoItem <item> <rounds>
+// <mags> gives the rifle the most rounds and magazines its entries name
+// (the ammo comp's getters 0x005f4270 / 0x005f41b0: the template's magSize
+// and nrOfMags plus the largest +8 and +4 of the entries naming it, not
+// their sum), ability.setMaterialDamageMod cuts the damage of the rifle's
+// projectile material (69 here) to the soldier by a quarter.
 TEST(GameWorld_UnlockAbilityLists)
 {
 	Range range;
@@ -2685,7 +2688,7 @@ TEST(GameWorld_UnlockAbilityLists)
 	range.templates.registerType(7, "ItemContainer");
 	world::ObjectTemplate* armour = range.templates.create("ItemContainer", "UnlockEU_AssaultPlayer5");
 	armour->settings()["ability.setMaterialDamageMod.list"] = "69 0.75;";
-	armour->settings()["ability.addExtraAmmoItem.list"] = "eu_ar_rifle 2 0 0;";
+	armour->settings()["ability.addExtraAmmoItem.list"] = "eu_ar_rifle 2 1 0;EU_AR_Rifle 1 3 0;";
 	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
 	kit->children().push_back({"eu_ar_rifle", {}, {}});
@@ -2701,8 +2704,22 @@ TEST(GameWorld_UnlockAbilityLists)
 		const auto ammo = range.world->weaponAmmo(player);
 		return ammo.empty() ? -1 : ammo.front().magazines;
 	};
-	std::fprintf(stderr, "  magazines: %d plain, %d with the unlock\n", mags(plain), mags(armoured));
-	CHECK(mags(armoured) == mags(plain) + 2);
+	const auto magSize = [&](int player) {
+		const auto ammo = range.world->weaponAmmo(player);
+		return ammo.empty() ? -1 : ammo.front().magSize;
+	};
+	std::fprintf(stderr, "  magazines: %d plain, %d with the unlock; rounds a magazine: %d, %d\n", mags(plain),
+		mags(armoured), magSize(plain), magSize(armoured));
+	CHECK(mags(plain) >= 0 && mags(armoured) == mags(plain) + 3);
+	CHECK(magSize(plain) > 0 && magSize(armoured) == magSize(plain) + 2);
+	// Owned but not chosen: the kit build's last pass (0x00570ab0) applies
+	// every owned container's Ability all the same.
+	const int owner = range.world->addPlayer("Owner", 2, true);
+	range.world->setKit(owner, "EU_Assault", "us_light_soldier");
+	range.world->setUnlocks(owner, {});
+	range.world->setOwnedUnlocks(owner, {"UnlockEU_AssaultPlayer5"});
+	CHECK(range.world->spawnSoldier(owner));
+	CHECK(mags(owner) == mags(plain) + 3 && magSize(owner) == magSize(plain) + 2);
 	game::GameWorld::PlayerInfo a, b;
 	range.world->playerInfo(plain, a);
 	range.world->playerInfo(armoured, b);

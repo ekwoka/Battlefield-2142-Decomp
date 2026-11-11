@@ -8,6 +8,7 @@
 #include "IO/Localization/Localization.h"
 #include "Input/ControlMap.h"
 #include "Main/EndOfRoundBindings.h"
+#include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/SettingsObjects.h"
 #include "Net/Demo.h"
@@ -810,6 +811,20 @@ TEST(MenuBindings_OfflineNatives)
 	call(vm, natives, "dice.bf2.GeneralSettings", "resetMessage");
 	CHECK(bindings.setting("GeneralSettings.ChatMessagesFilter", 0) == 1);
 	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.VideoSettings", "needsReboot")));
+	// The antialiasing modes are the renderer's (RendDX9's 0x1000fb60 lists
+	// only the multisample types the device takes), not a fixed four.
+	const auto antialiasing = [&] {
+		std::vector<std::string> values;
+		const avm1::Value list = call(vm, natives, "dice.bf2.VideoSettings", "getAvailableAntialiasing");
+		const int n = static_cast<int>(vm.toNumber(vm.getMember(list, "length")));
+		for (int i = 0; i < n; ++i) {
+			values.push_back(vm.toString(vm.getMember(vm.getMember(list, std::to_string(i)), "value")));
+		}
+		return values;
+	};
+	CHECK((antialiasing() == std::vector<std::string> {"Off"}));
+	bindings.setAntialiasingModes(listAntialiasingModes({4, 2}));
+	CHECK((antialiasing() == std::vector<std::string> {"Off", "2Samples", "4Samples"}));
 }
 
 // The select boxes SwiffPlayer.dll fills itself (0x100653f0): the bot

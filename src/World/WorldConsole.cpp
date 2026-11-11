@@ -151,8 +151,9 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 
 	// The unlocks' Ability lists (template component 0xc4b3):
 	// ability.setMaterialDamageMod <material> <modifier> (0x0054eadc ->
-	// slot 0x94) and ability.addExtraAmmoItem <item> <mags> <rounds> <flag>
-	// (0x0054ebed), and ability.setOverheatMod <weapon> <modifier>
+	// slot 0x94) and ability.addExtraAmmoItem <item> <rounds> <mags> <flag>
+	// (0x0054ebed -> slot 0x84, 0x006316e0: the entry's +8, +4 and +1;
+	// GameWorld::withExtraAmmo), and ability.setOverheatMod <weapon> <modifier>
 	// (0x0054e8b0 -> slot 0x8c, 0x00631740: a {modifier, name} pair on the
 	// list at +0x34; the unlocks' Unl_Active_Camo 0.72), kept in order as
 	// "<name>.list" = "args;...".

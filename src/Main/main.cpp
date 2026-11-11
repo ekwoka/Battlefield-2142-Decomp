@@ -3632,6 +3632,7 @@ int runGame(Options& options, Session& session)
 				return 1;
 			}
 			session.menuBindings->setDisplayModes(session.window->displayModes(options.wideScreen));
+			session.menuBindings->setAntialiasingModes(session.window->antialiasingModes());
 			applySettings();
 			// The start-up movies first (Esc skips the skippable ones).
 			if (options.movies && !playMovies(*session.window, session.movies, options)) {
@@ -6070,6 +6071,10 @@ int runGame(Options& options, Session& session)
 				return true;
 			};
 			remoteHud->ownJumpHold = [&prediction] { return prediction.active() && prediction.control().jumpHold(); };
+			remoteHud->ownBattery = [&prediction](float& battery) {
+				battery = prediction.battery();
+				return prediction.active();
+			};
 			remoteHud->ownLook = [&ownFeet, &remoteLook, &session](physics::Vec3& feet, float& yaw, float& pitch) {
 				if (!session.client || !session.client->world().hasControlObject() || !remoteLook.started) {
 					return false;
@@ -6579,12 +6584,25 @@ int runGame(Options& options, Session& session)
 					{
 						const auto object = ghostObjects.find(record.ghost);
 						int team = 0;
+						uint16_t kitGhost = 0;
 						for (const net::RemotePlayer& p : own.playerList()) {
 							if (p.local) {
 								team = p.team;
+								kitGhost = p.kitGhost;
 							}
 						}
 						prediction.setOwner(team, object != ghostObjects.end() ? object->second : 0);
+						// The worn kit's abilityRestoreRate (kit +0x31c), which
+						// fills the battery between records (0x0058d350).
+						const auto kit = ghostObjects.find(kitGhost);
+						const world::Object* worn = kitGhost && kit != ghostObjects.end() ? objects.find(kit->second) : nullptr;
+						float rate = 0;
+						if (const world::ObjectTemplate* kitTemplate = worn ? worn->objectTemplate() : nullptr) {
+							if (const auto it = kitTemplate->settings().find("abilityRestoreRate"); it != kitTemplate->settings().end()) {
+								rate = static_cast<float>(std::atof(it->second.c_str()));
+							}
+						}
+						prediction.setBatteryRate(rate);
 					}
 					if (!prediction.active()) {
 						const auto object = ghostObjects.find(record.ghost);
@@ -6616,6 +6634,8 @@ int runGame(Options& options, Session& session)
 				if (remoteHud->hitIndicator < 0.0001f) {
 					remoteHud->hitIndicator = 0;
 				}
+				// Our tool's scan (the ReplenishingAmmoComp's update, here too).
+				remoteHud->stepAbility(1.0f / 30.0f, remoteLook.fire);
 			}
 			std::set<uint16_t> seen;
 			// Soldiers with a player: their wrecks wait for the player (0x00652380).
@@ -8441,6 +8461,11 @@ int runGame(Options& options, Session& session)
 		sources.overlay = [&](float seconds) {
 			kitMenu.setUnlocked(round.localPlayerUnlocks, round.unlockAllByDefault);
 			kitMenu.setKit(localKit);
+			if (game::GameWorld::PlayerInfo me; hudPlayer(hudLocal(), me)) {
+				kitMenu.setAlive(me.alive);
+			} else {
+				kitMenu.setAlive(false);
+			}
 			kitMenu.update(round.playerTeam() == 1 ? 1 : 2);
 			kitMenu.commit();
 			trackKills();

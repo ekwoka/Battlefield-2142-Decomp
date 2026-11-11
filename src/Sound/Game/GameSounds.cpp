@@ -384,6 +384,7 @@ void GameSounds::reload(WeaponState& state, const std::string& prefix, bool firs
 	if (reloadState == 2) {
 		return;
 	}
+	state.reloaded = true;
 	const int slot = firstPerson ? 0 : 1;
 	const std::string name = prefix + (firstPerson ? "Reload1P" : "Reload3P");
 	state.skip = 0;
@@ -474,6 +475,7 @@ void GameSounds::weapon(WeaponEvent event, const std::string& weaponTemplate, bo
 		reload(state, prefix, firstPerson, position, object, reloadState);
 		break;
 	case WeaponEvent::Deploy: {
+		state.reloaded = false; // 0x005dc1d0 clears +0x41 with each draw
 		// Not again within 9 ticks of the last (+0x48).
 		const auto last = m_lastDeploy.find(weaponTemplate);
 		if (last != m_lastDeploy.end() && m_tick - last->second <= 9) {
@@ -496,9 +498,12 @@ void GameSounds::weapon(WeaponEvent event, const std::string& weaponTemplate, bo
 		}
 		break;
 	case WeaponEvent::TriggerClick:
-		// 0x005dc160: first person only (BoltClick instead while the
-		// component's +0x41 is set; its writer isn't traced).
-		if (firstPerson) {
+		// 0x005dc160: the first click after a reload event since the draw
+		// (+0x41) plays BoltClick (its +0x1c, in either view), else
+		// TriggerClick (+0x20) in first person only; +0x41 is cleared.
+		if (std::exchange(state.reloaded, false)) {
+			person("BoltClick", "BoltClick");
+		} else if (firstPerson) {
 			playFirstPerson(prefix + "TriggerClick");
 		}
 		break;

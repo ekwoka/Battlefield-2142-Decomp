@@ -10,6 +10,7 @@
 
 #include <sstream>
 #include <algorithm>
+#include <functional>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -713,6 +714,7 @@ void GameWorld::tick(float seconds)
 	stepParachutes(seconds);
 	stepSilos(seconds);
 	stepDrones(seconds);
+	stepSentryGuns(seconds);
 	stepSeatCorpses(seconds);
 	stepDroppedKits();
 	stepCorpses(seconds);
@@ -865,22 +867,34 @@ void GameWorld::setHitPoints(uint32_t object, float value)
 // the surface's materials; nothing left destroys the object, or kills the
 // soldier of a player.
 // An item's firing settings with the unlocks' extra ammunition
-// (ability.addExtraAmmoItem <item> <mags> <rounds> <flag>: the
-// magazines added to nrOfMags and the rounds to the magazine, as the
-// shipped unlocks read: "as_handgun 3 0 0" is the extra sidearm clips,
-// "unl_grenade_frag 0 1 1" the extra grenade; the flag marks the grenade
-// unlocks, and its one reader found is the spawn screen's ability icon,
-// 0x00798b20; where the firearm takes the counts wasn't found).
+// (ability.addExtraAmmoItem <item> <rounds> <mags> <flag>, 0x0054ebed ->
+// 0x006316e0: the entry's +8 the first number, +4 the second, +1 the
+// flag). The ammo component's getters, vtable slots 55 and 56 of every
+// ammo comp (0x005f4270 / 0x005f41b0), give the template's magSize (+0x38)
+// and nrOfMags (+0x34), each unless -1, plus the most any entry of the
+// holder's player's ability block (slot 0x2a0, the list +0x18) naming the
+// weapon's template (0x0065b980, without case) gives: +8 to the magazine,
+// +4 to the magazines. The comp's constructor (0x005f4c70) makes that
+// many magazines of that size, and every reader of the two counts (the
+// reloads, the refills, the ammunition's level) goes through the slots.
+// So "as_handgun 3 0 0" is a larger sidearm magazine, "unl_grenade_frag
+// 0 1 1" one grenade more, "as_smg 10 0 0" and "as_smg 0 1 0" the larger
+// and the extra SMG magazine.
 FireArmSettings GameWorld::withExtraAmmo(const Player& player, const world::ObjectTemplate& item) const
 {
 	FireArmSettings settings = FireArmSettings::fromTemplate(item);
+	int mags = 0, rounds = 0;
 	for (const auto& [name, extra] : player.extraAmmo) {
 		if (sameName(name, item.name())) {
-			if (settings.nrOfMags >= 0) {
-				settings.nrOfMags += extra.first;
-			}
-			settings.magSize += extra.second;
+			mags = std::max(mags, extra.first);
+			rounds = std::max(rounds, extra.second);
 		}
+	}
+	if (settings.nrOfMags != -1) {
+		settings.nrOfMags += mags;
+	}
+	if (settings.magSize != -1) {
+		settings.magSize += rounds;
 	}
 	// The unlocks' overheat modifier for this weapon (0x005c3cb0: each round
 	// adds the modifier x heatAddWhenFire, the last pair naming the
@@ -1912,10 +1926,11 @@ std::vector<GameWorld::WeaponAmmo> GameWorld::weaponAmmo(int id) const
 		const FireArm* weapon = c.weapon ? c.weapon.get()
 			: static_cast<int>(i) == player->inHand ? player->weapon.get() : nullptr;
 		if (!weapon) {
-			// Not taken in hand yet: as the kit gives it.
+			// Not taken in hand yet: as the kit gives it (with the unlocks'
+			// extra ammunition, as the ammo comp is made).
 			const world::ObjectTemplate* t = m_templates.find(c.name);
 			if (t) {
-				const FireArmSettings settings = FireArmSettings::fromTemplate(*t);
+				const FireArmSettings settings = withExtraAmmo(*player, *t);
 				list.push_back({c.name, settings.magSize * (settings.nrOfMags + 1), settings.magSize, settings.nrOfMags,
 					settings.magSize});
 			}
@@ -2048,9 +2063,11 @@ void GameWorld::stepLoneVehicle(LoneVehicle& lone, const VehicleInput& driver, f
 
 int GameWorld::empLevel(uint32_t vehicle) const
 {
-	for (const Drone& drone : m_drones) {
-		if (drone.object == vehicle) {
-			return static_cast<int>(std::ceil(drone.empLevel));
+	for (const std::vector<Drone>* list : {&m_drones, &m_sentryGuns}) {
+		for (const Drone& drone : *list) {
+			if (drone.object == vehicle) {
+				return static_cast<int>(std::ceil(drone.empLevel));
+			}
 		}
 	}
 	for (const Body& body : m_bodies) {
@@ -2949,14 +2966,16 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 			add(body.empLevel, *t, amount);
 		}
 	}
-	for (Drone& drone : m_drones) {
-		const world::Object* object = m_objects.find(drone.object);
-		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
-		if (!t || integer(*t, "armor.takesEmpDamage", 0) == 0) {
-			continue;
-		}
-		if (const float amount = amountFor(*t, drone.position); amount > 0) {
-			add(drone.empLevel, *t, amount);
+	for (std::vector<Drone>* list : {&m_drones, &m_sentryGuns}) {
+		for (Drone& drone : *list) {
+			const world::Object* object = m_objects.find(drone.object);
+			const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+			if (!t || integer(*t, "armor.takesEmpDamage", 0) == 0) {
+				continue;
+			}
+			if (const float amount = amountFor(*t, drone.position); amount > 0) {
+				add(drone.empLevel, *t, amount);
+			}
 		}
 	}
 	// Soldiers on foot: their own armour (0x005a6500 takes any armoured
@@ -4473,6 +4492,7 @@ void GameWorld::resetRound()
 		gone.push_back(drone.object);
 	}
 	m_drones.clear();
+	m_sentryGuns.clear();
 	for (const Pod& pod : m_pods) {
 		gone.push_back(pod.object);
 	}
@@ -6458,10 +6478,12 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// setEnterOnSpawn (a human, 5 m) / setAIEnterOnSpawn (15 m): straight
 	// into the nearest free seat of a vehicle of the team near the point
 	// (0x005a98e0, which the point's test 0x005b24f0 also asks: no such
-	// vehicle, no spawn there). Bots take setEnterOnSpawn points too (the
-	// original's AI branch searches 15 m for both; which flag seats it
-	// isn't traced), so none is left standing in a hull.
-	if (!withSquad && (pointFlags.enterOnSpawn || pointFlags.aiEnterOnSpawn)) {
+	// vehicle, no spawn there). The spawn's seating (0x005b18e0: the
+	// point's slot 0x20, enterOnSpawn, else the template's +0x8a,
+	// aiEnterOnSpawn, for an AI only) searches 5 m for a human at an
+	// enterOnSpawn point and 15 m for a bot at either kind; a human at an
+	// aiEnterOnSpawn-only point stands.
+	if (!withSquad && (pointFlags.enterOnSpawn || (player.ai && pointFlags.aiEnterOnSpawn))) {
 		enterOnSpawn(player, *created, pointAt, player.ai ? 15.0f : 5.0f, mobile ? at->id() : 0);
 	}
 	// A beacon's pod (0x004bef90: the spawn point's slot 0x58, its vehicle
@@ -6778,77 +6800,87 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 					applies = available(replacement->second) && !first.empty() && available(first);
 				}
 			}
-			if (!applies) {
+			// The kit build's last pass (0x00570ab0 after the items) applies
+			// the Ability component (0x005706b0) of each container the
+			// player owns (slot 0x2a8, 0x00597760: the owned masks +0x2b4),
+			// chosen or not.
+			const bool abilityOwned = player.allUnlocked || owned(container->name());
+			if (!applies && !abilityOwned) {
 				continue;
 			}
-			// An unlock's Ability component: its increasedRepairAbility
-			// goes to the player when above 0 (0x005706b0), the last one
-			// taken winning.
-			if (const float modifier = number(*container, "ability.increasedRepairAbility", 0); modifier > 0) {
-				player.abilityModifier = modifier;
-			}
-			// The scope stabilizer (the gun sway's steadying, 0x005e0da0).
-			if (integer(*container, "ability.hasScopeStabilizerAbility", 0) != 0) {
-				player.scopeStabilizer = true;
-			}
-			if (integer(*container, "ability.hasZoomUpgradeAbility", 0) != 0) {
-				player.zoomUpgrade = true; // 0x005706b0: once set it stays
-			}
-			// The squad reports' reading (0x005706b0: +0xc when not 3, +0x12
-			// when set).
-			if (const int reveal = integer(*container, "ability.networkableHudRevealTime", 3); reveal != 3) {
-				player.hudRevealTime = reveal;
-			}
-			if (integer(*container, "ability.networkableHudShowCloaked", 0) != 0) {
-				player.hudShowCloaked = true;
-			}
-			// The sprint and beacon modifiers (template +0x5c / +0x60 / +0x64,
-			// setters 0x0054e02d / 0x0054e27f / 0x0054e156 through slots 0xb4
-			// / 0xc4 / 0xbc), each that isn't 1 (0x005706b0).
-			for (const auto& [name, kept] : {std::pair<const char*, float*> {"ability.sprintRechargeModifier",
-												 &player.sprintRechargeModifier},
-					 {"ability.sprintUseModifier", &player.sprintUseModifier},
-					 {"ability.beaconSpawnTimeMod", &player.beaconSpawnTimeMod}}) {
-				if (const float modifier = number(*container, name, 1); modifier != 1) {
-					*kept = modifier;
+			if (abilityOwned) {
+				// An unlock's Ability component: its increasedRepairAbility
+				// goes to the player when above 0 (0x005706b0), the last one
+				// taken winning.
+				if (const float modifier = number(*container, "ability.increasedRepairAbility", 0); modifier > 0) {
+					player.abilityModifier = modifier;
 				}
-			}
-			// ability.setOverheatMod's pairs, appended (0x005706b0's +0x24 list).
-			if (const auto mods = container->settings().find("ability.setOverheatMod.list");
-				mods != container->settings().end()) {
-				std::stringstream list(mods->second);
-				for (std::string entry; std::getline(list, entry, ';');) {
-					char weapon[128] = {};
-					float mod = 1;
-					if (std::sscanf(entry.c_str(), "%127s %f", weapon, &mod) == 2) {
-						player.overheatMods[weapon] = mod;
+				// The scope stabilizer (the gun sway's steadying, 0x005e0da0).
+				if (integer(*container, "ability.hasScopeStabilizerAbility", 0) != 0) {
+					player.scopeStabilizer = true;
+				}
+				if (integer(*container, "ability.hasZoomUpgradeAbility", 0) != 0) {
+					player.zoomUpgrade = true; // 0x005706b0: once set it stays
+				}
+				// The squad reports' reading (0x005706b0: +0xc when not 3, +0x12
+				// when set).
+				if (const int reveal = integer(*container, "ability.networkableHudRevealTime", 3); reveal != 3) {
+					player.hudRevealTime = reveal;
+				}
+				if (integer(*container, "ability.networkableHudShowCloaked", 0) != 0) {
+					player.hudShowCloaked = true;
+				}
+				// The sprint and beacon modifiers (template +0x5c / +0x60 / +0x64,
+				// setters 0x0054e02d / 0x0054e27f / 0x0054e156 through slots 0xb4
+				// / 0xc4 / 0xbc), each that isn't 1 (0x005706b0).
+				for (const auto& [name, kept] : {std::pair<const char*, float*> {"ability.sprintRechargeModifier",
+													 &player.sprintRechargeModifier},
+						 {"ability.sprintUseModifier", &player.sprintUseModifier},
+						 {"ability.beaconSpawnTimeMod", &player.beaconSpawnTimeMod}}) {
+					if (const float modifier = number(*container, name, 1); modifier != 1) {
+						*kept = modifier;
+					}
+				}
+				// ability.setOverheatMod's pairs, appended (0x005706b0's +0x24 list).
+				if (const auto mods = container->settings().find("ability.setOverheatMod.list");
+					mods != container->settings().end()) {
+					std::stringstream list(mods->second);
+					for (std::string entry; std::getline(list, entry, ';');) {
+						char weapon[128] = {};
+						float mod = 1;
+						if (std::sscanf(entry.c_str(), "%127s %f", weapon, &mod) == 2) {
+							player.overheatMods[weapon] = mod;
+						}
+					}
+				}
+				// Damage taken by projectile material, and extra ammunition.
+				if (const auto mods = container->settings().find("ability.setMaterialDamageMod.list");
+					mods != container->settings().end()) {
+					std::stringstream list(mods->second);
+					for (std::string entry; std::getline(list, entry, ';');) {
+						unsigned material = 0;
+						float mod = 1;
+						if (std::sscanf(entry.c_str(), "%u %f", &material, &mod) == 2) {
+							player.materialDamageMods[material] = mod;
+						}
+					}
+				}
+				if (const auto extra = container->settings().find("ability.addExtraAmmoItem.list");
+					extra != container->settings().end()) {
+					std::stringstream list(extra->second);
+					for (std::string entry; std::getline(list, entry, ';');) {
+						char item[128] = {};
+						int rounds = 0, mags = 0;
+						if (std::sscanf(entry.c_str(), "%127s %d %d", item, &rounds, &mags) == 3) {
+							auto& [m, r] = player.extraAmmo[item];
+							m = std::max(m, mags);
+							r = std::max(r, rounds);
+						}
 					}
 				}
 			}
-			// Damage taken by projectile material, and extra ammunition.
-			if (const auto mods = container->settings().find("ability.setMaterialDamageMod.list");
-				mods != container->settings().end()) {
-				std::stringstream list(mods->second);
-				for (std::string entry; std::getline(list, entry, ';');) {
-					unsigned material = 0;
-					float mod = 1;
-					if (std::sscanf(entry.c_str(), "%u %f", &material, &mod) == 2) {
-						player.materialDamageMods[material] = mod;
-					}
-				}
-			}
-			if (const auto extra = container->settings().find("ability.addExtraAmmoItem.list");
-				extra != container->settings().end()) {
-				std::stringstream list(extra->second);
-				for (std::string entry; std::getline(list, entry, ';');) {
-					char item[128] = {};
-					int mags = 0, rounds = 0;
-					if (std::sscanf(entry.c_str(), "%127s %d %d", item, &mags, &rounds) == 3) {
-						auto& [m, r] = player.extraAmmo[item];
-						m += mags;
-						r += rounds;
-					}
-				}
+			if (!applies) {
+				continue;
 			}
 			// replaceItem (the container's list +0x2b4, 0x005bdd80): a chosen
 			// unlock's item takes the place of the kit items it names (the
@@ -9849,6 +9881,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				placed->setTeam(player.team);
 				m_deployed[key] = placed->id();
 				m_launchers[placed->id()] = player.object;
+				addSentryGun(player, *placed);
 			}
 		} else if (!gadget && player.projectile) {
 			fire(player, std::clamp(input.aimPitch + player.aimKickPitch, -89.0f, 89.0f));
@@ -10643,6 +10676,17 @@ bool GameWorld::seatYaw(uint32_t vehicle, int seat, float& yaw) const
 
 bool GameWorld::drivesSeat(uint32_t vehicle, int seat) const { return seat == 0 && this->vehicle(vehicle) != nullptr; }
 
+bool GameWorld::gadgetScan(const world::ObjectTemplate& gadget, float& radius, bool& ammo, bool& whileFiring)
+{
+	Ability ability;
+	if (!abilityOf(gadget, ability, whileFiring)) {
+		return false;
+	}
+	radius = ability.radius;
+	ammo = ability.ammo;
+	return true;
+}
+
 bool GameWorld::abilityOf(const world::ObjectTemplate& gadget, Ability& ability, bool& whileFiring)
 {
 	const auto type = gadget.settings().find("ammo.replenishingType");
@@ -10688,6 +10732,31 @@ int GameWorld::soldierAmmoLevel(const Player& player) const
 	return static_cast<int>(std::floor(std::clamp(level * 15.0f, 0.0f, 15.0f)));
 }
 
+void GameWorld::abilityBarKit(const world::ObjectTemplate& kit, AbilityBarInfo& out)
+{
+	for (const std::string& component : kit.components()) {
+		if (component.size() == 7 && std::equal(component.begin(), component.end(), "ability",
+				[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; })) {
+			out.kitAbility = true;
+		}
+	}
+	out.kitHealing = integer(kit, "ability.hasHealingAbility", 0) != 0;
+	out.kitRepairing = integer(kit, "ability.hasRepairingAbility", 0) != 0;
+	out.kitAmmo = integer(kit, "ability.hasAmmoAbility", 0) != 0;
+}
+
+bool GameWorld::abilityBarGadget(const world::ObjectTemplate& gun, AbilityBarInfo& out)
+{
+	Ability ability;
+	bool whileFiring = false;
+	if (!abilityOf(gun, ability, whileFiring)) {
+		return false;
+	}
+	const auto type = gun.settings().find("ammo.replenishingType");
+	out.replenishingType = type == gun.settings().end() || type->second == "RTHeal" ? 0 : type->second == "RTAmmo" ? 1 : 2;
+	return true;
+}
+
 bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 {
 	const Player* player = findPlayer(id);
@@ -10707,26 +10776,14 @@ bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 		: player->kitTemplate.empty()                                 ? nullptr
 																	   : m_templates.find(player->kitTemplate);
 	if (kit) {
-		for (const std::string& component : kit->components()) {
-			if (component.size() == 7 && std::equal(component.begin(), component.end(), "ability",
-					[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; })) {
-				out.kitAbility = true;
-			}
-		}
-		out.kitHealing = integer(*kit, "ability.hasHealingAbility", 0) != 0;
-		out.kitRepairing = integer(*kit, "ability.hasRepairingAbility", 0) != 0;
-		out.kitAmmo = integer(*kit, "ability.hasAmmoAbility", 0) != 0;
+		abilityBarKit(*kit, out);
 	}
 	// The gun in hand (0x007beac0: the control object's slot 0x78(0); a
 	// seat's guns carry no ReplenishingAmmoComp).
 	const world::ObjectTemplate* gun = player->vehicle ? nullptr : m_templates.find(player->weaponTemplate);
-	Ability ability;
-	bool whileFiring = false;
-	if (!gun || !abilityOf(*gun, ability, whileFiring)) {
+	if (!gun || !abilityBarGadget(*gun, out)) {
 		return true;
 	}
-	const auto type = gun->settings().find("ammo.replenishingType");
-	out.replenishingType = type == gun->settings().end() || type->second == "RTHeal" ? 0 : type->second == "RTAmmo" ? 1 : 2;
 	out.battery = std::max(0.0f, player->battery);
 	const auto scan = m_abilityScans.find(id);
 	if (scan == m_abilityScans.end()) {
@@ -11777,8 +11834,11 @@ void GameWorld::selectSeatWeapons(Player& player, Body& body, const SeatLayout& 
 				} else {
 					activateSeatWeapon(body, player.seat, seat, static_cast<int>(i));
 					// The local player's item selection (0x004d2a50 at
-					// 0x004d2dfe): unless the seat's new PIFire weapon has the
-					// flag +0x14 bit 0 (not traced; taken as clear), the HUD's
+					// 0x004d2dfe): unless the player's controlled object's
+					// active PIFire weapon has object flag 1 (+0x14 bit 0, the
+					// disabled flag of 0x006f68f0: set by a soldier's firearm's
+					// disable 0x005c42f0, cleared by its enable 0x005c47d0,
+					// which the slot 0x7c just ran, so clear here), the HUD's
 					// selection (HUD manager slot 0x2c8) gets 0.4 s (+0x20),
 					// the menu state 0xb (slot 0x224(0xb, 1)) and the key
 					// (0x0079c190: the slot of that item index selected, +0x18,
@@ -12842,9 +12902,9 @@ void GameWorld::poseBoneParts(anim::AnimationState& animation, const anim::Skele
 // for an object with the helper). Their messages (0x0063ce30): 0x20 once
 // the object's armour is destroyed (the sentry gun's "alive" switch takes
 // "dead"), 0x800 while a control object of its tree is occupied (none of
-// these is); the sentry's "still" switch on message 1 ("fire" with it,
-// "stand" without) has no sender in 0x0063ce30 (not traced): the rewrite
-// sets it while the sentry's auto controller has a target. Each plays its
+// these is); message 1, the sentry's "still" switch ("fire" with it,
+// "stand" without), comes from its gun's DefaultAnimationComp, which
+// 0x0063ce30 hands the system (fireMessage, gunMessages). Each plays its
 // "idle" CountTrigger once through ("open", then "stand"): the beacon's
 // covers and arm unfold, the hubs' lids open, the shield's arms spread,
 // the sentry's legs and mainframe rise.
@@ -12853,7 +12913,12 @@ void GameWorld::stepDeployableAnimations(float seconds)
 	if (!m_loadAnimationSystem || !m_animationSystems) {
 		return;
 	}
-	std::vector<std::pair<uint32_t, uint32_t>> live; // object, messages
+	struct Live {
+		uint32_t first;  // the object
+		uint32_t second; // its messages held
+		uint32_t pulses = 0;
+	};
+	std::vector<Live> live;
 	for (const Supply& supply : m_supplies) {
 		live.push_back({supply.object, 0});
 	}
@@ -12864,9 +12929,12 @@ void GameWorld::stepDeployableAnimations(float seconds)
 		live.push_back({object, 0});
 	}
 	for (const Drone& drone : m_drones) {
-		live.push_back({drone.object, drone.target >= 0 ? 1u : 0u});
+		live.push_back({drone.object, 0});
 	}
-	for (auto& [object, messages] : live) {
+	for (Live& entry : live) {
+		entry.second |= gunMessages(entry.first, entry.pulses);
+	}
+	for (auto& [object, messages, pulses] : live) {
 		if (const auto hp = m_hitPoints.find(object); hp != m_hitPoints.end() && hp->second <= 0) {
 			messages |= 0x20;
 		}
@@ -12885,6 +12953,7 @@ void GameWorld::stepDeployableAnimations(float seconds)
 	for (const auto& entry : live) {
 		const uint32_t object = entry.first;
 		const uint32_t messages = entry.second;
+		const uint32_t pulses = entry.pulses;
 		auto it = std::find_if(m_objectAnimations.begin(), m_objectAnimations.end(),
 			[&](const ObjectAnimation& a) { return a.object == object; });
 		if (it == m_objectAnimations.end()) {
@@ -12907,6 +12976,7 @@ void GameWorld::stepDeployableAnimations(float seconds)
 		anim::AnimationInput input;
 		input.movementSeconds = seconds;
 		input.messages = messages;
+		input.pulses = pulses;
 		it->animation->update(input, seconds);
 		it->animation->takeEvents();
 		posedAfterUpdate(*it);
@@ -13064,6 +13134,8 @@ void GameWorld::stepObjectAnimation(Body& b, float seconds)
 		: legs.messages | (legs.crouching ? 0x10u : 0u);
 	input.messages = legMessages | (occupied ? 0x800u : 0u)
 		| (b.wreckTime >= 0 ? 0x20u : 0u) | (gear ? 0x40u : 0u);
+	// A deployed sentry gun is a body too: its gun's message 1.
+	input.messages |= gunMessages(b.object, input.pulses);
 	b.animation->update(input, seconds);
 	// The bone parts posed with the update (posedAfterUpdate).
 	b.bonesPosed = false;
@@ -13339,14 +13411,15 @@ const world::ObjectTemplate* findInTree(const world::ObjectTemplateManager& temp
 	return nullptr;
 }
 
-// The sentry drone's auto controller, UAVDrone in AI/AutoControllers.ai
-// (the .ai files aren't read into templates yet, so its values are here).
-constexpr float kSentryViewDistance = 100;          // viewDistance
-constexpr float kSentryDiscoverCloakedDistance = 8; // discoverCloakedEnemiesDistance
-constexpr float kSentryFov = 90;                    // fov (degrees)
-constexpr float kSentryScanningSpeed = 0.13f;       // scanningSpeed (radians per 1/30 s)
-constexpr float kSentryTargetLostTimeout = 0.25f;   // targetLostTimeout
-constexpr float kSentryCamMaxSpeed = 250;           // unl_drone_sentry_cam setMaxSpeed (degrees/s)
+// The auto controllers of AI/AutoControllers.ai the rewrite runs here
+// (BotSettings holds the script's templates, the bots' side; GameWorld
+// keeps the shipped values): UAVDrone for the sentry drone, its yaw
+// unl_drone_sentry_cam's setMaxSpeed 250 x maxTrackingInput 1; SentryGun
+// for the deployed eu_sentrygun, its yaw EU_Sentrygun_rotation's
+// setMaxSpeed 1500 x maxTrackingInput 1 (neverAttackDeployer and
+// onlyAttackNetworkBattlefieldObjects unset).
+constexpr GameWorld::AutoControl kUavDrone {100, 8, 90, 0.13f, 0.25f, 0, 250, true, true};
+constexpr GameWorld::AutoControl kSentryGun {63, 5, 30, 0.03f, 0.05f, 1, 1500, false, false};
 constexpr float kSquadKnowledgeTime = 3.0f;         // 0x100bea30
 
 } // namespace
@@ -13380,6 +13453,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	drone.yaw = lookYaw(player);
 	drone.gunYaw = drone.yaw * 3.14159265f / 180.0f;
 	drone.hoverHeight = 1; // the soldier's physics origin over its feet (0x005f0a00)
+	drone.control = &kUavDrone;
 	if (const world::ObjectTemplate* force = findInTree(m_templates, t, "ForceObject")) {
 		const char* axes[3] = {"regulatePosX", "regulatePosY", "regulatePosZ"};
 		for (int axis = 0; axis < 3; ++axis) {
@@ -13393,7 +13467,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 		drone.force.minHeightAdjustDistance = number(*force, "minHeightAdjustDistance", 0);
 		drone.force.destroyWhenTargetLost = flag(*force, "destroyWhenTargetLost", false);
 	}
-	if (const world::ObjectTemplate* gun = findInTree(m_templates, t, "GenericFireArm")) {
+	if (const world::ObjectTemplate* gun = autoControlledGun(t, nullptr)) {
 		const FireArmSettings settings = FireArmSettings::fromTemplate(*gun);
 		drone.weapon = std::make_unique<FireArm>(settings);
 		drone.gunDeviation = DeviationBuildUp::fromTemplate(*gun);
@@ -13402,6 +13476,10 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 		drone.pulse = std::find_if(components.begin(), components.end(), [](const std::string& c) {
 			return sameName(c, "PulseMeterAmmoComp");
 		}) != components.end();
+		drone.animated = std::find_if(components.begin(), components.end(), [](const std::string& c) {
+			return sameName(c, "DefaultAnimationComp");
+		}) != components.end();
+		drone.loopingFire = flag(*gun, "animation.loopingFire", false);
 		drone.pulseDistance = number(*gun, "pulse.viewDistance", 0);
 		drone.revealTime = number(*gun, "pulse.revealTime", 10); // 10 by default (0x005d9a70)
 	}
@@ -13672,7 +13750,10 @@ void GameWorld::stepDrones(float seconds)
 		// (UAVDrone) at an enemy. Under EMP above level 1 the sentry's
 		// controller inputs are cut (fireSentry, 0x005ca2e0).
 		if (drone.weapon && drone.pulse) {
-			if (drone.weapon->tick(seconds, autoTrigger(drone, true))) {
+			const bool trigger = autoTrigger(drone, true);
+			const bool fired = drone.weapon->tick(seconds, trigger);
+			fireMessage(drone, trigger, fired);
+			if (fired) {
 				pulse(drone);
 			}
 		} else if (drone.weapon) {
@@ -13777,12 +13858,14 @@ bool GameWorld::squadKnows(int team, int squad, int player) const
 // rewrite's gate; the fire plan's own is the bots' aim gate).
 void GameWorld::fireSentry(Drone& drone, float seconds)
 {
-	const float half = kSentryFov * 0.5f * 3.14159265f / 180.0f;
-	const float far = kSentryViewDistance / std::cos(half);
+	const AutoControl& control = drone.control ? *drone.control : kUavDrone;
+	const float half = control.fov * 0.5f * 3.14159265f / 180.0f;
+	const float far = control.viewDistance / std::cos(half);
 	const Player* ownerPlayer = findPlayer(drone.owner);
 	const int ownerSquad = ownerPlayer ? ownerPlayer->squad : 0;
 	const auto visible = [&](const Player& player, physics::Vec3& chest, bool inView) {
-		if (!player.alive || player.vehicle || player.team == drone.team || player.id == drone.owner) {
+		if (!player.alive || player.vehicle || player.team == drone.team
+			|| (control.neverAttackDeployer && player.id == drone.owner)) {
 			return false;
 		}
 		const world::Object* soldier = m_objects.find(player.object);
@@ -13797,10 +13880,10 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 			|| std::fabs(std::atan2(d.y, flat)) > half)) {
 			return false;
 		}
-		if (player.cloaked && physics::lengthSquared(d) > kSentryDiscoverCloakedDistance * kSentryDiscoverCloakedDistance) {
+		if (player.cloaked && physics::lengthSquared(d) > control.discoverCloaked * control.discoverCloaked) {
 			return false;
 		}
-		if (ownerSquad != 0 && !squadKnows(drone.team, ownerSquad, player.id)) {
+		if (control.onlyAttackNetworkBattlefieldObjects && ownerSquad != 0 && !squadKnows(drone.team, ownerSquad, player.id)) {
 			return false;
 		}
 		return lineOfSight(drone.position, chest, drone.object);
@@ -13811,7 +13894,7 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		if (visible(*held, aim, false)) {
 			best = held;
 			drone.targetSeenAt = static_cast<float>(m_time);
-		} else if (m_time - drone.targetSeenAt > kSentryTargetLostTimeout || !held->alive) {
+		} else if (m_time - drone.targetSeenAt > control.targetLostTimeout || !held->alive) {
 			drone.target = -1;
 		}
 	} else {
@@ -13834,6 +13917,10 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		if (best) {
 			drone.target = best->id;
 			drone.targetSeenAt = static_cast<float>(m_time);
+			// The fire plan's trigger starts reactionTime on (AIDLL
+			// 0x100777a0: an auto controller's delay is its template's
+			// +0x18, BAPATrigger 0x100d3110's +0x28 = now + delay).
+			drone.fireFrom = static_cast<float>(m_time) + control.reactionTime;
 		}
 	}
 	// Under EMP (the PlayerControlObject's input filter 0x005ca2e0): an
@@ -13847,26 +13934,31 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	if (autoControlled && std::ceil(drone.empLevel) > 1) {
 		drone.gunDeviation.update(false);
 		drone.weapon->tick(seconds, false);
+		fireMessage(drone, false, false);
 		return;
 	}
 	bool onTarget = false;
 	if (best) {
 		const float want = std::atan2(aim.x - drone.position.x, aim.z - drone.position.z);
 		const float error = std::remainder(want - drone.gunYaw, 6.2831853f);
-		const float most = kSentryCamMaxSpeed * 3.14159265f / 180.0f * seconds;
+		const float most = control.yawSpeed * 3.14159265f / 180.0f * seconds;
 		drone.gunYaw += std::clamp(error, -most, most);
 		onTarget = std::fabs(error) <= most + 2 * 3.14159265f / 180.0f;
 	} else {
-		drone.gunYaw = std::remainder(drone.gunYaw + kSentryScanningSpeed * 30 * seconds, 6.2831853f);
+		drone.gunYaw = std::remainder(drone.gunYaw + control.scanningSpeed * 30 * seconds, 6.2831853f);
 	}
-	drone.gunDeviation.update(onTarget); // the auto controller holds the trigger while on target
-	if (!drone.weapon->tick(seconds, autoTrigger(drone, onTarget)) || !onTarget || !drone.projectile) {
+	const bool want = onTarget && m_time >= drone.fireFrom;
+	drone.gunDeviation.update(want); // the auto controller holds the trigger while on target
+	const bool trigger = autoTrigger(drone, want);
+	const bool fired = drone.weapon->tick(seconds, trigger);
+	fireMessage(drone, trigger, fired);
+	if (!fired || !onTarget || !drone.projectile) {
 		return;
 	}
 	physics::Vec3 direction = aim - drone.position;
 	direction = direction * (1.0f / std::sqrt(physics::lengthSquared(direction)));
 	const world::Object* object = m_objects.find(drone.object);
-	const world::ObjectTemplate* gun = object ? findInTree(m_templates, *object->objectTemplate(), "GenericFireArm") : nullptr;
+	const world::ObjectTemplate* gun = object ? autoControlledGun(*object->objectTemplate(), nullptr) : nullptr;
 	// The round strays by the gun's deviation component (0x005f5540): two
 	// normal numbers x (minDev + the firing's build-up) x 0.01 x its
 	// velocity, along its up and right; the round adds to the build-up.
@@ -13898,6 +13990,150 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		p.tracerStart = p.origin;
 	}
 	m_projectiles.push_back(p);
+}
+
+
+// The gun's DefaultAnimationComp (vtables 0x00973120 / 0x00973080, made by
+// 0x005e12e0 with the template 0x005e1260: useShiftAnimation +0x10,
+// loopingFire +0x1c) is handed the deployable's animation system
+// (0x0063ce30: each weapon of the control object above it, interface
+// 0xc49e, component 0xc502, slot 0x8c 0x007a73e0). Each shot (the
+// firearm's fire 0x005c3cb0 -> slot 0x38 0x005e0f30) sets message 1 with
+// loopingFire (system slot 0x2c), else pulses it (slot 0x30); the
+// trigger's release (0x005c1010 -> slot 0x30 0x005e0f60, not for the
+// altFire input) clears it. eu_sentrygun's gun has loopingFire 1, so its
+// "still" switch takes "fire" from the first round until the trigger
+// lets go.
+void GameWorld::fireMessage(Drone& drone, bool trigger, bool fired)
+{
+	if (!drone.animated) {
+		return;
+	}
+	drone.firePulse = fired && !drone.loopingFire; // seen by the next tick's animation step
+	if (fired && drone.loopingFire) {
+		drone.fireHeld = true;
+	}
+	if (!trigger) {
+		drone.fireHeld = false;
+	}
+}
+
+// Message 1 for an auto-controlled gun's object (fireMessage): held, and
+// pulsed into `pulses`.
+uint32_t GameWorld::gunMessages(uint32_t object, uint32_t& pulses) const
+{
+	for (const std::vector<Drone>* list : {&m_drones, &m_sentryGuns}) {
+		for (const Drone& drone : *list) {
+			if (drone.object == object) {
+				pulses |= drone.firePulse ? 1u : 0u;
+				return drone.fireHeld ? 1u : 0u;
+			}
+		}
+	}
+	return 0;
+}
+
+// An auto-controlled object's gun: the first GenericFireArm of its tree
+// (depth first, in the children's order) on PIFire (fire.fireInput); the
+// siren beside it (Car_horn_Alt under eu_sentrygun and unl_drone_sentry)
+// is on PIAltFire. `height` takes the sum of the child positions' y down
+// to it.
+const world::ObjectTemplate* GameWorld::autoControlledGun(const world::ObjectTemplate& t, float* height) const
+{
+	const world::ObjectTemplate* gun = nullptr;
+	const std::function<bool(const world::ObjectTemplate&, float, int)> find = [&](const world::ObjectTemplate& at, float y, int depth) {
+		for (const world::ChildTemplate& child : at.children()) {
+			const world::ObjectTemplate* c = depth < 8 ? m_templates.find(child.name) : nullptr;
+			if (!c) {
+				continue;
+			}
+			const float here = y + child.position.y;
+			const auto input = c->settings().find("fire.fireInput");
+			if (sameName(c->typeName(), "GenericFireArm") && (input == c->settings().end() || sameName(input->second, "PIFire"))) {
+				gun = c;
+				if (height) {
+					*height = here;
+				}
+				return true;
+			}
+			if (find(*c, here, depth + 1)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	find(t, 0, 0);
+	return gun;
+}
+
+// A deployed sentry gun (Unl_Deployer_Sentrygun's eu_sentrygun,
+// setAutoControllerTemplateName SentryGun): its PlayerControlObject is
+// run by the SentryGun auto controller as the sentry drone's is by
+// UAVDrone (fireSentry), from where it was set down. Its gun is the
+// GenericFireArm in its tree, at the sum of the child positions down to
+// it (eu_sentrygun: 0.41 m over its origin).
+void GameWorld::addSentryGun(const Player& player, const world::Object& placed)
+{
+	const world::ObjectTemplate* t = placed.objectTemplate();
+	if (!t) {
+		return;
+	}
+	const auto controller = t->settings().find("autoControllerTemplateName");
+	if (controller == t->settings().end() || !sameName(controller->second, "SentryGun")) {
+		return;
+	}
+	float gunHeight = 0;
+	const world::ObjectTemplate* gun = autoControlledGun(*t, &gunHeight);
+	if (!gun) {
+		return;
+	}
+	Drone sentry;
+	sentry.object = placed.id();
+	sentry.owner = player.id;
+	sentry.team = player.team;
+	sentry.control = &kSentryGun;
+	sentry.stationary = true;
+	sentry.gunHeight = gunHeight;
+	sentry.position = physics::Vec3 {placed.position().x, placed.position().y + sentry.gunHeight, placed.position().z};
+	sentry.yaw = placed.rotation().x;
+	sentry.gunYaw = sentry.yaw * 3.14159265f / 180.0f;
+	const FireArmSettings settings = FireArmSettings::fromTemplate(*gun);
+	sentry.weapon = std::make_unique<FireArm>(settings);
+	sentry.gunDeviation = DeviationBuildUp::fromTemplate(*gun);
+	sentry.projectile = projectileFor(settings.projectileTemplate);
+	const auto& components = gun->components();
+	sentry.animated = std::find_if(components.begin(), components.end(), [](const std::string& c) {
+		return sameName(c, "DefaultAnimationComp");
+	}) != components.end();
+	sentry.loopingFire = flag(*gun, "animation.loopingFire", false);
+	m_sentryGuns.erase(std::remove_if(m_sentryGuns.begin(), m_sentryGuns.end(),
+						   [&](const Drone& d) { return d.object == sentry.object; }),
+		m_sentryGuns.end());
+	m_sentryGuns.push_back(std::move(sentry));
+}
+
+// Each deployed sentry gun: gone with its object (shot to pieces, taken
+// back, the owner's new one); its EMP level falls as a drone's; its auto
+// controller aims and fires (fireSentry).
+void GameWorld::stepSentryGuns(float seconds)
+{
+	for (auto it = m_sentryGuns.begin(); it != m_sentryGuns.end();) {
+		const world::Object* object = m_objects.find(it->object);
+		const auto hp = m_hitPoints.find(it->object);
+		if (!object || (hp != m_hitPoints.end() && hp->second <= 0)) {
+			it = m_sentryGuns.erase(it);
+			continue;
+		}
+		Drone& sentry = *it++;
+		const world::ObjectTemplate* t = object->objectTemplate();
+		if (sentry.empLevel > 0) {
+			sentry.empLevel = std::max(0.0f, sentry.empLevel - seconds / (t ? number(*t, "armor.empLevelTime", 5) : 5));
+		}
+		sentry.position = physics::Vec3 {object->position().x, object->position().y + sentry.gunHeight, object->position().z};
+		if (sentry.weapon) {
+			fireSentry(sentry, seconds);
+		}
+	}
 }
 
 } // namespace dice::hfe::game

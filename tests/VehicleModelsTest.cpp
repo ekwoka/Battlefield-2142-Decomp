@@ -956,6 +956,16 @@ TEST(Vehicles_SpawnIntoTheApc)
 	}
 	CHECK(g.world->spawnSoldier(bot));
 	CHECK(g.world->playerInfo(bot, info) && info.vehicle == apc && info.seat > 0);
+	// setAIEnterOnSpawn alone seats only bots (0x005b18e0: the template's
+	// +0x8a for an AI): a human spawns there standing.
+	sp->settings()["setEnterOnSpawn"] = "0";
+	sp->settings()["setAIEnterOnSpawn"] = "1";
+	const int walker = g.world->addPlayer("Walker", 2, false);
+	CHECK(g.world->spawnSoldier(walker));
+	CHECK(g.world->playerInfo(walker, info) && info.vehicle == 0 && info.alive);
+	const int rider = g.world->addPlayer("Rider", 2, true);
+	CHECK(g.world->spawnSoldier(rider));
+	CHECK(g.world->playerInfo(rider, info) && info.vehicle == apc);
 }
 
 // The gunship's TV-guided missile (as_ag's GuidedMissileWeapon: ToggleCameraComp
@@ -2866,4 +2876,75 @@ TEST(Vehicles_PartMoverPushesAnotherBody)
 	const physics::Vec3 at = g.position(tank);
 	std::fprintf(stderr, "  the tank under us_ag's nose ends at z %.2f\n", at.z);
 	CHECK(at.z > 5.9f);
+}
+
+// A deployed sentry gun (Unl_Deployer_Sentrygun's eu_sentrygun) is run by
+// its SentryGun auto controller: an enemy on foot in its 30-degree view
+// within 63 m is taken, fired at after the reactionTime (1 s), and killed,
+// the kill its deployer's; its gun is the PIFire GenericFireArm, not the
+// PIAltFire siren (Car_horn_Alt) beside it. Its gun's DefaultAnimationComp (loopingFire 1)
+// holds message 1 from the first round to the trigger's release, so the
+// "still" switch plays "fire" (0x005e0f30, 0x005e0f60, 0x0063ce30).
+TEST(Vehicles_DeployedSentryGunFires)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("Unl_Deployer_Sentrygun") || !g.templates.find("eu_sentrygun")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Deployer_Sentrygun", {}, {}}};
+	world::ObjectTemplate* point = g.templates.create("ControlPoint", "garage_cp_pac");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "1";
+	point->settings()["unableToChangeTeam"] = "1";
+	g.objects.create(point, {200, 0, 0});
+	g.objects.create(g.templates.find("garage_sp"), {0, 0, 25}, {180, 0, 0})->setControlPointId(1);
+	Animations a(g);
+	g.start("eu_fav", {30, 2, 30});
+	a.attach(g);
+	// Both sides in before the deployment (a side's first player starts
+	// the round over), the enemy kept far off meanwhile.
+	const int enemy = g.world->addPlayer("Pac", 1, true);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	const int owner = g.world->localPlayer();
+	g.run(1);
+	CHECK(g.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	g.world->setSoldierPosition(info.soldier, {0, 0, -400});
+	g.run(1);
+	game::SoldierInput take;
+	take.selectItem = 5;
+	g.drive(take, 1.5f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.drive({}, 2.5f);
+	uint32_t sentry = 0;
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "eu_sentrygun") {
+			sentry = object->id();
+		}
+	}
+	CHECK(sentry != 0);
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	g.world->setSoldierPosition(info.soldier, {0, 0, 25});
+	// Its scan (0.9 rad/s) comes round to him, then the reaction time.
+	bool firing = false, killed = false;
+	for (int i = 0; i < 450 && !killed; ++i) {
+		g.run(1 / 30.0f);
+		const auto playing = g.world->objectAnimation(sentry);
+		firing = firing || std::find(playing.begin(), playing.end(), "fire") != playing.end();
+		game::GameWorld::PlayerInfo me;
+		killed = g.world->playerInfo(owner, me) && me.kills == 1;
+	}
+	CHECK(killed);
+	CHECK(firing);
+	// The target gone, the trigger lets go and the switch goes back.
+	g.run(1.5f);
+	const auto after = g.world->objectAnimation(sentry);
+	CHECK(std::find(after.begin(), after.end(), "stand") != after.end());
 }

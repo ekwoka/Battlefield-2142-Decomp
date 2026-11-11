@@ -1963,10 +1963,13 @@ void MenuBindings::bindServerSettings()
 		n.setFunction(object, "canApply", [](Interpreter&, const Args&) { return Value(true); });
 		n.setFunction(object, "needsRestart", [](Interpreter&, const Args&) { return Value(false); });
 	}
-	// 0x1005cc20: the antialiasing modes, {value, text} each.
+	// 0x1005cc20: the antialiasing modes, {value, text} each: the
+	// renderer's list, which RendDX9 remakes for the display mode chosen
+	// (0x1000ff50 -> 0x1000fb60: the device's multisample types;
+	// setAntialiasingModes).
 	n.setFunction(kVideoSettings, "getAvailableAntialiasing", [this](Interpreter& vm, const Args&) {
 		std::vector<Value> modes;
-		for (const char* mode : {"Off", "2Samples", "4Samples", "8Samples"}) {
+		for (const std::string& mode : m_antialiasingModes) {
 			auto object = vm.newObject();
 			vm.setMember(Value(object), "value", Value(mode));
 			vm.setMember(Value(object), "text", Value(m_natives.localize(std::string("VIDEOSETTINGS_") + mode)));

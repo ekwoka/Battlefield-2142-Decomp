@@ -786,3 +786,39 @@ TEST(GameAudio_InjurySound)
 	// On foot in the open, first person: the wind is wanted.
 	CHECK(audio.listenerState().windWanted && audio.listenerState().seat.empty());
 }
+
+// The weapon sound component's +0x41 (0x005dbfe0 sets it with each reload
+// event but state 2; 0x005dc1d0, the draw, and 0x005dc160, the click,
+// clear it): the first dry click after a reload is the BoltClick, in
+// either view; later ones the TriggerClick, in first person only.
+TEST(GameSounds_BoltClickAfterAReload)
+{
+	Range range;
+	addSoundTemplate(range.templates, "S_eu_ar_rifle_BoltClick");
+	using Event = sound::GameSounds::WeaponEvent;
+	const sound::Vec3 at {0, 0, 0};
+	const auto event = [&](Event e, bool firstPerson, int reloadState = 0) {
+		range.game.weapon(e, "eu_ar_rifle", firstPerson, at, false, 1, 0, nullptr, reloadState);
+	};
+	event(Event::Deploy, true);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_TriggerClick") == 1 && range.count("S_eu_ar_rifle_BoltClick") == 0);
+	event(Event::Reload, true, 3);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1 && range.count("S_eu_ar_rifle_TriggerClick") == 1);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1 && range.count("S_eu_ar_rifle_TriggerClick") == 2);
+	// State 2 sets nothing; a draw clears it.
+	event(Event::Reload, true, 2);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1);
+	event(Event::Reload, true, 3);
+	event(Event::Deploy, true);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1 && range.count("S_eu_ar_rifle_TriggerClick") == 4);
+	// In third person only the BoltClick sounds.
+	event(Event::Reload, false, 3);
+	event(Event::TriggerClick, false);
+	event(Event::TriggerClick, false);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 2 && range.count("S_eu_ar_rifle_TriggerClick") == 4);
+}

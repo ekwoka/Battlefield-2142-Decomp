@@ -1163,6 +1163,10 @@ public:
 		bool kitHealing = false, kitRepairing = false, kitAmmo = false;
 	};
 	bool abilityBar(int player, AbilityBarInfo& out) const;
+	// Its parts any machine has: the kit's Ability flags, and the gun's
+	// ReplenishingAmmoComp (its replenishingType; false without one).
+	static void abilityBarKit(const world::ObjectTemplate& kit, AbilityBarInfo& out);
+	static bool abilityBarGadget(const world::ObjectTemplate& gun, AbilityBarInfo& out);
 	double roundTime() const { return m_time; }
 	const std::vector<Projectile>& projectiles() const { return m_projectiles; }
 	// The objects with a geometry in the armour effects started on an
@@ -2078,6 +2082,18 @@ public:
 	// only with canBeRepairedWhenWreck (+0x14d, 0 by default), never a
 	// Titan's own armour (0x00561d90).
 	bool repairable(uint32_t object) const;
+	// A gadget's ReplenishingAmmoComp as the scan reads it (abilityOf): its
+	// abilityRadius, whether it rearms (RTAmmo) and onlyActiveWhileFiring;
+	// false without one. A joined client's own tool scans with these
+	// (host::RemoteHudWorld::stepAbility).
+	static bool gadgetScan(const world::ObjectTemplate& gadget, float& radius, bool& ammo, bool& whileFiring);
+	// The object a segment meets first (firstHit, passing through
+	// `ignore`'s body); 0 for none or the terrain.
+	uint32_t firstObjectHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const
+	{
+		uint32_t object = 0;
+		return firstHit(from, to, object, ignore) ? object : 0;
+	}
 	uint32_t titanOf(int team) const;     // 0 without one
 	// The commander's move order (Commander.moveTitan, the order event's
 	// server side 0x0050f1f0 -> 0x005abba0): the point must leave the Titan
@@ -3120,8 +3136,9 @@ private:
 		int hudRevealTime = 3;
 		bool hudShowCloaked = false;
 		// The unlocks' Ability lists: damage taken by projectile material
-		// (setMaterialDamageMod) and extra magazines / rounds per item
-		// (addExtraAmmoItem).
+		// (setMaterialDamageMod) and per item named by addExtraAmmoItem the
+		// most magazines (an entry's +4) and rounds a magazine (+8) any
+		// entry adds (withExtraAmmo).
 		std::map<uint32_t, float> materialDamageMods;
 		std::map<std::string, std::pair<int, int>> extraAmmo;
 		// The unlocks' sprint and beacon modifiers (player +0x30c: +0x4c
@@ -3540,15 +3557,44 @@ private:
 		float minHeightAdjustDistance = 0; // 0x2ac
 		bool destroyWhenTargetLost = false; // 0x295
 	};
+public:
+	// An auto controller's values (autoControllerTemplate.*, AIDLL's
+	// template 0x100a8ed0) for the guns the rewrite runs in GameWorld.
+	struct AutoControl {
+		float viewDistance = 30;      // +0x10
+		float discoverCloaked = 0;    // discoverCloakedEnemiesDistance, +0x2c
+		float fov = 20;               // +0xc, degrees
+		float scanningSpeed = 0.03f;  // +4, radians per 1/30 s
+		float targetLostTimeout = 0;  // +0x1c
+		float reactionTime = 0;       // +0x18
+		float yawSpeed = 0;           // the yaw bundle's maxSpeed x maxTrackingInput (degrees/s)
+		bool onlyAttackNetworkBattlefieldObjects = false; // +0x39
+		bool neverAttackDeployer = false;                 // +0x20
+	};
+
+private:
 	struct Drone {
 		uint32_t object = 0;
 		int owner = -1;
 		int team = 0;
+		const AutoControl* control = nullptr;
+		// A deployed sentry gun (eu_sentrygun): it stands where it was set
+		// down (no ForceObject) and its gun sits gunHeight over its origin.
+		bool stationary = false;
+		float gunHeight = 0;
 		// The sentry's auto controller: the gun's heading (radians), its
-		// target and when it was last seen.
+		// target and when it was last seen; the trigger waits until
+		// fireFrom (the reaction time from the target's taking).
 		float gunYaw = 0;
 		int target = -1;
 		float targetSeenAt = 0;
+		float fireFrom = 0;
+		// The gun's DefaultAnimationComp (0x005e12e0; template 0x005e1260,
+		// animation.loopingFire +0x1c) gives the deployable's animation
+		// system message 1: held from a shot to the trigger's release with
+		// loopingFire, else a pulse a shot.
+		bool animated = false, loopingFire = false;
+		bool fireHeld = false, firePulse = false;
 		ForceSettings force;
 		float hoverHeight = 0; // the target's physics origin over its feet (see stepDrones)
 		physics::Vec3 position, velocity;
@@ -3572,6 +3618,9 @@ private:
 		DeviationBuildUp gunDeviation; // the gun's firing build-up (setFireDev)
 	};
 	std::vector<Drone> m_drones;
+	// The deployed sentry guns (a deployable with the SentryGun auto
+	// controller), by their deployed object.
+	std::vector<Drone> m_sentryGuns;
 	// The deployables' own animation systems (spawn_beacon, the hubs, the
 	// portable shield, the sentry gun): objects that aren't bodies here but
 	// get the skeleton helper as every object does (the object base's
@@ -3752,6 +3801,11 @@ private:
 	void pulse(const Drone& drone);
 	static bool autoTrigger(Drone& drone, bool want);
 	void fireSentry(Drone& drone, float seconds);
+	static void fireMessage(Drone& drone, bool trigger, bool fired);
+	uint32_t gunMessages(uint32_t object, uint32_t& pulses) const;
+	void addSentryGun(const Player& player, const world::Object& placed);
+	const world::ObjectTemplate* autoControlledGun(const world::ObjectTemplate& t, float* height) const;
+	void stepSentryGuns(float seconds);
 	bool removeDrone(uint32_t object);
 	Drone* findDrone(uint32_t object);
 	bool isDrone(uint32_t object) const;

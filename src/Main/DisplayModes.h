@@ -79,4 +79,23 @@ inline std::vector<std::string> listDisplayModes(std::vector<DisplayMode> modes,
 	return list;
 }
 
+// The video options' antialiasing list ("Off", "<n>Samples"), as RendDX9
+// makes it: 0x10007e30 asks the device (IDirect3D9::CheckDeviceMultiSampleType,
+// vtable 0x2c, for the mode's format and windowed flag) for each
+// multisample type 0..16 and keeps those it accepts; 0x1000fb60 names type
+// 0 "Off" and type n "%dSamples", leaving out type 1 (the non-maskable
+// type). `counts`: the sample counts the GPU takes (GpuContext::sampleCounts).
+inline std::vector<std::string> listAntialiasingModes(std::vector<int> counts)
+{
+	std::sort(counts.begin(), counts.end());
+	std::vector<std::string> list {"Off"};
+	for (const int n : counts) {
+		const std::string text = std::to_string(n) + "Samples";
+		if (n >= 2 && n <= 16 && std::find(list.begin(), list.end(), text) == list.end()) {
+			list.push_back(text);
+		}
+	}
+	return list;
+}
+
 } // namespace dice::hfe

@@ -1857,6 +1857,139 @@ TEST(NetHost_JoinedCombatAreaCountdown)
 	client.disconnect();
 }
 
+// A joined client's ability bar (0x007c3af0 runs on the client too): the
+// gift flags of our own state, which the host now sends (0x00594cc0:
+// +0x16a, +0x168, +0x169, set by the heal 0x004bc410), the kit's battery
+// from the control record (mode 3's 0x40000) as the prediction keeps it,
+// filled between records by the kit's abilityRestoreRate (0x0058d350),
+// and the targets of the client's own scan of the medic hub in hand
+// (0x005d8740): our wounded soldier, his networked health.
+TEST(NetHost_JoinedAbilityBar)
+{
+	using namespace dice::hfe;
+	HostRange range;
+	game::GameWorld& round = *range.round;
+	range.templates.registerType(4, "GenericFireArm");
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* rifle = range.templates.create("GenericFireArm", "test_rifle");
+	rifle->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "test_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "test_medic_kit");
+	kit->components().push_back("Ability");
+	kit->settings()["ability.hasHealingAbility"] = "1";
+	kit->settings()["abilityRestoreRate"] = "0.02";
+	kit->settings()["networkableInfo"] = "KitInfo"; // a ghost of its own (HandlePickup names it)
+	kit->children().push_back({"test_rifle", {}, {}});
+	kit->children().push_back({"test_hub_medic", {}, {}});
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	client.world().setGhostTemplates([&range](uint32_t id) {
+		const world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	host::SoldierPrediction prediction(round);
+	client.onMoveSent = [&](const net::PlayerMove& move) { prediction.step(move); };
+	client.sendOnTicks = true;
+	net::GameClientOptions options;
+	options.playerName = "Medic";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	game::SoldierInput input;
+	uint32_t records = 0;
+	const auto step = [&] {
+		client.setInput(net::playerInputFrom(input));
+		client.update();
+		const net::RemoteWorld& world = client.world();
+		if (world.controlRecords() != records && world.controlState() && !world.controlState()->groups.empty()
+			&& world.controlState()->groups.front().kind == net::NetworkableKind::Soldier) {
+			records = world.controlRecords();
+			const net::ControlObjectRecord& record = world.controlObject();
+			if (!prediction.active()) {
+				prediction.start(range.templates.find("us_light_soldier"), record.lastMove,
+					world.controlState()->groups.front(), record.position);
+			} else {
+				prediction.reconcile(record.lastMove, world.controlState()->groups.front(), record.position);
+			}
+		}
+		client.simulatedTick();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	round.setKit(me, "test_medic_kit", "us_light_soldier");
+	CHECK(round.spawnSoldier(me));
+	game::GameWorld::PlayerInfo mine;
+	CHECK(round.playerInfo(me, mine));
+	round.setHitPoints(mine.soldier, 40);
+	round.setBattery(me, 0.5f);
+	// The client's view: the host's own objects stand in for its ghosts.
+	std::map<uint16_t, uint32_t> ghostObjects;
+	host::RemoteHudWorld hud(client.world(), round, ghostObjects);
+	hud.ownBattery = [&prediction](float& battery) {
+		battery = prediction.battery();
+		return prediction.active();
+	};
+	prediction.setBatteryRate(0.02f);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* p = client.world().player(me);
+		return p && p->alive && p->soldierGhost && p->kitGhost && prediction.active();
+	}, 15000));
+	ghostObjects[client.world().player(me)->soldierGhost] = mine.soldier;
+	ghostObjects[client.world().player(me)->kitGhost] = mine.kit;
+	game::GameWorld::AbilityBarInfo bar;
+	CHECK(hud.abilityBar(bar) && bar.alive && bar.kitAbility && bar.kitHealing && !bar.healFlag);
+	CHECK(bar.replenishingType == 3); // the rifle in hand
+	// The hub in hand: the host heals our soldier and stamps the gift; the
+	// client scans the same soldier.
+	input.selectItem = 4;
+	for (int i = 0; i < 3; ++i) {
+		step();
+	}
+	input.selectItem = 0;
+	CHECK(pumpUntil(step, [&] {
+		hud.stepAbility(1.0f / 30, false);
+		const net::ControlState* state = client.world().controlState();
+		return state && state->hasOwn && state->own.flag168 && hud.heldWeapon().weapon == hub;
+	}, 6000));
+	CHECK(hud.abilityBar(bar) && bar.healFlag && !bar.repairFlag && !bar.ammoFlag);
+	CHECK(bar.sinceHeal < 0); // no ticks come: the vehicle branch stays off
+	CHECK(bar.replenishingType == 0 && bar.active && bar.targets.size() == 1);
+	const float health = round.hitPoints(mine.soldier) / 100.0f;
+	std::fprintf(stderr, "  joined bar: target %.3f (host %.3f), battery %.3f (host %.3f)\n",
+		bar.targets.empty() ? -1.0f : bar.targets[0], health, bar.battery, [&] {
+			game::GameWorld::PlayerInfo now;
+			return round.playerInfo(me, now) ? now.battery : -1.0f;
+		}());
+	CHECK(!bar.targets.empty() && bar.targets[0] > 0.4f && bar.targets[0] < 1.0f && std::fabs(bar.targets[0] - health) < 0.05f);
+	// The battery: the record's (7 bits), the restore rate on top since.
+	game::GameWorld::PlayerInfo now;
+	CHECK(round.playerInfo(me, now) && now.battery >= 0 && std::fabs(bar.battery - now.battery) < 0.03f);
+	CHECK(prediction.battery() == bar.battery);
+	// The hub put away: no tool, no targets; the flag stays (the player's
+	// constructor alone clears it).
+	input.selectItem = 3;
+	for (int i = 0; i < 3; ++i) {
+		step();
+	}
+	input.selectItem = 0;
+	CHECK(pumpUntil(step, [&] {
+		hud.stepAbility(1.0f / 30, false);
+		return hud.heldWeapon().weapon == rifle;
+	}, 6000));
+	CHECK(hud.abilityBar(bar) && bar.healFlag && bar.replenishingType == 3 && bar.targets.empty() && !bar.active);
+	client.disconnect();
+}
+
 // What Radio.sendSpottedMessage says (0x007c8160 -> slot 0xd0, 0x0042e9d0):
 // the spotted object's radio.spottedMessage (a soldier's kit's, quotes
 // off), "spotted" without one or with nothing spotted; a joined client's

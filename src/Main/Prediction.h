@@ -92,6 +92,14 @@ public:
 	bool onGround() const { return m_body.onGround(); }
 	const game::SoldierControl& control() const { return m_control; }
 	int32_t lastMove() const { return m_lastMove; }
+	// The kit's ability battery (soldier +0x338, 0..1, -1 without a kit):
+	// the record's (mode 3's 0x40000, which the reader hands to the
+	// soldier's +0x18c interface, vtable 0x94 0x00586300), filled between
+	// records as the soldier's update does on every machine (0x0058d350:
+	// the kit's abilityRestoreRate / 30 a tick, up to 1, while not below
+	// 0). `perSecond`: the worn kit's abilityRestoreRate.
+	void setBatteryRate(float perSecond) { m_batteryRate = perSecond; }
+	float battery() const { return m_battery; }
 
 	struct Stats {
 		uint32_t steps = 0;        // moves stepped as they were sent
@@ -113,6 +121,7 @@ private:
 		net::MoveInputState inputState; // after the move
 		game::SoldierControl control;
 		physics::SoldierBody body;
+		float battery = -1;
 		bool stepped = false; // a predicted state (moves sent before the soldier carry only their input)
 	};
 	void tick(const net::PlayerMove& move);
@@ -125,6 +134,8 @@ private:
 	game::SoldierControl m_control;
 	physics::SoldierBody m_body;
 	net::MoveInputState m_input;
+	float m_battery = -1;
+	float m_batteryRate = 0;
 	std::deque<Snapshot> m_history; // the moves after the last record's, oldest first
 	int32_t m_lastMove = -1;
 	Stats m_stats;

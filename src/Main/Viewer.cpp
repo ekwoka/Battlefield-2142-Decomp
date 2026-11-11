@@ -878,6 +878,15 @@ std::vector<std::string> Window::displayModes(bool wideScreen) const
 	return listDisplayModes(std::move(modes), wideScreen);
 }
 
+std::vector<std::string> Window::antialiasingModes() const
+{
+	std::vector<int> counts;
+	for (const uint32_t n : impl->gpu->sampleCounts()) {
+		counts.push_back(static_cast<int>(n));
+	}
+	return listAntialiasingModes(std::move(counts));
+}
+
 void Window::setSize(int width, int height) { SDL_SetWindowSize(impl->window, width, height); }
 
 struct Window::MenuScreen::State {

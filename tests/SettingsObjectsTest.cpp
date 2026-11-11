@@ -289,3 +289,14 @@ TEST(DisplayModes_TheOriginalsFilters)
 	CHECK((listDisplayModes(panel, false) ==
 		std::vector<std::string> {"1512x982@120Hz", "1728x1117@60Hz", "1920x1080@60Hz"}));
 }
+
+// The antialiasing modes as RendDX9 lists them (0x10007e30 keeps the
+// multisample types 0..16 the device takes, 0x1000fb60 names them "Off"
+// and "%dSamples" without type 1): only the counts the GPU supports.
+TEST(DisplayModes_AntialiasingModesAreTheDevices)
+{
+	CHECK((listAntialiasingModes({}) == std::vector<std::string> {"Off"}));
+	CHECK((listAntialiasingModes({8, 2, 4}) == std::vector<std::string> {"Off", "2Samples", "4Samples", "8Samples"}));
+	CHECK((listAntialiasingModes({2, 4}) == std::vector<std::string> {"Off", "2Samples", "4Samples"}));
+	CHECK((listAntialiasingModes({1, 2, 32}) == std::vector<std::string> {"Off", "2Samples"}));
+}

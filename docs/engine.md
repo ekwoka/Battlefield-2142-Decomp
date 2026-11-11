@@ -1013,15 +1013,27 @@ shield (its middle, arms and top) and the sentry gun (rotation base,
 arms, mainframe) play their bundleAnimationSystem's tree: an `idle`
 CountTrigger (`open` once, then `stand` / `idle` for good); the sentry's
 `alive` switch on message 0x20 (its armour destroyed, `0x0063ce30`) takes
-`dead`, and its `still` switch on message 1 takes `fire`. Nothing in
-`0x0063ce30` sets message 1 (its sender isn't traced; the rewrite sets it
-while the sentry's auto controller has a target). These are plain objects
-or drones here, not bodies: `GameWorld::stepDeployableAnimations` keeps a
+`dead`, and its `still` switch on message 1 takes `fire`. Message 1 is
+the gun's: `0x0063ce30` hands the system to each weapon of the control
+object above it (interface `0xc49e`) whose DefaultAnimationComp
+(component `0xc502`, vtables `0x00973120` / `0x00973080`, made by
+`0x005e12e0`) keeps it (slot `0x8c`, `0x007a73e0`). Each shot (the
+firearm's fire `0x005c3cb0` → slot `0x38`, `0x005e0f30`) sets message 1
+when the component's template (`0x005e1260`) has `animation.loopingFire`
+(`+0x1c`; `+0x10` is useShiftAnimation), else pulses it; the trigger's
+release (`0x005c1010` → slot `0x30`, `0x005e0f60`; not the altFire
+input) clears it. eu_sentrygun's gun has loopingFire 1, so `fire` plays
+from its first round until the trigger lets go; unl_drone_sentry's pulses
+(`GameWorld::fireMessage`, `gunMessages`;
+`Vehicles_DeployedSentryGunFires`). These are plain objects
+or drones here: `GameWorld::stepDeployableAnimations` keeps a
 system per deployed hub, beacon, deployable (`m_deployed`) and drone
 (`ObjectAnimation`), steps it each tick with those messages, and
 `partBone` poses their bone parts for the drawing
 (`Vehicles_DeployablesPoseTheirParts`: the shield's arms spread as it
-opens).
+opens). The sentry gun, a mobile-physics PlayerControlObject, is also a
+body, whose own system (`stepObjectAnimation`) takes the gun's message 1 as
+well.
 
 **Not rewritten among the vehicles' details:** `autoUseAbility`
 (PlayerControlObject `+0x46a`, the 0xc4c5
@@ -1373,8 +1385,11 @@ guns are never a kit's, so every seat weapon passes; `mayUseWeapon`); the
 key of the weapon already active sends it event `0xb`, the fire-rate
 toggle. A weapon so taken (slot `0x7c`) for the local player
 (`DAT_00a85228` slot `0x30`) opens the item selection on the key
-(`0x004d2dfe`): unless the seat's new active PIFire weapon has its flag
-`+0x14` bit 0 (not traced), the HUD's selection (HUD manager slot
+(`0x004d2dfe`): unless the player's controlled object's (slot `0x4c`)
+active PIFire weapon has object flag 1 (`+0x14` bit 0, the disabled flag
+of `0x006f68f0`: a soldier's or parentless firearm's disable `0x005c42f0`
+sets it, its enable `0x005c47d0` clears it, and the slot `0x7c` just ran
+that enable, so it is clear here), the HUD's selection (HUD manager slot
 `0x2c8`) gets 0.4 s to stay open (`+0x20` = `0x3ecccccd`), the HUD the
 menu state 0xb (slot `0x224(0xb, 1)`) and `0x0079c190(key)`: the slot of
 that item index selected for a flash (`+0x18`; the first slot without
@@ -3466,9 +3481,9 @@ call are registered (`scene/OvergrowthSettings.h`; the editor's paint, save,
 generate and atlas rows aren't) and the renderer takes them, reading
 `Overgrowth.con` itself only without them.
 
-**Antialiasing.** `VideoSettings.setAntialiasing` ("Off", "2Samples",
-"4Samples", "8Samples": `0x1000fb60` names multisample type n
-"<n>Samples") is read by the Video.con console row
+**Antialiasing.** `VideoSettings.setAntialiasing` ("Off", "<n>Samples":
+`0x1000fb60` names multisample type n "<n>Samples") is read by the
+Video.con console row
 (`scene::QualitySettings::antialiasingSamples`) and the video page's apply.
 The original renders the world into its multisampled back buffer, then
 StretchRects it into the scene texture for the post-production (`0x1002cef0`:
@@ -7022,8 +7037,10 @@ seat mine" check):
   `0x0064aad0` / `0x94` `0x00586300`; the snapshot `0x005fc1a0` takes it,
   −1 without a kit; see the ability battery). The server's mask is every
   bit but the ragdoll's; the rewrite's host sends the battery too
-  (`HostedGame::soldierState`). A joined HUD has no ability bar, so its
-  client doesn't use it yet.
+  (`HostedGame::soldierState`). A joined client keeps it with its
+  prediction, filled between records by the kit's abilityRestoreRate as
+  the soldier's update does on every machine (`0x0058d350`;
+  `SoldierPrediction::battery`), for its ability bar.
 - **RotationalBundle**: 16 bits an angle and speed.
 - **A seat's occupant**: the seat hands the mode to the soldier's reader.
 
@@ -8300,10 +8317,20 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   the tools' ammunition bar is the battery. Dead or man down (slot
   `0x114`) it goes off. The AbilityValue bars are inside `beginrem` in
   the shipped scripts. RTTeam's branch (no shipped weapon) and slot
-  `0x284`'s stamp (`0x004bd4d0`'s, RTTeam's) aren't needed. A joined game
-  shows none (the server networks the flags, player networkable bits read
-  by `0x00596ed0`, but not the ticks or the tools' targets).
-  (`menu::AbilityBar`, `GameWorld::abilityBar`.)
+  `0x284`'s stamp (`0x004bd4d0`'s, RTTeam's) aren't needed. A joined
+  client runs the same function: the flags come in its own state
+  (`0x00594cc0` writes `+0x16a`, `+0x168`, `+0x169`, `+0x16b`;
+  `0x00596ed0` reads them), the ticks never (`+0x15c` / `+0x160` stay the
+  constructor's 0, so the vehicle branch stays off there); the battery is
+  the control record's (above); the tool's targets come from the client's
+  own scan, as the ReplenishingAmmoComp's update runs on every machine
+  (`0x005d8ac0` → `0x005d8740` / `0x005d84a0`; only the treating waits
+  for the game logic's slot `0x144`, the server's): a target's share is
+  its networked health, and the ammo kit's 15 for every soldier, as no
+  networkable carries another soldier's magazines (what the exe's
+  client's copies of their weapons hold for `0x00588ba0` isn't traced).
+  (`menu::AbilityBar`, `GameWorld::abilityBar`,
+  `host::RemoteHudWorld::abilityBar` / `stepAbility`.)
 - **The range finder and distance counter** (`0x007c1470`, the weapon's
   hasRangeFinder `+0xd4` / hasDistanceCounter `+0xe0`, template `+0x118`
   / `+0x124`): the distance counter sets TargetDistanceString "999"
@@ -8442,8 +8469,14 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   handlers), `ItemSelection::next` / `previous` / `selectedItem`, the
   Viewer counting the wheel in play by the control map's axis-to-trigger
   bindings (`PlayerInput::itemStep`, `SoldierInput::itemStep`, sent as
-  PIPrevItem / PINextItem) (`HudItemSelection_MouseWheel`). Not traced:
-  the active weapon's `+0x14` bit 0 that also forbids the list.
+  PIPrevItem / PINextItem) (`HudItemSelection_MouseWheel`). The active
+  weapon's `+0x14` bit 0 that also forbids the list is the object's
+  disabled flag (`0x006f68f0` flag 1): a soldier's firearm takes it with
+  its disable (`0x005c42f0`) and drops it with its enable (`0x005c47d0`),
+  which making it active runs (`0x005c9840` slot `0x1a4`): the active
+  weapon has it only while disabled in place, without another taking its
+  group. The rewrite's weapons have no such state, so the test is left
+  out.
 - **canBeSpotted** (block `+0xc2`, 1 by default): the map node's spot
   picks (`0x007925a0`, `0x007926c0`: within 70) skip an object without it
   unless it is alwaysShowOnMinimap (`+0xb1`); also read by `0x0075bfe0`
@@ -9298,19 +9331,39 @@ rewrite.
 **Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
 of that material does to the soldier (the assault's armour unlock: 0.75
-for twenty bullet materials); `ability.addExtraAmmoItem <item> <mags>
-<rounds> <flag>` (`0x0054ebed` → slot `0x84`, `0x006316e0`: an entry
-of 0x28 bytes on the list `+0x24`, `+1` the flag, `+4` the rounds, `+8`
-the magazines, `+0xc` the name; `addExtraAmmoItemToKit`'s fifth argument
-at `+0`) adds magazines and rounds to an item of the kit (`eu_handgun 2 0
-0` the extra sidearm clips, `unl_grenade_frag 0 1 1` the extra grenade;
-the flag is set on the grenade unlocks, `item_dummy 0 0 1` among them).
-The one reader of the player's copy found is the spawn screen's ability
-icons (`0x00798b20`: the flag lights Ability0Active, grenades.tga;
-magazines over 0 Ability1Active, rounds over 0 Ability2Active; then the
-sprint, damage and beacon modifiers Ability3..6Active, not rewritten);
-where the firearm takes the counts wasn't found, so the rewrite adds them
-to nrOfMags and magSize. The Ability template (class `0xc4b2`, vtable `0x00981e68`)
+for twenty bullet materials); `ability.addExtraAmmoItem <item> <rounds>
+<mags> <flag>` (`0x0054ebed` → slot `0x84`, `0x006316e0`: an entry
+of 0x28 bytes on the list `+0x24`, `+8` the first number, `+4` the
+second, `+1` the flag, `+0xc` the name; `addExtraAmmoItemToKit`'s fifth
+argument at `+0`; the Ability's writer `0x00630f10` prints them
+in that order) gives an item of the kit a larger magazine and more of
+them. The ammo comps' getters, vtable slots 55 and 56 of each of them
+(`0x005f4270` magSize, `0x005f41b0` nrOfMags), return the ammo template's
+`+0x38` / `+0x34`, unless −1, plus the largest `+8` / `+4` of the
+entries in the holder's player's ability block (slot `0x2a0`, the list
+`+0x18`) naming the weapon's template (`0x0065b980`, without case; the
+largest, not the sum). The comp's constructor (`0x005f4c70`) makes that
+many magazines of that size, and every reader of the two goes through
+the slots. So `as_handgun 3 0 0` (Ability_Extra_Sidearm_Clip) makes the
+sidearm's magazine 15 rounds, `unl_grenade_frag 0 1 1` (Ability_Extra_
+Grenade) gives a third grenade, the support's `as_smg 10 0 0` and `as_smg
+0 1 0` a larger and an extra SMG magazine, the assault's booster `AS_AR_
+Rocket 1 1 0` both. The flag is set on the grenade unlocks, `item_dummy
+0 0 1` among them. The spawn screen reads the block too (`0x00798b20`,
+from the open kit's rebuild `0x00798dd0` while the soldier is dead: the
+kit built for the player, `0x00570ab0`, then per entry the flag lights
+Ability0Active (grenades.tga), `+8` over 0 Ability1Active
+(extra_grenade.tga), `+4` over 0 Ability2Active (larger_pistol_clip.tga),
+these three only ever set until the kit interface's full reset
+`0x00797d30(1)` (its constructor `0x00798610`, and `0x00751ff0` on a
+profile change); sprintUseModifier (`+0x50`) not 1 Ability3Active
+(sprint_amount), sprintRechargeModifier (`+0x4c`) Ability4Active
+(sprint_recharge), setOverheatMod's pairs (`+0x38`) Ability5Active
+(gun_upgrade), beaconSpawnTimeMod (`+0x54`) Ability6Active
+(beacon_spawnTime); HudElementsKitsMenu.con's PlayerEquip row;
+`menu::KitMenu::updateAbilityIcons`). The kit build applies the Ability
+of each container the player owns (its last pass, player slot `0x2a8`),
+chosen on the customise screen or not. The Ability template (class `0xc4b2`, vtable `0x00981e68`)
 keeps `sprintRechargeModifier` at `+0x5c` (slot `0xb4`),
 `sprintUseModifier` `+0x60` (`0xc4`), `beaconSpawnTimeMod` `+0x64`
 (`0xbc`) and `setOverheatMod <weapon> <mod>`'s pairs (`0x0054e8b0` →
@@ -10015,6 +10068,33 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
     AI. The minimap side (the client's `0x00508590`): see [joined
     games](#joined-games-radio-tools-and-menus).
 
+- **The gun:** the first GenericFireArm of the drone's tree on PIFire
+  (`fire.fireInput`): unl_drone_sentry's root also carries the siren
+  `Car_horn_Alt` (a GenericFireArm on PIAltFire, no projectile), which a
+  breadth-first search found first, so before this the shipped sentry
+  drone never fired (`GameWorld::autoControlledGun`;
+  `Drones_SentryShootsEnemies` with the siren in place).
+- **Deployed sentry gun (`SentryGun`):** the engineer's
+  Unl_Deployer_Sentrygun sets down `eu_sentrygun`, a PlayerControlObject
+  with `setAutoControllerTemplateName SentryGun`, which the same
+  controller runs from where it stands (it never fired here before):
+  `fov` 30°, `viewDistance` 63 m (65.2 m along the frustum), scan
+  `scanningSpeed` 0.03 (0.9 rad/s), `targetLostTimeout` 0.05 s, cloaked
+  soldiers within 5 m, any enemy on foot (no `onlyAttackNetworkBattlefieldObjects`
+  or `neverAttackDeployer`), the yaw tracking at EU_Sentrygun_rotation's
+  1500°/s. `reactionTime` (1 s) is the fire plan's trigger delay
+  (`0x100777a0` reads the template's `+0x18` for an auto controller and
+  hands it to BAPATrigger `0x100d3110`, whose start is now + delay,
+  `+0x28`): the trigger waits that long after the target is taken. The
+  gun is `eu_SentryGun_FireArm` (13 damage falling to 5 from 15 to 40 m,
+  450 m/s), 0.41 m over the object (its child positions). Kills count for
+  the deployer; EMP above level 1 silences it as the drone
+  (`GameWorld::addSentryGun`, `stepSentryGuns`;
+  `Vehicles_DeployedSentryGunFires`). Not rewritten for either:
+  `useSiren` (the siren's press before the fire plan, `0x100d8090`),
+  `reportEnemiesToTeam` (`0x100d7fa0`), `sendFireWarning`,
+  `checkLineOfFire`, `flipOutAtHealth` and `scanningInputScale`.
+
 Under EMP above level 1 the sentry drone's auto controller (UAVDrone) has
 every input cut by the PlayerControlObject's filter (`0x005ca2e0`), the
 fire too: its gun neither turns nor fires. The recon drone's pulse is
@@ -10196,8 +10276,11 @@ reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
   c_PIReload (the firearm's action 10); a press of the trigger on the
   empty magazine is refused by the ammo's slot `0x34` (`0x005f37c0`) and
   clicks (`0x005c2ee0` → the sound component's `0x005dc160`:
-  TriggerClick in first person, BoltClick while its `+0x41` is set, whose
-  writer isn't traced). `FireArm::fire`, `takeClick`; a joined client's
+  BoltClick in either view while its `+0x41` is set, else TriggerClick in
+  first person: every reload event but state 2 sets `+0x41`, `0x005dbfe0`'s
+  end; the draw, `0x005dc1d0`, and the click itself clear it, so the
+  first dry click after a reload is the bolt's; `GameSounds::weapon`,
+  `GameSounds_BoltClickAfterAReload`). `FireArm::fire`, `takeClick`; a joined client's
   copy of others' firing waits for the server's reload
   (`reloadRemoteSoldier`) unless autoReload. The bots' reloads: see
   Bots, Fire. In a seat the press goes the same way: the game's player
@@ -10263,7 +10346,9 @@ shows its `weaponHud.unlockIcon`, and carries `specialAbilityIcon`,
 `CustomInfoShow`, `HeavyArmorActive` and `HeavyArmor%iActive`,
 `CustomSoldierPicture` (`Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].tga`,
 the 1 for heavy armour, `0x007975e0`), `OpenCloseKitCustomString`
-(`HUD_TEXT_MENU_UNLOCK_OPEN` / `_CLOSE`), `NotAntiVechicleKitChoosen`; the
+(`HUD_TEXT_MENU_UNLOCK_OPEN` / `_CLOSE`), `NotAntiVechicleKitChoosen`,
+`Ability0..6Active` (the abilities the kit gives the player, `0x00798b20`;
+see **Unlock abilities** under [Map and spawn screen](#map-and-spawn-screen)); the
 information (`0x007981e0`) `KitItemInfoString` with `LargeInfoPic` (row
 0) or `SmallInfoPic` (`DESCRIPTION_ARMOR_MOUSEOVER` and `Armour.tga` for
 the armour), reset to `HUD_TEXT_MENU_CUSTOMIZE_DEFAULT_TEXT`
@@ -10378,8 +10463,10 @@ the top.
   (SquadAndLocalEnemies anyone within 15 m too); SquadLeader the leader of
   the message's squad; SquadId that squad; LocalTeamMedic / LocalRevive
   teammates within 100 m with the medic's means (the soldier's interface
-  `0xc4d7`, `0x00585af0` → its kit, `+0x228`, whose `+0x74` slot `0x38`
-  flag's setter wasn't traced: taken as a kit with an RTHeal gadget),
+  `0xc4d7`, `0x00585af0` → its kit, `+0x228`, whose `+0x74` is its
+  Ability component, interface `0xc4b1` kept by `0x006f99e0`, slot `0x38`
+  `0x00658590` the template's `+0x10`: `ability.hasHealingAbility`, set on
+  EU_Assault and Pac_Assault; `GameWorld::carriesHealing`),
   else as AutoLocalRevive, anyone within 15 m; Local anyone within 100 m;
   LocalTeam teammates within 100 m and enemies within 15 m;
   LocalGround/AirVehicle anyone within 15 m (ground only), else teammates
@@ -14422,10 +14509,19 @@ the pause's stamp.
   The statement carries 5° (+0x1c, DAT_10127df0 × 5) where the Soldier's
   carries 0; the controller 0x100e5820 takes it as its fifth argument and
   never reads it. The faced sectors are the gun's. A turret's sectors are
-  held to its yaw limits (0x100d5440 over the ControlInfo's BF2142.exe
-  slots 0x4c / 0x54 / 0x60, not traced); the rewrite lets every sector
-  through (the shipped tanks' and AA guns' turrets turn all round).
-  `BotManager::turretLooks`.
+  held to its ControlInfo's camera-relative yaws (0x100d5a40 → 0x100d5440
+  over the BF2142.exe adaptor slots 0x4c `0x008a2790`, the DOF offset
+  `+0x60`; 0x50 `0x008a27a0`, the min `+0x64`; 0x54 `0x008a27b0`, the max
+  `+0x70`; 0x60 `0x008a2590`, the frame): the angle from the frame's
+  forward turned by the offset to the sector, negative to the left, within
+  min..max, every sector when both are 0. The heaviest-sector choice
+  (0x100d60f0) takes only allowed sectors; its random fallback draws up to
+  six more times while the sector isn't allowed and keeps the last; the
+  cancel test (0x100d6300) drops a plan whose sector isn't allowed.
+  Shipped limits: as_apc's pod cannons (−38..40°, −60..74°…), the
+  gunship's second position (−110..110°); the drivers' turrets 0/0. The
+  rewrite's frame is the hull's (`BotManager::sectorAllowed`,
+  `turretLooks`; `Bots_TurretLooksAround`).
 - **Null** (vtable 0x101175b4, FloatingTank and ManDown): its plans
   (0x1008b9f0) are a statement that does nothing (0x100d1fe0(0, 1, 0)):
   no look of its own, as before.
@@ -15238,7 +15334,14 @@ ask whether it's done.
   last applied ones, `reset()` to the defaults. Video qualities are 1 low,
   2 medium, 3 high (0 off for dynamic shadows and light);
   `getAvailableAntialiasing` (0x1005cc20) gives `{value, text}` objects
-  ("Off", "2Samples"... with `VIDEOSETTINGS_` texts); the select boxes
+  ("Off", "2Samples"... with `VIDEOSETTINGS_` texts): the renderer's list
+  for the display mode chosen (`0x1000ff50` → `0x1000fb60`), the device's
+  multisample types (`0x10007e30`: types 0..16 that
+  IDirect3D9::CheckDeviceMultiSampleType, vtable `0x2c`, accepts for the
+  mode's format, type 1 left out); the rewrite lists the counts SDL GPU
+  takes for both the colour and the depth-stencil format
+  (`GpuContext::sampleCounts`, `listAntialiasingModes`), so "8Samples"
+  isn't offered where the GPU stops at 4; the select boxes
   show the list their first argument names (`displayModes`: the display's
   modes as "1024x768@60Hz", 0x10065360). The list is RendDX9's
   `0x10010830`: from Direct3D's modes (`0x100079b0`: R5G6B5 then
