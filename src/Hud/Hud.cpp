@@ -163,7 +163,11 @@ struct HudManager::Node {
 	std::string compassTexture;
 	std::string compassSnapTextures[2]; // 0x14c (past the high end), 0x150 (past the low end)
 	float compassTextureSize[2] = {0, 0}; // 0x140, 0x144
-	int compassBorder[4] = {0, 0, 0, 0};  // 0x74..0x80
+	// The border of a bar node and so of a compass (+0x74..+0x80, slot
+	// 0x100 = 0x007e9270 in both vtables, Bf2BarNode's 0x009bbdd0 and
+	// Bf2CompassNode's 0x009bb950): top, bottom, left, right, set by
+	// setBarNodeBorder and setCompassNodeBorder alike.
+	int border[4] = {0, 0, 0, 0};
 	int compassSnapOffset[4] = {0, 0, 0, 0}; // 0x158..0x164
 	std::string compassVariable;
 	int compassOffset = 0;     // 0x154
@@ -232,11 +236,9 @@ struct HudManager::Node {
 	std::string outlineFont;
 	float outlineOffset[2] = {0, 0};
 	bool truncate = false;
-	// Bars: setBarNodeBorder <a> <b> <c> <d> (0x007b0540, slot 0x104: the
-	// fill keeps a and b pixels off its start and end along the bar, c and
-	// d across), setBarNodeIncreaseShow (0x110), setBarNodeSnapDir
+	// Bars: the border above (the fill keeps its top and bottom, left and
+	// right pixels off), setBarNodeIncreaseShow (0x110), setBarNodeSnapDir
 	// (0x108), setBarNodeRound <mode> <w> <h> (0x120), kept.
-	int barBorder[4] = {0, 0, 0, 0};
 	bool barIncreaseShow = false, barSnapDir = false;
 	int barRound = 0;
 	float barRoundSize[2] = {0, 0};
@@ -639,8 +641,8 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		// rectangle, filling it along the bar (the conquest screens' point
 		// bars split one node, "0 0 17 76" from the right and "0 0 77 15"
 		// from the left, 152 wide).
-		const float bx0 = x + static_cast<float>(node.barBorder[2]), bx1 = x + w - static_cast<float>(node.barBorder[3]);
-		const float by0 = y + static_cast<float>(node.barBorder[0]), by1 = y + h - static_cast<float>(node.barBorder[1]);
+		const float bx0 = x + static_cast<float>(node.border[2]), bx1 = x + w - static_cast<float>(node.border[3]);
+		const float by0 = y + static_cast<float>(node.border[0]), by1 = y + h - static_cast<float>(node.border[1]);
 		const float u0 = w > 0 ? (bx0 - x) / w : 0, u1 = w > 0 ? (bx1 - x) / w : 1;
 		const float v0 = h > 0 ? (by0 - y) / h : 0, v1 = h > 0 ? (by1 - y) / h : 1;
 		if (value > 0 && bx1 > bx0 && by1 > by0) {
@@ -928,7 +930,7 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 	float texX = x, texY = y, clipX = x;
 	int c = 0;
 	if (node.compassDirection == 0) {
-		c = static_cast<int>(std::floor(value / 360.0f * (texH - static_cast<float>(node.compassBorder[1])) + offset));
+		c = static_cast<int>(std::floor(value / 360.0f * (texH - static_cast<float>(node.border[1])) + offset));
 		if (node.compassSnap) {
 			const int o = node.compassOffset;
 			if (static_cast<float>(c - o) > h - static_cast<float>(node.compassSnapOffset[1])) {
@@ -945,7 +947,7 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 		}
 		texY -= static_cast<float>(c);
 	} else if (node.compassDirection == 3) {
-		c = static_cast<int>(std::floor(value / 360.0f * (texW - static_cast<float>(node.compassBorder[3])) + offset));
+		c = static_cast<int>(std::floor(value / 360.0f * (texW - static_cast<float>(node.border[3])) + offset));
 		if (node.compassSnap) {
 			const int o = node.compassOffset;
 			const float high = w * 0.5f - static_cast<float>(node.compassSnapOffset[2]);
@@ -982,7 +984,7 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 	};
 	place(texX);
 	if (node.compassWrap) {
-		const float period = texW - static_cast<float>(node.compassBorder[3]);
+		const float period = texW - static_cast<float>(node.border[3]);
 		const float fc = static_cast<float>(c);
 		if (c < 0 && offset - period * 0.5f <= fc) {
 			place(texX - period);
@@ -1760,7 +1762,8 @@ std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 // checks that count and passes the values on (the HudBuilder rows through
 // the HUD manager's slot 0x270, its builder). setBarNodeBorder and
 // setCompassNodeBorder share their executor (0x0076aebf → 0x007b0780, the
-// node's slot 0x100).
+// node's slot 0x100: 0x007e9270 on a bar and a compass alike, one border);
+// setBarNodeSnap's (0x00769896 → 0x007b0540) is slot 0x104, 0x007e92a0.
 //   HudManager:
 //     setSpottedMousePos 0x0075f9da / 0x0075faee / 0x0075fa67; setSpottedAngle 0x0075fb27 / 0x0075fbe5 / 0x0075fb98;
 //     setMaximumNrOfCPs 0x0075ffbc / 0x0076007a / 0x0076002d; setPaint 0x0076009e / 0x0076015c / 0x0076010f;
@@ -1969,15 +1972,23 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
-	bindMethod(console, "HudBuilder.setCompassNodeBorder", access, [active](int a, int b, int c, int d) {
-		if (Node* n = active()) {
-			n->compassBorder[0] = a;
-			n->compassBorder[1] = b;
-			n->compassBorder[2] = c;
-			n->compassBorder[3] = d;
+	// setCompassNodeBorder and setBarNodeBorder share their executor
+	// (0x0076aebf -> 0x007b0780: the active node's slot 0x100, 0 without
+	// one), which on a bar or a compass is 0x007e9270, the border at
+	// +0x74..+0x80 (returning 1). Slot 0x100 of the other node types is
+	// something else; not followed: they take nothing here.
+	const auto setBorder = [active](int a, int b, int c, int d) {
+		Node* n = active();
+		if (!n || (n->type != kBar && n->type != kCompass)) {
+			return false;
 		}
+		n->border[0] = a;
+		n->border[1] = b;
+		n->border[2] = c;
+		n->border[3] = d;
 		return true;
-	});
+	};
+	bindMethod(console, "HudBuilder.setCompassNodeBorder", access, setBorder);
 	bindMethod(console, "HudBuilder.setCompassNodeSnapOffset", access, [active](int a, int b, int c, int d) {
 		if (Node* n = active()) {
 			n->compassSnapOffset[0] = a;
@@ -2449,17 +2460,7 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		n->truncate = truncate;
 		return true;
 	});
-	bindMethod(console, "HudBuilder.setBarNodeBorder", access, [active](int a, int b, int c, int d) {
-		Node* n = active();
-		if (!n || (n->type != kBar && n->type != kCompass)) {
-			return false;
-		}
-		n->barBorder[0] = a;
-		n->barBorder[1] = b;
-		n->barBorder[2] = c;
-		n->barBorder[3] = d;
-		return true;
-	});
+	bindMethod(console, "HudBuilder.setBarNodeBorder", access, setBorder);
 	bindMethod(console, "HudBuilder.setBarNodeIncreaseShow", access, [active](int on) {
 		if (Node* n = active()) {
 			n->barIncreaseShow = on != 0;

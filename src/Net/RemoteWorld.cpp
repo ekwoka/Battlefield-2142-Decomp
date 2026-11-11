@@ -940,9 +940,11 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 		o.childDamage = root.childDamage;
 		const std::vector<bool>& cells = layout.groups.front().hints.armoredRepairCells;
 		o.repairCells.clear();
+		o.repairCellEighths.clear();
 		for (size_t i = 0; i < cells.size() && i < root.childDamage.size(); ++i) {
 			if (cells[i]) {
 				o.repairCells.push_back(root.childDamage[i] > 0);
+				o.repairCellEighths.push_back(root.childDamage[i]);
 			}
 		}
 	}

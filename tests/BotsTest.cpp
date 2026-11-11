@@ -2827,6 +2827,107 @@ TEST(Bots_ChangeHearsBailOutAndGetIn)
 	}
 }
 
+// AI/AIBehaviours.ai's aiSettings.setVehicleMaterialCost gives each bot
+// kind its own cost profile (AIDLL 0x1000be20 -> 0x1004fcf0 -> 0x100bdcc0
+// on the kind's profile, the default 0x100bdfb0; the material named by
+// 0x10058570): a Tank's, a Mech's and a Car's DeepWater (class 4) is
+// impassable, an ArmedCar's costs 2 and an Infantery's 6; their paths and
+// the drivers' room rays (0x1003f930 takes the profile by the kind,
+// DAT_10139470 vt+0xc0) use it.
+TEST(Bots_EquipmentCostProfiles)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console {&files};
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	CHECK(console.run("AI/AIBehaviours.ai", {}, out));
+	const ai::CostProfile tank = settings.costProfile("Tank");
+	CHECK(tank.costs[0] == -1 && tank.costs[1] == 1 && tank.costs[2] == 1);
+	CHECK(tank.costs[3] == 1.5f && tank.costs[4] == -1);
+	CHECK(tank.costs[5] == 1000 && tank.costs[6] == 1 && tank.costs[7] == 1000); // as the default
+	CHECK(settings.costProfile("Mech").costs[4] == -1);
+	CHECK(settings.costProfile("Car").costs[3] == 1.8f && settings.costProfile("Car").costs[4] == -1);
+	CHECK(settings.costProfile("ArmedCar").costs[3] == 1 && settings.costProfile("ArmedCar").costs[4] == 2);
+	CHECK(settings.costProfile("Infantery").costs[3] == 1.5f && settings.costProfile("Infantery").costs[4] == 6);
+	CHECK(settings.costProfile("Helicopter").costs[4] == 1); // no material costs: the default
+	// A Tank's room ray (vslot 0x84: the profile's passable test 0x100bdd00
+	// fails a polygon of class 4) stops where deep water starts, and reports
+	// the class it tried to enter; the default profile drives on.
+	ai::NavMesh mesh;
+	mesh.vertices = {{0, 0, 0}, {10, 0, 0}, {10, 0, 10}, {0, 0, 10}, {20, 0, 0}, {20, 0, 10}};
+	const auto polygon = [&](uint8_t costClass, std::vector<uint32_t> v, std::vector<int32_t> n) {
+		ai::Polygon p;
+		p.vertexCount = 3;
+		p.costClass = costClass;
+		p.firstEdge = static_cast<uint32_t>(mesh.edgeVertices.size());
+		p.normal = {0, 1, 0};
+		mesh.polygons.push_back(p);
+		mesh.edgeVertices.insert(mesh.edgeVertices.end(), v.begin(), v.end());
+		mesh.edgeNeighbours.insert(mesh.edgeNeighbours.end(), n.begin(), n.end());
+	};
+	polygon(1, {0, 1, 2}, {-1, 3, 1});
+	polygon(1, {0, 2, 3}, {0, -1, -1});
+	polygon(4, {1, 4, 5}, {-1, -1, 3});
+	polygon(4, {1, 5, 2}, {2, -1, 0});
+	ai::RayHit hit;
+	CHECK(!ai::meshRaycast(mesh, {6, 0, 3}, {18, 0, 5}, &tank, -1, nullptr, 0, 0, 6, nullptr, &hit));
+	CHECK(hit.lastClass == 4 && std::fabs(hit.point.x - 10) < 0.01f);
+	const ai::CostProfile plain;
+	CHECK(ai::meshRaycast(mesh, {6, 0, 3}, {18, 0, 5}, &plain, -1, nullptr, 0, 0, 6, nullptr, &hit));
+}
+
+// A driver's goal measures the bot's object (bot +0xa0, vt+0xcc, as
+// 0x10066a70 hands 0x1008aaa0 its position and radius): the vehicle, its
+// origin and its box's centre radius, so a driver within that radius + 1 m
+// of a scripted goal (ai.botMoveTo, 0x100284a0) has arrived, as its path
+// ends within the centre radius. With the soldier's radius (1.15 + 1 m) a
+// driver there kept MoveTo, braking at its path's end.
+TEST(Bots_DriverArrivesWithinItsVehiclesRadius)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	std::string out;
+	field.console.execute("aiSettings.setVehicleBehaviour Car MoveTo BBMoveTo BBPGotoWaypoint2d 4 UCUnion UnitWeights", out);
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 0);
+	physics::Vec3 at, lo, hi;
+	for (const auto& v : field.world->vehicleList()) {
+		if (v.object == car) {
+			at = v.position;
+			lo = v.boxMin;
+			hi = v.boxMax;
+		}
+	}
+	const physics::Vec3 half = (hi - lo) * 0.5f;
+	const float centreRadius = std::sqrt(physics::lengthSquared(half));
+	// Between the soldier's reach and the vehicle's, beside the car.
+	const float d = 0.5f * ((1.1489125f + 1) + (centreRadius + 1));
+	std::fprintf(stderr, "  centre radius %.2f, the goal %.2f m from the car\n", centreRadius, d);
+	CHECK(d > 1.1489125f + 1.2f && d < centreRadius + 0.8f);
+	game::BotManager bots(*field.world, field.settings);
+	bots.attach(field.settings);
+	char goal[96];
+	std::snprintf(goal, sizeof goal, "ai.botMoveTo 1 %.2f/0/%.2f %d", at.x - d, at.z, bot);
+	field.console.execute(goal, out);
+	CHECK(bots.scriptedGoal(bot) != nullptr);
+	field.ticks(30, &bots);
+	CHECK(bots.scriptedGoal(bot) == nullptr); // arrived: the SAI's orders again
+	CHECK(bots.behaviour(bot) != "MoveTo");
+}
+
 // The entry search (BF2142.exe 0x005a98e0) takes every EntryPoint whose
 // root is the vehicle, wherever it hangs (us_heavy_mech's under its pelvis
 // and turret bundles); and a bot heading for a car on foot keeps walking

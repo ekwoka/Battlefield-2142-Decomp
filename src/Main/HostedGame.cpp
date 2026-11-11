@@ -2348,17 +2348,18 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 			}
 			// The armoured parts below it (0x800000): the rewrite's vehicles
 			// keep their armour on the root, so every part is whole but the
-			// repair cells (GameWorld::repairCells, the heavy IFV's shield
-			// generators: hudRepairCellNo, in the root's armour order), each
-			// 8 while it stands and 0 a wreck, which the clients' vehicle
-			// HUD shows (0x007a1e50).
+			// repair cells (the heavy IFV's shield generators:
+			// hudRepairCellNo, in the root's armour order), each in eighths
+			// of its hit points as 0x005ffec0 captures them
+			// (GameWorld::repairCellEighths), which the clients' vehicle
+			// HUD (0x007a1e50) and the cells' armour effects follow.
 			if (h.kind == net::NetworkableKind::SimpleObject && h.armoredChildrenKnown && !h.armoredChildren.empty()) {
 				s.mask |= 0x800000;
 				s.childDamage.assign(h.armoredChildren.size(), 8);
-				const std::vector<bool> cells = m_round->repairCells(ghost.object);
+				const std::vector<int> cells = m_round->repairCellEighths(ghost.object);
 				for (size_t i = 0, cell = 0; i < h.armoredRepairCells.size() && i < s.childDamage.size(); ++i) {
 					if (h.armoredRepairCells[i] && cell < cells.size()) {
-						s.childDamage[i] = cells[cell++] ? 8 : 0;
+						s.childDamage[i] = cells[cell++];
 					}
 				}
 			}

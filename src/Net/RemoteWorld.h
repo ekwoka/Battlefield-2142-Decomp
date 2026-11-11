@@ -128,6 +128,7 @@ struct RemoteObject {
 	// while standing), empty until a state with them came.
 	std::vector<int> childDamage;
 	std::vector<bool> repairCells;
+	std::vector<int> repairCellEighths; // the same cells' eighths (GameWorld::setRemoteRepairCells)
 	// Soldiers: the selected weapon (mask 0x2000) and, in a vehicle, the seat.
 	int weapon = -1;
 	uint32_t updates = 0;     // ghost updates received

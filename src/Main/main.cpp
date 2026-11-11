@@ -6233,9 +6233,8 @@ int runGame(Options& options, Session& session)
 		// 0x00561e20 -> 0x005aca70, runs in the client's frame 0x00590e10
 		// too). Here the velocity comes from its updates' positions and
 		// ticks, and the body goes on at it between updates, so what stands
-		// on its decks is carried (the soldier contacts take the body's
-		// velocity, as 0x006ca660 / 0x006ca3b0 give what stands on a Titan
-		// its velocity).
+		// on its decks is carried (the predicted soldier's step takes the
+		// body's velocity as its carry, 0x006ca660 / 0x006ca3b0).
 		struct TitanGhost {
 			uint32_t tick = 0;
 			net::Vec3f position;
@@ -6700,6 +6699,12 @@ int runGame(Options& options, Session& session)
 						// (the team-change radio, the name tags, the assets').
 						if (object->team() != ghost.team) {
 							object->setTeam(ghost.team);
+						}
+						// The heavy IFV's shield cells' hit points (the root's
+						// 0x800000 eighths, 0x005ffec0's apply): their armour
+						// effects run here as on the host.
+						if (!ghost.repairCellEighths.empty()) {
+							round.setRemoteRepairCells(it->second, ghost.repairCellEighths);
 						}
 						// A walker's bundle animation, run here as the exe's
 						// client runs it (GameWorld::animateRemoteVehicle): its

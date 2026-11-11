@@ -274,11 +274,11 @@ coverage-9's list (§3b) was nearly all done in e8fe41c itself, the "before" com
 | # | Gap | What a player notices | Evidence | Effort |
 |---|---|---|---|---|
 | P1 | **Bots against the retail game** (unchanged) | Squad effectiveness (13.3 kills a round with the formation as decoded, 19.4 when every member heads for the order) and drivers' paths are unverified. Wider vehicles still rock where the infantry mesh leaves less room than they need (minsk_coop's eu_tank, Verdun's as_apc), and a driver stops where the infantry mesh has a hole that the vehicle mesh crosses (Camp_Gibraltar's PAC heavy mech). Verdun's stuck time rose (3,693 → 3,963 s), from seated passengers. | engine.md "Squads", the drivers' room rays | M (verification) |
-| P2 | **Multiplayer: the joined client** | A hosted round's restart at the countdown resets the players only; vehicles, control points and dropped kits stay as they are (whether the original's reset, `0x004ce910`, restores them wasn't checked here). A joined client's cells don't show their armour effects. The dirty masks are stand-ins (GhostPriority.h, HostedGame.cpp). | engine.md (restartPlayers), uncited.md "canopy, cells and parts", hedges | M; another agent's area |
-| P3 | **Parts as movers of their own** | A hasMobilePhysics part (`0x005f6ba0`'s node) moves with its body here, and meets movers only as a candidate. | uncited.md "Left" | S–M |
+| P2 | **Multiplayer: the joined client** | A hosted round's restart at the countdown resets the players only; vehicles, control points and dropped kits stay as they are (whether the original's reset, `0x004ce910`, restores them wasn't checked here). ~~A joined client's cells don't show their armour effects~~ (closed, §3g). The dirty masks are stand-ins (GhostPriority.h, HostedGame.cpp). A joined client's Titan velocity is estimated from its updates, so the first second and a half of its motion corrects a soldier standing in it by up to 5 cm (§3g). | engine.md (restartPlayers), uncited.md "canopy, cells and parts", hedges | M; another agent's area |
+| P3 | **Parts as movers of their own** | A hasMobilePhysics part (`0x005f6ba0`'s node) moves with its body here, and meets movers only as a candidate. Checked (§3g): nearly every shipped part has such a node and the dispatch `0x006dd0b0` would run it as a mover; how an attached part's node and contacts reach its root isn't traced, which blocks it. | uncited.md "Left", engine.md "The parts in the mesh physics" | M (tracing first) |
 | P4 | ~~**Commander panel leftovers**~~ **closed** (§3f) | The voice icons, `SELECTED_ALL_SQUADS` and the request's events were already done (c9486a4, engine.md); `us_beacon` (`0x004d2650`) is a load-time pass over a template the shipped content doesn't have. | uncited.md (d) #3 | — |
 | P5 | ~~**Particle leftovers**~~ **closed** (§3f) | All four were already done (d9a49fe; engine.md "Mesh particles' directionalScale" and the view flags); the open list was stale. | uncited.md (d) #1 | — |
-| P6 | ~~**Small differences recorded while citing**~~ **closed** (§3f) but for the shared border executor | Display modes, the FileManager's three cases and the three HUD rows' argument types follow the original. Left: `setBarNodeBorder` / `setCompassNodeBorder`'s shared executor. | uncited.md "Citing present code" | S |
+| P6 | ~~**Small differences recorded while citing**~~ **closed** (§3f, §3g) | Display modes, the FileManager's three cases, the three HUD rows' argument types and the shared border executor follow the original. | uncited.md "Citing present code" | — |
 | P7 | **Rendering details** | ~~Undergrowth's `ZFunc = Less`~~ (closed, §3f); the overgrowth's alpha-to-coverage path (the rewrite draws without multisampling); the language → LCID table for SwiffHost's dates and numbers (RendDX9 `0x1017af30`). | engine.md "Overgrowth"; uncited.md (d) #10 | S |
 | P8 | **`allowEmoteAnimation`** | No emotes in the rewrite. | uncited.md (d) #6 | S |
 
@@ -324,7 +324,7 @@ Of the 163, three more are not hedges:
 | P7, undergrowth depth | The undergrowth pipeline tests less (Undergrowth.fx's 22 passes, `ZFunc = Less`); the others keep less-or-equal. | Undergrowth.fx | none (a GPU pipeline state); `--play --screenshot` on Camp_Gibraltar still shows the grass |
 | P4, P5 | Found already done; the open list was stale. `us_beacon` (`0x004d2650`): a load-time pass that also looks up `ordermarker_*` and `us_beacon` by name and calls each template's slot 0x68; no shipped file names `us_beacon`. | | |
 
-Left of these lists: the shared bar/compass border executor (`0x0076aebf`), the overgrowth's alpha-to-coverage, SwiffHost's LCID table, emotes.
+Left of these lists: the overgrowth's alpha-to-coverage, SwiffHost's LCID table, emotes (the border executor closed in §3g).
 
 **Measured** (the same scripts, `run_all.sh` on the working tree; the source measurements also on a clean a00ce5b worktree). Headline rule, no audit docs:
 
@@ -340,15 +340,25 @@ Left of these lists: the shared bar/compass border executor (`0x0076aebf`), the 
 - The probe and the level runs are unchanged: 1,179 impl names in the probe union, as at 4d7a8b7. A first run gave 1,177, with `demo.recordDemo` and `demo.stopRecording` unbound in the host probe. Those two are bound only with the server's admin (`if (hosted && session.admin)`). A second `probe.py` run gave 1,179 again, so the dip was the run's environment (another agent was running hosts at the same time), not the tree. Hedges: 163, the same lines.
 - Tests: 936, 0 failing (the working tree; 929 at the audit, plus this section's 4 new tests and the other agent's).
 
+### 3g. Closed later (2026-11-11, working tree on 341b3ab)
+
+| Item | What changed | Original | Test |
+|---|---|---|---|
+| The Titan carry (not listed above; engine.md's soldier movement notes) | A soldier in a Titan's hull, or with a Titan under it, takes the Titan's velocity as its carry for 40 ticks; the integration adds it, and the contacts with the Titan leave its point velocity out, so the soldier's own velocity is relative to the Titan. Anything else under it gives a carry the run-over check takes off. On the server and in the client's prediction (the same `SoldierBody`). | `0x006ca660`, `0x006ca3b0`, `0x006c56e0`, `0x006c5df0`, `0x006c6260`, `0x006c6290`, `0x006f23a0`, `0x006f2b00`, `0x006c2e50`; `*0x00a84ae4` 40, `*0x00a84ae8` 1500 | `SoldierPhysics_TitanCarriesWhatStandsInIt`, `SoldierPhysics_VehicleUnderfootCarriesOnlyTheRunOver` |
+| P2, a joined client's cells | The host writes each heavy IFV cell's eighths as the capture makes them (floor, at least 1 while any are left); the client sets its cells from them as the apply does, and their armour effects run there. | `0x005ffec0` (capture and apply), armour slots `0x38` / `0x8c` / `0x90` | `Vehicles_JoinedShieldCellsShowArmourEffects`, `NetHost_JoinedRepairCells` |
+| P6, the border executor | One border for bars and compasses; setBarNodeBorder and setCompassNodeBorder both set it on either. The citation `0x007b0540` (slot 0x104) for setBarNodeBorder was setBarNodeSnap's. | `0x0076aebf`, `0x007b0780`, `0x007e9270` (vtables `0x009bbdd0`, `0x009bb950`) | `Hud_BarAndCompassShareTheBorder` |
+
+Measured joined (Suez_Canal gpm_ti, standing in the EU Titan while it moves 86 m at 1.08 m/s): the soldier no longer falls behind (0.88 m over the run); the client's corrections are unchanged by the carry, 28 of 2112 records over 1 cm, all while the client's Titan velocity estimate catches up after the start (engine.md "The carry"). Left: P3 (tracing), P8 emotes.
+
 ### Priority, overall
 
 | Rank | Item | Kind |
 |---|---|---|
 | 1 | P1: bots (squads, drivers) checked against the retail game | behaviour / verification |
 | 2 | P2: the joined client's and the hosted round's remaining pieces | behaviour (multiplayer) |
-| 3 | P3: parts as movers of their own | behaviour |
+| 3 | P3: parts as movers of their own (tracing first, §3g) | behaviour |
 | 4 | ~~P4 + P5: the commander panel's and the particles' leftovers~~ (closed, §3f) | visual, low |
-| 5 | P7 + P8: rendering details, emotes (P6 closed but for the border executor, §3f) | exactness, low |
+| 5 | P7 + P8: rendering details, emotes (P6 closed, §3f, §3g) | exactness, low |
 | 6 | 3c-4: a hand-check of SwiffPlayer's propagated (c) | bookkeeping |
 | 7 | 3d: the remaining untraced flags | exactness |
 

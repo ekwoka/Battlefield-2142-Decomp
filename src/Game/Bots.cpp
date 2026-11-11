@@ -729,6 +729,25 @@ ai::ClimbLimits BotSettings::climbLimits(int map) const
 	return limits;
 }
 
+ai::CostProfile BotSettings::costProfile(const std::string& equipment) const
+{
+	ai::CostProfile profile;
+	const auto setup = vehicles.find(equipment);
+	if (setup == vehicles.end()) {
+		return profile;
+	}
+	static const std::pair<const char*, size_t> kMaterials[] = {{"Invalid", 0}, {"Ground", 1}, {"Road", 2}, {"Shallows", 3},
+		{"DeepWater", 4}, {"DangerObject", 5}, {"OtherDangerObject", 6}, {"BothDangerObject", 7}};
+	for (const auto& [material, cost] : setup->second.materialCost) {
+		for (const auto& [name, costClass] : kMaterials) {
+			if (material == name) { // 0x100fdf60: the names as written
+				profile.costs[costClass] = cost;
+			}
+		}
+	}
+	return profile;
+}
+
 // A carried weapon's AI template: its ObjectTemplate.aiTemplate's
 // weaponTemplate (Unl_Hub_Medic -> MedicHub), else by its own name.
 WeaponAi BotManager::weaponAi(const std::string& name) const
@@ -1480,7 +1499,8 @@ void BotManager::update(float seconds)
 		// The soldier's spot on the infantry map (the courier, 0x10055650):
 		// where its paths start (BotManager::steer).
 		if (m_navMesh && !self.vehicle) {
-			const ai::PathOptions options;
+			ai::PathOptions options;
+			options.profile = m_settings.costProfile("Infantery");
 			ai::updateMapSpot(*m_navMesh, bot.footSpot, toAi(self.position), options.heightTolerance, &options.profile);
 		}
 		// A team kill: BF2142.exe's kill (0x005b7680) raises the game's
@@ -3762,16 +3782,29 @@ float BotManager::goalObjectUrgency(const Bot& bot, const GameWorld::PlayerInfo&
 	if (!bot.hasGoal) {
 		return 0;
 	}
+	const GoalMover mover = goalMover(self);
 	if (const auto scripted = m_goals.find(self.id); scripted != m_goals.end()) {
 		ai::Goal copy = scripted->second;
-		return ai::goalUrgency(copy, toAi(self.position), horizontal2(bot.goal - self.position), kSoldierRadius);
+		return ai::goalUrgency(copy, toAi(mover.position), horizontal2(bot.goal - mover.position), mover.radius);
 	}
 	if (bot.squadGoal) {
 		ai::Goal copy = bot.formation;
-		return ai::goalUrgency(copy, toAi(self.position), horizontal2(bot.goal - self.position), kSoldierRadius);
+		return ai::goalUrgency(copy, toAi(mover.position), horizontal2(bot.goal - mover.position), mover.radius);
 	}
 	Bot probe = bot;
 	return const_cast<BotManager*>(this)->moveUrgency(probe, self, 1);
+}
+
+BotManager::GoalMover BotManager::goalMover(const GameWorld::PlayerInfo& self) const
+{
+	if (self.vehicle && self.driving) {
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			if (v.object == self.vehicle) {
+				return {v.position, vehicleBox(v).centreRadius};
+			}
+		}
+	}
+	return {self.position, kSoldierRadius};
 }
 
 float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
@@ -3779,11 +3812,19 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 	if (!bot.hasGoal) {
 		return 0;
 	}
+	// The goal (0x1008aaa0) measures the bot's object (0x10066a70 hands it
+	// the position of bot vt+0xcc's object, vt+0x2c, and reads that
+	// object's physical part's vt+0x30 for the reach max(ceil(radius),
+	// r + 1)): at the wheel the vehicle, whose path ends within its centre
+	// radius of the goal (PathFollower's arrival), so a driver there has
+	// arrived. The soldier's radius kept the driver at an arrived plan's
+	// end in MoveTo, braking, its passengers seated.
+	const GoalMover mover = goalMover(self);
 	if (const auto scripted = m_goals.find(self.id); scripted != m_goals.end()) {
 		// The goal's own urgency (its slot 1); the same distance as the
 		// SAI's goals below.
-		const float u = ai::goalUrgency(scripted->second, toAi(self.position), horizontal2(bot.goal - self.position),
-			kSoldierRadius);
+		const float u = ai::goalUrgency(scripted->second, toAi(mover.position), horizontal2(bot.goal - mover.position),
+			mover.radius);
 		if (scripted->second.done && !bot.goalReached) {
 			bot.goalAt = m_time;
 			bot.goalReached = true;
@@ -3792,8 +3833,8 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 	}
 	if (bot.squadGoal) {
 		// The formation's waypoint goal (0x1008aaa0 over the slot).
-		const float u = ai::goalUrgency(bot.formation, toAi(self.position), horizontal2(bot.goal - self.position),
-			kSoldierRadius);
+		const float u = ai::goalUrgency(bot.formation, toAi(mover.position), horizontal2(bot.goal - mover.position),
+			mover.radius);
 		if (bot.formation.done && !bot.goalReached) {
 			bot.goalAt = m_time;
 			bot.goalReached = true;
@@ -3809,14 +3850,14 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 				area.exists = true;
 				area.teamHolds = point.team == self.team;
 				area.radius = a.temperature; // the area's per-side value at +0x98 (createFromControlPoint's third argument)
-				area.inside = horizontal2(self.position - point.position) < area.radius * area.radius;
+				area.inside = horizontal2(mover.position - point.position) < area.radius * area.radius;
 			}
 		}
 	} else if (const GameWorld::SquadOrder* order = self.squad ? squadOrder(self.team, self.squad) : nullptr) {
 		radius = order->radius;
 	}
 	bool arrived = false;
-	const float u = ai::gotoUrgency(horizontal2(bot.goal - self.position), radius, kSoldierRadius, area, arrived);
+	const float u = ai::gotoUrgency(horizontal2(bot.goal - mover.position), radius, mover.radius, area, arrived);
 	if (arrived || (area.exists && u == 0)) {
 		if (!bot.goalReached) {
 			bot.goalAt = m_time;
@@ -6952,6 +6993,7 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		settings.soldier = true;
 		settings.radius = kSoldierRadius;
 		settings.climb = m_settings.climbLimits(0);
+		settings.options.profile = m_settings.costProfile("Infantery");
 		ai::PathFollower::Steer steer;
 		if (follow(bot, *m_navMesh, bot.footSpot, to, goalId, settings, self.position)) {
 			steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time, &bot.footSpot);
@@ -7265,6 +7307,9 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		// not the origin's that the drive's rays and room use (vt+0x28).
 		follower.radius = settings.centreRadius;
 		follower.options.vehicle = true;
+		// The bot kind's cost profile: its paths (the pathfinder's
+		// DAT_10139470 vt+0xc0) and its room rays (the unit's, 0x100aa510).
+		follower.options.profile = m_settings.costProfile(equipmentOf(self));
 		follower.climb = m_settings.climbLimits(1);
 		if (bot.driveObject != vehicle->object) {
 			bot.driveObject = vehicle->object;

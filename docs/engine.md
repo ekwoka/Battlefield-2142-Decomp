@@ -352,7 +352,18 @@ sub-geometry is out (`0x006e5df0` clears flag `0x100`). A Titan's
 posed cannons go in with the Titan's node (a major actor). Not
 followed: a part as a mover of its own (its node, `0x005f6ba0`, makes
 one for hasMobilePhysics parts): the rewrite's parts move with their
-body. Because the parts are now asked every tick by the soldiers near a
+body. What is known (2026-11-11): nearly every shipped part sets
+hasMobilePhysics 1 with physicsType Mesh (the turrets, guns, barrels,
+engines and dampers of every vehicle: a scan of the Objects archives'
+scripts), so each gets a Basic node (`0x006c70c0`), registered with the
+node manager (`DAT_00a82514` slot `0x14`) and woken on the server; the
+dispatch (`0x006dd0b0`) runs any object whose response is on (`+0x14`,
+slot `0x18` = `0x006ba2d0`; slot `0x14` sets it) and whose node is awake
+through its broad phase (`0x006dc7b0`), then the response's ground pass,
+solve and movement (slots `0x28`, `0x30`, `0x34`) on that node. What is
+not traced is how an attached part's node and contacts reach its root
+(its responses' on flag, the node's slot `0x17c`, the chain's solve), so
+the rewrite doesn't guess it. Because the parts are now asked every tick by the soldiers near a
 body, the bone parts (a walker's, the deployables') are posed with each
 update of their system (`posedAfterUpdate`, `stepObjectAnimation`), as
 the exe does, not when first asked (asked before and after an update, the
@@ -625,6 +636,13 @@ setGearRatios table at gear / numberOfGears) × the push / currentTorque
 largest. A tank with engine wheels touching on both sides gets a torque
 about up of sign(rpm) × mean friction × trackTurnAcceleration × yaw while
 |ω.y| is under mean friction × trackTurnSpeed.
+Nothing brakes the tracks without input: the brake flag (`+0x274`, the
+EngineGrip wheels' target 0 in `0x006b8230`) is set only by a throttle over
+0.1 against the rpm, and a tank's load is the largest push the rpm's way
+(`0x0064dd10`), so let go the rpm falls by 3.5 % a tick to the 0.01 cut and
+the node sleeps. An eu_tank driven 0.1–3 s and let go at 14 places on
+Suez_Canal (`--drive eu_tank --seat 1`) stopped within 5 s at each, as on
+flat and sloped test ground (up to 35°): no crawl was reproduced.
 
 **Thrust** (`0x0064df20`, only for bit 1 and only while the PCO is
 occupied, `0x005c87b0`; along the engine's world z):
@@ -1529,9 +1547,8 @@ cell's id as the anchor (`armorAnchorFrame` places it on the vehicle);
 an attached group's SimpleObject children with a geometry are kept
 (`m_armorMeshes`) and drawn as placed templates
 (`GameWorld::armorEffectMeshes`, main.cpp's `placedTemplates`)
-(`Vehicles_HeavyIfvShieldCellsShowArmourEffects`). Left: a joined
-client's cells (the host writes them standing or wrecked only, 8 or 0
-eighths), so their effects are the host's. **The HUD's cells**: the HUD registers
+(`Vehicles_HeavyIfvShieldCellsShowArmourEffects`); a joined client's
+cells since, below. **The HUD's cells**: the HUD registers
 `RepairCell%iActive` 0..9 as bools at `+0x335` on (the HUD manager's
 constructor loop beside OccupyingPlayerName%i), and 0x007a1e50 writes cell
 n at `+0x336 + n`, so cell n is RepairCell(n+1)Active, which
@@ -1542,10 +1559,24 @@ keep their values (`VehicleHudInput::repairCells`, `HudWorld::repairCells`).
 0x800000 carries the root's armored list (0x0060ec00: every descendant
 with armour, networkable or not; the generators have no networkableInfo,
 which the rewrite's list had wrongly required) in eighths of hit points
-with armor.fullChildSync (the generators set it). The rewrite's host
-writes each cell 8 standing and 0 a wreck (`GameWorld::repairCells` in
-order over `NetworkableHints::armoredRepairCells`), and the client keeps
-them per ghost (`RemoteObject::childDamage`, `repairCells`).
+with armor.fullChildSync (the generators set it). The capture
+(`0x005ffec0`'s state pass, armour slots `0x3c` / `0x8c`) writes
+floor(hit points × 8 / maxHitPoints), at least 1 while any are left and 0
+at none or fewer (a child without fullChildSync: one bit, hit points
+above 0); the client (`0x005ffec0`'s apply) sets each through the
+armour's setter (slot `0x38`): e × maxHitPoints × 0.125 for e of 1..8,
+−wreckHitPoints (slot `0x90`) at 0 (the bit: maxHitPoints or
+−wreckHitPoints), so the armour effects (`0x006549a0`) run on the client
+from those hit points. The rewrite's host writes each cell so
+(`GameWorld::repairCellEighths`, in order over
+`NetworkableHints::armoredRepairCells`), the client keeps them per ghost
+(`RemoteObject::childDamage`, `repairCells`, `repairCellEighths`) and
+sets its round's cells from them (`GameWorld::setRemoteRepairCells`, from
+main.cpp's ghost pass): their effects then run there as on the host
+(`stepShieldCells`), and the host's mirror of the hull no longer runs on
+a synced cell (2026-11-11; `Vehicles_JoinedShieldCellsShowArmourEffects`,
+`NetHost_JoinedRepairCells`: the hull at 90 %, each cell 99 of 110, 7
+eighths, 96.25 on the client, the healing node's glow on all seven).
 
 ### Parachutes, stationary seats and the seated soldiers (2026-11-05)
 
@@ -6869,8 +6900,8 @@ same input.
 over the broad phase's movers, `0x006dcce0`) is the same on a client: its
 soldier meets the ghosts' collision too, each where its last update put
 it, and a contact takes the object's point velocity, which carries the
-soldier standing on it (`0x006c3890`; `0x006ca660` / `0x006ca3b0` give
-what stands on a Titan its velocity). The replay steps the control
+soldier standing on it (`0x006c3890`; on a Titan the carry,
+`0x006ca660` / `0x006ca3b0`, see Soldier movement). The replay steps the control
 object's tree alone (above), so the ghosts stay put while the moves run
 again. `SoldierPrediction` takes the moving objects near it each tick
 from the client's round (`GameWorld::soldierMovers`, the same list
@@ -10381,8 +10412,12 @@ active node to):
   `setTextNodeOutLineOffset` (`0x007afa40`, `0x007afac0`: the text's
   font object's slots `0x5c`, `0x60`) draw the outline font beneath;
   `setTruncate` (slot `0x68`) cuts the text at the node's width.
-  `setBarNodeBorder <top> <bottom> <left> <right>` (`0x007b0540`, slot
-  `0x104`): the fill takes the inner rectangle (the conquest point bars
+  `setBarNodeBorder <top> <bottom> <left> <right>` (the executor
+  `0x0076aebf`, shared with setCompassNodeBorder, → `0x007b0780`: the
+  active node's slot `0x100`, `0x007e9270` in Bf2BarNode's vtable
+  `0x009bbdd0` and Bf2CompassNode's `0x009bb950` alike: one border at
+  `+0x74..+0x80`, which either command sets on either node; `0x007b0540`,
+  slot `0x104` = `0x007e92a0`, is setBarNodeSnap's): the fill takes the inner rectangle (the conquest point bars
   share one 152 px node, `0 0 17 76` filling from the right and `0 0 77
   15` from the left); `setBarNodeIncreaseShow`, `setBarNodeSnapDir`,
   `setBarNodeRound` are kept. `setNodeSize` (`0x007b0a10`, slot `0xc8`).
@@ -10844,23 +10879,68 @@ still fire. The rewrite gives an awake body the contact.
 PlayerControlObject up its tree (itself) gives a team (slot `0x9c`); an
 object whose response has `collisionGroups` bit `0x10`, or `0x100` for
 team 1 / `0x200` for team 2, is passed. With `*0x00a84764` = 1 the soldier
-node's slot `0xd8` (`0x006c56e0`: `+0x90` while the tick count `+0x9c`
-runs, set by slot `0xdc`, `0x006c5df0`, at most `*PTR_DAT_00a06ee4` long
-for `*PTR_DAT_00a06ee0` ticks) comes off the relative velocity. Its setter's
-caller is the soldier node's step (`0x006ca660`): when the object the
-soldier stands in (`+0x120`, set by `0x006c3890`'s start when the
-candidate's flag 5 holds and `0x006f2b00`'s rays find the soldier inside
-it; cleared each step by slot `0xf0(0)`) has a Titan as its root
-(`0x00561d90`), the Titan node's velocity goes to slot `0xdc` and the
-Titan to slot `0xe8` (`+0xa0`, `+0xa4` ticks); the integration
-(`0x006ca3b0`) then adds it to the tick's mean velocity, and
-`0x006c3890` leaves the Titan's point velocity out of that Titan's
-contacts (slot `0xe4` against the candidate's root). So on a Titan the
-soldier node's own velocity is relative to the Titan. The rewrite's
-soldier velocity is absolute (the contacts take the Titan's point
-velocity, and the damping takes 1% of the Titan's speed off it each tick,
-made up by the movement), so nothing comes off here. `SoldierBody::Mover` (`ignoring`,
-`ignoresThis`, `pushed`, `own`, `collisionGroups`), `SoldierBody::team`.
+node's slot `0xd8` (the carry, below) comes off the relative velocity
+(`0x00562920`). `SoldierBody::Mover` (`ignoring`, `ignoresThis`,
+`pushed`, `own`, `collisionGroups`), `SoldierBody::team`.
+
+**The carry** (since 2026-11-11). The soldier node keeps a carry velocity
+(`+0x90`, slot `0xd8` = `0x006c56e0`: it while the tick count `+0x9c`
+runs, else none) and a carrier (`+0xa0`, its tick count `+0xa4`; slot
+`0xe4` = `0x006c6260` its root while that runs). Slot `0xdc`
+(`0x006c5df0`) sets the carry for 40 ticks (`*0x00a84ae4`, static_init
+`0x008ee260`), at most 1500 m/s long (`*0x00a84ae8`, `0x008ee270`;
+`0x005f1310`); slot `0xe8` (`0x006c6290`) the carrier for 40 ticks too.
+The node's step (`0x006ca660`) sets them before its integration:
+
+- standing in a Titan (`+0x120`: `0x006c3890`'s start, for a candidate
+  holding the hull's collision LOD type 5, slot `0xc4(5)`, when
+  `0x006f2b00`'s rays find the soldier's origin inside it; slots `0xec` /
+  `0xf0`), whose root is a Titan (`0x00561d90`): the Titan node's velocity
+  (slot `0x58`) is the carry and the Titan the carrier;
+- otherwise `0x006f23a0`: the object manager's ray (`DAT_00a85220` slot
+  `0x68`, past the soldier's own tree) from the soldier's origin 2 m down
+  (prone, the soldier's `+0x18c` slot `0x3c` = 2: from 0.75 m lower, its
+  radius `*0x00a68e34` through slot `0x6c` less a metre, to the same end);
+  an object found gives its root node's point velocity at the hit (slot
+  `0xac`) as the carry, and a Titan becomes the carrier. Nothing found
+  leaves both running out;
+- then `+0x120` is cleared (slot `0xf0(0)`).
+
+The integration (`0x006ca3b0`) adds the carry to the tick's mean velocity
+while the carrier is a Titan (slot `0xe4`'s root, `0x00561d90`) and counts
+both down; `0x006c3890` leaves the carrier's point velocity out of its
+contacts (slot `0xe4` against the candidate's root, `0x006f1d70`). So on
+or in a Titan the soldier node's own velocity is relative to the Titan,
+and the Titan's motion carries it on for 40 ticks after it steps off. A
+vehicle under the soldier (no Titan) gives the carry but no carrier: the
+motion isn't carried (the contacts take the vehicle's point velocity), and
+only the run-over check takes it off. The Basic node's linear step
+(`0x006c8380`) adds a carry the same way; what would set one on a
+vehicle's node wasn't traced. Rewritten:
+`SoldierBody::carry` / `setCarry` / `integrate`, the movers' `titan` and
+`inside` (`GameWorld::soldierMovers`, `insideTitanHull`); the ray meets
+the moving objects' soldier LODs (the rewrite's movers). The client's
+prediction steps the same body against its round's movers, a Titan's
+ghost moving at the velocity its updates give.
+
+Before, the soldier's velocity was absolute: the damping took 1% of the
+Titan's speed off it each tick and the movement made it up, so a soldier
+standing on a moving Titan fell behind by about a centimetre a second
+(`SoldierPhysics_TitanCarriesWhatStandsInIt`: 14 cm in 10 s at 1.3 m/s;
+now none, its own velocity 0). Measured joined on 127.0.0.1 (Suez_Canal
+gpm_ti 48, spawned in the EU Titan as commander, `--remote-actions
+"3:commander 15:accept 30:accept 32:spawn 36:titan:-250:7"`, 120 s, the
+Titan moving 86 m at 1.08 m/s): the soldier ends 0.88 m further along
+than without the carry (−294.93 against −295.81), and the client's
+corrections are the same either way: 28 of 2112 records over 1 cm, at
+most 5 cm, all in the 1.4 s after the Titan starts, while the client's
+estimate of its velocity (from the updates' positions) still lags the
+server's; none once it is under way. Walking on its decks while it moves
+(`55:forward 61:stop 70:strafe:1 74:stop`) 302 records of 1810 corrected
+over 1 cm (mean 1.1 cm, at most 21 cm) against 308 without (1.0 cm, 16
+cm), most of them standing after the walk, every record: on a deck seam
+the client's Titan, set to each update's position and moved on between
+them, and the server's differ by millimetres.
 
 **The speed index** (`0x00586020`, by the pose `+0x268`): crouched 1,
 prone 0, swimming 5 (6 sprinting); standing 4 sprinting (interface slot
@@ -11875,8 +11955,9 @@ whose armour is no wreck; its root is the Titan, the object's
 - `0x005b4ff0` (a projectile's hit): see the silo missiles;
 - `0x00655a00`: a Titan is never repaired; `0x00654120`: its wreck isn't
   scheduled for removal; `0x00656320`: no water or upside-down damage;
-- `0x006ca660` / `0x006ca3b0`: what stands on a Titan takes its velocity
-  (the rewrite's soldier contacts take the body's velocity already);
+- `0x006ca660` / `0x006ca3b0`: what stands in or on a Titan takes its
+  velocity as its carry (see Soldier movement, "The carry";
+  `SoldierBody::carry`);
 - `0x00589890` / `0x005718d0`: kits dropped on a Titan are carried with it:
   the drop (Soldier.cpp, a ray straight down from the soldier) asks each
   team's Titan record (`0x00561b20`) whether the hit object's root is its
@@ -12436,7 +12517,7 @@ The urgencies:
 
 | Behaviour | Urgency |
 |---|---|
-| MoveTo (0x10066a70) | The goal's (0x1008aaa0) × weight. r = max(ceil(radius), bot radius + 1). 0 within r (reached). Otherwise clamp(d² / (1.5 r²), 0.1, 1) × 2 for an area the team does not hold. Inside an area it holds the urgency is 0; outside it, d² − area radius² is used. |
+| MoveTo (0x10066a70) | The goal's (0x1008aaa0) × weight, measured from the bot's object (bot `+0xa0`, vt+0xcc, set by 0x10098200 as it gets in or out): its position (vt+0x2c) and its physical part's centre radius (vt+0x30). At the wheel that is the vehicle (`BotManager::goalMover`). r = max(ceil(radius), that radius + 1). 0 within r (reached): a driver's path ends within the vehicle's centre radius (the follower's arrival), so it has arrived there; with the soldier's radius (1.15 + 1 m, the rewrite before) a driver stayed in MoveTo at its path's end, braking, its passengers seated. Otherwise clamp(d² / (1.5 r²), 0.1, 1) × 2 for an area the team does not hold. Inside an area it holds the urgency is 0; outside it, d² − area radius² is used. |
 | Idle (0x10069f50) | The weight. A passenger gets 0.5. A driver with free seats gets 30 while a teammate within 40 m heads for it (70 when that teammate faces the vehicle within 0.85), for up to 10 s. |
 | Fire (0x10075fb0) | 50 while a known enemy scores above 0. The weight only gates it. |
 | Revive (0x10082760) | 100 × the squad factor (task 1) for a downed teammate within the Revive weapon's maxRange. Each candidate scores 1 − min(1, d / speed / time left), × 10 for a human's body. |
@@ -13278,18 +13359,44 @@ changes (0x100966c0 → 0x10095fc0).
     MoveTo on Camp Gibraltar 1200 → 750 s, minsk_coop 1381 → 150, Suez
     960 → 0, Verdun 990 → 540, Cerbere_Landing 1111 → 0; all bots 4533 →
     3273, 2884 → 750, 3033 → 1261, 3693 → 3963 (Verdun's seated
-    passengers 2463 → 2883), 3934 → 1773. Wider vehicles can still
-    rock, as the original's machines would with the same rays: a path on
-    the edge of minsk_coop's vehicle mesh (radius 2.3, "only jeeps",
-    2.05 m more than the infantry mesh's) leaves less across than a tank
-    needs (5.36 m along a diagonal of about 27°: 2.4 m), and an eu_tank at
-    −21/−317 rocks with its front-right ray at 5.27–5.40 m on the infantry
-    mesh; Verdun's as_apc (radius 3.5 there)
-    at 201/278 sees an infantry-mesh edge 5.2–5.4 m along its front-left
-    diagonal (needing 5.43) while its point lies 0.4 rad to the right.
-    A driver also stops where the infantry mesh has a hole the vehicle
-    mesh crosses (Camp Gibraltar's PAC heavy mech at 59/251 faces such an
-    edge 3.4 m ahead and turns on the spot, as 0x100e1f20 would).
+    passengers 2463 → 2883), 3934 → 1773.
+    Wider vehicles can still rock, and checked against AIDLL that is the
+    decoded code with this data, not a divergence found. A driver plans on
+    the map its Mobile part names (`setPathfindingMap Vehicle` for every
+    shipped ground vehicle: chosen by name, 0x10055020 → 0x10040570, not by
+    width, so minsk_coop's tanks plan on the mesh built 2.3 m in for jeeps),
+    measures its room on the trace map with its kind's cost profile (see
+    "Navigation mesh"), and steers by the machines above; the look-ahead
+    (0x10093420: within 20 m, 30 polygons, four a tick, else the ray to the
+    waypoint itself sets `+0xda`) and the reroute 0.5 s after it
+    (0x10095720) are as decoded. Verdun's as_apc at 201/278 (seed 2) comes
+    to the vehicle mesh's corner waypoint (201.0/277.6), turns right for the
+    next (0.53 rad) with its front-left diagonal at 5.2 m against 5.43 and
+    backs (state 11); backed, its record's ray to the next waypoint passes
+    the corner, the follower reroutes from the record half a second later,
+    the new path starts at the corner behind it, and the car drives back to
+    it, undoing the turn; it got through after 20 s. Camp Gibraltar's PAC
+    heavy mech at 56/251 has its front ray end 2.1 m ahead on the infantry
+    mesh, at a 0.5 m strip with no polygon (z 248.0–248.6, x 48–74: the
+    edges either side have no neighbour, a fence line the vehicle mesh
+    crosses); with 2.1 against 4.9 m needed its machine (0x100e1f20) goes
+    9/11 → 2/3 → 0 and back each tick as the full-lock turn (0x100e3c00, at
+    least ±1) swings the point from side to side, and the legs take an
+    input only once it has held for 10 ticks (0x00650b20), so it stands.
+    Verdun's seated passengers are transports parked at their squad's order
+    position in an area the team holds: the transport rule (0x100d3730)
+    takes the move value off only for an area the team doesn't hold, so a
+    passenger's seat behind a squad driver keeps maxSpeed × 5 × 0.5 × 0.3
+    (44–75 against the soldier's own 1.1) and nobody gets out. The driver,
+    its goal reached, now idles (MoveTo's reach, see the table); before, it
+    stayed in MoveTo braking at its path's end. With that and the kinds'
+    cost profiles, over 300 s (15 bots, seeds 0–7; base → now): drivers
+    stuck in MoveTo on minsk_coop 570 → 390 s, Verdun 1710 → 1620, Camp
+    Gibraltar 1950 → 1890, Suez_Canal 60 → 60, Cerbere_Landing 0 → 0; all
+    bots 1831 → 2101, 7869 → 10508 (seated 4864 → 6636, driving in
+    other behaviours up by 990), 10299 → 10179, 1380 (seven seeds: the
+    base crashed on seed 0) → 2281, 3992 → 2941. The rise is transports parked at their order
+    with their passengers, which the count takes for stuck.
   - **Other vehicles** (0x100fbff0): the one in the way (within the
     forward speed + max(r, 5) + both radii, the forward line crossing its
     sphere) is passed in state 6 on a side chosen by the room beside it
@@ -14448,6 +14555,28 @@ in `src/AI/NavMesh`:
 - How the bots combine the two searches is in "Following paths" above
   (rolling segments of three clusters); `findPath` (tools, tests) keeps
   a cluster corridor for one polygon search.
+- **Cost classes and the bot kinds' profiles.** A polygon's class
+  (`+0x01`) names its material (0x10058570): Invalid 0, Ground 1, Road 2,
+  Shallows 3, DeepWater 4, DangerObject 5, OtherDangerObject 6,
+  BothDangerObject 7. Each `aiSettings.setVehicle` type (the bot kind)
+  gets its own profile (AIDLL 0x10051050 appends the default 0x100bdfb0:
+  1, but Invalid −1 and classes 5 and 7 1000), and
+  `aiSettings.setVehicleMaterialCost <kind> <material> <cost>` sets one
+  class's multiplier on it (0x1000be20 → 0x1004fcf0 → 0x100bdcc0). A
+  negative multiplier is impassable (0x100bdd00). The pathfinder takes the
+  kind's profile (DAT_10139470 vt+0xc0: the goal's polygon 0x1003f000,
+  the searches, the look-ahead) and so do the drivers' room rays
+  (0x1003f930 with the unit's kind, 0x100aa510). From
+  `AI/AIBehaviours.ai`: Tank, FloatingTank and Mech Shallows 1.5 and
+  DeepWater −1, Car Shallows 1.8 and DeepWater −1, ArmedCar 1 and 2,
+  Infantery 1.5 and 6. So tanks, mechs and cars neither plan nor measure
+  room into deep water, and a room ray that would enter it ends there with
+  class 4 (its diagonal then doesn't count, a side gives full reach).
+  Class-4 polygons on the vehicle and infantry meshes: Camp Gibraltar
+  650 and 989, Suez_Canal 93 and 121, Verdun 5 and 159, minsk_coop none
+  and 1,122, Cerbere_Landing none. (The rewrite gave
+  every bot the default profile, so the material costs went unused:
+  `BotSettings::costProfile`.)
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.

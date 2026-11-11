@@ -454,8 +454,8 @@ Done and cited (engine.md "Parachutes, stationary seats and the seated soldiers"
 - The parts in the mesh physics: the responses (`0x005f6a60`), the chain (`0x006c0090`, `0x006dbb70`, `0x006f2d50`), the mover's and the soldier's candidates (`0x006dc7b0`, `0x006c3890`), the part instance (`0x0063ccc0`).
 
 Left:
-- A part as a mover of its own (`0x005f6ba0`'s node for a hasMobilePhysics part): the rewrite's parts move with their body and meet the movers as candidates only.
-- A joined client's cells' effects (the host writes the cells standing or wrecked, 8 or 0 eighths).
+- A part as a mover of its own (`0x005f6ba0`'s node for a hasMobilePhysics part): the rewrite's parts move with their body and meet the movers as candidates only. Checked 2026-11-11: nearly every shipped part has such a node, and the dispatch `0x006dd0b0` would run it as a mover of its own; how an attached part's node and contacts reach its root isn't traced (engine.md "The parts in the mesh physics").
+- A joined client's cells' effects (**done since**, 2026-11-11: the host writes each cell's eighths as `0x005ffec0`'s capture makes them, the client sets its cells from them as its apply does, `GameWorld::repairCellEighths` / `setRemoteRepairCells`; engine.md "The heavy IFV's shield cells").
 - The world-left armour groups' (0, −100) SimpleObject meshes (none shipped found).
 
 ### The map, foot, jump hold and joined seat pass (2026-11-05)
@@ -684,7 +684,7 @@ Comment-only citations of code the rewrite already has, in the largest present-b
 
 **Differences found** (recorded 2026-11-09; all but the shared border executor followed since, 2026-11-11):
 - `HudBuilder.setEditNodeFont`: the original's second argument is a bool (`0x00765755` / `0x007657e3` / `0x0076584e`), `setCompassNodeTextureSize` two ints (`0x0076b4ff` / `0x0076b613` / `0x0076b58c`; `0x007b0880` hands them on as floats), `setNodeLogicShowVariable`'s value an int (`0x0076e090` / `0x0076e140` / `0x0076e1ca`). **Followed** (src/Hud/Hud.cpp; test `Hud_LogicValueIsAnInt`: "1.5" is 1).
-- `setBarNodeBorder` and `setCompassNodeBorder` share one executor (`0x0076aebf` → `0x007b0780`, the active node's slot 0x100). The rewrite keeps a bar border and a compass border apart, and setBarNodeBorder also accepts a compass node. Not followed further.
+- `setBarNodeBorder` and `setCompassNodeBorder` share one executor (`0x0076aebf` → `0x007b0780`, the active node's slot 0x100). **Done** (2026-11-11): slot 0x100 is `0x007e9270` in Bf2BarNode's vtable (`0x009bbdd0`) and Bf2CompassNode's (`0x009bb950`), one border at +0x74..+0x80; the rewrite keeps one border for both and either command sets it on either node (`Hud_BarAndCompassShareTheBorder`). The rewrite had cited `0x007b0540` (slot 0x104) for setBarNodeBorder: that is setBarNodeSnap's (`0x00769896`).
 - `FileManager::exists`: `0x00698e40` erases the first "bf2/content/" wherever it is found in the path. **Followed** (test `FileManager_PathEdgeCases`).
 - `FileManager::expandPath`: `0x00697d70` leaves a path that already starts with the first search path as it is (`0x0065b9c0`, `_strnicmp`). **Followed**: the rewrite's search paths are absolute, so such a path goes under the root (test `FileManager_PathEdgeCases`).
 - `FileManager::readFile`: `0x00698b60` has a mode (+0x68 = 1) that reads only archives, except for @HOME@, @ROOT@ and `.png` paths. **Never set:** the constructor `0x0069aee0` clears +0x68 and nothing else in the exe writes it (its only reader besides `0x00698b60` is the getter, vtable `0x009902c0` slot 0xa4 = `0x006971b0`). The rewrite's fallback to loose files matches.

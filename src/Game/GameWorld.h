@@ -1983,6 +1983,17 @@ public:
 	// -1), in the root's armour order, each true while its armour stands
 	// (state 0): the vehicle HUD's cells (0x007a1e50 -> its +0x336 + n).
 	std::vector<bool> repairCells(uint32_t vehicle) const;
+	// The same cells' hit points as the root's SimpleObject state carries
+	// them in mask 0x800000 (armor.fullChildSync, 0x005ffec0's capture):
+	// eighths of the maximum, rounded down, at least 1 while any are left,
+	// 0 at none or fewer.
+	std::vector<int> repairCellEighths(uint32_t vehicle) const;
+	// A joined client's cells from those eighths (0x005ffec0's apply
+	// through the armour's setter, slot 0x38): 1..8 eighths of the
+	// maximum, a wreck's negative wreckHitPoints at 0; the cells' armour
+	// effects then follow (stepShieldCells), and the host's mirror of the
+	// hull no longer runs on them here.
+	void setRemoteRepairCells(uint32_t vehicle, const std::vector<int>& eighths);
 	// A shield cell's id for the damage paths (hitPoints, damage: the
 	// projectile LOD's owner of its faces; kShieldCellIds + vehicle x 16 +
 	// index), 0 for none.
@@ -2360,6 +2371,7 @@ private:
 			float effectHitPoints = 0;
 			int effectLevel = 0;
 			bool effectsAttached = false, effectsSeen = false;
+			bool synced = false; // a joined client's: its hit points from the host (setRemoteRepairCells)
 		};
 		std::vector<Cell> cells;
 		bool cellsBuilt = false;

@@ -350,7 +350,7 @@ void GameWorld::stepShieldCells(Body& body, float seconds)
 	const float left = hitPoints(body.object);
 	const float rootPercent = left >= 0 ? left / rootMax * 100.0f : left / rootWreck * 100.0f;
 	for (Body::Cell& cell : body.cells) {
-		if (cell.wreck || !cell.mirror) {
+		if (cell.wreck || !cell.mirror || cell.synced) {
 			continue;
 		}
 		if (cell.timer > 0) {
@@ -489,6 +489,56 @@ std::vector<bool> GameWorld::repairCells(uint32_t vehicle) const
 		}
 	}
 	return out;
+}
+
+// 0x005ffec0's capture for mask 0x800000: each armoured child with
+// armor.fullChildSync as floor(hit points x 8 / maxHitPoints (slot
+// 0x8c)), at least 1 while above 0, 0 at or under it.
+std::vector<int> GameWorld::repairCellEighths(uint32_t vehicle) const
+{
+	std::vector<int> out;
+	const Body* body = findBody(vehicle);
+	if (!body) {
+		return out;
+	}
+	for (const Body::Cell& cell : body->cells) {
+		if (cell.hudCell == -1) {
+			continue;
+		}
+		float e = cell.maxHitPoints > 0 ? cell.hitPoints * 8.0f / cell.maxHitPoints : 0.0f;
+		e = e > 0 ? std::max(e, 1.0f) : 0.0f;
+		out.push_back(std::min(static_cast<int>(std::floor(e)), 8));
+	}
+	return out;
+}
+
+// 0x005ffec0's apply on a client: a child's eighths e under 1 set its
+// hit points to -wreckHitPoints (slot 0x90), else to maxHitPoints (0x8c)
+// x e x 0.125, through the armour's setter (slot 0x38, 0x00655460, kept
+// within -wreckHitPoints), which runs its armour effects (0x006549a0).
+void GameWorld::setRemoteRepairCells(uint32_t vehicle, const std::vector<int>& eighths)
+{
+	Body* body = findBody(vehicle);
+	if (!body || !body->vehicle) {
+		return;
+	}
+	if (!body->cellsBuilt) {
+		buildShieldCells(*body);
+	}
+	size_t next = 0;
+	for (Body::Cell& cell : body->cells) {
+		if (cell.hudCell == -1) {
+			continue;
+		}
+		if (next >= eighths.size()) {
+			break;
+		}
+		const int e = eighths[next++];
+		const float wreck = armorEffectList(*cell.t).wreckHitPoints;
+		cell.synced = true;
+		cell.hitPoints = e < 1 ? -wreck : cell.maxHitPoints * static_cast<float>(e) * 0.125f;
+		cell.wreck = e < 1;
+	}
 }
 
 } // namespace dice::hfe::game

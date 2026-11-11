@@ -628,6 +628,18 @@ struct BotSettings {
 	int traceMap = -666;
 	// A map's climb limits (map 0's rays always climb 0.35 m, 0x1003f930).
 	ai::ClimbLimits climbLimits(int map) const;
+	// An equipment type's cost profile (bot kind): aiSettings.setVehicle
+	// gives each type one, the default (0x100bdfb0: 1 for every class but
+	// Invalid's -1 and classes 5 and 7's 1000; AIDLL 0x10051050), and
+	// aiSettings.setVehicleMaterialCost sets a class's multiplier
+	// (0x1000be20 -> 0x1004fcf0 -> 0x100bdcc0), the material named by
+	// 0x10058570: Invalid 0, Ground 1, Road 2, Shallows 3, DeepWater 4,
+	// DangerObject 5, OtherDangerObject 6, BothDangerObject 7. The
+	// pathfinder takes the bot kind's (DAT_10139470 vt+0xc0, as 0x1003f000
+	// for the goal's polygon) and the drivers' room rays the unit's
+	// (0x100aa510): a Tank's, a Mech's, a Car's DeepWater is -1, so their
+	// paths and rays don't enter deep water.
+	ai::CostProfile costProfile(const std::string& equipment) const;
 
 	// The rest of AIDLL's settings object (AISettings, constructor
 	// 0x10051aa0; IAISettings vtbl 0x101148c8, IAISettingsModifier vtbl
@@ -1346,6 +1358,15 @@ private:
 	// slots 0x84, 0x20, 0x28), null for none.
 	const Bot::Radio* heardFromHuman(const Bot& bot, int type) const;
 	float moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
+	// The bot's object (bot +0xa0, vt+0xcc: the object it controls, set by
+	// 0x10098200 as it gets in or out) where the goals measure it: a
+	// driver's is the vehicle, its origin and its box's centre radius (the
+	// physical part's vt+0x30); on foot (and seated) the soldier.
+	struct GoalMover {
+		physics::Vec3 position;
+		float radius = 0;
+	};
+	GoalMover goalMover(const GameWorld::PlayerInfo& self) const;
 	float reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	// The comm object's send (0x100a7860): `type` on the AI's `channel`

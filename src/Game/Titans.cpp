@@ -1044,8 +1044,9 @@ void GameWorld::findTitanObstacles()
 
 // Moves the Titan's object and body (0x005aa0e0: the position, then the
 // node's velocity across x and z); its spawn points follow. Soldiers
-// standing in it ride along by its velocity (the node's, which the
-// soldiers' contacts take: 0x006ca660).
+// standing in or on it ride along by its velocity (the node's, which the
+// soldier node's step 0x006ca660 takes as its carry and 0x006ca3b0 adds:
+// SoldierBody::carry).
 void GameWorld::moveTitanBody(Titan& titan, const physics::Vec3& delta)
 {
 	world::Object* object = m_objects.find(titan.object);

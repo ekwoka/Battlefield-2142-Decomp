@@ -175,7 +175,14 @@ void SoldierBody::collideWithObjects(float seconds)
 	if (world && !collideWithMesh(*world, nullptr, seconds, 1, true, deepest)) {
 		return;
 	}
-	for (const Mover& mover : movers) {
+	for (size_t i = 0; i < movers.size(); ++i) {
+		const Mover& mover = movers[i];
+		// 0x006c3890's start: a candidate holding the Titan's hull (its
+		// slot 0xc4(5)) with the soldier inside it (0x006f2b00) becomes
+		// the object the soldier stands in (+0x120, the node's slot 0xf0).
+		if (mover.inside) {
+			m_standingIn = static_cast<int>(i);
+		}
 		if (mover.mesh && !collideWithMesh(*mover.mesh, &mover, seconds, 1, true, deepest)) {
 			return;
 		}
@@ -361,7 +368,11 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 			addContact(normal, depth * (soldier::kSolvePush / scale), {});
 			continue;
 		}
-		const Vec3 relative = velocity - (mover ? mover->pointVelocity(contact.point) : Vec3 {});
+		// The Titan carrying the soldier (slot 0xe4, its root against the
+		// candidate's, 0x006f1d70) leaves its point velocity out: the
+		// soldier's own velocity is relative to it already.
+		const bool carrying = mover && m_carrierTicks > 0 && mover->owner == m_carrier;
+		const Vec3 relative = velocity - (mover && !carrying ? mover->pointVelocity(contact.point) : Vec3 {});
 		if (lengthSquared(relative) > 0) {
 			// 0x005ee2b0 between the two objects' events: the other's point
 			// velocity x 2.5 when faster than 1 m/s relative (a static
@@ -492,14 +503,9 @@ void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 // spheres where the soldier is now, its point velocity there over 3 m/s
 // from the soldier's, runs it over: 1000 damage, its owner credited. (The
 // original spares an owner under 10 in mass of the Particle class, which
-// the 100 already rules out, and with *0x00a84764 = 1 takes the soldier
-// node's slot 0xd8 off the relative velocity: 0x006c56e0, the node's +0x90
-// while its tick count +0x9c runs, set through slot 0xdc (0x006c5df0, at
-// most *PTR_DAT_00a06ee4 long, for *PTR_DAT_00a06ee0 ticks) by the node's
-// step 0x006ca660 with the velocity of the Titan the soldier stands in,
-// whose integration 0x006ca3b0 adds it: there the node's own velocity is
-// relative to the Titan. This soldier's velocity is the absolute one, the
-// contacts taking the Titan's point velocity, so nothing comes off here.)
+// the 100 already rules out.) With *0x00a84764 = 1 the soldier node's
+// slot 0xd8 comes off the relative velocity too (0x00562920): the carry
+// (0x006c56e0, the node's +0x90 while its ticks +0x9c run; see carry()).
 void SoldierBody::runOver()
 {
 	if (!onCrushed) {
@@ -533,7 +539,9 @@ void SoldierBody::runOver()
 			if (contacts.empty()) {
 				continue;
 			}
-			if (lengthSquared(mover.pointVelocity(centre) - velocity) > soldier::kCrushSpeed * soldier::kCrushSpeed) {
+			const Vec3 carried = m_carryTicks > 0 ? m_carry : Vec3 {};
+			if (lengthSquared(mover.pointVelocity(centre) - velocity - carried)
+				> soldier::kCrushSpeed * soldier::kCrushSpeed) {
 				onCrushed(mover.owner);
 				return;
 			}
@@ -613,6 +621,67 @@ void SoldierBody::move(float gravity)
 	m_contacts = 0;
 }
 
+// Slot 0xdc (0x006c5df0): the carry for 40 ticks (*0x00a84ae4), at most
+// 1500 m/s long (*0x00a84ae8, 0x005f1310).
+void SoldierBody::setCarry(const Vec3& v)
+{
+	m_carry = v;
+	m_carryTicks = soldier::kCarryTicks;
+	clampTo(m_carry, soldier::kMaxCarry);
+}
+
+// The node's step 0x006ca660 before its integration. Standing in a Titan
+// (+0x120's root a Titan, 0x00561d90): the Titan node's velocity (slot
+// 0x58) becomes the carry (slot 0xdc) and the Titan the carrier (slot
+// 0xe8, 0x006c6290: 40 ticks). Otherwise 0x006f23a0: the object manager's
+// ray (DAT_00a85220 slot 0x68) from the soldier's origin 2 m down (prone,
+// the pose +0x18c slot 0x3c = 2: from the soldier's radius less a metre
+// under it, *0x00a68e34 through slot 0x6c, to the same end) past the
+// soldier's own tree; an object found gives its root node's point velocity
+// at the hit (slot 0xac) as the carry, and a Titan becomes the carrier.
+// Nothing found leaves both running out. The rewrite's ray meets the
+// moving objects' soldier LODs (the movers). Then +0x120 is cleared (slot
+// 0xf0(0)).
+void SoldierBody::carry()
+{
+	if (m_standingIn >= 0 && static_cast<size_t>(m_standingIn) < movers.size() && movers[m_standingIn].titan) {
+		const Mover& titan = movers[m_standingIn];
+		setCarry(titan.velocity);
+		m_carrier = titan.owner;
+		m_carrierTicks = soldier::kCarryTicks;
+	} else {
+		Vec3 from = position;
+		float down = -soldier::kCarryRay;
+		if (stance == 2) {
+			from.y += soldier::kRadius - 1.0f;
+			down -= soldier::kRadius - 1.0f;
+		}
+		const Vec3 to = from + Vec3 {0, down, 0};
+		const Mover* found = nullptr;
+		float nearest = 2;
+		for (const Mover& mover : movers) {
+			if (!mover.mesh) {
+				continue;
+			}
+			CollisionWorld::Hit hit {};
+			const Vec3 a = mover.rotation.untransform(from - mover.position);
+			const Vec3 b = mover.rotation.untransform(to - mover.position);
+			if (mover.mesh->raycast(a, b, hit) && hit.fraction < nearest) {
+				nearest = hit.fraction;
+				found = &mover;
+			}
+		}
+		if (found) {
+			setCarry(found->pointVelocity(from + (to - from) * nearest));
+			if (found->titan) {
+				m_carrier = found->owner;
+				m_carrierTicks = soldier::kCarryTicks;
+			}
+		}
+	}
+	m_standingIn = -1;
+}
+
 void SoldierBody::integrate(float seconds)
 {
 	if (lengthSquared(acceleration) > 1e6f) {
@@ -645,8 +714,16 @@ void SoldierBody::integrate(float seconds)
 		water = 0.5f;
 	}
 	velocity = velocity * (water * soldier::kWaterDamping + (1.0f - water) * soldier::kLandDamping);
-	const Vec3 average = flush((previous + velocity) * 0.5f);
+	// While a Titan carries the soldier (slot 0xe4's root a Titan), the
+	// carry (slot 0xd8) joins the tick's mean velocity.
+	const Vec3 average = flush((previous + velocity) * 0.5f) + carriedVelocity();
 	position += average * seconds;
+	if (m_carryTicks > 0) {
+		--m_carryTicks;
+	}
+	if (m_carrierTicks > 0) {
+		--m_carrierTicks;
+	}
 	acceleration = {};
 	impulse = {};
 	m_inputAcceleration = {};
@@ -666,6 +743,7 @@ void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 	collideWithSoldiers(1);
 	solve(seconds, ground, gravity);
 	move(gravity);
+	carry();
 	integrate(seconds);
 	acceleration.y += gravity * gravityModifier;
 	m_stepEnd = position;

@@ -21,6 +21,9 @@
 //     segment test (the origin's way through a mesh kills);
 //   movement (slot 0x34, 0x006c2230): on the ground, accelerate towards the
 //     requested velocity along the ground, limited by friction and the slope;
+//   the carry (0x006ca660): the velocity of a Titan the soldier is inside
+//     (or of what a ray finds under it), added to its motion while a
+//     Titan carries it;
 //   integration (node slot 0xf4, 0x006ca660 / 0x006ca3b0) and gravity;
 //     a jump (the Soldier's 0x0058a6d0) sets the velocity before it;
 //   water (in 0x006c28c0): buoyancy under the feet's depth, swimming.
@@ -79,6 +82,10 @@ constexpr float kCrushSpeed = 3.0f;       // *0x00a84748: m/s relative to the so
 constexpr float kSquashDepth = 0.05f;     // *0x00a84754: how deep the crush has to be
 constexpr float kPushScale = 2.5f;        // *0x00a847b4: the hit's velocity kept for the ragdoll (0x005ee2b0)
 constexpr float kCrushDamage = 1000;      // the game logic's damage (slot 0xe4) for a crush or a run-over
+// The carry (0x006c5df0 / 0x006c6290; static_init 0x008ee260 / 0x008ee270).
+constexpr int kCarryTicks = 40;           // *0x00a84ae4
+constexpr float kMaxCarry = 1500;         // *0x00a84ae8: the carry's length at most
+constexpr float kCarryRay = 2;            // 0x006f23a0: the ray down from the origin
 // The stance's height (0x006c1b30 / 0x006c2620): standing the template's
 // 1.7, crouching or swimming 1.4 (*0x00a84798), prone 0.8 (*0x00a84778).
 float stanceHeight(int stance);
@@ -138,6 +145,14 @@ public:
 		// (*0x00a84774 = 1: the projectile interface 0x94c1's slot 0x48).
 		bool pushed = false;
 		bool own = false;
+		// Its root is a Titan (0x00561d90 on the candidate's root,
+		// 0x006f1d70): what stands on or in it is carried (below).
+		bool titan = false;
+		// The soldier is inside its hull (0x006c3890's start: the candidate
+		// has the hull's collision LOD type 5, slot 0xc4(5), and
+		// 0x006f2b00's rays find the soldier's origin inside it); taken
+		// where the soldier is when the movers are gathered.
+		bool inside = false;
 		Vec3 pointVelocity(const Vec3& p) const { return velocity + cross(angularVelocity, p - centerOfMass); }
 	};
 	std::vector<Mover> movers;
@@ -189,6 +204,18 @@ public:
 	Vec3 acceleration;      // gravity for the next tick
 	Vec3 impulse;           // velocity change for the next tick
 
+	// The carry (the node's +0x90 for +0x9c ticks, slots 0xd8 / 0xdc) and
+	// the Titan carrying the soldier (+0xa0 for +0xa4 ticks, slots 0xe4 /
+	// 0xe8), set each step by 0x006ca660 (see carry()). While a Titan
+	// carries it, the integration adds the carry to the soldier's motion,
+	// so `velocity` is then the soldier's own, relative to the Titan.
+	const Vec3& carryVelocity() const { return m_carry; }
+	int carryTicks() const { return m_carryTicks; }
+	uint32_t carrier() const { return m_carrierTicks > 0 ? m_carrier : 0; }
+	// What the integration adds to the velocity's motion: the carry while
+	// a Titan carries the soldier (0x006ca3b0), else none.
+	Vec3 carriedVelocity() const { return m_carrierTicks > 0 && m_carryTicks > 0 ? m_carry : Vec3 {}; }
+
 	bool onGround() const { return m_onGround; }
 	const Vec3& groundNormal() const { return m_groundNormal; }
 
@@ -228,6 +255,8 @@ private:
 	void runOver();                               // 0x006c2e50
 	void segmentTest(float seconds);              // 0x006c48c0's server part
 	void move(float gravity);                     // 0x006c2230
+	void carry();                                 // 0x006ca660's start (0x006f23a0)
+	void setCarry(const Vec3& velocity);          // slot 0xdc, 0x006c5df0
 	void integrate(float seconds);                // 0x006ca3b0
 
 	Vec3 m_desired;
@@ -252,6 +281,14 @@ private:
 	Vec3 m_jump;
 	bool m_jumping = false;
 	bool m_squashed = false;
+	// The object the soldier stands in (+0x120, slots 0xec / 0xf0): the
+	// mover whose hull it is inside, found by the object pass and cleared
+	// by each step (-1: none).
+	int m_standingIn = -1;
+	Vec3 m_carry;            // +0x90
+	int m_carryTicks = 0;    // +0x9c
+	uint32_t m_carrier = 0;  // +0xa0 (its root)
+	int m_carrierTicks = 0;  // +0xa4
 };
 
 } // namespace dice::hfe::physics

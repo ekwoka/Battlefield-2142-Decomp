@@ -13404,9 +13404,24 @@ void GameWorld::soldierMovers(const physics::Vec3& origin, int team, uint32_t ve
 		mover.ignoresThis = mover.ignoring && b.ignored == soldier;
 		mover.pushed = b.pushedBySoldiers;
 		mover.own = b.launcher != 0 && b.launcher == soldier;
+		// A Titan (0x00561d90 on the candidate's root): what stands in its
+		// hull (the candidate with LOD type 5, 0x006c3890's start with
+		// 0x006f2b00) or on it (0x006f23a0's ray) is carried by it
+		// (0x006ca660 / 0x006ca3b0, SoldierBody::carry).
+		const Titan* titan = titanByObject(b.object);
+		if (!titan) {
+			for (const Titan& remote : m_remoteTitans) {
+				titan = remote.object == b.object ? &remote : titan;
+			}
+		}
+		if (titan) {
+			mover.titan = true;
+			mover.inside = insideTitanHull(*titan, origin);
+		}
 		if (mover.mesh) {
 			movers.push_back(mover);
 		}
+		mover.inside = false; // the hull is the root's, not its parts'
 		// Its collisionPart children, each a response of its root's chain
 		// (0x006c0090) whose soldier LOD the soldier meets in the part's
 		// frame now (0x006c3890 with the part's instance, PartCollision.cpp).

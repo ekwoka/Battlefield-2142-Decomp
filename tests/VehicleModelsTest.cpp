@@ -2288,6 +2288,63 @@ TEST(Vehicles_HeavyIfvShieldCellsShowArmourEffects)
 	CHECK(!g.world->effects().emitting(cell));
 }
 
+// A joined client's cells (0x005ffec0): the host captures each cell's hit
+// points in eighths of its maximum (floor, at least 1 while any are left,
+// 0 at none) and the client sets them back (e x max / 8, a wreck's
+// -wreckHitPoints at 0) through the armour's setter, whose effects then
+// show there as on the host. Here the second IFV stands for the client's
+// copy of the first: its own hull is whole, its cells take the first's.
+TEST(Vehicles_JoinedShieldCellsShowArmourEffects)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_ifv")) {
+		return;
+	}
+	world::Object* copy = g.objects.create(g.templates.find("eu_ifv"), {30, 2, 0}, {0, 0, 0});
+	copy->setTeam(2);
+	const uint32_t remote = copy->id();
+	const uint32_t ifv = g.start("eu_ifv", {0, 2, 0}, 3);
+	const auto glowsNear = [&](uint32_t vehicle) {
+		std::vector<game::GameWorld::PlacedMesh> meshes;
+		g.world->armorEffectMeshes(meshes);
+		size_t n = 0;
+		for (const auto& m : meshes) {
+			if (m.objectTemplate && m.objectTemplate->name() == "ifv_shield_the_generatoreffect"
+				&& physics::lengthSquared(m.position - g.position(vehicle)) < 36) {
+				++n;
+			}
+		}
+		return n;
+	};
+	CHECK(g.world->repairCellEighths(ifv) == std::vector<int>(7, 8));
+	g.world->setHitPoints(ifv, g.world->hitPoints(ifv) * 0.9f);
+	g.run(0.5f);
+	const std::vector<int> eighths = g.world->repairCellEighths(ifv);
+	std::fprintf(stderr, "  cell 0 at %.1f of 110 hit points: %d eighths\n", g.world->hitPoints(g.world->shieldCellId(ifv, 0)),
+		eighths.empty() ? -1 : eighths[0]);
+	CHECK(eighths == std::vector<int>(7, 7));
+	CHECK(glowsNear(remote) == 0);
+	g.world->setRemoteRepairCells(remote, eighths);
+	g.run(0.5f);
+	const uint32_t cell = g.world->shieldCellId(remote, 0);
+	CHECK(std::fabs(g.world->hitPoints(cell) - 110 * 7 / 8.0f) < 1e-3f); // not mirrored back to its whole hull
+	CHECK(glowsNear(remote) == 7);
+	// Whole again: the glow goes; a wreck (0 eighths): the wreck's hit points.
+	g.world->setRemoteRepairCells(remote, std::vector<int>(7, 8));
+	g.run(0.2f);
+	CHECK(glowsNear(remote) == 0);
+	g.world->setRemoteRepairCells(remote, {0, 8, 8, 8, 8, 8, 8});
+	g.run(0.2f);
+	CHECK(std::fabs(g.world->hitPoints(cell) + 10) < 1e-3f);
+	CHECK(g.world->repairCells(remote).size() == 7 && !g.world->repairCells(remote)[0]);
+	// A sliver left is still one eighth.
+	g.world->setRemoteRepairCells(remote, {1, 8, 8, 8, 8, 8, 8});
+	CHECK(g.world->repairCellEighths(remote)[0] == 1);
+}
+
 namespace {
 
 // Horizontal rays across a vehicle (along its x, every half metre of its

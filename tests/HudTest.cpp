@@ -295,6 +295,47 @@ TEST(Hud_CompassScrolls)
 	}
 }
 
+// setBarNodeBorder and setCompassNodeBorder share one executor
+// (0x0076aebf -> 0x007b0780: the active node's slot 0x100), which bars and
+// compasses both answer with 0x007e9270 (+0x74..+0x80): either command
+// sets the same border on either node. A compass's strip period is its
+// width less the right border; a bar fills inside the border.
+TEST(Hud_BarAndCompassShareTheBorder)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createCompassNode Global Compass 3 100 10 90 10 1 0",
+			 "hudBuilder.setCompassNodeTexture 1 compass.tga",
+			 "hudBuilder.setCompassNodeTextureSize 360 10",
+			 "hudBuilder.setCompassNodeValueVariable VehicleAngle",
+			 "hudBuilder.setBarNodeBorder 0 0 0 60",
+			 "hudBuilder.createBarNode Global Health 3 100 500 200 10",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/full.tga",
+			 "hudBuilder.setBarNodeValueVariable PlayerHealth",
+			 "hudBuilder.setCompassNodeBorder 0 0 20 80",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.set("VehicleAngle", 90);
+	manager.set("PlayerHealth", 1);
+	const auto quads = manager.frame(0);
+	bool compass = false, bar = false;
+	for (const auto& q : quads) {
+		if (q.texture.find("compass.tga") != std::string::npos && q.x0 == 100) {
+			compass = true;
+			CHECK(std::abs(q.u0 - 75 / 360.0f) < 1e-5f); // floor(90 / 360 x (360 - 60))
+		}
+		if (q.texture.find("full.tga") != std::string::npos) {
+			bar = true;
+			CHECK(q.x0 == 120 && q.x1 == 220); // 20 off the left, 80 off the right
+		}
+	}
+	CHECK(compass && bar);
+}
+
 TEST(Hud_CompassSnaps)
 {
 	Console console;

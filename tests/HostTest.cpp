@@ -1619,8 +1619,8 @@ TEST(NetHost_PredictionOnAVehicleRoof)
 
 // The heavy IFV's repair cells on a joined client: the root's state carries
 // its armored children (mask 0x800000, the root's list in post-order,
-// armor.fullChildSync eighths), the host the cells' state among them
-// (GameWorld::repairCells), and the client's vehicle HUD shows the cells
+// armor.fullChildSync eighths), the host the cells' eighths among them
+// (GameWorld::repairCellEighths), and the client's vehicle HUD shows the cells
 // with hudRepairCellNo (0x007a1e50) from it: all up, then all down as the
 // hull is wrecked. Needs $BF2142_GAME_DIR.
 TEST(NetHost_JoinedRepairCells)
@@ -1697,6 +1697,19 @@ TEST(NetHost_JoinedRepairCells)
 		}
 	}
 	CHECK(turret);
+	// The cells in eighths (0x005ffec0's capture): the hull at 90 %, each
+	// cell mirrors it at 99 of 110, seven eighths, which the client sets
+	// its cells to (GameWorld::setRemoteRepairCells) for their effects.
+	const auto eighths = [&]() -> std::vector<int> {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == ifv->id() && o.part == 0) {
+				return o.repairCellEighths;
+			}
+		}
+		return {};
+	};
+	round.setHitPoints(garage.vehicle, round.hitPoints(garage.vehicle) * 0.9f);
+	CHECK(pumpUntil(step, [&] { return eighths() == std::vector<int>(7, 7); }, 6000));
 	round.applyDamage(garage.vehicle, 5000);
 	CHECK(pumpUntil(step, [&] { return all(seen(), false); }, 6000));
 	CHECK(all(round.repairCells(garage.vehicle), false));
