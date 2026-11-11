@@ -40,6 +40,23 @@ inline MeshQueue meshQueue(bool blended, bool additive, float fade)
 	return blended || fade < 1.0f ? MeshQueue::Transparent : MeshQueue::Opaque;
 }
 
+// Whether a material's back faces are culled. RendDX9's state manager
+// (0x100238b0) leaves D3DRS_CULLMODE at D3DCULL_CCW for whatever does not set
+// it, and a material's settings carry CullMode 3 (CCW) from their
+// constructor (0x10040070, "CullMode" at +0x8c) into the draw. The bundled
+// mesh's draw (0x100c3880, and its loader 0x100a2100) sets CullMode 1
+// (none) only for the blended materials (alpha mode 1, the additive ones
+// too); RaShaderBM's and RaShaderSM's techniques name no CullMode of their
+// own. So a bundled or skinned mesh's opaque and alpha-tested faces are
+// drawn from the front only: a gun's camera inside its turret's box (eu_ifv's
+// grenade launchers, the camera 3.5 cm behind the mount's front face) sees
+// out through it. (The static meshes are left two-sided here: RaShaderLeaf
+// sets CullMode NONE for the leaves, the rest are not sorted out.)
+inline bool meshCulled(bool bundledOrSkinned, bool blended)
+{
+	return bundledOrSkinned && !blended;
+}
+
 // The transparency queues' key: the camera's distance to the object's
 // origin (0x100c3880).
 inline float transparencyKey(const float origin[3], const float camera[3])

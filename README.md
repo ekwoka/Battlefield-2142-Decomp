@@ -244,7 +244,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Option | What it does |
 |---|---|
 | `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
-| `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. |
+| `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. It lands on whatever is under the spot (a roof, a deck or the terrain) when a 4 × 6 m footprint there is clear and level with the soldier; else on the nearest such spot round him, else on the nearest open ground within 60 m. A leading `goto:` in `--actions` places the soldier first (the rest run in the seat). |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
 | `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1). |
 | `--zoom` | A screenshot's soldier zooms in after firing. |

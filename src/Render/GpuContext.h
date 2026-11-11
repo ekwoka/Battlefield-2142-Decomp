@@ -7,6 +7,7 @@
 #pragma once
 
 #include "AnimatedUV.h"
+#include "MeshQueues.h"
 #include "RenderMath.h"
 #include "Texture/DdsFile.h"
 
@@ -243,6 +244,18 @@ public:
 	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
 	// depth-tested, not written.
 	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_additiveMeshPipeline; }
+	// A mesh queue's pipeline, with back faces culled or not (meshCulled:
+	// the opaque and alpha-tested materials of the bundled and skinned
+	// meshes keep the material settings' CullMode 3, D3DCULL_CCW).
+	SDL_GPUGraphicsPipeline* meshPipeline(MeshQueue queue, bool culled) const
+	{
+		switch (queue) {
+		case MeshQueue::Opaque: return culled ? m_culledMeshPipeline : m_meshPipeline;
+		case MeshQueue::Transparent: return culled ? m_culledFadedMeshPipeline : m_fadedMeshPipeline;
+		case MeshQueue::Additive: break;
+		}
+		return m_additiveMeshPipeline;
+	}
 	// Alpha-blended, depth-tested but not written.
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
 	// Water's blending plus a depth bias, for road decals.
@@ -349,6 +362,8 @@ private:
 	SDL_Window* m_window = nullptr;
 	SDL_GPUTextureFormat m_colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
 	SDL_GPUGraphicsPipeline* m_meshPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_culledMeshPipeline = nullptr;
+	SDL_GPUGraphicsPipeline* m_culledFadedMeshPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_terrainPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_surroundingPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_skyPipeline = nullptr;

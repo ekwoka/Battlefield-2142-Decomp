@@ -263,6 +263,28 @@ void ContactResponse::solve(RigidBody& body)
 	m_pushOut = {};
 }
 
+void ContactResponse::solveLegs(RigidBody& body)
+{
+	if (lengthSquared(m_pushOut) == 0) {
+		// Touching without sinking in: the legs keep what they had.
+		m_contacts.clear();
+		return;
+	}
+	body.position += m_pushOut;
+	float total = 0;
+	for (const Contact& c : m_contacts) {
+		total += std::max(c.approachSpeed, 0.0f);
+	}
+	const float inverse = total > 0.0001f ? 1.0f / total : total;
+	for (const Contact& c : m_contacts) {
+		const float weight = std::max(c.approachSpeed, 0.0f) * inverse;
+		const float strength = (c.elasticity * tuning::kElasticityScale + 1.0f) * weight * c.approachSpeed;
+		body.applyImpulse(c.offset, clampLength(c.normal * strength, tuning::kMaxContactImpulse));
+	}
+	m_contacts.clear();
+	m_pushOut = {};
+}
+
 MassShares massShares(const ShareNode& a, const ShareNode& b, float approach, bool particle, bool fixedA, bool fixedB)
 {
 	MassShares s;

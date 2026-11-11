@@ -160,6 +160,13 @@ public:
 		const ContactMaterial& material);
 	// Slot 0x30: push the body out and apply the contacts' impulses.
 	void solve(RigidBody& body);
+	// The MechLegs response's slot 0x30 (0x006ce740), for a walker whose
+	// contacts are its legs' sphere's only: nothing at all unless the push
+	// out (+0x1ac) is non-zero; then the push and each contact's impulse as
+	// solve's but without friction ((1 - cos) x 0.0 x *0x00a84cc8), at the
+	// contact's offset (its x and z x *0x00a84cf8, 1). The contacts go
+	// either way.
+	void solveLegs(RigidBody& body);
 
 	const std::vector<Contact>& contacts() const { return m_contacts; }
 	const Vec3& pushOut() const { return m_pushOut; }

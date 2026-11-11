@@ -2723,3 +2723,36 @@ TEST(Vehicles_WalkerStandsOnADeck)
 	CHECK(drift < 0.5f);
 	CHECK(g.world->bodyAsleep(mech));
 }
+
+// Suez_Canal's industrial bridge (-512/47/-36): a walker stands on its deck
+// on the legs' sphere alone, its hull's vehicle LOD box (1.9 m under its
+// origin) above the deck's box. The legs object is a mover of its own with
+// the dispatch's radius 5 and no box tests (0x006dc7b0 without a mesh
+// instance), so the sphere meets the deck every tick and the walker sleeps;
+// tied to the hull's box tests it met it every other tick and bounced
+// 0.16 m for ever.
+TEST(Vehicles_WalkerSleepsOnTheIndustrialBridge)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("bridge_industrial_01_c")) {
+		return;
+	}
+	g.objects.create(g.templates.find("bridge_industrial_01_c"), {0, 20, 0}, {0, 0, 0});
+	const uint32_t mech = g.start("us_heavy_mech", {0, 26.5f, 0}, 2);
+	const physics::Vec3 a = g.position(mech);
+	float lowest = a.y, highest = a.y;
+	for (int i = 0; i < 60; ++i) {
+		g.run(1 / 30.0f);
+		lowest = std::min(lowest, g.position(mech).y);
+		highest = std::max(highest, g.position(mech).y);
+	}
+	const physics::Vec3 b = g.position(mech);
+	std::fprintf(stderr, "  us_heavy_mech on the industrial bridge: %.3f m up, %.3f m bounce, %s\n", b.y,
+		highest - lowest, g.world->bodyAsleep(mech) ? "asleep" : "awake");
+	CHECK(b.y > 25 && b.y < 28); // on the deck (23.15), the legs 2.8 + 0.57 under the origin
+	CHECK(highest - lowest < 0.01f);
+	CHECK(g.world->bodyAsleep(mech));
+}

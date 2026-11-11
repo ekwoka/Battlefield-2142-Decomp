@@ -1308,7 +1308,7 @@ public:
 		};
 		Anchor gunAnchor;  // the gun's bundles and firearms
 		Anchor seatAnchor; // the seat's own place (the sitter)
-		physics::Vec3 rotation;      // seatInformation's yaw/pitch/roll, degrees
+		physics::Vec3 rotation;      // seatInformation's yaw/pitch/roll on the vehicle (with its placement's turn), degrees
 		std::string animationSystem; // seatAnimationSystem: the sitter's pose (empty: hidden)
 		// seatInformation's first word: the object of the vehicle's tree the
 		// soldier sits on (template +0x2a0). The PCO's creation (0x005cd4f0)
@@ -2138,6 +2138,10 @@ private:
 		uint32_t object;
 		physics::RigidBody body;
 		physics::ContactResponse response;
+		// A walker's legs object's own response (MechLegs 0xc432, made by
+		// its template's slot 31, 0x0062dc20): its sphere's contacts and
+		// push out, solved after the hull's (solveLegs, 0x006ce740).
+		physics::ContactResponse legsResponse;
 		std::vector<physics::Vec3> points; // vehicle collision LOD
 		std::shared_ptr<physics::CollisionWorld> projectileMesh; // object space, projectile LOD
 		std::shared_ptr<physics::CollisionWorld> soldierMesh;    // object space, soldier LOD (ragdolls)
@@ -2858,6 +2862,12 @@ private:
 	void wheelProbes(Body& body, MeshActor& b, float seconds);
 	// A walker's legs' sphere against B (the MechLegs response's slot 0x24).
 	void legsSphere(Body& walker, MeshActor& a, MeshActor& b);
+	// The legs object as a mover: its candidates and legsSphere with each.
+	void legsAgainstObjects(Body& mover, float seconds);
+	// A body whose response is a walker's legs (MechLegs, 0xc432), not a
+	// wreck: its contacts are its legs' only (solveLegs).
+	static bool walker(const Body& body);
+	static bool walker(const MeshActor& actor) { return actor.body && walker(*actor.body); }
 	// A walker's feet on the objects under them (0x00650e90's second probe:
 	// a sphere at each foot against the objects' vehicle LODs), before its
 	// update.

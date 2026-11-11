@@ -148,6 +148,8 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_postPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_bloomPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_culledMeshPipeline);
+	SDL_ReleaseGPUGraphicsPipeline(m_device, m_culledFadedMeshPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_terrainPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_surroundingPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_skyPipeline);
@@ -211,8 +213,9 @@ bool GpuContext::createPipelines(std::string& error)
 	info.vertex_input_state.vertex_attributes = attributes;
 	info.vertex_input_state.num_vertex_attributes = 11;
 	info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-	// Front faces are clockwise as in Direct3D; vegetation is two-sided, so
-	// nothing is culled yet (the original takes this from the material).
+	// Front faces are clockwise as in Direct3D. Two-sided by default: the
+	// culled mesh pipelines below serve the materials that keep CullMode 3
+	// (MeshQueues.h's meshCulled).
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
 	info.depth_stencil_state.enable_depth_test = true;
@@ -246,6 +249,12 @@ bool GpuContext::createPipelines(std::string& error)
 	};
 	m_meshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "mesh");
+	// The same with back faces culled (CullMode CCW, Direct3D's front faces
+	// clockwise): the bundled and skinned meshes' materials (meshCulled).
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+	m_culledMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "culled mesh");
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	m_terrainPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
 		k_terrain_frag_msl_size, 13, 3, "terrain", 2);
@@ -270,6 +279,11 @@ bool GpuContext::createPipelines(std::string& error)
 	info.depth_stencil_state.enable_depth_write = false;
 	m_fadedMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "faded mesh");
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+	m_culledFadedMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2,
+		"culled faded mesh");
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	m_particlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "particle");
@@ -369,7 +383,7 @@ bool GpuContext::createPipelines(std::string& error)
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	m_decalPipeline = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
 		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 2, 1, "decal");
-	return m_meshPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_roadMeshPipeline && m_decalPipeline &&
+	return m_meshPipeline && m_culledMeshPipeline && m_culledFadedMeshPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_roadMeshPipeline && m_decalPipeline &&
 		m_undergrowthPipeline && m_particlePipeline && m_shimmerPipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
 		m_uiTestPipeline && m_uiClearPipeline && m_shadowCasterPipeline && m_camoPipeline && m_postPipeline &&
 		m_bloomPipeline;

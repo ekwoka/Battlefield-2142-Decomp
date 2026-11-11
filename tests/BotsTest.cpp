@@ -736,6 +736,55 @@ TEST(Bots_DriveBoxedInAhead)
 	CHECK(st.state == 0 && out.direction == 1 && out.throttle == 1);
 }
 
+// The room rays (0x100e8170) start at the vehicle's spot on the map, and
+// the cost-class byte the diagonal and side rays share is written only
+// by a ray that enters a polygon: a diagonal that leaves the mesh in its
+// first polygon reads the class the ray before it ended in. Here the
+// front-left diagonal ends entering class 4 and the front-right one
+// leaves the mesh at 0.5 m: neither counts, so the car drives on ahead.
+TEST(Bots_DriveRoomRaysShareTheClass)
+{
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.hasRayStart = true;
+	sense.rayStart = {0, 1, 0};
+	sense.position = {0, 2, 0.3f}; // the origin, over its spot
+	bool fromSpot = true;
+	sense.ray = [&](const ai::Vec3& from, const ai::Vec3& to) {
+		fromSpot = fromSpot && from.x == 0 && from.y == 1 && from.z == 0;
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && x < -0.1f) {
+			ray.clear = false; // front left: into class 4 at 10 m
+			ray.distance = 10;
+			ray.lastClass = 4;
+		} else if (z > 0.1f && x > 0.1f) {
+			ray.clear = false; // front right: off the mesh at once
+			ray.distance = 0.5f;
+		}
+		return ray;
+	};
+	ai::DriveSettings s;
+	ai::DriveState st;
+	const ai::DriveOutput out = ai::driveControl(s, st, sense);
+	CHECK(fromSpot);
+	CHECK(st.state == 0 && out.direction == 1 && out.throttle > 0);
+	// The front-right ray first: nothing carried, it counts.
+	sense.ray = [&](const ai::Vec3& from, const ai::Vec3& to) {
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && x > 0.1f) {
+			ray.clear = false;
+			ray.distance = 0.5f;
+		}
+		return ray;
+	};
+	ai::DriveState again;
+	const ai::DriveOutput blocked = ai::driveControl(s, again, sense);
+	CHECK(again.state != 0 || blocked.direction != 1);
+}
+
 // FloatingTankMoveTo (0x1008c7c0, controller 0x100de350): the hover tank
 // strafes. From a standstill it pushes 10 (clamped to 1) along the way on
 // both axes; at speed the loop is 3 x (wanted - current - acceleration).
@@ -2716,6 +2765,47 @@ TEST(Bots_ChangeHearsBailOutAndGetIn)
 	}
 }
 
+// The entry search (BF2142.exe 0x005a98e0) takes every EntryPoint whose
+// root is the vehicle, wherever it hangs (us_heavy_mech's under its pelvis
+// and turret bundles); and a bot heading for a car on foot keeps walking
+// at it and pressing use (the get-in plan 0x1006dac0: MoveToObjectFinding
+// beside a Trigger of PIUse within the two radii + 1 m) until it is in.
+TEST(Bots_GetInThroughNestedEntryPoints)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		CarField field(gameDir);
+		field.addCar("car_nested", "car_firearm_n");
+		world::ObjectTemplate* nested = field.templates.find("car_nested");
+		nested->children().erase(nested->children().begin()); // the root's own entry
+		world::ObjectTemplate* bundle = field.templates.create("RotationalBundle", "car_nested_bundle");
+		bundle->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+		nested->children().push_back({"car_nested_bundle", {0, 0.2f, 0}, {}});
+		const uint32_t car = field.car("car_nested", 3, 0);
+		const int human = field.soldier("Human", false, 1, 0);
+		field.ticks(60);
+		CHECK(field.world->vehicleInReach(human));
+		field.board(human, 0);
+		CHECK(field.info(human).vehicle == car);
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int bot = field.soldier("Bot", true, -12, 0);
+		field.ticks(60);
+		game::BotManager bots(*field.world, field.settings);
+		bool in = false;
+		for (int tick = 0; tick < 30 * 20 && !in; ++tick) {
+			field.ticks(1, &bots);
+			in = field.info(bot).vehicle == car;
+		}
+		CHECK(in);
+	}
+}
+
 // From a vehicle BBChange weighs the other vehicles' seats too (0x1006c520):
 // a gunner whose own seat is worth 2 x 16 x 0.77 = 24.6 leaves for a car
 // whose gun is worth 2 x 40 x 0.77 = 61.6 nearby.
@@ -2860,7 +2950,7 @@ TEST(Bots_RadioHeardAndAnswered)
 	{
 		CarField field(gameDir);
 		const uint32_t car = field.car("car", 3, 0);
-		field.car("car_b", -14, 0);
+		field.car("car_b", -30, 0); // out of the bot's reach (the get-in press, 0x1006dac0)
 		const int human = field.soldier("Human", false, 0, 0);
 		const int bot = field.soldier("Bot", true, -11, 0);
 		field.ticks(90);

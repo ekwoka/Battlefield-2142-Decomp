@@ -349,6 +349,12 @@ struct DriveSense {
 	// choosing a side, from an obstacle. Without it the free space below
 	// is given.
 	std::function<DriveRay(const Vec3& from, const Vec3& to)> ray;
+	// Where the room rays start: the vehicle's spot on its map (0x100e8170
+	// reads the Mobile part's per-map record, 0x100a4510: its point at the
+	// mesh's height, kept from the last time the vehicle was found on the
+	// mesh). Unset: the position.
+	bool hasRayStart = false;
+	Vec3 rayStart;
 	// Free mesh ahead and behind (the forward and diagonal rays, the
 	// backward ones) and to the sides, out to radius + 10 m.
 	float freeFront = 1e9f, freeBack = 1e9f, freeLeft = 1e9f, freeRight = 1e9f;

@@ -4050,8 +4050,18 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// fading out) sorted back to front, the additive ones, and the
 	// particles: RendDX9's queue order (0x1002cef0: RSMTWater, then
 	// RSMTTransparency sorted by distance, RSMTAdditive, the particles).
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
-	useShadows(commands, pass, 1, 5, true);
+	// The queue's pipeline, culled or not by the material (meshCulled),
+	// rebound only when that changes.
+	SDL_GPUGraphicsPipeline* meshBound = nullptr;
+	const auto useMeshPipeline = [&](MeshQueue queue, bool culled) {
+		SDL_GPUGraphicsPipeline* pipeline = m_gpu.meshPipeline(queue, culled);
+		if (pipeline != meshBound) {
+			SDL_BindGPUGraphicsPipeline(pass, pipeline);
+			useShadows(commands, pass, 1, 5, true);
+			meshBound = pipeline;
+		}
+	};
+	useMeshPipeline(MeshQueue::Opaque, false);
 	// Lightmapped statics use the static sun/sky colors.
 	LightingUniforms uniformsFor[2][2] = {
 		{lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false),
@@ -4147,6 +4157,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			if (queueOf(submesh, item.drawnFade()) != queue) {
 				continue;
 			}
+			useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended));
 			const float space = bound->skinned ? static_cast<float>(submesh.normalKind) : transforms.normalSpace[0];
 			// Identity matrices without a part that animates them (RendDX9
 			// copies identities while +0x28c is unmade).
@@ -4200,6 +4211,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// Decals over the opaque surfaces.
 	if (m_decalVertices && !m_decalGroups.empty()) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.decalPipeline());
+		meshBound = nullptr;
 		const LightingUniforms decalLighting = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 		SDL_PushGPUFragmentUniformData(commands, 0, &decalLighting, sizeof(decalLighting));
 		// Decals.fx's DecalFadeDistanceAndInterval (0x10163810).
@@ -4286,8 +4298,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		drawSunFlare(commands, pass, viewProjection, camera);
 	}
 	// The transparent materials, farthest object first.
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
-	useShadows(commands, pass, 1, 5, true);
+	meshBound = nullptr; // the water's, the sun flare's
+	useMeshPipeline(MeshQueue::Transparent, false);
 	std::vector<std::pair<float, const DrawItem*>> transparent;
 	for (const DrawItem& item : m_drawList) {
 		transparent.push_back({transparencyKey(item.instance->world, camera.position), &item});
@@ -4297,8 +4309,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		drawInstance(*item, MeshQueue::Transparent);
 	}
 	// The additive ones (not sorted: RSMTAdditive keeps its order).
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.additiveMeshPipeline());
-	useShadows(commands, pass, 1, 5, true);
+	useMeshPipeline(MeshQueue::Additive, false);
 	for (const DrawItem& item : m_drawList) {
 		drawInstance(item, MeshQueue::Additive);
 	}
@@ -4452,6 +4463,16 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	}
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	const bool hemiAndShadows = !m_sources || !m_sources->quality || m_sources->quality->meshHemiAndShadows();
+	// The queue's pipeline, culled or not by the material (meshCulled).
+	SDL_GPUGraphicsPipeline* modelBound = nullptr;
+	const auto useModelPipeline = [&](MeshQueue queue, bool culled) {
+		SDL_GPUGraphicsPipeline* pipeline = m_gpu.meshPipeline(queue, culled);
+		if (pipeline != modelBound) {
+			SDL_BindGPUGraphicsPipeline(pass, pipeline);
+			useShadows(commands, pass, 1, 5, true);
+			modelBound = pipeline;
+		}
+	};
 	const auto drawModel = [&](const FirstPersonModel& model, MeshQueue queue) {
 		const GpuMesh* gpuMesh = mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
 		if (!gpuMesh) {
@@ -4477,6 +4498,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			if (queueOf(submesh, 1.0f) != queue) {
 				continue;
 			}
+			useModelPipeline(queue, meshCulled(gpuMesh->bundled || gpuMesh->skinned, submesh.blended));
 			transforms.normalSpace[0] = gpuMesh->skinned ? static_cast<float>(submesh.normalKind) : gpuMesh->bundled ? 1.0f : 0.0f;
 			if (gpuMesh->skinned) {
 				if (submesh.rig < 0 || model.pose.empty()) {
@@ -4519,13 +4541,11 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	// RSMT1Person: the opaque materials, and the additive ones (the
 	// bundled mesh sends those to the first-person queue too, 0x100c3880;
 	// drawn here after all the opaque ones).
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
-	useShadows(commands, pass, 1, 5, true);
+	useModelPipeline(MeshQueue::Opaque, false);
 	for (const FirstPersonModel& model : scene.models) {
 		drawModel(model, MeshQueue::Opaque);
 	}
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.additiveMeshPipeline());
-	useShadows(commands, pass, 1, 5, true);
+	useModelPipeline(MeshQueue::Additive, false);
 	for (const FirstPersonModel& model : scene.models) {
 		drawModel(model, MeshQueue::Additive);
 	}
@@ -4544,8 +4564,8 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		transparent.push_back({transparencyKey(model.world, camera.position), &model});
 	}
 	sortBackToFront(transparent);
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.fadedMeshPipeline());
-	useShadows(commands, pass, 1, 5, true);
+	modelBound = nullptr; // the particles'
+	useModelPipeline(MeshQueue::Transparent, false);
 	for (const auto& [distance, model] : transparent) {
 		drawModel(*model, MeshQueue::Transparent);
 	}

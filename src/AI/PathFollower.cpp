@@ -1090,7 +1090,7 @@ void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float&
 		left = in.freeLeft;
 		right = in.freeRight;
 	} else {
-		const Vec3 p = in.position;
+		const Vec3 p = in.hasRayStart ? in.rayStart : in.position;
 		const auto along = [&](const Vec3& d) { return in.ray(p, p + d * reach); };
 		const auto distance = [&](const DriveRay& r) { return r.clear ? reach : r.distance; };
 		Vec3 frontLeft = in.forward * length - in.right * width;
@@ -1098,22 +1098,35 @@ void freeSpace(const DriveSettings& s, const DriveSense& in, float reach, float&
 		frontLeft = frontLeft * (1 / std::max(length3(frontLeft), 1e-6f));
 		frontRight = frontRight * (1 / std::max(length3(frontRight), 1e-6f));
 		// The diagonal rays don't count where they end entering cost class
-		// 4, and a side ray that does gives the whole reach.
+		// 4, and a side ray that does gives the whole reach. The class is
+		// one byte (local_5 of 0x100e8170 / 0x100e1f20) that the diagonal
+		// and side rays share in turn and the ray writes only when it
+		// enters a polygon (0x1003ce50's param_11): a ray that leaves the
+		// mesh, or ends, in its first polygon reads the class the ray
+		// before it left (the first one's is unset: none here).
+		int carried = -1;
+		const auto classed = [&](const Vec3& d) {
+			DriveRay r = along(d);
+			carried = r.lastClass >= 0 ? r.lastClass : carried;
+			r.lastClass = carried;
+			return r;
+		};
 		front = distance(along(in.forward));
 		for (const Vec3& d : {frontLeft, frontRight}) {
-			const DriveRay r = along(d);
+			const DriveRay r = classed(d);
 			if (!r.clear && r.lastClass != 4) {
 				front = std::min(front, r.distance);
 			}
 		}
 		back = distance(along(in.forward * -1));
 		for (const Vec3& d : {frontLeft * -1, frontRight * -1}) {
-			const DriveRay r = along(d);
+			const DriveRay r = classed(d);
 			if (!r.clear && r.lastClass != 4) {
 				back = std::min(back, r.distance);
 			}
 		}
-		const DriveRay toRight = along(in.right), toLeft = along(in.right * -1);
+		const DriveRay toRight = classed(in.right);
+		const DriveRay toLeft = classed(in.right * -1);
 		right = toRight.lastClass == 4 ? reach : distance(toRight);
 		left = toLeft.lastClass == 4 ? reach : distance(toLeft);
 	}

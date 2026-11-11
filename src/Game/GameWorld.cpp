@@ -1998,6 +1998,9 @@ void GameWorld::stepLoneVehicle(LoneVehicle& lone, const VehicleInput& driver, f
 	if (stepBody(b, seconds)) {
 		collideMover(b, m_bodies.size(), seconds);
 		b.response.solve(b.body);
+		if (walker(b)) {
+			b.legsResponse.solveLegs(b.body);
+		}
 		if (b.vehicle->legs()) {
 			b.vehicle->legsDrive(b.body);
 		}
@@ -10072,7 +10075,12 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					char rotation[64] = {};
 					std::sscanf(info->second.c_str(), "%127s %63s %63s", name, position, rotation);
 					added.position = at + turn.transform(parseVec3(position));
-					added.rotation = parseVec3(rotation);
+					// The seat's matrix is seatInformation's in the
+					// PlayerControlObject's frame (0x00587a30's seat matrix):
+					// a seat placed turned (eu_fav_openPosition, setRotation
+					// 180: the kneeling passenger looks out over the tail)
+					// takes its placement's turn too.
+					added.rotation = (physics::Mat3::fromYawPitchRoll(parseVec3(rotation)) * turn).yawPitchRoll();
 					added.seatParent = name;
 					seatPlaces.push_back(parseVec3(position));
 				} else {
@@ -10324,12 +10332,17 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				const physics::Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
 				const physics::Mat3 childTurn =
 					physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * turn;
-				// The vehicle's EntryPoints, and a seat's own (the Titans' gun
-				// hubs: EntryPoint children of each seat's PlayerControlObject,
-				// setEntryRadius 5, at its console), which lead to that seat.
-				if (c->typeName() == "EntryPoint" && (depth == 0 || (seat >= 0 && t.typeName() == "PlayerControlObject"))) {
+				// The vehicle's EntryPoints anywhere in its tree (the entry
+				// search 0x005a98e0 takes every EntryPoint object, class
+				// 0x9477, whose root is the vehicle: us_heavy_mech's hang
+				// under its pelvis and turret bundles), and a seat's own (the
+				// Titans' gun hubs: EntryPoint children of each seat's
+				// PlayerControlObject, setEntryRadius 5, at its console),
+				// which lead to that seat.
+				if (c->typeName() == "EntryPoint") {
 					const float radius = number(*c, "entryRadius", number(*c, "setEntryRadius", 3));
-					layout.entries.push_back({childAt, radius, depth == 0 ? -1 : seat});
+					const bool seatOwn = depth > 0 && seat >= 0 && t.typeName() == "PlayerControlObject";
+					layout.entries.push_back({childAt, radius, seatOwn ? seat : -1});
 					continue;
 				}
 				const SeatLayout::Anchor above = carried;
@@ -13080,10 +13093,14 @@ void GameWorld::stepPhysics(float seconds)
 		// The physics node's +0x249 (slot 0x1b8): set at its step, cleared
 		// by a contact (0x006b9260, 0x006bb050 -> slot 0x1b4(0)); the
 		// rewrite's wheels touching the ground count as contacts.
-		b.inAir = b.response.contacts().empty()
+		b.inAir = b.response.contacts().empty() && b.legsResponse.contacts().empty()
 			&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
 				[](const Vehicle::Wheel& w) { return w.contact; }));
 		b.response.solve(b.body);
+		// The legs object's response after the hull's (0x006ce740).
+		if (walker(b)) {
+			b.legsResponse.solveLegs(b.body);
+		}
 		if (b.vehicle && b.vehicle->legs()) {
 			b.vehicle->legsDrive(b.body);
 		}

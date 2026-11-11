@@ -650,11 +650,7 @@ vehicle LOD (slot `0x60(1, …)`); either sets the foot's counter
 a deck stands with its feet down; with the heightmap's probe alone (the
 rewrite before) it was pushed sideways as over a drop and slid along
 Suez_Canal's bridges without sleeping (`GameWorld::feetOnObjects`,
-`Vehicle::touchFeet`; `Vehicles_WalkerStandsOnADeck`). Not settled: on
-Suez_Canal's industrial bridge (-512/50/-36) a mech still never sleeps,
-its legs' sphere touching the deck every other tick (the contact's
-vertical impulse is halved, `0x006c8380`, against its gravityModifier's
-pull); it holds its place. The response replaces the
+`Vehicle::touchFeet`; `Vehicles_WalkerStandsOnADeck`). The response replaces the
 hull's ground points: the legs' segment from stepHeight above the foot
 (length under the legs' object) to the heightmap, the body pushed up and
 the approach taken out, then the drive: the velocity along the ground to
@@ -730,6 +726,37 @@ half-radius line (lower than length − radius / 2) is ground for the drive
 (the best normal by height `+0x1c4`, `+0x21c`). The drive (`0x006cdca0`)
 runs after the solve, once a tick, and resets the normal to (0, 1, 0).
 `GameWorld::legsSphere`, `Vehicle::legsObjectContact`, `Vehicle::legsDrive`.
+
+*The legs are a mover of their own.* The MechLegs response belongs to the
+legs object (the MechLegs template `0x0062d690`, slot 31 `0x0062dc20` makes
+it, vtable `0x009944b8`, type `0xc432`), not to the root, whose Mesh
+physicsType keeps a Basic response for the hull. The legs object has no
+collisionPart, so no mesh instance: in the dispatch (`0x006dc7b0`, the legs
+as `param_3`) its radius is the default 5 (`local_8`), its "has a vehicle
+LOD" is the template's hasCollisionPhysics bit (`0x00650880`), and both
+box tests and the vertex-count test are skipped (they need the instance).
+A candidate (at the root's otherCollisionLod, slot `0x1a4`) is met within
+(|vM| + |vC|) dt + 5 + rC of the legs' origin; the radii's rule calls the
+legs' slot 9 with them as A unless 5 / rC is over 4 (the legs have no node
+of their own, so a candidate under 1.25 m is never met). Their contacts go
+to their own list (`+0x258`, `0x006ce680`) and push out (`+0x1ac`, the
+whole depth along the normal); their slot 0x2c (others' contacts) is empty
+(`0x00854170`). Their solve (`0x006ce740`) does nothing unless the push out
+is non-zero, then moves the root's node by it and gives each contact the
+weighted impulse of the Basic solve without friction (`(1 − cos) × 0.0 ×
+*0x00a84cc8`) at its offset (x and z × `*0x00a84cf8`, 1); with two contacts
+or more (`*0x00a84cd4`) it sets the node's `+0x248` (slot `0x1ac`), which
+cancels the next tick's gravity only for small non-PlayerControlObject roots
+(`0x006c6ec0`, `0x006c9060`). The rewrite tied the legs' sphere to the
+hull's pair tests: on Suez_Canal's industrial bridge (−512/47/−36) the
+hull's vehicle LOD box (us_heavy_mech's bottom 1.9 m under its origin)
+stands 0.38 m over the deck's box at rest, so the sphere met the deck only
+on the ticks the body had sunk that far: every other tick, with the halved
+vertical impulse (`0x006c8380`) against gravityModifier 4, a 0.16 m bounce
+for ever. Now `GameWorld::legsAgainstObjects` pairs the legs alone, into
+`Body::legsResponse`, solved after the hull's
+(`ContactResponse::solveLegs`): the mech sleeps on the deck within a
+second (`Vehicles_WalkerSleepsOnTheIndustrialBridge`).
 
 **Seats.** seatInformation is optional: a vehicle naming no seat (eu_tank,
 as_tank, the walkers, the APCs, as_ag) has a seat at each
@@ -1351,7 +1378,12 @@ neither the soldier's nor 0, its template is a PlayerControlObject
 player; a Titan always counts) or its template is `lockToTeam`
 (`+0x350`; only the heavy IFV eu_ifv ships it). So an enemy's empty APC
 may be taken, the heavy IFV not, and nobody gets into an enemy Titan's
-guns. `GameWorld::mayEnter`.
+guns. `GameWorld::mayEnter`. The search finds the EntryPoint objects
+wherever they hang in the vehicle's tree (their root is the vehicle,
+`0x006f1d70`): us_heavy_mech's two hang under its pelvis bundle and its
+turret, which the rewrite's layout used to skip, so nobody could get in
+but within 4 m of the origin (the fallback for a vehicle without entry
+points), 3.4 m up the mech.
 
 **crewKitIndex** (PlayerControlObject `+0x47c`, -1 by default; the
 gunships' pilot and gunner 12): the enter (`0x005cdd60`) sets the
@@ -2748,10 +2780,33 @@ Trace views, the death, follow and free cameras) asks only the
 heightmap's terrain (slot `0x6c`) and sea (slot `0x98`) heights, and
 `0x00611fc0` (the Inside and Nose modes) only measures how near the
 objects round the camera are (flags `0x1000008`, `+0x3d0`); a gun pushed
-into a wall shows the wall's inside, as in the exe. (eu_ifv's grenade
-launcher seats, camera cockpitSubGeom 1, see the world through a heavy
-blur in the rewrite, likely the vehicle's shield or the launcher's
-CameraEffect; not followed here.)
+into a wall shows the wall's inside, as in the exe. eu_ifv's grenade
+launcher seats (2 and 5) put their camera (`EU_IFV_GrenadeLauncherL_Camera`
+at −0.097/0.12/0.205 under the mount) inside the mount's box (part 6,
+±0.19 × ±0.13 × −0.25..0.24): the "blur" they showed was the mount's front
+face 3.5 cm ahead, a few texels of eu_ifv_c.dds over the whole screen, seen
+from behind. RendDX9 culls it: its state manager's defaults (`0x100238b0`)
+leave D3DRS_CULLMODE at 3 (CCW, its table's `+0x178`) for whatever does not
+set it, the material settings carry `CullMode` 3 from their constructor
+(`0x10040070`, the parameter at `+0x8c`), and the bundled mesh's draw and
+loader (`0x100c3880`, `0x100a2100`) set 1 (none) only for the blended
+materials (alpha mode 1, `+0x9c` of the settings at `+0x10`); RaShaderBM's
+and RaShaderSM's techniques name no CullMode of their own (RaShaderLeaf,
+RaShaderDefault and STM's Glowing set NONE). The rewrite draws the bundled
+and skinned meshes' opaque and alpha-tested materials with back faces
+culled (`meshCulled`, GpuContext's `meshPipeline(queue, culled)`); the
+static meshes stay two-sided (their leaves' NONE and the trunks' CCW not
+sorted out). The launcher seat now looks past its barrel; its PostProcess
+component (`enablePostProcessingOnGuiIndex 47`) is the CameraEffect frame
+above. Test: `MeshQueues_BundledAndSkinnedFacesCulled`.
+
+**A turned seat.** seatInformation's position and rotation are in its
+PlayerControlObject's frame (the seat's matrix, `0x00587a30`), so a seat
+placed turned takes its placement's turn: eu_fav_openPosition and
+as_fav_openPosition (`setRotation 180/0/0` and −180, seatInformation's
+0/0/0) kneel facing the tail; the layout kept only seatInformation's
+rotation and the passenger looked into the back of the seats ahead
+(`GameWorld::vehicleLayout`; `PlayerCamera_TurnedSeatFacesItsPlacement`).
 
 **The seat camera's shakes** (the Camera object's per-tick `0x00610240`;
 the view matrix `0x00610620` rolls about its forward row by the sum of
@@ -12913,14 +12968,27 @@ changes (0x100966c0 → 0x10095fc0).
     Mobile part's per-map record, 0x100a4510: polygon, cluster, point),
     which the courier (0x10055650 → pathfinder slot 0x34) moves only when
     it finds the object on the mesh, at the mesh's height; off the mesh it
-    keeps the last one. The rewrite starts them at the vehicle's origin
-    and, off the mesh, knows no room (16 of about 30,000 rays in three
-    Cerbere rounds).
+    keeps the last one; so do the rewrite's (`DriveSense::rayStart`, the
+    driver's `Bot::driveSpot`; a vehicle never found on the mesh knows no
+    room). The cost class the diagonal and side rays test is one byte the
+    rays share in turn (`local_5` of 0x100e8170 / 0x100e1f20, never reset):
+    a ray writes it only when it enters a polygon (0x1003ce50's
+    `param_11`), so one that leaves the mesh, or ends, in its first
+    polygon reads the class the ray before it ended in (the first one's is
+    left unset).
     "Needed" is spaceNeededTweak × r (Mobile slot 0x2c, 0x100a4370). The
     shipped Cerbere_Landing's vehicle mesh was built for jeeps
     (`AI/AI.ai`: `aiPathfinding.map.radius 2.3`, "There are only jeeps on
     this map"), so the PAC heavy mech, needing 4.9 m along its diagonals,
     finds no room at its spawn's 8 m wide neck there in the original too.
+    Suez_Canal's us_heavy_mech (r 4.6 m, needing 4.2 m) spawns at the
+    vehicle mesh's edge (`map.radius 4.35`): its front-right diagonal
+    leaves the mesh within 1 m and its back within needed, so its machine
+    goes 0 → 9 → 3 → 0 turning on the spot at the point it already faces,
+    as 0x100e1f20 does; it gets away only when its spawn slide or a
+    backing run leaves it room. Camp Gibraltar's Ruins and Central Camp
+    vehicle order positions lie off the vehicle mesh, so drivers sent
+    there fail every request (0x100966c0 has no search nearby) and stand.
   - **States** (one change per time stamp, 0x100973b0): from 0, a goal
     behind within 10 r with room behind is backed towards (8); behind and
     no room to turn (2.7 r across and lengthwise) backs out straight (12);
@@ -13290,6 +13358,29 @@ bipods), one without Mobile, or one whose infantry-map spot lies within
 the two radii; a passenger any. The choice of another vehicle gets out
 and walks there.
 
+**Getting in** (the plan 0x1006dac0, a soldier at a seat of a vehicle
+with a Mobile part, without `setUseNoPathfindingToGetToObject`): While
+(0x100d19c0) the seat isn't taken (NOT 0x100d4190, test 0x100d41c0: the
+seat's Unit, 0x100aa530), a Parallel that ends with its first child
+(0x100cde50 with 0; 0x10119a64's run 0x100cdca0) of MoveToObjectFinding
+(0x100cff90) at the vehicle with no distance kept and Trigger (0x100d3110)
+of PIUse (input 10, mask 0x400) whose start condition is ObjectDistance
+(0x100d4480, run 0x100d4620: 3-D from the seat's object to the bot's)
+within the vehicle's radius (its physical part's vt+0x28, the root's for
+a seat without one) + the bot's + 1 m. The move's goal is the vehicle's
+spot on the bot's map (its step 0x100d07a0 reads the root's Mobile record
+through 0x100a4510), which the bot never reaches: it walks on into the
+hull, pressing use, and the game's use key (BF2142.exe 0x004bb570 → the
+entry search 0x005a98e0) lets it in once it stands within an entry
+point's 3 m. The bot walks on while it presses: a bot that stopped at the
+press distance stood outside every entry point. (The rewrite pressed
+within 2.5 m of the origin across, which the hull's side keeps soldiers
+from: bots stood about 3 m from it, pushing. The rewrite's choice on foot
+is a vehicle, any seat: the root's object and radius.) The plan's other
+statements (the req_pickup radio, the wait to be seated 0x100d4d30, the
+target without a Mobile part walked to by MoveToFinding at the chosen
+spot) are as before.
+
 ### Action plans
 
 A BBP pattern builds its plan from statements (Parallel, Serial, PlanEnd,
@@ -13573,6 +13664,13 @@ squad every 18 frames.
   timed and doesn't lag again until a test clears it (a bot, the human
   leader a human leads by, a member not placed, out of the band or no
   longer behind). Bots never lag. (`BotManager::updateFormation`.)
+- **A member's map:** the squad's goals are drawn and tested on the map
+  of the object the bot controls (the reachability test 0x100c1300 asks
+  its Mobile part's map, 0x100a4330), so a member that took or left a
+  driver's seat isn't left with the other map's goal: the rewrite's
+  `updateGoal` kept a member's goal while its squad had no order under
+  way, and an infantry goal off the vehicle mesh fails every path request
+  (0x100966c0); Suez's PAC tanks stood at their spawn for the round.
 - **Members** (0x100c0bb0): every 9 s a goal unchanged since the last look
   is given again when the bot's goal reads reached (urgency below 0.5) or
   it stands still over 4 m from it. In the formation the leader goes to
@@ -14055,7 +14153,10 @@ keeps no copy). Kept as the binary does it.
 
 `bf2142 --bots N [--simulate S]` adds bots and, with `--simulate`, runs S
 seconds headless and prints the scores. With `BF2142_BOT_STATS` set, it
-also prints how long the bots ran each behaviour and how far they drove.
+also prints how long the bots ran each behaviour, how far they drove, and
+how long they were stuck: per bot, 30 s windows (on foot, driving or
+seated) that ended under 2 m from where they began, by the state and the
+behaviour run longest in the window.
 `BF2142_BOT_SEED=<n>` starts the bots' own draws elsewhere (under
 `--simulate` the default sequence is fixed): one round's figures are
 chaotic, so compare seeds.

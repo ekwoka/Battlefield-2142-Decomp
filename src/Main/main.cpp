@@ -7387,12 +7387,89 @@ int runGame(Options& options, Session& session)
 					}
 				};
 				if (!options.drive.empty()) {
+					// A leading goto: places the soldier before the vehicle comes
+					// (a roof to start from); the other actions run in the seat.
+					if (options.actions.rfind("goto:", 0) == 0) {
+						const size_t end = options.actions.find(' ');
+						const std::string rest = end == std::string::npos ? "" : options.actions.substr(end + 1);
+						options.actions = options.actions.substr(0, end);
+						runActions();
+						options.actions = rest;
+					}
 					// A vehicle 2.5 m ahead of the soldier: enter it and drive.
 					world::ObjectTemplate* vehicle = templates.find(options.drive);
 					const float yaw = player->rotation().x * 3.14159265f / 180.0f;
-					const float x = player->position().x + std::sin(yaw) * 2.5f, z = player->position().z + std::cos(yaw) * 2.5f;
 					const terrain::Heightmap* terrainHeights = heightmaps.primary();
-					const float y = terrainHeights && terrainHeights->loaded() ? terrainHeights->heightAt(x, z) : player->position().y;
+					const auto terrainAt = [&](float x, float z) {
+						return terrainHeights && terrainHeights->loaded() ? terrainHeights->heightAt(x, z) : player->position().y;
+					};
+					// What is under a spot: the first surface a segment down from
+					// 3 m over the soldier's feet meets (an object's projectile
+					// LOD, a roof or a deck, or the terrain), and whether 3 m over
+					// it are clear (no wall or ceiling for the vehicle to land in).
+					const float feet = player->position().y;
+					const auto surfaceAt = [&](float x, float z, float& y) {
+						const float ground = terrainAt(x, z);
+						const physics::Vec3 from {x, std::max(feet, ground) + 3.0f, z};
+						const physics::Vec3 to {x, ground - 1.0f, z};
+						float fraction = 1;
+						uint32_t hitObject = 0;
+						y = round.segmentHit(from, to, round.playerObject(), fraction, hitObject)
+							? from.y + (to.y - from.y) * fraction
+							: ground;
+						float above = 1;
+						return !round.segmentHit({x, y + 0.3f, z}, {x, y + 3.0f, z}, round.playerObject(), above, hitObject);
+					};
+					// A spot takes the vehicle when its middle and a 4 x 6 m
+					// footprint's corners (facing the soldier's way) are clear
+					// and level with each other (within 1 m): no edge of a
+					// roof or a tower's platform under it.
+					const auto footprint = [&](float cx, float cz, float& cy) {
+						if (!surfaceAt(cx, cz, cy)) {
+							return false;
+						}
+						for (const float side : {-2.0f, 2.0f}) {
+							for (const float along : {-3.0f, 3.0f}) {
+								const float px = cx + std::cos(yaw) * side + std::sin(yaw) * along;
+								const float pz = cz - std::sin(yaw) * side + std::cos(yaw) * along;
+								float py = 0;
+								if (!surfaceAt(px, pz, py) || std::fabs(py - cy) > 1.0f) {
+									return false;
+								}
+							}
+						}
+						return true;
+					};
+					// The spot ahead when it takes the vehicle at about the
+					// soldier's level; else the nearest such spot round him (up
+					// to 10 m); else the nearest open ground (the terrain itself)
+					// within 60 m.
+					float x = player->position().x + std::sin(yaw) * 2.5f, z = player->position().z + std::cos(yaw) * 2.5f;
+					float y = terrainAt(x, z);
+					bool placed = false;
+					for (int pass = 0; pass < 2 && !placed; ++pass) {
+						const float maxRadius = pass == 0 ? 10.0f : 60.0f;
+						for (float r = 2.5f; r <= maxRadius && !placed; r += pass == 0 ? 1.5f : 4.0f) {
+							for (int k = 0; k < 16 && !placed; ++k) {
+								const float a = yaw + static_cast<float>(k) * 0.3926991f; // ahead first, then round
+								const float cx = player->position().x + std::sin(a) * r, cz = player->position().z + std::cos(a) * r;
+								float cy = 0;
+								if (!footprint(cx, cz, cy)) {
+									continue;
+								}
+								const bool ok = pass == 0 ? std::fabs(cy - feet) < 1.5f : std::fabs(cy - terrainAt(cx, cz)) < 0.2f;
+								if (ok) {
+									x = cx;
+									y = cy;
+									z = cz;
+									placed = true;
+								}
+							}
+						}
+					}
+					if (!placed) {
+						surfaceAt(x, z, y);
+					}
 					const world::Object* made = vehicle ? objects.create(vehicle, {x, y + 1.5f, z}, {player->rotation().x, 0, 0}) : nullptr;
 					const uint32_t madeId = made ? made->id() : 0;
 					if (!made) {

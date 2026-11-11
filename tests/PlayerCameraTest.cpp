@@ -101,3 +101,28 @@ TEST(PlayerCamera_UnnamedSeatsUseTheirOwnCameras)
 	CHECK(std::fabs(eye.position[0] - 7.5f) < 1e-4f && std::fabs(eye.position[1] - 2) < 1e-4f
 		&& std::fabs(eye.position[2] - 21) < 1e-4f);
 }
+
+// A seat placed turned (eu_fav_openPosition: addTemplate ... setRotation
+// 180/0/0, its seatInformation's own rotation 0/0/0) faces its placement's
+// way: the seat's matrix is seatInformation's in the PlayerControlObject's
+// frame (0x00587a30), so the FAV's kneeling passenger looks out over the
+// tail, not into the back of the driver's seat.
+TEST(PlayerCamera_TurnedSeatFacesItsPlacement)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::ObjectTemplate* fav = templates.create("PlayerControlObject", "fav");
+	fav->settings()["seatInformation"] = "fav 0/0.53/1.1 0/0/0";
+	fav->children().push_back({"fav_open", {0, 0.12f, -1.22f}, {180, 0, 0}});
+	world::ObjectTemplate* open = templates.create("PlayerControlObject", "fav_open");
+	open->settings()["seatInformation"] = "fav_open 0/0.8/0.2 0/0/0";
+	const uint32_t vehicle = objects.create(fav, {0, 0, 0})->id();
+	game::GameWorld round(templates, objects);
+	const auto seats = round.vehicleSeats(vehicle);
+	CHECK(seats.size() == 2);
+	if (seats.size() == 2) {
+		CHECK(std::fabs(seats[0].rotation.x) < 1e-3f);
+		CHECK(std::fabs(std::fabs(seats[1].rotation.x) - 180) < 1e-3f);
+		CHECK(std::fabs(seats[1].position.y - 0.92f) < 1e-4f && std::fabs(seats[1].position.z + 1.42f) < 1e-4f);
+	}
+}

@@ -109,3 +109,13 @@ TEST(Culling_FrustumSpheresAndBoxes)
 	const render::BoundingSphere moved = render::transformSphere(s, world);
 	CHECK(moved.center.x == 12 && moved.center.y == 2 && std::fabs(moved.radius - 2 * std::sqrt(5.0f)) < 1e-4f);
 }
+
+// The material settings' CullMode 3 (D3DCULL_CCW, 0x10040070) stays for the
+// bundled and skinned meshes' opaque and alpha-tested materials; the
+// bundled mesh's draw sets 1 (none) for the blended ones (0x100c3880).
+TEST(MeshQueues_BundledAndSkinnedFacesCulled)
+{
+	CHECK(render::meshCulled(true, false));
+	CHECK(!render::meshCulled(true, true));
+	CHECK(!render::meshCulled(false, false)); // static meshes: left two-sided
+}

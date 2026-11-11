@@ -300,6 +300,9 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 	if (!mover.vehicleMesh || mover.points.empty()) {
 		return;
 	}
+	if (walker(mover)) {
+		legsAgainstObjects(mover, seconds);
+	}
 	MeshActor m = actorOf(mover);
 	const float speedM = length(mover.body.velocity);
 	// The pair's tests before slot 9 (0x006dc7b0), with the candidate at the
@@ -399,7 +402,6 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 						return;
 					}
 					m = actorOf(mover); // the pre-trace may have moved it
-					legsSphere(mover, m, c);
 				}
 				// Its wheels' parts as movers of their own (their probes).
 				wheelProbes(mover, c, seconds);
@@ -427,7 +429,6 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 					return;
 				}
 				m = actorOf(mover);
-				legsSphere(mover, m, c);
 			}
 			wheelProbes(mover, c, seconds);
 		}
@@ -443,8 +444,6 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 				return;
 			}
 			m = actorOf(mover);
-			legsSphere(mover, m, c);
-			legsSphere(other, c, m);
 		}
 		wheelProbes(mover, c, seconds);
 		if (!asleep(other)) {
@@ -488,9 +487,121 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 					return;
 				}
 				m = actorOf(mover);
-				legsSphere(mover, m, c);
 			}
 			wheelProbes(mover, c, seconds);
+		}
+	}
+}
+
+// A walker's legs object as a mover of its own (0x006dc7b0 with it as
+// param_3): it holds the MechLegs response (its template's slot 31,
+// 0x0062dc20) and no collision mesh instance (MechLegs has no
+// collisionPart), so the dispatch takes its radius as 5 (local_8's
+// default), skips both box tests (they need the instance) and the
+// vertex-count one, and finds its candidates by its origin: within
+// (|vM| + |vC|) dt + 5 + rC (rC the candidate's LOD radius at the root's
+// otherCollisionLod, slot 0x1a4). The radii's rule then calls its slot 9
+// with the legs as A (legsSphere) unless 5 / rC is over 4: a candidate
+// under 1.25 m is met only both ways mobile, and the legs have no node of
+// their own. The hull is a mover apart (its Basic response, collideMover):
+// on a deck the hull's vehicle LOD box (us_heavy_mech's, 1.9 m under its
+// origin) stands over the deck's box, so tying the legs to the hull's
+// pair tests met the deck only on the ticks the body had sunk far enough:
+// every other tick, the walker never at rest.
+void GameWorld::legsAgainstObjects(Body& mover, float seconds)
+{
+	physics::Mat3 frame;
+	Vec3 origin;
+	if (!mover.vehicle->legsFrame(mover.body, frame, origin)) {
+		return;
+	}
+	constexpr float kLegsRadius = 5.0f; // 0x006dc7b0's local_8 without an instance
+	MeshActor m = actorOf(mover);
+	const float speedM = length(mover.body.velocity);
+	const auto meet = [&](MeshActor& asked, float speedC) {
+		MeshActor c = asked;
+		if (!atLod(c, m.otherLod) || !c.mesh) {
+			return;
+		}
+		const float reach = (speedM + speedC) * seconds + kLegsRadius + c.radius;
+		if (physics::lengthSquared(c.position - origin) > reach * reach) {
+			return;
+		}
+		if (kLegsRadius / std::max(c.radius, 1e-6f) > 4.0f) {
+			return;
+		}
+		legsSphere(mover, m, c);
+	};
+	// The static parts near the legs.
+	++m_staticStamp;
+	const float reachM = kLegsRadius + speedM * seconds;
+	const int x0 = static_cast<int>(std::floor((origin.x - reachM) / kStaticCell));
+	const int x1 = static_cast<int>(std::floor((origin.x + reachM) / kStaticCell));
+	const int z0 = static_cast<int>(std::floor((origin.z - reachM) / kStaticCell));
+	const int z1 = static_cast<int>(std::floor((origin.z + reachM) / kStaticCell));
+	for (int x = x0; x <= x1; ++x) {
+		for (int z = z0; z <= z1; ++z) {
+			const auto cell = m_staticGrid.find(gridKey(x, z));
+			if (cell == m_staticGrid.end()) {
+				continue;
+			}
+			for (const uint32_t i : cell->second) {
+				StaticPart& part = m_staticParts[i];
+				if (part.stamp == m_staticStamp) {
+					continue;
+				}
+				part.stamp = m_staticStamp;
+				MeshActor c = actorOf(part);
+				meet(c, 0);
+			}
+		}
+	}
+	if (m_predicting) {
+		return; // a LoneVehicle meets the static objects only
+	}
+	// The other bodies (each pair once: the legs are never a candidate,
+	// their response being neither a soldier's nor a static's), their parts
+	// and roots, and the Titans' parts.
+	std::vector<MeshActor> parts;
+	for (Body& other : m_bodies) {
+		if (&other == &mover || findDrone(other.object) || !m_objects.find(other.object)) {
+			continue;
+		}
+		partActors(other, parts);
+		for (MeshActor& c : parts) {
+			meet(c, length(other.body.velocity));
+		}
+		if (other.vehicleMesh && !other.points.empty()) {
+			MeshActor c = actorOf(other);
+			meet(c, length(other.body.velocity));
+		}
+	}
+	for (const Titan& titan : m_titans) {
+		Body* tb = findBody(titan.object);
+		if (!tb || tb == &mover) {
+			continue;
+		}
+		for (const std::shared_ptr<const Titan::VehiclePart>& shared : titan.vehicleParts) {
+			const Titan::VehiclePart& part = *shared;
+			if (part.lod != m.otherLod) {
+				continue;
+			}
+			MeshActor c;
+			c.body = tb;
+			c.points = &part.points;
+			c.pointMaterials = &part.pointMaterials;
+			c.mesh = part.mesh.get();
+			c.boxMin = part.boxMin;
+			c.boxMax = part.boxMax;
+			c.radius = part.radius;
+			c.rotation = tb->body.rotation;
+			c.position = tb->body.position;
+			c.velocity = tb->body.velocity;
+			c.controlObject = true;
+			c.collisionGroups = part.groups;
+			c.team = titan.team;
+			c.node = {std::max(tb->mass, 1e6f), true, false};
+			meet(c, length(tb->body.velocity));
 		}
 	}
 }
@@ -510,6 +621,11 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 // height under -(length - radius / 2)) is ground for the drive (+0x1c4,
 // +0x21c). A soldier (0xc42d) would lose the normal's height; the
 // rewrite's soldiers aren't bodies.
+bool GameWorld::walker(const Body& body)
+{
+	return body.vehicle && body.vehicle->legs() && body.wreckTime < 0;
+}
+
 void GameWorld::legsSphere(Body& walker, MeshActor& a, MeshActor& b)
 {
 	if (!walker.vehicle || !b.mesh || walker.wreckTime >= 0) {
@@ -540,7 +656,19 @@ void GameWorld::legsSphere(Body& walker, MeshActor& a, MeshActor& b)
 		n = l > 1.1920929e-07f ? n * (1.0f / l) : Vec3 {0, 1, 0};
 		const Vec3 relative = a.pointVelocity(point) - b.pointVelocity(point);
 		const uint32_t material = length(relative) >= 20.0f ? 4251u : 4250u;
-		addMeshContact(a, b, point, n, c.depth, material, c.material, false);
+		// The events, the other's side and the shares as the mesh pass's;
+		// the legs' own contact into their response's list (+0x258,
+		// 0x006ce680) at their velocity share, the push out (+0x1ac) the
+		// whole depth along the normal (solveLegs).
+		const physics::MassShares shares = addMeshContact(a, b, point, n, c.depth, material, c.material, false, false);
+		if (shares.velocityA != 0) {
+			physics::ContactMaterial contact;
+			if (m_materials) {
+				contact.elasticity = (m_materials->elasticity(material) + m_materials->elasticity(c.material)) * 0.5f;
+			}
+			contact.friction = 0; // the legs' solve has none
+			walker.legsResponse.addContact(point - a.position, relative * shares.velocityA, n, c.depth, contact);
+		}
 		walker.vehicle->legsObjectContact(n, faceNormal, offset.y < -(legs.length - legs.radius * 0.5f));
 	}
 }

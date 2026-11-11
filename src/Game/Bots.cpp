@@ -828,6 +828,14 @@ BotManager::~BotManager()
 		const auto name = m_drivenName.find(vehicle);
 		std::fprintf(stderr, "  driven %-20s %6.0f m\n", name != m_drivenName.end() ? name->second.c_str() : "?", metres);
 	}
+	float stuck = 0;
+	for (const auto& [bot, seconds] : m_stuckPerBot) {
+		stuck += seconds;
+	}
+	std::fprintf(stderr, "bots stuck (30 s windows under 2 m): %.0f s over %zu bots\n", stuck, m_stuckPerBot.size());
+	for (const auto& [name, seconds] : m_stuckSeconds) {
+		std::fprintf(stderr, "  stuck %-34s %6.0f s\n", name.c_str(), seconds);
+	}
 }
 
 // The bots' U[0, 1): AIDLL's twister (DAT_101394cc; genrand 0x10046770,
@@ -1650,6 +1658,27 @@ void BotManager::update(float seconds)
 		handleWeapon(bot, *self, input);
 		stepZoom(bot, *self, elapsed);
 		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->driving ? " (driving)" : " (seated)") : "")] += elapsed;
+		if (m_stats) {
+			// The stuck count's windows.
+			const std::string state = self->vehicle ? (self->driving ? "driving" : "seated") : "on foot";
+			StuckWindow& w = m_stuckWindows[self->id];
+			if (w.from < 0 || w.state != state || m_time - w.seen > 2) {
+				w = {m_time, m_time, self->position, state, {}};
+			}
+			w.seen = m_time;
+			w.behaviours[bot.behaviour] += elapsed;
+			if (m_time - w.from >= 30) {
+				if (physics::lengthSquared(self->position - w.at) < 4) {
+					const auto most = std::max_element(w.behaviours.begin(), w.behaviours.end(),
+						[](const auto& a, const auto& b) { return a.second < b.second; });
+					m_stuckSeconds[w.state + " " + most->first] += m_time - w.from;
+					m_stuckPerBot[self->id] += m_time - w.from;
+				} else {
+					m_stuckPerBot[self->id] += 0;
+				}
+				w = {m_time, m_time, self->position, state, {}};
+			}
+		}
 		if (self->vehicle && self->driving) {
 			m_driven[self->vehicle] += std::sqrt(horizontal2(self->velocity)) * elapsed;
 			if (const world::Object* o = m_world.objects().find(self->vehicle); o && o->objectTemplate()) {
@@ -2199,12 +2228,17 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	const int map = self.vehicle && self.driving ? 1 : 0;
 	// A squad member heads for its squad's order under way (squad +0x2c,
 	// state 2: 0x100c0130); without one it keeps the goal it had, or, with
-	// none, goes as a bot outside squads would.
+	// none, goes as a bot outside squads would. A goal kept from the other
+	// map (the bot took or left a driver's seat) is not kept: the squad's
+	// goals are tested on the map of the object the bot controls (the
+	// reachability test 0x100c1300 asks its Mobile part's map, 0x100a4330),
+	// and an infantry goal off the vehicle mesh fails every path request
+	// (0x100966c0), which left drivers standing at their spawn.
 	const Squad* squad = self.squad ? this->squad(self.team, self.squad) : nullptr;
 	if (squad && squad->state == 2 && squad->kind != 4) {
 		orderAt = squad->orderAt;
 		hasOrder = true;
-	} else if (squad && squad->state != 2 && bot.hasGoal && !bot.orderRegoal) {
+	} else if (squad && squad->state != 2 && bot.hasGoal && !bot.orderRegoal && bot.goalMap == map) {
 		return;
 	} else if (self.team == 1 || self.team == 2) {
 		const Side& side = m_sides[self.team];
@@ -2595,10 +2629,33 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 					bot.pickupAsked = true;
 				}
 			}
-			const physics::Vec3 d = at - self.position;
-			if (horizontal2(d) > 2.5f * 2.5f) {
-				steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
-			} else {
+			// The plan's walk and press (0x1006dac0, a soldier at a seat of a
+			// vehicle with a Mobile part): While (0x100d19c0) the seat isn't
+			// taken (NOT 0x100d4190, its test 0x100d41c0 over the seat's Unit,
+			// 0x100aa530), a Parallel ending with its first child (0x100cde50
+			// with 0) of
+			//  - MoveToObjectFinding (0x100cff90) at the vehicle with no
+			//    distance kept: to the vehicle's spot on the bot's map (its
+			//    step 0x100d07a0 reads the root's Mobile record, 0x100a4510),
+			//    so the bot walks on into the hull, the vehicle not an obstacle
+			//    to step round (0x10093310);
+			//  - Trigger (0x100d3110) of PIUse (input 10, mask 0x400) once
+			//    ObjectDistance (0x100d4480, run 0x100d4620: 3-D, the seat's
+			//    object to the bot's) is within the vehicle's radius (its
+			//    physical part's vt+0x28, the root's for a seat without one) +
+			//    the bot's + 1 m.
+			// The press goes to the game's use key (BF2142.exe 0x004bb570 ->
+			// the entry search 0x005a98e0: an EntryPoint within 3 m and its
+			// entryRadius), so the bot keeps walking and pressing until it
+			// stands within an entry point's reach.
+			// (The rewrite's choice on foot is the vehicle, any seat:
+			// its root's object and radius.)
+			float reach = kSoldierRadius + 1 + 2.5f;
+			for (const GameWorld::VehicleInfo& vehicle : m_vehicles) {
+				reach = vehicle.object == bot.vehicleTarget ? vehicleBox(vehicle).radius + kSoldierRadius + 1 : reach;
+			}
+			steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
+			if (physics::lengthSquared(at - self.position) < reach * reach) {
 				input.use = !bot.usedLast && working; // a press
 			}
 		}
@@ -7238,14 +7295,24 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		// The drivers' rays (0x100e8170: vslot 0x84 with 1000 polygons, no
 		// width, stopping at cost class 6, the class entered last, the
 		// climb test on).
+		// The room rays start at the vehicle's spot on the map (the Mobile
+		// part's record through 0x100927c0: its polygon and its point at
+		// the mesh's height), which the courier keeps while the vehicle is
+		// off the mesh; the rays from an obstacle look its polygon up.
 		const ai::ClimbLimits climb = follower.climb;
-		sense.ray = [&mesh, climb](const ai::Vec3& from, const ai::Vec3& end) {
+		const ai::MapSpot spot = bot.driveSpot;
+		if (spot.polygon >= 0) {
+			sense.hasRayStart = true;
+			sense.rayStart = spot.point;
+		}
+		sense.ray = [&mesh, climb, spot](const ai::Vec3& from, const ai::Vec3& end) {
 			ai::DriveRay ray;
-			if (mesh.findPolygon(from) < 0) {
-				return ray; // off the mesh (a spawn spot beside it): nothing known
+			const bool fromSpot = spot.polygon >= 0 && from.x == spot.point.x && from.y == spot.point.y && from.z == spot.point.z;
+			if (!fromSpot && mesh.findPolygon(from) < 0) {
+				return ray; // off the mesh (a vehicle never found on it): nothing known
 			}
 			ai::RayHit hit;
-			ray.clear = ai::meshRaycast(mesh, from, end, nullptr, -1, &ray.distance, -1, 0, 6, &climb, &hit);
+			ray.clear = ai::meshRaycast(mesh, from, end, nullptr, -1, &ray.distance, fromSpot ? spot.polygon : -1, 0, 6, &climb, &hit);
 			ray.lastClass = hit.lastClass;
 			return ray;
 		};

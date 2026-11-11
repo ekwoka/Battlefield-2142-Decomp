@@ -1676,6 +1676,20 @@ private:
 	std::map<std::string, float> m_behaviourSeconds;
 	std::map<uint32_t, float> m_driven;
 	std::map<uint32_t, std::string> m_drivenName; // the template, kept past the vehicle's removal
+	// $BF2142_BOT_STATS's stuck count: per bot, a 30 s window's start (its
+	// clock, place, and what the bot was: on foot, driving, seated) and the
+	// seconds of windows that ended under 2 m from their start, per state
+	// and the behaviour run longest in the window.
+	struct StuckWindow {
+		float from = -1, seen = -1;
+		physics::Vec3 at;
+		std::string state;
+		std::map<std::string, float> behaviours;
+	};
+	bool m_stats = std::getenv("BF2142_BOT_STATS") != nullptr;
+	std::map<int, StuckWindow> m_stuckWindows;
+	std::map<std::string, float> m_stuckSeconds;
+	std::map<int, float> m_stuckPerBot;
 	// When a human player of each team last got out of a vehicle (the unit
 	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
 	// exit event 0x00894860, read through vt+0x60 by the seat value), and
