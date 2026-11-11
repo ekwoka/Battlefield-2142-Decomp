@@ -961,9 +961,15 @@ public:
 		// reaching 0x100c1eb0 when it changes).
 		GameWorld::OrderType seenType = GameWorld::OrderType::None;
 		physics::Vec3 seenAt;
+		// The squad leader's order (SquadLeader.sendOrder) it last saw.
+		GameWorld::OrderType seenLeaderType = GameWorld::OrderType::None;
+		physics::Vec3 seenLeaderAt;
 		bool updated = false;
 	};
 	const Squad* squad(int team, int id) const;
+	// The order a squad's AI works from: a human commander's (the game's),
+	// else its side's SAI's; null for none.
+	const GameWorld::SquadOrder* squadOrder(int team, int id) const;
 	// The team's kits by kit index (the game's Team::kits), for the SAI's
 	// kit choice at respawn (0x100f04a0); without them the bots keep theirs.
 	void setTeamKits(int team, std::vector<std::pair<std::string, std::string>> kits);
@@ -1110,6 +1116,12 @@ private:
 		float fleeCamoFrom = -1;     // the camouflage's 4 s, from when it is in hand
 		// Movement: the path follower on foot and at the wheel.
 		ai::PathFollower follower;
+		// Its spots on the maps (the courier's records, AIDLL 0x10055650):
+		// the soldier's on the infantry mesh, kept each frame on foot, and
+		// the vehicle's on the vehicle mesh while it drives (driveObject).
+		ai::MapSpot footSpot;
+		ai::MapSpot driveSpot;
+		uint32_t driveObject = 0;
 		int followId = -1;           // what it follows (a goal id)
 		physics::Vec3 followTo;
 		float followAt = -100;
@@ -1282,6 +1294,12 @@ private:
 		float startedAt = 0;
 		float nextUpdate = 0;
 		std::map<int, int> squadArea; // squad -> area index it attacks/defends
+		// The SAI's order per squad. It stays in AIDLL (the squad's order,
+		// 0x100c1eb0): the AI never sends the game a commander's order
+		// (IBFCommander's order slots 3..5, 0x008971c0.., are never called),
+		// so no player sees it; a bot leader taking it orders its squad
+		// (BotManager::acceptOrder).
+		std::map<int, GameWorld::SquadOrder> orders;
 		std::vector<int> attacks, defences;
 		std::map<std::string, int> picks; // the strategy records' +0xc (ai::strategyTimeUp)
 		std::map<int, bool> lonerAttacks;  // steps 10 / 11: a bot outside squads -> attack (else defend)
@@ -1445,7 +1463,7 @@ private:
 	// The point MoveTo heads for now (the next strategic waypoint or area
 	// on the way, else the goal), popping those reached (0x1008aaa0).
 	physics::Vec3 moveTarget(Bot& bot, const GameWorld::PlayerInfo& self);
-	bool follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& from, const physics::Vec3& to, int goalId,
+	bool follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& start, const physics::Vec3& to, int goalId,
 		const ai::FollowerSettings& settings);
 	ai::DriveSettings driveSettings(const GameWorld::PlayerInfo& self) const;
 	// What the infantry steering's sidestep (AIDLL 0x100ce860, 0x100e63c0) sees:

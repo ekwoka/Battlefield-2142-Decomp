@@ -1047,9 +1047,16 @@ TEST(Bots_StrategyOrdersSquadsToAttack)
 	settle(bots, 1);
 	CHECK(bots.strategy(2) == "basicAttackEnemy");
 	for (int squad = 1; squad <= 2; ++squad) {
-		const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, squad);
-		CHECK(order && order->type == game::GameWorld::OrderType::Attack && order->accepted);
+		// The SAI's order stays the AI's: no commander order in the game
+		// (nothing for the HUD to show), but the bot leader taking it
+		// orders its squad (the leader's map attack, 0x008968d0).
+		const game::GameWorld::SquadOrder* order = bots.squadOrder(2, squad);
+		CHECK(order && order->type == game::GameWorld::OrderType::Attack);
 		CHECK(order && (near(order->position.z, 60) || near(order->position.x, 100)));
+		CHECK(!field.world->squadOrder(2, squad));
+		const game::GameWorld::SquadOrder* leader = field.world->squadLeaderOrder(2, squad);
+		CHECK(leader && leader->type == game::GameWorld::OrderType::MapAttack && !leader->fromCommander);
+		CHECK(leader && order && near(leader->position.x, order->position.x) && near(leader->position.z, order->position.z));
 	}
 	CHECK(bots.behaviour(team[0]) == "MoveTo");
 	for (int tick = 0; tick < 30 * 12; ++tick) {
@@ -1244,7 +1251,7 @@ TEST(Bots_CerbereLanding)
 	CHECK(bots.strategy(1) == "basicAttackEnemy" && bots.strategy(2) == "basicAttackEnemy");
 	const auto orderedTo = [&](int team, float x, float z) {
 		for (int squad = 1; squad <= 9; ++squad) {
-			const game::GameWorld::SquadOrder* order = world.squadOrder(team, squad);
+			const game::GameWorld::SquadOrder* order = bots.squadOrder(team, squad);
 			if (order && order->type == game::GameWorld::OrderType::Attack && near(order->position.x, x, 0.01f)
 				&& near(order->position.z, z, 0.01f)) {
 				return true;
@@ -4427,7 +4434,8 @@ TEST(Bots_FormationLineAndTrail)
 // The squad taking an order (0x100c1eb0, 0x100c21b0) and its formation
 // (0x100c0890): three EU bots in a squad take the SAI's attack order (on
 // PAC's point); the leader accepts it, says attack_position (16) on the
-// squad's channel (3), the game's order is accepted; the leader heads for
+// squad's channel (3) and orders its squad in the game (the leader's map
+// attack: the SAI's own order never reaches the game); the leader heads for
 // the order, the members for their slots in the line beside its spot
 // (3 (r + r) = 6.89 m aside). A second order is ignored while this one is
 // under way and no member is near it.
@@ -4451,10 +4459,13 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 		field.world->tick(1 / 30.0f);
 	}
 	const game::BotManager::Squad* squad = bots.squad(2, 1);
-	const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, 1);
+	const game::GameWorld::SquadOrder* order = bots.squadOrder(2, 1);
 	CHECK(squad && order && squad->members.size() == 3 && squad->state == 2 && squad->kind == 0);
-	CHECK(squad && order && order->accepted && std::fabs(squad->orderAt.x - order->position.x) < 1
+	CHECK(squad && order && std::fabs(squad->orderAt.x - order->position.x) < 1
 		&& std::fabs(squad->orderAt.z - order->position.z) < 1);
+	const game::GameWorld::SquadOrder* leaderOrder = field.world->squadLeaderOrder(2, 1);
+	CHECK(squad && leaderOrder && leaderOrder->type == game::GameWorld::OrderType::MapAttack
+		&& std::fabs(squad->orderAt.x - leaderOrder->position.x) < 1 && std::fabs(squad->orderAt.z - leaderOrder->position.z) < 1);
 	bool said = false;
 	for (const auto& r : bots.radioSent(team[0])) {
 		said = said || (r.type == 16 && r.channel == 3);

@@ -761,15 +761,17 @@ void Vehicle::updateLegs(physics::RigidBody& body, const physics::Ground& ground
 	} else if (l.state == 2 && l.yaw != 0) {
 		body.angularVelocity += up * (-l.yaw * 0.25f);
 	}
-	// The feet: a metre's probe down from 1.7 m to either side, 2.3 down.
+	// The feet: a metre's probe down from 1.7 m to either side, 2.3 down,
+	// against the heightmap (the objects' sphere is GameWorld's
+	// feetOnObjects, touchFeet).
 	const Vec3 right = m.rows[0];
 	if (ground.height) {
-		const Vec3 left = at - right * 1.7f - up * 2.3f, rightFoot = at + right * 1.7f - up * 2.3f;
-		if (ground.height(left.x, left.z) >= left.y - 1.0f) {
-			l.footLeft = 10;
+		const Vec3 left = at - right * kFootSide - up * kFootDown, rightFoot = at + right * kFootSide - up * kFootDown;
+		if (ground.height(left.x, left.z) >= left.y - kFootProbe) {
+			l.footLeft = kFootTicks;
 		}
-		if (ground.height(rightFoot.x, rightFoot.z) >= rightFoot.y - 1.0f) {
-			l.footRight = 10;
+		if (ground.height(rightFoot.x, rightFoot.z) >= rightFoot.y - kFootProbe) {
+			l.footRight = kFootTicks;
 		}
 	}
 	const int bits = (l.footLeft > 0 ? 1 : 0) | (l.footRight > 0 ? 2 : 0);

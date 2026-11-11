@@ -2641,3 +2641,85 @@ TEST(Vehicles_StaticGunnerSitsOnTheCockpit)
 	std::fprintf(stderr, "  static_av: gun yaw %.1f, gunner %.1f -> %.1f\n", yaw, before, after);
 	CHECK(std::fabs(yaw) > 5 && std::fabs(std::remainder(after - before - yaw, 360.0f)) < 1);
 }
+
+// A gunship parked on a helipad laid on the terrain (Suez_Canal's EU pad:
+// helipad_m, its deck 0.29 m over the flattened ground). Its landing gear
+// probes the pad from where the Spring's step (0x006caef0) left the parts,
+// at rest; probing from the pushed-out place missed the deck every third
+// tick, so the springs lost and found it in turn: the body never slept,
+// bounced at 2, 4, -6 m/s, lost hit points and, with throttle, beat itself
+// to pieces. It settles and sleeps undamaged, and lifts off smoothly.
+TEST(Vehicles_GunshipRestsOnAHelipad)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("helipad_m")) {
+		return;
+	}
+	g.objects.create(g.templates.find("helipad_m"), {0, 0, 8}, {0, 0, 0});
+	const uint32_t ag = g.start("us_ag", {0, 2.4f, 8}, 0.1f);
+	float fastest = 0;
+	for (int tick = 0; tick < 4 * 30; ++tick) {
+		const physics::Vec3 before = g.position(ag);
+		g.run(1 / 30.0f);
+		if (tick >= 60) {
+			fastest = std::max(fastest, std::fabs(g.position(ag).y - before.y) * 30);
+		}
+	}
+	const physics::Vec3 rest = g.position(ag);
+	std::fprintf(stderr, "  us_ag on the pad: %.2f m up, %.2f m/s at most after 2 s, %s, %.0f hit points\n", rest.y,
+		fastest, g.world->bodyAsleep(ag) ? "asleep" : "awake", g.world->hitPoints(ag));
+	CHECK(g.world->bodyAsleep(ag));
+	CHECK(fastest < 1);
+	CHECK(g.world->hitPoints(ag) == 1000);
+	CHECK(rest.y > 1.5f && rest.y < 4);
+	CHECK(g.enter(ag));
+	game::SoldierInput input;
+	input.throttle = 1;
+	float lowest = rest.y, sharpest = 0;
+	physics::Vec3 last = g.position(ag);
+	for (int tick = 0; tick < 3 * 30; ++tick) {
+		g.drive(input, 1 / 30.0f);
+		const physics::Vec3 p = g.position(ag);
+		sharpest = std::max(sharpest, std::fabs(p.y - last.y) * 30);
+		lowest = std::min(lowest, p.y);
+		last = p;
+	}
+	std::fprintf(stderr, "  with throttle: %.1f m up after 3 s, %.1f m/s at most vertically, %.0f hit points\n", last.y,
+		sharpest, g.world->hitPoints(ag));
+	CHECK(last.y > rest.y + 2);
+	CHECK(sharpest < 8);
+	CHECK(g.world->hitPoints(ag) == 1000);
+}
+
+// A walker on a bridge high over the terrain: its feet find the
+// deck (0x00650e90's sphere at each foot against the objects' meshes, not
+// only the heightmap's segment), so it isn't pushed sideways as over a
+// drop (30 a tick to the side of the foot in the air) and comes to rest.
+TEST(Vehicles_WalkerStandsOnADeck)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	// Suez_Canal's big bridge, its deck 20 m over the ground.
+	if (!g.templates.find("bc_big_bridge_a")) {
+		return;
+	}
+	g.objects.create(g.templates.find("bc_big_bridge_a"), {0, 20, 0}, {180, 0, 0});
+	const uint32_t mech = g.start("us_heavy_mech", {0, 23.5f, 0}, 4);
+	const physics::Vec3 a = g.position(mech);
+	g.run(4);
+	const physics::Vec3 b = g.position(mech);
+	const float drift = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
+	std::fprintf(stderr, "  us_heavy_mech on the deck: %.2f m up, %.2f m drift in 4 s, %s\n", b.y, drift,
+		g.world->bodyAsleep(mech) ? "asleep" : "awake");
+	CHECK(b.y > 20 && b.y < 26);
+	CHECK(drift < 0.5f);
+	CHECK(g.world->bodyAsleep(mech));
+}

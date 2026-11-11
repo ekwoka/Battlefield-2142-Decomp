@@ -545,6 +545,85 @@ void GameWorld::legsSphere(Body& walker, MeshActor& a, MeshActor& b)
 	}
 }
 
+// The MechLegs object's update (0x00650e90) tests each foot twice: a
+// metre's segment down through the heightmap from 1.7 m (*0x00a055f0) to
+// its side and 2.3 m (*0x00a055f4) down (Vehicle::updateLegs), then a
+// sphere of 0.5 m (*0x00a05600) round the point 1.7 m to the side and
+// 2.3 + 1 - 0.5 m down, so over the same metre, against the objects the
+// collision manager finds there (slot 0x44 with the filter 0x006f4b60,
+// flags 0x1000100, the legs' object left out): each one's mesh instance
+// (+0x4c) at its vehicle LOD (slot 0x60(1, ...)). Either sets the foot's
+// counter to 10 (*0x00a055fc), so a walker standing on a bridge or a
+// deck has its feet down and isn't pushed sideways as over a drop.
+void GameWorld::feetOnObjects(Body& walker)
+{
+	physics::Mat3 frame;
+	Vec3 origin;
+	if (!walker.vehicle || !walker.vehicle->legsFrame(walker.body, frame, origin)) {
+		return;
+	}
+	const Vec3 right = frame.rows[0], up = frame.rows[1];
+	const float down = Vehicle::kFootDown + Vehicle::kFootProbe - Vehicle::kFootRadius;
+	const Vec3 left = origin - right * Vehicle::kFootSide - up * down;
+	const Vec3 rightFoot = origin + right * Vehicle::kFootSide - up * down;
+	walker.vehicle->touchFeet(sphereTouchesObjects(walker, left, Vehicle::kFootRadius),
+		sphereTouchesObjects(walker, rightFoot, Vehicle::kFootRadius));
+}
+
+bool GameWorld::sphereTouchesObjects(Body& self, const Vec3& centre, float radius)
+{
+	std::vector<physics::SphereContact> contacts;
+	const auto touches = [&](const MeshActor& c) {
+		if (!c.mesh || !c.points || c.points->empty()) {
+			return false;
+		}
+		const float reach = radius + c.radius;
+		if (physics::lengthSquared(c.position - centre) > reach * reach) {
+			return false;
+		}
+		contacts.clear();
+		c.mesh->querySphere(c.rotation.untransform(centre - c.position), radius, contacts);
+		return !contacts.empty();
+	};
+	const int x0 = static_cast<int>(std::floor((centre.x - radius) / kStaticCell));
+	const int x1 = static_cast<int>(std::floor((centre.x + radius) / kStaticCell));
+	const int z0 = static_cast<int>(std::floor((centre.z - radius) / kStaticCell));
+	const int z1 = static_cast<int>(std::floor((centre.z + radius) / kStaticCell));
+	for (int x = x0; x <= x1; ++x) {
+		for (int z = z0; z <= z1; ++z) {
+			const auto cell = m_staticGrid.find(gridKey(x, z));
+			if (cell == m_staticGrid.end()) {
+				continue;
+			}
+			for (const uint32_t i : cell->second) {
+				if (touches(actorOf(m_staticParts[i]))) {
+					return true;
+				}
+			}
+		}
+	}
+	std::vector<MeshActor> parts;
+	for (Body& other : m_bodies) {
+		if (&other == &self || findDrone(other.object) || !m_objects.find(other.object)) {
+			continue;
+		}
+		if (other.vehicleMesh && touches(actorOf(other))) {
+			return true;
+		}
+		const float reach = radius + other.partReach;
+		if (other.partMeshes.empty() || physics::lengthSquared(other.body.position - centre) > reach * reach) {
+			continue;
+		}
+		partActors(other, parts);
+		for (const MeshActor& c : parts) {
+			if (touches(c)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 // Slot 9 of the mobile mesh response (0x006bb050), A into B.
 bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOnly)
 {
@@ -812,8 +891,10 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 	for (size_t w = 0; w < wheels.size(); ++w) {
 		const Vehicle::Wheel& wheel = wheels[w];
 		const float h = std::fabs(wheel.radius);
-		const Vec3 mount {wheel.mount.x, wheel.mount.y + wheel.compression, wheel.mount.z};
-		const Vec3 p0 = body.body.position + r.transform(mount);
+		// The part at its rest place: the Spring's step (0x006caef0) reads how
+		// far the last solve pushed it, then puts it back at rest (slot 0xe8
+		// with +0x260) before the collision passes run.
+		const Vec3 p0 = body.body.position + r.transform(wheel.mount);
 		const float partRadius = w < body.wheelRadii.size() ? body.wheelRadii[w] : h;
 		const float motion = (length(body.body.velocity) + length(b.body ? b.body->body.velocity : Vec3 {})) * seconds;
 		const float reach = motion + partRadius + b.radius;

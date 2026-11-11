@@ -442,6 +442,23 @@ public:
 	void legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below);
 	// The legs' drive (0x006cdca0), after every contact of the tick.
 	void legsDrive(physics::RigidBody& body);
+	// A foot found on an object (0x00650e90's sphere at each foot against
+	// the objects' meshes), as its heightmap probe does: its counter
+	// (+0x1c4 left, +0x1c8 right) back to 10.
+	void touchFeet(bool left, bool right)
+	{
+		if (left) {
+			m_legs.footLeft = kFootTicks;
+		}
+		if (right) {
+			m_legs.footRight = kFootTicks;
+		}
+	}
+	static constexpr int kFootTicks = 10;      // *0x00a055fc
+	static constexpr float kFootSide = 1.7f;   // *0x00a055f0: the feet's probes to either side
+	static constexpr float kFootDown = 2.3f;   // *0x00a055f4: and down
+	static constexpr float kFootProbe = 1.0f;  // *0x00a055f8: the heightmap segment's length
+	static constexpr float kFootRadius = 0.5f; // *0x00a05600: the objects' sphere
 	// The legs' frame in the world (the MechLegs node's matrix); false
 	// without legs.
 	bool legsFrame(const physics::RigidBody& body, physics::Mat3& frame, Vec3& origin) const

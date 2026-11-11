@@ -2858,6 +2858,13 @@ private:
 	void wheelProbes(Body& body, MeshActor& b, float seconds);
 	// A walker's legs' sphere against B (the MechLegs response's slot 0x24).
 	void legsSphere(Body& walker, MeshActor& a, MeshActor& b);
+	// A walker's feet on the objects under them (0x00650e90's second probe:
+	// a sphere at each foot against the objects' vehicle LODs), before its
+	// update.
+	void feetOnObjects(Body& walker);
+	// Whether a sphere (world centre and radius) touches the vehicle LOD of
+	// a static part or of another body (its root or a posed part).
+	bool sphereTouchesObjects(Body& self, const physics::Vec3& centre, float radius);
 	physics::MassShares addMeshContact(MeshActor& a, MeshActor& b, const physics::Vec3& point, const physics::Vec3& normal, float depth,
 		uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA = true);
 	std::vector<uint32_t> materialMap(const world::ObjectTemplate& objectTemplate) const;

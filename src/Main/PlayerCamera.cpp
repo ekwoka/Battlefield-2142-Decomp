@@ -965,10 +965,21 @@ void PlayerCamera::tick(float seconds)
 	// abrupt one-shots, so holding it would start them over every update.
 	// Only reloadAmount's round-at-a-time kinds hold it (4) and drop it (6);
 	// no shipped weapon sets reloadAmount.
-	if (reloadStarted) {
+	// A reload begun zoomed zooms out on its start (zoomOutOnReload): the
+	// zoom message going makes the root SwitchMessageTrigger queue its
+	// transition at priority 10000, which stops every bundle queued that
+	// update (0x008c43f0 -> 0x008bb770 slot 0x58), the reload with it. The
+	// rewrite sends the reload message the update after, so the reload
+	// plays from the zoom-out; the order of the exe's own firearm, zoom and
+	// animation updates within its frame isn't settled.
+	const bool zoomMessage = m_zoom.level() > 0;
+	const bool zoomDropped = m_zoomMessageWas && !zoomMessage;
+	if (m_reloadPulseNext || (reloadStarted && !zoomDropped)) {
 		input.pulses |= 2;
 	}
-	if (m_zoom.level() > 0) {
+	m_reloadPulseNext = reloadStarted && zoomDropped;
+	m_zoomMessageWas = zoomMessage;
+	if (zoomMessage) {
 		input.messages |= 4;
 	}
 	if (fired) {
@@ -1136,6 +1147,13 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 		return false;
 	}
 	const std::string& seatName = seats[static_cast<size_t>(me.seat)].name;
+	// The vehicle's seats as the round lays them out (GameWorld::vehicleLayout:
+	// the PlayerControlObjects with seatInformation, or every one of them
+	// when the vehicle names none, as eu_ifv's gun positions): the camera
+	// map leaves the nested seats' subtrees out (0x0058bdb0).
+	const auto isSeat = [&seats](const std::string& name) {
+		return std::any_of(seats.begin(), seats.end(), [&name](const auto& s) { return s.name == name; });
+	};
 	const world::ObjectTemplateManager& templates = m_round.templates();
 	const uint32_t object = vehicle->id();
 	// The gun's ToggleCameraComp (0x005db260): taken up, the seat's camera
@@ -1180,7 +1198,7 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 									: m_round.partPose(object, child.name, offset, rotation)) {
 					m = placement(offset, rotation) * m; // a joined game's: as the bundles' ghosts turn them
 				}
-				const bool seat = c->settings().count("seatInformation") != 0;
+				const bool seat = isSeat(c->name());
 				if (inSeat && seat) {
 					continue; // another seat's cameras
 				}

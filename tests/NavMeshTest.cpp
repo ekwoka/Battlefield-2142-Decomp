@@ -697,6 +697,35 @@ TEST(PathFollower_MeshRayRefusesASteepClimb)
 // 0x1003cb90): the point max(0.5, half the radius) towards the current
 // waypoint, behind a near-vertical rise (over 85 degrees, more than
 // 0.35 m), makes the follower press jump while it is moved.
+// The mover's spot on the map (the courier's record, AIDLL 0x10055650 ->
+// 0x100ac5f0; read by the request 0x10095fc0): found on the mesh it takes
+// the polygon and the mesh's height there; off the mesh it keeps the last
+// one. A request from no spot fails (a spawn off the mesh); from a kept
+// spot it plans from where the mover last stood on the mesh.
+TEST(PathFollower_StartsFromTheMapSpot)
+{
+	const ai::NavMesh m = buildGrid();
+	ai::MapSpot spot;
+	ai::updateMapSpot(m, spot, {-20, 1, 4.5f}, 5, nullptr); // off the mesh
+	CHECK(spot.polygon == -1);
+	ai::FollowerSettings settings;
+	ai::PathFollower follower;
+	follower.requestFrom(m, spot, {8.5f, 0, 4.5f}, settings, 0);
+	CHECK(follower.planned() && follower.failed());
+	ai::updateMapSpot(m, spot, {1.5f, 1.2f, 4.5f}, 5, nullptr);
+	CHECK(spot.polygon >= 0 && std::fabs(spot.point.y) < 1e-4f && std::fabs(spot.point.x - 1.5f) < 1e-4f);
+	const int32_t kept = spot.polygon;
+	ai::updateMapSpot(m, spot, {-20, 1, 4.5f}, 5, nullptr); // walked off: the spot stays
+	CHECK(spot.polygon == kept && std::fabs(spot.point.x - 1.5f) < 1e-4f);
+	ai::PathFollower again;
+	again.requestFrom(m, spot, {8.5f, 0, 4.5f}, settings, 0);
+	CHECK(again.planned() && !again.failed() && !again.waypoints().empty());
+	// The goal off the mesh fails the request first (0x100966c0).
+	ai::PathFollower offGoal;
+	offGoal.requestFrom(m, spot, {40, 0, 4.5f}, settings, 0);
+	CHECK(offGoal.failed());
+}
+
 TEST(PathFollower_SoldierJumpsAStepAhead)
 {
 	ai::NavMesh m = buildGrid();

@@ -461,6 +461,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			if (menuUp && options.menuCursor) {
 				menuCursor.show(options.menuCursor());
 			}
+			// A movie hides the cursor while it plays (0x0040bd90); a menu or
+			// a pointer shows it again.
+			if ((menuUp || pointer) && !SDL_CursorVisible()) {
+				SDL_ShowCursor();
+			}
 			if (options.wantsQuit && options.wantsQuit()) {
 				running = false;
 			}

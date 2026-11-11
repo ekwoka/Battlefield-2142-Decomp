@@ -314,18 +314,45 @@ void PathFollower::reset()
 	m_jump = false;
 }
 
-void PathFollower::request(const NavMesh& mesh, const Vec3& from, const Vec3& to, const FollowerSettings& settings, float now)
+void updateMapSpot(const NavMesh& mesh, MapSpot& spot, const Vec3& position, float heightTolerance,
+	const CostProfile* profile)
+{
+	float offset = 0;
+	int32_t polygon = -1;
+	if (spot.polygon >= 0 && static_cast<size_t>(spot.polygon) < mesh.polygons.size()
+		&& (!profile || profile->cost(mesh.polygons[static_cast<size_t>(spot.polygon)].costClass) >= 0)
+		&& mesh.standsOn(static_cast<uint32_t>(spot.polygon), position, heightTolerance, &offset)) {
+		polygon = spot.polygon;
+	} else {
+		polygon = mesh.findPolygon(position, heightTolerance, profile, &offset);
+	}
+	if (polygon >= 0) {
+		spot.polygon = polygon;
+		spot.point = {position.x, position.y + offset, position.z};
+	}
+}
+
+void PathFollower::requestFrom(const NavMesh& mesh, const MapSpot& start, const Vec3& to, const FollowerSettings& settings,
+	float now)
 {
 	if (m_planned && !m_failed && distance2XZ(to, m_goal) < 1e-4f && std::fabs(to.y - m_goal.y) < 1e-2f) {
 		return; // the same goal: keep following (0x10095fc0)
 	}
 	m_settings = settings;
 	m_goal = to;
-	plan(mesh, from, now);
+	plan(mesh, start, now);
 }
 
-void PathFollower::plan(const NavMesh& mesh, const Vec3& from, float now)
+void PathFollower::request(const NavMesh& mesh, const Vec3& from, const Vec3& to, const FollowerSettings& settings, float now)
 {
+	MapSpot start;
+	updateMapSpot(mesh, start, from, settings.options.heightTolerance, &settings.options.profile);
+	requestFrom(mesh, start, to, settings, now);
+}
+
+void PathFollower::plan(const NavMesh& mesh, const MapSpot& spot, float now)
+{
+	const Vec3& from = spot.point;
 	m_planned = true;
 	m_failed = false;
 	m_blocked = false;
@@ -341,27 +368,27 @@ void PathFollower::plan(const NavMesh& mesh, const Vec3& from, float now)
 	const Vec3 d = m_goal - from;
 	const float distance2 = d.x * d.x + d.y * d.y + d.z * d.z;
 	const CostProfile* profile = &m_settings.options.profile;
-	// A straight walk first (0x100952c0): under 200 m (0x101287b0), the
-	// mesh ray to the goal not entering cost class 5 (or 7).
-	if (distance2 < 40000 && meshRaycast(mesh, from, m_goal, profile, -1, nullptr, -1, 0, 5, &m_settings.climb)) {
-		Waypoint w;
-		w.p = m_goal;
-		w.polygon = mesh.findPolygon(m_goal, m_settings.options.heightTolerance, profile);
-		m_waypoints.push_back(w);
-		m_startPolygon = mesh.findPolygon(from, m_settings.options.heightTolerance, profile);
-		return;
-	}
-	// The start and the goal on the mesh (vslot 0x38, 0x1003f2d0: the
-	// polygon each stands on; none fails the request, 0x100966c0).
-	const int32_t start = mesh.findPolygon(from, m_settings.options.heightTolerance, profile);
+	// The goal on the mesh (vslot 0x38, 0x1003f2d0: the polygon it stands
+	// on; none fails the request, 0x100966c0), and the mover's spot on the
+	// map (0x10095fc0: none, the mover never found on the mesh, fails it).
+	const int32_t start = spot.polygon;
 	const int32_t goal = mesh.findPolygon(m_goal, m_settings.options.heightTolerance, profile);
-	if (start < 0 || goal < 0) {
+	if (start < 0 || static_cast<size_t>(start) >= mesh.polygons.size() || goal < 0) {
 		m_failed = true;
 		return;
 	}
 	m_startPolygon = start;
 	m_goalPolygon = goal;
 	m_requestFrom = from;
+	// A straight walk first (0x100952c0): under 200 m (0x101287b0), the
+	// mesh ray from the spot to the goal not entering cost class 5 (or 7).
+	if (distance2 < 40000 && meshRaycast(mesh, from, m_goal, profile, -1, nullptr, start, 0, 5, &m_settings.climb)) {
+		Waypoint w;
+		w.p = m_goal;
+		w.polygon = goal;
+		m_waypoints.push_back(w);
+		return;
+	}
 	// Over 100 m (+0x8c): the cluster search first (0x10095620).
 	if (distance2 > 10000 && m_settings.options.useClusters && !mesh.clusters.empty()) {
 		m_clusterPath = findClusterRoute(mesh, static_cast<uint32_t>(start), from, static_cast<uint32_t>(goal), m_goal,

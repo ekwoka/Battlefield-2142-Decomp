@@ -120,6 +120,23 @@ std::vector<Waypoint> pathWaypoints(const NavMesh& mesh, const std::vector<PathS
 // (as the original).
 void smoothWaypoints(std::vector<Waypoint>& waypoints, const Vec3& bot, float radius);
 
+// An object's spot on a map (AIDLL's per-map record, 0x100a4510 / 0x100a46c0:
+// polygon, tree, point): the polygon it was last found standing on and its
+// point at the mesh's height; no polygon until it is first found there.
+// Paths start from it (0x10095fc0), not from the object.
+struct MapSpot {
+	int32_t polygon = -1;
+	Vec3 point;
+};
+
+// The courier's update of a spot (0x10055650 -> the pathfinder's slot 0x34,
+// 0x1003f370 -> 0x100ac5f0): the polygon kept while the object still stands
+// on it (0x100b88e0), else the polygon it stands on (0x100ac590); found,
+// the point goes to the mesh's height there. Off the mesh the spot keeps
+// what it had: there is no search for the nearest polygon.
+void updateMapSpot(const NavMesh& mesh, MapSpot& spot, const Vec3& position, float heightTolerance,
+	const CostProfile* profile);
+
 struct FollowerSettings {
 	bool soldier = true;
 	float radius = 0.5f;   // the bot's (+0x100: its physical part's centre radius, vt+0x30)
@@ -142,6 +159,10 @@ public:
 
 	void reset();
 	// Plans a path to `to` unless it already follows one there (0x10095fc0).
+	// The path starts from the mover's spot on the map; without one (never
+	// on the mesh) the request fails (0x10095fc0: the record's polygon -1).
+	void requestFrom(const NavMesh& mesh, const MapSpot& start, const Vec3& to, const FollowerSettings& settings, float now);
+	// The same from a point, located on the mesh as the courier would.
 	void request(const NavMesh& mesh, const Vec3& from, const Vec3& to, const FollowerSettings& settings, float now);
 	// The steering point this tick (0x10095720 with the update 0x10095ac0).
 	Steer steer(const NavMesh& mesh, const Vec3& position, float now);
@@ -166,7 +187,7 @@ public:
 	size_t current() const { return m_current; }
 
 private:
-	void plan(const NavMesh& mesh, const Vec3& from, float now);
+	void plan(const NavMesh& mesh, const MapSpot& start, float now);
 	bool planSegment(const NavMesh& mesh, const Vec3& position, float now);
 	bool resync(const NavMesh& mesh, const Vec3& position);
 	bool reroute(const NavMesh& mesh, const Vec3& position, float now);

@@ -1469,6 +1469,12 @@ void BotManager::update(float seconds)
 				}
 			}
 		}
+		// The soldier's spot on the infantry map (the courier, 0x10055650):
+		// where its paths start (BotManager::steer).
+		if (m_navMesh && !self.vehicle) {
+			const ai::PathOptions options;
+			ai::updateMapSpot(*m_navMesh, bot.footSpot, toAi(self.position), options.heightTolerance, &options.profile);
+		}
 		// A team kill: BF2142.exe's kill (0x005b7680) raises the game's
 		// event (3, 0xb) with the killer and the victim of its team
 		// (0x00894860 -> IAIEventCourier slot 0xa8, 0x1004e3e0 -> the bot
@@ -2133,7 +2139,8 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 // it, else the nearest control point the team does not hold.
 // For an area the team does not hold the goal is a spot within 0.8 of
 // the control point's radius (the bot stays where it is when already
-// inside); otherwise a spot round the order position
+// inside), else the area's order position for the map (a driver's goal
+// always: 0x1005d940); otherwise a spot round the order position
 // (order + U * W * 0.8 - 0.5 W on each axis, as the original's
 // asymmetric 0x10063460; W = twice the area's radius), up to 20 tries for
 // one on the mesh. (A squad member's goal from its squad's order when it
@@ -2304,12 +2311,21 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	const auto valid = [mesh](const physics::Vec3& at) { return !mesh || mesh->findPolygon({at.x, at.y, at.z}) >= 0; };
 	routeVia(bot, self, areaIndex, map);
 	if (!held) {
+		// 0x1005d940: a driver (map 1), or an order position for the map
+		// outside the point's radius (0x1005d840), heads for the area's
+		// order position itself; otherwise a spot of the point's, and when
+		// 20 tries find none on the map, the order position again
+		// (the area's vt+0x10), not the point.
+		if (map == 1 || horizontal2(orderAt - point->position) > point->radius * point->radius) {
+			bot.goal = orderAt;
+			return;
+		}
 		const float r = point->radius * 0.8f;
 		if (horizontal2(self.position - point->position) <= r * r) {
 			bot.goal = self.position;
 			return;
 		}
-		bot.goal = point->position;
+		bot.goal = orderAt;
 		for (int attempt = 0; attempt < 20; ++attempt) {
 			const float angle = random() * 6.2831853f;
 			const float distance = std::sqrt(random()) * r;
@@ -3739,7 +3755,7 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 				area.inside = horizontal2(self.position - point.position) < area.radius * area.radius;
 			}
 		}
-	} else if (const GameWorld::SquadOrder* order = self.squad ? m_world.squadOrder(self.team, self.squad) : nullptr) {
+	} else if (const GameWorld::SquadOrder* order = self.squad ? squadOrder(self.team, self.squad) : nullptr) {
 		radius = order->radius;
 	}
 	bool arrived = false;
@@ -6771,7 +6787,7 @@ bool BotManager::explosiveClear(Bot& bot, const GameWorld::PlayerInfo& self, con
 // the 2 m are the rewrite's), plans again. After a failure (no path, or no
 // progress) the next request waits a second (a think's delay in the
 // original, which plans the move anew).
-bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& from, const physics::Vec3& to, int goalId,
+bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& start, const physics::Vec3& to, int goalId,
 	const ai::FollowerSettings& settings)
 {
 	const bool other = bot.followId != goalId;
@@ -6784,7 +6800,7 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& 
 	}
 	if (other || moved || !bot.follower.planned() || bot.follower.failed()) {
 		bot.follower.reset();
-		bot.follower.request(mesh, toAi(from), toAi(to), settings, m_time);
+		bot.follower.requestFrom(mesh, start, toAi(to), settings, m_time);
 		bot.followId = goalId;
 		bot.followTo = to;
 		bot.followAt = m_time;
@@ -6803,7 +6819,8 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& 
 // 0x100d1020 / 0x100d1040 / 0x100d1070 / 0x100d1090 and done test
 // 0x100d10b0; the Turn (0x100d0fc0, run by 0x100d0f50 / 0x100d0fb0) hands
 // the bot's sensing agent the point to look at (0x100d58b0).
-// Without a mesh or a path the bot walks straight at the goal. The jump
+// Without a path the bot stands (the step fails); the path starts from
+// the soldier's spot on the map (Bot::footSpot). The jump
 // the follower asks for (AIDLL 0x10092bc0) holds PIAction for 0.4 s (see steer).
 ai::SidestepSense BotManager::sidestepSense(const Bot& bot, const physics::Vec3& at, uint32_t own, const ai::NavMesh& mesh,
 	const ai::FollowerSettings& settings, const physics::Vec3& steerPoint, const physics::Vec3& goal, uint32_t object) const
@@ -6877,8 +6894,9 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		settings.soldier = true;
 		settings.radius = kSoldierRadius;
 		settings.climb = m_settings.climbLimits(0);
-		if (follow(bot, *m_navMesh, self.position, to, goalId, settings)) {
-			const ai::PathFollower::Steer steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time);
+		ai::PathFollower::Steer steer;
+		if (follow(bot, *m_navMesh, bot.footSpot, to, goalId, settings)) {
+			steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time);
 			if (steer.arrived) {
 				return false;
 			}
@@ -6899,6 +6917,16 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 				d = fromAi(way);
 				steered = true;
 			}
+		}
+		if (!steer.ok) {
+			// No path (the soldier never on the mesh, the goal off it, no
+			// way between) or a failed one: MoveToFinding's step fails
+			// (0x100d1300) and InfanteryMoveTo stops the soldier
+			// (0x1008fc90 -> 0x100e6120); the request is made again (follow).
+			input.throttle = 0;
+			input.strafe = 0;
+			bot.follower.progress(toAi(self.position), 0, m_time);
+			return true;
 		}
 	}
 	if (!steered) {
@@ -7180,7 +7208,13 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		follower.radius = settings.centreRadius;
 		follower.options.vehicle = true;
 		follower.climb = m_settings.climbLimits(1);
-		if (!follow(bot, *m_vehicleNavMesh, at, to, goalId, follower)) {
+		if (bot.driveObject != vehicle->object) {
+			bot.driveObject = vehicle->object;
+			bot.driveSpot = ai::MapSpot();
+		}
+		ai::updateMapSpot(*m_vehicleNavMesh, bot.driveSpot, toAi(at), follower.options.heightTolerance,
+			&follower.options.profile);
+		if (!follow(bot, *m_vehicleNavMesh, bot.driveSpot, to, goalId, follower)) {
 			brake();
 			// No progress for 20 s (0x10092bc0): the move fails and the
 			// behaviour plans again (0x100c91c0 hands the stuck bot to the
@@ -7962,15 +7996,16 @@ void BotManager::updateStrategy(float seconds)
 		}
 		// The orders: defend an owned area that is not contested, attack
 		// otherwise. (AIDLL's squad takes a new order, 0x100c1eb0 then
-		// 0x100c21b0 / 0x100c1fe0, its leader accepting it.)
+		// 0x100c21b0 / 0x100c1fe0, its leader accepting it.) They stay the
+		// AI's (Side::orders): the game's commander order, which the
+		// squad's HUD shows, is only ever a human commander's.
 		for (const auto& [id, area] : side.squadArea) {
 			const AreaView& v = views[static_cast<size_t>(area)];
 			const bool defend = v.point->team == team;
-			const GameWorld::OrderType type = defend ? GameWorld::OrderType::Defend : GameWorld::OrderType::Attack;
-			const GameWorld::SquadOrder* order = m_world.squadOrder(team, id);
-			if (!order || order->type != type || horizontal2(order->position - v.order) > 1) {
-				m_world.issueOrder(team, id, type, v.order.x, v.order.z, -1);
-			}
+			GameWorld::SquadOrder order;
+			order.type = defend ? GameWorld::OrderType::Defend : GameWorld::OrderType::Attack;
+			order.position = {v.order.x, m_world.terrainHeight(v.order.x, v.order.z), v.order.z};
+			side.orders[id] = order;
 			// The squad takes it at its next update (0x100c1eb0) and its bot
 			// leader answers (0x100c21b0, BotsSquad.cpp).
 		}

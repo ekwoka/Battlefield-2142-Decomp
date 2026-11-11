@@ -639,7 +639,22 @@ only push. The friction goes to the body's tyre mean.
 class 0xc432): inputs taken 10 ticks after a change of state (walk,
 back, turn left/right, crouch); 7.5 m/s forward (× 1.3 sprinting), 4.5
 back, 0.25 rad/s a tick turning; the feet's probes 1.7 m to the sides push
-sideways by 30 when one is off the ground. The response replaces the
+sideways by 30 when one is off the ground. Each foot is probed twice
+(`0x00650e90`): a metre's segment down through the heightmap from 2.3 m
+under the legs (`*0x00a055f0` 1.7, `*0x00a055f4` 2.3, `*0x00a055f8` 1),
+then a 0.5 m sphere (`*0x00a05600`) round the point 2.8 m down against
+the objects the collision manager finds there (slot `0x44`, the filter
+`0x006f4b60` with flags `0x1000100`), each one's mesh instance at its
+vehicle LOD (slot `0x60(1, …)`); either sets the foot's counter
+(`+0x1c4` / `+0x1c8`) to 10 (`*0x00a055fc`). So a walker on a bridge or
+a deck stands with its feet down; with the heightmap's probe alone (the
+rewrite before) it was pushed sideways as over a drop and slid along
+Suez_Canal's bridges without sleeping (`GameWorld::feetOnObjects`,
+`Vehicle::touchFeet`; `Vehicles_WalkerStandsOnADeck`). Not settled: on
+Suez_Canal's industrial bridge (-512/50/-36) a mech still never sleeps,
+its legs' sphere touching the deck every other tick (the contact's
+vertical impulse is halved, `0x006c8380`, against its gravityModifier's
+pull); it holds its place. The response replaces the
 hull's ground points: the legs' segment from stepHeight above the foot
 (length under the legs' object) to the heightmap, the body pushed up and
 the approach taken out, then the drive: the velocity along the ground to
@@ -991,8 +1006,21 @@ them; the contact's depth is how far the end lies behind that face,
     inwards and ends where it would have; `d` is zeroed. A static part of
     under 4 vertices then has no way at all. Rewritten for
     `Vehicle::Wheel`s as movers of their own (`GameWorld::wheelProbes`:
-    h is the wheel's `radius`, the part at its mount and compression,
-    turned by its steer; its radius its geometry's LOD radius).
+    h is the wheel's `radius`, the part at its rest place, turned by its
+    steer; its radius its geometry's LOD radius). The part is at rest
+    when the probe runs: the Spring's step (`0x006caef0`) reads how far
+    the last solve pushed it from its rest place (`+0x260`) and puts it
+    back there (slot `0xe8`) before the collision passes. (The rewrite
+    probed from the pushed-out place: a compressed landing gear's probe
+    then ended over the deck and missed it, the spring lost and found the
+    deck every few ticks, and a gunship on Suez_Canal's EU helipad,
+    helipad_m 0.29 m over the flattened terrain, bounced at +2, +4, −6
+    m/s, never slept, lost hit points parked and was beaten to pieces
+    with throttle; tanks, FAVs, APCs and transports crept and lost hit
+    points on bridges and Titan decks. The terrain and the mesh were
+    never added up: the wheel takes the higher of the two, as the
+    response's push out keeps the larger per axis, `0x006b6bd0`.
+    `Vehicles_GunshipRestsOnAHelipad`.)
 - **Pass 1, the edges** (A a PlayerControlObject root, B's root static,
   `*0x00a84214` = 1): the edges of A's LOD-1 faces no steeper than 30° off
   the vertical (|n.y| ≤ 0.866, `0x006e1430`, kept at load in
@@ -2707,7 +2735,23 @@ children (by `cameraId`, `0x0058bdb0`), placed by the template tree, so a
 gunner's camera under the gun's pitch bundle follows the gun; its
 `insideFOV`. The seat's cameras are mapped by `CameraId` (0 by default);
 the rewrite takes the seat's camera with id 0 (nested seats left out) and
-turns the bundles as `GameWorld::partPose` does.
+turns the bundles as `GameWorld::partPose` does. The nested seats are the
+round's seats (`GameWorld::vehicleLayout`): in a vehicle that names no
+`seatInformation` every PlayerControlObject is one (eu_ifv's grenade
+launchers and machine guns); the camera walk took only those with
+`seatInformation` as seats, found no camera for such a gunner and fell
+back to the seated soldier's eye inside the hull, which drew the hull's
+walls round the view (`PlayerCamera_UnnamedSeatsUseTheirOwnCameras`).
+No seat camera is kept out of the world's geometry: the Camera object's
+code (`0x0060f000`–`0x00617000`: the Nose, Chase, FrontChase, FlyBy and
+Trace views, the death, follow and free cameras) asks only the
+heightmap's terrain (slot `0x6c`) and sea (slot `0x98`) heights, and
+`0x00611fc0` (the Inside and Nose modes) only measures how near the
+objects round the camera are (flags `0x1000008`, `+0x3d0`); a gun pushed
+into a wall shows the wall's inside, as in the exe. (eu_ifv's grenade
+launcher seats, camera cockpitSubGeom 1, see the world through a heavy
+blur in the rewrite, likely the vehicle's shield or the launcher's
+CameraEffect; not followed here.)
 
 **The seat camera's shakes** (the Camera object's per-tick `0x00610240`;
 the view matrix `0x00610620` rolls about its forward row by the sum of
@@ -12673,11 +12717,17 @@ vehicle's riders as hit.
   (+0x44, 0x100aa420: here the health the area pass then uses for an enemy
   unit's strengths). Hearing forces one (+0x20 to −1).
 - **Orders:** attack or defend orders go to the area's order position.
-  Squads under a human commander keep that player's orders.
+  Squads under a human commander keep that player's orders. The SAI's
+  own orders never become the game's commander orders (see Squads).
 - **Goals** (0x10060300): a bot heads for a spot within 0.8 of the
-  control point's radius when its team does not hold the point. Otherwise
-  it heads for `order + U × 0.8W − 0.5W`. It is re-ordered 35 s (20 s for
-  a leader) after arriving.
+  control point's radius when its team does not hold the point
+  (0x1005d940, 20 tries on the map, then the area's order position for
+  the map, its vt+0x10; not the point). A driver (map 1), or an order
+  position outside the point's radius (0x1005d840), heads for the area's
+  order position for the map itself: a vehicle's goal is the area's
+  `setOrderPosition Vehicle` point, which the level's makers put on the
+  vehicle mesh. Otherwise it heads for `order + U × 0.8W − 0.5W`. It is
+  re-ordered 35 s (20 s for a leader) after arriving.
 - **AI commander** (0x1009c050; not a player, see "Commander"): for a
   team with bots and no commander it shells a spot of the first held
   point whose flag is below 0.75 with the artillery (the SAI's slot 0x68,
@@ -12724,13 +12774,23 @@ follower (bot +0xd8, constructor 0x10094f10) for a path when the goal
 changes (0x100966c0 → 0x10095fc0).
 
 - **Path:**
-  - First a straight walk over the mesh (0x100952c0): under 200 m, the
-    mesh ray to the goal (up to 1000 polygons, no width) not entering cost
-    class 5 (or 7).
-  - Otherwise the start and the goal on the mesh (vslot 0x38, 0x1003f2d0:
-    the polygon each stands on, a height tolerance of 2.5 m for bot kind 3
-    and 5 m for the others; none fails the request, 0x100966c0; there is
-    no search nearby). Over 100 m (+0x8c) the cluster search runs first
+  - The goal on the mesh first (vslot 0x38, 0x1003f2d0: the polygon it
+    stands on, a height tolerance of 2.5 m for bot kind 3 and 5 m for the
+    others; none fails the request, 0x100966c0; there is no search
+    nearby). The start is not the mover's position but its spot on the
+    map (0x10095fc0 reads the unit's per-map record, 0x100a46c0 /
+    0x100a4510: polygon, tree, point), which the courier (0x10055650 →
+    pathfinder slot 0x34, 0x1003f370 → 0x100ac5f0) keeps: the polygon
+    while the object still stands on it (0x100b88e0), else the one it
+    stands on (0x100ac590), the point at the mesh's height; off the mesh
+    the record keeps the last spot. A mover never found on the mesh (a
+    spawn off it) has none and every request fails; one that left the
+    mesh plans from where it last was on it (`ai::MapSpot`,
+    `ai::updateMapSpot`, `Bot::footSpot` / `driveSpot`).
+  - Then a straight walk over the mesh from that spot (0x100952c0): under
+    200 m, the mesh ray to the goal (up to 1000 polygons, no width) not
+    entering cost class 5 (or 7).
+  - Otherwise Over 100 m (+0x8c) the cluster search runs first
     (0x10095620, vslot 0x24) and keeps {cluster, entry link} per step.
   - Then polygon searches in segments (0x100962e0, vslot 0x20): from the
     last waypoint (the start for the first) to the link into the cluster
@@ -12803,6 +12863,17 @@ changes (0x100966c0 → 0x10095fc0).
 - **Infantry** (InfanteryMoveTo 0x1008fc90): the look turned to the
   steering point 5 m ahead (the aim controller turns the soldier), the
   throttle at the order's speed over maxSpeed (0x100e6060), no strafing.
+  Without a path (MoveToFinding's step 0x100d1300 failing: no spot on the
+  map, the goal off the mesh, no way) the soldier is stopped (0x100e6120)
+  and the move fails; it doesn't walk straight at the goal.
+- **Meshes that don't cover the level:** the shipped meshes were built
+  for the single-player and co-op modes' areas. Suez_Canal's infantry
+  mesh spans x −712..260 (z −238..163) only, so in Titan mode (gpm_ti 48,
+  not a mode the original runs bots in: no `AI/AI.ai` in multiplayer, no
+  gpm_ti `StrategicAreas.ai`) PAC's Outpost spawns (x 553..617) and its
+  point (907) lie off it: bots spawned there stand, and the EU's attack
+  on 907 has no goal on the mesh. Bots on a Titan's deck are off the mesh
+  too.
 - **Vehicles** (the Unit plug-in's equipment picks the interpreter:
   CarMoveTo 0x10091050 for Car and ArmedCar, MechMoveTo 0x1008d250,
   FloatingTankMoveTo 0x1008c7c0, TankMoveTo 0x10091b40 for the rest),
@@ -13414,7 +13485,7 @@ squad every 18 frames.
 
 - **Orders** (state +0x98: 0 none, 1 taken, 2 under way; kind +0x38: 0
   attack, 1 defend, 2 move, 4 none). The game's order event (0x10089480;
-  here a change of `GameWorld::squadOrder`) reaches 0x100c1eb0: a
+  here a change of `BotManager::squadOrder`) reaches 0x100c1eb0: a
   commander's order (the SAI's are) is taken only by a squad with none,
   and without a human commander only while no member stands within 30 m
   (+0x50 900) of the old order's spot in an area the side doesn't hold
@@ -13431,7 +13502,21 @@ squad every 18 frames.
   roger_that (6, channel 4, 2.5 s) to a human commander and
   attack_position (16) / defend (15) / move (17) to the squad (channel 3,
   2 s); the game's order is accepted for it (IBFSquad 0x28; 0x2c
-  refuses). Every member re-goals.
+  refuses), and the bot leader orders its squad in the game: IBFSquad
+  0x1c / 0x24 / 0x20 by kind (BF2142.exe's adaptor, vtable 0x009d65a0:
+  0x008968d0 / 0x00896910 / 0x008968f0 → 0x00896830 → the squad
+  manager's slot 0x48, SquadLeader.sendOrder) a map attack (5), defend
+  (6) or move (4) at the order's spot: the squad leader's order marker
+  its members' HUD shows. Every member re-goals.
+- **The SAI's orders stay in AIDLL**: AIDLL never calls IBFCommander's
+  order slots (3..5, 0x008971c0 / 0x008971e0 / 0x00897200 → the squad
+  manager's slot 0x4c, the commander's order), so without a human
+  commander no commander order exists in the game and no player sees one
+  (`BotManager::Side::orders`, read with the human commander's through
+  `BotManager::squadOrder`). A human member of a bot-led squad sees its
+  leader's order; a human leader sees none. A squad leader's own order
+  reaches the squad as the event with its flag 0 (0x10089480 reading
+  the game's leader order, slot 0x50).
 - **Ending:** an attack ends once the side holds the area; a defence of a
   held area while the enemy holds an area whose point can change hands
   (0x1009c660 over IAIGame slot 0x24, 0x00895d90). The SAI letting go of

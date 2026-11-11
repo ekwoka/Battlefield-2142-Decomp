@@ -302,6 +302,8 @@ private:
 	anim::ZoomSettings m_zoomSettings;
 	int m_roundsWas = -1;
 	bool m_reloadingWas = false;
+	bool m_zoomMessageWas = false;  // the first-person systems' message 4 last update
+	bool m_reloadPulseNext = false; // a reload begun as the zoom went: its message next update
 	// The muzzle effects among the weapon's children (FireComp 0x005f25f0):
 	// those named "zoom" flash while zoomed with disableMuzzleWhenZoomed,
 	// the others otherwise (0x005f31d0, 0x005da050).

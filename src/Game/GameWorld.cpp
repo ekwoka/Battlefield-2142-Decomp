@@ -12968,6 +12968,9 @@ bool GameWorld::stepBody(Body& b, float seconds)
 		if (b.animation) {
 			b.vehicle->setLegsAnimation(b.animation->blocksInput(), b.animation->speedFactor());
 		}
+		if (b.vehicle->legs()) {
+			feetOnObjects(b);
+		}
 		b.vehicle->tick(body, m_ground, seconds, grip);
 	}
 	if (b.canopy) {
