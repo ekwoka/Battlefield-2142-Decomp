@@ -43,6 +43,14 @@ anything taken from the retail files, such as decompiler output dumps, game
 archives, or shaders copied verbatim. Commit only our own source, symbol and
 annotation files, and tools.
 
+### Use and remixing
+
+This project's code was written by AI, with a human guiding it. Because of
+that, there are no IP protections on this repository's own code: use it, copy
+it, change it and remix it however you see fit. This covers only what is in
+this repository. Battlefield 2142 itself, its assets and its trademarks belong
+to their owners and still need your own copy of the game.
+
 ## Repository layout
 
 ```
