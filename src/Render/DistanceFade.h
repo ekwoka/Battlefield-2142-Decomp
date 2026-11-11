@@ -89,6 +89,17 @@ inline float boxHalfDiagonal(const std::array<float, 3>& min, const std::array<f
 	return 0.5f * std::sqrt(x * x + y * y + z * z);
 }
 
+// A soldier's radius. The object's radius (0x006f7ec0) is its collision
+// component's when it has one (+0x4c, 0x006dedb0: the first LOD's +0xc0,
+// the box corner farthest from the origin), and every soldier template
+// names the built-in Soldier_CollisionMesh (0x006e4880: x and z +-0.4,
+// y -1..0.8 about the physics origin). Its UAVTarget child has no radius,
+// so it doesn't widen it (kit weapons assumed at the origin; unchecked).
+inline float soldierCullRadius()
+{
+	return std::sqrt(0.4f * 0.4f + 1.0f + 0.4f * 0.4f);
+}
+
 // One root object's record (0x006ff110 + 0x006fb280).
 struct CullRecord {
 	float minArea = 0;  // p0

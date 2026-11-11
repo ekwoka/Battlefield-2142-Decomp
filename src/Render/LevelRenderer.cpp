@@ -1982,8 +1982,10 @@ void LevelRenderer::syncObjects()
 				}
 				instance.cullActor = t->typeName() == "Soldier" || t->typeName() == "PlayerControlObject";
 			}
-			// A skinned mesh (a soldier) has no sphere; its box's radius.
-			const float radius = instance.mesh->skinned ? instance.mesh->skinnedRadius : instance.mesh->bounds.radius;
+			// A soldier: his collision box's; another skinned mesh has no
+			// sphere, so its geometry's box radius (RendDX9 0x10160d60).
+			const float radius = t && t->typeName() == "Soldier" ? soldierCullRadius()
+				: instance.mesh->skinned ? instance.mesh->skinnedRadius : instance.mesh->bounds.radius;
 			instance.cullRadius = std::max(radius, 0.0f) * scale;
 		}
 		if (!instance.parts.empty() && m_sources->partTransforms) {

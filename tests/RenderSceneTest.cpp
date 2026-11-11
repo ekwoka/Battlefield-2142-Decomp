@@ -118,7 +118,10 @@ TEST(RenderScene_SoldierDistanceFadeUsesTheSkinnedMeshRadius)
 	const auto& box = mesh->geometries[1].lods[0].bounds; // the third-person body
 	const float radius = render::boxHalfDiagonal(box.min, box.max);
 	CHECK(radius > 1.0f && radius < 1.3f);
-	const float far = cutoff(radius * 2.5f, 1); // us_light_soldier's cullRadiusScale
+	CHECK(cutoff(radius * 2.5f, 1) > 150); // another skinned mesh: its box
+	// A soldier: Soldier_CollisionMesh's box radius, within 1% of his mesh's.
+	CHECK(std::fabs(render::soldierCullRadius() - 1.1489f) < 0.001f);
+	const float far = cutoff(render::soldierCullRadius() * 2.5f, 1); // cullRadiusScale 2.5
 	CHECK(far > 150 && far < 200);
 }
 
