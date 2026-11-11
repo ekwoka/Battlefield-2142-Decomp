@@ -1,4 +1,5 @@
 #include "Viewer.h"
+#include "DisplayModes.h"
 
 #include "Render/GpuContext.h"
 #include "Render/LevelRenderer.h"
@@ -412,9 +413,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		render::Camera camera = level.suggestedCamera();
 		applyCameraOption(camera, options.camera);
 		const bool playing = static_cast<bool>(options.playerView);
-		if (options.onMenuInput || options.onHudText) {
-			SDL_StartTextInput(window);
-		}
+		// Text input is on only while a menu or the chat line takes typing:
+		// left on in play, macOS reads held movement keys as typing and
+		// opens its accent picker over the game (port addition).
+		bool textInput = false;
 		if (options.onMenuInput && !options.menuActive) {
 			std::printf("the menu has the mouse and keyboard; close the window to quit\n");
 		} else if (playing) {
@@ -465,6 +467,15 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			// a pointer shows it again.
 			if ((menuUp || pointer) && !SDL_CursorVisible()) {
 				SDL_ShowCursor();
+			}
+			const bool typing = menuUp || (options.onHudText && options.wantsText && options.wantsText());
+			if (typing != textInput) {
+				textInput = typing;
+				if (typing) {
+					SDL_StartTextInput(window);
+				} else {
+					SDL_StopTextInput(window);
+				}
 			}
 			if (options.wantsQuit && options.wantsQuit()) {
 				running = false;
@@ -852,23 +863,19 @@ std::unique_ptr<Window> Window::open(int width, int height)
 
 bool Window::closed() const { return impl->closed; }
 
-// RendDX9's 0x10010830 lists the adapter's modes as "%ix%i@%iHz", each
-// once. It keeps only the modes of the desktop's format and at least 800
-// wide (799 < width); every mode SDL gives is listed here.
-std::vector<std::string> Window::displayModes() const
+// RendDX9's 0x10010830: the modes ≥ 800 wide of 32 bits, 4:3 only without
+// "+widescreen 1", ascending (DisplayModes.h has the original's filters).
+std::vector<std::string> Window::displayModes(bool wideScreen) const
 {
-	std::vector<std::string> modes;
+	std::vector<DisplayMode> modes;
 	int count = 0;
 	SDL_DisplayMode** list = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(impl->window), &count);
 	for (int i = 0; list && i < count; ++i) {
-		const std::string mode = std::to_string(list[i]->w) + "x" + std::to_string(list[i]->h) + "@" +
-			std::to_string(static_cast<int>(std::lround(list[i]->refresh_rate))) + "Hz";
-		if (std::find(modes.begin(), modes.end(), mode) == modes.end()) {
-			modes.push_back(mode);
-		}
+		modes.push_back({list[i]->w, list[i]->h, static_cast<int>(std::lround(list[i]->refresh_rate)),
+			static_cast<int>(SDL_BYTESPERPIXEL(list[i]->format)) * 8});
 	}
 	SDL_free(list);
-	return modes;
+	return listDisplayModes(std::move(modes), wideScreen);
 }
 
 void Window::setSize(int width, int height) { SDL_SetWindowSize(impl->window, width, height); }

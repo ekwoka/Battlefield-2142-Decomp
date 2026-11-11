@@ -191,6 +191,7 @@ struct Options {
 	float movieSeconds = 1;      // --movie-seconds: with --screenshot, the movie's frame at that time
 	std::string lanAddress = "255.255.255.255"; // --lan <address>: where the LOCAL page's search probes
 	std::string playerName;      // --name N: our name on a server (ChangePlayerName)
+	bool wideScreen = false;     // +widescreen 1: WideScreenEx (0x00409950 case 0x13), modes wider than 4:3 listed
 	std::string probe;           // --probe host[:port]: shake hands and show what the server sends
 	// Network diagnostics for a joined game (Net/NetDiagnostics.h):
 	std::string netLog;          // --net-log <file>: every datagram in and out, hex and decoded, and the problems
@@ -432,6 +433,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.lanAddress = argv[++i];
 		} else if (arg == "--name" && hasValue) {
 			options.playerName = argv[++i];
+		} else if (arg == "+widescreen" && hasValue) {
+			options.wideScreen = std::atoi(argv[++i]) != 0;
 		} else if (arg == "+dedicated" && hasValue) {
 			options.dedicated = std::atoi(argv[++i]) != 0;
 		} else if (arg[0] == '+' && hasValue) {
@@ -3615,7 +3618,7 @@ int runGame(Options& options, Session& session)
 			if (!session.window) {
 				return 1;
 			}
-			session.menuBindings->setDisplayModes(session.window->displayModes());
+			session.menuBindings->setDisplayModes(session.window->displayModes(options.wideScreen));
 			applySettings();
 			// The start-up movies first (Esc skips the skippable ones).
 			if (options.movies && !playMovies(*session.window, session.movies, options)) {

@@ -1872,7 +1872,9 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	create("createObjectSelectionNode", kOther);
 	create("createTileNode", kOther);
 	create("createEditNode", kEdit);
-	bindMethod(console, "HudBuilder.setEditNodeFont", access, [active](std::string font, int) {
+	// setEditNodeFont 0x00765755 / 0x007657e3 / 0x0076584e: a string and a
+	// bool (the parser's operator>>(bool&)).
+	bindMethod(console, "HudBuilder.setEditNodeFont", access, [active](std::string font, bool) {
 		if (Node* n = active()) {
 			n->font = font;
 		}
@@ -1999,10 +2001,12 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
-	bindMethod(console, "HudBuilder.setCompassNodeTextureSize", access, [active](float w, float h) {
+	// setCompassNodeTextureSize 0x0076b4ff / 0x0076b613 / 0x0076b58c: two
+	// ints, which 0x007b0880 hands the compass node's slot 300 as floats.
+	bindMethod(console, "HudBuilder.setCompassNodeTextureSize", access, [active](int w, int h) {
 		if (Node* n = active()) {
-			n->compassTextureSize[0] = w;
-			n->compassTextureSize[1] = h;
+			n->compassTextureSize[0] = static_cast<float>(w);
+			n->compassTextureSize[1] = static_cast<float>(h);
 		}
 		return true;
 	});
@@ -2113,14 +2117,16 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
+	// setNodeLogicShowVariable 0x0076e090 / 0x0076e140 / 0x0076e1ca: two
+	// strings and an int (the executor hands them to 0x007b0fd0).
 	bindMethod(console, "HudBuilder.setNodeLogicShowVariable", access,
-		[active](std::string op, std::string variable, float value) {
+		[active](std::string op, std::string variable, int value) {
 			if (Node* n = active()) {
 				std::string o = op;
 				for (char& c : o) {
 					c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 				}
-				n->logic.push_back({o, variable, value});
+				n->logic.push_back({o, variable, static_cast<float>(value)});
 			}
 			return true;
 		});

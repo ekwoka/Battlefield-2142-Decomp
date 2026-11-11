@@ -972,3 +972,52 @@ TEST(Titan_FallingBotOpensItsParachute)
 	CHECK(rode && info.alive && !info.vehicle);
 	CHECK(info.position.y < pac.position.y - 100); // on the ground
 }
+
+// Suez_Canal's EU Titan: a soldier walking out of its spawn room crosses
+// the deck's seams, a centimetre or two down, and spends a tick in the air
+// at each. The Soldier asks for no velocity in the air (0x00588420) and the
+// movement (0x006c2230) keeps the one asked last, so he lands walking on;
+// with the air's "none" taken instead he braked to 1.8 m/s for two ticks at
+// every seam (3.6 m/s on average over the room instead of 3.8).
+TEST(Titan_SoldierWalksOverTheDeckSeams)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48);
+	if (!level.loaded) {
+		return;
+	}
+	const int id = level.world->addPlayer("Walker", 2, false);
+	CHECK(level.world->spawnSoldier(id));
+	for (int i = 0; i < 30; ++i) {
+		level.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	const auto* titan = level.titan(2);
+	CHECK(titan && std::fabs(info.position.x - titan->position.x) < titan->radius);
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	physics::Vec3 last = info.position;
+	float slowest = 1e9f, sum = 0;
+	int airborne = 0, counted = 0;
+	for (int i = 0; i < 58; ++i) {
+		level.world->setInput(id, walk);
+		level.world->tick(1 / 30.0f);
+		level.world->playerInfo(id, info);
+		const float speed = std::hypot(info.position.x - last.x, info.position.z - last.z) * 30;
+		last = info.position;
+		if (i >= 25) { // up to speed (the throttle eases in)
+			slowest = std::min(slowest, speed);
+			sum += speed;
+			++counted;
+			airborne += level.world->soldierBody(id)->onGround() ? 0 : 1;
+		}
+	}
+	std::fprintf(stderr, "  over the deck: %d ticks in the air, %.2f m/s on average, %.2f at the slowest\n", airborne,
+		sum / counted, slowest);
+	CHECK(airborne > 0 && info.alive);
+	CHECK(slowest > 3.3f && sum / counted > 3.6f);
+}

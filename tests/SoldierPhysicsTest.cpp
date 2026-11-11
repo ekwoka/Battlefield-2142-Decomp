@@ -88,6 +88,82 @@ TEST(SoldierPhysics_WalksUpAHill)
 	CHECK(std::fabs(body.position.y - (body.position.x * 0.3f + 1)) < 0.3f);
 }
 
+// A step a couple of centimetres down (a Titan deck's seam) leaves a
+// walking soldier a tick in the air. The Soldier asks for no velocity
+// there (0x00588420's air path skips slot 0x84) and the movement
+// (0x006c2230) returns without clearing the one asked last, so on landing
+// it is taken again: the soldier walks on at its speed. Braking to the
+// air's "none" instead cost a whole step's speed at every seam (the deck
+// walk on Suez_Canal's EU Titan fell to 1.8 m/s for two ticks each time).
+TEST(SoldierPhysics_KeepsItsSpeedDownASeam)
+{
+	physics::Ground seams;
+	const auto height = [](float, float z) { return -0.02f * std::floor(z / 1.5f); };
+	seams.height = height;
+	seams.heightAndNormal = [height](float x, float z, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return height(x, z);
+	};
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	game::SoldierInput forward;
+	forward.throttle = 1;
+	for (int i = 0; i < 60; ++i) {
+		control.update(forward, body);
+		body.step(1 / 30.0f, seams);
+	}
+	float slowest = 1e9f, sum = 0;
+	int airborne = 0;
+	for (int i = 0; i < 90; ++i) {
+		const physics::Vec3 before = body.position;
+		control.update(forward, body);
+		body.step(1 / 30.0f, seams);
+		airborne += body.onGround() ? 0 : 1;
+		const float speed = std::fabs(body.position.z - before.z) * 30;
+		slowest = std::min(slowest, speed);
+		sum += speed;
+	}
+	std::printf("  over the seams: %d ticks in the air, %.2f m/s on average, %.2f at the slowest\n", airborne,
+		sum / 90, slowest);
+	CHECK(airborne > 0);
+	CHECK(slowest > 3.7f && sum / 90 > 3.8f);
+}
+
+// The grip (0x006c2230, +0xe0 bit 0x40): holding, the movement corrects up
+// to normal.y^5 x friction x 2.3568 m/s a tick; without it, or past that,
+// at most x 1.5712, and a correction within that takes hold again.
+TEST(SoldierPhysics_GripCorrectsUpToTheLargerLimit)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	const auto stepWanting = [&body](float speed) {
+		body.setDesiredVelocity({0, 0, speed});
+		body.step(1 / 30.0f, slope(0));
+	};
+	// From standing, the first ticks take 1.5712 m/s each (no hold yet).
+	stepWanting(3.9f);
+	CHECK(std::fabs(body.velocity.z - 1.5712f * 0.99f) < 0.01f);
+	for (int i = 0; i < 30; ++i) {
+		stepWanting(3.9f);
+	}
+	CHECK(std::fabs(body.velocity.z - 3.9f * 0.99f) < 0.02f);
+	// Holding, a change of 2 m/s goes in one tick.
+	stepWanting(1.9f);
+	std::printf("  2 m/s slower in a tick: %.3f m/s\n", body.velocity.z);
+	CHECK(std::fabs(body.velocity.z - 1.9f * 0.99f) < 0.02f);
+	// A change of 3 m/s is past the hold: 1.5712 of it, and the hold is lost.
+	for (int i = 0; i < 30; ++i) {
+		stepWanting(3.9f);
+	}
+	const float was = body.velocity.z;
+	stepWanting(0.9f);
+	CHECK(std::fabs(body.velocity.z - (was - 1.5712f) * 0.99f) < 0.01f);
+	const float lost = body.velocity.z;
+	stepWanting(lost - 2.0f); // 2 m/s more: without the hold, 1.5712 of it
+	CHECK(std::fabs(body.velocity.z - (lost - 1.5712f) * 0.99f) < 0.01f);
+}
+
 namespace {
 
 // A wall across +z at z = 3 (two triangles facing -z, 4 m wide and 3 m high)

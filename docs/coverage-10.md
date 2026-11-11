@@ -276,10 +276,10 @@ coverage-9's list (§3b) was nearly all done in e8fe41c itself, the "before" com
 | P1 | **Bots against the retail game** (unchanged) | Squad effectiveness (13.3 kills a round with the formation as decoded, 19.4 when every member heads for the order) and drivers' paths are unverified. Wider vehicles still rock where the infantry mesh leaves less room than they need (minsk_coop's eu_tank, Verdun's as_apc), and a driver stops where the infantry mesh has a hole that the vehicle mesh crosses (Camp_Gibraltar's PAC heavy mech). Verdun's stuck time rose (3,693 → 3,963 s), from seated passengers. | engine.md "Squads", the drivers' room rays | M (verification) |
 | P2 | **Multiplayer: the joined client** | A hosted round's restart at the countdown resets the players only; vehicles, control points and dropped kits stay as they are (whether the original's reset, `0x004ce910`, restores them wasn't checked here). A joined client's cells don't show their armour effects. The dirty masks are stand-ins (GhostPriority.h, HostedGame.cpp). | engine.md (restartPlayers), uncited.md "canopy, cells and parts", hedges | M; another agent's area |
 | P3 | **Parts as movers of their own** | A hasMobilePhysics part (`0x005f6ba0`'s node) moves with its body here, and meets movers only as a candidate. | uncited.md "Left" | S–M |
-| P4 | **Commander panel leftovers** | The squad panel's `voip_icon_*` and `SELECTED_ALL_SQUADS`; the request's network events (Request `0x0050e170`, PostRemotes 2/0x1d, 2/0x1e); `us_beacon` (`0x004d2650`, not looked at). | uncited.md (d) #3 | S |
-| P5 | **Particle leftovers** | `usedOnTransparentSurface`, MeshParticleSystem `writeZ` / `directionalScale`, the emitter's view flags. | uncited.md (d) #1 | S |
-| P6 | **Small differences recorded while citing** | Display modes: the original lists only modes ≥ 800 wide in the desktop's format (`0x10010830`), the rewrite every SDL mode. FileManager: "bf2/content/" erased anywhere, expandPath's own-prefix case, the archive-only read mode. Three HUD rows' argument types. None changes the shipped content's behaviour. | uncited.md "Citing present code" | S |
-| P7 | **Rendering details** | Undergrowth's `ZFunc = Less` (the rewrite tests less-or-equal); the overgrowth's alpha-to-coverage path (the rewrite draws without multisampling); the language → LCID table for SwiffHost's dates and numbers (RendDX9 `0x1017af30`). | Undergrowth.fx; engine.md "Overgrowth"; uncited.md (d) #10 | S |
+| P4 | ~~**Commander panel leftovers**~~ **closed** (§3f) | The voice icons, `SELECTED_ALL_SQUADS` and the request's events were already done (c9486a4, engine.md); `us_beacon` (`0x004d2650`) is a load-time pass over a template the shipped content doesn't have. | uncited.md (d) #3 | — |
+| P5 | ~~**Particle leftovers**~~ **closed** (§3f) | All four were already done (d9a49fe; engine.md "Mesh particles' directionalScale" and the view flags); the open list was stale. | uncited.md (d) #1 | — |
+| P6 | ~~**Small differences recorded while citing**~~ **closed** (§3f) but for the shared border executor | Display modes, the FileManager's three cases and the three HUD rows' argument types follow the original. Left: `setBarNodeBorder` / `setCompassNodeBorder`'s shared executor. | uncited.md "Citing present code" | S |
+| P7 | **Rendering details** | ~~Undergrowth's `ZFunc = Less`~~ (closed, §3f); the overgrowth's alpha-to-coverage path (the rewrite draws without multisampling); the language → LCID table for SwiffHost's dates and numbers (RendDX9 `0x1017af30`). | engine.md "Overgrowth"; uncited.md (d) #10 | S |
 | P8 | **`allowEmoteAnimation`** | No emotes in the rewrite. | uncited.md (d) #6 | S |
 
 ### 3c. Bookkeeping and plumbing (no visible behaviour)
@@ -313,6 +313,33 @@ Of the 163, three more are not hedges:
 - the Novint Falcon and the G15 LCD;
 - the AI's CPU budgets.
 
+### 3f. Closed after the audit (2026-11-11, working tree on a00ce5b)
+
+| Item | What changed | Original | Test |
+|---|---|---|---|
+| §4 #7, ChangePlayerName | Nothing to change: HostedGame already renames only the sender's own player. The setPlayerName comment says so now. | `0x0050bb90` (`+0x2c` against the event's player, then the player manager's slot 0x38) | `NetHost_NameSquadSpawnAndSpawnWait` (a rename of the bot leader is refused, the client's own goes through) |
+| P6, display modes | The video options list RendDX9's modes: 32 bits, ≥ 800 wide, ≥ 480 high at ≥ 60 Hz (a refresh SDL leaves 0 is kept), 4:3 only without `+widescreen 1`, never 848 or 1024 × 480, ascending. New `+widescreen 1` option. | `0x10010830`, `0x100084a0`, `0x100079b0`, `0x10007b60`, `0x10007ce0`; WideScreenEx from `0x00409950` case 0x13 | `DisplayModes_TheOriginalsFilters` |
+| P6, FileManager | `exists` erases the first "bf2/content/" anywhere; `expandPath` leaves a path already under the first search path there (under the root, the rewrite's search paths being absolute). The archive-only read mode is never set in the shipped exe (constructor `0x0069aee0` clears +0x68; no writer), so readFile is unchanged. | `0x00698e40`, `0x00697d70`, `0x00698b60` | `FileManager_PathEdgeCases` |
+| P6, HUD rows | `setEditNodeFont`'s second argument a bool, `setCompassNodeTextureSize` two ints, `setNodeLogicShowVariable`'s value an int; each row now cited. | `0x00765755`, `0x0076b4ff` (→ `0x007b0880`), `0x0076e090` | `Hud_LogicValueIsAnInt` |
+| P7, undergrowth depth | The undergrowth pipeline tests less (Undergrowth.fx's 22 passes, `ZFunc = Less`); the others keep less-or-equal. | Undergrowth.fx | none (a GPU pipeline state); `--play --screenshot` on Camp_Gibraltar still shows the grass |
+| P4, P5 | Found already done; the open list was stale. `us_beacon` (`0x004d2650`): a load-time pass that also looks up `ordermarker_*` and `us_beacon` by name and calls each template's slot 0x68; no shipped file names `us_beacon`. | | |
+
+Left of these lists: the shared bar/compass border executor (`0x0076aebf`), the overgrowth's alpha-to-coverage, SwiffHost's LCID table, emotes.
+
+**Measured** (the same scripts, `run_all.sh` on the working tree; the source measurements also on a clean a00ce5b worktree). Headline rule, no audit docs:
+
+| Module | a00ce5b | Working tree |
+|---|---|---|
+| BF2142.exe cited / calibrated | 41.69 / 85.59% | 41.73 / 85.59% |
+| RendDX9_ori.dll cited / calibrated | 36.08 / 77.49% | 36.20 / **77.69%** |
+| RendDX9 raw (d) | 96.7 KB | **94.0 KB** |
+| All three calibrated | 82.913% | **82.955%** |
+
+- The working tree also holds another agent's uncommitted physics work; the EXE's +0.04 points of cited include it.
+- RendDX9's change is the mode list's filters. `0x100079b0`, `0x10007b60`, `0x10007ce0` and `0x100084a0` are now cited. About 20 functions of the `0x10008630`..`0x1000a1e0` run went from propagated (d) to propagated (c).
+- The probe and the level runs are unchanged: 1,179 impl names in the probe union, as at 4d7a8b7. A first run gave 1,177, with `demo.recordDemo` and `demo.stopRecording` unbound in the host probe. Those two are bound only with the server's admin (`if (hosted && session.admin)`). A second `probe.py` run gave 1,179 again, so the dip was the run's environment (another agent was running hosts at the same time), not the tree. Hedges: 163, the same lines.
+- Tests: 936, 0 failing (the working tree; 929 at the audit, plus this section's 4 new tests and the other agent's).
+
 ### Priority, overall
 
 | Rank | Item | Kind |
@@ -320,8 +347,8 @@ Of the 163, three more are not hedges:
 | 1 | P1: bots (squads, drivers) checked against the retail game | behaviour / verification |
 | 2 | P2: the joined client's and the hosted round's remaining pieces | behaviour (multiplayer) |
 | 3 | P3: parts as movers of their own | behaviour |
-| 4 | P4 + P5: the commander panel's and the particles' leftovers | visual, low |
-| 5 | P6 + P7 + P8: recorded differences, rendering details, emotes | exactness, low |
+| 4 | ~~P4 + P5: the commander panel's and the particles' leftovers~~ (closed, §3f) | visual, low |
+| 5 | P7 + P8: rendering details, emotes (P6 closed but for the border executor, §3f) | exactness, low |
 | 6 | 3c-4: a hand-check of SwiffPlayer's propagated (c) | bookkeeping |
 | 7 | 3d: the remaining untraced flags | exactness |
 
@@ -351,7 +378,7 @@ Of the 163, three more are not hedges:
 
 **All 17 match** on the claims checked. Notes:
 - **#5, #12 and #15** were only partly followed, as noted.
-- **#7: the citation leaves out the sender check.** `0x0050bb90` renames only when the event's player is the sender's own. The rewrite's `setPlayerName` comment doesn't say so; whether its caller checks wasn't looked at (multiplayer code, another agent's area).
+- **#7: the citation leaves out the sender check.** `0x0050bb90` renames only when the event's player is the sender's own. The rewrite's `setPlayerName` comment doesn't say so; whether its caller checks wasn't looked at (multiplayer code, another agent's area). **Since checked (§3f):** `HostedGame`'s ChangePlayerName case has compared the event's player with the sender's since 97c5452; the comment now says so and `NetHost_NameSquadSpawnAndSpawnWait` sends a rename of another player and checks it is refused.
 
 ## 5. Inconsistencies and measurement artefacts
 

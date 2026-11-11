@@ -10,13 +10,6 @@ namespace {
 float flush(float v) { return std::fabs(v) < 1e-6f ? 0.0f : v; }
 Vec3 flush(const Vec3& v) { return {flush(v.x), flush(v.y), flush(v.z)}; }
 
-// Keeps the larger magnitude per axis (0x006b6bd0).
-Vec3 largest(const Vec3& a, const Vec3& b)
-{
-	const auto pick = [](float x, float y) { return std::fabs(y) > std::fabs(x) ? y : x; };
-	return {pick(a.x, b.x), pick(a.y, b.y), pick(a.z, b.z)};
-}
-
 Vec3 project(const Vec3& v, const Vec3& axis)
 {
 	const float squared = lengthSquared(axis);
@@ -120,8 +113,8 @@ void SoldierBody::touchMaterial(uint32_t other)
 // `relative`: the soldier's velocity relative to what it touches.
 void SoldierBody::addContact(const Vec3& normal, float depth, const Vec3& relative)
 {
-	m_pushOut = largest(m_pushOut, normal * -depth);
-	m_cancel = largest(m_cancel, project(-relative, normal));
+	m_pushOut = combineAxes(m_pushOut, normal * -depth);
+	m_cancel = combineAxes(m_cancel, project(-relative, normal));
 	m_contactVelocity = flush((m_contactVelocity * static_cast<float>(m_contacts) + relative) *
 		(1.0f / static_cast<float>(m_contacts + 1)));
 	++m_contacts;
@@ -502,8 +495,11 @@ void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 // the 100 already rules out, and with *0x00a84764 = 1 takes the soldier
 // node's slot 0xd8 off the relative velocity: 0x006c56e0, the node's +0x90
 // while its tick count +0x9c runs, set through slot 0xdc (0x006c5df0, at
-// most *PTR_DAT_00a06ee4 long, for *PTR_DAT_00a06ee0 ticks) by no caller
-// found, so it is none here.)
+// most *PTR_DAT_00a06ee4 long, for *PTR_DAT_00a06ee0 ticks) by the node's
+// step 0x006ca660 with the velocity of the Titan the soldier stands in,
+// whose integration 0x006ca3b0 adds it: there the node's own velocity is
+// relative to the Titan. This soldier's velocity is the absolute one, the
+// contacts taking the Titan's point velocity, so nothing comes off here.)
 void SoldierBody::runOver()
 {
 	if (!onCrushed) {
@@ -571,36 +567,47 @@ void SoldierBody::segmentTest(float seconds)
 	}
 }
 
+// 0x006c2230. Neither standing (+0xf9) nor swimming (+0xfa), it returns at
+// once with +0xe0 set to 1 (the grip bit 0x40 off) and leaves the
+// wanted velocity (+0xac, slot 0x84's) as it was: the Soldier doesn't ask
+// for one in the air (0x00588420), so the one asked on the ground before
+// is taken again on landing, not none (which would brake the soldier to
+// a stop on the tick it lands: a step off a deck's seam a centimetre down
+// cost a third of a walking soldier's speed).
 void SoldierBody::move(float gravity)
 {
-	if (m_onGround || m_swim) {
-		const float ny = m_groundNormal.y;
-		const float grip = ny * ny * ny * ny * ny * (m_swim ? 1.0f : friction);
-		// How far the ground velocity is from the wanted one; gravity's tick is
-		// part of the vertical error.
-		Vec3 error = m_contactVelocity - m_desired;
-		error.y += gravity / 30.0f;
-		error = error - project(error, m_groundNormal);
-		Vec3 correction;
-		Vec3 wanted = -error;
-		if (!m_slipping) {
-			correction = wanted;
-			if (clampTo(correction, grip * soldier::kStaticGrip)) {
-				m_slipping = true;
-			}
-		} else {
-			correction = wanted;
-			if (!clampTo(correction, grip * soldier::kSlidingGrip)) {
-				m_slipping = false;
-				clampTo(correction, grip * soldier::kStaticGrip);
-			}
-		}
-		// Node slot 0xa8: averaged with other requests this tick.
-		const Vec3 acceleration = correction * 30.0f;
-		m_inputAcceleration = (m_inputAcceleration * static_cast<float>(m_inputs) + acceleration) *
-			(1.0f / static_cast<float>(m_inputs + 1));
-		++m_inputs;
+	if (!m_onGround && !m_swim) {
+		m_gripping = false;
+		m_contactVelocity = {};
+		m_contacts = 0;
+		return;
 	}
+	const float ny = m_groundNormal.y;
+	const float grip = ny * ny * ny * ny * ny * (m_swim ? 1.0f : friction);
+	// How far the ground velocity is from the wanted one; gravity's tick is
+	// part of the vertical error.
+	Vec3 error = m_contactVelocity - m_desired;
+	error.y += gravity / 30.0f;
+	error = error - project(error, m_groundNormal);
+	const Vec3 wanted = -error;
+	Vec3 correction = wanted;
+	// +0xe0 bit 0x40, the grip: without it the correction is at most the
+	// static limit, and one within it takes hold; holding, up to the larger
+	// limit (2.3568), and one past that loses it, cut to the static limit
+	// (0x006b6fd0: true when it shortened the vector).
+	if (!m_gripping) {
+		if (!clampTo(correction, grip * soldier::kStaticGrip)) {
+			m_gripping = true;
+		}
+	} else if (clampTo(correction, grip * soldier::kSlidingGrip)) {
+		m_gripping = false;
+		clampTo(correction, grip * soldier::kStaticGrip);
+	}
+	// Node slot 0xa8: averaged with other requests this tick.
+	const Vec3 acceleration = correction * 30.0f;
+	m_inputAcceleration = (m_inputAcceleration * static_cast<float>(m_inputs) + acceleration) *
+		(1.0f / static_cast<float>(m_inputs + 1));
+	++m_inputs;
 	m_desired = {};
 	m_contactVelocity = {};
 	m_contacts = 0;

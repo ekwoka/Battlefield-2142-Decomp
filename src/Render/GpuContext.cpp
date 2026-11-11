@@ -270,12 +270,16 @@ bool GpuContext::createPipelines(std::string& error)
 	// shipped meshes enclose a negative volume, every rock among them), and the
 	// generator (0x1010ba40) turns them by a rotation and copies the indices
 	// as they are. So the near side of a rock or a grass tuft is drawn and
-	// its far side culled.
+	// its far side culled. The passes also set ZFunc Less (the other
+	// pipelines keep less-or-equal), so of two tufts' cards at one depth the
+	// first drawn stays.
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_FRONT;
+	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
 	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
 		k_undergrowth_frag_msl_size, 5, 2, "undergrowth", 1, 2);
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
 	info.depth_stencil_state.enable_depth_test = false;
 	info.depth_stencil_state.enable_depth_write = false;
 	m_skyPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,

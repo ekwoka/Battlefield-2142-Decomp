@@ -4,6 +4,7 @@
 #include "TestMain.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -68,4 +69,35 @@ TEST(FileManager_MountsGameArchives)
 	// Loose files in the mod directory resolve through the search path.
 	CHECK(files.exists("Init.con"));
 	CHECK(!files.listFiles("Shaders").empty());
+}
+
+// The audits' three path cases: exists erases "bf2/content/" wherever it is
+// (0x00698e40); expandPath leaves a path already under the first search
+// path there (0x00697d70); readFile falls back to loose files (0x00698b60's
+// archive-only mode is never set).
+TEST(FileManager_PathEdgeCases)
+{
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / ("bf2142_fm_" + std::to_string(std::rand()));
+	fs::create_directories(root / "mods/bf2142/Settings");
+	std::ofstream(root / "mods/bf2142/Settings/Test.con") << "x";
+	io::FileManager files;
+	files.setRootPath(root.string());
+	files.addSearchPath("mods/bf2142");
+
+	CHECK(files.exists("Settings/Test.con"));
+	CHECK(files.exists("bf2/content/Settings/Test.con"));
+	CHECK(files.exists("Settings/bf2/content/Test.con"));
+	CHECK(!files.exists("Settings/bf2/content/Other.con"));
+
+	const std::string base = files.rootPath();
+	CHECK(files.expandPath("Settings/Test.con") == base + "mods/bf2142/Settings/Test.con");
+	CHECK(files.expandPath("mods/bf2142/Settings/Test.con") == base + "mods/bf2142/Settings/Test.con");
+	CHECK(files.expandPath("Mods\\BF2142/Settings/Test.con") == base + "Mods\\BF2142/Settings/Test.con");
+	CHECK(files.expandPath("@ROOT@/x.con") == base + "x.con");
+
+	std::vector<uint8_t> data;
+	CHECK(files.readFile("Settings/Test.con", data) && data.size() == 1);
+	std::error_code ec;
+	fs::remove_all(root, ec);
 }

@@ -91,6 +91,30 @@ TEST(RigidBody_TiltedLandingSettles)
 		body.rotation.rows[1].y, body.rotation.rows[1].z);
 }
 
+// The push outs (and the soldier's cancelled velocities) gathered by axis
+// (0x006b6bd0, 0x006b6b60): into 0 the new value, of one sign the larger,
+// of opposite signs the sum. Contacts pushing both ways across (the two
+// sides of a vehicle in a gully, a soldier or a walker's hull between two
+// faces) take each other off; the rewrite kept the larger magnitude
+// whatever its sign, so the one side won.
+TEST(RigidBody_OppositePushesAdd)
+{
+	CHECK(physics::combineAxes({0, 0, 0}, {0.2f, -0.1f, 0}).x == 0.2f);
+	const physics::Vec3 same = physics::combineAxes({0.2f, -0.1f, 0.3f}, {0.1f, -0.3f, 0.4f});
+	CHECK(same.x == 0.2f && same.y == -0.3f && same.z == 0.4f);
+	const physics::Vec3 opposite = physics::combineAxes({0.2f, -0.1f, 0}, {-0.3f, 0.1f, 0});
+	CHECK(std::fabs(opposite.x + 0.1f) < 1e-6f && opposite.y == 0);
+	// Through a response: two contacts of a body pushing it out of slopes
+	// facing each other, one 3 cm deep, one 2 cm.
+	physics::ContactResponse response;
+	const float s = 0.2873479f, c = 0.9578263f; // a 0.3 slope's normal
+	response.addContact({-2, -1, 0}, {}, {s, c, 0}, -0.03f, {});
+	response.addContact({2, -1, 0}, {}, {-s, c, 0}, -0.02f, {});
+	std::printf("  push out %.5f/%.5f\n", response.pushOut().x, response.pushOut().y);
+	CHECK(std::fabs(response.pushOut().x - 0.01f * s) < 1e-6f);
+	CHECK(std::fabs(response.pushOut().y - 0.03f * c) < 1e-6f);
+}
+
 TEST(RigidBody_YawPitchRollRoundTrips)
 {
 	const physics::Vec3 angles {30, -20, 10};

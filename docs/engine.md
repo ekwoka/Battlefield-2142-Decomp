@@ -240,6 +240,12 @@ ms, Verdun 4.62 / 3.05 / 3.07 → 3.05 / 3.03 / 3.14, Wake_Island_2142
 (gpm_ca 64, `--play 1`) 4.54 / 5.13 / 5.25 → 5.40 / 5.11 / 4.63: within
 the runs' noise. Test: `Undergrowth_MeshesWoundInwards`.
 
+**Depth test.** The same 22 passes set `ZFunc = Less` (and the alpha test
+`AlphaFunc = GREATER` against `alphaRefValue`). The rewrite's pipelines
+test less-or-equal; the undergrowth pipeline now tests less
+(`SDL_GPU_COMPAREOP_LESS`), so of two cards at one depth the first drawn
+stays.
+
 ## Physics of mobile objects
 
 **Collision mesh instances.** A `.collisionmesh` holds geometries, each
@@ -404,8 +410,12 @@ mass, centre of mass, inertia and gravity modifiers). Per tick
 Ground contact (`ResponsePhysics.Basic` slot `0x28` = `0x006b9260`) puts
 the points of collision LOD 1 (the vehicle LOD) into the world and records
 a contact for every point below the heightmap (slot `0x2c`); the solve
-(slot `0x30` = `0x006ba7d0`) pushes the body out by the largest
-penetration per axis and gives every contact an impulse
+(slot `0x30` = `0x006ba7d0`) pushes the body out by the contacts' push outs
+gathered per axis (`0x006b6bd0` → `0x006b6b60`: into 0 the new one, of one
+sign the larger, of opposite signs the sum, so two sides pushing opposite
+ways take each other off; the rewrite kept the larger magnitude whatever
+its sign until 2026-11-11, `physics::combineAxes`,
+`RigidBody_OppositePushesAdd`) and gives every contact an impulse
 `(n + friction * slide) * (1 + elasticity) * share`, the shares weighted
 by approach speed. Rewritten in `src/Physics/RigidBody`.
 
@@ -1070,7 +1080,8 @@ them; the contact's depth is how far the end lies behind that face,
     with throttle; tanks, FAVs, APCs and transports crept and lost hit
     points on bridges and Titan decks. The terrain and the mesh were
     never added up: the wheel takes the higher of the two, as the
-    response's push out keeps the larger per axis, `0x006b6bd0`.
+    response's push out keeps the larger of one sign per axis,
+    `0x006b6bd0`.
     `Vehicles_GunshipRestsOnAHelipad`.)
 - **Pass 1, the edges** (A a PlayerControlObject root, B's root static,
   `*0x00a84214` = 1): the edges of A's LOD-1 faces no steeper than 30° off
@@ -6888,7 +6899,14 @@ What is left is the orientation's 14-bit quaternion (`0x00687dc0` /
 at its spawn room 47 m from its origin: the soldier's floor contacts,
 whose tolerance is 4 cm, then catch the deck's seams on other ticks than
 the server's (with the server's exact orientation put in, walking there
-corrected nothing over 1 cm).
+corrected nothing over 1 cm). A seam caught on one side and not the
+other cost much more while a landing braked the soldier (above, Soldier
+movement); with the wanted velocity kept through the tick in the air
+(and the grip and the push outs as `0x006c2230` / `0x006b6bd0` have
+them), the same walk (`--remote-actions "5:spawn 12:forward 20:turn:3
+21:still 30:turn:-3 31:still 45:stop"`, 60 s, 910 records) corrects by
+1.2 cm on average, at most 12 cm, 151 records over 1 cm, against 3.4 cm,
+40 cm and 437 before (the rest mostly while pressed against a wall).
 
 The exe's replay is the game client's interface `0x1d4c2` (the client
 object's `+0xa8`, `0x004b35b0`; vtable `0x00928fa8`) slot `0x10`,
@@ -10695,7 +10713,10 @@ velocity the soldier's response is asked for (`0x00588420`, response slot
   like a bush's, does not stop soldiers;
 - movement (`0x006c2230`): the difference between the average contact
   velocity and the wanted one, along the ground, corrected by at most
-  `normal.y^5 * friction * 1.5712` m/s per tick (2.3568 before slipping),
+  `normal.y^5 * friction * 1.5712` m/s per tick, or up to 2.3568 while
+  the grip holds (`+0xe0` bit `0x40`: a correction within 1.5712 takes
+  hold, one past 2.3568 loses it and is cut to 1.5712; `0x006b6fd0` is
+  true when it shortens; the rewrite had the two the other way round),
   as an acceleration for the soldier's physics node, which integrates
   without rotation, damped 0.99 per tick (0.9 in water). The friction
   (`+0xd4`, 1 from the response's constructor `0x006c1ca0`) is set at
@@ -10706,6 +10727,20 @@ velocity the soldier's response is asked for (`0x00588420`, response slot
   terrain's material map under the point or the mesh face's
   (`SoldierBody::frictionOf`, `touchMaterial`). That material is also
   the soldier's side of its collision events (the templates set none).
+  Neither standing (`+0xf9`) nor swimming, the movement returns at once
+  (`+0xe0` = 1: the grip goes) and leaves the wanted velocity (`+0xac`)
+  as it is: the Soldier asks for none in the air (`0x00588420`'s air path
+  has no slot `0x84` call), so the one asked on the ground is taken again
+  the tick the soldier lands. The rewrite asked for none in the air and
+  cleared it in the movement, so a soldier stepping off a seam a
+  centimetre or two down (a tick in the air) braked by the whole grip on
+  landing: on Suez_Canal's EU Titan deck 1.8 m/s for two ticks at every
+  seam (`SoldierPhysics_KeepsItsSpeedDownASeam`,
+  `Titan_SoldierWalksOverTheDeckSeams`: the spawn room's straight walk
+  3.38 m/s on average and 1.76 at the slowest before, 3.72 and 3.57
+  after). The contacts' push outs and cancelled velocities (`0x006c24b0`)
+  are gathered per axis by `0x006b6bd0` (of one sign the larger, of
+  opposite signs the sum; above, the Basic solve).
 
 The look turns the head before the body (`0x0058a6d0`,
 `SoldierControl::twist`): standing (the shaped throttle within 0.01) the
@@ -10811,8 +10846,20 @@ object whose response has `collisionGroups` bit `0x10`, or `0x100` for
 team 1 / `0x200` for team 2, is passed. With `*0x00a84764` = 1 the soldier
 node's slot `0xd8` (`0x006c56e0`: `+0x90` while the tick count `+0x9c`
 runs, set by slot `0xdc`, `0x006c5df0`, at most `*PTR_DAT_00a06ee4` long
-for `*PTR_DAT_00a06ee0` ticks) comes off the relative velocity; no caller
-of the setter was found, so it is none. `SoldierBody::Mover` (`ignoring`,
+for `*PTR_DAT_00a06ee0` ticks) comes off the relative velocity. Its setter's
+caller is the soldier node's step (`0x006ca660`): when the object the
+soldier stands in (`+0x120`, set by `0x006c3890`'s start when the
+candidate's flag 5 holds and `0x006f2b00`'s rays find the soldier inside
+it; cleared each step by slot `0xf0(0)`) has a Titan as its root
+(`0x00561d90`), the Titan node's velocity goes to slot `0xdc` and the
+Titan to slot `0xe8` (`+0xa0`, `+0xa4` ticks); the integration
+(`0x006ca3b0`) then adds it to the tick's mean velocity, and
+`0x006c3890` leaves the Titan's point velocity out of that Titan's
+contacts (slot `0xe4` against the candidate's root). So on a Titan the
+soldier node's own velocity is relative to the Titan. The rewrite's
+soldier velocity is absolute (the contacts take the Titan's point
+velocity, and the damping takes 1% of the Titan's speed off it each tick,
+made up by the movement), so nothing comes off here. `SoldierBody::Mover` (`ignoring`,
 `ignoresThis`, `pushed`, `own`, `collisionGroups`), `SoldierBody::team`.
 
 **The speed index** (`0x00586020`, by the pose `+0x268`): crouched 1,
@@ -14826,7 +14873,19 @@ ask whether it's done.
   `getAvailableAntialiasing` (0x1005cc20) gives `{value, text}` objects
   ("Off", "2Samples"... with `VIDEOSETTINGS_` texts); the select boxes
   show the list their first argument names (`displayModes`: the display's
-  modes as "1280x720@60Hz", 0x10065360). Applied, the resolution sizes the
+  modes as "1024x768@60Hz", 0x10065360). The list is RendDX9's
+  `0x10010830`: from Direct3D's modes (`0x100079b0`: R5G6B5 then
+  X8R8G8B8, at least 640 x 480 at 60 Hz) those that the desktop's own
+  list (`0x10007b60`, EnumDisplaySettingsA: 16 or 32 bits, no display
+  flags, the same bounds, 4:3 only unless WideScreenEx, never 848 or 1024
+  x 480) has with the same size, refresh and depth (`0x100084a0`), then
+  those of 32 bits, at least 800 wide and supporting the depth format in
+  use (`0x10007ce0`'s D32 / D24S8 list). WideScreenEx is set only by the
+  command line's `+widescreen 1` (`0x00409950` case 0x13, with
+  GSWideScreen); without it a 16:9 or 5:4 mode isn't offered. The
+  rewrite applies the same filters to SDL's modes in Direct3D's
+  ascending order (`DisplayModes.h`, `+widescreen 1`; a refresh SDL
+  doesn't know, 0, is kept). Applied, the resolution sizes the
   window; the volumes set the master volume to 1 and the sound groups
   (0x00496830): effects groups 0, 3 (menu sounds) and 4 (first-person
   weapon sounds), music group 1 (the music and the interface menu

@@ -4,6 +4,7 @@
 // pages starting from and writing back to them.
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/SettingsObjects.h"
 #include "TestMain.h"
@@ -265,4 +266,26 @@ TEST(SettingsObjects_LocalProfiles)
 	call("dice.bf2.Profile", "connectToSubAccount", {ui::avm1::Value("acct")});
 	CHECK(profiles.currentDirectory() == "0004" && profiles.list().size() == 4);
 	std::filesystem::remove_all(dir);
+}
+
+// The video options' modes as RendDX9 lists them (0x10010830 with
+// 0x100079b0 / 0x10007b60 / 0x100084a0): 32 bits, at least 800 wide and
+// 480 high at 60 Hz or more, 4:3 only without "+widescreen 1", never
+// 848 or 1024 x 480, ascending.
+TEST(DisplayModes_TheOriginalsFilters)
+{
+	const std::vector<DisplayMode> modes = {
+		{1920, 1080, 60, 32}, {1280, 1024, 60, 32}, {1024, 768, 75, 32}, {1024, 768, 60, 32},
+		{800, 600, 60, 32}, {800, 600, 60, 16}, {640, 480, 60, 32}, {1024, 480, 60, 32},
+		{848, 480, 60, 32}, {1600, 1200, 50, 32}, {1600, 1200, 0, 32}, {1024, 768, 60, 32},
+	};
+	const std::vector<std::string> fourThree = listDisplayModes(modes, false);
+	CHECK((fourThree == std::vector<std::string> {"800x600@60Hz", "1024x768@60Hz", "1024x768@75Hz", "1600x1200@0Hz"}));
+	const std::vector<std::string> wide = listDisplayModes(modes, true);
+	CHECK((wide == std::vector<std::string> {"800x600@60Hz", "1024x768@60Hz", "1024x768@75Hz", "1280x1024@60Hz",
+				   "1600x1200@0Hz", "1920x1080@60Hz"}));
+	// A display with no 4:3 modes still lists its wider ones.
+	const std::vector<DisplayMode> panel = {{1512, 982, 120, 32}, {1728, 1117, 60, 32}, {1920, 1080, 60, 32}};
+	CHECK((listDisplayModes(panel, false) ==
+		std::vector<std::string> {"1512x982@120Hz", "1728x1117@60Hz", "1920x1080@60Hz"}));
 }

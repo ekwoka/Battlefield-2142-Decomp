@@ -172,9 +172,10 @@ public:
 	//   look:<dx>,<dy> (relative mouse), text:<text>, shot:<file.png>, quit.
 	void setScript(const std::string& script);
 
-	// The display's modes ("1280x720@60Hz", the largest first), and a new
-	// size for the window.
-	std::vector<std::string> displayModes() const;
+	// The display's modes as the video options list them ("1024x768@60Hz",
+	// ascending; wider than 4:3 only with "+widescreen 1"), and a new size
+	// for the window.
+	std::vector<std::string> displayModes(bool wideScreen) const;
 	void setSize(int width, int height);
 
 	// A menu drawn alone between other work (the loading screen while a

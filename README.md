@@ -237,6 +237,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--nosound` / `--sound` | No audio at all / the audio engine even without a window. |
 | `--play-sound <name>` | Play a named sound after start-up. |
 | `--no-movies` | Skip the start-up movies. |
+| `+widescreen 1` | List display modes wider than 4:3 in the video options (as the original, which lists only 4:3 modes without it). |
 | `--movie <name>` / `--movie-seconds <s>` | Play one movie (`Movies/<name>.bik`); with `--screenshot`, save its frame at that time. |
 
 **Playing a level yourself**

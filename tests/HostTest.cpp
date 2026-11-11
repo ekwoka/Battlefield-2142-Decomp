@@ -884,6 +884,18 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	const int me = client.world().localPlayer();
 	dice::hfe::game::GameWorld::PlayerInfo info;
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.name == "Joiner"; }));
+	// 0x0050bb90 renames only the sender's own player (the event's byte
+	// against the connection's, +0x2c): a rename of the leader is refused.
+	net::GameEvent rename;
+	rename.type = net::kEvChangePlayerName;
+	rename.values = {static_cast<uint32_t>(leader) & 0xff};
+	rename.bytes = {"Impostor"};
+	client.sendEvent(rename);
+	rename.values = {static_cast<uint32_t>(me) & 0xff};
+	rename.bytes = {"Joiner2"};
+	client.sendEvent(rename);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.name == "Joiner2"; }));
+	CHECK(round.playerInfo(leader, info) && info.name == "Leader");
 	client.selectTeam(2);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
 	client.joinSquad(1);

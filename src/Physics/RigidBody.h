@@ -45,6 +45,13 @@ float dot(const Vec3& a, const Vec3& b);
 Vec3 cross(const Vec3& a, const Vec3& b);
 float lengthSquared(const Vec3& v);
 
+// How the responses gather their contacts' push outs and cancelled
+// velocities (0x006b6bd0, per axis 0x006b6b60): into 0 the new value; of
+// the same sign the larger; of opposite signs the sum. So two contacts
+// pushing opposite ways (the two sides of a vehicle on uneven ground, a
+// soldier between two faces) cancel instead of the larger one winning.
+Vec3 combineAxes(const Vec3& into, const Vec3& value);
+
 // Rotation as rows (the engine's matrices act on row vectors: v * M).
 struct Mat3 {
 	std::array<Vec3, 3> rows {Vec3 {1, 0, 0}, Vec3 {0, 1, 0}, Vec3 {0, 0, 1}};

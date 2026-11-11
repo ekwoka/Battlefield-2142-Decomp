@@ -512,7 +512,10 @@ public:
 	// teams and the spawners to their start, so the vehicles spawn anew.
 	void resetRound();
 	// A player's new name (a joined client's ChangePlayerName, 0x0050bb90:
-	// the player's name for the scripts, the scoreboards and the logs).
+	// the player's name for the scripts, the scoreboards and the logs). The
+	// original renames only when the event's player is the sender's own
+	// (+0x2c, then the player manager's slot 0x38); HostedGame checks that
+	// before calling this.
 	void setPlayerName(int id, const std::string& name);
 	// Moves a player to the other team (a joined client's PostRemote 6/7,
 	// which the game server hands the game logic's slot 0x60, 0x004b0690):
