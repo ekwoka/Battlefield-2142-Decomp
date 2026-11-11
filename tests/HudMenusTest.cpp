@@ -145,9 +145,10 @@ TEST(HudMenus_InviteList)
 	s.squads.update(me);
 	CHECK(s.hud.listCell(8, rowOf(loner), 0) == "|cLoner" && s.hud.listCell(8, rowOf(mate), 0) == "Mate");
 	s.squads.applyInviteList(me);
-	// The mate is out; the loner (a bot in no squad) takes the invite; the
-	// other stays in his squad.
-	CHECK(s.squadOf(mate) == 0 && s.squadOf(loner) == 1 && s.squadOf(other) == 3 && !s.squads.inviteListShown());
+	// The mate is out; the loner (a bot in no squad) doesn't answer the
+	// invite (nothing in BF2142.exe or AIDLL reads a bot's invite mask but a
+	// private squad's join, 0x004c7290); the other stays in his squad.
+	CHECK(s.squadOf(mate) == 0 && s.squadOf(loner) == 0 && s.squadOf(other) == 3 && !s.squads.inviteListShown());
 }
 
 TEST(HudMenus_ListClicks)
@@ -685,6 +686,40 @@ TEST(HudVotes_ScoreboardKickStart)
 	CHECK(!votes.mayStartKick(2, false) && lines.size() == before);
 	votes.handle({2, 1, 3, 4, 0, 0, 0}); // it fails
 	CHECK(!votes.running() && votes.mayStartKick(2, false));
+}
+
+// After a mutiny against him (0x005740e0 cases 2 / 3: the target's slot
+// 0x144(5.0)) the commander who lost command (0x00591950 stamps +0x128)
+// can't apply again for 5 minutes (0x007d7050), told the minutes left.
+TEST(HudVotes_MutinyBarsTheCommander)
+{
+	menu::VoteMessages votes;
+	std::vector<std::string> lines;
+	votes.onLine = [&](const std::string& s) { lines.push_back(s); };
+	votes.playerName = [](int) { return std::string("P"); };
+	votes.localPlayer = 1;
+	votes.setCommanding(true);
+	votes.handle({3, 0, 1, 2, 0, 2, 90}); // a mutiny against us
+	votes.setCommanding(false);
+	votes.handle({3, 3, 1, 2, 0, 0, 0}); // passed
+	CHECK(!votes.mayApplyForCommander() && lines.back() == "HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTES");
+	for (int i = 0; i < 30 * 250; ++i) {
+		votes.tick(1 / 30.0f);
+	}
+	CHECK(!votes.mayApplyForCommander() && lines.back() == "HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTE");
+	for (int i = 0; i < 30 * 51; ++i) {
+		votes.tick(1 / 30.0f);
+	}
+	CHECK(votes.mayApplyForCommander());
+	// A failed mutiny bars no one; another's mutiny doesn't bar us.
+	menu::VoteMessages other;
+	other.localPlayer = 1;
+	other.handle({3, 0, 1, 2, 0, 2, 90});
+	other.handle({3, 1, 1, 2, 0, 0, 0});
+	CHECK(other.mayApplyForCommander());
+	other.handle({3, 0, 4, 2, 0, 2, 90});
+	other.handle({3, 3, 4, 2, 0, 0, 0});
+	CHECK(other.mayApplyForCommander());
 }
 
 // The commander screen's squad panel (0x007ab790): a squad's order picture

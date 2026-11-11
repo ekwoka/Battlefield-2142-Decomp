@@ -237,7 +237,7 @@ public:
 	}
 	const world::Object* soldier() const override { return m_round.player(); }
 	const world::Object* vehicle() const override { return m_round.playerVehicle(); }
-	float health() const override { return 1; }
+	float health() const override;
 	Weapon heldWeapon() const override;
 	Weapon seatGroupWeapon(int group) const override;
 	std::vector<int> revealedPlayers(int team) const override { return m_round.revealedPlayers(team); }

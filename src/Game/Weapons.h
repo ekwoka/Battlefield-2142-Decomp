@@ -613,8 +613,14 @@ public:
 	// component is reloading already (its state 2), and when it can
 	// (0x005c0e70), 0x005c0f40 starts its reload): a magazine not full,
 	// with one to spare, is replaced after reloadTime as an empty one is.
-	// False when nothing starts.
+	// The fire component's may-reload (slot 0x44, SingleFireComp
+	// 0x005d5b60: its state +0x150 at 0) refuses while a
+	// busyUntilButtonRelease round waits for the trigger's release (a
+	// guided launcher keeps its wire while the button is held). False when
+	// nothing starts.
 	bool startReload();
+	// That wait (busyUntilButtonRelease, the trigger still held since the round).
+	bool busyUntilRelease() const { return m_busyUntilRelease; }
 	// A press of the trigger that found the magazine empty since the last
 	// call (0x005c2ee0: the ammo's slot 0x34 refuses; the TriggerClick).
 	bool takeClick() { return std::exchange(m_clicked, false); }

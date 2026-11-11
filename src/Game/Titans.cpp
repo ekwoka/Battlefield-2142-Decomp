@@ -1949,7 +1949,7 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 	return true;
 }
 
-bool GameWorld::launchPod(int id)
+bool GameWorld::launchPod(int id, bool exitKey)
 {
 	Player* player = findPlayer(id);
 	if (!player || !player->alive || player->manDown) {
@@ -2004,7 +2004,13 @@ bool GameWorld::launchPod(int id)
 	physics::Vec3 start;
 	// The seat's pod launchers on PIAltFire in the order they were added;
 	// the group's active weapon is the first (each entry resets it,
-	// seatPlayer), the pod seats' pod_launcher_cq.
+	// seatPlayer), the pod seats' pod_launcher_cq. The exit key's
+	// (exitThroughPodLauncher) is the seat's weapon with interface 0x94c0
+	// whose fire is a pod launcher, on any input: the air transports'
+	// air_pod_launcher (PIFire, the pilot's and every seat's).
+	const auto launches = [this, exitKey](const world::ObjectTemplate& node, std::string& p, float& v, physics::Vec3& s) {
+		return podLauncherOf(node, p, v, s, true) || (exitKey && podLauncherOf(node, p, v, s, false));
+	};
 	std::vector<const world::ObjectTemplate*> launchers;
 	std::function<void(const world::ObjectTemplate&, int)> scan = [&](const world::ObjectTemplate& node, int depth) {
 		for (const world::ChildTemplate& child : node.children()) {
@@ -2015,7 +2021,7 @@ bool GameWorld::launchPod(int id)
 			std::string p;
 			float v = 0;
 			physics::Vec3 s;
-			if (podLauncherOf(*c, p, v, s, true)) {
+			if (launches(*c, p, v, s)) {
 				launchers.push_back(c);
 			}
 			scan(*c, depth + 1);
@@ -2056,7 +2062,7 @@ bool GameWorld::launchPod(int id)
 			}
 		}
 	}
-	const bool found = launcher && podLauncherOf(*launcher, projectile, velocity, start, true);
+	const bool found = launcher && launches(*launcher, projectile, velocity, start);
 	if (found) {
 		maxTilt = number(*launcher, "fire.maximumVehicleTiltForFire", 0);
 	}

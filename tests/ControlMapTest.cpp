@@ -163,6 +163,13 @@ TEST(ControlMap_Shipped)
 	CHECK(maps.firstControl(infantry, "c_PIUse") == "IDKey_E");
 	CHECK(maps.firstControl(infantry, "c_GILeader") == "IDKey_Capital");
 	CHECK(maps.value(infantry, "c_PIYaw", pressedKeys({"IDKey_D"})) == 1);
+	// A text's #PI key from the player's map (0x00752b70): in a land
+	// vehicle the flares' X, which the infantry map hasn't.
+	const auto bare = [](const std::string& key) { return key; };
+	const std::string help = "Press #PIFlareFire# to deploy Countermeasures.";
+	CHECK(maps.withKeyNames(help, bare, input::ControlMaps::playerMapFor(false, "")) == help);
+	CHECK(maps.withKeyNames(help, bare, input::ControlMaps::playerMapFor(true, "VCLand")) == "Press X to deploy Countermeasures.");
+	CHECK(std::string(input::ControlMaps::playerMapFor(true, "VCHelicopter")) == input::ControlMaps::kHelicopter);
 }
 
 // The maps written out (ControlMaps::script) build the same maps again.

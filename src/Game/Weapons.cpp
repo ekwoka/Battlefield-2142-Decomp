@@ -570,7 +570,7 @@ bool FireArm::selectable() const
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_settings.magSize < 0
+	if (m_readyIn > 0 || m_reloadLeft > 0 || m_busyUntilRelease || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
 		return false;

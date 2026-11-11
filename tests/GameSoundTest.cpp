@@ -380,6 +380,9 @@ TEST(GameAudio_WeaponsOfARound)
 {
 	Range range;
 	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	// The profile's auto reload off (GeneralSettings.setAutoReload 0): the
+	// player presses c_PIReload himself.
+	range.world->autoReload = false;
 	const int bot = range.world->addPlayer("Bot", 1, true);
 	CHECK(range.world->spawnSoldier(bot));
 	CHECK(range.world->spawnPlayer(2) != nullptr);

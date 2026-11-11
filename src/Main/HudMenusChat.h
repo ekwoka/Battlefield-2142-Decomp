@@ -191,6 +191,16 @@ public:
 	// nothing while a vote runs (+4), else mayStart's checks for a kick.
 	bool mayStartKick(int target, bool targetIsHost) { return !running() && mayStart(2, target, targetIsHost); }
 	bool running() const { return m_kind != 0; }
+	// The bar on applying for command after a mutiny (player +0x128 /
+	// +0x130, slots 0x13c..0x148). A mutiny vote's end, passed (phase 3)
+	// or cancelled (2), sets its target's minutes to 5 (0x005740e0); the
+	// local player's commander flag going off stamps the time
+	// (setCommander false, 0x00591950), going on clears the minutes.
+	// Commander.commanderApply (0x007d7050) refuses while 5 less the
+	// minutes since is above 0, saying
+	// HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTE(S) with ceil of it.
+	void setCommanding(bool commanding);
+	bool mayApplyForCommander();
 
 private:
 	enum Line { kUnable = 0, kInProgress = 1, kSelf = 2, kNotIn = 3, kHost = 4, kTooFew = 6, kStart = 7, kStat = 8,
@@ -206,6 +216,10 @@ private:
 	float m_left = 0, m_wait = 0, m_statTimer = 0, m_startTimer = 0;
 	bool m_voted = false;
 	std::map<int, int> m_states; // player -> 1 starter, 2 yes, 3 no
+	double m_clock = 0;          // the game's seconds (DAT_00a7d060 slot 0x14), from tick
+	double m_lostCommandAt = 0;  // the local player's +0x128
+	double m_barredMinutes = 0;  // and +0x130
+	bool m_commanding = false;
 };
 
 // The VOIP list and icon (VoipSquadList, VoiceOverTalkIconShow).

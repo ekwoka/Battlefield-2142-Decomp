@@ -888,6 +888,77 @@ TEST(Titan_PodSeatsChangeToTheTitanPodNearATitan)
 	}
 }
 
+// The air transports' seats (eu_at's pilot, gunners and passengers:
+// exitThroughPodLauncher, each with an air_pod_launcher on PIFire): the
+// exit key fires the seat's pod launcher whatever its input (0x004bda00
+// mask 0x400 -> event 6), and so does the fire button, the launcher's
+// round being the pod (eu_pod_drop, enterOnSpawn) that seats the soldier
+// who fired it: either way the soldier leaves in a pod, not in the air.
+TEST(Titan_AirTransportSeatsLaunchPods)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded || !level.templates.find("eu_at") || !level.templates.find("eu_pod_drop")) {
+		return;
+	}
+	level.run(0.5f);
+	for (const bool exitKey : {true, false}) {
+		const float x = exitKey ? 0.0f : 60.0f, z = 0;
+		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + 3.0f, z});
+		at->setTeam(2);
+		level.run(2 / 30.0f);
+		const int player = level.world->addPlayer(exitKey ? "Exit" : "Fire", 2, false);
+		CHECK(level.world->spawnSoldier(player));
+		// In at its entry point (the use key's reach).
+		physics::Vec3 entry;
+		CHECK(level.world->entryPoint(at->id(), entry));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(player, info);
+		level.world->setSoldierPosition(info.soldier, {entry.x, entry.y - 1.0f, entry.z});
+		game::SoldierInput use;
+		use.use = true;
+		level.world->setInput(player, use);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		level.run(1 / 30.0f);
+		// A passenger's seat (eu_at_Passenger2_Left..).
+		int seat = -1;
+		const auto seats = level.world->vehicleSeats(at->id());
+		for (size_t i = 0; i < seats.size() && seat < 0; ++i) {
+			std::string name = seats[i].name;
+			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			seat = name.find("passenger") != std::string::npos ? static_cast<int>(i) : -1;
+		}
+		CHECK(seat > 0);
+		game::SoldierInput input;
+		input.switchSeat = seat + 1;
+		level.world->setInput(player, input);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		level.run(1 / 30.0f);
+		CHECK(level.world->playerInfo(player, info) && info.vehicle == at->id() && info.seat == seat);
+		game::SoldierInput leave;
+		leave.use = exitKey;
+		leave.fire = !exitKey;
+		level.world->setInput(player, leave);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		level.run(1 / 30.0f);
+		std::string pod;
+		for (const auto& p : level.world->pods()) {
+			if (p.player == player) {
+				const world::Object* o = level.objects.find(p.object);
+				pod = o && o->objectTemplate() ? o->objectTemplate()->name() : "";
+			}
+		}
+		std::fprintf(stderr, "  %s: %s\n", exitKey ? "the exit key" : "fire", pod.c_str());
+		CHECK(pod == "eu_pod_drop");
+	}
+}
+
 // A parachute opened inside a Titan (its hangar, 14 m over the deck) comes
 // down on the deck: the parachute (otherCollisionLod 2) meets each of the
 // Titan's parts at its soldier LOD (Titan::VehiclePart::lod), as the mobile

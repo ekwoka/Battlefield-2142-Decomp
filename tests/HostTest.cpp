@@ -423,7 +423,7 @@ TEST(NetHost_JoinedHudStateAndRequests)
 // client, the game's own with no sender), the offer of command (2/0x23)
 // answered by a client, the commander's tools from a client (the supply
 // drop; refused from anyone else), the squads' events (a new squad by
-// name, the leader's invite of a bot, his kick), the orders both ways and
+// name, the leader's invite of a bot, unanswered, his kick), the orders both ways and
 // a mutiny vote.
 TEST(NetHost_RadioCommanderToolsAndSquads)
 {
@@ -576,8 +576,9 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	CHECK(pumpUntil(step, [&] { return tools.size() == 2; }));
 	CHECK(tools.size() == 2 && !std::get<2>(tools[1]));
 
-	// B makes squad 1 by naming it, invites a bot (who takes it), then
-	// removes him (LeaveSquad with the member).
+	// B makes squad 1 by naming it and invites a bot: the invite only marks
+	// the bot's mask (0x004c3190; no AI path answers it), so he stays out
+	// until he joins; then B removes him (LeaveSquad with the member).
 	b.createSquad(1, "Alpha");
 	CHECK(pumpUntil(step, [&] {
 		const net::RemotePlayer* pb = b.world().player(idB);
@@ -586,10 +587,11 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	const int bot = round.addPlayer("Bot1", team, true);
 	CHECK(pumpUntil(step, [&] { return b.world().player(bot) != nullptr; }));
 	b.invite(bot, 1);
-	CHECK(pumpUntil(step, [&] {
+	CHECK(!pumpUntil(step, [&] {
 		dice::hfe::game::GameWorld::PlayerInfo p;
 		return round.playerInfo(bot, p) && p.squad == 1;
-	}));
+	}, 300));
+	round.joinSquad(bot, 1);
 	b.leaveSquad(1, bot);
 	CHECK(pumpUntil(step, [&] {
 		dice::hfe::game::GameWorld::PlayerInfo p;
@@ -694,6 +696,18 @@ float distance(const net::Vec3f& a, const dice::hfe::physics::Vec3& b)
 }
 
 } // namespace
+
+// PlayerHealth on the local game's HUD (0x007a0f80): the soldier's hit
+// points over its maxHitPoints, not a constant full bar.
+TEST(Host_LocalHudHealthIsTheSoldiers)
+{
+	HostRange range;
+	CHECK(range.round->spawnPlayer(2) != nullptr);
+	const host::LocalHudWorld local(*range.round, range.logic);
+	CHECK(std::abs(local.health() - 1.0f) < 1e-4f);
+	range.round->setHitPoints(range.round->playerObject(), 48.7f);
+	CHECK(std::abs(local.health() - 0.487f) < 1e-4f);
+}
 
 // The control-object record's mode-3 state end to end: a client predicts
 // its soldier from its own moves (Prediction.h) while the host steps the
@@ -817,6 +831,41 @@ TEST(NetHost_PredictionAndSession)
 	CHECK(st.records > 100 && st.unknownMoves < st.records / 10);
 	CHECK(st.sumCorrection / st.records < 0.05);
 	CHECK(compared > 100 && worstBot < 0.01f && worstHealth < 0.01f);
+
+	// The client's moves stop (its game no longer ticks): the server takes
+	// the last move again for up to 30 ticks in a row (0x004ac660's +0x30),
+	// then steps an all-zero input, so the soldier walks on for a second
+	// and stops.
+	{
+		dice::hfe::game::SoldierInput forward;
+		forward.throttle = 1;
+		client.setInput(net::playerInputFrom(forward));
+		for (int i = 0; i < 20; ++i) {
+			client.update();
+			client.simulatedTick();
+			hosted.tick();
+			round.tick(1.0f / 30);
+			std::this_thread::sleep_for(std::chrono::milliseconds(33));
+		}
+		for (int i = 0; i < 10; ++i) { // the moves in flight arrive
+			client.update();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		std::vector<dice::hfe::physics::Vec3> at;
+		for (int i = 0; i < 70; ++i) {
+			client.update();
+			hosted.tick();
+			round.tick(1.0f / 30);
+			CHECK(round.playerInfo(me, info) && info.alive);
+			at.push_back(info.position);
+		}
+		const auto moved = [&](size_t from, size_t to) {
+			const dice::hfe::physics::Vec3 d = at[to] - at[from];
+			return std::sqrt(d.x * d.x + d.z * d.z);
+		};
+		CHECK(moved(0, 25) > 1.0f);   // the moves left, then the last one again
+		CHECK(moved(55, 69) < 0.05f); // past 30 dry ticks: standing
+	}
 
 	// A map change on the same connection: the level block again, and the
 	// join's database for the new round.

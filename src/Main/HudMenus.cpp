@@ -312,18 +312,13 @@ void SquadMenu::applyInviteList(int player)
 			}
 		}
 	}
+	// The invitations (slot 0x30: Invite); a client's player answers his.
+	// Offline the only one asked would be a bot, and no bot answers.
 	for (const int id : m_selected) {
 		game::GameWorld::PlayerInfo other;
-		if (m_remote.world) {
-			// The invitation (slot 0x30: Invite); the server's player answers it.
-			if (!m_unselected.count(id) && playerInfo(id, other) && other.squad != me.squad && m_remote.invite) {
-				m_remote.invite(id, me.squad);
-			}
-			continue;
-		}
-		if (!m_unselected.count(id) && playerInfo(id, other) && other.ai && other.squad == 0
-			&& !locked(me.team, me.squad)) {
-			m_round.joinSquad(id, me.squad);
+		if (m_remote.world && !m_unselected.count(id) && playerInfo(id, other) && other.squad != me.squad
+			&& m_remote.invite) {
+			m_remote.invite(id, me.squad);
 		}
 	}
 	m_inviteShow = false;

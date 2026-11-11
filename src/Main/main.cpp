@@ -204,6 +204,8 @@ struct Options {
 	bool spawnScreen = false;    // --spawn-screen: die first, to show the spawn screen
 	bool commanderScreen = false; // --commander-screen: take command and open its screen
 	bool unlockAll = false;      // --unlock-all: every kit unlock (no stats server to ask)
+	std::vector<std::string> unlocks; // --unlocks a,b: the ItemContainers chosen (the customise screen's)
+	bool squadLeader = false;    // --squad-leader: lead a squad the team's bots join
 	std::string menu;            // --menu [mainMenu|endOfRound]: the Flash menu over everything
 	float menuSeconds = 10;      // --menu-seconds: how long a screenshot lets the menu play first
 	std::vector<std::string> console; // --console "<command>": run once the round has started
@@ -325,6 +327,15 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.menuSeconds = static_cast<float>(std::atof(argv[++i]));
 		} else if (arg == "--unlock-all") {
 			options.unlockAll = true;
+		} else if (arg == "--squad-leader") {
+			options.squadLeader = true;
+		} else if (arg == "--unlocks" && hasValue) {
+			std::stringstream list(argv[++i]);
+			for (std::string name; std::getline(list, name, ',');) {
+				if (!name.empty()) {
+					options.unlocks.push_back(name);
+				}
+			}
 		} else if (arg == "--spawn-screen") {
 			options.spawnScreen = true;
 		} else if (arg == "--commander-screen") {
@@ -556,6 +567,12 @@ private:
 // teamwork, kills, deaths, ping); the list's own drawing (RendDX9.dll) is
 // not decompiled, so the layout is read off the scripts.
 std::function<std::string(const std::string&)> g_localize; // strings.csv
+// The local player's control map now (the input manager's, DAT_00a0f7c8
+// slot 0x48): the texts' #PI keys come from it (0x00752b70), so a seat's
+// "#PIFlareFire#" is the land or air map's key, which the infantry map
+// hasn't. Set by updateHud from the vehicle's category, as Viewer picks
+// the map it reads.
+std::string g_playerControlMap = input::ControlMaps::kInfantry;
 
 constexpr float tabKickColumn = 279; // the KICKVOTE label's 285..373 less the list's 10, the 12-pixel box centred near its start
 
@@ -776,6 +793,33 @@ float g_hudTime = -1;
 // game's while one runs (the console's HUD methods ask it).
 host::HudWorld* g_hudWorld = nullptr;
 host::RemoteHudWorld* g_remoteHud = nullptr;
+// The profile's auto reload (GeneralSettings.setAutoReload, GameWorld::autoReload).
+bool g_autoReload = true;
+
+// A joined client's auto reload: the player's input (0x00594280) runs
+// where the input is gathered and its c_PIReload goes to the server with
+// the rest. The weapon in hand by our own state (PlayerOwnState's active
+// group: its rounds and magazines) empty, with a magazine to take, and
+// without ammo.autoReload (the ammo's slot 0x94, 0x005f37f0). The server
+// takes a press as it comes down (and refuses one while the weapon is
+// drawn or busy), so the press is let go one tick in 15 to come again, and
+// isn't made while the trigger is held (a busyUntilButtonRelease
+// launcher keeps its wire till then).
+bool joinedAutoReload(bool fireHeld, int tick)
+{
+	if (!g_remoteHud || !g_autoReload || fireHeld || tick % 15 == 0) {
+		return false;
+	}
+	const host::HudWorld::Weapon w = g_remoteHud->heldWeapon();
+	if (!w.weapon || w.rounds != 0 || w.mags <= 0) {
+		return false;
+	}
+	const auto setting = [&w](const char* name, int fallback) {
+		const auto it = w.weapon->settings().find(name);
+		return it == w.weapon->settings().end() ? fallback : std::atoi(it->second.c_str());
+	};
+	return setting("ammo.magSize", 30) > 0 && setting("ammo.autoReload", 0) == 0;
+}
 // A joined game's soldier deviation now (the client's own weapon feel,
 // -1 none), for the crosshair.
 float g_remoteDeviation = -1;
@@ -1254,6 +1298,12 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const bool alive = soldier != nullptr;
 	const world::Object* const playerVehicle = world.vehicle();
 	const bool inVehicle = playerVehicle != nullptr;
+	{
+		const world::ObjectTemplate* t = inVehicle ? playerVehicle->objectTemplate() : nullptr;
+		const auto category = t ? t->settings().find("vehicleCategory") : decltype(t->settings().end()) {};
+		g_playerControlMap =
+			input::ControlMaps::playerMapFor(inVehicle, t && category != t->settings().end() ? category->second : std::string());
+	}
 	// The in-game HUD stays up while dead (the spawn screen is part of it);
 	// the soldier's own items have their own show variables.
 	const bool connected = world.localPlayer() >= 0;
@@ -1454,7 +1504,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	hud.set("PlayerHealthShow", alive ? 1 : 0);
 	const float health = world.health();
 	hud.set("PlayerHealth", health);
-	hud.setString("PlayerHealthString", std::to_string(static_cast<int>(std::lround(health * 100))));
+	// PlayerHealthString: ceil(health x 100) (0x007a0f80).
+	hud.setString("PlayerHealthString", std::to_string(static_cast<int>(std::ceil(health * 100 - 1e-4f))));
 	const game::FireArm* weapon = held.gun;
 	if (weapon && !inVehicle) {
 		heldGun = weapon;
@@ -3117,7 +3168,8 @@ int runGame(Options& options, Session& session)
 	const auto localizeWithKeys = [&localization, &controls](const std::string& id) {
 		std::string text = localization.text(id);
 		if (text.find("#PI") != std::string::npos || text.find("#GI") != std::string::npos) {
-			text = controls.withKeyNames(text, [&localization](const std::string& key) { return localization.text(key); });
+			text = controls.withKeyNames(text, [&localization](const std::string& key) { return localization.text(key); },
+				g_playerControlMap);
 		}
 		return text;
 	};
@@ -4163,6 +4215,10 @@ int runGame(Options& options, Session& session)
 		bots.attach(botSettings); // the scripted-bot commands (ai.botMoveTo...)
 		bots.setServerMaxPlayers(options.maxPlayers); // AIMain's kick and fill (sv.maxPlayers when hosting)
 		round.unlockAllByDefault = options.unlockAll;
+		// The profile's auto reload (GeneralSettings.setAutoReload, taken by
+		// the local player through 0x00591e50).
+		round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0;
+		g_autoReload = round.autoReload;
 		if (heightmaps.hasSea()) {
 			round.setWaterLevel(heightmaps.seaWaterLevel());
 		}
@@ -4226,13 +4282,6 @@ int runGame(Options& options, Session& session)
 			}
 			return round.commanderAction(myTeam(), ability, x, z);
 		};
-		bindMethod(console, "Commander.commanderApply", ConsoleAccess::Anyone, [&] {
-			if (net::GameClient* server = joinedServer()) {
-				server->applyForCommander(); // the Commander event, kind 4
-				return;
-			}
-			round.applyForCommander(round.localPlayer());
-		});
 		bindMethod(console, "Commander.commanderResign", ConsoleAccess::Anyone, [&] {
 			if (net::GameClient* server = joinedServer()) {
 				server->resignCommander(); // kind 2
@@ -4869,6 +4918,19 @@ int runGame(Options& options, Session& session)
 		dice::hfe::menu::VoteMessages voteMessages;
 		voteMessages.localize = [&localization](const std::string& id) { return localization.text(id); };
 		voteMessages.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
+		// Commander.commanderApply (0x007d7050): refused while barred after a
+		// mutiny (VoteMessages::mayApplyForCommander), else the Commander
+		// event's kind 4 (or the round's own application).
+		bindMethod(console, "Commander.commanderApply", ConsoleAccess::Anyone, [&] {
+			if (!voteMessages.mayApplyForCommander()) {
+				return;
+			}
+			if (net::GameClient* server = joinedServer()) {
+				server->applyForCommander(); // the Commander event, kind 4
+				return;
+			}
+			round.applyForCommander(round.localPlayer());
+		});
 		// Commander.commanderMutiny (HUD 0x007d7390 → the vote object's
 		// 0x00573cb0): a mutiny vote (kind 3) against the team's commander,
 		// from the local player, unless one runs or the last start is too
@@ -6451,7 +6513,8 @@ int runGame(Options& options, Session& session)
 						act.altFire = pressNow;
 					}
 				}
-				act.reload = reloadNow;
+				// The player's auto reload, as a window's input has it.
+				act.reload = reloadNow || joinedAutoReload(act.fire, static_cast<int>(gameLogic.elapsed * 30));
 				// face:enemy: the nearest living soldier of the other team;
 				// an underscore in a name stands for a space ("P._Soderlund").
 				std::string facingName = facing;
@@ -7211,6 +7274,8 @@ int runGame(Options& options, Session& session)
 					voteMessages.handle(v);
 				}
 			}
+			game::GameWorld::PlayerInfo commanding;
+			voteMessages.setCommanding(hudPlayer(hudLocal(), commanding) && commanding.commander);
 			voteMessages.tick(1.0f / 30.0f);
 			// The radio messages we hear (RadioMessage, 0x0050d300 → the
 			// event manager's category 6 → 0x0042e0c0): the voice and its
@@ -7409,6 +7474,8 @@ int runGame(Options& options, Session& session)
 			remoteStep();
 			if (hosted) {
 				hosted->tick();
+				game::GameWorld::PlayerInfo commanding;
+				voteMessages.setCommanding(round.playerInfo(round.localPlayer(), commanding) && commanding.commander);
 				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
 			}
 			bots.update(1.0f / 30.0f);
@@ -7428,6 +7495,8 @@ int runGame(Options& options, Session& session)
 			remoteStep();
 			if (hosted) {
 				hosted->tick();
+				game::GameWorld::PlayerInfo commanding;
+				voteMessages.setCommanding(round.playerInfo(round.localPlayer(), commanding) && commanding.commander);
 				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
 			}
 			bots.update(1.0f / 30.0f);
@@ -7591,6 +7660,12 @@ int runGame(Options& options, Session& session)
 				round.localPlayerUnlocks = stats::containersFor(stats::unlockContainers(templates), session.menuBindings->soldierUnlocks());
 				round.localPlayerOwned = round.localPlayerUnlocks;
 			}
+			if (!options.unlocks.empty()) {
+				// --unlocks: these containers chosen and owned, as the customise
+				// screen's equipped unlocks (not every unlock, as --unlock-all).
+				round.localPlayerUnlocks = options.unlocks;
+				round.localPlayerOwned = options.unlocks;
+			}
 			const world::Object* player = round.spawnPlayer(options.playTeam);
 			if (player && !options.kit.empty()) {
 				// --kit: the kit of the team's list, taken as the spawn screen's
@@ -7617,6 +7692,27 @@ int runGame(Options& options, Session& session)
 			}
 			if (player) {
 				round.joinSquad(round.localPlayer(), round.openSquad(options.playTeam));
+				if (options.squadLeader) {
+					// --squad-leader: lead a squad of our own, which the team's
+					// bots join (the squad leader's items want members).
+					int own = 0;
+					const auto everyone = round.playerList();
+					for (int squad = 1; squad <= 9 && own == 0; ++squad) {
+						if (std::none_of(everyone.begin(), everyone.end(), [&](const game::GameWorld::PlayerInfo& p) {
+								return p.team == options.playTeam && p.squad == squad;
+							})) {
+							own = squad;
+						}
+					}
+					if (own != 0 && round.joinSquad(round.localPlayer(), own)) {
+						int joined = 0;
+						for (const auto& p : everyone) {
+							if (p.ai && p.team == options.playTeam && joined < 5 && round.joinSquad(p.id, own)) {
+								++joined;
+							}
+						}
+					}
+				}
 				std::printf("playing %s at %.1f/%.1f/%.1f\n", player->objectTemplate()->name().c_str(),
 					player->position().x, player->position().y, player->position().z);
 				// --actions: the player's inputs, a tick each unless a count
@@ -7626,6 +7722,25 @@ int runGame(Options& options, Session& session)
 				const auto runActions = [&] {
 					std::istringstream actions(options.actions);
 					size_t impactsSeen = round.impactsTotal();
+					// The objects there are now: each action lists the new ones
+					// (a thrown or placed gadget, a deployed gun, a drone).
+					std::set<uint32_t> objectsSeen;
+					for (const auto& o : objects.objects()) {
+						objectsSeen.insert(o->id());
+					}
+					// What the kit carries, and the squad.
+					if (game::GameWorld::PlayerInfo me; round.playerInfo(round.localPlayer(), me)) {
+						std::printf("carries:");
+						for (const auto& [slot, name] : me.carried) {
+							std::printf(" %d:%s", slot, name.c_str());
+						}
+						const auto everyone = round.playerList();
+						std::printf("; squad %d of %zu%s\n", me.squad,
+							me.squad == 0 ? size_t {0}
+										  : static_cast<size_t>(std::count_if(everyone.begin(), everyone.end(),
+												[&me](const game::GameWorld::PlayerInfo& p) { return p.team == me.team && p.squad == me.squad; })),
+							me.squadLeader ? ", leader" : "");
+					}
 					for (std::string command; actions >> command;) {
 						const size_t colon = command.find(':');
 						const std::string op = command.substr(0, colon);
@@ -7639,10 +7754,11 @@ int runGame(Options& options, Session& session)
 						act.aimPitch = me.aimPitch;
 						round.takeAimKick(round.localPlayer());
 						bool known = true;
-						if (op == "fire" || op == "altfire" || op == "wait" || op == "forward" || op == "sprint" || op == "prone"
-							|| op == "crouch") {
+						if (op == "fire" || op == "altfire" || op == "flare" || op == "wait" || op == "forward" || op == "sprint"
+							|| op == "prone" || op == "crouch") {
 							act.fire = op == "fire";
 							act.altFire = op == "altfire";
+							act.flareFire = op == "flare"; // c_PIFlareFire: a seat's flares or active defence
 							act.throttle = op == "forward" || op == "sprint" ? 1.0f : 0.0f;
 							act.sprint = op == "sprint";
 							act.pose = op == "prone" ? game::SoldierPose::Prone : op == "crouch" ? game::SoldierPose::Crouch
@@ -7708,6 +7824,37 @@ int runGame(Options& options, Session& session)
 								me.vehicle ? ", in a vehicle" : "", me.position.x, me.position.y, me.position.z, me.yaw);
 							if (round.projectilesInFlight() > 0) {
 								std::printf("  %zu rounds in flight\n", round.projectilesInFlight());
+							}
+							std::printf("  %.1f hit points, battery %.2f%s\n", round.hitPoints(me.soldier), me.battery,
+								me.cloaked ? ", cloaked" : "");
+							if (me.vehicle && me.seat >= 0) {
+								// The seat's active weapon of each group (PIFire, PIAltFire, PIFlareFire).
+								const auto seats = round.vehicleSeats(me.vehicle);
+								std::printf("  vehicle %.1f hit points; seat guns:", round.hitPoints(me.vehicle));
+								for (int group = 0; group < 3; ++group) {
+									const int index = round.seatWeaponIndex(me.vehicle, me.seat, group);
+									if (index < 0 || static_cast<size_t>(me.seat) >= seats.size()
+										|| static_cast<size_t>(index) >= seats[static_cast<size_t>(me.seat)].weapons.size()) {
+										continue;
+									}
+									const game::FireArm* arm = round.seatFireArm(me.vehicle, me.seat, index);
+									std::printf(" [%d] %s %d/%d%s", group,
+										seats[static_cast<size_t>(me.seat)].weapons[static_cast<size_t>(index)].weapon.c_str(),
+										arm ? arm->roundsInMag() : -1, arm ? arm->magsLeft() : -1, arm && arm->reloading() ? " reloading" : "");
+								}
+								std::printf("\n");
+							}
+							std::string fresh;
+							for (const auto& o : objects.objects()) {
+								if (objectsSeen.insert(o->id()).second && o->objectTemplate()) {
+									char line[160];
+									std::snprintf(line, sizeof line, " %s@%.1f/%.1f/%.1f", o->objectTemplate()->name().c_str(),
+										o->position().x, o->position().y, o->position().z);
+									fresh += line;
+								}
+							}
+							if (!fresh.empty()) {
+								std::printf("  new objects:%s\n", fresh.c_str());
 							}
 							// The rounds' hits since the last action, and the
 							// --spawn targets' hit points.
@@ -9181,7 +9328,7 @@ int runGame(Options& options, Session& session)
 				return true;
 			};
 			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, &playerCamera, &remoteLook, lastAimPitch = 0.0f,
-										toggleCameraWas = false](const ViewerOptions::PlayerInput& raw) mutable {
+										toggleCameraWas = false, autoReloadTick = 0](const ViewerOptions::PlayerInput& raw) mutable {
 				scoreboardHeld = options.scoreboard || raw.scoreboard;
 				if (!session.client) {
 					return;
@@ -9215,7 +9362,7 @@ int runGame(Options& options, Session& session)
 				input.toggleWeapon = in.toggleWeapon;
 				input.use = in.use;
 				input.toggleFireRate = in.toggleFireRate;
-				input.reload = in.reload;
+				input.reload = in.reload || joinedAutoReload(in.fire, autoReloadTick++);
 				input.mouseLook = in.mouseLook;
 				// The position and weapon keys go to the server as
 				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's

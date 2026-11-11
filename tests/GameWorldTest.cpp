@@ -548,6 +548,57 @@ TEST(GameWorld_WeaponSwitching)
 	CHECK(held() == "eu_ar_rifle" && range.world->playerWeapon()->roundsInMag() == rifleRounds);
 }
 
+// toggleWhenNoAmmo after the last round (0x005f4a40 -> 0x005883d0): the
+// item before (soldier +0x1f4, written by the selection 0x00589dc0) when
+// it can be selected, else soldier +0x1f8, the kit's primary (itemIndex 3,
+// stored by the kit's add-item 0x0058c840), not the kit's first item.
+TEST(GameWorld_ToggleWhenNoAmmoFallsBackToThePrimary)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	range.templates.create("GenericFireArm", "knife")->settings()["itemIndex"] = "1";
+	for (const auto& [name, index] : {std::pair {"charge_a", "5"}, std::pair {"charge_b", "6"}}) {
+		world::ObjectTemplate* charge = range.templates.create("GenericFireArm", name);
+		charge->settings()["itemIndex"] = index;
+		charge->settings()["projectileTemplate"] = "bullet";
+		charge->settings()["ammo.magSize"] = "1";
+		charge->settings()["ammo.nrOfMags"] = "0";
+		charge->settings()["ammo.toggleWhenNoAmmo"] = "1";
+		charge->settings()["fire.roundsPerMinute"] = "60";
+	}
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* item : {"knife", "eu_ar_rifle", "charge_a", "charge_b"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto held = [&] { return range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name(); };
+	CHECK(held() == "eu_ar_rifle");
+	game::SoldierInput input;
+	const auto press = [&](game::SoldierInput in) {
+		range.world->setPlayerInput(in);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	};
+	input.selectItem = 6;
+	press(input);
+	input.selectItem = 5;
+	press(input);
+	CHECK(held() == "charge_a");
+	game::SoldierInput fire;
+	fire.fire = true;
+	fire.aimPitch = 30;
+	for (int i = 0; i < 40 && held() == "charge_a"; ++i) {
+		press(fire);
+	}
+	CHECK(held() == "charge_b"); // the item before, still loaded
+	for (int i = 0; i < 40 && held() == "charge_b"; ++i) {
+		press(fire);
+	}
+	CHECK(held() == "eu_ar_rifle"); // charge_a is empty: the primary, not the knife
+}
+
 TEST(GameWorld_GadgetsHealAndResupply)
 {
 	// unl_hub_medic: thrown out (slot 4), it heals the team round it, 3 per
@@ -1405,6 +1456,154 @@ TEST(GameWorld_SquadsLeadersAndBeacons)
 	CHECK(range.world->joinSquad(eu[0], 0));
 	range.world->playerInfo(eu[1], info);
 	CHECK(info.squadLeader && range.world->squadBeacon(2, 1) == 0);
+}
+
+// The player's auto reload (GeneralSettings.setAutoReload, on by default:
+// 0x0049a170; player +0x3d0 from 0x00591e50): the input (0x00594280)
+// presses c_PIReload while the weapon in hand's magazine is empty, it
+// isn't reloading and a magazine can be taken, for a weapon without
+// ammo.autoReload (the ammo's slot 0x94, 0x005f37f0). Off, the empty
+// rifle waits for the key. A busyUntilButtonRelease launcher (eu_av) keeps
+// its round's wire while the trigger is held: its reload, auto or not, is
+// refused until the release (the fire component's slot 0x44, 0x005d5b60).
+TEST(GameWorld_AutoReload)
+{
+	for (const bool autoReload : {true, false}) {
+		Range range;
+		range.templates.registerType(6, "Kit");
+		world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
+		rifle->settings()["itemIndex"] = "3";
+		rifle->settings()["ammo.magSize"] = "3";
+		rifle->settings()["ammo.nrOfMags"] = "4";
+		rifle->settings()["ammo.reloadTime"] = "1";
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		range.world->autoReload = autoReload;
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f); // drawn
+		}
+		game::SoldierInput spray;
+		spray.fire = true;
+		spray.aimPitch = 45;
+		for (int i = 0; i < 30 && range.world->playerWeapon()->roundsInMag() > 0; ++i) {
+			range.world->setPlayerInput(spray);
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+		for (int i = 0; i < 45; ++i) {
+			range.world->setPlayerInput({});
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->playerWeapon()->roundsInMag() == (autoReload ? 3 : 0));
+		CHECK(range.world->playerWeapon()->magsLeft() == (autoReload ? 3 : 4));
+	}
+	// The guided launcher: one round, busy until the trigger is let go.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* launcher = range.templates.create("GenericFireArm", "eu_av");
+	launcher->settings()["itemIndex"] = "3";
+	launcher->settings()["projectileTemplate"] = "bullet";
+	launcher->settings()["velocity"] = "50";
+	launcher->settings()["ammo.magSize"] = "1";
+	launcher->settings()["ammo.nrOfMags"] = "6";
+	launcher->settings()["ammo.reloadTime"] = "1";
+	launcher->settings()["fire.busyUntilButtonRelease"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault"); // the spawn's kit
+	kit->children().push_back({"eu_av", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	for (int i = 0; i < 30; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	game::SoldierInput hold;
+	hold.fire = true;
+	hold.aimPitch = 45;
+	for (int i = 0; i < 30; ++i) {
+		range.world->setPlayerInput(hold);
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+	CHECK(!range.world->playerWeapon()->reloading()); // held: the wire stays
+	hold.reload = true; // nor does the key reload it
+	range.world->setPlayerInput(hold);
+	range.world->tick(1 / 30.0f);
+	CHECK(!range.world->playerWeapon()->reloading());
+	for (int i = 0; i < 3; ++i) {
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->reloading()); // let go: the auto reload
+}
+
+// The ammo ability refills every firearm of the soldier's kit (0x004cf7b0:
+// the player's item containers' items through interface 0x94c0 slot 0x88,
+// 0x005f5110), not only the one in hand: a put-away rifle gets its
+// magazine back from an ammo hub while the soldier holds his pistol.
+TEST(GameWorld_AmmoRefillsPutAwayWeapons)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_ammo");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["projectileTemplate"] = "unl_hub_ammo_stationary";
+	hub->settings()["ammo.replenishingType"] = "RTAmmo";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "50";
+	hub->settings()["ammo.magSize"] = "1";
+	hub->settings()["fire.roundsPerMinute"] = "60";
+	range.templates.create("GenericProjectile", "unl_hub_ammo_stationary")->settings()["armor.maxHitPoints"] = "100";
+	world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
+	rifle->settings()["itemIndex"] = "3";
+	rifle->settings()["ammo.magSize"] = "5";
+	rifle->settings()["ammo.nrOfMags"] = "4";
+	rifle->settings()["ammo.reloadTime"] = "0.5";
+	world::ObjectTemplate* pistol = range.templates.find("as_ar_rifle"); // the sidearm
+	pistol->settings()["itemIndex"] = "2";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault"); // the spawn's kit
+	for (const char* item : {"eu_ar_rifle", "as_ar_rifle", "unl_hub_ammo"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto press = [&](game::SoldierInput input) {
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	};
+	for (int i = 0; i < 30; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	// A magazine of the rifle spent (the auto reload takes the next).
+	game::SoldierInput spray;
+	spray.fire = true;
+	spray.aimPitch = 45;
+	for (int i = 0; i < 60; ++i) {
+		range.world->setPlayerInput(spray);
+		range.world->tick(1 / 30.0f);
+		if (range.world->playerWeapon()->magsLeft() < 4 && range.world->playerWeapon()->roundsInMag() == 5) {
+			break;
+		}
+	}
+	for (int i = 0; i < 30; ++i) {
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->magsLeft() == 3);
+	game::SoldierInput take;
+	take.selectItem = 4;
+	press(take);
+	game::SoldierInput fire;
+	fire.fire = true;
+	press(fire);
+	CHECK(range.world->supplyObjects().size() == 1);
+	take.selectItem = 2; // the sidearm in hand, the rifle put away
+	press(take);
+	for (int i = 0; i < 30 * 4; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	take.selectItem = 3;
+	press(take);
+	CHECK(range.world->playerWeapon()->magsLeft() == 4);
 }
 
 TEST(GameWorld_PortableShield)

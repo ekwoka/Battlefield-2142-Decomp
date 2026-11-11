@@ -351,8 +351,9 @@ private:
 		net::MoveInputState moveState;           // the aim and the keys held
 		int32_t stepping = -1;                   // the move the round steps this tick
 		int32_t stepped = -1;                    // the last move the round has stepped (the record's)
-		bool starved = true;                     // no move was waiting: wait for two
-		uint32_t movesDropped = 0, ticksStarved = 0; // for the log
+		net::PlayerMove lastMove;                // the last move taken (0x004ac370: +0x14), all zero before any
+		int dryTicks = 0;                        // ticks in a row it was taken again (+0x30, at most 30)
+		uint32_t ticksStarved = 0;               // for the log
 		int historySlot = 7;                     // the record's slot (0x00580830: +0x20f8)
 		// The relative records (0x00580830's other path): the slot the
 		// client has acknowledged (+0x20f0, -1 none), how many relative
@@ -373,7 +374,6 @@ private:
 		// comes (the exe's join check has the name; the rewrite's clients
 		// send it after connecting).
 		bool full = false;
-		game::SoldierInput held;                 // the last move's held inputs
 	};
 	struct PlayerSeen {
 		uint16_t ghost = 0; // its networkable's

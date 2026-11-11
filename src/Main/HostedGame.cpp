@@ -154,14 +154,11 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 	m_server.onEvent = [this](int client, const net::GameEvent& e) { event(client, e); };
 	m_server.onMove = [this](int client, const net::PlayerMove& move) {
 		if (const auto it = m_clients.find(client); it != m_clients.end()) {
-			// The moves wait to be stepped one a tick; past four the oldest
-			// go (the buffer the original keeps per player; its depth here
-			// is OpenBattlefield2's reading of BF2's, not traced in BF2142.exe).
+			// The moves wait to be stepped one a tick: the input block's
+			// reader (0x00590990 -> 0x005904b0) appends each move newer than
+			// the last to the player's move list (player slot 0xa8,
+			// 0x00583770), which has no limit.
 			it->second.moves.push_back(move);
-			while (it->second.moves.size() > 4) {
-				it->second.moves.pop_front();
-				++it->second.movesDropped;
-			}
 		}
 	};
 }
@@ -172,8 +169,7 @@ HostedGame::~HostedGame()
 	stopDemo();
 	for (const auto& [id, client] : m_clients) {
 		if (onLog) {
-			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.movesDropped) + " dropped, "
-				+ std::to_string(client.ticksStarved) + " ticks without one");
+			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.ticksStarved) + " ticks without one");
 		}
 	}
 	m_server.stop();
@@ -402,6 +398,8 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		client.rescoreIn = 0;
 		client.hasEye = false;
 		client.moves.clear();
+		client.lastMove = {};
+		client.dryTicks = 0;
 		client.stepping = client.stepped = -1;
 		client.spawnRequested = false;
 		if (client.stage != Client::Stage::Connected) {
@@ -994,8 +992,7 @@ void HostedGame::left(int id)
 	const int player = it->second.player;
 	sendVoteReplies(m_votes.playerLeft(player));
 	if (onLog) {
-		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.movesDropped) + " dropped, "
-			+ std::to_string(it->second.ticksStarved) + " ticks without one");
+		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.ticksStarved) + " ticks without one");
 	}
 	m_clients.erase(it);
 	// The game server's destroyPlayer (0x004acfb0): the round lets the
@@ -1307,8 +1304,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	}
 	case net::kEvInvite: { // 0x0050e700: team, player, squad, from the leader
 		// From the squad's leader (squad manager slot 0x40) only; slot 0x30
-		// invites. A bot in no squad takes it at once (as offline: the
-		// rewrite's stand-in for its answer); a client's player is asked.
+		// invites. A client's player is asked; a bot never answers (no
+		// connection, and nothing in BF2142.exe or AIDLL reads its mask but
+		// a private squad's join, 0x004c7290).
 		// Without the leader bit it is the invited player's own refusal
 		// (the HUD's answer, 0x0079d6e0 kind 1: slot 0x30 with false, which
 		// clears the squad's bit).
@@ -1322,9 +1320,6 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		if (!m_round->playerInfo(player, me) || !me.squadLeader || me.squad != e.i(2) || !m_round->playerInfo(e.i(1), other)
 			|| other.team != me.team || other.commander) {
 			return;
-		}
-		if (other.ai && other.squad == 0) {
-			m_round->joinSquad(other.id, me.squad);
 		}
 		// Squad manager slot 0x30 (0x004c3190): the invited player's mask
 		// of the squads that invited it (player vtable 0x224 / 0x228) gets
@@ -1783,30 +1778,30 @@ void HostedGame::applyMoves()
 		}
 		// The move the round stepped last tick is the record's from now on.
 		client.stepped = client.stepping;
-		game::SoldierInput input = client.held;
-		input.turn = 0;
-		input.use = false;
-		input.switchSeat = 0;
-		input.selectItem = 0;
-		input.jump = false;
-		// After running dry the moves wait until two are there (the
-		// client's and the server's ticks run on their own clocks: a move a
-		// tick late otherwise leaves a tick stepped with none, which the
-		// client didn't predict). While dry the soldier keeps the last
-		// move's held inputs.
-		if (client.moves.empty()) {
-			client.starved = true;
-			++client.ticksStarved;
-		} else if (client.starved && client.moves.size() >= 2) {
-			client.starved = false;
-		}
-		if (!client.moves.empty() && !client.starved) {
-			// One move a tick, as the client stepped it (Prediction.h).
+		// The server's player step (0x004ac660 from 0x004ad5c0, each tick
+		// for each player not an AI): the move list's first move is taken
+		// (0x004ac370 keeps it as the last, +0x10 / +0x14) and decoded into
+		// the player's input (0x005838d0), as the client stepped it
+		// (Prediction.h). With none waiting the last one taken is decoded
+		// again, for up to 30 ticks in a row (the count +0x30, cleared by a
+		// move); after that the input is all zero. (Its keys' presses don't
+		// act again: they are the held keys, as MoveInputState keeps them.)
+		game::SoldierInput input;
+		if (!client.moves.empty()) {
 			const net::PlayerMove move = client.moves.front();
 			client.moves.pop_front();
 			input = net::soldierInputFromMove(move, client.moveState);
 			client.stepping = move.index;
-			client.held = input;
+			client.lastMove = move;
+			client.dryTicks = 0;
+		} else {
+			++client.ticksStarved;
+			if (client.dryTicks < 30) {
+				++client.dryTicks;
+				input = net::soldierInputFromMove(client.lastMove, client.moveState);
+			} else {
+				input = net::soldierInputFromMove(net::PlayerMove {}, client.moveState);
+			}
 		}
 		m_round->setInput(client.player, input);
 		game::GameWorld::PlayerInfo me;

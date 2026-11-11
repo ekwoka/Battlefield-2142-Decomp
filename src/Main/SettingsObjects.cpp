@@ -60,10 +60,10 @@ const Field kGeneral[] = {
 	{"GeneralSettings.setChatMessagesFilter", "i", "0"},
 	{"GeneralSettings.setLastAwardsCheckDate", "i", "0"},
 	{"GeneralSettings.setAllowPunkBuster", "b", "1"},
-	{"GeneralSettings.setItemSelectionReverseItems", "b", "0"},
+	{"GeneralSettings.setItemSelectionReverseItems", "b", "1"}, // +0xb5 = 1 (0x0049a170, the constructor's slot 0x28)
 	{"GeneralSettings.setToggleFilters", "i", "312194"}, // 0x4c382
-	{"GeneralSettings.setAutoReload", "b", "0"},
-	{"GeneralSettings.setConnectionType", "i", "0"},
+	{"GeneralSettings.setAutoReload", "b", "1"}, // +0xb6 = 1 (0x0049a170)
+	{"GeneralSettings.setConnectionType", "i", "5"}, // +0xc4 = 5 (0x0049a170)
 	{"GeneralSettings.setLCDDisplayModes", "i", "0"},
 	{"GeneralSettings.setConfirmLaunchEADownloader", "b", "0"},
 	{"GeneralSettings.setConfirmLaunchBFWeb", "b", "0"},

@@ -2198,10 +2198,13 @@ after: the soldier riding the pod faces the seat camera's way
 (`0x005c95b0`) gives the root's control objects the team of the players
 still aboard, none the default team (`+0x254`), except that with the left
 seat's flag and nobody aboard the team stays (`stepVehicleTeams`).
-`exitThroughPodLauncher` (`+0x490`, slots `0x158` / `0x154`; the AT
-walkers' hull and seats, the pod arrays): the exit key (player input
+`exitThroughPodLauncher` (`+0x490`, slots `0x158` / `0x154`; the air
+transports' (eu_at, as_at) hull and seats, the pod arrays): the exit key (player input
 `0x004bda00`, mask `0x400`) fires the seat's pod launcher (its weapon with
-`0x94c0` whose fire is one) when a ray up the frame (3 m past it) and four
+`0x94c0` whose fire is one, whatever its input: the transports'
+air_pod_launcher is on PIFire, the APC pod seats' on PIAltFire; the fire
+button on a PIFire pod launcher launches the pod the same way, its round
+eu_pod_drop having enterOnSpawn; `launchPod(player, exitKey)`) when a ray up the frame (3 m past it) and four
 at the (±1, ±1) corners meet nothing and more than a second has passed,
 then player slot `0x238(8)` and event 6; else the usual exit
 (`enterOrLeaveVehicle`, without the second). `allowTogglePosition`
@@ -4437,9 +4440,8 @@ it isn't drawn, part-faded it is drawn blended. Not done: the
 children's second record (the rewrite draws a vehicle's parts with its
 root's instance) and the walk's filter flag 0x1000000 that skips the fade
 (which views set it isn't traced; the commander's overhead view, 260 m
-up, draws unfaded). Left:
-`allowEmoteAnimation` (`+0x31e`, the soldier's emote `0x005edbf0`: the
-rewrite has no emotes).
+up, draws unfaded). (`allowEmoteAnimation`, once listed here, is read:
+see the radio messages' emotes, `GameWorld::playEmote`.)
 
 ## The pure-server content check
 
@@ -6163,8 +6165,7 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
 - **Squads** (`SquadMenu::setRemote`: the ClientSquadManager's events):
   join (JoinSquad 0x10), leave (LeaveSquad 0x11), a new squad by naming it
   (ChangeSquadName 0x16), its lock (SetPrivateSquad 0x17), the leader's
-  invites (Invite 0x19; the server lets a bot in no squad take it at once,
-  as offline) and removals (LeaveSquad with the member: the server's
+  invites (Invite 0x19; a bot never answers one, below) and removals (LeaveSquad with the member: the server's
   leader check). The server's squad manager slot 0x30 (`0x004c3190`) sets
   the squad's bit in the invited player's mask (player vtable 0x224 /
   0x228) and posts it 2/0x10 (the squad); the client's HUD asks (the
@@ -6173,7 +6174,12 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   invite (slot 0x30 with false: Invite without the leader bit, which the
   server's `0x0050e700` takes from the invited player himself); unless
   timed out the leader hears roger_that or negative (TCPlayer, the squad
-  manager's slot 0x40 giving the leader).
+  manager's slot 0x40 giving the leader). A bot has no connection for
+  2/0x10, and the mask's only other readers are the join (`0x004c7290`:
+  a private squad takes a player only with its bit) and the join's
+  clear (`0x004c6c80`); AIDLL's adaptors (`0x0089xxxx`–`0x008axxxx`) never
+  call slot 0x224, and no AI event carries an invite, so an invited bot
+  stays where he is, offline too.
 - **The HUD's questions** (the HUD manager's `+0x90`; `menu::HudQuestions`):
   seven kinds, one question each, with its seconds (the constructor's
   `+0x70`..: 20, 20, 30, 20, 20, 15, none): 0 a join request
@@ -6445,12 +6451,17 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   chat lines (the StringBlock, sent on to everyone with the sender's id,
   `0x004a5460`).
 
-- **Moves are stepped one a tick**, in order: a client's moves wait in a
-  queue of at most four (past that the oldest go; the depth is
-  OpenBattlefield2's reading of BF2's `GameServer::clearPlayerActions`, not
-  traced in BF2142.exe), and after the queue runs dry it waits for two before
-  stepping again, so a move a tick late doesn't leave a tick stepped with
-  none. The record's last move is the one the round stepped last.
+- **Moves are stepped one a tick**, in order: the input block's reader
+  (`0x00590990` → `0x005904b0`) appends each move newer than the last to
+  the player's move list (player slot `0xa8`, `0x00583770`), which has no
+  limit, and the server's player step (`0x004ac660`, each tick from
+  `0x004ad5c0` for every player not an AI) takes its first move
+  (`0x004ac370`, kept as the last taken at `+0x10` / `+0x14`) into the
+  player's input (`0x005838d0`). With none waiting it decodes the last one
+  taken again, up to 30 ticks in a row (`+0x30`, cleared by a move), then
+  steps an all-zero input. A move a tick late so leaves a tick stepped with
+  the move before it repeated, and the list a move deeper from then on.
+  The record's last move is the one the round stepped last.
 - **Every group of every ghost** goes out, not only the root's: a
   RotationalBundle's angles (the turrets' yaw and pitch, the steering, the
   rotors, as the round poses the part), a Spring's offset (the wheels'
@@ -7204,7 +7215,8 @@ positions as the client saw them equal the host's to the printed
 centimetre, their health 1.00 on both. While the client is still loading
 its level its game doesn't tick, so its moves go up only on the
 connection's own timer (every 200 ms) and the server steps the ticks in
-between with the last move held: those records correct it by tens of
+between with the last move taken again (for 30 ticks, then an all-zero
+input): those records correct it by tens of
 centimetres until the client's loop runs. `bf2142 --connect ... --verbose`
 prints any correction over half a metre.
 
@@ -8587,7 +8599,10 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
 - **The blinks** (the blinker `0x00778040`, vtable `0x009b264c`, ticked
   with the frame's time by `0x00778080`; `menu::HudBlink`): 0x0079e5a0
   makes four with its variables (`0x0079fa9f`..`0x0079fb89`):
-  PlayerHealthBlink (`+0x2ae`) on PlayerHealth (`+0x1cc`),
+  PlayerHealthBlink (`+0x2ae`) on PlayerHealth (`+0x1cc`: the soldier's
+  armour's hit points, slot `0x3c`, over its maxHitPoints, slot `0x8c`,
+  and PlayerHealthString ceil(× 100), `0x007a0f80`; the local game's HUD
+  showed a full bar whatever the hit points until the kit sweep),
   VehicleArmorBlink (`+0x2b9`) on VehicleArmor (`+0x1d8`),
   PlayerStaminaBlink (`+0x2aa`) on PlayerStamina (`+0x1d0`) and
   VehicleStaminaBlink (`+0x2ac`) on VehicleStamina (`+0x1d4`), each with
@@ -9022,7 +9037,11 @@ tick's strength × the cell (`0x005d7a40`):
   goes this way: tools, hubs, crates and pads, the seated kit
   (`GameWorld::repairable`);
 - **RTAmmo** (slot `0x10c` → `0x004cf7b0`): min(100, it) per cent of a
-  magazine for each weapon (`0x005f5110`, the fraction kept a second).
+  magazine for each weapon (`0x005f5110`, the fraction kept a second):
+  every firearm of the soldier's kit (the player's item containers, slot
+  `0x64`, each one's items, slot `0x74`, through interface `0x94c0` slot
+  `0x88`), the ones put away as well as the one in hand (the rewrite
+  refilled only the one in hand until the kit sweep below found it).
 
 The strength is also multiplied by the holder's player's
 `ability.increasedRepairAbility` when above 0 (`0x005d7a40`: player slot
@@ -10247,8 +10266,14 @@ reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
 - `toggleWhenNoAmmo` (`+0x40`, 17 shipped): with an empty magazine that
   can't be reloaded the weapon can't be selected (`0x005f39c0` via
   `0x005c1150`), and after its last round its soldier switches to the
-  item before (`0x005f4a40` → slot `0xe0`, `0x005883d0`: soldier `+0x1f4`;
-  the rewrite at the next tick, else the kit's first selectable).
+  item before (`0x005f4a40` → slot `0xe0`, `0x005883d0`: soldier `+0x1f4`,
+  the PIFire group's item in hand that the selection `0x00589dc0` keeps
+  there before it changes) when it can be selected, else to soldier
+  `+0x1f8`, the kit's primary: the kit's add-item (`0x0058c840`, soldier
+  subobject `+0x184` slot 27) stores there, while the kit is being given
+  (`0x0058b680`: soldier `+0x22c`), the PIFire weapon whose itemIndex is
+  the player's kit template's `+0x2c8` (3); none, no switch. The rewrite
+  at the next tick (`GameWorld_ToggleWhenNoAmmoFallsBackToThePrimary`).
 - `altItemIndex` (`+0x2e4`, −1 by default; 29 shipped at 6): the kit's
   add-item (`0x00589510`) puts an item whose itemIndex is taken in its
   altItemIndex when that is above 0 and free (the firearm's override
@@ -10273,7 +10298,27 @@ reloadWithoutPlayer 1, allowReplenish 1, the rest 0.
   update `0x005c58a0` through slot `0xc8` `0x005f39f0` → `0x005c0f40`)
   whenever the magazine is empty, the firearm isn't busy and a magazine
   can be taken (`0x005f4140`). Without autoReload nothing reloads but
-  c_PIReload (the firearm's action 10); a press of the trigger on the
+  c_PIReload (the firearm's action 10), which the local player's own
+  auto reload presses: GeneralSettings.setAutoReload (`+0xb6`, on by
+  default: `0x0049a170`, the constructor `0x0049bd20`'s slot `0x28`,
+  which also sets ItemSelectionReverseItems 1 and ConnectionType 5)
+  goes to the player's `+0x3d0` (`0x00591e50`, player slot `0x36c`,
+  through GeneralSettings slot `0xdc`), and the player's input (slot
+  `0x48`, `0x00594280`) sets input 32 (c_PIReload) while a weapon of its
+  control object (interface `0xc4c5` slot `0x78`, three) answers
+  interface `0x94c0` slot `0x80` (`0x005c0ff0` → the ammo's slot `0x94`,
+  `0x005f37f0`: not reloading, the magazine empty, a magazine to take, no
+  ammo.autoReload). The press is refused while the firearm is busy: the
+  fire component's may-reload (slot `0x44`, SingleFireComp `0x005d5b60`,
+  its state `+0x150` at 0) holds a busyUntilButtonRelease round's reload
+  until the trigger is let go, so a guided launcher keeps its wire while
+  the button is held (`GameWorld::autoReload`, `wantsAutoReload`; the
+  rewrite's press is an edge, so it is made only when it would be taken;
+  `FireArm::startReload`). A joined client presses it itself (the input
+  goes to the server with the press; `joinedAutoReload` in `main.cpp`):
+  by its own state's active weapon group (empty, a magazine left, no
+  ammo.autoReload), not while the trigger is held, let go one tick in 15
+  so that a press the server refused comes again. A press of the trigger on the
   empty magazine is refused by the ammo's slot `0x34` (`0x005f37c0`) and
   clicks (`0x005c2ee0` → the sound component's `0x005dc160`:
   BoltClick in either view while its `+0x41` is set, else TriggerClick in
@@ -10378,6 +10423,53 @@ once the branch is full), `NextUnlockIconPathString`,
 (`Kit%iBranch%iSelected`) too. `selectNextUnlock` / `selectUnlockItem`
 (`0x007b8f30`, `0x007b92c0`) make an unlock the soldier has its branch's
 choice.
+
+### The kit and vehicle sweep (2026-11-12)
+
+`build/scratch/sweep/sweep.py` runs the headless harness over every kit
+item of both factions, one unlock at a time (`--unlocks`, the
+customise screen's choice; the squad leader's items with bots on
+Cerbere_Landing and `--squad-leader`), and over every seat of the
+drivable vehicles (`--drive` / `--seat`, `fire`, `altfire`, `flare`, the
+weapon keys), on Shuhia_Taiba's open desert with a FAV 15 m ahead. Each
+`--actions` step prints the weapon in hand (a seat's three groups), the
+hit points and battery, the objects new since the step before, the hits
+and the target's hit points. What it found and what was fixed:
+
+- The local player never reloaded by himself: the profile's auto reload
+  (see Kits: Reloading) wasn't rewritten, and its default was written as
+  0. A guided launcher's reload could also start while its trigger was
+  held (busyUntilButtonRelease), cutting the wire.
+- The ammo hubs and the support kit's ammo refilled only the weapon in
+  hand (RTAmmo above: every kit firearm).
+- The local game's HUD showed 100 health whatever the soldier's hit
+  points (PlayerHealth, the HUD's blinks).
+- The air transports' passengers and gunners fell out of the transport
+  on the exit key (and fired empty pods on the fire button) instead of
+  leaving in a drop pod (exitThroughPodLauncher above).
+- Help texts' `#PI…#` keys came from the infantry map in a vehicle, so a
+  seat's `#PIFlareFire#` stayed unreplaced (`ControlMaps::playerMapFor`).
+
+Seen working: every primary, sidearm, shotgun, carbine and rifle unlock
+(rounds, hits, reload), the knives, the grenades (frag, EMP, smoke,
+radar, decoy), C4 (placed and set off: the FAV from 974 to 86), the
+mines and motion sensors (placed; their triggers are the unit tests'),
+the sentry gun, the spawn beacon and both
+drones (as squad leader), the portable shield (set down and unfolded),
+the medic hub (heals), the ammo hub, the repair tool (the FAV back to
+1000), active camouflage (cloaked), the guided AV and the AA launchers,
+and each seat's guns, rocket pods, EMP launchers, active defence and the
+APCs' pod launchers.
+
+Left as found: rounds pass through the deployed portable shield and the
+sentry gun. Both are set down as plain objects without collision; the
+shield's panels are collisionParts of its mesh (geometries 1..) posed by
+its bundle animation (`stepDeployableAnimations`), so they need the
+posed part meshes in the rounds' rays (as `raycastBody` does for a
+body's parts) rather than the static world's. Not checked by the sweep:
+the pulse meter's scan (no enemies near; no unit test either), the
+defuser and the defibrillator (they want an enemy mine or a downed
+teammate; GameWorldTest covers the defibrillator).
 
 ### Comm roses and the radio
 
@@ -11826,8 +11918,9 @@ a header's id cell "-1") lists the team's players with the members selected
 `0x007a7e20`) selects a player outside the squad while there is room (six
 less the members) or unselects a member (the set `+0x110`).
 `applyInviteList` (`0x007a84a0`) removes the unselected members (slot
-`0x38`) and invites the selected players (slot `0x30`). Offline nobody
-answers an invite, so a bot in no squad takes it at once (a stand-in).
+`0x38`) and invites the selected players (slot `0x30`). No bot answers
+an invite (see "Joining", the squads' events), so offline
+the invite does nothing.
 The squad name box (an edit node) isn't typed into: squads keep the
 default names. The list columns' positions are fitted to the scripts'
 list widths (the menu's own widths at `+0xc0`.. are set in code not
@@ -11851,8 +11944,16 @@ commander on with `host.sh_setEnableCommander(1)` (`0x00568640`, event
   `0x1a8` `+0x20`), the first of equal ranks (`0x004c4fb0`), off the list
   and offers it command (PostRemote 0x23). Its answer is kind 0 (slot
   `0x68`, `0x004c8c20`: it becomes commander) or kind 1 (slot `0x6c`: the
-  next is offered at once). The client bars an applicant for minutes
-  after a mutiny (player slots `0x140`, `0x148`).
+  next is offered at once). The client bars an applicant for 5 minutes
+  after a mutiny against him: the vote object's end of a mutiny, passed
+  (case 3) or cancelled (case 2), sets its target's minutes (player slot
+  `0x144(5.0)`, `+0x130`; `0x005740e0`), losing command stamps the time
+  (`0x00591950`: slot `0x13c`, `+0x128`; becoming commander clears the
+  minutes), and `Commander.commanderApply` (`0x007d7050`) sends nothing
+  while the minutes less those since are above 0, saying
+  HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTE (ceil under 2, `#MINUTE#`) or
+  `_MINUTES` (`#MINUTES#`) (`VoteMessages::mayApplyForCommander`,
+  `HudVotes_MutinyBarsTheCommander`).
 - **Taking over:** the new commander leaves its squad (`0x004c7bb0`) and
   gets the commander flag (player slot `0x124`); the other applicants hear
   `HUD_COMMANDERAPPLY_POSFILLED` (PostRemote 0x22) and the list is

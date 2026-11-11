@@ -111,6 +111,17 @@ TEST(SettingsObjects_Console)
 	std::filesystem::remove_all(dir);
 }
 
+// GeneralSettings' defaults of its slot 0x28 (0x0049a170, called by the
+// constructor 0x0049bd20): auto reload and the reversed item selection on,
+// connection type 5.
+TEST(SettingsObjects_GeneralDefaults)
+{
+	menu::SettingsObjects settings;
+	CHECK(settings.get("GeneralSettings.AutoReload") == "1");
+	CHECK(settings.get("GeneralSettings.ItemSelectionReverseItems") == "1");
+	CHECK(settings.get("GeneralSettings.ConnectionType") == "5");
+}
+
 TEST(SettingsObjects_MenuPages)
 {
 	Console console;

@@ -33,8 +33,12 @@
 // squad while there is room (six less the members) or unselects a member;
 // SquadMenu.applyInviteList (0x007a84a0) removes the unselected members
 // (squad manager slot 0x38) and invites the selected players (slot 0x30).
-// Offline there is nobody to answer an invite: a bot in no squad takes it
-// at once (a stand-in for the invite's answer).
+// A bot never answers an invite: slot 0x30 (0x004c3190) sets the squad's
+// bit in the player's mask (player vtable 0x224 / 0x228, +0x14c) and
+// posts 2/0x10 to his connection, which a bot hasn't; the mask's only
+// other readers are the join (0x004c7290: a private squad takes the
+// invited) and the join's clear (0x004c6c80), and AIDLL's adaptors never
+// read it. So offline an invite does nothing.
 #pragma once
 
 #include "Game/GameWorld.h"

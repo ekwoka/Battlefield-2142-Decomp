@@ -45,6 +45,15 @@ float LocalHudWorld::objectHealth(uint32_t object) const
 	return hp >= 0 && most > 0 ? hp / most : -1;
 }
 
+// PlayerHealth (0x007a0f80): the soldier's armour's hit points (slot
+// 0x3c) over its maxHitPoints (slot 0x8c).
+float LocalHudWorld::health() const
+{
+	const world::Object* soldier = m_round.player();
+	const float fraction = soldier ? objectHealth(soldier->id()) : -1;
+	return fraction >= 0 ? std::clamp(fraction, 0.0f, 1.0f) : 1.0f;
+}
+
 HudWorld::Scores LocalHudWorld::scores(int player) const
 {
 	Scores s;

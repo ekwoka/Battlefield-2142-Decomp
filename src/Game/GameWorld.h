@@ -833,6 +833,9 @@ public:
 	// (spawnChoice kSpawnOnLeader / kSpawnOnBeacon). The scripts hear
 	// PlayerChangedSquad.
 	static constexpr int kSquadSize = 6;
+	// The kit's primary's itemIndex: the Kit template's +0x2c8, 3, set by
+	// its constructor (0x00570080) and by no property.
+	static constexpr int kPrimaryItemIndex = 3;
 	static constexpr int kSpawnOnLeader = -2;
 	static constexpr int kSpawnOnBeacon = -3;
 	// Mobile spawn points: a vehicle of the team carrying a SpawnPoint
@@ -970,6 +973,22 @@ public:
 	void setAmbienceClient(bool client) { m_ambience.client = client; }
 	bool playAmbientEvent(size_t area, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt = nullptr);
 	bool unlockAllByDefault = false; // players joining from now on have everything
+	// The local player's auto reload (GeneralSettings.setAutoReload,
+	// +0xb6: on by default, 0x0049a170 from the constructor 0x0049bd20;
+	// the player's +0x3d0, set from GeneralSettings slot 0xdc by
+	// 0x00591e50, player slot 0x36c): its input (player slot 0x48,
+	// 0x00594280) presses c_PIReload while a weapon of its control object
+	// needs a reload by hand (wantsAutoReload).
+	bool autoReload = true;
+	// Whether a firearm needs that press: the ammo's slot 0x94
+	// (0x005f37f0) holds while it isn't reloading (+0x3c 0), its magazine
+	// is empty (slot 0x98, 0x005f37e0), a magazine can be taken (slot 0x40)
+	// and it hasn't ammo.autoReload (template +0x28, which reloads by
+	// itself); reached through the firearm's interface 0x94c0 slot 0x80
+	// (0x005c0ff0). Not while it is drawn, between rounds or held by
+	// busyUntilButtonRelease, which refuse the press (0x005c0e70): the
+	// rewrite's press is an edge, so it waits until it would be taken.
+	static bool wantsAutoReload(const FireArm& arm);
 	// The local player's unlocks (its soldier's chosen ItemContainers,
 	// Stats/Stats.h), given when spawnPlayer adds the player.
 	std::vector<std::string> localPlayerUnlocks;
@@ -2147,8 +2166,12 @@ public:
 	// Launches a soldier standing at a Titan's pod array (titan_pod_array1/2,
 	// within an EntryPoint's entryRadius) or riding a pod-launching seat in
 	// a drop pod (the launcher's projectileTemplate, a Parachute PCO with
-	// isPod): false when there is none at hand.
-	bool launchPod(int player);
+	// isPod): false when there is none at hand. A seat's launcher is the
+	// one on PIAltFire (the APCs' pod seats' alternate fire); `exitKey`
+	// (exitThroughPodLauncher's exit, 0x004bda00 mask 0x400) takes the
+	// seat's pod launcher whatever its input (the air transports' seats'
+	// air_pod_launcher is on PIFire).
+	bool launchPod(int player, bool exitKey = false);
 	// For a soldier aboard its own Titan (within its box): the nearest entry
 	// point of the Titan's pod arrays, in the world, and its radius.
 	bool titanPodEntry(int player, physics::Vec3& entry, float& radius) const;
@@ -3400,7 +3423,9 @@ private:
 	};
 	std::map<int, AbilityScan> m_abilityScans;
 	std::vector<Supply> m_supplies;
-	std::map<uint32_t, float> m_resupply; // ammo owed to soldiers (fractions of a magazine)
+	// Ammo owed to soldiers' weapons (fractions of a magazine), by soldier
+	// and kit slot (each firearm's ammo keeps its own, 0x005f5110's +0x30).
+	std::map<std::pair<uint32_t, int>, float> m_resupply;
 	// `holder`: the player whose battery pays and whose unlocks scale it
 	// (the gadget's holder, or the hub's owner); none: no battery.
 	static constexpr uint32_t kSoldierFootStepsMaterial = 5500; // 0x157c

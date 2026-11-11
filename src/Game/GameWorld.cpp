@@ -5125,11 +5125,11 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 // slot 0x14, 0x00585d00 -> its response's slot 0x98, 0x006c3340): the
 // soldier's spheres fitting there standing, else prone (the spawn point's
 // +0x18a: the member starts prone), else the try fails. The member faces
-// the leader (0x005b1d30). Not rewritten: the extra test some callers ask
-// for: with its AI flag (the server's spawn 0x004bef90 passes the
-// player's slot 0x68, a bot) a try that fits must also pass
-// IAIPathfindingCourier slot 0xc (DAT_00b4bb94: on the navigation mesh;
-// setAiSpawnTest), else the next try is taken.
+// the leader (0x005b1d30). With its AI flag (the server's spawn
+// 0x004bef90 passes the player's slot 0x68, a bot) a try that fits must
+// also pass IAIPathfindingCourier slot 0xc (DAT_00b4bb94: on the
+// navigation mesh; setAiSpawnTest, scatterFrom), else the next try is
+// taken.
 bool GameWorld::scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone, bool ai)
 {
 	return scatterFrom(leader.body.position - physics::Vec3 {0, 0.875f, 0}, leader.body.yawDegrees,
@@ -9312,11 +9312,41 @@ std::string GameWorld::animationFor(uint32_t object) const
 
 world::Object* GameWorld::player() const { return m_objects.find(playerObject()); }
 
+bool GameWorld::wantsAutoReload(const FireArm& arm)
+{
+	const FireArmSettings& s = arm.settings();
+	return !s.autoReload && s.magSize > 0 && arm.roundsInMag() <= 0 && !arm.reloading() && !arm.readying()
+		&& !arm.cycling() && !arm.busyUntilRelease() && (arm.magsLeft() > 0 || s.nrOfMags < 0);
+}
+
 void GameWorld::stepPlayers(float seconds)
 {
 	if (m_player) {
 		m_player->input = m_playerInput;
 		m_playerInput.turn = 0; // a turn is used once
+		// The auto reload (0x00594280): the control object's weapons (its
+		// interface 0xc4c5 slot 0x78, three: on foot the one in hand, in a
+		// seat each group's active one), the first wanting a reload by hand
+		// presses c_PIReload (input 32, +0x80 = 1).
+		if (autoReload && m_player->alive && !m_player->manDown) {
+			bool wanted = false;
+			if (!m_player->vehicle) {
+				wanted = m_player->weapon && wantsAutoReload(*m_player->weapon);
+			} else if (const Body* body = findBody(m_player->vehicle);
+					   body && m_player->seat >= 0 && static_cast<size_t>(m_player->seat) < body->guns.size()) {
+				const Body::Gun& gun = body->guns[static_cast<size_t>(m_player->seat)];
+				wanted = gun.weapon && wantsAutoReload(*gun.weapon);
+				for (int group = 1; group < 3 && !wanted; ++group) {
+					const int index = gun.active[group];
+					wanted = index >= 0 && static_cast<size_t>(index) < gun.arms.size()
+						&& gun.arms[static_cast<size_t>(index)].weapon
+						&& wantsAutoReload(*gun.arms[static_cast<size_t>(index)].weapon);
+				}
+			}
+			if (wanted) {
+				m_player->input.reload = true;
+			}
+		}
 	}
 	for (size_t i = 0; i < m_players.size(); ++i) {
 		Player& player = *m_players[i];
@@ -9685,17 +9715,27 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	}
 	// toggleWhenNoAmmo after the last round (0x005f4a40, after each round):
 	// the soldier switches to the item before (0x005883d0: soldier +0x1f4
-	// if selectable), else the kit's first selectable (the rewrite's
-	// stand-in for +0x1f8, whose writer isn't traced). Done here at the
-	// next tick, once the round is away.
+	// if selectable; the selection 0x00589dc0 keeps the PIFire group's
+	// item in hand there before it changes), else to soldier +0x1f8: the
+	// kit's primary. The kit's add-item (0x0058c840, soldier subobject
+	// +0x184 slot 27) stores there, while the kit is being given
+	// (0x0058b680: soldier +0x22c), the PIFire weapon whose itemIndex is
+	// the player's kit template's +0x2c8 (3, the Kit constructor
+	// 0x00570080's). None: no switch. Done here at the next tick, once the
+	// round is away.
 	if (player.weapon && !player.weapon->selectable() && !player.weapon->throwing() && !player.vehicle) {
 		const int from = player.inHand;
 		if (player.previousSlot > 0) {
 			equip(player, player.previousSlot);
 		}
-		for (size_t i = 0; player.inHand == from && i < player.carried.size(); ++i) {
-			if (static_cast<int>(i) != from && (!player.carried[i].weapon || player.carried[i].weapon->selectable())) {
-				equip(player, player.carried[i].slot);
+		const auto primary = std::find_if(player.carried.begin(), player.carried.end(),
+			[](const Player::Carried& c) { return c.slot == kPrimaryItemIndex; });
+		if (player.inHand == from && primary != player.carried.end()) {
+			if (const world::ObjectTemplate* t = m_templates.find(primary->name)) {
+				const auto input = t->settings().find("fire.fireInput");
+				if (input == t->settings().end() || sameName(input->second, "PIFire")) {
+					equip(player, kPrimaryItemIndex);
+				}
 			}
 		}
 	}
@@ -11006,15 +11046,15 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			continue;
 		}
 		const float percent = std::min(100.0f, amountFor(object));
-		const auto refill = [&](FireArm* weapon) {
+		const auto refill = [&](FireArm* weapon, int slot) {
 			if (!weapon) {
 				return false;
 			}
 			if (weapon->magsLeft() >= weapon->settings().nrOfMags || weapon->settings().magSize < 0) {
-				m_resupply[object] = 0;
+				m_resupply[{object, slot}] = 0;
 				return false; // full: nothing builds up
 			}
-			float& owed = m_resupply[object];
+			float& owed = m_resupply[{object, slot}];
 			owed += percent / 100.0f;
 			while (owed >= 1) {
 				owed -= 1;
@@ -11024,7 +11064,18 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			}
 			return true;
 		};
-		const bool refilled = refill(target->weapon.get());
+		// Every firearm of the soldier's kit (0x004cf7b0: the player's
+		// item containers, slot 0x64, each one's items, slot 0x74, through
+		// interface 0x94c0 slot 0x88, 0x005f5110), the one in hand and
+		// those put away (a kit item never drawn is full).
+		bool refilled = false;
+		for (size_t i = 0; i < target->carried.size(); ++i) {
+			FireArm* weapon = static_cast<int>(i) == target->inHand ? target->weapon.get() : target->carried[i].weapon.get();
+			refilled = refill(weapon, target->carried[i].slot) || refilled;
+		}
+		if (target->inHand < 0 || static_cast<size_t>(target->inHand) >= target->carried.size()) {
+			refilled = refill(target->weapon.get(), 0) || refilled;
+		}
 		if (refilled) {
 			draw();
 		}
@@ -11316,7 +11367,7 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 						clear = false;
 					}
 				}
-				if (clear && launchPod(player.id)) {
+				if (clear && launchPod(player.id, true)) {
 					return;
 				}
 			}
@@ -11738,7 +11789,17 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// (0x005c69a0).
 	const auto pressed = [&](int input, bool held) { return held && working && input != seat.specialToggleInput; };
 	if (groups & 1) {
-		fireSeatWeapon(player, body, seat, primary, gun, gun.active[0], seconds, pressed(8, player.input.fire));
+		if (gun.active[0] >= 0 && primary.podLauncher) {
+			// A pod launcher on PIFire (the air transports' seats'
+			// air_pod_launcher, a ThrownFireComp): its round is the pod, a
+			// Parachute PCO with enterOnSpawn, which seats the soldier who
+			// fired it as the parachute launcher's does (Titans.cpp).
+			if (pressed(8, player.input.fire) && launchPod(player.id, true)) {
+				return;
+			}
+		} else {
+			fireSeatWeapon(player, body, seat, primary, gun, gun.active[0], seconds, pressed(8, player.input.fire));
+		}
 	}
 	for (int group = 1; group < 3; ++group) {
 		const int index = gun.active[group];
