@@ -451,6 +451,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	auto gpuMesh = std::make_unique<GpuMesh>();
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
+	if (skinned) gpuMesh->skinnedRadius = boxHalfDiagonal(lod.bounds.min, lod.bounds.max);
 	gpuMesh->radiusShadowBounds = geometry->useRadiusForShadowDepth || geometry->useRadiusForShadowSpatial;
 	gpuMesh->titanInterior = geometry->titanInterior;
 	gpuMesh->titanExterior = geometry->titanExterior;
@@ -1981,7 +1982,9 @@ void LevelRenderer::syncObjects()
 				}
 				instance.cullActor = t->typeName() == "Soldier" || t->typeName() == "PlayerControlObject";
 			}
-			instance.cullRadius = std::max(instance.mesh->bounds.radius, 0.0f) * scale;
+			// A skinned mesh (a soldier) has no sphere; its box's radius.
+			const float radius = instance.mesh->skinned ? instance.mesh->skinnedRadius : instance.mesh->bounds.radius;
+			instance.cullRadius = std::max(radius, 0.0f) * scale;
 		}
 		if (!instance.parts.empty() && m_sources->partTransforms) {
 			std::vector<anim::Matrix> placed(instance.parts.size(), anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});

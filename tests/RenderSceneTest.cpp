@@ -90,6 +90,38 @@ TEST(RenderScene_OvergrowthLodPalmFrondsAreAlphaTestedLeaves)
 	CHECK(zip->read("africa/textures/leaf_af_palmtree_b_de_lod_alphatest.dds", cutout));
 }
 
+// A soldier's distance fade: its skinned mesh had no radius, so the cull
+// fell back to the 80 m minimum and enemies past ~88 m showed only when
+// zoomed. The mesh's box radius (0x101a7b10) x the template's
+// cullRadiusScale 2.5 keeps him much further.
+TEST(RenderScene_SoldierDistanceFadeUsesTheSkinnedMeshRadius)
+{
+	const auto cutoff = [](float radius, float zoom) {
+		const render::CullRecord record = render::cullRecord(render::objectCullScales(3), zoom, 760, true, 0);
+		float d = 1;
+		while (d < 2000 && render::stepDistanceFade(1, radius, d * d, record) > 0) d += 1;
+		return d;
+	};
+	// Without a radius: the minimum's 80 m, x sqrt(1.2) for the fade band.
+	CHECK(cutoff(0, 1) < 90);
+	CHECK(cutoff(0, 4) > 170); // zoomed in, the same soldier comes back
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	auto zip = io::ZipArchive::open(std::string(gameDir) + "/mods/bf2142/Objects/Soldiers_client.zip");
+	CHECK(zip != nullptr);
+	if (!zip) return;
+	std::vector<uint8_t> data;
+	CHECK(zip->read("us/meshes/us_light_soldier.skinnedmesh", data));
+	auto mesh = geom::parseMesh(data, geom::MeshKind::Skinned);
+	CHECK(mesh.has_value() && mesh->geometries.size() == 2);
+	if (!mesh || mesh->geometries.size() < 2) return;
+	const auto& box = mesh->geometries[1].lods[0].bounds; // the third-person body
+	const float radius = render::boxHalfDiagonal(box.min, box.max);
+	CHECK(radius > 1.0f && radius < 1.3f);
+	const float far = cutoff(radius * 2.5f, 1); // us_light_soldier's cullRadiusScale
+	CHECK(far > 150 && far < 200);
+}
+
 TEST(RenderScene_TreeMaterialDispatch)
 {
 	using render::TreeMaterial;

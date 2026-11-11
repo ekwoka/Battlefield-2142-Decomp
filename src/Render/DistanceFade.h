@@ -49,6 +49,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 namespace dice::hfe::render {
 
@@ -77,6 +78,15 @@ inline float viewFarDistance(float levelViewDistance, float viewDistanceScale)
 {
 	const float stored = static_cast<float>(static_cast<int>(std::clamp(levelViewDistance, 20.0f, 3000.0f) + 0.5f));
 	return stored * viewDistanceScale;
+}
+
+// A skinned mesh's radius (RendDX9 0x101a7b10, the geometry record's +0x1c,
+// which its LOD pick 0x101616c0 reads): the box's farthest corner from its
+// centre, the half diagonal.
+inline float boxHalfDiagonal(const std::array<float, 3>& min, const std::array<float, 3>& max)
+{
+	const float x = max[0] - min[0], y = max[1] - min[1], z = max[2] - min[2];
+	return 0.5f * std::sqrt(x * x + y * y + z * z);
 }
 
 // One root object's record (0x006ff110 + 0x006fb280).

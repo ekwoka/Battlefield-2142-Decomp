@@ -359,6 +359,9 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		// A skinned mesh's radius for the objects' distance fade
+		// (boxHalfDiagonal of the LOD's box); bounds stay unknown for one.
+		float skinnedRadius = 0;
 		bool tree = false; // a static mesh under "vegitation" (+0x2a2; renderer.drawTrees)
 		// A static mesh under "objects/water/" (the template's +0x2a8, set by
 		// its load 0x100de6d0): it keeps its lightmap at the low lighting
