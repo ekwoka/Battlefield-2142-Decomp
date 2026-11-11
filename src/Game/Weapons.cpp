@@ -419,6 +419,7 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.magSize = static_cast<int>(number(t, "ammo.magSize", static_cast<float>(s.magSize)));
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
+	s.batchSize = std::max(1, static_cast<int>(number(t, "fire.batchSize", 1)));
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 1) != 0;
 	s.delayToUseTicks = static_cast<int>(std::nearbyint(number(t, "delayToUse", 0) * 30));
 	s.autoReload = number(t, "ammo.autoReload", 0) != 0;
@@ -944,6 +945,9 @@ DeviationBuildUp DeviationBuildUp::fromTemplate(const world::ObjectTemplate& t)
 	}
 	if (const auto it = t.settings().find("deviation.minDev"); it != t.settings().end()) {
 		d.minDev = std::strtof(it->second.c_str(), nullptr);
+	}
+	if (const auto it = t.settings().find("deviation.subProjectileDev"); it != t.settings().end()) {
+		d.subDev = std::strtof(it->second.c_str(), nullptr);
 	}
 	return d;
 }

@@ -673,6 +673,42 @@ coverage-8 §1c's first pass, folded into `tools/coverage/uncited.py` (its Swiff
 
 **Left (d):** raw (d) 0 KB by the classifier. The end-of-round debriefing's rows (`0x10065ad0`), the last known gap, are done (the natives' fourth pass). The ten natives that were missing, the server info rows (`0x10068150`, `0x10068380`) and the time cells (`0x100657b0`, `0x1006a840`) of the earlier list are done (the natives' third pass).
 
+## Citing present code (coverage-9 §3c-3, 2026-11-09)
+
+Comment-only citations of code the rewrite already has, in the largest present-but-uncited runs of coverage-9 §2b. Each was read against the decompilation first; where the rewrite differs, the difference is noted here (and in the comment) and the behaviour is left as it is.
+
+**Cited:**
+- **EXE `0x00760a26` (the HUD's console method objects), src/Hud/Hud.cpp.** 134 rows of HudBuilder, HudManager and Minimap (`0x0075f9da`..`0x00770017`): each row's constructor, executor (vtable slot 23) and argument parser (slot 25), 396 addresses. Checked by machine for every row and by hand for a sample (`createMiniMapNode`, `setListNodeFont`, `setBarNodeRound`): the constructor's argument types are the bound lambda's (Vec2 as the string the rewrite parses), and the executor tests that count and hands the values on (HudBuilder through the HUD manager's slot 0x270, the builder). Rows the rewrite binds in main.cpp (`enableSay*ChatBox`, `setDone`, `addFavouriteServer`) and rows it doesn't bind are left out.
+- **EXE `0x00696f80` (the file manager), src/IO/File/FileManager.cpp:** `mountArchive` `0x0069a810`, `exists` `0x00698e40`, `readFile` `0x00698b60`, `expandPath` `0x00697d70`.
+- **RendDX9 `0x100106b0` (display modes), src/Main/Viewer.cpp:** the mode list `0x10010830`.
+
+**Differences found (not changed):**
+- `HudBuilder.setEditNodeFont`: the original's second argument is a bool (`0x00765755`), the rewrite's an int. `setCompassNodeTextureSize`: ints (`0x0076b4ff`), the rewrite's floats. `setNodeLogicShowVariable`: the value is an int, the rewrite's a float. The shipped HUD files pass whole numbers, so nothing shows; these three rows are not cited.
+- `setBarNodeBorder` and `setCompassNodeBorder` share one executor (`0x0076aebf` → `0x007b0780`, the active node's slot 0x100). The rewrite keeps a bar border and a compass border apart, and setBarNodeBorder also accepts a compass node. Not followed further.
+- `FileManager::exists`: `0x00698e40` erases "bf2/content/" wherever it is found in the path; the rewrite only takes it off the start.
+- `FileManager::expandPath`: `0x00697d70` leaves a path that already starts with the first search path as it is (`0x0065b9c0`, `_strnicmp`); the rewrite prefixes it again.
+- `FileManager::readFile`: `0x00698b60` has a mode (+0x68 = 1) that reads only archives, except for @HOME@, @ROOT@ and `.png` paths. The rewrite always falls back to loose files.
+- `Window::displayModes`: `0x10010830` keeps only the modes in the desktop's format and at least 800 wide; the rewrite lists every mode SDL gives.
+
+**Not citable:**
+- EXE `0x007c9090` (52 KB) is mostly the awards pop-up (`0x007cbd20`, 21.8 KB, whose decompilation times out; `0x007d1270`, `0x007d2dd0`, `0x007d4d20`), already a false (c) in the table above. Only the HUD manager's first few functions (`BF1942.font`, the `Menu/HUD/Texture/` cache) are left, and the rewrite keys its textures and fonts differently.
+- EXE `0x00870c90` (dice::meme effects, 37 KB): mostly string-less vtable siblings. `0x00875590` lays text out and appends three '.' glyphs where it reaches the right edge. The rewrite's setTruncate cuts the text with no "...", but which node uses `0x00875590` wasn't followed.
+- RendDX9's effect loader (`0x1001ddf0`) and the overgrowth's containers (`0x10092990`) are D3DX state and resource plumbing. The rewrite's GLSL pipeline has no part that does the same.
+
+**SwiffPlayer: propagated (c) hand-checked.** About 30 of the largest propagated (c) functions were read. Three groups were wrong, all list classes that took (c) from the shared list base's vtable-sibling vote:
+- `bfhqComparePlayers`: vtable `0x10108624`, constructor `0x1006e8e0`, which runs `0x1006db20`, BFHQ's rows, already (o). It has per-kit, per-weapon and per-vehicle sections, and nothing offline fills them. Its fill `0x1006d490` takes `0x1006a960`, `0x1006acd0`, `0x1006b610` (5.5 KB), `0x1006cbe0` and `0x1006d160` with it.
+- The buddy list: vtable `0x10107c60`, constructor `0x10061ff0`, fill `0x100622e0`. The fill's "online" / "offline" strings had made it (c).
+- The stats list's row makers for categories 1–6 (`0x1007aec0`, `0x1007b400`, `0x1007b6f0`, `0x1007bb10`, `0x1007bd80`, `0x1007c0e0`):
+  - `0x1007de70` picks one per category, and categories 0 and 7 were already (o).
+  - The page is BFHQ's (engine.md "The stats page").
+  - The rewrite's offline overview and player rows are its own smaller set, not `0x1007aec0`'s 15 rows (`%.4f` for the first two, a percent row).
+
+These are (o) in swf.py's `HAND` now.
+
+Checked and right, so left alone:
+- the stats list's own fill and category switch (`0x1007c4a0`, `0x1007de70`), which `MenuBindings::statsRows` fills;
+- the natives' property registration (`0x10005810`, `__get__%s` / `__set__%s`).
+
 ## Caveats
 
 - The (c)/(d) split rests on string matching. Composed strings (for example `"SettingsManager." + type + "Set"`) make false (d)s. Generic words make false (c)s. I spot-checked about 50 functions.

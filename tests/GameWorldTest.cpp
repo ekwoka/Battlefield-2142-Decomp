@@ -5107,3 +5107,83 @@ TEST(GameWorld_RocketEngine)
 		}
 	}
 }
+
+// fire.batchSize (FireComp 0x005f31d0, fire template +0x48): one round
+// makes that many projectiles, the first the main one and the rest
+// sub-projectiles straying by subProjectileDev (0x005c3cb0 -> 0x005f5540);
+// the magazine loses one round. The shotguns fire 12 pellets, the EU AV 4
+// rockets.
+TEST(GameWorld_FireBatch)
+{
+	for (const int batch : {1, 12}) {
+		Range range;
+		world::ObjectTemplate* gun = range.templates.find("eu_ar_rifle");
+		gun->settings()["fire.batchSize"] = std::to_string(batch);
+		gun->settings()["deviation.subProjectileDev"] = "2";
+		gun->components().push_back("SoldierDeviationComp");
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		CHECK(static_cast<int>(range.world->projectiles().size()) == batch);
+		CHECK(range.world->playerWeapon() && range.world->playerWeapon()->roundsInMag() == 29);
+		// The pellets spread: not all along the same line.
+		float least = 1, most = -1;
+		for (const game::Projectile& p : range.world->projectiles()) {
+			const float x = p.velocity.x / std::sqrt(physics::lengthSquared(p.velocity));
+			least = std::min(least, x);
+			most = std::max(most, x);
+		}
+		CHECK(batch == 1 ? most == least : most - least > 0.01f);
+	}
+}
+
+// The repair tool (ammo.onlyActiveWhileFiring, 0x005d84a0): the first
+// thing along the holder's look within abilityRadius, not a sphere round
+// him: a big vehicle whose centre is out of reach is mended when its side
+// is in front, and nothing behind the soldier is.
+TEST(GameWorld_RepairToolRay)
+{
+	for (const int facing : {0, 180}) {
+		Range range;
+		range.collisionTemplates.add("hull_mesh", boxMesh(2));
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(20, "PlayerControlObject");
+		world::ObjectTemplate* hull = range.templates.create("PlayerControlObject", "hull");
+		makeMobile(*hull, "hull_mesh");
+		hull->settings()["armor.maxHitPoints"] = "100";
+		world::ObjectTemplate* tool = range.templates.create("GenericFireArm", "unl_repair");
+		tool->settings()["itemIndex"] = "4";
+		tool->settings()["ammo.magSize"] = "-1";
+		tool->settings()["ammo.replenishingType"] = "RTHeal";
+		tool->settings()["ammo.abilityRadius"] = "2.5";
+		tool->settings()["ammo.abilityStrength"] = "2.5";
+		tool->settings()["ammo.onlyActiveWhileFiring"] = "1";
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		for (const char* item : {"eu_ar_rifle", "unl_repair"}) {
+			kit->children().push_back({item, {}, {}});
+		}
+		// Its centre 4 m ahead: its side 2 m off, its centre past the
+		// tool's 2.5 m.
+		const uint32_t car = range.objects.create(hull, {0, 2, facing == 0 ? 4.0f : -4.0f})->id();
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::SoldierInput take;
+		take.selectItem = 4;
+		range.world->setPlayerInput(take);
+		range.world->tick(1 / 30.0f);
+		range.world->setHitPoints(car, 50);
+		game::SoldierInput fire;
+		fire.fire = true;
+		fire.aimPitch = -10;
+		for (int i = 0; i < 30; ++i) {
+			range.world->setPlayerInput(fire);
+			range.world->tick(1 / 30.0f);
+		}
+		const float now = range.world->hitPoints(car);
+		CHECK(facing == 0 ? now > 51 : now == 50);
+	}
+}

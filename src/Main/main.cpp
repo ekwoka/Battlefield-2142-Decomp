@@ -7159,6 +7159,22 @@ int runGame(Options& options, Session& session)
 			};
 			showMenu = false;
 		};
+		// --spawn: the objects to look at (or shoot at: placed before the
+		// player's --actions, and settled with the round's own).
+		std::vector<uint32_t> spawnedIds;
+		for (const std::string& spawn : options.spawns) {
+			const size_t at = spawn.find('@');
+			world::ObjectTemplate* spawned = templates.find(spawn.substr(0, at));
+			float x = 0, y = 0, z = 0, yaw = 0;
+			if (!spawned || at == std::string::npos
+				|| std::sscanf(spawn.c_str() + at + 1, "%f/%f/%f/%f", &x, &y, &z, &yaw) < 3) {
+				std::fprintf(stderr, "cannot spawn %s\n", spawn.c_str());
+				continue;
+			}
+			if (const world::Object* made = objects.create(spawned, {x, y, z}, {yaw, 0, 0})) {
+				spawnedIds.push_back(made->id());
+			}
+		}
 		const size_t before = objects.objects().size();
 		// For a screenshot, let the spawned vehicles settle for 3 seconds.
 		const int ticks = options.screenshot.empty() ? 1 : 90;
@@ -7263,6 +7279,7 @@ int runGame(Options& options, Session& session)
 				// what the weapon in hand says after each.
 				const auto runActions = [&] {
 					std::istringstream actions(options.actions);
+					size_t impactsSeen = round.impactsTotal();
 					for (std::string command; actions >> command;) {
 						const size_t colon = command.find(':');
 						const std::string op = command.substr(0, colon);
@@ -7271,7 +7288,10 @@ int runGame(Options& options, Session& session)
 						game::GameWorld::PlayerInfo me;
 						round.playerInfo(round.localPlayer(), me);
 						game::SoldierInput act;
+						// The look so far, with the recoil's kick taken into it
+						// (as the window's mouse look does, Viewer's takeAimKick).
 						act.aimPitch = me.aimPitch;
+						round.takeAimKick(round.localPlayer());
 						bool known = true;
 						if (op == "fire" || op == "altfire" || op == "wait" || op == "forward" || op == "sprint" || op == "prone"
 							|| op == "crouch") {
@@ -7283,8 +7303,10 @@ int runGame(Options& options, Session& session)
 																							   : game::SoldierPose::Stand;
 							for (int i = 0; i < ticks; ++i) {
 								round.setPlayerInput(act);
+								playerCamera.setAltFire(act.altFire); // the zoom, as the window's right button
 								step();
 							}
+							playerCamera.setAltFire(false);
 						} else if (op == "reload" || op == "firemode" || op == "jump" || op == "item" || op == "use") {
 							act.reload = op == "reload";
 							act.toggleFireRate = op == "firemode";
@@ -7299,6 +7321,23 @@ int runGame(Options& options, Session& session)
 							// Lifted that many metres (to open a parachute from height).
 							round.setSoldierPosition(me.soldier, me.position + physics::Vec3 {0, value, 0});
 							step();
+						} else if (op == "goto") {
+							// Placed at x/y/z, facing yaw degrees (a known spot to shoot from).
+							float x = 0, y = 0, z = 0, yaw = me.yaw;
+							if (std::sscanf(command.c_str() + colon + 1, "%f/%f/%f/%f", &x, &y, &z, &yaw) >= 3) {
+								round.setSoldierPosition(me.soldier, {x, y, z});
+								for (int i = 0; i < 8; ++i) {
+									round.playerInfo(round.localPlayer(), me);
+									const float left = std::remainder(yaw - me.yaw, 360.0f);
+									if (std::fabs(left) < 0.5f) {
+										break;
+									}
+									act.turn = left * 0.5f;
+									round.setPlayerInput(act);
+									step();
+								}
+								round.setSoldierPosition(me.soldier, {x, y, z});
+							}
 						} else if (op == "turn" || op == "pitch") {
 							act.turn = op == "turn" ? value : 0.0f;
 							act.aimPitch = op == "pitch" ? value : me.aimPitch;
@@ -7317,10 +7356,33 @@ int runGame(Options& options, Session& session)
 									held = name;
 								}
 							}
-							std::printf("action %s: %s slot %d %s, %d rounds, %d magazines, fire mode %d%s%s\n", command.c_str(),
-								me.alive ? "alive" : "dead", me.inHandSlot, held.c_str(), gun ? gun->roundsInMag() : -1,
+							std::printf("action %s: %s slot %d %s, %d rounds, %d magazines, fire mode %d%s%s; at %.1f/%.1f/%.1f yaw %.0f\n",
+								command.c_str(), me.alive ? "alive" : "dead", me.inHandSlot, held.c_str(), gun ? gun->roundsInMag() : -1,
 								gun ? gun->magsLeft() : -1, gun ? gun->fireMode() : -1, gun && gun->reloading() ? ", reloading" : "",
-								me.vehicle ? ", in a vehicle" : "");
+								me.vehicle ? ", in a vehicle" : "", me.position.x, me.position.y, me.position.z, me.yaw);
+							if (round.projectilesInFlight() > 0) {
+								std::printf("  %zu rounds in flight\n", round.projectilesInFlight());
+							}
+							// The rounds' hits since the last action, and the
+							// --spawn targets' hit points.
+							if (round.impactsTotal() > impactsSeen) {
+								const size_t fresh = std::min(round.impactsTotal() - impactsSeen, round.impacts().size());
+								std::printf("  %zu hits:", round.impactsTotal() - impactsSeen);
+								for (size_t i = round.impacts().size() - fresh; i < round.impacts().size(); ++i) {
+									const auto& hit = round.impacts()[i];
+									const world::Object* struck = hit.object ? objects.find(hit.object) : nullptr;
+									std::printf(" %s %.0f", struck ? struck->objectTemplate()->name().c_str() : "terrain", hit.damage);
+								}
+								std::printf("\n");
+								impactsSeen = round.impactsTotal();
+							}
+							for (uint32_t id : spawnedIds) {
+								if (const world::Object* target = objects.find(id)) {
+									std::printf("  target %s: %.1f hit points at %.1f/%.1f/%.1f%s\n", target->objectTemplate()->name().c_str(),
+										round.hitPoints(id), target->position().x, target->position().y, target->position().z,
+										target->destroyed() ? ", destroyed" : "");
+								}
+							}
 						}
 					}
 				};
@@ -7331,28 +7393,46 @@ int runGame(Options& options, Session& session)
 					const float x = player->position().x + std::sin(yaw) * 2.5f, z = player->position().z + std::cos(yaw) * 2.5f;
 					const terrain::Heightmap* terrainHeights = heightmaps.primary();
 					const float y = terrainHeights && terrainHeights->loaded() ? terrainHeights->heightAt(x, z) : player->position().y;
-					if (!vehicle || !objects.create(vehicle, {x, y + 1.5f, z}, {player->rotation().x, 0, 0})) {
+					const world::Object* made = vehicle ? objects.create(vehicle, {x, y + 1.5f, z}, {player->rotation().x, 0, 0}) : nullptr;
+					const uint32_t madeId = made ? made->id() : 0;
+					if (!made) {
 						std::fprintf(stderr, "cannot spawn %s\n", options.drive.c_str());
 					} else {
+						// Stand at its left side, out of its way while it lands (a
+						// wide one, the IFV, crushed a soldier 2.5 m ahead), and
+						// again once it has (it may have been pushed out of a
+						// tight spot).
+						const auto standBeside = [&](float away) {
+						// (The one made here, not the level's own of that kind.)
+						if (const world::Object* car = objects.find(madeId)) {
+							// Clear of its hull: half a metre past its box's left side
+							// (`away` m while it lands: falling, a wide one, the IFV,
+							// ran over a soldier at its side).
+							const float carYaw = car->rotation().x * 3.14159265f / 180.0f;
+							physics::Vec3 low, high;
+							const float out = away > 0 ? away
+								: round.objectBox(car->id(), low, high)          ? std::max(1.8f, -low.x + 0.5f)
+																				  : 1.8f;
+							const physics::Vec3 side {car->position().x - std::cos(carYaw) * out, car->position().y,
+								car->position().z + std::sin(carYaw) * out};
+							physics::Vec3 entry;
+							if (away <= 0 && round.entryPoint(car->id(), entry)) {
+								// At its entry point, where the use key reaches.
+								round.setSoldierPosition(round.playerObject(),
+									{entry.x, std::max(entry.y - 1.0f, terrainHeights ? terrainHeights->heightAt(entry.x, entry.z) : entry.y),
+										entry.z});
+								return;
+							}
+							round.setSoldierPosition(round.playerObject(),
+								{side.x, std::max(side.y - 0.5f, terrainHeights ? terrainHeights->heightAt(side.x, side.z) : side.y), side.z});
+						}
+						};
+						standBeside(10);
 						// Let it land (briefly: on a slope it would roll out of reach).
 						for (int i = 0; i < 15; ++i) {
 							step();
 						}
-						// Stand at its left side (it may have been pushed out of a tight spot).
-						if (const world::Object* car = [&]() -> const world::Object* {
-								for (const auto& o : objects.objects()) {
-									if (o->objectTemplate() == vehicle) {
-										return o.get();
-									}
-								}
-								return nullptr;
-							}()) {
-							const float carYaw = car->rotation().x * 3.14159265f / 180.0f;
-							const physics::Vec3 side {car->position().x - std::cos(carYaw) * 1.8f, car->position().y,
-								car->position().z + std::sin(carYaw) * 1.8f};
-							round.setSoldierPosition(round.playerObject(),
-								{side.x, std::max(side.y - 0.5f, terrainHeights ? terrainHeights->heightAt(side.x, side.z) : side.y), side.z});
-						}
+						standBeside(0);
 						game::SoldierInput use;
 						use.use = true;
 						round.setPlayerInput(use);
@@ -7365,6 +7445,12 @@ int runGame(Options& options, Session& session)
 							if (v && state) {
 								std::printf("  %s: at %.1f/%.1f/%.1f yaw %.0f, gear %d, rpm %.2f\n", what, v->position().x,
 									v->position().y, v->position().z, v->rotation().x, state->gear(), state->rpm());
+							} else if (v) {
+								std::printf("  %s: at %.1f/%.1f/%.1f yaw %.0f pitch %.0f roll %.0f, %.0f hit points\n", what,
+									v->position().x, v->position().y, v->position().z, v->rotation().x, v->rotation().y,
+									v->rotation().z, round.hitPoints(v->id()));
+							} else {
+								std::printf("  %s: not aboard\n", what);
 							}
 						};
 						report("parked");
@@ -7689,17 +7775,6 @@ int runGame(Options& options, Session& session)
 			if (session.nextMap || (!options.view && options.screenshot.empty())) {
 				return 0;
 			}
-		}
-		for (const std::string& spawn : options.spawns) {
-			const size_t at = spawn.find('@');
-			world::ObjectTemplate* spawned = templates.find(spawn.substr(0, at));
-			float x = 0, y = 0, z = 0, yaw = 0;
-			if (!spawned || at == std::string::npos
-				|| std::sscanf(spawn.c_str() + at + 1, "%f/%f/%f/%f", &x, &y, &z, &yaw) < 3) {
-				std::fprintf(stderr, "cannot spawn %s\n", spawn.c_str());
-				continue;
-			}
-			objects.create(spawned, {x, y, z}, {yaw, 0, 0});
 		}
 #if BF2142_HAS_RENDERER
 		render::LevelSources sources {files, templates, objects, geometries, heightmaps,

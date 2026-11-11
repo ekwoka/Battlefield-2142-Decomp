@@ -1753,6 +1753,92 @@ std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 // 0x007af920). (0x0075cba0 next to them is the HUD manager's destructor:
 // its event handlers dropped, its menus deleted; the rewrite's members go
 // by themselves.)
+//
+// Each row below as constructor / executor / argument parser (vtable slots
+// 23 and 25; the parser is left out where the vtable shares one). The
+// constructor's argument types are the bound lambda's, and the executor
+// checks that count and passes the values on (the HudBuilder rows through
+// the HUD manager's slot 0x270, its builder). setBarNodeBorder and
+// setCompassNodeBorder share their executor (0x0076aebf → 0x007b0780, the
+// node's slot 0x100).
+//   HudManager:
+//     setSpottedMousePos 0x0075f9da / 0x0075faee / 0x0075fa67; setSpottedAngle 0x0075fb27 / 0x0075fbe5 / 0x0075fb98;
+//     setMaximumNrOfCPs 0x0075ffbc / 0x0076007a / 0x0076002d; setPaint 0x0076009e / 0x0076015c / 0x0076010f;
+//     setUpdate 0x00760187 / 0x00760245 / 0x007601f8; addTextureAtlas 0x0076035e / 0x007603cf / 0x00760411;
+//     setDisplayControlpoints 0x00760486 / 0x00760544 / 0x007604f7; setDisplayTickets 0x0076056f / 0x00760642 /
+//     0x007605f5; setMapStatic 0x007606b8 / 0x00760776 / 0x00760729; setTargetTop 0x007607ab / 0x00760869 /
+//     0x0076081c
+//   HudBuilder:
+//     createMapNode 0x00760ab0 / 0x00760b3d / 0x00760bc1; createMiniMapNode 0x00760c96 / 0x00760d9a / 0x00760e3c;
+//     setMiniSize 0x00760ff1 / 0x007610cf / 0x00761064; setMiniPos 0x0076114b / 0x00761229 / 0x007611be; setMaxiSize
+//     0x007612a0 / 0x0076137e / 0x00761313; setMaxiPos 0x007613d2 / 0x007614b0 / 0x00761445; setCommanderSize
+//     0x00761504 / 0x007615e2 / 0x00761577; setCommanderPos 0x00761636 / 0x00761714 / 0x007616a9; setZoomIcons
+//     0x00761768 / 0x00761826 / 0x007617d9; setCPFont 0x00761863 / 0x007618d4 / 0x00761964; setCPFontColor
+//     0x007619d9 / 0x00761b94 / 0x00761a9d; setAlphaMask 0x00761cf7 / 0x00761d81 / 0x00761e13; createListNode
+//     0x00761e88 / 0x00761fcc / 0x00762086; setListNodeData 0x007622ab / 0x0076236b / 0x0076231e; setListNodeConCmd
+//     0x007623a3 / 0x00762435 / 0x0076249d; setListNodeBackgroundColor 0x0076254a / 0x00762706 / 0x0076260f;
+//     setListNodeSelectColor 0x0076275e / 0x0076291a / 0x00762823; setListNodeBorderColor 0x00762972 / 0x00762b2e /
+//     0x00762a37; setListNodeBorder 0x00762b86 / 0x00762d42 / 0x00762c4b; setListNodeScrollbar 0x00762d90 /
+//     0x00762ea4 / 0x00762e1d; setListNodeRowSpacing 0x00762ee2 / 0x00762fa2 / 0x00762f55; setListNodeScrollbarColor
+//     0x00762fda / 0x00763196 / 0x0076309f; setListNodeScrollbarBackgroundColor 0x007631ee / 0x007633aa /
+//     0x007632b3; setListNodeFont 0x00763402 / 0x00763494 / 0x0076351a; setListNodeOutline 0x007635c7 / 0x00763685 /
+//     0x00763638; createTransformNode 0x00763cbd / 0x00763dbd / 0x00763e62; createSplitNode 0x00764017 / 0x007640a4
+//     / 0x00764128; createTransformListNode 0x007641fd / 0x0076431d / 0x007643c7; addTransformListNode 0x007645b4 /
+//     0x00764627 / 0x00764687; setTranformListNodePosVariable 0x007646fc / 0x0076478e / 0x007647f6;
+//     setTranformListNodeOffset 0x007648a3 / 0x007649b7 / 0x00764930; createTileNode 0x007649f5 / 0x00764af9 /
+//     0x00764b9b; createEditNode 0x00764efe / 0x00765002 / 0x007650a4; setEditNodeData 0x00765259 / 0x00765319 /
+//     0x007652cc; setEditNodeString 0x00765351 / 0x00765411 / 0x007653c4; setEditNodeMaxLength 0x00765449 /
+//     0x00765509 / 0x007654bc; setEditNodeColor 0x00765541 / 0x007656fd / 0x00765606; createOccupiedNode 0x007658fb
+//     / 0x00765a1b / 0x00765ac5; setOccupiedNodeData 0x00765cb2 / 0x00765d72 / 0x00765d25;
+//     setOccupiedNodePosVariable 0x00765daa / 0x00765e3c / 0x00765ea4; createObjectMarkerNode 0x00765f51 /
+//     0x00766055 / 0x007660f7; setObjectMarkerNodeTexture 0x007662ac / 0x0076633e / 0x007663a6;
+//     setObjectMarkerNodeTextureSize 0x00766453 / 0x007665bb / 0x007664fc; setObjectMarkerNodeObjects 0x00766601 /
+//     0x007666c1 / 0x00766674; setObjectMarkerNodeLockText 0x007666f9 / 0x00766789 / 0x007667f4;
+//     setObjectMarkerNodeLockTextOffset 0x007668a1 / 0x007669b5 / 0x0076692e; addObjectMarkerNodeLockTextNode
+//     0x007669f3 / 0x00766a66 / 0x00766ac6; setObjectMarkerNodeLockOnType 0x00766b3b / 0x00766bfb / 0x00766bae;
+//     setObjectMarkerNodeWeapon 0x00766c33 / 0x00766cf3 / 0x00766ca6; setObjectMarkerNodeRC 0x00766d2b / 0x00766deb
+//     / 0x00766d9e; createHoverNode 0x00766e23 / 0x00766f27 / 0x00766fc9; createObjectSelectionNode 0x00767524 /
+//     0x00767628 / 0x007676ca; setObjectSelectionNodePointerSize 0x0076787f / 0x00767993 / 0x0076790c;
+//     createAnimationNode 0x007679d1 / 0x00767ad5 / 0x00767b77; createPictureNode 0x0076801d / 0x00768121 /
+//     0x007681c3; setPictureNodeTexture 0x00768378 / 0x007683eb / 0x0076844b; setPictureNodeVariableTexture
+//     0x00768608 / 0x0076867b / 0x007686db; setPictureNodeRotateVariable 0x00768750 / 0x007687c3 / 0x00768823;
+//     setPictureNodeRotation 0x00768898 / 0x00768958 / 0x0076890b; setPictureNodeCenterPoint 0x00768990 / 0x00768aa4
+//     / 0x00768a1d; setPictureNodeBorder 0x00768ae2 / 0x00768cb3 / 0x00768bbc; setPictureNodeBorderColor 0x00768d01
+//     / 0x00768ebd / 0x00768dc6; createBarNode 0x00768f15 / 0x00769035 / 0x007690df; setBarNodeTexture 0x007692cc /
+//     0x0076935e / 0x007693c6; setBarNodeBorder 0x0076961a / 0x0076aebf / 0x007696df; setBarNodeSnap 0x007697d6 /
+//     0x00769896 / 0x00769849; setBarNodeSnapDir 0x007698ce / 0x0076998c / 0x0076993f; setBarNodeInverse 0x007699cf
+//     / 0x00769a8d / 0x00769a40; setBarNodeValueVariable 0x00769ad0 / 0x00769b43 / 0x00769ba3;
+//     setBarNodeIncreaseShow 0x00769e87 / 0x00769f47 / 0x00769efa; setBarNodeSpanValues 0x0076a225 / 0x0076a339 /
+//     0x0076a2b2; setBarNodeRound 0x0076a37e / 0x0076a4eb / 0x0076a42c; createCompassNode 0x0076a536 / 0x0076a693 /
+//     0x0076a758; setCompassNodeTexture 0x0076a9b5 / 0x0076aa47 / 0x0076aaaf; setCompassNodeBorder 0x0076ad03 /
+//     0x0076aebf / 0x0076adc8; setCompassNodeSnapOffset 0x0076af0d / 0x0076b0c9 / 0x0076afd2;
+//     setCompassNodeSnapTexture 0x0076b117 / 0x0076b1a7 / 0x0076b212; setCompassNodeValueVariable 0x0076b2bf /
+//     0x0076b332 / 0x0076b392; setCompassNodeOffset 0x0076b407 / 0x0076b4c7 / 0x0076b47a; setCompassNodeTiltValues
+//     0x0076b651 / 0x0076b765 / 0x0076b6de; createButtonNode 0x0076b7a3 / 0x0076b8a7 / 0x0076b949;
+//     setButtonNodeTexture 0x0076bafe / 0x0076bb90 / 0x0076bbf8; setButtonNodeMouseArea 0x0076bca5 / 0x0076be61 /
+//     0x0076bd6a; setButtonNodeConCmd 0x0076c0c3 / 0x0076c155 / 0x0076c1bb; setButtonNodeAltConCmd 0x0076c268 /
+//     0x0076c2fa / 0x0076c360; setButtonNodeDebug 0x0076c5b2 / 0x0076c670 / 0x0076c623; createMouseOverNode
+//     0x0076c6b3 / 0x0076c7b7 / 0x0076c859; setMouseOverNodeConCmd 0x0076cbb5 / 0x0076cc47 / 0x0076ccad;
+//     createTextNode 0x0076cd5a / 0x0076ce5e / 0x0076cf00; setTextNodeString 0x0076d0b5 / 0x0076d128 / 0x0076d188;
+//     setTextNodeStyle 0x0076d1fd / 0x0076d28f / 0x0076d2f5; setTextNodeOutLine 0x0076d3a2 / 0x0076d415 /
+//     0x0076d475; setTextNodeOutLineOffset 0x0076d4ea / 0x0076d5fe / 0x0076d577; setTextNodeStringVariable
+//     0x0076d643 / 0x0076d6b6 / 0x0076d716; setTruncate 0x0076d78b / 0x0076d849 / 0x0076d7fc; setNodeShowVariable
+//     0x0076d88c / 0x0076d8ff / 0x0076d95f; setNodeShowConCmd 0x0076d9d4 / 0x0076da66 / 0x0076dacc;
+//     addNodeAlphaShowEffect 0x0076db79 / 0x0076dbcc; addNodeMoveShowEffect 0x0076dbfe / 0x0076dd17 / 0x0076dc90;
+//     addNodeBlendEffect 0x0076dd58 / 0x0076de6c / 0x0076dde5; setNodeAlphaVariable 0x0076e2d7 / 0x0076e34a /
+//     0x0076e3aa; setNodeRGBVariables 0x0076e41f / 0x0076e4c8 / 0x0076e574; setNodeColor 0x0076e6a9 / 0x0076e865 /
+//     0x0076e76e; setNodeOffset 0x0076ea0f / 0x0076eb23 / 0x0076ea9c; setNodePosVariable 0x0076eb61 / 0x0076ebf3 /
+//     0x0076ec5b; setNodeTimesBlink 0x0076ed08 / 0x0076ee1c / 0x0076ed95; setNodeIntervalBlink 0x0076ee5a /
+//     0x0076ef1a / 0x0076eecd; setNodeInTime 0x0076ef55 / 0x0076f015 / 0x0076efc8; setNodeOutTime 0x0076f050 /
+//     0x0076f110 / 0x0076f0c3; setNodeSize 0x0076f14b / 0x0076f25f / 0x0076f1d8; setActiveObject 0x0076f508 /
+//     0x0076f595 / 0x0076f619; newLayer 0x0076f6ee / 0x0076f741
+//   Minimap:
+//     setPaintKit 0x0076f773 / 0x0076f846 / 0x0076f7f9; setPaintAllKits 0x0076f871 / 0x0076f8c3; setPaintVehicle
+//     0x0076f8e8 / 0x0076f9a6 / 0x0076f959; setPaintAllVehicles 0x0076f9d1 / 0x0076fa23; setCurrOrderList 0x0076fa48
+//     / 0x0076fb06 / 0x0076fab9; setZoom 0x0076fb31 / 0x0076fb83; setFullScreenZoom 0x0076fba8 / 0x0076fc66 /
+//     0x0076fc19; toggleShowKits 0x0076fc93 / 0x0076fce5; setCommanderOffset 0x0076fd10 / 0x0076fdec / 0x0076fd81;
+//     setSourceBlend 0x0076fe45 / 0x0076ff03 / 0x0076feb6; setDestinationBlend 0x0076ff2e / 0x0076ffec / 0x0076ff9f;
+//     setFilterColor 0x00770017 / 0x007701d2 / 0x007700db
 void registerHudConsoleMethods(Console& console, HudManager& hud)
 {
 	const uint32_t access = ConsoleAccess::Anyone;

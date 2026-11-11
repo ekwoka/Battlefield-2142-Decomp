@@ -1069,6 +1069,8 @@ public:
 		float damage;
 	};
 	const std::vector<Impact>& impacts() const { return m_impacts; }
+	// Every impact recorded this round (impacts() keeps the last 65).
+	size_t impactsTotal() const { return m_impactsTotal; }
 	size_t projectilesInFlight() const { return m_projectiles.size(); }
 	// The weapon HUD's ability bar's inputs (0x007c3af0) for a player:
 	// - what he last gave (player +0x158..+0x16b through slots 0x25c..0x284:
@@ -1119,6 +1121,12 @@ public:
 	// object with a collision mesh (+0x4c slot 0x74) and BundledMesh
 	// geometry (its template's slot 0xe4, 0x100a7da0, adds 0).
 	float objectRadius(uint32_t object) const;
+	// A body's collision box in its own space (Body::boxMin / boxMax); false
+	// for an object without one.
+	bool objectBox(uint32_t object, physics::Vec3& low, physics::Vec3& high) const;
+	// Where a vehicle's entry point for its driver (VehicleLayout::entries:
+	// the driver's own, else a shared one) lies in the world; false without one.
+	bool entryPoint(uint32_t vehicle, physics::Vec3& at) const;
 	// Sets them (the scripts' setDamage); none left kills a soldier or
 	// destroys the object.
 	void setHitPoints(uint32_t object, float hitPoints);
@@ -3169,10 +3177,12 @@ private:
 	std::map<std::string, std::unique_ptr<ProjectileSettings>> m_projectileSettings;
 	std::vector<Projectile> m_projectiles;
 	std::vector<Impact> m_impacts;
+	size_t m_impactsTotal = 0;
 	std::map<uint32_t, float> m_hitPoints;
 	effects::EffectManager m_effects;
 	void stepBurstRange(Player& player, const world::ObjectTemplate* inHand);
 	void fire(const Player& player, float aimPitch);
+	bool batchDeviation(DeviationBuildUp& build, bool sub, float mainDeviation, float& alongUp, float& alongRight);
 	// target.disableFireWhenActiveMissile: `firearm`'s guided round (of
 	// `player`, from `shooter`) is still flying (0x005e2430).
 	bool activeMissile(const Player& player, uint32_t shooter, const std::string& firearm,
@@ -3239,7 +3249,8 @@ private:
 	void playAnimationSound(const Player& player, int sound);
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
 		AbilityScan* scan = nullptr, Player* holder = nullptr, bool soldiersOnly = false, bool vehiclesOnly = false,
-		Player* giver = nullptr); // whose gifts are stamped (abilityBar): the holder by default
+		Player* giver = nullptr, // whose gifts are stamped (abilityBar): the holder by default
+		const physics::Vec3* rayEnd = nullptr); // onlyActiveWhileFiring: the ray at -> rayEnd instead of the sphere
 	void stepAbilities(float seconds);
 	// A soldier's ammunition for the ability bar (0x00588ba0): over its
 	// weapons that can be refilled (ammo.allowReplenish, nrOfMags not

@@ -99,6 +99,10 @@ size_t FileManager::mountedArchiveCount() const
 	return count;
 }
 
+// 0x0069a810: refused with "not supported in runtime" once mounting is
+// closed (+0x6d); an archive already mounted isn't mounted again; the
+// first search path that opens it mounts it, appended to its mount
+// point's list.
 bool FileManager::mountArchive(const std::string& archive, const std::string& mountPoint)
 {
 	if (!m_mountingAllowed) {
@@ -166,6 +170,9 @@ std::string FileManager::resolveLooseFile(const std::string& normalized) const
 	return {};
 }
 
+// 0x00698e40: "bf2/content/" taken out, then the path's mount's archives
+// (slot 0x1c), then each search path's loose file. (The original erases
+// "bf2/content/" wherever it is found, not only at the start.)
 bool FileManager::exists(const std::string& path) const
 {
 	std::string normalized = normalizePath(path);
@@ -201,6 +208,9 @@ void FileManager::removeMemoryFile(const std::string& path)
 	m_memoryFiles.erase(normalizePath(path));
 }
 
+// Opening for reading, 0x00698b60: the path's mount's archives in mount
+// order (slot 0x18), then each search path's loose file. (Its +0x68 mode,
+// archives only except @HOME@, @ROOT@ and .png paths, isn't kept.)
 bool FileManager::readFile(const std::string& path, std::vector<uint8_t>& out) const
 {
 	const std::string normalized = normalizePath(path);
@@ -248,6 +258,10 @@ bool FileManager::readText(const std::string& path, std::string& out) const
 	return true;
 }
 
+// 0x00697d70: an absolute path as it is, @ROOT@ / @HOME@ to the root and
+// home directories, anything else under the first search path. (The
+// original leaves a path that already starts with the first search path
+// as it is, 0x0065b9c0's _strnicmp; this prefixes it again.)
 std::string FileManager::expandPath(const std::string& path) const
 {
 	const std::string normalized = normalizePath(path);

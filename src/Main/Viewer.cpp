@@ -847,6 +847,9 @@ std::unique_ptr<Window> Window::open(int width, int height)
 
 bool Window::closed() const { return impl->closed; }
 
+// RendDX9's 0x10010830 lists the adapter's modes as "%ix%i@%iHz", each
+// once. It keeps only the modes of the desktop's format and at least 800
+// wide (799 < width); every mode SDL gives is listed here.
 std::vector<std::string> Window::displayModes() const
 {
 	std::vector<std::string> modes;

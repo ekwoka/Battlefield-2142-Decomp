@@ -2094,70 +2094,79 @@ void GameWorld::fire(const Player& player, float aimPitch)
 {
 	ambientShot(player); // the triggers' event 2
 	missileAway(player);  // a locked round's "missile_away" (0x005e1ee0)
+	Player& firer = const_cast<Player&>(player);
 	const physics::SoldierBody& body = player.body;
 	const float look = lookYaw(player);
 	const float yaw = look * 3.14159265f / 180.0f;
 	const float pitch = aimPitch * 3.14159265f / 180.0f;
-	physics::Vec3 direction {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-	const physics::Vec3 straight = direction;
-	// The weapon's soldier deviation (0x005f5540): two normal numbers x the
-	// deviation x 0.01 along the round's up and right; the round adds to
-	// the firing's build-up.
-	if (player.deviation.present) {
-		Player& firer = const_cast<Player&>(player);
-		// A bot's AI deviation (setAiDeviation) on top (0x005de980's end).
-		const float deviation = firer.deviation.deviation() + (player.ai ? player.aiDeviation : 0.0f);
-		firer.deviation.fire.fired();
-		if (deviation > 0.01f) {
-			const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
-			const physics::Vec3 up = physics::cross(direction, right);
-			const float alongUp = m_gaussian.next(m_random), alongRight = m_gaussian.next(m_random);
-			direction = deviateVelocity(direction, right, up, 1, deviation, alongUp, alongRight);
-			direction = direction * (1 / std::sqrt(physics::lengthSquared(direction)));
+	const physics::Vec3 straight {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
+	const physics::Vec3 up = physics::cross(straight, right);
+	// The main round's deviation: the weapon's soldier deviation and a
+	// bot's AI deviation (setAiDeviation) on top (0x005de980's end).
+	const float mainDeviation =
+		player.deviation.present ? firer.deviation.deviation() + (player.ai ? player.aiDeviation : 0.0f) : 0.0f;
+	const world::ObjectTemplate* gun = m_templates.find(player.weaponTemplate);
+	// fire.batchSize projectiles (FireComp 0x005f31d0), the first the main
+	// round, the rest sub-projectiles.
+	const int batch = player.weapon->settings().batchSize;
+	for (int index = 0; index < batch; ++index) {
+		physics::Vec3 direction = straight;
+		// Each strays by the weapon's soldier deviation (0x005f5540): two
+		// normal numbers x the deviation x 0.01 along the round's up and
+		// right; each adds to the firing's build-up.
+		if (player.deviation.present) {
+			float alongUp = 0, alongRight = 0;
+			const bool strays = batchDeviation(firer.deviation.fire, index > 0, mainDeviation, alongUp, alongRight);
+			firer.deviation.fire.fired();
+			if (strays) {
+				direction = deviateVelocity(direction, right, up, 1, 1, alongUp, alongRight);
+				direction = direction * (1 / std::sqrt(physics::lengthSquared(direction)));
+			}
 		}
-	}
-	Projectile p;
-	p.origin = body.position + physics::Vec3 {0, 0.6f, 0} + straight * 0.5f;
-	p.position = p.origin;
-	// A thrown round at its throw's power (0x005e5720: 1, or the soft
-	// throw's hold), plus the thrower's velocity.
-	p.velocity = body.velocity + direction * (player.weapon->settings().velocity * player.weapon->throwPower());
-	p.heading = direction;
-	p.settings = player.projectile;
-	if (player.weapon->settings().thrown && p.settings) {
-		// The thrown object's frame and spin (0x005e5720's end); the round's
-		// serial stands for its object id as the draws' seed.
-		p.serial = ++m_projectileSerial;
-		throwFrame(p, straight, player.weapon->settings().startRotation, player.weapon->settings().randomRotationSpeed,
-			player.weapon->throwPower(), p.serial);
-	}
-	p.timeLeft = player.projectile->timeToLive.sample(m_random);
-	p.shooter = player.object;
-	p.player = player.id;
-	p.team = player.team;
-	p.yaw = look;
-	p.keepProjectiles = player.weapon->settings().keepProjectiles;
-	// The distance counter's range, when on and at least a metre (0x005d4d80).
-	p.burstDistance = player.burstDistance >= 1 ? static_cast<float>(player.burstDistance) : 0.0f;
-	if (const world::ObjectTemplate* gun = m_templates.find(player.weaponTemplate)) {
-		wireSettings(p, *gun);
-		limitInWorld(const_cast<Player&>(player), *gun, p);
-	}
-	launchLocked(p, const_cast<Player&>(player));
-	// A tracer round (0x005f2bb0): its tracer starts at the muzzle as
-	// drawn (the weapon's e_muzz place, else the round's start) and closes
-	// on the round.
-	if (!p.settings->tracerGeometry.empty() && player.weapon->takeTracer(p.settings->tracerInterval)) {
-		p.tracer = true;
-		p.tracerStart = p.origin;
-		physics::Vec3 at;
-		physics::Mat3 rotation;
-		if (player.weaponObject && weaponPlace(player, at, rotation)) {
-			const physics::Vec3 offset = at + rotation.transform(player.muzzleOffset) - p.origin;
-			p.tracerOffset = physics::lengthSquared(offset) < 9 ? offset : physics::Vec3 {};
+		Projectile p;
+		p.origin = body.position + physics::Vec3 {0, 0.6f, 0} + straight * 0.5f;
+		p.position = p.origin;
+		// A thrown round at its throw's power (0x005e5720: 1, or the soft
+		// throw's hold), plus the thrower's velocity.
+		p.velocity = body.velocity + direction * (player.weapon->settings().velocity * player.weapon->throwPower());
+		p.heading = direction;
+		p.settings = player.projectile;
+		if (player.weapon->settings().thrown && p.settings) {
+			// The thrown object's frame and spin (0x005e5720's end); the round's
+			// serial stands for its object id as the draws' seed.
+			p.serial = ++m_projectileSerial;
+			throwFrame(p, straight, player.weapon->settings().startRotation, player.weapon->settings().randomRotationSpeed,
+				player.weapon->throwPower(), p.serial);
 		}
+		p.timeLeft = player.projectile->timeToLive.sample(m_random);
+		p.shooter = player.object;
+		p.player = player.id;
+		p.team = player.team;
+		p.yaw = look;
+		p.keepProjectiles = player.weapon->settings().keepProjectiles;
+		// The distance counter's range, when on and at least a metre (0x005d4d80).
+		p.burstDistance = player.burstDistance >= 1 ? static_cast<float>(player.burstDistance) : 0.0f;
+		if (gun) {
+			wireSettings(p, *gun);
+			limitInWorld(firer, *gun, p);
+		}
+		launchLocked(p, firer);
+		// A tracer round (0x005f2bb0): its tracer starts at the muzzle as
+		// drawn (the weapon's e_muzz place, else the round's start) and closes
+		// on the round.
+		if (!p.settings->tracerGeometry.empty() && player.weapon->takeTracer(p.settings->tracerInterval)) {
+			p.tracer = true;
+			p.tracerStart = p.origin;
+			physics::Vec3 at;
+			physics::Mat3 rotation;
+			if (player.weaponObject && weaponPlace(player, at, rotation)) {
+				const physics::Vec3 offset = at + rotation.transform(player.muzzleOffset) - p.origin;
+				p.tracerOffset = physics::lengthSquared(offset) < 9 ? offset : physics::Vec3 {};
+			}
+		}
+		m_projectiles.push_back(p);
 	}
-	m_projectiles.push_back(p);
 	// The third-person muzzle flash: the weapon's e_muzz child, placed by
 	// the weapon's matrix times its own as FireComp places the muzzle
 	// bundles (0x005f25f0 -> 0x006acfa0), so it follows the gun (its anchor
@@ -2171,12 +2180,35 @@ void GameWorld::fire(const Player& player, float aimPitch)
 			m_effects.setAnchor(player.weaponObject, at, rotation);
 			m_effects.spawnAttached(player.muzzleEffect, player.weaponObject, player.muzzleOffset, player.muzzleRotation,
 				effects::EffectManager::View::ThirdPerson);
-			const_cast<Player&>(player).muzzleUntil = m_time + 1.0;
+			firer.muzzleUntil = m_time + 1.0;
 		} else {
-			m_effects.spawn(player.muzzleEffect, p.origin + direction * 0.3f,
+			m_effects.spawn(player.muzzleEffect, body.position + physics::Vec3 {0, 0.6f, 0} + straight * 0.8f,
 				physics::Mat3::fromYawPitchRoll({look, -aimPitch, 0}));
 		}
 	}
+}
+
+// One projectile of a batch's offset (0x005f5540, before its build-up
+// grows): a sub-projectile strays by subProjectileDev and is kept (the
+// component's +0xc / +0x10); the main round by its own deviation plus the
+// last sub-projectile's (that of the previous firing: the main round comes
+// first). False (no offset) at 0.01 or less.
+bool GameWorld::batchDeviation(DeviationBuildUp& build, bool sub, float mainDeviation, float& alongUp, float& alongRight)
+{
+	const float deviation = sub ? build.subDev : mainDeviation;
+	if (deviation <= 0.01f) {
+		return false;
+	}
+	alongUp = m_gaussian.next(m_random) * deviation;
+	alongRight = m_gaussian.next(m_random) * deviation;
+	if (sub) {
+		build.subUp = alongUp;
+		build.subRight = alongRight;
+	} else {
+		alongUp += build.subUp;
+		alongRight += build.subRight;
+	}
+	return true;
 }
 
 bool GameWorld::weaponPlace(const Player& player, physics::Vec3& at, physics::Mat3& rotation) const
@@ -4135,6 +4167,7 @@ void GameWorld::stepProjectiles(float seconds)
 				}
 			}
 			m_impacts.push_back({hit.point, hit.normal, hitObject, hit.material, amount});
+			++m_impactsTotal;
 			// After the hit's damage the game logic's hit (0x005a4dd0) asks
 			// the round to go on (the +0x184 interface's slot 0xd4,
 			// 0x005b54e0), which hands it to its DefaultPenetrateComp
@@ -9745,6 +9778,42 @@ bool GameWorld::walkCycle(uint32_t vehicle, float& length, float& time) const
 	return false;
 }
 
+bool GameWorld::entryPoint(uint32_t vehicle, physics::Vec3& at) const
+{
+	const Body* body = findBody(vehicle);
+	const world::Object* object = body ? m_objects.find(vehicle) : nullptr;
+	if (!object || !object->objectTemplate()) {
+		return false;
+	}
+	const VehicleLayout& layout = const_cast<GameWorld*>(this)->vehicleLayout(*object->objectTemplate());
+	if (layout.entries.empty()) {
+		return false;
+	}
+	// The driver's own entry, else one for any seat, else the first.
+	const VehicleLayout::Entry* pick = &layout.entries.front();
+	for (const VehicleLayout::Entry& entry : layout.entries) {
+		if (entry.seat == 0 || (entry.seat < 0 && pick->seat != 0)) {
+			pick = &entry;
+			if (entry.seat == 0) {
+				break;
+			}
+		}
+	}
+	at = body->body.position + body->body.rotation.transform(pick->position);
+	return true;
+}
+
+bool GameWorld::objectBox(uint32_t object, physics::Vec3& low, physics::Vec3& high) const
+{
+	const Body* body = findBody(object);
+	if (!body || body->boxMax.x < body->boxMin.x) {
+		return false;
+	}
+	low = body->boxMin;
+	high = body->boxMax;
+	return true;
+}
+
 float GameWorld::objectRadius(uint32_t object) const
 {
 	for (const Body& body : m_bodies) {
@@ -10577,7 +10646,7 @@ bool GameWorld::repairable(uint32_t object) const
 }
 
 void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly, Player* giver)
+	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly, Player* giver, const physics::Vec3* rayEnd)
 {
 	if (!giver) {
 		giver = holder;
@@ -10620,7 +10689,28 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	// The targets: held ones between rescans.
 	std::vector<uint32_t> found;
 	const bool rescan = !scan || scan->timer >= (scan->targets.empty() ? 1.0f : 2.0f);
-	if (rescan) {
+	// With onlyActiveWhileFiring (the repair tool, 0x005d84a0): the first
+	// thing the ray along the holder's look meets within abilityRadius
+	// (the object manager's ray, DAT_00a85220 slot 0x68, the holder left
+	// out), when it passes the filter (0x005d7d40). A bot whose ray meets
+	// nothing takes its AI's target instead (the AI interface's slot 8);
+	// the rewrite's bots take the sphere's as before.
+	bool sphere = rescan;
+	if (rescan && rayEnd) {
+		uint32_t hitObject = 0;
+		const world::Object* object =
+			firstHit(at, *rayEnd, hitObject, holder ? holder->object : 0) && hitObject ? m_objects.find(hitObject) : nullptr;
+		if (object && !ability.ammo && !soldiersOnly && (object->team() == team || object->team() == 0)
+			&& repairable(hitObject)) {
+			found.push_back(hitObject);
+		}
+		sphere = found.empty() && holder && holder->ai;
+		if (!sphere && scan) {
+			scan->targets = found;
+			scan->timer = 0;
+		}
+	}
+	if (sphere) {
 		for (const auto& owned : m_players) {
 			const Player& target = *owned;
 			if (!vehiclesOnly && target.alive && (!target.vehicle || soldiersOnly) && target.team == team && target.object != skip
@@ -10660,7 +10750,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			scan->targets = found;
 			scan->timer = 0;
 		}
-	} else {
+	} else if (!rescan) {
 		found = scan->targets;
 	}
 	if (scan) {
@@ -10778,13 +10868,23 @@ void GameWorld::stepAbilities(float seconds)
 		Ability ability;
 		bool whileFiring = false;
 		if (const world::ObjectTemplate* t = m_templates.find(player.weaponTemplate); t && abilityOf(*t, ability, whileFiring)) {
-			// Round the point a metre ahead of the soldier's hands.
+			// Round the point a metre ahead of the soldier's hands; with
+			// onlyActiveWhileFiring along the look from the eyes, as far as
+			// abilityRadius (0x005d84a0: the camera's position and forward).
 			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
-			const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
 			auto scan = m_abilityScans.try_emplace(player.id).first;
 			if (scan->second.targets.empty() && scan->second.timer == 0) {
 				scan->second.timer = 1; // the first scan at once
 			}
+			if (whileFiring) {
+				const float pitch = std::clamp(player.input.aimPitch + player.aimKickPitch, -89.0f, 89.0f) * 3.14159265f / 180.0f;
+				const physics::Vec3 eye = player.body.position + physics::Vec3 {0, 0.6f, 0};
+				const physics::Vec3 look {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+				const physics::Vec3 end = eye + look * ability.radius;
+				applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end);
+				continue;
+			}
+			const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
 			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
 		}
 	}
@@ -11640,57 +11740,69 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 		direction = (facing * mount.turn * body.body.rotation).rows[2];
 	}
 	const physics::Vec3 straight = direction;
-	// The round strays by the deviation (0x005f5540): (minDev + the
+	// The rounds stray by the deviation (0x005f5540): (minDev + the
 	// build-up) and, for a bot, its AI deviation (0x005dedb0's end); two
 	// normal numbers x that x 0.01 along its up and right. (Zoomed, the
-	// component's deviation is 0: the world keeps no seat zoom.)
-	if (w.hasDeviation) {
-		const float deviation = arm.deviation.deviation() + (player.ai ? gun.aiDeviation : 0.0f);
-		arm.deviation.fired();
-		if (deviation > 0.01f) {
-			const float across = std::sqrt(direction.x * direction.x + direction.z * direction.z);
-			const physics::Vec3 right = across > 1e-4f ? physics::Vec3 {direction.z / across, 0, -direction.x / across}
-														: physics::Vec3 {1, 0, 0};
-			const physics::Vec3 up = physics::cross(direction, right);
-			const float alongUp = m_gaussian.next(m_random), alongRight = m_gaussian.next(m_random);
-			direction = deviateVelocity(direction, right, up, 1, deviation, alongUp, alongRight);
-			direction = direction * (1 / std::sqrt(physics::lengthSquared(direction)));
-		}
-	}
-	Projectile p;
-	p.origin = body.body.position + body.body.rotation.transform(mount.place(seatGunOrigin(seat, w, gun.yaw, gun.pitch, arm.barrel)));
-	p.position = p.origin;
-	p.velocity = body.body.velocity + direction * arm.weapon->settings().velocity;
-	p.heading = direction;
-	p.settings = arm.projectile;
-	p.timeLeft = arm.projectile->timeToLive.sample(m_random);
-	p.shooter = body.object;
-	p.player = player.id;
+	// component's deviation is 0: the world keeps no seat zoom.) A batch
+	// (fire.batchSize, FireComp 0x005f31d0) makes that many projectiles,
+	// each from the next barrel; the rest stray by subProjectileDev.
+	const float across = std::sqrt(straight.x * straight.x + straight.z * straight.z);
+	const physics::Vec3 right = across > 1e-4f ? physics::Vec3 {straight.z / across, 0, -straight.x / across}
+												: physics::Vec3 {1, 0, 0};
+	const physics::Vec3 up = physics::cross(straight, right);
+	const float mainDeviation = w.hasDeviation ? arm.deviation.deviation() + (player.ai ? gun.aiDeviation : 0.0f) : 0.0f;
 	const world::ObjectTemplate* firearm = m_templates.find(w.weapon);
-	if (firearm) {
-		wireSettings(p, *firearm);
-	}
-	launchLocked(p, player);
-	if (!p.settings->tracerGeometry.empty() && arm.weapon->takeTracer(p.settings->tracerInterval)) {
-		p.tracer = true;
-		p.tracerStart = p.origin;
-	}
-	if (!p.serial) {
-		p.serial = ++m_projectileSerial;
-	}
-	if (p.settings->seek == ProjectileSettings::Seek::Aim) {
-		// The LPTargetComp guides one round, the last one fired (its +0x1c,
+	physics::Vec3 firstOrigin;
+	if (arm.projectile->seek == ProjectileSettings::Seek::Aim) {
+		// The LPTargetComp guides one firing, the last one (its +0x1c,
 		// slot 0xbc, which the update 0x005e2e20 steers): an earlier round
 		// of the same gun goes on unguided.
 		for (Projectile& earlier : m_projectiles) {
-			if (earlier.player == p.player && earlier.shooter == p.shooter && earlier.settings == p.settings) {
+			if (earlier.player == player.id && earlier.shooter == body.object && earlier.settings == arm.projectile) {
 				earlier.wireLost = true;
 			}
 		}
 	}
-	m_projectiles.push_back(p);
-	if (firearm) {
-		startProjectileView(player, p, *firearm);
+	const int batch = arm.weapon->settings().batchSize;
+	for (int round = 0; round < batch; ++round) {
+		direction = straight;
+		if (w.hasDeviation) {
+			float alongUp = 0, alongRight = 0;
+			const bool strays = batchDeviation(arm.deviation, round > 0, mainDeviation, alongUp, alongRight);
+			arm.deviation.fired();
+			if (strays) {
+				direction = deviateVelocity(direction, right, up, 1, 1, alongUp, alongRight);
+				direction = direction * (1 / std::sqrt(physics::lengthSquared(direction)));
+			}
+		}
+		Projectile p;
+		p.origin =
+			body.body.position + body.body.rotation.transform(mount.place(seatGunOrigin(seat, w, gun.yaw, gun.pitch, arm.barrel)));
+		p.position = p.origin;
+		p.velocity = body.body.velocity + direction * arm.weapon->settings().velocity;
+		p.heading = direction;
+		p.settings = arm.projectile;
+		p.timeLeft = arm.projectile->timeToLive.sample(m_random);
+		p.shooter = body.object;
+		p.player = player.id;
+		if (firearm) {
+			wireSettings(p, *firearm);
+		}
+		launchLocked(p, player);
+		if (!p.settings->tracerGeometry.empty() && arm.weapon->takeTracer(p.settings->tracerInterval)) {
+			p.tracer = true;
+			p.tracerStart = p.origin;
+		}
+		if (!p.serial) {
+			p.serial = ++m_projectileSerial;
+		}
+		if (round == 0) {
+			firstOrigin = p.origin;
+		}
+		m_projectiles.push_back(p);
+		if (firearm && round == 0) {
+			startProjectileView(player, m_projectiles.back(), *firearm);
+		}
 	}
 	// WeaponBasedRecoilComp (0x005ddfc0): the gun's slide, and its push on
 	// the vehicle (slot 0xa0: -forward x recoilForce at the gun, no mass).
@@ -11724,7 +11836,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	}
 	++player.roundsFired;
 	++player.gunShots;
-	weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, p.origin);
+	weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, firstOrigin);
 	// The weapon's event 0 (ObjectEffects), kept short where nothing takes
 	// them (a dedicated server draws no effects).
 	if (std::vector<std::string>& fires = m_objectWeaponFires[body.object]; fires.size() < 8) {

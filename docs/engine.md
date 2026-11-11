@@ -8435,7 +8435,16 @@ has none and every two seconds while it has some (`*0x00a6db70` 1,
 `*0x00a6db68` 0.5 a second): a sphere of abilityRadius round the holder
 (`0x005d8740`), or with onlyActiveWhileFiring a ray of it along the
 holder's forward (`0x005d84a0`); held targets are treated in between even
-out of reach. Only the holder's team or team 0 for RTHeal and RTAmmo,
+out of reach. The ray (the repair tool's) starts at the holder's camera
+(slot `0x60`) and runs abilityRadius along its forward (slot `0x78`'s third
+row) through the object manager's ray (`DAT_00a85220` slot `0x68`, the
+holder left out); the first object it meets is the target when it passes
+the filter (`0x005d7d40`). A bot whose ray meets nothing takes its AI's
+target instead (the AI interface `DAT_00b4bc0c` slot 8). The rewrite casts
+from the eyes along the aim (`applyAbility`'s `rayEnd`, `firstHit`); its
+bots fall back on the sphere. (Until 2026-11 the rewrite used a 2.5 m
+sphere a metre ahead of the hands measured to the vehicles' centres, so a
+tank could only be mended from inside its hull.) Only the holder's team or team 0 for RTHeal and RTAmmo,
 only enemies for RTTeam (`0x005d7d40`). Each tick each target gets the
 tick's strength × the cell (`0x005d7a40`):
 
@@ -8655,6 +8664,24 @@ which the rewrite can't reproduce). The build-up (`DeviationBuildUp`):
 `+0x10` the most, `+0x8` added a round, `+0xc` the decay a tick), with
 `minDev` (`+0x14`) the floor; a round adds (`0x005f5540`), each tick off
 the trigger decays toward the floor (`0x005dedb0`).
+
+**Batches** (`fire.batchSize`, the fire template's `+0x48`, 1 by default;
+property `0x004e2c5c` / `0x004e2d1a`). FireComp's fire (`0x005f31d0`)
+makes that many projectiles (`0x005f2bb0` each, at the same velocity, each
+counting toward the tracer interval and taking the next barrel), and the
+firing's end (`0x005c3cb0`) strays every one of them through the
+deviation component (above): the first is the main round, the rest
+sub-projectiles by `subProjectileDev`. The recoil, the fire sound and the
+firing's messages go with the main round only, and the magazine loses one
+round. The shipped batches: the shotguns' 12 pellets (`*_shotgun`,
+`subProjectileDev` 1.4), the EU AV's 4 wire-guided rockets (`eu_av`:
+`subProjectileDev` 8, `maxProjectilesInWorld` 8, 125 damage each against
+the PAC AV's single 500), the heavy IFV's main gun's 20, and the
+commander's orbital strikes (`Commander.cpp`). The rewrite's soldier fire
+(`GameWorld::fire`) and seat fire (`fireSeatWeapon`) loop over the batch
+(`GameWorld::batchDeviation`); a guided seat round lets the gun's earlier
+firings go, not its batch-mates. (Until 2026-11 both fired one round: a
+shotgun one pellet, the EU AV a quarter of its damage.)
 
 **Soldier deviation** (hand-held firearms' `SoldierDeviationComp`, class
 `0x94e1`; the object's update `0x005de980` each tick with the holder's

@@ -370,6 +370,15 @@ struct FireArmSettings {
 	// rounds (template +0x4c, 3 by default, 0x005f2ad0).
 	std::vector<int> fireRates;
 	int burstSize = 3;
+	// fire.batchSize (fire template +0x48, 1 by default; the property
+	// 0x004e2c5c / 0x004e2d1a): the projectiles a round makes. FireComp's
+	// fire (0x005f31d0) makes that many (0x005f2bb0 each, the same velocity
+	// and tracer count), and the firing's end (0x005c3cb0) strays each by
+	// the deviation component, the first the main round and the rest
+	// sub-projectiles (by subProjectileDev); the recoil, the sound and the
+	// firing's messages only for the main one. The shotguns' 12 pellets,
+	// the EU AV's 4 wire-guided rockets, the heavy IFV's 20.
+	int batchSize = 1;
 	// A PulseMeterAmmoComp (the handheld pulse meter): each round starts its
 	// scan (0x005d9cf0 sets +0x58), which runs pulse-meter-scan-step (1, a
 	// tweakable of 0x008e..: DAT_00a6e194) a second until it is through
@@ -946,6 +955,12 @@ struct DeviationBuildUp {
 	float max = 0, perShot = 0, decay = 0;
 	float minDev = 0;
 	float value = 0; // +8
+	// deviation.subProjectileDev (template +0x18): a batch's
+	// sub-projectiles stray by it instead (fire.batchSize, below).
+	float subDev = 0;
+	// The last sub-projectile's offset (the component's +0xc, +0x10): kept
+	// from one firing to the next, and added to the main round's.
+	float subUp = 0, subRight = 0;
 	static DeviationBuildUp fromTemplate(const world::ObjectTemplate& t);
 	void update(bool firing);
 	// The SoldierDeviationComp's own decay (0x005de980): the build-up
