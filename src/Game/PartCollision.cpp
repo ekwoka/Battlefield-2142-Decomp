@@ -200,6 +200,18 @@ void GameWorld::addCollisionParts(Body& body, const world::ObjectTemplate& owner
 						made.radius = std::max(made.radius, physics::boxRadius(lod->boundsMin, lod->boundsMax));
 					}
 					if (made.lod[0] || made.lod[1]) {
+						// Its own response and node (0x005f6a60 / 0x005f6ba0,
+						// by the template's +0xf1 bits 0x2 / 0x4 and +0xf4). A
+						// Spring's contacts stay the Vehicle's wheels'.
+						const bool spring = sameName(m_templates.typeNameOf(c->classId()), "Spring");
+						const auto flag = [&](const char* key) {
+							const auto it = c->settings().find(key);
+							return it != c->settings().end() && std::atoi(it->second.c_str()) != 0;
+						};
+						const auto type = c->settings().find("physicsType");
+						const bool mesh = type != c->settings().end() && (sameName(type->second, "Mesh") || type->second == "3");
+						made.ownResponse = !spring && flag("hasCollisionPhysics");
+						made.mover = made.ownResponse && mesh && flag("hasMobilePhysics");
 						made.rotation = here.r; // at rest in the body's frame, until posed
 						made.position = here.t;
 						body.partNodes[index].mesh = static_cast<int>(body.partMeshes.size());
@@ -239,6 +251,11 @@ void GameWorld::buildTitanCollisionParts(Titan& titan, Body& body)
 		const uint32_t faceOwner = m.node >= 0 ? titan.parts[static_cast<size_t>(m.node)].id : titan.object;
 		addCollisionParts(body, *m.t, static_cast<int>(node), m.rotation, m.position, *m.mesh, m.materials, faceOwner,
 			static_cast<int>(i));
+		// A Titan's parts move with its sync, and what meets them takes the
+		// whole push (a major actor): no responses of their own here.
+		for (size_t p = before; p < body.partMeshes.size(); ++p) {
+			body.partMeshes[p].ownResponse = body.partMeshes[p].mover = false;
+		}
 		if (body.partMeshes.size() == before) {
 			body.partNodes.resize(node);
 		}
@@ -385,7 +402,8 @@ void GameWorld::partActors(Body& body, std::vector<MeshActor>& out)
 	const size_t state = body.collisionWrecked ? 1 : 0;
 	const MeshActor root = body.vehicleMesh ? actorOf(body) : MeshActor {};
 	const physics::Vec3 centre = body.body.position + body.body.rotation.transform(body.body.centerOfMass);
-	for (const Body::PartMesh& part : body.partMeshes) {
+	for (size_t index = 0; index < body.partMeshes.size(); ++index) {
+		const Body::PartMesh& part = body.partMeshes[index];
 		const Body::PartMesh::Physics& lods = part.physics[state];
 		if (part.off || !lods.vehicle || lods.points.empty()) {
 			continue;
@@ -413,6 +431,7 @@ void GameWorld::partActors(Body& body, std::vector<MeshActor>& out)
 		a.materials = &part.materials;
 		a.geometry = part.geometry;
 		a.state = state;
+		a.partMesh = part.ownResponse ? static_cast<int>(index) : -1;
 		out.push_back(a);
 	}
 }

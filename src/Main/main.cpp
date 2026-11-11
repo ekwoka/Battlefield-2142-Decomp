@@ -5945,6 +5945,20 @@ int runGame(Options& options, Session& session)
 		// And the vehicle we drive: a record of the driver's seat (its
 		// root's SimpleObject state, record.vehicle its ghost).
 		host::VehiclePrediction carPrediction(round);
+		// The radio messages' emotes (GameAudio::onEmote): the round's own
+		// sender, or in a joined game the sender's soldier ghost (ours with
+		// the prediction's sprint).
+		gameAudio.onEmote = [&round, &prediction](int sender, const std::string& emote) {
+			if (!g_remoteHud) {
+				round.playEmote(sender, emote);
+				return;
+			}
+			game::GameWorld::PlayerInfo p;
+			if (g_remoteHud->playerInfo(sender, p) && p.soldier && !p.vehicle) {
+				const bool own = sender == g_remoteHud->localPlayer();
+				round.playRemoteEmote(p.soldier, emote, own && prediction.active() && prediction.control().stamina().sprinting());
+			}
+		};
 		uint32_t recordsSeen = 0;
 		// A joined game's soldier deviation for the crosshair (the client
 		// runs its own soldier's weapon feel, as the server's soldier does,

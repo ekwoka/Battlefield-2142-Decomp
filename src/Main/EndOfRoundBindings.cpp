@@ -1,5 +1,7 @@
 #include "EndOfRoundBindings.h"
 
+#include "Hud/HudFont.h"
+#include "IO/Localization/LocaleFormat.h"
 #include "Stats/Stats.h"
 #include "UI/Player/Natives.h"
 
@@ -53,12 +55,13 @@ std::string format(const char* pattern, int a, const std::string& b)
 	return buffer;
 }
 
-// "%0.2f" (0x1001dcd0).
+// "%0.2f" through GetNumberFormatA in the game's language (0x1001dcd0,
+// 0x10066c40, 0x10065ad0 -> 0x10007c60; io::formatNumber).
 std::string twoDecimals(float value)
 {
 	char buffer[32];
 	std::snprintf(buffer, sizeof(buffer), "%0.2f", static_cast<double>(value));
-	return buffer;
+	return io::formatNumber(buffer, io::languageLcid(hud::language()));
 }
 
 } // namespace

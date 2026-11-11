@@ -2179,6 +2179,25 @@ public:
 	// or against it (Front): "hitBackLeft" ... "hitFrontBody", the
 	// RandomTriggers of AnimationSystem3p.inc. Not in a vehicle.
 	static const char* hitReaction(int node, const physics::Vec3& direction, float soldierYawDegrees);
+	// A radio message's emote (TemplateBehaviours.cpp). The client that
+	// hears a message (0x0042e0c0) has the sender's soldier, when it is
+	// the sender's controlled object (class 0x9493: on foot, not on a
+	// ladder), play the message's emote trigger (messages.addEmoteTrigger,
+	// 0x004d7fe0) through the soldier's slot 0x88 (0x005edbf0). That plays
+	// it in the 3P system (+0x2f0 == 1) through the system's slot 0x1c
+	// (0x008b97f0, as the hit reactions) unless the emote is "", the
+	// soldier sprints (slot 0x100: +0x37e), lies prone (+0x268 == 2) or
+	// holds a GenericFireArm (class 0x94d3, the item in hand 0x005896a0)
+	// without allowEmoteAnimation (template +0x31e, default 0, set by
+	// 0x004e1c58). Whether the soldier may emote by that rule:
+	static bool emoteAllowed(const std::string& emote, bool sprinting, SoldierPose pose,
+		const world::ObjectTemplate* inHand);
+	// The round's own player `player` (false when it doesn't play), and a
+	// joined game's soldier ghost (animateRemoteSoldier's; `sprinting` the
+	// client's own prediction's, false for others: the sprint is in the
+	// control-object record only).
+	bool playEmote(int player, const std::string& emote);
+	bool playRemoteEmote(uint32_t object, const std::string& emote, bool sprinting = false);
 	std::vector<Capsule> soldierCapsules(uint32_t soldier) const;
 	// A downed soldier's or a body's ragdoll (null for others; docs/engine.md, "Ragdolls").
 	const anim::RagDoll* ragDoll(uint32_t soldier) const;
@@ -2249,6 +2268,20 @@ private:
 			std::vector<uint32_t> materials;
 			size_t geometry = 0;
 			uint32_t collisionGroups = 0; // the part template's (response slot 0x50)
+			// The part's own response (0x005f6a60; not a Spring's, whose
+			// contacts are the Vehicle's wheels', nor a Titan's): the
+			// contacts others record in it (slot 0x2c) and its own ground
+			// pass and mover pass record, solved onto the root's node
+			// (0x006ba7d0 with the root's node in the part's stead).
+			bool ownResponse = false;
+			// A mover of its own (0x005f6ba0's Basic node, the dispatch
+			// 0x006dd0b0 through its root's chain): hasMobilePhysics and
+			// hasCollisionPhysics with physicsType Mesh, and a vehicle LOD
+			// (slot 0xc4(1)). A part without a mobile node keeps a static
+			// node, asleep for ever (slot 0x14c), whose response is never
+			// solved.
+			bool mover = false;
+			physics::ContactResponse response;
 			// Its frame in the object's as of `partsPosed` (poseCollisionParts).
 			mutable physics::Mat3 rotation;
 			mutable physics::Vec3 position;
@@ -2896,6 +2929,10 @@ private:
 		// Its otherCollisionLod (what LOD of B it asks for) and its mesh's
 		// source, for B's faces at another's ask (atLod).
 		int otherLod = 1;
+		// A body's part with a response of its own (Body::PartMesh::
+		// ownResponse): its index there; -1 for a root (its contacts are
+		// the root's response's).
+		int partMesh = -1;
 		const physics::CollisionMeshFile* file = nullptr;
 		const std::vector<uint32_t>* materials = nullptr;
 		size_t geometry = 0, state = 0; // the instance's geometry and sub-geometry (a wreck's 1)
@@ -2912,6 +2949,19 @@ private:
 	bool atLod(MeshActor& actor, int lod);
 	void collideBodies(float seconds);
 	void collideMover(Body& mover, size_t index, float seconds);
+	// A mover's candidates (0x006dc7b0 with `m` as param_3): the static
+	// parts near it, the other bodies' roots and parts that weren't movers
+	// before it this frame, the Titans' parts. `m` is the root (mRoot) or
+	// one of its mover parts. False when the mover was destroyed.
+	bool collideCandidates(Body& mover, size_t index, MeshActor& m, bool mRoot, float seconds);
+	// The parts as movers of their own, after their root (the dispatch's
+	// chain, 0x006dd1b0): each mover part's ground pass (0x006b9260) and
+	// broad phase (0x006dc7b0); their responses are solved onto the root
+	// after its own (solveParts).
+	void partsMove(Body& mover, size_t index, float seconds);
+	void solveParts(Body& body);
+	// Whether one of the body's parts was a mover this frame already.
+	bool partMoves(const Body& body, const MeshActor& part) const;
 	// A body's posed collisionPart children as candidates (their vehicle
 	// LOD in their frame now); empty when wrecked without a wreck shape.
 	void partActors(Body& body, std::vector<MeshActor>& out);
@@ -3635,6 +3685,7 @@ private:
 		float ladderY = 0;
 		bool onLadder = false;
 		bool hiddenBySeat = false;
+		SoldierPose posture = SoldierPose::Stand; // the last state's (the emotes' prone test)
 	};
 	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
 	RemoteSoldier* startRemoteSoldier(uint32_t object);

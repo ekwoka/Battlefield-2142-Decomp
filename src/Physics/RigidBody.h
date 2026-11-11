@@ -175,6 +175,13 @@ public:
 	// either way.
 	void solveLegs(RigidBody& body);
 
+	// What was recorded, dropped unsolved.
+	void clear()
+	{
+		m_contacts.clear();
+		m_pushOut = {};
+	}
+
 	const std::vector<Contact>& contacts() const { return m_contacts; }
 	const Vec3& pushOut() const { return m_pushOut; }
 
@@ -330,5 +337,13 @@ public:
 using GroundTouch = std::function<void(size_t index, const Vec3& point, const Vec3& velocity, const Vec3& normal)>;
 void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
 	const Ground& ground, const ContactMaterial& material, const GroundTouch& touched = {});
+// The same for a part of `root` (a mover part's slot 0x28, 0x006b9260 on
+// the part): its points at the part's world frame (`rotation`, `position`),
+// each contact's point velocity the root's, its offset from the part's
+// origin (as the original records it, 0x00442760 with the part's slot
+// 0x60); the solve applies it to the root. The root isn't lifted.
+void collidePartWithGround(const RigidBody& root, ContactResponse& response, const std::vector<Vec3>& points,
+	const Mat3& rotation, const Vec3& position, const Ground& ground, const ContactMaterial& material,
+	const GroundTouch& touched = {});
 
 } // namespace dice::hfe::physics

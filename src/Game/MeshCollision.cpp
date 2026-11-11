@@ -282,15 +282,21 @@ bool GameWorld::atLod(MeshActor& actor, int lod)
 }
 
 // The mobile mesh physics of a tick: every body is a mover in turn
-// (0x006dc7b0), against the static parts near it and the bodies after it.
+// (0x006dc7b0), against the static parts near it and the bodies after it,
+// then its parts that are movers of their own (partsMove).
 void GameWorld::collideBodies(float seconds)
 {
 	// A sleeping node is no mover (the dispatch 0x006dd0b0 skips it) but
-	// stays a candidate for the others.
+	// stays a candidate for the others; its parts' nodes sleep with it
+	// (0x006c9060: a part's node takes its root's counter, slots 0x158 /
+	// 0x154).
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
 		if (!findDrone(m_bodies[i].object) && !isTitan(m_bodies[i].object) && !m_bodies[i].fixed
 			&& m_objects.find(m_bodies[i].object) && !asleep(m_bodies[i])) {
 			collideMover(m_bodies[i], i, seconds);
+			if (m_objects.find(m_bodies[i].object)) {
+				partsMove(m_bodies[i], i, seconds);
+			}
 		}
 	}
 }
@@ -304,6 +310,18 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		legsAgainstObjects(mover, seconds);
 	}
 	MeshActor m = actorOf(mover);
+	collideCandidates(mover, index, m, true, seconds);
+}
+
+bool GameWorld::partMoves(const Body& body, const MeshActor& part) const
+{
+	return part.partMesh >= 0 && body.partMeshes[static_cast<size_t>(part.partMesh)].mover;
+}
+
+bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool mRoot, float seconds)
+{
+	// The motion's speeds are the roots' nodes' (slot 0x58; a part's node
+	// has none of its own, 0x006c99a0).
 	const float speedM = length(mover.body.velocity);
 	// The pair's tests before slot 9 (0x006dc7b0), with the candidate at the
 	// LOD the mover asks for (otherCollisionLod).
@@ -360,16 +378,24 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			return true;
 		}
 		const bool alive = meshPair(m, c, seconds, false);
-		if (c.trunkFromTypeFour) {
+		if (mRoot && c.trunkFromTypeFour) {
 			meshPair(c, m, seconds, true);
 		}
 		return alive;
 	};
 
+	// After a pair: the root's actor again (the small-object pre-trace may
+	// have moved it); a part's stays as it was posed.
+	const auto refresh = [&] {
+		if (mRoot) {
+			m = actorOf(mover);
+		}
+	};
+
 	// The static parts near it.
 	++m_staticStamp;
 	float reachM = m.radius;
-	if (mover.vehicle) {
+	if (mRoot && mover.vehicle) {
 		const auto& wheels = mover.vehicle->wheels();
 		for (size_t w = 0; w < wheels.size(); ++w) {
 			const float part = w < mover.wheelRadii.size() ? mover.wheelRadii[w] : wheels[w].radius;
@@ -399,40 +425,48 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 				}
 				if (paired(c, 0)) {
 					if (!collide(c, part.root)) {
-						return;
+						return false;
 					}
-					m = actorOf(mover); // the pre-trace may have moved it
+					refresh(); // the pre-trace may have moved it
 				}
 				// Its wheels' parts as movers of their own (their probes).
-				wheelProbes(mover, c, seconds);
+				if (mRoot) {
+					wheelProbes(mover, c, seconds);
+				}
 			}
 		}
 	}
 	if (m_predicting) {
-		return; // a LoneVehicle meets the static objects only
+		return true; // a LoneVehicle meets the static objects only
 	}
-	// The other bodies but those that were movers already (before it, awake).
+	// The other bodies but those that were movers already (before it,
+	// awake: their roots and their mover parts; 0x006dc7b0 leaves out a
+	// candidate whose response's frame, slot 0x44, is this one's).
 	std::vector<MeshActor> parts;
 	for (size_t j = 0; j < m_bodies.size(); ++j) {
 		Body& other = m_bodies[j];
 		if (j == index || findDrone(other.object) || !m_objects.find(other.object)) {
 			continue;
 		}
+		const bool moved = j < index && !asleep(other);
 		// Its parts in their pose now (partActors), each a candidate with
-		// a response of its own: met by every mover, as the rewrite's parts
-		// are no movers themselves (a part's own node, 0x005f6ba0, isn't
-		// followed: the parts move with their body).
+		// a response of its own.
 		partActors(other, parts);
 		for (MeshActor& c : parts) {
+			if (moved && partMoves(other, c)) {
+				continue;
+			}
 			if (paired(c, length(other.body.velocity))) {
 				if (!collide(c, false)) {
-					return;
+					return false;
 				}
-				m = actorOf(mover);
+				refresh();
 			}
-			wheelProbes(mover, c, seconds);
+			if (mRoot) {
+				wheelProbes(mover, c, seconds);
+			}
 		}
-		if (j < index && !asleep(other)) {
+		if (moved) {
 			continue;
 		}
 		if (!other.vehicleMesh || other.points.empty()) {
@@ -441,13 +475,15 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		MeshActor c = actorOf(other);
 		if (paired(c, length(other.body.velocity))) {
 			if (!collide(c, true)) {
-				return;
+				return false;
 			}
-			m = actorOf(mover);
+			refresh();
 		}
-		wheelProbes(mover, c, seconds);
-		if (!asleep(other)) {
-			wheelProbes(other, m, seconds);
+		if (mRoot) {
+			wheelProbes(mover, c, seconds);
+			if (!asleep(other)) {
+				wheelProbes(other, m, seconds);
+			}
 		}
 	}
 	// The Titans' parts (their LODs, Titans.cpp: the one the mover's
@@ -484,11 +520,102 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			c.node = {std::max(tb->mass, 1e6f), true, false};
 			if (paired(c, length(tb->body.velocity))) {
 				if (!collide(c, true)) {
-					return;
+					return false;
 				}
-				m = actorOf(mover);
+				refresh();
 			}
-			wheelProbes(mover, c, seconds);
+			if (mRoot) {
+				wheelProbes(mover, c, seconds);
+			}
+		}
+	}
+	return true;
+}
+
+// The parts as movers of their own. A hasMobilePhysics part with a Mesh
+// physicsType has a Basic node (0x005f6ba0) and a mobile response
+// (0x005f6a60), in its root's chain (0x006c0090, built by 0x006c0030 from
+// the children depth first). The dispatch (0x006dd1b0) runs the root's
+// response and then each response down the chain (slot 0x5c) whose
+// object's node is awake (slots 0x13c, 0x14c): its broad phase (0x006dc7b0
+// with the part as param_3), its ground pass (slot 0x28, 0x006b9260), its
+// solve (slot 0x30, 0x006ba7d0) and slot 0x34 (0x006b8230: a Spring's
+// alone). How the part reaches its root:
+//  - its node is never integrated: 0x006c9060 steps only the node that is
+//    its own root's (slot 0x17c, 0x006c6d30: the root object's +0x50); any
+//    other takes the root's sleep counter (slot 0x158 -> 0x154) and is
+//    zeroed while asleep. Its velocity (slot 0x58, 0x006c99a0) is zero for
+//    an object with a parent (+0x34), so the broad phase's motion and
+//    slot 9's are the roots' nodes' (0x006dc7b0 piVar4, 0x006bb050
+//    local_54 / local_5c);
+//  - the broad phase gathers candidates only for a root (param_3 +0x34
+//    is 0; the parts use the root's), skips the mover's own tree
+//    (piVar14 == piVar16) and every response that was a mover this frame
+//    (slot 0x44 against the frame), so each pair meets once;
+//  - the ground pass puts the part's vehicle-LOD vertices where the part
+//    is (its matrix, slot 0x78) and takes each contact's point velocity
+//    from the root's node (slot 0xac); the contact's offset is from the
+//    part's origin (0x00442760 with the part's slot 0x60); no buoyancy (the
+//    root's alone, local_4c == local_48);
+//  - the solve swaps in the root's node when its object isn't its root
+//    (0x006ba7d0: param_2 = root's +0x50): the push out moves the root and
+//    each contact's impulse turns it about its centre of mass (slot 0xd4,
+//    0x006c8ca0) at the offset as recorded, from the part's origin.
+// Shipped parts with a vehicle LOD of four vertices or more (the springs'
+// three are the Vehicle's wheels): eu_tank's barrel base, eu_ifv's tracks,
+// us_ag's engines and TAD base, as_hov_light's gunner gun and
+// missile_silo_closed's console base; every other part has none and moves
+// nothing. Not followed: a part whose origin goes under the heightmap is
+// set onto it (the ground pass's start, the part's slot 0x64), and its
+// node's water depth (slots 0x140 / 0x144).
+void GameWorld::partsMove(Body& mover, size_t index, float seconds)
+{
+	if (mover.partMeshes.empty() || isTitan(mover.object)) {
+		return;
+	}
+	std::vector<MeshActor> parts;
+	partActors(mover, parts);
+	for (MeshActor& m : parts) {
+		if (!partMoves(mover, m)) {
+			continue;
+		}
+		Body::PartMesh& part = mover.partMeshes[static_cast<size_t>(m.partMesh)];
+		// The ground pass (collisionGroups bit 0: none).
+		if (!(part.collisionGroups & 1)) {
+			Body& self = mover;
+			const std::vector<uint32_t>& materials = *m.pointMaterials;
+			const auto touched = [this, &self, &materials, &m](size_t i, const physics::Vec3& point,
+									 const physics::Vec3& velocity, const physics::Vec3& normal) {
+				const uint32_t own = i < materials.size() ? materials[i] : 0;
+				const uint32_t terrain = m_ground.material ? m_ground.material(point.x, point.z) : 0;
+				const float speed = physics::lengthSquared(velocity);
+				if (self.handleCollisionSpeed < speed) {
+					collisionEvent(self.object, 0, velocity, normal, point - m.position, own, terrain);
+				}
+				if (self.handleCollisionSpeed * self.handleCollisionSpeed <= speed) {
+					recordContactEffect(self, own, terrain, velocity, point, normal);
+				}
+			};
+			physics::collidePartWithGround(mover.body, part.response, *m.points, m.rotation, m.position, m_ground, {},
+				touched);
+		}
+		if (!collideCandidates(mover, index, m, false, seconds)) {
+			return;
+		}
+	}
+}
+
+// The parts' responses after the root's (the chain's order): a mover's
+// solve moves the root (0x006ba7d0 with the root's node). A part without a
+// mobile node is never dispatched (its static node sleeps, slot 0x14c), so
+// what others recorded in its response goes nowhere.
+void GameWorld::solveParts(Body& body)
+{
+	for (Body::PartMesh& part : body.partMeshes) {
+		if (part.mover) {
+			part.response.solve(body.body);
+		} else {
+			part.response.clear();
 		}
 	}
 }
@@ -784,7 +911,10 @@ bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOn
 
 	// The small-object pre-trace (0x6bb47f): its way back to where it is
 	// stops at the first face crossed.
-	if (a.body && a.radius < kSmallObject) {
+	// A part's would move the part (its object's slot 0x64): no shipped
+	// part with a vehicle LOD is that small (the smallest, as_hov_light's
+	// gunner gun and us_ag's TAD base, 0.64 m).
+	if (a.body && a.partMesh < 0 && a.radius < kSmallObject) {
 		physics::SphereContact hit;
 		const Vec3 end = last + travel;
 		if (b.mesh->segmentContact(last, end, b.rotation, b.position, hit)) {
@@ -984,12 +1114,18 @@ physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const 
 	if (a.body && b.body && a.body->mass < b.body->mass) {
 		a.body->support = b.body->object;
 	}
+	// Each side's response: a part's own (the part's slot 0x2c; its solve
+	// moves the root, solveParts), else the root's.
+	const auto responseOf = [](MeshActor& actor) -> physics::ContactResponse& {
+		return actor.partMesh >= 0 ? actor.body->partMeshes[static_cast<size_t>(actor.partMesh)].response
+								   : actor.body->response;
+	};
 	if (shares.velocityA != 0 && a.body && toA) {
-		a.body->response.addContact(point - a.position, relative * shares.velocityA, normal, depth * shares.depthA,
+		responseOf(a).addContact(point - a.position, relative * shares.velocityA, normal, depth * shares.depthA,
 			material);
 	}
 	if (shares.velocityB != 0 && b.body) {
-		b.body->response.addContact(point - b.position, relative * shares.velocityB, normal, depth * shares.depthB,
+		responseOf(b).addContact(point - b.position, relative * shares.velocityB, normal, depth * shares.depthB,
 			material);
 	}
 	return shares;

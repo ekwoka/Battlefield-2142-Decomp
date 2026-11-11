@@ -4,6 +4,7 @@
 // joining a server.
 #include "Console/Console.h"
 #include "IO/File/ZipArchive.h"
+#include "IO/Localization/LocaleFormat.h"
 #include "IO/Localization/Localization.h"
 #include "Input/ControlMap.h"
 #include "Main/EndOfRoundBindings.h"
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -1161,13 +1163,16 @@ TEST(MenuBindings_CommandLineDemosAndTexts)
 	// Bookmarks: LocalProfile.addDemoBookmark's entries.
 	menu::SettingsObjects objects;
 	bindings.setSettingsObjects(&objects);
-	objects.setList("LocalProfile.DemoBookmark", {"\"Server one\" \"Minsk\" \"http://x/1\" 0", "\"Two\" \"Belgrade\" \"u\" 0"});
+	objects.setList("LocalProfile.DemoBookmark", {"\"Server one\" \"Minsk\" \"http://x/1\" 0", "\"Two\" \"Belgrade\" \"u\" 1200000000"});
 	CHECK(vm.toNumber(mp("getNumDemoBookmarks")) == 2);
 	CHECK(avm1::toBoolean(mp("deleteDemoBookmark", {avm1::Value(0)})));
 	CHECK(!avm1::toBoolean(mp("deleteDemoBookmark", {avm1::Value(5)})));
 	CHECK(objects.list("LocalProfile.DemoBookmark").size() == 1);
 	const auto bookmarkRows = natives.listRows("demobm");
 	CHECK(bookmarkRows.size() == 1 && bookmarkRows[0][1] == "Two" && bookmarkRows[0][2] == "Belgrade");
+	// Its date alone (0x10064510 -> 0x10007b70), in the game's language.
+	CHECK(bookmarkRows.size() == 1 && bookmarkRows[0][0] == io::formatDate(std::time_t(1200000000), 0x409)
+		&& bookmarkRows[0][0].find(':') == std::string::npos && !bookmarkRows[0][0].empty());
 	CHECK(!avm1::toBoolean(mp("getHasNewBookmark")));
 	mp("setHasNewBookmark", {avm1::Value(true)});
 	CHECK(avm1::toBoolean(mp("getHasNewBookmark")));
@@ -1393,4 +1398,50 @@ TEST(MenuBindings_ServerRulesTimesKitsAndProbes)
 	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.VideoSettings", "detectVideoScheme")) == 2);
 	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.VideoSettings", "isRunningWithUnsupportedDrivers")));
 	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.AudioSettings", "isInCriticalState")));
+}
+
+// SwiffPlayer's language -> LCID table (0x10007730, RendDX9 0x1017af30) and
+// the locale defaults GetNumberFormatA / GetDateFormatA / GetTimeFormatA
+// give the menus (0x10007c60, 0x10007b70, 0x10007bf0, 0x10007aa0).
+TEST(LocaleFormat_LanguagesAndFormats)
+{
+	CHECK(io::languageLcid("English") == 0x409);
+	CHECK(io::languageLcid("German") == 0x407);
+	CHECK(io::languageLcid("Thai") == 0x41e);
+	CHECK(io::languageLcid("Chinese") == 0xc04);
+	// The game's own Chinese names aren't in the table: LCID 0, the user's
+	// default locale (English's here).
+	CHECK(io::languageLcid("Chinese_Simplified") == 0);
+	CHECK(io::languageLcid("english") == 0);
+	// Numbers: the separators, grouping by three, two decimals rounded.
+	CHECK(io::formatNumber("1234.50", 0x409) == "1,234.50");
+	CHECK(io::formatNumber("1234.50", 0x407) == "1.234,50");
+	CHECK(io::formatNumber("1234567.5", 0x40c) == "1\xc2\xa0" "234\xc2\xa0" "567,50");
+	CHECK(io::formatNumber("0.5", 0x409) == "0.50");
+	CHECK(io::formatNumber(".125", 0x409) == "0.13");
+	CHECK(io::formatNumber("9.999", 0x409) == "10.00");
+	CHECK(io::formatNumber("-3.14159", 0x407) == "-3,14");
+	CHECK(io::formatNumber("12", 0) == "12.00");
+	CHECK(io::formatNumber("abc", 0x409) == "abc"); // not a number: unchanged
+	// Dates and times on 5 March 2007, 14:07:09.
+	std::tm t {};
+	t.tm_year = 107;
+	t.tm_mon = 2;
+	t.tm_mday = 5;
+	t.tm_hour = 14;
+	t.tm_min = 7;
+	t.tm_sec = 9;
+	CHECK(io::formatDate(t, 0x409) == "3/5/2007");
+	CHECK(io::formatDate(t, 0x407) == "05.03.2007");
+	CHECK(io::formatDate(t, 0x41d) == "2007-03-05");
+	CHECK(io::formatDate(t, 0x413) == "5-3-2007");
+	CHECK(io::formatDate(t, 0x41e) == "5/3/2550"); // the Buddhist era
+	CHECK(io::formatTime(t, 0x409, true) == "2:07:09 PM");
+	CHECK(io::formatTime(t, 0x409, false) == "2:07 PM");
+	CHECK(io::formatTime(t, 0x407, false) == "14:07");
+	CHECK(io::formatTime(t, 0x410, true) == "14.07.09");
+	CHECK(io::formatTime(t, 0x412, false) == "\xec\x98\xa4\xed\x9b\x84 2:07");
+	CHECK(io::formatDate(std::time_t(0), 0x409).empty() && io::formatDateTime(std::time_t(0), 0x409).empty());
+	const std::time_t when = 1200000000;
+	CHECK(io::formatDateTime(when, 0x407) == io::formatDate(when, 0x407) + " " + io::formatTime(when, 0x407, true));
 }

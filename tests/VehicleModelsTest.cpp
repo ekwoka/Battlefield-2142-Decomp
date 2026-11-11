@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -106,6 +107,8 @@ struct Garage {
 
 	uint32_t groundMaterial = 0; // the terrain's material under every point
 	float groundHeight = 0;      // start's ground, which a test may move after
+	// A shape over it (x, z -> height above groundHeight), when a test sets one.
+	std::function<float(float, float)> groundShape;
 
 	// The vehicle at `at` facing +z, the world started and settled, the
 	// player spawned beside it.
@@ -122,10 +125,10 @@ struct Garage {
 		const uint32_t material = groundMaterial;
 		groundHeight = ground;
 		world->enablePhysics(files, collisionTemplates,
-			{[this](float, float) { return groundHeight; },
-				[this](float, float, physics::Vec3& normal) {
+			{[this](float x, float z) { return groundHeight + (groundShape ? groundShape(x, z) : 0.0f); },
+				[this](float x, float z, physics::Vec3& normal) {
 					normal = {0, 1, 0};
-					return groundHeight;
+					return groundHeight + (groundShape ? groundShape(x, z) : 0.0f);
 				},
 				[material](float, float) { return material; }},
 			&materials);
@@ -2812,4 +2815,55 @@ TEST(Vehicles_WalkerSleepsOnTheIndustrialBridge)
 	CHECK(b.y > 25 && b.y < 28); // on the deck (23.15), the legs 2.8 + 0.57 under the origin
 	CHECK(highest - lowest < 0.01f);
 	CHECK(g.world->bodyAsleep(mech));
+}
+
+// The parts as movers of their own (0x005f6ba0's Basic node and the
+// mobile response, run down the root's chain by the dispatch 0x006dd1b0):
+// a part's ground pass (0x006b9260) puts its vehicle LOD where the part is,
+// and its solve (0x006ba7d0) moves the root. eu_ifv's tracks (geometries 33
+// and 34, six vertices each, 1.24 m under the hull's origin) hang between
+// its road wheels (z 0.77 and -1.35): a 1 m bump there meets the tracks
+// and lifts the IFV by about as far as it reaches into them. Before, the
+// parts moved with the hull and the bump passed through them.
+TEST(Vehicles_PartsMeetTheGroundAsMovers)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage flat(gameDir());
+	if (!flat.loaded || !flat.templates.find("eu_ifv")) {
+		return;
+	}
+	const uint32_t a = flat.start("eu_ifv", {0, 3, 0}, 4);
+	Garage bump(gameDir());
+	bump.groundShape = [](float, float z) { return z > -0.6f && z < 0.0f ? 1.0f : 0.0f; };
+	const uint32_t b = bump.start("eu_ifv", {0, 3, 0}, 4);
+	const float rest = flat.position(a).y, lifted = bump.position(b).y;
+	std::fprintf(stderr, "  eu_ifv at rest %.3f, over the bump %.3f\n", rest, lifted);
+	CHECK(lifted > rest + 0.2f);
+	CHECK(lifted < rest + 0.5f);
+}
+
+// A part as a mover meets the other bodies (0x006dc7b0 with the part as
+// param_3, the roots' velocities, its contacts solved onto its root):
+// us_ag's TAD base (geometry 13, 30 vertices under the nose, 0.6 m over
+// the ground on its gear) settles onto a tank parked across its nose and
+// pushes it away (the tank ends past 5.9 m; without the part as a mover
+// the gunship's hull alone met it, 5.73 m).
+TEST(Vehicles_PartMoverPushesAnotherBody)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("us_ag")) {
+		return;
+	}
+	world::Object* parked = g.objects.create(g.templates.find("eu_tank"), {0, 1.2f, 5}, {90, 0, 0});
+	parked->setTeam(2);
+	const uint32_t tank = parked->id();
+	g.start("us_ag", {0, 3.5f, 0}, 5);
+	const physics::Vec3 at = g.position(tank);
+	std::fprintf(stderr, "  the tank under us_ag's nose ends at z %.2f\n", at.z);
+	CHECK(at.z > 5.9f);
 }

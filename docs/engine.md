@@ -343,27 +343,98 @@ each part of another tree and a soldier each part's soldier LOD, where
 the part is now. Rewritten: each collisionPart's vehicle LOD (vertices,
 materials, box) and soldier LOD per sub-geometry
 (`Body::PartMesh::physics`, `GameWorld::partPhysics`); `partActors` poses
-them (`poseCollisionParts`) as candidates for every mover (met by each,
-whatever the pair order of the roots, as the rewrite's parts are no
-movers) and `stepSoldier` adds each part's soldier LOD to the soldier's
+them (`poseCollisionParts`) as candidates for every mover and
+`stepSoldier` adds each part's soldier LOD to the soldier's
 movers (a body with parts but no soldier LOD of its own, a walker's, is
 asked too, within its parts' reach). A wrecked part without a wreck
 sub-geometry is out (`0x006e5df0` clears flag `0x100`). A Titan's
-posed cannons go in with the Titan's node (a major actor). Not
-followed: a part as a mover of its own (its node, `0x005f6ba0`, makes
-one for hasMobilePhysics parts): the rewrite's parts move with their
-body. What is known (2026-11-11): nearly every shipped part sets
-hasMobilePhysics 1 with physicsType Mesh (the turrets, guns, barrels,
-engines and dampers of every vehicle: a scan of the Objects archives'
-scripts), so each gets a Basic node (`0x006c70c0`), registered with the
-node manager (`DAT_00a82514` slot `0x14`) and woken on the server; the
-dispatch (`0x006dd0b0`) runs any object whose response is on (`+0x14`,
-slot `0x18` = `0x006ba2d0`; slot `0x14` sets it) and whose node is awake
-through its broad phase (`0x006dc7b0`), then the response's ground pass,
-solve and movement (slots `0x28`, `0x30`, `0x34`) on that node. What is
-not traced is how an attached part's node and contacts reach its root
-(its responses' on flag, the node's slot `0x17c`, the chain's solve), so
-the rewrite doesn't guess it. Because the parts are now asked every tick by the soldiers near a
+posed cannons go in with the Titan's node (a major actor).
+
+*Parts as movers of their own* (since 2026-11-12). A part whose template
+has hasMobilePhysics, hasCollisionPhysics and physicsType Mesh has a
+Basic node (`0x005f6ba0` → `0x006c70c0`, registered with the node
+manager) and a mobile response (`0x005f6a60`, on from its constructor:
+`0x006bfcc0` sets `+0x14` to 1). How it reaches its root, traced:
+
+- Only roots go into the dispatch's lists (`0x006dbbe0`: `+0x34` is 0;
+  a part goes to list `+0x28`, which nothing walks, and only when its
+  root has no response). The dispatch (`0x006dd1b0`, list `+8` of the
+  mobile meshes and legs) takes each root and walks its response's chain
+  (slot `0x5c`, `0x006c0090`: the root's response rebuilds it from the
+  children depth first, `0x006c0030`, keeping those whose slot `0x6c`,
+  `0x006bfc40`, holds: on, flag `0x100`, not flag 1, a mesh instance or a
+  legs / point type). For each response whose node is awake (slots
+  `0x13c`, `0x14c`) it runs the broad phase with that object as mover
+  (`0x006dc7b0`), the ground pass (slot `0x28`), the solve (slot `0x30`)
+  and slot `0x34` (`0x006b8230`, a Spring's tyre alone).
+- The part's node is never integrated: its step (`0x006c9060`) moves
+  only a node that is its root's own (slot `0x17c`, `0x006c6d30`: the
+  root object's `+0x50`); any other takes the root's sleep counter (slot
+  `0x158` → `0x154`), so the tree sleeps and wakes as one. Its velocity
+  (slot `0x58`, `0x006c99a0`) is zero for an object with a parent; the
+  broad phase's motion and slot 9's are the roots' nodes' (`0x006dc7b0`
+  `piVar4` / `piVar16[0x14]`, `0x006bb050` `local_54` / `local_5c`), and
+  slot 9's start of A's way is the root's position plus its centre of mass
+  turned by A's matrix, less the motion.
+- The broad phase gathers candidates only for a root (`param_3[0xd]`
+  0; a part uses its root's gathering), skips the mover's own tree
+  (`piVar14 == piVar16`: the part never meets its own vehicle) and every
+  response that was a mover this frame (slot `0x44` against
+  `DAT_00a07694`; a candidate's part that moved before is left out too).
+- The ground pass (`0x006b9260`) puts the part's vehicle-LOD vertices
+  at the part's matrix (slot `0x78`) and takes each contact's point
+  velocity from the root's node (slot `0xac`); the contact's offset is
+  from the part's origin (`0x00442760` with the part's slot `0x60`). No
+  buoyancy (the root's alone: `local_4c == local_48`).
+- The solve (`0x006ba7d0`) swaps in the root's node when its object is
+  not its root (`param_2 = root +0x50`): the part's push out moves the
+  root, and each contact's impulse turns the root about its centre of
+  mass (slot `0xd4`, `0x006c8ca0`) at the offset as recorded, from the
+  part's origin, not the root's. What another mover records in a part
+  (slot `0x2c` on the candidate's own response) is solved the same way
+  when its tree is dispatched; a part without a mobile node keeps a
+  static node (`0x006c5500`, slot `0x14c` always asleep), so its response
+  is never solved.
+
+Rewritten: `Body::PartMesh::ownResponse` / `mover` / `response`,
+`MeshActor::partMesh`; `GameWorld::partsMove` after each mover
+(`collideBodies`, and the client's `stepLoneVehicle`): each mover part's
+ground pass (`physics::collidePartWithGround`) and broad phase
+(`collideCandidates` with the part as mover: no wheel probes, no small-
+object pre-trace, no trunk pass of the candidate into it); `solveParts`
+after the root's and the legs' solves. Springs keep their contacts in the
+Vehicle's wheels (`wheelProbes`, the wheel model), and a Titan's parts
+none (its sync moves it). Which parts it moves: a scan of every
+PlayerControlObject's collision parts found a vehicle LOD on only eight
+besides the 129 Springs' three-vertex ones: eu_tank's barrel base (8
+vertices), eu_ifv's tracks (6 each, 1.24 m under the hull's origin, in the
+gap between the road wheels), us_ag's engines (8 each) and TAD base (30,
+under the nose), as_hov_light's gunner gun (8) and missile_silo_closed's
+console base; the turrets, the walkers' bone parts and the rest have none,
+so for them nothing changes. Not followed: the ground pass lifting a part
+whose origin is under the heightmap onto it (the part's slot `0x64`), and
+the part node's water depth (slots `0x140` / `0x144`). The rewrite's
+order is its own as before (every body's ground pass, then the movers,
+then the solves), where the original solves each tree before the next
+tree's broad phase. Tests: `Vehicles_PartsMeetTheGroundAsMovers` (eu_ifv
+over a 1 m bump between its road wheels stands at 2.23 m on its tracks,
+against 1.94 on flat ground; before, the bump passed through the tracks),
+`Vehicles_PartMoverPushesAnotherBody` (us_ag's TAD base settling onto an
+eu_tank parked across its nose pushes it to z 6.06; 5.73 before). In
+play: `--drive eu_ifv` on Suez_Canal lands the IFV with its left track
+inside container_wreck_c (the 4 × 6 m footprint test is narrower than the
+IFV's 5.7 m tracks), whose face the track's vertex segments (from the
+hull's centre of mass) cross, so it is pushed 2.7 m clear before it
+drives; the parked us_ag on its helipad rests on its TAD base too
+(0.16 m). `--drive` of eu_tank, as_hov_light, us_heavy_mech and eu_fav on
+Camp_Gibraltar print the same places to the digit with and without the
+part movers, and so do the bot rounds (minsk_coop 32 and Cerbere_Landing
+16, 15 bots, 300 s, `BF2142_BOT_STATS`); minsk_coop's 300 s took 14.6 s
+user against 15.1 without them (the best of three each; the runs' spread
+is larger), and the frame bench (`BF2142_FRAME_BENCH=200`, Suez_Canal in
+eu_tank) 2.07 ms either way at best.
+
+Because the parts are now asked every tick by the soldiers near a
 body, the bone parts (a walker's, the deployables') are posed with each
 update of their system (`posedAfterUpdate`, `stepObjectAnimation`), as
 the exe does, not when first asked (asked before and after an update, the
@@ -3350,7 +3421,32 @@ device's start (`0x1000aee0`) when CheckDeviceFormat takes the FourCC
 draws a probe with D3DRS_MULTISAMPLEANTIALIAS on and no multisample
 type and finds it antialiased, a driver forcing it; or a multisample
 type is chosen, `+0xc0`). The rewrite draws without multisampling, so
-the original's path without both: no doubling. The overgrowth shadow map
+it takes the original's path without both: no doubling.
+
+With both, alpha to coverage changes more than the doubling: the tree
+materials keep their plain textures, whose alpha runs 0..0.5, instead of
+`_alphatest` (`0x10151830`); the effects are compiled with HASALPHA2MASK 1
+(`0x100214b0`'s macro list, with A2MEnable and the FourCC values), so
+RaShaderLeaf's techniques set `Alpha2Mask` (the driver's state: NVIDIA's
+D3DRS_ADAPTIVETESS_Y = `ATOC`, ATI's D3DRS_POINTSIZE = `A2M1` / `A2M0`) and
+its overgrowth leaves double their alpha; the scene draw (`0x1002cef0`)
+turns that state on before the overgrowth and off after the undergrowth;
+the undergrowth's alpha reference goes to 0 with its alpha scaled by 1 /
+its alpha cut (`+0xf4`, `0x1010e270`), and its init (`0x101100d0`) skips a
+texture load it makes otherwise. SDL GPU can do this on every backend:
+SDL 3.4's `SDL_GPUMultisampleState` has `sample_count` and
+`enable_alpha_to_coverage` (Vulkan, Direct3D 12 and Metal alike), so
+portability is not what stops it. What stops it is that the frame has no
+multisampled pass to put it in: the world pass, the shimmer's copy, the
+camouflage mask (tested against the world's depth), the first-person pass
+and the HUD's stencil all share one single-sampled colour and depth
+target, and every pipeline drawn into it would need a twin at the chosen
+sample count, with the colour resolved at each break (SDL GPU resolves
+colour but not depth, which the camouflage mask and the HUD read). That is
+a change to the whole frame, larger than this item; until the antialiasing
+setting (`VideoSettings.setAntialiasing`, stored, read by nothing) drives a
+multisampled world pass, the overgrowth stays on the original's path
+without antialiasing. The overgrowth shadow map
 (`OvergrowthShadowmap.raw`, +0x84, read by the preLoad `0x1008c7e0`) is
 the editor's: its only reader, `0x1008acd0`, copies it as grey into the
 terrain's textures when the terrain renderer's style is 6 (vtable
@@ -4191,6 +4287,33 @@ head: Head, else Body) and the round's flight against the soldier's facing
 (dot >= 0: Back, else Front), the 3P animation system's trigger
 `hitBackLeft` ... `hitFrontBody` (RandomTriggers of
 `AnimationSystem3p.inc`), not in a vehicle.
+
+**Emotes.** There is no emote key: a soldier gestures when he says a radio
+message. `Sound/VoiceMessages.con` gives the player's messages an emote
+trigger each (`gamelogic.messages.addEmoteTrigger`, `0x004d83e0`, kept by
+message; read by `0x004d7fe0`): "affirmative" for roger_that, "negative",
+"thanks", "sorry", "pointy_finger" for the spotted calls, "point",
+"comms", "wave". The client that hears a message (`0x0042e0c0`) has the
+sender's soldier play it when the sender's controlled object is a soldier
+(class `0x9493`: on foot, not on a ladder or in a seat), before the voice,
+whoever hears it and however far. The soldier's slot `0x88`
+(`0x005edbf0`, interface `+0x18c`, vtable `0x00965ed0` slot 34) plays it in
+its 3P system (`+0x2f0 == 1`) through the system's slot `0x1c`
+(`0x008b97f0`, as the hit reactions) unless the name is empty, the soldier
+sprints (slot `0x100`: `0x00585e80`, `+0x37e`), lies prone (`+0x268 == 2`;
+a crouching or swimming soldier gestures) or holds a GenericFireArm (class
+`0x94d3`; the item in hand `0x005896a0`) whose `allowEmoteAnimation`
+(template `+0x31e`, 0 by default, `0x004e1c58`) is 0. The shipped scripts
+set it in 158 rows, on handheld weapons and vehicle guns; of the handheld
+GenericFireArms about half leave it off (the shotguns, the grenades, the
+EMP mine, the hubs, the defibrillator and the repair tool among them), so a
+soldier holding one says his message without the gesture. `AnimationSystem3p.inc`'s triggers of those names play the
+`3p_emote_*.baf` bundles (one-shots, fading in over 0.3 s); "affirmative"
+and "negative" pick one of two at random. Rewritten: `GameWorld::playEmote`
+(the round's soldiers) and `playRemoteEmote` (a joined game's ghosts: the
+sprint is only in the control-object record, so only the client's own
+soldier's prediction has it), from `GameAudio::onEmote`
+(`RagDoll_EmotesFollowAllowEmoteAnimation`).
 
 **Template behaviours.** `hasOnTimeEffect` (GenericProjectile `+0x328`,
 1 by default, `0x005b3500`): a round whose time runs out (events
@@ -7847,15 +7970,41 @@ CJK; gameswf's glyph layout `0x100c06a0`, which skips a missing glyph,
 isn't reached). The engine fonts the menu's edit texts use cover German,
 Polish, Russian and Chinese_Simplified menu strings, except the 24 px
 titles' StandardTextBold_24, which every language folder ships with its 98
-Latin glyphs (`Dfm_MenuEngineFontsCoverLanguages`). RendDX9's `0x1017af30`
-is not a font path: it maps the language to a Windows LCID (English 0x409,
-French 0x40c, German 0x407, Italian 0x410, Russian 0x419, Swedish 0x41d,
-Danish 0x406, Finnish 0x40b, Spanish 0x40a, Dutch 0x413, Polish 0x415,
-Czech 0x405, Korean 0x412, Chinese 0xc04, Japanese 0x411, Thai 0x41e; by
-SwiffHost's slot 0x3a8) for GetDateFormatA / GetTimeFormatA /
-GetNumberFormatA (`0x1017b2a0`, `0x1017b370`, `0x1017b3f0`, `0x1017b460`),
-whose only caller is SwiffHost's graph object (`0x10172af0`: its axis
-dates and values), which the rewrite doesn't have.
+Latin glyphs (`Dfm_MenuEngineFontsCoverLanguages`).
+
+**Dates and numbers in the menus.** SwiffPlayer (`0x10007730`) and RendDX9
+(`0x1017af30`) carry the same table, built once: the language to a Windows
+LCID (English 0x409, French 0x40c, German 0x407, Italian 0x410, Russian
+0x419, Swedish 0x41d, Danish 0x406, Finnish 0x40b, Spanish 0x40a, Dutch
+0x413, Polish 0x415, Czech 0x405, Korean 0x412, Chinese 0xc04, Japanese
+0x411, Thai 0x41e), looked up with SwiffHost slot 0x3a8 (`0x0046c510`:
+GSLanguage, "English" without one). A language not in it gets 0 from the
+map's `operator[]`, Windows' user default locale: the game's own
+Chinese_Simplified and Chinese_Traditional are such (the table says
+"Chinese"). The LCID goes to GetDateFormatA / GetTimeFormatA /
+GetNumberFormatA without a format of their own: SwiffPlayer's
+`0x10007b70` (the short date, "" for 0), `0x10007bf0` (the time; its
+callers pass 0, TIME_NOSECONDS), `0x10007aa0` (date, space, time with
+seconds; "" for 0) and `0x10007c60` (a "%.2f" text with the locale's
+separators, grouping and two decimals; RendDX9's copies are `0x1017b370`,
+`0x1017b2a0`, `0x1017b3f0`, `0x1017b460`). Offline the menus use them in the
+end-of-round score per minute (`0x1001dcd0`) and player list
+(`0x10066c40`), the debriefing's per-minute rows (`0x10065ad0`), the award
+progress rows' fractional values (`0x1005f1e0`), the demos' dates
+(`0x10064a50`, date and time) and the demo bookmarks' (`0x10064510`, the
+date alone). The rest are online: the BFHQ and stats rows, the EA news,
+the downloader's date, the server history's last-played time
+(`0x10077c90`: the time within a day, else the date; the rewrite's
+history keeps no time) and RendDX9's progress chart (SwiffRender
+`+0x470`, the graph object `0x101735d0` whose axes `0x10172af0` /
+`0x10172c20` write dates and values; `Logic.setActiveDiagram` has no
+series offline). Rewritten: `io::languageLcid`, `io::formatNumber`,
+`formatDate`, `formatTime`, `formatDateTime` (`IO/Localization/LocaleFormat.h`)
+with each LCID's Windows XP defaults (short date, time format, day halves,
+separators; no-break space U+00A0 for the space-separated ones, Thai's
+Buddhist year). LCID 0 takes English's: the rewrite has no Windows locale
+to fall back on (`LocaleFormat_LanguagesAndFormats`,
+`EndOfRoundBindings_Natives`, `MenuBindings_Natives`).
 
 The scoreboard (`ScoreboardShow`, menu state 0xd in `0x0079ab90`) is built
 from list nodes. Each node names a data source with `setListNodeData`:

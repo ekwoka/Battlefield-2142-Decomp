@@ -4,6 +4,7 @@
 #include "IO/File/ZipArchive.h"
 #include "IO/Localization/Localization.h"
 #include "Main/EndOfRoundBindings.h"
+#include "Hud/HudFont.h"
 #include "TestMain.h"
 #include "UI/Player/Player.h"
 
@@ -119,6 +120,11 @@ TEST(EndOfRoundBindings_Natives)
 	CHECK(text(eor, "getHeaderImageOutcome") == "images/eor/header_outcome_win_english.png");
 	CHECK(number(eor, "getPlayerScore") == 57);
 	CHECK(text(eor, "getPlayerScorePerMinute") == "3.50");
+	// Through GetNumberFormatA in the game's language (0x10007c60 with
+	// 0x10007730's LCID): German's decimal comma.
+	hud::setLanguage("German");
+	CHECK(text(eor, "getPlayerScorePerMinute") == "3,50");
+	hud::setLanguage("English");
 	CHECK(number(eor, "getNumVictories", {avm1::Value(1)}) == 1);
 	CHECK(number(eor, "getNumAwards") == 2);
 	CHECK(text(eor, "getCurrentRankString") == "Private 1st class");

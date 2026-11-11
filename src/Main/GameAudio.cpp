@@ -647,6 +647,14 @@ void GameAudio::radio()
 			in.sender.team = sender.team;
 			in.sender.position = toSound(sender.position) + sound::Vec3 {0, 1.6f, 0};
 		}
+		// The sender's soldier plays the message's emote (0x0042e0c0, before
+		// the voice: the sender's controlled object a soldier, class 0x9493).
+		if (onEmote && in.hasSender && in.onFoot) {
+			const std::string emote = m_voices->emote(m_voices->message(message.voice));
+			if (!emote.empty()) {
+				onEmote(message.sender, emote);
+			}
+		}
 		const sound::VoiceMessages::Result result = m_voices->heard(in);
 		if (result.played != sound::VoiceMessages::Played::None) {
 			++voiceOvers;

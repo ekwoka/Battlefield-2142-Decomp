@@ -252,7 +252,7 @@ coverage-9's list (§3b) was nearly all done in e8fe41c itself, the "before" com
 |---|---|---|---|
 | P1, bot squads checked against the retail game | **open** | | Still no side-by-side. The interval changed the bots' paths a good deal (133984a, ebf58f5, 4d7a8b7), and `BF2142_BOT_STATS` now measures stuck time (engine.md): drivers stuck in MoveTo over 300 s fell from 960–1,381 s to 0–750 s on the five maps measured. |
 | P2, collisionParts on statics, decals on parts | **done** | e8fe41c | Then 133984a / ebf58f5: the walker's feet on objects (`0x00650e90`), its legs as their own collider (`0x006dc7b0`). |
-| P3 + P4, the canopy's animation; the cells' armour effects | **done** | e8fe41c | Left: a joined client's cells' effects; a part as a mover of its own (`0x005f6ba0`). |
+| P3 + P4, the canopy's animation; the cells' armour effects | **done** | e8fe41c | Left: a joined client's cells' effects; a part as a mover of its own (`0x005f6ba0`; both closed since, §3g, §3h). |
 | P5, the bots' `+0x264` and slot-39 flags | **done** | e8fe41c | |
 | P6, debriefing rows, the game modes' order | **done** | e8fe41c | |
 | 3c-3, citations of present code | **done** (as far as citable) | 7219f6b | HUD rows, FileManager, display modes cited. `0x007c9090`, `0x00870c90`, the effect loader and the overgrowth's containers found not citable. Six differences found and recorded, not changed (uncited.md). SwiffPlayer's propagated (c) hand-checked: three online groups relabelled. |
@@ -275,12 +275,12 @@ coverage-9's list (§3b) was nearly all done in e8fe41c itself, the "before" com
 |---|---|---|---|---|
 | P1 | **Bots against the retail game** (unchanged) | Squad effectiveness (13.3 kills a round with the formation as decoded, 19.4 when every member heads for the order) and drivers' paths are unverified. Wider vehicles still rock where the infantry mesh leaves less room than they need (minsk_coop's eu_tank, Verdun's as_apc), and a driver stops where the infantry mesh has a hole that the vehicle mesh crosses (Camp_Gibraltar's PAC heavy mech). Verdun's stuck time rose (3,693 → 3,963 s), from seated passengers. | engine.md "Squads", the drivers' room rays | M (verification) |
 | P2 | **Multiplayer: the joined client** | A hosted round's restart at the countdown resets the players only; vehicles, control points and dropped kits stay as they are (whether the original's reset, `0x004ce910`, restores them wasn't checked here). ~~A joined client's cells don't show their armour effects~~ (closed, §3g). The dirty masks are stand-ins (GhostPriority.h, HostedGame.cpp). A joined client's Titan velocity is estimated from its updates, so the first second and a half of its motion corrects a soldier standing in it by up to 5 cm (§3g). | engine.md (restartPlayers), uncited.md "canopy, cells and parts", hedges | M; another agent's area |
-| P3 | **Parts as movers of their own** | A hasMobilePhysics part (`0x005f6ba0`'s node) moves with its body here, and meets movers only as a candidate. Checked (§3g): nearly every shipped part has such a node and the dispatch `0x006dd0b0` would run it as a mover; how an attached part's node and contacts reach its root isn't traced, which blocks it. | uncited.md "Left", engine.md "The parts in the mesh physics" | M (tracing first) |
+| P3 | ~~**Parts as movers of their own**~~ **closed** (§3h) | Traced and followed: the dispatch's chain runs each awake mobile part as a mover whose contacts move its root (`0x006dd1b0`, `0x006c9060`, `0x006ba7d0`); eight shipped parts have a vehicle LOD to move with. | engine.md "The parts in the mesh physics" | — |
 | P4 | ~~**Commander panel leftovers**~~ **closed** (§3f) | The voice icons, `SELECTED_ALL_SQUADS` and the request's events were already done (c9486a4, engine.md); `us_beacon` (`0x004d2650`) is a load-time pass over a template the shipped content doesn't have. | uncited.md (d) #3 | — |
 | P5 | ~~**Particle leftovers**~~ **closed** (§3f) | All four were already done (d9a49fe; engine.md "Mesh particles' directionalScale" and the view flags); the open list was stale. | uncited.md (d) #1 | — |
 | P6 | ~~**Small differences recorded while citing**~~ **closed** (§3f, §3g) | Display modes, the FileManager's three cases, the three HUD rows' argument types and the shared border executor follow the original. | uncited.md "Citing present code" | — |
-| P7 | **Rendering details** | ~~Undergrowth's `ZFunc = Less`~~ (closed, §3f); the overgrowth's alpha-to-coverage path (the rewrite draws without multisampling); the language → LCID table for SwiffHost's dates and numbers (RendDX9 `0x1017af30`). | engine.md "Overgrowth"; uncited.md (d) #10 | S |
-| P8 | **`allowEmoteAnimation`** | No emotes in the rewrite. | uncited.md (d) #6 | S |
+| P7 | **Rendering details** | ~~Undergrowth's `ZFunc = Less`~~ (closed, §3f); ~~the language → LCID table~~ (closed, §3h); the overgrowth's alpha-to-coverage path: decided against for now (§3h): it needs a multisampled world pass first. | engine.md "Overgrowth"; uncited.md (d) #10 | M (a multisampled frame) |
+| P8 | ~~**`allowEmoteAnimation`**~~ **closed** (§3h) | Soldiers gesture with their radio messages. | uncited.md (d) #6 | — |
 
 ### 3c. Bookkeeping and plumbing (no visible behaviour)
 
@@ -324,7 +324,7 @@ Of the 163, three more are not hedges:
 | P7, undergrowth depth | The undergrowth pipeline tests less (Undergrowth.fx's 22 passes, `ZFunc = Less`); the others keep less-or-equal. | Undergrowth.fx | none (a GPU pipeline state); `--play --screenshot` on Camp_Gibraltar still shows the grass |
 | P4, P5 | Found already done; the open list was stale. `us_beacon` (`0x004d2650`): a load-time pass that also looks up `ordermarker_*` and `us_beacon` by name and calls each template's slot 0x68; no shipped file names `us_beacon`. | | |
 
-Left of these lists: the overgrowth's alpha-to-coverage, SwiffHost's LCID table, emotes (the border executor closed in §3g).
+Left of these lists: the overgrowth's alpha-to-coverage, SwiffHost's LCID table, emotes (the border executor closed in §3g; the LCID table and the emotes in §3h).
 
 **Measured** (the same scripts, `run_all.sh` on the working tree; the source measurements also on a clean a00ce5b worktree). Headline rule, no audit docs:
 
@@ -348,7 +348,18 @@ Left of these lists: the overgrowth's alpha-to-coverage, SwiffHost's LCID table,
 | P2, a joined client's cells | The host writes each heavy IFV cell's eighths as the capture makes them (floor, at least 1 while any are left); the client sets its cells from them as the apply does, and their armour effects run there. | `0x005ffec0` (capture and apply), armour slots `0x38` / `0x8c` / `0x90` | `Vehicles_JoinedShieldCellsShowArmourEffects`, `NetHost_JoinedRepairCells` |
 | P6, the border executor | One border for bars and compasses; setBarNodeBorder and setCompassNodeBorder both set it on either. The citation `0x007b0540` (slot 0x104) for setBarNodeBorder was setBarNodeSnap's. | `0x0076aebf`, `0x007b0780`, `0x007e9270` (vtables `0x009bbdd0`, `0x009bb950`) | `Hud_BarAndCompassShareTheBorder` |
 
-Measured joined (Suez_Canal gpm_ti, standing in the EU Titan while it moves 86 m at 1.08 m/s): the soldier no longer falls behind (0.88 m over the run); the client's corrections are unchanged by the carry, 28 of 2112 records over 1 cm, all while the client's Titan velocity estimate catches up after the start (engine.md "The carry"). Left: P3 (tracing), P8 emotes.
+Measured joined (Suez_Canal gpm_ti, standing in the EU Titan while it moves 86 m at 1.08 m/s): the soldier no longer falls behind (0.88 m over the run); the client's corrections are unchanged by the carry, 28 of 2112 records over 1 cm, all while the client's Titan velocity estimate catches up after the start (engine.md "The carry"). Left: P3 (tracing), P8 emotes (both closed since, §3h).
+
+### 3h. Closed later (2026-11-12, working tree on d856e6a)
+
+| Item | What changed | Original | Test |
+|---|---|---|---|
+| P8, emotes | A radio message's emote trigger (`messages.addEmoteTrigger`) plays on the sender's soldier where the message is heard, in its 3P system, unless he sprints, lies prone or holds a GenericFireArm without `allowEmoteAnimation`. The round's soldiers and a joined game's ghosts (`GameWorld::playEmote`, `playRemoteEmote`, from `GameAudio::onEmote`). | `0x0042e0c0`, `0x004d7fe0`, `0x005edbf0` (soldier vtable `0x00965ed0` slot 34), `0x00585e80`, `0x005896a0`, `0x008b97f0`; template `+0x31e` | `RagDoll_EmotesFollowAllowEmoteAnimation` |
+| P7, the LCID table | SwiffPlayer's table (RendDX9's copy is the online progress chart's) and its date, time and number formatters, with each LCID's Windows XP defaults, in the offline menus: the end-of-round score per minute, player list and debriefing, the award progress values, the demos' dates; the demo bookmarks now show the date alone, as the original. | `0x10007730` (RendDX9 `0x1017af30`), `0x10007aa0`, `0x10007b70`, `0x10007bf0`, `0x10007c60`; callers `0x1001dcd0`, `0x10066c40`, `0x10065ad0`, `0x1005f1e0`, `0x10064a50`, `0x10064510`; SwiffHost slot 0x3a8 `0x0046c510` | `LocaleFormat_LanguagesAndFormats`, `EndOfRoundBindings_Natives` (German), `MenuBindings_Natives` (the bookmark's date) |
+| P7, alpha to coverage | Not implemented; decided and documented (engine.md "Overgrowth"). SDL GPU 3.4 has `enable_alpha_to_coverage` and multisampling on all its backends, so portability is not the obstacle. The obstacle is that the frame has no multisampled pass: the world, shimmer, camouflage, first-person and HUD passes share one single-sampled target, every pipeline drawn into it would need a twin at the sample count, and SDL GPU resolves colour but not depth, which the camouflage mask and the HUD read. The original's path also changes the tree textures, the leaf shader's alpha, the overgrowth and undergrowth draws' driver state and the undergrowth's alpha reference. | `0x1000aee0`, `0x1000b500`, `0x100214b0`, `0x1002cef0`, `0x1010e270`, `0x101100d0`, `0x10151830`; RaShaderLeaf.fx | none |
+| P3, parts as movers of their own | Traced how an attached part reaches its root: only roots are in the dispatch's lists, the dispatch walks each root's response chain and runs each awake mobile part as a mover; the part's node is never integrated (it takes its root's sleep counter, its velocity is zero, the motion is the roots'), the broad phase skips its own tree and the frame's earlier movers, and its solve moves the root's node with the part's contacts (offsets from the part's origin). Followed: each mover part's ground pass and broad phase after its root, its own response (also for what others record in it) solved onto the root after the root's. Eight shipped parts have a vehicle LOD to move with (eu_tank's barrel base, eu_ifv's tracks, us_ag's engines and TAD base, as_hov_light's gunner gun, missile_silo_closed's console base); Springs stay the Vehicle's wheels. | `0x006dbbe0`, `0x006dd1b0`, `0x006dd0b0`, `0x006c0090`, `0x006c0030`, `0x006bfc40`, `0x006c9060`, `0x006c6d30`, `0x006c99a0`, `0x006dc7b0`, `0x006bb050`, `0x006b9260`, `0x006ba7d0`, `0x006c8ca0`, `0x006ba4c0` | `Vehicles_PartsMeetTheGroundAsMovers`, `Vehicles_PartMoverPushesAnotherBody` |
+
+Left: P1, P2 as above; alpha to coverage once the antialiasing setting drives a multisampled world pass.
 
 ### Priority, overall
 
@@ -356,9 +367,9 @@ Measured joined (Suez_Canal gpm_ti, standing in the EU Titan while it moves 86 m
 |---|---|---|
 | 1 | P1: bots (squads, drivers) checked against the retail game | behaviour / verification |
 | 2 | P2: the joined client's and the hosted round's remaining pieces | behaviour (multiplayer) |
-| 3 | P3: parts as movers of their own (tracing first, §3g) | behaviour |
+| 3 | ~~P3: parts as movers of their own~~ (closed, §3h) | behaviour |
 | 4 | ~~P4 + P5: the commander panel's and the particles' leftovers~~ (closed, §3f) | visual, low |
-| 5 | P7 + P8: rendering details, emotes (P6 closed, §3f, §3g) | exactness, low |
+| 5 | P7: alpha to coverage, after a multisampled world pass (P6, P8 and the LCID table closed, §3f–§3h) | exactness, low |
 | 6 | 3c-4: a hand-check of SwiffPlayer's propagated (c) | bookkeeping |
 | 7 | 3d: the remaining untraced flags | exactness |
 

@@ -12,6 +12,8 @@
 #include "MenuBindings.h"
 
 #include "EndOfRoundBindings.h"
+#include "Hud/HudFont.h"
+#include "IO/Localization/LocaleFormat.h"
 #include "Input/ControlMap.h"
 #include "Net/Demo.h"
 #include "SettingsObjects.h"
@@ -157,23 +159,17 @@ std::string serverField(const net::ServerEntry& server, const char* name)
 }
 
 // 0x10007aa0: a time_t as GetDateFormatA and GetTimeFormatA give it in the
-// game's language (0x10007730: English 0x409), the two joined by a space;
-// "" for 0. The rewrite writes the English defaults, "M/d/yyyy h:mm:ss tt".
+// game's language (0x10007730's LCID; io::formatDateTime), the two joined by
+// a space; "" for 0.
 std::string demoDate(uint32_t time)
 {
-	if (time == 0) {
-		return std::string();
-	}
-	const std::time_t t = static_cast<std::time_t>(time);
-	const std::tm* tm = std::localtime(&t);
-	if (!tm) {
-		return std::string();
-	}
-	const int hour = tm->tm_hour % 12 == 0 ? 12 : tm->tm_hour % 12;
-	char text[64];
-	std::snprintf(text, sizeof text, "%d/%d/%d %d:%02d:%02d %s", tm->tm_mon + 1, tm->tm_mday, tm->tm_year + 1900, hour,
-		tm->tm_min, tm->tm_sec, tm->tm_hour < 12 ? "AM" : "PM");
-	return text;
+	return io::formatDateTime(static_cast<std::time_t>(time), io::languageLcid(hud::language()));
+}
+
+// 0x10007b70: the date alone (the bookmarks', 0x10064510).
+std::string bookmarkDate(uint32_t time)
+{
+	return io::formatDate(static_cast<std::time_t>(time), io::languageLcid(hud::language()));
 }
 
 // 0x0046b8a0: a local network's address (10/8, 172.16/12, 192.168/16).
@@ -1087,14 +1083,14 @@ std::vector<std::string> MenuBindings::demoBookmarks() const
 void MenuBindings::showDemoBookmarks()
 {
 	// The "demobm" list (0x100643f0 counts through LocalProfileManager slot
-	// 0xd4, 0x100644xx writes a row from slot 0xd8's record): cell0 the
-	// date (+0x54), cell1 the first text (+0x04), cell2 the map's name of
+	// 0xd4, 0x10064510 writes a row from slot 0xd8's record): cell0 the
+	// date (+0x54, 0x10007b70: no time), cell1 the first text (+0x04), cell2 the map's name of
 	// the second (+0x1c). The entries are addDemoBookmark's "qqqi".
 	ui::NativeRegistry::Rows rows;
 	for (const std::string& entry : demoBookmarks()) {
 		const std::vector<std::string> words = splitArguments(entry);
 		const auto word = [&words](size_t i) { return i < words.size() ? words[i] : std::string(); };
-		rows.push_back({demoDate(static_cast<uint32_t>(std::strtoul(word(3).c_str(), nullptr, 10))), word(0),
+		rows.push_back({bookmarkDate(static_cast<uint32_t>(std::strtoul(word(3).c_str(), nullptr, 10))), word(0),
 			underscoresAsSpaces(word(1))});
 	}
 	m_natives.setListRows("demobm", rows);

@@ -2610,3 +2610,56 @@ TEST(RagDoll_RemoteSeatedTurretAndGrips)
 	CHECK(moved > 0.05f);
 	CHECK(off < 0.25f);
 }
+
+// A radio message's emote (0x005edbf0): the sender's 3P system plays the
+// message's emote trigger ("wave", AnimationSystem3p.inc's) unless the
+// soldier sprints, lies prone or holds a GenericFireArm without
+// allowEmoteAnimation (template +0x31e, default 0).
+TEST(RagDoll_EmotesFollowAllowEmoteAnimation)
+{
+	using game::GameWorld;
+	using game::SoldierPose;
+	// The rule on its own.
+	world::ObjectTemplateManager templates;
+	templates.registerType(4, "GenericFireArm");
+	templates.registerType(9, "GenericProjectile");
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "gun");
+	world::ObjectTemplate* other = templates.create("GenericProjectile", "not_a_gun");
+	CHECK(!GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, gun));
+	gun->settings()["allowEmoteAnimation"] = "1";
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, gun));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Crouch, gun));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Swim, gun));
+	CHECK(!GameWorld::emoteAllowed("wave", false, SoldierPose::Prone, gun));
+	CHECK(!GameWorld::emoteAllowed("wave", true, SoldierPose::Stand, gun));
+	CHECK(!GameWorld::emoteAllowed("", false, SoldierPose::Stand, gun));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, other));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, nullptr));
+
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(0.5f);
+	const int me = game.world->localPlayer();
+	const uint32_t soldier = game.world->playerObject();
+	const auto waving = [&] {
+		const auto playing = game.world->playingAnimations(soldier);
+		return std::find(playing.begin(), playing.end(), "wave") != playing.end();
+	};
+	// The rifle in hand doesn't allow it.
+	CHECK(!game.world->playEmote(me, "wave"));
+	game.run(0.1f);
+	CHECK(!waving());
+	// With allowEmoteAnimation 1 the wave plays.
+	game.templates.find("eu_ar_rifle")->settings()["allowEmoteAnimation"] = "1";
+	game.templates.find("as_ar_rifle")->settings()["allowEmoteAnimation"] = "1";
+	CHECK(game.world->playEmote(me, "wave"));
+	game.run(0.1f);
+	CHECK(waving());
+	CHECK(!game.world->playEmote(me, "")); // a message without an emote
+	CHECK(!game.world->playEmote(me + 100, "wave"));
+}

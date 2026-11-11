@@ -1,6 +1,8 @@
 #include "MenuBindings.h"
 
 #include "Console/Console.h"
+#include "Hud/HudFont.h"
+#include "IO/Localization/LocaleFormat.h"
 #include "UI/Player/Scroller.h"
 
 #include "Net/ServerQuery.h"
@@ -1250,10 +1252,12 @@ void MenuBindings::fillAwardProgress(const std::string& id)
 		for (const stats::AwardCriterion& c : award->criteria) {
 			(c.global ? global : round).push_back(&c);
 		}
+		// A whole number as "%d", else "%.2f" through GetNumberFormatA in
+		// the game's language (0x1005f1e0 -> 0x10007c60).
 		const auto number = [](double v) {
 			char text[32];
 			std::snprintf(text, sizeof(text), v == std::floor(v) ? "%.0f" : "%.2f", v);
-			return std::string(text);
+			return v == std::floor(v) ? std::string(text) : io::formatNumber(text, io::languageLcid(hud::language()));
 		};
 		stats::SoldierStats recruit;
 		const stats::SoldierStats* record = soldierStats();

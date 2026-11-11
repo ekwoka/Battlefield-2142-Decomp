@@ -1998,10 +1998,12 @@ void GameWorld::stepLoneVehicle(LoneVehicle& lone, const VehicleInput& driver, f
 	b.vehicle->setInput(driver);
 	if (stepBody(b, seconds)) {
 		collideMover(b, m_bodies.size(), seconds);
+		partsMove(b, m_bodies.size(), seconds);
 		b.response.solve(b.body);
 		if (walker(b)) {
 			b.legsResponse.solveLegs(b.body);
 		}
+		solveParts(b);
 		if (b.vehicle->legs()) {
 			b.vehicle->legsDrive(b.body);
 		}
@@ -8502,6 +8504,7 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 		return;
 	}
 	leaveRemoteSeat(remote, *soldier);
+	remote.posture = state.pose;
 	if (state.weapon != remote.weaponName) {
 		// The weapon in hand changed (selectItem's object, 0x00582xxx): its
 		// object and its animationSystem3P.
@@ -13205,6 +13208,8 @@ void GameWorld::stepPhysics(float seconds)
 		// by a contact (0x006b9260, 0x006bb050 -> slot 0x1b4(0)); the
 		// rewrite's wheels touching the ground count as contacts.
 		b.inAir = b.response.contacts().empty() && b.legsResponse.contacts().empty()
+			&& std::all_of(b.partMeshes.begin(), b.partMeshes.end(),
+				[](const Body::PartMesh& p) { return !p.mover || p.response.contacts().empty(); })
 			&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
 				[](const Vehicle::Wheel& w) { return w.contact; }));
 		b.response.solve(b.body);
@@ -13212,6 +13217,8 @@ void GameWorld::stepPhysics(float seconds)
 		if (walker(b)) {
 			b.legsResponse.solveLegs(b.body);
 		}
+		// The parts' after it, down its chain (0x006dd1b0, MeshCollision.cpp).
+		solveParts(b);
 		if (b.vehicle && b.vehicle->legs()) {
 			b.vehicle->legsDrive(b.body);
 		}

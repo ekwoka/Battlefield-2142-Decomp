@@ -1,9 +1,13 @@
 // Template behaviours with a game side of their own: a soldier's 3P hit
 // reaction (BF2142.exe 0x005eda90; GameWorld::hitReaction) and the seats'
-// guns nobody uses (ammo.reloadWithoutPlayer, 0x005f4bb0 / 0x005f3a40).
+// guns nobody uses (ammo.reloadWithoutPlayer, 0x005f4bb0 / 0x005f3a40),
+// and the radio messages' emotes (0x005edbf0, allowEmoteAnimation).
 #include "GameWorld.h"
 
+#include "World/ObjectTemplateManager.h"
+
 #include <cmath>
+#include <cstdlib>
 
 namespace dice::hfe::game {
 
@@ -34,6 +38,54 @@ void GameWorld::playHitReaction(Player& victim, int node, const physics::Vec3& d
 		return;
 	}
 	victim.bodyAnimation->play(hitReaction(node, direction, victim.body.yawDegrees));
+}
+
+bool GameWorld::emoteAllowed(const std::string& emote, bool sprinting, SoldierPose pose,
+	const world::ObjectTemplate* inHand)
+{
+	// 0x005edbf0: the name's length (+0x14), the sprint (slot 0x100 of the
+	// +0x184 interface, 0x00585e80), the pose (+0xdc of the +0x18c
+	// interface: soldier +0x268, 2 prone), then the item in hand
+	// (0x005896a0: none for index 0) by its template's class and
+	// allowEmoteAnimation.
+	if (emote.empty() || sprinting || pose == SoldierPose::Prone) {
+		return false;
+	}
+	if (inHand && inHand->typeName() == "GenericFireArm") {
+		const auto allow = inHand->settings().find("allowEmoteAnimation");
+		return allow != inHand->settings().end() && std::atoi(allow->second.c_str()) != 0;
+	}
+	return true;
+}
+
+bool GameWorld::playEmote(int player, const std::string& emote)
+{
+	Player* sender = findPlayer(player);
+	// 0x0042e0c0: the sender's controlled object a soldier (class 0x9493:
+	// not seated, not in a ladder's container); 0x005edbf0: its 3P system.
+	if (!sender || !sender->alive || sender->manDown || sender->vehicle != 0 || sender->ladder >= 0
+		|| !sender->bodyAnimation) {
+		return false;
+	}
+	const world::ObjectTemplate* inHand = sender->weaponTemplate.empty() ? nullptr : m_templates.find(sender->weaponTemplate);
+	if (!emoteAllowed(emote, sender->control.stamina().sprinting(), sender->input.pose, inHand)) {
+		return false;
+	}
+	return sender->bodyAnimation->play(emote); // slot 0x1c, 0x008b97f0
+}
+
+bool GameWorld::playRemoteEmote(uint32_t object, const std::string& emote, bool sprinting)
+{
+	const auto found = m_remoteSoldiers.find(object);
+	if (found == m_remoteSoldiers.end() || !found->second.body || found->second.seat) {
+		return false;
+	}
+	RemoteSoldier& remote = found->second;
+	const world::ObjectTemplate* inHand = remote.weaponName.empty() ? nullptr : m_templates.find(remote.weaponName);
+	if (!emoteAllowed(emote, sprinting, remote.posture, inHand)) {
+		return false;
+	}
+	return remote.body->play(emote);
 }
 
 void GameWorld::stepUnmannedGuns(float seconds)
