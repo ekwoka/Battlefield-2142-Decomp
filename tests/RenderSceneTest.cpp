@@ -55,6 +55,41 @@ bool near(float a, float b, float epsilon = 1e-4f)
 
 } // namespace
 
+// The overgrowth's far palms (Suez Canal): the shipped "_lod" mesh marks its
+// fronds opaque (alpha mode 0), yet RendDX9 draws every material without
+// "tile_" in its texture name with LeafOG, which alpha-tests; drawn as an
+// opaque trunk they filled each frond card with the texels' hidden colour.
+TEST(RenderScene_OvergrowthLodPalmFrondsAreAlphaTestedLeaves)
+{
+	using render::TreeMaterial;
+	CHECK(render::overgrowthMaterial("objects/vegitation/africa/textures/tile_africa_de_lod.dds") == TreeMaterial::TrunkBase);
+	CHECK(render::overgrowthMaterial("objects/vegitation/africa/textures/leaf_af_palmtree_b_de_lod.dds") == TreeMaterial::Leaf);
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	auto zip = io::ZipArchive::open(std::string(gameDir) + "/mods/bf2142/Objects/Vegitation_client.zip");
+	CHECK(zip != nullptr);
+	if (!zip) return;
+	std::vector<uint8_t> data;
+	CHECK(zip->read("africa/af_palmtree_b/meshes/af_palmtree_b01_lod.staticmesh", data));
+	auto mesh = geom::parseMesh(data, geom::MeshKind::Static);
+	CHECK(mesh.has_value());
+	if (!mesh) return;
+	int fronds = 0, trunks = 0;
+	for (const auto& material : mesh->geometries[0].lods[0].materials) {
+		CHECK(material.alphaMode == 0);
+		const auto kind = render::overgrowthMaterial(material.maps[0]);
+		fronds += kind == TreeMaterial::Leaf;
+		trunks += kind == TreeMaterial::TrunkBase;
+		// The static-mesh rule alone would have made the fronds a trunk.
+		CHECK(render::treeMaterial(true, material.alphaMode, false) == TreeMaterial::TrunkBase);
+	}
+	CHECK(fronds == 1);
+	CHECK(trunks == 1);
+	// The cut-out texture the tree loader swaps in (0x10151b64).
+	std::vector<uint8_t> cutout;
+	CHECK(zip->read("africa/textures/leaf_af_palmtree_b_de_lod_alphatest.dds", cutout));
+}
+
 TEST(RenderScene_TreeMaterialDispatch)
 {
 	using render::TreeMaterial;

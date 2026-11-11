@@ -521,9 +521,10 @@ private:
 
 	// A geometry of a mesh file at a LOD; geometryIndex -1 is the one the
 	// world shows (the exterior: 1 of bundled and skinned meshes with more
-	// than one).
+	// than one). overgrowth: a "<geometry>_lod" mesh as the overgrowth draws
+	// it (overgrowthMaterial), cached apart from the same geometry placed alone.
 	const GpuMesh* mesh(const LevelSources& sources, const std::string& geometryName, int geometryIndex = -1,
-		int lod = 0);
+		int lod = 0, bool overgrowth = false);
 	// A texture by path, its top mip levels skipped by its class at the
 	// texture quality (RendDX9's texture classes, scene::TextureClass).
 	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path,

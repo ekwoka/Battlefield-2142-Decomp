@@ -325,11 +325,12 @@ SDL_GPUTexture* LevelRenderer::cubeTexture(const io::FileManager& files, const s
 }
 
 const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, const std::string& geometryName,
-	int wantedGeometry, int wantedLod)
+	int wantedGeometry, int wantedLod, bool overgrowth)
 {
-	const std::string key = wantedGeometry < 0 && wantedLod == 0
+	const std::string key = (wantedGeometry < 0 && wantedLod == 0
 		? lower(geometryName)
-		: lower(geometryName) + "#" + std::to_string(wantedGeometry) + "/" + std::to_string(wantedLod);
+		: lower(geometryName) + "#" + std::to_string(wantedGeometry) + "/" + std::to_string(wantedLod))
+		+ (overgrowth ? "#overgrowth" : "");
 	const auto it = m_meshes.find(key);
 	if (it != m_meshes.end()) {
 		return it->second.get();
@@ -553,9 +554,13 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		}
 		// Alpha-tested materials use "<name>_alphatest.dds" where it exists:
 		// the plain textures keep alpha in 0..0.5 for alpha to coverage
-		// (0x10151830).
+		// (0x10151830). A tree's materials all do, whatever their alpha mode
+		// (0x10151b64 tests only the template's +0x2a2).
 		std::string diffusePath = material.maps.empty() ? std::string() : material.maps[0];
-		if (material.alphaMode == 2 && diffusePath.size() > 4) {
+		const TreeMaterial overgrowthKind = overgrowthMaterial(diffusePath); // by the mesh's own name
+		const bool overgrowthLeaf = overgrowth && tree && overgrowthKind == TreeMaterial::Leaf;
+		const bool alphaTested = material.alphaMode == 2 || overgrowthLeaf;
+		if ((alphaTested || tree) && diffusePath.size() > 4) {
 			const std::string alphaTest = diffusePath.substr(0, diffusePath.size() - 4) + "_alphatest.dds";
 			if (sources.files.exists(alphaTest)) {
 				diffusePath = alphaTest;
@@ -566,13 +571,15 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		if (!diffusePath.empty() && !m_overgrowthAtlas.empty() && !sources.files.exists(diffusePath)) {
 			std::string key = lower(material.maps[0]);
 			std::replace(key.begin(), key.end(), '\\', '/');
-			const auto& first = material.alphaMode == 2 ? m_overgrowthAlphaTestAtlas : m_overgrowthAtlas;
-			const auto& second = material.alphaMode == 2 ? m_overgrowthAtlas : m_overgrowthAlphaTestAtlas;
-			auto found = first.find(key);
-			if (found != first.end()) {
-				atlas = &found->second;
-			} else if ((found = second.find(key)) != second.end()) {
-				atlas = &found->second;
+			// The alpha-test atlas, when the level has one (0x1008c97c), lists
+			// a texture under its "_alphatest" name where that file exists.
+			const std::string alphaTestKey = key.size() > 4 ? key.substr(0, key.size() - 4) + "_alphatest.dds" : key;
+			for (const auto& [map, name] : {std::pair {&m_overgrowthAlphaTestAtlas, alphaTestKey},
+					{&m_overgrowthAlphaTestAtlas, key}, {&m_overgrowthAtlas, key}}) {
+				if (const auto found = map->find(name); found != map->end()) {
+					atlas = &found->second;
+					break;
+				}
 			}
 			if (atlas) {
 				diffusePath = atlas->atlas;
@@ -581,7 +588,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		SDL_GPUTexture* diffuse = diffusePath.empty() ? nullptr
 			: texture(sources.files, diffusePath, atlas ? scene::TextureClass::Overgrowth : textureClass);
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
-			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
+			diffuse ? diffuse : m_gpu.whiteTexture(), alphaTested ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
 		if (atlas) {
 			submesh.uvAtlas[0] = atlas->size[0];
@@ -615,9 +622,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// The static template's load (0x100de6d0): a geometry whose path has
 		// "vegitation" is a tree (+0x2a2); its alpha-tested materials are the
 		// leaves (RaShaderLeaf).
-		submesh.leaf = tree && material.alphaMode == 2;
-		const auto treeKind = treeMaterial(tree, material.alphaMode,
-			effect == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0);
+		submesh.leaf = tree && alphaTested;
+		const auto treeKind = overgrowth && tree ? overgrowthKind
+			: treeMaterial(tree, material.alphaMode, effect == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0);
 		submesh.trunk = treeKind == TreeMaterial::TrunkBase || treeKind == TreeMaterial::TrunkDetail;
 		if (submesh.trunk) submesh.specularKind = 0;
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
@@ -3313,7 +3320,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 				if (!entry.resolved) {
 					entry.resolved = true;
 					if (m_sources->geometries.find(instance.geometry + "_lod")) {
-						entry.mesh = mesh(*m_sources, instance.geometry + "_lod");
+						entry.mesh = mesh(*m_sources, instance.geometry + "_lod", -1, 0, true);
 					}
 					uploaded = true;
 				}
