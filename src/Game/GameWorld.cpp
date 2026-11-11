@@ -702,6 +702,7 @@ void GameWorld::tick(float seconds)
 	if (m_files) {
 		addBodies();
 		stepTitans(seconds);
+		stepRemoteTitans();
 		stepPhysics(seconds);
 	} else {
 		stepTitans(seconds);
@@ -4155,6 +4156,12 @@ void GameWorld::stepProjectiles(float seconds)
 				}
 				if (Player* downed = downedPlayer(hitObject)) {
 					shockDowned(*downed, *p.settings, amount, hit.material, p.player);
+				} else if (Player* mate = p.settings->resurrect && hitObject == hitSoldier ? soldierPlayer(hitObject) : nullptr;
+						   mate && shooter && mate->team == shooter->team) {
+					// The paddles' hit (game logic slot 0x100, 0x004ba5c0) goes
+					// on to the damage (0x005a3bd0) only for a teammate on a
+					// downed body or an enemy on a standing one: a standing
+					// teammate takes nothing.
 				} else {
 					Player* victim = hitObject == hitSoldier ? soldierPlayer(hitObject) : nullptr;
 					if (victim && hitPoints(hitObject) > 0 && physics::lengthSquared(p.velocity) > 0) {
@@ -4380,6 +4387,118 @@ void GameWorld::restartPlayers(float spawnIn)
 		player.killer = -1;
 		player.respawnIn = playing ? spawnIn : 0;
 	}
+}
+
+// The rest of the countdown's reset (GameLogic::reset 0x004ce910, from the
+// round's slot 0x24 0x004be630): after the soldiers (0x004ce850, see
+// restartPlayers) the object manager drops what the round made (slot 0x98;
+// the reset asserts the PlayerControlObject and projectile maps empty
+// after it), the Titan sync starts over (0x00561cf0), and the spawners,
+// back at their start, make the vehicles anew: so the vehicles, the
+// Titans and what they carry, the rounds and mines in the world, the kits
+// on the ground, the deployed gadgets, drones, pods and parachutes go, and
+// the control points return to the level's teams.
+void GameWorld::resetRound()
+{
+	std::vector<uint32_t> gone;
+	// The Titans' own objects first: their carried spawners and supply
+	// points (out of m_spawners with them), and their spawn points.
+	for (Titan& titan : m_titans) {
+		removeTitanCarried(titan);
+		for (const Titan::Spawn& spawn : titan.spawnPoints) {
+			gone.push_back(spawn.object);
+		}
+		gone.push_back(titan.object);
+	}
+	m_titans.clear();
+	m_newSpawners.clear();
+	for (const auto& spawner : m_spawners) {
+		gone.insert(gone.end(), spawner->spawned().begin(), spawner->spawned().end());
+		gone.push_back(spawner->lastSpawned());
+	}
+	for (const auto& [object, abandonment] : m_abandonment) {
+		gone.push_back(object);
+	}
+	m_abandonment.clear();
+	for (const Silo& silo : m_silos) {
+		gone.push_back(silo.object);
+	}
+	m_silos.clear();
+	for (const DroppedKit& kit : m_droppedKits) {
+		gone.push_back(kit.object);
+	}
+	m_droppedKits.clear();
+	for (const Supply& supply : m_supplies) {
+		gone.push_back(supply.object);
+	}
+	m_supplies.clear();
+	for (const Drone& drone : m_drones) {
+		gone.push_back(drone.object);
+	}
+	m_drones.clear();
+	for (const Pod& pod : m_pods) {
+		gone.push_back(pod.object);
+	}
+	m_pods.clear();
+	for (const Parachute& chute : m_parachutes) {
+		gone.push_back(chute.object);
+	}
+	m_parachutes.clear();
+	for (const Corpse& corpse : m_corpses) {
+		gone.push_back(corpse.object);
+	}
+	m_corpses.clear();
+	for (const SeatCorpse& corpse : m_seatCorpses) {
+		gone.push_back(corpse.object);
+	}
+	m_seatCorpses.clear();
+	// The commander's supply drops and the deployed hubs' supplies (the
+	// level's own supply points, placed, stay).
+	m_crates.erase(std::remove_if(m_crates.begin(), m_crates.end(),
+					   [&](const Crate& c) {
+						   if (!c.carried) {
+							   gone.push_back(c.object);
+						   }
+						   return !c.carried;
+					   }),
+		m_crates.end());
+	for (Projectile& p : m_projectiles) {
+		p.alive = false;
+	}
+	m_projectiles.clear();
+	m_strikes.clear();
+	m_strikeFire.clear();
+	for (const uint32_t object : gone) {
+		if (object && m_objects.find(object)) {
+			stopArmorEffects(object);
+			m_hiddenChildren.erase(object);
+			m_objects.remove(object);
+		}
+	}
+	// The control points to the level's owners, the spawners to their start
+	// (0x005ae580) with their points' teams, as startRound sets them.
+	for (ControlPoint& point : m_controlPoints) {
+		const world::ObjectTemplate* t = point.object ? point.object->objectTemplate() : nullptr;
+		point.team = t ? integer(*t, "team", 0) : 0;
+		point.flag = point.team;
+		point.flagHeight = point.team != 0 ? 1.0f : 0.0f;
+		point.playerId = -1;
+		if (point.object) {
+			point.object->setTeam(point.team);
+		}
+	}
+	m_state = RoundState::BeforeStart;
+	for (const auto& spawner : m_spawners) {
+		spawner->reset(m_random);
+	}
+	for (const ControlPoint& point : m_controlPoints) {
+		for (const auto& spawner : m_spawners) {
+			if (spawner->settings().controlPointId == point.id && point.id != -1) {
+				spawner->setTeam(point.team, m_state);
+			}
+		}
+	}
+	m_state = RoundState::Playing;
 }
 
 void GameWorld::setPlayerName(int id, const std::string& name)
@@ -9338,54 +9457,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	}
 	// The moving objects near it (the soldier's broad phase 0x006dcce0): their
 	// soldier LOD in their own frame.
-	player.body.movers.clear();
-	for (const Body& b : m_bodies) {
-		if ((!b.soldierMesh && b.partMeshes.empty()) || b.object == player.vehicle || findDrone(b.object)) {
-			continue;
-		}
-		const float reach = std::max(b.radius, b.partReach) + 3.0f;
-		if (physics::lengthSquared(b.body.position - player.body.position) > reach * reach) {
-			continue;
-		}
-		physics::SoldierBody::Mover mover;
-		mover.mesh = b.soldierMesh.get();
-		if ((player.team == 1 || player.team == 2) && b.teamSoldierMesh[player.team - 1]) {
-			mover.mesh = b.teamSoldierMesh[player.team - 1].get(); // a Titan's forcefields
-		}
-		mover.rotation = b.body.rotation;
-		mover.position = b.body.position;
-		mover.velocity = b.body.velocity;
-		mover.angularVelocity = b.body.angularVelocity;
-		mover.centerOfMass = b.body.worldCenterOfMass();
-		mover.owner = b.object;
-		mover.mass = b.mass;
-		mover.asleep = b.sleep.asleep();
-		mover.collisionGroups = b.collisionGroups;
-		mover.ignoring = b.ignoreSet && m_ticks <= b.ignoreUntil;
-		mover.ignoresThis = mover.ignoring && b.ignored == player.object;
-		mover.pushed = b.pushedBySoldiers;
-		mover.own = b.launcher != 0 && b.launcher == player.object;
-		if (mover.mesh) {
-			player.body.movers.push_back(mover);
-		}
-		// Its collisionPart children, each a response of its root's chain
-		// (0x006c0090) whose soldier LOD the soldier meets in the part's
-		// frame now (0x006c3890 with the part's instance, PartCollision.cpp).
-		if (!b.partMeshes.empty()) {
-			poseCollisionParts(b);
-			const size_t state = b.collisionWrecked ? 1 : 0;
-			for (const Body::PartMesh& part : b.partMeshes) {
-				if (part.off || !part.physics[state].soldier) {
-					continue;
-				}
-				physics::SoldierBody::Mover p = mover;
-				p.mesh = part.physics[state].soldier.get();
-				p.rotation = part.rotation * b.body.rotation;
-				p.position = b.body.position + b.body.rotation.transform(part.position);
-				player.body.movers.push_back(p);
-			}
-		}
-	}
+	soldierMovers(player.body.position, player.team, player.vehicle, player.object, player.body.movers);
 	// The other soldiers near it on foot (0x006c2620: a soldier's response
 	// in the broad phase's list; one with a parent, in a seat or on a
 	// ladder's container, is left out).
@@ -13291,6 +13363,73 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	placed->setTeam(player.team);
 	drone.object = placed->id();
 	m_drones.push_back(std::move(drone));
+}
+
+// The moving objects a soldier at `origin` meets (the soldier's broad phase
+// 0x006dcce0 -> the response's object pass 0x006c5140): each body's
+// soldier LOD (a team's forcefields with its team's mesh) in its own frame
+// now, and its collisionPart children's in theirs; not the vehicle the
+// soldier sits in, nor a drone. stepSoldier takes them for the server's
+// soldiers; a joined client's prediction for its own, against the bodies
+// of the ghosts as they were last placed (placeRemoteBody), as the exe's
+// replay (0x004b5000) steps the control object's tree alone among the
+// objects where the ghost updates put them.
+void GameWorld::soldierMovers(const physics::Vec3& origin, int team, uint32_t vehicle, uint32_t soldier,
+	std::vector<physics::SoldierBody::Mover>& movers) const
+{
+	movers.clear();
+	for (const Body& b : m_bodies) {
+		if ((!b.soldierMesh && b.partMeshes.empty()) || b.object == vehicle || isDrone(b.object)) {
+			continue;
+		}
+		const float reach = std::max(b.radius, b.partReach) + 3.0f;
+		if (physics::lengthSquared(b.body.position - origin) > reach * reach) {
+			continue;
+		}
+		physics::SoldierBody::Mover mover;
+		mover.mesh = b.soldierMesh.get();
+		if ((team == 1 || team == 2) && b.teamSoldierMesh[team - 1]) {
+			mover.mesh = b.teamSoldierMesh[team - 1].get(); // a Titan's forcefields
+		}
+		mover.rotation = b.body.rotation;
+		mover.position = b.body.position;
+		mover.velocity = b.body.velocity;
+		mover.angularVelocity = b.body.angularVelocity;
+		mover.centerOfMass = b.body.worldCenterOfMass();
+		mover.owner = b.object;
+		mover.mass = b.mass;
+		mover.asleep = b.sleep.asleep();
+		mover.collisionGroups = b.collisionGroups;
+		mover.ignoring = b.ignoreSet && m_ticks <= b.ignoreUntil;
+		mover.ignoresThis = mover.ignoring && b.ignored == soldier;
+		mover.pushed = b.pushedBySoldiers;
+		mover.own = b.launcher != 0 && b.launcher == soldier;
+		if (mover.mesh) {
+			movers.push_back(mover);
+		}
+		// Its collisionPart children, each a response of its root's chain
+		// (0x006c0090) whose soldier LOD the soldier meets in the part's
+		// frame now (0x006c3890 with the part's instance, PartCollision.cpp).
+		if (!b.partMeshes.empty()) {
+			poseCollisionParts(b);
+			const size_t state = b.collisionWrecked ? 1 : 0;
+			for (const Body::PartMesh& part : b.partMeshes) {
+				if (part.off || !part.physics[state].soldier) {
+					continue;
+				}
+				physics::SoldierBody::Mover p = mover;
+				p.mesh = part.physics[state].soldier.get();
+				p.rotation = part.rotation * b.body.rotation;
+				p.position = b.body.position + b.body.rotation.transform(part.position);
+				movers.push_back(p);
+			}
+		}
+	}
+}
+
+bool GameWorld::isDrone(uint32_t object) const
+{
+	return std::any_of(m_drones.begin(), m_drones.end(), [object](const Drone& d) { return d.object == object; });
 }
 
 GameWorld::Drone* GameWorld::findDrone(uint32_t object)

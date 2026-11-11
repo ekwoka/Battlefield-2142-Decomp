@@ -36,6 +36,7 @@
 #include "Weapons.h"
 #include "World/WorldMath.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -338,6 +339,19 @@ public:
 	// the server has it rather than where the client first saw it.
 	void placeRemoteBody(uint32_t object, const physics::Vec3& position, const physics::Mat3& rotation,
 		const physics::Vec3& velocity);
+	// A joined client's ghost of a Titan (a tree holding the team's RCTitan
+	// object, 0x005ab390): the exe's client builds the ghost's whole object
+	// tree, each node's collision in the broad phase, so its own soldier
+	// walks the Titan's decks; here the Titan's body gets the tree's merged
+	// soldier and projectile LODs and its cannons' collision parts, as the
+	// server's (rebuildTitanMeshes), without the server's Titan logic (its
+	// orders, armour, spawn points and carried objects are the server's).
+	// False when `object` is no Titan.
+	bool addRemoteTitan(uint32_t object);
+	bool isRemoteTitan(uint32_t object) const
+	{
+		return std::any_of(m_remoteTitans.begin(), m_remoteTitans.end(), [object](const Titan& t) { return t.object == object; });
+	}
 	void animateRemoteVehicle(uint32_t object, const physics::Vec3& velocity, bool occupied, float seconds,
 		int legMessages = -1);
 	// A joined client's vehicles' part turns (the RotationalBundle
@@ -488,8 +502,15 @@ public:
 	// handler hears it: the game isn't playing), the counts start again
 	// and every player in the game waits out the countdown to spawn
 	// (0x004bd2a0 sets each player's spawn time, slot 0x100, to its end).
-	// Vehicles, control points and dropped kits are left as they are.
+	// The world's part is resetRound.
 	void restartPlayers(float spawnIn);
+	// The countdown's reset of the world (GameLogic::reset 0x004ce910, after
+	// restartPlayers): what the round made goes (the spawned vehicles and
+	// Titans with what they carry, rounds and mines, kits on the ground,
+	// deployed gadgets, drones, pods, parachutes, corpses, the commander's
+	// supply drops and strikes), the control points return to the level's
+	// teams and the spawners to their start, so the vehicles spawn anew.
+	void resetRound();
 	// A player's new name (a joined client's ChangePlayerName, 0x0050bb90:
 	// the player's name for the scripts, the scoreboards and the logs).
 	void setPlayerName(int id, const std::string& name);
@@ -1072,6 +1093,14 @@ public:
 	// soldier's contacts take (SoldierBody::frictionOf); 1 without materials.
 	float soldierFriction(uint32_t own, uint32_t other) const;
 	const SoldierControl* soldierControl(int player) const;
+	// The moving objects a soldier at `origin` (its physics origin) of
+	// `team` meets this tick: the bodies' soldier LODs and their posed
+	// collisionPart children's, in their own frames (the soldier broad
+	// phase 0x006dcce0); not `vehicle` (the one it sits in) nor a drone.
+	// `soldier` is its object (a launcher's round ignoring it). A joined
+	// client's prediction takes them for its own soldier.
+	void soldierMovers(const physics::Vec3& origin, int team, uint32_t vehicle, uint32_t soldier,
+		std::vector<physics::SoldierBody::Mover>& movers) const;
 	const physics::SoldierBody* soldierBody(int player) const;
 
 	// The local player's soldier: spawned at a spawn point of a control
@@ -3643,6 +3672,7 @@ private:
 	void fireSentry(Drone& drone, float seconds);
 	bool removeDrone(uint32_t object);
 	Drone* findDrone(uint32_t object);
+	bool isDrone(uint32_t object) const;
 
 	// The commander (Commander.cpp). Per team (index 1, 2): the SquadManager's
 	// commander (0x004c8120) and applicants (0x004c4fb0), the assets' tools
@@ -3928,8 +3958,14 @@ private:
 	bool titanGunWorks(uint32_t titan, int seat) const;
 	void titanSeatsOut(Titan& titan);
 	void removeTitanCarried(Titan& titan);
-	void buildTitanParts(Titan& titan);
+	// `remote`: a joined client's (addRemoteTitan): the tree's parts and
+	// meshes only, its spawn points and carried objects being the server's
+	// ghosts.
+	void buildTitanParts(Titan& titan, bool remote = false);
 	void rebuildTitanMeshes(Titan& titan);
+	// A joined client's Titans (addRemoteTitan): their collision only.
+	std::vector<Titan> m_remoteTitans;
+	void stepRemoteTitans();
 	// The collisionPart children under each node of the Titan's tree with a
 	// mesh (its gun hubs' cannons: 0x0063d720 -> 0x0063ccc0 with that
 	// node's mesh), as the body's posed parts (PartCollision.cpp).

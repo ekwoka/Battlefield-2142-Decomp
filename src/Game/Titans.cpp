@@ -344,6 +344,38 @@ void GameWorld::registerTitan(uint32_t id, int controlPoint)
 	}
 }
 
+bool GameWorld::addRemoteTitan(uint32_t id)
+{
+	const world::Object* object = m_objects.find(id);
+	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+	if (!t || !titanControl(m_templates, *t, 0)
+		|| std::any_of(m_remoteTitans.begin(), m_remoteTitans.end(), [id](const Titan& r) { return r.object == id; })) {
+		return false;
+	}
+	Titan titan;
+	titan.object = id;
+	titan.team = object->team();
+	titan.serial = m_titanSerial++;
+	m_remoteTitans.push_back(std::move(titan));
+	buildTitanParts(m_remoteTitans.back(), true);
+	return true;
+}
+
+// The joined client's Titans: gone with their ghosts' objects; their
+// meshes built once addBodies has made the root's body (as stepTitans
+// builds the server's).
+void GameWorld::stepRemoteTitans()
+{
+	m_remoteTitans.erase(std::remove_if(m_remoteTitans.begin(), m_remoteTitans.end(),
+							 [this](const Titan& t) { return !m_objects.find(t.object); }),
+		m_remoteTitans.end());
+	for (Titan& titan : m_remoteTitans) {
+		if (titan.meshesDirty) {
+			rebuildTitanMeshes(titan);
+		}
+	}
+}
+
 // The Titan's tree: each node with armour is a part (ArmorGLComp with the
 // template's settings, ctor 0x00630040's defaults: 10 hit points, 10 wreck
 // hit points, parentDamage 0, destroyOnParentDamageLevel and
@@ -356,7 +388,7 @@ void GameWorld::registerTitan(uint32_t id, int controlPoint)
 // the PAC Titan's, 0x200 the EU's) let their own team through (0x006c3890
 // for soldiers, 0x006bb050 for meshes; see rebuildTitanMeshes and
 // MeshCollision.cpp).
-void GameWorld::buildTitanParts(Titan& titan)
+void GameWorld::buildTitanParts(Titan& titan, bool remote)
 {
 	world::Object* object = m_objects.find(titan.object);
 	if (!object) {
@@ -539,6 +571,12 @@ void GameWorld::buildTitanParts(Titan& titan)
 			&& titan.parts[static_cast<size_t>(part.parent)].kind == TitanPartInfo::Other) {
 			titan.parts[static_cast<size_t>(part.parent)].kind = TitanPartInfo::CoreDoors;
 		}
+	}
+	if (remote) {
+		titan.spawnPoints.clear();
+		titan.carried.clear();
+		titan.meshesDirty = true;
+		return;
 	}
 	// Its spawn points: SpawnPoint objects of the Titan's control point,
 	// carried with it (stepTitanSpawnPoints).

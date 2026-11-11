@@ -401,6 +401,71 @@ TEST(ScriptHost_HandlersHearWhilePlaying)
 	CHECK(host.run("assert calls == ['always', 'always', 'playing', 'always'], calls\n"));
 }
 
+// A soldier spawned while a hosted round waits for players stands in a
+// control point: the trigger's callback (0x00442c80) runs only once the
+// round plays, as the handlers do, so gpm_cq's onCPTrigger never meets a
+// player its unheard PlayerSpawn left without `killed`. The second
+// player starts the countdown: the reset (PreGame, GameLogic::reset,
+// Playing again, as main's onCountdown) sets the triggers up anew, and
+// the soldier spawned in the playing round takes the point.
+TEST(ScriptHost_WaitingSoldierInAControlPoint)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	std::string errors;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) {
+				errors += line + "\n";
+			}
+		});
+	const auto raise = [&host](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	CHECK(host.startGameMode("gpm_cq"));
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(false);
+	round.logic.waitToStart(2, 2, 30, [&round] { return static_cast<int>(round.world->playerList().size()); });
+	round.logic.onPlaying = [&host] { host.setRoundPlaying(true); };
+	round.logic.onCountdown = [&round, &host] {
+		host.setGameStatus(game::GameStatus::PreGame);
+		round.world->restartPlayers(round.logic.startCountdown() + 2.0f / 30.0f);
+		round.world->resetRound();
+		host.raise("Reset", {game::ScriptValue::integer(0)});
+		host.setGameStatus(game::GameStatus::Playing);
+	};
+	round.world->setSpawnTime(1);
+	const int bot = round.world->addPlayer("Bot", 2, true);
+	CHECK(round.world->spawnSoldier(bot));
+	const auto run = [&](int ticks) {
+		for (int tick = 0; tick < ticks; ++tick) {
+			round.world->tick(1 / 30.0f);
+			round.logic.tick(1 / 30.0f);
+			host.update();
+		}
+	};
+	run(30 * 4);
+	CHECK(round.logic.roundState() == 1);
+	CHECK(errors.empty());
+	// A second player: the countdown, the reset, then the playing round.
+	round.world->addPlayer("Other", 1, true);
+	run(30 * 4);
+	CHECK(round.logic.roundState() == 3);
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.world->playerInfo(bot, info) && info.alive);
+	run(30 * 6);
+	CHECK(round.enemyPoint->team() != 1); // neutralised (or taken) by the EU soldier in it
+	if (!errors.empty()) {
+		std::fprintf(stderr, "%s", errors.c_str());
+	}
+	CHECK(errors.empty());
+}
+
 // A hosted round's start (0x004c03b0): the countdown restarts the players
 // (GameLogic::reset through slot 0x24; GameWorld::restartPlayers) and they
 // spawn when it ends, so the game mode's PlayerSpawn hears every soldier

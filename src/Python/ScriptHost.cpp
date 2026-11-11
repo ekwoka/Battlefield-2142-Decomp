@@ -868,6 +868,17 @@ void ScriptHost::update()
 		const uint32_t owner = impl.triggers[i].object;
 		const Ref callback = impl.triggers[i].callback;
 		const Ref data = impl.triggers[i].data;
+		// The callback (0x00442c80: the id, the trigger's object, the other,
+		// entered, the data when given) runs only with the status Playing
+		// and the round playing (game logic slots 0x164 / 0x168), as the
+		// handlers (0x00444140), unless the record's own flag (+0x2c) is
+		// set; those inside are still tracked, so who stands in a control
+		// point while a hosted round waits for players is no news to the
+		// game mode's trigger (gpm_cq's onCPTrigger reads the `killed` its
+		// PlayerSpawn handler, unheard then, sets).
+		if (impl.status != game::GameStatus::Playing || !impl.roundPlaying) {
+			continue;
+		}
 		const auto notify = [&](uint32_t object, bool entered) {
 			impl.call(callback.get(), {Ref(PyLong_FromLong(id)), impl.toPython(ScriptValue::object(owner)),
 										  impl.toPython(ScriptValue::object(object)), Ref(PyLong_FromLong(entered ? 1 : 0)), data});

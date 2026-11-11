@@ -104,6 +104,8 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 	}
 	m_body.stance = static_cast<int>(input.pose);
 	m_control.update(input, m_body, kTick);
+	// The moving objects near it now (GameWorld::stepSoldier's broad phase).
+	m_round.soldierMovers(m_body.position, m_team, 0, m_object, m_body.movers);
 	m_body.step(kTick, m_round.ground());
 }
 

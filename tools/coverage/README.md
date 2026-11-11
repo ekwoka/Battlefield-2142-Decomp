@@ -1,7 +1,7 @@
 # Coverage audit scripts
 
 The measurements behind docs/coverage.md, coverage-2.md, uncited.md,
-coverage-3.md, coverage-4.md, coverage-5.md, coverage-6.md, coverage-7.md, coverage-8.md and coverage-9.md, as scripts. Earlier audits ran
+coverage-3.md, coverage-4.md, coverage-5.md, coverage-6.md, coverage-7.md, coverage-8.md, coverage-9.md and coverage-10.md, as scripts. Earlier audits ran
 throw-away copies of these from a temp folder; these were rebuilt from the
 audits' method notes and checked against coverage-3's figures (below).
 

@@ -216,6 +216,30 @@ D / 2). `undergrowth.zPassPatchCount` (+0x574, 0) draws the nearest N
 patches depth-only first (ZOnly); kept, unused. `undergrowth.enabled`
 (slot 0x30) gates the drawing.
 
+**Faces culled.** Every Undergrowth.fx technique (the 22 passes: t0_l0..l4,
+their `_ds` and `_simple` forms) sets `CullMode = CW`, and the draw
+(`0x1010e270`) sets no cull state of its own (its render states are the
+stencil's, 0x34..0x39), so Direct3D culls the faces clockwise on screen,
+the front faces of every other mesh. The meshes are wound for it: the
+editor's import (`0x1010cb70`, `../RawData/Undergrowth/<mesh>.obj`) negates
+z and keeps the faces' vertex order, so in Undergrowth.dat the faces'
+normals by winding point inwards (of the 94 distinct shipped meshes, 79
+enclose a negative volume, 11 a positive one, 4 none; every rock and can
+is negative), and the generator (`0x1010ba40`) only turns an instance (a
+rotation: n × z, n, (n × z) × n, scaled) and copies the indices with the
+vertex base added. A rock is drawn from outside; of a ring of grass cards
+(grass_round, grass_Y) the near cards are drawn and the far ones culled.
+The rewrite drew both sides; its undergrowth pipeline now culls the
+front faces (`SDL_GPU_CULLMODE_FRONT` with clockwise front faces, as the
+CullMode CCW meshes take `BACK`). Overgrowth trees need nothing new: they
+are static meshes (TrunkOG keeps CullMode 3 and is drawn culled, LeafOG
+sets NONE, see the leaf rule under the seat camera's notes). Frame cost
+(BF2142_FRAME_BENCH=300, `--play 2 --screenshot`, release, three runs
+each, alternating): Camp_Gibraltar 1.92 / 1.92 / 1.92 → 1.91 / 1.92 / 1.92
+ms, Verdun 4.62 / 3.05 / 3.07 → 3.05 / 3.03 / 3.14, Wake_Island_2142
+(gpm_ca 64, `--play 1`) 4.54 / 5.13 / 5.25 → 5.40 / 5.11 / 4.63: within
+the runs' noise. Test: `Undergrowth_MeshesWoundInwards`.
+
 ## Physics of mobile objects
 
 **Collision mesh instances.** A `.collisionmesh` holds geometries, each
@@ -6042,7 +6066,19 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   and message unless it reloads already or is full). `bf2142 --connect ... --play 1
   --remote-actions "<s>:<op> ..."` drives a headless client (crouch, prone,
   stand, fire, hold, reload, forward, stop, turn:<deg>, face:<name>, still,
-  zoom, pitch:<deg>) for such checks.
+  zoom, pitch:<deg>) for such checks. `face` and `goto` turn from the
+  predicted soldier's look (`SoldierPrediction::lookYaw`; the camera's own
+  sum of turns lacked the spawn point's heading, so a client faced off by
+  it and its rounds missed) and aim at a man-down soldier's body from the
+  eyes the rounds leave from (1.6 m, `GameWorld::fire`). Checked on
+  127.0.0.1 (a host with `--unlock-all`): a medic (Assault, the
+  defibrillator in slot 6 behind the shotgun) downing a squad mate spawned
+  on him with the rifle at 1.5 m, then `item:6 goto:<name> crouch fire`,
+  revives him (the same soldier and ghost, full health, no respawn); a
+  recon (`--kit 1`, C4 in slot 6 behind the AP mine) on Sidi_Power_Plant,
+  `goto:static_av item:6 face:static_av fire back altfire`, throws the
+  charge onto the AV gun and sets it off from 13 m: 1000 damage from him,
+  the gun destroyed (its wreck's blast after).
 - **Orders** (IssueSquadOrder stores 0 and 1, SetAcceptOrder store 1): a
   joined leader's `SquadLeader.sendOrder` and a joined commander's orders
   (the map, the selected squads or the nearest leader's, the assets'
@@ -6223,17 +6259,36 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   `0x004bd2a0` puts every player's spawn time (slot `0x100`) at the
   countdown's end, so each soldier of the playing round spawns in it and
   the scripts' PlayerSpawn hears it. The rewrite's `GameLogic::onCountdown`
-  runs `GameWorld::restartPlayers`: the soldiers go (heard by no handler),
-  the kill counts start again, the players in the game wait out the
-  countdown (a client's spawn request too, in `HostedGame`); the vehicles,
-  control points and dropped kits stay, and so does the status (raising
-  Playing again without the vehicles' respawn would leave gpm_ti's Titan
-  tickets at 0). Before this, soldiers spawned while waiting for players
-  played on unknown to gpm_cq and stats.py: their deaths raised
-  AttributeErrors (`soldier`) and standing in a control point broke its
-  trigger (`killed`), so no capture; and a hosted Titan round's status
-  turned Playing after the Titans spawned: PAC's tickets (its Titan's
-  armour on the HUD) stayed 0.
+  runs it as the exe does: the status PreGame (the game modes drop their
+  triggers), `GameWorld::restartPlayers` (`0x004ce850`: the soldiers go,
+  heard by no handler; the kill counts start again, the players in the
+  game wait out the countdown, a client's spawn request too, in
+  `HostedGame`), `GameWorld::resetRound` (the rest of `0x004ce910`: the
+  object manager drops what the round made, slot `0x98`, after which the
+  reset asserts the PlayerControlObject and projectile maps empty; the
+  Titan sync starts over, `0x00561cf0`: so the spawned vehicles, the
+  Titans with their spawn points and carried spawners and supply points,
+  the rounds and mines in the world, the kits on the ground, the deployed
+  gadgets, drones, pods, parachutes, corpses, the commander's supply drops
+  and strikes go; the control points return to the level's teams and the
+  spawners to their start, `0x005ae580`, so the vehicles spawn anew), the
+  scripts' Reset event (`0x00444140` with event 0 and a 0, `0x00442f90`;
+  stats.py's onReset hears it always), then Playing again: the game modes
+  set their tickets and triggers anew, and gpm_ti's Titan tickets come
+  from the new Titans' VehicleSpawn. Before this, soldiers spawned while
+  waiting for players played on unknown to gpm_cq and stats.py: their
+  deaths raised AttributeErrors (`soldier`) and standing in a control
+  point broke its trigger (`killed`), so no capture; and a hosted Titan
+  round's status turned Playing after the Titans spawned: PAC's tickets
+  (its Titan's armour on the HUD) stayed 0.
+- **Triggers while waiting.** A script trigger's callback (`0x00442c80`:
+  the id, the trigger's object, the other, entered, the data) runs, as
+  the handlers do (`0x00444140`), only with the status Playing and the
+  round state 3 (game logic slots `0x164` / `0x168`) unless the record's
+  own flag (`+0x2c`) is set; who is inside is still tracked. So a soldier
+  spawned while a hosted round waits for players and standing in a
+  control point is no news to gpm_cq's onCPTrigger, which would read the
+  `killed` its unheard PlayerSpawn sets (`ScriptHost::update`).
 - **Spawns** asked for by a client (6/6) come once the player's spawn time
   is up (`0x004bb220`'s sv.spawnTime wait, also for man down), not at once.
   The spawn groups beside the control points' are made as the round goes
@@ -6798,6 +6853,42 @@ and steps the later moves again. The soldier is drawn and seen from the
 prediction. The moves a move-to-input conversion shares
 (`net::soldierInputFromMove`) make the server and the prediction step the
 same input.
+
+**On moving objects.** The soldier response's object pass (`0x006c5140`
+over the broad phase's movers, `0x006dcce0`) is the same on a client: its
+soldier meets the ghosts' collision too, each where its last update put
+it, and a contact takes the object's point velocity, which carries the
+soldier standing on it (`0x006c3890`; `0x006ca660` / `0x006ca3b0` give
+what stands on a Titan its velocity). The replay steps the control
+object's tree alone (above), so the ghosts stay put while the moves run
+again. `SoldierPrediction` takes the moving objects near it each tick
+from the client's round (`GameWorld::soldierMovers`, the same list
+`stepSoldier` gives the server's soldiers: each body's soldier LOD, a
+Titan's own team's forcefield mesh, the posed collisionPart children). A
+Titan's ghost builds the Titan's merged collision on the client
+(`GameWorld::addRemoteTitan`: the exe's client makes the ghost's whole
+object tree, each node's mesh in the broad phase; the rewrite gives the
+Titan's body the tree's soldier and projectile LODs and the cannons'
+parts as the server's `rebuildTitanMeshes` does, without the server's
+Titan logic). A Titan's ghost carries no velocity (the SimpleObject
+writer `0x005ff5d0` skips the node's vectors for a Titan, `0x00561d90`;
+the exe's client moves its Titans itself, the Titan sync's tick
+`0x00561e20` → `0x005aca70` running in its frame `0x00590e10`): the
+client takes the velocity from the updates' positions and ticks and
+moves the Titan's body on at it between updates. Measured on 127.0.0.1
+(Suez_Canal gpm_ti, spawned in the EU Titan): standing, before 490
+records corrected by 11.8 cm on average, at most 87 cm, 481 over 1 cm
+(the prediction fell through the deck); after, 0.0 mm, at most 0.1 mm,
+none over 1 cm; standing on the Titan moving at 1.08 m/s (`titan:<x>:<z>`
+as commander), none over 1 cm once it is under way; walking on its decks
+1.6 cm on average (at most 47 cm, pressed against a wall after a turn).
+What is left is the orientation's 14-bit quaternion (`0x00687dc0` /
+`0x00687f40`, `(v + 1) / 2 x 16383` truncated: a 0 comes back as
+−6.1e-5), which tilts the client's Titan by about 2e-4 rad, a centimetre
+at its spawn room 47 m from its origin: the soldier's floor contacts,
+whose tolerance is 4 cm, then catch the deck's seams on other ticks than
+the server's (with the server's exact orientation put in, walking there
+corrected nothing over 1 cm).
 
 The exe's replay is the game client's interface `0x1d4c2` (the client
 object's `+0xa8`, `0x004b35b0`; vtable `0x00928fa8`) slot `0x10`,
@@ -11058,7 +11149,10 @@ state, input, kills, deaths and team kills.
   ragdoll mode (`0x005f0f20`). The team test is the paddles' hit's (game
   logic slot `0x100`, `0x004ba5c0`, before `0x005a3bd0`): it goes on only
   for a teammate on a downed body or an enemy on a standing one, so an
-  enemy's shock leaves a downed body as it is (`shockDowned`).
+  enemy's shock leaves a downed body as it is (`shockDowned`) and a
+  teammate's a standing soldier (the projectiles' hit: a medic shocking
+  again after the revive killed the revived soldier with friendly fire
+  on).
 - **Final death:** at the end of man down, or when the player respawns
   (after `sv.spawnTime`, 15 s), the scripts get `PlayerDeath`. With the
   real `bf2/stats` and game-mode scripts, this is when the team loses its

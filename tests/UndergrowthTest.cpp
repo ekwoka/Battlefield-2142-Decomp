@@ -355,3 +355,56 @@ TEST(Undergrowth_SwayOffsets)
 	again.seed();
 	CHECK(again.speed == sway.speed && again.amplitude == sway.amplitude); // deterministic
 }
+
+// The winding Undergrowth.fx's CullMode CW relies on: the shipped meshes
+// (the editor's .obj import 0x1010cb70 negates z) have their faces' normals
+// by winding pointing inwards, so a closed mesh encloses a negative volume
+// and the faces towards the camera are the ones counter-clockwise on
+// screen (GpuContext's undergrowth pipeline culls the front faces).
+TEST(Undergrowth_MeshesWoundInwards)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	int rocks = 0, inward = 0, outward = 0;
+	std::map<std::string, float> volumes;
+	for (const auto& entry : fs::directory_iterator(fs::path(gameDir) / "mods/bf2142/Levels")) {
+		auto zip = dice::hfe::io::ZipArchive::open((entry.path() / "client.zip").string());
+		std::vector<uint8_t> data;
+		if (!zip || !zip->read("Undergrowth.dat", data)) {
+			continue;
+		}
+		const auto materials = terrain::parseUndergrowthData(data);
+		if (!materials) {
+			continue;
+		}
+		for (const auto& material : *materials) {
+			for (const auto& type : material.types) {
+				float volume = 0;
+				for (size_t i = 0; i + 2 < type.indices.size(); i += 3) {
+					const auto& a = type.vertices[type.indices[i]].position;
+					const auto& b = type.vertices[type.indices[i + 1]].position;
+					const auto& c = type.vertices[type.indices[i + 2]].position;
+					volume += (a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) +
+								  a[2] * (b[0] * c[1] - b[1] * c[0])) /
+						6;
+				}
+				volumes[type.mesh] = volume;
+			}
+		}
+	}
+	for (const auto& [mesh, volume] : volumes) {
+		std::string lowered = mesh;
+		std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (lowered.find("rock") != std::string::npos && volume != 0) {
+			++rocks;
+			CHECK(volume < 0);
+		}
+		inward += volume < 0;
+		outward += volume > 0;
+	}
+	std::printf("  %zu meshes: %d inward, %d outward, %d rocks\n", volumes.size(), inward, outward, rocks);
+	CHECK(rocks >= 10);
+	CHECK(inward > 5 * outward);
+}

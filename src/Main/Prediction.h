@@ -20,6 +20,15 @@
 // player's input, one tick of the control object's tree (0x0057b7f0,
 // 0x0057b960, 0x0057ba00) and of the physics managers. This one follows
 // what the rewrite's own server sends (its last move already stepped):
+//   - the soldier meets the static objects and, as the exe's soldier
+//     response does on a client too (its object pass 0x006c5140 over the
+//     broad phase's movers, 0x006dcce0), the moving objects near it: the
+//     client round's bodies of the ghosts (a Titan's decks, a vehicle's
+//     roof), where their last updates put them and moving at their
+//     networked velocity, which carries the soldier standing on them
+//     (the contacts' relative velocity, 0x006c3890); the replay steps the
+//     soldier alone, the ghosts staying put, as 0x004b5000 steps only the
+//     control object's tree;
 //   - each move sent is stepped once (one 1/30 s tick, as the server's
 //     HostedGame takes one move a tick) and remembered with the state it
 //     left behind;
@@ -51,6 +60,15 @@ namespace dice::hfe::host {
 class SoldierPrediction {
 public:
 	explicit SoldierPrediction(const game::GameWorld& round) : m_round(round) {}
+
+	// Who the soldier is in the client's round: its team (a Titan's team
+	// forcefields) and its object (the ghost's), for the moving objects
+	// it meets (GameWorld::soldierMovers).
+	void setOwner(int team, uint32_t object)
+	{
+		m_team = team;
+		m_object = object;
+	}
 
 	// Starts predicting a soldier of this template at the server's state
 	// after `lastMove` (its feet, the record's position), with the moves
@@ -101,6 +119,8 @@ private:
 	void apply(const net::NetworkableState& state, const net::Vec3f& feet);
 
 	const game::GameWorld& m_round;
+	int m_team = 0;
+	uint32_t m_object = 0;
 	bool m_active = false;
 	game::SoldierControl m_control;
 	physics::SoldierBody m_body;

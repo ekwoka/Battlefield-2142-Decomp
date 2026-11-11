@@ -262,9 +262,20 @@ bool GpuContext::createPipelines(std::string& error)
 	m_surroundingPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
 		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);
+	// The undergrowth: Undergrowth.fx's every technique sets CullMode CW, so
+	// Direct3D's front faces (clockwise on screen) are the ones culled. Its
+	// meshes (Undergrowth.dat, made by the editor's .obj import 0x1010cb70,
+	// which negates z) are wound the other way round from the static meshes:
+	// their faces' normals by winding point inwards (79 of the 94 distinct
+	// shipped meshes enclose a negative volume, every rock among them), and the
+	// generator (0x1010ba40) turns them by a rotation and copies the indices
+	// as they are. So the near side of a rock or a grass tuft is drawn and
+	// its far side culled.
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_FRONT;
 	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
 		k_undergrowth_frag_msl_size, 5, 2, "undergrowth", 1, 2);
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	info.depth_stencil_state.enable_depth_test = false;
 	info.depth_stencil_state.enable_depth_write = false;
 	m_skyPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,

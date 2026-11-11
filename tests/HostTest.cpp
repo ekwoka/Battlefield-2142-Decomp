@@ -1510,6 +1510,101 @@ TEST(NetHost_VehiclePrediction)
 	client.disconnect();
 }
 
+// A joined client's soldier standing and walking on a vehicle's roof: the
+// prediction meets the moving objects near it (GameWorld::soldierMovers,
+// the soldier broad phase 0x006dcce0) as the server's soldier does, so it
+// stays on the roof rather than falling through it between the records
+// (before: corrections on nearly every record). Needs $BF2142_GAME_DIR.
+TEST(NetHost_PredictionOnAVehicleRoof)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		std::printf("  (BF2142_GAME_DIR not set: skipped)\n");
+		return;
+	}
+	HostGarage garage(gameDir, "eu_apc", {0, 0, 12});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	dice::hfe::game::GameWorld& round = *garage.round;
+	host::HostSetup setup;
+	setup.level = "Garage";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, garage.logic, garage.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Rider";
+	client.world().setGhostTemplates([&garage](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = garage.templates.findById(id);
+		return t ? net::ghostTemplateFrom(garage.templates, *t) : net::GhostTemplateNode {};
+	});
+	host::SoldierPrediction soldier(round);
+	client.onMoveSent = [&](const net::PlayerMove& move) { soldier.step(move); };
+	client.sendOnTicks = true;
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	dice::hfe::game::SoldierInput walk;
+	uint32_t records = 0;
+	const auto step = [&] {
+		client.setInput(net::playerInputFrom(walk));
+		client.update();
+		const net::RemoteWorld& world = client.world();
+		if (world.controlRecords() != records) {
+			records = world.controlRecords();
+			const net::ControlState* state = world.controlState();
+			const net::ControlObjectRecord& record = world.controlObject();
+			if (state && !state->groups.empty() && state->groups.front().kind == net::NetworkableKind::Soldier) {
+				if (!soldier.active()) {
+					soldier.start(garage.templates.find("us_light_soldier"), record.lastMove, state->groups.front(),
+						record.position);
+				} else {
+					soldier.reconcile(record.lastMove, state->groups.front(), record.position);
+				}
+			}
+		}
+		client.simulatedTick();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(33));
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 8000));
+	const int me = client.world().localPlayer();
+	client.selectTeam(2);
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }, 6000));
+	soldier.setOwner(2, info.soldier);
+	// Dropped onto the roof; it settles there.
+	const dice::hfe::world::Object* apc = garage.objects.find(garage.vehicle);
+	round.setSoldierPosition(info.soldier, {apc->position().x, apc->position().y + 4.0f, apc->position().z});
+	for (int i = 0; i < 60; ++i) {
+		step();
+	}
+	CHECK(pumpUntil(step, [&] { return soldier.active(); }, 4000));
+	const host::SoldierPrediction::Stats before = soldier.stats();
+	// Standing two seconds, then a slow walk along the roof and back.
+	for (int i = 0; i < 30 * 4; ++i) {
+		walk = {};
+		walk.throttle = i < 60 ? 0.0f : i < 90 ? 0.4f : -0.4f;
+		step();
+	}
+	const host::SoldierPrediction::Stats& st = soldier.stats();
+	const uint32_t taken = st.records - before.records;
+	const double mean = taken ? (st.sumCorrection - before.sumCorrection) / taken : 0.0;
+	round.playerInfo(me, info);
+	std::printf("  on the roof (%.2f m up): %u records, correction mean %.4f m (%u over 1 cm)\n", info.position.y, taken,
+		mean, st.corrections - before.corrections);
+	CHECK(info.alive && info.position.y > 1.5f); // on the roof, not beside the vehicle
+	CHECK(taken > 60);
+	CHECK(mean < 0.01);
+	CHECK(st.corrections - before.corrections < taken / 10);
+	client.disconnect();
+}
+
 // The heavy IFV's repair cells on a joined client: the root's state carries
 // its armored children (mask 0x800000, the root's list in post-order,
 // armor.fullChildSync eighths), the host the cells' state among them

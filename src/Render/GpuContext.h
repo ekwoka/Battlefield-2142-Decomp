@@ -263,7 +263,8 @@ public:
 	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_roadMeshPipeline; }
 	// The same state for decals (decal.vert / decal.frag).
 	SDL_GPUGraphicsPipeline* decalPipeline() const { return m_decalPipeline; }
-	// Opaque, alpha-tested; undergrowth uniforms in the vertex stage.
+	// Opaque, alpha-tested, Direct3D's front faces culled (Undergrowth.fx's
+	// CullMode CW); undergrowth uniforms in the vertex stage.
 	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_undergrowthPipeline; }
 	// Particles: depth-tested, not written; blended or added.
 	SDL_GPUGraphicsPipeline* uiPipeline() const { return m_uiPipeline; }

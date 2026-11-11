@@ -110,6 +110,29 @@ TEST(GameWorld_DestroyedObjectsRespawnAfterTheDelay)
 	CHECK(level.count("tank_pac") == 1);
 }
 
+// The countdown's reset of a hosted round (GameLogic::reset 0x004ce910):
+// what the round made goes, the control points return to the level's
+// teams and the spawners to their start, so the vehicles spawn anew.
+TEST(GameWorld_ResetRoundRespawnsTheVehicles)
+{
+	Level level;
+	game::GameWorld world(level.templates, level.objects);
+	world.startRound();
+	world.tick(1 / 30.0f);
+	CHECK(level.count("tank_us") == 1);
+	const uint32_t first = level.objects.objects().back()->id();
+	// The point taken: the spawner's next tank would be PAC's.
+	world.setControlPointTeam(7, 1);
+	CHECK(world.spawners()[0]->team() == 1);
+	world.resetRound();
+	CHECK(level.objects.find(first) == nullptr);
+	CHECK(world.controlPoints()[0].team == 2 && world.controlPoints()[0].object->team() == 2);
+	CHECK(world.spawners()[0]->team() == 2);
+	world.tick(1 / 30.0f);
+	CHECK(level.count("tank_us") == 1 && level.count("tank_pac") == 0);
+	CHECK(level.objects.objects().back()->id() != first);
+}
+
 // Two control points 200 m apart with a spawn point each, 20 m apart:
 // EU's faces PAC's, PAC's looks sideways. Flat ground, rifles that kill in three hits.
 struct Range {
@@ -1083,6 +1106,8 @@ TEST(GameWorld_DefibrillatorRevives)
 	defib->settings()["velocity"] = "60";
 	defib->settings()["ammo.magSize"] = "1"; // one shock, then 0.6 s to recharge
 	defib->settings()["ammo.reloadTime"] = "0.6";
+	defib->settings()["ammo.nrOfMags"] = "4";
+	defib->settings()["ammo.autoReload"] = "1";
 	world::ObjectTemplate* shock = range.templates.create("GenericProjectile", "shock");
 	shock->settings()["damage"] = "1000";
 	shock->settings()["damageMandownSoldiers"] = "1";
@@ -1119,6 +1144,30 @@ TEST(GameWorld_DefibrillatorRevives)
 	CHECK(info.alive && !info.manDown && range.count("PlayerRevived") == 1 && range.count("PlayerDeath") == 0);
 	// Raised to the shock's restoreHP (0x004c1960).
 	CHECK(std::abs(range.world->hitPoints(info.soldier) - 100) < 1e-3f);
+	// Shocked again standing (the paddles' hit, 0x004ba5c0, goes on only
+	// for a teammate on a downed body): no harm, friendly fire or not.
+	game::GameWorld::FriendlyFire friendlyFire;
+	friendlyFire.soldier = friendlyFire.vehicle = friendlyFire.soldierSplash = friendlyFire.vehicleSplash = 100;
+	range.world->setFriendlyFire(friendlyFire);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 25; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	for (int aim : {-60, -30, -10}) {
+		input = {};
+		input.fire = true;
+		input.aimPitch = static_cast<float>(aim);
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 3; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		range.world->setPlayerInput({});
+		for (int i = 0; i < 25; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	}
+	range.world->playerInfo(bot, info);
+	CHECK(info.alive && std::abs(range.world->hitPoints(info.soldier) - 100) < 1e-3f);
 	// Left down, the body goes after the man-down time.
 	range.world->setPlayerInput({});
 	range.world->setManDownTime(1);

@@ -6224,6 +6224,22 @@ int runGame(Options& options, Session& session)
 		}
 		std::map<uint16_t, uint32_t> ragdollUpdates; // ghost -> the ragdoll update last applied
 		std::map<uint16_t, uint32_t> projectileUpdates; // a projectile ghost -> the update last applied to its round
+		// A Titan's ghost carries no velocity (its SimpleObject writer,
+		// 0x005ff5d0, skips the node's vectors for a Titan, 0x00561d90): the
+		// exe's client moves its Titans itself (the Titan sync's tick,
+		// 0x00561e20 -> 0x005aca70, runs in the client's frame 0x00590e10
+		// too). Here the velocity comes from its updates' positions and
+		// ticks, and the body goes on at it between updates, so what stands
+		// on its decks is carried (the soldier contacts take the body's
+		// velocity, as 0x006ca660 / 0x006ca3b0 give what stands on a Titan
+		// its velocity).
+		struct TitanGhost {
+			uint32_t tick = 0;
+			net::Vec3f position;
+			physics::Vec3 velocity;
+			int framesSince = 0;
+		};
+		std::map<uint16_t, TitanGhost> titanGhosts;
 		std::map<int, uint32_t> reloadsSeen;          // a player -> the reloads (mask 0x10000) already shown
 		struct TimedCommand {
 			float at;
@@ -6295,9 +6311,20 @@ int runGame(Options& options, Session& session)
 					// The requests go once (spawn, spawn:<group>, kit:<index>,
 					// team:<n>, suicide, say:<word>).
 					if (op == "spawn" || op == "kit" || op == "team" || op == "suicide" || op == "say" || op == "squad"
-						|| op == "joinsquad" || op == "leader") {
+						|| op == "joinsquad" || op == "leader" || op == "commander" || op == "accept" || op == "titan") {
 						if (remoteActionsDone.insert(stepIndex).second) {
-							if (op == "spawn") {
+							if (op == "commander") {
+								client.applyForCommander();
+							} else if (op == "accept") {
+								client.answerCommanderOffer(true); // the command offered
+							} else if (op == "titan") {
+								// titan:<x>:<z>: the commander's Titan move (Titan event kind 1).
+								float x = 0, z = 0;
+								if (second != std::string::npos
+									&& std::sscanf(step.c_str() + second + 1, "%f:%f", &x, &z) == 2) {
+									client.commanderTool(net::CommanderToolUse::MoveTitan, x, z);
+								}
+							} else if (op == "spawn") {
 								client.selectSpawnGroup(second == std::string::npos ? -1 : static_cast<int>(arg));
 							} else if (op == "kit") {
 								localKit = static_cast<int>(arg);
@@ -6395,6 +6422,7 @@ int runGame(Options& options, Session& session)
 				std::string facingName = facing;
 				std::replace(facingName.begin(), facingName.end(), '_', ' ');
 				const net::RemoteObject* facedSoldier = nullptr;
+				bool facedDown = false; // a man-down soldier: aimed at where it lies
 				float facedDistance = 1e9f;
 				const net::RemotePlayer* self = client.world().player(client.world().localPlayer());
 				for (const net::RemotePlayer& p : facing.empty() || !prediction.active() ? std::vector<net::RemotePlayer> {}
@@ -6407,6 +6435,7 @@ int runGame(Options& options, Session& session)
 						if (d < facedDistance) {
 							facedDistance = d;
 							facedSoldier = them;
+							facedDown = p.manDown;
 						}
 					}
 				}
@@ -6443,9 +6472,15 @@ int runGame(Options& options, Session& session)
 				if (facedSoldier) {
 					const net::Vec3f me = prediction.feet();
 					const float want = std::atan2(facedSoldier->position.x - me.x, facedSoldier->position.z - me.z) * 57.29578f;
-					act.turn = std::clamp(std::remainder(want - remoteLook.yaw, 360.0f), -10.0f, 10.0f);
-					// The aim's pitch at the soldier's chest (1.2 m over its feet).
-					const float rise = facedSoldier->position.y + 1.2f - (me.y + 1.6f);
+					// From where the predicted soldier looks (the spawn point's
+					// heading on, which the camera's own sum of turns lacks).
+					const float looking = prediction.active() ? prediction.lookYaw() : remoteLook.yaw;
+					act.turn = std::clamp(std::remainder(want - looking, 360.0f), -10.0f, 10.0f);
+					// The aim's pitch at the soldier's chest (1.2 m over its feet),
+					// or down at where a man-down body lies (a medic's shock, as
+					// the bots' revive looks, BBPRevive), from the eyes the
+					// rounds leave from (GameWorld::fire: 1.6 m over the feet).
+					const float rise = facedSoldier->position.y + (facedDown ? 0.0f : 1.2f) - (me.y + 1.6f);
 					act.aimPitch = std::atan2(rise, std::max(facedDistance, 0.1f)) * 57.29578f;
 				}
 				remoteLook.yaw = std::remainder(remoteLook.yaw + act.turn, 360.0f); // the camera's, as the window's mouse turns it
@@ -6504,6 +6539,18 @@ int runGame(Options& options, Session& session)
 				} else if (state && record.vehicle == 0 && !state->groups.empty()
 					&& state->groups.front().kind == net::NetworkableKind::Soldier && !(state->groups.front().mask & 0x10000)) {
 					carPrediction.stop();
+					// Our team and soldier object: the moving objects it meets
+					// (a Titan's own team's forcefields).
+					{
+						const auto object = ghostObjects.find(record.ghost);
+						int team = 0;
+						for (const net::RemotePlayer& p : own.playerList()) {
+							if (p.local) {
+								team = p.team;
+							}
+						}
+						prediction.setOwner(team, object != ghostObjects.end() ? object->second : 0);
+					}
 					if (!prediction.active()) {
 						const auto object = ghostObjects.find(record.ghost);
 						const world::Object* soldier = object != ghostObjects.end() ? objects.find(object->second) : nullptr;
@@ -6618,10 +6665,31 @@ int runGame(Options& options, Session& session)
 						object->setPosition(at);
 						object->setRotation(turned);
 						if (ghost.kind != net::NetworkableKind::Soldier) {
-							const physics::Vec3 v = ghost.hasVelocity
+							physics::Vec3 v = ghost.hasVelocity
 								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
 								: physics::Vec3 {};
-							round.placeRemoteBody(it->second, {at.x, at.y, at.z},
+							physics::Vec3 place {at.x, at.y, at.z};
+							if (round.isRemoteTitan(it->second)) {
+								TitanGhost& titan = titanGhosts[ghost.ghost];
+								if (ghost.lastTick != titan.tick) {
+									if (titan.tick != 0 && ghost.lastTick > titan.tick) {
+										const float seconds = static_cast<float>(ghost.lastTick - titan.tick) / 30.0f;
+										titan.velocity = {(ghost.position.x - titan.position.x) / seconds,
+											(ghost.position.y - titan.position.y) / seconds,
+											(ghost.position.z - titan.position.z) / seconds};
+									}
+									titan.tick = ghost.lastTick;
+									titan.position = ghost.position;
+									titan.framesSince = 0;
+								} else {
+									++titan.framesSince;
+								}
+								v = titan.velocity;
+								place = place + v * (static_cast<float>(titan.framesSince) / 30.0f);
+								at = {place.x, place.y, place.z};
+								object->setPosition(at);
+							}
+							round.placeRemoteBody(it->second, place,
 								physics::Mat3::fromYawPitchRoll({turned.x, turned.y, turned.z}), v);
 						}
 						// A control point taken (its networkable's team, 0x006084b0):
@@ -6654,6 +6722,7 @@ int runGame(Options& options, Session& session)
 					if (world::Object* object = objects.create(t, at, turned)) {
 						object->setTeam(ghost.team);
 						ghostObjects[ghost.ghost] = object->id();
+						round.addRemoteTitan(object->id()); // its decks' collision (a Titan's ghost)
 						if (t->typeName() == "GenericProjectile") {
 							const physics::Vec3 v = ghost.hasVelocity
 								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
@@ -6924,7 +6993,16 @@ int runGame(Options& options, Session& session)
 				// The spawn screen's kit (spawnManager.setPlayerKit; the
 				// original's spawn screen sends the kit selected there, as
 				// the local round takes it: not always the team's first, the
-				// recon's).
+				// recon's); --kit's (by name or its number from 1) when given.
+				if (!options.kit.empty()) {
+					const int team = session.joinTeam != 0 ? session.joinTeam : me ? me->team : 2;
+					const auto& kits = gameLogic.team(team == 1 ? 1 : 2).kits;
+					for (size_t i = 0; i < kits.size(); ++i) {
+						if (kits[i].name == options.kit || std::to_string(i + 1) == options.kit) {
+							localKit = static_cast<int>(i);
+						}
+					}
+				}
 				client.selectKit(localKit);
 				client.selectSpawnGroup(-1);
 			}
@@ -7215,14 +7293,25 @@ int runGame(Options& options, Session& session)
 				scripts.setGameStatus(game::GameStatus::Playing);
 				scripts.setRoundPlaying(false);
 				gameLogic.onPlaying = [&scripts] { scripts.setRoundPlaying(true); };
-				// The countdown's restart (the original's reset, which also
-				// respawns the vehicles and so raises PreGame and Playing
-				// again; the rewrite's keeps the vehicles and the status).
-				// The spawns wait for its end; the round steps before the
-				// game logic here (the original's logic first), so a tick
-				// more lets the round be playing when they come.
-				gameLogic.onCountdown = [&round, &gameLogic] {
+				// The countdown's restart (the round's slot 0x24, 0x004be630):
+				// the status PreGame (the game modes drop their triggers),
+				// GameLogic::reset (0x004ce910: the soldiers, then what the
+				// round made, the control points and the spawners back at
+				// their start, GameWorld::restartPlayers and resetRound), the
+				// scripts' Reset event (0x00444140 with event 0 and a 0, 0x00442f90;
+				// stats.py's onReset always hears it), then Playing
+				// again (0x004bd2a0): the game modes set their tickets and
+				// triggers anew, and the vehicles spawn after it (gpm_ti's
+				// Titan tickets come from their VehicleSpawn). The spawns
+				// wait for its end; the round steps before the game logic
+				// here (the original's logic first), so a tick more lets the
+				// round be playing when they come.
+				gameLogic.onCountdown = [&round, &gameLogic, &scripts] {
+					scripts.setGameStatus(game::GameStatus::PreGame);
 					round.restartPlayers(gameLogic.startCountdown() + 2.0f / 30.0f);
+					round.resetRound();
+					scripts.raise("Reset", {game::ScriptValue::integer(0)});
+					scripts.setGameStatus(game::GameStatus::Playing);
 				};
 				std::printf("waiting for %d players, then %d s to the start\n", sv.numPlayersNeededToStart, sv.startDelay);
 			} else {

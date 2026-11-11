@@ -246,7 +246,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
 | `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. It lands on whatever is under the spot (a roof, a deck or the terrain) when a 4 × 6 m footprint there is clear and level with the soldier; else on the nearest such spot round him, else on the nearest open ground within 60 m. A leading `goto:` in `--actions` places the soldier first (the rest run in the seat). |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
-| `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1). |
+| `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1), also on a server joined with `--play`. |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
 | `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 altfire:3 item:2 prone:20 jump"` (`altfire` also zooms, as the right button; `goto:x/y/z/yaw` puts the soldier at a spot facing a way). Each prints the weapon in hand, the soldier's place, the rounds' hits since the last and the `--spawn` targets' hit points. |
 | `--unlock-all` | Every kit unlock. |
@@ -297,7 +297,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--play [1\|2]` | On a server, spawn, and ask for that team. |
 | `--spectate` | Join as a spectator (the host needs `sv.allowSpectators 1`). |
 | `--walk` | Without a window, walk and turn (a check of the client's prediction). |
-| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `altfire` / `altstop`, `reload`, `forward`, `back`, `throttle:<x>`, `strafe:<x>`, `sprint` / `walk`, `stop`, `turn:<deg>`, `face:<player>` (`_` for a space; `enemy`, the nearest; or a template, e.g. `us_heavy_mech`), `goto:<same>` (and walk up to it), `still`, `zoom`, `pitch:<deg>`; presses `use`, `seat:<n>`, `item:<n>`, `jump`, `nextitem`, `previtem`, `weapon`, `firemode`, `flare`; requests `team:<n>`, `kit:<index>`, `spawn[:<group>]`, `leader` (spawn on the squad leader), `squad:<n>` (make one), `joinsquad:<n>`, `suicide`, `say:<word>`. |
+| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `altfire` / `altstop`, `reload`, `forward`, `back`, `throttle:<x>`, `strafe:<x>`, `sprint` / `walk`, `stop`, `turn:<deg>`, `face:<player>` (`_` for a space; `enemy`, the nearest; or a template, e.g. `us_heavy_mech`), `goto:<same>` (and walk up to it), `still`, `zoom`, `pitch:<deg>`; presses `use`, `seat:<n>`, `item:<n>`, `jump`, `nextitem`, `previtem`, `weapon`, `firemode`, `flare`; requests `team:<n>`, `kit:<index>`, `spawn[:<group>]`, `leader` (spawn on the squad leader), `squad:<n>` (make one), `joinsquad:<n>`, `suicide`, `say:<word>`, `commander` (apply), `accept` (take the command offered), `titan:<x>:<z>` (as commander, move the Titan). `face`/`goto` turn from where the soldier looks and aim at a man-down soldier's body (a medic's shock). |
 | `--probe host[:port]` | Only shake hands and print what the server sends. |
 | `--servers` | List the servers the master server knows. |
 | `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |
