@@ -70,6 +70,7 @@ float SoldierBody::collideWithGround(const Ground& ground, float gravity, float 
 		if (i == 0 && m_groundNormal.y < normal.y) {
 			m_groundNormal = normal;
 			m_onGround = true;
+			groundVelocity = {};
 		}
 	}
 	if (scale < 1) {
@@ -393,6 +394,7 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 		if (contact.point.y < lowest + soldier::kFloorTolerance && m_groundNormal.y < normal.y) {
 			m_groundNormal = normal;
 			m_onGround = true;
+			groundVelocity = mover ? mover->pointVelocity(contact.point) : Vec3 {};
 		}
 	}
 	return true;
@@ -655,6 +657,7 @@ void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 	const Vec3 start = position;
 	m_onGround = false; // the response's +0xf9 and normal, each tick
 	m_groundNormal = {0, 0, 0};
+	groundVelocity = {};
 	collideWithGround(ground, gravity);
 	collideWithObjects(seconds);
 	collideWithSoldiers(1);

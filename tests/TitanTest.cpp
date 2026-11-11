@@ -2997,3 +2997,43 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 		}
 	}
 }
+
+// Standing still on a moving Titan's deck: the soldier moves with it (its
+// measured velocity is the deck's) but its animations see no movement, as
+// the walker's input takes the floor's velocity off (0x0063ce30).
+TEST(Titan_SoldierStandingOnAMovingDeckDoesNotWalk)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.world->moveTitan(1, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	level.run(20);
+	const auto pac = *level.titan(1);
+	const world::Object* titan = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({titan->rotation().x, titan->rotation().y, titan->rotation().z});
+	CHECK(level.world->spawnPlayer(1) != nullptr);
+	const int me = level.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(me, info);
+	CHECK(level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({0, 11.5f, -40})));
+	level.run(2);
+	float carried = 0, animated = 0;
+	for (int i = 0; i < 90; ++i) {
+		level.run(1 / 30.0f);
+		const physics::SoldierBody* body = level.world->soldierBody(me);
+		CHECK(body != nullptr);
+		if (!body) {
+			break;
+		}
+		carried = std::max(carried, std::sqrt(physics::lengthSquared(body->measuredVelocity)));
+		animated = std::max(animated, std::sqrt(physics::lengthSquared(body->animationVelocity())));
+	}
+	std::fprintf(stderr, "  on the moving deck: measured %.3f m/s, animation %.3f m/s\n", carried, animated);
+	CHECK(carried > 0.2f); // it rides along
+	CHECK(animated < 0.1f); // and stands
+}

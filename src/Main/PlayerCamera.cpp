@@ -179,7 +179,8 @@ bool PlayerCamera::current(Me& me) const
 	me.origin = {body->position.x, body->position.y, body->position.z};
 	// The first-person systems see what the third-person ones do: the
 	// measured movement (GameWorld::stepAnimation).
-	me.velocity = {body->measuredVelocity.x, body->measuredVelocity.y, body->measuredVelocity.z};
+	const physics::Vec3 moving = body->animationVelocity();
+	me.velocity = {moving.x, moving.y, moving.z};
 	me.bodyYaw = body->yawDegrees;
 	me.yaw = info.yaw;
 	me.aimPitch = info.aimPitch;

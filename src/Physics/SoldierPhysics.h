@@ -191,6 +191,21 @@ public:
 	// 1e-6 zero. `velocity` holds the pending push into a floor between
 	// ticks (one tick of gravity); a soldier held still measures 0.
 	Vec3 measuredVelocity;
+	// The velocity of what it stands on (slot 0xd8): a moving object's under
+	// the feet this step, zero on the ground and static objects.
+	Vec3 groundVelocity;
+	// The movement an animation sees (as the walker's input, 0x0063ce30):
+	// the measured velocity, less the ground's when that moves, and then
+	// none under 0.7 m/s (|v|^2 < 0.49, *0x00976200): standing on a moving
+	// Titan is standing.
+	Vec3 animationVelocity() const
+	{
+		if (groundVelocity.x == 0 && groundVelocity.y == 0 && groundVelocity.z == 0) {
+			return measuredVelocity;
+		}
+		const Vec3 relative = measuredVelocity - groundVelocity;
+		return lengthSquared(relative) < 0.49f ? Vec3 {} : relative;
+	}
 	Vec3 acceleration;      // gravity for the next tick
 	Vec3 impulse;           // velocity change for the next tick
 
