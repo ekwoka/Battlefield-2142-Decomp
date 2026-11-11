@@ -377,6 +377,8 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_motion.clear();
 	m_nextGhost = kFirstGhost;
 	m_spawnGroups.clear();
+	m_squadSpawnGroups.clear();
+	m_vehicleSpawnGroups.clear();
 	m_requestsSent.clear();
 	m_ordersSent.clear();
 	m_offerSent = {-1, -1, -1};
@@ -1150,10 +1152,34 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			client.stage = Client::Stage::Playing;
 			break;
 		}
-		case net::kNeSelectSpawnGroup: // 0x004c1d50's request
-			m_round->setSpawnChoice(player, info.payloadInt());
+		case net::kNeSelectSpawnGroup: { // 0x004c1d50's request
+			// A squad's group: its leader, or the leader's beacon that holds
+			// the squad's spawn point once set down; a vehicle's group: that
+			// vehicle; else a control point's.
+			const int group = info.payloadInt();
+			game::GameWorld::PlayerInfo me;
+			m_round->playerInfo(player, me);
+			bool taken = false;
+			for (const auto& [squad, id] : m_squadSpawnGroups) {
+				if (id == group && squad == std::make_pair(me.team, me.squad)) {
+					m_round->setSpawnChoice(player, m_round->squadBeacon(me.team, me.squad)
+							? game::GameWorld::kSpawnOnBeacon
+							: game::GameWorld::kSpawnOnLeader);
+					taken = true;
+				}
+			}
+			for (const auto& [vehicle, id] : m_vehicleSpawnGroups) {
+				if (id == group) {
+					m_round->setSpawnVehicle(player, vehicle);
+					taken = true;
+				}
+			}
+			if (!taken) {
+				m_round->setSpawnChoice(player, group);
+			}
 			client.spawnRequested = true;
 			break;
+		}
 		case net::kNeSelectTeam: { // 0x004c1dc0's request; 0x004b0690 case 7 -> the game logic's slot 0x60
 			const int team = info.payloadInt();
 			if (m_round->setPlayerTeam(player, team)) {
@@ -1205,6 +1231,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			if (!name.empty()) {
 				client.name = name;
 				m_names[player] = name;
+				m_round->setPlayerName(player, name);
 				if (client.full && !reservedSlotCheck(id)) {
 					return; // refused: the server is full
 				}
@@ -1782,8 +1809,11 @@ void HostedGame::applyMoves()
 		}
 		m_round->setInput(client.player, input);
 		game::GameWorld::PlayerInfo me;
+		// A spawn asked for comes once the player's spawn time has (the
+		// death's sv.spawnTime wait, 0x004bb220), and not in the start's
+		// countdown (0x004bd2a0 sets every spawn time to its end).
 		if (client.spawnRequested && m_round->playerInfo(client.player, me) && !me.alive) {
-			if (m_round->spawnSoldier(client.player)) {
+			if (me.respawnIn <= 0 && m_logic->roundState() != 2 && m_round->spawnSoldier(client.player)) {
 				client.spawnRequested = false;
 			}
 		} else if (me.alive) {
@@ -2581,11 +2611,101 @@ std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
 	return out;
 }
 
+int HostedGame::freeSpawnGroupId(const std::set<int>& taken) const
+{
+	for (int id = 0xc0; id <= 0xff; ++id) {
+		if (!taken.count(id)) {
+			return id;
+		}
+	}
+	return -1; // 0x006347c0: none past 0xff
+}
+
 void HostedGame::trackSpawnGroups()
 {
 	std::map<int, net::SpawnGroupInfo> now;
 	for (const net::SpawnGroupInfo& info : spawnGroupsNow()) {
 		now.emplace(info.id, info);
+	}
+	// The groups made as the round goes, kept while their squad has a
+	// leader or their vehicle can be spawned in; sent while they have a
+	// place (the leader on foot and up, or the beacon; the vehicle).
+	std::set<int> taken;
+	for (const auto& [id, info] : now) {
+		taken.insert(id);
+	}
+	std::map<std::pair<int, int>, uint16_t> squads;
+	for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
+		if (p.squad == 0 || !p.squadLeader) {
+			continue;
+		}
+		// Placed at the leader while he is up on foot (where the spawn
+		// screen shows him), else at his beacon; a member who picks it
+		// spawns at the beacon when there is one (0x004c7f10 moves the
+		// squad's spawn point onto it).
+		uint16_t ghost = 0;
+		if (p.alive && !p.manDown && !p.vehicle && p.soldier) {
+			ghost = ghostOfObject(p.soldier);
+		} else if (const uint32_t beacon = m_round->squadBeacon(p.team, p.squad)) {
+			ghost = ghostOfObject(beacon);
+		}
+		squads[{p.team, p.squad}] = ghost;
+	}
+	std::map<uint32_t, int> vehicles;
+	for (int team = 1; team <= 2; ++team) {
+		for (const uint32_t vehicle : m_round->spawnVehicles(team)) {
+			vehicles[vehicle] = team;
+		}
+	}
+	for (auto it = m_squadSpawnGroups.begin(); it != m_squadSpawnGroups.end();) {
+		if (!squads.count(it->first)) {
+			it = m_squadSpawnGroups.erase(it); // the squad is gone (or has no leader)
+			continue;
+		}
+		taken.insert(it->second);
+		++it;
+	}
+	for (auto it = m_vehicleSpawnGroups.begin(); it != m_vehicleSpawnGroups.end();) {
+		if (!vehicles.count(it->first)) {
+			it = m_vehicleSpawnGroups.erase(it);
+			continue;
+		}
+		taken.insert(it->second);
+		++it;
+	}
+	const auto add = [&](int id, int team, uint16_t ghost) {
+		if (id >= 0 && ghost != 0) {
+			net::SpawnGroupInfo info;
+			info.id = id;
+			info.team = team;
+			info.ghost = ghost;
+			info.hasPoints = true;
+			now.emplace(id, info);
+		}
+	};
+	for (const auto& [squad, ghost] : squads) {
+		auto it = m_squadSpawnGroups.find(squad);
+		if (it == m_squadSpawnGroups.end()) {
+			const int id = freeSpawnGroupId(taken);
+			if (id < 0) {
+				continue;
+			}
+			taken.insert(id);
+			it = m_squadSpawnGroups.emplace(squad, id).first;
+		}
+		add(it->second, squad.first, ghost);
+	}
+	for (const auto& [vehicle, team] : vehicles) {
+		auto it = m_vehicleSpawnGroups.find(vehicle);
+		if (it == m_vehicleSpawnGroups.end()) {
+			const int id = freeSpawnGroupId(taken);
+			if (id < 0) {
+				continue;
+			}
+			taken.insert(id);
+			it = m_vehicleSpawnGroups.emplace(vehicle, id).first;
+		}
+		add(it->second, team, ghostOfObject(vehicle));
 	}
 	for (const auto& [id, info] : m_spawnGroups) {
 		if (!now.count(id)) {

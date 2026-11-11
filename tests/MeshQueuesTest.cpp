@@ -112,10 +112,25 @@ TEST(Culling_FrustumSpheresAndBoxes)
 
 // The material settings' CullMode 3 (D3DCULL_CCW, 0x10040070) stays for the
 // bundled and skinned meshes' opaque and alpha-tested materials; the
-// bundled mesh's draw sets 1 (none) for the blended ones (0x100c3880).
+// bundled mesh's draw sets 1 (none) for the blended ones (0x100c3880). The
+// static meshes keep it too, but for the trees' leaves (RaShaderLeaf's
+// CullMode NONE).
 TEST(MeshQueues_BundledAndSkinnedFacesCulled)
 {
-	CHECK(render::meshCulled(true, false));
-	CHECK(!render::meshCulled(true, true));
-	CHECK(!render::meshCulled(false, false)); // static meshes: left two-sided
+	CHECK(render::meshCulled(true, false, false));
+	CHECK(!render::meshCulled(true, true, false));
+	CHECK(render::meshCulled(false, false, false)); // a static mesh, a trunk
+	CHECK(!render::meshCulled(false, false, true)); // a tree's leaves
+}
+
+// A tree's leaves (0x100db6f0): a material with only its colour map (and
+// the SpecularLUT) that is not a "tile_" texture, whatever its alpha mode.
+TEST(MeshQueues_TreeLeavesByTheirMaps)
+{
+	const std::string lut = "Common\\Textures\\SpecularLUT_pow36.dds";
+	CHECK(render::treeLeaf(true, {"objects/vegitation/africa/af_treed01/textures/leaf_palmfrond_lod.dds", lut}));
+	CHECK(render::treeLeaf(true, {"leaf_af_savannahacacia_de.dds", lut}));
+	CHECK(!render::treeLeaf(true, {"tile_ncbark01de_lod.dds", lut}));              // an alpha-tested trunk
+	CHECK(!render::treeLeaf(true, {"afcolor.dds", "tile_africa_de.dds", lut}));    // BaseDetail
+	CHECK(!render::treeLeaf(false, {"leaf_af_savannahacacia_de.dds", lut}));       // not a tree
 }

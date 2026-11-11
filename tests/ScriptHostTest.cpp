@@ -368,3 +368,98 @@ TEST(ScriptHost_DivisionInAClass)
 				   "first = sorted([Old(3), Old(1), Old(2)])[0].v\\n'), 't', 'exec'), g)\n"
 				   "assert g['first'] == 1\n"));
 }
+
+// host.registerHandler (PythonHost.cpp, 0x00446860): a function already
+// registered for the event isn't added again, and without alwaysTrigger
+// its handler hears the event only while the game plays (0x00444140: the
+// game logic's status 1 and round state 3, which a hosted round reaches as
+// its countdown ends).
+TEST(ScriptHost_HandlersHearWhilePlaying)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	CHECK(host.run("import host\n"
+				   "calls = []\n"
+				   "def playing(*args): calls.append('playing')\n"
+				   "def always(*args): calls.append('always')\n"
+				   "host.registerHandler('PlayerScore', playing)\n"
+				   "host.registerHandler('PlayerScore', playing)\n"
+				   "host.registerHandler('PlayerScore', always, 1)\n"));
+	const game::ScriptArgs args {game::ScriptValue::player(0), game::ScriptValue::integer(1)};
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.raise("PlayerScore", args);
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(false); // a hosted round waiting for players or counting down
+	host.raise("PlayerScore", args);
+	host.setRoundPlaying(true);
+	host.raise("PlayerScore", args);
+	CHECK(host.run("assert calls == ['always', 'always', 'playing', 'always'], calls\n"));
+}
+
+// A hosted round's start (0x004c03b0): the countdown restarts the players
+// (GameLogic::reset through slot 0x24; GameWorld::restartPlayers) and they
+// spawn when it ends, so the game mode's PlayerSpawn hears every soldier
+// of the playing round. A soldier spawned while waiting for players and
+// kept (the rewrite's before) stood in a control point's trigger without
+// gpm_cq's `killed` (AttributeError in onCPTrigger) and died without
+// stats.py's `soldier`.
+TEST(ScriptHost_HostedStartRestartsThePlayers)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	std::string errors;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) {
+				errors += line + "\n";
+			}
+		});
+	const auto raise = [&host](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	CHECK(host.startGameMode("gpm_cq"));
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(false);
+	round.logic.waitToStart(1, 2, 30, [&round] { return static_cast<int>(round.world->playerList().size()); });
+	round.logic.onPlaying = [&host] { host.setRoundPlaying(true); };
+	round.logic.onCountdown = [&round] { round.world->restartPlayers(round.logic.startCountdown() + 2.0f / 30.0f); };
+	// An EU bot spawns at the harbour (in its trigger) while the server
+	// waits for players.
+	round.world->setSpawnTime(1);
+	const int bot = round.world->addPlayer("Bot", 2, true);
+	CHECK(round.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	bool restarted = false;
+	for (int tick = 0; tick < 30 * 5; ++tick) {
+		round.world->tick(1 / 30.0f);
+		round.logic.tick(1 / 30.0f);
+		host.update();
+		if (round.logic.roundState() == 2) {
+			restarted = restarted || (round.world->playerInfo(bot, info) && !info.alive);
+			CHECK(round.world->playerInfo(bot, info) && !info.alive); // no spawn in the countdown
+		}
+	}
+	CHECK(restarted && round.logic.roundState() == 3);
+	CHECK(round.world->playerInfo(bot, info) && info.alive && info.deaths == 0);
+	// Its death in the playing round runs stats.py's and gpm_cq's handlers.
+	round.world->setHitPoints(info.soldier, 0);
+	for (int tick = 0; tick < 60; ++tick) {
+		round.world->tick(1 / 30.0f);
+		round.logic.tick(1 / 30.0f);
+		host.update();
+	}
+	if (!errors.empty()) {
+		std::fprintf(stderr, "%s", errors.c_str());
+	}
+	CHECK(errors.empty());
+}

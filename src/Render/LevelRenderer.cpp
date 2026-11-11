@@ -540,9 +540,10 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		const geom::MeshMaterial& material = materials[m];
 		// Alpha-tested materials use "<name>_alphatest.dds" where it exists:
 		// the plain textures keep alpha in 0..0.5 for alpha to coverage
-		// (0x10151830).
+		// (0x10151830). A tree's maps all do (its +0x2a2 branch): its
+		// leaves are alpha-tested whatever their alpha mode (treeLeaf).
 		std::string diffusePath = material.maps.empty() ? std::string() : material.maps[0];
-		if (material.alphaMode == 2 && diffusePath.size() > 4) {
+		if ((material.alphaMode == 2 || tree) && diffusePath.size() > 4) {
 			const std::string alphaTest = diffusePath.substr(0, diffusePath.size() - 4) + "_alphatest.dds";
 			if (sources.files.exists(alphaTest)) {
 				diffusePath = alphaTest;
@@ -598,9 +599,13 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			}
 		}
 		// The static template's load (0x100de6d0): a geometry whose path has
-		// "vegitation" is a tree (+0x2a2); its alpha-tested materials are the
-		// leaves (RaShaderLeaf).
-		submesh.leaf = tree && material.alphaMode == 2;
+		// "vegitation" is a tree (+0x2a2); its leaves (treeLeaf, 0x100db6f0)
+		// are drawn with RaShaderLeaf, which alpha-tests them at 127 whatever
+		// their alpha mode (AlphaTestEnable true, AlphaRef 127).
+		submesh.leaf = treeLeaf(tree, material.maps);
+		if (submesh.leaf) {
+			submesh.alphaReference = 0.5f;
+		}
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
@@ -4157,7 +4162,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			if (queueOf(submesh, item.drawnFade()) != queue) {
 				continue;
 			}
-			useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended));
+			useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended, submesh.leaf));
 			const float space = bound->skinned ? static_cast<float>(submesh.normalKind) : transforms.normalSpace[0];
 			// Identity matrices without a part that animates them (RendDX9
 			// copies identities while +0x28c is unmade).
@@ -4498,7 +4503,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 			if (queueOf(submesh, 1.0f) != queue) {
 				continue;
 			}
-			useModelPipeline(queue, meshCulled(gpuMesh->bundled || gpuMesh->skinned, submesh.blended));
+			useModelPipeline(queue, meshCulled(gpuMesh->bundled || gpuMesh->skinned, submesh.blended, submesh.leaf));
 			transforms.normalSpace[0] = gpuMesh->skinned ? static_cast<float>(submesh.normalKind) : gpuMesh->bundled ? 1.0f : 0.0f;
 			if (gpuMesh->skinned) {
 				if (submesh.rig < 0 || model.pose.empty()) {

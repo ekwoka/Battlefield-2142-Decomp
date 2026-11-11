@@ -67,6 +67,8 @@ public:
 	// and the one a player picked.
 	virtual std::vector<int> spawnablePoints(int team) const = 0;
 	virtual int spawnChoice(int player) const = 0;
+	// The team's mobile spawn points (GameWorld::spawnVehicles): vehicles.
+	virtual std::vector<uint32_t> spawnVehicles(int) const { return {}; }
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
 	virtual float hitPoints(uint32_t object) const = 0;
@@ -206,6 +208,7 @@ public:
 	std::vector<ControlPointInfo> controlPointList() const override { return m_round.controlPointList(); }
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
+	std::vector<uint32_t> spawnVehicles(int team) const override { return m_round.spawnVehicles(team); }
 	// The vehicle bodies and the map's other PlayerControlObjects (the
 	// sentry gun, the drones, the pods: GameWorld::mapObjects), as the
 	// game's list of them holds both (0x00793b60).
@@ -286,6 +289,13 @@ public:
 	std::vector<ControlPointInfo> controlPointList() const override;
 	std::vector<int> spawnablePoints(int team) const override;
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
+	// The vehicles the server's spawn groups ride (their ghosts' objects).
+	std::vector<uint32_t> spawnVehicles(int team) const override;
+	// The server's spawn group placed at an object here (a squad leader's
+	// soldier or a vehicle: the groups the spawn manager makes as the round
+	// goes, ids from 0xc0), -1 none: what the spawn screen's squad leader
+	// and vehicle markers ask for (6/6).
+	int spawnGroupAt(uint32_t object) const;
 	std::vector<VehicleInfo> vehicleList() const override;
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override;
 	float hitPoints(uint32_t object) const override;

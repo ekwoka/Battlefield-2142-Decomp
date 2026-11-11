@@ -416,6 +416,14 @@ private:
 	std::map<int, net::SpawnGroupInfo> m_spawnGroups;
 	std::vector<net::SpawnGroupInfo> spawnGroupsNow() const;
 	void trackSpawnGroups();
+	// The spawn groups the spawn manager makes as the round goes (ids from
+	// 0xc0, the first free: 0x006347c0): a squad's (the squad's +0x15c,
+	// made with the squad, 0x004c87a0; its SquadLeaderSpawnPoint rides the
+	// leader's soldier or the leader's beacon, 0x004c7f10) and a mobile
+	// spawn vehicle's (0x00635080). By (team, squad) and by the vehicle.
+	std::map<std::pair<int, int>, int> m_squadSpawnGroups;
+	std::map<uint32_t, int> m_vehicleSpawnGroups;
+	int freeSpawnGroupId(const std::set<int>& taken) const;
 	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
 	void trackRequests();
 	void sendRadio();

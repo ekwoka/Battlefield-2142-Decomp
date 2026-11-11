@@ -620,6 +620,12 @@ struct BotSettings {
 	};
 	std::vector<PathfindingMap> pathfindingMaps;
 	int activeMap = -1;
+	// The trace map (aiPathfinding.traceMap, AI/AIPathfinding.ai: Infantry;
+	// 0x100201e0 -> the pathfinder's 0x10040530: the map's index at +0x5c,
+	// -666 for a name it doesn't know, as at first): the map the drivers'
+	// room rays run on (vslot 0x84 with 1, 0x1003f930) and the courier's
+	// first record (0x10055650).
+	int traceMap = -666;
 	// A map's climb limits (map 0's rays always climb 0.35 m, 0x1003f930).
 	ai::ClimbLimits climbLimits(int map) const;
 
@@ -1118,9 +1124,12 @@ private:
 		ai::PathFollower follower;
 		// Its spots on the maps (the courier's records, AIDLL 0x10055650):
 		// the soldier's on the infantry mesh, kept each frame on foot, and
-		// the vehicle's on the vehicle mesh while it drives (driveObject).
+		// the vehicle's on the vehicle mesh while it drives (driveObject),
+		// and the vehicle's on the trace map (the infantry mesh), which its
+		// room rays start from.
 		ai::MapSpot footSpot;
 		ai::MapSpot driveSpot;
+		ai::MapSpot traceSpot;
 		uint32_t driveObject = 0;
 		int followId = -1;           // what it follows (a goal id)
 		physics::Vec3 followTo;
@@ -1464,7 +1473,7 @@ private:
 	// on the way, else the goal), popping those reached (0x1008aaa0).
 	physics::Vec3 moveTarget(Bot& bot, const GameWorld::PlayerInfo& self);
 	bool follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& start, const physics::Vec3& to, int goalId,
-		const ai::FollowerSettings& settings);
+		const ai::FollowerSettings& settings, const physics::Vec3& position);
 	ai::DriveSettings driveSettings(const GameWorld::PlayerInfo& self) const;
 	// What the infantry steering's sidestep (AIDLL 0x100ce860, 0x100e63c0) sees:
 	// the vehicles of the world list round the bot's controlled object

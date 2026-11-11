@@ -330,6 +330,14 @@ public:
 	// `legMessages`: the walker's legs' messages from the server's MechLegs
 	// networkable (0x00650530: 0x80 / 0x100 / 0x400 / 0x200, 0x10 the
 	// crouch), -1 when none came.
+	// A joined client's object moved by its ghost (the SimpleObject
+	// networkable's update, 0x005ffec0: the position, the orientation and
+	// the velocity go to the root's physics node): the client's own body
+	// of it, if it has one, is put there too, so what reads the body (the
+	// seat guns' muzzles, the rounds meeting the vehicle) finds it where
+	// the server has it rather than where the client first saw it.
+	void placeRemoteBody(uint32_t object, const physics::Vec3& position, const physics::Mat3& rotation,
+		const physics::Vec3& velocity);
 	void animateRemoteVehicle(uint32_t object, const physics::Vec3& velocity, bool occupied, float seconds,
 		int legMessages = -1);
 	// A joined client's vehicles' part turns (the RotationalBundle
@@ -474,6 +482,17 @@ public:
 	// armor runs out (PlayerKilled, PlayerDeath for the scripts) and
 	// respawns after the spawn time.
 	int addPlayer(const std::string& name, int team, bool ai);
+	// A hosted round's restart as its countdown begins (0x004c03b0 runs the
+	// game logic's reset, slot 0x24 -> 0x004be630 -> GameLogic::reset
+	// 0x004ce910, once the players needed are there): the soldiers go (no
+	// handler hears it: the game isn't playing), the counts start again
+	// and every player in the game waits out the countdown to spawn
+	// (0x004bd2a0 sets each player's spawn time, slot 0x100, to its end).
+	// Vehicles, control points and dropped kits are left as they are.
+	void restartPlayers(float spawnIn);
+	// A player's new name (a joined client's ChangePlayerName, 0x0050bb90:
+	// the player's name for the scripts, the scoreboards and the logs).
+	void setPlayerName(int id, const std::string& name);
 	// Moves a player to the other team (a joined client's PostRemote 6/7,
 	// which the game server hands the game logic's slot 0x60, 0x004b0690):
 	// only while it has no soldier (the spawn screen's team buttons); it

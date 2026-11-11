@@ -615,6 +615,19 @@ TEST(Bots_PathSmoothingOnPortals)
 	close[1].p = {40, 0, 3.5f};
 	ai::smoothWaypoints(close, {2, 0, 0}, 0.5f);
 	CHECK(near(close[0].p.x, 2) && near(close[0].p.z, 3));
+	// The 5 m are 3-D, from the mover's own position (a vehicle's origin
+	// above the mesh): 3 m across and 4.5 m up is far enough for the margin
+	// passes. The line to the next point crosses the portal's line far
+	// beyond its end a, so the point goes to 1 m from a; the last pass
+	// (crossing outside the portal) leaves it there.
+	std::vector<ai::Waypoint> above(2);
+	above[0].a = {0, 0, 3};
+	above[0].b = {4, 0, 3};
+	above[0].p = {2, 0, 3};
+	above[0].portal = true;
+	above[1].p = {-40, 0, 3.5f};
+	ai::smoothWaypoints(above, {2, 4.5f, 0}, 0.5f);
+	CHECK(near(above[0].p.x, 1, 1e-3f) && near(above[0].p.z, 3));
 }
 
 // The vehicles' driving (0x100e9d40, 0x100e0540, 0x100e8170): steering
@@ -783,6 +796,46 @@ TEST(Bots_DriveRoomRaysShareTheClass)
 	ai::DriveState again;
 	const ai::DriveOutput blocked = ai::driveControl(s, again, sense);
 	CHECK(again.state != 0 || blocked.direction != 1);
+}
+
+// A room ray whose output stays (0, 0, 0) (no record to start from, or no
+// way out of a later polygon, 0x1003ce50) is skipped by 0x100e8170's
+// tests on the output: a diagonal so leaves the room ahead as it was, but
+// the front ray's room starts at 0 (local_2c), so without it the car has
+// no room ahead and backs.
+TEST(Bots_DriveRoomRaysWithoutOutput)
+{
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.hasRayStart = true;
+	const auto diagonalsLost = [](const ai::Vec3& from, const ai::Vec3& to) {
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && std::fabs(x) > 0.1f) {
+			ray.clear = false;
+			ray.distance = 0.5f;
+			ray.known = false;
+		}
+		return ray;
+	};
+	sense.ray = diagonalsLost;
+	ai::DriveSettings s;
+	ai::DriveState st;
+	const ai::DriveOutput out = ai::driveControl(s, st, sense);
+	CHECK(st.state == 0 && out.direction == 1 && out.throttle > 0);
+	sense.ray = [](const ai::Vec3& from, const ai::Vec3& to) {
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && std::fabs(x) < 0.1f) {
+			ray.clear = false; // straight ahead: nothing written
+			ray.known = false;
+		}
+		return ray;
+	};
+	ai::DriveState none;
+	ai::driveControl(s, none, sense);
+	CHECK(none.state == 11); // the point straight ahead (error 0): backing, the point "right"
 }
 
 // FloatingTankMoveTo (0x1008c7c0, controller 0x100de350): the hover tank
@@ -1603,6 +1656,15 @@ TEST(Bots_PathfindingMapsAndInformationTypes)
 		console.execute(line, out);
 	}
 	CHECK(settings.pathfindingMaps.size() == 2);
+	// The trace map (AI/AIPathfinding.ai's traceMap Infantry): the map the
+	// drivers' room rays run on; -666 until set, and for a name unknown.
+	CHECK(settings.traceMap == -666);
+	console.execute("aiPathfinding.traceMap Infantry", out);
+	CHECK(settings.traceMap == 0);
+	console.execute("aiPathfinding.traceMap Nowhere", out);
+	CHECK(settings.traceMap == -666);
+	console.execute("aiPathfinding.traceMap Vehicle", out);
+	CHECK(settings.traceMap == 1);
 	const ai::ClimbLimits infantry = settings.climbLimits(0), vehicle = settings.climbLimits(1);
 	CHECK(near(infantry.maxSlope, 35 * 3.14159265f / 180) && near(infantry.stepHeight, 0.35f));
 	CHECK(near(vehicle.maxSlope, 24 * 3.14159265f / 180) && near(vehicle.stepHeight, 0.1f));

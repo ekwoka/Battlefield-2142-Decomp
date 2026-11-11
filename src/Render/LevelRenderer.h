@@ -338,7 +338,8 @@ private:
 		// Lit with the level's envmap (EnvMapManager.h).
 		bool envMap = false;
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
-		// 0x100de6d0; its alpha-tested materials): RaShaderLeaf's sway.
+		// 0x100de6d0; its leaf materials, treeLeaf / 0x100db6f0):
+		// RaShaderLeaf's sway, alpha test and two sides.
 		bool leaf = false;
 		// A bundled material with an "AnimatedUV..." technique (RaShaderBM
 		// _HASUVANIMATION_): its coordinates go through the instance's UV

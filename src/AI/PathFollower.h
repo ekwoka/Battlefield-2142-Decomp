@@ -63,7 +63,8 @@ struct ClimbLimits {
 
 // What a ray reached (the output point of 0x1003ce50 / 0x1003d1c0): the
 // end when clear, else the last exit point (the start when it failed in
-// the first polygon). `started` is false when the start isn't on the mesh
+// the first polygon; (0, 0, 0) when the edge step 0x100b82a0 found no way
+// out of a later polygon, the exit point the ray zeroed before the step). `started` is false when the start isn't on the mesh
 // (the original then leaves its output untouched: zeros). `lastClass` is
 // the cost class of the last polygon it tried to enter (param_11).
 struct RayHit {
@@ -133,8 +134,8 @@ struct MapSpot {
 // 0x1003f370 -> 0x100ac5f0): the polygon kept while the object still stands
 // on it (0x100b88e0), else the polygon it stands on (0x100ac590); found,
 // the point goes to the mesh's height there. Off the mesh the spot keeps
-// what it had: there is no search for the nearest polygon.
-void updateMapSpot(const NavMesh& mesh, MapSpot& spot, const Vec3& position, float heightTolerance,
+// what it had: there is no search for the nearest polygon. True when found.
+bool updateMapSpot(const NavMesh& mesh, MapSpot& spot, const Vec3& position, float heightTolerance,
 	const CostProfile* profile);
 
 struct FollowerSettings {
@@ -161,11 +162,18 @@ public:
 	// Plans a path to `to` unless it already follows one there (0x10095fc0).
 	// The path starts from the mover's spot on the map; without one (never
 	// on the mesh) the request fails (0x10095fc0: the record's polygon -1).
-	void requestFrom(const NavMesh& mesh, const MapSpot& start, const Vec3& to, const FollowerSettings& settings, float now);
+	// `position` is the mover's own (vslot 0x2c), which the string-pull
+	// measures from (0x10093610); the spot's point when not given.
+	void requestFrom(const NavMesh& mesh, const MapSpot& start, const Vec3& to, const FollowerSettings& settings, float now,
+		const Vec3* position = nullptr);
 	// The same from a point, located on the mesh as the courier would.
 	void request(const NavMesh& mesh, const Vec3& from, const Vec3& to, const FollowerSettings& settings, float now);
 	// The steering point this tick (0x10095720 with the update 0x10095ac0).
-	Steer steer(const NavMesh& mesh, const Vec3& position, float now);
+	// `spot` is the mover's spot on the follower's map now (the courier's
+	// record, 0x100a46c0 / 0x100927c0), which the look-ahead's rays start
+	// from and the path's polygons are matched against; when not given,
+	// the follower keeps one from `position` as the courier would.
+	Steer steer(const NavMesh& mesh, const Vec3& position, float now, const MapSpot* spot = nullptr);
 	// The progress check (0x10092bc0): `input` is the largest of |throttle|,
 	// sprint and |yaw| this tick.
 	void progress(const Vec3& position, float input, float now);
@@ -187,7 +195,7 @@ public:
 	size_t current() const { return m_current; }
 
 private:
-	void plan(const NavMesh& mesh, const MapSpot& start, float now);
+	void plan(const NavMesh& mesh, const MapSpot& start, float now, const Vec3& position);
 	bool planSegment(const NavMesh& mesh, const Vec3& position, float now);
 	bool resync(const NavMesh& mesh, const Vec3& position);
 	bool reroute(const NavMesh& mesh, const Vec3& position, float now);
@@ -203,6 +211,7 @@ private:
 	int32_t m_startPolygon = -1;       // +0x14
 	int32_t m_goalPolygon = -1;        // +0x24
 	Vec3 m_requestFrom;                // +0x18
+	MapSpot m_spot;                    // the mover's record on the follower's map (+0x5c)
 	std::vector<ClusterStep> m_clusterPath; // +0x90 +0x14
 	size_t m_cursor = 0;                    // +0x90 +0
 	size_t m_current = 0;              // +0x88
@@ -318,14 +327,20 @@ struct DriveObstacle {
 };
 
 // A mesh ray for the driver: whether it is clear to the end, else how far
-// it got, and the cost class of the last polygon it tried to enter (the
-// rays' param_11; -1 for none). The drivers' rays (0x100e8170 and the
-// tank's and mech's machines) stop at cost class 6 (and 7) and take the
-// map's climb test.
+// it got (3-D, from the start to the ray's output point: the machines'
+// SQRT of the three differences), and the cost class of the last polygon
+// it tried to enter (the rays' param_11; -1 for none). `known` is false
+// when the output is (0, 0, 0) (the ray didn't start, or found no way out
+// of a later polygon): the machines skip such a ray, the front, back and
+// side rays leaving their room at 0. The drivers' room rays (0x100e8170
+// and the tank's and mech's machines) stop at cost class 6 (and 7) and
+// take the climb test.
 struct DriveRay {
 	bool clear = true;
 	float distance = 0;
 	int lastClass = -1;
+	bool known = true;
+	bool started = true; // false: no record to start from (the polygon -1)
 };
 
 // What the driver sees this tick.
@@ -345,14 +360,17 @@ struct DriveSense {
 	Vec3 velocity;
 	Vec3 goal;
 	std::vector<DriveObstacle> obstacles;
-	// The mesh rays (the pathfinder's vslot 0x84) from the vehicle and, for
-	// choosing a side, from an obstacle. Without it the free space below
-	// is given.
+	// The room rays (the pathfinder's vslot 0x84 with 1: on the trace map,
+	// see BotManager::drive). Without it the free space below is given.
 	std::function<DriveRay(const Vec3& from, const Vec3& to)> ray;
-	// Where the room rays start: the vehicle's spot on its map (0x100e8170
-	// reads the Mobile part's per-map record, 0x100a4510: its point at the
-	// mesh's height, kept from the last time the vehicle was found on the
-	// mesh). Unset: the position.
+	// The rays from an obstacle that choose the side to pass it on (vslot
+	// 0x88 on the driver's own map, no stop class, the climb test).
+	// Unset: `ray`.
+	std::function<DriveRay(const Vec3& from, const Vec3& to)> sideRay;
+	// Where the room rays start: the vehicle's spot on the trace map
+	// (0x100e8170 reads the Mobile part's record for the pathfinder's map
+	// +0x5c, 0x100a4510: its point at the mesh's height, kept from the last
+	// time the vehicle was found on the mesh). Unset: the position.
 	bool hasRayStart = false;
 	Vec3 rayStart;
 	// Free mesh ahead and behind (the forward and diagonal rays, the

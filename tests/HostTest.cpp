@@ -839,6 +839,92 @@ TEST(NetHost_PredictionAndSession)
 	CHECK(hosted.clientCount() == 0);
 }
 
+// A playtest's findings on a hosted round: a client's name reaches the
+// round (ChangePlayerName, 0x0050bb90: the scripts and the scoreboards
+// read the round's); a squad's spawn group (ids from 0xc0, 0x006347c0,
+// placed at its leader: 0x004c7f10) lets a member spawn on the leader
+// through 6/6, as the spawn screen's leader marker asks; and a spawn asked
+// for waits out the death's spawn time (0x004bb220).
+TEST(NetHost_NameSquadSpawnAndSpawnWait)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	round.autoRespawn = false;
+	round.setManDownTime(0);
+	round.setSpawnTime(2);
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	// The squad's leader, a bot of team 2, walks away from the team's spawn
+	// point (0, 0, 0).
+	const int leader = round.addPlayer("Leader", 2, true);
+	CHECK(round.joinSquad(leader, 1));
+	CHECK(round.spawnSoldier(leader));
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	int ticks = 0;
+	bool leaderWalks = true;
+	const auto step = [&] {
+		client.update();
+		dice::hfe::game::SoldierInput walk;
+		walk.throttle = leaderWalks ? 1.0f : 0.0f;
+		round.setInput(leader, walk);
+		hosted.tick();
+		round.tick(1.0f / 30);
+		++ticks;
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.name == "Joiner"; }));
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
+	for (int i = 0; i < 30 * 6; ++i) {
+		step();
+	}
+	leaderWalks = false;
+	dice::hfe::game::GameWorld::PlayerInfo lead;
+	CHECK(round.playerInfo(leader, lead) && lead.alive && lead.squadLeader);
+	CHECK(std::hypot(lead.position.x, lead.position.z) > 12);
+	// The squad's group, at the leader's soldier ghost.
+	uint16_t leaderGhost = 0;
+	int group = -1;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::RemotePlayer& p : client.world().playerList()) {
+			leaderGhost = p.name == "Leader" ? p.soldierGhost : leaderGhost;
+		}
+		for (const auto& [id, g] : client.world().spawnGroups()) {
+			group = leaderGhost && g.ghost == leaderGhost && g.team == 2 ? id : group;
+		}
+		return group >= 0;
+	}));
+	CHECK(group >= 0xc0 && group <= 0xff);
+	client.selectSpawnGroup(group);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
+	round.playerInfo(leader, lead);
+	CHECK(distance({info.position.x, info.position.y, info.position.z}, lead.position) < 10);
+	CHECK(std::hypot(info.position.x, info.position.z) > 5); // not at the team's spawn point
+
+	// Dead, a spawn asked for at once comes after the 2 s spawn time.
+	client.suicide();
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && !info.alive; }));
+	const int diedAt = ticks;
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
+	CHECK(ticks - diedAt >= 2 * 30 - 1);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 // The others' soldiers between machines: the soldier ghost's pose (mask
 // 0x20, +0x268 / +0x26c) and the look's twist (4), the player networkable's
 // fire state (0x40, +0x19c) and presses (0x4000000) and man-down (0x20);
@@ -1240,6 +1326,54 @@ struct HostGarage {
 };
 
 } // namespace
+
+// A joined client's body of a ghost vehicle (its round's physics, asleep
+// on a client) is put where the ghost is (GameWorld::placeRemoteBody, as
+// 0x005ffec0 sets the root's physics node): the seat guns' rounds start at
+// the vehicle's muzzle there, not where the client first saw the vehicle
+// (a walker driven 45 m fired from its spawn). Needs $BF2142_GAME_DIR.
+TEST(Host_RemoteSeatGunsFireFromTheGhostsPlace)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	namespace game = dice::hfe::game;
+	namespace physics = dice::hfe::physics;
+	HostGarage garage(gameDir, "us_heavy_mech", {0, 0, 20});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	game::GameWorld& round = *garage.round;
+	round.tick(1 / 30.0f); // its body
+	const std::vector<game::GameWorld::SeatLayout> seats = round.vehicleSeats(garage.vehicle);
+	int armed = -1;
+	for (size_t i = 0; i < seats.size() && armed < 0; ++i) {
+		armed = seats[i].weapons.empty() ? -1 : static_cast<int>(i);
+	}
+	CHECK(armed >= 0);
+	dice::hfe::world::Object* walker = garage.objects.find(garage.vehicle);
+	const physics::Vec3 there {60, 0, 90};
+	walker->setPosition({there.x, there.y, there.z});
+	round.placeRemoteBody(garage.vehicle, there, physics::Mat3 {}, {});
+	dice::hfe::client::RemoteSeatGuns guns;
+	dice::hfe::client::RemoteSeatGuns::Seat seat;
+	seat.player = 1;
+	seat.vehicle = garage.vehicle;
+	seat.seat = armed;
+	seat.firing[0] = seat.firing[1] = seat.firing[2] = true;
+	for (int i = 0; i < 10; ++i) {
+		guns.step(round, {seat}, 1 / 30.0f);
+	}
+	int near = 0, far = 0;
+	for (const game::Projectile& p : round.projectiles()) {
+		if (p.visual && p.shooter == garage.vehicle) {
+			(std::hypot(p.origin.x - there.x, p.origin.z - there.z) < 10 ? near : far) += 1;
+		}
+	}
+	CHECK(near > 0 && far == 0);
+}
 
 // The vehicle prediction end to end: a client drives a shipped car on the
 // host over 127.0.0.1; its own copy (GameWorld::LoneVehicle) is stepped

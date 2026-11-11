@@ -99,6 +99,9 @@ public:
 	float startCountdown() const { return m_countdown; }
 	// The round goes from waiting or counting down to playing.
 	std::function<void()> onPlaying;
+	// The countdown begins (the players needed are there): the original
+	// resets the round then (slot 0x24, 0x004be630).
+	std::function<void()> onCountdown;
 	void setTickets(int team, float tickets);
 	void endGame(int winner, int victoryType);
 

@@ -250,7 +250,8 @@ bool GpuContext::createPipelines(std::string& error)
 	m_meshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "mesh");
 	// The same with back faces culled (CullMode CCW, Direct3D's front faces
-	// clockwise): the bundled and skinned meshes' materials (meshCulled).
+	// clockwise): every material but the blended bundled and skinned ones
+	// and the trees' leaves (meshCulled).
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
 	m_culledMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "culled mesh");

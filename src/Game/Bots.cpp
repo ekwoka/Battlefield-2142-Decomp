@@ -6845,7 +6845,7 @@ bool BotManager::explosiveClear(Bot& bot, const GameWorld::PlayerInfo& self, con
 // progress) the next request waits a second (a think's delay in the
 // original, which plans the move anew).
 bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& start, const physics::Vec3& to, int goalId,
-	const ai::FollowerSettings& settings)
+	const ai::FollowerSettings& settings, const physics::Vec3& position)
 {
 	const bool other = bot.followId != goalId;
 	const bool moved = horizontal2(bot.followTo - to) > 4 && m_time - bot.followAt >= 1;
@@ -6857,7 +6857,8 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& st
 	}
 	if (other || moved || !bot.follower.planned() || bot.follower.failed()) {
 		bot.follower.reset();
-		bot.follower.requestFrom(mesh, start, toAi(to), settings, m_time);
+		const ai::Vec3 own = toAi(position); // the string-pull's (0x10093610: the mover's vslot 0x2c)
+		bot.follower.requestFrom(mesh, start, toAi(to), settings, m_time, &own);
 		bot.followId = goalId;
 		bot.followTo = to;
 		bot.followAt = m_time;
@@ -6952,8 +6953,8 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		settings.radius = kSoldierRadius;
 		settings.climb = m_settings.climbLimits(0);
 		ai::PathFollower::Steer steer;
-		if (follow(bot, *m_navMesh, bot.footSpot, to, goalId, settings)) {
-			steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time);
+		if (follow(bot, *m_navMesh, bot.footSpot, to, goalId, settings, self.position)) {
+			steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time, &bot.footSpot);
 			if (steer.arrived) {
 				return false;
 			}
@@ -7268,10 +7269,35 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		if (bot.driveObject != vehicle->object) {
 			bot.driveObject = vehicle->object;
 			bot.driveSpot = ai::MapSpot();
+			bot.traceSpot = ai::MapSpot();
 		}
-		ai::updateMapSpot(*m_vehicleNavMesh, bot.driveSpot, toAi(at), follower.options.heightTolerance,
-			&follower.options.profile);
-		if (!follow(bot, *m_vehicleNavMesh, bot.driveSpot, to, goalId, follower)) {
+		// The trace map (the pathfinder's +0x5c: Infantry, set by
+		// AI/AIPathfinding.ai's aiPathfinding.traceMap) is the one the room
+		// rays below run on: map 0 is the infantry mesh, map 1 the vehicle
+		// mesh.
+		const ai::NavMesh* traceMesh = m_settings.traceMap == 0 ? m_navMesh
+			: m_settings.traceMap == 1                     ? m_vehicleNavMesh
+														   : nullptr;
+		// The courier (0x10055650) keeps the vehicle's records on both maps:
+		// first the trace map's, then, only when the vehicle was found on
+		// it, the other map's from the point at the trace mesh's height.
+		physics::Vec3 courierAt = at;
+		bool courierFound = true;
+		if (traceMesh && traceMesh != m_vehicleNavMesh) {
+			courierFound = ai::updateMapSpot(*traceMesh, bot.traceSpot, toAi(at), follower.options.heightTolerance,
+				&follower.options.profile);
+			if (courierFound) {
+				courierAt.y = bot.traceSpot.point.y;
+			}
+		}
+		if (courierFound) {
+			ai::updateMapSpot(*m_vehicleNavMesh, bot.driveSpot, toAi(courierAt), follower.options.heightTolerance,
+				&follower.options.profile);
+		}
+		if (traceMesh == m_vehicleNavMesh) {
+			bot.traceSpot = bot.driveSpot;
+		}
+		if (!follow(bot, *m_vehicleNavMesh, bot.driveSpot, to, goalId, follower, at)) {
 			brake();
 			// No progress for 20 s (0x10092bc0): the move fails and the
 			// behaviour plans again (0x100c91c0 hands the stuck bot to the
@@ -7279,7 +7305,7 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 			// 0x58, 0x008924f0, which only returns 0: nothing to rewrite).
 			return true;
 		}
-		const ai::PathFollower::Steer steer = bot.follower.steer(*m_vehicleNavMesh, toAi(at), m_time);
+		const ai::PathFollower::Steer steer = bot.follower.steer(*m_vehicleNavMesh, toAi(at), m_time, &bot.driveSpot);
 		if (steer.arrived) {
 			brake();
 			return false;
@@ -7291,30 +7317,62 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		point = fromAi(steer.point);
 		sense.remaining = bot.follower.remaining(toAi(at));
 		sense.maxBend = bot.follower.maxBend(toAi(at), toAi(forward), sense.speed, settings.lookAheadTime, m_time);
-		const ai::NavMesh& mesh = *m_vehicleNavMesh;
-		// The drivers' rays (0x100e8170: vslot 0x84 with 1000 polygons, no
-		// width, stopping at cost class 6, the class entered last, the
-		// climb test on).
-		// The room rays start at the vehicle's spot on the map (the Mobile
-		// part's record through 0x100927c0: its polygon and its point at
-		// the mesh's height), which the courier keeps while the vehicle is
-		// off the mesh; the rays from an obstacle look its polygon up.
-		const ai::ClimbLimits climb = follower.climb;
-		const ai::MapSpot spot = bot.driveSpot;
+		// The room rays (0x100e8170, TankMoveTo's 0x100de8a0, MechMoveTo's
+		// 0x100e1f20: the pathfinder's vslot 0x84 with 1, 0x1003f930) run
+		// on the trace map, not the vehicle's: on the infantry mesh, which
+		// reaches where the vehicle mesh's edge (built map.radius in from
+		// the obstacles) stops short. They start at the vehicle's record on
+		// that map (0x100927c0: its polygon and its point at the mesh's
+		// height, kept while the vehicle is off the mesh) and take the
+		// vehicle's cost profile, 1000 polygons, no width, stop at cost
+		// class 6 (and 7) and report the class entered last; the climb test
+		// with the trace map's slope limit (0x1003ce50 reads its map's +0x24)
+		// and the step of the follower's map (0x1003f930: the map at the
+		// follower's +0x5c, the vehicle's; 0.35 m for map 0). A vehicle
+		// never found on the trace map has no record there: the rays don't
+		// start and leave their output (0, 0, 0).
+		ai::ClimbLimits traceClimb = m_settings.climbLimits(m_settings.traceMap);
+		traceClimb.stepHeight = follower.climb.stepHeight;
+		const ai::MapSpot spot = bot.traceSpot;
+		const ai::CostProfile profile = follower.options.profile;
 		if (spot.polygon >= 0) {
 			sense.hasRayStart = true;
 			sense.rayStart = spot.point;
 		}
-		sense.ray = [&mesh, climb, spot](const ai::Vec3& from, const ai::Vec3& end) {
+		const auto cast = [profile](const ai::NavMesh& mesh, const ai::Vec3& from, const ai::Vec3& end, int32_t polygon,
+							  uint8_t stopClass, const ai::ClimbLimits& climb) {
 			ai::DriveRay ray;
-			const bool fromSpot = spot.polygon >= 0 && from.x == spot.point.x && from.y == spot.point.y && from.z == spot.point.z;
-			if (!fromSpot && mesh.findPolygon(from) < 0) {
-				return ray; // off the mesh (a vehicle never found on it): nothing known
-			}
 			ai::RayHit hit;
-			ray.clear = ai::meshRaycast(mesh, from, end, nullptr, -1, &ray.distance, fromSpot ? spot.polygon : -1, 0, 6, &climb, &hit);
+			ray.clear = ai::meshRaycast(mesh, from, end, &profile, -1, nullptr, polygon, 0, stopClass, &climb, &hit);
 			ray.lastClass = hit.lastClass;
+			const ai::Vec3 d = hit.point - from;
+			ray.distance = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+			ray.known = hit.point.x != 0 || hit.point.y != 0 || hit.point.z != 0;
 			return ray;
+		};
+		sense.ray = [traceMesh, spot, traceClimb, cast](const ai::Vec3& from, const ai::Vec3& end) {
+			ai::DriveRay ray;
+			if (!traceMesh || spot.polygon < 0) {
+				ray.known = false; // no record on the trace map: nothing written
+				ray.started = false;
+				return ray;
+			}
+			return cast(*traceMesh, from, end, spot.polygon, 6, traceClimb);
+		};
+		// Choosing the side to pass an obstacle on: vslot 0x88 (0x1003f810)
+		// from the obstacle's record on the driver's map (0x100a4330: the
+		// vehicle mesh), no stop class, the climb test of that map.
+		const ai::NavMesh& mesh = *m_vehicleNavMesh;
+		const ai::ClimbLimits climb = follower.climb;
+		sense.sideRay = [&mesh, climb, cast](const ai::Vec3& from, const ai::Vec3& end) {
+			const int32_t polygon = mesh.findPolygon(from);
+			if (polygon < 0) {
+				ai::DriveRay ray;
+				ray.known = false; // 0x100e8170 skips an obstacle without a record (-1)
+				ray.started = false;
+				return ray;
+			}
+			return cast(mesh, from, end, polygon, 0, climb);
 		};
 		floatingFollower = follower;
 	}
@@ -8854,7 +8912,14 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 	bindMethod(console, "aiPathfinding.map.radius", access, [](float) {});
 	bindMethod(console, "aiPathfinding.map.allowedHeightDiff", access, [](float) {});
 	bindMethod(console, "aiPathfinding.map.addVehicleForClusterCost", access, [](std::string) {});
-	bindMethod(console, "aiPathfinding.traceMap", access, [](std::string) {});
+	bindMethod(console, "aiPathfinding.traceMap", access, [s](std::string name) {
+		s->traceMap = -666; // 0x10040530: a name it doesn't know
+		for (size_t i = 0; i < s->pathfindingMaps.size(); ++i) {
+			if (lower(s->pathfindingMaps[i].name) == lower(name)) {
+				s->traceMap = static_cast<int>(i);
+			}
+		}
+	});
 	bindMethod(console, "aiPathfinding.maxWaterDepth", access, [](float) {});
 	bindMethod(console, "aiTemplate.basicTemp", access, [s](float value) {
 		const auto it = s->aiTemplates.find(s->editingTemplate);

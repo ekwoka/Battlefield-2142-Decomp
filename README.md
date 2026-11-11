@@ -173,7 +173,7 @@ What a run does depends on three options:
 |---|---|
 | `--view` (or `--menu`, `--play`, `--connect` without the next two) | A window with sound. Runs until you quit. |
 | `--screenshot out.png` | No window: the frame is drawn off screen, saved, and the program exits. |
-| `--simulate N` | No window: N seconds of game time run as fast as possible, then the scores print. Only `--view` adds a window to it. |
+| `--simulate N` | No window: N seconds of game time run as fast as possible, then the scores print (joined to a server: in real time, following its map changes). Only `--view` adds a window to it. |
 | `--language L` | The game's language (the original's registry Language): strings.csv's column and the fonts of `Fonts/L/` (German, French, Russian, Chinese_Simplified, ...; English when the file has no such column). |
 
 `--screenshot` and `--simulate` can be combined with almost everything below,
@@ -297,7 +297,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--play [1\|2]` | On a server, spawn, and ask for that team. |
 | `--spectate` | Join as a spectator (the host needs `sv.allowSpectators 1`). |
 | `--walk` | Without a window, walk and turn (a check of the client's prediction). |
-| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `reload`, `forward`, `stop`, `turn:<deg>`, `face:<player>`, `still`, `zoom`, `pitch:<deg>`. |
+| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `altfire` / `altstop`, `reload`, `forward`, `back`, `throttle:<x>`, `strafe:<x>`, `sprint` / `walk`, `stop`, `turn:<deg>`, `face:<player>` (`_` for a space; `enemy`, the nearest; or a template, e.g. `us_heavy_mech`), `goto:<same>` (and walk up to it), `still`, `zoom`, `pitch:<deg>`; presses `use`, `seat:<n>`, `item:<n>`, `jump`, `nextitem`, `previtem`, `weapon`, `firemode`, `flare`; requests `team:<n>`, `kit:<index>`, `spawn[:<group>]`, `leader` (spawn on the squad leader), `squad:<n>` (make one), `joinsquad:<n>`, `suicide`, `say:<word>`. |
 | `--probe host[:port]` | Only shake hands and print what the server sends. |
 | `--servers` | List the servers the master server knows. |
 | `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |

@@ -170,8 +170,11 @@ struct Options {
 	// --remote-actions "<s>:<op> ...": on a server without a window, the
 	// inputs from that second of the round on (crouch, prone, stand, fire,
 	// hold (stop firing), reload, forward, stop, turn:<deg a tick>,
-	// face:<player name> (turn towards that soldier), still (no turning),
-	// zoom (the alternate fire's press), pitch:<deg> (the aim, up positive)).
+	// face:<player name> (turn towards that soldier; "enemy" the nearest,
+	// or an object by its template), goto:<the same> (and walk up to it),
+	// still (no turning), zoom (the alternate fire's press), pitch:<deg>
+	// (the aim, up positive), and the rest the README lists: presses
+	// (use, seat:<n>, item:<n>, ...) and requests (team, kit, spawn, ...)).
 	std::string remoteActions;
 	std::string maps;            // --maps level[:mode[:size]],...: a playlist for --host (map changes on the same connections)
 	uint16_t hostPort = 17567;   // +port N (the original's "specifies the network port to be used")
@@ -804,6 +807,33 @@ const world::ObjectTemplate* controlledTemplate(game::GameWorld& round, const ga
 	return vehicle->objectTemplate();
 }
 
+// A joined game's spawn group for a spawn screen marker: a control
+// point's id is its group's; the squad leader's and a vehicle's markers
+// ask for the server's group placed at the leader's soldier (or beacon)
+// and at the vehicle (RemoteHudWorld::spawnGroupAt), -1 (any) without one.
+int joinedSpawnGroup(int marker)
+{
+	if (!g_remoteHud || marker < kMarkerLeader) {
+		return marker;
+	}
+	if (marker >= kMarkerVehicle) {
+		const size_t i = static_cast<size_t>(marker - kMarkerVehicle);
+		g_spawnVehicle = i < g_spawnVehicles.size() ? g_spawnVehicles[i] : 0;
+		return g_remoteHud->spawnGroupAt(g_spawnVehicle);
+	}
+	game::GameWorld::PlayerInfo me;
+	if (!g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me) || me.squad == 0) {
+		return -1;
+	}
+	for (const game::GameWorld::PlayerInfo& p : g_remoteHud->playerList()) {
+		if (p.squadLeader && p.team == me.team && p.squad == me.squad && p.id != me.id) {
+			const int group = g_remoteHud->spawnGroupAt(p.soldier);
+			return group >= 0 ? group : -1;
+		}
+	}
+	return -1;
+}
+
 void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
 	bool commanderScreen)
 {
@@ -845,7 +875,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// moves with it.
 	g_spawnVehicles.clear();
 	if (spawning) {
-		g_spawnVehicles = round.spawnVehicles(me.team);
+		g_spawnVehicles = world.spawnVehicles(me.team);
 		for (size_t i = 0; i < g_spawnVehicles.size(); ++i) {
 			const world::Object* vehicle = round.objects().find(g_spawnVehicles[i]);
 			if (!vehicle) {
@@ -6214,6 +6244,7 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		float remoteActionsPitch = 0; // the aim the last --remote-actions move carried
+		std::set<size_t> remoteActionsDone; // --remote-actions' requests already sent (by their place in the list)
 		bool joinedLevelLoaded = false; // told the client (LoadComplete goes now)
 		const auto remoteStep = [&] {
 			runTimedConsole();
@@ -6249,8 +6280,10 @@ int runGame(Options& options, Session& session)
 				game::SoldierInput act;
 				bool reloadNow = false;
 				std::string facing; // face:<name>: turn towards that player's soldier
+				bool approach = false; // goto:<name>: and walk up to it
 				std::istringstream steps(options.remoteActions);
-				for (std::string step; steps >> step;) {
+				size_t stepIndex = 0;
+				for (std::string step; steps >> step; ++stepIndex) {
 					const size_t colon = step.find(':');
 					if (colon == std::string::npos || std::atof(step.c_str()) > gameLogic.elapsed) {
 						continue;
@@ -6258,6 +6291,70 @@ int runGame(Options& options, Session& session)
 					const std::string op = step.substr(colon + 1, step.find(':', colon + 1) - colon - 1);
 					const size_t second = step.find(':', colon + 1);
 					const float arg = second == std::string::npos ? 0.0f : static_cast<float>(std::atof(step.c_str() + second + 1));
+					const bool pressNow = gameLogic.elapsed - std::atof(step.c_str()) < 0.05; // a key's press: its second's tick
+					// The requests go once (spawn, spawn:<group>, kit:<index>,
+					// team:<n>, suicide, say:<word>).
+					if (op == "spawn" || op == "kit" || op == "team" || op == "suicide" || op == "say" || op == "squad"
+						|| op == "joinsquad" || op == "leader") {
+						if (remoteActionsDone.insert(stepIndex).second) {
+							if (op == "spawn") {
+								client.selectSpawnGroup(second == std::string::npos ? -1 : static_cast<int>(arg));
+							} else if (op == "kit") {
+								localKit = static_cast<int>(arg);
+								client.selectKit(localKit);
+							} else if (op == "team") {
+								client.selectTeam(static_cast<int>(arg));
+							} else if (op == "suicide") {
+								client.suicide();
+							} else if (op == "squad") {
+								client.createSquad(static_cast<int>(arg), "");
+							} else if (op == "joinsquad") {
+								client.joinSquad(static_cast<int>(arg));
+							} else if (op == "leader") {
+								// The spawn screen's squad leader marker.
+								client.selectKit(localKit);
+								const int group = joinedSpawnGroup(kMarkerLeader);
+								client.selectSpawnGroup(group);
+								if (options.verbose) {
+									std::printf("remote action leader: spawn group %d\n", group);
+								}
+							} else if (second != std::string::npos) {
+								client.say(step.substr(second + 1));
+							}
+						}
+						continue;
+					}
+					if (op == "use") {
+						act.use = pressNow;
+					} else if (op == "seat") {
+						act.switchSeat = pressNow ? static_cast<int>(arg) : 0;
+					} else if (op == "item") {
+						act.selectItem = pressNow ? static_cast<int>(arg) : 0;
+					} else if (op == "jump") {
+						act.jump = pressNow;
+					} else if (op == "nextitem" || op == "previtem") {
+						act.itemStep = pressNow ? (op == "nextitem" ? 1 : -1) : 0;
+					} else if (op == "weapon") {
+						act.toggleWeapon = pressNow; // F: a seat's next weapon
+					} else if (op == "firemode") {
+						act.toggleFireRate = pressNow;
+					} else if (op == "flare") {
+						act.flareFire = pressNow;
+					} else if (op == "altfire") {
+						act.altFire = true; // held, until altstop
+					} else if (op == "altstop") {
+						act.altFire = false;
+					} else if (op == "sprint") {
+						act.sprint = true;
+					} else if (op == "walk") {
+						act.sprint = false;
+					} else if (op == "back") {
+						act.throttle = -1;
+					} else if (op == "strafe") {
+						act.strafe = arg;
+					} else if (op == "throttle") {
+						act.throttle = arg;
+					}
 					if (op == "crouch") {
 						act.pose = game::SoldierPose::Crouch;
 					} else if (op == "prone") {
@@ -6272,14 +6369,16 @@ int runGame(Options& options, Session& session)
 						act.throttle = 1;
 					} else if (op == "stop") {
 						act.throttle = 0;
+						act.strafe = 0;
 						act.turn = 0;
 					} else if (op == "still") {
 						act.turn = 0;
 						facing.clear();
 					} else if (op == "turn") {
 						act.turn = arg;
-					} else if (op == "face") {
+					} else if (op == "face" || op == "goto") {
 						facing = second == std::string::npos ? std::string() : step.substr(second + 1);
+						approach = op == "goto";
 					} else if (op == "reload") {
 						// A press on the tick of its second only.
 						reloadNow = gameLogic.elapsed - std::atof(step.c_str()) < 0.05;
@@ -6287,18 +6386,67 @@ int runGame(Options& options, Session& session)
 						act.aimPitch = arg; // degrees, up positive
 					} else if (op == "zoom") {
 						// The alternate fire's press (a rifle's sight).
-						act.altFire = gameLogic.elapsed - std::atof(step.c_str()) < 0.05;
+						act.altFire = pressNow;
 					}
 				}
 				act.reload = reloadNow;
+				// face:enemy: the nearest living soldier of the other team;
+				// an underscore in a name stands for a space ("P._Soderlund").
+				std::string facingName = facing;
+				std::replace(facingName.begin(), facingName.end(), '_', ' ');
+				const net::RemoteObject* facedSoldier = nullptr;
+				float facedDistance = 1e9f;
+				const net::RemotePlayer* self = client.world().player(client.world().localPlayer());
 				for (const net::RemotePlayer& p : facing.empty() || !prediction.active() ? std::vector<net::RemotePlayer> {}
 																						: client.world().playerList()) {
-					const net::RemoteObject* them = p.name == facing ? client.world().object(p.soldierGhost) : nullptr;
+					const bool wanted = facing == "enemy" ? self && p.team != self->team && p.alive && !p.manDown : p.name == facingName;
+					const net::RemoteObject* them = wanted ? client.world().object(p.soldierGhost) : nullptr;
 					if (them && them->hasPosition) {
 						const net::Vec3f me = prediction.feet();
-						const float want = std::atan2(them->position.x - me.x, them->position.z - me.z) * 57.29578f;
-						act.turn = std::clamp(std::remainder(want - remoteLook.yaw, 360.0f), -10.0f, 10.0f);
+						const float d = std::hypot(them->position.x - me.x, them->position.z - me.z);
+						if (d < facedDistance) {
+							facedDistance = d;
+							facedSoldier = them;
+						}
 					}
+				}
+				// Else an object by its template's name (a vehicle to walk up to).
+				if (!facedSoldier && !facing.empty() && prediction.active()) {
+					for (const net::RemoteObject& o : client.world().objectList()) {
+						const auto object = ghostObjects.find(o.ghost);
+						const world::Object* found = object != ghostObjects.end() ? objects.find(object->second) : nullptr;
+						if (o.part != 0 || !o.hasPosition || !found || !found->objectTemplate()
+							|| !std::equal(found->objectTemplate()->name().begin(), found->objectTemplate()->name().end(),
+								facing.begin(), facing.end(), [](char a, char b) {
+									return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+								})) {
+							continue;
+						}
+						const net::Vec3f me = prediction.feet();
+						const float d = std::hypot(o.position.x - me.x, o.position.z - me.z);
+						if (d < facedDistance) {
+							facedDistance = d;
+							facedSoldier = client.world().object(o.ghost); // the list is a copy
+						}
+					}
+				}
+				if (facedSoldier && approach) {
+					// goto: up to a soldier (1.2 m: a medic's or an engineer's
+					// reach) or 3 m from an object.
+					const float reach = facedSoldier->kind == net::NetworkableKind::Soldier ? 1.2f : 3.0f;
+					act.throttle = facedDistance > reach ? 1.0f : 0.0f;
+				}
+				if (options.verbose && !facing.empty() && static_cast<int>(gameLogic.elapsed * 30) % 30 == 0) {
+					std::printf("remote action %s %s: %s\n", approach ? "goto" : "face", facing.c_str(),
+						facedSoldier ? (std::to_string(facedDistance) + " m").c_str() : "not seen");
+				}
+				if (facedSoldier) {
+					const net::Vec3f me = prediction.feet();
+					const float want = std::atan2(facedSoldier->position.x - me.x, facedSoldier->position.z - me.z) * 57.29578f;
+					act.turn = std::clamp(std::remainder(want - remoteLook.yaw, 360.0f), -10.0f, 10.0f);
+					// The aim's pitch at the soldier's chest (1.2 m over its feet).
+					const float rise = facedSoldier->position.y + 1.2f - (me.y + 1.6f);
+					act.aimPitch = std::atan2(rise, std::max(facedDistance, 0.1f)) * 57.29578f;
 				}
 				remoteLook.yaw = std::remainder(remoteLook.yaw + act.turn, 360.0f); // the camera's, as the window's mouse turns it
 				remoteLook.pitch = act.aimPitch;
@@ -6323,6 +6471,22 @@ int runGame(Options& options, Session& session)
 			// A new control-object record: the prediction takes the server's
 			// state (or starts from it); none in the last block: no soldier.
 			const net::RemoteWorld& own = client.world();
+			if (options.verbose && own.controlRecords() != recordsSeen) {
+				// What we control (the record's ghost: the soldier, or the
+				// seat with its vehicle), as it changes.
+				static std::pair<uint16_t, uint16_t> controlled;
+				const net::ControlObjectRecord& record = own.controlObject();
+				if (std::make_pair(record.ghost, record.vehicle) != controlled) {
+					controlled = {record.ghost, record.vehicle};
+					const auto nameOf = [&](uint16_t ghost) {
+						const auto it = ghostObjects.find(ghost);
+						const world::Object* o = it != ghostObjects.end() ? objects.find(it->second) : nullptr;
+						return o && o->objectTemplate() ? o->objectTemplate()->name() : "ghost " + std::to_string(ghost);
+					};
+					std::printf("controlling %s%s%s at %.0f s\n", nameOf(record.ghost).c_str(),
+						record.vehicle ? " in " : "", record.vehicle ? nameOf(record.vehicle).c_str() : "", gameLogic.elapsed);
+				}
+			}
 			if (own.controlRecords() != recordsSeen) {
 				recordsSeen = own.controlRecords();
 				const net::ControlState* state = own.controlState();
@@ -6453,6 +6617,13 @@ int runGame(Options& options, Session& session)
 					if (world::Object* object = round.remoteRagDoll(it->second) || flying ? nullptr : objects.find(it->second)) {
 						object->setPosition(at);
 						object->setRotation(turned);
+						if (ghost.kind != net::NetworkableKind::Soldier) {
+							const physics::Vec3 v = ghost.hasVelocity
+								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
+								: physics::Vec3 {};
+							round.placeRemoteBody(it->second, {at.x, at.y, at.z},
+								physics::Mat3::fromYawPitchRoll({turned.x, turned.y, turned.z}), v);
+						}
 						// A control point taken (its networkable's team, 0x006084b0):
 						// the object's team follows, as the exe's client sets it
 						// (the team-change radio, the name tags, the assets').
@@ -6675,8 +6846,10 @@ int runGame(Options& options, Session& session)
 							ghosts, impacts.size());
 						if (!impacts.empty()) {
 							const auto& last = impacts.back();
-							std::printf(" (last at %.1f/%.1f/%.1f on %s)", last.point.x, last.point.y, last.point.z,
-								last.object == 0 ? "the terrain" : round.isRemoteSoldier(last.object) ? "a soldier" : "an object");
+							const world::Object* on = last.object ? objects.find(last.object) : nullptr;
+							std::printf(" (last at %.1f/%.1f/%.1f on %s%s)", last.point.x, last.point.y, last.point.z,
+								last.object == 0 ? "the terrain" : round.isRemoteSoldier(last.object) ? "a soldier " : "an object ",
+								on && on->objectTemplate() ? on->objectTemplate()->name().c_str() : "");
 						}
 						for (auto p = round.projectiles().rbegin(); p != round.projectiles().rend(); ++p) {
 							if (p->visual && p->alive && !p->ghostObject) {
@@ -7034,7 +7207,23 @@ int runGame(Options& options, Session& session)
 				const net::ServerSettings& sv = session.admin->settings;
 				gameLogic.waitToStart(sv.numPlayersNeededToStart, static_cast<float>(sv.startDelay),
 					sv.notEnoughPlayersRestartDelay, [&round] { return static_cast<int>(round.playerList().size()); });
-				gameLogic.onPlaying = [&scripts] { scripts.setGameStatus(game::GameStatus::Playing); };
+				// The status is Playing from the first tick (0x004bd2a0 after
+				// the load's PreGame), so the game mode sets its tickets and
+				// triggers before the vehicles spawn (gpm_ti's Titan tickets
+				// come from their VehicleSpawn); the handlers hear the round's
+				// events once it plays (state 3).
+				scripts.setGameStatus(game::GameStatus::Playing);
+				scripts.setRoundPlaying(false);
+				gameLogic.onPlaying = [&scripts] { scripts.setRoundPlaying(true); };
+				// The countdown's restart (the original's reset, which also
+				// respawns the vehicles and so raises PreGame and Playing
+				// again; the rewrite's keeps the vehicles and the status).
+				// The spawns wait for its end; the round steps before the
+				// game logic here (the original's logic first), so a tick
+				// more lets the round be playing when they come.
+				gameLogic.onCountdown = [&round, &gameLogic] {
+					round.restartPlayers(gameLogic.startCountdown() + 2.0f / 30.0f);
+				};
 				std::printf("waiting for %d players, then %d s to the start\n", sv.numPlayersNeededToStart, sv.startDelay);
 			} else {
 				scripts.setGameStatus(game::GameStatus::Playing);
@@ -7749,6 +7938,12 @@ int runGame(Options& options, Session& session)
 					}
 					break;
 				}
+				// A joined game's map change: the new level loads now (the
+				// window's loop leaves on it too), with the run's seconds left.
+				if (session.client && session.levelChange && !serverRun) {
+					options.simulate = std::max(1, options.simulate - static_cast<int>(i / 30));
+					break;
+				}
 			}
 #if BF2142_HAS_PYTHON
 			if (serverRun && g_stopServer) {
@@ -7768,10 +7963,27 @@ int runGame(Options& options, Session& session)
 					soundTicks, soundSeconds * 1000.0 / soundTicks, gameAudio.weaponSounds, gameAudio.radioHeard,
 					gameAudio.voiceOvers, gameSounds.loops());
 			}
-			std::printf("after %d s: tickets PAC %.0f, EU %.0f; control points:", options.simulate,
-				gameLogic.team(1).tickets, gameLogic.team(2).tickets);
-			for (const auto& point : round.controlPointList()) {
-				std::printf(" %d:%s", point.id, point.team == 1 ? "PAC" : point.team == 2 ? "EU" : "-");
+			if (session.client) {
+				// A joined game's: the server's tickets (ghost 0x201's) and
+				// control points (their ghosts), as the HUD shows them.
+				const net::RemoteWorld& world = session.client->world();
+				std::printf("after %d s: tickets PAC %d, EU %d; control points:", options.simulate, world.tickets(1),
+					world.tickets(2));
+				for (const net::RemoteObject& o : world.objectList()) {
+					if (o.kind == net::NetworkableKind::ControlPoint) {
+						std::printf(" %u:%s", o.ghost, o.team == 1 ? "PAC" : o.team == 2 ? "EU" : "-");
+					}
+				}
+				std::printf("; spawn groups:");
+				for (const auto& [id, group] : world.spawnGroups()) {
+					std::printf(" %d:%s", id, group.team == 1 ? "PAC" : group.team == 2 ? "EU" : "-");
+				}
+			} else {
+				std::printf("after %d s: tickets PAC %.0f, EU %.0f; control points:", options.simulate,
+					gameLogic.team(1).tickets, gameLogic.team(2).tickets);
+				for (const auto& point : round.controlPointList()) {
+					std::printf(" %d:%s", point.id, point.team == 1 ? "PAC" : point.team == 2 ? "EU" : "-");
+				}
 			}
 			std::printf("\n");
 			if (const auto lost = round.objectsOutOfWorld(); !lost.empty()) {
@@ -7809,13 +8021,19 @@ int runGame(Options& options, Session& session)
 					const net::RemoteObject* soldier = p.soldierGhost ? world.object(p.soldierGhost) : nullptr;
 					if (p.local && prediction.active()) {
 						const net::Vec3f f = prediction.feet();
-						std::printf("  %-8s %s (ours) predicted at %.2f/%.2f/%.2f, server at %.2f/%.2f/%.2f\n", p.name.c_str(),
+						std::printf("  %-8s %s (ours) predicted at %.2f/%.2f/%.2f, server at %.2f/%.2f/%.2f", p.name.c_str(),
 							p.team == 1 ? "PAC" : "EU ", f.x, f.y, f.z, world.controlObject().position.x,
 							world.controlObject().position.y, world.controlObject().position.z);
 					} else if (soldier && soldier->hasPosition) {
-						std::printf("  %-8s %s at %.2f/%.2f/%.2f health %.2f (tick %u)\n", p.name.c_str(), p.team == 1 ? "PAC" : "EU ",
+						std::printf("  %-8s %s at %.2f/%.2f/%.2f health %.2f (tick %u)", p.name.c_str(), p.team == 1 ? "PAC" : "EU ",
 							soldier->position.x, soldier->position.y, soldier->position.z, soldier->health, soldier->lastTick);
+					} else {
+						std::printf("  %-8s %s %s", p.name.c_str(), p.team == 1 ? "PAC" : "EU ", p.alive ? "alive" : "dead");
 					}
+					// The scoreboard's columns.
+					std::printf(" score %d kills %d deaths %d%s%s\n", p.score, p.kills, p.deaths,
+						p.squad ? (" squad " + std::to_string(p.squad) + (p.squadLeader ? " (leader)" : "")).c_str() : "",
+						p.commander ? " commander" : "");
 				}
 				const host::SoldierPrediction::Stats& st = prediction.stats();
 				std::printf("  prediction: %u moves stepped, %u replayed, %u records (%u for moves not remembered), "
@@ -8857,9 +9075,12 @@ int runGame(Options& options, Session& session)
 				const int point = hudManager.mapMarkerAt(x, y);
 				if (session.client && point >= 0) {
 					session.client->selectKit(localKit);
-					session.client->selectSpawnGroup(point);
+					session.client->selectSpawnGroup(joinedSpawnGroup(point));
 					if (g_remoteHud) {
-						g_remoteHud->chosenSpawn = point; // the spawn screen's selected icon
+						// The spawn screen's selected icon.
+						g_remoteHud->chosenSpawn = point == kMarkerLeader ? game::GameWorld::kSpawnOnLeader
+							: point >= kMarkerVehicle                     ? game::GameWorld::kSpawnInVehicle
+																		  : point;
 					}
 				} else if (session.client && !session.client->world().hasControlObject()) {
 					// The client's own round has no control points (they are

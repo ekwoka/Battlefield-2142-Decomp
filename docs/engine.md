@@ -1934,7 +1934,7 @@ remote_missile's mesh reaches z 0.38: the camera is inside the nose.
 BundledMesh.fx's opaque techniques (Full, Full20, t1) leave Direct3D's
 default CullMode CCW (only the alpha ones set NONE), so from inside
 every face of the missile turns its back and none is drawn. The
-rewrite's meshes are drawn without culling, so the round whose camera
+rewrite drew its meshes without culling then, so the round whose camera
 is the local view is left out (`RoundVisuals::meshes`' `viewedFrom`).
 
 **Camera recoil.** WeaponBasedRecoilComp (the vehicle guns'; template
@@ -2794,9 +2794,38 @@ materials (alpha mode 1, `+0x9c` of the settings at `+0x10`); RaShaderBM's
 and RaShaderSM's techniques name no CullMode of their own (RaShaderLeaf,
 RaShaderDefault and STM's Glowing set NONE). The rewrite draws the bundled
 and skinned meshes' opaque and alpha-tested materials with back faces
-culled (`meshCulled`, GpuContext's `meshPipeline(queue, culled)`); the
-static meshes stay two-sided (their leaves' NONE and the trunks' CCW not
-sorted out). The launcher seat now looks past its barrel; its PostProcess
+culled (`meshCulled`, GpuContext's `meshPipeline(queue, culled)`). The
+static meshes keep CullMode 3 as well: their material (`0x100e3860`, the
+settings at `+0x2c`) is set up by `0x100dcd50` / `0x100dca10` and drawn by
+`0x100bdb00`, none of which touch CullMode, and RaShaderSTM's default
+technique and the trunks' (TrunkSTMDetail, TrunkSTMBase, TrunkOG) name
+none; only RaShaderLeaf (Leaf, LeafShadowed, the point-light ones, LeafOG
+for the overgrowth) sets `CullMode = NONE` (STM's Glowing too, not drawn
+by the rewrite). The shipped static meshes have no blended material (48
+alpha-tested ones: fences, nets, grates), so every static face but a
+tree's leaves is drawn from the front only (`meshCulled(…, leaf)`).
+*Which materials are leaves* (`0x100db6f0`, the static material's
+`+0x1ec`, read by `0x100bdb00` to pick key `0xf0000000` over the trunks'
+`0xf9000000` / `0xfa000000`): in a tree (`+0x2a2`), a material whose
+texture set (`+0x28`, built by `0x10151830`: maps from slot 1, the
+SpecularLUT in slot 7) has no second map (`+0x30`) and whose first map's
+name (`+0x2c`, `+0x5c`) has no "tile_" — a "Base" material that is not a
+bark tile — whatever its alpha mode. The rewrite took the alpha-tested
+materials: of the 406 "Base" materials of the shipped trees
+(Vegitation_client.zip), 29 leaves have alpha mode 0 (af_treed01_lod's
+palm fronds, nc_pinebig01's, eu_treel's, eu_treed's and stella_palmtree's
+leaves) and 6 alpha-tested ones are bark tiles (the _lod meshes of
+nc_pine_cluster01, me_palmtree01, the bamboo and birch clusters). RaShaderLeaf also
+alpha-tests every leaf (AlphaTestEnable true, AlphaRef 127), so a leaf of
+alpha mode 0 is tested at 0.5 too, with the "_alphatest" texture that
+`0x10151830` loads for every map of a tree where one exists (without it
+those fronds' 0..0.5 coverage alpha cut them away). `render::treeLeaf`,
+`LevelRenderer::mesh`. Frame cost (BF2142_FRAME_BENCH=300, `--play 2
+--screenshot`, release): Camp_Gibraltar 2.16 / 2.09 → 1.96 / 1.98 ms,
+Cerbere_Landing 1.95 / 1.95 → 1.96 / 1.94, Suez_Canal 2.12 → 2.01,
+Wake_Island_2142 1.98 → 2.01 / 1.99: within the runs' noise (the GPU is
+not the bound at 1280 × 720). Tests: `MeshQueues_BundledAndSkinnedFacesCulled`,
+`MeshQueues_TreeLeavesByTheirMaps`. The launcher seat now looks past its barrel; its PostProcess
 component (`enablePostProcessingOnGuiIndex 47`) is the CameraEffect frame
 above. Test: `MeshQueues_BundledAndSkinnedFacesCulled`.
 
@@ -3777,9 +3806,10 @@ tree (`0x100de6d0`, `+0x2a2`) and draws its leaves with RaShaderLeaf
 `+0x208` = WindManager slot 0x30 at the object) sways them:
 `pos += sin((GlobalTime / (ObjRadius + y)) × (WindSpeed + 5)) × (ObjRadius
 + y)² / 1024` (not the overgrowth's: OVERGROWTH has no sway). The rewrite
-takes the alpha-tested materials of such meshes as the leaves
-(`mesh.vert`, TransformUniforms `sway`), the speed at each tree's origin
-(so a helicopter's downwash stirs the trees under it).
+takes the leaves as `0x100db6f0` marks them (`render::treeLeaf`: a tree's
+"Base" materials whose map is not a "tile_" texture, see the culling
+above) (`mesh.vert`, TransformUniforms `sway`), the speed at each tree's
+origin (so a helicopter's downwash stirs the trees under it).
 
 **Wheel and draft bundles.** WheelEffectBundle (`0x0061bfc0`) and
 AirDraftEffectBundle (`0x0061d820`) take their effect from
@@ -5766,7 +5796,10 @@ block and the list's current index say which: `RemoteWorld::level()`,
 `currentMapIndex()`) loads as for a local game, with its gameplay objects as a client's (`v_arg1 client`: no
 spawners, the server's objects come as ghosts). Each tick the client
 updates and every ghost whose template we have becomes, and moves as, an
-object of the level; the keys go up as moves, the camera follows the
+object of the level (with the client round's own physics body of it, which
+sleeps there: `GameWorld::placeRemoteBody` puts it where the ghost is, as
+the SimpleObject's update `0x005ffec0` sets the root's physics node; before,
+a vehicle's seat guns fired from where the client first saw it); the keys go up as moves, the camera follows the
 control object, and a click on a spawn point asks for it. The server runs
 the round (no local game-mode script, no bots). The HUD is the local
 game's, fed by the server's state ([the HUD's world](#hud)): the tickets
@@ -6179,6 +6212,45 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   player has no soldier (`GameWorld::setPlayerTeam`: the squad and the
   command left, PlayerChangeTeams for the scripts); `--connect --play 1|2`
   asks for the team before spawning.
+- **The start** (`0x004c03b0`): the status is PreGame as the level loads
+  and Playing from the next tick (`0x004bd2a0`), so the game mode sets its
+  tickets and triggers before the vehicles spawn (gpm_ti's Titan tickets
+  come from their VehicleSpawn); the handlers without alwaysTrigger hear
+  nothing until the round state is 3 (`ScriptHost::setRoundPlaying`).
+  When the players needed are there, the countdown begins with the round's
+  reset (slot `0x24`, `0x004be630`: status PreGame, GameLogic::reset
+  `0x004ce910`, which also respawns the vehicles, then Playing again), and
+  `0x004bd2a0` puts every player's spawn time (slot `0x100`) at the
+  countdown's end, so each soldier of the playing round spawns in it and
+  the scripts' PlayerSpawn hears it. The rewrite's `GameLogic::onCountdown`
+  runs `GameWorld::restartPlayers`: the soldiers go (heard by no handler),
+  the kill counts start again, the players in the game wait out the
+  countdown (a client's spawn request too, in `HostedGame`); the vehicles,
+  control points and dropped kits stay, and so does the status (raising
+  Playing again without the vehicles' respawn would leave gpm_ti's Titan
+  tickets at 0). Before this, soldiers spawned while waiting for players
+  played on unknown to gpm_cq and stats.py: their deaths raised
+  AttributeErrors (`soldier`) and standing in a control point broke its
+  trigger (`killed`), so no capture; and a hosted Titan round's status
+  turned Playing after the Titans spawned: PAC's tickets (its Titan's
+  armour on the HUD) stayed 0.
+- **Spawns** asked for by a client (6/6) come once the player's spawn time
+  is up (`0x004bb220`'s sv.spawnTime wait, also for man down), not at once.
+  The spawn groups beside the control points' are made as the round goes
+  (SpawnManager `0x006347c0`: the first free id from `0xc0`): a squad's
+  (made with the squad, its `+0x15c`, `0x004c87a0`; its
+  SquadLeaderSpawnPoint rides the leader's soldier, or his beacon once set
+  down, `0x004c7f10`) and a mobile spawn vehicle's (`0x00635080`). The
+  rewrite's host sends a squad's group while its leader is up on foot (at
+  his soldier's ghost) or has a beacon (at the beacon's), and a vehicle's
+  at the vehicle's ghost (`HostedGame::trackSpawnGroups`); a 6/6 naming one
+  spawns the member on the leader or the beacon, or in the vehicle. The
+  client's spawn screen asks for the group at its leader's soldier or at
+  the vehicle (`RemoteHudWorld::spawnGroupAt`, `spawnVehicles`). Before
+  this, a joined player could pick neither.
+- **Names**: ChangePlayerName renames the round's player too
+  (`GameWorld::setPlayerName`): the scripts, the host's scoreboard and its
+  logs had kept "Player<n>".
 - **Map changes and new rounds** keep the connections
   (`HostedGame::changeLevel`; `bf2142 --host --maps
   level[:mode[:size]],...` plays a list): every client gets the map list and
@@ -10409,7 +10481,14 @@ At round start the engine imports `bf2`, runs `bf2.init_module()` and then
 the game mode's `init()`, and calls the game status handlers (PreGame,
 Playing). Engine events (`PlayerConnect`, `PlayerSpawn`, `EnterVehicle`,
 `ControlPointChangedOwner`, `TicketLimitReached`, `TimeLimitReached`...)
-call the handlers scripts registered with `host.registerHandler`.
+call the handlers scripts registered with `host.registerHandler(event,
+function[, alwaysTrigger])` (`0x00446860`; PythonHost.cpp). A function
+already registered for the event isn't added again (the game modes and
+stats.py register theirs on every change to Playing), and a handler
+without alwaysTrigger hears its event only while the game plays
+(`0x00444140`: the game logic's status 1, slot `0x164`, and round state
+3, slot `0x168`); PlayerConnect, PlayerDisconnect, Reset and the time
+limit's handlers are registered with it. `ScriptHost::raise`.
 
 In conquest the script does the deciding. It counts who is inside each
 control point's radius trigger, picks whose flag is up (`cp_setParam
@@ -12868,22 +12947,37 @@ changes (0x100966c0 → 0x10095fc0).
     on random 20–100 m trips (clusters 7–26 m) fails 312 of 321 on
     Cerbere, 351 of 393 on Camp Gibraltar and 255 of 397 on Minsk.
 - **String-pull** (0x10093610), twice, for waypoints 5 m or more from the
-  bot: where the line from the previous waypoint to the next crosses the
-  portal, kept max(1, 0.8 radius) (at most half the portal) from its ends.
-  Then a last pass without the margin where that line crosses the portal
-  itself.
+  bot (3-D, from the mover's own position, vslot 0x2c: a vehicle's origin
+  above the mesh counts its height): where the line from the previous
+  waypoint to the next crosses the portal, kept max(1, 0.8 radius) (at
+  most half the portal) from its ends; the previous point starts at the
+  mover and carries over from the first pass into the second. Then a last
+  pass, from the mover again, without the margin where that line crosses
+  the portal itself (0 ≤ t ≤ 1), for every waypoint near or far: round a
+  mesh corner it pulls the path to within centimetres of the corner (the
+  same in the original; the vehicles' room rays don't run on that mesh,
+  see Space).
 - **Each tick** (0x10095720):
   - **Off the path:** back onto the waypoint whose polygon the bot is on,
-    up to 20 ahead (0x10093a20).
+    up to 20 ahead (0x10093a20; the polygon of its record on the map,
+    0x100a46c0, not a lookup where it stands).
   - **Reached** (0x10094050): within 3 m of height (5 m in a vehicle) and
     0.5 m horizontally on foot; in a vehicle max(1, approach), the last
     one also within its radius.
-  - **Look-ahead** (0x10093420): within 10 m (20 m) of the waypoint,
-    skip to the next while the mesh ray to it is clear (8 polygons on
-    foot, 30 at the wheel, stopping at cost class 5 or 7; one a tick on
-    foot, up to four at the wheel). When none was skipped, the ray to the
+  - **Look-ahead** (0x10093420): within 10 m (20 m, 3-D from the mover,
+    0x1002b0b0 / 0x100269d0) of the waypoint, skip to the next while the
+    mesh ray to it is clear (8 polygons on foot, 30 at the wheel, stopping
+    at cost class 5 or 7; one a tick on foot, up to four at the wheel).
+    The rays start at the mover's record on the follower's map (vslot 0x84
+    with 0 → 0x100927c0: its polygon and point); without a record there is
+    no look-ahead. When none was skipped, the ray to the
     waypoint itself (1000 polygons) says whether it is blocked (+0xda,
-    until planned again). Blocked for 2 s (0.5 s) since last clear
+    until planned again; the clock +0xb8 runs only while it is not
+    blocked, so in the original a ray clear again later doesn't hold the
+    reroute off; the rewrite restarts the clock on every clear look-ahead,
+    as a walker stepping exactly along a path pulled onto the mesh's edge
+    sees the ray from its spot leave the mesh at once now and then).
+    Blocked for 2 s (0.5 s) since last clear
     (0x10095470, `PathFollower::reroute`): with more than one cluster
     step left, the cursor goes to the bot's cluster on the path (all but
     the last step), else to the first one next to it (0x1003f7a0 →
@@ -12893,7 +12987,10 @@ changes (0x100966c0 → 0x10095fc0).
     0x100b82a0): from the bot's polygon, across the x/z plane from the
     bot's position each time, the edge each polygon is left by (not the
     one back; a crossing within 0.001 of a vertex only when heading out;
-    else the nearest miss under 0.001, with no edge to leave by). It is
+    else the nearest miss under 0.001, with no edge to leave by). Its
+    output point is the end when clear, else the last exit point (at the
+    edge's height); a polygon after the first with no way out at all
+    leaves it (0, 0, 0), the exit point zeroed before the step. It is
     clear once the exit point lies within 0.05 m of the end (3-D) or
     0.16 m across. It fails off the mesh, into a polygon the profile can't
     walk, into the stop class, past its polygon count, or (with a width:
@@ -12963,30 +13060,43 @@ changes (0x100966c0 → 0x10095fc0).
     diagonals, and to either side. The rays behind are cut short by other
     vehicles' spheres (0x100fbdb0). The speed is capped from maxSpeed down
     to speedAtZeroSpace as the space ahead closes (backingSpeed below 95 %;
-    in the backing states from the space behind). The rays start at the
-    unit's point on the map (the vslot 0x84 ray's 0x100927c0 reads the
-    Mobile part's per-map record, 0x100a4510: polygon, cluster, point),
-    which the courier (0x10055650 → pathfinder slot 0x34) moves only when
-    it finds the object on the mesh, at the mesh's height; off the mesh it
-    keeps the last one; so do the rewrite's (`DriveSense::rayStart`, the
-    driver's `Bot::driveSpot`; a vehicle never found on the mesh knows no
-    room). The cost class the diagonal and side rays test is one byte the
+    in the backing states from the space behind). The rays run on the
+    pathfinder's **trace map**, not the vehicle's own: vslot 0x84 with 1
+    (0x1003f930) takes the map at the pathfinder's `+0x5c`, which
+    `aiPathfinding.traceMap Infantry` in `AI/AIPathfinding.ai` sets
+    (0x100200f0 / 0x100201e0 → the pathfinder's 0x10040530; −666 at first
+    and for an unknown name), and the pathfinder's slot 1 (0x10044850)
+    hands the same index to 0x100e8170 for the start record. So the
+    drivers measure their room on the **infantry mesh**, which reaches
+    where the vehicle mesh (built `map.radius` in from the obstacles:
+    2.3 m on minsk_coop, Cerbere_Landing) ends. The rays start at the
+    unit's record on that map (0x100927c0 reads the Mobile part's per-map
+    record, 0x100a4510: polygon, cluster, point). The courier (0x10055650 →
+    pathfinder slot 0x34) keeps a unit's records on both maps: first the
+    trace map's, and only when it found the object there, the other map's,
+    from the point at the trace mesh's height; found, at the mesh's height,
+    off the mesh it keeps the last (the rewrite's `Bot::traceSpot` and
+    `Bot::driveSpot`). A vehicle never found on the trace map has no
+    record and its rays don't start. They take the vehicle's cost profile,
+    1000 polygons, no width, stop class 6 (and 7), the climb test with the
+    trace map's slope limit (0x1003ce50 reads its own map's `+0x24`) and
+    the step height of the follower's map (the vehicle map's
+    `allowedThresholdHeight`; 0.35 m for map 0). A ray's room is the 3-D
+    distance from the record's point to its output (the end when clear);
+    an output left (0, 0, 0) doesn't count: the front and back rays' room
+    then stays 0 (`local_2c`, `local_18`), a diagonal changes nothing, a
+    side gives 0. The rays that choose the side to pass a vehicle on
+    (vslot 0x88, 0x1003f810) run on the driver's own map (0x100a4330),
+    from the obstacle's record there, with no stop class; without a record
+    there are none and the left side is taken. The cost class the diagonal
+    and side rays test is one byte the
     rays share in turn (`local_5` of 0x100e8170 / 0x100e1f20, never reset):
     a ray writes it only when it enters a polygon (0x1003ce50's
     `param_11`), so one that leaves the mesh, or ends, in its first
     polygon reads the class the ray before it ended in (the first one's is
     left unset).
-    "Needed" is spaceNeededTweak × r (Mobile slot 0x2c, 0x100a4370). The
-    shipped Cerbere_Landing's vehicle mesh was built for jeeps
-    (`AI/AI.ai`: `aiPathfinding.map.radius 2.3`, "There are only jeeps on
-    this map"), so the PAC heavy mech, needing 4.9 m along its diagonals,
-    finds no room at its spawn's 8 m wide neck there in the original too.
-    Suez_Canal's us_heavy_mech (r 4.6 m, needing 4.2 m) spawns at the
-    vehicle mesh's edge (`map.radius 4.35`): its front-right diagonal
-    leaves the mesh within 1 m and its back within needed, so its machine
-    goes 0 → 9 → 3 → 0 turning on the spot at the point it already faces,
-    as 0x100e1f20 does; it gets away only when its spawn slide or a
-    backing run leaves it room. Camp Gibraltar's Ruins and Central Camp
+    "Needed" is spaceNeededTweak × r (Mobile slot 0x2c, 0x100a4370).
+    Camp Gibraltar's Ruins and Central Camp
     vehicle order positions lie off the vehicle mesh, so drivers sent
     there fail every request (0x100966c0 has no search nearby) and stand.
   - **States** (one change per time stamp, 0x100973b0): from 0, a goal
@@ -13007,15 +13117,38 @@ changes (0x100966c0 → 0x10095fc0).
     states 0 and 9/11 never fails it; the 20 s failure only re-plans
     (BBPGotoWaypoint2d plans again), and the stuck hook (0x100c91c0 →
     BF2142.exe 0x0089e940 → the game logic's slot 0x58) does nothing.
-    Passengers stay while their seats outweigh the way out (Change). The
-    rocking FAVs on Cerbere follow paths the third string-pull pass
-    (0x10093610, without the margin) pulls taut round a corner of the
-    mesh and the look-ahead's width-0 rays (0x10093420; `0x10139514` is
-    read and never written) take: the steering point lies a few cm past
-    the corner, the forward and diagonal rays end short of 0.94 r there,
-    the driver backs (9/11) and comes on again. No step of the binary's
-    that would let its driver through there was found (the rays, the
-    machines and the follower were compared).
+    Passengers stay while their seats outweigh the way out (Change).
+    Drivers that rocked between states 0 and 9/11 (Cerbere's FAVs,
+    minsk_coop's eu_fav at 343/−323 and eu_tank at −195/−228, Verdun's
+    as_apc at 202/290, and a minsk eu_fav from its spawn at −202/−206)
+    did so because the rewrite measured their room on the vehicle mesh.
+    The follower is the original's there: the third string-pull pass pulls
+    the path round a corner of the vehicle mesh (the eu_fav's steering
+    point 0.74 m from the corner vertex at −197.29/−211.80) and the
+    steering point is that waypoint (0x10095720, no offset); the
+    front-right diagonal then ends on the vehicle mesh's edge just under
+    "needed" (2.86 against 2.93 m for the eu_fav; tank 4.6–5.3 against
+    5.36; as_apc 5.3–5.4 against 5.43) and the car backs. The original's
+    rays run on the infantry mesh, whose edge there lies past the vehicle
+    mesh's by about the map radius, so a vehicle whose diagonal needs no more
+    than that across (needed × sin of the diagonal's angle: 1.3 m for the
+    FAVs) keeps going. Measured over 300 s (15 bots, seeds 0–2, five
+    maps; stuck = 30 s windows under 2 m, all bots): drivers stuck in
+    MoveTo on Camp Gibraltar 1200 → 750 s, minsk_coop 1381 → 150, Suez
+    960 → 0, Verdun 990 → 540, Cerbere_Landing 1111 → 0; all bots 4533 →
+    3273, 2884 → 750, 3033 → 1261, 3693 → 3963 (Verdun's seated
+    passengers 2463 → 2883), 3934 → 1773. Wider vehicles can still
+    rock, as the original's machines would with the same rays: a path on
+    the edge of minsk_coop's vehicle mesh (radius 2.3, "only jeeps",
+    2.05 m more than the infantry mesh's) leaves less across than a tank
+    needs (5.36 m along a diagonal of about 27°: 2.4 m), and an eu_tank at
+    −21/−317 rocks with its front-right ray at 5.27–5.40 m on the infantry
+    mesh; Verdun's as_apc (radius 3.5 there)
+    at 201/278 sees an infantry-mesh edge 5.2–5.4 m along its front-left
+    diagonal (needing 5.43) while its point lies 0.4 rad to the right.
+    A driver also stops where the infantry mesh has a hole the vehicle
+    mesh crosses (Camp Gibraltar's PAC heavy mech at 59/251 faces such an
+    edge 3.4 m ahead and turns on the spot, as 0x100e1f20 would).
   - **Other vehicles** (0x100fbff0): the one in the way (within the
     forward speed + max(r, 5) + both radii, the forward line crossing its
     sphere) is passed in state 6 on a side chosen by the room beside it

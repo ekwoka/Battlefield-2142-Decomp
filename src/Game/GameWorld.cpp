@@ -4360,6 +4360,35 @@ int GameWorld::playerOf(uint32_t object) const
 	return -1;
 }
 
+void GameWorld::restartPlayers(float spawnIn)
+{
+	for (const auto& owned : m_players) {
+		Player& player = *owned;
+		if (!player.present) {
+			continue;
+		}
+		// Those in the game (a soldier, or a bot's wait) spawn again at the
+		// end (autoRespawn); a player yet to spawn still asks to.
+		const bool playing = player.alive || player.manDown || player.respawnIn > 0 || player.ai;
+		if (player.alive) {
+			kill(player, nullptr, 0);
+		}
+		if (player.manDown) {
+			finishDeath(player, BodyFate::Remove);
+		}
+		player.kills = player.deaths = player.teamKills = 0;
+		player.killer = -1;
+		player.respawnIn = playing ? spawnIn : 0;
+	}
+}
+
+void GameWorld::setPlayerName(int id, const std::string& name)
+{
+	if (Player* player = findPlayer(id)) {
+		player->name = name;
+	}
+}
+
 int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 {
 	// The lowest free id (a removed player's), else a new one.
@@ -12778,6 +12807,16 @@ void GameWorld::posedAfterUpdate(ObjectAnimation& a)
 	if (a.animation && a.skeleton) {
 		poseBoneParts(*a.animation, *a.skeleton, a.pose, a.boneParts);
 		a.posed = true;
+	}
+}
+
+void GameWorld::placeRemoteBody(uint32_t object, const physics::Vec3& position, const physics::Mat3& rotation,
+	const physics::Vec3& velocity)
+{
+	if (Body* body = findBody(object)) {
+		body->body.position = position;
+		body->body.rotation = rotation;
+		body->body.velocity = velocity;
 	}
 }
 

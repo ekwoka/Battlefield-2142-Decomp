@@ -303,6 +303,28 @@ std::vector<int> RemoteHudWorld::spawnablePoints(int team) const
 	return out;
 }
 
+std::vector<uint32_t> RemoteHudWorld::spawnVehicles(int team) const
+{
+	std::vector<uint32_t> out;
+	for (const auto& [id, group] : m_world.spawnGroups()) {
+		const world::Object* object = group.team == team ? m_round.objects().find(objectOf(group.ghost)) : nullptr;
+		if (object && object->objectTemplate() && object->objectTemplate()->typeName() == "PlayerControlObject") {
+			out.push_back(object->id());
+		}
+	}
+	return out;
+}
+
+int RemoteHudWorld::spawnGroupAt(uint32_t object) const
+{
+	for (const auto& [id, group] : m_world.spawnGroups()) {
+		if (object != 0 && objectOf(group.ghost) == object) {
+			return id;
+		}
+	}
+	return -1;
+}
+
 std::vector<HudWorld::VehicleInfo> RemoteHudWorld::vehicleList() const
 {
 	std::vector<VehicleInfo> out;

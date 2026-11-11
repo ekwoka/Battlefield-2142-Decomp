@@ -83,6 +83,9 @@ void GameLogic::tick(float seconds)
 		}
 		m_state = 2;
 		m_countdown = m_startDelay;
+		if (onCountdown) {
+			onCountdown();
+		}
 	}
 	if (m_state == 2) {
 		m_countdown -= seconds;

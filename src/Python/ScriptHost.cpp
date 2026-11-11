@@ -56,8 +56,18 @@ struct ScriptHost::Impl {
 	Log log;
 	bool ok = false;
 	Ref hostObjects; // the _host_objects module
-	std::map<std::string, std::vector<Ref>> handlers;
+	// An event's handlers (PythonHost.cpp's lists, 16 bytes an event): the
+	// function and its alwaysTrigger. Without alwaysTrigger a handler only
+	// hears the event while the game plays (0x00444140: the game logic's
+	// status 1 and round state 3).
+	struct Handler {
+		Ref function;
+		bool always = false;
+	};
+	std::map<std::string, std::vector<Handler>> handlers;
 	std::vector<Ref> statusHandlers;
+	game::GameStatus status = game::GameStatus::NotConnected;
+	bool roundPlaying = true; // the game logic's round state 3 (ScriptHost::setRoundPlaying)
 	std::vector<Ref> timers;
 	struct Trigger {
 		int id;
@@ -247,11 +257,21 @@ PyObject* host_log(PyObject*, PyObject* args)
 	return none();
 }
 
+// host.registerHandler(event, function[, alwaysTrigger]) (0x00446860): a
+// function already registered for the event is left as it is (the game
+// modes register their handlers on every change to Playing).
 PyObject* host_registerHandler(PyObject*, PyObject* args)
 {
 	PyObject* function = PyTuple_Size(args) > 1 ? PyTuple_GetItem(args, 1) : nullptr;
 	if (function && PyCallable_Check(function)) {
-		g_host->handlers[stringArg(args, 0)].push_back(Ref::borrowed(function));
+		auto& list = g_host->handlers[stringArg(args, 0)];
+		const bool known = std::any_of(list.begin(), list.end(),
+			[function](const auto& h) { return h.function.get() == function; });
+		if (!known) {
+			const bool always = PyTuple_Size(args) > 2 && PyLong_AsLong(PyTuple_GetItem(args, 2)) > 0;
+			PyErr_Clear();
+			list.push_back({Ref::borrowed(function), always});
+		}
 	}
 	return none();
 }
@@ -261,7 +281,9 @@ PyObject* host_unregisterHandler(PyObject*, PyObject* args)
 	PyObject* function = PyTuple_Size(args) > 1 ? PyTuple_GetItem(args, 1) : nullptr;
 	auto& list = g_host->handlers[stringArg(args, 0)];
 	list.erase(std::remove_if(list.begin(), list.end(),
-				   [function](const Ref& r) { return PyObject_RichCompareBool(r.get(), function, Py_EQ) == 1; }),
+				   [function](const auto& h) {
+					   return PyObject_RichCompareBool(h.function.get(), function, Py_EQ) == 1;
+				   }),
 		list.end());
 	return none();
 }
@@ -754,11 +776,14 @@ void ScriptHost::setGameStatus(game::GameStatus status)
 		return;
 	}
 	g_host = m_impl.get();
+	m_impl->status = status; // the game logic's +0x40 first (0x004bd2a0), then the handlers
 	const std::vector<Ref> handlers = m_impl->statusHandlers; // handlers may unregister
 	for (const Ref& handler : handlers) {
 		m_impl->call(handler.get(), {Ref(PyLong_FromLong(static_cast<long>(status)))});
 	}
 }
+
+void ScriptHost::setRoundPlaying(bool playing) { m_impl->roundPlaying = playing; }
 
 void ScriptHost::raise(const std::string& event, const ScriptArgs& args)
 {
@@ -774,9 +799,11 @@ void ScriptHost::raise(const std::string& event, const ScriptArgs& args)
 	for (const ScriptValue& a : args) {
 		pythonArgs.push_back(m_impl->toPython(a));
 	}
-	const std::vector<Ref> handlers = it->second;
-	for (const Ref& handler : handlers) {
-		m_impl->call(handler.get(), pythonArgs);
+	const std::vector<Impl::Handler> handlers = it->second; // handlers may unregister
+	for (const Impl::Handler& handler : handlers) {
+		if (handler.always || (m_impl->status == game::GameStatus::Playing && m_impl->roundPlaying)) {
+			m_impl->call(handler.function.get(), pythonArgs);
+		}
 	}
 }
 
