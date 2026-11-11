@@ -375,6 +375,9 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_players.clear();
 	m_names.clear();
 	m_motion.clear();
+	m_snapshot.clear();
+	m_reloadsSeen.clear();
+	m_stateCache.clear();
 	m_nextGhost = kFirstGhost;
 	m_spawnGroups.clear();
 	m_squadSpawnGroups.clear();
@@ -393,10 +396,8 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 			m_round->setKit(client.player, kits.front().name, kits.front().soldier);
 		}
 		client.created.clear();
-		client.sent.clear();
 		client.ghosts.clear();
 		client.carried.clear();
-		client.lastCarried.clear();
 		client.lostRemovals.clear();
 		client.rescoreIn = 0;
 		client.hasEye = false;
@@ -1895,9 +1896,7 @@ void HostedGame::trackObjects()
 				sendTo(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
 			}
 			for (size_t part = 0; part < it->second.layout->size(); ++part) {
-				client.sent.erase(static_cast<uint16_t>(ghost + part));
 				client.ghosts.forget(static_cast<uint16_t>(ghost + part));
-				client.lastCarried.erase(static_cast<uint16_t>(ghost + part));
 			}
 		}
 		it = m_ghosts.erase(it);
@@ -2128,9 +2127,7 @@ void HostedGame::trackProjectiles()
 				sendTo(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
 			}
 			for (size_t part = 0; part < it->second.layout->size(); ++part) {
-				client.sent.erase(static_cast<uint16_t>(ghost + part));
 				client.ghosts.forget(static_cast<uint16_t>(ghost + part));
-				client.lastCarried.erase(static_cast<uint16_t>(ghost + part));
 			}
 		}
 		it = m_ghosts.erase(it);
@@ -2259,6 +2256,10 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 		if (mode == 3) {
 			// The node's acceleration and velocity change (slots 0x74, 0xc4).
 			s.mask |= 0x200 | 0x80000;
+			// The kit's ability battery (0x40000, mode 3 only: soldier
+			// +0x338, 0..1, -1 without a kit).
+			s.mask |= 0x40000;
+			s.battery = std::clamp(info.battery, -1.0f, 1.0f);
 			s.soldierAcceleration = {body->acceleration.x, body->acceleration.y, body->acceleration.z};
 			s.soldierImpulse = {body->impulse.x, body->impulse.y, body->impulse.z};
 		}
@@ -2278,8 +2279,8 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 		// the ladder's id (+0x184; 0 none), and the place on it
 		// (0x0059ebf0); a client seats the soldier in a container of its
 		// own at that ladder (0x0059fbf0) and moves it there (0x0059ec80),
-		// and takes it out on a 0 (0x0059d440). The original's dirty mask
-		// sends it on a change; the rewrite's states are whole, so always.
+		// and takes it out on a 0 (0x0059d440). The dirty masks send it on
+		// a change (snapshotGhosts).
 		s.mask |= 0x20000;
 		s.ladder = std::min(info.ladder, 255);
 		s.ladderPosition = info.ladderPosition;
@@ -2479,13 +2480,150 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 	return states;
 }
 
-std::vector<uint8_t> HostedGame::stateOf(const Ghost& ghost, size_t part, size_t& bits) const
+std::vector<uint8_t> HostedGame::encodeGhost(const GhostNow& now, const net::GhostMasks& masks, size_t& bits,
+	net::GhostMasks& written) const
 {
-	const net::GhostPartLayout& layout = (*ghost.layout)[part];
+	// Each group with its mask (0x0057f420: the dirty mask & the
+	// networkable's slot 0x24 for the mode; here & the fields the state
+	// holds).
+	written = {};
 	net::BitWriter out;
-	net::encodeGhostState(out, layout, nullptr, statesOf(ghost, part, 2));
+	if (now.team) {
+		net::TeamNetState t = now.teamState;
+		t.mask &= masks[0];
+		written[0] = t.mask;
+		net::encodeTeamState(out, t);
+	} else if (now.player >= 0) {
+		net::NetworkableState s = now.states.front();
+		s.mask &= masks[0];
+		written[0] = s.mask;
+		net::NetworkableHints hints;
+		hints.kind = net::NetworkableKind::Player;
+		net::encodeNetworkable(out, hints, nullptr, s);
+	} else if (now.layout) {
+		std::vector<net::NetworkableState> states = now.states;
+		for (size_t g = 0; g < states.size() && g < net::kGhostMaskGroups; ++g) {
+			states[g].mask &= masks[g];
+			written[g] = states[g].mask;
+		}
+		net::encodeGhostState(out, *now.layout, nullptr, states);
+	}
 	bits = out.bits();
 	return out.data();
+}
+
+const HostedGame::GhostNow* HostedGame::ghostNow(uint16_t ghost)
+{
+	if (const auto it = m_stateCache.find(ghost); it != m_stateCache.end()) {
+		return &it->second;
+	}
+	GhostNow now;
+	if (ghost == net::kTeamStateGhost) {
+		now.team = true;
+		now.teamState = teamStateOf();
+	} else {
+		for (const auto& [player, seen] : m_players) {
+			if (seen.ghost == ghost) {
+				now.player = player;
+			}
+		}
+		if (now.player >= 0) {
+			// Every group's fields are there to write; the mask's 0x10000
+			// goes only with a reload (snapshotGhosts).
+			now.states.push_back(playerStateOf(now.player, true));
+		} else {
+			size_t part = 0;
+			const Ghost* g = ghostOf(ghost, part);
+			if (!g) {
+				return nullptr;
+			}
+			now.layout = &(*g->layout)[part];
+			now.states = statesOf(*g, part, 2);
+		}
+	}
+	return &(m_stateCache[ghost] = std::move(now));
+}
+
+void HostedGame::snapshotGhosts()
+{
+	if (m_snapshotTaken && m_snapshotTick == m_tick) {
+		return;
+	}
+	m_snapshotTaken = true;
+	m_snapshotTick = m_tick;
+	std::vector<uint16_t> ghosts;
+	for (const auto& [object, ghost] : m_ghosts) {
+		for (size_t part = 0; part < ghost.layout->size(); ++part) {
+			ghosts.push_back(static_cast<uint16_t>(ghost.first + part));
+		}
+	}
+	for (const auto& [player, seen] : m_players) {
+		ghosts.push_back(seen.ghost);
+	}
+	ghosts.push_back(net::kTeamStateGhost);
+	std::map<uint16_t, GhostSeen> snapshot;
+	for (const uint16_t ghost : ghosts) {
+		const GhostNow* now = ghostNow(ghost);
+		if (!now) {
+			continue;
+		}
+		const auto before = m_snapshot.find(ghost);
+		GhostSeen& seen = snapshot[ghost];
+		net::GhostMasks changed {};
+		if (now->team) {
+			// The teams' state: each value against the last (0x00560ff0's
+			// snapshot).
+			seen.team = now->teamState;
+			seen.hasTeam = true;
+			const bool had = before != m_snapshot.end() && before->second.hasTeam;
+			for (int bit = 0; bit < 32; ++bit) {
+				const uint32_t b = 1u << bit;
+				if ((seen.team.mask & b)
+					&& (!had || !(before->second.team.mask & b)
+						|| before->second.team.values[static_cast<size_t>(bit)] != seen.team.values[static_cast<size_t>(bit)])) {
+					changed[0] |= b;
+				}
+			}
+		} else if (now->player >= 0) {
+			// The player's (0x005929f0): its fields; mask 0x10000 from a
+			// reload pressed since (player +0x28c, which the snapshot
+			// turns into the bit and clears).
+			net::NetworkableState s = now->states.front();
+			s.mask &= ~0x10000u;
+			net::NetworkableHints hints;
+			hints.kind = net::NetworkableKind::Player;
+			seen.groups.push_back(net::networkableFields(hints, s));
+			changed[0] = net::changedFields(
+				before != m_snapshot.end() && !before->second.groups.empty() ? before->second.groups.front() : net::NetworkableFields {},
+				seen.groups.front());
+			game::GameWorld::PlayerInfo info;
+			if (m_round->playerInfo(now->player, info)) {
+				const auto presses = m_reloadsSeen.try_emplace(now->player, info.reloadPresses).first;
+				if (presses->second != info.reloadPresses) {
+					changed[0] |= 0x10000;
+					presses->second = info.reloadPresses;
+				}
+			}
+		} else {
+			for (size_t g = 0; g < now->states.size() && g < now->layout->groups.size() && g < net::kGhostMaskGroups; ++g) {
+				seen.groups.push_back(net::networkableFields(now->layout->groups[g].hints, now->states[g]));
+				changed[g] = net::changedFields(before != m_snapshot.end() && g < before->second.groups.size()
+						? before->second.groups[g]
+						: net::NetworkableFields {},
+					seen.groups.back());
+			}
+		}
+		bool any = false;
+		for (const uint32_t m : changed) {
+			any = any || m != 0;
+		}
+		if (any) {
+			for (auto& [id, client] : m_clients) {
+				client.ghosts.markDirty(ghost, changed);
+			}
+		}
+	}
+	m_snapshot = std::move(snapshot);
 }
 
 net::PlayerOwnState HostedGame::ownState(int player) const
@@ -2497,6 +2635,7 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 		return s;
 	}
 	s.spawnTick = m_tick + static_cast<uint32_t>(std::ceil(std::max(0.0f, info.respawnIn) * 30));
+	s.hitIndicator = m_round->takeHitIndicator(player); // slot 0x210 (0x0059b480)
 	s.manDown = info.manDown;
 	s.commander = info.commander;
 	if (info.soldier) {
@@ -2564,7 +2703,7 @@ const HostedGame::Ghost* HostedGame::ghostOf(uint16_t id, size_t& part) const
 	return nullptr;
 }
 
-std::vector<uint8_t> HostedGame::teamStateOf(size_t& bits) const
+net::TeamNetState HostedGame::teamStateOf() const
 {
 	// Both teams' tickets (the bits 0x400 and 0x400000, team +0x84, as
 	// 0x0055f180 clamps them), each with its bit and value (+0x90, +0x8c:
@@ -2574,10 +2713,7 @@ std::vector<uint8_t> HostedGame::teamStateOf(size_t& bits) const
 		const int tickets = static_cast<int>(std::lround(m_logic->team(team).tickets));
 		state.setTickets(team, std::clamp(tickets, 0, 9999));
 	}
-	net::BitWriter out;
-	net::encodeTeamState(out, state);
-	bits = out.bits();
-	return out.data();
+	return state;
 }
 
 std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
@@ -2791,7 +2927,7 @@ void HostedGame::trackRequests()
 	m_requestsSent = std::move(now);
 }
 
-std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool everyGroup) const
+net::NetworkableState HostedGame::playerStateOf(int player, bool everyGroup) const
 {
 	game::GameWorld::PlayerInfo p;
 	net::NetworkableState s;
@@ -2825,7 +2961,7 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool ev
 		s.player.spawnTick = m_tick + static_cast<uint32_t>(std::max(0.0f, p.respawnIn) * 30.0f);
 		// The fire states (0x00592410's loop: masks 0x40 / 0x80 / 0x20000
 		// from player +0x19c / +0x19d / +0x19e, the fire and alt fire held;
-		// the state goes whole every update here) with group 0's firearm,
+		// each bit goes when its group's fields change) with group 0's firearm,
 		// the weapon in hand: its rounds and fire mode; and the presses
 		// (0x4000000, +0x250).
 		// The fire held goes out in a seat too (0x004bda00 sets +0x19c from
@@ -2861,12 +2997,7 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool ev
 			s.mask |= 0x10000;
 		}
 	}
-	net::NetworkableHints hints;
-	hints.kind = net::NetworkableKind::Player;
-	net::BitWriter out;
-	net::encodeNetworkable(out, hints, nullptr, s);
-	bits = out.bits();
-	return out.data();
+	return s;
 }
 
 net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
@@ -2960,51 +3091,8 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		rescore(client);
 		client.rescoreIn = net::kGhostRescoreSeconds;
 	}
-	// Each ghost's state this tick, once for every client; a state the
-	// client doesn't have is its dirty masks' stand-in.
-	std::map<uint16_t, int> playerOfGhost;
-	for (const auto& [player, seen] : m_players) {
-		playerOfGhost[seen.ghost] = player;
-	}
-	// A player's reload this client hasn't had: its state with mask 0x10000.
-	std::map<uint16_t, std::pair<std::vector<uint8_t>, size_t>> reloadStates;
-	const auto reloadOf = [&](uint16_t ghost, uint32_t& presses) {
-		const auto p = playerOfGhost.find(ghost);
-		game::GameWorld::PlayerInfo info;
-		if (p == playerOfGhost.end() || !m_round->playerInfo(p->second, info)) {
-			return -1;
-		}
-		presses = info.reloadPresses;
-		const auto seen = client.reloadsSent.try_emplace(p->second, info.reloadPresses).first;
-		return seen->second != info.reloadPresses ? p->second : -1;
-	};
-	const auto current = [&](uint16_t ghost) -> const std::pair<std::vector<uint8_t>, size_t>* {
-		uint32_t presses = 0;
-		if (const int player = reloadOf(ghost, presses); player >= 0) {
-			auto& entry = reloadStates[ghost];
-			if (entry.first.empty()) {
-				entry.first = playerStateOf(player, entry.second, true);
-			}
-			return &entry;
-		}
-		if (auto it = m_stateCache.find(ghost); it != m_stateCache.end()) {
-			return &it->second;
-		}
-		std::pair<std::vector<uint8_t>, size_t> entry;
-		if (ghost == net::kTeamStateGhost) {
-			entry.first = teamStateOf(entry.second);
-		} else if (const auto p = playerOfGhost.find(ghost); p != playerOfGhost.end()) {
-			entry.first = playerStateOf(p->second, entry.second);
-		} else {
-			size_t part = 0;
-			const Ghost* g = ghostOf(ghost, part);
-			if (!g) {
-				return nullptr;
-			}
-			entry.first = stateOf(*g, part, entry.second);
-		}
-		return &(m_stateCache[ghost] = std::move(entry));
-	};
+	// What changed this frame, into every client's masks.
+	snapshotGhosts();
 	// What the block has used: the header and the record.
 	size_t used = kGhostHeaderBits;
 	if (block.control) {
@@ -3016,7 +3104,7 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		used = w.bits();
 	}
 	const uint32_t sequence = m_server.nextSequence(id);
-	std::vector<uint32_t>& carried = client.carried[sequence];
+	std::vector<Client::Carried>& carried = client.carried[sequence];
 	carried.clear();
 	const auto fits = [&](size_t bits) { return used + bits <= budgetBits; };
 	// Lost removals first (gm +0x10c0).
@@ -3033,35 +3121,12 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		update.ghost = *it;
 		block.updates.push_back(update);
 		used += 18;
-		carried.push_back(0x10000u | *it);
-		client.lastCarried[*it] = sequence;
+		carried.push_back({*it, true, {}});
 		it = client.lostRemovals.erase(it);
 	}
-	// Dirty: an in-scope state whose current state the client lacks.
-	std::vector<uint16_t> scheduled;
-	for (const auto& [object, ghost] : m_ghosts) {
-		for (size_t part = 0; part < ghost.layout->size(); ++part) {
-			scheduled.push_back(static_cast<uint16_t>(ghost.first + part));
-		}
-	}
-	for (const auto& [player, seen] : m_players) {
-		scheduled.push_back(seen.ghost);
-	}
-	scheduled.push_back(net::kTeamStateGhost);
-	for (const uint16_t ghost : scheduled) {
-		const net::GhostScheduler::State* st = client.ghosts.state(ghost);
-		if (!st || st->status != net::GhostScheduler::Status::InScope || st->dirty) {
-			continue;
-		}
-		const auto* now = current(ghost);
-		const auto sent = client.sent.find(ghost);
-		if (now && (sent == client.sent.end() || sent->second != now->first)) {
-			client.ghosts.markDirty(ghost);
-		}
-	}
-	// The heap (0x005823c0) and the writes (0x00582cd0): at most the
-	// block's updates; one that doesn't fit is skipped until under 24 bits
-	// are left.
+	// The heap (0x005823c0: a state out of scope or with a mask set) and
+	// the writes (0x00582cd0): at most the block's updates; one that
+	// doesn't fit is skipped until under 24 bits are left.
 	for (const uint16_t ghost : client.ghosts.queue()) {
 		if (block.updates.size() >= maxUpdates || used + net::kGhostMinimumBitsLeft > budgetBits) {
 			break;
@@ -3079,33 +3144,29 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 			update.kind = 3;
 			used += 18;
 			block.updates.push_back(update);
-			client.sent.erase(ghost);
 			client.ghosts.written(ghost);
-			carried.push_back(0x10000u | ghost);
-			client.lastCarried[ghost] = sequence;
+			carried.push_back({ghost, true, {}});
 			continue;
 		}
-		const auto* now = current(ghost);
+		const GhostNow* now = ghostNow(ghost);
 		if (!now) {
 			client.ghosts.written(ghost);
 			continue;
 		}
-		const size_t bits = 2 + 16 + 1 + lengthBits + now->second;
-		if (!fits(bits) || now->second >= (size_t {1} << lengthBits)) {
+		size_t stateBits = 0;
+		net::GhostMasks written {};
+		std::vector<uint8_t> state = encodeGhost(*now, st->masks, stateBits, written);
+		const size_t bits = 2 + 16 + 1 + lengthBits + stateBits;
+		if (!fits(bits) || stateBits >= (size_t {1} << lengthBits)) {
 			continue;
 		}
 		used += bits;
 		update.kind = 1;
-		update.state = now->first;
-		update.stateBits = now->second;
+		update.state = std::move(state);
+		update.stateBits = stateBits;
 		block.updates.push_back(std::move(update));
-		client.sent[ghost] = now->first;
 		client.ghosts.written(ghost);
-		carried.push_back(ghost);
-		client.lastCarried[ghost] = sequence;
-		if (uint32_t presses = 0; reloadStates.count(ghost) && reloadOf(ghost, presses) >= 0) {
-			client.reloadsSent[playerOfGhost[ghost]] = presses;
-		}
+		carried.push_back({ghost, false, written});
 	}
 	return block;
 }
@@ -3127,9 +3188,18 @@ void HostedGame::rescore(Client& client)
 {
 	net::GhostScheduler& g = client.ghosts;
 	g.beginRescore();
-	g.setPriority(net::kTeamStateGhost, -1, false); // the teams' networkable: always in scope
+	// The always ghosts (the teams' networkable, the players', a negative
+	// base priority) are given to a connection once, with every mask set
+	// (0x0057dad0, and 0x004a9ba0 for one registered later); the rescore
+	// keeps them in scope at 255 (0x00581d40).
+	const auto always = [&](uint16_t ghost) {
+		if (!g.has(ghost)) {
+			g.setPriority(ghost, -1, false);
+		}
+	};
+	always(net::kTeamStateGhost);
 	for (const auto& [player, seen] : m_players) {
-		g.setPriority(seen.ghost, -1, false);
+		always(seen.ghost);
 	}
 	const auto everyPart = [&](const Ghost& ghost, float p, bool keepMax) {
 		if (!client.created.count(ghost.first)) {
@@ -3140,8 +3210,10 @@ void HostedGame::rescore(Client& client)
 		}
 	};
 	for (const auto& [object, ghost] : m_ghosts) {
-		if (ghost.basePriority < 0) {
-			everyPart(ghost, -1, false);
+		if (ghost.basePriority < 0 && client.created.count(ghost.first)) {
+			for (size_t part = 0; part < ghost.layout->size(); ++part) {
+				always(static_cast<uint16_t>(ghost.first + part));
+			}
 		}
 	}
 	game::GameWorld::PlayerInfo me;
@@ -3247,8 +3319,9 @@ void HostedGame::rescore(Client& client)
 	}
 }
 
-// A packet's fate (0x005830e0): lost, what it carried that no later packet
-// carried goes again at 10000 (a lost removal first next packet).
+// A packet's fate (0x005830e0): lost, the masks it carried that no later
+// packet carried are set again, at 10000; each removal it carried goes
+// first next packet.
 void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
 {
 	const auto it = client.carried.find(sequence);
@@ -3256,18 +3329,22 @@ void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
 		return;
 	}
 	if (!delivered) {
-		for (const uint32_t entry : it->second) {
-			const uint16_t ghost = static_cast<uint16_t>(entry & 0xffff);
-			const auto last = client.lastCarried.find(ghost);
-			if (last == client.lastCarried.end() || last->second != sequence) {
+		for (const Client::Carried& entry : it->second) {
+			if (entry.removal) {
+				client.lostRemovals.push_back(entry.ghost);
 				continue;
 			}
-			if (entry & 0x10000u) {
-				client.lostRemovals.push_back(ghost);
-			} else {
-				client.sent.erase(ghost);
-				client.ghosts.markDirty(ghost, true);
+			net::GhostMasks lost = entry.masks;
+			for (auto later = std::next(it); later != client.carried.end(); ++later) {
+				for (const Client::Carried& next : later->second) {
+					if (!next.removal && next.ghost == entry.ghost) {
+						for (size_t g = 0; g < net::kGhostMaskGroups; ++g) {
+							lost[g] &= ~next.masks[g];
+						}
+					}
+				}
 			}
+			client.ghosts.markDirty(entry.ghost, lost, true);
 		}
 	}
 	client.carried.erase(it);

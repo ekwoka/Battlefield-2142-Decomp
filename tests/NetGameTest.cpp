@@ -1824,7 +1824,7 @@ TEST(NetGame_ControlRecordMode3)
 	s.stamina = 0.75f;
 	s.sprinting = true;
 	s.weapon = 3;
-	s.soldierValue40000 = -0.5f;
+	s.battery = -0.5f;
 	const auto roundTrip = [&](unsigned mode, net::NetworkableState& back, size_t& bits) {
 		net::BitWriter out;
 		net::encodeNetworkable(out, soldier, &ref, s, mode);
@@ -1841,8 +1841,8 @@ TEST(NetGame_ControlRecordMode3)
 	CHECK(near(full.soldierAcceleration.y, -9.81f, 0.0001f) && near(full.soldierNode88.z, -0.0456f, 0.0001f));
 	CHECK(near(full.soldierImpulse.y, 6, 0.0011f) && near(full.position.x, 100.25f, 0.0011f)); // truncated: one step
 	CHECK(near(full.soldierLean[0], 0.4567f, 0.002f) && near(full.soldierLean[1], -0.25f, 0.002f));
-	CHECK(near(full.stamina, 0.75f, 0.005f) && full.sprinting && near(full.soldierValue40000, -0.5f, 0.02f));
-	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.18f) && coarse.soldierValue40000 == 0);
+	CHECK(near(full.stamina, 0.75f, 0.005f) && full.sprinting && near(full.battery, -0.5f, 0.02f));
+	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.18f) && coarse.battery == 0);
 
 	// RotationalBundle: 16 bits an angle and speed in mode 3.
 	net::NetworkableHints bundle;

@@ -611,6 +611,45 @@ TEST(RenderScene_OvergrowthCrossFadeAndCells)
 	CHECK(out == "wood");
 }
 
+// The antialiasing setting (VideoSettings.setAntialiasing, RendDX9
+// 0x1000fb60's "<n>Samples" names) and the alpha-to-coverage path's alphas
+// (0x1008da30, RaShaderLeaf with HASALPHA2MASK, 0x1010e270).
+TEST(RenderScene_AntialiasingAndAlphaToCoverage)
+{
+	CHECK(scene::antialiasingSampleCount("Off") == 1);
+	CHECK(scene::antialiasingSampleCount("2Samples") == 2);
+	CHECK(scene::antialiasingSampleCount("4Samples") == 4);
+	CHECK(scene::antialiasingSampleCount("8Samples") == 8);
+	CHECK(scene::antialiasingSampleCount("1Samples") == 1);
+	CHECK(scene::antialiasingSampleCount("Samples") == 1);
+	CHECK(scene::antialiasingSampleCount("4Foo") == 1);
+	CHECK(scene::antialiasingSampleCount("x4Samples") == 1);
+	CHECK(scene::antialiasingSampleCount("") == 1);
+
+	Console console;
+	std::string out;
+	scene::QualitySettings video;
+	scene::registerQualityConsoleMethods(console, video);
+	CHECK(video.antialiasingSamples == 1);
+	console.execute("VideoSettings.setAntialiasing 4Samples", out);
+	CHECK(video.antialiasingSamples == 4);
+	console.execute("VideoSettings.setAntialiasing Off", out);
+	CHECK(video.antialiasingSamples == 1);
+
+	using render::AlphaToCoverage;
+	// The near pass doubles both alphas only antialiased.
+	CHECK(near(AlphaToCoverage::nearAlpha(0.5f, false), 0.5f));
+	CHECK(near(AlphaToCoverage::nearAlpha(0.5f, true), 1));
+	CHECK(near(AlphaToCoverage::nearAlpha(1, true), 2));
+	// The leaves' coverage: 4 x a Transparency held to 1 (COLOR0).
+	CHECK(near(AlphaToCoverage::leafAlphaScale(1), 4));
+	CHECK(near(AlphaToCoverage::leafAlphaScale(2), 4));
+	CHECK(near(AlphaToCoverage::leafAlphaScale(0.25f), 1));
+	// The undergrowth's: over the cfg's AlphaRef, else as it is.
+	CHECK(near(AlphaToCoverage::undergrowthAlphaScale(0.2f), 5));
+	CHECK(near(AlphaToCoverage::undergrowthAlphaScale(0), 1));
+}
+
 // The meshes' point lights (MeshLights.h, 0x100a9f80 / 0x100a7f00) and
 // the flicker (0x0064a920).
 TEST(RenderScene_MeshLightsPickedPerMesh)

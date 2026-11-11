@@ -31,8 +31,8 @@
 //   w <= 0.5, down by it at most to 2 - 2w above, and w = 1 - t. The
 //   "_lod" mesh is drawn at alpha clamp(2(1 - w), 0, 1) while w < 1, the
 //   full one at clamp(2w, 0, 1) while w > 0 (0x10089ee0: the mesh's alpha;
-//   both doubled while the renderer's 0x1000b500 / +0x50a hold, which the
-//   rewrite doesn't have). The cells' fades don't reach these.
+//   both doubled while the renderer's 0x1000b500 / +0x50a hold: alpha to
+//   coverage, AlphaToCoverage below). The cells' fades don't reach these.
 #pragma once
 
 #include <algorithm>
@@ -114,6 +114,28 @@ struct OvergrowthBlend {
 	}
 	static float fullAlpha(float w) { return w > 0 ? std::clamp(2 * w, 0.0f, 1.0f) : 0.0f; }
 	static float lodAlpha(float w) { return w < 1 ? std::clamp(2 * (1 - w), 0.0f, 1.0f) : 0.0f; }
+};
+
+// The antialiased path's alphas (0x1000b500: antialiasing in effect; +0x50a:
+// the device takes Alpha2Mask, which SDL GPU's alpha to coverage always
+// does). RaShaderLeaf's output alpha is the texture's x 2 x COLOR0.a, and
+// COLOR0.a its Transparency (x 2 with HASALPHA2MASK on the overgrowth),
+// clamped to 1 as a vertex colour; Undergrowth.fx's is the atlas's x
+// Transparency_x8 x 8.
+struct AlphaToCoverage {
+	// The near pass's alphas, doubled (0x1008da30).
+	static float nearAlpha(float alpha, bool coverage) { return coverage ? alpha * 2 : alpha; }
+	// The overgrowth's leaves (RaShaderLeafOG, HASALPHA2MASK 1): 4 x the
+	// tree's Transparency, held to 1, times the plain texture's alpha is
+	// the coverage; no alpha test.
+	static float leafAlphaScale(float transparency) { return 4 * std::min(transparency, 1.0f); }
+	// A leaf's plain texture drawn without coverage (RaShaderLeaf, HASALPHA2MASK
+	// 0 or not the overgrowth): 2 x its alpha against AlphaRef 127.
+	static constexpr float kPlainLeafAlphaScale = 2;
+	// The undergrowth (0x1010e270): the alpha reference 0 and the atlas's
+	// alpha over the cfg's AlphaRef (Transparency_x8 = 1 / AlphaRef / 8);
+	// 1 without one.
+	static float undergrowthAlphaScale(float alphaRef) { return alphaRef > 0 ? 1 / alphaRef : 1.0f; }
 };
 
 } // namespace dice::hfe::render

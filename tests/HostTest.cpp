@@ -1708,8 +1708,30 @@ TEST(NetHost_JoinedRepairCells)
 		}
 		return {};
 	};
+	// The dirty masks (0x005800e0, 0x0057f420): the first state carries
+	// every field, a later one only what changed. The hull's hit points
+	// alone go in fewer bits than the whole state did.
+	const auto rootState = [&]() -> std::pair<uint32_t, size_t> {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == ifv->id() && o.part == 0) {
+				return {o.updates, o.stateBits};
+			}
+		}
+		return {0, 0};
+	};
+	size_t wholeBits = rootState().second;
+	for (int i = 0; i < 30; ++i) {
+		step(); // standing: the masks stay clear
+	}
+	const auto standing = rootState();
+	wholeBits = std::max(wholeBits, standing.second);
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	CHECK(rootState().first <= standing.first + 1);
 	round.setHitPoints(garage.vehicle, round.hitPoints(garage.vehicle) * 0.9f);
 	CHECK(pumpUntil(step, [&] { return eighths() == std::vector<int>(7, 7); }, 6000));
+	CHECK(rootState().second > 0 && rootState().second < wholeBits);
 	round.applyDamage(garage.vehicle, 5000);
 	CHECK(pumpUntil(step, [&] { return all(seen(), false); }, 6000));
 	CHECK(all(round.repairCells(garage.vehicle), false));

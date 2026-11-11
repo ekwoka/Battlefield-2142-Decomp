@@ -1269,6 +1269,9 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// commander screen and its states (0x10, 0x12.., 0x17.., 0x21, 0x22).
 	const bool crosshairActive = !scoreboard && !commanderScreen && !g_bigMap;
 	hud.set("CrosshairIconShow", alive && !inVehicle && crosshairActive ? 1 : 0);
+	// The hit indicator (0x007be6e0, with the crosshair): its alpha is the
+	// local player's +0x2a4 (slot 0x90), shown while not 0; set below once
+	// the crosshair's show is known.
 	hud.set("HitIndicatorIconShow", 0);
 	// In a vehicle: its icon and armour, and a gunner's gun (its HUD by
 	// the firearm's weaponHud.guiIndex, the turret's direction).
@@ -1599,6 +1602,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		}
 	} else {
 		g_weaponHud.hide(hud);
+	}
+	// The hit indicator (0x007be6e0): with the crosshair shown, its alpha
+	// the local player's (slot 0x90, +0x2a4), shown while not 0.
+	if (hud.number("CrosshairIconShow") != 0) {
+		game::GameWorld::PlayerInfo self;
+		const float alpha = world.playerInfo(world.localPlayer(), self) ? self.hitIndicator : 0.0f;
+		hud.set("HitIndicatorIconAlpha", alpha);
+		hud.set("HitIndicatorIconShow", alpha != 0 ? 1 : 0);
 	}
 	// The ability bar (0x007c3af0, after the weapon block; see
 	// HudMenusVehicles.h): the gifts in a vehicle, the tool's targets on
@@ -3435,6 +3446,8 @@ int runGame(Options& options, Session& session)
 		// The video page's dynamic shadows (0 off .. 3 high) and bloom.
 		shadowSettings.quality = std::clamp(static_cast<int>(settings.setting("VideoSettings.DynamicShadowsQuality", 2)), 0, 3);
 		postSettings.useBloom = settings.setting("VideoSettings.BloomEnabled", 1) != 0;
+		// The antialiasing: the world's sample count (LevelRenderer::draw).
+		qualitySettings.antialiasingSamples = scene::antialiasingSampleCount(settings.text("VideoSettings.Antialiasing"));
 		const std::string resolution = settings.text("VideoSettings.Resolution");
 		if (session.window && std::sscanf(resolution.c_str(), "%dx%d", &width, &height) == 2 && width > 0 && height > 0) {
 			session.window->setSize(width, height);
@@ -4141,6 +4154,7 @@ int runGame(Options& options, Session& session)
 			round.setFriendlyFire({static_cast<float>(sv.soldierFriendlyFire), static_cast<float>(sv.vehicleFriendlyFire),
 				static_cast<float>(sv.soldierSplashFriendlyFire), static_cast<float>(sv.vehicleSplashFriendlyFire)});
 			round.setFriendlyFireWithMines(sv.friendlyFireWithMines);
+			round.setHitIndicatorEnabled(sv.hitIndicator);
 		}
 		// The bots see as far as the level's fog lets them (AIDLL 0x10056b20).
 		botSettings.levelFog = lights.fogStartEndAndBase;
@@ -6542,6 +6556,11 @@ int runGame(Options& options, Session& session)
 				recordsSeen = own.controlRecords();
 				const net::ControlState* state = own.controlState();
 				const net::ControlObjectRecord& record = own.controlObject();
+				// Our own state's hit indicator flag (0x00596ed0: player
+				// slot 0x20c(1), the alpha to 1).
+				if (state && state->hasOwn && state->own.hitIndicator && remoteHud) {
+					remoteHud->hitIndicator = 1;
+				}
 				if (state && record.vehicle != 0 && !state->groups.empty()
 					&& state->groups.front().kind == net::NetworkableKind::SimpleObject) {
 					prediction.stop();
@@ -6591,6 +6610,13 @@ int runGame(Options& options, Session& session)
 				carPrediction.stop();
 			}
 			client.simulatedTick(); // this tick's move goes up (and is predicted)
+			if (remoteHud) {
+				// The player's update (0x005912c0): 3 a second, 0 under 0.0001.
+				remoteHud->hitIndicator -= 3.0f / 30.0f;
+				if (remoteHud->hitIndicator < 0.0001f) {
+					remoteHud->hitIndicator = 0;
+				}
+			}
 			std::set<uint16_t> seen;
 			// Soldiers with a player: their wrecks wait for the player (0x00652380).
 			std::set<uint16_t> attached;
@@ -6658,8 +6684,8 @@ int runGame(Options& options, Session& session)
 					// here flies on from each update's place and velocity, and
 					// moves the object (GameWorld::launchRemoteProjectile).
 					const bool flying = round.hasRemoteProjectile(it->second);
-					if (flying && projectileUpdates[ghost.ghost] != ghost.updates) {
-						projectileUpdates[ghost.ghost] = ghost.updates;
+					if (flying && ghost.positionTick && projectileUpdates[ghost.ghost] != ghost.positionTick) {
+						projectileUpdates[ghost.ghost] = ghost.positionTick;
 						const physics::Vec3 v {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z};
 						round.moveRemoteProjectile(it->second, {at.x, at.y, at.z}, ghost.hasVelocity ? &v : nullptr);
 					}
@@ -6687,14 +6713,14 @@ int runGame(Options& options, Session& session)
 							physics::Vec3 place {at.x, at.y, at.z};
 							if (round.isRemoteTitan(it->second)) {
 								TitanGhost& titan = titanGhosts[ghost.ghost];
-								if (ghost.lastTick != titan.tick) {
-									if (titan.tick != 0 && ghost.lastTick > titan.tick) {
-										const float seconds = static_cast<float>(ghost.lastTick - titan.tick) / 30.0f;
+								if (ghost.positionTick != titan.tick) {
+									if (titan.tick != 0 && ghost.positionTick > titan.tick) {
+										const float seconds = static_cast<float>(ghost.positionTick - titan.tick) / 30.0f;
 										titan.velocity = {(ghost.position.x - titan.position.x) / seconds,
 											(ghost.position.y - titan.position.y) / seconds,
 											(ghost.position.z - titan.position.z) / seconds};
 									}
-									titan.tick = ghost.lastTick;
+									titan.tick = ghost.positionTick;
 									titan.position = ghost.position;
 									titan.framesSince = 0;
 								} else {

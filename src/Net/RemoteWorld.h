@@ -133,6 +133,10 @@ struct RemoteObject {
 	int weapon = -1;
 	uint32_t updates = 0;     // ghost updates received
 	uint32_t lastTick = 0;    // the server tick of the last one
+	// The server tick of the last one with a position: an update carries
+	// only what changed since the client last had it (the server's dirty
+	// masks, 0x005800e0), so the others leave the position as it was.
+	uint32_t positionTick = 0;
 	std::vector<uint8_t> state; // the last update's networkable state (undecoded)
 	size_t stateBits = 0;
 };

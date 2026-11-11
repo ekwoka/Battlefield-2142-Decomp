@@ -1729,7 +1729,7 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   its rider's feet instead). Now each live Titan mesh is a candidate at
   each LOD it has (`Titan::VehiclePart::lod`: projectile, vehicle,
   soldier, with its collisionGroups), and a mover meets the parts at its
-  otherCollisionLod; the rider's-feet stand-in is gone
+  otherCollisionLod; the landing by the rider's feet was taken out
   (`Titan_ParachuteComesDownOnTheDecks`: opened 14 m over the hangar's
   deck, it lands there and its rider steps out alive). Each mesh's LOD
   parts are built once (`TitanMesh::lodParts`, `titanLodParts`) and only
@@ -3420,33 +3420,42 @@ device's start (`0x1000aee0`) when CheckDeviceFormat takes the FourCC
 `0x1000b500` is whether antialiasing is in effect (`+0x508`: `0x1000b550`
 draws a probe with D3DRS_MULTISAMPLEANTIALIAS on and no multisample
 type and finds it antialiased, a driver forcing it; or a multisample
-type is chosen, `+0xc0`). The rewrite draws without multisampling, so
-it takes the original's path without both: no doubling.
+type is chosen, `+0xc0`). The rewrite has both whenever the antialiasing
+setting multisamples the world (below; SDL GPU's alpha to coverage stands
+for the FourCC on every backend), and neither without it.
 
-With both, alpha to coverage changes more than the doubling: the tree
-materials keep their plain textures, whose alpha runs 0..0.5, instead of
-`_alphatest` (`0x10151830`); the effects are compiled with HASALPHA2MASK 1
-(`0x100214b0`'s macro list, with A2MEnable and the FourCC values), so
-RaShaderLeaf's techniques set `Alpha2Mask` (the driver's state: NVIDIA's
-D3DRS_ADAPTIVETESS_Y = `ATOC`, ATI's D3DRS_POINTSIZE = `A2M1` / `A2M0`) and
-its overgrowth leaves double their alpha; the scene draw (`0x1002cef0`)
-turns that state on before the overgrowth and off after the undergrowth;
-the undergrowth's alpha reference goes to 0 with its alpha scaled by 1 /
-its alpha cut (`+0xf4`, `0x1010e270`), and its init (`0x101100d0`) skips a
-texture load it makes otherwise. SDL GPU can do this on every backend:
-SDL 3.4's `SDL_GPUMultisampleState` has `sample_count` and
-`enable_alpha_to_coverage` (Vulkan, Direct3D 12 and Metal alike), so
-portability is not what stops it. What stops it is that the frame has no
-multisampled pass to put it in: the world pass, the shimmer's copy, the
-camouflage mask (tested against the world's depth), the first-person pass
-and the HUD's stencil all share one single-sampled colour and depth
-target, and every pipeline drawn into it would need a twin at the chosen
-sample count, with the colour resolved at each break (SDL GPU resolves
-colour but not depth, which the camouflage mask and the HUD read). That is
-a change to the whole frame, larger than this item; until the antialiasing
-setting (`VideoSettings.setAntialiasing`, stored, read by nothing) drives a
-multisampled world pass, the overgrowth stays on the original's path
-without antialiasing. The overgrowth shadow map
+With both, alpha to coverage changes more than the doubling: a tree's
+leaf materials keep their plain textures, whose alpha runs about 0..0.5
+(the shipped leaves' plain maps: under 1.5% of texels above 0.5),
+instead of `_alphatest` (`0x10151830`); the effects are compiled with
+HASALPHA2MASK 1 (`0x100214b0`'s macro list, with A2MEnable and the FourCC
+values), so RaShaderLeaf's techniques set `Alpha2Mask` (the driver's state:
+NVIDIA's D3DRS_ADAPTIVETESS_Y = `ATOC`, ATI's D3DRS_POINTSIZE = `A2M1` /
+`A2M0`; the technique's literal is `1`, the FourCC being A2MEnable, so the
+rewrite follows the scene draw's switch) and its overgrowth leaves double
+their alpha; the scene draw (`0x1002cef0`) turns that state on before the
+overgrowth and off after the undergrowth; the undergrowth's alpha
+reference goes to 0 with its alpha scaled by 1 / its alpha cut (`+0xf4`,
+`0x1010e270`: Transparency_x8 = 1 / AlphaRef / 8, times 8 in
+Undergrowth.fx), its init (`0x101100d0`) skips the `_alphatest` atlas's
+load, and the overgrowth's preLoad (`0x1008c7e0`) reads only
+`OvergrowthAtlas.tai`. Rewritten (`render/OvergrowthLod.h`
+AlphaToCoverage, `LevelRenderer`): a level loaded antialiased keeps the
+leaves' plain textures (`Submesh::coverageTexture`) and the plain
+undergrowth atlas, and the distant leaves take the plain atlas first; each
+antialiased frame doubles the near pass's alphas, draws the overgrowth's
+leaves opaque through an alpha-to-coverage pipeline with the texture's
+alpha x 4 x the tree's Transparency held to 1 (RaShaderLeafOG's
+`Out.Color.a = Transparency.a * 2`, halved, a vertex colour clamped to 1,
+doubled and doubled again in the pixel shader) and no alpha test, and the
+undergrowth through one with the reference 0 and the alpha over AlphaRef
+(`undergrowth.frag`'s material.z). A plain leaf drawn without coverage (a
+static tree, which the scene draw's switch doesn't reach, or a level
+loaded antialiased with the setting turned off since) takes RaShaderLeaf's
+2 x alpha against AlphaRef 127, the shadow casters the same. The rest of
+a tree (its trunks and their alpha-tested `tile_` maps) keeps
+`_alphatest`: the rewrite's trunks have no shader that doubles a plain
+alpha. The overgrowth shadow map
 (`OvergrowthShadowmap.raw`, +0x84, read by the preLoad `0x1008c7e0`) is
 the editor's: its only reader, `0x1008acd0`, copies it as grey into the
 terrain's textures when the terrain renderer's style is 6 (vtable
@@ -3456,6 +3465,34 @@ rewritten. The `Overgrowth.*` / `OvergrowthType.*` rows the levels' scripts
 call are registered (`scene/OvergrowthSettings.h`; the editor's paint, save,
 generate and atlas rows aren't) and the renderer takes them, reading
 `Overgrowth.con` itself only without them.
+
+**Antialiasing.** `VideoSettings.setAntialiasing` ("Off", "2Samples",
+"4Samples", "8Samples": `0x1000fb60` names multisample type n
+"<n>Samples") is read by the Video.con console row
+(`scene::QualitySettings::antialiasingSamples`) and the video page's apply.
+The original renders the world into its multisampled back buffer, then
+StretchRects it into the scene texture for the post-production (`0x1002cef0`:
+with `0x1000b500` the render target stays the back buffer, `+0x8a0`, and
+StretchRect copies it into `+0x8bc`'s surface; the post-production then
+draws with D3DRS_MULTISAMPLEANTIALIAS off and no depth-stencil). The rewrite
+(`GpuContext::setWorldSamples`, `LevelRenderer::draw`): the world's
+pipelines (meshes, terrain, sky, water, roads, decals, undergrowth,
+particles, shimmer, camouflage) have a second set at the sample count, the
+most at or below the setting that the colour and depth-stencil formats
+take (Metal on Apple GPUs stops at 4); the world, shimmer, camouflage and
+first-person passes draw into a multisampled colour and depth-stencil
+target, each part resolving its colour into the scene texture (or the
+target without the post-production) as it ends, and keeping its samples
+when another follows. SDL GPU resolves no depth, so nothing that reads
+depth reads a resolve: the heat shimmer copies the resolved colour and
+goes on in the multisampled pass; the camouflage mask is drawn at the
+sample count against the multisampled depth and resolved into the mask
+texture; the first-person pass clears the multisampled depth as before;
+the post-production, the HUD and the menu (the HUD's masks are its
+stencil, which starts cleared and never needs the world's depth) draw
+single-sampled into the target with its own depth-stencil, so the shadow
+maps, the post-production, the bloom and the HUD keep one pipeline each.
+Off, the frame is the single-sampled one it was.
 
 **Mesh particles.** A MeshParticleSystem's particles are copies of its
 `geometry` (a MeshParticleMesh template: a bundled-mesh file), scaled by
@@ -6223,9 +6260,9 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   (player `+0x28c`), which the client's update (`0x00590e10`) takes
   through player vtable `0x200` (`0x0059b340`) and turns into input
   message 10 to the soldier: its weapon reloads. The rewrite counts the
-  presses (`PlayerInfo::reloadPresses`), the host sends each client the
-  player's state with mask 0x10000 until that client has had it (the
-  exe's per-client dirty mask keeps the bit until it goes), and the
+  presses (`PlayerInfo::reloadPresses`), the host's snapshot sets mask
+  0x10000 for a press since the last (`HostedGame::snapshotGhosts`), each
+  client's dirty mask keeps the bit until it goes, and the
   client counts them (`RemotePlayer::reloads`) and reloads the weapon in
   the soldier's hands (`GameWorld::reloadRemoteSoldier`: the Reload sound
   and message unless it reloads already or is full). `bf2142 --connect ... --play 1
@@ -6312,9 +6349,9 @@ constructor `0x005f8870` and written nowhere else).
   client hands a changed one (or the first) to its round
   (`RemoteWorld::takeTakeable` → `GameWorld::noteTakeable`), so the local
   player hears friendlyTakeable / enemyNotTakeable and the rest as the
-  exe's reader (`0x006084b0` → `0x005bcd00`) makes it. The exe sends the
-  masks only when they change (its dirty masks); the rewrite's state
-  carries them always, so its client takes only a change.
+  exe's reader (`0x006084b0` → `0x005bcd00`) makes it. The dirty masks
+  send them only when they change (and again after a loss), so the
+  client hands on only a change.
 - **The squad's minimap** (event 0x41, SquadRadar, `0x00508800`): the
   server's handler (`0x005088f0`) hands a report to the AI and posts a
   copy (`0x005087b0`: the kind, the reporter, the seconds, the players)
@@ -6555,8 +6592,31 @@ GhostManager.cpp) with a state per ghost the client has (0x54 bytes:
 - **Losses** (`0x005830e0`): what a lost packet carried that no later
   packet carried is dirty again at 10000; a lost removal goes first next.
 
-The rewrite's stand-ins: the dirty masks are "the state the client last
-got differs" (the states encoded once a tick for every client); the eye
+- **The dirty masks** (12 a state, one a group of the ghost's state):
+  once a server frame the ghost registry (`0x0067aec0`) asks each ghost's
+  networkables what changed (slot `0x28`, the snapshot: the Soldier's
+  `0x005fc1a0`, the player's `0x005929f0`, each field against its value
+  the frame before) and the frame ORs the list into every connection's
+  states (`0x004a91c0` → `0x005800e0`). An update writes each group with
+  its mask & the networkable's slot `0x24` for the mode (every bit for
+  the players', `0x00517c9b`); the written masks are cleared
+  (`0x005824f0`); a state given to a connection has every mask set, the
+  always ones only then (`0x0057dad0`, `0x004a9ba0`; the rescore keeps
+  them at 255 without touching their masks, `0x00581d40`). A loss ORs
+  back what the packet carried less what later packets carried, per bit
+  (`0x005830e0`). `HostedGame::snapshotGhosts` compares each mask bit's
+  encoded fields with the last snapshot's (`net::networkableFields` /
+  `changedFields`): the original's comparisons are of the same quantised
+  fields where it quantises before comparing, of the raw ones elsewhere,
+  so a change under the quantum sets no bit here. A change in the fields
+  written whatever the mask (the soldier's always bits, the player's
+  squad-leader bit) sets every bit of that group here; the original files
+  them under one bit (the squad leader under `0x8000000`). A joined
+  client keeps what an update leaves out (`RemoteWorld`; the Titan's
+  velocity estimate and a flying round's place go by the updates with a
+  position, `RemoteObject::positionTick`).
+
+The rewrite's stand-ins: the eye
 is the soldier's head (kept from its last life; before any, every ghost at
 1), with a field of view of 1.1; the client's own soldier and vehicle are
 scored like any (the original skips the player's own, which the record
@@ -6957,9 +7017,13 @@ seat mine" check):
   (`+0x270`); the leans' 16 bits instead of 10 (`+0x264`, `+0x260`: the
   eased throttle and strafe); the stamina's 7 bits instead of 5, then the
   sprinting bit (`0x005fb1f0`, PCO vtable `0x100` / `0x104`); mask 0x40000,
-  -1..1 in 7 bits (the soldier's `+0x18c` interface, vtable `0x90` /
-  `0x94`; meaning not traced). The server's mask is every bit but the
-  ragdoll's.
+  -1..1 in 7 bits, round((v + 1) / 2 × 127): the kit's ability battery
+  (soldier `+0x338` through its `+0x18c` interface, vtable `0x90`
+  `0x0064aad0` / `0x94` `0x00586300`; the snapshot `0x005fc1a0` takes it,
+  −1 without a kit; see the ability battery). The server's mask is every
+  bit but the ragdoll's; the rewrite's host sends the battery too
+  (`HostedGame::soldierState`). A joined HUD has no ability bar, so its
+  client doesn't use it yet.
 - **RotationalBundle**: 16 bits an angle and speed.
 - **A seat's occupant**: the seat hands the mode to the soldier's reader.
 
@@ -6967,7 +7031,7 @@ The player's own state (`0x00594cc0` writes, `0x00596ed0` reads):
 
 | Field | Bits | Player field |
 |---|---|---|
-| a flag | 1 | vtable `0x210` (the reader calls `0x20c(1)`) |
+| the hit indicator | 1 | vtable `0x210` (`0x0059b480`: `+0x2a8`, read and cleared); the reader calls `0x20c(1)` (below) |
 | four flags | 4 | `+0x16a`, `+0x168`, `+0x169`, `+0x16b` |
 | a value | 8 | `+0x14c` (vtable `0x228`) |
 | the hit's direction | 1 + 8 | `+0x1d0`, -pi..pi; sent for two records after a hit (`+0x1d4`); a new one posts message 2/0x39 (the hit indicator) |
@@ -9235,10 +9299,18 @@ rewrite.
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
 of that material does to the soldier (the assault's armour unlock: 0.75
 for twenty bullet materials); `ability.addExtraAmmoItem <item> <mags>
-<rounds> <flag>` (`0x0054ebed`) adds magazines and rounds to an item of
-the kit (`as_handgun 3 0 0`, `unl_grenade_frag 0 1 1`; the list's
-consumer and the flag aren't traced, the rewrite adds to nrOfMags and
-magSize). The Ability template (class `0xc4b2`, vtable `0x00981e68`)
+<rounds> <flag>` (`0x0054ebed` → slot `0x84`, `0x006316e0`: an entry
+of 0x28 bytes on the list `+0x24`, `+1` the flag, `+4` the rounds, `+8`
+the magazines, `+0xc` the name; `addExtraAmmoItemToKit`'s fifth argument
+at `+0`) adds magazines and rounds to an item of the kit (`eu_handgun 2 0
+0` the extra sidearm clips, `unl_grenade_frag 0 1 1` the extra grenade;
+the flag is set on the grenade unlocks, `item_dummy 0 0 1` among them).
+The one reader of the player's copy found is the spawn screen's ability
+icons (`0x00798b20`: the flag lights Ability0Active, grenades.tga;
+magazines over 0 Ability1Active, rounds over 0 Ability2Active; then the
+sprint, damage and beacon modifiers Ability3..6Active, not rewritten);
+where the firearm takes the counts wasn't found, so the rewrite adds them
+to nrOfMags and magSize. The Ability template (class `0xc4b2`, vtable `0x00981e68`)
 keeps `sprintRechargeModifier` at `+0x5c` (slot `0xb4`),
 `sprintUseModifier` `+0x60` (`0xc4`), `beaconSpawnTimeMod` `+0x64`
 (`0xbc`) and `setOverheatMod <weapon> <mod>`'s pairs (`0x0054e8b0` →
@@ -10486,6 +10558,23 @@ while they have the keys. `src/Main/HudMenusChat`:
   generic HUD's hit indicator alone), which is why a joined client that
   always took the team's first kit (the recon's) had none: it now sends
   the spawn screen's kit.
+- **The hit indicator** (HitIndicatorIconShow `+0xef`,
+  HitIndicatorIconAlpha `+0x100`; the weapon HUDs' and
+  HudElementsVehicleBasic.con's GenericVehicleHitIndicator): with the
+  crosshair shown, the alpha is the local player's `+0x2a4` (slot `0x90`,
+  `0x0062d770`), shown while not 0 (`0x007be6e0`). The server's game
+  logic hit handlers (`0x004ba440`, `0x004ba500`, `0x004ba7a0` a blast,
+  `0x004ba830` an EMP) hand the shooter's player to its slot `0x128`
+  (`0x004ba070`) when the damage (slot `0xe4`, `0x004c0e40`) was dealt:
+  0.1 or more, the materials' cell applied and before the friendly fire,
+  to an armoured object whose control object has a team (a soldier or a
+  vehicle). With sv.hitIndicator (settings `+0xfb`) that calls player
+  slot `0x20c(1)` (`0x0059b460`: `+0x2a4` = 1 and the flag `+0x2a8`). The
+  player's update (`0x005912c0`) takes 3 a second off, 0 under 0.0001. A
+  joined client gets the flag in its own state and calls `0x20c(1)` itself
+  (`0x00596ed0`). `GameWorld::showHitIndicator` / `takeHitIndicator`,
+  `PlayerInfo::hitIndicator`, `RemoteHudWorld::hitIndicator`
+  (`GameWorld_HitIndicator`).
 - **The map keys** (the HUD's input `0x00754290`): c_GIMapSize (M) toggles
   the big map (menu state 2, `0x0074fd90`: `MapShow` at full size) while
   alive; c_GIMapZoom (N) steps the minimap's zoom 0, 1, 2 (`0x0079a040` /
@@ -11213,7 +11302,7 @@ each update moves the container to the height the place gives
 (`0x0059ec80`: the place × the length + the bottom); the container's own
 update then poses the soldier by that height (`0x0059f380`). The
 rewrite's server sends the id (the ladder's index + 1, `PlayerInfo`
-`ladder` / `ladderPosition`; always, as its states are whole, so the 0
+`ladder` / `ladderPosition`; on a change, by the dirty masks, so the 0
 that ends it gets there) and its client (`RemoteObject::ladder`) poses the
 soldier ghost by the container's climb at that height
 (`GameWorld::animateRemoteSoldier` with `RemoteSoldierState::ladder`,
@@ -14490,7 +14579,7 @@ keeps no copy). Kept as the binary does it.
 - **Revive** (0x10082f10, 0x100dda20): within 1.6 m of the body the bot
   crouches; crouched, one press of the trigger, then its release.
 
-### Not decoded, and the rewrite's stand-ins
+### Open pieces, and the rewrite's simplifications
 
 - **Scheduling:** the CPU budgets are real time (see Scheduling: they
   depend on the machine's speed, so they can't be reproduced; every slice

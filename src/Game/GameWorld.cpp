@@ -868,8 +868,9 @@ void GameWorld::setHitPoints(uint32_t object, float value)
 // (ability.addExtraAmmoItem <item> <mags> <rounds> <flag>: the
 // magazines added to nrOfMags and the rounds to the magazine, as the
 // shipped unlocks read: "as_handgun 3 0 0" is the extra sidearm clips,
-// "unl_grenade_frag 0 1 1" the extra grenade; the consumer of the list in
-// BF2142.exe and its flag are not traced).
+// "unl_grenade_frag 0 1 1" the extra grenade; the flag marks the grenade
+// unlocks, and its one reader found is the spawn screen's ability icon,
+// 0x00798b20; where the firearm takes the counts wasn't found).
 FireArmSettings GameWorld::withExtraAmmo(const Player& player, const world::ObjectTemplate& item) const
 {
 	FireArmSettings settings = FireArmSettings::fromTemplate(item);
@@ -923,7 +924,41 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 			mod *= it->second;
 		}
 	}
+	// The hit indicator: the game logic's hit handlers (0x004ba440,
+	// 0x004ba500, 0x004ba7a0 for a blast, 0x004ba830 for an EMP) hand the
+	// shooter's player to slot 0x128 (0x004ba070: with sv.hitIndicator,
+	// player slot 0x20c(1)) when the damage (slot 0xe4, 0x004c0e40) says
+	// it was dealt: 0.1 or more of it (the materials' cell applied, before
+	// the friendly fire) to an armoured object whose control object has a
+	// team, a soldier or a vehicle.
+	if (attacker >= 0 && amount * (m_materials ? m_materials->damageMod(projectileMaterial, surfaceMaterial) : 1.0f) >= 0.1f) {
+		const Body* cellBody = nullptr;
+		const Body::Cell* cell = nullptr;
+		const uint32_t root = shieldCell(object, cellBody, cell) ? cellBody->object : object;
+		const Body* body = findBody(root);
+		const world::Object* o = m_objects.find(root);
+		const bool armoured = hitPoints(object) >= 0 || cell || isTitan(root);
+		if (armoured && (soldierPlayer(object) || (body && body->vehicle && o && o->team() != 0) || isTitan(root))) {
+			showHitIndicator(attacker);
+		}
+	}
 	loseHitPoints(object, amount * mod, attacker);
+}
+
+void GameWorld::showHitIndicator(int id)
+{
+	Player* player = findPlayer(id);
+	if (!player || !m_hitIndicatorEnabled) {
+		return;
+	}
+	player->hitIndicatorFlag = true;
+	player->hitIndicator = 1;
+}
+
+bool GameWorld::takeHitIndicator(int id)
+{
+	Player* player = findPlayer(id);
+	return player && std::exchange(player->hitIndicatorFlag, false);
 }
 
 void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
@@ -4692,6 +4727,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 		info.ladderPosition = ladderFraction(m_ladders[static_cast<size_t>(player->ladder)], player->ladderY);
 	}
 	info.battery = player->battery;
+	info.hitIndicator = player->hitIndicator;
 	info.squadLeader = player->squadLeader;
 	info.commander = commander(player->team) == player->id;
 	info.aimPitch = std::clamp(player->input.aimPitch + player->aimKickPitch, -89.0f, 89.0f);
@@ -10964,6 +11000,12 @@ void GameWorld::stepAbilities(float seconds)
 	}
 	for (const auto& owned : m_players) {
 		Player& player = *owned;
+		// The hit indicator fades, 3 a second (the player's update,
+		// 0x005912c0), to 0 under 0.0001.
+		player.hitIndicator -= seconds * 3;
+		if (player.hitIndicator < 0.0001f) {
+			player.hitIndicator = 0;
+		}
 		// The battery fills by the kit's abilityRestoreRate / 30 a tick
 		// (kit +0x31c, setter 0x0056cd90) up to 1, in the soldier's
 		// update (0x0058d350).

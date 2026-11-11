@@ -588,6 +588,9 @@ public:
 		int ladder = 0;
 		float ladderPosition = 0;
 		float battery = -1; // the ability battery, 0..1 (-1 without a kit)
+		// The hit indicator's alpha (player +0x2a4: 1 at a hit, falling 3 a
+		// second, slot 12 0x005912c0); the crosshair's HitIndicatorIcon.
+		float hitIndicator = 0;
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
 		float aimPitch = 0;      // degrees, up positive: the look's (the input's)
@@ -1002,6 +1005,14 @@ public:
 	// sv.friendlyFireWithMines (settings +0x288, copied to DAT_00a3fcc0
 	// +0x58 by 0x00430e20; on by default): see the mines' trigger.
 	void setFriendlyFireWithMines(bool on) { m_friendlyFireWithMines = on; }
+	// sv.hitIndicator (settings +0xfb, on by default): whether a player's
+	// hits light his crosshair's hit indicator (0x004ba070).
+	void setHitIndicatorEnabled(bool on) { m_hitIndicatorEnabled = on; }
+	// The hit indicator (player slot 0x20c(1), 0x0059b460: the alpha to 1
+	// and the networked flag +0x2a8 set): a joined client's own state
+	// carries the flag, read and cleared by slot 0x210 (0x0059b480).
+	void showHitIndicator(int player);
+	bool takeHitIndicator(int player);
 	// The sea's height, or none (false).
 	bool waterLevel(float& level) const
 	{
@@ -2739,6 +2750,7 @@ private:
 	std::map<uint32_t, float> m_outsideVehicles; // +0x304: abandoned vehicles' seconds outside
 	FriendlyFire m_friendlyFire;
 	bool m_friendlyFireWithMines = true;
+	bool m_hitIndicatorEnabled = true;
 	// The seats' IK objects (seatIkTargets): the template path from the
 	// vehicle's root, by root template and seat (ik null: none).
 	struct IkPath {
@@ -3067,6 +3079,10 @@ private:
 		// The ability battery (soldier +0x338, read and drawn through
 		// component 0xc4d7 slots 0x90/0x98): 0..1, -1 without a kit.
 		float battery = -1;
+		// The hit indicator: its alpha (+0x2a4) and the flag the own state
+		// sends (+0x2a8).
+		float hitIndicator = 0;
+		bool hitIndicatorFlag = false;
 		// What he last gave (abilityBar): player +0x168 healed or repaired,
 		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160.
 		bool gaveHeal = false, gaveRepair = false, gaveAmmo = false;

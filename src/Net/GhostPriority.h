@@ -25,8 +25,19 @@
 //   client hides that object until a kind-1 update brings it back.
 // - A lost packet (0x005830e0) dirties again what it carried that no later
 //   packet carried, at priority 10000.
+// - The masks (12 a state, one a group of the ghost's state): once a
+//   server frame the ghost registry (0x0067aec0) asks every ghost's
+//   networkables for what changed since the last frame (networkable slot
+//   0x28, the snapshot: e.g. the Soldier's 0x005fc1a0, the player's
+//   0x005929f0, each field against its last value), and the frame ORs the
+//   list into every connection's states (0x004a91c0 -> 0x005800e0). An
+//   update writes each group with its mask (0x0057f420: & the
+//   networkable's slot 0x24 for the mode, every bit for the players'), so a
+//   client gets only what changed; a written state's masks are cleared
+//   (0x005824f0).
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -66,6 +77,12 @@ constexpr float kGhostScanPriority = 0.5f;      // 0x3f000000: enemies in the sc
 constexpr size_t kGhostEntriesPerPacket = 40; // gm +0x213c
 constexpr size_t kGhostMinimumBitsLeft = 24;  // 0x18
 constexpr float kGhostRescoreSeconds = 0.1f;  // 0x00920bd8
+constexpr size_t kGhostMaskGroups = 12;       // the state's +0xc..+0x38
+
+// A state's dirty masks, one a group.
+using GhostMasks = std::array<uint32_t, kGhostMaskGroups>;
+constexpr GhostMasks kGhostAllMasks = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
+	0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
 
 class GhostScheduler {
 public:
@@ -75,22 +92,34 @@ public:
 		bool always = false;
 		float priority = kGhostNewPriority;
 		float accumulated = 0;
-		bool dirty = true; // the rewrite's stand-in for the 12 masks
+		GhostMasks masks = kGhostAllMasks; // a new state: every mask set (0x00581e80)
+		// Something to send (0x005823c0: any mask not 0).
+		bool dirty() const
+		{
+			for (const uint32_t m : masks) {
+				if (m) {
+					return true;
+				}
+			}
+			return false;
+		}
 	};
-	// 0x00581e80: p < 0 makes an always state (every mask set); keepMax
+	// 0x00581e80: p < 0 makes an always state and sets every mask; keepMax
 	// keeps an existing priority under 10000 that is at least p. A ghost
-	// new to the client starts at 10000 whatever p is.
+	// new to the client starts at 10000 whatever p is, every mask set.
 	void setPriority(uint16_t ghost, float p, bool keepMax);
 	// 0x00581d40: everything not always out of scope at 10000, always ones
-	// at 255.
+	// at 255 (their masks left as they are).
 	void beginRescore();
-	void markDirty(uint16_t ghost, bool urgent = false); // urgent: a loss, priority 10000
+	// ORs what changed into the state's masks (0x005800e0); urgent (a
+	// loss, 0x005830e0) also puts it at 10000.
+	void markDirty(uint16_t ghost, const GhostMasks& changed, bool urgent = false);
 	void forget(uint16_t ghost);                         // the object went (DestroyObject)
 	void clear() { m_states.clear(); }
 	// 0x005823c0: the ghosts to try this packet, highest accumulated first.
 	std::vector<uint16_t> queue();
-	// After writing: an in-scope state is clean and starts again; an
-	// out-of-scope one is gone (its kind 3 went).
+	// After writing (0x005824f0): an in-scope state's masks are cleared and
+	// it starts again; an out-of-scope one is gone (its kind 3 went).
 	void written(uint16_t ghost);
 	const State* state(uint16_t ghost) const;
 	bool has(uint16_t ghost) const { return m_states.count(ghost) != 0; }

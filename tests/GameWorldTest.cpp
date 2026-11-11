@@ -183,6 +183,44 @@ struct Range {
 	long count(const char* event) const { return std::count(events.begin(), events.end(), event); }
 };
 
+// The hit indicator (0x004ba070 -> player slot 0x20c(1), 0x0059b460):
+// a round that hurts a soldier puts the shooter's alpha at 1 and sets the
+// flag his own state sends (read and cleared, 0x0059b480); the alpha falls
+// 3 a second (0x005912c0). sv.hitIndicator 0 leaves it dark.
+TEST(GameWorld_HitIndicator)
+{
+	for (const bool enabled : {true, false}) {
+		Range range;
+		range.world->setHitIndicatorEnabled(enabled);
+		const int bot = range.world->addPlayer("Bot", 1, true);
+		CHECK(range.world->spawnSoldier(bot));
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		game::GameWorld::PlayerInfo info;
+		float most = 0;
+		bool flag = false;
+		for (int tick = 0; tick < 4 && range.world->playerInfo(bot, info) && info.alive; ++tick) {
+			range.world->tick(1 / 30.0f);
+			game::GameWorld::PlayerInfo shooter;
+			CHECK(range.world->playerInfo(me, shooter));
+			most = std::max(most, shooter.hitIndicator);
+			flag = range.world->takeHitIndicator(me) || flag;
+		}
+		CHECK(range.world->playerInfo(bot, info) && info.alive); // hurt, not dead yet
+		CHECK(enabled ? most > 0.85f && flag : most == 0 && !flag);
+		CHECK(!range.world->takeHitIndicator(me)); // read and cleared
+		range.world->setPlayerInput({});
+		for (int tick = 0; tick < 11; ++tick) {
+			range.world->tick(1 / 30.0f);
+		}
+		game::GameWorld::PlayerInfo shooter;
+		CHECK(range.world->playerInfo(me, shooter) && shooter.hitIndicator == 0);
+	}
+}
+
 TEST(GameWorld_SoldiersShootAndDie)
 {
 	Range range;

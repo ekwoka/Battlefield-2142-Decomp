@@ -620,7 +620,7 @@ bool readSoldier(BitReader& in, const NetworkableHints& h, const Vec3f& referenc
 		s.soldierValues[2] = static_cast<int>(in.read(2)); // +0x284
 	}
 	if (full && (m & 0x40000)) {
-		s.soldierValue40000 = readSnorm(in, 7, 1.0f); // +0x18c's vtable 0x90 (set by 0x94)
+		s.battery = readSnorm(in, 7, 1.0f); // the battery: +0x18c's vtable 0x94 (0x00586300) takes it
 	}
 	if (m & 0x20000) {
 		s.ladder = static_cast<int>(readRanged(in, 256));
@@ -1143,12 +1143,54 @@ bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f
 	case NetworkableKind::OverheadCamera: return readOverheadCamera(in, hints, reference, out);
 	case NetworkableKind::DestroyableWindowsBundle: return readWindows(in, hints, out);
 	case NetworkableKind::PlayerControlObject: return readSeat(in, hints, reference, out, mode);
-	default: return false; // the other classes' layouts aren't decoded
+	default: return false; // Unknown: no networkable class (all 17 above are decoded)
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Writers (mode 2), as the originals lay the fields out
+
+NetworkableFields networkableFields(const NetworkableHints& hints, const NetworkableState& state)
+{
+	NetworkableFields f;
+	f.mask = state.mask;
+	f.any = true;
+	NetworkableState one = state;
+	one.mask = 0;
+	BitWriter base;
+	encodeNetworkable(base, hints, nullptr, one);
+	f.base = base.data();
+	f.baseBits = base.bits();
+	for (int bit = 0; bit < 32; ++bit) {
+		if (!(state.mask & (1u << bit))) {
+			continue;
+		}
+		one.mask = 1u << bit;
+		BitWriter w;
+		encodeNetworkable(w, hints, nullptr, one);
+		f.bits.emplace_back(w.data(), w.bits());
+	}
+	return f;
+}
+
+uint32_t changedFields(const NetworkableFields& before, const NetworkableFields& now)
+{
+	if (!before.any || before.baseBits != now.baseBits || before.base != now.base) {
+		return now.mask;
+	}
+	uint32_t changed = 0;
+	size_t i = 0, j = 0;
+	for (int bit = 0; bit < 32; ++bit) {
+		const uint32_t b = 1u << bit;
+		const bool had = (before.mask & b) != 0, has = (now.mask & b) != 0;
+		if (has && (!had || before.bits[i] != now.bits[j])) {
+			changed |= b;
+		}
+		i += had ? 1 : 0;
+		j += has ? 1 : 0;
+	}
+	return changed;
+}
 
 void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* reference, const NetworkableState& s,
 	unsigned mode, const MotionHistory* history)
@@ -1360,7 +1402,7 @@ void encodeNetworkable(BitWriter& out, const NetworkableHints& h, const Vec3f* r
 			out.write(static_cast<uint32_t>(s.soldierValues[2]) & 3, 2);
 		}
 		if (full && (m & 0x40000)) {
-			writeSoldierSnorm(out, s.soldierValue40000, 7, 1.0f);
+			writeSoldierSnorm(out, s.battery, 7, 1.0f);
 		}
 		if (m & 0x20000) {
 			writeRanged(out, static_cast<uint32_t>(std::clamp(s.ladder, 0, 255)), 256);
@@ -1748,7 +1790,7 @@ unsigned loopBits(uint32_t limit) { return bitsFor(limit); }
 bool decodePlayerOwnState(BitReader& in, const PlayerOwnStateHints& h, PlayerOwnState& s)
 {
 	s = {};
-	s.flag210 = in.read(1) == 1;
+	s.hitIndicator = in.read(1) == 1;
 	s.flag16a = in.read(1) == 1;
 	s.flag168 = in.read(1) == 1;
 	s.flag169 = in.read(1) == 1;
@@ -1799,7 +1841,7 @@ bool decodePlayerOwnState(BitReader& in, const PlayerOwnStateHints& h, PlayerOwn
 
 void encodePlayerOwnState(BitWriter& out, const PlayerOwnStateHints& h, const PlayerOwnState& s)
 {
-	out.write(s.flag210 ? 1 : 0, 1);
+	out.write(s.hitIndicator ? 1 : 0, 1);
 	out.write(s.flag16a ? 1 : 0, 1);
 	out.write(s.flag168 ? 1 : 0, 1);
 	out.write(s.flag169 ? 1 : 0, 1);

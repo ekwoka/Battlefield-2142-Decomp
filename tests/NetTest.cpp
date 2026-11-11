@@ -328,9 +328,10 @@ TEST(Net_GhostScore)
 	CHECK(net::ghostScore(eye, {0, 0, 900}, {}, true) > 0); // LargerProjectileRadius 1000
 }
 
-// The heap (0x005823c0): new states first at 10000, the accumulated value
-// of a dirty one grows until it's written; an out-of-scope one goes (its
-// kind 3) once written; always states keep 255.
+// The heap (0x005823c0): new states first at 10000 with every mask set,
+// the accumulated value of a dirty one grows until it's written (its masks
+// cleared); an out-of-scope one goes (its kind 3) once written; always
+// states keep 255 and their masks through a rescore.
 TEST(Net_GhostScheduler)
 {
 	net::GhostScheduler g;
@@ -338,26 +339,37 @@ TEST(Net_GhostScheduler)
 	g.setPriority(2, 2, false);
 	g.setPriority(3, -1, false);
 	CHECK(g.state(3)->always && g.state(1)->priority == net::kGhostNewPriority);
+	CHECK(g.state(1)->masks == net::kGhostAllMasks);
 	std::vector<uint16_t> q = g.queue();
 	CHECK(q.size() == 3);
 	for (uint16_t ghost : q) {
 		g.written(ghost);
 	}
 	CHECK(g.queue().empty()); // nothing dirty
+	CHECK(!g.state(1)->dirty());
 	g.beginRescore();
 	g.setPriority(1, 1, false);
 	g.setPriority(2, 2, false);
 	CHECK(g.state(3)->priority == net::kGhostAlwaysPriority);
-	g.markDirty(1);
-	g.markDirty(2);
+	CHECK(!g.state(3)->dirty()); // the rescore sets no mask
+	net::GhostMasks changed {};
+	changed[0] = 0x4;
+	g.markDirty(1, changed);
+	changed[0] = 0;
+	changed[2] = 0x100;
+	g.markDirty(2, changed);
+	CHECK(g.state(2)->masks[2] == 0x100 && g.state(2)->masks[0] == 0);
 	q = g.queue();
 	CHECK(q.size() == 2 && q[0] == 2 && q[1] == 1);
 	g.written(2);
-	g.markDirty(2);
+	CHECK(!g.state(2)->dirty());
+	g.markDirty(2, changed);
 	q = g.queue(); // 1 has 1 + 1, 2 has 2: equal, by id
 	CHECK(q.size() == 2 && q[0] == 1);
-	g.markDirty(1, true); // a loss
-	CHECK(g.state(1)->priority == net::kGhostNewPriority);
+	changed = {};
+	changed[0] = 0x8;
+	g.markDirty(1, changed, true); // a loss: ORed in, at 10000
+	CHECK(g.state(1)->priority == net::kGhostNewPriority && g.state(1)->masks[0] == 0xc);
 	// keepMax keeps a higher priority.
 	g.setPriority(2, 0.03f, true);
 	CHECK(g.state(2)->priority == 2);
@@ -367,6 +379,34 @@ TEST(Net_GhostScheduler)
 	CHECK(std::find(q.begin(), q.end(), uint16_t {1}) != q.end());
 	g.written(1);
 	CHECK(!g.has(1) && g.has(3));
+}
+
+// The snapshot's comparison (slot 0x28): a field's bit when its value
+// changes, a bit new to the mask, every bit when a field written whatever
+// the mask changes (the player's squad leader bit).
+TEST(Net_ChangedFields)
+{
+	net::NetworkableHints hints;
+	hints.kind = net::NetworkableKind::Player;
+	net::NetworkableState a;
+	a.kind = net::NetworkableKind::Player;
+	a.mask = 0x1 | 0x200 | 0x2000;
+	a.player.alive = true;
+	a.player.team = 1;
+	a.player.squad = 2;
+	const net::NetworkableFields first = net::networkableFields(hints, a);
+	CHECK(net::changedFields({}, first) == a.mask);
+	CHECK(net::changedFields(first, net::networkableFields(hints, a)) == 0);
+	net::NetworkableState b = a;
+	b.player.squad = 3;
+	CHECK(net::changedFields(first, net::networkableFields(hints, b)) == 0x2000);
+	b = a;
+	b.mask |= 0x4000;
+	b.player.rank = 4;
+	CHECK(net::changedFields(first, net::networkableFields(hints, b)) == 0x4000);
+	b = a;
+	b.player.squadLeader = true;
+	CHECK(net::changedFields(first, net::networkableFields(hints, b)) == a.mask);
 }
 
 // sv.demoQuality's rates (0x0057b3f0): 4 a second of 260 bytes and 40

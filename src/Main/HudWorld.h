@@ -72,7 +72,7 @@ public:
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
 	virtual float hitPoints(uint32_t object) const = 0;
-	// An object's armour as a fraction of its maxHitPoints, -1 when not known
+	// An object's armour as a fraction of its maxHitPoints, -1 for none
 	// (no armour, or a ghost whose health hasn't come): the name tags' bars
 	// and useAliveArmor (RendDX9 0x1016a950: the armour's slot 0x60).
 	virtual float objectHealth(uint32_t object) const = 0;
@@ -277,6 +277,10 @@ public:
 	bool soldierJumpHold() const override { return ownJumpHold && ownJumpHold(); }
 	// The spawn group the local player asked for (6/6), -1 none.
 	int chosenSpawn = -1;
+	// Our hit indicator's alpha: 1 when our own state's flag comes
+	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
+	// (0x005912c0); PlayerInfo::hitIndicator of the local player.
+	float hitIndicator = 0;
 
 	bool joined() const override { return true; }
 	int localPlayer() const override;

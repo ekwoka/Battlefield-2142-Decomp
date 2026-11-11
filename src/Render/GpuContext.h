@@ -221,6 +221,33 @@ constexpr float kLayerCrackNormal = 2;  // its crack normal map (_NCRACK_)
 constexpr float kLayerParallax = 4;     // parallax on the detail coordinates (_PARALLAXDETAIL_)
 constexpr float kLayerEnvMap = 8;       // the level's nearest envmap (EnvMapManager +100)
 
+// The pipelines drawn into the world's target (the world, shimmer,
+// camouflage and first-person passes): one set single-sampled, one at the
+// antialiasing's sample count (GpuContext::setWorldSamples).
+struct WorldPipelines {
+	SDL_GPUGraphicsPipeline* mesh = nullptr;
+	SDL_GPUGraphicsPipeline* culledMesh = nullptr;
+	SDL_GPUGraphicsPipeline* culledFadedMesh = nullptr;
+	SDL_GPUGraphicsPipeline* terrain = nullptr;
+	SDL_GPUGraphicsPipeline* surrounding = nullptr;
+	SDL_GPUGraphicsPipeline* sky = nullptr;
+	SDL_GPUGraphicsPipeline* fadedMesh = nullptr;
+	SDL_GPUGraphicsPipeline* additiveMesh = nullptr;
+	SDL_GPUGraphicsPipeline* water = nullptr;
+	SDL_GPUGraphicsPipeline* road = nullptr;
+	SDL_GPUGraphicsPipeline* roadMesh = nullptr;
+	SDL_GPUGraphicsPipeline* decal = nullptr;
+	SDL_GPUGraphicsPipeline* undergrowth = nullptr;
+	SDL_GPUGraphicsPipeline* particle = nullptr;
+	SDL_GPUGraphicsPipeline* shimmer = nullptr;
+	SDL_GPUGraphicsPipeline* additiveParticle = nullptr;
+	SDL_GPUGraphicsPipeline* camo = nullptr;
+	// Multisampled sets only: meshPipeline's and undergrowthPipeline's state
+	// with alpha to coverage.
+	SDL_GPUGraphicsPipeline* coverageMesh = nullptr;
+	SDL_GPUGraphicsPipeline* coverageUndergrowth = nullptr;
+};
+
 class GpuContext {
 public:
 	// `window` may be null to render offscreen only.
@@ -228,44 +255,57 @@ public:
 	~GpuContext();
 
 	SDL_GPUDevice* device() const { return m_device; }
+	// The antialiasing (VideoSettings.setAntialiasing): the world pipelines'
+	// sample count, the most at or below `requested` that the colour and
+	// depth formats support (1: single-sampled, the multisampled set made
+	// the first time a count is asked for). Returns the count in effect.
+	uint32_t setWorldSamples(uint32_t requested);
+	uint32_t worldSamples() const { return m_worldSamples; }
+	// A colour (or with `depth` a depth-stencil) target of the world's
+	// sample count, for the multisampled world pass.
+	SDL_GPUTexture* createMultisampleTarget(uint32_t width, uint32_t height, bool depth);
+	// Alpha to coverage (the overgrowth's leaves, the undergrowth): null
+	// while the world is single-sampled.
+	SDL_GPUGraphicsPipeline* coverageMeshPipeline() const { return world().coverageMesh; }
+	SDL_GPUGraphicsPipeline* coverageUndergrowthPipeline() const { return world().coverageUndergrowth; }
 	SDL_Window* window() const { return m_window; }
-	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_meshPipeline; }
-	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_terrainPipeline; }
+	SDL_GPUGraphicsPipeline* meshPipeline() const { return world().mesh; }
+	SDL_GPUGraphicsPipeline* terrainPipeline() const { return world().terrain; }
 	// The surrounding terrain (secondary heightmaps): terrain.vert with
 	// surrounding.frag.
-	SDL_GPUGraphicsPipeline* surroundingPipeline() const { return m_surroundingPipeline; }
+	SDL_GPUGraphicsPipeline* surroundingPipeline() const { return world().surrounding; }
 	// Mesh shaders without depth test or write, for the sky dome.
-	SDL_GPUGraphicsPipeline* skyPipeline() const { return m_skyPipeline; }
+	SDL_GPUGraphicsPipeline* skyPipeline() const { return world().sky; }
 	// Meshes fading out (LightingUniforms material.w their alpha): blended,
 	// no depth writes.
 	// Also blended materials (RendDX9's transparency queues): SRCALPHA /
 	// INVSRCALPHA, no culling (CullMode 1, 0x100c3880).
-	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_fadedMeshPipeline; }
+	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return world().fadedMesh; }
 	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
 	// depth-tested, not written.
-	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_additiveMeshPipeline; }
+	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return world().additiveMesh; }
 	// A mesh queue's pipeline, with back faces culled or not (meshCulled:
 	// the opaque and alpha-tested materials of the bundled and skinned
 	// meshes keep the material settings' CullMode 3, D3DCULL_CCW).
 	SDL_GPUGraphicsPipeline* meshPipeline(MeshQueue queue, bool culled) const
 	{
 		switch (queue) {
-		case MeshQueue::Opaque: return culled ? m_culledMeshPipeline : m_meshPipeline;
-		case MeshQueue::Transparent: return culled ? m_culledFadedMeshPipeline : m_fadedMeshPipeline;
+		case MeshQueue::Opaque: return culled ? world().culledMesh : world().mesh;
+		case MeshQueue::Transparent: return culled ? world().culledFadedMesh : world().fadedMesh;
 		case MeshQueue::Additive: break;
 		}
-		return m_additiveMeshPipeline;
+		return world().additiveMesh;
 	}
 	// Alpha-blended, depth-tested but not written.
-	SDL_GPUGraphicsPipeline* waterPipeline() const { return m_waterPipeline; }
+	SDL_GPUGraphicsPipeline* waterPipeline() const { return world().water; }
 	// Water's blending plus a depth bias, for road decals.
-	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_roadPipeline; }
-	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_roadMeshPipeline; }
+	SDL_GPUGraphicsPipeline* roadPipeline() const { return world().road; }
+	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return world().roadMesh; }
 	// The same state for decals (decal.vert / decal.frag).
-	SDL_GPUGraphicsPipeline* decalPipeline() const { return m_decalPipeline; }
+	SDL_GPUGraphicsPipeline* decalPipeline() const { return world().decal; }
 	// Opaque, alpha-tested, Direct3D's front faces culled (Undergrowth.fx's
 	// CullMode CW); undergrowth uniforms in the vertex stage.
-	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_undergrowthPipeline; }
+	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return world().undergrowth; }
 	// Particles: depth-tested, not written; blended or added.
 	SDL_GPUGraphicsPipeline* uiPipeline() const { return m_uiPipeline; }
 	// The UI with gameswf's mask states (RendDX9.dll 0x10118920 /
@@ -289,16 +329,16 @@ public:
 	SDL_GPUGraphicsPipeline* uiBlendPipeline(int source, int destination);
 	SDL_GPUGraphicsPipeline* particlePipeline(bool additive) const
 	{
-		return additive ? m_additiveParticlePipeline : m_particlePipeline;
+		return additive ? world().additiveParticle : world().particle;
 	}
 	// The shadow maps' casters (mesh.vert, shadowcaster.frag): depth only,
 	// into shadowDepthFormat(), biased by the slope, two-sided.
 	SDL_GPUGraphicsPipeline* shadowCasterPipeline() const { return m_shadowCasterPipeline; }
 	// Cloaked meshes into the camouflage mask (camo.frag): depth-tested
 	// against the world's depth, not written.
-	SDL_GPUGraphicsPipeline* camoPipeline() const { return m_camoPipeline; }
+	SDL_GPUGraphicsPipeline* camoPipeline() const { return world().camo; }
 	// The heat shimmer's particles (shimmer.frag: the scene copy displaced).
-	SDL_GPUGraphicsPipeline* shimmerPipeline() const { return m_shimmerPipeline; }
+	SDL_GPUGraphicsPipeline* shimmerPipeline() const { return world().shimmer; }
 	// The post-production (fullscreen.vert, post.frag) into a target with
 	// the HUD's depth-stencil; the bloom's filters (bloom.frag) into colour
 	// only.
@@ -356,35 +396,26 @@ public:
 
 private:
 	GpuContext() = default;
-	bool createPipelines(std::string& error);
+	// The pipelines at `samples`: all of them single-sampled, only the
+	// world's otherwise.
+	bool createPipelines(std::string& error, uint32_t samples, WorldPipelines& world);
+	void releaseWorldPipelines(WorldPipelines& world);
+	const WorldPipelines& world() const { return m_worldSamples > 1 ? m_multisampled : m_singleSampled; }
 	SDL_GPUCopyPass* copyPass();
 
 	SDL_GPUDevice* m_device = nullptr;
 	SDL_Window* m_window = nullptr;
 	SDL_GPUTextureFormat m_colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-	SDL_GPUGraphicsPipeline* m_meshPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_culledMeshPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_culledFadedMeshPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_terrainPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_surroundingPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_skyPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_fadedMeshPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_additiveMeshPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_waterPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_roadPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_roadMeshPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_decalPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_undergrowthPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_particlePipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_shimmerPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_additiveParticlePipeline = nullptr;
+	WorldPipelines m_singleSampled;
+	WorldPipelines m_multisampled; // at m_multisampledCount
+	uint32_t m_multisampledCount = 1;
+	uint32_t m_worldSamples = 1;
 	SDL_GPUGraphicsPipeline* m_uiPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiTestPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiClearPipeline = nullptr;
 	std::map<int, SDL_GPUGraphicsPipeline*> m_uiBlendPipelines; // by source * 16 + destination
 	SDL_GPUGraphicsPipeline* m_shadowCasterPipeline = nullptr;
-	SDL_GPUGraphicsPipeline* m_camoPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_postPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_bloomPipeline = nullptr;
 	SDL_GPUTextureFormat m_shadowDepthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;

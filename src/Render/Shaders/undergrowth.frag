@@ -5,7 +5,9 @@
 //   light = (lightmap.g * sun + points) * 2 + lightmap.b * GI
 //   color = base * mix(terrain, 1, mix) * light * 2
 // Alpha-tested against the cfg's AlphaRef, using the atlas's "_alphatest"
-// variant (full-range alpha). With undergrowth.dynamicShadowsEnable the
+// variant (full-range alpha); antialiased, the plain atlas's alpha over
+// the AlphaRef (material.z) gives the coverage instead (alpha to coverage,
+// the reference 0). With undergrowth.dynamicShadowsEnable the
 // dynamic objects' shadows darken its sun term (shadow.glsl).
 #extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec2 inTexCoord;
@@ -29,7 +31,7 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 skyColor;     // terrain GI color
 	vec4 fogColor;     // rgb, w: the near term's floor (FogColor.w)
 	vec4 fogRange;     // RaCommon.fx FogRange (fog.glsl)
-	vec4 material;     // x: alpha reference, y: 1 with a lightmap
+	vec4 material;     // x: alpha reference, y: 1 with a lightmap, z: the coverage's alpha scale (0: opaque)
 	vec4 uvOffset;     // (LightingUniforms' layout; unused here)
 	vec4 tint;
 	vec4 lightCount;   // x: the patch's point lights (at most 4)
@@ -65,5 +67,5 @@ void main()
 	}
 	vec3 color = base.rgb * terrain * light * 2.0;
 	float fog = fogAmount(inDepth);
-	outColor = vec4(mix(color, fogColor.rgb, fog), 1.0);
+	outColor = vec4(mix(color, fogColor.rgb, fog), material.z > 0.0 ? base.a * material.z : 1.0);
 }

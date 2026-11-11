@@ -714,6 +714,9 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 			if (!states.empty()) {
 				applyState(o, states.front());
 				o.decoded = states.front().complete;
+				if (states.front().hasPosition) {
+					o.positionTick = ghosts.tick;
+				}
 			}
 			applyParts(o, layout, states);
 			continue;
@@ -732,6 +735,9 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		}
 		if (decoded) {
 			applyState(o, state);
+			if (state.hasPosition) {
+				o.positionTick = ghosts.tick;
+			}
 		}
 	}
 }
@@ -1058,8 +1064,8 @@ void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 		// point's setter (CP slot 0x34, 0x005bcd00) on every one, changed or
 		// not, which tells its Radio (the takeable radio).
 		// The server's per-client dirty masks send them when they change
-		// (and with a new ghost's first state); the rewrite's server sends
-		// them in every state, so a set here is one that changed or the first.
+		// (and with a new ghost's first state, or again after a loss), so
+		// only a changed one (or the first) is handed on.
 		if ((s.mask & 8) && (!o.hasAllow[0] || o.allow[0] != s.cpAllowTeam1)) {
 			o.hasAllow[0] = true;
 			o.allow[0] = s.cpAllowTeam1;

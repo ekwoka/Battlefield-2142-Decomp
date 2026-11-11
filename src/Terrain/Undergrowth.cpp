@@ -359,8 +359,15 @@ UndergrowthPatch UndergrowthGenerator::generate(int patch) const
 					const std::array<float, 3> tiltedZ = cross(xAxis, up);
 					const std::array<float, 3> rows[3] = {xAxis, up, tiltedZ};
 					const uint8_t swayIndex = static_cast<uint8_t>((r >> 22) & 0xf);
-					// Bytes are converted with _ftol (truncating) and keep the low 8 bits.
-					const uint8_t swayBase = static_cast<uint8_t>(static_cast<int>(scale * type.crossSize[1] * 85.0f));
+					// Bytes are converted with _ftol (truncating) and keep the low 8 bits;
+					// _ftol gives 0x80000000 for a NaN or an out-of-range value (some
+					// shipped vertices' sway is a NaN), whose low byte is 0.
+					const auto ftolByte = [](float value) {
+						return static_cast<uint8_t>(std::isfinite(value) && std::fabs(value) < 2147483648.0f
+								? static_cast<int64_t>(value)
+								: 0);
+					};
+					const uint8_t swayBase = ftolByte(scale * type.crossSize[1] * 85.0f);
 
 					const size_t first = result.vertices.size();
 					for (const UndergrowthVertex& v : type.vertices) {
@@ -375,7 +382,7 @@ UndergrowthPatch UndergrowthGenerator::generate(int patch) const
 						out.height = offset[1];
 						out.texCoord = {v.texCoord[0] / 32767.0f, v.texCoord[1] / 32767.0f};
 						out.swayIndex = swayIndex;
-						out.sway = static_cast<uint8_t>(static_cast<int>(swayBase * v.sway));
+						out.sway = ftolByte(swayBase * v.sway);
 						out.terrainColorMix = v.terrainColorMix;
 						out.type = &type;
 						result.vertices.push_back(out);

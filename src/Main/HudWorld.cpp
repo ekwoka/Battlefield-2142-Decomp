@@ -138,6 +138,7 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.team = p.team;
 	out.ai = p.ai;
 	out.alive = p.alive;
+	out.hitIndicator = p.local ? hitIndicator : 0;
 	out.kills = p.kills;
 	out.deaths = p.deaths;
 	out.teamKills = p.teamKills;

@@ -341,6 +341,10 @@ private:
 		// 0x100de6d0; its leaf materials, treeLeaf / 0x100db6f0):
 		// RaShaderLeaf's sway, alpha test and two sides.
 		bool leaf = false;
+		// A tree's leaves whose plain texture was kept for alpha to coverage
+		// (0x10151830 skips the "_alphatest" one while antialiasing with
+		// Alpha2Mask): its alpha runs 0..0.5 and RaShaderLeaf doubles it.
+		bool coverageTexture = false;
 		// A bundled material with an "AnimatedUV..." technique (RaShaderBM
 		// _HASUVANIMATION_): its coordinates go through the instance's UV
 		// matrices (AnimatedUV.h).
@@ -717,8 +721,29 @@ private:
 	bool postEnabled() const;
 	void ensurePostTargets(uint32_t width, uint32_t height);
 	void loadPostTextures(const LevelSources& sources);
-	// Draws the cloaked meshes into the mask (the world's depth loaded).
+	// Draws the cloaked meshes into the mask (the world's depth loaded;
+	// multisampled, into m_multisampleCamo resolved to the mask).
 	void drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* depth, const Mat4& viewProjection, float seconds);
+
+	// The antialiasing (VideoSettings.setAntialiasing, GpuContext::
+	// setWorldSamples): with more than one sample the world, shimmer,
+	// camouflage and first-person passes draw into these multisampled
+	// targets, their colour resolved into the scene texture (or the
+	// target without the post-production) as RendDX9 StretchRects its
+	// multisampled back buffer into the scene texture (0x1002cef0). The
+	// HUD and menu keep the single-sampled target and its depth-stencil.
+	SDL_GPUTexture* m_multisampleColor = nullptr;
+	SDL_GPUTexture* m_multisampleDepth = nullptr;
+	SDL_GPUTexture* m_multisampleCamo = nullptr;
+	uint32_t m_multisampleSize[3] {}; // width, height, samples
+	void ensureMultisampleTargets(uint32_t width, uint32_t height, uint32_t samples);
+	void releaseMultisampleTargets();
+	// Alpha to coverage while the world is multisampled (0x1000b500 and
+	// +0x50a: SDL GPU has it on every backend).
+	bool alphaToCoverage() const { return m_gpu.coverageMeshPipeline() && m_gpu.coverageUndergrowthPipeline(); }
+	// The level was loaded antialiased: the trees' and the undergrowth's
+	// plain textures (0x10151830, 0x1008c7e0, 0x101100d0).
+	bool m_coverageTextures = false;
 	// The bloom chain and the tinnitus's history from m_sceneColor, then
 	// the post pass into `pass` (already begun on the target).
 	PostUniforms preparePost(SDL_GPUCommandBuffer* commands, bool cloaked);

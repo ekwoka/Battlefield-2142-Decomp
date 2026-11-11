@@ -371,9 +371,9 @@ bool addBan(std::vector<Ban>& list, const std::string& what, const std::string& 
 
 bool active(const Ban& ban, std::time_t now) { return ban.kind != Ban::Kind::Until || ban.until > now; }
 
-// The listing (0x00506b60 builds a line per ban: "IP: " / "Key: ", " Time
-// Left: " or " Perm"; 0x00507800 / 0x005078d0 cut the address and key
-// lists from it).
+// The listing (0x00506b60 builds a line per ban: "IP: " / "Key: ", then
+// " Time Left: " or " Perm"; 0x00507800 / 0x005078d0 cut the address and
+// key lists from it).
 std::string listBans(const std::vector<Ban>& list, std::time_t now)
 {
 	std::string out;

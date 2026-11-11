@@ -253,6 +253,7 @@ LevelRenderer::~LevelRenderer()
 		SDL_ReleaseGPUBuffer(device, m_flareVertices);
 	}
 	releasePostTargets();
+	releaseMultisampleTargets();
 }
 
 SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::string& path,
@@ -542,23 +543,34 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// the plain textures keep alpha in 0..0.5 for alpha to coverage
 		// (0x10151830). A tree's maps all do (its +0x2a2 branch): its
 		// leaves are alpha-tested whatever their alpha mode (treeLeaf).
+		// Loaded antialiased, a tree's leaves keep the plain ones (the
+		// branch is skipped while 0x1000b500 and +0x50a hold), and so do
+		// the overgrowth's distant leaves: 0x1008c7e0 reads only
+		// OvergrowthAtlas.tai then. (The rest of a tree, its trunks and
+		// their alpha-tested "tile_" maps, keep "_alphatest": the rewrite's
+		// trunks have no shader to double a plain alpha.)
+		const bool leaf = treeLeaf(tree, material.maps);
+		const bool coverage = leaf && m_coverageTextures;
 		std::string diffusePath = material.maps.empty() ? std::string() : material.maps[0];
-		if ((material.alphaMode == 2 || tree) && diffusePath.size() > 4) {
+		if ((material.alphaMode == 2 || tree) && !coverage && diffusePath.size() > 4) {
 			const std::string alphaTest = diffusePath.substr(0, diffusePath.size() - 4) + "_alphatest.dds";
 			if (sources.files.exists(alphaTest)) {
 				diffusePath = alphaTest;
 			}
 		}
+		bool plainTexture = coverage && !diffusePath.empty() && sources.files.exists(diffusePath);
 		// The overgrowth's distant meshes use textures only its atlases hold.
 		const AtlasEntry* atlas = nullptr;
 		if (!diffusePath.empty() && !m_overgrowthAtlas.empty() && !sources.files.exists(diffusePath)) {
 			std::string key = lower(material.maps[0]);
 			std::replace(key.begin(), key.end(), '\\', '/');
-			const auto& first = material.alphaMode == 2 ? m_overgrowthAlphaTestAtlas : m_overgrowthAtlas;
-			const auto& second = material.alphaMode == 2 ? m_overgrowthAtlas : m_overgrowthAlphaTestAtlas;
+			const bool alphaTestFirst = material.alphaMode == 2 && !coverage;
+			const auto& first = alphaTestFirst ? m_overgrowthAlphaTestAtlas : m_overgrowthAtlas;
+			const auto& second = alphaTestFirst ? m_overgrowthAtlas : m_overgrowthAlphaTestAtlas;
 			auto found = first.find(key);
 			if (found != first.end()) {
 				atlas = &found->second;
+				plainTexture = coverage;
 			} else if ((found = second.find(key)) != second.end()) {
 				atlas = &found->second;
 			}
@@ -602,9 +614,10 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// "vegitation" is a tree (+0x2a2); its leaves (treeLeaf, 0x100db6f0)
 		// are drawn with RaShaderLeaf, which alpha-tests them at 127 whatever
 		// their alpha mode (AlphaTestEnable true, AlphaRef 127).
-		submesh.leaf = treeLeaf(tree, material.maps);
+		submesh.leaf = leaf;
 		if (submesh.leaf) {
 			submesh.alphaReference = 0.5f;
+			submesh.coverageTexture = plainTexture && diffuse;
 		}
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
@@ -1648,9 +1661,13 @@ void LevelRenderer::buildUndergrowth(const LevelSources& sources)
 	m_undergrowthSway.seed(); // 0x1010ad20, before the cfg is read
 	m_undergrowthSwayTicks = 0;
 	m_undergrowthAlphaRef = config.alphaRef;
+	// The "_alphatest" atlas where there is one, but antialiased (0x101100d0
+	// skips that test with 0x1000b500 and +0x50a): the plain one, its
+	// alpha for coverage.
 	const std::string atlas = sources.levelPath + "UndergrowthAtlas_alphatest0.dds";
+	const bool plain = m_coverageTextures || !sources.files.exists(atlas);
 	m_undergrowthAtlas = texture(sources.files,
-		sources.files.exists(atlas) ? atlas : sources.levelPath + "UndergrowthAtlas0.dds", scene::TextureClass::Undergrowth);
+		plain ? sources.levelPath + "UndergrowthAtlas0.dds" : atlas, scene::TextureClass::Undergrowth);
 }
 
 void LevelRenderer::updateUndergrowth(const Camera& camera)
@@ -1738,13 +1755,21 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	if (!m_undergrowth || m_undergrowthPatches.empty() || m_patchSize <= 0 || !m_undergrowthAtlas) {
 		return;
 	}
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.undergrowthPipeline());
+	// Antialiased (0x1010e270 with 0x1000b500 and +0x50a), between the
+	// scene draw's Alpha2Mask on and off (0x1002cef0): alpha to coverage,
+	// the alpha reference 0 and the atlas's alpha over the alpha cut
+	// (Transparency_x8: 1 / AlphaRef / 8, times 8 in Undergrowth.fx).
+	const bool coverage = alphaToCoverage();
+	SDL_BindGPUGraphicsPipeline(pass, coverage ? m_gpu.coverageUndergrowthPipeline() : m_gpu.undergrowthPipeline());
 	const bool undergrowthShadows = !(m_sources && m_sources->shadows && !m_sources->shadows->undergrowthShadows);
 	useShadows(commands, pass, 1, 3, false, undergrowthShadows);
 	const auto& sun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& gi = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
-	LightingUniforms lit = lighting(m_viewFog, lights, sun, gi, m_undergrowthAlphaRef, true);
-	LightingUniforms unlit = lighting(m_viewFog, lights, sun, gi, m_undergrowthAlphaRef, false);
+	LightingUniforms lit = lighting(m_viewFog, lights, sun, gi, coverage ? 0.0f : m_undergrowthAlphaRef, true);
+	LightingUniforms unlit = lighting(m_viewFog, lights, sun, gi, coverage ? 0.0f : m_undergrowthAlphaRef, false);
+	if (coverage) {
+		lit.material[2] = unlit.material[2] = AlphaToCoverage::undergrowthAlphaScale(m_undergrowthAlphaRef);
+	}
 
 	UndergrowthUniforms uniforms {};
 	uniforms.viewProjection = viewProjection;
@@ -3344,20 +3369,23 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			}
 			float w = OvergrowthBlend::weight(distance, nearRadius, instance.overgrowthTypeFactor, m_overgrowthCloseDistFade);
 			w = OvergrowthBlend::eased(w, instance.overgrowthLodState, overgrowthSeconds, m_overgrowthLodTimer);
+			// Antialiased both alphas are doubled (0x1008da30 with 0x1000b500
+			// and +0x50a): the leaves' coverage, and the trunks opaque sooner.
+			const bool coverage = alphaToCoverage();
 			if (w < 1) {
 				if (const GpuMesh* lod = lodMesh()) {
 					DrawItem far = item;
 					far.mesh = lod;
 					far.lightmap = nullptr;
-					far.fade = instance.fade * OvergrowthBlend::lodAlpha(w);
+					far.fade = instance.fade * AlphaToCoverage::nearAlpha(OvergrowthBlend::lodAlpha(w), coverage);
 					m_drawList.push_back(far);
 				}
 			}
 			if (w <= 0) {
 				continue;
 			}
-			if (w < 1) {
-				item.fade = instance.fade * OvergrowthBlend::fullAlpha(w);
+			if (w < 1 || coverage) {
+				item.fade = instance.fade * AlphaToCoverage::nearAlpha(OvergrowthBlend::fullAlpha(w), coverage);
 			}
 		}
 		const bool noLods = renderer.staticNoLods && !base.skinned && !base.bundled;
@@ -3472,6 +3500,11 @@ void LevelRenderer::build(const LevelSources& sources)
 	// original swaps the textures at the end of the load (0x1000deb0 ->
 	// 0x10018ca0); the rewrite loads the variants as it goes.
 	m_textureSuffix = world::customTextureSuffix();
+	// Antialiased at the load: the trees and the undergrowth keep their
+	// plain textures for alpha to coverage (0x10151830, 0x1008c7e0,
+	// 0x101100d0); the frame's sample count follows the setting.
+	m_coverageTextures = sources.quality && sources.quality->antialiasingSamples > 1 &&
+		m_gpu.setWorldSamples(static_cast<uint32_t>(sources.quality->antialiasingSamples)) > 1;
 	const auto progress = [&sources](float done) {
 		if (sources.buildProgress) {
 			sources.buildProgress(done);
@@ -3650,8 +3683,23 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	if (post) {
 		ensurePostTargets(target.width, target.height);
 	}
+	// The antialiasing: the world's passes multisampled, resolved into the
+	// scene texture (or `color` without the post-production).
+	uint32_t samples =
+		m_gpu.setWorldSamples(m_sources && m_sources->quality ? static_cast<uint32_t>(std::max(m_sources->quality->antialiasingSamples, 1)) : 1);
+	if (samples > 1) {
+		ensureMultisampleTargets(target.width, target.height, samples);
+		if (!m_multisampleColor || !m_multisampleDepth) {
+			samples = m_gpu.setWorldSamples(1);
+		}
+	}
+	const bool multisampled = samples > 1;
+	SDL_GPUTexture* const worldColor = post && m_sceneColor ? m_sceneColor : color;
 	SDL_GPUColorTargetInfo colorTarget {};
-	colorTarget.texture = post && m_sceneColor ? m_sceneColor : color;
+	colorTarget.texture = multisampled ? m_multisampleColor : worldColor;
+	if (multisampled) {
+		colorTarget.resolve_texture = worldColor;
+	}
 	// The fog the camera is in: the level's, or the water's below the sea (Fog.h).
 	{
 		const terrain::HeightmapCluster* cluster = m_sources ? &m_sources->heightmaps : nullptr;
@@ -3678,7 +3726,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
 	colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 	SDL_GPUDepthStencilTargetInfo depthTarget {};
-	depthTarget.texture = target.depth;
+	depthTarget.texture = multisampled ? m_multisampleDepth : target.depth;
 	depthTarget.clear_depth = 1.0f;
 	depthTarget.load_op = SDL_GPU_LOADOP_CLEAR;
 	depthTarget.store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -3762,6 +3810,17 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		depthTarget.store_op = SDL_GPU_STOREOP_STORE; // the camouflage mask tests against it
 		depthTarget.stencil_store_op = SDL_GPU_STOREOP_STORE;
 	}
+	// Multisampled, each part of the world pass resolves its colour as it
+	// ends, and keeps its samples too when another part follows (the
+	// shimmer's, the camouflage's or the first person's).
+	const bool cloaked = post && !m_cloakedList.empty();
+	int worldParts = 1 + (shimmer ? 1 : 0) + (cloaked ? 1 : 0) + (m_hasFirstPerson ? 1 : 0);
+	const auto worldStore = [&]() {
+		return !multisampled ? SDL_GPU_STOREOP_STORE
+			: --worldParts > 0 ? SDL_GPU_STOREOP_RESOLVE_AND_STORE
+							   : SDL_GPU_STOREOP_RESOLVE;
+	};
+	colorTarget.store_op = worldStore();
 	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depthTarget);
 
 	// Sky dome around the camera, unlit and unfogged, behind everything.
@@ -4058,13 +4117,23 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The queue's pipeline, culled or not by the material (meshCulled),
 	// rebound only when that changes.
 	SDL_GPUGraphicsPipeline* meshBound = nullptr;
-	const auto useMeshPipeline = [&](MeshQueue queue, bool culled) {
-		SDL_GPUGraphicsPipeline* pipeline = m_gpu.meshPipeline(queue, culled);
+	const auto bindMeshPipeline = [&](SDL_GPUGraphicsPipeline* pipeline) {
 		if (pipeline != meshBound) {
 			SDL_BindGPUGraphicsPipeline(pass, pipeline);
 			useShadows(commands, pass, 1, 5, true);
 			meshBound = pipeline;
 		}
+	};
+	const auto useMeshPipeline = [&](MeshQueue queue, bool culled) { bindMeshPipeline(m_gpu.meshPipeline(queue, culled)); };
+	// Antialiased, the overgrowth's leaves take alpha to coverage
+	// (0x1002cef0 sets Alpha2Mask before the overgrowth): opaque, their
+	// fade a dissolve of their coverage rather than a blend.
+	const bool coverage = alphaToCoverage();
+	const auto coverageLeaf = [coverage](const DrawItem& item, const Submesh& submesh) {
+		return coverage && submesh.leaf && item.instance->overgrowth && !submesh.blended;
+	};
+	const auto queueFor = [&](const DrawItem& item, const Submesh& submesh) {
+		return coverageLeaf(item, submesh) ? MeshQueue::Opaque : queueOf(submesh, item.drawnFade());
 	};
 	useMeshPipeline(MeshQueue::Opaque, false);
 	// Lightmapped statics use the static sun/sky colors.
@@ -4095,7 +4164,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				kMaxPointLights);
 		}
 		for (const Submesh& submesh : item.mesh->submeshes) {
-			any = any || queueOf(submesh, item.drawnFade()) == queue;
+			any = any || queueFor(item, submesh) == queue;
 		}
 		if (!any) {
 			return;
@@ -4159,10 +4228,15 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		static const std::vector<anim::Matrix> unposed;
 		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
 		for (const Submesh& submesh : bound->submeshes) {
-			if (queueOf(submesh, item.drawnFade()) != queue) {
+			if (queueFor(item, submesh) != queue) {
 				continue;
 			}
-			useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended, submesh.leaf));
+			const bool leafCoverage = coverageLeaf(item, submesh);
+			if (leafCoverage) {
+				bindMeshPipeline(m_gpu.coverageMeshPipeline());
+			} else {
+				useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended, submesh.leaf));
+			}
 			const float space = bound->skinned ? static_cast<float>(submesh.normalKind) : transforms.normalSpace[0];
 			// Identity matrices without a part that animates them (RendDX9
 			// copies identities while +0x28c is unmade).
@@ -4196,6 +4270,21 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			SDL_GPUTexture* const envMap = item.interior && m_indoorEnvMap ? m_indoorEnvMap : m_envMap;
 			layerUniforms(uniforms, submesh, envMap != nullptr);
 			uniforms.layers[3] = simpleShadow;
+			if (leafCoverage) {
+				// RaShaderLeafOG with HASALPHA2MASK: the texture's alpha
+				// times 4 x the tree's Transparency (the near pass's doubled
+				// alphas, prepareInstances), which the vertex colour holds
+				// to 1 (COLOR0 is clamped); that is the coverage, with no
+				// alpha test.
+				uniforms.material[0] = 0;
+				uniforms.material[3] = 0;
+				uniforms.tint[3] = AlphaToCoverage::leafAlphaScale(item.drawnFade());
+			} else if (submesh.coverageTexture) {
+				// A plain texture without coverage (a tree that isn't
+				// overgrowth, or antialiasing turned off since the load):
+				// RaShaderLeaf's 2 x alpha against AlphaRef 127.
+				uniforms.tint[3] = AlphaToCoverage::kPlainLeafAlphaScale;
+			}
 			SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 			SDL_GPUTextureSamplerBinding samplers[5] = {
@@ -4341,6 +4430,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_EndGPUCopyPass(copy);
 		SDL_GPUColorTargetInfo keepColor = colorTarget;
 		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		keepColor.store_op = worldStore();
 		SDL_GPUDepthStencilTargetInfo keepDepth = depthTarget;
 		keepDepth.load_op = SDL_GPU_LOADOP_LOAD;
 		keepDepth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
@@ -4348,12 +4438,12 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		drawShimmer(commands, pass, viewProjection, camera, target.width, target.height);
 	}
 	// The cloaked soldiers' mask, tested against the world's depth.
-	const bool cloaked = post && !m_cloakedList.empty();
 	if (cloaked) {
 		SDL_EndGPURenderPass(pass);
-		drawCamouflage(commands, target.depth, viewProjection, seconds);
+		drawCamouflage(commands, depthTarget.texture, viewProjection, seconds);
 		SDL_GPUColorTargetInfo keepColor = colorTarget;
 		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		keepColor.store_op = worldStore();
 		SDL_GPUDepthStencilTargetInfo keepDepth = depthTarget;
 		keepDepth.load_op = SDL_GPU_LOADOP_LOAD;
 		keepDepth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
@@ -4365,6 +4455,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		SDL_EndGPURenderPass(pass);
 		SDL_GPUColorTargetInfo keepColor = colorTarget;
 		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		keepColor.store_op = worldStore();
 		SDL_GPUDepthStencilTargetInfo clearDepth = depthTarget;
 		clearDepth.store_op = SDL_GPU_STOREOP_DONT_CARE;
 		clearDepth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -4381,10 +4472,24 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		finalColor.load_op = SDL_GPU_LOADOP_DONT_CARE;
 		finalColor.store_op = SDL_GPU_STOREOP_STORE;
 		SDL_GPUDepthStencilTargetInfo hudDepth = depthTarget; // the menus' masks start from 0
+		hudDepth.texture = target.depth;
 		hudDepth.store_op = SDL_GPU_STOREOP_DONT_CARE;
 		hudDepth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 		pass = SDL_BeginGPURenderPass(commands, &finalColor, 1, &hudDepth);
 		drawPost(commands, pass, postUniforms);
+	} else if (multisampled) {
+		// Without it, the HUD and menu over the resolved world in `color`,
+		// with the single-sampled depth-stencil.
+		SDL_EndGPURenderPass(pass);
+		SDL_GPUColorTargetInfo keepColor {};
+		keepColor.texture = color;
+		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
+		keepColor.store_op = SDL_GPU_STOREOP_STORE;
+		SDL_GPUDepthStencilTargetInfo hudDepth = depthTarget;
+		hudDepth.texture = target.depth;
+		hudDepth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+		hudDepth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &hudDepth);
 	}
 	// The HUD over everything.
 	if (m_overlayVertices && !m_overlayGroups.empty()) {
