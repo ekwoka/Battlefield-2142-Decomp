@@ -131,6 +131,7 @@ public:
 		float listenerObstruction = 0;
 		bool windWanted = false;
 		bool insideTitan = false;
+		int insideTitanTeam = 0; // the team of the Titan the listener is in
 		bool panting = false;
 		int injuries = 0;
 	};
@@ -181,6 +182,7 @@ private:
 		float hitPoints = -1;
 		bool damageArmed = true, destroyedArmed = true, repairedArmed = false;
 		bool destroyed = false;
+		bool titanPart = false; // a Titan's console or core: no world object of its own
 		const world::ObjectTemplate* objectTemplate = nullptr;
 	};
 	bool m_firstScan = true;

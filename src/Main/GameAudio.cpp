@@ -82,13 +82,18 @@ void GameAudio::listener(Camera& camera)
 		camera.velocity = {};
 	}
 	bool titanSeat = false, inside = false;
+	uint32_t titan = 0;
 	if (alive && me.vehicle) {
 		titanSeat = m_round.isTitan(me.vehicle);
 		inside = titanSeat;
+		titan = titanSeat ? me.vehicle : 0;
 	} else if (alive && !m_round.titans().empty()) {
-		inside = m_round.titanHolding(me.position + physics::Vec3 {0, 1.0f, 0}) != 0;
+		titan = m_round.titanHolding(me.position + physics::Vec3 {0, 1.0f, 0});
+		inside = titan != 0;
 	}
 	m_listenerState.insideTitan = inside;
+	const world::Object* titanObject = titan ? m_objects.find(titan) : nullptr;
+	m_listenerState.insideTitanTeam = titanObject ? titanObject->team() : 0;
 	m_manager.setListenerRoot(alive ? (me.vehicle ? me.vehicle : me.soldier) : 0, titanSeat);
 	interior(me, alive && camera.firstPerson);
 	m_manager.setWindAllowed(alive && camera.firstPerson && !inside);
@@ -614,10 +619,21 @@ void GameAudio::radio()
 	if (!playerInfo(local, me)) {
 		return;
 	}
+	// 0x0042e17e..0x0042e2d6: inside one's own Titan a message plays its
+	// "_inside" variant when there is one (Betty instead of the commander);
+	// a message named "_inside" plays only there.
+	const bool ownTitan = m_listenerState.insideTitan && m_listenerState.insideTitanTeam == me.team;
 	for (const auto& message : heard) {
 		++radioHeard;
 		sound::VoiceMessages::Heard in;
 		in.message = message.voice;
+		if (in.message.find("_inside") != std::string::npos) {
+			if (!ownTitan) {
+				continue;
+			}
+		} else if (ownTitan && m_voices->message(in.message + "_inside") >= 0) {
+			in.message += "_inside";
+		}
 		in.listenerTeam = me.team;
 		in.listener = toSound(me.position);
 		game::GameWorld::PlayerInfo sender;
@@ -789,12 +805,35 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 				}
 			}
 		}
+		// A Titan's consoles and core (Radio.friendlyDestroyedMessage
+		// "AUTO_TITAN_BB_consoledestroyeda" and the like) are its parts, not
+		// world objects: watched by their template, on the Titan's team.
+		for (int team = 1; team <= 2; ++team) {
+			for (const auto& part : m_round.titanParts(team)) {
+				if (m_watched.count(part.id)) {
+					continue;
+				}
+				const world::ObjectTemplate* t = m_templates.find(part.name);
+				if (!t || !(t->settings().count("radio.friendlyDestroyedMessage") || t->settings().count("radio.destroyedMessage")
+						|| t->settings().count("radio.enemyDestroyedMessage") || t->settings().count("radio.damageMessage")
+						|| t->settings().count("radio.repairedMessage"))) {
+					continue;
+				}
+				Watched w;
+				w.team = team;
+				w.titanPart = true;
+				w.hitPoints = part.hitPoints;
+				w.destroyed = part.hitPoints <= 0;
+				w.objectTemplate = t;
+				m_watched[part.id] = w;
+			}
+		}
 		m_firstScan = false;
 	}
 	for (auto it = m_watched.begin(); it != m_watched.end();) {
 		const world::Object* object = m_objects.find(it->first);
 		Watched& watched = it->second;
-		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : watched.titanPart ? watched.objectTemplate : nullptr;
 		if (!t) {
 			// Gone (a wreck removed) before its end was seen: destroyed.
 			if (watched.objectTemplate && !watched.destroyed && watched.destroyedArmed && watched.hitPoints >= 0) {
@@ -812,7 +851,7 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			it = m_watched.erase(it);
 			continue;
 		}
-		if (object->team() != watched.team) {
+		if (object && object->team() != watched.team) {
 			const int to = object->team(), from = watched.team;
 			// A silo's index, 1..5 as the voice table has them: its place
 			// among the silos ordered by control point id, the order the
@@ -843,8 +882,8 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			watched.team = to;
 		}
 		const float hp = m_round.hitPoints(it->first);
-		const int team = teamOf(*object);
-		if (hp >= 0) {
+		const int team = object ? teamOf(*object) : watched.team;
+		if (hp >= 0 || watched.titanPart) { // a wrecked part keeps a few negative hit points (-8 of a console's -10)
 			if (watched.hitPoints >= 0 && hp < watched.hitPoints && hp > 0 && watched.damageArmed) {
 				watched.damageArmed = false;
 				send(team, setting(*t, "radio.damageMessage"));

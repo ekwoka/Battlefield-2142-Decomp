@@ -351,6 +351,9 @@ private:
 		// _HASUVANIMATION_): its coordinates go through the instance's UV
 		// matrices (AnimatedUV.h).
 		bool animatedUV = false;
+		// A bundled material whose technique names "NoHemiLight": no hemi map (RaShaderBM
+		// _USEHEMIMAP_ off), the sky colour's ambient instead.
+		bool noHemi = false;
 	};
 	struct RigBone {
 		int node;

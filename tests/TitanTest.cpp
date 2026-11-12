@@ -13,6 +13,7 @@
 #include "Main/GameAudio.h"
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/GameSounds.h"
+#include "Sound/Game/VoiceMessages.h"
 #include "Sound/Game/SoundObjectTemplate.h"
 #include "Main/TitanShotTrace.h"
 #include "Animation/AnimationSystem.h"
@@ -3095,3 +3096,71 @@ TEST(Titan_SoldierStandingOnAMovingDeckDoesNotWalk)
 	CHECK(carried > 0.2f); // it rides along
 	CHECK(animated < 0.1f); // and stands
 }
+
+// A console's and the core's automatic radio (Radio.friendlyDestroyedMessage /
+// enemyDestroyedMessage, 0x00656d10): Betty to the Titan's team, the commander
+// to the attackers.
+TEST(Titan_ConsoleDestroyedRadio)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	sound::SoundManager manager {nullptr, level.templates};
+	sound::GameSounds sounds {manager};
+	// The voice table's pairs (VoiceMessages_AutomaticallyTriggered.con):
+	// outside the commander reads it, inside one's own Titan ("_inside") Betty.
+	sound::VoiceMessages voices {manager};
+	voices.reset("English", "English");
+	voices.addRadioFilter("commander", "Sound/VO/Activate_radio.wav");
+	for (const char* letter : {"a", "b", "c", "d"}) {
+		const std::string bb = std::string("AUTO_TITAN_BB_consoledestroyed") + letter;
+		voices.addMessage(bb);
+		voices.addRadioVoice("commander", "commander/filter/AUTO_TITAN_C_consoledestroyed" + std::string(letter) + ".ogg", bb);
+		voices.addMessage(bb + "_inside");
+		voices.addRadioVoice("commander", "betty/filter/" + bb + ".ogg", bb);
+	}
+	voices.build();
+	std::vector<std::string> played;
+	voices.onPlay = [&](const std::string& file, bool) { played.push_back(file); };
+	GameAudio audio(*level.world, level.objects, level.templates, manager, sounds, &voices);
+	const int attacker = level.world->addPlayer("Eu", 2, true);
+	uint32_t console = 0;
+	physics::Vec3 inside;
+	for (const auto& part : level.world->titanParts(1)) {
+		if (part.kind == game::GameWorld::TitanPartInfo::Console && !console) {
+			console = part.id;
+			inside = part.position + physics::Vec3 {0, 0.5f, 0};
+		}
+	}
+	CHECK(console != 0);
+	const world::Object* me = level.world->spawnPlayer(1);
+	CHECK(me != nullptr);
+	if (!me) {
+		return;
+	}
+	CHECK(level.world->setSoldierPosition(me->id(), inside));
+	for (int i = 0; i < 70; ++i) {
+		level.world->tick(1 / 30.0f);
+		audio.autoRadio();
+	}
+	level.world->applyDamage(console, 1e6f, attacker);
+	std::vector<std::pair<int, std::string>> sent;
+	for (int i = 0; i < 70 && sent.empty(); ++i) {
+		level.world->tick(1 / 30.0f);
+		sent = audio.autoRadio();
+	}
+	for (const auto& s : sent) {
+		std::fprintf(stderr, "  radio to %d: %s\n", s.first, s.second.c_str());
+	}
+	audio.tick({});
+	CHECK(audio.listenerState().insideTitan && audio.listenerState().insideTitanTeam == 1);
+	CHECK(!played.empty() && played.back().find("betty/filter/AUTO_TITAN_BB_consoledestroyed") != std::string::npos);
+	CHECK(sent.size() == 2 && sent[0].first == 1 && sent[0].second.rfind("AUTO_TITAN_BB_consoledestroyed", 0) == 0
+		&& sent[1].first == 2 && sent[1].second.rfind("AUTO_TITAN_C_consoledestroyed", 0) == 0);
+}
+

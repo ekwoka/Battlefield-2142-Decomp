@@ -124,7 +124,7 @@ void specularUniforms(LightingUniforms& uniforms, const S& submesh, const Camera
 template <class S>
 void meshKindUniforms(LightingUniforms& uniforms, const S& submesh, bool hemiAndShadows)
 {
-	uniforms.material[2] += hemiAndShadows ? kMaterialHemi : kMaterialNoShadows;
+	uniforms.material[2] += !hemiAndShadows ? kMaterialNoShadows : submesh.noHemi ? 0.0f : kMaterialHemi;
 	if (submesh.normalMap) {
 		uniforms.material[2] += kMaterialNormalMap;
 	}
@@ -630,6 +630,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		if (submesh.trunk) submesh.specularKind = 0;
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
+		// A "...NoHemiLight" technique drops _USEHEMIMAP_ (the material's +0x3d set at
+		// 0x101496a0; permutation bit 0x40 only without it: 0x100c4028 / 0x100c5709).
+		submesh.noHemi = bundled && technique.find("nohemilight") != std::string::npos;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
 			const bool hasDirt = technique.find("dirt") != std::string::npos;
 			const bool hasCrack = technique.find("crack") != std::string::npos;
