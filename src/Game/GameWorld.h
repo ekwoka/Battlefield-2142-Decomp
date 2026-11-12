@@ -2314,6 +2314,11 @@ private:
 		// waterDamageDelay) and in deep water (+0xf4, from
 		// deepWaterDamageDelay); -1 while out of it.
 		float waterTimer = -1, deepWaterTimer = -1;
+		// The critical burn's seconds (+0xf0), the upside-down test's timer
+		// (+0x258) and its "upright at the last test" flag (+0x25c); the
+		// armour's constructor zeroes all three (0x00655e11, 0x00655eb3).
+		float criticalTime = 0, upsideDownTimer = 0;
+		bool uprightLastTest = false;
 		// The armour's effects (ArmorEffects, stepArmorEffects): the hit
 		// points last seen (+0x254), the level started (+0x184), the last
 		// damage's spectacular flag (+0x250) and whether some follow it.
@@ -2484,6 +2489,10 @@ private:
 	// spawners (the APC pods) and off Verdun's deActivateOnEvent 1 FAVs.
 	void destroyedGameEvent(const world::ObjectTemplate& destroyed);
 	void stepVehicleDamage(float seconds);
+	// The upside-down test's "lies on something" (0x00652800): the body's
+	// lowest point (position less its radius, slot 0x90) is under the water
+	// or the terrain, or a ray down twice the radius meets an object.
+	bool restingOnSomething(const Body& body) const;
 	// A vehicle's armour effects (VehicleParts.cpp): its template's lists
 	// (cached), the change after its hit points moved (0x00654730 /
 	// 0x006549a0) and the attached ones following it.

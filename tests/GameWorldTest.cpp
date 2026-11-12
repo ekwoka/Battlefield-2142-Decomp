@@ -4616,8 +4616,8 @@ TEST(GameWorld_WaterDamageDelays)
 	makeMobile(*jeep, "jeep_mesh");
 	jeep->children().push_back({"jeep_engine", {}, {}});
 	jeep->settings()["armor.maxHitPoints"] = "100";
-	jeep->settings()["armor.waterLevel"] = "-0.5";
-	jeep->settings()["armor.deepWaterLevel"] = "-1.5";
+	jeep->settings()["armor.waterLevel"] = "0.5";
+	jeep->settings()["armor.deepWaterLevel"] = "1.5";
 	jeep->settings()["armor.hpLostWhileInWater"] = "5";
 	jeep->settings()["armor.hpLostWhileInDeepWater"] = "20";
 	jeep->settings()["armor.deepWaterDamageDelay"] = "0.5";
@@ -4629,11 +4629,6 @@ TEST(GameWorld_WaterDamageDelays)
 			range.world->tick(1 / 30.0f);
 		}
 	};
-	// Shipped templates encode these depths as negative offsets. A dry vehicle
-	// 0.56 m above the water must not take the immediate deep-water damage.
-	range.world->setWaterLevel(range.objects.find(car)->position().y - 0.56f);
-	run(2.1f);
-	CHECK(range.world->hitPoints(car) == 100);
 	range.world->setWaterLevel(range.objects.find(car)->position().y + 2);
 	run(0.4f);
 	CHECK(range.world->hitPoints(car) == 100);
@@ -4644,6 +4639,105 @@ TEST(GameWorld_WaterDamageDelays)
 	run(0.2f); // the water timer's 3 s
 	std::fprintf(stderr, "  after 3.1 s: %.0f\n", range.world->hitPoints(car));
 	CHECK(range.world->hitPoints(car) == 35);
+}
+
+// The water levels are signed offsets added to the position (0x006527a3:
+// in water when position.y + waterLevel is under the water): the shipped
+// -0.3 counts a vehicle whose origin is 0.2 m over the water as in it,
+// and not one 0.4 m over.
+TEST(GameWorld_WaterLevelIsSigned)
+{
+	for (const float over : {0.2f, 0.4f}) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["armor.maxHitPoints"] = "100";
+		jeep->settings()["armor.waterLevel"] = "-0.3";
+		jeep->settings()["armor.hpLostWhileInWater"] = "5";
+		jeep->settings()["armor.waterDamageDelay"] = "0.5";
+		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+		range.world->startRound();
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f); // settle on the ground
+		}
+		range.world->setWaterLevel(range.objects.find(car)->position().y - over);
+		for (int i = 0; i < 20; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  origin %.1f m over the water: %.0f\n", over, range.world->hitPoints(car));
+		CHECK(range.world->hitPoints(car) == (over < 0.3f ? 95.0f : 100.0f));
+	}
+}
+
+// Upside down (0x00652b10): once a second, hpLostWhileUpSideDown at once
+// while the body's up axis is under 0.3 of the world's and it lies on
+// something. The armour starts disarmed, so one that spawns upside down
+// loses it on its first test; an upright one never does.
+TEST(GameWorld_UpsideDownLossOnceASecond)
+{
+	for (const bool flipped : {false, true}) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["armor.maxHitPoints"] = "100";
+		jeep->settings()["armor.hpLostWhileUpSideDown"] = "10";
+		const uint32_t car = range.objects.create(jeep, {0, 1, 3}, {0, 0, flipped ? 180.0f : 0.0f})->id();
+		range.world->startRound();
+		std::vector<float> seen;
+		for (int i = 1; i <= 75; ++i) {
+			range.world->tick(1 / 30.0f);
+			if (i == 1 || i == 15 || i == 35 || i == 75) {
+				seen.push_back(range.world->hitPoints(car));
+			}
+		}
+		std::fprintf(stderr, "  %s: %.0f %.0f %.0f %.0f\n", flipped ? "flipped" : "upright", seen[0], seen[1], seen[2], seen[3]);
+		if (flipped) {
+			CHECK(seen == (std::vector<float> {90, 90, 80, 70})); // at 0.03, 1.03 and 2.03 s
+		} else {
+			CHECK(seen == (std::vector<float> {100, 100, 100, 100}));
+		}
+	}
+}
+
+// The critical burn (0x00654de9) goes through the damage routine once a
+// second, the rate times the seconds gathered, at or under criticalDamage.
+TEST(GameWorld_CriticalBurnOnceASecond)
+{
+	Range range;
+	range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+	range.templates.registerType(20, "PlayerControlObject");
+	range.templates.registerType(23, "Engine");
+	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	makeMobile(*jeep, "jeep_mesh");
+	jeep->children().push_back({"jeep_engine", {}, {}});
+	jeep->settings()["armor.maxHitPoints"] = "100";
+	jeep->settings()["armor.criticalDamage"] = "50";
+	jeep->settings()["armor.hpLostWhileCriticalDamage"] = "18";
+	const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+	range.world->startRound();
+	range.world->tick(1 / 30.0f);
+	range.world->applyDamage(car, 50); // at criticalDamage: burns
+	std::vector<float> seen;
+	for (int i = 1; i <= 60; ++i) {
+		range.world->tick(1 / 30.0f);
+		if (i == 20 || i == 40) {
+			seen.push_back(range.world->hitPoints(car));
+		}
+	}
+	std::fprintf(stderr, "  burning: %.2f %.2f\n", seen[0], seen[1]);
+	CHECK(seen[0] == 50); // nothing before the second is up
+	CHECK(seen[1] < 32.5f && seen[1] > 31.5f); // 18 x ~1 s
 }
 
 // fire.useDistanceCounter (0x005d5440, 0x005d4d80, 0x005b3e60): zoomed

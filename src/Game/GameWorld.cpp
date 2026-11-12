@@ -1867,10 +1867,41 @@ void GameWorld::stepVehicleDamage(float seconds)
 		if (left <= 0) {
 			continue;
 		}
-		float loss = 0;
-		const float critical = number(t, "armor.criticalDamage", 0);
-		if (critical > 0 && left < critical) {
-			loss += number(t, "armor.hpLostWhileCriticalDamage", 0);
+		// Each loss goes through the game logic's damage (slot 0xe4), as
+		// retail's do, in its order: burn, upside down, water (0x00654e09..).
+		const auto alive = [&] { return body.wreckTime < 0 && hitPoints(body.object) > 0; };
+		// Critical burn (0x00654de9): seconds add up; at 1 s or more, at or
+		// below criticalDamage (+0x150) with hpLostWhileCriticalDamage (+0x12c)
+		// not 0, the rate x those seconds goes at once; either way they restart.
+		body.criticalTime += seconds;
+		if (body.criticalTime >= 1) {
+			const float rate = number(t, "armor.hpLostWhileCriticalDamage", 0);
+			if (left <= number(t, "armor.criticalDamage", 0) && rate != 0) {
+				loseHitPoints(body.object, rate * body.criticalTime, -1);
+			}
+			body.criticalTime = 0;
+		}
+		// Upside down (0x00652b10): tested once a second; with
+		// hpLostWhileUpSideDown (+0x130) over 0.01, the body's up axis under
+		// 0.3 of the world's (*0x00975eb8) while it rests on something
+		// (0x00652800) is upside down. A test that finds it upright arms the
+		// next; the first upside-down test after one only disarms, so the
+		// damage starts one to two seconds after the roll.
+		body.upsideDownTimer -= seconds;
+		if (alive() && body.upsideDownTimer < 0) {
+			body.upsideDownTimer = 1;
+			if (const float lost = number(t, "armor.hpLostWhileUpSideDown", 0); lost > 0.01f) {
+				if (body.body.rotation.transform({0, 1, 0}).y >= 0.3f || !restingOnSomething(body)) {
+					body.uprightLastTest = true;
+				} else if (body.uprightLastTest) {
+					body.uprightLastTest = false;
+				} else {
+					loseHitPoints(body.object, lost, -1);
+				}
+			}
+		}
+		if (!alive()) {
+			continue;
 		}
 		// Water (the armour's 0x006521d0): over armor.waterLevel (metres
 		// over its centre; the flag +0x56) a timer starts at waterDamageDelay
@@ -1883,7 +1914,6 @@ void GameWorld::stepVehicleDamage(float seconds)
 		const float depth = m_hasWater ? m_waterLevel - body.body.position.y : -1;
 		// (The delay and the amount are read only in the water: each tick
 		// reads every vehicle's template.)
-		bool watered = false;
 		const auto waterTick = [&](bool in, float& timer, const char* delay, float delayDefault, const char* amount) {
 			if (!in) {
 				timer = -1;
@@ -1895,34 +1925,33 @@ void GameWorld::stepVehicleDamage(float seconds)
 			timer -= seconds;
 			if (timer <= 0) {
 				timer = 1;
-				if (const float lost = number(t, amount, 0); lost > 0) {
+				if (const float lost = number(t, amount, 0); lost > 0 && alive()) {
 					loseHitPoints(body.object, lost, -1);
-					watered = true;
 				}
 			}
 		};
-		// Shipped vehicle templates store the allowed water depth as a signed
-		// offset (commonly -0.3 / -0.7). Compare the positive depth to its
-		// magnitude: using a negative value directly damages vehicles while
-		// their origin is still above the water plane.
-		waterTick(depth > std::fabs(number(t, "armor.waterLevel", 1e9f)), body.waterTimer, "armor.waterDamageDelay", 3,
+		// The levels are signed, as retail adds them (0x006527a3: in water when
+		// position.y + waterLevel is under the water's height): the shipped
+		// -0.3 counts an origin up to 0.3 m over the water as in it.
+		waterTick(depth > number(t, "armor.waterLevel", 1e9f), body.waterTimer, "armor.waterDamageDelay", 3,
 			"armor.hpLostWhileInWater");
-		waterTick(depth > std::fabs(number(t, "armor.deepWaterLevel", 1e9f)), body.deepWaterTimer, "armor.deepWaterDamageDelay", 1,
+		waterTick(depth > number(t, "armor.deepWaterLevel", 1e9f), body.deepWaterTimer, "armor.deepWaterDamageDelay", 1,
 			"armor.hpLostWhileInDeepWater");
-		if (body.wreckTime >= 0 || (watered && hitPoints(body.object) <= 0)) {
-			continue; // (only the water's damage can have changed `left`)
-		}
-		if (body.body.rotation.transform({0, 1, 0}).y < 0) {
-			loss += number(t, "armor.hpLostWhileUpSideDown", 0);
-		}
-		if (loss > 0) {
-			const float now = left - loss * seconds;
-			m_hitPoints[body.object] = now;
-			if (now <= 0) {
-				destroyVehicle(body, -1);
-			}
-		}
 	}
+}
+
+bool GameWorld::restingOnSomething(const Body& body) const
+{
+	const physics::Vec3& p = body.body.position;
+	const float lowest = p.y - body.objectRadius;
+	if (m_hasWater && m_waterLevel > lowest) {
+		return true;
+	}
+	if (m_ground.height && m_ground.height(p.x, p.z) > lowest) {
+		return true;
+	}
+	// 0x006f2530: the object met, past the body itself.
+	return !lineOfSight(p, {p.x, p.y - 2 * body.objectRadius, p.z}, body.object);
 }
 
 std::vector<GameWorld::VehicleInfo> GameWorld::vehicleList()

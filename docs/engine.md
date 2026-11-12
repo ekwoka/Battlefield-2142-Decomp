@@ -8648,15 +8648,22 @@ Vehicles take damage through their armour settings:
   damageMod 0, e_ActiveDef, the force-field sounds), goes off there and
   doesn't penetrate (`stepProjectiles`). The bots never fire it (the ads
   have no aiTemplate).
-- **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
-  `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
-  100).
-- **Water and rolling:** water depth is measured from the vehicle origin to
-  the water plane. The signed `armor.waterLevel` and `armor.deepWaterLevel`
-  offsets are compared by magnitude, so an origin above the water plane does
-  not trigger damage; once the corresponding depth is exceeded, the vehicle
-  loses `hpLostWhileInWater` or `hpLostWhileInDeepWater` on its configured
-  timer. Upside down, it loses `hpLostWhileUpSideDown`.
+- **Critical damage:** at or below `armor.criticalDamage` a vehicle burns
+  down at `hpLostWhileCriticalDamage` a second, taken once a second as one
+  hit (`0x00654de9`; FAV: 18 at or below 151).
+- **Water:** the signed `armor.waterLevel` and `armor.deepWaterLevel` are
+  added to the vehicle's position (`0x006527a3`): it is in water when
+  `position.y + waterLevel` is under the water's height. The shipped -0.3
+  counts an origin up to 0.3 m over the water as in it. Each level's timer
+  then deals `hpLostWhileInWater` or `hpLostWhileInDeepWater` at once.
+- **Upside down** (`0x00652b10`): tested once a second. With
+  `hpLostWhileUpSideDown` over 0.01, the body's up axis under 0.3 of the
+  world's (about 73 degrees of tilt) while it lies on something
+  (`0x00652800`: its lowest point, position less its radius, under the water
+  or the terrain, or an object within twice the radius below) costs that
+  amount at once. A test that finds it upright arms the next, and the first
+  upside-down test after one only disarms, so the loss starts one to two
+  seconds after a roll. Every loss goes through the damage routine.
 - **Destruction:** a destroyed vehicle explodes with `armor.explosion*`
   (FAV: 300 over 6 m), kills everyone aboard, and stays as a wreck for
   `timeToStayAsWreck`. Its spawner then puts out a new one.
