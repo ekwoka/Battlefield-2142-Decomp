@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -554,6 +555,116 @@ TEST(Bots_DriveRayMeasuresStopIn3D)
 	CHECK(near(stopped.distance, std::sqrt(2.2f * 2.2f + 0.8f * 0.8f)));
 	const ai::DriveRay open = ai::driveRay(mesh, {-20, 0.8f, 0}, {-30, 0.8f, 0}, climb);
 	CHECK(open.clear);
+}
+
+// A deck of 2 m squares, x -20..40 and z 0..`depth`, with a hole (a wreck's
+// cut in the vehicle mesh) at x 16..24, z 0..8; the squares are linked.
+ai::NavMesh deckWithHole(int depth)
+{
+	ai::NavMesh mesh;
+	mesh.minX = mesh.minZ = -500;
+	mesh.maxX = mesh.maxZ = 500;
+	mesh.rootSize = 1000;
+	const int columns = 30, rows = depth / 2;
+	for (int z = 0; z <= rows; ++z) {
+		for (int x = 0; x <= columns; ++x) {
+			mesh.vertices.push_back({-20.0f + 2 * x, 0, 2.0f * z});
+		}
+	}
+	const auto vid = [&](int x, int z) { return static_cast<uint32_t>(z * (columns + 1) + x); };
+	std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t>> owners;
+	for (int z = 0; z < rows; ++z) {
+		for (int x = 0; x < columns; ++x) {
+			const float x0 = -20.0f + 2 * x, z0 = 2.0f * z;
+			if (x0 >= 16 && x0 < 24 && z0 < 8) {
+				continue; // the hole
+			}
+			const uint32_t v[4] = {vid(x, z), vid(x, z + 1), vid(x + 1, z + 1), vid(x + 1, z)};
+			ai::Polygon polygon;
+			polygon.vertexCount = 4; polygon.costClass = 1; polygon.normal = {0, 1, 0};
+			polygon.firstEdge = static_cast<uint32_t>(mesh.edgeVertices.size());
+			const uint32_t index = static_cast<uint32_t>(mesh.polygons.size());
+			mesh.polygons.push_back(polygon);
+			mesh.leafPolygons.push_back(index);
+			for (int k = 0; k < 4; ++k) {
+				mesh.edgeVertices.push_back(v[k]);
+				owners[{std::min(v[k], v[(k + 1) % 4]), std::max(v[k], v[(k + 1) % 4])}].push_back(index);
+			}
+		}
+	}
+	for (uint32_t p = 0; p < mesh.polygons.size(); ++p) {
+		for (int k = 0; k < 4; ++k) {
+			const uint32_t a = mesh.edgeVertices[p * 4 + k], b = mesh.edgeVertices[p * 4 + (k + 1) % 4];
+			int32_t other = -1;
+			for (const uint32_t q : owners[{std::min(a, b), std::max(a, b)}]) {
+				other = q != p ? static_cast<int32_t>(q) : other;
+			}
+			mesh.edgeNeighbours.push_back(other);
+		}
+	}
+	mesh.nodes.resize(1);
+	mesh.nodes[0].leaf = true;
+	mesh.nodes[0].polygonCount = static_cast<uint8_t>(mesh.polygons.size());
+	return mesh;
+}
+
+// enhanced.cornerSteer's point (ai::cornerApproach): a FAV refused at a
+// hole's corner, facing a steering point beyond it on a line that grazes the
+// corner (the long bridge's wreck), gets a point that turns it 28 degrees
+// or more away from the hole, on the free side; with a strip narrower than
+// its body there is none.
+TEST(Bots_CornerApproachTurnsAwayFromTheHole)
+{
+	ai::DriveSettings fav;
+	fav.radius = 2.93f; fav.spaceNeededTweak = 1; fav.width = 2.3f; fav.length = 4.6f;
+	const ai::ClimbLimits climb;
+	const ai::Vec3 at {12, 0, 8.4f}, point {28, 0, 8.4f};
+	{
+		const ai::NavMesh mesh = deckWithHole(14); // a 6 m strip beside the hole
+		CHECK(mesh.polygons.size() < 256);
+		// The body's right side on the straight line runs into the hole.
+		CHECK(!ai::driveRay(mesh, {12, 0, 7.25f}, {28, 0, 7.25f}, climb).clear);
+		const std::optional<ai::Vec3> q = ai::cornerApproach(mesh, climb, fav, at, point);
+		CHECK(q.has_value());
+		if (q) {
+			const float turn = std::acos(((q->x - at.x) * 16) / (16 * std::hypot(q->x - at.x, q->z - at.z)));
+			CHECK(turn >= 27.9f * 3.14159265f / 180);
+			CHECK(q->z > at.z); // away from the hole
+			CHECK(mesh.findPolygon(*q) >= 0);
+		}
+	}
+	{
+		const ai::NavMesh mesh = deckWithHole(10); // 2 m beside the hole, under the 2.3 m body
+		CHECK(!ai::cornerApproach(mesh, climb, fav, at, point).has_value());
+	}
+}
+
+// enhanced.cornerSteer: a tank-wide body (5.3 m) beside the hole. Its full
+// band can't stay half a width off a 6 m strip's borders, but the map's
+// mesh already lies its generator radius inside the obstacles: narrowed
+// by that, the search finds a point on the strip.
+TEST(Bots_CornerApproachNarrowsTheBandByTheMeshRadius)
+{
+	ai::DriveSettings tank;
+	tank.radius = 5.36f; tank.spaceNeededTweak = 1; tank.width = 5.31f; tank.length = 8.34f;
+	const ai::ClimbLimits climb;
+	const ai::NavMesh mesh = deckWithHole(14); // a 6 m strip beside the hole
+	const ai::Vec3 at {10, 0, 11}, point {28, 0, 11};
+	CHECK(!ai::cornerApproach(mesh, climb, tank, at, point).has_value());
+	const std::optional<ai::Vec3> q = ai::cornerApproach(mesh, climb, tank, at, point, 4.35f);
+	CHECK(q.has_value());
+	if (q) {
+		CHECK(mesh.findPolygon(*q) >= 0);
+	}
+	// A body no wider than the FAV's doesn't need it: the same point either way.
+	ai::DriveSettings fav;
+	fav.radius = 2.93f; fav.spaceNeededTweak = 1; fav.width = 2.3f; fav.length = 4.6f;
+	const std::optional<ai::Vec3> a = ai::cornerApproach(mesh, climb, fav, {12, 0, 8.4f}, point);
+	const std::optional<ai::Vec3> b = ai::cornerApproach(mesh, climb, fav, {12, 0, 8.4f}, point, 4.35f);
+	CHECK(a.has_value() && b.has_value());
+	if (a && b) {
+		CHECK(a->x == b->x && a->z == b->z);
+	}
 }
 
 TEST(Bots_GoalRecoveryConfirmedWorldExit)

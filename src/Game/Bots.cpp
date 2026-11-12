@@ -7682,6 +7682,8 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	physics::Vec3 point = to;
 	sense.remaining = std::sqrt(horizontal2(to - at));
 	ai::FollowerSettings floatingFollower;
+	// enhanced.cornerSteer (not retail; off by default): cars and tanks.
+	const bool cornerSteer = m_settings.cornerSteering() && settings.driver != ai::Driver::Mech && !floating;
 	if (m_vehicleNavMesh) {
 		ai::FollowerSettings follower;
 		follower.soldier = false;
@@ -7756,6 +7758,17 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 			return true;
 		}
 		point = fromAi(steer.point);
+		if (cornerSteer && bot.corner.latched) {
+			Bot::Corner& c = bot.corner;
+			// Within 1.5 m, or past it along the way it was chosen on.
+			const physics::Vec3 chosen = c.point - c.latchedFrom, left = c.point - at;
+			const bool reached = horizontal2(left) < 1.5f * 1.5f || chosen.x * left.x + chosen.z * left.z < 0;
+			if (reached || m_time - c.latchedAt > 15 || c.goal != goalId) {
+				c.latched = false;
+			} else {
+				point = c.point;
+			}
+		}
 		sense.remaining = bot.follower.remaining(toAi(at));
 		sense.maxBend = bot.follower.maxBend(toAi(at), toAi(forward), sense.speed, settings.lookAheadTime, m_time);
 		const ai::NavMesh& mesh = *m_vehicleNavMesh;
@@ -7791,7 +7804,69 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		bot.follower.progress(toAi(at), std::max(std::fabs(out.throttle), std::fabs(out.strafe)), m_time);
 		return true;
 	}
+	const int stateBefore = bot.drive.state;
 	const ai::DriveOutput out = ai::driveControl(settings, bot.drive, sense);
+	if (cornerSteer && m_vehicleNavMesh && (bot.drive.state == 9 || bot.drive.state == 11)
+		&& (stateBefore == 0 || stateBefore == 2 || stateBefore == 3) && bot.drive.avoided == -1 && std::cos(sense.error) > 0.9f) {
+		// Refused for room while facing the point (the controller's front rays,
+		// no obstacle). Retail backs straight and comes back on the same line
+		// (CURRENT-STATUS: the FAV at the long bridge's wreck). A refusal
+		// counts again only after a back-and-return (over 1.5 s since the
+		// last one) within 5 m of the first and with no less of the path
+		// left (within 2 m): a tank creeping on through a narrow spot, or out
+		// of its spawn, flips 0/11 and is making progress. On the second such
+		// refusal, steer at a point beside it that the body clears
+		// (ai::cornerApproach). After two such points, or with none by the
+		// third refusal, the move fails here instead of backing along the
+		// same line again.
+		Bot::Corner& c = bot.corner;
+		if (m_time - c.lastAt > 30 || horizontal2(at - c.at) > 25 || sense.remaining < c.remaining - 2) {
+			c.refusals = 0;
+			c.corrections = 0;
+			c.at = at;
+			c.remaining = sense.remaining;
+		}
+		if (c.refusals == 0 || m_time - c.lastAt > 1.5f) {
+			++c.refusals;
+		}
+		c.lastAt = m_time;
+		if (c.refusals >= 2 && !c.latched) {
+			const bool cooling = m_time < c.failedUntil && horizontal2(at - c.failedAt) <= 25;
+			std::optional<ai::Vec3> wider;
+			if (!cooling && c.corrections < 2) {
+				const float shrunk = m_settings.pathfindingMaps.size() > 1 ? m_settings.pathfindingMaps[1].radius : 0;
+				wider = ai::cornerApproach(*m_vehicleNavMesh, m_settings.climbLimits(1), settings, toAi(at), toAi(point), shrunk);
+			}
+			if (wider) {
+				c.refusals = 0;
+				c.latched = true;
+				c.point = fromAi(*wider);
+				c.latchedAt = m_time;
+				c.latchedFrom = at;
+				c.goal = goalId;
+				++c.corrections;
+			} else if (c.refusals >= 3) {
+				c.refusals = 0;
+				c.failedAt = at;
+				c.failedUntil = m_time + 30;
+				c.corrections = 0;
+				// Stop here, as a failed approach does (above): the objective is
+				// rejected for 30 s, and without another one the bot holds its
+				// place (updateGoal) instead of driving back onto the same line.
+				bot.goal = at;
+				bot.via.clear();
+				bot.follower.reset();
+				bot.followId = -1;
+				if (bot.goalControlPoint >= 0) {
+					bot.rejectedVehiclePoints[bot.goalControlPoint] = m_time + 30;
+				}
+				bot.orderRegoal = true;
+				bot.moveFailed = true;
+				brake();
+				return false;
+			}
+		}
+	}
 	if (out.stop) {
 		brake(); // something sits on the goal (0x10091050 on 666)
 		return false;
@@ -9306,8 +9381,13 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 		}
 	});
 	// The mesh generator's settings (the editor traces the maps with them;
-	// the bots read the generated .qtr/.clb): accepted, not used.
-	bindMethod(console, "aiPathfinding.map.radius", access, [](float) {});
+	// the bots read the generated .qtr/.clb): accepted, not used by retail.
+	// The radius is kept for enhanced.cornerSteer (not retail).
+	bindMethod(console, "aiPathfinding.map.radius", access, [activeMap](float radius) {
+		if (BotSettings::PathfindingMap* m = activeMap()) {
+			m->radius = radius;
+		}
+	});
 	bindMethod(console, "aiPathfinding.map.allowedHeightDiff", access, [](float) {});
 	bindMethod(console, "aiPathfinding.map.addVehicleForClusterCost", access, [](std::string) {});
 	bindMethod(console, "aiPathfinding.traceMap", access, [](std::string) {});

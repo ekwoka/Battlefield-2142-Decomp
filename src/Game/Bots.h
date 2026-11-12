@@ -546,6 +546,9 @@ struct BotSettings {
 	const bool* enhanced = nullptr;
 	const bool* botRecovery = nullptr;
 	bool stuckRecovery() const { return enhanced && *enhanced && (!botRecovery || *botRecovery); }
+	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
+	const bool* cornerSteer = nullptr;
+	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
 	std::vector<std::string> behaviours; // by id (aiSettings.setBehaviour)
@@ -622,6 +625,7 @@ struct BotSettings {
 		std::string name;
 		float maxSlope = 90;                 // degrees (+0xc holds its cosine, 0 at first)
 		float allowedThresholdHeight = 0.35f; // +0x18
+		float radius = 0; // aiPathfinding.map.radius: the generator shrank the mesh by it (read only by enhanced.cornerSteer)
 		float headClearance = 2;             // +0x14
 	};
 	std::vector<PathfindingMap> pathfindingMaps;
@@ -1130,6 +1134,21 @@ private:
 		float followAt = -100;
 		float jumpUntil = -1;        // PIAction held (the follower's jump, 0x10095720 / AIDLL 0x10092bc0)
 		ai::DriveState drive;
+		// enhanced.cornerSteer: a corner the driver keeps refusing for room.
+		struct Corner {
+			int refusals = 0;
+			float lastAt = -1e9f;
+			physics::Vec3 at;          // where it refuses
+			float remaining = 0;       // the path left there
+			int corrections = 0;       // wider points tried here
+			bool latched = false;
+			physics::Vec3 point;       // the wider steering point, held until reached
+			float latchedAt = 0;
+			physics::Vec3 latchedFrom; // where it was chosen
+			int goal = -1;             // the move it was chosen for
+			physics::Vec3 failedAt;    // the move failed here: no second search for 30 s
+			float failedUntil = -1e9f;
+		} corner;
 		ai::SidestepState sidestep;  // the move's (0x100ce860 +0x64..+0x80)
 		physics::Vec3 lastVelocity;  // the hover tank's, for its acceleration (FloatingTankMoveTo +0x3c)
 		// Strategic waypoints and areas on the way to the goal (0x10060300).

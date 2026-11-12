@@ -1115,6 +1115,106 @@ DriveRay driveRay(const NavMesh& mesh, const Vec3& from, const Vec3& end, const 
 	return ray;
 }
 
+std::optional<Vec3> cornerApproach(const NavMesh& mesh, const ClimbLimits& climb, const DriveSettings& s,
+	const Vec3& position, const Vec3& point, float meshShrunk)
+{
+	const float needed = s.spaceNeededTweak * s.radius;
+	float half = 0.5f * s.width;
+	const auto flatUnit = [](Vec3 v) {
+		v.y = 0;
+		const float l = std::sqrt(dot2(v, v));
+		return l > 1e-3f ? std::optional<Vec3>(v * (1 / l)) : std::nullopt;
+	};
+	// The body's band: five parallel driver rays across its width, each
+	// starting on the mesh. (meshRaycast's width only measures the edge
+	// crossed, so short interior edges would refuse every line.)
+	// Converging: the rays meet at `to` (the follower's own point, which
+	// retail's portal margins already allow).
+	const auto wide = [&](const Vec3& from, const Vec3& to, bool converging = false) {
+		const std::optional<Vec3> u = flatUnit(to - from);
+		if (!u) {
+			return mesh.findPolygon(from) >= 0;
+		}
+		const Vec3 side {u->z, 0, -u->x};
+		for (const float k : {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f}) {
+			const Vec3 o = side * (k * half);
+			if (mesh.findPolygon(from + o) < 0 || !driveRay(mesh, from + o, converging ? to : to + o, climb).clear) {
+				return false;
+			}
+		}
+		return true;
+	};
+	const std::optional<Vec3> way = flatUnit(point - position);
+	if (!way) {
+		return std::nullopt;
+	}
+	// The refusal leaves the heading on the point (cos over 0.9), and the
+	// controller drives on again once within that of its point with room
+	// ahead (states 9/11): a point beside the old one needs a turn, so the
+	// candidates lie 28 to 60 degrees off the way, 5 to 12 m out, the
+	// smallest turn first. The vehicle backs along its heading while it turns.
+	std::vector<Vec3> starts {position};
+	for (const float back : {needed, 2 * needed}) {
+		const Vec3 b = position - *way * back;
+		if (driveRay(mesh, position, b, climb).clear) {
+			starts.push_back(b);
+		}
+	}
+	// The fan first, then points beside the old one (up to 6 m across).
+	std::vector<Vec3> candidates;
+	for (int degrees = 28; degrees <= 60; degrees += 4) {
+		for (const float distance : {12.0f, 9.0f, 7.0f, 5.0f}) {
+			for (const float sideSign : {1.0f, -1.0f}) {
+				const float a = sideSign * static_cast<float>(degrees) * 0.017453292f;
+				const Vec3 u {way->x * std::cos(a) + way->z * std::sin(a), 0, way->z * std::cos(a) - way->x * std::sin(a)};
+				candidates.push_back(position + u * distance);
+			}
+		}
+	}
+	const Vec3 across {way->z, 0, -way->x};
+	for (int step = 1; step <= 24; ++step) {
+		candidates.push_back(point + across * (0.5f * static_cast<float>((step + 1) / 2) * (step % 2 ? 1.0f : -1.0f)));
+	}
+	const auto search = [&]() -> std::optional<Vec3> {
+		for (Vec3 q : candidates) {
+			if (mesh.findPolygon(q) < 0) {
+				continue;
+			}
+			q.y = position.y;
+			bool reach = false;
+			for (const Vec3& from : starts) {
+				reach = reach || wide(from, q);
+			}
+			// On from it to the old point.
+			const bool far = dot2(point - q, point - q) > 1;
+			if (!reach || (far && !wide(q, point, true))) {
+				continue;
+			}
+			const Vec3 h = far ? *flatUnit(point - q) : *way;
+			const Vec3 r {h.z, 0, -h.x};
+			// As freeSpace: the diagonals don't count where they end entering class 4.
+			const DriveRay ahead = driveRay(mesh, q, q + h * needed, climb);
+			bool room = ahead.clear || ahead.distance >= needed;
+			for (const Vec3& d3 : {h * s.length - r * s.width, h * s.length + r * s.width}) {
+				const DriveRay ray = driveRay(mesh, q, q + *flatUnit(d3) * needed, climb);
+				room = room && (ray.clear || ray.lastClass == 4 || ray.distance >= needed);
+			}
+			if (room) {
+				return q;
+			}
+		}
+		return std::nullopt;
+	};
+	if (std::optional<Vec3> found = search()) {
+		return found;
+	}
+	if (meshShrunk <= 0) {
+		return std::nullopt;
+	}
+	half = std::max(0.0f, half - meshShrunk);
+	return search();
+}
+
 DriveOutput driveControl(const DriveSettings& s, DriveState& st, const DriveSense& in)
 {
 	DriveOutput out;

@@ -395,6 +395,24 @@ DriveOutput driveControl(const DriveSettings& settings, DriveState& state, const
 // machine), not the distance across the ground.
 DriveRay driveRay(const NavMesh& mesh, const Vec3& from, const Vec3& end, const ClimbLimits& climb);
 
+// enhanced.cornerSteer, not retail: a steering point the vehicle's body can
+// reach and leave. First 28 to 60 degrees off the way to `point` (5 to 12 m
+// out, the smallest turn first), so that the controller turns while it
+// backs; then beside `point` (up to 6 m across). The line to it, from the
+// vehicle or from a point up to two clearances behind it, must keep half
+// the box's width off the mesh's border (five parallel driveRays across the
+// body; cost class 6, the map's climb test), and so must the line on to
+// `point`, narrowing onto it (the follower's own point, which retail's
+// portal margins allow); at it, facing `point`, the forward
+// and diagonal rays must have the controller's own clearance
+// (spaceNeededTweak x radius). With none, and `meshShrunk` (the map's
+// generator radius: the mesh already lies that far inside the obstacles),
+// the band is narrowed by it (a centre line for any vehicle up to twice
+// as wide) and the search runs again, so wide vehicles aren't held to
+// the border twice. None: no safe approach.
+std::optional<Vec3> cornerApproach(const NavMesh& mesh, const ClimbLimits& climb, const DriveSettings& settings,
+	const Vec3& position, const Vec3& point, float meshShrunk = 0);
+
 // The tank's reset (0x100e0930, TankMoveTo's and FloatingTankMoveTo's stop):
 // a throttle against the speed along the heading, t = -clamp(speed, +-0.7):
 // none within 0.05, 0.4 within 0.4, else t; no turning.

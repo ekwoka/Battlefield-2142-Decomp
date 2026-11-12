@@ -7,9 +7,9 @@
 // saved profiles must not change with it. A headless round prints a state
 // fingerprint (main.cpp, --simulate); tools/parity-check.sh runs the same
 // round with the switch off and on and fails if the fingerprints differ.
-// The one exception is a gameplay addition with its own switch below
-// (botRecovery): it changes the simulation by design, so the check turns it
-// off.
+// The exceptions are the gameplay additions with their own switches below
+// (botRecovery, cornerSteer): they change the simulation by design, so the
+// check turns them off (cornerSteer is off by default).
 #pragma once
 
 #include "Console/Console.h"
@@ -26,6 +26,7 @@ struct EnhancedSettings {
 	bool prepass = false; // enhanced.prepass: the depth/normal/motion prepass even when neither taa nor ssao reads it
 	// Gameplay, also only with enhanced.enabled; changes the simulation:
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
+	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 };
 
 inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& settings)
@@ -42,6 +43,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.prepass = v; });
 	bindProperty<bool>(console, "enhanced.botRecovery", ConsoleAccess::Anyone, [&settings] { return settings.botRecovery; },
 		[&settings](const bool& v) { settings.botRecovery = v; });
+	bindProperty<bool>(console, "enhanced.cornerSteer", ConsoleAccess::Anyone, [&settings] { return settings.cornerSteer; },
+		[&settings](const bool& v) { settings.cornerSteer = v; });
 }
 
 } // namespace dice::hfe::scene
