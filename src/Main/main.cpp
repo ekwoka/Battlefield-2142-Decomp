@@ -8919,7 +8919,7 @@ int runGame(Options& options, Session& session)
 			return playerCamera.cockpit(cockpit) ? cockpit.vehicle : 0;
 		};
 		// Inside a vehicle in first person its cockpit geometry (0x00612880).
-		sources.geometryFor = [&playerCamera, &round, &objects](uint32_t object, int& geometry, int& lod) {
+		sources.geometryFor = [&playerCamera, &round, &objects](uint32_t object, const std::string& source, int& geometry, int& lod) {
 			// A kit on the ground: its template's geometry.dropGeom.
 			const world::Object* kit = round.isDroppedKit(object) ? objects.find(object) : nullptr;
 			if (kit && kit->objectTemplate()) {
@@ -8944,7 +8944,7 @@ int runGame(Options& options, Session& session)
 				return true;
 			}
 			PlayerCamera::Cockpit cockpit;
-			if (!playerCamera.cockpit(cockpit, object)) {
+			if (!playerCamera.cockpit(cockpit, object) || !PlayerCamera::cockpitCovers(cockpit, source)) {
 				return false;
 			}
 			geometry = cockpit.subGeometry;
@@ -9643,6 +9643,7 @@ int runGame(Options& options, Session& session)
 				inner(in);
 			};
 		}
+		std::array<int, 3> remoteTicketState {-1, -1, -1}; // a joined game's last seen team +0x8c
 		viewer.onTicks = [&](int ticks) {
 			if (joinPending) {
 				return; // the loaded level waits on JOIN GAME: nothing runs yet
@@ -9652,6 +9653,23 @@ int runGame(Options& options, Session& session)
 				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;
 					showEndOfRound();
+				}
+			}
+			if (session.client && g_remoteHud) {
+				// The server's ticket state, sent with the tickets, announced
+				// as it changes (0x0044b7e8 -> 0x00449070); not the first seen.
+				game::GameWorld::PlayerInfo me;
+				const int local = g_remoteHud->localPlayer();
+				for (int team = 1; team <= 2; ++team) {
+					const int state = session.client->world().teamState().ticketState(team);
+					const int was = std::exchange(remoteTicketState[static_cast<size_t>(team)], state);
+					if (state < 0 || was < 0 || state == was || !g_remoteHud->playerInfo(local, me)) {
+						continue;
+					}
+					const std::string message = GameAudio::ticketStateMessage(team, state, me.team, round.gameMode());
+					if (!message.empty()) {
+						round.hearRadio(local, 13, message);
+					}
 				}
 			}
 		};

@@ -2527,12 +2527,12 @@ const HostedGame::Ghost* HostedGame::ghostOf(uint16_t id, size_t& part) const
 std::vector<uint8_t> HostedGame::teamStateOf(size_t& bits) const
 {
 	// Both teams' tickets (the bits 0x400 and 0x400000, team +0x84, as
-	// 0x0055f180 clamps them), each with its bit and value (+0x90, +0x8c:
-	// not kept by the rewrite's game logic, 0).
+	// 0x0055f180 clamps them), each with its bit (+0x90, not kept: 0) and
+	// value (+0x8c, the ticket state the clients announce, 0x0044b803).
 	net::TeamNetState state;
 	for (int team = 1; team <= 2; ++team) {
 		const int tickets = static_cast<int>(std::lround(m_logic->team(team).tickets));
-		state.setTickets(team, std::clamp(tickets, 0, 9999));
+		state.setTickets(team, std::clamp(tickets, 0, 9999), false, m_logic->team(team).ticketState);
 	}
 	net::BitWriter out;
 	net::encodeTeamState(out, state);

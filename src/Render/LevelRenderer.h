@@ -195,7 +195,7 @@ struct LevelSources {
 	// The geometry and LOD an object's meshes with more than one geometry
 	// draw instead of the exterior (a vehicle's cockpit seen from inside,
 	// BF2142.exe 0x00612880); false for the default. Asked by syncObjects.
-	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
+	std::function<bool(uint32_t object, const std::string& source, int& geometry, int& lod)> geometryFor;
 	// The vehicle the view is inside (its cockpit drawn), 0 for none.
 	std::function<uint32_t()> cockpitVehicle;
 	// Rain and snow (rainManager.*), if any.

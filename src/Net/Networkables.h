@@ -429,6 +429,7 @@ struct TeamNetState {
 	// sign + 2 and two sign + 17s).
 	std::array<std::array<int32_t, 3>, 32> values {};
 	int tickets(int team) const;   // -1 when this state hasn't them
+	int ticketState(int team) const; // the value after them (team +0x8c, the scripts' ticketState); -1 without
 	void setTickets(int team, int tickets, bool flag = false, int value = 0);
 	bool complete = false;
 };

@@ -1423,7 +1423,30 @@ bool PlayerCamera::cockpit(Cockpit& cockpit, uint32_t object) const
 		: seat.seat                            ? static_cast<int>(number(*seat.seat, "cockpitSubGeom", 0))
 											   : 0;
 	cockpit.lod = cameraLod != -1 ? cameraLod : seat.seat ? static_cast<int>(number(*seat.seat, "cockpitLod", 0)) : 0;
+	const world::Object* vehicle = m_round.objects().find(seat.vehicle);
+	const world::ObjectTemplate* root = vehicle ? vehicle->objectTemplate() : nullptr;
+	cockpit.seat = seat.seat && seat.seat != root ? seat.seat->name() : std::string();
+	cockpit.seatHasGeometry = !seat.seat || seat.seat->settings().count("geometry") > 0;
 	return true;
+}
+
+bool PlayerCamera::cockpitCovers(const Cockpit& cockpit, const std::string& source)
+{
+	std::vector<std::string> path;
+	for (size_t start = 0; !source.empty() && start <= source.size();) {
+		const size_t slash = std::min(source.find('/', start), source.size());
+		path.push_back(source.substr(start, slash - start));
+		start = slash + 1;
+	}
+	if (cockpit.seat.empty()) {
+		return path.size() <= 1; // the root and its children
+	}
+	const world::CaseInsensitiveLess less;
+	const auto isSeat = [&](size_t i) { return !less(path[i], cockpit.seat) && !less(cockpit.seat, path[i]); };
+	if (path.empty()) {
+		return !cockpit.seatHasGeometry;
+	}
+	return isSeat(path.size() - 1) || (path.size() >= 2 && isSeat(path.size() - 2));
 }
 
 std::vector<PlayerCamera::Model> PlayerCamera::models() const

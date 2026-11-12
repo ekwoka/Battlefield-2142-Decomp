@@ -209,7 +209,14 @@ public:
 		uint32_t vehicle = 0;
 		int subGeometry = 1;
 		int lod = 0;
+		std::string seat;          // the seat's PlayerControlObject template ("" for the vehicle's root)
+		bool seatHasGeometry = true;
 	};
+	// Whether the cockpit geometry is the one drawn for the vehicle's mesh at
+	// `source` (the renderer's node path, "" for the root): 0x00612880 sets it
+	// on the seat's own mesh (the root's when the seat has none) and its
+	// children's, not on the other seats (a Titan's other guns).
+	static bool cockpitCovers(const Cockpit& cockpit, const std::string& source);
 	// When the renderer already knows the object being considered, reject
 	// every other hull before resolving the player's seat-camera tree.
 	bool cockpit(Cockpit& cockpit, uint32_t object = 0) const;

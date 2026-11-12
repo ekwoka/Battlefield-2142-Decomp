@@ -3164,3 +3164,50 @@ TEST(Titan_ConsoleDestroyedRadio)
 		&& sent[1].first == 2 && sent[1].second.rfind("AUTO_TITAN_C_consoledestroyed", 0) == 0);
 }
 
+
+// From a Titan gun's seat, the cockpit geometry (0x00612880) is that gun's
+// alone: the Titan's other guns keep their exterior geometry.
+TEST(Titan_GunSeatCockpitLeavesTheOtherGuns)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	const int team = 2;
+	CHECK(level.world->spawnPlayer(team) != nullptr);
+	const int player = level.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(player, info));
+	const auto* titan = level.titan(team);
+	if (!titan) { CHECK(titan); return; }
+	CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+	physics::Vec3 entry; float radius = 0; int seat = -1;
+	CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+	CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+	game::SoldierInput input; input.use = true;
+	level.world->setPlayerInput(input); level.run(0.1f);
+	const auto seats = level.world->vehicleSeats(level.world->titanOf(team));
+	int cannon = -1;
+	for (size_t i = 0; i < seats.size() && cannon < 0; ++i) {
+		if (seats[i].name.find("groundcanone3") != std::string::npos) cannon = static_cast<int>(i);
+	}
+	CHECK(cannon >= 0);
+	if (cannon < 0) return;
+	input = {}; input.switchSeat = cannon + 1;
+	level.world->setPlayerInput(input); level.run(0.5f);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(*level.world, systems, nullptr);
+	camera.tick(1 / 30.0f);
+	PlayerCamera::Cockpit cockpit;
+	CHECK(camera.cockpit(cockpit));
+	std::fprintf(stderr, "  seat %s (mesh %d), cockpit geometry %d\n", cockpit.seat.c_str(), cockpit.seatHasGeometry, cockpit.subGeometry);
+	CHECK(cockpit.seat == seats[static_cast<size_t>(cannon)].name);
+	std::string other;
+	for (const auto& s : seats) {
+		if (s.name.find("groundcanone3") != std::string::npos && s.name != cockpit.seat) other = s.name;
+	}
+	CHECK(!other.empty());
+	CHECK(PlayerCamera::cockpitCovers(cockpit, cockpit.seat + "/gun"));
+	CHECK(!PlayerCamera::cockpitCovers(cockpit, other + "/gun"));
+}

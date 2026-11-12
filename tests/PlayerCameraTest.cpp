@@ -248,3 +248,23 @@ TEST(PlayerCamera_MissileViewInterpolation)
 	p = smooth.sample(2, true, 0, next);
 	CHECK(p.position[0] == 10 && p.yaw == next.yaw);
 }
+
+// The cockpit geometry's reach (0x00612880): the seat's own mesh and its
+// children's; a Titan gun seat must leave the other guns whole.
+TEST(PlayerCamera_CockpitCoversOnlyTheSeat)
+{
+	PlayerCamera::Cockpit gun;
+	gun.seat = "eu_groundcanone3_01_hub";
+	gun.seatHasGeometry = false;
+	CHECK(PlayerCamera::cockpitCovers(gun, "eu_groundcanone3_01_hub/eu_groundcanone3_01"));
+	CHECK(PlayerCamera::cockpitCovers(gun, "EU_groundcanone3_01_Hub/eu_controlstation_v2_g"));
+	CHECK(!PlayerCamera::cockpitCovers(gun, "eu_groundcanone3_02_hub/eu_groundcanone3_02"));
+	CHECK(!PlayerCamera::cockpitCovers(gun, "eu_groundcanone3_01_hub/eu_groundcanone3_01/eu_groundcanone3_base_01"));
+	CHECK(PlayerCamera::cockpitCovers(gun, "")); // a seat with no mesh: the root's
+	gun.seatHasGeometry = true;
+	CHECK(!PlayerCamera::cockpitCovers(gun, ""));
+	PlayerCamera::Cockpit driver; // the root's seat: the hull and its children
+	CHECK(PlayerCamera::cockpitCovers(driver, ""));
+	CHECK(PlayerCamera::cockpitCovers(driver, "us_tnk_turret"));
+	CHECK(!PlayerCamera::cockpitCovers(driver, "us_tnk_turret/us_tnk_barrel"));
+}

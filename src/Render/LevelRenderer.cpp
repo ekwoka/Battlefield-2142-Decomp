@@ -1953,7 +1953,7 @@ void LevelRenderer::syncObjects()
 		// The cockpit from inside: another geometry of its mesh.
 		if (instance.mesh->geometries > 1) {
 			int geometry = -1, lod = 0;
-			if (!(m_sources->geometryFor && m_sources->geometryFor(instance.object, geometry, lod))) {
+			if (!(m_sources->geometryFor && m_sources->geometryFor(instance.object, instance.source, geometry, lod))) {
 				geometry = -1;
 				lod = 0;
 			}

@@ -554,3 +554,20 @@ TEST(NetWire_TemplateLayouts)
 	dice::hfe::world::ObjectTemplate* recruit = make(templates, "Soldier", "recruit", nullptr);
 	CHECK(net::networkableHintsFrom(templates, *recruit, false).soldierItemSlots == 6);
 }
+
+// The ticket state rides with the tickets (team +0x8c, the value after the
+// tickets' bit), which a joined client announces as it changes.
+TEST(NetWire_TeamStateCarriesTheTicketState)
+{
+	net::TeamNetState state;
+	state.setTickets(1, 87, false, 10);
+	state.setTickets(2, 40, false, 5);
+	net::BitWriter out;
+	net::encodeTeamState(out, state);
+	net::BitReader in(out.data().data(), out.data().size());
+	in.limit(out.bits());
+	net::TeamNetState back;
+	CHECK(net::decodeTeamState(in, back));
+	CHECK(back.tickets(1) == 87 && back.ticketState(1) == 10);
+	CHECK(back.tickets(2) == 40 && back.ticketState(2) == 5);
+}
