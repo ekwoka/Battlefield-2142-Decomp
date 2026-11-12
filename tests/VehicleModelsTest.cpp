@@ -165,12 +165,13 @@ struct Garage {
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		const uint32_t material = groundMaterial;
 		world->enablePhysics(files, collisionTemplates,
-			{[ground](float, float) { return ground; },
-				[ground](float, float, physics::Vec3& normal) {
-					normal = {0, 1, 0};
-					return ground;
-				},
-				[material](float, float) { return material; }},
+			terrain ? *terrain
+					: physics::Ground {[ground](float, float) { return ground; },
+						  [ground](float, float, physics::Vec3& normal) {
+							  normal = {0, 1, 0};
+							  return ground;
+						  },
+						  [material](float, float) { return material; }},
 			&materials);
 		if (water > -10000) {
 			world->setWaterLevel(water);
@@ -3750,6 +3751,131 @@ TEST(Vehicles_FavStaysUprightUnderSteeringAndBoost)
 					CHECK(maxSpeed > (boost ? 30.0f : 24.0f));  // still the quick car, not capped
 				}
 			}
+		}
+	}
+}
+
+// Real Suez hills under a buggy and a tank, with the physics' terrain query
+// as main.cpp wires it (0x006d2fc0: the cell triangle's height and face
+// normal), against the port's former one (bilinear height, the normal from
+// heights a cell either side): no more time off the ground, no much rougher ride.
+TEST(Vehicles_DriveOverSuezHills)
+{
+	if (!gameDir()) return;
+	struct Drive {
+		int airborne = 0;
+		float jolt = 0, meanJolt = 0, roll = 0, pitch = 0, distance = 0;
+		int joltTick = 0;
+		bool alive = true;
+	};
+	const auto drive = [](const char* name, const physics::Vec3& from, bool faceted) {
+		Drive r;
+		Garage g(gameDir());
+		terrain::HeightmapCluster heightmaps;
+		terrain::registerTerrainConsoleMethods(g.console, heightmaps, g.files);
+		g.files.setMountingAllowed(true);
+		CHECK(g.files.mountArchive("Levels/Suez_Canal/server.zip", "Levels/Suez_Canal/"));
+		g.files.setMountingAllowed(false);
+		std::string out;
+		g.console.run("Levels/Suez_Canal/Heightdata.con", {}, out);
+		const terrain::Heightmap* map = heightmaps.primary();
+		if (!g.loaded || !map || !map->loaded()) { r.alive = false; return r; }
+		physics::Ground ground;
+		ground.height = [map](float x, float z) { return map->heightAt(x, z); };
+		ground.material = [&heightmaps](float x, float z) { return heightmaps.materialAt(x, z); };
+		ground.raycast = [map](const physics::Vec3& a, const physics::Vec3& b, float& fraction, physics::Vec3& point, physics::Vec3& normal) {
+			std::array<float, 3> n {}, p {};
+			if (!map->raycast({a.x, a.y, a.z}, {b.x, b.y, b.z}, fraction, n, &p)) return false;
+			point = {p[0], p[1], p[2]};
+			normal = {n[0], n[1], n[2]};
+			return true;
+		};
+		if (faceted) {
+			ground.heightAndNormal = [map](float x, float z, physics::Vec3& normal) {
+				std::array<float, 3> n {};
+				const float height = map->heightAndNormal(x, z, n);
+				normal = {n[0], n[1], n[2]};
+				return height;
+			};
+		} else {
+			ground.heightAndNormal = [map](float x, float z, physics::Vec3& normal) {
+				const float step = map->scale()[0];
+				const float dx = map->heightAt(x + step, z) - map->heightAt(x - step, z);
+				const float dz = map->heightAt(x, z + step) - map->heightAt(x, z - step);
+				const float length = std::sqrt(dx * dx + 4 * step * step + dz * dz);
+				normal = {-dx / length, 2 * step / length, -dz / length};
+				return map->heightAt(x, z);
+			};
+		}
+		g.terrain = ground;
+		const uint32_t id = g.start(name, from);
+		if (!g.enter(id)) { r.alive = false; return r; }
+		game::SoldierInput input;
+		input.throttle = 1;
+		float lastVy = 0;
+		bool first = true;
+		for (int tick = 0; tick < 8 * 30; ++tick) {
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			const game::Vehicle* v = g.world->playerVehicleState();
+			if (!v) { r.alive = false; break; }
+			r.airborne += std::none_of(v->wheels().begin(), v->wheels().end(), [](const auto& w) { return w.contact; });
+			for (const auto& state : g.world->vehicleList()) if (state.object == id) {
+				const float dv = first ? 0 : std::fabs(state.velocity.y - lastVy);
+				r.meanJolt += dv / (8 * 30);
+				if (dv > r.jolt) { r.jolt = dv; r.joltTick = tick; }
+				lastVy = state.velocity.y;
+				first = false;
+				r.roll = std::max(r.roll, std::fabs(std::asin(std::clamp(state.right.y, -1.0f, 1.0f)) * 57.29578f));
+				r.pitch = std::max(r.pitch, std::fabs(std::asin(std::clamp(state.forward.y, -1.0f, 1.0f)) * 57.29578f));
+			}
+		}
+		if (const world::Object* o = g.objects.find(id)) r.distance = o->position().z - from.z;
+		return r;
+	};
+
+	// The drivable stretches along +z (no slope over 0.35 ahead or across)
+	// whose slope changes most, from the primary heightmap.
+	std::vector<std::pair<float, physics::Vec3>> stretches;
+	{
+		Garage g(gameDir());
+		terrain::HeightmapCluster heightmaps;
+		terrain::registerTerrainConsoleMethods(g.console, heightmaps, g.files);
+		g.files.setMountingAllowed(true);
+		g.files.mountArchive("Levels/Suez_Canal/server.zip", "Levels/Suez_Canal/");
+		g.files.setMountingAllowed(false);
+		std::string out;
+		g.console.run("Levels/Suez_Canal/Heightdata.con", {}, out);
+		const terrain::Heightmap* map = heightmaps.primary();
+		CHECK(map && map->loaded());
+		if (!map || !map->loaded()) return;
+		for (float x = -800; x <= 800; x += 40) {
+			for (float z = -800; z <= 600; z += 40) {
+				float rough = 0, steep = 0;
+				for (float d = 2; d < 160; d += 2) {
+					const float a = map->heightAt(x, z + d - 2), b = map->heightAt(x, z + d), c = map->heightAt(x, z + d + 2);
+					rough += std::fabs(a - 2 * b + c);
+					steep = std::max({steep, std::fabs(c - b) / 2, std::fabs(map->heightAt(x + 2, z + d) - map->heightAt(x - 2, z + d)) / 4});
+				}
+				if (steep < 0.35f) stretches.push_back({rough, {x, map->heightAt(x, z) + 2, z}});
+			}
+		}
+	}
+	std::sort(stretches.begin(), stretches.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+	stretches.resize(std::min<size_t>(stretches.size(), 4));
+	CHECK(stretches.size() == 4);
+	for (const auto& [rough, from] : stretches) {
+		for (const char* name : {"eu_fav", "eu_tank"}) {
+			const Drive was = drive(name, from, false), now = drive(name, from, true);
+			std::fprintf(stderr, "  %s at %.0f/%.0f (roughness %.1f): airborne %d -> %d, jolt %.2f (tick %d) -> %.2f (tick %d) m/s, mean %.3f -> %.3f, roll %.1f -> %.1f, pitch %.1f -> %.1f, distance %.0f -> %.0f m\n",
+				name, from.x, from.z, rough, was.airborne, now.airborne, was.jolt, was.joltTick, now.jolt, now.joltTick, was.meanJolt, now.meanJolt, was.roll, now.roll, was.pitch, now.pitch, was.distance, now.distance);
+			CHECK(was.alive && now.alive);
+			CHECK(now.roll < 45.0f);
+			CHECK(now.airborne <= was.airborne + 3);
+			// Over the whole drive; the single worst tick isn't compared: once the
+			// two drives part, one crosses folds (a 2 m dip at 0/78) the other misses.
+			CHECK(now.meanJolt <= was.meanJolt * 1.35f);
+			CHECK(now.distance > was.distance * 0.8f);
 		}
 	}
 }
