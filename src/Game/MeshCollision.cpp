@@ -284,16 +284,36 @@ bool GameWorld::atLod(MeshActor& actor, int lod)
 void GameWorld::collideBodies(float seconds)
 {
 	// A sleeping node is no mover (the dispatch 0x006dd0b0 skips it) but
-	// stays a candidate for the others.
+	// stays a candidate for the others. Each mover in turn, in the list's
+	// order (0x006dd1b0's +0x8 list, appended at creation): its passes, its
+	// own solve and drive, then its child parts' (the wheels'), so a later
+	// mover meets it where its solve put it and its wheels measure from
+	// there. A sleeping node woken after its turn waits for the next tick.
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
-		if (!findDrone(m_bodies[i].object) && !isTitan(m_bodies[i].object) && !m_bodies[i].fixed
-			&& m_objects.find(m_bodies[i].object) && !asleep(m_bodies[i])) {
-			collideMover(m_bodies[i], i, seconds);
+		Body& b = m_bodies[i];
+		if (!findDrone(b.object) && !isTitan(b.object) && !b.fixed && m_objects.find(b.object) && !asleep(b)) {
+			collideMover(b, i, seconds);
+			settleBody(b);
+			collideMover(b, i, seconds, true);
 		}
 	}
 }
 
-void GameWorld::collideMover(Body& mover, size_t index, float seconds)
+void GameWorld::settleBody(Body& b)
+{
+	// The physics node's +0x249 (slot 0x1b8): set at its step, cleared
+	// by a contact (0x006b9260, 0x006bb050 -> slot 0x1b4(0)); the
+	// rewrite's wheels touching the ground count as contacts.
+	b.inAir = b.response.contacts().empty()
+		&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
+			[](const Vehicle::Wheel& w) { return w.contact; }));
+	b.response.solve(b.body);
+	if (b.vehicle && b.vehicle->legs()) {
+		b.vehicle->legsDrive(b.body);
+	}
+}
+
+void GameWorld::collideMover(Body& mover, size_t index, float seconds, bool ownWheels)
 {
 	if (!mover.vehicleMesh || mover.points.empty()) {
 		return;
@@ -408,6 +428,11 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 				if (!c.mesh) {
 					continue;
 				}
+				if (ownWheels) {
+					// Its wheels' parts as movers of their own (their probes).
+					wheelProbes(mover, c, seconds);
+					continue;
+				}
 				bool legsOnly = false;
 				if (paired(c, 0, legsOnly)) {
 					if (!legsOnly && !collide(c, part.root)) {
@@ -416,8 +441,6 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 					m = actorOf(mover); // the pre-trace may have moved it
 					legsSphere(mover, m, c);
 				}
-				// Its wheels' parts as movers of their own (their probes).
-				wheelProbes(mover, c, seconds);
 			}
 		}
 	}
@@ -434,6 +457,10 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			continue;
 		}
 		MeshActor c = actorOf(other);
+		if (ownWheels) {
+			wheelProbes(mover, c, seconds);
+			continue;
+		}
 		bool legsOnly = false;
 		if (paired(c, length(other.body.velocity), legsOnly)) {
 			if (!legsOnly && !collide(c, true)) {
@@ -443,7 +470,8 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			legsSphere(mover, m, c);
 			legsSphere(other, c, m);
 		}
-		wheelProbes(mover, c, seconds);
+		// The other's parts (its wheels) are candidates of this mover's
+		// turn too (0x006dc7b0 walks each candidate's hierarchy).
 		if (!asleep(other)) {
 			wheelProbes(other, m, seconds);
 		}
@@ -480,6 +508,10 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 			c.collisionGroups = part.groups;
 			c.team = titan.team;
 			c.node = {std::max(tb->mass, 1e6f), true, false};
+			if (ownWheels) {
+				wheelProbes(mover, c, seconds);
+				continue;
+			}
 			bool legsOnly = false;
 			if (paired(c, length(tb->body.velocity), legsOnly)) {
 				if (!legsOnly && !collide(c, true)) {
@@ -488,7 +520,6 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 				m = actorOf(mover);
 				legsSphere(mover, m, c);
 			}
-			wheelProbes(mover, c, seconds);
 		}
 	}
 }

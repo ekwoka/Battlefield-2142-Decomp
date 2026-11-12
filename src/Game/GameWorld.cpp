@@ -2174,6 +2174,7 @@ void GameWorld::stepLoneVehicle(LoneVehicle& lone, const VehicleInput& driver, f
 		if (b.vehicle->legs()) {
 			b.vehicle->legsDrive(b.body);
 		}
+		collideMover(b, m_bodies.size(), seconds, true);
 	}
 	m_predicting = false;
 }
@@ -13705,16 +13706,7 @@ void GameWorld::stepPhysics(float seconds)
 		if (!object || findDrone(b.object) || isTitan(b.object) || asleep(b) || b.fixed) {
 			continue;
 		}
-		// The physics node's +0x249 (slot 0x1b8): set at its step, cleared
-		// by a contact (0x006b9260, 0x006bb050 -> slot 0x1b4(0)); the
-		// rewrite's wheels touching the ground count as contacts.
-		b.inAir = b.response.contacts().empty()
-			&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
-				[](const Vehicle::Wheel& w) { return w.contact; }));
-		b.response.solve(b.body);
-		if (b.vehicle && b.vehicle->legs()) {
-			b.vehicle->legsDrive(b.body);
-		}
+		// (Its solve ran in its turn: collideBodies, settleBody.)
 		// A body thrown out of the world (a non-finite or absurd state) is
 		// stopped where it last was sane rather than carried on.
 		const auto sane = [](const physics::Vec3& v, float limit) {

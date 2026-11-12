@@ -2812,7 +2812,14 @@ private:
 	// a mesh source (the Titans' parts) stay at their vehicle LOD.
 	bool atLod(MeshActor& actor, int lod);
 	void collideBodies(float seconds);
-	void collideMover(Body& mover, size_t index, float seconds);
+	// One mover's turn (0x006dc7b0): its hull and legs against the static
+	// parts near it and the bodies not yet done; with `ownWheels`, its
+	// wheels' probes instead, run after its solve (0x006dd1b0 walks a root's
+	// child parts after the root: the Springs collide against the moved root).
+	void collideMover(Body& mover, size_t index, float seconds, bool ownWheels = false);
+	// A mover's own solve and drive, straight after its passes (0x006dd1b0's
+	// mesh group: slots 0x30 and 0x34 per node).
+	void settleBody(Body& b);
 	// Slot 9 of the mobile mesh response (0x006bb050): A's mesh against
 	// B's; `trunkOnly` runs the third pass alone (its last argument).
 	// Returns false when it destroyed A (the helicopter exit).
