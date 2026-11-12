@@ -110,7 +110,7 @@ uint64_t GameWorld::stateFingerprint() const
 
 bool GameWorld::isDroppedKit(uint32_t object) const
 {
-	return std::any_of(
+	return m_remoteDroppedKits.count(object) != 0 || std::any_of(
 		m_droppedKits.begin(), m_droppedKits.end(), [object](const DroppedKit& kit) { return kit.object == object; });
 }
 

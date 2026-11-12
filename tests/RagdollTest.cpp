@@ -3002,3 +3002,36 @@ TEST(RagDoll_RemoteSeatedTurretAndGrips)
 	CHECK(moved > 0.05f);
 	CHECK(off < 0.25f);
 }
+
+// A joined game's worn kit (helmet, vest, pack) is its soldier's child
+// (0x005718d0 -> 0x00571d10 addChild): skinned to the remote soldier's pose.
+// A kit ghost no one wears lies on the ground (geometry.dropGeom).
+TEST(RagDoll_RemoteWornKitTakesItsSoldiersPose)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(skeleton != nullptr);
+	if (!skeleton) {
+		return;
+	}
+	const uint32_t soldier = game.objects.create(game.templates.find("us_light_soldier"), {3, 1, 0})->id();
+	const uint32_t worn = game.objects.create(game.templates.find("us_light_soldier"), {3, 1, 0})->id();
+	const uint32_t lying = game.objects.create(game.templates.find("us_light_soldier"), {9, 0, 0})->id();
+	game::GameWorld::RemoteSoldierState foot;
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(soldier, foot, 1 / 30.0f);
+	}
+	std::vector<anim::Matrix> body, kit;
+	CHECK(game.world->skeletonPose(soldier, *skeleton, body) && body.size() > 9);
+	CHECK(!game.world->skeletonPose(worn, *skeleton, kit)); // not his yet
+	game.world->setRemoteKits({{worn, soldier}}, {lying});
+	CHECK(game.world->skeletonPose(worn, *skeleton, kit) && kit.size() == body.size());
+	CHECK(kit.size() > 9 && kit[9][13] == body[9][13]);
+	CHECK(!game.world->isDroppedKit(worn));
+	CHECK(game.world->isDroppedKit(lying));
+}

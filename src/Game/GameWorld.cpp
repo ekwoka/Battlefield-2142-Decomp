@@ -9369,6 +9369,9 @@ bool GameWorld::skeletonPose(uint32_t object, const anim::Skeleton& skeleton, st
 			break;
 		}
 	}
+	if (const auto worn = m_wornKits.find(object); worn != m_wornKits.end()) {
+		object = worn->second;
+	}
 	if (const auto remote = m_remoteSoldiers.find(object);
 		remote != m_remoteSoldiers.end() && remote->second.worldPose.size() == skeleton.nodes.size()) {
 		world = remote->second.worldPose;
@@ -9802,6 +9805,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				object->setRotation({body->body.rotation.yawPitchRoll().x, 0, 0});
 				object->setHidden(true);
 			}
+			followKit(player, *object); // the kit is the soldier's child: where the seat put him this tick
 			return;
 		}
 	}
@@ -10306,8 +10310,13 @@ void GameWorld::followSoldier(const Player& player, const world::Object& soldier
 			m_effects.setAnchor(player.weaponObject, at, rotation);
 		}
 	}
-	// A worn kit is its wearer's helmet, vest and pack: drawn with the
-	// soldier's skeleton (skeletonPose), where he is (0x00571230).
+	followKit(player, soldier);
+}
+
+// A worn kit is its wearer's helmet, vest and pack: drawn with the
+// soldier's skeleton (skeletonPose), where he is (0x00571230).
+void GameWorld::followKit(const Player& player, const world::Object& soldier)
+{
 	if (world::Object* kit = player.kitObject ? m_objects.find(player.kitObject) : nullptr) {
 		kit->setPosition(soldier.position());
 		kit->setRotation(soldier.rotation());

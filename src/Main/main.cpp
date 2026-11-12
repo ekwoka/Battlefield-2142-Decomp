@@ -7090,24 +7090,29 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
-			// A kit a living player carries is hidden, as the round's own
-			// worn kits are (GameWorld's spawn: the kit object is the
-			// soldier's, not drawn); a dropped one shows (geometry.dropGeom).
-			std::set<uint16_t> worn;
+			// A kit a living player carries is his soldier's child (0x005718d0
+			// -> 0x00571d10): it follows him and is skinned to his skeleton
+			// (GameWorld::followKit); a dropped one stays (geometry.dropGeom).
+			std::map<uint32_t, uint32_t> wornKits;
 			for (const net::RemotePlayer& p : client.world().playerList()) {
-				if (p.alive && p.kitGhost) {
-					worn.insert(p.kitGhost);
+				const auto kit = p.alive && p.kitGhost ? ghostObjects.find(p.kitGhost) : ghostObjects.end();
+				const auto body = p.soldierGhost ? ghostObjects.find(p.soldierGhost) : ghostObjects.end();
+				const world::Object* soldier = body != ghostObjects.end() ? objects.find(body->second) : nullptr;
+				if (world::Object* worn = kit != ghostObjects.end() && soldier ? objects.find(kit->second) : nullptr) {
+					worn->setPosition(soldier->position());
+					worn->setRotation(soldier->rotation());
+					worn->setHidden(soldier->hidden());
+					wornKits[kit->second] = body->second;
 				}
 			}
+			std::set<uint32_t> droppedKits; // a kit ghost no one wears: no parent (0x0056cc50 without one)
 			for (const auto& [ghost, id] : ghostObjects) {
 				const net::RemoteObject* o = client.world().object(ghost);
-				if (world::Object* object = o && o->kit ? nullptr : objects.find(id); object && o) {
-					const bool hide = worn.count(ghost) != 0;
-					if (object->hidden() != hide && object->objectTemplate() && object->objectTemplate()->typeName() == "Kit") {
-						object->setHidden(hide);
-					}
+				if (o && o->kit && !wornKits.count(id)) {
+					droppedKits.insert(id);
 				}
 			}
+			round.setRemoteKits(std::move(wornKits), std::move(droppedKits));
 			// The control points' allowCaptureByTeam from their ghosts (masks 8 /
 			// 0x10, every set: 0x006084b0 -> 0x005bcd00), for the takeable
 			// radio of the local player (GameAudio::autoRadio).

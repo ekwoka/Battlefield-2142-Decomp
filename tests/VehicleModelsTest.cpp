@@ -2933,6 +2933,35 @@ TEST(Vehicles_StaticGunsLetTheirGunnerExit)
 	}
 }
 
+// A seated soldier's worn kit (helmet, vest, pack) is his child (0x00571d10
+// addChild): it stands where the seat put him this tick, not a tick behind
+// on a moving vehicle.
+TEST(Vehicles_SeatedKitMovesWithItsWearer)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir(), "mods/bf2142");
+	if (!g.loaded || !g.templates.find("eu_fav")) { CHECK(false); return; }
+	const uint32_t fav = g.start("eu_fav", {0, 2, 6});
+	g.animate();
+	CHECK(g.enter(fav));
+	game::SoldierInput go;
+	go.throttle = 1;
+	g.drive(go, 2);
+	game::GameWorld::PlayerInfo me;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.kit != 0);
+	const world::Object* soldier = g.objects.find(me.soldier);
+	const world::Object* kit = g.objects.find(me.kit);
+	CHECK(soldier && kit);
+	if (!soldier || !kit) return;
+	const world::Vec3 a = soldier->position(), b = kit->position();
+	const float gap = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+	const float speed = std::sqrt(me.velocity.x * me.velocity.x + me.velocity.z * me.velocity.z);
+	std::fprintf(stderr, "  driver at %.2f m/s, kit %.3f m from him, hidden %d/%d\n", speed, gap, soldier->hidden(), kit->hidden());
+	CHECK(speed > 3);
+	CHECK(gap < 1e-3f);
+	CHECK(kit->hidden() == soldier->hidden());
+}
+
 // Check the real stationary AA at multiple headings, including both fire groups.
 TEST(Vehicles_StaticAAHeadingAndEmpMissileFlight)
 {

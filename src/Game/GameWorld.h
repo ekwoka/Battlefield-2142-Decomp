@@ -1201,6 +1201,14 @@ public:
 	void setAnimationSystems(anim::AnimationSystems* systems, AnimationLoader load);
 	// The pose of an object's skeleton (model-space matrices per node) from
 	// its animation systems, as of the last tick; false for objects without.
+	// A joined game's kits, rebuilt each frame: worn ones (kit object -> its
+	// wearer's soldier object; skinned to him, skeletonPose) and the rest,
+	// lying on the ground (isDroppedKit: geometry.dropGeom).
+	void setRemoteKits(std::map<uint32_t, uint32_t> worn, std::set<uint32_t> dropped)
+	{
+		m_wornKits = std::move(worn);
+		m_remoteDroppedKits = std::move(dropped);
+	}
 	bool skeletonPose(uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world);
 	// The transforms of an object's mesh parts relative to it, when the game
 	// places them: a held weapon's parts follow the soldier's skeleton nodes
@@ -3109,6 +3117,7 @@ private:
 		}
 	}
 	void followSoldier(const Player& player, const world::Object& soldier);
+	void followKit(const Player& player, const world::Object& soldier);
 	// The held weapon's root (the soldier's skeleton's mesh1) in the world;
 	// false without a posed skeleton.
 	bool weaponPlace(const Player& player, physics::Vec3& at, physics::Mat3& rotation) const;
@@ -3511,6 +3520,8 @@ private:
 		bool hiddenBySeat = false;
 	};
 	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
+	std::map<uint32_t, uint32_t> m_wornKits; // setRemoteKits
+	std::set<uint32_t> m_remoteDroppedKits; // setRemoteKits
 	RemoteSoldier* startRemoteSoldier(uint32_t object);
 	bool remoteSeatSystem(RemoteSoldier& remote, const std::string& path);
 	void leaveRemoteSeat(RemoteSoldier& remote, world::Object& soldier);

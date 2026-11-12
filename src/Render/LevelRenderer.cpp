@@ -784,6 +784,10 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			return;
 		}
 	}
+	// A kit's children are its inventory (knife, rifle, beacon...), made as objects of their own, not parts of its mesh.
+	if (objectTemplate.typeName() == "Kit") {
+		return;
+	}
 	for (const world::ChildTemplate& child : objectTemplate.children()) {
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
