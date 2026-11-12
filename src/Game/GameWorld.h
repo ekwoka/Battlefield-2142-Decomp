@@ -3308,7 +3308,8 @@ private:
 	bool teamHoldsControlPoint(int team) const;
 	bool spawnPointUsable(const world::Object& point, const Player& player, bool spotClear) const;
 	bool enterOnSpawn(Player& player, world::Object& soldier, const physics::Vec3& from, float radius, uint32_t only = 0);
-	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore) const;
+	// `ignoreStatic`: an object whose faces in the static world are left out (a stationary gun's own mesh).
+	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore, uint32_t ignoreStatic = 0) const;
 	float m_waterLevel = 0;
 	bool m_hasWater = false;
 	void stepPlayers(float seconds);

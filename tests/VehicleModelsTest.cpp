@@ -2908,6 +2908,31 @@ TEST(Vehicles_StaticAAFireFollowsItsCamera)
 	}
 }
 
+// The stationary guns (static_av/aa/ap: hasRestrictedExit, hasMobilePhysics 0) are
+// also in the static world; their own mesh there must not block their
+// gunner's exit (the places' ray and room test, 0x005c7840).
+TEST(Vehicles_StaticGunsLetTheirGunnerExit)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		for (const char* name : {"static_av", "static_aa", "static_ap"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find(name)) continue;
+			const uint32_t gun = g.start(name, {0, 0.5f, 8});
+			CHECK(g.enter(gun));
+			game::SoldierInput use;
+			use.use = true;
+			g.world->setPlayerInput(use);
+			g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({});
+			g.run(0.5f);
+			std::fprintf(stderr, "  %s %s: %s\n", mod, name, g.world->playerVehicle() ? "still in" : "out");
+			CHECK(g.world->playerVehicle() == nullptr);
+		}
+	}
+}
+
 // Check the real stationary AA at multiple headings, including both fire groups.
 TEST(Vehicles_StaticAAHeadingAndEmpMissileFlight)
 {

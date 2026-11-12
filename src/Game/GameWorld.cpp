@@ -1741,7 +1741,8 @@ bool GameWorld::restrictedExit(const Body& body, const VehicleLayout& layout, in
 		if (m_ground.height && !(m_ground.height(p.x, p.z) < p.y - 0.5f)) {
 			continue;
 		}
-		if (!soldierFits(p, SoldierPose::Stand, 0)) {
+		// A stationary gun's own mesh is also the static world's (Body::fixed): not an obstacle to its own exit.
+		if (!soldierFits(p, SoldierPose::Stand, 0, body.fixed ? body.object : 0)) {
 			continue;
 		}
 		if (place.category == 2 || place.category == 3) {
@@ -5412,10 +5413,10 @@ bool GameWorld::scatterFrom(const physics::Vec3& base, float heading, const phys
 // 0x006c3340): against the soldier collision LOD of the objects nearby,
 // the static objects and the vehicles (`ignore`, the soldier's own, aside;
 // and the response types 0xc42e/0xc42f, which the rewrite doesn't have).
-bool GameWorld::soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore) const
+bool GameWorld::soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore, uint32_t ignoreStatic) const
 {
 	const int stance = static_cast<int>(pose);
-	if (!physics::soldierFits(m_collision, origin, stance)) {
+	if (!physics::soldierFits(m_collision, origin, stance, {}, {}, ignoreStatic)) {
 		return false;
 	}
 	for (const Body& body : m_bodies) {
@@ -6047,7 +6048,8 @@ bool GameWorld::spawnGroupActive(int controlPoint, int playerId) const
 bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const
 {
 	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(from, to, hit)) {
+	// A stationary gun (Body::fixed) is also in the static world: `ignore` leaves its faces out there too.
+	if (m_projectileCollision.raycast(from, to, hit, ignore)) {
 		return false;
 	}
 	for (const Body& body : m_bodies) {

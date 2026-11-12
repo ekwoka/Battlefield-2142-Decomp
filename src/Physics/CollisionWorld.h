@@ -78,7 +78,8 @@ public:
 	// contact has the face's normal, also with the centre behind the face
 	// (depth below -radius then); an edge or corner only touches from the
 	// front.
-	void querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts) const;
+	// With `ignore` (not 0), the faces of that object are left out.
+	void querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts, uint32_t ignore = 0) const;
 
 	// A sphere moving from `start` to `end` (0x006e2350 with a motion over
 	// 0.01, *0x00a85174; the soldiers' swept spheres): each face whose plane

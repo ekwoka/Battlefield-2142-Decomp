@@ -60,7 +60,7 @@ constexpr Vec3 kGroundPoints[5] = {{0, -1, 0}, {-0.2f, -0.6f, -0.2f}, {0.2f, -0.
 // touching the mesh (the response's slot 0x98, 0x006c3340). A mesh in
 // its own frame (a vehicle's) is tested with the centres taken into it.
 bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation = {},
-	const Vec3& position = {});
+	const Vec3& position = {}, uint32_t ignore = 0);
 
 namespace soldier {
 constexpr float kSweepFactor = 0.9f;      // *0x00a84760 and *0x00a8475c: sweep over 0.9 r a tick (6.75 m/s)

@@ -153,7 +153,7 @@ float soldier::stanceHeight(int stance)
 	return stance == 2 ? 0.8f : soldier::kHeight; // *0x00a84778
 }
 
-bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation, const Vec3& position)
+bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation, const Vec3& position, uint32_t ignore)
 {
 	int count = 5;
 	float height = soldier::kHeight;
@@ -169,7 +169,7 @@ bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, co
 	for (int i = 0; i < count; ++i) {
 		// origin.y + i x spacing + (radius - *0x00a84768, 1)
 		const Vec3 centre {origin.x, origin.y + spacing * static_cast<float>(i) + soldier::kRadius - 1.0f, origin.z};
-		world.querySphere(rotation.untransform(centre - position), soldier::kRadius, contacts);
+		world.querySphere(rotation.untransform(centre - position), soldier::kRadius, contacts, ignore);
 		if (!contacts.empty()) {
 			return false;
 		}
