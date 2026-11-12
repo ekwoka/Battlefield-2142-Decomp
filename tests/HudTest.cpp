@@ -34,6 +34,16 @@ TEST(DeploymentDone_InitialAndDeathRespawnLifecycle)
 	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
 }
 
+TEST(DeploymentScreen_EnterHidesDeathScreenWhileTimerRuns)
+{
+	using dice::main::deploymentScreenShown;
+	CHECK(deploymentScreenShown(false, false, false)); // dead: shown
+	CHECK(!deploymentScreenShown(false, false, true)); // dead, Enter pressed: hidden
+	CHECK(deploymentScreenShown(true, true, false) && !deploymentScreenShown(true, false, true));
+	// Hiding is not DONE: the timer keeps running and only DONE (or the server) spawns.
+	CHECK(dice::main::deploymentDoneAction(false, true, false, false, 3) == dice::main::DeploymentDoneAction::None);
+}
+
 TEST(Hud_ParsesFonts)
 {
 	const auto font = hud::parseHudFont("header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n2\r\n"
@@ -78,6 +88,48 @@ TEST(Hud_ShowLogicAndBars)
 	}
 	manager.set("IsSpectator", 1);
 	CHECK(manager.frame(0).empty());
+}
+
+// setBarNodeRound (Bf2BarNode slot 0x120 0x007e9380; render 0x007eb2c0 calls
+// 0x007eafc0 when it is set): the quads are wedges of 2 pi * value clockwise
+// from up about the node's middle; the node colour is not touched.
+TEST(Hud_RoundBarWedge)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Items",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.createBarNode Items Ring 2 -16 -16 64 64",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/Bars/repair_tool_gradient.dds",
+			 "hudBuilder.setBarNodeTexture 0 Ingame/GeneralIcons/empty.tga",
+			 "hudBuilder.setBarNodeValueVariable AbilityBar",
+			 "hudBuilder.setNodeColor 0 0 0 1",
+			 "hudBuilder.setBarNodeRound 1 64 64",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.set("AbilityBar", 0.5f);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 2);
+	if (quads.size() == 2) {
+		for (const auto& q : quads) {
+			CHECK(q.sweepAbout && std::fabs(q.sweep - 3.14159265f) < 1e-5f);
+			CHECK(q.sweepCentre[0] == quads[0].x0 + 32 && q.sweepCentre[1] == quads[0].y0 + 32); // the node's middle
+			CHECK(q.color[0] == 0 && q.color[3] == 1); // colour untouched (unproven either way)
+		}
+		CHECK(quads[1].x1 - quads[1].x0 == 32); // the linear clip stays under the wedge
+	}
+	// Half a turn clockwise from up keeps the right half, the side the type-2 fill keeps.
+	const auto pieces = hud::sweepPieces({{0, 0, 0, 0}, {64, 0, 1, 0}, {64, 64, 1, 1}, {0, 64, 0, 1}}, 32, 32, 3.14159265f);
+	CHECK(!pieces.empty());
+	for (const auto& piece : pieces) {
+		for (const auto& p : piece) {
+			CHECK(p[0] >= 32 - 1e-3f);
+		}
+	}
 }
 
 // The corner roots (the "Ingame" MemeFile's transforms): a picture at 0, 0

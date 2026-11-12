@@ -804,6 +804,8 @@ bool g_pointerWarp = false; // the system cursor still has to be put on g_pointe
 // Enter opens deployment without killing the soldier; Redeploy is explicit.
 bool g_deploymentOpen = false;
 bool g_initialDeploymentPending = false;
+// Dead: Enter hid the spawn screen; the respawn timer runs on (0x00754d74, 0x004bfe40).
+bool g_spawnScreenHidden = false;
 // The local round's overhead camera (the commander's, HudMenus.h): its
 // point is g_commanderView's.
 dice::hfe::menu::OverheadCamera g_overheadCamera;
@@ -833,7 +835,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 {
 	game::GameWorld::PlayerInfo me;
 	const bool known = world.playerInfo(world.localPlayer(), me);
-	const bool spawning = known && (!me.alive || g_deploymentOpen);
+	const bool spawning = known && dice::main::deploymentScreenShown(me.alive, g_deploymentOpen, g_spawnScreenHidden);
 	const bool big = spawning || commanderScreen || g_bigMap;
 	hud.set("MapShow", known ? 1 : 0);
 	hud.set("MapMinSize", big ? 0 : 1);
@@ -2683,6 +2685,13 @@ int main(int argc, char** argv)
 	if (options.host && !setupServer(options, session)) {
 		return 1;
 	}
+	// +level in a window: a map list of that one map, so the end of round's JOIN GAME (and sv.endDelay)
+	// starts it again, as a game the player starts does (getNumRoundsLeft 999, 0x004d3450). Not for
+	// headless or screenshot runs, which end with the round.
+	if (session.playlist.empty() && !options.level.empty() && options.view && options.connect.empty() && options.simulate == 0 &&
+		options.screenshot.empty()) {
+		session.playlist.push_back({options.level, options.gameMode, options.mapSize});
+	}
 	if (!session.playlist.empty()) {
 		options.level = session.playlist.front().level;
 		options.gameMode = session.playlist.front().gameMode;
@@ -4145,6 +4154,11 @@ int runGame(Options& options, Session& session)
 	ui::Player loadingMovie;
 	dice::hfe::menu::EndOfRoundBindings loadingBindings(loadingMovie.natives());
 	loadingBindings.gameModeName = [&session](const std::string& mode) { return session.menuHost.gameModeName(mode); };
+	// A game started from the menu waits on the loaded level's JOIN GAME (retail's endOfRound.dfm, Logic.readyToPlay):
+	// set at the end of the build, cleared by the button. Not for --screenshot, --simulate,
+	// demos, a game we host or a joined server, which enter the game at once as before.
+	bool joinPending = false;
+	loadingBindings.onReadyToPlay = [&joinPending](bool) { joinPending = false; };
 #if BF2142_HAS_RENDERER
 	std::optional<render::LevelSources> loadingSources;
 	std::unique_ptr<Window::MenuScreen> loadingScreen;
@@ -7568,6 +7582,8 @@ int runGame(Options& options, Session& session)
 			// slot 0x3c0, 0x0046c780): JoinAsSpectator to the server; a game
 			// of our own runs the server's handler (0x005142a0) itself.
 			endOfRoundBindings.onReadyToPlay = [&](bool asSpectator) {
+				std::printf("end of round: readyToPlay(%d), %zu playlist maps, %.0f of %.0f s\n", asSpectator, session.playlist.size(),
+					sinceEnd, kEndDelay);
 				sinceEnd = std::max(sinceEnd, kEndDelay);
 				if (!asSpectator) {
 					return;
@@ -8153,6 +8169,12 @@ int runGame(Options& options, Session& session)
 			}
 			loadingStep(0.9f + 0.1f * done, 1);
 			if (done >= 1) {
+				// Not for a game we host: its clients would wait on our click (onTicks stops).
+				if (startedGame && !session.client && !session.hosted && !g_demo && options.screenshot.empty() &&
+					options.simulate == 0) {
+					loadingBindings.setLevelLoaded(); // 0x004cbea0: the movie now offers JOIN GAME
+					joinPending = true;
+				}
 				loadingScreen.reset();
 			}
 		};
@@ -8352,6 +8374,11 @@ int runGame(Options& options, Session& session)
 			return targets;
 		});
 		sources.overlay = [&](float seconds) {
+			// Leaving the spawn screen closes the customise screen (HudManager's menu hide calls 0x00798070, e.g. 0x00754df4);
+			// CustomInfoShow otherwise keeps the minimap's MapItems node hidden (HudElementsMap.con: AND CustomInfoShow 0).
+			if (kitMenu.customOpen() && hudManager.number("SpawnShow") == 0) {
+				kitMenu.closeCustomInterface();
+			}
 			kitMenu.setUnlocked(round.localPlayerUnlocks, round.unlockAllByDefault);
 			kitMenu.setKit(localKit);
 			kitMenu.skipUnchanged = enhancedSettings.enabled;
@@ -8475,7 +8502,7 @@ int runGame(Options& options, Session& session)
 					help.manDown = known && self.manDown;
 					help.inVehicle = vehicle != nullptr;
 					help.onFoot = help.alive && !vehicle;
-					help.spawnScreen = known && ((!self.alive && !self.manDown) || g_deploymentOpen);
+					help.spawnScreen = known && (self.manDown ? g_deploymentOpen : dice::main::deploymentScreenShown(self.alive, g_deploymentOpen, g_spawnScreenHidden));
 					help.commanderScreen = commanderScreen;
 					help.menuOpen = scoreboardHeld || commanderScreen || g_mapMenu != 0;
 					help.squad = known ? self.squad : 0;
@@ -8827,8 +8854,8 @@ int runGame(Options& options, Session& session)
 			dice::hfe::menu::updateMenuGameState(menu, *session.menuBindings, startedGame.has_value());
 		}
 		{
-			sources.menu = [&menu, &options, &showMenu, &endOfRound](float seconds) {
-				ui::Player* shown = showMenu && menu.loaded() ? &menu : endOfRound.loaded() ? &endOfRound : nullptr;
+			sources.menu = [&menu, &options, &showMenu, &endOfRound, &joinPending, &loadingMovie](float seconds) {
+				ui::Player* shown = joinPending ? &loadingMovie : showMenu && menu.loaded() ? &menu : endOfRound.loaded() ? &endOfRound : nullptr;
 				if (!shown) {
 					return ui::MenuFrame();
 				}
@@ -8955,16 +8982,19 @@ int runGame(Options& options, Session& session)
 				}
 			});
 			const auto toEndOfRound = menuInput(endOfRound);
-			viewer.onMenuInput = [toMenu, toEndOfRound, &showMenu, &menu](const ViewerOptions::MenuInput& input) {
-				(showMenu && menu.loaded() ? toMenu : toEndOfRound)(input);
+			const auto toLoading = menuInput(loadingMovie);
+			viewer.onMenuInput = [toMenu, toEndOfRound, toLoading, &showMenu, &menu, &joinPending](const ViewerOptions::MenuInput& input) {
+				(joinPending ? toLoading : showMenu && menu.loaded() ? toMenu : toEndOfRound)(input);
 			};
 			if (menu.loaded() && !startedGame) {
 				viewer.menuActive = [&showMenu] { return showMenu; }; // --menu over a level: always up
 			} else {
-				viewer.menuActive = [&showMenu, &menu, &endOfRound] { return (showMenu && menu.loaded()) || endOfRound.loaded(); };
+				viewer.menuActive = [&showMenu, &menu, &endOfRound, &joinPending] {
+					return joinPending || (showMenu && menu.loaded()) || endOfRound.loaded();
+				};
 			}
 			if (startedGame) {
-				viewer.onEscape = [&showMenu] { if (g_deploymentOpen) g_deploymentOpen = false; else showMenu = !showMenu; };
+				viewer.onEscape = [&showMenu, &joinPending] { if (joinPending) return; if (g_deploymentOpen) g_deploymentOpen = false; else showMenu = !showMenu; };
 			}
 			viewer.menuCursor = [&session, &showMenu] {
 				return showMenu && session.menuBindings ? session.menuBindings->waitCursor() : 0;
@@ -9172,7 +9202,7 @@ int runGame(Options& options, Session& session)
 			};
 		} else if (round.localPlayer() >= 0) {
 			// Deployment already owns input before the first soldier exists.
-			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen,
+			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &joinPending, &commanderScreen,
 										&session, &hudManager,
 										&commanderKeyWas, &playerCamera, wasAlive = false, spawnedProne = false,
 										toggleCameraWas = false, cameraWas = 0, actionWas = false, lastPitch = 0.0f, itemHeld = false](
@@ -9185,7 +9215,7 @@ int runGame(Options& options, Session& session)
 					commanderScreen = !commanderScreen && hudPlayer(hudLocal(), me) && me.commander;
 				}
 				commanderKeyWas = in.commanderScreen;
-				if ((showMenu && startedGame) || endOfRound.loaded()) {
+				if (joinPending || (showMenu && startedGame) || endOfRound.loaded()) {
 					round.setPlayerInput({}); // the menu has the keys
 					return;
 				}
@@ -9286,8 +9316,9 @@ int runGame(Options& options, Session& session)
 				round.setPlayerInput(input);
 			};
 			// The spawn screen: a pointer, and clicking a spawn icon picks it.
-			const auto pointerReason = [&hudPlayer, &hudLocal, &showMenu, &startedGame, &endOfRound, &commanderScreen]() -> const char* {
+			const auto pointerReason = [&hudPlayer, &hudLocal, &showMenu, &startedGame, &endOfRound, &joinPending, &commanderScreen]() -> const char* {
 				game::GameWorld::PlayerInfo me;
+				if (joinPending) return "join-game";
 				if (showMenu && startedGame) return "esc-menu";
 				if (endOfRound.loaded()) return "end-of-round";
 				if (commanderScreen) return "commander-screen";
@@ -9472,9 +9503,13 @@ int runGame(Options& options, Session& session)
 					g_deploymentOpen = !g_deploymentOpen;
 					hudManager.set("HudDone", 0);
 					g_bigMap = false;
+				} else if (deploymentPressed && playerPresent && !g_initialDeploymentPending) {
+					// 0x00754d74: the same toggle (0x0074fd90) when dead; it is DONE, not Enter, that spawns.
+					g_spawnScreenHidden = !g_spawnScreenHidden;
 				}
+				if (alive) g_spawnScreenHidden = false;
 				deploymentWas = in.deployment;
-				const bool done = hudManager.number("HudDone") != 0 || (deploymentPressed && !alive);
+				const bool done = hudManager.number("HudDone") != 0 || (deploymentPressed && !alive && g_initialDeploymentPending);
 				const auto doneAction = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if (done) {
 					if (doneAction == dice::main::DeploymentDoneAction::InitialSpawn
@@ -9595,6 +9630,9 @@ int runGame(Options& options, Session& session)
 			};
 		}
 		viewer.onTicks = [&](int ticks) {
+			if (joinPending) {
+				return; // the loaded level waits on JOIN GAME: nothing runs yet
+			}
 			for (int i = 0; i < ticks; ++i) {
 				step(); // its sounds too (stepSounds)
 				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {

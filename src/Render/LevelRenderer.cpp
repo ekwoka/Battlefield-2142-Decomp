@@ -2148,7 +2148,8 @@ void LevelRenderer::buildOverlay()
 			continue;
 		}
 		// A wedge (HudQuad::sweep): the polygon cut to each quarter turn.
-		const auto pieces = q.sweep >= 0 ? hud::sweepPieces(polygon, (q.x0 + q.x1) * 0.5f, (q.y0 + q.y1) * 0.5f, q.sweep)
+		const auto pieces = q.sweep >= 0 ? hud::sweepPieces(polygon, q.sweepAbout ? q.sweepCentre[0] : (q.x0 + q.x1) * 0.5f,
+													 q.sweepAbout ? q.sweepCentre[1] : (q.y0 + q.y1) * 0.5f, q.sweep)
 										 : std::vector<std::vector<std::array<float, 4>>> {polygon};
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
 		for (const auto& piece : pieces) {

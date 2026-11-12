@@ -75,6 +75,10 @@ struct HudQuad {
 	// about the quad's centre (the map's reload wipe, 0x0078a990's fan
 	// from the top centre through the corners); < 0 or 2 pi: all of it.
 	float sweep = -1;
+	// With sweepAbout set, the wedge's centre (instead of the quad's centre):
+	// a round bar's fill is a part of the node, masked about its middle.
+	bool sweepAbout = false;
+	float sweepCentre[2] = {0, 0};
 };
 
 // The parts of a convex polygon (x, y, u, v corners) inside the wedge of

@@ -18,4 +18,11 @@ namespace dice::main {
 		if (!alive && respawnIn <= 0.0f) return DeploymentDoneAction::Respawn;
 		return DeploymentDoneAction::None;
 	}
+
+	// Enter toggles the spawn screen (menu state 1, 0x00754d74 -> 0x0074fd90) alive or dead; the respawn
+	// timer is the server's (0x004bfe40) and never looks at the screen. Dead, it starts shown.
+	constexpr bool deploymentScreenShown(bool alive, bool open, bool hiddenWhileDead)
+	{
+		return alive ? open : !hiddenWhileDead;
+	}
 }

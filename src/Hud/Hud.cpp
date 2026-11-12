@@ -344,14 +344,16 @@ const HudFont* HudManager::font(const std::string& path)
 	const std::string key = lower(slashes(path));
 	auto& slot = m_fonts[key];
 	if (!slot) {
-		// "Fonts/x.dif": the language's 800 x 600 one first (the HUD is
-		// laid out for 800 x 600), then the language's own, then English's
-		// (hud::language(); the Local fonts exist only per language).
+		// "Fonts/x.dif": the language's own first, then English's (hud::language();
+		// the Local fonts exist only per language). Never the 800 x 600 set: the
+		// exe's HUD font loader (0x007ee320, 0x007caf00) tries the name, then
+		// "Fonts\<GSLanguage>\" and has no resolution folder, so the HUD draws
+		// the 1024 fonts (larger glyphs) at every size; only RendDX9's menu fonts
+		// (0x10185e90) pick "800" by window width.
 		const std::string file = key.substr(key.rfind('/') + 1);
 		const std::string folder = "Fonts/" + language() + "/";
 		std::string text;
-		for (const std::string& candidate : {folder + "800/" + file, "Fonts/800/" + file, folder + file,
-				 "Fonts/English/800/" + file, "Fonts/English/" + file, key}) {
+		for (const std::string& candidate : {folder + file, "Fonts/English/" + file, slashes(path)}) {
 			if (m_reader && m_reader(candidate, text)) {
 				if (auto parsed = parseHudFont(text)) {
 					slot = std::make_unique<HudFont>(std::move(*parsed));
@@ -635,12 +637,14 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		}
 		break;
 	case kBar: {
+		const size_t barFirst = out.size();
 		quad(node.barTextures[0], x, y, x + w, y + h, 0, 0, 1, 1, 0);
 		float value = node.valueVariable.empty() ? 0 : number(node.valueVariable);
 		if (node.spanMax != node.spanMin) {
 			value = (value - node.spanMin) / (node.spanMax - node.spanMin);
 		}
 		value = std::clamp(node.inverse ? 1 - value : value, 0.0f, 1.0f);
+		const float sweepValue = value; // the wedge takes the unsnapped value (0x007eb2c0 -> 0x007eafc0)
 		if (node.snap > 0) {
 			value = std::floor(value * static_cast<float>(node.snap) + 0.5f) / static_cast<float>(node.snap);
 		}
@@ -668,6 +672,20 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 			default: // from the left
 				quad(node.barTextures[1], bx0, by0, bx0 + fx, by1, u0, v0, u0 + fu, v1, 0);
 				break;
+			}
+		}
+		// setBarNodeRound (slot 0x120 0x007e9380, mode at +0x9c): the render
+		// calls 0x007eafc0 with the value; it builds a fan about the node's
+		// middle from straight up through angle 2 pi * value (corners at
+		// 7/4, 5/4, 3/4, 1/4 pi, 0.95 box) and draws it into the node's mask;
+		// the background and the (linearly clipped) fill both follow.
+		// Clockwise-from-up is inferred from the y flip of 0x007eae30.
+		if (node.barRound != 0 && sweepValue > 0) {
+			for (size_t i = barFirst; i < out.size(); ++i) {
+				out[i].sweep = sweepValue * 6.2831853f;
+				out[i].sweepAbout = true;
+				out[i].sweepCentre[0] = x + w * 0.5f;
+				out[i].sweepCentre[1] = y + h * 0.5f;
 			}
 		}
 		break;
