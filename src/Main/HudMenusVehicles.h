@@ -793,4 +793,66 @@ struct RadarMarker {
 };
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
 
+// The radio calls on the map (Bf2MenuMapNode's marker list +0xa94, its
+// entries 0x34 bytes from 0x00790d60: the texture, the id, the size, the
+// type, the time +0x14 and its total, a delay +0x18):
+//   - a call (0x007918d0 case 0x33..0x37: the call's message, the caller's
+//     soldier by its ghost; the local player's own from the game's slot
+//     0xd8): one of a teammate other than the local player, when the local
+//     player's kit can answer it (the kit's slot 0x38 bytes: [0] heal for
+//     0x33 medic and 0x36 / 0x37 revive, [2] ammunition for 0x34, [1]
+//     repair for 0x35; +0x7f, which would take any call, has no writer but
+//     the constructor's 0), drops the caller's marker (0x007845c0) and
+//     puts one of type 4 on him for +0xac8 = 12 s (+0xac0 0.5 and +0xac4 1
+//     the blink's) in the call's icon (slot 0x110, 0x0077ac70: mini_Medic,
+//     mini_Ammo, mini_Repair, mini_Revive). The local player's own call
+//     sets +0x7c (medic, revive), +0x7d (ammunition) or +0x7e (repair);
+//   - those flags last one draw (0x00795620 clears them at its end): each
+//     teammate drawn (the soldiers 0x00792980, a vehicle's rider
+//     0x00793b60) whose kit can answer one gets a marker of type 4 in its
+//     icon (medic, then repair, then ammunition) with no time and a 12 s
+//     delay, unless he has a marker (0x00790d60 adds only for an id
+//     without one, but for type 3);
+//   - each frame (0x007840c0) a marker's delay counts down, then its time;
+//     one with neither left goes;
+//   - a teammate with a marker is drawn in its icon, 16 px (0x007841e0 ->
+//     slot 0xf0 with 0x10; type 4 keeps the player's tint), the call icons
+//     on the map's top layers (0x007829c0: 0x1b medic / revive, 0x1c
+//     repair, 0x1d ammunition).
+// The marker list's other entries (the reports' vehicles, the radar's
+// blips) are kept apart here (RadarMarker, GameWorld::radarContacts); the
+// edge arrow (+0xa5c mini_MedicArrow) needs the map's clamping, which the
+// HUD's markers don't have.
+class MapCalls {
+public:
+	struct Kit {
+		bool heal = false, repair = false, ammo = false; // the kit's slot 0x38 bytes [0], [1], [2]
+	};
+	// A call heard: the caller (a player id) and his team, the code
+	// (0x33..0x37), the local player, his team and kit.
+	void call(int caller, int callerTeam, int code, int localPlayer, int localTeam, const Kit& local);
+	struct Mate {
+		int player = -1;
+		Kit kit;
+	};
+	// A draw: the teammates drawn (not the local player) take the local
+	// player's own call's flags, which then clear.
+	void place(const std::vector<Mate>& drawn);
+	void tick(float seconds);
+	// The icon a player is drawn in ("" none).
+	std::string icon(int player) const;
+	void clear() { m_markers.clear(); m_medic = m_ammo = m_repair = false; }
+	static std::string iconOf(int code); // 0x0077ac70
+
+private:
+	struct Marker {
+		int player = -1;
+		std::string texture;
+		float time = 0, delay = 0;
+	};
+	bool has(int player) const;
+	std::vector<Marker> m_markers;
+	bool m_medic = false, m_ammo = false, m_repair = false; // +0x7c, +0x7d, +0x7e
+};
+
 } // namespace dice::hfe::menu

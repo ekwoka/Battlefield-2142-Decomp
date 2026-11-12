@@ -127,6 +127,21 @@ struct TerrainDetailUniforms {
 	float farTiling[4];  // the low-detail texture: side x, side y, top, y offset
 	float farScale[4];   // its coordinates a metre across, has a low-detail texture, unused, a metre up
 	float water[4];      // TerrainWaterColor, WaterHeight (below -1e8: no sea)
+	// Per detail layer (terrain.frag only; surrounding.frag's block stops
+	// above): NEARTEXTILING's side tiling (x, y) and y offset (z), and the
+	// layer's pass in w (TerrainLayerKind).
+	float layers[6][4];
+	float eye[4]; // the camera (vCamerapos), for the envmap layers' reflection
+};
+
+// A terrain detail layer's pass (RendDX9 0x1014e570), terrain.frag's
+// TerrainDetailUniforms::layers w.
+enum class TerrainLayerKind {
+	Plain = 0,     // pass 4, Hi_PS_FullDetail
+	Mountain = 1,  // pass 5, Hi_PS_FullDetailMounten: its x and z planes from the layer's own texture
+	MountainSideA = 2, // ... from the first side texture (sampler 14)
+	MountainSideB = 3, // ... from the second (sampler 15)
+	EnvMap = 4,    // pass 11, Hi_PS_FullDetailWithEnvMap (the current cube, sampler 13)
 };
 
 // terrain.vert's geomorph (TerrainShader_Shared.fx geoMorphPosition); the

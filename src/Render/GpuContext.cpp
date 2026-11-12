@@ -263,7 +263,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	}
 	world.terrain = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
-		k_terrain_frag_msl_size, 13, 3, "terrain", 2);
+		k_terrain_frag_msl_size, 16, 3, "terrain", 2);
 	world.surrounding = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
 		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);

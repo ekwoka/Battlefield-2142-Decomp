@@ -1293,4 +1293,97 @@ std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWor
 	return out;
 }
 
+std::string MapCalls::iconOf(int code)
+{
+	// 0x0077ac70: the textures the constructor loads (0x00784cf0, +0xa58
+	// mini_Medic, +0xa4c mini_Ammo, +0xa50 mini_Repair, +0xa54
+	// mini_Revive); any other code the medic's.
+	switch (code) {
+	case 0x34: return "Ingame/Player/Icons/Minimap/mini_Ammo.tga";
+	case 0x35: return "Ingame/Player/Icons/Minimap/mini_Repair.tga";
+	case 0x36:
+	case 0x37: return "Ingame/Player/Icons/Minimap/mini_Revive.tga";
+	default: return "Ingame/Player/Icons/Minimap/mini_Medic.tga";
+	}
+}
+
+bool MapCalls::has(int player) const
+{
+	// 0x007800f0.
+	return std::any_of(m_markers.begin(), m_markers.end(), [player](const Marker& m) { return m.player == player; });
+}
+
+void MapCalls::call(int caller, int callerTeam, int code, int localPlayer, int localTeam, const Kit& local)
+{
+	if (code < 0x33 || code > 0x37 || caller < 0 || localPlayer < 0) {
+		return;
+	}
+	const bool heal = code == 0x33 || code == 0x36 || code == 0x37;
+	if (callerTeam == localTeam && caller != localPlayer) {
+		const bool answers = (heal && local.heal) || (code == 0x34 && local.ammo) || (code == 0x35 && local.repair);
+		if (!answers) {
+			return;
+		}
+		// 0x007845c0: the caller's first marker goes; 0x00790d60: type 4,
+		// the time +0xac8 (12 s) and no delay.
+		const auto old = std::find_if(m_markers.begin(), m_markers.end(), [caller](const Marker& m) { return m.player == caller; });
+		if (old != m_markers.end()) {
+			m_markers.erase(old);
+		}
+		if (!has(caller)) {
+			m_markers.push_back({caller, iconOf(code), 12, 0});
+		}
+		return;
+	}
+	if (caller == localPlayer) {
+		m_medic = heal;
+		m_ammo = code == 0x34;
+		m_repair = code == 0x35;
+	}
+}
+
+void MapCalls::place(const std::vector<Mate>& drawn)
+{
+	if (m_medic || m_ammo || m_repair) {
+		for (const Mate& mate : drawn) {
+			// 0x00792980 / 0x00793b60: medic, repair, ammunition, each
+			// added only for a player without a marker (0x00790d60), with
+			// the 12 s as its delay and no time.
+			const std::pair<bool, int> flags[] = {{m_medic && mate.kit.heal, 0x33}, {m_repair && mate.kit.repair, 0x35},
+				{m_ammo && mate.kit.ammo, 0x34}};
+			for (const auto& [on, code] : flags) {
+				if (on && mate.player >= 0 && !has(mate.player)) {
+					m_markers.push_back({mate.player, iconOf(code), 0, 12});
+				}
+			}
+		}
+	}
+	// 0x00795620's end.
+	m_medic = m_ammo = m_repair = false;
+}
+
+void MapCalls::tick(float seconds)
+{
+	// 0x007840c0: the delay first, then the time; gone with neither.
+	for (Marker& m : m_markers) {
+		if (m.delay > 0) {
+			m.delay -= seconds;
+		} else {
+			m.time -= seconds;
+		}
+	}
+	m_markers.erase(std::remove_if(m_markers.begin(), m_markers.end(), [](const Marker& m) { return m.time <= 0 && m.delay <= 0; }),
+		m_markers.end());
+}
+
+std::string MapCalls::icon(int player) const
+{
+	for (const Marker& m : m_markers) {
+		if (m.player == player && (m.time > 0 || m.delay > 0)) {
+			return m.texture;
+		}
+	}
+	return {};
+}
+
 } // namespace dice::hfe::menu

@@ -966,6 +966,14 @@ private:
 	Uint64 m_startTicks = 0;
 	SDL_GPUTexture* m_detailLayers[kMaxDetailLayers] = {};
 	float m_detailTiling[kMaxDetailLayers] = {};
+	// The layers' passes (terrain.frag, 0x1014e570): per layer the side
+	// tiling, the y offset and the kind (TerrainLayerKind), and the side
+	// textures ("<texture>_side", 0x100b2bdc) of the first two
+	// side-projected layers that have one (the terrain pipeline's last two
+	// samplers; no shipped layer has one).
+	static constexpr int kMaxDetailSides = 2;
+	float m_detailLayerInfo[kMaxDetailLayers][4] = {};
+	SDL_GPUTexture* m_detailSides[kMaxDetailSides] = {};
 	std::array<float, 3> m_terrainSunColor {};
 	std::array<float, 3> m_terrainGIColor {};
 	bool m_terrainColorsFromData = false;

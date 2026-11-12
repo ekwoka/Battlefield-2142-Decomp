@@ -1378,6 +1378,60 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	CHECK(markers.size() == 1 && markers[0].texture == "Ingame/mini_tank.tga" && markers[0].x == 100 && markers[0].size == 16);
 }
 
+// The map's radio call markers (menu::MapCalls; 0x007918d0 case
+// 0x33..0x37, 0x00790d60, 0x007840c0, the flags +0x7c..+0x7e): a
+// teammate's call the local kit answers marks him 12 s in the call's icon;
+// an enemy's, one the kit can't answer and the local player's own don't;
+// his own call marks the teammates who can answer it for the next draw.
+TEST(HudMap_RadioCallMarkers)
+{
+	menu::MapCalls calls;
+	menu::MapCalls::Kit medic;
+	medic.heal = true;
+	menu::MapCalls::Kit engineer;
+	engineer.repair = true;
+	menu::MapCalls::Kit support;
+	support.ammo = true;
+	// Local player 1 (team 2, a medic).
+	calls.call(5, 2, 0x33, 1, 2, medic);
+	CHECK(calls.icon(5) == "Ingame/Player/Icons/Minimap/mini_Medic.tga");
+	calls.call(6, 1, 0x33, 1, 2, medic); // an enemy's
+	CHECK(calls.icon(6).empty());
+	calls.call(7, 2, 0x35, 1, 2, medic); // repair: not his kit's
+	CHECK(calls.icon(7).empty());
+	calls.call(7, 2, 0x37, 1, 2, medic); // a revive
+	CHECK(calls.icon(7) == "Ingame/Player/Icons/Minimap/mini_Revive.tga");
+	// A new call replaces the caller's marker.
+	calls.call(5, 2, 0x36, 1, 2, medic);
+	CHECK(calls.icon(5) == "Ingame/Player/Icons/Minimap/mini_Revive.tga");
+	calls.tick(11.5f);
+	CHECK(!calls.icon(5).empty());
+	calls.tick(1.0f);
+	CHECK(calls.icon(5).empty() && calls.icon(7).empty());
+	CHECK(menu::MapCalls::iconOf(0x34) == "Ingame/Player/Icons/Minimap/mini_Ammo.tga");
+	// The local player's own call for ammunition: the support teammates
+	// drawn next take its icon for 12 s (as the delay); the flags last one
+	// draw.
+	calls.call(1, 2, 0x34, 1, 2, engineer);
+	CHECK(calls.icon(1).empty());
+	calls.place({{8, support}, {9, engineer}});
+	CHECK(calls.icon(8) == "Ingame/Player/Icons/Minimap/mini_Ammo.tga");
+	CHECK(calls.icon(9).empty());
+	calls.place({{10, support}});
+	CHECK(calls.icon(10).empty());
+	calls.tick(6);
+	CHECK(!calls.icon(8).empty());
+	calls.tick(6.5f);
+	CHECK(calls.icon(8).empty());
+	// A helper marker isn't added over one the player has.
+	calls.call(5, 2, 0x33, 1, 2, medic);
+	calls.call(1, 2, 0x33, 1, 2, medic);
+	calls.place({{5, medic}});
+	CHECK(calls.icon(5) == "Ingame/Player/Icons/Minimap/mini_Medic.tga");
+	calls.tick(12.5f);
+	CHECK(calls.icon(5).empty());
+}
+
 // The vehicle HUD's torque arrows and sprint (0x007a2e60): the torque eased
 // a hundredth a frame (its source +0x2f4 has no writer: 0), the stamina
 // bar while sprinting or below 1 and its text for 3 s after it fell.

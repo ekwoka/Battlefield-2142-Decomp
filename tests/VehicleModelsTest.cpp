@@ -2266,6 +2266,95 @@ TEST(Vehicles_BipodIsAStationarySeat)
 	CHECK(std::fabs(still.x - at.x) < 1e-3f && std::fabs(still.y - at.y) < 1e-3f && std::fabs(still.z - at.z) < 1e-3f);
 }
 
+// A bipod's ducking plays its seat system's duck (3p_eu_bipod_animSys.inc:
+// PoseTrigger root over stand and duck): the seat's setDucking (0x005c7cf0)
+// sets the seat system's pose (+0x284 slot 0x28) to 1 while ducking, 0
+// once risen, so the sitter's head goes down with lookAroundDuck and comes
+// back; a joined client's seated soldier as its ghost's ducking says.
+TEST(Vehicles_BipodDuckPlaysTheDuckPose)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t bipod = g.start("eu_bipod", {0, 1.2f, 8}, 1);
+	g.animate();
+	CHECK(g.enter(bipod));
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	const anim::Skeleton* skeleton = g.systems->skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	const int head = skeleton ? skeleton->find("head") : -1;
+	CHECK(head >= 0);
+	if (head < 0) {
+		return;
+	}
+	const auto headHeight = [&](uint32_t soldier) {
+		std::vector<anim::Matrix> pose;
+		if (!g.world->skeletonPose(soldier, *skeleton, pose) || pose.size() <= static_cast<size_t>(head)) {
+			return 0.0f;
+		}
+		return pose[static_cast<size_t>(head)][13];
+	};
+	game::SoldierInput still;
+	g.drive(still, 1);
+	const float sitting = headHeight(me.soldier);
+	game::SoldierInput duck;
+	duck.pose = game::SoldierPose::Crouch;
+	g.drive(duck, 1);
+	CHECK(g.world->seatDucking(bipod, 0));
+	const float ducked = headHeight(me.soldier);
+	g.drive(still, 1);
+	const float risen = headHeight(me.soldier);
+	std::fprintf(stderr, "  eu_bipod: head %.3f sitting, %.3f ducking, %.3f risen\n", sitting, ducked, risen);
+	CHECK(ducked < sitting - 0.1f);
+	CHECK(std::fabs(risen - sitting) < 0.02f);
+	// A joined client's seated soldier, by its ghost's ducking.
+	const uint32_t other = g.objects.create(g.templates.find("us_light_soldier"), {3, 1.2f, 8})->id();
+	const auto remoteHead = [&](bool ducking) {
+		for (int i = 0; i < 30; ++i) {
+			g.world->animateRemoteSeated(other, bipod, 0, 0, 1 / 30.0f, ducking);
+		}
+		return headHeight(other);
+	};
+	const float remoteSitting = remoteHead(false), remoteDucked = remoteHead(true);
+	CHECK(remoteDucked < remoteSitting - 0.1f);
+	CHECK(std::fabs(remoteHead(false) - remoteSitting) < 0.02f);
+}
+
+// The motion mine (Unl_Mine_Motion_Projectile: physicsType Mesh, drag 10,
+// mass 5) is a Basic node whose drag is its collision mesh's vehicle LOD
+// box's (0x006c9060 through the mesh's slot 0x54(1)).
+TEST(Weapons_MotionMineHasItsBox)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.start("eu_bipod", {0, 1.2f, 8}, 1);
+	const auto settingsOf = [&](const std::string& name) -> const game::ProjectileSettings* {
+		if (!g.world->launchProjectile(name, {0, 30, 0}, {0, 0, 1})) {
+			return nullptr;
+		}
+		return g.world->projectiles().empty() ? nullptr : g.world->projectiles().back().settings;
+	};
+	const game::ProjectileSettings* mine = settingsOf("Unl_Mine_Motion_Projectile");
+	CHECK(mine && mine->basicNode && mine->drag == 10 && mine->mass == 5);
+	if (mine) {
+		std::fprintf(stderr, "  motion mine box %.3f x %.3f x %.3f\n", mine->boxSize.x, mine->boxSize.y, mine->boxSize.z);
+		CHECK(mine->boxSize.x > 0.05f && mine->boxSize.y > 0.05f && mine->boxSize.z > 0.05f);
+		CHECK(mine->boxSize.x < 2 && mine->boxSize.y < 2 && mine->boxSize.z < 2);
+	}
+	// A grenade stays a RotationalPoint.
+	const game::ProjectileSettings* frag = settingsOf("Unl_Grenade_Frag_Projectile");
+	CHECK(frag && frag->rotationalPoint && !frag->basicNode);
+}
+
 // The heavy IFV's shield cells (SeatBehaviours.cpp): each
 // ifv_shield_the_generator's mesh is the vehicle's for the rounds, so a
 // round strikes the cell and hurts its armour (110 hit points), not the

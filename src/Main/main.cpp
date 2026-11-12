@@ -839,6 +839,30 @@ float g_remoteDeviation = -1;
 nametags::IconRegistry g_tagIcons;
 // The name tags of the game running now (the radio calls reach them).
 nametags::Nametags* g_nametags = nullptr;
+// The map's radio call markers (HudMenusVehicles.h MapCalls): the calls
+// heard since the last draw (the caller, the code), and the markers'
+// clock (the round's time).
+dice::hfe::menu::MapCalls g_mapCalls;
+std::vector<std::pair<int, int>> g_mapCallsHeard;
+float g_mapCallsTime = -1;
+// A radio call heard (0x33..0x37): the caller's name tag (0x100f19c0) and
+// the map's marker (0x007918d0); `local` the local player's own.
+void heardCall(int caller, int code, bool local)
+{
+	if (g_nametags) {
+		g_nametags->radioCall(caller, code, local);
+	}
+	g_mapCallsHeard.push_back({caller, code});
+}
+// A kit's answers to the calls (the kit's slot 0x38 bytes) by its kitType.
+dice::hfe::menu::MapCalls::Kit mapCallKit(game::GameWorld& round, uint32_t kit)
+{
+	const world::Object* object = kit ? round.objects().find(kit) : nullptr;
+	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+	const auto type = t ? t->settings().find("kitType") : decltype(t->settings().end()) {};
+	const nametags::Abilities a = nametags::kitAbilities(t && type != t->settings().end() ? type->second : std::string());
+	return {a.heal, a.repair, a.ammo};
+}
 // The big map (the HUD's menu state 2, MapShow at full size): c_GIMapSize
 // toggles it while alive (0x00754290 → 0x0074fd90(2)).
 bool g_bigMap = false;
@@ -1070,14 +1094,42 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			layer(icons.reload, sweep);
 		}
 	}
+	// The radio calls heard since the last draw (0x007918d0 case
+	// 0x33..0x37), the markers' time (0x007840c0), then the local
+	// player's own call's helpers among the teammates drawn (0x00792980).
+	{
+		const float now = round.roundTime();
+		g_mapCalls.tick(g_mapCallsTime < 0 || now < g_mapCallsTime ? 0.0f : now - g_mapCallsTime);
+		g_mapCallsTime = now;
+		const dice::hfe::menu::MapCalls::Kit myKit = mapCallKit(round, me.kit);
+		for (const auto& [caller, code] : g_mapCallsHeard) {
+			game::GameWorld::PlayerInfo from;
+			if (world.playerInfo(caller, from)) {
+				g_mapCalls.call(caller, from.team, code, me.id, me.team, myKit);
+			}
+		}
+		g_mapCallsHeard.clear();
+	}
+	std::vector<dice::hfe::menu::MapCalls::Mate> drawnMates;
+	std::vector<hud::HudManager::MapMarker> callMarkers;
 	for (const auto& player : world.playerList()) {
 		if (!player.alive || player.team != me.team || player.id == me.id) {
 			continue;
 		}
-		// Players: 16 px, tinted 0.7 grey (table 0x00b3be30).
-		hud::HudManager::MapMarker mate {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", player.position.x, player.position.z, 16};
+		drawnMates.push_back({player.id, mapCallKit(round, player.kit)});
+	}
+	g_mapCalls.place(drawnMates);
+	for (const auto& player : world.playerList()) {
+		if (!player.alive || player.team != me.team || player.id == me.id) {
+			continue;
+		}
+		// Players: 16 px, tinted 0.7 grey (table 0x00b3be30); one with a
+		// call's marker in its icon, over the rest (0x007841e0, 0x007829c0).
+		const std::string call = g_mapCalls.icon(player.id);
+		hud::HudManager::MapMarker mate {call.empty() ? "Ingame/Player/Icons/Minimap/mini_Soldier.dds" : call, player.position.x,
+			player.position.z, 16};
 		mate.color[0] = mate.color[1] = mate.color[2] = 0.7f;
-		markers.push_back(mate);
+		(call.empty() ? markers : callMarkers).push_back(mate);
 	}
 	// The commander screen's mini-map tab (HudManager::drawMiniMap): the
 	// team's players as dots coloured by 0x007e7580 (the local player's
@@ -1166,6 +1218,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		spotted.color[2] = 0.3f;
 		markers.push_back(spotted);
 	}
+	markers.insert(markers.end(), callMarkers.begin(), callMarkers.end());
 	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {
 		// The player's own icon and its heading arrow, 32 px (0x00792980).
@@ -4926,9 +4979,7 @@ int runGame(Options& options, Session& session)
 					session.hosted->spotted(call, round.localPlayer());
 				}
 				sayRadio(c, v, 0, false);
-				if (g_nametags) {
-					g_nametags->radioCall(hudLocal(), code, true);
-				}
+				heardCall(hudLocal(), code, true);
 			});
 		}
 		// The crosshair's enemy reported to the squad (0x007c8160: the game's
@@ -6054,8 +6105,8 @@ int runGame(Options& options, Session& session)
 			// posts it there): a client's radio call on its name tag.
 			hosted->onSpotted = [hosted, &round](const net::SpottedInfo& spot) {
 				const int caller = hosted->playerOfGhost(spot.spotter);
-				if (g_nametags && caller >= 0 && caller != round.localPlayer() && spot.message >= 0x33 && spot.message <= 0x37) {
-					g_nametags->radioCall(caller, static_cast<int>(spot.message), false);
+				if (caller >= 0 && caller != round.localPlayer() && spot.message >= 0x33 && spot.message <= 0x37) {
+					heardCall(caller, static_cast<int>(spot.message), false);
 				}
 			};
 			hosted->onRequestStored = [&squadRequests, &round](int team, int squad, int kind) {
@@ -7455,9 +7506,7 @@ int runGame(Options& options, Session& session)
 					&& net::parseSpottedPayload(message.payload, message.id, spot)) {
 					for (const net::RemotePlayer& p : client.world().playerList()) {
 						if (spot.spotter && p.soldierGhost == spot.spotter && !p.local) {
-							if (g_nametags) {
-								g_nametags->radioCall(p.id, static_cast<int>(message.id), false);
-							}
+							heardCall(p.id, static_cast<int>(message.id), false);
 							if (options.verbose) {
 								std::printf("spotted message 0x%x: %s's call\n", message.id, p.name.c_str());
 							}
@@ -8839,6 +8888,9 @@ int runGame(Options& options, Session& session)
 		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		nametags.setWorld(g_remoteHud); // a joined game's: the server's players and requests
 		g_nametags = &nametags;
+		g_mapCalls.clear(); // a new map node's list (0x00784cf0)
+		g_mapCallsHeard.clear();
+		g_mapCallsTime = -1;
 		struct TagsReset {
 			~TagsReset() { g_nametags = nullptr; }
 		} tagsReset;

@@ -50,7 +50,7 @@ struct ProjectileSettings {
 	float distToMinDamage = 0;
 	RandomDistribution timeToLive {RandomDistribution::Type::None, 1, 0, 0};
 	float gravityModifier = 1;
-	// Its Point / RotationalPoint node's drag and mass (template +0x78,
+	// Its Point / RotationalPoint / Basic node's drag and mass (template +0x78,
 	// +0x94; 0 and 1 by default): shotgun pellets 18, C4 15, missiles 0.1-10.
 	float drag = 0;
 	float mass = 1;
@@ -249,6 +249,20 @@ struct ProjectileSettings {
 	// that axis through 0x005b1a70), which nothing damps: the grenades,
 	// the IFV's mine, the stationary medic hub and motion bait.
 	bool rotationalPoint = false;
+	// physicsType Mesh (3) with hasMobilePhysics: a PhysicsNode.Basic
+	// (0x005f6ba0 -> 0x006c70c0, vtable 0x009938a0; its tick 0x006c9060):
+	// the motion mine, the C4, the AP and EMP mines, the sonars, the decoy
+	// and a few guns' rounds. Its tick, unlike the Point node's: with drag
+	// above 0, the box drag of its vehicle LOD's box (`boxSize`, filled by
+	// the game world from the collisionMesh; the object's mesh slot 0x54(1)),
+	// its faces' areas x 0.785 x dragModifier, linear (0x006c7e00) and
+	// angular (0x006c8110), else (no box) the 0.1 m sphere's (0x006c5730);
+	// then the angular step (0x006c8690) and the linear step (0x006c8380),
+	// each damped by 0.99 a tick (physics::RigidBody), gravity for the next.
+	// Projectiles don't sleep (the class 0x9493 test of 0x006c9060).
+	bool basicNode = false;
+	physics::Vec3 boxSize;
+	physics::Vec3 dragModifier {1, 1, 1};
 	// A ForceObject child that holds the round over the ground (the IFV's
 	// mine, eu_ifv_laserguided_mine_FO; template defaults 0x0062d4f0; the
 	// object's tick 0x0062c920 -> 0x0062b750; GameWorld::hoverProjectile).

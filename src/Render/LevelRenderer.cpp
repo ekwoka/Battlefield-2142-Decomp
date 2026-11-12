@@ -908,9 +908,34 @@ void LevelRenderer::buildTerrain(const LevelSources& sources)
 		m_terrainSunColor = data->sunColor;
 		m_terrainGIColor = data->giColor;
 		m_terrainColorsFromData = true;
+		int sides = 0;
 		for (size_t i = 0; i < data->layers.size() && i < kMaxDetailLayers; ++i) {
-			m_detailLayers[i] = texture(sources.files, data->layers[i].texture + ".dds", scene::TextureClass::TerrainDetail);
-			m_detailTiling[i] = data->layers[i].tiling;
+			const terrain::DetailLayer& layer = data->layers[i];
+			m_detailLayers[i] = texture(sources.files, layer.texture + ".dds", scene::TextureClass::TerrainDetail);
+			m_detailTiling[i] = layer.tiling;
+			// The layer's pass (0x1014e570): side-projected over envmapped
+			// (whose cube is the frame's, drawTerrain), NEARTEXTILING's
+			// side tiling and y offset. A side-projected layer's x and z
+			// planes take "<texture>_side" when there is one, else the
+			// texture itself (the record's +0xc, 0x100b2bdc).
+			TerrainLayerKind kind = TerrainLayerKind::Plain;
+			if (layer.sideProjection) {
+				kind = TerrainLayerKind::Mountain;
+				const std::string side = layer.texture + "_side.dds";
+				if (sides < kMaxDetailSides && sources.files.exists(side)) {
+					m_detailSides[sides] = texture(sources.files, side, scene::TextureClass::TerrainDetail);
+					if (m_detailSides[sides]) {
+						kind = sides == 0 ? TerrainLayerKind::MountainSideA : TerrainLayerKind::MountainSideB;
+						++sides;
+					}
+				}
+			} else if (layer.envMap) {
+				kind = TerrainLayerKind::EnvMap;
+			}
+			m_detailLayerInfo[i][0] = layer.sideTiling[0];
+			m_detailLayerInfo[i][1] = layer.sideTiling[1];
+			m_detailLayerInfo[i][2] = layer.yOffset;
+			m_detailLayerInfo[i][3] = static_cast<float>(kind);
 		}
 	}
 	const int samples = heightmap->width();
@@ -3849,6 +3874,26 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	TerrainDetailUniforms detail {};
 	for (int i = 0; i < kMaxDetailLayers; ++i) {
 		detail.tiling[i] = m_detailTiling[i];
+		std::copy(std::begin(m_detailLayerInfo[i]), std::end(m_detailLayerInfo[i]), detail.layers[i]);
+		// An envmap layer without a current cube is a plain one (0x1014e570:
+		// EnvMapManager +0x64 null).
+		if (!m_envMap && detail.layers[i][3] == static_cast<float>(TerrainLayerKind::EnvMap)) {
+			detail.layers[i][3] = static_cast<float>(TerrainLayerKind::Plain);
+		}
+	}
+	detail.eye[0] = camera.position.x;
+	detail.eye[1] = camera.position.y;
+	detail.eye[2] = camera.position.z;
+	// The current cube (TEXLAYER6 for pass 11) and the side textures
+	// (TEXLAYER6 for pass 5) after the shadow maps.
+	{
+		SDL_GPUTextureSamplerBinding extra[1 + kMaxDetailSides] = {
+			{m_envMap ? m_envMap : m_gpu.whiteCubeTexture(), m_gpu.repeatSampler()},
+		};
+		for (int i = 0; i < kMaxDetailSides; ++i) {
+			extra[1 + i] = {m_detailSides[i] ? m_detailSides[i] : m_gpu.whiteTexture(), m_gpu.repeatSampler()};
+		}
+		SDL_BindGPUFragmentSamplers(pass, 7 + kMaxDetailLayers, extra, 1 + kMaxDetailSides);
 	}
 	std::copy(std::begin(m_farTiling), std::end(m_farTiling), detail.farTiling);
 	// The low-detail texture's coordinates (TEXSCALE, 0x100af7e0): a patch

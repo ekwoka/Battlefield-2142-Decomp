@@ -294,6 +294,12 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		type != t.settings().end() && (sameText(type->second, "RotationalPoint") || type->second == "2")) {
 		s.collisionOffset = vector3(t, "centerOfCollisionOffset");
 		s.rotationalPoint = true;
+	} else if (type != t.settings().end() && (sameText(type->second, "Mesh") || type->second == "3")
+		&& number(t, "hasMobilePhysics", 0) != 0) {
+		s.basicNode = true;
+		if (t.settings().count("dragModifier")) {
+			s.dragModifier = vector3(t, "dragModifier");
+		}
 	}
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
@@ -1161,6 +1167,39 @@ physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3&
 
 void moveProjectile(Projectile& p, float seconds, float gravity)
 {
+	if (p.settings && p.settings->basicNode) {
+		// The Basic node's tick (0x006c9060, physics::RigidBody): its frame
+		// the round's own (a turning round's) or along its nose (as it is
+		// drawn), no centre of mass offset, the box's inertia.
+		const ProjectileSettings& s = *p.settings;
+		physics::RigidBody node;
+		node.position = p.position;
+		node.rotation = p.turns ? p.rotation : physics::lookAtRotation(noseOf(p), physics::Mat3 {});
+		node.velocity = p.velocity;
+		node.acceleration = p.acceleration;
+		node.angularVelocity = p.spin;
+		node.gravityModifier = s.gravityModifier;
+		const bool box = physics::lengthSquared(s.boxSize) > 0;
+		if (box) {
+			node.setBounds(s.boxSize);
+			physics::applyDrag(node, s.drag, s.mass, s.dragModifier, s.boxSize, 0);
+		} else if (s.drag > 0 && s.mass > 0) {
+			node.acceleration += node.velocity * (s.drag / s.mass * 0.01f * -3.14159265f); // 0x006c5730, 0.1 m
+		}
+		node.step(seconds, gravity);
+		p.position = node.position;
+		p.velocity = node.velocity;
+		p.acceleration = node.acceleration;
+		p.spin = node.angularVelocity;
+		if (p.turns) {
+			p.rotation = node.rotation;
+		}
+		p.timeLeft -= seconds;
+		if (p.timeLeft <= 0) {
+			p.alive = false;
+		}
+		return;
+	}
 	// The Point node's tick (0x006c6170 / 0x006c57a0, physics::PointBody):
 	// its drag, then the mean of the old and new velocity moves it; gravity
 	// for the next tick.

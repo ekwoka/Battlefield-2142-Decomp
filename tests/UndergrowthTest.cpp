@@ -10,8 +10,10 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -161,6 +163,126 @@ TEST(TerrainData_PatchMeshesToTheEnd)
 		}
 	}
 	CHECK(rows && heights);
+}
+
+// The detail layer records (0x100b2ea7..0x100b2ed9): the side-projection
+// byte, the side tiling, the tiling, the float y offset and the envmap byte.
+TEST(TerrainData_LayerRecords)
+{
+	std::vector<uint8_t> data;
+	const auto put = [&data](const void* p, size_t n) {
+		const auto* b = static_cast<const uint8_t*>(p);
+		data.insert(data.end(), b, b + n);
+	};
+	const auto u16 = [&put](uint16_t v) { put(&v, 2); };
+	const auto i32 = [&put](int32_t v) { put(&v, 4); };
+	const auto f32 = [&put](float v) { put(&v, 4); };
+	const auto u8 = [&put](uint8_t v) { put(&v, 1); };
+	const auto text = [&put](const char* s) {
+		put(s, std::strlen(s));
+		const char nl = '\n';
+		put(&nl, 1);
+	};
+	u16(26);
+	u16(0); // no low far top tiling
+	for (int i = 0; i < 6; ++i) {
+		f32(1);
+	}
+	i32(0);
+	f32(100);
+	f32(0);
+	i32(128);
+	u8(1);
+	i32(8);
+	i32(512);
+	i32(512);
+	text("cm");
+	text("dm");
+	text("ld");
+	text("lm");
+	f32(2);
+	f32(3);
+	f32(32);
+	f32(0.5f);
+	for (int i = 0; i < 9; ++i) {
+		f32(0.25f);
+	}
+	i32(3);
+	text("rock");
+	u8(1);
+	f32(12);
+	f32(8);
+	f32(4);
+	f32(50);
+	u8(1);
+	text("snow");
+	u8(0);
+	f32(2);
+	f32(2);
+	f32(48);
+	f32(0);
+	u8(1);
+	text("panorama");
+	u8(2); // any non-zero byte projects sideways (0x1014e570: != 0)
+	f32(0.4f);
+	f32(0.5f);
+	f32(99);
+	f32(2);
+	u8(0);
+	const auto t = terrain::parseTerrainData(data);
+	CHECK(t.has_value());
+	if (!t) {
+		return;
+	}
+	CHECK(t->layers.size() == 3);
+	if (t->layers.size() != 3) {
+		return;
+	}
+	const auto& rock = t->layers[0];
+	CHECK(rock.texture == "rock" && rock.sideProjection && rock.envMap);
+	CHECK(rock.sideTiling[0] == 12 && rock.sideTiling[1] == 8 && rock.tiling == 4 && rock.yOffset == 50);
+	CHECK(!t->layers[1].sideProjection && t->layers[1].envMap && t->layers[1].tiling == 48);
+	CHECK(t->layers[2].sideProjection && !t->layers[2].envMap && t->layers[2].yOffset == 2);
+	CHECK(!t->meshes.has_value()); // nothing after the header
+}
+
+// The shipped levels' layer kinds: Hamburg_Harbour's side-projected layers
+// with y offsets 1 and 50, Minsk's envmap layers.
+TEST(TerrainData_ShippedLayerKinds)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	const auto load = [dir](const std::string& level) -> std::optional<terrain::TerrainData> {
+		dice::hfe::io::FileManager files;
+		files.setRootPath(dir);
+		files.addSearchPath("mods/bf2142");
+		files.setMountingAllowed(true);
+		files.mountArchive("Levels/" + level + "/client.zip", "Levels/" + level + "/");
+		std::vector<uint8_t> data;
+		if (!files.readFile("Levels/" + level + "/terraindata.raw", data)) {
+			return std::nullopt;
+		}
+		return terrain::parseTerrainData(data);
+	};
+	const auto hamburg = load("Hamburg_Harbour");
+	CHECK(hamburg && hamburg->layers.size() == 6 && hamburg->meshes.has_value());
+	if (hamburg && hamburg->layers.size() == 6) {
+		CHECK(hamburg->layers[0].sideProjection && hamburg->layers[0].yOffset == 1);
+		CHECK(hamburg->layers[3].sideProjection && hamburg->layers[3].envMap && hamburg->layers[3].yOffset == 1);
+		CHECK(hamburg->layers[5].sideProjection && hamburg->layers[5].yOffset == 50 && !hamburg->layers[5].envMap);
+		CHECK(!hamburg->layers[1].sideProjection && !hamburg->layers[1].envMap);
+	}
+	const auto minsk = load("Minsk");
+	CHECK(minsk && minsk->layers.size() == 6 && minsk->meshes.has_value());
+	if (minsk && minsk->layers.size() == 6) {
+		CHECK(minsk->layers[1].sideProjection && minsk->layers[1].sideTiling[0] == 9);
+		for (size_t i = 1; i < 6; ++i) {
+			CHECK(minsk->layers[i].envMap);
+		}
+		CHECK(!minsk->layers[0].envMap && !minsk->layers[0].sideProjection);
+	}
 }
 
 // The main terrain's LOD cells (Render/TerrainLod.h) drawn from the compiled

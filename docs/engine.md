@@ -2835,7 +2835,15 @@ one) the system gets message 4 while the firearm is zoomed (its slot
 300, `0x005c1ba0`) and 1 while its fire state is above 0 (slot `0x1c`,
 `0x005c1b60`), each cleared otherwise (the system's slots `0x2c` /
 `0x34`), whatever the IK flag (`GameWorld::ikWeaponMessages`, in
-`poseSeated`; the bipods' 3p systems have no trigger on either). A
+`poseSeated`; the bipods' 3p systems have no trigger on either). The
+same setDucking sets the pose of the seat's system instance (PCO
+`+0x284`, the seatAnimationSystem's, whose slot `0x18` plays "die" at
+`0x005cee90`) through its slot `0x28`: 1 while ducking, 0 risen. The
+bipods' systems (`3p_eu_bipod_animSys.inc`) root at a PoseTrigger over
+`stand` (lookAround) and `duck` (lookAroundDuck, fading 0.2 s), so the
+sitter ducks behind the gun (the head 0.45 m lower); `poseSeated` and,
+on a joined client by the ghost's ducking, `animateRemoteSeated` hand it
+the pose (`Vehicles_BipodDuckPlaysTheDuckPose`). A
 straight arm (v1 ∥ v2) gives no plane to bend in, as in the original.
 
 ## The first-person view
@@ -3409,19 +3417,52 @@ and 3 take the maps' blue, 1 and 4 green, 2 and 5 red. The rewrite had
 read them red, green, blue, so layers 0 ↔ 2 and 3 ↔ 5 swapped on every
 level (terraindata.raw's lists confirm it: Camp_Gibraltar's list 0 lies
 where the map's blue is high, list 2 where red is). `terrain.frag`'s
-detailColor. Not done (found while tracing): a layer's per-material pass
-kind, which the rewrite draws as a plain top-down layer: a side-projected
-("mountain") layer (`+0x15`, pass 5 Hi_PS_FullDetailMounten: x and z planes
-from `<texture>_side`, or the texture itself, at (grid × sideTiling.x,
-height × −0.00615148 × sideTiling.y + yOffset), the y plane from the
-texture, weighted by saturate(|n| − vBlendMod)), used on 20-odd levels
-(Cerbere_Landing's rock_cerbere, Camp_Gibraltar's rock_desert); an
-envmap layer (`+0x28` with the current cube, pass 11
-FullDetailWithEnvMap: lerp to the cube's reflection by detail.a × (1 −
-interp)), on Belgrade, Minsk, Fall_of_Berlin, Liberation_of_Leipzig,
-Strike_at_Karkand, Tunis_Harbor, Verdun and Hamburg_Harbour; and the
-layer record's yOffset (a float, `100b2ea7`..`100b2ed9`), which
-TerrainData reads as an int and drops with the envmap byte.
+detailColor.
+
+**The layer kinds.** The layer record (terrain `+0x2cc`, read by
+`0x100b2bdc`..`0x100b2ed9`): the texture (`+4`), its `_normal`, the
+side texture `+0xc` (`<texture>_side` when the file exists, else the
+texture itself) and its `_sideNormal`, then from terraindata.raw a
+side-projection byte (`+0x15`), the side tiling (`+0x1c`, two floats),
+the tiling (`+0x18`), a float y offset (`+0x24`) and an envmap byte
+(`+0x28`). The LOD 0 pass (`0x1014e570`) picks each list's pass by its
+layer: 5 (Hi_PS_FullDetailMounten) when `+0x15` is set (any non-zero
+byte), with TEXLAYER6 the side texture; else 11
+(Hi_PS_FullDetailWithEnvMap) when `+0x28` is set and the EnvMapManager
+has a current cube (`+0x64`), with TEXLAYER6 that cube; else 4; and
+NEARTEXTILING = (side tiling, tiling, y offset). FullDetailMounten's
+detail is the y plane (the texture at the patch coordinate × tiling)
+plus the x and z planes (the side texture at (the patch coordinate
+across × sideTiling.x, height × −0.00615148 × sideTiling.y + yOffset),
+TerrainShader_Hi.fx tex.xy / tex.zy), blended by saturate(|n| −
+vBlendMod) over its sum; FullDetailWithEnvMap lights the detail as
+FullDetail, without the final × 2, and takes lerp(that, texCUBE(reflect(P
+− camera, (0, 1, 0))), detail.a × (1 − interp)) × 2. In the install's
+112 level folders (the retail levels, their coop and Titan16 variants and
+the community maps): side-projected layers in 50 (Camp_Gibraltar's
+rock_desert, Cerbere_Landing's rock_cerbere, Hamburg_Harbour's four with
+y offsets 1, 1 and 50, Yellow_Knife's 2, Dragon_Valley's 0.2, …),
+envmap layers in 26 (Belgrade, Minsk, Fall_of_Berlin,
+Liberation_of_Leipzig, Strike_at_Karkand, Tunis_Harbor, Verdun,
+Hamburg_Harbour, Titan_Arena, Artemis_Dock, …; a layer with both is
+side-projected), and no `_side` texture anywhere. Rewritten in `TerrainData` (`DetailLayer::yOffset`,
+`envMap`), `LevelRenderer::buildTerrain` (each layer's
+TerrainLayerKind, the first two `_side` textures) and `terrain.frag`'s
+detailBlend: still one pass, each layer's detail out lerp(2 × detail ×
+low, low, f) and an envmap layer's share k = detail.a × (1 − f), so the
+lit colour is lit × Σ w (1 − k) out / Σ w + 2 × cube × Σ w k / Σ w (the
+weighted sum of the original's additive passes). The terrain pipeline
+takes 16 samplers (the cube at 13, two side textures at 14 and 15): a
+level with more than two side-projected layers that have a `_side`
+texture would draw the third on with its own texture (none shipped
+does). FullDetail's own low-detail planes read the swapped coordinates
+(its x plane at Tex3.xy, the y plane × the near tiling; its z plane at
+the x plane's), but the primary patches' component map is (1, 0, 0), so
+the mountain term they feed is lerp(0.5, …, 0) and nothing shows.
+Screenshots (1280 × 720): Camp_Gibraltar's dunes and Cerbere_Landing's
+cliff lose the texture stretched down the slopes for the rock's strata;
+Minsk's and Tunis_Harbor's snow and tiles pick up the cube; levels with
+neither (Camp_Gibraltar_Winter, Aegis_Station) are unchanged.
 
 **Water.** RaShaderWaterBase.fx's `Water` pixel shader (the PS_20 variant
 with USE_FRESNEL and USE_SPECULAR, its 2D path): the normal is two frames of
@@ -4553,15 +4594,32 @@ fades; RendDX9's scene collectors (`0x100b8cd0`, `0x100b84b0`) build
 their filter with 2 (`0x101aa0a0`, slot 1 `0x101aa4b0`), and its three
 0x1000100 filters serve only the rays (manager slot 0x68). So no view
 skips the fade; the rewrite's overhead view, which draws unfaded, is a
-deviation. Not done: the children's second record. The walk
-(`0x006fe3b0`) visits each object of the tree with a render object
-(`+0x44`), with its own R (slot 0x8c × its template's cullRadiusScale)
-and origin, on the second record when R is under 0.8 × the root's, and
-a child faded to 0 hides with its subtree; the rewrite draws a vehicle's
-parts with its root's instance and fade. By the second record a part of
-under about 1.3 m (road wheels, small guns) would be gone from about
-40 m at the high geometry quality while its hull lasts to some 250 m;
-the per-vehicle radii weren't measured. (`allowEmoteAnimation`, once listed here, is read:
+deviation.
+
+**The parts fade with their root.** The walk (`0x006fe3b0`) steps a
+fade only for an object with a render object (`+0x44`): R = slot 0x8c ×
+the template's cullRadiusScale (slot 0x70), the first record when R is
+at least its threshold (`+0x20`, 0.8 × the root's or the nearest
+Soldier / PlayerControlObject's R, `0x006fb280`), else the second (p0 ×
+0.25 (*0x00a07f04), 0.5 (*0x00a07f08) × (`+0x140`)² × p2); one at 0 or
+less ends the walk there. A bundled mesh's geometryPart children have
+no render object of their own: the root's BundledMesh instance draws
+every part (its slot 0x5c counts them and slot 0x4c sets their matrices;
+hideChildrenOnSpectacularDeath hides the children by zeroing those,
+`0x00651c60`), and `0x0063d5e0` takes the children with a part and
+`+0x44` empty as the root's parts. Nor have collisionPart children a
+mesh instance (`+0x4c`). So a part is walked without a fade of its own
+and shows while its root does; only a child with a geometry of its own
+(its template's `geometry`, `0x006217e0`) is faded by itself. Slot 0x8c
+(`0x006f7ec0`) is the larger of the object's own radius (the collision
+instance's, `0x006e5ad0` → `0x006dedb0`: the collision mesh's first LOD
+`+0xc0`, whatever the part; else the render object's slot 0x44, plus the
+geometry's slot 0xe4 and the object's slot 0x94) and each child's offset
+plus the child's own slot 0x8c when that is above 0; a part child has
+neither instance, so it adds nothing. As the rewrite does: a vehicle's
+parts are drawn with its root's instance and fade. (A per-part fade
+tried on 2026-11-12, taking each part's vertex sphere for its R, left
+Camp_Gibraltar's AS_FAV without wheels at 55 m; taken out.) (`allowEmoteAnimation`, once listed here, is read:
 see the radio messages' emotes, `GameWorld::playEmote`.)
 
 ## The pure-server content check
@@ -10620,10 +10678,20 @@ Seeking projectiles (`seek.*`, `follow.*`):
   (regulatePosY −0.5/1.5, targetPosition 0/2/0,
   relativeYCollisionGroupInverse 3, enableOnStartMessage) holds it 2 m
   over what lies under it once started, as the IFV's mine's
-  (`GameWorld::hoverProjectile`). Not rewritten: its physicsType Mesh
-  (a Basic node with its collision mesh's box drag, drag 10 / mass 5, and
-  the Basic node's damping); the rewrite moves it as a Point node (its
-  drag as a 0.1 m sphere's, `physics::PointBody`).
+  (`GameWorld::hoverProjectile`). Its physicsType Mesh with
+  hasMobilePhysics makes a PhysicsNode.Basic (`0x005f6ba0` ->
+  `0x006c70c0`), whose tick (`0x006c9060`) drags it by its collision
+  mesh's vehicle LOD box (the mesh's slot `0x54(1)`; 0.227 x 0.227 x
+  0.197 m: the faces' areas x 0.785 x dragModifier, drag 10 / mass 5,
+  linear `0x006c7e00` and angular `0x006c8110`), then steps it with the
+  Basic node's 0.99 a tick damping (`0x006c8690`, `0x006c8380`); a round
+  doesn't sleep (the class `0x9493` test). `ProjectileSettings::basicNode`
+  / `boxSize` (`GameWorld::projectileFor`), `moveProjectile` through
+  `physics::RigidBody` and `applyDrag`, for every such round (the C4,
+  the AP and EMP mines, the sonars, the decoy and a few guns' rounds too;
+  without a box the 0.1 m sphere's drag, `0x006c5730`); its frame is
+  the round's own or along its nose (`Weapons_MeshRoundIsABasicNode`,
+  `Weapons_MotionMineHasItsBox`).
 - **The motion mine bait** (the booster's `Bp1_Motion_Mine_Bait`, its
   thrown `Bp1_Motion_Mine_Bait_Stationary` with a `MagneticBait` child: a
   TTMagnet TargetObject, `disableWhenEmptyVehicle` 0, `overrideArmingSpeed`
@@ -11174,8 +11242,26 @@ the top.
   client's minimap (`0x007918d0` case 0x33..0x37) keeps a marker of a
   teammate's call when the local player's kit can answer it (the kit's
   slot `0x38` bytes: 0 heal for 0x33 / 0x36 / 0x37, 2 ammunition, 1
-  repair; `mini_Medic`, `mini_Ammo`, `mini_Repair`, `mini_Revive`,
-  `0x0077ac70`) and flags its own (`+0x7c`..`+0x7e`): not rewritten.
+  repair; `+0x7f`, which would take any call, has only the constructor's
+  0): the caller's marker goes (`0x007845c0`) and one of type 4 takes its
+  place for `+0xac8` = 12 s (`0x00790d60`) in the call's icon (slot
+  `0x110`, `0x0077ac70`: `mini_Medic`, `mini_Ammo`, `mini_Repair`,
+  `mini_Revive`); the local player's own call sets `+0x7c` (medic,
+  revive), `+0x7d` (ammunition) or `+0x7e` (repair) for one draw: each
+  teammate drawn whose kit answers it (`0x00792980` soldiers, `0x00793b60`
+  a vehicle's rider) gets that icon's marker with no time and a 12 s
+  delay, unless he has a marker, and `0x00795620` clears the flags at its
+  end. A frame (`0x007840c0`) counts a marker's delay down, then its
+  time, and drops it with neither left; a teammate with one is drawn in
+  its icon at 16 px (`0x007841e0` -> slot `0xf0`) over the rest (layers
+  0x1b..0x1d, `0x007829c0`). `menu::MapCalls`, fed where the name tags
+  hear the calls (`heardCall`: the local player's own, a hosted game's
+  `onSpotted`, a joined client's 2/0x33..0x37) and drawn by `updateMap`
+  (`HudMap_RadioCallMarkers`). Offline the bots never call (AIDLL's
+  "medic" is a plain RadioMessage), so only the local player's own call
+  marks his medics. The edge arrow (`+0xa5c` mini_MedicArrow, for a
+  marker clamped to the map's edge) isn't drawn: the HUD's markers aren't
+  clamped.
   `setSpottedMenuActive` (`0x268`, the middle button's alternate command)
   shows the spotted rose (`SpottedInterfaceShow`, whose buttons say
   `game.radioMessage TCTeam <kind>_spotted`). `sendSpottedMessage <bool>

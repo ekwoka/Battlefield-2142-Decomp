@@ -4840,6 +4840,30 @@ const ProjectileSettings* GameWorld::projectileFor(const std::string& projectile
 					projectile->tracerGeometry = tracer->geometry();
 				}
 			}
+			// A Basic node's box (0x006c9060: the vehicle LOD's bounds).
+			// collisionMesh or setCollisionMesh (the motion mine's) name the
+			// same field.
+			auto meshName = p->settings().find("setCollisionMesh");
+			if (meshName == p->settings().end()) {
+				meshName = p->settings().find("collisionMesh");
+			}
+			const physics::CollisionMeshFile* mesh = projectile->basicNode && m_files && m_collisionTemplates
+					&& meshName != p->settings().end()
+				? m_collisionTemplates->mesh(meshName->second, *m_files)
+				: nullptr;
+			if (mesh && !mesh->geometries.empty()) {
+				physics::Vec3 low {1e30f, 1e30f, 1e30f}, high {-1e30f, -1e30f, -1e30f};
+				for (const auto& part : physics::collisionParts(*mesh, 0)) {
+					if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
+						low = {std::min(low.x, lod->boundsMin[0]), std::min(low.y, lod->boundsMin[1]), std::min(low.z, lod->boundsMin[2])};
+						high = {std::max(high.x, lod->boundsMax[0]), std::max(high.y, lod->boundsMax[1]),
+							std::max(high.z, lod->boundsMax[2])};
+					}
+				}
+				if (high.x >= low.x) {
+					projectile->boxSize = high - low;
+				}
+			}
 			// A ForceObject child holding the round over the ground (the
 			// IFV's mine's eu_ifv_laserguided_mine_FO; hoverProjectile).
 			for (const world::ChildTemplate& child : p->children()) {
@@ -8117,6 +8141,18 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	// its clip.
 	anim::AnimationInput look;
 	look.lookAroundY = std::clamp(std::remainder(player.seatBodyYaw / 360.0f, 2.0f), -1.0f, 1.0f);
+	// The seat's ducking (PCO +0x18c): a seat with allowDucking (+0x468)
+	// ducks on kPICrouch (0x005ca2e0), and its setDucking (0x005c7cf0) sets
+	// the pose of the seat's system instance (+0x284, the
+	// seatAnimationSystem's, whose slot 0x18 plays "die" at 0x005cee90)
+	// through its slot 0x28: 1 ducking, 0 risen. The bipods' PoseTrigger
+	// root takes its child by it (stand, duck: lookAroundDuck).
+	bool ducking = false;
+	if (player.input.pose == SoldierPose::Crouch) {
+		const world::ObjectTemplate* seatTemplate = m_templates.find(seat.name);
+		ducking = seatTemplate && number(*seatTemplate, "allowDucking", 0) != 0;
+	}
+	look.pose = ducking ? 1 : 0;
 	look.messages = player.seatMessages;
 	if (vehicleObject && vehicleObject->objectTemplate()) {
 		look.messages = ikWeaponMessages(*vehicleObject->objectTemplate(), seat, player.zoomed, player.input.fire, look.messages);
@@ -8134,12 +8170,7 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	// (0x005cee90's die bundle; the seated corpses here have no IK).
 	std::vector<anim::IkTarget> targets;
 	const physics::Vec3 place {at.x, at.y, at.z};
-	bool ikOff = false;
-	if (player.input.pose == SoldierPose::Crouch) {
-		const world::ObjectTemplate* seatTemplate = m_templates.find(seat.name);
-		ikOff = seatTemplate && number(*seatTemplate, "allowDucking", 0) != 0;
-	}
-	if (!ikOff && seatIkTargets(player.vehicle, player.skeleton, seat, rotation, place, targets)) {
+	if (!ducking && seatIkTargets(player.vehicle, player.skeleton, seat, rotation, place, targets)) {
 		player.worldPose = anim::worldMatricesWithIk(*player.skeleton, player.pose, targets);
 	} else {
 		player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
@@ -8673,6 +8704,10 @@ void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatI
 	// The seat's LookAroundTrigger: the body's turn / 360 (poseSeated).
 	anim::AnimationInput look;
 	look.lookAroundY = std::clamp(std::remainder(bodyYaw / 360.0f, 2.0f), -1.0f, 1.0f);
+	// The ghost's ducking reaches the seat's setDucking (0x005ffec0 ->
+	// 0x005c7cf0), which sets the seat system's pose (slot 0x28) as on the
+	// server (poseSeated).
+	look.pose = ducking ? 1 : 0;
 	remote.seat->update(look, seconds);
 	remote.seat->takeEvents();
 	std::vector<bool> touched;
