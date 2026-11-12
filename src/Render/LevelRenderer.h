@@ -600,9 +600,11 @@ private:
 	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
 	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
 	// The objects' distance fade this frame (DistanceFade.h): off for the
-	// commander's overhead view, whose camera sits hundreds of metres up
-	// (the walk's filter flag 0x1000000 keeps every object; which views set
-	// it isn't traced).
+	// commander's overhead view, whose camera sits hundreds of metres up.
+	// A deviation: the walk's filter flag 0x1000000 that skips the fade is
+	// set only by the AI's queries (BF2142.exe 0x0089b860, slot 1
+	// 0x00897af0); RendDX9's scene filters pass 2 (0x101aa0a0), so the
+	// original's overhead view fades by its own camera.
 	bool m_distanceFadeOn = true;
 	// This frame's close distance: the script's scale, or the quality's
 	// once the video settings change it after the level's script ran (the

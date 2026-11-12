@@ -85,6 +85,9 @@ constexpr float kMaxSpeed = 1500;               // 0x00a84ae8
 constexpr float kMaxContactImpulse = 1000;      // 0x00a83ea4
 constexpr float kFrictionScale = 1;             // 0x00a83eb8
 constexpr float kElasticityScale = 1;           // 0x00a83ebc
+constexpr float kStuckPush = 0.5f;              // *0x00a84238 (static_init 0x008ed7b0)
+constexpr float kStuckPushScale = 100;          // *0x00a8425c (0x008ed7d0)
+constexpr int kStuckCount = 3;                  // *0x00a84224 (0x008ed7f0)
 } // namespace tuning
 
 // The material properties a contact uses (MaterialManager slots 0x80-0x88:
@@ -165,8 +168,17 @@ public:
 	// `pointVelocity`, `depth` (negative) into a surface with `normal`.
 	void addContact(const Vec3& offset, const Vec3& pointVelocity, const Vec3& normal, float depth,
 		const ContactMaterial& material);
-	// Slot 0x30: push the body out and apply the contacts' impulses.
-	void solve(RigidBody& body);
+	// Slot 0x30: push the body out and apply the contacts' impulses. On
+	// the server (`server`, the game logic's slot 0x144) it also keeps the
+	// stuck push (0x006ba7d0): a counter (+0x118, -1 each solve and held
+	// within -1..3, +2 for a push over *0x00a84238 = 0.5 m) that, at
+	// *0x00a84224 = 3 or more, makes the stuck push (+0x11c, 0 at each
+	// solve's start) (sqrt(the largest push^2 yet, +0x114) - 0.5) x
+	// *0x00a8425c = 100: from the third solve running with such a push.
+	void solve(RigidBody& body, bool server = false);
+	// +0x11c: the mesh pass's collision events (0x006bb050, 0x6bc8b4 /
+	// 0x6bc8f6) take the mover's relative velocity x (1 + this).
+	float stuckPush() const { return m_stuckPush; }
 	// The MechLegs response's slot 0x30 (0x006ce740), for a walker whose
 	// contacts are its legs' sphere's only: nothing at all unless the push
 	// out (+0x1ac) is non-zero; then the push and each contact's impulse as
@@ -187,6 +199,9 @@ public:
 
 private:
 	Vec3 m_pushOut; // 0x94: the largest push per axis
+	float m_largestPush = 0; // 0x114: the largest |push|^2 since its creation (0x006ba0d0)
+	int m_stuckCount = -1;   // 0x118
+	float m_stuckPush = 0;   // 0x11c
 	std::vector<Contact> m_contacts;
 };
 

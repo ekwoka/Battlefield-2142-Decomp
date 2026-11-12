@@ -60,8 +60,9 @@
 // passes its team's force fields. A wheel's probes go to the wheel's own
 // response (Vehicle::touchObject). Sleeping nodes are no movers.
 //
-// Not modelled: the response's stuck push (+0x11c) scaling the events'
-// velocity, and a static's vertices into a wheel's three-vertex LOD.
+// The response's stuck push (+0x11c, ContactResponse::solve) scales both
+// events' velocity (addMeshContact). Not modelled: a static's vertices
+// into a wheel's three-vertex LOD.
 #include "GameWorld.h"
 
 #include "Physics/CollisionWorld.h"
@@ -613,7 +614,7 @@ void GameWorld::solveParts(Body& body)
 {
 	for (Body::PartMesh& part : body.partMeshes) {
 		if (part.mover) {
-			part.response.solve(body.body);
+			part.response.solve(body.body, !m_predicting);
 		} else {
 			part.response.clear();
 		}
@@ -1071,6 +1072,10 @@ bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOn
 physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const Vec3& point, const Vec3& normal,
 	float depth, uint32_t materialA, uint32_t materialB, bool trunkPass, bool toA)
 {
+	const auto responseOf = [](MeshActor& actor) -> physics::ContactResponse& {
+		return actor.partMesh >= 0 ? actor.body->partMeshes[static_cast<size_t>(actor.partMesh)].response
+								   : actor.body->response;
+	};
 	const Vec3 relative = a.pointVelocity(point) - b.pointVelocity(point);
 	const float approach = physics::dot(relative, normal);
 	if (trunkPass && approach < 0) {
@@ -1083,8 +1088,13 @@ physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const 
 	const uint32_t objectB = b.body ? b.body->object : b.part ? b.part->object : 0;
 	const float speed = physics::lengthSquared(relative);
 	if (speed > kEventSpeed || materialB == kKillMaterial) {
-		collisionEvent(objectA, objectB, relative, normal, point - a.position, materialA, materialB);
-		collisionEvent(objectB, objectA, -relative, normal, point - b.position, materialB, materialA);
+		// Both events' velocity x (1 + A's response's stuck push), which its
+		// last solve set (0x6bc8b4 / 0x6bc8f6 read +0x11c of the mover's
+		// response; ContactResponse::solve): a mover pushed out over 0.5 m
+		// three solves running hits with many times its speed.
+		const float stuck = a.body ? 1.0f + responseOf(a).stuckPush() : 1.0f;
+		collisionEvent(objectA, objectB, relative * stuck, normal, point - a.position, materialA, materialB);
+		collisionEvent(objectB, objectA, -relative * stuck, normal, point - b.position, materialB, materialA);
 	}
 	// The contact effect (0x6bcab2), past both nodes' handleCollisionSpeed:
 	// in A's root's response if only A is mobile, B's if A is not, the
@@ -1115,11 +1125,7 @@ physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const 
 		a.body->support = b.body->object;
 	}
 	// Each side's response: a part's own (the part's slot 0x2c; its solve
-	// moves the root, solveParts), else the root's.
-	const auto responseOf = [](MeshActor& actor) -> physics::ContactResponse& {
-		return actor.partMesh >= 0 ? actor.body->partMeshes[static_cast<size_t>(actor.partMesh)].response
-								   : actor.body->response;
-	};
+	// moves the root, solveParts), else the root's (responseOf).
 	if (shares.velocityA != 0 && a.body && toA) {
 		responseOf(a).addContact(point - a.position, relative * shares.velocityA, normal, depth * shares.depthA,
 			material);

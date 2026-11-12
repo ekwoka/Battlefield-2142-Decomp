@@ -2050,9 +2050,33 @@ TEST(Ik_DriverHoldsTheWheel)
 		game.world->tick(1 / 30.0f);
 	}
 	CHECK(wrist() > 0.01f);
+	// The seat's ducking as the server networks it (SimpleObject 0x100000
+	// on the root, a seat ghost's bit 8: HostedGame::statesOf).
+	CHECK(game.world->seatDucking(vehicle, 0));
 	game.world->setPlayerInput({});
 	game.world->tick(1 / 30.0f);
 	CHECK(wrist() < 1e-3f);
+	CHECK(!game.world->seatDucking(vehicle, 0));
+	// The wheel isn't a firearm: no weapon layers (0x005ef250's 0x94c0 test).
+	const auto carSeats = game.world->vehicleSeats(vehicle);
+	CHECK(!carSeats.empty() && game.world->ikWeaponMessages(*car, carSeats[0], true, true, 2) == 2);
+	// A joined client's seated soldier: the ghost's ducking reaches the
+	// seat's setDucking (0x005ffec0 -> slot 0x12c, 0x005c7cf0), which turns
+	// his IK off as on the server (animateRemoteSeated).
+	const uint32_t other = game.objects.create(game.templates.find("us_light_soldier"), {3, 1.2f, 0})->id();
+	const auto remoteWrist = [&](bool ducking) {
+		for (int i = 0; i < 5; ++i) {
+			game.world->animateRemoteSeated(other, vehicle, 0, 0, 1 / 30.0f, ducking);
+		}
+		std::vector<anim::Matrix> pose;
+		game.world->skeletonPose(other, *skeleton, pose);
+		const anim::Matrix& m = pose[static_cast<size_t>(leftWrist)];
+		return physics::Vec3 {m[12], m[13], m[14]};
+	};
+	const physics::Vec3 holding = remoteWrist(false), ducked = remoteWrist(true);
+	std::fprintf(stderr, "  remote seat: the left wrist moves %.3f off the grip while ducking\n", distance(holding, ducked));
+	CHECK(distance(holding, ducked) > 0.01f);
+	CHECK(distance(remoteWrist(false), holding) < 1e-4f);
 }
 
 // The combat areas (CombatAreaManager / CombatArea, 0x004bbf60): outside

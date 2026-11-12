@@ -5,15 +5,23 @@
 // and wear its shield and then its hull down, the core's sequence (four
 // consoles, the doors, the core) destroys a Titan, the commander's order
 // moves it, and gpm_ti.py keeps the tickets and ends the round.
+#include "Console/Vars.h"
 #include "Game/Bots.h"
+#include "Game/GameLogic.h"
+#include "Main/HostedGame.h"
+#include "Net/GameClient.h"
+#include "Net/GhostLayout.h"
 #include "TitanLevel.h"
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 
 using namespace dice::hfe;
 using titantest::TitanLevel;
@@ -468,6 +476,196 @@ TEST(Titan_ClientSyncMovesAsTheServer)
 	CHECK(worst < 1e-3f);
 	const world::Vec3 now = server.objects.find(real[1])->position();
 	CHECK(std::fabs(now.x - before.x) + std::fabs(now.z - before.z) > 10); // it went on moving
+}
+
+// A joined client's Titans take their height and heading from CreateObject:
+// the server's always says one ghost with the root's place and its
+// rotation in degrees, as floats (0x0050b0f0 sets +0x30 to 1; 0x004ab8a0
+// and the late-join replay), and the client numbers the tree's ghosts
+// from it (0x004b3f70 -> 0x0067d3d0); a Titan's mode mask (0x005fdce0,
+// 0xf61270) keeps its place and orientation out of every ghost write,
+// its first state included (0x0057f420). So the client's Titan stands
+// where the server's does to the bit, turned as it is (Minsk's EU Titan
+// by -4.964 degrees), not by a 14-bit quaternion.
+TEST(Titan_JoinedClientPlacedByCreateObject)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	CHECK(level.loaded && level.world->titans().size() == 2);
+	if (!level.loaded || level.world->titans().size() != 2) {
+		return;
+	}
+	game::GameLogic logic;
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Minsk";
+	setup.gameMode = "gpm_ti";
+	setup.mapSize = 48;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	client.world().setGhostTemplates([&level](uint32_t id) {
+		const world::ObjectTemplate* t = level.templates.findById(id);
+		return t ? net::ghostTemplateFrom(level.templates, *t) : net::GhostTemplateNode {};
+	});
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto titanGhost = [&](const game::GameWorld::TitanInfo& t) -> const net::RemoteObject* {
+		const world::Object* o = level.objects.find(t.object);
+		for (const net::RemoteObject& g : client.world().objectList()) {
+			if (o && g.part == 0 && g.templateId == o->objectTemplate()->id()) {
+				return client.world().object(g.ghost);
+			}
+		}
+		return nullptr;
+	};
+	int updates = 0;
+	for (int frame = 0; frame < 4000 && updates < 90; ++frame) {
+		client.update();
+		hosted.tick();
+		level.world->tick(1 / 30.0f);
+		bool both = true;
+		for (const auto& t : level.world->titans()) {
+			const net::RemoteObject* g = titanGhost(t);
+			both = both && g && g->health >= 0; // a state of its own read
+		}
+		updates += both ? 1 : 0;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	CHECK(updates >= 90);
+	for (const auto& t : level.world->titans()) {
+		const world::Object* o = level.objects.find(t.object);
+		const net::RemoteObject* g = titanGhost(t);
+		CHECK(o && g);
+		if (!o || !g) {
+			continue;
+		}
+		CHECK(g->hasPosition && !g->hasOrientation);
+		CHECK(g->position.x == o->position().x && g->position.y == o->position().y && g->position.z == o->position().z);
+		CHECK(g->rotation.x == o->rotation().x && g->rotation.y == o->rotation().y && g->rotation.z == o->rotation().z);
+		// Every ghost of the tree from the one CreateObject.
+		const net::RemoteObject* seat = client.world().object(static_cast<uint16_t>(g->ghost + 1));
+		CHECK(seat && seat->rootGhost == g->ghost);
+	}
+	bool turned = false;
+	for (const auto& t : level.world->titans()) {
+		turned = turned || std::fabs(level.objects.find(t.object)->rotation().x + 4.964f) < 1e-3f;
+	}
+	CHECK(turned);
+	client.disconnect();
+}
+
+// OptimizeEnclosingObjectsNetworking (a var, 0 by default): a client whose
+// soldier stands in a Titan's hull (the soldier's node +0x120, slot 0xa8
+// of its +0x18c, 0x00585cb0) doesn't get the soldiers enclosed otherwise
+// more than 20 m away scored, or at 0.01 with GhostNotEnclosed
+// (0x0057d560). Here an enemy 60 m off the EU Titan, outside it, walking:
+// its ghost's updates in 3 s, the var off, on, and on with
+// GhostNotEnclosed.
+TEST(Titan_EnclosedClientLeavesOutsideSoldiersUnscored)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	const auto* titan = level.loaded ? level.titan(2) : nullptr;
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	const world::Object* titanObject = level.objects.find(titan->object);
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({titanObject->rotation().x, titanObject->rotation().y, titanObject->rotation().z});
+	const physics::Vec3 inside = physics::Vec3 {titanObject->position().x, titanObject->position().y, titanObject->position().z}
+		+ turn.transform({0, -0.081f, -53.4f + 18});
+	game::GameLogic logic;
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Minsk";
+	setup.gameMode = "gpm_ti";
+	setup.mapSize = 48;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Inside";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const int enemy = level.world->addPlayer("Outside", 1, true);
+	CHECK(level.world->spawnSoldier(enemy));
+	int me = -1;
+	float x = 0;
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		game::GameWorld::PlayerInfo info;
+		if (me >= 0 && level.world->playerInfo(me, info) && info.alive) {
+			level.world->setSoldierPosition(info.soldier, inside);
+		}
+		if (level.world->playerInfo(enemy, info) && info.alive) {
+			x += 0.1f;
+			level.world->setSoldierPosition(info.soldier, inside + turn.transform({60, 0, std::fmod(x, 10.0f)}));
+		}
+		level.world->tick(1 / 30.0f);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	};
+	const auto pump = [&](const std::function<bool()>& done, int milliseconds) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+		while (std::chrono::steady_clock::now() < deadline) {
+			step();
+			if (done()) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(pump([&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 8000));
+	me = client.world().localPlayer();
+	client.selectTeam(2);
+	game::GameWorld::PlayerInfo info;
+	CHECK(pump([&] { return level.world->playerInfo(me, info) && info.team == 2; }, 4000));
+	client.selectSpawnGroup(-1);
+	CHECK(pump([&] { return level.world->playerInfo(me, info) && info.alive; }, 8000));
+	step();
+	CHECK(level.world->enclosingTitan(me) == titan->object);
+	CHECK(level.world->enclosingTitan(enemy) == 0);
+	const auto updates = [&] {
+		const net::RemotePlayer* p = client.world().player(enemy);
+		const net::RemoteObject* o = p && p->soldierGhost ? client.world().object(p->soldierGhost) : nullptr;
+		return o ? o->updates : 0u;
+	};
+	const auto during = [&](int ticks) {
+		const uint32_t from = updates();
+		for (int i = 0; i < ticks; ++i) {
+			step();
+		}
+		return updates() - from;
+	};
+	Vars& vars = Vars::global();
+	during(60);
+	const uint32_t off = during(90);
+	vars.set("OptimizeEnclosingObjectsNetworking", "1");
+	during(15);
+	const uint32_t on = during(90);
+	vars.set("GhostNotEnclosed", "1");
+	during(15);
+	const uint32_t notEnclosed = during(90);
+	vars.set("OptimizeEnclosingObjectsNetworking", "0");
+	vars.set("GhostNotEnclosed", "0");
+	std::fprintf(stderr, "  the enemy outside: %u updates in 3 s, %u with the var, %u with GhostNotEnclosed too\n", off, on,
+		notEnclosed);
+	CHECK(off > 20);
+	CHECK(on == 0);
+	CHECK(notEnclosed > 0);
+	client.disconnect();
 }
 
 // Minsk_Titan16 (gpm_ti 16): its own archives' Titans and silos

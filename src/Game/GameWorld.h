@@ -318,7 +318,10 @@ public:
 	// (the server's, which carries the seat's mount); the turn is the
 	// vehicle object's with the seat's own (a mount's turret turn and the
 	// hands' IK aren't networked to the client: not applied).
-	void animateRemoteSeated(uint32_t object, uint32_t vehicle, int seat, float bodyYaw, float seconds);
+	// `ducking`: the seat's (its ghost's bit 8, or the root's 0x100000),
+	// which lets the hands' grips go (0x005c7cf0 -> the soldier's +0x2ea).
+	void animateRemoteSeated(uint32_t object, uint32_t vehicle, int seat, float bodyYaw, float seconds,
+		bool ducking = false);
 	// A joined client's vehicle ghost with a bundleAnimationSystem (the
 	// mechs): the exe's client runs every object's skeleton helper in its
 	// own update (the object base's 0x0063d5b0 -> 0x0063d2f0, then
@@ -1597,6 +1600,22 @@ public:
 	// PIFlareFire) as an index into its SeatLayout::weapons (-1 none), and
 	// any of its weapons' state (nullptr before the seat was first taken).
 	int seatWeaponIndex(uint32_t vehicle, int seat, int group = 0) const;
+	// A seat's ducking (PCO +0x18c, object +0x310; setDucking, slot 0x12c,
+	// 0x005c7cf0): 0x005ca2e0 sets it from its occupant's kPICrouch when
+	// the seat's template has allowDucking (the shipped bipods'). Its
+	// soldier lets go of the grips while it ducks (poseSeated).
+	bool seatDucking(uint32_t vehicle, int seat) const;
+	// The Titan whose hull holds the player's soldier on foot (0 none): the
+	// soldier's node +0x120 (slot 0xec; the soldier's +0x18c slot 0xa8,
+	// 0x00585cb0), set by the response (0x006c3890) when its origin is
+	// inside a Titan's hull LOD (insideTitanHull). The ghost priorities'
+	// OptimizeEnclosingObjectsNetworking reads it (HostedGame::rescore).
+	uint32_t enclosingTitan(int player) const;
+	// The seat's third-person system's messages for an IK object that is a
+	// firearm (0x005ef250's weapon layers): `messages` with 4 while it is
+	// zoomed and 1 while its fire state is above 0, else without them.
+	uint32_t ikWeaponMessages(const world::ObjectTemplate& vehicle, const SeatLayout& seat, bool zoomed, bool firing,
+		uint32_t messages) const;
 	const FireArm* seatFireArm(uint32_t vehicle, int seat, int index) const;
 	// The active defence's shield on a vehicle now: its radius (0 none).
 	float shieldRadius(uint32_t vehicle) const;
@@ -2897,6 +2916,7 @@ private:
 		physics::Vec3 grips[2][3];
 	};
 	mutable std::map<std::pair<const world::ObjectTemplate*, std::string>, IkPath> m_ikPaths;
+	const IkPath& seatIkPath(const world::ObjectTemplate& root, const SeatLayout& seat) const;
 	bool disabled(const Body& body) const { return body.empLevel > 0 || body.wreckTime >= 0; }
 
 	void seatPlayer(Player& player, Body& body, int seat);

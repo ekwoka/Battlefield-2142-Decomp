@@ -287,6 +287,9 @@ void Vehicle::updateParts(float seconds)
 				float in = part.autoRotating ? 1.0f
 					: part.inputs[axis] >= 0  ? vehicleInputValue(m_regulated, part.inputs[axis])
 											  : 0.0f;
+				if (part.liftRegulated) {
+					in = part.liftRegulator; // 0x0064fd40: +0x1a4 = +0x24c before the step
+				}
 				in = bankExcessInput(part, axis, in);
 				rotationAxisStep(part.axes[axis], in, seconds, part.angle[axis], part.rate[axis]);
 			}
@@ -530,7 +533,16 @@ void Vehicle::engineForce(OldEngine& e, physics::RigidBody& body, const physics:
 // the lift orientation is the part's frame turned by the flap's share of
 // the pitch less pitchOffset about x; the air's velocity at the wing
 // (positionOffset from it) through the lift curve, x 50 under water,
-// within +-200, pushes against the wing's normal.
+// within +-200, pushes against the wing's normal. A liftRegulated wing
+// then sets its flap's next input (the node's tail, 0x006cbae8..0x006cbbe5,
+// into the object's +0x24c): the lift curve (no air density, water or
+// clamp) for the speed straight along the nose (|v| x the root's row 2) on
+// the wing as it is, plus wingToRegulatorRatio x the same on the wing with
+// the flap's share out (0x0064fbf0: turned by -pitchOffset alone), and
+// (that + regulateToLift) x gravity x 0.101833 (*0x00993e70) within +-1:
+// with gravity -14.73 a gain of -1.5 steering the lift to regulateToLift.
+// The shipped wings that set it (two BF2 conversions' jetski and BMP-3)
+// have no pitch speed, so their flap never moves.
 void Vehicle::updateWing(WingPart& w, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 	float gravity)
 {
@@ -539,10 +551,18 @@ void Vehicle::updateWing(WingPart& w, physics::RigidBody& body, const physics::G
 		return;
 	}
 	const float total = w.wingLift + w.flapLift;
-	if (total == 0 || w.part < 0) {
+	if (w.part < 0) {
 		return;
 	}
-	const Part& part = m_parts[static_cast<size_t>(w.part)];
+	Part& part = m_parts[static_cast<size_t>(w.part)];
+	if (total == 0) {
+		// The node runs on with a scale of 0: no force, the regulator at
+		// regulateToLift alone.
+		if (w.liftRegulated) {
+			part.liftRegulator = std::clamp(w.regulateToLift * gravity * -kSpringScale, -1.0f, 1.0f);
+		}
+		return;
+	}
 	const float a1 = std::clamp(((part.angle[1] * w.multiply + w.offsetY) * w.flapLift) / total - w.pitchOffset, -360.0f,
 		360.0f);
 	const Mat3 parent = part.parent >= 0 ? m_parts[static_cast<size_t>(part.parent)].rotation : Mat3 {};
@@ -556,6 +576,13 @@ void Vehicle::updateWing(WingPart& w, physics::RigidBody& body, const physics::G
 	l = sea <= p.y ? l * airDensity(p.y) : l * 50.0f;
 	l = std::clamp(l, -200.0f, 200.0f);
 	body.addForce(p - body.position, n * -l);
+	if (w.liftRegulated) {
+		const Vec3 nose = body.rotation.rows[2] * length(relative);
+		const float a0 = std::clamp(-w.pitchOffset, -360.0f, 360.0f);
+		const Mat3 neutral = Mat3::fromYawPitchRoll({0, a0, 0}) * part.base * parent * body.rotation;
+		const float regulated = wingLift(nose, n, scale) + wingLift(nose, neutral.rows[1], scale) * w.wingToRegulatorRatio;
+		part.liftRegulator = std::clamp((regulated + w.regulateToLift) * gravity * -kSpringScale, -1.0f, 1.0f);
+	}
 }
 
 // A ForceObject (0x0062c920 with 0x0062b750): its force along its forward

@@ -8118,6 +8118,9 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	anim::AnimationInput look;
 	look.lookAroundY = std::clamp(std::remainder(player.seatBodyYaw / 360.0f, 2.0f), -1.0f, 1.0f);
 	look.messages = player.seatMessages;
+	if (vehicleObject && vehicleObject->objectTemplate()) {
+		look.messages = ikWeaponMessages(*vehicleObject->objectTemplate(), seat, player.zoomed, player.input.fire, look.messages);
+	}
 	player.seatAnimation->update(look, seconds);
 	std::vector<bool> touched;
 	player.seatAnimation->apply(*player.skeleton, player.pose, touched);
@@ -8189,34 +8192,10 @@ bool GameWorld::seatPartPose(uint32_t object, const std::string& part, world::Ve
 	return !remote && partPose(object, part, offset, rotation);
 }
 
-bool GameWorld::seatIkTargets(uint32_t vehicleId, const anim::Skeleton* skeleton, const SeatLayout& seat,
-	const physics::Mat3& soldierRotation, const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets,
-	bool remote) const
+// A seat's IK object (0x005ee910 finds it as the soldier enters; the tree
+// doesn't change, so its path is kept by template and seat).
+const GameWorld::IkPath& GameWorld::seatIkPath(const world::ObjectTemplate& root, const SeatLayout& seat) const
 {
-	const world::Object* vehicle = vehicleId ? m_objects.find(vehicleId) : nullptr;
-	if (!vehicle || !vehicle->objectTemplate() || !skeleton) {
-		return false;
-	}
-	const anim::IkArms arms = anim::ikArms(*skeleton);
-	if (arms.leftBone < 0 && arms.rightBone < 0) {
-		return false;
-	}
-	const uint32_t object = vehicle->id();
-	const auto childFrame = [&](const world::ChildTemplate& child, const PartFrame& parent) {
-		PartFrame f {physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}),
-			{child.position.x, child.position.y, child.position.z}};
-		f = f.in(parent);
-		world::Vec3 offset, turn;
-		if (seatPartPose(object, child.name, offset, turn, remote)) {
-			const PartFrame posed {physics::Mat3::fromYawPitchRoll({turn.x, turn.y, turn.z}), {offset.x, offset.y, offset.z}};
-			f = posed.in(f);
-		}
-		return f;
-	};
-	// The IK object's place in the tree (0x005ee910 finds it as the soldier
-	// enters; the tree doesn't change, so the path is kept by template and
-	// seat).
-	const world::ObjectTemplate& root = *vehicle->objectTemplate();
 	const auto key = std::make_pair(&root, seat.name);
 	auto cached = m_ikPaths.find(key);
 	if (cached == m_ikPaths.end()) {
@@ -8295,14 +8274,63 @@ bool GameWorld::seatIkTargets(uint32_t vehicleId, const anim::Skeleton* skeleton
 		}
 		cached = m_ikPaths.emplace(key, std::move(found)).first;
 	}
-	const world::ObjectTemplate* found = cached->second.ik;
+	return cached->second;
+}
+
+// 0x005ef250's third-person branch: with an IK object (+0x2d0, found by
+// 0x005ee910) of an Ik component (+0x2d4) that is a firearm (interface
+// 0x94c0: the bipods' as_mg_stationary, eu_mg_stationary and
+// unl_hmg_stationary, the only shipped firearms with one), the system
+// gets message 4 while the firearm is zoomed (its slot 300, 0x005c1ba0:
+// the zoom component's level) and 1 while its fire state is above 0 (slot
+// 0x1c, 0x005c1b60: 1 pressed, 2 held), each cleared otherwise (the
+// system's slots 0x2c / 0x34), whatever the soldier's IK flag.
+uint32_t GameWorld::ikWeaponMessages(const world::ObjectTemplate& vehicle, const SeatLayout& seat, bool zoomed, bool firing,
+	uint32_t messages) const
+{
+	const world::ObjectTemplate* ik = seatIkPath(vehicle, seat).ik;
+	if (!ik || ik->typeName() != "GenericFireArm") {
+		return messages;
+	}
+	messages = zoomed ? messages | 4u : messages & ~4u;
+	return firing ? messages | 1u : messages & ~1u;
+}
+
+bool GameWorld::seatIkTargets(uint32_t vehicleId, const anim::Skeleton* skeleton, const SeatLayout& seat,
+	const physics::Mat3& soldierRotation, const physics::Vec3& soldierPosition, std::vector<anim::IkTarget>& targets,
+	bool remote) const
+{
+	const world::Object* vehicle = vehicleId ? m_objects.find(vehicleId) : nullptr;
+	if (!vehicle || !vehicle->objectTemplate() || !skeleton) {
+		return false;
+	}
+	const anim::IkArms arms = anim::ikArms(*skeleton);
+	if (arms.leftBone < 0 && arms.rightBone < 0) {
+		return false;
+	}
+	const uint32_t object = vehicle->id();
+	const auto childFrame = [&](const world::ChildTemplate& child, const PartFrame& parent) {
+		PartFrame f {physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}),
+			{child.position.x, child.position.y, child.position.z}};
+		f = f.in(parent);
+		world::Vec3 offset, turn;
+		if (seatPartPose(object, child.name, offset, turn, remote)) {
+			const PartFrame posed {physics::Mat3::fromYawPitchRoll({turn.x, turn.y, turn.z}), {offset.x, offset.y, offset.z}};
+			f = posed.in(f);
+		}
+		return f;
+	};
+	// The IK object's place in the tree (seatIkPath).
+	const world::ObjectTemplate& root = *vehicle->objectTemplate();
+	const IkPath& ikPath = seatIkPath(root, seat);
+	const world::ObjectTemplate* found = ikPath.ik;
 	if (!found) {
 		return false;
 	}
 	PartFrame foundFrame {
 		physics::Mat3::fromYawPitchRoll({vehicle->rotation().x, vehicle->rotation().y, vehicle->rotation().z}),
 		{vehicle->position().x, vehicle->position().y, vehicle->position().z}};
-	for (const world::ChildTemplate* child : cached->second.path) {
+	for (const world::ChildTemplate* child : ikPath.path) {
 		foundFrame = childFrame(*child, foundFrame);
 	}
 	// R = the IK object's world x the soldier's inverse (0x006acfa0): into
@@ -8313,7 +8341,7 @@ bool GameWorld::seatIkTargets(uint32_t vehicleId, const anim::Skeleton* skeleton
 		relative.rotation.rows[r] = soldierRotation.untransform(foundFrame.rotation.rows[r]);
 	}
 	relative.position = soldierRotation.untransform(foundFrame.position - soldierPosition);
-	const IkPath& grips = cached->second;
+	const IkPath& grips = ikPath;
 	const auto target = [&](int side, int bone, int end) {
 		if (bone < 0) {
 			return;
@@ -8586,7 +8614,8 @@ void GameWorld::leaveRemoteSeat(RemoteSoldier& remote, world::Object& soldier)
 	}
 }
 
-void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatIndex, float bodyYaw, float seconds)
+void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatIndex, float bodyYaw, float seconds,
+	bool ducking)
 {
 	RemoteSoldier* started = startRemoteSoldier(object);
 	world::Object* soldier = m_objects.find(object);
@@ -8650,10 +8679,13 @@ void GameWorld::animateRemoteSeated(uint32_t object, uint32_t vehicle, int seatI
 	remote.seat->apply(*remote.skeleton, remote.pose, touched);
 	// The hands on the grips (0x005efc00 each frame, on the client as on the
 	// server: the IK object's world matrix, its parts turned as their ghosts
-	// turn them). The soldier object stands where the ghost put it.
+	// turn them). The soldier object stands where the ghost put it. A
+	// ducking seat's soldier has its IK off (+0x2ea: the ghost's ducking
+	// reaches the seat's setDucking, 0x005ffec0 -> slot 0x12c, 0x005c7cf0,
+	// as on the server; 0x005ef250 skips the solve).
 	std::vector<anim::IkTarget> targets;
 	const physics::Vec3 place {soldier->position().x, soldier->position().y, soldier->position().z};
-	if (seatIkTargets(vehicle, remote.skeleton, *seat, rotation, place, targets, true)) {
+	if (!ducking && seatIkTargets(vehicle, remote.skeleton, *seat, rotation, place, targets, true)) {
 		remote.worldPose = anim::worldMatricesWithIk(*remote.skeleton, remote.pose, targets);
 	} else {
 		remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
@@ -10778,6 +10810,22 @@ int GameWorld::seatWeaponIndex(uint32_t vehicle, int seat, int group) const
 		}
 	}
 	return -1;
+}
+
+bool GameWorld::seatDucking(uint32_t vehicle, int seat) const
+{
+	const world::Object* object = m_objects.find(vehicle);
+	const std::vector<int> occupants = vehicleOccupants(vehicle);
+	if (!object || !object->objectTemplate() || seat < 0 || static_cast<size_t>(seat) >= occupants.size()) {
+		return false;
+	}
+	const Player* player = findPlayer(occupants[static_cast<size_t>(seat)]);
+	const auto known = m_layouts.find(object->objectTemplate()->name());
+	if (!player || known == m_layouts.end() || static_cast<size_t>(seat) >= known->second.seats.size()) {
+		return false;
+	}
+	const world::ObjectTemplate* seatTemplate = m_templates.find(known->second.seats[static_cast<size_t>(seat)].name);
+	return player->input.pose == SoldierPose::Crouch && seatTemplate && number(*seatTemplate, "allowDucking", 0) != 0;
 }
 
 const FireArm* GameWorld::seatFireArm(uint32_t vehicle, int seat, int index) const
@@ -13660,7 +13708,7 @@ void GameWorld::stepPhysics(float seconds)
 				[](const Body::PartMesh& p) { return !p.mover || p.response.contacts().empty(); })
 			&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
 				[](const Vehicle::Wheel& w) { return w.contact; }));
-		b.response.solve(b.body);
+		b.response.solve(b.body, !m_predicting); // the server keeps the stuck push
 		// The legs object's response after the hull's (0x006ce740).
 		if (walker(b)) {
 			b.legsResponse.solveLegs(b.body);

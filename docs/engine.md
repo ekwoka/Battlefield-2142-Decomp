@@ -735,7 +735,10 @@ wing turned by −pitchOffset (the flap's share, flapLift, is 0 in every
 shipped wing); the air's velocity at the wing (+ positionOffset) through
 the curve `0x006cb600` (peaking at 22.5°), × (wingLift + flapLift) × 1.5 ×
 |v|² × 0.0025 × airDensity (× 50 under water), within ±200, against the
-wing's normal.
+wing's normal. A wing that sets neither wingLift nor flapLift has 1 and
+0.1 (the template's constructor `0x0062a2c0`; the rewrite had read 0, so
+four community wings in the install's Levels, she_ec635's and
+she_littlebird's, lifted nothing). The lift regulator: below.
 
 **ForceObjects** (`0x0062c920`, `0x0062b750`): force × input + constant
 along the object's forward; with keepUp a couple of ±15 × (2a v + (a² +
@@ -1106,9 +1109,24 @@ whose box bottom is under the terrain onto it at creation: its push out of
 the ground in one tick and the springs' rate after it otherwise wrecked
 the gunships and APCs on their pads.
 
-Not rewritten: the wing's liftRegulated, regulateToLift and
-wingToRegulatorRatio (no official Wing sets them; three BF2 conversions'
-boats and BMP-3 in the install's Levels call `setLiftRegulated 1`). The
+**The wing's lift regulator** (liftRegulated `+0x384`, regulateToLift
+`+0x388`, 4.91, whose setter `0x0062a290` also sets the flag,
+wingToRegulatorRatio `+0x38c`, 1; the Wing template's constructor
+`0x0062a2c0`, which also gives wingLift 1 and flapLift 0.1 to a wing that
+sets neither): after the lift the physics node (`0x006cb780`'s tail,
+`0x006cbae8`..`0x006cbbe5`) takes the lift curve, without air density,
+water or clamp, of the speed straight along the root's nose (|v| × its
+row 2) on the wing as it is plus wingToRegulatorRatio × the same on the
+wing with the flap's share out (`0x0064fbf0`: turned by −pitchOffset
+alone), and keeps (that + regulateToLift) × gravity × 0.101833
+(`*0x00993e70`) within ±1 in the object's `+0x24c`; the next tick the
+object's update (`0x0064fd40`) puts it over the pitch input (`+0x1a4`)
+before the axis steps (`0x00563bd0`). With gravity −14.73 that is a gain of
+−1.5 steering the lift to regulateToLift. No official Wing sets it; the
+BF2 conversions' jetski and BMP-3 in the install's Levels do
+(`setLiftRegulated 1`), and their wings have no pitch speed, so their flap
+never moves. `Vehicle::updateWing`, `updateParts`
+(`Vehicle_WingLiftRegulated`). The
 yaw/pitch/roll PCO regulators are rewritten (below, the PCO's
 regulator). The other
 bundle animation systems run for the bodies that have them (eu_at's legs
@@ -1290,9 +1308,21 @@ them; the contact's depth is how far the end lies behind that face,
   velocity) treat another object's mesh as ground moving with it
   (`Vehicle::touchObject`).
 
-Not modelled: the response's stuck push (`+0x11c`, normally 0) scaling the
-events' velocity, the impact effects and decals of the damage
-(`0x005a36d0`), and B's vertices into a wheel's three-vertex LOD.
+- **The stuck push** (the solve `0x006ba7d0`, on the server: game logic
+  slot `0x144`): a counter (`+0x118`, −1 each solve, held within −1..3)
+  gains 2 for a push out over 0.5 m (`*0x00a84238`); at 3 or more
+  (`*0x00a84224`) the response's stuck push (`+0x11c`, 0 at each solve's
+  start) is (√(the largest push² since its creation, `+0x114`) − 0.5) × 100
+  (`*0x00a8425c`), from the third solve running with such a push. The mesh
+  pass's events (`0x006bb050` at `0x6bc8b4` / `0x6bc8f6`) take the relative
+  velocity × (1 + the mover's stuck push): a mover pushed 0.6 m out three
+  ticks running hits with 11 times its speed, which its collision damage
+  feels. A Spring with contacts skips it (its branch at the solve's start).
+  `ContactResponse::solve`, `GameWorld::addMeshContact`
+  (`RigidBody_StuckPush`).
+
+Not modelled: the impact effects and decals of the damage (`0x005a36d0`),
+and B's vertices into a wheel's three-vertex LOD.
 
 ### Seats and vehicle weapons
 
@@ -2790,11 +2820,23 @@ disable flag (`+0x2ea`, `0x005ed890`) is set, which the soldier's pose
 soldier, so a seat with allowDucking ducking on kPICrouch (`0x005ca2e0`)
 lets go of its grips until it rises (`poseSeated`;
 `Ik_DriverHoldsTheWheel`), and dying in the seat sets it (the seated
-corpses here have no IK). A joined client's seated soldiers keep their
-grips while ducking (the ghost's PCO `+0x18c`, SimpleObject 0x100000,
-isn't handed to the pose). Not rewritten: the weapon layers `0x005ef250`
-switches for an IK object with `0x94c0`. A straight arm (v1 ∥ v2) gives
-no plane to bend in, as in the original.
+corpses here have no IK). A joined client's seated soldier lets go too:
+the server networks the seat's ducking (a vehicle root's SimpleObject
+0x100000, a seat ghost's bit 8; `GameWorld::seatDucking`,
+`HostedGame::statesOf`) and the client's `0x005ffec0` hands it to the
+seat's setDucking (slot `0x12c`), so `animateRemoteSeated` skips the
+solve while it is set (`NetHost_JoinedDuckingSeat`; the shipped seats
+with allowDucking are the three bipods). The weapon layers
+(`0x005ef250`'s third-person branch): with an IK object (`+0x2d0`, found
+by `0x005ee910`) of an Ik component (`+0x2d4`) that is a firearm
+(interface `0x94c0`: as_mg_stationary, eu_mg_stationary and
+unl_hmg_stationary, the bipods' guns, the only shipped firearms with
+one) the system gets message 4 while the firearm is zoomed (its slot
+300, `0x005c1ba0`) and 1 while its fire state is above 0 (slot `0x1c`,
+`0x005c1b60`), each cleared otherwise (the system's slots `0x2c` /
+`0x34`), whatever the IK flag (`GameWorld::ikWeaponMessages`, in
+`poseSeated`; the bipods' 3p systems have no trigger on either). A
+straight arm (v1 ∥ v2) gives no plane to bend in, as in the original.
 
 ## The first-person view
 
@@ -3344,9 +3386,42 @@ terrain +0xc4), saturate((WaterHeight − y) / 3)) — here weighted by the
 fade so it comes in with the LOD. Frame cost (release build, 1280 × 720,
 100 waited frames): Camp_Gibraltar 5.1–5.3 → 4.6–4.7 ms, Cerbere_Landing
 7.23 → 6.68 ms and 6.72 → 6.21 ms (the mesh LOD defaults below
-changed in the same run). Not done: the per-material detail lists (the
-rewrite draws all six layers in one pass), the cullerTypes other than 3,
-detailCullMaxLevel.
+changed in the same run).
+
+The culler's other settings are equal for the shipped data:
+terrainCuller.cullerType (`+0x6c`, 3; the dispatch `0x100a0460`: 1
+`0x1009e810` front to back, 2 `0x1009ec50` all four children once three
+show, 3 `0x1009f210`, 4 `0x1009f600` a parent whole when its four pass, 5
+`0x1009fa40` without the camera-inside shortcut, 6 `0x1009fdd0` bottom up)
+is set by no shipped level, and detailCullMaxLevel (`+0x68`, 2, set by
+the constructor and the reset `0x1009d6c0`) is read by nothing in
+RendDX9.
+
+**The detail layers.** RendDX9 keeps per patch a triangle list per
+detail layer (`0x1014bc80` → `0x10178cd0`; list 6 the triangles under
+the water) and draws LOD 0 cells as one additive pass per list
+(`0x1014e570`, TerrainDiffusePassLod0: Hi_PS_FullDetail and its kin, each
+(chartcontrib × colour, chartcontrib) blended ONE / ONE); the lists only
+save overdraw, so the rewrite's one pass over all six layers looks the
+same. A layer n's weight, chartcontrib, is its component map against
+vComponentsel = (n%3 == 2, n%3 == 1, n%3 == 0) (`0x10178cd0`): layers 0
+and 3 take the maps' blue, 1 and 4 green, 2 and 5 red. The rewrite had
+read them red, green, blue, so layers 0 ↔ 2 and 3 ↔ 5 swapped on every
+level (terraindata.raw's lists confirm it: Camp_Gibraltar's list 0 lies
+where the map's blue is high, list 2 where red is). `terrain.frag`'s
+detailColor. Not done (found while tracing): a layer's per-material pass
+kind, which the rewrite draws as a plain top-down layer: a side-projected
+("mountain") layer (`+0x15`, pass 5 Hi_PS_FullDetailMounten: x and z planes
+from `<texture>_side`, or the texture itself, at (grid × sideTiling.x,
+height × −0.00615148 × sideTiling.y + yOffset), the y plane from the
+texture, weighted by saturate(|n| − vBlendMod)), used on 20-odd levels
+(Cerbere_Landing's rock_cerbere, Camp_Gibraltar's rock_desert); an
+envmap layer (`+0x28` with the current cube, pass 11
+FullDetailWithEnvMap: lerp to the cube's reflection by detail.a × (1 −
+interp)), on Belgrade, Minsk, Fall_of_Berlin, Liberation_of_Leipzig,
+Strike_at_Karkand, Tunis_Harbor, Verdun and Hamburg_Harbour; and the
+layer record's yOffset (a float, `100b2ea7`..`100b2ed9`), which
+TerrainData reads as an int and drops with the envmap byte.
 
 **Water.** RaShaderWaterBase.fx's `Water` pixel shader (the PS_20 variant
 with USE_FRESNEL and USE_SPECULAR, its 2D path): the normal is two frames of
@@ -4470,11 +4545,23 @@ collision mesh's radius, else the render object's, and the children's),
 the actor scale for Soldier and PlayerControlObject templates, the
 geometry quality's scales, the view's zoom, GSViewDistance from
 GameLogic.maximumLevelViewDistance × the view distance scale; faded out
-it isn't drawn, part-faded it is drawn blended. Not done: the
-children's second record (the rewrite draws a vehicle's parts with its
-root's instance) and the walk's filter flag 0x1000000 that skips the fade
-(which views set it isn't traced; the commander's overhead view, 260 m
-up, draws unfaded). (`allowEmoteAnimation`, once listed here, is read:
+it isn't drawn, part-faded it is drawn blended. The walk's filter flag
+0x1000000, which skips the fade, is the AI's alone: the only walk with it
+is IAIObjectEnvironment's (`0x0089b860`, filter vtable `0x009d6730`
+whose slot 1 `0x00897af0` returns it), so its queries don't step the
+fades; RendDX9's scene collectors (`0x100b8cd0`, `0x100b84b0`) build
+their filter with 2 (`0x101aa0a0`, slot 1 `0x101aa4b0`), and its three
+0x1000100 filters serve only the rays (manager slot 0x68). So no view
+skips the fade; the rewrite's overhead view, which draws unfaded, is a
+deviation. Not done: the children's second record. The walk
+(`0x006fe3b0`) visits each object of the tree with a render object
+(`+0x44`), with its own R (slot 0x8c × its template's cullRadiusScale)
+and origin, on the second record when R is under 0.8 × the root's, and
+a child faded to 0 hides with its subtree; the rewrite draws a vehicle's
+parts with its root's instance and fade. By the second record a part of
+under about 1.3 m (road wheels, small guns) would be gone from about
+40 m at the high geometry quality while its hull lasts to some 250 m;
+the per-vehicle radii weren't measured. (`allowEmoteAnimation`, once listed here, is read:
 see the radio messages' emotes, `GameWorld::playEmote`.)
 
 ## The pure-server content check
@@ -5485,7 +5572,7 @@ table built at start-up ("ChallengeEvent", "CreatePlayerEvent"...). All
 | 3 | ConnectionType | 0-6 in 3 bits |
 | 4 | DataBlock | 1 bit start: type and size (32 bits each); else 8-bit length + up to 63 bytes |
 | 5 | CreatePlayer | team (3), 4 bits, remote (1), player id (8), 16, 16, 1, name (32 bytes), profile id (sign + 31), flags (sign + 3), 1 |
-| 6 | CreateObject | template id (32), ghost id (16), team (2), 1 bit: a count (8) of ghosts at the origin; else 1 bit + position, 1 bit + rotation (3 floats each) |
+| 6 | CreateObject | template id (32), ghost id (16), team (2), 1 bit: a count (8) of ghosts at the origin (never sent: `0x0050b0f0` makes every one with 1); else 1 bit + position, 1 bit + rotation (3 floats each) |
 | 7 | DestroyObject | ghost id, 1 bit |
 | 8 | DestroyPlayer | player id |
 | 9, 10 | EnterVehicle, ExitVehicle | player id, (vehicle ghost,) 1 bit |
@@ -6747,11 +6834,18 @@ GhostManager.cpp) with a state per ghost the client has (0x54 bytes:
   `0x24`, `0x005fdce0`: `0xf61270` for a Titan, `0x1f6127b` else) leaves
   its orientation (1), place (2), angular velocity (8) and `0x1000000`
   out of every write: each client moves its Titans itself (the Titan
-  sync, see Titans). The rewrite's host sends the place and orientation
-  with the ghost's first state only (a Titan is several ghosts, for which
-  CreateObject carries no place, `0x0050b450`; where the exe's client
-  takes the Titan's height and heading from wasn't traced) and never
-  marks them dirty (`HostedGame::snapshotGhosts`).
+  sync, see Titans). `0x0057f420` ands the mode mask into every ghost
+  write, a new ghost's first state included, so no Titan update carries
+  them: the client has the Titan's height and heading from CreateObject,
+  which the server always builds with one ghost and the root's place and
+  rotation as floats (`0x0050b0f0` sets the count, `+0x30`, to 1; from
+  `0x004ab8a0` and the late-join replay `0x0057dda0`), the client making
+  the tree there and numbering all its ghosts from that id (`0x004b3f70`
+  → `0x0067d3d0`; the count's other branch in `0x0050b450`, each ghost at
+  the origin, is never sent). `HostedGame::createEvents` and `statesOf`
+  (the Titan's root state `& 0xf61270`), `RemoteWorld`'s CreateObject
+  (the layout's ghost count). Until 2026-11-12 the rewrite sent the
+  count and the place with the first state (`Titan_JoinedClientPlacedByCreateObject`).
 
 The rewrite's stand-ins: the eye
 is the soldier's head (kept from its last life; before any, every ghost at
@@ -6770,8 +6864,21 @@ scan's 11 s, `Commander_ScanBringsFarEnemiesIntoScope`); then for the commander 
 team's asset objects (`0x0057db50`: game logic slot `0x1d0`'s objects
 whose `+0x29c` kind is 1-4) at 0.03 (`HostedGame::rescore`,
 `net::kGhostScanPriority`). The alternate eye (player vt+0xd4) never
-holds for a remote client (see the commander's camera above). Not
-rewritten: OptimizeEnclosingObjectsNetworking / GhostNotEnclosed, the
+holds for a remote client (see the commander's camera above), and the
+host's own player has no connection, so the team's overhead camera
+(`DAT_00a1c174` slot `0x7c`, interface `0xc367`) is never the eye.
+`OptimizeEnclosingObjectsNetworking` (a var, `0x004237c0`, 0 unless a
+script sets it; no shipped one does): with the control object a soldier
+(class `0x9493`) enclosed by a Titan's hull (the soldier's `+0x18c`
+slot `0xa8`, `0x00585cb0` → its node's slot `0xec`, `+0x120`, which the
+response `0x006c3890` sets when its origin is inside the hull LOD), each
+tree whose root is a soldier brings the scope radius down to 100 m from
+then on, and one enclosed otherwise (or not at all) whose root is more
+than 20 m from the eye (a squared distance over 400, `0x004bb1b0`)
+isn't scored: at 0.01 with the var `GhostNotEnclosed` at 1, else left
+out (`0x0057d560`). `GameWorld::enclosingTitan`, `HostedGame::rescore`
+(the trees in the ghosts' order, the exe's in its tree list's;
+`Titan_EnclosedClientLeavesOutsideSoldiersUnscored`). Not rewritten: the
 20-rescores-a-pass cap, the enable set (`gm +0x28`).
 
 ### Server settings, the map list and remote admin
@@ -6956,7 +7063,16 @@ seconds over all its maps.
   needed for sv.notEnoughPlayersRestartDelay raise TimeLimitReached(0),
   the time limit TimeLimitReached(−1). `GameLogic::waitToStart` (a hosted
   game; a local one plays at once). sv.timeBeforeRestartMap is only kept
-  by the exe too. Not rewritten: the end-of-round delay's per-mode rules.
+  by the exe too. After a round (`0x004ba250` sets `+0x284`, `0x004bd390`
+  counts it down, then restarts the round, `0x004ba0c0`, or after
+  roundsPerMap rounds goes to the next map, `0x004bc850`): the end-of-round
+  delay (`0x00430610`: 15 in gpm_ti, the mode's name without case, else
+  sv.endOfRoundDelay, which its setter `0x00431640` keeps within 3..30; the
+  constructor's 15, the shipped file's 3), plus sv.endDelay on the map's
+  last round (rounds played = roundsPerMap − 1). The rewrite had waited
+  sv.endDelay alone after every round. Data block 8 carries the same delay
+  (`ServerSettings::roundEndCountdown`, `endOfRoundDelayInForce`;
+  `ServerAdmin_RoundEndCountdown`).
 - **Ranked** (`net::ServerSettings`): sv.ranked (`+0x26d`, set through
   `0x00430800`, which also takes GSRanked and checks the stats scripts:
   not rewritten) fixes spawnTime and manDownTime at 15 (`0x00430f60`,
@@ -7052,7 +7168,13 @@ carry an empty payload (`0x00516950`).
   `+0xa8`'s slot `0x6c`, not traced further: `RemoteWorld::demoNotice`
   keeps it. `HostedGame`'s autoDemo and `hookDone`
   (`ServerAdmin_AutoDemoHookSendsMessage9`); not rewritten: whether a
-  map change (`0x004bc850`) stops it, setAutoRecordRounds.
+  map change (`0x004bc850`) stops it. GameServerSettings.setAutoRecordRounds
+  (`0x004190ee` → the host page's slot `0x16c`, `0x00499030`) sets the
+  page's `+0x1cc` (10 in its reset branch, `0x00499430`), which only the
+  page's getAutoRecordRounds reads (slot `0x168`, SwiffPlayer
+  `0x10056010`); the page's writer (`0x00499be0`) doesn't put it out and
+  nothing in the game acts on it (`ServerAdmin`'s `autoRecordRounds`, the
+  menu's ServerSettings get/set).
 - **Camera files** (`.bf2142cam`, `net::CameraKeyframe`, read/write): the
   same zlib wrapper, no header, a keyframe a tick (`0x005f8d30`, read by
   `0x005f91f0`): u32 tick, u32 mode (follow only when exactly 1), u8
@@ -7339,6 +7461,22 @@ about to be predicted (the last record's block tick plus the moves sent
 since, one a tick), so the Titan the prediction meets is the one the
 server's soldier meets; and the Titan's orientation is no longer set from
 each update's 14-bit quaternion but kept from its first state.
+
+The Titan's height and heading from CreateObject (2026-11-12; see Ghost
+priorities: the exe's server never sends a Titan's place or orientation
+in a ghost write, and its CreateObject carries the root's as floats), so
+the client's Titan is turned as the server's to the bit and the 14-bit
+orientation is gone. The same runs, before → after (`build/scratch/
+titanhead`, each a fresh host and client): walking on the standing
+Titan (`32:spawn 50:forward 54:stop 60:strafe:1 63:stop 95:forward
+99:stop 105:strafe:-1 108:stop`, 120 s) 43 of 2133 records over 1 cm
+(mean 2.3 mm, at most 6.7 cm) → 6 of 2122 (0.1 mm, 3.9 cm); walking on
+it while it moves towards -380:3 (the 120 s run above) 1296 of 2134
+(1.4 cm, 26 cm) → 349 of 1928 (6.1 mm, 9.2 cm); the 150 s run towards
+-250:7 522 of 2732 (1.2 cm, 23 cm) → 454 of 2708 (1.1 cm, 16 cm);
+standing still none over 1 mm either way. What is left is the wall
+case on the moving Titan (the replay meets the Titan where the newest
+move does).
 
 The exe's replay is the game client's interface `0x1d4c2` (the client
 object's `+0xa8`, `0x004b35b0`; vtable `0x00928fa8`) slot `0x10`,
@@ -10478,8 +10616,14 @@ Seeking projectiles (`seek.*`, `follow.*`):
   is `maxSpeed` (300), or with `useTargetSpeed` the target's top speed,
   × `speedModifier` (2) once armed (`0x005ec770`, `0x005ec7a0`). A parked
   vehicle is never chased. It goes off on hitting the vehicle (its
-  collision, gameLogic slot `0xf8`). Not traced: its
-  `ForceObjectHoverTest` and `drag`.
+  collision, gameLogic slot `0xf8`). Its `ForceObjectHoverTest` child
+  (regulatePosY −0.5/1.5, targetPosition 0/2/0,
+  relativeYCollisionGroupInverse 3, enableOnStartMessage) holds it 2 m
+  over what lies under it once started, as the IFV's mine's
+  (`GameWorld::hoverProjectile`). Not rewritten: its physicsType Mesh
+  (a Basic node with its collision mesh's box drag, drag 10 / mass 5, and
+  the Basic node's damping); the rewrite moves it as a Point node (its
+  drag as a 0.1 m sphere's, `physics::PointBody`).
 - **The motion mine bait** (the booster's `Bp1_Motion_Mine_Bait`, its
   thrown `Bp1_Motion_Mine_Bait_Stationary` with a `MagneticBait` child: a
   TTMagnet TargetObject, `disableWhenEmptyVehicle` 0, `overrideArmingSpeed`
@@ -11023,7 +11167,15 @@ the top.
   `callForRepair` (`0x1a4` → `0x007c7ca0`) hand the game's slot `0xd8`
   (`0x0042d220`) the codes 0x33, 0x34 and 0x35: "medic" on
   TCLocalTeamMedic, "need_ammo" and "need_repair" on TCTeam (it also
-  sends the code to the server, whose use isn't rewritten).
+  sends the code to the server: the Spotted event above, whose handler
+  hands 2/<code> to the team, the server's own player posted there
+  and the others as PostRemote, on a dedicated server through each
+  player's connection, `0x0042b800`; `HostedGame::spotted`). A
+  client's minimap (`0x007918d0` case 0x33..0x37) keeps a marker of a
+  teammate's call when the local player's kit can answer it (the kit's
+  slot `0x38` bytes: 0 heal for 0x33 / 0x36 / 0x37, 2 ammunition, 1
+  repair; `mini_Medic`, `mini_Ammo`, `mini_Repair`, `mini_Revive`,
+  `0x0077ac70`) and flags its own (`+0x7c`..`+0x7e`): not rewritten.
   `setSpottedMenuActive` (`0x268`, the middle button's alternate command)
   shows the spotted rose (`SpottedInterfaceShow`, whose buttons say
   `game.radioMessage TCTeam <kind>_spotted`). `sendSpottedMessage <bool>
@@ -16021,8 +16173,11 @@ ask whether it's done.
 - **The playlist and the game under the menu:** each map runs in
   `runGame` (`src/Main/main.cpp`), whose managers all start empty, so the
   next map loads from nothing. The menu (its movie and the login) lives on
-  in the session across maps. `sv.endDelay` (15 s) after a round ends the
-  playlist's next map loads, after `roundsPerMap` rounds on one map. While
+  in the session across maps. After a round ends the next round (or,
+  after `roundsPerMap` rounds on one map, the playlist's next map) loads
+  after the end-of-round delay, plus `sv.endDelay` on the map's last round
+  (3 and 15 s with the shipped settings; gpm_ti's delay is 15: see
+  "The start" under the server settings). While
   a game started from the menu runs, `Logic.isGameRunning` is true, Esc
   shows or hides the menu over it (the soldier stops taking input while it
   is up), and `Logic.disconnectGame` ends the game and goes back to the
@@ -16030,7 +16185,7 @@ ask whether it's done.
 - **The end of a round:** once the round is over, `endOfRound.dfm` (a
   player of its own, `EndOfRoundBindings`) shows over the game with the
   outcome, the scoreboard from the scripts' scores and the player's
-  totals, until the next map; JOIN GAME skips the rest of `sv.endDelay`.
+  totals, until the next round; JOIN GAME skips the rest of the wait.
 - **Sound:** `Sound.playSound(name)` and `stopSound` play the menu sounds
   that `Menu/MenuSounds.con` adds with `sound.addMenuSound` (`rowPress`,
   `buttonPress`...), through the game's sound manager. The menu music is
@@ -16536,8 +16691,17 @@ uvMatrix[blend index 3] + TexDiffuse. A Spring with rotateUV (+0x2b8)
 doesn't turn its mesh (`0x006cace0` / `0x006b7261` skip `0x00614b50`).
 Rewritten in `src/Render/AnimatedUV.h`, `LevelRenderer::syncObjects`
 (each frame from the parts' world places) and mesh.vert (the matrices
-after the parts, sent with bundled meshes only). Not done:
-rotateAsAnimatedUV (one shipped bundle, with no object named).
+after the parts, sent with bundled meshes only). rotateAsAnimatedUV
+(template `+0x161`, rotateAsAnimatedUVObject `+0x164`,
+rotateAsAnimatedUVReverse `+0x180`; the update's start `0x0063b9b0`) looks
+the named object up from the root once (`0x006f1f90`, depth first, the
+name without case) and then sets the part's local transform to a turn
+about x by that object's animated-UV angle (negated with Reverse) at its
+own position, in place of its template rotation. The one shipped user,
+e_mexp_s_sand's EffectBundle, names no object, so the search never
+matches and nothing turns: equal for the shipped game, so left out. Only
+the community BMP-3 (xpak_bmp3 in three of the install's Levels) uses it,
+its drive sprockets following a road wheel.
 
 **Bundle modifiers.** An EffectBundle's six modifiers (alpha intensity,
 emit scale, emit speed scale, age scale, start age, sound intensity) sit

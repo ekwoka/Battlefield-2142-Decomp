@@ -102,9 +102,12 @@ vec3 detailColor()
 {
 	vec3 w0 = texture(detailWeights0, inTexCoord).rgb;
 	vec3 w1 = texture(detailWeights1, inTexCoord).rgb;
-	vec3 sum = w0.r * texture(layer0, inTexCoord * tiling0.x).rgb + w0.g * texture(layer1, inTexCoord * tiling0.y).rgb +
-		w0.b * texture(layer2, inTexCoord * tiling0.z).rgb + w1.r * texture(layer3, inTexCoord * tiling0.w).rgb +
-		w1.g * texture(layer4, inTexCoord * tiling1.x).rgb + w1.b * texture(layer5, inTexCoord * tiling1.y).rgb;
+	// Layer n's weight is the map's (b, g, r)[n % 3] (RendDX9 0x10178cd0:
+	// vComponentsel (n%3 == 2, n%3 == 1, n%3 == 0) against the component
+	// map, TerrainShader_Hi.fx's chartcontrib).
+	vec3 sum = w0.b * texture(layer0, inTexCoord * tiling0.x).rgb + w0.g * texture(layer1, inTexCoord * tiling0.y).rgb +
+		w0.r * texture(layer2, inTexCoord * tiling0.z).rgb + w1.b * texture(layer3, inTexCoord * tiling0.w).rgb +
+		w1.g * texture(layer4, inTexCoord * tiling1.x).rgb + w1.r * texture(layer5, inTexCoord * tiling1.y).rgb;
 	float total = dot(w0, vec3(1.0)) + dot(w1, vec3(1.0));
 	return total > 0.01 ? sum / total : vec3(0.5);
 }

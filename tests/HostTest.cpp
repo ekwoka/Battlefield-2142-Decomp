@@ -1840,6 +1840,92 @@ TEST(NetHost_JoinedRepairCells)
 	client.disconnect();
 }
 
+// A ducking seat seen from a joined client: the host's player in a bipod
+// (allowDucking) crouches, the seat ducks (0x005ca2e0 -> setDucking,
+// 0x005c7cf0), and the vehicle root's networkable carries it (SimpleObject
+// 0x100000, PCO +0x18c), which the client's seated soldier lets go of
+// the grips by (animateRemoteSeated). Needs $BF2142_GAME_DIR.
+TEST(NetHost_JoinedDuckingSeat)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	HostGarage garage(gameDir, "eu_bipod", {0, 0, 4});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	dice::hfe::game::GameWorld& round = *garage.round;
+	const dice::hfe::world::ObjectTemplate* bipod = garage.templates.find("eu_bipod");
+	host::HostSetup setup;
+	setup.level = "Garage";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, garage.logic, garage.templates, setup);
+	CHECK(hosted.start());
+	CHECK(round.spawnPlayer(2) != nullptr);
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Watcher";
+	client.world().setGhostTemplates([&garage](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = garage.templates.findById(id);
+		return t ? net::ghostTemplateFrom(garage.templates, *t) : net::GhostTemplateNode {};
+	});
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	dice::hfe::game::SoldierInput input;
+	const auto step = [&] {
+		round.setPlayerInput(input);
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	};
+	const auto seen = [&]() -> const net::RemoteObject* {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == bipod->id() && o.part == 0) {
+				return client.world().object(o.ghost);
+			}
+		}
+		return nullptr;
+	};
+	CHECK(pumpUntil(step, [&] { return seen() != nullptr; }, 8000));
+	// In: the use key beside it.
+	for (int tries = 0; tries < 40 && !round.playerVehicle(); ++tries) {
+		const float a = static_cast<float>(tries % 8) * 0.785398f, r = 0.8f + static_cast<float>(tries / 8) * 0.5f;
+		round.setSoldierPosition(round.playerObject(), {r * std::sin(a), 0, 4 + r * std::cos(a)});
+		input = {};
+		input.use = true;
+		for (int i = 0; i < 3; ++i) {
+			step();
+		}
+		input = {};
+		for (int i = 0; i < 3; ++i) {
+			step();
+		}
+	}
+	CHECK(round.playerVehicle() && round.playerVehicle()->id() == garage.vehicle);
+	CHECK(!round.seatDucking(garage.vehicle, 0));
+	// Its IK object is its gun (eu_mg_stationary, a firearm with an Ik
+	// component): the seat system's messages 4 while zoomed and 1 while
+	// firing (0x005ef250's weapon layers), cleared otherwise.
+	const auto seats = round.vehicleSeats(garage.vehicle);
+	CHECK(!seats.empty());
+	if (!seats.empty()) {
+		CHECK(round.ikWeaponMessages(*bipod, seats[0], true, false, 0) == 4);
+		CHECK(round.ikWeaponMessages(*bipod, seats[0], false, true, 4 | 2) == (1 | 2));
+		CHECK(round.ikWeaponMessages(*bipod, seats[0], false, false, 1 | 4) == 0);
+	}
+	input = {};
+	input.pose = dice::hfe::game::SoldierPose::Crouch;
+	CHECK(pumpUntil(step, [&] { return seen() && seen()->seatDucking; }));
+	CHECK(round.seatDucking(garage.vehicle, 0));
+	input = {};
+	CHECK(pumpUntil(step, [&] { return seen() && !seen()->seatDucking; }));
+	client.disconnect();
+}
+
 // GameWorld::removePlayer (the game server's destroyPlayer, 0x004acfb0):
 // the soldier dies and lies, the squad and the command are left, the id is
 // free for the next player.

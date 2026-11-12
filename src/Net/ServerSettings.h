@@ -110,6 +110,18 @@ struct ServerSettings {
 	float manDownTimeInForce() const { return ranked ? 15.0f : manDownTime; }
 	int ticketRatioInForce() const { return ranked ? 100 : ticketRatio; }
 	float teamRatioInForce() const { return ranked ? 100.0f : teamRatioPercent; }
+	// The pause after a round's end (0x00430610): 15 in gpm_ti (the mode's
+	// name without case), else sv.endOfRoundDelay, which its setter keeps
+	// within 3..30 (0x00431640; the constructor's 15, the shipped file's 3).
+	int endOfRoundDelayInForce(const std::string& gameMode) const;
+	// The countdown from a round's end to the next round or map (+0x284,
+	// set by 0x004ba250, counted down by 0x004bd390): the end-of-round
+	// delay, and on the map's last round (rounds played == roundsPerMap
+	// - 1) sv.endDelay on top.
+	float roundEndCountdown(const std::string& gameMode, bool lastRoundOnMap) const
+	{
+		return static_cast<float>(endOfRoundDelayInForce(gameMode) + (lastRoundOnMap ? endDelay : 0));
+	}
 	// A ranked game (0x00430a00): gpm_cq, gpm_ti, gpm_sl, gpm_nv or gpm_ca,
 	// an internet server (+0x54) with GameSpyRanked (the GameSpy back end's
 	// word on the server, which no LAN or offline host has) and sv.ranked;

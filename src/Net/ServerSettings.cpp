@@ -199,11 +199,19 @@ bool ServerSettings::rankedGame(const std::string& gameMode, bool gameSpyRanked)
 	return mode && internet && gameSpyRanked && ranked;
 }
 
+int ServerSettings::endOfRoundDelayInForce(const std::string& gameMode) const
+{
+	return sameName(gameMode, "gpm_ti") ? 15 : endOfRoundDelay;
+}
+
 bool ServerSettings::set(const std::string& name, const std::string& value)
 {
 	for (const Field& f : fields()) {
 		if (sameName(name, f.name)) {
 			f.set(*this, value);
+			if (sameName(name, "endOfRoundDelay")) {
+				endOfRoundDelay = std::clamp(endOfRoundDelay, 3, 30); // 0x00431640
+			}
 			return true;
 		}
 	}

@@ -7135,7 +7135,8 @@ int runGame(Options& options, Session& session)
 						if (seatGhost->hasOccupantState && (seatGhost->occupantState.mask & 2)) {
 							bodyYaw = seatGhost->occupantState.yaw;
 						}
-						round.animateRemoteSeated(found->second, vehicle->second, seatGhost->part, bodyYaw, 1.0f / 30.0f);
+						round.animateRemoteSeated(found->second, vehicle->second, seatGhost->part, bodyYaw, 1.0f / 30.0f,
+							seatGhost->seatDucking);
 						animated.insert(found->second);
 						// The seat's guns from the player's fire states (the
 						// client's 0x00590e10 -> 0x004cc7a0: the control
@@ -7797,8 +7798,16 @@ int runGame(Options& options, Session& session)
 			stepSounds();
 		};
 #endif
-		// After the round, sv.endDelay (15 s) before a playlist's next map.
-		const float kEndDelay = session.admin ? static_cast<float>(session.admin->settings.endDelay) : 15.0f;
+		// After the round, the countdown to the next round (0x004ba250 sets
+		// +0x284, 0x004bd390 counts it down and then restarts the round or,
+		// after roundsPerMap rounds, goes to the next map): the end-of-round
+		// delay (sv.endOfRoundDelay, 15 in gpm_ti), plus sv.endDelay on the
+		// map's last round. A game the menu started runs on the shipped
+		// ServerSettings.con's values (3 and 15; 0x00499430).
+		const net::ServerSettings menuSettings;
+		const net::ServerSettings& sv = session.admin ? session.admin->settings : menuSettings;
+		const int roundsPlayed = session.admin ? session.admin->roundsOnMap : session.roundsOnMap;
+		const float kEndDelay = sv.roundEndCountdown(options.gameMode, roundsPlayed + 1 >= session.roundsPerMap);
 		float sinceEnd = 0;
 		const auto nextMapDue = [&] {
 			return (serverNextMap && !session.playlist.empty()) || (!session.playlist.empty() && sinceEnd >= kEndDelay);

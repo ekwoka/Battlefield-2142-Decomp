@@ -203,12 +203,20 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (!parseCreateObject(event, info)) {
 			return false;
 		}
-		// 0x0050b450: an object of `count` ghosts, one per PlayerControlObject
-		// of its tree (0x0067c690), numbered from `ghost`.
+		// 0x0050b450: an object of one ghost per PlayerControlObject of its
+		// tree (0x0067c690), numbered from `ghost`. The server's CreateObject
+		// always says one (0x0050b0f0 sets +0x30 to 1, from 0x004ab8a0 and
+		// the late-join replay alike) with the root's place and rotation:
+		// the client makes the tree there and registers every ghost of it
+		// from that id (0x004b3f70 -> 0x0067d3d0). A count over 1 makes
+		// each ghost at the origin (never sent by the exe's server).
 		const std::vector<GhostPartLayout>* layout = ghostLayout(info.templateId);
 		const auto shared = layout ? m_layouts[info.templateId] : nullptr;
+		const uint32_t count = info.count == 1 && layout && !layout->empty()
+			? static_cast<uint32_t>(layout->size())
+			: info.count;
 		std::vector<uint16_t> seats;
-		for (uint32_t n = 0; n < info.count; ++n) {
+		for (uint32_t n = 0; n < count; ++n) {
 			const uint16_t ghost = static_cast<uint16_t>(info.ghost + n);
 			RemoteObject& o = m_objects[ghost];
 			o = {};
@@ -250,12 +258,12 @@ bool RemoteWorld::apply(const GameEvent& event)
 			&& (!m_resolver || m_resolver(info.templateId).empty())) {
 			onProblem("unknown template", "CreateObject of template id " + std::to_string(info.templateId) + " (ghost "
 				+ std::to_string(info.ghost) + ", " + std::to_string(info.count) + " ghosts)");
-		} else if (onProblem && layout && layout->size() != info.count) {
+		} else if (onProblem && layout && info.count > 1 && layout->size() != info.count) {
 			onProblem("ghost count", "CreateObject of " + std::string(m_resolver ? m_resolver(info.templateId) : "")
 				+ " (template id " + std::to_string(info.templateId) + ") says " + std::to_string(info.count)
 				+ " ghosts, its layout has " + std::to_string(layout->size()));
 		}
-		if (info.count > 0) {
+		if (count > 0) {
 			m_objects[info.ghost].seats = seats;
 		}
 		return true;
@@ -939,6 +947,12 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 		return;
 	}
 	const NetworkableState& root = states.front();
+	// A vehicle root's ducking (SimpleObject 0x100000: PCO +0x18c), its
+	// driver's seat's as a seat ghost's bit 8 is its own (0x005ffec0 hands
+	// it to the object's setDucking, PCO slot 0x12c).
+	if ((root.mask & 0x100000) && root.kind == NetworkableKind::SimpleObject) {
+		o.seatDucking = root.ducking;
+	}
 	if ((root.mask & 0x800000) && root.kind == NetworkableKind::SimpleObject && !layout.groups.empty()) {
 		// The armored children (0x800000); the repair cells among them in
 		// order, a cell standing while its hit points do (its armour state

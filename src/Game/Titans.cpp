@@ -2636,6 +2636,20 @@ void GameWorld::stepTitanHullKills()
 	}
 }
 
+uint32_t GameWorld::enclosingTitan(int player) const
+{
+	const Player* p = findPlayer(player);
+	if (!p || !p->alive || p->vehicle || !p->object) {
+		return 0;
+	}
+	for (const Titan& titan : m_titans) {
+		if (insideTitanHull(titan, p->body.position)) {
+			return titan.object;
+		}
+	}
+	return 0;
+}
+
 // 0x006f2b00: the hull is the first object of the Titan's tree with a LOD
 // of collision type 5 (the coreroom's closed shell, 240 faces). From the
 // point a ray to the hull's origin raised by the hull object's radius +

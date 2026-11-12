@@ -381,9 +381,15 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 			} else if (type == "Wing") {
 				WingPart wing;
 				wing.part = self;
-				wing.wingLift = number(t, "wingLift", 0);
-				wing.flapLift = number(t, "flapLift", 0);
+				wing.wingLift = number(t, "wingLift", wing.wingLift);
+				wing.flapLift = number(t, "flapLift", wing.flapLift);
 				wing.pitchOffset = number(t, "pitchOffset", 0);
+				wing.regulateToLift = number(t, "regulateToLift", wing.regulateToLift);
+				wing.wingToRegulatorRatio = number(t, "wingToRegulatorRatio", wing.wingToRegulatorRatio);
+				wing.liftRegulated = number(t, "liftRegulated", 0) != 0 || setting(t, "regulateToLift");
+				if (self >= 0) {
+					vehicle->m_parts[static_cast<size_t>(self)].liftRegulated = wing.liftRegulated;
+				}
 				wing.positionOffset = vector(t, "positionOffset");
 				wing.startDelay = number(t, "startDelay", 0);
 				wing.multiply = number(t, "multiply", 1);

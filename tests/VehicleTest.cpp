@@ -580,6 +580,49 @@ TEST(Vehicle_RememberExcessInputEmptiesOnAReversal)
 // regulateYaw, regulateRoll on their inputs): out = clamp(((R_i . w) /
 // seconds x b + R_i . w) x a, -1, 1), replacing an input that is 0 or of
 // the same sign and smaller.
+// A liftRegulated wing (0x0064fd40, 0x006cb780's tail): the node's
+// regulator replaces the flap's pitch input the next tick. At rest the lift
+// is 0, so the input is (0 + regulateToLift 4.91) x -14.73 x 0.101833,
+// within -1: the flap turns down at full rate with no input given. The
+// template defaults are wingLift 1 and flapLift 0.1 (0x0062a2c0).
+TEST(Vehicle_WingLiftRegulated)
+{
+	const auto flapAfter = [](bool regulated) {
+		world::ObjectTemplateManager templates;
+		templates.registerType(1, "PlayerControlObject");
+		templates.registerType(2, "Wing");
+		world::ObjectTemplate* root = templates.create("PlayerControlObject", "jetski");
+		world::ObjectTemplate* wing = templates.create("Wing", "jetski_wing");
+		wing->settings()["maxRotation"] = "0/30/0";
+		wing->settings()["minRotation"] = "0/-30/0";
+		wing->settings()["maxSpeed"] = "0/60/0";
+		wing->settings()["acceleration"] = "0/600/0";
+		if (regulated) {
+			wing->settings()["liftRegulated"] = "1";
+		}
+		root->children().push_back({"jetski_wing", {}, {}});
+		auto vehicle = game::Vehicle::fromTemplate(*root, templates, nullptr, game::Vehicle::Accept::Flight);
+		if (!vehicle) {
+			return 1e9f;
+		}
+		vehicle->setOccupied(true);
+		const physics::Ground ground = flatGround();
+		physics::RigidBody body;
+		body.position = {0, 1, 0};
+		for (int i = 0; i < 3; ++i) {
+			vehicle->tick(body, ground, 1 / 30.0f, 0);
+		}
+		for (const auto& part : vehicle->parts()) {
+			if (part.type == "Wing") {
+				return part.angle[1];
+			}
+		}
+		return 1e9f;
+	};
+	CHECK(near(flapAfter(false), 0.0f));
+	CHECK(flapAfter(true) < -0.5f);
+}
+
 TEST(Vehicle_RotationalRegulators)
 {
 	world::ObjectTemplateManager templates;

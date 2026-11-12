@@ -4,6 +4,7 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Console/Vars.h"
 #include "Game/GameLogic.h"
 #include "Net/BitStream.h"
 #include "Net/GameClient.h"
@@ -1074,7 +1075,14 @@ std::vector<net::GameEvent> HostedGame::createEvents(const Ghost& ghost) const
 	net::CreateObjectInfo info;
 	info.templateId = ghost.objectTemplate->id();
 	info.ghost = ghost.first;
-	info.count = static_cast<uint32_t>(ghost.layout->size());
+	// Always one ghost with the root's place and rotation (0x0050b0f0 sets
+	// +0x30 to 1; 0x004ab8a0 and the late-join replay 0x0057dda0 build it
+	// from the object's position, slot 0x60, and its rotation in degrees,
+	// 0x00568c30): the client makes the whole tree there and numbers its
+	// ghosts from this one (0x004b3f70 -> 0x0067d3d0). That is where a
+	// joined client's Titan takes its height and heading, which no update
+	// carries (its mode mask, statesOf).
+	info.count = 1;
 	if (const game::Projectile* p = projectileOf(ghost)) {
 		info.team = std::clamp(p->team, 0, 3);
 		info.hasPosition = info.hasRotation = true;
@@ -2540,12 +2548,25 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 					}
 				}
 			}
+			// A vehicle root's ducking (0x100000, PCO +0x18c, captured by
+			// 0x005fb230): its driver's seat's (a client's 0x005ffec0 hands
+			// it to setDucking, slot 0x12c, which lets the seated soldier's
+			// grips go, animateRemoteSeated).
+			if (h.kind == net::NetworkableKind::SimpleObject && h.inVehicle && !h.parachute) {
+				s.mask |= 0x100000;
+				s.ducking = m_round->seatDucking(ghost.object, 0);
+			}
 			if (h.kind == net::NetworkableKind::SimpleObject && m_round->isTitan(ghost.object)) {
 				// A Titan (0x00561d90): the bit after the mask set, so no
-				// node vectors (0x005ff5d0); its place goes with its first
-				// state only (snapshotGhosts).
+				// node vectors (0x005ff5d0); its mode mask (slot 0x24,
+				// 0x005fdce0: 0xf61270 for a Titan, 0x1f6127b else), which
+				// 0x0057f420 ands into every ghost write, a new ghost's first
+				// state too, leaves out its orientation (1), place (2),
+				// angular velocity (8) and 0x1000000: each client has them
+				// from CreateObject (createEvents) and moves its Titans
+				// itself by the Titan sync (GameWorld::stepTitanSync).
 				s.flag = true;
-				s.mask &= ~(0x4u | 0x8u);
+				s.mask &= 0x00f61270u;
 			}
 			break;
 		case net::NetworkableKind::OverheadCamera:
@@ -2642,6 +2663,9 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 					s.mask |= 1u << wg;
 					s.seatWeapon[wg] = place;
 				}
+				// Its ducking (8: PCO +0x18c, as the root's 0x100000).
+				s.mask |= 8;
+				s.seatDucking = m_round->seatDucking(ghost.object, static_cast<int>(part));
 				break;
 			}
 			game::GameWorld::PlayerInfo info;
@@ -2794,19 +2818,6 @@ void HostedGame::snapshotGhosts()
 						? before->second.groups[g]
 						: net::NetworkableFields {},
 					seen.groups.back());
-			}
-			// A Titan's mode mask (slot 0x24, 0x005fdce0: 0xf61270 for a
-			// Titan, 0x1f6127b else) leaves its orientation and place out of
-			// every update: each client moves its Titans itself by the Titan
-			// sync's messages (GameWorld::stepTitanSync). The rewrite sends
-			// them with the ghost's first state (a new state has every bit),
-			// as CreateObject carries no place for an object of several
-			// ghosts (0x0050b450) and the client needs the Titan's height
-			// and heading; where the exe's client takes them from wasn't
-			// traced.
-			size_t part = 0;
-			if (const Ghost* titan = ghostOf(ghost, part); titan && part == 0 && m_round->isTitan(titan->object)) {
-				changed[0] &= 0x00f61270u;
 			}
 		}
 		bool any = false;
@@ -3393,11 +3404,15 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 // (score + 0.3 for a projectile) x its base priority (0x0057d560); each
 // living teammate's control object (his soldier, or the seat he holds) at
 // least 0.03; then the commander's tools (below). The demo connection
-// takes everything at 1 (0x0057d8f0). Not rewritten:
-// OptimizeEnclosingObjectsNetworking / GhostNotEnclosed (0 by default),
-// and the eye of player vt+0xd4 (a team object's), which never holds for
-// a remote client. The client's own soldier and vehicle are
-// scored like the rest here (the original skips the player's own, which
+// takes everything at 1 (0x0057d8f0). The eye is the player's camera
+// (vt+0x1b4(0)'s matrix), or with player vt+0xd4 (0x0059afd0: commander
+// +0x10c, the commander screen +0x8d and its overhead view +0x8e) the
+// team's overhead camera (DAT_00a1c174 slot 0x7c, interface 0xc367);
+// +0x8d / +0x8e are set only by the HUD's executors on the machine that
+// shows the screen (0x00414914, 0x00555d64, 0x006f0cb9, 0x0075fdb6),
+// never from the network, so a remote client's player never has it and
+// the host's own player has no connection: never taken here. The client's
+// own soldier and vehicle are scored like the rest here (the original skips the player's own, which
 // the record carries); the eye is the soldier's head, kept from its last
 // life while it has none (the original's camera object).
 void HostedGame::rescore(Client& client)
@@ -3441,6 +3456,20 @@ void HostedGame::rescore(Client& client)
 		client.hasEye = true;
 	}
 	const bool everything = client.player < 0 || !client.hasEye;
+	// OptimizeEnclosingObjectsNetworking (a var, 0x004237c0: 0 unless a
+	// script sets it to 1): with our control object a soldier enclosed by
+	// a Titan's hull (the soldier's +0x18c slot 0xa8, 0x00585cb0), each
+	// tree whose root is a soldier (class 0x9493) brings the scope radius
+	// down to 100 m from then on, and one enclosed otherwise (or not at
+	// all) more than 20 m from the eye (a squared distance over 400,
+	// 0x004bb1b0) isn't scored: at 0.01 with GhostNotEnclosed at 1, else
+	// left out (0x0057d560). The exe's trees go in its tree list's order;
+	// here in the ghosts' (by object).
+	const Vars& vars = Vars::global();
+	const uint32_t enclosure = !everything && vars.number("OptimizeEnclosingObjectsNetworking", 0) == 1 && !me.vehicle
+		? m_round->enclosingTitan(client.player)
+		: 0;
+	net::GhostEye eye = client.eye;
 	for (const auto& [object, ghost] : m_ghosts) {
 		if (ghost.basePriority < 0) {
 			continue;
@@ -3451,6 +3480,23 @@ void HostedGame::rescore(Client& client)
 		}
 		if (ghost.basePriority == 0) {
 			continue; // never scored
+		}
+		if (enclosure && !ghost.layout->empty() && !(*ghost.layout)[0].groups.empty()
+			&& (*ghost.layout)[0].groups.front().hints.kind == net::NetworkableKind::Soldier) {
+			eye.radius = 100;
+			const int other = m_round->playerOf(object);
+			if (other != client.player && (other < 0 || m_round->enclosingTitan(other) != enclosure)) {
+				if (const world::Object* o = m_round->objects().find(object)) {
+					const float dx = o->position().x - eye.position.x, dy = o->position().y - eye.position.y,
+								dz = o->position().z - eye.position.z;
+					if (dx * dx + dy * dy + dz * dz > 400) {
+						if (vars.number("GhostNotEnclosed", 0) == 1) {
+							everyPart(ghost, 0.01f, false);
+						}
+						continue;
+					}
+				}
+			}
 		}
 		net::GhostVec3 at, velocity;
 		if (const game::Projectile* p = projectileOf(ghost)) {
@@ -3464,7 +3510,7 @@ void HostedGame::rescore(Client& client)
 		} else {
 			continue;
 		}
-		const float score = net::ghostScore(client.eye, at, velocity);
+		const float score = net::ghostScore(eye, at, velocity);
 		if (score > 0) {
 			everyPart(ghost, (score + (ghost.projectile ? net::kGhostProjectileBonus : 0)) * ghost.basePriority, false);
 		}
@@ -3670,7 +3716,7 @@ void HostedGame::tick()
 		m_endOfRoundSerialSent = m_logic->endOfRoundSerial();
 		net::RemoteWorld::EndOfRoundData data;
 		data.text = m_logic->endOfRoundData();
-		data.endOfRoundDelay = m_setup.settings ? m_setup.settings->endOfRoundDelay : 15;
+		data.endOfRoundDelay = m_setup.settings ? m_setup.settings->endOfRoundDelayInForce(m_setup.gameMode) : 15; // 0x00430610
 		for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
 			net::RemoteWorld::EndOfRoundData::Player row;
 			row.id = p.id;

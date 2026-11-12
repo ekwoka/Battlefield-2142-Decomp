@@ -255,6 +255,10 @@ public:
 		bool rememberExcess = false; // 0x30a: input over 1 is kept for later ticks (+-40; emptied by an input against it, 0x00563bd0)
 		bool canReverse = true;      // an Engine's 0x744: an input against the axis's acceleration is 0
 		bool moves = false;          // an axis with a speed
+		// A lift-regulated Wing's pitch input (the object's +0x24c, which
+		// its physics node set last tick; 0x0064fd40 puts it over +0x1a4).
+		bool liftRegulated = false;
+		float liftRegulator = 0;
 		// startAutoRotateOnEnter (+0x310): an enter (event 2, 0x00565600)
 		// turns its auto-rotation on (+0x1dd), an exit (3) off with the
 		// speeds zeroed and restoreRotationOnExit's angles back; while on,
@@ -309,9 +313,13 @@ public:
 	};
 	struct WingPart {
 		int part = -1;
-		float wingLift = 0, flapLift = 0, pitchOffset = 0; // 0x36c, 0x370, 0x374
-		Vec3 positionOffset;                                // 0x378
-		float startDelay = 0;                               // 0x390
+		float wingLift = 1, flapLift = 0.1f, pitchOffset = 0; // 0x36c, 0x370, 0x374 (template 0x0062a2c0)
+		Vec3 positionOffset;                                  // 0x378
+		// liftRegulated (0x384; regulateToLift's setter 0x0062a290 sets it
+		// too), regulateToLift (0x388, 4.91), wingToRegulatorRatio (0x38c).
+		bool liftRegulated = false;
+		float regulateToLift = 4.91f, wingToRegulatorRatio = 1;
+		float startDelay = 0;                                 // 0x390
 		float multiply = 1, offsetY = 0;                    // the bundle's 0x340, 0x338
 		float waited = 0;
 	};

@@ -301,7 +301,7 @@ struct CreateObjectInfo { // kEvCreateObject (0x0050b150, built 0x0050b0f0, hand
 	uint32_t templateId = 0; // ObjectTemplate +0x44: creation index of network-shared templates (0x0070a700)
 	uint16_t ghost = 0;
 	int team = 0;            // 2 bits
-	uint32_t count = 1;      // >1: that many ghosts from `ghost` on, at the origin
+	uint32_t count = 1;      // >1: that many ghosts from `ghost` on, at the origin (the exe's server always sends 1, 0x0050b0f0)
 	bool hasPosition = false, hasRotation = false;
 	Vec3f position;
 	Vec3f rotation;          // degrees, yaw/pitch/roll: 0x004ab8a0 builds the matrix with 0x006adb30(-z, -y, -x), which

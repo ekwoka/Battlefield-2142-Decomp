@@ -243,8 +243,20 @@ void ContactResponse::addContact(const Vec3& offset, const Vec3& pointVelocity, 
 	m_pushOut = combineAxes(m_pushOut, normal * -depth);
 }
 
-void ContactResponse::solve(RigidBody& body)
+void ContactResponse::solve(RigidBody& body, bool server)
 {
+	m_stuckCount = std::clamp(m_stuckCount - 1, -1, 3);
+	m_stuckPush = 0;
+	if (server && lengthSquared(m_pushOut) != 0) {
+		const float push = lengthSquared(m_pushOut);
+		if (push > tuning::kStuckPush * tuning::kStuckPush) {
+			m_stuckCount += 2;
+		}
+		if (m_stuckCount >= tuning::kStuckCount) {
+			m_stuckPush = (std::sqrt(std::max(push, m_largestPush)) - tuning::kStuckPush) * tuning::kStuckPushScale;
+		}
+		m_largestPush = std::max(push, m_largestPush);
+	}
 	if (m_contacts.empty() && lengthSquared(m_pushOut) == 0) {
 		return;
 	}

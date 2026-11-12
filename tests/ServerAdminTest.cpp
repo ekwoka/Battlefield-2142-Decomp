@@ -647,6 +647,20 @@ TEST(ServerAdmin_RankedOverridesAndMinimums)
 	CHECK(sv.playersNeededToStartInForce(true) == 8);
 }
 
+// The pause after a round (0x004ba250 -> +0x284, counted down by
+// 0x004bd390): sv.endOfRoundDelay (kept within 3..30 by 0x00431640; 15 in
+// gpm_ti whatever is set, 0x00430610), plus sv.endDelay on the map's last
+// round. The shipped settings: 3 s between rounds, 18 s before the next map.
+TEST(ServerAdmin_RoundEndCountdown)
+{
+	net::ServerSettings sv;
+	CHECK(sv.roundEndCountdown("gpm_cq", false) == 3 && sv.roundEndCountdown("gpm_cq", true) == 18);
+	CHECK(sv.roundEndCountdown("GPM_TI", false) == 15 && sv.roundEndCountdown("gpm_ti", true) == 30);
+	CHECK(sv.set("endOfRoundDelay", "1") && sv.endOfRoundDelay == 3);
+	CHECK(sv.set("endOfRoundDelay", "45") && sv.endOfRoundDelay == 30);
+	CHECK(sv.set("endOfRoundDelay", "7") && sv.endOfRoundDelayInForce("gpm_sl") == 7 && sv.endOfRoundDelayInForce("gpm_ti") == 15);
+}
+
 // Message 9 (0x005852b0 -> 0x004ad7a0): once the auto-recorder's hook is
 // done, every client gets data block 9 with sv.demoDownloadURL ("{file}"
 // replaced by the demo's file name) and the map.

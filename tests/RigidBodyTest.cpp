@@ -283,3 +283,30 @@ TEST(RigidBody_LookAtRotation)
 	const physics::Mat3 kept = physics::lookAtRotation(turned.rows[0] * 2.0f, turned);
 	CHECK(kept.rows[0].x == turned.rows[0].x && kept.rows[2].z == turned.rows[2].z);
 }
+
+// The stuck push (0x006ba7d0, +0x118 / +0x11c): on the server a response
+// pushed out over 0.5 m three solves running makes the mesh pass's events
+// hit with (1 + (sqrt(the largest push^2) - 0.5) x 100) times the speed;
+// a client keeps none, and a solve without such a push lets it go.
+TEST(RigidBody_StuckPush)
+{
+	const auto pushed = [](physics::ContactResponse& response, physics::RigidBody& body, float depth, bool server) {
+		response.addContact({}, {}, {0, 1, 0}, -depth, {});
+		response.solve(body, server);
+		return response.stuckPush();
+	};
+	physics::RigidBody body;
+	physics::ContactResponse server;
+	CHECK(pushed(server, body, 0.6f, true) == 0);
+	CHECK(pushed(server, body, 0.6f, true) == 0);
+	CHECK(std::fabs(pushed(server, body, 0.6f, true) - 10.0f) < 1e-3f);
+	CHECK(std::fabs(pushed(server, body, 0.6f, true) - 10.0f) < 1e-3f); // the counter at 4
+	// A small push while the counter holds (4 -> 3) carries the largest yet.
+	CHECK(std::fabs(pushed(server, body, 0.1f, true) - 10.0f) < 1e-3f);
+	CHECK(pushed(server, body, 0.1f, true) == 0);
+	CHECK(pushed(server, body, 0.0f, true) == 0);
+	physics::ContactResponse client;
+	for (int i = 0; i < 4; ++i) {
+		CHECK(pushed(client, body, 0.6f, false) == 0);
+	}
+}
