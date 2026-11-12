@@ -254,7 +254,8 @@ struct ParticleTemplate {
 	// seen in its steady state, not starting.
 	bool staticSystem = false;
 	// alphaCull (the sprite template's +0xa0, slot 0x154): a particle whose
-	// alpha is below it isn't drawn (the sprites' collector 0x10130bd0).
+	// alpha intensity times its fade (+0x2c) is below it isn't drawn (the
+	// sprites' collector 0x10130bd0); the transparency graph doesn't count.
 	float alphaCull = 0;
 	// pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8): the quad's centre moved by
 	// this many half-sizes off the particle (0/-0.5: standing on it).
@@ -290,7 +291,7 @@ struct Particle {
 	float rotationSpeed = 0; // radians a second (0x1013fdc0 +0x7c)
 	float intensity = 1;     // the system's, at birth (+0xc)
 	float randomIntensity = 0; // randomIntensity x (-1..1) (+0x10)
-	float alpha = 1;         // the bundle's alpha intensity at birth (+0x2c)
+	float alpha = 1;         // the bundle's alpha intensity at birth (+0x58; +0x2c is it faded)
 	Vec3 angles; // mesh particles: yaw/pitch/roll, degrees (+0xa8)
 	Vec3 spin;   // mesh particles: their speed, degrees a second (+0x9c)
 	float frameClock = 0;    // the flipbook's (+0x78)

@@ -287,8 +287,9 @@ bool Emitter::alive() const
 	if (t.trail && anchor != 0 && !m_stopped) {
 		return true;
 	}
-	// An attached looping system emits until it is stopped.
-	return !m_stopped && (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (anchor != 0 && t.isLooping));
+	// An attached looping or endless (emit time 0) system emits until it is stopped.
+	return !m_stopped
+		&& (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (anchor != 0 && (t.isLooping || t.emitTime == 0)));
 }
 
 void Emitter::place(const Vec3& position, const Mat3& rotation)
@@ -673,7 +674,11 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	}
 	const float interval = 1 / frequency;
 	while (m_emitClock + interval <= m_clock + 1e-5f) {
-		if (t.emitTime > 0 || !t.isLooping) {
+		// An emit time of 0 isn't run down (0x10140590): the system emits
+		// until it is stopped (the gunships' jets, the damage smoke).
+		// shortcut: an unattached one still stops at once, as bundles' own
+		// timeToLive isn't modelled to end it; upgrade when it is.
+		if (t.emitTime != 0 || (!t.isLooping && anchor == 0)) {
 			m_emitLeft -= interval;
 			if (m_emitLeft <= 0) {
 				if (t.isLooping) {
@@ -2148,9 +2153,12 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
 		float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f) * p.alpha, 0.0f, 1.0f);
 		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
-		if (size <= 0 || alpha <= 0 || alpha < t.alphaCull) {
+		if (size <= 0 || alpha <= 0) {
 			continue;
 		}
+		// alphaCull tests the particle's +0x2c (its alpha intensity by the
+		// fade below), not the graph, which is the shader's (0x10130bd0).
+		float cullAlpha = p.alpha;
 		const Vec3 at = emitter.worldPosition(p);
 		if (view.settings) {
 			const float depth = physics::dot(at - view.eye, view.forward);
@@ -2160,12 +2168,18 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 					continue;
 				}
 				alpha *= near;
+				cullAlpha *= near;
 			} else {
-				alpha *= view.fade(depth, t.lodDistance);
+				const float fade = view.fade(depth, t.lodDistance);
+				alpha *= fade;
+				cullAlpha *= fade;
 			}
 			if (alpha <= 0) {
 				continue;
 			}
+		}
+		if (cullAlpha < t.alphaCull) {
+			continue;
 		}
 		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
 			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};

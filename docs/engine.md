@@ -3316,8 +3316,10 @@ transparency and size graphs), randomSize `+0x1b8`, randomIntensity
 - *the draw* (`0x10132e90` and the like): a particle's alpha times (1 −
   min((d − s) / (end − s), 1))² past s = startLodPercentageOfLodDistance
   (0.85) of its class's end, d its depth in the view; a particle whose
-  alpha is below the template's alphaCull (+0xa0, the exe's slot 0x154,
-  `0x00539094` → `0x00626c50`) isn't drawn (the collector `0x10130bd0`).
+  faded alpha intensity (+0x2c: +0x58 by that fade; the transparency graph
+  is the shader's and doesn't count) is below the template's alphaCull
+  (+0xa0, the exe's slot 0x154, `0x00539094` → `0x00626c50`) isn't drawn
+  (the collector `0x10130bd0`).
   pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8) moves the quad's centre off
   the particle by that many half-sizes (`particle.vert`; 0/−0.5 stands
   it on it). drawOrder Back / Front is applied by its name (Back draws the

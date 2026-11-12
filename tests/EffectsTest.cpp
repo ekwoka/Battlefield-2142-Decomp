@@ -947,6 +947,68 @@ TEST(Effects_SpriteDrawAndCollision)
 	CHECK(drawn == 0);
 }
 
+// RendDX9's collector (0x10130bd0) culls on the particle's alpha (+0x2c:
+// its alpha intensity, +0x58, by the LOD fade); the transparency graph is
+// the vertex shader's and never culls. The gunships' jet hotspot
+// (em_rearjetHelo_hotspot: graph 0/-0.09/0/0.09, alphaCull 0.1) draws,
+// also at a hover's alpha intensity of 0.25.
+TEST(Effects_AlphaCullIgnoresTheTransparencyGraph)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* hotspot = addPuff(templates);
+	hotspot->settings()["transparencyGraph"] = "0/-0.09/0/0.09";
+	hotspot->settings()["alphaCull"] = "0.1";
+	hotspot->settings()["emitFrequency"] = "60";
+	hotspot->settings()["timeToLive"] = "0.1";
+	hotspot->settings()["emitTime"] = "0";
+	effects::EffectManager manager(templates);
+	manager.setAnchor(3, {}, {});
+	CHECK(manager.spawnAttached("e_puff", 3, {}, {}, effects::EffectManager::View::Any, 1));
+	manager.setModifier(3, 1, 0, 0.25f);
+	for (int i = 0; i < 6; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	const auto drawn = sprites(manager);
+	CHECK(!drawn.empty());
+	for (const auto& s : drawn) {
+		CHECK(s.color[3] > 0 && s.color[3] <= 0.09f * 0.25f + 1e-4f); // drawn at graph x intensity
+	}
+	manager.setModifier(3, 1, 0, 0.05f); // below alphaCull: culled
+	for (int i = 0; i < 6; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(sprites(manager).empty());
+}
+
+// An emit time of 0 isn't run down (RendDX9 0x10140590): an attached
+// system emits until its bundle stops (the jets' setStopOnEffects).
+TEST(Effects_ZeroEmitTimeEmitsUntilStopped)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* jet = addPuff(templates);
+	jet->settings()["emitFrequency"] = "60";
+	jet->settings()["timeToLive"] = "0.1";
+	jet->settings()["emitTime"] = "0";
+	effects::EffectManager manager(templates);
+	manager.setAnchor(3, {}, {});
+	CHECK(manager.spawnAttached("e_puff", 3, {}, {}, effects::EffectManager::View::Any, 1));
+	for (int i = 0; i < 90; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitting(3, 1) && !sprites(manager).empty()); // still going after 3 s
+	manager.stopAttached(3, 1);
+	for (int i = 0; i < 10; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitters() == 0);
+	// Unattached, it still ends at once (no bundle timeToLive to stop it).
+	manager.spawn("e_puff", {0, 0, 0});
+	for (int i = 0; i < 10; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitters() == 0);
+}
+
 // An EffectBundle's modifiers (0x00618e30): with a mapping set anywhere, the
 // mapped ones follow their inputs; otherwise the Used ones take their min.
 TEST(Effects_BundleModifiersAsTheExe)
