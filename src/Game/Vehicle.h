@@ -211,13 +211,17 @@ public:
 		std::string steering; // the RotationalBundle above it, if any
 		// What an object's mesh gave the wheel's own response last tick (its
 		// vertical probes in 0x006bb050 add to the wheel's response, slot
-		// 0x2c, as the heightmap's points do): the highest crossing, the
-		// mean normal, the mean velocity of what it touched and that
-		// surface's grip. The spring and the tyre read it as the ground
-		// when it is above the terrain.
+		// 0x2c, 0x006ba4c0): the push-out combined per axis (+0x94), the
+		// root's push-out as it stood at the latest of them (+0xa0, through
+		// slot 0x90 -> slot 0x8c), the mean normal, the mean velocity of
+		// what it touched and that surface's grip. The Spring's solve
+		// (0x006ba7d0, class 0x9481) moves the wheel out by
+		// (push - root push) . normal, within 0..1 m; the spring and the
+		// tyre read that as the ground when it is deeper than the terrain.
 		struct ObjectGround {
 			int count = 0;
-			float height = 0;
+			Vec3 push;
+			Vec3 rootPush;
 			Vec3 normal;
 			Vec3 velocity;
 			float grip = 0.8f;
@@ -508,9 +512,14 @@ public:
 	float clutch() const { return m_clutch; }
 
 	void setInput(const VehicleInput& input) { m_input = input; }
-	// A probe of wheel `index` met an object's face at `height` (see
+	// A probe of wheel `index` met an object's face, pushing the wheel by
+	// `push` while the root's push-out stood at `rootPush` (see
 	// Wheel::objectGround); taken by the next tick.
-	void touchObject(size_t index, float height, const Vec3& normal, const Vec3& velocity, float grip);
+	void touchObject(size_t index, const Vec3& push, const Vec3& rootPush, const Vec3& normal, const Vec3& velocity,
+		float grip);
+	// The Spring solve's displacement from the wheel's object contacts
+	// (0..1 m along their mean normal) and that normal; -1 without any.
+	float objectCompression(const Wheel& wheel, Vec3& normal) const;
 	void setWheelMaterial(size_t index, uint32_t material)
 	{
 		if (index < m_wheels.size()) {

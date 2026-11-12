@@ -363,6 +363,45 @@ TEST(Vehicle_WheelsSpinInTheAir)
 	CHECK(car.vehicle->wheels()[2].spin < spun);
 }
 
+// An object's face under a wheel (the Spring's solve, 0x006ba7d0): the
+// wheel moves out by its push-out less its root's, as the root's stood
+// when the latest contact was added, along their mean normal, within
+// 0..1 m. The spring then takes that as its compression.
+TEST(Vehicle_ObjectContactCompressesTheSpringByThePushLessTheRoots)
+{
+	Car car;
+	if (!car.vehicle) {
+		return;
+	}
+	car.ground.height = [](float, float) { return -100.0f; };
+	car.ground.heightAndNormal = [](float, float, Vec3& normal) {
+		normal = {0, 1, 0};
+		return -100.0f;
+	};
+	car.body.gravityModifier = 0;
+	const Vec3 up {0, 1, 0};
+	// The root was shoved 0.2 m down before the wheel's contact: 0.3 + 0.2.
+	car.vehicle->touchObject(2, {0, 0.3f, 0}, {0, -0.2f, 0}, up, {}, 0.8f);
+	Vec3 normal;
+	CHECK(std::fabs(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) - 0.5f) < 1e-5f);
+	car.run(1);
+	CHECK(std::fabs(car.vehicle->wheels()[2].compression - 0.5f) < 1e-5f);
+	CHECK(car.vehicle->wheels()[2].contact);
+	// The latest contact's root push counts; pushes combine per axis.
+	car.vehicle->touchObject(2, {0, 0.3f, 0}, {0, -0.2f, 0}, up, {}, 0.8f);
+	car.vehicle->touchObject(2, {0, 0.4f, 0}, {}, up, {}, 0.8f);
+	CHECK(std::fabs(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) - 0.4f) < 1e-5f);
+	car.run(1);
+	// Within 1 m however far the root went.
+	car.vehicle->touchObject(2, {0, 0.6f, 0}, {0, -0.9f, 0}, up, {}, 0.8f);
+	CHECK(std::fabs(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) - 1.0f) < 1e-5f);
+	car.run(1);
+	CHECK(std::fabs(car.vehicle->wheels()[2].compression - 1.0f) < 1e-5f);
+	// The root pushed up past the wheel's own push: no compression.
+	car.vehicle->touchObject(2, {0, 0.1f, 0}, {0, 0.3f, 0}, up, {}, 0.8f);
+	CHECK(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) == 0.0f);
+}
+
 // The shipped FAVs' wheels and their collision parts. A Spring's
 // collisionPart is a geometry of the vehicle's collision mesh (0x0063ccc0
 // hands the template's +0x74 to the collision manager's slot 0x28,

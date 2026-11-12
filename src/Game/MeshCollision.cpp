@@ -895,12 +895,11 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 				addMeshContact(a, b, hit.point, hit.normal, hit.depth, body.material, hit.material, false, false);
 			if (shares.velocityA != 0) {
 				const float grip = m_materials ? m_materials->friction(body.material, hit.material) : 0.8f;
-				// The solve's Spring branch moves the wheel out along the mean
-				// normal by its push, within 0..1 m (0x006ba7d0): the spring
-				// takes the height that gives it.
-				const float push = std::clamp(-hit.depth * shares.depthA, 0.0f, 1.0f);
-				const float height = (start + along).y + push * hit.normal.y;
-				body.vehicle->touchObject(w, height, hit.normal, b.pointVelocity(hit.point), grip);
+				// The wheel's response (0x006ba4c0): its push-out, and the
+				// root's as it stands now (contacts added later aren't in it);
+				// the Spring's solve takes the difference (0x006ba7d0).
+				const Vec3 push = hit.normal * (-hit.depth * shares.depthA);
+				body.vehicle->touchObject(w, push, body.response.pushOut(), hit.normal, b.pointVelocity(hit.point), grip);
 			}
 		}
 	}

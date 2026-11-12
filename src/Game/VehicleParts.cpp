@@ -912,15 +912,17 @@ void Vehicle::updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physi
 	Vec3 normal {0, 1, 0};
 	float groundHeight = ground.heightAndNormal(bottom.x, bottom.z, normal);
 	Vec3 surfaceVelocity;
-	if (wheel.objectGround.count > 0 && wheel.objectGround.height > groundHeight) {
-		groundHeight = wheel.objectGround.height;
-		const float l = length(wheel.objectGround.normal);
-		normal = l > 1e-6f ? wheel.objectGround.normal * (1.0f / l) : Vec3 {0, 1, 0};
+	float compression = std::max(0.0f, groundHeight - bottom.y);
+	Vec3 objectNormal;
+	const float pushed = objectCompression(wheel, objectNormal);
+	if (wheel.objectGround.count > 0 && pushed > compression) {
+		compression = pushed;
+		groundHeight = bottom.y + pushed;
+		normal = objectNormal;
 		surfaceVelocity = wheel.objectGround.velocity;
 		grip = wheel.objectGround.grip;
 	}
 	wheel.objectGround = {};
-	const float compression = std::max(0.0f, groundHeight - bottom.y);
 	wheel.contact = compression > 0;
 	// The Spring node's first step that finds it moving (0x006caef0's
 	// +0x284, set by 0x006caae0) takes its displacement's rate as 0, so a
