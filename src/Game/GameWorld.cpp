@@ -2335,23 +2335,27 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		p.serial = ++m_projectileSerial;
 	}
 	m_projectiles.push_back(p);
-	// The third-person muzzle flash: the weapon's e_muzz child, placed by
-	// the weapon's matrix times its own as FireComp places the muzzle
-	// bundles (0x005f25f0 -> 0x006acfa0), so it follows the gun (its anchor
-	// is the weapon object, moved in followSoldier while it burns); the
-	// systems shown in third person. Without a posed skeleton, at the eyes
-	// along the aim.
-	if (!player.muzzleEffect.empty() && (localMuzzleEffects || &player != m_player)) {
+	// The third-person shot bundles (fireBundles: the muzzle flash, a
+	// launcher's back blast), placed by the weapon's matrix times their own
+	// as FireComp places them (0x005f25f0 -> 0x006acfa0), so they follow the
+	// gun (their anchor is the weapon object, moved in followSoldier while
+	// they burn); the systems shown in third person. Without a posed
+	// skeleton, at the eyes along the aim.
+	if (!player.muzzles.empty() && (localMuzzleEffects || &player != m_player)) {
 		physics::Vec3 at;
 		physics::Mat3 rotation;
-		if (player.weaponObject && weaponPlace(player, at, rotation)) {
+		const bool placed = player.weaponObject && weaponPlace(player, at, rotation);
+		if (placed) {
 			m_effects.setAnchor(player.weaponObject, at, rotation);
-			m_effects.spawnAttached(player.muzzleEffect, player.weaponObject, player.muzzleOffset, player.muzzleRotation,
-				effects::EffectManager::View::ThirdPerson);
 			const_cast<Player&>(player).muzzleUntil = m_time + 1.0;
-		} else {
-			m_effects.spawn(player.muzzleEffect, p.origin + direction * 0.3f,
-				physics::Mat3::fromYawPitchRoll({look, -aimPitch, 0}));
+		}
+		for (const FireBundle& muzzle : player.muzzles) {
+			if (placed) {
+				m_effects.spawnAttached(muzzle.name, player.weaponObject, muzzle.position, muzzle.rotation,
+					effects::EffectManager::View::ThirdPerson);
+			} else {
+				m_effects.spawn(muzzle.name, p.origin + direction * 0.3f, physics::Mat3::fromYawPitchRoll({look, -aimPitch, 0}));
+			}
 		}
 	}
 }
@@ -5072,15 +5076,8 @@ void GameWorld::weaponTraits(Player& player, const world::ObjectTemplate& weapon
 		player.recoilLeftRight =
 			side != t->settings().end() ? RandomDistribution::parse(side->second) : RandomDistribution::parse("0");
 	}
-	player.muzzleEffect.clear();
-	for (const world::ChildTemplate& child : t->children()) {
-		if (child.name.compare(0, 6, "e_muzz") == 0) {
-			player.muzzleEffect = child.name;
-			player.muzzleOffset = {child.position.x, child.position.y, child.position.z};
-			player.muzzleRotation = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
-			break;
-		}
-	}
+	player.muzzles = fireBundles(m_templates, *t);
+	player.muzzleOffset = player.muzzles.empty() ? physics::Vec3 {} : player.muzzles.front().position;
 }
 
 void GameWorld::equip(Player& player, int slot)

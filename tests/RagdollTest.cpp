@@ -2102,6 +2102,61 @@ TEST(RagDoll_MuzzleFlashFollowsTheGun)
 	}
 }
 
+// A shot starts every child bundle of the weapon with startOnEffects 0,
+// whatever its name or place in the list (game::fireBundles: FireComp's
+// list 0x005f25f0, event 0 at 0x0061a5e2), and not one that a first-person
+// event starts (512): eu_av lists its reload puff e_muzz_eu_av_reload
+// before its launch flash e_muzz_eu_av, and the flash never showed.
+TEST(RagDoll_ShotStartsItsStartOnEffectsZeroBundles)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.templates.registerType(20, "EffectBundle");
+	game.templates.registerType(21, "SpriteParticleSystem");
+	for (const char* name : {"test_reload_puff", "test_shot_flash"}) {
+		world::ObjectTemplate* system = game.templates.create("SpriteParticleSystem", name);
+		system->settings()["emitFrequency"] = "60";
+		system->settings()["emitTime"] = "0.5";
+		system->settings()["timeToLive"] = "0.1";
+		system->settings()["isLocalSystem"] = "1";
+		system->settings()["textureName"] = std::string("objects\\effects\\textures\\") + name;
+	}
+	world::ObjectTemplate* reload = game.templates.create("EffectBundle", "e_muzz_test_reload");
+	reload->settings()["setStartOnEffects"] = "512";
+	reload->children().push_back({"test_reload_puff", {}, {}});
+	game.templates.create("EffectBundle", "e_test_shot")->children().push_back({"test_shot_flash", {}, {}});
+	auto& children = game.templates.find("eu_ar_rifle")->children();
+	children.insert(children.begin(), {"e_muzz_test_reload", {0, 0.05f, 0.3f}, {}});
+	children.push_back({"e_test_shot", {0, 0.05f, 0.6f}, {}});
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int me = game.world->localPlayer();
+	game.world->localMuzzleEffects = true;
+	game.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	game.world->playerInfo(me, info);
+	game::SoldierInput input;
+	input.fire = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.world->tick(1 / 30.0f);
+	const auto started = [&](const char* system) {
+		for (const auto& emitter : game.world->effects().emitterList()) {
+			if (emitter->anchor == info.weapon && emitter->anchor != 0
+				&& emitter->particleTemplate().texture.find(system) != std::string::npos) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(started("test_shot_flash"));
+	CHECK(!started("test_reload_puff"));
+}
+
 // Seat cameras on the mouse (0x00563bd0 on a Camera bundle with inputToYaw
 // PIMouseLookX / inputToPitch PIMouseLookY): the driver's camera
 // (eu_fav_driver_camera's settings: -125..120 across at 90 a second) turns

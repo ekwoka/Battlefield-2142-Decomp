@@ -1831,3 +1831,36 @@ TEST(Weapons_SeekBonusFuseOffsetAndHoverSettings)
 	}
 	CHECK(std::fabs(y - (2 + physics::tuning::kGravity / 75)) < 0.02f);
 }
+
+// A shot starts every child bundle of the weapon whose startOnEffects is 0
+// (FireComp's list 0x005f25f0, event 0 at 0x0061a5e2), zoom-named ones only
+// with `zoom`, whatever their names or order: eu_av lists its reload bundle
+// (startOnEffects 512) before its muzzle flash, and as_av has a back blast
+// beside its muzzle flash.
+TEST(Weapons_ShotStartsEveryStartOnEffectsZeroBundle)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	templates.registerType(2, "EffectBundle");
+	templates.registerType(3, "Sound");
+	templates.create("EffectBundle", "e_muzz_av_reload")->settings()["setStartOnEffects"] = "512";
+	templates.create("EffectBundle", "e_muzz_av");
+	templates.create("EffectBundle", "e_muzz_av_rear")->settings()["setStartOnEffects"] = "0";
+	templates.create("EffectBundle", "e_muzz_av_zoom");
+	templates.create("Sound", "s_av_fire");
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "av");
+	gun->children().push_back({"s_av_fire", {}, {}});
+	gun->children().push_back({"e_muzz_av_reload", {0, 0, 0.2f}, {}});
+	gun->children().push_back({"e_muzz_av", {0, 0.02f, 0.4f}, {}});
+	gun->children().push_back({"e_muzz_av_rear", {0.1f, 0, -0.5f}, {180, 0, 0}});
+	gun->children().push_back({"e_muzz_av_zoom", {}, {}});
+
+	const auto shot = game::fireBundles(templates, *gun);
+	CHECK(shot.size() == 2);
+	if (shot.size() == 2) {
+		CHECK(shot[0].name == "e_muzz_av" && std::fabs(shot[0].position.z - 0.4f) < 1e-6f);
+		CHECK(shot[1].name == "e_muzz_av_rear" && shot[1].rotation.transform({0, 0, 1}).z < -0.99f);
+	}
+	const auto zoomed = game::fireBundles(templates, *gun, true);
+	CHECK(zoomed.size() == 1 && zoomed.front().name == "e_muzz_av_zoom");
+}

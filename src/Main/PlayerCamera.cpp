@@ -931,7 +931,8 @@ void PlayerCamera::tick(float seconds)
 			m_rig->setWeapon(systemPath.empty() || !m_load ? nullptr : m_load(systemPath));
 		}
 		m_zoomSettings = {};
-		m_muzzle = m_zoomMuzzle = {};
+		m_muzzles.clear();
+		m_zoomMuzzles.clear();
 		m_weaponBundles.clear();
 		m_recoil = {};
 		m_recoilGraph.clear();
@@ -977,16 +978,8 @@ void PlayerCamera::tick(float seconds)
 				};
 			bundles(*weaponTemplate, {0, 0, 0}, 0);
 			m_zoomSettings = zoomSettings(*weaponTemplate);
-			for (const world::ChildTemplate& child : weaponTemplate->children()) {
-				if (child.name.compare(0, 6, "e_muzz") != 0) {
-					continue;
-				}
-				const bool zoom = child.name.find("zoom") != std::string::npos || child.name.find("Zoom") != std::string::npos;
-				Muzzle& muzzle = zoom ? m_zoomMuzzle : m_muzzle;
-				if (muzzle.effect.empty()) {
-					muzzle = {child.name, {child.position.x, child.position.y, child.position.z}};
-				}
-			}
+			m_muzzles = game::fireBundles(m_round.templates(), *weaponTemplate);
+			m_zoomMuzzles = game::fireBundles(m_round.templates(), *weaponTemplate, true);
 		}
 		m_zoom = {}; // the new weapon's zoom component (its fine tuning too)
 		m_fov.set(m_baseFov, 0);
@@ -1122,14 +1115,14 @@ void PlayerCamera::tick(float seconds)
 		}
 		m_effects.setAnchor(kWeaponAnchor, {part[12], part[13], part[14]}, rotation);
 	}
-	// The muzzle flash: the weapon's child at its place on the weapon, the
-	// zoomed one while zoomed in with disableMuzzleWhenZoomed; the systems
-	// shown in first person.
-	const Muzzle& muzzle = m_zoomSettings.disableMuzzle && zoomed() ? m_zoomMuzzle : m_muzzle;
-	if (fired && firstPerson && !muzzle.effect.empty()) {
-		const float* o = muzzle.offset.data();
-		m_effects.spawnAttached(muzzle.effect, kWeaponAnchor, {o[0], o[1], o[2]}, {},
-			effects::EffectManager::View::FirstPerson);
+	// The shot's bundles (the muzzle flash, a launcher's back blast): the
+	// weapon's children at their places on it, the zoomed ones while zoomed
+	// in with disableMuzzleWhenZoomed; the systems shown in first person.
+	if (fired && firstPerson) {
+		for (const game::FireBundle& muzzle : m_zoomSettings.disableMuzzle && zoomed() ? m_zoomMuzzles : m_muzzles) {
+			m_effects.spawnAttached(muzzle.name, kWeaponAnchor, muzzle.position, muzzle.rotation,
+				effects::EffectManager::View::FirstPerson);
+		}
 	}
 	// The weapon's first-person effect events (0x2c + N) start its bundles
 	// with bit 9 + N (0x0061a4e0); the soldier's first-person system has no

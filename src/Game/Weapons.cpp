@@ -719,6 +719,29 @@ std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& p
 	return out;
 }
 
+std::vector<FireBundle> fireBundles(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& weapon,
+	bool zoom)
+{
+	std::vector<FireBundle> out;
+	for (const world::ChildTemplate& child : weapon.children()) {
+		const world::ObjectTemplate* bundle = templates.find(child.name);
+		if (!bundle || bundle->typeName() != "EffectBundle") {
+			continue;
+		}
+		const bool zoomNamed = child.name.find("zoom") != std::string::npos || child.name.find("Zoom") != std::string::npos;
+		auto start = bundle->settings().find("setStartOnEffects");
+		if (start == bundle->settings().end()) {
+			start = bundle->settings().find("startOnEffects");
+		}
+		const unsigned long startOnEffects = start != bundle->settings().end() ? std::strtoul(start->second.c_str(), nullptr, 10) : 0;
+		if (zoomNamed == zoom && startOnEffects == 0) {
+			out.push_back({child.name, {child.position.x, child.position.y, child.position.z},
+				physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z})});
+		}
+	}
+	return out;
+}
+
 std::vector<ProjectileRenderState> projectileRenderStates(const world::ObjectTemplateManager& templates,
 	const std::vector<Projectile>& projectiles, uint32_t hiddenSerial)
 {

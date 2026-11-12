@@ -811,6 +811,21 @@ struct ProjectileRenderState {
 std::vector<ProjectileRenderState> projectileRenderStates(const world::ObjectTemplateManager& templates,
 	const std::vector<Projectile>& projectiles, uint32_t hiddenSerial = 0);
 
+// The bundles a shot starts on the weapon: FireComp lists all its children,
+// those named "zoom" / "Zoom" apart (0x005f25f0), and a shot sends one list
+// event 0, which starts a bundle only when its startOnEffects is 0
+// (0x0061a4e0 case 0, 0x0061a5e2). So: the EffectBundle children with
+// startOnEffects 0, the zoom-named ones with `zoom`, the others without.
+// A reload or deploy bundle (startOnEffects 512: first-person event 0x2c)
+// isn't one, whatever its name.
+struct FireBundle {
+	std::string name;
+	physics::Vec3 position; // the child's place on the weapon
+	physics::Mat3 rotation;
+};
+std::vector<FireBundle> fireBundles(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& weapon,
+	bool zoom = false);
+
 // The radius trigger's shape test (0x005e8aa0; GameWorld's radius trigger
 // has the rest: the trigger types, the spared side, the line to it): the
 // object's origin, frame and box (object space), whether it is a soldier

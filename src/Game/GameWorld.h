@@ -2959,9 +2959,8 @@ private:
 		// fire.maxProjectilesInWorld; it goes with the kit's firearms.
 		std::map<std::string, std::deque<uint32_t>> inWorld;
 		const ProjectileSettings* projectile = nullptr;
-		std::string muzzleEffect; // the weapon's e_muzz_* child
-		physics::Vec3 muzzleOffset; // its place on the weapon (the child's position and rotation)
-		physics::Mat3 muzzleRotation;
+		std::vector<FireBundle> muzzles; // the bundles a shot starts (fireBundles)
+		physics::Vec3 muzzleOffset; // the first one's place on the weapon (the tracer's start)
 		double muzzleUntil = -1; // its flash follows the weapon (the anchor moved) until then
 		int team = 0;
 		uint32_t vehicle = 0;     // the vehicle sat in, 0 on foot

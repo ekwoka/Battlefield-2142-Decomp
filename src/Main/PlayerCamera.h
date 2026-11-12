@@ -317,14 +317,10 @@ private:
 	int m_roundsWas = -1;
 	bool m_reloadingWas = false;
 	bool m_reloadAnimationPending = false;
-	// The muzzle effects among the weapon's children (FireComp 0x005f25f0):
+	// The bundles a shot starts among the weapon's children (game::fireBundles):
 	// those named "zoom" flash while zoomed with disableMuzzleWhenZoomed,
 	// the others otherwise (0x005f31d0, 0x005da050).
-	struct Muzzle {
-		std::string effect;
-		std::array<float, 3> offset {};
-	};
-	Muzzle m_muzzle, m_zoomMuzzle;
+	std::vector<game::FireBundle> m_muzzles, m_zoomMuzzles;
 	// The weapon's effect bundles started by its first-person system's
 	// effect events (startOnEffects bit 9 + N), with their places on it.
 	struct WeaponBundle {
