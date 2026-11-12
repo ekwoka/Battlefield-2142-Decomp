@@ -10630,32 +10630,32 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 					const auto it = settings.find(key);
 					return it != settings.end() && sameName(it->second, input);
 				};
+				// 0x00563bd0's axes (Vehicle.h's RotationAxis), x for yaw, y for pitch.
+				const auto vec = [&](const char* key) {
+					const auto it = settings.find(key);
+					return it != settings.end() ? parseVec3(it->second) : physics::Vec3 {};
+				};
+				const auto axis = [&](int i, bool on) {
+					RotationAxis a;
+					if (!on) {
+						return a;
+					}
+					const auto pick = [i](const physics::Vec3& v) { return i == 0 ? v.x : v.y; };
+					a.minRotation = pick(vec("minRotation"));
+					a.maxRotation = pick(vec("maxRotation"));
+					a.maxSpeed = pick(vec("maxSpeed"));
+					a.acceleration = pick(vec("acceleration"));
+					a.deAcceleration = pick(vec("deAcceleration"));
+					a.continuousSpeed = pick(vec("continousRotationSpeed"));
+					a.automaticReset = number(t, "automaticReset", 0) != 0;
+					a.snapToZero = number(t, "snapToZeroOnNoInput", 0) != 0;
+					a.useDeAcceleration = number(t, "useDeAcceleration", 0) != 0;
+					a.capMaxSpeed = number(t, "capMaxSpeed", 0) != 0;
+					a.maxSpeedMod = number(t, "maxSpeedMod", 0);
+					return a;
+				};
 				if (t.typeName() == "Camera" && owner.camera.empty()
 					&& (look("inputToYaw", "PIMouseLookX") || look("inputToPitch", "PIMouseLookY"))) {
-					// 0x00563bd0's axes (Vehicle.h's RotationAxis), x for yaw, y for pitch.
-					const auto vec = [&](const char* key) {
-						const auto it = settings.find(key);
-						return it != settings.end() ? parseVec3(it->second) : physics::Vec3 {};
-					};
-					const auto axis = [&](int i, bool on) {
-						RotationAxis a;
-						if (!on) {
-							return a;
-						}
-						const auto pick = [i](const physics::Vec3& v) { return i == 0 ? v.x : v.y; };
-						a.minRotation = pick(vec("minRotation"));
-						a.maxRotation = pick(vec("maxRotation"));
-						a.maxSpeed = pick(vec("maxSpeed"));
-						a.acceleration = pick(vec("acceleration"));
-						a.deAcceleration = pick(vec("deAcceleration"));
-						a.continuousSpeed = pick(vec("continousRotationSpeed"));
-						a.automaticReset = number(t, "automaticReset", 0) != 0;
-						a.snapToZero = number(t, "snapToZeroOnNoInput", 0) != 0;
-						a.useDeAcceleration = number(t, "useDeAcceleration", 0) != 0;
-						a.capMaxSpeed = number(t, "capMaxSpeed", 0) != 0;
-						a.maxSpeedMod = number(t, "maxSpeedMod", 0);
-						return a;
-					};
 					owner.camera = t.name();
 					owner.cameraRegulateYaw = vec("regulateVector").x;
 					owner.cameraIgnoreYaw = vec("ignoreParentRotation").x;
@@ -10761,6 +10761,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						owner.yawBundle = t.name();
 						owner.yawPivot = at;
 						owner.frameYaw = turn.yawPitchRoll().x;
+						owner.yawAxis = axis(0, true);
 						if (const auto reg = settings.find("regulateVector"); reg != settings.end()) {
 							owner.regulateYaw = parseVec3(reg->second).x;
 						}
@@ -10799,6 +10800,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						anchorGun(owner);
 						pitchHere = true;
 						owner.pitchBundle = t.name();
+						owner.pitchAxis = axis(1, true);
 						owner.pitchFrame = turn;
 						owner.hasPitchFrame = true;
 						pitchFrames.resize(layout.seats.size());
@@ -11892,6 +11894,9 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// seat rides (eu_tank's cupola on the driver's turret) and the bone
 	// part under it (the mechs' torso).
 	const physics::Mat3 hull = gunHull(body, tree, seat);
+	// This tick's PIMouseLookY (stepSeatCamera moves lastLookPitch on after
+	// us), taken before the view restores below move aimPitch.
+	const float lookPitchChange = player.input.aimPitch - player.lastLookPitch;
 	// The projectile camera with takeOverInput: the input goes to the
 	// round's camera and stops (0x005ca2e0); the guns neither turn nor fire.
 	if (stepProjectileView(player, seconds)) {
@@ -11924,6 +11929,9 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// A bot's aimPitch is the bundle's angle it wants (its aim's closed
 	// loop, the ControlInfo adaptor's PID on PIMouseLookY, takes any turn
 	// of the hull back itself), so it keeps no offset.
+	if (!continuing) {
+		gun.yawRate = gun.pitchRate = 0;
+	}
 	if (!continuing || player.ai) {
 		gun.pitchOffset = 0;
 	} else if (seat.ignoreParentPitch != 0) {
@@ -11982,7 +11990,17 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		}
 	}
 	if (aims) {
-		float turn = gun.yawBlocked ? 0.0f : player.input.turn;
+		// A person's look drives the bundles as retail's does (0x00565180
+		// puts the raw PIMouseLookX / Y, 5 degrees a unit, on the bundle;
+		// 0x00565a20 -> 0x00563bd0 per axis): a target speed of input x
+		// maxSpeed reached at `acceleration`, so a turret keeps turning after
+		// the mouse stops (eu_tank's 25 degrees a second a unit at 500 a
+		// second, a second). A bot's turn stays degrees a tick (Bots.cpp
+		// caps it at maxSpeed itself).
+		const auto moves = [](const RotationAxis& a) { return a.acceleration != 0 || a.continuousSpeed != 0; };
+		const bool yawBundled = !player.ai && !seat.yawBundle.empty() && moves(seat.yawAxis);
+		const bool pitchBundled = !player.ai && !seat.pitchBundle.empty() && moves(seat.pitchAxis);
+		float turn = gun.yawBlocked ? 0.0f : yawBundled ? player.input.turn / 5.0f : player.input.turn;
 		// surpressPlayerInputVector (the input pass 0x00565700): while the
 		// seat's weapon is zoomed (its zoom component's index, slot 0xa0,
 		// not 0) each axis's input is times its component, 0 leaving it be.
@@ -11991,24 +12009,39 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		if (seat.suppressYaw != 0 && player.zoomed) {
 			turn *= seat.suppressYaw;
 		}
-		if (seat.regulateYaw != 0 && seat.yawSpeed != 0 && !gun.yawBlocked) {
+		if (yawBundled && seat.regulateYaw != 0 && !gun.yawBlocked) {
+			turn = regulatedInput(turn, regulation(seat.regulateYaw, body.body)); // both in input units
+		} else if (seat.regulateYaw != 0 && seat.yawSpeed != 0 && !gun.yawBlocked) {
 			const float reg = regulation(seat.regulateYaw, body.body) * seat.yawSpeed * seconds;
 			turn = regulatedInput(turn, reg);
 		}
 		// A pitch-only mount has no horizontal articulation. Mouse X may
 		// steer the hull instead (the hover tank); it must not also rotate
 		// an invisible gun yaw away from the rendered barrel.
-		if (!seat.yawBundle.empty()) {
+		if (yawBundled) {
+			rotationAxisStep(seat.yawAxis, turn, seconds, gun.yaw, gun.yawRate);
+			gun.yaw = std::clamp(std::remainder(gun.yaw, 360.0f), seat.minYaw, seat.maxYaw);
+		} else if (!seat.yawBundle.empty()) {
 			gun.yaw = std::clamp(std::remainder(gun.yaw + turn, 360.0f), seat.minYaw, seat.maxYaw);
 		}
 		// Bundle pitch is down positive: its limits [min, max] bound the aim
 		// at [-max, -min]; the offset no further than the limits let it.
 		const float low = -seat.maxPitch, high = -seat.minPitch;
-		gun.pitchOffset = seat.ignoreParentPitch != 0 && low <= high
-			? std::clamp(gun.pitchOffset, low - player.input.aimPitch, high - player.input.aimPitch)
-			: 0.0f;
-		if (!gun.pitchBlocked) {
-			gun.pitch = std::clamp(player.input.aimPitch + gun.pitchOffset - seat.restPitch, low, high);
+		if (pitchBundled) {
+			// The bundle's own angle (down positive) takes this tick's look
+			// change and this tick's ignoreParentRotation take-back.
+			const float tilt = gun.pitchBlocked || !continuing ? 0.0f : -lookPitchChange / 5.0f;
+			float angle = -(gun.pitch + gun.pitchOffset);
+			gun.pitchOffset = 0;
+			rotationAxisStep(seat.pitchAxis, tilt, seconds, angle, gun.pitchRate);
+			gun.pitch = low <= high ? std::clamp(-angle, low, high) : -angle;
+		} else {
+			gun.pitchOffset = seat.ignoreParentPitch != 0 && low <= high
+				? std::clamp(gun.pitchOffset, low - player.input.aimPitch, high - player.input.aimPitch)
+				: 0.0f;
+			if (!gun.pitchBlocked) {
+				gun.pitch = std::clamp(player.input.aimPitch + gun.pitchOffset - seat.restPitch, low, high);
+			}
 		}
 	}
 	selectSeatWeapons(player, body, seat);
@@ -12275,10 +12308,13 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	const physics::Vec3 straight = direction;
 	// The round strays by the deviation (0x005f5540): (minDev + the
 	// build-up) and, for a bot, its AI deviation (0x005dedb0's end); two
-	// normal numbers x that x 0.01 along its up and right. (Zoomed, the
-	// component's deviation is 0: the world keeps no seat zoom.)
+	// normal numbers x that x 0.01 along its up and right. Zoomed, the
+	// component's deviation is 0 (0x005dedb0: its +0x2c, the firearm's zoom
+	// level over 0 by 0x005dee60, puts both modifiers to 0); the seat's zoom
+	// is the PIFire group's weapon's (PlayerCamera::zoomLevel).
 	if (w.hasDeviation) {
-		const float deviation = arm.deviation.deviation() + (player.ai ? gun.aiDeviation : 0.0f);
+		const bool zoomed = player.zoomed && &arm == static_cast<Body::Arm*>(&gun);
+		const float deviation = (zoomed ? 0.0f : arm.deviation.deviation()) + (player.ai ? gun.aiDeviation : 0.0f);
 		arm.deviation.fired();
 		if (deviation > 0.01f) {
 			const float across = std::sqrt(direction.x * direction.x + direction.z * direction.z);

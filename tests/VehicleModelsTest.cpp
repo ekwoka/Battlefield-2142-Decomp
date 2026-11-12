@@ -22,6 +22,7 @@
 #include "Main/PlayerCamera.h"
 #include "Net/RemoteInput.h"
 #include "Render/PostProduction.h"
+#include "SeatAim.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -1665,8 +1666,10 @@ TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 			game::SoldierInput in; in.switchSeat = 2;
 			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			g.world->setPlayerInput({}); g.run(4);
-			in = {}; in.aimPitch = -25;
-			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			float look = 0; // the bundles turn at their own speeds (stepGunner): lead the gun down
+			seataim::steerGun([&](const game::SoldierInput& i) { g.world->setPlayerInput(i); g.world->tick(1 / 30.0f); },
+				[&](float& y, float& p) { g.world->gunAim(v, 1, y, p); }, look, NAN, -25);
+			in = {}; in.aimPitch = look;
 			float yaw = 0, pitch = 0;
 			CHECK(g.world->gunAim(v, 1, yaw, pitch) && pitch < -10);
 			in.altFire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
@@ -1702,15 +1705,21 @@ TEST(Vehicles_GunshipTVSelectionRestoresGunnerPitch)
 			in.altFire = false; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			in.aimPitch = -35;
 			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			for (int i = 0; i < 30; ++i) {
+				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); // the bundle settles (stepGunner)
+			}
+			float yaw = 0, held = 0, pitch = 0;
+			CHECK(g.world->gunAim(v, 1, yaw, held));
 			in.altFire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			in.altFire = false; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			const float correction = g.world->takeAimKick(g.world->localPlayer());
 			CHECK(std::fabs(correction - 35) < 0.1f);
 			in.aimPitch += correction;
 			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
-			float yaw = 0, pitch = 0;
+			// The look's restore is no turn of the gun: the bundle takes the
+			// look's changes only (stepGunner), so it stays where it was.
 			CHECK(g.world->gunAim(v, 1, yaw, pitch));
-			CHECK(std::fabs(pitch) < 1.0f);
+			CHECK(std::fabs(pitch - held) < 1.0f);
 		}
 	}
 }
@@ -1731,7 +1740,11 @@ TEST(Vehicles_GunshipMouseInputBetweenTicks)
 	for (int i = 0; i < 4; ++i) g.world->setPlayerInput(in);
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->gunAim(v, 1, after, pitch));
-	CHECK(std::fabs(std::remainder(after - before, 360.0f) - 4) < 0.1f);
+	// The four moves make one tick's 4 degrees, 0.8 PIMouseLook units: the
+	// yaw bundle's speed goes towards 0.8 x maxSpeed (stepGunner, 0x00563bd0).
+	const auto& axis = g.world->vehicleSeats(v)[1].yawAxis;
+	const float speed = std::min(0.8f * axis.maxSpeed, axis.acceleration / 30);
+	CHECK(speed > 0 && std::fabs(std::remainder(after - before, 360.0f) - speed / 30) < 0.05f);
 }
 
 // A seat's weapons by group (0x005cc5e0): the heavy mech's driver has its
@@ -2038,11 +2051,29 @@ TEST(Vehicles_GroundDriverAimsAndFires)
 	float yaw = 0, pitch = 0;
 	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
 	const float hullYaw = g.yaw(tank);
-	game::SoldierInput look;
-	look.turn = 3; // degrees a tick
-	look.aimPitch = 4;
-	g.drive(look, 0.5f);
+	// The look drives the bundles' speeds, not their angles (stepGunner,
+	// 0x00563bd0): EU_TANK_Turret 25 degrees a second a PIMouseLook unit
+	// (5 degrees of look) reached at 500 a second, a second. A flick of 30
+	// degrees a tick for 3 ticks winds it up 16.7 a second each tick; after
+	// the mouse stops it keeps turning two more ticks as it slows.
+	float start = 0;
+	CHECK(g.world->gunAim(tank, 0, start, pitch));
+	game::SoldierInput flick;
+	flick.turn = 30;
+	g.drive(flick, 0.1f);
+	float stopped = 0;
+	CHECK(g.world->gunAim(tank, 0, stopped, pitch));
+	g.drive({}, 0.2f);
 	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	const float driving = std::remainder(stopped - start, 360.0f), coasting = std::remainder(yaw - stopped, 360.0f);
+	std::fprintf(stderr, "  eu_tank flick: %.2f turning, %.2f coasting\n", driving, coasting);
+	CHECK(std::fabs(driving - 100.0f / 30) < 0.2f); // 16.7 + 33.3 + 50 degrees a second, a tick each
+	CHECK(std::fabs(coasting - 50.0f / 30) < 0.2f);  // 33.3 + 16.7, then still
+	float look = 0;
+	seataim::steerGun([&](const game::SoldierInput& in) { g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); },
+		[&](float& y, float& p) { g.world->gunAim(tank, 0, y, p); }, look, std::remainder(start + 45, 360.0f), 4);
+	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	yaw = std::remainder(yaw - start, 360.0f);
 	std::fprintf(stderr, "  eu_tank turret %.1f, barrel %.1f (the hull turned %.1f)\n", yaw, pitch,
 		std::remainder(g.yaw(tank) - hullYaw, 360.0f));
 	CHECK(std::fabs(std::remainder(yaw - 45, 360.0f)) < 3);
@@ -2054,7 +2085,7 @@ TEST(Vehicles_GroundDriverAimsAndFires)
 	const size_t before = g.world->projectiles().size();
 	game::SoldierInput fire;
 	fire.turn = 0;
-	fire.aimPitch = 4;
+	fire.aimPitch = look;
 	fire.fire = true;
 	g.drive(fire, 0.1f);
 	g.world->setPlayerInput({});
@@ -2321,16 +2352,23 @@ TEST(VehicleModels_SuppressedInputWhileZoomed)
 		g.world->setZoomed(me, zoomed);
 		float yaw0 = 0, yaw1 = 0, pitch = 0;
 		g.world->gunAim(at, seat, yaw0, pitch);
+		// The bundle's speed follows the input (stepGunner): held, the turn
+		// is its steady speed, which the suppression scales.
 		input = {};
 		input.turn = 2;
-		g.world->setPlayerInput(input);
-		g.world->tick(1 / 30.0f);
+		for (int tick = 0; tick < 10; ++tick) {
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+		}
 		g.world->setPlayerInput({});
+		for (int tick = 0; tick < 5; ++tick) {
+			g.world->tick(1 / 30.0f);
+		}
 		g.world->gunAim(at, seat, yaw1, pitch);
-		turned[zoomed ? 1 : 0] = yaw1 - yaw0;
+		turned[zoomed ? 1 : 0] = std::remainder(yaw1 - yaw0, 360.0f);
 	}
 	std::fprintf(stderr, "  turned %.2f, zoomed %.2f\n", turned[0], turned[1]);
-	CHECK(std::fabs(turned[0] - 2) < 0.01f && std::fabs(turned[1] - 1.2f) < 0.01f);
+	CHECK(std::fabs(turned[0]) > 1 && std::fabs(turned[1] / turned[0] - 0.6f) < 0.02f);
 }
 
 // StickyCollisionComp (0x005e83d0): C4 (maxStickAngle 180, every stick
@@ -2744,10 +2782,15 @@ TEST(Vehicles_BipodIsAStationarySeat)
 	CHECK(g.world->gunAim(bipod, 0, yaw1, pitch1));
 	std::fprintf(stderr, "  eu_bipod: gun yaw %.1f -> %.1f\n", yaw0, yaw1);
 	CHECK(std::fabs(yaw1 - yaw0) > 5);
-	// The barrel rests 40 degrees up from eu_down's angle (restPitch): a
-	// level look holds the bundle at -40, within its 20..60 down.
+	// The barrel rests 40 degrees up from eu_down's angle (restPitch): the
+	// bundle (20..60 down) led to -40 by the look (stepGunner turns it at its
+	// own speed) points the barrel level.
+	float look = 0;
+	seataim::steerGun([&](const game::SoldierInput& in) { g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); },
+		[&](float& y, float& p) { g.world->gunAim(bipod, 0, y, p); }, look, NAN, -40);
 	game::SoldierInput level;
-	g.drive(level, 0.5f);
+	level.aimPitch = look;
+	g.drive(level, 0.2f);
 	g.world->gunAim(bipod, 0, yaw1, pitch1);
 	CHECK(std::fabs(pitch1 + 40) < 0.5f);
 	// eu_down takes both inputs: its pose (what the drawing and the seat
@@ -2991,6 +3034,29 @@ TEST(Vehicles_WalkerMainGunUsesItsAimAndConfiguredDeviation)
 			const float rmsDegrees = static_cast<float>(std::sqrt(squares / spread.size()) * 57.29578);
 			CHECK(rmsDegrees > 0.01f && rmsDegrees < 1.0f);
 		}
+		// Zoomed, the component's deviation is 0 (0x005dedb0's +0x2c): the
+		// rounds leave along the gun, one after another the same way.
+		g.world->setZoomed(g.world->localPlayer(), true);
+		std::vector<physics::Vec3> rays;
+		for (int i = 0; i < 300; ++i) {
+			game::SoldierInput fire;
+			fire.fire = true;
+			g.world->setPlayerInput(fire);
+			g.world->tick(dt);
+			for (size_t n = observed; n < g.world->projectiles().size(); ++n) {
+				const game::Projectile& p = g.world->projectiles()[n];
+				const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+				if (p.shooter == mech && p.age < 0.05f && speed > 1e-4f) rays.push_back(p.velocity * (1 / speed));
+			}
+			observed = g.world->projectiles().size();
+		}
+		CHECK(rays.size() >= 3); // the magazine is near its end after the volley above
+		float widest = 0;
+		for (size_t n = 1; n < rays.size(); ++n) {
+			widest = std::max(widest, std::acos(std::clamp(physics::dot(rays[n], rays[n - 1]), -1.0f, 1.0f)) * 57.29578f);
+		}
+		std::fprintf(stderr, "  %s zoomed: %zu rounds, widest step %.4f degrees\n", mod, rays.size(), widest);
+		CHECK(widest < 0.01f);
 	}
 }
 
@@ -3074,9 +3140,12 @@ TEST(Vehicles_StaticGunnerSitsOnTheCockpit)
 	g.run(0.5f);
 	CHECK(!g.objects.find(me.soldier)->hidden());
 	const float before = g.yaw(me.soldier);
+	// Static_AV_Cockpit turns 15 degrees a second a PIMouseLook unit
+	// (stepGunner): a unit a tick for a second, then it settles.
 	game::SoldierInput turn;
-	turn.turn = 2;
-	g.drive(turn, 0.5f);
+	turn.turn = 5;
+	g.drive(turn, 1.0f);
+	g.drive({}, 0.2f);
 	float yaw = 0, pitch = 0;
 	CHECK(g.world->gunAim(gun, 0, yaw, pitch));
 	const float after = g.yaw(me.soldier);
@@ -3329,13 +3398,13 @@ TEST(PlayerCamera_GunshipGunnerTurnsWithTheGun)
 			PlayerCamera::View rest, turned;
 			CHECK(camera.view(rest, 16.0f / 9.0f));
 			float gunYaw = 0, gunPitch = 0;
-			game::SoldierInput look;
-			look.turn = 20;
-			look.aimPitch = 25;
-			for (int i = 0; i < 15; ++i) { g.world->setPlayerInput(look); g.world->tick(1 / 30.0f); camera.tick(1 / 30.0f); look.turn = 0; }
-			CHECK(camera.view(turned, 16.0f / 9.0f));
 			game::GameWorld::PlayerInfo me;
 			g.world->playerInfo(g.world->localPlayer(), me);
+			// The gun's bundles turn at their own speeds (stepGunner): lead it.
+			float look = 0;
+			seataim::steerGun([&](const game::SoldierInput& in) { g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); camera.tick(1 / 30.0f); },
+				[&](float& y, float& p) { g.world->gunAim(ship, me.seat, y, p); }, look, 20, 25);
+			CHECK(camera.view(turned, 16.0f / 9.0f));
 			CHECK(g.world->gunAim(ship, me.seat, gunYaw, gunPitch));
 			std::fprintf(stderr, "  %s %s gunner: gun %.1f/%.1f, view yaw %.1f -> %.1f, pitch %.1f -> %.1f\n", mod, name, gunYaw, gunPitch,
 				rest.yaw / kDeg, turned.yaw / kDeg, rest.pitch / kDeg, turned.pitch / kDeg);

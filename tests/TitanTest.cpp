@@ -16,6 +16,7 @@
 #include "Sound/Game/SoundObjectTemplate.h"
 #include "Main/TitanShotTrace.h"
 #include "Animation/AnimationSystem.h"
+#include "SeatAim.h"
 #include "TitanLevel.h"
 
 #include <algorithm>
@@ -746,21 +747,23 @@ TEST(Titan_GunSeatsAreMannedAndFire)
 	input.switchSeat = ground + 1;
 	level.world->setInput(gunner, input);
 	level.run(0.1f);
-	input = {};
-	input.turn = 500; // degrees this tick
-	level.world->setInput(gunner, input);
-	level.run(1);
+	// The bundles turn at their own speeds (stepGunner): lead the gun past
+	// its yaw limit, then down to -30.
+	const auto tick = [&](const game::SoldierInput& in) { level.world->setInput(gunner, in); level.run(1 / 30.0f); };
+	const auto gun = [&](float& y, float& p) { level.world->gunAim(eu, ground, y, p); };
+	float look = 0;
+	const float limit = seats[static_cast<size_t>(ground)].frameYaw + seats[static_cast<size_t>(ground)].maxYaw;
+	seataim::steerGun(tick, gun, look, limit + 20, NAN);
 	level.world->playerInfo(gunner, info);
 	CHECK(info.seat == ground);
 	float yaw = 0, pitch = 0;
 	CHECK(level.world->gunAim(eu, ground, yaw, pitch));
 	std::fprintf(stderr, "  rear ground cannon aim: yaw %.1f, pitch %.1f\n", yaw, pitch);
-	CHECK(std::fabs(std::remainder(yaw - (seats[static_cast<size_t>(ground)].frameYaw + seats[static_cast<size_t>(ground)].maxYaw), 360.0f)) < 0.5f);
-	input.turn = 0;
-	input.aimPitch = -30;
-	level.world->setInput(gunner, input);
-	level.run(0.1f);
-	CHECK(level.world->gunAim(eu, ground, yaw, pitch) && pitch == -30);
+	CHECK(std::fabs(std::remainder(yaw - limit, 360.0f)) < 0.5f);
+	seataim::steerGun(tick, gun, look, NAN, -30);
+	CHECK(level.world->gunAim(eu, ground, yaw, pitch) && std::fabs(pitch + 30) < 0.5f);
+	input = {};
+	input.aimPitch = look;
 	// Fire: its rounds leave backwards and down.
 	const size_t before = level.world->projectiles().size();
 	input.turn = 0;
@@ -2424,8 +2427,10 @@ TEST(Titan_AASeatAimAndFireOwnership)
    ++count;
    input = {}; input.switchSeat = static_cast<int>(i) + 1;
    level.world->setInput(player, input); level.run(0.1f);
-   input = {}; input.aimPitch = 30;
-   level.world->setInput(player, input); level.run(0.1f);
+   float look = 0; // the bundles turn at their own speeds (stepGunner): lead the gun up
+   seataim::steerGun([&](const game::SoldierInput& in) { level.world->setInput(player, in); level.run(1 / 30.0f); },
+    [&](float& y, float& p) { level.world->gunAim(id, static_cast<int>(i), y, p); }, look, NAN, 30);
+   input = {}; input.aimPitch = look;
    float yaw = 0, pitch = 0;
    CHECK(level.world->gunAim(id, static_cast<int>(i), yaw, pitch));
    CHECK(std::fabs(pitch - 30) < 0.5f);
@@ -2483,16 +2488,17 @@ TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
    level.world->setInput(player, input); level.run(0.1f);
    input = {}; input.turn = 15;
    level.world->setInput(player, input); level.run(1 / 30.0f);
+   float look = 0; // the bundles turn at their own speeds (stepGunner): lead the gun
    for (const float aim : {-15.0f, -40.0f}) {
-    input = {}; input.aimPitch = aim;
-    level.world->setInput(player, input); level.run(0.1f);
+    seataim::steerGun([&](const game::SoldierInput& in) { level.world->setInput(player, in); level.run(1 / 30.0f); },
+     [&](float& y, float& p) { level.world->gunAim(id, static_cast<int>(i), y, p); }, look, NAN, aim);
     camera.tick(1 / 30.0f);
     PlayerCamera::View view;
     CHECK(camera.view(view, 16.0f / 9.0f));
     std::fprintf(stderr, "ground %s team %d seat %zu aim %.1f view %.1f yaw %.1f\n", mod, team, i, aim, view.pitch * 180 / 3.14159265f, view.yaw * 180 / 3.14159265f);
     CHECK(std::fabs(view.pitch - aim * 3.14159265f / 180.0f) < 0.04f);
    }
-   input = {}; input.aimPitch = -40; input.fire = true;
+   input = {}; input.aimPitch = look; input.fire = true;
    level.world->setInput(player, input); level.run(0.2f);
    const auto& projectiles = level.world->projectiles();
    const game::Projectile* shot = nullptr;
@@ -2742,9 +2748,12 @@ TEST(Titan_FriendlyWalkerAAGunOnSuez)
 		CHECK(info.seat == 1);
 		input = {};
 		const auto p = level.objects.find(walker)->position();
-		input.aimPitch = std::atan2(titan.position.y - p.y, titan.position.z - p.z) * 57.29578f;
-		level.world->setInput(player, input);
-		level.run(2);
+		// The bundles turn at their own speeds (stepGunner): lead the gun up.
+		float look = 0;
+		seataim::steerGun([&](const game::SoldierInput& in) { level.world->setInput(player, in); level.run(1.0f / 30); },
+			[&](float& y, float& pitch) { level.world->gunAim(walker, 1, y, pitch); }, look, NAN,
+			std::atan2(titan.position.y - p.y, titan.position.z - p.z) * 57.29578f);
+		input.aimPitch = look;
 		input.fire = !alt;
 		input.altFire = alt;
 		level.world->setInput(player, input);
@@ -2964,9 +2973,12 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 			camera.tick(1 / 30.0f);
 			PlayerCamera::View before, after;
 			CHECK(camera.view(before, 16.0f / 9));
+			// The launcher's bundle turns at its own speed (stepGunner): hold the turn.
 			input = {}; input.turn = 15; input.aimPitch = -30;
-			level.world->setInput(player, input);
-			level.run(0.5f);
+			for (int tick = 0; tick < 15; ++tick) {
+				level.world->setInput(player, input);
+				level.run(1 / 30.0f);
+			}
 			camera.tick(1 / 30.0f);
 			CHECK(camera.view(after, 16.0f / 9));
 			CHECK(std::fabs(std::remainder(after.yaw - before.yaw, 6.2831853f)) > 0.1f);

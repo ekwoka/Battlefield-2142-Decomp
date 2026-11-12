@@ -1368,6 +1368,9 @@ public:
 		// The yaw bundle's regulateVector x (template +0x314) and maxSpeed x:
 		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
 		float regulateYaw = 0, yawSpeed = 0;
+		// The yaw bundle's x axis and the pitch bundle's y axis as 0x00563bd0
+		// steps them (a person's look is their input, see stepGunner).
+		RotationAxis yawAxis, pitchAxis;
 		float ignoreParentYaw = 0; // the yaw bundle's ignoreParentRotation x (+0x344, see stepGunner)
 		// The yaw bundle's automaticYawStabilization (+0x308; the tanks'
 		// cupolas, the walkers' AA cannons and second gun): see
@@ -2256,7 +2259,8 @@ private:
 		// empty while it is; `arms` holds the others' state by index.
 		struct Gun : Arm {
 			float yaw = 0, pitch = 0; // the bundles' rotation, degrees (pitch up positive)
-			float aiDeviation = 0;      // the component's +0x28 (setAiDeviation)
+			float yawRate = 0, pitchRate = 0; // the bundles' speeds (0x00563bd0's +0x194), degrees a second, bundle sign
+			float aiDeviation = 0;     // the component's +0x28 (setAiDeviation)
 			bool manned = false;        // someone in its seat last tick (stepUnmannedGuns)
 			float hullYaw = NAN;        // the hull's yaw at the last tick (ignoreParentRotation)
 			// The pitch bundle's ignoreParentRotation: the hull's rotation at
