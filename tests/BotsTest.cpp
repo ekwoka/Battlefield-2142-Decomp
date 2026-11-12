@@ -635,6 +635,89 @@ TEST(Bots_GoalRecoveryConfirmedWorldExit)
 	CHECK(game::BotManagerTestAccess::seat(bots, self, vehicle) > 0);
 }
 
+// An EMP'd vehicle keeps its crew: the AI's seat choice (AIDLL 0x1006c520) has no EMP input, so a bot driving a
+// vehicle hit by an EMP blast (the APC's EMP launcher: detonation.isEMPWeapon) stays seated.
+TEST(Bots_EmpDoesNotTurnDriverOut)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	CHECK(gameDir != nullptr);
+	if (!gameDir) return;
+	Field field([&](Field& f) {
+		f.files.setRootPath(gameDir);
+		f.files.addSearchPath("mods/bf2142");
+		Console console {&f.files};
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&](std::string archive, std::string mountPoint, bool) { f.files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		f.templates.registerType(7, "PlayerControlObject");
+		f.templates.registerType(8, "EntryPoint");
+		f.templates.registerType(9, "Engine");
+		f.templates.registerType(10, "Spring");
+		f.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+		auto* car = f.templates.create("PlayerControlObject", "emp_test_car");
+		car->settings()["hasMobilePhysics"] = "1";
+		car->settings()["physicsType"] = "Mesh";
+		car->settings()["collisionMesh"] = "as_fav";
+		car->settings()["seatInformation"] = "emp_test_car 0/0.5/0.4 0/0/0";
+		car->settings()["mass"] = "1800";
+		car->settings()["aiTemplate"] = "EmpCar";
+		car->settings()["armor.takesEmpDamage"] = "1";
+		car->children().push_back({"emp_test_entry", {-1.5f, 0, 0}, {}});
+		car->children().push_back({"emp_test_engine", {0, -0.44f, 0}, {}});
+		auto* engine = f.templates.create("Engine", "emp_test_engine");
+		engine->settings()["engineType"] = "194";
+		auto* wheel = f.templates.create("Spring", "emp_test_wheel");
+		wheel->settings()["strength"] = "40"; wheel->settings()["damping"] = "8";
+		for (float x : {-0.95f, 0.95f}) for (float z : {-1.4f, 1.6f}) engine->children().push_back({"emp_test_wheel", {x, -0.15f, z}, {}});
+		f.templates.create("EntryPoint", "emp_test_entry")->settings()["entryRadius"] = "3";
+		// The APC's EMP projectile (EU_APC_empLauncher_Projectile): radius 9, material 69.
+		auto* emp = f.templates.create("GenericProjectile", "emp_test_projectile");
+		emp->components().push_back("DefaultDetonationComp");
+		emp->settings()["detonation.isEMPWeapon"] = "1";
+		emp->settings()["detonation.explosionRadius"] = "9";
+		emp->settings()["detonation.explosionMaterial"] = "69";
+	});
+	const uint32_t vehicle = field.objects.create(field.templates.find("emp_test_car"), {3, 1.2f, 0}, {30, 0, 0})->id();
+	const int id = field.soldier(2, true, 0, 0);
+	for (int i = 0; i < 90; ++i) field.world->tick(1 / 30.0f);
+	game::SoldierInput use;
+	use.use = true;
+	field.world->setInput(id, use);
+	field.world->tick(1 / 30.0f);
+	field.world->setInput(id, {});
+	field.world->tick(1 / 30.0f);
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	CHECK(self.vehicle == vehicle && self.driving);
+	game::BotSettings settings;
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile EmpCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create EmpCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn EmpCar_Mobile"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	auto infantry = goalTestMesh({{-200, -200, 200, 200}});
+	bots.setNavMesh(&infantry);
+	game::BotManagerTestAccess::vehicles(bots, field.world->vehicleList());
+	game::BotManagerTestAccess::act(bots, self);
+	CHECK(!game::BotManagerTestAccess::act(bots, self).use); // seated and content before the blast
+	// The blast on the vehicle (500 at its centre: EMP level 3), then a second.
+	const physics::Vec3 at = field.world->vehicleList().front().position;
+	CHECK(field.world->detonate("emp_test_projectile", at));
+	CHECK(field.world->empLevel(vehicle) == 3);
+	for (int i = 0; i < 30; ++i) {
+		field.world->tick(1 / 30.0f);
+		game::BotManagerTestAccess::vehicles(bots, field.world->vehicleList());
+		CHECK(field.world->playerInfo(id, self));
+		game::BotManagerTestAccess::time(bots, 10.0f + static_cast<float>(i)); // a second a step: the seat choice's waits pass
+		game::BotManagerTestAccess::thinkAndAct(bots, self, field.world->playerList()); // the seat choice too
+		CHECK(!game::BotManagerTestAccess::act(bots, self).use);
+	}
+	CHECK(field.world->vehicleList().front().working);
+	CHECK(self.vehicle == vehicle && self.driving);
+}
+
 TEST(Bots_UrgencyCurves)
 {
 	// aiSettings.createUCLinear UCFire -0.22 1.3 (0x10087ef0): max(0, -0.22 t + 1.3).

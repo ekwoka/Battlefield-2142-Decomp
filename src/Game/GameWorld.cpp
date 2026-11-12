@@ -1968,7 +1968,8 @@ std::vector<GameWorld::VehicleInfo> GameWorld::vehicleList()
 			free += i >= body.occupants.size() || body.occupants[i] < 0 ? 1 : 0;
 		}
 		const bool driverFree = !layout.seats.empty() && (body.occupants.empty() || body.occupants[0] < 0);
-		list.push_back({body.object, body.body.position, body.body.rotation.yawPitchRoll().x, free, driverFree, !disabled(body),
+		list.push_back({body.object, body.body.position, body.body.rotation.yawPitchRoll().x, free, driverFree,
+			body.wreckTime < 0, // a wreck only: AIDLL 0x1006c520 has no EMP input, so an EMP never turns the crew out
 			body.body.velocity, body.body.angularVelocity, body.body.rotation.rows[2], body.body.rotation.rows[0], {}, {}});
 		if (!body.points.empty()) {
 			physics::Vec3& lo = list.back().boxMin;
