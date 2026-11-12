@@ -8545,9 +8545,12 @@ unlocked shot never acquires). Wire guidance (LPTargetComp, the 11
 TSWireGuided weapons, ctor `0x005e2100`; `0x005e2e20` → `0x005e27a0`
 every tick): the steering point is o + f × (max(0, (m − o)·f) +
 `target.wireGuidedLookAheadDistance` (`+0xb4`, 20)) from the shooter's
-camera o and forward f, m the missile; guidance goes beyond
-`target.maxDistance` or with the line o–m cut, unless
-`dontLooseGuidanceOnObstruction` (`+0xb8`); `disableGuidanceOnReload`
+camera o and forward f, m the missile. Beyond `target.maxDistance`, or
+with the line o–m cut and not `dontLooseGuidanceOnObstruction` (`+0xb8`),
+the point stays where it was (`0x005e2ac5` returns before the target's
+move) but the round stays guided (`+0x64` kept): it chases that point
+(the follow `0x005ecb30` never reads the lock) and the steering comes
+back once the line clears, so the reload waits; `disableGuidanceOnReload`
 (`+0xb1`, as_av / eu_av) lets the missile go unguided at the reload's
 start (`0x005c0f40` → slot `0x48`, `0x005e23b0`). The component guides
 one round, its last (`+0x1c`, slot `0xbc`, which `0x005e2e20` steers): a

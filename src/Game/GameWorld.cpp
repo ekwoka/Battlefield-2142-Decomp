@@ -3595,9 +3595,13 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 	// tick: its updateInterval test, now + interval > last, always holds):
 	// from the shooter's camera o along its forward f the steering point
 	// is o + f x (max(0, (m - o).f) + wireGuidedLookAheadDistance), m the
-	// missile; guidance goes when the missile is beyond target.maxDistance
-	// of o or the terrain or an object (the see-through filter) cuts o-m,
-	// unless dontLooseGuidanceOnObstruction.
+	// missile. While the missile is beyond target.maxDistance of o, or the
+	// terrain or an object (the see-through filter) cuts o-m and not
+	// dontLooseGuidanceOnObstruction, the point isn't moved (0x005e2ac5:
+	// setTarget unlocked, return before the target's move at 0x005e2d14),
+	// but the guided round (+0x64) is kept: the follow (0x005ed1a0 ->
+	// 0x005ecb30, which never reads the lock) chases the last point, and
+	// guidance comes back once the line clears.
 	const Player* shooter = findPlayer(p.player);
 	if (!shooter || !shooter->alive || p.wireLost) {
 		return;
@@ -3629,18 +3633,17 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 		aim = m_cameraForward * (1 / std::sqrt(physics::lengthSquared(m_cameraForward)));
 	}
 	const physics::Vec3 toMissile = p.position - origin;
-	if ((p.wireMaxDistance > 0 && physics::lengthSquared(toMissile) > p.wireMaxDistance * p.wireMaxDistance)
-		|| (!fromRound && !p.wireKeepOnObstruction && !lineOfSight(eye, p.position, shooter->vehicle ? shooter->vehicle : shooter->object))) {
-		p.wireLost = true;
-		return;
+	if (!(p.wireMaxDistance > 0 && physics::lengthSquared(toMissile) > p.wireMaxDistance * p.wireMaxDistance)
+		&& (fromRound || p.wireKeepOnObstruction || lineOfSight(eye, p.position, shooter->vehicle ? shooter->vehicle : shooter->object))) {
+		p.wirePoint = origin + aim * (std::max(0.0f, physics::dot(toMissile, aim)) + p.wireLookAhead);
+		p.wireHasPoint = true;
 	}
-	if (!followActive(p)) {
+	if (!p.wireHasPoint || !followActive(p)) {
 		return; // past follow.followTime (the mechs' rockets, 0.35 s)
 	}
-	const float along = std::max(0.0f, physics::dot(toMissile, aim)) + p.wireLookAhead;
 	// The follow's turn (followStep: follow.maxYaw / maxPitch degrees a
 	// tick, the AV missile's 0.4 and 0.7).
-	followStep(p, origin + aim * along, {}, seconds);
+	followStep(p, p.wirePoint, {}, seconds);
 }
 
 void GameWorld::startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm)

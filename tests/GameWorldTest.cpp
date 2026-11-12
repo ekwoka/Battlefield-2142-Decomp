@@ -1997,6 +1997,74 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenLeavingSights)
 	}
 }
 
+// A wire-guided round that goes out of the shooter's sight stays guided
+// (0x005e27a0: a cut line returns at 0x005e2ac5 without moving the target
+// and keeps the guided round +0x64): it chases the last point while the
+// line is cut, the reload waits, and the steering comes back once the
+// line clears.
+TEST(GameWorld_WireGuidanceSurvivesLostSight)
+{
+	Range range;
+	bool wall = false;
+	const auto height = [&wall](float, float z) { return wall && z > 3 && z < 7 ? 30.0f : 0.0f; };
+	range.world->enablePhysics(range.files, range.collisionTemplates,
+		{height, [height](float x, float z, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return height(x, z);
+		 }});
+	auto* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["projectileTemplate"] = "missile";
+	launcher->settings()["velocity"] = "40";
+	launcher->settings()["ammo.magSize"] = "1";
+	launcher->settings()["ammo.nrOfMags"] = "4";
+	launcher->settings()["ammo.reloadTime"] = "0.2";
+	launcher->settings()["target.targetSystem"] = "TSWireGuided";
+	launcher->settings()["target.disableGuidanceOnReload"] = "1";
+	auto* missile = range.templates.create("GenericProjectile", "missile");
+	missile->settings()["seek.targetType"] = "TTUnique";
+	missile->settings()["seek.trackingDelay"] = "0.01";
+	missile->settings()["follow.maxYaw"] = "0.45";
+	missile->settings()["follow.maxPitch"] = "0.85";
+	missile->settings()["gravityModifier"] = "0";
+	missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setAutoReload(true);
+	range.world->setZoomed(range.world->localPlayer(), true);
+	game::SoldierInput input;
+	input.fire = true;
+	input.aimPitch = 3;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	input.fire = false;
+	range.world->setPlayerInput(input);
+	for (int i = 0; i < 10; ++i) range.world->tick(1 / 30.0f);
+	CHECK(range.world->projectiles().size() == 1);
+	if (range.world->projectiles().empty()) return;
+	CHECK(range.world->projectiles().front().position.z > 10);
+	// The wall rises between the shooter and the round; the view turns 30
+	// degrees right behind it.
+	wall = true;
+	input.turn = 30;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	input.turn = 0;
+	range.world->setPlayerInput(input);
+	for (int i = 0; i < 15; ++i) {
+		range.world->tick(1 / 30.0f);
+		CHECK(!range.world->projectiles().front().wireLost);
+		CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+		CHECK(!range.world->playerWeapon()->reloading());
+	}
+	const auto& hidden = range.world->projectiles().front();
+	CHECK(std::fabs(std::atan2(hidden.velocity.x, hidden.velocity.z)) < 0.01f); // the last point: straight on
+	wall = false;
+	for (int i = 0; i < 15; ++i) range.world->tick(1 / 30.0f);
+	const auto& seen = range.world->projectiles().front();
+	CHECK(!seen.wireLost);
+	CHECK(std::atan2(seen.velocity.x, seen.velocity.z) > 0.08f);
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+}
+
 // A deployed hub carrying a SupplyObject (unl_hub_medic_stationary's
 // Unl_Hub_Medic_Supply: radius 5, healSpeed 4, sharedStorageSize 300)
 // works as the supply crates do (0x005d1710, every 0.2 s): 4 per cent of

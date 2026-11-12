@@ -748,12 +748,15 @@ struct Projectile {
 	// Wire guidance (LPTargetComp, 0x005e2e20 -> 0x005e27a0) from its
 	// firearm: target.wireGuidedLookAheadDistance (+0xb4, 20 by default),
 	// target.maxDistance (+0x78), dontLooseGuidanceOnObstruction (+0xb8);
-	// wireLost once guidance is gone (out of range, the line cut, or a
-	// reload with disableGuidanceOnReload +0xb1).
+	// wireLost once guidance is gone (a reload with disableGuidanceOnReload
+	// +0xb1, or a newer round). Out of range or with the line cut the round
+	// stays guided and chases wirePoint, the last point set (0x005e2ac5).
 	float wireLookAhead = 20;
 	float wireMaxDistance = 0;
 	bool wireKeepOnObstruction = false;
 	bool wireLost = false;
+	bool wireHasPoint = false;
+	physics::Vec3 wirePoint {};
 	// Local infantry launcher control: leaving the sights or putting away the
 	// launcher releases guidance. Vehicle and AI guidance do not use this.
 	bool wireRequiresSights = false;
