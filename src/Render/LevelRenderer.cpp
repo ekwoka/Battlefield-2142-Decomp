@@ -3284,8 +3284,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	// quality's scales, the view distance GSViewDistance x the view
 	// distance scale, the frame's seconds.
 	const ObjectCullScales cullScales = objectCullScales(m_sources && m_sources->quality ? m_sources->quality->geometry : 3);
-	const float viewFar = viewFarDistance(m_sources && m_sources->viewDistance ? m_sources->viewDistance() : 500.0f,
-		m_sources && m_sources->quality ? m_sources->quality->viewDistanceScale : 1.0f);
+	const float viewFar = viewFarDistance(m_sources && m_sources->viewDistance ? m_sources->viewDistance() : 500.0f, m_viewDistanceScale);
 	const CullRecord cullRoot = cullRecord(cullScales, zoom, viewFar, false, overgrowthSeconds);
 	const CullRecord cullActor = cullRecord(cullScales, zoom, viewFar, true, overgrowthSeconds);
 	for (Instance& instance : m_instances) {
@@ -3710,6 +3709,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		m_sources && m_sources->renderer ? *m_sources->renderer : switchDefaults;
 	Camera camera = overheadOn ? overheadCamera(overhead) : viewCamera;
 	m_distanceFadeOn = !overheadOn;
+	m_viewDistanceScale = frameViewDistanceScale(m_sources && m_sources->quality ? m_sources->quality->viewDistanceScale : 1.0f, overheadOn);
 	if (switches.tweakNearPlaneSet && switches.tweakNearPlane > 0) {
 		camera.nearPlane = switches.tweakNearPlane;
 	}
@@ -3742,7 +3742,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		const scene::WaterSettings* water = m_sources ? &m_sources->water : nullptr;
 		const scene::WaterSettings waterDefaults;
 		const scene::WaterSettings& w = water ? *water : waterDefaults;
-		const float viewScale = m_sources && m_sources->quality ? m_sources->quality->viewDistanceScale : 1.0f;
+		const float viewScale = m_viewDistanceScale;
 		m_viewFog = viewFog(lights.fogColor, lights.fogStartEndAndBase, w.fogColor, w.fogStartEndAndBase,
 			cluster && cluster->hasSea(), cluster ? cluster->seaWaterLevel() : 0.0f, camera.position.y, viewScale);
 	}

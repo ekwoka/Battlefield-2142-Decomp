@@ -4580,6 +4580,10 @@ int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 	player->team = team;
 	player->ai = ai;
 	player->allUnlocked = unlockAllByDefault;
+	player->created = m_playersMade++;
+	if (!ai) {
+		player->connectedAt = m_time; // 0x004a8460: slot 0x8c with 1 for a human
+	}
 	if (slot < m_players.size()) {
 		m_players[slot] = std::move(player);
 	} else {
@@ -4590,6 +4594,13 @@ int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 	}
 	raise("PlayerConnect", {ScriptValue::player(static_cast<int>(slot))});
 	return static_cast<int>(slot);
+}
+
+void GameWorld::setPlayerConnected(int id)
+{
+	if (Player* player = findPlayer(id)) {
+		player->connectedAt = m_time;
+	}
 }
 
 bool GameWorld::removePlayer(int id)
@@ -4714,6 +4725,8 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.name = player->name;
 	info.team = player->team;
 	info.ai = player->ai;
+	info.created = player->created;
+	info.connectedAt = player->connectedAt;
 	info.spectator = player->spectator;
 	info.gunShots = player->gunShots;
 	info.alive = player->alive;

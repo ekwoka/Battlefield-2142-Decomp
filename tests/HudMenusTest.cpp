@@ -420,6 +420,52 @@ TEST(HudScoreboard_ServerTabListsNoPlayers)
 	CHECK(menu::activeLevelText("bridge_at_remagen") == "BRIDGE AT REMAGEN");
 }
 
+// The scoreboard's order (0x004b94a0): score, then skillScore, then the
+// fewer deaths, then the later connection (+0x1c8); a full tie keeps the
+// player manager's order, which is the order the players were made, not
+// their ids.
+TEST(HudScoreboard_Order)
+{
+	using Key = menu::ScoreboardKey;
+	const auto order = [](const std::vector<Key>& keys) { return menu::scoreboardOrder(keys); };
+	CHECK((order({{5}, {9}, {7}}) == std::vector<size_t> {1, 2, 0}));
+	CHECK((order({{5, 1}, {5, 3}, {5, 2}}) == std::vector<size_t> {1, 2, 0}));          // skillScore
+	CHECK((order({{5, 1, 4}, {5, 1, 2}, {5, 1, 3}}) == std::vector<size_t> {1, 2, 0})); // fewer deaths
+	CHECK((order({{0, 0, 0, 10}, {0, 0, 0, 30}, {0, 0, 0, -1}, {0, 0, 0, 20}}) == std::vector<size_t> {1, 3, 0, 2}));
+	CHECK((order({{3}, {3}, {3}}) == std::vector<size_t> {0, 1, 2})); // a full tie: the list's order
+	// The higher keys first: a better score wins over every later key.
+	CHECK((order({{1, 9, 0, 99}, {2, 0, 9, -1}}) == std::vector<size_t> {1, 0}));
+	// The host's players: made 0, 1, 2; a left player's id is taken again
+	// by a later one, who comes last in the manager's list. Humans are
+	// connected as they are made (0x004a8460) and again once loaded
+	// (0x004a7c80); bots never.
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld world {templates, objects};
+	const int a = world.addPlayer("A", 2, false);
+	const int b = world.addPlayer("B", 2, true);
+	const int c = world.addPlayer("C", 2, false);
+	world.tick(2.0f);
+	world.setPlayerConnected(c);
+	game::GameWorld::PlayerInfo pa, pb, pc;
+	CHECK(world.playerInfo(a, pa) && world.playerInfo(b, pb) && world.playerInfo(c, pc));
+	CHECK(pa.created < pb.created && pb.created < pc.created);
+	CHECK(pa.connectedAt == 0 && pb.connectedAt == -1 && pc.connectedAt == 2.0);
+	CHECK(world.removePlayer(a));
+	const int d = world.addPlayer("D", 2, false);
+	game::GameWorld::PlayerInfo pd;
+	CHECK(d == a && world.playerInfo(d, pd) && pd.created > pc.created && pd.connectedAt == 2.0);
+	// All on 0 points: C (loaded later) before D (made at the same time,
+	// later in the list), then the bot.
+	std::vector<game::GameWorld::PlayerInfo> list {pb, pc, pd};
+	std::vector<Key> keys;
+	for (const auto& p : list) {
+		keys.push_back({0, 0, 0, p.connectedAt});
+	}
+	const std::vector<size_t> rows = menu::scoreboardOrder(keys);
+	CHECK(list[rows[0]].name == "C" && list[rows[1]].name == "D" && list[rows[2]].name == "B");
+}
+
 // The scoreboard's rows (0x007bb540): black when dead, green for the
 // squad and the commanding player, blue friends and red enemies; the
 // local row's and every odd row's backgrounds.

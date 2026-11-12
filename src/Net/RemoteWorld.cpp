@@ -12,8 +12,12 @@ namespace dice::hfe::net {
 
 RemotePlayer& RemoteWorld::playerSlot(int id)
 {
-	RemotePlayer& p = m_players[id];
+	const auto [it, made] = m_players.try_emplace(id);
+	RemotePlayer& p = it->second;
 	p.id = id;
+	if (made) {
+		p.created = m_playersMade++;
+	}
 	return p;
 }
 

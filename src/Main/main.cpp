@@ -641,7 +641,22 @@ void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world, const w
 			}
 		}
 		const auto score = [&world](const game::GameWorld::PlayerInfo& p) { return world.scores(p.id).score; };
-		std::stable_sort(players.begin(), players.end(), [&](const auto& a, const auto& b) { return score(a) > score(b); });
+		// The team's list in the player manager's order, then 0x004b94a0's
+		// (menu::scoreboardOrder: score, skillScore, deaths, the later
+		// connection).
+		std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.created < b.created; });
+		{
+			std::vector<dice::hfe::menu::ScoreboardKey> keys;
+			for (const game::GameWorld::PlayerInfo& p : players) {
+				const host::HudWorld::Scores n = world.scores(p.id);
+				keys.push_back({n.score, n.skillScore, p.deaths, p.connectedAt});
+			}
+			std::vector<game::GameWorld::PlayerInfo> sorted;
+			for (size_t i : dice::hfe::menu::scoreboardOrder(keys)) {
+				sorted.push_back(players[i]);
+			}
+			players = std::move(sorted);
+		}
 		std::vector<std::vector<std::string>> rows;
 		std::vector<std::array<float, 4>> colors, backgrounds;
 		int totalScore = 0, totalTeamwork = 0, totalKills = 0, totalDeaths = 0;
@@ -3335,6 +3350,7 @@ int runGame(Options& options, Session& session)
 	dice::hfe::menu::HelpPopups helpPopups;
 	helpPopups.bind(console);
 	dice::hfe::menu::DogTags dogTags; // the knife kills' tags (HudAlerts.h)
+	dice::hfe::menu::ImportantMessage importantMessage; // the radio's "_important" lines (HudAlerts.h)
 	g_itemSelection.bind(console);
 	bindMethod(console, "IngameHelp.showIngameHelp", ConsoleAccess::Anyone,
 		[&helpPopups, &hudManager](std::string text, float seconds) { helpPopups.showText(hudManager, text, seconds); });
@@ -5947,8 +5963,19 @@ int runGame(Options& options, Session& session)
 		// (events 0x33..0x37, 0x100f19c0; a man-down player's "medic" is the
 		// revive call).
 		// The radio's text (0x0042d7f0 -> 0x0042bef0): a sender's as his
-		// chat line (slot 0x158, ChatList 0x007b4cd0), else a game line.
-		gameAudio.onRadioText = [&hudPlayer, &hudLocal, &chat, &localization](int sender, int, const std::string& id) {
+		// chat line (slot 0x158, ChatList 0x007b4cd0), else a game line;
+		// before it, or instead of it, the important message
+		// (menu::radioTextLines, 0x0042e0c0).
+		gameAudio.onRadioText = [&hudPlayer, &hudLocal, &chat, &localization, &importantMessage, &hudManager](
+									int sender, int, const std::string& id) {
+			const dice::hfe::menu::RadioTextLines lines = dice::hfe::menu::radioTextLines(id,
+				[&localization](const std::string& key) { return localization.find(key); });
+			if (!lines.important.empty()) {
+				importantMessage.show(hudManager, lines.important, 5.0f);
+			}
+			if (!lines.chat) {
+				return;
+			}
 			const std::string line = localization.text(id);
 			game::GameWorld::PlayerInfo from, me;
 			if (sender < 0 || !hudPlayer(sender, from)) {
@@ -6313,6 +6340,7 @@ int runGame(Options& options, Session& session)
 		} clearHooks {session.admin.get()};
 		gameLogic.startRound();
 		std::function<int(int)> scoreOf; // the scripts' scores, by player
+		std::function<int(int)> skillScoreOf; // and skillScore (the scoreboard's order)
 		bool scoreboardHeld = options.scoreboard;
 		// The end-of-round movie (endOfRound.dfm, its own player: its lists
 		// are not the main menu's), shown once the round is over until the
@@ -7770,6 +7798,7 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		scoreOf = [&bridge](int player) { return static_cast<int>(bridge.playerScore(player, "score").asInt()); };
+		skillScoreOf = [&bridge](int player) { return static_cast<int>(bridge.playerScore(player, "skillScore").asInt()); };
 		// The scripts' game logic events (0x00567d40): to the player's
 		// client, or handled here for our own (0x004cbea0: the dog tag's
 		// 0x13; this machine is the server, so its count isn't kept).
@@ -9095,6 +9124,7 @@ int runGame(Options& options, Session& session)
 				};
 			}
 			localHud.scoreOf = scoreOf;
+			localHud.skillScoreOf = skillScoreOf;
 			g_weaponZoomed = playerCamera.zoomLevel() > 0; // the firearm's slot 300 (its zoom)
 			// The seat camera's mode; a third-person choice not yet given to
 			// the seat's camera (it starts in Chase, PlayerCamera.h) is Chase.
@@ -9294,6 +9324,7 @@ int runGame(Options& options, Session& session)
 				helpPopups.update(hudManager, help, seconds);
 				helpPopups.tutorial(hudManager, help, seconds);
 				dogTags.tick(hudManager, seconds);
+				importantMessage.tick(hudManager, seconds);
 				// The lock tones (GameWorld::takeLockTones, 0x00657ce0).
 				for (const auto& tone : round.takeLockTones()) {
 					tone.play ? sounds.playSound(tone.sound) : sounds.stopSound(tone.sound);

@@ -744,6 +744,8 @@ TEST(RenderScene_ObjectDistanceFade)
 	CHECK(high.area == 8 && high.actorArea == 10 && high.minimum == 80);
 	CHECK(objectCullScales(1).minimum == 40 && objectCullScales(2).actorArea == 8);
 	CHECK(viewFarDistance(330.4f, 1) == 330 && viewFarDistance(5000, 0.5f) == 1500 && viewFarDistance(5, 1) == 20);
+	// The overhead view draws with the scale at 1 (0x00779680).
+	CHECK(frameViewDistanceScale(0.5f, false) == 0.5f && frameViewDistanceScale(0.5f, true) == 1.0f);
 	const CullRecord prop = cullRecord(high, 1, 1000, false, 0.1f);
 	CHECK(prop.minArea == 6400 && prop.areaScale == 640);
 	// R = 1: pi x 640 < 6400, so A = 6400.

@@ -7,6 +7,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
+#include "IO/Localization/Localization.h"
 #include "Main/HudAlerts.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
@@ -16,6 +17,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -684,6 +688,56 @@ TEST(HudAlerts_CloseToObjectVariables)
 	CHECK(hudManager.number("CloseToObject0") == 1 && hudManager.number("CloseToObject1") == 0);
 	menu::closeToObject(hudManager, -1, false);
 	CHECK(hudManager.number("CloseToObject0") == 0);
+}
+
+// The radio's important lines (0x0042e0c0): an id with "<id>_important"
+// in the strings shows that first as the important message for 5 s
+// (0x0042bef0 kind 4 → 0x0074ec50), then its own chat line; an id holding
+// "_important" is the important message alone. The shipped strings have
+// the Titans' 49.
+TEST(HudAlerts_RadioImportantLines)
+{
+	const std::map<std::string, std::string> strings {
+		{"AUTO_TITAN_C_shields25", "Our Titan shield is down by three quarters!"},
+		{"AUTO_TITAN_C_shields25_important", "Our Titan Shield: 25%"},
+		{"HUD_AUTO_TITAN_Shield75_important", "Titan Shield: 75%"},
+		{"radio_medic", "Medic!"},
+	};
+	const auto find = [&strings](const std::string& key) -> const std::string* {
+		const auto it = strings.find(key);
+		return it != strings.end() ? &it->second : nullptr;
+	};
+	menu::RadioTextLines lines = menu::radioTextLines("AUTO_TITAN_C_shields25", find);
+	CHECK(lines.important == "Our Titan Shield: 25%" && lines.chat);
+	lines = menu::radioTextLines("radio_medic", find);
+	CHECK(lines.important.empty() && lines.chat);
+	lines = menu::radioTextLines("HUD_AUTO_TITAN_Shield75_important", find);
+	CHECK(lines.important == "Titan Shield: 75%" && !lines.chat);
+	lines = menu::radioTextLines("missing_important", find); // the key itself (slot 0x38's fallback)
+	CHECK(lines.important == "missing_important" && !lines.chat);
+	hud::HudManager hudManager(nullptr);
+	menu::ImportantMessage message;
+	message.show(hudManager, "Our Titan Shield: 25%", 5.0f);
+	CHECK(hudManager.number("ShowImportantMessage") == 1 && hudManager.string("ImportantMessage") == "Our Titan Shield: 25%");
+	for (int i = 0; i < 140; ++i) {
+		message.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowImportantMessage") == 1);
+	for (int i = 0; i < 20; ++i) {
+		message.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowImportantMessage") == 0);
+	// The shipped strings: every "_important" row has its id's row.
+	if (const char* dir = std::getenv("BF2142_GAME_DIR")) {
+		std::ifstream in(std::string(dir) + "/mods/bf2142/Localization/strings.csv", std::ios::binary);
+		const std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		io::Localization localization;
+		CHECK(!data.empty() && localization.load(data));
+		const std::string* text = localization.find("AUTO_TITAN_C_shields25_important");
+		CHECK(text && *text == "Our Titan Shield: 25%");
+		lines = menu::radioTextLines("AUTO_TITAN_C_shields25", [&localization](const std::string& key) { return localization.find(key); });
+		CHECK(lines.important == "Our Titan Shield: 25%" && lines.chat);
+	}
 }
 
 // The dog tag's HUD (event 0x28 → 0x0074f0d0, its countdown in 0x007c8c30):

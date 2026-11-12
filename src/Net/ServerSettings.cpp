@@ -209,6 +209,9 @@ bool ServerSettings::set(const std::string& name, const std::string& value)
 	for (const Field& f : fields()) {
 		if (sameName(name, f.name)) {
 			f.set(*this, value);
+			if (sameName(name, "ranked")) {
+				ranked = rankedAllowed && (gameSpyRanked || ranked); // 0x00430800
+			}
 			if (sameName(name, "endOfRoundDelay")) {
 				endOfRoundDelay = std::clamp(endOfRoundDelay, 3, 30); // 0x00431640
 			}

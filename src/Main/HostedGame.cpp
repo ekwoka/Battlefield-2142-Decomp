@@ -1107,8 +1107,18 @@ std::vector<net::GameEvent> HostedGame::createEvents(const Ghost& ghost) const
 void HostedGame::sendDatabase(int id)
 {
 	Client& client = m_clients[id];
-	// The players, the objects, who holds which soldier.
-	for (const auto& p : m_round->playerList()) {
+	// The client's level is loaded (0x004a7c80, from the tick 0x004ae030
+	// at connection state 2): its player's connected flag again (slot 0x8c
+	// with 1), the clock the scoreboard's ties go by.
+	if (client.player >= 0) {
+		m_round->setPlayerConnected(client.player);
+	}
+	// The players (in the player manager's order, as they were made: the
+	// client's list keeps it, menu::scoreboardOrder), the objects, who
+	// holds which soldier.
+	std::vector<game::GameWorld::PlayerInfo> players = m_round->playerList();
+	std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.created < b.created; });
+	for (const auto& p : players) {
 		const auto seen = m_players.find(p.id);
 		if (seen != m_players.end()) {
 			sendTo(id, createPlayerEvent(p, p.id == client.player, seen->second.ghost));

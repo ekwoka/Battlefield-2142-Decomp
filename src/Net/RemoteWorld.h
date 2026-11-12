@@ -143,6 +143,9 @@ struct RemoteObject {
 
 struct RemotePlayer {
 	int id = -1;
+	// The player manager's list order on the client (0x004b8b60 appends
+	// each player CreatePlayer makes): the scoreboard's ties keep it.
+	uint64_t created = 0;
 	std::string name;
 	int team = 0;
 	bool local = false;
@@ -520,6 +523,7 @@ private:
 	std::map<uint16_t, RemoteObject> m_hidden;
 	std::map<uint16_t, StickyProjectileInfo> m_stuck; // a projectile's ghost -> its StickyProjectile event
 	std::map<int, RemotePlayer> m_players;
+	uint64_t m_playersMade = 0; // RemotePlayer::created
 	int m_localPlayer = -1;
 	bool m_hasControl = false;
 	ControlObjectRecord m_control;

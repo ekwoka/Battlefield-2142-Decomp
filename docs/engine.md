@@ -7165,8 +7165,15 @@ seconds over all its maps.
   (`ServerSettings::roundEndCountdown`, `endOfRoundDelayInForce`;
   `ServerAdmin_RoundEndCountdown`).
 - **Ranked** (`net::ServerSettings`): sv.ranked (`+0x26d`, set through
-  `0x00430800`, which also takes GSRanked and checks the stats scripts:
-  not rewritten) fixes spawnTime and manDownTime at 15 (`0x00430f60`,
+  `0x00430800` from the console's executor and, with 0, at the server's
+  start `0x004aff80`: short of the files python/bf2/stats/medals.py,
+  medal_data.py and providerID.sec, AIDLL's slot `0x20` when loaded, and
+  the command line's ServerInfoProvider / ServerInfoRegion /
+  ServerInfoType (`0x00409950` cases `0x47`..), it becomes 0; else 1 with
+  GSRanked, otherwise the value set. The shipped game has none of the
+  three files, so a shipped server is never ranked whatever its
+  ServerSettings.con says; `ServerSettings::rankedAllowed`,
+  `gameSpyRanked`, both off in the rewrite) fixes spawnTime and manDownTime at 15 (`0x00430f60`,
   `0x00430f80`), ticketRatio at 100 (`0x00430fa0`) and teamRatioPercent
   at 100 (`0x00430fc0`) whatever was set: the console's getters
   (`0x0041cd19` …), host.ss_getParam (`0x00568350`), the round's spawn and
@@ -8588,7 +8595,26 @@ name>/scoreBoard_Flag.tga`. The lists are BF2142.exe's
   covers) and the player's `+0x404` (slot `0x3bc`, set through `0x3b8`:
   setSpectator) also make a row black.
   `menu::scoreboardStyle` (`src/Main/HudMenus`).
-- Rows are sorted by the scripts' score. The "Squads" tab
+- Rows are in the order of `0x004b94a0` (`menu::scoreboardOrder`), on
+  the player manager's team list (slot `0x48`, `0x004b97e0`; a squad's,
+  slot `0x5c`): a selection sort that takes, again and again, the first
+  player of the manager's list who beats the rest by the stats (player
+  slot `0x1a8`): the higher score, then the higher skillScore (`+8`),
+  then the fewer deaths (`+0x10`), then the later connection (slot
+  `0x1c0`, `0x0059b450`: `+0x1c8`, the game clock when slot `0x8c`,
+  `0x005915f0`, last set the connected flag; −1 from the constructor
+  `0x0059c010`). The server sets it as a human player is made
+  (`0x004a8460`) and again when his client has loaded the level
+  (`0x004a7c80`, from the tick `0x004ae030`); bots never have it, and a
+  client's players keep −1 (the networkable's bit, `0x005981a0`, sets
+  the flag alone), as a client's skillScore stays 0 (no networkable
+  carries it). A full tie keeps the manager's list, which is creation
+  order (slot `0x10`, `0x004b8b60`, appends), not the ids: a joined
+  client's list is the order its CreatePlayer events came, which the
+  host sends in creation order (`GameWorld::PlayerInfo::created`,
+  `RemotePlayer::created`). Before this the rewrite sorted by score
+  alone with ties by id, so two clients joining at once could swap rows
+  between runs. The "Squads" tab
   (`scoreboard.setToggleShow 1`, ToggleSquads) groups them
   (`menu::scoreboardBySquad`): the commander under
   "HUD_HUD_MENU_COMMANDER_HEADING" (`0x007bad00`, no totals), then each
@@ -11430,8 +11456,20 @@ the top.
   message's team; Player the message's player. The bots take theirs (see
   Bots: Radio); the local player's (`GameAudio`'s radio, the client's
   `0x0042e0c0` → `0x0042d7f0`: the voice and its text) also on a joined
-  client, from the server's RadioMessage events; the `_important`
-  variants aren't rewritten.
+  client, from the server's RadioMessage events. The text's
+  `_important` lines (`menu::radioTextLines`, `menu::ImportantMessage`):
+  an id holding `_important` (`DAT_0091e75c`, the `find` at `0x0042e537`)
+  is one line, its text as the important message (`0x0042bef0` kind 4 →
+  the HUD manager's slot `0x80`, `0x0074ec50`, with 5 s: the text to
+  HudInformationLayer's ImportantMessage, `DAT_00a0f79c` slot `0x68`,
+  `0x0044e240`, ShowImportantMessage on, the timer `+0x240` that
+  `0x007c8c30` counts down to off; HudElementsGameInfo.con's
+  ImportantMessage node); any other id first shows `<id>_important` that
+  way when the strings have it (the HUD's slot `0x38`, `0x0074e430`,
+  differing from slot `0x54`, `0x0074e530`, the bare key), then its own
+  line. The strings' 49 `_important` rows are the Titans' automatic
+  voices': `AUTO_TITAN_C_shields25` puts "Our Titan Shield: 25%" up for
+  5 s over the chat's "Our Titan shield is down by three quarters!".
 
 ### Chat, kill messages, VOIP and the map vote
 
@@ -11537,9 +11575,15 @@ while they have the keys. `src/Main/HudMenusChat`:
   rectangle and the screen around it going on with the same view (an
   off-centre perspective, `overheadProjection`), without the first person:
   one pass, as the exe's camera swap, the view seen through the faded
-  map. The exe also sets a renderer value to 1 while it is on
-  (`DAT_00a2020c` slot `0x80` → `0x28` with `DAT_00a0c204`, restored
-  after), not decoded.
+  map. While it is on the exe sets the VideoSettings view distance
+  scale to 1 (`0x00779680`: with `DAT_00a0c208` set, the Renderer
+  `DAT_00a2020c` slot `0x80`, RendDX9 `0x10006260`, is its video
+  settings at `+0x3e8`, whose slot `0x28`, `0x1000f0c0`, keeps
+  `DAT_00a0c204`'s 1.0 at `+0x108`, clamped 0.5..1), keeping the
+  player's (slot `0x2c`, `0x100113c0`, in the minimap's `+0xdb4`) and
+  putting it back as the view goes off: the overhead view's far distance
+  and fog are full whatever the player's setting
+  (`render::frameViewDistanceScale`).
 
 ### Vote lines, radio text, text styles and the map keys
 

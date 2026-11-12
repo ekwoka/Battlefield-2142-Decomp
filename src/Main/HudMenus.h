@@ -487,6 +487,31 @@ struct ScoreboardStyle {
 	std::array<float, 4> background; // alpha 0: none
 };
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex);
+// The scoreboard's player order. The rows come from the player manager's
+// team list (slot 0x48, 0x004b97e0; a squad's, slot 0x5c, 0x004b9990)
+// put in order by 0x004b94a0: a selection sort that takes, again and
+// again, the first player of the manager's list (creation order: slot
+// 0x10, 0x004b8b60, appends) who beats every other one left by the stats
+// (player slot 0x1a8, *(player +0x100)) and then the clock:
+//   - the higher score (+0);
+//   - then the higher skillScore (+8);
+//   - then the fewer deaths (+0x10);
+//   - then the later connection (slot 0x1c0, 0x0059b450: the double at
+//     +0x1c8, the game clock (DAT_00a7d060 slot 0x14) when slot 0x8c,
+//     0x005915f0, last set the connected flag +0x1c0; -1 from the
+//     constructor 0x0059c010). The server sets it for a human player as
+//     it is made (0x004a8460) and again when his client has loaded the
+//     level (0x004a7c80, from 0x004ae030); bots never have it, and on a
+//     client every player keeps -1 (the networkable's bit, 0x005981a0,
+//     sets the flag alone).
+// A full tie keeps the list's order. Each key a strict comparison, so it
+// is a stable sort by the four keys.
+struct ScoreboardKey {
+	int score = 0, skillScore = 0, deaths = 0;
+	double connectedAt = -1;
+};
+// The indices of `players` (in the manager's order), best first.
+std::vector<size_t> scoreboardOrder(const std::vector<ScoreboardKey>& players);
 // Whether the scoreboard's tab lists its players (the rows above). On the
 // Server tab (ToggleServer, the scoreboard's +0x38b, set by 0x007ba1a0)
 // the row filler 0x007bb540 adds no player's row, as for an empty slot

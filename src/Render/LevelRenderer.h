@@ -606,6 +606,9 @@ private:
 	// 0x00897af0); RendDX9's scene filters pass 2 (0x101aa0a0), so the
 	// original's overhead view fades by its own camera.
 	bool m_distanceFadeOn = true;
+	// This frame's VideoSettings view distance scale (frameViewDistanceScale:
+	// 1 under the overhead view).
+	float m_viewDistanceScale = 1;
 	// This frame's close distance: the script's scale, or the quality's
 	// once the video settings change it after the level's script ran (the
 	// switch writes +0x110 when they are applied).

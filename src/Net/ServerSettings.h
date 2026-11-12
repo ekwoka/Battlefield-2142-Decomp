@@ -86,6 +86,18 @@ struct ServerSettings {
 	bool useGlobalRank = true;
 	bool useGlobalUnlocks = true;
 	bool ranked = false;
+	// What sv.ranked's setter (0x00430800, from the console's executor
+	// 0x0042079f and, with 0, at the server's start 0x004aff80) asks before
+	// taking a value: the files python/bf2/stats/medals.py, medal_data.py
+	// and providerID.sec (the file manager's slot 0x1c), AIDLL's slot 0x20
+	// when it is loaded, and the settings ServerInfoProvider and
+	// ServerInfoRegion set and ServerInfoType on (the command line's, cases
+	// 0x47.. of 0x00409950). Short of any, sv.ranked becomes 0; else 1 with
+	// GSRanked, otherwise the value. The shipped game has none of the three
+	// files and the rewrite's command line none of those options, so
+	// sv.ranked always ends 0 (set: rankedAllowed and gameSpyRanked).
+	bool rankedAllowed = false;
+	bool gameSpyRanked = false;
 	int minUnlockLevel = 0;
 	int maxUnlockLevel = -1;
 	std::string sponsorText;

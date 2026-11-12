@@ -293,4 +293,37 @@ private:
 	std::map<int, int> m_tags;   // the local player's, victim -> tags
 };
 
+// The radio's lines (0x0042e0c0 → 0x0042d7f0 → 0x0042bef0). A text id
+// holding "_important" (DAT_0091e75c, std::string::find, 0x0042e537) is
+// one line, the id's text as the important message (0x0042bef0's kind 4).
+// Any other id is first, when the strings have "<id>_important" (the
+// HUD's slot 0x38, 0x0074e430, localizes it and differs from slot 0x54,
+// 0x0074e530, the bare key widened), that text as the important message
+// (kind 4), then the id's own text in the chat (the message's kind). The
+// 49 shipped "_important" rows go with the Titans' automatic voices'
+// ids, "AUTO_TITAN_C_shields25" with "AUTO_TITAN_C_shields25_important"
+// ("Our Titan Shield: 25%") over "Our Titan shield is down by three
+// quarters!"). `find` is the strings' lookup (null when missing).
+struct RadioTextLines {
+	std::string important; // the important message's text, "" none
+	bool chat = true;      // the id's own line
+};
+RadioTextLines radioTextLines(const std::string& id, const std::function<const std::string*(const std::string&)>& find);
+
+// The important message: the HUD manager's slot 0x80 (0x0074ec50), from
+// 0x0042bef0's kind 4 with 5 s (0x40a00000): with a time over 0 the text
+// to HudInformationLayer's ImportantMessage (DAT_00a0f79c slot 0x68,
+// 0x0044e240: +0xa8, registered by 0x0044f1a0), ShowImportantMessage on
+// and the timer (+0x240), which the HUD manager's update (0x007c8c30)
+// counts down to ShowImportantMessage off; with none, off at once.
+// HudElementsGameInfo.con's ImportantMessage node shows it.
+class ImportantMessage {
+public:
+	void show(hud::HudManager& hud, const std::string& text, float seconds);
+	void tick(hud::HudManager& hud, float seconds);
+
+private:
+	float m_left = 0; // +0x240
+};
+
 } // namespace dice::hfe::menu

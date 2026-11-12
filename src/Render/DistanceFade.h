@@ -79,6 +79,18 @@ inline float viewFarDistance(float levelViewDistance, float viewDistanceScale)
 	return stored * viewDistanceScale;
 }
 
+// The view distance scale a frame uses. While the commander's overhead
+// view is on, BF2142.exe 0x00779680 sets the VideoSettings' scale to 1
+// (DAT_00a0c208 set, DAT_00a0c204 1.0: the Renderer's slot 0x80, RendDX9
+// 0x10006260, its video settings at +0x3e8, slot 0x28 0x1000f0c0 →
+// +0x108, clamped 0.5..1), keeping the player's (slot 0x2c, 0x100113c0,
+// in the minimap's +0xdb4) and putting it back as the view goes off. So
+// the view's far distance (+0x30) and the fog (0x10028020) are full there.
+inline float frameViewDistanceScale(float settingsScale, bool overheadView)
+{
+	return overheadView ? 1.0f : settingsScale;
+}
+
 // One root object's record (0x006ff110 + 0x006fb280).
 struct CullRecord {
 	float minArea = 0;  // p0

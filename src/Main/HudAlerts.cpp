@@ -514,4 +514,44 @@ void DogTags::tick(hud::HudManager& hud, float seconds)
 	}
 }
 
+RadioTextLines radioTextLines(const std::string& id, const std::function<const std::string*(const std::string&)>& find)
+{
+	RadioTextLines lines;
+	const auto text = [&find](const std::string& key) {
+		const std::string* found = find ? find(key) : nullptr;
+		return found ? *found : key;
+	};
+	if (id.find("_important") != std::string::npos) {
+		lines.important = text(id);
+		lines.chat = false;
+		return lines;
+	}
+	const std::string key = id + "_important";
+	if (const std::string* found = find ? find(key) : nullptr; found && *found != key) {
+		lines.important = *found;
+	}
+	return lines;
+}
+
+void ImportantMessage::show(hud::HudManager& hud, const std::string& text, float seconds)
+{
+	if (!(seconds > 0)) {
+		hud.set("ShowImportantMessage", 0);
+		return;
+	}
+	hud.setString("ImportantMessage", text);
+	hud.set("ShowImportantMessage", 1);
+	m_left = seconds;
+}
+
+void ImportantMessage::tick(hud::HudManager& hud, float seconds)
+{
+	if (m_left > 0) {
+		m_left -= seconds;
+		if (m_left <= 0) {
+			show(hud, {}, 0);
+		}
+	}
+}
+
 } // namespace dice::hfe::menu

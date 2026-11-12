@@ -55,9 +55,12 @@ public:
 	// The local player's team (0 without one).
 	int playerTeam() const;
 	// The scoreboard's numbers (the player's networkable on a client: score,
-	// rplScore, ping; the scripts' score locally).
+	// rplScore, ping; the scripts' score locally). skillScore (stats +8,
+	// one of the order's keys) isn't in the networkable (0x005981a0), so a
+	// client's stays 0; locally the scripts'.
 	struct Scores {
 		int score = 0, teamwork = 0, ping = -1;
+		int skillScore = 0;
 	};
 	virtual Scores scores(int player) const = 0;
 	virtual float tickets(int team) const = 0;
@@ -195,6 +198,7 @@ class LocalHudWorld : public HudWorld {
 public:
 	LocalHudWorld(game::GameWorld& round, const game::GameLogic& logic) : m_round(round), m_logic(logic) {}
 	std::function<int(int)> scoreOf; // the scripts' scores (else kills x 2 - team kills x 4)
+	std::function<int(int)> skillScoreOf; // the scripts' skillScore (else 0)
 
 	bool joined() const override { return false; }
 	int localPlayer() const override { return m_round.localPlayer(); }

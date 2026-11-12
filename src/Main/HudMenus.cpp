@@ -849,6 +849,29 @@ std::string activeLevelText(const std::string& level)
 	return text;
 }
 
+std::vector<size_t> scoreboardOrder(const std::vector<ScoreboardKey>& players)
+{
+	std::vector<size_t> order(players.size());
+	for (size_t i = 0; i < order.size(); ++i) {
+		order[i] = i;
+	}
+	std::stable_sort(order.begin(), order.end(), [&players](size_t ia, size_t ib) {
+		const ScoreboardKey& a = players[ia];
+		const ScoreboardKey& b = players[ib];
+		if (a.score != b.score) {
+			return a.score > b.score;
+		}
+		if (a.skillScore != b.skillScore) {
+			return a.skillScore > b.skillScore;
+		}
+		if (a.deaths != b.deaths) {
+			return a.deaths < b.deaths;
+		}
+		return a.connectedAt > b.connectedAt;
+	});
+	return order;
+}
+
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)
 {
 	ScoreboardStyle style {{0, 0, 0, 1}, {0, 0, 0, 0}};

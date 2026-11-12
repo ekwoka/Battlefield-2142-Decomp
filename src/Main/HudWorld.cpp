@@ -60,6 +60,7 @@ HudWorld::Scores LocalHudWorld::scores(int player) const
 	PlayerInfo p;
 	if (m_round.playerInfo(player, p)) {
 		s.score = scoreOf ? scoreOf(p.id) : p.kills * 2 - p.teamKills * 4;
+		s.skillScore = skillScoreOf ? skillScoreOf(p.id) : 0;
 	}
 	s.teamwork = 0;
 	s.ping = p.ai ? -1 : 0;
@@ -146,6 +147,7 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.name = p.name;
 	out.team = p.team;
 	out.ai = p.ai;
+	out.created = p.created; // connectedAt stays -1 (the networkable sets +0x1c0 alone, 0x005981a0)
 	out.alive = p.alive;
 	out.hitIndicator = p.local ? hitIndicator : 0;
 	out.kills = p.kills;

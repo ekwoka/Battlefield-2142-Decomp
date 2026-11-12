@@ -655,6 +655,17 @@ TEST(ServerAdmin_RankedOverridesAndMinimums)
 	CHECK(sv.playersNeededToStartInForce(false) == 2 && sv.playersNeededToStartInForce(true) == 6);
 	sv.maxPlayers = 64;
 	CHECK(sv.playersNeededToStartInForce(true) == 8);
+	// sv.ranked's setter (0x00430800): without the stats scripts and the
+	// ServerInfo options (as the shipped game, and the rewrite's command
+	// line) it becomes 0 whatever is set; with them, the value, or 1 with
+	// GSRanked.
+	net::ServerSettings fresh;
+	CHECK(fresh.set("ranked", "1") && !fresh.ranked);
+	fresh.rankedAllowed = true;
+	CHECK(fresh.set("ranked", "1") && fresh.ranked);
+	CHECK(fresh.set("ranked", "0") && !fresh.ranked);
+	fresh.gameSpyRanked = true;
+	CHECK(fresh.set("ranked", "0") && fresh.ranked);
 }
 
 // The pause after a round (0x004ba250 -> +0x284, counted down by

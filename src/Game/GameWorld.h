@@ -574,6 +574,14 @@ public:
 		bool commander = false;
 		bool cloaked = false; // active camouflage on
 		int rank = -1; // the stats' rank (player slot 0x1a8 +0x20; setPlayerRank, -1 unset): the name tags' ICRank
+		// The player manager's list order (0x004b8b60 appends each player
+		// made): 0, 1, ... by creation, not the id (a left player's id is
+		// taken again). The scoreboard's ties keep it (menu::scoreboardOrder).
+		uint64_t created = 0;
+		// When the player was last connected (player +0x1c8 through slot
+		// 0x1c0, -1 never: bots, and every player on a client), round
+		// seconds; menu::scoreboardOrder.
+		double connectedAt = -1;
 		// The soldier's own EMP level (its armour's, 0x00652a00 through the
 		// player's 0x005921b0 on foot), 0 none.
 		int empLevel = 0;
@@ -1866,6 +1874,11 @@ public:
 	// The player's rank (the stats' rank, player slot 0x1a8 +0x20) the
 	// applicants are ranked by; -1 until set (pmgr_setScore "rank").
 	void setPlayerRank(int player, int rank);
+	// The player's connected flag set (slot 0x8c with 1, 0x005915f0): the
+	// clock (here the round's seconds) goes to +0x1c8. addPlayer does it
+	// for a human (0x004a8460); the host again when the client has loaded
+	// the level (0x004a7c80).
+	void setPlayerConnected(int player);
 	// The commander's tools (Commander.orbitalStrike, .artillery, .uav,
 	// .satellite, .supplies). All but the supply drop need the team's asset
 	// intact: a placed object whose template holds a RemoteControlledObject
@@ -3195,6 +3208,8 @@ private:
 		// set it: stats.py gives 0 on PlayerConnect, rank.py the stats
 		// server's "rnk"); setPlayerRank.
 		int rank = -1;
+		uint64_t created = 0;     // the manager's list order (PlayerInfo::created)
+		double connectedAt = -1;  // +0x1c8 (PlayerInfo::connectedAt)
 		float respawnIn = 0;
 		int kills = 0, deaths = 0, teamKills = 0;
 		int killer = -1; // who killed it last (the player's slot 0x338: the death camera's other object)
@@ -3987,6 +4002,7 @@ private:
 	// scan timers (DAT_00a6a390: 0x005a23b0, 0x005a2450) and the supply drop
 	// (0x0043d6d0).
 	double m_time = 0; // seconds since the round started
+	uint64_t m_playersMade = 0; // addPlayer's count (Player::created)
 	uint32_t m_ticks = 0; // the engine's tick count (0x00666090: DAT_00a7d1f8)
 	// The launchers of the objects thrown or set down (the projectile
 	// interface's +0x1c8, 0x005b48b0), by object; read when its body is made.

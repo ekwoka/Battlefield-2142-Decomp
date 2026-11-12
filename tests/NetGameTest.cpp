@@ -307,6 +307,22 @@ TEST(NetGame_RemoteWorldFromEvents)
 	other.name = "Other";
 	world.apply(net::makeCreatePlayer(other));
 	CHECK(world.localPlayer() == 2 && world.playerList().size() == 2);
+	// The client's player manager keeps them in the order made (0x004b8b60),
+	// whatever their ids: the scoreboard's ties go by it.
+	{
+		net::CreatePlayerInfo low;
+		low.id = 1;
+		low.team = 2;
+		low.remote = true;
+		low.name = "Low";
+		world.apply(net::makeCreatePlayer(low));
+		CHECK(world.player(2)->created < world.player(5)->created && world.player(5)->created < world.player(1)->created);
+		net::GameEvent destroy;
+		destroy.type = net::kEvDestroyPlayer;
+		destroy.values = {1};
+		world.apply(destroy);
+		CHECK(world.playerList().size() == 2);
+	}
 	// HandlePickup (0x0050bfd0): player, the kit, the soldier (0x004bb350
 	// asks the third for the kit holder interface 0xc49d).
 	{
