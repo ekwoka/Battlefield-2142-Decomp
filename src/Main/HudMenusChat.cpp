@@ -103,7 +103,16 @@ void HudChat::addPersonal(const std::string& message)
 
 void HudChat::setKilledBy(const std::string& killer)
 {
-	m_hud.setString("DeathMessage", killer.empty() ? std::string() : replaced(text("HUD_CHAT_YOUWEREKILLEDBY"), "#PLAYERNAME#", killer));
+	// A personal line (0x0075a268 -> HUD slot 0x170), as "You killed"; DeathMessage is the centred
+	// killed line (critically wounded / killed, main's updateHud).
+	if (!killer.empty()) {
+		addPersonal(replaced(text("HUD_CHAT_YOUWEREKILLEDBY"), "#PLAYERNAME#", killer));
+	}
+}
+
+void HudChat::addKillScore(const std::string& victim)
+{
+	addPersonal(replaced(text("HUD_CHAT_YOUGOTAKILLSCORE"), "#PLAYERNAME#", victim));
 }
 
 void HudChat::open(Box box)

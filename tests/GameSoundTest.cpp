@@ -913,6 +913,26 @@ TEST(GameAudio_InjurySound)
 	CHECK(audio.listenerState().windWanted && audio.listenerState().seat.empty());
 }
 
+// The shipped S_Injury lives on the worn Kit's vehicleHud, not the soldier template.
+TEST(GameAudio_InjurySoundFromKit)
+{
+	Range range;
+	range.templates.registerType(7, "Kit");
+	range.templates.create("Kit", "EU_Assault")->settings()["vehicleHud.injurySound"] = "S_Injury";
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	range.world->tick(1 / 30.0f);
+	audio.tick(camera);
+	game::GameWorld::PlayerInfo me;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), me) && me.soldier != 0 && me.kit != 0);
+	range.world->setHitPoints(me.soldier, 80);
+	range.world->tick(1 / 30.0f);
+	audio.tick(camera);
+	CHECK(audio.listenerState().injuries == 1);
+}
+
 TEST(GameSounds_LocalAutomaticFireUsesRetailLoop)
 {
 	Sounds s;

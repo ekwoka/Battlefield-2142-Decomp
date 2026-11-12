@@ -44,6 +44,16 @@ TEST(DeploymentScreen_EnterHidesDeathScreenWhileTimerRuns)
 	CHECK(dice::main::deploymentDoneAction(false, true, false, false, 3) == dice::main::DeploymentDoneAction::None);
 }
 
+TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)
+{
+	using dice::main::killedInfoShown;
+	CHECK(killedInfoShown(true, 12, false, false));  // man down, screen closed: critically wounded + timer
+	CHECK(!killedInfoShown(true, 12, true, false));  // man down, screen opened
+	CHECK(!killedInfoShown(false, 12, false, false)); // dead: the spawn screen is up
+	CHECK(killedInfoShown(false, 12, false, true));   // dead, Enter pressed: killed + timer
+	CHECK(!killedInfoShown(false, 0, false, true));   // never died (initial deployment)
+}
+
 TEST(Hud_ParsesFonts)
 {
 	const auto font = hud::parseHudFont("header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n2\r\n"

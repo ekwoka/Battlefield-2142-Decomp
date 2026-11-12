@@ -16,7 +16,7 @@
 //   / _KILLED / _TEAMKILLS / _MYSELF with #PLAYERNAME1#, #WEAPON# (the
 //   weapon's weaponHud.hudName, or the vehicle's vehicleHud.hudName) and
 //   #PLAYERNAME2#, category 1; the victim's own "you were killed by" is
-//   HUD_CHAT_YOUWEREKILLEDBY in DeathMessage (HudElementsKilled.con).
+//   HUD_CHAT_YOUWEREKILLEDBY as a personal line (0x0075a268).
 // - PersonalList (list data 13): personal notices (the chat spam block,
 //   HUD_HUD_MENU_CHAT_SPAM_MESSAGE), 5 s each.
 // - The say boxes (HudManager.enableSay{All,Team,Squad}ChatBox
@@ -75,8 +75,11 @@ public:
 		Speaker color);
 	void addInfo(const std::string& text, int category = 1);
 	void addPersonal(const std::string& text);
-	// The local player's death message (DeathMessage), empty when alive.
+	// The local player's death: "You were killed by" as a personal line (empty: nothing).
 	void setKilledBy(const std::string& killer);
+	// The local player's kill of an enemy: HUD_CHAT_YOUGOTAKILLSCORE (0x0075a07a)
+	// to the PersonalList (slot 0x170), the centred message area.
+	void addKillScore(const std::string& victim);
 
 	// The say boxes.
 	void open(Box box);

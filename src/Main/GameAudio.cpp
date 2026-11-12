@@ -206,7 +206,13 @@ void GameAudio::soldierHud(const game::GameWorld::PlayerInfo& me, bool alive)
 		}
 		return;
 	}
-	const std::string& panting = setting(*t, "vehicleHud.pantingSound");
+	// The shipped data puts vehicleHud.pantingSound / injurySound on the worn Kit, not the soldier template.
+	const world::Object* kit = me.kit ? m_objects.find(me.kit) : nullptr;
+	const auto hudSetting = [&](const char* key) -> const std::string& {
+		const std::string& own = kit && kit->objectTemplate() ? setting(*kit->objectTemplate(), key) : setting(*t, key);
+		return own.empty() ? setting(*t, key) : own;
+	};
+	const std::string& panting = hudSetting("vehicleHud.pantingSound");
 	if (me.stamina > 0) {
 		if (me.stamina >= 0.2f && m_panting) {
 			m_manager.stopSound(m_pantingSound);
@@ -225,7 +231,7 @@ void GameAudio::soldierHud(const game::GameWorld::PlayerInfo& me, bool alive)
 	}
 	const float f = std::clamp(hp / max, 0.0f, 1.0f);
 	if (m_lastHealth >= 0 && f < m_lastHealth && f != 0 && m_injuryTimer <= 0) {
-		const std::string& injury = setting(*t, "vehicleHud.injurySound");
+		const std::string& injury = hudSetting("vehicleHud.injurySound");
 		if (!injury.empty()) {
 			m_manager.playSound(injury);
 			++m_listenerState.injuries;

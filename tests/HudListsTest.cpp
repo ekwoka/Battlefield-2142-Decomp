@@ -61,7 +61,7 @@ TEST(HudLists_ChatLinesAndSayBoxes)
 	CHECK(chat.chatRows().size() == 2);
 	CHECK(chat.chatRows()[0] == "\xa7" "1<TEAM> Alice: hello\xa7" "0");
 	CHECK(chat.chatRows()[1] == "\xa7" "1Bob [Rifle] Alice\xa7" "0");
-	CHECK(hud.number("ChatListShow") == 1 && hud.string("DeathMessage") == "You were killed by Bob");
+	CHECK(hud.number("ChatListShow") == 1 && hud.listCell(13, 0, 0) == "You were killed by Bob"); // the personal list
 	// Each category keeps its lines 5 s from the latest.
 	chat.update(4.95f);
 	CHECK(chat.chatRows().size() == 0 && hud.number("ChatListShow") == 0);
@@ -117,6 +117,19 @@ TEST(HudLists_ChatLinesAndSayBoxes)
 	menu::updateVoipList(hud, {{"Cmdr", true, 0}, {"Mate", false, 3}}, true, false);
 	CHECK(hud.number("VoipListShow") == 1 && hud.listCell(11, 0, 1) == "Cmdr");
 	CHECK(hud.listCell(11, 1, 0).find("mini_Squad_3_small") != std::string::npos && hud.number("VoiceOverTalkIconShow") == 1);
+}
+
+// The local player's kill of an enemy (0x0075a07a): a personal line.
+TEST(HudLists_KillScoreLine)
+{
+	hud::HudManager hud = emptyHud();
+	menu::HudChat chat(hud);
+	chat.setLocalizer([](const std::string& key) {
+		return key == "HUD_CHAT_YOUGOTAKILLSCORE" ? std::string("You killed #PLAYERNAME#") : key;
+	});
+	chat.addKillScore("Exodus AlexNorton");
+	chat.update(0.1f);
+	CHECK(hud.listCell(13, 0, 0) == "You killed Exodus AlexNorton");
 }
 
 TEST(HudLists_KitMenu)

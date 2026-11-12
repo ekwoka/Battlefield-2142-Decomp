@@ -1859,6 +1859,19 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			else if (respawnSeconds >= 0) hud.setString("SpawnInfoString", withTime("HUD_CENTERINFOBOX_timetospawn", respawnSeconds));
 			else hud.setString("SpawnInfoString", std::string());
 		}
+		// The centred killed lines (KilledState, DeathMessage, TimeToSpawnString of HudElementsKilled.con):
+		// man down says "critically wounded" (0x007516e5), dead "you were killed" (0x00751a04); the timer is
+		// "%s %2d" of HUD_TEXT_MENU_TIME_TO_RESPAWN and the seconds, 0..1000 (0x0044cd25..0x0044cd5d).
+		const bool killed = respawnSeconds >= 0
+			&& dice::main::killedInfoShown(respawnInfo.manDown, respawnInfo.respawnIn, g_deploymentOpen, g_spawnScreenHidden);
+		hud.set("KilledState", killed ? 1 : 0);
+		if (killed) {
+			const auto text = [](const char* key) { return g_localize ? g_localize(key) : std::string(key); };
+			char number[16];
+			std::snprintf(number, sizeof number, " %2d", std::min(respawnSeconds, 1000));
+			hud.setString("DeathMessage", text(respawnInfo.manDown ? "HUD_TEXT_MENU_YOU_ARE_IN_MAN_DOWN" : "HUD_TEXT_MENU_YOU_WERE_KILLED"));
+			hud.setString("TimeToSpawnString", text("HUD_TEXT_MENU_TIME_TO_RESPAWN") + number);
+		}
 	}
 	// The capture bar (HudElementsConquest.con "Controlpoint Info": shown
 	// while the soldier is in a capturable point's radius, the point
@@ -5442,6 +5455,10 @@ int runGame(Options& options, Session& session)
 					: k.team == me.team                     ? dice::hfe::menu::HudChat::Speaker::Team
 															: dice::hfe::menu::HudChat::Speaker::Enemy;
 				chat.addKill(byOther ? k.name : std::string(), v.name, weapon, byOther && k.team == v.team, speaker);
+				// HUD event 3/14 (0x0075a07a): the local, non-commander killer, enemy team only.
+				if (byOther && k.id == round.localPlayer() && k.team != v.team && !k.commander) {
+					chat.addKillScore(v.name);
+				}
 				if (victim == round.localPlayer()) {
 					chat.setKilledBy(byOther ? k.name : v.name);
 				}
@@ -7178,6 +7195,9 @@ int runGame(Options& options, Session& session)
 				if (victim) {
 					chat.addKill(killer && killer != victim ? killer->name : std::string(), victim->name, "",
 						killer && killer->team == victim->team, speakerOf(killer));
+					if (killer && self && kill.attacker == client.world().localPlayer() && !killer->commander && killer->team != victim->team) {
+						chat.addKillScore(victim->name); // 0x0075a07a
+					}
 				}
 			}
 			// The squads' requests (0x004c5720's messages): 2/0x1e to the
