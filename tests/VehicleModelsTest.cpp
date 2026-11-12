@@ -44,6 +44,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -135,6 +136,20 @@ struct Garage {
 	}
 
 	uint32_t groundMaterial = 0; // the terrain's material under every point
+	std::optional<physics::Ground> terrain; // instead of flat ground at `ground`
+	// A pit 100 m deep from z = 10 on: a parked gunship's TV missile leaves
+	// its camera (CameraId 11, under the nose, 10 degrees down:
+	// fireInCameraDof) a metre over the ground.
+	void pitAhead()
+	{
+		const auto h = [](float, float z) { return z < 10 ? 0.0f : -100.0f; };
+		terrain = physics::Ground {h,
+			[h](float x, float z, physics::Vec3& normal) {
+				normal = {0, 1, 0};
+				return h(x, z);
+			},
+			[this](float, float) { return groundMaterial; }};
+	}
 
 	// The vehicle at `at` facing +z, the world started and settled, the
 	// player spawned beside it.
@@ -1424,6 +1439,7 @@ TEST(Vehicles_GunshipMissileCamera)
 	if (!g.loaded || !g.templates.find("as_ag")) {
 		return;
 	}
+	g.pitAhead();
 	const uint32_t v = g.start("as_ag", {0, 4, 6});
 	CHECK(g.enter(v));
 	const int me = g.world->localPlayer();
@@ -1555,6 +1571,7 @@ TEST(Vehicles_GunshipMissileMotorAndCamera)
 			Garage g(gameDir(), mod);
 			CHECK(g.loaded && g.templates.find(aircraft));
 			if (!g.loaded || !g.templates.find(aircraft)) continue;
+			g.pitAhead();
 			const uint32_t v = g.start(aircraft, {0, 4, 6});
 			CHECK(g.enter(v));
 			game::SoldierInput in;
@@ -1669,7 +1686,18 @@ TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
 				in = {}; in.altFire = true;
 				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 				g.world->setPlayerInput({}); g.run(4);
-				g.world->setCamera({0, 4, 6}, {0, 0, 1});
+				// Up off the ground first: the missile leaves its camera
+				// (CameraId 11, under the nose, 10 degrees down: fireInCameraDof).
+				for (int i = 0; i < 30; ++i) {
+					CHECK(g.world->setBodyVelocity(v, {0, 5, 0}));
+					g.world->tick(1 / 30.0f);
+				}
+				// Moving for a few ticks first: a launch takes the carrier's
+				// displacement over the last tick (0x005f31d0, node slot 0x64).
+				for (int i = 0; i < 3; ++i) {
+					CHECK(g.world->setBodyVelocity(v, velocity));
+					g.world->tick(1 / 30.0f);
+				}
 				CHECK(g.world->setBodyVelocity(v, velocity));
 				in = {}; in.fire = true;
 				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
@@ -1679,7 +1707,7 @@ TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
 				std::fprintf(stderr, "  moving TV: %s %s velocity %.0f/%.0f camera %.1f/%.1f\n",
 					mod, aircraft, velocity.x, velocity.z, camera.yaw, camera.pitch);
 				CHECK(std::fabs(std::remainder(camera.yaw, 360.0f)) < 5);
-				CHECK(std::fabs(camera.pitch) < 5);
+				CHECK(std::fabs(camera.pitch + 10) < 5);
 				bool found = false;
 				for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
 					found = true;
@@ -1690,12 +1718,15 @@ TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
 				g.world->setPlayerInput({});
 				g.run(0.3f);
 				CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
-				CHECK(std::fabs(std::remainder(camera.yaw, 360.0f)) < 8 && std::fabs(camera.pitch) < 8);
+				CHECK(std::fabs(std::remainder(camera.yaw, 360.0f)) < 8 && std::fabs(camera.pitch + 10) < 8);
 			}
 		}
 	}
 }
 
+// The TV missile leaves along its camera (fireInCameraDof, 0x005f1a20: the
+// player's camera, CameraId 11, fixed under the nose 10 degrees down), not
+// along the cannon's mount, which can be left pointing down.
 TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 {
 	if (!gameDir()) return;
@@ -1716,14 +1747,15 @@ TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 			CHECK(g.world->gunAim(v, 1, yaw, pitch) && pitch < -10);
 			in.altFire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			in.altFire = false; g.world->setPlayerInput(in); g.run(4);
-			g.world->setCamera({0, 4, 6}, {0, 0, 1});
 			in.fire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			game::GameWorld::ProjectileCamera camera;
 			CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
 			bool found = false;
 			for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
 				found = true;
-				CHECK(std::fabs(p.cameraMissileForward.y) < 0.01f && p.cameraMissileForward.z > 0.99f);
+				std::fprintf(stderr, "  %s %s TV launch %.3f/%.3f/%.3f\n", mod, aircraft, p.cameraMissileForward.x,
+					p.cameraMissileForward.y, p.cameraMissileForward.z);
+				CHECK(std::fabs(p.cameraMissileForward.y + 0.1736f) < 0.03f && std::fabs(p.cameraMissileForward.x) < 0.03f);
 			}
 			CHECK(found);
 		}
@@ -2154,6 +2186,61 @@ TEST(Vehicles_GroundDriverAimsAndFires)
 	const float cupolaFrame = std::remainder(frame.yawPitchRoll().x - g.yaw(tank), 360.0f);
 	std::fprintf(stderr, "  the cupola's frame %.1f off the hull\n", cupolaFrame);
 	CHECK(std::fabs(std::remainder(cupolaFrame - 45, 360.0f)) < 3);
+}
+
+// fire.fireInCameraDof (the fire frame 0x005f1a20): a seat gun's round
+// leaves along the seat camera's frame (the player's camera's Camera
+// object, its own look included), not the gun's. eu_tank's cupola camera
+// leans with the mouse (eu_tank_cupola_Camera: +-1 yaw), so a turning
+// gunner's rounds go off the barrel by the lean.
+TEST(Vehicles_CameraDofRoundsFollowTheCamera)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	CHECK(g.enter(tank));
+	game::SoldierInput move;
+	move.switchSeat = 2;
+	g.world->setPlayerInput(move);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(1);
+	g.world->setZoomed(g.world->localPlayer(), true); // no deviation
+	game::SoldierInput turn;
+	turn.turn = 3;
+	g.drive(turn, 0.5f);
+	const size_t before = g.world->projectiles().size();
+	turn.fire = true;
+	g.world->setPlayerInput(turn);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	CHECK(g.world->projectiles().size() > before);
+	if (g.world->projectiles().size() <= before) {
+		return;
+	}
+	const game::Projectile& p = g.world->projectiles()[before];
+	world::Vec3 offset, look;
+	CHECK(g.world->partPose(tank, "eu_tank_cupola_Camera", offset, look, 1));
+	physics::Vec3 origin;
+	physics::Mat3 hull;
+	float yaw = 0, pitch = 0;
+	CHECK(g.world->gunFrame(tank, 1, origin, hull));
+	CHECK(g.world->gunAim(tank, 1, yaw, pitch));
+	const float y = yaw * 3.14159265f / 180.0f, x = pitch * 3.14159265f / 180.0f;
+	const physics::Vec3 barrel = hull.transform({std::sin(y) * std::cos(x), std::sin(x), std::cos(y) * std::cos(x)});
+	const physics::Vec3 way = p.velocity * (1 / std::sqrt(physics::lengthSquared(p.velocity)));
+	const physics::Vec3 local = hull.untransform(way);
+	const float roundYaw = std::atan2(local.x, local.z) * 57.29578f;
+	const float off = std::acos(std::clamp(static_cast<double>(physics::dot(way, barrel)), -1.0, 1.0)) * 57.29578;
+	std::fprintf(stderr, "  cupola gun %.2f, camera lean %.2f/%.2f, round %.2f (off the barrel %.2f)\n", yaw, look.x, look.y,
+		roundYaw, off);
+	CHECK(std::fabs(look.x) > 0.5f);
+	CHECK(std::fabs(std::remainder(roundYaw - (yaw + look.x), 360.0f)) < 0.15f);
 }
 
 // The heavy mech's guns ride its torso bone (AS_heavy_mech_torsospring,

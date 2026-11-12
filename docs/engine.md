@@ -1522,10 +1522,23 @@ in between (`FireArm::fire`). The round's start and its wait:
   `0x1b4(0)`; with Locked the seat camera's pose fixed to the gun at the
   start, `0x005f25f0`), else the gun's; on foot the soldier's control
   object's frame always (the flag isn't read); `projectileStartPosition`
-  is then added in that frame. Rewritten for seat guns
-  (`GameWorld::seatGunOrigin`): with the flag the round starts at the
-  seat's first Camera (its place at rest turned with the gun's aim about
-  the yaw bundle), along the gun's aim. Locked (`+0x45`, only
+  is then added in that frame. The player's camera (`0x005948e0`: the
+  control object's Camera) answers by its view mode (`+8`, slot `0x1c`
+  `0x006da520`): mode 2 (the nose view: modes 1 and 2 are the inside and
+  nose views, `0x00591510`; allowed by the Camera template's `+0x37e`)
+  the view's matrix (slot `0x10` `0x00612d80` → `0x00610800`); any other mode the
+  Camera object's own matrix (`0x004b9db0`: interface `0xc378`, slot
+  `0x78`), which carries its mounts' and its own look (the FAV and tank
+  cupola gunners' lean, the gunship TV launcher's fixed 10° down). Weapon
+  `+0x260` / `+0x261` (set for the commander's strikes, `+0x260` = 1)
+  take the weapon's matrix. Rewritten for seat guns
+  (`GameWorld::seatCameraFrame`, in `fireSeatWeapon`): with the flag the
+  round leaves along the seat Camera's world frame (the selected gun's
+  `zoom.startCameraId`, else 0), walked down the template tree as the
+  drawing poses it (`partPose`, `partBone`), from its place plus
+  `projectileStartPosition` in it; the nose view and ducking's camera 1
+  are left out. `seatGunOrigin` (the bots' aim) still turns the camera's
+  rest place with the gun. Locked (`+0x45`, only
   AS_TANK_Turretfirearm): at the gun's setup (`0x005f25f0`) the pose of a
   Camera that is a direct child of the weapon's control object
   (`0x0042b2f0`, interface 0xc4c5; its children through 0xc378 slot 0xec

@@ -1285,12 +1285,14 @@ public:
 		bool hasDeviation = false;
 		// Where the gun's rounds start (MultiFireComp 0x005d5fb0, the fire
 		// component's slot 53 0x005f1a20): with fire.fireInCameraDof
-		// (template +0x44) the seat camera's frame (the seat's `cameraAt`),
+		// (template +0x44) the seat camera's frame (seatCameraFrame; the
+		// seat's `cameraAt` for seatGunOrigin, the bots' aim),
 		// else a barrel's (fire.addBarrelName, 0x004e45a6 -> 0x005d6ae0: the
 		// gun's children of those names, 0x005d6d20; one in turn,
 		// 0x005d64a0), else the gun's; then fire.projectileStartPosition
 		// (+0x5c) in that frame. Positions in the vehicle's frame at rest.
 		bool fireInCameraDof = false;
+		bool fireInCameraDofLocked = false; // +0x45: the gun's frame x the camera's pose at setup
 		std::vector<physics::Vec3> barrels;
 		bool hasStartPosition = false;
 		physics::Vec3 startPosition;
@@ -2692,6 +2694,12 @@ private:
 	bool seatAims(const Body& body, int seat) const;
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, Body::Gun& gun, int& barrel);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel);
+	// A seat's Camera in the world (the fire frame 0x005f1a20 with
+	// fireInCameraDof: the player's camera, slot 0x1b4(0), whose Camera
+	// object's matrix, 0x004b9db0 -> 0xc378 slot 0x78, includes its own
+	// mouse look): the one numbered `cameraId`, else the seat's first, down
+	// the template tree as PlayerCamera::findSeatCamera poses it.
+	bool seatCameraFrame(const Body& body, int seat, int cameraId, physics::Vec3& at, physics::Mat3& turn);
 	Body* findBody(uint32_t object);
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
