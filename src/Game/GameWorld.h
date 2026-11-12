@@ -2403,6 +2403,14 @@ private:
 		bool trunkFromTypeFour = false;
 		// The position before this tick's step (the helicopter exit's start).
 		physics::Vec3 lastPosition;
+		// The node's reported velocity (slot 0x64, +0x78): its displacement
+		// since the last tick's end x 30, components under 1e-6 zero, taken
+		// at each tick's end (PhysicsNodeManager slot 0x20, 0x006daa00 ->
+		// slot 0x19c, 0x006c5920). A round launched from it inherits it
+		// (0x005f31d0).
+		physics::Vec3 reportedVelocity;
+		physics::Vec3 reportedFrom;
+		bool reported = false;
 		// The wheels' parts' radius (their vehicle LOD's, slot 0x50), by wheel.
 		std::vector<float> wheelRadii;
 		uint32_t material = 0; // the template's material
@@ -2691,7 +2699,9 @@ private:
 	bool buildBody(const world::ObjectTemplate& t, uint32_t id, const physics::Vec3& position,
 		const physics::Mat3& rotation, Body& body);
 	bool stepBody(Body& body, float seconds);
-	void stepPhysics(float seconds);
+	void stepPhysics(float seconds);        // stepPhysicsMove, then stepPhysicsCollide
+	void stepPhysicsMove(float seconds);    // the nodes' move (0x006daa70)
+	void stepPhysicsCollide(float seconds); // the mesh group's turns and the responses (0x006dd1b0)
 	// A walker's animation system fed as 0x0063ce30 does (see GameWorld.cpp).
 	void stepObjectAnimation(Body& body, float seconds);
 	std::map<uint32_t, uint32_t> m_objectEffectEvents;
@@ -2853,6 +2863,13 @@ private:
 		bool ai = false;
 		bool spectator = false; // +0x404
 		bool alive = false;
+		// This tick's step order (retail's tick: object updates, the nodes'
+		// move, the soldiers' collision before the mesh group's, 0x006dd1b0):
+		// alive when the update began, and the soldier awaiting its physics.
+		bool steppedAlive = false;
+		bool physicsPending = false;
+		bool physicsPassed = false; // its collision pass done (0x006dcce0's stamp)
+
 		// The stats' rank (stats +0x20, -1 from 0x005a5fc0 until the scripts
 		// set it: stats.py gives 0 on PlayerConnect, rank.py the stats
 		// server's "rnk"); setPlayerRank.
@@ -3331,8 +3348,21 @@ private:
 	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore, uint32_t ignoreStatic = 0) const;
 	float m_waterLevel = 0;
 	bool m_hasWater = false;
+	// A tick's soldiers (retail: ObjectManager slot 0x28's updates before
+	// the physics, the soldiers' collision passes before the mesh group's
+	// turns): stepPlayersBefore (input, stance, the drive), then after the
+	// nodes' move stepSoldiersPhysics (the move, then each pass), after the
+	// vehicles' turns stepSoldiersSettle (each solve), then
+	// stepPlayersAfter (weapons, pose, deaths, respawns).
 	void stepPlayers(float seconds);
+	void stepPlayersBefore(float seconds);
+	void stepSoldiersPhysics(float seconds);
+	void stepSoldiersSettle(float seconds);
+	void stepPlayersAfter(float seconds);
 	void stepSoldier(Player& player, float seconds);
+	void gatherSoldierContacts(Player& player);
+	void stepSoldierAfter(Player& player, float seconds);
+	void stepSoldierWeapon(Player& player, float seconds);
 	void stepWeaponFeel(Player& player, SoldierInput& turned, float seconds);
 	void stepWeaponLock(Player& player, float seconds);
 	int targetTypeOf(const world::ObjectTemplate& t, int depth = 0) const;

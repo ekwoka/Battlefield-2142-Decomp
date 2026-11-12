@@ -185,18 +185,23 @@ void SoldierBody::collideWithObjects(float seconds)
 	}
 }
 
-// Another soldier (0x006c2620; slot 9 with scale 1, the solve's passes
+// Another soldier (0x006c2620; the pass with scale 1, the solve's passes
 // with 0.999): when their heights overlap (each from its feet, a metre
 // under the origin, to its stance's height) and their origins are within
 // twice this soldier's radius x the scale across (x, z), each is pushed
-// away from the other by the overlap with no velocity (0x006c24b0 with
-// material 0x2f); 0.01 apart or nearer, along z. The original gives the
-// other its contact as well; here each soldier takes its own when it
-// steps.
-void SoldierBody::collideWithSoldiers(float scale)
+// away from the other by the overlap with no velocity (0x006c24b0 twice,
+// material 0x2f); 0.01 apart or nearer, along z. The other's push waits
+// in its response for its next solve: this tick's if still to come, else
+// the next (only entering the world clears it, slot 0x1c 0x006c1ad0).
+// `pass`: only the soldiers whose pass is still to come.
+void SoldierBody::collideWithSoldiers(float scale, bool pass)
 {
 	const float top = position.y - 1.0f + soldier::stanceHeight(stance);
-	for (const Neighbour& other : soldiers) {
+	for (const Neighbour& neighbour : soldiers) {
+		SoldierBody& other = *neighbour.body;
+		if (pass && neighbour.passed) {
+			continue;
+		}
 		const float otherTop = other.position.y - 1.0f + soldier::stanceHeight(other.stance);
 		if (position.y - 1.0f > otherTop || other.position.y - 1.0f > top) {
 			continue;
@@ -210,6 +215,7 @@ void SoldierBody::collideWithSoldiers(float scale)
 		const float distance = std::sqrt(squared);
 		away = distance >= 0.01f ? away * (1.0f / distance) : Vec3 {0, 0, 1};
 		addContact(away, reach - distance, {});
+		other.addContact(away * -1.0f, reach - distance, {});
 	}
 }
 
@@ -444,7 +450,7 @@ void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 				collideWithMesh(*mover.mesh, &mover, seconds, soldier::kSolveScale, normals, depth);
 			}
 		}
-		collideWithSoldiers(soldier::kSolveScale);
+		collideWithSoldiers(soldier::kSolveScale, false);
 		deepest = std::min(deepest, depth);
 		const float groundDepth = collideWithGround(ground, gravity, soldier::kSolveScale);
 		if (!normals) {
@@ -648,24 +654,39 @@ void SoldierBody::integrate(float seconds)
 
 void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 {
-	if (!m_hasLast || lengthSquared(position - m_stepEnd) > 1e-10f) {
-		m_lastPosition = position; // put there from outside: no motion
-		m_hasLast = true;
-	}
-	const Vec3 start = position;
-	m_onGround = false; // the response's +0xf9 and normal, each tick
-	m_groundNormal = {0, 0, 0};
-	groundVelocity = {};
-	collideWithGround(ground, gravity);
-	collideWithObjects(seconds);
-	collideWithSoldiers(1);
-	solve(seconds, ground, gravity);
-	move(gravity);
+	moveNode(seconds, gravity);
+	pass(seconds, ground, gravity);
+	settle(seconds, ground, gravity);
+}
+
+// The node advances with the previous response (0x004afbee).
+void SoldierBody::moveNode(float seconds, float gravity)
+{
+	m_start = position;
 	integrate(seconds);
 	acceleration.y += gravity * gravityModifier;
-	m_stepEnd = position;
+	m_onGround = false;
+	m_groundNormal = {0, 0.5f, 0}; // reset 0x006c1ad0, threshold set by 0x008edda0
+	groundVelocity = {};
+}
+
+// The response's contacts (0x006dcce0: objects, soldiers; slot 0x28: the
+// ground).
+void SoldierBody::pass(float seconds, const Ground& ground, float gravity)
+{
+	collideWithObjects(seconds);
+	collideWithSoldiers(1, true);
+	collideWithGround(ground, gravity);
+}
+
+// The solve resolves this tick's position and the drive accumulates the
+// impulse and input for the next node tick (0x006dd1b0's last loops).
+void SoldierBody::settle(float seconds, const Ground& ground, float gravity)
+{
+	solve(seconds, ground, gravity);
+	move(gravity);
 	if (seconds > 0) {
-		const Vec3 moved = (position - start) * (1.0f / seconds); // x 30 at the 1/30 s tick
+		const Vec3 moved = (position - m_start) * (1.0f / seconds); // x 30 at the 1/30 s tick
 		measuredVelocity = {flush(moved.x), flush(moved.y), flush(moved.z)};
 	}
 }

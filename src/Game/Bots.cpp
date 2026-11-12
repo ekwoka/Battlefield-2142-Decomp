@@ -1618,6 +1618,14 @@ void BotManager::update(float seconds)
 			// skipped frame turns no more (a vehicle's turn is its steering).
 			if (!self.vehicle) {
 				input.turn = 0;
+			} else if (bot.gunTurn) {
+				// A gun's turn (a gunner's, or a driver's whose look turns
+				// the gun) is the same degrees again, not a rate: held, it
+				// stops where the aim's error ran out, as the executed frame's
+				// does ("not past the target in one tick").
+				const float left = bot.gunTurnLeft;
+				input.turn = left >= 0 ? std::clamp(input.turn, 0.0f, left) : std::clamp(input.turn, left, 0.0f);
+				bot.gunTurnLeft -= input.turn;
 			}
 			if (bot.skips >= 16 || physics::lengthSquared(velocity) <= 0.01f) {
 				input.throttle = vehicle ? -std::clamp(0.5f * physics::dot(vehicle->velocity, vehicle->forward), -0.4f, 0.4f) : 0.0f;
@@ -1632,6 +1640,7 @@ void BotManager::update(float seconds)
 	for (const GameWorld::PlayerInfo* self : executed) {
 		Bot& bot = m_bots[self->id];
 		bot.skips = 0;
+		bot.gunTurn = false;
 		const float elapsed = bot.lastAct < 0 ? seconds : m_time - bot.lastAct;
 		bot.lastAct = m_time;
 		bot.sinceThink += elapsed;
@@ -6233,6 +6242,10 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		pitchStep = pitchErrorDegrees;
 	}
 	input.turn += turn;
+	if (gunning) {
+		bot.gunTurn = true;
+		bot.gunTurnLeft = errorDegrees - turn;
+	}
 	bot.pitch = std::clamp(truePitch + pitchStep, -kPitchLimit, kPitchLimit);
 	input.aimPitch = bot.pitch;
 }

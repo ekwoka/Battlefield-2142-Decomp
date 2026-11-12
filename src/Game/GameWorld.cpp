@@ -868,29 +868,47 @@ void GameWorld::tick(float seconds)
 		list.erase(std::remove_if(list.begin(), list.end(), [](const CollisionMemory& m) { return m.left < 0; }), list.end());
 		it = list.empty() ? m_collisionMemory.erase(it) : std::next(it);
 	}
+	// Retail's tick (0x004afb20): the objects' updates (ObjectManager slot
+	// 0x28: the soldiers' input and drive), then the nodes' move
+	// (PhysicsNodeManager slot 0x1c, 0x006daa70), then the collision
+	// response (slot 0x24, 0x006dd1b0): the soldiers' passes before the
+	// mesh group's turns, which solve as they go, and the soldiers' solves
+	// after them.
+	stepPlayersBefore(seconds);
 	if (m_files) {
 		addBodies();
-		stepTitans(seconds);
-		stepPhysics(seconds);
-	} else {
-		stepTitans(seconds);
 	}
+	// The other objects that fire (the silos, the drones, the strikes'
+	// guns) update with the rest, before the nodes' move.
+	stepSilos(seconds);
+	stepDrones(seconds);
+	stepCommander(seconds);
+	stepTitans(seconds);
+	if (m_files) {
+		stepPhysicsMove(seconds);
+	}
+	stepSoldiersPhysics(seconds);
+	// The Point and RotationalPoint passes (0x006dc430, 0x006dc640) before
+	// the mesh group's turns: the rounds, this tick's too, meet the
+	// vehicles as moved.
+	stepProjectiles(seconds);
+	if (m_files) {
+		stepPhysicsCollide(seconds);
+	}
+	stepSoldiersSettle(seconds);
 	setRagDollLevels();
-	stepPlayers(seconds);
+	stepPlayersAfter(seconds);
 	for (const auto& player : m_players) {
 		player->hitIndicator = std::max(0.0f, player->hitIndicator - seconds * 3.0f); // 0x005912c0
 	}
 	stepPods(seconds);
 	stepParachutes(seconds);
-	stepSilos(seconds);
-	stepDrones(seconds);
 	stepSeatCorpses(seconds);
 	stepDroppedKits();
 	stepCorpses(seconds);
 	stepRemoteBodies(seconds);
 	stepAbilities(seconds);
 	stepCloseTo(seconds);
-	stepCommander(seconds);
 	stepVehicleDamage(seconds);
 	stepUnmannedGuns(seconds);
 	stepSeatBehaviours(seconds);
@@ -898,11 +916,21 @@ void GameWorld::tick(float seconds)
 	stepVehicleTeams();
 	stepCombatAreas(seconds);
 	stepTitanHullKills();
-	stepProjectiles(seconds);
+	// The minimap's radar sweep (0x00788600): 4 rad/s, wrapping at 2pi.
+	m_radarSweep = std::fmod(m_radarSweep + 4.0f * seconds, 6.2831853f);
 	placeTracers();
 	stepControlPoints(seconds);
 	stepAmbience(seconds);
 	m_effects.update(seconds);
+	// The nodes' reported velocities (PhysicsNodeManager slot 0x20,
+	// 0x006daa00 -> 0x006c5920), at the tick's end.
+	const auto flush = [](float x) { return std::fabs(x) < 1e-6f ? 0.0f : x; };
+	for (Body& b : m_bodies) {
+		const physics::Vec3 d = b.reported ? (b.body.position - b.reportedFrom) * 30.0f : physics::Vec3 {};
+		b.reportedVelocity = {flush(d.x), flush(d.y), flush(d.z)};
+		b.reportedFrom = b.body.position;
+		b.reported = true;
+	}
 }
 
 void GameWorld::weaponEffectEvent(int id, int effect)
@@ -2263,6 +2291,16 @@ void GameWorld::limitInWorld(Player& player, const world::ObjectTemplate& firear
 	list.push_back(round.serial);
 }
 
+// A launch (0x005f31d0): the muzzle speed plus the root node's reported
+// velocity (slot 0x64), the sum held to 1500 m/s (0x005f1310 with
+// *0x00a71d1c, set to 1500 by 0x008e8200).
+static physics::Vec3 launchVelocity(const physics::Vec3& carried, const physics::Vec3& muzzle)
+{
+	const physics::Vec3 v = carried + muzzle;
+	const float speed2 = physics::lengthSquared(v);
+	return speed2 > 1500.0f * 1500.0f ? v * (1500.0f / std::sqrt(speed2)) : v;
+}
+
 // A round leaves from the soldier's eyes along the aim.
 void GameWorld::fire(const Player& player, float aimPitch)
 {
@@ -2298,9 +2336,14 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	const float eyeAboveBody = firingPose == SoldierPose::Prone ? 0.6f - 1.10f : firingPose == SoldierPose::Crouch ? 0.6f - 0.52f : 0.6f;
 	p.origin = body.position + physics::Vec3 {0, eyeAboveBody, 0} + straight * 0.5f;
 	p.position = p.origin;
-	// A thrown round at its throw's power (0x005e5720: 1, or the soft
-	// throw's hold), plus the thrower's velocity.
-	p.velocity = body.velocity + direction * (player.weapon->settings().velocity * player.weapon->throwPower());
+	// The launch (0x005f31d0): the speed along the aim plus the root node's
+	// reported velocity (slot 0x64, +0x78: the last step's displacement x 30,
+	// 0 standing), the sum held to 1500 m/s (launchVelocity).
+	// A throw (0x005e5720) then sets its own: the speed x the throw's power
+	// (1, or the soft throw's hold) plus the node's velocity (slot 0x58,
+	// +0x20, which on the ground holds a tick of gravity, and a jump's).
+	const physics::Vec3 muzzle = direction * (player.weapon->settings().velocity * player.weapon->throwPower());
+	p.velocity = player.weapon->settings().thrown ? body.velocity + muzzle : launchVelocity(body.measuredVelocity, muzzle);
 	p.settings = player.projectile;
 	p.timeLeft = player.projectile->timeToLive.sample(m_random);
 	p.shooter = player.object;
@@ -3910,8 +3953,6 @@ std::vector<GameWorld::RadarContact> GameWorld::radarContacts(int team) const
 
 void GameWorld::stepProjectiles(float seconds)
 {
-	// The minimap's radar sweep (0x00788600): 4 rad/s, wrapping at 2pi.
-	m_radarSweep = std::fmod(m_radarSweep + 4.0f * seconds, 6.2831853f);
 	for (Projectile& p : m_projectiles) {
 		if (!p.serial) {
 			p.serial = ++m_projectileSerial; // the server's ghosts know it by this
@@ -9651,14 +9692,69 @@ world::Object* GameWorld::player() const { return m_objects.find(playerObject())
 
 void GameWorld::stepPlayers(float seconds)
 {
+	stepPlayersBefore(seconds);
+	stepSoldiersPhysics(seconds);
+	stepSoldiersSettle(seconds);
+	stepPlayersAfter(seconds);
+}
+
+void GameWorld::stepPlayersBefore(float seconds)
+{
 	if (m_player) {
 		m_player->input = m_playerInput;
 		m_playerInput.turn = 0; // a turn is used once
 	}
 	for (size_t i = 0; i < m_players.size(); ++i) {
 		Player& player = *m_players[i];
+		player.steppedAlive = player.alive;
+		player.physicsPending = false;
 		if (player.alive) {
-			stepSoldier(player, seconds);
+			stepSoldier(player, seconds); // seated too: the seat's input and guns
+		}
+	}
+}
+
+// Every node moves (0x006daa70), then each soldier's pass in turn
+// (0x006dd1b0's first loop): a pair of soldiers meets once, in the pass
+// of the one that comes first.
+void GameWorld::stepSoldiersPhysics(float seconds)
+{
+	for (const auto& player : m_players) {
+		player->physicsPassed = false;
+		if (player->physicsPending && player->alive) {
+			player->body.moveNode(seconds);
+		}
+	}
+	for (size_t i = 0; i < m_players.size(); ++i) {
+		Player& player = *m_players[i];
+		if (player.physicsPending && player.alive) {
+			gatherSoldierContacts(player);
+			player.body.pass(seconds, m_ground);
+			player.physicsPassed = true;
+		}
+	}
+}
+
+// The soldiers' solves and drives, after the mesh group's turns
+// (0x006dd1b0): their passes look again where everything is now
+// (0x006c48c0's own broad phase).
+void GameWorld::stepSoldiersSettle(float seconds)
+{
+	for (size_t i = 0; i < m_players.size(); ++i) {
+		Player& player = *m_players[i];
+		if (player.physicsPending && player.alive) {
+			gatherSoldierContacts(player);
+			player.body.settle(seconds, m_ground);
+		}
+	}
+}
+
+void GameWorld::stepPlayersAfter(float seconds)
+{
+	for (size_t i = 0; i < m_players.size(); ++i) {
+		Player& player = *m_players[i];
+		if (player.steppedAlive) {
+			stepSoldierAfter(player, seconds);
 			if (player.alive) {
 				const uint32_t lockedBefore = player.lock.target;
 				const int lockBefore = player.lock.state;
@@ -9710,7 +9806,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			if (pod.player == player.id && pod.object == player.vehicle) pod.mouseInput = input.turn;
 		}
 		Body* body = findBody(player.vehicle);
-		if (!body) {
+		if (!body || !m_objects.find(body->object)) { // its object gone: the body goes in stepPhysicsMove
 			player.vehicle = 0;
 			object->setHidden(false);
 		} else if (findParachute(player.vehicle)) {
@@ -9869,52 +9965,6 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		followSoldier(player, *object);
 		return;
 	}
-	// The moving objects near it (the soldier's broad phase 0x006dcce0): their
-	// soldier LOD in their own frame.
-	player.body.movers.clear();
-	for (const Body& b : m_bodies) {
-		if (!b.soldierMesh || b.object == player.vehicle || findDrone(b.object)) {
-			continue;
-		}
-		const float reach = b.radius + 3.0f;
-		if (physics::lengthSquared(b.body.position - player.body.position) > reach * reach) {
-			continue;
-		}
-		physics::SoldierBody::Mover mover;
-		mover.mesh = b.soldierMesh.get();
-		if ((player.team == 1 || player.team == 2) && b.teamSoldierMesh[player.team - 1]) {
-			mover.mesh = b.teamSoldierMesh[player.team - 1].get(); // a Titan's forcefields
-		}
-		mover.rotation = b.body.rotation;
-		mover.position = b.body.position;
-		mover.velocity = b.body.velocity;
-		mover.angularVelocity = b.body.angularVelocity;
-		mover.centerOfMass = b.body.worldCenterOfMass();
-		mover.owner = b.object;
-		mover.mass = b.mass;
-		mover.asleep = asleep(b); // a spawner-held node is stopped (holdObject): no crush or run-over
-		mover.collisionGroups = b.collisionGroups;
-		mover.ignoring = b.ignoreSet && m_ticks <= b.ignoreUntil;
-		mover.ignoresThis = mover.ignoring && b.ignored == player.object;
-		mover.pushed = b.pushedBySoldiers;
-		mover.own = b.launcher != 0 && b.launcher == player.object;
-		player.body.movers.push_back(mover);
-	}
-	// The other soldiers near it on foot (0x006c2620: a soldier's response
-	// in the broad phase's list; one with a parent, in a seat or on a
-	// ladder's container, is left out).
-	player.body.soldiers.clear();
-	for (const auto& owned : m_players) {
-		const Player& other = *owned;
-		if (&other == &player || !other.alive || other.manDown || other.vehicle != 0 || other.ladder >= 0) {
-			continue;
-		}
-		const physics::Vec3 d = other.body.position - player.body.position;
-		if (physics::lengthSquared(d) > 3.0f * 3.0f) {
-			continue;
-		}
-		player.body.soldiers.push_back({other.body.position, other.body.stance});
-	}
 	// The hit's push a ragdoll starts with within 16 ticks (0x005ee2b0),
 	// and the solve's crush, run-over and segment kills (1000 through the
 	// game logic, slot 0xe4; the crushing object's driver credited).
@@ -9996,10 +10046,95 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	stepWeaponFeel(player, turned, seconds);
 	player.control.setZoomed(player.zoomed);
 	player.control.update(turned, player.body, seconds);
-	player.body.step(seconds, m_ground);
-	if (!player.alive) {
-		return; // killed by a collision (a fall, a road kill)
+	player.physicsPending = true; // moved and passed after the nodes' move, solved after the turns
+	stepSoldierWeapon(player, seconds);
+}
+
+// The soldier's collision pass and solve (0x006dcce0 with the soldier
+// response, slot 0x24 / 0x30), after every node has moved and before the
+// mesh group's turns: it meets the vehicles where their move put them, and
+// its pushes reach their responses before they solve.
+void GameWorld::gatherSoldierContacts(Player& player)
+{
+	// The moving objects near it (the soldier's broad phase 0x006dcce0): their
+	// soldier LOD in their own frame.
+	player.body.movers.clear();
+	for (const Body& b : m_bodies) {
+		if (!b.soldierMesh || b.object == player.vehicle || findDrone(b.object)) {
+			continue;
+		}
+		const float reach = b.radius + 3.0f;
+		if (physics::lengthSquared(b.body.position - player.body.position) > reach * reach) {
+			continue;
+		}
+		physics::SoldierBody::Mover mover;
+		mover.mesh = b.soldierMesh.get();
+		if ((player.team == 1 || player.team == 2) && b.teamSoldierMesh[player.team - 1]) {
+			mover.mesh = b.teamSoldierMesh[player.team - 1].get(); // a Titan's forcefields
+		}
+		mover.rotation = b.body.rotation;
+		mover.position = b.body.position;
+		mover.velocity = b.body.velocity;
+		mover.angularVelocity = b.body.angularVelocity;
+		mover.centerOfMass = b.body.worldCenterOfMass();
+		mover.owner = b.object;
+		mover.mass = b.mass;
+		mover.asleep = asleep(b); // a spawner-held node is stopped (holdObject): no crush or run-over
+		mover.collisionGroups = b.collisionGroups;
+		mover.ignoring = b.ignoreSet && m_ticks <= b.ignoreUntil;
+		mover.ignoresThis = mover.ignoring && b.ignored == player.object;
+		mover.pushed = b.pushedBySoldiers;
+		mover.own = b.launcher != 0 && b.launcher == player.object;
+		player.body.movers.push_back(mover);
 	}
+	// The other soldiers near it on foot (0x006c2620: a soldier's response
+	// in the broad phase's list; one with a parent, in a seat or on a
+	// ladder's container, is left out).
+	player.body.soldiers.clear();
+	for (const auto& owned : m_players) {
+		Player& other = *owned;
+		if (&other == &player || !other.alive || other.manDown || other.vehicle != 0 || other.ladder >= 0) {
+			continue;
+		}
+		const physics::Vec3 d = other.body.position - player.body.position;
+		if (physics::lengthSquared(d) > 3.0f * 3.0f) {
+			continue;
+		}
+		player.body.soldiers.push_back({&other.body, other.physicsPassed});
+	}
+}
+
+void GameWorld::stepSoldierAfter(Player& player, float seconds)
+{
+	if (!player.physicsPending) {
+		return;
+	}
+	player.physicsPending = false;
+	if (!player.alive) {
+		return; // killed by a collision (a fall, a road kill) or a round
+	}
+	world::Object* object = m_objects.find(player.object);
+	if (!object) {
+		return;
+	}
+	stepAnimation(player, seconds);
+	const physics::Vec3& p = player.body.position;
+	object->setPosition({p.x, p.y - 1.0f, p.z});
+	object->setRotation({player.body.yawDegrees, 0, 0});
+	followSoldier(player, *object);
+}
+
+// The soldier's weapon (its children's updates in the objects' update,
+// ObjectManager slot 0x28): before the nodes' move, so a round fired now
+// moves and meets the others this tick (its node joins the move list as
+// it is made: 0x005f6ba0 -> PhysicsNodeManager slot 0x14, 0x006dbb20).
+void GameWorld::stepSoldierWeapon(Player& player, float seconds)
+{
+	world::Object* object = m_objects.find(player.object);
+	if (!player.alive || !object) {
+		return;
+	}
+	SoldierInput& input = player.input;
 	// Alternate fire sets off the soldier's remote charges (C4).
 	if (input.altFire) {
 		for (Projectile& charge : m_projectiles) {
@@ -10035,14 +10170,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				}
 			}
 			object->setHidden(player.cloaked);
-			// No firing anything else while it is in hand (the body has
-			// moved already this tick).
-			stepAnimation(player, seconds);
-			const physics::Vec3& p = player.body.position;
-			object->setPosition({p.x, p.y - 1.0f, p.z});
-			object->setRotation({player.body.yawDegrees, 0, 0});
-			followSoldier(player, *object);
-			return;
+			return; // no firing anything else while it is in hand
 		}
 		if (player.cloaked) {
 			player.cloaked = false;
@@ -10292,11 +10420,6 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		player.fired = true;
 		++player.roundsFired;
 	}
-	stepAnimation(player, seconds);
-	const physics::Vec3& p = player.body.position;
-	object->setPosition({p.x, p.y - 1.0f, p.z});
-	object->setRotation({player.body.yawDegrees, 0, 0});
-	followSoldier(player, *object);
 }
 
 float GameWorld::lookYaw(const Player& player) const { return player.body.yawDegrees + player.control.twist(); }
@@ -13649,6 +13772,12 @@ bool GameWorld::stepBody(Body& b, float seconds)
 
 void GameWorld::stepPhysics(float seconds)
 {
+	stepPhysicsMove(seconds);
+	stepPhysicsCollide(seconds);
+}
+
+void GameWorld::stepPhysicsMove(float seconds)
+{
 	// Each body's step and ground contact, then the mobile mesh physics
 	// between the objects (MeshCollision.cpp), then each response.
 	for (auto it = m_bodies.begin(); it != m_bodies.end();) {
@@ -13692,6 +13821,10 @@ void GameWorld::stepPhysics(float seconds)
 		}
 		++it;
 	}
+}
+
+void GameWorld::stepPhysicsCollide(float seconds)
+{
 	// The objects' own animation systems (the walkers', after their legs'
 	// state; the AT's landing legs, the deployables').
 	for (Body& b : m_bodies) {
@@ -14319,7 +14452,8 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	Projectile p;
 	p.origin = drone.position + direction * 0.5f;
 	p.position = p.origin;
-	p.velocity = direction * drone.weapon->settings().velocity;
+	const Body* carrier = findBody(drone.object);
+	p.velocity = launchVelocity(carrier ? carrier->reportedVelocity : physics::Vec3 {}, direction * drone.weapon->settings().velocity);
 	p.settings = drone.projectile;
 	p.timeLeft = drone.projectile->timeToLive.sample(m_random);
 	p.shooter = drone.object;

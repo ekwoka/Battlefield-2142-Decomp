@@ -1172,6 +1172,10 @@ private:
 		int thinkAge = 0, senseAge = 0; // entry +8, +0x10
 		int skips = 0;               // bot +0x1b4
 		SoldierInput lastInput;
+		// A seat gun's aim this frame (aim): the error, in degrees, its turn
+		// left; a skipped frame's held turn goes no further.
+		bool gunTurn = false;
+		float gunTurnLeft = 0;
 		// MedicAssist, AmmoAssist, RepairVehicle: whom (a player, or a
 		// vehicle's object for RepairVehicle).
 		int assistTarget = -1;

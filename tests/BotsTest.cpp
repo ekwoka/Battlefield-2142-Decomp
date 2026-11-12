@@ -4875,8 +4875,9 @@ TEST(Bots_ReloadAfterTheFight)
 // MouseTurretAimAt on PIMouseLookX / PIMouseLookY, and triggers the gun
 // as a gunner's): the turret turns at an enemy off the hull's line, the
 // gun's rounds go out from the tank, and the vehicle's plan doesn't drive
-// it while the target is within the gun's reach (0x100795a0's
-// ObjectDistance 0x100d44c0).
+// it while the target is nearer than the distance it keeps (the plan's
+// preferred range, here 22.9 m: driveFirePlan's manoeuvre past 1.1 times
+// it). Its turn held over a skipped frame stops at the target.
 TEST(Bots_DriverAimsAndFiresTheTurret)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -4927,13 +4928,13 @@ TEST(Bots_DriverAimsAndFiresTheTurret)
 	field.board(bot, 0);
 	CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 0);
 	CHECK(field.world->seatTurnsGun(id, 0));
-	// An enemy 30 m off, 35 degrees right of the hull's line.
+	// An enemy 15 m off, 35 degrees right of the hull's line.
 	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
 	const int enemy = field.world->addPlayer("Enemy", 1, false);
 	field.world->spawnSoldier(enemy);
 	const float a = 35 * 3.14159265f / 180;
 	const physics::Vec3 at = field.info(bot).position;
-	field.world->setSoldierPosition(field.info(enemy).soldier, {at.x + 30 * std::sin(a), 0, at.z + 30 * std::cos(a)});
+	field.world->setSoldierPosition(field.info(enemy).soldier, {at.x + 15 * std::sin(a), 0, at.z + 15 * std::cos(a)});
 	game::BotManager bots(*field.world, field.settings);
 	const physics::Vec3 start = field.info(bot).position;
 	size_t fromTank = 0;
@@ -4955,6 +4956,26 @@ TEST(Bots_DriverAimsAndFiresTheTurret)
 	CHECK(fromTank >= 2);
 	CHECK(std::fabs(std::remainder(yaw + hull - 35, 360.0f)) < 8);
 	CHECK(physics::lengthSquared(now - start) < 3.0f * 3.0f);
+	// Farther than it keeps (30 m, 35 degrees the other side): the plan
+	// drives at it while the gun aims. A moving driver's input is held over
+	// its skipped frames, the gun's turn too, which stops at the target: the
+	// turret settles on it rather than swinging past it each frame.
+	const float b = (hull - 35) * 3.14159265f / 180;
+	field.world->setSoldierPosition(field.info(enemy).soldier, {now.x + 30 * std::sin(b), 0, now.z + 30 * std::cos(b)});
+	float worst = 0;
+	for (int tick = 0; tick < 30 * 6; ++tick) {
+		field.ticks(1, &bots);
+		const physics::Vec3 d = field.info(enemy).position - field.info(bot).position;
+		if (tick >= 30 * 2 && field.world->gunAim(id, 0, yaw, pitch)) {
+			const float bearing = std::atan2(d.x, d.z) * 180 / 3.14159265f;
+			worst = std::max(worst, std::fabs(std::remainder(yaw + field.objects.find(id)->rotation().x - bearing, 360.0f)));
+		}
+	}
+	const physics::Vec3 driven = field.info(bot).position;
+	std::printf("  driven %.1f m at the far enemy; the turret's worst error after 2 s %.1f degrees\n",
+		std::sqrt(physics::lengthSquared(driven - now)), worst);
+	CHECK(physics::lengthSquared(driven - now) > 3.0f * 3.0f);
+	CHECK(worst < 8);
 }
 
 // The vehicle plan's move (0x100795a0: If NOT ObjectDistance [minRange,

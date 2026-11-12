@@ -664,22 +664,36 @@ TEST(SoldierControl_SprintStaminaRunsOut)
 	CHECK(!stamina.sprinting());
 }
 
-// Two soldiers closer than two radii push each other apart (0x006c2620).
+// Two soldiers closer than two radii push each other apart (0x006c2620):
+// one contact, in the pass of the soldier that comes first, gives both
+// their push; the second's pass leaves the pair alone.
 TEST(SoldierPhysics_SoldiersPushApart)
 {
-	physics::SoldierBody a;
+	const float dt = 1 / 30.0f;
+	physics::SoldierBody a, b;
 	a.position = {0, 1, 0};
-	a.step(1 / 30.0f, slope(0));
-	a.soldiers = {{{0.3f, 1, 0}, 0}};
-	a.step(1 / 30.0f, slope(0));
+	b.position = {0.3f, 1, 0};
+	a.step(dt, slope(0));
+	b.step(dt, slope(0));
+	a.soldiers = {{&b, false}};
+	b.soldiers = {{&a, true}};
+	a.moveNode(dt);
+	b.moveNode(dt);
+	a.pass(dt, slope(0));
+	b.pass(dt, slope(0));
+	a.settle(dt, slope(0));
+	b.settle(dt, slope(0));
 	CHECK(a.position.x < -0.15f);
+	CHECK(std::fabs(a.position.x + b.position.x - 0.3f) < 1e-4f); // the same push each
 	// Lying under the other's feet (heights apart) nothing.
-	physics::SoldierBody b;
-	b.position = {0, 1, 0};
-	b.step(1 / 30.0f, slope(0));
-	b.soldiers = {{{0.3f, 3, 0}, 0}};
-	b.step(1 / 30.0f, slope(0));
-	CHECK(std::fabs(b.position.x) < 1e-4f);
+	physics::SoldierBody c, d;
+	c.position = {0, 1, 0};
+	c.step(dt, slope(0));
+	d.position = {0.3f, 3, 0};
+	c.soldiers = {{&d, false}};
+	c.step(dt, slope(0));
+	CHECK(std::fabs(c.position.x) < 1e-4f);
+	CHECK(std::fabs(d.position.x - 0.3f) < 1e-4f);
 }
 
 namespace {

@@ -1130,6 +1130,188 @@ TEST(Hull_WheelsProbeStaticObjects)
 	CHECK(std::abs(rest[0] - rest[1]) < 0.25f);
 }
 
+// The mesh group's order (0x006dd1b0): a mover's passes, its own solve,
+// then its child parts (the wheels' probes) against the root where the
+// solve put it. Car A on a deck, run in step with and without car B dropped
+// onto its roof; A is the earlier mover. The tick B's shove first moves
+// A (in A's turn, before A's solve), A's wheels already probe from there,
+// so its springs take the shove the next tick, not a tick later.
+TEST(Hull_WheelsProbeAfterTheirRootSolves)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	std::unique_ptr<Game> games[2];
+	uint32_t a = 0;
+	for (int shove = 0; shove < 2; ++shove) {
+		games[shove] = std::make_unique<Game>(gameDir);
+		Game& game = *games[shove];
+		const float base = 2.0f;
+		a = makeCar(game, {3, base + 1.5f, 0});
+		if (shove) {
+			makeCar(game, {3, base + 5.0f, 0}); // falling onto A's roof once A stands
+		}
+		const physics::CollisionLod lod = boxedLod(1, {{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+		physics::CollisionSubGeometry part;
+		part.lods = {lod};
+		physics::CollisionGeometry geometry;
+		geometry.subGeometries = {part};
+		physics::CollisionMeshFile mesh;
+		mesh.version = 10;
+		mesh.geometries = {geometry};
+		game.collisionTemplates.add("deck_mesh", mesh);
+		game.templates.registerType(11, "SimpleObject");
+		world::ObjectTemplate* deck = game.templates.create("SimpleObject", "deck");
+		deck->settings()["collisionMesh"] = "deck_mesh";
+		game.objects.create(deck, {3, base, 0}, {0, 0, 0});
+		game.start();
+	}
+	int moved = -1, felt = -1;
+	for (int k = 0; k < 60 && felt < 0; ++k) {
+		float y[2], compression[2] = {};
+		for (int shove = 0; shove < 2; ++shove) {
+			games[shove]->world->tick(1 / 30.0f);
+			y[shove] = games[shove]->objects.find(a)->position().y;
+			if (const game::Vehicle* vehicle = games[shove]->world->vehicle(a)) {
+				for (const auto& wheel : vehicle->wheels()) {
+					compression[shove] += wheel.compression;
+				}
+			}
+		}
+		if (moved < 0 && std::fabs(y[1] - y[0]) > 1e-4f) {
+			moved = k;
+		}
+		if (felt < 0 && std::fabs(compression[1] - compression[0]) > 1e-4f) {
+			felt = k;
+		}
+	}
+	std::fprintf(stderr, "  B first moved A at tick %d; A's springs first differed at tick %d\n", moved, felt);
+	CHECK(moved >= 0);
+	CHECK(felt == moved + 1);
+}
+
+// The tick's order (retail 0x004afb20, 0x006dd1b0): the soldiers'
+// collision runs after every node's move and before the mesh group's
+// turns, so a soldier's push on a small body (under 0.6 m: 0x006c3890's
+// pushed object, a mesh GenericProjectile) reaches that body's response
+// before it solves, the same tick. A soldier walks into a small one that has just landed, in step
+// with the same world where it walks beside it: the crate's way first
+// differs the tick the soldier's does (before, a tick later).
+// Two soldiers standing too close (0x006c2620): the first one's pass
+// pushes both, each by the overlap, before either solves; the second's
+// pass leaves the pair alone (0x006dcce0's stamp). Stepping each soldier
+// whole, the second met the first already pushed, and stayed put.
+TEST(Physics_SoldiersPushEachOtherTheSame)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	int ids[2];
+	uint32_t soldiers[2];
+	for (int i = 0; i < 2; ++i) {
+		ids[i] = game.world->addPlayer(i ? "B" : "A", 2, false);
+		game.world->spawnSoldier(ids[i]);
+		game::GameWorld::PlayerInfo info;
+		CHECK(game.world->playerInfo(ids[i], info));
+		soldiers[i] = info.soldier;
+	}
+	for (int k = 0; k < 30; ++k) { // settle on the ground apart
+		for (int i = 0; i < 2; ++i) {
+			game.world->setSoldierPosition(soldiers[i], {i * 5.0f, 0, 0});
+		}
+		game.world->tick(1 / 30.0f);
+	}
+	for (int i = 0; i < 2; ++i) {
+		game.world->setSoldierPosition(soldiers[i], {i * 0.3f, 0, 0});
+	}
+	game.world->tick(1 / 30.0f);
+	float x[2];
+	for (int i = 0; i < 2; ++i) {
+		game::GameWorld::PlayerInfo info;
+		CHECK(game.world->playerInfo(ids[i], info));
+		x[i] = info.position.x;
+	}
+	std::printf("pushed apart: A %.4f, B %.4f\n", x[0], x[1] - 0.3f);
+	CHECK(x[0] < -0.05f);
+	CHECK(std::fabs(x[0] + (x[1] - 0.3f)) < 1e-3f);
+}
+
+TEST(Physics_SoldierPushesASmallBodyTheSameTick)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	std::unique_ptr<Game> games[2];
+	uint32_t crate = 0;
+	for (int into = 0; into < 2; ++into) {
+		games[into] = std::make_unique<Game>(gameDir);
+		Game& game = *games[into];
+		const float h = 0.25f;
+		std::vector<std::array<float, 3>> v;
+		for (int i = 0; i < 8; ++i) {
+			v.push_back({(i & 1) ? h : -h, (i & 2) ? h : -h, (i & 4) ? h : -h});
+		}
+		const physics::CollisionLod lod = boxedLod(1, v,
+			{{{0, 2, 1}, 0}, {{1, 2, 3}, 0}, {{4, 5, 6}, 0}, {{5, 7, 6}, 0}, {{0, 1, 4}, 0}, {{1, 5, 4}, 0},
+				{{2, 6, 3}, 0}, {{3, 6, 7}, 0}, {{0, 4, 2}, 0}, {{2, 4, 6}, 0}, {{1, 3, 5}, 0}, {{3, 7, 5}, 0}});
+		physics::CollisionSubGeometry part;
+		part.lods = {lod};
+		physics::CollisionGeometry geometry;
+		geometry.subGeometries = {part};
+		physics::CollisionMeshFile mesh;
+		mesh.version = 10;
+		mesh.geometries = {geometry};
+		game.collisionTemplates.add("crate_mesh", mesh);
+		game.templates.registerType(12, "GenericProjectile");
+		world::ObjectTemplate* t = game.templates.create("GenericProjectile", "crate");
+		t->settings()["collisionMesh"] = "crate_mesh";
+		t->settings()["hasMobilePhysics"] = "1";
+		t->settings()["physicsType"] = "Mesh";
+		t->settings()["mass"] = "20";
+		crate = game.objects.create(t, {0, 2.4f, 0}, {0, 0, 0})->id();
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo info;
+		game.world->playerInfo(game.world->localPlayer(), info);
+		CHECK(game.world->setSoldierPosition(info.soldier, {into ? 0.0f : 3.0f, 0, -1.5f}));
+	}
+	int crateDiffers = -1, soldierDiffers = -1;
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	for (int k = 0; k < 60 && crateDiffers < 0; ++k) {
+		physics::Vec3 at[2], feet[2];
+		for (int into = 0; into < 2; ++into) {
+			Game& game = *games[into];
+			game.world->setPlayerInput(walk);
+			game.world->tick(1 / 30.0f);
+			const world::Object* o = game.objects.find(crate);
+			at[into] = o ? physics::Vec3 {o->position().x, o->position().y, o->position().z} : physics::Vec3 {};
+			game::GameWorld::PlayerInfo info;
+			game.world->playerInfo(game.world->localPlayer(), info);
+			feet[into] = info.position;
+		}
+		// A pushed object doesn't hold the soldier back (its contact is
+		// skipped), so the meeting is geometric: the soldier's spheres
+		// (0.25 m) reach the crate's face (z -0.25) where its move put it.
+		if (soldierDiffers < 0 && feet[1].z > -0.5f) {
+			soldierDiffers = k;
+		}
+		if (physics::lengthSquared(at[1] - at[0]) > 1e-8f) {
+			crateDiffers = k;
+		}
+	}
+	std::fprintf(stderr, "  the soldier first reached the crate at tick %d, the crate first moved at tick %d\n", soldierDiffers,
+		crateDiffers);
+	CHECK(soldierDiffers >= 0);
+	CHECK(crateDiffers == soldierDiffers);
+}
+
 namespace {
 
 // A static SimpleObject `name` at `at` whose collision mesh is `lods`.

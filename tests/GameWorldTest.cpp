@@ -1144,9 +1144,10 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 
 TEST(GameWorld_GrenadesBounceAndGoOff)
 {
-	// A frag grenade from an unlock (slot 7): thrown at the PAC bot 20 m
-	// away, it lands, rolls to a stop, and its 9 m blast goes off after
-	// the 2.8 s fuse.
+	// A frag grenade from an unlock (slot 7): thrown low at the PAC bot
+	// 20 m away (10 degrees: steeper, it meets the bot in the air, and
+	// where it ends up turns on that bounce), it lands, rolls to a stop,
+	// and its 9 m blast goes off after the 2.8 s fuse.
 	Range range;
 	range.templates.registerType(6, "Kit");
 	range.templates.registerType(7, "ItemContainer");
@@ -1180,7 +1181,7 @@ TEST(GameWorld_GrenadesBounceAndGoOff)
 	CHECK(range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name() == "unl_grenade_frag");
 	input = {};
 	input.fire = true;
-	input.aimPitch = 20;
+	input.aimPitch = 10;
 	range.world->setPlayerInput(input);
 	range.world->tick(1 / 30.0f);
 	range.world->setPlayerInput({});
@@ -3882,6 +3883,80 @@ TEST(GameWorld_VehicleArmorEffects)
 // Tracer rounds and the fire modes for the player's rifle: one round a
 // press in single fire, the toggle (c_PIToggleFireRate) to automatic with
 // its SwitchFireRate sound, every second round a tracer the effects draw.
+// The soldier's weapon updates with the objects, before the nodes' move
+// (retail tick 0x004afb20), and a round's node joins the move list as it
+// is made (0x005f6ba0 -> PhysicsNodeManager slot 0x14): fired while
+// walking, the round leaves from where the soldier stood at the tick's
+// start and has flown its first step by the tick's end.
+TEST(GameWorld_RoundsLeaveBeforeTheMove)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	range.world->setPlayerInput(walk);
+	for (int i = 0; i < 30; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo before, after;
+	CHECK(range.world->playerInfo(me, before));
+	walk.fire = true;
+	range.world->setPlayerInput(walk);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, after));
+	CHECK(range.world->projectiles().size() == 1);
+	const game::Projectile& round = range.world->projectiles().front();
+	const auto across = [](const physics::Vec3& a, const physics::Vec3& b) {
+		return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z));
+	};
+	std::printf("  the soldier walked %.3f m this tick; the round left %.3f m from the start, %.3f from the end; flew %.3f m\n",
+		across(before.position, after.position), across(round.origin, before.position), across(round.origin, after.position),
+		across(round.position, round.origin));
+	CHECK(across(before.position, after.position) > 0.05f);
+	CHECK(std::fabs(across(round.origin, before.position) - 0.5f) < 0.01f); // half a metre along the look
+	CHECK(std::fabs(across(round.position, round.origin) - 10) < 0.5f);       // 300 m/s for a tick
+}
+
+// What a round takes from its soldier (retail 0x005f31d0 / 0x005e5720):
+// a fired one the node's reported velocity (slot 0x64: the last step's
+// displacement x 30, nothing standing), a thrown one the node's own
+// (slot 0x58, which on the ground holds a tick of gravity, -0.486 m/s, and
+// on the jump's tick the jump's 6 m/s up: the soldier's input handling,
+// 0x004ad5c0 -> player slot 0x44 -> 0x0058a6d0, runs before the objects'
+// update that throws).
+TEST(GameWorld_RoundsTakeTheSoldiersVelocity)
+{
+	// Standing still for a second, then the trigger, level: the round's
+	// vertical velocity as it leaves.
+	const auto leaves = [](bool thrown, bool jump = false) {
+		Range range;
+		if (thrown) {
+			world::ObjectTemplate* rifle = range.templates.find("eu_ar_rifle");
+			rifle->components().push_back("ThrownFireComp");
+			rifle->settings()["fire.pullbackTime"] = "0";
+		}
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		game::SoldierInput fire;
+		fire.fire = true;
+		fire.jump = jump;
+		range.world->setPlayerInput(fire);
+		for (int i = 0; i < 5 && range.world->projectiles().empty(); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->projectiles().size() == 1);
+		return range.world->projectiles().empty() ? 99.0f : range.world->projectiles().back().velocity.y;
+	};
+	const float shot = leaves(false), throw_ = leaves(true), leap = leaves(true, true);
+	std::printf("  vertical velocity as it leaves: fired %.3f, thrown %.3f, thrown on the jump %.3f\n", shot, throw_, leap);
+	CHECK(std::fabs(shot) < 1e-3f);
+	CHECK(std::fabs(throw_ + 0.486f) < 0.01f);
+	CHECK(std::fabs(leap - 6.0f) < 0.01f); // the jump's velocity is the node's at once (0x0058a6d0, slot 0x5c)
+}
+
 TEST(GameWorld_TracersAndFireModes)
 {
 	Range range;
