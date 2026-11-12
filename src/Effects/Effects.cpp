@@ -595,13 +595,12 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	if (span > 0 && seconds > span) {
 		seconds = span;
 	}
-	// The system's velocity, inherited by world particles born now (set
-	// from outside with speedFromPhysics).
-	if (physicsVelocity) {
-		m_velocity = inheritedVelocity;
-	} else if (!m_prewarming) {
-		m_velocity = (m_position - m_previous) * (1 / seconds);
-	}
+	// The system's velocity, inherited by world particles born now: only
+	// what speedFromPhysics sets from outside (0x00618ae0 -> the systems'
+	// setters). The systems' constructors zero it (sprite 0x10137290, mesh
+	// 0x10146820) and their updates never derive it from their own moves,
+	// so a rocket's sparks aren't thrown forward at the rocket's speed.
+	m_velocity = physicsVelocity ? inheritedVelocity : Vec3 {};
 	// The particles: fixed steps of 0.01 s, the remainder carried.
 	const float total = seconds + m_carry;
 	const int steps = static_cast<int>(std::lround(total * 100.0f));

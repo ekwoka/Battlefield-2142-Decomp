@@ -939,6 +939,31 @@ TEST(Effects_LocalWinds)
 	CHECK(blowing.empty());
 }
 
+// A system's particles inherit only the velocity speedFromPhysics sets
+// (0x00618ae0); the systems' own moves give them none (the constructors
+// zero it, sprite 0x10137290 / mesh 0x10146820): a rocket's sparks stay
+// where they are born, they aren't thrown on at the rocket's speed.
+TEST(Effects_MovingSystemGivesItsParticlesNoVelocity)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* spark = addPuff(templates);
+	spark->settings()["emitFrequency"] = "30";
+	spark->settings()["emitTime"] = "0";
+	spark->settings()["timeToLive"] = "2";
+	effects::EffectManager manager(templates);
+	manager.setAnchor(4, {}, {});
+	CHECK(manager.spawnAttached("e_puff", 4, {}, {}, effects::EffectManager::View::Any, 1));
+	for (int i = 1; i <= 10; ++i) {
+		manager.setAnchor(4, {100.0f * static_cast<float>(i) / 30.0f, 0, 0}, {}); // 100 m/s along x
+		manager.update(1 / 30.0f);
+	}
+	const auto& particles = manager.emitterList()[0]->particles();
+	CHECK(particles.size() >= 5);
+	for (const effects::Particle& p : particles) {
+		CHECK(std::fabs(p.velocity.x) < 1.0f);
+	}
+}
+
 // alphaCull, pivotOffset, drawOrder and collisionEnable of a sprite system.
 TEST(Effects_SpriteDrawAndCollision)
 {
