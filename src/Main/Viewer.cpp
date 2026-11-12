@@ -161,6 +161,12 @@ void Window::Impl::runScript()
 			event.text.windowID = id;
 			event.text.text = text.c_str();
 			SDL_PushEvent(&event);
+		} else if (c.op == "wheel") {
+			SDL_Event event {};
+			event.type = SDL_EVENT_MOUSE_WHEEL;
+			event.wheel.windowID = id;
+			event.wheel.y = static_cast<float>(std::atof(c.arg.c_str()));
+			SDL_PushEvent(&event);
 		} else if (c.op == "shot") {
 			shot = c.arg;
 		} else if (c.op == "quit") {
@@ -822,19 +828,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				// "addAxisToTriggerMapping c_PINextItem c_PIPrevItem IDFMouse
 				// IDAxis_2": the axis's positive way the first, its negative
 				// the second): a frame it turned presses one.
-				const auto wheelTo = [&](const char* name) {
-					const input::ControlMaps::Map* m = c.find(map);
-					if (!m || !m->count(name)) {
-						return false;
-					}
-					for (const input::Binding& b : m->at(name)) {
-						if (b.kind == input::Binding::Kind::Axis && !b.hold && b.device == "IDFMouse" && b.control == "IDAxis_2"
-							&& wheelSteps * b.sign > 0) {
-							return true;
-						}
-					}
-					return false;
-				};
+				// The shipped profile binds them only in defaultPlayerInputControlMap, which the seat's map falls back to.
+				const auto wheelTo = [&](const char* name) { return c.wheelPresses(map, name, wheelSteps); };
 				input.itemStep = wheelTo("c_PINextItem") ? 1 : wheelTo("c_PIPrevItem") ? -1 : 0;
 				wheelSteps = 0;
 				options.onPlayerInput(input);

@@ -52,6 +52,20 @@ const std::vector<Binding>* ControlMaps::bindings(const std::string& map, const 
 	return nullptr;
 }
 
+bool ControlMaps::wheelPresses(const std::string& map, const std::string& input, float amount) const
+{
+	const std::vector<Binding>* list = bindings(map, input);
+	if (!list) {
+		return false;
+	}
+	for (const Binding& b : *list) {
+		if (b.kind == Binding::Kind::Axis && !b.hold && b.device == "IDFMouse" && b.control == "IDAxis_2" && amount * b.sign > 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool ControlMaps::isAxisInput(const std::string& input)
 {
 	// c_PIYaw 0 .. c_PICameraY 7 (0x00669baf).

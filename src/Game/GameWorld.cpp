@@ -10130,8 +10130,8 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		// 0x005dc160): no reload starts by itself without ammo.autoReload.
 		weaponSound(WeaponSoundEvent::TriggerClick, player, player.object, player.weaponTemplate, player.body.position);
 	}
-	if (player.weapon && player.weapon->reloading() && !wasReloading) {
-		weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
+	const bool reloadSound = player.weapon && player.weapon->reloading() && !wasReloading;
+	if (reloadSound) {
 		// The reload's start (0x005c0f40) tells each component (slot 0x48):
 		// LPTargetComp's (0x005e23b0) with target.disableGuidanceOnReload
 		// (+0xb1, as_av / eu_av) lets its missile in flight go unguided.
@@ -10168,9 +10168,16 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		++player.firePresses; // 0x0059b260: +0x250 on the fire's rising edge
 	}
 	player.triggerWas = input.fire;
+	// The reload sound (which ends a burst's skips, 0x005dbfe0) follows the last round's fire sound.
+	if (reloadSound && !shot) {
+		weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
+	}
 	if (shot) {
 		weaponSound(WeaponSoundEvent::Fire, player, player.object, player.weaponTemplate,
 			player.body.position + physics::Vec3 {0, 0.6f, 0});
+		if (reloadSound) {
+			weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
+		}
 		if (gadget && !whileFiring) {
 			for (auto it = m_supplies.begin(); it != m_supplies.end();) {
 				if (it->owner == player.id && it->gadget == inHand->name()) {
@@ -12288,9 +12295,14 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	}
 	const bool wasReloading = arm.weapon->reloading();
 	const bool shot = arm.weapon->tick(seconds, trigger);
-	if (arm.weapon->reloading() && !wasReloading) {
-		weaponSound(WeaponSoundEvent::Reload, player, body.object, w.weapon, body.body.position);
-	}
+	// The reload starts after the round (ammo slot 0x3c, then the firearm's update 0x005c58a0): its
+	// sound (0x005dbfe0, which ends a burst's skips) follows the last round's fire sound.
+	const bool reloadSound = arm.weapon->reloading() && !wasReloading;
+	const auto sayReload = [&] {
+		if (reloadSound) {
+			weaponSound(WeaponSoundEvent::Reload, player, body.object, w.weapon, body.body.position);
+		}
+	};
 	// The gun's SimpleDeviationComp (0x005dedb0, a tick): the firing's
 	// build-up decays off the trigger.
 	if (w.hasDeviation) {
@@ -12299,6 +12311,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	if (shot && w.activeDefense) {
 		raiseShield(body, w, *arm.weapon);
 		weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, body.body.position, arm.weapon->fireMode());
+		sayReload();
 		// The fire's event 0 to the ads' children too: e_ActiveDef_shield is one.
 		if (auto& fires = m_objectWeaponFires[body.object]; fires.size() < 8) {
 			fires.push_back({w.weapon, seat.name});
@@ -12306,6 +12319,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 		return;
 	}
 	if (!shot || !arm.projectile) {
+		sayReload();
 		return;
 	}
 	// A pitch bundle frame already includes the mount heading. Apply that
@@ -12434,6 +12448,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	++player.roundsFired;
 	++player.gunShots;
 	weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, p.origin, arm.weapon->fireMode());
+	sayReload();
 	// The weapon's event 0 (ObjectEffects), kept short where nothing takes
 	// them (a dedicated server draws no effects).
 	if (auto& fires = m_objectWeaponFires[body.object]; fires.size() < 8) {

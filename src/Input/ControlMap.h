@@ -112,6 +112,10 @@ struct Binding {
 class ControlMaps {
 public:
 	bool hasBinding(const std::string& map, const std::string& input) const { return bindings(map, input) != nullptr; }
+	// Whether a mouse wheel turn of `amount` (positive up) presses the axis-to-trigger input (IDAxis_2: the
+	// first name of addAxisToTriggerMapping for up, the second for down). Looked up like value(): the
+	// player map, then defaultPlayerInputControlMap, where the shipped Controls.con binds c_PINextItem.
+	bool wheelPresses(const std::string& map, const std::string& input, float amount) const;
 	// Maps by name, each from a player input (c_PIThrottle) to its bindings.
 	using Map = std::map<std::string, std::vector<Binding>>;
 

@@ -990,3 +990,24 @@ TEST(GameAudio_ConstantEffectLoopFollowsPod)
 	effects.releaseAnchor(7);
 	CHECK(effects.bundleLoops().empty());
 }
+
+// A magazine-sized burst (the Titan ground cannon: burst 10, magazine 10)
+// starts its reload with the last round. The reload sound (0x005dbfe0) ends
+// the burst's skips, so it must follow that round's fire sound: one play per
+// burst, none left over for the next burst.
+TEST(GameSounds_ReloadAfterLastBurstRoundKeepsOnePlayPerBurst)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_cannon_Fire3P");
+	using E = sound::GameSounds::WeaponEvent;
+	sound::GameSounds::FireInfo burst;
+	burst.mode = 1;
+	burst.burstRounds = 10;
+	for (int round = 0; round < 3; ++round) {
+		for (int i = 0; i < 10; ++i) {
+			s.game.weapon(E::Fire, "cannon", false, {}, true, 1, 0, &burst);
+		}
+		s.game.weapon(E::Reload, "cannon", false, {}, true, 1, 0, nullptr, 0);
+	}
+	CHECK(s.triggered.size() == 3);
+}

@@ -2520,6 +2520,52 @@ TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
  }
 }
 
+// The ground cannon's burst (10) empties its magazine (10), so the reload
+// starts with the last round. Its sound event (which ends the burst's sound
+// skips, 0x005dbfe0) must come after that round's fire event, or a second
+// burst sound starts on round 10.
+TEST(Titan_GroundCannonReloadSoundFollowsLastRound)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ TitanLevel level(dir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
+ CHECK(level.loaded);
+ if (!level.loaded) return;
+ const int team = 2;
+ const int player = level.world->joinPlayer(team);
+ CHECK(level.world->spawnSoldier(player));
+ game::GameWorld::PlayerInfo info;
+ CHECK(level.world->playerInfo(player, info));
+ const auto* titan = level.titan(team);
+ if (!titan) { CHECK(titan); return; }
+ CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+ physics::Vec3 entry; float radius = 0; int seat = -1;
+ CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+ CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+ game::SoldierInput input; input.use = true;
+ level.world->setInput(player, input); level.run(0.1f);
+ const auto seats = level.world->vehicleSeats(level.world->titanOf(team));
+ int cannon = -1;
+ for (size_t i = 0; i < seats.size() && cannon < 0; ++i) {
+  if (seats[i].name.find("groundcanone3") != std::string::npos) cannon = static_cast<int>(i);
+ }
+ CHECK(cannon >= 0);
+ if (cannon < 0) return;
+ input = {}; input.switchSeat = cannon + 1;
+ level.world->setInput(player, input); level.run(0.5f);
+ level.world->takeWeaponSounds();
+ input = {}; input.fire = true;
+ level.world->setInput(player, input); level.run(1.5f);
+ input = {}; level.world->setInput(player, input); level.run(0.2f);
+ int fires = 0, reloads = 0, firesAfterReload = 0;
+ for (const auto& e : level.world->takeWeaponSounds()) {
+  if (e.kind == game::GameWorld::WeaponSoundEvent::Fire) { ++fires; if (reloads) ++firesAfterReload; }
+  if (e.kind == game::GameWorld::WeaponSoundEvent::Reload) ++reloads;
+ }
+ std::fprintf(stderr, "ground cannon burst: %d fire events, %d reloads, %d fires after the reload\n", fires, reloads, firesAfterReload);
+ CHECK(fires == 10 && reloads == 1 && firesAfterReload == 0);
+}
+
 TEST(Titan_VehicleSeatHudUsesAuthoredIconOffsets)
 {
  const char* dir = std::getenv("BF2142_GAME_DIR");

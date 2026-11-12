@@ -198,6 +198,27 @@ TEST(ControlMap_ScriptRoundTrip)
 	CHECK(!copy.find(infantry)->at("c_PIReload")[0].hold);
 }
 
+TEST(ControlMap_WheelBindingFallsBackToDefaultPlayerMap)
+{
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	// As the shipped Controls.con: the wheel only in defaultPlayerInputControlMap.
+	for (const char* line : {"ControlMap.create InfantryPlayerInputControlMap",
+			 "ControlMap.addKeyToTriggerMapping c_PIUse IDFKeyboard IDKey_E 0 0",
+			 "ControlMap.create defaultPlayerInputControlMap",
+			 "ControlMap.addAxisToTriggerMapping c_PINextItem -1 IDFMouse IDAxis_2 0",
+			 "ControlMap.addAxisToTriggerMapping -1 c_PIPrevItem IDFMouse IDAxis_2 0"}) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	for (const char* map : {input::ControlMaps::kInfantry, input::ControlMaps::kLand}) {
+		CHECK(maps.wheelPresses(map, "c_PINextItem", 1) && !maps.wheelPresses(map, "c_PINextItem", -1));
+		CHECK(maps.wheelPresses(map, "c_PIPrevItem", -1) && !maps.wheelPresses(map, "c_PIPrevItem", 1));
+		CHECK(!maps.wheelPresses(map, "c_PINextItem", 0));
+	}
+}
+
 TEST(ControlMap_NativeMouseAndTrackpad)
 {
 	CHECK(input::sdlMouseButton(0) == 1);
