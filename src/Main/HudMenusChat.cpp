@@ -101,6 +101,17 @@ void HudChat::addPersonal(const std::string& message)
 	push({message, {1, 1, 1, 1}, 7, true});
 }
 
+void HudChat::addQuestion(const std::string& message)
+{
+	push({message, {1, 1, 1, 1}, 8, true});
+}
+
+void HudChat::clearQuestions()
+{
+	m_lines.erase(std::remove_if(m_lines.begin(), m_lines.end(), [](const Line& l) { return l.category == 8; }), m_lines.end());
+	m_left[8] = 0;
+}
+
 void HudChat::setKilledBy(const std::string& killer)
 {
 	// A personal line (0x0075a268 -> HUD slot 0x170), as "You killed"; DeathMessage is the centred
@@ -514,12 +525,18 @@ const HudQuestions::Question* HudQuestions::front() const
 void HudQuestions::show() const
 {
 	const Question* q = front();
-	if (!q || !onLine) {
+	if (!q) {
 		return;
 	}
-	onLine(q->text);
+	if (onClear) {
+		onClear();
+	}
+	if (!onQuestion) {
+		return;
+	}
+	onQuestion(q->text);
 	const char* prompt = q->kind == TeamKill ? "HUD_HUD_YESNO" : "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT";
-	onLine(localize ? localize(prompt) : std::string(prompt));
+	onQuestion(localize ? localize(prompt) : std::string(prompt));
 }
 
 void HudQuestions::answer(bool yes)
@@ -530,6 +547,9 @@ void HudQuestions::answer(bool yes)
 	}
 	const Question asked = *q;
 	m_questions[static_cast<size_t>(asked.kind)].reset();
+	if (onClear) {
+		onClear();
+	}
 	if (onAnswer) {
 		onAnswer(asked, yes, false);
 	}
@@ -550,6 +570,9 @@ void HudQuestions::tick(float seconds)
 		}
 		const Question asked = *q;
 		q.reset();
+		if (onClear) {
+			onClear();
+		}
 		if (onAnswer) {
 			onAnswer(asked, asked.kind == TeamKill, true); // a team kill forgiven
 		}
@@ -557,6 +580,9 @@ void HudQuestions::tick(float seconds)
 			const char* id = timedOut[static_cast<int>(asked.kind)];
 			onLine(localize ? localize(id) : std::string(id));
 		}
+		// shortcut: retail re-shows the next question on its own +0xa8 timer
+		// (0x0079e1e7); shown at once here so the clear doesn't hide it.
+		show();
 	}
 }
 

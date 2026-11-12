@@ -75,6 +75,10 @@ public:
 		Speaker color);
 	void addInfo(const std::string& text, int category = 1);
 	void addPersonal(const std::string& text);
+	// A question's line (HUD slot 0x174: category 8, 0x007b6170) and their
+	// removal (slot 0x180 with 8, 0x007c75b0) when it is answered.
+	void addQuestion(const std::string& text);
+	void clearQuestions();
 	// The local player's death: "You were killed by" as a personal line (empty: nothing).
 	void setKilledBy(const std::string& killer);
 	// The local player's kill of an enemy: HUD_CHAT_YOUGOTAKILLSCORE (0x0075a07a)
@@ -250,7 +254,11 @@ public:
 		float left = 0;   // seconds (-1 none)
 	};
 	std::function<std::string(const std::string&)> localize;
-	std::function<void(const std::string&)> onLine; // a personal line
+	std::function<void(const std::string&)> onLine; // a personal line (a timed-out one)
+	// The front's lines (HUD slot 0x174) and their removal (slot 0x180 with
+	// 8), first in each answer (0x0079d6e0) and each showing (0x0079c720).
+	std::function<void(const std::string&)> onQuestion;
+	std::function<void()> onClear;
 	// The answer (0x0079d6e0's per kind), `quiet` for a timed-out one.
 	std::function<void(const Question&, bool yes, bool quiet)> onAnswer;
 

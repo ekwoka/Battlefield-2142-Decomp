@@ -5143,12 +5143,14 @@ int runGame(Options& options, Session& session)
 		dice::hfe::menu::HudQuestions questions;
 		// The prompts' '#GIYes#' / '#GINo#' as the bound keys (0x00752b70).
 		questions.localize = localizeWithKeys;
-		questions.onLine = [&chat, &options](const std::string& line) {
-			chat.addPersonal(line);
+		questions.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
+		questions.onQuestion = [&chat, &options](const std::string& line) {
+			chat.addQuestion(line);
 			if (options.verbose) {
 				std::printf("question: %s\n", line.c_str());
 			}
 		};
+		questions.onClear = [&chat] { chat.clearQuestions(); };
 		questions.onAnswer = [&](const dice::hfe::menu::HudQuestions::Question& q, bool yes, bool quiet) {
 			using Q = dice::hfe::menu::HudQuestions;
 			net::GameClient* server = joinedServer();

@@ -943,24 +943,34 @@ TEST(HudQuestions_AskAnswerAndTimeout)
 	std::vector<std::string> lines;
 	std::vector<std::tuple<int, int, bool, bool>> answers; // kind, value, yes, quiet
 	q.localize = [](const std::string& id) { return id; };
-	q.onLine = [&lines](const std::string& line) { lines.push_back(line); };
-	q.onAnswer = [&answers](const menu::HudQuestions::Question& asked, bool yes, bool quiet) {
+	std::string events; // c a clear, q a question line, l a personal line, a an answer
+	q.onLine = [&](const std::string& line) { lines.push_back(line); events += 'l'; };
+	q.onQuestion = [&](const std::string& line) { lines.push_back(line); events += 'q'; };
+	q.onClear = [&events] { events += 'c'; };
+	q.onAnswer = [&](const menu::HudQuestions::Question& asked, bool yes, bool quiet) {
 		answers.push_back({asked.kind, asked.value, yes, quiet});
+		events += 'a';
 	};
 	q.ask(menu::HudQuestions::Invite, 3, "invited to Charlie");
 	CHECK(lines.size() == 2 && lines[0] == "invited to Charlie" && lines[1] == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
+	CHECK(events == "cqq");
 	q.tick(5);
 	q.ask(menu::HudQuestions::CommanderOffer, 1, "commander of the PAC");
 	// The invite has 15 s left, the offer 20: the invite stays in front.
 	CHECK(q.front() && q.front()->kind == menu::HudQuestions::Invite);
+	events.clear();
 	q.answer(true);
+	// The answered question's lines go first (0x0079d6e0), then the next's.
+	CHECK(events == "cacqq");
 	CHECK(answers.size() == 1 && std::get<0>(answers[0]) == menu::HudQuestions::Invite && std::get<1>(answers[0]) == 3
 		&& std::get<2>(answers[0]) && !std::get<3>(answers[0]));
 	CHECK(q.front() && q.front()->kind == menu::HudQuestions::CommanderOffer && lines.back() == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
 	// Unanswered for its 20 s: a quiet no and the timed-out line.
 	q.tick(19.9f);
 	CHECK(answers.size() == 1);
+	events.clear();
 	q.tick(0.2f);
+	CHECK(events == "cal");
 	CHECK(answers.size() == 2 && std::get<0>(answers[1]) == menu::HudQuestions::CommanderOffer && !std::get<2>(answers[1])
 		&& std::get<3>(answers[1]));
 	CHECK(lines.back() == "HUD_TEXT_MENU_COMMANDER_APPLICATION_TIMED_OUT" && !q.front());

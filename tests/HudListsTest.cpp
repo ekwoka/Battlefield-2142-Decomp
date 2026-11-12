@@ -119,6 +119,23 @@ TEST(HudLists_ChatLinesAndSayBoxes)
 	CHECK(hud.listCell(11, 1, 0).find("mini_Squad_3_small") != std::string::npos && hud.number("VoiceOverTalkIconShow") == 1);
 }
 
+// A question's lines (category 8, HUD slot 0x174) go together when it is
+// answered (slot 0x180 with 8); other personal lines stay.
+TEST(HudLists_QuestionLinesCleared)
+{
+	hud::HudManager hud = emptyHud();
+	menu::HudChat chat(hud);
+	chat.addPersonal("timed out");
+	chat.addQuestion("You have been accepted as Commander");
+	chat.addQuestion("Press 'PageUp' to Accept");
+	chat.update(0.1f);
+	CHECK(hud.listCell(13, 2, 0) == "Press 'PageUp' to Accept");
+	chat.clearQuestions();
+	chat.addPersonal("declined");
+	chat.update(0.1f);
+	CHECK(hud.listCell(13, 0, 0) == "timed out" && hud.listCell(13, 1, 0) == "declined" && hud.listCell(13, 2, 0).empty());
+}
+
 // The local player's kill of an enemy (0x0075a07a): a personal line.
 TEST(HudLists_KillScoreLine)
 {
