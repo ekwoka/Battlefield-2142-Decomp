@@ -988,6 +988,17 @@ public:
 		int victim = -1, attacker = -1;
 	};
 	std::vector<AiHit> takeAiHits() { return std::exchange(m_aiHits, {}); }
+	// Players out of a vehicle by the use key (0x004bb570's AI event 3/3,
+	// posted once the soldier is out, with the seat's AI adaptor): the
+	// player and the vehicle's root; the last 64 kept.
+	struct UseKeyExit {
+		int player = -1;
+		uint32_t vehicle = 0;
+	};
+	std::vector<UseKeyExit> takeUseKeyExits() { return std::exchange(m_useKeyExits, {}); }
+	// Where `player` looks (the camera's z axis): on foot his look's yaw
+	// and pitch, seated his seat's gun or camera turned by the hull.
+	physics::Vec3 viewForward(int player) const;
 	// The level ambience over the network (AmbientTriggers.h): what the
 	// networked areas (numNetworkedEffects) played since the last call, for
 	// a server to send (the AmbientEffectArea event, 0x00510270; kept only
@@ -2432,6 +2443,10 @@ private:
 		// the object's team then).
 		int defaultTeam = -1;
 		double occupiedAt = -1e9; // when someone last sat in it (MagneticObject's disableWhenEmptyVehicle)
+		// The target object's +0x1a0 (0x0058eba0): the last player to get in,
+		// or to get out while others stayed; and the riders it last saw.
+		int lastRider = -1;
+		std::vector<int> ridersSeen;
 		// One seat firearm's state (SeatLayout::weapons).
 		struct Arm {
 			std::unique_ptr<FireArm> weapon;
@@ -2804,6 +2819,7 @@ private:
 	void scanCloseTo(Player& player, CloseToScan& scan);
 	void clearCloseTo(int player, CloseToScan& scan);
 	std::vector<AiHit> m_aiHits;
+	std::vector<UseKeyExit> m_useKeyExits;
 	struct {
 		std::string weapon; // the weapon whose tones play
 		int state = 0;      // the runtime WeaponHud's +0x10
@@ -3468,7 +3484,8 @@ private:
 	void applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
 		AbilityScan* scan = nullptr, Player* holder = nullptr, bool soldiersOnly = false, bool vehiclesOnly = false,
 		Player* giver = nullptr, // whose gifts are stamped (abilityBar): the holder by default
-		const physics::Vec3* rayEnd = nullptr); // onlyActiveWhileFiring: the ray at -> rayEnd instead of the sphere
+		const physics::Vec3* rayEnd = nullptr, // onlyActiveWhileFiring: the ray at -> rayEnd instead of the sphere
+		std::vector<uint32_t>* treated = nullptr); // the targets that took something
 	void stepAbilities(float seconds);
 	// A soldier's ammunition for the ability bar (0x00588ba0): over its
 	// weapons that can be refilled (ammo.allowReplenish, nrOfMags not

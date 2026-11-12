@@ -881,16 +881,21 @@ void ScriptHost::update()
 		}
 		const auto notify = [&](uint32_t object, bool entered) {
 			impl.call(callback.get(), {Ref(PyLong_FromLong(id)), impl.toPython(ScriptValue::object(owner)),
-										  impl.toPython(ScriptValue::object(object)), Ref(PyLong_FromLong(entered ? 1 : 0)), data});
+										  impl.toPython(object ? ScriptValue::object(object) : ScriptValue::none()),
+										  Ref(PyLong_FromLong(entered ? 1 : 0)), data});
 		};
 		for (uint32_t object : now) {
 			if (!before.count(object)) {
 				notify(object, true);
 			}
 		}
+		// An object gone since it went in leaves as None: the trigger's
+		// reference to it is empty then (0x00442c80's caller passes 0 to
+		// 0x00569770), which gpm_coop's onCPTrigger tests (`if vehicle:`).
 		for (uint32_t object : before) {
 			if (!now.count(object)) {
-				notify(object, false);
+				float gone[3];
+				notify(impl.game.objectPosition(object, gone) ? object : 0, false);
 			}
 		}
 	}

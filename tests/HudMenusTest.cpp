@@ -389,6 +389,17 @@ TEST(CommRose_ShippedRadio)
 	CHECK(ran.size() == 1 && ran[0] == "SquadLeader.sendRequest 0 0");
 }
 
+// The scoreboard's Server tab (scoreboard.setToggleShow 3, 0x007ba1a0)
+// lists no players under the server's information (0x007bb540).
+TEST(HudScoreboard_ServerTabListsNoPlayers)
+{
+	CHECK(menu::scoreboardListsPlayers(0) && menu::scoreboardListsPlayers(1) && menu::scoreboardListsPlayers(2));
+	CHECK(!menu::scoreboardListsPlayers(3));
+	// The tab's map (ActiveLevel, 0x00448300).
+	CHECK(menu::activeLevelText("Cerbere_Landing") == "CERBERE LANDING");
+	CHECK(menu::activeLevelText("bridge_at_remagen") == "BRIDGE AT REMAGEN");
+}
+
 // The scoreboard's rows (0x007bb540): black when dead, green for the
 // squad and the commanding player, blue friends and red enemies; the
 // local row's and every odd row's backgrounds.

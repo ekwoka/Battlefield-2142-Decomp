@@ -222,6 +222,10 @@ public:
 	std::vector<std::string> allGameModes() const;
 	int serverInfoRows(const std::string& host, int port);
 	std::vector<std::string> selectBoxGameModes() const;
+	// The video page's preset (VideoSettings.setVideoOptionScheme: 0 low,
+	// 1 medium, 2 high) into the page's qualities, resolution, antialiasing,
+	// view distance and bloom.
+	void applyVideoScheme(int scheme);
 	// Sets a setting as if a page had applied it (written down at once).
 	void storeSetting(const std::string& name, const ui::avm1::Value& value);
 	// The same as text ("" when unset or not text).

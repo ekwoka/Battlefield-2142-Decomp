@@ -870,8 +870,10 @@ void MenuBindings::bindOffline()
 	n.setFunction(kProfile, "deleteCurrentProfile", [](Interpreter&, const Args&) { return Value(); });
 	// 0x10016390: ControlSettings slot 0x24 (the game's controls again:
 	// Settings/Controls.con), then the current profile saved
-	// (LocalProfileManager slots 0x38 / 0x34).
-	n.setFunction(kControlSettings, "resetDefault", [this](Interpreter&, const Args&) {
+	// (LocalProfileManager slots 0x38 / 0x34). The page's own "reset"
+	// (0x10016490, the controls page's RESET TO DEFAULT: resetControls)
+	// is the same code, not the other settings objects' reset.
+	const auto resetControls = [this](Interpreter&, const Args&) {
 		if (m_profiles && m_profiles->onResetControls) {
 			m_profiles->onResetControls();
 		}
@@ -879,7 +881,9 @@ void MenuBindings::bindOffline()
 			m_profiles->save();
 		}
 		return Value();
-	});
+	};
+	n.setFunction(kControlSettings, "resetDefault", resetControls);
+	n.setFunction(kControlSettings, "reset", resetControls);
 
 	// --- The settings objects.
 	// 0x1002fec0: GeneralSettings slot 0x24 (0x0049bdf0), the HUD page's

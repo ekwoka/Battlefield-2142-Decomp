@@ -484,6 +484,11 @@ struct WeaponChoice {
 // original keeps its last choice then); `explosive` is the bot's +0x249
 // (the bonus given).
 int chooseWeapon(const WeaponChoice& choice, const std::vector<WeaponOption>& weapons, bool& explosive);
+// A human target attending to the bot (0x10074ef0's local_9): holding a
+// weapon of his Armament, and the bot's newest sensing record of him
+// (0x100eb7f0; `lastSensed` below -1e8 for none, read as -1000) under
+// 9995 s old at `now`.
+bool humanAttends(bool armed, float now, float lastSensed);
 
 // A strategic area for the explosive bonus's guard (0x10034a10 and
 // 0x10074ef0): whether the bot's team holds it (+0x70 + 4 team, 0 held),
@@ -827,6 +832,11 @@ public:
 	bool holdingForLob(int player) const;
 	// Whether its fire plan keeps to its order's spot (+0x248, 0x100795a0).
 	bool keepsToOrder(int player) const;
+	// Whether a human's bail_out closed `vehicle` to the bots' vehicle
+	// choice (m_closedToBots).
+	bool closedToBots(uint32_t vehicle) const { return m_closedToBots.count(vehicle) != 0; }
+	// Whether bot `player` keeps a radio message of `type` from `sender`.
+	bool keepsRadio(int player, int type, int sender) const;
 	// The bot's weapon zoom level (0: unzoomed; see stepZoom).
 	int zoomLevel(int player) const;
 	// A behaviour's urgency at the bot's last think (0 for none).
@@ -1729,6 +1739,13 @@ private:
 	// the vehicle each human player was in at the last update.
 	std::map<uint32_t, std::array<float, 3>> m_humanLeftAt;
 	std::map<int, uint32_t> m_humanVehicle;
+	// The vehicles closed to the bots' choice: their root's AI object
+	// adaptor's +8 (BF2142.exe 0x008a3a60 sets it 1; slot 0x90 0x00498120
+	// writes it, slot 0x94 0x0043c4f0 reads it in BBChange 0x1006c520),
+	// cleared by a human's bail_out and set again by his get_in (AIDLL
+	// 0x10030b20) or by a human leaving it with the use key (AIMain slot
+	// 23, 0x10056610).
+	std::set<uint32_t> m_closedToBots;
 	// When each player took its weapon in hand: the AI weapon's +0x20
 	// (BF2142.exe 0x008a6d80 stamps the newly selected weapon with the
 	// clock, slot 0xfc 0x008924d0; read through slot 0x100 0x008924e0).

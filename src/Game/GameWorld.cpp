@@ -915,8 +915,10 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 	// Friendly fire (0x005b7290): an attacker on a team hitting what its
 	// team controls (the victim's control object's team, slot 0x9c; the
 	// attacker's own things too) does the server's percentage of it. The
-	// victim's factor 0.9 / 1.1 (its slot 0xec(4) / (5)) isn't settled and
-	// is left at 1.
+	// victim's factor 0.9 / 1.1 (its slot 0xec(4) / (5), 0x005c6af0) counts
+	// crew whose kit template lists the vehicle (+0x308), a list nothing in
+	// BF2142.exe fills (constructor 0x00570080, getter 0x0056cd80's two
+	// readers 0x0058cf00 / 0x00588ed0): always 1, so left out.
 	if (const Player* from = attacker >= 0 ? findPlayer(attacker) : nullptr; from && from->team > 0) {
 		const Player* victim = soldierPlayer(object);
 		const Body* cellBody = nullptr;
@@ -5497,9 +5499,11 @@ const world::ObjectTemplate* GameWorld::targetObjectOf(const world::ObjectTempla
 // disableWhenEmptyVehicleDelay seconds (+0x2ac, 0x00500766; default 0)
 // and comes back when someone gets in (0x0058e9a0). The shipped
 // HeatObject and LaserTarget_vehicle: both, 5 s; MagneticObject: empty
-// only, 3 s; HeatObject_aa / _flare: wrecks only. (On the client whose
-// player just left, the original drops it at once: the delay's -1 when
-// the leaver is the local player, a client-side nicety not modelled.)
+// only, 3 s; HeatObject_aa / _flare: wrecks only. The delay is -1 (off
+// at once) when the target's last rider (+0x1a0: the last to get in, or
+// to get out while others stayed; the leave event 3's player, slot 0xf8)
+// is the machine's local player (DAT_00a85228 slot 0x30): offline and on
+// a listen server, the human's own vehicle goes dark as he gets out.
 // Drones and Titans keep theirs: they are never sat in the way a
 // vehicle is.
 bool GameWorld::targetEnabled(const world::Object& root)
@@ -5513,8 +5517,8 @@ bool GameWorld::targetEnabled(const world::Object& root)
 	if (integer(*t, "disableWhenWreck", 0) != 0 && body->wreckTime >= 0) {
 		return false;
 	}
-	return integer(*t, "disableWhenEmptyVehicle", 0) == 0
-		|| m_time - body->occupiedAt <= number(*t, "disableWhenEmptyVehicleDelay", 0);
+	const float delay = body->lastRider >= 0 && body->lastRider == localPlayer() ? -1.0f : number(*t, "disableWhenEmptyVehicleDelay", 0);
+	return integer(*t, "disableWhenEmptyVehicle", 0) == 0 || m_time - body->occupiedAt <= delay;
 }
 
 // A lock-on weapon's lock each tick: the default target component's
@@ -11023,7 +11027,8 @@ bool GameWorld::repairable(uint32_t object) const
 }
 
 void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
-	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly, Player* giver, const physics::Vec3* rayEnd)
+	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly, Player* giver, const physics::Vec3* rayEnd,
+	std::vector<uint32_t>* treated)
 {
 	if (!giver) {
 		giver = holder;
@@ -11165,6 +11170,9 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 				if (giver) {
 					stampHeal(object);
 				}
+				if (treated) {
+					treated->push_back(object);
+				}
 			}
 			continue;
 		}
@@ -11205,6 +11213,9 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		}
 		if (refilled) {
 			draw();
+			if (treated) {
+				treated->push_back(object);
+			}
 		}
 		if (giver) {
 			giver->gaveAmmo = true;
@@ -11308,10 +11319,20 @@ void GameWorld::stepAbilities(float seconds)
 //   of the team or of none takes slot 0x10c too, which the rewrite's
 //   RTAmmo (soldiers' kit weapons) leaves alone.
 // So an engineer's repair in a vehicle needs the unlock, a medic heals
-// and a supporter rearms only their own passengers without it. Not
-// rewritten: the second dose 0x00599f30 gives each target treated (the
-// strength times the control object's slot 0x17c, healing and repair
-// shared by their count), whose slot isn't traced.
+// and a supporter rearms only their own passengers without it.
+// - All of it only from a seat with autoUseAbility: the control object's
+//   0xc4c5 interface (0x0042b2f0, the seat's own PlayerControlObject)
+//   slot 0x13c (0x005c6bd0: its template's +0x46a, 0 from the template's
+//   constructor 0x005cd9e0). The shipped ground vehicles and gunships set
+//   it on their seats (as_at on 5 of 7), the Titans' and stationary guns
+//   don't.
+// - Then a second dose to each target that took something in the first
+//   (the set 0x0056e4d0 fills when slot 0x108 / 0x10c answer true): the
+//   strength times the seat's slot 0x17c (0x005c6d60 -> the template's
+//   interface +0x298 slot 0x168, 0x0059dbd0: abilityInVehicleStrength-
+//   Modifier, template +0x4b0, 1 by default and in every shipped vehicle),
+//   for healing and repair shared by the count of those targets, for ammo
+//   whole.
 void GameWorld::stepVehicleAbility(Player& player, float seconds)
 {
 	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
@@ -11320,6 +11341,14 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 																		: m_templates.find(player.kitTemplate);
 	const Body* vehicle = findBody(player.vehicle);
 	if (!kit || !vehicle) {
+		return;
+	}
+	const world::Object* vehicleObject = m_objects.find(vehicle->object);
+	const VehicleLayout* layout = vehicleObject && vehicleObject->objectTemplate() ? &vehicleLayout(*vehicleObject->objectTemplate()) : nullptr;
+	const world::ObjectTemplate* seat = layout && player.seat >= 0 && static_cast<size_t>(player.seat) < layout->seats.size()
+		? m_templates.find(layout->seats[static_cast<size_t>(player.seat)].name)
+		: nullptr;
+	if (!seat || integer(*seat, "autoUseAbility", 0) == 0) {
 		return;
 	}
 	const float radius = number(*kit, "abilityInVehicleRadius", 0);
@@ -11390,7 +11419,20 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 	// Those targets exactly (a scan held, not run again).
 	AbilityScan fixed;
 	fixed.targets = std::move(targets);
-	applyAbility(ability, at, player.team, seconds, 0, &fixed, nullptr, false, false, &player);
+	std::vector<uint32_t> treated;
+	applyAbility(ability, at, player.team, seconds, 0, &fixed, nullptr, false, false, &player, nullptr, &treated);
+	if (treated.empty()) {
+		return;
+	}
+	// The second dose, to those treated.
+	Ability second = ability;
+	second.strength *= number(*seat, "abilityInVehicleStrengthModifier", 1);
+	if (!ability.ammo) {
+		second.strength /= static_cast<float>(treated.size());
+	}
+	AbilityScan again;
+	again.targets = std::move(treated);
+	applyAbility(second, at, player.team, seconds, 0, &again, nullptr, false, false, &player);
 }
 
 const FireArm* GameWorld::gun(uint32_t vehicle, int seat) const
@@ -11624,6 +11666,9 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 			body->vehicle->setInput({});
 		}
 		soldier.setPosition({at.x, at.y - 1.0f, at.z});
+		if (m_useKeyExits.size() < 64) {
+			m_useKeyExits.push_back({player.id, body->object});
+		}
 		raise("ExitVehicle", {ScriptValue::player(player.id), ScriptValue::object(body->object)});
 		return;
 	}
@@ -13537,6 +13582,28 @@ void GameWorld::stepPhysics(float seconds)
 		physics::RigidBody& body = it->body;
 		if (std::any_of(it->occupants.begin(), it->occupants.end(), [](int p) { return p >= 0; })) {
 			it->occupiedAt = m_time;
+		}
+		{
+			std::vector<int> riders;
+			for (const int p : it->occupants) {
+				if (p >= 0) {
+					riders.push_back(p);
+				}
+			}
+			std::sort(riders.begin(), riders.end());
+			if (riders != it->ridersSeen) {
+				for (const int p : riders) {
+					if (!std::binary_search(it->ridersSeen.begin(), it->ridersSeen.end(), p)) {
+						it->lastRider = p; // got in
+					}
+				}
+				for (const int p : it->ridersSeen) {
+					if (!riders.empty() && !std::binary_search(riders.begin(), riders.end(), p)) {
+						it->lastRider = p; // got out, others stay
+					}
+				}
+				it->ridersSeen = std::move(riders);
+			}
 		}
 		if (it->held) {
 			// Held by its spawner: the engines turn (the hold lets go at 0.1),

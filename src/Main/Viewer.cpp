@@ -538,10 +538,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && !pointer) {
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
-					turn += event.motion.xrel * 0.15f * scale;
+					float axisX = 1, axisY = 1;
+					if (options.mouseAxes) {
+						options.mouseAxes(axisX, axisY);
+					}
+					turn += event.motion.xrel * 0.15f * scale * axisX;
 					// First person looks up and down to 85 degrees (0x005890a0).
 					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
-					pitch = std::fmax(low, std::fmin(high, pitch - event.motion.yrel * 0.003f * scale * up));
+					pitch = std::fmax(low, std::fmin(high, pitch - event.motion.yrel * 0.003f * scale * axisY * up));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && (event.motion.state & SDL_BUTTON_RMASK)) {
 					camera.yaw += event.motion.xrel * 0.004f;
 					camera.pitch = std::fmax(-1.5f, std::fmin(1.5f, camera.pitch - event.motion.yrel * 0.004f));

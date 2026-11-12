@@ -476,6 +476,18 @@ struct ScoreboardStyle {
 	std::array<float, 4> background; // alpha 0: none
 };
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex);
+// Whether the scoreboard's tab lists its players (the rows above). On the
+// Server tab (ToggleServer, the scoreboard's +0x38b, set by 0x007ba1a0)
+// the row filler 0x007bb540 adds no player's row, as for an empty slot
+// (at most a blank odd row, and its row counter +0x38 starts at 0), so
+// the server's information shows over empty lists.
+// tab: scoreboard.setToggleShow's (0 players, 1 squads, 2 manage, 3 server).
+inline bool scoreboardListsPlayers(int tab) { return tab != 3; }
+// The server tab's map (the HUD's ActiveLevel, the HUD manager's +0xa78,
+// set at the level's start by 0x00448300): the level's name with its
+// underscores as spaces, in capitals (0x0065b420, 0x0065af00: toupper,
+// and the Latin-1 a-ring, a- and o-umlaut, u-umlaut and e-acute by hand).
+std::string activeLevelText(const std::string& level);
 // A scoreboard row's kit icon (the HUD manager's slot 0x64, 0x0074e940,
 // taken by the row filler 0x007bb540 and drawn 15 pixels square): a player
 // not alive (slot 0x74; or the HUD manager's slot 0x410 test) shows

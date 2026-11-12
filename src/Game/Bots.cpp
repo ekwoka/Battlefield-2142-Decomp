@@ -542,6 +542,12 @@ int guidanceKind(const world::ObjectTemplate* weapon)
 //     (minRange - d) / 5)), beyond maxRange x (1 - 0.9 min(1, (d -
 //     maxRange) / 5)); an empty magazine x0.33.
 // The best score above 0 wins.
+bool humanAttends(bool armed, float now, float lastSensed)
+{
+	const double stamp = lastSensed > -1e8f ? lastSensed : -1000.0; // 0xc08f400000000000
+	return armed && now - stamp < 9995.0;
+}
+
 int chooseWeapon(const WeaponChoice& c, const std::vector<WeaponOption>& weapons, bool& explosive)
 {
 	explosive = false; // vt+0x260(0)
@@ -981,12 +987,20 @@ bool BotManager::holdingForLob(int player) const
 }
 
 // The game hands the AI a radio message per hearer (0x1004e140 ->
-// AIDLL 0x10030b20): not one the hearer said itself (the player's vt+0xa8), and
-// for bail_out, get_in and req_pickup (types 0..2) the AI acts on it at
-// once (seat changes, a pick-up, not rewritten); every message goes to the
-// hearer's comm object (vt+0xa4 -> 0x100a6fe0), filed under its type with
-// its sender: a newer one from the same sender replaces the older. It is
-// kept for its type's receive time to live (0x100a7130, the comm's +0x54).
+// AIDLL 0x10030b20): not one the hearer said itself (the player's vt+0xa8).
+// From a human sender (the AI player's vt+0x84 -> player vt+0x68), bail_out
+// (type 0) and get_in (1) first set his vehicle's "bots may take it" flag
+// to 0 and 1: the AI player's vt+0x50 (0x008a50d0: the control object's AI
+// adaptor, +0x40; on a ladder or a parachute the soldier's), its root's
+// (adaptor slot 0xf0: itself, or a secondary part's parent, 0x00448230 /
+// 0x00584240) slot 0x90 (0x00498120, +8); and a req_pickup (2) is kept
+// only by a hearer within 90 degrees of where the sender looks (the camera
+// matrix's z axis, AI player vt+0x88 0x008a4f00, against the way from his
+// position to the hearer's object, 0x1002b0b0; acos > 90 deg: dropped).
+// Every message kept goes to the hearer's comm object (vt+0xa4 ->
+// 0x100a6fe0), filed under its type with its sender: a newer one from the
+// same sender replaces the older. It is kept for its type's receive time
+// to live (0x100a7130, the comm's +0x54).
 void BotManager::radio(int sender, const std::string& voiceName, int receiver)
 {
 	const int type = radioMessageType(voiceName);
@@ -994,11 +1008,26 @@ void BotManager::radio(int sender, const std::string& voiceName, int receiver)
 	if (type < 0 || !m_world.playerInfo(sender, from)) {
 		return;
 	}
+	const physics::Vec3 look = from.ai || type != 2 ? physics::Vec3 {} : m_world.viewForward(sender);
 	for (auto& [id, bot] : m_bots) {
 		GameWorld::PlayerInfo info;
 		if (id == sender || (receiver >= 0 && id != receiver) || !m_world.playerInfo(id, info)
 			|| (receiver < 0 && info.team != from.team)) {
 			continue;
+		}
+		if (!from.ai && type <= 1 && from.vehicle) {
+			if (type == 0) {
+				m_closedToBots.insert(from.vehicle);
+			} else {
+				m_closedToBots.erase(from.vehicle);
+			}
+		}
+		if (!from.ai && type == 2) {
+			const physics::Vec3 to = info.position - from.position;
+			const float length = std::sqrt(physics::lengthSquared(to));
+			if (length > 0 && (to.x * look.x + to.y * look.y + to.z * look.z) / length < 0) {
+				continue;
+			}
 		}
 		const auto same = std::find_if(bot.radio.begin(), bot.radio.end(),
 			[&](const Bot::Radio& r) { return r.type == type && r.sender == sender; });
@@ -1144,6 +1173,12 @@ const BotManager::Bot::Radio* BotManager::heardFromHuman(const Bot& bot, int typ
 		return human ? &r : nullptr;
 	}
 	return nullptr;
+}
+
+bool BotManager::keepsRadio(int player, int type, int sender) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() && heard(it->second, type, sender);
 }
 
 bool BotManager::heard(const Bot& bot, int type, int sender) const
@@ -1397,6 +1432,19 @@ void BotManager::update(float seconds)
 	}
 	for (const GameWorld::AiHit& hit : m_world.takeAiHits()) {
 		hitBy(hit.victim, hit.attacker);
+	}
+	// A human out of a vehicle by the use key (BF2142.exe 0x004bb570 posts
+	// AI event 3/3 with the seat's AI adaptor once he is out; 0x00894860 ->
+	// IAIEventCourier slot 8, 0x1004e0a0 -> AIMain slot 23, 0x10056610):
+	// for a player not a bot, the root's +8 set again.
+	for (const GameWorld::UseKeyExit& exit : m_world.takeUseKeyExits()) {
+		GameWorld::PlayerInfo info;
+		if (m_world.playerInfo(exit.player, info) && !info.ai) {
+			m_closedToBots.erase(exit.vehicle);
+		}
+	}
+	for (auto it = m_closedToBots.begin(); it != m_closedToBots.end();) {
+		it = m_world.objects().find(*it) ? std::next(it) : m_closedToBots.erase(it); // the adaptor goes with its object
 	}
 	// A human player out of a vehicle stamps it for the team (BF2142.exe
 	// 0x00894860, exit event: the player not a bot (vt+0x84 -> player
@@ -3599,17 +3647,18 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 // the bot and the target's remembered position. The target's Mobile slot
 // 0x78 (BF2142.exe 0x008a1960: its interface 0xc4c5 slot 0x108,
 // 0x0059d950) is its sprint stamina (0x006457f0's +0x18), not a speed.
-// Stand-ins: the target attending to the bot
-// (a bot: its target is this one, its vt+0x74; a human: the sensing
-// agent's stamp for it within 9995 s, AIDLL 0x100eb7f0 on the map at +0x74
-// +0x84, whose writer wasn't traced) is, for a human, a round of it having
-// passed the bot (the rewrite's alert). No target is run by an auto
+// The target attending to the bot (0x10074ef0's local_9): a bot whose
+// target is this one (its vt+0x74); a human holding a weapon (his
+// Armament's current one) whose newest sensing record in the bot's agent
+// (the map +0x84 that 0x100ebdd0 fills from the remembered sightings,
+// read by 0x100eb7f0; -1000 with none) is under 9995 s old, which is
+// nearly always. No target is run by an auto
 // controller (+0x264: set by 0x100c8d20 and IAIAutoControllersManager's
 // 0x1004d140 / 0x1004d8e0; the rewrite's drones and silos aren't bots), and
 // no wire-guided weapon holds a target for a bot (the LPTargetComp's
-// target isn't modelled). The fire plan's move to the order's spot that
-// sets +0x248 (0x100795a0 -> 0x100d11c0, when 0x100775f0 finds the spot
-// set) isn't rewritten: +0x248 stays clear.
+// target isn't modelled). The choice reads +0x248 as the fire plan's
+// last plan left it (0x100795a0 -> 0x100d11c0 when 0x100775f0 finds the
+// spot: fireKeepsToOrder, bot.orderMove).
 void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
 	bot.explosive = false;
@@ -3669,7 +3718,15 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 		const auto it = m_bots.find(target->id);
 		c.targetTargetsMe = it != m_bots.end() && it->second.target == self.id;
 	} else {
-		c.targetTargetsMe = known->alertAt > -1e8f;
+		// A human: with a current weapon in his Armament part (+0x34 slot
+		// 0x10 / 0x18 in the AI weapons' table), the bot's last sensing
+		// record of him (vt+0x30c, 0x10096d10 -> 0x100eb7f0: the sensing
+		// agent's newest record per unit, its map +0x84, which 0x100ebdd0
+		// fills from the remembered sightings; -1000 with none) under
+		// 9995 s old.
+		const std::vector<std::pair<int, std::string>> arms = armament(*target);
+		const bool armed = std::any_of(arms.begin(), arms.end(), [&](const auto& item) { return item.first == target->inHandSlot; });
+		c.targetTargetsMe = humanAttends(armed, m_time, known->seen);
 	}
 	// The Mobile's slot 0x78 (0x008a1960): the target's interface 0xc4c5
 	// slot 0x108, 0x0059d950, is its sprint stamina (the SprintStamina's
@@ -4437,8 +4494,10 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 	}
 	const float myHealth = healthOf(self.soldier);
 	for (const GameWorld::VehicleInfo& vehicle : weighOthers ? vehicles : std::vector<GameWorld::VehicleInfo> {}) {
+		// A vehicle a human closed with bail_out (its root adaptor's +8,
+		// slot 0x94, the candidates' first test) isn't weighed.
 		if (!vehicle.working || vehicle.freeSeats <= 0 || vehicle.object == self.vehicle
-			|| (onlyReserved && vehicle.object != reserved)) {
+			|| (onlyReserved && vehicle.object != reserved) || m_closedToBots.count(vehicle.object)) {
 			continue;
 		}
 		const float d2 = horizontal2(vehicle.position - from);

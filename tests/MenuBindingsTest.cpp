@@ -617,6 +617,121 @@ TEST(MenuBindings_AudioRadios)
 	CHECK(get("getSelectedProvider") == "hardware" && get("getSelectedSoundQuality") == "UltraHigh");
 }
 
+// A slider's value is its m_percent, a Number object (the Slider class's
+// update makes one): the setters take it as the number it holds, so the
+// audio page's volumes reach the profile's Audio.con when applied.
+TEST(MenuBindings_SliderNumberObjects)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::SettingsObjects objects;
+	bindings.setSettingsObjects(&objects);
+	avm1::Interpreter vm;
+	const auto number = [&](double v) {
+		return avm1::Value(vm.construct(vm.getMember(avm1::Value(vm.global()), "Number"), {avm1::Value(v)}));
+	};
+	CHECK(number(0.25).isObject());
+	call(vm, natives, "dice.bf2.AudioSettings", "setEffectsVolume", {number(0.25)});
+	call(vm, natives, "dice.bf2.AudioSettings", "setMusicVolume", {number(0.5)});
+	call(vm, natives, "dice.bf2.AudioSettings", "apply");
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.AudioSettings", "getEffectsVolume")) == 0.25);
+	CHECK(objects.get("AudioSettings.EffectsVolume") == "0.25");
+	CHECK(objects.get("AudioSettings.MusicVolume") == "0.5");
+	CHECK(objects.audioScript().find("AudioSettings.setEffectsVolume 0.25") != std::string::npos);
+	CHECK(bindings.setting("AudioSettings.MusicVolume", 1) == 0.5);
+}
+
+// The controls page's mouse settings are the active map's (0x00497fa0 ..
+// 0x00498080): they reach the map's ControlMap lines in Controls.con.
+TEST(MenuBindings_MouseSettingsOnTheMap)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	input::ControlMaps controls;
+	controls.create(input::ControlMaps::kInfantry);
+	controls.create(input::ControlMaps::kAir);
+	bindings.setControls(&controls);
+	avm1::Interpreter vm;
+	const auto cs = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.ControlSettings", member, std::move(args));
+	};
+	cs("setActiveControlMap", {avm1::Value("0")});
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 1);
+	cs("setMouseSensitivity", {avm1::Value(2.5)});
+	cs("setMouseYAWFactor", {avm1::Value(2)});
+	cs("setInvertMouse", {avm1::Value(true)});
+	cs("setMouseSensitivity", {avm1::Value(25)}); // 0..10 (0x006802a0)
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 10);
+	cs("setMouseSensitivity", {avm1::Value(2.5)});
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 2.5 && avm1::toBoolean(cs("getInvertMouse")));
+	const input::ControlMaps::MapSettings foot = controls.settingsOf(input::ControlMaps::kInfantry);
+	CHECK(foot.mouseSensitivity == 2.5f && foot.yawFactor == 2 && foot.pitchFactor == 1 && foot.invertMouse);
+	// The aircraft's map keeps its own.
+	cs("setActiveControlMap", {avm1::Value("2")});
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 1 && !avm1::toBoolean(cs("getInvertMouse")));
+	const std::string script = controls.script();
+	CHECK(script.find("ControlMap.mouseSensitivity 2.5") != std::string::npos);
+	CHECK(script.find("ControlMap.invertMouse 1") != std::string::npos);
+	CHECK(script.find("ControlMap.setYawFactor 2") != std::string::npos);
+	// The page's RESET TO DEFAULT (ControlSettings.reset, 0x10016490) is
+	// resetDefault's code: the game's controls again.
+	menu::SettingsObjects objects;
+	menu::LocalProfileManager profiles(objects);
+	bindings.setLocalProfiles(&profiles);
+	int resets = 0;
+	profiles.onResetControls = [&] { ++resets; };
+	cs("reset");
+	CHECK(resets == 1);
+	cs("resetDefault");
+	CHECK(resets == 2);
+}
+
+// The video page's presets (0x1005ba10 -> 0x00497200 -> RendDX9
+// 0x1000f780): the scheme sets the qualities, the display mode, the
+// antialiasing, the view distance and bloom; custom (3) leaves them.
+TEST(MenuBindings_VideoPresets)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	bindings.setDisplayModes({"800x600@60Hz", "1024x768@60Hz", "1024x768@75Hz", "1280x720@60Hz"});
+	bindings.setAntialiasingModes({"Off", "2Samples", "4Samples"});
+	avm1::Interpreter vm;
+	const auto video = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.VideoSettings", member, std::move(args));
+	};
+	const auto qualities = [&] {
+		std::string q;
+		for (const char* name : {"getTerrainQuality", "getGeometryQuality", "getLightingQuality", "getDynamicLightingQuality",
+				 "getDynamicShadowsQuality", "getEffectsQuality", "getTextureQuality", "getTextureFilteringQuality"}) {
+			q += std::to_string(static_cast<int>(vm.toNumber(video(name))));
+		}
+		return q;
+	};
+	video("setVideoOptionScheme", {avm1::Value(0)});
+	CHECK(qualities() == "11100121");
+	CHECK(vm.toString(video("getResolution")) == "800x600@60Hz");
+	CHECK(vm.toString(video("getAntialiasing")) == "Off");
+	CHECK(std::fabs(vm.toNumber(video("getViewDistanceScale")) - 0.75) < 1e-6);
+	CHECK(!avm1::toBoolean(video("getBloomEnabled")));
+	CHECK(vm.toNumber(video("getVideoOptionScheme")) == 0);
+	video("setVideoOptionScheme", {avm1::Value(1)});
+	CHECK(qualities() == "22222232");
+	CHECK(avm1::toBoolean(video("getBloomEnabled")));
+	video("setVideoOptionScheme", {avm1::Value(2)});
+	CHECK(qualities() == "33333333");
+	CHECK(vm.toString(video("getResolution")) == "1024x768@60Hz");
+	CHECK(vm.toString(video("getAntialiasing")) == "2Samples");
+	CHECK(vm.toNumber(video("getViewDistanceScale")) == 1);
+	// Custom: the page's own values stay.
+	video("setTerrainQuality", {avm1::Value(1)});
+	video("setVideoOptionScheme", {avm1::Value(3)});
+	CHECK(qualities() == "13333333");
+	CHECK(vm.toNumber(video("getVideoOptionScheme")) == 3);
+}
+
 // SwiffHost's and MenuTeamManager's console objects (credits.con,
 // gameModes.con, menuTeams.con) and the credits roll's slots: 40 lines 20 px
 // apart from the stage's bottom, moving up at the speed (twips a second,

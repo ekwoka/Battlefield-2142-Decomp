@@ -795,6 +795,22 @@ std::string scoreboardIcon(const game::GameWorld::PlayerInfo& player, int localT
 	return path;
 }
 
+std::string activeLevelText(const std::string& level)
+{
+	std::string text = level;
+	for (char& c : text) {
+		const unsigned char u = static_cast<unsigned char>(c);
+		if (c == '_') {
+			c = ' ';
+		} else if (u == 0xe5 || u == 0xe4 || u == 0xf6 || u == 0xfc || u == 0xe9) {
+			c = static_cast<char>(u - 0x20);
+		} else {
+			c = static_cast<char>(std::toupper(u));
+		}
+	}
+	return text;
+}
+
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)
 {
 	ScoreboardStyle style {{0, 0, 0, 1}, {0, 0, 0, 0}};

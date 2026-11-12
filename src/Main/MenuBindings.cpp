@@ -1895,11 +1895,9 @@ void MenuBindings::bindServerSettings()
 		{"AudioSettings.SoundQuality", Value("Medium")},
 		{"AudioSettings.SoundDetail", Value(2)},
 		{"AudioSettings.Provider", Value("software")},
-		{"ControlSettings.MouseSensitivity", Value(0.5)},
+		// (The mouse's sensitivity, factors and inversion are the control
+		// maps', bindControls.)
 		{"ControlSettings.MouseSensitivityMultiplier", Value(1)},
-		{"ControlSettings.MouseYAWFactor", Value(1)},
-		{"ControlSettings.MousePITCHFactor", Value(1)},
-		{"ControlSettings.InvertMouse", Value(false)},
 	};
 	for (const char* object : kSettingsObjects) {
 		const std::string prefix = std::string(object).substr(std::string("dice.bf2.").size()) + ".";
@@ -1909,8 +1907,13 @@ void MenuBindings::bindServerSettings()
 			}
 			const std::string verb = member.substr(0, 3), key = prefix + member.substr(3);
 			if (verb == "set") {
-				n.setFunction(object, member, [this, key](Interpreter&, const Args& args) {
-					m_settings[key] = arg(args, 0);
+				// The original's setters take the argument as their type
+				// (0x100a4c50, as_value's number; ...): a slider passes its
+				// m_percent, a Number object (dice.UIs.Forms.Slider's
+				// update: new Number(...)), whose value is the setting.
+				n.setFunction(object, member, [this, key](Interpreter& vm, const Args& args) {
+					const Value value = arg(args, 0);
+					m_settings[key] = value.isObject() ? vm.toPrimitive(value) : value;
 					return Value();
 				});
 			} else if (verb == "get") {
@@ -2036,6 +2039,32 @@ void MenuBindings::bindServerSettings()
 	});
 	n.setFunction(kGeneralSettings, "setHelpPopUps", [this](Interpreter&, const Args& args) {
 		m_settings["GeneralSettings.HelpPopUps"] = Value(avm1::toBoolean(arg(args, 0)) ? 1.0 : 0.0);
+		return Value();
+	});
+	// The video page's presets (0x1005ba10): the scheme goes to the
+	// object (slot 0xe4, +0x10c), whose slot 0x30 (0x00497200) has the
+	// renderer's settings take it (RendDX9 slot 0x3c, 0x1000f780) and reads
+	// the eight qualities, the resolution, the antialiasing, the view
+	// distance and bloom back. 0x1000f780's presets, by quality index
+	// (terrain, geometry, lighting, dynamic lighting, dynamic shadows,
+	// effects, texture, texture filtering):
+	//   0 low     1 1 1 0 0 1 2 1, 800x600, Off, 0.75, no bloom
+	//   1 medium  2 2 2 2 2 2 3 2, 800x600, Off, 0.9, bloom
+	//   2 high    3 3 3 3 3 3 3 3, 1024x768, 2Samples, 1, bloom
+	// The texture (0x1000f600) and the high lighting depend on the machine:
+	// 2 and 2 under 240 MB of video memory or 1100 / 1280 MB of memory, and
+	// the low texture is one under the others'. Bloom is the card's (the
+	// vendor tables of 0x10001e50; a card they don't list gets it from
+	// medium up). Any other scheme (3, custom) changes nothing. A quality
+	// is clamped to its range (slot 0, 0x1000f730), a resolution or
+	// antialiasing taken only when a listed one starts with it, ignoring
+	// case (slot 0x20, 0x1000ff50), the view distance clamped to 0.5..1
+	// (slot 0x28, 0x1000f0c0). The rewrite takes today's machines: enough
+	// memory for the higher texture and lighting.
+	n.setFunction(kVideoSettings, "setVideoOptionScheme", [this](Interpreter& vm, const Args& args) {
+		const int scheme = static_cast<int>(std::lround(vm.toNumber(arg(args, 0))));
+		m_settings["VideoSettings.VideoOptionScheme"] = Value(scheme);
+		applyVideoScheme(scheme);
 		return Value();
 	});
 	// 0x1005d2d0: the display mode in use, as the displayModes list writes it.
@@ -2259,6 +2288,35 @@ void MenuBindings::bindControls()
 		return Value();
 	});
 	n.setFunction(kControlSettings, "getActiveControlMap", [this](Interpreter&, const Args&) { return Value(m_controlMap); });
+	// The mouse settings are the active map's (0x00497fa0 / 0x00497fc0 ..
+	// 0x00498080: the map's slots 0x8c / 0x88 the sensitivity, 0xa8 / 0xa0
+	// the yaw factor, 0xa4 the pitch factor, 0x84 / 0x80 the inverted
+	// mouse; 1 and off with no map), so they go to the profile's
+	// Controls.con with the map (ControlMap.mouseSensitivity, setYawFactor,
+	// setPitchFactor, invertMouse). The sensitivity is clamped to 0..10
+	// (0x006802a0); the page shows it over 10.
+	using MapSettings = input::ControlMaps::MapSettings;
+	const auto mouseSetting = [this, mapName, &n](const char* name, auto get, auto set) {
+		n.setFunction(kControlSettings, std::string("get") + name, [this, mapName, get](Interpreter&, const Args&) {
+			return m_controls ? get(m_controls->settingsOf(mapName())) : get(MapSettings());
+		});
+		n.setFunction(kControlSettings, std::string("set") + name, [this, mapName, set](Interpreter& vm, const Args& args) {
+			if (m_controls) {
+				set(m_controls->settings(mapName()), vm, arg(args, 0));
+			}
+			return Value();
+		});
+	};
+	mouseSetting("MouseSensitivity", [](const MapSettings& s) { return Value(s.mouseSensitivity); },
+		[](MapSettings& s, Interpreter& vm, const Value& v) {
+			s.mouseSensitivity = std::clamp(static_cast<float>(vm.toNumber(v)), 0.0f, 10.0f);
+		});
+	mouseSetting("MouseYAWFactor", [](const MapSettings& s) { return Value(s.yawFactor); },
+		[](MapSettings& s, Interpreter& vm, const Value& v) { s.yawFactor = static_cast<float>(vm.toNumber(v)); });
+	mouseSetting("MousePITCHFactor", [](const MapSettings& s) { return Value(s.pitchFactor); },
+		[](MapSettings& s, Interpreter& vm, const Value& v) { s.pitchFactor = static_cast<float>(vm.toNumber(v)); });
+	mouseSetting("InvertMouse", [](const MapSettings& s) { return Value(s.invertMouse); },
+		[](MapSettings& s, Interpreter&, const Value& v) { s.invertMouse = avm1::toBoolean(v); });
 	// getMappedString(keyId, secondary, negative): the key on the input
 	// (keyId: the engine's c_PI number) in that slot and side, as shown:
 	// 0x10018050 localizes the "CONTROLLER_..." key the game gives
@@ -2463,6 +2521,46 @@ std::vector<std::string> MenuBindings::allGameModes() const
 // The modes the create-server page offers: the mod's without the first
 // "sp1" and the first "gpm_sp" (0x10069160's fill, and setGameModeIndex
 // 0x10057870, take them out the same way).
+void MenuBindings::applyVideoScheme(int scheme)
+{
+	if (scheme < 0 || scheme > 2) {
+		return;
+	}
+	static const char* const kQualities[8] = {"TerrainQuality", "GeometryQuality", "LightingQuality",
+		"DynamicLightingQuality", "DynamicShadowsQuality", "EffectsQuality", "TextureQuality", "TextureFilteringQuality"};
+	static const int kPresets[3][8] = {{1, 1, 1, 0, 0, 1, 2, 1}, {2, 2, 2, 2, 2, 2, 3, 2}, {3, 3, 3, 3, 3, 3, 3, 3}};
+	static const int kLowest[8] = {1, 1, 1, 0, 0, 1, 1, 1}; // +0x50; the highest (+0x90) 3
+	for (int i = 0; i < 8; ++i) {
+		m_settings[std::string("VideoSettings.") + kQualities[i]] = Value(std::clamp(kPresets[scheme][i], kLowest[i], 3));
+	}
+	// 0x1000ff50: the first listed entry that starts with the text.
+	const auto listed = [](const std::vector<std::string>& entries, const std::string& text) -> const std::string* {
+		for (const std::string& entry : entries) {
+			if (entry.size() >= text.size()
+				&& std::equal(text.begin(), text.end(), entry.begin(), [](char a, char b) {
+					   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+				   })) {
+				return &entry;
+			}
+		}
+		return nullptr;
+	};
+	std::vector<std::string> modes;
+	for (const auto& row : m_natives.listRows("displayModes")) {
+		if (!row.empty()) {
+			modes.push_back(row[0]);
+		}
+	}
+	if (const std::string* mode = listed(modes, scheme == 2 ? "1024x768" : "800x600")) {
+		m_settings["VideoSettings.Resolution"] = Value(*mode);
+	}
+	if (const std::string* mode = listed(m_antialiasingModes, scheme == 2 ? "2Samples" : "Off")) {
+		m_settings["VideoSettings.Antialiasing"] = Value(*mode);
+	}
+	m_settings["VideoSettings.ViewDistanceScale"] = Value(scheme == 0 ? 0.75 : scheme == 1 ? 0.9 : 1.0);
+	m_settings["VideoSettings.BloomEnabled"] = Value(scheme > 0);
+}
+
 std::vector<std::string> MenuBindings::selectBoxGameModes() const
 {
 	std::vector<std::string> modes = allGameModes();

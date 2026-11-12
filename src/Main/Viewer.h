@@ -132,6 +132,9 @@ struct ViewerOptions {
 	// the game's default) and whether up looks down. Asked as it moves.
 	std::function<float()> mouseScale;
 	std::function<bool()> invertMouse;
+	// The mouse's own axes (the map's yaw and pitch factors, 0x006802c0):
+	// what its X and its Y are multiplied by on top of mouseScale.
+	std::function<void(float& x, float& y)> mouseAxes;
 	// Told where the camera is and looks each frame (position, forward),
 	// before drawing: the game's level-of-detail choices go by it.
 	std::function<void(const float position[3], const float forward[3])> onCamera;

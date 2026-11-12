@@ -1035,11 +1035,15 @@ opens). The sentry gun, a mobile-physics PlayerControlObject, is also a
 body, whose own system (`stepObjectAnimation`) takes the gun's message 1 as
 well.
 
-**Not rewritten among the vehicles' details:** `autoUseAbility`
-(PlayerControlObject `+0x46a`, the 0xc4c5
-interface's slot `0x13c` `0x005c6bd0`): its only reader is the help
-manager's tick (`0x00646cb0`, case `0x2e`, at `0x00646deb`): a vehicle's
-help popup shows only with it; it uses no ability (the HUD's).
+**autoUseAbility** (PlayerControlObject template `+0x46a`, 0 from the
+constructor `0x005cd9e0`; the 0xc4c5 interface's slot `0x13c`
+`0x005c6bd0`) has two readers: the help manager's tick (`0x00646cb0`,
+case `0x2e`, at `0x00646deb`: a vehicle's help popup shows only with it)
+and the seated kit's ability (`0x00599f30`, see "Kit abilities in a
+vehicle"), which works only from a seat that sets it. The shipped tanks,
+APCs, walkers, FAVs, the hover tank, the heavy IFV and the gunships set
+it on their seats (as_at on 5 of 7); the Titans' guns, the stationary
+guns and the pod arrays don't. `GameWorld::stepVehicleAbility`.
 
 **Drivers' and pilots' guns.** The player's fire inputs go to the
 control object the player is in (`0x004bda00` → `0x004cc7a0`, the fire
@@ -6873,9 +6877,12 @@ seconds over all its maps.
   (`0x005c6af0`) counts per ability type n the crew aboard whose kit lists
   the vehicle (kit template `+0x308`, entering `0x0058cf00` and leaving
   `0x00588ed0` move slots 0xe4 / 0xe8); type 4 alone gives 0.9, type 5
-  alone 1.1. A soldier's slot 0xec is 0 (`0x007f1f70`): 1. Which loader
-  fills the kit's list isn't found, so f is 1 in practice and not
-  rewritten.
+  alone 1.1. A soldier's slot 0xec is 0 (`0x007f1f70`): 1. Nothing in
+  BF2142.exe fills the kit's list (a vector of name and type pairs): the
+  kit template's constructor (`0x00570080`) zeroes it, its destructor
+  frees it, and its getter (`0x0056cd80`) has only the two readers above;
+  no other code takes its address or writes its ends. So f is always 1,
+  and the rewrite leaves it out.
 - **The start** (the server game logic's states, `0x004c03b0`): waiting
   while the players are under sv.numPlayersNeededToStart, then
   sv.startDelay's countdown (`+0x280`), then playing; fewer players than
@@ -9401,16 +9408,18 @@ the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). So
 without the unlock a medic heals and a supporter rearms only his
 passengers, and an engineer mends nothing, his own vehicle included
 (only riders' soldiers are targets); the rewrite treated every seated or
-standing teammate in range and the engineer's own vehicle. Not
-rewritten: the second dose `0x00599f30` gives each target it treated
-(the strength times the control object's slot `0x17c`, shared by their
-count for healing and repair), whose slot wasn't traced.
-`abilityInVehicleStrengthModifier` (executor
-`0x004ff6df` → the template's interface at `+0x298`, slot 0x164
-`0x0059dbc0`: template `+0x4b0`, 1 by default; getter slot 0x168
-`0x0059dbd0`; saved by `0x005caff0`) has no reader: nothing reads
-`+0x4b0` and no call of slot 0x168 goes through that interface. Nothing to
-rewrite.
+standing teammate in range and the engineer's own vehicle. All of it
+runs only from a seat whose template has autoUseAbility (the control
+object's 0xc4c5 interface, `0x0042b2f0`, slot `0x13c`); the rewrite ran
+it in any seat. Each target that took something in that pass (slots
+`0x108` / `0x10c` answering true; the set `0x0056e4d0`) then gets a
+second dose: the strength times the seat's slot `0x17c` (`0x005c6d60` →
+the template's interface at `+0x298`, slot 0x168 `0x0059dbd0`:
+`abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
+executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
+`0x005caff0`; no shipped vehicle sets it), for healing and repair
+shared by the count of those targets, for ammo whole. So a medic alone
+with one passenger heals him twice as fast as the first pass alone.
 
 **Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
@@ -10233,7 +10242,12 @@ Seeking projectiles (`seek.*`, `follow.*`):
   vehicle above it is a wreck; `disableWhenEmptyVehicle` (`+0x2a5`) turns
   it off once the vehicle has stood empty for
   `disableWhenEmptyVehicleDelay` (`+0x2ac`) seconds, on again when someone
-  gets in (`0x0058e9a0`). HeatObject and LaserTarget_vehicle: both, 5 s;
+  gets in (`0x0058e9a0`). The delay is −1, off at once, when the object's
+  last rider (`+0x1a0`: the last to get in, or to get out while others
+  stayed, the player of the occupancy events 0x1e / 3, slot 0xf8) is the
+  machine's local player (`DAT_00a85228` slot 0x30): offline and on a
+  listen server the human's own vehicle goes dark as he leaves it, a
+  bot's after the delay. HeatObject and LaserTarget_vehicle: both, 5 s;
   MagneticObject: empty only, 3 s. Off, the launchers can't lock it and
   the heat and laser rounds and the motion mines don't take it
   (`GameWorld::targetEnabled`).
@@ -10545,6 +10559,86 @@ rewrite's). Effects `effect-shield-stops-rounds` and
 the pulse meter's scan (no enemies near; no unit test either), the
 defuser and the defibrillator (they want an enemy mine or a downed
 teammate; GameWorldTest covers the defibrillator).
+
+### The menu and HUD sweep (2026-11-12)
+
+`build/scratch/menusweep/sweep.py` walks the front end headless
+(`--menu --offline --menu-script`, with the script's `press:`, `drag:`,
+`print:`, `clickables`, `unbound` and `realwait:` steps) after an offline
+login on a scratch profile, and the in-game screens (`--play` with
+`--scoreboard`, `--spawn-screen`, `--commander-screen` and
+`--hud-click`, Cerbere_Landing with bots). It checks that each page's
+controls reach the profile's files (General.con, Audio.con, Video.con,
+Controls.con) and come back on the next start, that the lists fill (the
+singleplayer maps, the LOCAL browser against a server hosted on
+127.0.0.1), that the buttons act (instant action, start playlist, the
+resets), and keeps a screenshot of each screen. What it found and what
+was fixed:
+
+- The audio page's volume sliders (and every other slider whose page
+  passes its `m_percent`, a Number object that `dice.UIs.Forms.Slider`'s
+  update makes) were kept as objects, so the apply wrote nothing and the
+  volumes came back at 100%: the settings objects' setters now take the
+  number it holds, as the original's do (`0x100a4c50`).
+- The video page's presets only changed the preset's radio: setting the
+  scheme now sets the eight qualities, the resolution, the antialiasing,
+  the view distance and bloom as RendDX9's presets do (`0x1005ba10` →
+  `0x00497200` → RendDX9 slot 0x3c, `0x1000f780`; low 1 1 1 0 0 1 2 1 at
+  800x600, Off, 0.75, no bloom; medium 2s with texture 3 at 800x600,
+  Off, 0.9; high 3s at 1024x768, 2Samples, 1), each clamped to its range
+  (`0x1000f730`) and the mode and antialiasing taken only when listed
+  (`0x1000ff50`). The texture and the high lighting depend on the
+  machine's memory there (`0x1000f600`, `0x1000f130`); the rewrite takes
+  a machine with enough.
+- The controls page's mouse sensitivity, yaw and pitch factors and
+  inverted mouse were menu-only values, lost at the next start: they are
+  the active control map's (`0x00497fa0`..`0x00498080`), so they reach
+  Controls.con as `ControlMap.mouseSensitivity` (0..10, `0x006802a0`),
+  `setYawFactor`, `setPitchFactor` and `invertMouse`, and the mouse look
+  takes the on-foot map's: its sensitivity scales the mouse, the larger
+  factor over the other scales its axis, and it inverts Y (`0x006802c0`).
+  The page's RESET TO DEFAULT (`ControlSettings.reset`, `0x10016490`) was
+  the other objects' reset and left the keys; it is `resetDefault`'s code
+  (the game's Controls.con again, the profile saved).
+- The HUD page's transparencies and static map were stored but never
+  reached the HUD: GeneralSettings' apply (`0x0049bad0`) hands the HUD
+  `MenuBackgroundAlpha` (the HUD's alpha, every HUD picture's alpha
+  variable), `MenuMapAlpha` and `MenuMapIconAlpha` (the minimap's texture
+  and icons, over 255) and `MapStatic` (not minimapRotate, `0x0079a0a0`);
+  the rewrite set `MenuBackgroundAlpha` to 1 every frame. They now come
+  from the profile at its load and at each apply, with GeneralSettings'
+  defaults (`0x0049bdf0`: 255, 170, 255, rotating) from the start. While
+  playing the minimap's texture eases to `MenuMapAlpha` and its icons
+  take `MenuMapIconAlpha` (the map's state 0, `0x00780940`: +0x7b8 and
+  +0x7a4); the spawn screen's and the commander's maps stay full. A
+  static map holds the compass ring at north (`0x0078f680` keeps its
+  angles at 0).
+- The scoreboard's Server tab listed the players under the server's
+  information: its row filler adds no player rows on that tab
+  (`0x007bb540` returns before them with +0x38b set). Its map line
+  (`ActiveLevel`, `0x00448300`) was empty: the level's name, underscores
+  as spaces, in capitals (`0x0065af00`).
+
+Seen working: the game page's radios and reset, the HUD page's radios,
+sliders and reset, the video page's sliders, enhanced lighting and
+reset, the audio page's radios, the controls page's tabs and key
+bindings (the unit tests'), the singleplayer page's map lists, bot skill,
+playlist and instant action, the LOCAL list on loopback, the create tab,
+the in-game HUD, scoreboard (players, squads, manage), spawn screen and
+commander screen.
+
+Left: the rotating minimap. With `MapStatic` off (the default) the
+original turns the minimap about the player (`0x0078f680`: the angle
++0x7fc eased to the player's +0x810, the delayed +0x800 the compass shows,
++0x80c for the markers, `0x0078cb30` / `0x0078e510`); the rewrite's
+minimap stays north up, its ring turning. The audio page's RESET TO
+DEFAULT changes the page (`0x10010a60`: slot 0x24, no apply) but nothing
+applies it, so the file keeps the old values; whether the original
+writes them later (the profile's save) isn't established. Not checked
+headless: the display modes' box (a window lists the modes), the roses,
+chat and vote screens (keys in a window), the end-of-round screen in a
+round (EndOfRoundBindingsTest), the online pages (BFHQ, the account's
+stats and the leaderboards, which stay offline).
 
 ### Comm roses and the radio
 
@@ -13064,6 +13158,25 @@ The urgencies:
   20 s for medic and need_ammo; AIDLL 0x100a7130). Who hears is the game
   server's 0x004a6f70 (see the HUD's comm roses: `GameWorld::hearsRadio`);
   `BotManager::update` takes the bots' share of what the world heard.
+  From a human sender (the AI player's vt+0x84 → player vt+0x68),
+  0x10030b20 first acts on three types. bail_out and get_in set the "bots
+  may take it" flag of his vehicle to 0 and 1: the AI player's vt+0x50
+  (0x008a50d0: the control object's AI adaptor at `+0x40`, or the
+  soldier's on a ladder or a parachute), then its root (adaptor slot 0xf0:
+  itself, or a secondary part's parent, 0x00448230 / 0x00584240), then
+  slot 0x90 (0x00498120 → `+8`; 1 from the constructor 0x008a3a60). The
+  vehicle choice weighs no vehicle whose `+8` is 0 (BBChange 0x1006c520,
+  slot 0x94 0x0043c4f0, before every other test of a candidate). A human
+  leaving a vehicle with the use key sets it again: 0x004bb570 posts AI
+  event 3/3 once he is out, and 0x00894860 → IAIEventCourier slot 8
+  (0x1004e0a0) → AIMain slot 23 (0x10056610) does it for a player who
+  isn't a bot. Nothing else writes `+8`. A req_pickup from a human is kept
+  only by a hearer within 90° of where he looks: the camera matrix's z
+  axis (AI player vt+0x88, 0x008a4f00) against the way from his position
+  to the hearer's object (0x1002b0b0; acos over 90° drops it). Other
+  messages, and every message from a bot, are filed as they come.
+  `BotManager::radio`, `closedToBots`, `GameWorld::takeUseKeyExits`,
+  `viewForward`.
   The bots' own radio, the comm object's sends (0x100a7860): a type is
   queued `delay` s on unless its next time (+0x3c) hasn't come, which
   queuing sets the type's max send period on (+100: the
@@ -13406,7 +13519,11 @@ vehicle's riders as hit.
   and Revive need the target on the bot's mesh outside the vehicles round
   it (0x100947b0) and count only soldier to soldier within 3 m or when
   "going in" (a human soldier within 20 m, moving, with its magazine
-  empty, and the bot's own empty or a melee weapon in hand); with the
+  empty, and the bot's own empty or a melee weapon in hand, and either
+  that melee weapon or the human attending: holding a weapon of his
+  Armament, with the bot's newest sensing record of him, 0x100eb7f0 on
+  the agent's map +0x84 that 0x100ebdd0 fills, under 9995 s old, −1000
+  with none, so nearly always); with the
   mesh ray to the target clear such a weapon is taken at once. The
   explosive bonus (above) needs the weapon unguided (+0x6c 0) and, for a
   soldier, neither its `+0x248` nor the area guard: of the areas its
@@ -13608,8 +13725,8 @@ vehicle's riders as hit.
   team with bots and no commander it shells a spot of the first held
   point whose flag is below 0.75 with the artillery (the SAI's slot 0x68,
   0x1009c4d0), nine times in ten and only with no teammate within 40 m of
-  it (0x1008a110, the squad manager's strike radius +0xb8; the earlier
-  stand-in had 15 m); failing that, an enemy human who has been off the
+  it (0x1008a110, the squad manager's strike radius +0xb8; the
+  rewrite once used 15 m); failing that, an enemy human who has been off the
   navigation mesh for over 60 s (0x100888d0 over the squad manager's list
   0x1008a3b0, refreshed each time the squads' round robin wraps: humans
   alive, up and on foot whose position isn't on their map). At most every

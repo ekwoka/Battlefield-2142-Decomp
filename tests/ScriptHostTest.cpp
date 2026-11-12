@@ -528,3 +528,45 @@ TEST(ScriptHost_HostedStartRestartsThePlayers)
 	}
 	CHECK(errors.empty());
 }
+
+// An object deleted while inside a trigger leaves it as None (0x00442c80's
+// caller passes the trigger's emptied reference), so gpm_coop's onCPTrigger
+// (`if vehicle:`) skips it rather than asking a dead object for its players.
+TEST(ScriptHost_TriggerExitOfADeletedObjectIsNone)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	std::string errors;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) {
+				errors += line + "\n";
+			}
+		});
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(true);
+	const int bot = round.world->addPlayer("Bot", 2, true);
+	CHECK(round.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.world->playerInfo(bot, info) && info.soldier);
+	CHECK(host.run("import host, _host_objects\n"
+				   "_host_objects.seen = []\n"
+				   "def onTrigger(id, owner, other, entered, data=None):\n"
+				   "    _host_objects.seen.append((other is None, entered))\n"
+				   "    if other:\n"
+				   "        other.getOccupyingPlayers()[0]\n"
+				   "host.trig_create(_host_objects.wrap(" + std::to_string(round.enemyPoint->id()) +
+		"), onTrigger, 'PlayerControlObject', 10.0, 0)\n"));
+	host.update();
+	round.objects.remove(info.soldier);
+	host.update();
+	CHECK(host.run("import _host_objects\nassert _host_objects.seen == [(False, 1), (True, 0)], _host_objects.seen\n"));
+	if (!errors.empty()) {
+		std::fprintf(stderr, "%s", errors.c_str());
+	}
+	CHECK(errors.empty());
+}

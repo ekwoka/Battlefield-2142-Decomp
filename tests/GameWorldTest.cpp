@@ -3213,6 +3213,72 @@ TEST(GameWorld_TargetObjectOffWhenEmpty)
 	}
 }
 
+// The empty vehicle's delay (0x0058eba0): -1 when its last rider (+0x1a0)
+// is the machine's local player, so a vehicle the local player got out of
+// goes dark at once; one a bot got out of stays lockable for the
+// template's 5 s.
+TEST(GameWorld_TargetObjectOffAtOnceForTheLocalLeaver)
+{
+	for (const bool local : {true, false}) {
+		Range range;
+		range.collisionTemplates.add("crate_mesh", boxMesh(1));
+		range.templates.registerType(8, "SimpleObject");
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+		launcher->settings()["target.maxDistance"] = "450";
+		launcher->settings()["target.lockAngle"] = "180";
+		launcher->settings()["target.lockDelay"] = "0.1";
+		range.templates.create("Engine", "crate_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* heat = range.templates.create("SimpleObject", "HeatObject");
+		heat->settings()["targetType"] = "TTHeat";
+		heat->settings()["disableWhenEmptyVehicle"] = "1";
+		heat->settings()["disableWhenEmptyVehicleDelay"] = "5";
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		makeMobile(*crate, "crate_mesh");
+		crate->children().push_back({"crate_engine", {}, {}});
+		crate->children().push_back({"HeatObject", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		const int rider = local ? me : range.world->addPlayer("Rider", 1, true);
+		if (!local) {
+			CHECK(range.world->spawnSoldier(rider));
+		}
+		range.world->playerInfo(rider, info);
+		world::Object* car = range.objects.create(crate, {info.position.x, 1, info.position.z + 2});
+		car->setTeam(1);
+		const auto press = [&](bool use) {
+			game::SoldierInput input;
+			input.use = use;
+			if (rider == me) {
+				range.world->setPlayerInput(input);
+			} else {
+				range.world->setInput(rider, input);
+			}
+			range.world->tick(1 / 30.0f);
+		};
+		range.world->tick(1 / 30.0f);
+		press(true);
+		press(false);
+		CHECK(range.world->playerInfo(rider, info) && info.vehicle == car->id());
+		press(true);
+		press(false);
+		CHECK(range.world->playerInfo(rider, info) && info.vehicle == 0);
+		if (!local) {
+			range.world->playerInfo(me, info);
+			range.world->setSoldierPosition(info.soldier, {car->position().x, 0, car->position().z - 20});
+		}
+		for (int i = 0; i < 10; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(me);
+		CHECK(local ? lock.target == 0 : lock.target == car->id() && lock.state == 2);
+	}
+}
+
 // A heat seeker's round (SeekClosestTargetComp, TTHeat): fired locked it
 // has the launcher's target and turns after it (0x005e1ee0, 0x005ec260);
 // fired unlocked with reLockTime 9999 it never takes one.
@@ -3793,14 +3859,16 @@ TEST(GameWorld_StaticSupplyTakesTheClosestPointsTeam)
 
 // A seated engineer's kit ability (0x00599f30): an EU_Anti-Vehicle kit
 // (hasRepairingAbility, abilityInVehicleRadius 8, abilityInVehicleStrength
-// 0.075 a tick) repairs the vehicle it sits in, 2.25 per cent a second,
-// only with an unlock's increasedRepairAbility above 0 (slot 0x2a0's
-// +0x48: the second sphere, which takes the vehicles; the first takes
-// only the riders' soldiers); a kit without an Ability component does
-// nothing.
+// 0.075 a tick) repairs the vehicle it sits in, 2.25 per cent a second
+// and the second dose's 2.25 again (the strength times the seat's
+// abilityInVehicleStrengthModifier, 1, shared by the one target), only
+// with an unlock's increasedRepairAbility above 0 (slot 0x2a0's +0x48:
+// the second sphere, which takes the vehicles; the first takes only the
+// riders' soldiers) and only from a seat with autoUseAbility (case 3:
+// without it, nothing); a kit without an Ability component does nothing.
 TEST(GameWorld_KitAbilityInAVehicle)
 {
-	for (int repairs = 0; repairs < 3; ++repairs) {
+	for (int repairs = 0; repairs < 4; ++repairs) {
 		Range range;
 		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
 		range.templates.registerType(6, "Kit");
@@ -3812,6 +3880,9 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["armor.maxHitPoints"] = "100";
+		if (repairs < 3) {
+			jeep->settings()["autoUseAbility"] = "1";
+		}
 		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 		// Named as team 2's default kit, the local player's.
 		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
@@ -3824,7 +3895,7 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		// The unlock (an owned ItemContainer's Ability, 0x005706b0).
 		range.templates.create("ItemContainer", "repair_unlock")->settings()["ability.increasedRepairAbility"] = "1.25";
 		kit->children().push_back({"repair_unlock", {}, {}});
-		if (repairs == 2) {
+		if (repairs >= 2) {
 			range.world->localPlayerOwned = {"repair_unlock"};
 		}
 		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
@@ -3845,8 +3916,8 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		}
 		const float now = range.world->hitPoints(car);
 		std::fprintf(stderr, "  %s: %.2f after a second\n",
-			repairs == 2 ? "repairing, unlocked" : repairs ? "repairing" : "no ability", now);
-		CHECK(repairs == 2 ? std::fabs(now - 52.25f) < 0.1f : now == 50);
+			repairs == 3 ? "unlocked, no autoUseAbility" : repairs == 2 ? "repairing, unlocked" : repairs ? "repairing" : "no ability", now);
+		CHECK(repairs == 2 ? std::fabs(now - 54.5f) < 0.1f : now == 50);
 	}
 }
 
@@ -3854,9 +3925,10 @@ TEST(GameWorld_KitAbilityInAVehicle)
 // objects in abilityInVehicleRadius give their riders' soldiers (player
 // slot 0xb4), but without increasedRepairAbility only those of his own
 // vehicle (the same root): his passenger is healed (0.35 a tick, 10.5 per
-// cent a second), the rider of another car 4 m off and a soldier on foot
-// beside them aren't; with the unlock all three are (the second sphere
-// takes the one on foot).
+// cent a second, and the second dose's 10.5 shared by the targets
+// treated), the rider of another car 4 m off and a soldier on foot beside
+// them aren't; with the unlock all three are (the second sphere takes the
+// one on foot), each 10.5 + 3.5.
 TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 {
 	for (const bool unlocked : {false, true}) {
@@ -3871,6 +3943,7 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->settings()["armor.maxHitPoints"] = "100";
 		jeep->settings()["seatInformation"] = "jeep 0/0.5/0.5 0/0/0";
+		jeep->settings()["autoUseAbility"] = "1";
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->children().push_back({"jeep_back", {0, 0, -0.5f}, {}});
 		range.templates.create("PlayerControlObject", "jeep_back")->settings()["seatInformation"] = "jeep_back 0/0.5/0 0/0/0";
@@ -3939,9 +4012,9 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 		const float onFoot = range.world->hitPoints(soldierOf(walker));
 		std::fprintf(stderr, "  %s: passenger %.2f, the other car's %.2f, on foot %.2f\n",
 			unlocked ? "unlocked" : "no unlock", healed, otherCar, onFoot);
-		CHECK(std::fabs(healed - 60.5f) < 0.2f);
-		CHECK(unlocked ? std::fabs(otherCar - 60.5f) < 0.2f : otherCar == 50);
-		CHECK(unlocked ? std::fabs(onFoot - 60.5f) < 0.2f : onFoot == 50);
+		CHECK(std::fabs(healed - (unlocked ? 64.0f : 71.0f)) < 0.2f);
+		CHECK(unlocked ? std::fabs(otherCar - 64.0f) < 0.2f : otherCar == 50);
+		CHECK(unlocked ? std::fabs(onFoot - 64.0f) < 0.2f : onFoot == 50);
 	}
 }
 
@@ -4151,6 +4224,7 @@ TEST(GameWorld_CanBeRepaired)
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["armor.maxHitPoints"] = "100";
 		jeep->settings()["armor.canBeRepaired"] = repairable ? "1" : "0";
+		jeep->settings()["autoUseAbility"] = "1";
 		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
 		kit->children().push_back({"eu_ar_rifle", {}, {}});
@@ -4176,7 +4250,7 @@ TEST(GameWorld_CanBeRepaired)
 			range.world->tick(1 / 30.0f);
 		}
 		const float now = range.world->hitPoints(car);
-		CHECK(repairable ? std::fabs(now - 52.25f) < 0.1f : now == 50);
+		CHECK(repairable ? std::fabs(now - 54.5f) < 0.1f : now == 50); // the two doses
 	}
 }
 

@@ -713,6 +713,11 @@ void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world, const w
 			colors = std::move(groupedColors);
 			backgrounds = std::move(groupedBackgrounds);
 		}
+		if (!dice::hfe::menu::scoreboardListsPlayers(hud.number("ToggleServer") != 0 ? 3 : 0)) {
+			rows.clear();
+			colors.clear();
+			backgrounds.clear();
+		}
 		hud.setList(side == 0 ? 2 : 1, std::move(rows));
 		hud.setListRowColors(side == 0 ? 2 : 1, std::move(colors));
 		hud.setListRowBackgrounds(side == 0 ? 2 : 1, std::move(backgrounds));
@@ -1311,7 +1316,6 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	hud.set("ShowSoldierHud", connected ? 1 : 0);
 	hud.set("ShowVehicleHud", inVehicle ? 1 : 0);
 	hud.set("InVehicle", inVehicle ? 1 : 0);
-	hud.set("MenuBackgroundAlpha", 1);
 	// The crosshair (CrosshairIconShow, the weapon HUD's +0xec, 0x007be6e0)
 	// needs CrosshairActive (+0xed), which the HUD's menu state sets
 	// (0x007c1bf0): on with no menu while alive, off for the spawn screen
@@ -1498,8 +1502,10 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	if (soldier) {
 		// <map>DelayedMapAngle (the map node's variables, registered by its
 		// constructor 0x00784cf0 with <map>RMBMenuState, MapFilter%iActive,
-		// SatelliteActive and the CPNames* ones).
-		hud.set("MinimapDelayedMapAngle", heading(soldier->rotation().x));
+		// SatelliteActive and the CPNames* ones). A static map (MapStatic,
+		// the profile's minimapRotate off) holds its angles at 0
+		// (0x0078f680: +0x7fc, +0x800 and +0x80c), so the ring shows north.
+		hud.set("MinimapDelayedMapAngle", hud.number("MapStatic") != 0 ? 0.0f : heading(soldier->rotation().x));
 	}
 	hud.set("PlayerHealthShow", alive ? 1 : 0);
 	const float health = world.health();
@@ -2129,9 +2135,12 @@ dice::hfe::menu::RoundSummary remoteRoundSummary(const Options& options, const n
 	return summary;
 }
 
-// Plays the menu headless: "wait:<seconds>", "click:<x>,<y>" (stage
-// pixels), "type:<text>", "call:<clip>.<method>,<args>", separated by
-// spaces; stops early once `done`.
+// Plays the menu headless: "wait:<seconds>" ("realwait:<seconds>" in real
+// time), "click:<x>,<y>" (stage
+// pixels), "drag:<x>,<y>,<x2>,<y2>", "press:<target>", "type:<text>", "key:<code>",
+// "call:<clip>.<method>,<args>", and for checks "print:<path>",
+// "clickables[:<part>]" and "unbound", separated by spaces; stops early
+// once `done`.
 void runMenuScript(ui::Player& menu, const std::string& script, const std::function<bool()>& done)
 {
 	std::istringstream commands(script);
@@ -2151,6 +2160,75 @@ void runMenuScript(ui::Player& menu, const std::string& script, const std::funct
 			menu.mouseDown();
 			menu.advance(1.0f / 30);
 			menu.mouseUp();
+		} else if (op == "realwait") {
+			// realwait:<seconds>: the same in real time, for the jobs the
+			// natives poll (a LAN search, a server's probe).
+			const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<int>(std::atof(arg.c_str()) * 1000));
+			while (std::chrono::steady_clock::now() < until && !done()) {
+				menu.advance(1.0f / 30);
+				std::this_thread::sleep_for(std::chrono::milliseconds(33));
+			}
+		} else if (op == "drag") {
+			// drag:<x>,<y>,<x2>,<y2>: pressed at the first point, moved to
+			// the second over a few frames, released there a second later.
+			float v[4] = {};
+			std::istringstream numbers(arg);
+			for (float& n : v) {
+				std::string part;
+				std::getline(numbers, part, ',');
+				n = static_cast<float>(std::atof(part.c_str()));
+			}
+			menu.mouseMove(v[0], v[1]);
+			menu.advance(1.0f / 30);
+			menu.mouseDown();
+			for (int i = 1; i <= 8; ++i) {
+				menu.advance(1.0f / 30);
+				menu.mouseMove(v[0] + (v[2] - v[0]) * i / 8, v[1] + (v[3] - v[1]) * i / 8);
+			}
+			// Held a second there: the sliders report on their update
+			// manager's ticks (dice.UIs.Forms.Slider's slide), not on release.
+			for (int i = 0; i < 30; ++i) {
+				menu.advance(1.0f / 30);
+			}
+			menu.mouseUp();
+		} else if (op == "press") {
+			// press:<target>: a click in the middle of the topmost visible
+			// clickable whose target ends so ("FlashMenu.btnOptions").
+			bool found = false;
+			for (const ui::Player::Clickable& c : menu.clickables()) {
+				if (c.target.size() >= arg.size() && c.target.compare(c.target.size() - arg.size(), arg.size(), arg) == 0) {
+					menu.mouseMove(c.x + c.width / 2, c.y + c.height / 2);
+					menu.advance(1.0f / 30);
+					menu.mouseDown();
+					menu.advance(1.0f / 30);
+					menu.mouseUp();
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				std::fprintf(stderr, "menu script: nothing to press for %s\n", arg.c_str());
+			}
+		} else if (op == "print") {
+			// print:<path>: a value by path from _root, on stdout.
+			std::printf("menu print %s = %s\n", arg.c_str(), menu.vm().toString(menu.evaluate(arg)).c_str());
+		} else if (op == "clickables") {
+			// clickables[:<substring>]: the visible clickables, on stdout.
+			for (const ui::Player::Clickable& c : menu.clickables()) {
+				if (arg.empty() || c.target.find(arg) != std::string::npos) {
+					std::printf("menu clickable %s %.0f,%.0f %.0fx%.0f\n", c.target.c_str(), c.x, c.y, c.width, c.height);
+				}
+			}
+		} else if (op == "unbound") {
+			// unbound: the natives called so far that nothing binds, on stdout.
+			for (const std::string& call : menu.natives().unboundCalls()) {
+				std::printf("menu unbound %s\n", call.c_str());
+			}
+		} else if (op == "key") {
+			// key:<Flash key code>: a key pressed and released (13 Enter, 27 Esc).
+			const int code = std::atoi(arg.c_str());
+			menu.keyDown(code, code < 128 ? static_cast<uint32_t>(code) : 0);
+			menu.keyUp(code);
 		} else if (op == "type") {
 			for (const unsigned char c : arg) {
 				menu.keyDown(static_cast<uint32_t>(std::toupper(c)), c);
@@ -2177,7 +2255,10 @@ void runMenuScript(ui::Player& menu, const std::string& script, const std::funct
 				const double number = std::strtod(parts[i].c_str(), &end);
 				values.push_back(!parts[i].empty() && *end == 0 ? ui::avm1::Value(number) : ui::avm1::Value(parts[i]));
 			}
-			menu.vm().callMember(target, parts[0].substr(dot + 1), values);
+			const ui::avm1::Value result = menu.vm().callMember(target, parts[0].substr(dot + 1), values);
+			if (!result.isUndefined()) {
+				std::printf("menu call %s = %s\n", parts[0].c_str(), menu.vm().toString(result).c_str());
+			}
 		} else {
 			std::fprintf(stderr, "menu script: unknown command %s\n", command.c_str());
 		}
@@ -3242,6 +3323,25 @@ int runGame(Options& options, Session& session)
 				hudManager.set(names[i], std::clamp(c[i] / 255.0f, 0.0f, 1.0f));
 			}
 		}
+		// The HUD page's other values, as GeneralSettings' slot 6
+		// (0x0049bad0) hands them to the HUD: MapStatic is "not
+		// minimapRotate" (+0x74, 0x0079a0a0, the map's event 10 then reads
+		// it, 0x00779890), and MenuBackgroundAlpha, MenuMapAlpha and
+		// MenuMapIconAlpha the HUD, minimap and map icon alphas (+0x48,
+		// +0x78, +0x7c) over 255.
+		if (key == "GeneralSettings.MinimapRotate") {
+			hudManager.set("MapStatic", session.settings.number(key, 1) != 0 ? 0 : 1);
+		}
+		static const std::pair<const char*, const char*> kAlphas[] = {
+			{"GeneralSettings.HUDTransparency", "MenuBackgroundAlpha"},
+			{"GeneralSettings.MinimapTransparency", "MenuMapAlpha"},
+			{"GeneralSettings.MapIconAlphaTransparency", "MenuMapIconAlpha"},
+		};
+		for (const auto& [setting, variable] : kAlphas) {
+			if (key == setting) {
+				hudManager.set(variable, std::clamp(static_cast<float>(session.settings.number(key, 255)) / 255.0f, 0.0f, 1.0f));
+			}
+		}
 	};
 	StubMethods stubs;
 	for (const std::string& table : options.apiTables) {
@@ -3344,6 +3444,10 @@ int runGame(Options& options, Session& session)
 			}
 			if (session.settings.get("GeneralSettings.CrosshairColor") != "255 255 255 255") {
 				session.settings.onChange("GeneralSettings.CrosshairColor");
+			}
+			for (const char* key : {"GeneralSettings.MinimapRotate", "GeneralSettings.HUDTransparency",
+					 "GeneralSettings.MinimapTransparency", "GeneralSettings.MapIconAlphaTransparency"}) {
+				session.settings.onChange(key);
 			}
 		}
 	}
@@ -3482,6 +3586,13 @@ int runGame(Options& options, Session& session)
 		}
 		applyVoiceSettings();
 		const dice::hfe::menu::MenuBindings& settings = *session.menuBindings;
+		// The HUD page's values to the HUD (0x0049bad0 runs on the apply).
+		if (session.settings.onChange) {
+			for (const char* key : {"GeneralSettings.CrosshairColor", "GeneralSettings.MinimapRotate", "GeneralSettings.HUDTransparency",
+					 "GeneralSettings.MinimapTransparency", "GeneralSettings.MapIconAlphaTransparency"}) {
+				session.settings.onChange(key);
+			}
+		}
 		// The controls page's keys into the profile's Controls.con.
 		if (session.profiles.onSaveControls) {
 			session.profiles.onSaveControls(session.settings.profile());
@@ -5777,6 +5888,8 @@ int runGame(Options& options, Session& session)
 			soundSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 			++soundTicks;
 		};
+		// The scoreboard's server tab's map (ActiveLevel, 0x00448300).
+		hudManager.setString("ActiveLevel", dice::hfe::menu::activeLevelText(options.level));
 		// The HUD's map: the level's ingameMap.dds over the primary terrain.
 		if (const terrain::Heightmap* ground = heightmaps.primary(); ground && ground->loaded()) {
 			hudManager.setMap("Levels/" + options.level + "/Hud/Minimap/ingameMap.dds", ground->originX(), ground->originZ(),
@@ -9249,14 +9362,25 @@ int runGame(Options& options, Session& session)
 				return showMenu && session.menuBindings ? session.menuBindings->waitCursor() : 0;
 			};
 		}
-		if (session.menuBindings) {
-			// ControlSettings: 0.5 is the game's default sensitivity.
-			const dice::hfe::menu::MenuBindings* settings = session.menuBindings.get();
-			viewer.mouseScale = [settings, &playerCamera] {
-				return static_cast<float>(settings->setting("ControlSettings.MouseSensitivity", 0.5) / 0.5)
-					* playerCamera.mouseScale();
+		if (!controls.maps().empty()) {
+			// The mouse look's map settings, as the controls page's common tab
+			// sets them (the on-foot map; MenuBindings::bindControls): its
+			// sensitivity scales the mouse (0x006802c0: 1 the default), the
+			// larger of the yaw and pitch factors over the other scales its
+			// axis (X with the yaw's, Y with the pitch's), and it can invert Y.
+			viewer.mouseScale = [&controls, &playerCamera] {
+				return controls.settingsOf(input::ControlMaps::kInfantry).mouseSensitivity * playerCamera.mouseScale();
 			};
-			viewer.invertMouse = [settings] { return settings->setting("ControlSettings.InvertMouse", 0) != 0; };
+			viewer.invertMouse = [&controls] { return controls.settingsOf(input::ControlMaps::kInfantry).invertMouse; };
+			viewer.mouseAxes = [&controls](float& x, float& y) {
+				const input::ControlMaps::MapSettings s = controls.settingsOf(input::ControlMaps::kInfantry);
+				if (s.pitchFactor < s.yawFactor && s.pitchFactor > 0) {
+					x = s.yawFactor / s.pitchFactor;
+				}
+				if (s.yawFactor < s.pitchFactor && s.yawFactor > 0) {
+					y = s.pitchFactor / s.yawFactor;
+				}
+			};
 		}
 		if (!controls.maps().empty()) {
 			viewer.controls = &controls;

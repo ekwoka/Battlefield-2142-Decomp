@@ -2409,6 +2409,12 @@ TEST(Bots_WeaponChoice)
 	c.targetHuman = true;
 	c.targetMotion = 0;
 	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 0);
+	// The human attending (0x10074ef0's local_9): armed, and the bot's
+	// newest sensing record of him under 9995 s old (-1000 with none).
+	CHECK(game::humanAttends(true, 60, 50));
+	CHECK(game::humanAttends(true, 60, -1e9f)); // no record: -1000
+	CHECK(!game::humanAttends(true, 9000, -1e9f));
+	CHECK(!game::humanAttends(false, 60, 50)); // nothing in hand
 	// EMP: x (3 - level).
 	game::WeaponOption emp = rifle;
 	emp.emp = true;
@@ -2824,6 +2830,78 @@ TEST(Bots_ChangeHearsBailOutAndGetIn)
 		const float after = bots.lastUrgency(bot, "Change");
 		CHECK(before > 0);
 		CHECK(after > 5 * before); // x10, the same distance
+	}
+}
+
+// The radio's actions (AIDLL 0x10030b20): a human's bail_out closes his
+// vehicle to the bots' choice (its root AI adaptor's +8, BF2142.exe slot
+// 0x90 0x00498120, which BBChange 0x1006c520 reads first through slot
+// 0x94), his get_in opens it again, and so does his leaving it with the
+// use key (0x004bb570's event 3/3 -> AIMain slot 23, 0x10056610); a bot's
+// bail_out doesn't. A human's req_pickup is kept only by the bots within
+// 90 degrees of where he looks.
+TEST(Bots_RadioActionsCloseTheVehicleAndFilterThePickup)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int human = field.soldier("Human", false, 0, 0);
+		const int bot = field.soldier("Bot", true, -30, 0);
+		field.ticks(90);
+		field.board(human, 0);
+		CHECK(field.info(human).vehicle == car);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(30, &bots);
+		const float open = bots.lastUrgency(bot, "Change");
+		CHECK(open > 0);
+		CHECK(!bots.closedToBots(car));
+		bots.radio(human, "bail_out");
+		CHECK(bots.closedToBots(car));
+		field.ticks(30, &bots);
+		CHECK(bots.lastUrgency(bot, "Change") == 0); // the car isn't weighed
+		bots.radio(human, "get_in");
+		CHECK(!bots.closedToBots(car));
+		field.ticks(30, &bots);
+		CHECK(bots.lastUrgency(bot, "Change") > open);
+		bots.radio(human, "bail_out");
+		CHECK(bots.closedToBots(car));
+		field.board(human, 0); // out by the use key
+		CHECK(field.info(human).vehicle == 0);
+		field.ticks(1, &bots);
+		CHECK(!bots.closedToBots(car));
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int other = field.soldier("Bot2", true, 0, 0);
+		const int bot = field.soldier("Bot", true, -30, 0);
+		field.ticks(90);
+		field.board(other, 0);
+		CHECK(field.info(other).vehicle == car);
+		game::BotManager bots(*field.world, field.settings);
+		bots.radio(other, "bail_out", bot);
+		CHECK(!bots.closedToBots(car)); // a bot's message only goes to the comm
+	}
+	{
+		CarField field(gameDir);
+		const int human = field.soldier("Human", false, 0, 0);
+		field.ticks(10);
+		const physics::Vec3 look = field.world->viewForward(human);
+		CHECK(physics::lengthSquared(look) > 0.9f);
+		const int ahead = field.soldier("Ahead", true, 10 * look.x, 10 * look.z);
+		const int behind = field.soldier("Behind", true, -10 * look.x, -10 * look.z);
+		field.ticks(10);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(1, &bots);
+		bots.radio(human, "req_pickup");
+		CHECK(bots.keepsRadio(ahead, 2, human));
+		CHECK(!bots.keepsRadio(behind, 2, human));
+		bots.radio(human, "medic"); // the other types go to every hearer
+		CHECK(bots.keepsRadio(ahead, 3, human) && bots.keepsRadio(behind, 3, human));
 	}
 }
 

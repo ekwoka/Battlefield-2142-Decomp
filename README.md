@@ -273,7 +273,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 |---|---|
 | `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
 | `--offline` | The menu finds no account service, so it plays offline. |
-| `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>`, `click:<x>,<y>`, `type:<text>`, `call:<clip>.<method>,<args>`. |
+| `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |
 | `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
 
 **Hosting a game**

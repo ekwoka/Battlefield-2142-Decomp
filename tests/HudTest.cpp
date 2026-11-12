@@ -416,6 +416,29 @@ TEST(Hud_MapAndMarkers)
 		CHECK(std::abs(quads[0].u0) < 1e-5f && std::abs(quads[0].v1 - 1) < 1e-5f && std::abs(quads[0].u1 - span) < 1e-4f);
 	}
 	CHECK(quads.size() == 1); // the spawn point is outside the window
+	// While playing, the minimap's texture eases to MenuMapAlpha, the
+	// profile's minimap transparency (0x0049bad0; 170 / 255 by default,
+	// 0x0049bdf0), and its icons take MenuMapIconAlpha (0x00780940).
+	CHECK(!quads.empty() && std::abs(quads[0].color[3] - 170.0f / 255.0f) < 1e-3f);
+	manager.set("MenuMapAlpha", 0.25f);
+	manager.set("MenuMapIconAlpha", 0.5f);
+	manager.setMapFocus(256, 256);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	CHECK(quads.size() == 2 && std::abs(quads[0].color[3] - 0.25f) < 1e-3f && std::abs(quads[1].color[3] - 0.5f) < 1e-3f);
+	manager.set("MapFullSize", 1);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	CHECK(quads.size() == 2 && quads[0].color[3] == 1 && quads[1].color[3] == 1); // the big map: full
+	manager.set("MapFullSize", 0);
+	manager.set("MenuMapAlpha", 170.0f / 255.0f);
+	manager.set("MenuMapIconAlpha", 1);
+	manager.setMapFocus(-500, -500);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
 	// A combat area of the level's middle half: the big map shows it
 	// (widened by 20 of 512 pixels a side) filling the node.
 	manager.setMapArea(-256, -256, 256, 256);

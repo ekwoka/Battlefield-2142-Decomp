@@ -413,6 +413,29 @@ void GameWorld::stepCombatAreas(float seconds)
 	}
 }
 
+physics::Vec3 GameWorld::viewForward(int id) const
+{
+	const Player* me = findPlayer(id);
+	if (!me) {
+		return {};
+	}
+	const auto along = [](float yawDegrees, float pitchDegrees) {
+		const float yaw = yawDegrees * 3.14159265f / 180.0f;
+		const float pitch = pitchDegrees * 3.14159265f / 180.0f;
+		return physics::Vec3 {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	};
+	if (const Body* body = me->vehicle ? findBody(me->vehicle) : nullptr) {
+		float yaw = 0, pitch = 0;
+		if (!gunAim(body->object, me->seat, yaw, pitch) && me->seat >= 0
+			&& static_cast<size_t>(me->seat) < body->looks.size()) {
+			yaw = body->looks[static_cast<size_t>(me->seat)].yaw;
+			pitch = body->looks[static_cast<size_t>(me->seat)].pitch;
+		}
+		return body->body.rotation.transform(along(yaw, pitch));
+	}
+	return along(lookYaw(*me), me->input.aimPitch);
+}
+
 int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const
 {
 	const Player* me = findPlayer(id);

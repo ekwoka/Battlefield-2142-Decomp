@@ -271,6 +271,12 @@ HudManager::HudManager(Reader reader) : m_reader(std::move(reader))
 		Node* node = create(kSplit, "", root.name, root.x, root.y, 800, 600);
 		m_roots.push_back(node);
 	}
+	// The variables GeneralSettings hands the HUD (0x0049bad0), at its
+	// defaults (0x0049bdf0) until a profile's are applied: the HUD opaque,
+	// the minimap's texture at 170 / 255, its icons opaque, rotating.
+	set("MenuBackgroundAlpha", 1);
+	set("MenuMapAlpha", 170.0f / 255.0f);
+	set("MenuMapIconAlpha", 1);
 }
 
 HudManager::~HudManager() = default;
@@ -1497,7 +1503,7 @@ void HudManager::shownArea(float refX, float refY, float area[4]) const
 // The map's texture is the node's size times the zoom, placed with the
 // focus at the node's centre, then pushed back so that the shown area
 // covers the node; it is cut to the node and drawn white at the map's
-// transparency (0x7b0, 1).
+// transparency (0x7b0: MenuMapAlpha while playing, else 1; below).
 //
 // Markers (0x0077c610) keep their pixel size at every zoom: a marker's
 // rectangle is floor(its point - size / 2) by floor(size) (the exe takes
@@ -1522,10 +1528,15 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		size = commanderSize.data();
 	}
 	const float nx = 400 + pos[0], ny = 300 + pos[1], nw = size[0], nh = size[1];
-	// The map texture's alpha (+0x7b0) eased towards MenuMapAlpha's 0 with
-	// the overhead view on, 1 off: down by a tenth of (1 - e^(-9 t)) a
-	// frame, up by a fifth of it (0x00790400).
-	const float mapAlphaTarget = m_overhead ? 0.0f : 1.0f;
+	// The map texture's alpha (+0x7b0) eased towards its target (+0x7b8):
+	// 0 with the overhead view on; while playing (the map's state 0,
+	// 0x00780940) the HUD's MenuMapAlpha, the profile's minimap
+	// transparency (GeneralSettings 0x0049bad0), else 1. Down by a tenth
+	// of (1 - e^(-9 t)) a frame, up by a fifth of it (0x00790400). The
+	// markers take MenuMapIconAlpha the same way (+0x7a4, eased at +0x79c).
+	const bool playing = !full && number("CommanderShow") == 0;
+	const float mapAlphaTarget = m_overhead ? 0.0f : playing ? std::clamp(number("MenuMapAlpha"), 0.0f, 1.0f) : 1.0f;
+	const float iconAlpha = playing ? std::clamp(number("MenuMapIconAlpha"), 0.0f, 1.0f) : 1.0f;
 	if (std::abs(m_mapAlpha - mapAlphaTarget) < 0.01f) {
 		m_mapAlpha = mapAlphaTarget;
 	} else if (mapAlphaTarget <= m_mapAlpha) {
@@ -1614,7 +1625,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
-			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha}, marker.yaw};
+			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * iconAlpha}, marker.yaw};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;
