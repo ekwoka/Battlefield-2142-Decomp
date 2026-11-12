@@ -1656,6 +1656,7 @@ void GameWorld::registerSilo(world::Object& object)
 	}
 	silo.missile = projectileFor(*setting(*firearm, "projectileTemplate"));
 	silo.loaded = true; // a full magazine (ammo.magSize 1)
+	silo.number = static_cast<int>(m_silos.size()) + 1;
 	m_silos.push_back(silo);
 }
 
@@ -1675,6 +1676,7 @@ std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
 		info.reloadLeft = silo.loaded ? 0 : silo.reloadLeft;
 		info.reloadTime = silo.reloadTime;
 		info.launched = silo.launched;
+		info.number = silo.number;
 		for (const auto& spawner : m_spawners) {
 			if (std::find(spawner->spawned().begin(), spawner->spawned().end(), silo.object) != spawner->spawned().end()) {
 				info.controlPoint = spawner->settings().controlPointId;

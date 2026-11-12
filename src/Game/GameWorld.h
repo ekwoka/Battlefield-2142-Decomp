@@ -2107,6 +2107,9 @@ public:
 		uint32_t object = 0;
 		int team = 0;
 		int controlPoint = -1;
+		// Its number (1..): the silos counted when it was added (0x004d1770),
+		// its map frame _NN and its 3D icon ICObjectCannon0N.
+		int number = 0;
 		physics::Vec3 position;
 		bool loaded = false;
 		float reloadLeft = 0;   // seconds until it is loaded
@@ -3917,6 +3920,7 @@ private:
 	struct Silo {
 		uint32_t object = 0;
 		int team = 0;
+		int number = 0; // SiloInfo::number
 		bool loaded = false;
 		float reloadLeft = 0;
 		float reloadTime = 120;   // ammo.reloadTime

@@ -6,6 +6,7 @@
 #include "Sound/SoundEngine/SoundEnvelope.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -80,6 +81,37 @@ ISound* GameSounds::create(const std::string& templateName, uint32_t owner)
 		}
 	}
 	return sound;
+}
+
+const std::string& GameSounds::sameWords(const std::string& templateName) const
+{
+	const auto known = m_sameWords.find(templateName);
+	if (known != m_sameWords.end()) {
+		return known->second;
+	}
+	const auto lowercase = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return text;
+	};
+	const auto words = [&lowercase](const std::string& name) {
+		std::vector<std::string> list;
+		size_t start = 0;
+		for (size_t end; (end = name.find('_', start)) != std::string::npos; start = end + 1) {
+			list.push_back(lowercase(name.substr(start, end - start)));
+		}
+		list.push_back(lowercase(name.substr(start)));
+		std::sort(list.begin(), list.end());
+		return list;
+	};
+	const std::vector<std::string> wanted = words(templateName);
+	std::string found = templateName;
+	for (const auto& t : m_manager.templates().templates()) {
+		if (t && t->name().size() == templateName.size() && words(t->name()) == wanted && sampleCount(t->name()) > 0) {
+			found = t->name();
+			break;
+		}
+	}
+	return m_sameWords[templateName] = found;
 }
 
 int GameSounds::sampleCount(const std::string& templateName) const
@@ -290,7 +322,11 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	// has an empty Fire1P_Outdoor template but a configured Fire1P sample.
 	// Template existence alone must not select that silent variant.
 	const bool outdoorSound = sampleCount(prefix + "Fire1P_Outdoor") > 0;
-	const bool firstPersonSound = sampleCount(prefix + "Fire1P") > 0;
+	// Enhanced audio: a 1P sound filed under the same words (a port addition).
+	const std::string fire1P = enhancedAudioEnabled() && firstPerson && !outdoorSound && sampleCount(prefix + "Fire1P") == 0
+		? sameWords(prefix + "Fire1P")
+		: prefix + "Fire1P";
+	const bool firstPersonSound = sampleCount(fire1P) > 0;
 	if (firstPerson && (outdoorSound || firstPersonSound)) {
 		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
 	}
@@ -320,21 +356,21 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	}
 	// The slot: first person selects Fire1P / Fire1P_Outdoor; otherwise
 	// Fire3P. First-person fire ducks the world's effects (reason 4).
+	// 0x005dbec3..0x005dbee7: a local player's weapon sets reason 4 (muteOnFire) before the
+	// sample is looked at, so a gun with no 1P sample still ducks the world's effects.
 	// No 1P sample (the right Shepherd gunner's Fire1P is misnamed in both mods'
 	// eu_at.tweak): retail 0x005dbdc0 picks slot 0/1 on first person alone and plays
 	// nothing. Enhanced audio (a port addition) lets the 3P sample stand in, kept
 	// head-relative so occlusion and HRTF don't treat the player's own gun as distant.
+	const bool head = firstPerson;
+	if (head && muteOnFire) {
+		m_manager.setMuted(4, true);
+	}
 	if (firstPerson && slot == 2 && !enhancedAudioEnabled()) {
 		return;
 	}
-	const bool head = firstPerson;
-	if (head) {
-		if (muteOnFire) {
-			m_manager.setMuted(4, true);
-		}
-	}
 	static const char* const kSlots[3] = {"Fire1P", "Fire1P_Outdoor", "Fire3P"};
-	const std::string name = prefix + kSlots[slot];
+	const std::string name = slot == 0 ? fire1P : prefix + kSlots[slot];
 	const int samples = sampleCount(name);
 	int sample = -1, loops = 1;
 	bool keep = false;

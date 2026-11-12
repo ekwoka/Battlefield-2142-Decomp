@@ -1000,14 +1000,6 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// background (0x0077df60) under the reload ring wiped over the time
 	// still to go (0x0077dee0, 0x0078a990), in the vehicles' tint.
 	const auto silos = round.missileSilos();
-	// The numbered frames (_01.._05): the silos in their control points'
-	// order (the shipped ids, 202 and 503..506 on Minsk, aren't 1..5).
-	std::vector<size_t> siloOrder(silos.size());
-	for (size_t i = 0; i < silos.size(); ++i) {
-		siloOrder[i] = i;
-	}
-	std::stable_sort(siloOrder.begin(), siloOrder.end(),
-		[&silos](size_t a, size_t b) { return silos[a].controlPoint < silos[b].controlPoint; });
 	for (size_t i = 0; i < silos.size(); ++i) {
 		const game::GameWorld::SiloInfo& silo = silos[i];
 		const world::Object* object = round.objects().find(silo.object);
@@ -1020,7 +1012,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			|| (relation == dice::hfe::menu::MapRelation::Enemy && !icons.showOnEnemy && !icons.always)) {
 			continue;
 		}
-		const int frame = static_cast<int>(std::find(siloOrder.begin(), siloOrder.end(), i) - siloOrder.begin()) + 1;
+		const int frame = silo.number; // the numbered frames _01.._05 (0x006574d0)
 		const float tint = relation == dice::hfe::menu::MapRelation::Neutral ? 1.0f : 0.7f;
 		const auto layer = [&](const std::string& texture, float sweep) {
 			hud::HudManager::MapMarker m {dice::hfe::menu::iconFrame(texture, frame), silo.position.x, silo.position.z,

@@ -113,6 +113,11 @@ public:
 	void releaseTrigger(uint64_t user);
 	// Samples of a Sound template (its soundFilename list), 0 for none.
 	int sampleCount(const std::string& templateName) const;
+	// Enhanced audio: a sound with samples named by the same words in
+	// another order (the right Shepherd gun's Fire1P is configured as
+	// S_eu_at_minigun_R_firearm_Fire1P), else the name itself.
+	const std::string& sameWords(const std::string& templateName) const;
+	mutable std::map<std::string, std::string> m_sameWords;
 	// Whether a user's automatic fire loop plays (for tests).
 	bool fireLooping(uint64_t user) const
 	{

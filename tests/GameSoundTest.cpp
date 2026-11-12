@@ -239,10 +239,14 @@ TEST(GameSounds_FirstPersonShotWithOnlyThirdPersonSampleStaysHeadRelative)
 	s.templates.create(sound::SoundObjectTemplate::kClassId, "S_gunner_Fire1P"); // no file
 	sound::GameSounds::FireInfo fire;
 	fire.mode = 0;
-	// Ordinary (retail 0x005dbdc0): the empty first-person slot plays nothing.
+	// Ordinary (retail 0x005dbdc0): the empty first-person slot plays nothing,
+	// but muteOnFire still ducks the world (reason 4 is set before the
+	// sample is looked at, 0x005dbec3..0x005dbee7).
 	sound::setEnhancedAudio(false);
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
 	CHECK(s.triggered.empty());
+	CHECK(s.manager.muted(4));
+	s.manager.setMuted(4, false);
 	// Enhanced: the 3P sample stands in, head-relative.
 	sound::setEnhancedAudio(true);
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
@@ -251,6 +255,28 @@ TEST(GameSounds_FirstPersonShotWithOnlyThirdPersonSampleStaysHeadRelative)
 	CHECK(s.manager.muted(4));
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", false, {4, 0, 0}, true, 2, 0, &fire);
 	CHECK(s.triggered.size() == 2 && !s.triggered[1].firstPerson && s.triggered[1].position.x == 4);
+}
+
+// Enhanced audio: a gun whose Fire1P is filed under the same words in
+// another order (the right Shepherd gun: S_eu_at_minigun_R_firearm_Fire1P
+// for S_eu_at_R_minigun_firearm_Fire1P) plays that 1P sound, as its twin
+// does. Ordinary audio stays retail: nothing (0x005dbdc0), the duck alone.
+TEST(GameSounds_EnhancedFindsAFirstPersonSoundUnderReorderedWords)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_at_gun_R_firearm_Fire1P");
+	addSoundTemplate(s.templates, "S_at_R_gun_firearm_Fire3P");
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 0;
+	sound::setEnhancedAudio(false);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
+	CHECK(s.triggered.empty() && s.manager.muted(4));
+	s.manager.setMuted(4, false);
+	sound::setEnhancedAudio(true);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
+	sound::setEnhancedAudio(false);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_at_gun_R_firearm_Fire1P" && s.triggered[0].firstPerson);
+	CHECK(s.manager.muted(4));
 }
 
 // 0x007fa100: two rays up and one down, 15 m; a 6 m room gives

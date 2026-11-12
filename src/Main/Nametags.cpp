@@ -981,7 +981,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				state.share = share; // a repair: no push, the icon stays
 			}
 		}
-		const int iconIndex = state.secondary ? tt.secondaryIcon : tt.icon;
+		int iconIndex = state.secondary ? tt.secondaryIcon : tt.icon;
+		if (iconIndex >= 0 && !state.secondary && !hud) {
+			// A silo's own offset to its 3dMapIcon (0x004d1770 -> slot 0x40, read by 0x006585a0): ICObjectCannon0N.
+			for (const auto& silo : world.missileSilos()) {
+				iconIndex += silo.object == id ? silo.number - 1 : 0;
+			}
+		}
 		const IconRegistry::Icon* icon = m_icons && iconIndex >= 0 ? m_icons->find(0x50 + iconIndex) : nullptr;
 		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
 			continue;

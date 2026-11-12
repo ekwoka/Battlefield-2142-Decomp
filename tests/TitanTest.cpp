@@ -102,6 +102,15 @@ TEST(Titan_MinskTitansSpawn)
 	CHECK(level.count("VehicleSpawn") == 2);
 	// The five silos, neutral and loaded.
 	CHECK(level.world->missileSilos().size() == 5);
+	// Numbered 1..5 as they were added (0x004d1770's count): the map's
+	// _NN frames and the 3D icons ICObjectCannon0N, not their control ids.
+	{
+		const auto silos = level.world->missileSilos();
+		for (size_t i = 0; i < silos.size(); ++i) {
+			std::fprintf(stderr, "  silo %d: control point %d\n", silos[i].number, silos[i].controlPoint);
+			CHECK(silos[i].number == static_cast<int>(i) + 1);
+		}
+	}
 	// A soldier spawns in a Titan when its spawn points are chosen, and
 	// stands on its floor.
 	const int bot = level.world->addPlayer("Bot", 2, true);
