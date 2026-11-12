@@ -11,6 +11,7 @@
 #include "World/ObjectTemplateManager.h"
 #include "World/WorldConsole.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <memory>
@@ -378,4 +379,55 @@ TEST(Drones_OnTheMapList)
 	const auto list = field.world->mapObjects();
 	CHECK(list.size() == 1 && list[0].object == drone);
 	CHECK(!list.empty() && !std::isnan(list[0].cameraYaw) && across(list[0].position, field.at(drone)) < 0.01f);
+}
+
+// The fire plan's useSiren and reportEnemiesToTeam statements (AIDLL
+// 0x100d80f0, 0x100d7ff0), both set in UAVDrone: as the drone takes its
+// target, PIAltFire is held for a second and the siren (Car_horn_Alt, a
+// SingleFireComp) sounds once; the target is reported through IAIGame slot
+// 0x68 (0x00895ab0) by the auto controller's player: its "spotted" voice
+// on TCTeam to the drone's team only, and not again within 5 s.
+TEST(Drones_SentrySirenAndReport)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	const int enemy = field.world->addPlayer("Pac", 1, true);
+	CHECK(field.world->spawnSoldier(enemy));
+	const int mate = field.world->addPlayer("Eu", 2, true);
+	CHECK(field.world->spawnSoldier(mate));
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	field.run(1.5f);
+	const auto sirens = [&] {
+		int n = 0;
+		for (const auto& e : field.world->takeWeaponSounds()) {
+			n += e.weapon == "Car_horn_Alt" && e.player == -1 && e.object == drone ? 1 : 0;
+		}
+		return n;
+	};
+	CHECK(sirens() == 0);
+	field.world->takeRadioHeard();
+	field.world->reportBattlefieldObjects(leader, {enemy});
+	field.run(0.2f);
+	CHECK(sirens() == 1);
+	std::vector<int> hearers;
+	for (const auto& heard : field.world->takeRadioHeard()) {
+		if (heard.senderTeam != 0) {
+			CHECK(heard.sender == -1 && heard.senderObject == drone && heard.senderTeam == 2 && heard.channel == 1
+				&& heard.voice == "spotted");
+			hearers.push_back(heard.receiver);
+		}
+	}
+	CHECK(hearers.size() == 2 && std::count(hearers.begin(), hearers.end(), leader) == 1
+		&& std::count(hearers.begin(), hearers.end(), mate) == 1);
+	// Held on the same target: no second siren, no report within 5 s.
+	field.run(1.0f);
+	CHECK(sirens() == 0);
+	for (const auto& heard : field.world->takeRadioHeard()) {
+		CHECK(heard.senderTeam == 0);
+	}
 }

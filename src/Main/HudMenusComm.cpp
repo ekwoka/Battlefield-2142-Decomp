@@ -98,6 +98,31 @@ std::string CommRose::selectOrder(const std::string& entry)
 	return it != m_commands.end() ? it->second : std::string();
 }
 
+double RadioSpamGate::now() const
+{
+	return m_round.roundTime();
+}
+
+bool RadioSpamGate::message(bool commander, const std::function<void(int)>& tell)
+{
+	const double t = now();
+	spam.tick(commander, t);
+	if (!spam.check(true, commander, t)) {
+		return false;
+	}
+	if (tell) {
+		tell(spam.secondsLeft(t));
+	}
+	return true;
+}
+
+bool RadioSpamGate::spot(bool commander)
+{
+	const double t = now();
+	spam.tick(commander, t);
+	return spam.check(false, commander, t);
+}
+
 CommRoses::CommRoses(hud::HudManager& hud) : m_hud(hud)
 {
 	// 0x0075e1f0's names and counts.

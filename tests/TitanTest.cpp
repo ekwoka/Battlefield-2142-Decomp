@@ -9,6 +9,7 @@
 #include "TitanLevel.h"
 
 #include <algorithm>
+#include <map>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -356,6 +357,117 @@ TEST(Titan_MovesToTheCommandersTarget)
 	level.run(30);
 	CHECK(std::sqrt(physics::lengthSquared(level.titan(1)->velocity)) < 0.05f);
 	CHECK(!level.titan(1)->canMove);
+}
+
+// A joined client's Titans (the client's frame 0x00590e10 runs the Titan
+// sync, 0x00561e20 -> 0x005aca70; 0x00562100 takes its messages): moved
+// from the server's orders and states (ECPhysicsETitanSync, 9/0 and 9/2)
+// as the server moves its own, a tick at a time, so the client's Titan is
+// where the server's is at each tick, and moves at its velocity from the
+// order's first tick on (before, a client took the velocity from its
+// updates' places and lagged the start). A client that missed the orders
+// catches up from the Titans' last orders and states (titanSyncState).
+TEST(Titan_ClientSyncMovesAsTheServer)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel server(gameDir, "Minsk", 48);
+	TitanLevel client(gameDir, "Minsk", 48, false);
+	CHECK(server.loaded && client.loaded);
+	if (!server.loaded || !client.loaded) {
+		return;
+	}
+	// The client's ghosts of both Titans, where CreateObject and their
+	// first state put them.
+	std::map<int, uint32_t> ghost, real;
+	for (const auto& t : server.world->titans()) {
+		const world::Object* o = server.objects.find(t.object);
+		world::Object* made = client.objects.create(client.templates.find(o->objectTemplate()->name()), o->position(), o->rotation());
+		CHECK(made != nullptr);
+		if (!made) {
+			return;
+		}
+		made->setTeam(t.team);
+		CHECK(client.world->addRemoteTitan(made->id()));
+		ghost[t.team] = made->id();
+		real[t.team] = t.object;
+	}
+	client.world->tick(1 / 30.0f); // their meshes and radii
+	bool joined = false;
+	const auto deliver = [&] {
+		for (const auto& m : server.world->takeTitanSync()) {
+			if (joined) {
+				client.world->titanSyncMessage(m);
+			}
+		}
+	};
+	float worst = 0, worstSpeed = 0;
+	const auto step = [&](int ticks, bool compare) {
+		for (int i = 0; i < ticks; ++i) {
+			// The client's clock is up to the server's when the messages
+			// come (they go out after the server's tick).
+			server.world->tick(1 / 30.0f);
+			client.world->stepTitanSync(server.world->ticks());
+			deliver();
+			client.world->tick(1 / 30.0f);
+			if (!compare) {
+				continue;
+			}
+			for (int team = 1; team <= 2; ++team) {
+				const world::Vec3 a = server.objects.find(real[team])->position(), b = client.objects.find(ghost[team])->position();
+				worst = std::max({worst, std::fabs(a.x - b.x), std::fabs(a.z - b.z)});
+				physics::Vec3 v;
+				CHECK(client.world->titanSyncPlaced(ghost[team], &v));
+				for (const auto& t : server.world->titans()) {
+					if (t.team == team) {
+						worstSpeed = std::max({worstSpeed, std::fabs(t.velocity.x - v.x), std::fabs(t.velocity.z - v.z)});
+					}
+				}
+			}
+		}
+	};
+	// The server's first orders (each Titan's own place, 0x005aca70's
+	// server side) go out before the client joins; then the commander's.
+	step(90, false);
+	CHECK(server.world->moveTitan(1, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	step(20 * 30, false);
+	const world::Vec3 before = server.objects.find(real[1])->position();
+	const world::Vec3 stale = client.objects.find(ghost[1])->position();
+	CHECK(std::fabs(before.x - stale.x) + std::fabs(before.z - stale.z) > 1); // moved, unseen
+	// The client joins: the last orders and states, then the messages.
+	joined = true;
+	for (const auto& m : server.world->titanSyncState()) {
+		client.world->titanSyncMessage(m);
+	}
+	client.world->stepTitanSync(server.world->ticks());
+	step(15 * 30, true);
+	// The other Titan ordered while the client watches: both follow.
+	{
+		const world::Vec3 a = server.objects.find(real[2])->position(), b = server.objects.find(real[1])->position();
+		CHECK(server.world->moveTitan(2, a.x + 0.2f * (b.x - a.x), a.z + 0.2f * (b.z - a.z))
+			== game::GameWorld::TitanMove::Accepted);
+	}
+	step(20 * 30, true);
+	std::fprintf(stderr, "  client against server: place %.6f m, velocity %.6f m/s at worst\n", worst, worstSpeed);
+	CHECK(worst < 1e-3f);
+	CHECK(worstSpeed < 1e-4f);
+	// A client gone wrong (its Titan's armour read as down: no push) is put
+	// back by the server's next state where they differ (0x005ab8a0).
+	client.world->setRemoteTitanHitPoints(ghost[1], 0);
+	step(20, false);
+	const world::Vec3 a = server.objects.find(real[1])->position(), b = client.objects.find(ghost[1])->position();
+	const float off = std::fabs(a.x - b.x) + std::fabs(a.z - b.z);
+	CHECK(off > 1e-3f);
+	client.world->setRemoteTitanHitPoints(ghost[1], 6e6f);
+	step(45, false);
+	worst = 0;
+	step(60, true);
+	std::fprintf(stderr, "  %.4f m off with the armour misread, %.6f m a state later\n", off, worst);
+	CHECK(worst < 1e-3f);
+	const world::Vec3 now = server.objects.find(real[1])->position();
+	CHECK(std::fabs(now.x - before.x) + std::fabs(now.z - before.z) > 10); // it went on moving
 }
 
 // Minsk_Titan16 (gpm_ti 16): its own archives' Titans and silos

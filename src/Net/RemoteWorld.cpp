@@ -1274,6 +1274,38 @@ std::string RemoteWorld::encodeEndOfRoundData(const EndOfRoundData& data)
 	return bytesOf(out);
 }
 
+std::string RemoteWorld::encodeDemoNotice(const DemoNotice& notice)
+{
+	BitWriter out;
+	for (const std::string* text : {&notice.url, &notice.map}) {
+		const size_t length = std::min<size_t>(text->size(), 255);
+		out.write(static_cast<uint32_t>(length), 8);
+		for (size_t i = 0; i < length; ++i) {
+			out.write(static_cast<uint8_t>((*text)[i]), 8);
+		}
+	}
+	return bytesOf(out);
+}
+
+bool RemoteWorld::decodeDemoNotice(const std::string& block, DemoNotice& out)
+{
+	BitReader in(reinterpret_cast<const uint8_t*>(block.data()), block.size());
+	out = {};
+	for (std::string* text : {&out.url, &out.map}) {
+		const uint32_t length = in.read(8);
+		for (uint32_t i = 0; i < length; ++i) {
+			text->push_back(static_cast<char>(in.read(8)));
+		}
+	}
+	return !in.bad();
+}
+
+bool RemoteWorld::demoNotice(DemoNotice& out) const
+{
+	const auto it = m_dataBlocks.find(9);
+	return it != m_dataBlocks.end() && decodeDemoNotice(it->second, out);
+}
+
 bool RemoteWorld::endOfRoundData(EndOfRoundData& out) const
 {
 	const auto it = m_dataBlocks.find(8);

@@ -2783,9 +2783,16 @@ the shoulder takes the start turn, the elbow half the middle turn
 again, and the end bone takes the target whole; no blend, the arm doesn't
 stretch. `anim::worldMatricesWithIk` (`src/Animation/Ik`),
 `GameWorld::seatIkTargets` (the IK object's template path kept by
-vehicle template and seat). Not rewritten: the disable flag
-(`+0x2ea`, `0x005ed890`: a PlayerControlObject template's `+0x430`
-through `0x005c7cf0`, and dying) and the weapon layers `0x005ef250`
+vehicle template and seat). The soldier's IK is skipped while its
+disable flag (`+0x2ea`, `0x005ed890`) is set, which the soldier's pose
+(`0x005ef250`) reads before it solves: the seat's setDucking (PCO slot
+`0x12c`, `0x005c7cf0`) hands the seat's ducking (`+0x18c`) to its
+soldier, so a seat with allowDucking ducking on kPICrouch (`0x005ca2e0`)
+lets go of its grips until it rises (`poseSeated`;
+`Ik_DriverHoldsTheWheel`), and dying in the seat sets it (the seated
+corpses here have no IK). A joined client's seated soldiers keep their
+grips while ducking (the ghost's PCO `+0x18c`, SimpleObject 0x100000,
+isn't handed to the pose). Not rewritten: the weapon layers `0x005ef250`
 switches for an IK object with `0x94c0`. A straight arm (v1 ∥ v2) gives
 no plane to bend in, as in the original.
 
@@ -6140,7 +6147,17 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   HUD_HUD_MENU_CHAT_SPAM_MESSAGE with #SEC# = clock +
   radioBlockedDurationTime + 1 - now. The radio calls (`0x0042d220`) aren't
   checked. The rewrite's host sends the defaults (6, 6, 30) without sv
-  settings of its own.
+  settings of its own. The clock is the game's timer (`0x00666070`, the
+  float at `0x00a7d1f0`: ticks × 1/30 s, `GameWorld::roundTime`), which
+  both the check and the line read (`menu::RadioSpamGate`), so a local
+  `--keys` run stepping faster than real time, or a slowed game, holds the
+  same limits in game time (it was the wall clock). Only slot 0x50's
+  refusal speaks: the spot's checks (`0x007c8160` without an object or a
+  point, slot 0x340 with 0; `0x0042d110`) refuse silently, so
+  Radio.sendSpottedMessage 1, whose voice is refused too, tells the block
+  once (it told it twice: the "medic" entry that coverage-11 §5.3 saw
+  refused twice was the rose's middle entry, the spot, whose button's
+  mouse area covers the bottom one's click).
 - **The radio calls and spots** (the Spotted event 0x1d, read `0x0050e770`,
   written `0x0050e830`, made by `0x0042cfa0`): Radio.callForMedic / Ammo /
   Repair (the game's slot 0xd8, `0x0042d220`) send the call's code (0x33
@@ -6687,8 +6704,11 @@ GhostManager.cpp) with a state per ghost the client has (0x54 bytes:
   the eye's forward ≥ fov × 0.5 × 4/3 ? 1 : 0; an angle against a cosine,
   as the original has it) + (1 − d / R), and each of its ghosts gets (score
   + 0.3 for a projectile) × its base priority (`0x0057d560`), back in
-  scope; each living teammate's soldier or vehicle at least 0.03. A state
-  new to the client starts at 10000 with every mask set (`0x00581e80`).
+  scope; each living teammate's control object at least 0.03 (its
+  soldier, or the seat he holds: player vt+0x4c's own networkable, slot
+  `0xd0`; the vehicle's other seats and parts are ghosts of their own,
+  scored with the tree). A state new to the client starts at 10000 with
+  every mask set (`0x00581e80`).
   The demo connection takes everything at 1 (`0x0057d8f0`).
 - **Queueing** (`0x005823c0`, each packet): a state out of scope or with
   something to send adds its priority to its accumulated value and joins
@@ -6720,9 +6740,18 @@ GhostManager.cpp) with a state per ghost the client has (0x54 bytes:
   written whatever the mask (the soldier's always bits, the player's
   squad-leader bit) sets every bit of that group here; the original files
   them under one bit (the squad leader under `0x8000000`). A joined
-  client keeps what an update leaves out (`RemoteWorld`; the Titan's
-  velocity estimate and a flying round's place go by the updates with a
-  position, `RemoteObject::positionTick`).
+  client keeps what an update leaves out (`RemoteWorld`; a flying round's
+  place goes by the updates with a position, `RemoteObject::positionTick`).
+  A Titan's SimpleObject (`0x00561d90` on its root) has the bit after the
+  mask set, so no node vectors (`0x005ff5d0`), and its mode mask (slot
+  `0x24`, `0x005fdce0`: `0xf61270` for a Titan, `0x1f6127b` else) leaves
+  its orientation (1), place (2), angular velocity (8) and `0x1000000`
+  out of every write: each client moves its Titans itself (the Titan
+  sync, see Titans). The rewrite's host sends the place and orientation
+  with the ghost's first state only (a Titan is several ghosts, for which
+  CreateObject carries no place, `0x0050b450`; where the exe's client
+  takes the Titan's height and heading from wasn't traced) and never
+  marks them dirty (`HostedGame::snapshotGhosts`).
 
 The rewrite's stand-ins: the eye
 is the soldier's head (kept from its last life; before any, every ghost at
@@ -6730,11 +6759,14 @@ is the soldier's head (kept from its last life; before any, every ghost at
 scored like any (the original skips the player's own, which the record
 carries). The commander's tools (the end of `0x0057dc10`, the asset
 manager `DAT_00a6a390`, 0x3c bytes a team): for the team's commander with
-the satellite scan running (`0x005a2370`) every enemy, else with the
-team's UAV up (`0x005a27c0`: its time and point) the enemies within the
-game logic's `+0x230` (uavRadius, slot `0x28c`) of it, each living enemy's
-soldier or vehicle whose base priority is over 0 at 0.5, kept over a
-higher score (`0x0057cfb0` → `0x00581e80`); then for the commander his
+the satellite scan running (`0x005a2370`) every enemy, else (any player of
+the team) with the team's UAV up (`0x005a27c0`: its time and point) the
+enemies within the game logic's `+0x230` (uavRadius, slot `0x28c`) of it,
+measured in three dimensions to the control object's place: each living
+enemy's control object (his soldier, or the seat he holds) whose base
+priority is over 0 at 0.5, kept over a higher score (`0x0057cfb0` →
+`0x00581e80`), out of scope or not (an enemy 3 km away comes in for the
+scan's 11 s, `Commander_ScanBringsFarEnemiesIntoScope`); then for the commander his
 team's asset objects (`0x0057db50`: game logic slot `0x1d0`'s objects
 whose `+0x29c` kind is 1-4) at 0.03 (`HostedGame::rescore`,
 `net::kGhostScanPriority`). The alternate eye (player vt+0xd4) never
@@ -6924,8 +6956,27 @@ seconds over all its maps.
   needed for sv.notEnoughPlayersRestartDelay raise TimeLimitReached(0),
   the time limit TimeLimitReached(−1). `GameLogic::waitToStart` (a hosted
   game; a local one plays at once). sv.timeBeforeRestartMap is only kept
-  by the exe too. Not rewritten: the ranked minimums and overrides, the
-  end-of-round delay's per-mode rules.
+  by the exe too. Not rewritten: the end-of-round delay's per-mode rules.
+- **Ranked** (`net::ServerSettings`): sv.ranked (`+0x26d`, set through
+  `0x00430800`, which also takes GSRanked and checks the stats scripts:
+  not rewritten) fixes spawnTime and manDownTime at 15 (`0x00430f60`,
+  `0x00430f80`), ticketRatio at 100 (`0x00430fa0`) and teamRatioPercent
+  at 100 (`0x00430fc0`) whatever was set: the console's getters
+  (`0x0041cd19` …), host.ss_getParam (`0x00568350`), the round's spawn and
+  man-down times, the tickets and the GameSpy report read them so; sv.save
+  writes the values set (`*InForce`). A ranked game (`0x00430a00`) is
+  gpm_cq/ti/sl/nv/ca on an internet server with GameSpyRanked and
+  sv.ranked (and, with AIDLL loaded, its interface's slot `0x20`, not
+  modelled): only then maxPlayers is at least 16 (`0x00431690`) and the
+  players needed to start at least 6, or 8 over 32 players
+  (`0x004316b0`; data block 0's field), ss_getParam's `ranked` is 1,
+  `maxRank` sv.maxRank (`0x00430d90`, else 0) and `globUnlocks` 0
+  (`0x00430fe0`: 1 in gpm_sp, else sv.useGlobalUnlocks); `globRank` is
+  sv.useGlobalRank on an internet server that isn't sv.ranked
+  (`0x00431070`). GameSpyRanked comes from the GameSpy back end, which no
+  LAN or offline host has, so the rewrite's hosts never run a ranked game
+  (`rankedGame(mode, false)`); the console's `sv.ranked` reads the flag
+  here, the ranked game in the exe (`0x00420755` → `0x00430a00`).
 - **Votes** (manager `DAT_00a693f8`, Vote event 0x27, handler
   `0x00590230`, start / cast `0x0058f470`, end `0x0058fb90`;
   `game::Votes`, `HostedGame`): all skipped without sv.votingEnabled. Map
@@ -6990,8 +7041,17 @@ carry an empty payload (`0x00516950`).
   message 9 to everyone with sv.demoDownloadURL (its "{file}" replaced by
   the file's name, or the name appended) and the map. sv.demoIndexURL is
   only advertised (GameSpy keys 0x36..0x38). The exe keeps no count of
-  demos (rotate_demo.cfg's file_limit is the hook's). `HostedGame`'s
-  autoDemo; not rewritten: message 9 (its event isn't mapped), whether a
+  demos (rotate_demo.cfg's file_limit is the hook's). Message 9
+  (`0x004ad7a0`) is data block 9 through every connection (`0x004a9f10`):
+  the URL and the map, each an 8-bit length and its bytes (`0x00583ec0`;
+  the length is min(size, 256) in 8 bits, the rewrite keeps 255), the
+  file's name taken after its last `\` or `/` (`0x0065b640`); a hook
+  that failed logs "Demo upload failed. Check 'rotate_demo_err.txt' for
+  more info." instead (`0x005852b0`'s `+0xbc`). The client's handler
+  (`0x004b5eb0` case 9, read by `0x00583d80`) hands the URL to its
+  `+0xa8`'s slot `0x6c`, not traced further: `RemoteWorld::demoNotice`
+  keeps it. `HostedGame`'s autoDemo and `hookDone`
+  (`ServerAdmin_AutoDemoHookSendsMessage9`); not rewritten: whether a
   map change (`0x004bc850`) stops it, setAutoRecordRounds.
 - **Camera files** (`.bf2142cam`, `net::CameraKeyframe`, read/write): the
   same zlib wrapper, no header, a keyframe a tick (`0x005f8d30`, read by
@@ -7216,12 +7276,16 @@ Titan's ghost builds the Titan's merged collision on the client
 object tree, each node's mesh in the broad phase; the rewrite gives the
 Titan's body the tree's soldier and projectile LODs and the cannons'
 parts as the server's `rebuildTitanMeshes` does, without the server's
-Titan logic). A Titan's ghost carries no velocity (the SimpleObject
-writer `0x005ff5d0` skips the node's vectors for a Titan, `0x00561d90`;
-the exe's client moves its Titans itself, the Titan sync's tick
-`0x00561e20` → `0x005aca70` running in its frame `0x00590e10`): the
-client takes the velocity from the updates' positions and ticks and
-moves the Titan's body on at it between updates. Measured on 127.0.0.1
+Titan logic). A Titan's ghost carries neither velocity nor place in its
+updates (the SimpleObject writer `0x005ff5d0` skips the node's vectors
+for a Titan, `0x00561d90`, and its mode mask `0x005fdce0` leaves out the
+place and orientation; Ghost priorities above): the client moves its
+Titans itself, the Titan sync's tick `0x00561e20` → `0x005aca70` running
+in its frame `0x00590e10` (`GameWorld::stepTitanSync`, see Titans,
+"The client's Titans"). Until 2026-11-12 the rewrite's client took the
+velocity from the updates' positions and ticks and moved the Titan's
+body on at it between updates; the measurements in this paragraph are
+of that, those after it of the sync. Measured on 127.0.0.1
 (Suez_Canal gpm_ti, spawned in the EU Titan): standing, before 490
 records corrected by 11.8 cm on average, at most 87 cm, 481 over 1 cm
 (the prediction fell through the deck); after, 0.0 mm, at most 0.1 mm,
@@ -7242,6 +7306,39 @@ them), the same walk (`--remote-actions "5:spawn 12:forward 20:turn:3
 21:still 30:turn:-3 31:still 45:stop"`, 60 s, 910 records) corrects by
 1.2 cm on average, at most 12 cm, 151 records over 1 cm, against 3.4 cm,
 40 cm and 437 before (the rest mostly while pressed against a wall).
+
+With the client's own Titan sync (Suez_Canal gpm_ti 48, spawned in the EU
+Titan as commander; the old figures are the update-based estimate's,
+same runs): standing while the Titan starts (2 s after the order, at
+38 s), moves and stops (`--remote-actions "3:commander 15:accept
+30:accept 32:spawn 36:titan:-380:3"`, 120 s: 42 m, stopped by 90 s),
+2135 records corrected by 0.0 mm on average, at most 0.4 mm, none over
+1 mm, against 1.0 mm, 3.9 cm and 41 over 1 cm (15 in the 1.6 s after the
+start, 26 in the 4 s it took to stop, while the estimate lagged; 0.6 mm
+on every record while it moved, the updates' centimetre places);
+standing on it for 150 s towards -250:7 (118 m, still moving at the
+end), none over 1 cm, at most 1.8 mm (the estimate: 27, 5.1 cm). Walking
+on its decks (`55:forward 61:stop 70:strafe:1 74:stop 128:forward
+134:stop` on the 150 s run): 498 of 2729 records over 1 cm (mean 1.1 cm,
+at most 28 cm) against 1853 (1.9 cm, 15 cm); on the 120 s run (`50:forward
+54:stop 60:strafe:1 63:stop 95:forward 99:stop 105:strafe:-1 108:stop`),
+1300 of 2132 against 1322 of 2125: none left at the start (27 before),
+the rest as before. What walking leaves isn't the Titan's place or
+velocity, which are the server's to the bit at the client's tick: it is
+the soldier pressed against a wall, where on the moving Titan the replay
+of the moves after a record meets the Titan where the newest move does
+(the ghosts stay put, `0x004b5000`; about 5.5 cm a record), and, on the
+Titan standing or moving, every record correcting by the same 1.5 cm:
+the first state's 14-bit orientation (above), about 1e-4 rad of yaw at
+50-70 m from the Titan's origin. Three things made the
+difference besides the sync itself: the Titan's hit points reach the
+client (the hints read armor.maxHitPoints "6e+006" as a float, 6,000,000,
+not 6, so the client's Titan is above 60 % and pushes); the client's
+clock for the sync is the tick at which the server will step the move
+about to be predicted (the last record's block tick plus the moves sent
+since, one a tick), so the Titan the prediction meets is the one the
+server's soldier meets; and the Titan's orientation is no longer set from
+each update's 14-bit quaternion but kept from its first state.
 
 The exe's replay is the game client's interface `0x1d4c2` (the client
 object's `+0xa8`, `0x004b35b0`; vtable `0x00928fa8`) slot `0x10`,
@@ -9414,11 +9511,27 @@ unlock and its `replaceItem knife`) for a player whose totalDogtagCount
 (player `+0x104`, slots `0x398` / `0x39c`, `pmgr_p_set`; carried to
 clients in the kit-selection event `0x0050beb0`) is 50 or more
 (`*0x00a67b68`), unlocked or not (`GameWorld::setDogtagCount`, `fillKit`).
-A knife kill's reward is the ranked stats scripts' (not shipped):
-`host.sgl_sendGameLogicEvent(player, 19, victim)` posts
-ECGameLogicGLDogTag, which a client (`0x004cbea0`) shows as HUD event
-0x28 (the "dogtag" sound and `HUD_DOG_TAG_MESSAGE` for 5 s, `0x0074f0d0`)
-and counts per victim; not rewritten.
+A knife kill's tag is the stats script's (`python/bf2/stats/stats.py`,
+shipped and run offline too: `onPlayerKilled` for a weapon of
+WEAPON_TYPE_KNIFE, "knife" / "knife_unlock", counts it in the attacker's
+`stats.dogTags` and calls `sendGameEvent(attacker, 19, victim.index)`).
+`host.sgl_sendGameLogicEvent` (`0x00567d40`: the tuple's items are the
+player, the event, the data) posts the game category's message 0x13
+(ECGameLogicGLDogTag, 4 bytes: the victim) to the attacker's connection
+(the game's slot 0x98): `ScriptBridge::onGameLogicEvent`, the host's
+`HostedGame::gameLogicEvent` (PostRemote 0/0x13). Its handler
+(`0x004cbea0`) posts HUD event 0x28 (`0x00756b60`'s case: the menu sound
+"dogtag", which no MenuSounds.con adds, and slot 0x9c, `0x0074f0d0`, with
+the victim's name and 5 s: ShowMedalIcon and ShowRankUpIcon off,
+ShowDogTagMessage on, DogTagMessage = HUD_DOG_TAG_MESSAGE with #PLAYER#,
+counted down by `0x007c8c30`: HudElementsActionIcons.con's DogTagArea)
+and, on a client, counts the tag per victim (the player's slot 0x1a8
+object's `+0x64`, `0x005a5f70`). No reader of that count was found: no
+scoreboard column or award was found showing it (a "Dog Tags: " label
+is set up by `0x0070e120`, a form not traced to a page; `&dogTagFilter=1`
+is the online BFHQ's).
+`menu::DogTags`; `ScriptHost_KnifeKillSendsTheDogTag`,
+`HudAlerts_DogTagMessage`.
 
 **Kit abilities in a vehicle** (the player's update `0x00599f30`, each
 tick from `0x0059bd80` while the soldier sits in a vehicle). The kit's
@@ -10249,12 +10362,39 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
     at the gun's heading (`0x100f9a90`) and moves at scanningSpeed × 30
     rad/s (0.9), under the 0.12 × 1500°/s (3.1 rad/s) the scaled input
     allows, so the gun follows it as the rewrite turns it.
-  Not rewritten for either: `useSiren` (PIAltFire held for the first
-  second of the fire plan, `0x100d8090` / `0x100d80f0`: the horn's
-  sound), `reportEnemiesToTeam` (`0x100d7fa0` / `0x100d7ff0`: every 5 s
-  of the plan, IAIGame slot `0x68` with the target, the team's spot and
-  "spotted"; the rewrite's drones and sentries have no AI player to say
-  it) and `sendFireWarning`.
+  - **The fire plan's extras** (both auto controllers set useSiren and
+    reportEnemiesToTeam; the plan's builder adds them for an auto
+    controller, bot slot `0x27c`, from its template, slot `0x288`):
+    - **useSiren** (`+0x14`; `0x100d8090` / `0x100d80f0`): PIAltFire is
+      held for the plan's first second (from the target's taking). The
+      siren on PIAltFire, Car_horn_Alt (a SingleFireComp), sounds once a
+      press: one horn as the target is taken, and one as the gun flips
+      out (the scan statement holds PIAltFire too). EMP cuts the input
+      (no horn). `GameWorld::autoControllerSiren` (its fire sound at the
+      gun, no player).
+    - **reportEnemiesToTeam** (`+0x21`; `0x100d7fa0` / `0x100d7ff0`): on
+      the plan's first execution and every 5 s after (AIDLL's clock),
+      IAIGame slot `0x68` (`0x00895ab0`) with the target's object from the
+      auto controller's player: a real player the auto controllers'
+      manager makes for it (`0x1004d8e0` → IAIGame slot `0x20`), an id of
+      256 or more (Player.cpp's `+0x3d1`, "AutoController"). That is a
+      bot's spot: `0x0042d110` (type 0x1b, the spam check counted, never
+      reached at one a 5 s) and the target's voice (slot `0xd0`: its
+      kit's radio.spottedMessage, "infantry_spotted" / "sniper_spotted")
+      on TCTeam (slot `0x54`) to the team's players whose controlled
+      object stands, the living bots among them. EMP doesn't stop it.
+      The rewrite has no such player: the spot goes to the team's
+      squad-0 knowledge as a bot's (`spotSighting`), and the voice is
+      handed out with the team and the sentry's object for the sender
+      (`RadioHeard::senderTeam`), heard as a grunt's with the sentry's
+      soundFilter (`GameWorld::autoControllerReport`,
+      `Drones_SentrySirenAndReport`). A joined client hears it with no
+      sender (the RadioMessage's sender 0xff), as the player isn't sent.
+    - **sendFireWarning** (`+0`, "will add flashing icon to minimap when
+      firing", AutoControllers.ai says): nothing reads it. AIDLL reads the
+      template only through the bot's slot `0x288` (`0x100a3970`,
+      `+0x268`), and none of its 21 calls reads `+0`; BF2142.exe never
+      sees the template. It does nothing in the shipped game.
 
 Under EMP above level 1 the sentry drone's auto controller (UAVDrone) has
 every input cut by the PlayerControlObject's filter (`0x005ca2e0`), the
@@ -10492,8 +10632,18 @@ fired by one of his carried items with `pickupEnabled` (GenericFireArm
 sonars, Bp1_Decoy, the sentry gun's deployer, the shield) whose
 projectile template (slot `0x1b4`) is the object's: the item gets a round
 back (slot `0x84(1, 0, 0, 0)`), the object goes, and no kit is picked up
-(`GameWorld::pickUpPlaced`). `0x004c5950` does the same within 9 m for a
-deployable on another object (not rewritten).
+(`GameWorld::pickUpPlaced`). Before it the use key asks the squad
+manager (slot `0xb4`, `0x004c5950`, at `0x4be027`) for the squad's beacon:
+the squad leader (player slot `0x150`, `+0x10d`) on foot as a soldier, of
+a squad with a beacon down (the squad's slot `0x2c`, `+0x2f`), within 3 m
+of its spawn point (`0x004bb1b0` is the squared distance, under 9) when
+that sits on a deployable (its parent, not a soldier): the spawn point
+goes back to the soldier, the deployable is deleted, the squad's beacon
+cleared (slot `0x30` with 0, `0x004c30b0`), and the item that fired it
+(pickupEnabled, its projectile the deployable's template) gets a round
+back, which spends the use; with no such item the use goes on to
+`0x004bce30`. So the leader takes his beacon back from 3 m in any
+direction, not only 1.3 m in front (`GameWorld_LeaderTakesBackTheBeacon`).
 
 Guns without magazines (`ammo.magSize -1`, most vehicle guns) heat up
 instead. Each round adds `heatAddWhenFire`, the heat cools by
@@ -10966,8 +11116,12 @@ while they have the keys. `src/Main/HudMenusChat`:
   HUD information layer's slot 0xa8, `0x00449180`): 1 adds the joined
   server to GeneralSettings' favourites (slot 0x17c: its address, port,
   name and `time()`), 0 removes it (slot 0x190); ServerIsFavourite
-  (+0xb24) follows the list. Removing isn't rewritten (GeneralSettings has
-  no console method for it).
+  (+0xb24) follows the list. Removing (slot 0x190, `0x0049ca90`) takes
+  the entries with the joined server's address (`+0xb18`) and game port
+  (`DAT_00a201c0 +0x168`) off the list and tells the menu's "favourites"
+  list (`SettingsObjects::removeFavouriteServer`, through
+  `MenuBindings::removeFavouriteServer` when the menu runs). Both need
+  the HUD layer's server name and address, so only a joined game.
 - **ChatList** (the message list class `0x007b6d80`): a line is "§1" +
   text + "§0", chat "<prefix><name>: <text>" (`0x007b4cd0`; the prefixes
   `HUD_TEXT_CHAT_TEAM`, `_SQUAD`, `_COMMANDER`, `HUD_CHAT_DEADPREFIX`),
@@ -11724,7 +11878,10 @@ server's; none once it is under way. Walking on its decks while it moves
 over 1 cm (mean 1.1 cm, at most 21 cm) against 308 without (1.0 cm, 16
 cm), most of them standing after the walk, every record: on a deck seam
 the client's Titan, set to each update's position and moved on between
-them, and the server's differ by millimetres.
+them, and the server's differ by millimetres. Since 2026-11-12 the client
+moves its Titans by the Titan sync as the server does (Titans, "The
+client's Titans"): standing, no record over 1 cm while the Titan starts,
+moves and stops (Soldier prediction, "On moving objects").
 
 **The speed index** (`0x00586020`, by the pose `+0x268`): crouched 1,
 prone 0, swimming 5 (6 sprinting); standing 4 sprinting (interface slot
@@ -12280,8 +12437,19 @@ squad makes it again) in SquadCreateTagString, refused in a squad
 SquadCreateLockedShow and `createSquad` (`0x007a5ad0`) makes the squad,
 named by `0x007a5250`: the first of the game's names (757 at `0x00b3df00`,
 filled at start-up: "Unassigned", "Alpha", "Bravo", "Charlie", "Delta",
-"Echo", "Foxtrot", "Gamma", "Hotel", ...) no squad of the team has. The
-HUD variables are the menu's (`0x007a4100`): NrOfUnassigned (`+0xc`) and
+"Echo", "Foxtrot", "Gamma", "Hotel", ...) no squad of the team has.
+`createSquad` needs no box: with the box hidden (`+0xec` 0) it fills the
+box's text with that name (HUD slot `0x2f0`), then hands the box's text
+to slot `0x2f8` (`0x007d67e0` → slot `0x300`, `0x007d6910`), which for
+anyone but the commander (player slot `0x128`) takes the first free id
+(slot `0x310`), or his own squad when he is alone in it, leaves the squad
+he is in (`0x007a55f0`), and makes the squad (squad manager slot `0x1c`)
+when it has no members (`+8`), named by the text or the id's name
+(`0x00b411a4`); the box closes after (`0x007a5700` with 0). The rewrite
+refused it without the box, so a console `SquadMenu.createSquad` (the
+key sweep's) left a joined client squadless and its squad say box
+(c_GISaySquad needs a squad, player slot 0x120) shut
+(`HudMenus_CreateSquadJoinedWithoutTheBox`). The HUD variables are the menu's (`0x007a4100`): NrOfUnassigned (`+0xc`) and
 NrOfSquads (`+0x10`), numbers; SquadCreateShow `+0xec`,
 SquadCreateLockedShow `+0xee`, SquadCreateTagString `+0xf0`, InviteListShow
 `+0xa5`, IsInSquad `+0xa6`, IsSquadLeader `+0xa0`.
@@ -12801,6 +12969,62 @@ was spawned. Each tick:
   moves by it across x and z (`0x005aa0e0`: the object's position, the
   node's velocity). It never turns. The top speed is about 1.09 m/s. With
   `sv.allowTitanMovement` off (server settings `+0x59`) it stands.
+
+Without an order yet the server gives the Titan one at its own place, two
+seconds on (`0x005aca70`'s server side, slot `0x144`: `+0x44` empty →
+`0x005abba0`), which pushes nothing; the sync object keeps each tick's
+state (`+0x48`: tick → velocity and place across x and z, `0x005ab670`
+storing one and dropping those after it). Both teams' Titans step in the
+sync's order, team 1's (`+8`) then team 2's (`+0xc`), each steering off
+the other where it now stands. `GameWorld::stepTitans`,
+`titanMoveTick` (shared with the client).
+
+**The sync's messages** (`ECPhysicsETitanSync`, event category 9, sent to
+everyone through the game's slot `0x84` as a PostRemote, `0x00509990`;
+`net::TitanSyncInfo`): 0x24 bytes (`0x0050f160`, filled by `0x005ab040`):
+the team (a byte), the last order's tick and target across x and z, the
+last state's tick, its velocity and place across x and z. Id 0 goes with
+every order taken (`0x0050f1f0`, and the server's first order above); id
+2 every 30 ticks (`*0x00a6746c`) for both Titans, while both exist
+(`0x00561e20`'s case 3). The rewrite's host sends the ticks as its ghost
+blocks count them (`HostedGame::titanSyncEvent`), sends id 2 only for a
+Titan with an order (the exe's `0x005ab040` leaves an order-less one's
+fields zero, team 0 included) and id 0 only for an order taken (the exe
+sends a refused one too, which the client refuses again), and gives a
+client that comes in later each Titan's last order and state as an id 0
+(the rewrite's: the exe's late client keeps its Titan where it is until
+the next order).
+
+**The client's Titans** (`0x00562100` takes the messages, `0x00561e20` →
+`0x005aca70` runs in the client's frame `0x00590e10` before the control
+object's update; `GameWorld::titanSyncMessage`, `stepTitanSync`): id 0
+adds the order (`0x005abba0`: unless one is there at that tick, and only
+inside the combat areas binding the Titans) and puts the state in at its
+tick, dropping those after; id 2 is kept among the server's states
+(`+0x54`) and, once the client has states, at the earlier of the
+server's last tick and its own the server's state replaces the client's
+where any velocity or place component differs by more than FLT_EPSILON
+(`*0x00a6af94`, `*0x00a6afc8`, `0x34000000`; `0x005ab8a0`), the states
+after it dropped. Each frame, with both Titans, each goes back to the
+earlier of their last states (`0x005aa570`, `0x005ab840`, `0x005aab10`
+placing it) and both step on a tick at a time to the client's tick
+(`0x005aca70`: with an order in force, from the last state before the
+tick, pushed once the order's tick has come, each state kept and the
+Titan put there, `0x005aa0e0`: the object's x and z, its y kept, the
+node's velocity); states 1000 ticks old go (`*0x00a67470`, `0x005aaab0`).
+The client's armour percent (`+0x35`) is its ghost's hit points over the
+template's. The rewrite takes the earlier only of the Titans with states
+(with none for one, the exe's client would go back to tick 0 each frame).
+Its clock is the server tick at which the move about to be predicted
+will be stepped: the last control-object record's block tick plus the
+moves sent since (one a tick), or without a record the last ghost
+block's tick and the ticks run since; it only goes forward. The client's
+body of the Titan isn't stepped by its physics (as the server's isn't).
+Client and server step the same code (`titanMoveTick`) on the same
+floats: `Titan_ClientSyncMovesAsTheServer` (Minsk) has the client's Titans
+where the server's are, to the bit, at every tick, a late client caught up
+from the last orders and states, and a client gone wrong put back by the
+next id 2. Joined measurements: Soldier prediction, "On moving objects".
 
 The combat areas (`CombatArea.*`, `CombatAreaManager.*`; the manager is
 `DAT_00a25134`): an area binds vehicle category 4 when its `vehicles` is 4

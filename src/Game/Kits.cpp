@@ -176,9 +176,8 @@ void GameWorld::dropKit(Player& player)
 }
 
 // The use key's pick-up of a placed item (0x004bce30, from 0x004bda00 at
-// 0x4be038; the same for an item on another object, 0x004c5950, within
-// 9 m): the nearest object within 1.3 m (*0x009fe420) of the soldier and
-// in front of him (the horizontal direction's dot with his facing at
+// 0x4be038; the squad's beacon first, 0x004c5950, below): the nearest
+// object within 1.3 m (*0x009fe420) of the soldier and in front of him (the horizontal direction's dot with his facing at
 // least 0.9), of his team, that one of his carried items fired: the item
 // (interface 0x94c0) has pickupEnabled (the GenericFireArm template's
 // +0x2ec, slot 0xc0 0x005c1830) and its projectile template (slot 0x1b4)
@@ -217,6 +216,41 @@ bool GameWorld::pickUpPlaced(Player& player)
 		}
 		return -1;
 	};
+	// First the squad's beacon (the squad manager's slot 0xb4, 0x004c5950,
+	// before 0x004bce30 at 0x4be027): for the squad leader (player slot
+	// 0x150, +0x10d) on foot as a soldier, of a squad with a beacon down
+	// (the squad's slot 0x2c, +0x2f), whose spawn point (+0x180) is within
+	// 3 m (0x004bb1b0's squared distance under 9) of the soldier and sits
+	// on a deployable (its parent, not a soldier): the spawn point goes
+	// back to the soldier, the deployable is deleted (slot 0xa4) and the
+	// squad's beacon cleared (slot 0x30 with 0, 0x004c30b0). Then the item
+	// that fired the deployable (pickupEnabled, its projectile template
+	// the deployable's) gets a round back (slot 0x84(1, 0, 0, 0)) and the
+	// use is spent; without such an item the use goes on to 0x004bce30.
+	if (player.squadLeader && player.squad > 0) {
+		const auto beacon = m_beacons.find({player.team, player.squad});
+		const world::Object* placed = beacon != m_beacons.end() ? m_objects.find(beacon->second) : nullptr;
+		const world::Object* soldier = m_objects.find(player.object);
+		if (placed && placed->objectTemplate() && soldier) {
+			const world::Vec3& a = placed->position();
+			const world::Vec3& b = soldier->position();
+			const float d2 = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z);
+			if (d2 < 9.0f) {
+				const std::string name = placed->objectTemplate()->name();
+				m_objects.remove(beacon->second);
+				m_beaconPods.erase(beacon->first);
+				m_beacons.erase(beacon);
+				const int from = source(name);
+				if (from >= 0) {
+					FireArm* weapon = from == player.inHand ? player.weapon.get() : player.carried[static_cast<size_t>(from)].weapon.get();
+					if (weapon) {
+						weapon->giveRoundBack();
+					}
+					return true;
+				}
+			}
+		}
+	}
 	float best = 1e9f;
 	int item = -1;
 	uint32_t object = 0;

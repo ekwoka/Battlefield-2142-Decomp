@@ -647,6 +647,11 @@ public:
 	struct RadioHeard {
 		int sender = -1, receiver = -1, channel = 0;
 		std::string voice;
+		// An auto controller's player (an id of 256 or more, Player.cpp's
+		// +0x3d1; the rewrite's sentries and drones have no player): its
+		// team and controlled object, with sender -1.
+		int senderTeam = 0;
+		uint32_t senderObject = 0;
 	};
 	// The messages heard since the last call, in order (at most the last
 	// 256 kept); `receiver` takes only those whose hearer it picks.
@@ -1650,6 +1655,10 @@ public:
 	// off (0x005d92c0), which the server sends on only as kind 1 to a
 	// squad with a showCloaked reader (HostedGame::sendBattlefieldReports).
 	void reportBattlefieldObjects(int reporter, const std::vector<int>& players, float seconds = 3, int kind = 0);
+	// An object template's radio.spottedMessage (its quotes taken off), ""
+	// for none: the game's slot 0xd0 (0x0042e9d0) asks the spotted
+	// object's Radio component.
+	static std::string spottedMessageOf(const world::ObjectTemplate* t);
 	// The reports made since the last call, for a server to send each to
 	// the reporter's squad (event 0x41: 0x005088f0 posts a copy to each,
 	// 0x005087b0; the client's 0x00508590 puts them on its minimap).
@@ -2171,6 +2180,40 @@ public:
 	// message (0x00757xxx: AUTO_TITAN_CC_moveaccepted / _unablemove).
 	enum class TitanMove { Accepted, Unable, NoTitan, TooSoon };
 	TitanMove moveTitan(int team, float x, float z);
+	// The Titan sync's message (ECPhysicsETitanSync, net::TitanSyncInfo):
+	// `order` an order taken (id 0: 0x0050f1f0, or the server's first order
+	// at the Titan's own place, 0x005aca70), else the state every 30 ticks
+	// (id 2, 0x00561e20); the team's last order and the Titan's last state
+	// (0x005ab040). Ticks are the round's (ticks()) on the server; the host
+	// hands them on as its own.
+	struct TitanSync {
+		bool order = false;
+		int team = 0;
+		uint32_t orderTick = 0;
+		float targetX = 0, targetZ = 0;
+		uint32_t stateTick = 0;
+		float velocityX = 0, velocityZ = 0, x = 0, z = 0;
+	};
+	std::vector<TitanSync> takeTitanSync() { return std::exchange(m_titanSyncOut, {}); }
+	// Each Titan's last order and state as an order message: a client that
+	// joins after the orders went out has its Titans' sync from them (the
+	// rewrite's; the exe's late client keeps its Titan where CreateObject put
+	// it until the next order).
+	std::vector<TitanSync> titanSyncState() const;
+	// A joined client's side (0x00562100 takes the messages, 0x00561e20 ->
+	// 0x005aca70 runs in the client's frame 0x00590e10): its Titans are
+	// moved as the server moves its own, a tick at a time from the last
+	// state up to `tick` (the server's, as the ghost blocks count them),
+	// and put back to the server's state where one differs.
+	void titanSyncMessage(const TitanSync& message);
+	void stepTitanSync(uint32_t tick);
+	// Whether the client's sync put this Titan (an order in force and a
+	// state to go from): its ghost's place is then not the one to take.
+	bool titanSyncPlaced(uint32_t object, physics::Vec3* velocity = nullptr) const;
+	// A joined client's Titan's hit points (its ghost's armour, 0x005ffec0):
+	// above 60 % it may move (0x005aca70's +0x35).
+	void setRemoteTitanHitPoints(uint32_t object, float hitPoints);
+	uint32_t ticks() const { return m_ticks; } // the engine's tick count (0x00666090)
 	// The Titan's armoured parts (its tree's templates with armour below the
 	// root): consoles, the core and its doors, the guns, the forcefield.
 	struct TitanPartInfo {
@@ -3655,6 +3698,8 @@ public:
 		bool neverAttackDeployer = false;                 // +0x20
 		bool checkLineOfFire = false;                     // +0x28
 		float flipOutAtHealth = 0;                        // +0x30
+		bool useSiren = false;                            // +0x14
+		bool reportEnemiesToTeam = false;                 // +0x21
 	};
 
 private:
@@ -3674,6 +3719,16 @@ private:
 		int target = -1;
 		float targetSeenAt = 0;
 		float fireFrom = 0;
+		// The fire plan's statements for an auto controller (AIDLL
+		// 0x10077xxx's tail, made with the plan as the target is taken):
+		// useSiren's (0x100d8090 / 0x100d80f0) holds PIAltFire for the
+		// plan's first second, from planFrom; reportEnemiesToTeam's
+		// (0x100d7fa0 / 0x100d7ff0) reports the target every 5 s, the
+		// last at reportedAt (+0x20, 0 for none yet). altFireHeld: the
+		// siren's input as last given (a SingleFireComp sounds on a press).
+		float planFrom = 0;
+		double reportedAt = 0;
+		bool altFireHeld = false;
 		// The gun's DefaultAnimationComp (0x005e12e0; template 0x005e1260,
 		// animation.loopingFire +0x1c) gives the deployable's animation
 		// system message 1: held from a shot to the trigger's release with
@@ -3896,6 +3951,10 @@ private:
 	void addSentryGun(const Player& player, const world::Object& placed);
 	const world::ObjectTemplate* autoControlledGun(const world::ObjectTemplate& t, float* height) const;
 	void stepSentryGuns(float seconds);
+	// An auto controller's report of its target (IAIGame slot 0x68,
+	// 0x00895ab0, from its player) and the siren's press.
+	void autoControllerReport(Drone& drone, const Player& target);
+	void autoControllerSiren(const Drone& drone);
 	bool removeDrone(uint32_t object);
 	Drone* findDrone(uint32_t object);
 	bool isDrone(uint32_t object) const;
@@ -4093,6 +4152,15 @@ private:
 		physics::Vec3 velocity;       // x and z (0x005aa0e0 sets the node's)
 		// The move orders (+0x3c: tick -> target), the last order's time.
 		std::map<uint32_t, std::pair<float, float>> targets;
+		// The sync object's states (+0x48: tick -> the velocity and the
+		// position across x and z, 0x005ab670) and, on a client, the
+		// server's (+0x54, 0x005ab8a0); whether the client's sync placed it
+		// on its last step.
+		struct SyncState {
+			float velocityX = 0, velocityZ = 0, x = 0, z = 0;
+		};
+		std::map<uint32_t, SyncState> states, serverStates;
+		bool syncPlaced = false;
 		double lastOrder = -1e9;
 		float orderInterval = 5; // the RCTitan object's minTimeBetweenActivation
 		float radius = 0;
@@ -4234,6 +4302,19 @@ private:
 	std::set<uint32_t> m_bonedObjects;   // bodies with bone parts (partBone's quick test)
 	bool titanTerrainClear(const Titan& titan, float x, float z) const;
 	void findTitanObstacles();
+	// One tick of a Titan's move (0x005aca70's loop), from `from` towards
+	// the order's target (pushed only once `pushing`), steering off the
+	// other Titans of `titans` and the tall static objects.
+	Titan::SyncState titanMoveTick(const Titan& titan, const std::vector<Titan>& titans, const Titan::SyncState& from,
+		float targetX, float targetZ, bool pushing, bool canMove, float seconds) const;
+	TitanSync titanSyncOf(const Titan& titan, bool order) const;
+	std::vector<TitanSync> m_titanSyncOut;
+	uint32_t m_titanSyncSent = 0; // the manager's +0x30: the tick the last states went
+	// A client's Titan one tick on (0x005aca70 on a client) and put at a
+	// state (0x005aa0e0).
+	void stepRemoteTitanSync(Titan& titan, uint32_t tick);
+	void placeSyncedTitan(Titan& titan, const Titan::SyncState& state);
+	std::vector<Titan*> titansByTeam(std::vector<Titan>& list);
 	void stepTitans(float seconds);
 	void moveTitanBody(Titan& titan, const physics::Vec3& delta);
 	physics::Vec3 titanAim(const Titan& titan) const;

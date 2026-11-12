@@ -8122,10 +8122,21 @@ void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& b
 	std::vector<bool> touched;
 	player.seatAnimation->apply(*player.skeleton, player.pose, touched);
 	// The hands on the seat's grips (the IK object 0x005ee910 found at
-	// entering, its targets set each frame by 0x005efc00).
+	// entering, its targets set each frame by 0x005efc00), unless the
+	// soldier's IK is off (+0x2ea, 0x005ed890; read by the soldier's pose
+	// 0x005ef250 before it solves): the seat's setDucking (PCO slot 0x12c,
+	// 0x005c7cf0) hands its ducking (+0x18c) to its soldier's flag, so a
+	// seat with allowDucking (+0x468) ducking on kPICrouch (0x005ca2e0)
+	// lets go of the grips until it rises; dying in the seat sets it too
+	// (0x005cee90's die bundle; the seated corpses here have no IK).
 	std::vector<anim::IkTarget> targets;
 	const physics::Vec3 place {at.x, at.y, at.z};
-	if (seatIkTargets(player.vehicle, player.skeleton, seat, rotation, place, targets)) {
+	bool ikOff = false;
+	if (player.input.pose == SoldierPose::Crouch) {
+		const world::ObjectTemplate* seatTemplate = m_templates.find(seat.name);
+		ikOff = seatTemplate && number(*seatTemplate, "allowDucking", 0) != 0;
+	}
+	if (!ikOff && seatIkTargets(player.vehicle, player.skeleton, seat, rotation, place, targets)) {
 		player.worldPose = anim::worldMatricesWithIk(*player.skeleton, player.pose, targets);
 	} else {
 		player.worldPose = anim::worldMatrices(*player.skeleton, player.pose);
@@ -13577,8 +13588,8 @@ void GameWorld::stepPhysics(float seconds)
 			++it;
 			continue;
 		}
-		if (findDrone(it->object) || isTitan(it->object)) {
-			++it; // held in the air by its ForceObject (stepDrones), or a Titan moved by its sync (stepTitans)
+		if (findDrone(it->object) || isTitan(it->object) || isRemoteTitan(it->object)) {
+			++it; // held in the air by its ForceObject (stepDrones), or a Titan moved by its sync (stepTitans, stepTitanSync)
 			continue;
 		}
 		physics::RigidBody& body = it->body;
@@ -13638,7 +13649,7 @@ void GameWorld::stepPhysics(float seconds)
 	collideBodies(seconds);
 	for (Body& b : m_bodies) {
 		world::Object* object = m_objects.find(b.object);
-		if (!object || findDrone(b.object) || isTitan(b.object) || asleep(b) || b.fixed) {
+		if (!object || findDrone(b.object) || isTitan(b.object) || isRemoteTitan(b.object) || asleep(b) || b.fixed) {
 			continue;
 		}
 		// The physics node's +0x249 (slot 0x1b8): set at its step, cleared
@@ -13740,9 +13751,13 @@ const world::ObjectTemplate* findInTree(const world::ObjectTemplateManager& temp
 // unl_drone_sentry_cam's setMaxSpeed 250 x maxTrackingInput 1; SentryGun
 // for the deployed eu_sentrygun, its yaw EU_Sentrygun_rotation's
 // setMaxSpeed 1500 x maxTrackingInput 1 (neverAttackDeployer and
-// onlyAttackNetworkBattlefieldObjects unset).
-constexpr GameWorld::AutoControl kUavDrone {100, 8, 90, 0.13f, 0.25f, 0, 250, true, true, true, 0};
-constexpr GameWorld::AutoControl kSentryGun {63, 5, 30, 0.03f, 0.05f, 1, 1500, false, false, true, 0.25f};
+// onlyAttackNetworkBattlefieldObjects unset). Both have useSiren and
+// reportEnemiesToTeam; their sendFireWarning (+0, "will add flashing icon
+// to minimap when firing", the script says) has no reader: AIDLL reads the
+// template only through the bot's slot 0x288 (0x100a3970, +0x268), and no
+// such read takes +0, so it does nothing in the shipped game.
+constexpr GameWorld::AutoControl kUavDrone {100, 8, 90, 0.13f, 0.25f, 0, 250, true, true, true, 0, true, true};
+constexpr GameWorld::AutoControl kSentryGun {63, 5, 30, 0.03f, 0.05f, 1, 1500, false, false, true, 0.25f, true, true};
 constexpr float kSquadKnowledgeTime = 3.0f;         // 0x100bea30
 
 } // namespace
@@ -14153,6 +14168,112 @@ void GameWorld::reportBattlefieldObjects(int reporter, const std::vector<int>& p
 	}
 }
 
+std::string GameWorld::spottedMessageOf(const world::ObjectTemplate* t)
+{
+	if (!t) {
+		return {};
+	}
+	const auto it = t->settings().find("radio.spottedMessage");
+	if (it == t->settings().end()) {
+		return {};
+	}
+	std::string name = it->second;
+	if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
+		name = name.substr(1, name.size() - 2);
+	}
+	return name;
+}
+
+// The fire plan's reportEnemiesToTeam statement (AIDLL 0x100d7ff0): on its
+// first execution and then each one 5 s or more after the last report
+// (the AIDLL clock), IAIGame slot 0x68 (BF2142.exe 0x00895ab0) with the
+// auto controller's player (the bot's slot 0xb0 then slot 8: the player
+// the auto controllers' manager made for it, 0x1004d8e0, an id of 256 or
+// more, Player.cpp +0x3d1) and the target's object:
+// - the game's slot 0xd4 (0x0042d110, type 0x1b): the spam check (counted,
+//   as he isn't the local player; a report every 5 s never reaches the
+//   limit) and the target reported, as a bot's spot (BotManager::
+//   spotSighting): the reporter's squad, which an auto controller's player
+//   hasn't (squad 0, so no client's squad radar gets it);
+// - the target's voice (slot 0xd0: its radio.spottedMessage, the kit's for
+//   a soldier on foot, else its own; "spotted" without one) said by him on
+//   TCTeam (slot 0x54, channel 1, no spam check): the team's players whose
+//   controlled object stands hear it, the living bots among them (the
+//   server's hand-out 0x004ab600, 0x004a6f70's channel 1). The rewrite's
+//   sentries have no player: the message carries the team and the object.
+void GameWorld::autoControllerReport(Drone& drone, const Player& target)
+{
+	if (drone.reportedAt != 0 && m_time <= drone.reportedAt + 5) {
+		return;
+	}
+	drone.reportedAt = m_time;
+	auto& known = m_squadKnowledge[{drone.team, 0}];
+	known[target.id] = m_time;
+	const auto templateOf = [this](uint32_t id) -> const world::ObjectTemplate* {
+		const world::Object* o = id ? m_objects.find(id) : nullptr;
+		return o ? o->objectTemplate() : nullptr;
+	};
+	std::string voice = target.vehicle ? spottedMessageOf(templateOf(target.vehicle)) : spottedMessageOf(templateOf(target.kitObject));
+	if (voice.empty() && !target.vehicle) {
+		const world::ObjectTemplate* kit = target.kitTemplate.empty() ? nullptr : m_templates.find(target.kitTemplate);
+		voice = spottedMessageOf(kit);
+		if (voice.empty()) {
+			voice = spottedMessageOf(templateOf(target.object));
+		}
+	}
+	if (voice.empty()) {
+		voice = "spotted";
+	}
+	for (const auto& player : m_players) {
+		if (player->team != drone.team) {
+			continue;
+		}
+		PlayerInfo to;
+		if (!playerInfo(player->id, to) || !to.heldVehicle || (player->ai && !player->alive && !player->manDown)) {
+			continue;
+		}
+		RadioHeard heard;
+		heard.receiver = player->id;
+		heard.channel = 1;
+		heard.voice = voice;
+		heard.senderTeam = drone.team;
+		heard.senderObject = drone.object;
+		m_radioHeard.push_back(heard);
+	}
+	if (m_radioHeard.size() > 256) {
+		m_radioHeard.erase(m_radioHeard.begin(), m_radioHeard.end() - 256);
+	}
+}
+
+// The siren: the GenericFireArm on PIAltFire in the object's tree
+// (Car_horn_Alt under eu_sentrygun and unl_drone_sentry, a SingleFireComp:
+// one sound a press), its fire sound at the gun.
+void GameWorld::autoControllerSiren(const Drone& drone)
+{
+	const world::Object* object = m_objects.find(drone.object);
+	if (!object || !object->objectTemplate()) {
+		return;
+	}
+	std::vector<const world::ObjectTemplate*> open {object->objectTemplate()};
+	for (size_t i = 0; i < open.size() && i < 64; ++i) {
+		for (const world::ChildTemplate& child : open[i]->children()) {
+			const world::ObjectTemplate* c = m_templates.find(child.name);
+			if (!c) {
+				continue;
+			}
+			const auto input = c->settings().find("fire.fireInput");
+			if (sameName(c->typeName(), "GenericFireArm") && input != c->settings().end() && sameName(input->second, "PIAltFire")) {
+				m_weaponSounds.push_back({WeaponSoundEvent::Fire, -1, drone.object, c->name(), drone.position});
+				if (m_weaponSounds.size() > 256) {
+					m_weaponSounds.erase(m_weaponSounds.begin(), m_weaponSounds.end() - 256);
+				}
+				return;
+			}
+			open.push_back(c);
+		}
+	}
+}
+
 bool GameWorld::squadKnows(int team, int squad, int player) const
 {
 	const auto it = m_squadKnowledge.find({team, squad});
@@ -14244,6 +14365,9 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 			// 0x100777a0: an auto controller's delay is its template's
 			// +0x18, BAPATrigger 0x100d3110's +0x28 = now + delay).
 			drone.fireFrom = static_cast<float>(m_time) + control.reactionTime;
+			// A new plan: its siren and report statements start afresh.
+			drone.planFrom = static_cast<float>(m_time);
+			drone.reportedAt = 0;
 		}
 	}
 	// Under EMP (the PlayerControlObject's input filter 0x005ca2e0): an
@@ -14254,12 +14378,6 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	const world::ObjectTemplate* droneTemplate = droneObject ? droneObject->objectTemplate() : nullptr;
 	const bool autoControlled = droneTemplate && droneTemplate->settings().count("autoControllerTemplateName")
 		&& !droneTemplate->settings().at("autoControllerTemplateName").empty();
-	if (autoControlled && std::ceil(drone.empLevel) > 1) {
-		drone.gunDeviation.update(false);
-		drone.weapon->tick(seconds, false);
-		fireMessage(drone, false, false);
-		return;
-	}
 	// Flipping out (the bot's slot 0x280, AIDLL 0x10097d60): an auto
 	// controller whose object's health (its armour's slot 0x10, the share
 	// of maxHitPoints) is under flipOutAtHealth (template +0x30; the
@@ -14273,6 +14391,27 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		const auto hp = m_hitPoints.find(drone.object);
 		flipping = most > 0 && hp != m_hitPoints.end() && hp->second / most < control.flipOutAtHealth;
 	}
+	// The plan's report (not an input: EMP doesn't stop it).
+	if (!flipping && control.reportEnemiesToTeam) {
+		if (const Player* target = drone.target >= 0 ? findPlayer(drone.target) : nullptr) {
+			autoControllerReport(drone, *target);
+		}
+	}
+	if (autoControlled && std::ceil(drone.empLevel) > 1) {
+		drone.gunDeviation.update(false);
+		drone.weapon->tick(seconds, false);
+		fireMessage(drone, false, false);
+		drone.altFireHeld = false;
+		return;
+	}
+	// PIAltFire: held by the siren's statement (0x100d80f0) for the plan's
+	// first second, and by the flip-out (0x100f9cf0); the siren sounds as
+	// it is pressed.
+	const bool altFire = flipping || (control.useSiren && drone.target >= 0 && m_time - drone.planFrom < 1.0);
+	if (altFire && !drone.altFireHeld) {
+		autoControllerSiren(drone);
+	}
+	drone.altFireHeld = altFire;
 	if (flipping) {
 		drone.target = -1;
 		best = nullptr;

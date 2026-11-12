@@ -191,6 +191,29 @@ struct RadioSpam {
 	}
 };
 
+// The local player's RadioSpam on the game's timer (0x00666070: the
+// float at 0x00a7d1f0, the ticks × 1/30 s GameWorld::roundTime counts),
+// which both the check (0x00591d40) and the block's line (0x004b2b60)
+// read; a paused or slowed game holds the limits with it.
+// - message: the radio message's check (the client's game slot 0x50,
+//   0x004b2b60: slot 0x340 with 1, counted); a refusal plays the local
+//   "spam" voice and the personal line through `tell` (the seconds left).
+// - spot: the spot's (0x007c8160 without an object or a point: slot 0x340
+//   with 0; 0x0042d110: with "not the local player", 0 for him), neither
+//   counted nor told: only slot 0x50's refusal speaks, so a spot whose
+//   voice is refused too (Radio.sendSpottedMessage 1) is told once.
+class RadioSpamGate {
+public:
+	explicit RadioSpamGate(const game::GameWorld& round) : m_round(round) {}
+	RadioSpam spam;
+	bool message(bool commander, const std::function<void(int secondsLeft)>& tell);
+	bool spot(bool commander);
+
+private:
+	double now() const;
+	const game::GameWorld& m_round;
+};
+
 // What Radio.sendSpottedMessage spots and says (0x007c8160).
 // - The crosshair object (0x0075be30 with the HUD's ray 0x0075bfe0): the
 //   ray meets an object; when it and its root are canBeSpotted (vehicleHud

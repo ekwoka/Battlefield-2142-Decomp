@@ -646,6 +646,18 @@ void GameAudio::radio()
 			in.sender.id = sender.id;
 			in.sender.team = sender.team;
 			in.sender.position = toSound(sender.position) + sound::Vec3 {0, 1.6f, 0};
+		} else if (message.sender < 0 && message.senderTeam != 0) {
+			// An auto controller's player (GameWorld::autoControllerReport):
+			// neither commander nor squad leader ("grunt"), his controlled
+			// object the sentry (not a soldier: the radio, not the local
+			// voice), its soundFilter (0x0042e0c0).
+			const world::Object* object = m_objects.find(message.senderObject);
+			in.hasSender = true;
+			in.senderIsListener = false;
+			if (object && object->objectTemplate()) {
+				in.senderFilter = setting(*object->objectTemplate(), "soundFilter");
+			}
+			in.sender.team = message.senderTeam;
 		}
 		// The sender's soldier plays the message's emote (0x0042e0c0, before
 		// the voice: the sender's controlled object a soldier, class 0x9493).

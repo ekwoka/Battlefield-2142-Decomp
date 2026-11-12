@@ -109,6 +109,25 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	CHECK(s.squadOf(a) == 2);
 }
 
+// SquadMenu.createSquad without the create box (0x007a5ad0 → 0x007d6910):
+// the squad is made all the same, with the first free id; a member of
+// another squad leaves it first; one alone in his keeps it.
+TEST(HudMenus_CreateSquadWithoutTheBox)
+{
+	Squads s;
+	const int me = s.world.addPlayer("Me", 2, false);
+	const int a = s.world.addPlayer("A", 2, true);
+	const int b = s.world.addPlayer("B", 2, true);
+	s.world.joinSquad(a, 1);
+	CHECK(!s.squads.createShown());
+	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+	// In squad 1 with A: a new squad (3) and squad 1 left.
+	s.world.joinSquad(b, 1);
+	CHECK(s.squads.createSquad(b) && s.squadOf(b) == 3 && s.squadOf(a) == 1);
+	// Alone in his squad: kept.
+	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+}
+
 // A private squad (the squad manager's join 0x004c7290, the HUD's
 // category-2 lines 0x00756b60 and question kind 0): the leader's lock
 // (column 8, slot 0x20) is the round's; a player without the squad's bit
@@ -968,6 +987,48 @@ TEST(RadioSpam_CountBlockAndReset)
 	for (int i = 0; i < 20; ++i) {
 		CHECK(!spots.check(false, false, now));
 	}
+}
+
+// The local player's gate on the game's timer (0x00666070): six messages
+// 4 s of game time apart are all said however fast the ticks run, and a
+// spot refused at the limit is silent (0x0042d110), so a spot whose voice
+// is refused too tells the block once (0x004b2b60).
+TEST(RadioSpam_GameTimerAndSilentSpot)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	menu::RadioSpamGate gate(round);
+	int told = 0, lastSeconds = 0;
+	const auto tell = [&](int seconds) {
+		++told;
+		lastSeconds = seconds;
+	};
+	const auto run = [&](double seconds) {
+		for (int i = 0; i < static_cast<int>(std::lround(seconds * 30)); ++i) {
+			round.tick(1.0f / 30.0f);
+		}
+	};
+	run(1);
+	for (int i = 0; i < 12; ++i) {
+		CHECK(!gate.message(false, tell)); // each 4 s on: the count went at 6 s
+		run(4);
+	}
+	CHECK(told == 0);
+	// Six within the interval, then the spot (not counted) and its voice.
+	for (int i = 0; i < 6; ++i) {
+		CHECK(!gate.message(false, tell));
+	}
+	CHECK(gate.spot(false));
+	CHECK(told == 0);
+	CHECK(gate.message(false, tell));
+	CHECK(told == 1 && lastSeconds == 31);
+	// The block lasts 30 s of game time.
+	run(29);
+	CHECK(gate.message(false, tell));
+	CHECK(told == 2 && lastSeconds == 2);
+	run(1.5);
+	CHECK(!gate.message(false, tell));
 }
 
 // The crosshair's parts (0x007be770): the spread by deviationFactor, pushed
@@ -2132,4 +2193,35 @@ TEST(HudMenus_ScoreboardShowsTheMapList)
 	hud.set("ServerInfoSelected", 1);
 	menu::showScoreboard(hud, false);
 	CHECK(hud.number("ScoreboardShow") == 0 && hud.number("LevelsListShow") == 0 && hud.number("ServerInfoSelected") == 0);
+}
+
+// Joined, SquadMenu.createSquad without the box (a console line, as the
+// key sweep's) asks the server for the first free squad (ChangeSquadName),
+// leaving the one he is in first (LeaveSquad); the commander asks nothing.
+TEST(HudMenus_CreateSquadJoinedWithoutTheBox)
+{
+	Squads s;
+	RadarWorld remote;
+	game::GameWorld::PlayerInfo me, mate;
+	me.id = 0;
+	me.team = 2;
+	mate.id = 1;
+	mate.team = 2;
+	mate.squad = 1;
+	remote.players = {me, mate};
+	std::vector<std::pair<int, std::string>> created;
+	std::vector<int> left;
+	menu::SquadMenu::Remote r;
+	r.world = &remote;
+	r.create = [&](int squad, const std::string& name) { created.push_back({squad, name}); };
+	r.leave = [&](int squad) { left.push_back(squad); };
+	s.squads.setRemote(r);
+	CHECK(s.squads.createSquad(0));
+	CHECK(created.size() == 1 && created[0].first == 2 && created[0].second == "Bravo" && left.empty());
+	remote.players[0].squad = 1;
+	CHECK(s.squads.createSquad(0));
+	CHECK(created.size() == 2 && created[1].first == 2 && left.size() == 1 && left[0] == 1);
+	remote.players[0].squad = 0;
+	remote.players[0].commander = true;
+	CHECK(!s.squads.createSquad(0) && created.size() == 2);
 }

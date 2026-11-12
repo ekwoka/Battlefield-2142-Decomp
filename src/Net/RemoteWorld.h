@@ -329,6 +329,20 @@ public:
 	static std::string encodeEndOfRoundData(const EndOfRoundData& data);
 	static bool decodeEndOfRoundData(const std::string& block, EndOfRoundData& out);
 
+	// The demo just recorded (data block 9; 0x004ad7a0 sends it once the
+	// AutoRecorder's hook is done, 0x005852b0): sv.demoDownloadURL with
+	// "{file}" replaced by the demo's file name (or the name appended),
+	// and the map. Each string an 8-bit length (at most 255 bytes kept
+	// here) and its bytes (0x00583ec0 writes, 0x00583d80 reads). The
+	// client's handler (0x004b5eb0 case 9) hands the URL to its +0xa8's
+	// slot 0x6c, not traced further: kept here.
+	struct DemoNotice {
+		std::string url, map;
+	};
+	bool demoNotice(DemoNotice& out) const;
+	static std::string encodeDemoNotice(const DemoNotice& notice);
+	static bool decodeDemoNotice(const std::string& block, DemoNotice& out);
+
 	// Transfers (DataBlock events; the client's handler is 0x004b5eb0). Each
 	// is a bit stream, strings a u16 length and the bytes (0x005155b0).
 	const std::map<uint32_t, std::string>& dataBlocks() const { return m_dataBlocks; }

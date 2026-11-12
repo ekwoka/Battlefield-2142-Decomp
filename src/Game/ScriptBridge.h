@@ -88,6 +88,11 @@ public:
 
 	// Messages and game events the scripts sent, newest last (for the HUD).
 	std::vector<std::string> messages;
+	// host.sgl_sendGameLogicEvent (0x00567d40: the player, an event id
+	// 0..24, the data): the game category's message `event` with the data
+	// for that player's connection (the game's slot 0x98); the dog tag's
+	// 19 (ECGameLogicGLDogTag, HudAlerts.h's DogTags).
+	std::function<void(int player, int event, int data)> onGameLogicEvent;
 
 private:
 	ScriptValue controlPointParam(ControlPoint& point, const std::string& name, const ScriptArgs& args);

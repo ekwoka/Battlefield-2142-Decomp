@@ -3060,7 +3060,7 @@ bool setupServer(Options& options, Session& session)
 	options.hostPort = static_cast<uint16_t>(sv.serverPort);
 	options.queryPort = static_cast<uint16_t>(sv.gameSpyPort);
 	options.timeLimit = sv.timeLimit;
-	options.ticketRatio = sv.ticketRatio;
+	options.ticketRatio = sv.ticketRatioInForce(); // 0x00430fa0: 100 ranked
 	options.scoreLimit = sv.scoreLimit;
 	options.maxPlayers = sv.maxPlayers;
 	if (options.botSkill < 0) {
@@ -3212,6 +3212,7 @@ int runGame(Options& options, Session& session)
 	dice::hfe::menu::WarningHud warningHud;
 	dice::hfe::menu::HelpPopups helpPopups;
 	helpPopups.bind(console);
+	dice::hfe::menu::DogTags dogTags; // the knife kills' tags (HudAlerts.h)
 	g_itemSelection.bind(console);
 	bindMethod(console, "IngameHelp.showIngameHelp", ConsoleAccess::Anyone,
 		[&helpPopups, &hudManager](std::string text, float seconds) { helpPopups.showText(hudManager, text, seconds); });
@@ -3273,6 +3274,7 @@ int runGame(Options& options, Session& session)
 	hudManager.setLocalizer(localizeWithKeys);
 	g_localize = localizeWithKeys;
 	helpPopups.setLocalizer(localizeWithKeys);
+	dogTags.setLocalizer(localizeWithKeys);
 	setupScoreboard(hudManager);
 	// The comm roses, filled by the HUD's Communication scripts (HudMenusComm.h).
 	dice::hfe::menu::CommRoses commRoses(hudManager);
@@ -4844,44 +4846,46 @@ int runGame(Options& options, Session& session)
 		// spam check and the local echo on: 0x004a5a80 on a server,
 		// 0x004b2b60 on a client): to the server of a joined game, else
 		// heard in the round; the sender hears his own at once (0x0042e0c0).
-		// The spam check (player slot 0x340, HudMenusComm.h's RadioSpam)
-		// with the server's limits (data block 0, else our own settings).
-		dice::hfe::menu::RadioSpam radioSpam;
+		// The spam check (player slot 0x340, HudMenusComm.h's RadioSpam) on
+		// the game's timer (RadioSpamGate) with the server's limits (data
+		// block 0, else our own settings).
+		dice::hfe::menu::RadioSpamGate radioSpam(round);
 		std::function<void(const std::string&)> spamLine; // the personal line (the chat, set below)
-		const auto spamRefused = [&](bool countIt) {
+		const auto spamLimits = [&] {
 			if (net::GameClient* server = joinedServer(); server && server->world().dataBlocks().count(0)) {
 				const net::RemoteWorld::ServerSettings sv = server->world().settings();
-				radioSpam.interval = sv.radioSpamInterval;
-				radioSpam.maxCount = sv.radioMaxSpamFlagCount;
-				radioSpam.blockedTime = sv.radioBlockedDurationTime;
+				radioSpam.spam.interval = sv.radioSpamInterval;
+				radioSpam.spam.maxCount = sv.radioMaxSpamFlagCount;
+				radioSpam.spam.blockedTime = sv.radioBlockedDurationTime;
 			} else if (session.admin) {
-				radioSpam.interval = session.admin->settings.radioSpamInterval;
-				radioSpam.maxCount = session.admin->settings.radioMaxSpamFlagCount;
-				radioSpam.blockedTime = session.admin->settings.radioBlockedDurationTime;
+				radioSpam.spam.interval = session.admin->settings.radioSpamInterval;
+				radioSpam.spam.maxCount = session.admin->settings.radioMaxSpamFlagCount;
+				radioSpam.spam.blockedTime = session.admin->settings.radioBlockedDurationTime;
 			}
-			const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 			game::GameWorld::PlayerInfo me;
-			const bool commander = hudPlayer(hudLocal(), me) && me.commander;
-			radioSpam.tick(commander, now);
-			if (!radioSpam.check(countIt, commander, now)) {
-				return false;
-			}
-			// 0x004b2b60: the local "spam" voice (game slot 0x60) and the line.
-			round.hearRadio(hudLocal(), 2, "spam");
-			if (spamLine) {
-				std::string line = localization.text("HUD_HUD_MENU_CHAT_SPAM_MESSAGE");
-				if (const size_t at = line.find("#SEC#"); at != std::string::npos) {
-					line.replace(at, 5, std::to_string(radioSpam.secondsLeft(now)));
-				}
-				spamLine(line);
-			}
-			return true;
+			return hudPlayer(hudLocal(), me) && me.commander;
 		};
+		// A radio message's check (0x004b2b60): refused, the local "spam"
+		// voice (game slot 0x60) and the line.
+		const auto spamRefused = [&] {
+			return radioSpam.message(spamLimits(), [&](int secondsLeft) {
+				round.hearRadio(hudLocal(), 2, "spam");
+				if (spamLine) {
+					std::string line = localization.text("HUD_HUD_MENU_CHAT_SPAM_MESSAGE");
+					if (const size_t at = line.find("#SEC#"); at != std::string::npos) {
+						line.replace(at, 5, std::to_string(secondsLeft));
+					}
+					spamLine(line);
+				}
+			});
+		};
+		// A spot's (0x007c8160, 0x0042d110): not counted and silent.
+		const auto spotRefused = [&] { return radioSpam.spot(spamLimits()); };
 		const auto sayRadio = [&](int channel, const std::string& voice, int value, bool checkSpam = true) {
 			if (channel < 0 || voice.empty()) {
 				return;
 			}
-			if (checkSpam && spamRefused(true)) {
+			if (checkSpam && spamRefused()) {
 				return;
 			}
 			if (net::GameClient* server = joinedServer()) {
@@ -4936,7 +4940,7 @@ int runGame(Options& options, Session& session)
 		// A joined client picks the object from its own view (its ghost's
 		// id goes up); a server takes the reporter's crosshair from its view.
 		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone,
-			[&commRoses, &round, &gameLogic, &joinedServer, &session, spamRefused, sayRadio](bool say, std::string) {
+			[&commRoses, &round, &gameLogic, &joinedServer, &session, spotRefused, sayRadio](bool say, std::string) {
 				commRoses.close();
 				dice::hfe::menu::SpotChoice choice;
 				if (net::GameClient* server = joinedServer(); server && g_remoteHud) {
@@ -4952,7 +4956,7 @@ int runGame(Options& options, Session& session)
 					const host::LocalHudWorld local(round, gameLogic);
 					choice = dice::hfe::menu::spotChoice(local, round, round.crosshairTarget(round.localPlayer()));
 				}
-				if (!spamRefused(false)) {
+				if (!spotRefused()) {
 					net::SpottedInfo spot;
 					spot.message = 0x2e;
 					if (net::GameClient* server = joinedServer()) {
@@ -5027,21 +5031,32 @@ int runGame(Options& options, Session& session)
 		// 0x00752580 → the HUD information layer's slot 0xa8, 0x00449180):
 		// 1 adds the joined server to GeneralSettings' favourites (its slot
 		// 0x17c with the address, the port, the name and time()), 0 removes
-		// it (slot 0x190); ServerIsFavourite (+0xb24) follows the list.
+		// it (slot 0x190, 0x0049ca90: by the address and the game port,
+		// the menu's lists told); ServerIsFavourite (+0xb24) follows the
+		// list. Both only in a joined game (+0xb14 / +0xb18 set).
 		bindMethod(console, "HudManager.addFavouriteServer", ConsoleAccess::Anyone, [&](bool add) {
 			hudManager.set("ServerIsFavourite", add ? 1 : 0);
-			if (add && session.client) {
-				std::string host = options.connect;
-				int port = 17567;
-				if (const size_t colon = host.rfind(':'); colon != std::string::npos) {
-					port = std::atoi(host.c_str() + colon + 1);
-					host.resize(colon);
-				}
-				std::string output;
-				console.execute("GeneralSettings.addFavouriteServer \"" + host + "\" " + std::to_string(port) + " \""
-						+ session.client->world().serverName() + "\" " + std::to_string(static_cast<long long>(std::time(nullptr))),
-					output);
+			if (!session.client) {
+				return;
 			}
+			std::string host = options.connect;
+			int port = 17567;
+			if (const size_t colon = host.rfind(':'); colon != std::string::npos) {
+				port = std::atoi(host.c_str() + colon + 1);
+				host.resize(colon);
+			}
+			if (!add) {
+				if (session.menuBindings) {
+					session.menuBindings->removeFavouriteServer(host, port);
+				} else {
+					session.settings.removeFavouriteServer(host, port);
+				}
+				return;
+			}
+			std::string output;
+			console.execute("GeneralSettings.addFavouriteServer \"" + host + "\" " + std::to_string(port) + " \""
+					+ session.client->world().serverName() + "\" " + std::to_string(static_cast<long long>(std::time(nullptr))),
+				output);
 		});
 		bindMethod(console, "Chat.sayAll", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kAll, line); });
 		bindMethod(console, "Chat.sayTeam", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kTeam, line); });
@@ -6090,8 +6105,8 @@ int runGame(Options& options, Session& session)
 			// The round's sv settings: the time limit (seconds), spawn and
 			// man-down times.
 			gameLogic.timeLimit = static_cast<float>(admin.settings.timeLimit);
-			round.setSpawnTime(admin.settings.spawnTime);
-			round.setManDownTime(admin.settings.manDownTime);
+			round.setSpawnTime(admin.settings.spawnTimeInForce());     // 0x00430f60: 15 ranked
+			round.setManDownTime(admin.settings.manDownTimeInForce()); // 0x00430f80: 15 ranked
 			admin.hooks.players = [&round, hosted] {
 				std::vector<host::AdminHooks::Player> out;
 				const auto clients = hosted->clientPlayers();
@@ -6510,10 +6525,11 @@ int runGame(Options& options, Session& session)
 		// 0x005ff5d0, skips the node's vectors for a Titan, 0x00561d90): the
 		// exe's client moves its Titans itself (the Titan sync's tick,
 		// 0x00561e20 -> 0x005aca70, runs in the client's frame 0x00590e10
-		// too). Here the velocity comes from its updates' positions and
-		// ticks, and the body goes on at it between updates, so what stands
-		// on its decks is carried (the predicted soldier's step takes the
-		// body's velocity as its carry, 0x006ca660 / 0x006ca3b0).
+		// too; GameWorld::stepTitanSync). Until its sync has an order in
+		// force, the velocity comes from its updates' positions and ticks,
+		// and the body goes on at it between updates, so what stands on its
+		// decks is carried (the predicted soldier's step takes the body's
+		// velocity as its carry, 0x006ca660 / 0x006ca3b0).
 		struct TitanGhost {
 			uint32_t tick = 0;
 			net::Vec3f position;
@@ -6521,6 +6537,8 @@ int runGame(Options& options, Session& session)
 			int framesSince = 0;
 		};
 		std::map<uint16_t, TitanGhost> titanGhosts;
+		uint32_t titanSyncBlock = 0, titanSyncFrames = 0, titanSyncTick = 0; // the Titan sync's clock (server ticks)
+		uint32_t titanRecordTick = 0; // the server tick of the last control-object record
 		std::map<int, uint32_t> reloadsSeen;          // a player -> the reloads (mask 0x10000) already shown
 		struct TimedCommand {
 			float at;
@@ -6806,6 +6824,7 @@ int runGame(Options& options, Session& session)
 			}
 			if (own.controlRecords() != recordsSeen) {
 				recordsSeen = own.controlRecords();
+				titanRecordTick = own.serverTick();
 				const net::ControlState* state = own.controlState();
 				const net::ControlObjectRecord& record = own.controlObject();
 				// Our own state's hit indicator flag (0x00596ed0: player
@@ -6873,6 +6892,30 @@ int runGame(Options& options, Session& session)
 			} else if (!own.controlInLastBlock() && (prediction.active() || carPrediction.active())) {
 				prediction.stop();
 				carPrediction.stop();
+			}
+			// The Titans move here as on the server (the client's frame
+			// 0x00590e10 runs the Titan sync, 0x00561e20 -> 0x005aca70, before
+			// the control object's update), up to the server tick at which
+			// the move about to be predicted will be stepped: the last
+			// record's (its move stepped against the Titan of that block)
+			// plus the moves sent since, one a tick; without a record, the
+			// last ghost block's tick and the ticks run since. It only goes
+			// forward (a state the server corrects is stepped again).
+			{
+				const uint32_t block = client.world().serverTick();
+				titanSyncFrames = block == titanSyncBlock ? titanSyncFrames + 1 : 0;
+				titanSyncBlock = block;
+				uint32_t wanted = block + titanSyncFrames;
+				if (client.world().controlRecords() && (prediction.active() || carPrediction.active())) {
+					const int32_t ahead = client.nextMove() - client.world().controlObject().lastMove;
+					if (ahead > 0 && ahead < 90) {
+						wanted = titanRecordTick + static_cast<uint32_t>(ahead);
+					}
+				}
+				titanSyncTick = wanted + 30 < titanSyncTick ? wanted : std::max(titanSyncTick, wanted);
+				if (block) {
+					round.stepTitanSync(titanSyncTick);
+				}
 			}
 			client.simulatedTick(); // this tick's move goes up (and is predicted)
 			if (remoteHud) {
@@ -6971,6 +7014,13 @@ int runGame(Options& options, Session& session)
 						}
 					}
 					if (world::Object* object = round.remoteRagDoll(it->second) || flying ? nullptr : objects.find(it->second)) {
+						// A Titan the client's sync moves stays where it put it
+						// (its ghost's place isn't the exe client's to take).
+						physics::Vec3 titanVelocity;
+						const bool titanSynced = round.titanSyncPlaced(it->second, &titanVelocity);
+						if (titanSynced) {
+							at = object->position();
+						}
 						object->setPosition(at);
 						object->setRotation(turned);
 						if (ghost.kind != net::NetworkableKind::Soldier) {
@@ -6978,7 +7028,15 @@ int runGame(Options& options, Session& session)
 								? physics::Vec3 {ghost.velocity.x, ghost.velocity.y, ghost.velocity.z}
 								: physics::Vec3 {};
 							physics::Vec3 place {at.x, at.y, at.z};
-							if (round.isRemoteTitan(it->second)) {
+							if (round.isRemoteTitan(it->second) && ghost.health >= 0) {
+								round.setRemoteTitanHitPoints(it->second, ghost.health);
+							}
+							if (titanSynced) {
+								v = titanVelocity;
+							} else if (round.isRemoteTitan(it->second)) {
+								// Before the sync has an order in force and a state
+								// (a Titan with none yet), its updates' places: the
+								// velocity from them, the body moved on at it.
 								TitanGhost& titan = titanGhosts[ghost.ghost];
 								if (ghost.positionTick != titan.tick) {
 									if (titan.tick != 0 && ghost.positionTick > titan.tick) {
@@ -7358,6 +7416,14 @@ int runGame(Options& options, Session& session)
 				if (message.category == 2 && message.id == 0x23) {
 					offers.push_back(message);
 				}
+				// The Titan sync's (ECPhysicsETitanSync, 0x00562100): an order
+				// and the state at its tick (id 0), the server's states (id 2).
+				if (net::TitanSyncInfo sync; message.category == net::kMsgPhysicsCategory
+					&& (message.id == net::kTitanSyncOrder || message.id == net::kTitanSyncState)
+					&& net::parseTitanSync(message.payload, sync)) {
+					round.titanSyncMessage({message.id == net::kTitanSyncOrder, sync.team, sync.orderTick, sync.targetX,
+						sync.targetZ, sync.stateTick, sync.velocityX, sync.velocityZ, sync.x, sync.z});
+				}
 				// An invite (2/0x10, the squad: 0x004c3190's message): the
 				// question's kind 1 (HUD_HUD_SQUAD_INVITED_TO, #SQUADNAME#).
 				// The squad manager's join answers (0x004c7290: 2/0xb full,
@@ -7366,6 +7432,12 @@ int runGame(Options& options, Session& session)
 				if (message.category == 2
 					&& (message.id == 0xb || message.id == 0xc || message.id == 0x11 || message.id == 0x12 || message.id == 0x13)) {
 					squadMenu.squadMessage(static_cast<int>(message.id), message.payloadInt(0));
+				}
+				// The dog tag (the game category's 0x13, 0x004cbea0): the
+				// victim's id; a client counts it.
+				if (message.category == net::kMsgGameCategory && message.id == 0x13 && message.payload.size() >= 4) {
+					const net::RemotePlayer* victim = client.world().player(message.payloadInt(0));
+					dogTags.collect(hudManager, message.payloadInt(0), victim ? victim->name : std::string(), false);
 				}
 				if (message.category == 2 && message.id == 0x10) {
 					std::string line = localization.text("HUD_HUD_SQUAD_INVITED_TO");
@@ -7564,6 +7636,18 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		scoreOf = [&bridge](int player) { return static_cast<int>(bridge.playerScore(player, "score").asInt()); };
+		// The scripts' game logic events (0x00567d40): to the player's
+		// client, or handled here for our own (0x004cbea0: the dog tag's
+		// 0x13; this machine is the server, so its count isn't kept).
+		bridge.onGameLogicEvent = [&round, &hudManager, &dogTags, hosted](int player, int event, int data) {
+			if (hosted && hosted->gameLogicEvent(player, event, data)) {
+				return;
+			}
+			game::GameWorld::PlayerInfo victim;
+			if (event == 0x13 && player >= 0 && player == round.localPlayer() && round.playerInfo(data, victim)) {
+				dogTags.collect(hudManager, data, victim.name, true);
+			}
+		};
 		script::ScriptHost scripts(bridge,
 			{options.gameDir + "/python", options.gameDir + "/" + options.modPath + "/python"},
 			[&options](const std::string& line) {
@@ -9063,6 +9147,7 @@ int runGame(Options& options, Session& session)
 				}
 				helpPopups.update(hudManager, help, seconds);
 				helpPopups.tutorial(hudManager, help, seconds);
+				dogTags.tick(hudManager, seconds);
 				// The lock tones (GameWorld::takeLockTones, 0x00657ce0).
 				for (const auto& tone : round.takeLockTones()) {
 					tone.play ? sounds.playSound(tone.sound) : sounds.stopSound(tone.sound);

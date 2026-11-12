@@ -412,6 +412,9 @@ public:
 		int queryPort = 0;
 	};
 	std::vector<FavouriteServer> favouriteServers(bool history = false) const;
+	// Slot 0x190 (0x0049ca90): that address and game port's favourite
+	// removed, the lists shown again; true when there was one.
+	bool removeFavouriteServer(const std::string& ip, int port);
 
 	// The menu's wait state (Logic.beginWaitState n / endWaitState,
 	// SwiffHost slots 0x2e8 / 0x2ec: +0xd90, the cursor slot 0x84 picks:

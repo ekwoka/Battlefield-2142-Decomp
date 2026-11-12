@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace dice::hfe;
@@ -569,4 +570,38 @@ TEST(ScriptHost_TriggerExitOfADeletedObjectIsNone)
 		std::fprintf(stderr, "%s", errors.c_str());
 	}
 	CHECK(errors.empty());
+}
+
+// A knife kill's dog tag (python/bf2/stats/stats.py's onPlayerKilled for a
+// WEAPON_TYPE_KNIFE weapon): sendGameEvent(attacker, 19, victim.index),
+// host.sgl_sendGameLogicEvent (0x00567d40: the player, the event, the
+// data) for the attacker's connection (the game's slot 0x98).
+TEST(ScriptHost_KnifeKillSendsTheDogTag)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	const auto raise = [&](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	round.bridge->events = raise;
+	std::vector<std::tuple<int, int, int>> sent;
+	round.bridge->onGameLogicEvent = [&](int player, int event, int data) { sent.push_back({player, event, data}); };
+	CHECK(host.startGameMode("gpm_cq"));
+	const int a = round.world->addPlayer("A", 2, true);
+	const int c = round.world->addPlayer("C", 1, true);
+	CHECK(round.world->spawnSoldier(a) && round.world->spawnSoldier(c));
+	const std::string kill = "import bf2\n"
+							 "import bf2.stats.stats as s\n"
+							 "class W:\n  def __init__(self, n): self.templateName = n\n"
+							 "pa = bf2.playerManager.getPlayerByIndex(" + std::to_string(a) + ")\n"
+							 "pc = bf2.playerManager.getPlayerByIndex(" + std::to_string(c) + ")\n";
+	CHECK(host.run(kill + "s.onPlayerKilled(pc, pa, W('eu_ar_rifle'), [], None)\n"));
+	CHECK(sent.empty());
+	CHECK(host.run(kill + "s.onPlayerKilled(pc, pa, W('knife'), [], None)\n"));
+	CHECK(sent.size() == 1 && sent[0] == std::make_tuple(a, 19, c));
 }

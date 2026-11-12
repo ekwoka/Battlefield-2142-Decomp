@@ -99,7 +99,17 @@ void ScriptBridge::gameEvent(const std::string& kind, const ScriptArgs& args)
 	for (const ScriptValue& a : args) {
 		text += ' ' + std::to_string(a.asInt());
 	}
+	if (kind == "gameLogicEvent" && args.size() >= 3) {
+		const int event = static_cast<int>(args[1].asInt());
+		if (event >= 0 && event < 0x19 && onGameLogicEvent) {
+			onGameLogicEvent(static_cast<int>(args[0].asInt()), event, static_cast<int>(args[2].asInt()));
+		}
+		return;
+	}
 	messages.push_back(text);
+	if (messages.size() > 256) {
+		messages.erase(messages.begin(), messages.end() - 256);
+	}
 }
 
 std::vector<uint32_t> ScriptBridge::objectsOfType(const std::string& type)

@@ -1945,24 +1945,7 @@ void BotManager::warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self)
 }
 
 namespace {
-// An object template's radio.spottedMessage (its quotes taken off), "" for
-// none: the game's slot 0xd0 (0x0042e9d0) asks the spotted object's Radio
-// component.
-std::string spottedVoiceOf(const world::ObjectTemplate* t)
-{
-	if (!t) {
-		return {};
-	}
-	const auto it = t->settings().find("radio.spottedMessage");
-	if (it == t->settings().end()) {
-		return {};
-	}
-	std::string name = it->second;
-	if (name.size() >= 2 && name.front() == '"' && name.back() == '"') {
-		name = name.substr(1, name.size() - 2);
-	}
-	return name;
-}
+std::string spottedVoiceOf(const world::ObjectTemplate* t) { return GameWorld::spottedMessageOf(t); }
 } // namespace
 
 // The bots' spotting. The memory pass (0x100ed2c0) hands an item's first

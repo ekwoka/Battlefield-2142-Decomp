@@ -253,6 +253,8 @@ public:
 	// Each move as it goes up (once, with its index): the client's
 	// prediction steps it (src/Main/Prediction.h).
 	std::function<void(const PlayerMove&)> onMoveSent;
+	// The index the next move goes up with (0x005836b0's count).
+	int32_t nextMove() const { return m_moveIndex; }
 
 	// Counters for diagnostics.
 	size_t packetsReceived() const { return m_packetsReceived; }

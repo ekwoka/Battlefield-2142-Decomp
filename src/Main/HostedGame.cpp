@@ -532,7 +532,7 @@ void HostedGame::addRuleKeys(net::ServerReport& r) const
 	const auto flag = [](bool on) { return std::string(on ? "1" : "0"); };
 	// 0x00430a00: a ranked game also needs GameSpyRanked, which a LAN
 	// host never has, so only sv.ranked's fixed rules apply here.
-	const bool rankedGame = false;
+	const bool rankedGame = sv.rankedGame(m_setup.gameMode, false);
 	r.keys["roundtime"] = decimal(sv.roundsPerMap);                         // field 9, +0x11c
 	r.keys["timelimit"] = decimal(sv.timeLimit);                            // field 0xb, +0x120
 	r.keys["bf2142_ranked"] = flag(rankedGame);                             // field 0xe, 0x00430a00
@@ -542,11 +542,11 @@ void HostedGame::addRuleKeys(net::ServerReport& r) const
 	r.keys["bf2142_friendlyfire"] = flag(sv.soldierFriendlyFire >= 100);    // field 0x16, +0x128 at 100 or more
 	r.keys["bf2142_tkmode"] = sv.tkPunishEnabled ? "Punish" : "No Punish"; // field 0x17, +0x140
 	r.keys["bf2142_startdelay"] = decimal(sv.startDelay);                   // field 0x18, +0x108
-	r.keys["bf2142_spawntime"] = real(sv.ranked ? 15.0f : sv.spawnTime);    // field 0x19, 0x00430f60
+	r.keys["bf2142_spawntime"] = real(sv.spawnTimeInForce());               // field 0x19, 0x00430f60
 	r.keys["bf2142_sponsortext"] = sv.sponsorText;                          // field 0x1a, +0x1f0
 	r.keys["bf2142_scorelimit"] = decimal(sv.scoreLimit);                   // field 8, +0x124
-	r.keys["bf2142_ticketratio"] = decimal(sv.ranked ? 100 : sv.ticketRatio); // field 0x1c, 0x00430fa0
-	r.keys["bf2142_teamratio"] = real(sv.ranked ? 100.0f : sv.teamRatioPercent); // field 0x1d, 0x00430fc0
+	r.keys["bf2142_ticketratio"] = decimal(sv.ticketRatioInForce());        // field 0x1c, 0x00430fa0
+	r.keys["bf2142_teamratio"] = real(sv.teamRatioInForce());              // field 0x1d, 0x00430fc0
 	r.keys["bf2142_team1"] = m_logic->team(1).name;                         // field 0x1e (slot 0x48)
 	r.keys["bf2142_team2"] = m_logic->team(2).name;                         // field 0x1f (slot 0x48(2))
 	r.keys["bf2142_mapsize"] = decimal(m_setup.mapSize);                    // field 0x22 (slot 0x100)
@@ -708,7 +708,9 @@ void HostedGame::sendSettings(int id)
 		settings.radioMaxSpamFlagCount = sv->radioMaxSpamFlagCount;
 		settings.radioBlockedDurationTime = sv->radioBlockedDurationTime;
 		settings.votingEnabled = sv->votingEnabled;
-		settings.playersNeededToStart = static_cast<uint32_t>(std::max(sv->numPlayersNeededToStart, 0));
+		// 0x004316b0: a ranked game's minimum (never on a LAN host).
+		settings.playersNeededToStart = static_cast<uint32_t>(
+			std::max(sv->playersNeededToStartInForce(sv->rankedGame(m_setup.gameMode, false)), 0));
 		settings.friendlyFireWithMines = sv->friendlyFireWithMines;
 		settings.allowTitanMovement = sv->allowTitanMovement;
 	}
@@ -840,13 +842,53 @@ void HostedGame::stopAutoDemo()
 		return; // no hook program (the original's launch fails: "failed to launch hook program")
 	}
 	m_hookBusy->store(true);
-	std::thread([busy = m_hookBusy, command = "\"" + hook + "\" \"" + file + "\""] {
+	m_hookFile = file;
+	m_hookMap = m_setup.level;
+	std::thread([busy = m_hookBusy, done = m_hookDone, command = "\"" + hook + "\" \"" + file + "\""] {
 		const int result = std::system(command.c_str());
 		if (result != 0) {
 			std::fprintf(stderr, "dep: autodemo hook program failed w/ non-zero exit code\n");
 		}
+		done->store(result == 0 ? 1 : 2);
 		busy->store(false);
 	}).detach();
+}
+
+// 0x005852b0, once the hook is done: a failure is logged; else message 9
+// (0x004ad7a0) goes to every client: sv.demoDownloadURL with "{file}"
+// replaced by the demo's file name (after the last \ or /, 0x0065b640),
+// or the name appended, and the map (data block 9 through each
+// connection, 0x004a9f10).
+void HostedGame::hookDone()
+{
+	const int done = m_hookDone->exchange(0);
+	if (done == 0) {
+		return;
+	}
+	if (done == 2) {
+		if (onLog) {
+			onLog("Demo upload failed. Check 'rotate_demo_err.txt' for more info.");
+		}
+		return;
+	}
+	const size_t slash = m_hookFile.find_last_of("\\/");
+	const std::string name = slash == std::string::npos ? m_hookFile : m_hookFile.substr(slash + 1);
+	net::RemoteWorld::DemoNotice notice;
+	notice.url = m_setup.settings ? m_setup.settings->demoDownloadURL : std::string();
+	if (const size_t at = notice.url.find("{file}"); at != std::string::npos) {
+		notice.url.replace(at, 6, name);
+	} else {
+		notice.url += name;
+	}
+	notice.map = m_hookMap;
+	const std::string data = net::RemoteWorld::encodeDemoNotice(notice);
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage != Client::Stage::Connected && id != kDemoClient) { // a map change leaves them loading
+			for (const net::GameEvent& e : net::dataBlockEvents(9, data)) {
+				sendTo(id, e);
+			}
+		}
+	}
 }
 
 void HostedGame::stopDemo()
@@ -1210,6 +1252,11 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			const uint32_t end = m_logic->timeLimit > 0 ? static_cast<uint32_t>(m_logic->timeLimit * 30) : 0;
 			sendTo(id, eventOf(net::kEvBeginRound, {3, end, static_cast<uint32_t>(-1)}));
 			client.stage = Client::Stage::Playing;
+			// The Titans' last orders and states, for a client that came
+			// after they went out (the rewrite's; see sendTitanSync).
+			for (const game::GameWorld::TitanSync& m : m_round->titanSyncState()) {
+				sendTo(id, titanSyncEvent(m));
+			}
 			break;
 		}
 		case net::kNeSelectSpawnGroup: { // 0x004c1d50's request
@@ -1745,6 +1792,46 @@ void HostedGame::sendTeamDamage()
 						   net::int32Payload(e.kind) + net::int32Payload(e.victim) + net::int32Payload(e.attacker)));
 		}
 	}
+}
+
+// The Titan sync's messages (ECPhysicsETitanSync, category 9: id 0 an
+// order, 0x0050f1f0 / 0x005aca70; id 2 the states every 30 ticks,
+// 0x00561e20) to everyone (the game's slot 0x84 with 0x00509990's
+// PostRemote). Their ticks go out as the ghost blocks count them: the
+// round's last tick is this one's.
+net::GameEvent HostedGame::titanSyncEvent(const game::GameWorld::TitanSync& m) const
+{
+	const uint32_t shift = m_tick - m_round->ticks();
+	net::TitanSyncInfo info;
+	info.team = m.team;
+	info.orderTick = m.orderTick + shift;
+	info.targetX = m.targetX;
+	info.targetZ = m.targetZ;
+	info.stateTick = m.stateTick + shift;
+	info.velocityX = m.velocityX;
+	info.velocityZ = m.velocityZ;
+	info.x = m.x;
+	info.z = m.z;
+	return net::makePostRemote(net::kMsgPhysicsCategory, m.order ? net::kTitanSyncOrder : net::kTitanSyncState,
+		net::titanSyncPayload(info));
+}
+
+void HostedGame::sendTitanSync()
+{
+	for (const game::GameWorld::TitanSync& m : m_round->takeTitanSync()) {
+		sendToPlaying(titanSyncEvent(m));
+	}
+}
+
+bool HostedGame::gameLogicEvent(int player, int event, int data)
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage == Client::Stage::Playing && client.player == player && player >= 0) {
+			sendTo(id, net::makePostRemote(net::kMsgGameCategory, static_cast<uint32_t>(event), net::int32Payload(data)));
+			return true;
+		}
+	}
+	return false;
 }
 
 void HostedGame::sendSquadMessages()
@@ -2453,6 +2540,13 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 					}
 				}
 			}
+			if (h.kind == net::NetworkableKind::SimpleObject && m_round->isTitan(ghost.object)) {
+				// A Titan (0x00561d90): the bit after the mask set, so no
+				// node vectors (0x005ff5d0); its place goes with its first
+				// state only (snapshotGhosts).
+				s.flag = true;
+				s.mask &= ~(0x4u | 0x8u);
+			}
 			break;
 		case net::NetworkableKind::OverheadCamera:
 			// 0x006033a0 / 0x006037a0: the pan (1), where it stands (2), the
@@ -2700,6 +2794,19 @@ void HostedGame::snapshotGhosts()
 						? before->second.groups[g]
 						: net::NetworkableFields {},
 					seen.groups.back());
+			}
+			// A Titan's mode mask (slot 0x24, 0x005fdce0: 0xf61270 for a
+			// Titan, 0x1f6127b else) leaves its orientation and place out of
+			// every update: each client moves its Titans itself by the Titan
+			// sync's messages (GameWorld::stepTitanSync). The rewrite sends
+			// them with the ghost's first state (a new state has every bit),
+			// as CreateObject carries no place for an object of several
+			// ghosts (0x0050b450) and the client needs the Titan's height
+			// and heading; where the exe's client takes them from wasn't
+			// traced.
+			size_t part = 0;
+			if (const Ghost* titan = ghostOf(ghost, part); titan && part == 0 && m_round->isTitan(titan->object)) {
+				changed[0] &= 0x00f61270u;
 			}
 		}
 		bool any = false;
@@ -3284,11 +3391,12 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 // players' networkables, which have no object) at 255; each tree within
 // the radius scored by its root (0x0057d300) and each ghost of it at
 // (score + 0.3 for a projectile) x its base priority (0x0057d560); each
-// living teammate's soldier or vehicle at least 0.03. The demo connection
-// takes everything at 1 (0x0057d8f0). Not rewritten: the commander's
-// satellite scan and the UAV (enemies at 0.5), his soldiers with +0x29c
-// set (0.03), OptimizeEnclosingObjectsNetworking, and the eye of player
-// vt+0xd4 (a team object's). The client's own soldier and vehicle are
+// living teammate's control object (his soldier, or the seat he holds) at
+// least 0.03; then the commander's tools (below). The demo connection
+// takes everything at 1 (0x0057d8f0). Not rewritten:
+// OptimizeEnclosingObjectsNetworking / GhostNotEnclosed (0 by default),
+// and the eye of player vt+0xd4 (a team object's), which never holds for
+// a remote client. The client's own soldier and vehicle are
 // scored like the rest here (the original skips the player's own, which
 // the record carries); the eye is the soldier's head, kept from its last
 // life while it has none (the original's camera object).
@@ -3364,24 +3472,35 @@ void HostedGame::rescore(Client& client)
 	if (everything) {
 		return;
 	}
+	// A player's control object's own networkable (vt+0x4c, its slot 0xd0):
+	// the soldier's ghost, or the ghost of the seat he holds (a vehicle's
+	// other seats and parts are ghosts of their own), its base priority
+	// over 0.
+	const auto controlled = [&](const game::GameWorld::PlayerInfo& p, float priority) {
+		const auto it = m_ghosts.find(p.vehicle ? p.vehicle : p.soldier);
+		if (it == m_ghosts.end() || it->second.basePriority <= 0 || !client.created.count(it->second.first)) {
+			return;
+		}
+		g.setPriority(p.vehicle ? ghostOfObject(p.vehicle, p.seat) : it->second.first, priority, true);
+	};
+	// Each living teammate's at least 0.03 (0x0057d560's end).
 	for (const auto& [player, seen] : m_players) {
 		game::GameWorld::PlayerInfo p;
 		if (player == client.player || !m_round->playerInfo(player, p) || !p.alive || p.team != me.team) {
 			continue;
 		}
-		const auto it = m_ghosts.find(p.vehicle ? p.vehicle : p.soldier);
-		if (it != m_ghosts.end() && it->second.basePriority > 0) {
-			everyPart(it->second, net::kGhostTeammatePriority, true);
-		}
+		controlled(p, net::kGhostTeammatePriority);
 	}
 	// The commander's tools (0x0057dc10's end, the asset manager
 	// DAT_00a6a390): for the team's commander with the satellite scan
 	// running (0x005a2370: the team's +0xc of its 0x3c bytes over 0) every
 	// enemy (radius -1), else with the team's UAV up (0x005a27c0: +0x4 over
 	// 0, its point at +0x14) the enemies within the game logic's +0x230
-	// (uavRadius, slot 0x28c) of it: each living enemy's soldier or vehicle
-	// (vt+0x4c) whose networkable's base priority is over 0 at 0.5, kept
-	// over a higher score (0x0057cfb0 -> 0x00581e80(..., 0.5, 1)). Then the
+	// (uavRadius, slot 0x28c) of it: each living enemy's control object
+	// (vt+0x4c: his soldier, or the seat he holds) whose networkable's base
+	// priority is over 0 at 0.5, kept over a higher score (0x0057cfb0 ->
+	// 0x00581e80(..., 0.5, 1)), the UAV's radius measured to the control
+	// object's place (slot 0x60) in three dimensions. Then the
 	// commander's own assets (0x0057db50: the objects of the game logic's
 	// slot 0x1d0 list of his team whose +0x29c kind is 1-4) at 0.03.
 	if (me.team != 1 && me.team != 2) {
@@ -3398,10 +3517,6 @@ void HostedGame::rescore(Client& client)
 				continue;
 			}
 			const uint32_t object = p.vehicle ? p.vehicle : p.soldier;
-			const auto it = m_ghosts.find(object);
-			if (it == m_ghosts.end() || it->second.basePriority <= 0) {
-				continue;
-			}
 			if (uav && uavRadius > 0) {
 				const world::Object* o = m_round->objects().find(object);
 				if (!o) {
@@ -3412,7 +3527,7 @@ void HostedGame::rescore(Client& client)
 					continue;
 				}
 			}
-			everyPart(it->second, net::kGhostScanPriority, true);
+			controlled(p, net::kGhostScanPriority);
 		}
 	}
 	if (me.commander) {
@@ -3546,6 +3661,8 @@ void HostedGame::tick()
 	sendCloseTo();
 	sendTeamDamage();
 	sendSquadMessages();
+	sendTitanSync();
+	hookDone();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).

@@ -852,6 +852,13 @@ TEST(MenuBindings_Favourites)
 	CHECK(avm1::toBoolean(mp("removeFavouriteServer", {avm1::Value("10.0.0.3 17569 29900")})));
 	CHECK(bindings.favouriteServers().empty() && natives.listRows("serverListQuick").size() == 15);
 	CHECK(!avm1::toBoolean(mp("isServerOnline", {avm1::Value("10.0.0.3 17569 29900")})));
+	// The in-game HUD's removal (slot 0x190 for the joined server): the
+	// lists shown again.
+	CHECK(avm1::toBoolean(mp("addFavourite", {avm1::Value("Mine"), avm1::Value("192.168.1.20"), avm1::Value(16567)})));
+	CHECK(natives.listRows("serverListQuick").size() == 16);
+	CHECK(!bindings.removeFavouriteServer("192.168.1.20", 16568));
+	CHECK(bindings.removeFavouriteServer("192.168.1.20", 16567));
+	CHECK(bindings.favouriteServers().empty() && natives.listRows("serverListQuick").size() == 15);
 
 	// The history from the profile's file: made a favourite, removed.
 	objects.setList("GeneralSettings.ServerHistory", {"\"10.1.1.1\" 16567 \"Old one\" 29901"});

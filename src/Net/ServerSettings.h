@@ -16,6 +16,7 @@
 // settings, ServerAdmin (src/Main) binds them to the console.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <ctime>
 #include <functional>
@@ -100,6 +101,30 @@ struct ServerSettings {
 	float botSkill = 0.5f;
 	bool allowSpectators = false;
 	bool allowTitanMovement = true;
+
+	// What a ranked server (sv.ranked, +0x26d) runs with whatever was set:
+	// spawnTime and manDownTime 15 (0x00430f60, 0x00430f80), ticketRatio
+	// 100 (0x00430fa0), teamRatioPercent 100 (0x00430fc0). The console's
+	// getters read these (0x0041cd19 ...), sv.save the values set.
+	float spawnTimeInForce() const { return ranked ? 15.0f : spawnTime; }
+	float manDownTimeInForce() const { return ranked ? 15.0f : manDownTime; }
+	int ticketRatioInForce() const { return ranked ? 100 : ticketRatio; }
+	float teamRatioInForce() const { return ranked ? 100.0f : teamRatioPercent; }
+	// A ranked game (0x00430a00): gpm_cq, gpm_ti, gpm_sl, gpm_nv or gpm_ca,
+	// an internet server (+0x54) with GameSpyRanked (the GameSpy back end's
+	// word on the server, which no LAN or offline host has) and sv.ranked;
+	// with AIDLL loaded also its interface's slot 0x20 (not modelled).
+	bool rankedGame(const std::string& gameMode, bool gameSpyRanked) const;
+	// Its minimums: maxPlayers at least 16 (0x00431690), the players needed
+	// to start at least 8 over 32 players, else 6 (0x004316b0).
+	int maxPlayersInForce(bool rankedGame) const { return rankedGame && maxPlayers < 17 ? 16 : maxPlayers; }
+	int playersNeededToStartInForce(bool rankedGame) const
+	{
+		if (!rankedGame) {
+			return numPlayersNeededToStart;
+		}
+		return std::max(numPlayersNeededToStart, maxPlayers > 32 ? 8 : 6);
+	}
 
 	// The settings as console lines (0x00431880's order and quoting).
 	std::string save() const;

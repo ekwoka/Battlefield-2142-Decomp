@@ -2025,6 +2025,34 @@ TEST(Ik_DriverHoldsTheWheel)
 	const int shoulder = skeleton->find("left_shoulder"), elbow = skeleton->find("left_elbow");
 	CHECK(std::abs(distance(at(shoulder), at(elbow)) - std::sqrt(physics::lengthSquared({skeleton->nodes[elbow].position[0],
 		skeleton->nodes[elbow].position[1], skeleton->nodes[elbow].position[2]}))) < 1e-3f);
+	// Ducking (a seat with allowDucking on kPICrouch, 0x005ca2e0 →
+	// setDucking 0x005c7cf0) turns the soldier's IK off (+0x2ea,
+	// 0x005ed890): the hands leave the grips until he rises.
+	car->settings()["allowDucking"] = "1";
+	const auto wrist = [&] {
+		std::vector<anim::Matrix> pose;
+		game.world->skeletonPose(soldier, *skeleton, pose);
+		const anim::Matrix& m = pose[static_cast<size_t>(leftWrist)];
+		const world::Object* o = game.objects.find(soldier);
+		const world::Object* c = game.objects.find(vehicle);
+		const physics::Mat3 ct = physics::Mat3::fromYawPitchRoll({c->rotation().x, c->rotation().y, c->rotation().z});
+		const physics::Mat3 wt = physics::Mat3::fromYawPitchRoll({0, 20, 0}) * ct;
+		const physics::Vec3 wa = ct.transform({0, 0.85f, 0.85f}) + physics::Vec3 {c->position().x, c->position().y, c->position().z};
+		const physics::Mat3 st = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+		const physics::Vec3 g = st.untransform(wt.transform({-0.145199f, -0.0447125f, -0.186665f}) + wa
+			- physics::Vec3 {o->position().x, o->position().y, o->position().z});
+		return distance(physics::Vec3 {m[12], m[13], m[14]}, g);
+	};
+	input = {};
+	input.pose = game::SoldierPose::Crouch;
+	for (int i = 0; i < 5; ++i) {
+		game.world->setPlayerInput(input);
+		game.world->tick(1 / 30.0f);
+	}
+	CHECK(wrist() > 0.01f);
+	game.world->setPlayerInput({});
+	game.world->tick(1 / 30.0f);
+	CHECK(wrist() < 1e-3f);
 }
 
 // The combat areas (CombatAreaManager / CombatArea, 0x004bbf60): outside

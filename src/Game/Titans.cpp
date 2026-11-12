@@ -1006,6 +1006,8 @@ GameWorld::TitanMove GameWorld::moveTitan(int team, float x, float z)
 	}
 	titan->lastOrder = m_time;
 	titan->targets[m_ticks + static_cast<uint32_t>(std::lround(kOrderDelay * 30.0f))] = {x, z};
+	// The order to everyone (0x0050f1f0: 0x005ab040, 0x00509990(9, 0)).
+	m_titanSyncOut.push_back(titanSyncOf(*titan, true));
 	return TitanMove::Accepted;
 }
 
@@ -1020,15 +1022,17 @@ void GameWorld::findTitanObstacles()
 	if (!m_collisionTemplates || !m_files) {
 		return;
 	}
+	// A joined client's are its ghosts' Titans (stepTitanSync).
+	const std::vector<Titan>& titans = m_titans.empty() ? m_remoteTitans : m_titans;
 	float lowest = 1e30f;
-	for (const Titan& titan : m_titans) {
+	for (const Titan& titan : titans) {
 		if (const world::Object* object = m_objects.find(titan.object)) {
 			lowest = std::min(lowest, object->position().y + titan.bottom);
 		}
 	}
 	for (const auto& owned : m_objects.objects()) {
 		const world::ObjectTemplate* t = owned->objectTemplate();
-		if (!t || titanByObject(owned->id()) || integer(*t, "hasMobilePhysics", 0) != 0) {
+		if (!t || titanByObject(owned->id()) || isRemoteTitan(owned->id()) || integer(*t, "hasMobilePhysics", 0) != 0) {
 			continue;
 		}
 		const std::string* name = collisionMeshOf(*t);
@@ -1089,7 +1093,15 @@ void GameWorld::stepTitans(float seconds)
 	if (!m_titanObstaclesFound && std::all_of(m_titans.begin(), m_titans.end(), [](const Titan& t) { return !t.meshesDirty; })) {
 		findTitanObstacles();
 	}
+	// In the sync object's order, team 1's Titan then team 2's (0x00561e20:
+	// +8, then +0xc), each steering off the other where it now stands.
+	std::vector<Titan*> ordered;
 	for (Titan& titan : m_titans) {
+		ordered.push_back(&titan);
+	}
+	std::stable_sort(ordered.begin(), ordered.end(), [](const Titan* a, const Titan* b) { return a->team < b->team; });
+	for (Titan* each : ordered) {
+		Titan& titan = *each;
 		// The parts' armour update (0x00654d80 on the server): destroyed
 		// with the root's or the parent's armour at or below their levels,
 		// and burning down below their critical damage
@@ -1145,69 +1157,339 @@ void GameWorld::stepTitans(float seconds)
 			target = it;
 		}
 		if (target == titan.targets.end()) {
+			// None yet: the server gives the Titan one at its own place, two
+			// seconds on, once it has none at all (0x005aca70's server side:
+			// +0x44 empty -> 0x005abba0 with the tick + round(2 / tick length),
+			// then the order event to everyone, 0x00509990(9, 0)); till then
+			// it hangs where it was spawned.
+			const float x = object->position().x, z = object->position().z;
+			if (titan.targets.empty() && titanTerrainClear(titan, x, z)) {
+				titan.targets[m_ticks + static_cast<uint32_t>(std::lround(kOrderDelay * 30.0f))] = {x, z};
+				m_titanSyncOut.push_back(titanSyncOf(titan, true));
+			}
 			moveTitanBody(titan, {});
-			continue; // no order yet: it hangs where it was spawned
+			continue;
 		}
 		const bool canMove = titanPercent(titan.parts[0]) > kMoveAbove;
-		const float x = object->position().x, z = object->position().z;
-		float dx = target->second.first - x, dz = target->second.second - z;
+		const Titan::SyncState from {titan.velocity.x, titan.velocity.z, object->position().x, object->position().z};
+		const Titan::SyncState to =
+			titanMoveTick(titan, m_titans, from, target->second.first, target->second.second, true, canMove, seconds);
+		titan.velocity = {to.velocityX, 0, to.velocityZ};
+		moveTitanBody(titan, {to.x - from.x, 0, to.z - from.z});
+		object->setPosition({to.x, object->position().y, to.z}); // the state's own place, as a client's sync takes it
+	}
+	// Every 30 ticks (*0x00a6746c) with both Titans there, the server sends
+	// both their states (0x00561e20's case 3 -> 0x005ab040, 0x00509990(9, 2)).
+	if (titanModeOn() && m_titans.size() >= 2 && m_ticks >= m_titanSyncSent + 30) {
+		m_titanSyncSent = m_ticks;
+		for (const Titan* titan : titansByTeam(m_titans)) {
+			if (!titan->targets.empty()) {
+				m_titanSyncOut.push_back(titanSyncOf(*titan, false));
+			}
+		}
+	}
+}
+
+// 0x005aca70's loop body. The push towards the target is min(0.33, (distance
+// - 5) x 5) while the Titan may move, nothing before the order's tick
+// (local_c / local_8 start at 0); the others within 50 m of its edge
+// (0x005626a0) and a combat area's border within 1.25 radii (0x005ab740)
+// turn it, the sum scaled back to the push's length; then velocity = 0.99
+// x (velocity + push x tick) and the place moves by it. With
+// sv.allowTitanMovement off (+0x59) the velocity is 0 and it stays.
+GameWorld::Titan::SyncState GameWorld::titanMoveTick(const Titan& titan, const std::vector<Titan>& titans,
+	const Titan::SyncState& from, float targetX, float targetZ, bool pushing, bool canMove, float seconds) const
+{
+	const float x = from.x, z = from.z;
+	float ax = 0, az = 0;
+	if (pushing) {
+		float dx = targetX - x, dz = targetZ - z;
 		const float distance = std::sqrt(dx * dx + dz * dz);
 		if (distance > 0) {
 			dx /= distance;
 			dz /= distance;
 		}
 		const float push = std::min(canMove ? kPush : 0.0f, std::max(distance - kArrival, 0.0f) * kPushPerMetre);
-		float ax = dx * push, az = dz * push;
-		// Steering off the others (0x005626a0): the other Titans and the tall
-		// static objects within the avoidance range of its edge.
-		float avoidX = 0, avoidZ = 0;
-		const auto avoid = [&](float ox, float oz, float radius) {
-			const float px = x - ox, pz = z - oz;
-			const float d2 = px * px + pz * pz;
-			const float d = std::sqrt(d2);
-			if (d > titan.radius + radius + kAvoidRange) {
-				return;
-			}
-			const float gap = std::clamp(d - (titan.radius + radius), 0.0f, kAvoidRange);
-			if (d2 > 0) {
-				const float f = (kAvoidRange - gap) * kAvoidStrength / d;
-				avoidX += px * f;
-				avoidZ += pz * f;
-			}
-		};
-		for (const Titan& other : m_titans) {
-			const world::Object* o = &other != &titan ? m_objects.find(other.object) : nullptr;
-			if (o) {
-				avoid(o->position().x, o->position().z, other.radius);
+		ax = dx * push;
+		az = dz * push;
+	}
+	// Steering off the others (0x005626a0): the other Titans and the tall
+	// static objects within the avoidance range of its edge.
+	float avoidX = 0, avoidZ = 0;
+	const auto avoid = [&](float ox, float oz, float radius) {
+		const float px = x - ox, pz = z - oz;
+		const float d2 = px * px + pz * pz;
+		const float d = std::sqrt(d2);
+		if (d > titan.radius + radius + kAvoidRange) {
+			return;
+		}
+		const float gap = std::clamp(d - (titan.radius + radius), 0.0f, kAvoidRange);
+		if (d2 > 0) {
+			const float f = (kAvoidRange - gap) * kAvoidStrength / d;
+			avoidX += px * f;
+			avoidZ += pz * f;
+		}
+	};
+	for (const Titan& other : titans) {
+		const world::Object* o = &other != &titan ? m_objects.find(other.object) : nullptr;
+		if (o) {
+			avoid(o->position().x, o->position().z, other.radius);
+		}
+	}
+	for (const auto& [at, radius] : m_titanObstacles) {
+		avoid(at.x, at.z, radius);
+	}
+	// A combat area's border within 1.25 radii (0x005ab740) pushes it in.
+	float borderX = 0, borderZ = 0;
+	if (m_combatAreas && m_combatAreas->use) {
+		float d = 0, bx = 0, bz = 0;
+		if (m_combatAreas->nearestBorder(x, z, titan.radius * 1.25f, 4, d, bx, bz) && d < titan.radius * 1.25f) {
+			borderX = -bx * kBorderStrength;
+			borderZ = -bz * kBorderStrength;
+		}
+	}
+	Titan::SyncState to = from;
+	if (!allowTitanMovement) {
+		to.velocityX = to.velocityZ = 0;
+		return to;
+	}
+	const float wanted = std::sqrt(ax * ax + az * az);
+	float sx = ax + avoidX + borderX, sz = az + avoidZ + borderZ;
+	const float sum = std::sqrt(sx * sx + sz * sz);
+	if (sum > 0) {
+		sx *= wanted / sum;
+		sz *= wanted / sum;
+	}
+	to.velocityX = kDamping * (sx * seconds + from.velocityX);
+	to.velocityZ = kDamping * (sz * seconds + from.velocityZ);
+	to.x = from.x + to.velocityX * seconds;
+	to.z = from.z + to.velocityZ * seconds;
+	return to;
+}
+
+// The sync object's two Titans in its order: team 1's (+8), then team 2's
+// (+0xc).
+std::vector<GameWorld::Titan*> GameWorld::titansByTeam(std::vector<Titan>& list)
+{
+	std::vector<Titan*> sorted;
+	for (int team = 1; team <= 2; ++team) {
+		for (Titan& titan : list) {
+			if (titan.team == team && m_objects.find(titan.object)) {
+				sorted.push_back(&titan);
+				break;
 			}
 		}
-		for (const auto& [at, radius] : m_titanObstacles) {
-			avoid(at.x, at.z, radius);
+	}
+	return sorted;
+}
+
+// 0x005ab040: the team, the last order (+0x40's last) and the last state
+// (+0x4c's last; the server's is the Titan as it stands after this tick).
+GameWorld::TitanSync GameWorld::titanSyncOf(const Titan& titan, bool order) const
+{
+	TitanSync m;
+	m.order = order;
+	m.team = titan.team;
+	if (!titan.targets.empty()) {
+		m.orderTick = titan.targets.rbegin()->first;
+		m.targetX = titan.targets.rbegin()->second.first;
+		m.targetZ = titan.targets.rbegin()->second.second;
+	}
+	m.stateTick = m_ticks;
+	m.velocityX = titan.velocity.x;
+	m.velocityZ = titan.velocity.z;
+	if (const world::Object* object = m_objects.find(titan.object)) {
+		m.x = object->position().x;
+		m.z = object->position().z;
+	}
+	return m;
+}
+
+std::vector<GameWorld::TitanSync> GameWorld::titanSyncState() const
+{
+	std::vector<TitanSync> list;
+	for (const Titan& titan : m_titans) {
+		if (!titan.targets.empty() && m_objects.find(titan.object)) {
+			list.push_back(titanSyncOf(titan, true));
 		}
-		// A combat area's border within 1.25 radii (0x005ab740) pushes it in.
-		float borderX = 0, borderZ = 0;
-		if (m_combatAreas && m_combatAreas->use) {
-			float d = 0, bx = 0, bz = 0;
-			if (m_combatAreas->nearestBorder(x, z, titan.radius * 1.25f, 4, d, bx, bz) && d < titan.radius * 1.25f) {
-				borderX = -bx * kBorderStrength;
-				borderZ = -bz * kBorderStrength;
+	}
+	return list;
+}
+
+// A client's message (0x00562100, category 9). Id 0: the order goes in
+// (0x005abba0: unless one is there for that tick, and only for a point
+// inside the combat areas binding the Titans, 0x005aba40) and the state at
+// its tick, the states after it dropped (0x005ab670). Id 2 (0x005ab8a0):
+// kept among the server's (+0x54); once the client has states, at the
+// earlier of the server's last tick and its own (the server's state there,
+// else none) a velocity or position differing by more than FLT_EPSILON
+// (*0x00a6af94, *0x00a6afc8: 0x34000000) replaces the client's state there
+// and drops those after, so the next step goes on from it.
+void GameWorld::titanSyncMessage(const TitanSync& m)
+{
+	Titan* titan = nullptr;
+	for (Titan& t : m_remoteTitans) {
+		if (t.team == m.team) {
+			titan = &t;
+		}
+	}
+	if (!titan) {
+		return;
+	}
+	const Titan::SyncState state {m.velocityX, m.velocityZ, m.x, m.z};
+	if (m.order) {
+		if (!titan->targets.count(m.orderTick) && titanTerrainClear(*titan, m.targetX, m.targetZ)) {
+			titan->targets[m.orderTick] = {m.targetX, m.targetZ};
+		}
+		titan->states.erase(titan->states.lower_bound(m.stateTick), titan->states.end());
+		titan->states[m.stateTick] = state;
+		return;
+	}
+	titan->serverStates[m.stateTick] = state;
+	if (titan->states.empty()) {
+		return;
+	}
+	const uint32_t at = std::min(titan->serverStates.rbegin()->first, titan->states.rbegin()->first);
+	const auto server = titan->serverStates.find(at);
+	const auto own = titan->states.find(at);
+	if (server == titan->serverStates.end() || own == titan->states.end()) {
+		return;
+	}
+	const float epsilon = 1.1920929e-7f; // 0x34000000
+	const Titan::SyncState& a = server->second;
+	const Titan::SyncState& b = own->second;
+	if (std::fabs(a.velocityZ - b.velocityZ) > epsilon || std::fabs(a.velocityX - b.velocityX) > epsilon
+		|| std::fabs(a.z - b.z) > epsilon || std::fabs(a.x - b.x) > epsilon) {
+		const Titan::SyncState taken = a;
+		titan->states.erase(titan->states.lower_bound(at), titan->states.end());
+		titan->states[at] = taken;
+	}
+}
+
+// 0x005aa0e0 on a client's Titan: the object across x and z (its y kept),
+// the node's velocity across x and z.
+void GameWorld::placeSyncedTitan(Titan& titan, const Titan::SyncState& state)
+{
+	world::Object* object = m_objects.find(titan.object);
+	if (!object) {
+		return;
+	}
+	const world::Vec3 at = object->position();
+	object->setPosition({state.x, at.y, state.z});
+	if (Body* body = findBody(titan.object)) {
+		body->lastPosition = body->body.position;
+		body->body.position.x = state.x;
+		body->body.position.z = state.z;
+		body->body.velocity = {state.velocityX, 0, state.velocityZ};
+		body->body.angularVelocity = {};
+	}
+}
+
+// 0x005aca70 on a client (its server-only first order left out): with an
+// order in force at `tick` (0x005ab4b0) the Titan goes from its last state
+// before `tick` (placed there, 0x005aa0e0) a tick at a time up to it, each
+// state kept (0x005ab670, dropping those after) and placed.
+void GameWorld::stepRemoteTitanSync(Titan& titan, uint32_t tick)
+{
+	auto order = titan.targets.end();
+	for (auto it = titan.targets.begin(); it != titan.targets.end() && it->first <= tick; ++it) {
+		order = it;
+	}
+	auto base = titan.states.lower_bound(tick);
+	if (order == titan.targets.end() || base == titan.states.begin()) {
+		return;
+	}
+	--base;
+	// +0x35: its armour's percent above 60 (the first armour's vtable 0x40).
+	const bool canMove = titan.parts.empty() || titanPercent(titan.parts[0]) > kMoveAbove;
+	Titan::SyncState state = base->second;
+	placeSyncedTitan(titan, state);
+	for (uint32_t at = base->first + 1; at <= tick; ++at) {
+		state = titanMoveTick(titan, m_remoteTitans, state, order->second.first, order->second.second, order->first <= at,
+			canMove, 1.0f / 30.0f);
+		titan.states.erase(titan.states.lower_bound(at), titan.states.end());
+		titan.states[at] = state;
+		placeSyncedTitan(titan, state);
+	}
+	titan.velocity = {state.velocityX, 0, state.velocityZ};
+	titan.syncPlaced = true;
+}
+
+// 0x00561e20 on a client (gpm_ti only). With one Titan, its step to the
+// tick; with both (case 3) each goes back to the earlier of their last
+// states (0x005aa570, 0x005ab840 keeping it and dropping those after,
+// 0x005aab10 placing it) and both step on together a tick at a time, so a
+// state the server replaced moves the other Titan's steering too. States
+// 1000 ticks old (*0x00a67470) go (0x005aaab0). The rewrite takes the
+// earlier only of the Titans with states (a client without an order for
+// one would go back to tick 0 each frame).
+void GameWorld::stepTitanSync(uint32_t tick)
+{
+	for (Titan& titan : m_remoteTitans) {
+		titan.syncPlaced = false;
+	}
+	if (!titanModeOn()) {
+		return;
+	}
+	if (!m_titanObstaclesFound && !m_remoteTitans.empty()
+		&& std::all_of(m_remoteTitans.begin(), m_remoteTitans.end(), [](const Titan& t) { return !t.meshesDirty; })) {
+		findTitanObstacles();
+	}
+	const std::vector<Titan*> titans = titansByTeam(m_remoteTitans);
+	if (titans.size() == 1) {
+		stepRemoteTitanSync(*titans.front(), tick);
+	} else if (titans.size() == 2) {
+		uint32_t from = tick;
+		bool any = false;
+		for (const Titan* titan : titans) {
+			if (!titan->states.empty()) {
+				from = any ? std::min(from, titan->states.rbegin()->first) : titan->states.rbegin()->first;
+				any = true;
 			}
 		}
-		if (!allowTitanMovement) {
-			titan.velocity = {};
-		} else {
-			const float wanted = std::sqrt(ax * ax + az * az);
-			float sx = ax + avoidX + borderX, sz = az + avoidZ + borderZ;
-			const float sum = std::sqrt(sx * sx + sz * sz);
-			if (sum > 0) {
-				sx *= wanted / sum;
-				sz *= wanted / sum;
+		if (any) {
+			for (Titan* titan : titans) {
+				if (const auto it = titan->states.find(from); it != titan->states.end()) {
+					titan->states.erase(std::next(it), titan->states.end());
+					placeSyncedTitan(*titan, it->second);
+					titan->velocity = {it->second.velocityX, 0, it->second.velocityZ};
+					titan->syncPlaced = true;
+				}
 			}
-			titan.velocity.x = kDamping * (sx * seconds + titan.velocity.x);
-			titan.velocity.z = kDamping * (sz * seconds + titan.velocity.z);
-			titan.velocity.y = 0;
+			for (uint32_t at = from + 1; at <= tick; ++at) {
+				for (Titan* titan : titans) {
+					stepRemoteTitanSync(*titan, at);
+				}
+			}
 		}
-		moveTitanBody(titan, {titan.velocity.x * seconds, 0, titan.velocity.z * seconds});
+	}
+	for (Titan* titan : titans) {
+		if (tick > 1000) {
+			titan->states.erase(titan->states.begin(), titan->states.lower_bound(tick - 1000));
+			titan->serverStates.erase(titan->serverStates.begin(), titan->serverStates.lower_bound(tick - 1000));
+		}
+	}
+}
+
+bool GameWorld::titanSyncPlaced(uint32_t object, physics::Vec3* velocity) const
+{
+	for (const Titan& titan : m_remoteTitans) {
+		if (titan.object == object && titan.syncPlaced) {
+			if (velocity) {
+				*velocity = titan.velocity;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+void GameWorld::setRemoteTitanHitPoints(uint32_t object, float hitPoints)
+{
+	for (Titan& titan : m_remoteTitans) {
+		if (titan.object == object && !titan.parts.empty()) {
+			titan.parts[0].hitPoints = hitPoints;
+		}
 	}
 }
 

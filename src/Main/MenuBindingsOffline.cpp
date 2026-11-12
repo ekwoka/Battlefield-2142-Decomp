@@ -362,6 +362,18 @@ void MenuBindings::storeFavourites(bool history, const std::vector<FavouriteServ
 	refreshFavourites();
 }
 
+bool MenuBindings::removeFavouriteServer(const std::string& ip, int port)
+{
+	std::vector<FavouriteServer> servers = favouriteServers(false);
+	const auto it = std::find_if(servers.begin(), servers.end(), [&](const FavouriteServer& s) { return s.ip == ip && s.port == port; });
+	if (it == servers.end()) {
+		return false;
+	}
+	servers.erase(it);
+	storeFavourites(false, servers);
+	return true;
+}
+
 void MenuBindings::refreshFavourites()
 {
 	const auto rows = [this](const std::vector<FavouriteServer>& entries) {

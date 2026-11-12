@@ -456,8 +456,10 @@ NetworkableHints networkableHintsFrom(const world::ObjectTemplateManager& templa
 	} else if (h.kind == NetworkableKind::Soldier) {
 		h.soldierItemSlots = 6; // the Soldier template's constructor (0x005c0a50: +0x2c0 = 6)
 	}
-	h.maxHitPoints = std::atoi(setting(t, "armor.maxHitPoints").c_str());
-	h.wreckHitPoints = std::atoi(setting(t, "armor.wreckHitPoints").c_str());
+	// Floats truncated (armor vtable 0x8c): the Titans' "6e+006" is
+	// 6,000,000 hit points, not 6.
+	h.maxHitPoints = static_cast<int>(std::atof(setting(t, "armor.maxHitPoints").c_str()));
+	h.wreckHitPoints = static_cast<int>(std::atof(setting(t, "armor.wreckHitPoints").c_str()));
 	h.maxSpeed = vec3Setting(t, "maxSpeed");
 	h.minRotation = vec3Setting(t, "minRotation");
 	h.maxRotation = vec3Setting(t, "maxRotation");

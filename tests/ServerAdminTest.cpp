@@ -609,3 +609,103 @@ TEST(ServerAdmin_AutoRecorder)
 	CHECK(net::readDemo(file, header, records) && !records.empty());
 	std::filesystem::remove_all(root);
 }
+
+// A ranked server (sv.ranked, +0x26d) runs with fixed values whatever was
+// set (0x00430f60 / 0x00430f80 spawn and man-down times 15, 0x00430fa0
+// ticket ratio 100, 0x00430fc0 team ratio 100): the console reads them so,
+// sv.save keeps what was set. A ranked game (0x00430a00) also needs an
+// internet server with GameSpyRanked, which no LAN host has; its minimums
+// (0x00431690 maxPlayers 16, 0x004316b0 players to start 6, or 8 over 32
+// players) never apply on one.
+TEST(ServerAdmin_RankedOverridesAndMinimums)
+{
+	net::ServerSettings sv;
+	sv.spawnTime = 5;
+	sv.manDownTime = 8;
+	sv.ticketRatio = 300;
+	sv.teamRatioPercent = 75;
+	sv.maxPlayers = 12;
+	sv.numPlayersNeededToStart = 2;
+	std::string value;
+	CHECK(sv.get("spawnTime", value) && value == "5");
+	CHECK(sv.spawnTimeInForce() == 5 && sv.manDownTimeInForce() == 8 && sv.ticketRatioInForce() == 300);
+	sv.ranked = true;
+	CHECK(sv.spawnTimeInForce() == 15 && sv.manDownTimeInForce() == 15);
+	CHECK(sv.ticketRatioInForce() == 100 && sv.teamRatioInForce() == 100);
+	CHECK(sv.get("spawnTime", value) && value == "15");
+	CHECK(sv.get("manDownTime", value) && value == "15");
+	CHECK(sv.get("ticketRatio", value) && value == "100");
+	CHECK(sv.save().find("sv.spawnTime 5\n") != std::string::npos); // the value set is saved
+	CHECK(sv.save().find("sv.ticketRatio 300\n") != std::string::npos);
+	// Offline: never a ranked game, so the minimums stay off.
+	CHECK(!sv.rankedGame("gpm_cq", false));
+	sv.internet = true;
+	CHECK(!sv.rankedGame("gpm_cq", false) && sv.rankedGame("gpm_cq", true) && !sv.rankedGame("gpm_sp", true));
+	CHECK(sv.maxPlayersInForce(false) == 12 && sv.maxPlayersInForce(true) == 16);
+	CHECK(sv.playersNeededToStartInForce(false) == 2 && sv.playersNeededToStartInForce(true) == 6);
+	sv.maxPlayers = 64;
+	CHECK(sv.playersNeededToStartInForce(true) == 8);
+}
+
+// Message 9 (0x005852b0 -> 0x004ad7a0): once the auto-recorder's hook is
+// done, every client gets data block 9 with sv.demoDownloadURL ("{file}"
+// replaced by the demo's file name) and the map.
+TEST(ServerAdmin_AutoDemoHookSendsMessage9)
+{
+	CHECK(net::RemoteWorld::encodeDemoNotice({"http://x/a.bf2142demo", "Minsk"}).size() == (2 * 8 + 21 * 8 + 5 * 8 + 7) / 8);
+	net::RemoteWorld::DemoNotice decoded;
+	CHECK(net::RemoteWorld::decodeDemoNotice(net::RemoteWorld::encodeDemoNotice({"http://x/a.bf2142demo", "Minsk"}), decoded));
+	CHECK(decoded.url == "http://x/a.bf2142demo" && decoded.map == "Minsk");
+	const std::string root = std::filesystem::absolute("bf2142_test_autodemo9").string();
+	std::filesystem::remove_all(root);
+	std::filesystem::create_directories(root);
+	const std::string hook = root + "/hook.sh";
+	{
+		std::FILE* f = std::fopen(hook.c_str(), "w");
+		CHECK(f != nullptr);
+		if (!f) {
+			return;
+		}
+		std::fputs("#!/bin/sh\nexit 0\n", f);
+		std::fclose(f);
+		std::filesystem::permissions(hook, std::filesystem::perms::owner_all);
+	}
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	host::ServerAdmin admin;
+	admin.settings.autoRecord = true;
+	admin.settings.autoDemoHook = hook;
+	admin.settings.demoDownloadURL = "http://demos.example/{file}?dl=1";
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &admin.settings;
+	setup.modDirectory = root;
+	host::HostedGame hosted(round, logic, templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && hosted.recordingDemo(); }));
+	const std::string file = hosted.autoDemo();
+	hosted.changeLevel(round, logic, templates, setup); // the round's restart stops it and runs the hook
+	net::RemoteWorld::DemoNotice notice;
+	CHECK(pumpUntil(step, [&] { return client.world().demoNotice(notice); }, 8000));
+	const std::string name = std::filesystem::path(file).filename().string();
+	CHECK(notice.url == "http://demos.example/" + name + "?dl=1");
+	CHECK(notice.map == "Camp_Gibraltar");
+	client.disconnect();
+	std::filesystem::remove_all(root);
+}

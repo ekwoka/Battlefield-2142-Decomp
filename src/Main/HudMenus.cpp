@@ -146,29 +146,58 @@ std::string SquadMenu::squadLabel(int team, int squad) const
 	return it != m_names.end() ? it->second : squadName(squad);
 }
 
+// SquadMenu.createSquad (0x007a5ad0) needs no box: shown or not (+0xec),
+// the box's name goes to the HUD manager's slot 0x2f8 (0x007d67e0 →
+// slot 0x300, 0x007d6910), which makes the squad for anyone but the
+// commander (player slot 0x128): the first free id (slot 0x310), or his
+// own when he is alone in it; a squad he is in is left first
+// (0x007a55f0); the squad made only when it has no members (the squad
+// manager's slot 0x58, +8), named by the box or its id's name (0x00b411a4),
+// through the squad manager's slot 0x1c. The box closes after (0x007a5700
+// with 0). Without the box shown the name is the first of the game's
+// names no other squad of the team has (0x007a5250 into slot 0x2f0).
 bool SquadMenu::createSquad(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_createShow || !playerInfo(player, me)) {
+	if (!playerInfo(player, me) || me.commander) {
+		setCreateSelect(player, false);
 		return false;
 	}
-	const int squad = me.squad > 0 ? me.squad : freeSquad(me.team);
+	int squad = freeSquad(me.team);
+	bool alone = false;
+	if (me.squad > 0) {
+		int members = 0;
+		for (const auto& other : playerList()) {
+			members += other.team == me.team && other.squad == me.squad ? 1 : 0;
+		}
+		alone = members == 1;
+		if (alone) {
+			squad = me.squad;
+		}
+	}
+	const std::string typed = m_createShow && typedName ? typedName() : std::string();
 	bool made = false;
 	if (m_remote.world) {
-		// ChangeSquadName for the empty squad: the server makes it.
+		// LeaveSquad, then ChangeSquadName for the empty squad: the server
+		// makes it and joins the sender (0x004c6720). A leader alone in his
+		// squad keeps it.
 		made = squad > 0 && m_remote.create;
-		if (made && me.squad != squad) {
-			const std::string typed = typedName ? typedName() : std::string();
+		if (made && !alone) {
+			if (me.squad > 0) {
+				leave(player);
+			}
 			m_remote.create(squad, typed.empty() ? squadName(squad) : typed);
 			if (m_createLocked && m_remote.lock) {
 				m_remote.lock(squad, true);
 			}
 		}
 	} else {
+		if (me.squad > 0 && !alone) {
+			leave(player);
+		}
 		made = squad > 0 && (me.squad == squad || m_round.joinSquad(player, squad));
 	}
 	if (made) {
-		const std::string typed = typedName ? typedName() : std::string();
 		if (!typed.empty()) {
 			m_names[{me.team, squad}] = typed;
 		} else {

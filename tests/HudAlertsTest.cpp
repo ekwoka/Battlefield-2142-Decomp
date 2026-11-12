@@ -685,3 +685,34 @@ TEST(HudAlerts_CloseToObjectVariables)
 	menu::closeToObject(hudManager, -1, false);
 	CHECK(hudManager.number("CloseToObject0") == 0);
 }
+
+// The dog tag's HUD (event 0x28 → 0x0074f0d0, its countdown in 0x007c8c30):
+// the medal and rank icons go, ShowDogTagMessage shows the victim's name
+// in HUD_DOG_TAG_MESSAGE for 5 s; a client counts the tags per victim.
+TEST(HudAlerts_DogTagMessage)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::DogTags tags;
+	tags.setLocalizer([](const std::string& id) {
+		return id == "HUD_DOG_TAG_MESSAGE" ? std::string("You collected #PLAYER#'s dog tag") : id;
+	});
+	hudManager.set("ShowMedalIcon", 1);
+	hudManager.set("ShowRankUpIcon", 1);
+	tags.collect(hudManager, 7, "Pac", false);
+	CHECK(hudManager.number("ShowDogTagMessage") == 1 && hudManager.string("DogTagMessage") == "You collected Pac's dog tag");
+	CHECK(hudManager.number("ShowMedalIcon") == 0 && hudManager.number("ShowRankUpIcon") == 0);
+	CHECK(tags.tags(7) == 1);
+	for (int i = 0; i < 140; ++i) {
+		tags.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowDogTagMessage") == 1);
+	for (int i = 0; i < 20; ++i) {
+		tags.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowDogTagMessage") == 0);
+	// The server's own player: shown, not counted (0x004cbea0's slot 0x144).
+	tags.collect(hudManager, 7, "Pac", true);
+	CHECK(hudManager.number("ShowDogTagMessage") == 1 && tags.tags(7) == 1);
+	tags.collect(hudManager, 7, "Pac", false);
+	CHECK(tags.tags(7) == 2);
+}

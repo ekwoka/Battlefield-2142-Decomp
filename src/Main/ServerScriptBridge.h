@@ -31,11 +31,15 @@ public:
 		}
 		const net::ServerSettings& s = m_admin->settings;
 		const auto flag = [](bool on) { return ScriptValue::integer(on ? 1 : 0); };
+		// A ranked game (0x00430a00) needs GameSpyRanked from the GameSpy
+		// back end, which a LAN or offline server never has.
+		const std::string mode = gameMode();
+		const bool ranked = s.rankedGame(mode, false);
 		if (name == "ticketRatio") {
-			return ScriptValue::integer(s.ticketRatio);
+			return ScriptValue::integer(s.ticketRatioInForce()); // 0x00430fa0
 		}
 		if (name == "maxPlayers") {
-			return ScriptValue::integer(s.maxPlayers);
+			return ScriptValue::integer(s.maxPlayersInForce(ranked)); // 0x00431690
 		}
 		if (name == "timeLimit") {
 			return ScriptValue::integer(s.timeLimit);
@@ -47,7 +51,7 @@ public:
 			return flag(s.autoBalanceTeam);
 		}
 		if (name == "teamRatioPct") {
-			return ScriptValue::number(s.teamRatioPercent);
+			return ScriptValue::number(s.teamRatioInForce()); // 0x00430fc0
 		}
 		if (name == "tkpEnabled") {
 			return flag(s.tkPunishEnabled);
@@ -59,16 +63,18 @@ public:
 			return flag(s.tkPunishByDefault);
 		}
 		if (name == "globRank") {
-			return flag(s.useGlobalRank);
+			// 0x00431070: an internet server's useGlobalRank, never sv.ranked's.
+			return flag(!s.ranked && s.internet && s.useGlobalRank);
 		}
 		if (name == "globUnlocks") {
-			return flag(s.useGlobalUnlocks);
+			// 0x00430fe0: always in gpm_sp, never in a ranked game.
+			return flag(mode == "gpm_sp" || (!ranked && s.useGlobalUnlocks));
 		}
 		if (name == "ranked") {
-			return flag(s.ranked);
+			return flag(ranked); // 0x00430a00
 		}
 		if (name == "maxRank") {
-			return ScriptValue::integer(s.maxRank);
+			return ScriptValue::integer(ranked ? s.maxRank : 0); // 0x00430d90
 		}
 		return game::ScriptBridge::serverSetting(name); // "unknown serversetting" in the exe
 	}
@@ -93,6 +99,13 @@ public:
 	std::string overlay;
 
 private:
+	// The game logic's mode (the scripts' "gameMode").
+	std::string gameMode()
+	{
+		const game::ScriptValue v = game::ScriptBridge::serverSetting("gameMode");
+		return v.kind == game::ScriptValue::Kind::String ? v.s : std::string();
+	}
+
 	ServerAdmin* m_admin;
 	Console* m_console;
 };

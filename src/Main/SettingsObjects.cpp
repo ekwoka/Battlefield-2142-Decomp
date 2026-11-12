@@ -370,6 +370,35 @@ double SettingsObjects::number(const std::string& key, double fallback) const
 	return end == it->second.c_str() ? fallback : value;
 }
 
+bool SettingsObjects::removeFavouriteServer(const std::string& ip, int port)
+{
+	const auto it = m_lists.find("GeneralSettings.FavouriteServer");
+	if (it == m_lists.end()) {
+		return false;
+	}
+	// An entry: "ip" port "name" queryPort.
+	const auto matches = [&](const std::string& entry) {
+		size_t at = entry.find_first_not_of(" \t");
+		if (at == std::string::npos) {
+			return false;
+		}
+		std::string address;
+		if (entry[at] == '"') {
+			const size_t end = entry.find('"', at + 1);
+			address = entry.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1);
+			at = end == std::string::npos ? entry.size() : end + 1;
+		} else {
+			const size_t end = entry.find_first_of(" \t", at);
+			address = entry.substr(at, end == std::string::npos ? std::string::npos : end - at);
+			at = end == std::string::npos ? entry.size() : end;
+		}
+		return address == ip && std::atoi(entry.c_str() + std::min(at, entry.size())) == port;
+	};
+	const size_t before = it->second.size();
+	it->second.erase(std::remove_if(it->second.begin(), it->second.end(), matches), it->second.end());
+	return it->second.size() != before;
+}
+
 const std::vector<std::string>& SettingsObjects::list(const std::string& key) const
 {
 	static const std::vector<std::string> none;

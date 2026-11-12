@@ -5,9 +5,12 @@
 // supply_crate); the assignment and the orders run without them.
 #include "Console/Console.h"
 #include "Game/Bots.h"
+#include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
+#include "Main/HostedGame.h"
 #include "Main/HudMenus.h"
+#include "Net/GameClient.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "TestMain.h"
 #include "World/Object.h"
@@ -15,7 +18,10 @@
 #include "World/WorldConsole.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <functional>
+#include <thread>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -665,4 +671,88 @@ TEST(Commander_AiAnswersSquadRequests)
 	CHECK(world.storeSquadRequest(1, 1, 2, {0, 0, 0}));
 	step(6);
 	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
+}
+
+// The ghost priorities of a commander's client (0x0057dc10's end): with
+// the satellite scan running every living enemy's control object comes in
+// at 0.5 (0x0057cfb0, radius -1), however far it is; else enemies are
+// scored by the eye like any ghost (out of scope beyond 850 m). Over
+// 127.0.0.1: an enemy 3 km away moves; its ghost's updates reach the
+// commander's client only while the scan runs.
+TEST(Commander_ScanBringsFarEnemiesIntoScope)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	field.place("commander_movement_analyst", 2, -220, -200);
+	game::GameLogic logic;
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Field";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(world, logic, field.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Boss";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const int enemy = field.soldier(1, 3000, 0);
+	float x = 3000;
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		world.tick(1 / 30.0f);
+		// The enemy walks, so its ghost has something to send.
+		game::GameWorld::PlayerInfo info;
+		if (world.playerInfo(enemy, info) && info.alive) {
+			x += 0.1f;
+			world.setSoldierPosition(info.soldier, {x, 0, 0});
+		}
+	};
+	const auto pump = [&](const std::function<bool()>& done, int milliseconds) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+		while (std::chrono::steady_clock::now() < deadline) {
+			step();
+			if (done()) {
+				return true;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return false;
+	};
+	CHECK(pump([&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int boss = client.world().localPlayer();
+	client.selectTeam(2);
+	game::GameWorld::PlayerInfo me;
+	CHECK(pump([&] { return world.playerInfo(boss, me) && me.team == 2; }, 4000));
+	client.selectSpawnGroup(-1);
+	CHECK(pump([&] { return world.playerInfo(boss, me) && me.alive; }, 6000)); // an eye at the origin
+	CHECK(world.setCommander(2, boss));
+	const auto updates = [&] {
+		const net::RemotePlayer* p = client.world().player(enemy);
+		const net::RemoteObject* o = p && p->soldierGhost ? client.world().object(p->soldierGhost) : nullptr;
+		return o ? o->updates : 0u;
+	};
+	const auto during = [&](int ticks) {
+		const uint32_t from = updates();
+		for (int i = 0; i < ticks; ++i) {
+			step();
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return updates() - from;
+	};
+	during(60);
+	const uint32_t before = during(90);
+	CHECK(world.commanderAction(2, Ability::Satellite, 0, 0));
+	during(15);
+	const uint32_t scanned = during(90);
+	std::printf("  the far enemy's ghost: %u updates in 3 s without the scan, %u with it\n", before, scanned);
+	CHECK(before == 0);
+	CHECK(scanned > 20);
+	client.disconnect();
 }

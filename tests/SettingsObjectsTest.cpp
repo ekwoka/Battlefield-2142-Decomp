@@ -311,3 +311,23 @@ TEST(DisplayModes_AntialiasingModesAreTheDevices)
 	CHECK((listAntialiasingModes({2, 4}) == std::vector<std::string> {"Off", "2Samples", "4Samples"}));
 	CHECK((listAntialiasingModes({1, 2, 32}) == std::vector<std::string> {"Off", "2Samples"}));
 }
+
+// GeneralSettings slot 0x190 (0x0049ca90), the in-game HUD's
+// HudManager.addFavouriteServer 0 (0x00449180): the joined server's
+// favourite goes by its address and game port, every line of it; another
+// port's stays.
+TEST(SettingsObjects_RemoveFavouriteServer)
+{
+	Console console;
+	menu::SettingsObjects settings;
+	settings.registerConsole(console);
+	run(console, "GeneralSettings.addFavouriteServer \"127.0.0.1\" 17567 \"Here\" 1762000000");
+	run(console, "GeneralSettings.addFavouriteServer \"127.0.0.1\" 17568 \"Other port\" 0");
+	run(console, "GeneralSettings.addFavouriteServer \"127.0.0.1\" 17567 \"Here again\" 0");
+	CHECK(settings.list("GeneralSettings.FavouriteServer").size() == 3);
+	CHECK(settings.removeFavouriteServer("127.0.0.1", 17567));
+	CHECK(settings.list("GeneralSettings.FavouriteServer").size() == 1
+		&& settings.list("GeneralSettings.FavouriteServer")[0].find("Other port") != std::string::npos);
+	CHECK(!settings.removeFavouriteServer("127.0.0.1", 17567));
+	CHECK(settings.generalScript().find("17567") == std::string::npos);
+}

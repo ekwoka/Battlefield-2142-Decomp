@@ -1458,6 +1458,70 @@ TEST(GameWorld_SquadsLeadersAndBeacons)
 	CHECK(info.squadLeader && range.world->squadBeacon(2, 1) == 0);
 }
 
+// The squad's beacon taken back with the use key (0x004c5950, the squad
+// manager's slot 0xb4, before 0x004bce30): the leader within 3 m of it
+// (a squared distance under 9), in any direction, takes it and its round;
+// a member, or the leader 3.5 m off, doesn't.
+TEST(GameWorld_LeaderTakesBackTheBeacon)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* beacon = range.templates.create("GenericFireArm", "beacon");
+	beacon->settings()["itemIndex"] = "8";
+	beacon->settings()["projectileTemplate"] = "spawn_beacon";
+	beacon->settings()["ammo.magSize"] = "1";
+	beacon->settings()["ammo.nrOfMags"] = "1";
+	beacon->settings()["pickupEnabled"] = "1";
+	range.templates.create("GenericProjectile", "spawn_beacon")->settings()["armor.holdsSlBeacon"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"beacon", {}, {}});
+	const int leader = range.world->addPlayer("Lead", 2, true);
+	const int member = range.world->addPlayer("Mate", 2, true);
+	CHECK(range.world->joinSquad(leader, 1) && range.world->joinSquad(member, 1));
+	CHECK(range.world->spawnSoldier(leader) && range.world->spawnSoldier(member));
+	game::GameWorld::PlayerInfo lead, mate;
+	range.world->playerInfo(leader, lead);
+	range.world->playerInfo(member, mate);
+	CHECK(lead.squadLeader && !mate.squadLeader);
+	range.world->setSoldierPosition(lead.soldier, {30, 0, 30});
+	const auto press = [&](int player, game::SoldierInput input) {
+		range.world->setInput(player, input);
+		range.world->tick(1 / 30.0f);
+		range.world->setInput(player, {});
+		range.world->tick(1 / 30.0f);
+	};
+	const auto throwBeacon = [&] {
+		game::SoldierInput input;
+		input.selectItem = 8;
+		press(leader, input);
+		input = {};
+		input.fire = true;
+		press(leader, input);
+		return range.world->squadBeacon(2, 1);
+	};
+	const uint32_t placed = throwBeacon();
+	CHECK(placed != 0);
+	const world::Object* at = range.objects.find(placed);
+	CHECK(at != nullptr);
+	const world::Vec3 b = at->position();
+	game::SoldierInput use;
+	use.use = true;
+	// A member 2 m off: not his to take.
+	range.world->setSoldierPosition(mate.soldier, {b.x + 2, b.y, b.z});
+	press(member, use);
+	CHECK(range.world->squadBeacon(2, 1) == placed);
+	// The leader 3.5 m behind it: too far.
+	range.world->setSoldierPosition(lead.soldier, {b.x, b.y, b.z + 3.5f});
+	press(leader, use);
+	CHECK(range.world->squadBeacon(2, 1) == placed);
+	// 2.5 m behind it (not the 1.3 m in front 0x004bce30 asks): taken.
+	range.world->setSoldierPosition(lead.soldier, {b.x, b.y, b.z + 2.5f});
+	press(leader, use);
+	CHECK(range.world->squadBeacon(2, 1) == 0 && range.objects.find(placed) == nullptr);
+	// Its round came back: another can be set down.
+	CHECK(throwBeacon() != 0);
+}
+
 // The player's auto reload (GeneralSettings.setAutoReload, on by default:
 // 0x0049a170; player +0x3d0 from 0x00591e50): the input (0x00594280)
 // presses c_PIReload while the weapon in hand's magazine is empty, it

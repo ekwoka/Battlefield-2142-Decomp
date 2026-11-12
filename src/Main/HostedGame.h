@@ -254,6 +254,10 @@ public:
 	// The host's own player's report (the game's slots 0xd8 / 0xd4 on a
 	// server: the event handled at once).
 	void spotted(const net::SpottedInfo& spot, int reporter);
+	// host.sgl_sendGameLogicEvent (0x00567d40): the game category's message
+	// `event` with the 4-byte data to `player`'s connection (the game's slot
+	// 0x98); false when no playing client has that player (the host's own).
+	bool gameLogicEvent(int player, int event, int data);
 	// A commander's strike asset fired its burst's first round
 	// (GameWorld::takeStrikeFires, which main.cpp's effects step takes):
 	// 0x005a0e50 tells every client, kEvArtillery kind 2 with the asset's
@@ -420,6 +424,11 @@ private:
 	std::string m_autoDemo, m_lastAutoDemo; // the AutoRecorder's file and its last (+0x10, +0x2c)
 	int m_lastRoundState = -1;
 	std::shared_ptr<std::atomic<bool>> m_hookBusy = std::make_shared<std::atomic<bool>>(false);
+	// The hook's end (+0xb8, the error at +0xbc): 1 done, 2 failed; the
+	// demo's file and map (+0x48) for message 9.
+	std::shared_ptr<std::atomic<int>> m_hookDone = std::make_shared<std::atomic<int>>(0);
+	std::string m_hookFile, m_hookMap;
+	void hookDone();
 	void startAutoDemo();
 	void stopAutoDemo();
 	game::Votes m_votes;
@@ -454,6 +463,8 @@ private:
 	// The squad manager's messages (GameWorld::takeSquadMessages) to the
 	// clients' players' connections.
 	void sendSquadMessages();
+	void sendTitanSync();
+	net::GameEvent titanSyncEvent(const game::GameWorld::TitanSync& m) const;
 	// The offers of command made (PostRemote 2/0x23 to the candidate,
 	// 0x004c5070), per team.
 	std::array<int, 3> m_offerSent {-1, -1, -1};
