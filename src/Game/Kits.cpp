@@ -339,7 +339,6 @@ bool GameWorld::pickUpClosestKit(Player& player, float radius)
 	}
 	player.kitObject = taken.object;
 	if (world::Object* kit = m_objects.find(taken.object)) {
-		kit->setHidden(true);
 		kit->setPosition(soldier->position());
 	}
 	player.carried = std::move(taken.carried);

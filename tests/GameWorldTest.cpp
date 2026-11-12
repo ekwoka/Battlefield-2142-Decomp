@@ -2866,7 +2866,7 @@ TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
 		me.position + physics::Vec3 {0, 0, 2.0f});
 	range.world->playerInfo(bot, info);
 	const uint32_t botKit = info.kit;
-	CHECK(botKit != 0 && range.objects.find(botKit)->hidden());
+	CHECK(botKit != 0 && !range.objects.find(botKit)->hidden()); // worn: drawn on the soldier
 	range.world->setSpawnTime(60);
 	range.world->setHitPoints(info.soldier, 0);
 	range.world->tick(1 / 30.0f);
@@ -2888,7 +2888,7 @@ TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
 	range.world->tick(1 / 30.0f);
 	range.world->playerInfo(range.world->localPlayer(), me);
 	CHECK(me.kit == botKit && held() == "eu_lmg" && range.world->playerWeapon()->roundsInMag() == 100);
-	CHECK(range.objects.find(botKit)->hidden() && range.count("PickupKit") >= 3 && range.count("DropKit") == 2);
+	CHECK(!range.objects.find(botKit)->hidden() && range.count("PickupKit") >= 3 && range.count("DropKit") == 2);
 	CHECK(range.world->droppedKits() == std::vector<uint32_t> {ownKit});
 	// Within 2 s of a pick-up, use takes nothing (the time stamp).
 	range.world->setPlayerInput(use);

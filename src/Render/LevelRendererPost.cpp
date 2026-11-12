@@ -50,6 +50,10 @@ const std::vector<anim::Matrix>& LevelRenderer::poseFor(const Instance& instance
 	if (instance.skeleton
 		&& !(m_sources && m_sources->skeletonPose && instance.object != 0
 			&& m_sources->skeletonPose(instance.object, *instance.skeleton, pose))) {
+		if (instance.wornKit) {
+			pose.clear(); // not worn (dropped): unskinned, as before
+			return pose;
+		}
 		float frame = seconds * anim::kFramesPerSecond;
 		if (instance.animation && instance.animationDuration > 0.0f) {
 			frame = seconds * static_cast<float>(instance.animation->frameCount) / instance.animationDuration;

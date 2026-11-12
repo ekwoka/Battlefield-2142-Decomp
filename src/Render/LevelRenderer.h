@@ -411,6 +411,7 @@ private:
 		std::shared_ptr<anim::Animation> animation;
 		float animationDuration = 0; // authored clip length, seconds; zero is 24 fps
 		bool hidden = false; // its object is hidden
+		bool wornKit = false; // posed only by its wearer's skeleton (a kit has none of its own)
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
 		// object's +0x2c), its object's origin, its cull radius (the mesh's

@@ -8937,6 +8937,16 @@ int runGame(Options& options, Session& session)
 				lod = 0;
 				return true;
 			}
+			// A worn kit: its template's geometry.kit (0x0056cc50 with a parent).
+			if (const world::Object* worn = objects.find(object); worn && worn->objectTemplate() &&
+				worn->objectTemplate()->typeName() == "Kit") {
+				const auto& settings = worn->objectTemplate()->settings();
+				if (const auto index = settings.find("geometry.kit"); index != settings.end()) {
+					geometry = std::atoi(index->second.c_str());
+					lod = 0;
+					return true;
+				}
+			}
 			// A broken prop of two geometries or more: its second (Props.cpp).
 			if (const int wreck = round.propGeometry(object); wreck >= 0) {
 				geometry = wreck;

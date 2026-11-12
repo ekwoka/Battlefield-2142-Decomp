@@ -751,6 +751,10 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 					: skeletonPath != objectTemplate.settings().end() ? skeletonPath->second : inheritedSkeleton;
 				if (!selected.empty()) {
 					instance.skeleton = skeleton(sources.files, selected);
+				} else if (objectTemplate.typeName() == "Kit") {
+					// shortcut: the soldiers' shared 3P skeleton, all shipped soldiers name it; read it from the wearer if a mod differs.
+					instance.skeleton = skeleton(sources.files, "Objects/Soldiers/Common/Animations/3p_setup.ske");
+					instance.wornKit = true;
 				}
 				if (!sources.previewAnimation.empty()) {
 					instance.animation = animation(sources.files, sources.previewAnimation);

@@ -6694,7 +6694,6 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// player.getKit() returns), picked up as the soldier appears.
 	if (world::ObjectTemplate* kit = kitTemplate) {
 		if (world::Object* worn = m_objects.create(kit, created->position(), created->rotation())) {
-			worn->setHidden(true);
 			player.kitObject = worn->id();
 		}
 	}
@@ -7831,7 +7830,6 @@ void GameWorld::revive(Player& victim, Player* medic, float restoreHitPoints)
 			victim.kitTemplate.empty() ? (victim.team == 1 ? "Pac_Assault" : "EU_Assault") : victim.kitTemplate);
 		if (kit) {
 			if (world::Object* worn = m_objects.create(kit, body->position(), body->rotation())) {
-				worn->setHidden(true);
 				victim.kitObject = worn->id();
 			}
 			world::ObjectTemplate* primary = nullptr;
@@ -9364,6 +9362,13 @@ void GameWorld::endRemoteProjectile(uint32_t ghostObject)
 
 bool GameWorld::skeletonPose(uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world)
 {
+	// A worn kit's mesh is skinned to its wearer's skeleton.
+	for (const auto& wearer : m_players) {
+		if (wearer && object != 0 && wearer->kitObject == object) {
+			object = wearer->object;
+			break;
+		}
+	}
 	if (const auto remote = m_remoteSoldiers.find(object);
 		remote != m_remoteSoldiers.end() && remote->second.worldPose.size() == skeleton.nodes.size()) {
 		world = remote->second.worldPose;
@@ -10301,8 +10306,12 @@ void GameWorld::followSoldier(const Player& player, const world::Object& soldier
 			m_effects.setAnchor(player.weaponObject, at, rotation);
 		}
 	}
+	// A worn kit is its wearer's helmet, vest and pack: drawn with the
+	// soldier's skeleton (skeletonPose), where he is (0x00571230).
 	if (world::Object* kit = player.kitObject ? m_objects.find(player.kitObject) : nullptr) {
 		kit->setPosition(soldier.position());
+		kit->setRotation(soldier.rotation());
+		kit->setHidden(soldier.hidden());
 	}
 }
 
