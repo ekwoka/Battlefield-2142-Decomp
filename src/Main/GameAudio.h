@@ -111,6 +111,9 @@ public:
 	// silo's index, its ancestor's slot 0x38, into the Radio's +0x18) that
 	// the team-change messages (0x00656e80) end with: "_<index>" for a
 	// missile silo, else "".
+	// The ticket state's announcement (0x00449070, from the state change at
+	// 0x0044b7e8 with state % 20): "" for none.
+	static std::string ticketStateMessage(int team, int state, int localTeam, const std::string& gameMode);
 	static std::string siloSuffix(int index) { return index > 0 ? "_" + std::to_string(index) : std::string(); }
 
 	// Who the local player is and what the players are, for the radio

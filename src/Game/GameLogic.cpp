@@ -36,14 +36,18 @@ void GameLogic::checkLimits(int teamIndex, float before, float after)
 	if (!m_events) {
 		return;
 	}
-	// Copies: a handler may change the limits.
+	// One event per change: the first crossed limit by id (0x004be900 from
+	// 0x004beaaa); copies, as a handler may change the limits.
 	const std::map<int, int> limits = team(teamIndex).ticketLimits;
 	for (const auto& [id, value] : limits) {
 		const float limit = static_cast<float>(value);
 		if (before > limit && after <= limit) {
 			m_events("TicketLimitReached", {ScriptValue::integer(teamIndex), ScriptValue::integer(-id)});
-		} else if (before <= limit && after > limit) {
+			return;
+		}
+		if (before <= limit && after > limit) {
 			m_events("TicketLimitReached", {ScriptValue::integer(teamIndex), ScriptValue::integer(id)});
+			return;
 		}
 	}
 }
@@ -181,7 +185,13 @@ void GameLogic::setParam(const std::string& name, int teamIndex, const ScriptVal
 	if (name == "tickets") {
 		setTickets(teamIndex, static_cast<float>(value.asNumber()));
 	} else if (name == "ticketState") {
-		t.ticketState = static_cast<int>(value.asInt());
+		const int state = static_cast<int>(value.asInt());
+		if (state != t.ticketState) {
+			t.ticketState = state;
+			if (onTicketState) {
+				onTicketState(teamIndex, state);
+			}
+		}
 	} else if (name == "ticketChangePerSecond") {
 		t.ticketChangePerSecond = static_cast<float>(value.asNumber());
 	} else if (name == "ticketLimit") {

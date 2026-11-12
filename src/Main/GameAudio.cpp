@@ -662,6 +662,25 @@ void GameAudio::radio()
 	}
 }
 
+std::string GameAudio::ticketStateMessage(int team, int state, int localTeam, const std::string& gameMode)
+{
+	// Titan mode (the mode's name holding "ti") has both teams' Titan
+	// shield/hull lines; the other modes only the local team's ticket level.
+	const int level = state % 20;
+	const bool titans = gameMode.find("ti") != std::string::npos;
+	const bool own = team == localTeam;
+	if (level <= 0 || level > 15) {
+		return {};
+	}
+	if (level == 15) {
+		return own ? "AUTO_RULES_TITANS_less_points_friendly" : "AUTO_RULES_TITANS_less_points_enemy";
+	}
+	if (titans) {
+		return "AUTO_RULES_ticketlevel_titans_" + std::to_string(level) + (own ? "_friendly" : "_enemy");
+	}
+	return own ? "AUTO_RULES_ticketlevel_" + std::to_string(level) : std::string();
+}
+
 void GameAudio::silos()
 {
 	for (const auto& silo : m_round.missileSilos()) {

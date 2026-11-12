@@ -6,6 +6,7 @@
 #include "Game/ScriptBridge.h"
 #include "Python/ScriptHost.h"
 #include "TitanLevel.h"
+#include <algorithm>
 
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,8 @@ TEST(ScriptHost_TitanModeTicketsAndTheEnd)
 	}
 	game::GameLogic logic;
 	logic.mapSize = 48;
+	std::vector<std::pair<int, int>> states; // the scripts' setTicketState: the shield/hull announcements
+	logic.onTicketState = [&states](int team, int state) { states.push_back({team, state}); };
 	game::ServerSettings settings;
 	settings.gameMode = "gpm_ti";
 	settings.mapName = "Minsk";
@@ -72,6 +75,12 @@ TEST(ScriptHost_TitanModeTicketsAndTheEnd)
 	level.world->applyDamage(eu, level.world->hitPoints(eu) - 6e6f * 0.4f, pac);
 	level.run(0.1f);
 	CHECK(logic.team(2).tickets == 40);
+	for (const auto& [team, state] : states) {
+		std::fprintf(stderr, "  ticket state: team %d -> %d\n", team, state);
+	}
+	// 99 (the shield's first damage) .. 48 (the hull at 75 %): states 12 .. 5.
+	CHECK(std::find(states.begin(), states.end(), std::make_pair(2, 12)) != states.end());
+	CHECK(!states.empty() && states.back() == std::make_pair(2, 5));
 	CHECK(!logic.ended());
 	// A player killed before the end: its handler asks every player's
 	// vehicle (getClosestTitan(p.getVehicle(), ...) calls isValid on it);

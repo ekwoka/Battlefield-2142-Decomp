@@ -1011,3 +1011,18 @@ TEST(GameSounds_ReloadAfterLastBurstRoundKeepsOnePlayPerBurst)
 	}
 	CHECK(s.triggered.size() == 3);
 }
+
+// The ticket state's announcement (0x00449070): state % 20; Titan mode
+// names both teams' lines, the other modes only the local team's level.
+TEST(GameAudio_TicketStateMessages)
+{
+	CHECK(GameAudio::ticketStateMessage(1, 10, 1, "gpm_ti") == "AUTO_RULES_ticketlevel_titans_10_friendly");
+	CHECK(GameAudio::ticketStateMessage(2, 7, 1, "gpm_ti") == "AUTO_RULES_ticketlevel_titans_7_enemy");
+	CHECK(GameAudio::ticketStateMessage(1, 22, 1, "gpm_ti") == "AUTO_RULES_ticketlevel_titans_2_friendly");
+	CHECK(GameAudio::ticketStateMessage(1, 20, 1, "gpm_ti").empty());
+	CHECK(GameAudio::ticketStateMessage(1, 0, 1, "gpm_ti").empty());
+	CHECK(GameAudio::ticketStateMessage(2, 15, 1, "gpm_ti") == "AUTO_RULES_TITANS_less_points_enemy");
+	CHECK(GameAudio::ticketStateMessage(1, 3, 1, "gpm_cq") == "AUTO_RULES_ticketlevel_3");
+	CHECK(GameAudio::ticketStateMessage(2, 3, 1, "gpm_cq").empty());
+	CHECK(GameAudio::ticketStateMessage(1, 16, 1, "gpm_ti").empty());
+}

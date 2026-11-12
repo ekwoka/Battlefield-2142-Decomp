@@ -7424,6 +7424,20 @@ int runGame(Options& options, Session& session)
 			std::printf("round over: team %d won (victory type %d)\n", winner, victoryType);
 			scripts.setGameStatus(game::GameStatus::EndGame);
 		};
+		// The scripts' ticket state (gpm_ti: the Titans' shields and hulls)
+		// announced to the local player (0x0044b7e8 -> 0x00449070, slot 0x60).
+		gameLogic.onTicketState = [&round](int team, int state) {
+			const int local = round.localPlayer();
+			game::GameWorld::PlayerInfo me;
+			if (local < 0 || !round.playerInfo(local, me)) {
+				return;
+			}
+			const std::string message = GameAudio::ticketStateMessage(team, state, me.team, round.gameMode());
+			if (!message.empty()) {
+				std::printf("ticket state: team %d -> %d: %s\n", team, state, message.c_str());
+				round.hearRadio(local, 13, message);
+			}
+		};
 		if (session.client) {
 			std::printf("on %s: the server runs the round\n", session.client->world().serverName().c_str());
 		} else if (scripts.ok() && scripts.startGameMode(options.gameMode)) {
