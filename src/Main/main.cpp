@@ -213,6 +213,7 @@ struct Options {
 	std::string menu;            // --menu [mainMenu|endOfRound]: the Flash menu over everything
 	float menuSeconds = 10;      // --menu-seconds: how long a screenshot lets the menu play first
 	std::vector<std::string> console; // --console "<command>": run once the round has started
+	std::vector<std::string> enhancedSettings; // +enhanced.<setting> <value>: set at startup (Scene/EnhancedSettings.h)
 	bool offline = false;        // --offline: the menu finds no account service (offline mode)
 	// --hud-click x/y[/right|/move] (repeatable): a click (or a pointer
 	// move) on the HUD's 800 x 600 screen before the screenshot.
@@ -441,6 +442,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.playerName = argv[++i];
 		} else if (arg == "+dedicated" && hasValue) {
 			options.dedicated = std::atoi(argv[++i]) != 0;
+		} else if (arg.rfind("+enhanced.", 0) == 0 && hasValue) {
+			options.enhancedSettings.push_back(arg.substr(1) + " " + argv[++i]);
 		} else if (arg[0] == '+' && hasValue) {
 			++i; // other "+setting value" options are not used yet
 		} else {
@@ -3158,6 +3161,12 @@ int runGame(Options& options, Session& session)
 	scene::EnhancedSettings enhancedSettings;
 	enhancedSettings.enabled = options.enhanced;
 	scene::registerEnhancedConsoleMethods(console, enhancedSettings);
+	// The launcher's Enhanced options, before the audio, the renderer and the
+	// bots read them (--console runs only once a round has started).
+	for (const std::string& line : options.enhancedSettings) {
+		std::string output;
+		console.execute(line, output);
+	}
 	// The post-production, the dynamic shadows and the hemi maps (RendDX9).
 	scene::PostProductionSettings postSettings;
 	scene::registerPostProductionConsoleMethods(console, postSettings);
