@@ -395,6 +395,14 @@ public:
 	uint32_t anchor = 0;
 	uint32_t tag = 0;
 	uint32_t bundle = 0; // the AttachedBundle it belongs to (0: none)
+	// The life left of the world-spawned EffectBundle it came from (the
+	// bundle's +0x194: its timeToLive sampled at creation, 0x00619700; an
+	// unparented infinite one gets 0.5 s, 0x00618600; run down by the tick
+	// while above 0 and the bundle stopped below 0, 0x0061a760). -1: none.
+	float bundleLife = -1;
+	// Its emission is held by an anchor or a living bundle: a looping or
+	// emit-time-0 system emits until then.
+	bool held() const { return anchor != 0 || bundleLife >= 0; }
 	Vec3 mountPosition, localPosition;
 	Mat3 mountRotation, localRotation;
 

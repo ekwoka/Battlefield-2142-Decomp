@@ -283,13 +283,13 @@ bool Emitter::alive() const
 	if (!m_active) {
 		return false; // never started (its quality, or out of view)
 	}
-	// A trail draws its path as long as its anchor carries it.
-	if (t.trail && anchor != 0 && !m_stopped) {
+	// A trail draws its path as long as its anchor or bundle carries it.
+	if (t.trail && held() && !m_stopped) {
 		return true;
 	}
-	// An attached looping or endless (emit time 0) system emits until it is stopped.
+	// A held looping or endless (emit time 0) system emits until it is stopped.
 	return !m_stopped
-		&& (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (anchor != 0 && (t.isLooping || t.emitTime == 0)));
+		&& (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (held() && (t.isLooping || t.emitTime == 0)));
 }
 
 void Emitter::place(const Vec3& position, const Mat3& rotation)
@@ -675,10 +675,9 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	const float interval = 1 / frequency;
 	while (m_emitClock + interval <= m_clock + 1e-5f) {
 		// An emit time of 0 isn't run down (0x10140590): the system emits
-		// until it is stopped (the gunships' jets, the damage smoke).
-		// shortcut: an unattached one still stops at once, as bundles' own
-		// timeToLive isn't modelled to end it; upgrade when it is.
-		if (t.emitTime != 0 || (!t.isLooping && anchor == 0)) {
+		// until it is stopped (the gunships' jets, the damage smoke), by its
+		// anchor or its bundle's life (bundleLife).
+		if (t.emitTime != 0 || (!t.isLooping && !held())) {
 			m_emitLeft -= interval;
 			if (m_emitLeft <= 0) {
 				if (t.isLooping) {
@@ -1303,7 +1302,23 @@ bool EffectManager::spawn(const std::string& name, const Vec3& position, const M
 	if (!t) {
 		return false;
 	}
-	spawnTemplate(*t, position, rotation, 0, view, nullptr);
+	std::vector<Emitter*> started;
+	spawnTemplate(*t, position, rotation, 0, view, &started);
+	if (t->typeName() == "EffectBundle") {
+		// The bundle's life: its timeToLive (CRD_NONE/1/0 by the template's
+		// constructor, 0x0061a9b0) sampled once (0x00619700); one with no
+		// parent and no end lives 0.5 s (0x00618600).
+		float life = 1;
+		if (const std::string* ttl = setting(*t, "timeToLive")) {
+			life = game::RandomDistribution::parse(*ttl).sample(m_random);
+		}
+		if (life < 0) {
+			life = 0.5f;
+		}
+		for (Emitter* emitter : started) {
+			emitter->bundleLife = life;
+		}
+	}
 	return true;
 }
 
@@ -1580,6 +1595,14 @@ void EffectManager::update(float seconds)
 	}
 	context.poolUsed = &m_poolUsed;
 	for (const auto& emitter : m_emitters) {
+		// The bundle's life runs down by the tick (no age scale) while above
+		// 0; below 0 the bundle stops (0x0061a760). Exactly 0 never ends.
+		if (emitter->bundleLife > 0) {
+			emitter->bundleLife -= seconds;
+			if (emitter->bundleLife < 0) {
+				emitter->stop();
+			}
+		}
 		emitter->update(seconds, m_random, context);
 	}
 	m_emitters.erase(std::remove_if(m_emitters.begin(), m_emitters.end(),

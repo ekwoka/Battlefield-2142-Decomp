@@ -1001,9 +1001,49 @@ TEST(Effects_ZeroEmitTimeEmitsUntilStopped)
 		manager.update(1 / 30.0f);
 	}
 	CHECK(manager.emitters() == 0);
-	// Unattached, it still ends at once (no bundle timeToLive to stop it).
+}
+
+// A bundle spawned on its own lives its timeToLive (sampled at creation,
+// 0x00619700; 1 s by the template's constructor, 0x0061a9b0), an infinite
+// one 0.5 s (no parent, 0x00618600); its emit-time-0 and looping systems
+// emit until then (0x0061a760), its particles living on.
+TEST(Effects_WorldBundleLivesItsTimeToLive)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* glow = addPuff(templates);
+	glow->settings()["emitFrequency"] = "30";
+	glow->settings()["timeToLive"] = "0.2";
+	glow->settings()["emitTime"] = "0";
+	world::ObjectTemplate* bundle = templates.find("e_puff");
+	const auto emitsAt = [&](float seconds) {
+		effects::EffectManager manager(templates);
+		manager.spawn("e_puff", {0, 0, 0});
+		for (float t = 0; t < seconds; t += 1 / 30.0f) {
+			manager.update(1 / 30.0f);
+		}
+		return !manager.emitterList().empty() && !manager.emitterList()[0]->stopped();
+	};
+	// The Titan core's explosion (e_vexp_eu_titanCore): 50 s.
+	bundle->settings()["timeToLive"] = "CRD_NONE/50/0/0";
+	CHECK(emitsAt(49.5f) && !emitsAt(50.5f));
+	// No timeToLive: 1 s.
+	bundle->settings().erase("timeToLive");
+	CHECK(emitsAt(0.9f) && !emitsAt(1.1f));
+	// Infinite with no parent: 0.5 s.
+	bundle->settings()["timeToLive"] = "CRD_NONE/-1/0/0";
+	CHECK(emitsAt(0.4f) && !emitsAt(0.6f));
+	// A looping system is held the same way; stopped, its particles live on.
+	glow->settings()["emitTime"] = "0.1";
+	glow->settings()["isLooping"] = "1";
+	bundle->settings()["timeToLive"] = "CRD_NONE/3/0/0";
+	CHECK(emitsAt(2.9f) && !emitsAt(3.1f));
+	effects::EffectManager manager(templates);
 	manager.spawn("e_puff", {0, 0, 0});
-	for (int i = 0; i < 10; ++i) {
+	for (int i = 0; i < 92; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(!sprites(manager).empty()); // 3.07 s: stopped, the last ones still there
+	for (int i = 0; i < 15; ++i) {
 		manager.update(1 / 30.0f);
 	}
 	CHECK(manager.emitters() == 0);

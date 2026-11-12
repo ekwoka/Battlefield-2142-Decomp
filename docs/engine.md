@@ -3917,7 +3917,18 @@ its systems' age (`+0x12c`, slots 0x7c / 0x78), and `speedFromPhysics`
 (`+0x45c`) has the exe set, each tick (`0x00618ae0`), the velocity its
 particles inherit to the root object's physics velocity's direction
 times the square root of its speed (slots 0x40 / 0x4c, the instance's
-`+0xcc` / `+0xdc`). Rewritten in `src/Effects` (`spriteFrame`,
+`+0xcc` / `+0xdc`). The bundle's own `timeToLive` (template `+0x3fc`,
+CRD_NONE/1/0 by its constructor `0x0061a9b0`) is sampled into the
+instance's `+0x194` as it is made (`0x00619700`); one with no parent and
+a negative life gets 0.5 s (the post-create slot 0x1c, `0x00618600`); the
+update (`0x0061a760`) runs it down by the tick while above 0 and stops
+and removes the bundle below 0 (−1 and exactly 0 never end; a held
+`+0x30` forces −1). Until then its looping and emit-time-0 systems emit:
+the Titan core's 50 s blast (`e_vexp_eu_titanCore`), the consoles' 6 s
+`e_titan_consol`. The rewrite applies it to bundles spawned on their own
+(`Emitter::bundleLife`); attached ones keep emitting until stopped (what
+sets `+0x30` on a parented bundle isn't traced, so a finite life there,
+the PAC Titan engines' 500 s, isn't run down). Rewritten in `src/Effects` (`spriteFrame`,
 `ParticleTemplate`, `EffectManager::setPhysicsVelocity`) and
 `particle.vert`; the rewrite's zoomed first person is the view's field of
 view narrower than its first. The flags act each frame (`0x0061a1c0`):
