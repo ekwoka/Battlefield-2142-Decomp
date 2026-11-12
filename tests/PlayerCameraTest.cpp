@@ -149,6 +149,31 @@ TEST(PlayerCamera_RespawnAfterDyingInThirdPersonSeatIsFirstPerson)
 	CHECK(camera.insideView());
 }
 
+// A soldier spawned between ticks (the deployment's Done): the camera's
+// zero-time update taken then puts it in first person for that frame.
+TEST(PlayerCamera_SpawnFrameIsFirstPerson)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	auto* soldier = templates.create("Soldier", "infantry");
+	const auto rider = objects.create(soldier, {})->id();
+	game::GameWorld round(templates, objects);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(round, systems, nullptr);
+	bool alive = false;
+	camera.setRemote([&](PlayerCamera::Remote& me) {
+		me.alive = alive;
+		me.soldier = alive ? rider : 0;
+		me.soldierTemplate = alive ? soldier : nullptr;
+		return true;
+	});
+	camera.tick(1 / 30.0f); // dead: the spawn screen
+	alive = true;           // Done
+	CHECK(!camera.insideView());
+	camera.tick(0);
+	CHECK(camera.insideView() && camera.hides(rider));
+}
+
 TEST(VehicleHud_GeometryOnlyFirearmHasNoFireGroup)
 {
 	world::ObjectTemplateManager templates;

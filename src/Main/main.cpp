@@ -9504,7 +9504,7 @@ int runGame(Options& options, Session& session)
 		if (viewer.onPlayerInput) {
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
-			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager,
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera,
 										&questions, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
 										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
@@ -9531,6 +9531,9 @@ int runGame(Options& options, Session& session)
 						if (round.spawnSoldier(round.localPlayer())) {
 							g_initialDeploymentPending = false;
 							g_deploymentOpen = false;
+							// Spawned between ticks: the camera takes the soldier now, or this
+							// frame draws him from outside (the next tick would flip it).
+							playerCamera.tick(0);
 						}
 					} else if (alive) {
 						g_deploymentOpen = false;

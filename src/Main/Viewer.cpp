@@ -47,14 +47,35 @@ struct Window::Impl {
 
 	// Pushes the events of the commands now due.
 	void runScript();
+	// A detached launch is not the active app on macOS: until the window first has input focus, ask for it
+	// (throttled, bounded) from every screen's frame, so menus and movies get hover and clicks without an Alt-Tab.
+	Uint64 lastRaise = 0;
+	int raises = 0;
+	bool focusSeen = false;
+	void claimFocus();
 	// The keyboard as read, with the scripted keys held.
 	const bool* keyboard();
 	Uint32 mouseButtons() const { return SDL_GetMouseState(nullptr, nullptr) | heldButtons; }
 	bool merged[SDL_SCANCODE_COUNT] = {};
 };
 
+void Window::Impl::claimFocus()
+{
+	if (focusSeen || (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) {
+		focusSeen = true;
+		return;
+	}
+	const Uint64 now = SDL_GetTicksNS();
+	if (raises < 20 && now - lastRaise >= 500'000'000ull) {
+		lastRaise = now;
+		++raises;
+		SDL_RaiseWindow(window);
+	}
+}
+
 void Window::Impl::runScript()
 {
+	claimFocus();
 	const double now = static_cast<double>(SDL_GetTicksNS() - opened) / 1e9;
 	int width = 1, height = 1;
 	SDL_GetWindowSize(window, &width, &height);
