@@ -1934,10 +1934,12 @@ void GameWorld::stepVehicleDamage(float seconds)
 		// The levels are signed, as retail adds them (0x006527a3: in water when
 		// position.y + waterLevel is under the water's height): the shipped
 		// -0.3 counts an origin up to 0.3 m over the water as in it.
-		waterTick(depth > number(t, "armor.waterLevel", 1e9f), body.waterTimer, "armor.waterDamageDelay", 3,
-			"armor.hpLostWhileInWater");
-		waterTick(depth > number(t, "armor.deepWaterLevel", 1e9f), body.deepWaterTimer, "armor.deepWaterDamageDelay", 1,
-			"armor.hpLostWhileInDeepWater");
+		// Deep is tested only once in water (0x006527b2 returns before the +0x148 test): Belgrade's static_av
+		// (-0.3 / -0.7) stands 0.56 m over the sea, out of water, so never deep.
+		const bool inWater = depth > number(t, "armor.waterLevel", 1e9f);
+		waterTick(inWater, body.waterTimer, "armor.waterDamageDelay", 3, "armor.hpLostWhileInWater");
+		waterTick(inWater && depth > number(t, "armor.deepWaterLevel", 1e9f), body.deepWaterTimer,
+			"armor.deepWaterDamageDelay", 1, "armor.hpLostWhileInDeepWater");
 	}
 }
 

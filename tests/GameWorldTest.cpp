@@ -4742,6 +4742,39 @@ TEST(GameWorld_WaterLevelIsSigned)
 	}
 }
 
+// Deep water is tested only inside water (0x006527b2 skips the deepWaterLevel
+// test): Belgrade's EU static_av (-0.3 / -0.7, deep loss 335 with no delay)
+// stands 0.56 m over the sea and must not drown; 0.2 m over it is both.
+TEST(GameWorld_DeepWaterOnlyInWater)
+{
+	for (const float over : {0.56f, 0.2f}) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->settings()["armor.maxHitPoints"] = "1000";
+		jeep->settings()["armor.waterLevel"] = "-0.3";
+		jeep->settings()["armor.deepWaterLevel"] = "-0.7";
+		jeep->settings()["armor.hpLostWhileInWater"] = "100";
+		jeep->settings()["armor.waterDamageDelay"] = "1";
+		jeep->settings()["armor.hpLostWhileInDeepWater"] = "335";
+		jeep->settings()["armor.deepWaterDamageDelay"] = "0";
+		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
+		range.world->startRound();
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f); // settle on the ground
+		}
+		range.world->setWaterLevel(range.objects.find(car)->position().y - over);
+		range.world->tick(1 / 30.0f);
+		std::fprintf(stderr, "  origin %.2f m over the water: %.0f\n", over, range.world->hitPoints(car));
+		CHECK(range.world->hitPoints(car) == (over > 0.3f ? 1000.0f : 665.0f));
+	}
+}
+
 // Upside down (0x00652b10): once a second, hpLostWhileUpSideDown at once
 // while the body's up axis is under 0.3 of the world's and it lies on
 // something. The armour starts disarmed, so one that spawns upside down
