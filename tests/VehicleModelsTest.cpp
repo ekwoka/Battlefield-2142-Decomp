@@ -17,6 +17,12 @@
 #include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/GameAudio.h"
+#include "Main/HudAlerts.h"
+#include "Sound/Game/GameSounds.h"
+#include "Sound/Game/SoundConsole.h"
+#include "Sound/Game/SoundObjectTemplate.h"
+#include "Sound/Game/SoundManager.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "Main/HudWorld.h"
@@ -36,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -68,7 +75,8 @@ struct Garage {
 	std::unique_ptr<game::GameWorld> world;
 	bool loaded = false;
 
-	explicit Garage(const char* gameDir, const char* modPath = "mods/bf2142", bool clientAssets = false)
+	explicit Garage(const char* gameDir, const char* modPath = "mods/bf2142", bool clientAssets = false,
+		const std::function<void(Garage&)>& beforeLoad = {})
 	{
 		files.setRootPath(gameDir);
 		files.addSearchPath(modPath);
@@ -81,6 +89,9 @@ struct Garage {
 		if (clientAssets) CHECK(console.run("ClientArchives.con", {}, out));
 		files.setMountingAllowed(false);
 		world::registerWorldConsoleMethods(console, templates, objects);
+		if (beforeLoad) {
+			beforeLoad(*this); // e.g. the sound factory, the WarningHud methods: before the untyped properties
+		}
 		geom::registerGeometryConsoleMethods(console, geometries);
 		templates.setCurrentFileProvider([this] { return console.currentFile(); });
 		physics::registerCollisionConsoleMethods(console, collisionTemplates);
@@ -5645,4 +5656,69 @@ TEST(Vehicles_RemasterMadlockProjectile)
 		std::fprintf(stderr, "MGL blast victim alive=%d health=%.1f\n", target.alive, g.world->hitPoints(target.soldier));
 		CHECK(!target.alive || g.world->hitPoints(target.soldier) < 100);
 	}
+}
+
+// End to end on the shipped Remaster data: the tank's damaged-cabin alarm
+// (S_<seat>_AmbientDamaged under damagedAmbientSoundLimit, 0x005c8a90) and
+// the motion mine's lock warning (WarningHud TTMagnet -> HUD_MotionMine_*).
+TEST(Vehicles_TankDamageAlarmAndMotionMineWarning)
+{
+	if (!gameDir()) return;
+	std::unique_ptr<sound::SoundManager> manager;
+	Garage g(gameDir(), "mods/Project_Remaster_v17_Final", true, [&manager](Garage& garage) { // the client archives: the sounds' files
+		manager = std::make_unique<sound::SoundManager>(nullptr, garage.templates);
+		manager->registerTemplateType();
+		sound::registerSoundConsoleMethods(garage.console, *manager); // as main does (soundFilename ...)
+		menu::registerWarningHudMethods(garage.console, garage.templates);
+	});
+	if (!g.loaded) return;
+	const uint32_t tank = g.start("eu_tank", {0, 1, 0});
+	CHECK(g.enter(tank));
+	sound::GameSounds sounds {*manager};
+	GameAudio audio(*g.world, g.objects, g.templates, *manager, sounds, nullptr);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	audio.tick(camera);
+	const std::string healthy = audio.listenerState().ambient;
+	const world::ObjectTemplate* t = g.objects.find(tank)->objectTemplate();
+	const float maxHp = static_cast<float>(std::atof(t->settings().at("armor.maxHitPoints").c_str()));
+	g.world->setHitPoints(tank, maxHp * 0.25f); // over eu_tank's damagedAmbientSoundLimit 0.20
+	audio.tick(camera);
+	const std::string quarter = audio.listenerState().ambient;
+	g.world->setHitPoints(tank, maxHp * 0.1f);
+	audio.tick(camera);
+	const std::string damaged = audio.listenerState().ambient;
+	const auto* alarm = dynamic_cast<const sound::SoundObjectTemplate*>(g.templates.find(damaged));
+	const std::string file = alarm ? alarm->soundFilenames() : std::string();
+	std::fprintf(stderr, "  cabin: healthy %s, at 25 %% %s, at 10 %% %s (%s)\n", healthy.c_str(), quarter.c_str(), damaged.c_str(), file.c_str());
+	CHECK(healthy == "S_eu_tank_Ambient" && quarter == healthy);
+	CHECK(damaged == "S_eu_tank_AmbientDamaged");
+	CHECK(file.find("damagealarm") != std::string::npos);
+	g.world->setHitPoints(tank, maxHp);
+	// A motion mine 8 m off: armed (3.5 s) and locked (TTMagnet, 20 m) on the tank.
+	const auto pos = g.objects.find(tank)->position();
+	const physics::Vec3 at {pos.x, pos.y, pos.z};
+	CHECK(g.world->launchProjectile("Unl_Mine_Motion_Projectile", at + physics::Vec3 {8, 0.5f, 0}, {0, 0, 0}));
+	bool locked = false;
+	for (int i = 0; i < 30 * 8 && !locked; ++i) {
+		g.world->tick(1 / 30.0f);
+		for (const auto& p : g.world->projectiles()) {
+			locked = locked || (p.alive && p.lockedOn == tank);
+		}
+	}
+	std::fprintf(stderr, "  motion mine locked on the tank: %d\n", locked);
+	CHECK(locked);
+	hud::HudManager hudManager(nullptr);
+	menu::WarningHud warnings;
+	std::vector<std::string> played;
+	warnings.setSoundHook([&played](const std::string& sound, bool start) { played.push_back((start ? "+" : "-") + sound); });
+	warnings.update(hudManager, t, {{1, 3, false}}); // as main feeds it: the mine (TTMagnet, 3) locked on
+	std::fprintf(stderr, "  warning: %s, icon %.0f\n", played.empty() ? "-" : played.front().c_str(), hudManager.number("WarningIconShow"));
+	CHECK(!played.empty() && played.front() == "+HUD_MotionMine_Warning" && hudManager.number("WarningIconShow") == 1);
+	// The tone itself: GameSounds.con's Sound.addSound (Missile_Warning.wav at pitch 0.45), as main runs it.
+	std::string out;
+	g.console.run("Sound/GameSounds.con", {}, out);
+	const auto* tone = dynamic_cast<const sound::SoundObjectTemplate*>(g.templates.find("S_Game_HUD_MotionMine_Warning"));
+	std::fprintf(stderr, "  tone: %s\n", tone ? tone->soundFilenames().c_str() : "-");
+	CHECK(tone && tone->soundFilenames().find("Missile_Warning") != std::string::npos);
 }
