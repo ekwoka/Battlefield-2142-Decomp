@@ -1627,16 +1627,9 @@ void LevelRenderer::buildRoads(const LevelSources& sources)
 		road.boundsMin[1] = file->boundsMin[2];
 		road.boundsMax[0] = file->boundsMax[0];
 		road.boundsMax[1] = file->boundsMax[2];
-		{
-			const Vec3f lo {file->boundsMin[0], file->boundsMin[1], file->boundsMin[2]};
-			const Vec3f hi {file->boundsMax[0], file->boundsMax[1], file->boundsMax[2]};
-			const Vec3f mid = (lo + hi) * 0.5f;
-			road.center = {mid.x * road.world.at(0, 0) + mid.y * road.world.at(1, 0) + mid.z * road.world.at(2, 0) + road.world.at(3, 0),
-				mid.x * road.world.at(0, 1) + mid.y * road.world.at(1, 1) + mid.z * road.world.at(2, 1) + road.world.at(3, 1),
-				mid.x * road.world.at(0, 2) + mid.y * road.world.at(1, 2) + mid.z * road.world.at(2, 2) + road.world.at(3, 2)};
-			const Vec3f half = (hi - lo) * 0.5f;
-			road.radius = std::sqrt(dot(half, half));
-		}
+		// The header's sphere is already world space, as the bounds are.
+		road.center = {file->position[0], file->position[1], file->position[2]};
+		road.radius = file->radius;
 		m_roads.push_back(road);
 	}
 	std::stable_sort(m_roads.begin(), m_roads.end(), [](const Road& a, const Road& b) { return a.priority < b.priority; });

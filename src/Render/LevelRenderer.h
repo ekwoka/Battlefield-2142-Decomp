@@ -506,7 +506,7 @@ private:
 		uint32_t priority = 0;
 		float boundsMin[2] {}; // world x, z
 		float boundsMax[2] {};
-		// The bounds' centre (world) and half diagonal: the road renderer's
+		// The compiled file's header sphere (world): the road renderer's
 		// distance cull (0x100ba1d0, the road's +0x50 / +0x5c).
 		Vec3f center;
 		float radius = 0;
