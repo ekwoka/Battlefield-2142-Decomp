@@ -3216,8 +3216,58 @@ TEST(Chat_HandOutByChannel)
 	CHECK(w.playerInfo(dead, info) && !info.alive);
 	CHECK(w.hearsChat(0, me, dead));             // the living reach the dead
 	CHECK(!w.hearsChat(0, dead, me) && !w.hearsChat(0, dead, enemy));
+	// TCPlayer (case 0xe): the value's player, not the sender, the dead's
+	// only to the dead.
+	CHECK(w.hearsChat(14, me, mate, mate) && !w.hearsChat(14, me, me, me) && !w.hearsChat(14, me, enemy, mate));
+	CHECK(!w.hearsRadio(14, dead, me, me) && w.hearsRadio(14, me, dead, dead));
 	// The server's own messages reach everyone.
 	CHECK(w.hearsChat(12, -1, dead) && w.hearsChat(13, -1, mate, 2) && !w.hearsChat(13, -1, enemy, 2));
+}
+
+// The dead's team chat (0x004a93b0's down rule, then 0x004a6f70's case 1,
+// which needs both players' controlled objects, slot 0x4c 0x00593df0):
+// the handle keeps the body, so a dead player's team line reaches his dead
+// teammates while both bodies lie, and no one once his is gone. A man-down
+// sender counts alive on the revive channels (0xf / 0x10); the bots hear
+// only a living or man-down sender (0x004a8a00).
+TEST(Chat_DeadTeamChatByTheBodies)
+{
+	RadioField f;
+	const int me = f.soldier("Me", 2, 0, 0);
+	const int mate = f.soldier("Mate", 2, 5, 0);
+	const int living = f.soldier("Living", 2, 8, 0);
+	const int bot = f.soldier("Bot", 2, 6, 0, true);
+	game::GameWorld& w = *f.world;
+	game::GameWorld::PlayerInfo info;
+	for (const int id : {me, mate}) {
+		w.playerInfo(id, info);
+		w.setHitPoints(info.soldier, 0);
+	}
+	w.tick(1.0f / 30);
+	CHECK(w.playerInfo(me, info) && !info.alive && info.heldVehicle != 0);
+	CHECK(w.hearsChat(1, me, mate) && !w.hearsChat(1, me, living) && !w.hearsChat(1, me, bot));
+	// Man down on TCAutoLocalRevive (15 m): heard by the living; the bots
+	// too, the man-down sender counting alive.
+	w.radioMessage(me, 16, "medic");
+	const auto heard = w.takeRadioHeard();
+	const bool mateHeard = std::any_of(heard.begin(), heard.end(), [&](const auto& h) { return h.receiver == mate; });
+	const bool livingHeard = std::any_of(heard.begin(), heard.end(), [&](const auto& h) { return h.receiver == living; });
+	const bool botHeard = std::any_of(heard.begin(), heard.end(), [&](const auto& h) { return h.receiver == bot; });
+	CHECK(info.manDown && livingHeard && botHeard && mateHeard);
+	// A man-down sender's team radio: to the down, not to the living
+	// players; the bots' hand-out takes man down as alive.
+	w.radioMessage(me, 1, "roger_that");
+	const auto team = w.takeRadioHeard();
+	CHECK(team.size() == 2 && team[0].receiver == mate && team[1].receiver == bot);
+	// His body gone (the corpse removed), his team line reaches no one.
+	for (int i = 0; i < 30 * 60 && w.playerInfo(me, info) && info.heldVehicle; ++i) {
+		w.tick(1.0f / 30);
+	}
+	CHECK(w.playerInfo(me, info) && info.heldVehicle == 0 && !info.alive && !info.manDown);
+	CHECK(!w.hearsChat(1, me, mate));
+	w.radioMessage(me, 0, "roger_that"); // dead: the bots don't hear him
+	const auto global = w.takeRadioHeard();
+	CHECK(std::none_of(global.begin(), global.end(), [&](const auto& h) { return h.receiver == bot || h.receiver == living; }));
 }
 
 // The bots hear through the world's hand-out and answer through their

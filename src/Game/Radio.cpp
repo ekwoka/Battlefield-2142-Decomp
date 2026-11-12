@@ -128,12 +128,28 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 	if (!receiver) {
 		return false;
 	}
-	// The controlled objects' positions (slot 0x4c: the vehicle aboard).
+	// The controlled objects (slot 0x4c, 0x00593df0: the player's handle
+	// +0x80, the vehicle aboard, else the soldier, kept through man down
+	// and as a corpse until the body is removed; PlayerInfo::heldVehicle)
+	// and their positions (slot 0x60).
 	PlayerInfo from, to;
-	const bool haveFrom = sender && playerInfo(sender->id, from) && from.alive;
-	const bool haveTo = playerInfo(receiver->id, to) && to.alive;
-	const auto distance2 = [&] { return physics::lengthSquared(to.position - from.position); };
+	const world::Object* fromObject = nullptr;
+	const world::Object* toObject = nullptr;
+	if (sender && playerInfo(sender->id, from) && from.heldVehicle) {
+		fromObject = m_objects.find(from.heldVehicle);
+	}
+	if (playerInfo(receiver->id, to) && to.heldVehicle) {
+		toObject = m_objects.find(to.heldVehicle);
+	}
+	const bool haveFrom = fromObject != nullptr;
+	const bool haveTo = toObject != nullptr;
+	const auto distance2 = [&] {
+		const auto& a = fromObject->position();
+		const auto& b = toObject->position();
+		return physics::lengthSquared(physics::Vec3 {b.x - a.x, b.y - a.y, b.z - a.z});
+	};
 	const auto sameTeam = [&] { return sender && sender->team == receiver->team; };
+	const auto downApart = [&] { return sender && !sender->alive && receiver->alive; };
 	switch (channel) {
 	case 0:
 		return sender != receiver;
@@ -163,10 +179,13 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 			return true;
 		}
 		return sameTeam();
+	// 4, 5 and 0xe first take the chat's down rule again (a dead or
+	// man-down sender, slots 0x74 / 0x114, only to the dead and the downed;
+	// the rewrite's man down isn't alive).
 	case 4:
-		return sender != receiver && receiver->squadLeader && receiver->squad == value && sameTeam();
+		return sender != receiver && !downApart() && receiver->squadLeader && receiver->squad == value && sameTeam();
 	case 5:
-		return sender != receiver && receiver->squad == value && sameTeam();
+		return sender != receiver && !downApart() && receiver->squad == value && sameTeam();
 	case 6:
 	case 15:
 		if (!sender || sender == receiver || !haveFrom || !haveTo) {
@@ -205,11 +224,10 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 		if (sender->squad != 0 && sender->squad == receiver->squad) {
 			return true;
 		}
-		if (!to.vehicle) {
-			return false; // on foot: the controlled object is the soldier itself
+		if (to.heldVehicle == to.heldSoldier) {
+			return false; // the controlled object is the default vehicle (slot 0xb4): on foot
 		}
-		const world::Object* vehicle = m_objects.find(to.vehicle);
-		const world::ObjectTemplate* t = vehicle ? vehicle->objectTemplate() : nullptr;
+		const world::ObjectTemplate* t = toObject->objectTemplate();
 		const int category = t ? vehicleCategory(*t) : -1;
 		if (category == 0) {
 			return d2 <= kFar; // +0x114
@@ -217,13 +235,14 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 		return (category == 2 || category == 3) && d2 <= kFar; // +0x110
 	}
 	case 11:
-		return sender && sender != receiver && haveFrom && haveTo && from.vehicle && from.vehicle == to.vehicle;
+		// The two controlled objects' roots (0x006f1d70) the same.
+		return sender && sender != receiver && haveFrom && haveTo && from.heldVehicle == to.heldVehicle;
 	case 12:
 		return true;
 	case 13:
 		return receiver->team == value;
 	case 14:
-		return receiver->id == value;
+		return sender != receiver && !downApart() && receiver->id == value;
 	default:
 		return false;
 	}
@@ -236,7 +255,11 @@ bool GameWorld::hearsChat(int channel, int senderId, int receiverId, int value) 
 		if (!playerInfo(senderId, from) || !playerInfo(receiverId, to)) {
 			return false;
 		}
-		const bool senderDown = !from.alive || (from.manDown && channel != 15 && channel != 16);
+		// Down: not alive (player slot 0x74, +0xd5) or man down (slot
+		// 0x114, +0xe0), a man-down sender counting alive on 0xf / 0x10.
+		// The original's man down is alive with +0xe0 set; the rewrite's
+		// man down is not alive, so it is told apart here.
+		const bool senderDown = from.manDown ? channel != 15 && channel != 16 : !from.alive;
 		const bool receiverDown = !to.alive || to.manDown;
 		if (senderDown && senderDown != receiverDown) {
 			return false;
@@ -245,13 +268,23 @@ bool GameWorld::hearsChat(int channel, int senderId, int receiverId, int value) 
 	return hearsRadio(channel, senderId, receiverId, value);
 }
 
+// The server's hand-out (0x004ab600): to each client's player and its own
+// (0x004a93b0, 0x004a7800) with the chat's rule, hearsChat; to the bots
+// (0x004a8a00, the players with the bot bit, slot 0x68 +0xd4) only from a
+// living sender (slot 0x74; man down counts alive) to a living bot, then
+// 0x004a6f70.
 void GameWorld::radioMessage(int sender, int channel, const std::string& voice, int value)
 {
 	if (channel < 0 || voice.empty()) {
 		return;
 	}
+	const Player* from = sender >= 0 ? findPlayer(sender) : nullptr;
+	const bool senderLiving = from && (from->alive || from->manDown);
 	for (const auto& player : m_players) {
-		if (hearsRadio(channel, sender, player->id, value)) {
+		const bool hears = player->ai
+			? senderLiving && (player->alive || player->manDown) && hearsRadio(channel, sender, player->id, value)
+			: hearsChat(channel, sender, player->id, value);
+		if (hears) {
 			m_radioHeard.push_back({sender, player->id, channel, voice});
 		}
 	}

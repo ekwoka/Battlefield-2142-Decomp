@@ -13741,8 +13741,8 @@ const world::ObjectTemplate* findInTree(const world::ObjectTemplateManager& temp
 // for the deployed eu_sentrygun, its yaw EU_Sentrygun_rotation's
 // setMaxSpeed 1500 x maxTrackingInput 1 (neverAttackDeployer and
 // onlyAttackNetworkBattlefieldObjects unset).
-constexpr GameWorld::AutoControl kUavDrone {100, 8, 90, 0.13f, 0.25f, 0, 250, true, true};
-constexpr GameWorld::AutoControl kSentryGun {63, 5, 30, 0.03f, 0.05f, 1, 1500, false, false};
+constexpr GameWorld::AutoControl kUavDrone {100, 8, 90, 0.13f, 0.25f, 0, 250, true, true, true, 0};
+constexpr GameWorld::AutoControl kSentryGun {63, 5, 30, 0.03f, 0.05f, 1, 1500, false, false, true, 0.25f};
 constexpr float kSquadKnowledgeTime = 3.0f;         // 0x100bea30
 
 } // namespace
@@ -14260,17 +14260,72 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		fireMessage(drone, false, false);
 		return;
 	}
-	bool onTarget = false;
+	// Flipping out (the bot's slot 0x280, AIDLL 0x10097d60): an auto
+	// controller whose object's health (its armour's slot 0x10, the share
+	// of maxHitPoints) is under flipOutAtHealth (template +0x30; the
+	// sentry gun's 0.25) takes no target (the targets' loop 0x10075fb0
+	// scores none) and the scan statement (0x100f9cf0) holds PIFire and
+	// PIAltFire at 1 and the yaw bundle's input at -1: the gun spins at
+	// its full speed and fires wherever it points.
+	bool flipping = false;
+	if (control.flipOutAtHealth > 0 && droneTemplate) {
+		const float most = number(*droneTemplate, "armor.maxHitPoints", 0);
+		const auto hp = m_hitPoints.find(drone.object);
+		flipping = most > 0 && hp != m_hitPoints.end() && hp->second / most < control.flipOutAtHealth;
+	}
+	if (flipping) {
+		drone.target = -1;
+		best = nullptr;
+		drone.gunYaw = std::remainder(drone.gunYaw - control.yawSpeed * 3.14159265f / 180.0f * seconds, 6.2831853f);
+		aim = drone.position + physics::Vec3 {std::sin(drone.gunYaw), 0, std::cos(drone.gunYaw)} * 50.0f;
+	}
+	bool onTarget = flipping;
 	if (best) {
 		const float want = std::atan2(aim.x - drone.position.x, aim.z - drone.position.z);
 		const float error = std::remainder(want - drone.gunYaw, 6.2831853f);
 		const float most = control.yawSpeed * 3.14159265f / 180.0f * seconds;
 		drone.gunYaw += std::clamp(error, -most, most);
 		onTarget = std::fabs(error) <= most + 2 * 3.14159265f / 180.0f;
-	} else {
+	} else if (!flipping) {
 		drone.gunYaw = std::remainder(drone.gunYaw + control.scanningSpeed * 30 * seconds, 6.2831853f);
 	}
-	const bool want = onTarget && m_time >= drone.fireFrom;
+	// checkLineOfFire (template +0x28): the fire plan's condition 0x100db150
+	// tests an auto controller's line only with it set (both shipped ones
+	// do), through 0x100dad90: no teammate's soldier on foot (the AI
+	// players of the bot's team whose controlled object is a soldier,
+	// neither the bot's nor the target's) within 0.5 + 0.02 t of the line
+	// from the gun to the target's position, 0 <= t <= its length; a
+	// cloaked one (the adaptor's slot 0x90, 0x008a5230: player +0x3d4 at
+	// most 0.4) only within discoverCloakedEnemiesDistance of the gun.
+	// The second's hold for a teammate within 5 m is a soldier bot's only.
+	bool blocked = false;
+	if (best && control.checkLineOfFire) {
+		const world::Object* targetBody = m_objects.find(best->object);
+		const physics::Vec3 to = targetBody ? physics::Vec3 {targetBody->position().x, targetBody->position().y, targetBody->position().z} : aim;
+		const physics::Vec3 line = to - drone.position;
+		const float length = std::sqrt(physics::lengthSquared(line));
+		const physics::Vec3 along = length > 0.0001f ? line * (1 / length) : line;
+		for (const auto& mate : m_players) {
+			if (!mate->alive || mate->vehicle || mate->team != drone.team || mate.get() == best) {
+				continue;
+			}
+			const world::Object* body = m_objects.find(mate->object);
+			if (!body) {
+				continue;
+			}
+			const physics::Vec3 rel = physics::Vec3 {body->position().x, body->position().y, body->position().z} - drone.position;
+			if (mate->cloaked && physics::lengthSquared(rel) > control.discoverCloaked * control.discoverCloaked) {
+				continue;
+			}
+			const float t = physics::dot(rel, along);
+			const float radius = 0.5f + 0.02f * t;
+			if (t >= 0 && t <= length && physics::lengthSquared(rel - along * t) < radius * radius) {
+				blocked = true;
+				break;
+			}
+		}
+	}
+	const bool want = flipping || (onTarget && !blocked && m_time >= drone.fireFrom);
 	drone.gunDeviation.update(want); // the auto controller holds the trigger while on target
 	const bool trigger = autoTrigger(drone, want);
 	const bool fired = drone.weapon->tick(seconds, trigger);

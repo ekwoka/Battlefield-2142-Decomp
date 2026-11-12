@@ -665,7 +665,8 @@ void updateScoreboard(hud::HudManager& hud, const host::HudWorld& world, const w
 			totalTeamwork += n.teamwork;
 			// The row's colours (0x007bb540; see menu::scoreboardStyle).
 			dice::hfe::menu::ScoreboardRow look;
-			look.alive = p.alive;
+			look.alive = p.alive; // the rewrite's man down isn't alive (the HUD's 0x410)
+			look.hidden = p.spectator;
 			look.friendlyList = side == 0;
 			look.local = p.id == world.localPlayer();
 			look.sameSquad = me.squad > 0 && p.squad == me.squad;

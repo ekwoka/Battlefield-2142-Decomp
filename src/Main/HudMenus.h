@@ -476,7 +476,11 @@ struct ScoreboardRow {
 	bool sameSquad = false;    // in the local player's squad (squad > 0)
 	bool local = false;        // the local player
 	bool localCommands = false; // the local player is the commander
-	bool hidden = false;       // the HUD manager's 0x410 or the player's +0x404
+	// The HUD manager's slot 0x410 (0x00751780: the soldier's armour, +0x48
+	// slot 0x60 0x00651c20, in state 1, hit points at most 0 and not past
+	// the wreck's: man down) or the player's +0x404 (slot 0x3bc: a
+	// spectator).
+	bool hidden = false;
 };
 struct ScoreboardStyle {
 	std::array<float, 4> text;

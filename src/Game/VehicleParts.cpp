@@ -204,6 +204,11 @@ Vec3 Vehicle::partPoint(const physics::RigidBody& body, int part) const
 // root node's slot 0x68) in the hull's frame, row i of its matrix: out =
 // clamp(((R_i . w) / seconds x b + R_i . w) x a, -1, 1), merged the same
 // way. Each reads the inputs as they came, before any is replaced.
+// `seconds` is the tick: the filter's fourth argument (pushed at 0x5cac44)
+// is the player's slot 0x44 (0x00593fe0) third, which the client's frame
+// (0x00590e10 -> 0x00590c00) passes as the step it gives the physics world
+// (DAT_00a85220 slot 0x28), and the server's player step (0x004ad5c0 ->
+// 0x004ac660) as its own tick's.
 void Vehicle::regulateInput(const physics::RigidBody& body, float gravity, float seconds)
 {
 	m_regulated = m_input;

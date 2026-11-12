@@ -638,7 +638,9 @@ public:
 	// (0x004a7800): a line from a dead or man-down sender (man down counts
 	// alive on the revive channels 0xf / 0x10) only to the dead and the
 	// downed, except the server's own channels 0xc / 0xd, then
-	// hearsRadio's rule (0x004a6f70: never back to the sender).
+	// hearsRadio's rule (0x004a6f70: never back to the sender; the
+	// distances between the players' held objects, slot 0x4c, the body
+	// while it lies).
 	bool hearsChat(int channel, int sender, int receiver, int value = 0) const;
 	// A radio message said: each hearer gets it (the server's hand-out).
 	void radioMessage(int sender, int channel, const std::string& voice, int value = 0);
@@ -3651,6 +3653,8 @@ public:
 		float yawSpeed = 0;           // the yaw bundle's maxSpeed x maxTrackingInput (degrees/s)
 		bool onlyAttackNetworkBattlefieldObjects = false; // +0x39
 		bool neverAttackDeployer = false;                 // +0x20
+		bool checkLineOfFire = false;                     // +0x28
+		float flipOutAtHealth = 0;                        // +0x30
 	};
 
 private:

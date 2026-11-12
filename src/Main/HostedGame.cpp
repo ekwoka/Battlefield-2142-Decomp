@@ -1113,12 +1113,15 @@ void HostedGame::handOutChat(const net::ChatMessage& line)
 {
 	const std::vector<net::GameEvent> events = net::stringBlockEvents(net::encodeChat(line));
 	const auto hears = [&](int receiver) {
-		if (line.channel == net::kChatPlayer) {
+		if (line.channel == net::kChatPlayer && m_round->localPlayer() < 0) {
 			// A whisper (byte 9 the player it is for, 0xff from the retail
-			// HUD, 0x007d9e20): only to that player (the rewrite's routing).
-			return receiver == line.b9 && receiver != line.player;
+			// HUD, 0x007d9e20) on a dedicated server (GSDedicated,
+			// DAT_00a1fc01): 0x004ab6b0 hands it to each client whose
+			// player's id (slot 0x58) is byte 9 (0x004a92b0), no other test.
+			// Otherwise 0x004a93b0 / 0x004a7800 with 0x004a6f70's case 0xe.
+			return receiver == line.b9;
 		}
-		return m_round->hearsChat(static_cast<int>(line.channel), line.player, receiver);
+		return m_round->hearsChat(static_cast<int>(line.channel), line.player, receiver, line.channel == net::kChatPlayer ? line.b9 : 0);
 	};
 	for (const auto& [to, other] : m_clients) {
 		if (other.stage == Client::Stage::Playing && other.player >= 0 && hears(other.player)) {

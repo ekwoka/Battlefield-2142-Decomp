@@ -523,7 +523,12 @@ TEST(Commander_SquadRequests)
 	}
 	game::GameWorld& world = *field.world;
 	world.setCommanderEnabled(true);
+	// The commander's lines to the leaders are his radio on TCPlayer
+	// (0x007c7810: the client's slot 0x50), handed out by the server's
+	// rule (0x004a93b0, 0x004a6f70 case 0xe): a dead one's reach no living
+	// leader, so he is on the field.
 	const int boss = world.addPlayer("Boss", 2, false);
+	world.spawnSoldier(boss);
 	const int leader = field.soldier(2, 10, 10);
 	const int other = field.soldier(2, 30, 10);
 	world.joinSquad(leader, 1);

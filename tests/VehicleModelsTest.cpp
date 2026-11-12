@@ -3032,3 +3032,139 @@ TEST(Vehicles_DeployedSentryGunFires)
 	const auto after = g.world->objectAnimation(sentry);
 	CHECK(std::find(after.begin(), after.end(), "stand") != after.end());
 }
+
+// checkLineOfFire (AutoControllers.ai: 1 for SentryGun and UAVDrone): the
+// fire plan's condition (AIDLL 0x100db150 -> 0x100dad90) holds the
+// trigger while a teammate on foot stands within 0.5 + 0.02 t of the line
+// from the gun to the target; he steps aside and the gun fires.
+TEST(Vehicles_SentryGunHoldsFireOverATeammate)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("Unl_Deployer_Sentrygun") || !g.templates.find("eu_sentrygun")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Deployer_Sentrygun", {}, {}}};
+	world::ObjectTemplate* point = g.templates.create("ControlPoint", "garage_cp_pac");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "1";
+	point->settings()["unableToChangeTeam"] = "1";
+	g.objects.create(point, {200, 0, 0});
+	g.objects.create(g.templates.find("garage_sp"), {0, 0, 25}, {180, 0, 0})->setControlPointId(1);
+	g.start("eu_fav", {30, 2, 30});
+	const int enemy = g.world->addPlayer("Pac", 1, true);
+	const int mate = g.world->addPlayer("Mate", 2, true);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	const int owner = g.world->localPlayer();
+	g.run(1);
+	CHECK(g.world->spawnSoldier(enemy) && g.world->spawnSoldier(mate));
+	game::GameWorld::PlayerInfo info, mateInfo;
+	CHECK(g.world->playerInfo(enemy, info) && info.alive && g.world->playerInfo(mate, mateInfo));
+	g.world->setSoldierPosition(info.soldier, {0, 0, -400});
+	g.world->setSoldierPosition(mateInfo.soldier, {0, 0, -420});
+	g.run(1);
+	game::SoldierInput take;
+	take.selectItem = 5;
+	g.drive(take, 1.5f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.drive({}, 2.5f);
+	const world::Object* sentry = nullptr;
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "eu_sentrygun") {
+			sentry = object.get();
+		}
+	}
+	CHECK(sentry != nullptr);
+	if (!sentry) {
+		return;
+	}
+	const auto at = sentry->position();
+	// The enemy 20 m off along +z, the teammate halfway, on the line.
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	g.world->setSoldierPosition(info.soldier, {at.x, at.y, at.z + 20});
+	g.world->setSoldierPosition(mateInfo.soldier, {at.x, at.y, at.z + 10});
+	game::GameWorld::PlayerInfo me;
+	for (int i = 0; i < 300; ++i) {
+		g.world->setSoldierPosition(mateInfo.soldier, {at.x, at.y, at.z + 10});
+		g.run(1 / 30.0f);
+	}
+	CHECK(g.world->playerInfo(owner, me) && me.kills == 0);
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	CHECK(g.world->playerInfo(mate, mateInfo) && mateInfo.alive);
+	g.world->setSoldierPosition(mateInfo.soldier, {at.x + 8, at.y, at.z + 10});
+	bool killed = false;
+	for (int i = 0; i < 300 && !killed; ++i) {
+		g.run(1 / 30.0f);
+		killed = g.world->playerInfo(owner, me) && me.kills == 1;
+	}
+	CHECK(killed);
+}
+
+// flipOutAtHealth (AutoControllers.ai: the sentry gun's 0.25, of its 120
+// hit points): under it the auto controller takes no target and holds
+// PIFire with the yaw at its full speed (AIDLL 0x10097d60, 0x100f9cf0's
+// flipping branch): with no enemy near, the gun spins and fires.
+TEST(Vehicles_SentryGunFlipsOut)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("Unl_Deployer_Sentrygun") || !g.templates.find("eu_sentrygun")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Deployer_Sentrygun", {}, {}}};
+	world::ObjectTemplate* point = g.templates.create("ControlPoint", "garage_cp_pac");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "1";
+	point->settings()["unableToChangeTeam"] = "1";
+	g.objects.create(point, {200, 0, 0});
+	g.objects.create(g.templates.find("garage_sp"), {0, 0, 25}, {180, 0, 0})->setControlPointId(1);
+	Animations a(g);
+	g.start("eu_fav", {30, 2, 30});
+	a.attach(g);
+	const int enemy = g.world->addPlayer("Pac", 1, true);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	g.run(1);
+	CHECK(g.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(enemy, info));
+	g.world->setSoldierPosition(info.soldier, {0, 0, -400});
+	g.run(1);
+	game::SoldierInput take;
+	take.selectItem = 5;
+	g.drive(take, 1.5f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.drive({}, 2.5f);
+	uint32_t sentry = 0;
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "eu_sentrygun") {
+			sentry = object->id();
+		}
+	}
+	CHECK(sentry != 0);
+	const auto firing = [&] {
+		const auto playing = g.world->objectAnimation(sentry);
+		return std::find(playing.begin(), playing.end(), "fire") != playing.end();
+	};
+	g.run(1);
+	CHECK(!firing()); // healthy: nothing to shoot at
+	g.world->setHitPoints(sentry, 50); // over 30: still calm
+	g.run(0.5f);
+	CHECK(!firing());
+	g.world->setHitPoints(sentry, 29);
+	bool flipped = false;
+	for (int i = 0; i < 30 && !flipped; ++i) {
+		g.run(1 / 30.0f);
+		flipped = firing();
+	}
+	CHECK(flipped);
+}

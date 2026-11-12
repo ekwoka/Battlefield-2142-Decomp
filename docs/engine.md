@@ -753,7 +753,11 @@ other three, regulatePitch (`+0x380`, input `+0x36c`), regulateYaw
 `0x004fd497`, `0x004fd2ae`, `0x004fd60e`, `0x004fd6e6`..`0x004fd932`),
 take the root node's angular velocity w (slot `0x68`) about the hull's own
 x, y, z (the rows of its matrix): out = clamp(((Rᵢ·w) / dt × b + Rᵢ·w) a,
-−1, 1), merged the same way; every regulator reads the inputs as they
+−1, 1), merged the same way; dt is the tick (the filter's fourth
+argument, pushed at `0x5cac44`, is the third of the player's slot `0x44`,
+`0x00593fe0`, which the client's frame `0x00590e10` → `0x00590c00` passes
+as the step it gives the physics world, slot `0x28` of `DAT_00a85220`,
+and the server's player step `0x004ad5c0` → `0x004ac660` as its tick's); every regulator reads the inputs as they
 came. No official vehicle sets them; the BF2 conversions' boats, jeeps
 and the musclecar in the install's Levels do (`Vehicle::regulateInput`,
 `Vehicle_RotationalRegulators`).
@@ -6425,9 +6429,13 @@ constructor `0x005f8870` and written nowhere else).
   the own list (slot `0x158`). `+0x48` is -1 from the constructor
   (`0x0075c6b0`) and nothing in BF2142.exe sets it again, so retail's
   whisper goes out for player 0xff. The rewrite sends it so
-  (`GameClient::whisper`), and the host passes a channel-14 line only to
-  byte 9's player (the rewrite's routing: the server's dispatch for it
-  isn't traced), so it reaches no one.
+  (`GameClient::whisper`). The server's chat hand-out (`0x004ab6b0`)
+  passes a channel-14 line only to byte 9's player: on a dedicated server
+  (GSDedicated, `DAT_00a1fc01`) to each client whose player's id (slot
+  `0x58`) is byte 9 (`0x004a92b0`, after the sender's spam check), else
+  through `0x004a93b0` / `0x004a7800` and `0x004a6f70`'s case 0xe (the
+  same id, never back to the sender, the dead's only to the dead). So it
+  reaches no one (`HostedGame::handOutChat`).
 - **The takeable radio** (see [gameplay sound](#gameplay-sound)): the rewrite's host sends
   the control points' allowCaptureByTeam (masks 8 and 0x10) and the
   client hands a changed one (or the first) to its round
@@ -7425,8 +7433,9 @@ Its search (`0x00467d40` → `0x00715900` → `0x007249c0`) sends `FE FD 02 00
 port from 29900 to 29950 (`0x74cc`-`0x74fe`), and every address that
 answers within 2 s (`0x00724440`) is a server, which the browser's query
 engine then asks for its keys. `src/Net/ServerQuery` has both sides; the
-rewrite asks the standard keys among those `0x00467d40` lists (its others
-are the game's own, from 0x35 on, whose names aren't known). `bf2142 --lan
+rewrite asks the 21 keys `0x00467d40` lists, the standard ones and the
+game's own (0x34 `bf2142_ranked` .. 0x52 `bf2142_custom_map_url`, named
+by `0x005785b0`), with the server info page's at once. `bf2142 --lan
 <address>` sends the search elsewhere (127.0.0.1 finds the servers on this
 machine). The menu has no direct-IP join: `Multiplay.get/setConnectToIpHost`
 and `...Port` exist (the profile's `GSConnectToIpHost`/`Port`, `0x0046c030`
@@ -8237,8 +8246,11 @@ name>/scoreBoard_Flag.tga`. The lists are BF2142.exe's
   background (0.392, 0.392, 0.392, 0.35) and every odd row (0.651, 0.651,
   0.651, 0.8) (`0x007dd5d0`: the row's cells +0x6c/+0x70, filled between
   the side borders by `0x007de7d0` except on a selected row). The HUD
-  manager's slot `0x410` and the player's `+0x404` (slot `0x3bc`, set
-  through `0x3b8`) also make a row black; what they mean isn't traced.
+  manager's slot `0x410` (`0x00751780`: the player's soldier's armour,
+  `+0x48` slot `0x60` `0x00651c20`, in state 1, its hit points at most 0
+  and not yet past the wreck's: man down, which the rewrite's not-alive
+  covers) and the player's `+0x404` (slot `0x3bc`, set through `0x3b8`:
+  setSpectator) also make a row black.
   `menu::scoreboardStyle` (`src/Main/HudMenus`).
 - Rows are sorted by the scripts' score. The "Squads" tab
   (`scoreboard.setToggleShow 1`, ToggleSquads) groups them
@@ -10210,10 +10222,39 @@ The drones' guns are run by auto controllers (`AI/AutoControllers.ai`):
   450 m/s), 0.41 m over the object (its child positions). Kills count for
   the deployer; EMP above level 1 silences it as the drone
   (`GameWorld::addSentryGun`, `stepSentryGuns`;
-  `Vehicles_DeployedSentryGunFires`). Not rewritten for either:
-  `useSiren` (the siren's press before the fire plan, `0x100d8090`),
-  `reportEnemiesToTeam` (`0x100d7fa0`), `sendFireWarning`,
-  `checkLineOfFire`, `flipOutAtHealth` and `scanningInputScale`.
+  `Vehicles_DeployedSentryGunFires`).
+  - **checkLineOfFire** (template `+0x28`, 1 on both): the fire plan's
+    condition (`0x100db150`) tests an auto controller's line only with
+    it set, through `0x100dad90`: no teammate's soldier on foot (the AI
+    players of its team whose controlled object is a soldier, not the
+    target) within 0.5 + 0.02 t of the line from the gun to the target's
+    position, 0 ≤ t ≤ its length (`*0x1012a5e4` 0.5, `*0x1012a5e8` 1.5);
+    a cloaked one (the AI player adaptor's slot `0x90`, `0x008a5230`:
+    player `+0x3d4` at most 0.4) only within
+    discoverCloakedEnemiesDistance of the gun. The second's hold after
+    a teammate crosses within 5 m (`0x1008f1e0`, slot `0x248`) is set
+    only for a soldier bot. The rewrite's sentries fired through their
+    teammates (`Vehicles_SentryGunHoldsFireOverATeammate`).
+  - **flipOutAtHealth** (`+0x30`; the sentry gun's 0.25 of its 120 hit
+    points, the drone's 0): below
+    it (the bot's slot `0x280`, `0x10097d60`: the object's armour slot
+    `0x10`, the share of maxHitPoints) the targets' loop (`0x10075fb0`)
+    takes no target and the scan statement (`0x100f9cf0`) holds PIFire
+    and PIAltFire at 1 and the yaw bundle's input at −1: the gun spins at
+    its full speed and fires where it points
+    (`Vehicles_SentryGunFlipsOut`).
+  - **scanningInputScale** (`+0x34`; the sentry gun's 0.12): the aim
+    statement (`0x100e5820`) limits its input to it while scanning
+    (maxTrackingInput, `+0x24`, while tracking). The scan's point starts
+    at the gun's heading (`0x100f9a90`) and moves at scanningSpeed × 30
+    rad/s (0.9), under the 0.12 × 1500°/s (3.1 rad/s) the scaled input
+    allows, so the gun follows it as the rewrite turns it.
+  Not rewritten for either: `useSiren` (PIAltFire held for the first
+  second of the fire plan, `0x100d8090` / `0x100d80f0`: the horn's
+  sound), `reportEnemiesToTeam` (`0x100d7fa0` / `0x100d7ff0`: every 5 s
+  of the plan, IAIGame slot `0x68` with the target, the team's spot and
+  "spotted"; the rewrite's drones and sentries have no AI player to say
+  it) and `sendFireWarning`.
 
 Under EMP above level 1 the sentry drone's auto controller (UAVDrone) has
 every input cut by the PlayerControlObject's filter (`0x005ca2e0`), the
@@ -10735,7 +10776,24 @@ squad), Enter sends, Esc closes. Joined, with a host and three clients:
   sender's (man down counting alive on 0xf / 0x10) only to the dead and
   the downed, except the server's 0xc / 0xd, then the target channel's
   rule (`0x004a6f70`, `GameWorld::hearsChat`: team chat to the team,
-  squad chat to the squad, never back to the sender). The sender's HUD
+  squad chat to the squad, never back to the sender). The rule's
+  distances and most of its channels (team, squad, the local ones, the
+  vehicle's) need both players' controlled objects (player slot `0x4c`,
+  `0x00593df0`: the handle that keeps the body through man down and as a
+  corpse until it is removed, `PlayerInfo::heldVehicle`), measured between
+  them: a dead player's team line reaches his dead teammates while both
+  bodies lie, and no one once his is gone. The rewrite had taken the
+  living soldiers only, so the dead's team chat reached no one, and a
+  man-down sender (alive with `+0xe0` in the original, which the rewrite
+  keeps apart) counted as down on the revive channels too. The radio
+  goes the same way (`0x004ab600`: `0x004a93b0`, `0x004a7800`), and to
+  the bots (`0x004a8a00`, the players with the bot bit `+0xd4`) only from
+  a living or man-down sender to a living bot; the rewrite had handed a
+  dead sender's radio to everyone on the channel
+  (`Chat_DeadTeamChatByTheBodies`). TCSquadLeader, TCSquadId and
+  TCPlayer (cases 4, 5, 0xe) take the down rule again themselves, so a
+  commander who isn't alive answers no living leader (his lines are his
+  radio on TCPlayer, `0x007c7810` → the client's slot `0x50`). The sender's HUD
   shows its own line as it sends it (`0x007d9b50`: the line to the game,
   then the HUD's slot 0x158). The rewrite sent every line to every
   client, the sender included, and a listen server's own player neither
