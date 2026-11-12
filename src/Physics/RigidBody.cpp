@@ -40,6 +40,20 @@ Vec3 cross(const Vec3& a, const Vec3& b)
 }
 float lengthSquared(const Vec3& v) { return dot(v, v); }
 
+Vec3 combineContacts(const Vec3& into, const Vec3& value)
+{
+	const auto axis = [](float a, float b) {
+		if (a > 0 && b > 0) {
+			return std::max(a, b);
+		}
+		if (a < 0 && b < 0) {
+			return std::min(a, b);
+		}
+		return a + b;
+	};
+	return {axis(into.x, value.x), axis(into.y, value.y), axis(into.z, value.z)};
+}
+
 Vec3 Mat3::transform(const Vec3& v) const { return rows[0] * v.x + rows[1] * v.y + rows[2] * v.z; }
 
 Mat3 Mat3::operator*(const Mat3& o) const
@@ -223,10 +237,7 @@ void ContactResponse::addContact(const Vec3& offset, const Vec3& pointVelocity, 
 {
 	m_contacts.push_back({offset, normal, -pointVelocity, -dot(pointVelocity, normal), material.elasticity,
 		material.friction});
-	// The push out keeps the largest magnitude per axis (0x006b6bd0).
-	const Vec3 push = normal * -depth;
-	const auto larger = [](float a, float b) { return std::fabs(b) > std::fabs(a) ? b : a; };
-	m_pushOut = {larger(m_pushOut.x, push.x), larger(m_pushOut.y, push.y), larger(m_pushOut.z, push.z)};
+	m_pushOut = combineContacts(m_pushOut, normal * -depth);
 }
 
 void ContactResponse::solve(RigidBody& body)

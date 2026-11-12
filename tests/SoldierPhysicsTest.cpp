@@ -934,3 +934,64 @@ TEST(SoldierControl_ViewRelativeDiagonals)
 	}
 	CHECK(body.velocity.x > 3 && body.velocity.z < -1.8f);
 }
+
+// The ground correction while far from the wanted velocity (0x006c23a2):
+// sliding, held to grip x 1.5712 a tick, until it fits and grips (then up
+// to grip x 2.3568). Inverted, a soldier pushing into a wall drove at the
+// grip limit every tick and shook against it.
+TEST(SoldierPhysics_FarFromTheWantedVelocitySlidesAtTheLowLimit)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	for (int i = 0; i < 30; ++i) {
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(body.onGround());
+	float largest = 0;
+	for (int i = 0; i < 6; ++i) {
+		const float before = body.velocity.z;
+		body.setDesiredVelocity({0, 0, 20});
+		body.step(1 / 30.0f, slope(0));
+		largest = std::max(largest, body.velocity.z - before);
+	}
+	std::printf("  largest change a tick %.3f m/s\n", largest);
+	CHECK(largest > 1.4f && largest < 1.6f);
+}
+
+// Object and terrain contacts are solved after integrating the node. Each
+// published pose must clear the wall and the floor even with forward held.
+TEST(SoldierPhysics_ContactStepPublishesTheResolvedPose)
+{
+	physics::CollisionWorld world;
+	world.addMesh(testMesh(), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.world = &world;
+	body.position = {0, 1, 2.6f};
+	game::SoldierControl control;
+	game::SoldierInput forward;
+	forward.throttle = 1;
+	const auto ground = slope(0);
+	float nearest = 0;
+	float lowest = body.position.y;
+	for (int tick = 0; tick < 60; ++tick) {
+		control.update(forward, body);
+		body.step(1 / 30.0f, ground);
+		nearest = std::max(nearest, body.position.z);
+		lowest = std::min(lowest, body.position.y);
+	}
+	const float limit = 3 - physics::soldier::kRadius;
+	CHECK(nearest > limit - 0.001f);
+	CHECK(nearest <= limit + 0.001f);
+	CHECK(lowest >= 1.0f - 0.001f);
+}
+
+// The response starts with a minimum normal.y of 0.5 on each tick.
+// A steep triangle still pushes the soldier out.
+TEST(SoldierPhysics_SteepTerrainPushesWithoutGrantingFooting)
+{
+	physics::SoldierBody body;
+	body.position = {0, 0.98f, 0};
+	body.step(1 / 30.0f, slope(2.0f));
+	CHECK(body.position.y > 0.98f);
+	CHECK(!body.onGround());
+}

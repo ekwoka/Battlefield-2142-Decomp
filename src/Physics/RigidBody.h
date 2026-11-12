@@ -44,6 +44,10 @@ struct Vec3 {
 float dot(const Vec3& a, const Vec3& b);
 Vec3 cross(const Vec3& a, const Vec3& b);
 float lengthSquared(const Vec3& v);
+// Contacts' push-outs and cancels taken together per axis (0x006b6bd0,
+// each axis 0x006b6b60): of the same sign the larger, of opposite signs
+// (or into 0) the sum, so opposed contacts offset each other.
+Vec3 combineContacts(const Vec3& into, const Vec3& value);
 
 // Rotation as rows (the engine's matrices act on row vectors: v * M).
 struct Mat3 {

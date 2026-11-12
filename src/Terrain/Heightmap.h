@@ -49,6 +49,10 @@ public:
 	float originZ() const;
 	// Height at a world position, bilinearly filtered; 0 outside.
 	float heightAt(float worldX, float worldZ) const;
+	// The physics' terrain query (cluster slot 0x80 -> heightmap slot 0xb8 ->
+	// 0x006d2fc0): the cell's triangle under the point (split along
+	// x + z = 1) gives the height and its face normal; outside, 0 and up.
+	float heightAndNormal(float worldX, float worldZ, std::array<float, 3>& normal) const;
 	// First intersection with the cell triangles along a world-space segment.
 	// Retail's 0x006d12c0 splits each cell along x + z = 1.
 	bool raycast(const std::array<float, 3>& from, const std::array<float, 3>& to,

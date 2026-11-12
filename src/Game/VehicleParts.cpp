@@ -847,29 +847,10 @@ void Vehicle::legsRespond(physics::RigidBody& body, const physics::Ground& groun
 	l.contactNormal = contactNormal;
 }
 
-namespace {
-// 0x006b6b60: an axis of a contact normal taken into the drive's: of the
-// same sign the larger, of opposite signs (or into 0) the sum.
-float combineAxis(float into, float value)
-{
-	if (into == 0) {
-		return value;
-	}
-	if (into > 0 && value > 0) {
-		return std::max(into, value);
-	}
-	if (into < 0 && value < 0) {
-		return std::min(into, value);
-	}
-	return into + value;
-}
-} // namespace
-
 void Vehicle::legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below)
 {
 	Legs& l = m_legs;
-	l.contactNormal = {combineAxis(l.contactNormal.x, normal.x), combineAxis(l.contactNormal.y, normal.y),
-		combineAxis(l.contactNormal.z, normal.z)};
+	l.contactNormal = physics::combineContacts(l.contactNormal, normal); // 0x006b6bd0
 	l.objectNormal = true;
 	// Below the legs (0x006cec60's bVar3): the best ground normal by its
 	// height (+0x1c4, its y at +0x1c8) and the landed flag (+0x21c).

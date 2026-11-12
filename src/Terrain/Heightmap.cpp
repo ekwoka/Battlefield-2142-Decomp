@@ -73,6 +73,37 @@ float Heightmap::heightAt(float worldX, float worldZ) const
 	return top * (1 - ty) + bottom * ty;
 }
 
+float Heightmap::heightAndNormal(float worldX, float worldZ, std::array<float, 3>& normal) const
+{
+	normal = {0, 1, 0};
+	if (!loaded()) {
+		return 0;
+	}
+	const float gx = (worldX - originX()) / m_scale[0];
+	const float gz = (worldZ - originZ()) / m_scale[2];
+	if (gx < 0 || gz < 0 || gx > m_width - 1 || gz > m_height - 1) {
+		return 0;
+	}
+	const int x = static_cast<int>(std::floor(gx));
+	const int z = static_cast<int>(std::floor(gz));
+	const float fx = gx - x, fz = gz - z;
+	const float h00 = sample(x, z), h10 = sample(x + 1, z), h01 = sample(x, z + 1);
+	// The slopes per metre along x and z (the original scales both by x's).
+	const float k = 1 / m_scale[0];
+	float height;
+	if (fx + fz <= 1) {
+		height = h00 + fx * (h10 - h00) + fz * (h01 - h00);
+		normal = {-(h10 - h00) * k, 1, -(h01 - h00) * k};
+	} else {
+		const float h11 = sample(x + 1, z + 1);
+		height = h11 + (1 - fx) * (h01 - h11) + (1 - fz) * (h10 - h11);
+		normal = {(h01 - h11) * k, 1, (h10 - h11) * k};
+	}
+	const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+	normal = {normal[0] / length, normal[1] / length, normal[2] / length};
+	return height;
+}
+
 bool Heightmap::raycast(const std::array<float, 3>& from, const std::array<float, 3>& to,
 	float& fraction, std::array<float, 3>& normal, std::array<float, 3>* point) const
 {

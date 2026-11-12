@@ -690,6 +690,27 @@ TEST(GameWorld_ProjectileImpactOnFlatGround)
 
 // Retail heightmap cells consist of two triangles along x+z=1. A saddle
 // distinguishes this from the native heightAt bilinear interpolation.
+// The physics' terrain query (0x006d2fc0): the cell's triangle (split along
+// x + z = 1) gives the height and its face normal, as the raycast sees the
+// ground, not the bilinear height or a normal from the neighbouring cells.
+TEST(Heightmap_HeightAndNormalAreTheCellTriangles)
+{
+	Range range;
+	terrain::Heightmap saddle(0, 0);
+	saddle.setSize(2, 2); saddle.setScale({1, 1, 1}); saddle.setBitResolution(8);
+	range.files.addMemoryFile("saddle2.raw", {0,0,0,2});
+	CHECK(saddle.load(range.files, "saddle2.raw"));
+	std::array<float, 3> n {};
+	// The far triangle (h11 = 2): the raycast's 1.0 there, not bilinear 1.125.
+	CHECK(std::fabs(saddle.heightAndNormal(0.25f, 0.25f, n) - 1.0f) < 0.0001f);
+	CHECK(std::fabs(n[0] + 2 / 3.0f) < 0.0001f && std::fabs(n[1] - 1 / 3.0f) < 0.0001f && std::fabs(n[2] + 2 / 3.0f) < 0.0001f);
+	// The near triangle is flat (h00 = h10 = h01 = 0).
+	CHECK(std::fabs(saddle.heightAndNormal(-0.25f, -0.25f, n)) < 0.0001f);
+	CHECK(n[0] == 0 && n[1] == 1 && n[2] == 0);
+	// Outside: 0 and up.
+	CHECK(saddle.heightAndNormal(5, 5, n) == 0 && n[1] == 1);
+}
+
 TEST(GameWorld_TerrainBlastRayHitsRidge)
 {
 	Range range;

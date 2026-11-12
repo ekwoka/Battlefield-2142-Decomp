@@ -2232,13 +2232,11 @@ struct CerbereLanding {
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		physics::Ground surface;
 		surface.height = [ground](float x, float z) { return ground->heightAt(x, z); };
-		surface.heightAndNormal = [ground](float x, float z, physics::Vec3& normal) {
-			const float step = ground->scale()[0];
-			const float dx = ground->heightAt(x + step, z) - ground->heightAt(x - step, z);
-			const float dz = ground->heightAt(x, z + step) - ground->heightAt(x, z - step);
-			const float length = std::sqrt(dx * dx + 4 * step * step + dz * dz);
-			normal = {-dx / length, 2 * step / length, -dz / length};
-			return ground->heightAt(x, z);
+		surface.heightAndNormal = [ground](float x, float z, physics::Vec3& normal) { // as main.cpp
+			std::array<float, 3> n {};
+			const float height = ground->heightAndNormal(x, z, n);
+			normal = {n[0], n[1], n[2]};
+			return height;
 		};
 		world->enablePhysics(files, collisionTemplates, std::move(surface));
 		world->startRound();

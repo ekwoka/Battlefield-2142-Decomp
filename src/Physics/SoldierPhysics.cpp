@@ -10,13 +10,6 @@ namespace {
 float flush(float v) { return std::fabs(v) < 1e-6f ? 0.0f : v; }
 Vec3 flush(const Vec3& v) { return {flush(v.x), flush(v.y), flush(v.z)}; }
 
-// Keeps the larger magnitude per axis (0x006b6bd0).
-Vec3 largest(const Vec3& a, const Vec3& b)
-{
-	const auto pick = [](float x, float y) { return std::fabs(y) > std::fabs(x) ? y : x; };
-	return {pick(a.x, b.x), pick(a.y, b.y), pick(a.z, b.z)};
-}
-
 Vec3 project(const Vec3& v, const Vec3& axis)
 {
 	const float squared = lengthSquared(axis);
@@ -108,8 +101,10 @@ float SoldierBody::collideWithGround(const Ground& ground, float gravity, float 
 }
 
 // 0x006c24b0's last part: with the soldier's material set, the friction
-// from MaterialManager slot 0x88 (the pair's; slots 0x80 / 0x84, the
-// pair's mean elasticity and resistance, aren't read by the movement).
+// from MaterialManager slot 0x88 (the pair's). Slot 0x80's mean elasticity
+// isn't read by the movement; slot 0x84's mean resistance is (0x006c2349: a
+// drag of -error x resistance through node slot 0xa4), not modelled here:
+// 0.01 to 0.1 in the shipped materials, under 1 cm/s a tick.
 void SoldierBody::touchMaterial(uint32_t other)
 {
 	if (material != 0 && frictionOf) {
@@ -121,8 +116,8 @@ void SoldierBody::touchMaterial(uint32_t other)
 // `relative`: the soldier's velocity relative to what it touches.
 void SoldierBody::addContact(const Vec3& normal, float depth, const Vec3& relative)
 {
-	m_pushOut = largest(m_pushOut, normal * -depth);
-	m_cancel = largest(m_cancel, project(-relative, normal));
+	m_pushOut = combineContacts(m_pushOut, normal * -depth);
+	m_cancel = combineContacts(m_cancel, project(-relative, normal));
 	m_contactVelocity = flush((m_contactVelocity * static_cast<float>(m_contacts) + relative) *
 		(1.0f / static_cast<float>(m_contacts + 1)));
 	++m_contacts;
@@ -583,19 +578,17 @@ void SoldierBody::move(float gravity)
 		Vec3 error = m_contactVelocity - m_desired;
 		error.y += gravity / 30.0f;
 		error = error - project(error, m_groundNormal);
-		Vec3 correction;
-		Vec3 wanted = -error;
-		if (!m_slipping) {
-			correction = wanted;
-			if (clampTo(correction, grip * soldier::kStaticGrip)) {
-				m_slipping = true;
+		// 0x006c23a2: gripping, the correction may reach the grip limit;
+		// past it the soldier slides at the slide limit. Sliding, it is held
+		// to the slide limit and grips again once the correction fits.
+		Vec3 correction = -error;
+		if (m_gripping) {
+			if (clampTo(correction, grip * soldier::kGripLimit)) {
+				m_gripping = false;
+				clampTo(correction, grip * soldier::kSlideLimit);
 			}
-		} else {
-			correction = wanted;
-			if (!clampTo(correction, grip * soldier::kSlidingGrip)) {
-				m_slipping = false;
-				clampTo(correction, grip * soldier::kStaticGrip);
-			}
+		} else if (!clampTo(correction, grip * soldier::kSlideLimit)) {
+			m_gripping = true;
 		}
 		// Node slot 0xa8: averaged with other requests this tick.
 		const Vec3 acceleration = correction * 30.0f;
@@ -605,9 +598,9 @@ void SoldierBody::move(float gravity)
 		m_desired = {}; // used: cleared on the ground only (0x006c2230's end, +0xac)
 	} else {
 		// In the air (0x006c2230's early out): no friction, the wanted
-		// velocity kept for the landing, and no longer slipping (+0xe0 set
-		// to 1, clearing its bit 0x40).
-		m_slipping = false;
+		// velocity kept for the landing, and no grip (+0xe0 set to 1,
+		// clearing its bit 0x40): a landing starts sliding.
+		m_gripping = false;
 	}
 	m_contactVelocity = {};
 	m_contacts = 0;

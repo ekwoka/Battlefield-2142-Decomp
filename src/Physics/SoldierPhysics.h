@@ -39,8 +39,9 @@ namespace dice::hfe::physics {
 namespace soldier {
 constexpr float kLandDamping = 0.99f;  // 0x00a84bec
 constexpr float kWaterDamping = 0.9f;  // 0x00a84bf0
-constexpr float kStaticGrip = 1.5712f;  // per tick, times normal.y^5 * friction
-constexpr float kSlidingGrip = 2.3568f; // grip before slipping starts
+// The ground correction's limit a tick, times normal.y^5 * friction:
+constexpr float kSlideLimit = 1.5712f; // sliding (*0x009931f0)
+constexpr float kGripLimit = 2.3568f;  // gripping, before it breaks into a slide (*0x009931f4)
 constexpr float kMaxInputAcceleration = 250; // squared limit 62500
 constexpr float kRadius = 0.25f;           // 0x00a68a80
 constexpr float kHeight = 1.7f;            // standing (0x00a68a7c)
@@ -257,7 +258,7 @@ private:
 	Vec3 m_contactVelocity;
 	int m_contacts = 0;
 	bool m_onGround = false;
-	bool m_slipping = false;
+	bool m_gripping = false; // +0xe0 bit 0x40
 	Vec3 m_groundNormal {0, 1, 0};
 	// The node's averaged input acceleration (0xc4, count 0xd0).
 	Vec3 m_inputAcceleration;
