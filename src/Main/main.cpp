@@ -5621,6 +5621,10 @@ int runGame(Options& options, Session& session)
 		// trails), following them (effects::ObjectEffects).
 		effects::EffectManager objectEffects(templates, 0x2f6b1d3u);
 		effects::ObjectEffects objectEffectBundles(templates);
+		// Bone parts carry their bundles as the renderer draws them.
+		objectEffectBundles.setPartBone([&round](uint32_t object, const std::string& part, std::array<float, 16>& local) {
+			return round.partBone(object, part, local);
+		});
 		// The wheel and draft bundles' ground: the water, else what the
 		// projectiles' collision meets (its point taken on the terrain under
 		// it, or the ray's middle on an object), and the materials' effect.

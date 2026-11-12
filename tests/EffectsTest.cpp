@@ -223,6 +223,38 @@ TEST(Effects_ObjectBundlesStartAndStopAsTheOriginal)
 	CHECK(!manager.emitting(9) && objects.tracked() == 0);
 }
 
+// A bundle under a bone part (boneIndex, 0x0063d470: the Talon's engine
+// pods) sits where the bone puts the part, its template place replaced, as
+// the renderer draws the part.
+TEST(Effects_BundlesFollowBoneParts)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	world::ObjectTemplate* jet = templates.create("EffectBundle", "e_jet");
+	jet->children().push_back({"flame", {}, {}});
+	world::ObjectTemplate* pod = templates.create("Bundle", "pod");
+	pod->children().push_back({"e_jet", {0, 0, -1}, {}});
+	world::ObjectTemplate* ship = templates.create("PlayerControlObject", "ship");
+	ship->children().push_back({"pod", {5, 0, 0}, {}});
+	// The bone: pitched 90 degrees (z down to -y) at (1, 2, 3).
+	const effects::ObjectEffects::PartBone bone = [](uint32_t object, const std::string& part,
+													  std::array<float, 16>& m) {
+		if (object != 7 || part != "pod") {
+			return false;
+		}
+		m = {1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 1, 2, 3, 1};
+		return true;
+	};
+	const auto unboned = effects::ObjectEffects::bundlesOf(templates, *ship, 7);
+	CHECK(unboned.size() == 1 && std::fabs(unboned[0].position.x - 5) < 1e-5f
+		&& std::fabs(unboned[0].position.z + 1) < 1e-5f);
+	const auto boned = effects::ObjectEffects::bundlesOf(templates, *ship, 7, {}, nullptr, bone);
+	CHECK(boned.size() == 1);
+	const physics::Vec3 at = boned[0].position, z = boned[0].rotation.transform({0, 0, 1});
+	CHECK(std::fabs(at.x - 1) < 1e-5f && std::fabs(at.y - 3) < 1e-5f && std::fabs(at.z - 3) < 1e-5f);
+	CHECK(std::fabs(z.y + 1) < 1e-5f); // its z turned down with the pod
+}
+
 TEST(Effects_GenericProjectileStartsAndCarriesItsFireBundle)
 {
 	world::ObjectTemplateManager templates;

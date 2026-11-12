@@ -1263,6 +1263,11 @@ public:
 	}
 	// A part's pose in its parent (the game's partPose); may be empty.
 	using PartPose = std::function<bool(uint32_t object, const std::string& part, Vec3& offset, Vec3& rotation)>;
+	// A bone part's local matrix (boneIndex, 0x0063d470: row-major, row
+	// vectors, the translation in 12..14), which replaces the part's own
+	// place in its parent; the game's partBone, as the renderer draws it.
+	using PartBone = std::function<bool(uint32_t object, const std::string& part, std::array<float, 16>& local)>;
+	void setPartBone(PartBone bone) { m_partBone = std::move(bone); }
 
 	explicit ObjectEffects(const world::ObjectTemplateManager& templates) : m_templates(templates) {}
 	// Once a tick: the objects there are now. Starts, moves and stops their
@@ -1330,7 +1335,7 @@ public:
 	// the walk skips the branches without one (a Titan's tree is large).
 	using BundleCache = std::map<const world::ObjectTemplate*, bool>;
 	static std::vector<Placed> bundlesOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& root,
-		uint32_t object = 0, const PartPose& partPose = {}, BundleCache* cache = nullptr);
+		uint32_t object = 0, const PartPose& partPose = {}, BundleCache* cache = nullptr, const PartBone& partBone = {});
 
 private:
 	struct Tracked {
@@ -1360,9 +1365,11 @@ private:
 	const world::ObjectTemplateManager& m_templates;
 	std::map<uint32_t, Tracked> m_objects;
 	BundleCache m_hasBundles;
+	PartBone m_partBone;
 	std::vector<scene::WindSettings::LocalWind> m_localWinds;
 	// A bundle's place along its chain under the parts' current poses.
-	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation);
+	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation,
+		const PartBone& partBone = {});
 public:
 	// The tag the breath bundle is spawned with on its soldier.
 	static constexpr uint32_t kBreathTag = 0xb7ea7;

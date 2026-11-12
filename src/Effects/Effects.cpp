@@ -2357,8 +2357,18 @@ uint32_t flags(const world::ObjectTemplate& t, const char* name, const char* oth
 // Moves `at`/`turn` from a parent's space to its child's, after the pose
 // the game gives the part (as the renderer's collectParts).
 void placeChild(const world::ChildTemplate& child, uint32_t object, const ObjectEffects::PartPose& partPose, Vec3& at,
-	Mat3& turn)
+	Mat3& turn, const ObjectEffects::PartBone& partBone)
 {
+	// A bone part (boneIndex, 0x0063d470): the bone's local matrix is its
+	// place, as the renderer draws it (the Talon's engine pods).
+	std::array<float, 16> bone;
+	if (partBone && object != 0 && partBone(object, child.name, bone)) {
+		const Mat3 boneTurn {{Vec3 {bone[0], bone[1], bone[2]}, Vec3 {bone[4], bone[5], bone[6]},
+			Vec3 {bone[8], bone[9], bone[10]}}};
+		at = at + turn.transform({bone[12], bone[13], bone[14]});
+		turn = boneTurn * turn;
+		return;
+	}
 	Mat3 childTurn = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
 	Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
 	Vec3 offset, rotation;
@@ -2432,7 +2442,8 @@ ObjectEffects::Placed groundTriggerOf(const world::ObjectTemplate& t, const std:
 } // namespace
 
 std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectTemplateManager& templates,
-	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose, BundleCache* cache)
+	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose, BundleCache* cache,
+	const PartBone& partBone)
 {
 	std::vector<Placed> out;
 	std::vector<std::string> path;
@@ -2449,7 +2460,7 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 				}
 				Vec3 childAt = at;
 				Mat3 childTurn = turn;
-				placeChild(child, object, partPose, childAt, childTurn);
+				placeChild(child, object, partPose, childAt, childTurn, partBone);
 				path.push_back(child.name);
 				chain.push_back(&child);
 				const std::string& type = c->typeName();
@@ -2481,7 +2492,7 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 						}
 						Vec3 groundAt = childAt;
 						Mat3 groundTurn = childTurn;
-						placeChild(grand, object, partPose, groundAt, groundTurn);
+						placeChild(grand, object, partPose, groundAt, groundTurn, partBone);
 						path.push_back(grand.name);
 						chain.push_back(&grand);
 						out.push_back(groundTriggerOf(*g, path, chain, groundAt, groundTurn, parent));
@@ -2533,12 +2544,12 @@ scene::WindSettings::LocalWind ObjectEffects::localWindOf(const world::ObjectTem
 }
 
 void ObjectEffects::place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position,
-	Mat3& rotation)
+	Mat3& rotation, const PartBone& partBone)
 {
 	position = {};
 	rotation = {};
 	for (const world::ChildTemplate* child : bundle.chain) {
-		placeChild(*child, object, partPose, position, rotation);
+		placeChild(*child, object, partPose, position, rotation, partBone);
 	}
 }
 
@@ -2547,7 +2558,7 @@ void ObjectEffects::startBundle(const ObjectState& object, Tracked& tracked, siz
 {
 	Placed& b = tracked.bundles[index];
 	if (partPose && !created) {
-		place(b, object.id, partPose, b.position, b.rotation);
+		place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 	}
 	effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, static_cast<uint32_t>(index + 1), false);
 	// The start sends its children event 0 (0x0061a1c0).
@@ -2576,7 +2587,7 @@ void ObjectEffects::groundTrigger(const ObjectState& object, Placed& g, EffectMa
 		return;
 	}
 	if (partPose && !created) {
-		place(g, object.id, partPose, g.position, g.rotation);
+		place(g, object.id, partPose, g.position, g.rotation, m_partBone);
 	}
 	groundTriggerAt(object.position + object.rotation.transform(g.position), g.rotation * object.rotation, g, object.id,
 		effects);
@@ -2649,7 +2660,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			}
 			Tracked tracked;
 			tracked.objectTemplate = object.objectTemplate;
-			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose, &m_hasBundles);
+			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose, &m_hasBundles, m_partBone);
 			found = m_objects.insert_or_assign(object.id, std::move(tracked)).first;
 		}
 		Tracked& tracked = found->second;
@@ -2682,7 +2693,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 					continue;
 				}
 				Placed& b = tracked.bundles[tag - 1];
-				place(b, object.id, partPose, b.position, b.rotation);
+				place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 				effects.setMount(object.id, tag, b.position, b.rotation);
 			}
 		}
@@ -2727,7 +2738,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				// The affector's wind, placed with its part (its object's
 				// position and matrix, slots 0x60 / 0x78).
 				if (partPose) {
-					place(b, object.id, partPose, b.position, b.rotation);
+					place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 				}
 				m_localWinds.push_back(localWindOf(*b.bundle, object.position + object.rotation.transform(b.position),
 					b.rotation * object.rotation));
@@ -2969,7 +2980,7 @@ void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity
 	// speed, a draft's with the engine), and no rays to cast.
 	const bool idle = !object.occupied && object.engine <= 0 && speed < 0.5f;
 	if (partPose && !idle) {
-		place(b, object.id, partPose, b.position, b.rotation);
+		place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 	}
 	const Vec3 at = object.position + object.rotation.transform(b.position);
 	std::string effect;

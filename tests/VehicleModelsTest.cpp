@@ -7,6 +7,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Animation/FirstPerson.h"
 #include "Console/Console.h"
+#include "Effects/Effects.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
@@ -775,6 +776,36 @@ TEST(Vehicles_BundleSkeletonPosesBoneParts)
 	CHECK(g.world->partBone(at, "EU_AT_FLG_Top", leg));
 	std::fprintf(stderr, "  eu_at front leg: %.2f %.2f %.2f\n", leg[12], leg[13], leg[14]);
 	CHECK(std::fabs(leg[14] - 2.674f) < 1.5f);
+	// The Talon's engine pods are bone parts: their jets (e_jetHelo) go
+	// where the bones put the pods, not the pods' template places.
+	const uint32_t ag = g.start("us_ag", {0, 4, 6});
+	g.world->setAnimationSystems(&systems, load);
+	CHECK(g.enter(ag));
+	g.drive({}, 2);
+	anim::Matrix pod {};
+	CHECK(g.world->partBone(ag, "US_AG_L_Engine_anim_obj", pod));
+	const world::ObjectTemplate* agTemplate = g.templates.find("us_ag");
+	CHECK(agTemplate != nullptr);
+	if (agTemplate) {
+		const effects::ObjectEffects::PartBone bone = [&g](uint32_t object, const std::string& part,
+														  std::array<float, 16>& local) {
+			return g.world->partBone(object, part, local);
+		};
+		const auto plain = effects::ObjectEffects::bundlesOf(g.templates, *agTemplate, ag);
+		const auto boned = effects::ObjectEffects::bundlesOf(g.templates, *agTemplate, ag, {}, nullptr, bone);
+		int jets = 0;
+		for (size_t i = 0; i < boned.size() && i < plain.size(); ++i) {
+			if (boned[i].bundle->name() != "e_jetHelo") {
+				continue;
+			}
+			++jets;
+			const physics::Vec3 a = boned[i].rotation.transform({0, 0, 1}), b = plain[i].rotation.transform({0, 0, 1});
+			std::fprintf(stderr, "  us_ag jet %d: bone z %.2f %.2f %.2f, template z %.2f %.2f %.2f\n", jets, a.x, a.y,
+				a.z, b.x, b.y, b.z);
+			CHECK(physics::lengthSquared(a - b) > 1e-4f || physics::lengthSquared(boned[i].position - plain[i].position) > 1e-4f);
+		}
+		CHECK(jets == 2);
+	}
 }
 
 // The legs' object pass (0x006cec60): a contact under the legs' half-radius
