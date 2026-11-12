@@ -2074,7 +2074,10 @@ void MenuBindings::bindServerSettings()
 	// antialiasing taken only when a listed one starts with it, ignoring
 	// case (slot 0x20, 0x1000ff50), the view distance clamped to 0.5..1
 	// (slot 0x28, 0x1000f0c0). The rewrite takes today's machines: enough
-	// memory for the higher texture and lighting.
+	// memory for the higher texture and lighting. The high preset's
+	// 800x600 branch (with the renderer's +0x102 set) is dead: +0x102 is
+	// the named value "rodSpecial" (0x1000bee0, through DAT_10221a0c slot
+	// 0x48), which nothing in BF2142.exe names or sets.
 	n.setFunction(kVideoSettings, "setVideoOptionScheme", [this](Interpreter& vm, const Args& args) {
 		const int scheme = static_cast<int>(std::lround(vm.toNumber(arg(args, 0))));
 		m_settings["VideoSettings.VideoOptionScheme"] = Value(scheme);

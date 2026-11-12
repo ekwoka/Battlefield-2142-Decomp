@@ -36,6 +36,16 @@
 namespace dice::hfe::net {
 
 constexpr uint32_t kPlayerInfoBlock = 1; // the data block's type
+// The in-game remote console's lines travel as data blocks, whole: a
+// client's "rcon <line>" as type 6 (its handler 0x004b6630 case 0x12 hands
+// the text, without its NUL, to the block sender's slot 0, 0x006438e0; the
+// server's 0x004aef10 raises the scripts' RemoteCommand, event 0x2b, with
+// the sender), the server's answer as type 7 (0x004b0690 case 0x13: the
+// "rcon: " + text of host.rcon_feedback 0x00442940 to that player's
+// connection; the client's 0x004b5eb0 case 7 prints it and "\n" to its
+// console). Events 6/0x12 and 6/0x13 are each side's own steps.
+constexpr uint32_t kRconCommandBlock = 6;
+constexpr uint32_t kRconFeedbackBlock = 7;
 constexpr int kCdKeyGameId = 0x52c;      // the CD-key SDK's game id (0x00642f90 -> 0x007184b0)
 
 struct PlayerInfoBlock {

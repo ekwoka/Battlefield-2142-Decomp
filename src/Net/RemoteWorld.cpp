@@ -1,5 +1,7 @@
 #include "RemoteWorld.h"
 
+#include "PlayerAuth.h"
+
 #include <zlib.h>
 
 #include <algorithm>
@@ -100,6 +102,12 @@ void RemoteWorld::applyDataBlock(const DataBlockChunk& chunk)
 		m_inData = false;
 		if (m_dataType == 2) {
 			onLevel(m_dataBuffer);
+		}
+		if (m_dataType == kRconFeedbackBlock) {
+			m_consoleLines.push_back(m_dataBuffer + "\n");
+		}
+		if (m_dataType == 9) {
+			m_newDemoNotice = true;
 		}
 	}
 }
@@ -1318,6 +1326,11 @@ bool RemoteWorld::demoNotice(DemoNotice& out) const
 {
 	const auto it = m_dataBlocks.find(9);
 	return it != m_dataBlocks.end() && decodeDemoNotice(it->second, out);
+}
+
+bool RemoteWorld::takeDemoNotice(DemoNotice& out)
+{
+	return std::exchange(m_newDemoNotice, false) && demoNotice(out);
 }
 
 bool RemoteWorld::endOfRoundData(EndOfRoundData& out) const

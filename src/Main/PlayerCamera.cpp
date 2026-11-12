@@ -363,6 +363,19 @@ void PlayerCamera::toggleMode(bool backwards)
 	firstPerson = !firstPerson || !allowExternalViews;
 }
 
+bool PlayerCamera::viewColor(std::array<float, 3>& tint, float& saturation) const
+{
+	SeatView seat;
+	if (!findSeatCamera(seat) || number(*seat.camera, "useColorTransform", 0) == 0) {
+		return false;
+	}
+	float c[3] = {1, 1, 1};
+	vec3(text(*seat.camera, "colorTransform"), c);
+	tint = {c[0], c[1], c[2]};
+	saturation = number(*seat.camera, "saturation", 1);
+	return true;
+}
+
 bool PlayerCamera::insideView() const
 {
 	if (!m_alive) {

@@ -1934,13 +1934,13 @@ std::vector<GameWorld::WeaponAmmo> GameWorld::weaponAmmo(int id) const
 			if (t) {
 				const FireArmSettings settings = withExtraAmmo(*player, *t);
 				list.push_back({c.name, settings.magSize * (settings.nrOfMags + 1), settings.magSize, settings.nrOfMags,
-					settings.magSize});
+					settings.magSize, settings.nrOfMags, static_cast<int>(i) == player->inHand});
 			}
 			continue;
 		}
 		const FireArmSettings& settings = weapon->settings();
 		list.push_back({c.name, weapon->roundsInMag() + weapon->magsLeft() * std::max(settings.magSize, 0), settings.magSize,
-			settings.nrOfMags, weapon->roundsInMag()});
+			settings.nrOfMags, weapon->roundsInMag(), weapon->magsLeft(), static_cast<int>(i) == player->inHand});
 	}
 	return list;
 }
@@ -11928,7 +11928,10 @@ void GameWorld::stepSeatCamera(Player& player, Body& body, float seconds)
 	// 0.5), the camera takes no input that tick: its speeds (+0x194..) go
 	// to 0 and its angles (+0x188..) come back a quarter of the way to
 	// rest (x 0.75), so the driver's view springs back to ahead of the hull.
-	// (Its +0x250 state 6, which skips the handler, isn't traced.)
+	// The handler is skipped in the camera's mode 6 (+0x250, Trace: setMode
+	// 0x00612eb0 takes it only with CVMTrace, template +0x37b, executor
+	// 0x00524dee, default 0 at 0x00610fd0; the one shipped script that
+	// names it sets 0), so no shipped camera reaches it.
 	if (seat.cameraToggleMouseLook && !player.input.mouseLook) {
 		look.yawSpeed = look.pitchSpeed = 0;
 		look.yaw *= 0.75f;

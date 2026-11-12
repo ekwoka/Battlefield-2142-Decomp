@@ -1744,9 +1744,14 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   `GameWorld::parachuteRoom`, `canopyClear`; parachute.collisionmesh's
   24 vertices span −3.21..1.10 m about the start). Taken, it opens at his frame
   plus fire.projectileStartPosition (`0x005e4460`, slot 53: 0/2/0), the
-  round taking his velocity, and enterOnSpawn seats him (the press that
-  lets the round go after the choice isn't traced; AIDLL's bots press
-  only input 22, so the choice opens it). The launcher is never held in
+  round taking his velocity, and enterOnSpawn seats him. No press lets
+  it go: a weapon shown (its slot 10, `0x005c32f0`, while its fire test
+  passes) calls its fire component's slot 33, which the
+  SpawnObjectFireComp's `0x005e41e0` makes a fire (slot 0x90,
+  `0x005d4d80`). The choice (`0x00589dc0`) clears the soldier's `+0x328`
+  (`0x00585bb0`), the falling flag that hides his weapons
+  (`0x005878b0`, which shows the active one again by slot 10), so the
+  chosen launcher fires as it is shown. The launcher is never held in
   hand. `GameWorld::openParachute`, `mayOpenParachute`, `soldierFalling`.
 - **The bots** (AIDLL `0x10099b70`, the weapon handling after each
   execution's plan, before its test of a plan holding the weapon): for a
@@ -2072,7 +2077,10 @@ particle drawer's own list, `+0x1d78` (cleared each frame by
 Additive technique (`0x10167d90` with 1; the systems pick Diffuse,
 Additive or DiffuseWithZWrite by their own template, `0x10134450`), its
 `+0x80` / `+0x81` choosing the first-person pass and view as a system's
-`+8` does; the list's filler wasn't found).
+`+8` does; the list is filled by the Particle render object's slot 6,
+`0x101682e0` (vtable `0x101da630`), while its template's `+0x4c` and
+renderer.drawParticles (`+0x68e`, executor `0x1004cdf0`, on from
+`0x1002ad41`) are set).
 
 **The rounds' own look.** A round is an object like any other in the
 original (a GenericProjectile): its template's `ObjectTemplate.geometry`
@@ -3844,9 +3852,12 @@ their emitSpeed along emitDirection, the drag −airResistance |r| r of the
 speed r through the wind (× windAffectionFactor; no drag graph, unlike
 the sprites), gravity along y by the gravity graph at their age, speeds
 under 0.001 dropped, and with forceToWaterSurface held at the water +
-waterSurfaceOffset + 0.1 (the boats' wakes); a new point adds the
-system's `+0x1c` velocity, taken here as speedFromPhysics' (its writer
-isn't traced). Rewritten in `moveTrailPoint` (src/Effects/Effects.cpp;
+waterSurfaceOffset + 0.1 (the boats' wakes); a new point, outside a
+local system, adds the speedFromPhysics velocity (`+0xe4` × `+0xd4`,
+slots 0x4c / 0x40, both 0 without it: `0x1013acb0`, constructor
+`0x1013b1e0`). `0x1013b4b0` then adds the system's `+0x1c`, set only by
+its slot 0x90 (`0x1013c010`), which neither the exe's bundle code
+(`0x00618000`..`0x0061c000`) nor RendDX9's particle code calls: 0. Rewritten in `moveTrailPoint` (src/Effects/Effects.cpp;
 `Effects_TrailPointsMove`). The points, joined in the order they were left, make
 strips of 2 × size across in `numPlanes` planes about the path, each
 vertex faded by the square of its plane's normal against the eye
@@ -5210,15 +5221,20 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    weapon's `weaponHud.enablePostProcessingOnGuiIndex` names the HUD shown
    (`altGuiIndex` zoomed, else `guiIndex`: the tanks' and walkers' zoomed
    sights, and unzoomed guns such as the FAV gunner's machine gun, whose
-   `guiIndex` and `enablePostProcessingOnGuiIndex` are both 74). Also on
-   in the inside view of a seat whose controlled template sets
-   `vehicleHud.enablePostProcessingOnGuiIndex` (a 32-bit flag at the
-   template's `+0x11c`, setter slot 0x158 `0x006376c0`, executor
-   `0x00554a71`; 48 seats: the APCs' pod cannons and second turret, the
-   tanks' cupolas and driver cameras, the ATs' passenger guns, whose guns
-   carry no weapon-side index). That flag's reader isn't traced; the seats
-   that set it are taken to turn the pass on for their own view
-   (`menu::seatPostProcessing`).
+   `guiIndex` and `enablePostProcessingOnGuiIndex` are both 74). The
+   object's choice is the runtime VehicleHud's slot 0x40
+   (`0x006573a0`, asked by `0x007a0080` with the HUD's gui index `+0xa0`):
+   the seat's own PostProcess component when its `vehicleHud.guiIndex`
+   (template slot 0x30, `+0x134`) and `vehicleHud.enablePostProcessingOnGuiIndex`
+   (slot 0x15c, `+0x11c`, default −1 at `0x00637b30`; setter
+   `0x006376c0`, executor `0x00554a71`) both equal that index, else its
+   first gun's when the gun's weaponHud value does, else its second
+   group's gun's (`0x0042b2f0` slot 0x78(1)). The 48 seats that set the
+   vehicle's (the APCs' pod cannons and second turret, the tanks' cupolas
+   and driver cameras, the ATs' passenger guns) set 1, with guiIndex 0
+   (61 on one), so none turns it on by its own flag. Until 2026-11-12 the
+   rewrite turned the pass on in all 48 seats' inside views
+   (`menu::seatPostProcessing`; `HudVehicle_SeatZoomGuiIndex`).
 5. *EMP* (`0x10049d70`): a vehicle's EMP level (the player's slot 0x380)
    loads the static from the table `0x10048950` builds (`0x10048a30`:
    INTERFERENCE 0 then 8 for levels 1-5, DISTORTIONROLL 0 then 0.02, no
@@ -5259,7 +5275,15 @@ soldier template has `armor.takesEmpDamage` (no shipped soldier sets it);
 `PlayerInfo::empLevel`. The tinnitus event's sender is the blast shake
 (no `sound-tinnitus-range` setting exists in BF2142.exe): `0x005a6e70` posts
 event 0xd for a local soldier on foot within 0.6 × a blast's radius (see
-**Blast shake**; `GameWorld::takeTinnitus`, the setup's 1 + 2 + 4 s). The view's tint colour (its slot 0x7c) is not decoded.
+**Blast shake**; `GameWorld::takeTinnitus`, the setup's 1 + 2 + 4 s). The view's
+tint is the player's camera's (ICamera slots 0x84 / 0x7c / 0x80,
+`0x006105a0` / `0x00610580` / `0x00610590`): the Camera template's
+useColorTransform (`+0x444`), colorTransform (`+0x434`) and saturation
+(`+0x440`; executors from `0x00527a8b`, defaults 0, 1/1/1 and 1 at
+`0x00610fd0`). RendDX9 grades with the tint at that saturation
+(`0x1002e44c`, `0x1002983a` → `0x1004a280`), where the rewrite had taken
+saturation 0. No shipped script sets useColorTransform, so no shipped
+view is tinted (`PlayerCamera::viewColor`).
 
 ## Kits on the ground
 
@@ -7034,14 +7058,23 @@ and map list (`DAT_00a21940`, `MapList.cpp`) outlive the levels:
 by line through the console's `executeString` `0x00674430`) and returns its
 output ending with a newline (nothing for nothing; a ranked server refuses
 `vars.set` with "Ranked server blocks vars.set from remote console").
-`host.rcon_feedback(player, text)` (`0x00442940`) posts "rcon: " + the text
-to the player as message 6/0x13; the rewrite sends it as PostRemote 6/0x13
-payloads of the int -1 and up to 48 characters each (the client's handler
-prints a -1 payload to its console, `0x004b6630`); how the exe carries a
-longer text was not traced. A client's `rcon <line>` (the console's
-`executeString` posts 6/0x12) comes to the server as 6/0x12 with the line
-and raises the scripts' `RemoteCommand(player, line)` (`0x004b0690` case
-0x12 makes event 0x2b); `GameClient::remoteCommand` sends one.
+`host.rcon_feedback(player, text)` (`0x00442940`) posts the server's own
+event 6/0x13 with the player and "rcon: " + the text; its handler
+(`0x004b0690` case 0x13) sends the whole text to that player's connection
+as data block 7 (the block sender's slot 0, `0x006438e0`: a start, then
+63-byte chunks), which the client prints to its console with a newline
+(`0x004b5eb0` case 7, the suffix at `0x00918bf4`; the -1 branch of case
+0x13 is the server's own console). A client's `rcon <line>` (the console's
+`executeString` posts its own 6/0x12, `0x00674430`) goes to the server as
+data block 6, the line without its NUL (`0x004b6630` case 0x12); the
+server's block handler (`0x004aef10`) raises the scripts'
+`RemoteCommand(player, line)` (event 0x2b) with the sender. A 6/0x12
+posted on the server itself raises it with player -1 (`0x004b0690` case
+0x12). Until 2026-11-12 the rewrite carried both as PostRemotes (the
+line cut at 51 characters, the answer in 48-character pieces), which an
+exe peer neither sends nor reads. `GameClient::remoteCommand`,
+`RemoteWorld::takeConsoleLines`, `HostedGame::sendRemoteFeedback`
+(`ServerAdmin_HostedKickBanAndMessages`).
 `host.ss_getParam` (`0x00568350`) reads the settings: `gameMode` and
 `mapName` from the game logic, `ticketRatio`, `maxPlayers`, `timeLimit`,
 `scoreLimit`, `autoBalance` (`sv.autoBalanceTeam`), `teamRatioPct` (a
@@ -7222,11 +7255,21 @@ carry an empty payload (`0x00516950`).
   file's name taken after its last `\` or `/` (`0x0065b640`); a hook
   that failed logs "Demo upload failed. Check 'rotate_demo_err.txt' for
   more info." instead (`0x005852b0`'s `+0xbc`). The client's handler
-  (`0x004b5eb0` case 9, read by `0x00583d80`) hands the URL to its
-  `+0xa8`'s slot `0x6c`, not traced further: `RemoteWorld::demoNotice`
-  keeps it. `HostedGame`'s autoDemo and `hookDone`
-  (`ServerAdmin_AutoDemoHookSendsMessage9`); not rewritten: whether a
-  map change (`0x004bc850`) stops it. GameServerSettings.setAutoRecordRounds
+  (`0x004b5eb0` case 9, read by `0x00583d80`) hands the URL and the map
+  to its interface at `+0xa8` (vtable `0x00928fa8`), slot `0x6c`
+  `0x004b4710`: LocalProfileManager slot 0xd0 adds a demo bookmark (the
+  server's name, SwiffHost slot 0x338; the map; the URL; the time), slot
+  0x34(1) saves the profile and the DemoLibrary's slot 0x44(1) sets the
+  library's new-bookmark flag. `RemoteWorld::takeDemoNotice`,
+  `MenuBindings::addDemoBookmark` (until 2026-11-12 the rewrite only kept
+  the notice). `HostedGame`'s autoDemo and `hookDone`
+  (`ServerAdmin_AutoDemoHookSendsMessage9`). The demo stops at the end
+  of the round: the game status's end of game (event 0/1 with 2) reaches
+  the AutoRecorder's handler (`0x00585ac0` → `0x00585920`) before the
+  end-of-round delay; the round's restart (`0x004ba0c0`) stops one still
+  running, the map change (`0x004bc850`) doesn't. Until 2026-11-12 the
+  rewrite recorded on through the delay, to the round's restart or the
+  next map. GameServerSettings.setAutoRecordRounds
   (`0x004190ee` → the host page's slot `0x16c`, `0x00499030`) sets the
   page's `+0x1cc` (10 in its reset branch, `0x00499430`), which only the
   page's getAutoRecordRounds reads (slot `0x168`, SwiffPlayer
@@ -9367,9 +9410,72 @@ made square and kept on the map (`0x0078b490`); without one, the whole
 map. Markers keep their pixel size at every zoom (`0x0077c610`: the
 rectangle is floored, turned by the marker's yaw, cut to the node). The
 exe's own sizes and tints (set where its markers are made): control
-points 32 px, soldiers 15 or 16 px, squad leaders 32 px, the commander
-16 px (`0x0077d9f0`, `0x0077dbf0`); players are tinted by side from the
-table at `0x00b3be30` (no team (1, 1, 1), either team (0.7, 0.7, 0.7)).
+points 32 px; vehicles tinted by side from the table at `0x00b3be30` (no
+team (1, 1, 1), either team (0.7, 0.7, 0.7)).
+
+**The teammates** (`0x00792980`; `menu::mateMarker`, `mateNeed`). Each is
+three markers, drawn in this order:
+- the need disc (mini_Health, 16 px, main map only);
+- the arrow;
+- the icon.
+
+The icon (`0x0077d9f0`): a squad leader (player slot `0x150`) 16 px in his
+squad's `SquadLeaders/mini_Squad_%d_small` (`0x0077aa20`); the commander
+(slot `0x128`) 32 px in mini_commander2; both carry the 32 px
+mini_headingArrow, black (0, 0, 0), turned by the heading. Anyone else is
+16 px in mini_Soldier, which is itself turned by the heading. Before, the
+rewrite drew every teammate as a grey unturned mini_Soldier, and this
+paragraph had the leader's and commander's sizes swapped.
+
+The colours (`0x00781900`):
+- the squad's (0.4, 1, 0) (`0x00a0bb60`) for a member of the local
+  player's squad who isn't the commander, or one sharing the local
+  player's vehicle when the local player has a squad;
+- white for the commander on foot in his icon;
+- else the team's (0.254, 0.552, 0.89) (`0x00a0be60`);
+- the alpha is the icon alpha.
+
+A call's marker (`0x007841e0`) puts its icon in the icon's place: white,
+alpha 1 and unturned. The medic, repair and ammunition icons also take
+the 16 px mini_medicArrow (`+0xa5c`) as their arrow, a small pin at the
+icon's top; a revive call doesn't.
+
+The need disc appears while the local player's kit heals or gives
+ammunition and the teammate's soldier is within 150 m, in 3D
+(`0x0077b340`). It measures:
+- for a healer, his armour's share;
+- else, for an ammunition giver, the weapon in his hand's (magazines,
+  the gun's counted, less 1) over nrOfMags.
+
+It is drawn below a half, in (1, share, 0).
+
+The icon's record has the +0x30 flag, so it is kept on the map
+(`0x0077efb0` → `0x0077e100`): its point stays at least 0.02 / zoom
+(`+0x7cc` over the zoom's y) of the map's side in from the map's edges.
+That is about 3 px of the minimap. The edges are the map's, not the
+node's: a teammate off the minimap is still cut away
+(`MapMarker::clamp`). The arrow and the disc take the icon's kept point
+(`0x00793b22`).
+
+The minimap names its icons `.tga` while most ship as `.dds`. The texture
+load (RendDX9 `0x10017f20` → `0x10017340`) takes a name as given if that
+file exists, else the name with `.dds`, then bare
+(`render::textureFallbackPaths`, `LevelRenderer::texture`). Until this
+was rewritten, the radio calls' map icons and every vehicle icon named
+`.tga` that ships only as `.dds` never drew: the stationary guns' and
+defences' icons (`mini_SMGsmall`, `mini_armourdefsmall`,
+`mini_airdefsmall`, from their templates' miniMapIcon).
+
+Not rewritten:
+- `Minimap.toggleShowKits` (`+0x3c1`): 15 px kit icons from game slot
+  `0x64`, unturned;
+- the kit filter (`setPaintKit`, `+0x3f4`; bit 7 the leaders');
+- the colours inside the map menus and on the commander screen.
+
+No shipped script calls the first two. The colours inside the menus
+weren't followed. The joined client's need disc measures health only:
+the rewrite's client doesn't hold other players' magazines.
+
 Which markers to show and their sizes come from the game
 (`HudManager::setMapMarkers`).
 
@@ -11259,9 +11365,11 @@ the top.
   `onSpotted`, a joined client's 2/0x33..0x37) and drawn by `updateMap`
   (`HudMap_RadioCallMarkers`). Offline the bots never call (AIDLL's
   "medic" is a plain RadioMessage), so only the local player's own call
-  marks his medics. The edge arrow (`+0xa5c` mini_MedicArrow, for a
-  marker clamped to the map's edge) isn't drawn: the HUD's markers aren't
-  clamped.
+  marks his medics. The marked teammate is drawn in the call's icon,
+  white at full alpha and unturned. The medic, repair and ammunition
+  icons also take the 16 px mini_medicArrow (`+0xa5c`, `0x00793585`) in
+  the heading arrow's place. It isn't an edge arrow: it is a pin at the
+  icon's top ("The teammates", Map and spawn screen).
   `setSpottedMenuActive` (`0x268`, the middle button's alternate command)
   shows the spotted rose (`SpottedInterfaceShow`, whose buttons say
   `game.radioMessage TCTeam <kind>_spotted`). `sendSpottedMessage <bool>
@@ -12905,8 +13013,19 @@ rewritten:
 - The bots don't send squad requests (the players' do: see "Squad
   requests" below), so the AI commander's answers
   (orbital strike, supplies, UAV) never run.
-- Which order kind the minimap draws with which icon (it loads move,
-  attack, defend, repair, destroy, mine) isn't traced.
+- The minimap draws the squad's orders (`0x00779e50` the leader's,
+  squad slot 0x10 `0x004c2ee0`; `0x0077a1a0` the commander's, slot 0x14
+  `0x004c2ef0`; both through `0x00791090` → `0x0078b110`) with the icon
+  of their kind from two tables (`0x00786b7a`..): the leader's at
+  `+0x954`, the commander's at `+0x97c`, kinds 0..3 orbit_strike,
+  force_strike, icon_UAV, icon_supplies, 4..9 orderMove, orderAttack,
+  orderDefend, orderRepair, orderDestroy, orderMine (the commander's with
+  "Commander"). Until 2026-11-12 the rewrite drew only the commander's
+  order, a repair order with the move icon (`menu::orderMapIcon`;
+  `HudMenus_OrderMapIcons`). A commander's own map (player slot 0x128)
+  draws the orders of the squads selected in his screen (`DAT_00b2d148`
+  slot 0x2c4, slot 0x34; `CommanderMenu::selected`), where the rewrite's
+  had drawn none.
 
 In `bf2142` the commander's HUD buttons run console commands:
 `Commander.commanderApply` / `commanderResign`, the tool toggles
@@ -16960,7 +17079,12 @@ randomDeviationAngleSpeed (1)) × maxRandomChange (0.3); the offset is (cos
 a · sx, sin b · sy, sin a · sz) (π/180 at `0x101f6a98`), then a and b turn
 by (angleSpeed.x + their speed) × dt (both by x), wrapped past 360;
 uploaded as DEVIATIONGROUPS (+0x3c). Rewritten in `effects::Weather`
-(MSVC's rand from seed 1; a particle's group is its index mod 16).
+(MSVC's rand from seed 1). A particle's group is drawn as the particle
+is made (`0x1011b1b0`): rand() & 15 after the three rand()s of its place
+(`0x1011b0b0`), kept in its record's `+0x10` and written to its vertex's
+byte `0xd` (`0x1011cf00`), Rain.fx's Data.y (`Weather::groups`;
+`Effects_RainParticleGroupsAreRandom`). Until 2026-11-12 the rewrite took
+the index mod 16, which moved every sixteenth drop together.
 
 **Undergrowth sway.** The 16-offset walk once taken for the undergrowth's
 is the rain's (above). UndergrowthSystem's own (slot 0x24, `0x1010a900`,

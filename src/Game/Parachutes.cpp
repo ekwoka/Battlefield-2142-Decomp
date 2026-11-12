@@ -15,9 +15,12 @@
 //    parachute (0x005e45e0: its collision against the objects within 15 m).
 //    Taken, it opens: the round leaves at the soldier's frame plus the start
 //    position (0x005e4460, slot 53: 2 m over him) and its enterOnSpawn puts
-//    him in. (The press that lets that round go after the choice was not
-//    traced; the bots' only press is input 22, AIDLL 0x10099b70, so the
-//    choice opens it here.)
+//    him in. No press lets it go: a weapon shown (slot 10, 0x005c32f0,
+//    while its fire test passes) has its fire component's slot 33 fire
+//    the SpawnObjectFireComp (0x005e41e0 -> 0x005d4d80), and the choice
+//    (0x00589dc0) clears the falling flag +0x328 (0x00585bb0) that hides
+//    the soldier's weapons (0x005878b0), so the launcher fires as it is
+//    shown: here the choice opens it.
 //  - Entering (0x005cfaf0 after the PCO's 0x005cdd60): a parachute that
 //    isn't a pod (+0x4cc) is set upright about its heading (0x006ad2a0's
 //    angles, 0x005cfa40). The rider hangs at its seatInformation, visible

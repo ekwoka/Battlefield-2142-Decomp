@@ -196,6 +196,14 @@ public:
 		// > 0: the icon's side in metres (it scales with the map's zoom:
 		// the radar rings, 0x0078f060), over `size`.
 		float worldSize = 0;
+		// Kept on the map (the record's +0x30; 0x0077efb0 -> 0x0077e100):
+		// its point at least 0.02 / the zoom (+0x7cc over 0x0077b7b0's y)
+		// of the map's side in from the map's edges, about 3 pixels of
+		// the minimap; not the node's: off the node it is still cut away.
+		bool clamp = false;
+		// false: drawn at its own alpha, not the map's icon alpha (a
+		// call's marker on a teammate, 0x007841e0).
+		bool iconAlpha = true;
 	};
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }

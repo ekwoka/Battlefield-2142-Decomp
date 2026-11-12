@@ -413,8 +413,15 @@ void GameClient::suicide()
 
 void GameClient::remoteCommand(const std::string& command)
 {
-	// The line and its terminating NUL in one message (a payload holds 52 bytes).
-	sendEvent(makePostRemote(kMsgNetworkCategory, kNeRemoteConsoleCommand, command.substr(0, 51) + std::string(1, '\0')));
+	// The whole line as data block 6 (PlayerAuth.h kRconCommandBlock); an
+	// empty block would wedge the server's transfers, so none is sent.
+	if (command.empty()) {
+		return;
+	}
+	m_events.queue(makeDataBlockStart(kRconCommandBlock, static_cast<uint32_t>(command.size())));
+	for (size_t at = 0; at < command.size(); at += 63) {
+		m_events.queue(makeDataBlockChunk(command.substr(at, 63)));
+	}
 }
 
 void GameClient::say(const std::string& text, uint32_t channel)

@@ -786,9 +786,12 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 		m_age += seconds;
 		const float active = m_age - t.emitDelay;
 		m_speed = m_placed && seconds > 0 ? std::sqrt(physics::lengthSquared(m_position - m_lastPosition)) / seconds : 0.0f;
-		// A new point adds the system's +0x1c..+0x24 to its speed
-		// (0x1013b4b0); taken here as the velocity speedFromPhysics hands
-		// the system, else none (which writer fills it isn't traced).
+		// A new world point takes the speedFromPhysics velocity, +0xe4 (slot
+		// 0x4c) x +0xd4..+0xdc (slot 0x40), both 0 without it (0x1013acb0;
+		// constructor 0x1013b1e0), which emit adds as m_velocity. 0x1013b4b0
+		// then adds +0x1c..+0x24, set only by slot 0x90 (0x1013c010), which
+		// neither the exe's bundle code (0x00618000..0x0061c000) nor RendDX9's
+		// particle code calls: 0 (constructor, reset 0x1013b440).
 		m_velocity = physicsVelocity ? inheritedVelocity : Vec3 {};
 		m_lastPosition = m_position;
 		m_placed = true;
@@ -3069,9 +3072,12 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 	const Vec3 centre = m_centre;
 	if (static_cast<int>(m_positions.size()) != count) {
 		m_positions.resize(static_cast<size_t>(count));
-		for (Vec3& p : m_positions) {
-			p = centre + Vec3 {(m_random.unit() * 2 - 1) * radius.x, (m_random.unit() * 2 - 1) * radius.y,
+		m_groups.resize(static_cast<size_t>(count));
+		for (size_t i = 0; i < m_positions.size(); ++i) {
+			m_positions[i] = centre + Vec3 {(m_random.unit() * 2 - 1) * radius.x, (m_random.unit() * 2 - 1) * radius.y,
 				(m_random.unit() * 2 - 1) * radius.z};
+			// The group: rand() & 0x8000000f, so 0..15 (0x1011b1b0).
+			m_groups[i] = static_cast<uint8_t>(rand() & 15);
 		}
 	}
 	if (count == 0) {
@@ -3115,9 +3121,9 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 		Vec3 d = p - centre;
 		d = {wrap(d.x, radius.x), wrap(d.y, radius.y), wrap(d.z, radius.z)};
 		p = centre + d;
-		// Its deviation group's offset.
+		// Its deviation group's offset (vsPoint's deviations[Data.y]).
 		Drop drop;
-		drop.position = p + m_deviations[i % 16].offset;
+		drop.position = p + m_deviations[m_groups[i]].offset;
 		// vsPoint: 1 - |saturate((|delta| - range) / (radius - range))|.
 		const Vec3 over {std::clamp((std::fabs(d.x) - radius.x * fadeStart) / (radius.x * (1 - fadeStart)), 0.0f, 1.0f),
 			std::clamp((std::fabs(d.y) - radius.y * fadeStart) / (radius.y * (1 - fadeStart)), 0.0f, 1.0f),

@@ -57,6 +57,12 @@ public:
 	// Whether the view now is the first-person one (the soldier's eye or a
 	// seat's Inside camera).
 	bool insideView() const;
+	// The seat camera's colour (ICamera slots 0x84 / 0x7c / 0x80, 0x006105a0
+	// / 0x00610580 / 0x00610590: the Camera template's useColorTransform
+	// +0x444, colorTransform +0x434 and saturation +0x440, defaults 0,
+	// 1/1/1 and 1 at 0x00610fd0): false without a seat camera or with
+	// useColorTransform 0, which no shipped script sets.
+	bool viewColor(std::array<float, 3>& tint, float& saturation) const;
 	// The view when it isn't first person and the game places it: a seat
 	// camera's Nose, Chase, FrontChase, FlyBy or Trace view, the death
 	// camera, a followed player's or the free camera (false otherwise: the

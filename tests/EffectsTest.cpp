@@ -1058,6 +1058,31 @@ TEST(Effects_RainDeviationGroups)
 	CHECK(weather.deviations()[0].speed[0] == 0 && weather.deviations()[0].speed[1] == 0);
 }
 
+// A rain particle's deviation group is drawn as it is made, rand() & 15
+// (RendDX9 0x1011b1b0; Rain.fx Data.y from 0x1011cf00), not its index.
+TEST(Effects_RainParticleGroupsAreRandom)
+{
+	scene::RainSettings s;
+	s.enabled = true;
+	s.particleCount = 64;
+	effects::Weather weather;
+	weather.update(s, {}, 0);
+	const std::vector<uint8_t>& groups = weather.groups();
+	CHECK(groups.size() == 64);
+	// MSVC's rand() seeded 1: 41, 18467, 6334, 26500 ...
+	CHECK(groups[0] == (41 & 15) && groups[1] == (18467 & 15) && groups[2] == (6334 & 15) && groups[3] == (26500 & 15));
+	int byIndex = 0;
+	for (size_t i = 0; i < groups.size(); ++i) {
+		CHECK(groups[i] < 16);
+		byIndex += groups[i] == i % 16 ? 1 : 0;
+	}
+	CHECK(byIndex < 16);
+	// Kept while the count is.
+	const std::vector<uint8_t> before = groups;
+	weather.update(s, {}, 0.1f);
+	CHECK(weather.groups() == before);
+}
+
 // A vehicle's bundles seen from inside by its own occupant (0x006187c0:
 // the local player in the inside or nose view under the same root, no
 // neverDrawAs1p on the way; GameWorld::firstPersonEffects): their

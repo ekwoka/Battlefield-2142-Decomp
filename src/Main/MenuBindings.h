@@ -359,6 +359,12 @@ public:
 	// The library's new-bookmark flag (+0xb0, slots 0x40 / 0x44; set when
 	// a bookmark is added, 0x004b4710).
 	void setHasNewBookmark(bool value) { m_hasNewBookmark = value; }
+	// A joined client's notice of the server's demo (data block 9;
+	// 0x004b4710): LocalProfileManager slot 0xd0 adds the bookmark (the
+	// server's name from SwiffHost slot 0x338, the map, the URL, the time),
+	// slot 0x34(1) saves the profile, and the DemoLibrary's slot 0x44(1)
+	// sets the new-bookmark flag. Nothing without a profile's objects.
+	void addDemoBookmark(const std::string& serverName, const std::string& map, const std::string& url, uint32_t time);
 
 	// --- The window and the game's files
 

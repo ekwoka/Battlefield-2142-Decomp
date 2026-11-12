@@ -334,12 +334,15 @@ public:
 	// "{file}" replaced by the demo's file name (or the name appended),
 	// and the map. Each string an 8-bit length (at most 255 bytes kept
 	// here) and its bytes (0x00583ec0 writes, 0x00583d80 reads). The
-	// client's handler (0x004b5eb0 case 9) hands the URL to its +0xa8's
-	// slot 0x6c, not traced further: kept here.
+	// client's handler (0x004b5eb0 case 9) hands the URL and the map to
+	// its interface at +0xa8 (vtable 0x00928fa8), slot 0x6c 0x004b4710:
+	// a demo bookmark (MenuBindings::addDemoBookmark). demoNotice keeps the
+	// last; takeDemoNotice gives each once.
 	struct DemoNotice {
 		std::string url, map;
 	};
 	bool demoNotice(DemoNotice& out) const;
+	bool takeDemoNotice(DemoNotice& out);
 	static std::string encodeDemoNotice(const DemoNotice& notice);
 	static bool decodeDemoNotice(const std::string& block, DemoNotice& out);
 
@@ -449,6 +452,10 @@ public:
 	}
 	uint32_t radarReports() const { return m_radarReports; }
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
+	// The server's rcon answers (data block 7, PlayerAuth.h
+	// kRconFeedbackBlock), each as the console prints it: the text and a
+	// newline (0x004b5eb0 case 7, the suffix at 0x00918bf4).
+	std::vector<std::string> takeConsoleLines() { return std::exchange(m_consoleLines, {}); }
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
 	// The commanders' strike assets the server fired (kEvArtillery kind 2,
 	// the client's handler 0x0050eeb0): the client fires the asset's
@@ -547,6 +554,8 @@ private:
 	std::map<uint16_t, uint32_t> m_radarVehicles; // a vehicle's ghost -> the same
 	uint32_t m_radarReports = 0;
 	std::vector<PostRemoteInfo> m_messages;
+	std::vector<std::string> m_consoleLines;
+	bool m_newDemoNotice = false;
 	std::vector<GameEvent> m_unhandled;
 	std::vector<KickInfo> m_kicks;
 	std::vector<StrikeFireInfo> m_strikeFires;

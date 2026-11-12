@@ -1413,8 +1413,9 @@ public:
 	// step (RainSettings), then its offset is (cos a x size.x, sin b x
 	// size.y, sin a x size.z) and a and b turn by (angleSpeed.x + their
 	// speed) x the frame's seconds (both by angleSpeed's x), wrapped past
-	// 360. The particle's group is its index mod 16 (the original's
-	// vertex data, Rain.fx Data.y, isn't traced).
+	// 360. A particle's group (Rain.fx Data.y, the vertex's byte 0xd from
+	// its record's +0x10, 0x1011cf00) is drawn once as it is made: rand()
+	// & 15 after the three rand()s of its place (0x1011b1b0, 0x1011b0b0).
 	struct Deviation {
 		float angle[2] {};
 		float size[3] {};
@@ -1422,6 +1423,7 @@ public:
 		Vec3 offset;
 	};
 	const std::array<Deviation, 16>& deviations() const { return m_deviations; }
+	const std::vector<uint8_t>& groups() const { return m_groups; } // each particle's deviation group
 
 private:
 	void rebuildDeviations(const scene::RainSettings& settings);
@@ -1432,6 +1434,7 @@ private:
 	bool m_deviationsBuilt = false;
 	uint32_t m_randState = 1;
 	std::vector<Vec3> m_positions; // without the sway
+	std::vector<uint8_t> m_groups; // their deviation groups, 0..15
 	Vec3 m_centre;          // the box's centre (held while frozen)
 	bool m_centreSet = false;
 	std::vector<Drop> m_drops;

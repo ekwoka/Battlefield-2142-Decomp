@@ -1339,6 +1339,12 @@ TEST(MenuBindings_CommandLineDemosAndTexts)
 	CHECK(!avm1::toBoolean(mp("getHasNewBookmark")));
 	mp("setHasNewBookmark", {avm1::Value(true)});
 	CHECK(avm1::toBoolean(mp("getHasNewBookmark")));
+	// A joined server's demo notice (0x004b4710): the bookmark added, the flag set.
+	mp("setHasNewBookmark", {avm1::Value(false)});
+	bindings.addDemoBookmark("Three", "Minsk", "http://x/3", 1200000000);
+	CHECK(vm.toNumber(mp("getNumDemoBookmarks")) == 2 && avm1::toBoolean(mp("getHasNewBookmark")));
+	CHECK(objects.list("LocalProfile.DemoBookmark").back() == "\"Three\" \"Minsk\" \"http://x/3\" 1200000000");
+	CHECK(natives.listRows("demobm").size() == 2 && natives.listRows("demobm")[1][1] == "Three");
 
 	// The map texts: a level's .desc (its name, briefing locid, modes).
 	bindings.setMaps({{"Minsk", "gpm_ti", 32}, {"Minsk", "gpm_cq", 64}});

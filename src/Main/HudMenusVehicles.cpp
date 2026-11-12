@@ -1016,17 +1016,19 @@ const world::ObjectTemplate* childArmorTemplate(const world::ObjectTemplate* con
 	return walk(*controlled, 0);
 }
 
-bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon, bool zoomed)
+bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon,
+	const world::ObjectTemplate* second, int shownGuiIndex)
 {
-	if (controlled && hudNumber(controlled, "vehicleHud.enablePostProcessingOnGuiIndex", 0) != 0) {
+	if (controlled && static_cast<int>(hudNumber(controlled, "vehicleHud.guiIndex", 0)) == shownGuiIndex
+		&& static_cast<int>(hudNumber(controlled, "vehicleHud.enablePostProcessingOnGuiIndex", -1)) == shownGuiIndex) {
 		return true;
 	}
-	if (!weapon) {
-		return false;
+	for (const world::ObjectTemplate* w : {weapon, second}) {
+		if (w && static_cast<int>(hudNumber(w, "weaponHud.enablePostProcessingOnGuiIndex", -1)) == shownGuiIndex) {
+			return true;
+		}
 	}
-	const auto& settings = weapon->settings();
-	const auto on = settings.find("weaponHud.enablePostProcessingOnGuiIndex");
-	return on != settings.end() && std::atoi(on->second.c_str()) == weaponGuiIndex(weapon, zoomed);
+	return false;
 }
 
 bool soldierWeaponFlag(bool jumpHold, const world::ObjectTemplate* weapon)
@@ -1182,6 +1184,20 @@ std::string cameraRotationBundle(const world::ObjectTemplate& t, const world::Ob
 	std::string bundle;
 	walk(t, std::string(), 0, bundle);
 	return bundle;
+}
+
+std::string orderMapIcon(int kind, bool commander)
+{
+	static const char* const kTools[] = {"Ingame/Commander/tools/orbit_strike.tga", "Ingame/Commander/tools/force_strike.tga",
+		"Ingame/Minimap/Icons/icon_UAV.tga", "Ingame/Minimap/Icons/icon_supplies.tga"};
+	static const char* const kOrders[] = {"Move", "Attack", "Defend", "Repair", "Destroy", "Mine"};
+	if (kind >= 0 && kind < 4) {
+		return kTools[kind];
+	}
+	if (kind >= 4 && kind < 10) {
+		return std::string("Ingame/Minimap/Icons/order") + kOrders[kind - 4] + (commander ? "Commander.tga" : ".tga");
+	}
+	return kind == 10 && !commander ? kTools[0] : std::string();
 }
 
 std::string iconFrame(const std::string& icon, int frame)
@@ -1384,6 +1400,90 @@ std::string MapCalls::icon(int player) const
 		}
 	}
 	return {};
+}
+
+MateMarker mateMarker(const MateInput& in)
+{
+	MateMarker m;
+	// 0x0077d9f0 (slot 0x138): the commander's test comes after the squad
+	// leader's.
+	bool commanderIcon = false;
+	if (in.squadLeader && in.squad > 0) {
+		m.texture = "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_" + std::to_string(in.squad) + "_small.tga"; // 0x0077aa20
+		m.size = 16;
+		m.arrow = true;
+	} else if (in.commander) {
+		m.texture = "Ingame/Player/Icons/Minimap/mini_commander2.tga"; // +0xa1c: the local player's team
+		m.size = 32;
+		m.arrow = true;
+		commanderIcon = true;
+	} else {
+		m.texture = "Ingame/Player/Icons/Minimap/mini_Soldier.tga"; // +0xa28
+		m.size = 16;
+	}
+	m.arrowTexture = "Ingame/Player/Icons/Minimap/mini_headingArrow.tga"; // +0xa20
+	m.arrowSize = 32;
+	bool turned = true; // local_1f
+	if (!in.call.empty()) {
+		// 0x007841e0: the marker's icon (0x0077dfe0), white at 1
+		// (0x00781900's first test), and type 4 clears the turn.
+		m.texture = in.call;
+		m.size = 16;
+		m.iconAlpha = false;
+		turned = false;
+		// 0x00793585: the medic, repair and ammunition icons' arrow.
+		if (in.call.find("mini_Revive") == std::string::npos) {
+			m.arrow = true;
+			m.arrowTexture = "Ingame/Player/Icons/Minimap/mini_medicArrow.tga"; // +0xa5c
+			m.arrowSize = 16;
+		}
+	} else {
+		// 0x00781900's last tests (not in the map menus or the commander
+		// screen).
+		static const float kSquad[4] = {0.4f, 1, 0, 1};      // 0x00a0bb60
+		static const float kTeam[4] = {0.254f, 0.552f, 0.89f, 1}; // 0x00a0be60
+		static const float kWhite[4] = {1, 1, 1, 1};
+		const float* c = kTeam;
+		if (in.sharesVehicle && in.localSquad != 0) {
+			c = kSquad;
+		} else if (in.squad != 0 && in.squad == in.localSquad && !in.commander) {
+			c = kSquad;
+		} else if (in.commander && in.onFoot && commanderIcon) {
+			c = kWhite;
+		}
+		std::copy(c, c + 4, m.color);
+	}
+	const float yaw = turned ? in.yaw : 0.0f;
+	(m.arrow ? m.arrowYaw : m.yaw) = yaw;
+	// 0x00793a45..0x00793af9: under a half, (1, share, 0).
+	if (in.need && *in.need < 0.5f) {
+		m.disc = true;
+		m.discColor[0] = 1;
+		m.discColor[1] = std::clamp(*in.need, 0.0f, 1.0f);
+		m.discColor[2] = 0;
+		m.discColor[3] = 1;
+	}
+	return m;
+}
+
+std::optional<float> mateNeed(bool localHeals, bool localGivesAmmo, float distance, float health, int magazines, int nrOfMags,
+	int magSize)
+{
+	if ((!localHeals && !localGivesAmmo) || distance > 150) {
+		return std::nullopt;
+	}
+	if (localHeals && health >= 0) {
+		return health;
+	}
+	if (localGivesAmmo && magSize >= 0 && nrOfMags >= 0 && magazines >= 0) {
+		if (nrOfMags == 0) {
+			// The division by 0: -inf (a disc at 0) without a magazine,
+			// else inf or NaN (none).
+			return magazines == 0 ? std::optional<float>(-1.0f) : std::nullopt;
+		}
+		return (static_cast<float>(magazines) - 1) / static_cast<float>(nrOfMags);
+	}
+	return std::nullopt;
 }
 
 } // namespace dice::hfe::menu

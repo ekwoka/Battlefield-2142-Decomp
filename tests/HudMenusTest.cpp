@@ -12,6 +12,7 @@
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/HudWorld.h"
+#include "Render/TextureSuffix.h"
 #include "Console/ConsoleBinding.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
@@ -1432,6 +1433,105 @@ TEST(HudMap_RadioCallMarkers)
 	CHECK(calls.icon(5).empty());
 }
 
+// The teammates on the map (menu::mateMarker; 0x00792980, 0x0077d9f0,
+// 0x00781900, 0x007841e0): a soldier's teardrop turned by his heading in
+// the team's blue, the squad's green; a squad leader's numbered icon and a
+// commander's (white on foot) unturned under a black heading arrow; a
+// call's icon white at full alpha, unturned, with the medic arrow's pin
+// for the medic, repair and ammunition calls; the need disc under a half.
+TEST(HudMap_TeammateMarkers)
+{
+	menu::MateInput in;
+	in.yaw = 30;
+	menu::MateMarker m = menu::mateMarker(in);
+	CHECK(m.texture == "Ingame/Player/Icons/Minimap/mini_Soldier.tga" && m.size == 16 && m.yaw == 30 && !m.arrow);
+	CHECK(std::fabs(m.color[0] - 0.254f) < 1e-6f && std::fabs(m.color[1] - 0.552f) < 1e-6f && std::fabs(m.color[2] - 0.89f) < 1e-6f);
+	CHECK(m.iconAlpha && !m.disc);
+	in.squad = 3;
+	in.localSquad = 3;
+	m = menu::mateMarker(in);
+	CHECK(m.color[0] == 0.4f && m.color[1] == 1 && m.color[2] == 0);
+	in.localSquad = 2; // another squad
+	CHECK(menu::mateMarker(in).color[0] == 0.254f);
+	in.sharesVehicle = true; // in the local player's vehicle, and he has a squad
+	CHECK(menu::mateMarker(in).color[0] == 0.4f);
+	in.sharesVehicle = false;
+	in.squadLeader = true;
+	m = menu::mateMarker(in);
+	CHECK(m.texture == "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_3_small.tga" && m.size == 16 && m.yaw == 0);
+	CHECK(m.arrow && m.arrowTexture == "Ingame/Player/Icons/Minimap/mini_headingArrow.tga" && m.arrowSize == 32 && m.arrowYaw == 30);
+	menu::MateInput boss;
+	boss.commander = true;
+	boss.yaw = -45;
+	m = menu::mateMarker(boss);
+	CHECK(m.texture == "Ingame/Player/Icons/Minimap/mini_commander2.tga" && m.size == 32 && m.arrow && m.arrowYaw == -45);
+	CHECK(m.color[0] == 1 && m.color[1] == 1 && m.color[2] == 1);
+	boss.onFoot = false; // seated: the team's
+	CHECK(menu::mateMarker(boss).color[0] == 0.254f);
+	// A call's marker: a plain soldier gets the medic arrow, unturned.
+	menu::MateInput caller;
+	caller.yaw = 90;
+	caller.squad = caller.localSquad = 1;
+	caller.call = "Ingame/Player/Icons/Minimap/mini_Medic.tga";
+	m = menu::mateMarker(caller);
+	CHECK(m.texture == caller.call && m.size == 16 && m.yaw == 0 && !m.iconAlpha);
+	CHECK(m.color[0] == 1 && m.color[1] == 1 && m.color[2] == 1 && m.color[3] == 1);
+	CHECK(m.arrow && m.arrowTexture == "Ingame/Player/Icons/Minimap/mini_medicArrow.tga" && m.arrowSize == 16 && m.arrowYaw == 0);
+	caller.call = "Ingame/Player/Icons/Minimap/mini_Revive.tga";
+	CHECK(!menu::mateMarker(caller).arrow);
+	caller.squadLeader = true; // keeps his heading arrow, unturned
+	m = menu::mateMarker(caller);
+	CHECK(m.arrow && m.arrowTexture == "Ingame/Player/Icons/Minimap/mini_headingArrow.tga" && m.arrowYaw == 0);
+	// The need disc: a healer's teammate at 30 % within 150 m; ammunition
+	// (magazines with the gun's, less 1, over nrOfMags) for a giver.
+	CHECK(!menu::mateNeed(false, false, 10, 0.3f, 3, 4, 30));
+	CHECK(!menu::mateNeed(true, false, 151, 0.3f, 3, 4, 30));
+	CHECK(menu::mateNeed(true, true, 150, 0.3f, 1, 4, 30) == 0.3f);
+	CHECK(menu::mateNeed(false, true, 20, 0.3f, 3, 4, 30) == 0.5f);
+	CHECK(menu::mateNeed(true, true, 20, -1, 2, 4, 30) == 0.25f); // no armour: the ammunition
+	CHECK(!menu::mateNeed(false, true, 20, 1, 3, -1, 30) && !menu::mateNeed(false, true, 20, 1, 3, 4, -1));
+	in = {};
+	in.need = 0.3f;
+	m = menu::mateMarker(in);
+	CHECK(m.disc && m.discColor[0] == 1 && m.discColor[1] == 0.3f && m.discColor[2] == 0);
+	in.need = 0.5f;
+	CHECK(!menu::mateMarker(in).disc);
+	in.need = -1.0f;
+	m = menu::mateMarker(in);
+	CHECK(m.disc && m.discColor[1] == 0);
+	// Every icon named loads from the shipped menu archive, by its name or
+	// as the texture load's fallback (render::textureFallbackPaths: the
+	// minimap's ".tga" names ship as .dds).
+	if (const char* gameDir = std::getenv("BF2142_GAME_DIR")) {
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath("mods/bf2142");
+		CHECK(files.mountArchive("Menu_client.zip", "Menu"));
+		const auto loads = [&files](const std::string& name) {
+			std::vector<uint8_t> data;
+			const std::string path = "Menu/HUD/Texture/" + name;
+			if (files.readFile(path, data)) {
+				return true;
+			}
+			for (const std::string& other : render::textureFallbackPaths(path)) {
+				if (files.readFile(other, data)) {
+					return true;
+				}
+			}
+			return false;
+		};
+		for (const char* name : {"Ingame/Player/Icons/Minimap/mini_Soldier.tga", "Ingame/Player/Icons/Minimap/mini_commander2.tga",
+				 "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_9_small.tga",
+				 "Ingame/Player/Icons/Minimap/mini_headingArrow.tga", "Ingame/Player/Icons/Minimap/mini_medicArrow.tga",
+				 "Ingame/Player/Icons/Minimap/mini_Health.tga"}) {
+			CHECK(loads(name));
+		}
+		for (int code = 0x33; code <= 0x37; ++code) {
+			CHECK(loads(menu::MapCalls::iconOf(code)));
+		}
+	}
+}
+
 // The vehicle HUD's torque arrows and sprint (0x007a2e60): the torque eased
 // a hundredth a frame (its source +0x2f4 has no writer: 0), the stamina
 // bar while sprinting or below 1 and its text for 3 s after it fell.
@@ -1902,8 +2002,21 @@ TEST(HudVehicle_SeatZoomGuiIndex)
 	CHECK(menu::weaponGuiIndex(tank, false) == 12 && menu::weaponGuiIndex(tank, true) == 13);
 	CHECK(menu::weaponGuiIndex(at, false) == 65 && menu::weaponGuiIndex(at, true) == 65);
 	CHECK(menu::weaponGuiIndex(nullptr, true) == 0);
-	CHECK(!menu::seatPostProcessing(nullptr, tank, false) && menu::seatPostProcessing(nullptr, tank, true));
-	CHECK(menu::seatPostProcessing(nullptr, at, false) && menu::seatPostProcessing(nullptr, at, true));
+	const auto post = [](const world::ObjectTemplate* seat, const world::ObjectTemplate* gun, bool zoomed) {
+		return menu::seatPostProcessing(seat, gun, nullptr, menu::weaponGuiIndex(gun, zoomed));
+	};
+	CHECK(!post(nullptr, tank, false) && post(nullptr, tank, true));
+	CHECK(post(nullptr, at, false) && post(nullptr, at, true));
+	// A seat's own flag (0x006573a0): only when its guiIndex and the flag
+	// both name the index shown. The shipped seats' 1 with guiIndex 0
+	// (the APC pod cannons) never turns it on.
+	world::ObjectTemplate* pod = templates.create("PlayerControlObject", "eu_apc_PodCannon");
+	pod->settings()["vehicleHud.enablePostProcessingOnGuiIndex"] = "1";
+	CHECK(!menu::seatPostProcessing(pod, nullptr, nullptr, 0) && !menu::seatPostProcessing(pod, nullptr, nullptr, 1));
+	pod->settings()["vehicleHud.guiIndex"] = "1";
+	CHECK(menu::seatPostProcessing(pod, nullptr, nullptr, 1) && !menu::seatPostProcessing(pod, nullptr, nullptr, 0));
+	// The second weapon's flag too.
+	CHECK(menu::seatPostProcessing(nullptr, nullptr, at, 65) && !menu::seatPostProcessing(nullptr, tank, at, 12));
 	tank->settings()["weaponHud.altGuiIndex"] = "-1";
 	CHECK(menu::weaponGuiIndex(tank, true) == 12);
 }
@@ -2278,4 +2391,20 @@ TEST(HudMenus_CreateSquadJoinedWithoutTheBox)
 	remote.players[0].squad = 0;
 	remote.players[0].commander = true;
 	CHECK(!s.squads.createSquad(0) && created.size() == 2);
+}
+
+// The orders' minimap icons by kind (0x0078b110 over the tables of
+// 0x00786b7a..): the leader's plain, the commander's "Commander" ones;
+// a repair order shows the repair icon, not the move one.
+TEST(HudMenus_OrderMapIcons)
+{
+	CHECK(menu::orderMapIcon(4, true) == "Ingame/Minimap/Icons/orderMoveCommander.tga");
+	CHECK(menu::orderMapIcon(5, true) == "Ingame/Minimap/Icons/orderAttackCommander.tga");
+	CHECK(menu::orderMapIcon(6, false) == "Ingame/Minimap/Icons/orderDefend.tga");
+	CHECK(menu::orderMapIcon(7, true) == "Ingame/Minimap/Icons/orderRepairCommander.tga");
+	CHECK(menu::orderMapIcon(9, false) == "Ingame/Minimap/Icons/orderMine.tga");
+	CHECK(menu::orderMapIcon(0, false) == "Ingame/Commander/tools/orbit_strike.tga");
+	CHECK(menu::orderMapIcon(2, true) == "Ingame/Minimap/Icons/icon_UAV.tga");
+	CHECK(menu::orderMapIcon(10, false) == "Ingame/Commander/tools/orbit_strike.tga");
+	CHECK(menu::orderMapIcon(10, true).empty() && menu::orderMapIcon(-1, false).empty() && menu::orderMapIcon(11, false).empty());
 }

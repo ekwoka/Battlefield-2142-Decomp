@@ -866,6 +866,13 @@ dice::hfe::menu::MapCalls::Kit mapCallKit(game::GameWorld& round, uint32_t kit)
 // The big map (the HUD's menu state 2, MapShow at full size): c_GIMapSize
 // toggles it while alive (0x00754290 → 0x0074fd90(2)).
 bool g_bigMap = false;
+// The gui index the vehicle HUD shows (the HUD manager's +0xa0; 0 on foot),
+// which the seat's post-processing asks with (0x007a0080).
+int g_guiIndex = 0;
+const dice::hfe::world::ObjectTemplate* g_guiSecondWeapon = nullptr; // the seat's second group's gun
+// The commander screen's selected squads (CommanderMenu::selected), whose
+// orders the commander's map draws.
+const std::set<int>* g_commanderSquads = nullptr;
 // The local round's overhead camera (the commander's, HudMenus.h): its
 // point is g_commanderView's.
 dice::hfe::menu::OverheadCamera g_overheadCamera;
@@ -994,7 +1001,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	}
 	// The vehicles (Bf2MenuMapNode 0x00793b60; see HudMenusVehicles.h): by
 	// their relation to the player, filtered by Minimap.setPaintVehicle's
-	// vehicleType bits, tinted like the players (0x00b3be30: no team
+	// vehicleType bits, tinted by the table 0x00b3be30 (no team
 	// white, a team 0.7 grey), turned by the vehicle.
 	for (const auto& vehicle : world.vehicleList()) {
 		const world::Object* object = round.objects().find(vehicle.object);
@@ -1119,17 +1126,58 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		drawnMates.push_back({player.id, mapCallKit(round, player.kit)});
 	}
 	g_mapCalls.place(drawnMates);
+	// The teammates (0x00792980; menu::mateMarker): the need disc, the
+	// arrow and the icon, kept on the map; one with a call's marker over
+	// the rest (0x007841e0, 0x007829c0).
+	const dice::hfe::menu::MapCalls::Kit localKit = mapCallKit(round, me.kit);
 	for (const auto& player : world.playerList()) {
 		if (!player.alive || player.team != me.team || player.id == me.id) {
 			continue;
 		}
-		// Players: 16 px, tinted 0.7 grey (table 0x00b3be30); one with a
-		// call's marker in its icon, over the rest (0x007841e0, 0x007829c0).
-		const std::string call = g_mapCalls.icon(player.id);
-		hud::HudManager::MapMarker mate {call.empty() ? "Ingame/Player/Icons/Minimap/mini_Soldier.dds" : call, player.position.x,
-			player.position.z, 16};
-		mate.color[0] = mate.color[1] = mate.color[2] = 0.7f;
-		(call.empty() ? markers : callMarkers).push_back(mate);
+		dice::hfe::menu::MateInput in;
+		in.commander = player.commander;
+		in.squadLeader = player.squadLeader;
+		in.squad = player.squad;
+		in.localSquad = me.squad;
+		in.sharesVehicle = me.alive && me.vehicle != 0 && player.vehicle == me.vehicle;
+		in.onFoot = player.vehicle == 0 || player.ladder != 0;
+		in.yaw = player.yaw;
+		in.call = g_mapCalls.icon(player.id);
+		if (localKit.heal || localKit.ammo) {
+			int magazines = -1, nrOfMags = -1, magSize = -1;
+			for (const game::GameWorld::WeaponAmmo& ammo : round.weaponAmmo(player.id)) {
+				if (ammo.inHand) {
+					magazines = ammo.magsLeft + 1;
+					nrOfMags = ammo.magazines;
+					magSize = ammo.magSize;
+				}
+			}
+			const float dx = player.position.x - me.position.x, dy = player.position.y - me.position.y,
+						dz = player.position.z - me.position.z;
+			in.need = dice::hfe::menu::mateNeed(localKit.heal, localKit.ammo, std::sqrt(dx * dx + dy * dy + dz * dz),
+				player.soldier ? world.objectHealth(player.soldier) : -1, magazines, nrOfMags, magSize);
+		}
+		const dice::hfe::menu::MateMarker look = dice::hfe::menu::mateMarker(in);
+		auto& list = in.call.empty() ? markers : callMarkers;
+		if (look.disc) {
+			hud::HudManager::MapMarker disc {"Ingame/Player/Icons/Minimap/mini_Health.tga", player.position.x, player.position.z, 16};
+			std::copy(look.discColor, look.discColor + 4, disc.color);
+			disc.clamp = true;
+			disc.iconAlpha = look.iconAlpha;
+			list.push_back(disc);
+		}
+		if (look.arrow) {
+			hud::HudManager::MapMarker arrow {look.arrowTexture, player.position.x, player.position.z, look.arrowSize, look.arrowYaw};
+			arrow.color[0] = arrow.color[1] = arrow.color[2] = 0; // 0x00792b0d: (0, 0, 0)
+			arrow.clamp = true; // at the icon's point, which is kept on the map
+			arrow.iconAlpha = look.iconAlpha;
+			list.push_back(arrow);
+		}
+		hud::HudManager::MapMarker mate {look.texture, player.position.x, player.position.z, look.size, look.yaw};
+		std::copy(look.color, look.color + 4, mate.color);
+		mate.clamp = true;
+		mate.iconAlpha = look.iconAlpha;
+		list.push_back(mate);
 	}
 	// The commander screen's mini-map tab (HudManager::drawMiniMap): the
 	// team's players as dots coloured by 0x007e7580 (the local player's
@@ -1170,12 +1218,29 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			markers.push_back({"Ingame/Minimap/Icons/icon_supplies.tga", object->position().x, object->position().z, 20});
 		}
 	}
-	if (const auto* order = me.squad ? round.squadOrder(me.team, me.squad) : nullptr) {
-		using Order = game::GameWorld::OrderType;
-		const bool attack = order->type == Order::Attack || order->type == Order::MapAttack;
-		const bool defend = order->type == Order::Defend || order->type == Order::MapDefend;
-		const char* icon = attack ? "orderAttackCommander.tga" : defend ? "orderDefendCommander.tga" : "orderMoveCommander.tga";
-		markers.push_back({std::string("Ingame/Minimap/Icons/") + icon, order->position.x, order->position.z, 24});
+	// The squad's leader order and commander order, each by its kind
+	// (menu::orderMapIcon: 0x00779e50 / 0x0077a1a0 → 0x00791090 →
+	// 0x0078b110); the commander's map (player slot 0x128) those of the
+	// squads selected in his screen (DAT_00b2d148 slot 0x2c4, slot 0x34).
+	std::vector<int> orderSquads;
+	const int commander = g_remoteHud ? g_remoteHud->commander(me.team) : round.commander(me.team);
+	if (known && commander == me.id) {
+		if (g_commanderSquads) {
+			orderSquads.assign(g_commanderSquads->begin(), g_commanderSquads->end());
+		}
+	} else if (me.squad) {
+		orderSquads.push_back(me.squad);
+	}
+	for (const int squad : orderSquads) {
+		for (const bool fromCommander : {false, true}) {
+			game::GameWorld::SquadOrder order;
+			if (world.squadOrder(me.team, squad, fromCommander, order)) {
+				const std::string icon = menu::orderMapIcon(static_cast<int>(order.type), fromCommander);
+				if (!icon.empty()) {
+					markers.push_back({icon, order.position.x, order.position.z, 24});
+				}
+			}
+		}
 	}
 	// Enemies a recon drone's pulse revealed to the team, in red.
 	// The satellite scan's enemies, shown to the commander only (0x0057cfb0).
@@ -1548,9 +1613,13 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			// The HUD's sprint flag in a seat: the vehicle's boost (0x007a2e60);
 			// its weapon flag the last on foot.
 			gui.sprintTest = dice::hfe::menu::guiSprintTest(look.sprinting, g_hudWeaponFlag);
-			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::vehicleGuiIndex(gui)));
+			g_guiIndex = dice::hfe::menu::vehicleGuiIndex(gui);
+			g_guiSecondWeapon = gui.second;
+			hud.set("GuiIndex", static_cast<float>(g_guiIndex));
 		}
 	} else {
+		g_guiIndex = 0;
+		g_guiSecondWeapon = nullptr;
 		g_vehicleHud.clear(hud);
 	}
 	// Compass headings, degrees clockwise from north (+z): the vehicle's
@@ -4768,6 +4837,10 @@ int runGame(Options& options, Session& session)
 		// The commander screen's tabs and squad list (CommanderMenu.*).
 		dice::hfe::menu::CommanderMenu commanderMenu(round, hudManager);
 		commanderMenu.bind(console);
+		g_commanderSquads = &commanderMenu.selected();
+		const struct CommanderSquadsReset {
+			~CommanderSquadsReset() { g_commanderSquads = nullptr; }
+		} commanderSquadsReset;
 		commanderMenu.ctrlHeld = [] { return g_ctrlHeld; };
 		commanderMenu.shiftHeld = [] { return g_shiftHeld; };
 		// The leader's voice on or off (as the scoreboard's mute box), and
@@ -7463,6 +7536,17 @@ int runGame(Options& options, Session& session)
 			// leader that asked (his line; his radio to the commander comes
 			// as a RadioMessage), 2/0x1d to the commander (the squad and the
 			// kind).
+			// The server's demo just recorded (data block 9, 0x004b5eb0 case
+			// 9 → 0x004b4710): a bookmark in the profile, the library's flag.
+			if (net::RemoteWorld::DemoNotice notice; client.world().takeDemoNotice(notice) && session.menuBindings) {
+				session.menuBindings->addDemoBookmark(client.world().serverName(), notice.map, notice.url,
+					static_cast<uint32_t>(std::time(nullptr)));
+			}
+			// The server's rcon answers (data block 7, 0x004b5eb0 case 7): to
+			// the console's output.
+			for (const std::string& line : client.world().takeConsoleLines()) {
+				std::fputs(line.c_str(), stdout);
+			}
 			std::vector<net::PostRemoteInfo> offers;
 			for (const net::PostRemoteInfo& message : client.world().takeMessages()) {
 				if (message.category == 2 && message.id == 0x23) {
@@ -8821,17 +8905,18 @@ int runGame(Options& options, Session& session)
 			// Through a guided round's camera (useProjectileCamera): the
 			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect").
 			host::roundCameraEffects(round, round.localPlayer(), effects);
+			effects.viewTinted = playerCamera.viewColor(effects.viewTint, effects.viewSaturation);
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
 				effects.vehicleEmpLevel = round.empLevel(me.vehicle);
 				const auto seats = round.vehicleSeats(me.vehicle);
 				const world::ObjectTemplate* gun = me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()
 					? round.templates().find(seats[static_cast<size_t>(me.seat)].weapon)
 					: nullptr;
-				// The seat's vehicleHud.enablePostProcessingOnGuiIndex, or the
-				// gun's weaponHud index naming the HUD shown (HudMenusVehicles.h).
+				// The seat's or its guns' enablePostProcessingOnGuiIndex naming
+				// the gui index shown (HudMenusVehicles.h seatPostProcessing).
 				if (playerCamera.insideView()) {
 					effects.cameraEffect =
-						dice::hfe::menu::seatPostProcessing(controlledTemplate(round, me), gun, playerCamera.zoomed());
+						dice::hfe::menu::seatPostProcessing(controlledTemplate(round, me), gun, g_guiSecondWeapon, g_guiIndex);
 				}
 			}
 			for (const auto& titan : round.titans()) {

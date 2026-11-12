@@ -202,10 +202,10 @@ public:
 	void sayAll(const std::string& text);
 	void sayTeam(int team, const std::string& text);
 	// The remote console in the game: a client's "rcon <command>" comes as
-	// message 6/0x12 (the client's 0x004b6630 case 0x12 sends the line;
-	// the server's 0x004b0690 case 0x12 raises the scripts' RemoteCommand
-	// with the player), the reply as 6/0x13 (host.rcon_feedback, 0x00442940:
-	// "rcon: <text>").
+	// data block 6 (the client's 0x004b6630 case 0x12 sends the line; the
+	// server's 0x004aef10 raises the scripts' RemoteCommand with the
+	// player), the reply as data block 7 (host.rcon_feedback, 0x00442940:
+	// "rcon: <text>", sent by 0x004b0690 case 0x13). PlayerAuth.h.
 	std::function<void(int player, const std::string& command)> onRemoteCommand;
 	void sendRemoteFeedback(int player, const std::string& text);
 	// A chat line a client said (for the scripts' ChatMessage: player, text,

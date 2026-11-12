@@ -268,19 +268,29 @@ TEST(ServerAdmin_HostedKickBanAndMessages)
 	const std::string list = run(console, "admin.listPlayers");
 	CHECK(list.find("Joiner is remote ip: 127.0.0.1:") != std::string::npos);
 
-	// In-game rcon: the line to the server, its answer back.
+	// In-game rcon: the line to the server as data block 6 (0x004aef10),
+	// its answer back whole as data block 7 (0x004b0690 case 0x13 →
+	// 0x004b5eb0 case 7), however long.
 	client.remoteCommand("login secret");
-	bool answered = false;
+	std::string answer;
 	CHECK(pumpUntil(step, [&] {
-		for (const net::PostRemoteInfo& m : client.world().takeMessages()) {
-			if (m.category == net::kMsgNetworkCategory && m.id == net::kNeRemoteConsoleFeedback && m.payloadInt() == -1
-				&& m.payload.find("rcon: Authentication successful") != std::string::npos) {
-				answered = true;
-			}
+		for (const std::string& line : client.world().takeConsoleLines()) {
+			answer += line;
 		}
-		return answered;
+		return !answer.empty();
 	}));
+	CHECK(answer == "rcon: Authentication successful, rcon ready.\n\n");
 	CHECK(commands.size() == 1 && commands[0] == "login secret");
+	const std::string longLine = "admin.listPlayers " + std::string(120, 'x');
+	client.remoteCommand(longLine);
+	answer.clear();
+	CHECK(pumpUntil(step, [&] {
+		for (const std::string& line : client.world().takeConsoleLines()) {
+			answer += line;
+		}
+		return !answer.empty();
+	}));
+	CHECK(commands.size() == 2 && commands[1] == longLine);
 
 	// A server message (Game.sayAll).
 	CHECK(run(console, "Game.sayAll \"server here\"").empty());
@@ -714,12 +724,20 @@ TEST(ServerAdmin_AutoDemoHookSendsMessage9)
 	};
 	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && hosted.recordingDemo(); }));
 	const std::string file = hosted.autoDemo();
-	hosted.changeLevel(round, logic, templates, setup); // the round's restart stops it and runs the hook
+	// The round's end (the game status's end of game, 0x00585ac0) stops it
+	// and runs the hook, before the end-of-round delay.
+	logic.endGame(1, 3);
+	step();
+	CHECK(hosted.autoDemo().empty());
+	hosted.changeLevel(round, logic, templates, setup);
 	net::RemoteWorld::DemoNotice notice;
 	CHECK(pumpUntil(step, [&] { return client.world().demoNotice(notice); }, 8000));
 	const std::string name = std::filesystem::path(file).filename().string();
 	CHECK(notice.url == "http://demos.example/" + name + "?dl=1");
 	CHECK(notice.map == "Camp_Gibraltar");
+	// Each notice is taken once (the bookmark, 0x004b4710).
+	net::RemoteWorld::DemoNotice taken;
+	CHECK(client.world().takeDemoNotice(taken) && taken.url == notice.url && !client.world().takeDemoNotice(taken));
 	client.disconnect();
 	std::filesystem::remove_all(root);
 }

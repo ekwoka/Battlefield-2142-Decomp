@@ -152,6 +152,14 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 	};
 	m_server.onLeft = [this](int client) { left(client); };
 	m_server.onPlayerInfo = [this](int client) { m_loginChecks.push_back(client); };
+	// A client's "rcon <line>" (data block 6, 0x004aef10): the scripts'
+	// RemoteCommand with its player.
+	m_server.onRemoteCommand = [this](int client, const std::string& line) {
+		const auto it = m_clients.find(client);
+		if (it != m_clients.end() && it->second.player >= 0 && onRemoteCommand) {
+			onRemoteCommand(it->second.player, line);
+		}
+	};
 	m_server.onEvent = [this](int client, const net::GameEvent& e) { event(client, e); };
 	m_server.onMove = [this](int client, const net::PlayerMove& move) {
 		if (const auto it = m_clients.find(client); it != m_clients.end()) {
@@ -330,19 +338,16 @@ void HostedGame::sayTeam(int team, const std::string& text)
 
 void HostedGame::sendRemoteFeedback(int player, const std::string& text)
 {
-	// 6/0x13 to the player's client: -1 (its console) and the text, as
-	// many messages as the text needs (a PostRemote payload holds 52 bytes).
+	// 0x004b0690 case 0x13: the whole "rcon: " + text as data block 7 to
+	// the player's connection (PlayerAuth.h kRconFeedbackBlock), which its
+	// client prints (0x004b5eb0 case 7).
 	const std::string reply = "rcon: " + text;
 	for (const auto& [id, client] : m_clients) {
 		if (client.player != player) {
 			continue;
 		}
-		for (size_t at = 0; at < reply.size() || at == 0; at += 48) {
-			sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeRemoteConsoleFeedback,
-				net::int32Payload(-1) + reply.substr(at, 48)));
-			if (reply.empty()) {
-				break;
-			}
+		for (const net::GameEvent& e : net::dataBlockEvents(net::kRconFeedbackBlock, reply)) {
+			sendTo(id, e);
 		}
 	}
 }
@@ -1308,9 +1313,13 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			break;
 		}
-		case net::kNeRemoteConsoleCommand: // "rcon <command>" typed in the client's console
+		case net::kNeRemoteConsoleCommand:
+			// Posted to the server's own event manager, 6/0x12 is its own
+			// console's "rcon <line>": 0x004b0690 case 0x12 raises
+			// RemoteCommand with player -1, whoever sent it. A client's line
+			// comes as data block 6 (m_server.onRemoteCommand).
 			if (onRemoteCommand) {
-				onRemoteCommand(player, info.payload.substr(0, info.payload.find('\0')));
+				onRemoteCommand(-1, info.payload.substr(0, info.payload.find('\0')));
 			}
 			break;
 		case net::kNeSuicide: {
@@ -3738,6 +3747,11 @@ void HostedGame::tick()
 	}
 	if (m_logic->ended() && !m_roundEndSent) {
 		m_roundEndSent = true;
+		// The game status's end of game (event 0/1 with 2) stops the
+		// AutoRecorder (0x00585ac0 → 0x00585920), before the end-of-round
+		// delay; the round's restart (0x004ba0c0) and changeLevel stop it
+		// too, the map change (0x004bc850) doesn't.
+		stopAutoDemo();
 		sendToPlaying(eventOf(net::kEvEndOfRound,
 			{0, static_cast<uint32_t>(m_logic->winner()), static_cast<uint32_t>(m_logic->victoryType())}));
 	}

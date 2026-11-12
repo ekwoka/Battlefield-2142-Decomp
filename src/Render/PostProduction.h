@@ -42,10 +42,13 @@ struct PostEffects {
 	// and the soldier's own (0 none).
 	int vehicleEmpLevel = 0;
 	int soldierEmpLevel = 0;
-	// The vehicle's view colour (the view's slot 0x84 on: saturation 0 and
-	// this tint; off: neutral).
+	// The view's colour (the player's camera, ICamera slot 0x84 on: this
+	// tint, slot 0x7c, at its saturation, slot 0x80, pushed before the
+	// tint's call: RendDX9 0x1002e44c / 0x1002983a → 0x1004a280; off:
+	// neutral). PlayerCamera::viewColor.
 	bool viewTinted = false;
 	std::array<float, 3> viewTint {1, 1, 1};
+	float viewSaturation = 1;
 	// CameraEffect instead of the plain grade.
 	bool cameraEffect = false;
 	// TVEffect (PostProduction's "TVEffect", the PostProcess component's
@@ -205,7 +208,7 @@ public:
 			if (vehicleLevel > 0) {
 				if (effects.viewTinted) {
 					empTint = effects.viewTint;
-					empSaturation = 0;
+					empSaturation = effects.viewSaturation;
 				}
 			} else {
 				level = soldierLevel == 3 ? 5 : soldierLevel + 3;
@@ -234,8 +237,8 @@ public:
 			m_empSwing = 0;
 			if (vehicleLevel == 0 && effects.viewTinted && effects.vehicleEmpLevel >= 0) {
 				// No EMP: the view's colour as a second grade (ColorTransform
-				// again with the vehicle's tint, saturation 0).
-				colorGrade(effects.viewTint, 0, u.empColorRow);
+				// again with the view's tint and saturation, 0x10029852).
+				colorGrade(effects.viewTint, effects.viewSaturation, u.empColorRow);
 				mode |= kPostViewGrade;
 			}
 		}

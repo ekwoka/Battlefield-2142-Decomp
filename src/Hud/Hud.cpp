@@ -1784,8 +1784,15 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	}
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
 	for (const MapMarker& marker : m_mapMarkers) {
-		const float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
-		const float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
+		float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
+		float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
+		if (marker.clamp && m_mapZoomShown[1] > 0) {
+			// 0x0077e100: the point about the map's centre within
+			// +-(0.5 - 0.02 / zoom) of its side, both axes by the y zoom.
+			const float k = std::min(0.02f / m_mapZoomShown[1], 0.5f);
+			u = std::clamp(u, k, 1 - k);
+			v = std::clamp(v, k, 1 - k);
+		}
 		float sx = mapX + u * mapW, sy = mapY + v * mapH;
 		// 0x0077c610: the icon turned about its point by its angle less the
 		// map's turn, then with the map about the node's centre: its point
@@ -1807,7 +1814,8 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
-			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * iconAlpha}, marker.yaw - turnDegrees};
+			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
+			marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;

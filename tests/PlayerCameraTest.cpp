@@ -100,6 +100,18 @@ TEST(PlayerCamera_UnnamedSeatsUseTheirOwnCameras)
 	CHECK(cam.view(eye, 4.0f / 3.0f));
 	CHECK(std::fabs(eye.position[0] - 7.5f) < 1e-4f && std::fabs(eye.position[1] - 2) < 1e-4f
 		&& std::fabs(eye.position[2] - 21) < 1e-4f);
+	// The seat camera's colour (ICamera slots 0x84 / 0x7c / 0x80): only
+	// with useColorTransform; saturation 1 by default (0x00610fd0).
+	std::array<float, 3> tint {};
+	float saturation = -1;
+	CHECK(!cam.viewColor(tint, saturation));
+	templates.find("ifv_side_cam")->settings()["useColorTransform"] = "1";
+	templates.find("ifv_side_cam")->settings()["colorTransform"] = "0.5/1/0.25";
+	CHECK(cam.viewColor(tint, saturation) && tint[0] == 0.5f && tint[1] == 1 && tint[2] == 0.25f && saturation == 1);
+	templates.find("ifv_side_cam")->settings()["saturation"] = "0.2";
+	CHECK(cam.viewColor(tint, saturation) && std::fabs(saturation - 0.2f) < 1e-6f);
+	seat = 0;
+	CHECK(!cam.viewColor(tint, saturation));
 }
 
 // A seat placed turned (eu_fav_openPosition: addTemplate ... setRotation

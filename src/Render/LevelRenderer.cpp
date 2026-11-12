@@ -279,9 +279,19 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 	// The level's customTextureSuffix variant where one exists (0x10018ca0).
 	const std::string variant = customSuffixedTexturePath(path, m_textureSuffix);
 	const bool swapped = !variant.empty() && files.readFile(variant, data);
-	if (swapped || files.readFile(path, data)) {
+	std::string found = swapped ? variant : files.readFile(path, data) ? lower(path) : std::string();
+	if (found.empty()) {
+		// Not there by its own name: with ".dds", then bare (0x10017340).
+		for (const std::string& name : textureFallbackPaths(path)) {
+			if (files.readFile(name, data)) {
+				found = lower(name);
+				break;
+			}
+		}
+	}
+	if (!found.empty()) {
 		// By the name read (the key may carry "#skip").
-		const std::string read = swapped ? variant : lower(path);
+		const std::string& read = found;
 		const bool targa = read.size() > 4 && read.compare(read.size() - 4, 4, ".tga") == 0;
 		if (auto image = targa ? texture::parseTga(data) : texture::parseDds(data)) {
 			texture::skipTopLevels(*image, skip);

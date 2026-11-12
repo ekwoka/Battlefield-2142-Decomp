@@ -846,6 +846,23 @@ TEST(RenderScene_CustomTextureSuffix)
 	CHECK(customSuffixedTexturePath("rad_2041100.dds", "HEAT").empty());
 }
 
+// The texture load's name (0x10017f20 -> 0x10017340): as given, else
+// with ".dds", else bare. The map node's "mini_Medic.tga" ships only as
+// mini_Medic.dds.
+TEST(RenderScene_TextureFallbackNames)
+{
+	using namespace dice::hfe::render;
+	const auto medic = textureFallbackPaths("Menu/HUD/Texture/Ingame/Player/Icons/Minimap/mini_Medic.tga");
+	CHECK(medic.size() == 2);
+	if (medic.size() == 2) {
+		CHECK(medic[0] == "Menu/HUD/Texture/Ingame/Player/Icons/Minimap/mini_Medic.dds");
+		CHECK(medic[1] == "Menu/HUD/Texture/Ingame/Player/Icons/Minimap/mini_Medic");
+	}
+	const auto dds = textureFallbackPaths("textures/x.dds");
+	CHECK(dds.size() == 1 && dds[0] == "textures/x");
+	CHECK(textureFallbackPaths("levels/a.b/noextension").empty());
+}
+
 TEST(RenderScene_RoadStaticMeshTechniques)
 {
 	using namespace dice::hfe::render;

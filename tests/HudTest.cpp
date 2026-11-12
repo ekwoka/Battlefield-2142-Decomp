@@ -741,6 +741,65 @@ TEST(Hud_MapMarkerOffset)
 	}
 }
 
+// A marker kept on the map (the record's +0x30, 0x0077efb0 -> 0x0077e100):
+// a teammate past the map's west edge sits 0.02 / zoom of the map in from
+// it; one not kept is cut away. A marker kept on the map but off the
+// minimap's node is still cut.
+TEST(Hud_MapMarkerClamp)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud::HudManager::MapMarker kept {"kept.dds", -600, 0, 16};
+	kept.clamp = true;
+	hud::HudManager::MapMarker loose {"loose.dds", -600, 0, 16};
+	hud::HudManager::MapMarker inside {"inside.dds", -510, 300, 16};
+	inside.clamp = true;
+	manager.setMapMarkers({kept, loose, inside});
+	manager.set("MapFullSize", 1);
+	std::vector<hud::HudQuad> marks;
+	for (const hud::HudQuad& q : manager.frame(0)) {
+		if (q.texture.find(".dds") != std::string::npos && q.texture.find("ingameMap") == std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	// The big map at (278, 29), 512 pixels, zoom 1: 0.02 x 512 = 10.24.
+	CHECK(marks.size() == 2);
+	if (marks.size() == 2) {
+		CHECK(marks[0].texture.find("kept.dds") != std::string::npos);
+		CHECK(marks[0].x0 == 280 && marks[0].x1 == 296 && marks[0].y0 == 29 + 256 - 8);
+		// Inside the map but nearer its edge than the margin: pushed in.
+		CHECK(marks[1].texture.find("inside.dds") != std::string::npos && marks[1].x0 == 280);
+	}
+	// The minimap round the map's centre: the kept marker is on the map's
+	// edge, far off the node, and cut.
+	manager.set("MapFullSize", 0);
+	manager.setMapFocus(0, 0);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	marks.clear();
+	for (const hud::HudQuad& q : quads) {
+		if (q.texture.find("kept.dds") != std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	CHECK(marks.empty());
+}
+
 // The commander's mini-map tab (Bf2MiniMenuMapNode, 0x007e8a90): the
 // level's map at zoom 0 and half alpha filling the node, the players as
 // 2-pixel dots (4 for the squad's), the zoom square at the map's focus

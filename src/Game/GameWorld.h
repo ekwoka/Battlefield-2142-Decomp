@@ -1711,6 +1711,8 @@ public:
 		int magSize = 0;
 		int magazines = 0;
 		int inMag = 0; // the rounds in the gun's magazine (-1 without magazines)
+		int magsLeft = 0;    // the magazines besides the gun's (the firearm's slot 0xb0 is this + 1)
+		bool inHand = false; // the player's weapon in hand (the PlayerControlObject's +0x1f8)
 	};
 	std::vector<WeaponAmmo> weaponAmmo(int player) const;
 	// A projectile template's detonation at a point, as if it went off

@@ -1091,6 +1091,22 @@ void MenuBindings::showDemos()
 	m_natives.setListRows("demos", rows);
 }
 
+void MenuBindings::addDemoBookmark(const std::string& serverName, const std::string& map, const std::string& url, uint32_t time)
+{
+	if (!m_objects) {
+		return;
+	}
+	std::vector<std::string> entries = demoBookmarks();
+	// addDemoBookmark's "qqqi", as the profile writes it.
+	entries.push_back("\"" + serverName + "\" \"" + map + "\" \"" + url + "\" " + std::to_string(time));
+	m_objects->setList(kBookmarkList, entries);
+	if (m_profiles) {
+		m_profiles->save();
+	}
+	m_hasNewBookmark = true;
+	showDemoBookmarks();
+}
+
 std::vector<std::string> MenuBindings::demoBookmarks() const
 {
 	return m_objects ? m_objects->list(kBookmarkList) : std::vector<std::string>();
