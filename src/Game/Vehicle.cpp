@@ -518,6 +518,17 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		vehicle->m_vertical.a = ab.x;
 		vehicle->m_vertical.b = ab.y;
 	}
+	const char* rotational[3][2] = {{"regulatePitchInput", "regulatePitch"}, {"regulateYawInput", "regulateYaw"},
+		{"regulateRollInput", "regulateRoll"}};
+	for (size_t i = 0; i < 3; ++i) {
+		if (const std::string* input = setting(root, rotational[i][0])) {
+			Regulator& r = vehicle->m_rotational[i];
+			r.input = vehicleInputIndex(*input);
+			const Vec3 ab = vector(root, rotational[i][1]);
+			r.a = ab.x;
+			r.b = ab.y;
+		}
+	}
 	for (Part& part : vehicle->m_parts) {
 		part.rotation = part.base;
 	}
@@ -634,7 +645,7 @@ void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, floa
 	if (m_sprintFactor > 0) {
 		m_sprint.update(false, 0, seconds);
 	}
-	regulateInput(body, gravity);
+	regulateInput(body, gravity, seconds);
 	for (GearPart& gear : m_gears) {
 		updateGear(gear, body, ground, seconds);
 	}

@@ -1410,7 +1410,8 @@ void LevelRenderer::loadOvergrowth(const LevelSources& sources)
 		}
 	}
 	m_overgrowthViewDistance = viewDistance > 0 ? viewDistance : 500.0f;
-	// The cells' size (0x10120420 / 0x1008f510), fitted to the terrain.
+	// The cells' size (0x10120420), then a whole number of them across the
+	// terrain's smaller side (0x1008f510: W / floor(W / size)).
 	const terrain::Heightmap* primary = sources.heightmaps.primary();
 	const float side = primary && primary->loaded() ? std::min(primary->worldWidth(), primary->worldDepth()) : 0.0f;
 	m_overgrowthCellSize = OvergrowthCells::cellSize(m_overgrowthViewDistance, side);

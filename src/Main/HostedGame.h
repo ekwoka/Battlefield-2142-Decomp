@@ -211,6 +211,15 @@ public:
 	// A chat line a client said (for the scripts' ChatMessage: player, text,
 	// channel, flags).
 	std::function<void(int player, const net::ChatMessage& line)> onChat;
+	// The hand-out of a player's line (0x004ab6b0): to each playing
+	// client whose player hears it (0x004a93b0 → GameWorld::hearsChat; a
+	// whisper only to its player's client) and to the server's own player
+	// when it does (0x004a7800 → its HUD, 0x004a56b0: onLocalChat). The
+	// sender's own HUD showed it when sent (0x007d9b50), so it never comes
+	// back. localSay is the server's own player's line (its send, then the
+	// same hand-out).
+	void localSay(int player, const net::ChatMessage& line);
+	std::function<void(const net::ChatMessage& line)> onLocalChat;
 	// The votes' results (game::Votes, the server's 0x0058fb90): a map vote
 	// passed (5 s on, the map-list index to run), a mutiny against a team's
 	// commander. A kick vote kicks here ("KICKED", 0x15).
@@ -502,6 +511,7 @@ private:
 	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
 	std::string nameOf(int player) const;
 	void sendToPlaying(const net::GameEvent& event);
+	void handOutChat(const net::ChatMessage& line);
 	// The rules' keys of the report (0x006423d0's fields).
 	void addRuleKeys(net::ServerReport& r) const;
 

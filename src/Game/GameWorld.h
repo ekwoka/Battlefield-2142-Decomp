@@ -633,6 +633,13 @@ public:
 	// (0x004a6f70); `value` is the message's team, squad or player for the
 	// channels that name one.
 	bool hearsRadio(int channel, int sender, int receiver, int value = 0) const;
+	// Whether `receiver` gets a player's chat line on a channel: the
+	// server's hand-out to each client's player (0x004a93b0) and to its own
+	// (0x004a7800): a line from a dead or man-down sender (man down counts
+	// alive on the revive channels 0xf / 0x10) only to the dead and the
+	// downed, except the server's own channels 0xc / 0xd, then
+	// hearsRadio's rule (0x004a6f70: never back to the sender).
+	bool hearsChat(int channel, int sender, int receiver, int value = 0) const;
 	// A radio message said: each hearer gets it (the server's hand-out).
 	void radioMessage(int sender, int channel, const std::string& voice, int value = 0);
 	struct RadioHeard {
@@ -1793,8 +1800,8 @@ public:
 	// (with showVehicles); none whose template has
 	// vehicleHud.alwaysShowOnMinimap or lacks canBeSpotted. The HUD puts
 	// each on the minimap as a short blip (0x00790d60, once while listed)
-	// and plays HUD_Uav_target. (The decoy's stand-in, HudManager slot
-	// 0x70 with 70 m, is the HUD's.)
+	// and plays HUD_Uav_target. (A decoy shown in a soldier's place,
+	// HudManager slot 0x70 within 60 m, is the HUD's: radarMarkers.)
 	struct RadarContact {
 		uint32_t object = 0; // the soldier's or the vehicle's
 		int player = -1;     // the soldier's player, or the vehicle's first occupant

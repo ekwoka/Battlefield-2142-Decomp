@@ -1928,7 +1928,7 @@ void MenuBindings::bindServerSettings()
 		}
 		// apply() keeps the page's values (and writes them down), cancel()
 		// goes back to the last applied ones, reset() to the defaults.
-		n.setFunction(object, "apply", [this, prefix](Interpreter&, const Args&) {
+		const auto apply = [this, prefix]() {
 			for (const auto& [key, value] : m_settings) {
 				if (key.compare(0, prefix.size(), prefix) == 0) {
 					m_appliedSettings[key] = value;
@@ -1939,6 +1939,9 @@ void MenuBindings::bindServerSettings()
 			if (onSettingsApplied) {
 				onSettingsApplied();
 			}
+		};
+		n.setFunction(object, "apply", [apply](Interpreter&, const Args&) {
+			apply();
 			return Value();
 		});
 		n.setFunction(object, "cancel", [this, prefix](Interpreter&, const Args&) {
@@ -1952,7 +1955,14 @@ void MenuBindings::bindServerSettings()
 			}
 			return Value();
 		});
-		n.setFunction(object, "reset", [this, prefix](Interpreter&, const Args&) {
+		// The pages' RESET TO DEFAULT. The general and video pages' only
+		// reset the object (0x100549b0: slot 0x1c, 0x1005b9d0: slot 0x20);
+		// the audio page's (0x10010a60) then applies as its apply does
+		// (0x10010bd0): with canApply (slot 0x1c) the object's apply(1)
+		// (slot 0x18), LocalProfileManager slot 0x34(1) and, applied, the
+		// profile's save (slot 0xc8), returning whether it applied.
+		const bool applies = std::string(object) == kAudioSettings;
+		n.setFunction(object, "reset", [this, prefix, apply, applies](Interpreter&, const Args&) {
 			for (auto it = m_settings.begin(); it != m_settings.end();) {
 				it = it->first.compare(0, prefix.size(), prefix) == 0 ? m_settings.erase(it) : std::next(it);
 			}
@@ -1961,7 +1971,11 @@ void MenuBindings::bindServerSettings()
 					m_settings[key] = value;
 				}
 			}
-			return Value();
+			if (!applies) {
+				return Value();
+			}
+			apply();
+			return Value(true);
 		});
 		n.setFunction(object, "canApply", [](Interpreter&, const Args&) { return Value(true); });
 		n.setFunction(object, "needsRestart", [](Interpreter&, const Args&) { return Value(false); });

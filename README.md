@@ -275,6 +275,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--offline` | The menu finds no account service, so it plays offline. |
 | `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |
 | `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
+| `--keys "<s>:<op> …"` | A level's game input without a window (with `--play`, `--connect`, `--host`; after `--simulate`, or before `--screenshot`): from that second on, `down:` / `up:` / `press:<control>` (the control map's names: `c_GIRadioComm`, `c_GITacticalComm`, `c_GISayAll`, `c_GISayTeam`, `c_GISaySquad`, `c_GIYes`, `c_GINo`, `c_GIShowScoreboard`, `c_PIFire`…), `text:<text>` and `key:<Flash code>` (13 Enter, 27 Esc) to the open say box, `move:` / `click:` / `rclick:<x>/<y>` on the HUD's 800 × 600 screen, `console:<line>` (`_` a space). It prints each step and what changed: the rose shown, the say box, new chat rows, the radio heard. A hosted or joined game runs in real time. |
 
 **Hosting a game**
 
@@ -499,7 +500,8 @@ runs local stand-ins of OpenSpy's services built from OpenSpy's code
 (repeatable), `--emulator-cdkey KEY` (then only that key passes) and
 `--emulator-list host:gameport[:queryport]` set what they know. A host
 started with `--require-login` checks a joining player as a retail server
-does (name checksum, profile, CD key, ValidatePlayer) before making it.
+does (name checksum, profile, ValidatePlayer; the CD key is asked about
+but, as in retail, a bad one is only logged) before making it.
 
 ### Credentials
 

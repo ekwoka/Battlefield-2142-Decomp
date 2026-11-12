@@ -3194,6 +3194,32 @@ TEST(Radio_TargetChannelsReachTheirHearers)
 	CHECK(w.takeRadioHeard().empty());
 }
 
+// A player's chat line goes where the target channel says (the server's
+// 0x004a93b0 → 0x004a6f70): team chat to the sender's team only, squad
+// chat to his squad, never back to the sender (his HUD showed it at the
+// send); a dead sender's line only to the dead.
+TEST(Chat_HandOutByChannel)
+{
+	RadioField f;
+	const int me = f.soldier("Me", 2, 0, 0);
+	const int mate = f.soldier("Mate", 2, 50, 0);
+	const int enemy = f.soldier("Enemy", 1, 10, 0);
+	const int dead = f.soldier("Dead", 1, 20, 0);
+	game::GameWorld& w = *f.world;
+	CHECK(w.hearsChat(0, me, mate) && w.hearsChat(0, me, enemy) && !w.hearsChat(0, me, me));
+	CHECK(w.hearsChat(1, me, mate) && !w.hearsChat(1, me, enemy) && !w.hearsChat(1, me, me));
+	CHECK(w.hearsChat(3, me, mate) && !w.hearsChat(3, me, enemy));
+	game::GameWorld::PlayerInfo info;
+	w.playerInfo(dead, info);
+	w.setHitPoints(info.soldier, 0);
+	w.tick(1.0f / 30);
+	CHECK(w.playerInfo(dead, info) && !info.alive);
+	CHECK(w.hearsChat(0, me, dead));             // the living reach the dead
+	CHECK(!w.hearsChat(0, dead, me) && !w.hearsChat(0, dead, enemy));
+	// The server's own messages reach everyone.
+	CHECK(w.hearsChat(12, -1, dead) && w.hearsChat(13, -1, mate, 2) && !w.hearsChat(13, -1, enemy, 2));
+}
+
 // The bots hear through the world's hand-out and answer through their
 // comm (0x100a7860 / 0x100a7af0): a get_in from a human's car makes a bot
 // on foot head for it and say "roger_that" a second on (0x1006dac0); the
@@ -4409,6 +4435,29 @@ TEST(Bots_BoxAreaStatusRule)
 	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 1, true, false) == AreaStatus::Owned);
 	CHECK(ai::boxAreaStatus(AreaStatus::Hostile, 1, 1, true, true) == AreaStatus::Hostile);
 	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 0, true, true) == AreaStatus::Owned);
+}
+
+// aiStrategicArea.create's two points (0x10062e10 -> 0x100623c0): the box's
+// corner, then its centre, the area's position; the box spans corner .. 2
+// position - corner (0x100a3fc0, isInside 0x1005d3e0).
+TEST(Bots_BoxAreaCornerAndCentre)
+{
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	console.execute("aiStrategicArea.create beach -267.15/287.2 -257.15/297.2 15.6769 50", out); // juneau's
+	const auto inside = [&](const char* at) {
+		std::string answer;
+		console.execute(std::string("aiStrategicArea.isInside beach ") + at, answer);
+		return answer.find('1') != std::string::npos;
+	};
+	CHECK(inside("-257.15/297.2"));  // the position, the centre
+	CHECK(inside("-248/306"));       // past the second point, within 2 position - corner
+	CHECK(inside("-267.15/287.2"));  // the corner
+	CHECK(!inside("-268/290"));      // before the corner
+	CHECK(!inside("-247/297"));      // past -247.15
+	const ai::StrategicArea* area = settings.strategy.findArea("beach");
+	CHECK(area && area->insideBox(-250, 300) && !area->insideBox(-250, 308));
 }
 
 // The guided weapons' plan on foot (AIDLL 0x10078570, its fire statements

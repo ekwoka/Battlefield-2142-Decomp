@@ -261,8 +261,10 @@ struct NetworkableState {
 
 	// RotationalBundle (0x00602070): rotation yaw/pitch/roll in degrees
 	// (masks 1, 2, 4; object +0x188), rotation speeds (8, 0x10, 0x20; +0x194),
-	// 0x40 a value of ±41 (+0x1b0: RotationalBundle's own code only zeroes
-	// it, 0x00562a80/0x00562ee0; what fills it wasn't found), and with a PlayerControlObject above it (object vtable 0xd8)
+	// 0x40 a value of ±41 (+0x1b0: the pitch's banked input, the
+	// rememberExcessInput bank +0x1ac.. that the axis step 0x00563bd0 fills
+	// within ±40, zeroed by 0x00562a80/0x00562ee0; the rewrite's host leaves
+	// it out, as its clients turn parts by the angles), and with a PlayerControlObject above it (object vtable 0xd8)
 	// the ignore-parent rotation: angles (0x200-0x800) and a quaternion (0x100).
 	float rotation[3] {};
 	float rotationSpeed[3] {};

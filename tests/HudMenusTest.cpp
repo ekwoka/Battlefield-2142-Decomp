@@ -760,6 +760,58 @@ TEST(HudVotes_Lines)
 	CHECK(lines.back() == "HUD_HUD_KICKVOTE_UNABLE_TO_START_VOTE");
 }
 
+// A voter's start line is the HUD's question of kind 6 (0x005725e0 line 7
+// → 0x0079e440, shown without the accept/reject prompt, 0x0079c720 case
+// 6); c_GIYes / c_GINo answer it and cast the vote (0x0079d6e0 case 6 →
+// 0x00572390: 0 yes, 1 no, once; not by a kick's target). The starter and
+// the target get the local line and no question (0x0079e290).
+TEST(HudVotes_VoterAnswersTheQuestion)
+{
+	menu::VoteMessages votes;
+	menu::HudQuestions questions;
+	std::vector<std::string> lines;
+	std::vector<menu::VoteMessages::Cast> sent;
+	votes.localize = [](const std::string& id) {
+		return id == "HUD_HUD_KICKVOTE_PLAYER_START_REMOTE" ? std::string("#PLAYERNAME1# vs #PLAYERNAME2#") : id;
+	};
+	votes.playerName = [](int id) { return id == 1 ? std::string("Me") : id == 2 ? std::string("Bob") : std::string("Eve"); };
+	votes.onLine = [&](const std::string& s) { lines.push_back(s); };
+	votes.onVoteQuestion = [&](int kind, const std::string& line) { questions.ask(menu::HudQuestions::Vote, kind, line); };
+	votes.onVoteQuestionGone = [&] { questions.forget(menu::HudQuestions::Vote); };
+	questions.onLine = [&](const std::string& s) { lines.push_back(s); };
+	questions.onAnswer = [&](const menu::HudQuestions::Question& q, bool yes, bool) {
+		menu::VoteMessages::Cast cast;
+		if (q.kind == menu::HudQuestions::Vote && votes.castVote(q.value, yes, cast)) {
+			sent.push_back(cast);
+		}
+	};
+	votes.localPlayer = 1;
+	votes.handle({2, 0, 2, 3, 0, 4, 90}); // Eve starts a kick of Bob
+	CHECK(lines.size() == 1 && lines[0] == "Eve vs Bob");
+	CHECK(questions.front() && questions.front()->kind == menu::HudQuestions::Vote && questions.front()->value == 2);
+	questions.answer(false);
+	CHECK(sent.size() == 1 && sent[0].kind == 2 && sent[0].target == 2 && sent[0].choice == 1);
+	CHECK(!questions.front());
+	// Counted as cast: the start line stops coming back.
+	for (int i = 0; i < 30 * 6; ++i) {
+		votes.tick(1.0f / 30);
+	}
+	CHECK(lines.size() == 1);
+	votes.handle({2, 1, 2, 3, 0, 0, 0}); // it fails
+	// Bob's view of a kick against him: the local line, no question.
+	menu::VoteMessages bob;
+	menu::HudQuestions bobQuestions;
+	bob.playerName = votes.playerName;
+	bob.localPlayer = 2;
+	bool asked = false;
+	bob.onVoteQuestion = [&](int, const std::string&) { asked = true; };
+	bob.onVoteQuestionGone = [&] { bobQuestions.forget(menu::HudQuestions::Vote); };
+	bobQuestions.ask(menu::HudQuestions::Vote, 2, "an old one");
+	bob.handle({2, 0, 2, 3, 0, 4, 90});
+	menu::VoteMessages::Cast cast;
+	CHECK(!asked && !bobQuestions.front() && !bob.castVote(2, true, cast));
+}
+
 // The scoreboard's kick box (0x007bc590 types 10 / 11 -> 0x00573f20):
 // silent while a vote runs, else the start's checks (self, the host, the
 // wait after one's own start).
@@ -2055,4 +2107,29 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	info.alive = false;
 	CHECK(!bar.update(info, false).show);
 	CHECK(!bar.hide().show && bar.out().sound == -1);
+}
+
+// A joined game's left click (the HUD's input, 0x00754290): with a soldier
+// it goes to the HUD's buttons (a rose's entry, the scoreboard), not to the
+// spawn screen's choice of a point; without one, a spawn icon picks its
+// point and elsewhere any point.
+TEST(HudMenus_JoinedClickReachesTheHud)
+{
+	CHECK(menu::joinedClick(true, -1) == menu::JoinedClick::Hud);
+	CHECK(menu::joinedClick(true, 3) == menu::JoinedClick::Hud);
+	CHECK(menu::joinedClick(false, 3) == menu::JoinedClick::SpawnAt);
+	CHECK(menu::joinedClick(false, -1) == menu::JoinedClick::AnySpawn);
+}
+
+// The scoreboard's menu state (10, 0x0079ab90) shows the map list with it
+// (LevelsListShow: the Server tab's map vote), and leaving it hides both
+// and the server tab's selection.
+TEST(HudMenus_ScoreboardShowsTheMapList)
+{
+	hud::HudManager hud(nullptr);
+	menu::showScoreboard(hud, true);
+	CHECK(hud.number("ScoreboardShow") == 1 && hud.number("LevelsListShow") == 1);
+	hud.set("ServerInfoSelected", 1);
+	menu::showScoreboard(hud, false);
+	CHECK(hud.number("ScoreboardShow") == 0 && hud.number("LevelsListShow") == 0 && hud.number("ServerInfoSelected") == 0);
 }

@@ -11804,8 +11804,10 @@ void GameWorld::stepSeatCamera(Player& player, Body& body, float seconds)
 	if (seat.camera.empty()) {
 		return;
 	}
-	// An axis input is -1..1 (what goes past is lost: only
-	// rememberExcessInput, not rewritten, banks it).
+	// An axis input is -1..1 (what goes past is lost: the axis step
+	// 0x00563bd0 banks it only with rememberExcessInput, which no shipped
+	// Camera sets; the shipped ones are RotationalBundles and an Engine,
+	// Vehicle::Part::rememberExcess).
 	Body::Look& look = body.looks[static_cast<size_t>(player.seat)];
 	// The camera's ignoreParentRotation (0x00563180, as the gunners'
 	// bundles: eu_fav_driver_camera and as_fav_PilotCamera 0/0.6/0, the

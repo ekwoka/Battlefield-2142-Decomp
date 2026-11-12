@@ -638,12 +638,16 @@ void HostedGame::playerInfo(int id)
 		refuse(0xd, "no logged-in profile");
 		return;
 	}
-	// GameSpy's CD-key service (0x00642f90 -> 0x007184b0, game 0x52c).
+	// GameSpy's CD-key service (0x00642f90 -> 0x007184b0, game 0x52c). Its
+	// answer refuses no one: 0x00642f90 goes on at once, and the gcd
+	// callback 0x00642e70 goes on the same way whatever comes back (the
+	// failure's text only compared, with "Your CD Key is disabled. Contact
+	// customer service.", and the result dropped). The rewrite logs it.
 	std::string why;
 	if (!net::cdKeyAuthenticate(m_setup.login.cdKeyHost, m_setup.login.cdKeyPort, m_server.challenge(), info->cdKeyResponse, 0,
-			&why)) {
-		refuse(0x14, "CD key: " + why); // the reason is the rewrite's (the retail server's gcd callback, 0x00642e70, isn't traced)
-		return;
+			&why)
+		&& onLog) {
+		onLog("client " + std::to_string(id) + " (" + p.name + "): CD key: " + why + " (let in, as the retail server does)");
 	}
 	// The stats service's ValidatePlayer (0x00584c00).
 	std::string body;
@@ -1105,6 +1109,43 @@ void HostedGame::sendDatabase(int id)
 	client.stage = Client::Stage::Database;
 }
 
+void HostedGame::handOutChat(const net::ChatMessage& line)
+{
+	const std::vector<net::GameEvent> events = net::stringBlockEvents(net::encodeChat(line));
+	const auto hears = [&](int receiver) {
+		if (line.channel == net::kChatPlayer) {
+			// A whisper (byte 9 the player it is for, 0xff from the retail
+			// HUD, 0x007d9e20): only to that player (the rewrite's routing).
+			return receiver == line.b9 && receiver != line.player;
+		}
+		return m_round->hearsChat(static_cast<int>(line.channel), line.player, receiver);
+	};
+	for (const auto& [to, other] : m_clients) {
+		if (other.stage == Client::Stage::Playing && other.player >= 0 && hears(other.player)) {
+			for (const net::GameEvent& out : events) {
+				sendTo(to, out);
+			}
+		}
+	}
+	if (const int local = m_round->localPlayer(); local >= 0 && !clientHas(local) && hears(local) && onLocalChat) {
+		onLocalChat(line);
+	}
+}
+
+void HostedGame::localSay(int player, const net::ChatMessage& said)
+{
+	net::ChatMessage line = said;
+	line.player = player;
+	line.source = 2;
+	handOutChat(line);
+	if (onLog) {
+		onLog("chat " + nameOf(player) + ": " + line.text);
+	}
+	if (onChat) {
+		onChat(player, line);
+	}
+}
+
 void HostedGame::sendToPlaying(const net::GameEvent& event)
 {
 	for (const auto& [id, client] : m_clients) {
@@ -1277,20 +1318,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		if (net::decodeChat(client.chat, line) && line.source == 2 && line.channel != net::kChatServerMessage
 			&& line.channel != net::kChatServerTeamMessage) {
 			line.player = player; // 0x004a5460: the sender's player
-			for (const net::GameEvent& out : net::stringBlockEvents(net::encodeChat(line))) {
-				if (line.channel == net::kChatPlayer) {
-					// A whisper (byte 9 the player it is for, 0xff from the
-					// retail HUD, 0x007d9e20): only to that player's client
-					// (the rewrite's routing; the sender shows its own line).
-					for (auto& [to, other] : m_clients) {
-						if (other.player == line.b9 && other.stage == Client::Stage::Playing) {
-							sendTo(to, out);
-						}
-					}
-					continue;
-				}
-				sendToPlaying(out);
-			}
+			handOutChat(line);
 			if (onLog) {
 				onLog("chat " + nameOf(player) + ": " + line.text);
 			}

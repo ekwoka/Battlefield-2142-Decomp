@@ -683,7 +683,9 @@ template keeps no type).
 LandingGear and FloatingBundle of the tree is a part with three axes (yaw,
 pitch, roll: the x, y, z of its vectors) stepped by `rotationAxisStep`
 (`0x00563bd0`) on the inputs it names (`inputToYaw` 0x2f8 ... `0x300`),
-`rememberExcessInput` (`0x30a`: input banked within ±40, used ±1 a tick),
+`rememberExcessInput` (`0x30a`: input banked within ±40 at the object's
+`+0x1ac`, used ±1 a tick; an input against the bank empties it and goes
+as it is),
 and its frame R(angles) × its rotation × its parent's (`0x00565a20`). The
 vehicle's inputs: PIThrottle (W/S), PIYaw (A/D), PIRoll and PIPitch (the
 mouse's x and y in the land and air maps, `Settings/Controls.con`; a tick's
@@ -745,7 +747,16 @@ are held upright by it (stopRegulateWhenUnoccupied).
 occupied): regulateVerticalPos (a, b) = (−0.8, 2) on PIThrottle (the
 aircraft): out = clamp(((a.y − gMod·g) b + v.y) a, −1, 1) under 20° of
 lean (faded from 10°), replacing a zero or smaller same-sign input. It
-holds vertical speed, not height (as_at let go: about −0.7 m/s).
+holds vertical speed, not height (as_at let go: about −0.7 m/s). Its
+other three, regulatePitch (`+0x380`, input `+0x36c`), regulateYaw
+(`+0x378`, `+0x368`) and regulateRoll (`+0x388`, `+0x370`; executors
+`0x004fd497`, `0x004fd2ae`, `0x004fd60e`, `0x004fd6e6`..`0x004fd932`),
+take the root node's angular velocity w (slot `0x68`) about the hull's own
+x, y, z (the rows of its matrix): out = clamp(((Rᵢ·w) / dt × b + Rᵢ·w) a,
+−1, 1), merged the same way; every regulator reads the inputs as they
+came. No official vehicle sets them; the BF2 conversions' boats, jeeps
+and the musclecar in the install's Levels do (`Vehicle::regulateInput`,
+`Vehicle_RotationalRegulators`).
 
 **The old wheel path** (`0x006b8230` for Springs under no newCar2 engine;
 hover tanks' antigravs under none): the spring as newCar2's; touching,
@@ -1092,8 +1103,10 @@ the ground in one tick and the springs' rate after it otherwise wrecked
 the gunships and APCs on their pads.
 
 Not rewritten: the wing's liftRegulated, regulateToLift and
-wingToRegulatorRatio (no shipped Wing sets them, so they never act); the
-yaw/pitch/roll PCO regulators (no shipped vehicle sets them). The other
+wingToRegulatorRatio (no official Wing sets them; three BF2 conversions'
+boats and BMP-3 in the install's Levels call `setLiftRegulated 1`). The
+yaw/pitch/roll PCO regulators are rewritten (below, the PCO's
+regulator). The other
 bundle animation systems run for the bodies that have them (eu_at's legs
 by its landing gear, us_ag's), and the deployables' (above).
 
@@ -2732,7 +2745,7 @@ So are the mechs' effect events: the walker's own system fires `effect:1..4`
 into the object's tree (above, "The walker's own animation system";
 `GameWorld::takeObjectEffectEvents`). The first-person weapon's are played
 (see below). (coverage-7's P5 cited this paragraph when it still listed
-both as not rewritten; the particle systems' own per-instance time, the
+both as missing; the particle systems' own per-instance time, the
 bundles' start age, is in "Bundle modifiers" below.)
 
 ### The hands' IK (`ik.*`)
@@ -2813,7 +2826,9 @@ camera then draws (`0x00612d80`) by mode (`src/Game/Cameras`, played by
 
 - **Inside** (`0x00610620`): the camera's own frame, its shakes, kept
   0.09 over the terrain (`*0x00a73a04`). insideViewInterpolate (`+0x430`,
-  a slerp of the turn) is 1 in every shipped camera, not rewritten.
+  a slerp of the turn) keeps the template constructor's 1 (`0x00610fd0`)
+  in every camera, as no shipped script sets it: the slerp takes the
+  whole turn, which is the rewrite's view.
 - **Nose** (`0x00610800`): the camera's frame moved by nosePos (`+0x380`)
   turned by its parent's rotation.
 - **Chase / FrontChase** (`0x006108e0`, reset `0x006105c0`): the point
@@ -3070,8 +3085,9 @@ about its pivot 0/0/−2) lean with the mouse and settle back.
 `GameWorld::stepSeatCamera` turns the seat's Camera (the first with a
 PIMouseLook input under the seat) each tick with `rotationAxisStep`:
 PIMouseLookX is the turn over 5 degrees, PIMouseLookY the pitch's change
-over 5 (down positive), each kept within −1..1 (only `rememberExcessInput`,
-not rewritten, banks what goes past); a new sitter starts looking ahead
+over 5 (down positive), each kept within −1..1 (`rememberExcessInput`
+would bank what goes past, `0x00563bd0`, but no shipped Camera sets it:
+the 26 shipped settings are on RotationalBundles and Engines); a new sitter starts looking ahead
 (`restoreRotationOnExit`). `partPose` gives the camera node's turn about
 its pivot, which the seat camera already applies to its own node.
 
@@ -3428,8 +3444,8 @@ second when lodTimer is over 0. The base cell update (`0x10120ef0`) keeps a
 cell only while its nearest corner is within viewDistance (no zoom or
 scale) and fades it over the last 30% (+0x20); the cell draw
 (`0x10121410`) fades near cells when the camera is low. The cells are
-viewDistance / 4 across (`0x10120420`), fitted to the terrain
-(`0x1008f510`); a cell's batch holds the `_lod` meshes of its trees outside
+viewDistance / 4 across (`0x10120420`), then a whole number of them
+across the terrain's smaller side W (`0x1008f510`: W / floor(W / size)); a cell's batch holds the `_lod` meshes of its trees outside
 their near radius (`0x1008e790`). The type's factor (+0x9c) is
 clamp((its geometry's radius / 5)², 0.3, 1) (`0x100917e0`). The cell draw's
 near fade: × clamp(the distance to the cell's centre / 12 (+0x34),
@@ -5770,7 +5786,8 @@ Vehicle parts:
 
 - **RotationalBundle** (12-bit mask): rotation yaw, pitch, roll in degrees
   (1, 2, 4; 12 bits of ±360), their speeds (8, 0x10, 0x20; ±16 maxSpeed),
-  0x40 a 16-bit ±41, and under a PlayerControlObject the ignore-parent
+  0x40 a 16-bit ±41 (the pitch's rememberExcessInput bank, `+0x1b0`, filled
+  by the axis step `0x00563bd0`, read back by `0x006011a0`), and under a PlayerControlObject the ignore-parent
   rotation (0x200-0x800 angles, 0x100 a 14-bit quaternion). In mode 3
   every angle and speed takes 16 bits (`0x006015a0`: `(mode == 3) * 4 +
   12`). The writer only sends the angles an input drives. Values within one step of 0 read
@@ -5942,8 +5959,9 @@ loads; the rewrite's client does the same (`GameClient::loadingLevel` →
    md5(key + number % 0xffff + challenge). It also carries the build and
    the player's profile id.
 3. The server checks the build (refusing old and new ones with 0x17 and
-   0x18) and the profile, then validates the key with GameSpy's CD-key
-   service (`0x004af940`).
+   0x18) and the profile, then has GameSpy's CD-key service validate the
+   key (`0x004af940`), whose answer refuses no one (see "What a server
+   checks").
 4. The client told its connection type (event 3) as soon as the
    connection was made (`0x004b4d10` runs `0x004b48a0`), before the
    challenge; the challenge handler (`0x004b2790`) sends only event 2.
@@ -6138,9 +6156,12 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   server's own player posted there (`onSpotted`), the others as PostRemote
   to their connection. A client takes 2/0x33..0x37 to its name tags
   (the caller's tag by its soldier's ghost: `Nametags::radioCall`, the
-  NametagManager's events 0x33..0x37, `0x100f19c0`); the radio heard stays
-  the rewrite's stand-in for the bots' calls only (theirs don't go
-  through slot 0xd8).
+  NametagManager's events 0x33..0x37, `0x100f19c0`). Only slot 0xd8 lights
+  a tag: a bot's "medic" or "need_ammo" is a plain RadioMessage (AIDLL's
+  send `0x00896270`, event 6, vtable `0x009284b0`), whose handler
+  `0x0042e0c0` plays the voice and the text and nothing else, so a bot's
+  call shows on no name tag (the rewrite had lit the bots' tags from the
+  radio heard).
 - **The commander** (the Commander event 0x13): applying (kind 4) and
   resigning (2) go up; the offer of command after the apply period is
   PostRemote 2/0x23 to the applicant (`0x004c5070`, `HostedGame::
@@ -6204,7 +6225,9 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   its event manager (0xff); a bot's go nowhere. The HUD's category-2
   handler (`0x00756b60`; `SquadMenu::squadMessage`) makes 0xb, 0xc, 0x12
   (HUD_HUD_SQUAD_JOIN_DENIED) and 0x13 (HUD_HUD_SQUAD_JOIN_ACCEPTED)
-  personal lines, with the menu's "warning" sound (not rewritten), and
+  personal lines, with the menu sound "warning" (DAT_00b43878 slot 0x2c,
+  as Sound.playSound, `0x0040bd90` case 6; no shipped MenuSounds.con adds
+  it, so it is silent), and
   0x11 the question's kind 0 (HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN,
   #PLAYERNAME#) unless that player is on the menu's list (`+0x120`,
   `0x007a5e30`). The leader's answer (`0x0079d6e0` kind 0): on a server
@@ -6843,7 +6866,11 @@ balance and TK punishing are these scripts', not the engine's. The
 scripts are Python 2; besides `py2compat`'s translation the rewrite gives
 them a `socket` module with Python 2's `str` data and errors indexed as
 tuples (`detail[0]`, a would-block always `errno.EWOULDBLOCK`, a
-`shutdown` of a gone peer ignored as Winsock does), `md5` objects taking
+`shutdown` of a gone peer ignored as Winsock does, `SO_REUSEADDR` letting a
+second server bind the rcon port as Winsock's does, through
+`SO_REUSEPORT`: without it, a second server on one machine kept
+default.py's unbound socket and its accept raised EINVAL every tick),
+`md5` objects taking
 `str`, and the `admin` package from the install's `admin` (or `Admin`)
 folder. The interpreter outlives the per-map script hosts, so the admin
 module and its connections live on; the handlers and timers it
@@ -8920,9 +8947,9 @@ second.
   min(d / 150, 1) / 2) x the blink 0.5 - 0.5 cos(2 pi t)
   (`0x100f3490`); the local player's own call starts a 12 s timer
   (`0x10211290` / 98 / a0) during which those who can answer show that
-  icon (`0x100f0310`). Here the calls come from Radio.callFor* and the
-  "medic" / "need_ammo" / "need_repair" messages the local player hears (a
-  man-down caller's "medic" is the revive call).
+  icon (`0x100f0310`). Here the calls come from Radio.callFor* (and,
+  joined, the server's Spotted messages); a bot's radio lights no tag, as
+  in the original (its calls are plain RadioMessages).
 - **The selection** (`0x100f16c0`): the selectable tag nearest the screen
   centre within 0.08 is selected (a sound, 2/0x58); a selected object's
   icon sits on its selected3dMapIcon (0x50 +, ICObjectFlagBackground 0x93
@@ -10627,18 +10654,129 @@ playlist and instant action, the LOCAL list on loopback, the create tab,
 the in-game HUD, scoreboard (players, squads, manage), spawn screen and
 commander screen.
 
-Left: the rotating minimap. With `MapStatic` off (the default) the
-original turns the minimap about the player (`0x0078f680`: the angle
-+0x7fc eased to the player's +0x810, the delayed +0x800 the compass shows,
-+0x80c for the markers, `0x0078cb30` / `0x0078e510`); the rewrite's
-minimap stays north up, its ring turning. The audio page's RESET TO
-DEFAULT changes the page (`0x10010a60`: slot 0x24, no apply) but nothing
-applies it, so the file keeps the old values; whether the original
-writes them later (the profile's save) isn't established. Not checked
-headless: the display modes' box (a window lists the modes), the roses,
-chat and vote screens (keys in a window), the end-of-round screen in a
-round (EndOfRoundBindingsTest), the online pages (BFHQ, the account's
-stats and the leaderboards, which stay offline).
+Since then (the same day):
+
+- **The minimap turns with the player** (`HudManager::setMapHeading` /
+  `tickMapTurn`, `Hud_MinimapTurnsWithThePlayer`). The HUD's update hands
+  the map the view's heading each frame (`0x00752640`: atan2 of the
+  camera direction's x and z, 0 unless the local player is alive, into
+  +0x810 through `0x0077b460` → `0x00778ea0`). The map's update
+  (`0x0078f680`), at the minimap's size (+0x709, as the last update left
+  it: within 3 pixels of setMiniSize; +0x708 the big map, +0x70a the
+  commander's, whose heading is 0) with MapStatic off (+0x7dc) and the
+  player alive and not man down (player slots 0x74, 0x114), eases +0x7fc
+  to the heading by (1 - e^(-9 dt)) of the short way (`0x00778d00` the
+  side, 0 within 0.001 or a turn away; `0x00778e20` the size); +0x804 is
+  +0x7fc, or after a turn settles within 0.2 rad a wobble of sin(4.5 t)
+  by 0.3 - 0.4 t to the turn's side for 0.75 s (+0x808, +0x7c4, +0x7f8,
+  +0x817 / +0x815 from `0x00778ea0`); +0x800 (DelayedMapAngle, the compass
+  strip) eases to +0x804 the same way; +0x80c, the map's own turn, takes
+  up to 100 steps of 0.007 (0.05 once caught up at a settled size,
+  +0x814 / +0x816) of the ease and snaps within 0.2 rad. Angles are kept
+  in [-pi, pi) (`2 pi (a / 2 pi - floor(a / 2 pi + 0.5))`); the exe's exp
+  (`0x00614830`) clamps its power to +-10. At the minimap otherwise
+  (static, dead, man down) the three go to 0; at the other sizes they hold;
+  MapStatic's change (the map's event 10, `0x00779890`) zeroes them. The
+  map texture and the combat-area layer are drawn turned by +0x80c about
+  the node's centre (`0x0077cba0` / `0x0077d200` → `0x00870f60`, a
+  positive angle counter-clockwise on the screen), then cut to the node;
+  each icon is turned about its point by its angle less +0x80c and then
+  with the map about the centre (`0x0077c610`; `0x0077d660` adds +0x80c
+  to the icons' angles), so it sits where its place went and keeps its
+  heading on the map: the player's arrow points up. `mapWorldAt` turns a
+  point back first. The rewrite's sizes change at once, so it is always
+  settled.
+- **The audio page's RESET TO DEFAULT applies** (`MenuBindings_AudioResetApplies`):
+  AudioSettings.reset (`0x10010a60`) is the object's reset (slot 0x24)
+  and then what its apply (`0x10010bd0`) does: with canApply (slot 0x1c)
+  apply(1) (slot 0x18), LocalProfileManager slot 0x34(1) and, applied,
+  the profile's save (slot 0xc8), returning whether it applied. The
+  general and video pages' resets (`0x100549b0`: slot 0x1c, `0x1005b9d0`:
+  slot 0x20) don't, their pages applying on Accept.
+
+Not checked headless: the display modes' box (a window lists the modes),
+the end-of-round screen in a round (EndOfRoundBindingsTest), the online
+pages (BFHQ, the account's stats and the leaderboards, which stay
+offline). The roses, chat and votes: next section.
+
+### The roses, chat and votes headless (`--keys`, 2026-11-12)
+
+`--keys "<s>:<op> …"` (`runKeyScript`, Viewer.cpp) drives a level's game
+input without a window through the same layers the window's input goes
+through (ViewerOptions' onPlayerInput chain: the roses, the say boxes,
+the HUD's questions, the map keys; onHudText; onClick / onRightClick /
+onPointerMove), a tick at a time with the HUD's update after each, in real
+time on a hosted or joined game. Its ops: `down:` / `up:` / `press:` a
+control by the control map's name, `text:` and `key:` to the open say
+box, `move:` / `click:` / `rclick:` on the HUD's screen, `console:`. It
+prints the rose shown, the say box, new chat rows and the radio heard.
+`build/scratch/keysweep/mp.sh` runs a host and up to three clients on
+127.0.0.1, each with its own keys and scratch profile.
+
+The rose buttons' mouse areas are `setButtonNodeMouseArea`'s, not the
+buttons' rectangles (the Radio rose: the middle 325..473 × 225..373, the
+up entry 325..473 × 122..225, the side entries 135..325 and 473..643 in
+rows from 122 to 476). Swept: in a local round each of the Radio rose's
+11 entries, by clicks and by `RadioInterface.selectOrder`, says its
+message, the local player hears it and its text is a chat row; the say
+boxes open on c_GISayAll / c_GISayTeam / c_GISaySquad (squad only in a
+squad), Enter sends, Esc closes. Joined, with a host and three clients:
+
+- **A joined player couldn't pick a rose entry**: the joined game's click
+  went only to the spawn screen (a spawn icon, else any point), never to
+  the HUD's buttons, so a rose (and the scoreboard's tabs and boxes)
+  ignored the mouse while playing. With a soldier the click now goes to
+  the HUD (`menu::joinedClick`, the HUD's input `0x00754290`), as do the
+  right button and the pointer's moves (`HudMenus_JoinedClickReachesTheHud`).
+- **Chat went to everyone, back to its sender, and not to or from the
+  host's own player.** The server hands a player's line out per hearer
+  (`0x004ab6b0` → `0x004a93b0` for each client's player, `0x004a7800` for
+  its own, `0x004a56b0` showing it on its HUD): a dead or man-down
+  sender's (man down counting alive on 0xf / 0x10) only to the dead and
+  the downed, except the server's 0xc / 0xd, then the target channel's
+  rule (`0x004a6f70`, `GameWorld::hearsChat`: team chat to the team,
+  squad chat to the squad, never back to the sender). The sender's HUD
+  shows its own line as it sends it (`0x007d9b50`: the line to the game,
+  then the HUD's slot 0x158). The rewrite sent every line to every
+  client, the sender included, and a listen server's own player neither
+  saw clients' lines nor sent its own: HostedGame's `handOutChat` /
+  `localSay` / `onLocalChat` now follow the original
+  (`Chat_HandOutByChannel`, the NetHost tests). Seen: Alice's team line
+  reaches Bob (her team), not Carol or the host (the other team); her
+  all line reaches all three; the host's own lines go out.
+- **A voter couldn't vote.** A vote's start for someone neither its
+  starter nor (a kick, a mutiny) its target is the HUD's question of kind
+  6 (`0x005725e0` line 7 → `0x0079e440(6, the vote's kind, shown)`: its
+  text the `*_START_REMOTE` line, `0x0079c720` case 6, with no
+  accept/reject prompt; the vote counted as not cast, +1), asked again
+  each 5 s until cast; c_GIYes / c_GINo answer it (`0x0079e320` →
+  `0x0079d6e0` case 6: with no vote of the player's yet, slot 0x310,
+  `0x00572390` casts 0 for yes or 1 for no, not by a kick's or mutiny's
+  target: a client's Vote event phase 4, a host's to its own votes). The
+  starter and the target get the local line and lose any such question
+  (`0x0079e290(6, -1)`). The rewrite showed the line but never asked, so
+  the keys did nothing and only the starter's vote counted
+  (`HudVotes_VoterAnswersTheQuestion`).
+- **The map vote's list never showed**: the Server tab's map list
+  (HudElementsLevelsList.con's MapsList) shows on LevelsListShow, which
+  the scoreboard's menu state sets with ScoreboardShow (`0x0079ab90`
+  state 10; leaving it clears both and ServerInfoSelected); the rewrite
+  never set it, so no map could be voted for from the scoreboard
+  (`menu::showScoreboard`, `HudMenus_ScoreboardShowsTheMapList`).
+
+Seen after the fixes (a host and three joined clients, release build):
+Alice's Radio entries reach Bob and Carol by their channels (gogogo,
+TCLocalTeam, only Carol within 100 m; negative and roger_that,
+TCTeamAndLocalEnemies, both) with their text rows, and she hears her
+own; Bob applies for command and takes the offer with c_GIYes; Alice's
+mutiny opens (her local line, Carol's remote line with the keys), Carol's
+c_GIYes counts (VOTE_YES, 2 of 2) and Bob is demoted; Carol's kick from
+the Manage tab's box (on the second row; her own has none) opens (the
+local line for Bob, no question for him), Alice's yes passes it and Bob's
+client is dropped with 0x15 KICKED; Alice's map vote from the Server tab
+opens, Bob's c_GIYes passes it ("Map Cerbere Landing will now be
+loaded"). `--keys` doesn't run the map change itself (the window's and
+`--simulate`'s loops load the next level).
 
 ### Comm roses and the radio
 
@@ -11184,9 +11322,11 @@ active node to):
   as it builds the kit buttons) lets it through only for a kit whose
   KitUnlockArrow%iShow (+0x304) is on: a field unlock to take, from the
   HUD's flags +0x289 / +0x5f5 (`0x00449690`) that a server's field
-  unlocks set; offline never. Left: the parachute (case 0x0d asks the
-  HUD's slot 0xb0 object, which a soldier without a parachute doesn't
-  have).
+  unlocks set; offline never. The parachute's (case 0x0d, on foot) asks
+  the HUD's slot 0xb0 (`0x0074e8c0`: the player's controlled object's
+  interface 0xc4d7, the soldier's `+0x18c`) its slot 0x78 (`0x007f9bc0`:
+  `+0x19c` there, the soldier's falling flag `+0x328`), shown for 9 s
+  (`GameWorld::soldierFalling`).
 - **Supply sounds.** AbilityHud (`0xc4f2`, `abilityHud.healingSound`,
   `repairingSound`, `ammoSound` from `0x0055a41f`):
   the kits carry them (`S_Heal`, `S_Repair`, `S_Resupply`). They are the
@@ -11746,7 +11886,12 @@ into EAOnlineManager slot 0x70 (`0x0049f9e0`: `+` → `[`, `/` → `]`, `=` →
 - Event 2 (`0x004af940`): the build (0x17 / 0x18), on a ranked server
   slot 0xe8 (`0x004a61e0`), then GameSpy's CD-key SDK
   (`0x00642f90` → gcd_authenticate_user `0x007184b0`, game id 0x52c),
-  which doesn't hold the join up, and the ban list.
+  which doesn't hold the join up and refuses no one: `0x00642f90` goes on
+  at once, and the callback `0x00642e70` goes on the same way whatever
+  the answer (a failure's text is only compared with "Your CD Key is
+  disabled. Contact customer service.", the result dropped); the
+  rewrite's host logs a failure and lets the player in. Then the ban
+  list.
 - The player info (`0x004ae6a0`): the name's checksum (0x24), on a
   ranked server (gpm_cq/ti/sl/nv/ca with GameSpyRanked, `0x00430a00`) a
   profile (0xd); then GameSpyAuth's
@@ -13029,8 +13174,8 @@ The settings come from the game's own scripts: `aiSettings.*` in
 `aiTemplate.*` and `aiTemplatePlugIn.*` in `Objects/**/ai/Objects.ai`,
 `aiStrategy.*` in `AI/AIDefaultStrategies.ai`, and `aiStrategicArea.*` in
 the level's `GameModes/<mode>/<size>/ai/StrategicAreas.ai`. Without those
-scripts the shipped values are assumed: the built-in rifle stand-in and
-one area per control point, each a neighbour of every other.
+scripts (the unit tests' rounds) the rewrite falls back to a built-in
+rifle and one area per control point, each a neighbour of every other.
 
 Every random draw of the AI comes from one generator, AIRandom
 (`DAT_101394cc`, src/AI/Random): made at the AI's start (0x10001740 →
@@ -13384,8 +13529,8 @@ IAIGame slot 0x68 (BF2142.exe 0x00895ab0): the game's slot 0xd4 with
 type 0x1b (the team learns of the object, as from a human's
 sendSpottedMessage) and the spotted object's voice (slot 0xd0: a
 vehicle's own `radio.spottedMessage`, a soldier's kit's, "spotted") said
-on TCTeam (slot 0x54). Stand-in: a box area's position is its box's
-centre.
+on TCTeam (slot 0x54). A box area's position (0x1005d1c0: `+0x84`) is
+create's second point, its box's centre.
 
 **Hits** (`BotManager::hitBy`, `GameWorld::takeAiHits`): hit points lost
 to another player reach IAICollisionHandler slot 0x18 (0x1004f020) through
@@ -14510,8 +14655,15 @@ slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
   original compares the bot's height with the point's x, kept). Slot 4
   (0x1008a9a0, 0x1008a9b0) suspends a goal.
 - **Strategic areas** of their own (`aiStrategicArea.create <name>
-  <x/z> <x/z> <height> <temperature>`, juneau and Strike_at_Karkand_Coop
-  use them): kept with their box and per-side takeable flags (`setTakeable
+  <corner x/z> <position x/z> <height> <temperature>`, juneau and
+  Strike_at_Karkand_Coop use them): the first x/z is the box's corner
+  (`+0x118`), the second the area's position (`+0x84` and the sides'
+  copies `+0x7c` + 8 side, `0x10062e10` → `0x100623c0`), the box's
+  centre: the box spans corner .. 2 position − corner (`0x100a3fc0`, for
+  isInside `0x1005d3e0` and the status pass; `StrategicArea::insideBox`).
+  The shipped boxes are 20 m across about their second point (the
+  rewrite had taken the two points as opposite corners, a 10 m box about
+  their middle). Kept with their box and per-side takeable flags (`setTakeable
   <side> <0|1>`, +399 + side, 0x1001ab30) and the SAI's status rule for
   them (0x1005f210 with +0x164 −1: with units there, the side's own alone
   make it Owned when it is takeable for the side, the enemy's alone make
@@ -15058,11 +15210,10 @@ keeps no copy). Kept as the binary does it.
   interfaces) is its sprint stamina, not a speed: the SprintStamina's
   +0x18 (0x006457f0 writes it), the soldier's +0x378 or a vehicle PCO's
   +0x2ec, 1 when rested (`WeaponChoice::targetMotion`: PlayerInfo
-  `stamina`, a vehicle's `GameWorld::vehicleStamina`). Stand-ins: a human's
-  attention on the bot (the sensing agent's stamp 0x100eb7f0, whose
-  writer wasn't traced: in AIDLL's decompilation only that find and the
-  agent's destructor 0x100ed5b0 touch the map at +0x84) is a round of it
-  having passed the bot; no bot is an auto controller (the +0x264 flag: the drones' and silos' controllers aren't bots here); no wire-guided weapon holds a target
+  `stamina`, a vehicle's `GameWorld::vehicleStamina`). A human's
+  attention on the bot is the sensing agent's newest record of him (the
+  map +0x84 read by 0x100eb7f0, filled by 0x100ebdd0; `humanAttends`).
+  Stand-ins: no bot is an auto controller (the +0x264 flag: the drones' and silos' controllers aren't bots here); no wire-guided weapon holds a target
   (LPTargetComp's target isn't modelled); the area guard's per-side spot
   is the control point (0x100623c0 starts it at the area's position) and
   its per-side radius (+0x98 + 4 team: the spot's distance to the area's

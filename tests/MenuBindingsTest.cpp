@@ -642,6 +642,32 @@ TEST(MenuBindings_SliderNumberObjects)
 	CHECK(bindings.setting("AudioSettings.MusicVolume", 1) == 0.5);
 }
 
+// The audio page's RESET TO DEFAULT (0x10010a60) applies what it reset
+// as its apply does (0x10010bd0: apply(1), the profile saved), so the
+// defaults reach Audio.con; the general and video pages' resets
+// (0x100549b0, 0x1005b9d0) only reset the page.
+TEST(MenuBindings_AudioResetApplies)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::SettingsObjects objects;
+	bindings.setSettingsObjects(&objects);
+	avm1::Interpreter vm;
+	call(vm, natives, "dice.bf2.AudioSettings", "setEffectsVolume", {avm1::Value(0.25)});
+	call(vm, natives, "dice.bf2.AudioSettings", "apply");
+	CHECK(objects.get("AudioSettings.EffectsVolume") == "0.25");
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.AudioSettings", "reset")));
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.AudioSettings", "getEffectsVolume")) == 1);
+	CHECK(objects.get("AudioSettings.EffectsVolume") == "1");
+	CHECK(bindings.setting("AudioSettings.EffectsVolume", 0) == 1);
+	// The video page's reset leaves the applied values until its apply.
+	call(vm, natives, "dice.bf2.VideoSettings", "setViewDistanceScale", {avm1::Value(0.5)});
+	call(vm, natives, "dice.bf2.VideoSettings", "apply");
+	call(vm, natives, "dice.bf2.VideoSettings", "reset");
+	CHECK(objects.get("VideoSettings.ViewDistanceScale") == "0.5");
+}
+
 // The controls page's mouse settings are the active map's (0x00497fa0 ..
 // 0x00498080): they reach the map's ControlMap lines in Controls.con.
 TEST(MenuBindings_MouseSettingsOnTheMap)

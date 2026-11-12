@@ -283,18 +283,17 @@ TEST(NetHost_HostedGameJoin)
 	}));
 	dice::hfe::game::GameWorld::PlayerInfo me;
 	CHECK(round.playerInfo(client.world().localPlayer(), me) && me.team == 1 && !me.ai);
-	// A chat line goes round to every client, from our player.
+	// A chat line reaches the server from our player and goes out to those
+	// its channel reaches (0x004a93b0 → 0x004a6f70), never back to its
+	// sender, whose HUD showed it when sent (0x007d9b50).
 	std::vector<std::string> log;
 	hosted.onLog = [&log](const std::string& line) { log.push_back(line); };
 	client.say("hello all");
-	std::vector<net::ChatLine> heard;
-	CHECK(pumpUntil(step, [&] {
-		for (const net::ChatLine& line : client.world().takeChat()) {
-			heard.push_back(line);
-		}
-		return !heard.empty();
-	}));
-	CHECK(!heard.empty() && heard[0].text == "hello all" && heard[0].player == client.world().localPlayer());
+	CHECK(pumpUntil(step, [&] { return std::find(log.begin(), log.end(), "chat Joiner: hello all") != log.end(); }));
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	CHECK(client.world().takeChat().empty());
 	CHECK(hosted.clientCount() == 1);
 	const int joinerId = client.world().localPlayer();
 	client.disconnect();
@@ -522,6 +521,18 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	CHECK(pumpUntil(step, [&] { return radioOf(heardB, 2, radio); }));
 	CHECK(radio.sender == idA && radio.team == team && radio.channel == 0 && radio.source == 3);
 	CHECK(!radioOf(heardA, 2, radio));
+	// A's chat line to all: B gets it from A, A not (0x004a93b0 →
+	// 0x004a6f70; A's HUD showed it when sent).
+	a.say("hello all");
+	std::vector<net::ChatLine> chatB;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::ChatLine& line : b.world().takeChat()) {
+			chatB.push_back(line);
+		}
+		return !chatB.empty();
+	}));
+	CHECK(!chatB.empty() && chatB[0].text == "hello all" && chatB[0].player == idA);
+	CHECK(a.world().takeChat().empty());
 	// The game's own (no sender) to the team.
 	round.radioMessage(-1, 13, "AUTO_MOODGP_TEAM_lostcp", team);
 	CHECK(pumpUntil(step, [&] { return radioOf(heardA, 3, radio) && radioOf(heardB, 3, radio); }));

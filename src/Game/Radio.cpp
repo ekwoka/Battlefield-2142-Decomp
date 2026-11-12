@@ -229,6 +229,22 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 	}
 }
 
+bool GameWorld::hearsChat(int channel, int senderId, int receiverId, int value) const
+{
+	if (channel != 12 && channel != 13) {
+		PlayerInfo from, to;
+		if (!playerInfo(senderId, from) || !playerInfo(receiverId, to)) {
+			return false;
+		}
+		const bool senderDown = !from.alive || (from.manDown && channel != 15 && channel != 16);
+		const bool receiverDown = !to.alive || to.manDown;
+		if (senderDown && senderDown != receiverDown) {
+			return false;
+		}
+	}
+	return hearsRadio(channel, senderId, receiverId, value);
+}
+
 void GameWorld::radioMessage(int sender, int channel, const std::string& voice, int value)
 {
 	if (channel < 0 || voice.empty()) {

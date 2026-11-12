@@ -90,8 +90,10 @@ public:
 	// player asking to join our private squad (the player), the question
 	// kind 0 (0x0079e440; HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN, #PLAYERNAME#,
 	// 0x0079c720) unless the leader turned that player down before (the
-	// menu's list +0x120, 0x007a5e30). The original also plays the menu's
-	// "warning" sound with the lines (not rewritten).
+	// menu's list +0x120, 0x007a5e30). The original also asks for the menu
+	// sound "warning" with the lines (DAT_00b43878 slot 0x2c, the menu's
+	// Sound.playSound, 0x0040bd90 case 6), which no shipped MenuSounds.con
+	// adds: silent.
 	void squadMessage(int id, int value);
 	std::function<void(const std::string&)> onLine;
 	std::function<void(int player, const std::string&)> onJoinRequest;
@@ -242,6 +244,11 @@ struct OverheadCamera {
 //   - Commander.spottedMouseOver <n> (0x00771b67 -> slot 0x450,
 //     0x00751f80): Spotted<i>MouseOver = (i == n) for i 1..11.
 void spottedMouseOver(hud::HudManager& hud, int n);
+// The scoreboard's menu state (10, the HUD manager's 0x0079ab90): shown,
+// ScoreboardShow and LevelsListShow (the map list and its vote under
+// the Server tab, HudElementsLevelsList.con's MapsList); left, both and
+// ServerInfoSelected go to 0.
+void showScoreboard(hud::HudManager& hud, bool shown);
 // The squad leader rose's rows:
 //   - SquadLeader.sendRequestForOrder (0x00770a7e -> slot 0x314,
 //     0x007c7cd0, the rose's needorders): "req_new_order" to the commander

@@ -629,6 +629,77 @@ TEST(Hud_TextNodeStyles)
 
 // A vehicle's miniMapIconOffset (0x0077dd70 → 0x0077c610): the icon drawn
 // that many pixels from its point, turned about the point.
+// The minimap turns with the player (0x0078f680): the heading (0x00778ea0)
+// eased into the map's turn (+0x80c), the texture and the icons turned
+// about the node's centre (0x0077cba0, 0x0077c610) so the view's way is
+// up; a static map (MapStatic) or a dead player at the minimap back to
+// north; the compass's delayed angle (+0x800) follows.
+TEST(Hud_MinimapTurnsWithThePlayer)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	manager.setMapFocus(0, 0);
+	// A mark 100 m east of the player, pointing north.
+	manager.setMapMarkers({{"mark.dds", 100, 0, 16, 0}});
+	manager.set("MapFullSize", 0);
+	const float east = 3.1415927f / 2;
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(east);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
+	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
+	CHECK(std::abs(manager.mapDelayedAngle() - east) < 0.01f);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	const float cx = 645 + 73, cy = 9 + 73;
+	CHECK(quads.size() == 2);
+	if (quads.size() == 2) {
+		// The map turned a quarter counter-clockwise about the node's centre.
+		CHECK(std::abs(quads[0].rotation + 90) < 0.01f && quads[0].pivotSet && quads[0].pivot[0] == cx && quads[0].pivot[1] == cy);
+		CHECK(quads[0].clipped);
+		// East is up: the mark straight above the centre, pointing left
+		// (north on the turned map).
+		const float mx = (quads[1].x0 + quads[1].x1) / 2, my = (quads[1].y0 + quads[1].y1) / 2;
+		CHECK(std::abs(mx - cx) <= 1 && my < cy - 40);
+		CHECK(std::abs(quads[1].rotation + 90) < 0.01f);
+	}
+	// A static map: north up again.
+	manager.set("MapStatic", 1);
+	manager.setMapHeading(east);
+	manager.tickMapTurn(1.0f / 60, true);
+	CHECK(manager.mapTurn() == 0 && manager.mapDelayedAngle() == 0);
+	quads = manager.frame(1);
+	CHECK(quads.size() == 2 && quads[0].rotation == 0);
+	if (quads.size() == 2) {
+		CHECK(std::abs((quads[1].x0 + quads[1].x1) / 2 - cx) > 40);
+	}
+	// Turning again, then dead at the minimap: back to 0.
+	manager.set("MapStatic", 0);
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(east);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
+	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
+	manager.setMapHeading(0);
+	manager.tickMapTurn(1.0f / 60, false);
+	CHECK(manager.mapTurn() == 0);
+}
+
 TEST(Hud_MapMarkerOffset)
 {
 	Console console;

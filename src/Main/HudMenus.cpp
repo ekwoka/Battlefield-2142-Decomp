@@ -561,6 +561,15 @@ void spottedMouseOver(hud::HudManager& hud, int n)
 	}
 }
 
+void showScoreboard(hud::HudManager& hud, bool shown)
+{
+	if (!shown && hud.number("ScoreboardShow") != 0) {
+		hud.set("ServerInfoSelected", 0);
+	}
+	hud.set("ScoreboardShow", shown ? 1 : 0);
+	hud.set("LevelsListShow", shown ? 1 : 0);
+}
+
 void sendRequestForOrder(const std::function<void(int channel, const std::string& voice)>& say,
 	const std::function<void(int kind)>& request)
 {

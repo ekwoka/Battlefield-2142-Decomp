@@ -4,7 +4,7 @@
 //
 // The trees sit in square cells (the Growth base 0x10122130: a grid of
 // +0x10 = 10 x 10 cells about the camera) of viewDistance / (10 / 2 - 1)
-// metres (0x10120420), fitted so a whole number of them spans the terrain
+// metres (0x10120420), then made so a whole number of them spans the terrain
 // (0x1008f510: size = W / floor(W / size), W the smaller of the terrain's
 // sides +0x5c / +0x60), their corners on multiples of the size. Per frame:
 //

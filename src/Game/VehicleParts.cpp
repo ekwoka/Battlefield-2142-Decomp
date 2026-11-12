@@ -108,6 +108,25 @@ float wingLift(const Vec3& v, const Vec3& n, float scale)
 
 float airDensity(float height) { return 1.0f - std::clamp(height / 1000.0f, 0.0f, 1.0f); }
 
+// An axis' input through rememberExcessInput (0x00563bd0, the template's
+// +0x30a; the bank is the object's +0x1ac.., which the RotationalBundle's
+// networkable sends for the pitch, +0x1b0, as mask 0x40): without the flag,
+// or with an input against what is banked, the bank empties and the input
+// goes as it is; else the input is added to the bank (held within +-40)
+// and the axis takes at most 1 of it a tick.
+float bankExcessInput(Vehicle::Part& part, size_t axis, float input)
+{
+	float& bank = part.excess[axis];
+	if (!part.rememberExcess || bank * input < 0) {
+		bank = 0;
+		return input;
+	}
+	bank = std::clamp(bank + input, -40.0f, 40.0f);
+	const float take = std::clamp(bank, -1.0f, 1.0f);
+	bank -= take;
+	return take;
+}
+
 float Vehicle::OldEngine::gearRatio() const
 {
 	static const float kTable[] = {4.0f, 4.0f, 2.0f, 1.5f, 1.25f, 1.0f}; // 0x00a052a0
@@ -179,12 +198,49 @@ Vec3 Vehicle::partPoint(const physics::RigidBody& body, int part) const
 // aircraft's PIThrottle) as out = clamp(((a.y - gMod g) b + v.y) a, -1,
 // 1) while the vehicle leans under 20 degrees (noVertRegAngle, 0x39c),
 // faded out from 10 (maxVertRegAngle, 0x398); it replaces the input when
-// that is 0 or smaller the same way. (Yaw, pitch and roll regulators exist
-// but no shipped vehicle sets them.)
-void Vehicle::regulateInput(const physics::RigidBody& body, float gravity)
+// that is 0 or smaller the same way. Its first three (regulatePitch, Yaw,
+// Roll on their inputs; no official vehicle sets them, the BF2 conversions
+// in the install's Levels do) take the hull's angular velocity w (the
+// root node's slot 0x68) in the hull's frame, row i of its matrix: out =
+// clamp(((R_i . w) / seconds x b + R_i . w) x a, -1, 1), merged the same
+// way. Each reads the inputs as they came, before any is replaced.
+void Vehicle::regulateInput(const physics::RigidBody& body, float gravity, float seconds)
 {
 	m_regulated = m_input;
-	if (m_vertical.input < 0 || !m_occupied) {
+	if (!m_occupied) {
+		return;
+	}
+	const auto merge = [](float out, float v) { return (out < v && v <= 0) || (out > v && v >= 0) ? out : v; };
+	const auto put = [this](int input, float v) {
+		switch (input) {
+		case 0:
+			m_regulated.steer = v;
+			break;
+		case 1:
+			m_regulated.pitch = v;
+			break;
+		case 2:
+			m_regulated.roll = v;
+			break;
+		case 3:
+			m_regulated.throttle = v;
+			break;
+		default:
+			break;
+		}
+	};
+	if (seconds > 0) {
+		for (size_t i = 0; i < 3; ++i) {
+			const Regulator& r = m_rotational[i];
+			if (r.input < 0) {
+				continue;
+			}
+			const float w = physics::dot(body.rotation.rows[i], body.angularVelocity);
+			const float out = std::clamp((w / seconds * r.b + w) * r.a, -1.0f, 1.0f);
+			put(r.input, merge(out, vehicleInputValue(m_input, r.input)));
+		}
+	}
+	if (m_vertical.input < 0) {
 		return;
 	}
 	const float up = body.rotation.rows[1].y;
@@ -197,26 +253,7 @@ void Vehicle::regulateInput(const physics::RigidBody& body, float gravity)
 			out *= (up - cos20) / (cos10 - cos20);
 		}
 	}
-	float v = vehicleInputValue(m_regulated, m_vertical.input);
-	if ((out < v && v <= 0) || (out > v && v >= 0)) {
-		v = out;
-	}
-	switch (m_vertical.input) {
-	case 0:
-		m_regulated.steer = v;
-		break;
-	case 1:
-		m_regulated.pitch = v;
-		break;
-	case 2:
-		m_regulated.roll = v;
-		break;
-	case 3:
-		m_regulated.throttle = v;
-		break;
-	default:
-		break;
-	}
+	put(m_vertical.input, merge(out, vehicleInputValue(m_input, m_vertical.input)));
 }
 
 // Each part's axes on their inputs (the bundles' handlers; an Engine's own
@@ -245,11 +282,7 @@ void Vehicle::updateParts(float seconds)
 				float in = part.autoRotating ? 1.0f
 					: part.inputs[axis] >= 0  ? vehicleInputValue(m_regulated, part.inputs[axis])
 											  : 0.0f;
-				if (part.rememberExcess) {
-					part.excess[axis] = std::clamp(part.excess[axis] + in, -40.0f, 40.0f);
-					in = std::clamp(part.excess[axis], -1.0f, 1.0f);
-					part.excess[axis] -= in;
-				}
+				in = bankExcessInput(part, axis, in);
 				rotationAxisStep(part.axes[axis], in, seconds, part.angle[axis], part.rate[axis]);
 			}
 		}
@@ -323,11 +356,7 @@ void Vehicle::updateOldEngine(OldEngine& e, physics::RigidBody& body, const phys
 	for (size_t axis = 0; axis < 3; ++axis) {
 		if (part.axes[axis].maxSpeed != 0) {
 			float input = in[axis];
-			if (part.rememberExcess) {
-				part.excess[axis] = std::clamp(part.excess[axis] + input, -40.0f, 40.0f);
-				input = std::clamp(part.excess[axis], -1.0f, 1.0f);
-				part.excess[axis] -= input;
-			}
+			input = bankExcessInput(part, axis, input);
 			rotationAxisStep(part.axes[axis], input, seconds, part.angle[axis], part.rate[axis]);
 		}
 	}

@@ -1606,7 +1606,7 @@ private:
 	std::vector<std::pair<int, std::string>> carried(const GameWorld::PlayerInfo& self) const;
 	// What of that the AI has a weapon for: an item whose object names an
 	// aiTemplate that is a weaponTemplate (with the AI scripts loaded; all
-	// of it without them, the tests' built-in rifle stand-in).
+	// of it without them, as the tests' built-in rifle has no aiTemplate).
 	std::vector<std::pair<int, std::string>> armament(const GameWorld::PlayerInfo& self) const;
 	// A seat's armament (the Armament list at 0x10075170 over the bot's
 	// object's weapons): its weapons whose aiTemplate names a

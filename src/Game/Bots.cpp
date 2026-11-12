@@ -2008,8 +2008,7 @@ bool BotManager::spotSighting(const GameWorld::PlayerInfo& self, const GameWorld
 			if (!areas[i].box) {
 				continue;
 			}
-			at = {(areas[i].boxMin[0] + areas[i].boxMax[0]) * 0.5f, areas[i].height,
-				(areas[i].boxMin[1] + areas[i].boxMax[1]) * 0.5f};
+			at = {areas[i].position[0], areas[i].height, areas[i].position[1]}; // +0x84 (0x1005d1c0)
 		}
 		if (horizontal2(other.position - at) >= range2) {
 			continue;
@@ -7874,7 +7873,7 @@ void BotManager::updateStrategy(float seconds)
 					for (const GameWorld::PlayerInfo& p : players) {
 						physics::Vec3 at = p.position;
 						if (!p.alive || p.team < 1 || p.team > 2 || !knownPosition(team, p.id, at) || certainty(team, p.id) <= 0
-							|| at.x < a.boxMin[0] || at.x > a.boxMax[0] || at.z < a.boxMin[1] || at.z > a.boxMax[1]) {
+							|| !a.insideBox(at.x, at.z)) {
 							continue;
 						}
 						(p.team == team ? friendly : enemy) += 1;

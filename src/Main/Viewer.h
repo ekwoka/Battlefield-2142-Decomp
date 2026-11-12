@@ -260,4 +260,28 @@ bool capsLockOn();
 // it open); without one it opens its own for this run.
 int runViewer(const render::LevelSources& sources, const ViewerOptions& options, Window* window = nullptr);
 
+// --keys "<s>:<op> ...": the game input a window gives (ViewerOptions'
+// onPlayerInput, onHudText, onClick...) driven headless, a tick at a time
+// (onTicks(1), then `frame` with the tick's seconds: the HUD's update).
+// Ops from that second of the run on: down:<control> / up:<control>
+// (held, by the control map's names: c_GIRadioComm, c_GISayTeam, c_GIYes,
+// c_PIFire...), press:<control> (for one tick), text:<text> ('_' a space)
+// and key:<Flash code> (13 Enter, 27 Esc) to the open text box,
+// move:<x>/<y>, click:<x>/<y> (moved there first) and rclick:<x>/<y> on
+// the HUD's 800 x 600 screen, console:<line> ('_' a space). A hosted or
+// joined game runs in real time (realTime). Prints each op
+// and what changed: the rose shown, the say box open, new chat and
+// personal rows and the radio messages heard.
+struct KeyScriptHooks {
+	std::function<std::string(const std::string&)> console;
+	std::function<std::string()> rose;
+	std::function<int()> typing;
+	std::function<std::vector<std::string>()> rows;
+	std::function<int()> heard;
+	std::function<void(float x, float y)> setPointer;
+	bool realTime = false; // a hosted or joined game: 30 ticks a second of the clock
+};
+void runKeyScript(const std::string& script, const ViewerOptions& viewer, const std::function<void(float seconds)>& frame,
+	const KeyScriptHooks& hooks);
+
 } // namespace dice::hfe

@@ -214,6 +214,10 @@ struct Options {
 	// move) on the HUD's 800 x 600 screen before the screenshot.
 	std::vector<std::string> hudClicks;
 	std::string inputScript;     // --input-script "<s>:<command> ...": scripted input in the window (Viewer.h)
+	// --keys "<s>:<op> ...": the window's game input without a window (the
+	// game's controls held and released, the HUD's text boxes typed into,
+	// HUD clicks, console lines), run after the round starts (runKeyScript).
+	std::string keys;
 	std::string actions;         // --actions "<command> ...": the soldier's inputs before a screenshot (off screen)
 	std::string menuScript;      // --menu-script "wait:12 click:x,y type:text ...": drive the menu headless
 	std::string login;           // --login [name:password[@soldier]]: log in (FESL, then GameSpy Presence); bare: the configured credentials
@@ -314,6 +318,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.hudClicks.push_back(argv[++i]);
 		} else if (arg == "--input-script" && hasValue) {
 			options.inputScript = argv[++i];
+		} else if (arg == "--keys" && hasValue) {
+			options.keys = argv[++i];
 		} else if (arg == "--actions" && hasValue) {
 			options.actions = argv[++i];
 		} else if (arg == "--remote-actions" && hasValue) {
@@ -455,7 +461,7 @@ bool parseOptions(int argc, char** argv, Options& options)
 			return false;
 		}
 	}
-	if (options.simulate > 0 && options.screenshot.empty() && !options.viewAsked) {
+	if ((options.simulate > 0 || !options.keys.empty()) && options.screenshot.empty() && !options.viewAsked) {
 		// A game run for a while without a picture stays headless, whatever
 		// else asked for the viewer (--play, --connect, --drive): only --view
 		// opens a window with it.
@@ -1295,7 +1301,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	updateMap(hud, world, round, logic, commanderScreen);
 	updateCommander(hud, world, round, commanderScreen);
 	updateTeams(hud, world, logic);
-	hud.set("ScoreboardShow", scoreboard ? 1 : 0);
+	dice::hfe::menu::showScoreboard(hud, scoreboard);
 	if (scoreboard) {
 		updateScoreboard(hud, world, round.objects());
 	}
@@ -1499,13 +1505,22 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	if (const world::Object* vehicle = playerVehicle) {
 		hud.set("VehicleAngle", heading(vehicle->rotation().x));
 	}
-	if (soldier) {
-		// <map>DelayedMapAngle (the map node's variables, registered by its
-		// constructor 0x00784cf0 with <map>RMBMenuState, MapFilter%iActive,
-		// SatelliteActive and the CPNames* ones). A static map (MapStatic,
-		// the profile's minimapRotate off) holds its angles at 0
-		// (0x0078f680: +0x7fc, +0x800 and +0x80c), so the ring shows north.
-		hud.set("MinimapDelayedMapAngle", hud.number("MapStatic") != 0 ? 0.0f : heading(soldier->rotation().x));
+	{
+		// The minimap turns with the player (HudManager::tickMapTurn,
+		// 0x0078f680): the HUD's update hands the map the view's heading,
+		// 0 unless the local player is alive (0x00752640), then the map's
+		// update eases its angles, alive and not man down (slots 0x74,
+		// 0x114). A static map (MapStatic, the profile's minimapRotate off)
+		// holds them at 0. <map>DelayedMapAngle is +0x800 (registered by
+		// the map's constructor 0x00784cf0 with <map>RMBMenuState,
+		// MapFilter%iActive, SatelliteActive and the CPNames* ones): the
+		// compass strip's value, in degrees.
+		game::GameWorld::PlayerInfo me;
+		const bool known = world.playerInfo(world.localPlayer(), me);
+		const float yaw = known && me.alive ? me.yaw - 360.0f * std::floor(me.yaw / 360.0f + 0.5f) : 0.0f;
+		hud.setMapHeading(yaw * 3.14159265f / 180.0f);
+		hud.tickMapTurn(dt, known && me.alive && !me.manDown);
+		hud.set("MinimapDelayedMapAngle", heading(hud.mapDelayedAngle() * 57.29578f));
 	}
 	hud.set("PlayerHealthShow", alive ? 1 : 0);
 	const float health = world.health();
@@ -4294,7 +4309,8 @@ int runGame(Options& options, Session& session)
 		std::printf("  %7d %s\n", sorted[i].second, sorted[i].first.c_str());
 	}
 
-	if (options.view || !options.screenshot.empty() || options.simulate > 0 || (options.dedicated && session.admin)) {
+	if (options.view || !options.screenshot.empty() || options.simulate > 0 || !options.keys.empty()
+		|| (options.dedicated && session.admin)) {
 		// Start the round: spawners take their control points' teams and
 		// put their vehicles out on the first tick.
 		game::GameWorld round(templates, objects);
@@ -4982,15 +4998,24 @@ int runGame(Options& options, Session& session)
 					dice::hfe::menu::HudChat::Speaker::Neutral);
 				return;
 			}
-			if (session.client) {
-				session.client->say(line, channel);
+			// The line goes out (a client's to its server, a host's own
+			// player's through the server's hand-out, HostedGame::localSay)
+			// and into our own list at once (0x007d9b50: slot 0x158), as the
+			// server never sends it back (0x004a6f70).
+			game::GameWorld::PlayerInfo me;
+			if (!hudPlayer(hudLocal(), me)) {
 				return;
 			}
-			game::GameWorld::PlayerInfo me;
-			if (round.playerInfo(round.localPlayer(), me)) {
-				chat.addChat(me.name, line, static_cast<int>(channel),
-					box == Box::kSquad ? dice::hfe::menu::HudChat::Speaker::Squad : dice::hfe::menu::HudChat::Speaker::Team, !me.alive);
+			if (session.client) {
+				session.client->say(line, channel);
+			} else if (session.hosted) {
+				net::ChatMessage said;
+				said.channel = channel;
+				said.text = line;
+				session.hosted->localSay(me.id, said);
 			}
+			chat.addChat(me.name, line, static_cast<int>(channel),
+				box == Box::kSquad ? dice::hfe::menu::HudChat::Speaker::Squad : dice::hfe::menu::HudChat::Speaker::Team, !me.alive);
 		};
 		chat.onSay = sayLocal;
 		bindMethod(console, "HudManager.enableSayAllChatBox", ConsoleAccess::Anyone, [&chat](bool) { chat.open(Box::kAll); });
@@ -5141,6 +5166,17 @@ int runGame(Options& options, Session& session)
 				if (!quiet && leader >= 0) {
 					sayRadio(14, yes ? "roger_that" : "negative", leader);
 				}
+			} else if (q.kind == Q::Vote) {
+				dice::hfe::menu::VoteMessages::Cast cast;
+				game::GameWorld::PlayerInfo me;
+				if (!voteMessages.castVote(q.value, yes, cast)) {
+					return;
+				}
+				if (server) {
+					server->castVote(cast.kind, cast.target, cast.choice);
+				} else if (session.hosted && hudPlayer(hudLocal(), me)) {
+					session.hosted->localVote(me.id, cast.kind, 4, cast.target, cast.choice);
+				}
 			} else if (q.kind == Q::CommanderOffer) {
 				// Kind 3: squad manager slot 0x68 (take it) or 0x6c (pass it
 				// on) with HUD_HUD_DECLINED_COMMANDER.
@@ -5154,6 +5190,14 @@ int runGame(Options& options, Session& session)
 				}
 			}
 		};
+		// A vote's start for a voter is the question of kind 6 (0x005725e0
+		// line 7 → 0x0079e440); its answer casts the vote (0x0079d6e0 case 6
+		// → 0x00572390): a client's Vote event (phase 4), a host's to its
+		// own votes.
+		voteMessages.onVoteQuestion = [&questions](int kind, const std::string& line) {
+			questions.ask(dice::hfe::menu::HudQuestions::Vote, kind, line);
+		};
+		voteMessages.onVoteQuestionGone = [&questions] { questions.forget(dice::hfe::menu::HudQuestions::Vote); };
 		bindMethod(console, "Radio.answer", ConsoleAccess::Anyone, [&questions](bool yes) { questions.answer(yes); });
 		int localOfferAsked = -1; // the local round's offer to our player, asked once
 		const auto askCommanderOffer = [&questions, &localization, &gameLogic](int team) {
@@ -5778,27 +5822,13 @@ int runGame(Options& options, Session& session)
 				: from.team == me.team ? Speaker::Team : Speaker::Enemy;
 			chat.addChat(from.name, line, 0, speaker, !from.alive);
 		};
-		// The name tags' calls from the radio heard: the rewrite's stand-in
-		// for the bots' (theirs don't go through the game's slot 0xd8); a
-		// joined game's players' come with the Spotted event's message.
-		gameAudio.onHeard = [&hudPlayer, &joinedServer](int sender, const std::string& voice) {
-			if (!g_nametags || sender < 0) {
-				return;
-			}
-			game::GameWorld::PlayerInfo p;
-			const bool known = hudPlayer(sender, p);
-			if (joinedServer() && (!known || !p.ai)) {
-				return;
-			}
-			const bool down = known && p.manDown;
-			const int code = voice == "medic" ? (down ? nametags::CallRevive : nametags::CallMedic)
-				: voice == "need_ammo"        ? nametags::CallAmmo
-				: voice == "need_repair"      ? nametags::CallRepair
-											  : 0;
-			if (code) {
-				g_nametags->radioCall(sender, code, false);
-			}
-		};
+		// The name tags' calls come only through the game's slot 0xd8
+		// (0x0042d220: Radio.callFor*, and the local soldier's own 0x36 / 0x37,
+		// 0x00585df0 / 0x00587b90) and, joined, the Spotted event's message;
+		// nothing of AIDLL's calls it: a bot's "medic" is a plain
+		// RadioMessage (AIDLL's send, 0x00896270, event 6 / vtable 0x009284b0),
+		// whose handler 0x0042e0c0 plays the voice and the text and lights no
+		// tag.
 		// The indoor level's rays (0x007fa100) against the level, the hit's
 		// distance found by halving.
 		sounds.setRayTest([&round](const sound::Vec3& from, const sound::Vec3& to, float& distance) {
@@ -5988,6 +6018,7 @@ int runGame(Options& options, Session& session)
 					hosted->detach();
 					hosted->onRemoteCommand = nullptr; // this round's scripts
 					hosted->onChat = nullptr;
+					hosted->onLocalChat = nullptr;
 					hosted->onRequestStored = nullptr;
 					hosted->onSpotted = nullptr;
 					hosted->onVoteReply = nullptr;
@@ -7621,6 +7652,20 @@ int runGame(Options& options, Session& session)
 				hosted->onRemoteCommand = [&scripts](int player, const std::string& command) {
 					scripts.raise("RemoteCommand", {game::ScriptValue::integer(player), game::ScriptValue::string(command)});
 				};
+				// A client's line our own player gets (0x004a7800 → its HUD).
+				hosted->onLocalChat = [&chat, &round](const net::ChatMessage& line) {
+					game::GameWorld::PlayerInfo from, me;
+					if (!round.playerInfo(line.player, from)) {
+						return;
+					}
+					round.playerInfo(round.localPlayer(), me);
+					using Speaker = dice::hfe::menu::HudChat::Speaker;
+					const Speaker speaker = from.commander && from.team == me.team ? Speaker::Commander
+						: from.team == me.team && from.squad && from.squad == me.squad ? Speaker::Squad
+						: from.team == me.team ? Speaker::Team
+											   : Speaker::Enemy;
+					chat.addChat(from.name, line.text, static_cast<int>(line.channel), speaker, !from.alive);
+				};
 				hosted->onChat = [&scripts](int player, const net::ChatMessage& line) {
 					scripts.raise("ChatMessage", {game::ScriptValue::integer(player), game::ScriptValue::string(line.text),
 													 game::ScriptValue::integer(line.channel), game::ScriptValue::integer(0)});
@@ -8530,7 +8575,7 @@ int runGame(Options& options, Session& session)
 					std::printf("    magazines:%s\n", list.c_str());
 				}
 			}
-			if (session.nextMap || (!options.view && options.screenshot.empty())) {
+			if (session.nextMap || (!options.view && options.screenshot.empty() && options.keys.empty())) {
 				return 0;
 			}
 		}
@@ -9556,8 +9601,15 @@ int runGame(Options& options, Session& session)
 			};
 			viewer.wantsPointer = [&session] { return session.client && !session.client->world().hasControlObject(); };
 			viewer.onClick = [&session, &hudManager, &localKit](float x, float y) {
+				if (!session.client) {
+					return;
+				}
 				const int point = hudManager.mapMarkerAt(x, y);
-				if (session.client && point >= 0) {
+				using dice::hfe::menu::JoinedClick;
+				const JoinedClick to = dice::hfe::menu::joinedClick(session.client->world().hasControlObject(), point);
+				if (to == JoinedClick::Hud) {
+					hudManager.click(x, y);
+				} else if (to == JoinedClick::SpawnAt) {
 					session.client->selectKit(localKit);
 					session.client->selectSpawnGroup(joinedSpawnGroup(point));
 					if (g_remoteHud) {
@@ -9566,13 +9618,17 @@ int runGame(Options& options, Session& session)
 							: point >= kMarkerVehicle                     ? game::GameWorld::kSpawnInVehicle
 																		  : point;
 					}
-				} else if (session.client && !session.client->world().hasControlObject()) {
+				} else {
 					// The client's own round has no control points (they are
 					// the server's ghosts): a click asks for any spawn point.
 					session.client->selectKit(localKit);
 					session.client->selectSpawnGroup(-1);
 				}
 			};
+			// The right button's alternate commands and the pointer's moves
+			// (the roses' mouse-over) as in a local round.
+			viewer.onRightClick = [&hudManager](float x, float y) { hudManager.click(x, y, true); };
+			viewer.onPointerMove = [&hudManager](float x, float y) { hudManager.setPointer(x, y); };
 		} else if (round.player()) {
 			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &commanderScreen,
 										&session, &hudManager,
@@ -9967,6 +10023,36 @@ int runGame(Options& options, Session& session)
 		}
 		if (!options.hudClicks.empty() && sources.overlay) {
 			sources.overlay(1); // a second for the menus' fades to finish
+		}
+		if (!options.keys.empty()) {
+			// --keys: the window's game input headless, through the same
+			// layers (the roses, the say boxes, the questions, the map keys).
+			KeyScriptHooks hooks;
+			hooks.console = [&console](const std::string& line) {
+				std::string output;
+				console.execute(line, output, ConsoleAccess::Anyone);
+				return output;
+			};
+			hooks.rose = [&commRoses] { return commRoses.shown(); };
+			hooks.typing = [&chat] { return static_cast<int>(chat.typing()); };
+			hooks.rows = [&chat] {
+				std::vector<std::string> rows = chat.chatRows();
+				for (const std::string& row : chat.personalRows()) {
+					rows.push_back("(personal) " + row);
+				}
+				return rows;
+			};
+			hooks.heard = [&gameAudio] { return gameAudio.radioHeard; };
+			hooks.setPointer = [&hudManager](float x, float y) { hudManager.setPointer(x, y); };
+			hooks.realTime = session.hosted != nullptr || session.client != nullptr;
+			runKeyScript(options.keys, viewer, [&sources](float seconds) {
+				if (sources.overlay) {
+					sources.overlay(seconds);
+				}
+			}, hooks);
+			if (options.screenshot.empty()) {
+				return 0;
+			}
 		}
 		if (!options.screenshot.empty()) {
 			return runViewer(sources, viewer);

@@ -1409,11 +1409,168 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 	if (!m.drawn || x < m.x0 || x > m.x1 || y < m.y0 || y > m.y1) {
 		return false;
 	}
+	// Turned back about the node's centre (the map is drawn turned by
+	// +0x80c).
+	if (m_mapTurn != 0) {
+		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
+		const float c = std::cos(-m_mapTurn), s = std::sin(-m_mapTurn);
+		const float dx = x - cx, dy = y - cy;
+		x = cx + dx * c + dy * s;
+		y = cy + dy * c - dx * s;
+	}
 	const float u = (x - m.mapX) / m.mapW;
 	const float v = (y - m.mapY) / m.mapH;
 	worldX = m_mapOrigin[0] + u * m_mapSize[0];
 	worldZ = m_mapOrigin[1] + (1 - v) * m_mapSize[1];
 	return true;
+}
+
+namespace {
+
+constexpr float kTwoPi = 6.2831855f, kPi = 3.1415927f;
+
+// An angle into [-pi, pi) (0x0078f680's 2pi (a / 2pi - floor(a / 2pi + 0.5))).
+float wrapAngle(float a)
+{
+	const float turns = a / kTwoPi;
+	return (turns - std::floor(turns + 0.5f)) * kTwoPi;
+}
+
+// 0x00778e20: the turn from b to a, at most half a turn either way (its
+// size is what the callers take).
+float angleBetween(float a, float b)
+{
+	float d = 0 <= a || b <= 0 ? a - b : b - a;
+	if (std::abs(d) > kPi) {
+		d = kTwoPi - std::abs(d);
+	}
+	return d;
+}
+
+// 0x00778d00: which way `current` turns to reach `target`: 0 within eps
+// (also a turn away), else -1 or 1, across +-pi the short way.
+int turnSide(float target, float current, float eps)
+{
+	if (std::abs(current - target) < eps || std::abs(current - (target + kTwoPi)) < eps ||
+		std::abs(current - (target - kTwoPi)) < eps) {
+		return 0;
+	}
+	if (std::abs(target - current) > kPi) {
+		if (current < 0 && target > 0) {
+			return -1;
+		}
+		if (current > 0 && target < 0) {
+			return 1;
+		}
+	}
+	return static_cast<int>(std::ceil((target - current) / std::abs(target - current)));
+}
+
+// 1 - e^(-k t), the exe's exp (0x00614830) taking its power within +-10.
+float easeStep(float seconds, float k)
+{
+	return 1 - std::exp(std::clamp(-seconds * k, -10.0f, 10.0f));
+}
+
+} // namespace
+
+void HudManager::setMapHeading(float radians)
+{
+	if (std::abs(angleBetween(radians, m_mapAngle)) <= 0.2f) {
+		if (!m_mapWobbled) {
+			m_mapWobbling = true;
+		}
+	} else {
+		m_mapWobbled = false;
+		m_mapWobbling = false;
+		m_mapWobbleTime = 0;
+		m_mapWobbleSide = radians - m_mapAngle > 0 ? 1.0f : -1.0f;
+		if (std::abs(m_mapAngle - radians) > kPi) {
+			if (m_mapAngle > 0 && radians < 0) {
+				m_mapWobbleSide = 1;
+			} else if (m_mapAngle < 0 && radians > 0) {
+				m_mapWobbleSide = -1;
+			}
+		}
+	}
+	m_mapHeading = radians;
+}
+
+void HudManager::tickMapTurn(float seconds, bool alive)
+{
+	const bool settled = m_mapSizeSettled; // the update's local copy of +0x816
+	// MapStatic's change (the map's event 10, 0x00779890): the angles to 0.
+	const bool isStatic = number("MapStatic") != 0;
+	if (isStatic != m_mapStatic) {
+		m_mapTurn = m_mapAngle = m_mapDelayed = 0;
+		m_mapStatic = isStatic;
+	}
+	// The commander's map (+0x70a) heads north.
+	const bool commander = number("CommanderShow") != 0;
+	if (commander) {
+		m_mapHeading = 0;
+	}
+	if (m_mapAtMini) {
+		if (!m_mapStatic && alive) {
+			const float target = wrapAngle(m_mapHeading);
+			const float ease = easeStep(seconds, 9);
+			m_mapAngle = wrapAngle(m_mapAngle);
+			if (const int side = turnSide(target, m_mapAngle, 0.001f)) {
+				m_mapAngle += ease * std::abs(angleBetween(target, m_mapAngle)) * static_cast<float>(side);
+			} else {
+				m_mapAngle = target;
+			}
+			// The compass's target: the angle, or with the wobble once a
+			// turn settles (+0x817: sin(4.5 t) by 0.3 - 0.4 t to its side,
+			// for 0.75 s).
+			if (!m_mapWobbling) {
+				m_mapCompassTarget = wrapAngle(m_mapAngle);
+			} else {
+				const float size = 0.3f - m_mapWobbleTime * 0.4f;
+				m_mapWobble = std::sin(m_mapWobbleTime * 4.5f) * size * m_mapWobbleSide;
+				m_mapCompassTarget = wrapAngle(m_mapAngle + m_mapWobble);
+				if (size > 0) {
+					m_mapWobbleTime += seconds;
+				} else {
+					m_mapWobbled = true;
+					m_mapWobbling = false;
+					m_mapWobble = 0;
+					m_mapWobbleTime = 0;
+				}
+			}
+			m_mapDelayed = wrapAngle(m_mapDelayed);
+			if (const int side = turnSide(m_mapCompassTarget, m_mapDelayed, 0.001f)) {
+				m_mapDelayed += ease * std::abs(angleBetween(m_mapCompassTarget, m_mapDelayed)) * static_cast<float>(side);
+			} else {
+				m_mapDelayed = m_mapCompassTarget;
+			}
+			// The map's own turn: up to 100 steps of 0.007 (0.05 once it
+			// has caught up at a settled size) of the ease towards the
+			// heading, taking it once within 0.2.
+			const bool slow = !settled || !m_mapTurnCaught;
+			for (int i = 0; i < 100; ++i) {
+				const int side = turnSide(target, m_mapTurn, 0.2f);
+				if (side == 0) {
+					m_mapTurn = target;
+					if (slow) {
+						m_mapTurnCaught = true;
+					}
+					break;
+				}
+				if (slow) {
+					m_mapTurnCaught = false;
+				}
+				m_mapTurn += ease * (slow ? 0.007f : 0.05f) * static_cast<float>(side);
+			}
+		} else {
+			m_mapTurn = m_mapAngle = m_mapDelayed = 0;
+			m_mapTurnCaught = true;
+		}
+	}
+	// The size flags for the next frame (+0x709, +0x816): the rewrite's map
+	// takes its size at once, so it is always settled.
+	m_mapAtMini = number("MapFullSize") == 0 && !commander;
+	m_mapSizeSettled = true;
 }
 
 void HudManager::setMapArea(float minX, float minZ, float maxX, float maxZ)
@@ -1597,7 +1754,22 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		mapX = nx + nw / 2 - (m_overheadPoint[0] - m_mapOrigin[0]) / m_mapSize[0] * mapW;
 		mapY = ny + nh / 2 - (1 - (m_overheadPoint[1] - m_mapOrigin[1]) / m_mapSize[1]) * mapH;
 	}
+	// The map's turn (+0x80c, tickMapTurn): the texture and the layer
+	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
+	// a positive turn counter-clockwise on the screen; HudQuad's rotation
+	// is clockwise), then cut to the node.
+	const float turnDegrees = m_mapTurn * 57.29578f;
+	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
+	const auto turned = [&](HudQuad& q) {
+		if (turnDegrees != 0) {
+			q.rotation = -turnDegrees;
+			q.pivotSet = true;
+			q.pivot[0] = centreX;
+			q.pivot[1] = centreY;
+		}
+	};
 	HudQuad map {m_mapTexture, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * m_mapAlpha}, 0};
+	turned(map);
 	if (map.color[3] > 0 && clipTo(map, nx, ny, nx + nw, ny + nh)) {
 		out.push_back(map);
 	}
@@ -1605,6 +1777,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// times the node's (0x0077d200: +0x7b4 x +0x7b0), before the markers.
 	if (!m_mapLayer.empty()) {
 		HudQuad layer {m_mapLayer, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * m_mapAlpha}, 0};
+		turned(layer);
 		if (layer.color[3] > 0 && clipTo(layer, nx, ny, nx + nw, ny + nh)) {
 			out.push_back(layer);
 		}
@@ -1613,7 +1786,16 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	for (const MapMarker& marker : m_mapMarkers) {
 		const float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
 		const float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
-		const float sx = mapX + u * mapW, sy = mapY + v * mapH;
+		float sx = mapX + u * mapW, sy = mapY + v * mapH;
+		// 0x0077c610: the icon turned about its point by its angle less the
+		// map's turn, then with the map about the node's centre: its point
+		// moves with the map and it keeps its heading on it.
+		if (turnDegrees != 0) {
+			const float c = std::cos(m_mapTurn), s = std::sin(m_mapTurn);
+			const float dx = sx - centreX, dy = sy - centreY;
+			sx = centreX + dx * c + dy * s;
+			sy = centreY + dy * c - dx * s;
+		}
 		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size;
 		const float side = std::floor(pixels);
 		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
@@ -1625,7 +1807,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
-			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * iconAlpha}, marker.yaw};
+			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * iconAlpha}, marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;

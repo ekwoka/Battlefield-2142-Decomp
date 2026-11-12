@@ -90,6 +90,7 @@ public:
 	// Each frame: the lists' timeouts and the variables.
 	void update(float seconds);
 	const std::vector<std::string>& chatRows() const { return m_rows; }
+	const std::vector<std::string>& personalRows() const { return m_personalRows; } // the PersonalList's (13)
 
 private:
 	struct Line {
@@ -105,7 +106,7 @@ private:
 	std::function<std::string(const std::string&)> m_localize;
 	std::deque<Line> m_lines;
 	std::array<float, 9> m_left {}; // each category's time left
-	std::vector<std::string> m_rows;
+	std::vector<std::string> m_rows, m_personalRows;
 	Box m_box = kNone;
 	std::string m_typed;
 };
@@ -181,6 +182,14 @@ public:
 	std::function<std::string(int player)> playerName; // "" for none
 	std::function<std::string(int map)> mapName;       // the map list's name
 	std::function<void(const std::string& line)> onLine;
+	// A start seen by a voter (0x005725e0 line 7, neither the starter nor
+	// a kick's or mutiny's target): instead of the line, the HUD's
+	// question of kind 6 (0x0079e440 with the vote's kind, shown: its text
+	// the *_START_REMOTE line, 0x0079c720 case 6) and the vote counted as
+	// not yet cast (+1); the starter's and the target's start takes any
+	// such question away (0x0079e290) and shows the *_START_LOCAL line.
+	std::function<void(int kind, const std::string& line)> onVoteQuestion;
+	std::function<void()> onVoteQuestionGone;
 	int localPlayer = -1;
 
 	void handle(const Event& event);
@@ -191,6 +200,16 @@ public:
 	// nothing while a vote runs (+4), else mayStart's checks for a kick.
 	bool mayStartKick(int target, bool targetIsHost) { return !running() && mayStart(2, target, targetIsHost); }
 	bool running() const { return m_kind != 0; }
+	// The question's answer (0x0079d6e0 case 6): with the question's vote
+	// kind and no vote of the local player's yet (player slot 0x310), the
+	// cast (0x00572390): not by a kick's or mutiny's target, the choice 0
+	// for yes and 1 for no, the vote's kind and target to send (a client's
+	// Vote event, phase 4; a host's to its own votes); the vote then
+	// counts as cast (+1). False: nothing to send.
+	struct Cast {
+		int kind = 0, target = 0, choice = 0;
+	};
+	bool castVote(int questionKind, bool yes, Cast& out);
 	// The bar on applying for command after a mutiny (player +0x128 /
 	// +0x130, slots 0x13c..0x148). A mutiny vote's end, passed (phase 3)
 	// or cancelled (2), sets its target's minutes to 5 (0x005740e0); the
@@ -266,6 +285,8 @@ public:
 	std::function<void(const Question&, bool yes, bool quiet)> onAnswer;
 
 	void ask(Kind kind, int value, const std::string& text);
+	// 0x0079e290 with -1: the kind's questions taken away, unanswered.
+	void forget(Kind kind) { m_questions[static_cast<size_t>(kind)].reset(); }
 	void answer(bool yes);
 	void tick(float seconds);
 	const Question* front() const;

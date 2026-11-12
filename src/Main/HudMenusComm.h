@@ -230,4 +230,19 @@ std::string spottedMessage(const world::ObjectTemplate* t);
 int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3],
 	float reach = 300);
 
+// Where a joined game's left click goes (the HUD's input, 0x00754290: the
+// pointer's buttons for the HUD's own nodes while playing). With a
+// soldier: the HUD (HudManager::click: the roses' entries, the scoreboard,
+// the map's menus); without one, the spawn screen: a spawn icon picks
+// that point, elsewhere any point (the client's round has no control
+// points of its own).
+enum class JoinedClick { Hud, SpawnAt, AnySpawn };
+inline JoinedClick joinedClick(bool hasControlObject, int marker)
+{
+	if (hasControlObject) {
+		return JoinedClick::Hud;
+	}
+	return marker >= 0 ? JoinedClick::SpawnAt : JoinedClick::AnySpawn;
+}
+
 } // namespace dice::hfe::menu
