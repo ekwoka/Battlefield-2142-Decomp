@@ -165,6 +165,11 @@ public:
 	void joinSquad(int squad);                                    // JoinSquad (0x10; sent by 0x004c9bf0): team, player, squad
 	void leaveSquad(int squad, int player = -1, bool flag = false); // LeaveSquad (0x11; 0x004c9c50); another player: the leader kicks
 	void invite(int player, int squad, bool fromLeader = true);   // Invite (0x19; server 0x0050e700)
+	// A private squad's leader's answer to a player asking to join (the
+	// HUD's question kind 0, message 2/0x11): PostRemote 2/0x13 or 2/0x12
+	// with {squad, player} (the original's second int is the player's
+	// connection; HostedGame relays by the id), and with yes the invite.
+	void answerJoinRequest(int player, int squad, bool yes);
 	void setSquadLeader(int player, int squad);                   // SetSquadLeader (0x1c)
 	void setSquadName(int squad, const std::string& name);        // ChangeSquadName (0x16): squad, team, our id, name (at most 31)
 	// A new squad: ChangeSquadName for an empty squad (0x0050da80 ->

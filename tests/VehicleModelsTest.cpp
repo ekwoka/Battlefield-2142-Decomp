@@ -1566,6 +1566,90 @@ TEST(Vehicles_DeployablesPoseTheirParts)
 	CHECK(hub == 0 || g.world->partBone(hub, "UNL_HUB_Ammo_lid1", lid));
 }
 
+// The deployables as the rounds meet them: each is a mobile mesh body (its
+// root's instance and its collisionPart children's, posed by its bones,
+// 0x0063ccc0 / 0x0063d470). The portable shield's ThrownFireComp turns it
+// by fire.projectileStartRotation 90/0/0 in its own frame (0x005e5720), so
+// its panel (geometry 0, in the root's y-z plane, about 0.94 m across)
+// faces the deployer: rounds from in front, 0.3 m off its middle, meet it
+// (set down along the view they passed its 4 cm edge). The sentry gun, its
+// shape all parts, takes rounds and is destroyed (120 hit points).
+TEST(Vehicles_DeployablesStopRounds)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* gadget : {"unl_port_shield", "Unl_Deployer_Sentrygun"}) {
+		Garage g(gameDir());
+		world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+		if (!kit || !g.templates.find(gadget)) {
+			return;
+		}
+		const bool shield = std::string(gadget) == "unl_port_shield";
+		kit->children() = {{"eu_ar_rifle", {}, {}}, {gadget, {}, {}}};
+		Animations a(g);
+		g.start("eu_fav", {30, 2, 30});
+		a.attach(g);
+		CHECK(g.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		CHECK(g.world->playerInfo(g.world->localPlayer(), me));
+		g.world->setSoldierPosition(me.soldier, {0, 0, 0});
+		g.run(1);
+		game::SoldierInput take;
+		take.selectItem = 5;
+		g.drive(take, 1.5f);
+		game::SoldierInput fire;
+		fire.fire = true;
+		g.drive(fire, 0.1f);
+		g.drive({}, 2.5f); // unfolded
+		uint32_t placed = 0;
+		for (const auto& object : g.objects.objects()) {
+			const world::ObjectTemplate* t = object->objectTemplate();
+			if (t && t->name() == (shield ? "portable_shield" : "eu_sentrygun")) {
+				placed = object->id();
+			}
+		}
+		CHECK(placed != 0);
+		if (!placed) {
+			continue;
+		}
+		const physics::Vec3 at = g.position(placed);
+		const float yaw = g.yaw(placed);
+		std::fprintf(stderr, "  %s at %.2f %.2f %.2f, yaw %.1f, %.0f hit points\n", gadget, at.x, at.y, at.z, yaw,
+			g.world->hitPoints(placed));
+		if (shield) {
+			// The deployer looked along +z (yaw 0): the shield turned by 90.
+			CHECK(std::fabs(std::remainder(yaw - 90.0f, 360.0f)) < 1.0f);
+		}
+		// Six metres back on the deployer's side (the shield's 0.3 m off its
+		// middle), still looking along +z, the rifle aimed at its middle.
+		g.world->setSoldierPosition(me.soldier, {at.x + (shield ? 0.3f : 0.0f), 0, at.z - 6});
+		take.selectItem = 3;
+		g.drive(take, 1.5f);
+		const float before = g.world->hitPoints(placed);
+		game::SoldierInput shoot;
+		shoot.aimPitch = shield ? -12 : -10;
+		g.drive(shoot, 0.5f);
+		bool destroyed = false;
+		for (int burst = 0; burst < 40 && !destroyed; ++burst) {
+			shoot.fire = true;
+			g.drive(shoot, 1 / 30.0f);
+			shoot.fire = false;
+			g.drive(shoot, 0.4f);
+			destroyed = !g.objects.find(placed) || g.world->hitPoints(placed) <= 0;
+			if (shield && g.world->hitPoints(placed) < before) {
+				break;
+			}
+		}
+		const float after = g.objects.find(placed) ? g.world->hitPoints(placed) : 0;
+		std::fprintf(stderr, "  %s: %.0f -> %.0f hit points%s\n", gadget, before, after, destroyed ? ", destroyed" : "");
+		CHECK(after < before);
+		if (!shield) {
+			CHECK(destroyed);
+		}
+	}
+}
+
 // The player's may-use test (0x005921e0) and a weapon key's item selection
 // in a seat (0x004d2a50 -> 0x0079c190): the heavy mech's driver presses 3,
 // the rockets' key (PIAltFire group, already active): no new pick, no

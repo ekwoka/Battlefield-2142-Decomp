@@ -396,7 +396,13 @@ struct PlayerOwnState {
 	float hitStrength = 0;
 	// Weapon groups 0-2 (player +0x1e0 + g: one is active): the selected
 	// weapon's index in the group (5 bits of index + 1, 0x005a98b0), three
-	// 2-bit values (+0x208, +0x238, +0x1fc; meanings not traced), the rounds
+	// 2-bit values the snapshot 0x00595e50 takes from the firearm's 0x94c0
+	// interface: +0x208 its slot 300 (the zoom level), +0x238 slot 0x140
+	// (0x005c3120: the fire component's slot 0xf4 bit, with its slot 0xa4
+	// and the +0x1cc component's slot 0x90 shifted up one), +0x1fc slot
+	// 0x14 (0x005c1b20: the fire component's mode, slot 0xdc); a client
+	// hands them back to the firearm (0x00595d90 -> slot 0x68, 0x005c25b0);
+	// the rewrite's host sends 0 and its client reads its own. The rounds
 	// (+0x1e4, 11 bits of value + 1) and the magazines (+0x214, 10 bits of
 	// value + 1); with a heat-carrying firearm (PlayerOwnStateHints) its
 	// 0..6 (+0x22c) in 8 bits.

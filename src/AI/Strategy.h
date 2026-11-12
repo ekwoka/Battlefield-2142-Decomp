@@ -53,9 +53,10 @@ struct StrategyCondition {
 	int type = 14; // Ticket 13, ControlPoint 14, Time 15, StartTime 16, Attacks 17, Defences 18,
 	               // NumberOfFriendlyAreas 19, NumberOfNeutralAreas 20, NumberOfHostileAreas 21
 	float constant = 0;
-	// setConditionStrength follows every createConstantCondition in the
-	// shipped AIDefaultStrategies.ai, so the default never counts; where
-	// the original keeps it was not found.
+	// The condition's +0x1c (setConditionStrength, 0x10016d40 ->
+	// 0x1005ccd0), 0 = Required (0x100587c0's order) from the condition's
+	// constructor 0x1005cc30; every createConstantCondition in the shipped
+	// AIDefaultStrategies.ai sets it.
 	Strength strength = Strength::Required;
 };
 
@@ -99,8 +100,9 @@ struct StrategicArea {
 	// point, 0x100629e0).
 	std::array<bool, 3> takeable {true, true, true};
 	// Such an area's status for each side (+0x70 + 4 side), kept from one
-	// update to the next; Neutral at the start (the area's constructor
-	// wasn't traced).
+	// update to the next; Neutral at the start (2: the strategic-object
+	// base's constructor 0x10063fc0 sets +0x74 / +0x78 and their copies
+	// +0x7c / +0x80, and the box area's 0x10062e10 leaves them).
 	std::array<AreaStatus, 3> boxStatus {AreaStatus::Neutral, AreaStatus::Neutral, AreaStatus::Neutral};
 };
 

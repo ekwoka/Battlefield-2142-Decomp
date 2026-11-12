@@ -388,7 +388,9 @@ TEST(RagDoll_SeatedSoldierTakesTheSeatsPose)
 
 // Killed in a seat with a die bundle (0x005cea00 with died = 1): the
 // seat's system plays "die" and the body stays in the seat, posed by it
-// (no ragdoll), until someone takes the seat or the vehicle goes.
+// (no ragdoll), until someone takes the seat or the vehicle goes, or its
+// armour's countdown ends (0x00652380: a soldier with a parent skips the
+// landed test; the test soldier's armour gives 3 s, then a 1 s fade).
 TEST(RagDoll_KilledInASeatSlumpsThere)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -435,6 +437,11 @@ TEST(RagDoll_KilledInASeatSlumpsThere)
 	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == vehicle);
 	std::vector<anim::Matrix> seated, slumped;
 	CHECK(skeleton && game.world->skeletonPose(soldier, *skeleton, seated));
+	if (const world::Object* o = game.objects.find(soldier); o && o->objectTemplate()) {
+		auto* t = const_cast<world::ObjectTemplate*>(o->objectTemplate());
+		t->settings()["armor.timeToStayAsWreck"] = "3";
+		t->settings()["armor.timeToStayAfterDestroyed"] = "1";
+	}
 	game.world->setHitPoints(soldier, 0);
 	CHECK(game.world->seatCorpse(vehicle, 0) == soldier);
 	game.run(1.0f);
@@ -447,11 +454,13 @@ TEST(RagDoll_KilledInASeatSlumpsThere)
 		std::fprintf(stderr, "  the head moved %.2f m slumping\n", moved);
 		CHECK(moved > 0.05f); // the die bundle's pose, not the seat's still one
 	}
-	// Still there a while on, gone with the vehicle.
-	game.run(5.0f);
+	// Still there a while on, then fading out and gone.
+	game.run(1.0f);
 	CHECK(game.world->seatCorpse(vehicle, 0) == soldier && game.objects.find(soldier));
-	game.objects.remove(vehicle);
-	game.run(0.1f);
+	game.run(1.5f);
+	body = game.objects.find(soldier);
+	CHECK(game.world->seatCorpse(vehicle, 0) == soldier && body && body->fade() < 1.0f && body->fade() > 0.0f);
+	game.run(1.0f);
 	CHECK(game.world->seatCorpse(vehicle, 0) == 0 && !game.objects.find(soldier));
 }
 
@@ -2076,7 +2085,8 @@ TEST(CombatArea_OutsideTimerThenDamage)
 // A neutral APC (no teamOnVehicle) carrying a SpawnPoint: entered by a
 // team-2 soldier it is team 2's (0x005c9500: the first occupant's team),
 // so it is one of team 2's mobile spawn points; left empty it is its own
-// (neutral) again.
+// (neutral) again. Under its armour's criticalDamage the point is
+// refused (0x005b24f0's parent armour test).
 TEST(Vehicle_TeamOfItsOccupant)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -2107,6 +2117,8 @@ TEST(Vehicle_TeamOfItsOccupant)
 	}
 	game.templates.create("SpawnPoint", "apc_SpawnPoint");
 	car->children().push_back({"apc_SpawnPoint", {0, 0, -3}, {}});
+	car->settings()["armor.maxHitPoints"] = "500";
+	car->settings()["armor.criticalDamage"] = "100";
 	game.templates.create("EntryPoint", "apc_entry")->settings()["entryRadius"] = "3";
 	game.start();
 	world::Object* apc = game.objects.create(car, {3, 1.2f, 0}, {0, 0, 0});
@@ -2125,6 +2137,10 @@ TEST(Vehicle_TeamOfItsOccupant)
 	const auto mine = game.world->spawnVehicles(2);
 	CHECK(mine.size() == 1 && mine[0] == vehicle);
 	CHECK(game.world->spawnVehicles(1).empty());
+	game.world->setHitPoints(vehicle, 99);
+	CHECK(game.world->spawnVehicles(2).empty());
+	game.world->setHitPoints(vehicle, 100);
+	CHECK(game.world->spawnVehicles(2).size() == 1);
 	// Out: empty, its own team (none) again.
 	game.world->setPlayerInput(input);
 	game.world->tick(1 / 30.0f);

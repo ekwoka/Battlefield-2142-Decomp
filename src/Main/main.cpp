@@ -4964,9 +4964,48 @@ int runGame(Options& options, Session& session)
 				std::printf("question: %s\n", line.c_str());
 			}
 		};
+		// The squad manager's messages to our player (SquadMenu::squadMessage):
+		// the lines, and a request to join our private squad as the
+		// question's kind 0.
+		squadMenu.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
+		squadMenu.teamName = [&localization, &gameLogic](int team) {
+			return localization.text("HUD_TEAMNAME_" + gameLogic.team(team == 1 ? 1 : 2).name);
+		};
+		squadMenu.onJoinRequest = [&questions](int player, const std::string& line) {
+			questions.ask(dice::hfe::menu::HudQuestions::JoinRequest, player, line);
+		};
 		questions.onAnswer = [&](const dice::hfe::menu::HudQuestions::Question& q, bool yes, bool quiet) {
 			using Q = dice::hfe::menu::HudQuestions;
 			net::GameClient* server = joinedServer();
+			if (q.kind == Q::JoinRequest) {
+				// Kind 0 (0x0079d6e0): the leader's answer to the player who
+				// asked: 2/0x13 or 2/0x12 with our squad to him (a client's
+				// through the server), with yes the invite (slot 0x30); the
+				// leader's line unless timed out, and a no answered puts the
+				// player on the squad menu's list (0x007a7d10).
+				game::GameWorld::PlayerInfo me, asking;
+				if (!hudPlayer(hudLocal(), me) || !me.squadLeader || !hudPlayer(q.value, asking)) {
+					return;
+				}
+				if (server) {
+					server->answerJoinRequest(q.value, me.squad, yes);
+				} else if (session.hosted) {
+					session.hosted->answerJoinRequest(me.id, q.value, yes);
+				} else if (yes) {
+					round.setSquadInvite(q.value, me.squad, true); // a bot never answers it
+				}
+				if (!quiet) {
+					if (!yes) {
+						squadMenu.denyJoinRequest(q.value);
+					}
+					std::string line = localization.text(yes ? "HUD_HUD_SQUAD_GRANTED_TO_ACCESS_SQUAD" : "HUD_HUD_SQUAD_DENIED_TO_ACCESS_SQUAD");
+					if (const size_t at = line.find("#PLAYERNAME#"); at != std::string::npos) {
+						line.replace(at, 12, asking.name);
+					}
+					chat.addPersonal(line);
+				}
+				return;
+			}
 			if (q.kind == Q::Invite) {
 				// Kind 1: yes joins the squad (the squad menu's 0x007a5410:
 				// JoinSquad), no clears the invite (squad manager slot 0x30
@@ -4986,7 +5025,7 @@ int runGame(Options& options, Session& session)
 						server->invite(server->world().localPlayer(), q.value, false);
 					}
 				} else if (yes) {
-					round.joinSquad(round.localPlayer(), q.value);
+					round.requestJoinSquad(round.localPlayer(), q.value);
 				}
 				if (!quiet && leader >= 0) {
 					sayRadio(14, yes ? "roger_that" : "negative", leader);
@@ -5163,7 +5202,7 @@ int runGame(Options& options, Session& session)
 			if (net::GameClient* server = joinedServer()) {
 				server->joinSquad(squad);
 			} else {
-				round.joinSquad(round.localPlayer(), squad);
+				round.requestJoinSquad(round.localPlayer(), squad); // 0x34: 0x004c7290
 			}
 		});
 		const auto leave = [&](int squad) {
@@ -7176,6 +7215,13 @@ int runGame(Options& options, Session& session)
 				}
 				// An invite (2/0x10, the squad: 0x004c3190's message): the
 				// question's kind 1 (HUD_HUD_SQUAD_INVITED_TO, #SQUADNAME#).
+				// The squad manager's join answers (0x004c7290: 2/0xb full,
+				// 2/0xc private; 2/0x11 to a private squad's leader) and a
+				// leader's answer handed on (0x004a5750: 2/0x12, 2/0x13).
+				if (message.category == 2
+					&& (message.id == 0xb || message.id == 0xc || message.id == 0x11 || message.id == 0x12 || message.id == 0x13)) {
+					squadMenu.squadMessage(static_cast<int>(message.id), message.payloadInt(0));
+				}
 				if (message.category == 2 && message.id == 0x10) {
 					std::string line = localization.text("HUD_HUD_SQUAD_INVITED_TO");
 					if (const size_t at = line.find("#SQUADNAME#"); at != std::string::npos) {
@@ -8869,6 +8915,11 @@ int runGame(Options& options, Session& session)
 				if (!session.client) {
 					for (const auto& e : round.takeCloseToEvents(round.localPlayer())) {
 						dice::hfe::menu::closeToObject(hudManager, e.type, e.enter);
+					}
+					// The squad manager's messages to the server's own player
+					// (0xff: its event manager, 0x004c7290).
+					for (const auto& m : round.takeSquadMessages(round.localPlayer())) {
+						squadMenu.squadMessage(m.id, m.value);
 					}
 					// The team damage limits (sgl_setParam, scoringCommon.py's
 					// setTeamDamagePointLimit) and the server's own player's

@@ -400,7 +400,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		client.moves.clear();
 		client.lastMove = {};
 		client.dryTicks = 0;
-		client.stepping = client.stepped = -1;
+		client.stepping = client.stepped = client.recordMove = -1;
 		client.spawnRequested = false;
 		if (client.stage != Client::Stage::Connected) {
 			client.stage = Client::Stage::Loading;
@@ -1123,7 +1123,25 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	switch (e.type) {
 	case net::kEvPostRemote: {
 		net::PostRemoteInfo info;
-		if (!net::parsePostRemote(e, info) || info.category != net::kMsgNetworkCategory) {
+		if (!net::parsePostRemote(e, info)) {
+			return;
+		}
+		// A client leader's answer to a request to join his private squad
+		// (0x0079d6e0 kind 0 on a client: {squad, the player} to the
+		// server), which the game server's listener (0x004a5750) hands the
+		// player's connection as 2/0x12 or 2/0x13 with the squad (none for
+		// the server's own player). The original's second int is the
+		// player's connection (player slot 0x58), which a client of the
+		// rewrite doesn't hold: the rewrite's is the player's id.
+		if (info.category == 2 && (info.id == 0x12 || info.id == 0x13) && info.payload.size() >= 8) {
+			for (const auto& [to, c] : m_clients) {
+				if (c.player == info.payloadInt(1) && c.player != player) {
+					sendTo(to, net::makePostRemote(2, info.id, net::int32Payload(info.payloadInt(0))));
+				}
+			}
+			return;
+		}
+		if (info.category != net::kMsgNetworkCategory) {
 			return;
 		}
 		switch (info.id) {
@@ -1283,9 +1301,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		client.chat.clear();
 		return;
 	}
-	case net::kEvJoinSquad: // team, player, squad
+	case net::kEvJoinSquad: // team, player, squad: the squad manager's join (0x004c7290)
 		if (e.i(1) == player) {
-			m_round->joinSquad(player, e.i(2));
+			m_round->requestJoinSquad(player, e.i(2));
 		}
 		return;
 	case net::kEvLeaveSquad: { // team, player, squad, bit (0x004c9c50)
@@ -1312,32 +1330,28 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		// clears the squad's bit).
 		if (e.u(3) == 0) {
 			if (e.i(1) == player) {
-				m_invites[player] &= ~(1u << (e.u(2) & 31));
+				m_round->setSquadInvite(player, e.i(2), false);
 			}
 			return;
 		}
-		game::GameWorld::PlayerInfo me, other;
-		if (!m_round->playerInfo(player, me) || !me.squadLeader || me.squad != e.i(2) || !m_round->playerInfo(e.i(1), other)
-			|| other.team != me.team || other.commander) {
-			return;
-		}
-		// Squad manager slot 0x30 (0x004c3190): the invited player's mask
-		// of the squads that invited it (player vtable 0x224 / 0x228) gets
-		// the squad's bit and its client message 2/0x10 (the squad), which
-		// its HUD asks about (the question queue's kind 1, 0x0079e440).
-		m_invites[other.id] |= 1u << (static_cast<uint32_t>(me.squad) & 31);
-		for (const auto& [id, c] : m_clients) {
-			if (c.player == other.id) {
-				sendTo(id, net::makePostRemote(2, 0x10, net::int32Payload(me.squad)));
-			}
+		game::GameWorld::PlayerInfo me;
+		if (m_round->playerInfo(player, me) && me.squad == e.i(2)) {
+			inviteToSquad(player, e.i(1));
 		}
 		return;
 	}
-	case net::kEvSetPrivateSquad: // team, squad, bit: the leader's lock (slot 0x20)
+	case net::kEvSetPrivateSquad: { // team, squad, bit: the leader's lock (slot 0x20)
+		// Its squad's leader's (the HUD's toggle 0x007a5a60 offers it to
+		// him only); the round's squad manager keeps it (requestJoinSquad).
+		game::GameWorld::PlayerInfo me;
+		if (m_round->playerInfo(player, me) && me.squadLeader && me.squad == e.i(1)) {
+			m_round->setSquadPrivate(me.team, me.squad, e.u(2) != 0);
+		}
 		if (onLog) {
 			onLog("player " + std::to_string(player) + (e.u(2) ? " locks" : " unlocks") + " squad " + std::to_string(e.i(1)));
 		}
 		return;
+	}
 	case net::kEvChangeSquadName: // a new squad (0x004c6720)
 		if (e.i(2) == player) {
 			m_round->joinSquad(player, e.i(0));
@@ -1699,6 +1713,55 @@ void HostedGame::sendTeamDamage()
 			sendTo(id, net::makePostRemote(net::kMsgGameCategory, 0xb,
 						   net::int32Payload(e.kind) + net::int32Payload(e.victim) + net::int32Payload(e.attacker)));
 		}
+	}
+}
+
+void HostedGame::sendSquadMessages()
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage == Client::Stage::Playing && client.player >= 0) {
+			for (const game::GameWorld::SquadMessage& m : m_round->takeSquadMessages(client.player)) {
+				sendTo(id, net::makePostRemote(2, static_cast<uint32_t>(m.id), net::int32Payload(m.value)));
+			}
+		}
+	}
+}
+
+void HostedGame::inviteToSquad(int leader, int player)
+{
+	game::GameWorld::PlayerInfo me, other;
+	if (!m_round->playerInfo(leader, me) || !me.squadLeader || me.squad <= 0 || !m_round->playerInfo(player, other)
+		|| other.team != me.team || other.commander) {
+		return;
+	}
+	// Squad manager slot 0x30 (0x004c3190): the invited player's mask of
+	// the squads that invited it (player vtable 0x224 / 0x228) gets the
+	// squad's bit and its client message 2/0x10 (the squad), which its HUD
+	// asks about (the question queue's kind 1, 0x0079e440).
+	m_round->setSquadInvite(other.id, me.squad, true);
+	for (const auto& [id, c] : m_clients) {
+		if (c.player == other.id) {
+			sendTo(id, net::makePostRemote(2, 0x10, net::int32Payload(me.squad)));
+		}
+	}
+}
+
+void HostedGame::answerJoinRequest(int leader, int player, bool yes)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!m_round->playerInfo(leader, me) || !me.squadLeader || me.squad <= 0) {
+		return;
+	}
+	// 0x0079d6e0 kind 0 on a server: 2/0x13 or 2/0x12 with the leader's
+	// squad to the player's connection (the server's own player, 0xff,
+	// hears nothing), then with yes slot 0x30's invite.
+	for (const auto& [id, c] : m_clients) {
+		if (c.player == player) {
+			sendTo(id, net::makePostRemote(2, yes ? 0x13 : 0x12, net::int32Payload(me.squad)));
+		}
+	}
+	if (yes) {
+		inviteToSquad(leader, player);
 	}
 }
 
@@ -3015,10 +3078,21 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 	// Our soldier, or the seat of the vehicle we sit in.
 	game::GameWorld::PlayerInfo me;
 	std::vector<uint16_t> first;
-	if (m_round->playerInfo(client.player, me) && me.alive && ghostOfObject(me.soldier)) {
+	// A record goes only for a move taken since the last record (the
+	// ghost manager's +0x20e4, the move list's last taken, 0x0057e8c0, set
+	// to -1 when it equals +0x20e8, the last record's move, which the
+	// ghost block's writer 0x00582cd0 sets as it writes one): the ticks the server steps the last move again
+	// with none waiting (0x004ac660) send none, and the next move's record
+	// carries them. The exe's client doesn't step them (its replay,
+	// 0x004b5000, takes the record's move off with 0x004ac370 and steps the
+	// moves after it), so that record corrects it by those ticks.
+	const net::GameServer::ClientInfo* info = m_server.client(id);
+	const int32_t recordMove = client.stepped >= 0 ? client.stepped : info ? info->lastMove : 0;
+	if (recordMove != client.recordMove && m_round->playerInfo(client.player, me) && me.alive
+		&& ghostOfObject(me.soldier)) {
+		client.recordMove = recordMove;
 		net::ControlObjectRecord control;
-		const net::GameServer::ClientInfo* info = m_server.client(id);
-		control.lastMove = client.stepped >= 0 ? client.stepped : info ? info->lastMove : 0;
+		control.lastMove = recordMove;
 		const world::Object* body = m_round->objects().find(me.vehicle ? me.vehicle : me.soldier);
 		if (body) {
 			control.position = {body->position().x, body->position().y, body->position().z};
@@ -3440,6 +3514,7 @@ void HostedGame::tick()
 	sendRadio();
 	sendCloseTo();
 	sendTeamDamage();
+	sendSquadMessages();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).

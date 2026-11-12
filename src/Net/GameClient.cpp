@@ -344,16 +344,13 @@ void GameClient::answerMessage(const GameEvent& event)
 
 void GameClient::sendTick(bool newMove)
 {
-	// 0x006aa140 holds a packet more than 30 ahead of the server's last
-	// acknowledgement; nothing is taken from the queues meanwhile.
-	if (!m_connection.canSendData()) {
-		return;
-	}
-	GamePayload payload;
 	// The input: this frame's move and the two before (0x00590450). Only
 	// once the server made our player: 0x00590740 writes a lone 0 bit while
 	// the input manager has no player (+0x84), and the server's reader
-	// hands moves to its player for the connection.
+	// hands moves to its player for the connection. Each simulated tick
+	// makes its move whether a packet goes or not (0x00590c00 steps the
+	// player, then 0x004b2750 adds the move to his list and to these
+	// three), so a held packet's move goes in the next one.
 	if (m_world.localPlayer() >= 0 && (newMove || m_moves.empty())) {
 		m_moves.push_back(m_world.input().toMove(m_moveIndex++));
 		if (onMoveSent) {
@@ -363,6 +360,12 @@ void GameClient::sendTick(bool newMove)
 			m_moves.pop_front();
 		}
 	}
+	// 0x006aa140 holds a packet more than 30 ahead of the server's last
+	// acknowledgement; nothing is taken from the queues meanwhile.
+	if (!m_connection.canSendData()) {
+		return;
+	}
+	GamePayload payload;
 	if (m_world.localPlayer() >= 0 && !m_moves.empty()) {
 		payload.input.present = true;
 		// 0x0057b040: the networkable manager's delay (+0x50, 100 ms) plus
@@ -480,6 +483,16 @@ void GameClient::invite(int player, int squad, bool fromLeader)
 {
 	const RemotePlayer* me = m_world.player(m_world.localPlayer());
 	sendEvent(eventOf(kEvInvite, {u8(me ? me->team : 0), u8(player), u8(squad), fromLeader ? 1u : 0u}));
+}
+
+void GameClient::answerJoinRequest(int player, int squad, bool yes)
+{
+	// 0x0079d6e0 kind 0 on a client: 2/0x13 (yes) or 2/0x12 with {squad,
+	// the player} to the server (connection -1), which hands it on.
+	sendEvent(makePostRemote(2, yes ? 0x13 : 0x12, int32Payload(squad) + int32Payload(player)));
+	if (yes) {
+		invite(player, squad); // slot 0x30
+	}
 }
 
 void GameClient::setSquadLeader(int player, int squad)

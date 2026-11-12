@@ -153,8 +153,14 @@ void registerSoundConsoleMethods(Console& console, SoundManager& sounds)
 		[](S& s, const float& v) { s.setSoundRadius(v); });
 	bindSoundProperty<bool>(console, templates, "isTitanAmbient", [](S& s) { return s.isTitanAmbient(); },
 		[](S& s, const bool& v) { s.setTitanAmbient(v); });
-	bindSoundProperty<float>(console, templates, "globalEffectLevel", [](S& s) { return s.globalEffectLevel; },
-		[](S& s, const float& v) { s.globalEffectLevel = v; });
+	bindSoundProperty<float>(console, templates, "globalEffectLevel",
+		[](S& s) { return s.engineTemplate() ? s.engineTemplate()->occlusionFactor() : s.globalEffectLevel; },
+		[](S& s, const float& v) {
+			s.globalEffectLevel = v;
+			if (s.engineTemplate()) {
+				s.engineTemplate()->setOcclusionFactor(v);
+			}
+		});
 
 	// The rest go straight to the engine template.
 	const auto engine = [](S& s) { return s.engineTemplate(); };

@@ -3793,16 +3793,20 @@ TEST(GameWorld_StaticSupplyTakesTheClosestPointsTeam)
 
 // A seated engineer's kit ability (0x00599f30): an EU_Anti-Vehicle kit
 // (hasRepairingAbility, abilityInVehicleRadius 8, abilityInVehicleStrength
-// 0.075 a tick) repairs the vehicle it sits in, 2.25 per cent a second; a
-// kit without an Ability component does nothing.
+// 0.075 a tick) repairs the vehicle it sits in, 2.25 per cent a second,
+// only with an unlock's increasedRepairAbility above 0 (slot 0x2a0's
+// +0x48: the second sphere, which takes the vehicles; the first takes
+// only the riders' soldiers); a kit without an Ability component does
+// nothing.
 TEST(GameWorld_KitAbilityInAVehicle)
 {
-	for (int repairs = 0; repairs < 2; ++repairs) {
+	for (int repairs = 0; repairs < 3; ++repairs) {
 		Range range;
 		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
 		range.templates.registerType(6, "Kit");
 		range.templates.registerType(20, "PlayerControlObject");
 		range.templates.registerType(23, "Engine");
+		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
 		makeMobile(*jeep, "jeep_mesh");
@@ -3816,6 +3820,12 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		kit->settings()["abilityInVehicleStrength"] = "0.075";
 		if (repairs) {
 			kit->settings()["ability.hasRepairingAbility"] = "1";
+		}
+		// The unlock (an owned ItemContainer's Ability, 0x005706b0).
+		range.templates.create("ItemContainer", "repair_unlock")->settings()["ability.increasedRepairAbility"] = "1.25";
+		kit->children().push_back({"repair_unlock", {}, {}});
+		if (repairs == 2) {
+			range.world->localPlayerOwned = {"repair_unlock"};
 		}
 		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
 		range.world->startRound();
@@ -3834,8 +3844,104 @@ TEST(GameWorld_KitAbilityInAVehicle)
 			range.world->tick(1 / 30.0f);
 		}
 		const float now = range.world->hitPoints(car);
-		std::fprintf(stderr, "  %s: %.2f after a second\n", repairs ? "repairing" : "no ability", now);
-		CHECK(repairs ? std::fabs(now - 52.25f) < 0.1f : now == 50);
+		std::fprintf(stderr, "  %s: %.2f after a second\n",
+			repairs == 2 ? "repairing, unlocked" : repairs ? "repairing" : "no ability", now);
+		CHECK(repairs == 2 ? std::fabs(now - 52.25f) < 0.1f : now == 50);
+	}
+}
+
+// A seated medic's kit ability (0x00599f30's first sphere): the control
+// objects in abilityInVehicleRadius give their riders' soldiers (player
+// slot 0xb4), but without increasedRepairAbility only those of his own
+// vehicle (the same root): his passenger is healed (0.35 a tick, 10.5 per
+// cent a second), the rider of another car 4 m off and a soldier on foot
+// beside them aren't; with the unlock all three are (the second sphere
+// takes the one on foot).
+TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
+{
+	for (const bool unlocked : {false, true}) {
+		Range range;
+		range.collisionTemplates.add("jeep_mesh", boxMesh(1));
+		range.templates.registerType(6, "Kit");
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.registerType(24, "ItemContainer");
+		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		makeMobile(*jeep, "jeep_mesh");
+		jeep->settings()["armor.maxHitPoints"] = "100";
+		jeep->settings()["seatInformation"] = "jeep 0/0.5/0.5 0/0/0";
+		jeep->children().push_back({"jeep_engine", {}, {}});
+		jeep->children().push_back({"jeep_back", {0, 0, -0.5f}, {}});
+		range.templates.create("PlayerControlObject", "jeep_back")->settings()["seatInformation"] = "jeep_back 0/0.5/0 0/0/0";
+		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rifle", {}, {}});
+		kit->children().push_back({"medic_unlock", {}, {}});
+		kit->settings()["abilityInVehicleRadius"] = "7";
+		kit->settings()["abilityInVehicleStrength"] = "0.35";
+		kit->settings()["ability.hasHealingAbility"] = "1";
+		range.templates.create("ItemContainer", "medic_unlock")->settings()["ability.increasedRepairAbility"] = "1.5";
+		if (unlocked) {
+			range.world->localPlayerOwned = {"medic_unlock"};
+		}
+		const uint32_t mine = range.objects.create(jeep, {0, 1, 3})->id();
+		const uint32_t other = range.objects.create(jeep, {4, 1, 3})->id();
+		range.world->startRound();
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		const int passenger = range.world->addPlayer("Passenger", 2, true);
+		const int rider = range.world->addPlayer("Rider", 2, true);
+		const int walker = range.world->addPlayer("Walker", 2, true);
+		game::GameWorld::PlayerInfo info;
+		const auto seat = [&](int player, uint32_t car) {
+			range.world->playerInfo(player, info);
+			const world::Vec3& at = range.objects.find(car)->position();
+			range.world->setSoldierPosition(info.soldier, {at.x, 0, at.z - 3});
+			range.world->tick(1 / 30.0f);
+			game::SoldierInput use;
+			use.use = true;
+			if (player == me) {
+				range.world->setPlayerInput(use);
+			} else {
+				range.world->setInput(player, use);
+			}
+			range.world->tick(1 / 30.0f);
+			if (player == me) {
+				range.world->setPlayerInput({});
+			} else {
+				range.world->setInput(player, {});
+			}
+			range.world->tick(1 / 30.0f);
+			return range.world->playerInfo(player, info) && info.vehicle == car;
+		};
+		for (const int bot : {passenger, rider, walker}) {
+			CHECK(range.world->spawnSoldier(bot));
+		}
+		CHECK(seat(me, mine));
+		CHECK(seat(passenger, mine));
+		CHECK(seat(rider, other));
+		range.world->playerInfo(walker, info);
+		range.world->setSoldierPosition(info.soldier, {2, 0, 6});
+		range.world->tick(1 / 30.0f);
+		const auto soldierOf = [&](int player) {
+			range.world->playerInfo(player, info);
+			return info.soldier;
+		};
+		for (const int p : {passenger, rider, walker}) {
+			range.world->setHitPoints(soldierOf(p), 50);
+		}
+		for (int i = 0; i < 30; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		const float healed = range.world->hitPoints(soldierOf(passenger));
+		const float otherCar = range.world->hitPoints(soldierOf(rider));
+		const float onFoot = range.world->hitPoints(soldierOf(walker));
+		std::fprintf(stderr, "  %s: passenger %.2f, the other car's %.2f, on foot %.2f\n",
+			unlocked ? "unlocked" : "no unlock", healed, otherCar, onFoot);
+		CHECK(std::fabs(healed - 60.5f) < 0.2f);
+		CHECK(unlocked ? std::fabs(otherCar - 60.5f) < 0.2f : otherCar == 50);
+		CHECK(unlocked ? std::fabs(onFoot - 60.5f) < 0.2f : onFoot == 50);
 	}
 }
 
@@ -4038,6 +4144,7 @@ TEST(GameWorld_CanBeRepaired)
 		range.templates.registerType(6, "Kit");
 		range.templates.registerType(20, "PlayerControlObject");
 		range.templates.registerType(23, "Engine");
+		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
 		makeMobile(*jeep, "jeep_mesh");
@@ -4050,6 +4157,10 @@ TEST(GameWorld_CanBeRepaired)
 		kit->settings()["abilityInVehicleRadius"] = "8";
 		kit->settings()["abilityInVehicleStrength"] = "0.075";
 		kit->settings()["ability.hasRepairingAbility"] = "1";
+		// The unlock that lets a seated engineer mend vehicles (0x00599f30).
+		range.templates.create("ItemContainer", "repair_unlock")->settings()["ability.increasedRepairAbility"] = "1.25";
+		kit->children().push_back({"repair_unlock", {}, {}});
+		range.world->localPlayerOwned = {"repair_unlock"};
 		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
 		range.world->startRound();
 		CHECK(range.world->spawnPlayer(2) != nullptr);

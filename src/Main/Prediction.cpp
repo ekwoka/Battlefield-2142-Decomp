@@ -147,8 +147,9 @@ void SoldierPrediction::reconcile(int32_t lastMove, const net::NetworkableState&
 	const bool known = !m_history.empty() && m_history.front().move == lastMove;
 	if (known && m_history.front().stepped) {
 		// The state that move left, corrected by the server's. It stays
-		// remembered: the next record may be for the same move again (the
-		// server had no new move for a tick and stepped the soldier on).
+		// remembered. (The server writes one record a move taken,
+		// 0x00582cd0's +0x20e8; the ticks it steps the last move again
+		// with none waiting come in the next move's record.)
 		const Snapshot& at = m_history.front();
 		m_control = at.control;
 		m_body = at.body;

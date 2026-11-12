@@ -1323,8 +1323,11 @@ send. The rewrite's bodies don't outlive the
 player's death, so that one goes at once. In a destroyed vehicle the
 occupants die and are deleted (`0x005cacf0`). The rewrite keeps the
 slumped body (`GameWorld::seatCorpse`) until the vehicle is wrecked or
-gone or someone takes the seat; how long the engine keeps it is not
-traced. The soldier is placed at the seat's `seatInformation` position and
+gone or someone takes the seat, and counts it down by its armour as any
+body (`0x00652380`): a soldier with a parent skips the landed test, so
+timeToStayAsWreck after the death (or 60 s) it fades over
+timeToStayAfterDestroyed and goes (`0x00651db0`), with the shipped
+soldiers' 6 and 1 seven seconds after the death (`stepSeatCorpses`). The soldier is placed at the seat's `seatInformation` position and
 rotation in the vehicle's frame, with its skeleton a metre below that
 point. The engine keeps a soldier's object at its physics origin, a metre
 above the skeleton's root (at death `0x005f0a00` poses the skeleton at
@@ -6180,6 +6183,39 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   clear (`0x004c6c80`); AIDLL's adaptors (`0x0089xxxx`–`0x008axxxx`) never
   call slot 0x224, and no AI event carries an invite, so an invited bot
   stays where he is, offline too.
+- **Private squads** (the squad manager's join, slot 0x34 `0x004c8460` →
+  `0x004c7290`, which the squad menu's JOIN `0x007a5410`, an invite's yes,
+  `SquadManager.joinSquad` and a client's JoinSquad all reach;
+  `GameWorld::requestJoinSquad`). The lock is the squad's flag (slot 4),
+  set by squad manager slot 0x20 from the leader's toggle (`0x007a5a60`,
+  which reads it back to flip it), the create box, or a client's
+  SetPrivateSquad (the host takes it from the squad's leader only); a
+  squad left empty is removed with it (`0x004c6c80` → slot 0x3c). The
+  join: a squad of six answers the player 2/0xb (HUD_HUD_SQUAD_FULL,
+  #TEAMNAME# #SQUADNAME#); a private squad with members takes him only
+  with the squad's bit in his invite mask, else posts its leader (squad
+  `+0x24`) 2/0x11 with the player and the player 2/0xc with the squad
+  (HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN); a join clears the squad's bit. A
+  message goes to the player's connection, the server's own player's to
+  its event manager (0xff); a bot's go nowhere. The HUD's category-2
+  handler (`0x00756b60`; `SquadMenu::squadMessage`) makes 0xb, 0xc, 0x12
+  (HUD_HUD_SQUAD_JOIN_DENIED) and 0x13 (HUD_HUD_SQUAD_JOIN_ACCEPTED)
+  personal lines, with the menu's "warning" sound (not rewritten), and
+  0x11 the question's kind 0 (HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN,
+  #PLAYERNAME#) unless that player is on the menu's list (`+0x120`,
+  `0x007a5e30`). The leader's answer (`0x0079d6e0` kind 0): on a server
+  2/0x13 or 2/0x12 with his squad to the player's connection
+  (`HostedGame::answerJoinRequest`), on a client the same with {squad,
+  player} to the server, whose listener (`0x004a5750`) hands it on (none
+  for its own player; the original's second int is the player's
+  connection, player slot 0x58, which the rewrite's clients don't hold,
+  so the rewrite's is the player's id: `GameClient::answerJoinRequest`);
+  then with yes slot 0x30's invite (`0x0079ddc8`: 2/0x10, whose yes joins
+  with the bit), and unless timed out the leader's line
+  (HUD_HUD_SQUAD_GRANTED_TO_ACCESS_SQUAD / _DENIED_TO_ACCESS_SQUAD), a no
+  putting the player on the list (`0x007a7d10`). Offline the requests
+  come from nobody (the bots join through AIDLL's own squads, unchanged)
+  and a bot invited after a request never answers.
 - **The HUD's questions** (the HUD manager's `+0x90`; `menu::HudQuestions`):
   seven kinds, one question each, with its seconds (the constructor's
   `+0x70`..: 20, 20, 30, 20, 20, 15, none): 0 a join request
@@ -6461,7 +6497,18 @@ server is `src/Net/GameServer` (the protocol) and `src/Main/HostedGame`
   taken again, up to 30 ticks in a row (`+0x30`, cleared by a move), then
   steps an all-zero input. A move a tick late so leaves a tick stepped with
   the move before it repeated, and the list a move deeper from then on.
-  The record's last move is the one the round stepped last.
+  The record's last move is the one the round stepped last, and a record
+  goes only for a move taken since the last one written (the ghost
+  manager's `+0x20e4`, the list's last taken, set by `0x0057e8c0` and
+  cleared when it equals `+0x20e8`, the last record's move, which the
+  block writer `0x00582cd0` sets): the repeated ticks send no record, and
+  the next move's carries them. The exe's client doesn't step them (its
+  replay, below, steps only the moves after the record's), so that record
+  corrects it by the repeated ticks; nor does its sending keep the list
+  full: each packet carries the last three moves (`0x00590450`), against
+  loss, not delay. A client tick makes its move whether a packet goes or
+  not (`0x00590c00` → `0x004b2750`), so a packet held for the window
+  (`0x006aa140`) loses none.
 - **Every group of every ghost** goes out, not only the root's: a
   RotationalBundle's angles (the turrets' yaw and pitch, the steering, the
   rotors, as the round poses the part), a Spring's offset (the wheels'
@@ -7064,7 +7111,7 @@ The player's own state (`0x00594cc0` writes, `0x00596ed0` reads):
 | a value | 8 | `+0x14c` (vtable `0x228`) |
 | the hit's direction | 1 + 8 | `+0x1d0`, -pi..pi; sent for two records after a hit (`+0x1d4`); a new one posts message 2/0x39 (the hit indicator) |
 | the hit's strength | 1 + 8 | `+0x1d8`, 0..25, twice too (`+0x1dc`); handed to the control object's vtable `0x1b4(0)` slot `0x4c` |
-| per weapon group 0-2 (with a PlayerControlObject on the control object's chain) | 1, then 5 + 2 + 2 + 2 + 11 + 10 (+ 8) | active (`+0x1e0 + g`); the weapon's index in the group + 1 (`0x005a98b0`), three 2-bit values (`+0x208`, `+0x238`, `+0x1fc`), the rounds + 1 (`+0x1e4`), the magazines + 1 (`+0x214`), and for a firearm whose interface `0x94c0` slot `0x30` holds (`0x005c1360`: its template's vector at `+0x2c8`, set by `0x00522125`, has y > 0) a 0..6 (`+0x22c`) |
+| per weapon group 0-2 (with a PlayerControlObject on the control object's chain) | 1, then 5 + 2 + 2 + 2 + 11 + 10 (+ 8) | active (`+0x1e0 + g`); the weapon's index in the group + 1 (`0x005a98b0`), three 2-bit values (`+0x208` the zoom level, the firearm's slot 300; `+0x238` its slot `0x140`, `0x005c3120`, the fire component's state bits; `+0x1fc` its slot `0x14`, the fire component's mode; filled by `0x00595e50`, handed back to the firearm by `0x00595d90`), the rounds + 1 (`+0x1e4`), the magazines + 1 (`+0x214`), and for a firearm whose interface `0x94c0` slot `0x30` holds (`0x005c1360`: its template's vector at `+0x2c8`, set by `0x00522125`, has y > 0) a 0..6 (`+0x22c`) |
 | group 0's component `0xc506` | 1 + 8 | 0..1 (a template component of class `0x94e5` with its `+0x48` flag: slot `0xcc`) |
 | spawn tick | 32 | `+0xdc` |
 | man down | 1 | `+0xe0` |
@@ -7161,7 +7208,8 @@ server's tick and 1/30 s. It keeps the move L in the local player's move
 list (player slot `0xa8`; `0x00583710` drops the moves before L and keeps
 L at the front), and, with the record's object found (`0x00678d70`) and
 prediction on (`+0x55`), sets the clock to the server's tick
-(`0x006660b0`), then for every move left in the list, L's own included:
+(`0x006660b0`), takes L off the list's front (`0x004ac370`, as the server
+takes a move), then for every move left in the list:
 the clock one tick on while the game logic's state (slot `0x164`) is 1
 (`0x006660e0(1)`), the move decoded into the player's input
 (`0x00583820`, `0x005838d0`) and handed to the player (game logic slot
@@ -7171,11 +7219,10 @@ the physics nodes' move (`0x0057b960`: PhysicsNodeManager `0x00a82514`
 slot `0x1c` per node), the ObjectManager's slot `0xa4`, the
 ResponsePhysicsManager's (`0x00a82518`) slot `0x20` and each response's
 slot `0x1c` (`0x0057ba00`). So the original steps whatever the control
-object is, a vehicle's tree included. Taking L's move again means the
-record's state is the server's before move L by this reading, while the
-rewrite's server (`HostedGame`, whose `lastMove` is the move its round last
-stepped) and client agree on "after L"; which the original server writes
-(`0x00580830`'s `+0x20e4`) wasn't settled.
+object is, a vehicle's tree included. The record's state is the server's
+after move L (its `+0x20e4` is the move list's last taken, `+0x10`,
+`0x0057e8c0`), as the rewrite's server (`HostedGame`, whose `lastMove` is
+the move its round last stepped) and client have it.
 
 **Vehicles** (`VehiclePrediction`): the driver's moves step the client's
 own copy of the vehicle, `GameWorld::LoneVehicle` (`makeLoneVehicle`: built
@@ -7216,8 +7263,11 @@ centimetre, their health 1.00 on both. While the client is still loading
 its level its game doesn't tick, so its moves go up only on the
 connection's own timer (every 200 ms) and the server steps the ticks in
 between with the last move taken again (for 30 ticks, then an all-zero
-input): those records correct it by tens of
-centimetres until the client's loop runs. `bf2142 --connect ... --verbose`
+input): the record after them corrects it by tens of
+centimetres until the client's loop runs. (Since the records go one a
+move taken, the in-process test corrects by 0.2–2.9 mm on average over
+five runs; its larger corrections, up to 21 cm, are a jump landed against
+the host's bot, which the prediction meets where its ghost last was.) `bf2142 --connect ... --verbose`
 prints any correction over half a metre.
 
 ### The wire audit (a retail 1.51 server)
@@ -9335,12 +9385,27 @@ engineers), at `abilityInVehicleStrength` (`+0x324`: 0.35, 0.075, 0.4)
 per cent a tick of material `abilityInVehicleMaterial` (`+0x320`: 73,
 84, 91). Healing treats the team's soldiers, the seated ones too (game
 logic slot `0x108`); repairing (with neither of the others) the vehicles
-of the team or of none, the engineer's own among them (slot `0x108`);
-ammo refills the team's soldiers (slot `0x10c`). `GameWorld::
-stepVehicleAbility` through `applyAbility` without the battery. Left: the
-first sphere's pass over the nearby vehicles and, when the player's
-slot `0x2a0` object has `+0x48` above 0, its message (`0x005910c0` with
-`0x400` and the material). `abilityInVehicleStrengthModifier` (executor
+of the team or of none (slot `0x108`); ammo refills the team's soldiers
+(slot `0x10c`), each among the targets below. `GameWorld::
+stepVehicleAbility` through `applyAbility` without the battery. The
+targets (`0x00599f30`): the first sphere takes the control objects
+(class `0xc4c2`, the vehicles and their seats), each one's player
+(interface `0xc4c5` slot 0x10) other than ours giving his soldier (player
+slot `0xb4`), but with the player's `ability.increasedRepairAbility`
+(slot `0x2a0`'s `+0x48`) at 0 only one of his own vehicle (the same
+root, `0x006f1d70`); with it above 0 the sphere again with the message
+`0x005910c0(0x400, material)` takes everything in it too. Each target:
+repairing alone mends a vehicle (`+0x17` bit 0) of the team or of none;
+healing or ammo a soldier of the team (with ammo also another vehicle of
+the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). So
+without the unlock a medic heals and a supporter rearms only his
+passengers, and an engineer mends nothing, his own vehicle included
+(only riders' soldiers are targets); the rewrite treated every seated or
+standing teammate in range and the engineer's own vehicle. Not
+rewritten: the second dose `0x00599f30` gives each target it treated
+(the strength times the control object's slot `0x17c`, shared by their
+count for healing and repair), whose slot wasn't traced.
+`abilityInVehicleStrengthModifier` (executor
 `0x004ff6df` → the template's interface at `+0x298`, slot 0x164
 `0x0059dbc0`: template `+0x4b0`, 1 by default; getter slot 0x168
 `0x0059dbd0`; saved by `0x005caff0`) has no reader: nothing reads
@@ -10461,12 +10526,22 @@ the medic hub (heals), the ammo hub, the repair tool (the FAV back to
 and each seat's guns, rocket pods, EMP launchers, active defence and the
 APCs' pod launchers.
 
-Left as found: rounds pass through the deployed portable shield and the
-sentry gun. Both are set down as plain objects without collision; the
-shield's panels are collisionParts of its mesh (geometries 1..) posed by
-its bundle animation (`stepDeployableAnimations`), so they need the
-posed part meshes in the rounds' rays (as `raycastBody` does for a
-body's parts) rather than the static world's. Not checked by the sweep:
+Rounds through the portable shield and the sentry gun: both are
+mobile mesh bodies already (hasMobilePhysics, physicsType Mesh:
+`addBodies`), their roots' projectile LODs and their collisionPart
+children (`0x0063ccc0`) posed by the body's own bundle system
+(`stepObjectAnimation`, the parts by `partBone`) in the rounds' rays
+(`raycastBody`); the sentry is shot from any side and destroyed. The
+shield's panel is its root's geometry 0 (0.94 m across, 0.74 m high, in
+its y-z plane; the sub-geometry 1 wreck is its base alone), and the
+rewrite set it down along the deployer's view, its 4 cm edge to him: the
+ThrownFireComp's launch (`0x005e5720`) turns the thrown object by
+fire.projectileStartRotation in its own frame, unl_port_shield's
+90/0/0, so its face is across the view (the deployable's placement now
+takes the deployer weapon's startRotation; level, a metre ahead as
+before: the projectile's start 0/0/1.5 and its fall aren't the
+rewrite's). Effects `effect-shield-stops-rounds` and
+`effect-sentry-shot-down`; `Vehicles_DeployablesStopRounds`. Not checked by the sweep:
 the pulse meter's scan (no enemies near; no unit test either), the
 defuser and the defibrillator (they want an enemy mine or a downed
 teammate; GameWorldTest covers the defibrillator).
@@ -11639,9 +11714,18 @@ state, input, kills, deaths and team kills.
   `setScatterSpawnPositions` (`+0x90`) the squad leader's scatter (below)
   from the point and its heading, else the point plus
   `setSpawnPositionOffset` (`+0x70`, 0/1.02/0 by default: the soldier's
-  origin, about a metre over the feet), unturned. Not rewritten: the
-  `+0x8c` height test (-1, off; no shipped setter found) and the
-  parent's armour tests. When every point is taken the rewrite uses one
+  origin, about a metre over the feet), unturned. Before the vehicle
+  tests, the point's parent test: the nearest object up its tree with an
+  armour decides, refusing the point while that armour is a wreck (slot
+  `0x60`, `0x00651c20`: hit points at or under 0) or under its
+  criticalDamage (slot `0x5c`, `0x00655fc0`: `+0x16`, set while the hit
+  points are under the template's `+0x150`): a burning APC is no spawn
+  point (`GameWorld::spawnParentArmourHolds`, for the mobile points; the
+  rewrite's objects keep no parent chain for the others). Then a height
+  test on the template's `+0x8c`, which is always off: the constructor
+  (`0x00635590`) sets −1, and no console command sets it (its setter,
+  interface slot `0x58`, has no executor, and the writer `0x00635810`
+  prints no line for it). When every point is taken the rewrite uses one
   anyway. Mobile spawn points: a SpawnPoint in a vehicle's tree (the
   APCs' `eu_apc_SpawnPoint`, the AT and IFV spawn vehicles', all
   `setEnterOnSpawn 1`) is a spawn group of its own (net ids from `0xc0`,
@@ -12257,7 +12341,7 @@ script's widths.
   `<tool>_deny`; accept uses the tool quietly at the request's point (the
   tools' slots `0x32c` / `0x348` / `0x35c` / `0x358` with 1): done,
   `<tool>_accept` to the leader and `<tool>_deny` to the other squads with
-  a request of that kind (all taken off); not done, `<tool>_unavailable`
+  a request of that kind (all taken off); refused, `<tool>_unavailable`
   to the commander and the request stays. The tools are `artillery`,
   `orbitalstrike`, `uav`, `supply`.
 - **The commander's own tools** say why they refuse, to him alone: arming
@@ -13058,8 +13142,18 @@ The urgencies:
     the round's position and the weapon's stamp (`0x10092920`): AI weapon
     `+0x20`, the clock when it was taken in hand (`0x008a6d80`, slot
     `0xfc`). The warning lasts until 2.8 s after the stamp (`0x10092960`).
-    BF2142.exe's sender of the event wasn't found: the rewrite checks the
-    rounds in flight every tick, with the thrower's weapon in hand.
+    The event's senders: of IAICollisionHandler's four slots that reach
+    `0x1004ed30`, 8 and 0xc (`0x1004efa0` / `0x1004ef80`) come only from
+    IBFCollisionHandler's slots 10 / 9 (`0x0089fbb0` / `0x0089fbe0`),
+    which nothing calls (the 16 references to its global `0x00b4bbc4` in
+    BF2142.exe's disassembly call slots 8, 0xc, 0x10, 0x18, 0x1c and 0x2c;
+    AIDLL's copy `0x1013947c` none of 0x24 / 0x28); the others are a hit
+    (slot 0x14, `0x1004efc0`, from `0x005a4dd0` → IBF slot 0x2c
+    `0x0089fdd0`) and a round's end (slot 0x20, `0x1004f2c0`, from
+    `0x005b6680` / `0x005b4db0` → IBF slot 0xc `0x0089faf0`). So the
+    original warns of a grenade when it goes off. The rewrite's stand-in
+    checks the rounds in flight every tick, with the thrower's weapon in
+    hand (a grenade that has gone off warns of nothing to flee).
   - Flee (0x10085fc0; the point 0x10085de0): ChangeWeapon(camouflage),
     LockPlan(on) (0x100ce070: bot+0x7c, so 0x100cd090 keeps the plan with
     no arbitration), then side by side a sprinting MoveToFinding to 50 m
@@ -13204,7 +13298,7 @@ vehicle's riders as hit.
   optimal alone; maxRange + 1.25 dh for a target over 5 m up, + 0.25 dh
   for one above, neither for thrown weapons). It belongs to the fire plan:
   BBFire's plan maker (0x1007cf10) keeps the running plan only while it is
-  this behaviour's fire plan (type 0xe), not done, for the same target
+  this behaviour's fire plan (type 0xe), unfinished, for the same target
   (plan `+0x20`), the same weapon (`+0x24` against the behaviour's per-bot
   weapon, the one the choice settled on) and flags (`+0x2c`, `+0x38`
   against bot slot 0x264); anything else builds a new plan and a new
@@ -14207,7 +14301,7 @@ functions (ai::driveControl, aim, the path follower). The interpreter's
 table is read (`BotSettings::moveInterpreter`: the MoveTo statement an
 equipment type lists picks its driver). Rewriting the patterns as trees
 for an interpreter would change no behaviour (the trees are fixed per
-pattern; no script builds plans) and was not done. The plan printers
+pattern; no script builds plans), so the rewrite keeps them as code. The plan printers
 (0x10059000 the statement names, 0x100a4aa0, BotPlans.cpp's 0x100c65e0
 for `ai.writeBotPlans`) are debug output.
 
@@ -14307,8 +14401,11 @@ slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
   it Hostile when takeable for the enemy, else the status stays;
   `ai::boxAreaStatus`, `Bots_BoxAreaStatusRule`). The status, counted over
   the units the side knows in the box, feeds the neighbours' flags; the
-  SAI still orders units only to control point areas, and the starting
-  status is taken as neutral (the area's constructor wasn't traced).
+  SAI still orders units only to control point areas. The status starts
+  Neutral for both sides (2: the strategic-object base's constructor
+  0x10063fc0 sets +0x74 / +0x78 and the copies +0x7c / +0x80; the box
+  area's 0x10062e10 leaves them), and setTakeable starts on for both
+  (0x100623c0: +400, +0x191).
 
 The commands (constructor / execute slot), and where the rewrite has them:
 

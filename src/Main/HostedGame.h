@@ -235,6 +235,13 @@ public:
 	// posts 2/<message> there): a radio call's code (0x33..0x36) or a spot
 	// (0x2e), the reporter's soldier ghost in `spotter`.
 	std::function<void(const net::SpottedInfo&)> onSpotted;
+	// Squad manager slot 0x30 (0x004c3190) from a leader: the invited
+	// player's mask gets the squad's bit and his client 2/0x10 (the squad).
+	void inviteToSquad(int leader, int player);
+	// A private squad's leader answers a player's request to join (the
+	// HUD's question kind 0, 0x0079d6e0): 2/0x13 (yes) or 2/0x12 (no) with
+	// the squad to the asking player's client, and with yes the invite.
+	void answerJoinRequest(int leader, int player, bool yes);
 	// The host's own player's report (the game's slots 0xd8 / 0xd4 on a
 	// server: the event handled at once).
 	void spotted(const net::SpottedInfo& spot, int reporter);
@@ -351,6 +358,7 @@ private:
 		net::MoveInputState moveState;           // the aim and the keys held
 		int32_t stepping = -1;                   // the move the round steps this tick
 		int32_t stepped = -1;                    // the last move the round has stepped (the record's)
+		int32_t recordMove = -1;                 // the last record's move (+0x20e8, 0x00582cd0)
 		net::PlayerMove lastMove;                // the last move taken (0x004ac370: +0x14), all zero before any
 		int dryTicks = 0;                        // ticks in a row it was taken again (+0x30, at most 30)
 		uint32_t ticksStarved = 0;               // for the log
@@ -434,6 +442,9 @@ private:
 	// server's slot 0x88 after 0x004c0e40: PostRemote 0/0xb {kind, victim,
 	// attacker}, TeamDamage.cpp).
 	void sendTeamDamage();
+	// The squad manager's messages (GameWorld::takeSquadMessages) to the
+	// clients' players' connections.
+	void sendSquadMessages();
 	// The offers of command made (PostRemote 2/0x23 to the candidate,
 	// 0x004c5070), per team.
 	std::array<int, 3> m_offerSent {-1, -1, -1};
@@ -514,7 +525,6 @@ private:
 	std::set<uint32_t> m_static;
 	std::map<uint32_t, std::unique_ptr<std::vector<net::GhostPartLayout>>> m_layouts; // by template id
 	std::map<uint32_t, Ghost> m_ghosts; // by object id
-	std::map<int, uint32_t> m_invites;  // per player: the squads that invited it (player +0x224's mask)
 	uint16_t m_nextGhost = kFirstGhost;
 	// The teams' networkable takes 0x201 first (0x0042b8b0), so the ghost
 	// manager hands out ids from 0x202 (0x00678610).

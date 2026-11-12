@@ -852,13 +852,20 @@ TEST(NetHost_PredictionAndSession)
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 		std::vector<dice::hfe::physics::Vec3> at;
+		uint32_t recordsDry = 0;
 		for (int i = 0; i < 70; ++i) {
 			client.update();
+			if (i == 10) {
+				recordsDry = client.world().controlRecords();
+			}
 			hosted.tick();
 			round.tick(1.0f / 30);
 			CHECK(round.playerInfo(me, info) && info.alive);
 			at.push_back(info.position);
 		}
+		// No move taken, no record (the ghost manager's +0x20e4 / +0x20e8):
+		// the dry ticks send none.
+		CHECK(recordsDry > 0 && client.world().controlRecords() == recordsDry);
 		const auto moved = [&](size_t from, size_t to) {
 			const dice::hfe::physics::Vec3 d = at[to] - at[from];
 			return std::sqrt(d.x * d.x + d.z * d.z);
@@ -991,7 +998,8 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 // fire state (0x40, +0x19c) and presses (0x4000000) and man-down (0x20);
 // the Spotted event (0x0050e910: a radio call's code to the team's players
 // as 2/<code> with the reporter's soldier); an invite asked of a client's
-// player (2/0x10, 0x004c3190) and its refusal (Invite without the bit).
+// player (2/0x10, 0x004c3190) and its refusal (Invite without the bit); a
+// private squad's join asking its leader (0x004c7290) and his answers.
 TEST(NetHost_StanceFireSpottedAndInvites)
 {
 	HostRange range;
@@ -1121,6 +1129,40 @@ TEST(NetHost_StanceFireSpottedAndInvites)
 		dice::hfe::game::GameWorld::PlayerInfo pa;
 		return round.playerInfo(idA, pa) && pa.squad == 1;
 	}));
+
+	// A private squad (0x004c7290): B locks squad 1 after A leaves; A's
+	// JoinSquad is refused, B is asked (2/0x11, A's id) and A told (2/0xc,
+	// the squad). B's no reaches A through the server (2/0x12, 0x004a5750);
+	// asked again, B's yes (2/0x13) invites A (2/0x10), whose join then
+	// takes.
+	a.leaveSquad(1);
+	b.setPrivateSquad(1, true);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa;
+		return round.playerInfo(idA, pa) && pa.squad == 0 && round.squadPrivate(2, 1);
+	}));
+	const auto heard = [](const std::vector<net::PostRemoteInfo>& list, uint32_t id, int value) {
+		return std::any_of(list.begin(), list.end(), [&](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == id && m.payloadInt(0) == value;
+		});
+	};
+	messagesA.clear();
+	messagesB.clear();
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return heard(messagesB, 0x11, idA) && heard(messagesA, 0xc, 1); }));
+	dice::hfe::game::GameWorld::PlayerInfo pa;
+	CHECK(round.playerInfo(idA, pa) && pa.squad == 0);
+	b.answerJoinRequest(idA, 1, false);
+	CHECK(pumpUntil(step, [&] { return heard(messagesA, 0x12, 1); }));
+	CHECK(!heard(messagesA, 0x10, 1) && round.playerInfo(idA, pa) && pa.squad == 0);
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return heard(messagesA, 0xc, 1); }));
+	b.answerJoinRequest(idA, 1, true);
+	CHECK(pumpUntil(step, [&] { return heard(messagesA, 0x13, 1) && heard(messagesA, 0x10, 1); }));
+	CHECK((round.squadInvites(idA) & (1u << 1)) != 0);
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(idA, pa) && pa.squad == 1; }));
+	CHECK((round.squadInvites(idA) & (1u << 1)) == 0); // the join's clear (0x004c6c80)
 }
 
 // Others' rounds and reloads on clients: a reload pressed on the server

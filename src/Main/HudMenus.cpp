@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <vector>
 
@@ -173,10 +174,14 @@ bool SquadMenu::createSquad(int player)
 		} else {
 			m_names.erase({me.team, squad});
 		}
-		if (m_createLocked) {
-			m_locked.insert({me.team, squad});
+		if (m_remote.world) {
+			if (m_createLocked) {
+				m_locked.insert({me.team, squad});
+			} else {
+				m_locked.erase({me.team, squad});
+			}
 		} else {
-			m_locked.erase({me.team, squad});
+			m_round.setSquadPrivate(me.team, squad, m_createLocked); // slot 0x20
 		}
 	}
 	setCreateSelect(player, false);
@@ -193,16 +198,60 @@ bool SquadMenu::join(int player, int squad)
 		message("HUD_HUD_SQUAD_MUST_LEAVE_TO_JOIN");
 		return false;
 	}
-	if (locked(me.team, squad)) {
-		return false;
-	}
+	// The squad manager's slot 0x34 (0x007a5410 asks no lock of its own):
+	// a private or full squad answers with its messages (requestJoinSquad).
 	if (m_remote.world) {
 		if (m_remote.join) {
 			m_remote.join(squad);
 		}
 		return true;
 	}
-	return m_round.joinSquad(player, squad);
+	return m_round.requestJoinSquad(player, squad) == game::GameWorld::SquadJoin::Joined;
+}
+
+void SquadMenu::squadMessage(int id, int value)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!playerInfo(localPlayer(), me)) {
+		return;
+	}
+	const auto fill = [](std::string line, const char* key, const std::string& with) {
+		if (const size_t at = line.find(key); at != std::string::npos) {
+			line.replace(at, std::strlen(key), with);
+		}
+		return line;
+	};
+	const auto say = [&](const char* key) {
+		std::string line = fill(text(key), "#SQUADNAME#", squadLabel(me.team, value));
+		line = fill(line, "#TEAMNAME#", teamName ? teamName(me.team) : std::string());
+		if (onLine) {
+			onLine(line);
+		}
+	};
+	switch (id) {
+	case 0xb:
+		say("HUD_HUD_SQUAD_FULL");
+		break;
+	case 0xc:
+		say("HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN");
+		break;
+	case 0x12:
+		say("HUD_HUD_SQUAD_JOIN_DENIED");
+		break;
+	case 0x13:
+		say("HUD_HUD_SQUAD_JOIN_ACCEPTED");
+		break;
+	case 0x11: {
+		game::GameWorld::PlayerInfo asking;
+		if (m_denied.count(value) || !playerInfo(value, asking) || !onJoinRequest) {
+			return;
+		}
+		onJoinRequest(value, fill(text("HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN"), "#PLAYERNAME#", asking.name));
+		break;
+	}
+	default:
+		break;
+	}
 }
 
 void SquadMenu::leave(int player)
@@ -237,10 +286,15 @@ void SquadMenu::clickSquadList(int player, int row, int column)
 			join(player, id);
 		}
 	} else if (column == kColumnLock && id == me.squad && me.squadLeader) {
+		// 0x007a5a60: slot 0x20 with the squad's flag turned over.
+		if (!m_remote.world) {
+			m_round.setSquadPrivate(me.team, id, !m_round.squadPrivate(me.team, id));
+			return;
+		}
 		if (!m_locked.erase({me.team, id})) {
 			m_locked.insert({me.team, id});
 		}
-		if (m_remote.world && m_remote.lock) {
+		if (m_remote.lock) {
 			m_remote.lock(id, locked(me.team, id));
 		}
 	}

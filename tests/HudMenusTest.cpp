@@ -109,6 +109,87 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	CHECK(s.squadOf(a) == 2);
 }
 
+// A private squad (the squad manager's join 0x004c7290, the HUD's
+// category-2 lines 0x00756b60 and question kind 0): the leader's lock
+// (column 8, slot 0x20) is the round's; a player without the squad's bit
+// in his invite mask is refused, its leader asked (2/0x11) and the player
+// told (2/0xc); a bot hears nothing (no connection); the invite's bit lets
+// him in and the join clears it; a leader's no keeps that player's later
+// requests from asking (0x007a7d10 / 0x007a5e30); a full squad answers
+// 2/0xb; an emptied squad loses its lock.
+TEST(HudMenus_PrivateSquadAsksTheLeader)
+{
+	Squads s;
+	s.world.spawnPlayer(2);
+	const int me = s.world.localPlayer();
+	const int asker = s.world.addPlayer("Asker", 2, false);
+	const int bot = s.world.addPlayer("Bot", 2, true);
+	CHECK(me >= 0 && s.world.joinSquad(me, 1));
+	s.squads.setLocalizer([](const std::string& key) -> std::string {
+		if (key == "HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN") {
+			return "#PLAYERNAME# has asked to join your squad";
+		}
+		if (key == "HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN") {
+			return "#SQUADNAME# squad is private";
+		}
+		if (key == "HUD_HUD_SQUAD_FULL") {
+			return "#TEAMNAME# #SQUADNAME# squad is full";
+		}
+		return key;
+	});
+	std::vector<std::string> lines;
+	std::vector<std::pair<int, std::string>> asked;
+	s.squads.onLine = [&](const std::string& line) { lines.push_back(line); };
+	s.squads.onJoinRequest = [&](int player, const std::string& line) { asked.push_back({player, line}); };
+	s.squads.teamName = [](int team) { return team == 2 ? std::string("EU") : std::string("PAC"); };
+	s.squads.update(me);
+	s.squads.clickSquadList(me, s.row(1, 2), 8);
+	CHECK(s.world.squadPrivate(2, 1) && s.squads.locked(2, 1));
+	using Join = game::GameWorld::SquadJoin;
+	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Private && s.squadOf(asker) == 0);
+	auto toLeader = s.world.takeSquadMessages(me);
+	auto toAsker = s.world.takeSquadMessages(asker);
+	CHECK(toLeader.size() == 1 && toLeader[0].id == 0x11 && toLeader[0].value == asker);
+	CHECK(toAsker.size() == 1 && toAsker[0].id == 0xc && toAsker[0].value == 1);
+	s.squads.squadMessage(toLeader[0].id, toLeader[0].value);
+	CHECK(asked.size() == 1 && asked[0].first == asker && asked[0].second == "Asker has asked to join your squad");
+	// The local player's own refusal line (a squad he asked).
+	s.squads.squadMessage(0xc, 1);
+	CHECK(!lines.empty() && lines.back() == "Alpha squad is private");
+	// A bot is refused too and hears nothing; its leader is asked.
+	CHECK(s.world.requestJoinSquad(bot, 1) == Join::Private && s.world.takeSquadMessages(bot).empty());
+	toLeader = s.world.takeSquadMessages(me);
+	CHECK(toLeader.size() == 1 && toLeader[0].value == bot);
+	// Turned down: that player's next request asks nothing.
+	s.squads.denyJoinRequest(bot);
+	s.squads.squadMessage(0x11, bot);
+	CHECK(asked.size() == 1);
+	// Invited (slot 0x30's bit): the join takes and clears it.
+	s.world.setSquadInvite(asker, 1, true);
+	CHECK(s.world.squadInvites(asker) == (1u << 1));
+	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Joined && s.squadOf(asker) == 1 && s.world.squadInvites(asker) == 0);
+	CHECK(s.world.takeSquadMessages(me).empty());
+	// Six: full (2/0xb to the player, the squad).
+	for (int i = 0; i < 4; ++i) {
+		const int member = s.world.addPlayer("M" + std::to_string(i), 2, true);
+		s.world.joinSquad(member, 1);
+	}
+	const int late = s.world.addPlayer("Late", 2, false);
+	s.world.setSquadInvite(late, 1, true);
+	CHECK(s.world.requestJoinSquad(late, 1) == Join::Full);
+	const auto toLate = s.world.takeSquadMessages(late);
+	CHECK(toLate.size() == 1 && toLate[0].id == 0xb && toLate[0].value == 1);
+	s.squads.squadMessage(0xb, 1);
+	CHECK(lines.back() == "EU Alpha squad is full");
+	// Emptied, the squad goes with its lock.
+	for (const auto& p : s.world.playerList()) {
+		if (p.squad == 1) {
+			s.world.joinSquad(p.id, 0);
+		}
+	}
+	CHECK(!s.world.squadPrivate(2, 1));
+}
+
 TEST(HudMenus_InviteList)
 {
 	Squads s;

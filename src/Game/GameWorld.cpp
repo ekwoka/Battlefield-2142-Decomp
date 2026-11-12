@@ -5028,8 +5028,88 @@ bool GameWorld::joinSquad(int id, int squad)
 			m_beacons.erase(beacon);
 		}
 	}
+	// The squad left empty goes (0x004c6c80: slot 0x3c when the count is
+	// 0), its lock with it.
+	if (old != 0 && squadMembers(player->team, old).empty()) {
+		m_privateSquads.erase({player->team, old});
+	}
 	raise("PlayerChangedSquad", {ScriptValue::player(id), ScriptValue::integer(old), ScriptValue::integer(squad)});
 	return true;
+}
+
+GameWorld::SquadJoin GameWorld::requestJoinSquad(int id, int squad)
+{
+	const Player* player = findPlayer(id);
+	if (!player || squad <= 0 || squad > 9 || squad == player->squad) {
+		return SquadJoin::Refused;
+	}
+	// A message to a player's connection (0xff, the server's own: its
+	// event manager); a bot has none.
+	const auto post = [this](int to, int message, int value) {
+		const Player* p = findPlayer(to);
+		if (p && !p->ai) {
+			m_squadMessages[to].push_back({message, value});
+		}
+	};
+	const std::vector<int> members = squadMembers(player->team, squad);
+	if (members.size() >= kSquadSize) {
+		post(id, 0xb, squad); // 0x004c7290: six or more
+		return SquadJoin::Full;
+	}
+	// A private squad (the squad's slot 4) with members takes the player
+	// only with its bit (slot 0xc, the squad's id) in his mask.
+	if (squadPrivate(player->team, squad) && !members.empty() && (squadInvites(id) & (1u << squad)) == 0) {
+		for (int member : members) {
+			const Player* p = findPlayer(member);
+			if (p && p->squadLeader) {
+				post(member, 0x11, id); // the leader (squad +0x24): who asks
+			}
+		}
+		post(id, 0xc, squad);
+		return SquadJoin::Private;
+	}
+	if (!joinSquad(id, squad)) {
+		return SquadJoin::Refused;
+	}
+	setSquadInvite(id, squad, false); // 0x004c6c80's clear of the squad's bit
+	return SquadJoin::Joined;
+}
+
+void GameWorld::setSquadPrivate(int team, int squad, bool isPrivate)
+{
+	if (squad <= 0 || squad > 9) {
+		return;
+	}
+	if (isPrivate) {
+		m_privateSquads.insert({team, squad});
+	} else {
+		m_privateSquads.erase({team, squad});
+	}
+}
+
+void GameWorld::setSquadInvite(int player, int squad, bool invited)
+{
+	if (squad <= 0 || squad > 31) {
+		return;
+	}
+	uint32_t& mask = m_squadInvites[player];
+	mask = invited ? mask | (1u << squad) : mask & ~(1u << squad);
+}
+
+uint32_t GameWorld::squadInvites(int player) const
+{
+	const auto it = m_squadInvites.find(player);
+	return it != m_squadInvites.end() ? it->second : 0;
+}
+
+std::vector<GameWorld::SquadMessage> GameWorld::takeSquadMessages(int player)
+{
+	std::vector<SquadMessage> taken;
+	if (const auto it = m_squadMessages.find(player); it != m_squadMessages.end()) {
+		taken = std::move(it->second);
+		m_squadMessages.erase(it);
+	}
+	return taken;
 }
 
 uint32_t GameWorld::squadBeacon(int team, int squad) const
@@ -6318,6 +6398,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 		const Body* body = findBody(player.spawnVehicle);
 		physics::Vec3 offset;
 		if (vehicle && body && body->vehicle && !vehicle->destroyed() && vehicle->team() == team && teamHoldsControlPoint(team)
+			&& spawnParentArmourHolds(*vehicle)
 			&& (mobile = spawnPointChild(m_templates, *vehicle->objectTemplate(), offset)) != nullptr) {
 			mobileAt = body->body.position + body->body.rotation.transform(offset);
 			squadAt = const_cast<world::Object*>(vehicle);
@@ -6519,9 +6600,13 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 // 0x00634fc0): not a human's when onlyForAI, not a bot's when
 // onlyForHuman; with enterOnSpawn, only with a vehicle to enter near it;
 // otherwise, unless it scatters or allows spawning close to vehicles, not
-// while a living soldier or a vehicle is within a metre of it. Not
-// rewritten: its +0x8c height test (-1: off; no shipped setter found)
-// and the parent armour's tests (a point on a destroyed object).
+// while a living soldier or a vehicle is within a metre of it. Its
+// template's +0x8c height test is off: the constructor (0x00635590) sets
+// -1 and no console command sets it (the interface's setter, slot 0x58,
+// has no executor; the writer 0x00635810 prints no such line). The
+// parent armour test is spawnParentArmourHolds, run for the mobile
+// points (their vehicle); the rewrite's objects keep no parent chain for
+// the other points (a Titan's are carried by Titans.cpp).
 bool GameWorld::spawnPointUsable(const world::Object& point, const Player& player, bool spotClear) const
 {
 	const world::ObjectTemplate* t = point.objectTemplate();
@@ -6679,6 +6764,21 @@ bool GameWorld::teamHoldsControlPoint(int team) const
 	return std::any_of(m_controlPoints.begin(), m_controlPoints.end(), [team](const ControlPoint& cp) { return cp.team == team; });
 }
 
+// The point's parent test (0x005b24f0): the nearest object up its tree
+// with an armour decides; its armour wrecked (slot 0x60, 0x00651c20: hit
+// points at or under 0) or under its criticalDamage (slot 0x5c,
+// 0x00655fc0: +0x16, set while the hit points are below the template's
+// +0x150) refuses the point. A mobile point's is its vehicle's.
+bool GameWorld::spawnParentArmourHolds(const world::Object& vehicle) const
+{
+	const float left = hitPoints(vehicle.id());
+	if (left <= 0) {
+		return false;
+	}
+	const world::ObjectTemplate* t = vehicle.objectTemplate();
+	return !t || left >= number(*t, "armor.criticalDamage", 0);
+}
+
 std::vector<uint32_t> GameWorld::spawnVehicles(int team) const
 {
 	std::vector<uint32_t> found;
@@ -6689,7 +6789,7 @@ std::vector<uint32_t> GameWorld::spawnVehicles(int team) const
 		const world::Object* object = body.vehicle ? m_objects.find(body.object) : nullptr;
 		physics::Vec3 offset;
 		if (object && object->objectTemplate() && !object->destroyed() && object->team() == team
-			&& spawnPointChild(m_templates, *object->objectTemplate(), offset)) {
+			&& spawnParentArmourHolds(*object) && spawnPointChild(m_templates, *object->objectTemplate(), offset)) {
 			found.push_back(body.object);
 		}
 	}
@@ -6996,6 +7096,11 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 				corpse.skeleton = victim.skeleton;
 				corpse.pose = victim.pose;
 				corpse.worldPose = victim.worldPose;
+				corpse.diedAt = victim.diedAt;
+				if (const world::Object* o = m_objects.find(soldier); o && o->objectTemplate()) {
+					corpse.stayAsWreck = number(*o->objectTemplate(), "armor.timeToStayAsWreck", 20);
+					corpse.afterDestroyed = number(*o->objectTemplate(), "armor.timeToStayAfterDestroyed", 0);
+				}
 				m_seatCorpses.push_back(std::move(corpse));
 				victim.seatAnimationPath.clear();
 				slumped = true;
@@ -7105,8 +7210,11 @@ uint32_t GameWorld::seatCorpse(uint32_t vehicle, int seat) const
 
 // The slumped bodies ride in their seats, posed by the seat's system
 // (its root's still bundle under the die bundle). One goes when the
-// vehicle is wrecked or gone or when someone takes the seat (how long the
-// engine keeps it is not traced).
+// vehicle is wrecked or gone or when someone takes the seat, else by its
+// armour's countdown (0x00652380): a soldier with a parent skips the
+// landed test, so timeToStayAsWreck after the death (or 60 s,
+// *0x00a79388) it fades over timeToStayAfterDestroyed and goes
+// (0x00651db0): the shipped soldiers' 6 and 1.
 void GameWorld::stepSeatCorpses(float seconds)
 {
 	for (auto it = m_seatCorpses.begin(); it != m_seatCorpses.end();) {
@@ -7115,7 +7223,15 @@ void GameWorld::stepSeatCorpses(float seconds)
 		const world::Object* vehicleObject = body ? m_objects.find(body->object) : nullptr;
 		const bool taken = body && static_cast<size_t>(it->seat) < body->occupants.size()
 			&& body->occupants[static_cast<size_t>(it->seat)] >= 0;
-		if (!body || !soldier || !vehicleObject || body->wreckTime >= 0 || taken) {
+		if (soldier && it->fadeFrom < 0 && (m_time > it->diedAt + it->stayAsWreck || m_time > it->diedAt + 60)) {
+			it->fadeFrom = m_time;
+		}
+		if (soldier && it->fadeFrom >= 0 && it->afterDestroyed > 0) {
+			const double left = it->fadeFrom + it->afterDestroyed - m_time;
+			soldier->setFade(std::clamp(static_cast<float>(left / it->afterDestroyed), 0.0f, 1.0f));
+		}
+		const bool gone = it->fadeFrom >= 0 && it->afterDestroyed + it->fadeFrom - m_time <= 0;
+		if (!body || !soldier || !vehicleObject || body->wreckTime >= 0 || taken || gone) {
 			if (soldier) {
 				m_objects.remove(it->object);
 			}
@@ -9917,7 +10033,18 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)};
 			at.y = m_ground.height(at.x, at.z);
-			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {lookYaw(player), 0, 0})) {
+			// Its frame as the ThrownFireComp's launch leaves it (0x005e5720,
+			// after the fire 0x005f31d0): fire.projectileStartRotation
+			// (+0xb4..+0xbc) turns the fire frame in the object's own frame
+			// (0x006adb30(-roll, -pitch, -yaw) x the frame, 0x006acfa0). The
+			// portable shield's 90/0/0 sets its panel (its root's geometry 0,
+			// in its y-z plane) across the deployer's view, so the rounds
+			// from that side meet its face, not its edge; the sentry gun's
+			// deployer has none. Set down level (the fire frame's yaw).
+			const physics::Vec3 frame = (physics::Mat3::fromYawPitchRoll(player.weapon->settings().startRotation)
+				* physics::Mat3::fromYawPitchRoll({lookYaw(player), 0, 0}))
+											.yawPitchRoll();
+			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {frame.x, frame.y, frame.z})) {
 				placed->setTeam(player.team);
 				m_deployed[key] = placed->id();
 				m_launchers[placed->id()] = player.object;
@@ -11157,15 +11284,34 @@ void GameWorld::stepAbilities(float seconds)
 	}
 }
 
-// 0x00599f30: the vehicle's surroundings (the object manager's sphere,
-// DAT_00a85220 slot 0x44, round the vehicle) within the kit's radius; per
-// tick (30 a second) the strength in per cent, times the material table's
-// cell of the kit's material and the target's armour material, as the
-// in-hand abilities' (applyAbility, without the battery):
-// - healing: the team's soldiers (0x9493 of the player's team);
-// - repairing (and neither of the others): vehicles (the object's +0x17
-//   bit 0) of the team or of none, the player's own among them;
-// - ammo: the team's soldiers' magazines.
+// 0x00599f30 (on the server, while the player's control object is a
+// vehicle's, class 0xc4c2, and his soldier has a kit with one of the
+// three abilities): the targets, then per tick (30 a second) the strength
+// in per cent times the material table's cell of the kit's material and
+// the target's armour material, as the in-hand abilities' (applyAbility,
+// without the battery):
+// - The object manager's sphere (DAT_00a85220 slot 0x44 with the query
+//   slot 0x60 of the vehicle: abilityInVehicleRadius, Kit +0x328) takes
+//   the control objects (class 0xc4c2: the vehicles and their seats);
+//   each one's player (interface 0xc4c5 slot 0x10) other than ours gives
+//   his soldier (player slot 0xb4), but with the player's
+//   increasedRepairAbility (slot 0x2a0's +0x48) at 0 only one in our own
+//   vehicle (the same root, 0x006f1d70): the passengers.
+// - With it above 0, the sphere again (0x005910c0: message 0x400 with the
+//   kit's material) takes everything in it as well: the soldiers on foot,
+//   the vehicles (the rewrite's: those of the bodies, the soldiers on
+//   foot as applyAbility's sphere has them).
+// - Each target: repairing alone (neither of the others) mends a vehicle
+//   (the object's +0x17 bit 0) of the team or of none, the player's own
+//   among them (slot 0x108); healing or ammo treats a soldier (0x9493)
+//   of the team (0x108 heal, 0x10c ammo). With ammo a vehicle not ours
+//   of the team or of none takes slot 0x10c too, which the rewrite's
+//   RTAmmo (soldiers' kit weapons) leaves alone.
+// So an engineer's repair in a vehicle needs the unlock, a medic heals
+// and a supporter rearms only their own passengers without it. Not
+// rewritten: the second dose 0x00599f30 gives each target treated (the
+// strength times the control object's slot 0x17c, healing and repair
+// shared by their count), whose slot isn't traced.
 void GameWorld::stepVehicleAbility(Player& player, float seconds)
 {
 	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
@@ -11190,14 +11336,61 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 	ability.strength = strength * 30; // per tick
 	ability.material = static_cast<uint32_t>(integer(*kit, "abilityInVehicleMaterial", 0));
 	const physics::Vec3 at = vehicle->body.position;
-	// The soldiers in the query are seated ones too (their objects ride in
-	// the vehicles): a medic heals the passengers.
-	if (healing || ammo) {
-		ability.ammo = !healing;
-		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, true, false, &player);
-	} else {
-		applyAbility(ability, at, player.team, seconds, 0, nullptr, nullptr, false, true, &player);
+	const bool increased = player.abilityModifier > 0;
+	const auto inSphere = [&](const physics::Vec3& p, float bound) {
+		return physics::lengthSquared(p - at) <= (radius + bound) * (radius + bound);
+	};
+	std::vector<uint32_t> found;
+	const auto take = [&found](uint32_t object) {
+		if (object && std::find(found.begin(), found.end(), object) == found.end()) {
+			found.push_back(object);
+		}
+	};
+	// The first sphere: the seats' players, ours left out.
+	for (const Body& body : m_bodies) {
+		const bool own = body.object == vehicle->object;
+		if (!own && (!increased || !inSphere(body.body.position, body.objectRadius))) {
+			continue;
+		}
+		for (const int occupant : body.occupants) {
+			const Player* rider = occupant >= 0 && occupant != player.id ? findPlayer(occupant) : nullptr;
+			if (rider && rider->alive) {
+				take(rider->object);
+			}
+		}
 	}
+	// The second, with the unlock: what else is in it.
+	if (increased) {
+		for (const auto& owned : m_players) {
+			const Player& p = *owned;
+			if (p.alive && !p.vehicle && inSphere(p.body.position - physics::Vec3 {0, 1.0f, 0}, 0)) {
+				take(p.object);
+			}
+		}
+		for (const Body& body : m_bodies) {
+			if (inSphere(body.body.position, body.objectRadius)) {
+				take(body.object);
+			}
+		}
+	}
+	// Each target by the kit's abilities.
+	const bool repairOnly = repairing && !healing && !ammo;
+	std::vector<uint32_t> targets;
+	for (const uint32_t object : found) {
+		const Player* soldier = soldierPlayer(object);
+		if (repairOnly) {
+			const world::Object* o = m_objects.find(object);
+			if (!soldier && findBody(object) && o && (o->team() == player.team || o->team() == 0) && repairable(object)) {
+				targets.push_back(object);
+			}
+		} else if (soldier && soldier->team == player.team) {
+			targets.push_back(object);
+		}
+	}
+	// Those targets exactly (a scan held, not run again).
+	AbilityScan fixed;
+	fixed.targets = std::move(targets);
+	applyAbility(ability, at, player.team, seconds, 0, &fixed, nullptr, false, false, &player);
 }
 
 const FireArm* GameWorld::gun(uint32_t vehicle, int seat) const

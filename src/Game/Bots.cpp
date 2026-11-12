@@ -1855,9 +1855,10 @@ void BotManager::noticeRounds(Bot& bot, const GameWorld::PlayerInfo& self)
 // (AI weapon slot 0x100: when it was taken in hand, 0x008a6d80). No team
 // test: a teammate's grenade (or the bot's own) warns too. It lasts until
 // 2.8 s after that stamp (0x10092960); BBAvoid turns it into 1000.
-// BF2142.exe's sender of the event wasn't found; like the rounds above it
-// is checked every tick on the rounds in flight, with the thrower's weapon
-// in hand as the round's weapon.
+// The event comes at a hit (IAICollisionHandler slot 0x14) or a round's
+// end (slot 0x20: 0x005b6680 / 0x005b4db0 -> 0x0089faf0); slots 8 / 0xc
+// have no caller (engine.md). The rewrite's stand-in checks the rounds in
+// flight every tick, with the thrower's weapon in hand as the round's.
 void BotManager::warnOfGrenades(Bot& bot, const GameWorld::PlayerInfo& self)
 {
 	if (self.vehicle) {
@@ -3552,7 +3553,7 @@ float fire3dUnitScale(float summedStrength)
 
 // The fire plan (0x100795a0, built by BBFire's plan maker 0x1007cf10). The
 // running plan is kept while it is a fire plan (type 0xe) of this
-// behaviour, not done, for the same target (plan +0x20 against the
+// behaviour, unfinished, for the same target (plan +0x20 against the
 // behaviour's per-bot target, +0xc[bot]), the same weapon (+0x24 against
 // +0x14[bot], the weapon the choice settled on) and the same flags
 // (+0x2c, +0x38 against bot vt+0x264); otherwise a new plan is built,

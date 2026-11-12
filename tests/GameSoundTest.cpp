@@ -17,6 +17,7 @@
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/SoundObjectTemplate.h"
 #include "Sound/Game/VoiceMessages.h"
+#include "Sound/SoundEngine/ISoundEngine.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -122,6 +123,28 @@ TEST(SoundConsole_AddSoundMakesTheTemplate)
 	templates.create("GenericFireArm", "silo_gun");
 	CHECK(console.execute("ObjectTemplate.sound.addReloadTimeSound 2 12", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
 	CHECK(templates.find("silo_gun")->settings().at("sound.reloadTimeSound.2") == "12");
+}
+
+// ObjectTemplate.globalEffectLevel (executor 0x007f54a0) goes to the
+// engine template's slot 0xb8 (read back by 0xbc): how much occlusion and
+// the tinnitus muffle the sound.
+TEST(SoundConsole_GlobalEffectLevelIsTheEnginesOcclusionFactor)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	sound::SoundManager manager(sound::getSoundEngine(), templates);
+	manager.registerTemplateType();
+	sound::registerSoundConsoleMethods(console, manager);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create Sound S_hud_beep", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	const auto* sound = dynamic_cast<const sound::SoundObjectTemplate*>(templates.find("S_hud_beep"));
+	CHECK(sound && sound->engineTemplate() && sound->engineTemplate()->occlusionFactor() == 1.0f);
+	CHECK(console.execute("ObjectTemplate.globalEffectLevel 0.25", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(sound && sound->engineTemplate() && sound->engineTemplate()->occlusionFactor() == 0.25f);
+	CHECK(console.execute("ObjectTemplate.globalEffectLevel", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(out.find("0.25") != std::string::npos);
 }
 
 // DefaultSoundComp (0x005dbdc0, 0x005dbfe0, 0x005dc1d0): the shooter's own

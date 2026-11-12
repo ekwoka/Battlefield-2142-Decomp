@@ -846,6 +846,9 @@ public:
 	static constexpr int kSpawnInVehicle = -4;
 	void setSpawnVehicle(int player, uint32_t vehicle);
 	std::vector<uint32_t> spawnVehicles(int team) const;
+	// The spawn point's parent armour test (0x005b24f0): not on a wreck,
+	// nor under the armour's criticalDamage.
+	bool spawnParentArmourHolds(const world::Object& vehicle) const;
 	// The projectile camera: a seat's weapon with ToggleCameraComp's
 	// zoom.useProjectileCamera (as_ag's and us_ag's guided missile seats, the
 	// hover bike's) firing a round whose template has useProjectileCamera
@@ -874,6 +877,33 @@ public:
 	// Joins a squad of the player's team (0 leaves), false when full;
 	// a new squad's first member leads it.
 	bool joinSquad(int player, int squad);
+	// The squad manager's join (slot 0x34, 0x004c8460 -> 0x004c7290), as
+	// the squad menu's JOIN (0x007a5410), an invite's yes and a client's
+	// JoinSquad ask for it: a squad of six takes nobody (the player hears
+	// 2/0xb, HUD_HUD_SQUAD_FULL); a private one (the squad's slot 4) takes
+	// a player only with its bit in his invite mask (player vtable 0x224,
+	// +0x14c) or when it has no members, else its leader hears 2/0x11 (the
+	// player: the HUD's question kind 0) and the player 2/0xc (the squad:
+	// HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN). A join clears the squad's bit
+	// (0x004c6c80). The messages wait in squadMessages for a player that
+	// isn't a bot (a bot's go nowhere: no connection).
+	enum class SquadJoin { Joined, Refused, Full, Private };
+	SquadJoin requestJoinSquad(int player, int squad);
+	// A squad's lock (squad manager slot 0x20, the squad's +4 flag): the
+	// leader's toggle (0x007a5a60) and the create box's (0x007a5ad0). A
+	// squad left empty is removed with it (0x004c6c80 -> slot 0x3c).
+	void setSquadPrivate(int team, int squad, bool isPrivate);
+	bool squadPrivate(int team, int squad) const { return m_privateSquads.count({team, squad}) != 0; }
+	// Slot 0x30 (0x004c3190)'s bit in the player's invite mask: set by the
+	// leader's invite (and its yes to a request), cleared by the invited
+	// player's no and by leaving (0x007a55f0).
+	void setSquadInvite(int player, int squad, bool invited);
+	uint32_t squadInvites(int player) const;
+	struct SquadMessage {
+		int id = 0;    // PostRemote 2/id
+		int value = 0; // its payload's int: the squad, or the asking player
+	};
+	std::vector<SquadMessage> takeSquadMessages(int player);
 	// A squad of the team with room (a new one if none): the squad id.
 	int openSquad(int team) const;
 	// The squad's beacon object (0 for none).
@@ -3452,7 +3482,9 @@ private:
 	// vehicle within abilityInVehicleRadius (Kit +0x328) at
 	// abilityInVehicleStrength (+0x324) of material abilityInVehicleMaterial
 	// (+0x320): healing the team's soldiers and repairing its vehicles
-	// (game logic slot 0x108) or rearming its soldiers (slot 0x10c).
+	// (game logic slot 0x108) or rearming its soldiers (slot 0x10c); the
+	// passengers of his own vehicle only, unless his increasedRepairAbility
+	// is above 0 (then everyone in the sphere).
 	void stepVehicleAbility(Player& player, float seconds);
 	void stepProjectiles(float seconds);
 	// StickyCollisionComp's response (0x005e83d0) to a bouncing round's
@@ -3676,11 +3708,16 @@ private:
 	static void poseBoneParts(anim::AnimationState& animation, const anim::Skeleton& skeleton, anim::LocalPose& pose,
 		std::vector<Body::BonePart>& parts);
 	// Soldiers killed in a seat that has a die bundle: the body stays,
-	// slumped by the seat's animation system (0x005cea00, 0x005ed890).
+	// slumped by the seat's animation system (0x005cea00, 0x005ed890),
+	// counted down by its armour as any body (0x00652380).
 	struct SeatCorpse {
 		uint32_t object = 0;
 		uint32_t vehicle = 0;
 		int seat = -1;
+		double diedAt = 0;        // the armour's wreck time (+0x60)
+		float stayAsWreck = 20;   // armor.timeToStayAsWreck (+0x158)
+		float afterDestroyed = 0; // armor.timeToStayAfterDestroyed (+0x15c)
+		double fadeFrom = -1;     // when the countdown began (+0x64)
 		std::unique_ptr<anim::AnimationState> animation;
 		const anim::Skeleton* skeleton = nullptr;
 		anim::LocalPose pose;
@@ -4096,6 +4133,9 @@ private:
 	};
 	std::vector<PendingTeamDamage> m_teamDamage;
 	float m_teamDamageLimits[2] = {50, 25};
+	std::set<std::pair<int, int>> m_privateSquads;          // (team, squad): requestJoinSquad
+	std::map<int, uint32_t> m_squadInvites;                  // player -> its invite mask
+	std::map<int, std::vector<SquadMessage>> m_squadMessages; // player -> its 2/x messages
 	// 0x006557a0 for `armour` (the object whose armour took it; `vehicle`
 	// the body whose control object it is under, `most` its maximum).
 	void recordArmourDamage(uint32_t armour, uint32_t vehicle, float amount, int attacker, float most);

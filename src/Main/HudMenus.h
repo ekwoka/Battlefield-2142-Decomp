@@ -81,6 +81,26 @@ public:
 	// Messages the menu shows (HUD_HUD_SQUAD_*, text ids).
 	std::function<void(const std::string&)> onMessage;
 
+	// The squad manager's messages to the local player (PostRemote 2/id
+	// with an int; the HUD's category-2 handler 0x00756b60, each line a
+	// personal line, slot 0x170): 0xb HUD_HUD_SQUAD_FULL (#TEAMNAME#,
+	// #SQUADNAME#), 0xc HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN, 0x12
+	// HUD_HUD_SQUAD_JOIN_DENIED and 0x13 HUD_HUD_SQUAD_JOIN_ACCEPTED (the
+	// squad, by the local player's team, 0x00a1c174 slot 0x28); 0x11, a
+	// player asking to join our private squad (the player), the question
+	// kind 0 (0x0079e440; HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN, #PLAYERNAME#,
+	// 0x0079c720) unless the leader turned that player down before (the
+	// menu's list +0x120, 0x007a5e30). The original also plays the menu's
+	// "warning" sound with the lines (not rewritten).
+	void squadMessage(int id, int value);
+	std::function<void(const std::string&)> onLine;
+	std::function<void(int player, const std::string&)> onJoinRequest;
+	std::function<std::string(int team)> teamName; // the team's localised name
+	// The leader's no to a request (0x0079d6e0 kind 0, answered, not timed
+	// out): the player goes on the menu's list (+0x120, 0x007a7d10), whose
+	// later requests ask nothing (0x007a5e30).
+	void denyJoinRequest(int player) { m_denied.insert(player); }
+
 	// Each frame: the lists and the variables (SquadCreateShow,
 	// SquadCreateLockedShow, SquadCreateTagString, NrOfSquads,
 	// NrOfUnassigned, InviteListShow, IsInSquad, IsSquadLeader).
@@ -99,8 +119,13 @@ public:
 	// data 2): the squad createSquad makes takes it (ChangeSquadName, 0x16).
 	std::function<std::string()> typedName;
 	std::string squadLabel(int team, int squad) const;
-	// A squad's lock (its leader's; the squad manager's slot 0x20).
-	bool locked(int team, int squad) const { return m_locked.count({team, squad}) != 0; }
+	// A squad's lock (its leader's; the squad manager's slot 0x20, the
+	// squad's flag the toggle 0x007a5a60 reads): the round's
+	// (GameWorld::squadPrivate), a joined game's as the menu sent it.
+	bool locked(int team, int squad) const
+	{
+		return m_remote.world ? m_locked.count({team, squad}) != 0 : m_round.squadPrivate(team, squad);
+	}
 
 	// A joined game (HudWorld.h): the players as the server has them, and
 	// what the menu changes sent as the original's events (a client's
@@ -149,7 +174,8 @@ private:
 	bool m_inviteShow = false;   // +0xa5
 	std::set<int> m_selected;    // +0x104: invited, or members kept
 	std::set<int> m_unselected;  // +0x110: members to remove
-	std::set<std::pair<int, int>> m_locked;
+	std::set<std::pair<int, int>> m_locked; // a joined game's, as sent
+	std::set<int> m_denied;                 // +0x120: requests turned down
 	std::map<std::pair<int, int>, std::string> m_names; // squads named in the create box
 };
 
@@ -332,7 +358,7 @@ private:
 //     "<tool>_deny" to the leader; accept uses the tool at the request's
 //     point quietly (the tools' slots 0x32c / 0x348 / 0x35c / 0x358 with
 //     1): done, "<tool>_accept" to the leader and "<tool>_deny" to every
-//     other squad with a request of that kind (each taken off); not done,
+//     other squad with a request of that kind (each taken off); refused,
 //     "<tool>_unavailable" to the commander alone and the request stays.
 // The tools are named artillery, orbitalstrike, uav and supply.
 class SquadRequests {
