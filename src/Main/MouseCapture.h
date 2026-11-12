@@ -30,6 +30,15 @@ constexpr bool gameplayPointerConfined(bool playing, bool pointer, bool menuUp, 
 		&& !sameText(reason, "end-of-round");
 }
 
+// Full screen the window is the whole display, so a free or confined cursor reaches
+// the edges and corners where macOS fires hot corners, reveals the Dock and hands the
+// pointer to another Mac (Universal Control). While focused, every screen (menus too)
+// keeps it this many points inside; windowed play is unchanged.
+constexpr int fullscreenEdgeInset(bool fullscreen, bool focused)
+{
+	return fullscreen && focused ? 4 : 0;
+}
+
 // Screens that draw the game's own pointer (the commander screen's
 // pointerMinimap.tga, HudManager.setMouseTextureFull) or none (the comm rose,
 // picked by pointing) hide the system cursor while it is confined there.

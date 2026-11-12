@@ -685,6 +685,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				pointerConfinedBefore = confine;
 			}
 			{
+				// SDL ignores an unchanged rect; relative xrel/yrel are never clamped by it.
+				const int inset = fullscreenEdgeInset((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0, focused);
+				int ww = 1, wh = 1;
+				SDL_GetWindowSize(window, &ww, &wh);
+				const SDL_Rect edgeGuard{inset, inset, ww - 2 * inset, wh - 2 * inset};
+				SDL_SetWindowMouseRect(window, inset ? &edgeGuard : nullptr);
+			}
+			{
 				const bool hideCursor = gameplaySystemCursorHidden(confine, pointerWhy);
 				if (hideCursor != roseCursorHidden) {
 					if (hideCursor) {
@@ -709,13 +717,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const bool relative = SDL_GetWindowRelativeMouseMode(window);
 				const bool grabbed = SDL_GetWindowMouseGrab(window);
 				const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+				const bool edgeGuarded = SDL_GetWindowMouseRect(window) != nullptr;
 				const char* why = options.pointerReason ? options.pointerReason() : nullptr;
 				const int state = focused | (pointer << 1) | (menuUp << 2) | (relative << 3) | (grabbed << 4) | (fullscreen << 5)
-					| (playing << 6) | (capture << 7) | (why ? static_cast<int>(why[0]) << 8 : 0);
+					| (playing << 6) | (capture << 7) | (why ? static_cast<int>(why[0]) << 8 : 0) | (edgeGuarded << 16);
 				if (state != tracedCaptureState) {
-					std::printf("mouse-capture: t=%.1f wanted=%d blocker=%s focused=%d pointer=%d(%s) menu=%d playing=%d actual relative=%d grabbed=%d fullscreen=%d\n",
+					std::printf("mouse-capture: t=%.1f wanted=%d blocker=%s focused=%d pointer=%d(%s) menu=%d playing=%d actual relative=%d grabbed=%d fullscreen=%d edge-guard=%d\n",
 						SDL_GetTicksNS() / 1e9, capture, mouseCaptureBlocker(playing, pointer, menuUp, focused), focused, pointer, why ? why : "-", menuUp,
-						playing, relative, grabbed, fullscreen);
+						playing, relative, grabbed, fullscreen, edgeGuarded);
 					std::fflush(stdout);
 					tracedCaptureState = state;
 				}
@@ -1003,6 +1012,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		gpu->releaseTarget(target);
 		SDL_SetWindowRelativeMouseMode(window, false);
 		SDL_SetWindowMouseGrab(window, false);
+		SDL_SetWindowMouseRect(window, nullptr);
 		SDL_StopTextInput(window);
 	}
 	return 0;

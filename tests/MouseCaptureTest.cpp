@@ -78,3 +78,12 @@ TEST(MouseCapture_CommanderScreenHidesSystemCursor)
 	CHECK(!gameplaySystemCursorHidden(false, "commander-screen")); // unfocused or Esc menu
 	CHECK(!gameplaySystemCursorHidden(true, nullptr));
 }
+
+// Full screen, the cursor stays off the display's edges on every focused screen
+// (the Esc menu too), so hot corners, the Dock and Universal Control never see it.
+TEST(MouseCapture_FullscreenKeepsCursorOffDisplayEdges)
+{
+	CHECK(fullscreenEdgeInset(true, true) > 0);
+	CHECK(fullscreenEdgeInset(false, true) == 0); // windowed: the Esc menu still lets go
+	CHECK(fullscreenEdgeInset(true, false) == 0); // Cmd-Tab away frees it
+}
