@@ -4569,7 +4569,9 @@ void GameWorld::stepProjectiles(float seconds)
 			const bool onShield = shieldHit && hitBody && hitBody->shieldLeft > 0 && hitObject == hitBody->object
 				&& hit.material == static_cast<uint32_t>(hitBody->shieldMaterial) && hitSoldier == 0;
 			const bool through = !dud && !onShield && penetrate(p, hit, hitObject, hitBody, hitSoldier != 0);
-			if (p.settings->explosionRadius > 0 && !through && !dud) {
+			// Any detonation component goes off (0x005e9300 has no radius
+			// gate): the silo missile's radius 0 still starts its end effect.
+			if (p.settings->detonates && !through && !dud) {
 				detonateHit(p, hit.point, hit.normal, hitObject, hit.material);
 			}
 			// The impact effect for the two materials, facing out of the surface.
