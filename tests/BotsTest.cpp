@@ -718,6 +718,50 @@ TEST(Bots_EmpDoesNotTurnDriverOut)
 	CHECK(self.vehicle == vehicle && self.driving);
 }
 
+// armor.empDamageIgnoreRadius (the gunships') drops the falloff, not the sphere query: an EMP far away
+// leaves the vehicle alone (0x005a7ab0 only visits what the explosion's query finds), one inside its
+// radius takes the modifier's share (explosionDamage 500 x 1 -> the armour's 2 steps).
+TEST(Vehicles_EmpIgnoreRadiusStaysWithinBlast)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	CHECK(gameDir != nullptr);
+	if (!gameDir) return;
+	Field field([&](Field& f) {
+		f.files.setRootPath(gameDir);
+		f.files.addSearchPath("mods/bf2142");
+		Console console {&f.files};
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&](std::string archive, std::string mountPoint, bool) { f.files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		f.templates.registerType(7, "PlayerControlObject");
+		f.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+		auto* car = f.templates.create("PlayerControlObject", "emp_far_car");
+		car->settings()["hasMobilePhysics"] = "1";
+		car->settings()["physicsType"] = "Mesh";
+		car->settings()["collisionMesh"] = "as_fav";
+		car->settings()["mass"] = "1800";
+		car->settings()["armor.takesEmpDamage"] = "1";
+		car->settings()["armor.empDamageNumStep"] = "2";
+		car->settings()["armor.empDamageIgnoreRadius"] = "1";
+		car->settings()["armor.empDamageIgnoreRadiusModifier"] = "1";
+		auto* emp = f.templates.create("GenericProjectile", "emp_far_projectile");
+		emp->components().push_back("DefaultDetonationComp");
+		emp->settings()["detonation.isEMPWeapon"] = "1";
+		emp->settings()["detonation.explosionRadius"] = "9";
+		emp->settings()["detonation.explosionDamage"] = "500";
+		emp->settings()["detonation.explosionMaterial"] = "69";
+	});
+	const uint32_t vehicle = field.objects.create(field.templates.find("emp_far_car"), {3, 1.2f, 0}, {30, 0, 0})->id();
+	for (int i = 0; i < 30; ++i) field.world->tick(1 / 30.0f);
+	const auto placed = field.objects.find(vehicle)->position(); // no seats: not in vehicleList()
+	const physics::Vec3 at {placed.x, placed.y, placed.z};
+	CHECK(field.world->detonate("emp_far_projectile", {at.x + 100, at.y, at.z}));
+	CHECK(field.world->empLevel(vehicle) == 0);
+	CHECK(field.world->detonate("emp_far_projectile", {at.x + 5, at.y, at.z}));
+	CHECK(field.world->empLevel(vehicle) == 2);
+}
+
 TEST(Bots_UrgencyCurves)
 {
 	// aiSettings.createUCLinear UCFire -0.22 1.3 (0x10087ef0): max(0, -0.22 t + 1.3).

@@ -3102,7 +3102,14 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 	const std::function<float(const physics::Vec3&)>& distanceTo)
 {
 	const float radius = settings.explosionRadius;
-	const auto amountFor = [&](const world::ObjectTemplate& t, const physics::Vec3& p) {
+	const auto amountFor = [&](const world::ObjectTemplate& t, const physics::Vec3& p, float objectRadius) {
+		// Only what the sphere query finds (0x005a7ab0 -> DAT_00a85220 slot 0x44, the explosion's own query):
+		// armor.empDamageIgnoreRadius only skips the falloff of those, it does not reach the whole map.
+		const float dx = p.x - at.x, dz = p.z - at.z;
+		const float reach = radius + objectRadius;
+		if (dx * dx + dz * dz > reach * reach) {
+			return 0.0f;
+		}
 		const float distance = distanceTo(p);
 		const bool ignoreRadius = integer(t, "armor.empDamageIgnoreRadius", 0) != 0;
 		if (distance >= radius && !ignoreRadius) {
@@ -3121,7 +3128,7 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 		if (!t || findDrone(body.object) || integer(*t, "armor.takesEmpDamage", 0) == 0) {
 			continue; // drones below
 		}
-		if (const float amount = amountFor(*t, body.body.position); amount > 0) {
+		if (const float amount = amountFor(*t, body.body.position, body.objectRadius); amount > 0) {
 			add(body.empLevel, *t, amount);
 		}
 	}
@@ -3131,7 +3138,7 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 		if (!t || integer(*t, "armor.takesEmpDamage", 0) == 0) {
 			continue;
 		}
-		if (const float amount = amountFor(*t, drone.position); amount > 0) {
+		if (const float amount = amountFor(*t, drone.position, 0); amount > 0) {
 			add(drone.empLevel, *t, amount);
 		}
 	}
@@ -3143,7 +3150,7 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 		if (!t || integer(*t, "armor.takesEmpDamage", 0) == 0) {
 			continue;
 		}
-		if (const float amount = amountFor(*t, player->body.position); amount > 0) {
+		if (const float amount = amountFor(*t, player->body.position, 0); amount > 0) {
 			add(player->empLevel, *t, amount);
 		}
 	}
