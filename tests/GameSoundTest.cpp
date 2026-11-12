@@ -13,6 +13,7 @@
 #include "Main/GameAudio.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Sound/Game/GameSounds.h"
+#include "Sound/SoundEngine/EnhancedAudio.h"
 #include "Sound/Game/SoundConsole.h"
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/SoundObjectTemplate.h"
@@ -225,6 +226,31 @@ TEST(GameSounds_EmptyOutdoorFireVariantFallsBackToFirstPerson)
 	fire.mode = 0;
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "walker_cannon", true, {}, true, 1, 0, &fire);
 	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_walker_cannon_Fire1P");
+}
+
+// The right Shepherd gunner's Fire1P is misnamed in the shipped data, so
+// only its Fire3P has a sample. Ordinary: silent, as retail. Enhanced: the
+// local player's shot plays it head-relative (like the left gunner's 2D
+// Fire1P), not 3D at the muzzle where occlusion and HRTF would muffle it.
+TEST(GameSounds_FirstPersonShotWithOnlyThirdPersonSampleStaysHeadRelative)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_gunner_Fire3P");
+	s.templates.create(sound::SoundObjectTemplate::kClassId, "S_gunner_Fire1P"); // no file
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 0;
+	// Ordinary (retail 0x005dbdc0): the empty first-person slot plays nothing.
+	sound::setEnhancedAudio(false);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
+	CHECK(s.triggered.empty());
+	// Enhanced: the 3P sample stands in, head-relative.
+	sound::setEnhancedAudio(true);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
+	sound::setEnhancedAudio(false);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_gunner_Fire3P" && s.triggered[0].firstPerson);
+	CHECK(s.manager.muted(4));
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", false, {4, 0, 0}, true, 2, 0, &fire);
+	CHECK(s.triggered.size() == 2 && !s.triggered[1].firstPerson && s.triggered[1].position.x == 4);
 }
 
 // 0x007fa100: two rays up and one down, 15 m; a 6 m room gives

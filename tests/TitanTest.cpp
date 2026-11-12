@@ -2877,7 +2877,7 @@ TEST(Titan_GunMinimapHeadingFollowsCamera)
    anim::AnimationSystems systems(nullptr);
    PlayerCamera camera(*level.world, systems, nullptr);
    float heading = 123;
-   CHECK(!camera.titanGunHeading(heading)); // on-foot fallback
+   CHECK(!camera.seatMapHeading(heading)); // on-foot fallback
    CHECK(heading == 123);
    CHECK(level.world->setSoldierPosition(info.soldier, titan->position));
    physics::Vec3 entry; float radius = 0; int seat = -1;
@@ -2900,7 +2900,7 @@ TEST(Titan_GunMinimapHeadingFollowsCamera)
      CHECK(level.world->playerInfo(player, info));
      CHECK(info.vehicle == titan->object && info.seat == static_cast<int>(i));
      PlayerCamera::View eye; CHECK(camera.view(eye, 16.0f / 9));
-     CHECK(camera.titanGunHeading(heading));
+     CHECK(camera.seatMapHeading(heading));
      CHECK(std::fabs(std::remainder(heading - eye.yaw * 180 / 3.14159265f, 360.0f)) < .001f);
      if (std::fabs(std::remainder(heading - info.yaw, 360.0f)) > 1) ++differentFromHull;
      if (!step) first = heading;

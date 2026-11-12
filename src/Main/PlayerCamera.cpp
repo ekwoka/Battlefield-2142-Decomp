@@ -1146,12 +1146,13 @@ void PlayerCamera::startWeaponEffects(int effect)
 	}
 }
 
-bool PlayerCamera::titanGunHeading(float& degrees) const
+bool PlayerCamera::seatMapHeading(float& degrees) const
 {
 	Me me;
 	View eye;
-	if (!current(me) || !me.alive || !me.vehicle || !m_round.isTitan(me.vehicle)
-		|| !view(eye, 4.0f / 3.0f)) {
+	// Any seat's camera, not only a Titan gun's: retail's minimap takes the player camera's
+	// position and look (0x00752640 from the HUD update 0x00753700); the exact source is unproven.
+	if (!current(me) || !me.alive || !me.vehicle || !view(eye, 4.0f / 3.0f)) {
 		return false;
 	}
 	degrees = eye.yaw / kDegrees;

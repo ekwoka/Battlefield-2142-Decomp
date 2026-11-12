@@ -2,6 +2,7 @@
 
 #include "SoundManager.h"
 #include "SoundObjectTemplate.h"
+#include "Sound/SoundEngine/EnhancedAudio.h"
 #include "Sound/SoundEngine/SoundEnvelope.h"
 
 #include <algorithm>
@@ -319,7 +320,15 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	}
 	// The slot: first person selects Fire1P / Fire1P_Outdoor; otherwise
 	// Fire3P. First-person fire ducks the world's effects (reason 4).
-	if (slot != 2) {
+	// No 1P sample (the right Shepherd gunner's Fire1P is misnamed in both mods'
+	// eu_at.tweak): retail 0x005dbdc0 picks slot 0/1 on first person alone and plays
+	// nothing. Enhanced audio (a port addition) lets the 3P sample stand in, kept
+	// head-relative so occlusion and HRTF don't treat the player's own gun as distant.
+	if (firstPerson && slot == 2 && !enhancedAudioEnabled()) {
+		return;
+	}
+	const bool head = firstPerson;
+	if (head) {
 		if (muteOnFire) {
 			m_manager.setMuted(4, true);
 		}
@@ -363,7 +372,6 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (!m_manager.hasSound(name)) {
 		return;
 	}
-	const bool head = slot != 2;
 	if (m_log) {
 		std::printf("sound: %s%s%s\n", name.c_str(), head ? " (first person)" : "", loops == 0 ? " loops" : "");
 	}

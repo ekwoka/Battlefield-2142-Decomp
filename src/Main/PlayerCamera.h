@@ -146,9 +146,9 @@ public:
 		float roll = 0;           // radians about the view axis (a seat camera's shakes)
 	};
 	bool view(View& view, float aspect) const;
-	// Local map direction while operating a Titan gun, in degrees. The
-	// hull heading in PlayerInfo does not follow the gun's camera.
-	bool titanGunHeading(float& degrees) const;
+	// Local map direction in any vehicle seat with a first-person camera, in degrees.
+	// The hull heading in PlayerInfo does not follow a gun or gunner's camera.
+	bool seatMapHeading(float& degrees) const;
 	// A seat camera's shakes (the Camera object's 0x00610240, rolled about
 	// the view axis by 0x00610620 through 0x005b1a70, degrees): the speed
 	// shake past cameraShakeStartSpeed (template +0x3d0) up to

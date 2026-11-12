@@ -8445,7 +8445,7 @@ int runGame(Options& options, Session& session)
 				g_cameraMode = static_cast<int>(game::camera::Mode::Chase);
 			}
 			float gunHeading = 0;
-			const std::optional<float> mapHeading = playerCamera.titanGunHeading(gunHeading)
+			const std::optional<float> mapHeading = playerCamera.seatMapHeading(gunHeading)
 				? std::optional<float>(gunHeading) : std::nullopt;
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
