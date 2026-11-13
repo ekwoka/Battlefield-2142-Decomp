@@ -816,6 +816,7 @@ PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool clo
 			effects.frameSeconds = static_cast<float>(value);
 		}
 	}
+	effects.inTitan = m_cameraInTitan;
 	const uint64_t now = SDL_GetTicks();
 	if (effects.frameSeconds <= 0) {
 		effects.frameSeconds = m_lastPostTicks ? static_cast<float>(now - m_lastPostTicks) / 1000.0f : 1.0f / 30.0f;
