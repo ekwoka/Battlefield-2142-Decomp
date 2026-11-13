@@ -486,7 +486,7 @@ public:
 	}
 	// Whether its engines push it through the air (a propeller engine).
 	bool flies() const;
-	// Someone aboard (the engines' messages 4 and 5: 0x0064c890; the force
+	// The pilot aboard, the root PCO's own seat (the engines' messages 4 and 5: 0x0064c890; the force
 	// only with the PCO occupied, 0x005c87b0) and the tick (for the legs'
 	// latched inputs).
 	// Entering (0x005cdd60 / 0x005ce600) also sets the PCO's own sprint up
