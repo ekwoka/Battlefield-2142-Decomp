@@ -3732,6 +3732,7 @@ private:
 	struct AbilityScan {
 		float timer = 0;
 		std::vector<uint32_t> targets;
+		int64_t treatedTick = -1; // the last tick a target took something (a full one is held, not treated)
 	};
 	std::map<int, AbilityScan> m_abilityScans;
 	std::vector<Supply> m_supplies;

@@ -1140,6 +1140,18 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 0 && info.active);
 	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.45f);
 	CHECK(info.healFlag && !info.repairFlag && info.sinceHeal == 0);
+	// Healthy, the hub still holds its holder as a target (the circle shows) but treats nothing:
+	// the HUD's healing sound must not play.
+	range.world->setHitPoints(soldier, 100);
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.targets.size() == 1 && !info.active);
+	range.world->setHitPoints(soldier, 40);
+	for (int i = 0; i < 3; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.active);
 	// Put away, the hub treats no more: the flag stays, the ticks run on.
 	game::SoldierInput rifle;
 	rifle.selectItem = 3;
