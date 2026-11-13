@@ -61,6 +61,92 @@ TEST(EnhancedRender_InverseUndoesAViewProjection)
 	CHECK(enhanced::inverse(singular).at(0, 0) == 1); // identity back
 }
 
+// gbuffer.frag's normals from the depth buffer, in float as the GPU works:
+// a Titan deck 12 m ahead at a grazing angle, seen from the Suez Titan
+// (some 400 m from the origin) at 3456 x 2160. Unprojected through the
+// view-projection's inverse the depth's rounding near 1 came out as
+// millimetres, more than a pixel's spacing, and the normals as noise (the
+// GTAO's streaks on the decks, worse the finer the screen); unprojected
+// about the camera (the projection's inverse) it stays well under a degree.
+TEST(EnhancedRender_ViewSpaceUnprojectionKeepsGrazingNormals)
+{
+	const Vec3f eye {-380, 171, -11};
+	const Mat4 view = Mat4::lookAt(eye, eye + Vec3f {1, -0.8f, 0.1f}, {0, 1, 0});
+	const Mat4 projection = Mat4::perspective(1.22f, 1.6f, 0.1f, 6000.0f);
+	const Mat4 viewProjection = view * projection;
+	const auto rowTimes = [](const float v[4], const Mat4& m, float out[4]) {
+		for (int c = 0; c < 4; ++c) {
+			out[c] = v[0] * m.at(0, c) + v[1] * m.at(1, c) + v[2] * m.at(2, c) + v[3] * m.at(3, c);
+		}
+	};
+	// The deck (y = 169.5) where the ray through a pixel meets it: its depth
+	// as the depth buffer holds it (float), and its ndc.
+	const float pixel[2] = {2.0f / 3456, 2.0f / 2160};
+	const Mat4 inverseViewProjection = enhanced::inverse(viewProjection);
+	const auto depthAt = [&](float x, float y, float ndcOut[3]) {
+		const double start[4] = {x, y, 0, 1}, end[4] = {x, y, 1, 1};
+		double a[4] = {}, b[4] = {};
+		for (int c = 0; c < 4; ++c) {
+			for (int r = 0; r < 4; ++r) {
+				a[c] += start[r] * inverseViewProjection.at(r, c);
+				b[c] += end[r] * inverseViewProjection.at(r, c);
+			}
+		}
+		double p0[3], p1[3];
+		for (int k = 0; k < 3; ++k) {
+			p0[k] = a[k] / a[3];
+			p1[k] = b[k] / b[3];
+		}
+		const double t = (169.5 - p0[1]) / (p1[1] - p0[1]);
+		const double world[4] = {p0[0] + (p1[0] - p0[0]) * t, 169.5, p0[2] + (p1[2] - p0[2]) * t, 1};
+		double clip[4] = {};
+		for (int c = 0; c < 4; ++c) {
+			for (int r = 0; r < 4; ++r) {
+				clip[c] += world[r] * viewProjection.at(r, c);
+			}
+		}
+		ndcOut[0] = x;
+		ndcOut[1] = y;
+		ndcOut[2] = static_cast<float>(clip[2] / clip[3]); // the depth buffer's rounding only
+	};
+	const Mat4 inverseProjection = enhanced::inverse(projection);
+	const Mat4 inverseView = enhanced::inverse(view);
+	const auto unproject = [&](const Mat4& m, const float ndc[3], Vec3f& out) {
+		const float v[4] = {ndc[0], ndc[1], ndc[2], 1};
+		float p[4];
+		rowTimes(v, m, p);
+		out = {p[0] / p[3], p[1] / p[3], p[2] / p[3]};
+	};
+	const auto worstAngle = [&](bool viaView) {
+		float worst = 0;
+		for (int i = 0; i < 64; ++i) {
+			const float x = -0.3f + 0.0093f * static_cast<float>(i), y = -0.35f + 0.0041f * static_cast<float>(i);
+			float c[3], r[3], d[3];
+			depthAt(x, y, c);
+			depthAt(x + pixel[0], y, r);
+			depthAt(x, y - pixel[1], d);
+			Vec3f pc, pr, pd;
+			unproject(viaView ? inverseProjection : inverseViewProjection, c, pc);
+			unproject(viaView ? inverseProjection : inverseViewProjection, r, pr);
+			unproject(viaView ? inverseProjection : inverseViewProjection, d, pd);
+			Vec3f n = normalize(cross(pr - pc, pd - pc));
+			if (viaView) { // back to the world for the comparison
+				const float v[4] = {n.x, n.y, n.z, 0};
+				float w[4];
+				rowTimes(v, inverseView, w);
+				n = normalize(Vec3f {w[0], w[1], w[2]});
+			}
+			worst = std::max(worst, std::acos(std::min(std::fabs(n.y), 1.0f)) * 57.29578f);
+		}
+		return worst;
+	};
+	const float throughWorld = worstAngle(false), aboutCamera = worstAngle(true);
+	std::fprintf(stderr, "  deck normal error: %.2f deg through the world, %.3f deg about the camera\n", throughWorld,
+		aboutCamera);
+	CHECK(throughWorld > 10.0f);
+	CHECK(aboutCamera < 1.0f);
+}
+
 TEST(EnhancedRender_CascadesSplitTheViewAndHoldTheirSlices)
 {
 	const auto far = enhanced::cascadeSplits(0.5f, 180.0f);

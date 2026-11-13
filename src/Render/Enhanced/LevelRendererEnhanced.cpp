@@ -41,8 +41,8 @@ namespace dice::hfe::render {
 namespace {
 
 struct GBufferUniforms {
-	Mat4 inverseViewProjection;
-	Mat4 view;
+	Mat4 inverseProjection; // the jittered projection's
+	Mat4 inverseView;
 	Mat4 viewProjection;
 	Mat4 previousViewProjection;
 	float texel[4] {};
@@ -457,8 +457,11 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 	// The normals, the linear depth and the camera's motion.
 	{
 		GBufferUniforms g;
-		g.inverseViewProjection = enhanced::inverse(viewProjection);
-		g.view = m_enh.view;
+		// Not the view-projection's inverse: its translation (a world some
+		// 400 m from the origin) magnifies the depth's rounding near 1 into
+		// millimetres, more than a pixel's spacing at high resolutions.
+		g.inverseProjection = enhanced::inverse(m_enh.jittered ? m_enh.projection * m_enh.jitter : m_enh.projection);
+		g.inverseView = enhanced::inverse(m_enh.view);
 		g.viewProjection = m_enh.viewProjection;
 		g.previousViewProjection = m_enh.previousViewProjection;
 		std::copy(texel, texel + 4, g.texel);
