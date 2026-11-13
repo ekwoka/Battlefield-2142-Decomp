@@ -388,6 +388,17 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 		SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 	};
 	static const std::vector<anim::Matrix> unposed;
+	// A material's pipeline, back faces culled where the world pass culls them (meshCulled):
+	// from inside a mesh its far side must not stand in front of what is seen through it.
+	const auto cullAs = [](SDL_GPURenderPass* pass, SDL_GPUGraphicsPipeline*& bound, const GpuMesh& mesh,
+							const Submesh& submesh, SDL_GPUGraphicsPipeline* twoSided, SDL_GPUGraphicsPipeline* culled) {
+		SDL_GPUGraphicsPipeline* pipeline =
+			culled && meshCulled(mesh.bundled || mesh.skinned, submesh.blended, submesh.leaf) ? culled : twoSided;
+		if (pipeline != bound) {
+			bound = pipeline;
+			SDL_BindGPUGraphicsPipeline(pass, pipeline);
+		}
+	};
 
 	// The depth: the terrain, then the opaque meshes.
 	{
@@ -403,7 +414,8 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 			SDL_BindGPUGraphicsPipeline(pass, p.terrainDepth);
 			drawTerrainDepth(commands, pass, camera, viewProjection, false);
 		}
-		SDL_BindGPUGraphicsPipeline(pass, p.depth);
+		SDL_GPUGraphicsPipeline* pipeline = p.depth;
+		SDL_BindGPUGraphicsPipeline(pass, pipeline);
 		const GpuMesh* bound = nullptr;
 		TransformUniforms transforms {};
 		for (const DrawItem& item : m_drawList) {
@@ -434,6 +446,7 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 					transforms.sway[0] = sway ? 1.0f : 0.0f;
 					SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 				}
+				cullAs(pass, pipeline, *item.mesh, submesh, p.depth, p.depthCulled);
 				alphaTest(pass, submesh);
 				SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 			}
@@ -478,7 +491,8 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 		depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
 		depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &color, 1, &depth);
-		SDL_BindGPUGraphicsPipeline(pass, p.motion);
+		SDL_GPUGraphicsPipeline* pipeline = p.motion;
+		SDL_BindGPUGraphicsPipeline(pass, pipeline);
 		const GpuMesh* bound = nullptr;
 		TransformUniforms transforms {};
 		MotionUniforms motion;
@@ -524,6 +538,7 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 					SDL_PushGPUVertexUniformData(commands, 1, &motion, sizeof(motion));
 					pushed = true;
 				}
+				cullAs(pass, pipeline, mesh, submesh, p.motion, p.motionCulled);
 				alphaTest(pass, submesh);
 				SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 			}

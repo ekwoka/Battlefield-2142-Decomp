@@ -418,6 +418,7 @@ public:
 		// The prepass's depth (mesh.vert / shadowcaster.frag, terrain.vert /
 		// depth.frag) into shadowDepthFormat(); the cascades' terrain casters.
 		SDL_GPUGraphicsPipeline* depth = nullptr;
+		SDL_GPUGraphicsPipeline* depthCulled = nullptr; // back faces culled, as the world's (meshCulled)
 		SDL_GPUGraphicsPipeline* terrainDepth = nullptr;
 		SDL_GPUGraphicsPipeline* terrainCaster = nullptr;
 		// The G-buffer (normalDepth + motion targets), the moving meshes'
@@ -425,6 +426,7 @@ public:
 		// (untested), the GTAO and its blur, TAA's resolve.
 		SDL_GPUGraphicsPipeline* gbuffer = nullptr;
 		SDL_GPUGraphicsPipeline* motion = nullptr;
+		SDL_GPUGraphicsPipeline* motionCulled = nullptr;
 		SDL_GPUGraphicsPipeline* motionOverlay = nullptr;
 		SDL_GPUGraphicsPipeline* gtao = nullptr;
 		SDL_GPUGraphicsPipeline* aoBlur = nullptr;

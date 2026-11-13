@@ -7475,6 +7475,9 @@ TEST(Render_EnhancedLitPipelinesCompileOptIn)
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		CHECK(gpu->enhancedPipelines().terrain != nullptr);
 		CHECK(gpu->enhancedLitAvailable());
+		// The prepass's and the motion's culled variants (the world pass's meshCulled).
+		CHECK(gpu->enhancedPipelines().depthCulled != nullptr);
+		CHECK(gpu->enhancedPipelines().motionCulled != nullptr);
 	}
 	SDL_Quit();
 }
