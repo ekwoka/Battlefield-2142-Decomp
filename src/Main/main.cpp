@@ -55,6 +55,7 @@
 #include "Prediction.h"
 #include "RemoteGuns.h"
 #include "RoundVisuals.h"
+#include "FxDump.h"
 #include "Movie/MovieDecoder.h"
 #include "Movie/MovieQueue.h"
 #include "Movie/MenuVideo.h"
@@ -6410,6 +6411,35 @@ int runGame(Options& options, Session& session)
 			for (const auto& loop : round.effects().bundleLoops()) { // the armour's (burning aircraft)
 				gameAudio.effectLoop(loop.key | (1ull << 48), loop.name, {loop.position.x, loop.position.y, loop.position.z},
 					loop.intensity);
+			}
+			// BF2142_FX_DUMP=1: what glows or smokes around the camera, once a second (Main/FxDump.h).
+			static const bool fxDump = std::getenv("BF2142_FX_DUMP") != nullptr;
+			static int fxDumpTick = 0;
+			if (fxDump && ++fxDumpTick % 30 == 0) {
+				const physics::Vec3 at {camera.position.x, camera.position.y, camera.position.z};
+				const auto describe = [&](uint32_t anchor) -> std::string {
+					if ((anchor & 0xf0000000u) == client::kRoundAnchor) {
+						for (const game::Projectile& p : round.projectiles()) {
+							if ((client::kRoundAnchor | (p.serial & 0x0fffffffu)) == anchor && p.settings) {
+								return "round:" + p.settings->name;
+							}
+						}
+						return "round";
+					}
+					const world::Object* object = objects.find(anchor);
+					return object && object->objectTemplate() ? "object:" + object->objectTemplate()->name() : "unknown";
+				};
+				std::vector<std::string> lines;
+				client::fxDumpEmitters(objectEffects, "objects", at, 25.0f, describe, lines);
+				client::fxDumpEmitters(round.effects(), "world", at, 25.0f, describe, lines);
+				std::vector<client::RoundVisuals::Mesh> roundMeshes;
+				roundVisuals.meshes(round.projectiles(), roundMeshes, 0);
+				client::fxDumpRounds(roundMeshes, at, 25.0f, lines);
+				std::printf("fx-dump: t=%d camera=%.1f/%.1f/%.1f %zu entries\n", fxDumpTick / 30, at.x, at.y, at.z, lines.size());
+				for (const std::string& line : lines) {
+					std::printf("%s\n", line.c_str());
+				}
+				std::fflush(stdout);
 			}
 			gameAudio.tick(camera);
 			soundSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
