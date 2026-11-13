@@ -11950,6 +11950,10 @@ bool GameWorld::abilityBarGadget(const world::ObjectTemplate& gun, AbilityBarInf
 	return true;
 }
 
+namespace {
+constexpr int64_t kAbilityGraceTicks = 3; // a gap between two doses must not stutter the loop
+}
+
 bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 {
 	const Player* player = findPlayer(id);
@@ -11982,7 +11986,10 @@ bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 	if (scan == m_abilityScans.end()) {
 		return true;
 	}
-	out.active = player->abilityActive && !scan->second.targets.empty();
+	// The tool works (the HUD's sound plays) while it gives something: a held
+	// target already at full health or full magazines is shown but not treated.
+	out.active = player->abilityActive && !scan->second.targets.empty() && scan->second.treatedTick >= 0
+		&& now - scan->second.treatedTick <= kAbilityGraceTicks;
 	for (const uint32_t target : scan->second.targets) {
 		if (out.kitAmmo) {
 			const Player* soldier = soldierPlayer(target);
@@ -12368,11 +12375,19 @@ void GameWorld::stepAbilities(float seconds)
 				const physics::Vec3 eye = player.body.position + physics::Vec3 {0, 0.6f, 0};
 				const physics::Vec3 look {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 				const physics::Vec3 end = eye + look * ability.radius;
-				applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end);
+				std::vector<uint32_t> treated;
+				applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end, &treated);
+				if (!treated.empty()) {
+					scan->second.treatedTick = static_cast<int64_t>(m_ticks);
+				}
 				continue;
 			}
 			const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
-			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
+			std::vector<uint32_t> treated;
+			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, nullptr, &treated);
+			if (!treated.empty()) {
+				scan->second.treatedTick = static_cast<int64_t>(m_ticks);
+			}
 		}
 	}
 }

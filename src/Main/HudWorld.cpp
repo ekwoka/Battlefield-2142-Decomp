@@ -716,9 +716,15 @@ bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
 	}
 	out.battery = std::max(0.0f, battery);
 	out.active = m_abilityScan.active && !m_abilityScan.targets.empty();
+	bool hurt = false;
 	for (const uint32_t target : m_abilityScan.targets) {
 		out.targets.push_back(out.kitAmmo ? 1.0f : objectHealth(target));
+		const float share = out.targets.back();
+		hurt = hurt || (share >= 0 && share < 1);
 	}
+	// The sound plays while something is treated: a full-health target is shown, not treated
+	// (ammo: the clients cannot see the magazines, as before).
+	out.active = out.active && (out.kitAmmo || hurt);
 	return true;
 }
 
