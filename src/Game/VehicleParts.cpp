@@ -310,16 +310,24 @@ void Vehicle::updateParts(float seconds)
 void Vehicle::updateOldEngine(OldEngine& e, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 	float gravity)
 {
-	// The messages (0x0064c890): someone entering starts it (4); leaving
-	// (5) stops a ground engine half a second later, an air or sea one
-	// keeps running (unless it is on the ground: the rewrite stops it too).
+	// The messages (0x0064c890), each once: the pilot entering starts it (4);
+	// leaving (5, 0x0064c9bb) stops it half a second later, but a propeller
+	// or a rotor (bits 1, 0x20) keeps running unless the root then lies
+	// within its radius of the ground (0x006f2a30 with 0: the terrain under
+	// it, then a ray that long down; the rewrite's meets only the terrain).
 	if (m_occupied) {
 		e.running = e.heat < 1 || e.heatIncrement <= 0 ? true : e.running;
 		e.stopTimer = -1;
-	} else if (e.running) {
-		if (e.stopTimer < 0) {
+		e.seated = true;
+	} else if (e.seated) {
+		e.seated = false;
+		const bool grounded
+			= ground.height && body.position.y - m_objectRadius <= ground.height(body.position.x, body.position.z);
+		if (e.running && (!(e.flags & 0x21) || grounded)) {
 			e.stopTimer = 0.5f;
 		}
+	}
+	if (e.stopTimer >= 0) {
 		e.stopTimer -= seconds;
 		if (e.stopTimer <= 0) {
 			e.running = false;

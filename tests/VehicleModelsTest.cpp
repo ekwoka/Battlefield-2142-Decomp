@@ -7565,3 +7565,62 @@ TEST(Vehicles_ShepherdWithOnlyAGunnerAboard)
 		CHECK(gunner.back().y < pilot.back().y - 15); // a gunner alone: no thrust, no hover regulator
 	}
 }
+
+// The pilot leaving the Shepherd in the air: the rotor engines keep running
+// (message 5, 0x0064c9bb: a propeller or rotor stops only within the root's
+// radius of the ground, 0x006f2a30), while the lift and the keepUp still
+// end with the root seat at once (0x0064df20 x 0x005c87b0(0), 0x0062cc2e):
+// it falls with the rotor turning. Left on the ground, the engines stop.
+TEST(Vehicles_ShepherdRotorRunsOnAfterThePilotBails)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const bool air : {true, false}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("eu_at")) {
+			return;
+		}
+		const uint32_t at = g.start("eu_at", air ? physics::Vec3 {0, 80, 6} : physics::Vec3 {0, 2, 6}, air ? 0.5f : 3);
+		CHECK(g.enter(at));
+		g.drive({}, 3);
+		const float left = g.position(at).y;
+		const auto rotorRpm = [](const game::Vehicle* v, int& rotors, int& running) {
+			float rpm = 0;
+			rotors = running = 0;
+			for (const auto& e : v->engines()) {
+				if ((e.flags & 0x20) && !e.pureRotational) {
+					++rotors;
+					running += e.running;
+					rpm = std::max(rpm, std::fabs(e.rpm));
+				}
+			}
+			return rpm;
+		};
+		int rotors = 0, running = 0;
+		const float flying = rotorRpm(g.world->vehicle(at), rotors, running);
+		game::SoldierInput use;
+		use.use = true;
+		g.world->setPlayerInput(use);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		CHECK(g.world->playerVehicle() == nullptr || g.world->playerVehicle()->id() != at);
+		g.run(1.5f);
+		const game::Vehicle* v = g.world->vehicle(at);
+		CHECK(v != nullptr);
+		if (!v) {
+			return;
+		}
+		const float rpm = rotorRpm(v, rotors, running);
+		const float fell = left - g.position(at).y;
+		std::fprintf(stderr, "  %s: left at %.1f m (rpm %.2f), 1.5 s later fell %.1f m, rotors %d running %d rpm %.2f\n",
+			air ? "air" : "ground", left, flying, fell, rotors, running, rpm);
+		CHECK(rotors > 0);
+		if (air) {
+			CHECK(running == rotors && rpm > 0.3f);
+			CHECK(fell > 20); // no lift without the pilot
+		} else {
+			CHECK(running == 0 && rpm == 0);
+		}
+	}
+}
