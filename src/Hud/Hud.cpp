@@ -1724,6 +1724,31 @@ void HudManager::shownArea(float refX, float refY, float area[4]) const
 // rectangle is floor(its point - size / 2) by floor(size) (the exe takes
 // a further half pixel off each for Direct3D 9's pixel centres), turned
 // by its yaw and cut to the node.
+std::string spawnLabelText(std::string label)
+{
+	if (label.rfind("CPNAME_", 0) == 0) {
+		size_t cut = 0;
+		for (int part = 0; part < 3 && cut != std::string::npos; ++part) {
+			cut = label.find('_', cut);
+			cut = cut == std::string::npos ? cut : cut + 1;
+		}
+		if (cut != std::string::npos && cut < label.size()) {
+			label.erase(0, cut);
+			for (size_t i = label.size(); i-- > 1;) {
+				if (std::isupper(static_cast<unsigned char>(label[i])) && std::islower(static_cast<unsigned char>(label[i - 1]))) {
+					label.insert(i, " ");
+				}
+			}
+		}
+	}
+	if (label.rfind("ID_", 0) == 0) {
+		label.erase(0, 3);
+	}
+	label.erase(0, label.rfind("CP_", 0) == 0 || label.rfind("cp_", 0) == 0 ? 3 : 0);
+	std::replace(label.begin(), label.end(), '_', ' ');
+	return label;
+}
+
 void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out)
 {
 	m_mapHits.clear();
@@ -1902,12 +1927,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 					label = localized;
 				}
 			}
-			if (label.rfind("ID_", 0) == 0) {
-				label.erase(0, 3);
-			}
-			const size_t prefix = label.rfind("CP_", 0) == 0 || label.rfind("cp_", 0) == 0 ? 3 : 0;
-			label.erase(0, prefix);
-			std::replace(label.begin(), label.end(), '_', ' ');
+			label = spawnLabelText(std::move(label));
 			const std::string fontPath = "Fonts/hudFontLocalBold_9.dif";
 			if (const HudFont* f = font(fontPath)) {
 				const float textWidth = f->width(label);

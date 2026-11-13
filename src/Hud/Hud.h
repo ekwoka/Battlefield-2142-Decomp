@@ -88,6 +88,11 @@ struct HudQuad {
 std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 	const std::vector<std::array<float, 4>>& polygon, float cx, float cy, float sweep);
 
+// The text of a deployment map label: a CPNAME_<level>_<size|Ti>_<Name> key the
+// string tables lack (Remagen's Titan-mode names) reads as "<Name>" split at its
+// capitals; other labels are only tidied (ID_/CP_ prefix, underscores).
+std::string spawnLabelText(std::string label);
+
 class HudManager {
 public:
 	using Reader = std::function<bool(const std::string& path, std::string& text)>;

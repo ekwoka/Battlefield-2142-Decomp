@@ -1057,6 +1057,19 @@ TEST(Hud_CommanderMiniMapTab)
 	CHECK(!manager.miniMapWorldAt(100, 300, x, z));
 }
 
+TEST(Hud_SpawnLabelOfAnUntranslatedCpNameIsReadable)
+{
+	// Remagen's Titan mode names its points CPNAME_RE_Ti_<Name>; the shipped string
+	// tables only have the 16/32/64 keys, so the key itself reached the map.
+	CHECK(hud::spawnLabelText("CPNAME_RE_Ti_InsertionPoint") == "Insertion Point");
+	CHECK(hud::spawnLabelText("CPNAME_RE_Ti_Hotel") == "Hotel");
+	CHECK(hud::spawnLabelText("CPNAME_RE_64_MonorailStation") == "Monorail Station");
+	CHECK(hud::spawnLabelText("CP_Some_Name") == "Some Name");
+	CHECK(hud::spawnLabelText("ID_Alley") == "Alley");
+	CHECK(hud::spawnLabelText("Insertion Point") == "Insertion Point");
+	CHECK(hud::spawnLabelText("CPNAME_") == "CPNAME ");
+}
+
 TEST(Hud_DeploymentMarkerLabelsAreReadableAndClickable)
 {
 	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n1\r\n"
