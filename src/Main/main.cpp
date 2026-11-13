@@ -1071,6 +1071,11 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 					(selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
 				titan.position.x, titan.position.z, hud::HudManager::kSpawnMarkerSize};
 			spawn.label = titan.team == 1 ? "PAC Titan" : "EU Titan";
+			for (const auto& point : world.controlPointList()) {
+				if (point.id == titan.controlPoint) {
+					spawn.label = hud::titanSpawnLabel(spawn.label, g_localize ? g_localize(point.name) : point.name);
+				}
+			}
 			spawn.id = kMarkerTitan + static_cast<int>(g_spawnTitans.size());
 			g_spawnTitans.push_back(titan.object);
 			spawnMarkers.push_back(spawn);

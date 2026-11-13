@@ -1749,6 +1749,11 @@ std::string spawnLabelText(std::string label)
 	return label;
 }
 
+std::string titanSpawnLabel(const std::string& titan, const std::string& baseName)
+{
+	return spawnLabelText(baseName) == titan ? titan + " (inside)" : titan;
+}
+
 void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out)
 {
 	m_mapHits.clear();
