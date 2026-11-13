@@ -305,6 +305,7 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 		cp.name = t ? t->name() : std::string();
 		cp.flagHeight = o.captureProgress;
 		cp.flagRate = o.captureRate;
+		cp.showOnMinimap = templateNumber(t, "showOnMinimap", 1) != 0;
 		if (t) {
 			for (const char* key : {"controlPointName", "name"}) {
 				const auto it = t->settings().find(key);
