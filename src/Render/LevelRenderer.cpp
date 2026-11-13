@@ -3919,6 +3919,28 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_firstPersonZoomed = viewZoom(camera) > 1.05f;
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups, camera, false, m_firstPersonZoomed);
+	if (m_hasFirstPerson && m_firstPerson.effects) {
+		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
+			mesh(*m_sources, geometry);
+		});
+		m_gpu.flushUploads();
+	}
+	buildOverlay();
+	// The menu keeps its own clock: it plays with or without a HUD.
+	const uint64_t now = SDL_GetTicks();
+	const float menuSeconds = m_lastMenuTicks ? static_cast<float>(now - m_lastMenuTicks) / 1000.0f : 0.0f;
+	m_lastMenuTicks = now;
+	buildMenu(menuSeconds);
+	const Mat4 projection = overheadOn
+		? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height), camera.nearPlane,
+			  6000.0f)
+		: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
+	// The enhanced mode's passes this frame, and TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
+	beginEnhancedFrame(camera, target.width, target.height, overheadOn, post && m_sceneColor, projection);
+	const Mat4 viewProjection = m_enh.jittered ? camera.view() * projection * m_enh.jitter : camera.view() * projection;
+	prepareInstances(camera, viewProjection);
+	// The lights' list against this frame's view (RendDX9 0x100a93f0 builds its frustum from the camera it
+	// is called with), so after prepareInstances has made m_frameFrustum.
 	collectPointLights(camera);
 	if (LightTrace& trace = lightTrace(); trace.on && m_hasFirstPerson && m_firstPerson.effects) {
 		// The first-person sprites within 5 m, the size of the view (a muzzle's glow and smoke), when they change.
@@ -3940,26 +3962,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		});
 		trace.changed(trace.firstPerson, "first-person sprites", text.empty() ? "none" : text);
 	}
-	if (m_hasFirstPerson && m_firstPerson.effects) {
-		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
-			mesh(*m_sources, geometry);
-		});
-		m_gpu.flushUploads();
-	}
-	buildOverlay();
-	// The menu keeps its own clock: it plays with or without a HUD.
-	const uint64_t now = SDL_GetTicks();
-	const float menuSeconds = m_lastMenuTicks ? static_cast<float>(now - m_lastMenuTicks) / 1000.0f : 0.0f;
-	m_lastMenuTicks = now;
-	buildMenu(menuSeconds);
-	const Mat4 projection = overheadOn
-		? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height), camera.nearPlane,
-			  6000.0f)
-		: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
-	// The enhanced mode's passes this frame, and TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
-	beginEnhancedFrame(camera, target.width, target.height, overheadOn, post && m_sceneColor, projection);
-	const Mat4 viewProjection = m_enh.jittered ? camera.view() * projection * m_enh.jitter : camera.view() * projection;
-	prepareInstances(camera, viewProjection);
 	// The particle systems seen this frame (RendDX9's draws stamp the frame
 	// of each system whose box meets the view frustum, 0x101a4720): one
 	// unseen for 60 frames stops emitting (Emitter::lastSeenFrame). The
