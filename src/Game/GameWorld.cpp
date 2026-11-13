@@ -11957,10 +11957,6 @@ bool GameWorld::abilityBarGadget(const world::ObjectTemplate& gun, AbilityBarInf
 	return true;
 }
 
-namespace {
-constexpr int64_t kAbilityGraceTicks = 3; // a gap between two doses must not stutter the loop
-}
-
 bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 {
 	const Player* player = findPlayer(id);
@@ -11993,10 +11989,7 @@ bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 	if (scan == m_abilityScans.end()) {
 		return true;
 	}
-	// The tool works (the HUD's sound plays) while it gives something: a held
-	// target already at full health or full magazines is shown but not treated.
-	out.active = player->abilityActive && !scan->second.targets.empty() && scan->second.treatedTick >= 0
-		&& now - scan->second.treatedTick <= kAbilityGraceTicks;
+	out.active = player->abilityActive && !scan->second.targets.empty();
 	for (const uint32_t target : scan->second.targets) {
 		if (out.kitAmmo) {
 			const Player* soldier = soldierPlayer(target);
@@ -12131,6 +12124,23 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		}
 	};
 	const auto inReach = [&](const physics::Vec3& p) { return physics::lengthSquared(p - at) <= ability.radius * ability.radius; };
+	// 0x004cc380 (through 0x005d7d40, checkOnly): a heal or repair target has
+	// hit points below its maximum; the ammo scan takes anyone of the team.
+	const auto hurt = [&](uint32_t object) {
+		if (ability.ammo) {
+			return true;
+		}
+		Titan* titan = nullptr;
+		int index = 0;
+		if (titanPart(object, titan, index)) {
+			const TitanPart& part = titan->parts[static_cast<size_t>(index)];
+			return part.hitPoints < part.maxHitPoints;
+		}
+		const world::Object* o = m_objects.find(object);
+		const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
+		const float left = hitPoints(object);
+		return t && left >= 0 && left < number(*t, "armor.maxHitPoints", left);
+	};
 	// The targets: held ones between rescans.
 	std::vector<uint32_t> found;
 	const bool rescan = !scan || scan->timer >= (scan->targets.empty() ? 1.0f : 2.0f);
@@ -12146,7 +12156,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		const world::Object* object =
 			firstHit(at, *rayEnd, hitObject, holder ? holder->object : 0) && hitObject ? m_objects.find(hitObject) : nullptr;
 		if (object && !ability.ammo && !soldiersOnly && (object->team() == team || object->team() == 0)
-			&& repairable(hitObject)) {
+			&& repairable(hitObject) && hurt(hitObject)) {
 			found.push_back(hitObject);
 		}
 		sphere = found.empty() && holder && holder->ai;
@@ -12159,7 +12169,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		for (const auto& owned : m_players) {
 			const Player& target = *owned;
 			if (!vehiclesOnly && target.alive && (!target.vehicle || soldiersOnly) && target.team == team && target.object != skip
-				&& inReach(target.body.position - physics::Vec3 {0, 1.0f, 0})) {
+				&& hurt(target.object) && inReach(target.body.position - physics::Vec3 {0, 1.0f, 0})) {
 				found.push_back(target.object);
 			}
 		}
@@ -12169,7 +12179,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 				// 0x005d7d40 asks 0x004cc380's test: one that can't be
 				// repaired is never picked (nor held).
 				if (object && (object->team() == team || object->team() == 0) && inReach(body.body.position)
-					&& repairable(body.object)) {
+					&& repairable(body.object) && hurt(body.object)) {
 					found.push_back(body.object);
 				}
 			}
@@ -12177,7 +12187,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			// node one): those of the team, repairable (the gun hubs'
 			// wrecks too: canBeRepairedWhenWreck 1).
 			for (const TitanPartInfo& part : titanParts(team)) {
-				if (part.id >= kTitanPartIds && inReach(part.position) && repairable(part.id)) {
+				if (part.id >= kTitanPartIds && inReach(part.position) && repairable(part.id) && hurt(part.id)) {
 					found.push_back(part.id);
 				}
 			}
@@ -12185,7 +12195,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			// armor.canBeRepairedWhenWreck 1).
 			for (const CommanderAsset& asset : m_assets) {
 				const world::Object* object = m_objects.find(asset.object);
-				if (object && !findBody(asset.object) && (object->team() == team || object->team() == 0)
+				if (object && !findBody(asset.object) && (object->team() == team || object->team() == 0) && hurt(asset.object)
 					&& inReach({object->position().x, object->position().y, object->position().z})) {
 					found.push_back(asset.object);
 				}
@@ -12382,19 +12392,11 @@ void GameWorld::stepAbilities(float seconds)
 				const physics::Vec3 eye = player.body.position + physics::Vec3 {0, 0.6f, 0};
 				const physics::Vec3 look {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 				const physics::Vec3 end = eye + look * ability.radius;
-				std::vector<uint32_t> treated;
-				applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end, &treated);
-				if (!treated.empty()) {
-					scan->second.treatedTick = static_cast<int64_t>(m_ticks);
-				}
+				applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end);
 				continue;
 			}
 			const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
-			std::vector<uint32_t> treated;
-			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, nullptr, &treated);
-			if (!treated.empty()) {
-				scan->second.treatedTick = static_cast<int64_t>(m_ticks);
-			}
+			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
 		}
 	}
 }

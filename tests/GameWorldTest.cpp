@@ -1089,6 +1089,9 @@ TEST(GameWorld_AbilityBattery)
 	run(1);
 	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.01f);
 	// Charged: 3 x 1.5 per cent a second, the battery down 0.5 - 0.1 a second.
+	// (The scan lists a hurt soldier at its next turn, one a second: let it come.)
+	range.world->setHitPoints(soldier, 40);
+	run(1.1f);
 	range.world->setHitPoints(soldier, 40);
 	range.world->setBattery(me, 0.5f);
 	run(1);
@@ -1128,30 +1131,35 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 	game::GameWorld::AbilityBarInfo info;
 	CHECK(range.world->abilityBar(me, info) && info.alive && info.kitAbility && info.kitHealing && !info.kitAmmo);
 	CHECK(info.replenishingType == 3 && !info.healFlag); // the rifle
-	range.world->setHitPoints(soldier, 40);
 	game::SoldierInput take;
 	take.selectItem = 4;
 	range.world->setPlayerInput(take);
 	range.world->tick(1 / 30.0f);
 	range.world->setPlayerInput({});
+	// At full health nothing is a target (0x004cc380 wants hit points below
+	// the maximum), so the list is empty and the HUD's sound silent (0x005d7e90).
 	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 0 && info.targets.empty() && !info.active);
+	// Hurt, the next scan (one a second while the list is empty) lists him.
+	range.world->setHitPoints(soldier, 40);
+	for (int i = 0; i < 35; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 0 && info.active);
 	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.45f);
 	CHECK(info.healFlag && !info.repairFlag && info.sinceHeal == 0);
-	// Healthy, the hub still holds its holder as a target (the circle shows) but treats nothing:
-	// the HUD's healing sound must not play.
+	// Full again, he is held (and the sound plays) until the next scan, 2 s on.
 	range.world->setHitPoints(soldier, 100);
 	for (int i = 0; i < 10; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
-	CHECK(range.world->abilityBar(me, info) && info.targets.size() == 1 && !info.active);
-	range.world->setHitPoints(soldier, 40);
-	for (int i = 0; i < 3; ++i) {
+	CHECK(range.world->abilityBar(me, info) && info.active && info.targets.size() == 1);
+	for (int i = 0; i < 70; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
-	CHECK(range.world->abilityBar(me, info) && info.active);
+	CHECK(range.world->abilityBar(me, info) && info.targets.empty() && !info.active);
 	// Put away, the hub treats no more: the flag stays, the ticks run on.
 	game::SoldierInput rifle;
 	rifle.selectItem = 3;
