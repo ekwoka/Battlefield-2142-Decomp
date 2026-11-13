@@ -1468,9 +1468,10 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 	}
 	// Turned back about the node's centre (the map is drawn turned by
 	// +0x80c).
-	if (m_mapTurn != 0) {
+	const float turn = number("MapFullSize") != 0 ? 0.0f : m_mapTurn; // the big map stays north-up
+	if (turn != 0) {
 		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
-		const float c = std::cos(-m_mapTurn), s = std::sin(-m_mapTurn);
+		const float c = std::cos(-turn), s = std::sin(-turn);
 		const float dx = x - cx, dy = y - cy;
 		x = cx + dx * c + dy * s;
 		y = cy + dy * c - dx * s;
@@ -1816,7 +1817,9 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
 	// a positive turn counter-clockwise on the screen; HudQuad's rotation
 	// is clockwise), then cut to the node.
-	const float turnDegrees = m_mapTurn * 57.29578f;
+	// The big map (the player's view turned, then opened) is drawn north-up.
+	const float mapTurn = full ? 0.0f : m_mapTurn;
+	const float turnDegrees = mapTurn * 57.29578f;
 	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
 	const auto turned = [&](HudQuad& q) {
 		if (turnDegrees != 0) {
@@ -1857,7 +1860,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		// map's turn, then with the map about the node's centre: its point
 		// moves with the map and it keeps its heading on it.
 		if (turnDegrees != 0) {
-			const float c = std::cos(m_mapTurn), s = std::sin(m_mapTurn);
+			const float c = std::cos(mapTurn), s = std::sin(mapTurn);
 			const float dx = sx - centreX, dy = sy - centreY;
 			sx = centreX + dx * c + dy * s;
 			sy = centreY + dy * c - dx * s;
@@ -1874,7 +1877,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
 			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
-			marker.yaw - turnDegrees};
+			marker.upright ? 0.0f : marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;

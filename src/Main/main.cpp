@@ -1162,6 +1162,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				icons.size[0]};
 			m.height = icons.size[1];
 			m.sweep = sweep;
+			m.upright = true;
 			m.color[0] = m.color[1] = m.color[2] = tint;
 			markers.push_back(m);
 		};

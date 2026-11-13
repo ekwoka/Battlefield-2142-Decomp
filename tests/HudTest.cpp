@@ -881,6 +881,19 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 		CHECK(std::abs(mx - cx) <= 1 && my < cy - 40);
 		CHECK(std::abs(quads[1].rotation + 90) < 0.01f);
 	}
+	// An upright mark (a silo's number) keeps screen-up on the turned map.
+	{
+		hud::HudManager::MapMarker silo {"silo.dds", 100, 0, 16, 0};
+		silo.upright = true;
+		manager.setMapMarkers({silo});
+		quads = manager.frame(1);
+		CHECK(quads.size() == 2 && quads[1].rotation == 0);
+	}
+	// The big map opened after the turn is north-up.
+	manager.set("MapFullSize", 1);
+	quads = manager.frame(1);
+	CHECK(!quads.empty() && quads[0].rotation == 0);
+	manager.set("MapFullSize", 0);
 	// A static map: north up again.
 	manager.set("MapStatic", 1);
 	manager.setMapHeading(east);

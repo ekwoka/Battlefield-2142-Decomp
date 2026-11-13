@@ -222,6 +222,7 @@ public:
 		// > 0: the icon's side in metres (it scales with the map's zoom:
 		// the radar rings, 0x0078f060), over `size`.
 		float worldSize = 0;
+		bool upright = false; // stays screen-up on a turned map (the silos' baked-in numbers)
 		std::string label;    // readable label beside a deployment spawn marker
 		// Kept on the map (the record's +0x30; 0x0077efb0 -> 0x0077e100):
 		// its point at least 0.02 / the zoom (+0x7cc over 0x0077b7b0's y)
