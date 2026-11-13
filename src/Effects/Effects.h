@@ -337,6 +337,7 @@ public:
 	void place(const Vec3& position, const Mat3& rotation);
 	const Vec3& position() const { return m_position; }
 	const Mat3& rotation() const { return m_rotation; }
+	float age() const { return m_age; }
 	// Ends the emission (a looping system's too); the particles live on.
 	void stop() { m_stopped = true; }
 	bool stopped() const { return m_stopped; }
@@ -1002,6 +1003,7 @@ public:
 	{
 		m_placedMeshes = std::move(groups);
 	}
+	const std::vector<std::pair<std::string, std::vector<MeshSprite>>>& placedMeshes() const { return m_placedMeshes; }
 	// Calls `draw` for each group of sprites sharing a texture and blending
 	// (the heat shimmer's with `shimmer`: forEachShimmerGroup), faded by
 	// distance from `view` when it has settings.

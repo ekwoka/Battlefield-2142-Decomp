@@ -3,6 +3,7 @@
 // (0x005b2c10, 0x005b2ca0 -> EffectBundle 0x0061a4e0).
 #include "Effects/Effects.h"
 #include "Game/Weapons.h"
+#include "Main/FxDump.h"
 #include "Main/RoundVisuals.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
@@ -215,4 +216,49 @@ TEST(RoundVisuals_BundlesAndMeshes)
 	rounds[0].alive = false;             // its end: the bundles let go
 	tick();
 	CHECK(!manager.emitting(anchor, 1) && !manager.emitting(anchor, 2));
+}
+
+// BF2142_FX_DUMP's lines (Main/FxDump.h): what is within the radius of the camera, what carries it, and whether
+// its colour is orange.
+TEST(FxDump_ListsTheEmittersAndMeshesNearTheCamera)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* flash = templates.create("SpriteParticleSystem", "flash_glow");
+	flash->settings()["emitFrequency"] = "50";
+	flash->settings()["emitTime"] = "3";
+	flash->settings()["timeToLive"] = "1";
+	flash->settings()["textureName"] = "orange_flash";
+	flash->settings()["color1"] = "1.9/1.25/0.56";
+	world::ObjectTemplate* smoke = trailSystem(templates, "grey_smoke");
+	smoke->settings()["color1"] = "0.9/0.9/0.95";
+	world::ObjectTemplate* bundle = templates.create("EffectBundle", "e_pair");
+	bundle->children().push_back({"flash_glow", {}, {}});
+	bundle->children().push_back({"grey_smoke", {}, {}});
+
+	effects::EffectManager manager(templates);
+	manager.spawnAttached("e_pair", 42, {10, 0, 0});
+	manager.setAnchor(42, {10, 0, 0}, {});
+	manager.spawn("e_pair", {500, 0, 0}); // far away: left out
+	manager.update(0.5f);
+
+	std::vector<std::string> lines;
+	const auto describe = [](uint32_t anchor) { return anchor == 42 ? std::string("object:missile_silo_v2") : std::string("unknown"); };
+	client::fxDumpEmitters(manager, "objects", {0, 0, 0}, 25.0f, describe, lines);
+	CHECK(lines.size() == 2);
+	int warm = 0, silo = 0;
+	for (const std::string& line : lines) {
+		CHECK(line.rfind("fx-dump: objects emitter ", 0) == 0);
+		CHECK(line.find("anchor=42") != std::string::npos);
+		warm += line.find("tex=orange_flash") != std::string::npos && line.find("warm=1") != std::string::npos;
+		silo += line.find("parent=object:missile_silo_v2") != std::string::npos;
+		CHECK(line.find("tex=grey_smoke") == std::string::npos || line.find("warm=0") != std::string::npos);
+	}
+	CHECK(warm == 1 && silo == 2);
+
+	world::ObjectTemplate* missile = templates.create("GenericProjectile", "test_missile");
+	std::vector<client::RoundVisuals::Mesh> meshes {{missile, {3, 4, 0}, {}}, {missile, {300, 0, 0}, {}}};
+	lines.clear();
+	client::fxDumpRounds(meshes, {0, 0, 0}, 25.0f, lines);
+	CHECK(lines.size() == 1 && lines[0].find("round-mesh template=test_missile") != std::string::npos
+		&& lines[0].find("dist=5.0") != std::string::npos);
 }
