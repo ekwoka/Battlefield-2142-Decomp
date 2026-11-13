@@ -50,7 +50,7 @@ namespace {
 struct LightTrace {
 	bool on = std::getenv("BF2142_LIGHT_TRACE") != nullptr;
 	int frame = 0;
-	std::unordered_map<const void*, std::string> picks;
+	std::unordered_map<std::string, std::string> picks;
 	std::string lighting[2], post, firstPerson;
 	// Prints `text` under `label` when it differs from `last`.
 	void changed(std::string& last, const char* label, const std::string& text)
@@ -4395,7 +4395,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				std::snprintf(text, sizeof text, " %.2f/%.2f/%.2f:%.2f", l.position.x, l.position.y, l.position.z, l.range2);
 				set += text;
 			}
-			std::string& last = trace.picks[&instance];
+			// Keyed by what stays put while the instance list is rebuilt (placed models and debris come and go):
+			// its object, geometry, child template and place on the object (in the world for object 0).
+			const Mat4& place = instance.object ? instance.local : instance.world;
+			std::snprintf(text, sizeof text, "%u %.2f/%.2f/%.2f ", instance.object, place.at(3, 0), place.at(3, 1), place.at(3, 2));
+			std::string& last = trace.picks[text + instance.geometry + " " + instance.source];
 			if (set != last) {
 				std::fprintf(stderr, "light-trace: frame %d picks object %u kind %d lm %d at %.2f/%.2f/%.2f r %.1f:%s ->%s\n", trace.frame,
 					instance.object, static_cast<int>(lightKind), item.lightmap ? 1 : 0, instance.world.at(3, 0), instance.world.at(3, 1),
