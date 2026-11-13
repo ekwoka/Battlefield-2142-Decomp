@@ -236,7 +236,11 @@ void LevelRenderer::useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURe
 		{m_hemiMap ? m_hemiMap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 	};
 	SDL_BindGPUFragmentSamplers(pass, firstSampler, samplers, hemi ? 3 : 2);
-	// The variants' AO sampler: after mesh.frag's 11, else after the maps.
+	// The variants' AO sampler: after mesh.frag's 11, else after the maps; the
+	// terrain's variant has none (its 16 slots are full: 13 is the envmap).
+	if (firstSampler == 5 + kMaxDetailLayers) {
+		return;
+	}
 	SDL_GPUTextureSamplerBinding aoMap {ao ? m_enh.ao : m_gpu.whiteTexture(), m_gpu.clampSampler()};
 	SDL_BindGPUFragmentSamplers(pass, hemi ? kMeshSamplers : firstSampler + 2, &aoMap, 1);
 }

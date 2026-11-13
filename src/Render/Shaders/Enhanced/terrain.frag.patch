@@ -1,18 +1,9 @@
-Enhanced variant of terrain.frag: enhanced_shadow.glsl, the GTAO on the GI
-(ambient) term.
+Enhanced variant of terrain.frag: enhanced_shadow.glsl (the cascades). No AO:
+terrain.frag already uses all 16 sampler slots Metal allows a shader (0-10 the
+maps, 11-12 the shadows, 13-15 the envmap and the side layers), so a 17th for
+the AO map makes the library fail and takes the whole lit set with it.
 <<<<
 #include "shadow.glsl"
 ====
-#define ENHANCED_AO_BINDING 13
 #include "enhanced_shadow.glsl"
->>>>
-<<<<
-			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5;
-====
-			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5 * enhancedAO();
->>>>
-<<<<
-		color = albedo * (skyColor.rgb * 0.5 + sunColor.rgb
-====
-		color = albedo * (skyColor.rgb * 0.5 * enhancedAO() + sunColor.rgb
 >>>>

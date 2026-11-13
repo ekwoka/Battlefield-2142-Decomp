@@ -232,6 +232,10 @@ constexpr float kMaterialTrunk = 256; // RaShaderTrunkSTMBase/Detail
 // normal map, 10 the envmap (a cube).
 constexpr uint32_t kMeshSamplers = 11;
 constexpr uint32_t kMeshLayerSamplers = 8;
+// terrain.frag's samplers: 0-10 the maps and layers, 11-12 the shadows, 13 the
+// envmap cube, 14-15 the side-projected layers: Metal's whole 16 (an enhanced
+// variant has no slot left for an AO map).
+constexpr uint32_t kTerrainSamplers = 16;
 // LightingUniforms::layers[2] bits.
 constexpr float kLayerDetailNormal = 1; // a static mesh's detail normal map (RaShaderSTM _NDETAIL_)
 constexpr float kLayerCrackNormal = 2;  // its crack normal map (_NCRACK_)

@@ -283,7 +283,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	}
 	world.terrain = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
-		k_terrain_frag_msl_size, 16, 3, "terrain", 2);
+		k_terrain_frag_msl_size, kTerrainSamplers, 3, "terrain", 2);
 	world.surrounding = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
 		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);
@@ -496,7 +496,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 		"enhanced mesh");
 	m_enhanced.terrain = enhanced(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_enh_terrain_frag_spv, k_enh_terrain_frag_spv_size, k_enh_terrain_frag_msl,
-		k_enh_terrain_frag_msl_size, 14, 3, "enhanced terrain", 2);
+		k_enh_terrain_frag_msl_size, kTerrainSamplers, 3, "enhanced terrain", 2);
 	m_enhanced.undergrowth = enhanced(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_enh_undergrowth_frag_spv, k_enh_undergrowth_frag_spv_size,
 		k_enh_undergrowth_frag_msl, k_enh_undergrowth_frag_msl_size, 6, 2, "enhanced undergrowth", 1, 2);

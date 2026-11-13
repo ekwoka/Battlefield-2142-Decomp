@@ -7430,3 +7430,25 @@ TEST(Vehicles_GunshipGunnerMissileRearmedOnAPadReloads)
 		}
 	}
 }
+
+#ifdef BF2142_RENDER_TESTS
+// Explicit opt-in (a real GPU device, no window): every enhanced lit pipeline
+// must compile. A shader sampler binding that clashes with a later addition to
+// its base shader (terrain.frag's envmap at 13 against the AO map) makes
+// Metal refuse the library, and the world silently loses the cascaded shadows
+// and the ambient occlusion.
+TEST(Render_EnhancedLitPipelinesCompileOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output) return;
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		CHECK(gpu->enhancedPipelines().terrain != nullptr);
+		CHECK(gpu->enhancedLitAvailable());
+	}
+	SDL_Quit();
+}
+#endif
