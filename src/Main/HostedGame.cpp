@@ -1335,7 +1335,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		case net::kNeSuicide: {
 			game::GameWorld::PlayerInfo me;
 			if (m_round->playerInfo(player, me) && me.alive) {
-				m_round->setHitPoints(me.soldier, 0);
+				m_round->suicide(me.soldier);
 			}
 			break;
 		}

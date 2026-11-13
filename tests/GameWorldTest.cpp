@@ -418,6 +418,21 @@ TEST(GameWorld_SoldiersShootAndDie)
 	CHECK(range.count("PlayerDeath") == 1 && range.count("PlayerSpawn") == 3);
 }
 
+// A suicide (6/0xc, 0x004b08f8) raises PlayerKilled and goes straight to
+// KillPlayer (0x004bbad0): PlayerDeath at once, no man down to revive from.
+TEST(GameWorld_SuicideSkipsManDown)
+{
+	Range range;
+	const int bot = range.world->addPlayer("Bot", 1, true);
+	CHECK(range.world->spawnSoldier(bot));
+	range.world->setSpawnTime(2);
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(bot, info) && info.alive);
+	range.world->suicide(info.soldier);
+	CHECK(range.world->playerInfo(bot, info) && !info.alive && !info.manDown && info.deaths == 1);
+	CHECK(range.count("PlayerKilled") == 1 && range.count("PlayerDeath") == 1);
+}
+
 TEST(GameWorld_InitialDeploymentJoinsWithoutDeathThenSpawnsAtChoice)
 {
 	Range range;

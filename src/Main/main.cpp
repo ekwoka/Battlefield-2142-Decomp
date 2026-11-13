@@ -5234,7 +5234,7 @@ int runGame(Options& options, Session& session)
 		bool membersShown = false;
 		bindMethod(console, "SpawnManager.toggleMembers", ConsoleAccess::Anyone, [&](bool members) { membersShown = members; });
 		bindMethod(console, "spawnManager.commitSuicide", ConsoleAccess::Anyone,
-			[&] { if (session.client) session.client->suicide(); else round.setHitPoints(round.playerObject(), 0); });
+			[&] { if (session.client) session.client->suicide(); else round.suicide(round.playerObject()); });
 		// The kit buttons, the customise and the unlock screens (HudMenusKits.h).
 		dice::hfe::menu::KitMenu kitMenu(round, gameLogic, templates, hudManager);
 		kitMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });

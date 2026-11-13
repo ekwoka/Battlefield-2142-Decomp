@@ -1142,6 +1142,14 @@ public:
 	}
 	// How long a killed soldier lies revivable (sv.manDownTime, 15; 0: none).
 	void setManDownTime(float seconds) { m_manDownTime = seconds; }
+	// The player's suicide (6/0xc, 0x004b08f8): PlayerKilled, then KillPlayer
+	// (0x004bbad0) at once, PlayerDeath with it: no man down to revive from.
+	void suicide(uint32_t soldier)
+	{
+		m_giveUp = true;
+		setHitPoints(soldier, 0);
+		m_giveUp = false;
+	}
 	// Respawn on their own when the time is up (no spawn menu yet).
 	bool autoRespawn = true;
 	// The local player's muzzle flashes in the world: off while the
@@ -3827,6 +3835,7 @@ private:
 	Player* downedPlayer(uint32_t object) const;
 	void shockDowned(Player& victim, const ProjectileSettings& shock, float amount, uint32_t surfaceMaterial, int attacker);
 	float m_manDownTime = 15;
+	bool m_giveUp = false; // suicide: the kill skips man down
 	std::map<std::pair<int, int>, uint32_t> m_beacons; // (team, squad) -> beacon object
 	// The beacon's pod (the thrower's ThrownSpawnPointComp, class 0x94f3:
 	// spawn.spawnInPod +0xe0 and spawn.spawnVehicle +0xc4, handed by the

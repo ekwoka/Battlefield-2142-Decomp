@@ -7850,7 +7850,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 	victim.weaponObject = victim.kitObject = 0;
 	// Man down (sv.manDownTime): the body lies where it fell and a medic
 	// may revive it; killed in a vehicle, the soldier is gone at once.
-	if (onFoot && m_manDownTime > 0) {
+	if (onFoot && m_manDownTime > 0 && !m_giveUp) {
 		victim.manDown = true;
 		victim.manDownLeft = m_manDownTime;
 		if (world::Object* body = m_objects.find(soldier)) {
