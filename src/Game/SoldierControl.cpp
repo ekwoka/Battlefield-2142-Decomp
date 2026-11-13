@@ -224,9 +224,9 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 	// delay): the direction x the time left x 0.5 x 2 m/s (*0x00a68eb4)
 	// added to the velocity (node slot 0x60), the ground speed then held
 	// to what it was if that was over the steering speed and grew. The
-	// wanted velocity is left as it was (0x00588420's air branch never sets
-	// it, slot 0x84): the movement keeps it through the air, so a landing
-	// carries on instead of braking to a stop.
+	// response isn't asked for a velocity (no slot 0x84 call on this path
+	// of 0x00588420): it keeps the last one asked on the ground, which the
+	// movement (0x006c2230) takes again on landing.
 	if (m_slopeDelay < 0 && m_airTime > 0) {
 		const float steer = m_airTime * 0.5f * jump::kAirSpeed;
 		const physics::Vec3 before = body.velocity;

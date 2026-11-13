@@ -49,6 +49,14 @@ SDL_GPUTextureFormat gpuFormat(texture::TextureFormat format)
 	return SDL_GPU_TEXTUREFORMAT_INVALID;
 }
 
+SDL_GPUSampleCount sampleCountOf(uint32_t samples)
+{
+	return samples >= 8 ? SDL_GPU_SAMPLECOUNT_8
+		: samples >= 4  ? SDL_GPU_SAMPLECOUNT_4
+		: samples >= 2  ? SDL_GPU_SAMPLECOUNT_2
+						: SDL_GPU_SAMPLECOUNT_1;
+}
+
 } // namespace
 
 std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& error)
@@ -67,7 +75,7 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 		context->m_window = window;
 		context->m_colorFormat = SDL_GetGPUSwapchainTextureFormat(context->m_device, window);
 	}
-	if (!context->createPipelines(error)) {
+	if (!context->createPipelines(error, 1, context->m_singleSampled)) {
 		return nullptr;
 	}
 
@@ -163,25 +171,11 @@ GpuContext::~GpuContext()
 		}
 	}
 	SDL_ReleaseGPUTexture(m_device, m_emptyShadowMap);
+	releaseWorldPipelines(m_singleSampled);
+	releaseWorldPipelines(m_multisampled);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_shadowCasterPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_camoPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_postPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_bloomPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_meshCulledPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_terrainPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_surroundingPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_skyPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_fadedMeshPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_additiveMeshPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_waterPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_roadPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_roadMeshPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_decalPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_undergrowthPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_particlePipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_shimmerPipeline);
-	SDL_ReleaseGPUGraphicsPipeline(m_device, m_additiveParticlePipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiSubmitPipeline);
 	SDL_ReleaseGPUGraphicsPipeline(m_device, m_uiTestPipeline);
@@ -195,8 +189,11 @@ GpuContext::~GpuContext()
 	SDL_DestroyGPUDevice(m_device);
 }
 
-bool GpuContext::createPipelines(std::string& error)
+bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipelines& world)
 {
+	// The multisampled set: the world's pipelines only (the shadow maps,
+	// the post-production and the HUD stay single-sampled).
+	const bool single = samples <= 1;
 	m_depthFormat = SDL_GPUTextureSupportsFormat(m_device, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT, SDL_GPU_TEXTURETYPE_2D,
 						SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)
 		? SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT
@@ -232,8 +229,9 @@ bool GpuContext::createPipelines(std::string& error)
 	info.vertex_input_state.vertex_attributes = attributes;
 	info.vertex_input_state.num_vertex_attributes = 11;
 	info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-	// Front faces are clockwise as in Direct3D; vegetation is two-sided, so
-	// nothing is culled yet (the original takes this from the material).
+	// Front faces are clockwise as in Direct3D. Two-sided by default: the
+	// culled mesh pipelines below serve the materials that keep CullMode 3
+	// (MeshQueues.h's meshCulled).
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
 	info.depth_stencil_state.enable_depth_test = true;
@@ -243,6 +241,7 @@ bool GpuContext::createPipelines(std::string& error)
 	info.target_info.num_color_targets = 1;
 	info.target_info.depth_stencil_format = m_depthFormat;
 	info.target_info.has_depth_stencil_target = true;
+	info.multisample_state.sample_count = sampleCountOf(samples);
 
 	const auto build = [&](const unsigned char* vs, size_t vsSize, const unsigned char* vsMsl, size_t vsMslSize,
 						   const unsigned char* fs, size_t fsSize, const unsigned char* fsMsl, size_t fsMslSize,
@@ -265,26 +264,57 @@ bool GpuContext::createPipelines(std::string& error)
 		SDL_ReleaseGPUShader(m_device, fragment);
 		return pipeline;
 	};
-	m_meshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+	world.mesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "mesh");
-	// The same with back faces culled (the effects' CullMode CCW): an exterior
-	// hull seen from inside, a gunship gunner's cockpitSubGeom 1, is see-through.
+	// The same with back faces culled (CullMode CCW, Direct3D's front faces
+	// clockwise): every material but the blended bundled and skinned ones
+	// and the trees' leaves (meshCulled).
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
-	m_meshCulledPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "mesh (culled)");
+	world.culledMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "culled mesh");
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-	m_terrainPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
+	if (!single) {
+		// The overgrowth's leaves with alpha to coverage (RaShaderLeaf's
+		// Alpha2Mask, 0x1002cef0): two-sided, opaque.
+		info.multisample_state.enable_alpha_to_coverage = true;
+		world.coverageMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+			k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "coverage mesh");
+		info.multisample_state.enable_alpha_to_coverage = false;
+	}
+	world.terrain = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_terrain_frag_spv, k_terrain_frag_spv_size, k_terrain_frag_msl,
-		k_terrain_frag_msl_size, 13, 3, "terrain", 2);
-	m_surroundingPipeline = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
+		k_terrain_frag_msl_size, 16, 3, "terrain", 2);
+	world.surrounding = build(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_surrounding_frag_spv, k_surrounding_frag_spv_size, k_surrounding_frag_msl,
 		k_surrounding_frag_msl_size, 3, 2, "surrounding terrain", 2);
-	m_undergrowthPipeline = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
+	// The undergrowth: Undergrowth.fx's every technique sets CullMode CW, so
+	// Direct3D's front faces (clockwise on screen) are the ones culled. Its
+	// meshes (Undergrowth.dat, made by the editor's .obj import 0x1010cb70,
+	// which negates z) are wound the other way round from the static meshes:
+	// their faces' normals by winding point inwards (79 of the 94 distinct
+	// shipped meshes enclose a negative volume, every rock among them), and the
+	// generator (0x1010ba40) turns them by a rotation and copies the indices
+	// as they are. So the near side of a rock or a grass tuft is drawn and
+	// its far side culled. The passes also set ZFunc Less (the other
+	// pipelines keep less-or-equal), so of two tufts' cards at one depth the
+	// first drawn stays.
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_FRONT;
+	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+	world.undergrowth = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
 		k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
 		k_undergrowth_frag_msl_size, 5, 2, "undergrowth", 1, 2);
+	if (!single) {
+		info.multisample_state.enable_alpha_to_coverage = true;
+		world.coverageUndergrowth = build(k_undergrowth_vert_spv, k_undergrowth_vert_spv_size, k_undergrowth_vert_msl,
+			k_undergrowth_vert_msl_size, k_undergrowth_frag_spv, k_undergrowth_frag_spv_size, k_undergrowth_frag_msl,
+			k_undergrowth_frag_msl_size, 5, 2, "coverage undergrowth", 1, 2);
+		info.multisample_state.enable_alpha_to_coverage = false;
+	}
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
 	info.depth_stencil_state.enable_depth_test = false;
 	info.depth_stencil_state.enable_depth_write = false;
-	m_skyPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+	world.sky = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_sky_frag_spv, k_sky_frag_spv_size, k_sky_frag_msl, k_sky_frag_msl_size, 3, 1, "sky");
 	info.depth_stencil_state.enable_depth_test = true;
 	color.blend_state.enable_blend = true;
@@ -295,37 +325,46 @@ bool GpuContext::createPipelines(std::string& error)
 	color.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
 	color.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 	info.depth_stencil_state.enable_depth_write = false;
-	m_fadedMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+	world.fadedMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "faded mesh");
-	m_particlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+	world.culledFadedMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2,
+		"culled faded mesh");
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+	world.particle = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "particle");
-	m_shimmerPipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
+	world.shimmer = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_shimmer_frag_spv, k_shimmer_frag_spv_size, k_shimmer_frag_msl,
 		k_shimmer_frag_msl_size, 2, 1, "heat shimmer");
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-	m_additiveMeshPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+	world.additiveMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "additive mesh");
-	m_additiveParticlePipeline = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
+	world.additiveParticle = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "additive particle");
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
 	{
 		// Cloaked meshes into their mask: depth-tested, not written, unblended.
 		color.blend_state.enable_blend = false;
-		m_camoPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		world.camo = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 			k_camo_frag_spv, k_camo_frag_spv_size, k_camo_frag_msl, k_camo_frag_msl_size, 0, 0, "camouflage");
 		// The full-screen passes: no vertex buffers, no depth test.
 		const SDL_GPUVertexInputState meshInput = info.vertex_input_state;
 		info.vertex_input_state = {};
 		info.depth_stencil_state.enable_depth_test = false;
-		m_postPipeline = build(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
-			k_fullscreen_vert_msl_size, k_post_frag_spv, k_post_frag_spv_size, k_post_frag_msl, k_post_frag_msl_size, 11, 1,
-			"post-production", 0);
+		if (single) {
+			m_postPipeline = build(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
+				k_fullscreen_vert_msl_size, k_post_frag_spv, k_post_frag_spv_size, k_post_frag_msl, k_post_frag_msl_size, 11, 1,
+				"post-production", 0);
+		}
 		info.target_info.has_depth_stencil_target = false;
-		m_bloomPipeline = build(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
-			k_fullscreen_vert_msl_size, k_bloom_frag_spv, k_bloom_frag_spv_size, k_bloom_frag_msl, k_bloom_frag_msl_size, 1, 1,
-			"bloom", 0);
+		if (single) {
+			m_bloomPipeline = build(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
+				k_fullscreen_vert_msl_size, k_bloom_frag_spv, k_bloom_frag_spv_size, k_bloom_frag_msl, k_bloom_frag_msl_size, 1, 1,
+				"bloom", 0);
+		}
 		// The shadow casters: depth only into the shadow maps' format.
 		info.vertex_input_state = meshInput;
 		info.target_info.num_color_targets = 0;
@@ -336,9 +375,11 @@ bool GpuContext::createPipelines(std::string& error)
 		info.rasterizer_state.enable_depth_bias = true;
 		info.rasterizer_state.depth_bias_constant_factor = 1.0f;
 		info.rasterizer_state.depth_bias_slope_factor = 2.0f;
-		m_shadowCasterPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
-			k_shadowcaster_frag_spv, k_shadowcaster_frag_spv_size, k_shadowcaster_frag_msl, k_shadowcaster_frag_msl_size, 1,
-			1, "shadow caster");
+		if (single) {
+			m_shadowCasterPipeline = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+				k_shadowcaster_frag_spv, k_shadowcaster_frag_spv_size, k_shadowcaster_frag_msl, k_shadowcaster_frag_msl_size, 1,
+				1, "shadow caster");
+		}
 		info.rasterizer_state.enable_depth_bias = false;
 		info.rasterizer_state.depth_bias_constant_factor = 0;
 		info.rasterizer_state.depth_bias_slope_factor = 0;
@@ -349,8 +390,10 @@ bool GpuContext::createPipelines(std::string& error)
 	}
 	// The HUD: blended over everything, no depth.
 	info.depth_stencil_state.enable_depth_test = false;
-	m_uiPipeline = build(k_ui_vert_spv, k_ui_vert_spv_size, k_ui_vert_msl, k_ui_vert_msl_size, k_ui_frag_spv,
-		k_ui_frag_spv_size, k_ui_frag_msl, k_ui_frag_msl_size, 1, 0, "ui");
+	if (single) {
+		m_uiPipeline = build(k_ui_vert_spv, k_ui_vert_spv_size, k_ui_vert_msl, k_ui_vert_msl_size, k_ui_frag_spv,
+			k_ui_frag_spv_size, k_ui_frag_msl, k_ui_frag_msl_size, 1, 0, "ui");
+	}
 	{
 		const auto stencil = [&](SDL_GPUCompareOp compare, SDL_GPUStencilOp pass, SDL_GPUStencilOp fail, bool colour,
 								 const char* name) {
@@ -372,36 +415,39 @@ bool GpuContext::createPipelines(std::string& error)
 			color.blend_state.enable_color_write_mask = false;
 			return pipeline;
 		};
-		m_uiSubmitPipeline = stencil(SDL_GPU_COMPAREOP_GREATER, SDL_GPU_STENCILOP_INCREMENT_AND_CLAMP,
-			SDL_GPU_STENCILOP_REPLACE, false, "ui mask");
-		m_uiTestPipeline = stencil(SDL_GPU_COMPAREOP_EQUAL, SDL_GPU_STENCILOP_KEEP, SDL_GPU_STENCILOP_KEEP, true, "ui masked");
-		m_uiClearPipeline = stencil(SDL_GPU_COMPAREOP_ALWAYS, SDL_GPU_STENCILOP_REPLACE, SDL_GPU_STENCILOP_REPLACE, false,
-			"ui mask clear");
+		if (single) {
+			m_uiSubmitPipeline = stencil(SDL_GPU_COMPAREOP_GREATER, SDL_GPU_STENCILOP_INCREMENT_AND_CLAMP,
+				SDL_GPU_STENCILOP_REPLACE, false, "ui mask");
+			m_uiTestPipeline = stencil(SDL_GPU_COMPAREOP_EQUAL, SDL_GPU_STENCILOP_KEEP, SDL_GPU_STENCILOP_KEEP, true, "ui masked");
+			m_uiClearPipeline = stencil(SDL_GPU_COMPAREOP_ALWAYS, SDL_GPU_STENCILOP_REPLACE, SDL_GPU_STENCILOP_REPLACE, false,
+				"ui mask clear");
+		}
 	}
 	info.depth_stencil_state.enable_depth_test = true;
-	m_waterPipeline = build(k_water_vert_spv, k_water_vert_spv_size, k_water_vert_msl, k_water_vert_msl_size,
+	world.water = build(k_water_vert_spv, k_water_vert_spv_size, k_water_vert_msl, k_water_vert_msl_size,
 		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 4, 2, "water");
 	// Roads: blended like water, pulled towards the camera over the terrain.
 	info.rasterizer_state.enable_depth_bias = true;
 	info.rasterizer_state.depth_bias_constant_factor = -1.0f;
 	info.rasterizer_state.depth_bias_slope_factor = -1.0f;
-	m_roadPipeline = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
+	world.road = build(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 5, 3, "road");
 	// The road static meshes (RaShaderRoad*.fx): the same, back faces culled
 	// (CullMode CCW with Direct3D's clockwise front faces).
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
-	m_roadMeshPipeline = build(k_roadmesh_vert_spv, k_roadmesh_vert_spv_size, k_roadmesh_vert_msl,
+	world.roadMesh = build(k_roadmesh_vert_spv, k_roadmesh_vert_spv_size, k_roadmesh_vert_msl,
 		k_roadmesh_vert_msl_size, k_road_frag_spv, k_road_frag_spv_size, k_road_frag_msl, k_road_frag_msl_size, 5, 3,
 		"road mesh");
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-	m_decalPipeline = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
+	world.decal = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
 		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 2, 1, "decal");
-	const bool made = m_meshPipeline && m_meshCulledPipeline && m_surroundingPipeline && m_fadedMeshPipeline && m_additiveMeshPipeline && m_terrainPipeline && m_skyPipeline && m_waterPipeline && m_roadPipeline && m_roadMeshPipeline && m_decalPipeline &&
-		m_undergrowthPipeline && m_particlePipeline && m_shimmerPipeline && m_additiveParticlePipeline && m_uiPipeline && m_uiSubmitPipeline &&
-		m_uiTestPipeline && m_uiClearPipeline && m_shadowCasterPipeline && m_camoPipeline && m_postPipeline &&
-		m_bloomPipeline;
-	if (!made) {
-		return false;
+	const bool worldMade = world.mesh && world.culledMesh && world.culledFadedMesh && world.surrounding && world.fadedMesh && world.additiveMesh && world.terrain && world.sky && world.water && world.road && world.roadMesh && world.decal &&
+		world.undergrowth && world.particle && world.shimmer && world.additiveParticle && world.camo &&
+		(single || (world.coverageMesh && world.coverageUndergrowth));
+	const bool made = worldMade && (!single || (m_uiPipeline && m_uiSubmitPipeline && m_uiTestPipeline && m_uiClearPipeline &&
+																		  m_shadowCasterPipeline && m_postPipeline && m_bloomPipeline));
+	if (!made || !single) {
+		return made;
 	}
 	// The enhanced mode's (not retail; Enhanced/LevelRendererEnhanced.cpp):
 	// each left null when it can't be made, which turns its pass off, never
@@ -539,6 +585,71 @@ bool GpuContext::createPipelines(std::string& error)
 	}
 	error.clear();
 	return true;
+}
+
+void GpuContext::releaseWorldPipelines(WorldPipelines& world)
+{
+	for (SDL_GPUGraphicsPipeline* pipeline : {world.mesh, world.culledMesh, world.culledFadedMesh, world.terrain,
+			 world.surrounding, world.sky, world.fadedMesh, world.additiveMesh, world.water, world.road, world.roadMesh,
+			 world.decal, world.undergrowth, world.particle, world.shimmer, world.additiveParticle, world.camo,
+			 world.coverageMesh, world.coverageUndergrowth}) {
+		if (pipeline) {
+			SDL_ReleaseGPUGraphicsPipeline(m_device, pipeline);
+		}
+	}
+	world = {};
+}
+
+std::vector<uint32_t> GpuContext::sampleCounts() const
+{
+	std::vector<uint32_t> counts;
+	for (const uint32_t count : {2u, 4u, 8u}) {
+		if (SDL_GPUTextureSupportsSampleCount(m_device, m_colorFormat, sampleCountOf(count)) &&
+			SDL_GPUTextureSupportsSampleCount(m_device, m_depthFormat, sampleCountOf(count))) {
+			counts.push_back(count);
+		}
+	}
+	return counts;
+}
+
+uint32_t GpuContext::setWorldSamples(uint32_t requested)
+{
+	// The most samples at or below the request both targets' formats take
+	// (the original lists the device's multisample types, 0x1000fb60).
+	uint32_t samples = 1;
+	for (const uint32_t count : sampleCounts()) {
+		if (count <= requested) {
+			samples = count;
+		}
+	}
+	if (samples > 1 && samples != m_multisampledCount) {
+		releaseWorldPipelines(m_multisampled);
+		std::string error;
+		if (createPipelines(error, samples, m_multisampled)) {
+			m_multisampledCount = samples;
+		} else {
+			SDL_Log("antialiasing (%u samples): %s", samples, error.c_str());
+			releaseWorldPipelines(m_multisampled);
+			m_multisampledCount = 1;
+			samples = 1;
+		}
+	}
+	m_worldSamples = samples;
+	return samples;
+}
+
+SDL_GPUTexture* GpuContext::createMultisampleTarget(uint32_t width, uint32_t height, bool depth)
+{
+	SDL_GPUTextureCreateInfo info {};
+	info.type = SDL_GPU_TEXTURETYPE_2D;
+	info.format = depth ? m_depthFormat : m_colorFormat;
+	info.usage = depth ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET : SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+	info.width = std::max<uint32_t>(width, 1);
+	info.height = std::max<uint32_t>(height, 1);
+	info.layer_count_or_depth = 1;
+	info.num_levels = 1;
+	info.sample_count = sampleCountOf(m_worldSamples);
+	return SDL_CreateGPUTexture(m_device, &info);
 }
 
 namespace {

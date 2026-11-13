@@ -16,7 +16,18 @@ constexpr uint8_t kPacketQuery = 0, kPacketEcho = 2, kPacketEchoResponse = 5;
 const char* const kKeyNames[] = {"", "hostname", "gamename", "gamever", "hostport", "mapname", "gametype", "gamevariant",
 	"numplayers", "numteams", "maxplayers", "gamemode", "teamplay", "fraglimit", "teamfraglimit", "timeelapsed",
 	"timelimit", "roundtime", "roundelapsed", "password", "groupid", "player_", "score_", "skill_", "ping_", "team_",
-	"deaths_", "pid_", "team_t", "score_t"};
+	"deaths_", "pid_", "team_t", "score_t",
+	// 30..51: unregistered.
+	"", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+	// 0x34..0x52: the game's own keys (qr2_register_key calls in 0x005785b0).
+	"bf2142_ranked", "bf2142_anticheat", "bf2142_autorec", "bf2142_d_idx", "bf2142_d_dl", "bf2142_voip",
+	"bf2142_autobalanced", "bf2142_friendlyfire", "bf2142_tkmode", "bf2142_startdelay", "bf2142_spawntime",
+	"bf2142_sponsortext", "bf2142_sponsorlogo_url", "bf2142_scorelimit", "bf2142_ticketratio", "bf2142_teamratio",
+	"bf2142_team1", "bf2142_team2", "bf2142_pure", "bf2142_mapsize", "bf2142_globalunlocks",
+	"bf2142_communitylogo_url", "bf2142_reservedslots", "bf2142_maxrank", "bf2142_provider", "bf2142_region",
+	"bf2142_type", "bf2142_averageping", "bf2142_ranked_tournament", "bf2142_allow_spectators",
+	"bf2142_custom_map_url"};
+static_assert(sizeof(kKeyNames) / sizeof(kKeyNames[0]) == 0x53, "the keys run to 0x52");
 constexpr int kKeyCount = sizeof(kKeyNames) / sizeof(kKeyNames[0]);
 
 void addString(std::vector<uint8_t>& out, const std::string& text)
@@ -53,7 +64,7 @@ const char* qr2KeyName(uint8_t id) { return id < kKeyCount ? kKeyNames[id] : "";
 int qr2KeyId(const std::string& name)
 {
 	for (int i = 1; i < kKeyCount; ++i) {
-		if (name == kKeyNames[i]) {
+		if (!name.empty() && name == kKeyNames[i]) {
 			return i;
 		}
 	}
@@ -241,10 +252,18 @@ void QueryServer::poll(const std::function<ServerReport()>& report)
 
 const std::vector<uint8_t>& lanQueryKeys()
 {
-	// hostname, gametype, mapname, numplayers, maxplayers, hostport,
-	// gamevariant, password, gamever: the standard keys among those
-	// 0x00467d40 asks for (its others are the game's own, from 0x35 on).
-	static const std::vector<uint8_t> keys {1, 6, 5, 8, 10, 4, 7, 19, 3};
+	// The browser's list keys (0x00467d40's 21: hostname, gametype, mapname,
+	// numplayers, maxplayers, hostport, gamevariant, password, gamever,
+	// anticheat, ranked, voip, autorec, pure, mapsize, reservedslots,
+	// friendlyfire, autobalanced, maxrank, ranked_tournament,
+	// custom_map_url), then the server info popup's: the original's popup
+	// asks the server again for all its keys (ServerBrowserAuxUpdateServer
+	// with a full update, 0x00715ae0 from 0x004661a0), whose rules rows read
+	// timelimit, roundtime, startdelay, spawntime, ticketratio, teamratio
+	// and allow_spectators, and its scorelimit, tkmode, team1 and team2
+	// fields. The rewrite asks for them all at once.
+	static const std::vector<uint8_t> keys {1, 6, 5, 8, 10, 4, 7, 19, 3, 0x35, 0x34, 0x39, 0x36, 0x46, 0x47, 0x4a,
+		0x3b, 0x3a, 0x4b, 0x50, 0x52, 16, 17, 0x3d, 0x3e, 0x42, 0x43, 0x51, 0x41, 0x3c, 0x44, 0x45};
 	return keys;
 }
 

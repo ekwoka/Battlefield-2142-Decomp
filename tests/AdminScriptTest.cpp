@@ -88,6 +88,17 @@ TEST(AdminScript_RemoteConsoleOverTcp)
 					  "assert host.ss_getParam('tkpNeeded') == 3 and host.ss_getParam('tkpEnabled') == 1\n"
 					  "assert host.ss_getParam('ranked') == 0\n"));
 
+	// A second server's rcon socket binds the same port, as Winsock's
+	// SO_REUSEADDR lets it (the shim adds SO_REUSEPORT); unbound, its
+	// accept would raise EINVAL each tick.
+	CHECK(scripts.run("import py2socket as s\n"
+					  "b = s.socket(s.AF_INET, s.SOCK_STREAM)\n"
+					  "b.setsockopt(s.SOL_SOCKET, s.SO_REUSEADDR, 1)\n"
+					  "b.bind(('0.0.0.0', "
+		+ std::to_string(port) + "))\n"
+								 "b.listen(1)\n"
+								 "b.close()\n"));
+
 	std::atomic<bool> done {false};
 	bool connected = false, refused = false, loggedIn = false;
 	std::string seed, name, maps, users, unknown;

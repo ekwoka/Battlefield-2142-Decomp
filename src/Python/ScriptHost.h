@@ -37,6 +37,12 @@ public:
 	// Imports bf2 and the game mode and runs their init.
 	bool startGameMode(const std::string& mode);
 	void setGameStatus(game::GameStatus status);
+	// A hosted round's state (the game logic's slot 0x168): false while it
+	// waits for players or counts down (states 1 and 2), true playing (3,
+	// and always for a local round). Handlers without alwaysTrigger hear
+	// their events only with the status Playing and the round playing
+	// (0x00444140).
+	void setRoundPlaying(bool playing);
 	// An engine event for the handlers registered for it.
 	void raise(const std::string& event, const game::ScriptArgs& args);
 	// Timers and triggers.

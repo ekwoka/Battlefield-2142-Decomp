@@ -42,7 +42,7 @@ void GhostScheduler::setPriority(uint16_t ghost, float p, bool keepMax)
 	s.status = Status::InScope;
 	if (p < 0) {
 		s.always = true;
-		s.dirty = true;
+		s.masks = kGhostAllMasks;
 		s.priority = kGhostAlwaysPriority;
 		return;
 	}
@@ -65,13 +65,15 @@ void GhostScheduler::beginRescore()
 	}
 }
 
-void GhostScheduler::markDirty(uint16_t ghost, bool urgent)
+void GhostScheduler::markDirty(uint16_t ghost, const GhostMasks& changed, bool urgent)
 {
 	const auto it = m_states.find(ghost);
 	if (it == m_states.end()) {
 		return;
 	}
-	it->second.dirty = true;
+	for (size_t g = 0; g < kGhostMaskGroups; ++g) {
+		it->second.masks[g] |= changed[g];
+	}
 	if (urgent) {
 		it->second.priority = kGhostNewPriority;
 	}
@@ -83,7 +85,7 @@ std::vector<uint16_t> GhostScheduler::queue()
 {
 	std::vector<std::pair<float, uint16_t>> heap;
 	for (auto& [ghost, s] : m_states) {
-		if (s.status != Status::InScope || s.dirty) {
+		if (s.status != Status::InScope || s.dirty()) {
 			s.accumulated += s.priority;
 			heap.emplace_back(s.accumulated, ghost);
 		}
@@ -111,7 +113,7 @@ void GhostScheduler::written(uint16_t ghost)
 		return;
 	}
 	it->second.accumulated = 0;
-	it->second.dirty = false;
+	it->second.masks = {};
 }
 
 const GhostScheduler::State* GhostScheduler::state(uint16_t ghost) const

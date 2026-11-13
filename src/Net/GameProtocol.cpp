@@ -1302,6 +1302,41 @@ std::string int32Payload(int32_t value)
 	return bytes;
 }
 
+std::string titanSyncPayload(const TitanSyncInfo& info)
+{
+	std::string bytes(0x24, '\0');
+	bytes[0] = static_cast<char>(info.team);
+	const auto put = [&bytes](size_t at, const void* v) { std::memcpy(bytes.data() + at, v, 4); };
+	put(0x04, &info.orderTick);
+	put(0x08, &info.targetX);
+	put(0x0c, &info.targetZ);
+	put(0x10, &info.stateTick);
+	put(0x14, &info.velocityX);
+	put(0x18, &info.velocityZ);
+	put(0x1c, &info.x);
+	put(0x20, &info.z);
+	return bytes;
+}
+
+bool parseTitanSync(const std::string& payload, TitanSyncInfo& out)
+{
+	if (payload.size() < 0x24) {
+		return false;
+	}
+	out = {};
+	out.team = static_cast<uint8_t>(payload[0]);
+	const auto get = [&payload](size_t at, void* v) { std::memcpy(v, payload.data() + at, 4); };
+	get(0x04, &out.orderTick);
+	get(0x08, &out.targetX);
+	get(0x0c, &out.targetZ);
+	get(0x10, &out.stateTick);
+	get(0x14, &out.velocityX);
+	get(0x18, &out.velocityZ);
+	get(0x1c, &out.x);
+	get(0x20, &out.z);
+	return true;
+}
+
 bool parseDataBlock(const GameEvent& e, DataBlockChunk& out)
 {
 	if (e.type != kEvDataBlock || e.values.empty()) {

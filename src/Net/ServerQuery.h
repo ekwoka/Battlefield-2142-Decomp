@@ -31,7 +31,10 @@
 // 12 teamplay, 13 fraglimit, 14 teamfraglimit, 15 timeelapsed,
 // 16 timelimit, 17 roundtime, 18 roundelapsed, 19 password, 20 groupid;
 // player keys 21 player_, 22 score_, 23 skill_, 24 ping_, 25 team_,
-// 26 deaths_, 27 pid_; team keys 28 team_t, 29 score_t.
+// 26 deaths_, 27 pid_; team keys 28 team_t, 29 score_t. The game's own,
+// registered by 0x005785b0: 0x34 bf2142_ranked .. 0x52
+// bf2142_custom_map_url (0x3a autobalanced, 0x3b friendlyfire, 0x3e
+// spawntime, 0x42 ticketratio, 0x43 teamratio, 0x51 allow_spectators).
 #pragma once
 
 #include "ServerBrowser.h"

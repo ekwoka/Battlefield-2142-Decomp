@@ -7,6 +7,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
+#include "IO/Localization/Localization.h"
 #include "Main/HudAlerts.h"
 #include "TestMain.h"
 #include "World/ObjectTemplateManager.h"
@@ -16,6 +17,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -706,4 +710,85 @@ TEST(HudAlerts_CloseToObjectVariables)
 	CHECK(hudManager.number("CloseToObject0") == 1 && hudManager.number("CloseToObject1") == 0);
 	menu::closeToObject(hudManager, -1, false);
 	CHECK(hudManager.number("CloseToObject0") == 0);
+}
+
+// The radio's important lines (0x0042e0c0): an id with "<id>_important"
+// in the strings shows that first as the important message for 5 s
+// (0x0042bef0 kind 4 → 0x0074ec50), then its own chat line; an id holding
+// "_important" is the important message alone. The shipped strings have
+// the Titans' 49.
+TEST(HudAlerts_RadioImportantLines)
+{
+	const std::map<std::string, std::string> strings {
+		{"AUTO_TITAN_C_shields25", "Our Titan shield is down by three quarters!"},
+		{"AUTO_TITAN_C_shields25_important", "Our Titan Shield: 25%"},
+		{"HUD_AUTO_TITAN_Shield75_important", "Titan Shield: 75%"},
+		{"radio_medic", "Medic!"},
+	};
+	const auto find = [&strings](const std::string& key) -> const std::string* {
+		const auto it = strings.find(key);
+		return it != strings.end() ? &it->second : nullptr;
+	};
+	menu::RadioTextLines lines = menu::radioTextLines("AUTO_TITAN_C_shields25", find);
+	CHECK(lines.important == "Our Titan Shield: 25%" && lines.chat);
+	lines = menu::radioTextLines("radio_medic", find);
+	CHECK(lines.important.empty() && lines.chat);
+	lines = menu::radioTextLines("HUD_AUTO_TITAN_Shield75_important", find);
+	CHECK(lines.important == "Titan Shield: 75%" && !lines.chat);
+	lines = menu::radioTextLines("missing_important", find); // the key itself (slot 0x38's fallback)
+	CHECK(lines.important == "missing_important" && !lines.chat);
+	hud::HudManager hudManager(nullptr);
+	menu::ImportantMessage message;
+	message.show(hudManager, "Our Titan Shield: 25%", 5.0f);
+	CHECK(hudManager.number("ShowImportantMessage") == 1 && hudManager.string("ImportantMessage") == "Our Titan Shield: 25%");
+	for (int i = 0; i < 140; ++i) {
+		message.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowImportantMessage") == 1);
+	for (int i = 0; i < 20; ++i) {
+		message.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowImportantMessage") == 0);
+	// The shipped strings: every "_important" row has its id's row.
+	if (const char* dir = std::getenv("BF2142_GAME_DIR")) {
+		std::ifstream in(std::string(dir) + "/mods/bf2142/Localization/strings.csv", std::ios::binary);
+		const std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		io::Localization localization;
+		CHECK(!data.empty() && localization.load(data));
+		const std::string* text = localization.find("AUTO_TITAN_C_shields25_important");
+		CHECK(text && *text == "Our Titan Shield: 25%");
+		lines = menu::radioTextLines("AUTO_TITAN_C_shields25", [&localization](const std::string& key) { return localization.find(key); });
+		CHECK(lines.important == "Our Titan Shield: 25%" && lines.chat);
+	}
+}
+
+// The dog tag's HUD (event 0x28 → 0x0074f0d0, its countdown in 0x007c8c30):
+// the medal and rank icons go, ShowDogTagMessage shows the victim's name
+// in HUD_DOG_TAG_MESSAGE for 5 s; a client counts the tags per victim.
+TEST(HudAlerts_DogTagMessage)
+{
+	hud::HudManager hudManager(nullptr);
+	menu::DogTags tags;
+	tags.setLocalizer([](const std::string& id) {
+		return id == "HUD_DOG_TAG_MESSAGE" ? std::string("You collected #PLAYER#'s dog tag") : id;
+	});
+	hudManager.set("ShowMedalIcon", 1);
+	hudManager.set("ShowRankUpIcon", 1);
+	tags.collect(hudManager, 7, "Pac", false);
+	CHECK(hudManager.number("ShowDogTagMessage") == 1 && hudManager.string("DogTagMessage") == "You collected Pac's dog tag");
+	CHECK(hudManager.number("ShowMedalIcon") == 0 && hudManager.number("ShowRankUpIcon") == 0);
+	CHECK(tags.tags(7) == 1);
+	for (int i = 0; i < 140; ++i) {
+		tags.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowDogTagMessage") == 1);
+	for (int i = 0; i < 20; ++i) {
+		tags.tick(hudManager, 1 / 30.0f);
+	}
+	CHECK(hudManager.number("ShowDogTagMessage") == 0);
+	// The server's own player: shown, not counted (0x004cbea0's slot 0x144).
+	tags.collect(hudManager, 7, "Pac", true);
+	CHECK(hudManager.number("ShowDogTagMessage") == 1 && tags.tags(7) == 1);
+	tags.collect(hudManager, 7, "Pac", false);
+	CHECK(tags.tags(7) == 2);
 }

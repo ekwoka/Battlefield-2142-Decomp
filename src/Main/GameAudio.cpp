@@ -576,12 +576,28 @@ void GameAudio::engines()
 	}
 }
 
+// The round's Sound child, created and played with it (its loop; the
+// template's own child, as the S_<name>_Looping most carry, a few named
+// otherwise: static_ap_railgun_projectile's
+// S_static_ap_railgun_projectile_projectile_Looping), else that name.
 const std::string& GameAudio::loopingSound(const void*, const std::string& name)
 {
 	auto it = m_looping.find(name);
 	if (it == m_looping.end()) {
-		const std::string loop = "S_" + name + "_Looping";
-		it = m_looping.emplace(name, m_manager.soundTemplate(loop) ? loop : std::string()).first;
+		std::string loop;
+		if (const world::ObjectTemplate* round = m_templates.find(name)) {
+			for (const world::ChildTemplate& child : round->children()) {
+				const world::ObjectTemplate* c = m_templates.find(child.name);
+				if (c && c->typeName() == "Sound") {
+					loop = child.name;
+					break;
+				}
+			}
+		}
+		if (loop.empty() && m_manager.soundTemplate("S_" + name + "_Looping")) {
+			loop = "S_" + name + "_Looping";
+		}
+		it = m_looping.emplace(name, loop).first;
 	}
 	return it->second;
 }
@@ -653,6 +669,26 @@ void GameAudio::radio()
 			in.sender.id = sender.id;
 			in.sender.team = sender.team;
 			in.sender.position = toSound(sender.position) + sound::Vec3 {0, 1.6f, 0};
+		} else if (message.sender < 0 && message.senderTeam != 0) {
+			// An auto controller's player (GameWorld::autoControllerReport):
+			// neither commander nor squad leader ("grunt"), his controlled
+			// object the sentry (not a soldier: the radio, not the local
+			// voice), its soundFilter (0x0042e0c0).
+			const world::Object* object = m_objects.find(message.senderObject);
+			in.hasSender = true;
+			in.senderIsListener = false;
+			if (object && object->objectTemplate()) {
+				in.senderFilter = setting(*object->objectTemplate(), "soundFilter");
+			}
+			in.sender.team = message.senderTeam;
+		}
+		// The sender's soldier plays the message's emote (0x0042e0c0, before
+		// the voice: the sender's controlled object a soldier, class 0x9493).
+		if (onEmote && in.hasSender && in.onFoot) {
+			const std::string emote = m_voices->emote(m_voices->message(message.voice));
+			if (!emote.empty()) {
+				onEmote(message.sender, emote);
+			}
 		}
 		const sound::VoiceMessages::Result result = m_voices->heard(in);
 		// One line per radio message so a session log shows whether the voice started (and at what group gain).

@@ -12,6 +12,7 @@
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/HudWorld.h"
+#include "Render/TextureSuffix.h"
 #include "Console/ConsoleBinding.h"
 #include "IO/File/FileManager.h"
 #include "TestMain.h"
@@ -350,9 +351,10 @@ TEST(HudMenus_InviteList)
 	s.squads.update(me);
 	CHECK(s.hud.listCell(8, rowOf(loner), 0) == "|cLoner" && s.hud.listCell(8, rowOf(mate), 0) == "Mate");
 	s.squads.applyInviteList(me);
-	// The mate is out; the loner (a bot in no squad) takes the invite; the
-	// other stays in his squad.
-	CHECK(s.squadOf(mate) == 0 && s.squadOf(loner) == 1 && s.squadOf(other) == 3 && !s.squads.inviteListShown());
+	// The mate is out; the loner (a bot in no squad) doesn't answer the
+	// invite (nothing in BF2142.exe or AIDLL reads a bot's invite mask but a
+	// private squad's join, 0x004c7290); the other stays in his squad.
+	CHECK(s.squadOf(mate) == 0 && s.squadOf(loner) == 0 && s.squadOf(other) == 3 && !s.squads.inviteListShown());
 }
 
 TEST(HudMenus_ListClicks)
@@ -510,6 +512,63 @@ TEST(CommRose_ShippedRadio)
 	roses.openTactical(false, true, true);
 	console.execute("SquadLeaderInterface.selectOrder 9", out);
 	CHECK(ran.size() == 1 && ran[0] == "SquadLeader.sendRequest 0 0");
+}
+
+// The scoreboard's Server tab (scoreboard.setToggleShow 3, 0x007ba1a0)
+// lists no players under the server's information (0x007bb540).
+TEST(HudScoreboard_ServerTabListsNoPlayers)
+{
+	CHECK(menu::scoreboardListsPlayers(0) && menu::scoreboardListsPlayers(1) && menu::scoreboardListsPlayers(2));
+	CHECK(!menu::scoreboardListsPlayers(3));
+	// The tab's map (ActiveLevel, 0x00448300).
+	CHECK(menu::activeLevelText("Cerbere_Landing") == "CERBERE LANDING");
+	CHECK(menu::activeLevelText("bridge_at_remagen") == "BRIDGE AT REMAGEN");
+}
+
+// The scoreboard's order (0x004b94a0): score, then skillScore, then the
+// fewer deaths, then the later connection (+0x1c8); a full tie keeps the
+// player manager's order, which is the order the players were made, not
+// their ids.
+TEST(HudScoreboard_Order)
+{
+	using Key = menu::ScoreboardKey;
+	const auto order = [](const std::vector<Key>& keys) { return menu::scoreboardOrder(keys); };
+	CHECK((order({{5}, {9}, {7}}) == std::vector<size_t> {1, 2, 0}));
+	CHECK((order({{5, 1}, {5, 3}, {5, 2}}) == std::vector<size_t> {1, 2, 0}));          // skillScore
+	CHECK((order({{5, 1, 4}, {5, 1, 2}, {5, 1, 3}}) == std::vector<size_t> {1, 2, 0})); // fewer deaths
+	CHECK((order({{0, 0, 0, 10}, {0, 0, 0, 30}, {0, 0, 0, -1}, {0, 0, 0, 20}}) == std::vector<size_t> {1, 3, 0, 2}));
+	CHECK((order({{3}, {3}, {3}}) == std::vector<size_t> {0, 1, 2})); // a full tie: the list's order
+	// The higher keys first: a better score wins over every later key.
+	CHECK((order({{1, 9, 0, 99}, {2, 0, 9, -1}}) == std::vector<size_t> {1, 0}));
+	// The host's players: made 0, 1, 2; a left player's id is taken again
+	// by a later one, who comes last in the manager's list. Humans are
+	// connected as they are made (0x004a8460) and again once loaded
+	// (0x004a7c80); bots never.
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld world {templates, objects};
+	const int a = world.addPlayer("A", 2, false);
+	const int b = world.addPlayer("B", 2, true);
+	const int c = world.addPlayer("C", 2, false);
+	world.tick(2.0f);
+	world.setPlayerConnected(c);
+	game::GameWorld::PlayerInfo pa, pb, pc;
+	CHECK(world.playerInfo(a, pa) && world.playerInfo(b, pb) && world.playerInfo(c, pc));
+	CHECK(pa.created < pb.created && pb.created < pc.created);
+	CHECK(pa.connectedAt == 0 && pb.connectedAt == -1 && pc.connectedAt == 2.0);
+	CHECK(world.removePlayer(a));
+	const int d = world.addPlayer("D", 2, false);
+	game::GameWorld::PlayerInfo pd;
+	CHECK(d == a && world.playerInfo(d, pd) && pd.created > pc.created && pd.connectedAt == 2.0);
+	// All on 0 points: C (loaded later) before D (made at the same time,
+	// later in the list), then the bot.
+	std::vector<game::GameWorld::PlayerInfo> list {pb, pc, pd};
+	std::vector<Key> keys;
+	for (const auto& p : list) {
+		keys.push_back({0, 0, 0, p.connectedAt});
+	}
+	const std::vector<size_t> rows = menu::scoreboardOrder(keys);
+	CHECK(list[rows[0]].name == "C" && list[rows[1]].name == "D" && list[rows[2]].name == "B");
 }
 
 // The scoreboard's rows (0x007bb540): black when dead, green for the
@@ -881,6 +940,58 @@ TEST(HudVotes_Lines)
 	CHECK(lines.back() == "HUD_HUD_KICKVOTE_UNABLE_TO_START_VOTE");
 }
 
+// A voter's start line is the HUD's question of kind 6 (0x005725e0 line 7
+// → 0x0079e440, shown without the accept/reject prompt, 0x0079c720 case
+// 6); c_GIYes / c_GINo answer it and cast the vote (0x0079d6e0 case 6 →
+// 0x00572390: 0 yes, 1 no, once; not by a kick's target). The starter and
+// the target get the local line and no question (0x0079e290).
+TEST(HudVotes_VoterAnswersTheQuestion)
+{
+	menu::VoteMessages votes;
+	menu::HudQuestions questions;
+	std::vector<std::string> lines;
+	std::vector<menu::VoteMessages::Cast> sent;
+	votes.localize = [](const std::string& id) {
+		return id == "HUD_HUD_KICKVOTE_PLAYER_START_REMOTE" ? std::string("#PLAYERNAME1# vs #PLAYERNAME2#") : id;
+	};
+	votes.playerName = [](int id) { return id == 1 ? std::string("Me") : id == 2 ? std::string("Bob") : std::string("Eve"); };
+	votes.onLine = [&](const std::string& s) { lines.push_back(s); };
+	votes.onVoteQuestion = [&](int kind, const std::string& line) { questions.ask(menu::HudQuestions::Vote, kind, line); };
+	votes.onVoteQuestionGone = [&] { questions.forget(menu::HudQuestions::Vote); };
+	questions.onLine = [&](const std::string& s) { lines.push_back(s); };
+	questions.onAnswer = [&](const menu::HudQuestions::Question& q, bool yes, bool) {
+		menu::VoteMessages::Cast cast;
+		if (q.kind == menu::HudQuestions::Vote && votes.castVote(q.value, yes, cast)) {
+			sent.push_back(cast);
+		}
+	};
+	votes.localPlayer = 1;
+	votes.handle({2, 0, 2, 3, 0, 4, 90}); // Eve starts a kick of Bob
+	CHECK(lines.size() == 1 && lines[0] == "Eve vs Bob");
+	CHECK(questions.front() && questions.front()->kind == menu::HudQuestions::Vote && questions.front()->value == 2);
+	questions.answer(false);
+	CHECK(sent.size() == 1 && sent[0].kind == 2 && sent[0].target == 2 && sent[0].choice == 1);
+	CHECK(!questions.front());
+	// Counted as cast: the start line stops coming back.
+	for (int i = 0; i < 30 * 6; ++i) {
+		votes.tick(1.0f / 30);
+	}
+	CHECK(lines.size() == 1);
+	votes.handle({2, 1, 2, 3, 0, 0, 0}); // it fails
+	// Bob's view of a kick against him: the local line, no question.
+	menu::VoteMessages bob;
+	menu::HudQuestions bobQuestions;
+	bob.playerName = votes.playerName;
+	bob.localPlayer = 2;
+	bool asked = false;
+	bob.onVoteQuestion = [&](int, const std::string&) { asked = true; };
+	bob.onVoteQuestionGone = [&] { bobQuestions.forget(menu::HudQuestions::Vote); };
+	bobQuestions.ask(menu::HudQuestions::Vote, 2, "an old one");
+	bob.handle({2, 0, 2, 3, 0, 4, 90});
+	menu::VoteMessages::Cast cast;
+	CHECK(!asked && !bobQuestions.front() && !bob.castVote(2, true, cast));
+}
+
 // The scoreboard's kick box (0x007bc590 types 10 / 11 -> 0x00573f20):
 // silent while a vote runs, else the start's checks (self, the host, the
 // wait after one's own start).
@@ -899,6 +1010,40 @@ TEST(HudVotes_ScoreboardKickStart)
 	CHECK(!votes.mayStartKick(2, false) && lines.size() == before);
 	votes.handle({2, 1, 3, 4, 0, 0, 0}); // it fails
 	CHECK(!votes.running() && votes.mayStartKick(2, false));
+}
+
+// After a mutiny against him (0x005740e0 cases 2 / 3: the target's slot
+// 0x144(5.0)) the commander who lost command (0x00591950 stamps +0x128)
+// can't apply again for 5 minutes (0x007d7050), told the minutes left.
+TEST(HudVotes_MutinyBarsTheCommander)
+{
+	menu::VoteMessages votes;
+	std::vector<std::string> lines;
+	votes.onLine = [&](const std::string& s) { lines.push_back(s); };
+	votes.playerName = [](int) { return std::string("P"); };
+	votes.localPlayer = 1;
+	votes.setCommanding(true);
+	votes.handle({3, 0, 1, 2, 0, 2, 90}); // a mutiny against us
+	votes.setCommanding(false);
+	votes.handle({3, 3, 1, 2, 0, 0, 0}); // passed
+	CHECK(!votes.mayApplyForCommander() && lines.back() == "HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTES");
+	for (int i = 0; i < 30 * 250; ++i) {
+		votes.tick(1 / 30.0f);
+	}
+	CHECK(!votes.mayApplyForCommander() && lines.back() == "HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTE");
+	for (int i = 0; i < 30 * 51; ++i) {
+		votes.tick(1 / 30.0f);
+	}
+	CHECK(votes.mayApplyForCommander());
+	// A failed mutiny bars no one; another's mutiny doesn't bar us.
+	menu::VoteMessages other;
+	other.localPlayer = 1;
+	other.handle({3, 0, 1, 2, 0, 2, 90});
+	other.handle({3, 1, 1, 2, 0, 0, 0});
+	CHECK(other.mayApplyForCommander());
+	other.handle({3, 0, 4, 2, 0, 2, 90});
+	other.handle({3, 3, 4, 2, 0, 0, 0});
+	CHECK(other.mayApplyForCommander());
 }
 
 // The commander screen's squad panel (0x007ab790): a squad's order picture
@@ -953,7 +1098,7 @@ TEST(HudQuestions_AskAnswerAndTimeout)
 	};
 	q.ask(menu::HudQuestions::Invite, 3, "invited to Charlie");
 	CHECK(lines.size() == 2 && lines[0] == "invited to Charlie" && lines[1] == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
-	CHECK(events == "cqq");
+	CHECK(events == "clq"); // the question text a personal line (0x0079c720), the prompt the question line
 	q.tick(5);
 	q.ask(menu::HudQuestions::CommanderOffer, 1, "commander of the PAC");
 	// The invite has 15 s left, the offer 20: the invite stays in front.
@@ -961,7 +1106,7 @@ TEST(HudQuestions_AskAnswerAndTimeout)
 	events.clear();
 	q.answer(true);
 	// The answered question's lines go first (0x0079d6e0), then the next's.
-	CHECK(events == "cacqq");
+	CHECK(events == "caclq");
 	CHECK(answers.size() == 1 && std::get<0>(answers[0]) == menu::HudQuestions::Invite && std::get<1>(answers[0]) == 3
 		&& std::get<2>(answers[0]) && !std::get<3>(answers[0]));
 	CHECK(q.front() && q.front()->kind == menu::HudQuestions::CommanderOffer && lines.back() == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
@@ -1013,6 +1158,48 @@ TEST(RadioSpam_CountBlockAndReset)
 	for (int i = 0; i < 20; ++i) {
 		CHECK(!spots.check(false, false, now));
 	}
+}
+
+// The local player's gate on the game's timer (0x00666070): six messages
+// 4 s of game time apart are all said however fast the ticks run, and a
+// spot refused at the limit is silent (0x0042d110), so a spot whose voice
+// is refused too tells the block once (0x004b2b60).
+TEST(RadioSpam_GameTimerAndSilentSpot)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	menu::RadioSpamGate gate(round);
+	int told = 0, lastSeconds = 0;
+	const auto tell = [&](int seconds) {
+		++told;
+		lastSeconds = seconds;
+	};
+	const auto run = [&](double seconds) {
+		for (int i = 0; i < static_cast<int>(std::lround(seconds * 30)); ++i) {
+			round.tick(1.0f / 30.0f);
+		}
+	};
+	run(1);
+	for (int i = 0; i < 12; ++i) {
+		CHECK(!gate.message(false, tell)); // each 4 s on: the count went at 6 s
+		run(4);
+	}
+	CHECK(told == 0);
+	// Six within the interval, then the spot (not counted) and its voice.
+	for (int i = 0; i < 6; ++i) {
+		CHECK(!gate.message(false, tell));
+	}
+	CHECK(gate.spot(false));
+	CHECK(told == 0);
+	CHECK(gate.message(false, tell));
+	CHECK(told == 1 && lastSeconds == 31);
+	// The block lasts 30 s of game time.
+	run(29);
+	CHECK(gate.message(false, tell));
+	CHECK(told == 2 && lastSeconds == 2);
+	run(1.5);
+	CHECK(!gate.message(false, tell));
 }
 
 // The crosshair's parts (0x007be770): the spread by deviationFactor, pushed
@@ -1398,6 +1585,159 @@ TEST(HudVehicle_HorizonAndClimb)
 	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
 	vehicleHud.update(hud, in); // retail's "easing" assigns both terms: no accumulation
 	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
+}
+
+// The map's radio call markers (menu::MapCalls; 0x007918d0 case
+// 0x33..0x37, 0x00790d60, 0x007840c0, the flags +0x7c..+0x7e): a
+// teammate's call the local kit answers marks him 12 s in the call's icon;
+// an enemy's, one the kit can't answer and the local player's own don't;
+// his own call marks the teammates who can answer it for the next draw.
+TEST(HudMap_RadioCallMarkers)
+{
+	menu::MapCalls calls;
+	menu::MapCalls::Kit medic;
+	medic.heal = true;
+	menu::MapCalls::Kit engineer;
+	engineer.repair = true;
+	menu::MapCalls::Kit support;
+	support.ammo = true;
+	// Local player 1 (team 2, a medic).
+	calls.call(5, 2, 0x33, 1, 2, medic);
+	CHECK(calls.icon(5) == "Ingame/Player/Icons/Minimap/mini_Medic.tga");
+	calls.call(6, 1, 0x33, 1, 2, medic); // an enemy's
+	CHECK(calls.icon(6).empty());
+	calls.call(7, 2, 0x35, 1, 2, medic); // repair: not his kit's
+	CHECK(calls.icon(7).empty());
+	calls.call(7, 2, 0x37, 1, 2, medic); // a revive
+	CHECK(calls.icon(7) == "Ingame/Player/Icons/Minimap/mini_Revive.tga");
+	// A new call replaces the caller's marker.
+	calls.call(5, 2, 0x36, 1, 2, medic);
+	CHECK(calls.icon(5) == "Ingame/Player/Icons/Minimap/mini_Revive.tga");
+	calls.tick(11.5f);
+	CHECK(!calls.icon(5).empty());
+	calls.tick(1.0f);
+	CHECK(calls.icon(5).empty() && calls.icon(7).empty());
+	CHECK(menu::MapCalls::iconOf(0x34) == "Ingame/Player/Icons/Minimap/mini_Ammo.tga");
+	// The local player's own call for ammunition: the support teammates
+	// drawn next take its icon for 12 s (as the delay); the flags last one
+	// draw.
+	calls.call(1, 2, 0x34, 1, 2, engineer);
+	CHECK(calls.icon(1).empty());
+	calls.place({{8, support}, {9, engineer}});
+	CHECK(calls.icon(8) == "Ingame/Player/Icons/Minimap/mini_Ammo.tga");
+	CHECK(calls.icon(9).empty());
+	calls.place({{10, support}});
+	CHECK(calls.icon(10).empty());
+	calls.tick(6);
+	CHECK(!calls.icon(8).empty());
+	calls.tick(6.5f);
+	CHECK(calls.icon(8).empty());
+	// A helper marker isn't added over one the player has.
+	calls.call(5, 2, 0x33, 1, 2, medic);
+	calls.call(1, 2, 0x33, 1, 2, medic);
+	calls.place({{5, medic}});
+	CHECK(calls.icon(5) == "Ingame/Player/Icons/Minimap/mini_Medic.tga");
+	calls.tick(12.5f);
+	CHECK(calls.icon(5).empty());
+}
+
+// The teammates on the map (menu::mateMarker; 0x00792980, 0x0077d9f0,
+// 0x00781900, 0x007841e0): a soldier's teardrop turned by his heading in
+// the team's blue, the squad's green; a squad leader's numbered icon and a
+// commander's (white on foot) unturned under a black heading arrow; a
+// call's icon white at full alpha, unturned, with the medic arrow's pin
+// for the medic, repair and ammunition calls; the need disc under a half.
+TEST(HudMap_TeammateMarkers)
+{
+	menu::MateInput in;
+	in.yaw = 30;
+	menu::MateMarker m = menu::mateMarker(in);
+	CHECK(m.texture == "Ingame/Player/Icons/Minimap/mini_Soldier.tga" && m.size == 16 && m.yaw == 30 && !m.arrow);
+	CHECK(std::fabs(m.color[0] - 0.254f) < 1e-6f && std::fabs(m.color[1] - 0.552f) < 1e-6f && std::fabs(m.color[2] - 0.89f) < 1e-6f);
+	CHECK(m.iconAlpha && !m.disc);
+	in.squad = 3;
+	in.localSquad = 3;
+	m = menu::mateMarker(in);
+	CHECK(m.color[0] == 0.4f && m.color[1] == 1 && m.color[2] == 0);
+	in.localSquad = 2; // another squad
+	CHECK(menu::mateMarker(in).color[0] == 0.254f);
+	in.sharesVehicle = true; // in the local player's vehicle, and he has a squad
+	CHECK(menu::mateMarker(in).color[0] == 0.4f);
+	in.sharesVehicle = false;
+	in.squadLeader = true;
+	m = menu::mateMarker(in);
+	CHECK(m.texture == "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_3_small.tga" && m.size == 16 && m.yaw == 0);
+	CHECK(m.arrow && m.arrowTexture == "Ingame/Player/Icons/Minimap/mini_headingArrow.tga" && m.arrowSize == 32 && m.arrowYaw == 30);
+	menu::MateInput boss;
+	boss.commander = true;
+	boss.yaw = -45;
+	m = menu::mateMarker(boss);
+	CHECK(m.texture == "Ingame/Player/Icons/Minimap/mini_commander2.tga" && m.size == 32 && m.arrow && m.arrowYaw == -45);
+	CHECK(m.color[0] == 1 && m.color[1] == 1 && m.color[2] == 1);
+	boss.onFoot = false; // seated: the team's
+	CHECK(menu::mateMarker(boss).color[0] == 0.254f);
+	// A call's marker: a plain soldier gets the medic arrow, unturned.
+	menu::MateInput caller;
+	caller.yaw = 90;
+	caller.squad = caller.localSquad = 1;
+	caller.call = "Ingame/Player/Icons/Minimap/mini_Medic.tga";
+	m = menu::mateMarker(caller);
+	CHECK(m.texture == caller.call && m.size == 16 && m.yaw == 0 && !m.iconAlpha);
+	CHECK(m.color[0] == 1 && m.color[1] == 1 && m.color[2] == 1 && m.color[3] == 1);
+	CHECK(m.arrow && m.arrowTexture == "Ingame/Player/Icons/Minimap/mini_medicArrow.tga" && m.arrowSize == 16 && m.arrowYaw == 0);
+	caller.call = "Ingame/Player/Icons/Minimap/mini_Revive.tga";
+	CHECK(!menu::mateMarker(caller).arrow);
+	caller.squadLeader = true; // keeps his heading arrow, unturned
+	m = menu::mateMarker(caller);
+	CHECK(m.arrow && m.arrowTexture == "Ingame/Player/Icons/Minimap/mini_headingArrow.tga" && m.arrowYaw == 0);
+	// The need disc: a healer's teammate at 30 % within 150 m; ammunition
+	// (magazines with the gun's, less 1, over nrOfMags) for a giver.
+	CHECK(!menu::mateNeed(false, false, 10, 0.3f, 3, 4, 30));
+	CHECK(!menu::mateNeed(true, false, 151, 0.3f, 3, 4, 30));
+	CHECK(menu::mateNeed(true, true, 150, 0.3f, 1, 4, 30) == 0.3f);
+	CHECK(menu::mateNeed(false, true, 20, 0.3f, 3, 4, 30) == 0.5f);
+	CHECK(menu::mateNeed(true, true, 20, -1, 2, 4, 30) == 0.25f); // no armour: the ammunition
+	CHECK(!menu::mateNeed(false, true, 20, 1, 3, -1, 30) && !menu::mateNeed(false, true, 20, 1, 3, 4, -1));
+	in = {};
+	in.need = 0.3f;
+	m = menu::mateMarker(in);
+	CHECK(m.disc && m.discColor[0] == 1 && m.discColor[1] == 0.3f && m.discColor[2] == 0);
+	in.need = 0.5f;
+	CHECK(!menu::mateMarker(in).disc);
+	in.need = -1.0f;
+	m = menu::mateMarker(in);
+	CHECK(m.disc && m.discColor[1] == 0);
+	// Every icon named loads from the shipped menu archive, by its name or
+	// as the texture load's fallback (render::textureFallbackPaths: the
+	// minimap's ".tga" names ship as .dds).
+	if (const char* gameDir = std::getenv("BF2142_GAME_DIR")) {
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath("mods/bf2142");
+		CHECK(files.mountArchive("Menu_client.zip", "Menu"));
+		const auto loads = [&files](const std::string& name) {
+			std::vector<uint8_t> data;
+			const std::string path = "Menu/HUD/Texture/" + name;
+			if (files.readFile(path, data)) {
+				return true;
+			}
+			for (const std::string& other : render::textureFallbackPaths(path)) {
+				if (files.readFile(other, data)) {
+					return true;
+				}
+			}
+			return false;
+		};
+		for (const char* name : {"Ingame/Player/Icons/Minimap/mini_Soldier.tga", "Ingame/Player/Icons/Minimap/mini_commander2.tga",
+				 "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_9_small.tga",
+				 "Ingame/Player/Icons/Minimap/mini_headingArrow.tga", "Ingame/Player/Icons/Minimap/mini_medicArrow.tga",
+				 "Ingame/Player/Icons/Minimap/mini_Health.tga"}) {
+			CHECK(loads(name));
+		}
+		for (int code = 0x33; code <= 0x37; ++code) {
+			CHECK(loads(menu::MapCalls::iconOf(code)));
+		}
+	}
 }
 
 // The vehicle HUD's torque arrows and sprint (0x007a2e60): the torque eased
@@ -1888,8 +2228,21 @@ TEST(HudVehicle_SeatZoomGuiIndex)
 	CHECK(menu::weaponGuiIndex(tank, false) == 12 && menu::weaponGuiIndex(tank, true) == 13);
 	CHECK(menu::weaponGuiIndex(at, false) == 65 && menu::weaponGuiIndex(at, true) == 65);
 	CHECK(menu::weaponGuiIndex(nullptr, true) == 0);
-	CHECK(!menu::seatPostProcessing(nullptr, tank, false) && menu::seatPostProcessing(nullptr, tank, true));
-	CHECK(menu::seatPostProcessing(nullptr, at, false) && menu::seatPostProcessing(nullptr, at, true));
+	const auto post = [](const world::ObjectTemplate* seat, const world::ObjectTemplate* gun, bool zoomed) {
+		return menu::seatPostProcessing(seat, gun, nullptr, menu::weaponGuiIndex(gun, zoomed));
+	};
+	CHECK(!post(nullptr, tank, false) && post(nullptr, tank, true));
+	CHECK(post(nullptr, at, false) && post(nullptr, at, true));
+	// A seat's own flag (0x006573a0): only when its guiIndex and the flag
+	// both name the index shown. The shipped seats' 1 with guiIndex 0
+	// (the APC pod cannons) never turns it on.
+	world::ObjectTemplate* pod = templates.create("PlayerControlObject", "eu_apc_PodCannon");
+	pod->settings()["vehicleHud.enablePostProcessingOnGuiIndex"] = "1";
+	CHECK(!menu::seatPostProcessing(pod, nullptr, nullptr, 0) && !menu::seatPostProcessing(pod, nullptr, nullptr, 1));
+	pod->settings()["vehicleHud.guiIndex"] = "1";
+	CHECK(menu::seatPostProcessing(pod, nullptr, nullptr, 1) && !menu::seatPostProcessing(pod, nullptr, nullptr, 0));
+	// The second weapon's flag too.
+	CHECK(menu::seatPostProcessing(nullptr, nullptr, at, 65) && !menu::seatPostProcessing(nullptr, tank, at, 12));
 	tank->settings()["weaponHud.altGuiIndex"] = "-1";
 	CHECK(menu::weaponGuiIndex(tank, true) == 12);
 }
@@ -2236,4 +2589,176 @@ TEST(HudMenus_MiddleTicketsShownForTitanArmourNotConquestTickets)
 	CHECK(menu::middleTicketsShown(37, 100));
 	CHECK(!menu::middleTicketsShown(600, 600)); // Conquest
 	CHECK(menu::middleTicketsShown(600, 12));   // either side counts
+}
+
+// SquadMenu.createSquad without the create box (0x007a5ad0 → 0x007d6910):
+// the squad is made all the same, with the first free id; a member of
+// another squad leaves it first; one alone in his keeps it.
+TEST(HudMenus_CreateSquadWithoutTheBox)
+{
+	Squads s;
+	const int me = s.world.addPlayer("Me", 2, false);
+	const int a = s.world.addPlayer("A", 2, true);
+	const int b = s.world.addPlayer("B", 2, true);
+	s.world.joinSquad(a, 1);
+	CHECK(!s.squads.createShown());
+	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+	// In squad 1 with A: a new squad (3) and squad 1 left.
+	s.world.joinSquad(b, 1);
+	CHECK(s.squads.createSquad(b) && s.squadOf(b) == 3 && s.squadOf(a) == 1);
+	// Alone in his squad: kept.
+	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+}
+
+// A private squad (the squad manager's join 0x004c7290, the HUD's
+// category-2 lines 0x00756b60 and question kind 0): the leader's lock
+// (column 8, slot 0x20) is the round's; a player without the squad's bit
+// in his invite mask is refused, its leader asked (2/0x11) and the player
+// told (2/0xc); a bot hears nothing (no connection); the invite's bit lets
+// him in and the join clears it; a leader's no keeps that player's later
+// requests from asking (0x007a7d10 / 0x007a5e30); a full squad answers
+// 2/0xb; an emptied squad loses its lock.
+TEST(HudMenus_PrivateSquadAsksTheLeader)
+{
+	Squads s;
+	s.world.spawnPlayer(2);
+	const int me = s.world.localPlayer();
+	const int asker = s.world.addPlayer("Asker", 2, false);
+	const int bot = s.world.addPlayer("Bot", 2, true);
+	CHECK(me >= 0 && s.world.joinSquad(me, 1));
+	s.squads.setLocalizer([](const std::string& key) -> std::string {
+		if (key == "HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN") {
+			return "#PLAYERNAME# has asked to join your squad";
+		}
+		if (key == "HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN") {
+			return "#SQUADNAME# squad is private";
+		}
+		if (key == "HUD_HUD_SQUAD_FULL") {
+			return "#TEAMNAME# #SQUADNAME# squad is full";
+		}
+		return key;
+	});
+	std::vector<std::string> lines;
+	std::vector<std::pair<int, std::string>> asked;
+	s.squads.onLine = [&](const std::string& line) { lines.push_back(line); };
+	s.squads.onJoinRequest = [&](int player, const std::string& line) { asked.push_back({player, line}); };
+	s.squads.teamName = [](int team) { return team == 2 ? std::string("EU") : std::string("PAC"); };
+	s.squads.update(me);
+	s.squads.clickSquadList(me, s.row(1, 2), 8);
+	CHECK(s.world.squadPrivate(2, 1) && s.squads.locked(2, 1));
+	using Join = game::GameWorld::SquadJoin;
+	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Private && s.squadOf(asker) == 0);
+	auto toLeader = s.world.takeSquadMessages(me);
+	auto toAsker = s.world.takeSquadMessages(asker);
+	CHECK(toLeader.size() == 1 && toLeader[0].id == 0x11 && toLeader[0].value == asker);
+	CHECK(toAsker.size() == 1 && toAsker[0].id == 0xc && toAsker[0].value == 1);
+	s.squads.squadMessage(toLeader[0].id, toLeader[0].value);
+	CHECK(asked.size() == 1 && asked[0].first == asker && asked[0].second == "Asker has asked to join your squad");
+	// The local player's own refusal line (a squad he asked).
+	s.squads.squadMessage(0xc, 1);
+	CHECK(!lines.empty() && lines.back() == "Alpha squad is private");
+	// A bot is refused too and hears nothing; its leader is asked.
+	CHECK(s.world.requestJoinSquad(bot, 1) == Join::Private && s.world.takeSquadMessages(bot).empty());
+	toLeader = s.world.takeSquadMessages(me);
+	CHECK(toLeader.size() == 1 && toLeader[0].value == bot);
+	// Turned down: that player's next request asks nothing.
+	s.squads.denyJoinRequest(bot);
+	s.squads.squadMessage(0x11, bot);
+	CHECK(asked.size() == 1);
+	// Invited (slot 0x30's bit): the join takes and clears it.
+	s.world.setSquadInvite(asker, 1, true);
+	CHECK(s.world.squadInvites(asker) == (1u << 1));
+	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Joined && s.squadOf(asker) == 1 && s.world.squadInvites(asker) == 0);
+	CHECK(s.world.takeSquadMessages(me).empty());
+	// Six: full (2/0xb to the player, the squad).
+	for (int i = 0; i < 4; ++i) {
+		const int member = s.world.addPlayer("M" + std::to_string(i), 2, true);
+		s.world.joinSquad(member, 1);
+	}
+	const int late = s.world.addPlayer("Late", 2, false);
+	s.world.setSquadInvite(late, 1, true);
+	CHECK(s.world.requestJoinSquad(late, 1) == Join::Full);
+	const auto toLate = s.world.takeSquadMessages(late);
+	CHECK(toLate.size() == 1 && toLate[0].id == 0xb && toLate[0].value == 1);
+	s.squads.squadMessage(0xb, 1);
+	CHECK(lines.back() == "EU Alpha squad is full");
+	// Emptied, the squad goes with its lock.
+	for (const auto& p : s.world.playerList()) {
+		if (p.squad == 1) {
+			s.world.joinSquad(p.id, 0);
+		}
+	}
+	CHECK(!s.world.squadPrivate(2, 1));
+}
+
+// A joined game's left click (the HUD's input, 0x00754290): with a soldier
+// it goes to the HUD's buttons (a rose's entry, the scoreboard), not to the
+// spawn screen's choice of a point; without one, a spawn icon picks its
+// point and elsewhere any point.
+TEST(HudMenus_JoinedClickReachesTheHud)
+{
+	CHECK(menu::joinedClick(true, -1) == menu::JoinedClick::Hud);
+	CHECK(menu::joinedClick(true, 3) == menu::JoinedClick::Hud);
+	CHECK(menu::joinedClick(false, 3) == menu::JoinedClick::SpawnAt);
+	CHECK(menu::joinedClick(false, -1) == menu::JoinedClick::AnySpawn);
+}
+
+// The scoreboard's menu state (10, 0x0079ab90) shows the map list with it
+// (LevelsListShow: the Server tab's map vote), and leaving it hides both
+// and the server tab's selection.
+TEST(HudMenus_ScoreboardShowsTheMapList)
+{
+	hud::HudManager hud(nullptr);
+	menu::showScoreboard(hud, true);
+	CHECK(hud.number("ScoreboardShow") == 1 && hud.number("LevelsListShow") == 1);
+	hud.set("ServerInfoSelected", 1);
+	menu::showScoreboard(hud, false);
+	CHECK(hud.number("ScoreboardShow") == 0 && hud.number("LevelsListShow") == 0 && hud.number("ServerInfoSelected") == 0);
+}
+
+// Joined, SquadMenu.createSquad without the box (a console line, as the
+// key sweep's) asks the server for the first free squad (ChangeSquadName),
+// leaving the one he is in first (LeaveSquad); the commander asks nothing.
+TEST(HudMenus_CreateSquadJoinedWithoutTheBox)
+{
+	Squads s;
+	RadarWorld remote;
+	game::GameWorld::PlayerInfo me, mate;
+	me.id = 0;
+	me.team = 2;
+	mate.id = 1;
+	mate.team = 2;
+	mate.squad = 1;
+	remote.players = {me, mate};
+	std::vector<std::pair<int, std::string>> created;
+	std::vector<int> left;
+	menu::SquadMenu::Remote r;
+	r.world = &remote;
+	r.create = [&](int squad, const std::string& name) { created.push_back({squad, name}); };
+	r.leave = [&](int squad) { left.push_back(squad); };
+	s.squads.setRemote(r);
+	CHECK(s.squads.createSquad(0));
+	CHECK(created.size() == 1 && created[0].first == 2 && created[0].second == "Bravo" && left.empty());
+	remote.players[0].squad = 1;
+	CHECK(s.squads.createSquad(0));
+	CHECK(created.size() == 2 && created[1].first == 2 && left.size() == 1 && left[0] == 1);
+	remote.players[0].squad = 0;
+	remote.players[0].commander = true;
+	CHECK(!s.squads.createSquad(0) && created.size() == 2);
+}
+
+// The orders' minimap icons by kind (0x0078b110 over the tables of
+// 0x00786b7a..): the leader's plain, the commander's "Commander" ones;
+// a repair order shows the repair icon, not the move one.
+TEST(HudMenus_OrderMapIcons)
+{
+	CHECK(menu::orderMapIcon(4, true) == "Ingame/Minimap/Icons/orderMoveCommander.tga");
+	CHECK(menu::orderMapIcon(5, true) == "Ingame/Minimap/Icons/orderAttackCommander.tga");
+	CHECK(menu::orderMapIcon(6, false) == "Ingame/Minimap/Icons/orderDefend.tga");
+	CHECK(menu::orderMapIcon(7, true) == "Ingame/Minimap/Icons/orderRepairCommander.tga");
+	CHECK(menu::orderMapIcon(9, false) == "Ingame/Minimap/Icons/orderMine.tga");
+	CHECK(menu::orderMapIcon(0, false) == "Ingame/Commander/tools/orbit_strike.tga");
+	CHECK(menu::orderMapIcon(2, true) == "Ingame/Minimap/Icons/icon_UAV.tga");
+	CHECK(menu::orderMapIcon(10, false) == "Ingame/Commander/tools/orbit_strike.tga");
+	CHECK(menu::orderMapIcon(10, true).empty() && menu::orderMapIcon(-1, false).empty() && menu::orderMapIcon(11, false).empty());
 }

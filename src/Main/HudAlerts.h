@@ -252,4 +252,78 @@ private:
 // ammo); "" when the template has none.
 std::string abilitySound(const world::ObjectTemplate& receiver, int what);
 
+// The dog tags. A knife kill's tag is the stats script's
+// (python/bf2/stats/stats.py, onPlayerKilled: a kill whose weapon's type is
+// WEAPON_TYPE_KNIFE, "knife" / "knife_unlock", counts in the attacker's
+// stats.dogTags and calls sendGameEvent(attacker, 19, victim.index)):
+// host.sgl_sendGameLogicEvent (0x00567d40; its tuple's items 0, 1, 2 the
+// player, the event, the data) posts the game category's message 0x13
+// (ECGameLogicGLDogTag, 4 bytes: the victim) to the attacker's connection
+// (the game's slot 0x98). Its handler (0x004cbea0, category 0 id 0x13), on
+// a machine with a screen (0x0042b800) and a local player, posts the HUD
+// event 2/0x28 with the victim and, unless it is the server (slot 0x144),
+// counts the tag in the local player's map (his slot 0x1a8 object's +0x64,
+// 0x005a5f70: victim -> tags; no reader of it was found). The HUD's event
+// 0x28 (0x00756b60's case, at 0x00758980) plays the menu sound "dogtag"
+// (DAT_00b43878 slot 0x2c, which no shipped MenuSounds.con adds: silent)
+// and calls the HUD manager's
+// slot 0x9c (0x0074f0d0) with the victim's name and 5 s: ShowMedalIcon and
+// ShowRankUpIcon off when on, ShowDogTagMessage on, DogTagMessage the
+// HUD_DOG_TAG_MESSAGE text with #PLAYER# the name, and the timer (+0x254)
+// that the HUD manager's update (0x007c8c30) counts down to slot 0x9c with
+// no time: ShowDogTagMessage off (HudElementsActionIcons.con's DogTagArea,
+// large_dogtag.tga and the text).
+class DogTags {
+public:
+	void setLocalizer(std::function<std::string(const std::string&)> localize) { m_localize = std::move(localize); }
+	// The event 0x13 for the local player: the victim's id and name.
+	void collect(hud::HudManager& hud, int victim, const std::string& name, bool server);
+	// 0x0074f0d0.
+	void show(hud::HudManager& hud, const std::string& name, float seconds);
+	void tick(hud::HudManager& hud, float seconds);
+	int tags(int victim) const
+	{
+		const auto it = m_tags.find(victim);
+		return it != m_tags.end() ? it->second : 0;
+	}
+
+private:
+	std::function<std::string(const std::string&)> m_localize;
+	float m_left = 0;            // +0x254
+	std::map<int, int> m_tags;   // the local player's, victim -> tags
+};
+
+// The radio's lines (0x0042e0c0 → 0x0042d7f0 → 0x0042bef0). A text id
+// holding "_important" (DAT_0091e75c, std::string::find, 0x0042e537) is
+// one line, the id's text as the important message (0x0042bef0's kind 4).
+// Any other id is first, when the strings have "<id>_important" (the
+// HUD's slot 0x38, 0x0074e430, localizes it and differs from slot 0x54,
+// 0x0074e530, the bare key widened), that text as the important message
+// (kind 4), then the id's own text in the chat (the message's kind). The
+// 49 shipped "_important" rows go with the Titans' automatic voices'
+// ids, "AUTO_TITAN_C_shields25" with "AUTO_TITAN_C_shields25_important"
+// ("Our Titan Shield: 25%") over "Our Titan shield is down by three
+// quarters!"). `find` is the strings' lookup (null when missing).
+struct RadioTextLines {
+	std::string important; // the important message's text, "" none
+	bool chat = true;      // the id's own line
+};
+RadioTextLines radioTextLines(const std::string& id, const std::function<const std::string*(const std::string&)>& find);
+
+// The important message: the HUD manager's slot 0x80 (0x0074ec50), from
+// 0x0042bef0's kind 4 with 5 s (0x40a00000): with a time over 0 the text
+// to HudInformationLayer's ImportantMessage (DAT_00a0f79c slot 0x68,
+// 0x0044e240: +0xa8, registered by 0x0044f1a0), ShowImportantMessage on
+// and the timer (+0x240), which the HUD manager's update (0x007c8c30)
+// counts down to ShowImportantMessage off; with none, off at once.
+// HudElementsGameInfo.con's ImportantMessage node shows it.
+class ImportantMessage {
+public:
+	void show(hud::HudManager& hud, const std::string& text, float seconds);
+	void tick(hud::HudManager& hud, float seconds);
+
+private:
+	float m_left = 0; // +0x240
+};
+
 } // namespace dice::hfe::menu

@@ -84,7 +84,39 @@ HAND = {
     0x1000c090: ("o", "online: GameSpy's stats host (stella.prod.gamespy.com)"),
     0x10063ad0: ("o", "online: the new account page's parentalAge row (selectBoxNewAcc, with the countries)"),
     0x100776e0: ("o", "online: the master server's filter text (gamever=, bf2142_ranked=1, bf2142_anticheat=1)"),
-    0x10023590: ("u", "the totalCount row of dice.General.getListEntries (0x10026e90, its only caller; unreached, see STATUS_LABEL)"),
+    # Propagated (c) hand-checked in coverage-9's follow-up and found online:
+    # list classes the vtable-sibling vote took from the shared list base
+    # (0x10060f30.., 0x10081250..). Their callees follow by callee-of.
+    # bfhqComparePlayers (vtable 0x10108624; its constructor 0x1006e8e0 runs
+    # 0x1006db20's BFHQ rows; per-kit / weapon / vehicle sections of
+    # DAT_1012c404, which nothing offline fills; the rewrite fills no such list)
+    0x1006e8e0: ("o", "online: bfhqComparePlayers' list constructor (vtable 0x10108624, 0x1006db20's rows)"),
+    0x100702e0: ("o", "online: bfhqComparePlayers' list destructor"),
+    0x1006d800: ("o", "online: bfhqComparePlayers' list destructor body"),
+    0x1006d840: ("o", "online: bfhqComparePlayers' list, slot 4"),
+    0x1006d490: ("o", "online: bfhqComparePlayers' row fill (sections of DAT_1012c404; 0x1006a960 / 0x1006acd0 / "
+                      "0x1006b610 / 0x1006cbe0 / 0x1006d160 per section)"),
+    0x1006a830: ("o", "online: bfhqComparePlayers' list, slot 13"),
+    # the buddy list (vtable 0x10107c60: "buddy", TEXT_buddyrequest, TEXT_online / TEXT_offline)
+    0x10061ff0: ("o", "online: the buddy list's constructor (ProfileManager's buddies)"),
+    0x10062160: ("o", "online: the buddy list's destructor"),
+    0x10063680: ("o", "online: the buddy list, slot 0"),
+    0x100621a0: ("o", "online: the buddy list, slot 4"),
+    0x100622e0: ("o", "online: the buddy list's row fill (its 'online' / 'offline' strings made it (c))"),
+    0x10062200: ("o", "online: the buddy list, slot 6"),
+    0x10062e50: ("o", "online: the buddy list, slot 13"),
+    # the stats list's categories 1-6 (0x1007de70 picks the row maker by
+    # category; 0 = 0x1007d000 and 7 = 0x1007dbf0 were already (o)). The
+    # page is BFHQ's, online only in the movie (engine.md "The stats page");
+    # the rewrite's offline overview / player rows are a smaller set of its
+    # own (MenuBindings::statsRows), not these 15-row makers.
+    0x1007aec0: ("o", "online: the BFHQ stats list's category 1 rows (15 rows, %.4f / %d / percent / %.02f)"),
+    0x1007b400: ("o", "online: the BFHQ stats list's category 2 rows"),
+    0x1007b6f0: ("o", "online: the BFHQ stats list's category 3 rows"),
+    0x1007bb10: ("o", "online: the BFHQ stats list's category 4 rows"),
+    0x1007bd80: ("o", "online: the BFHQ stats list's category 5 rows"),
+    0x1007c0e0: ("o", "online: the BFHQ stats list's category 6 rows"),
+    0x10023590: ("u","the totalCount row of dice.General.getListEntries (0x10026e90, its only caller; unreached, see STATUS_LABEL)"),
     0x100d4270: ("u", "XML.load (no XML in the shipped movies)"),
     # --- never reached by the shipped movies (u): neither mainMenu.dfm nor
     # endOfRound.dfm has DefineSound / StartSound / DefineButtonSound /

@@ -147,9 +147,9 @@ public:
 	// queue 0x00643370): the header's byte 9 is the HUD manager's player
 	// (+0x48), which 0x0075c6b0 sets to -1 and nothing changes, so 0xff.
 	void whisper(const std::string& text, int target = -1);
-	// "rcon <command>" typed in the console: PostRemote 6/0x12 with the
-	// line (0x004b6630 case 0x12); the server's answers come back as 6/0x13
-	// messages (world().takeMessages(): -1 and "rcon: <text>").
+	// "rcon <command>" typed in the console: data block 6 with the line
+	// (0x004b6630 case 0x12); the server's answers come back as data block
+	// 7 (world().takeConsoleLines(): "rcon: <text>" and a newline).
 	void remoteCommand(const std::string& command);
 	void toggleFreeCamera();                   // ToggleFreeCamera (0x28)
 	// The menu's SPECTATOR (Logic.readyToPlay(true)): JoinAsSpectator (0x47)
@@ -165,6 +165,11 @@ public:
 	void joinSquad(int squad);                                    // JoinSquad (0x10; sent by 0x004c9bf0): team, player, squad
 	void leaveSquad(int squad, int player = -1, bool flag = false); // LeaveSquad (0x11; 0x004c9c50); another player: the leader kicks
 	void invite(int player, int squad, bool fromLeader = true);   // Invite (0x19; server 0x0050e700)
+	// A private squad's leader's answer to a player asking to join (the
+	// HUD's question kind 0, message 2/0x11): PostRemote 2/0x13 or 2/0x12
+	// with {squad, player} (the original's second int is the player's
+	// connection; HostedGame relays by the id), and with yes the invite.
+	void answerJoinRequest(int player, int squad, bool yes);
 	void setSquadLeader(int player, int squad);                   // SetSquadLeader (0x1c)
 	void setSquadName(int squad, const std::string& name);        // ChangeSquadName (0x16): squad, team, our id, name (at most 31)
 	// A new squad: ChangeSquadName for an empty squad (0x0050da80 ->
@@ -248,6 +253,8 @@ public:
 	// Each move as it goes up (once, with its index): the client's
 	// prediction steps it (src/Main/Prediction.h).
 	std::function<void(const PlayerMove&)> onMoveSent;
+	// The index the next move goes up with (0x005836b0's count).
+	int32_t nextMove() const { return m_moveIndex; }
 
 	// Counters for diagnostics.
 	size_t packetsReceived() const { return m_packetsReceived; }

@@ -43,6 +43,14 @@ anything taken from the retail files, such as decompiler output dumps, game
 archives, or shaders copied verbatim. Commit only our own source, symbol and
 annotation files, and tools.
 
+### Use and remixing
+
+This project's code was written by AI, with a human guiding it. Because of
+that, there are no IP protections on this repository's own code: use it, copy
+it, change it and remix it however you see fit. This covers only what is in
+this repository. Battlefield 2142 itself, its assets and its trademarks belong
+to their owners and still need your own copy of the game.
+
 ## Repository layout
 
 ```
@@ -165,7 +173,7 @@ What a run does depends on three options:
 |---|---|
 | `--view` (or `--menu`, `--play`, `--connect` without the next two) | A window with sound. Runs until you quit. |
 | `--screenshot out.png` | No window: the frame is drawn off screen, saved, and the program exits. |
-| `--simulate N` | No window: N seconds of game time run as fast as possible, then the scores print. Only `--view` adds a window to it. |
+| `--simulate N` | No window: N seconds of game time run as fast as possible, then the scores print (joined to a server: in real time, following its map changes). Only `--view` adds a window to it. |
 | `--language L` | The game's language (the original's registry Language): strings.csv's column and the fonts of `Fonts/L/` (German, French, Russian, Chinese_Simplified, ...; English when the file has no such column). |
 
 `--screenshot` and `--simulate` can be combined with almost everything below,
@@ -231,6 +239,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--nosound` / `--sound` | No audio at all / the audio engine even without a window. |
 | `--play-sound <name>` | Play a named sound after start-up. |
 | `--no-movies` | Skip the start-up movies. |
+| `+widescreen 1` | List display modes wider than 4:3 in the video options (as the original, which lists only 4:3 modes without it). |
 | `--movie <name>` / `--movie-seconds <s>` | Play one movie (`Movies/<name>.bik`); with `--screenshot`, save its frame at that time. |
 
 **Playing a level yourself**
@@ -238,15 +247,18 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Option | What it does |
 |---|---|
 | `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
-| `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. |
+| `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. It lands on whatever is under the spot (a roof, a deck or the terrain) when a 4 × 6 m footprint there is clear and level with the soldier; else on the nearest such spot round him, else on the nearest open ground within 60 m. A leading `goto:` in `--actions` places the soldier first (the rest run in the seat). |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
+| `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1), also on a server joined with `--play`. |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
-| `--actions "<cmd> …"` | Screenshot inputs for the soldier or selected `--drive`/`--seat` vehicle, e.g. `"wait:90 altfire:1 wait:10"` for an AA rocket, or `"reload wait:60 firemode fire:10 item:2 prone:20 jump"`. |
+| `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 altfire:3 item:2 prone:20 jump"` (`altfire` also zooms, as the right button; `flare` is a seat's flares or active defence; `goto:x/y/z/yaw` puts the soldier at a spot facing a way). Each prints the weapon in hand (in a seat, each weapon group's), the soldier's place, hit points and battery, the objects new since the last, the rounds' hits since the last and the `--spawn` targets' hit points. |
 | `--unlock-all` | Every kit unlock. |
+| `--unlocks <a,b,…>` | Only these unlocks (ItemContainer names, e.g. `UnlockEU_SupportHeavy2`), chosen as the customise screen equips them. |
+| `--squad-leader` | Lead a squad of your own that the team's bots join (the squad leader's beacon and drones want members). |
 | `--scoreboard` / `--spawn-screen` / `--commander-screen` | Show the scoreboard; die first and show the spawn screen; take command and open the commander screen. |
 | `--hud-click x/y[/right\|/move]` | A click or pointer move on the HUD's 800 × 600 screen before a screenshot (repeatable). |
 | `--console "<command>"` | Run a console command once the round starts; `"<s>:<command>"` runs it when the round is that many seconds old (repeatable). |
-| `--spawn <template>@x/y/z[/yaw]` | Add an object to look at (repeatable). |
+| `--spawn <template>@x/y/z[/yaw]` | Add an object to look at or shoot at (repeatable; placed before the round settles and the `--actions` run). |
 | `--animation <file.baf>` | Play an animation on the skinned objects. |
 | `--dump-template <name>` | Print a template's tree and settings. |
 
@@ -264,8 +276,9 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
 | `--offline` | The menu finds no account service, so it plays offline. |
 | `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. |
-| `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>`, `click:<x>,<y>`, `type:<text>`, `call:<clip>.<method>,<args>`. |
+| `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |
 | `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
+| `--keys "<s>:<op> …"` | A level's game input without a window (with `--play`, `--connect`, `--host`; after `--simulate`, or before `--screenshot`): from that second on, `down:` / `up:` / `press:<control>` (the control map's names: `c_GIRadioComm`, `c_GITacticalComm`, `c_GISayAll`, `c_GISayTeam`, `c_GISaySquad`, `c_GIYes`, `c_GINo`, `c_GIShowScoreboard`, `c_PIFire`…), `text:<text>` and `key:<Flash code>` (13 Enter, 27 Esc) to the open say box, `move:` / `click:` / `rclick:<x>/<y>` on the HUD's 800 × 600 screen, `console:<line>` (`_` a space). It prints each step and what changed: the rose shown, the say box, new chat rows, the radio heard. A hosted or joined game runs in real time. |
 
 **Hosting a game**
 
@@ -291,7 +304,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--play [1\|2]` | On a server, spawn, and ask for that team. |
 | `--spectate` | Join as a spectator (the host needs `sv.allowSpectators 1`). |
 | `--walk` | Without a window, walk and turn (a check of the client's prediction). |
-| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `reload`, `forward`, `stop`, `turn:<deg>`, `face:<player>`, `still`, `zoom`, `pitch:<deg>`. |
+| `--remote-actions "<s>:<op> …"` | Without a window, the soldier's inputs from that second on: `crouch`, `prone`, `stand`, `fire`, `hold`, `altfire` / `altstop`, `reload`, `forward`, `back`, `throttle:<x>`, `strafe:<x>`, `sprint` / `walk`, `stop`, `turn:<deg>`, `face:<player>` (`_` for a space; `enemy`, the nearest; or a template, e.g. `us_heavy_mech`), `goto:<same>` (and walk up to it), `still`, `zoom`, `pitch:<deg>`; presses `use`, `seat:<n>`, `item:<n>`, `jump`, `nextitem`, `previtem`, `weapon`, `firemode`, `flare`; requests `team:<n>`, `kit:<index>`, `spawn[:<group>]`, `leader` (spawn on the squad leader), `squad:<n>` (make one), `joinsquad:<n>`, `suicide`, `say:<word>`, `commander` (apply), `accept` (take the command offered), `titan:<x>:<z>` (as commander, move the Titan). `face`/`goto` turn from where the soldier looks and aim at a man-down soldier's body (a medic's shock). |
 | `--probe host[:port]` | Only shake hands and print what the server sends. |
 | `--servers` | List the servers the master server knows. |
 | `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |
@@ -490,7 +503,8 @@ runs local stand-ins of OpenSpy's services built from OpenSpy's code
 (repeatable), `--emulator-cdkey KEY` (then only that key passes) and
 `--emulator-list host:gameport[:queryport]` set what they know. A host
 started with `--require-login` checks a joining player as a retail server
-does (name checksum, profile, CD key, ValidatePlayer) before making it.
+does (name checksum, profile, ValidatePlayer; the CD key is asked about
+but, as in retail, a bad one is only logged) before making it.
 
 ### Credentials
 

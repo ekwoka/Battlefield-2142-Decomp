@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace dice::hfe;
@@ -431,4 +432,240 @@ TEST(ScriptHost_SuezBridgeInfantryCapture)
 	CHECK(feet.y < pos.y && feet.y > pos.y - 0.5f);
 	CHECK(cp->team == 2 && cp->flagHeight > 0.99f);
 	CHECK(errors.empty());
+}
+
+// host.registerHandler (PythonHost.cpp, 0x00446860): a function already
+// registered for the event isn't added again, and without alwaysTrigger
+// its handler hears the event only while the game plays (0x00444140: the
+// game logic's status 1 and round state 3, which a hosted round reaches as
+// its countdown ends).
+TEST(ScriptHost_HandlersHearWhilePlaying)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	CHECK(host.run("import host\n"
+				   "calls = []\n"
+				   "def playing(*args): calls.append('playing')\n"
+				   "def always(*args): calls.append('always')\n"
+				   "host.registerHandler('PlayerScore', playing)\n"
+				   "host.registerHandler('PlayerScore', playing)\n"
+				   "host.registerHandler('PlayerScore', always, 1)\n"));
+	const game::ScriptArgs args {game::ScriptValue::player(0), game::ScriptValue::integer(1)};
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.raise("PlayerScore", args);
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(false); // a hosted round waiting for players or counting down
+	host.raise("PlayerScore", args);
+	host.setRoundPlaying(true);
+	host.raise("PlayerScore", args);
+	CHECK(host.run("assert calls == ['always', 'always', 'playing', 'always'], calls\n"));
+}
+
+// A soldier spawned while a hosted round waits for players stands in a
+// control point: the trigger's callback (0x00442c80) runs only once the
+// round plays, as the handlers do, so gpm_cq's onCPTrigger never meets a
+// player its unheard PlayerSpawn left without `killed`. The second
+// player starts the countdown: the reset (PreGame, GameLogic::reset,
+// Playing again, as main's onCountdown) sets the triggers up anew, and
+// the soldier spawned in the playing round takes the point.
+TEST(ScriptHost_WaitingSoldierInAControlPoint)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	std::string errors;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) {
+				errors += line + "\n";
+			}
+		});
+	const auto raise = [&host](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	CHECK(host.startGameMode("gpm_cq"));
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(false);
+	round.logic.waitToStart(2, 2, 30, [&round] { return static_cast<int>(round.world->playerList().size()); });
+	round.logic.onPlaying = [&host] { host.setRoundPlaying(true); };
+	round.logic.onCountdown = [&round, &host] {
+		host.setGameStatus(game::GameStatus::PreGame);
+		round.world->restartPlayers(round.logic.startCountdown() + 2.0f / 30.0f);
+		round.world->resetRound();
+		host.raise("Reset", {game::ScriptValue::integer(0)});
+		host.setGameStatus(game::GameStatus::Playing);
+	};
+	round.world->setSpawnTime(1);
+	const int bot = round.world->addPlayer("Bot", 2, true);
+	CHECK(round.world->spawnSoldier(bot));
+	const auto run = [&](int ticks) {
+		for (int tick = 0; tick < ticks; ++tick) {
+			round.world->tick(1 / 30.0f);
+			round.logic.tick(1 / 30.0f);
+			host.update();
+		}
+	};
+	run(30 * 4);
+	CHECK(round.logic.roundState() == 1);
+	CHECK(errors.empty());
+	// A second player: the countdown, the reset, then the playing round.
+	round.world->addPlayer("Other", 1, true);
+	run(30 * 4);
+	CHECK(round.logic.roundState() == 3);
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.world->playerInfo(bot, info) && info.alive);
+	run(30 * 6);
+	CHECK(round.enemyPoint->team() != 1); // neutralised (or taken) by the EU soldier in it
+	if (!errors.empty()) {
+		std::fprintf(stderr, "%s", errors.c_str());
+	}
+	CHECK(errors.empty());
+}
+
+// A hosted round's start (0x004c03b0): the countdown restarts the players
+// (GameLogic::reset through slot 0x24; GameWorld::restartPlayers) and they
+// spawn when it ends, so the game mode's PlayerSpawn hears every soldier
+// of the playing round. A soldier spawned while waiting for players and
+// kept (the rewrite's before) stood in a control point's trigger without
+// gpm_cq's `killed` (AttributeError in onCPTrigger) and died without
+// stats.py's `soldier`.
+TEST(ScriptHost_HostedStartRestartsThePlayers)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	std::string errors;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) {
+				errors += line + "\n";
+			}
+		});
+	const auto raise = [&host](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	CHECK(host.startGameMode("gpm_cq"));
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(false);
+	round.logic.waitToStart(1, 2, 30, [&round] { return static_cast<int>(round.world->playerList().size()); });
+	round.logic.onPlaying = [&host] { host.setRoundPlaying(true); };
+	round.logic.onCountdown = [&round] { round.world->restartPlayers(round.logic.startCountdown() + 2.0f / 30.0f); };
+	// An EU bot spawns at the harbour (in its trigger) while the server
+	// waits for players.
+	round.world->setSpawnTime(1);
+	const int bot = round.world->addPlayer("Bot", 2, true);
+	CHECK(round.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	bool restarted = false;
+	for (int tick = 0; tick < 30 * 5; ++tick) {
+		round.world->tick(1 / 30.0f);
+		round.logic.tick(1 / 30.0f);
+		host.update();
+		if (round.logic.roundState() == 2) {
+			restarted = restarted || (round.world->playerInfo(bot, info) && !info.alive);
+			CHECK(round.world->playerInfo(bot, info) && !info.alive); // no spawn in the countdown
+		}
+	}
+	CHECK(restarted && round.logic.roundState() == 3);
+	CHECK(round.world->playerInfo(bot, info) && info.alive && info.deaths == 0);
+	// Its death in the playing round runs stats.py's and gpm_cq's handlers.
+	round.world->setHitPoints(info.soldier, 0);
+	for (int tick = 0; tick < 60; ++tick) {
+		round.world->tick(1 / 30.0f);
+		round.logic.tick(1 / 30.0f);
+		host.update();
+	}
+	if (!errors.empty()) {
+		std::fprintf(stderr, "%s", errors.c_str());
+	}
+	CHECK(errors.empty());
+}
+
+// An object deleted while inside a trigger leaves it as None (0x00442c80's
+// caller passes the trigger's emptied reference), so gpm_coop's onCPTrigger
+// (`if vehicle:`) skips it rather than asking a dead object for its players.
+TEST(ScriptHost_TriggerExitOfADeletedObjectIsNone)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	std::string errors;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) {
+				errors += line + "\n";
+			}
+		});
+	host.setGameStatus(game::GameStatus::Playing);
+	host.setRoundPlaying(true);
+	const int bot = round.world->addPlayer("Bot", 2, true);
+	CHECK(round.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.world->playerInfo(bot, info) && info.soldier);
+	CHECK(host.run("import host, _host_objects\n"
+				   "_host_objects.seen = []\n"
+				   "def onTrigger(id, owner, other, entered, data=None):\n"
+				   "    _host_objects.seen.append((other is None, entered))\n"
+				   "    if other:\n"
+				   "        other.getOccupyingPlayers()[0]\n"
+				   "host.trig_create(_host_objects.wrap(" + std::to_string(round.enemyPoint->id()) +
+		"), onTrigger, 'PlayerControlObject', 10.0, 0)\n"));
+	host.update();
+	round.objects.remove(info.soldier);
+	host.update();
+	CHECK(host.run("import _host_objects\nassert _host_objects.seen == [(False, 1), (True, 0)], _host_objects.seen\n"));
+	if (!errors.empty()) {
+		std::fprintf(stderr, "%s", errors.c_str());
+	}
+	CHECK(errors.empty());
+}
+
+// A knife kill's dog tag (python/bf2/stats/stats.py's onPlayerKilled for a
+// WEAPON_TYPE_KNIFE weapon): sendGameEvent(attacker, 19, victim.index),
+// host.sgl_sendGameLogicEvent (0x00567d40: the player, the event, the
+// data) for the attacker's connection (the game's slot 0x98).
+TEST(ScriptHost_KnifeKillSendsTheDogTag)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Round round;
+	script::ScriptHost host(*round.bridge,
+		{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"}, [](const std::string&) {});
+	const auto raise = [&](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	round.world->setEventSink(raise);
+	round.logic.setEventSink(raise);
+	round.bridge->events = raise;
+	std::vector<std::tuple<int, int, int>> sent;
+	round.bridge->onGameLogicEvent = [&](int player, int event, int data) { sent.push_back({player, event, data}); };
+	CHECK(host.startGameMode("gpm_cq"));
+	const int a = round.world->addPlayer("A", 2, true);
+	const int c = round.world->addPlayer("C", 1, true);
+	CHECK(round.world->spawnSoldier(a) && round.world->spawnSoldier(c));
+	const std::string kill = "import bf2\n"
+							 "import bf2.stats.stats as s\n"
+							 "class W:\n  def __init__(self, n): self.templateName = n\n"
+							 "pa = bf2.playerManager.getPlayerByIndex(" + std::to_string(a) + ")\n"
+							 "pc = bf2.playerManager.getPlayerByIndex(" + std::to_string(c) + ")\n";
+	CHECK(host.run(kill + "s.onPlayerKilled(pc, pa, W('eu_ar_rifle'), [], None)\n"));
+	CHECK(sent.empty());
+	CHECK(host.run(kill + "s.onPlayerKilled(pc, pa, W('knife'), [], None)\n"));
+	CHECK(sent.size() == 1 && sent[0] == std::make_tuple(a, 19, c));
 }

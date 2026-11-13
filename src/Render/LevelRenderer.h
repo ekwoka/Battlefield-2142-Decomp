@@ -132,15 +132,6 @@ struct FirstPersonScene {
 	const effects::EffectManager* effects = nullptr;
 };
 
-// A moving game object that lives outside ObjectManager (GenericProjectile
-// rounds). The renderer rebuilds these instances each frame from simulation
-// state, including the template's child meshes and bundled parts.
-struct TransientModel {
-	const world::ObjectTemplate* objectTemplate = nullptr;
-	world::Vec3 position;
-	world::Vec3 rotation;
-};
-
 struct LevelSources {
 	const io::FileManager& files;
 	const world::ObjectTemplateManager& templates;
@@ -187,6 +178,18 @@ struct LevelSources {
 	// More of them, drawn with those (the bundles attached to objects:
 	// engines, exhausts, trails; effects::ObjectEffects).
 	const effects::EffectManager* objectEffects = nullptr;
+	// Templates drawn this frame without an object of their own: the
+	// rounds in flight and lying (GameWorld's projectiles, whose objects
+	// RendDX9 draws as any bundled mesh: the GenericProjectile's
+	// ObjectTemplate.geometry at the round's matrix; client::RoundVisuals).
+	// Their geometry's parts sit as the template's children place them.
+	// Asked by syncObjects; may be null.
+	struct PlacedTemplate {
+		const world::ObjectTemplate* objectTemplate = nullptr;
+		effects::Vec3 position;
+		effects::Mat3 rotation; // rows x, y, z
+	};
+	std::function<void(std::vector<PlacedTemplate>& out)> placedTemplates;
 	// The first-person view, asked each frame: false draws none.
 	std::function<bool(FirstPersonScene& scene)> firstPerson;
 	// Objects the world pass leaves out this frame (in first person the
@@ -213,16 +216,18 @@ struct LevelSources {
 	const scene::ParticleSystemSettings* particles = nullptr;
 	const scene::WindSettings* wind = nullptr;
 	const scene::QualitySettings* quality = nullptr;
-	// Render-only models updated from simulation state (e.g. projectiles).
-	std::function<void(std::vector<TransientModel>&)> transientModels;
 	// The collision faces (the projectile LOD's) of `object` within `radius`
 	// of `center`, for a decal's clipping (RendDX9 0x10165f60 / 0x101655c0):
 	// object 0 the static objects' in world space, only those of `owner`
-	// when it isn't 0; else that moving object's in its own space. None if
+	// when it isn't 0; else that moving object's in its own space, or its
+	// collisionPart `part`'s (Decal::part, not -1) in the part's. None if
 	// null.
-	std::function<void(uint32_t object, uint32_t owner, const effects::Vec3& center, float radius,
+	std::function<void(uint32_t object, uint32_t owner, int part, const effects::Vec3& center, float radius,
 		std::vector<std::array<effects::Vec3, 3>>& faces)>
 		collisionFaces;
+	// A moving object's collisionPart `part` (Decal::part): its frame in the
+	// object's now (rows x, y, z); false without one.
+	std::function<bool(uint32_t object, int part, effects::Mat3& rotation, effects::Vec3& position)> collisionPartFrame;
 	// Overgrowth.* as the level's Overgrowth.con set them (else the file is read).
 	const scene::OvergrowthSettings* overgrowth = nullptr;
 	// The interior sun of the seat camera now; false when there is none.
@@ -292,6 +297,9 @@ public:
 	// The effects' debris pieces (effects::DebrisPiece) as instances of their
 	// mesh with only their geometryPart shown, replaced each frame.
 	void syncDebris();
+	// The placed templates (LevelSources::placedTemplates) as instances of
+	// their geometry, replaced each frame.
+	void syncPlaced();
 
 	// Records a render pass into `commands` that clears and draws into
 	// `color` (a swapchain or offscreen texture) using `target`'s depth.
@@ -344,9 +352,14 @@ private:
 		// Lit with the level's envmap (EnvMapManager.h).
 		bool envMap = false;
 		// A tree's leaves (a static mesh under "vegitation", RendDX9
-		// 0x100de6d0; its alpha-tested materials): RaShaderLeaf's sway.
+		// 0x100de6d0; its leaf materials, treeLeaf / 0x100db6f0):
+		// RaShaderLeaf's sway, alpha test and two sides.
 		bool leaf = false;
 		bool trunk = false;
+		// A tree's leaves whose plain texture was kept for alpha to coverage
+		// (0x10151830 skips the "_alphatest" one while antialiasing with
+		// Alpha2Mask): its alpha runs 0..0.5 and RaShaderLeaf doubles it.
+		bool coverageTexture = false;
 		// A bundled material with an "AnimatedUV..." technique (RaShaderBM
 		// _HASUVANIMATION_): its coordinates go through the instance's UV
 		// matrices (AnimatedUV.h).
@@ -451,7 +464,7 @@ private:
 		float overgrowthCell[3] {};
 		mutable float overgrowthLodState = 0;
 		bool debris = false;     // an effects' debris piece, placed afresh each frame (syncDebris)
-		bool transient = false;  // rebuilt from LevelSources::transientModels each frame
+		bool placed = false;     // a placed template (a round's mesh), placed afresh each frame (syncPlaced)
 		// The mesh instance's UV matrices (RendDX9 +0x28c) and its parts'
 		// animated-UV states (BF2142.exe's SimpleObject +0x160), in the
 		// order collectParts meets them (AnimatedUV.h).
@@ -556,6 +569,11 @@ private:
 	const AnimatedUVLook& animatedUVLook(const world::ObjectTemplate& objectTemplate) const;
 	mutable std::unordered_map<const world::ObjectTemplate*, AnimatedUVLook> m_animatedUVLooks;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
+	// syncPlaced's: the templates asked for this frame, and each template's
+	// parts at rest (collectParts without an object).
+	std::vector<LevelSources::PlacedTemplate> m_placedScratch;
+	std::map<const world::ObjectTemplate*, std::vector<Mat4>> m_placedParts;
+	bool m_hadPlaced = false;
 	void buildTerrain(const LevelSources& sources);
 	// The primary terrain's LODs (terraindata.raw's compiled patches, drawn
 	// as RendDX9's terrain culler draws them: cells of terrainCuller.
@@ -614,10 +632,15 @@ private:
 	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
 	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
 	// The objects' distance fade this frame (DistanceFade.h): off for the
-	// commander's overhead view, whose camera sits hundreds of metres up
-	// (the walk's filter flag 0x1000000 keeps every object; which views set
-	// it isn't traced).
+	// commander's overhead view, whose camera sits hundreds of metres up.
+	// A deviation: the walk's filter flag 0x1000000 that skips the fade is
+	// set only by the AI's queries (BF2142.exe 0x0089b860, slot 1
+	// 0x00897af0); RendDX9's scene filters pass 2 (0x101aa0a0), so the
+	// original's overhead view fades by its own camera.
 	bool m_distanceFadeOn = true;
+	// This frame's VideoSettings view distance scale (frameViewDistanceScale:
+	// 1 under the overhead view).
+	float m_viewDistanceScale = 1;
 	// This frame's close distance: the script's scale, or the quality's
 	// once the video settings change it after the level's script ran (the
 	// switch writes +0x110 when they are applied).
@@ -739,8 +762,29 @@ private:
 	bool postEnabled() const;
 	void ensurePostTargets(uint32_t width, uint32_t height);
 	void loadPostTextures(const LevelSources& sources);
-	// Draws the cloaked meshes into the mask (the world's depth loaded).
+	// Draws the cloaked meshes into the mask (the world's depth loaded;
+	// multisampled, into m_multisampleCamo resolved to the mask).
 	void drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* depth, const Mat4& viewProjection, float seconds);
+
+	// The antialiasing (VideoSettings.setAntialiasing, GpuContext::
+	// setWorldSamples): with more than one sample the world, shimmer,
+	// camouflage and first-person passes draw into these multisampled
+	// targets, their colour resolved into the scene texture (or the
+	// target without the post-production) as RendDX9 StretchRects its
+	// multisampled back buffer into the scene texture (0x1002cef0). The
+	// HUD and menu keep the single-sampled target and its depth-stencil.
+	SDL_GPUTexture* m_multisampleColor = nullptr;
+	SDL_GPUTexture* m_multisampleDepth = nullptr;
+	SDL_GPUTexture* m_multisampleCamo = nullptr;
+	uint32_t m_multisampleSize[3] {}; // width, height, samples
+	void ensureMultisampleTargets(uint32_t width, uint32_t height, uint32_t samples);
+	void releaseMultisampleTargets();
+	// Alpha to coverage while the world is multisampled (0x1000b500 and
+	// +0x50a: SDL GPU has it on every backend).
+	bool alphaToCoverage() const { return m_gpu.coverageMeshPipeline() && m_gpu.coverageUndergrowthPipeline(); }
+	// The level was loaded antialiased: the trees' and the undergrowth's
+	// plain textures (0x10151830, 0x1008c7e0, 0x101100d0).
+	bool m_coverageTextures = false;
 	// The bloom chain and the tinnitus's history from m_sceneColor, then
 	// the post pass into `pass` (already begun on the target).
 	PostUniforms preparePost(SDL_GPUCommandBuffer* commands, bool cloaked);
@@ -1039,6 +1083,14 @@ private:
 	Uint64 m_startTicks = 0;
 	SDL_GPUTexture* m_detailLayers[kMaxDetailLayers] = {};
 	float m_detailTiling[kMaxDetailLayers] = {};
+	// The layers' passes (terrain.frag, 0x1014e570): per layer the side
+	// tiling, the y offset and the kind (TerrainLayerKind), and the side
+	// textures ("<texture>_side", 0x100b2bdc) of the first two
+	// side-projected layers that have one (the terrain pipeline's last two
+	// samplers; no shipped layer has one).
+	static constexpr int kMaxDetailSides = 2;
+	float m_detailLayerInfo[kMaxDetailLayers][4] = {};
+	SDL_GPUTexture* m_detailSides[kMaxDetailSides] = {};
 	std::array<float, 3> m_terrainSunColor {};
 	std::array<float, 3> m_terrainGIColor {};
 	bool m_terrainColorsFromData = false;

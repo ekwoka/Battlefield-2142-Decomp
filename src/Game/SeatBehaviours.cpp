@@ -259,8 +259,9 @@ std::vector<GameWorld::RollingSound> GameWorld::rollingSounds() const
 // its own collision mesh (ifv_shield_the_generator, mapMaterial 5101):
 // its faces are the vehicle's for the rounds (the projectile LOD, owned by
 // the cell's id), and a round that strikes one hurts its armour
-// (shieldCellDamage). Not rewritten: the cells' armour effects
-// (e_healing_node, e_titan_consol, e_bluespark_loop by its hit points).
+// (shieldCellDamage). The cells' armour effects (e_healing_node,
+// e_titan_consol, e_bluespark_loop by their hit points) at the end of
+// stepShieldCells.
 void GameWorld::buildShieldCells(Body& body)
 {
 	body.cellsBuilt = true;
@@ -298,7 +299,14 @@ void GameWorld::buildShieldCells(Body& body)
 		};
 	find(*t, physics::Mat3 {}, physics::Vec3 {}, 0);
 	// The cells' meshes into the vehicle's projectile LOD.
-	if (!m_collisionTemplates || !m_files || !body.projectileMesh) {
+	if (body.projectileMesh) {
+		addShieldCellMeshes(body, *body.projectileMesh);
+	}
+}
+
+void GameWorld::addShieldCellMeshes(const Body& body, physics::CollisionWorld& world) const
+{
+	if (!m_collisionTemplates || !m_files) {
 		return;
 	}
 	for (size_t i = 0; i < body.cells.size(); ++i) {
@@ -306,10 +314,21 @@ void GameWorld::buildShieldCells(Body& body)
 		const std::string* name = setting(*cell.t, "collisionMesh");
 		const physics::CollisionMeshFile* mesh = name ? m_collisionTemplates->mesh(*name, *m_files) : nullptr;
 		const uint32_t id = shieldCellId(body.object, i);
-		if (mesh && !mesh->geometries.empty() && id) {
-			body.projectileMesh->addMesh(*mesh, physics::CollisionUser::Projectile, cell.rotation, cell.position, id,
-				materialMap(*cell.t));
+		if (!mesh || mesh->geometries.empty() || !id) {
+			continue;
 		}
+		// A wreck's tree switches every instance (0x006539f0 over the
+		// children): to sub-geometry 1 where there is one, else out of
+		// the rays (0x006e5df0 returning 0 clears the object's flag 0x100).
+		size_t state = 0;
+		if (body.collisionWrecked) {
+			if (mesh->geometries[0].subGeometries.size() < 2) {
+				continue;
+			}
+			state = 1;
+		}
+		world.addMesh(*mesh, physics::CollisionUser::Projectile, cell.rotation, cell.position, id, materialMap(*cell.t),
+			0, state);
 	}
 }
 
@@ -331,7 +350,7 @@ void GameWorld::stepShieldCells(Body& body, float seconds)
 	const float left = hitPoints(body.object);
 	const float rootPercent = left >= 0 ? left / rootMax * 100.0f : left / rootWreck * 100.0f;
 	for (Body::Cell& cell : body.cells) {
-		if (cell.wreck || !cell.mirror) {
+		if (cell.wreck || !cell.mirror || cell.synced) {
 			continue;
 		}
 		if (cell.timer > 0) {
@@ -355,6 +374,32 @@ void GameWorld::stepShieldCells(Body& body, float seconds)
 				raiseTitanEvent(event, body.object, -1); // the scripts' handler takes the root
 			}
 		}
+	}
+	// Each cell's armour effects after its hit points moved (0x006549a0
+	// through 0x00654730 from the hit points' setter, on the cell's own
+	// armour): ifv_shield_the_generator's addArmorEffect 99 e_healing_node
+	// (attached to the cell, turned 90 degrees), 0 e_titan_consol (left in
+	// the world at the cell) and -1 e_bluespark_loop (attached). So a cell
+	// under 100 % glows with the healing node until it is full again, one
+	// brought to exactly 0 (the mirror's loss, 0x00656320) bursts once, and
+	// one under 0 (a round's killing blow, which always leaves it below:
+	// 0x00656320's limit) sparks as a wreck. The cells' percents below 0 are
+	// of the template's wreckHitPoints (10 by default, 0x00630040).
+	for (size_t i = 0; i < body.cells.size(); ++i) {
+		Body::Cell& cell = body.cells[i];
+		if (cell.effectsSeen && cell.hitPoints == cell.effectHitPoints) {
+			continue;
+		}
+		const ArmorEffectList& list = armorEffectList(*cell.t);
+		if (list.effects.empty()) {
+			cell.effectsSeen = true;
+			cell.effectHitPoints = cell.hitPoints;
+			continue;
+		}
+		const physics::Vec3 at = body.body.position + body.body.rotation.transform(cell.position);
+		const physics::Mat3 turn = cell.rotation * body.body.rotation;
+		armorEffectsAfter(list, {cell.effectHitPoints, cell.effectLevel, cell.effectsAttached, cell.effectsSeen},
+			shieldCellId(body.object, i), at, turn, false, cell.hitPoints);
 	}
 }
 
@@ -412,7 +457,8 @@ bool GameWorld::shieldCellDamage(uint32_t id, float amount, int attacker)
 		return true;
 	}
 	const float before = cell->hitPoints;
-	cell->hitPoints -= amount;
+	// The hit points' setter (0x00655460) keeps them within -wreckHitPoints.
+	cell->hitPoints = std::max(cell->hitPoints - amount, -number(*cell->t, "armor.wreckHitPoints", 10));
 	if (attacker >= 0) {
 		const uint32_t armour = id;
 		recordArmourDamage(armour, body->object, amount, attacker, cell->maxHitPoints);
@@ -443,6 +489,56 @@ std::vector<bool> GameWorld::repairCells(uint32_t vehicle) const
 		}
 	}
 	return out;
+}
+
+// 0x005ffec0's capture for mask 0x800000: each armoured child with
+// armor.fullChildSync as floor(hit points x 8 / maxHitPoints (slot
+// 0x8c)), at least 1 while above 0, 0 at or under it.
+std::vector<int> GameWorld::repairCellEighths(uint32_t vehicle) const
+{
+	std::vector<int> out;
+	const Body* body = findBody(vehicle);
+	if (!body) {
+		return out;
+	}
+	for (const Body::Cell& cell : body->cells) {
+		if (cell.hudCell == -1) {
+			continue;
+		}
+		float e = cell.maxHitPoints > 0 ? cell.hitPoints * 8.0f / cell.maxHitPoints : 0.0f;
+		e = e > 0 ? std::max(e, 1.0f) : 0.0f;
+		out.push_back(std::min(static_cast<int>(std::floor(e)), 8));
+	}
+	return out;
+}
+
+// 0x005ffec0's apply on a client: a child's eighths e under 1 set its
+// hit points to -wreckHitPoints (slot 0x90), else to maxHitPoints (0x8c)
+// x e x 0.125, through the armour's setter (slot 0x38, 0x00655460, kept
+// within -wreckHitPoints), which runs its armour effects (0x006549a0).
+void GameWorld::setRemoteRepairCells(uint32_t vehicle, const std::vector<int>& eighths)
+{
+	Body* body = findBody(vehicle);
+	if (!body || !body->vehicle) {
+		return;
+	}
+	if (!body->cellsBuilt) {
+		buildShieldCells(*body);
+	}
+	size_t next = 0;
+	for (Body::Cell& cell : body->cells) {
+		if (cell.hudCell == -1) {
+			continue;
+		}
+		if (next >= eighths.size()) {
+			break;
+		}
+		const int e = eighths[next++];
+		const float wreck = armorEffectList(*cell.t).wreckHitPoints;
+		cell.synced = true;
+		cell.hitPoints = e < 1 ? -wreck : cell.maxHitPoints * static_cast<float>(e) * 0.125f;
+		cell.wreck = e < 1;
+	}
 }
 
 } // namespace dice::hfe::game

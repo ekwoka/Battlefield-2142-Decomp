@@ -21,6 +21,7 @@
 #include "Net/GameClient.h"
 #include "Net/GameServer.h"
 #include "Net/ServerQuery.h"
+#include "Net/ServerSettings.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 #include "World/TemplateFiles.h"
@@ -172,6 +173,58 @@ TEST(NetHost_QueryAndLanSearch)
 	}
 }
 
+// The rules a hosted game reports (the server key callback 0x00578bb0
+// over 0x006423d0's fields), found by the LAN search's keys as the server
+// info popup reads them (0x004661a0).
+TEST(NetHost_ReportedRules)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectManager objects;
+	dice::hfe::game::GameWorld round(templates, objects);
+	dice::hfe::game::GameLogic logic;
+	round.startRound();
+	logic.startRound();
+	net::ServerSettings sv;
+	sv.soldierFriendlyFire = 100;
+	sv.roundsPerMap = 2;
+	sv.spawnTime = 12;
+	sv.timeLimit = 1800;
+	sv.ticketRatio = 150;
+	sv.teamRatioPercent = 110;
+	sv.autoBalanceTeam = true;
+	sv.allowSpectators = true;
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	setup.settings = &sv;
+	host::HostedGame hosted(round, logic, templates, setup);
+	net::ServerReport report = hosted.report();
+	CHECK(report.keys["bf2142_friendlyfire"] == "1" && report.keys["roundtime"] == "2" && report.keys["timelimit"] == "1800");
+	CHECK(std::atof(report.keys["bf2142_spawntime"].c_str()) == 12.0 && report.keys["bf2142_ticketratio"] == "150");
+	CHECK(std::atof(report.keys["bf2142_teamratio"].c_str()) == 110.0 && report.keys["bf2142_autobalanced"] == "1");
+	CHECK(report.keys["bf2142_allow_spectators"] == "1" && report.keys["bf2142_tkmode"] == "Punish");
+	// Under 100 per cent soldier friendly fire it reports none; a ranked
+	// server its fixed rules (0x00430f60 / 0x00430fa0 / 0x00430fc0).
+	sv.soldierFriendlyFire = 50;
+	sv.ranked = true;
+	report = hosted.report();
+	CHECK(report.keys["bf2142_friendlyfire"] == "0" && report.keys["bf2142_ticketratio"] == "100");
+	CHECK(std::atof(report.keys["bf2142_spawntime"].c_str()) == 15.0 && std::atof(report.keys["bf2142_teamratio"].c_str()) == 100.0);
+
+	// The keys travel: the game's own ids (0x005785b0) by name, asked by the LAN search.
+	CHECK(net::qr2KeyId("bf2142_friendlyfire") == 0x3b && net::qr2KeyId("bf2142_allow_spectators") == 0x51);
+	CHECK(net::qr2KeyId("") == -1);
+	const std::vector<uint8_t>& keys = net::lanQueryKeys();
+	net::ServerReport back;
+	CHECK(net::parseQr2Reply(net::qr2Answer(net::qr2Query(7, keys), report), 7, keys, {}, back));
+	for (const char* key : {"bf2142_friendlyfire", "roundtime", "bf2142_spawntime", "timelimit", "bf2142_ticketratio",
+			 "bf2142_teamratio", "bf2142_autobalanced", "bf2142_allow_spectators"}) {
+		CHECK(back.keys.count(key) == 1 && back.keys[key] == report.keys[key]);
+	}
+}
+
 TEST(NetHost_QuaternionRoundTrip)
 {
 	for (const auto& [yaw, pitch, roll] : std::vector<std::tuple<float, float, float>> {
@@ -230,18 +283,17 @@ TEST(NetHost_HostedGameJoin)
 	}));
 	dice::hfe::game::GameWorld::PlayerInfo me;
 	CHECK(round.playerInfo(client.world().localPlayer(), me) && me.team == 1 && !me.ai);
-	// A chat line goes round to every client, from our player.
+	// A chat line reaches the server from our player and goes out to those
+	// its channel reaches (0x004a93b0 → 0x004a6f70), never back to its
+	// sender, whose HUD showed it when sent (0x007d9b50).
 	std::vector<std::string> log;
 	hosted.onLog = [&log](const std::string& line) { log.push_back(line); };
 	client.say("hello all");
-	std::vector<net::ChatLine> heard;
-	CHECK(pumpUntil(step, [&] {
-		for (const net::ChatLine& line : client.world().takeChat()) {
-			heard.push_back(line);
-		}
-		return !heard.empty();
-	}));
-	CHECK(!heard.empty() && heard[0].text == "hello all" && heard[0].player == client.world().localPlayer());
+	CHECK(pumpUntil(step, [&] { return std::find(log.begin(), log.end(), "chat Joiner: hello all") != log.end(); }));
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	CHECK(client.world().takeChat().empty());
 	CHECK(hosted.clientCount() == 1);
 	const int joinerId = client.world().localPlayer();
 	client.disconnect();
@@ -370,7 +422,7 @@ TEST(NetHost_JoinedHudStateAndRequests)
 // client, the game's own with no sender), the offer of command (2/0x23)
 // answered by a client, the commander's tools from a client (the supply
 // drop; refused from anyone else), the squads' events (a new squad by
-// name, the leader's invite of a bot, his kick), the orders both ways and
+// name, the leader's invite of a bot, unanswered, his kick), the orders both ways and
 // a mutiny vote.
 TEST(NetHost_RadioCommanderToolsAndSquads)
 {
@@ -469,6 +521,18 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	CHECK(pumpUntil(step, [&] { return radioOf(heardB, 2, radio); }));
 	CHECK(radio.sender == idA && radio.team == team && radio.channel == 0 && radio.source == 3);
 	CHECK(!radioOf(heardA, 2, radio));
+	// A's chat line to all: B gets it from A, A not (0x004a93b0 →
+	// 0x004a6f70; A's HUD showed it when sent).
+	a.say("hello all");
+	std::vector<net::ChatLine> chatB;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::ChatLine& line : b.world().takeChat()) {
+			chatB.push_back(line);
+		}
+		return !chatB.empty();
+	}));
+	CHECK(!chatB.empty() && chatB[0].text == "hello all" && chatB[0].player == idA);
+	CHECK(a.world().takeChat().empty());
 	// The game's own (no sender) to the team.
 	round.radioMessage(-1, 13, "AUTO_MOODGP_TEAM_lostcp", team);
 	CHECK(pumpUntil(step, [&] { return radioOf(heardA, 3, radio) && radioOf(heardB, 3, radio); }));
@@ -523,8 +587,9 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	CHECK(pumpUntil(step, [&] { return tools.size() == 2; }));
 	CHECK(tools.size() == 2 && !std::get<2>(tools[1]));
 
-	// B makes squad 1 by naming it, invites a bot (who takes it), then
-	// removes him (LeaveSquad with the member).
+	// B makes squad 1 by naming it and invites a bot: the invite only marks
+	// the bot's mask (0x004c3190; no AI path answers it), so he stays out
+	// until he joins; then B removes him (LeaveSquad with the member).
 	b.createSquad(1, "Alpha");
 	CHECK(pumpUntil(step, [&] {
 		const net::RemotePlayer* pb = b.world().player(idB);
@@ -533,10 +598,11 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	const int bot = round.addPlayer("Bot1", team, true);
 	CHECK(pumpUntil(step, [&] { return b.world().player(bot) != nullptr; }));
 	b.invite(bot, 1);
-	CHECK(pumpUntil(step, [&] {
+	CHECK(!pumpUntil(step, [&] {
 		dice::hfe::game::GameWorld::PlayerInfo p;
 		return round.playerInfo(bot, p) && p.squad == 1;
-	}));
+	}, 300));
+	round.joinSquad(bot, 1);
 	b.leaveSquad(1, bot);
 	CHECK(pumpUntil(step, [&] {
 		dice::hfe::game::GameWorld::PlayerInfo p;
@@ -641,6 +707,18 @@ float distance(const net::Vec3f& a, const dice::hfe::physics::Vec3& b)
 }
 
 } // namespace
+
+// PlayerHealth on the local game's HUD (0x007a0f80): the soldier's hit
+// points over its maxHitPoints, not a constant full bar.
+TEST(Host_LocalHudHealthIsTheSoldiers)
+{
+	HostRange range;
+	CHECK(range.round->spawnPlayer(2) != nullptr);
+	const host::LocalHudWorld local(*range.round, range.logic);
+	CHECK(std::abs(local.health() - 1.0f) < 1e-4f);
+	range.round->setHitPoints(range.round->playerObject(), 48.7f);
+	CHECK(std::abs(local.health() - 0.487f) < 1e-4f);
+}
 
 // The control-object record's mode-3 state end to end: a client predicts
 // its soldier from its own moves (Prediction.h) while the host steps the
@@ -765,6 +843,48 @@ TEST(NetHost_PredictionAndSession)
 	CHECK(st.sumCorrection / st.records < 0.05);
 	CHECK(compared > 100 && worstBot < 0.01f && worstHealth < 0.01f);
 
+	// The client's moves stop (its game no longer ticks): the server takes
+	// the last move again for up to 30 ticks in a row (0x004ac660's +0x30),
+	// then steps an all-zero input, so the soldier walks on for a second
+	// and stops.
+	{
+		dice::hfe::game::SoldierInput forward;
+		forward.throttle = 1;
+		client.setInput(net::playerInputFrom(forward));
+		for (int i = 0; i < 20; ++i) {
+			client.update();
+			client.simulatedTick();
+			hosted.tick();
+			round.tick(1.0f / 30);
+			std::this_thread::sleep_for(std::chrono::milliseconds(33));
+		}
+		for (int i = 0; i < 10; ++i) { // the moves in flight arrive
+			client.update();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		std::vector<dice::hfe::physics::Vec3> at;
+		uint32_t recordsDry = 0;
+		for (int i = 0; i < 70; ++i) {
+			client.update();
+			if (i == 10) {
+				recordsDry = client.world().controlRecords();
+			}
+			hosted.tick();
+			round.tick(1.0f / 30);
+			CHECK(round.playerInfo(me, info) && info.alive);
+			at.push_back(info.position);
+		}
+		// No move taken, no record (the ghost manager's +0x20e4 / +0x20e8):
+		// the dry ticks send none.
+		CHECK(recordsDry > 0 && client.world().controlRecords() == recordsDry);
+		const auto moved = [&](size_t from, size_t to) {
+			const dice::hfe::physics::Vec3 d = at[to] - at[from];
+			return std::sqrt(d.x * d.x + d.z * d.z);
+		};
+		CHECK(moved(0, 25) > 1.0f);   // the moves left, then the last one again
+		CHECK(moved(55, 69) < 0.05f); // past 30 dry ticks: standing
+	}
+
 	// A map change on the same connection: the level block again, and the
 	// join's database for the new round.
 	HostRange next;
@@ -786,12 +906,111 @@ TEST(NetHost_PredictionAndSession)
 	CHECK(hosted.clientCount() == 0);
 }
 
+// A playtest's findings on a hosted round: a client's name reaches the
+// round (ChangePlayerName, 0x0050bb90: the scripts and the scoreboards
+// read the round's); a squad's spawn group (ids from 0xc0, 0x006347c0,
+// placed at its leader: 0x004c7f10) lets a member spawn on the leader
+// through 6/6, as the spawn screen's leader marker asks; and a spawn asked
+// for waits out the death's spawn time (0x004bb220).
+TEST(NetHost_NameSquadSpawnAndSpawnWait)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	round.autoRespawn = false;
+	round.setManDownTime(0);
+	round.setSpawnTime(2);
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	// The squad's leader, a bot of team 2, walks away from the team's spawn
+	// point (0, 0, 0).
+	const int leader = round.addPlayer("Leader", 2, true);
+	CHECK(round.joinSquad(leader, 1));
+	CHECK(round.spawnSoldier(leader));
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	int ticks = 0;
+	bool leaderWalks = true;
+	const auto step = [&] {
+		client.update();
+		dice::hfe::game::SoldierInput walk;
+		walk.throttle = leaderWalks ? 1.0f : 0.0f;
+		round.setInput(leader, walk);
+		hosted.tick();
+		round.tick(1.0f / 30);
+		++ticks;
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.name == "Joiner"; }));
+	// 0x0050bb90 renames only the sender's own player (the event's byte
+	// against the connection's, +0x2c): a rename of the leader is refused.
+	net::GameEvent rename;
+	rename.type = net::kEvChangePlayerName;
+	rename.values = {static_cast<uint32_t>(leader) & 0xff};
+	rename.bytes = {"Impostor"};
+	client.sendEvent(rename);
+	rename.values = {static_cast<uint32_t>(me) & 0xff};
+	rename.bytes = {"Joiner2"};
+	client.sendEvent(rename);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.name == "Joiner2"; }));
+	CHECK(round.playerInfo(leader, info) && info.name == "Leader");
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
+	for (int i = 0; i < 30 * 6; ++i) {
+		step();
+	}
+	leaderWalks = false;
+	dice::hfe::game::GameWorld::PlayerInfo lead;
+	CHECK(round.playerInfo(leader, lead) && lead.alive && lead.squadLeader);
+	CHECK(std::hypot(lead.position.x, lead.position.z) > 12);
+	// The squad's group, at the leader's soldier ghost.
+	uint16_t leaderGhost = 0;
+	int group = -1;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::RemotePlayer& p : client.world().playerList()) {
+			leaderGhost = p.name == "Leader" ? p.soldierGhost : leaderGhost;
+		}
+		for (const auto& [id, g] : client.world().spawnGroups()) {
+			group = leaderGhost && g.ghost == leaderGhost && g.team == 2 ? id : group;
+		}
+		return group >= 0;
+	}));
+	CHECK(group >= 0xc0 && group <= 0xff);
+	client.selectSpawnGroup(group);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
+	round.playerInfo(leader, lead);
+	CHECK(distance({info.position.x, info.position.y, info.position.z}, lead.position) < 10);
+	CHECK(std::hypot(info.position.x, info.position.z) > 5); // not at the team's spawn point
+
+	// Dead, a spawn asked for at once comes after the 2 s spawn time.
+	client.suicide();
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && !info.alive; }));
+	const int diedAt = ticks;
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
+	CHECK(ticks - diedAt >= 2 * 30 - 1);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 // The others' soldiers between machines: the soldier ghost's pose (mask
 // 0x20, +0x268 / +0x26c) and the look's twist (4), the player networkable's
 // fire state (0x40, +0x19c) and presses (0x4000000) and man-down (0x20);
 // the Spotted event (0x0050e910: a radio call's code to the team's players
 // as 2/<code> with the reporter's soldier); an invite asked of a client's
-// player (2/0x10, 0x004c3190) and its refusal (Invite without the bit).
+// player (2/0x10, 0x004c3190) and its refusal (Invite without the bit); a
+// private squad's join asking its leader (0x004c7290) and his answers.
 TEST(NetHost_StanceFireSpottedAndInvites)
 {
 	HostRange range;
@@ -942,6 +1161,40 @@ TEST(NetHost_StanceFireSpottedAndInvites)
 		dice::hfe::game::GameWorld::PlayerInfo pa;
 		return round.playerInfo(idA, pa) && pa.squad == 1;
 	}));
+
+	// A private squad (0x004c7290): B locks squad 1 after A leaves; A's
+	// JoinSquad is refused, B is asked (2/0x11, A's id) and A told (2/0xc,
+	// the squad). B's no reaches A through the server (2/0x12, 0x004a5750);
+	// asked again, B's yes (2/0x13) invites A (2/0x10), whose join then
+	// takes.
+	a.leaveSquad(1);
+	b.setPrivateSquad(1, true);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa;
+		return round.playerInfo(idA, pa) && pa.squad == 0 && round.squadPrivate(2, 1);
+	}));
+	const auto heard = [](const std::vector<net::PostRemoteInfo>& list, uint32_t id, int value) {
+		return std::any_of(list.begin(), list.end(), [&](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == id && m.payloadInt(0) == value;
+		});
+	};
+	messagesA.clear();
+	messagesB.clear();
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return heard(messagesB, 0x11, idA) && heard(messagesA, 0xc, 1); }));
+	dice::hfe::game::GameWorld::PlayerInfo pa;
+	CHECK(round.playerInfo(idA, pa) && pa.squad == 0);
+	b.answerJoinRequest(idA, 1, false);
+	CHECK(pumpUntil(step, [&] { return heard(messagesA, 0x12, 1); }));
+	CHECK(!heard(messagesA, 0x10, 1) && round.playerInfo(idA, pa) && pa.squad == 0);
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return heard(messagesA, 0xc, 1); }));
+	b.answerJoinRequest(idA, 1, true);
+	CHECK(pumpUntil(step, [&] { return heard(messagesA, 0x13, 1) && heard(messagesA, 0x10, 1); }));
+	CHECK((round.squadInvites(idA) & (1u << 1)) != 0);
+	a.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(idA, pa) && pa.squad == 1; }));
+	CHECK((round.squadInvites(idA) & (1u << 1)) == 0); // the join's clear (0x004c6c80)
 }
 
 // Others' rounds and reloads on clients: a reload pressed on the server
@@ -1209,6 +1462,54 @@ struct HostGarage {
 
 } // namespace
 
+// A joined client's body of a ghost vehicle (its round's physics, asleep
+// on a client) is put where the ghost is (GameWorld::placeRemoteBody, as
+// 0x005ffec0 sets the root's physics node): the seat guns' rounds start at
+// the vehicle's muzzle there, not where the client first saw the vehicle
+// (a walker driven 45 m fired from its spawn). Needs $BF2142_GAME_DIR.
+TEST(Host_RemoteSeatGunsFireFromTheGhostsPlace)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	namespace game = dice::hfe::game;
+	namespace physics = dice::hfe::physics;
+	HostGarage garage(gameDir, "us_heavy_mech", {0, 0, 20});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	game::GameWorld& round = *garage.round;
+	round.tick(1 / 30.0f); // its body
+	const std::vector<game::GameWorld::SeatLayout> seats = round.vehicleSeats(garage.vehicle);
+	int armed = -1;
+	for (size_t i = 0; i < seats.size() && armed < 0; ++i) {
+		armed = seats[i].weapons.empty() ? -1 : static_cast<int>(i);
+	}
+	CHECK(armed >= 0);
+	dice::hfe::world::Object* walker = garage.objects.find(garage.vehicle);
+	const physics::Vec3 there {60, 0, 90};
+	walker->setPosition({there.x, there.y, there.z});
+	round.placeRemoteBody(garage.vehicle, there, physics::Mat3 {}, {});
+	dice::hfe::client::RemoteSeatGuns guns;
+	dice::hfe::client::RemoteSeatGuns::Seat seat;
+	seat.player = 1;
+	seat.vehicle = garage.vehicle;
+	seat.seat = armed;
+	seat.firing[0] = seat.firing[1] = seat.firing[2] = true;
+	for (int i = 0; i < 10; ++i) {
+		guns.step(round, {seat}, 1 / 30.0f);
+	}
+	int near = 0, far = 0;
+	for (const game::Projectile& p : round.projectiles()) {
+		if (p.visual && p.shooter == garage.vehicle) {
+			(std::hypot(p.origin.x - there.x, p.origin.z - there.z) < 10 ? near : far) += 1;
+		}
+	}
+	CHECK(near > 0 && far == 0);
+}
+
 // The vehicle prediction end to end: a client drives a shipped car on the
 // host over 127.0.0.1; its own copy (GameWorld::LoneVehicle) is stepped
 // with each move it sends and corrected by each record of the driver's
@@ -1353,10 +1654,105 @@ TEST(NetHost_VehiclePrediction)
 	client.disconnect();
 }
 
+// A joined client's soldier standing and walking on a vehicle's roof: the
+// prediction meets the moving objects near it (GameWorld::soldierMovers,
+// the soldier broad phase 0x006dcce0) as the server's soldier does, so it
+// stays on the roof rather than falling through it between the records
+// (before: corrections on nearly every record). Needs $BF2142_GAME_DIR.
+TEST(NetHost_PredictionOnAVehicleRoof)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		std::printf("  (BF2142_GAME_DIR not set: skipped)\n");
+		return;
+	}
+	HostGarage garage(gameDir, "eu_apc", {0, 0, 12});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	dice::hfe::game::GameWorld& round = *garage.round;
+	host::HostSetup setup;
+	setup.level = "Garage";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, garage.logic, garage.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Rider";
+	client.world().setGhostTemplates([&garage](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = garage.templates.findById(id);
+		return t ? net::ghostTemplateFrom(garage.templates, *t) : net::GhostTemplateNode {};
+	});
+	host::SoldierPrediction soldier(round);
+	client.onMoveSent = [&](const net::PlayerMove& move) { soldier.step(move); };
+	client.sendOnTicks = true;
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	dice::hfe::game::SoldierInput walk;
+	uint32_t records = 0;
+	const auto step = [&] {
+		client.setInput(net::playerInputFrom(walk));
+		client.update();
+		const net::RemoteWorld& world = client.world();
+		if (world.controlRecords() != records) {
+			records = world.controlRecords();
+			const net::ControlState* state = world.controlState();
+			const net::ControlObjectRecord& record = world.controlObject();
+			if (state && !state->groups.empty() && state->groups.front().kind == net::NetworkableKind::Soldier) {
+				if (!soldier.active()) {
+					soldier.start(garage.templates.find("us_light_soldier"), record.lastMove, state->groups.front(),
+						record.position);
+				} else {
+					soldier.reconcile(record.lastMove, state->groups.front(), record.position);
+				}
+			}
+		}
+		client.simulatedTick();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(33));
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 8000));
+	const int me = client.world().localPlayer();
+	client.selectTeam(2);
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }, 6000));
+	soldier.setOwner(2, info.soldier);
+	// Dropped onto the roof; it settles there.
+	const dice::hfe::world::Object* apc = garage.objects.find(garage.vehicle);
+	round.setSoldierPosition(info.soldier, {apc->position().x, apc->position().y + 4.0f, apc->position().z});
+	for (int i = 0; i < 60; ++i) {
+		step();
+	}
+	CHECK(pumpUntil(step, [&] { return soldier.active(); }, 4000));
+	const host::SoldierPrediction::Stats before = soldier.stats();
+	// Standing two seconds, then a slow walk along the roof and back.
+	for (int i = 0; i < 30 * 4; ++i) {
+		walk = {};
+		walk.throttle = i < 60 ? 0.0f : i < 90 ? 0.4f : -0.4f;
+		step();
+	}
+	const host::SoldierPrediction::Stats& st = soldier.stats();
+	const uint32_t taken = st.records - before.records;
+	const double mean = taken ? (st.sumCorrection - before.sumCorrection) / taken : 0.0;
+	round.playerInfo(me, info);
+	std::printf("  on the roof (%.2f m up): %u records, correction mean %.4f m (%u over 1 cm)\n", info.position.y, taken,
+		mean, st.corrections - before.corrections);
+	CHECK(info.alive && info.position.y > 1.5f); // on the roof, not beside the vehicle
+	CHECK(taken > 60);
+	CHECK(mean < 0.01);
+	CHECK(st.corrections - before.corrections < taken / 10);
+	client.disconnect();
+}
+
 // The heavy IFV's repair cells on a joined client: the root's state carries
 // its armored children (mask 0x800000, the root's list in post-order,
-// armor.fullChildSync eighths), the host the cells' state among them
-// (GameWorld::repairCells), and the client's vehicle HUD shows the cells
+// armor.fullChildSync eighths), the host the cells' eighths among them
+// (GameWorld::repairCellEighths), and the client's vehicle HUD shows the cells
 // with hudRepairCellNo (0x007a1e50) from it: all up, then all down as the
 // hull is wrecked. Needs $BF2142_GAME_DIR.
 TEST(NetHost_JoinedRepairCells)
@@ -1433,9 +1829,130 @@ TEST(NetHost_JoinedRepairCells)
 		}
 	}
 	CHECK(turret);
+	// The cells in eighths (0x005ffec0's capture): the hull at 90 %, each
+	// cell mirrors it at 99 of 110, seven eighths, which the client sets
+	// its cells to (GameWorld::setRemoteRepairCells) for their effects.
+	const auto eighths = [&]() -> std::vector<int> {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == ifv->id() && o.part == 0) {
+				return o.repairCellEighths;
+			}
+		}
+		return {};
+	};
+	// The dirty masks (0x005800e0, 0x0057f420): the first state carries
+	// every field, a later one only what changed. The hull's hit points
+	// alone go in fewer bits than the whole state did.
+	const auto rootState = [&]() -> std::pair<uint32_t, size_t> {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == ifv->id() && o.part == 0) {
+				return {o.updates, o.stateBits};
+			}
+		}
+		return {0, 0};
+	};
+	size_t wholeBits = rootState().second;
+	for (int i = 0; i < 30; ++i) {
+		step(); // standing: the masks stay clear
+	}
+	const auto standing = rootState();
+	wholeBits = std::max(wholeBits, standing.second);
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	CHECK(rootState().first <= standing.first + 1);
+	round.setHitPoints(garage.vehicle, round.hitPoints(garage.vehicle) * 0.9f);
+	CHECK(pumpUntil(step, [&] { return eighths() == std::vector<int>(7, 7); }, 6000));
+	CHECK(rootState().second > 0 && rootState().second < wholeBits);
 	round.applyDamage(garage.vehicle, 5000);
 	CHECK(pumpUntil(step, [&] { return all(seen(), false); }, 6000));
 	CHECK(all(round.repairCells(garage.vehicle), false));
+	client.disconnect();
+}
+
+// A ducking seat seen from a joined client: the host's player in a bipod
+// (allowDucking) crouches, the seat ducks (0x005ca2e0 -> setDucking,
+// 0x005c7cf0), and the vehicle root's networkable carries it (SimpleObject
+// 0x100000, PCO +0x18c), which the client's seated soldier lets go of
+// the grips by (animateRemoteSeated). Needs $BF2142_GAME_DIR.
+TEST(NetHost_JoinedDuckingSeat)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	HostGarage garage(gameDir, "eu_bipod", {0, 0, 4});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	dice::hfe::game::GameWorld& round = *garage.round;
+	const dice::hfe::world::ObjectTemplate* bipod = garage.templates.find("eu_bipod");
+	host::HostSetup setup;
+	setup.level = "Garage";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, garage.logic, garage.templates, setup);
+	CHECK(hosted.start());
+	CHECK(round.spawnPlayer(2) != nullptr);
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Watcher";
+	client.world().setGhostTemplates([&garage](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = garage.templates.findById(id);
+		return t ? net::ghostTemplateFrom(garage.templates, *t) : net::GhostTemplateNode {};
+	});
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	dice::hfe::game::SoldierInput input;
+	const auto step = [&] {
+		round.setPlayerInput(input);
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	};
+	const auto seen = [&]() -> const net::RemoteObject* {
+		for (const net::RemoteObject& o : client.world().objectList()) {
+			if (o.templateId == bipod->id() && o.part == 0) {
+				return client.world().object(o.ghost);
+			}
+		}
+		return nullptr;
+	};
+	CHECK(pumpUntil(step, [&] { return seen() != nullptr; }, 8000));
+	// In: the use key beside it.
+	for (int tries = 0; tries < 40 && !round.playerVehicle(); ++tries) {
+		const float a = static_cast<float>(tries % 8) * 0.785398f, r = 0.8f + static_cast<float>(tries / 8) * 0.5f;
+		round.setSoldierPosition(round.playerObject(), {r * std::sin(a), 0, 4 + r * std::cos(a)});
+		input = {};
+		input.use = true;
+		for (int i = 0; i < 3; ++i) {
+			step();
+		}
+		input = {};
+		for (int i = 0; i < 3; ++i) {
+			step();
+		}
+	}
+	CHECK(round.playerVehicle() && round.playerVehicle()->id() == garage.vehicle);
+	CHECK(!round.seatDucking(garage.vehicle, 0));
+	// Its IK object is its gun (eu_mg_stationary, a firearm with an Ik
+	// component): the seat system's messages 4 while zoomed and 1 while
+	// firing (0x005ef250's weapon layers), cleared otherwise.
+	const auto seats = round.vehicleSeats(garage.vehicle);
+	CHECK(!seats.empty());
+	if (!seats.empty()) {
+		CHECK(round.ikWeaponMessages(*bipod, seats[0], true, false, 0) == 4);
+		CHECK(round.ikWeaponMessages(*bipod, seats[0], false, true, 4 | 2) == (1 | 2));
+		CHECK(round.ikWeaponMessages(*bipod, seats[0], false, false, 1 | 4) == 0);
+	}
+	input = {};
+	input.pose = dice::hfe::game::SoldierPose::Crouch;
+	CHECK(pumpUntil(step, [&] { return seen() && seen()->seatDucking; }));
+	CHECK(round.seatDucking(garage.vehicle, 0));
+	input = {};
+	CHECK(pumpUntil(step, [&] { return seen() && !seen()->seatDucking; }));
 	client.disconnect();
 }
 
@@ -1615,6 +2132,139 @@ TEST(NetHost_JoinedCombatAreaCountdown)
 		return q && q->outsideSeconds == 0;
 	}, 8000));
 	CHECK(hud.combatAreaTimeLeft() < 0);
+	client.disconnect();
+}
+
+// A joined client's ability bar (0x007c3af0 runs on the client too): the
+// gift flags of our own state, which the host now sends (0x00594cc0:
+// +0x16a, +0x168, +0x169, set by the heal 0x004bc410), the kit's battery
+// from the control record (mode 3's 0x40000) as the prediction keeps it,
+// filled between records by the kit's abilityRestoreRate (0x0058d350),
+// and the targets of the client's own scan of the medic hub in hand
+// (0x005d8740): our wounded soldier, his networked health.
+TEST(NetHost_JoinedAbilityBar)
+{
+	using namespace dice::hfe;
+	HostRange range;
+	game::GameWorld& round = *range.round;
+	range.templates.registerType(4, "GenericFireArm");
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* rifle = range.templates.create("GenericFireArm", "test_rifle");
+	rifle->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "test_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "test_medic_kit");
+	kit->components().push_back("Ability");
+	kit->settings()["ability.hasHealingAbility"] = "1";
+	kit->settings()["abilityRestoreRate"] = "0.02";
+	kit->settings()["networkableInfo"] = "KitInfo"; // a ghost of its own (HandlePickup names it)
+	kit->children().push_back({"test_rifle", {}, {}});
+	kit->children().push_back({"test_hub_medic", {}, {}});
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	client.world().setGhostTemplates([&range](uint32_t id) {
+		const world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	host::SoldierPrediction prediction(round);
+	client.onMoveSent = [&](const net::PlayerMove& move) { prediction.step(move); };
+	client.sendOnTicks = true;
+	net::GameClientOptions options;
+	options.playerName = "Medic";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	game::SoldierInput input;
+	uint32_t records = 0;
+	const auto step = [&] {
+		client.setInput(net::playerInputFrom(input));
+		client.update();
+		const net::RemoteWorld& world = client.world();
+		if (world.controlRecords() != records && world.controlState() && !world.controlState()->groups.empty()
+			&& world.controlState()->groups.front().kind == net::NetworkableKind::Soldier) {
+			records = world.controlRecords();
+			const net::ControlObjectRecord& record = world.controlObject();
+			if (!prediction.active()) {
+				prediction.start(range.templates.find("us_light_soldier"), record.lastMove,
+					world.controlState()->groups.front(), record.position);
+			} else {
+				prediction.reconcile(record.lastMove, world.controlState()->groups.front(), record.position);
+			}
+		}
+		client.simulatedTick();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	round.setKit(me, "test_medic_kit", "us_light_soldier");
+	CHECK(round.spawnSoldier(me));
+	game::GameWorld::PlayerInfo mine;
+	CHECK(round.playerInfo(me, mine));
+	round.setHitPoints(mine.soldier, 40);
+	round.setBattery(me, 0.5f);
+	// The client's view: the host's own objects stand in for its ghosts.
+	std::map<uint16_t, uint32_t> ghostObjects;
+	host::RemoteHudWorld hud(client.world(), round, ghostObjects);
+	hud.ownBattery = [&prediction](float& battery) {
+		battery = prediction.battery();
+		return prediction.active();
+	};
+	prediction.setBatteryRate(0.02f);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemotePlayer* p = client.world().player(me);
+		return p && p->alive && p->soldierGhost && p->kitGhost && prediction.active();
+	}, 15000));
+	ghostObjects[client.world().player(me)->soldierGhost] = mine.soldier;
+	ghostObjects[client.world().player(me)->kitGhost] = mine.kit;
+	game::GameWorld::AbilityBarInfo bar;
+	CHECK(hud.abilityBar(bar) && bar.alive && bar.kitAbility && bar.kitHealing && !bar.healFlag);
+	CHECK(bar.replenishingType == 3); // the rifle in hand
+	// The hub in hand: the host heals our soldier and stamps the gift; the
+	// client scans the same soldier.
+	input.selectItem = 4;
+	for (int i = 0; i < 3; ++i) {
+		step();
+	}
+	input.selectItem = 0;
+	CHECK(pumpUntil(step, [&] {
+		hud.stepAbility(1.0f / 30, false);
+		const net::ControlState* state = client.world().controlState();
+		return state && state->hasOwn && state->own.flag168 && hud.heldWeapon().weapon == hub;
+	}, 6000));
+	CHECK(hud.abilityBar(bar) && bar.healFlag && !bar.repairFlag && !bar.ammoFlag);
+	CHECK(bar.sinceHeal < 0); // no ticks come: the vehicle branch stays off
+	CHECK(bar.replenishingType == 0 && bar.active && bar.targets.size() == 1);
+	const float health = round.hitPoints(mine.soldier) / 100.0f;
+	std::fprintf(stderr, "  joined bar: target %.3f (host %.3f), battery %.3f (host %.3f)\n",
+		bar.targets.empty() ? -1.0f : bar.targets[0], health, bar.battery, [&] {
+			game::GameWorld::PlayerInfo now;
+			return round.playerInfo(me, now) ? now.battery : -1.0f;
+		}());
+	CHECK(!bar.targets.empty() && bar.targets[0] > 0.4f && bar.targets[0] < 1.0f && std::fabs(bar.targets[0] - health) < 0.05f);
+	// The battery: the record's (7 bits), the restore rate on top since.
+	game::GameWorld::PlayerInfo now;
+	CHECK(round.playerInfo(me, now) && now.battery >= 0 && std::fabs(bar.battery - now.battery) < 0.03f);
+	CHECK(prediction.battery() == bar.battery);
+	// The hub put away: no tool, no targets; the flag stays (the player's
+	// constructor alone clears it).
+	input.selectItem = 3;
+	for (int i = 0; i < 3; ++i) {
+		step();
+	}
+	input.selectItem = 0;
+	CHECK(pumpUntil(step, [&] {
+		hud.stepAbility(1.0f / 30, false);
+		return hud.heldWeapon().weapon == rifle;
+	}, 6000));
+	CHECK(hud.abilityBar(bar) && bar.healFlag && bar.replenishingType == 3 && bar.targets.empty() && !bar.active);
 	client.disconnect();
 }
 

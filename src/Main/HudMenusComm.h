@@ -191,6 +191,29 @@ struct RadioSpam {
 	}
 };
 
+// The local player's RadioSpam on the game's timer (0x00666070: the
+// float at 0x00a7d1f0, the ticks × 1/30 s GameWorld::roundTime counts),
+// which both the check (0x00591d40) and the block's line (0x004b2b60)
+// read; a paused or slowed game holds the limits with it.
+// - message: the radio message's check (the client's game slot 0x50,
+//   0x004b2b60: slot 0x340 with 1, counted); a refusal plays the local
+//   "spam" voice and the personal line through `tell` (the seconds left).
+// - spot: the spot's (0x007c8160 without an object or a point: slot 0x340
+//   with 0; 0x0042d110: with "not the local player", 0 for him), neither
+//   counted nor told: only slot 0x50's refusal speaks, so a spot whose
+//   voice is refused too (Radio.sendSpottedMessage 1) is told once.
+class RadioSpamGate {
+public:
+	explicit RadioSpamGate(const game::GameWorld& round) : m_round(round) {}
+	RadioSpam spam;
+	bool message(bool commander, const std::function<void(int secondsLeft)>& tell);
+	bool spot(bool commander);
+
+private:
+	double now() const;
+	const game::GameWorld& m_round;
+};
+
 // What Radio.sendSpottedMessage spots and says (0x007c8160).
 // - The crosshair object (0x0075be30 with the HUD's ray 0x0075bfe0): the
 //   ray meets an object; when it and its root are canBeSpotted (vehicleHud
@@ -229,5 +252,20 @@ std::string spottedMessage(const world::ObjectTemplate* t);
 // with nothing in between); -1 for none.
 int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3],
 	float reach = 300);
+
+// Where a joined game's left click goes (the HUD's input, 0x00754290: the
+// pointer's buttons for the HUD's own nodes while playing). With a
+// soldier: the HUD (HudManager::click: the roses' entries, the scoreboard,
+// the map's menus); without one, the spawn screen: a spawn icon picks
+// that point, elsewhere any point (the client's round has no control
+// points of its own).
+enum class JoinedClick { Hud, SpawnAt, AnySpawn };
+inline JoinedClick joinedClick(bool hasControlObject, int marker)
+{
+	if (hasControlObject) {
+		return JoinedClick::Hud;
+	}
+	return marker >= 0 ? JoinedClick::SpawnAt : JoinedClick::AnySpawn;
+}
 
 } // namespace dice::hfe::menu

@@ -257,9 +257,13 @@ public:
 		std::array<RotationAxis, 3> axes;
 		std::array<int, 3> inputs {-1, -1, -1};
 		std::array<float, 3> angle {}, rate {}, excess {};
-		bool rememberExcess = false; // 0x30a: input over 1 is kept for later ticks (+-40)
+		bool rememberExcess = false; // 0x30a: input over 1 is kept for later ticks (+-40; emptied by an input against it, 0x00563bd0)
 		bool canReverse = true;      // an Engine's 0x744: an input against the axis's acceleration is 0
 		bool moves = false;          // an axis with a speed
+		// A lift-regulated Wing's pitch input (the object's +0x24c, which
+		// its physics node set last tick; 0x0064fd40 puts it over +0x1a4).
+		bool liftRegulated = false;
+		float liftRegulator = 0;
 		// startAutoRotateOnEnter (+0x310): an enter (event 2, 0x00565600)
 		// turns its auto-rotation on (+0x1dd), an exit (3) off with the
 		// speeds zeroed and restoreRotationOnExit's angles back; while on,
@@ -314,9 +318,13 @@ public:
 	};
 	struct WingPart {
 		int part = -1;
-		float wingLift = 0, flapLift = 0, pitchOffset = 0; // 0x36c, 0x370, 0x374
-		Vec3 positionOffset;                                // 0x378
-		float startDelay = 0;                               // 0x390
+		float wingLift = 1, flapLift = 0.1f, pitchOffset = 0; // 0x36c, 0x370, 0x374 (template 0x0062a2c0)
+		Vec3 positionOffset;                                  // 0x378
+		// liftRegulated (0x384; regulateToLift's setter 0x0062a290 sets it
+		// too), regulateToLift (0x388, 4.91), wingToRegulatorRatio (0x38c).
+		bool liftRegulated = false;
+		float regulateToLift = 4.91f, wingToRegulatorRatio = 1;
+		float startDelay = 0;                                 // 0x390
 		float multiply = 1, offsetY = 0;                    // the bundle's 0x340, 0x338
 		float waited = 0;
 	};
@@ -430,6 +438,7 @@ public:
 	const EngineSettings& engine() const { return m_engine; }
 	bool hasNewCar2() const { return m_newCar2; }
 	const std::vector<Part>& parts() const { return m_parts; }
+	const VehicleInput& regulatedInput() const { return m_regulated; } // after the PCO's regulator
 	const std::vector<OldEngine>& engines() const { return m_engines; }
 	const std::vector<WingPart>& wings() const { return m_wings; }
 	const std::vector<FloaterPart>& floaters() const { return m_floaters; }
@@ -450,6 +459,23 @@ public:
 	void legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below);
 	// The legs' drive (0x006cdca0), after every contact of the tick.
 	void legsDrive(physics::RigidBody& body);
+	// A foot found on an object (0x00650e90's sphere at each foot against
+	// the objects' meshes), as its heightmap probe does: its counter
+	// (+0x1c4 left, +0x1c8 right) back to 10.
+	void touchFeet(bool left, bool right)
+	{
+		if (left) {
+			m_legs.footLeft = kFootTicks;
+		}
+		if (right) {
+			m_legs.footRight = kFootTicks;
+		}
+	}
+	static constexpr int kFootTicks = 10;      // *0x00a055fc
+	static constexpr float kFootSide = 1.7f;   // *0x00a055f0: the feet's probes to either side
+	static constexpr float kFootDown = 2.3f;   // *0x00a055f4: and down
+	static constexpr float kFootProbe = 1.0f;  // *0x00a055f8: the heightmap segment's length
+	static constexpr float kFootRadius = 0.5f; // *0x00a05600: the objects' sphere
 	// The legs' frame in the world (the MechLegs node's matrix); false
 	// without legs.
 	bool legsFrame(const physics::RigidBody& body, physics::Mat3& frame, Vec3& origin) const
@@ -550,7 +576,7 @@ private:
 	void updateLegs(physics::RigidBody& body, const physics::Ground& ground, float seconds);
 	void updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
 		float gravity);
-	void regulateInput(const physics::RigidBody& body, float gravity);
+	void regulateInput(const physics::RigidBody& body, float gravity, float seconds);
 	float trackSpeed(const OldEngine& engine, float side, const physics::RigidBody& body) const;
 	physics::Mat3 partWorld(const physics::RigidBody& body, int part) const;
 	Vec3 partPoint(const physics::RigidBody& body, int part) const;
@@ -584,6 +610,10 @@ private:
 	std::function<bool(const Vec3&, const Vec3&)> m_legsObjectProbe;
 	bool m_hasLegs = false;
 	Regulator m_vertical; // regulateVerticalPos (0x390) on its input (0x374)
+	// regulatePitch (0x380, input 0x36c), regulateYaw (0x378, input 0x368),
+	// regulateRoll (0x388, input 0x370): the regulator's indices 0..2, each
+	// on the hull's angular velocity about its own x, y, z.
+	std::array<Regulator, 3> m_rotational;
 	bool m_occupied = false;
 	float m_objectRadius = 1;
 	float m_sprintFactor = 2.5f; // the PCO template's (+0x464; the constructor's 2.5)

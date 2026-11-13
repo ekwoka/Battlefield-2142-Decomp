@@ -307,6 +307,22 @@ TEST(NetGame_RemoteWorldFromEvents)
 	other.name = "Other";
 	world.apply(net::makeCreatePlayer(other));
 	CHECK(world.localPlayer() == 2 && world.playerList().size() == 2);
+	// The client's player manager keeps them in the order made (0x004b8b60),
+	// whatever their ids: the scoreboard's ties go by it.
+	{
+		net::CreatePlayerInfo low;
+		low.id = 1;
+		low.team = 2;
+		low.remote = true;
+		low.name = "Low";
+		world.apply(net::makeCreatePlayer(low));
+		CHECK(world.player(2)->created < world.player(5)->created && world.player(5)->created < world.player(1)->created);
+		net::GameEvent destroy;
+		destroy.type = net::kEvDestroyPlayer;
+		destroy.values = {1};
+		world.apply(destroy);
+		CHECK(world.playerList().size() == 2);
+	}
 	// HandlePickup (0x0050bfd0): player, the kit, the soldier (0x004bb350
 	// asks the third for the kit holder interface 0xc49d).
 	{
@@ -1824,7 +1840,7 @@ TEST(NetGame_ControlRecordMode3)
 	s.stamina = 0.75f;
 	s.sprinting = true;
 	s.weapon = 3;
-	s.soldierValue40000 = -0.5f;
+	s.battery = -0.5f;
 	const auto roundTrip = [&](unsigned mode, net::NetworkableState& back, size_t& bits) {
 		net::BitWriter out;
 		net::encodeNetworkable(out, soldier, &ref, s, mode);
@@ -1841,8 +1857,8 @@ TEST(NetGame_ControlRecordMode3)
 	CHECK(near(full.soldierAcceleration.y, -9.81f, 0.0001f) && near(full.soldierNode88.z, -0.0456f, 0.0001f));
 	CHECK(near(full.soldierImpulse.y, 6, 0.0011f) && near(full.position.x, 100.25f, 0.0011f)); // truncated: one step
 	CHECK(near(full.soldierLean[0], 0.4567f, 0.002f) && near(full.soldierLean[1], -0.25f, 0.002f));
-	CHECK(near(full.stamina, 0.75f, 0.005f) && full.sprinting && near(full.soldierValue40000, -0.5f, 0.02f));
-	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.18f) && coarse.soldierValue40000 == 0);
+	CHECK(near(full.stamina, 0.75f, 0.005f) && full.sprinting && near(full.battery, -0.5f, 0.02f));
+	CHECK(full.weapon == 3 && coarse.weapon == 3 && near(coarse.yaw, s.yaw, 0.18f) && coarse.battery == 0);
 
 	// RotationalBundle: 16 bits an angle and speed in mode 3.
 	net::NetworkableHints bundle;
@@ -2130,4 +2146,59 @@ TEST(NetGame_MechLegsMessages)
 	CHECK(net::mechLegsMessages(5, true) == 0x10);
 	CHECK(net::mechLegsMessages(1, false) == 0);
 	CHECK(net::mechLegsMessages(0, true) == 0);
+}
+
+// The armour's hit points are floats the network truncates (armor vtable
+// 0x8c): the Titans' "6e+006" is 6,000,000 hit points, so their ghosts'
+// hit points span 6,000,000 + 3,000,000 + 1 values, not 6 + 3 + 1, and a
+// client reads the Titan's armour as the server has it (its sync moves it
+// only above 60 %).
+TEST(NetGame_HitPointHintsTakeFloats)
+{
+	dice::hfe::world::ObjectTemplateManager templates;
+	dice::hfe::world::ObjectTemplate* titan = templates.create("PlayerControlObject", "titan_like");
+	titan->settings()["networkableInfo"] = "Info";
+	titan->settings()["armor.maxHitPoints"] = "6e+006";
+	titan->settings()["armor.wreckHitPoints"] = "3e+006";
+	const net::NetworkableHints h = net::networkableHintsFrom(templates, *titan, false);
+	CHECK(h.hasArmor && h.maxHitPoints == 6000000 && h.wreckHitPoints == 3000000);
+	net::NetworkableState s;
+	s.kind = net::NetworkableKind::SimpleObject;
+	s.mask = 0x10;
+	s.flag = true; // a Titan (0x00561d90): no node vectors
+	s.health = 3600000;
+	net::BitWriter out;
+	net::encodeNetworkable(out, h, nullptr, s);
+	net::BitReader in(out.data().data(), out.data().size());
+	net::NetworkableState back;
+	CHECK(net::decodeNetworkable(in, h, {}, back) && back.flag && back.hasHealth && back.health == 3600000);
+}
+
+// ECPhysicsETitanSync's 0x24 bytes (0x0050f160 / 0x005ab040): the team,
+// the last order's tick and target, the last state's tick, velocity and
+// position across x and z, as PostRemote 9/0 or 9/2.
+TEST(NetGame_TitanSyncPayload)
+{
+	net::TitanSyncInfo info;
+	info.team = 2;
+	info.orderTick = 1894;
+	info.targetX = -250;
+	info.targetZ = 7;
+	info.stateTick = 1834;
+	info.velocityX = 1.0625f;
+	info.velocityZ = -0.25f;
+	info.x = -423.621f;
+	info.z = 2.536f;
+	const std::string bytes = net::titanSyncPayload(info);
+	CHECK(bytes.size() == 0x24 && bytes[0] == 2);
+	uint32_t tick = 0;
+	std::memcpy(&tick, bytes.data() + 4, 4);
+	CHECK(tick == 1894);
+	const net::GameEvent e = net::makePostRemote(net::kMsgPhysicsCategory, net::kTitanSyncState, bytes);
+	net::PostRemoteInfo remote;
+	net::TitanSyncInfo back;
+	CHECK(net::parsePostRemote(e, remote) && remote.category == 9 && remote.id == 2 && net::parseTitanSync(remote.payload, back));
+	CHECK(back.team == 2 && back.orderTick == 1894 && back.targetX == -250 && back.targetZ == 7 && back.stateTick == 1834);
+	CHECK(back.velocityX == 1.0625f && back.velocityZ == -0.25f && back.x == -423.621f && back.z == 2.536f);
+	CHECK(!net::parseTitanSync(bytes.substr(0, 0x20), back));
 }

@@ -550,6 +550,16 @@ struct Decal {
 	// DecalManager slot 0x14, RendDX9 0x100e6b70, kept at object +0x164 and
 	// released with it, slot 0x20).
 	uint32_t object = 0;
+	// On a part of that object (-1: the object itself): a collisionPart
+	// child the round met, which in BF2142.exe is an object of its own
+	// with its own decal set (every shipped one has hasCollisionPhysics,
+	// 0x0063c000) and its own mesh instance (+0x4c, 0x0063ccc0), which the
+	// add (0x005a36d0: the hit object's slot 0xd4 set, its +0x4c mesh)
+	// clips the decal to and the set draws at the part's matrix: position,
+	// normal and tangent are then in the part's space (its index among the
+	// object's posed parts, GameWorld's raycastBody), and the decal turns
+	// and moves with it.
+	int part = -1;
 	// A world decal's static object (0: the terrain): the exe's add
 	// (0x005a36d0 -> DecalSet slot 4 0x10166410) passes the hit's mesh,
 	// whose faces 0x10165f60 clips it to.
@@ -946,6 +956,10 @@ public:
 	// isStatic): the rewrite's set is the object's decals' ownerDrawn.
 	bool spawnDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
 		const Vec3& objectPosition, const Vec3& objectRotation);
+	// The same on `object`'s part `part` (Decal::part) whose frame in the
+	// world is now `partRotation` (rows x, y, z) at `partPosition`.
+	bool spawnPartDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object, int part,
+		const Vec3& partPosition, const Mat3& partRotation);
 	// The id the last spawnDecal gave its decal (0x10166410's result: a
 	// static decal's id in its set, else 0).
 	uint8_t lastDecalId() const { return m_lastDecalId; }
@@ -1247,6 +1261,14 @@ public:
 		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
 		struct WeaponFire { std::string weapon, seat; };
 		std::vector<WeaponFire> firedWeapons;
+		// Events 0 and 1 to the object's own children this update (a
+		// round's: its engine's start, 0x005b2c10, sends 0x44 then 0; its
+		// stop, 0x005b2ca0 at a lost target or the round's end 0x005b4cb0,
+		// sends 1 then 0x45). 0x0061a4e0 starts on event 0 the bundles whose
+		// startOnEffects is 0 and stops on event 1 those whose
+		// stopOnEffects is 0; 0x44 and 0x45 do nothing to a bundle.
+		bool startEvent = false;
+		bool stopEvent = false;
 	};
 	// The ground under a point (wheel and draft bundles): the first hit from
 	// `from` to `to` against the terrain, the water and the objects (not
@@ -1408,8 +1430,9 @@ public:
 	// step (RainSettings), then its offset is (cos a x size.x, sin b x
 	// size.y, sin a x size.z) and a and b turn by (angleSpeed.x + their
 	// speed) x the frame's seconds (both by angleSpeed's x), wrapped past
-	// 360. The particle's group is its index mod 16 (the original's
-	// vertex data, Rain.fx Data.y, isn't traced).
+	// 360. A particle's group (Rain.fx Data.y, the vertex's byte 0xd from
+	// its record's +0x10, 0x1011cf00) is drawn once as it is made: rand()
+	// & 15 after the three rand()s of its place (0x1011b1b0, 0x1011b0b0).
 	struct Deviation {
 		float angle[2] {};
 		float size[3] {};
@@ -1417,6 +1440,7 @@ public:
 		Vec3 offset;
 	};
 	const std::array<Deviation, 16>& deviations() const { return m_deviations; }
+	const std::vector<uint8_t>& groups() const { return m_groups; } // each particle's deviation group
 
 private:
 	void rebuildDeviations(const scene::RainSettings& settings);
@@ -1427,6 +1451,7 @@ private:
 	bool m_deviationsBuilt = false;
 	uint32_t m_randState = 1;
 	std::vector<Vec3> m_positions; // without the sway
+	std::vector<uint8_t> m_groups; // their deviation groups, 0..15
 	Vec3 m_centre;          // the box's centre (held while frozen)
 	bool m_centreSet = false;
 	std::vector<Drop> m_drops;

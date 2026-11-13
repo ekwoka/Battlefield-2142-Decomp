@@ -44,10 +44,12 @@ struct Vec3 {
 float dot(const Vec3& a, const Vec3& b);
 Vec3 cross(const Vec3& a, const Vec3& b);
 float lengthSquared(const Vec3& v);
-// Contacts' push-outs and cancels taken together per axis (0x006b6bd0,
-// each axis 0x006b6b60): of the same sign the larger, of opposite signs
-// (or into 0) the sum, so opposed contacts offset each other.
-Vec3 combineContacts(const Vec3& into, const Vec3& value);
+// How the responses gather their contacts' push outs and cancelled
+// velocities (0x006b6bd0, per axis 0x006b6b60): into 0 the new value; of
+// the same sign the larger; of opposite signs the sum. So two contacts
+// pushing opposite ways (the two sides of a vehicle on uneven ground, a
+// soldier between two faces) cancel instead of the larger one winning.
+Vec3 combineAxes(const Vec3& into, const Vec3& value);
 
 // Rotation as rows (the engine's matrices act on row vectors: v * M).
 struct Mat3 {
@@ -82,6 +84,9 @@ constexpr float kMaxSpeed = 1500;               // 0x00a84ae8
 constexpr float kMaxContactImpulse = 1000;      // 0x00a83ea4
 constexpr float kFrictionScale = 1;             // 0x00a83eb8
 constexpr float kElasticityScale = 1;           // 0x00a83ebc
+constexpr float kStuckPush = 0.5f;              // *0x00a84238 (static_init 0x008ed7b0)
+constexpr float kStuckPushScale = 100;          // *0x00a8425c (0x008ed7d0)
+constexpr int kStuckCount = 3;                  // *0x00a84224 (0x008ed7f0)
 } // namespace tuning
 
 // The material properties a contact uses (MaterialManager slots 0x80-0x88:
@@ -162,14 +167,40 @@ public:
 	// `pointVelocity`, `depth` (negative) into a surface with `normal`.
 	void addContact(const Vec3& offset, const Vec3& pointVelocity, const Vec3& normal, float depth,
 		const ContactMaterial& material);
-	// Slot 0x30: push the body out and apply the contacts' impulses.
-	void solve(RigidBody& body);
+	// Slot 0x30: push the body out and apply the contacts' impulses. On
+	// the server (`server`, the game logic's slot 0x144) it also keeps the
+	// stuck push (0x006ba7d0): a counter (+0x118, -1 each solve and held
+	// within -1..3, +2 for a push over *0x00a84238 = 0.5 m) that, at
+	// *0x00a84224 = 3 or more, makes the stuck push (+0x11c, 0 at each
+	// solve's start) (sqrt(the largest push^2 yet, +0x114) - 0.5) x
+	// *0x00a8425c = 100: from the third solve running with such a push.
+	void solve(RigidBody& body, bool server = false);
+	// +0x11c: the mesh pass's collision events (0x006bb050, 0x6bc8b4 /
+	// 0x6bc8f6) take the mover's relative velocity x (1 + this).
+	float stuckPush() const { return m_stuckPush; }
+	// The MechLegs response's slot 0x30 (0x006ce740), for a walker whose
+	// contacts are its legs' sphere's only: nothing at all unless the push
+	// out (+0x1ac) is non-zero; then the push and each contact's impulse as
+	// solve's but without friction ((1 - cos) x 0.0 x *0x00a84cc8), at the
+	// contact's offset (its x and z x *0x00a84cf8, 1). The contacts go
+	// either way.
+	void solveLegs(RigidBody& body);
+
+	// What was recorded, dropped unsolved.
+	void clear()
+	{
+		m_contacts.clear();
+		m_pushOut = {};
+	}
 
 	const std::vector<Contact>& contacts() const { return m_contacts; }
 	const Vec3& pushOut() const { return m_pushOut; }
 
 private:
 	Vec3 m_pushOut; // 0x94: the largest push per axis
+	float m_largestPush = 0; // 0x114: the largest |push|^2 since its creation (0x006ba0d0)
+	int m_stuckCount = -1;   // 0x118
+	float m_stuckPush = 0;   // 0x11c
 	std::vector<Contact> m_contacts;
 };
 
@@ -322,5 +353,13 @@ public:
 using GroundTouch = std::function<void(size_t index, const Vec3& point, const Vec3& velocity, const Vec3& normal)>;
 void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
 	const Ground& ground, const ContactMaterial& material, const GroundTouch& touched = {});
+// The same for a part of `root` (a mover part's slot 0x28, 0x006b9260 on
+// the part): its points at the part's world frame (`rotation`, `position`),
+// each contact's point velocity the root's, its offset from the part's
+// origin (as the original records it, 0x00442760 with the part's slot
+// 0x60); the solve applies it to the root. The root isn't lifted.
+void collidePartWithGround(const RigidBody& root, ContactResponse& response, const std::vector<Vec3>& points,
+	const Mat3& rotation, const Vec3& position, const Ground& ground, const ContactMaterial& material,
+	const GroundTouch& touched = {});
 
 } // namespace dice::hfe::physics

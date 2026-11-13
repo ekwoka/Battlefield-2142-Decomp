@@ -528,6 +528,29 @@ TEST(Hud_MapAndMarkers)
 		CHECK(std::abs(quads[0].u0) < 1e-5f && std::abs(quads[0].v1 - 1) < 1e-5f && std::abs(quads[0].u1 - span) < 1e-4f);
 	}
 	CHECK(quads.size() == 1); // the spawn point is outside the window
+	// While playing, the minimap's texture eases to MenuMapAlpha, the
+	// profile's minimap transparency (0x0049bad0; 170 / 255 by default,
+	// 0x0049bdf0), and its icons take MenuMapIconAlpha (0x00780940).
+	CHECK(!quads.empty() && std::abs(quads[0].color[3] - 170.0f / 255.0f) < 1e-3f);
+	manager.set("MenuMapAlpha", 0.25f);
+	manager.set("MenuMapIconAlpha", 0.5f);
+	manager.setMapFocus(256, 256);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	CHECK(quads.size() == 2 && std::abs(quads[0].color[3] - 0.25f) < 1e-3f && std::abs(quads[1].color[3] - 0.5f) < 1e-3f);
+	manager.set("MapFullSize", 1);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	CHECK(quads.size() == 2 && quads[0].color[3] == 1 && quads[1].color[3] == 1); // the big map: full
+	manager.set("MapFullSize", 0);
+	manager.set("MenuMapAlpha", 170.0f / 255.0f);
+	manager.set("MenuMapIconAlpha", 1);
+	manager.setMapFocus(-500, -500);
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
 	// A combat area of the level's middle half: the big map shows it
 	// (widened by 20 of 512 pixels a side) filling the node.
 	manager.setMapArea(-256, -256, 256, 256);
@@ -809,6 +832,77 @@ TEST(Hud_TextNodeStyles)
 
 // A vehicle's miniMapIconOffset (0x0077dd70 → 0x0077c610): the icon drawn
 // that many pixels from its point, turned about the point.
+// The minimap turns with the player (0x0078f680): the heading (0x00778ea0)
+// eased into the map's turn (+0x80c), the texture and the icons turned
+// about the node's centre (0x0077cba0, 0x0077c610) so the view's way is
+// up; a static map (MapStatic) or a dead player at the minimap back to
+// north; the compass's delayed angle (+0x800) follows.
+TEST(Hud_MinimapTurnsWithThePlayer)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	manager.setMapFocus(0, 0);
+	// A mark 100 m east of the player, pointing north.
+	manager.setMapMarkers({{"mark.dds", 100, 0, 16, 0}});
+	manager.set("MapFullSize", 0);
+	const float east = 3.1415927f / 2;
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(east);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
+	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
+	CHECK(std::abs(manager.mapDelayedAngle() - east) < 0.01f);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	const float cx = 645 + 73, cy = 9 + 73;
+	CHECK(quads.size() == 2);
+	if (quads.size() == 2) {
+		// The map turned a quarter counter-clockwise about the node's centre.
+		CHECK(std::abs(quads[0].rotation + 90) < 0.01f && quads[0].pivotSet && quads[0].pivot[0] == cx && quads[0].pivot[1] == cy);
+		CHECK(quads[0].clipped);
+		// East is up: the mark straight above the centre, pointing left
+		// (north on the turned map).
+		const float mx = (quads[1].x0 + quads[1].x1) / 2, my = (quads[1].y0 + quads[1].y1) / 2;
+		CHECK(std::abs(mx - cx) <= 1 && my < cy - 40);
+		CHECK(std::abs(quads[1].rotation + 90) < 0.01f);
+	}
+	// A static map: north up again.
+	manager.set("MapStatic", 1);
+	manager.setMapHeading(east);
+	manager.tickMapTurn(1.0f / 60, true);
+	CHECK(manager.mapTurn() == 0 && manager.mapDelayedAngle() == 0);
+	quads = manager.frame(1);
+	CHECK(quads.size() == 2 && quads[0].rotation == 0);
+	if (quads.size() == 2) {
+		CHECK(std::abs((quads[1].x0 + quads[1].x1) / 2 - cx) > 40);
+	}
+	// Turning again, then dead at the minimap: back to 0.
+	manager.set("MapStatic", 0);
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(east);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
+	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
+	manager.setMapHeading(0);
+	manager.tickMapTurn(1.0f / 60, false);
+	CHECK(manager.mapTurn() == 0);
+}
+
 TEST(Hud_MapMarkerOffset)
 {
 	Console console;
@@ -1109,4 +1203,124 @@ TEST(CaptureVoice_IsTeamRelativeAndSiloAware)
 	CHECK(captureVoice(0, 2, 1, 3) == "AUTO_TITAN_C_enemycapturedsilo_3");
 	CHECK(captureVoice(0, 1, 1, 3) == "AUTO_TITAN_C_friendlycapturedsilo_3");
 	CHECK(captureVoice(1, 2, 1, 5) == "AUTO_TITAN_C_friendlylostsilo_5");
+}
+
+// setNodeLogicShowVariable's value is an int (0x0076e090 names "int",
+// 0x0076e1ca reads it with operator>>(int&)): "1.5" is 1.
+TEST(Hud_LogicValueIsAnInt)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createPictureNode BottomLeftStatic Left 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
+			 "hudBuilder.setNodeLogicShowVariable NOT IsSpectator 1.5",
+		 }) {
+		console.execute(line, out);
+	}
+	CHECK(!manager.frame(0).empty());
+	manager.set("IsSpectator", 1);
+	CHECK(manager.frame(0).empty());
+}
+
+// setBarNodeBorder and setCompassNodeBorder share one executor
+// (0x0076aebf -> 0x007b0780: the active node's slot 0x100), which bars and
+// compasses both answer with 0x007e9270 (+0x74..+0x80): either command
+// sets the same border on either node. A compass's strip period is its
+// width less the right border; a bar fills inside the border.
+TEST(Hud_BarAndCompassShareTheBorder)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createCompassNode Global Compass 3 100 10 90 10 1 0",
+			 "hudBuilder.setCompassNodeTexture 1 compass.tga",
+			 "hudBuilder.setCompassNodeTextureSize 360 10",
+			 "hudBuilder.setCompassNodeValueVariable VehicleAngle",
+			 "hudBuilder.setBarNodeBorder 0 0 0 60",
+			 "hudBuilder.createBarNode Global Health 3 100 500 200 10",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/full.tga",
+			 "hudBuilder.setBarNodeValueVariable PlayerHealth",
+			 "hudBuilder.setCompassNodeBorder 0 0 20 80",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.set("VehicleAngle", 90);
+	manager.set("PlayerHealth", 1);
+	const auto quads = manager.frame(0);
+	bool compass = false, bar = false;
+	for (const auto& q : quads) {
+		if (q.texture.find("compass.tga") != std::string::npos && q.x0 == 100) {
+			compass = true;
+			CHECK(std::abs(q.u0 - 75 / 360.0f) < 1e-5f); // floor(90 / 360 x (360 - 60))
+		}
+		if (q.texture.find("full.tga") != std::string::npos) {
+			bar = true;
+			CHECK(q.x0 == 120 && q.x1 == 220); // 20 off the left, 80 off the right
+		}
+	}
+	CHECK(compass && bar);
+}
+
+// A marker kept on the map (the record's +0x30, 0x0077efb0 -> 0x0077e100):
+// a teammate past the map's west edge sits 0.02 / zoom of the map in from
+// it; one not kept is cut away. A marker kept on the map but off the
+// minimap's node is still cut.
+TEST(Hud_MapMarkerClamp)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud::HudManager::MapMarker kept {"kept.dds", -600, 0, 16};
+	kept.clamp = true;
+	hud::HudManager::MapMarker loose {"loose.dds", -600, 0, 16};
+	hud::HudManager::MapMarker inside {"inside.dds", -510, 300, 16};
+	inside.clamp = true;
+	manager.setMapMarkers({kept, loose, inside});
+	manager.set("MapFullSize", 1);
+	std::vector<hud::HudQuad> marks;
+	for (const hud::HudQuad& q : manager.frame(0)) {
+		if (q.texture.find(".dds") != std::string::npos && q.texture.find("ingameMap") == std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	// The big map at (278, 29), 512 pixels, zoom 1: 0.02 x 512 = 10.24.
+	CHECK(marks.size() == 2);
+	if (marks.size() == 2) {
+		CHECK(marks[0].texture.find("kept.dds") != std::string::npos);
+		CHECK(marks[0].x0 == 280 && marks[0].x1 == 296 && marks[0].y0 == 29 + 256 - 8);
+		// Inside the map but nearer its edge than the margin: pushed in.
+		CHECK(marks[1].texture.find("inside.dds") != std::string::npos && marks[1].x0 == 280);
+	}
+	// The minimap round the map's centre: the kept marker is on the map's
+	// edge, far off the node, and cut.
+	manager.set("MapFullSize", 0);
+	manager.setMapFocus(0, 0);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	marks.clear();
+	for (const hud::HudQuad& q : quads) {
+		if (q.texture.find("kept.dds") != std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	CHECK(marks.empty());
 }

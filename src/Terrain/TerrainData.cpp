@@ -228,13 +228,13 @@ std::optional<TerrainData> parseTerrainData(const std::vector<uint8_t>& data, st
 		return std::nullopt;
 	}
 	t.layers.resize(static_cast<size_t>(layerCount));
-	for (DetailLayer& layer : t.layers) {
+	for (DetailLayer& layer : t.layers) { // 0x100b2ea7..0x100b2ed9
 		layer.texture = r.line();
 		layer.sideProjection = r.read<uint8_t>() != 0;
 		layer.sideTiling = r.floats<2>();
 		layer.tiling = r.read<float>();
-		r.read<int32_t>();
-		r.read<uint8_t>();
+		layer.yOffset = r.read<float>();
+		layer.envMap = r.read<uint8_t>() != 0;
 	}
 	if (!r.ok()) {
 		if (error) {

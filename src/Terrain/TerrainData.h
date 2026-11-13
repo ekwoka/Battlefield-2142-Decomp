@@ -11,8 +11,10 @@
 //   each terminated by '\n' (patch files append "XXxYY")
 //   far side tiling (2 floats), far top tiling high, [low (version >= 23)],
 //   far y offset, sun color, GI color, water color (3 floats each)
-//   i32 detail layer count; per layer: texture name ('\n'), u8 flag,
-//   2 floats, float tiling, i32, u8
+//   i32 detail layer count; per layer (0x100b2bdc..0x100b2ed9 into the
+//   layer record): texture name ('\n'), u8 side projection (+0x15), side
+//   tiling (2 floats, +0x1c), tiling (float, +0x18), y offset (float,
+//   +0x24), u8 envmap (+0x28)
 // RendDX9 stores the sun color scaled by 1/4 and the GI color by 1/2.
 //
 // Then (decoded from the loader's callees; the whole file is walked to its
@@ -60,11 +62,19 @@ class FileManager;
 
 namespace dice::hfe::terrain {
 
+// A detail layer's record (RendDX9 terrain +0x2cc). Its pass (0x1014e570):
+// side-projected (TerrainShader_Hi.fx pass 5, FullDetailMounten) when
+// sideProjection is set, else environment-mapped (pass 11,
+// FullDetailWithEnvMap) when envMap is set and there is a current cube,
+// else plain (pass 4, FullDetail). NEARTEXTILING is (sideTiling, tiling,
+// yOffset).
 struct DetailLayer {
 	std::string texture; // without ".dds"
-	bool sideProjection = false; // the flag byte; set for rock layers
-	std::array<float, 2> sideTiling {};
-	float tiling = 1; // repeats across a patch
+	bool sideProjection = false; // +0x15; any non-zero byte
+	std::array<float, 2> sideTiling {}; // +0x1c: the x and z planes' repeats across a patch and a height unit
+	float tiling = 1;    // +0x18: the y plane's repeats across a patch
+	float yOffset = 0;   // +0x24: added to the x and z planes' vertical coordinate
+	bool envMap = false; // +0x28
 };
 
 // A range of a shared index buffer (indices, not triangles).

@@ -133,6 +133,91 @@ TEST(SoldierPhysics_WalksUpAHill)
 	CHECK(std::fabs(body.position.y - (body.position.x * 0.3f + 1)) < 0.3f);
 }
 
+// A step a couple of centimetres down (a Titan deck's seam) leaves a
+// walking soldier a tick in the air. The Soldier asks for no velocity
+// there (0x00588420's air path skips slot 0x84) and the movement
+// (0x006c2230) returns without clearing the one asked last, so on landing
+// it is taken again: the soldier walks on at its speed. Braking to the
+// air's "none" instead cost a whole step's speed at every seam (the deck
+// walk on Suez_Canal's EU Titan fell to 1.8 m/s for two ticks each time).
+TEST(SoldierPhysics_KeepsItsSpeedDownASeam)
+{
+	physics::Ground seams;
+	const auto height = [](float, float z) { return -0.02f * std::floor(z / 1.5f); };
+	seams.height = height;
+	seams.heightAndNormal = [height](float x, float z, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return height(x, z);
+	};
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	game::SoldierInput forward;
+	forward.throttle = 1;
+	for (int i = 0; i < 60; ++i) {
+		control.update(forward, body);
+		body.step(1 / 30.0f, seams);
+	}
+	float slowest = 1e9f, sum = 0;
+	int airborne = 0;
+	for (int i = 0; i < 90; ++i) {
+		const physics::Vec3 before = body.position;
+		control.update(forward, body);
+		body.step(1 / 30.0f, seams);
+		airborne += body.onGround() ? 0 : 1;
+		const float speed = std::fabs(body.position.z - before.z) * 30;
+		slowest = std::min(slowest, speed);
+		sum += speed;
+	}
+	std::printf("  over the seams: %d ticks in the air, %.2f m/s on average, %.2f at the slowest\n", airborne,
+		sum / 90, slowest);
+	CHECK(airborne > 0);
+	CHECK(slowest > 3.7f && sum / 90 > 3.8f);
+}
+
+// The grip (0x006c2230, +0xe0 bit 0x40): holding, the movement corrects up
+// to normal.y^5 x friction x 2.3568 m/s a tick; without it, or past that,
+// at most x 1.5712, and a correction within that takes hold again.
+TEST(SoldierPhysics_GripCorrectsUpToTheLargerLimit)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	const auto stepWanting = [&body](float speed) {
+		body.setDesiredVelocity({0, 0, speed});
+		body.step(1 / 30.0f, slope(0));
+	};
+	// The node moves with the previous response (0x004afbee): what a tick
+	// asks for shows in the velocity after the next step, which asks the same.
+	const auto settle = [&stepWanting](float speed) {
+		stepWanting(speed);
+		stepWanting(speed);
+	};
+	// From standing, the first ticks take 1.5712 m/s each (no hold yet).
+	settle(3.9f);
+	CHECK(std::fabs(body.velocity.z - 1.5712f * 0.99f) < 0.01f);
+	for (int i = 0; i < 30; ++i) {
+		stepWanting(3.9f);
+	}
+	CHECK(std::fabs(body.velocity.z - 3.9f * 0.99f) < 0.02f);
+	// Holding, a change of 2 m/s goes in one tick.
+	settle(1.9f);
+	std::printf("  2 m/s slower in a tick: %.3f m/s\n", body.velocity.z);
+	CHECK(std::fabs(body.velocity.z - 1.9f * 0.99f) < 0.02f);
+	// A change of 3 m/s is past the hold: 1.5712 of it, and the hold is lost.
+	for (int i = 0; i < 30; ++i) {
+		stepWanting(3.9f);
+	}
+	const float was = body.velocity.z;
+	settle(0.9f);
+	CHECK(std::fabs(body.velocity.z - (was - 1.5712f) * 0.99f) < 0.01f);
+	// Past the hold again (the ask is far over the limit, so it stays lost
+	// while the first correction is applied): 1.5712 of it a tick.
+	const float lost = body.velocity.z;
+	stepWanting(lost - 20.0f);
+	stepWanting(lost - 20.0f);
+	CHECK(std::fabs(body.velocity.z - (lost - 1.5712f) * 0.99f) < 0.01f);
+}
+
 namespace {
 
 // A wall across +z at z = 3 (two triangles facing -z, 4 m wide and 3 m high)
@@ -848,6 +933,96 @@ TEST(SoldierPhysics_RunOverTeamFilter)
 		body.step(1 / 30.0f, slope(0));
 		CHECK((by == 3) == killed);
 	}
+}
+
+// The carry (0x006ca660 / 0x006ca3b0): inside a Titan's hull (0x006c3890's
+// start, 0x006f2b00) the soldier node takes the Titan's velocity as its
+// carry for 40 ticks and the Titan as its carrier; the integration adds
+// the carry to its motion, and its contacts with the Titan leave the
+// Titan's point velocity out. So the soldier's own velocity is relative
+// to the Titan, and one standing still rides along exactly (with an
+// absolute velocity, the damping took 1% of the Titan's speed off each
+// tick and the movement made it up: a centimetre a second behind).
+TEST(SoldierPhysics_TitanCarriesWhatStandsInIt)
+{
+	physics::CollisionWorld deck;
+	deck.addMesh(boxMesh({-20, -1, -20}, {20, 0, 20}), physics::CollisionUser::Soldier, {}, {});
+	physics::Ground below = slope(0);
+	below.height = [](float, float) { return -100.0f; };
+	below.heightAndNormal = [](float, float, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return -100.0f;
+	};
+	for (const bool inside : {true, false}) { // in its hull, or on its deck (0x006f23a0's ray)
+		physics::SoldierBody body;
+		body.position = {3, 1, 7};
+		physics::SoldierBody::Mover titan;
+		titan.mesh = &deck;
+		titan.owner = 9;
+		titan.mass = 1e6f;
+		titan.titan = true;
+		titan.inside = inside;
+		const physics::Vec3 v {1.2f, 0, 0.5f};
+		game::SoldierControl control;
+		game::SoldierInput idle;
+		for (int i = 0; i < 30; ++i) { // settle on the still deck
+			body.movers = {titan};
+			control.update(idle, body);
+			body.step(1 / 30.0f, below);
+		}
+		const float startX = body.position.x - titan.position.x;
+		titan.velocity = v;
+		for (int i = 0; i < 300; ++i) {
+			titan.position += v * (1 / 30.0f);
+			titan.centerOfMass = titan.position;
+			body.movers = {titan};
+			control.update(idle, body);
+			body.step(1 / 30.0f, below);
+		}
+		const float lag = (titan.position.x - body.position.x) + startX;
+		std::printf("  %s: own velocity across %.4f m/s, %.2f mm behind after 10 s, carried by %u\n",
+			inside ? "in the hull" : "on the deck", std::hypot(body.velocity.x, body.velocity.z), lag * 1000,
+			body.carrier());
+		CHECK(body.onGround());
+		CHECK(body.carrier() == 9);
+		CHECK(body.carryTicks() > 0);
+		CHECK(physics::lengthSquared(body.carriedVelocity() - v) < 1e-8f);
+		CHECK(std::hypot(body.velocity.x, body.velocity.z) < 1e-3f);
+		CHECK(std::fabs(lag) < 1e-3f);
+		// Off the Titan, the carry runs out after 40 ticks (*0x00a84ae4).
+		body.movers.clear();
+		int carried = 0;
+		for (int i = 0; i < 60; ++i) {
+			const float x = body.position.x;
+			body.step(1 / 30.0f, below);
+			carried += std::fabs(body.position.x - x - v.x / 30) < 1e-4f ? 1 : 0;
+		}
+		CHECK(carried == physics::soldier::kCarryTicks - 1);
+		CHECK(body.carrier() == 0);
+	}
+}
+
+// What the ray finds under a soldier (0x006f23a0) that is no Titan gives
+// the carry, but no carrier: the motion isn't carried (the contacts take
+// the vehicle's point velocity), and the run-over check takes the carry
+// off the relative velocity too (0x006c2e50, *0x00a84764 = 1).
+TEST(SoldierPhysics_VehicleUnderfootCarriesOnlyTheRunOver)
+{
+	physics::CollisionWorld roof;
+	roof.addMesh(boxMesh({-5, -1, -5}, {5, 0, 5}), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	physics::SoldierBody::Mover car;
+	car.mesh = &roof;
+	car.owner = 4;
+	car.mass = 1500;
+	car.velocity = {0, 0, 2};
+	body.movers = {car};
+	body.step(1 / 30.0f, slope(-50));
+	CHECK(body.carrier() == 0);
+	CHECK(body.carryTicks() == physics::soldier::kCarryTicks - 1);
+	CHECK(physics::lengthSquared(body.carryVelocity() - car.velocity) < 1e-8f);
+	CHECK(physics::lengthSquared(body.carriedVelocity()) < 1e-12f);
 }
 
 // A projectile that ignores its launcher (noInitialCollisionWithLauncher:

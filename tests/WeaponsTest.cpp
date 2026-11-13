@@ -258,6 +258,45 @@ TEST(Weapons_ProjectilesFall)
 	CHECK(!p.alive);
 }
 
+// A round of physicsType Mesh with hasMobilePhysics (the motion mine,
+// drag 10, mass 5) is a PhysicsNode.Basic (0x005f6ba0 -> 0x006c70c0): its
+// tick (0x006c9060) drags it by its box (0x006c7e00) and damps its
+// velocity by 0.99 a tick (0x006c8380), where a Point node drags it as a
+// 0.1 m sphere and doesn't damp.
+TEST(Weapons_MeshRoundIsABasicNode)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericProjectile");
+	world::ObjectTemplate* t = templates.create("GenericProjectile", "mine");
+	t->settings()["physicsType"] = "Mesh";
+	t->settings()["hasMobilePhysics"] = "1";
+	t->settings()["drag"] = "10";
+	t->settings()["mass"] = "5";
+	game::ProjectileSettings settings = game::ProjectileSettings::fromTemplate(*t);
+	CHECK(settings.basicNode && !settings.rotationalPoint);
+	settings.boxSize = {0.3f, 0.3f, 0.3f};
+	game::Projectile p;
+	p.settings = &settings;
+	p.velocity = {0, 0, 10};
+	p.timeLeft = 10;
+	game::moveProjectile(p, 1 / 30.0f, 0);
+	// drag / mass x |v| x the face's area (0.3 x 0.3 x 0.785) along z: 14.13
+	// m/s^2 for the tick, then x 0.99.
+	const float expected = (10 - 10 * 2 * 0.3f * 0.3f * 0.785f * 10 / 30) * 0.99f;
+	std::fprintf(stderr, "  basic node: %.4f m/s after a tick (%.4f expected)\n", p.velocity.z, expected);
+	CHECK(std::fabs(p.velocity.z - expected) < 1e-3f);
+	// Without drag, only the damping: 0.99^30 over a second.
+	settings.drag = 0;
+	p.velocity = {0, 0, 10};
+	for (int i = 0; i < 30; ++i) {
+		game::moveProjectile(p, 1 / 30.0f, 0);
+	}
+	CHECK(std::fabs(p.velocity.z - 10 * std::pow(0.99f, 30.0f)) < 1e-3f);
+	// Without hasMobilePhysics: no node of its type (a Point here).
+	t->settings()["hasMobilePhysics"] = "0";
+	CHECK(!game::ProjectileSettings::fromTemplate(*t).basicNode);
+}
+
 TEST(Weapons_RandomDistributions)
 {
 	const auto ttl = game::RandomDistribution::parse("CRD_NONE/1/0/0");

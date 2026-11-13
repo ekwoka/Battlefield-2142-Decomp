@@ -206,7 +206,7 @@ void PlayerCamera::resetSoldier()
 	m_seatGun = nullptr;
 	m_inSeat = false;
 	m_roundsWas = -1;
-	m_reloadingWas = m_reloadAnimationPending = false;
+	m_reloadingWas = m_zoomMessageWas = m_reloadPulseNext = false;
 	m_springState = {};
 	m_springOffset = {};
 }
@@ -436,6 +436,19 @@ void PlayerCamera::toggleMode(bool backwards)
 		return;
 	}
 	firstPerson = !firstPerson || !allowExternalViews;
+}
+
+bool PlayerCamera::viewColor(std::array<float, 3>& tint, float& saturation) const
+{
+	SeatView seat;
+	if (!findSeatCamera(seat) || number(*seat.camera, "useColorTransform", 0) == 0) {
+		return false;
+	}
+	float c[3] = {1, 1, 1};
+	vec3(text(*seat.camera, "colorTransform"), c);
+	tint = {c[0], c[1], c[2]};
+	saturation = number(*seat.camera, "saturation", 1);
+	return true;
 }
 
 bool PlayerCamera::insideView() const
@@ -924,7 +937,7 @@ void PlayerCamera::tick(float seconds)
 	// The held weapon: its first-person system, zoom and muzzle flash.
 	const world::ObjectTemplate* weaponTemplate = me.weaponTemplate;
 	if (weaponTemplate != m_weaponTemplate) {
-		m_reloadingWas = m_reloadAnimationPending = false;
+		m_reloadingWas = m_zoomMessageWas = m_reloadPulseNext = false;
 		m_weaponTemplate = weaponTemplate;
 		const std::string systemPath = weaponTemplate ? text(*weaponTemplate, "animationSystem1P") : std::string();
 		if (m_rig) {
@@ -986,11 +999,6 @@ void PlayerCamera::tick(float seconds)
 		m_roundsWas = -1;
 	}
 	const bool reloading = me.reloading;
-	const bool reloadStarted = reloading && !m_reloadingWas;
-	// Forced unzoom queues an exclusive zoomTransition this tick, which
-	// discards the other animation requests. Start reload on the next tick
-	// so it survives that transition, then let its one-shot advance.
-	const bool reloadAnimationStarted = std::exchange(m_reloadAnimationPending, reloadStarted);
 	const int rounds = me.rounds;
 	// Audio and first-person effects follow the same accepted-shot tick.
 	// Magazine deltas miss the first shot and guns whose ammo is unlimited.
@@ -1034,6 +1042,7 @@ void PlayerCamera::tick(float seconds)
 			m_fov.set(m_baseFov, m_zoomSettings.delay);
 		}
 	}
+	const bool reloadStarted = reloading && !m_reloadingWas;
 	m_reloadingWas = reloading;
 	if (me.vehicle && m_zoom.level() > 0) {
 		m_zoom.reset();
@@ -1064,10 +1073,26 @@ void PlayerCamera::tick(float seconds)
 	}
 	input.movementSeconds = seconds;
 	input.pose = me.stance;
-	if (reloadAnimationStarted) {
-		input.pulses |= 2; // an event, not a held request that restarts abruptPlayback
+	// A reload sends message 2 once, as it starts (0x005e0fd0's kind 3, the
+	// whole-magazine reload of ammo.reloadAmount 0): the reload bundles are
+	// abrupt one-shots, so holding it would start them over every update.
+	// Only reloadAmount's round-at-a-time kinds hold it (4) and drop it (6);
+	// no shipped weapon sets reloadAmount.
+	// A reload begun zoomed zooms out on its start (zoomOutOnReload): the
+	// zoom message going makes the root SwitchMessageTrigger queue its
+	// transition at priority 10000, which stops every bundle queued that
+	// update (0x008c43f0 -> 0x008bb770 slot 0x58), the reload with it. The
+	// rewrite sends the reload message the update after, so the reload
+	// plays from the zoom-out; the order of the exe's own firearm, zoom and
+	// animation updates within its frame isn't settled.
+	const bool zoomMessage = m_zoom.level() > 0;
+	const bool zoomDropped = m_zoomMessageWas && !zoomMessage;
+	if (m_reloadPulseNext || (reloadStarted && !zoomDropped)) {
+		input.pulses |= 2;
 	}
-	if (m_zoom.level() > 0) {
+	m_reloadPulseNext = reloadStarted && zoomDropped;
+	m_zoomMessageWas = zoomMessage;
+	if (zoomMessage) {
 		input.messages |= 4;
 	}
 	if (fired) {
@@ -1076,7 +1101,7 @@ void PlayerCamera::tick(float seconds)
 	std::vector<anim::FirstPersonRig::Event> events;
 	m_rig->update(input, seconds, &events);
 	if (std::getenv("BF2142_INPUT_TRACE") && (reloadStarted || (reloading && m_tick % 15 == 0))) {
-		std::printf("reload-animation tick=%d pulse=%d playing", m_tick, reloadAnimationStarted);
+		std::printf("reload-animation tick=%d pulse=%d playing", m_tick, reloadStarted);
 		for (const auto& name : m_rig->playing()) std::printf(" %s", name.c_str());
 		std::printf("\n");
 	}
@@ -1254,12 +1279,17 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 		return false;
 	}
 	const std::string& seatName = seats[static_cast<size_t>(me.seat)].name;
+	// The vehicle's seats as the round lays them out (GameWorld::vehicleLayout:
+	// the PlayerControlObjects with seatInformation, or every one of them
+	// when the vehicle names none, as eu_ifv's gun positions): the camera
+	// map leaves the nested seats' subtrees out (0x0058bdb0).
 	const auto sameName = [](const std::string& a, const std::string& b) {
 		const world::CaseInsensitiveLess less;
 		return !less(a, b) && !less(b, a);
 	};
-	const auto isSeat = [&](const world::ObjectTemplate& t) {
-		return std::any_of(seats.begin(), seats.end(), [&](const auto& seat) { return sameName(seat.name, t.name()); });
+	const auto isSeat = [&seats](const std::string& name) {
+		const world::CaseInsensitiveLess less;
+		return std::any_of(seats.begin(), seats.end(), [&](const auto& s) { return !less(s.name, name) && !less(name, s.name); });
 	};
 	const world::ObjectTemplateManager& templates = m_round.templates();
 	const uint32_t object = vehicle->id();
@@ -1306,7 +1336,7 @@ bool PlayerCamera::findSeatCamera(SeatView& out) const
 					m = placement(offset, rotation) * m; // a joined game's: as the bundles' ghosts turn them
 				}
 				// Many shipped seats (walkers, tanks, APCs) omit seatInformation.
-				const bool seat = isSeat(*c);
+				const bool seat = isSeat(c->name());
 				if (inSeat && seat) {
 					continue; // another seat's cameras
 				}

@@ -410,7 +410,9 @@ TEST(RagDoll_SeatedSoldierTakesTheSeatsPose)
 
 // Killed in a seat with a die bundle (0x005cea00 with died = 1): the
 // seat's system plays "die" and the body stays in the seat, posed by it
-// (no ragdoll), until someone takes the seat or the vehicle goes.
+// (no ragdoll), until someone takes the seat or the vehicle goes, or its
+// armour's countdown ends (0x00652380: a soldier with a parent skips the
+// landed test; the test soldier's armour gives 3 s, then a 1 s fade).
 TEST(RagDoll_KilledInASeatSlumpsThere)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -457,6 +459,11 @@ TEST(RagDoll_KilledInASeatSlumpsThere)
 	CHECK(game.world->playerVehicle() && game.world->playerVehicle()->id() == vehicle);
 	std::vector<anim::Matrix> seated, slumped;
 	CHECK(skeleton && game.world->skeletonPose(soldier, *skeleton, seated));
+	if (const world::Object* o = game.objects.find(soldier); o && o->objectTemplate()) {
+		auto* t = const_cast<world::ObjectTemplate*>(o->objectTemplate());
+		t->settings()["armor.timeToStayAsWreck"] = "3";
+		t->settings()["armor.timeToStayAfterDestroyed"] = "1";
+	}
 	game.world->setHitPoints(soldier, 0);
 	CHECK(game.world->seatCorpse(vehicle, 0) == soldier);
 	game.run(1.0f);
@@ -469,11 +476,13 @@ TEST(RagDoll_KilledInASeatSlumpsThere)
 		std::fprintf(stderr, "  the head moved %.2f m slumping\n", moved);
 		CHECK(moved > 0.05f); // the die bundle's pose, not the seat's still one
 	}
-	// Still there a while on, gone with the vehicle.
-	game.run(5.0f);
+	// Still there a while on, then fading out and gone.
+	game.run(1.0f);
 	CHECK(game.world->seatCorpse(vehicle, 0) == soldier && game.objects.find(soldier));
-	game.objects.remove(vehicle);
-	game.run(0.1f);
+	game.run(1.5f);
+	body = game.objects.find(soldier);
+	CHECK(game.world->seatCorpse(vehicle, 0) == soldier && body && body->fade() < 1.0f && body->fade() > 0.0f);
+	game.run(1.0f);
 	CHECK(game.world->seatCorpse(vehicle, 0) == 0 && !game.objects.find(soldier));
 }
 
@@ -2590,6 +2599,58 @@ TEST(Ik_DriverHoldsTheWheel)
 	const int shoulder = skeleton->find("left_shoulder"), elbow = skeleton->find("left_elbow");
 	CHECK(std::abs(distance(at(shoulder), at(elbow)) - std::sqrt(physics::lengthSquared({skeleton->nodes[elbow].position[0],
 		skeleton->nodes[elbow].position[1], skeleton->nodes[elbow].position[2]}))) < 1e-3f);
+	// Ducking (a seat with allowDucking on kPICrouch, 0x005ca2e0 →
+	// setDucking 0x005c7cf0) turns the soldier's IK off (+0x2ea,
+	// 0x005ed890): the hands leave the grips until he rises.
+	car->settings()["allowDucking"] = "1";
+	const auto wrist = [&] {
+		std::vector<anim::Matrix> pose;
+		game.world->skeletonPose(soldier, *skeleton, pose);
+		const anim::Matrix& m = pose[static_cast<size_t>(leftWrist)];
+		const world::Object* o = game.objects.find(soldier);
+		const world::Object* c = game.objects.find(vehicle);
+		const physics::Mat3 ct = physics::Mat3::fromYawPitchRoll({c->rotation().x, c->rotation().y, c->rotation().z});
+		const physics::Mat3 wt = physics::Mat3::fromYawPitchRoll({0, 20, 0}) * ct;
+		const physics::Vec3 wa = ct.transform({0, 0.85f, 0.85f}) + physics::Vec3 {c->position().x, c->position().y, c->position().z};
+		const physics::Mat3 st = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+		const physics::Vec3 g = st.untransform(wt.transform({-0.145199f, -0.0447125f, -0.186665f}) + wa
+			- physics::Vec3 {o->position().x, o->position().y, o->position().z});
+		return distance(physics::Vec3 {m[12], m[13], m[14]}, g);
+	};
+	input = {};
+	input.pose = game::SoldierPose::Crouch;
+	for (int i = 0; i < 5; ++i) {
+		game.world->setPlayerInput(input);
+		game.world->tick(1 / 30.0f);
+	}
+	CHECK(wrist() > 0.01f);
+	// The seat's ducking as the server networks it (SimpleObject 0x100000
+	// on the root, a seat ghost's bit 8: HostedGame::statesOf).
+	CHECK(game.world->seatDucking(vehicle, 0));
+	game.world->setPlayerInput({});
+	game.world->tick(1 / 30.0f);
+	CHECK(wrist() < 1e-3f);
+	CHECK(!game.world->seatDucking(vehicle, 0));
+	// The wheel isn't a firearm: no weapon layers (0x005ef250's 0x94c0 test).
+	const auto carSeats = game.world->vehicleSeats(vehicle);
+	CHECK(!carSeats.empty() && game.world->ikWeaponMessages(*car, carSeats[0], true, true, 2) == 2);
+	// A joined client's seated soldier: the ghost's ducking reaches the
+	// seat's setDucking (0x005ffec0 -> slot 0x12c, 0x005c7cf0), which turns
+	// his IK off as on the server (animateRemoteSeated).
+	const uint32_t other = game.objects.create(game.templates.find("us_light_soldier"), {3, 1.2f, 0})->id();
+	const auto remoteWrist = [&](bool ducking) {
+		for (int i = 0; i < 5; ++i) {
+			game.world->animateRemoteSeated(other, vehicle, 0, 0, 1 / 30.0f, ducking);
+		}
+		std::vector<anim::Matrix> pose;
+		game.world->skeletonPose(other, *skeleton, pose);
+		const anim::Matrix& m = pose[static_cast<size_t>(leftWrist)];
+		return physics::Vec3 {m[12], m[13], m[14]};
+	};
+	const physics::Vec3 holding = remoteWrist(false), ducked = remoteWrist(true);
+	std::fprintf(stderr, "  remote seat: the left wrist moves %.3f off the grip while ducking\n", distance(holding, ducked));
+	CHECK(distance(holding, ducked) > 0.01f);
+	CHECK(distance(remoteWrist(false), holding) < 1e-4f);
 }
 
 // The combat areas (CombatAreaManager / CombatArea, 0x004bbf60): outside
@@ -2650,7 +2711,8 @@ TEST(CombatArea_OutsideTimerThenDamage)
 // A neutral APC (no teamOnVehicle) carrying a SpawnPoint: entered by a
 // team-2 soldier it is team 2's (0x005c9500: the first occupant's team),
 // so it is one of team 2's mobile spawn points; left empty it is its own
-// (neutral) again.
+// (neutral) again. Under its armour's criticalDamage the point is
+// refused (0x005b24f0's parent armour test).
 TEST(Vehicle_TeamOfItsOccupant)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -2681,6 +2743,8 @@ TEST(Vehicle_TeamOfItsOccupant)
 	}
 	game.templates.create("SpawnPoint", "apc_SpawnPoint");
 	car->children().push_back({"apc_SpawnPoint", {0, 0, -3}, {}});
+	car->settings()["armor.maxHitPoints"] = "500";
+	car->settings()["armor.criticalDamage"] = "100";
 	game.templates.create("EntryPoint", "apc_entry")->settings()["entryRadius"] = "3";
 	game.start();
 	world::Object* apc = game.objects.create(car, {3, 1.2f, 0}, {0, 0, 0});
@@ -2699,6 +2763,10 @@ TEST(Vehicle_TeamOfItsOccupant)
 	const auto mine = game.world->spawnVehicles(2);
 	CHECK(mine.size() == 1 && mine[0] == vehicle);
 	CHECK(game.world->spawnVehicles(1).empty());
+	game.world->setHitPoints(vehicle, 99);
+	CHECK(game.world->spawnVehicles(2).empty());
+	game.world->setHitPoints(vehicle, 100);
+	CHECK(game.world->spawnVehicles(2).size() == 1);
 	// Out: empty, its own team (none) again.
 	game.world->setPlayerInput(input);
 	game.world->tick(1 / 30.0f);
@@ -3216,4 +3284,57 @@ TEST(RagDoll_RemoteWornKitTakesItsSoldiersPose)
 	CHECK(kit.size() > 9 && kit[9][13] == body[9][13]);
 	CHECK(!game.world->isDroppedKit(worn));
 	CHECK(game.world->isDroppedKit(lying));
+}
+
+// A radio message's emote (0x005edbf0): the sender's 3P system plays the
+// message's emote trigger ("wave", AnimationSystem3p.inc's) unless the
+// soldier sprints, lies prone or holds a GenericFireArm without
+// allowEmoteAnimation (template +0x31e, default 0).
+TEST(RagDoll_EmotesFollowAllowEmoteAnimation)
+{
+	using game::GameWorld;
+	using game::SoldierPose;
+	// The rule on its own.
+	world::ObjectTemplateManager templates;
+	templates.registerType(4, "GenericFireArm");
+	templates.registerType(9, "GenericProjectile");
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "gun");
+	world::ObjectTemplate* other = templates.create("GenericProjectile", "not_a_gun");
+	CHECK(!GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, gun));
+	gun->settings()["allowEmoteAnimation"] = "1";
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, gun));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Crouch, gun));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Swim, gun));
+	CHECK(!GameWorld::emoteAllowed("wave", false, SoldierPose::Prone, gun));
+	CHECK(!GameWorld::emoteAllowed("wave", true, SoldierPose::Stand, gun));
+	CHECK(!GameWorld::emoteAllowed("", false, SoldierPose::Stand, gun));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, other));
+	CHECK(GameWorld::emoteAllowed("wave", false, SoldierPose::Stand, nullptr));
+
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(0.5f);
+	const int me = game.world->localPlayer();
+	const uint32_t soldier = game.world->playerObject();
+	const auto waving = [&] {
+		const auto playing = game.world->playingAnimations(soldier);
+		return std::find(playing.begin(), playing.end(), "wave") != playing.end();
+	};
+	// The rifle in hand doesn't allow it.
+	CHECK(!game.world->playEmote(me, "wave"));
+	game.run(0.1f);
+	CHECK(!waving());
+	// With allowEmoteAnimation 1 the wave plays.
+	game.templates.find("eu_ar_rifle")->settings()["allowEmoteAnimation"] = "1";
+	game.templates.find("as_ar_rifle")->settings()["allowEmoteAnimation"] = "1";
+	CHECK(game.world->playEmote(me, "wave"));
+	game.run(0.1f);
+	CHECK(waving());
+	CHECK(!game.world->playEmote(me, "")); // a message without an emote
+	CHECK(!game.world->playEmote(me + 100, "wave"));
 }

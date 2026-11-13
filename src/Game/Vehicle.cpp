@@ -383,9 +383,15 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 			} else if (type == "Wing") {
 				WingPart wing;
 				wing.part = self;
-				wing.wingLift = number(t, "wingLift", 0);
-				wing.flapLift = number(t, "flapLift", 0);
+				wing.wingLift = number(t, "wingLift", wing.wingLift);
+				wing.flapLift = number(t, "flapLift", wing.flapLift);
 				wing.pitchOffset = number(t, "pitchOffset", 0);
+				wing.regulateToLift = number(t, "regulateToLift", wing.regulateToLift);
+				wing.wingToRegulatorRatio = number(t, "wingToRegulatorRatio", wing.wingToRegulatorRatio);
+				wing.liftRegulated = number(t, "liftRegulated", 0) != 0 || setting(t, "regulateToLift");
+				if (self >= 0) {
+					vehicle->m_parts[static_cast<size_t>(self)].liftRegulated = wing.liftRegulated;
+				}
 				wing.positionOffset = vector(t, "positionOffset");
 				wing.startDelay = number(t, "startDelay", 0);
 				wing.multiply = number(t, "multiply", 1);
@@ -520,6 +526,17 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		vehicle->m_vertical.a = ab.x;
 		vehicle->m_vertical.b = ab.y;
 	}
+	const char* rotational[3][2] = {{"regulatePitchInput", "regulatePitch"}, {"regulateYawInput", "regulateYaw"},
+		{"regulateRollInput", "regulateRoll"}};
+	for (size_t i = 0; i < 3; ++i) {
+		if (const std::string* input = setting(root, rotational[i][0])) {
+			Regulator& r = vehicle->m_rotational[i];
+			r.input = vehicleInputIndex(*input);
+			const Vec3 ab = vector(root, rotational[i][1]);
+			r.a = ab.x;
+			r.b = ab.y;
+		}
+	}
 	for (Part& part : vehicle->m_parts) {
 		part.rotation = part.base;
 	}
@@ -618,7 +635,7 @@ void Vehicle::touchObject(size_t index, const Vec3& push, const Vec3& rootPush, 
 	Wheel::ObjectGround& g = m_wheels[index].objectGround;
 	const float n = static_cast<float>(g.count);
 	const float mean = 1.0f / static_cast<float>(g.count + 1);
-	g.push = physics::combineContacts(g.push, push);
+	g.push = physics::combineAxes(g.push, push);
 	g.rootPush = rootPush;
 	g.normal = (g.normal * n + normal) * mean;
 	g.velocity = (g.velocity * n + velocity) * mean;
@@ -649,7 +666,7 @@ void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, floa
 	if (m_sprintFactor > 0) {
 		m_sprint.update(false, 0, seconds);
 	}
-	regulateInput(body, gravity);
+	regulateInput(body, gravity, seconds);
 	for (GearPart& gear : m_gears) {
 		updateGear(gear, body, ground, seconds);
 	}

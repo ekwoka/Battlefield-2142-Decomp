@@ -302,11 +302,32 @@ void registerQualityConsoleMethods(Console& console, QualitySettings& s)
 		s.viewDistanceScale = std::clamp(scale, 0.0f, 1.0f);
 		s.changed = true;
 	});
+	bindMethod(console, "VideoSettings.setAntialiasing", kAccess, [&s](std::string name) {
+		s.antialiasingSamples = antialiasingSampleCount(name);
+		s.changed = true;
+	});
 	// undergrowth.simpleShaderEnable (0x100862e7: the undergrowth's slot
 	// 0x40, the one the quality switch 0x10010040 writes): holds until the
 	// video settings are applied again.
 	bindProperty<bool>(console, "undergrowth.simpleShaderEnable", kAccess, [&s] { return s.undergrowthSimpleShader(); }, // 0x10086358, 0x100863a5
 		[&s](const bool& on) { s.undergrowthSimpleShaderSet = on ? 1 : 0; });
+}
+
+int antialiasingSampleCount(const std::string& name)
+{
+	// 0x1000fb60 names multisample type n "<n>Samples" (type 0 "Off").
+	const std::string suffix = "Samples";
+	if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+		return 1;
+	}
+	int samples = 0;
+	for (size_t i = 0; i + suffix.size() < name.size(); ++i) {
+		if (name[i] < '0' || name[i] > '9' || samples > 16) {
+			return 1;
+		}
+		samples = samples * 10 + (name[i] - '0');
+	}
+	return samples >= 2 ? std::min(samples, 16) : 1;
 }
 
 } // namespace dice::hfe::scene

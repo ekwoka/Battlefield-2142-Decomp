@@ -18,6 +18,7 @@
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/SoundObjectTemplate.h"
 #include "Sound/Game/VoiceMessages.h"
+#include "Sound/SoundEngine/ISoundEngine.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -164,6 +165,28 @@ TEST(SoundConsole_AddSoundMakesTheTemplate)
 	templates.create("GenericFireArm", "silo_gun");
 	CHECK(console.execute("ObjectTemplate.sound.addReloadTimeSound 2 12", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
 	CHECK(templates.find("silo_gun")->settings().at("sound.reloadTimeSound.2") == "12");
+}
+
+// ObjectTemplate.globalEffectLevel (executor 0x007f54a0) goes to the
+// engine template's slot 0xb8 (read back by 0xbc): how much occlusion and
+// the tinnitus muffle the sound.
+TEST(SoundConsole_GlobalEffectLevelIsTheEnginesOcclusionFactor)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	sound::SoundManager manager(sound::getSoundEngine(), templates);
+	manager.registerTemplateType();
+	sound::registerSoundConsoleMethods(console, manager);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create Sound S_hud_beep", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	const auto* sound = dynamic_cast<const sound::SoundObjectTemplate*>(templates.find("S_hud_beep"));
+	CHECK(sound && sound->engineTemplate() && sound->engineTemplate()->occlusionFactor() == 1.0f);
+	CHECK(console.execute("ObjectTemplate.globalEffectLevel 0.25", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(sound && sound->engineTemplate() && sound->engineTemplate()->occlusionFactor() == 0.25f);
+	CHECK(console.execute("ObjectTemplate.globalEffectLevel", out, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	CHECK(out.find("0.25") != std::string::npos);
 }
 
 // DefaultSoundComp (0x005dbdc0, 0x005dbfe0, 0x005dc1d0): the shooter's own
@@ -489,6 +512,9 @@ TEST(GameAudio_WeaponsOfARound)
 {
 	Range range;
 	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	// The profile's auto reload off (GeneralSettings.setAutoReload 0): the
+	// player presses c_PIReload himself.
+	range.world->autoReload = false;
 	const int bot = range.world->addPlayer("Bot", 1, true);
 	CHECK(range.world->spawnSoldier(bot));
 	CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -543,6 +569,25 @@ TEST(GameAudio_WeaponsOfARound)
 	}
 	CHECK(thirdPersonAcceptedShots >= 2); // enough rounds to distinguish one free-running loop
 	CHECK(range.count("S_eu_ar_rifle_Fire3P") == 1);
+}
+
+// A round's own Sound child (created and played with it) loops while it
+// flies, whatever its name (static_ap_railgun_projectile's is
+// S_static_ap_railgun_projectile_projectile_Looping).
+TEST(GameAudio_RoundLoopsItsSoundChild)
+{
+	Range range;
+	addSoundTemplate(range.templates, "S_bullet_whiz");
+	range.templates.find("bullet")->children().push_back({"S_bullet_whiz", {}, {}});
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	range.world->tick(1 / 30.0f);
+	CHECK(!range.world->projectiles().empty());
+	audio.tick({});
+	CHECK(range.count("S_bullet_whiz") == 1);
 }
 
 // The local player's radio through GameAudio: a teammate's message within
@@ -1099,4 +1144,40 @@ TEST(GameAudio_TicketStateMessages)
 	CHECK(GameAudio::ticketStateMessage(1, 3, 1, "gpm_cq") == "AUTO_RULES_ticketlevel_3");
 	CHECK(GameAudio::ticketStateMessage(2, 3, 1, "gpm_cq").empty());
 	CHECK(GameAudio::ticketStateMessage(1, 16, 1, "gpm_ti").empty());
+}
+
+// The weapon sound component's +0x41 (0x005dbfe0 sets it with each reload
+// event but state 2; 0x005dc1d0, the draw, and 0x005dc160, the click,
+// clear it): the first dry click after a reload is the BoltClick, in
+// either view; later ones the TriggerClick, in first person only.
+TEST(GameSounds_BoltClickAfterAReload)
+{
+	Range range;
+	addSoundTemplate(range.templates, "S_eu_ar_rifle_BoltClick");
+	using Event = sound::GameSounds::WeaponEvent;
+	const sound::Vec3 at {0, 0, 0};
+	const auto event = [&](Event e, bool firstPerson, int reloadState = 0) {
+		range.game.weapon(e, "eu_ar_rifle", firstPerson, at, false, 1, 0, nullptr, reloadState);
+	};
+	event(Event::Deploy, true);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_TriggerClick") == 1 && range.count("S_eu_ar_rifle_BoltClick") == 0);
+	event(Event::Reload, true, 3);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1 && range.count("S_eu_ar_rifle_TriggerClick") == 1);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1 && range.count("S_eu_ar_rifle_TriggerClick") == 2);
+	// State 2 sets nothing; a draw clears it.
+	event(Event::Reload, true, 2);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1);
+	event(Event::Reload, true, 3);
+	event(Event::Deploy, true);
+	event(Event::TriggerClick, true);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 1 && range.count("S_eu_ar_rifle_TriggerClick") == 4);
+	// In third person only the BoltClick sounds.
+	event(Event::Reload, false, 3);
+	event(Event::TriggerClick, false);
+	event(Event::TriggerClick, false);
+	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 2 && range.count("S_eu_ar_rifle_TriggerClick") == 4);
 }

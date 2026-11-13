@@ -39,8 +39,12 @@
 // squad while there is room (six less the members) or unselects a member;
 // SquadMenu.applyInviteList (0x007a84a0) removes the unselected members
 // (squad manager slot 0x38) and invites the selected players (slot 0x30).
-// Offline there is nobody to answer an invite: a bot in no squad takes it
-// at once (a stand-in for the invite's answer).
+// A bot never answers an invite: slot 0x30 (0x004c3190) sets the squad's
+// bit in the player's mask (player vtable 0x224 / 0x228, +0x14c) and
+// posts 2/0x10 to his connection, which a bot hasn't; the mask's only
+// other readers are the join (0x004c7290: a private squad takes the
+// invited) and the join's clear (0x004c6c80), and AIDLL's adaptors never
+// read it. So offline an invite does nothing.
 #pragma once
 
 #include "Game/GameWorld.h"
@@ -98,6 +102,28 @@ public:
 	bool playerInfoFor(int player, game::GameWorld::PlayerInfo& out) const { return playerInfo(player, out); }
 	bool commanderExpanded() const { return m_commanderExpanded; }
 
+	// The squad manager's messages to the local player (PostRemote 2/id
+	// with an int; the HUD's category-2 handler 0x00756b60, each line a
+	// personal line, slot 0x170): 0xb HUD_HUD_SQUAD_FULL (#TEAMNAME#,
+	// #SQUADNAME#), 0xc HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN, 0x12
+	// HUD_HUD_SQUAD_JOIN_DENIED and 0x13 HUD_HUD_SQUAD_JOIN_ACCEPTED (the
+	// squad, by the local player's team, 0x00a1c174 slot 0x28); 0x11, a
+	// player asking to join our private squad (the player), the question
+	// kind 0 (0x0079e440; HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN, #PLAYERNAME#,
+	// 0x0079c720) unless the leader turned that player down before (the
+	// menu's list +0x120, 0x007a5e30). The original also asks for the menu
+	// sound "warning" with the lines (DAT_00b43878 slot 0x2c, the menu's
+	// Sound.playSound, 0x0040bd90 case 6), which no shipped MenuSounds.con
+	// adds: silent.
+	void squadMessage(int id, int value);
+	std::function<void(const std::string&)> onLine;
+	std::function<void(int player, const std::string&)> onJoinRequest;
+	std::function<std::string(int team)> teamName; // the team's localised name
+	// The leader's no to a request (0x0079d6e0 kind 0, answered, not timed
+	// out): the player goes on the menu's list (+0x120, 0x007a7d10), whose
+	// later requests ask nothing (0x007a5e30).
+	void denyJoinRequest(int player) { m_denied.insert(player); }
+
 	// Each frame: the lists and the variables (SquadCreateShow,
 	// SquadCreateLockedShow, SquadCreateTagString, NrOfSquads,
 	// NrOfUnassigned, InviteListShow, IsInSquad, IsSquadLeader).
@@ -116,8 +142,13 @@ public:
 	// data 2): the squad createSquad makes takes it (ChangeSquadName, 0x16).
 	std::function<std::string()> typedName;
 	std::string squadLabel(int team, int squad) const;
-	// A squad's lock (its leader's; the squad manager's slot 0x20).
-	bool locked(int team, int squad) const { return m_locked.count({team, squad}) != 0; }
+	// A squad's lock (its leader's; the squad manager's slot 0x20, the
+	// squad's flag the toggle 0x007a5a60 reads): the round's
+	// (GameWorld::squadPrivate), a joined game's as the menu sent it.
+	bool locked(int team, int squad) const
+	{
+		return m_remote.world ? m_locked.count({team, squad}) != 0 : m_round.squadPrivate(team, squad);
+	}
 
 	// A joined game (HudWorld.h): the players as the server has them, and
 	// what the menu changes sent as the original's events (a client's
@@ -170,7 +201,8 @@ private:
 	bool m_commanderExpanded = false; // +0xa3
 	int m_lastSquad = 0;              // the local player's, for the squad events
 	bool m_lastLeader = false;
-	std::set<std::pair<int, int>> m_locked;
+	std::set<std::pair<int, int>> m_locked; // a joined game's, as sent
+	std::set<int> m_denied;                 // +0x120: requests turned down
 	std::map<std::pair<int, int>, std::string> m_names; // squads named in the create box
 };
 
@@ -239,6 +271,11 @@ struct OverheadCamera {
 //   - Commander.spottedMouseOver <n> (0x00771b67 -> slot 0x450,
 //     0x00751f80): Spotted<i>MouseOver = (i == n) for i 1..11.
 void spottedMouseOver(hud::HudManager& hud, int n);
+// The scoreboard's menu state (10, the HUD manager's 0x0079ab90): shown,
+// ScoreboardShow and LevelsListShow (the map list and its vote under
+// the Server tab, HudElementsLevelsList.con's MapsList); left, both and
+// ServerInfoSelected go to 0.
+void showScoreboard(hud::HudManager& hud, bool shown);
 // The squad leader rose's rows:
 //   - SquadLeader.sendRequestForOrder (0x00770a7e -> slot 0x314,
 //     0x007c7cd0, the rose's needorders): "req_new_order" to the commander
@@ -355,7 +392,7 @@ private:
 //     "<tool>_deny" to the leader; accept uses the tool at the request's
 //     point quietly (the tools' slots 0x32c / 0x348 / 0x35c / 0x358 with
 //     1): done, "<tool>_accept" to the leader and "<tool>_deny" to every
-//     other squad with a request of that kind (each taken off); not done,
+//     other squad with a request of that kind (each taken off); refused,
 //     "<tool>_unavailable" to the commander alone and the request stays.
 // The tools are named artillery, orbitalstrike, uav and supply.
 class SquadRequests {
@@ -466,13 +503,54 @@ struct ScoreboardRow {
 	bool sameSquad = false;    // in the local player's squad (squad > 0)
 	bool local = false;        // the local player
 	bool localCommands = false; // the local player is the commander
-	bool hidden = false;       // the HUD manager's 0x410 or the player's +0x404
+	// The HUD manager's slot 0x410 (0x00751780: the soldier's armour, +0x48
+	// slot 0x60 0x00651c20, in state 1, hit points at most 0 and not past
+	// the wreck's: man down) or the player's +0x404 (slot 0x3bc: a
+	// spectator).
+	bool hidden = false;
 };
 struct ScoreboardStyle {
 	std::array<float, 4> text;
 	std::array<float, 4> background; // alpha 0: none
 };
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex);
+// The scoreboard's player order. The rows come from the player manager's
+// team list (slot 0x48, 0x004b97e0; a squad's, slot 0x5c, 0x004b9990)
+// put in order by 0x004b94a0: a selection sort that takes, again and
+// again, the first player of the manager's list (creation order: slot
+// 0x10, 0x004b8b60, appends) who beats every other one left by the stats
+// (player slot 0x1a8, *(player +0x100)) and then the clock:
+//   - the higher score (+0);
+//   - then the higher skillScore (+8);
+//   - then the fewer deaths (+0x10);
+//   - then the later connection (slot 0x1c0, 0x0059b450: the double at
+//     +0x1c8, the game clock (DAT_00a7d060 slot 0x14) when slot 0x8c,
+//     0x005915f0, last set the connected flag +0x1c0; -1 from the
+//     constructor 0x0059c010). The server sets it for a human player as
+//     it is made (0x004a8460) and again when his client has loaded the
+//     level (0x004a7c80, from 0x004ae030); bots never have it, and on a
+//     client every player keeps -1 (the networkable's bit, 0x005981a0,
+//     sets the flag alone).
+// A full tie keeps the list's order. Each key a strict comparison, so it
+// is a stable sort by the four keys.
+struct ScoreboardKey {
+	int score = 0, skillScore = 0, deaths = 0;
+	double connectedAt = -1;
+};
+// The indices of `players` (in the manager's order), best first.
+std::vector<size_t> scoreboardOrder(const std::vector<ScoreboardKey>& players);
+// Whether the scoreboard's tab lists its players (the rows above). On the
+// Server tab (ToggleServer, the scoreboard's +0x38b, set by 0x007ba1a0)
+// the row filler 0x007bb540 adds no player's row, as for an empty slot
+// (at most a blank odd row, and its row counter +0x38 starts at 0), so
+// the server's information shows over empty lists.
+// tab: scoreboard.setToggleShow's (0 players, 1 squads, 2 manage, 3 server).
+inline bool scoreboardListsPlayers(int tab) { return tab != 3; }
+// The server tab's map (the HUD's ActiveLevel, the HUD manager's +0xa78,
+// set at the level's start by 0x00448300): the level's name with its
+// underscores as spaces, in capitals (0x0065b420, 0x0065af00: toupper,
+// and the Latin-1 a-ring, a- and o-umlaut, u-umlaut and e-acute by hand).
+std::string activeLevelText(const std::string& level);
 // A scoreboard row's kit icon (the HUD manager's slot 0x64, 0x0074e940,
 // taken by the row filler 0x007bb540 and drawn 15 pixels square): a player
 // not alive (slot 0x74; or the HUD manager's slot 0x410 test) shows

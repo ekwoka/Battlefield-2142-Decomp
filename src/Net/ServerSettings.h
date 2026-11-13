@@ -16,6 +16,7 @@
 // settings, ServerAdmin (src/Main) binds them to the console.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <ctime>
 #include <functional>
@@ -85,6 +86,18 @@ struct ServerSettings {
 	bool useGlobalRank = true;
 	bool useGlobalUnlocks = true;
 	bool ranked = false;
+	// What sv.ranked's setter (0x00430800, from the console's executor
+	// 0x0042079f and, with 0, at the server's start 0x004aff80) asks before
+	// taking a value: the files python/bf2/stats/medals.py, medal_data.py
+	// and providerID.sec (the file manager's slot 0x1c), AIDLL's slot 0x20
+	// when it is loaded, and the settings ServerInfoProvider and
+	// ServerInfoRegion set and ServerInfoType on (the command line's, cases
+	// 0x47.. of 0x00409950). Short of any, sv.ranked becomes 0; else 1 with
+	// GSRanked, otherwise the value. The shipped game has none of the three
+	// files and the rewrite's command line none of those options, so
+	// sv.ranked always ends 0 (set: rankedAllowed and gameSpyRanked).
+	bool rankedAllowed = false;
+	bool gameSpyRanked = false;
 	int minUnlockLevel = 0;
 	int maxUnlockLevel = -1;
 	std::string sponsorText;
@@ -100,6 +113,42 @@ struct ServerSettings {
 	float botSkill = 0.5f;
 	bool allowSpectators = false;
 	bool allowTitanMovement = true;
+
+	// What a ranked server (sv.ranked, +0x26d) runs with whatever was set:
+	// spawnTime and manDownTime 15 (0x00430f60, 0x00430f80), ticketRatio
+	// 100 (0x00430fa0), teamRatioPercent 100 (0x00430fc0). The console's
+	// getters read these (0x0041cd19 ...), sv.save the values set.
+	float spawnTimeInForce() const { return ranked ? 15.0f : spawnTime; }
+	float manDownTimeInForce() const { return ranked ? 15.0f : manDownTime; }
+	int ticketRatioInForce() const { return ranked ? 100 : ticketRatio; }
+	float teamRatioInForce() const { return ranked ? 100.0f : teamRatioPercent; }
+	// The pause after a round's end (0x00430610): 15 in gpm_ti (the mode's
+	// name without case), else sv.endOfRoundDelay, which its setter keeps
+	// within 3..30 (0x00431640; the constructor's 15, the shipped file's 3).
+	int endOfRoundDelayInForce(const std::string& gameMode) const;
+	// The countdown from a round's end to the next round or map (+0x284,
+	// set by 0x004ba250, counted down by 0x004bd390): the end-of-round
+	// delay, and on the map's last round (rounds played == roundsPerMap
+	// - 1) sv.endDelay on top.
+	float roundEndCountdown(const std::string& gameMode, bool lastRoundOnMap) const
+	{
+		return static_cast<float>(endOfRoundDelayInForce(gameMode) + (lastRoundOnMap ? endDelay : 0));
+	}
+	// A ranked game (0x00430a00): gpm_cq, gpm_ti, gpm_sl, gpm_nv or gpm_ca,
+	// an internet server (+0x54) with GameSpyRanked (the GameSpy back end's
+	// word on the server, which no LAN or offline host has) and sv.ranked;
+	// with AIDLL loaded also its interface's slot 0x20 (not modelled).
+	bool rankedGame(const std::string& gameMode, bool gameSpyRanked) const;
+	// Its minimums: maxPlayers at least 16 (0x00431690), the players needed
+	// to start at least 8 over 32 players, else 6 (0x004316b0).
+	int maxPlayersInForce(bool rankedGame) const { return rankedGame && maxPlayers < 17 ? 16 : maxPlayers; }
+	int playersNeededToStartInForce(bool rankedGame) const
+	{
+		if (!rankedGame) {
+			return numPlayersNeededToStart;
+		}
+		return std::max(numPlayersNeededToStart, maxPlayers > 32 ? 8 : 6);
+	}
 
 	// The settings as console lines (0x00431880's order and quoting).
 	std::string save() const;

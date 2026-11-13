@@ -10,8 +10,10 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -161,6 +163,126 @@ TEST(TerrainData_PatchMeshesToTheEnd)
 		}
 	}
 	CHECK(rows && heights);
+}
+
+// The detail layer records (0x100b2ea7..0x100b2ed9): the side-projection
+// byte, the side tiling, the tiling, the float y offset and the envmap byte.
+TEST(TerrainData_LayerRecords)
+{
+	std::vector<uint8_t> data;
+	const auto put = [&data](const void* p, size_t n) {
+		const auto* b = static_cast<const uint8_t*>(p);
+		data.insert(data.end(), b, b + n);
+	};
+	const auto u16 = [&put](uint16_t v) { put(&v, 2); };
+	const auto i32 = [&put](int32_t v) { put(&v, 4); };
+	const auto f32 = [&put](float v) { put(&v, 4); };
+	const auto u8 = [&put](uint8_t v) { put(&v, 1); };
+	const auto text = [&put](const char* s) {
+		put(s, std::strlen(s));
+		const char nl = '\n';
+		put(&nl, 1);
+	};
+	u16(26);
+	u16(0); // no low far top tiling
+	for (int i = 0; i < 6; ++i) {
+		f32(1);
+	}
+	i32(0);
+	f32(100);
+	f32(0);
+	i32(128);
+	u8(1);
+	i32(8);
+	i32(512);
+	i32(512);
+	text("cm");
+	text("dm");
+	text("ld");
+	text("lm");
+	f32(2);
+	f32(3);
+	f32(32);
+	f32(0.5f);
+	for (int i = 0; i < 9; ++i) {
+		f32(0.25f);
+	}
+	i32(3);
+	text("rock");
+	u8(1);
+	f32(12);
+	f32(8);
+	f32(4);
+	f32(50);
+	u8(1);
+	text("snow");
+	u8(0);
+	f32(2);
+	f32(2);
+	f32(48);
+	f32(0);
+	u8(1);
+	text("panorama");
+	u8(2); // any non-zero byte projects sideways (0x1014e570: != 0)
+	f32(0.4f);
+	f32(0.5f);
+	f32(99);
+	f32(2);
+	u8(0);
+	const auto t = terrain::parseTerrainData(data);
+	CHECK(t.has_value());
+	if (!t) {
+		return;
+	}
+	CHECK(t->layers.size() == 3);
+	if (t->layers.size() != 3) {
+		return;
+	}
+	const auto& rock = t->layers[0];
+	CHECK(rock.texture == "rock" && rock.sideProjection && rock.envMap);
+	CHECK(rock.sideTiling[0] == 12 && rock.sideTiling[1] == 8 && rock.tiling == 4 && rock.yOffset == 50);
+	CHECK(!t->layers[1].sideProjection && t->layers[1].envMap && t->layers[1].tiling == 48);
+	CHECK(t->layers[2].sideProjection && !t->layers[2].envMap && t->layers[2].yOffset == 2);
+	CHECK(!t->meshes.has_value()); // nothing after the header
+}
+
+// The shipped levels' layer kinds: Hamburg_Harbour's side-projected layers
+// with y offsets 1 and 50, Minsk's envmap layers.
+TEST(TerrainData_ShippedLayerKinds)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	const auto load = [dir](const std::string& level) -> std::optional<terrain::TerrainData> {
+		dice::hfe::io::FileManager files;
+		files.setRootPath(dir);
+		files.addSearchPath("mods/bf2142");
+		files.setMountingAllowed(true);
+		files.mountArchive("Levels/" + level + "/client.zip", "Levels/" + level + "/");
+		std::vector<uint8_t> data;
+		if (!files.readFile("Levels/" + level + "/terraindata.raw", data)) {
+			return std::nullopt;
+		}
+		return terrain::parseTerrainData(data);
+	};
+	const auto hamburg = load("Hamburg_Harbour");
+	CHECK(hamburg && hamburg->layers.size() == 6 && hamburg->meshes.has_value());
+	if (hamburg && hamburg->layers.size() == 6) {
+		CHECK(hamburg->layers[0].sideProjection && hamburg->layers[0].yOffset == 1);
+		CHECK(hamburg->layers[3].sideProjection && hamburg->layers[3].envMap && hamburg->layers[3].yOffset == 1);
+		CHECK(hamburg->layers[5].sideProjection && hamburg->layers[5].yOffset == 50 && !hamburg->layers[5].envMap);
+		CHECK(!hamburg->layers[1].sideProjection && !hamburg->layers[1].envMap);
+	}
+	const auto minsk = load("Minsk");
+	CHECK(minsk && minsk->layers.size() == 6 && minsk->meshes.has_value());
+	if (minsk && minsk->layers.size() == 6) {
+		CHECK(minsk->layers[1].sideProjection && minsk->layers[1].sideTiling[0] == 9);
+		for (size_t i = 1; i < 6; ++i) {
+			CHECK(minsk->layers[i].envMap);
+		}
+		CHECK(!minsk->layers[0].envMap && !minsk->layers[0].sideProjection);
+	}
 }
 
 // The main terrain's LOD cells (Render/TerrainLod.h) drawn from the compiled
@@ -354,4 +476,57 @@ TEST(Undergrowth_SwayOffsets)
 	terrain::UndergrowthSway again;
 	again.seed();
 	CHECK(again.speed == sway.speed && again.amplitude == sway.amplitude); // deterministic
+}
+
+// The winding Undergrowth.fx's CullMode CW relies on: the shipped meshes
+// (the editor's .obj import 0x1010cb70 negates z) have their faces' normals
+// by winding pointing inwards, so a closed mesh encloses a negative volume
+// and the faces towards the camera are the ones counter-clockwise on
+// screen (GpuContext's undergrowth pipeline culls the front faces).
+TEST(Undergrowth_MeshesWoundInwards)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	int rocks = 0, inward = 0, outward = 0;
+	std::map<std::string, float> volumes;
+	for (const auto& entry : fs::directory_iterator(fs::path(gameDir) / "mods/bf2142/Levels")) {
+		auto zip = dice::hfe::io::ZipArchive::open((entry.path() / "client.zip").string());
+		std::vector<uint8_t> data;
+		if (!zip || !zip->read("Undergrowth.dat", data)) {
+			continue;
+		}
+		const auto materials = terrain::parseUndergrowthData(data);
+		if (!materials) {
+			continue;
+		}
+		for (const auto& material : *materials) {
+			for (const auto& type : material.types) {
+				float volume = 0;
+				for (size_t i = 0; i + 2 < type.indices.size(); i += 3) {
+					const auto& a = type.vertices[type.indices[i]].position;
+					const auto& b = type.vertices[type.indices[i + 1]].position;
+					const auto& c = type.vertices[type.indices[i + 2]].position;
+					volume += (a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) +
+								  a[2] * (b[0] * c[1] - b[1] * c[0])) /
+						6;
+				}
+				volumes[type.mesh] = volume;
+			}
+		}
+	}
+	for (const auto& [mesh, volume] : volumes) {
+		std::string lowered = mesh;
+		std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (lowered.find("rock") != std::string::npos && volume != 0) {
+			++rocks;
+			CHECK(volume < 0);
+		}
+		inward += volume < 0;
+		outward += volume > 0;
+	}
+	std::printf("  %zu meshes: %d inward, %d outward, %d rocks\n", volumes.size(), inward, outward, rocks);
+	CHECK(rocks >= 10);
+	CHECK(inward > 5 * outward);
 }

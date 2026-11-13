@@ -888,6 +888,45 @@ TEST(RenderScene_OvergrowthCrossFadeAndCells)
 	CHECK(out == "wood");
 }
 
+// The antialiasing setting (VideoSettings.setAntialiasing, RendDX9
+// 0x1000fb60's "<n>Samples" names) and the alpha-to-coverage path's alphas
+// (0x1008da30, RaShaderLeaf with HASALPHA2MASK, 0x1010e270).
+TEST(RenderScene_AntialiasingAndAlphaToCoverage)
+{
+	CHECK(scene::antialiasingSampleCount("Off") == 1);
+	CHECK(scene::antialiasingSampleCount("2Samples") == 2);
+	CHECK(scene::antialiasingSampleCount("4Samples") == 4);
+	CHECK(scene::antialiasingSampleCount("8Samples") == 8);
+	CHECK(scene::antialiasingSampleCount("1Samples") == 1);
+	CHECK(scene::antialiasingSampleCount("Samples") == 1);
+	CHECK(scene::antialiasingSampleCount("4Foo") == 1);
+	CHECK(scene::antialiasingSampleCount("x4Samples") == 1);
+	CHECK(scene::antialiasingSampleCount("") == 1);
+
+	Console console;
+	std::string out;
+	scene::QualitySettings video;
+	scene::registerQualityConsoleMethods(console, video);
+	CHECK(video.antialiasingSamples == 1);
+	console.execute("VideoSettings.setAntialiasing 4Samples", out);
+	CHECK(video.antialiasingSamples == 4);
+	console.execute("VideoSettings.setAntialiasing Off", out);
+	CHECK(video.antialiasingSamples == 1);
+
+	using render::AlphaToCoverage;
+	// The near pass doubles both alphas only antialiased.
+	CHECK(near(AlphaToCoverage::nearAlpha(0.5f, false), 0.5f));
+	CHECK(near(AlphaToCoverage::nearAlpha(0.5f, true), 1));
+	CHECK(near(AlphaToCoverage::nearAlpha(1, true), 2));
+	// The leaves' coverage: 4 x a Transparency held to 1 (COLOR0).
+	CHECK(near(AlphaToCoverage::leafAlphaScale(1), 4));
+	CHECK(near(AlphaToCoverage::leafAlphaScale(2), 4));
+	CHECK(near(AlphaToCoverage::leafAlphaScale(0.25f), 1));
+	// The undergrowth's: over the cfg's AlphaRef, else as it is.
+	CHECK(near(AlphaToCoverage::undergrowthAlphaScale(0.2f), 5));
+	CHECK(near(AlphaToCoverage::undergrowthAlphaScale(0), 1));
+}
+
 // The meshes' point lights (MeshLights.h, 0x100a9f80 / 0x100a7f00) and
 // the flicker (0x0064a920).
 TEST(RenderScene_MeshLightsPickedPerMesh)
@@ -982,6 +1021,8 @@ TEST(RenderScene_ObjectDistanceFade)
 	CHECK(high.area == 8 && high.actorArea == 10 && high.minimum == 80);
 	CHECK(objectCullScales(1).minimum == 40 && objectCullScales(2).actorArea == 8);
 	CHECK(viewFarDistance(330.4f, 1) == 330 && viewFarDistance(5000, 0.5f) == 1500 && viewFarDistance(5, 1) == 20);
+	// The overhead view draws with the scale at 1 (0x00779680).
+	CHECK(frameViewDistanceScale(0.5f, false) == 0.5f && frameViewDistanceScale(0.5f, true) == 1.0f);
 	const CullRecord prop = cullRecord(high, 1, 1000, false, 0.1f);
 	CHECK(prop.minArea == 6400 && prop.areaScale == 640);
 	// R = 1: pi x 640 < 6400, so A = 6400.
@@ -1089,6 +1130,23 @@ TEST(RenderScene_CustomTextureSuffix)
 			"Ingame/Customization/soldiers/Soldier_021.dds", "Ingame/Customization/soldiers/Soldier_021"}));
 	CHECK(texturePathCandidates("Common/Textures/x") == std::vector<std::string>({"Common/Textures/x.dds", "Common/Textures/x"}));
 	CHECK(texturePathCandidates("mods/a.b/x") == std::vector<std::string>({"mods/a.b/x.dds", "mods/a.b/x"}));
+}
+
+// The texture load's name (0x10017f20 -> 0x10017340): as given, else
+// with ".dds", else bare. The map node's "mini_Medic.tga" ships only as
+// mini_Medic.dds.
+TEST(RenderScene_TextureFallbackNames)
+{
+	using namespace dice::hfe::render;
+	const auto medic = textureFallbackPaths("Menu/HUD/Texture/Ingame/Player/Icons/Minimap/mini_Medic.tga");
+	CHECK(medic.size() == 2);
+	if (medic.size() == 2) {
+		CHECK(medic[0] == "Menu/HUD/Texture/Ingame/Player/Icons/Minimap/mini_Medic.dds");
+		CHECK(medic[1] == "Menu/HUD/Texture/Ingame/Player/Icons/Minimap/mini_Medic");
+	}
+	const auto dds = textureFallbackPaths("textures/x.dds");
+	CHECK(dds.size() == 1 && dds[0] == "textures/x");
+	CHECK(textureFallbackPaths("levels/a.b/noextension").empty());
 }
 
 TEST(RenderScene_RoadStaticMeshTechniques)

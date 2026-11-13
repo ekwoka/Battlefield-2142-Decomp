@@ -1320,6 +1320,19 @@ TEST(Bots_PathSmoothingOnPortals)
 	close[0].p = {2, 0, 3};
 	ai::smoothWaypoints(close, {2, 6, 0}, 0.5f);
 	CHECK(near(close[0].p.x, 3, 1e-3f) && near(close[0].p.z, 3));
+	// The 5 m are 3-D, from the mover's own position (a vehicle's origin
+	// above the mesh): 3 m across and 4.5 m up is far enough for the margin
+	// passes. The line to the next point crosses the portal's line far
+	// beyond its end a, so the point goes to 1 m from a; the last pass
+	// (crossing outside the portal) leaves it there.
+	std::vector<ai::Waypoint> above(2);
+	above[0].a = {0, 0, 3};
+	above[0].b = {4, 0, 3};
+	above[0].p = {2, 0, 3};
+	above[0].portal = true;
+	above[1].p = {-40, 0, 3.5f};
+	ai::smoothWaypoints(above, {2, 4.5f, 0}, 0.5f);
+	CHECK(near(above[0].p.x, 1, 1e-3f) && near(above[0].p.z, 3));
 }
 
 // The vehicles' driving (0x100e9d40, 0x100e0540, 0x100e8170): steering
@@ -1439,6 +1452,95 @@ TEST(Bots_DriveBoxedInAhead)
 	sense.freeFront = 20;
 	const ai::DriveOutput out = ai::driveControl(mech, st, sense);
 	CHECK(st.state == 0 && out.direction == 1 && out.throttle == 1);
+}
+
+// The room rays (0x100e8170) start at the vehicle's spot on the map, and
+// the cost-class byte the diagonal and side rays share is written only
+// by a ray that enters a polygon: a diagonal that leaves the mesh in its
+// first polygon reads the class the ray before it ended in. Here the
+// front-left diagonal ends entering class 4 and the front-right one
+// leaves the mesh at 0.5 m: neither counts, so the car drives on ahead.
+TEST(Bots_DriveRoomRaysShareTheClass)
+{
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.hasRayStart = true;
+	sense.rayStart = {0, 1, 0};
+	sense.position = {0, 2, 0.3f}; // the origin, over its spot
+	bool fromSpot = true;
+	sense.ray = [&](const ai::Vec3& from, const ai::Vec3& to) {
+		fromSpot = fromSpot && from.x == 0 && from.y == 1 && from.z == 0;
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && x < -0.1f) {
+			ray.clear = false; // front left: into class 4 at 10 m
+			ray.distance = 10;
+			ray.lastClass = 4;
+		} else if (z > 0.1f && x > 0.1f) {
+			ray.clear = false; // front right: off the mesh at once
+			ray.distance = 0.5f;
+		}
+		return ray;
+	};
+	ai::DriveSettings s;
+	ai::DriveState st;
+	const ai::DriveOutput out = ai::driveControl(s, st, sense);
+	CHECK(fromSpot);
+	CHECK(st.state == 0 && out.direction == 1 && out.throttle > 0);
+	// The front-right ray first: nothing carried, it counts.
+	sense.ray = [&](const ai::Vec3& from, const ai::Vec3& to) {
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && x > 0.1f) {
+			ray.clear = false;
+			ray.distance = 0.5f;
+		}
+		return ray;
+	};
+	ai::DriveState again;
+	const ai::DriveOutput blocked = ai::driveControl(s, again, sense);
+	CHECK(again.state != 0 || blocked.direction != 1);
+}
+
+// A room ray whose output stays (0, 0, 0) (no record to start from, or no
+// way out of a later polygon, 0x1003ce50) is skipped by 0x100e8170's
+// tests on the output: a diagonal so leaves the room ahead as it was, but
+// the front ray's room starts at 0 (local_2c), so without it the car has
+// no room ahead and backs.
+TEST(Bots_DriveRoomRaysWithoutOutput)
+{
+	ai::DriveSense sense;
+	sense.goalDistance = 100;
+	sense.remaining = 200;
+	sense.hasRayStart = true;
+	const auto diagonalsLost = [](const ai::Vec3& from, const ai::Vec3& to) {
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && std::fabs(x) > 0.1f) {
+			ray.clear = false;
+			ray.distance = 0.5f;
+			ray.known = false;
+		}
+		return ray;
+	};
+	sense.ray = diagonalsLost;
+	ai::DriveSettings s;
+	ai::DriveState st;
+	const ai::DriveOutput out = ai::driveControl(s, st, sense);
+	CHECK(st.state == 0 && out.direction == 1 && out.throttle > 0);
+	sense.ray = [](const ai::Vec3& from, const ai::Vec3& to) {
+		ai::DriveRay ray;
+		const float x = to.x - from.x, z = to.z - from.z;
+		if (z > 0.1f && std::fabs(x) < 0.1f) {
+			ray.clear = false; // straight ahead: nothing written
+			ray.known = false;
+		}
+		return ray;
+	};
+	ai::DriveState none;
+	ai::driveControl(s, none, sense);
+	CHECK(none.state == 11); // the point straight ahead (error 0): backing, the point "right"
 }
 
 // FloatingTankMoveTo (0x1008c7c0, controller 0x100de350): the hover tank
@@ -2123,9 +2225,16 @@ TEST(Bots_StrategyOrdersSquadsToAttack)
 	settle(bots, 1);
 	CHECK(bots.strategy(2) == "basicAttackEnemy");
 	for (int squad = 1; squad <= 2; ++squad) {
-		const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, squad);
-		CHECK(order && order->type == game::GameWorld::OrderType::Attack && order->accepted);
+		// The SAI's order stays the AI's: no commander order in the game
+		// (nothing for the HUD to show), but the bot leader taking it
+		// orders its squad (the leader's map attack, 0x008968d0).
+		const game::GameWorld::SquadOrder* order = bots.squadOrder(2, squad);
+		CHECK(order && order->type == game::GameWorld::OrderType::Attack);
 		CHECK(order && (near(order->position.z, 60) || near(order->position.x, 100)));
+		CHECK(!field.world->squadOrder(2, squad));
+		const game::GameWorld::SquadOrder* leader = field.world->squadLeaderOrder(2, squad);
+		CHECK(leader && leader->type == game::GameWorld::OrderType::MapAttack && !leader->fromCommander);
+		CHECK(leader && order && near(leader->position.x, order->position.x) && near(leader->position.z, order->position.z));
 	}
 	CHECK(bots.behaviour(team[0]) == "MoveTo");
 	for (int tick = 0; tick < 30 * 12; ++tick) {
@@ -2318,7 +2427,7 @@ TEST(Bots_CerbereLanding)
 	CHECK(bots.strategy(1) == "basicAttackEnemy" && bots.strategy(2) == "basicAttackEnemy");
 	const auto orderedTo = [&](int team, float x, float z) {
 		for (int squad = 1; squad <= 9; ++squad) {
-			const game::GameWorld::SquadOrder* order = world.squadOrder(team, squad);
+			const game::GameWorld::SquadOrder* order = bots.squadOrder(team, squad);
 			if (order && order->type == game::GameWorld::OrderType::Attack && near(order->position.x, x, 0.01f)
 				&& near(order->position.z, z, 0.01f)) {
 				return true;
@@ -2630,6 +2739,15 @@ TEST(Bots_PathfindingMapsAndInformationTypes)
 		console.execute(line, out);
 	}
 	CHECK(settings.pathfindingMaps.size() == 2);
+	// The trace map (AI/AIPathfinding.ai's traceMap Infantry): the map the
+	// drivers' room rays run on; -666 until set, and for a name unknown.
+	CHECK(settings.traceMap == -666);
+	console.execute("aiPathfinding.traceMap Infantry", out);
+	CHECK(settings.traceMap == 0);
+	console.execute("aiPathfinding.traceMap Nowhere", out);
+	CHECK(settings.traceMap == -666);
+	console.execute("aiPathfinding.traceMap Vehicle", out);
+	CHECK(settings.traceMap == 1);
 	const ai::ClimbLimits infantry = settings.climbLimits(0), vehicle = settings.climbLimits(1);
 	CHECK(near(infantry.maxSlope, 35 * 3.14159265f / 180) && near(infantry.stepHeight, 0.35f));
 	CHECK(near(vehicle.maxSlope, 24 * 3.14159265f / 180) && near(vehicle.stepHeight, 0.1f));
@@ -3374,6 +3492,12 @@ TEST(Bots_WeaponChoice)
 	c.targetHuman = true;
 	c.targetMotion = 0;
 	CHECK(game::chooseWeapon(c, {pistol, knife}, explosive) == 0);
+	// The human attending (0x10074ef0's local_9): armed, and the bot's
+	// newest sensing record of him under 9995 s old (-1000 with none).
+	CHECK(game::humanAttends(true, 60, 50));
+	CHECK(game::humanAttends(true, 60, -1e9f)); // no record: -1000
+	CHECK(!game::humanAttends(true, 9000, -1e9f));
+	CHECK(!game::humanAttends(false, 60, 50)); // nothing in hand
 	// EMP: x (3 - level).
 	game::WeaponOption emp = rifle;
 	emp.emp = true;
@@ -3792,6 +3916,220 @@ TEST(Bots_ChangeHearsBailOutAndGetIn)
 	}
 }
 
+// The radio's actions (AIDLL 0x10030b20): a human's bail_out closes his
+// vehicle to the bots' choice (its root AI adaptor's +8, BF2142.exe slot
+// 0x90 0x00498120, which BBChange 0x1006c520 reads first through slot
+// 0x94), his get_in opens it again, and so does his leaving it with the
+// use key (0x004bb570's event 3/3 -> AIMain slot 23, 0x10056610); a bot's
+// bail_out doesn't. A human's req_pickup is kept only by the bots within
+// 90 degrees of where he looks.
+TEST(Bots_RadioActionsCloseTheVehicleAndFilterThePickup)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int human = field.soldier("Human", false, 0, 0);
+		const int bot = field.soldier("Bot", true, -30, 0);
+		field.ticks(90);
+		field.board(human, 0);
+		CHECK(field.info(human).vehicle == car);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(30, &bots);
+		const float open = bots.lastUrgency(bot, "Change");
+		CHECK(open > 0);
+		CHECK(!bots.closedToBots(car));
+		bots.radio(human, "bail_out");
+		CHECK(bots.closedToBots(car));
+		field.ticks(30, &bots);
+		CHECK(bots.lastUrgency(bot, "Change") == 0); // the car isn't weighed
+		bots.radio(human, "get_in");
+		CHECK(!bots.closedToBots(car));
+		field.ticks(30, &bots);
+		CHECK(bots.lastUrgency(bot, "Change") > open);
+		bots.radio(human, "bail_out");
+		CHECK(bots.closedToBots(car));
+		field.board(human, 0); // out by the use key
+		CHECK(field.info(human).vehicle == 0);
+		field.ticks(1, &bots);
+		CHECK(!bots.closedToBots(car));
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int other = field.soldier("Bot2", true, 0, 0);
+		const int bot = field.soldier("Bot", true, -30, 0);
+		field.ticks(90);
+		field.board(other, 0);
+		CHECK(field.info(other).vehicle == car);
+		game::BotManager bots(*field.world, field.settings);
+		bots.radio(other, "bail_out", bot);
+		CHECK(!bots.closedToBots(car)); // a bot's message only goes to the comm
+	}
+	{
+		CarField field(gameDir);
+		const int human = field.soldier("Human", false, 0, 0);
+		field.ticks(10);
+		const physics::Vec3 look = field.world->viewForward(human);
+		CHECK(physics::lengthSquared(look) > 0.9f);
+		const int ahead = field.soldier("Ahead", true, 10 * look.x, 10 * look.z);
+		const int behind = field.soldier("Behind", true, -10 * look.x, -10 * look.z);
+		field.ticks(10);
+		game::BotManager bots(*field.world, field.settings);
+		field.ticks(1, &bots);
+		bots.radio(human, "req_pickup");
+		CHECK(bots.keepsRadio(ahead, 2, human));
+		CHECK(!bots.keepsRadio(behind, 2, human));
+		bots.radio(human, "medic"); // the other types go to every hearer
+		CHECK(bots.keepsRadio(ahead, 3, human) && bots.keepsRadio(behind, 3, human));
+	}
+}
+
+// AI/AIBehaviours.ai's aiSettings.setVehicleMaterialCost gives each bot
+// kind its own cost profile (AIDLL 0x1000be20 -> 0x1004fcf0 -> 0x100bdcc0
+// on the kind's profile, the default 0x100bdfb0; the material named by
+// 0x10058570): a Tank's, a Mech's and a Car's DeepWater (class 4) is
+// impassable, an ArmedCar's costs 2 and an Infantery's 6; their paths and
+// the drivers' room rays (0x1003f930 takes the profile by the kind,
+// DAT_10139470 vt+0xc0) use it.
+TEST(Bots_EquipmentCostProfiles)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console {&files};
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	CHECK(console.run("AI/AIBehaviours.ai", {}, out));
+	const ai::CostProfile tank = settings.costProfile("Tank");
+	CHECK(tank.costs[0] == -1 && tank.costs[1] == 1 && tank.costs[2] == 1);
+	CHECK(tank.costs[3] == 1.5f && tank.costs[4] == -1);
+	CHECK(tank.costs[5] == 1000 && tank.costs[6] == 1 && tank.costs[7] == 1000); // as the default
+	CHECK(settings.costProfile("Mech").costs[4] == -1);
+	CHECK(settings.costProfile("Car").costs[3] == 1.8f && settings.costProfile("Car").costs[4] == -1);
+	CHECK(settings.costProfile("ArmedCar").costs[3] == 1 && settings.costProfile("ArmedCar").costs[4] == 2);
+	CHECK(settings.costProfile("Infantery").costs[3] == 1.5f && settings.costProfile("Infantery").costs[4] == 6);
+	CHECK(settings.costProfile("Helicopter").costs[4] == 1); // no material costs: the default
+	// A Tank's room ray (vslot 0x84: the profile's passable test 0x100bdd00
+	// fails a polygon of class 4) stops where deep water starts, and reports
+	// the class it tried to enter; the default profile drives on.
+	ai::NavMesh mesh;
+	mesh.vertices = {{0, 0, 0}, {10, 0, 0}, {10, 0, 10}, {0, 0, 10}, {20, 0, 0}, {20, 0, 10}};
+	const auto polygon = [&](uint8_t costClass, std::vector<uint32_t> v, std::vector<int32_t> n) {
+		ai::Polygon p;
+		p.vertexCount = 3;
+		p.costClass = costClass;
+		p.firstEdge = static_cast<uint32_t>(mesh.edgeVertices.size());
+		p.normal = {0, 1, 0};
+		mesh.polygons.push_back(p);
+		mesh.edgeVertices.insert(mesh.edgeVertices.end(), v.begin(), v.end());
+		mesh.edgeNeighbours.insert(mesh.edgeNeighbours.end(), n.begin(), n.end());
+	};
+	polygon(1, {0, 1, 2}, {-1, 3, 1});
+	polygon(1, {0, 2, 3}, {0, -1, -1});
+	polygon(4, {1, 4, 5}, {-1, -1, 3});
+	polygon(4, {1, 5, 2}, {2, -1, 0});
+	ai::RayHit hit;
+	CHECK(!ai::meshRaycast(mesh, {6, 0, 3}, {18, 0, 5}, &tank, -1, nullptr, 0, 0, 6, nullptr, &hit));
+	CHECK(hit.lastClass == 4 && std::fabs(hit.point.x - 10) < 0.01f);
+	const ai::CostProfile plain;
+	CHECK(ai::meshRaycast(mesh, {6, 0, 3}, {18, 0, 5}, &plain, -1, nullptr, 0, 0, 6, nullptr, &hit));
+}
+
+// A driver's goal measures the bot's object (bot +0xa0, vt+0xcc, as
+// 0x10066a70 hands 0x1008aaa0 its position and radius): the vehicle, its
+// origin and its box's centre radius, so a driver within that radius + 1 m
+// of a scripted goal (ai.botMoveTo, 0x100284a0) has arrived, as its path
+// ends within the centre radius. With the soldier's radius (1.15 + 1 m) a
+// driver there kept MoveTo, braking at its path's end.
+TEST(Bots_DriverArrivesWithinItsVehiclesRadius)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	std::string out;
+	field.console.execute("aiSettings.setVehicleBehaviour Car MoveTo BBMoveTo BBPGotoWaypoint2d 4 UCUnion UnitWeights", out);
+	const uint32_t car = field.car("car", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 0);
+	physics::Vec3 at, lo, hi;
+	for (const auto& v : field.world->vehicleList()) {
+		if (v.object == car) {
+			at = v.position;
+			lo = v.boxMin;
+			hi = v.boxMax;
+		}
+	}
+	const physics::Vec3 half = (hi - lo) * 0.5f;
+	const float centreRadius = std::sqrt(physics::lengthSquared(half));
+	// Between the soldier's reach and the vehicle's, beside the car.
+	const float d = 0.5f * ((1.1489125f + 1) + (centreRadius + 1));
+	std::fprintf(stderr, "  centre radius %.2f, the goal %.2f m from the car\n", centreRadius, d);
+	CHECK(d > 1.1489125f + 1.2f && d < centreRadius + 0.8f);
+	game::BotManager bots(*field.world, field.settings);
+	bots.attach(field.settings);
+	char goal[96];
+	std::snprintf(goal, sizeof goal, "ai.botMoveTo 1 %.2f/0/%.2f %d", at.x - d, at.z, bot);
+	field.console.execute(goal, out);
+	CHECK(bots.scriptedGoal(bot) != nullptr);
+	field.ticks(30, &bots);
+	CHECK(bots.scriptedGoal(bot) == nullptr); // arrived: the SAI's orders again
+	CHECK(bots.behaviour(bot) != "MoveTo");
+}
+
+// The entry search (BF2142.exe 0x005a98e0) takes every EntryPoint whose
+// root is the vehicle, wherever it hangs (us_heavy_mech's under its pelvis
+// and turret bundles); and a bot heading for a car on foot keeps walking
+// at it and pressing use (the get-in plan 0x1006dac0: MoveToObjectFinding
+// beside a Trigger of PIUse within the two radii + 1 m) until it is in.
+TEST(Bots_GetInThroughNestedEntryPoints)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	{
+		CarField field(gameDir);
+		field.addCar("car_nested", "car_firearm_n");
+		world::ObjectTemplate* nested = field.templates.find("car_nested");
+		nested->children().erase(nested->children().begin()); // the root's own entry
+		world::ObjectTemplate* bundle = field.templates.create("RotationalBundle", "car_nested_bundle");
+		bundle->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+		nested->children().push_back({"car_nested_bundle", {0, 0.2f, 0}, {}});
+		const uint32_t car = field.car("car_nested", 3, 0);
+		const int human = field.soldier("Human", false, 1, 0);
+		field.ticks(60);
+		CHECK(field.world->vehicleInReach(human));
+		field.board(human, 0);
+		CHECK(field.info(human).vehicle == car);
+	}
+	{
+		CarField field(gameDir);
+		const uint32_t car = field.car("car", 3, 0);
+		const int bot = field.soldier("Bot", true, -12, 0);
+		field.ticks(60);
+		game::BotManager bots(*field.world, field.settings);
+		bool in = false;
+		for (int tick = 0; tick < 30 * 20 && !in; ++tick) {
+			field.ticks(1, &bots);
+			in = field.info(bot).vehicle == car;
+		}
+		CHECK(in);
+	}
+}
+
 // From a vehicle BBChange weighs the other vehicles' seats too (0x1006c520):
 // a gunner whose own seat is worth 2 x 16 x 0.77 = 24.6 leaves for a car
 // whose gun is worth 2 x 40 x 0.77 = 61.6 nearby.
@@ -3947,11 +4285,104 @@ TEST(Radio_TargetChannelsReachTheirHearers)
 	CHECK(!w.hearsRadio(11, me, mate)); // on foot: no vehicle to share
 	// Ground vehicles' channel: 15 m for anyone, else teammates aboard.
 	CHECK(w.hearsRadio(7, me, enemy) && !w.hearsRadio(7, me, mate) && !w.hearsRadio(8, me, enemy));
+	// TCLocalTeamMedic: teammates within 100 m whose kit's Ability
+	// component has hasHealingAbility (the kit's +0x74, interface 0xc4b1,
+	// slot 0x38: template +0x10), as EU_Assault's and Pac_Assault's.
+	f.templates.registerType(6, "Kit");
+	world::ObjectTemplate* medic = f.templates.create("Kit", "Radio_Medic");
+	medic->components().push_back("Ability");
+	medic->settings()["ability.hasHealingAbility"] = "1";
+	world::ObjectTemplate* plain = f.templates.create("Kit", "Radio_Plain");
+	plain->components().push_back("Ability");
+	CHECK(!w.hearsRadio(6, me, mate));
+	w.setKit(mate, "Radio_Plain", "");
+	CHECK(!w.hearsRadio(6, me, mate));
+	w.setKit(mate, "Radio_Medic", "");
+	w.setKit(far, "Radio_Medic", "");
+	w.setKit(enemy, "Radio_Medic", "");
+	// Past 100 m no; anyone within 15 m as AutoLocalRevive.
+	CHECK(w.hearsRadio(6, me, mate) && !w.hearsRadio(6, me, far) && w.hearsRadio(6, me, enemy));
 	// The hand-out: each hearer once, in player order.
 	w.radioMessage(me, 10, "roger_that");
 	const auto heard = w.takeRadioHeard();
 	CHECK(heard.size() == 2 && heard[0].receiver == mate && heard[1].receiver == enemy && heard[0].voice == "roger_that");
 	CHECK(w.takeRadioHeard().empty());
+}
+
+// A player's chat line goes where the target channel says (the server's
+// 0x004a93b0 → 0x004a6f70): team chat to the sender's team only, squad
+// chat to his squad, never back to the sender (his HUD showed it at the
+// send); a dead sender's line only to the dead.
+TEST(Chat_HandOutByChannel)
+{
+	RadioField f;
+	const int me = f.soldier("Me", 2, 0, 0);
+	const int mate = f.soldier("Mate", 2, 50, 0);
+	const int enemy = f.soldier("Enemy", 1, 10, 0);
+	const int dead = f.soldier("Dead", 1, 20, 0);
+	game::GameWorld& w = *f.world;
+	CHECK(w.hearsChat(0, me, mate) && w.hearsChat(0, me, enemy) && !w.hearsChat(0, me, me));
+	CHECK(w.hearsChat(1, me, mate) && !w.hearsChat(1, me, enemy) && !w.hearsChat(1, me, me));
+	CHECK(w.hearsChat(3, me, mate) && !w.hearsChat(3, me, enemy));
+	game::GameWorld::PlayerInfo info;
+	w.playerInfo(dead, info);
+	w.setHitPoints(info.soldier, 0);
+	w.tick(1.0f / 30);
+	CHECK(w.playerInfo(dead, info) && !info.alive);
+	CHECK(w.hearsChat(0, me, dead));             // the living reach the dead
+	CHECK(!w.hearsChat(0, dead, me) && !w.hearsChat(0, dead, enemy));
+	// TCPlayer (case 0xe): the value's player, not the sender, the dead's
+	// only to the dead.
+	CHECK(w.hearsChat(14, me, mate, mate) && !w.hearsChat(14, me, me, me) && !w.hearsChat(14, me, enemy, mate));
+	CHECK(!w.hearsRadio(14, dead, me, me) && w.hearsRadio(14, me, dead, dead));
+	// The server's own messages reach everyone.
+	CHECK(w.hearsChat(12, -1, dead) && w.hearsChat(13, -1, mate, 2) && !w.hearsChat(13, -1, enemy, 2));
+}
+
+// The dead's team chat (0x004a93b0's down rule, then 0x004a6f70's case 1,
+// which needs both players' controlled objects, slot 0x4c 0x00593df0):
+// the handle keeps the body, so a dead player's team line reaches his dead
+// teammates while both bodies lie, and no one once his is gone. A man-down
+// sender counts alive on the revive channels (0xf / 0x10); the bots hear
+// only a living or man-down sender (0x004a8a00).
+TEST(Chat_DeadTeamChatByTheBodies)
+{
+	RadioField f;
+	const int me = f.soldier("Me", 2, 0, 0);
+	const int mate = f.soldier("Mate", 2, 5, 0);
+	const int living = f.soldier("Living", 2, 8, 0);
+	const int bot = f.soldier("Bot", 2, 6, 0, true);
+	game::GameWorld& w = *f.world;
+	game::GameWorld::PlayerInfo info;
+	for (const int id : {me, mate}) {
+		w.playerInfo(id, info);
+		w.setHitPoints(info.soldier, 0);
+	}
+	w.tick(1.0f / 30);
+	CHECK(w.playerInfo(me, info) && !info.alive && info.heldVehicle != 0);
+	CHECK(w.hearsChat(1, me, mate) && !w.hearsChat(1, me, living) && !w.hearsChat(1, me, bot));
+	// Man down on TCAutoLocalRevive (15 m): heard by the living; the bots
+	// too, the man-down sender counting alive.
+	w.radioMessage(me, 16, "medic");
+	const auto heard = w.takeRadioHeard();
+	const bool mateHeard = std::any_of(heard.begin(), heard.end(), [&](const auto& h) { return h.receiver == mate; });
+	const bool livingHeard = std::any_of(heard.begin(), heard.end(), [&](const auto& h) { return h.receiver == living; });
+	const bool botHeard = std::any_of(heard.begin(), heard.end(), [&](const auto& h) { return h.receiver == bot; });
+	CHECK(info.manDown && livingHeard && botHeard && mateHeard);
+	// A man-down sender's team radio: to the down, not to the living
+	// players; the bots' hand-out takes man down as alive.
+	w.radioMessage(me, 1, "roger_that");
+	const auto team = w.takeRadioHeard();
+	CHECK(team.size() == 2 && team[0].receiver == mate && team[1].receiver == bot);
+	// His body gone (the corpse removed), his team line reaches no one.
+	for (int i = 0; i < 30 * 60 && w.playerInfo(me, info) && info.heldVehicle; ++i) {
+		w.tick(1.0f / 30);
+	}
+	CHECK(w.playerInfo(me, info) && info.heldVehicle == 0 && !info.alive && !info.manDown);
+	CHECK(!w.hearsChat(1, me, mate));
+	w.radioMessage(me, 0, "roger_that"); // dead: the bots don't hear him
+	const auto global = w.takeRadioHeard();
+	CHECK(std::none_of(global.begin(), global.end(), [&](const auto& h) { return h.receiver == bot || h.receiver == living; }));
 }
 
 // The bots hear through the world's hand-out and answer through their
@@ -3968,10 +4399,7 @@ TEST(Bots_RadioHeardAndAnswered)
 	{
 		CarField field(gameDir);
 		const uint32_t car = field.car("car", 3, 0);
-		// The other car beyond the get-in press's reach (the two AI radii
-		// and a metre, 0x1006ed13) for the second before the call: nearer,
-		// the bot heading for it is already in it.
-		field.car("car_b", -25, 0);
+		field.car("car_b", -30, 0); // out of the bot's reach (the get-in press, 0x1006dac0)
 		const int human = field.soldier("Human", false, 0, 0);
 		const int bot = field.soldier("Bot", true, -11, 0);
 		field.ticks(90);
@@ -5196,6 +5624,29 @@ TEST(Bots_BoxAreaStatusRule)
 	CHECK(ai::boxAreaStatus(AreaStatus::Owned, 0, 0, true, true) == AreaStatus::Owned);
 }
 
+// aiStrategicArea.create's two points (0x10062e10 -> 0x100623c0): the box's
+// corner, then its centre, the area's position; the box spans corner .. 2
+// position - corner (0x100a3fc0, isInside 0x1005d3e0).
+TEST(Bots_BoxAreaCornerAndCentre)
+{
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	std::string out;
+	console.execute("aiStrategicArea.create beach -267.15/287.2 -257.15/297.2 15.6769 50", out); // juneau's
+	const auto inside = [&](const char* at) {
+		std::string answer;
+		console.execute(std::string("aiStrategicArea.isInside beach ") + at, answer);
+		return answer.find('1') != std::string::npos;
+	};
+	CHECK(inside("-257.15/297.2"));  // the position, the centre
+	CHECK(inside("-248/306"));       // past the second point, within 2 position - corner
+	CHECK(inside("-267.15/287.2"));  // the corner
+	CHECK(!inside("-268/290"));      // before the corner
+	CHECK(!inside("-247/297"));      // past -247.15
+	const ai::StrategicArea* area = settings.strategy.findArea("beach");
+	CHECK(area && area->insideBox(-250, 300) && !area->insideBox(-250, 308));
+}
+
 // The guided weapons' plan on foot (AIDLL 0x10078570, its fire statements
 // 0x100781e0, the half-reach distance condition 0x100d4480): the move holds
 // between minRange and half the reach, closes to 0.85 maxRange from
@@ -5570,7 +6021,8 @@ TEST(Bots_FormationLineAndTrail)
 // The squad taking an order (0x100c1eb0, 0x100c21b0) and its formation
 // (0x100c0890): three EU bots in a squad take the SAI's attack order (on
 // PAC's point); the leader accepts it, says attack_position (16) on the
-// squad's channel (3), the game's order is accepted; the leader heads for
+// squad's channel (3) and orders its squad in the game (the leader's map
+// attack: the SAI's own order never reaches the game); the leader heads for
 // the order, the members for their slots in the line beside its spot
 // (3 (r + r) = 6.89 m aside). A second order is ignored while this one is
 // under way and no member is near it.
@@ -5594,10 +6046,13 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 		field.world->tick(1 / 30.0f);
 	}
 	const game::BotManager::Squad* squad = bots.squad(2, 1);
-	const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, 1);
+	const game::GameWorld::SquadOrder* order = bots.squadOrder(2, 1);
 	CHECK(squad && order && squad->members.size() == 3 && squad->state == 2 && squad->kind == 0);
-	CHECK(squad && order && order->accepted && std::fabs(squad->orderAt.x - order->position.x) < 1
+	CHECK(squad && order && std::fabs(squad->orderAt.x - order->position.x) < 1
 		&& std::fabs(squad->orderAt.z - order->position.z) < 1);
+	const game::GameWorld::SquadOrder* leaderOrder = field.world->squadLeaderOrder(2, 1);
+	CHECK(squad && leaderOrder && leaderOrder->type == game::GameWorld::OrderType::MapAttack
+		&& std::fabs(squad->orderAt.x - leaderOrder->position.x) < 1 && std::fabs(squad->orderAt.z - leaderOrder->position.z) < 1);
 	bool said = false;
 	for (const auto& r : bots.radioSent(team[0])) {
 		said = said || (r.type == 16 && r.channel == 3);
@@ -6001,14 +6456,16 @@ TEST(Bots_HumanJoiningKicksABot)
 
 // The Turret sensing pattern (0x1008c120): a tank's driver with nothing
 // to fight looks about with the turret, by the look-around's sectors; with
-// the Null pattern the turret stays where it is.
+// the Null pattern the turret stays where it is; a ControlInfo with
+// camera-relative yaw limits keeps the sectors within them (0x100d5440).
 TEST(Bots_TurretLooksAround)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
 	}
-	for (const bool turretPattern : {true, false}) {
+	for (const int mode : {0, 1, 2}) {
+		const bool turretPattern = mode != 1;
 		CarField field(gameDir);
 		world::ObjectTemplate* tank = field.templates.create("PlayerControlObject", "tank");
 		for (const auto& [key, value] : field.templates.find("car")->settings()) {
@@ -6039,6 +6496,15 @@ TEST(Bots_TurretLooksAround)
 		field.console.execute(turretPattern ? "aiSettings.addSensingAgentPattern Tank Turret"
 											: "aiSettings.addSensingAgentPattern Tank Null",
 			out);
+		if (mode == 2) {
+			// Held to -40..40 degrees of the hull (as as_apc's pod cannons,
+			// 0x100d5440): only the hull's own sector (+z) may be chosen by
+			// weight (a random pick may still fall outside, as the
+			// original's; the gun's bundle limits hold it).
+			field.console.execute("aiTemplatePlugIn.active TestTank_Ctrl", out);
+			field.console.execute("aiTemplatePlugIn.setCameraRelativeMinRotationDeg -40/-20/0", out);
+			field.console.execute("aiTemplatePlugIn.setCameraRelativeMaxRotationDeg 40/35/0", out);
+		}
 		const uint32_t id = field.objects.create(tank, {3, 1.2f, 0}, {0, 0, 0})->id();
 		const int bot = field.soldier("Bot", true, 0, 0);
 		field.ticks(90);
@@ -6056,9 +6522,14 @@ TEST(Bots_TurretLooksAround)
 			planned = planned || bots.lookPlanned(bot);
 		}
 		std::printf("  %s pattern: the turret turned up to %.1f degrees off the hull, looked %d\n",
-			turretPattern ? "Turret" : "Null", most, planned);
+			mode == 2 ? "Limited Turret" : turretPattern ? "Turret" : "Null", most, planned);
 		CHECK(planned == turretPattern);
-		CHECK(turretPattern ? most > 20 : most < 1);
+		CHECK(mode == 2 || (turretPattern ? most > 20 : most < 1));
+		// The sectors (+z, +x, -z, -x, +x+z, +x-z, -x-z, -x+z) against the
+		// hull facing +z: within 40 degrees only +z.
+		for (int sector = 0; sector < 8; ++sector) {
+			CHECK(bots.lookSectorAllowed(bot, sector) == (mode != 2 || sector == 0));
+		}
 	}
 }
 
@@ -6287,4 +6758,62 @@ TEST(Bots_ReviewSquadRejectedGoalRetry)
 		game::BotManagerTestAccess::goal(bots, self);
 		CHECK(bot.rejectedVehiclePoints.empty() && bot.vehicleApproach);
 	}
+}
+
+// The bots' unlock pools (BF2142.exe's AI player adaptor slot 40,
+// 0x008a5b90, sorting by slot 39, 0x008a57b0): a container whose first
+// item has no aiTemplate is left out; one whose item's itemIndex is the
+// kit's primary slot (Kit +0x2c8, 3) goes to the primary pool, of which one
+// is taken at floor((n + 0.999) U) when that is below n (about half the
+// time with one); the rest to the main pool, two of which are taken.
+TEST(Bots_UnlocksTakeAPrimaryFromItsOwnPool)
+{
+	Field field([](Field& f) {
+		f.templates.registerType(20, "Kit");
+		f.templates.registerType(21, "ItemContainer");
+		world::ObjectTemplate* kit = f.templates.create("Kit", "EU_Assault");
+		kit->settings()["unlockIndex"] = "1";
+		const auto item = [&](const char* name, int index, bool ai) {
+			world::ObjectTemplate* t = f.templates.create("GenericFireArm", name);
+			t->settings()["itemIndex"] = std::to_string(index);
+			if (ai) {
+				t->settings()["aiTemplate"] = name;
+			}
+		};
+		item("unl_shotgun", 5, true);
+		item("unl_smoke", 5, true);
+		item("unl_har_rifle", 3, true);
+		item("ability_sprint", 0, false);
+		const auto add = [&](const char* name, const char* branch, int level, const char* content) {
+			world::ObjectTemplate* c = f.templates.create("ItemContainer", name);
+			c->settings()["unlockBranch"] = branch;
+			c->settings()["unlockLevel"] = std::to_string(level);
+			c->children().push_back({content, {}, {}});
+			kit->children().push_back({name, {}, {}});
+		};
+		add("Light0", "UB_First", 0, "unl_shotgun");
+		add("Light1", "UB_First", 1, "ability_sprint");
+		add("Light2", "UB_First", 2, "unl_har_rifle");
+		add("Medic0", "UB_Second", 0, "unl_smoke");
+	});
+	// A human owning Light0 and Light1 (mask 3): UB_First level 4, so Light0
+	// to Light2 are offered; UB_Second level 1 (Medic0).
+	const int human = field.world->addPlayer("Human", 1, false);
+	field.world->setOwnedUnlocks(human, {"Light0", "Light1"});
+	CHECK(field.world->spawnSoldier(human));
+	const int bot = field.world->addPlayer("Bot", 2, true);
+	field.world->setKit(bot, "EU_Assault", "us_light_soldier");
+	int primaries = 0;
+	const int runs = 400;
+	for (int run = 0; run < runs; ++run) {
+		field.world->chooseBotUnlocks(bot);
+		const std::vector<std::string> chosen = field.world->unlocksOf(bot);
+		const auto has = [&](const char* name) { return std::find(chosen.begin(), chosen.end(), name) != chosen.end(); };
+		CHECK(has("Light0") && has("Medic0")); // the main pool's two
+		CHECK(!has("Light1"));                 // no aiTemplate: left out
+		primaries += has("Light2") ? 1 : 0;
+		CHECK(chosen.size() == (has("Light2") ? 3u : 2u));
+	}
+	std::fprintf(stderr, "  the primary taken %d of %d\n", primaries, runs);
+	CHECK(primaries > runs * 3 / 10 && primaries < runs * 7 / 10);
 }

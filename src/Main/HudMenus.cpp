@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <vector>
 
@@ -209,38 +210,71 @@ std::string SquadMenu::squadLabel(int team, int squad) const
 	return it != m_names.end() ? it->second : squadName(squad);
 }
 
+// SquadMenu.createSquad (0x007a5ad0) needs no box: shown or not (+0xec),
+// the box's name goes to the HUD manager's slot 0x2f8 (0x007d67e0 →
+// slot 0x300, 0x007d6910), which makes the squad for anyone but the
+// commander (player slot 0x128): the first free id (slot 0x310), or his
+// own when he is alone in it; a squad he is in is left first
+// (0x007a55f0); the squad made only when it has no members (the squad
+// manager's slot 0x58, +8), named by the box or its id's name (0x00b411a4),
+// through the squad manager's slot 0x1c. The box closes after (0x007a5700
+// with 0). Without the box shown the name is the first of the game's
+// names no other squad of the team has (0x007a5250 into slot 0x2f0).
 bool SquadMenu::createSquad(int player)
 {
 	game::GameWorld::PlayerInfo me;
-	if (!m_createShow || !playerInfo(player, me)) {
+	if (!playerInfo(player, me) || me.commander) {
+		setCreateSelect(player, false);
 		return false;
 	}
-	const int squad = me.squad > 0 ? me.squad : freeSquad(me.team);
+	int squad = freeSquad(me.team);
+	bool alone = false;
+	if (me.squad > 0) {
+		int members = 0;
+		for (const auto& other : playerList()) {
+			members += other.team == me.team && other.squad == me.squad ? 1 : 0;
+		}
+		alone = members == 1;
+		if (alone) {
+			squad = me.squad;
+		}
+	}
+	const std::string typed = m_createShow && typedName ? typedName() : std::string();
 	bool made = false;
 	if (m_remote.world) {
-		// ChangeSquadName for the empty squad: the server makes it.
+		// LeaveSquad, then ChangeSquadName for the empty squad: the server
+		// makes it and joins the sender (0x004c6720). A leader alone in his
+		// squad keeps it.
 		made = squad > 0 && m_remote.create;
-		if (made && me.squad != squad) {
-			const std::string typed = typedName ? typedName() : std::string();
+		if (made && !alone) {
+			if (me.squad > 0) {
+				leave(player);
+			}
 			m_remote.create(squad, typed.empty() ? squadName(squad) : typed);
 			if (m_createLocked && m_remote.lock) {
 				m_remote.lock(squad, true);
 			}
 		}
 	} else {
+		if (me.squad > 0 && !alone) {
+			leave(player);
+		}
 		made = squad > 0 && (me.squad == squad || m_round.joinSquad(player, squad));
 	}
 	if (made) {
-		const std::string typed = typedName ? typedName() : std::string();
 		if (!typed.empty()) {
 			m_names[{me.team, squad}] = typed;
 		} else {
 			m_names.erase({me.team, squad});
 		}
-		if (m_createLocked) {
-			m_locked.insert({me.team, squad});
+		if (m_remote.world) {
+			if (m_createLocked) {
+				m_locked.insert({me.team, squad});
+			} else {
+				m_locked.erase({me.team, squad});
+			}
 		} else {
-			m_locked.erase({me.team, squad});
+			m_round.setSquadPrivate(me.team, squad, m_createLocked); // slot 0x20
 		}
 	}
 	setCreateSelect(player, false);
@@ -257,16 +291,60 @@ bool SquadMenu::join(int player, int squad)
 		message("HUD_HUD_SQUAD_MUST_LEAVE_TO_JOIN");
 		return false;
 	}
-	if (locked(me.team, squad)) {
-		return false;
-	}
+	// The squad manager's slot 0x34 (0x007a5410 asks no lock of its own):
+	// a private or full squad answers with its messages (requestJoinSquad).
 	if (m_remote.world) {
 		if (m_remote.join) {
 			m_remote.join(squad);
 		}
 		return true;
 	}
-	return m_round.joinSquad(player, squad);
+	return m_round.requestJoinSquad(player, squad) == game::GameWorld::SquadJoin::Joined;
+}
+
+void SquadMenu::squadMessage(int id, int value)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!playerInfo(localPlayer(), me)) {
+		return;
+	}
+	const auto fill = [](std::string line, const char* key, const std::string& with) {
+		if (const size_t at = line.find(key); at != std::string::npos) {
+			line.replace(at, std::strlen(key), with);
+		}
+		return line;
+	};
+	const auto say = [&](const char* key) {
+		std::string line = fill(text(key), "#SQUADNAME#", squadLabel(me.team, value));
+		line = fill(line, "#TEAMNAME#", teamName ? teamName(me.team) : std::string());
+		if (onLine) {
+			onLine(line);
+		}
+	};
+	switch (id) {
+	case 0xb:
+		say("HUD_HUD_SQUAD_FULL");
+		break;
+	case 0xc:
+		say("HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN");
+		break;
+	case 0x12:
+		say("HUD_HUD_SQUAD_JOIN_DENIED");
+		break;
+	case 0x13:
+		say("HUD_HUD_SQUAD_JOIN_ACCEPTED");
+		break;
+	case 0x11: {
+		game::GameWorld::PlayerInfo asking;
+		if (m_denied.count(value) || !playerInfo(value, asking) || !onJoinRequest) {
+			return;
+		}
+		onJoinRequest(value, fill(text("HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN"), "#PLAYERNAME#", asking.name));
+		break;
+	}
+	default:
+		break;
+	}
 }
 
 void SquadMenu::leave(int player)
@@ -321,10 +399,15 @@ void SquadMenu::clickSquadList(int player, int row, int column)
 			join(player, id);
 		}
 	} else if (column == kColumnLock && id == me.squad && me.squadLeader) {
+		// 0x007a5a60: slot 0x20 with the squad's flag turned over.
+		if (!m_remote.world) {
+			m_round.setSquadPrivate(me.team, id, !m_round.squadPrivate(me.team, id));
+			return;
+		}
 		if (!m_locked.erase({me.team, id})) {
 			m_locked.insert({me.team, id});
 		}
-		if (m_remote.world && m_remote.lock) {
+		if (m_remote.lock) {
 			m_remote.lock(id, locked(me.team, id));
 		}
 	}
@@ -396,18 +479,13 @@ void SquadMenu::applyInviteList(int player)
 			}
 		}
 	}
+	// The invitations (slot 0x30: Invite); a client's player answers his.
+	// Offline the only one asked would be a bot, and no bot answers.
 	for (const int id : m_selected) {
 		game::GameWorld::PlayerInfo other;
-		if (m_remote.world) {
-			// The invitation (slot 0x30: Invite); the server's player answers it.
-			if (!m_unselected.count(id) && playerInfo(id, other) && other.squad != me.squad && m_remote.invite) {
-				m_remote.invite(id, me.squad);
-			}
-			continue;
-		}
-		if (!m_unselected.count(id) && playerInfo(id, other) && other.ai && other.squad == 0
-			&& !locked(me.team, me.squad)) {
-			m_round.joinSquad(id, me.squad);
+		if (m_remote.world && !m_unselected.count(id) && playerInfo(id, other) && other.squad != me.squad
+			&& m_remote.invite) {
+			m_remote.invite(id, me.squad);
 		}
 	}
 	m_inviteShow = false;
@@ -729,6 +807,15 @@ void spottedMouseOver(hud::HudManager& hud, int n)
 	}
 }
 
+void showScoreboard(hud::HudManager& hud, bool shown)
+{
+	if (!shown && hud.number("ScoreboardShow") != 0) {
+		hud.set("ServerInfoSelected", 0);
+	}
+	hud.set("ScoreboardShow", shown ? 1 : 0);
+	hud.set("LevelsListShow", shown ? 1 : 0);
+}
+
 void sendRequestForOrder(const std::function<void(int channel, const std::string& voice)>& say,
 	const std::function<void(int kind)>& request)
 {
@@ -961,6 +1048,45 @@ std::string scoreboardIcon(const game::GameWorld::PlayerInfo& player, int localT
 	std::string path = icon != kit->settings().end() ? icon->second : std::string();
 	std::replace(path.begin(), path.end(), '\\', '/');
 	return path;
+}
+
+std::string activeLevelText(const std::string& level)
+{
+	std::string text = level;
+	for (char& c : text) {
+		const unsigned char u = static_cast<unsigned char>(c);
+		if (c == '_') {
+			c = ' ';
+		} else if (u == 0xe5 || u == 0xe4 || u == 0xf6 || u == 0xfc || u == 0xe9) {
+			c = static_cast<char>(u - 0x20);
+		} else {
+			c = static_cast<char>(std::toupper(u));
+		}
+	}
+	return text;
+}
+
+std::vector<size_t> scoreboardOrder(const std::vector<ScoreboardKey>& players)
+{
+	std::vector<size_t> order(players.size());
+	for (size_t i = 0; i < order.size(); ++i) {
+		order[i] = i;
+	}
+	std::stable_sort(order.begin(), order.end(), [&players](size_t ia, size_t ib) {
+		const ScoreboardKey& a = players[ia];
+		const ScoreboardKey& b = players[ib];
+		if (a.score != b.score) {
+			return a.score > b.score;
+		}
+		if (a.skillScore != b.skillScore) {
+			return a.skillScore > b.skillScore;
+		}
+		if (a.deaths != b.deaths) {
+			return a.deaths < b.deaths;
+		}
+		return a.connectedAt > b.connectedAt;
+	});
+	return order;
 }
 
 ScoreboardStyle scoreboardStyle(const ScoreboardRow& row, int rowIndex)

@@ -590,3 +590,140 @@ TEST(Vehicle_AutoRotateOnEnter)
 	vehicle->tick(body, ground, 1 / 30.0f, 0);
 	CHECK(flapAngle() == 0);
 }
+
+// rememberExcessInput (0x00563bd0): an input past 1 is banked (within
+// +-40) and drained 1 a tick; an input against the bank empties it and is
+// taken as it is.
+TEST(Vehicle_RememberExcessInputEmptiesOnAReversal)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	templates.registerType(2, "RotationalBundle");
+	templates.registerType(3, "Engine");
+	world::ObjectTemplate* root = templates.create("PlayerControlObject", "gunship");
+	world::ObjectTemplate* rotor = templates.create("RotationalBundle", "gunship_engine");
+	rotor->settings()["inputToYaw"] = "PIRoll";
+	rotor->settings()["maxRotation"] = "90/0/0";
+	rotor->settings()["minRotation"] = "-90/0/0";
+	rotor->settings()["maxSpeed"] = "30/0/0";
+	rotor->settings()["acceleration"] = "1000/0/0";
+	rotor->settings()["rememberExcessInput"] = "1";
+	templates.create("Engine", "gunship_motor")->settings()["engineType"] = "c_ETCar";
+	root->children().push_back({"gunship_motor", {}, {}});
+	root->children().push_back({"gunship_engine", {0, 1, 0}, {}});
+	auto vehicle = game::Vehicle::fromTemplate(*root, templates, nullptr);
+	CHECK(vehicle != nullptr);
+	if (!vehicle) {
+		return;
+	}
+	vehicle->setOccupied(true);
+	physics::RigidBody body;
+	body.position = {0, 1, 0};
+	const physics::Ground ground = flatGround();
+	const auto bank = [&] {
+		for (const auto& part : vehicle->parts()) {
+			if (part.name == "gunship_engine") {
+				return part.excess[0];
+			}
+		}
+		return -100.0f;
+	};
+	game::VehicleInput input;
+	input.roll = 5;
+	vehicle->setInput(input);
+	vehicle->tick(body, ground, 1 / 30.0f, 0);
+	CHECK(near(bank(), 4));
+	input.roll = 0;
+	vehicle->setInput(input);
+	vehicle->tick(body, ground, 1 / 30.0f, 0);
+	CHECK(near(bank(), 3)); // drained 1
+	input.roll = -0.5f;
+	vehicle->setInput(input);
+	vehicle->tick(body, ground, 1 / 30.0f, 0);
+	CHECK(near(bank(), 0)); // against the bank: emptied
+	input.roll = 50;
+	vehicle->setInput(input);
+	vehicle->tick(body, ground, 1 / 30.0f, 0);
+	CHECK(near(bank(), 39)); // held at 40, less the tick's 1
+}
+
+// The PCO's rotational regulators (0x005c9ec0's indices 0..2: regulatePitch,
+// regulateYaw, regulateRoll on their inputs): out = clamp(((R_i . w) /
+// seconds x b + R_i . w) x a, -1, 1), replacing an input that is 0 or of
+// the same sign and smaller.
+// A liftRegulated wing (0x0064fd40, 0x006cb780's tail): the node's
+// regulator replaces the flap's pitch input the next tick. At rest the lift
+// is 0, so the input is (0 + regulateToLift 4.91) x -14.73 x 0.101833,
+// within -1: the flap turns down at full rate with no input given. The
+// template defaults are wingLift 1 and flapLift 0.1 (0x0062a2c0).
+TEST(Vehicle_WingLiftRegulated)
+{
+	const auto flapAfter = [](bool regulated) {
+		world::ObjectTemplateManager templates;
+		templates.registerType(1, "PlayerControlObject");
+		templates.registerType(2, "Wing");
+		world::ObjectTemplate* root = templates.create("PlayerControlObject", "jetski");
+		world::ObjectTemplate* wing = templates.create("Wing", "jetski_wing");
+		wing->settings()["maxRotation"] = "0/30/0";
+		wing->settings()["minRotation"] = "0/-30/0";
+		wing->settings()["maxSpeed"] = "0/60/0";
+		wing->settings()["acceleration"] = "0/600/0";
+		if (regulated) {
+			wing->settings()["liftRegulated"] = "1";
+		}
+		root->children().push_back({"jetski_wing", {}, {}});
+		auto vehicle = game::Vehicle::fromTemplate(*root, templates, nullptr, game::Vehicle::Accept::Flight);
+		if (!vehicle) {
+			return 1e9f;
+		}
+		vehicle->setOccupied(true);
+		const physics::Ground ground = flatGround();
+		physics::RigidBody body;
+		body.position = {0, 1, 0};
+		for (int i = 0; i < 3; ++i) {
+			vehicle->tick(body, ground, 1 / 30.0f, 0);
+		}
+		for (const auto& part : vehicle->parts()) {
+			if (part.type == "Wing") {
+				return part.angle[1];
+			}
+		}
+		return 1e9f;
+	};
+	CHECK(near(flapAfter(false), 0.0f));
+	CHECK(flapAfter(true) < -0.5f);
+}
+
+TEST(Vehicle_RotationalRegulators)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	templates.registerType(2, "Engine");
+	world::ObjectTemplate* root = templates.create("PlayerControlObject", "boat");
+	root->settings()["regulateYawInput"] = "PIYaw";
+	root->settings()["regulateYaw"] = "-0.1/0.01";
+	templates.create("Engine", "boat_engine")->settings()["engineType"] = "c_ETCar";
+	root->children().push_back({"boat_engine", {}, {}});
+	auto vehicle = game::Vehicle::fromTemplate(*root, templates, nullptr);
+	CHECK(vehicle != nullptr);
+	if (!vehicle) {
+		return;
+	}
+	vehicle->setOccupied(true);
+	const physics::Ground ground = flatGround();
+	const auto steered = [&](float steer) {
+		physics::RigidBody body;
+		body.position = {0, 1, 0};
+		body.angularVelocity = {0, 2, 0};
+		game::VehicleInput input;
+		input.steer = steer;
+		vehicle->setInput(input);
+		vehicle->tick(body, ground, 1 / 30.0f, 0);
+		return vehicle->regulatedInput().steer;
+	};
+	// (2 x 30 x 0.01 + 2) x -0.1 = -0.26
+	CHECK(near(steered(0), -0.26f, 1e-4f));
+	CHECK(near(steered(-0.1f), -0.26f, 1e-4f));
+	CHECK(near(steered(-0.5f), -0.5f));
+	CHECK(near(steered(0.5f), 0.5f));
+}

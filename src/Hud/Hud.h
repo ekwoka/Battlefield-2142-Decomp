@@ -223,6 +223,14 @@ public:
 		// the radar rings, 0x0078f060), over `size`.
 		float worldSize = 0;
 		std::string label;    // readable label beside a deployment spawn marker
+		// Kept on the map (the record's +0x30; 0x0077efb0 -> 0x0077e100):
+		// its point at least 0.02 / the zoom (+0x7cc over 0x0077b7b0's y)
+		// of the map's side in from the map's edges, about 3 pixels of
+		// the minimap; not the node's: off the node it is still cut away.
+		bool clamp = false;
+		// false: drawn at its own alpha, not the map's icon alpha (a
+		// call's marker on a teammate, 0x007841e0).
+		bool iconAlpha = true;
 	};
 	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
 	static constexpr float kSpawnMarkerSize = 16.0f;
@@ -244,6 +252,22 @@ public:
 	void setMapLayer(std::string texture) { m_mapLayer = std::move(texture); }
 	const std::string& mapLayer() const { return m_mapLayer; }
 	void setMapMarkers(std::vector<MapMarker> markers) { m_mapMarkers = std::move(markers); }
+	// The map's turn with the player (the map node's update 0x0078f680).
+	// setMapHeading is 0x00778ea0: the camera's heading (radians clockwise
+	// from north, atan2 of its direction's x and z; 0 when the local player
+	// isn't alive, 0x00752640) into +0x810. tickMapTurn runs the update's
+	// turn once a frame: at the minimap (+0x709, as the last frame left it)
+	// with the map not static (+0x7dc, MapStatic) and the player alive and
+	// not man down (slots 0x74, 0x114), +0x7fc eases to the heading, +0x800
+	// (DelayedMapAngle, the compass) to +0x7fc with a settling wobble, and
+	// +0x80c (the map and its icons) follows; else, at the minimap, all
+	// three go to 0; at other sizes they hold. The map and its markers are
+	// drawn turned by +0x80c about the node's centre (0x0077cba0,
+	// 0x0077c610).
+	void setMapHeading(float radians);
+	void tickMapTurn(float seconds, bool alive);
+	float mapDelayedAngle() const { return m_mapDelayed; } // radians (+0x800)
+	float mapTurn() const { return m_mapTurn; }            // radians (+0x80c)
 	// The clickable marker at a point of the 800 x 600 screen, as last
 	// drawn; -1 for none.
 	int mapMarkerAt(float x, float y) const;
@@ -438,6 +462,15 @@ private:
 	float m_mapAlpha = 1; // the map texture's alpha as eased (+0x7b0)
 	bool m_mapInVehicle = false, m_mapInsideTitan = false;
 	float m_mapLevel = 0;       // the zoom level as eased (0x714)
+	// The turn (0x0078f680): the heading +0x810, its eased angle +0x7fc,
+	// the compass's target +0x804 and delayed angle +0x800, the map's
+	// turn +0x80c; the wobble +0x808 (time +0x7c4, side +0x7f8, on +0x817,
+	// done +0x815); +0x814 the turn caught up; +0x709 at the minimap;
+	// +0x816 the size settled; +0x7dc MapStatic as last seen.
+	float m_mapHeading = 0, m_mapAngle = 0, m_mapCompassTarget = 0, m_mapDelayed = 0, m_mapTurn = 0;
+	float m_mapWobble = 0, m_mapWobbleTime = 0, m_mapWobbleSide = 0;
+	bool m_mapWobbling = false, m_mapWobbled = false, m_mapTurnCaught = false;
+	bool m_mapAtMini = false, m_mapSizeSettled = false, m_mapStatic = false;
 	bool m_mapLevelSet = false;
 	bool m_mapAreaSet = false;
 	float m_mapArea[4] = {0, 0, 0, 0}; // world minX, minZ, maxX, maxZ

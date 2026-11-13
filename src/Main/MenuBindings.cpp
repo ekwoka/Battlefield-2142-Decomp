@@ -1,6 +1,8 @@
 #include "MenuBindings.h"
 
 #include "Console/Console.h"
+#include "Hud/HudFont.h"
+#include "IO/Localization/LocaleFormat.h"
 #include "UI/Player/Scroller.h"
 
 #include "Net/ServerQuery.h"
@@ -1250,10 +1252,12 @@ void MenuBindings::fillAwardProgress(const std::string& id)
 		for (const stats::AwardCriterion& c : award->criteria) {
 			(c.global ? global : round).push_back(&c);
 		}
+		// A whole number as "%d", else "%.2f" through GetNumberFormatA in
+		// the game's language (0x1005f1e0 -> 0x10007c60).
 		const auto number = [](double v) {
 			char text[32];
 			std::snprintf(text, sizeof(text), v == std::floor(v) ? "%.0f" : "%.2f", v);
-			return std::string(text);
+			return v == std::floor(v) ? std::string(text) : io::formatNumber(text, io::languageLcid(hud::language()));
 		};
 		stats::SoldierStats recruit;
 		const stats::SoldierStats* record = soldierStats();
@@ -1544,7 +1548,7 @@ void MenuBindings::bindLists()
 			// The game modes' select box (0x100690b0; filled by 0x10069160,
 			// rows drawn by 0x100689a0): "gameModes <rows> <all>" lists the
 			// mod's game modes (its list +0x10c, each mode once in the order
-			// the level scan meets them; here the levels in name order),
+			// the level scan meets them: allGameModes),
 			// after an "All" row when <all> is 1. A mode shows as its
 			// TEXT_<id> when that has a translation, else its name in the mod
 			// (ModInfo slot 0x48) unless "N/A", else its id. Chosen: "All"
@@ -1891,11 +1895,9 @@ void MenuBindings::bindServerSettings()
 		{"AudioSettings.SoundQuality", Value("Medium")},
 		{"AudioSettings.SoundDetail", Value(2)},
 		{"AudioSettings.Provider", Value("software")},
-		{"ControlSettings.MouseSensitivity", Value(0.5)},
+		// (The mouse's sensitivity, factors and inversion are the control
+		// maps', bindControls.)
 		{"ControlSettings.MouseSensitivityMultiplier", Value(1)},
-		{"ControlSettings.MouseYAWFactor", Value(1)},
-		{"ControlSettings.MousePITCHFactor", Value(1)},
-		{"ControlSettings.InvertMouse", Value(false)},
 	};
 	for (const char* object : kSettingsObjects) {
 		const std::string prefix = std::string(object).substr(std::string("dice.bf2.").size()) + ".";
@@ -1905,8 +1907,13 @@ void MenuBindings::bindServerSettings()
 			}
 			const std::string verb = member.substr(0, 3), key = prefix + member.substr(3);
 			if (verb == "set") {
-				n.setFunction(object, member, [this, key](Interpreter&, const Args& args) {
-					m_settings[key] = arg(args, 0);
+				// The original's setters take the argument as their type
+				// (0x100a4c50, as_value's number; ...): a slider passes its
+				// m_percent, a Number object (dice.UIs.Forms.Slider's
+				// update: new Number(...)), whose value is the setting.
+				n.setFunction(object, member, [this, key](Interpreter& vm, const Args& args) {
+					const Value value = arg(args, 0);
+					m_settings[key] = value.isObject() ? vm.toPrimitive(value) : value;
 					return Value();
 				});
 			} else if (verb == "get") {
@@ -1921,7 +1928,7 @@ void MenuBindings::bindServerSettings()
 		}
 		// apply() keeps the page's values (and writes them down), cancel()
 		// goes back to the last applied ones, reset() to the defaults.
-		n.setFunction(object, "apply", [this, prefix](Interpreter&, const Args&) {
+		const auto apply = [this, prefix]() {
 			for (const auto& [key, value] : m_settings) {
 				if (key.compare(0, prefix.size(), prefix) == 0) {
 					m_appliedSettings[key] = value;
@@ -1932,6 +1939,9 @@ void MenuBindings::bindServerSettings()
 			if (onSettingsApplied) {
 				onSettingsApplied();
 			}
+		};
+		n.setFunction(object, "apply", [apply](Interpreter&, const Args&) {
+			apply();
 			return Value();
 		});
 		n.setFunction(object, "cancel", [this, prefix](Interpreter&, const Args&) {
@@ -1945,7 +1955,14 @@ void MenuBindings::bindServerSettings()
 			}
 			return Value();
 		});
-		n.setFunction(object, "reset", [this, prefix](Interpreter&, const Args&) {
+		// The pages' RESET TO DEFAULT. The general and video pages' only
+		// reset the object (0x100549b0: slot 0x1c, 0x1005b9d0: slot 0x20);
+		// the audio page's (0x10010a60) then applies as its apply does
+		// (0x10010bd0): with canApply (slot 0x1c) the object's apply(1)
+		// (slot 0x18), LocalProfileManager slot 0x34(1) and, applied, the
+		// profile's save (slot 0xc8), returning whether it applied.
+		const bool applies = std::string(object) == kAudioSettings;
+		n.setFunction(object, "reset", [this, prefix, apply, applies](Interpreter&, const Args&) {
 			for (auto it = m_settings.begin(); it != m_settings.end();) {
 				it = it->first.compare(0, prefix.size(), prefix) == 0 ? m_settings.erase(it) : std::next(it);
 			}
@@ -1954,15 +1971,22 @@ void MenuBindings::bindServerSettings()
 					m_settings[key] = value;
 				}
 			}
-			return Value();
+			if (!applies) {
+				return Value();
+			}
+			apply();
+			return Value(true);
 		});
 		n.setFunction(object, "canApply", [](Interpreter&, const Args&) { return Value(true); });
 		n.setFunction(object, "needsRestart", [](Interpreter&, const Args&) { return Value(false); });
 	}
-	// 0x1005cc20: the antialiasing modes, {value, text} each.
+	// 0x1005cc20: the antialiasing modes, {value, text} each: the
+	// renderer's list, which RendDX9 remakes for the display mode chosen
+	// (0x1000ff50 -> 0x1000fb60: the device's multisample types;
+	// setAntialiasingModes).
 	n.setFunction(kVideoSettings, "getAvailableAntialiasing", [this](Interpreter& vm, const Args&) {
 		std::vector<Value> modes;
-		for (const char* mode : {"Off", "2Samples", "4Samples", "8Samples"}) {
+		for (const std::string& mode : m_antialiasingModes) {
 			auto object = vm.newObject();
 			vm.setMember(Value(object), "value", Value(mode));
 			vm.setMember(Value(object), "text", Value(m_natives.localize(std::string("VIDEOSETTINGS_") + mode)));
@@ -2029,6 +2053,35 @@ void MenuBindings::bindServerSettings()
 	});
 	n.setFunction(kGeneralSettings, "setHelpPopUps", [this](Interpreter&, const Args& args) {
 		m_settings["GeneralSettings.HelpPopUps"] = Value(avm1::toBoolean(arg(args, 0)) ? 1.0 : 0.0);
+		return Value();
+	});
+	// The video page's presets (0x1005ba10): the scheme goes to the
+	// object (slot 0xe4, +0x10c), whose slot 0x30 (0x00497200) has the
+	// renderer's settings take it (RendDX9 slot 0x3c, 0x1000f780) and reads
+	// the eight qualities, the resolution, the antialiasing, the view
+	// distance and bloom back. 0x1000f780's presets, by quality index
+	// (terrain, geometry, lighting, dynamic lighting, dynamic shadows,
+	// effects, texture, texture filtering):
+	//   0 low     1 1 1 0 0 1 2 1, 800x600, Off, 0.75, no bloom
+	//   1 medium  2 2 2 2 2 2 3 2, 800x600, Off, 0.9, bloom
+	//   2 high    3 3 3 3 3 3 3 3, 1024x768, 2Samples, 1, bloom
+	// The texture (0x1000f600) and the high lighting depend on the machine:
+	// 2 and 2 under 240 MB of video memory or 1100 / 1280 MB of memory, and
+	// the low texture is one under the others'. Bloom is the card's (the
+	// vendor tables of 0x10001e50; a card they don't list gets it from
+	// medium up). Any other scheme (3, custom) changes nothing. A quality
+	// is clamped to its range (slot 0, 0x1000f730), a resolution or
+	// antialiasing taken only when a listed one starts with it, ignoring
+	// case (slot 0x20, 0x1000ff50), the view distance clamped to 0.5..1
+	// (slot 0x28, 0x1000f0c0). The rewrite takes today's machines: enough
+	// memory for the higher texture and lighting. The high preset's
+	// 800x600 branch (with the renderer's +0x102 set) is dead: +0x102 is
+	// the named value "rodSpecial" (0x1000bee0, through DAT_10221a0c slot
+	// 0x48), which nothing in BF2142.exe names or sets.
+	n.setFunction(kVideoSettings, "setVideoOptionScheme", [this](Interpreter& vm, const Args& args) {
+		const int scheme = static_cast<int>(std::lround(vm.toNumber(arg(args, 0))));
+		m_settings["VideoSettings.VideoOptionScheme"] = Value(scheme);
+		applyVideoScheme(scheme);
 		return Value();
 	});
 	// 0x1005d2d0: the display mode in use, as the displayModes list writes it.
@@ -2252,6 +2305,35 @@ void MenuBindings::bindControls()
 		return Value();
 	});
 	n.setFunction(kControlSettings, "getActiveControlMap", [this](Interpreter&, const Args&) { return Value(m_controlMap); });
+	// The mouse settings are the active map's (0x00497fa0 / 0x00497fc0 ..
+	// 0x00498080: the map's slots 0x8c / 0x88 the sensitivity, 0xa8 / 0xa0
+	// the yaw factor, 0xa4 the pitch factor, 0x84 / 0x80 the inverted
+	// mouse; 1 and off with no map), so they go to the profile's
+	// Controls.con with the map (ControlMap.mouseSensitivity, setYawFactor,
+	// setPitchFactor, invertMouse). The sensitivity is clamped to 0..10
+	// (0x006802a0); the page shows it over 10.
+	using MapSettings = input::ControlMaps::MapSettings;
+	const auto mouseSetting = [this, mapName, &n](const char* name, auto get, auto set) {
+		n.setFunction(kControlSettings, std::string("get") + name, [this, mapName, get](Interpreter&, const Args&) {
+			return m_controls ? get(m_controls->settingsOf(mapName())) : get(MapSettings());
+		});
+		n.setFunction(kControlSettings, std::string("set") + name, [this, mapName, set](Interpreter& vm, const Args& args) {
+			if (m_controls) {
+				set(m_controls->settings(mapName()), vm, arg(args, 0));
+			}
+			return Value();
+		});
+	};
+	mouseSetting("MouseSensitivity", [](const MapSettings& s) { return Value(s.mouseSensitivity); },
+		[](MapSettings& s, Interpreter& vm, const Value& v) {
+			s.mouseSensitivity = std::clamp(static_cast<float>(vm.toNumber(v)), 0.0f, 10.0f);
+		});
+	mouseSetting("MouseYAWFactor", [](const MapSettings& s) { return Value(s.yawFactor); },
+		[](MapSettings& s, Interpreter& vm, const Value& v) { s.yawFactor = static_cast<float>(vm.toNumber(v)); });
+	mouseSetting("MousePITCHFactor", [](const MapSettings& s) { return Value(s.pitchFactor); },
+		[](MapSettings& s, Interpreter& vm, const Value& v) { s.pitchFactor = static_cast<float>(vm.toNumber(v)); });
+	mouseSetting("InvertMouse", [](const MapSettings& s) { return Value(s.invertMouse); },
+		[](MapSettings& s, Interpreter&, const Value& v) { s.invertMouse = avm1::toBoolean(v); });
 	// getMappedString(keyId, secondary, negative): the key on the input
 	// (keyId: the engine's c_PI number) in that slot and side, as shown:
 	// 0x10018050 localizes the "CONTROLLER_..." key the game gives
@@ -2399,12 +2481,55 @@ std::string MenuBindings::hoursMinutes(std::string format, int minutes)
 	return format;
 }
 
+// The mod's game modes (ModInfo +0x10c) in the order the level scan meets
+// them. The scan (0x004643d0) lists <mod>/Levels/ with the file system's
+// directory listing (slot 0x34; FindFirstFileW / FindNextFileW in turn,
+// 0x0069f530, which on NTFS gives the names in upper-cased order) and reads
+// each level's Info/<level>.desc (0x00462750): every <mode type="...">
+// under <modes> in the file's order goes to the end of the list unless it
+// is there already (compared without regard to case, 0x0065aed0). A level
+// whose .desc can't be read adds nothing in the original; here it adds the
+// modes its server.zip has, in name order.
 std::vector<std::string> MenuBindings::allGameModes() const
 {
+	const auto folded = [](std::string text, int (*fold)(int)) {
+		for (char& c : text) {
+			c = static_cast<char>(fold(static_cast<unsigned char>(c)));
+		}
+		return text;
+	};
+	const auto upperText = [&](const std::string& text) { return folded(text, ::toupper); };
+	const auto lowerText = [&](const std::string& text) { return folded(text, ::tolower); };
+	std::vector<std::string> levels;
+	for (const MenuMap& map : m_maps) {
+		if (std::find(levels.begin(), levels.end(), map.level) == levels.end()) {
+			levels.push_back(map.level);
+		}
+	}
+	std::stable_sort(levels.begin(), levels.end(), [&upperText](const std::string& a, const std::string& b) {
+		return upperText(a) < upperText(b);
+	});
 	std::vector<std::string> modes;
-	for (const MenuMap& map : m_maps) { // sorted by level, then mode
-		if (!map.gameMode.empty() && std::find(modes.begin(), modes.end(), map.gameMode) == modes.end()) {
-			modes.push_back(map.gameMode);
+	const auto add = [&modes, &lowerText](const std::string& mode) {
+		if (mode.empty()) {
+			return;
+		}
+		const std::string lower = lowerText(mode);
+		if (std::none_of(modes.begin(), modes.end(), [&](const std::string& m) { return lowerText(m) == lower; })) {
+			modes.push_back(mode);
+		}
+	};
+	for (const std::string& level : levels) {
+		if (const LevelText* text = levelText(level)) {
+			for (const std::string& mode : text->modes) {
+				add(mode);
+			}
+			continue;
+		}
+		for (const MenuMap& map : m_maps) { // sorted by level, then mode
+			if (map.level == level) {
+				add(map.gameMode);
+			}
 		}
 	}
 	return modes;
@@ -2413,6 +2538,46 @@ std::vector<std::string> MenuBindings::allGameModes() const
 // The modes the create-server page offers: the mod's without the first
 // "sp1" and the first "gpm_sp" (0x10069160's fill, and setGameModeIndex
 // 0x10057870, take them out the same way).
+void MenuBindings::applyVideoScheme(int scheme)
+{
+	if (scheme < 0 || scheme > 2) {
+		return;
+	}
+	static const char* const kQualities[8] = {"TerrainQuality", "GeometryQuality", "LightingQuality",
+		"DynamicLightingQuality", "DynamicShadowsQuality", "EffectsQuality", "TextureQuality", "TextureFilteringQuality"};
+	static const int kPresets[3][8] = {{1, 1, 1, 0, 0, 1, 2, 1}, {2, 2, 2, 2, 2, 2, 3, 2}, {3, 3, 3, 3, 3, 3, 3, 3}};
+	static const int kLowest[8] = {1, 1, 1, 0, 0, 1, 1, 1}; // +0x50; the highest (+0x90) 3
+	for (int i = 0; i < 8; ++i) {
+		m_settings[std::string("VideoSettings.") + kQualities[i]] = Value(std::clamp(kPresets[scheme][i], kLowest[i], 3));
+	}
+	// 0x1000ff50: the first listed entry that starts with the text.
+	const auto listed = [](const std::vector<std::string>& entries, const std::string& text) -> const std::string* {
+		for (const std::string& entry : entries) {
+			if (entry.size() >= text.size()
+				&& std::equal(text.begin(), text.end(), entry.begin(), [](char a, char b) {
+					   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+				   })) {
+				return &entry;
+			}
+		}
+		return nullptr;
+	};
+	std::vector<std::string> modes;
+	for (const auto& row : m_natives.listRows("displayModes")) {
+		if (!row.empty()) {
+			modes.push_back(row[0]);
+		}
+	}
+	if (const std::string* mode = listed(modes, scheme == 2 ? "1024x768" : "800x600")) {
+		m_settings["VideoSettings.Resolution"] = Value(*mode);
+	}
+	if (const std::string* mode = listed(m_antialiasingModes, scheme == 2 ? "2Samples" : "Off")) {
+		m_settings["VideoSettings.Antialiasing"] = Value(*mode);
+	}
+	m_settings["VideoSettings.ViewDistanceScale"] = Value(scheme == 0 ? 0.75 : scheme == 1 ? 0.9 : 1.0);
+	m_settings["VideoSettings.BloomEnabled"] = Value(scheme > 0);
+}
+
 std::vector<std::string> MenuBindings::selectBoxGameModes() const
 {
 	std::vector<std::string> modes = allGameModes();

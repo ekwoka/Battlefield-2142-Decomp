@@ -199,12 +199,11 @@ void HudChat::update(float seconds)
 	std::vector<std::vector<std::string>> chat, personal;
 	std::vector<std::array<float, 4>> chatColors, personalColors;
 	m_rows.clear();
+	m_personalRows.clear();
 	for (const Line& line : m_lines) {
 		(line.personal ? personal : chat).push_back({line.text});
 		(line.personal ? personalColors : chatColors).push_back(line.color);
-		if (!line.personal) {
-			m_rows.push_back(line.text);
-		}
+		(line.personal ? m_personalRows : m_rows).push_back(line.text);
 	}
 	m_hud.setList(3, std::move(chat));
 	m_hud.setListRowColors(3, std::move(chatColors));
@@ -412,9 +411,34 @@ void VoteMessages::line(int which, int choice)
 	if (key) {
 		out = text(key);
 	}
+	if (which == kStart) {
+		const std::string me = playerName ? playerName(localPlayer) : std::string();
+		const bool local = (!me.empty() && me == m_starterName) || (m_kind != 1 && !me.empty() && me == m_targetName);
+		if (!local && onVoteQuestion) {
+			onVoteQuestion(m_kind, out);
+			m_voted = false;
+			return;
+		}
+		if (local && onVoteQuestionGone) {
+			onVoteQuestionGone();
+		}
+	}
 	if (onLine && !out.empty()) {
 		onLine(out);
 	}
+}
+
+bool VoteMessages::castVote(int questionKind, bool yes, Cast& out)
+{
+	if (questionKind == 0 || m_states.count(localPlayer) != 0 || m_kind == 0) {
+		return false;
+	}
+	if ((m_kind == 2 || m_kind == 3) && m_target == localPlayer) {
+		return false;
+	}
+	out = {m_kind, m_target, yes ? 0 : 1};
+	m_voted = true;
+	return true;
 }
 
 void VoteMessages::handle(const Event& e)
@@ -442,8 +466,16 @@ void VoteMessages::handle(const Event& e)
 		line(kStart);
 		return;
 	case 1: line(kFailed); clear(); return;
-	case 2: line(m_kind == 3 ? kResigned : kLeft); clear(); return;
-	case 3: line(kPassed); clear(); return;
+	case 2:
+	case 3:
+		// A mutiny's end bars its target for 5 minutes (the target's slot
+		// 0x144(5.0), 0x005740e0 cases 2 and 3).
+		if (m_kind == 3 && e.target == localPlayer) {
+			m_barredMinutes = 5;
+		}
+		line(e.phase == 3 ? kPassed : m_kind == 3 ? kResigned : kLeft);
+		clear();
+		return;
 	case 4:
 		if (e.choice == 2) {
 			return;
@@ -461,8 +493,38 @@ void VoteMessages::handle(const Event& e)
 	}
 }
 
+void VoteMessages::setCommanding(bool commanding)
+{
+	if (m_commanding && !commanding) {
+		m_lostCommandAt = m_clock;
+	} else if (!m_commanding && commanding) {
+		m_barredMinutes = 0;
+	}
+	m_commanding = commanding;
+}
+
+bool VoteMessages::mayApplyForCommander()
+{
+	if (m_commanding) {
+		return true; // 0x007d7050 checks only a player who isn't commander (slot 0x128)
+	}
+	const double left = m_barredMinutes - (m_clock - m_lostCommandAt) / 60.0;
+	if (left <= 0) {
+		return true;
+	}
+	const int minutes = static_cast<int>(std::ceil(left));
+	const std::string out = minutes < 2
+		? replaced(text("HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTE"), "#MINUTE#", std::to_string(minutes))
+		: replaced(text("HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTES"), "#MINUTES#", std::to_string(minutes));
+	if (onLine) {
+		onLine(out);
+	}
+	return false;
+}
+
 void VoteMessages::tick(float seconds)
 {
+	m_clock += seconds;
 	m_wait = std::max(0.0f, m_wait - seconds);
 	if (m_kind == 0) {
 		return;
@@ -531,10 +593,15 @@ void HudQuestions::show() const
 	if (onClear) {
 		onClear();
 	}
+	if (onLine) {
+		onLine(q->text);
+	}
+	if (q->kind == Vote) {
+		return; // the start line names the keys (0x0079c720 case 6)
+	}
 	if (!onQuestion) {
 		return;
 	}
-	onQuestion(q->text);
 	const char* prompt = q->kind == TeamKill ? "HUD_HUD_YESNO" : "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT";
 	onQuestion(localize ? localize(prompt) : std::string(prompt));
 }

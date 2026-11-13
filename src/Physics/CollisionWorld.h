@@ -47,16 +47,15 @@ enum class CollisionUser { Projectile = 0, Vehicle = 1, Soldier = 2, Tree = 4 };
 
 class CollisionWorld {
 public:
-	// Adds geometry 0 of `mesh` (all parts) at the LOD for `user` (parts
-	// without one add nothing: collisionLodFor), placed by
+	// Adds geometry `geometry` of `mesh` (0: the object's own; a part's
+	// collisionPart names another, 0x0063ccc0) in sub-geometry `state` (0
+	// normal, 1 a wreck's: collisionPart) at the LOD for `user` (one
+	// without it adds nothing: collisionLodFor), placed by
 	// an object transform (row vectors: world = local * rotation + position).
 	// `materials` maps the mesh's material indices to material ids (the
 	// template's mapMaterial); `owner` is reported with hits.
 	void addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation, const Vec3& position,
-		uint32_t owner = 0, const std::vector<uint32_t>& materials = {});
-	// The same for another geometry of `mesh` (a child object's collisionPart).
-	void addGeometry(const CollisionMeshFile& mesh, size_t geometry, CollisionUser user, const Mat3& rotation,
-		const Vec3& position, uint32_t owner = 0, const std::vector<uint32_t>& materials = {});
+		uint32_t owner = 0, const std::vector<uint32_t>& materials = {}, size_t geometry = 0, size_t state = 0);
 	// Adds `other`'s faces after this world's, in their order: the same
 	// world as making `other`'s addMesh calls here (a world merged from
 	// meshes built once).

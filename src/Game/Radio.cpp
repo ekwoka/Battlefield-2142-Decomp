@@ -53,6 +53,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <set>
@@ -92,21 +93,30 @@ int GameWorld::targetChannel(const std::string& name)
 
 // The medic's means for TCLocalTeamMedic: 0x004a6f70 asks the receiver's
 // soldier for its interface 0xc4d7 (the soldier's +0x18c, 0x00585af0),
-// whose slot 0x58 (0x005afc00) is its kit (+0x228), and the kit's +0x74's
-// slot 0x38 for a flag; that flag's setter wasn't traced. The rewrite
-// takes a kit carrying a healing gadget (ammo.replenishingType RTHeal: the
-// medic hub, the defibrillator's kit) as having it.
+// whose slot 0x58 (0x005afc00) is its kit (+0x228), and the kit's +0x74
+// (the object's component of interface 0xc4b1, kept by 0x006f99e0: the
+// Ability component, vtable 0x00988e50) for its slot 0x38 (0x00658590:
+// the template's +0x10), ability.hasHealingAbility (+0x10 of hasHealing,
+// hasRepairing, hasAmmo, showPlayers, showVehicles, radialRadar, then
+// radarRadius +0x18, which the component's constructor 0x00656550 reads).
+// Shipped: EU_Assault and Pac_Assault.
 bool GameWorld::carriesHealing(const Player& player) const
 {
-	for (const Player::Carried& item : player.carried) {
-		const world::ObjectTemplate* t = m_templates.find(item.name);
-		Ability ability;
-		bool whileFiring = false;
-		if (t && abilityOf(*t, ability, whileFiring) && !ability.ammo) {
-			return true;
-		}
+	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
+	const world::ObjectTemplate* kit = worn && worn->objectTemplate() ? worn->objectTemplate()
+		: player.kitTemplate.empty()                                   ? nullptr
+																		: m_templates.find(player.kitTemplate);
+	if (!kit) {
+		return false;
 	}
-	return false;
+	const auto& components = kit->components();
+	const bool ability = std::any_of(components.begin(), components.end(), [](const std::string& c) {
+		return c.size() == 7 && std::equal(c.begin(), c.end(), "ability", [](char a, char b) {
+			return std::tolower(static_cast<unsigned char>(a)) == b;
+		});
+	});
+	const auto healing = kit->settings().find("ability.hasHealingAbility");
+	return ability && healing != kit->settings().end() && std::atoi(healing->second.c_str()) != 0;
 }
 
 bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value) const
@@ -118,12 +128,28 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 	if (!receiver) {
 		return false;
 	}
-	// The controlled objects' positions (slot 0x4c: the vehicle aboard).
+	// The controlled objects (slot 0x4c, 0x00593df0: the player's handle
+	// +0x80, the vehicle aboard, else the soldier, kept through man down
+	// and as a corpse until the body is removed; PlayerInfo::heldVehicle)
+	// and their positions (slot 0x60).
 	PlayerInfo from, to;
-	const bool haveFrom = sender && playerInfo(sender->id, from) && from.alive;
-	const bool haveTo = playerInfo(receiver->id, to) && to.alive;
-	const auto distance2 = [&] { return physics::lengthSquared(to.position - from.position); };
+	const world::Object* fromObject = nullptr;
+	const world::Object* toObject = nullptr;
+	if (sender && playerInfo(sender->id, from) && from.heldVehicle) {
+		fromObject = m_objects.find(from.heldVehicle);
+	}
+	if (playerInfo(receiver->id, to) && to.heldVehicle) {
+		toObject = m_objects.find(to.heldVehicle);
+	}
+	const bool haveFrom = fromObject != nullptr;
+	const bool haveTo = toObject != nullptr;
+	const auto distance2 = [&] {
+		const auto& a = fromObject->position();
+		const auto& b = toObject->position();
+		return physics::lengthSquared(physics::Vec3 {b.x - a.x, b.y - a.y, b.z - a.z});
+	};
 	const auto sameTeam = [&] { return sender && sender->team == receiver->team; };
+	const auto downApart = [&] { return sender && !sender->alive && receiver->alive; };
 	switch (channel) {
 	case 0:
 		return sender != receiver;
@@ -153,10 +179,13 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 			return true;
 		}
 		return sameTeam();
+	// 4, 5 and 0xe first take the chat's down rule again (a dead or
+	// man-down sender, slots 0x74 / 0x114, only to the dead and the downed;
+	// the rewrite's man down isn't alive).
 	case 4:
-		return sender != receiver && receiver->squadLeader && receiver->squad == value && sameTeam();
+		return sender != receiver && !downApart() && receiver->squadLeader && receiver->squad == value && sameTeam();
 	case 5:
-		return sender != receiver && receiver->squad == value && sameTeam();
+		return sender != receiver && !downApart() && receiver->squad == value && sameTeam();
 	case 6:
 	case 15:
 		if (!sender || sender == receiver || !haveFrom || !haveTo) {
@@ -195,11 +224,10 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 		if (sender->squad != 0 && sender->squad == receiver->squad) {
 			return true;
 		}
-		if (!to.vehicle) {
-			return false; // on foot: the controlled object is the soldier itself
+		if (to.heldVehicle == to.heldSoldier) {
+			return false; // the controlled object is the default vehicle (slot 0xb4): on foot
 		}
-		const world::Object* vehicle = m_objects.find(to.vehicle);
-		const world::ObjectTemplate* t = vehicle ? vehicle->objectTemplate() : nullptr;
+		const world::ObjectTemplate* t = toObject->objectTemplate();
 		const int category = t ? vehicleCategory(*t) : -1;
 		if (category == 0) {
 			return d2 <= kFar; // +0x114
@@ -207,25 +235,56 @@ bool GameWorld::hearsRadio(int channel, int senderId, int receiverId, int value)
 		return (category == 2 || category == 3) && d2 <= kFar; // +0x110
 	}
 	case 11:
-		return sender && sender != receiver && haveFrom && haveTo && from.vehicle && from.vehicle == to.vehicle;
+		// The two controlled objects' roots (0x006f1d70) the same.
+		return sender && sender != receiver && haveFrom && haveTo && from.heldVehicle == to.heldVehicle;
 	case 12:
 		return true;
 	case 13:
 		return receiver->team == value;
 	case 14:
-		return receiver->id == value;
+		return sender != receiver && !downApart() && receiver->id == value;
 	default:
 		return false;
 	}
 }
 
+bool GameWorld::hearsChat(int channel, int senderId, int receiverId, int value) const
+{
+	if (channel != 12 && channel != 13) {
+		PlayerInfo from, to;
+		if (!playerInfo(senderId, from) || !playerInfo(receiverId, to)) {
+			return false;
+		}
+		// Down: not alive (player slot 0x74, +0xd5) or man down (slot
+		// 0x114, +0xe0), a man-down sender counting alive on 0xf / 0x10.
+		// The original's man down is alive with +0xe0 set; the rewrite's
+		// man down is not alive, so it is told apart here.
+		const bool senderDown = from.manDown ? channel != 15 && channel != 16 : !from.alive;
+		const bool receiverDown = !to.alive || to.manDown;
+		if (senderDown && senderDown != receiverDown) {
+			return false;
+		}
+	}
+	return hearsRadio(channel, senderId, receiverId, value);
+}
+
+// The server's hand-out (0x004ab600): to each client's player and its own
+// (0x004a93b0, 0x004a7800) with the chat's rule, hearsChat; to the bots
+// (0x004a8a00, the players with the bot bit, slot 0x68 +0xd4) only from a
+// living sender (slot 0x74; man down counts alive) to a living bot, then
+// 0x004a6f70.
 void GameWorld::radioMessage(int sender, int channel, const std::string& voice, int value)
 {
 	if (channel < 0 || voice.empty()) {
 		return;
 	}
+	const Player* from = sender >= 0 ? findPlayer(sender) : nullptr;
+	const bool senderLiving = from && (from->alive || from->manDown);
 	for (const auto& player : m_players) {
-		if (hearsRadio(channel, sender, player->id, value)) {
+		const bool hears = player->ai
+			? senderLiving && (player->alive || player->manDown) && hearsRadio(channel, sender, player->id, value)
+			: hearsChat(channel, sender, player->id, value);
+		if (hears) {
 			m_radioHeard.push_back({sender, player->id, channel, voice});
 		}
 	}
@@ -401,6 +460,29 @@ void GameWorld::stepCombatAreas(float seconds)
 	for (const auto& [object, amount] : losses) {
 		loseHitPoints(object, amount, -1);
 	}
+}
+
+physics::Vec3 GameWorld::viewForward(int id) const
+{
+	const Player* me = findPlayer(id);
+	if (!me) {
+		return {};
+	}
+	const auto along = [](float yawDegrees, float pitchDegrees) {
+		const float yaw = yawDegrees * 3.14159265f / 180.0f;
+		const float pitch = pitchDegrees * 3.14159265f / 180.0f;
+		return physics::Vec3 {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	};
+	if (const Body* body = me->vehicle ? findBody(me->vehicle) : nullptr) {
+		float yaw = 0, pitch = 0;
+		if (!gunAim(body->object, me->seat, yaw, pitch) && me->seat >= 0
+			&& static_cast<size_t>(me->seat) < body->looks.size()) {
+			yaw = body->looks[static_cast<size_t>(me->seat)].yaw;
+			pitch = body->looks[static_cast<size_t>(me->seat)].pitch;
+		}
+		return body->body.rotation.transform(along(yaw, pitch));
+	}
+	return along(lookYaw(*me), me->input.aimPitch);
 }
 
 int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const

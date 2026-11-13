@@ -8,7 +8,11 @@
 // Detail: each patch has up to two detail maps whose RGB channels weight
 // detail layers 0-2 and 3-5; each layer tiles its own texture across the
 // patch. Detail textures centre on 0.5, so 2 * detail leaves the colormap
-// unchanged on average; it fades out with distance.
+// unchanged on average; it fades out with distance. RendDX9 draws each
+// layer's triangles with the layer's pass (0x1014e570): side-projected
+// layers (FullDetailMounten) add x and z planes from their side texture,
+// envmap layers (FullDetailWithEnvMap) lerp towards the current cube; here
+// one pass blends all six by their weights (detailBlend).
 //
 // Low detail (TerrainShader_Hi.fx, Hi_PS_FullDetail with HIGHTERRAIN): the
 // level's lowDetailTexture tiled across the terrain by the far tilings
@@ -52,6 +56,9 @@ layout(set = 2, binding = 10) uniform sampler2D lowDetailTexture;
 #define SHADOW_UNIFORM_BINDING 2
 #define SHADOW_MAP_BINDING 11
 #include "shadow.glsl"
+layout(set = 2, binding = 13) uniform samplerCube envCube;  // the current cube (EnvMaps.h)
+layout(set = 2, binding = 14) uniform sampler2D sideLayerA; // "<texture>_side" of a side-projected layer
+layout(set = 2, binding = 15) uniform sampler2D sideLayerB;
 
 layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
@@ -94,19 +101,87 @@ layout(set = 3, binding = 1) uniform Detail {
 	vec4 farTiling;    // side x, side y, top, y offset (repeats across a patch)
 	vec4 farScale;     // x: 1 / a patch's metres, y: 1 with a low-detail texture, w: a metre up
 	vec4 water;        // TerrainWaterColor, WaterHeight
+	vec4 layerInfo[6]; // NEARTEXTILING's side tiling (xy) and y offset (z); w: the pass (TerrainLayerKind)
+	vec4 eye;          // the camera (vCamerapos)
 };
 
 layout(location = 0) out vec4 outColor;
 
-vec3 detailColor()
+// The x and z planes' blend by the normal (Hi_VS_FullDetailMounten:
+// saturate(|n| - vBlendMod) over its sum, vBlendMod the effect's default
+// (0.2, 0.5, 0.2)), shared with the low-detail texture's planes.
+vec3 planeBlend()
+{
+	vec3 blend = clamp(abs(normalize(inNormal)) - vec3(0.2, 0.5, 0.2), 0.0, 1.0);
+	return blend / max(dot(blend, vec3(1.0)), 1e-4);
+}
+
+// A layer's colour (rgb) and alpha. Its pass (RendDX9 0x1014e570):
+// FullDetail and FullDetailWithEnvMap sample the texture on the y plane at
+// the patch coordinate times the tiling; FullDetailMounten adds the x and
+// z planes (TerrainShader_Hi.fx tex.xy / tex.zy: the patch coordinate
+// across, -0.00615148 a metre up) from the side texture, at that times
+// the side tiling plus the y offset on the vertical, blended by the normal.
+vec4 layerSample(sampler2D layer, float tiling, int n, vec3 blend)
+{
+	vec4 y = texture(layer, inTexCoord * tiling);
+	int kind = int(layerInfo[n].w + 0.5);
+	if (kind < 1 || kind > 3) {
+		return y;
+	}
+	vec4 info = layerInfo[n];
+	float up = -inWorldPosition.y * farScale.w * info.y + info.z;
+	vec2 xPlane = vec2(inTexCoord.y * info.x, up);
+	vec2 zPlane = vec2(inTexCoord.x * info.x, up);
+	vec4 x, z;
+	if (kind == 2) {
+		x = texture(sideLayerA, xPlane);
+		z = texture(sideLayerA, zPlane);
+	} else if (kind == 3) {
+		x = texture(sideLayerB, xPlane);
+		z = texture(sideLayerB, zPlane);
+	} else {
+		x = texture(layer, xPlane);
+		z = texture(layer, zPlane);
+	}
+	return x * blend.x + y * blend.y + z * blend.z;
+}
+
+// The detail layers blended by their weights: per layer the full-detail
+// pass's detailout = lerp(2 x detail x low, low, f), and for an envmap
+// layer (FullDetailWithEnvMap) the share k = detail.a x (1 - f) of the
+// lit colour that goes to the cube: lerp(lit, cube, k) x 2. Returns
+// sum(w (1 - k) detailout) / sum(w) in rgb and sum(w k) / sum(w) in a,
+// so the lit colour is lit x rgb + 2 x cube x a.
+vec4 detailBlend(float low, float fade)
 {
 	vec3 w0 = texture(detailWeights0, inTexCoord).rgb;
 	vec3 w1 = texture(detailWeights1, inTexCoord).rgb;
-	vec3 sum = w0.r * texture(layer0, inTexCoord * tiling0.x).rgb + w0.g * texture(layer1, inTexCoord * tiling0.y).rgb +
-		w0.b * texture(layer2, inTexCoord * tiling0.z).rgb + w1.r * texture(layer3, inTexCoord * tiling0.w).rgb +
-		w1.g * texture(layer4, inTexCoord * tiling1.x).rgb + w1.b * texture(layer5, inTexCoord * tiling1.y).rgb;
+	// Layer n's weight is the map's (b, g, r)[n % 3] (RendDX9 0x10178cd0:
+	// vComponentsel (n%3 == 2, n%3 == 1, n%3 == 0) against the component
+	// map, TerrainShader_Hi.fx's chartcontrib).
+	float weights[6] = float[6](w0.b, w0.g, w0.r, w1.b, w1.g, w1.r);
 	float total = dot(w0, vec3(1.0)) + dot(w1, vec3(1.0));
-	return total > 0.01 ? sum / total : vec3(0.5);
+	if (total <= 0.01) {
+		return vec4(vec3(low), 0.0);
+	}
+	vec3 blend = planeBlend();
+	vec4 samples[6];
+	samples[0] = layerSample(layer0, tiling0.x, 0, blend);
+	samples[1] = layerSample(layer1, tiling0.y, 1, blend);
+	samples[2] = layerSample(layer2, tiling0.z, 2, blend);
+	samples[3] = layerSample(layer3, tiling0.w, 3, blend);
+	samples[4] = layerSample(layer4, tiling1.x, 4, blend);
+	samples[5] = layerSample(layer5, tiling1.y, 5, blend);
+	vec3 sum = vec3(0.0);
+	float env = 0.0;
+	for (int n = 0; n < 6; ++n) {
+		vec3 detailOut = mix(2.0 * samples[n].rgb * low, vec3(low), fade);
+		float k = int(layerInfo[n].w + 0.5) == 4 ? samples[n].a * (1.0 - fade) : 0.0;
+		sum += weights[n] * (1.0 - k) * detailOut;
+		env += weights[n] * k;
+	}
+	return vec4(sum, env) / total;
 }
 
 // The low-detail modulation for a component map value (r: flat, b: mountain).
@@ -130,8 +205,11 @@ void main()
 	vec3 albedo = texture(colorMap, inTexCoord).rgb;
 	float fade = clamp(inFade, 0.0, 1.0);
 	float low = lowDetail(vec3(1.0, 0.0, 0.0), fade);
+	float envShare = 0.0;
 	if (detailFade.z > 0.0) {
-		albedo *= mix(2.0 * detailColor() * low, vec3(low), fade);
+		vec4 detail = detailBlend(low, fade);
+		albedo *= detail.rgb;
+		envShare = detail.a;
 	} else {
 		albedo *= low;
 	}
@@ -146,6 +224,12 @@ void main()
 	} else {
 		float sun = max(dot(normalize(inNormal), sunDirection.xyz), 0.0);
 		color = albedo * (skyColor.rgb * 0.5 + sunColor.rgb * sun * shadowFactor(inWorldPosition, false));
+	}
+	if (envShare > 0.0) {
+		// FullDetailWithEnvMap: the cube at the view reflected off the flat
+		// ground (reflect(wPos - vCamerapos, (0, 1, 0)), Hi_VS_FullDetailWithEnvMap).
+		vec3 view = inWorldPosition - eye.xyz;
+		color += 2.0 * texture(envCube, vec3(view.x, -view.y, view.z)).rgb * envShare;
 	}
 	if (water.w > -1e8) {
 		color = mix(color, water.rgb, clamp((water.w - inWorldPosition.y) / 3.0, 0.0, 1.0) * fade);

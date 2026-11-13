@@ -116,8 +116,8 @@ void SoldierBody::touchMaterial(uint32_t other)
 // `relative`: the soldier's velocity relative to what it touches.
 void SoldierBody::addContact(const Vec3& normal, float depth, const Vec3& relative)
 {
-	m_pushOut = combineContacts(m_pushOut, normal * -depth);
-	m_cancel = combineContacts(m_cancel, project(-relative, normal));
+	m_pushOut = combineAxes(m_pushOut, normal * -depth);
+	m_cancel = combineAxes(m_cancel, project(-relative, normal));
 	m_contactVelocity = flush((m_contactVelocity * static_cast<float>(m_contacts) + relative) *
 		(1.0f / static_cast<float>(m_contacts + 1)));
 	++m_contacts;
@@ -178,7 +178,14 @@ void SoldierBody::collideWithObjects(float seconds)
 	if (world && !collideWithMesh(*world, nullptr, seconds, 1, true, deepest)) {
 		return;
 	}
-	for (const Mover& mover : movers) {
+	for (size_t i = 0; i < movers.size(); ++i) {
+		const Mover& mover = movers[i];
+		// 0x006c3890's start: a candidate holding the Titan's hull (its
+		// slot 0xc4(5)) with the soldier inside it (0x006f2b00) becomes
+		// the object the soldier stands in (+0x120, the node's slot 0xf0).
+		if (mover.inside) {
+			m_standingIn = static_cast<int>(i);
+		}
 		if (mover.mesh && !collideWithMesh(*mover.mesh, &mover, seconds, 1, true, deepest)) {
 			return;
 		}
@@ -370,7 +377,11 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 			addContact(normal, depth * (soldier::kSolvePush / scale), {});
 			continue;
 		}
-		const Vec3 relative = velocity - (mover ? mover->pointVelocity(contact.point) : Vec3 {});
+		// The Titan carrying the soldier (slot 0xe4, its root against the
+		// candidate's, 0x006f1d70) leaves its point velocity out: the
+		// soldier's own velocity is relative to it already.
+		const bool carrying = mover && m_carrierTicks > 0 && mover->owner == m_carrier;
+		const Vec3 relative = velocity - (mover && !carrying ? mover->pointVelocity(contact.point) : Vec3 {});
 		if (lengthSquared(relative) > 0) {
 			// 0x005ee2b0 between the two objects' events: the other's point
 			// velocity x 2.5 when faster than 1 m/s relative (a static
@@ -502,11 +513,9 @@ void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 // spheres where the soldier is now, its point velocity there over 3 m/s
 // from the soldier's, runs it over: 1000 damage, its owner credited. (The
 // original spares an owner under 10 in mass of the Particle class, which
-// the 100 already rules out, and with *0x00a84764 = 1 takes the soldier
-// node's slot 0xd8 off the relative velocity: 0x006c56e0, the node's +0x90
-// while its tick count +0x9c runs, set through slot 0xdc (0x006c5df0, at
-// most *PTR_DAT_00a06ee4 long, for *PTR_DAT_00a06ee0 ticks) by no caller
-// found, so it is none here.)
+// the 100 already rules out.) With *0x00a84764 = 1 the soldier node's
+// slot 0xd8 comes off the relative velocity too (0x00562920): the carry
+// (0x006c56e0, the node's +0x90 while its ticks +0x9c run; see carry()).
 void SoldierBody::runOver()
 {
 	if (!onCrushed) {
@@ -540,7 +549,9 @@ void SoldierBody::runOver()
 			if (contacts.empty()) {
 				continue;
 			}
-			if (lengthSquared(mover.pointVelocity(centre) - velocity) > soldier::kCrushSpeed * soldier::kCrushSpeed) {
+			const Vec3 carried = m_carryTicks > 0 ? m_carry : Vec3 {};
+			if (lengthSquared(mover.pointVelocity(centre) - velocity - carried)
+				> soldier::kCrushSpeed * soldier::kCrushSpeed) {
 				onCrushed(mover.owner);
 				return;
 			}
@@ -574,42 +585,111 @@ void SoldierBody::segmentTest(float seconds)
 	}
 }
 
+// 0x006c2230. Neither standing (+0xf9) nor swimming (+0xfa), it returns at
+// once with +0xe0 set to 1 (the grip bit 0x40 off) and leaves the
+// wanted velocity (+0xac, slot 0x84's) as it was: the Soldier doesn't ask
+// for one in the air (0x00588420), so the one asked on the ground before
+// is taken again on landing, not none (which would brake the soldier to
+// a stop on the tick it lands: a step off a deck's seam a centimetre down
+// cost a third of a walking soldier's speed).
 void SoldierBody::move(float gravity)
 {
-	if (m_onGround || m_swim) {
-		const float ny = m_groundNormal.y;
-		const float grip = ny * ny * ny * ny * ny * (m_swim ? 1.0f : friction);
-		// How far the ground velocity is from the wanted one; gravity's tick is
-		// part of the vertical error.
-		Vec3 error = m_contactVelocity - m_desired;
-		error.y += gravity / 30.0f;
-		error = error - project(error, m_groundNormal);
-		// 0x006c23a2: gripping, the correction may reach the grip limit;
-		// past it the soldier slides at the slide limit. Sliding, it is held
-		// to the slide limit and grips again once the correction fits.
-		Vec3 correction = -error;
-		if (m_gripping) {
-			if (clampTo(correction, grip * soldier::kGripLimit)) {
-				m_gripping = false;
-				clampTo(correction, grip * soldier::kSlideLimit);
-			}
-		} else if (!clampTo(correction, grip * soldier::kSlideLimit)) {
+	if (!m_onGround && !m_swim) {
+		m_gripping = false;
+		m_contactVelocity = {};
+		m_contacts = 0;
+		return;
+	}
+	const float ny = m_groundNormal.y;
+	const float grip = ny * ny * ny * ny * ny * (m_swim ? 1.0f : friction);
+	// How far the ground velocity is from the wanted one; gravity's tick is
+	// part of the vertical error.
+	Vec3 error = m_contactVelocity - m_desired;
+	error.y += gravity / 30.0f;
+	error = error - project(error, m_groundNormal);
+	const Vec3 wanted = -error;
+	Vec3 correction = wanted;
+	// +0xe0 bit 0x40, the grip: without it the correction is at most the
+	// static limit, and one within it takes hold; holding, up to the larger
+	// limit (2.3568), and one past that loses it, cut to the static limit
+	// (0x006b6fd0: true when it shortened the vector).
+	if (!m_gripping) {
+		if (!clampTo(correction, grip * soldier::kStaticGrip)) {
 			m_gripping = true;
 		}
-		// Node slot 0xa8: averaged with other requests this tick.
-		const Vec3 acceleration = correction * 30.0f;
-		m_inputAcceleration = (m_inputAcceleration * static_cast<float>(m_inputs) + acceleration) *
-			(1.0f / static_cast<float>(m_inputs + 1));
-		++m_inputs;
-		m_desired = {}; // used: cleared on the ground only (0x006c2230's end, +0xac)
-	} else {
-		// In the air (0x006c2230's early out): no friction, the wanted
-		// velocity kept for the landing, and no grip (+0xe0 set to 1,
-		// clearing its bit 0x40): a landing starts sliding.
+	} else if (clampTo(correction, grip * soldier::kSlidingGrip)) {
 		m_gripping = false;
+		clampTo(correction, grip * soldier::kStaticGrip);
 	}
+	// Node slot 0xa8: averaged with other requests this tick.
+	const Vec3 acceleration = correction * 30.0f;
+	m_inputAcceleration = (m_inputAcceleration * static_cast<float>(m_inputs) + acceleration) *
+		(1.0f / static_cast<float>(m_inputs + 1));
+	++m_inputs;
+	m_desired = {};
 	m_contactVelocity = {};
 	m_contacts = 0;
+}
+
+// Slot 0xdc (0x006c5df0): the carry for 40 ticks (*0x00a84ae4), at most
+// 1500 m/s long (*0x00a84ae8, 0x005f1310).
+void SoldierBody::setCarry(const Vec3& v)
+{
+	m_carry = v;
+	m_carryTicks = soldier::kCarryTicks;
+	clampTo(m_carry, soldier::kMaxCarry);
+}
+
+// The node's step 0x006ca660 before its integration. Standing in a Titan
+// (+0x120's root a Titan, 0x00561d90): the Titan node's velocity (slot
+// 0x58) becomes the carry (slot 0xdc) and the Titan the carrier (slot
+// 0xe8, 0x006c6290: 40 ticks). Otherwise 0x006f23a0: the object manager's
+// ray (DAT_00a85220 slot 0x68) from the soldier's origin 2 m down (prone,
+// the pose +0x18c slot 0x3c = 2: from the soldier's radius less a metre
+// under it, *0x00a68e34 through slot 0x6c, to the same end) past the
+// soldier's own tree; an object found gives its root node's point velocity
+// at the hit (slot 0xac) as the carry, and a Titan becomes the carrier.
+// Nothing found leaves both running out. The rewrite's ray meets the
+// moving objects' soldier LODs (the movers). Then +0x120 is cleared (slot
+// 0xf0(0)).
+void SoldierBody::carry()
+{
+	if (m_standingIn >= 0 && static_cast<size_t>(m_standingIn) < movers.size() && movers[m_standingIn].titan) {
+		const Mover& titan = movers[m_standingIn];
+		setCarry(titan.velocity);
+		m_carrier = titan.owner;
+		m_carrierTicks = soldier::kCarryTicks;
+	} else {
+		Vec3 from = position;
+		float down = -soldier::kCarryRay;
+		if (stance == 2) {
+			from.y += soldier::kRadius - 1.0f;
+			down -= soldier::kRadius - 1.0f;
+		}
+		const Vec3 to = from + Vec3 {0, down, 0};
+		const Mover* found = nullptr;
+		float nearest = 2;
+		for (const Mover& mover : movers) {
+			if (!mover.mesh) {
+				continue;
+			}
+			CollisionWorld::Hit hit {};
+			const Vec3 a = mover.rotation.untransform(from - mover.position);
+			const Vec3 b = mover.rotation.untransform(to - mover.position);
+			if (mover.mesh->raycast(a, b, hit) && hit.fraction < nearest) {
+				nearest = hit.fraction;
+				found = &mover;
+			}
+		}
+		if (found) {
+			setCarry(found->pointVelocity(from + (to - from) * nearest));
+			if (found->titan) {
+				m_carrier = found->owner;
+				m_carrierTicks = soldier::kCarryTicks;
+			}
+		}
+	}
+	m_standingIn = -1;
 }
 
 void SoldierBody::integrate(float seconds)
@@ -644,8 +724,16 @@ void SoldierBody::integrate(float seconds)
 		water = 0.5f;
 	}
 	velocity = velocity * (water * soldier::kWaterDamping + (1.0f - water) * soldier::kLandDamping);
-	const Vec3 average = flush((previous + velocity) * 0.5f);
+	// While a Titan carries the soldier (slot 0xe4's root a Titan), the
+	// carry (slot 0xd8) joins the tick's mean velocity.
+	const Vec3 average = flush((previous + velocity) * 0.5f) + carriedVelocity();
 	position += average * seconds;
+	if (m_carryTicks > 0) {
+		--m_carryTicks;
+	}
+	if (m_carrierTicks > 0) {
+		--m_carrierTicks;
+	}
 	acceleration = {};
 	impulse = {};
 	m_inputAcceleration = {};
@@ -663,6 +751,7 @@ void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 void SoldierBody::moveNode(float seconds, float gravity)
 {
 	m_start = position;
+	carry(); // 0x006ca660 reads +0x120 set by the previous tick's object pass
 	integrate(seconds);
 	acceleration.y += gravity * gravityModifier;
 	m_onGround = false;

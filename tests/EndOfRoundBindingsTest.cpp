@@ -4,9 +4,11 @@
 #include "IO/File/ZipArchive.h"
 #include "IO/Localization/Localization.h"
 #include "Main/EndOfRoundBindings.h"
+#include "Hud/HudFont.h"
 #include "TestMain.h"
 #include "UI/Player/Player.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -61,6 +63,8 @@ menu::RoundSummary finishedRound()
 	r.localPlayer = 0;
 	r.squads = {{2, 1, "Alpha"}};
 	r.awards = {{200, 0, 1}, {100, 1, 1}};
+	r.endOfRoundText = "\\ktw1_Ghost\\300\\ks1_Ghost\\20\\ktw1_Bot4\\120\\ks1_Bot4\\30\\ktw1_Bot1\\60\\ks1_Bot1\\25"
+		"\\wk0_Ghost\\5\\wa0_Ghost\\0.5\\wtw0_Ghost\\120\\vtw2_Ghost\\60\\vk2_Ghost\\2\\vtw2_Bot3\\30\\vk2_Bot3\\3";
 	return r;
 }
 
@@ -116,6 +120,11 @@ TEST(EndOfRoundBindings_Natives)
 	CHECK(text(eor, "getHeaderImageOutcome") == "images/eor/header_outcome_win_english.png");
 	CHECK(number(eor, "getPlayerScore") == 57);
 	CHECK(text(eor, "getPlayerScorePerMinute") == "3.50");
+	// Through GetNumberFormatA in the game's language (0x10007c60 with
+	// 0x10007730's LCID): German's decimal comma.
+	hud::setLanguage("German");
+	CHECK(text(eor, "getPlayerScorePerMinute") == "3,50");
+	hud::setLanguage("English");
 	CHECK(number(eor, "getNumVictories", {avm1::Value(1)}) == 1);
 	CHECK(number(eor, "getNumAwards") == 2);
 	CHECK(text(eor, "getCurrentRankString") == "Private 1st class");
@@ -339,5 +348,112 @@ TEST(EndOfRoundBindings_FinishedRound)
 	CHECK(movie.click("EOR_nav.mcNav.EOR_nav_squad"));
 	movie.run(2);
 	CHECK(movie.label("EOR_holder.mcSquadLeft1") == "1. ALPHA"); // upper-cased by the label
+	// The debriefing: the player's best kit, weapon and vehicle and the
+	// best teammate's and opponent's with the same one.
+	CHECK(movie.click("EOR_nav.mcNav.EOR_nav_debriefing"));
+	movie.run(2);
+	CHECK(movie.text("EOR_holder.eorDebriefing00.holder_list.row1.cell1.text") == "20");
+	CHECK(movie.text("EOR_holder.eorDebriefing00.holder_list.row3.cell1.text") == "4.00");
+	CHECK(movie.text("EOR_holder.eorDebriefing01.holder_list.row0.cell1.text") == "Bot4");
+	CHECK(movie.text("EOR_holder.eorDebriefing02.holder_list.row0.cell1.text") == "Bot1");
+	CHECK(movie.text("EOR_holder.eorDebriefing10.holder_list.row2.cell1.text") == "50%");
+	CHECK(movie.text("EOR_holder.eorDebriefing22.holder_list.row0.cell1.text") == "Bot3");
+	CHECK(movie.text("EOR_holder.eorDebriefing22.holder_list.row1.cell0.text") == movie.strings.text("TEXT_killswithvehicle"));
 	CHECK(movie.clean());
+}
+
+// The debriefing (0x0047c7a0's records from the scripts' end-of-round
+// text, the natives 0x1001e120.. and the rows 0x10065ad0).
+TEST(EndOfRoundBindings_Debriefing)
+{
+	std::vector<menu::EndOfRoundPlayer> players(4);
+	players[0].name = "Me";
+	players[0].team = 2;
+	players[1].name = "Mate";
+	players[1].team = 2;
+	players[2].name = "Foe";
+	players[2].team = 1;
+	players[3].name = "Foe Two";
+	players[3].team = 1;
+	// bf2/stats/endofround.py's text (its order: ktw, ks; wk, wa, wtw; vtw, vk).
+	const std::string text = "\\tt_Me\\600\\ktw1_Me\\300\\ks1_Me\\10\\ktw3_Me\\300\\ks3_Me\\20"
+		"\\ktw3_Mate\\120\\ks3_Mate\\30\\ktw3_Foe\\600\\ks3_Foe\\5\\ktw3_Foe Two\\60\\ks3_Foe Two\\25"
+		"\\ktw3_Stranger\\60\\ks3_Stranger\\99"
+		"\\wk4_Me\\6\\wa4_Me\\0.25\\wtw4_Me\\180\\wk4_Foe\\9\\wa4_Foe\\0.004\\wtw4_Foe\\60"
+		"\\vtw2_Mate\\90\\vk2_Mate\\1\\tp0\\Mate";
+	const menu::Debriefing d = menu::parseDebriefing(text, players, "Me");
+	// Kits by score: Stranger (unknown, dropped), Mate 30, Foe Two 25, Me 20, Foe 5.
+	const menu::DebriefingCategory& kits = d.categories[0];
+	CHECK(kits.places[0].index == 3 && kits.places[0].count == 20 && kits.places[0].seconds == 300);
+	CHECK(std::abs(kits.places[0].perMinute - 4.0f) < 1e-4f);
+	CHECK(kits.places[1].name == "Mate" && kits.places[1].count == 30);
+	CHECK(kits.places[2].name == "Foe Two"); // the best opponent with the same kit
+	CHECK(kits.position == 3 && kits.players == 4);
+	const menu::DebriefingCategory& weapons = d.categories[1];
+	CHECK(weapons.places[0].index == 4 && weapons.places[0].count == 6 && weapons.places[0].seconds == 180);
+	CHECK(std::abs(weapons.places[0].accuracy - 0.25f) < 1e-6f && std::abs(weapons.places[0].perMinute - 2.0f) < 1e-4f);
+	CHECK(weapons.places[1].index == -1 && weapons.places[2].name == "Foe");
+	CHECK(std::abs(weapons.places[2].accuracy - 0.01f) < 1e-6f); // under 0.01: 0.01
+	CHECK(weapons.position == 2 && weapons.players == 2);
+	// No vehicle of the player's: nothing, 0/0.
+	CHECK(d.categories[2].places[0].index == -1 && d.categories[2].players == 0);
+
+	// The natives and the rows.
+	NativeRegistry natives;
+	natives.setLocalizer([](const std::string& key) { return key == "TEXT_timeformat_hhmm" ? std::string("#HH#:#MM#") : key; });
+	menu::EndOfRoundBindings bindings(natives);
+	menu::RoundSummary r;
+	r.validRound = true;
+	r.players = players;
+	r.localPlayer = 0;
+	r.myTeam = 2;
+	r.endOfRoundText = text;
+	bindings.setSummary(r);
+	avm1::Interpreter vm;
+	natives.install(vm);
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.EndOfRound", "getKitPosition")) == "3/4");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.EndOfRound", "getVehiclePosition")) == "0/0");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.EndOfRound", "getKitImage")) == "images/kits/eu_support.png");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.EndOfRound", "getKitHeader")) == "images/kits/support_header_english.png");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.EndOfRound", "getWeaponImage")) == "images/weapons/eu_mg.png");
+	CHECK(vm.toString(call(vm, natives, "dice.bf2.EndOfRound", "getWeaponHeader"))
+		== "images/weapons/eu_mg_header_english.png");
+	const avm1::Value bf2 = vm.getMember(vm.getMember(avm1::Value(vm.global()), "dice"), "bf2");
+	const auto rowsOf = [&](const char* args) {
+		auto holder = vm.newObject();
+		std::vector<avm1::ObjectRef> cells;
+		for (int i = 0; i < 4; ++i) {
+			auto row = vm.newObject();
+			for (const char* cell : {"cell0", "cell1"}) {
+				cells.push_back(vm.newObject());
+				vm.setMember(avm1::Value(row), cell, avm1::Value(cells.back()));
+			}
+			vm.setMember(avm1::Value(holder), "row" + std::to_string(i), avm1::Value(row));
+		}
+		const avm1::Value list = vm.constructWith(vm.getMember(bf2, "List"),
+			{avm1::Value(holder), avm1::Value("eorDebriefing"), avm1::Value(args)});
+		vm.callMember(list, "fillList", {avm1::Value(true)});
+		std::vector<std::string> texts;
+		for (const auto& cell : cells) {
+			texts.push_back(vm.toString(vm.getMember(avm1::Value(cell), "text")));
+		}
+		return texts;
+	};
+	const auto mine = rowsOf("0 0");
+	CHECK(mine.size() == 8);
+	if (mine.size() == 8) {
+		CHECK(mine[0].empty() && mine[1].empty()); // the player's kit: no header, no name
+		CHECK(mine[2] == "TEXT_scorewithkit" && mine[3] == "20");
+		CHECK(mine[4] == "TEXT_timewithkit" && mine[5] == "05:00"); // the seconds as #HH#:#MM#
+		CHECK(mine[6] == "TEXT_scoreperminutewithkit" && mine[7] == "4.00");
+	}
+	const auto foe = rowsOf("1 2");
+	if (foe.size() == 8) {
+		CHECK(foe[0] == "HEADER_OPPOSITETEAM" && foe[1] == "Foe");
+		CHECK(foe[2] == "TEXT_killswithweapon" && foe[3] == "9" && foe[5] == "1%" && foe[7] == "9.00");
+	}
+	const auto none = rowsOf("2 1");
+	if (none.size() == 8) {
+		CHECK(none[0] == "HEADER_SAMETEAM" && none[1].empty() && none[2] == "TEXT_killswithvehicle" && none[3].empty());
+	}
 }

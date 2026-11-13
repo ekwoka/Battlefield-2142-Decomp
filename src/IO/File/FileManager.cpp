@@ -99,6 +99,10 @@ size_t FileManager::mountedArchiveCount() const
 	return count;
 }
 
+// 0x0069a810: refused with "not supported in runtime" once mounting is
+// closed (+0x6d); an archive already mounted isn't mounted again; the
+// first search path that opens it mounts it, appended to its mount
+// point's list.
 bool FileManager::mountArchive(const std::string& archive, const std::string& mountPoint)
 {
 	if (!m_mountingAllowed) {
@@ -172,6 +176,9 @@ std::string FileManager::resolveLooseFile(const std::string& normalized) const
 	return {};
 }
 
+// 0x00698e40: the first "bf2/content/" in the path erased, wherever it is
+// (find on the lower-case path, then erase 12), then the path's mount's
+// archives (slot 0x1c), then each search path's loose file.
 bool FileManager::exists(const std::string& path) const
 {
 	std::string normalized = normalizePath(path);
@@ -181,8 +188,8 @@ bool FileManager::exists(const std::string& path) const
 			return true;
 		}
 	}
-	if (startsWith(normalized, kLegacyContentPrefix)) {
-		normalized.erase(0, sizeof(kLegacyContentPrefix) - 1);
+	if (const size_t legacy = normalized.find(kLegacyContentPrefix); legacy != std::string::npos) {
+		normalized.erase(legacy, sizeof(kLegacyContentPrefix) - 1);
 	}
 	std::string relative;
 	if (const MountPoint* mount = findMount(normalized, relative)) {
@@ -207,6 +214,12 @@ void FileManager::removeMemoryFile(const std::string& path)
 	m_memoryFiles.erase(normalizePath(path));
 }
 
+// Opening for reading, 0x00698b60: the path's mount's archives in mount
+// order (slot 0x18), then each search path's loose file. Its +0x68 mode 1
+// (archives only, except @HOME@, @ROOT@ and .png paths) is never set: the
+// constructor 0x0069aee0 clears it, no other code of the exe writes it
+// (only the getter, slot 0xa4 = 0x006971b0, reads it), so loose files are
+// always looked at, as here.
 bool FileManager::readFile(const std::string& path, std::vector<uint8_t>& out) const
 {
 	const std::string normalized = normalizePath(path);
@@ -254,9 +267,24 @@ bool FileManager::readText(const std::string& path, std::string& out) const
 	return true;
 }
 
+// 0x00697d70: a path that already starts with the first search path as it
+// is (0x0065b9c0, _strnicmp over the search path's length), then an
+// absolute path as it is, @ROOT@ / @HOME@ to the root and home
+// directories, anything else under the first search path. The original's
+// search paths are relative to the installation ("mods/bf2142/"); here they
+// are absolute, so a path starting with the first one's part under the root
+// is put under the root.
 std::string FileManager::expandPath(const std::string& path) const
 {
 	const std::string normalized = normalizePath(path);
+	if (!m_searchPaths.empty()) {
+		const std::string& first = m_searchPaths.front();
+		const std::string given =
+			!m_root.empty() && startsWith(first, m_root) ? first.substr(m_root.size()) : first;
+		if (!given.empty() && startsWith(normalized, normalizePath(given))) {
+			return fs::path(given).is_absolute() ? path : m_root + path;
+		}
+	}
 	if (startsWith(normalized, "@root@/")) {
 		return m_root + path.substr(7);
 	}

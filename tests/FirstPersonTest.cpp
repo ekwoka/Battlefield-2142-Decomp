@@ -145,6 +145,26 @@ TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 		rig.update(input, 1 / 30.0f);
 	}
 	CHECK(playing("zoom_still"));
+	// A reload begun zoomed: the zoom-out's transition (priority 10000)
+	// stops what was queued with it, so the reload's message goes the
+	// update after (PlayerCamera::tick) and the reload plays.
+	{
+		anim::AnimationInput dropped;
+		rig.update(dropped, 1 / 30.0f); // the zoom message goes
+		dropped.pulses = 2;
+		rig.update(dropped, 1 / 30.0f); // the reload's, an update later
+		dropped.pulses = 0;
+		int ticks = 0;
+		for (int i = 0; i < 150; ++i) {
+			rig.update(dropped, 1 / 30.0f);
+			ticks += playing("reload") ? 1 : 0;
+		}
+		CHECK(ticks > 90); // most of its 3.96 s
+		input.messages = 4;
+		for (int i = 0; i < 10; ++i) {
+			rig.update(input, 1 / 30.0f);
+		}
+	}
 	// The weapon's first mesh node sits in front of and below the camera
 	// bone (the rifle at the right hip of the view).
 	const int mesh1 = skeleton->find("mesh1");

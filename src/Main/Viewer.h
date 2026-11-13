@@ -141,6 +141,9 @@ struct ViewerOptions {
 	// the game's default) and whether up looks down. Asked as it moves.
 	std::function<float()> mouseScale;
 	std::function<bool()> invertMouse;
+	// The mouse's own axes (the map's yaw and pitch factors, 0x006802c0):
+	// what its X and its Y are multiplied by on top of mouseScale.
+	std::function<void(float& x, float& y)> mouseAxes;
 	// Told where the camera is and looks each frame (position, forward),
 	// before drawing: the game's level-of-detail choices go by it.
 	std::function<void(const float position[3], const float forward[3])> onCamera;
@@ -181,9 +184,13 @@ public:
 	//   look:<dx>,<dy> (relative mouse), text:<text>, shot:<file.png>, quit.
 	void setScript(const std::string& script);
 
-	// The display's modes ("1280x720@60Hz", the largest first), and a new
-	// size for the window.
-	std::vector<std::string> displayModes() const;
+	// The display's modes as the video options list them ("1024x768@60Hz",
+	// ascending; wider than 4:3 only with "+widescreen 1"), and a new size
+	// for the window.
+	std::vector<std::string> displayModes(bool wideScreen) const;
+	// The antialiasing modes the video options list ("Off", then
+	// "<n>Samples" for each count the GPU takes; listAntialiasingModes).
+	std::vector<std::string> antialiasingModes() const;
 	void setSize(int width, int height);
 
 	// A menu drawn alone between other work (the loading screen while a
@@ -261,5 +268,29 @@ bool capsLockOn();
 // Returns the process exit code. With a window it draws there (and leaves
 // it open); without one it opens its own for this run.
 int runViewer(const render::LevelSources& sources, const ViewerOptions& options, Window* window = nullptr);
+
+// --keys "<s>:<op> ...": the game input a window gives (ViewerOptions'
+// onPlayerInput, onHudText, onClick...) driven headless, a tick at a time
+// (onTicks(1), then `frame` with the tick's seconds: the HUD's update).
+// Ops from that second of the run on: down:<control> / up:<control>
+// (held, by the control map's names: c_GIRadioComm, c_GISayTeam, c_GIYes,
+// c_PIFire...), press:<control> (for one tick), text:<text> ('_' a space)
+// and key:<Flash code> (13 Enter, 27 Esc) to the open text box,
+// move:<x>/<y>, click:<x>/<y> (moved there first) and rclick:<x>/<y> on
+// the HUD's 800 x 600 screen, console:<line> ('_' a space). A hosted or
+// joined game runs in real time (realTime). Prints each op
+// and what changed: the rose shown, the say box open, new chat and
+// personal rows and the radio messages heard.
+struct KeyScriptHooks {
+	std::function<std::string(const std::string&)> console;
+	std::function<std::string()> rose;
+	std::function<int()> typing;
+	std::function<std::vector<std::string>()> rows;
+	std::function<int()> heard;
+	std::function<void(float x, float y)> setPointer;
+	bool realTime = false; // a hosted or joined game: 30 ticks a second of the clock
+};
+void runKeyScript(const std::string& script, const ViewerOptions& viewer, const std::function<void(float seconds)>& frame,
+	const KeyScriptHooks& hooks);
 
 } // namespace dice::hfe

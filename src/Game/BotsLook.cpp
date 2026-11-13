@@ -84,12 +84,8 @@ void BotManager::faceSectors(Bot& bot, float yaw)
 // stimuli 0x100d7400 (memory items) and 0x100d7590 (rounds), the choice
 // 0x100d77c0 -> 0x100d67b0 / 0x100d60f0, the look's duration 0x100d5ad0,
 // the cancel test 0x100d6300, a new plan 0x100d5ca0 and the stimuli
-// cleared 0x100d6440. The soldier's control info allows every sector
-// (0x100d5a40 over 0x100d5440: no limits). A turret's would hold the
-// sectors to its yaw limits (0x100d5440 over the ControlInfo's slots
-// 0x4c / 0x54 / 0x60 in BF2142.exe); the rewrite lets every sector
-// through (the shipped tanks' and AA guns' turrets turn all round; a
-// limited gun stops at its limit).
+// cleared 0x100d6440. The choice and the cancel test take only the
+// sectors 0x100d5a40 allows (sectorAllowed).
 void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	Bot::Look& L = bot.look;
@@ -202,9 +198,13 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 			float bestW = 0;
 			physics::Vec3 bestAt;
 			bool hasAt = false;
+			std::array<bool, 8> allowed {};
+			for (int i = 0; i < 8; ++i) {
+				allowed[static_cast<size_t>(i)] = sectorAllowed(self, i);
+			}
 			for (int i = 0; i < 8; ++i) {
 				const float w = acc[i].w + L.sectorW[static_cast<size_t>(i)];
-				if (w > bestW) {
+				if (w > bestW && allowed[static_cast<size_t>(i)]) {
 					best = i;
 					bestW = w;
 					hasAt = acc[i].n > 0;
@@ -212,7 +212,12 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 				}
 			}
 			if (best < 0) {
-				best = static_cast<int>(std::floor(random() * 7.0f + 0.5f)); // 0x100d60f0
+				// 0x100d60f0: up to six draws more while the sector isn't
+				// allowed (the last one kept).
+				best = static_cast<int>(std::floor(random() * 7.0f + 0.5f));
+				for (int tries = 0; !allowed[static_cast<size_t>(best)] && tries < 6; ++tries) {
+					best = static_cast<int>(std::floor(random() * 7.0f + 0.5f));
+				}
 				bestW = 0.1f;
 				hasAt = false;
 			}
@@ -238,7 +243,8 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 			// 0x100d6300: a plan whose sector isn't chosen again goes.
 			bool bad = false;
 			if (L.sectorPlan) {
-				if (best != L.sector) {
+				// 0x100d6300 also drops a plan whose sector isn't allowed.
+				if (best != L.sector || (L.sector >= 0 && !allowed[static_cast<size_t>(L.sector)])) {
 					L.reached = false;
 					bad = true;
 				}
@@ -314,6 +320,50 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 	L.quiet = false;
 }
 
+// 0x100d5a40 -> 0x100d5440: whether the look may face a sector. For a
+// turret (turretLooks) the seat's ControlInfo holds it to its
+// camera-relative yaws (BF2142.exe adaptor slots 0x4c 0x008a2790: +0x60,
+// the DOF rotation offset; 0x54 0x008a27b0: +0x70, the max; 0x50
+// 0x008a27a0: +0x64, the min; AIDLL 0x100cf6c0 / 0x100cf700 / 0x100cf6e0):
+// the angle from the forward of the frame slot 0x60 gives (0x008a2590:
+// the controlled object's slot 0xd0 with the ControlInfo's +0x7c; here the
+// hull's forward) turned by the offset (x 57.3 degrees, 0x10129fb8) to
+// the sector, negative to the left (ref.z x - ref.x z <= 0), within
+// min..max; both 0 lets every way through. A soldier's (no ControlInfo
+// on his object) allows all. Shipped: the APC's pod cannons -38..40 /
+// -60..74 degrees, the gunship's second position -110..110; their
+// offsets are commented out of the scripts, the turrets' 0/0.
+bool BotManager::sectorAllowed(const GameWorld::PlayerInfo& self, int sector) const
+{
+	if (sector < 0 || sector > 7 || !turretLooks(self)) {
+		return true;
+	}
+	const std::vector<GameWorld::SeatLayout> seats = const_cast<GameWorld&>(m_world).vehicleSeats(self.vehicle);
+	const AiPlugin* control = m_settings.plugin(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name), "ControlInfo");
+	if (!control || (control->cameraMin[0] == 0 && control->cameraMax[0] == 0)) {
+		return true;
+	}
+	physics::Vec3 forward {0, 0, 1};
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		if (v.object == self.vehicle) {
+			forward = v.forward;
+		}
+	}
+	const float c = std::cos(control->dofRotationOffset), s = std::sin(control->dofRotationOffset);
+	float rx = forward.x * c + forward.z * s, rz = -forward.x * s + forward.z * c;
+	const float l = std::sqrt(rx * rx + rz * rz);
+	if (l < 1e-6f) {
+		return true;
+	}
+	rx /= l;
+	rz /= l;
+	const float angle = std::acos(std::clamp(rx * kSectorX[sector] + rz * kSectorZ[sector], -1.0f, 1.0f));
+	if (rz * kSectorX[sector] - rx * kSectorZ[sector] <= 0) {
+		return -angle >= control->cameraMin[0];
+	}
+	return angle <= control->cameraMax[0];
+}
+
 bool BotManager::turretLooks(const GameWorld::PlayerInfo& self) const
 {
 	if (!self.vehicle || m_settings.vehicle(equipmentOf(self)).sensingPattern != "Turret") {
@@ -328,6 +378,12 @@ bool BotManager::turretLooks(const GameWorld::PlayerInfo& self) const
 		return false;
 	}
 	return m_settings.plugin(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name), "ControlInfo") != nullptr;
+}
+
+bool BotManager::lookSectorAllowed(int player, int sector) const
+{
+	GameWorld::PlayerInfo self;
+	return m_world.playerInfo(player, self) && sectorAllowed(self, sector);
 }
 
 int BotManager::lookSector(int player) const

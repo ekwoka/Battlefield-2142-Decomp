@@ -344,7 +344,8 @@ TEST(Online_PreAuthorisedJoinEndToEnd)
 		CHECK(waitUntil(stepWith(liar), [&] { return liar.state() == net::GameClient::State::Disconnected; }));
 		CHECK(liar.disconnectReason() == 0x24);
 	}
-	// A wrong CD key.
+	// A wrong CD key is let in: the retail server's gcd callback
+	// (0x00642e70) goes on whatever the answer.
 	{
 		net::GameClient pirate;
 		net::GameClientOptions options;
@@ -354,8 +355,9 @@ TEST(Online_PreAuthorisedJoinEndToEnd)
 		options.nameChecksum = id.nameChecksum;
 		options.auth = id.loginTicket;
 		CHECK(pirate.connect("127.0.0.1", hosted.gamePort(), options));
-		CHECK(waitUntil(stepWith(pirate), [&] { return pirate.state() == net::GameClient::State::Disconnected; }));
-		CHECK(pirate.disconnectReason() == 0x14);
+		CHECK(waitUntil(stepWith(pirate), [&] { return pirate.world().localPlayer() >= 0 || pirate.state() == net::GameClient::State::Disconnected; }, 8000));
+		CHECK(pirate.world().localPlayer() >= 0 && pirate.state() != net::GameClient::State::Disconnected);
+		pirate.disconnect();
 	}
 
 	// The server browser finds the host on the emulator's master.

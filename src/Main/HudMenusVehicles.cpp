@@ -1042,17 +1042,19 @@ const world::ObjectTemplate* childArmorTemplate(const world::ObjectTemplate* con
 	return walk(*controlled, 0);
 }
 
-bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon, bool zoomed)
+bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon,
+	const world::ObjectTemplate* second, int shownGuiIndex)
 {
-	if (controlled && hudNumber(controlled, "vehicleHud.enablePostProcessingOnGuiIndex", 0) != 0) {
+	if (controlled && static_cast<int>(hudNumber(controlled, "vehicleHud.guiIndex", 0)) == shownGuiIndex
+		&& static_cast<int>(hudNumber(controlled, "vehicleHud.enablePostProcessingOnGuiIndex", -1)) == shownGuiIndex) {
 		return true;
 	}
-	if (!weapon) {
-		return false;
+	for (const world::ObjectTemplate* w : {weapon, second}) {
+		if (w && static_cast<int>(hudNumber(w, "weaponHud.enablePostProcessingOnGuiIndex", -1)) == shownGuiIndex) {
+			return true;
+		}
 	}
-	const auto& settings = weapon->settings();
-	const auto on = settings.find("weaponHud.enablePostProcessingOnGuiIndex");
-	return on != settings.end() && std::atoi(on->second.c_str()) == weaponGuiIndex(weapon, zoomed);
+	return false;
 }
 
 bool soldierWeaponFlag(bool jumpHold, const world::ObjectTemplate* weapon)
@@ -1210,6 +1212,20 @@ std::string cameraRotationBundle(const world::ObjectTemplate& t, const world::Ob
 	return bundle;
 }
 
+std::string orderMapIcon(int kind, bool commander)
+{
+	static const char* const kTools[] = {"Ingame/Commander/tools/orbit_strike.tga", "Ingame/Commander/tools/force_strike.tga",
+		"Ingame/Minimap/Icons/icon_UAV.tga", "Ingame/Minimap/Icons/icon_supplies.tga"};
+	static const char* const kOrders[] = {"Move", "Attack", "Defend", "Repair", "Destroy", "Mine"};
+	if (kind >= 0 && kind < 4) {
+		return kTools[kind];
+	}
+	if (kind >= 4 && kind < 10) {
+		return std::string("Ingame/Minimap/Icons/order") + kOrders[kind - 4] + (commander ? "Commander.tga" : ".tga");
+	}
+	return kind == 10 && !commander ? kTools[0] : std::string();
+}
+
 std::string iconFrame(const std::string& icon, int frame)
 {
 	const size_t slash = icon.find_last_of('/');
@@ -1317,6 +1333,183 @@ std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWor
 		}
 	}
 	return out;
+}
+
+std::string MapCalls::iconOf(int code)
+{
+	// 0x0077ac70: the textures the constructor loads (0x00784cf0, +0xa58
+	// mini_Medic, +0xa4c mini_Ammo, +0xa50 mini_Repair, +0xa54
+	// mini_Revive); any other code the medic's.
+	switch (code) {
+	case 0x34: return "Ingame/Player/Icons/Minimap/mini_Ammo.tga";
+	case 0x35: return "Ingame/Player/Icons/Minimap/mini_Repair.tga";
+	case 0x36:
+	case 0x37: return "Ingame/Player/Icons/Minimap/mini_Revive.tga";
+	default: return "Ingame/Player/Icons/Minimap/mini_Medic.tga";
+	}
+}
+
+bool MapCalls::has(int player) const
+{
+	// 0x007800f0.
+	return std::any_of(m_markers.begin(), m_markers.end(), [player](const Marker& m) { return m.player == player; });
+}
+
+void MapCalls::call(int caller, int callerTeam, int code, int localPlayer, int localTeam, const Kit& local)
+{
+	if (code < 0x33 || code > 0x37 || caller < 0 || localPlayer < 0) {
+		return;
+	}
+	const bool heal = code == 0x33 || code == 0x36 || code == 0x37;
+	if (callerTeam == localTeam && caller != localPlayer) {
+		const bool answers = (heal && local.heal) || (code == 0x34 && local.ammo) || (code == 0x35 && local.repair);
+		if (!answers) {
+			return;
+		}
+		// 0x007845c0: the caller's first marker goes; 0x00790d60: type 4,
+		// the time +0xac8 (12 s) and no delay.
+		const auto old = std::find_if(m_markers.begin(), m_markers.end(), [caller](const Marker& m) { return m.player == caller; });
+		if (old != m_markers.end()) {
+			m_markers.erase(old);
+		}
+		if (!has(caller)) {
+			m_markers.push_back({caller, iconOf(code), 12, 0});
+		}
+		return;
+	}
+	if (caller == localPlayer) {
+		m_medic = heal;
+		m_ammo = code == 0x34;
+		m_repair = code == 0x35;
+	}
+}
+
+void MapCalls::place(const std::vector<Mate>& drawn)
+{
+	if (m_medic || m_ammo || m_repair) {
+		for (const Mate& mate : drawn) {
+			// 0x00792980 / 0x00793b60: medic, repair, ammunition, each
+			// added only for a player without a marker (0x00790d60), with
+			// the 12 s as its delay and no time.
+			const std::pair<bool, int> flags[] = {{m_medic && mate.kit.heal, 0x33}, {m_repair && mate.kit.repair, 0x35},
+				{m_ammo && mate.kit.ammo, 0x34}};
+			for (const auto& [on, code] : flags) {
+				if (on && mate.player >= 0 && !has(mate.player)) {
+					m_markers.push_back({mate.player, iconOf(code), 0, 12});
+				}
+			}
+		}
+	}
+	// 0x00795620's end.
+	m_medic = m_ammo = m_repair = false;
+}
+
+void MapCalls::tick(float seconds)
+{
+	// 0x007840c0: the delay first, then the time; gone with neither.
+	for (Marker& m : m_markers) {
+		if (m.delay > 0) {
+			m.delay -= seconds;
+		} else {
+			m.time -= seconds;
+		}
+	}
+	m_markers.erase(std::remove_if(m_markers.begin(), m_markers.end(), [](const Marker& m) { return m.time <= 0 && m.delay <= 0; }),
+		m_markers.end());
+}
+
+std::string MapCalls::icon(int player) const
+{
+	for (const Marker& m : m_markers) {
+		if (m.player == player && (m.time > 0 || m.delay > 0)) {
+			return m.texture;
+		}
+	}
+	return {};
+}
+
+MateMarker mateMarker(const MateInput& in)
+{
+	MateMarker m;
+	// 0x0077d9f0 (slot 0x138): the commander's test comes after the squad
+	// leader's.
+	bool commanderIcon = false;
+	if (in.squadLeader && in.squad > 0) {
+		m.texture = "Ingame/Player/Icons/Minimap/SquadLeaders/mini_Squad_" + std::to_string(in.squad) + "_small.tga"; // 0x0077aa20
+		m.size = 16;
+		m.arrow = true;
+	} else if (in.commander) {
+		m.texture = "Ingame/Player/Icons/Minimap/mini_commander2.tga"; // +0xa1c: the local player's team
+		m.size = 32;
+		m.arrow = true;
+		commanderIcon = true;
+	} else {
+		m.texture = "Ingame/Player/Icons/Minimap/mini_Soldier.tga"; // +0xa28
+		m.size = 16;
+	}
+	m.arrowTexture = "Ingame/Player/Icons/Minimap/mini_headingArrow.tga"; // +0xa20
+	m.arrowSize = 32;
+	bool turned = true; // local_1f
+	if (!in.call.empty()) {
+		// 0x007841e0: the marker's icon (0x0077dfe0), white at 1
+		// (0x00781900's first test), and type 4 clears the turn.
+		m.texture = in.call;
+		m.size = 16;
+		m.iconAlpha = false;
+		turned = false;
+		// 0x00793585: the medic, repair and ammunition icons' arrow.
+		if (in.call.find("mini_Revive") == std::string::npos) {
+			m.arrow = true;
+			m.arrowTexture = "Ingame/Player/Icons/Minimap/mini_medicArrow.tga"; // +0xa5c
+			m.arrowSize = 16;
+		}
+	} else {
+		// 0x00781900's last tests (not in the map menus or the commander
+		// screen).
+		static const float kSquad[4] = {0.4f, 1, 0, 1};      // 0x00a0bb60
+		static const float kTeam[4] = {0.254f, 0.552f, 0.89f, 1}; // 0x00a0be60
+		static const float kWhite[4] = {1, 1, 1, 1};
+		const float* c = kTeam;
+		if (in.sharesVehicle && in.localSquad != 0) {
+			c = kSquad;
+		} else if (in.squad != 0 && in.squad == in.localSquad && !in.commander) {
+			c = kSquad;
+		} else if (in.commander && in.onFoot && commanderIcon) {
+			c = kWhite;
+		}
+		std::copy(c, c + 4, m.color);
+	}
+	const float yaw = turned ? in.yaw : 0.0f;
+	(m.arrow ? m.arrowYaw : m.yaw) = yaw;
+	// 0x00793a45..0x00793af9: under a half, (1, share, 0).
+	if (in.need && *in.need < 0.5f) {
+		m.disc = true;
+		m.discColor[0] = 1;
+		m.discColor[1] = std::clamp(*in.need, 0.0f, 1.0f);
+		m.discColor[2] = 0;
+		m.discColor[3] = 1;
+	}
+	return m;
+}
+
+std::optional<float> mateNeed(bool localHeals, bool localGivesAmmo, float distance, float health, int magazines, int nrOfMags,
+	int magSize)
+{
+	if ((!localHeals && !localGivesAmmo) || distance > 150) {
+		return std::nullopt;
+	}
+	if (localHeals && health >= 0) {
+		return health;
+	}
+	if (localGivesAmmo && magSize >= 0 && nrOfMags >= 0 && magazines >= 0) {
+		if (nrOfMags == 0) {
+			// The division by 0: -inf (a disc at 0) without a magazine,
+			// else inf or NaN (none).
+			return magazines == 0 ? std::optional<float>(-1.0f) : std::nullopt;
+		}
+		return (static_cast<float>(magazines) - 1) / static_cast<float>(nrOfMags);
+	}
+	return std::nullopt;
 }
 
 } // namespace dice::hfe::menu

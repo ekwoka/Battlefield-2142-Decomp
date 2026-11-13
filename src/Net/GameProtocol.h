@@ -301,7 +301,7 @@ struct CreateObjectInfo { // kEvCreateObject (0x0050b150, built 0x0050b0f0, hand
 	uint32_t templateId = 0; // ObjectTemplate +0x44: creation index of network-shared templates (0x0070a700)
 	uint16_t ghost = 0;
 	int team = 0;            // 2 bits
-	uint32_t count = 1;      // >1: that many ghosts from `ghost` on, at the origin
+	uint32_t count = 1;      // >1: that many ghosts from `ghost` on, at the origin (the exe's server always sends 1, 0x0050b0f0)
 	bool hasPosition = false, hasRotation = false;
 	Vec3f position;
 	Vec3f rotation;          // degrees, yaw/pitch/roll: 0x004ab8a0 builds the matrix with 0x006adb30(-z, -y, -x), which
@@ -578,6 +578,33 @@ enum NetworkMessage : uint32_t {
 	kNeRemoteConsoleFeedback = 0x13,
 	kNeEndOfRoundGuard = 0x14,
 };
+
+// ECPhysicsETitanSync (category 9; the Titan sync manager 0x005628f0
+// listens, 0x00562100): 0x24 bytes (0x0050f160 makes them, 0x005ab040
+// fills them from a team's sync object): the team (a byte, then three
+// unused), the last order's tick and target across x and z (+0x3c), the
+// last state's tick, its velocity and position across x and z (+0x48).
+// Id 0 an order taken (0x0050f1f0, and the server's first order at the
+// Titan's own place in 0x005aca70): the client adds the order (0x005abba0)
+// and puts the state in at its tick (0x005ab670); id 2 every 30 ticks
+// (*0x00a6746c) for both Titans (0x00561e20): the server's state, which
+// replaces the client's at that tick where they differ (0x005ab8a0).
+// Ticks are the server's (0x00666090), as its ghost blocks carry them.
+constexpr uint32_t kMsgPhysicsCategory = 9;
+enum TitanSyncMessage : uint32_t {
+	kTitanSyncOrder = 0,
+	kTitanSyncState = 2,
+};
+struct TitanSyncInfo {
+	int team = 0;
+	uint32_t orderTick = 0;
+	float targetX = 0, targetZ = 0;
+	uint32_t stateTick = 0;
+	float velocityX = 0, velocityZ = 0;
+	float x = 0, z = 0;
+};
+std::string titanSyncPayload(const TitanSyncInfo& info);
+bool parseTitanSync(const std::string& payload, TitanSyncInfo& out);
 
 // kEvDataBlock / kEvStringBlock transfers: a start then chunks.
 struct DataBlockChunk {

@@ -100,6 +100,10 @@ public:
 	// Every radio message the local player hears, as it is heard (the
 	// name tags' calls).
 	std::function<void(int sender, const std::string& voice)> onHeard;
+	// The emote of each radio message the local player hears from a sender
+	// on foot (0x0042e0c0: the message's addEmoteTrigger, 0x004d7fe0, to
+	// the sender's soldier's slot 0x88, 0x005edbf0; GameWorld::playEmote).
+	std::function<void(int sender, const std::string& emote)> onEmote;
 	// The text of each radio message the local player hears (the sample's
 	// text id, 0x0042e0c0 -> 0x0042d7f0 -> 0x0042bef0: the HUD's chat
 	// list with the sender, slot 0x158 -> ChatList 0x007b4cd0, or without

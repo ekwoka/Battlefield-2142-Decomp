@@ -53,9 +53,10 @@ struct StrategyCondition {
 	int type = 14; // Ticket 13, ControlPoint 14, Time 15, StartTime 16, Attacks 17, Defences 18,
 	               // NumberOfFriendlyAreas 19, NumberOfNeutralAreas 20, NumberOfHostileAreas 21
 	float constant = 0;
-	// setConditionStrength follows every createConstantCondition in the
-	// shipped AIDefaultStrategies.ai, so the default never counts; where
-	// the original keeps it was not found.
+	// The condition's +0x1c (setConditionStrength, 0x10016d40 ->
+	// 0x1005ccd0), 0 = Required (0x100587c0's order) from the condition's
+	// constructor 0x1005cc30; every createConstantCondition in the shipped
+	// AIDefaultStrategies.ai sets it.
 	Strength strength = Strength::Required;
 };
 
@@ -87,20 +88,30 @@ struct StrategicArea {
 	int side = 0;
 	float vehicleSearchRadius = 0;
 	bool controlPointFlag = false; // addObjectTypeFlag ControlPoint
-	// aiStrategicArea.create: an area of its own, a box over x/z at a
-	// height, without a control point. The rewrite's SAI keeps its status
-	// (boxAreaStatus) for the neighbours' flags; it orders no unit there.
+	// aiStrategicArea.create <name> <corner> <position> <height> ...: an
+	// area of its own, without a control point. The rewrite's SAI keeps its
+	// status (boxAreaStatus) for the neighbours' flags; it orders no unit
+	// there. The first x/z is the box's corner (+0x118), the second the
+	// area's position (+0x84, and each side's copy +0x7c + 8 side; the box
+	// area's constructor 0x10062e10 -> 0x100623c0), the box's centre: it
+	// spans corner .. 2 position - corner (0x100a3fc0, from isInside's
+	// 0x1005d3e0 and the status pass 0x1005f210).
 	bool box = false;
-	float boxMin[2] = {}, boxMax[2] = {};
+	float corner[2] = {}, position[2] = {};
 	float height = 0;
+	bool insideBox(float x, float z) const
+	{
+		return x >= corner[0] && z >= corner[1] && 2 * position[0] - corner[0] >= x && z <= 2 * position[1] - corner[1];
+	}
 	// setTakeable <side> <bool> (+399 + side, 0x1001ab30): whether a side's
 	// units alone in an area without a control point make it theirs
 	// (0x1005f210's status rule; a control point's area takes it from its
 	// point, 0x100629e0).
 	std::array<bool, 3> takeable {true, true, true};
 	// Such an area's status for each side (+0x70 + 4 side), kept from one
-	// update to the next; Neutral at the start (the area's constructor
-	// wasn't traced).
+	// update to the next; Neutral at the start (2: the strategic-object
+	// base's constructor 0x10063fc0 sets +0x74 / +0x78 and their copies
+	// +0x7c / +0x80, and the box area's 0x10062e10 leaves them).
 	std::array<AreaStatus, 3> boxStatus {AreaStatus::Neutral, AreaStatus::Neutral, AreaStatus::Neutral};
 };
 

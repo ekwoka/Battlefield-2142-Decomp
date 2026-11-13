@@ -40,9 +40,12 @@ Vec3 cross(const Vec3& a, const Vec3& b)
 }
 float lengthSquared(const Vec3& v) { return dot(v, v); }
 
-Vec3 combineContacts(const Vec3& into, const Vec3& value)
+Vec3 combineAxes(const Vec3& into, const Vec3& value)
 {
-	const auto axis = [](float a, float b) {
+	const auto axis = [](float a, float b) { // 0x006b6b60
+		if (a == 0) {
+			return b;
+		}
 		if (a > 0 && b > 0) {
 			return std::max(a, b);
 		}
@@ -237,11 +240,25 @@ void ContactResponse::addContact(const Vec3& offset, const Vec3& pointVelocity, 
 {
 	m_contacts.push_back({offset, normal, -pointVelocity, -dot(pointVelocity, normal), material.elasticity,
 		material.friction});
-	m_pushOut = combineContacts(m_pushOut, normal * -depth);
+	// The push out by axis (0x006b6bd0): the larger of one sign, the sum of
+	// opposite signs.
+	m_pushOut = combineAxes(m_pushOut, normal * -depth);
 }
 
-void ContactResponse::solve(RigidBody& body)
+void ContactResponse::solve(RigidBody& body, bool server)
 {
+	m_stuckCount = std::clamp(m_stuckCount - 1, -1, 3);
+	m_stuckPush = 0;
+	if (server && lengthSquared(m_pushOut) != 0) {
+		const float push = lengthSquared(m_pushOut);
+		if (push > tuning::kStuckPush * tuning::kStuckPush) {
+			m_stuckCount += 2;
+		}
+		if (m_stuckCount >= tuning::kStuckCount) {
+			m_stuckPush = (std::sqrt(std::max(push, m_largestPush)) - tuning::kStuckPush) * tuning::kStuckPushScale;
+		}
+		m_largestPush = std::max(push, m_largestPush);
+	}
 	if (m_contacts.empty() && lengthSquared(m_pushOut) == 0) {
 		return;
 	}
@@ -271,6 +288,28 @@ void ContactResponse::solve(RigidBody& body)
 		const float strength = (c.elasticity * tuning::kElasticityScale + 1.0f) * normalPart;
 		const Vec3 change = clampLength((c.normal + sliding * friction) * strength, tuning::kMaxContactImpulse);
 		body.applyImpulse(c.offset, change);
+	}
+	m_contacts.clear();
+	m_pushOut = {};
+}
+
+void ContactResponse::solveLegs(RigidBody& body)
+{
+	if (lengthSquared(m_pushOut) == 0) {
+		// Touching without sinking in: the legs keep what they had.
+		m_contacts.clear();
+		return;
+	}
+	body.position += m_pushOut;
+	float total = 0;
+	for (const Contact& c : m_contacts) {
+		total += std::max(c.approachSpeed, 0.0f);
+	}
+	const float inverse = total > 0.0001f ? 1.0f / total : total;
+	for (const Contact& c : m_contacts) {
+		const float weight = std::max(c.approachSpeed, 0.0f) * inverse;
+		const float strength = (c.elasticity * tuning::kElasticityScale + 1.0f) * weight * c.approachSpeed;
+		body.applyImpulse(c.offset, clampLength(c.normal * strength, tuning::kMaxContactImpulse));
 	}
 	m_contacts.clear();
 	m_pushOut = {};
@@ -376,17 +415,18 @@ bool boxesOverlap(const Vec3& lowA, const Vec3& highA, const Mat3& rotationA, co
 	return true;
 }
 
-void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
-	const Ground& ground, const ContactMaterial& material, const GroundTouch& touched)
+namespace {
+
+// The ground pass's points (0x006b9260): each vertex at the frame, below
+// the heightmap a contact with the node's point velocity there and its
+// offset from the frame's origin.
+void groundContacts(const RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
+	const Mat3& rotation, const Vec3& position, const Ground& ground, const ContactMaterial& material,
+	const GroundTouch& touched)
 {
-	// An object below the ground is lifted onto it first.
-	const float floor = ground.height(body.position.x, body.position.z);
-	if (body.position.y < floor) {
-		body.position.y = floor;
-	}
 	for (size_t index = 0; index < points.size(); ++index) {
 		const Vec3& point = points[index];
-		const Vec3 world = body.position + body.rotation.transform(point);
+		const Vec3 world = position + rotation.transform(point);
 		Vec3 normal {0, 1, 0};
 		const float groundHeight = ground.heightAndNormal(world.x, world.z, normal);
 		const float depth = world.y - groundHeight;
@@ -397,9 +437,29 @@ void collideWithGround(RigidBody& body, ContactResponse& response, const std::ve
 			if (touched) {
 				touched(index, contactPoint, velocity, normal);
 			}
-			response.addContact(contactPoint - body.position, velocity, normal, depth, material);
+			response.addContact(contactPoint - position, velocity, normal, depth, material);
 		}
 	}
+}
+
+} // namespace
+
+void collideWithGround(RigidBody& body, ContactResponse& response, const std::vector<Vec3>& points,
+	const Ground& ground, const ContactMaterial& material, const GroundTouch& touched)
+{
+	// An object below the ground is lifted onto it first.
+	const float floor = ground.height(body.position.x, body.position.z);
+	if (body.position.y < floor) {
+		body.position.y = floor;
+	}
+	groundContacts(body, response, points, body.rotation, body.position, ground, material, touched);
+}
+
+void collidePartWithGround(const RigidBody& root, ContactResponse& response, const std::vector<Vec3>& points,
+	const Mat3& rotation, const Vec3& position, const Ground& ground, const ContactMaterial& material,
+	const GroundTouch& touched)
+{
+	groundContacts(root, response, points, rotation, position, ground, material, touched);
 }
 
 bool SleepState::sample(const Vec3& position, const Vec3& angularVelocity, float seconds)

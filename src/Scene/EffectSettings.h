@@ -188,6 +188,10 @@ struct QualitySettings {
 	int texture = 3;
 	int textureFiltering = 3;
 	float viewDistanceScale = 1; // VideoSettings.setViewDistanceScale
+	// VideoSettings.setAntialiasing: the samples of the multisample type
+	// its "Off" / "<n>Samples" names (RendDX9 0x1000fb60 lists them), 1
+	// for off. The renderer draws the world multisampled with more.
+	int antialiasingSamples = 1;
 	bool changed = true;         // set by the setters; the owner clears it once applied
 	// undergrowth.simpleShaderEnable as a script or the console set it (-1:
 	// the terrain quality's, until a VideoSettings setter applies them again).
@@ -235,8 +239,11 @@ void registerColdBreathConsoleMethods(Console& console, ColdBreathSettings& sett
 void registerParticleSystemConsoleMethods(Console& console, ParticleSystemSettings& settings);
 // VideoSettings.setTerrainQuality / setGeometryQuality / setLightingQuality /
 // setDynamicLightingQuality / setEffectsQuality / setTextureQuality /
-// setTextureFilteringQuality / setViewDistanceScale (setUseBloom and
+// setTextureFilteringQuality / setViewDistanceScale / setAntialiasing (setUseBloom and
 // setDynamicShadowsQuality are the post-production's).
 void registerQualityConsoleMethods(Console& console, QualitySettings& settings);
+// VideoSettings' antialiasing name ("Off", "2Samples", "4Samples", ...) as a
+// sample count (1 for off or a name it can't read).
+int antialiasingSampleCount(const std::string& name);
 
 } // namespace dice::hfe::scene

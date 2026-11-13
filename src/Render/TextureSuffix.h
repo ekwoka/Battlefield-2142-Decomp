@@ -75,4 +75,25 @@ inline std::string customSuffixedTexturePath(const std::string& path, const std:
 	return base + "_" + suffix + ".dds";
 }
 
+// The texture load's name (0x10017f20 -> 0x10017340): the name as given
+// when that file exists, else the name up to its extension (0x1019ee40)
+// with ".dds", then with none. So the HUD's "mini_Medic.tga" (the map
+// node's constructor, 0x00784cf0) loads mini_Medic.dds, the only one
+// shipped. The fallback names to try after `path`, in order.
+inline std::vector<std::string> textureFallbackPaths(const std::string& path)
+{
+	const size_t slash = path.find_last_of("/\\");
+	const size_t dot = path.rfind('.');
+	if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+		return {};
+	}
+	const std::string base = path.substr(0, dot);
+	std::vector<std::string> out;
+	if (path.size() - dot != 4 || (path.compare(dot, 4, ".dds") != 0 && path.compare(dot, 4, ".DDS") != 0)) {
+		out.push_back(base + ".dds");
+	}
+	out.push_back(base);
+	return out;
+}
+
 } // namespace dice::hfe::render

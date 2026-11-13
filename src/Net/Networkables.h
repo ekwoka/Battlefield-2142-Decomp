@@ -222,7 +222,10 @@ struct NetworkableState {
 	Vec3f soldierNode88;
 	Vec3f soldierImpulse;
 	bool sprinting = false;      // mode 3, with 0x8000: PCO vtable 0x100 (0x104 sets it)
-	float soldierValue40000 = 0; // mode 3, 0x40000: -1..1 in 7 bits (the soldier's +0x18c interface, vtable 0x90 / 0x94; meaning not traced)
+	// mode 3, 0x40000: -1..1 in 7 bits, the kit's ability battery (soldier
+	// +0x338 through its +0x18c interface, vtable 0x90 0x0064aad0 / 0x94
+	// 0x00586300; the snapshot 0x005fc1a0 takes it, -1 without a kit)
+	float battery = 0;
 	int ladder = -1;             // Soldier 0x20000: the ladder's id (0 none)
 	float ladderPosition = 0;    // and the position on it, 0..1
 	int soldierValues[3] {};     // Soldier 0x20 (+0x268, +0x26c, 0..4), 0x4000 (+0x284)
@@ -258,8 +261,10 @@ struct NetworkableState {
 
 	// RotationalBundle (0x00602070): rotation yaw/pitch/roll in degrees
 	// (masks 1, 2, 4; object +0x188), rotation speeds (8, 0x10, 0x20; +0x194),
-	// 0x40 a value of ±41 (+0x1b0: RotationalBundle's own code only zeroes
-	// it, 0x00562a80/0x00562ee0; what fills it wasn't found), and with a PlayerControlObject above it (object vtable 0xd8)
+	// 0x40 a value of ±41 (+0x1b0: the pitch's banked input, the
+	// rememberExcessInput bank +0x1ac.. that the axis step 0x00563bd0 fills
+	// within ±40, zeroed by 0x00562a80/0x00562ee0; the rewrite's host leaves
+	// it out, as its clients turn parts by the angles), and with a PlayerControlObject above it (object vtable 0xd8)
 	// the ignore-parent rotation: angles (0x200-0x800) and a quaternion (0x100).
 	float rotation[3] {};
 	float rotationSpeed[3] {};
@@ -350,13 +355,36 @@ bool decodeNetworkable(BitReader& in, const NetworkableHints& hints, const Vec3f
 void encodeNetworkable(BitWriter& out, const NetworkableHints& hints, const Vec3f* reference, const NetworkableState& state,
 	unsigned mode = 2, const MotionHistory* history = nullptr);
 
+// A networkable's fields as the server's snapshot compares them (slot 0x28,
+// e.g. the Soldier's 0x005fc1a0, the player's 0x005929f0: each field
+// against its value the frame before, setting its mask bit when it
+// differs): the bits each of the state's mask bits writes (mode 2, from
+// the origin), and those every update writes whatever the mask.
+struct NetworkableFields {
+	uint32_t mask = 0;
+	bool any = false; // false: no state yet (everything changed)
+	std::vector<uint8_t> base;
+	size_t baseBits = 0;
+	std::vector<std::pair<std::vector<uint8_t>, size_t>> bits; // per set bit of `mask`, lowest first
+};
+NetworkableFields networkableFields(const NetworkableHints& hints, const NetworkableState& state);
+// The mask bits whose fields differ (a bit new to the mask included). A
+// change in the fields written whatever the mask (the soldier's always
+// bits, the player's squad leader bit) marks every bit: the rewrite's
+// snapshot can't tell which of its fields the original files them under.
+uint32_t changedFields(const NetworkableFields& before, const NetworkableFields& now);
+
 // The player's own state, the last part of the control-object record
 // (after its 10-bit length): the player's vtable 0x1c8 writes it
 // (0x00594cc0), 0x1cc reads it (0x00596ed0) with the client's control
 // object. The weapon part is there only when that object (or a parent) is
 // a PlayerControlObject (interface 0xc4c5: a soldier or a seat).
 struct PlayerOwnState {
-	bool flag210 = false;          // player vtable 0x210 (the reader calls 0x20c(1) when set; meaning not traced)
+	// The hit indicator: player vtable 0x210 (0x0059b480) reads and clears
+	// +0x2a8, which slot 0x20c(1) sets with the alpha +0x2a4 at a hit the
+	// player dealt (0x004ba070, with sv.hitIndicator); the reader calls
+	// 0x20c(1) when set, lighting the client's crosshair indicator.
+	bool hitIndicator = false;
 	bool flag16a = false, flag168 = false, flag169 = false, flag16b = false; // player +0x16a, +0x168, +0x169, +0x16b
 	int value14c = 0;              // 8 bits, player +0x14c (vtable 0x228 sets it)
 	// Where the last hit came from (+0x1d0, radians -pi..pi), sent in the
@@ -370,7 +398,13 @@ struct PlayerOwnState {
 	float hitStrength = 0;
 	// Weapon groups 0-2 (player +0x1e0 + g: one is active): the selected
 	// weapon's index in the group (5 bits of index + 1, 0x005a98b0), three
-	// 2-bit values (+0x208, +0x238, +0x1fc; meanings not traced), the rounds
+	// 2-bit values the snapshot 0x00595e50 takes from the firearm's 0x94c0
+	// interface: +0x208 its slot 300 (the zoom level), +0x238 slot 0x140
+	// (0x005c3120: the fire component's slot 0xf4 bit, with its slot 0xa4
+	// and the +0x1cc component's slot 0x90 shifted up one), +0x1fc slot
+	// 0x14 (0x005c1b20: the fire component's mode, slot 0xdc); a client
+	// hands them back to the firearm (0x00595d90 -> slot 0x68, 0x005c25b0);
+	// the rewrite's host sends 0 and its client reads its own. The rounds
 	// (+0x1e4, 11 bits of value + 1) and the magazines (+0x214, 10 bits of
 	// value + 1); with a heat-carrying firearm (PlayerOwnStateHints) its
 	// 0..6 (+0x22c) in 8 bits.

@@ -1,6 +1,7 @@
 #include "Viewer.h"
 #include "MouseCapture.h"
 #include "MissileViewSmoothing.h"
+#include "DisplayModes.h"
 
 #include "Render/GpuContext.h"
 #include "Render/LevelRenderer.h"
@@ -11,6 +12,8 @@
 #include "Input/SdlGameControllers.h"
 
 #include <SDL3/SDL.h>
+#include <chrono>
+#include <thread>
 
 #include <algorithm>
 #include <cmath>
@@ -472,9 +475,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		const bool playing = static_cast<bool>(options.playerView);
 		// A window point in the HUD's 800 x 600, through the HUD pass's x scale (LevelSources::hudXScale).
 		const auto hudX = [&sources](float x, float width) { return 400.0f + (x * 800.0f / width - 400.0f) / sources.hudXScale; };
-		if (options.onMenuInput || options.onHudText) {
-			SDL_StartTextInput(window);
-		}
+		// Text input is on only while a menu or the chat line takes typing:
+		// left on in play, macOS reads held movement keys as typing and
+		// opens its accent picker over the game (port addition).
+		bool textInput = false;
 		if (options.onMenuInput && !options.menuActive) {
 			std::printf("the menu has the mouse and keyboard; close the window to quit\n");
 		} else if (playing) {
@@ -530,6 +534,20 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			const bool menuUp = options.onMenuInput && (!options.menuActive || options.menuActive());
 			if (menuUp && options.menuCursor) {
 				menuCursor.show(options.menuCursor());
+			}
+			// A movie hides the cursor while it plays (0x0040bd90); a menu or
+			// a pointer shows it again.
+			if ((menuUp || pointer) && !SDL_CursorVisible()) {
+				SDL_ShowCursor();
+			}
+			const bool typing = menuUp || (options.onHudText && options.wantsText && options.wantsText());
+			if (typing != textInput) {
+				textInput = typing;
+				if (typing) {
+					SDL_StartTextInput(window);
+				} else {
+					SDL_StopTextInput(window);
+				}
 			}
 			if (options.wantsQuit && options.wantsQuit()) {
 				running = false;
@@ -656,9 +674,13 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					}
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
-					turn += event.motion.xrel * 0.15f * scale;
+					float axisX = 1, axisY = 1;
+					if (options.mouseAxes) {
+						options.mouseAxes(axisX, axisY);
+					}
+					turn += event.motion.xrel * 0.15f * scale * axisX;
 					// First person looks up and down to 85 degrees (0x005890a0).
-					pitch = clampLookPitch(pitch - event.motion.yrel * 0.003f * scale * up, firstPerson, drivingNow);
+					pitch = clampLookPitch(pitch - event.motion.yrel * 0.003f * scale * axisY * up, firstPerson, drivingNow);
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && (event.motion.state & SDL_BUTTON_RMASK)) {
 					camera.yaw += event.motion.xrel * 0.004f;
 					camera.pitch = std::fmax(-1.5f, std::fmin(1.5f, camera.pitch - event.motion.yrel * 0.004f));
@@ -752,8 +774,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						return pads && control.compare(0, 9, "IDButton_") == 0 && pads->down(slot, std::atoi(control.c_str() + 9));
 					}
 					if (control.compare(0, 9, "IDButton_") == 0) {
+						// DirectInput's mouse buttons: 0 left, 1 right, 2 middle, 3 and
+						// 4 the side buttons (SDL counts left 1, middle 2, right 3).
+						static const int sdlButton[] = {SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT, SDL_BUTTON_MIDDLE, SDL_BUTTON_X1, SDL_BUTTON_X2};
 						const int button = std::atoi(control.c_str() + 9);
-						return !pointer && (buttons & SDL_BUTTON_MASK(input::sdlMouseButton(button))) != 0;
+						return !pointer && button >= 0 && button < 5 && (buttons & SDL_BUTTON_MASK(input::sdlMouseButton(button))) != 0;
 					}
 					const SDL_Scancode code = scancodeFor(control);
 					return code != SDL_SCANCODE_UNKNOWN && keys[code];
@@ -1071,20 +1096,28 @@ std::unique_ptr<Window> Window::open(int width, int height)
 
 bool Window::closed() const { return impl->closed; }
 
-std::vector<std::string> Window::displayModes() const
+// RendDX9's 0x10010830: the modes ≥ 800 wide of 32 bits, 4:3 only without
+// "+widescreen 1", ascending (DisplayModes.h has the original's filters).
+std::vector<std::string> Window::displayModes(bool wideScreen) const
 {
-	std::vector<std::string> modes;
+	std::vector<DisplayMode> modes;
 	int count = 0;
 	SDL_DisplayMode** list = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(impl->window), &count);
 	for (int i = 0; list && i < count; ++i) {
-		const std::string mode = std::to_string(list[i]->w) + "x" + std::to_string(list[i]->h) + "@" +
-			std::to_string(static_cast<int>(std::lround(list[i]->refresh_rate))) + "Hz";
-		if (std::find(modes.begin(), modes.end(), mode) == modes.end()) {
-			modes.push_back(mode);
-		}
+		modes.push_back({list[i]->w, list[i]->h, static_cast<int>(std::lround(list[i]->refresh_rate)),
+			static_cast<int>(SDL_BYTESPERPIXEL(list[i]->format)) * 8});
 	}
 	SDL_free(list);
-	return modes;
+	return listDisplayModes(std::move(modes), wideScreen);
+}
+
+std::vector<std::string> Window::antialiasingModes() const
+{
+	std::vector<int> counts;
+	for (const uint32_t n : impl->gpu->sampleCounts()) {
+		counts.push_back(static_cast<int>(n));
+	}
+	return listAntialiasingModes(std::move(counts));
 }
 
 void Window::setSize(int width, int height) { SDL_SetWindowSize(impl->window, width, height); }
@@ -1388,6 +1421,168 @@ bool saveMovieFrame(const uint8_t* rgba, int frameWidth, int frameHeight, int wi
 	gpu->releaseTarget(target);
 	std::printf("%s %s\n", ok ? "wrote" : "failed to write", png.c_str());
 	return ok;
+}
+
+void runKeyScript(const std::string& script, const ViewerOptions& viewer, const std::function<void(float seconds)>& frame,
+	const KeyScriptHooks& hooks)
+{
+	struct Step {
+		float at = 0;
+		std::string op, arg;
+	};
+	std::vector<Step> steps;
+	std::istringstream words(script);
+	for (std::string word; words >> word;) {
+		const size_t first = word.find(':');
+		if (first == std::string::npos) {
+			std::fprintf(stderr, "--keys: \"%s\" isn't <s>:<op>\n", word.c_str());
+			continue;
+		}
+		Step step;
+		step.at = static_cast<float>(std::atof(word.substr(0, first).c_str()));
+		const size_t second = word.find(':', first + 1);
+		step.op = word.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
+		step.arg = second == std::string::npos ? "" : word.substr(second + 1);
+		std::replace(step.arg.begin(), step.arg.end(), '_', ' ');
+		if (step.op == "down" || step.op == "up" || step.op == "press") {
+			std::replace(step.arg.begin(), step.arg.end(), ' ', '_'); // control names keep theirs
+		}
+		steps.push_back(step);
+	}
+	std::stable_sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) { return a.at < b.at; });
+	const float end = (steps.empty() ? 0.0f : steps.back().at) + 1.0f;
+	// The controls a PlayerInput carries as flags.
+	const auto setControl = [](ViewerOptions::PlayerInput& in, const std::string& c) {
+		static const std::pair<const char*, bool ViewerOptions::PlayerInput::*> kFlags[] = {
+			{"c_GISayAll", &ViewerOptions::PlayerInput::sayAll}, {"c_GISayTeam", &ViewerOptions::PlayerInput::sayTeam},
+			{"c_GISaySquad", &ViewerOptions::PlayerInput::saySquad}, {"c_GIRadioComm", &ViewerOptions::PlayerInput::radioComm},
+			{"c_GITacticalComm", &ViewerOptions::PlayerInput::tacticalComm}, {"c_GIMapSize", &ViewerOptions::PlayerInput::mapSize},
+			{"c_GIMapZoom", &ViewerOptions::PlayerInput::mapZoom}, {"c_GI3dMap", &ViewerOptions::PlayerInput::map3d},
+			{"c_GIYes", &ViewerOptions::PlayerInput::yes}, {"c_GINo", &ViewerOptions::PlayerInput::no},
+			{"c_GIShowScoreboard", &ViewerOptions::PlayerInput::scoreboard},
+			{"c_GILeader", &ViewerOptions::PlayerInput::commanderScreen},
+			{"c_GIVoipPushToTalk", &ViewerOptions::PlayerInput::voipPushToTalk},
+			{"c_PIFire", &ViewerOptions::PlayerInput::fire}, {"c_PIAltFire", &ViewerOptions::PlayerInput::altFire},
+			{"c_PIUse", &ViewerOptions::PlayerInput::use}, {"c_PIReload", &ViewerOptions::PlayerInput::reload},
+			{"c_PISprint", &ViewerOptions::PlayerInput::sprint}, {"c_PICrouch", &ViewerOptions::PlayerInput::crouch},
+			{"c_PILie", &ViewerOptions::PlayerInput::lie}, {"c_PIAction", &ViewerOptions::PlayerInput::jump},
+			{"c_PIFlareFire", &ViewerOptions::PlayerInput::flareFire},
+			{"c_PIToggleWeapon", &ViewerOptions::PlayerInput::toggleWeapon},
+			{"c_PIToggleFireRate", &ViewerOptions::PlayerInput::toggleFireRate},
+		};
+		for (const auto& [name, flag] : kFlags) {
+			if (c == name) {
+				in.*flag = true;
+				return true;
+			}
+		}
+		if (c == "c_PIThrottle") {
+			in.throttle = 1;
+			return true;
+		}
+		return false;
+	};
+	const auto point = [](const std::string& arg, float& x, float& y) {
+		return std::sscanf(arg.c_str(), "%f/%f", &x, &y) == 2;
+	};
+	std::set<std::string> held, pulsed;
+	std::string rose = hooks.rose ? hooks.rose() : std::string();
+	int typing = hooks.typing ? hooks.typing() : 0;
+	std::vector<std::string> rows = hooks.rows ? hooks.rows() : std::vector<std::string> {};
+	const int heardAtStart = hooks.heard ? hooks.heard() : 0;
+	int heard = heardAtStart;
+	size_t next = 0;
+	const int ticks = static_cast<int>(std::ceil(end * 30));
+	auto due = std::chrono::steady_clock::now();
+	for (int tick = 0; tick <= ticks; ++tick) {
+		if (hooks.realTime) {
+			due += std::chrono::microseconds(33333);
+			std::this_thread::sleep_until(due);
+		}
+		const float now = static_cast<float>(tick) / 30.0f;
+		for (; next < steps.size() && steps[next].at <= now + 1e-4f; ++next) {
+			const Step& step = steps[next];
+			std::string note;
+			float x = 0, y = 0;
+			if (step.op == "down" || step.op == "press") {
+				ViewerOptions::PlayerInput probe;
+				if (!setControl(probe, step.arg)) {
+					note = " (not a control --keys knows)";
+				}
+				(step.op == "down" ? held : pulsed).insert(step.arg);
+			} else if (step.op == "up") {
+				held.erase(step.arg);
+			} else if (step.op == "text" || step.op == "key") {
+				ViewerOptions::MenuInput in {step.op == "text" ? ViewerOptions::MenuInput::Kind::Text : ViewerOptions::MenuInput::Kind::Key};
+				in.text = step.arg;
+				in.key = std::atoi(step.arg.c_str());
+				if (viewer.wantsText && viewer.wantsText() && viewer.onHudText) {
+					viewer.onHudText(in);
+				} else {
+					note = " (no text box open)";
+				}
+			} else if ((step.op == "move" || step.op == "click" || step.op == "rclick") && point(step.arg, x, y)) {
+				if (hooks.setPointer) {
+					hooks.setPointer(x, y);
+				}
+				if (viewer.onPointerMove) {
+					viewer.onPointerMove(x, y);
+				}
+				if (step.op == "click" && viewer.onClick) {
+					viewer.onClick(x, y);
+				} else if (step.op == "rclick" && viewer.onRightClick) {
+					viewer.onRightClick(x, y);
+				}
+			} else if (step.op == "console" && hooks.console) {
+				const std::string out = hooks.console(step.arg);
+				note = out.empty() ? "" : " -> " + out;
+			} else {
+				note = " (unknown)";
+			}
+			std::printf("keys %.2f: %s %s%s\n", step.at, step.op.c_str(), step.arg.c_str(), note.c_str());
+		}
+		ViewerOptions::PlayerInput in;
+		for (const std::string& c : held) {
+			setControl(in, c);
+		}
+		for (const std::string& c : pulsed) {
+			setControl(in, c);
+		}
+		pulsed.clear();
+		if (viewer.onPlayerInput) {
+			viewer.onPlayerInput(in);
+		}
+		if (viewer.onTicks) {
+			viewer.onTicks(1);
+		}
+		if (frame) {
+			frame(1.0f / 30.0f);
+		}
+		if (hooks.rose && hooks.rose() != rose) {
+			rose = hooks.rose();
+			std::printf("keys %.2f: rose %s\n", now, rose.empty() ? "closed" : rose.c_str());
+		}
+		if (hooks.typing && hooks.typing() != typing) {
+			typing = hooks.typing();
+			static const char* kBoxes[] = {"closed", "all", "team", "squad", "player"};
+			std::printf("keys %.2f: say box %s\n", now, typing >= 0 && typing < 5 ? kBoxes[typing] : "?");
+		}
+		if (hooks.rows) {
+			const std::vector<std::string> now_rows = hooks.rows();
+			for (const std::string& row : now_rows) {
+				if (std::find(rows.begin(), rows.end(), row) == rows.end()) {
+					std::printf("keys %.2f: chat row \"%s\"\n", now, row.c_str());
+				}
+			}
+			rows = now_rows;
+		}
+		if (hooks.heard && hooks.heard() != heard) {
+			heard = hooks.heard();
+			std::printf("keys %.2f: radio heard (%d so far)\n", now, heard - heardAtStart);
+		}
+	}
+	std::printf("keys: done after %.1f s, %d radio messages heard\n", static_cast<float>(ticks) / 30.0f,
+		heard - heardAtStart);
 }
 
 } // namespace dice::hfe

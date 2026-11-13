@@ -101,6 +101,8 @@ public:
 	std::function<void(int client)> onLeft;
 	// A joined client's player info (data block 1) arrived.
 	std::function<void(int client)> onPlayerInfo;
+	// A client's "rcon <line>" (data block 6, kRconCommandBlock: 0x004aef10).
+	std::function<void(int client, const std::string& line)> onRemoteCommand;
 	std::function<void(int client, const GameEvent& event)> onEvent;
 	std::function<void(int client, const PlayerMove& move)> onMove;
 	// A data packet we sent (its 6-bit sequence) was delivered or lost, as

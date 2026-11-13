@@ -163,7 +163,11 @@ struct HudManager::Node {
 	std::string compassTexture;
 	std::string compassSnapTextures[2]; // 0x14c (past the high end), 0x150 (past the low end)
 	float compassTextureSize[2] = {0, 0}; // 0x140, 0x144
-	int compassBorder[4] = {0, 0, 0, 0};  // 0x74..0x80
+	// The border of a bar node and so of a compass (+0x74..+0x80, slot
+	// 0x100 = 0x007e9270 in both vtables, Bf2BarNode's 0x009bbdd0 and
+	// Bf2CompassNode's 0x009bb950): top, bottom, left, right, set by
+	// setBarNodeBorder and setCompassNodeBorder alike.
+	int border[4] = {0, 0, 0, 0};
 	int compassSnapOffset[4] = {0, 0, 0, 0}; // 0x158..0x164
 	std::string compassVariable;
 	int compassOffset = 0;     // 0x154
@@ -232,11 +236,9 @@ struct HudManager::Node {
 	std::string outlineFont;
 	float outlineOffset[2] = {0, 0};
 	bool truncate = false;
-	// Bars: setBarNodeBorder <a> <b> <c> <d> (0x007b0540, slot 0x104: the
-	// fill keeps a and b pixels off its start and end along the bar, c and
-	// d across), setBarNodeIncreaseShow (0x110), setBarNodeSnapDir
+	// Bars: the border above (the fill keeps its top and bottom, left and
+	// right pixels off), setBarNodeIncreaseShow (0x110), setBarNodeSnapDir
 	// (0x108), setBarNodeRound <mode> <w> <h> (0x120), kept.
-	int barBorder[4] = {0, 0, 0, 0};
 	bool barIncreaseShow = false, barSnapDir = false;
 	int barRound = 0;
 	float barRoundSize[2] = {0, 0};
@@ -270,6 +272,12 @@ HudManager::HudManager(Reader reader) : m_reader(std::move(reader))
 		Node* node = create(kSplit, "", root.name, root.x, root.y, 800, 600);
 		m_roots.push_back(node);
 	}
+	// The variables GeneralSettings hands the HUD (0x0049bad0), at its
+	// defaults (0x0049bdf0) until a profile's are applied: the HUD opaque,
+	// the minimap's texture at 170 / 255, its icons opaque, rotating.
+	set("MenuBackgroundAlpha", 1);
+	set("MenuMapAlpha", 170.0f / 255.0f);
+	set("MenuMapIconAlpha", 1);
 }
 
 HudManager::~HudManager() = default;
@@ -652,8 +660,8 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		// rectangle, filling it along the bar (the conquest screens' point
 		// bars split one node, "0 0 17 76" from the right and "0 0 77 15"
 		// from the left, 152 wide).
-		const float bx0 = x + static_cast<float>(node.barBorder[2]), bx1 = x + w - static_cast<float>(node.barBorder[3]);
-		const float by0 = y + static_cast<float>(node.barBorder[0]), by1 = y + h - static_cast<float>(node.barBorder[1]);
+		const float bx0 = x + static_cast<float>(node.border[2]), bx1 = x + w - static_cast<float>(node.border[3]);
+		const float by0 = y + static_cast<float>(node.border[0]), by1 = y + h - static_cast<float>(node.border[1]);
 		const float u0 = w > 0 ? (bx0 - x) / w : 0, u1 = w > 0 ? (bx1 - x) / w : 1;
 		const float v0 = h > 0 ? (by0 - y) / h : 0, v1 = h > 0 ? (by1 - y) / h : 1;
 		if (value > 0 && bx1 > bx0 && by1 > by0) {
@@ -956,7 +964,7 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 	float texX = x, texY = y, clipX = x;
 	int c = 0;
 	if (node.compassDirection == 0) {
-		c = static_cast<int>(std::floor(value / 360.0f * (texH - static_cast<float>(node.compassBorder[1])) + offset));
+		c = static_cast<int>(std::floor(value / 360.0f * (texH - static_cast<float>(node.border[1])) + offset));
 		if (node.compassSnap) {
 			const int o = node.compassOffset;
 			if (static_cast<float>(c - o) > h - static_cast<float>(node.compassSnapOffset[1])) {
@@ -973,7 +981,7 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 		}
 		texY -= static_cast<float>(c);
 	} else if (node.compassDirection == 3) {
-		c = static_cast<int>(std::floor(value / 360.0f * (texW - static_cast<float>(node.compassBorder[3])) + offset));
+		c = static_cast<int>(std::floor(value / 360.0f * (texW - static_cast<float>(node.border[3])) + offset));
 		if (node.compassSnap) {
 			const int o = node.compassOffset;
 			const float high = w * 0.5f - static_cast<float>(node.compassSnapOffset[2]);
@@ -1010,7 +1018,7 @@ void HudManager::drawCompass(const Node& node, float x, float y, const float col
 	};
 	place(texX);
 	if (node.compassWrap) {
-		const float period = texW - static_cast<float>(node.compassBorder[3]);
+		const float period = texW - static_cast<float>(node.border[3]);
 		const float fc = static_cast<float>(c);
 		if (c < 0 && offset - period * 0.5f <= fc) {
 			place(texX - period);
@@ -1458,11 +1466,168 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 	if (!m.drawn || x < m.x0 || x > m.x1 || y < m.y0 || y > m.y1) {
 		return false;
 	}
+	// Turned back about the node's centre (the map is drawn turned by
+	// +0x80c).
+	if (m_mapTurn != 0) {
+		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
+		const float c = std::cos(-m_mapTurn), s = std::sin(-m_mapTurn);
+		const float dx = x - cx, dy = y - cy;
+		x = cx + dx * c + dy * s;
+		y = cy + dy * c - dx * s;
+	}
 	const float u = (x - m.mapX) / m.mapW;
 	const float v = (y - m.mapY) / m.mapH;
 	worldX = m_mapOrigin[0] + u * m_mapSize[0];
 	worldZ = m_mapOrigin[1] + (1 - v) * m_mapSize[1];
 	return true;
+}
+
+namespace {
+
+constexpr float kTwoPi = 6.2831855f, kPi = 3.1415927f;
+
+// An angle into [-pi, pi) (0x0078f680's 2pi (a / 2pi - floor(a / 2pi + 0.5))).
+float wrapAngle(float a)
+{
+	const float turns = a / kTwoPi;
+	return (turns - std::floor(turns + 0.5f)) * kTwoPi;
+}
+
+// 0x00778e20: the turn from b to a, at most half a turn either way (its
+// size is what the callers take).
+float angleBetween(float a, float b)
+{
+	float d = 0 <= a || b <= 0 ? a - b : b - a;
+	if (std::abs(d) > kPi) {
+		d = kTwoPi - std::abs(d);
+	}
+	return d;
+}
+
+// 0x00778d00: which way `current` turns to reach `target`: 0 within eps
+// (also a turn away), else -1 or 1, across +-pi the short way.
+int turnSide(float target, float current, float eps)
+{
+	if (std::abs(current - target) < eps || std::abs(current - (target + kTwoPi)) < eps ||
+		std::abs(current - (target - kTwoPi)) < eps) {
+		return 0;
+	}
+	if (std::abs(target - current) > kPi) {
+		if (current < 0 && target > 0) {
+			return -1;
+		}
+		if (current > 0 && target < 0) {
+			return 1;
+		}
+	}
+	return static_cast<int>(std::ceil((target - current) / std::abs(target - current)));
+}
+
+// 1 - e^(-k t), the exe's exp (0x00614830) taking its power within +-10.
+float easeStep(float seconds, float k)
+{
+	return 1 - std::exp(std::clamp(-seconds * k, -10.0f, 10.0f));
+}
+
+} // namespace
+
+void HudManager::setMapHeading(float radians)
+{
+	if (std::abs(angleBetween(radians, m_mapAngle)) <= 0.2f) {
+		if (!m_mapWobbled) {
+			m_mapWobbling = true;
+		}
+	} else {
+		m_mapWobbled = false;
+		m_mapWobbling = false;
+		m_mapWobbleTime = 0;
+		m_mapWobbleSide = radians - m_mapAngle > 0 ? 1.0f : -1.0f;
+		if (std::abs(m_mapAngle - radians) > kPi) {
+			if (m_mapAngle > 0 && radians < 0) {
+				m_mapWobbleSide = 1;
+			} else if (m_mapAngle < 0 && radians > 0) {
+				m_mapWobbleSide = -1;
+			}
+		}
+	}
+	m_mapHeading = radians;
+}
+
+void HudManager::tickMapTurn(float seconds, bool alive)
+{
+	const bool settled = m_mapSizeSettled; // the update's local copy of +0x816
+	// MapStatic's change (the map's event 10, 0x00779890): the angles to 0.
+	const bool isStatic = number("MapStatic") != 0;
+	if (isStatic != m_mapStatic) {
+		m_mapTurn = m_mapAngle = m_mapDelayed = 0;
+		m_mapStatic = isStatic;
+	}
+	// The commander's map (+0x70a) heads north.
+	const bool commander = number("CommanderShow") != 0;
+	if (commander) {
+		m_mapHeading = 0;
+	}
+	if (m_mapAtMini) {
+		if (!m_mapStatic && alive) {
+			const float target = wrapAngle(m_mapHeading);
+			const float ease = easeStep(seconds, 9);
+			m_mapAngle = wrapAngle(m_mapAngle);
+			if (const int side = turnSide(target, m_mapAngle, 0.001f)) {
+				m_mapAngle += ease * std::abs(angleBetween(target, m_mapAngle)) * static_cast<float>(side);
+			} else {
+				m_mapAngle = target;
+			}
+			// The compass's target: the angle, or with the wobble once a
+			// turn settles (+0x817: sin(4.5 t) by 0.3 - 0.4 t to its side,
+			// for 0.75 s).
+			if (!m_mapWobbling) {
+				m_mapCompassTarget = wrapAngle(m_mapAngle);
+			} else {
+				const float size = 0.3f - m_mapWobbleTime * 0.4f;
+				m_mapWobble = std::sin(m_mapWobbleTime * 4.5f) * size * m_mapWobbleSide;
+				m_mapCompassTarget = wrapAngle(m_mapAngle + m_mapWobble);
+				if (size > 0) {
+					m_mapWobbleTime += seconds;
+				} else {
+					m_mapWobbled = true;
+					m_mapWobbling = false;
+					m_mapWobble = 0;
+					m_mapWobbleTime = 0;
+				}
+			}
+			m_mapDelayed = wrapAngle(m_mapDelayed);
+			if (const int side = turnSide(m_mapCompassTarget, m_mapDelayed, 0.001f)) {
+				m_mapDelayed += ease * std::abs(angleBetween(m_mapCompassTarget, m_mapDelayed)) * static_cast<float>(side);
+			} else {
+				m_mapDelayed = m_mapCompassTarget;
+			}
+			// The map's own turn: up to 100 steps of 0.007 (0.05 once it
+			// has caught up at a settled size) of the ease towards the
+			// heading, taking it once within 0.2.
+			const bool slow = !settled || !m_mapTurnCaught;
+			for (int i = 0; i < 100; ++i) {
+				const int side = turnSide(target, m_mapTurn, 0.2f);
+				if (side == 0) {
+					m_mapTurn = target;
+					if (slow) {
+						m_mapTurnCaught = true;
+					}
+					break;
+				}
+				if (slow) {
+					m_mapTurnCaught = false;
+				}
+				m_mapTurn += ease * (slow ? 0.007f : 0.05f) * static_cast<float>(side);
+			}
+		} else {
+			m_mapTurn = m_mapAngle = m_mapDelayed = 0;
+			m_mapTurnCaught = true;
+		}
+	}
+	// The size flags for the next frame (+0x709, +0x816): the rewrite's map
+	// takes its size at once, so it is always settled.
+	m_mapAtMini = number("MapFullSize") == 0 && !commander;
+	m_mapSizeSettled = true;
 }
 
 void HudManager::setMapArea(float minX, float minZ, float maxX, float maxZ)
@@ -1552,7 +1717,7 @@ void HudManager::shownArea(float refX, float refY, float area[4]) const
 // The map's texture is the node's size times the zoom, placed with the
 // focus at the node's centre, then pushed back so that the shown area
 // covers the node; it is cut to the node and drawn white at the map's
-// transparency (0x7b0, 1).
+// transparency (0x7b0: MenuMapAlpha while playing, else 1; below).
 //
 // Markers (0x0077c610) keep their pixel size at every zoom: a marker's
 // rectangle is floor(its point - size / 2) by floor(size) (the exe takes
@@ -1578,10 +1743,15 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		size = commanderSize.data();
 	}
 	const float nx = 400 + pos[0], ny = 300 + pos[1], nw = size[0], nh = size[1];
-	// The map texture's alpha (+0x7b0) eased towards MenuMapAlpha's 0 with
-	// the overhead view on, 1 off: down by a tenth of (1 - e^(-9 t)) a
-	// frame, up by a fifth of it (0x00790400).
-	const float mapAlphaTarget = m_overhead ? 0.0f : 1.0f;
+	// The map texture's alpha (+0x7b0) eased towards its target (+0x7b8):
+	// 0 with the overhead view on; while playing (the map's state 0,
+	// 0x00780940) the HUD's MenuMapAlpha, the profile's minimap
+	// transparency (GeneralSettings 0x0049bad0), else 1. Down by a tenth
+	// of (1 - e^(-9 t)) a frame, up by a fifth of it (0x00790400). The
+	// markers take MenuMapIconAlpha the same way (+0x7a4, eased at +0x79c).
+	const bool playing = !full && number("CommanderShow") == 0;
+	const float mapAlphaTarget = m_overhead ? 0.0f : playing ? std::clamp(number("MenuMapAlpha"), 0.0f, 1.0f) : 1.0f;
+	const float iconAlpha = playing ? std::clamp(number("MenuMapIconAlpha"), 0.0f, 1.0f) : 1.0f;
 	if (std::abs(m_mapAlpha - mapAlphaTarget) < 0.01f) {
 		m_mapAlpha = mapAlphaTarget;
 	} else if (mapAlphaTarget <= m_mapAlpha) {
@@ -1642,7 +1812,22 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		mapX = nx + nw / 2 - (m_overheadPoint[0] - m_mapOrigin[0]) / m_mapSize[0] * mapW;
 		mapY = ny + nh / 2 - (1 - (m_overheadPoint[1] - m_mapOrigin[1]) / m_mapSize[1]) * mapH;
 	}
+	// The map's turn (+0x80c, tickMapTurn): the texture and the layer
+	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
+	// a positive turn counter-clockwise on the screen; HudQuad's rotation
+	// is clockwise), then cut to the node.
+	const float turnDegrees = m_mapTurn * 57.29578f;
+	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
+	const auto turned = [&](HudQuad& q) {
+		if (turnDegrees != 0) {
+			q.rotation = -turnDegrees;
+			q.pivotSet = true;
+			q.pivot[0] = centreX;
+			q.pivot[1] = centreY;
+		}
+	};
 	HudQuad map {m_mapTexture, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * m_mapAlpha}, 0};
+	turned(map);
 	if (map.color[3] > 0 && clipTo(map, nx, ny, nx + nw, ny + nh)) {
 		out.push_back(map);
 	}
@@ -1650,6 +1835,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// times the node's (0x0077d200: +0x7b4 x +0x7b0), before the markers.
 	if (!m_mapLayer.empty()) {
 		HudQuad layer {m_mapLayer, mapX, mapY, mapX + mapW, mapY + mapH, 0, 0, 1, 1, {1, 1, 1, alpha * m_mapAlpha}, 0};
+		turned(layer);
 		if (layer.color[3] > 0 && clipTo(layer, nx, ny, nx + nw, ny + nh)) {
 			out.push_back(layer);
 		}
@@ -1657,9 +1843,25 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
 	std::vector<Hit> labelRects;
 	for (const MapMarker& marker : m_mapMarkers) {
-		const float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
-		const float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
-		const float sx = mapX + u * mapW, sy = mapY + v * mapH;
+		float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
+		float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
+		if (marker.clamp && m_mapZoomShown[1] > 0) {
+			// 0x0077e100: the point about the map's centre within
+			// +-(0.5 - 0.02 / zoom) of its side, both axes by the y zoom.
+			const float k = std::min(0.02f / m_mapZoomShown[1], 0.5f);
+			u = std::clamp(u, k, 1 - k);
+			v = std::clamp(v, k, 1 - k);
+		}
+		float sx = mapX + u * mapW, sy = mapY + v * mapH;
+		// 0x0077c610: the icon turned about its point by its angle less the
+		// map's turn, then with the map about the node's centre: its point
+		// moves with the map and it keeps its heading on it.
+		if (turnDegrees != 0) {
+			const float c = std::cos(m_mapTurn), s = std::sin(m_mapTurn);
+			const float dx = sx - centreX, dy = sy - centreY;
+			sx = centreX + dx * c + dy * s;
+			sy = centreY + dy * c - dx * s;
+		}
 		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size;
 		const float side = std::floor(pixels);
 		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
@@ -1671,7 +1873,8 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
-			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha}, marker.yaw};
+			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
+			marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;
@@ -1874,6 +2077,93 @@ std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 // 0x007af920). (0x0075cba0 next to them is the HUD manager's destructor:
 // its event handlers dropped, its menus deleted; the rewrite's members go
 // by themselves.)
+//
+// Each row below as constructor / executor / argument parser (vtable slots
+// 23 and 25; the parser is left out where the vtable shares one). The
+// constructor's argument types are the bound lambda's, and the executor
+// checks that count and passes the values on (the HudBuilder rows through
+// the HUD manager's slot 0x270, its builder). setBarNodeBorder and
+// setCompassNodeBorder share their executor (0x0076aebf → 0x007b0780, the
+// node's slot 0x100: 0x007e9270 on a bar and a compass alike, one border);
+// setBarNodeSnap's (0x00769896 → 0x007b0540) is slot 0x104, 0x007e92a0.
+//   HudManager:
+//     setSpottedMousePos 0x0075f9da / 0x0075faee / 0x0075fa67; setSpottedAngle 0x0075fb27 / 0x0075fbe5 / 0x0075fb98;
+//     setMaximumNrOfCPs 0x0075ffbc / 0x0076007a / 0x0076002d; setPaint 0x0076009e / 0x0076015c / 0x0076010f;
+//     setUpdate 0x00760187 / 0x00760245 / 0x007601f8; addTextureAtlas 0x0076035e / 0x007603cf / 0x00760411;
+//     setDisplayControlpoints 0x00760486 / 0x00760544 / 0x007604f7; setDisplayTickets 0x0076056f / 0x00760642 /
+//     0x007605f5; setMapStatic 0x007606b8 / 0x00760776 / 0x00760729; setTargetTop 0x007607ab / 0x00760869 /
+//     0x0076081c
+//   HudBuilder:
+//     createMapNode 0x00760ab0 / 0x00760b3d / 0x00760bc1; createMiniMapNode 0x00760c96 / 0x00760d9a / 0x00760e3c;
+//     setMiniSize 0x00760ff1 / 0x007610cf / 0x00761064; setMiniPos 0x0076114b / 0x00761229 / 0x007611be; setMaxiSize
+//     0x007612a0 / 0x0076137e / 0x00761313; setMaxiPos 0x007613d2 / 0x007614b0 / 0x00761445; setCommanderSize
+//     0x00761504 / 0x007615e2 / 0x00761577; setCommanderPos 0x00761636 / 0x00761714 / 0x007616a9; setZoomIcons
+//     0x00761768 / 0x00761826 / 0x007617d9; setCPFont 0x00761863 / 0x007618d4 / 0x00761964; setCPFontColor
+//     0x007619d9 / 0x00761b94 / 0x00761a9d; setAlphaMask 0x00761cf7 / 0x00761d81 / 0x00761e13; createListNode
+//     0x00761e88 / 0x00761fcc / 0x00762086; setListNodeData 0x007622ab / 0x0076236b / 0x0076231e; setListNodeConCmd
+//     0x007623a3 / 0x00762435 / 0x0076249d; setListNodeBackgroundColor 0x0076254a / 0x00762706 / 0x0076260f;
+//     setListNodeSelectColor 0x0076275e / 0x0076291a / 0x00762823; setListNodeBorderColor 0x00762972 / 0x00762b2e /
+//     0x00762a37; setListNodeBorder 0x00762b86 / 0x00762d42 / 0x00762c4b; setListNodeScrollbar 0x00762d90 /
+//     0x00762ea4 / 0x00762e1d; setListNodeRowSpacing 0x00762ee2 / 0x00762fa2 / 0x00762f55; setListNodeScrollbarColor
+//     0x00762fda / 0x00763196 / 0x0076309f; setListNodeScrollbarBackgroundColor 0x007631ee / 0x007633aa /
+//     0x007632b3; setListNodeFont 0x00763402 / 0x00763494 / 0x0076351a; setListNodeOutline 0x007635c7 / 0x00763685 /
+//     0x00763638; createTransformNode 0x00763cbd / 0x00763dbd / 0x00763e62; createSplitNode 0x00764017 / 0x007640a4
+//     / 0x00764128; createTransformListNode 0x007641fd / 0x0076431d / 0x007643c7; addTransformListNode 0x007645b4 /
+//     0x00764627 / 0x00764687; setTranformListNodePosVariable 0x007646fc / 0x0076478e / 0x007647f6;
+//     setTranformListNodeOffset 0x007648a3 / 0x007649b7 / 0x00764930; createTileNode 0x007649f5 / 0x00764af9 /
+//     0x00764b9b; createEditNode 0x00764efe / 0x00765002 / 0x007650a4; setEditNodeData 0x00765259 / 0x00765319 /
+//     0x007652cc; setEditNodeString 0x00765351 / 0x00765411 / 0x007653c4; setEditNodeMaxLength 0x00765449 /
+//     0x00765509 / 0x007654bc; setEditNodeColor 0x00765541 / 0x007656fd / 0x00765606; createOccupiedNode 0x007658fb
+//     / 0x00765a1b / 0x00765ac5; setOccupiedNodeData 0x00765cb2 / 0x00765d72 / 0x00765d25;
+//     setOccupiedNodePosVariable 0x00765daa / 0x00765e3c / 0x00765ea4; createObjectMarkerNode 0x00765f51 /
+//     0x00766055 / 0x007660f7; setObjectMarkerNodeTexture 0x007662ac / 0x0076633e / 0x007663a6;
+//     setObjectMarkerNodeTextureSize 0x00766453 / 0x007665bb / 0x007664fc; setObjectMarkerNodeObjects 0x00766601 /
+//     0x007666c1 / 0x00766674; setObjectMarkerNodeLockText 0x007666f9 / 0x00766789 / 0x007667f4;
+//     setObjectMarkerNodeLockTextOffset 0x007668a1 / 0x007669b5 / 0x0076692e; addObjectMarkerNodeLockTextNode
+//     0x007669f3 / 0x00766a66 / 0x00766ac6; setObjectMarkerNodeLockOnType 0x00766b3b / 0x00766bfb / 0x00766bae;
+//     setObjectMarkerNodeWeapon 0x00766c33 / 0x00766cf3 / 0x00766ca6; setObjectMarkerNodeRC 0x00766d2b / 0x00766deb
+//     / 0x00766d9e; createHoverNode 0x00766e23 / 0x00766f27 / 0x00766fc9; createObjectSelectionNode 0x00767524 /
+//     0x00767628 / 0x007676ca; setObjectSelectionNodePointerSize 0x0076787f / 0x00767993 / 0x0076790c;
+//     createAnimationNode 0x007679d1 / 0x00767ad5 / 0x00767b77; createPictureNode 0x0076801d / 0x00768121 /
+//     0x007681c3; setPictureNodeTexture 0x00768378 / 0x007683eb / 0x0076844b; setPictureNodeVariableTexture
+//     0x00768608 / 0x0076867b / 0x007686db; setPictureNodeRotateVariable 0x00768750 / 0x007687c3 / 0x00768823;
+//     setPictureNodeRotation 0x00768898 / 0x00768958 / 0x0076890b; setPictureNodeCenterPoint 0x00768990 / 0x00768aa4
+//     / 0x00768a1d; setPictureNodeBorder 0x00768ae2 / 0x00768cb3 / 0x00768bbc; setPictureNodeBorderColor 0x00768d01
+//     / 0x00768ebd / 0x00768dc6; createBarNode 0x00768f15 / 0x00769035 / 0x007690df; setBarNodeTexture 0x007692cc /
+//     0x0076935e / 0x007693c6; setBarNodeBorder 0x0076961a / 0x0076aebf / 0x007696df; setBarNodeSnap 0x007697d6 /
+//     0x00769896 / 0x00769849; setBarNodeSnapDir 0x007698ce / 0x0076998c / 0x0076993f; setBarNodeInverse 0x007699cf
+//     / 0x00769a8d / 0x00769a40; setBarNodeValueVariable 0x00769ad0 / 0x00769b43 / 0x00769ba3;
+//     setBarNodeIncreaseShow 0x00769e87 / 0x00769f47 / 0x00769efa; setBarNodeSpanValues 0x0076a225 / 0x0076a339 /
+//     0x0076a2b2; setBarNodeRound 0x0076a37e / 0x0076a4eb / 0x0076a42c; createCompassNode 0x0076a536 / 0x0076a693 /
+//     0x0076a758; setCompassNodeTexture 0x0076a9b5 / 0x0076aa47 / 0x0076aaaf; setCompassNodeBorder 0x0076ad03 /
+//     0x0076aebf / 0x0076adc8; setCompassNodeSnapOffset 0x0076af0d / 0x0076b0c9 / 0x0076afd2;
+//     setCompassNodeSnapTexture 0x0076b117 / 0x0076b1a7 / 0x0076b212; setCompassNodeValueVariable 0x0076b2bf /
+//     0x0076b332 / 0x0076b392; setCompassNodeOffset 0x0076b407 / 0x0076b4c7 / 0x0076b47a; setCompassNodeTiltValues
+//     0x0076b651 / 0x0076b765 / 0x0076b6de; createButtonNode 0x0076b7a3 / 0x0076b8a7 / 0x0076b949;
+//     setButtonNodeTexture 0x0076bafe / 0x0076bb90 / 0x0076bbf8; setButtonNodeMouseArea 0x0076bca5 / 0x0076be61 /
+//     0x0076bd6a; setButtonNodeConCmd 0x0076c0c3 / 0x0076c155 / 0x0076c1bb; setButtonNodeAltConCmd 0x0076c268 /
+//     0x0076c2fa / 0x0076c360; setButtonNodeDebug 0x0076c5b2 / 0x0076c670 / 0x0076c623; createMouseOverNode
+//     0x0076c6b3 / 0x0076c7b7 / 0x0076c859; setMouseOverNodeConCmd 0x0076cbb5 / 0x0076cc47 / 0x0076ccad;
+//     createTextNode 0x0076cd5a / 0x0076ce5e / 0x0076cf00; setTextNodeString 0x0076d0b5 / 0x0076d128 / 0x0076d188;
+//     setTextNodeStyle 0x0076d1fd / 0x0076d28f / 0x0076d2f5; setTextNodeOutLine 0x0076d3a2 / 0x0076d415 /
+//     0x0076d475; setTextNodeOutLineOffset 0x0076d4ea / 0x0076d5fe / 0x0076d577; setTextNodeStringVariable
+//     0x0076d643 / 0x0076d6b6 / 0x0076d716; setTruncate 0x0076d78b / 0x0076d849 / 0x0076d7fc; setNodeShowVariable
+//     0x0076d88c / 0x0076d8ff / 0x0076d95f; setNodeShowConCmd 0x0076d9d4 / 0x0076da66 / 0x0076dacc;
+//     addNodeAlphaShowEffect 0x0076db79 / 0x0076dbcc; addNodeMoveShowEffect 0x0076dbfe / 0x0076dd17 / 0x0076dc90;
+//     addNodeBlendEffect 0x0076dd58 / 0x0076de6c / 0x0076dde5; setNodeAlphaVariable 0x0076e2d7 / 0x0076e34a /
+//     0x0076e3aa; setNodeRGBVariables 0x0076e41f / 0x0076e4c8 / 0x0076e574; setNodeColor 0x0076e6a9 / 0x0076e865 /
+//     0x0076e76e; setNodeOffset 0x0076ea0f / 0x0076eb23 / 0x0076ea9c; setNodePosVariable 0x0076eb61 / 0x0076ebf3 /
+//     0x0076ec5b; setNodeTimesBlink 0x0076ed08 / 0x0076ee1c / 0x0076ed95; setNodeIntervalBlink 0x0076ee5a /
+//     0x0076ef1a / 0x0076eecd; setNodeInTime 0x0076ef55 / 0x0076f015 / 0x0076efc8; setNodeOutTime 0x0076f050 /
+//     0x0076f110 / 0x0076f0c3; setNodeSize 0x0076f14b / 0x0076f25f / 0x0076f1d8; setActiveObject 0x0076f508 /
+//     0x0076f595 / 0x0076f619; newLayer 0x0076f6ee / 0x0076f741
+//   Minimap:
+//     setPaintKit 0x0076f773 / 0x0076f846 / 0x0076f7f9; setPaintAllKits 0x0076f871 / 0x0076f8c3; setPaintVehicle
+//     0x0076f8e8 / 0x0076f9a6 / 0x0076f959; setPaintAllVehicles 0x0076f9d1 / 0x0076fa23; setCurrOrderList 0x0076fa48
+//     / 0x0076fb06 / 0x0076fab9; setZoom 0x0076fb31 / 0x0076fb83; setFullScreenZoom 0x0076fba8 / 0x0076fc66 /
+//     0x0076fc19; toggleShowKits 0x0076fc93 / 0x0076fce5; setCommanderOffset 0x0076fd10 / 0x0076fdec / 0x0076fd81;
+//     setSourceBlend 0x0076fe45 / 0x0076ff03 / 0x0076feb6; setDestinationBlend 0x0076ff2e / 0x0076ffec / 0x0076ff9f;
+//     setFilterColor 0x00770017 / 0x007701d2 / 0x007700db
 void registerHudConsoleMethods(Console& console, HudManager& hud)
 {
 	const uint32_t access = ConsoleAccess::Anyone;
@@ -1907,7 +2197,9 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 	create("createObjectSelectionNode", kOther);
 	create("createTileNode", kOther);
 	create("createEditNode", kEdit);
-	bindMethod(console, "HudBuilder.setEditNodeFont", access, [active](std::string font, int) {
+	// setEditNodeFont 0x00765755 / 0x007657e3 / 0x0076584e: a string and a
+	// bool (the parser's operator>>(bool&)).
+	bindMethod(console, "HudBuilder.setEditNodeFont", access, [active](std::string font, bool) {
 		if (Node* n = active()) {
 			n->font = font;
 		}
@@ -2004,15 +2296,23 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
-	bindMethod(console, "HudBuilder.setCompassNodeBorder", access, [active](int a, int b, int c, int d) {
-		if (Node* n = active()) {
-			n->compassBorder[0] = a;
-			n->compassBorder[1] = b;
-			n->compassBorder[2] = c;
-			n->compassBorder[3] = d;
+	// setCompassNodeBorder and setBarNodeBorder share their executor
+	// (0x0076aebf -> 0x007b0780: the active node's slot 0x100, 0 without
+	// one), which on a bar or a compass is 0x007e9270, the border at
+	// +0x74..+0x80 (returning 1). Slot 0x100 of the other node types is
+	// something else; not followed: they take nothing here.
+	const auto setBorder = [active](int a, int b, int c, int d) {
+		Node* n = active();
+		if (!n || (n->type != kBar && n->type != kCompass)) {
+			return false;
 		}
+		n->border[0] = a;
+		n->border[1] = b;
+		n->border[2] = c;
+		n->border[3] = d;
 		return true;
-	});
+	};
+	bindMethod(console, "HudBuilder.setCompassNodeBorder", access, setBorder);
 	bindMethod(console, "HudBuilder.setCompassNodeSnapOffset", access, [active](int a, int b, int c, int d) {
 		if (Node* n = active()) {
 			n->compassSnapOffset[0] = a;
@@ -2036,10 +2336,12 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
-	bindMethod(console, "HudBuilder.setCompassNodeTextureSize", access, [active](float w, float h) {
+	// setCompassNodeTextureSize 0x0076b4ff / 0x0076b613 / 0x0076b58c: two
+	// ints, which 0x007b0880 hands the compass node's slot 300 as floats.
+	bindMethod(console, "HudBuilder.setCompassNodeTextureSize", access, [active](int w, int h) {
 		if (Node* n = active()) {
-			n->compassTextureSize[0] = w;
-			n->compassTextureSize[1] = h;
+			n->compassTextureSize[0] = static_cast<float>(w);
+			n->compassTextureSize[1] = static_cast<float>(h);
 		}
 		return true;
 	});
@@ -2150,14 +2452,16 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		return true;
 	});
+	// setNodeLogicShowVariable 0x0076e090 / 0x0076e140 / 0x0076e1ca: two
+	// strings and an int (the executor hands them to 0x007b0fd0).
 	bindMethod(console, "HudBuilder.setNodeLogicShowVariable", access,
-		[active](std::string op, std::string variable, float value) {
+		[active](std::string op, std::string variable, int value) {
 			if (Node* n = active()) {
 				std::string o = op;
 				for (char& c : o) {
 					c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 				}
-				n->logic.push_back({o, variable, value});
+				n->logic.push_back({o, variable, static_cast<float>(value)});
 			}
 			return true;
 		});
@@ -2488,17 +2792,7 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		n->truncate = truncate;
 		return true;
 	});
-	bindMethod(console, "HudBuilder.setBarNodeBorder", access, [active](int a, int b, int c, int d) {
-		Node* n = active();
-		if (!n || (n->type != kBar && n->type != kCompass)) {
-			return false;
-		}
-		n->barBorder[0] = a;
-		n->barBorder[1] = b;
-		n->barBorder[2] = c;
-		n->barBorder[3] = d;
-		return true;
-	});
+	bindMethod(console, "HudBuilder.setBarNodeBorder", access, setBorder);
 	bindMethod(console, "HudBuilder.setBarNodeIncreaseShow", access, [active](int on) {
 		if (Node* n = active()) {
 			n->barIncreaseShow = on != 0;

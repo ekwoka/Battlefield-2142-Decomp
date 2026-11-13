@@ -88,14 +88,19 @@ TEST(PostProduction_FrameModes)
 	CHECK(!(mode & render::kPostBloom));
 	settings.useBloom = true;
 	// A vehicle's EMP: the static and a neutral second grade; with the
-	// view's colour, saturation 0 and its tint.
+	// view's colour, its tint at the camera's saturation (0x1002e44c).
 	effects.vehicleEmpLevel = 2;
 	effects.viewTinted = true;
 	effects.viewTint = {1, 0.5f, 0.5f};
+	effects.viewSaturation = 0;
 	u = state.update(effects, settings, false);
 	mode = static_cast<int>(u.contrast[3]);
 	CHECK((mode & render::kPostEmp) && near(u.emp[0], 8));
 	CHECK(near(u.empColorRow[0][0], 0.3086f) && near(u.empColorRow[0][1], 0.6094f * 0.5f));
+	// The template's default saturation 1: the tint alone.
+	effects.viewSaturation = 1;
+	u = state.update(effects, settings, false);
+	CHECK(near(u.empColorRow[0][0], 1) && near(u.empColorRow[0][1], 0) && near(u.empColorRow[1][1], 0.5f));
 	// No EMP but the view's colour: the second grade alone.
 	effects.vehicleEmpLevel = 0;
 	mode = static_cast<int>(state.update(effects, settings, false).contrast[3]);

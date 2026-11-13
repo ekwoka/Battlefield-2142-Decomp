@@ -222,6 +222,10 @@ public:
 	std::vector<std::string> allGameModes() const;
 	int serverInfoRows(const std::string& host, int port);
 	std::vector<std::string> selectBoxGameModes() const;
+	// The video page's preset (VideoSettings.setVideoOptionScheme: 0 low,
+	// 1 medium, 2 high) into the page's qualities, resolution, antialiasing,
+	// view distance and bloom.
+	void applyVideoScheme(int scheme);
 	// Sets a setting as if a page had applied it (written down at once).
 	void storeSetting(const std::string& name, const ui::avm1::Value& value);
 	// The same as text ("" when unset or not text).
@@ -262,6 +266,9 @@ public:
 
 	// The display modes the video page offers ("1280x720@60Hz").
 	void setDisplayModes(const std::vector<std::string>& modes);
+	// The antialiasing modes the video page offers (Window::antialiasingModes;
+	// "Off" alone until told).
+	void setAntialiasingModes(std::vector<std::string> modes) { m_antialiasingModes = std::move(modes); }
 
 	// The levels the map lists offer (all game modes; the menu filters).
 	void setMaps(std::vector<MenuMap> maps);
@@ -352,6 +359,12 @@ public:
 	// The library's new-bookmark flag (+0xb0, slots 0x40 / 0x44; set when
 	// a bookmark is added, 0x004b4710).
 	void setHasNewBookmark(bool value) { m_hasNewBookmark = value; }
+	// A joined client's notice of the server's demo (data block 9;
+	// 0x004b4710): LocalProfileManager slot 0xd0 adds the bookmark (the
+	// server's name from SwiffHost slot 0x338, the map, the URL, the time),
+	// slot 0x34(1) saves the profile, and the DemoLibrary's slot 0x44(1)
+	// sets the new-bookmark flag. Nothing without a profile's objects.
+	void addDemoBookmark(const std::string& serverName, const std::string& map, const std::string& url, uint32_t time);
 
 	// --- The window and the game's files
 
@@ -405,6 +418,9 @@ public:
 		int queryPort = 0;
 	};
 	std::vector<FavouriteServer> favouriteServers(bool history = false) const;
+	// Slot 0x190 (0x0049ca90): that address and game port's favourite
+	// removed, the lists shown again; true when there was one.
+	bool removeFavouriteServer(const std::string& ip, int port);
 
 	// The menu's wait state (Logic.beginWaitState n / endWaitState,
 	// SwiffHost slots 0x2e8 / 0x2ec: +0xd90, the cursor slot 0x84 picks:
@@ -482,8 +498,8 @@ private:
 		std::string name, briefing, briefingKey;
 		std::vector<std::string> modes;
 	};
-	const LevelText* levelText(const std::string& level);
-	std::map<std::string, std::optional<LevelText>> m_levelTexts;
+	const LevelText* levelText(const std::string& level) const;
+	mutable std::map<std::string, std::optional<LevelText>> m_levelTexts;
 	// SwiffHost slots 0x124 joinServer and 0x128 createServer.
 	bool joinServer(const std::string& host, int port);
 	bool createServer();
@@ -525,6 +541,7 @@ private:
 	void log(const std::string& line) const;
 
 	ui::NativeRegistry& m_natives;
+	std::vector<std::string> m_antialiasingModes {"Off"};
 	MenuServices m_services;
 
 	// Startup checks.

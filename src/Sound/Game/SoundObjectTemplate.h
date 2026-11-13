@@ -61,7 +61,11 @@ public:
 	// half-volume distance, reverb level and radius; reapplies them.
 	void setTweaks(const std::array<float, 6>& multipliers);
 
-	float globalEffectLevel = 1; // stored only; its use isn't known yet
+	// globalEffectLevel (executor 0x007f54a0): the engine template's slot
+	// 0xb8 / 0xbc, how much occlusion and the tinnitus muffle the sound
+	// (ISoundTemplate::setOcclusionFactor; no shipped script sets it, so it
+	// stays 1). Kept here only without an engine.
+	float globalEffectLevel = 1;
 
 private:
 	enum Tweak { VolumeTweak, PitchTweak, MinDistanceTweak, HalfVolumeTweak, ReverbTweak, RadiusTweak };

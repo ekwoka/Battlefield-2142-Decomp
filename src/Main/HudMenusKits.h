@@ -29,7 +29,8 @@
 // (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].dds, the 1 for
 // heavy armour, 0x007975e0), KitItemInfoString with LargeInfoPic /
 // SmallInfoPic (0x007981e0), OpenCloseKitCustomString, HeavyArmorActive,
-// NotAntiVechicleKitChoosen.
+// NotAntiVechicleKitChoosen; Ability0..6Active, the abilities the kit
+// gives (0x00798b20, below).
 //
 // Picking: the original drags an item (chooseKitCustom 0x00798090 takes
 // it on the pointer) onto a slot (selectDroppedItem 0x00798cf0 → equip
@@ -95,6 +96,21 @@ public:
 	// Enhanced mode (Scene/EnhancedSettings.h): update() skips its HUD
 	// writes while nothing it shows has changed. Retail rewrites them every frame.
 	bool skipUnchanged = false;
+	// Whether the local player's soldier lives (the ability icons are
+	// worked out only while it doesn't; a death rebuilds the open kit, as
+	// entering the spawn screen does).
+	void setAlive(bool alive)
+	{
+		if (m_alive && !alive) {
+			m_built = false;
+		}
+		m_alive = alive;
+	}
+	// The ability icons' full reset (0x00797d30 with 1: the interface's
+	// constructor 0x00798610 and the HUD manager's 0x00751ff0, a profile
+	// change's): Ability0..6Active all off.
+	void resetAbilityIcons() { m_abilityIcons.fill(false); }
+	const std::array<bool, 7>& abilityIcons() const { return m_abilityIcons; }
 	// The chosen unlocks' ItemContainers (for GameWorld::setUnlocks), told
 	// when the choice is committed (closing the screen; spawning).
 	std::function<void(const std::vector<std::string>&)> onEquip;
@@ -121,6 +137,7 @@ public:
 
 private:
 	void build(int team);
+	void updateAbilityIcons();
 	std::string text(const std::string& key) const { return m_localize ? m_localize(key) : key; }
 	std::string setting(const std::string& templateName, const std::string& key) const;
 	bool mainWeapon(const std::string& itemTemplate) const; // its itemIndex is the kit's main weapon one
@@ -156,6 +173,8 @@ private:
 		}
 	} m_shown;
 	bool m_shownValid = false;
+	bool m_alive = false;
+	std::array<bool, 7> m_abilityIcons {}; // Ability0..6Active (+0xae..+0xb4)
 };
 
 } // namespace dice::hfe::menu

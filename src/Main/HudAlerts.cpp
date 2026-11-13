@@ -494,4 +494,82 @@ std::string abilitySound(const world::ObjectTemplate& receiver, int what)
 	return what >= 0 && what < 3 ? setting(receiver, kKeys[what]) : std::string();
 }
 
+void DogTags::collect(hud::HudManager& hud, int victim, const std::string& name, bool server)
+{
+	show(hud, name, 5.0f);
+	if (!server) {
+		++m_tags[victim];
+	}
+}
+
+void DogTags::show(hud::HudManager& hud, const std::string& name, float seconds)
+{
+	if (!(seconds > 0)) {
+		hud.set("ShowDogTagMessage", 0);
+		return;
+	}
+	for (const char* icon : {"ShowMedalIcon", "ShowRankUpIcon"}) {
+		if (hud.number(icon) != 0) {
+			hud.set(icon, 0);
+		}
+	}
+	hud.set("ShowDogTagMessage", 1);
+	m_left = seconds;
+	std::string line = m_localize ? m_localize("HUD_DOG_TAG_MESSAGE") : std::string("HUD_DOG_TAG_MESSAGE");
+	if (const size_t at = line.find("#PLAYER#"); at != std::string::npos) {
+		line.replace(at, 8, name);
+	}
+	hud.setString("DogTagMessage", line);
+}
+
+void DogTags::tick(hud::HudManager& hud, float seconds)
+{
+	if (m_left > 0) {
+		m_left -= seconds;
+		if (m_left <= 0) {
+			show(hud, {}, 0);
+		}
+	}
+}
+
+RadioTextLines radioTextLines(const std::string& id, const std::function<const std::string*(const std::string&)>& find)
+{
+	RadioTextLines lines;
+	const auto text = [&find](const std::string& key) {
+		const std::string* found = find ? find(key) : nullptr;
+		return found ? *found : key;
+	};
+	if (id.find("_important") != std::string::npos) {
+		lines.important = text(id);
+		lines.chat = false;
+		return lines;
+	}
+	const std::string key = id + "_important";
+	if (const std::string* found = find ? find(key) : nullptr; found && *found != key) {
+		lines.important = *found;
+	}
+	return lines;
+}
+
+void ImportantMessage::show(hud::HudManager& hud, const std::string& text, float seconds)
+{
+	if (!(seconds > 0)) {
+		hud.set("ShowImportantMessage", 0);
+		return;
+	}
+	hud.setString("ImportantMessage", text);
+	hud.set("ShowImportantMessage", 1);
+	m_left = seconds;
+}
+
+void ImportantMessage::tick(hud::HudManager& hud, float seconds)
+{
+	if (m_left > 0) {
+		m_left -= seconds;
+		if (m_left <= 0) {
+			show(hud, {}, 0);
+		}
+	}
+}
+
 } // namespace dice::hfe::menu

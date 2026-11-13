@@ -21,6 +21,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -38,6 +39,55 @@ inline MeshQueue meshQueue(bool blended, bool additive, float fade)
 		return MeshQueue::Additive;
 	}
 	return blended || fade < 1.0f ? MeshQueue::Transparent : MeshQueue::Opaque;
+}
+
+// Whether a material's back faces are culled. RendDX9's state manager
+// (0x100238b0) leaves D3DRS_CULLMODE at D3DCULL_CCW for whatever does not set
+// it, and a material's settings carry CullMode 3 (CCW) from their
+// constructor (0x10040070, "CullMode" at +0x8c) into the draw. The bundled
+// mesh's draw (0x100c3880, and its loader 0x100a2100) sets CullMode 1
+// (none) only for the blended materials (alpha mode 1, the additive ones
+// too); RaShaderBM's and RaShaderSM's techniques name no CullMode of their
+// own. So a bundled or skinned mesh's opaque and alpha-tested faces are
+// drawn from the front only: a gun's camera inside its turret's box (eu_ifv's
+// grenade launchers, the camera 3.5 cm behind the mount's front face) sees
+// out through it. A static mesh's material (0x100e3860, its settings at
+// +0x2c) keeps CullMode 3 too: neither its loader (0x100dcd50, 0x100dca10)
+// nor its draw (0x100bdb00) sets it, and RaShaderSTM's and the trunks'
+// techniques (TrunkSTMDetail, TrunkSTMBase, TrunkOG) name none; only
+// RaShaderLeaf (the leaves' "Leaf" shaders, key 0xf0000000, and LeafOG for
+// the overgrowth) sets CullMode NONE. So every static face is one-sided but
+// a tree's leaves (treeLeaf), alpha-tested ones (fences, nets) included.
+inline bool meshCulled(bool bundledOrSkinned, bool blended, bool leaf)
+{
+	return bundledOrSkinned ? !blended : !leaf;
+}
+
+// A tree's leaf material (RendDX9 0x100db6f0, +0x1ec of the static
+// material): in a template flagged a tree (a geometry path with
+// "vegitation", +0x2a2), a material whose texture set has no second map
+// (+0x30: the SpecularLUT goes to its own slot, 7, so a "Base" technique
+// has only its colour map) and whose colour map (+0x2c) is not a "tile_"
+// texture. Its normals are made to point out from the material's centre
+// and the draw (0x100bdb00) gives it the Leaf shader (key 0xf0000000,
+// RaShaderLeaf: alpha-tested at 127, two-sided, swaying); the rest of a
+// tree are trunks (TrunkSTMBase / TrunkSTMDetail). Not the alpha mode: the
+// palm fronds of af_treed01_lod, eu_treel's and stella_palmtree's leaves
+// have alpha mode 0 and are leaves; nc_pine_cluster01_lod's alpha-tested
+// "tile_ncbark01de_lod" is a trunk.
+inline bool treeLeaf(bool tree, const std::vector<std::string>& maps)
+{
+	if (!tree || maps.empty()) {
+		return false;
+	}
+	const auto lowered = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return text;
+	};
+	if (maps.size() > 1 && lowered(maps[1]).find("specularlut") == std::string::npos) {
+		return false;
+	}
+	return lowered(maps[0]).find("tile_") == std::string::npos;
 }
 
 // The transparency queues' key: the camera's distance to the object's

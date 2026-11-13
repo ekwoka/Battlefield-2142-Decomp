@@ -52,7 +52,7 @@ struct ProjectileSettings {
 	float distToMinDamage = 0;
 	RandomDistribution timeToLive {RandomDistribution::Type::None, 1, 0, 0};
 	float gravityModifier = 1;
-	// Its Point / RotationalPoint node's drag and mass (template +0x78,
+	// Its Point / RotationalPoint / Basic node's drag and mass (template +0x78,
 	// +0x94; 0 and 1 by default): shotgun pellets 18, C4 15, missiles 0.1-10.
 	float drag = 0;
 	float mass = 1;
@@ -156,9 +156,9 @@ struct ProjectileSettings {
 	float armingSpeed = 0, speedModifier = 1, predictionFactor = 0;
 	bool useTargetSpeed = false, magneticBehaviour = false;
 	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
-	// hasDirection (template +0x335, 1 by default; only the magnets ship
-	// 0): the motor pushes along the round's own heading (0x005b3e60).
-	bool hasDirection = true;
+	// hasDirection (template +0x335, 0 by default): the motor of a round
+	// without a follow pushes along its own nose (0x005b3e60).
+	bool hasDirection = false;
 	float maxAngleLock = 360;
 	bool ignoreFriendly = true;
 	// seek.directionBonus (the seek template's +0x30, executor 0x004f541e,
@@ -167,9 +167,18 @@ struct ProjectileSettings {
 	// (1 - bonus) x distance (the angle off the round's heading in radians),
 	// not simply the nearest. The launchers' lock asks with 0 (0x005e1b30).
 	float directionBonus = 0;
-	// startDelay (the GenericProjectile's): seconds before its acceleration
-	// pushes it along its flight.
+	// The engine (0x005b3e60 from 0x005b4370): startDelay (template +0x300)
+	// seconds after the launch (0x005b3990 schedules event 0, 0x005b62a0 ->
+	// 0x005b2c10 sets the round's +0x25f; at once without a delay), or with
+	// follow.targetActivation the lock (0x005b2c10), the round is pushed by
+	// acceleration (+0x31c) a second while under maxSpeed (+0x324): along
+	// the follow's new heading (its slot 0x40, 0x005ed120) on a tick its
+	// update (0x005ed1a0) steered it or is past followTime, else, with
+	// hasDirection (+0x335), along its nose; otherwise not at all. A
+	// magnet's follow pushes it itself (followMagnet). hasFollow: a
+	// DefaultFollowComp.
 	float startDelay = 0;
+	bool hasFollow = false;
 	// onlyDetonateOnMaterial (template +0x348, -1 none) for the first
 	// onlyDetonateOnMaterialTimeLimit seconds (+0x34c; 0: always): until
 	// then it sets off only on that material, and anything else it meets
@@ -241,6 +250,27 @@ struct ProjectileSettings {
 	// (0/-0.12/0) 12 cm above where its origin would lie. Other node types
 	// don't read it (Point, Basic: the decoy and EMP mine are Mesh).
 	physics::Vec3 collisionOffset;
+	// physicsType RotationalPoint (the string switch 0x006bf540: 2): its
+	// node (0x006c6480, vtable 0x00993610) turns the object about its own
+	// origin by its angular velocity (+0xb8, world axes, rad/s; the step
+	// 0x006c6860 by its mean over the tick x dt x 57.2958 degrees, about
+	// that axis through 0x005b1a70), which nothing damps: the grenades,
+	// the IFV's mine, the stationary medic hub and motion bait.
+	bool rotationalPoint = false;
+	// physicsType Mesh (3) with hasMobilePhysics: a PhysicsNode.Basic
+	// (0x005f6ba0 -> 0x006c70c0, vtable 0x009938a0; its tick 0x006c9060):
+	// the motion mine, the C4, the AP and EMP mines, the sonars, the decoy
+	// and a few guns' rounds. Its tick, unlike the Point node's: with drag
+	// above 0, the box drag of its vehicle LOD's box (`boxSize`, filled by
+	// the game world from the collisionMesh; the object's mesh slot 0x54(1)),
+	// its faces' areas x 0.785 x dragModifier, linear (0x006c7e00) and
+	// angular (0x006c8110), else (no box) the 0.1 m sphere's (0x006c5730);
+	// then the angular step (0x006c8690) and the linear step (0x006c8380),
+	// each damped by 0.99 a tick (physics::RigidBody), gravity for the next.
+	// Projectiles don't sleep (the class 0x9493 test of 0x006c9060).
+	bool basicNode = false;
+	physics::Vec3 boxSize;
+	physics::Vec3 dragModifier {1, 1, 1};
 	// A ForceObject child that holds the round over the ground (the IFV's
 	// mine, eu_ifv_laserguided_mine_FO; template defaults 0x0062d4f0; the
 	// object's tick 0x0062c920 -> 0x0062b750; GameWorld::hoverProjectile).
@@ -363,6 +393,15 @@ struct FireArmSettings {
 	// rounds (template +0x4c, 3 by default, 0x005f2ad0).
 	std::vector<int> fireRates;
 	int burstSize = 3;
+	// fire.batchSize (fire template +0x48, 1 by default; the property
+	// 0x004e2c5c / 0x004e2d1a): the projectiles a round makes. FireComp's
+	// fire (0x005f31d0) makes that many (0x005f2bb0 each, the same velocity
+	// and tracer count), and the firing's end (0x005c3cb0) strays each by
+	// the deviation component, the first the main round and the rest
+	// sub-projectiles (by subProjectileDev); the recoil, the sound and the
+	// firing's messages only for the main one. The shotguns' 12 pellets,
+	// the EU AV's 4 wire-guided rockets, the heavy IFV's 20.
+	int batchSize = 1;
 	// A PulseMeterAmmoComp (the handheld pulse meter): each round starts its
 	// scan (0x005d9cf0 sets +0x58), which runs pulse-meter-scan-step (1, a
 	// tweakable of 0x008e..: DAT_00a6e194) a second until it is through
@@ -436,6 +475,18 @@ struct FireArmSettings {
 	// update, slot 5 0x005e4c80). Ticks are the times x 30, rounded.
 	bool thrown = false;
 	int pullbackTicks = 0, launchDelayTicks = 0;
+	// The thrown object's frame and spin (the launch's end, 0x005e5720):
+	// fire.projectileStartRotation (ThrownFireComp +0xb4..+0xbc, yaw /
+	// pitch / roll degrees; executor 0x004e4d83) turns the object's matrix
+	// in its own frame (0x006adb30(-roll, -pitch, -yaw) x the fire frame,
+	// 0x006acfa0), not its velocity; fire.randomRotationSpeed (+0xac) above
+	// 0 sets its node's angular velocity (slot 0x6c) to (0, -n1, n2) x the
+	// throw's power (+0x168), each n = ceil(s x the next draw in (0, 1])
+	// of the engine's generator (0x0042b230) seeded with the round's id
+	// (object +0x20 & 0x7fffffff). Shipped 4 on the smoke and radar
+	// grenades and the motion bait (the frag grenade's line is a rem).
+	physics::Vec3 startRotation;
+	float randomRotationSpeed = 0;
 	// The underarm (soft) throw: a ThrownFireComp with fire.altFireInput
 	// (PIAltFire on the grenades): the alternate press (0x005e4d80, slot 13)
 	// starts the throw with the soft flag (+0x178), under which the
@@ -594,8 +645,14 @@ public:
 	// component is reloading already (its state 2), and when it can
 	// (0x005c0e70), 0x005c0f40 starts its reload): a magazine not full,
 	// with one to spare, is replaced after reloadTime as an empty one is.
-	// False when nothing starts.
+	// The fire component's may-reload (slot 0x44, SingleFireComp
+	// 0x005d5b60: its state +0x150 at 0) refuses while a
+	// busyUntilButtonRelease round waits for the trigger's release (a
+	// guided launcher keeps its wire while the button is held). False when
+	// nothing starts.
 	bool startReload();
+	// That wait (busyUntilButtonRelease, the trigger still held since the round).
+	bool busyUntilRelease() const { return m_busyUntilRelease; }
 	// A press of the trigger that found the magazine empty since the last
 	// call (0x005c2ee0: the ammo's slot 0x34 refuses; the TriggerClick).
 	bool takeClick() { return std::exchange(m_clicked, false); }
@@ -719,9 +776,23 @@ struct Projectile {
 	physics::Vec3 origin;
 	physics::Vec3 position;
 	physics::Vec3 velocity;
+	// Its nose (a unit vector; zero for "along its flight"): the firing's
+	// direction at the launch. A Point round's physics doesn't turn it; the
+	// follow does (0x005ecb30 turns the object's matrix, not its velocity),
+	// and the engine pushes along it, so a round launched at rest (the
+	// gunship's TV missile, velocity 0) still flies off.
+	physics::Vec3 heading;
 	physics::Vec3 acceleration; // gravity, applied the next tick
-	physics::Vec3 cameraMissileForward; // launch heading for a powered projectile-camera round
-	float cameraMissileDistance = 0; // path length since launch
+	float cameraMissileDistance = 0; // path length since launch (the missile view's range bar)
+	// A RotationalPoint round's own frame and spin (ProjectileSettings::
+	// rotationalPoint; set by a throw, FireArmSettings::startRotation /
+	// randomRotationSpeed): its node turns the frame by the spin each
+	// tick (moveProjectile -> physics::PointBody, 0x006c6860) and a bounce
+	// reverses and slows it (bounceSpin, 0x006c0d00). Rounds launched
+	// otherwise keep turns false and are drawn along their nose.
+	bool turns = false;
+	physics::Mat3 rotation;
+	physics::Vec3 spin; // rad/s about world axes (+0xb8)
 	float timeLeft = 1;
 	const ProjectileSettings* settings = nullptr;
 	uint32_t shooter = 0;
@@ -762,6 +833,7 @@ struct Projectile {
 	bool wireRequiresSights = false;
 	uint32_t wireWeapon = 0;
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
+	bool followTurned = false; // the follow steered it this tick (0x005ed1a0's result)
 	// SeekClosestTargetComp's relock: armed at each shot (0x005b2e70 ->
 	// setTarget(t, 1)); a candidate held since pendingSince.
 	bool relockArmed = false;
@@ -887,6 +959,15 @@ TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& r
 // the part along the normal reversed times `elasticity` (the mean of the
 // two materials'), the sliding part times 1 - `friction` (at most 1).
 physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3& normal, float elasticity, float friction);
+// Its spin after that contact (0x006c0d00's end, through the node's slots
+// 0x68 / 0x6c): reversed and scaled by the new velocity's square, at most
+// 1, and stopped under 0.1 m^2/s^2.
+physics::Vec3 bounceSpin(const physics::Vec3& spin, const physics::Vec3& velocity);
+// The thrown round's start (0x005e5720): its frame, the fire frame along
+// `direction` turned by `startRotation` in its own frame; its spin from
+// randomRotationSpeed `speed` x `power`, the draws seeded with `id`.
+void throwFrame(Projectile& p, const physics::Vec3& direction, const physics::Vec3& startRotation, float speed,
+	float power, uint32_t id);
 
 // A magnet's follow and thrust for a tick (0x005ecb30, 0x005b3e60): the
 // target's top speed arms it past armingSpeed; it heads for `aim` plus
@@ -928,6 +1009,13 @@ float followSpeedCap(const Projectile& projectile, bool overrideArming = false);
 bool followStep(Projectile& projectile, const physics::Vec3& target, const physics::Vec3& targetVelocity, float seconds,
 	bool newTarget = false);
 
+// The round's nose: its heading, else the direction of its flight (zero
+// for a round at rest without one).
+physics::Vec3 noseOf(const Projectile& projectile);
+
+// The engine's push for a tick (see ProjectileSettings::startDelay).
+void thrustProjectile(Projectile& projectile, float seconds);
+
 // Whether the follow turns the round this tick (0x005ed1a0): from its
 // start (followFrom, else trackingDelay after the launch) until
 // follow.followTime seconds after it, when that is set.
@@ -959,6 +1047,12 @@ struct DeviationBuildUp {
 	float max = 0, perShot = 0, decay = 0;
 	float minDev = 0;
 	float value = 0; // +8
+	// deviation.subProjectileDev (template +0x18): a batch's
+	// sub-projectiles stray by it instead (fire.batchSize, below).
+	float subDev = 0;
+	// The last sub-projectile's offset (the component's +0xc, +0x10): kept
+	// from one firing to the next, and added to the main round's.
+	float subUp = 0, subRight = 0;
 	static DeviationBuildUp fromTemplate(const world::ObjectTemplate& t);
 	void update(bool firing);
 	// The SoldierDeviationComp's own decay (0x005de980): the build-up
@@ -989,8 +1083,9 @@ struct DeviationBuildUp {
 //   - the stance's modifier (Stand, Crouch, Lie), and zoomed devModZoom
 //     on the whole and minDevModZoom on minDev (else 1 and 1).
 // The deviation = (minDev x minDevModZoom + misc + turn + speed + fire)
-// x zoom x stance. (Its +0x44 extra, added on a condition of the holder's
-// slot 0x1a0 not decoded, is left out.)
+// x zoom x stance. Its +0x44 (set by slot 0xac, 0x00680290: the bots'
+// setAiDeviation) is added while the holder is an AI (the holder's +0x1a0
+// slot 0x6c, then slot 0x68; 0x005de980's end): Player::aiDeviation.
 struct SoldierDeviation {
 	DeviationBuildUp fire;
 	float turnMax = 0, turnPitch = 0, turnYaw = 0, turnDecay = 0;

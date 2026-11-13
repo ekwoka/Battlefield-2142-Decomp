@@ -83,6 +83,16 @@ def _bf2142_admin_setup():
 		def setblocking(self, flag):
 			self._sock.setblocking(bool(flag))
 
+		# Winsock's SO_REUSEADDR lets a socket bind a port another socket
+		# listens on (two servers on one machine both open the rcon port
+		# 4711); BSD sockets want SO_REUSEPORT for that. Without it the
+		# second server's bind fails, default.py keeps the unbound socket
+		# and its accept raises EINVAL every tick.
+		def setsockopt(self, level, option, value, *rest):
+			call(self._sock.setsockopt, level, option, value, *rest)
+			if level == _real.SOL_SOCKET and option == _real.SO_REUSEADDR and value and hasattr(_real, 'SO_REUSEPORT'):
+				call(self._sock.setsockopt, level, _real.SO_REUSEPORT, value)
+
 		# A peer that has gone: Winsock's shutdown doesn't mind, BSD
 		# sockets say ENOTCONN (default.py's handler of that would fail).
 		def shutdown(self, how):

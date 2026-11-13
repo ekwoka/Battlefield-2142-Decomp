@@ -4,6 +4,7 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Console/Vars.h"
 #include "Game/GameLogic.h"
 #include "Net/BitStream.h"
 #include "Net/GameClient.h"
@@ -151,17 +152,22 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 	};
 	m_server.onLeft = [this](int client) { left(client); };
 	m_server.onPlayerInfo = [this](int client) { m_loginChecks.push_back(client); };
+	// A client's "rcon <line>" (data block 6, 0x004aef10): the scripts'
+	// RemoteCommand with its player.
+	m_server.onRemoteCommand = [this](int client, const std::string& line) {
+		const auto it = m_clients.find(client);
+		if (it != m_clients.end() && it->second.player >= 0 && onRemoteCommand) {
+			onRemoteCommand(it->second.player, line);
+		}
+	};
 	m_server.onEvent = [this](int client, const net::GameEvent& e) { event(client, e); };
 	m_server.onMove = [this](int client, const net::PlayerMove& move) {
 		if (const auto it = m_clients.find(client); it != m_clients.end()) {
-			// The moves wait to be stepped one a tick; past four the oldest
-			// go (the buffer the original keeps per player; its depth here
-			// is OpenBattlefield2's reading of BF2's, not traced in BF2142.exe).
+			// The moves wait to be stepped one a tick: the input block's
+			// reader (0x00590990 -> 0x005904b0) appends each move newer than
+			// the last to the player's move list (player slot 0xa8,
+			// 0x00583770), which has no limit.
 			it->second.moves.push_back(move);
-			while (it->second.moves.size() > 4) {
-				it->second.moves.pop_front();
-				++it->second.movesDropped;
-			}
 		}
 	};
 }
@@ -172,8 +178,7 @@ HostedGame::~HostedGame()
 	stopDemo();
 	for (const auto& [id, client] : m_clients) {
 		if (onLog) {
-			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.movesDropped) + " dropped, "
-				+ std::to_string(client.ticksStarved) + " ticks without one");
+			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.ticksStarved) + " ticks without one");
 		}
 	}
 	m_server.stop();
@@ -333,19 +338,16 @@ void HostedGame::sayTeam(int team, const std::string& text)
 
 void HostedGame::sendRemoteFeedback(int player, const std::string& text)
 {
-	// 6/0x13 to the player's client: -1 (its console) and the text, as
-	// many messages as the text needs (a PostRemote payload holds 52 bytes).
+	// 0x004b0690 case 0x13: the whole "rcon: " + text as data block 7 to
+	// the player's connection (PlayerAuth.h kRconFeedbackBlock), which its
+	// client prints (0x004b5eb0 case 7).
 	const std::string reply = "rcon: " + text;
 	for (const auto& [id, client] : m_clients) {
 		if (client.player != player) {
 			continue;
 		}
-		for (size_t at = 0; at < reply.size() || at == 0; at += 48) {
-			sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeRemoteConsoleFeedback,
-				net::int32Payload(-1) + reply.substr(at, 48)));
-			if (reply.empty()) {
-				break;
-			}
+		for (const net::GameEvent& e : net::dataBlockEvents(net::kRconFeedbackBlock, reply)) {
+			sendTo(id, e);
 		}
 	}
 }
@@ -375,8 +377,13 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_players.clear();
 	m_names.clear();
 	m_motion.clear();
+	m_snapshot.clear();
+	m_reloadsSeen.clear();
+	m_stateCache.clear();
 	m_nextGhost = kFirstGhost;
 	m_spawnGroups.clear();
+	m_squadSpawnGroups.clear();
+	m_vehicleSpawnGroups.clear();
 	m_requestsSent.clear();
 	m_ordersSent.clear();
 	m_offerSent = {-1, -1, -1};
@@ -391,15 +398,15 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 			m_round->setKit(client.player, kits.front().name, kits.front().soldier);
 		}
 		client.created.clear();
-		client.sent.clear();
 		client.ghosts.clear();
 		client.carried.clear();
-		client.lastCarried.clear();
 		client.lostRemovals.clear();
 		client.rescoreIn = 0;
 		client.hasEye = false;
 		client.moves.clear();
-		client.stepping = client.stepped = -1;
+		client.lastMove = {};
+		client.dryTicks = 0;
+		client.stepping = client.stepped = client.recordMove = -1;
 		client.spawnRequested = false;
 		if (client.stage != Client::Stage::Connected) {
 			client.stage = Client::Stage::Loading;
@@ -506,8 +513,52 @@ net::ServerReport HostedGame::report() const
 		{"gamevariant", "bf2142"}, {"numplayers", std::to_string(players)}, {"numteams", "2"},
 		{"maxplayers", std::to_string(m_setup.maxPlayers)}, {"gamemode", "openplaying"},
 		{"password", m_setup.password.empty() ? "0" : "1"}};
+	addRuleKeys(r);
 	r.teams = {m_logic->team(1).name, m_logic->team(2).name};
 	return r;
+}
+
+// The server rules' keys. The host's server key callback (0x00578bb0)
+// answers each key from the server info object (0x00a75560, field slot 1
+// 0x00642210), which 0x006423d0 fills from the sv settings (DAT_00a201c0)
+// before each report: "%d" or "%f" of a setting, "1" / "0" for a switch.
+// A ranked server (sv.ranked, +0x26d) reports its fixed rules: a spawn
+// time of 15 (0x00430f60), a ticket ratio of 100 (0x00430fa0) and a team
+// ratio of 100 (0x00430fc0). A game without settings reports the defaults.
+void HostedGame::addRuleKeys(net::ServerReport& r) const
+{
+	const net::ServerSettings defaults;
+	const net::ServerSettings& sv = m_setup.settings ? *m_setup.settings : defaults;
+	const auto decimal = [](int value) { return std::to_string(value); };
+	const auto real = [](float value) {
+		char text[32];
+		std::snprintf(text, sizeof(text), "%f", static_cast<double>(value));
+		return std::string(text);
+	};
+	const auto flag = [](bool on) { return std::string(on ? "1" : "0"); };
+	// 0x00430a00: a ranked game also needs GameSpyRanked, which a LAN
+	// host never has, so only sv.ranked's fixed rules apply here.
+	const bool rankedGame = sv.rankedGame(m_setup.gameMode, false);
+	r.keys["roundtime"] = decimal(sv.roundsPerMap);                         // field 9, +0x11c
+	r.keys["timelimit"] = decimal(sv.timeLimit);                            // field 0xb, +0x120
+	r.keys["bf2142_ranked"] = flag(rankedGame);                             // field 0xe, 0x00430a00
+	r.keys["bf2142_autorec"] = flag(sv.autoRecord);                         // field 0x11, +0x16d
+	r.keys["bf2142_voip"] = flag(sv.voipEnabled);                           // field 0x14 (the voip slot 0x254)
+	r.keys["bf2142_autobalanced"] = flag(sv.autoBalanceTeam);               // field 0x15, +0x1e8
+	r.keys["bf2142_friendlyfire"] = flag(sv.soldierFriendlyFire >= 100);    // field 0x16, +0x128 at 100 or more
+	r.keys["bf2142_tkmode"] = sv.tkPunishEnabled ? "Punish" : "No Punish"; // field 0x17, +0x140
+	r.keys["bf2142_startdelay"] = decimal(sv.startDelay);                   // field 0x18, +0x108
+	r.keys["bf2142_spawntime"] = real(sv.spawnTimeInForce());               // field 0x19, 0x00430f60
+	r.keys["bf2142_sponsortext"] = sv.sponsorText;                          // field 0x1a, +0x1f0
+	r.keys["bf2142_scorelimit"] = decimal(sv.scoreLimit);                   // field 8, +0x124
+	r.keys["bf2142_ticketratio"] = decimal(sv.ticketRatioInForce());        // field 0x1c, 0x00430fa0
+	r.keys["bf2142_teamratio"] = real(sv.teamRatioInForce());              // field 0x1d, 0x00430fc0
+	r.keys["bf2142_team1"] = m_logic->team(1).name;                         // field 0x1e (slot 0x48)
+	r.keys["bf2142_team2"] = m_logic->team(2).name;                         // field 0x1f (slot 0x48(2))
+	r.keys["bf2142_mapsize"] = decimal(m_setup.mapSize);                    // field 0x22 (slot 0x100)
+	r.keys["bf2142_reservedslots"] = decimal(sv.numReservedSlots);         // field 0x26, 0x00430d80 (+0x274)
+	r.keys["bf2142_maxrank"] = flag(false);                                 // field 0x27: ranked games only
+	r.keys["bf2142_allow_spectators"] = flag(!rankedGame && sv.allowSpectators); // field 0x2d, +0x290
 }
 
 // --- joining
@@ -593,12 +644,16 @@ void HostedGame::playerInfo(int id)
 		refuse(0xd, "no logged-in profile");
 		return;
 	}
-	// GameSpy's CD-key service (0x00642f90 -> 0x007184b0, game 0x52c).
+	// GameSpy's CD-key service (0x00642f90 -> 0x007184b0, game 0x52c). Its
+	// answer refuses no one: 0x00642f90 goes on at once, and the gcd
+	// callback 0x00642e70 goes on the same way whatever comes back (the
+	// failure's text only compared, with "Your CD Key is disabled. Contact
+	// customer service.", and the result dropped). The rewrite logs it.
 	std::string why;
 	if (!net::cdKeyAuthenticate(m_setup.login.cdKeyHost, m_setup.login.cdKeyPort, m_server.challenge(), info->cdKeyResponse, 0,
-			&why)) {
-		refuse(0x14, "CD key: " + why); // the reason is the rewrite's (the retail server's gcd callback, 0x00642e70, isn't traced)
-		return;
+			&why)
+		&& onLog) {
+		onLog("client " + std::to_string(id) + " (" + p.name + "): CD key: " + why + " (let in, as the retail server does)");
 	}
 	// The stats service's ValidatePlayer (0x00584c00).
 	std::string body;
@@ -659,7 +714,9 @@ void HostedGame::sendSettings(int id)
 		settings.radioMaxSpamFlagCount = sv->radioMaxSpamFlagCount;
 		settings.radioBlockedDurationTime = sv->radioBlockedDurationTime;
 		settings.votingEnabled = sv->votingEnabled;
-		settings.playersNeededToStart = static_cast<uint32_t>(std::max(sv->numPlayersNeededToStart, 0));
+		// 0x004316b0: a ranked game's minimum (never on a LAN host).
+		settings.playersNeededToStart = static_cast<uint32_t>(
+			std::max(sv->playersNeededToStartInForce(sv->rankedGame(m_setup.gameMode, false)), 0));
 		settings.friendlyFireWithMines = sv->friendlyFireWithMines;
 		settings.allowTitanMovement = sv->allowTitanMovement;
 	}
@@ -791,13 +848,53 @@ void HostedGame::stopAutoDemo()
 		return; // no hook program (the original's launch fails: "failed to launch hook program")
 	}
 	m_hookBusy->store(true);
-	std::thread([busy = m_hookBusy, command = "\"" + hook + "\" \"" + file + "\""] {
+	m_hookFile = file;
+	m_hookMap = m_setup.level;
+	std::thread([busy = m_hookBusy, done = m_hookDone, command = "\"" + hook + "\" \"" + file + "\""] {
 		const int result = std::system(command.c_str());
 		if (result != 0) {
 			std::fprintf(stderr, "dep: autodemo hook program failed w/ non-zero exit code\n");
 		}
+		done->store(result == 0 ? 1 : 2);
 		busy->store(false);
 	}).detach();
+}
+
+// 0x005852b0, once the hook is done: a failure is logged; else message 9
+// (0x004ad7a0) goes to every client: sv.demoDownloadURL with "{file}"
+// replaced by the demo's file name (after the last \ or /, 0x0065b640),
+// or the name appended, and the map (data block 9 through each
+// connection, 0x004a9f10).
+void HostedGame::hookDone()
+{
+	const int done = m_hookDone->exchange(0);
+	if (done == 0) {
+		return;
+	}
+	if (done == 2) {
+		if (onLog) {
+			onLog("Demo upload failed. Check 'rotate_demo_err.txt' for more info.");
+		}
+		return;
+	}
+	const size_t slash = m_hookFile.find_last_of("\\/");
+	const std::string name = slash == std::string::npos ? m_hookFile : m_hookFile.substr(slash + 1);
+	net::RemoteWorld::DemoNotice notice;
+	notice.url = m_setup.settings ? m_setup.settings->demoDownloadURL : std::string();
+	if (const size_t at = notice.url.find("{file}"); at != std::string::npos) {
+		notice.url.replace(at, 6, name);
+	} else {
+		notice.url += name;
+	}
+	notice.map = m_hookMap;
+	const std::string data = net::RemoteWorld::encodeDemoNotice(notice);
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage != Client::Stage::Connected && id != kDemoClient) { // a map change leaves them loading
+			for (const net::GameEvent& e : net::dataBlockEvents(9, data)) {
+				sendTo(id, e);
+			}
+		}
+	}
 }
 
 void HostedGame::stopDemo()
@@ -947,8 +1044,7 @@ void HostedGame::left(int id)
 	const int player = it->second.player;
 	sendVoteReplies(m_votes.playerLeft(player));
 	if (onLog) {
-		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.movesDropped) + " dropped, "
-			+ std::to_string(it->second.ticksStarved) + " ticks without one");
+		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.ticksStarved) + " ticks without one");
 	}
 	m_clients.erase(it);
 	// The game server's destroyPlayer (0x004acfb0): the round lets the
@@ -984,7 +1080,14 @@ std::vector<net::GameEvent> HostedGame::createEvents(const Ghost& ghost) const
 	net::CreateObjectInfo info;
 	info.templateId = ghost.objectTemplate->id();
 	info.ghost = ghost.first;
-	info.count = static_cast<uint32_t>(ghost.layout->size());
+	// Always one ghost with the root's place and rotation (0x0050b0f0 sets
+	// +0x30 to 1; 0x004ab8a0 and the late-join replay 0x0057dda0 build it
+	// from the object's position, slot 0x60, and its rotation in degrees,
+	// 0x00568c30): the client makes the whole tree there and numbers its
+	// ghosts from this one (0x004b3f70 -> 0x0067d3d0). That is where a
+	// joined client's Titan takes its height and heading, which no update
+	// carries (its mode mask, statesOf).
+	info.count = 1;
 	if (const game::Projectile* p = projectileOf(ghost)) {
 		info.team = std::clamp(p->team, 0, 3);
 		info.hasPosition = info.hasRotation = true;
@@ -1004,8 +1107,18 @@ std::vector<net::GameEvent> HostedGame::createEvents(const Ghost& ghost) const
 void HostedGame::sendDatabase(int id)
 {
 	Client& client = m_clients[id];
-	// The players, the objects, who holds which soldier.
-	for (const auto& p : m_round->playerList()) {
+	// The client's level is loaded (0x004a7c80, from the tick 0x004ae030
+	// at connection state 2): its player's connected flag again (slot 0x8c
+	// with 1), the clock the scoreboard's ties go by.
+	if (client.player >= 0) {
+		m_round->setPlayerConnected(client.player);
+	}
+	// The players (in the player manager's order, as they were made: the
+	// client's list keeps it, menu::scoreboardOrder), the objects, who
+	// holds which soldier.
+	std::vector<game::GameWorld::PlayerInfo> players = m_round->playerList();
+	std::stable_sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.created < b.created; });
+	for (const auto& p : players) {
 		const auto seen = m_players.find(p.id);
 		if (seen != m_players.end()) {
 			sendTo(id, createPlayerEvent(p, p.id == client.player, seen->second.ghost));
@@ -1061,6 +1174,46 @@ void HostedGame::sendDatabase(int id)
 	client.stage = Client::Stage::Database;
 }
 
+void HostedGame::handOutChat(const net::ChatMessage& line)
+{
+	const std::vector<net::GameEvent> events = net::stringBlockEvents(net::encodeChat(line));
+	const auto hears = [&](int receiver) {
+		if (line.channel == net::kChatPlayer && m_round->localPlayer() < 0) {
+			// A whisper (byte 9 the player it is for, 0xff from the retail
+			// HUD, 0x007d9e20) on a dedicated server (GSDedicated,
+			// DAT_00a1fc01): 0x004ab6b0 hands it to each client whose
+			// player's id (slot 0x58) is byte 9 (0x004a92b0), no other test.
+			// Otherwise 0x004a93b0 / 0x004a7800 with 0x004a6f70's case 0xe.
+			return receiver == line.b9;
+		}
+		return m_round->hearsChat(static_cast<int>(line.channel), line.player, receiver, line.channel == net::kChatPlayer ? line.b9 : 0);
+	};
+	for (const auto& [to, other] : m_clients) {
+		if (other.stage == Client::Stage::Playing && other.player >= 0 && hears(other.player)) {
+			for (const net::GameEvent& out : events) {
+				sendTo(to, out);
+			}
+		}
+	}
+	if (const int local = m_round->localPlayer(); local >= 0 && !clientHas(local) && hears(local) && onLocalChat) {
+		onLocalChat(line);
+	}
+}
+
+void HostedGame::localSay(int player, const net::ChatMessage& said)
+{
+	net::ChatMessage line = said;
+	line.player = player;
+	line.source = 2;
+	handOutChat(line);
+	if (onLog) {
+		onLog("chat " + nameOf(player) + ": " + line.text);
+	}
+	if (onChat) {
+		onChat(player, line);
+	}
+}
+
 void HostedGame::sendToPlaying(const net::GameEvent& event)
 {
 	for (const auto& [id, client] : m_clients) {
@@ -1079,7 +1232,25 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	switch (e.type) {
 	case net::kEvPostRemote: {
 		net::PostRemoteInfo info;
-		if (!net::parsePostRemote(e, info) || info.category != net::kMsgNetworkCategory) {
+		if (!net::parsePostRemote(e, info)) {
+			return;
+		}
+		// A client leader's answer to a request to join his private squad
+		// (0x0079d6e0 kind 0 on a client: {squad, the player} to the
+		// server), which the game server's listener (0x004a5750) hands the
+		// player's connection as 2/0x12 or 2/0x13 with the squad (none for
+		// the server's own player). The original's second int is the
+		// player's connection (player slot 0x58), which a client of the
+		// rewrite doesn't hold: the rewrite's is the player's id.
+		if (info.category == 2 && (info.id == 0x12 || info.id == 0x13) && info.payload.size() >= 8) {
+			for (const auto& [to, c] : m_clients) {
+				if (c.player == info.payloadInt(1) && c.player != player) {
+					sendTo(to, net::makePostRemote(2, info.id, net::int32Payload(info.payloadInt(0))));
+				}
+			}
+			return;
+		}
+		if (info.category != net::kMsgNetworkCategory) {
 			return;
 		}
 		switch (info.id) {
@@ -1104,12 +1275,41 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			const uint32_t end = m_logic->timeLimit > 0 ? static_cast<uint32_t>(m_logic->timeLimit * 30) : 0;
 			sendTo(id, eventOf(net::kEvBeginRound, {3, end, static_cast<uint32_t>(-1)}));
 			client.stage = Client::Stage::Playing;
+			// The Titans' last orders and states, for a client that came
+			// after they went out (the rewrite's; see sendTitanSync).
+			for (const game::GameWorld::TitanSync& m : m_round->titanSyncState()) {
+				sendTo(id, titanSyncEvent(m));
+			}
 			break;
 		}
-		case net::kNeSelectSpawnGroup: // 0x004c1d50's request
-			m_round->setSpawnChoice(player, info.payloadInt());
+		case net::kNeSelectSpawnGroup: { // 0x004c1d50's request
+			// A squad's group: its leader, or the leader's beacon that holds
+			// the squad's spawn point once set down; a vehicle's group: that
+			// vehicle; else a control point's.
+			const int group = info.payloadInt();
+			game::GameWorld::PlayerInfo me;
+			m_round->playerInfo(player, me);
+			bool taken = false;
+			for (const auto& [squad, id] : m_squadSpawnGroups) {
+				if (id == group && squad == std::make_pair(me.team, me.squad)) {
+					m_round->setSpawnChoice(player, m_round->squadBeacon(me.team, me.squad)
+							? game::GameWorld::kSpawnOnBeacon
+							: game::GameWorld::kSpawnOnLeader);
+					taken = true;
+				}
+			}
+			for (const auto& [vehicle, id] : m_vehicleSpawnGroups) {
+				if (id == group) {
+					m_round->setSpawnVehicle(player, vehicle);
+					taken = true;
+				}
+			}
+			if (!taken) {
+				m_round->setSpawnChoice(player, group);
+			}
 			client.spawnRequested = true;
 			break;
+		}
 		case net::kNeSelectTeam: { // 0x004c1dc0's request; 0x004b0690 case 7 -> the game logic's slot 0x60
 			const int team = info.payloadInt();
 			if (m_round->setPlayerTeam(player, team)) {
@@ -1123,9 +1323,13 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			}
 			break;
 		}
-		case net::kNeRemoteConsoleCommand: // "rcon <command>" typed in the client's console
+		case net::kNeRemoteConsoleCommand:
+			// Posted to the server's own event manager, 6/0x12 is its own
+			// console's "rcon <line>": 0x004b0690 case 0x12 raises
+			// RemoteCommand with player -1, whoever sent it. A client's line
+			// comes as data block 6 (m_server.onRemoteCommand).
 			if (onRemoteCommand) {
-				onRemoteCommand(player, info.payload.substr(0, info.payload.find('\0')));
+				onRemoteCommand(-1, info.payload.substr(0, info.payload.find('\0')));
 			}
 			break;
 		case net::kNeSuicide: {
@@ -1161,6 +1365,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			if (!name.empty()) {
 				client.name = name;
 				m_names[player] = name;
+				m_round->setPlayerName(player, name);
 				if (client.full && !reservedSlotCheck(id)) {
 					return; // refused: the server is full
 				}
@@ -1190,20 +1395,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		if (net::decodeChat(client.chat, line) && line.source == 2 && line.channel != net::kChatServerMessage
 			&& line.channel != net::kChatServerTeamMessage) {
 			line.player = player; // 0x004a5460: the sender's player
-			for (const net::GameEvent& out : net::stringBlockEvents(net::encodeChat(line))) {
-				if (line.channel == net::kChatPlayer) {
-					// A whisper (byte 9 the player it is for, 0xff from the
-					// retail HUD, 0x007d9e20): only to that player's client
-					// (the rewrite's routing; the sender shows its own line).
-					for (auto& [to, other] : m_clients) {
-						if (other.player == line.b9 && other.stage == Client::Stage::Playing) {
-							sendTo(to, out);
-						}
-					}
-					continue;
-				}
-				sendToPlaying(out);
-			}
+			handOutChat(line);
 			if (onLog) {
 				onLog("chat " + nameOf(player) + ": " + line.text);
 			}
@@ -1214,9 +1406,9 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		client.chat.clear();
 		return;
 	}
-	case net::kEvJoinSquad: // team, player, squad
+	case net::kEvJoinSquad: // team, player, squad: the squad manager's join (0x004c7290)
 		if (e.i(1) == player) {
-			m_round->joinSquad(player, e.i(2));
+			m_round->requestJoinSquad(player, e.i(2));
 		}
 		return;
 	case net::kEvLeaveSquad: { // team, player, squad, bit (0x004c9c50)
@@ -1235,42 +1427,36 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	}
 	case net::kEvInvite: { // 0x0050e700: team, player, squad, from the leader
 		// From the squad's leader (squad manager slot 0x40) only; slot 0x30
-		// invites. A bot in no squad takes it at once (as offline: the
-		// rewrite's stand-in for its answer); a client's player is asked.
+		// invites. A client's player is asked; a bot never answers (no
+		// connection, and nothing in BF2142.exe or AIDLL reads its mask but
+		// a private squad's join, 0x004c7290).
 		// Without the leader bit it is the invited player's own refusal
 		// (the HUD's answer, 0x0079d6e0 kind 1: slot 0x30 with false, which
 		// clears the squad's bit).
 		if (e.u(3) == 0) {
 			if (e.i(1) == player) {
-				m_invites[player] &= ~(1u << (e.u(2) & 31));
+				m_round->setSquadInvite(player, e.i(2), false);
 			}
 			return;
 		}
-		game::GameWorld::PlayerInfo me, other;
-		if (!m_round->playerInfo(player, me) || !me.squadLeader || me.squad != e.i(2) || !m_round->playerInfo(e.i(1), other)
-			|| other.team != me.team || other.commander) {
-			return;
-		}
-		if (other.ai && other.squad == 0) {
-			m_round->joinSquad(other.id, me.squad);
-		}
-		// Squad manager slot 0x30 (0x004c3190): the invited player's mask
-		// of the squads that invited it (player vtable 0x224 / 0x228) gets
-		// the squad's bit and its client message 2/0x10 (the squad), which
-		// its HUD asks about (the question queue's kind 1, 0x0079e440).
-		m_invites[other.id] |= 1u << (static_cast<uint32_t>(me.squad) & 31);
-		for (const auto& [id, c] : m_clients) {
-			if (c.player == other.id) {
-				sendTo(id, net::makePostRemote(2, 0x10, net::int32Payload(me.squad)));
-			}
+		game::GameWorld::PlayerInfo me;
+		if (m_round->playerInfo(player, me) && me.squad == e.i(2)) {
+			inviteToSquad(player, e.i(1));
 		}
 		return;
 	}
-	case net::kEvSetPrivateSquad: // team, squad, bit: the leader's lock (slot 0x20)
+	case net::kEvSetPrivateSquad: { // team, squad, bit: the leader's lock (slot 0x20)
+		// Its squad's leader's (the HUD's toggle 0x007a5a60 offers it to
+		// him only); the round's squad manager keeps it (requestJoinSquad).
+		game::GameWorld::PlayerInfo me;
+		if (m_round->playerInfo(player, me) && me.squadLeader && me.squad == e.i(1)) {
+			m_round->setSquadPrivate(me.team, me.squad, e.u(2) != 0);
+		}
 		if (onLog) {
 			onLog("player " + std::to_string(player) + (e.u(2) ? " locks" : " unlocks") + " squad " + std::to_string(e.i(1)));
 		}
 		return;
+	}
 	case net::kEvChangeSquadName: // a new squad (0x004c6720)
 		if (e.i(2) == player) {
 			m_round->joinSquad(player, e.i(0));
@@ -1670,6 +1856,95 @@ void HostedGame::sendTeamDamage()
 	}
 }
 
+// The Titan sync's messages (ECPhysicsETitanSync, category 9: id 0 an
+// order, 0x0050f1f0 / 0x005aca70; id 2 the states every 30 ticks,
+// 0x00561e20) to everyone (the game's slot 0x84 with 0x00509990's
+// PostRemote). Their ticks go out as the ghost blocks count them: the
+// round's last tick is this one's.
+net::GameEvent HostedGame::titanSyncEvent(const game::GameWorld::TitanSync& m) const
+{
+	const uint32_t shift = m_tick - m_round->ticks();
+	net::TitanSyncInfo info;
+	info.team = m.team;
+	info.orderTick = m.orderTick + shift;
+	info.targetX = m.targetX;
+	info.targetZ = m.targetZ;
+	info.stateTick = m.stateTick + shift;
+	info.velocityX = m.velocityX;
+	info.velocityZ = m.velocityZ;
+	info.x = m.x;
+	info.z = m.z;
+	return net::makePostRemote(net::kMsgPhysicsCategory, m.order ? net::kTitanSyncOrder : net::kTitanSyncState,
+		net::titanSyncPayload(info));
+}
+
+void HostedGame::sendTitanSync()
+{
+	for (const game::GameWorld::TitanSync& m : m_round->takeTitanSync()) {
+		sendToPlaying(titanSyncEvent(m));
+	}
+}
+
+bool HostedGame::gameLogicEvent(int player, int event, int data)
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage == Client::Stage::Playing && client.player == player && player >= 0) {
+			sendTo(id, net::makePostRemote(net::kMsgGameCategory, static_cast<uint32_t>(event), net::int32Payload(data)));
+			return true;
+		}
+	}
+	return false;
+}
+
+void HostedGame::sendSquadMessages()
+{
+	for (const auto& [id, client] : m_clients) {
+		if (client.stage == Client::Stage::Playing && client.player >= 0) {
+			for (const game::GameWorld::SquadMessage& m : m_round->takeSquadMessages(client.player)) {
+				sendTo(id, net::makePostRemote(2, static_cast<uint32_t>(m.id), net::int32Payload(m.value)));
+			}
+		}
+	}
+}
+
+void HostedGame::inviteToSquad(int leader, int player)
+{
+	game::GameWorld::PlayerInfo me, other;
+	if (!m_round->playerInfo(leader, me) || !me.squadLeader || me.squad <= 0 || !m_round->playerInfo(player, other)
+		|| other.team != me.team || other.commander) {
+		return;
+	}
+	// Squad manager slot 0x30 (0x004c3190): the invited player's mask of
+	// the squads that invited it (player vtable 0x224 / 0x228) gets the
+	// squad's bit and its client message 2/0x10 (the squad), which its HUD
+	// asks about (the question queue's kind 1, 0x0079e440).
+	m_round->setSquadInvite(other.id, me.squad, true);
+	for (const auto& [id, c] : m_clients) {
+		if (c.player == other.id) {
+			sendTo(id, net::makePostRemote(2, 0x10, net::int32Payload(me.squad)));
+		}
+	}
+}
+
+void HostedGame::answerJoinRequest(int leader, int player, bool yes)
+{
+	game::GameWorld::PlayerInfo me;
+	if (!m_round->playerInfo(leader, me) || !me.squadLeader || me.squad <= 0) {
+		return;
+	}
+	// 0x0079d6e0 kind 0 on a server: 2/0x13 or 2/0x12 with the leader's
+	// squad to the player's connection (the server's own player, 0xff,
+	// hears nothing), then with yes slot 0x30's invite.
+	for (const auto& [id, c] : m_clients) {
+		if (c.player == player) {
+			sendTo(id, net::makePostRemote(2, yes ? 0x13 : 0x12, net::int32Payload(me.squad)));
+		}
+	}
+	if (yes) {
+		inviteToSquad(leader, player);
+	}
+}
+
 // The squads' orders (the leader's, slot 0x48 → 0x004c5360, and the
 // commander's, 0x4c → 0x004c5530) as they change: each new or moved one
 // to everyone as IssueSquadOrder (store 0 / 1, the map kind and the
@@ -1746,35 +2021,38 @@ void HostedGame::applyMoves()
 		}
 		// The move the round stepped last tick is the record's from now on.
 		client.stepped = client.stepping;
-		game::SoldierInput input = client.held;
-		input.turn = 0;
-		input.use = false;
-		input.switchSeat = 0;
-		input.selectItem = 0;
-		input.jump = false;
-		// After running dry the moves wait until two are there (the
-		// client's and the server's ticks run on their own clocks: a move a
-		// tick late otherwise leaves a tick stepped with none, which the
-		// client didn't predict). While dry the soldier keeps the last
-		// move's held inputs.
-		if (client.moves.empty()) {
-			client.starved = true;
-			++client.ticksStarved;
-		} else if (client.starved && client.moves.size() >= 2) {
-			client.starved = false;
-		}
-		if (!client.moves.empty() && !client.starved) {
-			// One move a tick, as the client stepped it (Prediction.h).
+		// The server's player step (0x004ac660 from 0x004ad5c0, each tick
+		// for each player not an AI): the move list's first move is taken
+		// (0x004ac370 keeps it as the last, +0x10 / +0x14) and decoded into
+		// the player's input (0x005838d0), as the client stepped it
+		// (Prediction.h). With none waiting the last one taken is decoded
+		// again, for up to 30 ticks in a row (the count +0x30, cleared by a
+		// move); after that the input is all zero. (Its keys' presses don't
+		// act again: they are the held keys, as MoveInputState keeps them.)
+		game::SoldierInput input;
+		if (!client.moves.empty()) {
 			const net::PlayerMove move = client.moves.front();
 			client.moves.pop_front();
 			input = net::soldierInputFromMove(move, client.moveState);
 			client.stepping = move.index;
-			client.held = input;
+			client.lastMove = move;
+			client.dryTicks = 0;
+		} else {
+			++client.ticksStarved;
+			if (client.dryTicks < 30) {
+				++client.dryTicks;
+				input = net::soldierInputFromMove(client.lastMove, client.moveState);
+			} else {
+				input = net::soldierInputFromMove(net::PlayerMove {}, client.moveState);
+			}
 		}
 		m_round->setInput(client.player, input);
 		game::GameWorld::PlayerInfo me;
+		// A spawn asked for comes once the player's spawn time has (the
+		// death's sv.spawnTime wait, 0x004bb220), and not in the start's
+		// countdown (0x004bd2a0 sets every spawn time to its end).
 		if (client.spawnRequested && m_round->playerInfo(client.player, me) && !me.alive) {
-			if (m_round->spawnSoldier(client.player)) {
+			if (me.respawnIn <= 0 && m_logic->roundState() != 2 && m_round->spawnSoldier(client.player)) {
 				client.spawnRequested = false;
 			}
 		} else if (me.alive) {
@@ -1856,9 +2134,7 @@ void HostedGame::trackObjects()
 				sendTo(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
 			}
 			for (size_t part = 0; part < it->second.layout->size(); ++part) {
-				client.sent.erase(static_cast<uint16_t>(ghost + part));
 				client.ghosts.forget(static_cast<uint16_t>(ghost + part));
-				client.lastCarried.erase(static_cast<uint16_t>(ghost + part));
 			}
 		}
 		it = m_ghosts.erase(it);
@@ -2089,9 +2365,7 @@ void HostedGame::trackProjectiles()
 				sendTo(id, eventOf(net::kEvDestroyObject, {ghost, 0}));
 			}
 			for (size_t part = 0; part < it->second.layout->size(); ++part) {
-				client.sent.erase(static_cast<uint16_t>(ghost + part));
 				client.ghosts.forget(static_cast<uint16_t>(ghost + part));
-				client.lastCarried.erase(static_cast<uint16_t>(ghost + part));
 			}
 		}
 		it = m_ghosts.erase(it);
@@ -2220,6 +2494,10 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 		if (mode == 3) {
 			// The node's acceleration and velocity change (slots 0x74, 0xc4).
 			s.mask |= 0x200 | 0x80000;
+			// The kit's ability battery (0x40000, mode 3 only: soldier
+			// +0x338, 0..1, -1 without a kit).
+			s.mask |= 0x40000;
+			s.battery = std::clamp(info.battery, -1.0f, 1.0f);
 			s.soldierAcceleration = {body->acceleration.x, body->acceleration.y, body->acceleration.z};
 			s.soldierImpulse = {body->impulse.x, body->impulse.y, body->impulse.z};
 		}
@@ -2239,8 +2517,8 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 		// the ladder's id (+0x184; 0 none), and the place on it
 		// (0x0059ebf0); a client seats the soldier in a container of its
 		// own at that ladder (0x0059fbf0) and moves it there (0x0059ec80),
-		// and takes it out on a 0 (0x0059d440). The original's dirty mask
-		// sends it on a change; the rewrite's states are whole, so always.
+		// and takes it out on a 0 (0x0059d440). The dirty masks send it on
+		// a change (snapshotGhosts).
 		s.mask |= 0x20000;
 		s.ladder = std::min(info.ladder, 255);
 		s.ladderPosition = info.ladderPosition;
@@ -2309,19 +2587,40 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 			}
 			// The armoured parts below it (0x800000): the rewrite's vehicles
 			// keep their armour on the root, so every part is whole but the
-			// repair cells (GameWorld::repairCells, the heavy IFV's shield
-			// generators: hudRepairCellNo, in the root's armour order), each
-			// 8 while it stands and 0 a wreck, which the clients' vehicle
-			// HUD shows (0x007a1e50).
+			// repair cells (the heavy IFV's shield generators:
+			// hudRepairCellNo, in the root's armour order), each in eighths
+			// of its hit points as 0x005ffec0 captures them
+			// (GameWorld::repairCellEighths), which the clients' vehicle
+			// HUD (0x007a1e50) and the cells' armour effects follow.
 			if (h.kind == net::NetworkableKind::SimpleObject && h.armoredChildrenKnown && !h.armoredChildren.empty()) {
 				s.mask |= 0x800000;
 				s.childDamage.assign(h.armoredChildren.size(), 8);
-				const std::vector<bool> cells = m_round->repairCells(ghost.object);
+				const std::vector<int> cells = m_round->repairCellEighths(ghost.object);
 				for (size_t i = 0, cell = 0; i < h.armoredRepairCells.size() && i < s.childDamage.size(); ++i) {
 					if (h.armoredRepairCells[i] && cell < cells.size()) {
-						s.childDamage[i] = cells[cell++] ? 8 : 0;
+						s.childDamage[i] = cells[cell++];
 					}
 				}
+			}
+			// A vehicle root's ducking (0x100000, PCO +0x18c, captured by
+			// 0x005fb230): its driver's seat's (a client's 0x005ffec0 hands
+			// it to setDucking, slot 0x12c, which lets the seated soldier's
+			// grips go, animateRemoteSeated).
+			if (h.kind == net::NetworkableKind::SimpleObject && h.inVehicle && !h.parachute) {
+				s.mask |= 0x100000;
+				s.ducking = m_round->seatDucking(ghost.object, 0);
+			}
+			if (h.kind == net::NetworkableKind::SimpleObject && m_round->isTitan(ghost.object)) {
+				// A Titan (0x00561d90): the bit after the mask set, so no
+				// node vectors (0x005ff5d0); its mode mask (slot 0x24,
+				// 0x005fdce0: 0xf61270 for a Titan, 0x1f6127b else), which
+				// 0x0057f420 ands into every ghost write, a new ghost's first
+				// state too, leaves out its orientation (1), place (2),
+				// angular velocity (8) and 0x1000000: each client has them
+				// from CreateObject (createEvents) and moves its Titans
+				// itself by the Titan sync (GameWorld::stepTitanSync).
+				s.flag = true;
+				s.mask &= 0x00f61270u;
 			}
 			break;
 		case net::NetworkableKind::OverheadCamera:
@@ -2418,6 +2717,9 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 					s.mask |= 1u << wg;
 					s.seatWeapon[wg] = place;
 				}
+				// Its ducking (8: PCO +0x18c, as the root's 0x100000).
+				s.mask |= 8;
+				s.seatDucking = m_round->seatDucking(ghost.object, static_cast<int>(part));
 				break;
 			}
 			game::GameWorld::PlayerInfo info;
@@ -2439,13 +2741,150 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 	return states;
 }
 
-std::vector<uint8_t> HostedGame::stateOf(const Ghost& ghost, size_t part, size_t& bits) const
+std::vector<uint8_t> HostedGame::encodeGhost(const GhostNow& now, const net::GhostMasks& masks, size_t& bits,
+	net::GhostMasks& written) const
 {
-	const net::GhostPartLayout& layout = (*ghost.layout)[part];
+	// Each group with its mask (0x0057f420: the dirty mask & the
+	// networkable's slot 0x24 for the mode; here & the fields the state
+	// holds).
+	written = {};
 	net::BitWriter out;
-	net::encodeGhostState(out, layout, nullptr, statesOf(ghost, part, 2));
+	if (now.team) {
+		net::TeamNetState t = now.teamState;
+		t.mask &= masks[0];
+		written[0] = t.mask;
+		net::encodeTeamState(out, t);
+	} else if (now.player >= 0) {
+		net::NetworkableState s = now.states.front();
+		s.mask &= masks[0];
+		written[0] = s.mask;
+		net::NetworkableHints hints;
+		hints.kind = net::NetworkableKind::Player;
+		net::encodeNetworkable(out, hints, nullptr, s);
+	} else if (now.layout) {
+		std::vector<net::NetworkableState> states = now.states;
+		for (size_t g = 0; g < states.size() && g < net::kGhostMaskGroups; ++g) {
+			states[g].mask &= masks[g];
+			written[g] = states[g].mask;
+		}
+		net::encodeGhostState(out, *now.layout, nullptr, states);
+	}
 	bits = out.bits();
 	return out.data();
+}
+
+const HostedGame::GhostNow* HostedGame::ghostNow(uint16_t ghost)
+{
+	if (const auto it = m_stateCache.find(ghost); it != m_stateCache.end()) {
+		return &it->second;
+	}
+	GhostNow now;
+	if (ghost == net::kTeamStateGhost) {
+		now.team = true;
+		now.teamState = teamStateOf();
+	} else {
+		for (const auto& [player, seen] : m_players) {
+			if (seen.ghost == ghost) {
+				now.player = player;
+			}
+		}
+		if (now.player >= 0) {
+			// Every group's fields are there to write; the mask's 0x10000
+			// goes only with a reload (snapshotGhosts).
+			now.states.push_back(playerStateOf(now.player, true));
+		} else {
+			size_t part = 0;
+			const Ghost* g = ghostOf(ghost, part);
+			if (!g) {
+				return nullptr;
+			}
+			now.layout = &(*g->layout)[part];
+			now.states = statesOf(*g, part, 2);
+		}
+	}
+	return &(m_stateCache[ghost] = std::move(now));
+}
+
+void HostedGame::snapshotGhosts()
+{
+	if (m_snapshotTaken && m_snapshotTick == m_tick) {
+		return;
+	}
+	m_snapshotTaken = true;
+	m_snapshotTick = m_tick;
+	std::vector<uint16_t> ghosts;
+	for (const auto& [object, ghost] : m_ghosts) {
+		for (size_t part = 0; part < ghost.layout->size(); ++part) {
+			ghosts.push_back(static_cast<uint16_t>(ghost.first + part));
+		}
+	}
+	for (const auto& [player, seen] : m_players) {
+		ghosts.push_back(seen.ghost);
+	}
+	ghosts.push_back(net::kTeamStateGhost);
+	std::map<uint16_t, GhostSeen> snapshot;
+	for (const uint16_t ghost : ghosts) {
+		const GhostNow* now = ghostNow(ghost);
+		if (!now) {
+			continue;
+		}
+		const auto before = m_snapshot.find(ghost);
+		GhostSeen& seen = snapshot[ghost];
+		net::GhostMasks changed {};
+		if (now->team) {
+			// The teams' state: each value against the last (0x00560ff0's
+			// snapshot).
+			seen.team = now->teamState;
+			seen.hasTeam = true;
+			const bool had = before != m_snapshot.end() && before->second.hasTeam;
+			for (int bit = 0; bit < 32; ++bit) {
+				const uint32_t b = 1u << bit;
+				if ((seen.team.mask & b)
+					&& (!had || !(before->second.team.mask & b)
+						|| before->second.team.values[static_cast<size_t>(bit)] != seen.team.values[static_cast<size_t>(bit)])) {
+					changed[0] |= b;
+				}
+			}
+		} else if (now->player >= 0) {
+			// The player's (0x005929f0): its fields; mask 0x10000 from a
+			// reload pressed since (player +0x28c, which the snapshot
+			// turns into the bit and clears).
+			net::NetworkableState s = now->states.front();
+			s.mask &= ~0x10000u;
+			net::NetworkableHints hints;
+			hints.kind = net::NetworkableKind::Player;
+			seen.groups.push_back(net::networkableFields(hints, s));
+			changed[0] = net::changedFields(
+				before != m_snapshot.end() && !before->second.groups.empty() ? before->second.groups.front() : net::NetworkableFields {},
+				seen.groups.front());
+			game::GameWorld::PlayerInfo info;
+			if (m_round->playerInfo(now->player, info)) {
+				const auto presses = m_reloadsSeen.try_emplace(now->player, info.reloadPresses).first;
+				if (presses->second != info.reloadPresses) {
+					changed[0] |= 0x10000;
+					presses->second = info.reloadPresses;
+				}
+			}
+		} else {
+			for (size_t g = 0; g < now->states.size() && g < now->layout->groups.size() && g < net::kGhostMaskGroups; ++g) {
+				seen.groups.push_back(net::networkableFields(now->layout->groups[g].hints, now->states[g]));
+				changed[g] = net::changedFields(before != m_snapshot.end() && g < before->second.groups.size()
+						? before->second.groups[g]
+						: net::NetworkableFields {},
+					seen.groups.back());
+			}
+		}
+		bool any = false;
+		for (const uint32_t m : changed) {
+			any = any || m != 0;
+		}
+		if (any) {
+			for (auto& [id, client] : m_clients) {
+				client.ghosts.markDirty(ghost, changed);
+			}
+		}
+	}
+	m_snapshot = std::move(snapshot);
 }
 
 net::PlayerOwnState HostedGame::ownState(int player) const
@@ -2457,6 +2896,15 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 		return s;
 	}
 	s.spawnTick = m_tick + static_cast<uint32_t>(std::ceil(std::max(0.0f, info.respawnIn) * 30));
+	s.hitIndicator = m_round->takeHitIndicator(player); // slot 0x210 (0x0059b480)
+	// What the player gave (the ability bar's flags, set by the game
+	// logic's heal 0x004bc410 and ammo 0x004bd5f0): +0x16a ammo, +0x168
+	// healed, +0x169 repaired; +0x16b is RTTeam's (slot 0x284), never set.
+	if (game::GameWorld::AbilityBarInfo gifts; m_round->abilityBar(player, gifts)) {
+		s.flag16a = gifts.ammoFlag;
+		s.flag168 = gifts.healFlag;
+		s.flag169 = gifts.repairFlag;
+	}
 	s.manDown = info.manDown;
 	s.commander = info.commander;
 	if (info.soldier) {
@@ -2524,7 +2972,7 @@ const HostedGame::Ghost* HostedGame::ghostOf(uint16_t id, size_t& part) const
 	return nullptr;
 }
 
-std::vector<uint8_t> HostedGame::teamStateOf(size_t& bits) const
+net::TeamNetState HostedGame::teamStateOf() const
 {
 	// Both teams' tickets (the bits 0x400 and 0x400000, team +0x84, as
 	// 0x0055f180 clamps them), each with its bit (+0x90, not kept: 0) and
@@ -2534,10 +2982,7 @@ std::vector<uint8_t> HostedGame::teamStateOf(size_t& bits) const
 		const int tickets = static_cast<int>(std::lround(m_logic->team(team).tickets));
 		state.setTickets(team, std::clamp(tickets, 0, 9999), false, m_logic->team(team).ticketState);
 	}
-	net::BitWriter out;
-	net::encodeTeamState(out, state);
-	bits = out.bits();
-	return out.data();
+	return state;
 }
 
 std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
@@ -2572,11 +3017,101 @@ std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
 	return out;
 }
 
+int HostedGame::freeSpawnGroupId(const std::set<int>& taken) const
+{
+	for (int id = 0xc0; id <= 0xff; ++id) {
+		if (!taken.count(id)) {
+			return id;
+		}
+	}
+	return -1; // 0x006347c0: none past 0xff
+}
+
 void HostedGame::trackSpawnGroups()
 {
 	std::map<int, net::SpawnGroupInfo> now;
 	for (const net::SpawnGroupInfo& info : spawnGroupsNow()) {
 		now.emplace(info.id, info);
+	}
+	// The groups made as the round goes, kept while their squad has a
+	// leader or their vehicle can be spawned in; sent while they have a
+	// place (the leader on foot and up, or the beacon; the vehicle).
+	std::set<int> taken;
+	for (const auto& [id, info] : now) {
+		taken.insert(id);
+	}
+	std::map<std::pair<int, int>, uint16_t> squads;
+	for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
+		if (p.squad == 0 || !p.squadLeader) {
+			continue;
+		}
+		// Placed at the leader while he is up on foot (where the spawn
+		// screen shows him), else at his beacon; a member who picks it
+		// spawns at the beacon when there is one (0x004c7f10 moves the
+		// squad's spawn point onto it).
+		uint16_t ghost = 0;
+		if (p.alive && !p.manDown && !p.vehicle && p.soldier) {
+			ghost = ghostOfObject(p.soldier);
+		} else if (const uint32_t beacon = m_round->squadBeacon(p.team, p.squad)) {
+			ghost = ghostOfObject(beacon);
+		}
+		squads[{p.team, p.squad}] = ghost;
+	}
+	std::map<uint32_t, int> vehicles;
+	for (int team = 1; team <= 2; ++team) {
+		for (const uint32_t vehicle : m_round->spawnVehicles(team)) {
+			vehicles[vehicle] = team;
+		}
+	}
+	for (auto it = m_squadSpawnGroups.begin(); it != m_squadSpawnGroups.end();) {
+		if (!squads.count(it->first)) {
+			it = m_squadSpawnGroups.erase(it); // the squad is gone (or has no leader)
+			continue;
+		}
+		taken.insert(it->second);
+		++it;
+	}
+	for (auto it = m_vehicleSpawnGroups.begin(); it != m_vehicleSpawnGroups.end();) {
+		if (!vehicles.count(it->first)) {
+			it = m_vehicleSpawnGroups.erase(it);
+			continue;
+		}
+		taken.insert(it->second);
+		++it;
+	}
+	const auto add = [&](int id, int team, uint16_t ghost) {
+		if (id >= 0 && ghost != 0) {
+			net::SpawnGroupInfo info;
+			info.id = id;
+			info.team = team;
+			info.ghost = ghost;
+			info.hasPoints = true;
+			now.emplace(id, info);
+		}
+	};
+	for (const auto& [squad, ghost] : squads) {
+		auto it = m_squadSpawnGroups.find(squad);
+		if (it == m_squadSpawnGroups.end()) {
+			const int id = freeSpawnGroupId(taken);
+			if (id < 0) {
+				continue;
+			}
+			taken.insert(id);
+			it = m_squadSpawnGroups.emplace(squad, id).first;
+		}
+		add(it->second, squad.first, ghost);
+	}
+	for (const auto& [vehicle, team] : vehicles) {
+		auto it = m_vehicleSpawnGroups.find(vehicle);
+		if (it == m_vehicleSpawnGroups.end()) {
+			const int id = freeSpawnGroupId(taken);
+			if (id < 0) {
+				continue;
+			}
+			taken.insert(id);
+			it = m_vehicleSpawnGroups.emplace(vehicle, id).first;
+		}
+		add(it->second, team, ghostOfObject(vehicle));
 	}
 	for (const auto& [id, info] : m_spawnGroups) {
 		if (!now.count(id)) {
@@ -2661,7 +3196,7 @@ void HostedGame::trackRequests()
 	m_requestsSent = std::move(now);
 }
 
-std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool everyGroup) const
+net::NetworkableState HostedGame::playerStateOf(int player, bool everyGroup) const
 {
 	game::GameWorld::PlayerInfo p;
 	net::NetworkableState s;
@@ -2695,7 +3230,7 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool ev
 		s.player.spawnTick = m_tick + static_cast<uint32_t>(std::max(0.0f, p.respawnIn) * 30.0f);
 		// The fire states (0x00592410's loop: masks 0x40 / 0x80 / 0x20000
 		// from player +0x19c / +0x19d / +0x19e, the fire and alt fire held;
-		// the state goes whole every update here) with group 0's firearm,
+		// each bit goes when its group's fields change) with group 0's firearm,
 		// the weapon in hand: its rounds and fire mode; and the presses
 		// (0x4000000, +0x250).
 		// The fire held goes out in a seat too (0x004bda00 sets +0x19c from
@@ -2731,12 +3266,7 @@ std::vector<uint8_t> HostedGame::playerStateOf(int player, size_t& bits, bool ev
 			s.mask |= 0x10000;
 		}
 	}
-	net::NetworkableHints hints;
-	hints.kind = net::NetworkableKind::Player;
-	net::BitWriter out;
-	net::encodeNetworkable(out, hints, nullptr, s);
-	bits = out.bits();
-	return out.data();
+	return s;
 }
 
 net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
@@ -2751,10 +3281,21 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 	// Our soldier, or the seat of the vehicle we sit in.
 	game::GameWorld::PlayerInfo me;
 	std::vector<uint16_t> first;
-	if (m_round->playerInfo(client.player, me) && me.alive && ghostOfObject(me.soldier)) {
+	// A record goes only for a move taken since the last record (the
+	// ghost manager's +0x20e4, the move list's last taken, 0x0057e8c0, set
+	// to -1 when it equals +0x20e8, the last record's move, which the
+	// ghost block's writer 0x00582cd0 sets as it writes one): the ticks the server steps the last move again
+	// with none waiting (0x004ac660) send none, and the next move's record
+	// carries them. The exe's client doesn't step them (its replay,
+	// 0x004b5000, takes the record's move off with 0x004ac370 and steps the
+	// moves after it), so that record corrects it by those ticks.
+	const net::GameServer::ClientInfo* info = m_server.client(id);
+	const int32_t recordMove = client.stepped >= 0 ? client.stepped : info ? info->lastMove : 0;
+	if (recordMove != client.recordMove && m_round->playerInfo(client.player, me) && me.alive
+		&& ghostOfObject(me.soldier)) {
+		client.recordMove = recordMove;
 		net::ControlObjectRecord control;
-		const net::GameServer::ClientInfo* info = m_server.client(id);
-		control.lastMove = client.stepped >= 0 ? client.stepped : info ? info->lastMove : 0;
+		control.lastMove = recordMove;
 		const world::Object* body = m_round->objects().find(me.vehicle ? me.vehicle : me.soldier);
 		if (body) {
 			control.position = {body->position().x, body->position().y, body->position().z};
@@ -2830,51 +3371,8 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		rescore(client);
 		client.rescoreIn = net::kGhostRescoreSeconds;
 	}
-	// Each ghost's state this tick, once for every client; a state the
-	// client doesn't have is its dirty masks' stand-in.
-	std::map<uint16_t, int> playerOfGhost;
-	for (const auto& [player, seen] : m_players) {
-		playerOfGhost[seen.ghost] = player;
-	}
-	// A player's reload this client hasn't had: its state with mask 0x10000.
-	std::map<uint16_t, std::pair<std::vector<uint8_t>, size_t>> reloadStates;
-	const auto reloadOf = [&](uint16_t ghost, uint32_t& presses) {
-		const auto p = playerOfGhost.find(ghost);
-		game::GameWorld::PlayerInfo info;
-		if (p == playerOfGhost.end() || !m_round->playerInfo(p->second, info)) {
-			return -1;
-		}
-		presses = info.reloadPresses;
-		const auto seen = client.reloadsSent.try_emplace(p->second, info.reloadPresses).first;
-		return seen->second != info.reloadPresses ? p->second : -1;
-	};
-	const auto current = [&](uint16_t ghost) -> const std::pair<std::vector<uint8_t>, size_t>* {
-		uint32_t presses = 0;
-		if (const int player = reloadOf(ghost, presses); player >= 0) {
-			auto& entry = reloadStates[ghost];
-			if (entry.first.empty()) {
-				entry.first = playerStateOf(player, entry.second, true);
-			}
-			return &entry;
-		}
-		if (auto it = m_stateCache.find(ghost); it != m_stateCache.end()) {
-			return &it->second;
-		}
-		std::pair<std::vector<uint8_t>, size_t> entry;
-		if (ghost == net::kTeamStateGhost) {
-			entry.first = teamStateOf(entry.second);
-		} else if (const auto p = playerOfGhost.find(ghost); p != playerOfGhost.end()) {
-			entry.first = playerStateOf(p->second, entry.second);
-		} else {
-			size_t part = 0;
-			const Ghost* g = ghostOf(ghost, part);
-			if (!g) {
-				return nullptr;
-			}
-			entry.first = stateOf(*g, part, entry.second);
-		}
-		return &(m_stateCache[ghost] = std::move(entry));
-	};
+	// What changed this frame, into every client's masks.
+	snapshotGhosts();
 	// What the block has used: the header and the record.
 	size_t used = kGhostHeaderBits;
 	if (block.control) {
@@ -2886,7 +3384,7 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		used = w.bits();
 	}
 	const uint32_t sequence = m_server.nextSequence(id);
-	std::vector<uint32_t>& carried = client.carried[sequence];
+	std::vector<Client::Carried>& carried = client.carried[sequence];
 	carried.clear();
 	const auto fits = [&](size_t bits) { return used + bits <= budgetBits; };
 	// Lost removals first (gm +0x10c0).
@@ -2903,35 +3401,12 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 		update.ghost = *it;
 		block.updates.push_back(update);
 		used += 18;
-		carried.push_back(0x10000u | *it);
-		client.lastCarried[*it] = sequence;
+		carried.push_back({*it, true, {}});
 		it = client.lostRemovals.erase(it);
 	}
-	// Dirty: an in-scope state whose current state the client lacks.
-	std::vector<uint16_t> scheduled;
-	for (const auto& [object, ghost] : m_ghosts) {
-		for (size_t part = 0; part < ghost.layout->size(); ++part) {
-			scheduled.push_back(static_cast<uint16_t>(ghost.first + part));
-		}
-	}
-	for (const auto& [player, seen] : m_players) {
-		scheduled.push_back(seen.ghost);
-	}
-	scheduled.push_back(net::kTeamStateGhost);
-	for (const uint16_t ghost : scheduled) {
-		const net::GhostScheduler::State* st = client.ghosts.state(ghost);
-		if (!st || st->status != net::GhostScheduler::Status::InScope || st->dirty) {
-			continue;
-		}
-		const auto* now = current(ghost);
-		const auto sent = client.sent.find(ghost);
-		if (now && (sent == client.sent.end() || sent->second != now->first)) {
-			client.ghosts.markDirty(ghost);
-		}
-	}
-	// The heap (0x005823c0) and the writes (0x00582cd0): at most the
-	// block's updates; one that doesn't fit is skipped until under 24 bits
-	// are left.
+	// The heap (0x005823c0: a state out of scope or with a mask set) and
+	// the writes (0x00582cd0): at most the block's updates; one that
+	// doesn't fit is skipped until under 24 bits are left.
 	for (const uint16_t ghost : client.ghosts.queue()) {
 		if (block.updates.size() >= maxUpdates || used + net::kGhostMinimumBitsLeft > budgetBits) {
 			break;
@@ -2949,33 +3424,29 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 			update.kind = 3;
 			used += 18;
 			block.updates.push_back(update);
-			client.sent.erase(ghost);
 			client.ghosts.written(ghost);
-			carried.push_back(0x10000u | ghost);
-			client.lastCarried[ghost] = sequence;
+			carried.push_back({ghost, true, {}});
 			continue;
 		}
-		const auto* now = current(ghost);
+		const GhostNow* now = ghostNow(ghost);
 		if (!now) {
 			client.ghosts.written(ghost);
 			continue;
 		}
-		const size_t bits = 2 + 16 + 1 + lengthBits + now->second;
-		if (!fits(bits) || now->second >= (size_t {1} << lengthBits)) {
+		size_t stateBits = 0;
+		net::GhostMasks written {};
+		std::vector<uint8_t> state = encodeGhost(*now, st->masks, stateBits, written);
+		const size_t bits = 2 + 16 + 1 + lengthBits + stateBits;
+		if (!fits(bits) || stateBits >= (size_t {1} << lengthBits)) {
 			continue;
 		}
 		used += bits;
 		update.kind = 1;
-		update.state = now->first;
-		update.stateBits = now->second;
+		update.state = std::move(state);
+		update.stateBits = stateBits;
 		block.updates.push_back(std::move(update));
-		client.sent[ghost] = now->first;
 		client.ghosts.written(ghost);
-		carried.push_back(ghost);
-		client.lastCarried[ghost] = sequence;
-		if (uint32_t presses = 0; reloadStates.count(ghost) && reloadOf(ghost, presses) >= 0) {
-			client.reloadsSent[playerOfGhost[ghost]] = presses;
-		}
+		carried.push_back({ghost, false, written});
 	}
 	return block;
 }
@@ -2985,21 +3456,35 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 // players' networkables, which have no object) at 255; each tree within
 // the radius scored by its root (0x0057d300) and each ghost of it at
 // (score + 0.3 for a projectile) x its base priority (0x0057d560); each
-// living teammate's soldier or vehicle at least 0.03. The demo connection
-// takes everything at 1 (0x0057d8f0). Not rewritten: the commander's
-// satellite scan and the UAV (enemies at 0.5), his soldiers with +0x29c
-// set (0.03), OptimizeEnclosingObjectsNetworking, and the eye of player
-// vt+0xd4 (a team object's). The client's own soldier and vehicle are
-// scored like the rest here (the original skips the player's own, which
+// living teammate's control object (his soldier, or the seat he holds) at
+// least 0.03; then the commander's tools (below). The demo connection
+// takes everything at 1 (0x0057d8f0). The eye is the player's camera
+// (vt+0x1b4(0)'s matrix), or with player vt+0xd4 (0x0059afd0: commander
+// +0x10c, the commander screen +0x8d and its overhead view +0x8e) the
+// team's overhead camera (DAT_00a1c174 slot 0x7c, interface 0xc367);
+// +0x8d / +0x8e are set only by the HUD's executors on the machine that
+// shows the screen (0x00414914, 0x00555d64, 0x006f0cb9, 0x0075fdb6),
+// never from the network, so a remote client's player never has it and
+// the host's own player has no connection: never taken here. The client's
+// own soldier and vehicle are scored like the rest here (the original skips the player's own, which
 // the record carries); the eye is the soldier's head, kept from its last
 // life while it has none (the original's camera object).
 void HostedGame::rescore(Client& client)
 {
 	net::GhostScheduler& g = client.ghosts;
 	g.beginRescore();
-	g.setPriority(net::kTeamStateGhost, -1, false); // the teams' networkable: always in scope
+	// The always ghosts (the teams' networkable, the players', a negative
+	// base priority) are given to a connection once, with every mask set
+	// (0x0057dad0, and 0x004a9ba0 for one registered later); the rescore
+	// keeps them in scope at 255 (0x00581d40).
+	const auto always = [&](uint16_t ghost) {
+		if (!g.has(ghost)) {
+			g.setPriority(ghost, -1, false);
+		}
+	};
+	always(net::kTeamStateGhost);
 	for (const auto& [player, seen] : m_players) {
-		g.setPriority(seen.ghost, -1, false);
+		always(seen.ghost);
 	}
 	const auto everyPart = [&](const Ghost& ghost, float p, bool keepMax) {
 		if (!client.created.count(ghost.first)) {
@@ -3010,8 +3495,10 @@ void HostedGame::rescore(Client& client)
 		}
 	};
 	for (const auto& [object, ghost] : m_ghosts) {
-		if (ghost.basePriority < 0) {
-			everyPart(ghost, -1, false);
+		if (ghost.basePriority < 0 && client.created.count(ghost.first)) {
+			for (size_t part = 0; part < ghost.layout->size(); ++part) {
+				always(static_cast<uint16_t>(ghost.first + part));
+			}
 		}
 	}
 	game::GameWorld::PlayerInfo me;
@@ -3023,6 +3510,20 @@ void HostedGame::rescore(Client& client)
 		client.hasEye = true;
 	}
 	const bool everything = client.player < 0 || !client.hasEye;
+	// OptimizeEnclosingObjectsNetworking (a var, 0x004237c0: 0 unless a
+	// script sets it to 1): with our control object a soldier enclosed by
+	// a Titan's hull (the soldier's +0x18c slot 0xa8, 0x00585cb0), each
+	// tree whose root is a soldier (class 0x9493) brings the scope radius
+	// down to 100 m from then on, and one enclosed otherwise (or not at
+	// all) more than 20 m from the eye (a squared distance over 400,
+	// 0x004bb1b0) isn't scored: at 0.01 with GhostNotEnclosed at 1, else
+	// left out (0x0057d560). The exe's trees go in its tree list's order;
+	// here in the ghosts' (by object).
+	const Vars& vars = Vars::global();
+	const uint32_t enclosure = !everything && vars.number("OptimizeEnclosingObjectsNetworking", 0) == 1 && !me.vehicle
+		? m_round->enclosingTitan(client.player)
+		: 0;
+	net::GhostEye eye = client.eye;
 	for (const auto& [object, ghost] : m_ghosts) {
 		if (ghost.basePriority < 0) {
 			continue;
@@ -3033,6 +3534,23 @@ void HostedGame::rescore(Client& client)
 		}
 		if (ghost.basePriority == 0) {
 			continue; // never scored
+		}
+		if (enclosure && !ghost.layout->empty() && !(*ghost.layout)[0].groups.empty()
+			&& (*ghost.layout)[0].groups.front().hints.kind == net::NetworkableKind::Soldier) {
+			eye.radius = 100;
+			const int other = m_round->playerOf(object);
+			if (other != client.player && (other < 0 || m_round->enclosingTitan(other) != enclosure)) {
+				if (const world::Object* o = m_round->objects().find(object)) {
+					const float dx = o->position().x - eye.position.x, dy = o->position().y - eye.position.y,
+								dz = o->position().z - eye.position.z;
+					if (dx * dx + dy * dy + dz * dz > 400) {
+						if (vars.number("GhostNotEnclosed", 0) == 1) {
+							everyPart(ghost, 0.01f, false);
+						}
+						continue;
+					}
+				}
+			}
 		}
 		net::GhostVec3 at, velocity;
 		if (const game::Projectile* p = projectileOf(ghost)) {
@@ -3046,7 +3564,7 @@ void HostedGame::rescore(Client& client)
 		} else {
 			continue;
 		}
-		const float score = net::ghostScore(client.eye, at, velocity);
+		const float score = net::ghostScore(eye, at, velocity);
 		if (score > 0) {
 			everyPart(ghost, (score + (ghost.projectile ? net::kGhostProjectileBonus : 0)) * ghost.basePriority, false);
 		}
@@ -3054,24 +3572,35 @@ void HostedGame::rescore(Client& client)
 	if (everything) {
 		return;
 	}
+	// A player's control object's own networkable (vt+0x4c, its slot 0xd0):
+	// the soldier's ghost, or the ghost of the seat he holds (a vehicle's
+	// other seats and parts are ghosts of their own), its base priority
+	// over 0.
+	const auto controlled = [&](const game::GameWorld::PlayerInfo& p, float priority) {
+		const auto it = m_ghosts.find(p.vehicle ? p.vehicle : p.soldier);
+		if (it == m_ghosts.end() || it->second.basePriority <= 0 || !client.created.count(it->second.first)) {
+			return;
+		}
+		g.setPriority(p.vehicle ? ghostOfObject(p.vehicle, p.seat) : it->second.first, priority, true);
+	};
+	// Each living teammate's at least 0.03 (0x0057d560's end).
 	for (const auto& [player, seen] : m_players) {
 		game::GameWorld::PlayerInfo p;
 		if (player == client.player || !m_round->playerInfo(player, p) || !p.alive || p.team != me.team) {
 			continue;
 		}
-		const auto it = m_ghosts.find(p.vehicle ? p.vehicle : p.soldier);
-		if (it != m_ghosts.end() && it->second.basePriority > 0) {
-			everyPart(it->second, net::kGhostTeammatePriority, true);
-		}
+		controlled(p, net::kGhostTeammatePriority);
 	}
 	// The commander's tools (0x0057dc10's end, the asset manager
 	// DAT_00a6a390): for the team's commander with the satellite scan
 	// running (0x005a2370: the team's +0xc of its 0x3c bytes over 0) every
 	// enemy (radius -1), else with the team's UAV up (0x005a27c0: +0x4 over
 	// 0, its point at +0x14) the enemies within the game logic's +0x230
-	// (uavRadius, slot 0x28c) of it: each living enemy's soldier or vehicle
-	// (vt+0x4c) whose networkable's base priority is over 0 at 0.5, kept
-	// over a higher score (0x0057cfb0 -> 0x00581e80(..., 0.5, 1)). Then the
+	// (uavRadius, slot 0x28c) of it: each living enemy's control object
+	// (vt+0x4c: his soldier, or the seat he holds) whose networkable's base
+	// priority is over 0 at 0.5, kept over a higher score (0x0057cfb0 ->
+	// 0x00581e80(..., 0.5, 1)), the UAV's radius measured to the control
+	// object's place (slot 0x60) in three dimensions. Then the
 	// commander's own assets (0x0057db50: the objects of the game logic's
 	// slot 0x1d0 list of his team whose +0x29c kind is 1-4) at 0.03.
 	if (me.team != 1 && me.team != 2) {
@@ -3088,10 +3617,6 @@ void HostedGame::rescore(Client& client)
 				continue;
 			}
 			const uint32_t object = p.vehicle ? p.vehicle : p.soldier;
-			const auto it = m_ghosts.find(object);
-			if (it == m_ghosts.end() || it->second.basePriority <= 0) {
-				continue;
-			}
 			if (uav && uavRadius > 0) {
 				const world::Object* o = m_round->objects().find(object);
 				if (!o) {
@@ -3102,7 +3627,7 @@ void HostedGame::rescore(Client& client)
 					continue;
 				}
 			}
-			everyPart(it->second, net::kGhostScanPriority, true);
+			controlled(p, net::kGhostScanPriority);
 		}
 	}
 	if (me.commander) {
@@ -3117,8 +3642,9 @@ void HostedGame::rescore(Client& client)
 	}
 }
 
-// A packet's fate (0x005830e0): lost, what it carried that no later packet
-// carried goes again at 10000 (a lost removal first next packet).
+// A packet's fate (0x005830e0): lost, the masks it carried that no later
+// packet carried are set again, at 10000; each removal it carried goes
+// first next packet.
 void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
 {
 	const auto it = client.carried.find(sequence);
@@ -3126,18 +3652,22 @@ void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
 		return;
 	}
 	if (!delivered) {
-		for (const uint32_t entry : it->second) {
-			const uint16_t ghost = static_cast<uint16_t>(entry & 0xffff);
-			const auto last = client.lastCarried.find(ghost);
-			if (last == client.lastCarried.end() || last->second != sequence) {
+		for (const Client::Carried& entry : it->second) {
+			if (entry.removal) {
+				client.lostRemovals.push_back(entry.ghost);
 				continue;
 			}
-			if (entry & 0x10000u) {
-				client.lostRemovals.push_back(ghost);
-			} else {
-				client.sent.erase(ghost);
-				client.ghosts.markDirty(ghost, true);
+			net::GhostMasks lost = entry.masks;
+			for (auto later = std::next(it); later != client.carried.end(); ++later) {
+				for (const Client::Carried& next : later->second) {
+					if (!next.removal && next.ghost == entry.ghost) {
+						for (size_t g = 0; g < net::kGhostMaskGroups; ++g) {
+							lost[g] &= ~next.masks[g];
+						}
+					}
+				}
 			}
+			client.ghosts.markDirty(entry.ghost, lost, true);
 		}
 	}
 	client.carried.erase(it);
@@ -3231,6 +3761,9 @@ void HostedGame::tick()
 	sendRadio();
 	sendCloseTo();
 	sendTeamDamage();
+	sendSquadMessages();
+	sendTitanSync();
+	hookDone();
 	// The scripts' end-of-round text (gl_sendEndOfRoundData, 0x00568930:
 	// data block 8 to everyone, with sv.endOfRoundDelay and each player's
 	// kills and deaths).
@@ -3238,7 +3771,7 @@ void HostedGame::tick()
 		m_endOfRoundSerialSent = m_logic->endOfRoundSerial();
 		net::RemoteWorld::EndOfRoundData data;
 		data.text = m_logic->endOfRoundData();
-		data.endOfRoundDelay = m_setup.settings ? m_setup.settings->endOfRoundDelay : 15;
+		data.endOfRoundDelay = m_setup.settings ? m_setup.settings->endOfRoundDelayInForce(m_setup.gameMode) : 15; // 0x00430610
 		for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
 			net::RemoteWorld::EndOfRoundData::Player row;
 			row.id = p.id;
@@ -3260,6 +3793,11 @@ void HostedGame::tick()
 	}
 	if (m_logic->ended() && !m_roundEndSent) {
 		m_roundEndSent = true;
+		// The game status's end of game (event 0/1 with 2) stops the
+		// AutoRecorder (0x00585ac0 → 0x00585920), before the end-of-round
+		// delay; the round's restart (0x004ba0c0) and changeLevel stop it
+		// too, the map change (0x004bc850) doesn't.
+		stopAutoDemo();
 		sendToPlaying(eventOf(net::kEvEndOfRound,
 			{0, static_cast<uint32_t>(m_logic->winner()), static_cast<uint32_t>(m_logic->victoryType())}));
 	}

@@ -23,7 +23,8 @@ struct OvergrowthSettings {
 	std::string path;
 	// Overgrowth.viewDistance (+0x24, 500; both rows 0x100873ba / 0x10087478
 	// call slot 3 0x1008f510, which also sizes the cells: viewDistance /
-	// (10 / 2 - 1), then fitted to the terrain, 0x10120420).
+	// (10 / 2 - 1), 0x10120420, then W / floor(W / size) for the terrain's
+	// smaller side W).
 	float viewDistance = 500;
 	float viewDistanceScale = 1;    // +0x28 (0x1008763d)
 	float closeDistPercentage = 0.15f; // +0xc8

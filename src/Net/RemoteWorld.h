@@ -128,16 +128,24 @@ struct RemoteObject {
 	// while standing), empty until a state with them came.
 	std::vector<int> childDamage;
 	std::vector<bool> repairCells;
+	std::vector<int> repairCellEighths; // the same cells' eighths (GameWorld::setRemoteRepairCells)
 	// Soldiers: the selected weapon (mask 0x2000) and, in a vehicle, the seat.
 	int weapon = -1;
 	uint32_t updates = 0;     // ghost updates received
 	uint32_t lastTick = 0;    // the server tick of the last one
+	// The server tick of the last one with a position: an update carries
+	// only what changed since the client last had it (the server's dirty
+	// masks, 0x005800e0), so the others leave the position as it was.
+	uint32_t positionTick = 0;
 	std::vector<uint8_t> state; // the last update's networkable state (undecoded)
 	size_t stateBits = 0;
 };
 
 struct RemotePlayer {
 	int id = -1;
+	// The player manager's list order on the client (0x004b8b60 appends
+	// each player CreatePlayer makes): the scoreboard's ties keep it.
+	uint64_t created = 0;
 	std::string name;
 	int team = 0;
 	bool local = false;
@@ -324,6 +332,23 @@ public:
 	static std::string encodeEndOfRoundData(const EndOfRoundData& data);
 	static bool decodeEndOfRoundData(const std::string& block, EndOfRoundData& out);
 
+	// The demo just recorded (data block 9; 0x004ad7a0 sends it once the
+	// AutoRecorder's hook is done, 0x005852b0): sv.demoDownloadURL with
+	// "{file}" replaced by the demo's file name (or the name appended),
+	// and the map. Each string an 8-bit length (at most 255 bytes kept
+	// here) and its bytes (0x00583ec0 writes, 0x00583d80 reads). The
+	// client's handler (0x004b5eb0 case 9) hands the URL and the map to
+	// its interface at +0xa8 (vtable 0x00928fa8), slot 0x6c 0x004b4710:
+	// a demo bookmark (MenuBindings::addDemoBookmark). demoNotice keeps the
+	// last; takeDemoNotice gives each once.
+	struct DemoNotice {
+		std::string url, map;
+	};
+	bool demoNotice(DemoNotice& out) const;
+	bool takeDemoNotice(DemoNotice& out);
+	static std::string encodeDemoNotice(const DemoNotice& notice);
+	static bool decodeDemoNotice(const std::string& block, DemoNotice& out);
+
 	// Transfers (DataBlock events; the client's handler is 0x004b5eb0). Each
 	// is a bit stream, strings a u16 length and the bytes (0x005155b0).
 	const std::map<uint32_t, std::string>& dataBlocks() const { return m_dataBlocks; }
@@ -430,6 +455,10 @@ public:
 	}
 	uint32_t radarReports() const { return m_radarReports; }
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
+	// The server's rcon answers (data block 7, PlayerAuth.h
+	// kRconFeedbackBlock), each as the console prints it: the text and a
+	// newline (0x004b5eb0 case 7, the suffix at 0x00918bf4).
+	std::vector<std::string> takeConsoleLines() { return std::exchange(m_consoleLines, {}); }
 	std::vector<GameEvent> takeUnhandled() { return std::exchange(m_unhandled, {}); }
 	// The commanders' strike assets the server fired (kEvArtillery kind 2,
 	// the client's handler 0x0050eeb0): the client fires the asset's
@@ -494,6 +523,7 @@ private:
 	std::map<uint16_t, RemoteObject> m_hidden;
 	std::map<uint16_t, StickyProjectileInfo> m_stuck; // a projectile's ghost -> its StickyProjectile event
 	std::map<int, RemotePlayer> m_players;
+	uint64_t m_playersMade = 0; // RemotePlayer::created
 	int m_localPlayer = -1;
 	bool m_hasControl = false;
 	ControlObjectRecord m_control;
@@ -528,6 +558,8 @@ private:
 	std::map<uint16_t, uint32_t> m_radarVehicles; // a vehicle's ghost -> the same
 	uint32_t m_radarReports = 0;
 	std::vector<PostRemoteInfo> m_messages;
+	std::vector<std::string> m_consoleLines;
+	bool m_newDemoNotice = false;
 	std::vector<GameEvent> m_unhandled;
 	std::vector<KickInfo> m_kicks;
 	std::vector<StrikeFireInfo> m_strikeFires;

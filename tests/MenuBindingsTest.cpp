@@ -4,9 +4,11 @@
 // joining a server.
 #include "Console/Console.h"
 #include "IO/File/ZipArchive.h"
+#include "IO/Localization/LocaleFormat.h"
 #include "IO/Localization/Localization.h"
 #include "Input/ControlMap.h"
 #include "Main/EndOfRoundBindings.h"
+#include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/MenuGameState.h"
 #include "Main/SettingsObjects.h"
@@ -19,6 +21,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -700,6 +703,147 @@ TEST(MenuBindings_AudioRadios)
 	CHECK(get("getSelectedProvider") == "hardware" && get("getSelectedSoundQuality") == "UltraHigh");
 }
 
+// A slider's value is its m_percent, a Number object (the Slider class's
+// update makes one): the setters take it as the number it holds, so the
+// audio page's volumes reach the profile's Audio.con when applied.
+TEST(MenuBindings_SliderNumberObjects)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::SettingsObjects objects;
+	bindings.setSettingsObjects(&objects);
+	avm1::Interpreter vm;
+	const auto number = [&](double v) {
+		return avm1::Value(vm.construct(vm.getMember(avm1::Value(vm.global()), "Number"), {avm1::Value(v)}));
+	};
+	CHECK(number(0.25).isObject());
+	call(vm, natives, "dice.bf2.AudioSettings", "setEffectsVolume", {number(0.25)});
+	call(vm, natives, "dice.bf2.AudioSettings", "setMusicVolume", {number(0.5)});
+	call(vm, natives, "dice.bf2.AudioSettings", "apply");
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.AudioSettings", "getEffectsVolume")) == 0.25);
+	CHECK(objects.get("AudioSettings.EffectsVolume") == "0.25");
+	CHECK(objects.get("AudioSettings.MusicVolume") == "0.5");
+	CHECK(objects.audioScript().find("AudioSettings.setEffectsVolume 0.25") != std::string::npos);
+	CHECK(bindings.setting("AudioSettings.MusicVolume", 1) == 0.5);
+}
+
+// The audio page's RESET TO DEFAULT (0x10010a60) applies what it reset
+// as its apply does (0x10010bd0: apply(1), the profile saved), so the
+// defaults reach Audio.con; the general and video pages' resets
+// (0x100549b0, 0x1005b9d0) only reset the page.
+TEST(MenuBindings_AudioResetApplies)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::SettingsObjects objects;
+	bindings.setSettingsObjects(&objects);
+	avm1::Interpreter vm;
+	call(vm, natives, "dice.bf2.AudioSettings", "setEffectsVolume", {avm1::Value(0.25)});
+	call(vm, natives, "dice.bf2.AudioSettings", "apply");
+	CHECK(objects.get("AudioSettings.EffectsVolume") == "0.25");
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.AudioSettings", "reset")));
+	CHECK(vm.toNumber(call(vm, natives, "dice.bf2.AudioSettings", "getEffectsVolume")) == 1);
+	CHECK(objects.get("AudioSettings.EffectsVolume") == "1");
+	CHECK(bindings.setting("AudioSettings.EffectsVolume", 0) == 1);
+	// The video page's reset leaves the applied values until its apply.
+	call(vm, natives, "dice.bf2.VideoSettings", "setViewDistanceScale", {avm1::Value(0.5)});
+	call(vm, natives, "dice.bf2.VideoSettings", "apply");
+	call(vm, natives, "dice.bf2.VideoSettings", "reset");
+	CHECK(objects.get("VideoSettings.ViewDistanceScale") == "0.5");
+}
+
+// The controls page's mouse settings are the active map's (0x00497fa0 ..
+// 0x00498080): they reach the map's ControlMap lines in Controls.con.
+TEST(MenuBindings_MouseSettingsOnTheMap)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	input::ControlMaps controls;
+	controls.create(input::ControlMaps::kInfantry);
+	controls.create(input::ControlMaps::kAir);
+	bindings.setControls(&controls);
+	avm1::Interpreter vm;
+	const auto cs = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.ControlSettings", member, std::move(args));
+	};
+	cs("setActiveControlMap", {avm1::Value("0")});
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 1);
+	cs("setMouseSensitivity", {avm1::Value(2.5)});
+	cs("setMouseYAWFactor", {avm1::Value(2)});
+	cs("setInvertMouse", {avm1::Value(true)});
+	cs("setMouseSensitivity", {avm1::Value(25)}); // 0..10 (0x006802a0)
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 10);
+	cs("setMouseSensitivity", {avm1::Value(2.5)});
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 2.5 && avm1::toBoolean(cs("getInvertMouse")));
+	const input::ControlMaps::MapSettings foot = controls.settingsOf(input::ControlMaps::kInfantry);
+	CHECK(foot.mouseSensitivity == 2.5f && foot.yawFactor == 2 && foot.pitchFactor == 1 && foot.invertMouse);
+	// The aircraft's map keeps its own.
+	cs("setActiveControlMap", {avm1::Value("2")});
+	CHECK(vm.toNumber(cs("getMouseSensitivity")) == 1 && !avm1::toBoolean(cs("getInvertMouse")));
+	const std::string script = controls.script();
+	CHECK(script.find("ControlMap.mouseSensitivity 2.5") != std::string::npos);
+	CHECK(script.find("ControlMap.invertMouse 1") != std::string::npos);
+	CHECK(script.find("ControlMap.setYawFactor 2") != std::string::npos);
+	// The page's RESET TO DEFAULT (ControlSettings.reset, 0x10016490) is
+	// resetDefault's code: the game's controls again.
+	menu::SettingsObjects objects;
+	menu::LocalProfileManager profiles(objects);
+	bindings.setLocalProfiles(&profiles);
+	int resets = 0;
+	profiles.onResetControls = [&] { ++resets; };
+	cs("reset");
+	CHECK(resets == 1);
+	cs("resetDefault");
+	CHECK(resets == 2);
+}
+
+// The video page's presets (0x1005ba10 -> 0x00497200 -> RendDX9
+// 0x1000f780): the scheme sets the qualities, the display mode, the
+// antialiasing, the view distance and bloom; custom (3) leaves them.
+TEST(MenuBindings_VideoPresets)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	bindings.setDisplayModes({"800x600@60Hz", "1024x768@60Hz", "1024x768@75Hz", "1280x720@60Hz"});
+	bindings.setAntialiasingModes({"Off", "2Samples", "4Samples"});
+	avm1::Interpreter vm;
+	const auto video = [&](const char* member, std::vector<avm1::Value> args = {}) {
+		return call(vm, natives, "dice.bf2.VideoSettings", member, std::move(args));
+	};
+	const auto qualities = [&] {
+		std::string q;
+		for (const char* name : {"getTerrainQuality", "getGeometryQuality", "getLightingQuality", "getDynamicLightingQuality",
+				 "getDynamicShadowsQuality", "getEffectsQuality", "getTextureQuality", "getTextureFilteringQuality"}) {
+			q += std::to_string(static_cast<int>(vm.toNumber(video(name))));
+		}
+		return q;
+	};
+	video("setVideoOptionScheme", {avm1::Value(0)});
+	CHECK(qualities() == "11100121");
+	CHECK(vm.toString(video("getResolution")) == "800x600@60Hz");
+	CHECK(vm.toString(video("getAntialiasing")) == "Off");
+	CHECK(std::fabs(vm.toNumber(video("getViewDistanceScale")) - 0.75) < 1e-6);
+	CHECK(!avm1::toBoolean(video("getBloomEnabled")));
+	CHECK(vm.toNumber(video("getVideoOptionScheme")) == 0);
+	video("setVideoOptionScheme", {avm1::Value(1)});
+	CHECK(qualities() == "22222232");
+	CHECK(avm1::toBoolean(video("getBloomEnabled")));
+	video("setVideoOptionScheme", {avm1::Value(2)});
+	CHECK(qualities() == "33333333");
+	CHECK(vm.toString(video("getResolution")) == "1024x768@60Hz");
+	CHECK(vm.toString(video("getAntialiasing")) == "2Samples");
+	CHECK(vm.toNumber(video("getViewDistanceScale")) == 1);
+	// Custom: the page's own values stay.
+	video("setTerrainQuality", {avm1::Value(1)});
+	video("setVideoOptionScheme", {avm1::Value(3)});
+	CHECK(qualities() == "13333333");
+	CHECK(vm.toNumber(video("getVideoOptionScheme")) == 3);
+}
+
 // SwiffHost's and MenuTeamManager's console objects (credits.con,
 // gameModes.con, menuTeams.con) and the credits roll's slots: 40 lines 20 px
 // apart from the stage's bottom, moving up at the speed (twips a second,
@@ -794,6 +938,13 @@ TEST(MenuBindings_Favourites)
 	CHECK(avm1::toBoolean(mp("removeFavouriteServer", {avm1::Value("10.0.0.3 17569 29900")})));
 	CHECK(bindings.favouriteServers().empty() && natives.listRows("serverListQuick").size() == 15);
 	CHECK(!avm1::toBoolean(mp("isServerOnline", {avm1::Value("10.0.0.3 17569 29900")})));
+	// The in-game HUD's removal (slot 0x190 for the joined server): the
+	// lists shown again.
+	CHECK(avm1::toBoolean(mp("addFavourite", {avm1::Value("Mine"), avm1::Value("192.168.1.20"), avm1::Value(16567)})));
+	CHECK(natives.listRows("serverListQuick").size() == 16);
+	CHECK(!bindings.removeFavouriteServer("192.168.1.20", 16568));
+	CHECK(bindings.removeFavouriteServer("192.168.1.20", 16567));
+	CHECK(bindings.favouriteServers().empty() && natives.listRows("serverListQuick").size() == 15);
 
 	// The history from the profile's file: made a favourite, removed.
 	objects.setList("GeneralSettings.ServerHistory", {"\"10.1.1.1\" 16567 \"Old one\" 29901"});
@@ -894,6 +1045,20 @@ TEST(MenuBindings_OfflineNatives)
 	call(vm, natives, "dice.bf2.GeneralSettings", "resetMessage");
 	CHECK(bindings.setting("GeneralSettings.ChatMessagesFilter", 0) == 1);
 	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.VideoSettings", "needsReboot")));
+	// The antialiasing modes are the renderer's (RendDX9's 0x1000fb60 lists
+	// only the multisample types the device takes), not a fixed four.
+	const auto antialiasing = [&] {
+		std::vector<std::string> values;
+		const avm1::Value list = call(vm, natives, "dice.bf2.VideoSettings", "getAvailableAntialiasing");
+		const int n = static_cast<int>(vm.toNumber(vm.getMember(list, "length")));
+		for (int i = 0; i < n; ++i) {
+			values.push_back(vm.toString(vm.getMember(vm.getMember(list, std::to_string(i)), "value")));
+		}
+		return values;
+	};
+	CHECK((antialiasing() == std::vector<std::string> {"Off"}));
+	bindings.setAntialiasingModes(listAntialiasingModes({4, 2}));
+	CHECK((antialiasing() == std::vector<std::string> {"Off", "2Samples", "4Samples"}));
 }
 
 // The select boxes SwiffPlayer.dll fills itself (0x100653f0): the bot
@@ -919,6 +1084,27 @@ TEST(MenuBindings_SelectBoxes)
 	CHECK(vm.toNumber(vm.getMember(skills, "m_selectedIndex")) == 1);
 	const avm1::Value hard = vm.callMember(skills, "selectRow", {avm1::Value(2)});
 	CHECK(vm.toString(vm.getMember(hard, "rowValue")) == "HEADER_hard");
+
+	// The modes in the level scan's order (0x004643d0 / 0x00462750): the
+	// levels as NTFS lists them (without regard to case), each .desc's
+	// modes in the file's order; without a .desc its server.zip's.
+	{
+		NativeRegistry scanNatives;
+		menu::MenuBindings scan(scanNatives, fake.services());
+		scan.readFile = [](const std::string& path, std::string& text) {
+			if (path == "Levels/Minsk/Info/Minsk.desc") {
+				text = "<map><modes><mode type=\"gpm_ti\"></mode><mode type=\"GPM_CQ\"></mode></modes></map>";
+				return true;
+			}
+			if (path == "Levels/Belgrade/Info/Belgrade.desc") {
+				text = "<map><modes><mode type=\"gpm_coop\"></mode><mode type=\"gpm_cq\"></mode></modes></map>";
+				return true;
+			}
+			return false;
+		};
+		scan.setMaps({{"Minsk", "gpm_cq", 32}, {"Minsk", "gpm_ti", 32}, {"aegis", "gpm_nv", 16}, {"Belgrade", "gpm_cq", 16}});
+		CHECK((scan.allGameModes() == std::vector<std::string> {"gpm_nv", "gpm_coop", "gpm_cq", "gpm_ti"}));
+	}
 
 	// gpm_sp and sp1 are not offered (0x10069160).
 	const avm1::Value modes = box("gameModes 4 1");
@@ -1235,16 +1421,25 @@ TEST(MenuBindings_CommandLineDemosAndTexts)
 	// Bookmarks: LocalProfile.addDemoBookmark's entries.
 	menu::SettingsObjects objects;
 	bindings.setSettingsObjects(&objects);
-	objects.setList("LocalProfile.DemoBookmark", {"\"Server one\" \"Minsk\" \"http://x/1\" 0", "\"Two\" \"Belgrade\" \"u\" 0"});
+	objects.setList("LocalProfile.DemoBookmark", {"\"Server one\" \"Minsk\" \"http://x/1\" 0", "\"Two\" \"Belgrade\" \"u\" 1200000000"});
 	CHECK(vm.toNumber(mp("getNumDemoBookmarks")) == 2);
 	CHECK(avm1::toBoolean(mp("deleteDemoBookmark", {avm1::Value(0)})));
 	CHECK(!avm1::toBoolean(mp("deleteDemoBookmark", {avm1::Value(5)})));
 	CHECK(objects.list("LocalProfile.DemoBookmark").size() == 1);
 	const auto bookmarkRows = natives.listRows("demobm");
 	CHECK(bookmarkRows.size() == 1 && bookmarkRows[0][1] == "Two" && bookmarkRows[0][2] == "Belgrade");
+	// Its date alone (0x10064510 -> 0x10007b70), in the game's language.
+	CHECK(bookmarkRows.size() == 1 && bookmarkRows[0][0] == io::formatDate(std::time_t(1200000000), 0x409)
+		&& bookmarkRows[0][0].find(':') == std::string::npos && !bookmarkRows[0][0].empty());
 	CHECK(!avm1::toBoolean(mp("getHasNewBookmark")));
 	mp("setHasNewBookmark", {avm1::Value(true)});
 	CHECK(avm1::toBoolean(mp("getHasNewBookmark")));
+	// A joined server's demo notice (0x004b4710): the bookmark added, the flag set.
+	mp("setHasNewBookmark", {avm1::Value(false)});
+	bindings.addDemoBookmark("Three", "Minsk", "http://x/3", 1200000000);
+	CHECK(vm.toNumber(mp("getNumDemoBookmarks")) == 2 && avm1::toBoolean(mp("getHasNewBookmark")));
+	CHECK(objects.list("LocalProfile.DemoBookmark").back() == "\"Three\" \"Minsk\" \"http://x/3\" 1200000000");
+	CHECK(natives.listRows("demobm").size() == 2 && natives.listRows("demobm")[1][1] == "Three");
 
 	// The map texts: a level's .desc (its name, briefing locid, modes).
 	bindings.setMaps({{"Minsk", "gpm_ti", 32}, {"Minsk", "gpm_cq", 64}});
@@ -1495,4 +1690,50 @@ TEST(MenuBindings_SetPlayedVOHelpPersists)
 	const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 	CHECK(text.find("GeneralSettings.setPlayedVOHelp \"HUD_HELP_Menu\"") != std::string::npos);
 	std::filesystem::remove_all(dir);
+}
+
+// SwiffPlayer's language -> LCID table (0x10007730, RendDX9 0x1017af30) and
+// the locale defaults GetNumberFormatA / GetDateFormatA / GetTimeFormatA
+// give the menus (0x10007c60, 0x10007b70, 0x10007bf0, 0x10007aa0).
+TEST(LocaleFormat_LanguagesAndFormats)
+{
+	CHECK(io::languageLcid("English") == 0x409);
+	CHECK(io::languageLcid("German") == 0x407);
+	CHECK(io::languageLcid("Thai") == 0x41e);
+	CHECK(io::languageLcid("Chinese") == 0xc04);
+	// The game's own Chinese names aren't in the table: LCID 0, the user's
+	// default locale (English's here).
+	CHECK(io::languageLcid("Chinese_Simplified") == 0);
+	CHECK(io::languageLcid("english") == 0);
+	// Numbers: the separators, grouping by three, two decimals rounded.
+	CHECK(io::formatNumber("1234.50", 0x409) == "1,234.50");
+	CHECK(io::formatNumber("1234.50", 0x407) == "1.234,50");
+	CHECK(io::formatNumber("1234567.5", 0x40c) == "1\xc2\xa0" "234\xc2\xa0" "567,50");
+	CHECK(io::formatNumber("0.5", 0x409) == "0.50");
+	CHECK(io::formatNumber(".125", 0x409) == "0.13");
+	CHECK(io::formatNumber("9.999", 0x409) == "10.00");
+	CHECK(io::formatNumber("-3.14159", 0x407) == "-3,14");
+	CHECK(io::formatNumber("12", 0) == "12.00");
+	CHECK(io::formatNumber("abc", 0x409) == "abc"); // not a number: unchanged
+	// Dates and times on 5 March 2007, 14:07:09.
+	std::tm t {};
+	t.tm_year = 107;
+	t.tm_mon = 2;
+	t.tm_mday = 5;
+	t.tm_hour = 14;
+	t.tm_min = 7;
+	t.tm_sec = 9;
+	CHECK(io::formatDate(t, 0x409) == "3/5/2007");
+	CHECK(io::formatDate(t, 0x407) == "05.03.2007");
+	CHECK(io::formatDate(t, 0x41d) == "2007-03-05");
+	CHECK(io::formatDate(t, 0x413) == "5-3-2007");
+	CHECK(io::formatDate(t, 0x41e) == "5/3/2550"); // the Buddhist era
+	CHECK(io::formatTime(t, 0x409, true) == "2:07:09 PM");
+	CHECK(io::formatTime(t, 0x409, false) == "2:07 PM");
+	CHECK(io::formatTime(t, 0x407, false) == "14:07");
+	CHECK(io::formatTime(t, 0x410, true) == "14.07.09");
+	CHECK(io::formatTime(t, 0x412, false) == "\xec\x98\xa4\xed\x9b\x84 2:07");
+	CHECK(io::formatDate(std::time_t(0), 0x409).empty() && io::formatDateTime(std::time_t(0), 0x409).empty());
+	const std::time_t when = 1200000000;
+	CHECK(io::formatDateTime(when, 0x407) == io::formatDate(when, 0x407) + " " + io::formatTime(when, 0x407, true));
 }

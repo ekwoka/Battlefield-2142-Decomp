@@ -1,7 +1,7 @@
 # Coverage audit scripts
 
 The measurements behind docs/coverage.md, coverage-2.md, uncited.md,
-coverage-3.md, coverage-4.md, coverage-5.md, coverage-6.md, coverage-7.md and coverage-8.md, as scripts. Earlier audits ran
+coverage-3.md, coverage-4.md, coverage-5.md, coverage-6.md, coverage-7.md, coverage-8.md, coverage-9.md and coverage-10.md, as scripts. Earlier audits ran
 throw-away copies of these from a temp folder; these were rebuilt from the
 audits' method notes and checked against coverage-3's figures (below).
 
@@ -79,7 +79,7 @@ Checked on a worktree build of 5480574, the commit coverage-3 measured:
   `MenuBindings_NativeCoverage` keeps that table equal to what the rewrite binds.
 - **Hand-checked functions.** `swf.HAND` labels single functions, each with its reason:
   - gameswf parts the rewrite replaces by design → (c);
-  - online pages → (o);
+  - online pages → (o), and the online list classes that the shared list base's vtable-sibling vote had made (c): bfhqComparePlayers, the buddy list and the BFHQ stats list's category row makers (uncited.md, "Citing present code");
   - gameswf parts the shipped movies never reach → (u): sound tags, DefineText, DefineFontInfo, JPEG2, ImportAssets, XML. The movies' tag and action inventory behind this is in uncited.md, "SwiffPlayer.dll: gameswf and the classifier".
 - **(o) and (u) are left out of the needed code**, like (a) and (b), and are reported on their own line. They spread to callees whose callers are all (o) or (u), and to nothing else.
 - **Strings.** Only identifier-like strings count. The rewrite's player is a new implementation of the format: it has gameswf's method and property names but not its log text. With every string counted, the loaders and built-ins src/UI plainly has came out (d) (coverage-8 §1c). src/UI/Avm1 is in the corpus for this module, since it holds the built-ins.

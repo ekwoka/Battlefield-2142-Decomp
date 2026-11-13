@@ -27,6 +27,7 @@
 #include "Physics/MaterialManager.h"
 #include "Main/HudWorld.h"
 #include "Main/PlayerCamera.h"
+#include "Main/RoundVisuals.h"
 #include "Net/RemoteInput.h"
 #include "Render/PostProduction.h"
 #include "SeatAim.h"
@@ -136,7 +137,10 @@ struct Garage {
 	}
 
 	uint32_t groundMaterial = 0; // the terrain's material under every point
-	std::optional<physics::Ground> terrain; // instead of flat ground at `ground`
+	float groundHeight = 0;      // start's ground, which a test may move after
+	// A shape over it (x, z -> height above groundHeight), when a test sets one.
+	std::function<float(float, float)> groundShape;
+	std::optional<physics::Ground> terrain; // instead of that ground
 	// A pit 100 m deep from z = 10 on: a parked gunship's TV missile leaves
 	// its camera (CameraId 11, under the nose, 10 degrees down:
 	// fireInCameraDof) a metre over the ground.
@@ -164,12 +168,13 @@ struct Garage {
 		made->setTeam(2);
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		const uint32_t material = groundMaterial;
+		groundHeight = ground;
 		world->enablePhysics(files, collisionTemplates,
 			terrain ? *terrain
-					: physics::Ground {[ground](float, float) { return ground; },
-						  [ground](float, float, physics::Vec3& normal) {
+					: physics::Ground {[this](float x, float z) { return groundHeight + (groundShape ? groundShape(x, z) : 0.0f); },
+						  [this](float x, float z, physics::Vec3& normal) {
 							  normal = {0, 1, 0};
-							  return ground;
+							  return groundHeight + (groundShape ? groundShape(x, z) : 0.0f);
 						  },
 						  [material](float, float) { return material; }},
 			&materials);
@@ -1420,6 +1425,16 @@ TEST(Vehicles_SpawnIntoTheApc)
 	}
 	CHECK(g.world->spawnSoldier(bot));
 	CHECK(g.world->playerInfo(bot, info) && info.vehicle == apc && info.seat > 0);
+	// setAIEnterOnSpawn alone seats only bots (0x005b18e0: the template's
+	// +0x8a for an AI): a human spawns there standing.
+	sp->settings()["setEnterOnSpawn"] = "0";
+	sp->settings()["setAIEnterOnSpawn"] = "1";
+	const int walker = g.world->addPlayer("Walker", 2, false);
+	CHECK(g.world->spawnSoldier(walker));
+	CHECK(g.world->playerInfo(walker, info) && info.vehicle == 0 && info.alive);
+	const int rider = g.world->addPlayer("Rider", 2, true);
+	CHECK(g.world->spawnSoldier(rider));
+	CHECK(g.world->playerInfo(rider, info) && info.vehicle == apc);
 }
 
 // The gunship's TV-guided missile (as_ag's GuidedMissileWeapon: ToggleCameraComp
@@ -1488,6 +1503,9 @@ TEST(Vehicles_GunshipMissileCamera)
 	render::PostEffects effects;
 	host::roundCameraEffects(*g.world, me, effects);
 	CHECK(!effects.tv);
+	// High above the ground, as a gunship flies: the missile, launched at
+	// rest, dives under its engine (acceleration 35) where the camera looks.
+	g.groundHeight = -500;
 	input = {};
 	input.fire = true;
 	for (int i = 0; i < 4 && !g.world->projectileCamera(me, camera); ++i) {
@@ -1497,6 +1515,23 @@ TEST(Vehicles_GunshipMissileCamera)
 	CHECK(g.world->projectileCamera(me, camera) && camera.takeOverInput);
 	host::roundCameraEffects(*g.world, me, effects);
 	CHECK(effects.tv);
+	// Launched at rest along the active camera's facing (fireInCameraDof,
+	// 0x005f1a20: zoom.startCameraId 11, as_ag_TAD_GuidedMissile_Camera,
+	// set 10 degrees down under the seat), its nose that way.
+	{
+		const world::Object* ship = g.objects.find(v);
+		const physics::Mat3 hull =
+			physics::Mat3::fromYawPitchRoll({ship->rotation().x, ship->rotation().y, ship->rotation().z});
+		physics::Vec3 nose;
+		for (const auto& p : g.world->projectiles()) {
+			if (p.player == me) {
+				nose = game::noseOf(p);
+			}
+		}
+		const physics::Vec3 local = hull.untransform(nose);
+		std::fprintf(stderr, "  the missile's nose in the gunship's frame (%.3f, %.3f, %.3f)\n", local.x, local.y, local.z);
+		CHECK(std::fabs(local.y + std::sin(10 / 57.29578f)) < 0.05f && local.z > 0.95f);
+	}
 	const float startYaw = camera.yaw;
 	// The mouse to the right for a second: the camera turns at most 18
 	// degrees off the round, and the round comes round after it.
@@ -1754,9 +1789,9 @@ TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 			bool found = false;
 			for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
 				found = true;
-				std::fprintf(stderr, "  %s %s TV launch %.3f/%.3f/%.3f\n", mod, aircraft, p.cameraMissileForward.x,
-					p.cameraMissileForward.y, p.cameraMissileForward.z);
-				CHECK(std::fabs(p.cameraMissileForward.y + 0.1736f) < 0.03f && std::fabs(p.cameraMissileForward.x) < 0.03f);
+				std::fprintf(stderr, "  %s %s TV launch %.3f/%.3f/%.3f\n", mod, aircraft, p.heading.x,
+					p.heading.y, p.heading.z);
+				CHECK(std::fabs(p.heading.y + 0.1736f) < 0.03f && std::fabs(p.heading.x) < 0.03f);
 			}
 			CHECK(found);
 		}
@@ -2119,7 +2154,9 @@ TEST(Vehicles_GroundDriverAimsAndFires)
 		CHECK(!favSeats.empty() && favSeats[0].yawBundle.empty() && favSeats[0].pitchBundle.empty());
 		CHECK(!g.world->seatTurnsGun(fav, 0));
 	}
-	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	// Away from the hover tank and the FAV left standing at its place (they
+	// would shove it: their parts meet its hull, MeshCollision.cpp).
+	const uint32_t tank = g.start("eu_tank", {40, 2, 6});
 	CHECK(g.enter(tank));
 	CHECK(g.world->seatTurnsGun(tank, 0));
 	g.run(2);
@@ -2346,11 +2383,12 @@ TEST(Vehicles_DeployablesPoseTheirParts)
 	};
 	deploy(5);
 	const uint32_t shield = placed("portable_shield");
+	// The arms as it is put down (posed with each update of its system).
+	anim::Matrix early {}, late {};
+	CHECK(g.world->partBone(shield, "portable_shield_arm1_anim", early));
 	deploy(4);
 	const uint32_t hub = placed("unl_hub_ammo_stationary_model");
 	CHECK(shield != 0 && hub != 0);
-	anim::Matrix early {}, late {};
-	CHECK(g.world->partBone(shield, "portable_shield_arm1_anim", early));
 	g.run(4);
 	CHECK(g.world->partBone(shield, "portable_shield_arm1_anim", late));
 	float moved = 0;
@@ -2363,6 +2401,90 @@ TEST(Vehicles_DeployablesPoseTheirParts)
 	CHECK(std::find(playing.begin(), playing.end(), "stand") != playing.end());
 	anim::Matrix lid {};
 	CHECK(hub == 0 || g.world->partBone(hub, "UNL_HUB_Ammo_lid1", lid));
+}
+
+// The deployables as the rounds meet them: each is a mobile mesh body (its
+// root's instance and its collisionPart children's, posed by its bones,
+// 0x0063ccc0 / 0x0063d470). The portable shield's ThrownFireComp turns it
+// by fire.projectileStartRotation 90/0/0 in its own frame (0x005e5720), so
+// its panel (geometry 0, in the root's y-z plane, about 0.94 m across)
+// faces the deployer: rounds from in front, 0.3 m off its middle, meet it
+// (set down along the view they passed its 4 cm edge). The sentry gun, its
+// shape all parts, takes rounds and is destroyed (120 hit points).
+TEST(Vehicles_DeployablesStopRounds)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* gadget : {"unl_port_shield", "Unl_Deployer_Sentrygun"}) {
+		Garage g(gameDir());
+		world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+		if (!kit || !g.templates.find(gadget)) {
+			return;
+		}
+		const bool shield = std::string(gadget) == "unl_port_shield";
+		kit->children() = {{"eu_ar_rifle", {}, {}}, {gadget, {}, {}}};
+		Animations a(g);
+		g.start("eu_fav", {30, 2, 30});
+		a.attach(g);
+		CHECK(g.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		CHECK(g.world->playerInfo(g.world->localPlayer(), me));
+		g.world->setSoldierPosition(me.soldier, {0, 0, 0});
+		g.run(1);
+		game::SoldierInput take;
+		take.selectItem = 5;
+		g.drive(take, 1.5f);
+		game::SoldierInput fire;
+		fire.fire = true;
+		g.drive(fire, 0.1f);
+		g.drive({}, 2.5f); // unfolded
+		uint32_t placed = 0;
+		for (const auto& object : g.objects.objects()) {
+			const world::ObjectTemplate* t = object->objectTemplate();
+			if (t && t->name() == (shield ? "portable_shield" : "eu_sentrygun")) {
+				placed = object->id();
+			}
+		}
+		CHECK(placed != 0);
+		if (!placed) {
+			continue;
+		}
+		const physics::Vec3 at = g.position(placed);
+		const float yaw = g.yaw(placed);
+		std::fprintf(stderr, "  %s at %.2f %.2f %.2f, yaw %.1f, %.0f hit points\n", gadget, at.x, at.y, at.z, yaw,
+			g.world->hitPoints(placed));
+		if (shield) {
+			// The deployer looked along +z (yaw 0): the shield turned by 90.
+			CHECK(std::fabs(std::remainder(yaw - 90.0f, 360.0f)) < 1.0f);
+		}
+		// Six metres back on the deployer's side (the shield's 0.3 m off its
+		// middle), still looking along +z, the rifle aimed at its middle.
+		g.world->setSoldierPosition(me.soldier, {at.x + (shield ? 0.3f : 0.0f), 0, at.z - 6});
+		take.selectItem = 3;
+		g.drive(take, 1.5f);
+		const float before = g.world->hitPoints(placed);
+		game::SoldierInput shoot;
+		shoot.aimPitch = shield ? -12 : -10;
+		g.drive(shoot, 0.5f);
+		bool destroyed = false;
+		for (int burst = 0; burst < 40 && !destroyed; ++burst) {
+			shoot.fire = true;
+			g.drive(shoot, 1 / 30.0f);
+			shoot.fire = false;
+			g.drive(shoot, 0.4f);
+			destroyed = !g.objects.find(placed) || g.world->hitPoints(placed) <= 0;
+			if (shield && g.world->hitPoints(placed) < before) {
+				break;
+			}
+		}
+		const float after = g.objects.find(placed) ? g.world->hitPoints(placed) : 0;
+		std::fprintf(stderr, "  %s: %.0f -> %.0f hit points%s\n", gadget, before, after, destroyed ? ", destroyed" : "");
+		CHECK(after < before);
+		if (!shield) {
+			CHECK(destroyed);
+		}
+	}
 }
 
 // The player's may-use test (0x005921e0) and a weapon key's item selection
@@ -2843,6 +2965,60 @@ TEST(Vehicles_SoldierParachuteOpensFallsAndLands)
 	CHECK(me.alive && me.vehicle == 0);
 	CHECK(g.position(me.soldier).y < 3);
 }
+// The canopy (animatedparachute, an AnimatedBundle: 0x005c06a0 / 0x005c00e0)
+// runs parachute/AnimationSystem.inc on the parachute's messages
+// (0x005cfbb0, every 1/3 s): "startup" deploys it once, "root" loops the
+// idle, and message 4 collapses it: the rider's death sets it at once and
+// starts the landing timer (0x005cfe40), so the parachute is gone 0.15 s
+// later (0x005cff20, then the event 0x21).
+TEST(Vehicles_ParachuteCanopyDeploysIdlesAndCollapses)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.start("supply_crate", {50, 0.5f, 50}, 0.5f);
+	g.animate();
+	CHECK(g.world->spawnPlayer(2));
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	g.world->setSoldierPosition(me.soldier, {0, 60, 0});
+	game::SoldierInput nine;
+	nine.selectItem = 9;
+	g.drive({}, 1.5f);
+	g.drive(nine, 1 / 30.0f);
+	const auto open = g.world->parachutes();
+	CHECK(open.size() == 1);
+	if (open.size() != 1) {
+		return;
+	}
+	const uint32_t chute = open[0].object;
+	const auto playing = [&](const char* bundle) {
+		const std::vector<std::string> names = g.world->playingAnimations(chute);
+		return std::find(names.begin(), names.end(), bundle) != names.end();
+	};
+	g.world->tick(1 / 30.0f);
+	CHECK(playing("parachute_deploy"));
+	g.run(2);
+	CHECK(playing("parachute_idle"));
+	CHECK(!playing("parachute_collapse"));
+	CHECK(g.world->parachutes()[0].state == 1);
+	g.world->setHitPoints(me.soldier, 0);
+	bool collapsed = false;
+	int ticks = 0;
+	for (; ticks < 30 && !g.world->parachutes().empty(); ++ticks) {
+		g.world->tick(1 / 30.0f);
+		collapsed = collapsed || playing("parachute_collapse");
+	}
+	std::fprintf(stderr, "  the canopy collapsed: %d, gone after %d ticks\n", collapsed, ticks);
+	CHECK(collapsed);
+	CHECK(g.world->parachutes().empty() && ticks <= 7);
+	CHECK(g.objects.find(chute) == nullptr);
+}
+
 // The parachute's room (0x005e45e0 / 0x006f2760): the round's collision
 // mesh (parachute.collisionmesh's vehicle LOD) placed at its start, 2 m over
 // the feet; a ceiling a metre over the head crosses the segments to the
@@ -3299,6 +3475,446 @@ TEST(Vehicles_HeavyIfvShieldCellsTakeRounds)
 		const std::vector<bool> cells = g.world->repairCells(ifv);
 		CHECK(!cells.empty() && !cells[0]);
 	}
+}
+
+// The cells' armour effects (0x006549a0 / 0x00654730 on each cell's
+// armour): addArmorEffect 99 e_healing_node (its SimpleObject
+// ifv_shield_the_generatoreffect, a glow on the cell) while a cell is under
+// 100 %, through the mirror of the hull's damage; gone when it is full
+// again; a wreck takes -1's e_bluespark_loop, which no archive ships
+// (e_bluesparks_loop is), so nothing.
+TEST(Vehicles_HeavyIfvShieldCellsShowArmourEffects)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_ifv")) {
+		return;
+	}
+	const uint32_t ifv = g.start("eu_ifv", {0, 2, 0}, 3);
+	const auto glows = [&] {
+		std::vector<game::GameWorld::PlacedMesh> meshes;
+		g.world->armorEffectMeshes(meshes);
+		std::vector<physics::Vec3> out;
+		for (const auto& m : meshes) {
+			if (m.objectTemplate && m.objectTemplate->name() == "ifv_shield_the_generatoreffect") {
+				out.push_back(m.position);
+			}
+		}
+		return out;
+	};
+	CHECK(glows().empty());
+	const float hull = g.world->hitPoints(ifv);
+	g.world->setHitPoints(ifv, hull * 0.9f);
+	g.run(0.5f);
+	const uint32_t cell = g.world->shieldCellId(ifv, 0);
+	const auto damaged = glows();
+	std::fprintf(stderr, "  cell 0 at %.1f hit points, %zu glows\n", g.world->hitPoints(cell), damaged.size());
+	CHECK(g.world->hitPoints(cell) < 110 && g.world->hitPoints(cell) > 90);
+	CHECK(damaged.size() == 7);
+	const physics::Vec3 at = g.position(ifv);
+	for (const physics::Vec3& p : damaged) {
+		CHECK(physics::lengthSquared(p - at) < 36);
+	}
+	g.world->setHitPoints(ifv, hull);
+	g.run(0.5f);
+	CHECK(std::fabs(g.world->hitPoints(cell) - 110) < 1e-2f);
+	CHECK(glows().empty());
+	// Down to a wreck: no glow, and no spark either.
+	g.world->setHitPoints(ifv, hull * 0.9f);
+	g.run(0.5f);
+	const int shooter = g.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* rifle = g.templates.find("Unl_AV_Rifle");
+	const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+	const physics::Vec3 aim = at + physics::Vec3 {3.0f, -0.6f, 2.0f};
+	for (int shots = 0; shots < 50 && g.world->hitPoints(cell) > 0; ++shots) {
+		g.world->launchProjectile(round, aim + physics::Vec3 {6, 0, 0}, {-300, 0, 0}, shooter);
+		g.run(0.1f);
+	}
+	g.run(0.2f);
+	std::fprintf(stderr, "  the wreck at %.1f hit points, %zu glows\n", g.world->hitPoints(cell), glows().size());
+	CHECK(g.world->hitPoints(cell) < 0 && g.world->hitPoints(cell) >= -10);
+	CHECK(glows().size() == 6);
+	CHECK(!g.world->effects().emitting(cell));
+}
+
+// A joined client's cells (0x005ffec0): the host captures each cell's hit
+// points in eighths of its maximum (floor, at least 1 while any are left,
+// 0 at none) and the client sets them back (e x max / 8, a wreck's
+// -wreckHitPoints at 0) through the armour's setter, whose effects then
+// show there as on the host. Here the second IFV stands for the client's
+// copy of the first: its own hull is whole, its cells take the first's.
+TEST(Vehicles_JoinedShieldCellsShowArmourEffects)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_ifv")) {
+		return;
+	}
+	world::Object* copy = g.objects.create(g.templates.find("eu_ifv"), {30, 2, 0}, {0, 0, 0});
+	copy->setTeam(2);
+	const uint32_t remote = copy->id();
+	const uint32_t ifv = g.start("eu_ifv", {0, 2, 0}, 3);
+	const auto glowsNear = [&](uint32_t vehicle) {
+		std::vector<game::GameWorld::PlacedMesh> meshes;
+		g.world->armorEffectMeshes(meshes);
+		size_t n = 0;
+		for (const auto& m : meshes) {
+			if (m.objectTemplate && m.objectTemplate->name() == "ifv_shield_the_generatoreffect"
+				&& physics::lengthSquared(m.position - g.position(vehicle)) < 36) {
+				++n;
+			}
+		}
+		return n;
+	};
+	CHECK(g.world->repairCellEighths(ifv) == std::vector<int>(7, 8));
+	g.world->setHitPoints(ifv, g.world->hitPoints(ifv) * 0.9f);
+	g.run(0.5f);
+	const std::vector<int> eighths = g.world->repairCellEighths(ifv);
+	std::fprintf(stderr, "  cell 0 at %.1f of 110 hit points: %d eighths\n", g.world->hitPoints(g.world->shieldCellId(ifv, 0)),
+		eighths.empty() ? -1 : eighths[0]);
+	CHECK(eighths == std::vector<int>(7, 7));
+	CHECK(glowsNear(remote) == 0);
+	g.world->setRemoteRepairCells(remote, eighths);
+	g.run(0.5f);
+	const uint32_t cell = g.world->shieldCellId(remote, 0);
+	CHECK(std::fabs(g.world->hitPoints(cell) - 110 * 7 / 8.0f) < 1e-3f); // not mirrored back to its whole hull
+	CHECK(glowsNear(remote) == 7);
+	// Whole again: the glow goes; a wreck (0 eighths): the wreck's hit points.
+	g.world->setRemoteRepairCells(remote, std::vector<int>(7, 8));
+	g.run(0.2f);
+	CHECK(glowsNear(remote) == 0);
+	g.world->setRemoteRepairCells(remote, {0, 8, 8, 8, 8, 8, 8});
+	g.run(0.2f);
+	CHECK(std::fabs(g.world->hitPoints(cell) + 10) < 1e-3f);
+	CHECK(g.world->repairCells(remote).size() == 7 && !g.world->repairCells(remote)[0]);
+	// A sliver left is still one eighth.
+	g.world->setRemoteRepairCells(remote, {1, 8, 8, 8, 8, 8, 8});
+	CHECK(g.world->repairCellEighths(remote)[0] == 1);
+}
+
+namespace {
+
+// Horizontal rays across a vehicle (along its x, every half metre of its
+// z from -2 to 2) at heights over its origin from `low` to `high`: at how
+// many heights one meets it, and the first and last.
+struct Probe {
+	int hits = 0;
+	float lowest = 1e9f, highest = -1e9f;
+};
+Probe probeAcross(Garage& g, uint32_t vehicle, float low, float high)
+{
+	Probe probe;
+	const world::Object* o = g.objects.find(vehicle);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	const physics::Vec3 at = g.position(vehicle);
+	for (float h = low; h <= high; h += 0.25f) {
+		for (float z = -2; z <= 2; z += 0.5f) {
+			const physics::Vec3 from = at + hull.transform({-12, h, z});
+			const physics::Vec3 to = at + hull.transform({12, h, z});
+			float fraction = 0;
+			uint32_t object = 0;
+			if (g.world->segmentHit(from, to, 0, fraction, object) && object == vehicle) {
+				++probe.hits;
+				probe.lowest = std::min(probe.lowest, h);
+				probe.highest = std::max(probe.highest, h);
+				break;
+			}
+		}
+	}
+	return probe;
+}
+
+} // namespace
+
+// The walker's parts (0x0063ccc0): its mesh's geometry 0 is one small
+// face and the parts' collisionPart geometries are its shape (the legs'
+// bones, the torso on its spring, the turret and guns on their bundles).
+// Rays across it meet the legs and the torso standing, and again after it
+// has walked (the parts posed where they stand, PartCollision.cpp); the
+// tank's hull and turret as before.
+TEST(Vehicles_RoundsMeetTheWalkersParts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	g.animate();
+	g.run(1);
+	// The feet stand about 3.2 m under the origin, the torso above it.
+	const Probe legs = probeAcross(g, mech, -2.75f, -0.75f);
+	const Probe torso = probeAcross(g, mech, 0.0f, 2.0f);
+	std::fprintf(stderr, "  us_heavy_mech parked: legs %d rays (%.2f..%.2f), torso %d rays (%.2f..%.2f)\n", legs.hits,
+		legs.lowest, legs.highest, torso.hits, torso.lowest, torso.highest);
+	CHECK(legs.hits >= 8 && torso.hits >= 8);
+	CHECK(g.enter(mech));
+	const physics::Vec3 start = g.position(mech);
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	g.drive(walk, 4);
+	const physics::Vec3 now = g.position(mech);
+	const float walked = std::sqrt(physics::lengthSquared(now - start));
+	const Probe walkingLegs = probeAcross(g, mech, -2.75f, -0.75f);
+	const Probe walkingTorso = probeAcross(g, mech, 0.0f, 2.0f);
+	std::fprintf(stderr, "  walked %.1f m: legs %d rays, torso %d rays\n", walked, walkingLegs.hits, walkingTorso.hits);
+	CHECK(walked > 5);
+	CHECK(walkingLegs.hits >= 8 && walkingTorso.hits >= 8);
+	// A ray at the knees' height (the legs reach back from the hips) meets
+	// a leg out at its side (the left or, mid-stride, the right), not the
+	// middle (where the root's one face lies).
+	const world::Object* o = g.objects.find(mech);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	float fraction = 0;
+	uint32_t object = 0;
+	CHECK(g.world->segmentHit(now + hull.transform({-12, -1.5f, -0.75f}), now + hull.transform({12, -1.5f, -0.75f}), 0,
+		fraction, object));
+	const float x = -12 + 24 * fraction;
+	std::fprintf(stderr, "  the knee-high ray meets it at x %.2f\n", x);
+	CHECK(object == mech && std::fabs(x) > 1.0f);
+
+	Garage tank(gameDir());
+	const uint32_t t = tank.start("eu_tank", {0, 2, 6});
+	const Probe hull2 = probeAcross(tank, t, -0.5f, 2.0f);
+	CHECK(hull2.hits >= 6 && hull2.highest > 0.9f); // the turret over the hull
+}
+
+// An anti-vehicle rocket (eu_av's) at the walker's leg (us_heavy_mech:
+// the root's armour, 1000 hit points; the leg's faces are material "legs"
+// 4201 through the root's mapMaterial) hurts the walker: a part's hit is its root's (0x004c0e40,
+// the nearest armoured ancestor).
+// The parts in the mesh physics (each collisionPart child's response in
+// its root's chain, 0x005f6a60 / 0x006c0090): a soldier meets a part's
+// soldier LOD where the part is now (0x006c3890). Dropped 2 m to the
+// tank's left he lands on the hull's edge (0.7 m) while the turret looks
+// ahead, and on the turret's roof (1.8 m) once it has turned 90 degrees
+// over that side; dropped on the turret at rest he stands on its roof, not
+// on the hull under it.
+TEST(Vehicles_SoldierStandsOnTheTurnedTurret)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_tank")) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 0});
+	CHECK(g.enter(tank));
+	const physics::Vec3 at = g.position(tank);
+	const int id = g.world->addPlayer("Dropped", 2, true);
+	CHECK(g.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	const auto drop = [&](float x, float z) {
+		g.world->playerInfo(id, info);
+		g.world->setSoldierPosition(info.soldier, at + physics::Vec3 {x, 4, z});
+		g.run(1.5f);
+		g.world->playerInfo(id, info);
+		return info.position.y - at.y;
+	};
+	const float roof = drop(0, -3);
+	const float side = drop(-2, 0);
+	game::SoldierInput look;
+	look.turn = 3; // degrees a tick
+	g.drive(look, 1.0f);
+	g.drive({}, 0.5f);
+	float yaw = 0, pitch = 0;
+	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	const float turned = drop(-2, 0);
+	std::fprintf(stderr, "  on the turret at rest %.2f; 2 m to the left %.2f, after it turned %.0f degrees %.2f\n", roof, side,
+		yaw, turned);
+	CHECK(roof > 1.4f);
+	CHECK(side < 1.0f);
+	CHECK(turned > 1.4f);
+}
+
+TEST(Vehicles_RocketHurtsTheWalker)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	const int shooter = g.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* launcher = g.templates.find("eu_av");
+	const std::string round = launcher && launcher->settings().count("projectileTemplate")
+		? launcher->settings().at("projectileTemplate")
+		: "";
+	CHECK(!round.empty());
+	const float before = g.world->hitPoints(mech);
+	const world::Object* o = g.objects.find(mech);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	// From 20 m off its left side at the knee's height, flying across.
+	const physics::Vec3 at = g.position(mech) + hull.transform({-20, -1.5f, -0.75f});
+	CHECK(g.world->launchProjectile(round, at, hull.transform({60, 0, 0}), shooter));
+	g.run(1);
+	const float after = g.world->hitPoints(mech);
+	std::fprintf(stderr, "  us_heavy_mech: %.0f -> %.0f hit points\n", before, after);
+	CHECK(after < before - 10);
+}
+
+// A wreck's mesh instances (0x006539f0(object, 1)): the root's turns to
+// its wreck sub-geometry (us_heavy_mech's whole wreck shape) and the
+// parts, with one sub-geometry, leave the rays.
+TEST(Vehicles_WalkerWreckMeetsRaysAsItsWreckShape)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	g.run(0.5f);
+	g.world->applyDamage(mech, 1100);
+	g.run(0.2f);
+	CHECK(g.world->hitPoints(mech) <= 0);
+	const Probe wreck = probeAcross(g, mech, -3.5f, 3.0f);
+	std::fprintf(stderr, "  us_heavy_mech wreck: %d rays (%.2f..%.2f)\n", wreck.hits, wreck.lowest, wreck.highest);
+	CHECK(wreck.hits >= 4);
+}
+
+// A decal on a walker's leg (0x005a36d0: the hit object's own decal set
+// and mesh instance; the leg, a collisionPart child, is an object of its
+// own with both): it lies in the leg's space, clipped to the leg's faces,
+// and goes where the leg goes as the walker walks.
+TEST(Vehicles_DecalOnTheWalkersLegRidesIt)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	g.animate();
+	g.run(1);
+	CHECK(g.world->collisionPartCount(mech) > 10);
+	const int shooter = g.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* rifle = g.templates.find("eu_ar_rifle");
+	const std::string round = rifle && rifle->settings().count("projectileTemplate")
+		? rifle->settings().at("projectileTemplate")
+		: "";
+	CHECK(!round.empty());
+	const world::Object* o = g.objects.find(mech);
+	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	const physics::Vec3 at = g.position(mech) + hull.transform({-20, -1.5f, -0.75f});
+	CHECK(g.world->launchProjectile(round, at, hull.transform({600, 0, 0}), shooter));
+	g.run(0.2f);
+	const effects::Decal* decal = nullptr;
+	for (const effects::Decal& d : g.world->effects().decals()) {
+		if (d.object == mech && d.part >= 0) {
+			decal = &d;
+		}
+	}
+	CHECK(decal != nullptr);
+	if (!decal) {
+		return;
+	}
+	const int part = decal->part;
+	const effects::Vec3 local = decal->position;
+	// On the leg's own faces, in the leg's space.
+	const physics::CollisionWorld* faces = g.world->partCollision(mech, part);
+	int near = 0;
+	if (faces) {
+		faces->forEachFaceNear(local, 0.25f,
+			[&](const physics::Vec3&, const physics::Vec3&, const physics::Vec3&, uint32_t, uint32_t) { ++near; });
+	}
+	CHECK(near > 0);
+	physics::Mat3 r0, r1;
+	physics::Vec3 t0, t1;
+	CHECK(g.world->collisionPartFrame(mech, part, r0, t0));
+	CHECK(g.enter(mech));
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	g.drive(walk, 2);
+	CHECK(g.world->collisionPartFrame(mech, part, r1, t1));
+	const float moved = std::sqrt(physics::lengthSquared(t1 - t0)) + std::fabs(r1.rows[2].y - r0.rows[2].y)
+		+ std::fabs(r1.rows[1].z - r0.rows[1].z);
+	std::fprintf(stderr, "  the decal on part %d (%.2f, %.2f, %.2f), %d faces near; the part moved %.2f\n", part, local.x,
+		local.y, local.z, near, moved);
+	CHECK(moved > 0.05f);
+	bool kept = false;
+	for (const effects::Decal& d : g.world->effects().decals()) {
+		kept = kept || (d.object == mech && d.part == part);
+	}
+	CHECK(kept);
+}
+
+// The wreck's instance (0x006539f0 -> 0x006e5df0): every LOD query goes
+// through sub-geometry 1, so the wrecked tank's vehicle LOD (what the
+// ground pass and the other movers meet) is the wreck's shape (eu_tank:
+// 34 faces whole, 20 wrecked).
+TEST(Vehicles_WreckMeetsMoversAsItsWreckShape)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	const physics::CollisionWorld* whole = g.world->vehicleCollision(tank);
+	CHECK(whole != nullptr);
+	const size_t before = whole ? whole->triangles() : 0;
+	g.world->applyDamage(tank, 1e5f);
+	g.run(0.5f);
+	const physics::CollisionWorld* wreck = g.world->vehicleCollision(tank);
+	const size_t after = wreck ? wreck->triangles() : 0;
+	std::fprintf(stderr, "  eu_tank vehicle LOD: %zu faces, wrecked %zu, at %.2f m\n", before, after, g.position(tank).y);
+	CHECK(g.world->hitPoints(tank) <= 0);
+	CHECK(before > 0 && after > 0 && after != before);
+	g.run(2);
+	CHECK(g.position(tank).y > -1); // it still stands on the ground
+}
+
+// A static object's collisionPart children (0x0063d720 -> 0x0063ccc0 with
+// its mesh): missile_silo_v2's base and barrel are geometries 1 and 2 of
+// its mesh, in the static world where their templates place them.
+TEST(Vehicles_StaticObjectsCollisionParts)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("missile_silo_v2")) {
+		return;
+	}
+	world::ObjectTemplate* silo = g.templates.find("missile_silo_v2");
+	const uint32_t id = g.objects.create(silo, {40, 0, 40}, {0, 0, 0})->id();
+	g.start("eu_tank", {0, 2, 6}, 0.1f);
+	const auto name = silo->settings().find("collisionMesh");
+	const physics::CollisionMeshFile* mesh = name != silo->settings().end() ? g.collisionTemplates.mesh(name->second, g.files) : nullptr;
+	CHECK(mesh && mesh->geometries.size() > 2);
+	if (!mesh) {
+		return;
+	}
+	physics::CollisionWorld rootOnly;
+	rootOnly.addMesh(*mesh, physics::CollisionUser::Projectile, {}, {40, 0, 40}, id);
+	size_t inWorld = 0;
+	g.world->staticCollision(); // (soldier LOD)
+	const physics::CollisionWorld* statics = g.world->projectileCollision(0);
+	CHECK(statics != nullptr);
+	if (statics) {
+		statics->forEachFaceNear({40, 0, 40}, 60,
+			[&](const physics::Vec3&, const physics::Vec3&, const physics::Vec3&, uint32_t, uint32_t owner) {
+				inWorld += owner == id ? 1 : 0;
+			});
+	}
+	std::fprintf(stderr, "  missile_silo_v2: %zu projectile faces, the root's own %zu\n", inWorld, rootOnly.triangles());
+	CHECK(inWorld > rootOnly.triangles());
 }
 
 // The static AV gun (static_av: stationary, Body::fixed): its
@@ -3928,13 +4544,15 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 				nullptr, lights, sky, water, "", ""};
 			sources.renderer = &renderSettings;
 			bool shown = false;
-			sources.transientModels = [&](std::vector<render::TransientModel>& models) {
+			client::RoundVisuals visuals(templates);
+			std::vector<client::RoundVisuals::Mesh> roundMeshes;
+			sources.placedTemplates = [&](std::vector<render::LevelSources::PlacedTemplate>& out) {
 				if (!shown) return;
-				for (const auto& p : game::projectileRenderStates(templates, round.projectiles())) {
-					if (p.objectTemplate->name() != name) continue;
-					const auto angles = p.rotation.yawPitchRoll();
-					models.push_back({p.objectTemplate, {p.position.x, p.position.y, p.position.z},
-						{angles.x, angles.y, angles.z}});
+				roundMeshes.clear();
+				visuals.meshes(round.projectiles(), roundMeshes, 0);
+				for (const auto& mesh : roundMeshes) {
+					if (mesh.objectTemplate->name() != name) continue;
+					out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation});
 				}
 			};
 			render::LevelRenderer renderer(*gpu);
@@ -4630,8 +5248,8 @@ TEST(Vehicles_ProjectileCoverageSurvey)
 			continue;
 		}
 		physics::CollisionWorld vehicle, projectile;
-		vehicle.addGeometry(*file, 0, physics::CollisionUser::Vehicle, {}, {}, 1, {});
-		projectile.addGeometry(*file, 0, physics::CollisionUser::Projectile, {}, {}, 1, {});
+		vehicle.addMesh(*file, physics::CollisionUser::Vehicle, {}, {}, 1, {});
+		projectile.addMesh(*file, physics::CollisionUser::Projectile, {}, {}, 1, {});
 		int onHull = 0, covered = 0;
 		for (int axis = 0; axis < 3; ++axis) {
 			for (int sign = -1; sign <= 1; sign += 2) {
@@ -4937,7 +5555,7 @@ TEST(Vehicles_NativeRaysForTheRetailComparison)
 		return;
 	}
 	physics::CollisionWorld world;
-	world.addGeometry(*file, 0, physics::CollisionUser::Projectile, {}, {}, 1, {});
+	world.addMesh(*file, physics::CollisionUser::Projectile, {}, {}, 1, {});
 	std::string bits;
 	for (const int axis : {0, 2, 1}) {
 		for (const int sign : {1, -1}) {
@@ -5988,4 +6606,466 @@ TEST(Vehicles_TankDamageAlarmAndMotionMineWarning)
 	const auto* tone = dynamic_cast<const sound::SoundObjectTemplate*>(g.templates.find("S_Game_HUD_MotionMine_Warning"));
 	std::fprintf(stderr, "  tone: %s\n", tone ? tone->soundFilenames().c_str() : "-");
 	CHECK(tone && tone->soundFilenames().find("Missile_Warning") != std::string::npos);
+}
+
+// A bipod's ducking plays its seat system's duck (3p_eu_bipod_animSys.inc:
+// PoseTrigger root over stand and duck): the seat's setDucking (0x005c7cf0)
+// sets the seat system's pose (+0x284 slot 0x28) to 1 while ducking, 0
+// once risen, so the sitter's head goes down with lookAroundDuck and comes
+// back; a joined client's seated soldier as its ghost's ducking says.
+TEST(Vehicles_BipodDuckPlaysTheDuckPose)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t bipod = g.start("eu_bipod", {0, 1.2f, 8}, 1);
+	g.animate();
+	CHECK(g.enter(bipod));
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	const anim::Skeleton* skeleton = g.systems->skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	const int head = skeleton ? skeleton->find("head") : -1;
+	CHECK(head >= 0);
+	if (head < 0) {
+		return;
+	}
+	const auto headHeight = [&](uint32_t soldier) {
+		std::vector<anim::Matrix> pose;
+		if (!g.world->skeletonPose(soldier, *skeleton, pose) || pose.size() <= static_cast<size_t>(head)) {
+			return 0.0f;
+		}
+		return pose[static_cast<size_t>(head)][13];
+	};
+	game::SoldierInput still;
+	g.drive(still, 1);
+	const float sitting = headHeight(me.soldier);
+	game::SoldierInput duck;
+	duck.pose = game::SoldierPose::Crouch;
+	g.drive(duck, 1);
+	CHECK(g.world->seatDucking(bipod, 0));
+	const float ducked = headHeight(me.soldier);
+	g.drive(still, 1);
+	const float risen = headHeight(me.soldier);
+	std::fprintf(stderr, "  eu_bipod: head %.3f sitting, %.3f ducking, %.3f risen\n", sitting, ducked, risen);
+	CHECK(ducked < sitting - 0.1f);
+	CHECK(std::fabs(risen - sitting) < 0.02f);
+	// A joined client's seated soldier, by its ghost's ducking.
+	const uint32_t other = g.objects.create(g.templates.find("us_light_soldier"), {3, 1.2f, 8})->id();
+	const auto remoteHead = [&](bool ducking) {
+		for (int i = 0; i < 30; ++i) {
+			g.world->animateRemoteSeated(other, bipod, 0, 0, 1 / 30.0f, ducking);
+		}
+		return headHeight(other);
+	};
+	const float remoteSitting = remoteHead(false), remoteDucked = remoteHead(true);
+	CHECK(remoteDucked < remoteSitting - 0.1f);
+	CHECK(std::fabs(remoteHead(false) - remoteSitting) < 0.02f);
+}
+
+// The motion mine (Unl_Mine_Motion_Projectile: physicsType Mesh, drag 10,
+// mass 5) is a Basic node whose drag is its collision mesh's vehicle LOD
+// box's (0x006c9060 through the mesh's slot 0x54(1)).
+TEST(Weapons_MotionMineHasItsBox)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	g.start("eu_bipod", {0, 1.2f, 8}, 1);
+	const auto settingsOf = [&](const std::string& name) -> const game::ProjectileSettings* {
+		if (!g.world->launchProjectile(name, {0, 30, 0}, {0, 0, 1})) {
+			return nullptr;
+		}
+		return g.world->projectiles().empty() ? nullptr : g.world->projectiles().back().settings;
+	};
+	const game::ProjectileSettings* mine = settingsOf("Unl_Mine_Motion_Projectile");
+	CHECK(mine && mine->basicNode && mine->drag == 10 && mine->mass == 5);
+	if (mine) {
+		std::fprintf(stderr, "  motion mine box %.3f x %.3f x %.3f\n", mine->boxSize.x, mine->boxSize.y, mine->boxSize.z);
+		CHECK(mine->boxSize.x > 0.05f && mine->boxSize.y > 0.05f && mine->boxSize.z > 0.05f);
+		CHECK(mine->boxSize.x < 2 && mine->boxSize.y < 2 && mine->boxSize.z < 2);
+	}
+	// A grenade stays a RotationalPoint.
+	const game::ProjectileSettings* frag = settingsOf("Unl_Grenade_Frag_Projectile");
+	CHECK(frag && frag->rotationalPoint && !frag->basicNode);
+}
+
+// A gunship parked on a helipad laid on the terrain (Suez_Canal's EU pad:
+// helipad_m, its deck 0.29 m over the flattened ground). Its landing gear
+// probes the pad from where the Spring's step (0x006caef0) left the parts,
+// at rest; probing from the pushed-out place missed the deck every third
+// tick, so the springs lost and found it in turn: the body never slept,
+// bounced at 2, 4, -6 m/s, lost hit points and, with throttle, beat itself
+// to pieces. It settles and sleeps undamaged, and lifts off smoothly.
+TEST(Vehicles_GunshipRestsOnAHelipad)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("helipad_m")) {
+		return;
+	}
+	g.objects.create(g.templates.find("helipad_m"), {0, 0, 8}, {0, 0, 0});
+	const uint32_t ag = g.start("us_ag", {0, 2.4f, 8}, 0.1f);
+	float fastest = 0;
+	for (int tick = 0; tick < 4 * 30; ++tick) {
+		const physics::Vec3 before = g.position(ag);
+		g.run(1 / 30.0f);
+		if (tick >= 60) {
+			fastest = std::max(fastest, std::fabs(g.position(ag).y - before.y) * 30);
+		}
+	}
+	const physics::Vec3 rest = g.position(ag);
+	std::fprintf(stderr, "  us_ag on the pad: %.2f m up, %.2f m/s at most after 2 s, %s, %.0f hit points\n", rest.y,
+		fastest, g.world->bodyAsleep(ag) ? "asleep" : "awake", g.world->hitPoints(ag));
+	CHECK(g.world->bodyAsleep(ag));
+	CHECK(fastest < 1);
+	CHECK(g.world->hitPoints(ag) == 1000);
+	CHECK(rest.y > 1.5f && rest.y < 4);
+	CHECK(g.enter(ag));
+	game::SoldierInput input;
+	input.throttle = 1;
+	float lowest = rest.y, sharpest = 0;
+	physics::Vec3 last = g.position(ag);
+	for (int tick = 0; tick < 3 * 30; ++tick) {
+		g.drive(input, 1 / 30.0f);
+		const physics::Vec3 p = g.position(ag);
+		sharpest = std::max(sharpest, std::fabs(p.y - last.y) * 30);
+		lowest = std::min(lowest, p.y);
+		last = p;
+	}
+	std::fprintf(stderr, "  with throttle: %.1f m up after 3 s, %.1f m/s at most vertically, %.0f hit points\n", last.y,
+		sharpest, g.world->hitPoints(ag));
+	CHECK(last.y > rest.y + 2);
+	CHECK(sharpest < 8);
+	CHECK(g.world->hitPoints(ag) == 1000);
+}
+
+// A walker on a bridge high over the terrain: its feet find the
+// deck (0x00650e90's sphere at each foot against the objects' meshes, not
+// only the heightmap's segment), so it isn't pushed sideways as over a
+// drop (30 a tick to the side of the foot in the air) and comes to rest.
+TEST(Vehicles_WalkerStandsOnADeck)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	// Suez_Canal's big bridge, its deck 20 m over the ground.
+	if (!g.templates.find("bc_big_bridge_a")) {
+		return;
+	}
+	g.objects.create(g.templates.find("bc_big_bridge_a"), {0, 20, 0}, {180, 0, 0});
+	const uint32_t mech = g.start("us_heavy_mech", {0, 23.5f, 0}, 4);
+	const physics::Vec3 a = g.position(mech);
+	g.run(4);
+	const physics::Vec3 b = g.position(mech);
+	const float drift = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
+	std::fprintf(stderr, "  us_heavy_mech on the deck: %.2f m up, %.2f m drift in 4 s, %s\n", b.y, drift,
+		g.world->bodyAsleep(mech) ? "asleep" : "awake");
+	CHECK(b.y > 20 && b.y < 26);
+	CHECK(drift < 0.5f);
+	CHECK(g.world->bodyAsleep(mech));
+}
+
+// Suez_Canal's industrial bridge (-512/47/-36): a walker stands on its deck
+// on the legs' sphere alone, its hull's vehicle LOD box (1.9 m under its
+// origin) above the deck's box. The legs object is a mover of its own with
+// the dispatch's radius 5 and no box tests (0x006dc7b0 without a mesh
+// instance), so the sphere meets the deck every tick and the walker sleeps;
+// tied to the hull's box tests it met it every other tick and bounced
+// 0.16 m for ever.
+TEST(Vehicles_WalkerSleepsOnTheIndustrialBridge)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("bridge_industrial_01_c")) {
+		return;
+	}
+	g.objects.create(g.templates.find("bridge_industrial_01_c"), {0, 20, 0}, {0, 0, 0});
+	const uint32_t mech = g.start("us_heavy_mech", {0, 26.5f, 0}, 2);
+	const physics::Vec3 a = g.position(mech);
+	float lowest = a.y, highest = a.y;
+	for (int i = 0; i < 60; ++i) {
+		g.run(1 / 30.0f);
+		lowest = std::min(lowest, g.position(mech).y);
+		highest = std::max(highest, g.position(mech).y);
+	}
+	const physics::Vec3 b = g.position(mech);
+	std::fprintf(stderr, "  us_heavy_mech on the industrial bridge: %.3f m up, %.3f m bounce, %s\n", b.y,
+		highest - lowest, g.world->bodyAsleep(mech) ? "asleep" : "awake");
+	CHECK(b.y > 25 && b.y < 28); // on the deck (23.15), the legs 2.8 + 0.57 under the origin
+	CHECK(highest - lowest < 0.01f);
+	CHECK(g.world->bodyAsleep(mech));
+}
+
+// The parts as movers of their own (0x005f6ba0's Basic node and the
+// mobile response, run down the root's chain by the dispatch 0x006dd1b0):
+// a part's ground pass (0x006b9260) puts its vehicle LOD where the part is,
+// and its solve (0x006ba7d0) moves the root. eu_ifv's tracks (geometries 33
+// and 34, six vertices each, 1.24 m under the hull's origin) hang between
+// its road wheels (z 0.77 and -1.35): a 1 m bump there meets the tracks
+// and lifts the IFV by about as far as it reaches into them. Before, the
+// parts moved with the hull and the bump passed through them.
+TEST(Vehicles_PartsMeetTheGroundAsMovers)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage flat(gameDir());
+	if (!flat.loaded || !flat.templates.find("eu_ifv")) {
+		return;
+	}
+	const uint32_t a = flat.start("eu_ifv", {0, 3, 0}, 4);
+	Garage bump(gameDir());
+	bump.groundShape = [](float, float z) { return z > -0.6f && z < 0.0f ? 1.0f : 0.0f; };
+	const uint32_t b = bump.start("eu_ifv", {0, 3, 0}, 4);
+	const float rest = flat.position(a).y, lifted = bump.position(b).y;
+	std::fprintf(stderr, "  eu_ifv at rest %.3f, over the bump %.3f\n", rest, lifted);
+	CHECK(lifted > rest + 0.2f);
+	CHECK(lifted < rest + 0.5f);
+}
+
+// A part as a mover meets the other bodies (0x006dc7b0 with the part as
+// param_3, the roots' velocities, its contacts solved onto its root):
+// us_ag's TAD base (geometry 13, 30 vertices under the nose, 0.6 m over
+// the ground on its gear) settles onto a tank parked across its nose and
+// pushes it away (the tank ends past 5.9 m; without the part as a mover
+// the gunship's hull alone met it, 5.73 m).
+TEST(Vehicles_PartMoverPushesAnotherBody)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("us_ag")) {
+		return;
+	}
+	world::Object* parked = g.objects.create(g.templates.find("eu_tank"), {0, 1.2f, 5}, {90, 0, 0});
+	parked->setTeam(2);
+	const uint32_t tank = parked->id();
+	g.start("us_ag", {0, 3.5f, 0}, 5);
+	const physics::Vec3 at = g.position(tank);
+	std::fprintf(stderr, "  the tank under us_ag's nose ends at z %.2f\n", at.z);
+	CHECK(at.z > 5.9f);
+}
+
+// A deployed sentry gun (Unl_Deployer_Sentrygun's eu_sentrygun) is run by
+// its SentryGun auto controller: an enemy on foot in its 30-degree view
+// within 63 m is taken, fired at after the reactionTime (1 s), and killed,
+// the kill its deployer's; its gun is the PIFire GenericFireArm, not the
+// PIAltFire siren (Car_horn_Alt) beside it. Its gun's DefaultAnimationComp (loopingFire 1)
+// holds message 1 from the first round to the trigger's release, so the
+// "still" switch plays "fire" (0x005e0f30, 0x005e0f60, 0x0063ce30).
+TEST(Vehicles_DeployedSentryGunFires)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("Unl_Deployer_Sentrygun") || !g.templates.find("eu_sentrygun")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Deployer_Sentrygun", {}, {}}};
+	world::ObjectTemplate* point = g.templates.create("ControlPoint", "garage_cp_pac");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "1";
+	point->settings()["unableToChangeTeam"] = "1";
+	g.objects.create(point, {200, 0, 0});
+	g.objects.create(g.templates.find("garage_sp"), {0, 0, 25}, {180, 0, 0})->setControlPointId(1);
+	Animations a(g);
+	g.start("eu_fav", {30, 2, 30});
+	a.attach(g);
+	// Both sides in before the deployment (a side's first player starts
+	// the round over), the enemy kept far off meanwhile.
+	const int enemy = g.world->addPlayer("Pac", 1, true);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	const int owner = g.world->localPlayer();
+	g.run(1);
+	CHECK(g.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	g.world->setSoldierPosition(info.soldier, {0, 0, -400});
+	g.run(1);
+	game::SoldierInput take;
+	take.selectItem = 5;
+	g.drive(take, 1.5f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.drive({}, 2.5f);
+	uint32_t sentry = 0;
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "eu_sentrygun") {
+			sentry = object->id();
+		}
+	}
+	CHECK(sentry != 0);
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	g.world->setSoldierPosition(info.soldier, {0, 0, 25});
+	// Its scan (0.9 rad/s) comes round to him, then the reaction time.
+	bool firing = false, killed = false;
+	for (int i = 0; i < 450 && !killed; ++i) {
+		g.run(1 / 30.0f);
+		const auto playing = g.world->objectAnimation(sentry);
+		firing = firing || std::find(playing.begin(), playing.end(), "fire") != playing.end();
+		game::GameWorld::PlayerInfo me;
+		killed = g.world->playerInfo(owner, me) && me.kills == 1;
+	}
+	CHECK(killed);
+	CHECK(firing);
+	// The target gone, the trigger lets go and the switch goes back.
+	g.run(1.5f);
+	const auto after = g.world->objectAnimation(sentry);
+	CHECK(std::find(after.begin(), after.end(), "stand") != after.end());
+}
+
+// checkLineOfFire (AutoControllers.ai: 1 for SentryGun and UAVDrone): the
+// fire plan's condition (AIDLL 0x100db150 -> 0x100dad90) holds the
+// trigger while a teammate on foot stands within 0.5 + 0.02 t of the line
+// from the gun to the target; he steps aside and the gun fires.
+TEST(Vehicles_SentryGunHoldsFireOverATeammate)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("Unl_Deployer_Sentrygun") || !g.templates.find("eu_sentrygun")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Deployer_Sentrygun", {}, {}}};
+	world::ObjectTemplate* point = g.templates.create("ControlPoint", "garage_cp_pac");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "1";
+	point->settings()["unableToChangeTeam"] = "1";
+	g.objects.create(point, {200, 0, 0});
+	g.objects.create(g.templates.find("garage_sp"), {0, 0, 25}, {180, 0, 0})->setControlPointId(1);
+	g.start("eu_fav", {30, 2, 30});
+	const int enemy = g.world->addPlayer("Pac", 1, true);
+	const int mate = g.world->addPlayer("Mate", 2, true);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	const int owner = g.world->localPlayer();
+	g.run(1);
+	CHECK(g.world->spawnSoldier(enemy) && g.world->spawnSoldier(mate));
+	game::GameWorld::PlayerInfo info, mateInfo;
+	CHECK(g.world->playerInfo(enemy, info) && info.alive && g.world->playerInfo(mate, mateInfo));
+	g.world->setSoldierPosition(info.soldier, {0, 0, -400});
+	g.world->setSoldierPosition(mateInfo.soldier, {0, 0, -420});
+	g.run(1);
+	game::SoldierInput take;
+	take.selectItem = 5;
+	g.drive(take, 1.5f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.drive({}, 2.5f);
+	const world::Object* sentry = nullptr;
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "eu_sentrygun") {
+			sentry = object.get();
+		}
+	}
+	CHECK(sentry != nullptr);
+	if (!sentry) {
+		return;
+	}
+	const auto at = sentry->position();
+	// The enemy 20 m off along +z, the teammate halfway, on the line.
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	g.world->setSoldierPosition(info.soldier, {at.x, at.y, at.z + 20});
+	g.world->setSoldierPosition(mateInfo.soldier, {at.x, at.y, at.z + 10});
+	game::GameWorld::PlayerInfo me;
+	for (int i = 0; i < 300; ++i) {
+		g.world->setSoldierPosition(mateInfo.soldier, {at.x, at.y, at.z + 10});
+		g.run(1 / 30.0f);
+	}
+	CHECK(g.world->playerInfo(owner, me) && me.kills == 0);
+	CHECK(g.world->playerInfo(enemy, info) && info.alive);
+	CHECK(g.world->playerInfo(mate, mateInfo) && mateInfo.alive);
+	g.world->setSoldierPosition(mateInfo.soldier, {at.x + 8, at.y, at.z + 10});
+	bool killed = false;
+	for (int i = 0; i < 300 && !killed; ++i) {
+		g.run(1 / 30.0f);
+		killed = g.world->playerInfo(owner, me) && me.kills == 1;
+	}
+	CHECK(killed);
+}
+
+// flipOutAtHealth (AutoControllers.ai: the sentry gun's 0.25, of its 120
+// hit points): under it the auto controller takes no target and holds
+// PIFire with the yaw at its full speed (AIDLL 0x10097d60, 0x100f9cf0's
+// flipping branch): with no enemy near, the gun spins and fires.
+TEST(Vehicles_SentryGunFlipsOut)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	if (!kit || !g.templates.find("Unl_Deployer_Sentrygun") || !g.templates.find("eu_sentrygun")) {
+		return;
+	}
+	kit->children() = {{"eu_ar_rifle", {}, {}}, {"Unl_Deployer_Sentrygun", {}, {}}};
+	world::ObjectTemplate* point = g.templates.create("ControlPoint", "garage_cp_pac");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "1";
+	point->settings()["unableToChangeTeam"] = "1";
+	g.objects.create(point, {200, 0, 0});
+	g.objects.create(g.templates.find("garage_sp"), {0, 0, 25}, {180, 0, 0})->setControlPointId(1);
+	Animations a(g);
+	g.start("eu_fav", {30, 2, 30});
+	a.attach(g);
+	const int enemy = g.world->addPlayer("Pac", 1, true);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	g.run(1);
+	CHECK(g.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo info;
+	CHECK(g.world->playerInfo(enemy, info));
+	g.world->setSoldierPosition(info.soldier, {0, 0, -400});
+	g.run(1);
+	game::SoldierInput take;
+	take.selectItem = 5;
+	g.drive(take, 1.5f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	g.drive(fire, 0.1f);
+	g.drive({}, 2.5f);
+	uint32_t sentry = 0;
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() && object->objectTemplate()->name() == "eu_sentrygun") {
+			sentry = object->id();
+		}
+	}
+	CHECK(sentry != 0);
+	const auto firing = [&] {
+		const auto playing = g.world->objectAnimation(sentry);
+		return std::find(playing.begin(), playing.end(), "fire") != playing.end();
+	};
+	g.run(1);
+	CHECK(!firing()); // healthy: nothing to shoot at
+	g.world->setHitPoints(sentry, 50); // over 30: still calm
+	g.run(0.5f);
+	CHECK(!firing());
+	g.world->setHitPoints(sentry, 29);
+	bool flipped = false;
+	for (int i = 0; i < 30 && !flipped; ++i) {
+		g.run(1 / 30.0f);
+		flipped = firing();
+	}
+	CHECK(flipped);
 }

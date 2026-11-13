@@ -3,6 +3,7 @@
 #include "Game/GameWorld.h"
 #include "World/ObjectTemplate.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -29,6 +30,7 @@ void SoldierPrediction::start(const world::ObjectTemplate* soldier, int32_t last
 {
 	m_control = {};
 	m_body = {};
+	m_battery = -1;
 	// As GameWorld::stepSoldier sets a spawned soldier up: the stamina from
 	// the template (0x00645790) and the jump's loss, the static objects'
 	// soldier collision; a client runs no segment test (game logic slot
@@ -86,6 +88,9 @@ void SoldierPrediction::apply(const net::NetworkableState& s, const net::Vec3f& 
 	if ((m & 0x8000) && s.stamina >= 0) {
 		m_control.stamina().restore(s.stamina, s.sprinting);
 	}
+	if (m & 0x40000) {
+		m_battery = s.battery;
+	}
 }
 
 void SoldierPrediction::tick(const net::PlayerMove& move)
@@ -104,6 +109,11 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 	}
 	m_body.stance = static_cast<int>(input.pose);
 	m_control.update(input, m_body, kTick);
+	if (m_battery >= 0) {
+		m_battery = std::min(1.0f, m_battery + m_batteryRate * kTick);
+	}
+	// The moving objects near it now (GameWorld::stepSoldier's broad phase).
+	m_round.soldierMovers(m_body.position, m_team, 0, m_object, m_body.movers);
 	m_body.step(kTick, m_round.ground());
 }
 
@@ -117,7 +127,7 @@ void SoldierPrediction::step(const net::PlayerMove& move)
 	}
 	// Without a soldier the moves are kept too: the first record's move is
 	// one of them, and those after it are stepped on top of its state.
-	m_history.push_back({move.index, move, m_input, m_control, m_body, m_active});
+	m_history.push_back({move.index, move, m_input, m_control, m_body, m_battery, m_active});
 	while (m_history.size() > kHistory) {
 		m_history.pop_front();
 	}
@@ -137,12 +147,14 @@ void SoldierPrediction::reconcile(int32_t lastMove, const net::NetworkableState&
 	const bool known = !m_history.empty() && m_history.front().move == lastMove;
 	if (known && m_history.front().stepped) {
 		// The state that move left, corrected by the server's. It stays
-		// remembered: the next record may be for the same move again (the
-		// server had no new move for a tick and stepped the soldier on).
+		// remembered. (The server writes one record a move taken,
+		// 0x00582cd0's +0x20e8; the ticks it steps the last move again
+		// with none waiting come in the next move's record.)
 		const Snapshot& at = m_history.front();
 		m_control = at.control;
 		m_body = at.body;
 		m_input = at.inputState;
+		m_battery = at.battery;
 	} else if (!known) {
 		++m_stats.unknownMoves; // the server's state, and every move remembered on top of it
 	}
@@ -152,6 +164,7 @@ void SoldierPrediction::reconcile(int32_t lastMove, const net::NetworkableState&
 		at.control = m_control;
 		at.body = m_body;
 		at.inputState = m_input;
+		at.battery = m_battery;
 		at.stepped = true;
 	}
 	// The moves the server hasn't taken yet, again.
@@ -161,6 +174,7 @@ void SoldierPrediction::reconcile(int32_t lastMove, const net::NetworkableState&
 		next.inputState = m_input;
 		next.control = m_control;
 		next.body = m_body;
+		next.battery = m_battery;
 		next.stepped = true;
 		++m_stats.replayed;
 	}

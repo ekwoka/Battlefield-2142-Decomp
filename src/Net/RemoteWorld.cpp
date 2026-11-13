@@ -1,5 +1,7 @@
 #include "RemoteWorld.h"
 
+#include "PlayerAuth.h"
+
 #include <zlib.h>
 
 #include <algorithm>
@@ -10,8 +12,12 @@ namespace dice::hfe::net {
 
 RemotePlayer& RemoteWorld::playerSlot(int id)
 {
-	RemotePlayer& p = m_players[id];
+	const auto [it, made] = m_players.try_emplace(id);
+	RemotePlayer& p = it->second;
 	p.id = id;
+	if (made) {
+		p.created = m_playersMade++;
+	}
 	return p;
 }
 
@@ -100,6 +106,12 @@ void RemoteWorld::applyDataBlock(const DataBlockChunk& chunk)
 		m_inData = false;
 		if (m_dataType == 2) {
 			onLevel(m_dataBuffer);
+		}
+		if (m_dataType == kRconFeedbackBlock) {
+			m_consoleLines.push_back(m_dataBuffer + "\n");
+		}
+		if (m_dataType == 9) {
+			m_newDemoNotice = true;
 		}
 	}
 }
@@ -203,12 +215,20 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (!parseCreateObject(event, info)) {
 			return false;
 		}
-		// 0x0050b450: an object of `count` ghosts, one per PlayerControlObject
-		// of its tree (0x0067c690), numbered from `ghost`.
+		// 0x0050b450: an object of one ghost per PlayerControlObject of its
+		// tree (0x0067c690), numbered from `ghost`. The server's CreateObject
+		// always says one (0x0050b0f0 sets +0x30 to 1, from 0x004ab8a0 and
+		// the late-join replay alike) with the root's place and rotation:
+		// the client makes the tree there and registers every ghost of it
+		// from that id (0x004b3f70 -> 0x0067d3d0). A count over 1 makes
+		// each ghost at the origin (never sent by the exe's server).
 		const std::vector<GhostPartLayout>* layout = ghostLayout(info.templateId);
 		const auto shared = layout ? m_layouts[info.templateId] : nullptr;
+		const uint32_t count = info.count == 1 && layout && !layout->empty()
+			? static_cast<uint32_t>(layout->size())
+			: info.count;
 		std::vector<uint16_t> seats;
-		for (uint32_t n = 0; n < info.count; ++n) {
+		for (uint32_t n = 0; n < count; ++n) {
 			const uint16_t ghost = static_cast<uint16_t>(info.ghost + n);
 			RemoteObject& o = m_objects[ghost];
 			o = {};
@@ -250,12 +270,12 @@ bool RemoteWorld::apply(const GameEvent& event)
 			&& (!m_resolver || m_resolver(info.templateId).empty())) {
 			onProblem("unknown template", "CreateObject of template id " + std::to_string(info.templateId) + " (ghost "
 				+ std::to_string(info.ghost) + ", " + std::to_string(info.count) + " ghosts)");
-		} else if (onProblem && layout && layout->size() != info.count) {
+		} else if (onProblem && layout && info.count > 1 && layout->size() != info.count) {
 			onProblem("ghost count", "CreateObject of " + std::string(m_resolver ? m_resolver(info.templateId) : "")
 				+ " (template id " + std::to_string(info.templateId) + ") says " + std::to_string(info.count)
 				+ " ghosts, its layout has " + std::to_string(layout->size()));
 		}
-		if (info.count > 0) {
+		if (count > 0) {
 			m_objects[info.ghost].seats = seats;
 		}
 		return true;
@@ -736,6 +756,9 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 			if (!states.empty()) {
 				applyState(o, states.front());
 				o.decoded = states.front().complete;
+				if (states.front().hasPosition) {
+					o.positionTick = ghosts.tick;
+				}
 			}
 			applyParts(o, layout, states);
 			continue;
@@ -754,6 +777,9 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 		}
 		if (decoded) {
 			applyState(o, state);
+			if (state.hasPosition) {
+				o.positionTick = ghosts.tick;
+			}
 		}
 	}
 }
@@ -955,6 +981,12 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 		return;
 	}
 	const NetworkableState& root = states.front();
+	// A vehicle root's ducking (SimpleObject 0x100000: PCO +0x18c), its
+	// driver's seat's as a seat ghost's bit 8 is its own (0x005ffec0 hands
+	// it to the object's setDucking, PCO slot 0x12c).
+	if ((root.mask & 0x100000) && root.kind == NetworkableKind::SimpleObject) {
+		o.seatDucking = root.ducking;
+	}
 	if ((root.mask & 0x800000) && root.kind == NetworkableKind::SimpleObject && !layout.groups.empty()) {
 		// The armored children (0x800000); the repair cells among them in
 		// order, a cell standing while its hit points do (its armour state
@@ -962,9 +994,11 @@ void RemoteWorld::applyParts(RemoteObject& o, const GhostPartLayout& layout, con
 		o.childDamage = root.childDamage;
 		const std::vector<bool>& cells = layout.groups.front().hints.armoredRepairCells;
 		o.repairCells.clear();
+		o.repairCellEighths.clear();
 		for (size_t i = 0; i < cells.size() && i < root.childDamage.size(); ++i) {
 			if (cells[i]) {
 				o.repairCells.push_back(root.childDamage[i] > 0);
+				o.repairCellEighths.push_back(root.childDamage[i]);
 			}
 		}
 	}
@@ -1078,8 +1112,8 @@ void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 		// point's setter (CP slot 0x34, 0x005bcd00) on every one, changed or
 		// not, which tells its Radio (the takeable radio).
 		// The server's per-client dirty masks send them when they change
-		// (and with a new ghost's first state); the rewrite's server sends
-		// them in every state, so a set here is one that changed or the first.
+		// (and with a new ghost's first state, or again after a loss), so
+		// only a changed one (or the first) is handed on.
 		if ((s.mask & 8) && (!o.hasAllow[0] || o.allow[0] != s.cpAllowTeam1)) {
 			o.hasAllow[0] = true;
 			o.allow[0] = s.cpAllowTeam1;
@@ -1286,6 +1320,43 @@ std::string RemoteWorld::encodeEndOfRoundData(const EndOfRoundData& data)
 		}
 	}
 	return bytesOf(out);
+}
+
+std::string RemoteWorld::encodeDemoNotice(const DemoNotice& notice)
+{
+	BitWriter out;
+	for (const std::string* text : {&notice.url, &notice.map}) {
+		const size_t length = std::min<size_t>(text->size(), 255);
+		out.write(static_cast<uint32_t>(length), 8);
+		for (size_t i = 0; i < length; ++i) {
+			out.write(static_cast<uint8_t>((*text)[i]), 8);
+		}
+	}
+	return bytesOf(out);
+}
+
+bool RemoteWorld::decodeDemoNotice(const std::string& block, DemoNotice& out)
+{
+	BitReader in(reinterpret_cast<const uint8_t*>(block.data()), block.size());
+	out = {};
+	for (std::string* text : {&out.url, &out.map}) {
+		const uint32_t length = in.read(8);
+		for (uint32_t i = 0; i < length; ++i) {
+			text->push_back(static_cast<char>(in.read(8)));
+		}
+	}
+	return !in.bad();
+}
+
+bool RemoteWorld::demoNotice(DemoNotice& out) const
+{
+	const auto it = m_dataBlocks.find(9);
+	return it != m_dataBlocks.end() && decodeDemoNotice(it->second, out);
+}
+
+bool RemoteWorld::takeDemoNotice(DemoNotice& out)
+{
+	return std::exchange(m_newDemoNotice, false) && demoNotice(out);
 }
 
 bool RemoteWorld::endOfRoundData(EndOfRoundData& out) const

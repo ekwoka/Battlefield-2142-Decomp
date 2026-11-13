@@ -6,6 +6,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Hud/Hud.h"
 #include "Main/HudAlerts.h"
+#include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/SettingsObjects.h"
 #include "TestMain.h"
@@ -110,6 +111,17 @@ TEST(SettingsObjects_Console)
 	CHECK(loaded.generalScript() == general);
 	CHECK(loaded.gameSettings().count("GSCameraShake") == 1);
 	std::filesystem::remove_all(dir);
+}
+
+// GeneralSettings' defaults of its slot 0x28 (0x0049a170, called by the
+// constructor 0x0049bd20): auto reload and the reversed item selection on,
+// connection type 5.
+TEST(SettingsObjects_GeneralDefaults)
+{
+	menu::SettingsObjects settings;
+	CHECK(settings.get("GeneralSettings.AutoReload") == "1");
+	CHECK(settings.get("GeneralSettings.ItemSelectionReverseItems") == "1");
+	CHECK(settings.get("GeneralSettings.ConnectionType") == "5");
 }
 
 TEST(SettingsObjects_MenuPages)
@@ -316,4 +328,57 @@ TEST(SettingsObjects_RetailAudioQualityMapping)
 	CHECK(menu::audioQualityIndex("High") == 0);
 	CHECK(menu::audioQualityIndex("UltraHigh") == 0);
 	CHECK(menu::audioQualityIndex("medium") == 1);
+}
+
+// The video options' modes as RendDX9 lists them (0x10010830 with
+// 0x100079b0 / 0x10007b60 / 0x100084a0): 32 bits, at least 800 wide and
+// 480 high at 60 Hz or more, 4:3 only without "+widescreen 1", never
+// 848 or 1024 x 480, ascending.
+TEST(DisplayModes_TheOriginalsFilters)
+{
+	const std::vector<DisplayMode> modes = {
+		{1920, 1080, 60, 32}, {1280, 1024, 60, 32}, {1024, 768, 75, 32}, {1024, 768, 60, 32},
+		{800, 600, 60, 32}, {800, 600, 60, 16}, {640, 480, 60, 32}, {1024, 480, 60, 32},
+		{848, 480, 60, 32}, {1600, 1200, 50, 32}, {1600, 1200, 0, 32}, {1024, 768, 60, 32},
+	};
+	const std::vector<std::string> fourThree = listDisplayModes(modes, false);
+	CHECK((fourThree == std::vector<std::string> {"800x600@60Hz", "1024x768@60Hz", "1024x768@75Hz", "1600x1200@0Hz"}));
+	const std::vector<std::string> wide = listDisplayModes(modes, true);
+	CHECK((wide == std::vector<std::string> {"800x600@60Hz", "1024x768@60Hz", "1024x768@75Hz", "1280x1024@60Hz",
+				   "1600x1200@0Hz", "1920x1080@60Hz"}));
+	// A display with no 4:3 modes still lists its wider ones.
+	const std::vector<DisplayMode> panel = {{1512, 982, 120, 32}, {1728, 1117, 60, 32}, {1920, 1080, 60, 32}};
+	CHECK((listDisplayModes(panel, false) ==
+		std::vector<std::string> {"1512x982@120Hz", "1728x1117@60Hz", "1920x1080@60Hz"}));
+}
+
+// The antialiasing modes as RendDX9 lists them (0x10007e30 keeps the
+// multisample types 0..16 the device takes, 0x1000fb60 names them "Off"
+// and "%dSamples" without type 1): only the counts the GPU supports.
+TEST(DisplayModes_AntialiasingModesAreTheDevices)
+{
+	CHECK((listAntialiasingModes({}) == std::vector<std::string> {"Off"}));
+	CHECK((listAntialiasingModes({8, 2, 4}) == std::vector<std::string> {"Off", "2Samples", "4Samples", "8Samples"}));
+	CHECK((listAntialiasingModes({2, 4}) == std::vector<std::string> {"Off", "2Samples", "4Samples"}));
+	CHECK((listAntialiasingModes({1, 2, 32}) == std::vector<std::string> {"Off", "2Samples"}));
+}
+
+// GeneralSettings slot 0x190 (0x0049ca90), the in-game HUD's
+// HudManager.addFavouriteServer 0 (0x00449180): the joined server's
+// favourite goes by its address and game port, every line of it; another
+// port's stays.
+TEST(SettingsObjects_RemoveFavouriteServer)
+{
+	Console console;
+	menu::SettingsObjects settings;
+	settings.registerConsole(console);
+	run(console, "GeneralSettings.addFavouriteServer \"127.0.0.1\" 17567 \"Here\" 1762000000");
+	run(console, "GeneralSettings.addFavouriteServer \"127.0.0.1\" 17568 \"Other port\" 0");
+	run(console, "GeneralSettings.addFavouriteServer \"127.0.0.1\" 17567 \"Here again\" 0");
+	CHECK(settings.list("GeneralSettings.FavouriteServer").size() == 3);
+	CHECK(settings.removeFavouriteServer("127.0.0.1", 17567));
+	CHECK(settings.list("GeneralSettings.FavouriteServer").size() == 1
+		&& settings.list("GeneralSettings.FavouriteServer")[0].find("Other port") != std::string::npos);
+	CHECK(!settings.removeFavouriteServer("127.0.0.1", 17567));
+	CHECK(settings.generalScript().find("17567") == std::string::npos);
 }

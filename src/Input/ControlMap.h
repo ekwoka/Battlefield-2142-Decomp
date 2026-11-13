@@ -241,6 +241,11 @@ public:
 	static constexpr const char* kAir = "AirPlayerInputControlMap";
 	static constexpr const char* kHelicopter = "HelicopterPlayerInputControlMap";
 	static constexpr const char* kSea = "SeaPlayerInputControlMap";
+	// The player's map: the infantry one on foot, in a vehicle (any seat)
+	// the map of its root's vehicleCategory (VCLand, VCSea, VCAir,
+	// VCHelicopter; the land one for none), as the input manager holds it
+	// (DAT_00a0f7c8 slot 0x48, which 0x00752b70's #PI keys read too).
+	static const char* playerMapFor(bool inVehicle, const std::string& vehicleCategory);
 
 private:
 	const std::vector<Binding>* bindings(const std::string& map, const std::string& input,

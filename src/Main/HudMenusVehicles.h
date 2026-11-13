@@ -97,6 +97,7 @@
 
 #include <array>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -445,7 +446,10 @@ struct ItemListInput {
 	// unless the weapon in hand is zoomed (its firearm's slot 300), in a
 	// vehicle only with the control object's vehicleHud.useSelectionIcons
 	// (block +0xbc); never in a demo. The active weapon's +0x14 bit 0,
-	// which also forbids it, isn't traced.
+	// which also forbids it, is the object's disabled flag (0x006f68f0
+	// flag 1: a soldier's firearm's disable 0x005c42f0 sets it, its enable
+	// 0x005c47d0, run when it is made active, clears it); the rewrite's
+	// active weapons are never disabled in place, so it is left out.
 	bool allowed = false;
 	std::vector<SelectItem> items; // 0x0079c470's list
 	int inHand = -1;               // the item index in hand (selected at opening)
@@ -686,19 +690,20 @@ bool usesVehicleCommRose(const world::ObjectTemplate* controlled);
 // or nothing below it has armour.
 const world::ObjectTemplate* childArmorTemplate(const world::ObjectTemplate* controlled,
 	const world::ObjectTemplateManager& templates);
-// The zoomed vehicle views' post-processing (RendDX9's TVEffect pass,
-// asked through the HUD manager's slot 0x2b8 -> 0x007a0080): on in the
-// inside view of a seat whose controlled template sets
-// vehicleHud.enablePostProcessingOnGuiIndex (a 32-bit flag at the
-// template's +0x11c, executor 0x00554a71 through template slot 0x158 /
-// 0x15c, 0x006376c0; 48 seats: the APCs' pod cannons and second turret,
-// the walkers' and tanks' gunner seats, the drivers' cameras), or whose
-// weapon's weaponHud.enablePostProcessingOnGuiIndex names the gui index
-// shown (altGuiIndex zoomed, else guiIndex). The vehicle flag's reader
-// isn't traced; the seats that set it carry no weapon-side index (the pod
-// cannons' guns, guiIndex 72), so it is taken to turn the pass on for the
-// seat's own view.
-bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon, bool zoomed);
+// The vehicle views' post-processing (the PostProcess component's
+// values to PostProductionFrameWork, asked through the HUD manager's slot
+// 0x2b8 -> 0x007a0080 with the gui index shown, the HUD's +0xa0): the
+// runtime VehicleHud's slot 0x40 (0x006573a0) gives the seat's own when
+// its vehicleHud.guiIndex (template slot 0x30, +0x134) and
+// vehicleHud.enablePostProcessingOnGuiIndex (slot 0x15c, +0x11c, default
+// -1 at 0x00637b30; executor 0x00554a71, setter 0x006376c0) both equal the
+// index shown; else its first weapon's (slot 0x78(0)) when that one's
+// weaponHud.enablePostProcessingOnGuiIndex (its HUD template's +0xdc)
+// equals it; else the second's (0x0042b2f0 slot 0x78(1)) the same way.
+// The 48 shipped seats that set the vehicle's set it to 1 with guiIndex 0
+// (61 on one), so only the weapons' turn it on.
+bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::ObjectTemplate* weapon,
+	const world::ObjectTemplate* second, int shownGuiIndex);
 // The weapon HUD's gui index (the runtime WeaponHud's slot 0x38,
 // 0x00657a70): altGuiIndex (the template's getter slot 0x38) while the
 // firearm is zoomed (its slot 300: the zoom level not 0, at once, before
@@ -782,6 +787,17 @@ int vehicleGuiIndex(const VehicleGuiInput& in);
 // that camera, depth first from the template; "" when the flag is off, or
 // no camera hangs under one (the icon keeps the object's yaw).
 std::string cameraRotationBundle(const world::ObjectTemplate& t, const world::ObjectTemplateManager& templates);
+// An order's minimap icon (Bf2MenuMapNode 0x0078b110, the textures of
+// 0x00786b7a..): the squad's orders through 0x00791090, its leader's
+// (squad slot 0x10, 0x004c2ee0; 0x00779e50) from the table at +0x954, the
+// commander's (slot 0x14, 0x004c2ef0; 0x0077a1a0) from +0x97c, each by
+// the order's kind: 0 orbit_strike, 1 force_strike, 2 icon_UAV, 3
+// icon_supplies (Ingame/Commander/tools/ and Ingame/Minimap/Icons/), 4..9
+// orderMove, orderAttack, orderDefend, orderRepair, orderDestroy,
+// orderMine (+ "Commander" for the commander's). "" past 9 (the
+// squad's slot 10 holds orbit_strike again, the commander's nothing:
+// +0x97c and +0x9a4 are written twice).
+std::string orderMapIcon(int kind, bool commander);
 // A numbered frame of an icon without an extension (mini_titanSilo +
 // 2 -> mini_titanSilo_02.dds); a name with one stays.
 std::string iconFrame(const std::string& icon, int frame);
@@ -804,5 +820,146 @@ struct RadarMarker {
 	float x = 0, z = 0, size = 16, yaw = 0;
 };
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
+
+// The radio calls on the map (Bf2MenuMapNode's marker list +0xa94, its
+// entries 0x34 bytes from 0x00790d60: the texture, the id, the size, the
+// type, the time +0x14 and its total, a delay +0x18):
+//   - a call (0x007918d0 case 0x33..0x37: the call's message, the caller's
+//     soldier by its ghost; the local player's own from the game's slot
+//     0xd8): one of a teammate other than the local player, when the local
+//     player's kit can answer it (the kit's slot 0x38 bytes: [0] heal for
+//     0x33 medic and 0x36 / 0x37 revive, [2] ammunition for 0x34, [1]
+//     repair for 0x35; +0x7f, which would take any call, has no writer but
+//     the constructor's 0), drops the caller's marker (0x007845c0) and
+//     puts one of type 4 on him for +0xac8 = 12 s (+0xac0 0.5 and +0xac4 1
+//     the blink's) in the call's icon (slot 0x110, 0x0077ac70: mini_Medic,
+//     mini_Ammo, mini_Repair, mini_Revive). The local player's own call
+//     sets +0x7c (medic, revive), +0x7d (ammunition) or +0x7e (repair);
+//   - those flags last one draw (0x00795620 clears them at its end): each
+//     teammate drawn (the soldiers 0x00792980, a vehicle's rider
+//     0x00793b60) whose kit can answer one gets a marker of type 4 in its
+//     icon (medic, then repair, then ammunition) with no time and a 12 s
+//     delay, unless he has a marker (0x00790d60 adds only for an id
+//     without one, but for type 3);
+//   - each frame (0x007840c0) a marker's delay counts down, then its time;
+//     one with neither left goes;
+//   - a teammate with a marker is drawn in its icon, 16 px (0x007841e0 ->
+//     slot 0xf0 with 0x10, 0x00781900: a call icon white), the call icons
+//     on the map's top layers (0x007829c0: 0x1b medic / revive, 0x1c
+//     repair, 0x1d ammunition); how he is drawn is mateMarker's.
+// The marker list's other entries (the reports' vehicles, the radar's
+// blips) are kept apart here (RadarMarker, GameWorld::radarContacts).
+class MapCalls {
+public:
+	struct Kit {
+		bool heal = false, repair = false, ammo = false; // the kit's slot 0x38 bytes [0], [1], [2]
+	};
+	// A call heard: the caller (a player id) and his team, the code
+	// (0x33..0x37), the local player, his team and kit.
+	void call(int caller, int callerTeam, int code, int localPlayer, int localTeam, const Kit& local);
+	struct Mate {
+		int player = -1;
+		Kit kit;
+	};
+	// A draw: the teammates drawn (not the local player) take the local
+	// player's own call's flags, which then clear.
+	void place(const std::vector<Mate>& drawn);
+	void tick(float seconds);
+	// The icon a player is drawn in ("" none).
+	std::string icon(int player) const;
+	void clear() { m_markers.clear(); m_medic = m_ammo = m_repair = false; }
+	static std::string iconOf(int code); // 0x0077ac70
+
+private:
+	struct Marker {
+		int player = -1;
+		std::string texture;
+		float time = 0, delay = 0;
+	};
+	bool has(int player) const;
+	std::vector<Marker> m_markers;
+	bool m_medic = false, m_ammo = false, m_repair = false; // +0x7c, +0x7d, +0x7e
+};
+
+// A teammate on the map (Bf2MenuMapNode's players, 0x00792980). Each is
+// three markers (the icon at -0xd8, the arrow at -0xa0, the health bar at
+// -0x68 of its frame, 0x00792ad0..0x00792be2), the icon's 0x34-byte record
+// (0x0077d5d0: the point, colour +8, size +0x18, offset +0x20, angle +0x28,
+// texture +0x2c and +0x30, kept on the map):
+//   - the icon (slot 0x138, 0x0077d9f0, with toggleShowKits' +0x3c1 off
+//     and the kit filter's bit 7 on): a commander (player slot 0x128) 32
+//     px in mini_commander2 (+0xa1c; mini_commander1 +0xa18 for another
+//     team's), a squad leader (slot 0x150) 16 px in his squad's
+//     SquadLeaders/mini_Squad_%d_small (slot 0xfc, 0x0077aa20), both with
+//     the arrow; else 16 px mini_Soldier (+0xa28) without it;
+//   - turned by his control object's heading (slot 0x4c's matrix, the
+//     map's turn +0x80c less atan2 of its forward, 0x007938e5..0x007939f9):
+//     the arrow when he has one, else the icon;
+//   - its colour (slot 0xf0, 0x00781900, outside the map menus and the
+//     commander screen): the squad's (0.4, 1, 0) (0x00b3c360's [2],
+//     0x00b3c1c0 = 0x00a0bb60) when he shares the local player's vehicle
+//     (the same root, 0x006f1d70) and the local player has a squad, or is
+//     in the local player's squad and isn't the commander; the commander
+//     on foot or on a ladder (LadderContainer, 0x9c46) in his icon white;
+//     else the team's (0.254, 0.552, 0.89) (0x00b3c260's [2] =
+//     0x00a0be60). The list +0xad0 that would make him (0, 1, 1)
+//     (0x00780290 -> 0x00b3c460) is never filled. Its alpha is the map's
+//     icon alpha (+0x79c);
+//   - with a call's marker (0x007841e0, type 4) the icon is the call's,
+//     white at alpha 1 (0x00781900's first test; +0x14 left at 1), not
+//     turned (type 4 clears the turn flag), and for the medic, repair and
+//     ammunition icons (not the revive) the arrow is mini_medicArrow at 16
+//     px (+0xa5c, 0x00793585), drawn for a plain soldier too; a squad
+//     leader's revive call keeps his heading arrow, unturned;
+//   - the arrow is mini_headingArrow (+0xa20) at 32 px in black (0, 0, 0,
+//     the icon's alpha), at the icon's point (0x00793b22: the icon's,
+//     after it is kept on the map). mini_medicArrow is a small black
+//     pointer at the top of its 16 px: with the call icon, a pin.
+//   - the need disc (mini_Health, +0xa2c, 16 px; the main map's alone,
+//     +0xb17): when the local player's kit heals or gives ammunition (its
+//     Ability's slot 0x38 bytes [0] / [2], through game slot 0xac and
+//     0x00590430) and his control object is within 150 m of the
+//     teammate's soldier (slot 0xb4; 0x0077b340, in 3D): a healer measures
+//     the soldier's armour (hit points over maxHitPoints, slots 0x3c /
+//     0x8c), else an ammunition giver the weapon in his hand (the
+//     PlayerControlObject's +0x1f8, firearm 0x94c0 slots 0xb8 magSize and
+//     0xa8 nrOfMags both 0 or more: (slot 0xb0, the magazines with the
+//     gun's, less 1) over nrOfMags). Below a half it is drawn under the
+//     icon in (1, the share, 0) at the icon's alpha (0x00793a45..
+//     0x00793af9).
+// Drawn in that order: the disc, the arrow, the icon. The kit icons of
+// Minimap.toggleShowKits (+0x3c1: 15 px, game slot 0x64, unturned) and
+// the kit filter (setPaintKit, +0x3f4, bit 7 the leaders') aren't
+// rewritten: no shipped script calls either.
+struct MateInput {
+	bool commander = false, squadLeader = false;
+	int squad = 0;      // his (player slot 0x120); 0 none
+	int localSquad = 0; // the local player's
+	bool sharesVehicle = false; // the local player's control object has the same root
+	bool onFoot = true;         // his control object is his soldier, or a ladder
+	float yaw = 0;              // his control object's heading, degrees clockwise from north
+	std::string call;           // MapCalls::icon ("" none)
+	std::optional<float> need;  // the disc's share (see above), mateNeed
+};
+struct MateMarker {
+	std::string texture;
+	float size = 16;
+	float color[4] = {1, 1, 1, 1};
+	float yaw = 0;
+	bool iconAlpha = true; // takes the map's icon alpha
+	bool arrow = false;
+	std::string arrowTexture;
+	float arrowSize = 32;
+	float arrowYaw = 0;
+	bool disc = false;
+	float discColor[4] = {1, 0, 0, 1};
+};
+MateMarker mateMarker(const MateInput& in);
+// The disc's share for a teammate (none: not measured): his soldier's
+// health share (-1 without armour) and the weapon in his hand's
+// magazines (with the gun's), nrOfMags and magSize (-1 without a
+// firearm), with the local player's kit and the distance between them.
+std::optional<float> mateNeed(bool localHeals, bool localGivesAmmo, float distance, float health, int magazines, int nrOfMags,
+	int magSize);
 
 } // namespace dice::hfe::menu

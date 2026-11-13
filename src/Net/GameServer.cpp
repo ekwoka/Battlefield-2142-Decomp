@@ -300,6 +300,8 @@ void GameServer::deliver(Client& client, const GameEvent& event)
 				if (onPlayerInfo) {
 					onPlayerInfo(client.info.id);
 				}
+			} else if (client.dataType == kRconCommandBlock && onRemoteCommand) {
+				onRemoteCommand(client.info.id, client.dataBuffer);
 			}
 		}
 		return;

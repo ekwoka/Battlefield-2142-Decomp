@@ -464,7 +464,7 @@ std::vector<uint32_t> BotManager::heardVehicles(int player) const
 // each with a team (adaptor slot 0x120) and an Armament or Mobile part
 // makes a sound sphere (hearingReach), and every bot of another team
 // within it (3-D), not dead (slot 0xb8) or slot 0x18c, is told (bot slot
-// 0x164 = 0x100969b0, not for a scripted bot, +0x264) -> 0x100ec100: not
+// 0x164 = 0x100969b0, not for an auto controller, +0x264) -> 0x100ec100: not
 // within 1.5 s of the bot's own last round (+0xc0, 0x10097a60 from the
 // rounds' event 0x1004e910), not its own object, not its team, and a
 // soldier source only for a soldier listener (the listener's flag bit 9);
@@ -903,7 +903,9 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	bindMethod(
 		console, "aiStrategicArea.create", access,
 		[st](std::string name, ConsoleVec2 corner, ConsoleVec2 other, float height, float temperature, std::string) {
-			// An area of its own (0x10017a00): a box, no control point. The
+			// An area of its own (0x10017a00, run 0x10017c30 -> 0x10037ed0 ->
+			// 0x10062e10): the box's corner, then its centre (the area's
+			// position), the height and the temperature; no control point. The
 			// rewrite's SAI keeps its per-side status (ai::boxAreaStatus,
 			// 0x1005f210) for its neighbours; it orders units only to the
 			// control point areas (see docs/engine.md, Strategy).
@@ -911,10 +913,10 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 			area.name = name;
 			area.temperature = temperature;
 			area.box = true;
-			area.boxMin[0] = std::min(corner.x, other.x);
-			area.boxMin[1] = std::min(corner.y, other.y);
-			area.boxMax[0] = std::max(corner.x, other.x);
-			area.boxMax[1] = std::max(corner.y, other.y);
+			area.corner[0] = corner.x;
+			area.corner[1] = corner.y;
+			area.position[0] = other.x;
+			area.position[1] = other.y;
 			area.height = height;
 			st->areas.push_back(area);
 			st->area = name;
@@ -987,7 +989,7 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	// isInside <area> <x/z> (0x1001e330): a box area's test.
 	bindMethod(console, "aiStrategicArea.isInside", access, [st](std::string name, ConsoleVec2 at) {
 		const ai::StrategicArea* a = st->findArea(name);
-		return a && a->box && at.x >= a->boxMin[0] && at.x <= a->boxMax[0] && at.y >= a->boxMin[1] && at.y <= a->boxMax[1];
+		return a && a->box && a->insideBox(at.x, at.y);
 	});
 	bindMethod(console, "aiStrategicArea.getStrategicAreaNames", access, [st]() {
 		std::string out;

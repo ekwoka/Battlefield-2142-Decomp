@@ -55,9 +55,12 @@ public:
 	// The local player's team (0 without one).
 	int playerTeam() const;
 	// The scoreboard's numbers (the player's networkable on a client: score,
-	// rplScore, ping; the scripts' score locally).
+	// rplScore, ping; the scripts' score locally). skillScore (stats +8,
+	// one of the order's keys) isn't in the networkable (0x005981a0), so a
+	// client's stays 0; locally the scripts'.
 	struct Scores {
 		int score = 0, teamwork = 0, ping = -1;
+		int skillScore = 0;
 	};
 	virtual Scores scores(int player) const = 0;
 	virtual float tickets(int team) const = 0;
@@ -70,12 +73,14 @@ public:
 	// group finds no server interface (0x918c30) and answers true (0x006330ee).
 	virtual bool spawnGroupActive(int /*group*/, int /*player*/) const { return true; }
 	virtual int spawnChoice(int player) const = 0;
+	// The team's mobile spawn points (GameWorld::spawnVehicles): vehicles.
+	virtual std::vector<uint32_t> spawnVehicles(int) const { return {}; }
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
 	// Local pilot's requested thrust, not engine output.
 	virtual float pilotThrust(uint32_t vehicle) const { (void)vehicle; return 0; }
 	virtual float hitPoints(uint32_t object) const = 0;
-	// An object's armour as a fraction of its maxHitPoints, -1 when not known
+	// An object's armour as a fraction of its maxHitPoints, -1 for none
 	// (no armour, or a ghost whose health hasn't come): the name tags' bars
 	// and useAliveArmor (RendDX9 0x1016a950: the armour's slot 0x60).
 	virtual float objectHealth(uint32_t object) const = 0;
@@ -164,9 +169,7 @@ public:
 	// level's own areas'.
 	virtual float combatAreaTimeLeft() const { return -1; }
 	// The ability bar's inputs (GameWorld::abilityBar) for the local player:
-	// a local round's. A joined game's: none (the server networks the
-	// players' gift flags, player networkable bits read by 0x00596ed0, but
-	// not their ticks or the tools' targets).
+	// a local round's, or a joined game's (RemoteHudWorld::abilityBar).
 	virtual bool abilityBar(game::GameWorld::AbilityBarInfo& out) const
 	{
 		(void)out;
@@ -200,6 +203,7 @@ class LocalHudWorld : public HudWorld {
 public:
 	LocalHudWorld(game::GameWorld& round, const game::GameLogic& logic) : m_round(round), m_logic(logic) {}
 	std::function<int(int)> scoreOf; // the scripts' scores (else kills x 2 - team kills x 4)
+	std::function<int(int)> skillScoreOf; // the scripts' skillScore (else 0)
 
 	bool joined() const override { return false; }
 	int localPlayer() const override { return m_round.localPlayer(); }
@@ -212,6 +216,7 @@ public:
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
 	bool spawnGroupActive(int group, int player) const override { return m_round.spawnGroupActive(group, player); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
+	std::vector<uint32_t> spawnVehicles(int team) const override { return m_round.spawnVehicles(team); }
 	// The vehicle bodies and the map's other PlayerControlObjects (the
 	// sentry gun, the drones, the pods: GameWorld::mapObjects), as the
 	// game's list of them holds both (0x00793b60).
@@ -243,7 +248,7 @@ public:
 	}
 	const world::Object* soldier() const override { return m_round.player(); }
 	const world::Object* vehicle() const override { return m_round.playerVehicle(); }
-	float health() const override { return 1; }
+	float health() const override;
 	Weapon heldWeapon() const override;
 	Weapon seatGroupWeapon(int group) const override;
 	std::vector<int> revealedPlayers(int team) const override;
@@ -282,6 +287,32 @@ public:
 	bool soldierJumpHold() const override { return ownJumpHold && ownJumpHold(); }
 	// The spawn group the local player asked for (6/6), -1 none.
 	int chosenSpawn = -1;
+	// Our soldier's ability battery as the prediction has it (the control
+	// record's, filled between records); false: none.
+	std::function<bool(float& battery)> ownBattery;
+	// The scan of our tool in hand, run here as the exe's client runs the
+	// ReplenishingAmmoComp's update (0x005d8ac0 on every machine; only the
+	// treating is the server's, game logic slot 0x144): while the tool
+	// works (a hub in hand; the repair tool while firing, `fire`), every
+	// second with no targets and every two with some (0x00a6db70 /
+	// 0x00a6db68), the targets of 0x005d8740 (a sphere of abilityRadius
+	// round the hands: our team's soldiers on foot; the objects of our team
+	// or none that can be mended, 0x005d7d40) or of 0x005d84a0 (the first
+	// object along the look within abilityRadius), as GameWorld's own scan.
+	void stepAbility(float seconds, bool fire);
+	// The bar's inputs (0x007c3af0 runs on the client too): our own state's
+	// gift flags (0x00596ed0: +0x16a, +0x168, +0x169) without their ticks
+	// (nothing sends +0x15c / +0x160, and the constructor's 0 keeps the
+	// vehicle branch off), the kit's and the tool's flags, our battery, and
+	// the targets: a soldier's networked health or an object's hit points
+	// over maxHitPoints; for the ammo kit 15 each, as no networkable
+	// carries another soldier's magazines (what the exe's client's copies
+	// of their weapons hold for 0x00588ba0 isn't traced).
+	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override;
+	// Our hit indicator's alpha: 1 when our own state's flag comes
+	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
+	// (0x005912c0); PlayerInfo::hitIndicator of the local player.
+	float hitIndicator = 0;
 
 	bool joined() const override { return true; }
 	int localPlayer() const override;
@@ -294,6 +325,13 @@ public:
 	std::vector<ControlPointInfo> controlPointList() const override;
 	std::vector<int> spawnablePoints(int team) const override;
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
+	// The vehicles the server's spawn groups ride (their ghosts' objects).
+	std::vector<uint32_t> spawnVehicles(int team) const override;
+	// The server's spawn group placed at an object here (a squad leader's
+	// soldier or a vehicle: the groups the spawn manager makes as the round
+	// goes, ids from 0xc0), -1 none: what the spawn screen's squad leader
+	// and vehicle markers ask for (6/6).
+	int spawnGroupAt(uint32_t object) const;
 	std::vector<VehicleInfo> vehicleList() const override;
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override;
 	float pilotThrust(uint32_t vehicle) const override;
@@ -319,6 +357,12 @@ public:
 
 private:
 	void fill(const net::RemotePlayer& p, PlayerInfo& out) const;
+	std::vector<uint32_t> scanAbilityTargets(const PlayerInfo& me, float radius, bool ammo, bool whileFiring) const;
+	struct AbilityScan {
+		bool active = false; // the tool works (abilityActive)
+		float timer = 0;
+		std::vector<uint32_t> targets;
+	} m_abilityScan;
 	const net::RemoteWorld& m_world;
 	game::GameWorld& m_round;
 	const std::map<uint16_t, uint32_t>& m_ghostObjects;

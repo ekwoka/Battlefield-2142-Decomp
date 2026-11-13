@@ -149,6 +149,8 @@ public:
 	HostedGame(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates, HostSetup setup);
 	~HostedGame();
 	bool start();
+	// What the query port answers (the qr2 callbacks: server keys, players, teams).
+	net::ServerReport report() const;
 	// A new level (the next map, or the same one again for a new round) on
 	// the same connections: the clients get its level block and join it.
 	void changeLevel(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates,
@@ -200,15 +202,24 @@ public:
 	void sayAll(const std::string& text);
 	void sayTeam(int team, const std::string& text);
 	// The remote console in the game: a client's "rcon <command>" comes as
-	// message 6/0x12 (the client's 0x004b6630 case 0x12 sends the line;
-	// the server's 0x004b0690 case 0x12 raises the scripts' RemoteCommand
-	// with the player), the reply as 6/0x13 (host.rcon_feedback, 0x00442940:
-	// "rcon: <text>").
+	// data block 6 (the client's 0x004b6630 case 0x12 sends the line; the
+	// server's 0x004aef10 raises the scripts' RemoteCommand with the
+	// player), the reply as data block 7 (host.rcon_feedback, 0x00442940:
+	// "rcon: <text>", sent by 0x004b0690 case 0x13). PlayerAuth.h.
 	std::function<void(int player, const std::string& command)> onRemoteCommand;
 	void sendRemoteFeedback(int player, const std::string& text);
 	// A chat line a client said (for the scripts' ChatMessage: player, text,
 	// channel, flags).
 	std::function<void(int player, const net::ChatMessage& line)> onChat;
+	// The hand-out of a player's line (0x004ab6b0): to each playing
+	// client whose player hears it (0x004a93b0 → GameWorld::hearsChat; a
+	// whisper only to its player's client) and to the server's own player
+	// when it does (0x004a7800 → its HUD, 0x004a56b0: onLocalChat). The
+	// sender's own HUD showed it when sent (0x007d9b50), so it never comes
+	// back. localSay is the server's own player's line (its send, then the
+	// same hand-out).
+	void localSay(int player, const net::ChatMessage& line);
+	std::function<void(const net::ChatMessage& line)> onLocalChat;
 	// The votes' results (game::Votes, the server's 0x0058fb90): a map vote
 	// passed (5 s on, the map-list index to run), a mutiny against a team's
 	// commander. A kick vote kicks here ("KICKED", 0x15).
@@ -233,9 +244,20 @@ public:
 	// posts 2/<message> there): a radio call's code (0x33..0x36) or a spot
 	// (0x2e), the reporter's soldier ghost in `spotter`.
 	std::function<void(const net::SpottedInfo&)> onSpotted;
+	// Squad manager slot 0x30 (0x004c3190) from a leader: the invited
+	// player's mask gets the squad's bit and his client 2/0x10 (the squad).
+	void inviteToSquad(int leader, int player);
+	// A private squad's leader answers a player's request to join (the
+	// HUD's question kind 0, 0x0079d6e0): 2/0x13 (yes) or 2/0x12 (no) with
+	// the squad to the asking player's client, and with yes the invite.
+	void answerJoinRequest(int leader, int player, bool yes);
 	// The host's own player's report (the game's slots 0xd8 / 0xd4 on a
 	// server: the event handled at once).
 	void spotted(const net::SpottedInfo& spot, int reporter);
+	// host.sgl_sendGameLogicEvent (0x00567d40): the game category's message
+	// `event` with the 4-byte data to `player`'s connection (the game's slot
+	// 0x98); false when no playing client has that player (the host's own).
+	bool gameLogicEvent(int player, int event, int data);
 	// A commander's strike asset fired its burst's first round
 	// (GameWorld::takeStrikeFires, which main.cpp's effects step takes):
 	// 0x005a0e50 tells every client, kEvArtillery kind 2 with the asset's
@@ -331,28 +353,29 @@ private:
 		int cameraMode = 0, cameraFollow = -1;
 		enum class Stage { Connected, Loading, Database, Playing } stage = Stage::Connected;
 		std::set<uint16_t> created;              // the ghosts it was told of
-		std::map<uint16_t, std::vector<uint8_t>> sent; // each ghost's last state sent
-		// The client's GhostManager (net::GhostScheduler): its states, the
-		// rescore timer (connection +0x20, every 0.1 s), what each packet
-		// carried (by its sequence; kind 3 as the ghost | 0x10000) and the
-		// packet that last carried each ghost, for a loss (0x005830e0).
+		// The client's GhostManager (net::GhostScheduler): its states and
+		// their dirty masks, the rescore timer (connection +0x20, every
+		// 0.1 s) and what each packet carried (by its sequence: the kind,
+		// the ghost and the masks written), for a loss (0x005830e0).
 		net::GhostScheduler ghosts;
 		float rescoreIn = 0;
-		std::map<uint32_t, std::vector<uint32_t>> carried;
-		std::map<uint16_t, uint32_t> lastCarried;
+		struct Carried {
+			uint16_t ghost = 0;
+			bool removal = false; // kind 3
+			net::GhostMasks masks {};
+		};
+		std::map<uint32_t, std::vector<Carried>> carried;
 		std::vector<uint16_t> lostRemovals; // written first (gm +0x10c0)
-		// Each player's reload presses this client has had a state with
-		// mask 0x10000 for (the exe's per-client dirty mask keeps the bit
-		// until it goes out).
-		std::map<int, uint32_t> reloadsSent;
 		bool hasEye = false;
 		net::GhostEye eye;
 		std::deque<net::PlayerMove> moves;       // moves waiting, one a tick
 		net::MoveInputState moveState;           // the aim and the keys held
 		int32_t stepping = -1;                   // the move the round steps this tick
 		int32_t stepped = -1;                    // the last move the round has stepped (the record's)
-		bool starved = true;                     // no move was waiting: wait for two
-		uint32_t movesDropped = 0, ticksStarved = 0; // for the log
+		int32_t recordMove = -1;                 // the last record's move (+0x20e8, 0x00582cd0)
+		net::PlayerMove lastMove;                // the last move taken (0x004ac370: +0x14), all zero before any
+		int dryTicks = 0;                        // ticks in a row it was taken again (+0x30, at most 30)
+		uint32_t ticksStarved = 0;               // for the log
 		int historySlot = 7;                     // the record's slot (0x00580830: +0x20f8)
 		// The relative records (0x00580830's other path): the slot the
 		// client has acknowledged (+0x20f0, -1 none), how many relative
@@ -373,7 +396,6 @@ private:
 		// comes (the exe's join check has the name; the rewrite's clients
 		// send it after connecting).
 		bool full = false;
-		game::SoldierInput held;                 // the last move's held inputs
 	};
 	struct PlayerSeen {
 		uint16_t ghost = 0; // its networkable's
@@ -403,18 +425,31 @@ private:
 	std::string m_autoDemo, m_lastAutoDemo; // the AutoRecorder's file and its last (+0x10, +0x2c)
 	int m_lastRoundState = -1;
 	std::shared_ptr<std::atomic<bool>> m_hookBusy = std::make_shared<std::atomic<bool>>(false);
+	// The hook's end (+0xb8, the error at +0xbc): 1 done, 2 failed; the
+	// demo's file and map (+0x48) for message 9.
+	std::shared_ptr<std::atomic<int>> m_hookDone = std::make_shared<std::atomic<int>>(0);
+	std::string m_hookFile, m_hookMap;
+	void hookDone();
 	void startAutoDemo();
 	void stopAutoDemo();
 	game::Votes m_votes;
 	void sendVoteReplies(const std::vector<game::Votes::Reply>& replies);
 	bool clientHas(int player) const;
 	// The teams' networkable (ghost net::kTeamStateGhost): its state now.
-	std::vector<uint8_t> teamStateOf(size_t& bits) const;
+	net::TeamNetState teamStateOf() const;
 	// The spawn groups (CreateSpawnGroup / RemoveSpawnGroup) and the
 	// requests (IssueSquadOrder / SetAcceptOrder) sent, to send the changes.
 	std::map<int, net::SpawnGroupInfo> m_spawnGroups;
 	std::vector<net::SpawnGroupInfo> spawnGroupsNow() const;
 	void trackSpawnGroups();
+	// The spawn groups the spawn manager makes as the round goes (ids from
+	// 0xc0, the first free: 0x006347c0): a squad's (the squad's +0x15c,
+	// made with the squad, 0x004c87a0; its SquadLeaderSpawnPoint rides the
+	// leader's soldier or the leader's beacon, 0x004c7f10) and a mobile
+	// spawn vehicle's (0x00635080). By (team, squad) and by the vehicle.
+	std::map<std::pair<int, int>, int> m_squadSpawnGroups;
+	std::map<uint32_t, int> m_vehicleSpawnGroups;
+	int freeSpawnGroupId(const std::set<int>& taken) const;
 	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
 	void trackRequests();
 	void sendRadio();
@@ -426,6 +461,11 @@ private:
 	// server's slot 0x88 after 0x004c0e40: PostRemote 0/0xb {kind, victim,
 	// attacker}, TeamDamage.cpp).
 	void sendTeamDamage();
+	// The squad manager's messages (GameWorld::takeSquadMessages) to the
+	// clients' players' connections.
+	void sendSquadMessages();
+	void sendTitanSync();
+	net::GameEvent titanSyncEvent(const game::GameWorld::TitanSync& m) const;
 	// The offers of command made (PostRemote 2/0x23 to the candidate,
 	// 0x004c5070), per team.
 	std::array<int, 3> m_offerSent {-1, -1, -1};
@@ -452,19 +492,40 @@ private:
 	void ghostLost(Client& client, uint32_t sequence, bool delivered);
 	std::vector<net::GameEvent> createEvents(const Ghost& ghost) const;
 	net::GameEvent createPlayerEvent(const game::GameWorld::PlayerInfo& player, bool own, uint16_t ghost) const;
-	std::vector<uint8_t> stateOf(const Ghost& ghost, size_t part, size_t& bits) const;
+	// A ghost id's state this frame: an object part's groups, a player's
+	// networkable or the teams' (one group each).
+	struct GhostNow {
+		const net::GhostPartLayout* layout = nullptr; // an object part's
+		int player = -1;                              // a player's networkable
+		bool team = false;                            // the teams'
+		std::vector<net::NetworkableState> states;    // per group
+		net::TeamNetState teamState;
+	};
+	const GhostNow* ghostNow(uint16_t ghost);
+	// The frame's snapshot (0x0067aec0 -> 0x004a91c0): each ghost's fields
+	// against the last snapshot's, what changed ORed into every client's
+	// masks.
+	void snapshotGhosts();
+	// An update of a ghost with a client's masks (0x0057f420), and the
+	// masks it carried.
+	std::vector<uint8_t> encodeGhost(const GhostNow& now, const net::GhostMasks& masks, size_t& bits,
+		net::GhostMasks& written) const;
 	// Every group's state of one of a ghost's parts (mode 2 or 3).
 	std::vector<net::NetworkableState> statesOf(const Ghost& ghost, size_t part, unsigned mode) const;
 	net::NetworkableState soldierState(uint32_t soldier, const world::ObjectTemplate& t, const net::NetworkableHints& h,
 		unsigned mode) const;
 	net::PlayerOwnState ownState(int player) const;
 	const Ghost* ghostOf(uint16_t ghost, size_t& part) const;
-	std::vector<uint8_t> playerStateOf(int player, size_t& bits, bool everyGroup = false) const;
+	// The player networkable's state; everyGroup: with mask 0x10000 (a
+	// reload's every weapon group).
+	net::NetworkableState playerStateOf(int player, bool everyGroup = false) const;
 	const std::vector<net::GhostPartLayout>* layoutFor(const world::ObjectTemplate& t);
 	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
 	std::string nameOf(int player) const;
 	void sendToPlaying(const net::GameEvent& event);
-	net::ServerReport report() const;
+	void handOutChat(const net::ChatMessage& line);
+	// The rules' keys of the report (0x006423d0's fields).
+	void addRuleKeys(net::ServerReport& r) const;
 
 	game::GameWorld* m_round;
 	game::GameLogic* m_logic;
@@ -486,7 +547,6 @@ private:
 	std::set<uint32_t> m_static;
 	std::map<uint32_t, std::unique_ptr<std::vector<net::GhostPartLayout>>> m_layouts; // by template id
 	std::map<uint32_t, Ghost> m_ghosts; // by object id
-	std::map<int, uint32_t> m_invites;  // per player: the squads that invited it (player +0x224's mask)
 	uint16_t m_nextGhost = kFirstGhost;
 	// The teams' networkable takes 0x201 first (0x0042b8b0), so the ghost
 	// manager hands out ids from 0x202 (0x00678610).
@@ -496,7 +556,18 @@ private:
 	std::map<int, std::string> m_names;  // names the clients gave
 	uint32_t m_tick = 0;
 	// Each ghost id's state this tick, shared by the clients.
-	std::map<uint16_t, std::pair<std::vector<uint8_t>, size_t>> m_stateCache;
+	std::map<uint16_t, GhostNow> m_stateCache;
+	// The last snapshot's fields of each ghost (by group; the teams' state
+	// whole), the players' reload presses then, and the tick it was taken.
+	struct GhostSeen {
+		std::vector<net::NetworkableFields> groups;
+		net::TeamNetState team;
+		bool hasTeam = false;
+	};
+	std::map<uint16_t, GhostSeen> m_snapshot;
+	std::map<int, uint32_t> m_reloadsSeen;
+	uint32_t m_snapshotTick = 0;
+	bool m_snapshotTaken = false;
 	bool m_roundEndSent = false;
 	int m_endOfRoundSerialSent = 0;
 };

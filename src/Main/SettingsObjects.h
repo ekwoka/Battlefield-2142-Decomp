@@ -65,6 +65,12 @@ public:
 	// queryPort`), and the list replaced (the menu's favourites).
 	const std::vector<std::string>& list(const std::string& key) const;
 	void setList(const std::string& key, std::vector<std::string> entries) { m_lists[key] = std::move(entries); }
+	// GeneralSettings slot 0x190 (0x0049ca90): the favourite with that
+	// address and game port taken off the list (each entry of it, as the
+	// console adds each line); true when there was one. The original then
+	// tells the menu's "favourites" list (SwiffHost slot 0x94, its slot
+	// 0x4c); the list is written at the next profile save.
+	bool removeFavouriteServer(const std::string& ip, int port);
 	// A SettingsManager setting (GSConnectToIpHost...): its value, or the
 	// fallback when unset; set with its type ("string", "int"...).
 	std::string gameSetting(const std::string& name, const std::string& fallback) const;

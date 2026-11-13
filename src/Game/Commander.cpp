@@ -135,9 +135,9 @@ void GameWorld::setPlayerRank(int player, int rank)
 // the player joins the team's applicants. The first application while
 // nobody is being offered command starts the apply period (event 7 after
 // SquadManager +0x14, 15 s; HUD_COMMANDERAPPLY_TIMETOSTART counts down to
-// the round's start meanwhile). Not modelled: the client refusing an
-// applicant still barred after a mutiny (player slots 0x140, 0x148,
-// HUD_HUD_COMMANDER_CANNOT_APPLY_FOR_MINUTES); there is no mutiny here.
+// the round's start meanwhile). The client refuses to send it for 5
+// minutes after a mutiny against its player (menu::VoteMessages::
+// mayApplyForCommander, 0x007d7050 over player slots 0x140 / 0x148).
 // Bots don't apply: AIDLL never calls it (its commander is the team's
 // AI, BotManager::command).
 void GameWorld::applyForCommander(int player)

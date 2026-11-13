@@ -274,6 +274,21 @@ std::string ControlMaps::displayKey(const Binding& binding)
 	return "CONTROLLER_" + binding.control;
 }
 
+const char* ControlMaps::playerMapFor(bool inVehicle, const std::string& vehicleCategory)
+{
+	if (!inVehicle) {
+		return kInfantry;
+	}
+	static const char* kCategories[] = {"VCLand", "VCSea", "VCAir", "VCHelicopter"};
+	static const char* kMaps[] = {kLand, kSea, kAir, kHelicopter};
+	for (int i = 0; i < 4; ++i) {
+		if (vehicleCategory == kCategories[i]) {
+			return kMaps[i];
+		}
+	}
+	return kLand;
+}
+
 std::string ControlMaps::withKeyNames(const std::string& text,
 	const std::function<std::string(const std::string&)>& localize, const std::string& playerMap) const
 {

@@ -459,7 +459,7 @@ struct WeaponChoice {
 	bool soldierBot = true;       // the bot's object is ITSoldier
 	bool targetSoldier = true;
 	bool targetHuman = true;      // the target is no bot (the bot manager's slot 0x20 has none)
-	bool targetScripted = false;  // a target bot's +0x264 (vt+0x27c): x0.5
+	bool targetAutoController = false; // the target's bot is an auto controller (+0x264, vt+0x27c): x0.5
 	float distance = 0;
 	float targetEmpLevel = 0;     // 0x10074c60's 3 - level, for EMP weapons
 	bool inHandMelee = false;     // the weapon in hand is CloseCombat or Revive
@@ -484,6 +484,11 @@ struct WeaponChoice {
 // original keeps its last choice then); `explosive` is the bot's +0x249
 // (the bonus given).
 int chooseWeapon(const WeaponChoice& choice, const std::vector<WeaponOption>& weapons, bool& explosive);
+// A human target attending to the bot (0x10074ef0's local_9): holding a
+// weapon of his Armament, and the bot's newest sensing record of him
+// (0x100eb7f0; `lastSensed` below -1e8 for none, read as -1000) under
+// 9995 s old at `now`.
+bool humanAttends(bool armed, float now, float lastSensed);
 
 // A strategic area for the explosive bonus's guard (0x10034a10 and
 // 0x10074ef0): whether the bot's team holds it (+0x70 + 4 team, 0 held),
@@ -630,8 +635,26 @@ struct BotSettings {
 	};
 	std::vector<PathfindingMap> pathfindingMaps;
 	int activeMap = -1;
+	// The trace map (aiPathfinding.traceMap, AI/AIPathfinding.ai: Infantry;
+	// 0x100201e0 -> the pathfinder's 0x10040530: the map's index at +0x5c,
+	// -666 for a name it doesn't know, as at first): the map the drivers'
+	// room rays run on (vslot 0x84 with 1, 0x1003f930) and the courier's
+	// first record (0x10055650).
+	int traceMap = -666;
 	// A map's climb limits (map 0's rays always climb 0.35 m, 0x1003f930).
 	ai::ClimbLimits climbLimits(int map) const;
+	// An equipment type's cost profile (bot kind): aiSettings.setVehicle
+	// gives each type one, the default (0x100bdfb0: 1 for every class but
+	// Invalid's -1 and classes 5 and 7's 1000; AIDLL 0x10051050), and
+	// aiSettings.setVehicleMaterialCost sets a class's multiplier
+	// (0x1000be20 -> 0x1004fcf0 -> 0x100bdcc0), the material named by
+	// 0x10058570: Invalid 0, Ground 1, Road 2, Shallows 3, DeepWater 4,
+	// DangerObject 5, OtherDangerObject 6, BothDangerObject 7. The
+	// pathfinder takes the bot kind's (DAT_10139470 vt+0xc0, as 0x1003f000
+	// for the goal's polygon) and the drivers' room rays the unit's
+	// (0x100aa510): a Tank's, a Mech's, a Car's DeepWater is -1, so their
+	// paths and rays don't enter deep water.
+	ai::CostProfile costProfile(const std::string& equipment) const;
 
 	// The rest of AIDLL's settings object (AISettings, constructor
 	// 0x10051aa0; IAISettings vtbl 0x101148c8, IAISettingsModifier vtbl
@@ -820,6 +843,11 @@ public:
 	bool holdingForLob(int player) const;
 	// Whether its fire plan keeps to its order's spot (+0x248, 0x100795a0).
 	bool keepsToOrder(int player) const;
+	// Whether a human's bail_out closed `vehicle` to the bots' vehicle
+	// choice (m_closedToBots).
+	bool closedToBots(uint32_t vehicle) const { return m_closedToBots.count(vehicle) != 0; }
+	// Whether bot `player` keeps a radio message of `type` from `sender`.
+	bool keepsRadio(int player, int type, int sender) const;
 	// The bot's weapon zoom level (0: unzoomed; see stepZoom).
 	int zoomLevel(int player) const;
 	// A behaviour's urgency at the bot's last think (0 for none).
@@ -972,9 +1000,15 @@ public:
 		// reaching 0x100c1eb0 when it changes).
 		GameWorld::OrderType seenType = GameWorld::OrderType::None;
 		physics::Vec3 seenAt;
+		// The squad leader's order (SquadLeader.sendOrder) it last saw.
+		GameWorld::OrderType seenLeaderType = GameWorld::OrderType::None;
+		physics::Vec3 seenLeaderAt;
 		bool updated = false;
 	};
 	const Squad* squad(int team, int id) const;
+	// The order a squad's AI works from: a human commander's (the game's),
+	// else its side's SAI's; null for none.
+	const GameWorld::SquadOrder* squadOrder(int team, int id) const;
 	// The team's kits by kit index (the game's Team::kits), for the SAI's
 	// kit choice at respawn (0x100f04a0); without them the bots keep theirs.
 	void setTeamKits(int team, std::vector<std::pair<std::string, std::string>> kits);
@@ -983,6 +1017,8 @@ public:
 	int respawnPoint(int player) const;
 	// The sensing agent's chosen sector (-1 none) and whether a look plan runs.
 	int lookSector(int player) const;
+	// Whether the look-around may face sector 0..7 (sectorAllowed).
+	bool lookSectorAllowed(int player, int sector) const;
 	bool lookPlanned(int player) const;
 	// Whether a bot may advance (bot +400, vt+0x128 / 0x12c: set by the
 	// squad's bounding and flanking; read by the look-around 0x100d7840,
@@ -1033,6 +1069,18 @@ private:
 		std::string behaviour = "Idle";
 		float lastThink = -1;
 		float spawnedAt = 0;
+		// +0x264 (vt+0x278 sets it, 0x1009b3e0; vt+0x27c reads it,
+		// 0x1009b3f0): the bot is an auto controller. The constructor takes
+		// it as its last argument (0x1009ac30): 1 from the auto controller
+		// maker (0x100c8d20, "Activating autoController"), 0 from the two
+		// bot makers (0x100c84b0, 0x100c8950); IAIAutoControllersManager
+		// (vtbl 0x10114630) sets it again when it takes an object over
+		// (0x1004d140, 0x1004d8e0). The auto controllers run the objects
+		// with an autoControllerTemplateName (the sentry and recon drones,
+		// the Titans' silos), which the rewrite runs in GameWorld and
+		// Titans rather than as bots, so no bot here is one; kept so the
+		// gates read as the original's.
+		bool autoController = false;
 		std::vector<Known> known;
 		std::map<uint32_t, KnownVehicle> knownVehicles;
 		float firedAt = -1e9f; // +0xc0: the bot's last round (slot 0x314, 0x10097a60); hearing waits 1.5 s
@@ -1129,6 +1177,15 @@ private:
 		float fleeCamoFrom = -1;     // the camouflage's 4 s, from when it is in hand
 		// Movement: the path follower on foot and at the wheel.
 		ai::PathFollower follower;
+		// Its spots on the maps (the courier's records, AIDLL 0x10055650):
+		// the soldier's on the infantry mesh, kept each frame on foot, and
+		// the vehicle's on the vehicle mesh while it drives (driveObject),
+		// and the vehicle's on the trace map (the infantry mesh), which its
+		// room rays start from.
+		ai::MapSpot footSpot;
+		ai::MapSpot driveSpot;
+		ai::MapSpot traceSpot;
+		uint32_t driveObject = 0;
 		int followId = -1;           // what it follows (a goal id)
 		physics::Vec3 followTo;
 		float followAt = -100;
@@ -1318,6 +1375,12 @@ private:
 		float startedAt = 0;
 		float nextUpdate = 0;
 		std::map<int, int> squadArea; // squad -> area index it attacks/defends
+		// The SAI's order per squad. It stays in AIDLL (the squad's order,
+		// 0x100c1eb0): the AI never sends the game a commander's order
+		// (IBFCommander's order slots 3..5, 0x008971c0.., are never called),
+		// so no player sees it; a bot leader taking it orders its squad
+		// (BotManager::acceptOrder).
+		std::map<int, GameWorld::SquadOrder> orders;
 		std::vector<int> attacks, defences;
 		std::map<std::string, int> picks; // the strategy records' +0xc (ai::strategyTimeUp)
 		std::map<int, bool> lonerAttacks;  // steps 10 / 11: a bot outside squads -> attack (else defend)
@@ -1355,6 +1418,15 @@ private:
 	// slots 0x84, 0x20, 0x28), null for none.
 	const Bot::Radio* heardFromHuman(const Bot& bot, int type) const;
 	float moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
+	// The bot's object (bot +0xa0, vt+0xcc: the object it controls, set by
+	// 0x10098200 as it gets in or out) where the goals measure it: a
+	// driver's is the vehicle, its origin and its box's centre radius (the
+	// physical part's vt+0x30); on foot (and seated) the soldier.
+	struct GoalMover {
+		physics::Vec3 position;
+		float radius = 0;
+	};
+	GoalMover goalMover(const GameWorld::PlayerInfo& self) const;
 	float reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players);
 	float changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight);
 	// The comm object's send (0x100a7860): `type` on the AI's `channel`
@@ -1483,8 +1555,8 @@ private:
 	// The point MoveTo heads for now (the next strategic waypoint or area
 	// on the way, else the goal), popping those reached (0x1008aaa0).
 	physics::Vec3 moveTarget(Bot& bot, const GameWorld::PlayerInfo& self);
-	bool follow(Bot& bot, const ai::NavMesh& mesh, const physics::Vec3& from, const physics::Vec3& to, int goalId,
-		const ai::FollowerSettings& settings);
+	bool follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& start, const physics::Vec3& to, int goalId,
+		const ai::FollowerSettings& settings, const physics::Vec3& position);
 	ai::DriveSettings driveSettings(const GameWorld::PlayerInfo& self) const;
 	// What the infantry steering's sidestep (AIDLL 0x100ce860, 0x100e63c0) sees:
 	// the vehicles of the world list round the bot's controlled object
@@ -1507,6 +1579,7 @@ private:
 	// (0x1008c120: the vehicle's equipment type names Turret, the seat's
 	// controlled object has its ControlInfo and the seat aims a gun).
 	bool turretLooks(const GameWorld::PlayerInfo& self) const;
+	bool sectorAllowed(const GameWorld::PlayerInfo& self, int sector) const;
 	// The squads (BotsSquad.cpp): the manager's round robin (0x1008a910),
 	// one squad's update (0x100c4240) and its parts.
 	void updateSquads();
@@ -1583,7 +1656,7 @@ private:
 	std::vector<std::pair<int, std::string>> carried(const GameWorld::PlayerInfo& self) const;
 	// What of that the AI has a weapon for: an item whose object names an
 	// aiTemplate that is a weaponTemplate (with the AI scripts loaded; all
-	// of it without them, the tests' built-in rifle stand-in).
+	// of it without them, as the tests' built-in rifle has no aiTemplate).
 	std::vector<std::pair<int, std::string>> armament(const GameWorld::PlayerInfo& self) const;
 	// A seat's armament (the Armament list at 0x10075170 over the bot's
 	// object's weapons): its weapons whose aiTemplate names a
@@ -1698,12 +1771,33 @@ private:
 	std::map<std::string, float> m_behaviourSeconds;
 	std::map<uint32_t, float> m_driven;
 	std::map<uint32_t, std::string> m_drivenName; // the template, kept past the vehicle's removal
+	// $BF2142_BOT_STATS's stuck count: per bot, a 30 s window's start (its
+	// clock, place, and what the bot was: on foot, driving, seated) and the
+	// seconds of windows that ended under 2 m from their start, per state
+	// and the behaviour run longest in the window.
+	struct StuckWindow {
+		float from = -1, seen = -1;
+		physics::Vec3 at;
+		std::string state;
+		std::map<std::string, float> behaviours;
+	};
+	bool m_stats = std::getenv("BF2142_BOT_STATS") != nullptr;
+	std::map<int, StuckWindow> m_stuckWindows;
+	std::map<std::string, float> m_stuckSeconds;
+	std::map<int, float> m_stuckPerBot;
 	// When a human player of each team last got out of a vehicle (the unit
 	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
 	// exit event 0x00894860, read through vt+0x60 by the seat value), and
 	// the vehicle each human player was in at the last update.
 	std::map<uint32_t, std::array<float, 3>> m_humanLeftAt;
 	std::map<int, uint32_t> m_humanVehicle;
+	// The vehicles closed to the bots' choice: their root's AI object
+	// adaptor's +8 (BF2142.exe 0x008a3a60 sets it 1; slot 0x90 0x00498120
+	// writes it, slot 0x94 0x0043c4f0 reads it in BBChange 0x1006c520),
+	// cleared by a human's bail_out and set again by his get_in (AIDLL
+	// 0x10030b20) or by a human leaving it with the use key (AIMain slot
+	// 23, 0x10056610).
+	std::set<uint32_t> m_closedToBots;
 	// When each player took its weapon in hand: the AI weapon's +0x20
 	// (BF2142.exe 0x008a6d80 stamps the newly selected weapon with the
 	// clock, slot 0xfc 0x008924d0; read through slot 0x100 0x008924e0).

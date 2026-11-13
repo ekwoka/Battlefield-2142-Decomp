@@ -161,7 +161,7 @@ public:
 	virtual void endOfRoundData(const std::string& text) { (void)text; }
 	// Remote administration (a server's; Main/ServerAdmin.h): rcon_invoke
 	// (0x004427b0: a console command's output), rcon_feedback (0x00442940:
-	// "rcon: <text>" to a player's console, message 6/0x13) and
+	// "rcon: <text>" to a player's console, data block 7) and
 	// sgl_getOverlayDirectory (the overlay path, "" without one).
 	virtual std::string rconInvoke(const std::string& command) { (void)command; return {}; }
 	virtual void rconFeedback(int player, const std::string& text) { (void)player; (void)text; }

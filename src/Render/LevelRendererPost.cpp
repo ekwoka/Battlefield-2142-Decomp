@@ -2,6 +2,7 @@
 // post-production (see LevelRenderer.h and PostProduction.h).
 #include "LevelRenderer.h"
 #include "MeshQueues.h"
+#include "OvergrowthLod.h"
 #include "SceneMath.h"
 
 #include "IO/File/FileManager.h"
@@ -431,8 +432,10 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 				skinPalette(*bound, submesh, *pose, transforms);
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
-			const float caster[4] = {submesh.alphaReference > 0 ? std::max(submesh.alphaReference, settings.alphaShadowThreshold) : 0.0f,
-				0, 0, 0};
+			// A leaf's plain texture (antialiased, Submesh::coverageTexture)
+			// is tested as RaShaderLeaf tests it, its alpha doubled.
+			const float reference = submesh.alphaReference > 0 ? std::max(submesh.alphaReference, settings.alphaShadowThreshold) : 0.0f;
+			const float caster[4] = {submesh.coverageTexture ? reference / AlphaToCoverage::kPlainLeafAlphaScale : reference, 0, 0, 0};
 			SDL_PushGPUFragmentUniformData(commands, 0, caster, sizeof(caster));
 			SDL_GPUTextureSamplerBinding sampler {submesh.texture, m_gpu.repeatSampler()};
 			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
@@ -659,6 +662,32 @@ void LevelRenderer::releasePostTargets()
 	m_sceneSize[0] = m_sceneSize[1] = 0;
 }
 
+void LevelRenderer::releaseMultisampleTargets()
+{
+	SDL_GPUDevice* device = m_gpu.device();
+	for (SDL_GPUTexture** texture : {&m_multisampleColor, &m_multisampleDepth, &m_multisampleCamo}) {
+		if (*texture) {
+			SDL_ReleaseGPUTexture(device, *texture);
+			*texture = nullptr;
+		}
+	}
+	m_multisampleSize[0] = m_multisampleSize[1] = m_multisampleSize[2] = 0;
+}
+
+void LevelRenderer::ensureMultisampleTargets(uint32_t width, uint32_t height, uint32_t samples)
+{
+	if (m_multisampleColor && m_multisampleSize[0] == width && m_multisampleSize[1] == height &&
+		m_multisampleSize[2] == samples) {
+		return;
+	}
+	releaseMultisampleTargets();
+	m_multisampleColor = m_gpu.createMultisampleTarget(width, height, false);
+	m_multisampleDepth = m_gpu.createMultisampleTarget(width, height, true);
+	m_multisampleSize[0] = width;
+	m_multisampleSize[1] = height;
+	m_multisampleSize[2] = samples;
+}
+
 void LevelRenderer::ensurePostTargets(uint32_t width, uint32_t height)
 {
 	if (m_sceneColor && m_sceneSize[0] == width && m_sceneSize[1] == height) {
@@ -711,6 +740,19 @@ void LevelRenderer::drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTextur
 	colorTarget.clear_color = {0, 0, 0, 0};
 	colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
 	colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+	if (m_gpu.worldSamples() > 1 && !m_multisampleCamo) {
+		m_multisampleCamo = m_gpu.createMultisampleTarget(m_multisampleSize[0], m_multisampleSize[1], false);
+	}
+	if (m_gpu.worldSamples() > 1) {
+		if (!m_multisampleCamo) {
+			return;
+		}
+		// Antialiased: tested against the multisampled depth (SDL GPU
+		// resolves no depth), drawn at its sample count and resolved.
+		colorTarget.texture = m_multisampleCamo;
+		colorTarget.resolve_texture = m_camoMask;
+		colorTarget.store_op = SDL_GPU_STOREOP_RESOLVE;
+	}
 	SDL_GPUDepthStencilTargetInfo depth {};
 	depth.texture = depthTexture;
 	depth.load_op = SDL_GPU_LOADOP_LOAD;

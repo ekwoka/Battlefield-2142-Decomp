@@ -108,6 +108,25 @@ float wingLift(const Vec3& v, const Vec3& n, float scale)
 
 float airDensity(float height) { return 1.0f - std::clamp(height / 1000.0f, 0.0f, 1.0f); }
 
+// An axis' input through rememberExcessInput (0x00563bd0, the template's
+// +0x30a; the bank is the object's +0x1ac.., which the RotationalBundle's
+// networkable sends for the pitch, +0x1b0, as mask 0x40): without the flag,
+// or with an input against what is banked, the bank empties and the input
+// goes as it is; else the input is added to the bank (held within +-40)
+// and the axis takes at most 1 of it a tick.
+float bankExcessInput(Vehicle::Part& part, size_t axis, float input)
+{
+	float& bank = part.excess[axis];
+	if (!part.rememberExcess || bank * input < 0) {
+		bank = 0;
+		return input;
+	}
+	bank = std::clamp(bank + input, -40.0f, 40.0f);
+	const float take = std::clamp(bank, -1.0f, 1.0f);
+	bank -= take;
+	return take;
+}
+
 float Vehicle::OldEngine::gearRatio() const
 {
 	static const float kTable[] = {4.0f, 4.0f, 2.0f, 1.5f, 1.25f, 1.0f}; // 0x00a052a0
@@ -179,12 +198,54 @@ Vec3 Vehicle::partPoint(const physics::RigidBody& body, int part) const
 // aircraft's PIThrottle) as out = clamp(((a.y - gMod g) b + v.y) a, -1,
 // 1) while the vehicle leans under 20 degrees (noVertRegAngle, 0x39c),
 // faded out from 10 (maxVertRegAngle, 0x398); it replaces the input when
-// that is 0 or smaller the same way. (Yaw, pitch and roll regulators exist
-// but no shipped vehicle sets them.)
-void Vehicle::regulateInput(const physics::RigidBody& body, float gravity)
+// that is 0 or smaller the same way. Its first three (regulatePitch, Yaw,
+// Roll on their inputs; no official vehicle sets them, the BF2 conversions
+// in the install's Levels do) take the hull's angular velocity w (the
+// root node's slot 0x68) in the hull's frame, row i of its matrix: out =
+// clamp(((R_i . w) / seconds x b + R_i . w) x a, -1, 1), merged the same
+// way. Each reads the inputs as they came, before any is replaced.
+// `seconds` is the tick: the filter's fourth argument (pushed at 0x5cac44)
+// is the player's slot 0x44 (0x00593fe0) third, which the client's frame
+// (0x00590e10 -> 0x00590c00) passes as the step it gives the physics world
+// (DAT_00a85220 slot 0x28), and the server's player step (0x004ad5c0 ->
+// 0x004ac660) as its own tick's.
+void Vehicle::regulateInput(const physics::RigidBody& body, float gravity, float seconds)
 {
 	m_regulated = m_input;
-	if (m_vertical.input < 0 || !m_occupied) {
+	if (!m_occupied) {
+		return;
+	}
+	const auto merge = [](float out, float v) { return (out < v && v <= 0) || (out > v && v >= 0) ? out : v; };
+	const auto put = [this](int input, float v) {
+		switch (input) {
+		case 0:
+			m_regulated.steer = v;
+			break;
+		case 1:
+			m_regulated.pitch = v;
+			break;
+		case 2:
+			m_regulated.roll = v;
+			break;
+		case 3:
+			m_regulated.throttle = v;
+			break;
+		default:
+			break;
+		}
+	};
+	if (seconds > 0) {
+		for (size_t i = 0; i < 3; ++i) {
+			const Regulator& r = m_rotational[i];
+			if (r.input < 0) {
+				continue;
+			}
+			const float w = physics::dot(body.rotation.rows[i], body.angularVelocity);
+			const float out = std::clamp((w / seconds * r.b + w) * r.a, -1.0f, 1.0f);
+			put(r.input, merge(out, vehicleInputValue(m_input, r.input)));
+		}
+	}
+	if (m_vertical.input < 0) {
 		return;
 	}
 	const float up = body.rotation.rows[1].y;
@@ -197,26 +258,7 @@ void Vehicle::regulateInput(const physics::RigidBody& body, float gravity)
 			out *= (up - cos20) / (cos10 - cos20);
 		}
 	}
-	float v = vehicleInputValue(m_regulated, m_vertical.input);
-	if ((out < v && v <= 0) || (out > v && v >= 0)) {
-		v = out;
-	}
-	switch (m_vertical.input) {
-	case 0:
-		m_regulated.steer = v;
-		break;
-	case 1:
-		m_regulated.pitch = v;
-		break;
-	case 2:
-		m_regulated.roll = v;
-		break;
-	case 3:
-		m_regulated.throttle = v;
-		break;
-	default:
-		break;
-	}
+	put(m_vertical.input, merge(out, vehicleInputValue(m_input, m_vertical.input)));
 }
 
 // Each part's axes on their inputs (the bundles' handlers; an Engine's own
@@ -245,11 +287,10 @@ void Vehicle::updateParts(float seconds)
 				float in = part.autoRotating ? 1.0f
 					: part.inputs[axis] >= 0  ? vehicleInputValue(m_regulated, part.inputs[axis])
 											  : 0.0f;
-				if (part.rememberExcess) {
-					part.excess[axis] = std::clamp(part.excess[axis] + in, -40.0f, 40.0f);
-					in = std::clamp(part.excess[axis], -1.0f, 1.0f);
-					part.excess[axis] -= in;
+				if (part.liftRegulated) {
+					in = part.liftRegulator; // 0x0064fd40: +0x1a4 = +0x24c before the step
 				}
+				in = bankExcessInput(part, axis, in);
 				rotationAxisStep(part.axes[axis], in, seconds, part.angle[axis], part.rate[axis]);
 			}
 		}
@@ -323,11 +364,7 @@ void Vehicle::updateOldEngine(OldEngine& e, physics::RigidBody& body, const phys
 	for (size_t axis = 0; axis < 3; ++axis) {
 		if (part.axes[axis].maxSpeed != 0) {
 			float input = in[axis];
-			if (part.rememberExcess) {
-				part.excess[axis] = std::clamp(part.excess[axis] + input, -40.0f, 40.0f);
-				input = std::clamp(part.excess[axis], -1.0f, 1.0f);
-				part.excess[axis] -= input;
-			}
+			input = bankExcessInput(part, axis, input);
 			rotationAxisStep(part.axes[axis], input, seconds, part.angle[axis], part.rate[axis]);
 		}
 	}
@@ -496,7 +533,16 @@ void Vehicle::engineForce(OldEngine& e, physics::RigidBody& body, const physics:
 // the lift orientation is the part's frame turned by the flap's share of
 // the pitch less pitchOffset about x; the air's velocity at the wing
 // (positionOffset from it) through the lift curve, x 50 under water,
-// within +-200, pushes against the wing's normal.
+// within +-200, pushes against the wing's normal. A liftRegulated wing
+// then sets its flap's next input (the node's tail, 0x006cbae8..0x006cbbe5,
+// into the object's +0x24c): the lift curve (no air density, water or
+// clamp) for the speed straight along the nose (|v| x the root's row 2) on
+// the wing as it is, plus wingToRegulatorRatio x the same on the wing with
+// the flap's share out (0x0064fbf0: turned by -pitchOffset alone), and
+// (that + regulateToLift) x gravity x 0.101833 (*0x00993e70) within +-1:
+// with gravity -14.73 a gain of -1.5 steering the lift to regulateToLift.
+// The shipped wings that set it (two BF2 conversions' jetski and BMP-3)
+// have no pitch speed, so their flap never moves.
 void Vehicle::updateWing(WingPart& w, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 	float gravity)
 {
@@ -505,10 +551,18 @@ void Vehicle::updateWing(WingPart& w, physics::RigidBody& body, const physics::G
 		return;
 	}
 	const float total = w.wingLift + w.flapLift;
-	if (total == 0 || w.part < 0) {
+	if (w.part < 0) {
 		return;
 	}
-	const Part& part = m_parts[static_cast<size_t>(w.part)];
+	Part& part = m_parts[static_cast<size_t>(w.part)];
+	if (total == 0) {
+		// The node runs on with a scale of 0: no force, the regulator at
+		// regulateToLift alone.
+		if (w.liftRegulated) {
+			part.liftRegulator = std::clamp(w.regulateToLift * gravity * -kSpringScale, -1.0f, 1.0f);
+		}
+		return;
+	}
 	const float a1 = std::clamp(((part.angle[1] * w.multiply + w.offsetY) * w.flapLift) / total - w.pitchOffset, -360.0f,
 		360.0f);
 	const Mat3 parent = part.parent >= 0 ? m_parts[static_cast<size_t>(part.parent)].rotation : Mat3 {};
@@ -522,6 +576,13 @@ void Vehicle::updateWing(WingPart& w, physics::RigidBody& body, const physics::G
 	l = sea <= p.y ? l * airDensity(p.y) : l * 50.0f;
 	l = std::clamp(l, -200.0f, 200.0f);
 	body.addForce(p - body.position, n * -l);
+	if (w.liftRegulated) {
+		const Vec3 nose = body.rotation.rows[2] * length(relative);
+		const float a0 = std::clamp(-w.pitchOffset, -360.0f, 360.0f);
+		const Mat3 neutral = Mat3::fromYawPitchRoll({0, a0, 0}) * part.base * parent * body.rotation;
+		const float regulated = wingLift(nose, n, scale) + wingLift(nose, neutral.rows[1], scale) * w.wingToRegulatorRatio;
+		part.liftRegulator = std::clamp((regulated + w.regulateToLift) * gravity * -kSpringScale, -1.0f, 1.0f);
+	}
 }
 
 // A ForceObject (0x0062c920 with 0x0062b750): its force along its forward
@@ -761,22 +822,17 @@ void Vehicle::updateLegs(physics::RigidBody& body, const physics::Ground& ground
 	} else if (l.state == 2 && l.yaw != 0) {
 		body.angularVelocity += up * (-l.yaw * 0.25f);
 	}
-	// The feet: a metre's probe down from 1.7 m to either side, 2.3 down. The
-	// heightmap's ray first, then the objects' meshes along the same segment
-	// (0x00650e90's second loop, the collision world's query): a foot on a
-	// bridge deck is on the ground, or the walker is pushed off it sideways.
+	// The feet: a metre's probe down from 1.7 m to either side, 2.3 down,
+	// against the heightmap (the objects' sphere is GameWorld's
+	// feetOnObjects, touchFeet).
 	const Vec3 right = m.rows[0];
 	if (ground.height) {
-		const Vec3 left = at - right * 1.7f - up * 2.3f, rightFoot = at + right * 1.7f - up * 2.3f;
-		const auto onGround = [&](const Vec3& foot) {
-			return ground.height(foot.x, foot.z) >= foot.y - 1.0f
-				|| (m_legsObjectProbe && m_legsObjectProbe(foot + up * 1.0f, foot - up * 1.0f));
-		};
-		if (onGround(left)) {
-			l.footLeft = 10;
+		const Vec3 left = at - right * kFootSide - up * kFootDown, rightFoot = at + right * kFootSide - up * kFootDown;
+		if (ground.height(left.x, left.z) >= left.y - kFootProbe) {
+			l.footLeft = kFootTicks;
 		}
-		if (onGround(rightFoot)) {
-			l.footRight = 10;
+		if (ground.height(rightFoot.x, rightFoot.z) >= rightFoot.y - kFootProbe) {
+			l.footRight = kFootTicks;
 		}
 	}
 	const int bits = (l.footLeft > 0 ? 1 : 0) | (l.footRight > 0 ? 2 : 0);
@@ -850,7 +906,7 @@ void Vehicle::legsRespond(physics::RigidBody& body, const physics::Ground& groun
 void Vehicle::legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below)
 {
 	Legs& l = m_legs;
-	l.contactNormal = physics::combineContacts(l.contactNormal, normal); // 0x006b6bd0
+	l.contactNormal = physics::combineAxes(l.contactNormal, normal); // 0x006b6bd0
 	l.objectNormal = true;
 	// Below the legs (0x006cec60's bVar3): the best ground normal by its
 	// height (+0x1c4, its y at +0x1c8) and the landed flag (+0x21c).

@@ -253,8 +253,9 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.acceleration = number(t, "acceleration", 0);
 	s.deAcceleration = number(t, "deAcceleration", 0);
 	s.maxSpeed = number(t, "maxSpeed", 0);
-	s.hasDirection = number(t, "hasDirection", 1) != 0;
+	s.hasDirection = number(t, "hasDirection", 0) != 0;
 	s.startDelay = number(t, "startDelay", 0);
+	s.hasFollow = std::find(components.begin(), components.end(), "DefaultFollowComp") != components.end();
 	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and
 	// the detonation component wait for it (0x005b3e60).
 	s.armingDelay = number(t, "armingDelay", 0);
@@ -294,8 +295,15 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	// The node's type (physicsType RotationalPoint, as every shipped round
 	// that sets the offset names it).
 	if (const auto type = t.settings().find("physicsType");
-		type != t.settings().end() && sameText(type->second, "RotationalPoint")) {
+		type != t.settings().end() && (sameText(type->second, "RotationalPoint") || type->second == "2")) {
 		s.collisionOffset = vector3(t, "centerOfCollisionOffset");
+		s.rotationalPoint = true;
+	} else if (type != t.settings().end() && (sameText(type->second, "Mesh") || type->second == "3")
+		&& number(t, "hasMobilePhysics", 0) != 0) {
+		s.basicNode = true;
+		if (t.settings().count("dragModifier")) {
+			s.dragModifier = vector3(t, "dragModifier");
+		}
 	}
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
@@ -433,6 +441,7 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	if (number(t, "zoom.useProjectileCamera", 0) != 0) {
 		s.reloadTime = std::max(s.reloadTime, number(t, "ammo.minimumTimeUntilReload", 0));
 	}
+	s.batchSize = std::max(1, static_cast<int>(number(t, "fire.batchSize", 1)));
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 1) != 0;
 	s.delayToUseTicks = static_cast<int>(std::nearbyint(number(t, "delayToUse", 0) * 30));
 	s.autoReload = number(t, "ammo.autoReload", 0) != 0;
@@ -487,6 +496,10 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 		const auto alt = t.settings().find("fire.altFireInput");
 		s.softThrow = alt != t.settings().end() && !alt->second.empty();
 		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
+		if (const auto turn = t.settings().find("fire.projectileStartRotation"); turn != t.settings().end()) {
+			std::sscanf(turn->second.c_str(), "%f/%f/%f", &s.startRotation.x, &s.startRotation.y, &s.startRotation.z);
+		}
+		s.randomRotationSpeed = number(t, "fire.randomRotationSpeed", 0);
 	}
 	s.allowReloadWithFullMag = number(t, "ammo.allowReloadWithFullMag", 0) != 0;
 	if (const auto link = t.settings().find("ammo.magLinkWeapon"); link != t.settings().end()) {
@@ -579,7 +592,7 @@ bool FireArm::selectable() const
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_settings.magSize < 0
+	if (m_readyIn > 0 || m_reloadLeft > 0 || m_busyUntilRelease || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
 		return false;
@@ -1079,6 +1092,9 @@ DeviationBuildUp DeviationBuildUp::fromTemplate(const world::ObjectTemplate& t)
 	if (const auto it = t.settings().find("deviation.minDev"); it != t.settings().end()) {
 		d.minDev = std::strtof(it->second.c_str(), nullptr);
 	}
+	if (const auto it = t.settings().find("deviation.subProjectileDev"); it != t.settings().end()) {
+		d.subDev = std::strtof(it->second.c_str(), nullptr);
+	}
 	return d;
 }
 
@@ -1160,6 +1176,79 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 	}
 }
 
+physics::Vec3 bounceSpin(const physics::Vec3& spin, const physics::Vec3& velocity)
+{
+	float scale = physics::lengthSquared(velocity);
+	if (scale >= 1) {
+		scale = 1;
+	} else if (scale < 0.1f) {
+		scale = 0;
+	}
+	return spin * -scale;
+}
+
+void throwFrame(Projectile& p, const physics::Vec3& direction, const physics::Vec3& startRotation, float speed,
+	float power, uint32_t id)
+{
+	constexpr float kDegrees = 57.29578f;
+	if (!p.settings || !p.settings->rotationalPoint) {
+		return;
+	}
+	// The fire frame (the round's matrix as the fire component made it,
+	// 0x005f31d0): z along the throw, level x.
+	const float across = std::sqrt(direction.x * direction.x + direction.z * direction.z);
+	const physics::Mat3 fire = physics::Mat3::fromYawPitchRoll(
+		{std::atan2(direction.x, direction.z) * kDegrees, -std::atan2(direction.y, across) * kDegrees, 0});
+	p.turns = true;
+	p.rotation = physics::Mat3::fromYawPitchRoll(startRotation) * fire;
+	p.spin = {};
+	if (speed > 0) {
+		// Two draws of 0x0042b230 from the round's id: ceil(draw x s)
+		// with the draw ((h | 0x80) >> 7) + 1) x 2^-24 in (0, 1].
+		uint32_t state = id & 0x7fffffffu;
+		const auto draw = [&state, speed] {
+			const uint32_t h = lehmerNext(state);
+			const double unit = static_cast<double>((static_cast<int32_t>(h | 0x80u) >> 7) + 1) * 5.9604645e-08;
+			return static_cast<float>(std::ceil(unit * speed));
+		};
+		const float yaw = draw();
+		const float roll = draw();
+		p.spin = physics::Vec3 {0, -yaw, roll} * power;
+	}
+}
+
+physics::Vec3 noseOf(const Projectile& p)
+{
+	if (physics::lengthSquared(p.heading) > 0.25f) {
+		return p.heading;
+	}
+	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	return speed > 1e-4f ? p.velocity * (1 / speed) : physics::Vec3 {};
+}
+
+void thrustProjectile(Projectile& p, float seconds)
+{
+	const ProjectileSettings& s = *p.settings;
+	if (s.acceleration <= 0 || s.maxSpeed <= 0 || s.seek == ProjectileSettings::Seek::Magnet || s.seek == ProjectileSettings::Seek::Beacon || p.stuck || p.resting) {
+		return;
+	}
+	const bool engineOn = s.targetActivation ? (p.lockedOn != 0 || p.lockedBait != 0) : p.age >= s.startDelay;
+	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	const physics::Vec3 nose = noseOf(p);
+	if (!engineOn || speed >= s.maxSpeed || physics::lengthSquared(nose) < 0.25f) {
+		return;
+	}
+	// 0x005ed1a0 answers true past followTime too (without turning).
+	const float from = p.followFrom >= 0 ? p.followFrom : s.seekDelay;
+	const bool steered = s.hasFollow && (p.followTurned || (s.followTime > 0 && p.age > from + s.followTime));
+	if (!steered && !s.hasDirection) {
+		return;
+	}
+	// Along the follow's new heading, which it keeps as the nose, or along
+	// the nose itself.
+	p.velocity = p.velocity + nose * (s.acceleration * seconds);
+}
+
 bool followActive(const Projectile& p)
 {
 	const ProjectileSettings& s = *p.settings;
@@ -1177,11 +1266,11 @@ bool followStep(Projectile& p, const physics::Vec3& target, const physics::Vec3&
 	}
 	physics::Vec3 d = aim - p.position;
 	const float length = std::sqrt(physics::lengthSquared(d));
-	if (length < 1e-4f || speed < 1e-4f) {
+	const physics::Vec3 forward = noseOf(p);
+	if (length < 1e-4f || physics::lengthSquared(forward) < 0.25f) {
 		return false;
 	}
 	d = d * (1 / length);
-	const physics::Vec3 forward = p.velocity * (1 / speed);
 	physics::Vec3 right {forward.z, 0, -forward.x}; // (0, 1, 0) x forward
 	const float r = std::sqrt(physics::lengthSquared(right));
 	right = r > 1e-5f ? right * (1 / r) : physics::Vec3 {1, 0, 0};
@@ -1213,7 +1302,8 @@ bool followStep(Projectile& p, const physics::Vec3& target, const physics::Vec3&
 	const physics::Vec3 pitched = forward * std::cos(a) + up * std::sin(a);
 	const physics::Vec3 turned = pitched * std::cos(b) + right * std::sin(b);
 	const float t = std::sqrt(physics::lengthSquared(turned));
-	p.velocity = turned * (speed / (t > 0 ? t : 1));
+	p.heading = turned * (1 / (t > 0 ? t : 1));
+	p.velocity = p.heading * speed;
 	return true;
 }
 
@@ -1225,6 +1315,39 @@ physics::Vec3 bounceVelocity(const physics::Vec3& velocity, const physics::Vec3&
 
 void moveProjectile(Projectile& p, float seconds, float gravity)
 {
+	if (p.settings && p.settings->basicNode) {
+		// The Basic node's tick (0x006c9060, physics::RigidBody): its frame
+		// the round's own (a turning round's) or along its nose (as it is
+		// drawn), no centre of mass offset, the box's inertia.
+		const ProjectileSettings& s = *p.settings;
+		physics::RigidBody node;
+		node.position = p.position;
+		node.rotation = p.turns ? p.rotation : physics::lookAtRotation(noseOf(p), physics::Mat3 {});
+		node.velocity = p.velocity;
+		node.acceleration = p.acceleration;
+		node.angularVelocity = p.spin;
+		node.gravityModifier = s.gravityModifier;
+		const bool box = physics::lengthSquared(s.boxSize) > 0;
+		if (box) {
+			node.setBounds(s.boxSize);
+			physics::applyDrag(node, s.drag, s.mass, s.dragModifier, s.boxSize, 0);
+		} else if (s.drag > 0 && s.mass > 0) {
+			node.acceleration += node.velocity * (s.drag / s.mass * 0.01f * -3.14159265f); // 0x006c5730, 0.1 m
+		}
+		node.step(seconds, gravity);
+		p.position = node.position;
+		p.velocity = node.velocity;
+		p.acceleration = node.acceleration;
+		p.spin = node.angularVelocity;
+		if (p.turns) {
+			p.rotation = node.rotation;
+		}
+		p.timeLeft -= seconds;
+		if (p.timeLeft <= 0) {
+			p.alive = false;
+		}
+		return;
+	}
 	// The Point node's tick (0x006c6170 / 0x006c57a0, physics::PointBody):
 	// its drag, then the mean of the old and new velocity moves it; gravity
 	// for the next tick.
@@ -1232,6 +1355,9 @@ void moveProjectile(Projectile& p, float seconds, float gravity)
 	node.position = p.position;
 	node.velocity = p.velocity;
 	node.acceleration = p.acceleration;
+	node.rotational = p.turns; // a RotationalPoint's turn (0x006c6860)
+	node.rotation = p.rotation;
+	node.angularVelocity = p.spin;
 	if (p.settings) {
 		node.drag = p.settings->drag;
 		node.mass = p.settings->mass;
@@ -1241,6 +1367,10 @@ void moveProjectile(Projectile& p, float seconds, float gravity)
 	p.position = node.position;
 	p.velocity = node.velocity;
 	p.acceleration = node.acceleration;
+	if (p.turns) {
+		p.rotation = node.rotation;
+		p.spin = node.angularVelocity;
+	}
 	p.timeLeft -= seconds;
 	if (p.timeLeft <= 0) {
 		p.alive = false;

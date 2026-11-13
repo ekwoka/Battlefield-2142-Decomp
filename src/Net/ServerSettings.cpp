@@ -173,11 +173,35 @@ bool ServerSettings::get(const std::string& name, std::string& value) const
 {
 	for (const Field& f : fields()) {
 		if (sameName(name, f.name)) {
-			value = f.get(*this);
+			// The console's getters read a ranked server's fixed values
+			// (0x0041cd19 -> 0x00430f60, 0x0041ce29 -> 0x00430f80,
+			// 0x0041d03f -> 0x00430fa0, 0x0041eecb -> 0x00430fc0).
+			if (ranked) {
+				ServerSettings shown = *this;
+				shown.spawnTime = spawnTimeInForce();
+				shown.manDownTime = manDownTimeInForce();
+				shown.ticketRatio = ticketRatioInForce();
+				shown.teamRatioPercent = teamRatioInForce();
+				value = f.get(shown);
+			} else {
+				value = f.get(*this);
+			}
 			return true;
 		}
 	}
 	return false;
+}
+
+bool ServerSettings::rankedGame(const std::string& gameMode, bool gameSpyRanked) const
+{
+	static const char* const modes[] = {"gpm_cq", "gpm_ti", "gpm_sl", "gpm_nv", "gpm_ca"};
+	const bool mode = std::any_of(std::begin(modes), std::end(modes), [&gameMode](const char* m) { return gameMode == m; });
+	return mode && internet && gameSpyRanked && ranked;
+}
+
+int ServerSettings::endOfRoundDelayInForce(const std::string& gameMode) const
+{
+	return sameName(gameMode, "gpm_ti") ? 15 : endOfRoundDelay;
 }
 
 bool ServerSettings::set(const std::string& name, const std::string& value)
@@ -185,6 +209,12 @@ bool ServerSettings::set(const std::string& name, const std::string& value)
 	for (const Field& f : fields()) {
 		if (sameName(name, f.name)) {
 			f.set(*this, value);
+			if (sameName(name, "ranked")) {
+				ranked = rankedAllowed && (gameSpyRanked || ranked); // 0x00430800
+			}
+			if (sameName(name, "endOfRoundDelay")) {
+				endOfRoundDelay = std::clamp(endOfRoundDelay, 3, 30); // 0x00431640
+			}
 			return true;
 		}
 	}
@@ -371,9 +401,9 @@ bool addBan(std::vector<Ban>& list, const std::string& what, const std::string& 
 
 bool active(const Ban& ban, std::time_t now) { return ban.kind != Ban::Kind::Until || ban.until > now; }
 
-// The listing (0x00506b60 builds a line per ban: "IP: " / "Key: ", " Time
-// Left: " or " Perm"; 0x00507800 / 0x005078d0 cut the address and key
-// lists from it).
+// The listing (0x00506b60 builds a line per ban: "IP: " / "Key: ", then
+// " Time Left: " or " Perm"; 0x00507800 / 0x005078d0 cut the address and
+// key lists from it).
 std::string listBans(const std::vector<Ban>& list, std::time_t now)
 {
 	std::string out;

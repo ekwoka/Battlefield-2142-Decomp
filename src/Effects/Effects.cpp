@@ -789,9 +789,12 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 		m_age += seconds;
 		const float active = m_age - t.emitDelay;
 		m_speed = m_placed && seconds > 0 ? std::sqrt(physics::lengthSquared(m_position - m_lastPosition)) / seconds : 0.0f;
-		// A new point adds the system's +0x1c..+0x24 to its speed
-		// (0x1013b4b0); taken here as the velocity speedFromPhysics hands
-		// the system, else none (which writer fills it isn't traced).
+		// A new world point takes the speedFromPhysics velocity, +0xe4 (slot
+		// 0x4c) x +0xd4..+0xdc (slot 0x40), both 0 without it (0x1013acb0;
+		// constructor 0x1013b1e0), which emit adds as m_velocity. 0x1013b4b0
+		// then adds +0x1c..+0x24, set only by slot 0x90 (0x1013c010), which
+		// neither the exe's bundle code (0x00618000..0x0061c000) nor RendDX9's
+		// particle code calls: 0 (constructor, reset 0x1013b440).
 		m_velocity = physicsVelocity ? inheritedVelocity : Vec3 {};
 		m_lastPosition = m_position;
 		m_placed = true;
@@ -1217,6 +1220,29 @@ bool EffectManager::spawnDecal(const std::string& name, const Vec3& position, co
 		decal.normal = turn.untransform(decal.normal);
 		decal.tangent = turn.untransform(decal.tangent);
 	}
+	return true;
+}
+
+bool EffectManager::spawnPartDecal(const std::string& name, const Vec3& position, const Vec3& normal, uint32_t object,
+	int part, const Vec3& partPosition, const Mat3& partRotation)
+{
+	// The object's set and its parts' sets age together here (they are
+	// drawn together): the root's ownerDrawn stands for the part's +0x1a.
+	const bool unseen = std::any_of(m_decals.begin(), m_decals.end(),
+		[object](const Decal& d) { return d.object == object && !d.ownerDrawn; });
+	const world::ObjectTemplate* t = unseen ? m_templates.find(name) : nullptr;
+	if (t && !DecalTemplate::fromTemplate(*t).isStatic) {
+		return false;
+	}
+	if (!addDecal(name, position, normal, 0, object)) {
+		return false;
+	}
+	Decal& decal = m_decals.back();
+	decal.object = object;
+	decal.part = part;
+	decal.position = partRotation.untransform(decal.position - partPosition);
+	decal.normal = partRotation.untransform(decal.normal);
+	decal.tangent = partRotation.untransform(decal.tangent);
 	return true;
 }
 
@@ -2750,19 +2776,17 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				updateGround(object, tracked.velocity, tracked, i, effects, partPose, bundleView);
 				continue;
 			}
-			// GenericProjectiles aren't ObjectManager objects in this rewrite,
-			// but their shipped EffectBundle children (e_RifleRocket_trail,
-			// e_av_rifle_trail, etc.) receive the projectile's creation/fire
-			// event in the original. Start their startOnEffects=0 bundles when
-			// the projectile state first appears; main.cpp supplies that state
-			// for the lifetime of each flying round.
-			const bool projectileFire = created && object.objectTemplate->typeName() == "GenericProjectile"
-				&& b.startOnEffects == 0;
-			const bool start = (created && b.startAtCreation) || projectileFire
+			// Events 0 and 1 reach the root's own children only (0x005b2c10
+			// walks its children, slot 0xec, and their siblings +0x38).
+			const bool child = b.path.size() == 1;
+			const bool start = (created && b.startAtCreation)
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
-				|| (object.effects & b.startOnEffects) != 0;
+				|| (object.effects & b.startOnEffects) != 0 || (object.startEvent && child && b.startOnEffects == 0);
 			if (start && !effects.emitting(object.id, tag)) {
 				startBundle(object, tracked, i, effects, partPose, bundleView, created);
+			}
+			if (object.stopEvent && child && b.stopOnEffects == 0 && effects.emitting(object.id, tag)) {
+				effects.stopAttached(object.id, tag);
 			}
 			// The depth gate (0x0061a760, BundleModifiers::maxUnderWater):
 			// the water's height at the bundle less its own.
@@ -3099,9 +3123,12 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 	const Vec3 centre = m_centre;
 	if (static_cast<int>(m_positions.size()) != count) {
 		m_positions.resize(static_cast<size_t>(count));
-		for (Vec3& p : m_positions) {
-			p = centre + Vec3 {(m_random.unit() * 2 - 1) * radius.x, (m_random.unit() * 2 - 1) * radius.y,
+		m_groups.resize(static_cast<size_t>(count));
+		for (size_t i = 0; i < m_positions.size(); ++i) {
+			m_positions[i] = centre + Vec3 {(m_random.unit() * 2 - 1) * radius.x, (m_random.unit() * 2 - 1) * radius.y,
 				(m_random.unit() * 2 - 1) * radius.z};
+			// The group: rand() & 0x8000000f, so 0..15 (0x1011b1b0).
+			m_groups[i] = static_cast<uint8_t>(rand() & 15);
 		}
 	}
 	if (count == 0) {
@@ -3145,9 +3172,9 @@ void Weather::update(const scene::RainSettings& s, const Vec3& camera, float sec
 		Vec3 d = p - centre;
 		d = {wrap(d.x, radius.x), wrap(d.y, radius.y), wrap(d.z, radius.z)};
 		p = centre + d;
-		// Its deviation group's offset.
+		// Its deviation group's offset (vsPoint's deviations[Data.y]).
 		Drop drop;
-		drop.position = p + m_deviations[i % 16].offset;
+		drop.position = p + m_deviations[m_groups[i]].offset;
 		// vsPoint: 1 - |saturate((|delta| - range) / (radius - range))|.
 		const Vec3 over {std::clamp((std::fabs(d.x) - radius.x * fadeStart) / (radius.x * (1 - fadeStart)), 0.0f, 1.0f),
 			std::clamp((std::fabs(d.y) - radius.y * fadeStart) / (radius.y * (1 - fadeStart)), 0.0f, 1.0f),

@@ -20,6 +20,15 @@
 // player's input, one tick of the control object's tree (0x0057b7f0,
 // 0x0057b960, 0x0057ba00) and of the physics managers. This one follows
 // what the rewrite's own server sends (its last move already stepped):
+//   - the soldier meets the static objects and, as the exe's soldier
+//     response does on a client too (its object pass 0x006c5140 over the
+//     broad phase's movers, 0x006dcce0), the moving objects near it: the
+//     client round's bodies of the ghosts (a Titan's decks, a vehicle's
+//     roof), where their last updates put them and moving at their
+//     networked velocity, which carries the soldier standing on them
+//     (the contacts' relative velocity, 0x006c3890); the replay steps the
+//     soldier alone, the ghosts staying put, as 0x004b5000 steps only the
+//     control object's tree;
 //   - each move sent is stepped once (one 1/30 s tick, as the server's
 //     HostedGame takes one move a tick) and remembered with the state it
 //     left behind;
@@ -52,6 +61,15 @@ class SoldierPrediction {
 public:
 	explicit SoldierPrediction(const game::GameWorld& round) : m_round(round) {}
 
+	// Who the soldier is in the client's round: its team (a Titan's team
+	// forcefields) and its object (the ghost's), for the moving objects
+	// it meets (GameWorld::soldierMovers).
+	void setOwner(int team, uint32_t object)
+	{
+		m_team = team;
+		m_object = object;
+	}
+
 	// Starts predicting a soldier of this template at the server's state
 	// after `lastMove` (its feet, the record's position), with the moves
 	// sent since then on top.
@@ -74,6 +92,14 @@ public:
 	bool onGround() const { return m_body.onGround(); }
 	const game::SoldierControl& control() const { return m_control; }
 	int32_t lastMove() const { return m_lastMove; }
+	// The kit's ability battery (soldier +0x338, 0..1, -1 without a kit):
+	// the record's (mode 3's 0x40000, which the reader hands to the
+	// soldier's +0x18c interface, vtable 0x94 0x00586300), filled between
+	// records as the soldier's update does on every machine (0x0058d350:
+	// the kit's abilityRestoreRate / 30 a tick, up to 1, while not below
+	// 0). `perSecond`: the worn kit's abilityRestoreRate.
+	void setBatteryRate(float perSecond) { m_batteryRate = perSecond; }
+	float battery() const { return m_battery; }
 
 	struct Stats {
 		uint32_t steps = 0;        // moves stepped as they were sent
@@ -95,16 +121,21 @@ private:
 		net::MoveInputState inputState; // after the move
 		game::SoldierControl control;
 		physics::SoldierBody body;
+		float battery = -1;
 		bool stepped = false; // a predicted state (moves sent before the soldier carry only their input)
 	};
 	void tick(const net::PlayerMove& move);
 	void apply(const net::NetworkableState& state, const net::Vec3f& feet);
 
 	const game::GameWorld& m_round;
+	int m_team = 0;
+	uint32_t m_object = 0;
 	bool m_active = false;
 	game::SoldierControl m_control;
 	physics::SoldierBody m_body;
 	net::MoveInputState m_input;
+	float m_battery = -1;
+	float m_batteryRate = 0;
 	std::deque<Snapshot> m_history; // the moves after the last record's, oldest first
 	int32_t m_lastMove = -1;
 	Stats m_stats;

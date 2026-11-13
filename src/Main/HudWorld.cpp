@@ -53,12 +53,22 @@ float LocalHudWorld::objectHealth(uint32_t object) const
 	return hp >= 0 && most > 0 ? hp / most : -1;
 }
 
+// PlayerHealth (0x007a0f80): the soldier's armour's hit points (slot
+// 0x3c) over its maxHitPoints (slot 0x8c).
+float LocalHudWorld::health() const
+{
+	const world::Object* soldier = m_round.player();
+	const float fraction = soldier ? objectHealth(soldier->id()) : -1;
+	return fraction >= 0 ? std::clamp(fraction, 0.0f, 1.0f) : 1.0f;
+}
+
 HudWorld::Scores LocalHudWorld::scores(int player) const
 {
 	Scores s;
 	PlayerInfo p;
 	if (m_round.playerInfo(player, p)) {
 		s.score = scoreOf ? scoreOf(p.id) : p.kills * 2 - p.teamKills * 4;
+		s.skillScore = skillScoreOf ? skillScoreOf(p.id) : 0;
 	}
 	s.teamwork = 0;
 	s.ping = p.ai ? -1 : 0;
@@ -145,7 +155,9 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.name = p.name;
 	out.team = p.team;
 	out.ai = p.ai;
+	out.created = p.created; // connectedAt stays -1 (the networkable sets +0x1c0 alone, 0x005981a0)
 	out.alive = p.alive;
+	out.hitIndicator = p.local ? hitIndicator : 0;
 	out.kills = p.kills;
 	out.deaths = p.deaths;
 	out.teamKills = p.teamKills;
@@ -324,6 +336,28 @@ std::vector<int> RemoteHudWorld::spawnablePoints(int team) const
 		}
 	}
 	return out;
+}
+
+std::vector<uint32_t> RemoteHudWorld::spawnVehicles(int team) const
+{
+	std::vector<uint32_t> out;
+	for (const auto& [id, group] : m_world.spawnGroups()) {
+		const world::Object* object = group.team == team ? m_round.objects().find(objectOf(group.ghost)) : nullptr;
+		if (object && object->objectTemplate() && object->objectTemplate()->typeName() == "PlayerControlObject") {
+			out.push_back(object->id());
+		}
+	}
+	return out;
+}
+
+int RemoteHudWorld::spawnGroupAt(uint32_t object) const
+{
+	for (const auto& [id, group] : m_world.spawnGroups()) {
+		if (object != 0 && objectOf(group.ghost) == object) {
+			return id;
+		}
+	}
+	return -1;
 }
 
 std::vector<HudWorld::VehicleInfo> RemoteHudWorld::vehicleList() const
@@ -569,6 +603,122 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 		}
 	}
 	return w;
+}
+
+void RemoteHudWorld::stepAbility(float seconds, bool fire)
+{
+	// The gun in hand's ReplenishingAmmoComp (0x007beac0's, on foot), as
+	// GameWorld's players work it: a hub while in hand, the repair tool
+	// (onlyActiveWhileFiring) while firing.
+	PlayerInfo me;
+	const world::ObjectTemplate* gun = nullptr;
+	if (playerInfo(localPlayer(), me) && me.alive && !me.manDown && !me.vehicle) {
+		gun = heldWeapon().weapon;
+	}
+	float radius = 0;
+	bool ammo = false, whileFiring = false;
+	const bool gadget = gun && game::GameWorld::gadgetScan(*gun, radius, ammo, whileFiring);
+	if (!gadget || (whileFiring && !fire)) {
+		m_abilityScan = {};
+		return;
+	}
+	m_abilityScan.active = true;
+	if (m_abilityScan.targets.empty() && m_abilityScan.timer == 0) {
+		m_abilityScan.timer = 1; // the first scan at once
+	}
+	if (m_abilityScan.timer >= (m_abilityScan.targets.empty() ? 1.0f : 2.0f)) {
+		m_abilityScan.targets = scanAbilityTargets(me, radius, ammo, whileFiring);
+		m_abilityScan.timer = 0;
+	}
+	m_abilityScan.timer += seconds;
+}
+
+std::vector<uint32_t> RemoteHudWorld::scanAbilityTargets(const PlayerInfo& me, float radius, bool ammo, bool whileFiring) const
+{
+	std::vector<uint32_t> found;
+	constexpr float kDegrees = 3.14159265f / 180.0f;
+	const float yaw = me.yaw * kDegrees;
+	// 0x005d7d40: of our team or of none, and one a heal may mend
+	// (GameWorld::repairable's test on the ghost's hit points).
+	const auto ofTeam = [&](uint32_t object) {
+		const world::Object* o = m_round.objects().find(object);
+		return o && (o->team() == me.team || o->team() == 0);
+	};
+	const auto mendable = [&](uint32_t object) {
+		const world::Object* o = m_round.objects().find(object);
+		const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
+		if (!t || m_round.isTitan(object) || templateNumber(t, "armor.maxHitPoints", 0) <= 0
+			|| templateNumber(t, "armor.canBeRepaired", 1) == 0) {
+			return false;
+		}
+		return hitPoints(object) > 0 || templateNumber(t, "armor.canBeRepairedWhenWreck", 0) != 0;
+	};
+	if (whileFiring) {
+		// 0x005d84a0: from the eyes along the look, as far as abilityRadius.
+		const float pitch = std::clamp(me.aimPitch, -89.0f, 89.0f) * kDegrees;
+		const physics::Vec3 eye = me.position + physics::Vec3 {0, 1.6f, 0};
+		const physics::Vec3 look {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+		const uint32_t hit = m_round.firstObjectHit(eye, eye + look * radius, me.soldier);
+		if (hit && !ammo && ofTeam(hit) && mendable(hit)) {
+			found.push_back(hit);
+		}
+		return found;
+	}
+	// 0x005d8740: round the point a metre ahead of the hands.
+	const physics::Vec3 at = me.position + physics::Vec3 {std::sin(yaw), 0.5f, std::cos(yaw)};
+	const auto inReach = [&](const physics::Vec3& p) { return physics::lengthSquared(p - at) <= radius * radius; };
+	for (const PlayerInfo& p : playerList()) {
+		if (p.alive && !p.vehicle && p.soldier && p.team == me.team && inReach(p.position)) {
+			found.push_back(p.soldier);
+		}
+	}
+	if (!ammo) {
+		for (const net::RemoteObject& o : m_world.objectList()) {
+			if (o.part != 0 || !o.hasPosition || o.kind == net::NetworkableKind::Soldier) {
+				continue;
+			}
+			const uint32_t object = objectOf(o.ghost);
+			if (object && ofTeam(object) && inReach({o.position.x, o.position.y, o.position.z}) && mendable(object)) {
+				found.push_back(object);
+			}
+		}
+	}
+	return found;
+}
+
+bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
+{
+	PlayerInfo me;
+	if (!playerInfo(localPlayer(), me)) {
+		return false;
+	}
+	out = {};
+	out.alive = me.alive && !me.manDown; // slots 0x74 and 0x114
+	const net::ControlState* state = m_world.controlState();
+	if (state && state->hasOwn) {
+		out.healFlag = state->own.flag168;
+		out.repairFlag = state->own.flag169;
+		out.ammoFlag = state->own.flag16a;
+	}
+	if (const world::Object* kit = m_round.objects().find(me.kit); kit && kit->objectTemplate()) {
+		game::GameWorld::abilityBarKit(*kit->objectTemplate(), out);
+	}
+	const world::ObjectTemplate* gun = me.vehicle ? nullptr : heldWeapon().weapon;
+	if (!gun || !game::GameWorld::abilityBarGadget(*gun, out)) {
+		return true;
+	}
+	// The battery (slot 0x28, 0x005d8160: the holder's soldier's +0x338).
+	float battery = 0;
+	if (!(ownBattery && ownBattery(battery)) && state && !state->groups.empty()
+		&& state->groups.front().kind == net::NetworkableKind::Soldier && (state->groups.front().mask & 0x40000)) {
+		battery = state->groups.front().battery;
+	}
+	out.battery = std::max(0.0f, battery);
+	out.active = m_abilityScan.active && !m_abilityScan.targets.empty();
+	for (const uint32_t target : m_abilityScan.targets) {
+		out.targets.push_back(out.kitAmmo ? 1.0f : objectHealth(target));
+	}
+	return true;
 }
 
 float RemoteHudWorld::combatAreaTimeLeft() const

@@ -102,6 +102,18 @@ void BotManager::updateSquadNow(int team, int id)
 	updateSquad(squad);
 }
 
+const GameWorld::SquadOrder* BotManager::squadOrder(int team, int id) const
+{
+	if (humanCommands(team)) {
+		return m_world.squadOrder(team, id);
+	}
+	if (team != 1 && team != 2) {
+		return nullptr;
+	}
+	const auto it = m_sides[team].orders.find(id);
+	return it != m_sides[team].orders.end() ? &it->second : nullptr;
+}
+
 bool BotManager::humanCommands(int team) const
 {
 	// The SAI's slot 0x4c (0x1009bd50: +0x241, a human commander).
@@ -658,8 +670,9 @@ void BotManager::takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool
 // slots 0x3c / 0x40 / 0x44 by kind) and everyone re-goals. Accepted: a
 // bot leader says "roger_that" to a human commander (6, channel 4, 2.5 s)
 // and the order to the squad (attack_position 16, defend 15, move 17 on
-// channel 3, 2 s; IBFSquad 0x1c / 0x24 / 0x20 mark it and 0x30 / 0x34 /
-// 0x38 take it for the leader); everyone re-goals.
+// channel 3, 2 s; IBFSquad 0x1c / 0x24 / 0x20 order the squad in the
+// game, 0x30 / 0x34 / 0x38 post the leader's acceptance, BF2142.exe
+// 0x008964e0); everyone re-goals.
 bool BotManager::acceptOrder(Squad& squad, int by)
 {
 	const bool commander = humanCommands(squad.team);
@@ -728,6 +741,15 @@ bool BotManager::acceptOrder(Squad& squad, int by)
 		static const int orderVoice[3] = {16, 15, 17};
 		if (squad.kind >= 0 && squad.kind <= 2) {
 			queueRadio(*leaderBot, orderVoice[squad.kind], 3, 2.0f);
+			// The leader orders its squad in the game (IBFSquad 0x1c / 0x24
+			// / 0x20, BF2142.exe 0x008968d0 / 0x00896910 / 0x008968f0 ->
+			// 0x00896830 -> the squad manager's slot 0x48, SquadLeader.sendOrder):
+			// map attack, defend or move at the order's spot. This is
+			// the squad's order marker its members see.
+			static const GameWorld::OrderType leaderOrder[3] = {GameWorld::OrderType::MapAttack,
+				GameWorld::OrderType::MapDefend, GameWorld::OrderType::MapMove};
+			m_world.issueSquadLeaderOrder(squadLeaderOf(squad)->id, leaderOrder[squad.kind], squad.orderAt.x,
+				squad.orderAt.z);
 		}
 	}
 	for (SquadMember& m : squad.members) {
@@ -894,7 +916,7 @@ void BotManager::updateMember(Squad& squad, SquadMember& member)
 		}
 		if (by >= 0) {
 			const bool accepted = acceptOrder(squad, by);
-			if (leader && leader->ai && m_world.squadOrder(squad.team, squad.id)) {
+			if (leader && leader->ai && humanCommands(squad.team) && m_world.squadOrder(squad.team, squad.id)) {
 				m_world.acceptOrder(leader->id, accepted);
 			}
 		}
@@ -1357,8 +1379,9 @@ void BotManager::updateSquad(Squad& squad)
 {
 	syncSquadMembers(squad);
 	const bool commander = humanCommands(squad.team);
-	// The world's order changing is the game's order event (0x10089480).
-	const GameWorld::SquadOrder* order = m_world.squadOrder(squad.team, squad.id);
+	// An order changing is the game's order event (0x10089480): a human
+	// commander's, or the SAI's (squadOrder).
+	const GameWorld::SquadOrder* order = squadOrder(squad.team, squad.id);
 	const GameWorld::OrderType type = order ? order->type : GameWorld::OrderType::None;
 	const physics::Vec3 orderAt = order ? order->position : physics::Vec3 {};
 	if (order && (type != squad.seenType || distance2(orderAt, squad.seenAt) > 1.0f)) {
@@ -1369,6 +1392,19 @@ void BotManager::updateSquad(Squad& squad)
 	}
 	squad.seenType = type;
 	squad.seenAt = orderAt;
+	// The squad leader's own order (the event with its flag 0,
+	// 0x10089480 reading the game's leader order, slot 0x50).
+	const GameWorld::SquadOrder* leaderOrder = m_world.squadLeaderOrder(squad.team, squad.id);
+	const GameWorld::OrderType leaderType = leaderOrder ? leaderOrder->type : GameWorld::OrderType::None;
+	const physics::Vec3 leaderAt = leaderOrder ? leaderOrder->position : physics::Vec3 {};
+	if (leaderOrder && (leaderType != squad.seenLeaderType || distance2(leaderAt, squad.seenLeaderAt) > 1.0f)) {
+		const int kind = kindOf(leaderType);
+		if (kind != 4) {
+			takeOrder(squad, kind, leaderAt, false);
+		}
+	}
+	squad.seenLeaderType = leaderType;
+	squad.seenLeaderAt = leaderAt;
 	if (squad.state == 1 && m_time > squad.takenUntil) {
 		// +0xa8: the order taken lapses unanswered (the squad manager's
 		// 0x10088f20 re-goals; the rewrite lets it go).

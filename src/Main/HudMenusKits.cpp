@@ -8,6 +8,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 
 namespace dice::hfe::menu {
@@ -243,10 +244,94 @@ void KitMenu::build(int team)
 	m_grid[0][0].active = std::none_of(primary.begin() + 1, primary.end(), [](const Item& i) { return i.active; });
 }
 
+// 0x00798b20, from each rebuild of the open kit (0x00798dd0) while the
+// local player's soldier is dead: the kit is built for the player
+// (0x00570ab0: its own items' and the applying unlocks' Ability
+// components, 0x005706b0, into the player's ability block, slot 0x2a0),
+// then the block lights the icons (HudElementsKitsMenu.con's PlayerEquip
+// row):
+//   - per addExtraAmmoItem entry (the list +0x18, 0x28 bytes each), only
+//     ever set: the flag (+1) Ability0Active (grenades.tga), rounds a
+//     magazine (+8) Ability1Active (extra_grenade.tga), magazines (+4)
+//     Ability2Active (larger_pistol_clip.tga), as the script pairs them;
+//   - sprintUseModifier (+0x50) not 1 Ability3Active (sprint_amount),
+//     sprintRechargeModifier (+0x4c) not 1 Ability4Active
+//     (sprint_recharge), setOverheatMod's pairs (+0x38) Ability5Active
+//     (gun_upgrade), beaconSpawnTimeMod (+0x54) not 1 Ability6Active
+//     (beacon_spawnTime).
+// An unlock's Ability applies when the player owns the container (the
+// build's last pass: player slot 0x2a8, 0x00597760), chosen on the grid
+// or not (GameWorld::fillKit); every one with "all unlocked".
+void KitMenu::updateAbilityIcons()
+{
+	const auto& kits = m_logic.team(m_team == 1 ? 1 : 2).kits;
+	if (m_alive || m_kit < 0 || static_cast<size_t>(m_kit) >= kits.size()) {
+		return;
+	}
+	const world::ObjectTemplate* kit = m_templates.find(kits[static_cast<size_t>(m_kit)].name);
+	if (!kit) {
+		return;
+	}
+	const auto owned = [this](const std::string& container) {
+		return m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), container) != m_unlocked.end();
+	};
+	float sprintUse = 1, sprintRecharge = 1, beacon = 1;
+	bool overheat = false;
+	const auto apply = [&](const world::ObjectTemplate& t) {
+		const auto& settings = t.settings();
+		if (const auto extra = settings.find("ability.addExtraAmmoItem.list"); extra != settings.end()) {
+			std::string list = extra->second;
+			for (size_t at = 0; at < list.size();) {
+				size_t end = list.find(';', at);
+				end = end == std::string::npos ? list.size() : end;
+				char item[128] = {};
+				int rounds = 0, mags = 0, flag = 0;
+				if (std::sscanf(list.substr(at, end - at).c_str(), "%127s %d %d %d", item, &rounds, &mags, &flag) >= 3) {
+					m_abilityIcons[0] = m_abilityIcons[0] || flag != 0;
+					m_abilityIcons[1] = m_abilityIcons[1] || rounds > 0;
+					m_abilityIcons[2] = m_abilityIcons[2] || mags > 0;
+				}
+				at = end + 1;
+			}
+		}
+		// 0x005706b0 copies each modifier that isn't 1 and appends the pairs.
+		const auto modifier = [&settings](const char* key, float& kept) {
+			const auto it = settings.find(key);
+			if (it != settings.end() && std::atof(it->second.c_str()) != 1.0) {
+				kept = static_cast<float>(std::atof(it->second.c_str()));
+			}
+		};
+		modifier("ability.sprintUseModifier", sprintUse);
+		modifier("ability.sprintRechargeModifier", sprintRecharge);
+		modifier("ability.beaconSpawnTimeMod", beacon);
+		if (const auto mods = settings.find("ability.setOverheatMod.list"); mods != settings.end() && !mods->second.empty()) {
+			overheat = true;
+		}
+	};
+	for (const world::ChildTemplate& child : kit->children()) {
+		const world::ObjectTemplate* t = m_templates.find(child.name);
+		if (!t) {
+			continue;
+		}
+		if (t->typeName() != "ItemContainer") {
+			apply(*t); // the kit's own items (their Ability, +0x74)
+			continue;
+		}
+		if (owned(child.name)) {
+			apply(*t);
+		}
+	}
+	m_abilityIcons[3] = sprintUse != 1;
+	m_abilityIcons[4] = sprintRecharge != 1;
+	m_abilityIcons[5] = overheat;
+	m_abilityIcons[6] = beacon != 1;
+}
+
 void KitMenu::update(int team)
 {
 	if (!m_built || team != m_team) {
 		build(team);
+		updateAbilityIcons();
 	}
 	const auto& kits = m_logic.team(team == 1 ? 1 : 2).kits;
 	if (skipUnchanged) {
@@ -334,6 +419,9 @@ void KitMenu::update(int team)
 	// / Alpha / FieldUnlocked, Ability%iActive, HeavyArmor%iActive,
 	// HeavyArmorActive, CustomInfoShow, CustomSoldierPicture).
 	m_hud.set("CustomInfoShow", m_customOpen ? 1 : 0);
+	for (size_t i = 0; i < m_abilityIcons.size(); ++i) {
+		m_hud.set("Ability" + std::to_string(i) + "Active", m_abilityIcons[i] ? 1 : 0);
+	}
 	m_hud.set("HeavyArmorActive", m_heavy ? 1 : 0);
 	m_hud.set("NotAntiVechicleKitChoosen", 1);
 	m_hud.set("UnlockInfoBarShow", 0);
