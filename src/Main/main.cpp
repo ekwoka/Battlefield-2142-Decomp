@@ -3499,6 +3499,9 @@ int runGame(Options& options, Session& session)
 	}
 	sound::SoundManager sounds(soundEngine, templates);
 	sounds.registerTemplateType();
+	if (enhancedSettings.enabled && soundEngine) {
+		templates.onMissingSound = [&sounds](world::ObjectTemplate& created) { sounds.applyEventDefaults(created); };
+	}
 	sound::registerSoundConsoleMethods(console, sounds);
 	// The game logic's voice messages (0x004cdab0: made once the level has
 	// set the teams' languages) and the objects' sounds (GameAudio.h).

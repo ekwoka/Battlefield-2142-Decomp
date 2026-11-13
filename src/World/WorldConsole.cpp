@@ -305,8 +305,12 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	registerInertConsoleRows(console);
 
 	// activeSafe <type> <name>: the type is only checked in debug builds.
-	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string, std::string name) {
-		templates.setActive(templates.find(firstWord(name)));
+	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string type, std::string name) {
+		ObjectTemplate* found = templates.find(firstWord(name));
+		if (!found && templates.onMissingSound && firstWord(type) == "Sound" && (found = templates.create("Sound", firstWord(name)))) {
+			templates.onMissingSound(*found);
+		}
+		templates.setActive(found);
 	});
 
 	ConsoleMethod createComponent;
