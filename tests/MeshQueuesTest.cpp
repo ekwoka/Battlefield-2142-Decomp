@@ -1,6 +1,7 @@
 // Which render queue a material takes and the transparency queues' order
 // (RendDX9 0x100c3880, 0x10039380; src/Render/MeshQueues.h).
 #include "Render/MeshQueues.h"
+#include "Render/TreeMaterials.h"
 #include "Render/Culling.h"
 #include "Geometry/GeometryTemplateManager.h"
 #include "Console/Console.h"
@@ -121,6 +122,18 @@ TEST(MeshQueues_BundledAndSkinnedFacesCulled)
 	CHECK(!render::meshCulled(true, true, false));
 	CHECK(render::meshCulled(false, false, false)); // a static mesh, a trunk
 	CHECK(!render::meshCulled(false, false, true)); // a tree's leaves
+}
+
+// Backstab's olive leaves have alpha mode 0, so the static-mesh rule calls them a
+// trunk; drawn as one (no alpha test) each leaf card showed its hidden texels.
+TEST(MeshQueues_ALeafIsNeverATrunk)
+{
+	const std::string lut = "Common\\Textures\\SpecularLUT_pow36.dds";
+	const bool leaf = render::treeLeaf(true, {"levels/backstab/textures/olive_leaf_c.dds", lut});
+	CHECK(leaf);
+	CHECK(render::treeMaterial(true, 0, false) == render::TreeMaterial::TrunkBase);
+	CHECK(!render::treeTrunk(leaf, render::treeMaterial(true, 0, false)));
+	CHECK(render::treeTrunk(false, render::treeMaterial(true, 0, true)));
 }
 
 // A tree's leaves (0x100db6f0): a material with only its colour map (and

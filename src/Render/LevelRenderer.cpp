@@ -642,7 +642,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		}
 		const auto treeKind = overgrowth && tree ? overgrowthKind
 			: treeMaterial(tree, material.alphaMode, effect == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0);
-		submesh.trunk = treeKind == TreeMaterial::TrunkBase || treeKind == TreeMaterial::TrunkDetail;
+		submesh.trunk = treeTrunk(leaf, treeKind);
 		if (submesh.trunk) submesh.specularKind = 0;
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
