@@ -758,6 +758,18 @@ TEST(RenderScene_DecalClippedToTheSurface)
 	CHECK(flat);
 	// Nowhere near the faces.
 	CHECK(effects::clipDecal({50, 0, 50}, {0, 1, 0}, {1, 0, 0}, 1, frame, fold, 0, 0.01f).empty());
+	// A copy of the fold 5 m up (another storey of the same mesh, in the
+	// hit's grid column) is no face the hit face's walk reaches: no pieces.
+	std::vector<std::array<Vec3, 3>> storeys = fold;
+	for (const auto& face : fold) {
+		storeys.push_back({face[0] + Vec3 {0, 5, 0}, face[1] + Vec3 {0, 5, 0}, face[2] + Vec3 {0, 5, 0}});
+	}
+	const auto stacked = effects::clipDecal({0, 0, 0}, {0, 1, 0}, {1, 0, 0}, 1, frame, storeys, 0, 0.01f);
+	bool low = stacked.size() == pieces.size();
+	for (const auto& p : stacked) {
+		low = low && p.position.y < 2;
+	}
+	CHECK(low);
 }
 
 // The doubled ageing (0x10164f10): a decal set whose owner wasn't drawn the

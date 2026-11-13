@@ -3771,3 +3771,72 @@ TEST(Titan_SiloMissileFliesThroughObstaclesUntilItsTimeLimit)
 	CHECK(blocked.ended && blocked.through >= 2);
 	CHECK(blocked.endAge > 6.5f && blocked.endAge < 8.5f && blocked.toTitan > 300);
 }
+
+// RendDX9's decal clip (0x10165f60 -> 0x101655c0) starts at the face the
+// round hit and walks its edge neighbours, at most 4 deep (0x101f79d4): a
+// rifle round's decal on the Suez EU Titan's hull lies on the hull about
+// the hit, never on a face of the same mesh elsewhere in its column.
+TEST(Titan_HullDecalStaysOnTheHull)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	if (!level.loaded) {
+		return;
+	}
+	level.run(1);
+	const auto* titan = level.titan(2);
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	const int shooter = level.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* rifle = level.templates.find("eu_ar_rifle");
+	const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+	CHECK(!round.empty());
+	const physics::Vec3 c = titan->position;
+	for (int side = 0; side < 4; ++side) {
+		const float a = side * 1.5707963f;
+		const physics::Vec3 out {std::sin(a), 0, std::cos(a)};
+		for (float dy = -6; dy <= 14; dy += 2) {
+			for (float across = -20; across <= 20; across += 5) {
+				const physics::Vec3 from = c + out * 45.0f + physics::Vec3 {out.z, 0, -out.x} * across + physics::Vec3 {0, dy, 0};
+				level.world->launchProjectile(round, from, out * -400.0f, shooter);
+			}
+			level.run(0.2f);
+		}
+	}
+	int decals = 0, far = 0, empty = 0;
+	float worst = 0;
+	for (const effects::Decal& d : level.world->effects().decals()) {
+		if (d.object != titan->object) {
+			continue;
+		}
+		const physics::CollisionWorld* mesh =
+			d.part >= 0 ? level.world->partCollision(d.object, d.part) : level.world->projectileCollision(d.object);
+		if (!mesh) {
+			continue;
+		}
+		std::vector<std::array<effects::Vec3, 3>> faces;
+		mesh->forEachFaceNear(d.position, d.size * 0.5f * 1.4143f,
+			[&](const physics::Vec3& p, const physics::Vec3& q, const physics::Vec3& r, uint32_t, uint32_t) {
+				faces.push_back({p, q, r});
+			});
+		const auto pieces = effects::clipDecal(d.position, d.normal, d.tangent, d.size * 0.5f, d.frame, faces, 60, 0.01f);
+		++decals;
+		empty += pieces.empty() ? 1 : 0;
+		float most = 0;
+		for (const auto& p : pieces) {
+			most = std::max(most, std::sqrt(physics::lengthSquared(p.position - d.position)));
+		}
+		worst = std::max(worst, most);
+		far += most > d.size * 2 ? 1 : 0;
+	}
+	std::fprintf(stderr, "  %d decals on the EU Titan, %d with pieces off the hull (worst %.1f m), %d with none\n", decals,
+		far, worst, empty);
+	CHECK(decals > 10);
+	CHECK(far == 0);
+	CHECK(empty == 0); // the hit face always keeps its piece
+}

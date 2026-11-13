@@ -3017,9 +3017,9 @@ void LevelRenderer::buildDecals()
 		// away by angle); one on a static object or a vehicle to that
 		// object's collision faces (the projectile LOD's, the mesh the
 		// exe's add 0x005a36d0 passes) about the hit, turned away past
-		// decalGeomClipAngle as 0x101655c0 does. With decalGeomClipAngle 0,
-		// off the terrain without faces, or with nothing left, the flat
-		// square (0x10164940).
+		// decalGeomClipAngle as 0x101655c0 does. With nothing left the add
+		// frees the decal (0x10166735 -> 0x10164660): not drawn. With
+		// decalGeomClipAngle 0, the flat square (0x10164940).
 		if (ps.decalGeomClipAngle > 0 && !decal.clipped) {
 			std::vector<effects::DecalVertex> pieces;
 			if (decal.object == 0 && decal.surface == 0 && ground && ground->loaded() &&
@@ -3034,7 +3034,10 @@ void LevelRenderer::buildDecals()
 			}
 			decal.clipped = std::make_shared<const std::vector<effects::DecalVertex>>(std::move(pieces));
 		}
-		if (decal.clipped && !decal.clipped->empty()) {
+		if (decal.clipped) {
+			if (decal.clipped->empty()) {
+				continue;
+			}
 			const uint32_t first = static_cast<uint32_t>(vertices.size());
 			for (const effects::DecalVertex& p : *decal.clipped) {
 				effects::Vec3 position = p.position;

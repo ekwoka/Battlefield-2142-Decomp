@@ -597,10 +597,17 @@ struct Decal {
 // A triangle whose normal is more than maxAngleDegrees from the decal's is
 // skipped (acos(n . normal) > angle x 0.0174533; the terrain path passes an
 // angle of 0: none skipped). At most 128 vertices (0x7f). The original walks
-// the triangles from the hit one through their edge neighbours, at most 4
-// deep (0x101f79d4), stopping where the square lies inside a face; the
-// rewrite takes every triangle it is given (the terrain's 3 x 3 cells about
-// the hit, 0x10164d70), which gives the same pieces for decals that small.
+// the triangles from the hit one (the hit's face, 0x101662f7) through their
+// edge neighbours (mesh slot 0x38, 0x10165a02; the terrain's table
+// 0x101f7880), at most 4 deep (0x101f79d4, 0x10165a60), each once (the set
+// 0x1021e3b8), stopping where the square lies inside a face (0x101659c2), so
+// it never meets a face of the mesh away from the hit. The rewrite takes the
+// triangles it is given (the terrain's 3 x 3 cells about the hit,
+// 0x10164d70; a mesh's faces in the grid column over the hit, any height)
+// and stands in for the walk by skipping a triangle whose plane is further
+// from the centre than the square's half diagonal: the hit face (distance 0)
+// and every face folded off it inside the square stay, a parallel face above
+// or below (a Titan's upper hull over the hit) doesn't get a copy.
 // Triangles facing away from the decal are skipped. Empty if nothing is
 // left: RendDX9 then frees the decal (0x10164660).
 std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const Vec3& tangent, float halfSize,

@@ -1074,6 +1074,11 @@ std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const
 		if (facing <= 1e-4f || facing < cosLimit) {
 			continue;
 		}
+		// shortcut: stands in for 0x101655c0's edge-neighbour walk from the hit face; a
+		// disconnected face within the half diagonal still gets a piece (the walk needs the hit's face index).
+		if (std::fabs(dotv(centre - a, n)) > halfSize * 1.4143f) {
+			continue;
+		}
 		std::vector<DecalVertex> polygon(square, square + 4);
 		const Vec3 corners[3] = {a, b, c};
 		for (int e = 0; e < 3 && polygon.size() >= 3; ++e) {
