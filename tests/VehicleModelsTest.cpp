@@ -4843,6 +4843,65 @@ TEST(Vehicles_TransportGunnerCameraTurnsWithTheGun)
 	CHECK(std::fabs(gunYaw) > 10 && std::fabs(cameraYaw - gunYaw) < 0.01f);
 }
 
+// The Shepherd's side gunners (eu_at seats F2 and F3): the minigun's rounds
+// leave along the barrel the mouse aims, wherever the gun is turned
+// (fire.fireInCameraDof's frame is the seat camera's, 0x005f1a20, and that
+// camera rides the gun's bundles).
+TEST(Vehicles_ShepherdGunnersFireWhereTheyAim)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const int seatKey : {2, 3}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("eu_at")) {
+			return;
+		}
+		const uint32_t at = g.start("eu_at", {0, 2, 6});
+		CHECK(g.enter(at));
+		game::SoldierInput seat;
+		seat.switchSeat = seatKey;
+		g.world->setPlayerInput(seat);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.run(0.5f);
+		g.world->setZoomed(g.world->localPlayer(), true); // no deviation
+		const int gunSeat = seatKey - 1;
+		float yaw = 0, pitch = 0;
+		CHECK(g.world->gunAim(at, gunSeat, yaw, pitch));
+		float look = 0;
+		seataim::steerGun([&](const game::SoldierInput& i) { g.world->setPlayerInput(i); g.world->tick(1 / 30.0f); },
+			[&](float& y, float& p) { g.world->gunAim(at, gunSeat, y, p); }, look, std::remainder(yaw + 25, 360.0f), pitch + 8); // up: a round into the ground ends within its tick
+		game::SoldierInput hold;
+		hold.aimPitch = look;
+		g.world->setPlayerInput(hold);
+		g.world->tick(1 / 30.0f);
+		const size_t before = g.world->projectiles().size();
+		hold.fire = true;
+		for (int i = 0; i < 90 && g.world->projectiles().size() <= before; ++i) {
+			g.world->setPlayerInput(hold);
+			g.world->tick(1 / 30.0f);
+		}
+		CHECK(g.world->projectiles().size() > before);
+		if (g.world->projectiles().size() <= before) {
+			return;
+		}
+		const game::Projectile& p = g.world->projectiles()[before];
+		physics::Vec3 origin;
+		physics::Mat3 hull;
+		float gunYaw = 0, gunPitch = 0;
+		CHECK(g.world->gunFrame(at, gunSeat, origin, hull));
+		CHECK(g.world->gunAim(at, gunSeat, gunYaw, gunPitch));
+		const float y = gunYaw * 3.14159265f / 180.0f, x = gunPitch * 3.14159265f / 180.0f;
+		const physics::Vec3 barrel = hull.transform({std::sin(y) * std::cos(x), std::sin(x), std::cos(y) * std::cos(x)});
+		const physics::Vec3 way = p.velocity * (1 / std::sqrt(physics::lengthSquared(p.velocity)));
+		const float off = std::acos(std::clamp(static_cast<double>(physics::dot(way, barrel)), -1.0, 1.0)) * 57.29578;
+		std::fprintf(stderr, "  Shepherd seat %d: gun %.1f/%.1f, round off the barrel by %.2f degrees\n", seatKey, gunYaw, gunPitch, off);
+		CHECK(std::fabs(gunYaw - yaw) > 10); // the gun did turn
+		CHECK(off < 2.0f);
+	}
+}
+
 // A pod seat of the APC aiming up: how high and far the pod goes.
 TEST(Vehicles_ApcPodFlightWhenAimedUp)
 {

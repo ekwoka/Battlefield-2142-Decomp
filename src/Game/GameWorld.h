@@ -3100,6 +3100,12 @@ private:
 	// the control object's active camera, the one its zoom.startCameraId
 	// takes up, 0x005db260, else the seat's first); null without one.
 	static const SeatLayout::SeatCamera* fireCamera(const SeatLayout& seat, const SeatWeapon& weapon);
+	// That camera in the world as posed now (its camera object's matrix,
+	// 0x004b9db0 -> 0xc378 slot 0x78, with its bundles' and its own look):
+	// the one numbered `cameraId`, else the seat's first, down the template
+	// tree as PlayerCamera::findSeatCamera poses it. A camera that turns by
+	// bundles of its own (the Shepherd gunners') is not under the gun's.
+	bool seatCameraFrame(const Body& body, int seat, int cameraId, physics::Vec3& at, physics::Mat3& turn);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, Body::Gun& gun, int& barrel);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel);
 	Body* findBody(uint32_t object);

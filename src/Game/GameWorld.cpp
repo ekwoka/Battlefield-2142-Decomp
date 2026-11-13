@@ -13345,7 +13345,17 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	// it). The round flies off along it (the TV missile at rest, velocity
 	// 0, its engine pushing along the nose).
 	const SeatLayout::SeatCamera* camera = w.fireInCameraDof ? fireCamera(seat, w) : nullptr;
-	if (camera && !camera->ridesGun) {
+	// A camera that is no child of the gun's bundles turns by bundles of its
+	// own (the Shepherd gunners' eu_at_L_gun_cameraBase chain, the TV
+	// missile camera's look): the round follows its posed frame, from its
+	// place plus projectileStartPosition in it.
+	physics::Vec3 cameraAt;
+	physics::Mat3 cameraTurn;
+	const bool cameraFrame = camera && !camera->ridesGun
+		&& seatCameraFrame(body, player.seat, std::max(w.startCameraId, 0), cameraAt, cameraTurn);
+	if (cameraFrame) {
+		direction = cameraTurn.rows[2] * (1 / std::sqrt(physics::lengthSquared(cameraTurn.rows[2]))); // the hull's drift
+	} else if (camera && !camera->ridesGun) {
 		physics::Mat3 facing = camera->turn;
 		const size_t seatIndex = static_cast<size_t>(player.seat);
 		if (!seat.camera.empty() && sameName(seat.camera, camera->name) && seatIndex < body.looks.size()) {
@@ -13405,6 +13415,9 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 		Projectile p;
 		p.origin =
 			body.body.position + body.body.rotation.transform(mount.place(seatGunOrigin(seat, w, gun.yaw, gun.pitch, arm.barrel)));
+		if (cameraFrame) {
+			p.origin = cameraAt + cameraTurn.transform(w.hasStartPosition ? w.startPosition : physics::Vec3 {0, 0, 1});
+		}
 		p.position = p.origin;
 		p.velocity = launchVelocity(body.reportedVelocity, direction * arm.weapon->settings().velocity); // the vehicle's (0x005f31d0)
 		p.heading = direction;
@@ -13641,6 +13654,85 @@ const GameWorld::SeatLayout::SeatCamera* GameWorld::fireCamera(const SeatLayout&
 		}
 	}
 	return seat.cameras.empty() ? nullptr : &seat.cameras.front();
+}
+
+bool GameWorld::seatCameraFrame(const Body& body, int seat, int cameraId, physics::Vec3& at, physics::Mat3& turn)
+{
+	const world::Object* vehicle = m_objects.find(body.object);
+	if (!vehicle || !vehicle->objectTemplate()) {
+		return false;
+	}
+	const VehicleLayout& layout = vehicleLayout(*vehicle->objectTemplate());
+	if (seat < 0 || static_cast<size_t>(seat) >= layout.seats.size()) {
+		return false;
+	}
+	const auto isSeat = [&](const std::string& name) {
+		return std::any_of(layout.seats.begin(), layout.seats.end(), [&](const SeatLayout& s) { return sameName(s.name, name); });
+	};
+	const std::string& seatName = layout.seats[static_cast<size_t>(seat)].name;
+	struct Frame {
+		physics::Mat3 turn;
+		physics::Vec3 at;
+	};
+	// a then b, for row vectors (v * a * b): the child's frame in its parent's.
+	const auto then = [](const Frame& a, const Frame& b) { return Frame {a.turn * b.turn, b.turn.transform(a.at) + b.at}; };
+	const auto place = [](const world::Vec3& p, const world::Vec3& r) {
+		return Frame {physics::Mat3::fromYawPitchRoll({r.x, r.y, r.z}), {p.x, p.y, p.z}};
+	};
+	Frame found, first;
+	bool ok = false, haveFirst = false;
+	std::function<void(const world::ObjectTemplate&, const Frame&, bool, int)> walk = [&](const world::ObjectTemplate& t,
+																						 const Frame& parent, bool inSeat, int depth) {
+		if (ok || depth > 10) {
+			return;
+		}
+		for (const world::ChildTemplate& child : t.children()) {
+			const world::ObjectTemplate* c = m_templates.find(child.name);
+			if (!c) {
+				continue;
+			}
+			Frame m = then(place(child.position, child.rotation), parent);
+			world::Vec3 offset, rotation;
+			anim::Matrix bone;
+			if (partBone(body.object, child.name, bone)) {
+				const Frame boned {{physics::Vec3 {bone[0], bone[1], bone[2]}, physics::Vec3 {bone[4], bone[5], bone[6]},
+									   physics::Vec3 {bone[8], bone[9], bone[10]}},
+					{bone[12], bone[13], bone[14]}};
+				m = then(boned, parent);
+			} else if (partPose(body.object, child.name, offset, rotation, inSeat ? seat : -1)) {
+				m = then(place(offset, rotation), m);
+			}
+			const bool aSeat = isSeat(c->name());
+			if (inSeat && aSeat) {
+				continue; // another seat's cameras
+			}
+			if (inSeat && c->typeName() == "Camera") {
+				if (!haveFirst) {
+					first = m;
+					haveFirst = true;
+				}
+				if (static_cast<int>(number(*c, "CameraId", 0)) == cameraId) {
+					found = m;
+					ok = true;
+					return;
+				}
+				continue;
+			}
+			walk(*c, m, inSeat || (aSeat && sameName(c->name(), seatName)), depth + 1);
+			if (ok) {
+				return;
+			}
+		}
+	};
+	const world::ObjectTemplate& root = *vehicle->objectTemplate();
+	walk(root, Frame {}, sameName(root.name(), seatName), 0);
+	if (!ok && !haveFirst) {
+		return false;
+	}
+	const Frame world = then(ok ? found : first, Frame {body.body.rotation, body.body.position});
+	at = world.at;
+	turn = world.turn;
+	return true;
 }
 
 physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel)
