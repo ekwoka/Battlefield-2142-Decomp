@@ -413,10 +413,48 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 			static_cast<double>(SDL_GetTicksNS() - start) / 1e6 / frames, frames);
 	}
 	std::vector<uint8_t> pixels;
-	const bool ok = gpu->readPixels(target, pixels) &&
+	bool ok = gpu->readPixels(target, pixels) &&
 		render::writePng(options.screenshot, target.width, target.height, pixels);
-	gpu->releaseTarget(target);
 	std::printf("%s %s\n", ok ? "wrote" : "failed to write", options.screenshot.c_str());
+	// BF2142_SHOT_SEQUENCE=N[:F] (a diagnostic): N more frames, a game tick before each, the fire button held
+	// for the first F of them; each saved beside the screenshot as <name>-<i>.png (a frame sequence in one run).
+	if (const char* sequence = std::getenv("BF2142_SHOT_SEQUENCE")) {
+		const int frames = std::atoi(sequence);
+		const char* colon = std::strchr(sequence, ':');
+		const int fireFrames = colon ? std::atoi(colon + 1) : 0;
+		const std::string stem = options.screenshot.substr(0, options.screenshot.rfind('.'));
+		for (int i = 1; i <= frames && ok; ++i) {
+			ViewerOptions::PlayerInput input;
+			input.fire = i <= fireFrames;
+			if (options.onPlayerInput) {
+				options.onPlayerInput(input);
+			}
+			if (options.onTicks) {
+				options.onTicks(1);
+			}
+			if (options.camera.empty() && options.playerView && options.playerView(view) && (view.firstPerson || view.external)) {
+				camera.position = {view.eye[0], view.eye[1], view.eye[2]};
+				camera.yaw = view.eyeYaw;
+				camera.pitch = view.eyePitch;
+				camera.fovY = view.fovY;
+				camera.roll = view.eyeRoll;
+			}
+			if (options.onView) {
+				const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
+				options.onView(position, camera.yaw, camera.pitch, camera.fovY,
+					static_cast<float>(options.width) / static_cast<float>(options.height));
+			}
+			SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu->device());
+			level.syncObjects();
+			level.draw(again, target.color, target, camera, sources.lights);
+			SDL_SubmitGPUCommandBuffer(again);
+			char name[16];
+			std::snprintf(name, sizeof name, "-%02d.png", i);
+			ok = gpu->readPixels(target, pixels) && render::writePng(stem + name, target.width, target.height, pixels);
+			std::printf("%s %s%s\n", ok ? "wrote" : "failed to write", stem.c_str(), name);
+		}
+	}
+	gpu->releaseTarget(target);
 	return ok ? 0 : 1;
 }
 

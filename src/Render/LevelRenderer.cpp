@@ -43,6 +43,40 @@ namespace dice::hfe::render {
 
 namespace {
 
+// BF2142_LIGHT_TRACE=1 (a diagnostic, off by default): each frame on stderr, "light-trace:" lines with the
+// effects' dynamic lights listed, every mesh whose point-light picks changed since the last frame, the lighting
+// and post-production uniforms and the first-person sprites within 5 m when they change. For a shading flicker
+// seen live: a wall's light set or the frame's grade changing for a moment, or a sprite over the view.
+struct LightTrace {
+	bool on = std::getenv("BF2142_LIGHT_TRACE") != nullptr;
+	int frame = 0;
+	std::unordered_map<const void*, std::string> picks;
+	std::string lighting[2], post, firstPerson;
+	// Prints `text` under `label` when it differs from `last`.
+	void changed(std::string& last, const char* label, const std::string& text)
+	{
+		if (text != last) {
+			std::fprintf(stderr, "light-trace: frame %d %s %s\n", frame, label, text.c_str());
+			last = text;
+		}
+	}
+};
+LightTrace& lightTrace()
+{
+	static LightTrace trace;
+	return trace;
+}
+std::string traceFloats(const float* v, int n)
+{
+	std::string out;
+	char text[32];
+	for (int i = 0; i < n; ++i) {
+		std::snprintf(text, sizeof text, i ? "/%.3f" : "%.3f", v[i]);
+		out += text;
+	}
+	return out;
+}
+
 constexpr int kDefaultTerrainPatches = 8; // colormaps per side without terrain data
 // The low-detail texture's x and z planes: its v a metre up (TEXSCALE.y,
 // 0x100af7e0; STTEXSCALE.y is the secondary y scale x 400 x 1.53787e-05 of
@@ -2728,15 +2762,29 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		m_lightLimits.skinnedMesh = m_sources->lights.maxLightsPerSkinnedMesh;
 	}
 	const float cull = m_lightLimits.cullDistance;
+	LightTrace& trace = lightTrace();
+	if (trace.on) {
+		++trace.frame;
+		std::fprintf(stderr, "light-trace: frame %d camera %.2f/%.2f/%.2f yaw %.3f pitch %.3f limits cull %.0f static %d bundled %d skinned %d\n",
+			trace.frame, camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch, cull,
+			m_lightLimits.staticMesh, m_lightLimits.bundledMesh, m_lightLimits.skinnedMesh);
+	}
 	if (cull <= 0) {
 		return;
 	}
+	const char* from = "placed";
 	const auto consider = [&](const effects::PointLight& light) {
 		const Vec3f at {light.position.x, light.position.y, light.position.z};
 		const Vec3f d = at - camera.position;
 		const float reach = std::max(light.range2, 0.0f);
 		if (std::sqrt(dot(d, d)) - reach > cull || !m_frameFrustum.containsSphere(at, reach)) {
 			return;
+		}
+		if (trace.on && std::strcmp(from, "placed") != 0) {
+			std::fprintf(stderr, "light-trace: frame %d light %zu from %s at %.2f/%.2f/%.2f r %.2f/%.2f col %.2f/%.2f/%.2f spec %.2f/%.2f/%.2f spot %d lm %d emitter %d\n",
+				trace.frame, m_pointLights.size(), from, at.x, at.y, at.z, light.range1, light.range2, light.color.x, light.color.y,
+				light.color.z, light.specColor.x, light.specColor.y, light.specColor.z, light.spot ? 1 : 0, light.affectsLightmapped ? 1 : 0,
+				light.supportsEmitter ? 1 : 0);
 		}
 		m_pointLights.push_back(light);
 		ListedLight listed;
@@ -2752,8 +2800,12 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	// VideoSettings' dynamic lighting 0 turns the dynamic lights off (the
 	// light manager's slot 0xf4, 0x10010040): the effects' lights.
 	const bool dynamicLights = !m_sources->quality || m_sources->quality->dynamicLightsEnabled();
-	for (const effects::EffectManager* manager :
-		{m_sources->effects, m_sources->objectEffects, m_hasFirstPerson ? m_firstPerson.effects : nullptr}) {
+	const effects::EffectManager* const managers[3] = {m_sources->effects, m_sources->objectEffects,
+		m_hasFirstPerson ? m_firstPerson.effects : nullptr};
+	static const char* const kManagerNames[3] = {"world-effects", "object-effects", "first-person-effects"};
+	for (int m = 0; m < 3; ++m) {
+		const effects::EffectManager* manager = managers[m];
+		from = kManagerNames[m];
 		if (!manager || !dynamicLights) {
 			continue;
 		}
@@ -2761,6 +2813,7 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 			consider(light);
 		}
 	}
+	from = "placed";
 	const world::Object* current = nullptr;
 	Mat4 objectWorld;
 	for (const ObjectLight& placed : m_objectLights) {
@@ -3867,6 +3920,26 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups, camera, false, m_firstPersonZoomed);
 	collectPointLights(camera);
+	if (LightTrace& trace = lightTrace(); trace.on && m_hasFirstPerson && m_firstPerson.effects) {
+		// The first-person sprites within 5 m, the size of the view (a muzzle's glow and smoke), when they change.
+		effects::ParticleView view = particleView(camera);
+		view.zoomed = m_firstPersonZoomed;
+		std::string text;
+		m_firstPerson.effects->forEachGroup(view, [&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
+			char line[200];
+			for (const effects::Sprite& sprite : sprites) {
+				const Vec3f d = Vec3f {sprite.position.x, sprite.position.y, sprite.position.z} - camera.position;
+				if (dot(d, d) > 25.0f) {
+					continue;
+				}
+				std::snprintf(line, sizeof line, " [%s%s size %.2f rgba %.2f/%.2f/%.2f/%.2f dist %.2f]", path.substr(path.find_last_of("/\\") + 1).c_str(),
+					additive ? " additive" : "", sprite.size, sprite.color[0], sprite.color[1], sprite.color[2], sprite.color[3],
+					std::sqrt(dot(d, d)));
+				text += line;
+			}
+		});
+		trace.changed(trace.firstPerson, "first-person sprites", text.empty() ? "none" : text);
+	}
 	if (m_hasFirstPerson && m_firstPerson.effects) {
 		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
 			mesh(*m_sources, geometry);
@@ -4282,6 +4355,14 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		{lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
 			lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
+	if (LightTrace& trace = lightTrace(); trace.on) {
+		for (int lm = 0; lm < 2; ++lm) {
+			const LightingUniforms& u = uniformsFor[lm][0];
+			trace.changed(trace.lighting[lm], lm ? "lighting lightmapped" : "lighting",
+				"sun " + traceFloats(u.sunDirection, 4) + " " + traceFloats(u.sunColor, 4) + " sky " + traceFloats(u.skyColor, 4) +
+					" fog " + traceFloats(u.fogColor, 4) + " " + traceFloats(u.fogRange, 4) + " spec " + traceFloats(u.specular, 4));
+		}
+	}
 	// The objects' point lights are their own (drawInstance).
 	const float windSpeed = m_sources && m_sources->wind ? m_sources->wind->speedAt() : 0.0f;
 	// The lighting level's bundled and skinned meshes (QualitySettings).
@@ -4303,6 +4384,22 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			pickedCount = pickMeshLights(m_listedLights.data(), m_listedLights.size(), origin,
 				std::max(item.mesh->bounds.radius, 0.0f), lightKind, item.lightmap != nullptr, m_lightLimits, picked,
 				kMaxPointLights);
+		}
+		if (LightTrace& trace = lightTrace(); trace.on) {
+			std::string set;
+			char text[96];
+			for (int i = 0; i < pickedCount; ++i) {
+				const effects::PointLight& l = m_pointLights[static_cast<size_t>(picked[i])];
+				std::snprintf(text, sizeof text, " %.2f/%.2f/%.2f:%.2f", l.position.x, l.position.y, l.position.z, l.range2);
+				set += text;
+			}
+			std::string& last = trace.picks[&instance];
+			if (set != last) {
+				std::fprintf(stderr, "light-trace: frame %d picks object %u kind %d lm %d at %.2f/%.2f/%.2f r %.1f:%s ->%s\n", trace.frame,
+					instance.object, static_cast<int>(lightKind), item.lightmap ? 1 : 0, instance.world.at(3, 0), instance.world.at(3, 1),
+					instance.world.at(3, 2), item.mesh->bounds.radius, last.c_str(), set.c_str());
+				last = set;
+			}
 		}
 		for (const Submesh& submesh : item.mesh->submeshes) {
 			any = any || queueFor(item, submesh) == queue;
@@ -4637,6 +4734,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			resolveTaa(commands); // m_postSource: the resolve
 		}
 		const PostUniforms postUniforms = preparePost(commands, cloaked);
+		if (LightTrace& trace = lightTrace(); trace.on) {
+			trace.changed(trace.post, "post", "rows " + traceFloats(postUniforms.colorRow[0], 12) + " contrast " +
+				traceFloats(postUniforms.contrast, 4) + " bloom " + traceFloats(postUniforms.bloom, 4) + " tinnitus " +
+				traceFloats(postUniforms.tinnitus, 4) + " emp " + traceFloats(postUniforms.emp, 4));
+		}
 		SDL_GPUColorTargetInfo finalColor {};
 		finalColor.texture = color;
 		finalColor.load_op = SDL_GPU_LOADOP_DONT_CARE;
