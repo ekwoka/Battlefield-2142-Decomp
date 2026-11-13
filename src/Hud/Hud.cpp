@@ -646,6 +646,13 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		break;
 	case kBar: {
 		const size_t barFirst = out.size();
+		// A round bar is drawn in its texture's own colours: the ability ring is authored
+		// "setNodeColor 0 0 0 1" over an orange gradient, yet the retail ring shows transparent
+		// with an orange fill (user's retail capture). The mask state that spares the RGB
+		// (RendDX9 ops 0x500/0x402/0x203) is not decoded, so this follows the capture, not the shader.
+		if (node.barRound != 0 && node.rgbVariables[0].empty() && !tint) {
+			color[0] = color[1] = color[2] = 1;
+		}
 		quad(node.barTextures[0], x, y, x + w, y + h, 0, 0, 1, 1, 0);
 		float value = node.valueVariable.empty() ? 0 : number(node.valueVariable);
 		if (node.spanMax != node.spanMin) {
