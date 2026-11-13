@@ -6417,10 +6417,11 @@ int runGame(Options& options, Session& session)
 				gameAudio.effectLoop(loop.key | (1ull << 48), loop.name, {loop.position.x, loop.position.y, loop.position.z},
 					loop.intensity);
 			}
-			// BF2142_FX_DUMP=1: what glows or smokes around the camera, once a second (Main/FxDump.h).
+			// BF2142_FX_DUMP=1: what glows or smokes around the camera, once a second (Main/FxDump.h); =tick: every tick.
 			static const bool fxDump = std::getenv("BF2142_FX_DUMP") != nullptr;
 			static int fxDumpTick = 0;
-			if (fxDump && ++fxDumpTick % 30 == 0) {
+			static const int fxDumpEvery = fxDump && std::strcmp(std::getenv("BF2142_FX_DUMP"), "tick") == 0 ? 1 : 30;
+			if (fxDump && ++fxDumpTick % fxDumpEvery == 0) {
 				const physics::Vec3 at {camera.position.x, camera.position.y, camera.position.z};
 				const auto describe = [&](uint32_t anchor) -> std::string {
 					if ((anchor & 0xf0000000u) == client::kRoundAnchor) {
@@ -6437,6 +6438,7 @@ int runGame(Options& options, Session& session)
 				std::vector<std::string> lines;
 				client::fxDumpEmitters(objectEffects, "objects", at, 25.0f, describe, lines);
 				client::fxDumpEmitters(round.effects(), "world", at, 25.0f, describe, lines);
+				client::fxDumpEmitters(playerCamera.effects(), "first-person", at, 25.0f, {}, lines); // its anchors are the view's own
 				std::vector<client::RoundVisuals::Mesh> roundMeshes;
 				roundVisuals.meshes(round.projectiles(), roundMeshes, 0);
 				client::fxDumpRounds(roundMeshes, at, 25.0f, lines);
