@@ -14780,6 +14780,12 @@ bool GameWorld::stepBody(Body& b, float seconds)
 	}
 	stepSleep(b, seconds);
 	if (asleep(b)) {
+		// A resting node's bundles still turn on the driver's input (their own update, as the mech
+		// legs': the Hachimoto's camera mount rides PIPitch with its gun, which turns regardless).
+		if (b.vehicle && std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; })) {
+			b.vehicle->setOccupied(true);
+			b.vehicle->tickParts(body, seconds);
+		}
 		return false;
 	}
 	const bool legs = b.vehicle && b.vehicle->legs();

@@ -559,6 +559,12 @@ public:
 	// One tick: suspension and tyre forces on `body`; call before it steps.
 	void tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
 		float gravity = physics::tuning::kGravity);
+	// Only the bundles' turn on the driver's input: a parked (sleeping) node's bundles still turn.
+	void tickParts(const physics::RigidBody& body, float seconds, float gravity = physics::tuning::kGravity)
+	{
+		regulateInput(body, gravity, seconds);
+		updateParts(seconds);
+	}
 
 private:
 	void updateParts(float seconds);

@@ -7452,3 +7452,36 @@ TEST(Render_EnhancedLitPipelinesCompileOptIn)
 	SDL_Quit();
 }
 #endif
+
+// The Hachimoto's camera mount rides PIPitch with the same limits as its driver's gun, so the view
+// tilts with the barrel: also parked, when the node sleeps (the bundles keep turning on the input).
+TEST(PlayerCamera_HovDriverViewTiltsWithTheGunWhileParked)
+{
+	if (!gameDir()) return;
+	constexpr float kDeg = 3.14159265f / 180;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		Garage g(gameDir(), mod);
+		if (!g.loaded || !g.templates.find("as_hov_light")) continue;
+		const auto car = g.start("as_hov_light", {0, 2, 6});
+		CHECK(g.enter(car));
+		anim::AnimationSystems systems(nullptr);
+		PlayerCamera camera(*g.world, systems, nullptr);
+		for (int i = 0; i < 60; ++i) { g.world->setPlayerInput({}); g.world->tick(1 / 30.0f); camera.tick(1 / 30.0f); }
+		PlayerCamera::View rest;
+		CHECK(camera.view(rest, 16.0f / 9.0f));
+		for (int step = 1; step <= 30; ++step) {
+			game::SoldierInput in;
+			in.aimPitch = -0.5f * std::min(step, 20);
+			g.world->setPlayerInput(in);
+			g.world->tick(1 / 30.0f);
+			camera.tick(1 / 30.0f);
+		}
+		float yaw = 0, gun = 0;
+		CHECK(g.world->gunAim(car, 0, yaw, gun));
+		PlayerCamera::View aimed;
+		CHECK(camera.view(aimed, 16.0f / 9.0f));
+		CHECK(std::fabs(gun) > 4.0f);
+		CHECK(std::fabs((aimed.pitch - rest.pitch) / kDeg - gun) < 0.1f);
+	}
+}
