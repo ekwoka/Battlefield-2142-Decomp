@@ -14,6 +14,13 @@ inline TreeMaterial treeMaterial(bool vegetation, int alphaMode, bool hasDetail)
 	return hasDetail ? TreeMaterial::TrunkDetail : TreeMaterial::TrunkBase;
 }
 
+// A leaf (MeshQueues.h treeLeaf) is drawn with the Leaf shader whatever its alpha
+// mode; only the rest of a tree is a trunk (Backstab's olive leaves: alpha mode 0).
+inline bool treeTrunk(bool leaf, TreeMaterial kind)
+{
+	return !leaf && (kind == TreeMaterial::TrunkBase || kind == TreeMaterial::TrunkDetail);
+}
+
 // The overgrowth's distant "<geometry>_lod" meshes (RendDX9 0x10091972): a
 // material whose texture name has "tile_" goes to the cell's TrunkOG batch,
 // any other to its LeafOG batch, which always alpha-tests (AlphaRef 127),
