@@ -2708,6 +2708,45 @@ TEST(CombatArea_OutsideTimerThenDamage)
 	CHECK(game.world->playerInfo(me, info) && (!info.alive || game.world->outsideCombatArea(me) < 0));
 }
 
+// A soldier's template has no vehicleCategory, which reads VCLand (0): the
+// areas that bind VCLand (vehicles 0) and the ones that bind everything
+// (vehicles 4) apply to him. Bridge at Remagen's gpm_ti: the playable
+// "0_Titan" is vehicles 0, the "32_Titan" strip vehicles 4 holds 12 of its 88
+// control points; read as category 4 a soldier on foot was bound to the strip
+// alone and punished outside it, while in a land vehicle (category 0) he was
+// not.
+TEST(CombatArea_SoldierOnFootIsBoundByTheLandArea)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game::CombatAreas areas;
+	game::registerCombatAreaConsoleMethods(game.console, areas);
+	std::string out;
+	for (const char* line : {"CombatAreaManager.use 1", "CombatAreaManager.timeAllowedOutside 2",
+			 "CombatAreaManager.damage 50", "CombatArea.create land", "CombatArea.vehicles 0",
+			 "CombatArea.addAreaPoint -50/-50", "CombatArea.addAreaPoint 50/-50", "CombatArea.addAreaPoint 50/50",
+			 "CombatArea.addAreaPoint -50/50", "CombatArea.create strip", "CombatArea.vehicles 4",
+			 "CombatArea.addAreaPoint 100/100", "CombatArea.addAreaPoint 200/100", "CombatArea.addAreaPoint 200/200",
+			 "CombatArea.addAreaPoint 100/200"}) {
+		game.console.execute(line, out);
+	}
+	game.start();
+	game.world->setCombatAreas(&areas);
+	CHECK(game.world->spawnPlayer(2) != nullptr); // at the origin: in "land", outside "strip"
+	const int me = game.world->localPlayer();
+	game.run(5);
+	game::GameWorld::PlayerInfo info;
+	CHECK(game.world->insideCombatArea(me) && game.world->outsideCombatArea(me) < 0);
+	CHECK(game.world->playerInfo(me, info) && info.alive);
+	// Outside both: punished.
+	areas.areas[0].points = {{300, 300}, {350, 300}, {350, 350}, {300, 350}};
+	game.run(1);
+	CHECK(!game.world->insideCombatArea(me) && game.world->outsideCombatArea(me) > 0);
+}
+
 // A neutral APC (no teamOnVehicle) carrying a SpawnPoint: entered by a
 // team-2 soldier it is team 2's (0x005c9500: the first occupant's team),
 // so it is one of team 2's mobile spawn points; left empty it is its own

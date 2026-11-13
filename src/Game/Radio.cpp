@@ -324,11 +324,15 @@ bool GameWorld::insideCombatArea(const Player& player) const
 	if (!m_combatAreas || !m_combatAreas->use) {
 		return true;
 	}
-	int category = 4; // a soldier's template has no category: VCNoVehicleCategory
+	// A soldier's template has no vehicleCategory, which reads VCLand (0), as
+	// the minimap's layer takes it (0x0078b490: "0 on foot"). Remagen's Titan
+	// level binds its playable area to VCLand (veh 0) and only a Titan strip
+	// to 4: 76 of its 88 spawn points lie outside that strip.
+	int category = 0;
 	physics::Vec3 at = player.body.position;
 	if (player.vehicle) {
 		const world::Object* vehicle = m_objects.find(player.vehicle);
-		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 4;
+		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 0;
 		if (vehicle) {
 			at = {vehicle->position().x, vehicle->position().y, vehicle->position().z};
 		}
