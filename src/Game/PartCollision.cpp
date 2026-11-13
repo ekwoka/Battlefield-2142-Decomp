@@ -432,6 +432,7 @@ void GameWorld::partActors(Body& body, std::vector<MeshActor>& out)
 		a.geometry = part.geometry;
 		a.state = state;
 		a.partMesh = part.ownResponse ? static_cast<int>(index) : -1;
+		a.team = root.team; // a part passes its team's force fields as its root does
 		out.push_back(a);
 	}
 }

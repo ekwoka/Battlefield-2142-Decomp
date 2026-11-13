@@ -1014,7 +1014,7 @@ bool followStep(Projectile& projectile, const physics::Vec3& target, const physi
 physics::Vec3 noseOf(const Projectile& projectile);
 
 // The engine's push for a tick (see ProjectileSettings::startDelay).
-void thrustProjectile(Projectile& projectile, float seconds);
+void thrustProjectile(Projectile& projectile, float seconds, bool overrideArming = false);
 
 // Whether the follow turns the round this tick (0x005ed1a0): from its
 // start (followFrom, else trackingDelay after the launch) until

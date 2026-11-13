@@ -1226,16 +1226,30 @@ physics::Vec3 noseOf(const Projectile& p)
 	return speed > 1e-4f ? p.velocity * (1 / speed) : physics::Vec3 {};
 }
 
-void thrustProjectile(Projectile& p, float seconds)
+void thrustProjectile(Projectile& p, float seconds, bool overrideArming)
 {
 	const ProjectileSettings& s = *p.settings;
 	if (s.acceleration <= 0 || s.maxSpeed <= 0 || s.seek == ProjectileSettings::Seek::Magnet || s.seek == ProjectileSettings::Seek::Beacon || p.stuck || p.resting) {
 		return;
 	}
-	const bool engineOn = s.targetActivation ? (p.lockedOn != 0 || p.lockedBait != 0) : p.age >= s.startDelay;
+	const bool target = p.lockedOn != 0 || p.lockedBait != 0;
+	const bool engineOn = s.targetActivation ? target : p.age >= s.startDelay;
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	// A round with a follow thrusts while under its cap (followSpeedCap: the
+	// target's speed for the heat seekers, else maxSpeed) and brakes by
+	// deAcceleration against its heading at the cap, or with magneticBehaviour
+	// whenever it has no target (0x005b44ff..0x005b4551).
+	const bool follows = s.seek != ProjectileSettings::Seek::None;
+	const float cap = follows ? followSpeedCap(p, overrideArming) : s.maxSpeed;
+	if (!engineOn || speed <= 0.01f) {
+		return;
+	}
+	if (follows && ((s.magneticBehaviour && !target) || speed >= cap)) {
+		p.velocity = p.velocity - p.velocity * (std::min(s.deAcceleration * seconds, speed) / speed);
+		return;
+	}
 	const physics::Vec3 nose = noseOf(p);
-	if (!engineOn || speed >= s.maxSpeed || physics::lengthSquared(nose) < 0.25f) {
+	if (speed >= cap || physics::lengthSquared(nose) < 0.25f) {
 		return;
 	}
 	// 0x005ed1a0 answers true past followTime too (without turning).

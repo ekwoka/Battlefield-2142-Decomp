@@ -216,12 +216,17 @@ public:
 	// the measured velocity, less the ground's when that moves, and then
 	// none under 0.7 m/s (|v|^2 < 0.49, *0x00976200): standing on a moving
 	// Titan is standing.
+	// A Titan's carry (the integration added it to the displacement) is the
+	// ground's motion too: a soldier standing in a moving Titan is standing.
 	Vec3 animationVelocity() const
 	{
-		if (groundVelocity.x == 0 && groundVelocity.y == 0 && groundVelocity.z == 0) {
+		// (The carry and the ground's velocity are the same motion: not both.)
+		const bool carried = m_carriedStep.x != 0 || m_carriedStep.y != 0 || m_carriedStep.z != 0;
+		const Vec3 under = carried ? m_carriedStep : groundVelocity;
+		if (under.x == 0 && under.y == 0 && under.z == 0) {
 			return measuredVelocity;
 		}
-		const Vec3 relative = measuredVelocity - groundVelocity;
+		const Vec3 relative = measuredVelocity - under;
 		return lengthSquared(relative) < 0.49f ? Vec3 {} : relative;
 	}
 	Vec3 acceleration;      // gravity for the next tick
@@ -316,6 +321,7 @@ private:
 	int m_carryTicks = 0;    // +0x9c
 	uint32_t m_carrier = 0;  // +0xa0 (its root)
 	int m_carrierTicks = 0;  // +0xa4
+	Vec3 m_carriedStep;      // the carry the last integration added to the displacement
 };
 
 } // namespace dice::hfe::physics

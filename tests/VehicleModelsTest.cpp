@@ -1735,6 +1735,7 @@ TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
 					g.world->tick(1 / 30.0f);
 				}
 				CHECK(g.world->setBodyVelocity(v, velocity));
+				g.world->tick(1 / 30.0f); // the node reports its velocity from the step's displacement (0x005f31d0 reads slot 0x64)
 				in = {}; in.fire = true;
 				g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 				game::GameWorld::ProjectileCamera camera;
@@ -1748,7 +1749,11 @@ TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
 				for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
 					found = true;
 					std::fprintf(stderr, "    missile velocity %.2f/%.2f/%.2f\n", p.velocity.x, p.velocity.y, p.velocity.z);
-					CHECK(p.velocity.z > 10 && std::fabs(p.velocity.x) < 2);
+					// Retail (0x005f31d0): the round inherits the node's reported velocity and faces along the
+					// camera (its nose, noseOf); the engine pushes along the nose (0x005b3e60). The old
+					// forced alignment of the velocity to the camera frame is gone.
+					CHECK(p.heading.z > 0.9f && std::fabs(p.heading.x) < 0.1f);
+					CHECK(std::fabs(p.velocity.x - velocity.x) < 3 && std::fabs(p.velocity.z - velocity.z) < 3);
 				}
 				CHECK(found);
 				g.world->setPlayerInput({});
@@ -1770,6 +1775,7 @@ TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded || !g.templates.find(aircraft)) continue;
+			g.pitAhead(); // as a gunship flies: the missile, launched at rest, dives clear of the ground
 			const auto v = g.start(aircraft, {0, 4, 6});
 			CHECK(g.enter(v));
 			game::SoldierInput in; in.switchSeat = 2;
@@ -1783,8 +1789,13 @@ TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 			CHECK(g.world->gunAim(v, 1, yaw, pitch) && pitch < -10);
 			in.altFire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			in.altFire = false; g.world->setPlayerInput(in); g.run(4);
-			in.fire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
+			in.fire = true;
 			game::GameWorld::ProjectileCamera camera;
+			// The press waits for the missile's draw delay (as upstream's Vehicles_GunshipMissileCamera does).
+			for (int i = 0; i < 6 && !g.world->projectileCamera(g.world->localPlayer(), camera); ++i) {
+				g.world->setPlayerInput(in);
+				g.world->tick(1 / 30.0f);
+			}
 			CHECK(g.world->projectileCamera(g.world->localPlayer(), camera));
 			bool found = false;
 			for (const auto& p : g.world->projectiles()) if (p.serial == camera.serial) {
@@ -1805,6 +1816,7 @@ TEST(Vehicles_GunshipTVSelectionRestoresGunnerPitch)
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded || !g.templates.find(aircraft)) continue;
+			g.pitAhead(); // as a gunship flies: the missile, launched at rest, dives clear of the ground
 			const auto v = g.start(aircraft, {0, 4, 6});
 			CHECK(g.enter(v));
 			game::SoldierInput in; in.switchSeat = 2;

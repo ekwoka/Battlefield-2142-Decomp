@@ -1357,12 +1357,14 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	// as_titan_forcefield, the vehicle bays' eu_forcefield_big and
 	// as_titan_vb_shield: every face of it); the team rule lets a team's
 	// own through, so an enemy pod or vehicle meeting a standing shield is
-	// destroyed with its riders. A shield wrecked at 61 per cent of its
+	// destroyed with its riders. The kill is the game logic's damage with 1e10 and
+	// no materials (0x005c72f0 pushes 0 for both, no attacker): the material table's
+	// damageMod(0x29a, 0x29a) is 0 and must not scale it. A shield wrecked at 61 per cent of its
 	// Titan (destroyOnParentDamageLevel) has left the parts (Titans.cpp).
 	if (otherMaterial == kKillMaterial
 		&& (sameName(t->typeName(), "PlayerControlObject") || sameName(t->typeName(), "Parachute"))) {
 		if (hitPoints(self) > 0) {
-			damage(self, 1e10f, kKillMaterial, kKillMaterial, -1);
+			loseHitPoints(self, 1e10f, -1);
 		}
 		return;
 	}
@@ -1429,7 +1431,21 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 		return;
 	}
 	if (Player* soldier = soldierPlayer(victim)) {
-		roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		// A soldier landing on or walking into an object that moves slower
+		// than he does is the mover: the ground rule (over 9.1 m/s, no
+		// mass factor), not the object running him over. Dropping into a
+		// pit of the standing Titan (mass 1e6, factor 3) was a 127 kill.
+		// shortcut: the speed comparison stands in for retail's dispatch, not read from the exe.
+		// Retail (0x005a4690) sends every object hitting a soldier to the road
+		// kill; the death material (the Titans' shields) is its instant case.
+		const Body* body = findBody(attacker);
+		if (attackerMaterial != kKillMaterial && body
+			&& physics::lengthSquared(body->body.velocity)
+				< physics::lengthSquared(soldier->body.velocity + soldier->body.carriedVelocity())) { // the world's speed, carry included
+			groundCollisionDamage(victim, velocity, normal, attackerMaterial, victimMaterial);
+		} else {
+			roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		}
 		return;
 	}
 	if (attacker == victim || hitPoints(victim) < 0) {

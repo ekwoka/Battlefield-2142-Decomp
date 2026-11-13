@@ -380,8 +380,10 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 		// The Titan carrying the soldier (slot 0xe4, its root against the
 		// candidate's, 0x006f1d70) leaves its point velocity out: the
 		// soldier's own velocity is relative to it already.
+		// Any other mover is met in the world's frame: the soldier's velocity
+		// is relative to the carry, so the carry is added back.
 		const bool carrying = mover && m_carrierTicks > 0 && mover->owner == m_carrier;
-		const Vec3 relative = velocity - (mover && !carrying ? mover->pointVelocity(contact.point) : Vec3 {});
+		const Vec3 relative = mover && !carrying ? velocity + carriedVelocity() - mover->pointVelocity(contact.point) : velocity;
 		if (lengthSquared(relative) > 0) {
 			// 0x005ee2b0 between the two objects' events: the other's point
 			// velocity x 2.5 when faster than 1 m/s relative (a static
@@ -726,7 +728,8 @@ void SoldierBody::integrate(float seconds)
 	velocity = velocity * (water * soldier::kWaterDamping + (1.0f - water) * soldier::kLandDamping);
 	// While a Titan carries the soldier (slot 0xe4's root a Titan), the
 	// carry (slot 0xd8) joins the tick's mean velocity.
-	const Vec3 average = flush((previous + velocity) * 0.5f) + carriedVelocity();
+	m_carriedStep = carriedVelocity();
+	const Vec3 average = flush((previous + velocity) * 0.5f) + m_carriedStep;
 	position += average * seconds;
 	if (m_carryTicks > 0) {
 		--m_carryTicks;

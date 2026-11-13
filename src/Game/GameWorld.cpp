@@ -4181,7 +4181,7 @@ void GameWorld::stepProjectiles(float seconds)
 		p.followTurned = false;
 		steerSeeker(p, seconds);
 		if (p.settings) {
-			thrustProjectile(p, seconds);
+			thrustProjectile(p, seconds, overridesArming(p));
 		}
 		hoverProjectile(p, seconds);
 		if (p.resting) {
@@ -6072,7 +6072,10 @@ bool GameWorld::targetEnabled(const world::Object& root)
 		return false;
 	}
 	const float delay = body->lastRider >= 0 && body->lastRider == localPlayer() ? -1.0f : number(*t, "disableWhenEmptyVehicleDelay", 0);
-	return integer(*t, "disableWhenEmptyVehicle", 0) == 0 || m_time - body->occupiedAt <= delay;
+	// The delay counts from the vehicle's emptying: while someone sits in it (the local
+	// player included, whose -1 is for after he leaves) it is a target.
+	const bool occupied = std::any_of(body->occupants.begin(), body->occupants.end(), [](int p) { return p >= 0; });
+	return integer(*t, "disableWhenEmptyVehicle", 0) == 0 || occupied || m_time - body->occupiedAt <= delay;
 }
 
 // A lock-on weapon's lock each tick: the default target component's
@@ -13350,6 +13353,14 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 			facing = physics::Mat3::fromYawPitchRoll({look.yaw, look.pitch, 0}) * facing;
 		}
 		direction = (facing * mount.turn * body.body.rotation).rows[2];
+	} else if (camera && !seat.camera.empty() && sameName(seat.camera, camera->name)
+		&& static_cast<size_t>(player.seat) < body.looks.size()) {
+		// A camera riding the gun's bundles that is also the seat's mouse-look
+		// camera (the cupola gunners'): its Camera object's matrix carries the
+		// look (partPose), which the round follows (0x005f1a20).
+		const Body::Look& look = body.looks[static_cast<size_t>(player.seat)];
+		direction = (physics::Mat3::fromYawPitchRoll({look.yaw, look.pitch, 0}) * pitchFrame * yawTurn * mount.turn
+			* body.body.rotation).transform(local);
 	}
 	const physics::Vec3 straight = direction;
 	// The rounds stray by the deviation (0x005f5540): (minDev + the
@@ -13453,6 +13464,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	++player.roundsFired;
 	++player.gunShots;
 	weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, firstOrigin, arm.weapon->fireMode());
+	sayReload(); // the reload's sound follows the last round's fire sound
 	// The weapon's event 0 (ObjectEffects), kept short where nothing takes
 	// them (a dedicated server draws no effects).
 	if (auto& fires = m_objectWeaponFires[body.object]; fires.size() < 8) {

@@ -2612,7 +2612,10 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 		// order position itself; otherwise a spot of the point's, and when
 		// 20 tries find none on the map, the order position again
 		// (the area's vt+0x10), not the point.
-		if (map == 1 || horizontal2(orderAt - point->position) > point->radius * point->radius) {
+		// enhanced.botRecovery (not retail) keeps the driver's reachable-approach
+		// goal below, for an order position the vehicle mesh doesn't reach.
+		const bool approachDriver = map == 1 && m_settings.stuckRecovery();
+		if (!approachDriver && (map == 1 || horizontal2(orderAt - point->position) > point->radius * point->radius)) {
 			bot.goal = orderAt;
 			return;
 		}

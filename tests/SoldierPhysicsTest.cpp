@@ -210,12 +210,18 @@ TEST(SoldierPhysics_GripCorrectsUpToTheLargerLimit)
 	const float was = body.velocity.z;
 	settle(0.9f);
 	CHECK(std::fabs(body.velocity.z - (was - 1.5712f) * 0.99f) < 0.01f);
-	// Past the hold again (the ask is far over the limit, so it stays lost
-	// while the first correction is applied): 1.5712 of it a tick.
-	const float lost = body.velocity.z;
-	stepWanting(lost - 20.0f);
-	stepWanting(lost - 20.0f);
-	CHECK(std::fabs(body.velocity.z - (lost - 1.5712f) * 0.99f) < 0.01f);
+	// Without the hold a 2 m/s change takes 1.5712 of it: the first ask loses
+	// the hold (3 m/s over the limit), the second, made where the first's
+	// correction leaves the soldier, is cut to 1.5712 as the hold is gone.
+	for (int i = 0; i < 40; ++i) {
+		stepWanting(3.9f);
+	}
+	const float steady = body.velocity.z;
+	stepWanting(0.9f);
+	const float next = (steady - 1.5712f) * 0.99f;
+	stepWanting(next - 2.0f);
+	stepWanting(next - 2.0f);
+	CHECK(std::fabs(body.velocity.z - (next - 1.5712f) * 0.99f) < 0.01f);
 }
 
 namespace {

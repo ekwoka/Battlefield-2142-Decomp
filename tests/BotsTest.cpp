@@ -260,6 +260,8 @@ TEST(Bots_GoalRecoveryManagerIntegration)
 {
 	Field field;
 	game::BotSettings settings;
+	static const bool recovery = true; // enhanced.botRecovery: the driver's reachable-approach goal (retail 0x1005d940 heads for the order position itself)
+	settings.enhanced = &recovery;
 	ai::StrategicArea area;
 	area.controlPoint = 1;
 	area.hasOrderPosition[0] = area.hasOrderPosition[1] = true;
@@ -6678,6 +6680,8 @@ TEST(Bots_ReviewSquadRejectedGoalRetry)
 	for (int squadState : {0, 1}) {
 		Field field;
 		game::BotSettings settings;
+		static const bool recovery = true; // enhanced.botRecovery: the driver's reachable-approach goal (retail 0x1005d940 heads for the order position itself)
+		settings.enhanced = &recovery;
 		ai::StrategicArea area;
 		area.controlPoint = 1;
 		area.hasOrderPosition[0] = area.hasOrderPosition[1] = true;
