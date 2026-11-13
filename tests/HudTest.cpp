@@ -1078,7 +1078,7 @@ TEST(Hud_TitanSpawnIsToldFromItsBasePoint)
 	CHECK(hud::titanSpawnLabel("EU Titan", "CP_BS_USBASE") == "EU Titan");
 }
 
-TEST(Hud_DeploymentMarkerLabelsAreReadableAndClickable)
+TEST(Hud_DeploymentMarkerNameShowsOnlyUnderThePointer)
 {
 	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n1\r\n"
 		"65\t0.125000\t4.250000\t0.025000\t2\t44\t16\t49\t25\r\nkerning\r\n0\r\n";
@@ -1103,20 +1103,25 @@ TEST(Hud_DeploymentMarkerLabelsAreReadableAndClickable)
 	spawn.id = 3;
 	spawn.label = "A";
 	manager.setMapMarkers({spawn});
-	const auto quads = manager.frame(0);
-	CHECK(std::any_of(quads.begin(), quads.end(), [](const hud::HudQuad& q) {
-		return q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos;
-	}));
-	CHECK(manager.mapMarkerAt(420, 300) == 3);
-	auto second = spawn;
-	second.id = 4;
-	manager.setMapMarkers({spawn, second});
+	const auto hasText = [](const std::vector<hud::HudQuad>& quads) {
+		return std::any_of(quads.begin(), quads.end(), [](const hud::HudQuad& q) {
+			return q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos;
+		});
+	};
+	// Retail draws the spawn points as bare icons: no name until the pointer is on one.
+	CHECK(!hasText(manager.frame(0)));
+	manager.setPointer(420, 300); // beside the icon, not on it
+	CHECK(!hasText(manager.frame(0)));
+	manager.setPointer(400, 300);
+	CHECK(hasText(manager.frame(0)));
+	CHECK(manager.mapMarkerAt(400, 300) == 3);
+	manager.setPointer(-1, -1);
 	manager.frame(0);
-	CHECK(manager.mapMarkerAt(420, 300) == 3);
-	CHECK(manager.mapMarkerAt(420, 315) == 4);
+	CHECK(manager.mapMarkerAt(420, 300) == -1); // the name is no click target
 	// A long fallback/localized name must not paint over the kit panel.
 	spawn.label = std::string(400, 'A');
 	manager.setMapMarkers({spawn});
+	manager.setPointer(400, 300);
 	for (const auto& q : manager.frame(0)) {
 		if (q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos) {
 			CHECK(q.x0 >= 144 && q.x1 <= 656 && q.y0 >= 44 && q.y1 <= 556);

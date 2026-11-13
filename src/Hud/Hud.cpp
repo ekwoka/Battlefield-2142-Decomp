@@ -1875,6 +1875,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	}
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
 	std::vector<Hit> labelRects;
+	std::vector<HudQuad> tooltips; // drawn last, over the later markers' icons
 	for (const MapMarker& marker : m_mapMarkers) {
 		float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
 		float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
@@ -1918,13 +1919,11 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		out.push_back(q);
-		// Deployment markers need a readable identifier: the white spawn
-		// icon alone is hard to distinguish from the map texture. Keep its
-		// label tied to the same projected point and include the label in the
-		// hit target so clicking either part selects that point.
-		float labelHitX0 = 0, labelHitY0 = 0, labelHitX1 = 0, labelHitY1 = 0;
-		bool hasLabelHit = false;
-		if (!marker.label.empty() && spawning) {
+		// The retail deployment map draws the spawn points as bare icons, no
+		// text. The name is the port's addition to tell the points apart, so
+		// it shows only under the pointer (a tooltip), not beside every icon.
+		const bool hovered = m_pointer[0] >= x0 && m_pointer[0] <= x0 + side && m_pointer[1] >= y0 && m_pointer[1] <= y0 + tall;
+		if (!marker.label.empty() && spawning && hovered) {
 			std::string label = marker.label;
 			if (m_localize) {
 				const std::string localized = m_localize(label);
@@ -1963,23 +1962,16 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 				drawString(fontPath, label, labelX + 1, labelY + 1, 0, 0, shadow, labelQuads);
 				drawString(fontPath, label, labelX, labelY, 0, 0, text, labelQuads);
 				for (HudQuad& glyph : labelQuads) {
-					if (clipTo(glyph, nx, ny, nx + nw, ny + nh)) out.push_back(std::move(glyph));
+					if (clipTo(glyph, nx, ny, nx + nw, ny + nh)) tooltips.push_back(std::move(glyph));
 				}
-				labelHitX0 = std::max(labelX, nx);
-				labelHitY0 = std::max(labelY, ny);
-				labelHitX1 = std::min(labelX + textWidth, nx + nw);
-				labelHitY1 = std::min(labelY + f->lineHeight, ny + nh);
-				hasLabelHit = labelHitX1 > labelHitX0 && labelHitY1 > labelHitY0;
 			}
 		}
 		if (marker.id >= 0) {
 			m_mapHits.push_back({std::max(x0, nx), std::max(y0, ny), std::min(x0 + side, nx + nw),
 				std::min(y0 + tall, ny + nh), marker.id});
-			if (hasLabelHit) {
-				m_mapHits.push_back({labelHitX0, labelHitY0, labelHitX1, labelHitY1, marker.id});
-			}
 		}
 	}
+	out.insert(out.end(), tooltips.begin(), tooltips.end());
 }
 
 // dice::meme::Bf2MiniMenuMapNode (factory 0x007e8fb0, constructor
