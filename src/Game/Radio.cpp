@@ -324,10 +324,10 @@ bool GameWorld::insideCombatArea(const Player& player) const
 	if (!m_combatAreas || !m_combatAreas->use) {
 		return true;
 	}
-	// A soldier's template has no vehicleCategory, which reads VCLand (0), as
-	// the minimap's layer takes it (0x0078b490: "0 on foot"). Remagen's Titan
-	// level binds its playable area to VCLand (veh 0) and only a Titan strip
-	// to 4: 76 of its 88 spawn points lie outside that strip.
+	// 0x004ca5d0 passes the category 4 to 0x004d9d50, which then takes the
+	// controlled object's own: through the vehicle-category interface, and an
+	// object without it, a soldier on foot, reads 0 (VCLand, 0x004d9dba). The
+	// 4 is that "ask the object" marker, not a category.
 	int category = 0;
 	physics::Vec3 at = player.body.position;
 	if (player.vehicle) {

@@ -3664,3 +3664,39 @@ TEST(Titan_SoldierWalksOverTheDeckSeams)
 	CHECK(airborne > 0 && info.alive);
 	CHECK(slowest > 3.3f && sum / counted > 3.6f);
 }
+
+// Bridge at Remagen's real gpm_ti combat areas: the playable "0_Titan" binds
+// VCLand (vehicles 0), "25_Titan" the aircraft (5) and the "32_Titan" strip
+// everything (4). The retail test (0x004ca5d0 -> 0x004d9d50 with the argument
+// 4) takes the category of the controlled object, and an object without the
+// vehicle-category interface, a soldier on foot, reads 0 (xor eax, eax at
+// 0x004d9dba): so he is inside the land area wherever the strip is not.
+TEST(Titan_RemagenSoldierOnFootIsInsideTheLandArea)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.areas.use && level.areas.areas.size() == 3);
+	const terrain::Heightmap* ground = level.heightmaps.primary();
+	const int me = level.world->addPlayer("Walker", 2, false);
+	CHECK(level.world->spawnSoldier(me));
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(me, info));
+	// Control points of the level (the Square, the Hotel, the Monorail
+	// Station), all outside the strip, all inside the land area.
+	for (const auto& at : {std::pair<float, float> {-172, 45}, {259, 347}, {380, 522}}) {
+		CHECK(level.areas.inside(at.first, at.second, 0));
+		CHECK(!level.areas.inside(at.first, at.second, 4)); // the strip alone: what a category-4 soldier met
+		CHECK(level.world->setSoldierPosition(info.soldier, {at.first, ground->heightAt(at.first, at.second), at.second}));
+		CHECK(level.world->insideCombatArea(me) && level.world->outsideCombatArea(me) < 0);
+	}
+	// Beyond the playable area's edge he is outside.
+	CHECK(level.world->setSoldierPosition(info.soldier, {-600, ground->heightAt(-600, 0), 0}));
+	CHECK(!level.world->insideCombatArea(me));
+}
