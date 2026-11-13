@@ -164,8 +164,8 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUSampler(m_device, m_menuRepeatSampler);
 	for (SDL_GPUGraphicsPipeline* pipeline : {m_enhanced.mesh, m_enhanced.meshCulled, m_enhanced.fadedMesh,
 			 m_enhanced.additiveMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh,
-			 m_enhanced.depth, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer, m_enhanced.motion,
-			 m_enhanced.motionOverlay, m_enhanced.gtao, m_enhanced.aoBlur, m_enhanced.taa}) {
+			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer,
+			 m_enhanced.motion, m_enhanced.motionCulled, m_enhanced.motionOverlay, m_enhanced.gtao, m_enhanced.aoBlur, m_enhanced.taa}) {
 		if (pipeline) {
 			SDL_ReleaseGPUGraphicsPipeline(m_device, pipeline);
 		}
@@ -527,6 +527,13 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	m_enhanced.depth = enhanced(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_shadowcaster_frag_spv, k_shadowcaster_frag_spv_size, k_shadowcaster_frag_msl, k_shadowcaster_frag_msl_size, 1, 1,
 		"enhanced depth");
+	// The materials the world pass culls (meshCulled) cull here too: a view
+	// from inside a mesh must not take its far side's depth (the AO, the motion).
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+	m_enhanced.depthCulled = enhanced(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_shadowcaster_frag_spv, k_shadowcaster_frag_spv_size, k_shadowcaster_frag_msl, k_shadowcaster_frag_msl_size, 1, 1,
+		"enhanced depth (culled)");
+	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	m_enhanced.terrainDepth = enhanced(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_depth_frag_spv, k_depth_frag_spv_size, k_depth_frag_msl, k_depth_frag_msl_size, 0, 0,
 		"enhanced terrain depth", 2);
@@ -550,6 +557,10 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 		info.target_info.depth_stencil_format = m_shadowDepthFormat;
 		m_enhanced.motion = enhanced(k_motion_vert_spv, k_motion_vert_spv_size, k_motion_vert_msl, k_motion_vert_msl_size,
 			k_motion_frag_spv, k_motion_frag_spv_size, k_motion_frag_msl, k_motion_frag_msl_size, 1, 1, "enhanced motion", 2);
+		info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+		m_enhanced.motionCulled = enhanced(k_motion_vert_spv, k_motion_vert_spv_size, k_motion_vert_msl,
+			k_motion_vert_msl_size, k_motion_frag_spv, k_motion_frag_spv_size, k_motion_frag_msl, k_motion_frag_msl_size, 1,
+			1, "enhanced motion (culled)", 2);
 		state(false, false, false, SDL_GPU_CULLMODE_NONE, 0);
 		info.target_info.color_target_descriptions = &motionTarget;
 		info.depth_stencil_state.enable_depth_test = false;
