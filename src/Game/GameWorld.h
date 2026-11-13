@@ -4060,6 +4060,9 @@ private:
 	// other bodies met.
 	bool m_predicting = false;
 	void dropKit(Player& player);
+	bool surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& surface, uint32_t& object) const;
+	// A thrown gadget's resting height at (x, z): what is under the soldier's reach (a deck, a roof), the terrain else.
+	float restHeight(const Player& player, float x, float z) const;
 	void fillKit(Player& player, world::ObjectTemplate* kitTemplate, world::ObjectTemplate* primary);
 	bool pickUpClosestKit(Player& player, float radius);
 	// The use key's pick-up of a placed item (0x004bce30): see Kits.cpp.

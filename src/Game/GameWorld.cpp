@@ -10905,7 +10905,7 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 			}
 			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)} * 1.0f;
-			at.y = m_ground.height(at.x, at.z);
+			at.y = restHeight(player, at.x, at.z);
 			const auto projectile = inHand->settings().find("projectileTemplate");
 			world::ObjectTemplate* hub = projectile != inHand->settings().end() ? m_templates.find(projectile->second) : nullptr;
 			if (world::Object* placed = hub ? m_objects.create(hub, {at.x, at.y, at.z}, {lookYaw(player), 0, 0}) : nullptr) {
@@ -10939,7 +10939,7 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 				}
 				const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 				physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)};
-				at.y = m_ground.height(at.x, at.z);
+				at.y = restHeight(player, at.x, at.z);
 				if (world::Object* placed = m_objects.create(beacon, {at.x, at.y, at.z}, {lookYaw(player), 0, 0})) {
 					placed->setTeam(player.team);
 					m_beacons[{player.team, player.squad}] = placed->id();
@@ -10965,7 +10965,7 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 			}
 			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)};
-			at.y = m_ground.height(at.x, at.z);
+			at.y = restHeight(player, at.x, at.z);
 			// Its frame as the ThrownFireComp's launch leaves it (0x005e5720,
 			// after the fire 0x005f31d0): fire.projectileStartRotation
 			// (+0xb4..+0xbc) turns the fire frame in the object's own frame

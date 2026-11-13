@@ -3210,6 +3210,49 @@ TEST(GameWorld_RecoilKicksTheAim)
 	}
 }
 
+// A hub (a medic's kit) thrown out on a deck or roof stays there: it was set
+// at the terrain's height, which put it far under a soldier on a Titan.
+TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
+{
+	Range range;
+	range.collisionTemplates.add("slab_mesh", boxMesh(10));
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "SimpleObject");
+	world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
+	slab->settings()["collisionMesh"] = "slab_mesh";
+	range.objects.create(slab, {0, 0, 30}); // its top at y 10
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["projectileTemplate"] = "unl_hub_medic_stationary";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	hub->settings()["ammo.magSize"] = "1";
+	hub->settings()["fire.roundsPerMinute"] = "60";
+	range.templates.create("GenericProjectile", "unl_hub_medic_stationary")->settings()["armor.maxHitPoints"] = "100";
+	range.templates.create("Kit", "EU_Assault")->children().push_back({"unl_hub_medic", {}, {}});
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setSoldierPosition(range.world->playerObject(), {0, 11.5f, 30});
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	range.world->tick(1 / 30.0f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	range.world->tick(1 / 30.0f);
+	const auto placed = range.world->supplyObjects();
+	CHECK(placed.size() == 1);
+	if (!placed.empty()) {
+		CHECK(std::fabs(range.objects.find(placed[0])->position().y - 10) < 0.5f);
+	}
+}
+
 TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
 {
 	// A dead soldier's kit falls where he lay (0x00589890: the ray straight
