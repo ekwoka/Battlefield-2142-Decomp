@@ -2251,6 +2251,24 @@ public:
 	enum class TeamDamageNotice { None, SayFriendlyFire, VictimSaysFriendlyFire, PlayerLine, VehicleLine };
 	static TeamDamageNotice teamDamageNotice(const TeamDamage& event, int local, bool victimUp);
 	static constexpr const char* kFriendlyFireVoice = "AUTO_MOODGP_friendlyfire";
+	// The score manager's replenish limits (sgl_setParam healScoreLimit /
+	// repairScoreLimit / giveAmmoScoreLimit: the setters 0x00567929.., +0x48..+0x50,
+	// 100 each from its constructor 0x00560e00; scoringCommon.py sets 50, 50, 100): the
+	// per cent of a target's hit points (heal, repair) or of its magazines (ammo) a
+	// giver has to give for one point (0x004bc410, 0x004bd5f0: his ability's sum
+	// +0x24 / +0x2c, 0x005a53d0 adds, 0x005a53e0 takes a limit off when it holds one).
+	void setReplenishLimits(float heal, float repair, float ammo)
+	{
+		m_replenishLimits[0] = heal;
+		m_replenishLimits[1] = repair;
+		m_replenishLimits[2] = ammo;
+	}
+	// The HUD's line for a replenish message (0x00759bf0 case 10: the game
+	// category's id 10, which scoringCommon.py's sendGameEvent(player, 10, kind)
+	// sends; the local player, not a commander): kind 0 a healing point, 1 a repair
+	// point, 2 an ammo giving point, 3 a driver assist, 4 a revive score. Null for
+	// the other kinds (5.. are the strategic and Titan attack scores).
+	static const char* replenishNotice(int kind);
 	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
 	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
 	void setAiRunning(bool on) { m_aiRunning = on; }
@@ -3410,6 +3428,8 @@ private:
 		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160.
 		bool gaveHeal = false, gaveRepair = false, gaveAmmo = false;
 		int64_t gaveHealTick = -1, gaveAmmoTick = -1;
+		// What he has given since his last point, per cent: heal, repair, ammo.
+		float replenishOwed[3] = {0, 0, 0};
 		// The unlocks' ability.increasedRepairAbility (player +0x30c
 		// +0x48, copied by 0x005706b0 when above 0): scales the
 		// abilities' strength when above 0.
@@ -4465,6 +4485,9 @@ private:
 	};
 	std::vector<PendingTeamDamage> m_teamDamage;
 	float m_teamDamageLimits[2] = {50, 25};
+	float m_replenishLimits[3] = {100, 100, 100};
+	// A giver's point for `percent` given to `object`: kind 0 heal, 1 repair, 2 ammo.
+	void replenishPoint(Player& giver, int kind, float percent, uint32_t object);
 	std::set<std::pair<int, int>> m_privateSquads;          // (team, squad): requestJoinSquad
 	std::map<int, uint32_t> m_squadInvites;                  // player -> its invite mask
 	std::map<int, std::vector<SquadMessage>> m_squadMessages; // player -> its 2/x messages

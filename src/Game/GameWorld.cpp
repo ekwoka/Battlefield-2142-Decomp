@@ -12048,6 +12048,33 @@ bool GameWorld::repairable(uint32_t object) const
 	return hitPoints(object) > 0 || integer(*t, "armor.canBeRepairedWhenWreck", 0) != 0;
 }
 
+const char* GameWorld::replenishNotice(int kind)
+{
+	// 0x00759bf0's case 10: its strings by the message's kind (0x0075ae91..0x0075b041).
+	switch (kind) {
+	case 0: return "HUD_HUD_REPLENISH_GOT_HEALING_POINT";
+	case 1: return "HUD_HUD_REPLENISH_GOT_REPAIR_POINT";
+	case 2: return "HUD_HUD_REPLENISH_GOT_AMMO_POINT";
+	case 3: return "HUD_HUD_REPLENISH_DRIVER";
+	case 4: return "HUD_HUD_REPLENISH_REVIVE_SCORE";
+	default: return nullptr;
+	}
+}
+
+void GameWorld::replenishPoint(Player& giver, int kind, float percent, uint32_t object)
+{
+	// 0x005a53d0 / 0x005a53e0 (0x005a54c0 / 0x005a54d0 for ammo): the sum grows by what
+	// was given, and a point takes one limit off it (one point a call).
+	float& owed = giver.replenishOwed[kind];
+	owed += percent;
+	if (owed < m_replenishLimits[kind]) {
+		return;
+	}
+	owed -= m_replenishLimits[kind];
+	static constexpr const char* kEvents[3] = {"PlayerHealPoint", "PlayerRepairPoint", "PlayerGiveAmmoPoint"}; // Python events 0x22, 0x21, 0x23
+	raise(kEvents[kind], {ScriptValue::player(giver.id), ScriptValue::object(object)});
+}
+
 void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, int team, float seconds, uint32_t skip,
 	AbilityScan* scan, Player* holder, bool soldiersOnly, bool vehiclesOnly, Player* giver, const physics::Vec3* rayEnd,
 	std::vector<uint32_t>* treated)
@@ -12185,12 +12212,40 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		giver->gaveRepair = repaired;
 		giver->gaveHealTick = static_cast<int64_t>(m_ticks);
 	};
+	// 0x004bc410 after the stamp: a soldier of the giver's team other than himself, or a
+	// vehicle of his team whose first occupant is another, gives a point for each
+	// limit's worth of the target's maximum hit points healed (the change x 100 /
+	// the maximum, 0x004bc4e8..0x004bc505).
+	const auto healPoint = [&](uint32_t object, float before) {
+		const world::Object* o = m_objects.find(object);
+		const world::ObjectTemplate* t = o ? o->objectTemplate() : nullptr;
+		const float most = t ? number(*t, "armor.maxHitPoints", 0) : 0;
+		const float after = hitPoints(object);
+		if (most <= 0 || before < 0 || after <= before) {
+			return;
+		}
+		int kind = 0;
+		if (const Player* receiver = soldierPlayer(object)) {
+			if (receiver->team != giver->team || receiver->id == giver->id) {
+				return;
+			}
+		} else {
+			const std::vector<int> crew = vehicleOccupants(object);
+			if (crew.empty() || crew.front() < 0 || crew.front() == giver->id || o->team() != giver->team) {
+				return;
+			}
+			kind = 1;
+		}
+		replenishPoint(*giver, kind, (after - before) * 100.0f / most, object);
+	};
 	for (const uint32_t object : found) {
 		if (!ability.ammo) {
+			const float before = hitPoints(object);
 			if (heal(object, amountFor(object))) {
 				draw();
 				if (giver) {
 					stampHeal(object);
+					healPoint(object, before);
 				}
 				if (treated) {
 					treated->push_back(object);
@@ -12245,6 +12300,11 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			if (refilled) {
 				target->gaveAmmo = true;
 				target->gaveAmmoTick = static_cast<int64_t>(m_ticks);
+				// 0x004bd5f0 (0x004bd681..0x004bd6d6): a player of the giver's team
+				// other than himself gives a point for each limit of what was given.
+				if (giver->team == target->team && target->id != giver->id) {
+					replenishPoint(*giver, 2, percent, object);
+				}
 			}
 		}
 	}

@@ -8021,6 +8021,14 @@ int runGame(Options& options, Session& session)
 				// call goes to the server as our radio; the other's voice
 				// (the client's slot 0x54, a radio in the victim's name) has
 				// no message of ours to carry it.
+				// The replenish message (0/10 {kind}, 0x00759bf0 case 10): a personal
+				// line, not for a commander.
+				if (message.category == net::kMsgGameCategory && message.id == 10 && message.payload.size() >= 4) {
+					const net::RemotePlayer* self = client.world().player(client.world().localPlayer());
+					if (const char* key = self && !self->commander ? game::GameWorld::replenishNotice(message.payloadInt(0)) : nullptr) {
+						chat.addPersonal(localization.text(key));
+					}
+				}
 				if (message.category == net::kMsgGameCategory && message.id == 0xb && message.payload.size() >= 12) {
 					game::GameWorld::TeamDamage e;
 					e.kind = message.payloadInt(0);
@@ -8187,11 +8195,20 @@ int runGame(Options& options, Session& session)
 		// The scripts' game logic events (0x00567d40): to the player's
 		// client, or handled here for our own (0x004cbea0: the dog tag's
 		// 0x13; this machine is the server, so its count isn't kept).
-		bridge.onGameLogicEvent = [&round, &hudManager, &dogTags, hosted](int player, int event, int data) {
+		bridge.onGameLogicEvent = [&round, &hudManager, &dogTags, &chat, &localization, hosted](int player, int event, int data) {
 			if (hosted && hosted->gameLogicEvent(player, event, data)) {
 				return;
 			}
+			// The replenish message (0x00759bf0 case 10, scoringCommon.py's
+			// sendGameEvent(player, 10, kind)): the local player's personal line,
+			// not for a commander.
 			game::GameWorld::PlayerInfo victim;
+			if (event == 10 && player >= 0 && player == round.localPlayer() && round.playerInfo(player, victim) && !victim.commander) {
+				if (const char* key = game::GameWorld::replenishNotice(data)) {
+					chat.addPersonal(localization.text(key));
+				}
+				return;
+			}
 			if (event == 0x13 && player >= 0 && player == round.localPlayer() && round.playerInfo(data, victim)) {
 				dogTags.collect(hudManager, data, victim.name, true);
 			}
@@ -9854,6 +9871,7 @@ int runGame(Options& options, Session& session)
 						return it != gameLogic.limits.end() ? static_cast<float>(it->second.asNumber()) : fallback;
 					};
 					round.setTeamDamageLimits(limit("teamDamageScoreLimit", 50), limit("teamVehicleDamageScoreLimit", 25));
+					round.setReplenishLimits(limit("healScoreLimit", 100), limit("repairScoreLimit", 100), limit("giveAmmoScoreLimit", 100));
 					for (const auto& e : round.takeTeamDamage(round.localPlayer())) {
 						game::GameWorld::PlayerInfo victim;
 						const bool up = round.playerInfo(e.victim, victim) && victim.alive && !victim.manDown;

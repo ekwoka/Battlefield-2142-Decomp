@@ -1153,6 +1153,105 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 	CHECK(info.healFlag && info.sinceHeal >= 15);
 }
 
+TEST(GameWorld_ReplenishNoticeIsTheHudsLineOfItsKind)
+{
+	// 0x00759bf0 case 10: the replenish message's kinds (0x0075ae91..0x0075b041).
+	CHECK(std::string(game::GameWorld::replenishNotice(0)) == "HUD_HUD_REPLENISH_GOT_HEALING_POINT");
+	CHECK(std::string(game::GameWorld::replenishNotice(1)) == "HUD_HUD_REPLENISH_GOT_REPAIR_POINT");
+	CHECK(std::string(game::GameWorld::replenishNotice(2)) == "HUD_HUD_REPLENISH_GOT_AMMO_POINT");
+	CHECK(std::string(game::GameWorld::replenishNotice(3)) == "HUD_HUD_REPLENISH_DRIVER");
+	CHECK(std::string(game::GameWorld::replenishNotice(4)) == "HUD_HUD_REPLENISH_REVIVE_SCORE");
+	CHECK(game::GameWorld::replenishNotice(5) == nullptr && game::GameWorld::replenishNotice(-1) == nullptr);
+}
+
+TEST(GameWorld_GiversEarnReplenishPoints)
+{
+	// A hub in hand gives a point (PlayerHealPoint, or PlayerGiveAmmoPoint for ammo, with the giver and
+	// the target's object, which scoringCommon.py answers with sendGameEvent(player, 10,
+	// kind)) for each limit's worth given to a teammate (0x004bc410, 0x004bd5f0): per cent
+	// of the target's maximum hit points healed, or of its magazines refilled. Not for
+	// himself, and not for the enemy. (Only the heal is driven here: an ammo point needs a
+	// teammate with a spent magazine and a second controllable giver.)
+	Range range;
+	range.templates.registerType(6, "Kit");
+	for (const char* name : {"unl_hub_medic", "unl_hub_ammo"}) {
+		world::ObjectTemplate* hub = range.templates.create("GenericFireArm", name);
+		const bool ammo = std::string(name) == "unl_hub_ammo";
+		hub->settings()["itemIndex"] = ammo ? "5" : "4";
+		hub->settings()["ammo.replenishingType"] = ammo ? "RTAmmo" : "RTHeal";
+		hub->settings()["ammo.abilityRadius"] = "8";
+		hub->settings()["ammo.abilityStrength"] = ammo ? "20" : "3";
+	}
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	range.templates.find("eu_ar_rifle")->settings()["ammo.nrOfMags"] = "5";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->components().push_back("Ability");
+	kit->settings()["ability.hasHealingAbility"] = "1";
+	for (const char* item : {"eu_ar_rifle", "unl_hub_medic", "unl_hub_ammo"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const uint32_t mine = range.world->playerObject();
+	const int ally = range.world->addPlayer("Ally", 2, true);
+	const int enemy = range.world->addPlayer("Enemy", 1, true);
+	CHECK(range.world->spawnSoldier(ally) && range.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo allyInfo, enemyInfo;
+	CHECK(range.world->playerInfo(ally, allyInfo) && range.world->playerInfo(enemy, enemyInfo));
+	const auto distance = [&](uint32_t a, uint32_t b) {
+		const world::Vec3 p = range.world->objects().find(a)->position(), q = range.world->objects().find(b)->position();
+		return std::sqrt((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y) + (p.z - q.z) * (p.z - q.z));
+	};
+	CHECK(distance(mine, allyInfo.soldier) < 6.0f);
+	std::vector<std::pair<std::string, game::ScriptArgs>> raised;
+	range.world->setEventSink([&](const std::string& event, const game::ScriptArgs& args) { raised.push_back({event, args}); });
+	range.world->setReplenishLimits(5, 5, 5);
+	const auto points = [&](const char* event) {
+		std::vector<game::ScriptArgs> found;
+		for (const auto& [name, args] : raised) {
+			if (name == event) {
+				found.push_back(args);
+			}
+		}
+		return found;
+	};
+	const auto hold = [&](int item, int ticks) {
+		game::SoldierInput take;
+		take.selectItem = item;
+		range.world->setPlayerInput(take);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		for (int i = 0; i < ticks; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	};
+	// Heal: the three hurt, only the ally's healing counts.
+	for (const uint32_t soldier : {mine, allyInfo.soldier, enemyInfo.soldier}) {
+		range.world->setHitPoints(soldier, 40);
+	}
+	hold(4, 150);
+	const auto heals = points("PlayerHealPoint");
+	CHECK(!heals.empty());
+	for (const game::ScriptArgs& args : heals) {
+		CHECK(args.size() == 2 && args[0].kind == game::ScriptValue::Kind::Player && args[0].i == me);
+		CHECK(args[1].kind == game::ScriptValue::Kind::Object && args[1].i == allyInfo.soldier);
+	}
+	CHECK(range.world->hitPoints(mine) > 40 && range.world->hitPoints(enemyInfo.soldier) <= 40.01f);
+	// A limit above all that is given: no point.
+	raised.clear();
+	range.world->setReplenishLimits(1000, 1000, 1000);
+	range.world->setHitPoints(allyInfo.soldier, 40);
+	hold(4, 150);
+	CHECK(points("PlayerHealPoint").empty());
+	// Nobody but the giver healed (a full ally, no point on himself).
+	range.world->setReplenishLimits(5, 5, 5);
+	range.world->setHitPoints(allyInfo.soldier, 100);
+	range.world->setHitPoints(mine, 40);
+	raised.clear();
+	hold(4, 150);
+	CHECK(points("PlayerHealPoint").empty());
+}
+
 TEST(GameWorld_GrenadesBounceAndGoOff)
 {
 	// A frag grenade from an unlock (slot 7): thrown low at the PAC bot
