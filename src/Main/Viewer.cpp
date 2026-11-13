@@ -490,7 +490,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		float pitch = -0.2f;
 		float turn = 0;
 		bool drivingNow = false; // last frame's seat: a driver's mouse pitch is not clamped like a soldier's
-		float wheelSteps = 0; // the mouse wheel in play (IDAxis_2), since the last input
+		input::PlayWheel playWheel; // the mouse wheel in play (IDAxis_2), since the last input
 		// The game controllers, opened as SDL reports them.
 		std::unique_ptr<input::SdlGameControllers> sdlControllers;
 		if (options.gameControllers) {
@@ -645,7 +645,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						options.onPointerWheel(hudX(x, static_cast<float>(windowWidth)), y / windowHeight * 600, steps);
 					}
 				} else if (playing && !pointer && event.type == SDL_EVENT_MOUSE_WHEEL) {
-					wheelSteps += event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+					playWheel.add(event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y);
 				} else if (menuUp && (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)) {
 					menu({event.type == SDL_EVENT_KEY_DOWN ? ViewerOptions::MenuInput::Kind::Key : ViewerOptions::MenuInput::Kind::KeyUp, 0, 0,
 						flashKeyCode(static_cast<int>(event.key.key))});
@@ -884,9 +884,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				// IDAxis_2": the axis's positive way the first, its negative
 				// the second): a frame it turned presses one.
 				// The shipped profile binds them only in defaultPlayerInputControlMap, which the seat's map falls back to.
+				const float wheelSteps = playWheel.take();
 				const auto wheelTo = [&](const char* name) { return c.wheelPresses(map, name, wheelSteps); };
 				input.itemStep = wheelTo("c_PINextItem") ? 1 : wheelTo("c_PIPrevItem") ? -1 : 0;
-				wheelSteps = 0;
 				options.onPlayerInput(input);
 				turn = 0;
 			} else if (playing && options.onPlayerInput) {
@@ -932,8 +932,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						input.seat = seat + 1;
 					}
 				}
+				const float wheelSteps = playWheel.take();
 				input.itemStep = wheelSteps > 0 ? 1 : wheelSteps < 0 ? -1 : 0; // up the next item, down the previous
-				wheelSteps = 0;
 				options.onPlayerInput(input);
 				turn = 0;
 			}

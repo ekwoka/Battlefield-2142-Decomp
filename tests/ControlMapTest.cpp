@@ -262,3 +262,25 @@ TEST(ControlMap_MenuWheelRejectsAccelerationBursts)
 	CHECK(wheel.add(-0.5f) == 0); // reverse clears the old gesture
 	CHECK(wheel.add(-0.5f) == -1);
 }
+
+TEST(ControlMap_PlayWheelStepsOneNotchNotOnePerFrame)
+{
+	input::PlayWheel wheel;
+	// A trackpad flick: forty frames of small events must not step the item
+	// list forty times (a raw per-frame sign test did).
+	int steps = 0;
+	for (int frame = 0; frame < 40; ++frame) {
+		wheel.add(0.05f);
+		steps += wheel.take() > 0 ? 1 : 0;
+	}
+	CHECK(steps == 2);
+	// A mouse wheel: one notch per frame is one step each, the way it turned.
+	CHECK((wheel.add(1), wheel.take()) == 1);
+	CHECK((wheel.add(-1), wheel.take()) == -1);
+	CHECK(wheel.take() == 0); // nothing carried over to an idle frame
+	// An accelerated burst in one frame still presses once.
+	wheel.add(30);
+	wheel.add(30);
+	CHECK(wheel.take() > 0);
+	CHECK(wheel.take() == 0);
+}

@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe {
@@ -94,6 +95,18 @@ public:
 private:
 	float m_pending = 0;
 	int m_direction = 0;
+};
+
+// The wheel in play: whole notches only (a trackpad's small or accelerated
+// events must not step the item list every frame they touch), summed over
+// the frame; the frame's sign presses c_PINextItem / c_PIPrevItem.
+class PlayWheel {
+public:
+	void add(float delta) { m_frame += m_steps.add(delta); }
+	float take() { return std::exchange(m_frame, 0.0f); }
+private:
+	MenuWheelSteps m_steps;
+	float m_frame = 0;
 };
 
 // One binding of a player input.
