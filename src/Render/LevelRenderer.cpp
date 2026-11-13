@@ -3373,10 +3373,10 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		// and trail effects. The Titan's indoor actor cutoff must not hide
 		// the missile body while leaving its trail visible through openings.
 		// Ordinary frustum/depth tests still apply to these models.
-		// The native inside test is a union of room bounding boxes, not the
-		// retail camera's Titan membership and portal visibility. Applying the
-		// retail static-mesh switch globally makes the entire outside world,
-		// unmarked Titan details, or rooms disappear at a box boundary. Keep
+		// The native renderer has the retail camera's Titan membership
+		// (cameraInTitan) but not its portal visibility. Applying the retail
+		// static-mesh switch globally makes the entire outside world,
+		// unmarked Titan details, or rooms disappear at the boundary. Keep
 		// static geometry available on both sides and let depth/frustum tests
 		// resolve visibility. Bundled and skinned meshes retain distance culling.
 		if (base.titanInterior || base.titanExterior || titanView.cameraInside) {
@@ -3547,10 +3547,16 @@ bool LevelRenderer::cameraInTitan(const Camera& camera) const
 		return true; // ObjectDrawer.isInsideTitanOverride (+0x91)
 	}
 	// The exe tells RendDX9 the Titan the camera is in (game slot 0x110:
-	// the player's soldier's Titan, else a ray from the camera up through
-	// the Titan's hull, 0x006fa8b0 / 0x006f2b00). The rewrite takes the
-	// camera inside a Titan when it is within the box of one of its rooms
+	// a ray from the camera up through the Titan's hull, 0x006fa8b0 /
+	// 0x006f2b00; GameWorld::cameraTitan). The rooms' boxes don't
+	// fit the hull: they took the open decks fore and aft for inside and the
+	// upper hangar for outside, so the shield (an exterior bundled mesh)
+	// came and went as the camera crossed a box's face. Without the game
+	// (the viewer, the tests) the camera is inside within the box of a room
 	// (a static mesh marked isTitanInterior).
+	if (m_sources && m_sources->cameraInTitan) {
+		return m_sources->cameraInTitan(camera.position);
+	}
 	for (const Instance& instance : m_instances) {
 		const GpuMesh& mesh = *instance.mesh;
 		if (!mesh.titanInterior || mesh.bundled || mesh.skinned || instance.hidden) {

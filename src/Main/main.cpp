@@ -9414,6 +9414,9 @@ int runGame(Options& options, Session& session)
 			g_overheadCamera.speed = value("speed", g_overheadCamera.speed);
 		}
 		sources.titanObject = [&round](int team) { return round.titanOf(team); };
+		sources.cameraInTitan = [&round](const render::Vec3f& camera) {
+			return round.cameraTitan({camera.x, camera.y, camera.z}) != 0;
+		};
 		sources.overheadView = [&hudManager](render::OverheadView& view) {
 			if (!hudManager.overheadRect(view.rect)) {
 				return false;

@@ -2842,6 +2842,19 @@ uint32_t GameWorld::enclosingTitan(int player) const
 	return 0;
 }
 
+uint32_t GameWorld::cameraTitan(const physics::Vec3& camera) const
+{
+	// A joined client's Titans are the remote ones.
+	for (const auto* titans : {&m_titans, &m_remoteTitans}) {
+		for (const Titan& titan : *titans) {
+			if (insideTitanHull(titan, camera)) {
+				return titan.object;
+			}
+		}
+	}
+	return 0;
+}
+
 // 0x006f2b00: the hull is the first object of the Titan's tree with a LOD
 // of collision type 5 (the coreroom's closed shell, 240 faces). From the
 // point a ray to the hull's origin raised by the hull object's radius +
