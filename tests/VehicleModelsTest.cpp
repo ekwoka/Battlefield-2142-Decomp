@@ -7512,3 +7512,53 @@ TEST(PlayerCamera_HovDriverViewTiltsWithTheGunWhileParked)
 		CHECK(std::fabs((aimed.pitch - rest.pitch) / kDeg - gun) < 0.1f);
 	}
 }
+
+// The Shepherd with its pilot gone but a gunner aboard (retail: the engines' thrust and the
+// ForceObject's keepUp follow the root PCO's own seat, 0x0064df20 / 0x0062c920 through 0x005c87b0
+// with 0, not the vehicle's other seats).
+namespace {
+void shepherdProbe(const char* label, int seat, bool aboard, std::vector<physics::Vec3>& track)
+{
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t at = g.start("eu_at", {0, 80, 6}, 0.5f);
+	if (aboard) {
+		CHECK(g.enter(at));
+		game::SoldierInput hold;
+		g.drive(hold, 1);
+		if (seat > 1) {
+			game::SoldierInput move;
+			move.switchSeat = seat;
+			g.world->setPlayerInput(move);
+			g.world->tick(1 / 30.0f);
+		}
+	}
+	game::GameWorld::PlayerInfo me;
+	g.world->playerInfo(g.world->localPlayer(), me);
+	std::fprintf(stderr, "  %s: seat %d vehicle %u\n", label, me.seat + 1, me.vehicle);
+	for (int s = 0; s <= 10; ++s) {
+		const physics::Vec3 p = g.position(at);
+		const world::Vec3& r = g.objects.find(at)->rotation();
+		std::fprintf(stderr, "  %s t=%2d y %.2f z %.2f pitch %.1f roll %.1f\n", label, s, p.y, p.z, r.y, r.z);
+		track.push_back(p);
+		g.drive({}, 1);
+	}
+}
+}
+
+TEST(Vehicles_ShepherdWithOnlyAGunnerAboard)
+{
+	if (!gameDir()) {
+		return;
+	}
+	std::vector<physics::Vec3> pilot, gunner, nobody;
+	shepherdProbe("pilot", 1, true, pilot);
+	shepherdProbe("gunner", 2, true, gunner);
+	shepherdProbe("nobody", 1, false, nobody);
+	if (pilot.size() == 11 && gunner.size() == 11 && nobody.size() == 11) {
+		CHECK(pilot.back().y > 30);                  // the pilot's hold keeps it flying
+		CHECK(gunner.back().y < pilot.back().y - 15); // a gunner alone: no thrust, no hover regulator
+	}
+}

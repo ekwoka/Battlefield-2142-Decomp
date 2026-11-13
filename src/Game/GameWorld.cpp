@@ -14784,7 +14784,7 @@ bool GameWorld::stepBody(Body& b, float seconds)
 	if (asleep(b)) {
 		// A resting node's bundles still turn on the driver's input (their own update, as the mech
 		// legs': the Hachimoto's camera mount rides PIPitch with its gun, which turns regardless).
-		if (b.vehicle && std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; })) {
+		if (b.vehicle && !b.occupants.empty() && b.occupants[0] >= 0) {
 			b.vehicle->setOccupied(true);
 			b.vehicle->tickParts(body, seconds);
 		}
@@ -14803,8 +14803,9 @@ bool GameWorld::stepBody(Body& b, float seconds)
 				b.vehicle->setWheelGrip(w, m_materials->friction(wheels[w].material, ground));
 			}
 		}
-		b.vehicle->setOccupied(
-			std::any_of(b.occupants.begin(), b.occupants.end(), [](int p) { return p >= 0; }));
+		// The root PCO's own seat, the pilot's: the engines' thrust (0x0064df20), the ForceObjects
+		// (0x0062c920) and the input regulator ask it with 0 (0x005c87b0), not the other seats.
+		b.vehicle->setOccupied(!b.occupants.empty() && b.occupants[0] >= 0);
 		if (b.animation) {
 			b.vehicle->setLegsAnimation(b.animation->blocksInput(), b.animation->speedFactor());
 		}
@@ -14915,8 +14916,7 @@ void GameWorld::stepPhysicsMove(float seconds)
 			// Held by its spawner: the engines turn (the hold lets go at 0.1),
 			// the forces go nowhere.
 			if (it->vehicle) {
-				it->vehicle->setOccupied(
-					std::any_of(it->occupants.begin(), it->occupants.end(), [](int p) { return p >= 0; }));
+				it->vehicle->setOccupied(!it->occupants.empty() && it->occupants[0] >= 0);
 				it->vehicle->tick(body, m_ground, seconds, 0.8f);
 			}
 			body.velocity = body.angularVelocity = body.acceleration = body.torque = {};
