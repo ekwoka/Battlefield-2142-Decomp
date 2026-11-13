@@ -302,6 +302,38 @@ TEST(GameSounds_EnhancedFindsAFirstPersonSoundUnderReorderedWords)
 	CHECK(s.manager.muted(4));
 }
 
+// The shipped data's shape: the right Shepherd gun's eu_at.tweak adds
+// S_eu_at_R_minigun_firearm_Fire1P (no file) but configures the sound under
+// another word order with `activeSafe Sound`, which no one created. Retail
+// applies that block to nothing; enhanced audio creates the sound so the lookup
+// above finds it (the right gun then plays the left one's 2D sample).
+TEST(GameSounds_EnhancedCreatesTheSoundAnActiveSafeBlockConfigures)
+{
+	for (const bool enhanced : {false, true}) {
+		Sounds s;
+		world::ObjectManager objects;
+		Console console;
+		world::registerWorldConsoleMethods(console, s.templates, objects);
+		sound::registerSoundConsoleMethods(console, s.manager);
+		if (enhanced) {
+			s.templates.onMissingSound = [&s](world::ObjectTemplate& created) { s.manager.applyEventDefaults(created); };
+		}
+		s.templates.create("Sound", "S_at_R_gun_firearm_Fire1P"); // addTemplate: no file
+		std::string out;
+		CHECK(console.execute("ObjectTemplate.activeSafe Sound S_at_gun_R_firearm_Fire1P", out) == ConsoleResult::Ok);
+		console.execute("ObjectTemplate.soundFilename \"sound/weapons/miniguns/drone_gun_mono.wav\"", out);
+		CHECK((s.templates.find("S_at_gun_R_firearm_Fire1P") != nullptr) == enhanced);
+		CHECK(s.game.sampleCount("S_at_gun_R_firearm_Fire1P") == (enhanced ? 1 : 0));
+		sound::setEnhancedAudio(enhanced);
+		sound::GameSounds::FireInfo fire;
+		fire.mode = 0;
+		s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
+		sound::setEnhancedAudio(false);
+		CHECK(s.triggered.size() == (enhanced ? 1u : 0u));
+		CHECK(!enhanced || (s.triggered[0].name == "S_at_gun_R_firearm_Fire1P" && s.triggered[0].firstPerson));
+	}
+}
+
 // 0x007fa100: two rays up and one down, 15 m; a 6 m room gives
 // 0.5 x 6 / (0.98 x 6 + 0.3).
 TEST(SoundManager_IndoorLevel)

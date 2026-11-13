@@ -56,6 +56,10 @@ public:
 
 	ObjectTemplate* active() const { return m_active; }
 	void setActive(ObjectTemplate* objectTemplate) { m_active = objectTemplate; }
+	// Enhanced audio (a port addition): when set, `activeSafe Sound <name>` creates a Sound the data
+	// never created and passes it here; retail leaves its block unapplied (eu_at.tweak's right gun
+	// Fire1P is misnamed).
+	std::function<void(ObjectTemplate&)> onMissingSound;
 
 	// Templates created while loading a level are flagged so they can be
 	// unloaded with it.
