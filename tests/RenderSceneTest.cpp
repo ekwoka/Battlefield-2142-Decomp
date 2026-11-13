@@ -960,6 +960,23 @@ TEST(RenderScene_MeshLightsPickedPerMesh)
 	CHECK(n == 1 && picked[0] == 0);
 	n = render::pickMeshLights(lights, 4, origin, 3, LightedMesh::Static, false, limits, picked, 8);
 	CHECK(n == 2 && picked[0] == 1 && picked[1] == 2);
+	// The rank is the squared distance from the light to the mesh's origin
+	// alone (0x100abbe0 under std::sort, 0x100ad8c0), not its reach: a
+	// bullet hit's 1 m flash (e_bhit_l_metalsolid) nearer a large Titan wall
+	// mesh's origin takes a slot from a 22.5 m eu_titan_specular light, as
+	// in a live Suez trace (mesh at -373.30/154.58/2.54, radius 45.7).
+	render::ListedLight titan[3];
+	const float titanAt[3][3] = {{-370.22f, 152.28f, 2.54f}, {-362.83f, 152.80f, -9.11f}, {-379.22f, 151.97f, -5.97f}};
+	const float titanRadius[3] = {22, 22.5f, 1};
+	for (int i = 0; i < 3; ++i) {
+		std::copy(titanAt[i], titanAt[i] + 3, titan[i].position);
+		titan[i].radius = titanRadius[i];
+	}
+	const float wall[3] = {-373.30f, 154.58f, 2.54f};
+	n = render::pickMeshLights(titan, 2, wall, 45.7f, LightedMesh::Static, false, limits, picked, 8);
+	CHECK(n == 2 && picked[0] == 0 && picked[1] == 1);
+	n = render::pickMeshLights(titan, 3, wall, 45.7f, LightedMesh::Static, false, limits, picked, 8);
+	CHECK(n == 2 && picked[0] == 0 && picked[1] == 2);
 	// An undergrowth patch (0x1010e270): Point lights only (0xb09), the
 	// nearest 4 about its sphere, whatever the emitter flag.
 	n = render::pickUndergrowthLights(lights, 4, origin, 3, picked);
