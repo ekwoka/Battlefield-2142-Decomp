@@ -4688,6 +4688,85 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 #endif
 
 #include "TitanLevel.h"
+// A silo's launch: the missile leaves the barrel's muzzle (not the ground at the silo's foot), its trail rides the
+// missile, and once the missile has left nothing of the launch still glows or smokes at the silo (the report: an
+// orange glow at the base long after a launch, drawn too low). The trail's anchor is the round, as main.cpp feeds it
+// (RoundVisuals::appendEffectStates -> ObjectEffects -> EffectManager), with the silo object's own bundles beside it.
+TEST(Titan_SiloLaunchLeavesNoLiveEffectAtItsBase)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		geom::GeometryTemplateManager geometries;
+		titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, true, &geometries);
+		CHECK(level.loaded);
+		const auto silos = level.world->missileSilos();
+		CHECK(!silos.empty());
+		if (silos.empty()) continue;
+		level.world->setControlPointTeam(silos.front().controlPoint, 1);
+		effects::EffectManager effectManager(level.templates);
+		effects::ObjectEffects attachments(level.templates);
+		client::RoundVisuals visuals(level.templates);
+		const auto step = [&]() {
+			level.run(1 / 30.0f);
+			std::vector<effects::ObjectEffects::ObjectState> states;
+			for (const auto& silo : level.world->missileSilos()) {
+				const world::Object* object = level.objects.find(silo.object);
+				if (!object) continue;
+				effects::ObjectEffects::ObjectState state;
+				state.id = object->id();
+				state.objectTemplate = object->objectTemplate();
+				state.position = {object->position().x, object->position().y, object->position().z};
+				state.rotation = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+				states.push_back(state);
+			}
+			visuals.appendEffectStates(level.world->projectiles(), states);
+			attachments.update(states, effectManager, [&](uint32_t object, const std::string& part, physics::Vec3& offset, physics::Vec3& rotation) {
+				world::Vec3 o, r;
+				if (!level.world->partPose(object, part, o, r)) return false;
+				offset = {o.x, o.y, o.z};
+				rotation = {r.x, r.y, r.z};
+				return true;
+			});
+			effectManager.update(1 / 30.0f);
+		};
+		const auto missile = [&]() -> const game::Projectile* {
+			for (const auto& p : level.world->projectiles()) {
+				if (p.alive && p.settings && p.settings->name == "msilo_missile") return &p;
+			}
+			return nullptr;
+		};
+		int guard = 0;
+		while (!missile() && guard++ < 30 * 150) step();
+		CHECK(missile() != nullptr);
+		if (!missile()) continue;
+		physics::Vec3 base;
+		for (const auto& s : level.world->missileSilos()) {
+			if (s.launched > 0) base = s.position;
+		}
+		// It leaves the barrel's muzzle, well above the silo's origin at the ground.
+		CHECK(missile()->position.y - base.y > 3.0f);
+		const auto nearBase = [&]() {
+			int near = 0;
+			for (const auto& e : effectManager.emitterList()) {
+				const physics::Vec3 d = e->position() - base;
+				if (physics::lengthSquared(d) < 15.0f * 15.0f) ++near;
+			}
+			return near;
+		};
+		// The missile climbs away at 4 m/s and then turns for the Titan: after a few seconds its trail is far from the base
+		// and the silo's own smoke (2.5 s) is spent.
+		int goneTicks = -1;
+		for (int tick = 0; tick < 30 * 40; ++tick) {
+			step();
+			if (tick == 30 * 6) CHECK(nearBase() == 0);
+			if (!missile() && goneTicks < 0) goneTicks = tick;
+			// Seconds after the missile is gone (it flew its 14 s out): nothing of it is left anywhere.
+			if (goneTicks >= 0 && tick == goneTicks + 30 * 8) CHECK(effectManager.emitterList().empty());
+		}
+		CHECK(goneTicks >= 0);
+	}
+}
+
 // Titans are not in vehicleList(): the floor radio ("The enemy has boarded our Titan!") once found none and took every
 // soldier on a Titan floor, the player's own team's included, for a boarder. Its holder is now the hull test's.
 TEST(Titan_HullHoldsItsOwnSoldiersNotOthers)
