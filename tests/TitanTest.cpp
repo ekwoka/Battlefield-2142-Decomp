@@ -3878,3 +3878,40 @@ TEST(Titan_HullDecalStaysOnTheHull)
 	CHECK(far == 0);
 	CHECK(empty == 0); // the hit face always keeps its piece
 }
+
+// Wake_Island_2142 (gpm_ca 64): the two dock Titans are RCTitan trees in a
+// mode that is not gpm_ti. Retail lists them in any mode and only the
+// movement tick (0x00561e20) is gpm_ti's, so they keep their parts and stay put.
+TEST(Titan_WakeStaticTitansKeepPartsAndStayPut)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Wake_Island_2142", 64, true, nullptr, false, nullptr, "gpm_ca");
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.world->titans().size() == 2);
+	std::vector<physics::Vec3> before;
+	for (int team = 1; team <= 2; ++team) {
+		const auto* titan = level.titan(team);
+		CHECK(titan != nullptr);
+		if (!titan) {
+			before.push_back({});
+			continue;
+		}
+		CHECK(level.world->isTitan(titan->object));
+		CHECK(!level.world->titanParts(team).empty());
+		CHECK(titan->consoles > 0);
+		before.push_back(titan->position);
+	}
+	level.run(20);
+	for (int team = 1; team <= 2; ++team) {
+		if (const auto* titan = level.titan(team)) {
+			const physics::Vec3 d = titan->position - before[team - 1];
+			CHECK(physics::lengthSquared(d) < 0.01f);
+		}
+	}
+}

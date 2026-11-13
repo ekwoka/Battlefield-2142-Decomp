@@ -853,10 +853,10 @@ void GameWorld::tick(float seconds)
 			if (t && sameName(t->typeName(), "PlayerControlObject")) {
 				const float ttl = spawner->settings().timeToLive;
 				m_abandonment[id] = {spawner->object().id(), ttl, ttl, m_time + 0.5};
-				// Titan mode's Titans (0x005ab390) and missile silos (Titans.cpp).
-				if (titanModeOn()) {
-					registerTitan(id, spawner->settings().controlPointId);
-				}
+				// The tree's RCTitan objects (0x005ab390 lists them in any mode) and missile
+				// silos (Titans.cpp). Only the Titans' movement tick is gpm_ti's (0x00561e20
+				// returns at once in other modes), so Wake's static Titans keep their parts.
+				registerTitan(id, spawner->settings().controlPointId);
 				registerSilo(*m_objects.find(id));
 			}
 		}
