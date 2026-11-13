@@ -4568,13 +4568,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
 			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
+			specularUniforms(uniforms, submesh, camera, lights);
 			if (lightmapped && bound->titanInterior && !bound->bundled && !bound->skinned && m_cameraInTitan) {
 				// Inside a Titan RendDX9 zeroes the static sun and sky (0x100283aa) and
 				// StaticSpecularColor is 0.7 (shortcut: its 2 s ramp from the level's is skipped).
 				uniforms.material[2] += kMaterialTitanInterior;
 				uniforms.specular[0] = uniforms.specular[1] = uniforms.specular[2] = 0.7f;
 			}
-			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);
 				std::copy(hemiObject, hemiObject + 4, uniforms.hemiObject);
