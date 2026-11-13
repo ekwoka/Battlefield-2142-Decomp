@@ -3893,6 +3893,47 @@ TEST(GameWorld_UnlockTakesItsAlternativeSlot)
 	CHECK(slots.size() == 3 && slots[2] == std::make_pair(6, std::string("unl_shotgun_02")));
 }
 
+// A replacement unlock's item goes through the add-item rule like any
+// other: the defibrillator holds 5, the rocket it replaces sat at 6, so
+// the Gauss rocket goes to 6 too (it was put on 5 beside the defibrillator,
+// the slot list showed the wrong icon and key 6 did nothing).
+TEST(GameWorld_ReplacementItemKeepsTheFreeSlot)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	const auto firearm = [&](const char* name) {
+		world::ObjectTemplate* t = range.templates.create("GenericFireArm", name);
+		t->settings()["itemIndex"] = "5";
+		t->settings()["altItemIndex"] = "6";
+	};
+	firearm("unl_defib");
+	firearm("eu_ar_rocket");
+	firearm("gauss_rocket");
+	world::ObjectTemplate* rocket = range.templates.create("ItemContainer", "UnlockRocket");
+	rocket->children().push_back({"eu_ar_rocket", {}, {}});
+	world::ObjectTemplate* gauss = range.templates.create("ItemContainer", "UnlockGauss");
+	gauss->children().push_back({"gauss_rocket", {}, {}});
+	gauss->settings()["isFirearmReplacement"] = "1";
+	gauss->settings()["replaceItem.list"] = "eu_ar_rocket;";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* child : {"eu_ar_rifle", "unl_defib", "UnlockRocket", "UnlockGauss"}) {
+		kit->children().push_back({child, {}, {}});
+	}
+	const int player = range.world->addPlayer("P", 2, true);
+	range.world->setKit(player, "EU_Assault", "us_light_soldier");
+	range.world->setUnlocks(player, {"UnlockRocket", "UnlockGauss"});
+	CHECK(range.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(player, info));
+	std::vector<std::pair<int, std::string>> slots(info.carried.begin(), info.carried.end());
+	std::sort(slots.begin(), slots.end());
+	CHECK(slots.size() == 3);
+	CHECK(slots.size() == 3 && slots[1] == std::make_pair(5, std::string("unl_defib")));
+	CHECK(slots.size() == 3 && slots[2] == std::make_pair(6, std::string("gauss_rocket")));
+}
+
 // A lock-on weapon (target.targetSystem TSHeatSeeking): an enemy carrying
 // a TTHeat target object in the lock cone is locking at once and locked
 // after lockDelay; turned away, the lock holds for loseLockDelay, then

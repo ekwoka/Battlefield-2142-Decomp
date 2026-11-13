@@ -7661,7 +7661,14 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 					if (primary && sameName(replaced->name, primary->name())) {
 						primary = m_templates.find(item->name()); // the new item is the one in hand
 					}
-					*replaced = {item->name(), slot, nullptr};
+					// The replaced item leaves its slot and the new one goes through the
+					// add-item rule (0x00589510): its itemIndex, else its altItemIndex
+					// (a rocket at 6 under the defibrillator's 5 stays at 6).
+					const int freed = replaced->slot;
+					player.carried.erase(replaced);
+					if (!place(*item, slot)) {
+						player.carried.push_back({item->name(), freed, nullptr});
+					}
 					continue;
 				}
 				place(*item, slot);
