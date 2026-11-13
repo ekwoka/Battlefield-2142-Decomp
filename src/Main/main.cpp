@@ -994,12 +994,19 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	std::vector<hud::HudManager::MapMarker> markers;
 	const std::vector<int> spawnable = world.spawnablePoints(me.team);
 	const int chosen = world.spawnChoice(me.id);
+	// The spawn icons are drawn over the vehicles, silos and teammates (0x00796379
+	// after 0x00796143 and 0x0079629f), so they are collected and added below.
+	std::vector<hud::HudManager::MapMarker> spawnMarkers;
 	for (const auto& point : world.controlPointList()) {
-		hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + // 0x0077dbf0: a point that can't change hands is a base
-				(point.capturable ? "/miniMap_CP.tga" : "/miniMap_CPBase.tga"),
-			// 0x0077dc72 / 0x0077dd04 construct 32x32 on both maps.
-			point.position.x, point.position.z, 32};
-		markers.push_back(flag);
+		// The flags only of the points with showOnMinimap (slot 0x44 in 0x0078bd00): the
+		// Titan maps' silo and Titan points have none. Their spawn icons stay.
+		if (point.showOnMinimap) {
+			hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + // 0x0077dbf0: a point that can't change hands is a base
+					(point.capturable ? "/miniMap_CP.tga" : "/miniMap_CPBase.tga"),
+				// 0x0077dc72 / 0x0077dd04 construct 32x32 on both maps.
+				point.position.x, point.position.z, 32};
+			markers.push_back(flag);
+		}
 		if (spawning && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
 			// 0x0078e9b0: the group's slot 0x28 picks the active texture (+0x9f4,
 			// +0xa04) or the Inactive one (+0x9f0, +0xa00).
@@ -1009,7 +1016,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				point.position.x, point.position.z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = point.id;
 			spawn.label = point.name.empty() ? "CP " + std::to_string(point.id) : point.name;
-			markers.push_back(spawn);
+			spawnMarkers.push_back(spawn);
 		}
 	}
 	// Mobile spawn points: the team's vehicles that carry a SpawnPoint
@@ -1040,7 +1047,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 					spawn.label = spawn.label.substr(1, spawn.label.size() - 2);
 				}
 			}
-			markers.push_back(spawn);
+			spawnMarkers.push_back(spawn);
 		}
 	}
 	// Titan interior points belong to their spawner's CP group. The local
@@ -1065,7 +1072,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			spawn.label = titan.team == 1 ? "PAC Titan" : "EU Titan";
 			spawn.id = kMarkerTitan + static_cast<int>(g_spawnTitans.size());
 			g_spawnTitans.push_back(titan.object);
-			markers.push_back(spawn);
+			spawnMarkers.push_back(spawn);
 		}
 	}
 	// The squad leader's beacon (the leader, to spawn on, is drawn with the team below).
@@ -1076,7 +1083,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				beacon->position().x, beacon->position().z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = kMarkerBeacon;
 			spawn.label = "HUD_TEXT_MENU_SPAWN_PLAYER_SL";
-			markers.push_back(spawn);
+			spawnMarkers.push_back(spawn);
 		}
 	}
 	// The vehicles (Bf2MenuMapNode 0x00793b60; see HudMenusVehicles.h): by
@@ -1156,14 +1163,17 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			continue;
 		}
 		const int frame = silo.number; // the numbered frames _01.._05 (0x006574d0)
-		const float tint = relation == dice::hfe::menu::MapRelation::Neutral ? 1.0f : 0.7f;
+		// Both layers take the vehicles' tint by relation (the switch of 0x00793b60 on
+		// 0x00781680's relation): blue friendly, red enemy, white neutral. The table
+		// 0x00b3be30 is the teammates' (0x00792ab4), not the vehicles'.
+		const auto tint = dice::hfe::menu::mapRelationColor(relation);
 		const auto layer = [&](const std::string& texture, float sweep) {
 			hud::HudManager::MapMarker m {dice::hfe::menu::iconFrame(texture, frame), silo.position.x, silo.position.z,
 				icons.size[0]};
 			m.height = icons.size[1];
 			m.sweep = sweep;
 			m.upright = true;
-			m.color[0] = m.color[1] = m.color[2] = tint;
+			std::copy(tint.begin(), tint.end(), m.color);
 			markers.push_back(m);
 		};
 		if (icons.info == 2 && !icons.background.empty()) {
@@ -1360,6 +1370,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		markers.push_back(spotted);
 	}
 	markers.insert(markers.end(), callMarkers.begin(), callMarkers.end());
+	markers.insert(markers.end(), spawnMarkers.begin(), spawnMarkers.end());
 	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {
 		// The player's own icon and its heading arrow, 32 px (0x00792980).
