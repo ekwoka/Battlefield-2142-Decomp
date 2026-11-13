@@ -2,6 +2,7 @@
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
 #include "MeshLights.h"
+#include "Scene/EnhancedSettings.h"
 #include "Scene/OvergrowthSettings.h"
 #include "MeshQueues.h"
 #include "SceneMath.h"
@@ -4385,7 +4386,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			const float origin[3] = {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			pickedCount = pickMeshLights(m_listedLights.data(), m_listedLights.size(), origin,
 				std::max(item.mesh->bounds.radius, 0.0f), lightKind, item.lightmap != nullptr, m_lightLimits, picked,
-				kMaxPointLights);
+				kMaxPointLights, m_sources && m_sources->enhanced && m_sources->enhanced->enabled && m_sources->enhanced->lightRank);
 		}
 		if (LightTrace& trace = lightTrace(); trace.on) {
 			std::string set;

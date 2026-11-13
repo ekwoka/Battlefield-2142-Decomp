@@ -977,6 +977,13 @@ TEST(RenderScene_MeshLightsPickedPerMesh)
 	CHECK(n == 2 && picked[0] == 0 && picked[1] == 1);
 	n = render::pickMeshLights(titan, 3, wall, 45.7f, LightedMesh::Static, false, limits, picked, 8);
 	CHECK(n == 2 && picked[0] == 0 && picked[1] == 2);
+	// enhanced.lightRank (not retail): d^2 / R^2, so the flash 10.7 m off ranks last.
+	n = render::pickMeshLights(titan, 3, wall, 45.7f, LightedMesh::Static, false, limits, picked, 8, true);
+	CHECK(n == 2 && picked[0] == 0 && picked[1] == 1);
+	// A flash within its own range still wins a slot.
+	const float nearFlash[3] = {-379.2f, 152.0f, -5.9f};
+	n = render::pickMeshLights(titan, 3, nearFlash, 0.1f, LightedMesh::Static, false, limits, picked, 8, true);
+	CHECK(n == 2 && picked[0] == 2 && picked[1] == 0);
 	// An undergrowth patch (0x1010e270): Point lights only (0xb09), the
 	// nearest 4 about its sphere, whatever the emitter flag.
 	n = render::pickUndergrowthLights(lights, 4, origin, 3, picked);
