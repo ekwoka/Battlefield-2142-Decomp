@@ -102,7 +102,7 @@ TEST(Hud_ShowLogicAndBars)
 
 // setBarNodeRound (Bf2BarNode slot 0x120 0x007e9380; render 0x007eb2c0 calls
 // 0x007eafc0 when it is set): the quads are wedges of 2 pi * value clockwise
-// from up about the node's middle; the node colour is not touched.
+// from up about the node's middle; drawn in the texture's own colours, whatever the node colour.
 TEST(Hud_RoundBarWedge)
 {
 	Console console;
@@ -128,7 +128,7 @@ TEST(Hud_RoundBarWedge)
 		for (const auto& q : quads) {
 			CHECK(q.sweepAbout && std::fabs(q.sweep - 3.14159265f) < 1e-5f);
 			CHECK(q.sweepCentre[0] == quads[0].x0 + 32 && q.sweepCentre[1] == quads[0].y0 + 32); // the node's middle
-			CHECK(q.color[0] == 0 && q.color[3] == 1); // colour untouched (unproven either way)
+			CHECK(q.color[0] == 1 && q.color[1] == 1 && q.color[2] == 1 && q.color[3] == 1); // the texture's own colours (orange), not the authored 0 0 0
 		}
 		CHECK(quads[1].x1 - quads[1].x0 == 32); // the linear clip stays under the wedge
 	}
