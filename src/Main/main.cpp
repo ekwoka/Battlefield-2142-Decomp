@@ -9042,7 +9042,7 @@ int runGame(Options& options, Session& session)
 						}
 						}
 					}
-				} else if (!options.screenshot.empty()) {
+				} else if (!options.screenshot.empty() && player) { // (--spawn-screen has no soldier yet)
 					// Run forward for two seconds to show the soldier moving.
 					game::SoldierInput forward;
 					forward.throttle = 1;
@@ -10716,17 +10716,20 @@ int runGame(Options& options, Session& session)
 			};
 			if (!options.screenshot.empty() && options.camera.empty() && !playerCamera.firstPerson && !session.client) {
 				// Frame the soldier (or the vehicle) from behind (along a gunner's gun).
+				// No soldier yet (the spawn screen): the death camera frames it.
 				const world::Object* player = round.playerVehicle() ? round.playerVehicle() : round.player();
 				game::GameWorld::PlayerInfo me;
 				float gunYaw = 0, gunPitch = 0;
 				round.playerInfo(round.localPlayer(), me);
 				round.gunAim(me.vehicle, me.seat, gunYaw, gunPitch);
+				if (player) {
 				const float yawDegrees = (me.vehicle ? player->rotation().x : me.yaw) + gunYaw;
 				const float yaw = yawDegrees * 3.14159265f / 180.0f;
 				char camera[128];
 				std::snprintf(camera, sizeof(camera), "%f/%f/%f/%f/-12", player->position().x - std::sin(yaw) * 5,
 					player->position().y + 2.5f, player->position().z - std::cos(yaw) * 5, yawDegrees);
 				viewer.camera = camera;
+				}
 			}
 		}
 		// The HUD's text boxes: the say keys open the chat's (0x00755020: not
