@@ -15153,10 +15153,10 @@ void GameWorld::soldierMovers(const physics::Vec3& origin, int team, uint32_t ve
 			continue;
 		}
 		physics::SoldierBody::Mover mover;
-		mover.mesh = b.soldierMesh.get();
-		if ((team == 1 || team == 2) && b.teamSoldierMesh[team - 1]) {
-			mover.mesh = b.teamSoldierMesh[team - 1].get(); // a Titan's forcefields
-		}
+		mover.keep = (team == 1 || team == 2) && b.teamSoldierMesh[team - 1]
+			? b.teamSoldierMesh[team - 1] // a Titan's forcefields
+			: b.soldierMesh;
+		mover.mesh = mover.keep.get();
 		mover.rotation = b.body.rotation;
 		mover.position = b.body.position;
 		mover.velocity = b.body.velocity;
@@ -15199,7 +15199,8 @@ void GameWorld::soldierMovers(const physics::Vec3& origin, int team, uint32_t ve
 					continue;
 				}
 				physics::SoldierBody::Mover p = mover;
-				p.mesh = part.physics[state].soldier.get();
+				p.keep = part.physics[state].soldier;
+				p.mesh = p.keep.get();
 				p.rotation = part.rotation * b.body.rotation;
 				p.position = b.body.position + b.body.rotation.transform(part.position);
 				movers.push_back(p);

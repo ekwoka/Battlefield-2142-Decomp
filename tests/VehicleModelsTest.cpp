@@ -3746,6 +3746,33 @@ TEST(Vehicles_SoldierStandsOnTheTurnedTurret)
 	CHECK(turned > 1.4f);
 }
 
+// A soldier standing by a tank carries the tank's soldier LOD into the next
+// tick (carry() reads the movers the last gather left); the tank leaving
+// between the two ticks must not leave the soldier a freed mesh to ray.
+// (Under DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib it crashes without the movers' keepalive.)
+TEST(Vehicles_SoldierSurvivesTheObjectUnderItLeaving)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_tank")) {
+		return;
+	}
+	const uint32_t tank = g.start("eu_tank", {0, 2, 0});
+	const physics::Vec3 at = g.position(tank);
+	const int id = g.world->addPlayer("Standing", 2, true);
+	CHECK(g.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	g.world->playerInfo(id, info);
+	g.world->setSoldierPosition(info.soldier, at + physics::Vec3 {0, 4, -3});
+	g.run(1.5f); // on the roof: the movers hold the tank's mesh
+	g.objects.remove(tank);
+	g.run(0.5f);
+	g.world->playerInfo(id, info);
+	CHECK(info.alive);
+}
+
 TEST(Vehicles_RocketHurtsTheWalker)
 {
 	if (!gameDir()) {

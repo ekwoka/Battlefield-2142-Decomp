@@ -36,6 +36,7 @@
 #include "RigidBody.h"
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace dice::hfe::physics {
@@ -121,6 +122,9 @@ public:
 	// Moving objects near it: their soldier LOD in their own frame.
 	struct Mover {
 		const CollisionWorld* mesh = nullptr;
+		// Keeps `mesh` alive: the movers are read again by the next tick's carry(),
+		// by when the object they were gathered from may be gone.
+		std::shared_ptr<const CollisionWorld> keep;
 		Mat3 rotation;
 		Vec3 position;
 		Vec3 velocity, angularVelocity, centerOfMass; // centre of mass in world space
