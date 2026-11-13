@@ -1070,6 +1070,14 @@ TEST(Hud_SpawnLabelOfAnUntranslatedCpNameIsReadable)
 	CHECK(hud::spawnLabelText("CPNAME_") == "CPNAME ");
 }
 
+TEST(Hud_TitanSpawnIsToldFromItsBasePoint)
+{
+	// Minsk's base is CPNAME_Mi_Ti_EU_Titan, which reads "EU Titan" without its string.
+	CHECK(hud::titanSpawnLabel("EU Titan", "CPNAME_Mi_Ti_EU_Titan") == "EU Titan (inside)");
+	CHECK(hud::titanSpawnLabel("EU Titan", "EU Headquarters") == "EU Titan");
+	CHECK(hud::titanSpawnLabel("EU Titan", "CP_BS_USBASE") == "EU Titan");
+}
+
 TEST(Hud_DeploymentMarkerLabelsAreReadableAndClickable)
 {
 	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n1\r\n"

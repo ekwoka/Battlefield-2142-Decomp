@@ -92,6 +92,9 @@ std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 // string tables lack (Remagen's Titan-mode names) reads as "<Name>" split at its
 // capitals; other labels are only tidied (ID_/CP_ prefix, underscores).
 std::string spawnLabelText(std::string label);
+// The Titan's own spawn entry, told from its base point when both read the same
+// (Remaster's string tables lack Minsk's "CPNAME_Mi_Ti_EU_Titan", which then reads "EU Titan").
+std::string titanSpawnLabel(const std::string& titan, const std::string& baseName);
 
 class HudManager {
 public:
