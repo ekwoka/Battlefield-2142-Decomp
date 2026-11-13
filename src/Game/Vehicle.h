@@ -300,6 +300,7 @@ public:
 		// State.
 		bool running = false; // +0x24c
 		float stopTimer = -1; // +0x28c
+		bool seated = false;  // message 4 seen, 5 not yet
 		float rpm = 0;        // +0x25c
 		float load = 0;       // +0x260, the feedback this tick
 		int loadCount = 0;    // +0x268
