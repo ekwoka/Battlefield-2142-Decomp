@@ -817,6 +817,12 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				instance.partsTemplate = &objectTemplate;
 			}
 			lightmapFor(sources, objectTemplate.geometry(), 0, world, instance.lightmap, instance.lightmapTransform);
+			if (!instance.lightmap && gpuMesh->titanInterior && !gpuMesh->bundled && !gpuMesh->skinned) {
+				// The Titans' interiors are lit by their own baked map (RendDX9 0x10152870), whole, not an atlas cell.
+				instance.lightmap = titanLightmap(sources, objectTemplate.geometry());
+				instance.lightmapTransform[0] = instance.lightmapTransform[1] = 1;
+				instance.lightmapTransform[2] = instance.lightmapTransform[3] = 0;
+			}
 			if (instance.lightmap) {
 				++m_stats.lightmappedInstances;
 			}
@@ -3304,6 +3310,36 @@ void LevelRenderer::lightmapFor(const LevelSources& sources, const std::string& 
 	}
 }
 
+// RendDX9 0x10152870 (branching on isTitanExterior, 0x10152a13): the interior
+// statics' map is "/Common/Textures/<titan>_Lightmap_Interior.dds" (R the light, B 0);
+// "<level>/Lightmaps/Titans/<titan>_Lightmap<N>.dds" is the exterior's (the fallback
+// here). <titan> is as_titan_playtest, eu_titan_playtest, or their _wake.
+SDL_GPUTexture* LevelRenderer::titanLightmap(const LevelSources& sources, const std::string& geometry)
+{
+	const std::string prefix = lower(geometry).substr(0, 8);
+	if (prefix != "as_titan" && prefix != "eu_titan") {
+		return nullptr;
+	}
+	const auto cached = m_titanLightmaps.find(prefix);
+	if (cached != m_titanLightmaps.end()) {
+		return cached->second;
+	}
+	SDL_GPUTexture* found = nullptr;
+	for (const char* variant : {"_playtest", "_wake"}) {
+		const std::string name = prefix + variant;
+		for (const std::string& path : {"common/textures/" + name + "_Lightmap_Interior.dds",
+				 sources.levelPath + "Lightmaps/Titans/" + name + "_Lightmap0.dds"}) {
+			if (!found) {
+				found = texture(sources.files, path);
+			}
+		}
+		if (found) {
+			break;
+		}
+	}
+	return m_titanLightmaps[prefix] = found;
+}
+
 // An instance's sphere in the world: its parts' spheres where they are now.
 BoundingSphere LevelRenderer::instanceBounds(const Instance& instance, const GpuMesh& mesh) const
 {
@@ -4532,6 +4568,12 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
 			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
+			if (lightmapped && bound->titanInterior && !bound->bundled && !bound->skinned && m_cameraInTitan) {
+				// Inside a Titan RendDX9 zeroes the static sun and sky (0x100283aa) and
+				// StaticSpecularColor is 0.7 (shortcut: its 2 s ramp from the level's is skipped).
+				uniforms.material[2] += kMaterialTitanInterior;
+				uniforms.specular[0] = uniforms.specular[1] = uniforms.specular[2] = 0.7f;
+			}
 			specularUniforms(uniforms, submesh, camera, lights);
 			if (bound->skinned || bound->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);

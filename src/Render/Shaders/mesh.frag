@@ -270,6 +270,14 @@ void main()
 		float skyShare = perPixel ? dot(tangentNormal, vec3(0.78, 0.52, 0.65)) : 0.52;
 		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible);
 		shine = specularTerm(lit, sunVisible, gloss);
+		if ((layers & 512) != 0) {
+			// _TITANINTERIOR_ inside a Titan: the static sun and sky are 0, so
+			// the light is the interior map's R (times the doubling) and G only
+			// masks the specular; no fog (RaShaderSTM.fx).
+			light = vec3(2.0 * lightmap.r);
+			shine = specularTerm(lit, lightmap.g, gloss);
+			fog = 0.0;
+		}
 	} else {
 		// Bundled and skinned meshes (32) take the hemi map (RaShaderBM/SM's
 		// _USEHEMIMAP_: by the vertex normal, a skinned mesh's per pixel);
