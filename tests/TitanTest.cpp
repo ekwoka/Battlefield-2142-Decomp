@@ -3430,6 +3430,44 @@ TEST(Titan_JoinedClientPlacedByCreateObject)
 	client.disconnect();
 }
 
+// The Titan the camera is in, as BF2142.exe tells RendDX9 each frame
+// (0x006fa940 -> 0x006fa8b0): the hull test from the camera (0x006f2db0 ->
+// 0x006f2b00), whatever the soldier's place (the soldier branch is gated by
+// an int nothing sets). The renderer's room boxes, which it used instead,
+// don't fit the hull, so the Titan's shield (skipped from inside) came and
+// went on the decks and in the upper hangar.
+TEST(Titan_CameraTitanIsTheHullHoldingTheCamera)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	const auto* titan = level.loaded ? level.titan(2) : nullptr;
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	const world::Object* titanObject = level.objects.find(titan->object);
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({titanObject->rotation().x, titanObject->rotation().y, titanObject->rotation().z});
+	const physics::Vec3 origin {titanObject->position().x, titanObject->position().y, titanObject->position().z};
+	const physics::Vec3 inside = origin + turn.transform({0, -0.081f, -53.4f + 18});
+	const physics::Vec3 outside = inside + turn.transform({60, 0, 0});
+	CHECK(level.world->cameraTitan(inside) == titan->object);
+	CHECK(level.world->cameraTitan(outside) == 0);
+	CHECK(level.world->cameraTitan(origin + physics::Vec3 {0, 200, 0}) == 0); // the commander's overhead view
+	// The soldier in the hull doesn't take the camera with him.
+	CHECK(level.world->spawnPlayer(2) != nullptr);
+	const int me = level.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(me, info));
+	CHECK(level.world->setSoldierPosition(info.soldier, inside));
+	CHECK(level.world->enclosingTitan(me) == titan->object);
+	CHECK(level.world->cameraTitan(outside) == 0);
+	CHECK(level.world->cameraTitan(inside) == titan->object);
+}
+
 // OptimizeEnclosingObjectsNetworking (a var, 0 by default): a client whose
 // soldier stands in a Titan's hull (the soldier's node +0x120, slot 0xa8
 // of its +0x18c, 0x00585cb0) doesn't get the soldiers enclosed otherwise

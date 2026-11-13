@@ -248,6 +248,9 @@ struct LevelSources {
 	// drawer's slot 0x40, which RendDX9's NametagManager reads too,
 	// 0x100f3490: the 3D icons' showInside / showOutside); may be null.
 	bool* cameraInTitanOut = nullptr;
+	// Whether the camera is in a Titan, as the exe decides it
+	// (GameWorld::cameraTitan, 0x006fa8b0); null: within a room's box.
+	std::function<bool(const Vec3f& camera)> cameraInTitan;
 	// GameLogic.maximumLevelViewDistance (GSViewDistance): the view
 	// distance the objects' distance fade cuts at (DistanceFade.h); null:
 	// 500, the unset GSViewDistance BF2142.exe 0x00434610 reads.

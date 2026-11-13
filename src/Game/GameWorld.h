@@ -1697,6 +1697,14 @@ public:
 	// inside a Titan's hull LOD (insideTitanHull). The ghost priorities'
 	// OptimizeEnclosingObjectsNetworking reads it (HostedGame::rescore).
 	uint32_t enclosingTitan(int player) const;
+	// The Titan the camera is in, as the object drawer's update tells
+	// RendDX9 each frame (0x006fa940 -> 0x006fa8b0, kept at +0x158 and read
+	// back through slot 0x110): the one whose hull holds the camera
+	// (0x006f2db0 -> 0x006f2b00 for the teams' Titans); 0 none. 0x006fa8b0
+	// would take the local player's soldier's Titan (player slot 0xb4) first,
+	// but only while *(0x00a07ef8) is 1: that int (0x00a88e98) is set to 0
+	// at start-up (0x008ef730) and nothing else in the exe refers to it.
+	uint32_t cameraTitan(const physics::Vec3& camera) const;
 	// The seat's third-person system's messages for an IK object that is a
 	// firearm (0x005ef250's weapon layers): `messages` with 4 while it is
 	// zoomed and 1 while its fire state is above 0, else without them.
