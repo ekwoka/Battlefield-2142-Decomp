@@ -3700,3 +3700,74 @@ TEST(Titan_RemagenSoldierOnFootIsInsideTheLandArea)
 	CHECK(level.world->setSoldierPosition(info.soldier, {-600, ground->heightAt(-600, 0), 0}));
 	CHECK(!level.world->insideCombatArea(me));
 }
+
+// A silo's missile has no obstacle avoidance. msilo_missile's onlyDetonateOnMaterial 4100
+// within onlyDetonateOnMaterialTimeLimit 6.5 s (retail 0x005b51e6..0x005b5281, collision
+// handler 0x005b4ff0): a contact with another material that is no Titan's destroys that
+// object on the server and the round flies on; once the 6.5 s are over any contact sets it
+// off. Bridge at Remagen, PAC's silos at EU's Titan: cp602 passes two obstacles (4.8 s and
+// 6.1 s) and reaches the Titan at 9.2 s; cp604, 670 m from it, passes two (5.0 s, 5.9 s) and
+// goes off in the next obstacle at 7.7 s, 513 m short (the same at 3e8d211).
+TEST(Titan_SiloMissileFliesThroughObstaclesUntilItsTimeLimit)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, nullptr, true);
+	if (!level.loaded) {
+		return;
+	}
+	struct Flight {
+		bool ended = false;
+		float endAge = 0, toTitan = -1;
+		int through = 0; // obstacles crossed 3 s to 6.5 s after the launch (the silo's own tube is at 1.1 s)
+	};
+	const auto fly = [&](int controlPoint) {
+		const auto silos = level.world->missileSilos();
+		const auto silo = std::find_if(silos.begin(), silos.end(), [&](const auto& s) { return s.controlPoint == controlPoint; });
+		CHECK(silo != silos.end());
+		Flight flight;
+		if (silo == silos.end()) {
+			return flight;
+		}
+		level.world->setControlPointTeam(controlPoint, 1);
+		bool have = false;
+		physics::Vec3 last {};
+		float lastAge = 0;
+		level.afterTick = [&] {
+			bool found = false;
+			for (const auto& p : level.world->projectiles()) {
+				if (!p.alive || !p.settings || p.settings->name != "msilo_missile" || p.shooter != silo->object) {
+					continue;
+				}
+				found = true;
+				if (have && p.age > 3 && p.age < 6.5f && !level.world->lineOfSight(last, p.position)) {
+					++flight.through;
+				}
+				last = p.position;
+				lastAge = p.age;
+				have = true;
+			}
+			if (!found && have && !flight.ended) {
+				flight.ended = true;
+				flight.endAge = lastAge;
+				const auto* eu = level.titan(2);
+				flight.toTitan = eu ? std::sqrt(physics::lengthSquared(eu->position - last)) : -1.0f;
+			}
+		};
+		for (int second = 0; second < 150 && !flight.ended; ++second) {
+			level.run(1);
+		}
+		level.afterTick = nullptr;
+		level.world->setControlPointTeam(controlPoint, 0);
+		level.run(1);
+		return flight;
+	};
+	const Flight reaches = fly(602);
+	CHECK(reaches.ended && reaches.through >= 2);
+	CHECK(reaches.endAge > 8.5f && reaches.endAge < 10 && reaches.toTitan > 0 && reaches.toTitan < 100);
+	const Flight blocked = fly(604);
+	CHECK(blocked.ended && blocked.through >= 2);
+	CHECK(blocked.endAge > 6.5f && blocked.endAge < 8.5f && blocked.toTitan > 300);
+}
