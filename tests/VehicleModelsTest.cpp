@@ -7219,3 +7219,214 @@ TEST(Vehicles_SentryGunFlipsOut)
 	}
 	CHECK(flipped);
 }
+
+// A gunship's pilot weapon (as_ag / us_ag PilotWeapon: ammo.autoReload, 10 x 6)
+// spent to nothing is rearmed by a pad's SupplyObject (the helipad's
+// dummy_helipad_repair_SupplyObject and the Titans' heliRepairRearm: radius,
+// workOnVehicles, addVehicleType 3, refillAmmoSpeed 12; 0x005d0b20 -> the
+// ammo's slot 0xa8, 0x005f5110). The ammo's update starts the reload of an
+// empty magazine by itself once a magazine can be taken (0x005f3c40, which a
+// resupply makes true), and the sound component's reload event (0x005dbfe0:
+// S_..._PilotWeapon_Reload1P, vehicle_reload.wav) plays for the pilot.
+TEST(Vehicles_GunshipRearmedOnAPadReloadsWithItsSound)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			for (const char* padName : {"dummy_helipad_repair", "eu_titan_heliRepairRearm"}) {
+				Garage g(gameDir(), mod);
+				if (!g.loaded || !g.templates.find(aircraft) || !g.templates.find(padName)) {
+					continue;
+				}
+				const uint32_t v = g.start(aircraft, {0, 4, 6});
+				CHECK(g.enter(v));
+				if (!g.world->playerVehicle()) {
+					continue;
+				}
+				std::fprintf(stderr, "  %s %s %s\n", mod, aircraft, padName);
+				// Fire the pilot weapon dry (it stays busy until the trigger is let
+				// go, busyUntilButtonRelease: press and release): no round for 5 s.
+				game::SoldierInput fire;
+				int shots = 0, idle = 0;
+				for (int i = 0; i < 30 * 240 && idle < 30 * 5; ++i) {
+					fire.fire = i % 2 == 0;
+					g.world->setPlayerInput(fire);
+					g.world->tick(1 / 30.0f);
+					bool shot = false;
+					for (const auto& sound : g.world->takeWeaponSounds()) {
+						shot = shot || sound.kind == game::GameWorld::WeaponSoundEvent::Fire;
+					}
+					shots += shot;
+					idle = shot ? 0 : idle + 1;
+				}
+				g.world->setPlayerInput({});
+				std::fprintf(stderr, "    shots %d\n", shots);
+				CHECK(shots >= 60); // the 6 spare magazines and the loaded one
+				// Without a pad nothing reloads an empty gun with no magazine left.
+				g.run(3);
+				int reloads = 0;
+				for (const auto& sound : g.world->takeWeaponSounds()) {
+					reloads += sound.kind == game::GameWorld::WeaponSoundEvent::Reload;
+				}
+				CHECK(reloads == 0);
+				// The pad under it (a SupplyObject of a Bundle at the gunship; the
+				// Titans' own is a child of the Titan).
+				world::ObjectTemplate* pad = g.templates.find(padName);
+				if (std::string(padName) == "eu_titan_heliRepairRearm") {
+					world::ObjectTemplate* holder = g.templates.create("Bundle", "test_titan_pad_holder");
+					holder->children().push_back({padName, {0, 0, 0}, {}});
+					pad = holder;
+				}
+				const world::Vec3 at = g.objects.find(v)->position();
+				g.objects.create(pad, {at.x, at.y - 5, at.z});
+				for (int i = 0; i < 30 * 8; ++i) {
+					g.world->tick(1 / 30.0f);
+					for (const auto& sound : g.world->takeWeaponSounds()) {
+						reloads += sound.kind == game::GameWorld::WeaponSoundEvent::Reload;
+					}
+				}
+				CHECK(reloads >= 1);
+			}
+		}
+	}
+}
+
+// The same end to end through the sound templates of the shipped data: the
+// pilot weapon's Reload1P (vehicle_reload.wav) triggers for the seated
+// pilot when the pad's refill makes the dry gun take a magazine in.
+TEST(Vehicles_GunshipRearmedOnAPadTriggersThePilotsReloadSound)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			std::unique_ptr<sound::SoundManager> manager;
+			Garage g(gameDir(), mod, true, [&manager](Garage& garage) {
+				manager = std::make_unique<sound::SoundManager>(nullptr, garage.templates);
+				manager->registerTemplateType();
+				sound::registerSoundConsoleMethods(garage.console, *manager);
+			});
+			if (!g.loaded || !g.templates.find(aircraft) || !g.templates.find("dummy_helipad_repair")) {
+				continue;
+			}
+			const uint32_t v = g.start(aircraft, {0, 4, 6});
+			CHECK(g.enter(v));
+			if (!g.world->playerVehicle()) {
+				continue;
+			}
+			sound::GameSounds sounds {*manager};
+			std::vector<std::string> triggered;
+			sounds.onTrigger = [&triggered](const sound::GameSounds::Triggered& t) { triggered.push_back(t.name); };
+			GameAudio audio(*g.world, g.objects, g.templates, *manager, sounds, nullptr);
+			GameAudio::Camera camera;
+			camera.firstPerson = true;
+			const auto count = [&triggered](const char* part) {
+				int n = 0;
+				for (const std::string& name : triggered) {
+					n += name.find(part) != std::string::npos;
+				}
+				return n;
+			};
+			game::SoldierInput fire;
+			int idle = 0;
+			for (int i = 0; i < 30 * 240 && idle < 30 * 5; ++i) {
+				fire.fire = i % 2 == 0;
+				g.world->setPlayerInput(fire);
+				g.world->tick(1 / 30.0f);
+				const int before = count("PilotWeapon_Fire");
+				audio.tick(camera);
+				idle = count("PilotWeapon_Fire") > before ? 0 : idle + 1;
+			}
+			g.world->setPlayerInput({});
+			const int fired = count("PilotWeapon_Fire");
+			std::fprintf(stderr, "  %s %s: %d fire sounds, %d reload sounds when spent\n", mod, aircraft, fired, count("PilotWeapon_Reload"));
+			CHECK(fired >= 60);
+			const int spentReloads = count("PilotWeapon_Reload1P");
+			g.objects.create(g.templates.find("dummy_helipad_repair"), {g.objects.find(v)->position().x,
+				g.objects.find(v)->position().y - 5, g.objects.find(v)->position().z});
+			for (int i = 0; i < 30 * 8; ++i) {
+				g.world->tick(1 / 30.0f);
+				audio.tick(camera);
+			}
+			std::fprintf(stderr, "    after the pad: %d reload sounds (Reload1P %d)\n", count("PilotWeapon_Reload"), count("PilotWeapon_Reload1P"));
+			CHECK(count("PilotWeapon_Reload1P") > spentReloads);
+		}
+	}
+}
+
+// The gunner's seat: the guided missile (1 x 8, ammo.autoReload) the seat's
+// special toggle selects, spent, takes a magazine in by itself when the pad
+// rearms it, and its Reload1P triggers.
+TEST(Vehicles_GunshipGunnerMissileRearmedOnAPadReloads)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* aircraft : {"as_ag", "us_ag"}) {
+			std::unique_ptr<sound::SoundManager> manager;
+			Garage g(gameDir(), mod, true, [&manager](Garage& garage) {
+				manager = std::make_unique<sound::SoundManager>(nullptr, garage.templates);
+				manager->registerTemplateType();
+				sound::registerSoundConsoleMethods(garage.console, *manager);
+			});
+			if (!g.loaded || !g.templates.find(aircraft) || !g.templates.find("dummy_helipad_repair")) {
+				continue;
+			}
+			g.groundHeight = 0;
+			const uint32_t v = g.start(aircraft, {0, 4, 6});
+			CHECK(g.enter(v));
+			if (!g.world->playerVehicle()) {
+				continue;
+			}
+			sound::GameSounds sounds {*manager};
+			std::vector<std::string> triggered;
+			sounds.onTrigger = [&triggered](const sound::GameSounds::Triggered& t) { triggered.push_back(t.name); };
+			GameAudio audio(*g.world, g.objects, g.templates, *manager, sounds, nullptr);
+			GameAudio::Camera camera;
+			camera.firstPerson = true;
+			const auto count = [&triggered](const char* part) {
+				int n = 0;
+				for (const std::string& name : triggered) {
+					n += name.find(part) != std::string::npos;
+				}
+				return n;
+			};
+			const auto step = [&](const game::SoldierInput& input) {
+				g.world->setPlayerInput(input);
+				g.world->tick(1 / 30.0f);
+				audio.tick(camera);
+			};
+			game::SoldierInput input;
+			input.switchSeat = 2;
+			step(input);
+			input = {};
+			for (int i = 0; i < 30 * 4; ++i) step(input);
+			input.altFire = true; // the toggle: the cannon -> the guided missile
+			for (int i = 0; i < 3; ++i) step(input);
+			input = {};
+			for (int i = 0; i < 30 * 4; ++i) step(input);
+			g.groundHeight = -500; // the missile dives for a while: its press is free again
+			int idle = 0;
+			for (int i = 0; i < 30 * 400 && idle < 30 * 10; ++i) {
+				input = {};
+				input.fire = i % 4 == 0;
+				const int before = count("GuidedMissile");
+				step(input);
+				idle = count("GuidedMissile") > before ? 0 : idle + 1;
+			}
+			g.groundHeight = 0;
+			std::fprintf(stderr, "  %s %s: missile sounds %d (Fire1P %d), reloads %d\n", mod, aircraft, count("GuidedMissile"),
+				count("GuidedMissile_firearm_Fire1P") + count("GuidedMissileWeapon_Fire1P"), count("GuidedMissile") - 0);
+			const int spent = count("Reload1P");
+			g.objects.create(g.templates.find("dummy_helipad_repair"), {g.objects.find(v)->position().x,
+				g.objects.find(v)->position().y - 5, g.objects.find(v)->position().z});
+			for (int i = 0; i < 30 * 12; ++i) step({});
+			std::fprintf(stderr, "    after the pad: Reload1P %d (was %d)\n", count("Reload1P"), spent);
+			CHECK(count("Reload1P") > spent);
+		}
+	}
+}
