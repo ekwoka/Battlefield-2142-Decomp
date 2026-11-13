@@ -4569,7 +4569,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
 			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
 			specularUniforms(uniforms, submesh, camera, lights);
+			// RaShaderSTM: _POINTLIGHT_ forces _ENVMAP_ 0; RendDX9 sets 0x400 when the
+			// drawable has gathered lights (0x100bd2dc, 0x100bc14e).
+			bool titanLit = false;
 			if (lightmapped && bound->titanInterior && !bound->bundled && !bound->skinned && m_cameraInTitan) {
+				titanLit = pickedCount > 0;
 				// Inside a Titan RendDX9 zeroes the static sun and sky (0x100283aa) and
 				// StaticSpecularColor is 0.7 (shortcut: its 2 s ramp from the level's is skipped).
 				uniforms.material[2] += kMaterialTitanInterior;
@@ -4582,7 +4586,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			// The Titan interior path binds the indoor cube (0x100c3880,
 			// EnvMapManager +0x6c) for the envmap materials.
 			SDL_GPUTexture* const envMap = item.interior && m_indoorEnvMap ? m_indoorEnvMap : m_envMap;
-			layerUniforms(uniforms, submesh, envMap != nullptr);
+			layerUniforms(uniforms, submesh, envMap != nullptr && !titanLit);
 			uniforms.layers[3] = simpleShadow;
 			if (leafCoverage) {
 				// RaShaderLeafOG with HASALPHA2MASK: the texture's alpha
