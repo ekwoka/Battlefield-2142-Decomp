@@ -200,6 +200,8 @@ bool PlayerCamera::current(Me& me) const
 		me.zoomBusy = firearm->zoomBusy();
 		me.rounds = firearm->roundsInMag();
 		me.fired = firearm->firedThisTick();
+		me.weaponPulses = firearm->animationPulses();
+		me.weaponMessages = firearm->animationMessages();
 	}
 	return true;
 }
@@ -1082,11 +1084,7 @@ void PlayerCamera::tick(float seconds)
 	}
 	input.movementSeconds = seconds;
 	input.pose = me.stance;
-	// A reload sends message 2 once, as it starts (0x005e0fd0's kind 3, the
-	// whole-magazine reload of ammo.reloadAmount 0): the reload bundles are
-	// abrupt one-shots, so holding it would start them over every update.
-	// Only reloadAmount's round-at-a-time kinds hold it (4) and drop it (6);
-	// no shipped weapon sets reloadAmount.
+	// Whole-magazine reloads pulse message 2; incremental reloads hold it.
 	// A reload begun zoomed zooms out on its start (zoomOutOnReload): the
 	// zoom message going makes the root SwitchMessageTrigger queue its
 	// transition at priority 10000, which stops every bundle queued that
@@ -1096,16 +1094,22 @@ void PlayerCamera::tick(float seconds)
 	// animation updates within its frame isn't settled.
 	const bool zoomMessage = m_zoom.level() > 0;
 	const bool zoomDropped = m_zoomMessageWas && !zoomMessage;
-	if (m_reloadPulseNext || (reloadStarted && !zoomDropped)) {
+	const bool incrementalReload = (me.weaponMessages & 2u) != 0;
+	if (m_reloadPulseNext || (reloadStarted && !zoomDropped && !incrementalReload)) {
 		input.pulses |= 2;
 	}
-	m_reloadPulseNext = reloadStarted && zoomDropped;
+	m_reloadPulseNext = reloadStarted && zoomDropped && !incrementalReload;
 	m_zoomMessageWas = zoomMessage;
 	if (zoomMessage) {
 		input.messages |= 4;
 	}
-	if (fired) {
-		input.pulses |= 1;
+	if (m_remote) {
+		if (fired) {
+			input.pulses |= 1;
+		}
+	} else {
+		input.pulses |= me.weaponPulses;
+		input.messages |= me.weaponMessages;
 	}
 	std::vector<anim::FirstPersonRig::Event> events;
 	m_rig->update(input, seconds, &events);

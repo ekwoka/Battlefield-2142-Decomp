@@ -716,6 +716,8 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 // (79 shipped hand weapons set it: their crosshair overlays go while the
 // soldier sprints).
 int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed, bool sprintTest = false);
+int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* weapon, float deviation,
+	bool zoomed, bool sprintTest, bool crosshairActive);
 // The argument 0x007a01e0 hands the gui index getters (VehicleHud slot
 // 0x3c, WeaponHud slot 0x38): on (1) unless the HUD's sprint flag is off
 // and its weapon flag on. The sprint flag (+0x2a8) is the control

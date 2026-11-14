@@ -437,6 +437,10 @@ struct FireArmSettings {
 	// end at reloadTicks; the update (0x005f3c40) fills at the swap and is
 	// busy until the end.
 	float changeMagAt = 0.7f;
+	int reloadAmount = 0;
+	float firstShotExtraTime = 0, lastShotExtraTime = 0;
+	bool loopingFire = false, useShiftAnimation = false;
+	int shiftDelayTicks = 0;
 	// fire.busyUntilButtonRelease (SingleFireComp +0x9c, setter 0x004e3f33):
 	// see FireArm::fire.
 	bool busyUntilButtonRelease = false;
@@ -472,9 +476,14 @@ struct FireArmSettings {
 	// +0x15c) waits fire.pullbackTime (template +0x94, ticks +0x98, 0.2 s
 	// by default; the setter 0x005e4c40) and then fire.fireLaunchDelay
 	// (+0x1c, ticks +0x20: state 3, +0x160) before it leaves (state 4; the
-	// update, slot 5 0x005e4c80). Ticks are the times x 30, rounded.
+	// update, slot 5 0x005e4c80). The setters truncate the times x 30.
 	bool thrown = false;
 	int pullbackTicks = 0, launchDelayTicks = 0;
+	// SingleFireComp also waits fireLaunchDelay (0x005d4d80); its
+	// animation and sound start at the beginning of that wait.
+	bool singleFire = false;
+	// Ammo's authored minimumTimeUntilReload after release.
+	int minimumReloadTicks = 0;
 	// The thrown object's frame and spin (the launch's end, 0x005e5720):
 	// fire.projectileStartRotation (ThrownFireComp +0xb4..+0xbc, yaw /
 	// pitch / roll degrees; executor 0x004e4d83) turns the object's matrix
@@ -490,9 +499,10 @@ struct FireArmSettings {
 	// The underarm (soft) throw: a ThrownFireComp with fire.altFireInput
 	// (PIAltFire on the grenades): the alternate press (0x005e4d80, slot 13)
 	// starts the throw with the soft flag (+0x178), under which the
-	// pull-back / launch-delay timer (0x005e4c80) waits; while it is held
+	// phase transitions (0x005e4c80) wait; pull-back time still elapses.
+	// While it is held
 	// the power (+0x168) is min(1, ticks held / 30) (0x005e4eb0, the
-	// constructor's 1/30 at +0x90); the release lets the timer run and the
+	// constructor's 1/30 at +0x90); the release lets the phases advance and the
 	// round leaves at the weapon's speed x the power (0x005e5720). A
 	// normal throw's power is 1 (0x005e4b40).
 	bool softThrow = false;
@@ -558,10 +568,20 @@ public:
 	int roundsInMag() const { return m_rounds; }
 	// A real round leaving this tick, including weapons with unlimited ammo.
 	bool firedThisTick() const { return m_firedThisTick; }
+	bool fireSoundThisTick() const { return m_fireSoundThisTick; }
+	bool fireSoundHeld() const { return m_fireSoundHeld; }
+	int takeReloadSoundEvent() { return std::exchange(m_reloadSoundEvent, 0); }
+	uint32_t animationPulses() const { return m_animationPulses; }
+	uint32_t animationMessages() const
+	{
+		return (m_settings.thrown && !m_uncocked ? 8u : 0u)
+			| (m_animationFireHeld ? 1u : 0u)
+			| (m_settings.reloadAmount > 0 && m_reloadStageLeft > 0 ? 2u : 0u);
+	}
 	int magsLeft() const { return m_mags; }
 	bool reloading() const { return m_reloadLeft > 0; }
 	// A thrown round on its way out (ThrownFireComp states 2 and 3).
-	bool throwing() const { return m_launchIn >= 0; }
+	bool throwing() const { return m_settings.thrown && m_launchIn >= 0; }
 	// Put away after a throw until showAfterReloadTicks past the reload's
 	// start (FireArmSettings::showAfterReloadTicks); drawn again by enable.
 	bool hidden() const { return m_hidden; }
@@ -576,7 +596,7 @@ public:
 			fire(seconds, false);
 		}
 	}
-	void dropReload() { m_reloadLeft = 0; }
+	void dropReload() { m_reloadLeft = m_reloadStageLeft = 0; m_reloadSoundEvent = 0; }
 	// The firearm's enable (0x005c47d0: drawn): delayToUse starts, and the
 	// ammo's on-enable runs (0x005f4bb0): held by a soldier (or without
 	// reloadWithoutPlayer) a reload under way is dropped; instantReloadOnEnable.
@@ -611,11 +631,11 @@ public:
 	bool overheated() const { return m_heat >= 1; }
 	// Between rounds: the fire component's state above 1 (a round's cycle,
 	// state 4 until its ticksBetweenShots are past, or the spin-up, state 3).
-	bool cycling() const { return m_cooldown > 0 || m_startDelay >= 0; }
+	bool cycling() const { return m_cooldown > 0 || m_startDelay >= 0 || m_launchIn >= 0; }
 	// The firearm busy for a zoom press (0x005c50e0's test): reloading, or
 	// cycling without fire.allowZoomOnROF (0x005d3c40). The press is then
 	// taken only with zoomWhenBusy (anim::ZoomSettings::takesPress).
-	bool zoomBusy() const { return reloading() || (cycling() && !m_settings.allowZoomOnROF); }
+	bool zoomBusy() const { return reloading() || m_shiftPending || m_shiftIn > 0 || (cycling() && !m_settings.allowZoomOnROF); }
 	// The holder's ability battery (0..1) for a ReplenishingAmmoComp's
 	// abilityCost (FireArmSettings::replenishing), set before each tick and
 	// enable; and what the rounds since the last call cost it.
@@ -673,7 +693,8 @@ public:
 	static constexpr float kPulseScanStep = 1; // "pulse-meter-scan-step"
 
 private:
-	bool fire(float seconds, bool trigger); // tick's rounds
+	bool fire(float seconds, bool trigger, bool soft = false); // tick's rounds
+	bool launch();
 	FireArmSettings m_settings;
 	int m_rounds;
 	int m_mags;
@@ -681,6 +702,8 @@ private:
 	uint32_t m_resupplyTick = 0;  // the ammo's +0x3c: the last refill's tick
 	int m_cooldown = 0;
 	float m_reloadLeft = 0;
+	float m_reloadStageLeft = 0;
+	int m_reloadSoundEvent = 0;
 	bool m_reloadFilled = false; // the magazine swapped (changeMagAt) in this reload
 	int m_readyIn = 0;           // ticks of delayToUse left
 	float m_heat = 0;
@@ -694,9 +717,16 @@ private:
 	Random m_startRandom {0xcfb}; // 0x005f1650's draws (its seed: the owner's +0x214 or the time, + 0xcfb)
 	bool m_pending = false; // a press waiting for the gun
 	bool m_firedThisTick = false;
+	bool m_fireSoundThisTick = false, m_fireSoundHeld = false;
+	uint32_t m_animationPulses = 0;
+	bool m_animationFireHeld = false, m_shiftPending = false;
+	int m_shiftIn = 0;
+	bool m_uncocked = false;
 	bool m_clicked = false; // a press on an empty magazine (takeClick)
 	int m_burstLeft = 0;
 	int m_launchIn = -1;   // a thrown round's ticks to go (states 2 and 3), -1 none
+	int m_pullbackIn = -1;
+	int m_reloadIn = 0;
 	bool m_soft = false;   // the soft throw's flag (+0x178): the alternate input still held
 	bool m_altWas = false;
 	int m_softTicks = 0;
@@ -704,6 +734,7 @@ private:
 	bool m_hidden = false; // the object's flag 2 cleared by the launch
 	int m_showIn = -1;     // ticks to showing again (-1 none)
 	void reloadStarted();
+	void beginReload();
 	// "A magazine can be taken" for a reload (0x005f4140, or a
 	// ReplenishingAmmoComp's 0x005d79a0), the magazine count aside.
 	bool batteryAllowsReload() const;

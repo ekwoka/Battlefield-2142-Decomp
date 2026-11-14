@@ -436,6 +436,64 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	const geom::VertexElement* partIndex =
 		bundled || skinned ? file->element(geom::VertexUsage::BlendIndices) : nullptr;
 	const geom::VertexElement* blendWeight = skinned ? file->element(geom::VertexUsage::BlendWeight) : nullptr;
+	std::vector<uint16_t> particleIndices;
+	std::vector<std::vector<IndexRange>> particleSlots;
+	if (geometry->meshParticle) {
+		// Blend indices select a particle matrix in the pre-batched mesh.
+		// Preserve the original ranges and append triangles grouped by slot;
+		// a slot's triangles need not be contiguous in the source.
+		if (!bundled || !partIndex || partIndex->type != geom::VertexType::D3DColor ||
+			static_cast<uint32_t>(partIndex->offset) + 4 > file->vertexStride) {
+			return missing("mesh particle has invalid blend indices in " + geometry->path);
+		}
+		if (lod.partCount == 0 || lod.partCount > 256) {
+			return missing("mesh particle has invalid batch size in " + geometry->path);
+		}
+		uint64_t totalIndices = file->indices.size();
+		for (const geom::MeshMaterial& material : lod.materials) {
+			totalIndices += material.indexCount;
+		}
+		if (totalIndices > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t)) {
+			return missing("mesh particle index buffer too large in " + geometry->path);
+		}
+		particleIndices = file->indices;
+		particleIndices.reserve(static_cast<size_t>(totalIndices));
+		particleSlots.resize(lod.materials.size());
+		for (size_t m = 0; m < lod.materials.size(); ++m) {
+			const geom::MeshMaterial& material = lod.materials[m];
+			if (material.indexCount % 3 != 0) {
+				return missing("mesh particle material has incomplete triangle in " + geometry->path);
+			}
+			std::vector<std::vector<uint16_t>> bySlot(lod.partCount);
+			for (uint32_t i = 0; i < material.indexCount; i += 3) {
+				const size_t start = static_cast<size_t>(material.indexStart) + i;
+				uint32_t triangleSlot = 0;
+				for (size_t v = 0; v < 3; ++v) {
+					const uint16_t index = file->indices[start + v];
+					if (index >= material.vertexCount) {
+						return missing("mesh particle index outside material in " + geometry->path);
+					}
+					const size_t vertex = static_cast<size_t>(material.vertexStart) + index;
+					const uint32_t slot = file->vertices[vertex * file->vertexStride + partIndex->offset];
+					if (slot >= lod.partCount) {
+						return missing("mesh particle slot outside batch in " + geometry->path);
+					}
+					if (v != 0 && slot != triangleSlot) {
+						return missing("mesh particle triangle has mixed particle slots in " + geometry->path);
+					}
+					triangleSlot = slot;
+				}
+				auto& indices = bySlot[triangleSlot];
+				indices.insert(indices.end(), file->indices.begin() + start, file->indices.begin() + start + 3);
+			}
+			particleSlots[m].resize(lod.partCount);
+			for (size_t s = 0; s < bySlot.size(); ++s) {
+				particleSlots[m][s] = {static_cast<uint32_t>(particleIndices.size()),
+					static_cast<uint32_t>(bySlot[s].size())};
+				particleIndices.insert(particleIndices.end(), bySlot[s].begin(), bySlot[s].end());
+			}
+		}
+	}
 	// The tangents (Vertex::tangent): the binormal is cross(tangent,
 	// normal) times 1 - 2 x the third blend index byte for bundled and
 	// skinned meshes (RaShaderBM/SM createWorld2TanMat / getTangentBasis),
@@ -490,6 +548,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	auto gpuMesh = std::make_unique<GpuMesh>();
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
+	gpuMesh->particleSlotCount = geometry->meshParticle ? lod.partCount : 0;
 	if (skinned) gpuMesh->skinnedRadius = boxHalfDiagonal(lod.bounds.min, lod.bounds.max);
 	gpuMesh->radiusShadowBounds = geometry->useRadiusForShadowDepth || geometry->useRadiusForShadowSpatial;
 	gpuMesh->titanInterior = geometry->titanInterior;
@@ -568,8 +627,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	}
 	gpuMesh->vertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
 		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
-	gpuMesh->indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, file->indices.data(),
-		static_cast<uint32_t>(file->indices.size() * sizeof(uint16_t)));
+	const std::vector<uint16_t>& indices = geometry->meshParticle ? particleIndices : file->indices;
+	gpuMesh->indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
+		static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
 	const auto& materials = lod.materials;
 	// The texture class of the mesh's materials (scene::TextureClass): a
 	// tree's are the overgrowth's (0x10151830 with the template's +0x2a2).
@@ -637,6 +697,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
+		if (geometry->meshParticle) {
+			submesh.particleSlots = std::move(particleSlots[m]);
+		}
 		if (atlas) {
 			submesh.uvAtlas[0] = atlas->size[0];
 			submesh.uvAtlas[1] = atlas->size[1];
@@ -2049,8 +2112,8 @@ void LevelRenderer::syncObjects()
 		instance.fade = current->fade();
 		instance.objectOrigin = {current->position().x, current->position().y, current->position().z};
 		if (instance.cullRadius < 0) {
-			// The object's radius (slot 0x8c) as the mesh's sphere, x the
-			// template's cullRadiusScale (+0x58, 1 by default; read once).
+			// Object slot 0x8c uses the collision radius before the render
+			// mesh's. A walker's mesh bounds omit its displaced leg parts.
 			const world::ObjectTemplate* t = current->objectTemplate();
 			float scale = 1;
 			if (t) {
@@ -2062,8 +2125,14 @@ void LevelRenderer::syncObjects()
 			}
 			// A soldier: his collision box's; another skinned mesh has no
 			// sphere, so its geometry's box radius (RendDX9 0x10160d60).
-			const float radius = t && t->typeName() == "Soldier" ? soldierCullRadius()
+			float radius = t && t->typeName() == "Soldier" ? soldierCullRadius()
 				: instance.mesh->skinned ? instance.mesh->skinnedRadius : instance.mesh->bounds.radius;
+			if (instance.source.empty() && m_sources->objectRadius) {
+				const float objectRadius = m_sources->objectRadius(instance.object);
+				if (objectRadius > 0) {
+					radius = objectRadius;
+				}
+			}
 			instance.cullRadius = std::max(radius, 0.0f) * scale;
 		}
 		if (!instance.parts.empty() && m_sources->partTransforms) {
@@ -3223,7 +3292,13 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 			LightingUniforms base = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 			applyPointLights(base);
+			size_t particleIndex = 0;
 			for (const effects::MeshSprite& particle : particles) {
+				// RendDX9 fills the batch from its highest slot down (0x1013459f).
+				const uint32_t slot = particleMesh->particleSlotCount
+					? particleMesh->particleSlotCount - 1 - static_cast<uint32_t>(particleIndex % particleMesh->particleSlotCount)
+					: 0;
+				++particleIndex;
 				Mat4 world;
 				for (int row = 0; row < 3; ++row) {
 					const effects::Vec3& r = particle.rotation.rows[static_cast<size_t>(row)];
@@ -3238,6 +3313,11 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 				TransformUniforms transforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 				for (const Submesh& submesh : particleMesh->submeshes) {
+					const IndexRange range = particleMesh->particleSlotCount ? submesh.particleSlots[slot]
+						: IndexRange {submesh.firstIndex, submesh.indexCount};
+					if (range.indexCount == 0) {
+						continue;
+					}
 					LightingUniforms uniforms = base;
 					uniforms.material[2] = additive ? kMaterialAdditive : kMaterialBlended;
 					uniforms.material[3] = std::max(particle.color[3], 1e-3f);
@@ -3254,7 +3334,7 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 					};
 					SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 					bindMeshLayers(pass, nullptr);
-					SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+					SDL_DrawGPUIndexedPrimitives(pass, range.indexCount, 1, range.firstIndex, submesh.vertexOffset, 0);
 				}
 			}
 		});

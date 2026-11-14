@@ -1141,6 +1141,20 @@ bool lists(const std::vector<int>& modes, int mode)
 
 } // namespace
 
+int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* weapon, float deviation,
+	bool zoomed, bool sprintTest, bool crosshairActive)
+{
+	const int gui = weaponGuiIndex(weapon, zoomed, sprintTest);
+	hud.set("GuiIndex", static_cast<float>(gui));
+	hud.set("CrosshairIconShow", crosshairActive ? 1 : 0);
+	const auto parts = crosshairParts(deviation > 0 ? deviation : hudNumber(weapon, "deviation.minDev", 0), weapon);
+	hud.set("CrossRightPos", parts.right);
+	hud.set("CrossLeftPos", parts.left);
+	hud.set("CrossUpPos", parts.up);
+	hud.set("CrossDownPos", parts.down);
+	return gui;
+}
+
 int vehicleGuiIndex(const VehicleGuiInput& in)
 {
 	// 0x007a01e0: no VehicleHud, the first weapon's HUD as it is.

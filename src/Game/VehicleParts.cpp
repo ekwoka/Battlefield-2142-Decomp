@@ -144,6 +144,11 @@ float Vehicle::OldEngine::currentTorque() const
 	return settings.torqueAt(rpm);
 }
 
+float Vehicle::OldEngine::audioValue() const
+{
+	return (flags & 0x20) ? std::clamp(2 * aoa, -0.5f, 0.5f) + 0.5f : std::clamp(rpm, -1.0f, 1.0f);
+}
+
 // feedbackLoop (0x0064dd10): the push along the engine's axis as a load on
 // the rpm: a car's (no bit 4) is the running mean of the tick's pushes x
 // 0.99, a tank's the largest the rpm's way; a car's within +-1, a

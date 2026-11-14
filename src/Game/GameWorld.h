@@ -477,6 +477,8 @@ public:
 		std::string weapon; // the weapon's template
 		physics::Vec3 position;
 		int fireMode = -1; // a seat gun's fire component mode (0 single, 1 burst, 2 automatic); -1 unknown
+		bool fireHeld = false; // ThrownFireComp state 2: pin-removal sample
+		int reloadState = 3; // whole magazine 3, incremental first/middle/last 4/5/6
 	};
 	std::vector<WeaponSoundEvent> takeWeaponSounds() { return std::exchange(m_weaponSounds, {}); }
 
@@ -1488,8 +1490,10 @@ public:
 		// A seat whose only PIFire weapon is a pod launcher (the air transports'
 		// passenger seats: air_pod_launcher, which the exit key launches,
 		// exitThroughPodLauncher) leaves the primary fire to the soldier's own
-		// weapon: its passengers fire whatever they carry.
-		bool kitWeapon() const { return podLauncher && group == 0; }
+		// weapon: its passengers fire whatever they carry. A seat with a camera
+		// of its own (a Titan's pod array, titan_pod_launcher_podCamera) aims and
+		// fires its launcher instead.
+		bool kitWeapon() const { return podLauncher && group == 0 && cameras.empty(); }
 		// specialToggleWeaponInput (PCO template +0x46c, 0x40 none; 0x005c7f80):
 		// a press of that input moves the PIFire group on as PIToggleWeapon
 		// does, and while it is held that input fires nothing (0x005c69a0 in
@@ -3781,7 +3785,7 @@ private:
 		AbilityScan* scan = nullptr, Player* holder = nullptr, bool soldiersOnly = false, bool vehiclesOnly = false,
 		Player* giver = nullptr, // whose gifts are stamped (abilityBar): the holder by default
 		const physics::Vec3* rayEnd = nullptr, // onlyActiveWhileFiring: the ray at -> rayEnd instead of the sphere
-		std::vector<uint32_t>* treated = nullptr); // the targets that took something
+		std::vector<uint32_t>* treated = nullptr, bool checkOnly = false); // the targets eligible to receive something
 	void stepAbilities(float seconds);
 	// A soldier's ammunition for the ability bar (0x00588ba0): over its
 	// weapons that can be refilled (ammo.allowReplenish, nrOfMags not
@@ -3909,16 +3913,17 @@ private:
 	void gatherSoldierContacts(Player& player);
 	void stepSoldierAfter(Player& player, float seconds);
 	void stepSoldierWeapon(Player& player, float seconds);
-	void stepWeaponFeel(Player& player, SoldierInput& turned, float seconds);
+	void stepWeaponRecoil(Player& player, SoldierInput& turned);
+	void stepWeaponFeel(Player& player, SoldierInput& turned, float seconds, bool seated = false);
 	void stepWeaponLock(Player& player, float seconds);
-	int targetTypeOf(const world::ObjectTemplate& t, int depth = 0) const;
-	// The TargetObject template that gives a tree its targetType (the
-	// root's own or a child's), nullptr if none.
-	const world::ObjectTemplate* targetObjectOf(const world::ObjectTemplate& t, int depth = 0) const;
-	// Whether a target root's TargetObject is enabled (0x0058eba0):
-	// disableWhenWreck and disableWhenEmptyVehicle(Delay).
-	bool targetEnabled(const world::Object& root);
-	mutable std::map<const world::ObjectTemplate*, int> m_targetTypes;
+	// The first TargetObject template of a tree (the root's own or a
+	// child's) whose targetType is type (TTNone 0 .. TTPod 7; -1 any),
+	// nullptr if none.
+	const world::ObjectTemplate* targetObjectOf(const world::ObjectTemplate& t, int type = -1, int depth = 0) const;
+	// Whether a target root's TargetObject of that type is enabled
+	// (0x0058eba0): disableWhenWreck and disableWhenEmptyVehicle(Delay).
+	bool targetEnabled(const world::Object& root, int type = -1);
+	mutable std::map<std::pair<const world::ObjectTemplate*, int>, const world::ObjectTemplate*> m_targetObjects;
 	FireArmSettings withExtraAmmo(const Player& player, const world::ObjectTemplate& item) const;
 	// Takes the carried weapon of a slot in hand.
 	void equip(Player& player, int slot);

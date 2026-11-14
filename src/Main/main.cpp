@@ -1521,6 +1521,11 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const bool alive = soldier != nullptr;
 	const world::Object* const playerVehicle = world.vehicle();
 	const bool inVehicle = playerVehicle != nullptr;
+	game::GameWorld::PlayerInfo seatedPlayer;
+	const auto playerSeats = inVehicle ? round.vehicleSeats(playerVehicle->id()) : std::vector<game::GameWorld::SeatLayout> {};
+	const bool kitSeat = inVehicle && world.playerInfo(world.localPlayer(), seatedPlayer) && seatedPlayer.seat >= 0
+		&& static_cast<size_t>(seatedPlayer.seat) < playerSeats.size()
+		&& playerSeats[static_cast<size_t>(seatedPlayer.seat)].kitWeapon();
 	{
 		const world::ObjectTemplate* t = inVehicle ? playerVehicle->objectTemplate() : nullptr;
 		const auto category = t ? t->settings().find("vehicleCategory") : decltype(t->settings().end()) {};
@@ -1663,7 +1668,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		look.repairCells = world.repairCells(vehicle->id());
 		// Read the seat's active PIFire group, not the legacy first gun in
 		// the layout (which can be an alternate-fire machine gun on tanks).
-		const host::HudWorld::Weapon primary = world.seatGroupWeapon(0);
+		const host::HudWorld::Weapon primary = kitSeat ? held : world.seatGroupWeapon(0);
 		if (primary.weapon) {
 			heldGun = primary.gun;
 			heldGunTemplate = primary.weapon;
@@ -1683,6 +1688,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			childHud = dice::hfe::menu::hudNumber(round.templates().find(seats[static_cast<size_t>(me.seat)].name),
 						   "vehicleHud.useChildHud", 0) != 0;
 		}
+		childHud = childHud || kitSeat;
 		if (childHud && !heldGunTemplate && !world.joined() && held.gun && held.weapon) {
 			heldGun = held.gun;
 			heldGunTemplate = held.weapon;
@@ -1704,7 +1710,11 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			// The HUD's sprint flag in a seat: the vehicle's boost (0x007a2e60);
 			// its weapon flag the last on foot.
 			gui.sprintTest = dice::hfe::menu::guiSprintTest(look.sprinting, g_hudWeaponFlag);
-			g_guiIndex = dice::hfe::menu::vehicleGuiIndex(gui);
+			g_guiIndex = kitSeat
+				? dice::hfe::menu::updateSoldierWeaponHud(hud, held.weapon,
+					world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer()),
+					g_weaponZoomed, false, crosshairActive)
+				: dice::hfe::menu::vehicleGuiIndex(gui);
 			g_guiSecondWeapon = gui.second;
 			hud.set("GuiIndex", static_cast<float>(g_guiIndex));
 		}
@@ -2243,7 +2253,6 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			g_hudWeaponFlag = dice::hfe::menu::soldierWeaponFlag(world.soldierJumpHold(), held.weapon);
 		}
 		if (const world::ObjectTemplate* rifle = held.weapon) {
-			const auto& settings = rifle->settings();
 			// 0x007a01e0 on foot: the weapon's gui index (0x00657a70) with
 			// the sprint test, the HUD's sprint flag the soldier's sprint
 			// (0x007a0f80) and its weapon flag: a disableOnSprint weapon's
@@ -2252,26 +2261,18 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			float stamina = 1;
 			bool sprinting = false;
 			world.soldierStamina(stamina, sprinting);
-			hud.set("GuiIndex", static_cast<float>(dice::hfe::menu::weaponGuiIndex(rifle, false,
-									dice::hfe::menu::guiSprintTest(sprinting, g_hudWeaponFlag))));
+			const bool sprintTest = dice::hfe::menu::guiSprintTest(sprinting, g_hudWeaponFlag);
 			// The crosshair's parts (0x007be770): the spread in pixels is
 			// the deviation (degrees) times weaponHud.deviationFactor
 			// (default 10); the parts are 20 long, about the 800 x 600
 			// centre. The deviation is the weapon's soldier deviation now
 			// (GameWorld::weaponDeviation: the turn, speed, stance and
 			// firing), its minimum without one.
-			const auto number = [&settings](const char* key, float otherwise) {
-				const auto it = settings.find(key);
-				return it != settings.end() ? static_cast<float>(std::atof(it->second.c_str())) : otherwise;
-			};
 			// minVisualDeviation pushes the parts out, maxVisualDeviation
 			// holds them (menu::crosshairParts).
 			const float now = world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer());
-			const auto parts = dice::hfe::menu::crosshairParts(now > 0 ? now : number("deviation.minDev", 0), rifle);
-			hud.set("CrossRightPos", parts.right);
-			hud.set("CrossLeftPos", parts.left);
-			hud.set("CrossUpPos", parts.up);
-			hud.set("CrossDownPos", parts.down);
+			dice::hfe::menu::updateSoldierWeaponHud(hud, rifle, now, false,
+				sprintTest, hud.number("CrosshairIconShow") != 0);
 		}
 	}
 }
@@ -9563,27 +9564,28 @@ int runGame(Options& options, Session& session)
 		// (a candidate), or the local weapon's lock on it
 		// (GameWorld::weaponLock: locking 1, locked 2); the reach is the
 		// weapon's target.maxDistance when it has one.
-		std::map<const world::ObjectTemplate*, int> targetTypes; // a template's target object's type (-1 none)
-		std::function<int(const world::ObjectTemplate*, int)> targetTypeOf = [&](const world::ObjectTemplate* t, int depth) {
+		// A template's target objects' types (bit i: TT index i; a tree may
+		// carry several, as us_ag's MagneticObject and HeatObject).
+		std::map<const world::ObjectTemplate*, unsigned> targetTypes;
+		std::function<unsigned(const world::ObjectTemplate*, int)> targetTypesOf = [&](const world::ObjectTemplate* t, int depth) {
 			if (!t || depth > 6) {
-				return -1;
+				return 0u;
 			}
 			const auto known = targetTypes.find(t);
 			if (known != targetTypes.end()) {
 				return known->second;
 			}
-			int type = -1;
+			unsigned types = 0;
 			const auto own = t->settings().find("targetType");
 			if (own != t->settings().end()) {
-				type = dice::hfe::menu::targetTypeIndex(own->second);
+				const int type = dice::hfe::menu::targetTypeIndex(own->second);
+				types |= type >= 0 ? 1u << type : 0u;
 			}
 			for (const world::ChildTemplate& child : t->children()) {
-				if (type < 0) {
-					type = targetTypeOf(round.templates().find(child.name), depth + 1);
-				}
+				types |= targetTypesOf(round.templates().find(child.name), depth + 1);
 			}
-			targetTypes[t] = type;
-			return type;
+			targetTypes[t] = types;
+			return types;
 		};
 		hudManager.setMarkerSource([&](const hud::HudManager::MarkerQuery& query) {
 			std::vector<hud::HudManager::MarkerTarget> targets;
@@ -9594,8 +9596,8 @@ int runGame(Options& options, Session& session)
 				if (!object || object->destroyed() || object->hidden() || object->team() == 0 || object->team() == team) {
 					continue;
 				}
-				const int type = targetTypeOf(object->objectTemplate(), 0);
-				if (type < 0 || (query.lockOnType >= 0 && type != query.lockOnType)) {
+				const unsigned types = targetTypesOf(object->objectTemplate(), 0);
+				if (!types || (query.lockOnType >= 0 && !(types >> query.lockOnType & 1u))) {
 					continue;
 				}
 				const auto& at = object->position();
@@ -9721,7 +9723,8 @@ int runGame(Options& options, Session& session)
 					}
 					using Seek = game::ProjectileSettings::Seek;
 					const int type = p.settings->seek == Seek::Magnet ? 3 : p.settings->seek == Seek::Aim ? 4
-						: p.settings->seek == Seek::Beacon ? 5 : 2;
+						: p.settings->seek == Seek::Beacon ? 5
+						: p.settings->seek == Seek::Closest && p.settings->seekTargetType >= 0 ? p.settings->seekTargetType : 2;
 					seekers.push_back({static_cast<uint32_t>(i + 1), type, p.followFrom >= 0 && p.age >= p.followFrom});
 				}
 				warningHud.update(hudManager, vehicle ? vehicle->objectTemplate() : nullptr, seekers);
@@ -10125,6 +10128,7 @@ int runGame(Options& options, Session& session)
 		sources.skeletonPose = [&round](uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world) {
 			return round.skeletonPose(object, skeleton, world);
 		};
+		sources.objectRadius = [&round](uint32_t object) { return round.objectRadius(object); };
 		sources.partTransforms = [&round](uint32_t object, std::vector<anim::Matrix>& parts) {
 			return round.partTransforms(object, parts);
 		};

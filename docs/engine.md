@@ -2003,23 +2003,37 @@ in between (`FireArm::fire`). The round's start and its wait:
   default; the grenades 1, the sonar 0.05): the throw waits that long
   (state 2), then fireLaunchDelay (state 3) before it goes (`0x005e4c80`;
   slot 36 `0x005e5a10` starts state 2, the update is slot 5). Rewritten
-  (`FireArmSettings::thrown`, `FireArm::throwing`): the round is decided
-  and spent on the press and leaves pull-back + launch-delay ticks later
-  (a frag grenade's 30 + 12). **The underarm (soft) throw**: with
+  (`FireArmSettings::thrown`, `FireArm::throwing`): the press starts
+  pin-removal animation pulse 16 and the held fire sound; the end of
+  pull-back starts uncocked-throw pulse 1. Ammo is spent at projectile
+  release, not at the press. These setters truncate seconds x 30
+  (a vanilla frag grenade's 30 + 11 ticks; Remaster's 21 + 16).
+  Thrown ammo waits its authored `ammo.minimumTimeUntilReload` after
+  release before reloading; other firearms' reload-delay handling is unchanged.
+  **The underarm (soft) throw**: with
   `fire.altFireInput` (PIAltFire on seven throwables) the alternate press
   (slot 13 `0x005e4d80`) starts the throw with the soft flag (`+0x178`),
-  under which the timer (`0x005e4c80`) waits; while held the power
+  under which phase transitions (`0x005e4c80`) wait; while held the power
   (`+0x168`) is min(1, ticks held × 1/30) (`0x005e4eb0`; `+0x90` is the
   constructor's 1/30, not a property), the arm's animation taking min(power,
-  0.99); the release clears the flag and the round leaves after the
-  pull-back and launch delay at the weapon's speed × power plus the
+  0.99); the release clears the flag. Pull-back time has already elapsed
+  during the hold, so a long hold leaves only launch delay, not another
+  pull-back. The round leaves at the weapon's speed × power plus the
   thrower's velocity (`0x005e5720`; its random spin `+0xac` × power too,
   see **The rounds' own look**). A
   normal throw's power is 1 (`0x005e4b40`). `FireArmSettings::softThrow`,
   `FireArm::throwPower`, `GameWorld::fire`. fireLaunchDelaySoft (`+0x9c`)
   is read only by slot 11 (`0x005e4e70`: max(fireLaunchDelay, soft) +
-  `+0xa4`, the busy time) and isn't applied; the arm's animation isn't
-  either.
+  `+0xa4`, the busy time), which remains unmodeled. Exact selection of the
+  short-throw animation pulse 4 is not established.
+- `fire.fireLaunchDelay` on SingleFireComp (`0x005d4d80`) enters
+  charge state 3 before release state 4. The rewrite starts weapon
+  animation and sound at charge acceptance, but spends ammo, creates
+  the projectile, applies recoil and starts muzzle effects only at
+  release. Remaster's handheld `EU_Rorsch_Mk_V` charges for 2.5 s
+  (75 ticks), matching its authored fire-animation effect time.
+  Its `e_muzz_static_av` uses `startOnEffects 0`, so that animation
+  event does not also start the same muzzle bundle.
 - `fire.addBarrelName` (`0x004e45a6` → `0x005d6ae0`, MultiFireComp
   `+0x94`): the gun's children of those names are its barrels
   (`0x005d6d20`), fired in turn (`+0x9c` set by default, `+0x1a8`) from
@@ -2298,7 +2312,19 @@ SoldierCamera, at the crouch pose's eye, yaw the seat's + the body's +
 the twist, pitch within ±85. Rewritten: `GameWorld::stepSeatedLook`,
 `poseSeated` (the bundles' share above the seat left at 0),
 `seatedSoldierView` and `PlayerCamera::view`. Not decoded: whether a
-passenger's own weapon fires there (the open seats carry none).
+passenger's own weapon fires there (the open seats carry none). The
+rewrite lets an air transport's passenger seat (a camera-less seat whose
+only PIFire weapon is the pod launcher, `SeatLayout::kitWeapon`; a
+Titan's pod array has its own camera and keeps its launcher) fire the
+soldier's weapon along that camera: from the crouch eye, the twist
+starting at 0 in the seat (`+0x278` is one field on foot and seated), the
+vehicle's reported velocity carried, and the weapon's deviation updated
+from the seated look (crouch, no movement, not in the air). These seats
+also use the infantry recoil graph for yaw and pitch; the seated camera
+includes the pending pitch kick until the viewer consumes it. Their HUD
+uses the carried weapon's ammunition, GUI and live crosshair spread,
+refreshing these when switching from a pilot or door-gun seat. Seats
+with their own weapons or cameras retain the vehicle HUD path.
 
 On a joined client the seated look comes from the server: the soldier's
 networkable (`0x005fc1a0` fills masks 2 and 4 from `+0x25c` and `+0x278`
@@ -3679,6 +3705,14 @@ roll), coloured by the colour graph and faded by the transparency graph
 pass (RendDX9's MeshParticles draw `0x101351e0`: the hemi map constants `0x10135460`, then
 `0x10135020`).
 
+The bundled geometry is pre-batched: its blend-index byte selects a
+particle matrix. Retail fills slots from the highest down
+(`0x1013459f`). Native groups each material's triangles by that byte,
+preserving their vertex offsets and original index ranges, and draws one
+slot per particle instead of the whole batch. Triangles for a slot need
+not be contiguous. The shipped ADS spike mesh has 26 slots; some particle
+meshes have one.
+
 **Lights.** LightSource templates (class `0x94c7`; the fields as the
 writer `0x00617030` lists them: lightType `+0x70`, isDynamic `+0x64`,
 affectLightmappedObjects `+0x6d`, affectingType `+0x90`,
@@ -3830,6 +3864,16 @@ camera, where the original has no cap), `applyTerrainLights`,
 `terrain.frag` (after the fog, as the passes go over the finished
 terrain), `pickUndergrowthLights` / `applyUndergrowthLights` and
 `undergrowth.frag` (per pixel where the original lights per vertex).
+
+**Signed mesh-particle scale.** Mesh particles retain negative sizes:
+RendDX9's `particleMaxSize` setter (`0x10135d40`, template slot `0x134`)
+stores the value unchanged at `+0x1e8`. The draw (`0x10135b03..0x10135b58`)
+multiplies the clamped size graph by that value, adds the random size,
+and applies the signed scale to the mesh matrix (`0x101a28e0`).
+The shipped active-defence spikes use `particleMaxSize -1`, a constant
+size graph of 1 and `directionalScale 3`. `collectMeshes` preserves
+that mirrored scale instead of discarding the particles; zero scale
+and transparent particles remain omitted. Sprite sizing is unchanged.
 
 **Non-screen-aligned particles and trails.** A
 NonScreenAlignedParticleSystem's particles are squares lying across the
@@ -4594,11 +4638,16 @@ the children: p0 / 4 and 0.5 × `+0x140`² × p2, taken by a child whose own
 R is under 0.8 (`*0x00a07f00`) × its root's. Rewritten in
 `render/DistanceFade.h` and `LevelRenderer::prepareInstances`: each
 object's instance in view steps its fade (`Instance::distanceFade`) with
-R = its mesh's sphere × cullRadiusScale (the exe's slot 0x8c is the
-collision mesh's radius, else the render object's, and the children's),
-the actor scale for Soldier and PlayerControlObject templates, the
-geometry quality's scales, the view's zoom, GSViewDistance from
-GameLogic.maximumLevelViewDistance × the view distance scale; faded out
+R = the root's `GameWorld::objectRadius` × cullRadiusScale when it has a
+physics body, otherwise its mesh's radius (the exe's slot 0x8c is the
+collision mesh's radius, else the render object's, and the children's).
+`LevelSources::objectRadius` supplies this through the gameplay host:
+using a walker's visual mesh bounds alone omitted its displaced parts
+and faded out the EU walker at 180 m and both walkers at 250 m.
+Child mesh instances retain their own radius rather than inheriting the
+root's. The fade uses the actor scale for Soldier and PlayerControlObject
+templates, the geometry quality's scales, the view's zoom, GSViewDistance
+from GameLogic.maximumLevelViewDistance × the view distance scale; faded out
 it isn't drawn, part-faded it is drawn blended. The walk's filter flag
 0x1000000, which skips the fade, is the AI's alone: the only walk with it
 is IAIObjectEnvironment's (`0x0089b860`, filter vtable `0x009d6730`
@@ -9904,24 +9953,63 @@ slot `0xb4`), but with the player's `ability.increasedRepairAbility`
 (slot `0x2a0`'s `+0x48`) at 0 only one of his own vehicle (the same
 root, `0x006f1d70`); with it above 0 the sphere again with the message
 `0x005910c0(0x400, material)` takes everything in it too. Each target:
-repairing alone mends a vehicle (`+0x17` bit 0) of the team or of none;
+repairing alone checks a vehicle (`+0x17` bit 0) of the team or of none;
 healing or ammo a soldier of the team (with ammo also another vehicle of
-the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). So
-without the unlock a medic heals and a supporter rearms only his
-passengers, and an engineer mends nothing, his own vehicle included
-(only riders' soldiers are targets); the rewrite treated every seated or
-standing teammate in range and the engineer's own vehicle. All of it
-runs only from a seat whose template has autoUseAbility (the control
-object's 0xc4c5 interface, `0x0042b2f0`, slot `0x13c`); the rewrite ran
-it in any seat. Each target that took something in that pass (slots
-`0x108` / `0x10c` answering true; the set `0x0056e4d0`) then gets a
-second dose: the strength times the seat's slot `0x17c` (`0x005c6d60` →
-the template's interface at `+0x298`, slot 0x168 `0x0059dbd0`:
+the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). The
+repair call (`0x0059a446`) asks slot `0x108` to check only, with the
+self-check bypass at 0. `0x004bc410` asks `0x004cc380`, which resolves
+the giver's controlled object's root (`0x006f1d70`) and rejects that root
+as a non-soldier target. Thus even if the second sphere supplies it, the
+engineer cannot mend the occupied vehicle's root in this retail path.
+Original-instruction execution with synthetic objects and stubbed services
+confirms own-root rejection and another vehicle's acceptance; it is not a
+full-game test. Native now excludes the occupied root from repair-only
+targets. Its first pass checks eligibility without applying effects; the
+second pass applies the single retail dose (shared among healing/repair
+targets).
+Without the unlock a medic heals and a supporter rearms only
+his passengers, and an engineer mends nothing (only riders' soldiers are
+targets). All of it runs only from a seat whose template has
+autoUseAbility (the control object's 0xc4c5 interface, `0x0042b2f0`,
+slot `0x13c`); the rewrite ran it in any seat. Each target that passes
+the first, check-only call (slots `0x108` / `0x10c` answering true; the
+set `0x0056e4d0`) is treated once in the next pass: the strength times
+the seat's slot `0x17c` (`0x005c6d60` → the template's interface at
+`+0x298`, slot 0x168 `0x0059dbd0`:
 `abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
 executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
 `0x005caff0`; no shipped vehicle sets it), for healing and repair
-shared by the count of those targets, for ammo whole. So a medic alone
-with one passenger heals him twice as fast as the first pass alone.
+shared by the count of those targets, for ammo whole. The first call
+returns without treating the target (`0x004bc43b` for healing and repair,
+`0x004cf83b` for ammo). A kit with ammo only also rearms another vehicle
+(`0x0059a303`: a target with interface `0x998890`. It must be a
+PlayerControlObject whose root is not ours, from the team or team 0. Because it
+comes from the second sphere, this needs `increasedRepairAbility > 0`;
+`Unlock{EU,Pac}_SupportEngineer1` sets 1.15). In check-only mode, `0x004cf7b0`
+asks for an own-weapon ammo-fullness index below 15 (slot `0x154`), not a
+seat-count limit. `0x005c8060` averages the control object's own weapon
+loads, multiplies by 15 and floors; `0x005c93af` caches it at object
+`+0x314`. For the dose, it walks the root
+PlayerControlObject's slot `0x64` list. For each entry's slot `0x74` items,
+it calls interface `0x94c0` slot `0x88` (`0x005f5110`, `FireArm::resupply`)
+with the whole strength. It answers whether any weapon took ammo.
+Creation `0x005cd538` calls collector `0x0058c340` to build the persistent
+PCO map, including empty child/nested seats. Getter `0x0059d1d0` returns
+that cache; soldiers attached later on boarding are not added by it.
+Passenger kits are separately targeted by the first sphere, not traversed
+again by this vehicle refill. Original collector/getter/ammo-traversal
+instructions were exercised with a synthetic hierarchy and stubbed
+allocation/insertion, services and weapon refill, not a full retail
+creation/boarding/tick run. Individual child-target enumeration by the
+second sphere remains unverified. `0x004bd5f0` then stamps the giver (slot `0x260`, tick and 1; 0 and 1
+when nothing was taken) and the receiving players (tick and 0). It gives
+PlayerGiveAmmoPoint when the root's player is another teammate. Native now
+selects other eligible vehicle roots and calls `FireArm::resupply` on
+their active/stored seat weapons, including retained weapons in empty
+seats, without traversing passenger kits. Root-seat ammo must be missing;
+full and unlimited weapons take nothing. Never-used seat weapons need
+no eager creation, since they are implicitly full. The dose is whole and
+has no unlock multiplier (`GameWorld_KitAbilityInAVehicleRearmsOtherSeats`).
 
 **Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
@@ -13769,7 +13857,8 @@ pod arrays (titan_pod_array1/2: entered at their EntryPoints, the launcher
 pod_launcher at 150 m/s; pod_launcher_cq in other modes). The pod is a
 rigid body of its own (gravityModifier 1.5, drag 1, dragModifier 3/1/3);
 its ForceObjects steer it (eu_pod_FOFWD 35 on PIThrottle, eu_pod_FOStrafe
-20 on PIYaw, eu_pod_FOTurn 5 on PIMouseLookX). The node's slot 0xa0 adds
+20 on PIYaw, eu_pod_FOTurn 5 on PIMouseLookX; each force × input, clamped
+to ±maxForceOnObject, so S's −1 thrusts the pod backwards). The node's slot 0xa0 adds
 these as accelerations at their child offsets, without a mass divisor
 (`0x0062c920` -> `0x006c7b10` -> `0x006c96b0` -> `0x006c5bb0`).
 Eligible landing contact starts the Parachute's 0.05-second exit timer;
@@ -13784,6 +13873,16 @@ GameServer `0x004b0b90`: the nearest RCTitan, the game logic's objects of
 type 7 (`0x0058e400`), within it by the horizontal distance turns the pod
 and its rider to face it; rewritten in `startPod`, the rider's camera
 pitch from the second look-at left out).
+
+The pod's `Parachute` root also participates in seat-camera discovery:
+it inherits PlayerControlObject in retail. Launch initializes its seat's
+camera/bundle state, and `partPose` exposes the camera mount's pitch even
+though pod physics is separate from `Vehicle`. This keeps the authored
+camera's right/up/forward frame attached to the steering hull instead of
+falling back to an unrelated view. Retail Inside takes the camera's world
+matrix (`0x00610620`, called by `0x00612d80`); its ForceObjects push in their
+world frame (`0x0062ca4e..0x0062cc22`). No camera-relative thrust inversion
+or artificial horizon lock is added.
 
 Pods against a shielded Titan: no shield-state code, a material. The
 Titans' fields map their vehicle LOD to material 666 (`0x29a`; eu_forcefield

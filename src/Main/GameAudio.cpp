@@ -400,7 +400,7 @@ void GameAudio::weapons(const Camera& camera)
 			fire.mode = p && !p->vehicle ? p->fireMode : event.fireMode >= 0 ? event.fireMode : 2;
 			const int burst = weapon ? std::max(1, static_cast<int>(number(*weapon, "fire.burstSize", 3))) : 1;
 			fire.burstRounds = fire.mode == 0 ? 1 : fire.mode == 1 ? burst : std::max(1, p ? p->roundsInMag : 1);
-			fire.held = false;
+			fire.held = event.fireHeld;
 			fire.roundsPerMinute = weapon ? static_cast<int>(number(*weapon, "fire.roundsPerMinute", 600)) : 600;
 			Trigger& trigger = m_triggers[user];
 			trigger.firing = true;
@@ -410,7 +410,8 @@ void GameAudio::weapons(const Camera& camera)
 			m_sounds.releaseTrigger(user);
 			m_triggers.erase(user);
 		}
-		m_sounds.weapon(kind, event.weapon, firstPerson, toSound(event.position), muteOnFire, user, event.object, &fire);
+		m_sounds.weapon(kind, event.weapon, firstPerson, toSound(event.position), muteOnFire, user, event.object, &fire,
+			event.reloadState);
 	}
 	for (auto it = m_triggers.begin(); it != m_triggers.end();) {
 		const int player = static_cast<int>(static_cast<uint32_t>(it->first >> 32));
@@ -531,14 +532,14 @@ void GameAudio::engines()
 			if (part.type != "Engine") {
 				continue;
 			}
-			// The old engines run (+0x24c) and say their own rpm; newCar2's is
+			// The old engines run (+0x24c) and say their own audio value (+0x258); newCar2's is
 			// the vehicle's, on while someone is aboard.
 			bool running = true;
 			float rpm = vehicle->rpm();
 			for (const auto& engine : vehicle->engines()) {
 				if (engine.part == static_cast<int>(index)) {
 					running = engine.running;
-					rpm = engine.rpm;
+					rpm = engine.audioValue();
 				}
 			}
 			if (!running) {

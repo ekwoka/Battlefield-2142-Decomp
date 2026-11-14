@@ -276,6 +276,7 @@ private:
 		int rounds = -1; // in the magazine, -1 unknown
 		bool firing = false; // remote: the fire input held
 		bool fired = false; // local: an accepted shot in the current simulation tick
+		uint32_t weaponPulses = 0, weaponMessages = 0;
 	};
 	bool current(Me& me) const;
 	// A seat that leaves the primary fire to the soldier's own weapon (the air

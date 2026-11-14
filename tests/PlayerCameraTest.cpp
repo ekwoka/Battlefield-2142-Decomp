@@ -5,6 +5,9 @@
 #include "Game/GameWorld.h"
 #include "Main/PlayerCamera.h"
 #include "Main/MissileViewSmoothing.h"
+#ifdef BF2142_RENDER_TESTS
+#include "Render/LevelRenderer.h"
+#endif
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -226,6 +229,48 @@ TEST(PlayerCamera_SeatCameraRollsWithTheHull)
 		CHECK(std::fabs(view.yaw - 30 * 3.14159265f / 180) < 1e-3f);
 	}
 }
+
+#ifdef BF2142_RENDER_TESTS
+TEST(PlayerCamera_PodCameraKeepsTheHullScreenAxes)
+{
+	for (const world::Vec3 turn : {world::Vec3 {35, -40, 0}, world::Vec3 {-120, 65, 110},
+			 world::Vec3 {170, -70, -160}}) {
+		world::ObjectTemplateManager templates;
+		world::ObjectManager objects;
+		auto* pod = templates.create("Parachute", "test_pod");
+		pod->settings()["isPod"] = "1";
+		pod->children().push_back({"pod_camera_mount", {0, 1, 0}, {0, -30, 0}});
+		auto* mount = templates.create("RotationalBundle", "pod_camera_mount");
+		mount->children().push_back({"pod_camera"});
+		templates.create("Camera", "pod_camera");
+		auto* soldier = templates.create("Soldier", "us_soldier");
+		const auto vehicle = objects.create(pod, {10, 50, 20}, turn)->id();
+		const auto rider = objects.create(soldier, {})->id();
+		game::GameWorld round(templates, objects);
+		anim::AnimationSystems systems(nullptr);
+		PlayerCamera camera(round, systems, nullptr);
+		camera.setRemote([&](PlayerCamera::Remote& me) {
+			me.alive = true; me.soldier = rider; me.soldierTemplate = soldier;
+			me.vehicle = vehicle; me.seat = 0;
+			return true;
+		});
+		camera.tick(1 / 30.0f);
+		PlayerCamera::View eye;
+		CHECK(camera.view(eye, 16.0f / 9.0f));
+		if (!camera.view(eye, 16.0f / 9.0f)) return;
+		render::Camera rendered;
+		rendered.position = {eye.position[0], eye.position[1], eye.position[2]};
+		rendered.yaw = eye.yaw;
+		rendered.pitch = eye.pitch;
+		rendered.roll = eye.roll;
+		const auto screen = rendered.view();
+		const auto hull = render::Mat4::yawPitchRoll(turn.x, turn.y, turn.z);
+		const float right = hull.at(0, 0) * screen.at(0, 0)
+			+ hull.at(0, 1) * screen.at(1, 0) + hull.at(0, 2) * screen.at(2, 0);
+		CHECK(right > 0.999f); // A's negative hull-right force must remain screen-left.
+	}
+}
+#endif
 
 // Retail keeps a soldier under his parachute (a seat without a camera) in
 // first person: no view key reaches the external modes.

@@ -325,6 +325,9 @@ public:
 		float currentRatio() const;  // slot 0x1b8 (0x0064d3f0): differential x 3.5 / the table's ratio
 		float currentTorque() const; // slot 0x1a4 (0x00629660): the curve at |rpm| x torque
 		void feedback(float push);   // feedbackLoop 0x0064dd10 with the push along the axis
+		// The engine audio's value (+0x258, 0x0064cb80): a helicopter's is its angle of attack,
+		// clamp(2 aoa, -0.5, 0.5) + 0.5; the others' the rpm within +-1.
+		float audioValue() const;
 	};
 	struct WingPart {
 		int part = -1;

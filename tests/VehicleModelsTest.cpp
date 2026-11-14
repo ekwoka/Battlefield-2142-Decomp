@@ -52,6 +52,7 @@
 #ifdef BF2142_RENDER_TESTS
 #include "Render/LevelRenderer.h"
 #include "Render/PngWriter.h"
+#include "Geometry/MeshFile.h"
 #include "Terrain/Heightmap.h"
 #include "Scene/LightSettings.h"
 #include "TitanLevel.h"
@@ -188,9 +189,9 @@ struct Garage {
 
 	// Into the driver's seat: the player tried round the vehicle until an
 	// entry point takes him.
-	bool enter(uint32_t vehicle)
+	bool enter(uint32_t vehicle, bool spawn = true)
 	{
-		if (!world->spawnPlayer(2)) {
+		if (spawn && !world->spawnPlayer(2)) {
 			return false;
 		}
 		game::GameWorld::PlayerInfo me;
@@ -2704,6 +2705,85 @@ TEST(VehicleModels_TransportPassengerFiresHisOwnWeapon)
 	CHECK(!after.empty() && after[0].count > (before.empty() ? 0 : before[0].count));
 }
 
+TEST(VehicleModels_TransportPassengerRecoilAndHudAfterPilot)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		CHECK(g.loaded);
+		if (!g.loaded) return;
+		const uint32_t at = g.start("as_at", {0, 2, 6});
+		CHECK(g.enter(at));
+		game::GameWorld::PlayerInfo me;
+		CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.seat == 0);
+		const auto seats = g.world->vehicleSeats(at);
+		CHECK(seats.size() > 3 && !seats[0].kitWeapon() && seats[3].kitWeapon());
+		if (seats.size() <= 3) return;
+		game::GameLogic logic;
+		host::LocalHudWorld world(*g.world, logic);
+		hud::HudManager hud(nullptr);
+		menu::VehicleGuiInput pilot;
+		pilot.controlled = g.templates.find(seats[0].name);
+		pilot.weapon = world.seatGroupWeapon(0).weapon;
+		hud.set("GuiIndex", static_cast<float>(menu::vehicleGuiIndex(pilot)));
+		hud.set("CrosshairIconShow", 0);
+		game::SoldierInput input;
+		input.switchSeat = 4;
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.run(1);
+		CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.seat == 3);
+		const auto held = world.heldWeapon();
+		CHECK(held.weapon && held.gun);
+		if (!held.weapon || !held.gun) return;
+		const auto refreshHud = [&](bool active) {
+			return menu::updateSoldierWeaponHud(hud, held.weapon, g.world->weaponDeviation(me.id), false, false, active);
+		};
+		CHECK(refreshHud(true) == menu::weaponGuiIndex(held.weapon, false));
+		CHECK(hud.number("GuiIndex") > 0);
+		CHECK(hud.number("GuiIndex") == menu::weaponGuiIndex(held.weapon, false));
+		CHECK(hud.number("CrosshairIconShow") == 1);
+		const float settledCrosshair = hud.number("CrossRightPos");
+		refreshHud(false);
+		CHECK(hud.number("CrosshairIconShow") == 0);
+		refreshHud(true);
+		CHECK(hud.number("CrosshairIconShow") == 1);
+
+		anim::AnimationSystems systems(nullptr);
+		PlayerCamera camera(*g.world, systems, nullptr);
+		camera.tick(1 / 30.0f);
+		game::GameWorld::LadderView before;
+		CHECK(g.world->seatedSoldierView(me.id, before));
+		const float hullYaw = g.objects.find(at)->rotation().x;
+		float highest = 0, sideways = 0, modelRecoil = 0;
+		input = {};
+		input.fire = true;
+		for (int tick = 0; tick < 20; ++tick) {
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			camera.tick(1 / 30.0f);
+			game::GameWorld::LadderView view;
+			PlayerCamera::View eye;
+			CHECK(g.world->seatedSoldierView(me.id, view));
+			CHECK(camera.view(eye, 4.0f / 3.0f));
+			CHECK(std::fabs(view.pitch - g.world->aimPitchOf(me.id)) < 0.001f);
+			CHECK(std::fabs(eye.pitch * 57.29578f - view.pitch) < 0.001f);
+			highest = std::max(highest, view.pitch - before.pitch);
+			modelRecoil = std::max(modelRecoil, std::fabs(camera.recoil()));
+			sideways = std::max(sideways, std::fabs(std::remainder(view.yaw - before.yaw
+				- (g.objects.find(at)->rotation().x - hullYaw), 360.0f)));
+		}
+		std::fprintf(stderr, "  %s: passenger recoil %.3f up, %.3f sideways\n", mod, highest, sideways);
+		CHECK(highest > 0.1f);
+		CHECK(sideways > 0.001f);
+		CHECK(modelRecoil > 0.01f);
+		CHECK(std::fabs(g.world->takeAimKick(me.id)) > 0.01f);
+		refreshHud(true);
+		CHECK(hud.number("CrossRightPos") > settledCrosshair);
+	}
+}
+
 // A passenger reloads his weapon from the seat.
 TEST(VehicleModels_TransportPassengerReloads)
 {
@@ -2789,6 +2869,77 @@ TEST(VehicleModels_TransportPassengerRoundsClearTheHull)
 		g.world->hitPoints(at));
 	CHECK(seen > 0 && farthest > 20);
 	CHECK(g.world->hitPoints(at) == hp);
+}
+
+// A passenger's round goes where his camera looks: from the seat's eye along
+// the seated view (the head's twist on foot is left behind), carried along by
+// the flying transport as a door gun's rounds are.
+TEST(VehicleModels_TransportPassengerFiresWhereHeLooks)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_at")) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 40, 6}, 3, 0, -10000, 30);
+	CHECK(g.world->spawnPlayer(2));
+	game::SoldierInput input;
+	input.turn = 30; // standing still: the head twists, the body stays
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.world->tick(1 / 30.0f);
+	CHECK(g.enter(at, false));
+	input = {};
+	input.switchSeat = 4;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(1);
+	input = {};
+	input.turn = 20;
+	input.aimPitch = 12; // over the ground the transport stands on
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	input.turn = 0;
+	g.drive(input, 1); // the turn's deviation settles
+	for (int tick = 0; tick < 3; ++tick) { // under way, as in flight
+		CHECK(g.world->setBodyVelocity(at, {25, 0, -10}));
+		g.world->tick(1 / 30.0f);
+	}
+	input.fire = true;
+	CHECK(g.world->setBodyVelocity(at, {25, 0, -10}));
+	const physics::Vec3 hull = g.position(at);
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	const physics::Vec3 carried = (g.position(at) - hull) * 30.0f;
+	game::GameWorld::LadderView view;
+	CHECK(g.world->seatedSoldierView(g.world->localPlayer(), view));
+	const game::Projectile* round = nullptr;
+	for (const auto& p : g.world->projectiles()) {
+		if (p.alive && p.player == g.world->localPlayer()) {
+			round = &p;
+		}
+	}
+	CHECK(round != nullptr);
+	if (!round) {
+		return;
+	}
+	const float yaw = std::atan2(round->heading.x, round->heading.z) * 57.2958f;
+	const float pitch = std::asin(std::clamp(round->heading.y, -1.0f, 1.0f)) * 57.2958f;
+	const physics::Vec3 off = round->origin - view.position;
+	const physics::Vec3 own = round->velocity - carried;
+	const physics::Vec3 side = physics::cross(own, round->heading);
+	std::fprintf(stderr, "  view %.1f/%.1f, round %.1f/%.1f, origin off %.2f %.2f %.2f, carried %.1f %.1f %.1f, side %.2f\n",
+		view.yaw, view.pitch, yaw, pitch, off.x, off.y, off.z, carried.x, carried.y, carried.z,
+		std::sqrt(physics::lengthSquared(side)));
+	CHECK(std::fabs(std::remainder(yaw - view.yaw, 360.0f)) < 1);
+	CHECK(std::fabs(pitch - view.pitch) < 1);
+	CHECK(std::fabs(off.y) < 0.3f); // at the eye, not over the hull
+	CHECK(std::sqrt(physics::lengthSquared(side)) < 0.01f * std::sqrt(physics::lengthSquared(own)));
 }
 
 // StickyCollisionComp (0x005e83d0): C4 (maxStickAngle 180, every stick
@@ -4692,9 +4843,333 @@ TEST(Vehicles_DriveOverSuezHills)
 }
 
 #ifdef BF2142_RENDER_TESTS
+// The bundled walker's visual bounds understate its collision-based radius.
+// Isolate the body so firing effects cannot make an invisible walker pass.
+TEST(Vehicles_WalkerDistanceVisibilityPixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			for (const char* name : {"us_heavy_mech", "as_heavy_mech"}) {
+				Garage g(gameDir(), mod, true);
+				CHECK(g.loaded);
+				if (!g.loaded) continue;
+				const uint32_t id = g.start(name, {0, 5, 0});
+				const auto* object = g.objects.find(id);
+				CHECK(object);
+				if (!object) continue;
+				const auto* geometry = g.geometries.find(object->objectTemplate()->geometry());
+				CHECK(geometry);
+				if (!geometry) continue;
+				std::vector<uint8_t> data;
+				CHECK(g.files.readFile(geometry->path, data));
+				const auto mesh = geom::parseMesh(data, geometry->kind);
+				CHECK(mesh && mesh->geometries.size() > 1);
+				if (!mesh || mesh->geometries.size() < 2) continue;
+				const auto& bounds = mesh->geometries[1].lods[0].bounds;
+				std::fprintf(stderr, "  %s %s: object radius %.3f, mesh box %.2f/%.2f/%.2f .. %.2f/%.2f/%.2f\n",
+					mod, name, g.world->objectRadius(id), bounds.min[0], bounds.min[1], bounds.min[2],
+					bounds.max[0], bounds.max[1], bounds.max[2]);
+				terrain::HeightmapCluster terrain;
+				scene::LightSettings lights;
+				lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+				scene::SkySettings sky;
+				scene::WaterSettings water;
+				scene::RendererSettings settings;
+				settings.drawSkyDome = settings.drawTerrain = false;
+				render::LevelSources sources {g.files, g.templates, g.objects, g.geometries, terrain,
+					nullptr, lights, sky, water, "", ""};
+				sources.renderer = &settings;
+				sources.objectRadius = [&](uint32_t object) { return g.world->objectRadius(object); };
+				sources.partPose = [&](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
+					return g.world->partPose(object, part, offset, rotation);
+				};
+				sources.partBone = [&](uint32_t object, const std::string& part, anim::Matrix& local) {
+					return g.world->partBone(object, part, local);
+				};
+				render::LevelRenderer renderer(*gpu);
+				renderer.build(sources);
+				auto target = gpu->createOffscreenTarget(960, 540);
+				render::Camera camera;
+				const auto origin = object->position();
+				camera.yaw = 3.14159265f;
+				const auto frame = [&]() {
+					renderer.syncObjects();
+					auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+					renderer.draw(commands, target.color, target, camera, lights);
+					CHECK(SDL_SubmitGPUCommandBuffer(commands));
+					std::vector<uint8_t> pixels;
+					CHECK(gpu->readPixels(target, pixels));
+					return pixels;
+				};
+				for (float distance : {40.0f, 100.0f, 180.0f, 250.0f, 550.0f, 40.0f}) {
+					camera.position = {origin.x, origin.y, origin.z + distance};
+					settings.drawObjects = false;
+					const auto blank = frame();
+					settings.drawObjects = true;
+					const auto body = frame();
+					size_t changed = 0;
+					for (size_t i = 0; i + 3 < body.size() && i + 3 < blank.size(); i += 4)
+						if (body[i] != blank[i] || body[i + 1] != blank[i + 1] || body[i + 2] != blank[i + 2]) ++changed;
+					std::fprintf(stderr, "  %s %s at %.0f m: %zu body pixels\n", mod, name, distance, changed);
+					if (distance > 500) {
+						CHECK(changed == 0);
+					} else {
+						CHECK(changed > 20);
+					}
+					const std::string label = std::string(mod).find("Remaster") != std::string::npos ? "remaster-" : "vanilla-";
+					CHECK(render::writePng(std::string(output) + "/" + label + name + "-" + std::to_string(static_cast<int>(distance)) + ".png",
+						target.width, target.height, body));
+				}
+			}
+		}
+	}
+	SDL_Quit();
+}
+
+// Compare independently drawn particles with a pre-batched, multi-material
+// mesh whose triangles are interleaved and whose slots alternate geometry.
+TEST(Vehicles_MeshParticleBatchPixelsOptIn)
+{
+	if (!std::getenv("BF2142_RENDER_TEST_DIR")) return;
+	enum class Fault { None, MissingIndices, MixedSlots, InvalidIndex, InvalidSlot };
+	const auto meshBytes = [](uint32_t slots, uint32_t singleVariant, Fault fault) {
+		std::vector<uint8_t> bytes;
+		const auto write = [&bytes](auto value) {
+			const auto* data = reinterpret_cast<const uint8_t*>(&value);
+			bytes.insert(bytes.end(), data, data + sizeof(value));
+		};
+		const auto u32 = [&](uint32_t value) { write(value); };
+		const auto element = [&](uint16_t stream, uint16_t offset, uint16_t type, uint16_t usage) {
+			write(stream); write(offset); write(type); write(usage);
+		};
+		const auto text = [&](const std::string& value) {
+			u32(static_cast<uint32_t>(value.size()));
+			bytes.insert(bytes.end(), value.begin(), value.end());
+		};
+		u32(0); u32(10); u32(0); u32(0); u32(0); write(uint8_t {0});
+		u32(1); u32(1);
+		u32(5);
+		element(0, 0, 2, 0); element(0, 12, 2, 3);
+		element(0, 24, 4, fault == Fault::MissingIndices ? 7 : 2);
+		element(0, 28, 1, 5); element(255, 0, 17, 0);
+		u32(4); u32(36); u32(slots * 8);
+		for (uint32_t material = 0; material < 2; ++material) {
+			for (uint32_t slot = 0; slot < slots; ++slot) {
+				const uint32_t variant = slots == 1 ? singleVariant : slot % 2;
+				const float x = variant ? 0.75f : -0.75f;
+				const float y = material == 0 ? -0.75f : 0.75f;
+				const float vertices[4][2] = {{x - 0.5f, y - 0.5f}, {x + 0.5f, y - 0.5f},
+					{x + 0.5f, y + 0.5f}, {x - 0.5f, y + 0.5f}};
+				for (uint32_t v = 0; v < 4; ++v) {
+					write(vertices[v][0]); write(vertices[v][1]); write(0.0f);
+					write(0.0f); write(0.0f); write(-1.0f);
+					const uint32_t blend = material == 0 && slot == 0 && fault == Fault::InvalidSlot ? slots
+						: material == 0 && slot == 0 && v == 1 && fault == Fault::MixedSlots ? 1 : slot;
+					u32(blend); write(0.0f); write(0.0f);
+				}
+			}
+		}
+		u32(slots * 12);
+		for (uint32_t material = 0; material < 2; ++material) {
+			for (int triangle = 0; triangle < 2; ++triangle) {
+				for (uint32_t i = 0; i < slots; ++i) {
+					const uint16_t base = static_cast<uint16_t>((slots - i - 1) * 4);
+					const bool invalid = material == 0 && triangle == 0 && i == slots - 1 && fault == Fault::InvalidIndex;
+					write(invalid ? static_cast<uint16_t>(slots * 4) : base);
+					write(static_cast<uint16_t>(base + (triangle == 0 ? 1 : 2)));
+					write(static_cast<uint16_t>(base + (triangle == 0 ? 2 : 3)));
+				}
+			}
+		}
+		u32(0);
+		for (float value : {-1.25f, -1.25f, 0.0f, 1.25f, 1.25f, 0.0f}) write(value);
+		u32(slots);
+		u32(2);
+		for (uint32_t material = 0; material < 2; ++material) {
+			u32(0); text("BundledMesh.fx"); text(""); u32(0);
+			u32(material * slots * 4); u32(material * slots * 6);
+			u32(slots * 6); u32(slots * 4); u32(0); u32(0);
+		}
+		return bytes;
+	};
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		io::FileManager files;
+		world::ObjectTemplateManager templates;
+		world::ObjectManager objects;
+		geom::GeometryTemplateManager geometries;
+		for (const auto& item : {std::pair<const char*, uint32_t> {"single-odd", 1},
+				 std::pair<const char*, uint32_t> {"single-even", 0},
+				 std::pair<const char*, uint32_t> {"batched", 0}}) {
+			auto* geometry = geometries.create("MeshParticleMesh", item.first, "test/");
+			CHECK(geometry);
+			if (!geometry) return;
+			files.addMemoryFile(geometry->path, meshBytes(std::string(item.first) == "batched" ? 26 : 1, item.second, Fault::None));
+		}
+		for (const auto& item : {std::pair<const char*, Fault> {"missing-indices", Fault::MissingIndices},
+				 std::pair<const char*, Fault> {"mixed-slots", Fault::MixedSlots},
+				 std::pair<const char*, Fault> {"invalid-index", Fault::InvalidIndex},
+				 std::pair<const char*, Fault> {"invalid-slot", Fault::InvalidSlot}}) {
+			auto* geometry = geometries.create("MeshParticleMesh", item.first, "test/");
+			CHECK(geometry);
+			if (!geometry) return;
+			files.addMemoryFile(geometry->path, meshBytes(2, 0, item.second));
+		}
+		terrain::HeightmapCluster terrain;
+		scene::LightSettings lights;
+		lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+		scene::SkySettings sky;
+		scene::WaterSettings water;
+		scene::RendererSettings settings;
+		settings.drawSkyDome = settings.drawTerrain = false;
+		effects::EffectManager manager(templates);
+		render::LevelSources sources {files, templates, objects, geometries, terrain,
+			nullptr, lights, sky, water, "", ""};
+		sources.renderer = &settings;
+		sources.objectEffects = &manager;
+		render::LevelRenderer renderer(*gpu);
+		renderer.build(sources);
+		render::Camera camera;
+		camera.position = {0, 0, -5};
+		auto target = gpu->createOffscreenTarget(320, 180);
+		const auto frame = [&]() {
+			renderer.syncObjects();
+			auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+			renderer.draw(commands, target.color, target, camera, lights);
+			CHECK(SDL_SubmitGPUCommandBuffer(commands));
+			std::vector<uint8_t> pixels;
+			CHECK(gpu->readPixels(target, pixels));
+			return pixels;
+		};
+		const auto blank = frame();
+		const effects::MeshSprite particle {{}, {}, 1, {0.25f, 0.75f, 0.3f, 0.12f}, 1};
+		manager.setPlacedMeshes({{"single-odd", {particle}}, {"single-even", {particle}}});
+		const auto reference = frame();
+		manager.setPlacedMeshes({{"batched", {particle, particle}}});
+		const auto batched = frame();
+		CHECK(reference != blank);
+		CHECK(batched == reference);
+		std::vector<std::pair<std::string, std::vector<effects::MeshSprite>>> singles;
+		std::vector<effects::MeshSprite> many;
+		for (int i = 0; i < 27; ++i) {
+			auto sprite = particle;
+			sprite.position.x = static_cast<float>(i % 9 - 4) * 0.6f;
+			sprite.position.y = static_cast<float>(i / 9 - 1) * 0.6f;
+			sprite.size = 0.3f;
+			singles.push_back({i % 2 == 0 ? "single-odd" : "single-even", {sprite}});
+			many.push_back(sprite);
+		}
+		manager.setPlacedMeshes(std::move(singles));
+		const auto referenceMany = frame();
+		manager.setPlacedMeshes({{"batched", many}});
+		CHECK(frame() == referenceMany);
+		for (const auto& item : {std::pair<const char*, const char*> {"missing-indices", "blend indices"},
+				 std::pair<const char*, const char*> {"mixed-slots", "mixed particle slots"},
+				 std::pair<const char*, const char*> {"invalid-index", "index outside material"},
+				 std::pair<const char*, const char*> {"invalid-slot", "slot outside batch"}}) {
+			const size_t previous = renderer.stats().missingMeshNames.size();
+			manager.setPlacedMeshes({{item.first, {particle}}});
+			CHECK(frame() == blank);
+			const auto& missing = renderer.stats().missingMeshNames;
+			CHECK(missing.size() == previous + 1);
+			if (missing.size() == previous + 1) CHECK(missing.back().find(item.second) != std::string::npos);
+		}
+		gpu->releaseTarget(target);
+	}
+	SDL_Quit();
+}
+
 // Explicit opt-in: real SDL GPU offscreen draw/readback, never a window.
-// The background is rendered before the missile geometry is requested, so
-// this also exercises resources first encountered during syncObjects().
+TEST(Vehicles_AdsSpikesPixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			Garage g(gameDir(), mod, true);
+			CHECK(g.loaded);
+			auto* spike = g.templates.find("em_ActiveDef_shield_Spikes");
+			CHECK(spike);
+			if (!spike) continue;
+			const auto authored = effects::ParticleTemplate::fromTemplate(*spike);
+			CHECK(authored.particleMaxSize == -1 && authored.directionalScale == 3);
+			effects::EffectManager manager(g.templates);
+			CHECK(manager.spawn(spike->name(), {}));
+			for (int i = 0; i < 30; ++i) manager.update(1 / 30.0f);
+			size_t meshCount = 0;
+			manager.forEachMeshGroup([&](const std::string& name, bool additive,
+				const std::vector<effects::MeshSprite>& list) {
+				CHECK(name == "mp_smokespike" && additive);
+				for (const auto& mesh : list) {
+					CHECK(mesh.size == -1 && mesh.stretch > 0 && mesh.color[3] > 0);
+					++meshCount;
+				}
+			});
+			CHECK(meshCount > 20);
+			world::ObjectManager noObjects;
+			terrain::HeightmapCluster noTerrain;
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			render::LevelSources sources {g.files, g.templates, noObjects, g.geometries, noTerrain,
+				nullptr, lights, sky, water, "", ""};
+			sources.renderer = &settings;
+			render::LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			render::Camera camera;
+			camera.position = {0, 4, -18};
+			camera.pitch = -std::atan2(4.0f, 18.0f);
+			auto target = gpu->createOffscreenTarget(960, 540);
+			const auto frame = [&]() {
+				renderer.syncObjects();
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer.draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				return pixels;
+			};
+			const auto blank = frame();
+			sources.objectEffects = &manager;
+			const auto active = frame();
+			size_t greenPixels = 0;
+			for (size_t i = 0; i + 3 < active.size(); i += 4) {
+				const int red = int(active[i]) - int(blank[i]);
+				const int green = int(active[i + 1]) - int(blank[i + 1]);
+				const int blue = int(active[i + 2]) - int(blank[i + 2]);
+				if (green > 8 && green > red && green > blue) ++greenPixels;
+			}
+			const std::string label = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
+			std::fprintf(stderr, "  %s ADS: %zu mesh particles, %zu green spike pixels\n",
+				label.c_str(), meshCount, greenPixels);
+			CHECK(greenPixels > 100);
+			CHECK(render::writePng(std::string(output) + "/" + label + "-ads-spikes.png",
+				target.width, target.height, active));
+			sources.objectEffects = nullptr;
+			CHECK(frame() == blank);
+			gpu->releaseTarget(target);
+		}
+	}
+	SDL_Quit();
+}
+
 TEST(Vehicles_ProjectilePixelsOptIn)
 {
 	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
@@ -7778,5 +8253,32 @@ TEST(Vehicles_ShepherdRotorRunsOnAfterThePilotBails)
 		} else {
 			CHECK(running == 0 && rpm == 0);
 		}
+	}
+}
+
+// A helicopter engine's sound follows its collective, not its rotor's steady rpm
+// (0x0064cb80: clamp(2 aoa, -0.5, 0.5) + 0.5): the gunships' and transports'
+// pitch and volume envelopes (authored over 0.42..0.75) move with the throttle.
+TEST(Vehicles_HelicopterEngineSoundFollowsTheCollective)
+{
+	if (!gameDir()) return;
+	for (const char* name : {"us_ag", "as_ag", "eu_at", "as_at"}) {
+		Garage g(gameDir());
+		if (!g.loaded) return;
+		const uint32_t ag = g.start(name, {0, 3, 8});
+		CHECK(g.enter(ag));
+		const game::Vehicle* v = g.world->playerVehicleState();
+		CHECK(v && !v->engines().empty());
+		const auto& rotor = v->engines().front(); // the one with the Idle / Rpm2 sounds
+		game::SoldierInput input;
+		input.throttle = 1;
+		g.drive(input, 4);
+		const float up = rotor.audioValue();
+		input.throttle = -1;
+		g.drive(input, 2);
+		const float down = rotor.audioValue();
+		std::fprintf(stderr, "  %s: audio value %.3f climbing, %.3f descending\n", name, up, down);
+		CHECK(up >= 0 && up <= 1 && down >= 0 && down <= 1);
+		CHECK(std::fabs(up - down) > 0.1f); // the gunships' main engine (negative axis, canReverse 0) opens on throttle down
 	}
 }

@@ -154,6 +154,9 @@ struct LevelSources {
 	// The pose of an object's skeleton from the game's animation systems
 	// (world matrices per node); false to play the preview animation.
 	std::function<bool(uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world)> skeletonPose;
+	// Object slot 0x8c: the collision-based radius including its children.
+	// Zero means no physics body; use the render mesh's radius instead.
+	std::function<float(uint32_t object)> objectRadius;
 	// All mesh-part transforms of an object (relative to it) when the game
 	// places them itself (held weapons); false otherwise.
 	std::function<bool(uint32_t object, std::vector<anim::Matrix>& parts)> partTransforms;
@@ -310,6 +313,10 @@ public:
 		const Camera& camera, const scene::LightSettings& lights);
 
 private:
+	struct IndexRange {
+		uint32_t firstIndex = 0;
+		uint32_t indexCount = 0;
+	};
 	struct Submesh {
 		uint32_t firstIndex;
 		uint32_t indexCount;
@@ -317,6 +324,7 @@ private:
 		SDL_GPUTexture* texture;
 		float alphaReference;
 		int rig = -1; // skinned meshes: the bone set this material uses
+		std::vector<IndexRange> particleSlots {}; // indices per pre-batched particle slot
 		SDL_GPUTexture* detail = nullptr; // static mesh layers, null if unused
 		SDL_GPUTexture* dirt = nullptr;
 		SDL_GPUTexture* crack = nullptr;
@@ -413,6 +421,7 @@ private:
 		std::vector<std::vector<RigBone>> rigs;
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUBuffer* indices = nullptr;
+		uint32_t particleSlotCount = 0;
 		std::vector<Submesh> submeshes;
 	};
 	struct Instance {
@@ -430,7 +439,7 @@ private:
 		bool wornKit = false; // posed only by its wearer's skeleton (a kit has none of its own)
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
-		// object's +0x2c), its object's origin, its cull radius (the mesh's
+		// object's +0x2c), its object's origin, its cull radius (the object's
 		// radius x cullRadiusScale; below 0 not yet read) and whether its
 		// template is a Soldier or PlayerControlObject (+0x144's scale).
 		float distanceFade = 1;

@@ -493,7 +493,7 @@ struct ParticleView {
 struct MeshSprite {
 	Vec3 position;
 	Mat3 rotation;
-	float size;
+	float size; // signed mesh scale (negative values mirror the geometry)
 	std::array<float, 4> color;
 	float stretch = 1; // along its z (directionalScale)
 };

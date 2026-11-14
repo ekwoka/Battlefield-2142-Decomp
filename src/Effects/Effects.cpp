@@ -2069,7 +2069,8 @@ void EffectManager::collectMeshes(const Emitter& emitter, std::vector<MeshSprite
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
 		const float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f), 0.0f, 1.0f);
 		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
-		if (size <= 0 || alpha <= 0) {
+		// Retail 0x10135b40..0x10135b58 applies signed scale; ADS uses -1.
+		if (size == 0 || alpha <= 0) {
 			continue;
 		}
 		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;

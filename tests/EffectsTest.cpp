@@ -1181,6 +1181,41 @@ TEST(Effects_MeshParticlesDirectionalScale)
 	CHECK(checked > 0);
 }
 
+TEST(Effects_MeshParticlesSignedScale)
+{
+	for (const float scale : {-1.0f, 0.0f, 2.0f}) {
+		world::ObjectTemplateManager templates;
+		templates.registerType(3, "MeshParticleSystem");
+		auto* spike = templates.create("MeshParticleSystem", "mp_spike");
+		spike->setGeometry("mp_smokespike");
+		spike->settings()["emitFrequency"] = "33";
+		spike->settings()["emitTime"] = "2";
+		spike->settings()["timeToLive"] = "3";
+		spike->settings()["emitSpeed"] = "10";
+		spike->settings()["gravity"] = "0";
+		spike->settings()["particleMaxSize"] = std::to_string(scale);
+		spike->settings()["randomSize"] = "0";
+		spike->settings()["sizeGraph"] = "0/0/0/1";
+		spike->settings()["transparencyGraph"] = "0/-0.25/0.25/0";
+		spike->settings()["directionalScale"] = "3";
+		spike->settings()["alignRotationToSpeed"] = "1";
+		effects::EffectManager manager(templates);
+		CHECK(manager.spawn("mp_spike", {}));
+		manager.update(0.5f);
+		size_t drawn = 0;
+		manager.forEachMeshGroup([&](const std::string&, bool, const std::vector<effects::MeshSprite>& list) {
+			for (const auto& mesh : list) {
+				CHECK(mesh.size == scale);
+				CHECK(mesh.color[3] > 0);
+				CHECK(std::fabs(mesh.stretch - 30) < 1e-4f);
+				++drawn;
+			}
+		});
+		CHECK(!manager.emitterList().front()->particles().empty());
+		CHECK(scale == 0 ? drawn == 0 : drawn > 0);
+	}
+}
+
 // A mesh particle's turn (RendDX9 0x10144d90, 0x101357c0): one random
 // start for the three axes, a speed of rotationSpeed + randomRotationSpeed
 // x a random with its sign, scaled by the rotation graph; isStaticSystem

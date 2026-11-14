@@ -23,6 +23,9 @@
 #include "Main/HostedGame.h"
 #include "Net/GameClient.h"
 #include "Net/GhostLayout.h"
+#ifdef BF2142_RENDER_TESTS
+#include "Render/LevelRenderer.h"
+#endif
 #include "TitanLevel.h"
 
 #include <algorithm>
@@ -3020,6 +3023,7 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 			if (info.seat < 0 || static_cast<size_t>(info.seat) >= seats.size()) continue;
 			const auto seat = seats[info.seat];
 			CHECK(seat.podLauncher && !seat.camera.empty());
+			CHECK(!seat.kitWeapon()); // its own launcher and camera, not the soldier's gun
 			// An occupied array cannot accept a second soldier.
 			const int other = level.world->addPlayer("Other pod rider", team, false);
 			CHECK(level.world->spawnSoldier(other));
@@ -3065,12 +3069,17 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 			level.world->setInput(player, input);
 			level.world->tick(1 / 30.0f);
 			CHECK(level.world->ridingPod(player));
+			camera.tick(1 / 30.0f);
+			PlayerCamera::View podView;
+			CHECK(camera.view(podView, 16.0f / 9));
 			CHECK(std::none_of(level.world->projectiles().begin(), level.world->projectiles().end(), [](const auto& p) {
 				return p.settings && p.settings->name == "eu_pod0";
 			}));
 			const auto pods = level.world->pods();
 			CHECK(pods.size() == 1);
 			if (pods.size() == 1) {
+				const auto podSeats = level.world->vehicleSeats(pods.front().object);
+				CHECK(podSeats.size() == 1 && !podSeats.front().cameras.empty());
 				const auto v = pods[0].velocity;
 				const float speed = std::sqrt(physics::lengthSquared(v));
 				CHECK(speed > 90);
@@ -3080,6 +3089,94 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 		}
 	}
 }
+
+#ifdef BF2142_RENDER_TESTS
+TEST(Titan_PodStrafeStaysScreenRelativeAfterTurning)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		// Coasting, A, D, S, W: retail's ForceObjects (0x0062c920) push force x
+		// input, clamped to +-maxForceOnObject, so S's -1 on eu_pod_FOFWD
+		// (35 / 35) thrusts the pod backwards along its own hull.
+		const float inputs[5][2] = {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+		physics::Vec3 velocity[5], right, ahead;
+		int trial = 0;
+		for (const auto& [strafe, throttle] : inputs) {
+			TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) return;
+			CHECK(level.world->spawnPlayer(1) != nullptr);
+			const int player = level.world->localPlayer();
+			game::GameWorld::PlayerInfo me;
+			CHECK(level.world->playerInfo(player, me));
+			const auto* titan = level.titan(1);
+			CHECK(titan);
+			if (!titan) return;
+			CHECK(level.world->setSoldierPosition(me.soldier, titan->position + physics::Vec3 {30, 10, 0}));
+			physics::Vec3 entry;
+			float radius = 0;
+			CHECK(level.world->titanPodEntry(player, entry, radius));
+			CHECK(level.world->setSoldierPosition(me.soldier, entry - physics::Vec3 {0, 1, 0}));
+			game::SoldierInput input;
+			input.use = true;
+			level.world->setInput(player, input);
+			level.run(0.1f);
+			level.world->setInput(player, {});
+			CHECK(level.world->launchPod(player));
+			CHECK(level.world->pods().size() == 1);
+			if (level.world->pods().size() != 1) return;
+			const uint32_t pod = level.world->pods().front().object;
+			const float launchYaw = level.objects.find(pod)->rotation().x;
+			CHECK(level.world->setBodyVelocity(pod, {0, 15, 0}));
+			for (int tick = 0; tick < 30; ++tick) {
+				input = {};
+				input.turn = 5;
+				input.aimPitch = 2.5f * (tick + 1);
+				level.world->setInput(player, input);
+				level.run(1 / 30.0f);
+			}
+			CHECK(std::fabs(std::remainder(level.objects.find(pod)->rotation().x - launchYaw, 360.0f)) > 1);
+			world::Vec3 offset, mountTurn;
+			CHECK(level.world->partPose(pod, "eu_pod_CameraMount", offset, mountTurn));
+			CHECK(mountTurn.y < -1);
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera camera(*level.world, systems, nullptr);
+			camera.tick(1 / 30.0f);
+			PlayerCamera::View eye;
+			CHECK(camera.view(eye, 16.0f / 9));
+			if (!camera.view(eye, 16.0f / 9)) return;
+			render::Camera rendered;
+			rendered.position = {eye.position[0], eye.position[1], eye.position[2]};
+			rendered.yaw = eye.yaw; rendered.pitch = eye.pitch; rendered.roll = eye.roll;
+			const auto screen = rendered.view();
+			if (trial == 0) {
+				right = {screen.at(0, 0), screen.at(1, 0), screen.at(2, 0)};
+				const world::Vec3 hull = level.objects.find(pod)->rotation();
+				ahead = physics::Mat3::fromYawPitchRoll({hull.x, hull.y, hull.z}).rows[2];
+			}
+			input.turn = 0;
+			input.strafe = strafe;
+			input.throttle = throttle;
+			level.world->setInput(player, input);
+			level.run(0.1f);
+			CHECK(level.world->ridingPod(player) && level.world->pods().size() == 1);
+			if (level.world->pods().size() != 1) return;
+			velocity[trial++] = level.world->pods().front().velocity;
+		}
+		const float left = physics::dot(velocity[1] - velocity[0], right);
+		const float rightward = physics::dot(velocity[2] - velocity[0], right);
+		const float back = physics::dot(velocity[3] - velocity[0], ahead);
+		const float forward = physics::dot(velocity[4] - velocity[0], ahead);
+		std::fprintf(stderr, "  %s: A %.3f, D %.3f m/s along screen-right; S %.3f, W %.3f along the hull's forward\n",
+			mod, left, rightward, back, forward);
+		CHECK(left < -0.5f);
+		CHECK(rightward > 0.5f);
+		CHECK(back < -0.5f);
+		CHECK(forward > 0.5f);
+	}
+}
+#endif
 
 // Standing still on a moving Titan's deck: the soldier moves with it (its
 // measured velocity is the deck's) but its animations see no movement, as

@@ -77,6 +77,84 @@ TEST(Weapons_FirePulseIncludesUnlimitedAmmoAndRejectsCooldown)
 	CHECK(!gun.tick(1 / 30.0f, false) && !gun.firedThisTick());
 }
 
+TEST(Weapons_IncrementalReloadConsumesOneReservePerRound)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 6;
+	settings.nrOfMags = 3;
+	settings.reloadAmount = 1;
+	settings.reloadTime = 0.8f;
+	settings.firstShotExtraTime = 0.2f;
+	settings.lastShotExtraTime = 0.4f;
+	game::FireArm gun(settings);
+	for (int i = 0; i < 80 && gun.roundsInMag() > 0; ++i) {
+		gun.tick(1 / 30.0f, true);
+	}
+	CHECK(gun.roundsInMag() == 0);
+	gun.tick(1 / 30.0f, false);
+	CHECK(gun.startReload());
+	CHECK((gun.animationMessages() & 2) != 0);
+	for (int i = 0; i < 30; ++i) {
+		gun.tick(1 / 30.0f, false);
+	}
+	CHECK(gun.roundsInMag() == 1 && gun.magsLeft() == 2);
+	for (int i = 0; i < 100 && gun.reloading(); ++i) {
+		gun.tick(1 / 30.0f, false);
+	}
+	CHECK(!gun.reloading() && gun.roundsInMag() == 3 && gun.magsLeft() == 0);
+	CHECK((gun.animationMessages() & 2) == 0);
+}
+
+TEST(Weapons_MinimumAutoReloadDelayIsSeparateFromReloadTime)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 1;
+	settings.nrOfMags = -1;
+	settings.autoReload = true;
+	settings.minimumReloadTicks = 12;
+	settings.reloadTime = 0.2f;
+	game::FireArm gun(settings);
+	CHECK(gun.tick(1 / 30.0f, true));
+	CHECK(!gun.reloading());
+	for (int i = 0; i < 11; ++i) {
+		gun.tick(1 / 30.0f, false);
+		CHECK(!gun.reloading());
+	}
+	gun.tick(1 / 30.0f, false);
+	CHECK(gun.reloading());
+}
+
+TEST(Weapons_ShiftAndHeldFireAnimation)
+{
+	game::FireArmSettings tool;
+	tool.magSize = -1;
+	tool.loopingFire = true;
+	game::FireArm repair(tool);
+	CHECK(repair.tick(1 / 30.0f, true));
+	CHECK((repair.animationMessages() & 1) != 0 && repair.animationPulses() == 0);
+	repair.tick(1 / 30.0f, true);
+	CHECK((repair.animationMessages() & 1) != 0);
+	repair.tick(1 / 30.0f, false);
+	CHECK((repair.animationMessages() & 1) == 0);
+
+	game::FireArmSettings bolt;
+	bolt.magSize = 2;
+	bolt.useShiftAnimation = true;
+	bolt.shiftDelayTicks = 4;
+	game::FireArm rifle(bolt);
+	CHECK(rifle.tick(1 / 30.0f, true));
+	bool shifted = false;
+	int shots = 1;
+	for (int i = 0; i < 10; ++i) {
+		shots += rifle.tick(1 / 30.0f, true) ? 1 : 0;
+		if (rifle.animationPulses() & 32) {
+			shifted = true;
+			CHECK(shots == 1);
+		}
+	}
+	CHECK(shifted && shots == 2);
+}
+
 TEST(Weapons_DamageFallsOffWithDistance)
 {
 	game::ProjectileSettings rifle; // eu_ar_rifleProjectile
@@ -1232,8 +1310,7 @@ TEST(Weapons_PulseMeterScan)
 
 // A ThrownFireComp's round (0x005e5a10 -> 0x005e4c80): decided on the
 // press, it leaves fire.pullbackTime + fire.fireLaunchDelay later (the frag
-// grenade's 1 + 0.39 s: 30 + 12 ticks), the magazine spent at once; other
-// fire components fire at once.
+// grenade's 1 + 0.39 s: 30 + 11 ticks), the magazine spent at launch.
 TEST(Weapons_ThrownRoundsWaitForThePullBack)
 {
 	world::ObjectTemplateManager templates;
@@ -1245,18 +1322,22 @@ TEST(Weapons_ThrownRoundsWaitForThePullBack)
 	frag->settings()["ammo.magSize"] = "1";
 	frag->settings()["ammo.nrOfMags"] = "2";
 	const game::FireArmSettings settings = game::FireArmSettings::fromTemplate(*frag);
-	CHECK(settings.thrown && settings.pullbackTicks == 30 && settings.launchDelayTicks == 12);
+	CHECK(settings.thrown && settings.pullbackTicks == 30 && settings.launchDelayTicks == 11);
 	game::FireArm grenade(settings);
 	int tick = 0, left = -1;
 	CHECK(!grenade.tick(1 / 30.0f, true));
-	CHECK(grenade.throwing() && grenade.roundsInMag() == 0);
+	CHECK(grenade.throwing() && grenade.roundsInMag() == 1);
+	CHECK(grenade.animationPulses() == 16 && grenade.fireSoundHeld());
 	for (tick = 1; tick < 100; ++tick) {
 		if (grenade.tick(1 / 30.0f, false)) {
 			left = tick;
 			break;
 		}
+		CHECK(grenade.animationPulses() == (tick == 30 ? 1u : 0u));
+		CHECK(grenade.roundsInMag() == 1 && !grenade.fireSoundThisTick());
 	}
-	CHECK(left == 42 && !grenade.throwing());
+	CHECK(left == 41 && !grenade.throwing() && grenade.roundsInMag() == 0);
+	CHECK(grenade.animationPulses() == 0 && grenade.fireSoundThisTick() && !grenade.fireSoundHeld());
 	// The default pull-back is 0.2 s (the setter 0x005e4c40's template default).
 	world::ObjectTemplate* hub = templates.create("GenericFireArm", "Unl_Hub_Ammo");
 	hub->components().push_back("ThrownFireComp");
@@ -1339,8 +1420,8 @@ TEST(Weapons_SoldierDeviationSteadiesBackToZero)
 // The underarm (soft) throw (ThrownFireComp with fire.altFireInput,
 // 0x005e4d80 / 0x005e4eb0 / 0x005e5720): the alternate press starts the
 // throw, the timer waits while it is held, the power is min(1, ticks held
-// / 30) and the round leaves pull-back + launch delay after the release at
-// the speed x the power; the primary press throws at full power.
+// / 30). Pull-back time elapses during the hold; launch delay starts once
+// the pull-back is through and the button released.
 TEST(Weapons_SoftThrowScalesThePower)
 {
 	world::ObjectTemplateManager templates;
@@ -1367,7 +1448,7 @@ TEST(Weapons_SoftThrowScalesThePower)
 	};
 	game::FireArm a(settings);
 	const int after = throwFor(a, 16);
-	CHECK(after == 6);                         // the pull-back after the release
+	CHECK(after == 0);                         // pull-back already elapsed during the hold
 	CHECK(std::fabs(a.throwPower() - 0.5f) < 1e-4f); // 15 ticks held after the press
 	game::FireArm b(settings);
 	throwFor(b, 60);
@@ -1379,10 +1460,53 @@ TEST(Weapons_SoftThrowScalesThePower)
 		++ticks;
 	}
 	CHECK(c.throwPower() == 1 && ticks == 5);
+	auto delayed = settings;
+	delayed.launchDelayTicks = 12;
+	game::FireArm e(delayed);
+	CHECK(throwFor(e, 16) == 12); // only the launch delay remains after a long hold
 	// No altFireInput: the alternate does nothing.
 	frag->settings().erase("fire.altFireInput");
 	game::FireArm d(game::FireArmSettings::fromTemplate(*frag));
 	CHECK(!d.tick(1 / 30.0f, false, true) && !d.throwing());
+}
+
+TEST(Weapons_ChargedShotStartsBeforeItLaunches)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	auto* t = templates.create("GenericFireArm", "charged");
+	t->components().push_back("SingleFireComp");
+	t->settings()["fire.fireLaunchDelay"] = "2.5";
+	t->settings()["fire.addFireRate.list"] = "0";
+	t->settings()["ammo.magSize"] = "1";
+	const auto settings = game::FireArmSettings::fromTemplate(*t);
+	game::FireArm arm(settings);
+	CHECK(!arm.tick(1 / 30.0f, true));
+	CHECK(arm.animationPulses() == 1 && arm.fireSoundThisTick());
+	CHECK(arm.roundsInMag() == 1 && !arm.reloading() && arm.zoomBusy());
+	CHECK(!arm.startReload());
+	for (int i = 1; i < 75; ++i) {
+		CHECK(!arm.tick(1 / 30.0f, false));
+		CHECK(!arm.fireSoundThisTick() && arm.animationPulses() == 0 && arm.roundsInMag() == 1);
+	}
+	CHECK(arm.tick(1 / 30.0f, false));
+	CHECK(arm.roundsInMag() == 0 && !arm.reloading());
+	CHECK(!arm.fireSoundThisTick() && arm.animationPulses() == 0);
+	CHECK(arm.startReload());
+	// A rejected press during deployment must not start a charge or sound.
+	auto deploying = settings;
+	deploying.delayToUseTicks = 18;
+	game::FireArm busy(deploying);
+	busy.enable(true);
+	CHECK(!busy.tick(1 / 30.0f, true) && !busy.fireSoundThisTick());
+	for (int i = 0; i < 18; ++i) {
+		busy.tick(1 / 30.0f, false);
+	}
+	CHECK(!busy.tick(1 / 30.0f, true) && busy.fireSoundThisTick());
+	busy.enable(true); // deselect/reselect drops the pending launch
+	for (int i = 0; i < 80; ++i) {
+		CHECK(!busy.tick(1 / 30.0f, false) && !busy.fireSoundThisTick());
+	}
 }
 
 // DefaultPenetrateComp (0x005eaca0, called from the round's 0x005b54e0):

@@ -435,12 +435,13 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.magSize = static_cast<int>(number(t, "ammo.magSize", static_cast<float>(s.magSize)));
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
-	// Camera-guided launchers author a minimum reload interval. Limit this
-	// interpretation to those launchers: other weapons also use the field,
-	// but its retail semantics there have not been established.
-	if (number(t, "zoom.useProjectileCamera", 0) != 0) {
-		s.reloadTime = std::max(s.reloadTime, number(t, "ammo.minimumTimeUntilReload", 0));
-	}
+	s.minimumReloadTicks = static_cast<int>(number(t, "ammo.minimumTimeUntilReload", 0) * 30);
+	s.reloadAmount = std::max(0, static_cast<int>(number(t, "ammo.reloadAmount", 0)));
+	s.firstShotExtraTime = std::max(0.0f, number(t, "ammo.firstShotExtraTime", 0));
+	s.lastShotExtraTime = std::max(0.0f, number(t, "ammo.lastShotExtraTime", 0));
+	s.loopingFire = number(t, "animation.loopingFire", 0) != 0;
+	s.useShiftAnimation = number(t, "animation.useShiftAnimation", 0) != 0;
+	s.shiftDelayTicks = std::max(0, static_cast<int>(number(t, "animation.shiftDelay", 0) * 30));
 	s.batchSize = std::max(1, static_cast<int>(number(t, "fire.batchSize", 1)));
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 1) != 0;
 	s.delayToUseTicks = static_cast<int>(std::nearbyint(number(t, "delayToUse", 0) * 30));
@@ -489,17 +490,26 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 			})) {
 			s.thrown = true;
 		}
+		if (c.size() == 14 && std::equal(c.begin(), c.end(), "SingleFireComp", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			s.singleFire = true;
+		}
+	}
+	if (s.thrown || s.singleFire) {
+		s.launchDelayTicks = static_cast<int>(number(t, "fire.fireLaunchDelay", 0) * 30);
 	}
 	if (s.thrown) {
-		s.pullbackTicks = static_cast<int>(std::nearbyint(number(t, "fire.pullbackTime", 0.2f) * 30));
-		s.launchDelayTicks = static_cast<int>(std::nearbyint(number(t, "fire.fireLaunchDelay", 0) * 30));
+		s.pullbackTicks = static_cast<int>(number(t, "fire.pullbackTime", 0.2f) * 30);
 		const auto alt = t.settings().find("fire.altFireInput");
 		s.softThrow = alt != t.settings().end() && !alt->second.empty();
-		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
 		if (const auto turn = t.settings().find("fire.projectileStartRotation"); turn != t.settings().end()) {
 			std::sscanf(turn->second.c_str(), "%f/%f/%f", &s.startRotation.x, &s.startRotation.y, &s.startRotation.z);
 		}
 		s.randomRotationSpeed = number(t, "fire.randomRotationSpeed", 0);
+	}
+	if (s.thrown || s.singleFire) {
+		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
 	}
 	s.allowReloadWithFullMag = number(t, "ammo.allowReloadWithFullMag", 0) != 0;
 	if (const auto link = t.settings().find("ammo.magLinkWeapon"); link != t.settings().end()) {
@@ -538,20 +548,26 @@ void FireArm::enable(bool soldier)
 {
 	m_readyIn = m_settings.delayToUseTicks;
 	if (soldier || !m_settings.reloadWithoutPlayer) {
-		m_reloadLeft = 0;
+		dropReload();
 	}
 	// canReload (0x005f4140): not full (allowReloadWithFullMag aside) and
 	// a magazine to take, or magazines without end; a ReplenishingAmmoComp's
 	// (0x005d79a0) the battery too.
 	if (m_reloadLeft <= 0 && m_settings.autoReload && m_settings.instantReloadOnEnable && m_settings.magSize > 0
 		&& m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
-		m_rounds = m_settings.magSize;
+		m_rounds = m_settings.reloadAmount > 0 ? 1 : m_settings.magSize;
 		if (m_settings.nrOfMags >= 0) {
 			--m_mags;
 		}
 	}
 	m_pending = false;
 	m_burstLeft = 0;
+	m_launchIn = m_pullbackIn = -1;
+	m_soft = m_uncocked = false;
+	m_animationPulses = 0;
+	m_animationFireHeld = m_shiftPending = false;
+	m_shiftIn = 0;
+	m_fireSoundThisTick = m_firedThisTick = false;
 	m_hidden = false; // drawn (0x005c1650 sets flag 2)
 	m_showIn = -1;
 }
@@ -571,8 +587,30 @@ bool FireArm::batteryAllowsReload() const
 
 void FireArm::reloadStarted()
 {
-	if (m_settings.thrown) {
+	if (m_settings.thrown || m_settings.singleFire) {
 		m_showIn = m_settings.showAfterReloadTicks; // 0x005e49d0
+	}
+	if (m_settings.thrown) {
+		m_uncocked = false; // ThrownAnimationComp::reload, 0x005e1410
+	}
+}
+
+void FireArm::beginReload()
+{
+	reloadStarted();
+	m_reloadFilled = false;
+	if (m_settings.reloadAmount > 0) {
+		int rounds = std::max(0, m_settings.magSize - m_rounds);
+		if (m_settings.nrOfMags >= 0) {
+			rounds = std::min(rounds, m_mags);
+		}
+		m_reloadStageLeft = m_settings.reloadTime + m_settings.firstShotExtraTime;
+		m_reloadLeft = rounds * m_settings.reloadTime + m_settings.firstShotExtraTime + m_settings.lastShotExtraTime;
+		m_reloadSoundEvent = 4;
+	} else {
+		m_reloadStageLeft = 0;
+		m_reloadLeft = m_settings.reloadTime;
+		m_reloadSoundEvent = 3;
 	}
 }
 
@@ -592,14 +630,13 @@ bool FireArm::selectable() const
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_busyUntilRelease || m_settings.magSize < 0
+	if (m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
+		|| m_busyUntilRelease || m_shiftPending || m_shiftIn > 0 || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
 		return false;
 	}
-	reloadStarted();
-	m_reloadLeft = m_settings.reloadTime;
-	m_reloadFilled = false;
+	beginReload();
 	m_pending = false;
 	m_burstLeft = 0;
 	return true;
@@ -804,7 +841,7 @@ bool FireArm::addMagazine()
 	}
 	++m_mags;
 	if (m_rounds <= 0 && m_reloadLeft <= 0) {
-		m_rounds = m_settings.magSize;
+		m_rounds = m_settings.reloadAmount > 0 ? 1 : m_settings.magSize;
 		--m_mags;
 	}
 	return true;
@@ -842,6 +879,11 @@ bool FireArm::resupply(float percent, uint32_t now)
 
 bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 {
+	m_animationPulses = 0;
+	if (!trigger) {
+		m_animationFireHeld = false;
+	}
+	m_fireSoundThisTick = m_fireSoundHeld = false;
 	const bool altPressed = altTrigger && !m_altWas;
 	m_altWas = altTrigger;
 	// The pulse meter's scan runs on (0x005d99e0, after the ammo's update).
@@ -857,41 +899,38 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	if (m_showIn >= 0 && m_showIn-- == 0) {
 		m_hidden = false;
 	}
-	if (m_launchIn >= 0 && m_soft) {
-		// The soft throw held: the power grows, the timer waits.
+	if (m_launchIn >= 0) {
 		fire(seconds, false);
-		if (altTrigger) {
+		m_triggerWas = trigger;
+		if (m_soft && altTrigger) {
 			m_softTicks = std::min(m_softTicks + 1, 30);
 			m_power = static_cast<float>(m_softTicks) / 30;
-		} else {
+		} else if (m_soft) {
 			m_soft = false;
 		}
-	} else if (m_launchIn >= 0) {
-		// 0x005e4c80: the thrown round leaves when its waits are through;
-		// meanwhile the component is busy (no new round).
-		fire(seconds, false);
-		if (m_launchIn == 0) {
-			m_launchIn = -1;
-			fired = true;
-		} else {
+		// Retail timestamps the pull-back at the press, not the release.
+		if (m_pullbackIn >= 0) {
+			if (m_pullbackIn > 0) {
+				--m_pullbackIn;
+			}
+			if (m_pullbackIn == 0 && !m_soft) {
+				m_pullbackIn = -1;
+				m_animationPulses |= 1; // state 3: the uncocked throw
+			}
+		} else if (!m_soft && m_launchIn > 0) {
 			--m_launchIn;
+		}
+		if (m_pullbackIn < 0 && !m_soft && m_launchIn == 0) {
+			m_launchIn = -1;
+			fired = launch();
+			// A charged SingleFireComp already played its sound at state 3.
+			if (m_settings.thrown) {
+				m_fireSoundThisTick = true;
+			}
 		}
 	} else {
 		const bool soft = m_settings.softThrow && altPressed && !trigger;
-		fired = fire(seconds, trigger || soft);
-		if (fired && m_settings.thrown) {
-			m_power = 1;
-			if (soft) {
-				m_soft = true;
-				m_softTicks = 0;
-				m_power = 0;
-				m_launchIn = std::max(m_settings.pullbackTicks + m_settings.launchDelayTicks - 1, 0);
-				fired = false;
-			} else if (m_settings.pullbackTicks + m_settings.launchDelayTicks > 0) {
-				m_launchIn = m_settings.pullbackTicks + m_settings.launchDelayTicks - 1;
-				fired = false;
-			}
-		}
+		fired = fire(seconds, trigger || soft, soft);
 	}
 	if (fired && m_settings.pulseScan) {
 		m_scanning = true; // 0x005d9cf0
@@ -903,7 +942,7 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	return fired;
 }
 
-bool FireArm::fire(float seconds, bool trigger)
+bool FireArm::fire(float seconds, bool trigger, bool soft)
 {
 	const bool pressed = trigger && !m_triggerWas;
 	m_triggerWas = trigger;
@@ -919,12 +958,23 @@ bool FireArm::fire(float seconds, bool trigger)
 	// the component's update. So a held trigger never cools.
 	const bool inRoundInterval = m_cooldown > 0;
 	m_sinceFire += seconds;
+	if (m_reloadIn > 0) {
+		--m_reloadIn;
+	}
 	if (m_cooldown > 0) {
 		--m_cooldown;
+	}
+	if (m_shiftIn > 0) {
+		--m_shiftIn;
+	} else if (m_shiftPending && m_cooldown <= 0 && m_reloadLeft <= 0) {
+		m_shiftPending = false;
+		m_shiftIn = m_settings.shiftDelayTicks;
+		m_animationPulses |= 32;
 	}
 	if (m_reloadLeft > 0 || overheated()) {
 		m_pending = false;
 		m_burstLeft = 0;
+		m_animationFireHeld = false;
 	}
 	if (mode == kFireSingle) {
 		trigger = m_pending;
@@ -952,6 +1002,34 @@ bool FireArm::fire(float seconds, bool trigger)
 	}
 	if (m_reloadLeft > 0) {
 		m_reloadLeft -= seconds;
+		if (m_settings.reloadAmount > 0) {
+			if (m_reloadStageLeft > 0) {
+				m_reloadStageLeft -= seconds;
+				if (!m_reloadFilled && m_reloadStageLeft <= m_settings.reloadTime * (1 - m_settings.changeMagAt) + 1e-4f
+					&& m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+					m_reloadFilled = true;
+					++m_rounds;
+					if (m_settings.nrOfMags >= 0) {
+						--m_mags;
+					}
+				}
+				if (m_reloadStageLeft <= 1e-4f) {
+					if (m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+						m_reloadStageLeft = m_settings.reloadTime;
+						m_reloadLeft = std::max(m_reloadLeft, m_settings.reloadTime + m_settings.lastShotExtraTime);
+						m_reloadFilled = false;
+						m_reloadSoundEvent = 5;
+					} else {
+						m_reloadStageLeft = 0;
+						m_reloadSoundEvent = 6;
+					}
+				}
+			}
+			if (m_reloadLeft <= 1e-4f) {
+				m_reloadLeft = m_reloadStageLeft = 0;
+			}
+			return false;
+		}
 		// The swap at changeMagAt of the reload (0x005f4830 / 0x005f3c40),
 		// busy on to its end.
 		if (!m_reloadFilled && m_reloadLeft <= m_settings.reloadTime * (1 - m_settings.changeMagAt) + 1e-4f) {
@@ -991,11 +1069,9 @@ bool FireArm::fire(float seconds, bool trigger)
 		// the firearm's update (0x005c58a0, slot 0xc8) turns into the
 		// reload (0x005c0f40). A magazine given to an empty gun (a resupply)
 		// is so taken in.
-		if (m_settings.autoReload && m_cooldown <= 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
+		if (m_settings.autoReload && m_cooldown <= 0 && m_reloadIn <= 0 && m_launchIn < 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
 			&& m_settings.reloadTime > 0 && batteryAllowsReload()) {
-			reloadStarted();
-			m_reloadLeft = m_settings.reloadTime;
-			m_reloadFilled = false;
+			beginReload();
 			return false;
 		}
 	}
@@ -1020,9 +1096,47 @@ bool FireArm::fire(float seconds, bool trigger)
 			return false;
 		}
 	}
-	if (!trigger || m_cooldown > 0 || (!unlimited && m_rounds <= 0)) {
+	if (!trigger || m_launchIn >= 0 || m_cooldown > 0 || m_shiftPending || m_shiftIn > 0 || (!unlimited && m_rounds <= 0)) {
 		return false;
 	}
+	m_pending = false;
+	m_fireSoundThisTick = true;
+	if (m_settings.thrown) {
+		m_uncocked = true;
+		m_animationPulses = 16; // ThrownAnimationComp state 2, 0x005e1380
+		m_fireSoundHeld = true;
+		m_soft = soft;
+		m_softTicks = 0;
+		m_power = soft ? 0 : 1;
+		m_pullbackIn = std::max(m_settings.pullbackTicks, 0);
+		m_launchIn = std::max(m_settings.launchDelayTicks, 0);
+		if (m_pullbackIn > 0 || soft) {
+			return false;
+		}
+		m_pullbackIn = -1;
+		m_animationPulses |= 1;
+	} else {
+		if (m_settings.loopingFire) {
+			m_animationFireHeld = true;
+		} else {
+			m_animationPulses |= 1;
+		}
+		if (m_settings.singleFire && m_settings.launchDelayTicks > 0) {
+			m_launchIn = m_settings.launchDelayTicks;
+			return false;
+		}
+	}
+	if (m_launchIn > 0) {
+		return false;
+	}
+	m_launchIn = -1;
+	m_fireSoundHeld = false;
+	return launch();
+}
+
+bool FireArm::launch()
+{
+	const bool unlimited = m_settings.magSize < 0;
 	m_pending = false;
 	if (m_burstLeft > 0) {
 		--m_burstLeft;
@@ -1043,6 +1157,8 @@ bool FireArm::fire(float seconds, bool trigger)
 		return true;
 	}
 	--m_rounds;
+	m_shiftPending = m_settings.useShiftAnimation && m_rounds > 0;
+	m_reloadIn = m_settings.minimumReloadTicks;
 	// A ReplenishingAmmoComp's round (0x005d81d0): the battery pays
 	// abilityCost for it.
 	if (m_settings.replenishing && m_settings.abilityCost > 0) {
@@ -1057,10 +1173,9 @@ bool FireArm::fire(float seconds, bool trigger)
 	// empty, the trigger clicks (0x005c2ee0), until c_PIReload (the
 	// firearm's action 10). ammo.nrOfMags -1: magazines without end (the
 	// drones' detonators).
-	if (m_rounds == 0 && m_settings.autoReload && (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
-		reloadStarted();
-		m_reloadLeft = m_settings.reloadTime;
-		m_reloadFilled = false;
+	if (m_rounds == 0 && m_settings.autoReload && m_reloadIn <= 0
+		&& (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
+		beginReload();
 	}
 	return true;
 }

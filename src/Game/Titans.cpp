@@ -2321,8 +2321,12 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 		std::printf("pod-launch: %s from %.0f %.0f %.0f at %.0f %.0f %.0f\n", projectile.c_str(), from.x, from.y, from.z, velocity.x, velocity.y, velocity.z);
 	}
 	m_pods.push_back(p);
-	player.vehicle = pod->id();
-	player.seat = 0;
+	if (Body* body = findBody(pod->id())) {
+		seatPlayer(player, *body, 0);
+	} else {
+		player.vehicle = pod->id();
+		player.seat = 0;
+	}
 	soldier->setHidden(true);
 	player.body.position = from + physics::Vec3 {0, 1, 0};
 	player.body.velocity = {};
