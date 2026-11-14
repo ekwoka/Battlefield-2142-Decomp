@@ -70,7 +70,7 @@ layout(set = 3, binding = 0) uniform Lighting {
 	vec4 lightSpot[8];     // a spot light's axis, w: its ConeAngle (radians;
 						   // below -1: a point light)
 	vec4 lightExtra[8];    // y: 1 when it lights lightmapped surfaces too
-	vec4 hemiObject;       // rgb: HemiMapConstantColor, w: HeightOverTerrain
+	vec4 hemiObject;       // rgb: HemiMapConstantColor (lightmapped statics: SinglePointColor), w: HeightOverTerrain
 	vec4 eye;              // xyz: the camera, w: the specular kind (0 none)
 	vec4 specular;         // rgb: its colour, w: the static gloss
 	vec4 layerMaps;        // xy: ParallaxScaleBias's scale, z: 1 detail normal map,
@@ -133,7 +133,7 @@ layout(location = 0) out vec4 outColor;
 //     specularColor) (1 - saturate(|d| / R^2)) (a length, not its square, as
 //     the shader has it); specularColor the template's speccolor.
 // The diffuse goes to `light` (times the albedo), the specular to `shine`.
-void meshPointLights(vec3 normal, float gloss, inout vec3 light, inout vec3 shine)
+void meshPointLights(vec3 normal, float gloss, vec3 lightmapMask, inout vec3 light, inout vec3 shine)
 {
 	int kind = int(lightCount.y + 0.5);
 	int count = int(lightCount.x + 0.5);
@@ -147,8 +147,14 @@ void meshPointLights(vec3 normal, float gloss, inout vec3 light, inout vec3 shin
 		float nh = clamp(dot(normal, normalize(direction + toEye)), 0.0, 1.0);
 		if (kind == 1) {
 			float attenuation = 1.0 - clamp(d2 / (r * r), 0.0, 1.0);
-			light += lightColor[i].rgb * nl * attenuation;
-			shine += pow(nh, 32.0) * gloss * specular.rgb * attenuation;
+			if (lightmapMask.x >= 0.0) {
+				// RaShaderSTM getPointPixelLighting: x the lightmap x 2, saturated, x 2.
+				light += 2.0 * clamp(lightColor[i].rgb * nl * lightmapMask * attenuation, 0.0, 1.0);
+				shine += pow(nh, 32.0) * gloss * specular.rgb * lightmapMask * attenuation;
+			} else {
+				light += lightColor[i].rgb * nl * attenuation;
+				shine += pow(nh, 32.0) * gloss * specular.rgb * attenuation;
+			}
 		} else if (kind == 2) {
 			float attenuation = 1.0 - clamp(9.0 * d2 / (r * r), 0.0, 1.0);
 			light += vec3(nl * attenuation);
@@ -261,14 +267,17 @@ void main()
 	vec3 sun = sunColor.rgb * max(dot(lit, sunDirection.xyz), 0.0);
 	vec3 light;
 	vec3 shine = vec3(0.0);
+	vec3 pointMask = vec3(-1.0); // a lightmapped static's 2 x lightmap for its point lights
 	bool shadowed = (layers & 128) == 0;
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);
+		pointMask = 2.0 * lightmap.rgb;
 		float sunVisible = lightmap.g * shadowFactor(inWorldPosition, false);
 		// getDiffusePixelLighting: the sky by the bumped normal against
 		// skyNormal (0.78, 0.52, 0.65) in the tangent frame.
 		float skyShare = perPixel ? dot(tangentNormal, vec3(0.78, 0.52, 0.65)) : 0.52;
-		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible);
+		// + the baked lamps (R) x SinglePointColor (lightmapped statics carry it in hemiObject).
+		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible + lightmap.r * hemiObject.rgb);
 		shine = specularTerm(lit, sunVisible, gloss);
 		if ((layers & 512) != 0) {
 			// _TITANINTERIOR_ inside a Titan: the static sun and sky are 0, so
@@ -277,6 +286,14 @@ void main()
 			light = vec3(2.0 * lightmap.r);
 			shine = specularTerm(lit, lightmap.g, gloss);
 			fog = 0.0;
+			if (lightCount.x > 0.5) {
+				// _TITANINTERIOR_ + _POINTLIGHT_: Lights[0] is the nearest gathered light
+				// (0x100bda62), unattenuated (sat 1), masked by G, in the directional
+				// term and again in the point term (saturate(N.L c 2G)).
+				vec3 toLight = normalize(lightPosition[0].xyz - inWorldPosition);
+				vec3 c = lightColor[0].rgb * clamp(dot(lit, toLight), 0.0, 1.0);
+				light += 2.0 * c * lightmap.g + 2.0 * clamp(c * 2.0 * lightmap.g, 0.0, 1.0);
+			}
 		}
 	} else {
 		// Bundled and skinned meshes (32) take the hemi map (RaShaderBM/SM's
@@ -295,8 +312,10 @@ void main()
 		light = hemi.rgb + sun * sunVisible;
 		shine = specularTerm(lit, sunVisible * (sunColor.a > 0.0 ? 1.0 : 0.0), gloss);
 	}
-	if (lightCount.y > 0.5) {
-		meshPointLights(lit, gloss, light, shine);
+	if ((layers & 512) != 0) {
+		// the interior's one light is in its term above
+	} else if (lightCount.y > 0.5) {
+		meshPointLights(lit, gloss, pointMask, light, shine);
 	} else {
 		light += pointLights(lit);
 	}

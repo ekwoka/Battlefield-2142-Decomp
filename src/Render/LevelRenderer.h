@@ -712,12 +712,14 @@ private:
 		Vec3f axes[3];   // its rotation's rows
 	};
 	std::vector<TitanHemiMap> m_titanHemiMaps;
-	// A Titan's baked interior lightmap by its prefix ("as_titan", "eu_titan"), null when it has none.
+	// A Titan's baked maps by prefix ("as_titan", "eu_titan") and LOD (-1 the interior), null when missing.
 	std::map<std::string, SDL_GPUTexture*> m_titanLightmaps;
-	SDL_GPUTexture* titanLightmap(const LevelSources& sources, const std::string& geometry);
+	SDL_GPUTexture* titanLightmap(const LevelSources& sources, const std::string& geometry, int lod);
 	// The camera inside a Titan this frame (the object drawer's slot 0x40,
 	// TitanParts.h), and the hull parts' LOD pairs.
 	bool m_cameraInTitan = false;
+	float m_titanBlend = 0;           // the inside-Titan blend, 0..1 (0x10029b70)
+	uint64_t m_titanBlendTicks = 0;
 	TitanExteriorLods m_titanExteriorLods;
 	bool cameraInTitan(const Camera& camera) const;
 	void loadTitanHemiMaps(const LevelSources& sources);

@@ -9,9 +9,9 @@ the cascades in place of the SimpleShadowmap where they reach.
 #include "enhanced_shadow.glsl"
 >>>>
 <<<<
-		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible);
+		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb + sun * sunVisible + lightmap.r * hemiObject.rgb);
 ====
-		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb * enhancedAO() + sun * sunVisible);
+		light = 2.0 * (skyShare * lightmap.b * skyColor.rgb * enhancedAO() + sun * sunVisible + lightmap.r * hemiObject.rgb);
 >>>>
 <<<<
 		float simple = layerMaps.w > 0.5 ? layerMaps.w - 1.0 : 1.0;

@@ -817,9 +817,9 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				instance.partsTemplate = &objectTemplate;
 			}
 			lightmapFor(sources, objectTemplate.geometry(), 0, world, instance.lightmap, instance.lightmapTransform);
-			if (!instance.lightmap && gpuMesh->titanInterior && !gpuMesh->bundled && !gpuMesh->skinned) {
-				// The Titans' interiors are lit by their own baked map (RendDX9 0x10152870), whole, not an atlas cell.
-				instance.lightmap = titanLightmap(sources, objectTemplate.geometry());
+			if (!instance.lightmap && (gpuMesh->titanInterior || gpuMesh->titanExterior) && !gpuMesh->bundled && !gpuMesh->skinned) {
+				// The Titans' parts are lit by their own baked maps (RendDX9 0x10152870), whole, not an atlas cell.
+				instance.lightmap = titanLightmap(sources, objectTemplate.geometry(), gpuMesh->titanExterior ? 0 : -1);
 				instance.lightmapTransform[0] = instance.lightmapTransform[1] = 1;
 				instance.lightmapTransform[2] = instance.lightmapTransform[3] = 0;
 			}
@@ -3311,33 +3311,30 @@ void LevelRenderer::lightmapFor(const LevelSources& sources, const std::string& 
 }
 
 // RendDX9 0x10152870 (branching on isTitanExterior, 0x10152a13): the interior
-// statics' map is "/Common/Textures/<titan>_Lightmap_Interior.dds" (R the light, B 0);
-// "<level>/Lightmaps/Titans/<titan>_Lightmap<N>.dds" is the exterior's (the fallback
-// here). <titan> is as_titan_playtest, eu_titan_playtest, or their _wake.
-SDL_GPUTexture* LevelRenderer::titanLightmap(const LevelSources& sources, const std::string& geometry)
+// statics' map is "/Common/Textures/<titan>_Lightmap_Interior.dds" (R the light, B 0;
+// `lod` < 0), the hull's "<level>/Lightmaps/Titans/<titan>_Lightmap<lod>.dds". <titan>
+// is as_titan_playtest, eu_titan_playtest, or their _wake.
+SDL_GPUTexture* LevelRenderer::titanLightmap(const LevelSources& sources, const std::string& geometry, int lod)
 {
 	const std::string prefix = lower(geometry).substr(0, 8);
 	if (prefix != "as_titan" && prefix != "eu_titan") {
 		return nullptr;
 	}
-	const auto cached = m_titanLightmaps.find(prefix);
+	const std::string key = prefix + std::to_string(lod);
+	const auto cached = m_titanLightmaps.find(key);
 	if (cached != m_titanLightmaps.end()) {
 		return cached->second;
 	}
 	SDL_GPUTexture* found = nullptr;
 	for (const char* variant : {"_playtest", "_wake"}) {
 		const std::string name = prefix + variant;
-		for (const std::string& path : {"common/textures/" + name + "_Lightmap_Interior.dds",
-				 sources.levelPath + "Lightmaps/Titans/" + name + "_Lightmap0.dds"}) {
-			if (!found) {
-				found = texture(sources.files, path);
-			}
-		}
+		found = texture(sources.files, lod < 0 ? "common/textures/" + name + "_Lightmap_Interior.dds"
+											   : sources.levelPath + "Lightmaps/Titans/" + name + "_Lightmap" + std::to_string(lod) + ".dds");
 		if (found) {
 			break;
 		}
 	}
-	return m_titanLightmaps[prefix] = found;
+	return m_titanLightmaps[key] = found;
 }
 
 // An instance's sphere in the world: its parts' spheres where they are now.
@@ -3408,6 +3405,13 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	}();
 	// The Titans' parts (TitanParts.h).
 	m_cameraInTitan = cameraInTitan(camera);
+	{
+		// RendDX9 0x10029b70: the inside-Titan blend moves 0.5 a second (+0x898).
+		const uint64_t now = SDL_GetTicks();
+		const float dt = m_titanBlendTicks ? static_cast<float>(now - m_titanBlendTicks) / 1000.0f : 0.0f;
+		m_titanBlendTicks = now;
+		m_titanBlend = std::clamp(m_titanBlend + (m_cameraInTitan ? 0.5f : -0.5f) * dt, 0.0f, 1.0f);
+	}
 	if (m_sources && m_sources->cameraInTitanOut) {
 		*m_sources->cameraInTitanOut = m_cameraInTitan;
 	}
@@ -3605,7 +3609,12 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 				if (!entry.resolved) {
 					entry.resolved = true;
 					entry.mesh = mesh(*m_sources, instance.geometry, -1, lod);
-					if (instance.lightmap) {
+					if (instance.lightmap && (base.titanInterior || base.titanExterior)) {
+						// The interior's one map for every LOD; the hull's <titan>_Lightmap<LOD> (0x10152870).
+						entry.lightmap = titanLightmap(*m_sources, instance.geometry, base.titanExterior ? lod : -1);
+						entry.lightmapTransform[0] = entry.lightmapTransform[1] = 1;
+						entry.lightmapTransform[2] = entry.lightmapTransform[3] = 0;
+					} else if (instance.lightmap) {
 						lightmapFor(*m_sources, instance.geometry, lod, instance.world, entry.lightmap, entry.lightmapTransform);
 					}
 					uploaded = true;
@@ -4403,6 +4412,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		{lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
 			lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
+	// RaShaderSTM getDiffuse*Lighting: + lightmap.r x SinglePointColor, the baked lamps.
+	// SinglePointColor fades to (1, 1, 1) with the inside-Titan blend (0x10028301).
+	for (LightingUniforms& u : uniformsFor[1]) {
+		for (int i = 0; i < 3; ++i) {
+			u.hemiObject[i] = lights.singlePointColor[static_cast<size_t>(i)] + (1.0f - lights.singlePointColor[static_cast<size_t>(i)]) * m_titanBlend;
+		}
+	}
 	if (LightTrace& trace = lightTrace(); trace.on) {
 		for (int lm = 0; lm < 2; ++lm) {
 			const LightingUniforms& u = uniformsFor[lm][0];
