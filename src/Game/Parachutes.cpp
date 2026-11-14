@@ -416,7 +416,16 @@ void GameWorld::parachuteCollision(uint32_t self, uint32_t other, const physics:
 {
 	(void)otherMaterial;
 	Parachute* chute = findParachute(self);
-	if (!chute || chute->landing >= 0 || chute->removeIn >= 0) {
+	Pod* pod = nullptr;
+	for (Pod& candidate : m_pods) {
+		if (candidate.object == self) {
+			pod = &candidate;
+			break;
+		}
+	}
+	float* landing = chute ? &chute->landing : pod ? &pod->landing : nullptr;
+	const float removeIn = chute ? chute->removeIn : pod ? pod->removeIn : -1;
+	if (!landing || *landing >= 0 || removeIn >= 0) {
 		return;
 	}
 	if (other != 0) {
@@ -425,7 +434,7 @@ void GameWorld::parachuteCollision(uint32_t self, uint32_t other, const physics:
 		// bodies' (Body::objectRadius), 1 for an object without one.
 		const Body* own = findBody(self);
 		const Body* theirs = findBody(other);
-		float up = std::fabs(normal.y);
+		float up = normal.y;
 		if (own && 4 * (theirs ? theirs->objectRadius : 1.0f) < own->objectRadius) {
 			up = 1;
 		}
@@ -438,7 +447,12 @@ void GameWorld::parachuteCollision(uint32_t self, uint32_t other, const physics:
 			return;
 		}
 	}
-	chute->landing = kLandingTime;
+	if (pod) {
+		pod->landingNormal = other ? normal : physics::Vec3 {0, 1, 0};
+		const Body* surface = other ? findBody(other) : nullptr;
+		pod->landingSurfaceVelocity = surface ? surface->body.velocity : physics::Vec3 {};
+	}
+	*landing = kLandingTime;
 }
 
 void GameWorld::leaveParachute(Player& player, Parachute& chute)

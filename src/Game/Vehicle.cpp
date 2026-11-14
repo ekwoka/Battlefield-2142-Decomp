@@ -219,7 +219,9 @@ Vec3 tyreForce(const EngineSettings& e, const TyreContact& contact, const Vec3& 
 	const Vec3& right, float* longitudinal, float* lateral)
 {
 	float load = std::max(contact.normalY, 0.0f);
-	float loadPower = 1;
+	// 0x006b71f0 starts from the normal's height itself, then multiplies by it [0xa83e9c] (3) more
+	// times: the fourth power, not the cube.
+	float loadPower = load;
 	for (int i = 0; i < kLoadExponent; ++i) {
 		loadPower *= load;
 	}
@@ -308,6 +310,10 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		part.rememberExcess = number(t, "rememberExcessInput", 0) != 0;
 		part.autoRotateOnEnter = number(t, "startAutoRotateOnEnter", 0) != 0;
 		part.restoreRotationOnExit = number(t, "restoreRotationOnExit", 0) != 0;
+		if (t.typeName() == "RotationalBundle") {
+			part.angleScale = number(t, "multiply", 1);
+			part.angleOffset = vector(t, "offset");
+		}
 	};
 	// Depth-first over the tree with each node's offset and rotation.
 	const std::function<void(const world::ObjectTemplate&, Vec3, Mat3, Steering, Place, int)> visit =
@@ -624,7 +630,8 @@ void Vehicle::updateEngine(const physics::RigidBody& body, float seconds)
 	}
 }
 
-void Vehicle::touchObject(size_t index, float height, const Vec3& normal, const Vec3& velocity, float grip)
+void Vehicle::touchObject(size_t index, const Vec3& push, const Vec3& rootPush, const Vec3& normal,
+	const Vec3& velocity, float grip)
 {
 	if (index >= m_wheels.size()) {
 		return;
@@ -632,11 +639,23 @@ void Vehicle::touchObject(size_t index, float height, const Vec3& normal, const 
 	Wheel::ObjectGround& g = m_wheels[index].objectGround;
 	const float n = static_cast<float>(g.count);
 	const float mean = 1.0f / static_cast<float>(g.count + 1);
-	g.height = g.count == 0 ? height : std::max(g.height, height);
+	g.push = physics::combineAxes(g.push, push);
+	g.rootPush = rootPush;
 	g.normal = (g.normal * n + normal) * mean;
 	g.velocity = (g.velocity * n + velocity) * mean;
 	g.grip = grip;
 	++g.count;
+}
+
+float Vehicle::objectCompression(const Wheel& wheel, Vec3& normal) const
+{
+	const Wheel::ObjectGround& g = wheel.objectGround;
+	if (g.count == 0) {
+		return -1;
+	}
+	const float l = std::sqrt(physics::lengthSquared(g.normal));
+	normal = l > 1e-6f ? g.normal * (1.0f / l) : Vec3 {0, 1, 0}; // 0x006ba7d0: a zero normal is up
+	return std::clamp(physics::dot(g.push - g.rootPush, normal), 0.0f, 1.0f);
 }
 
 void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip, float gravity)
@@ -745,15 +764,17 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 	// An object under the wheel (a bridge, a deck, another vehicle) is its
 	// ground where it is higher, moving as that object does.
 	Vec3 surfaceVelocity;
-	if (wheel.objectGround.count > 0 && wheel.objectGround.height > groundHeight) {
-		groundHeight = wheel.objectGround.height;
-		const float l = std::sqrt(physics::lengthSquared(wheel.objectGround.normal));
-		normal = l > 1e-6f ? wheel.objectGround.normal * (1.0f / l) : Vec3 {0, 1, 0};
+	float compression = std::max(0.0f, groundHeight - bottom.y);
+	Vec3 objectNormal;
+	const float pushed = objectCompression(wheel, objectNormal);
+	if (wheel.objectGround.count > 0 && pushed > compression) {
+		compression = pushed;
+		groundHeight = bottom.y + pushed;
+		normal = objectNormal;
 		surfaceVelocity = wheel.objectGround.velocity;
 		grip = wheel.objectGround.grip;
 	}
 	wheel.objectGround = {};
-	const float compression = std::max(0.0f, groundHeight - bottom.y);
 	wheel.contact = compression > 0;
 
 	// The spring pushes the body by how far, and how fast, the ground

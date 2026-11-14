@@ -144,6 +144,11 @@ float Vehicle::OldEngine::currentTorque() const
 	return settings.torqueAt(rpm);
 }
 
+float Vehicle::OldEngine::audioValue() const
+{
+	return (flags & 0x20) ? std::clamp(2 * aoa, -0.5f, 0.5f) + 0.5f : std::clamp(rpm, -1.0f, 1.0f);
+}
+
 // feedbackLoop (0x0064dd10): the push along the engine's axis as a load on
 // the rpm: a car's (no bit 4) is the running mean of the tick's pushes x
 // 0.99, a tank's the largest the rpm's way; a car's within +-1, a
@@ -294,7 +299,7 @@ void Vehicle::updateParts(float seconds)
 				rotationAxisStep(part.axes[axis], in, seconds, part.angle[axis], part.rate[axis]);
 			}
 		}
-		const Mat3 turn = Mat3::fromYawPitchRoll({part.angle[0], part.angle[1], part.angle[2]});
+		const Mat3 turn = Mat3::fromYawPitchRoll(part.turnAngles());
 		if (part.parent >= 0) {
 			const Part& parent = m_parts[static_cast<size_t>(part.parent)];
 			part.rotation = turn * part.base * parent.rotation;
@@ -310,16 +315,24 @@ void Vehicle::updateParts(float seconds)
 void Vehicle::updateOldEngine(OldEngine& e, physics::RigidBody& body, const physics::Ground& ground, float seconds,
 	float gravity)
 {
-	// The messages (0x0064c890): someone entering starts it (4); leaving
-	// (5) stops a ground engine half a second later, an air or sea one
-	// keeps running (unless it is on the ground: the rewrite stops it too).
+	// The messages (0x0064c890), each once: the pilot entering starts it (4);
+	// leaving (5, 0x0064c9bb) stops it half a second later, but a propeller
+	// or a rotor (bits 1, 0x20) keeps running unless the root then lies
+	// within its radius of the ground (0x006f2a30 with 0: the terrain under
+	// it, then a ray that long down; the rewrite's meets only the terrain).
 	if (m_occupied) {
 		e.running = e.heat < 1 || e.heatIncrement <= 0 ? true : e.running;
 		e.stopTimer = -1;
-	} else if (e.running) {
-		if (e.stopTimer < 0) {
+		e.seated = true;
+	} else if (e.seated) {
+		e.seated = false;
+		const bool grounded
+			= ground.height && body.position.y - m_objectRadius <= ground.height(body.position.x, body.position.z);
+		if (e.running && (!(e.flags & 0x21) || grounded)) {
 			e.stopTimer = 0.5f;
 		}
+	}
+	if (e.stopTimer >= 0) {
 		e.stopTimer -= seconds;
 		if (e.stopTimer <= 0) {
 			e.running = false;
@@ -903,29 +916,10 @@ void Vehicle::legsRespond(physics::RigidBody& body, const physics::Ground& groun
 	l.contactNormal = contactNormal;
 }
 
-namespace {
-// 0x006b6b60: an axis of a contact normal taken into the drive's: of the
-// same sign the larger, of opposite signs (or into 0) the sum.
-float combineAxis(float into, float value)
-{
-	if (into == 0) {
-		return value;
-	}
-	if (into > 0 && value > 0) {
-		return std::max(into, value);
-	}
-	if (into < 0 && value < 0) {
-		return std::min(into, value);
-	}
-	return into + value;
-}
-} // namespace
-
 void Vehicle::legsObjectContact(const Vec3& normal, const Vec3& queryNormal, bool below)
 {
 	Legs& l = m_legs;
-	l.contactNormal = {combineAxis(l.contactNormal.x, normal.x), combineAxis(l.contactNormal.y, normal.y),
-		combineAxis(l.contactNormal.z, normal.z)};
+	l.contactNormal = physics::combineAxes(l.contactNormal, normal); // 0x006b6bd0
 	l.objectNormal = true;
 	// Below the legs (0x006cec60's bVar3): the best ground normal by its
 	// height (+0x1c4, its y at +0x1c8) and the landed flag (+0x21c).
@@ -987,15 +981,17 @@ void Vehicle::updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physi
 	Vec3 normal {0, 1, 0};
 	float groundHeight = ground.heightAndNormal(bottom.x, bottom.z, normal);
 	Vec3 surfaceVelocity;
-	if (wheel.objectGround.count > 0 && wheel.objectGround.height > groundHeight) {
-		groundHeight = wheel.objectGround.height;
-		const float l = length(wheel.objectGround.normal);
-		normal = l > 1e-6f ? wheel.objectGround.normal * (1.0f / l) : Vec3 {0, 1, 0};
+	float compression = std::max(0.0f, groundHeight - bottom.y);
+	Vec3 objectNormal;
+	const float pushed = objectCompression(wheel, objectNormal);
+	if (wheel.objectGround.count > 0 && pushed > compression) {
+		compression = pushed;
+		groundHeight = bottom.y + pushed;
+		normal = objectNormal;
 		surfaceVelocity = wheel.objectGround.velocity;
 		grip = wheel.objectGround.grip;
 	}
 	wheel.objectGround = {};
-	const float compression = std::max(0.0f, groundHeight - bottom.y);
 	wheel.contact = compression > 0;
 	// The Spring node's first step that finds it moving (0x006caef0's
 	// +0x284, set by 0x006caae0) takes its displacement's rate as 0, so a

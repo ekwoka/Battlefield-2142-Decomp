@@ -11,6 +11,7 @@ add_library(Render STATIC
 	GpuContext.cpp
 	LevelRenderer.cpp
 	LevelRendererPost.cpp
+	Enhanced/LevelRendererEnhanced.cpp
 	PngWriter.cpp
 )
 target_include_directories(Render PUBLIC ${PROJECT_SOURCE_DIR}/src)
@@ -41,4 +42,17 @@ bf2142_embed_shaders(Render
 	Shaders/fullscreen.vert
 	Shaders/bloom.frag
 	Shaders/post.frag
+	# The enhanced mode's (not retail; Enhanced/LevelRendererEnhanced.cpp):
+	# its passes, and the lit shaders' variants (name=shader+edits).
+	Shaders/Enhanced/depth.frag
+	Shaders/Enhanced/gbuffer.frag
+	Shaders/Enhanced/motion.vert
+	Shaders/Enhanced/motion.frag
+	Shaders/Enhanced/gtao.frag
+	Shaders/Enhanced/aoblur.frag
+	Shaders/Enhanced/taa.frag
+	enh_mesh.frag=Shaders/mesh.frag+Shaders/Enhanced/mesh.frag.patch
+	enh_terrain.frag=Shaders/terrain.frag+Shaders/Enhanced/terrain.frag.patch
+	enh_road.frag=Shaders/road.frag+Shaders/Enhanced/road.frag.patch
+	enh_undergrowth.frag=Shaders/undergrowth.frag+Shaders/Enhanced/undergrowth.frag.patch
 )

@@ -3,15 +3,16 @@
 //
 // The soldier does not turn with physics and has no inertia: the Soldier
 // object turns it and asks for a velocity (response slot 0x84). Per tick:
-//   ground contact (slot 0x28, 0x006c28c0): the first five points of the
-//     built-in "Soldier_CollisionMesh" (0x006e4880: the feet at 1 m below the
-//     origin and four at 0.6 m) against the heightmap; the first point
-//     decides whether the soldier stands and on which slope;
+//   integration (node slot 0xf4, 0x006ca660 / 0x006ca3b0) and gravity;
 //   objects (slot 9, 0x006c5140 -> 0x006c3890): a stack of spheres by
 //     stance against their soldier collision LOD (static objects', and
 //     moving ones' in their own frames), swept from the last tick's place
 //     when it moved over 0.9 of a radius, contacts handled like the
 //     ground's; other soldiers (0x006c2620: upright cylinders);
+//   ground contact (slot 0x28, 0x006c28c0): the first five points of the
+//     built-in "Soldier_CollisionMesh" (0x006e4880: the feet at 1 m below the
+//     origin and four at 0.6 m) against the heightmap; the first point
+//     decides whether the soldier stands and on which slope;
 //   solve (slot 0x30, 0x006c48c0): push out of the ground and objects,
 //     cancel the velocity into them; then up to eight passes of the
 //     collisions at 0.999 of the size, each pushing out what still
@@ -35,6 +36,7 @@
 #include "RigidBody.h"
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace dice::hfe::physics {
@@ -63,7 +65,7 @@ constexpr Vec3 kGroundPoints[5] = {{0, -1, 0}, {-0.2f, -0.6f, -0.2f}, {0.2f, -0.
 // touching the mesh (the response's slot 0x98, 0x006c3340). A mesh in
 // its own frame (a vehicle's) is tested with the centres taken into it.
 bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation = {},
-	const Vec3& position = {});
+	const Vec3& position = {}, uint32_t ignore = 0);
 
 namespace soldier {
 constexpr float kSweepFactor = 0.9f;      // *0x00a84760 and *0x00a8475c: sweep over 0.9 r a tick (6.75 m/s)
@@ -120,6 +122,9 @@ public:
 	// Moving objects near it: their soldier LOD in their own frame.
 	struct Mover {
 		const CollisionWorld* mesh = nullptr;
+		// Keeps `mesh` alive: the movers are read again by the next tick's carry(),
+		// by when the object they were gathered from may be gone.
+		std::shared_ptr<const CollisionWorld> keep;
 		Mat3 rotation;
 		Vec3 position;
 		Vec3 velocity, angularVelocity, centerOfMass; // centre of mass in world space
@@ -156,10 +161,12 @@ public:
 		Vec3 pointVelocity(const Vec3& p) const { return velocity + cross(angularVelocity, p - centerOfMass); }
 	};
 	std::vector<Mover> movers;
-	// Other soldiers near it (on foot): their origin and stance (0x006c2620).
+	// Other soldiers near it on foot (0x006c2620): each contact pushes both.
+	// In the pass, only those whose own pass is still to come (0x006dcce0
+	// skips a soldier stamped this frame); in the solve's passes, all.
 	struct Neighbour {
-		Vec3 position;
-		int stance = 0;
+		SoldierBody* body = nullptr;
+		bool passed = false;
 	};
 	std::vector<Neighbour> soldiers;
 	// The hit's velocity a ragdoll starts with when the soldier dies within
@@ -201,6 +208,31 @@ public:
 	bool swimming() const { return m_swim; }
 
 	Vec3 velocity;
+	// What the node reports as its velocity (slot 0x64 -> +0x78, set by slot
+	// 0x19c, 0x006c5920): the step's displacement x 30, components under
+	// 1e-6 zero. `velocity` holds the pending push into a floor between
+	// ticks (one tick of gravity); a soldier held still measures 0.
+	Vec3 measuredVelocity;
+	// The velocity of what it stands on (slot 0xd8): a moving object's under
+	// the feet this step, zero on the ground and static objects.
+	Vec3 groundVelocity;
+	// The movement an animation sees (as the walker's input, 0x0063ce30):
+	// the measured velocity, less the ground's when that moves, and then
+	// none under 0.7 m/s (|v|^2 < 0.49, *0x00976200): standing on a moving
+	// Titan is standing.
+	// A Titan's carry (the integration added it to the displacement) is the
+	// ground's motion too: a soldier standing in a moving Titan is standing.
+	Vec3 animationVelocity() const
+	{
+		// (The carry and the ground's velocity are the same motion: not both.)
+		const bool carried = m_carriedStep.x != 0 || m_carriedStep.y != 0 || m_carriedStep.z != 0;
+		const Vec3 under = carried ? m_carriedStep : groundVelocity;
+		if (under.x == 0 && under.y == 0 && under.z == 0) {
+			return measuredVelocity;
+		}
+		const Vec3 relative = measuredVelocity - under;
+		return lengthSquared(relative) < 0.49f ? Vec3 {} : relative;
+	}
 	Vec3 acceleration;      // gravity for the next tick
 	Vec3 impulse;           // velocity change for the next tick
 
@@ -222,20 +254,26 @@ public:
 	// Response slot 0x84: the velocity the soldier wants (along the ground).
 	void setDesiredVelocity(const Vec3& velocity) { m_desired = velocity; }
 	// A jump (0x0058a6d0: node slots 0xc8, 0x78, 0x5c): no impulse, and the
-	// velocity and the acceleration both `velocity` for the next
-	// integration (the original's object update runs before the physics'
-	// integration; this one's step collides first, so the jump waits for
-	// its integration instead of being cancelled by the ground it leaves).
-	void jump(const Vec3& velocity)
+	// velocity and the acceleration both `leap`, set at once (a round
+	// thrown this tick takes it, 0x005e5720) and again by the next
+	// integration, before collision response.
+	void jump(const Vec3& leap)
 	{
-		m_jump = velocity;
+		m_jump = leap;
 		m_jumping = true;
+		velocity = leap;
 	}
 	// Whether the last step's solve gave up (eight passes) and put the
 	// soldier back (the response's +0xf9 then set).
 	bool squashed() const { return m_squashed; }
 
+	// One tick alone: move, pass, then solve. In the world the three run
+	// for every soldier in turn (0x006daa70, then 0x006dd1b0: every
+	// soldier's pass before the vehicles' turns, every solve after them).
 	void step(float seconds, const Ground& ground, float gravity = tuning::kGravity);
+	void moveNode(float seconds, float gravity = tuning::kGravity); // node slot 0xf4
+	void pass(float seconds, const Ground& ground, float gravity = tuning::kGravity); // 0x006dcce0, slot 0x28
+	void settle(float seconds, const Ground& ground, float gravity = tuning::kGravity); // slots 0x30, 0x34
 
 private:
 	// 0x006c28c0 at a scale (1 on slot 0x28; 0.999 in the solve's passes):
@@ -248,7 +286,7 @@ private:
 	// way the soldier came.
 	bool collideWithMesh(const CollisionWorld& mesh, const Mover* mover, float seconds, float scale, bool normals,
 		float& deepest);
-	void collideWithSoldiers(float scale);        // 0x006c2620
+	void collideWithSoldiers(float scale, bool pass); // 0x006c2620
 	void addContact(const Vec3& normal, float depth, const Vec3& velocity); // 0x006c24b0
 	void touchMaterial(uint32_t other);                                      // 0x006c24b0's friction
 	void solve(float seconds, const Ground& ground, float gravity); // 0x006c48c0
@@ -272,15 +310,13 @@ private:
 	Vec3 m_inputAcceleration;
 	int m_inputs = 0;
 	// The node's matrix before the last integration (slot 0x4c -> +0xd4):
-	// the spheres' last place; where the last step left it (a position set
-	// from outside since is a jump, not a motion).
+	// the sweep starts at the position from which this tick integrated.
 	Vec3 m_lastPosition;
-	Vec3 m_stepEnd;
-	bool m_hasLast = false;
 	bool m_swim = false; // response +0xfa
 	Vec3 m_jump;
 	bool m_jumping = false;
 	bool m_squashed = false;
+	Vec3 m_start; // where this tick's move began (the measured velocity)
 	// The object the soldier stands in (+0x120, slots 0xec / 0xf0): the
 	// mover whose hull it is inside, found by the object pass and cleared
 	// by each step (-1: none).
@@ -289,6 +325,7 @@ private:
 	int m_carryTicks = 0;    // +0x9c
 	uint32_t m_carrier = 0;  // +0xa0 (its root)
 	int m_carrierTicks = 0;  // +0xa4
+	Vec3 m_carriedStep;      // the carry the last integration added to the displacement
 };
 
 } // namespace dice::hfe::physics

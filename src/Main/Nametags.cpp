@@ -323,6 +323,10 @@ void TagFont::write(const std::string& text, float x, float y, const float colou
 		q.v0 = static_cast<float>(cell.y) / static_cast<float>(textureHeight);
 		q.v1 = static_cast<float>(cell.y + height) / static_cast<float>(textureHeight);
 		std::copy(colour, colour + 4, q.color);
+		// The font texture is opaque DXT1 (white strokes on black, no alpha), so plain source-alpha blending
+		// draws every cell as a black box; source alpha with ONE lets the black add nothing (Meme 7/2, as the vehicle HUDs).
+		q.blend[0] = 7;
+		q.blend[1] = 2;
 		out.push_back(q);
 		x += w + static_cast<float>(between);
 	}
@@ -684,7 +688,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	const View& view, float seconds)
 {
 	std::vector<hud::HudQuad> out;
-	if (!m_fontLoaded || !m_shown) {
+	if (!m_fontLoaded) {
 		m_selectedObject = 0;
 		m_selectedRequest = -1;
 		return out;
@@ -894,12 +898,14 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		if (tt.controlPoint) {
 			// The control points' icons (object tags, 0x100f1330 / 0x100ef960).
 			int team = 0;
+			bool capturable = true;
 			float nearest = 1e9f;
 			for (const auto& point : points) {
 				const float dx = point.position.x - owned->position().x, dz = point.position.z - owned->position().z;
 				if (dx * dx + dz * dz < nearest) {
 					nearest = dx * dx + dz * dz;
 					team = point.team;
+					capturable = point.capturable;
 				}
 			}
 			if ((tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
@@ -929,7 +935,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			const int colour = tt.useTeamColor ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
 			Drawn d {distance, {}};
 			hud::HudQuad icon;
-			icon.texture = std::string("Menu/Nametag/") + (team == 1 ? "Pac" : team == 2 ? "EU" : "Neutral") + "/miniMap_CP.dds";
+			icon.texture = std::string("Menu/Nametag/") + (team == 1 ? "Pac" : team == 2 ? "EU" : "Neutral") +
+				(capturable || team == 0 ? "/miniMap_CP.dds" : "/miniMap_CPBase.dds"); // RendDX9 0x100efa0e
 			icon.x0 = std::round(x) - 16;
 			icon.y0 = std::round(y) - 16;
 			icon.x1 = icon.x0 + 32;
@@ -974,7 +981,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				state.share = share; // a repair: no push, the icon stays
 			}
 		}
-		const int iconIndex = state.secondary ? tt.secondaryIcon : tt.icon;
+		int iconIndex = state.secondary ? tt.secondaryIcon : tt.icon;
+		if (iconIndex >= 0 && !state.secondary && !hud) {
+			// A silo's own offset to its 3dMapIcon (0x004d1770 -> slot 0x40, read by 0x006585a0): ICObjectCannon0N.
+			for (const auto& silo : world.missileSilos()) {
+				iconIndex += silo.object == id ? silo.number - 1 : 0;
+			}
+		}
 		const IconRegistry::Icon* icon = m_icons && iconIndex >= 0 ? m_icons->find(0x50 + iconIndex) : nullptr;
 		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
 			continue;
@@ -1117,6 +1130,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	}
 
 	// The players' tags.
+	const size_t playerDrawnStart = drawn.size();
 	std::map<int, Tag> seen;
 	for (const auto& p : players) {
 		if (p.id == me.id) {
@@ -1173,6 +1187,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		in.localMedic = localMedic;
 		in.distance = distance;
 		const bool calling = tag.callIcon >= 0 && in.friendly;
+		const int helper = in.friendly ? helperIcon(m_calls, kitAbilities(kitTypeOf(p.kit))) : -1;
+		const bool specialIcon = calling || helper >= 0;
 		const float alpha = playerTagAlpha(m_settings, in, tag.fade, seconds);
 		seen[p.id] = tag;
 		// The first occupant only speaks for a vehicle (0x100f33c0, bit
@@ -1190,7 +1206,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		}
 		// Squad members' and callers' tags stay on screen (flags 0x4020 /
 		// 0x26808: glueToEdge, showIconOnTracker).
-		const bool glue = in.sameSquad || calling;
+		// When ordinary tags are hidden, the retail response flags also glue
+		// compatible helper icons to the screen edge for tracker display.
+		const bool glue = in.sameSquad || calling || (!m_shown && helper >= 0);
 		float x = 0, y = 0, ix = 0, iy = 0;
 		bool clamped = false;
 		if (alpha <= 0.01f || !project(view, head, x, y, glue, m_settings.circleRadius, &clamped)) {
@@ -1274,7 +1292,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// answer it), at the icon's point; glued to the edge with the
 		// location arrow (Menu/Nametag/loactionArrow.dds, 0x10168d90:
 		// outwards at 1.05 the edge, alpha 0.5).
-		if (in.friendly && m_icons) {
+		if (in.friendly && m_icons && (m_shown || specialIcon)) {
 			int own = playerIconId(p.squadLeader, p.squad, p.commander);
 			if (own == 0x5a && p.vehicle) {
 				// Aboard, the vehicle's own icon (0x100ee590 by its root's type).
@@ -1282,10 +1300,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 					own = tagTemplate(v->objectTemplate()).vehicleIcon;
 				}
 			}
-			int overlay = calling ? tag.callIcon : -1;
-			if (overlay < 0) {
-				overlay = helperIcon(m_calls, kitAbilities(kitTypeOf(p.kit)));
-			}
+			int overlay = calling ? tag.callIcon : helper;
 			const IconRegistry::Icon* base = m_icons->find(own);
 			const IconRegistry::Icon* flash = overlay >= 0 ? m_icons->find(overlay) : nullptr;
 			const bool shown = clamped ? true : project(view, iconAt, ix, iy, false, 0);
@@ -1293,19 +1308,26 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				ix = x;
 				iy = y;
 			}
-			if (base && shown) {
+			const IconRegistry::Icon* normal = m_shown ? base : nullptr;
+			const IconRegistry::Icon* highlighted = flash;
+			if (normal && shown) {
 				float c[4];
 				std::copy(colour, colour + 4, c);
-				const float cross = flash ? fade : 0;
+				const float cross = highlighted ? fade : 0;
 				c[3] = alpha * (1 - cross);
-				d.quads.push_back(iconQuad(*base, ix, iy, c));
-				if (flash) {
+				d.quads.push_back(iconQuad(*normal, ix, iy, c));
+				if (highlighted) {
 					c[3] = alpha * cross;
-					d.quads.push_back(iconQuad(*flash, ix, iy, c));
+					d.quads.push_back(iconQuad(*highlighted, ix, iy, c));
 				}
 				if (!clamped) {
 					consider(ix, iy, -1, object);
 				}
+			} else if (!m_shown && highlighted && shown) {
+				float c[4];
+				std::copy(colour, colour + 4, c);
+				c[3] = alpha;
+				d.quads.push_back(iconQuad(*highlighted, ix, iy, c));
 			}
 			if (clamped) {
 				const float ax = x - 400, ay = y - 300;
@@ -1327,7 +1349,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// The bar (0x1016c1e0, ICArmorBar: bar_base under bar_filler, the
 		// fill from texel 1 to 45 of 64): a hurt friend's health for a
 		// medic, a damaged vehicle's armour for an engineer, under half.
-		if (in.friendly && p.alive && !p.manDown && !clamped && (localMedic || (localEngineer && p.vehicle))) {
+		if (m_shown && in.friendly && p.alive && !p.manDown && !clamped && (localMedic || (localEngineer && p.vehicle))) {
 			const uint32_t armoured = localMedic && !p.vehicle ? p.soldier : p.vehicle;
 			const world::Object* o = objects.find(armoured);
 			const float hp = world.hitPoints(armoured);
@@ -1345,6 +1367,21 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		drawn.push_back(std::move(d));
 	}
 	m_players = std::move(seen);
+	if (!m_shown) {
+		// Retail's selectable-icon pass keeps active radio/help icons alive
+		// when the manager hides ordinary tags (flags 0x20000 and 0x4000, plus
+		// the friendly tag colour). These are the only player icon quads
+		// emitted in this state. Name rows are drawn independently above; world
+		// markers and orders remain hidden.
+		drawn.erase(drawn.begin(), drawn.begin() + static_cast<std::ptrdiff_t>(playerDrawnStart));
+		std::stable_sort(drawn.begin(), drawn.end(), [](const Drawn& a, const Drawn& b) { return a.distance > b.distance; });
+		for (Drawn& d : drawn) {
+			out.insert(out.end(), d.quads.begin(), d.quads.end());
+		}
+		m_selectedObject = 0;
+		m_selectedRequest = -1;
+		return out;
+	}
 	// The selected tag's background under its icon (its first quad).
 	m_selectedObject = selection.centre < 0.08f ? selection.object : 0;
 	// A selected request shows its Selected icon instead (+0x58).

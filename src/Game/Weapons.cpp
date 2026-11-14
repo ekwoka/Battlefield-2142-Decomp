@@ -2,6 +2,7 @@
 
 #include "Physics/MaterialManager.h"
 #include "World/ObjectTemplate.h"
+#include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -247,11 +248,13 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		s.ignoreFriendly = number(t, "seek.ignoreFriendly", 1) != 0;
 		s.directionBonus = number(t, "seek.directionBonus", 0);
 	}
-	s.startDelay = number(t, "startDelay", 0);
+	// The GenericProjectile's own (+0x31c..+0x324, +0x335): rounds without a
+	// seek have a motor too (Unl_AV_Rifle_Projectile, eu_rifle_missile).
 	s.acceleration = number(t, "acceleration", 0);
 	s.deAcceleration = number(t, "deAcceleration", 0);
 	s.maxSpeed = number(t, "maxSpeed", 0);
 	s.hasDirection = number(t, "hasDirection", 0) != 0;
+	s.startDelay = number(t, "startDelay", 0);
 	s.hasFollow = std::find(components.begin(), components.end(), "DefaultFollowComp") != components.end();
 	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and
 	// the detonation component wait for it (0x005b3e60).
@@ -280,6 +283,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	if (const auto effect = t.settings().find("detonation.endEffectTemplate"); effect != t.settings().end()) {
 		s.endEffect = effect->second;
 	}
+	s.useMMOnEndEffect = number(t, "detonation.useMMOnEndEffect", 0) != 0;
 	const auto ttl = t.settings().find("timeToLive");
 	if (ttl != t.settings().end()) {
 		s.timeToLive = RandomDistribution::parse(ttl->second);
@@ -303,6 +307,12 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	}
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
 	return s;
+}
+
+std::string tracerGeometryFor(const world::ObjectTemplateManager& templates, const ProjectileSettings& settings)
+{
+	const world::ObjectTemplate* tracer = settings.tracerTemplate.empty() ? nullptr : templates.find(settings.tracerTemplate);
+	return tracer ? tracer->geometry() : std::string();
 }
 
 float ProjectileSettings::damageAt(float distance) const
@@ -425,6 +435,13 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.magSize = static_cast<int>(number(t, "ammo.magSize", static_cast<float>(s.magSize)));
 	s.nrOfMags = static_cast<int>(number(t, "ammo.nrOfMags", static_cast<float>(s.nrOfMags)));
 	s.reloadTime = number(t, "ammo.reloadTime", s.reloadTime);
+	s.minimumReloadTicks = static_cast<int>(number(t, "ammo.minimumTimeUntilReload", 0) * 30);
+	s.reloadAmount = std::max(0, static_cast<int>(number(t, "ammo.reloadAmount", 0)));
+	s.firstShotExtraTime = std::max(0.0f, number(t, "ammo.firstShotExtraTime", 0));
+	s.lastShotExtraTime = std::max(0.0f, number(t, "ammo.lastShotExtraTime", 0));
+	s.loopingFire = number(t, "animation.loopingFire", 0) != 0;
+	s.useShiftAnimation = number(t, "animation.useShiftAnimation", 0) != 0;
+	s.shiftDelayTicks = std::max(0, static_cast<int>(number(t, "animation.shiftDelay", 0) * 30));
 	s.batchSize = std::max(1, static_cast<int>(number(t, "fire.batchSize", 1)));
 	s.reloadWithoutPlayer = number(t, "ammo.reloadWithoutPlayer", 1) != 0;
 	s.delayToUseTicks = static_cast<int>(std::nearbyint(number(t, "delayToUse", 0) * 30));
@@ -473,17 +490,26 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 			})) {
 			s.thrown = true;
 		}
+		if (c.size() == 14 && std::equal(c.begin(), c.end(), "SingleFireComp", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			s.singleFire = true;
+		}
+	}
+	if (s.thrown || s.singleFire) {
+		s.launchDelayTicks = static_cast<int>(number(t, "fire.fireLaunchDelay", 0) * 30);
 	}
 	if (s.thrown) {
-		s.pullbackTicks = static_cast<int>(std::nearbyint(number(t, "fire.pullbackTime", 0.2f) * 30));
-		s.launchDelayTicks = static_cast<int>(std::nearbyint(number(t, "fire.fireLaunchDelay", 0) * 30));
+		s.pullbackTicks = static_cast<int>(number(t, "fire.pullbackTime", 0.2f) * 30);
 		const auto alt = t.settings().find("fire.altFireInput");
 		s.softThrow = alt != t.settings().end() && !alt->second.empty();
-		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
 		if (const auto turn = t.settings().find("fire.projectileStartRotation"); turn != t.settings().end()) {
 			std::sscanf(turn->second.c_str(), "%f/%f/%f", &s.startRotation.x, &s.startRotation.y, &s.startRotation.z);
 		}
 		s.randomRotationSpeed = number(t, "fire.randomRotationSpeed", 0);
+	}
+	if (s.thrown || s.singleFire) {
+		s.showAfterReloadTicks = static_cast<int>(std::nearbyint(number(t, "fire.showWeaponAfterReloadDelay", 0) * 30));
 	}
 	s.allowReloadWithFullMag = number(t, "ammo.allowReloadWithFullMag", 0) != 0;
 	if (const auto link = t.settings().find("ammo.magLinkWeapon"); link != t.settings().end()) {
@@ -522,20 +548,26 @@ void FireArm::enable(bool soldier)
 {
 	m_readyIn = m_settings.delayToUseTicks;
 	if (soldier || !m_settings.reloadWithoutPlayer) {
-		m_reloadLeft = 0;
+		dropReload();
 	}
 	// canReload (0x005f4140): not full (allowReloadWithFullMag aside) and
 	// a magazine to take, or magazines without end; a ReplenishingAmmoComp's
 	// (0x005d79a0) the battery too.
 	if (m_reloadLeft <= 0 && m_settings.autoReload && m_settings.instantReloadOnEnable && m_settings.magSize > 0
 		&& m_rounds == 0 && (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
-		m_rounds = m_settings.magSize;
+		m_rounds = m_settings.reloadAmount > 0 ? 1 : m_settings.magSize;
 		if (m_settings.nrOfMags >= 0) {
 			--m_mags;
 		}
 	}
 	m_pending = false;
 	m_burstLeft = 0;
+	m_launchIn = m_pullbackIn = -1;
+	m_soft = m_uncocked = false;
+	m_animationPulses = 0;
+	m_animationFireHeld = m_shiftPending = false;
+	m_shiftIn = 0;
+	m_fireSoundThisTick = m_firedThisTick = false;
 	m_hidden = false; // drawn (0x005c1650 sets flag 2)
 	m_showIn = -1;
 }
@@ -555,8 +587,33 @@ bool FireArm::batteryAllowsReload() const
 
 void FireArm::reloadStarted()
 {
-	if (m_settings.thrown) {
+	if (m_settings.thrown || m_settings.singleFire) {
 		m_showIn = m_settings.showAfterReloadTicks; // 0x005e49d0
+	}
+	if (m_settings.thrown) {
+		m_uncocked = false; // ThrownAnimationComp::reload, 0x005e1410
+	}
+}
+
+void FireArm::beginReload()
+{
+	reloadStarted();
+	m_reloadFilled = false;
+	if (m_settings.reloadAmount > 0) {
+		m_reloadRoundsLeft = std::max(0, m_settings.magSize - m_rounds);
+		if (m_settings.nrOfMags >= 0) {
+			m_reloadRoundsLeft = std::min(m_reloadRoundsLeft, m_mags);
+		}
+		const float reloadTime = static_cast<int>(m_settings.reloadTime * 30) / 30.0f;
+		const float firstExtra = static_cast<int>(m_settings.firstShotExtraTime * 30) / 30.0f;
+		const float lastExtra = static_cast<int>(m_settings.lastShotExtraTime * 30) / 30.0f;
+		m_reloadStageLeft = reloadTime + firstExtra;
+		m_reloadLeft = m_reloadRoundsLeft * reloadTime + firstExtra + lastExtra;
+		m_reloadSoundEvent = 4;
+	} else {
+		m_reloadStageLeft = 0;
+		m_reloadLeft = m_settings.reloadTime;
+		m_reloadSoundEvent = 3;
 	}
 }
 
@@ -576,14 +633,13 @@ bool FireArm::selectable() const
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_busyUntilRelease || m_settings.magSize < 0
+	if (m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
+		|| m_busyUntilRelease || m_shiftIn > 0 || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
 		return false;
 	}
-	reloadStarted();
-	m_reloadLeft = m_settings.reloadTime;
-	m_reloadFilled = false;
+	beginReload();
 	m_pending = false;
 	m_burstLeft = 0;
 	return true;
@@ -699,6 +755,88 @@ TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& r
 	return look;
 }
 
+std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& projectiles)
+{
+	std::vector<PlacedTracerLook> out;
+	for (const Projectile& projectile : projectiles) {
+		if (!projectile.tracer || !projectile.alive || !projectile.settings
+			|| projectile.settings->tracerGeometry.empty()) {
+			continue;
+		}
+		TracerLook look = tracerLook(*projectile.settings, projectile.position, projectile.velocity, projectile.origin,
+			projectile.tracerStart, projectile.tracerOffset, projectile.tracerHit);
+		if (look.shown) {
+			out.push_back({projectile.settings->tracerGeometry, look});
+		}
+	}
+	return out;
+}
+
+std::vector<FireBundle> fireBundles(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& weapon,
+	bool zoom)
+{
+	std::vector<FireBundle> out;
+	for (const world::ChildTemplate& child : weapon.children()) {
+		const world::ObjectTemplate* bundle = templates.find(child.name);
+		if (!bundle || bundle->typeName() != "EffectBundle") {
+			continue;
+		}
+		const bool zoomNamed = child.name.find("zoom") != std::string::npos || child.name.find("Zoom") != std::string::npos;
+		auto start = bundle->settings().find("setStartOnEffects");
+		if (start == bundle->settings().end()) {
+			start = bundle->settings().find("startOnEffects");
+		}
+		const unsigned long startOnEffects = start != bundle->settings().end() ? std::strtoul(start->second.c_str(), nullptr, 10) : 0;
+		if (zoomNamed == zoom && startOnEffects == 0) {
+			out.push_back({child.name, {child.position.x, child.position.y, child.position.z},
+				physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z})});
+		}
+	}
+	return out;
+}
+
+std::vector<ProjectileRenderState> projectileRenderStates(const world::ObjectTemplateManager& templates,
+	const std::vector<Projectile>& projectiles, uint32_t hiddenSerial)
+{
+	std::vector<ProjectileRenderState> out;
+	for (const Projectile& projectile : projectiles) {
+		if (!projectile.alive || !projectile.settings || (hiddenSerial && projectile.serial == hiddenSerial)) {
+			continue;
+		}
+		const world::ObjectTemplate* objectTemplate = templates.find(projectile.settings->name);
+		if (!objectTemplate || objectTemplate->geometry().empty()) {
+			continue;
+		}
+		physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({projectile.yaw, 0, 0});
+		if (physics::lengthSquared(projectile.velocity) > 0.025f) {
+			rotation = physics::lookAtRotation(projectile.velocity, rotation);
+		} else if (projectile.stuck) {
+			// Sticky rounds retain their contact normal; keep their local up on
+			// that face while preserving the launch heading around its normal.
+			physics::Vec3 up = projectile.stuckNormal;
+			const float upLength = std::sqrt(physics::lengthSquared(up));
+			if (upLength > 1e-5f) {
+				up = up * (1 / upLength);
+				physics::Vec3 forward {std::sin(projectile.yaw * 0.01745329252f), 0,
+					std::cos(projectile.yaw * 0.01745329252f)};
+				forward = forward - up * physics::dot(forward, up);
+				const float forwardLength = std::sqrt(physics::lengthSquared(forward));
+				if (forwardLength > 1e-5f) {
+					forward = forward * (1 / forwardLength);
+					physics::Vec3 right = physics::cross(up, forward);
+					const float rightLength = std::sqrt(physics::lengthSquared(right));
+					if (rightLength > 1e-5f) {
+						right = right * (1 / rightLength);
+						rotation.rows = {right, physics::cross(forward, right), forward};
+					}
+				}
+			}
+		}
+		out.push_back({objectTemplate, projectile.position, rotation});
+	}
+	return out;
+}
+
 bool FireArm::addMagazine()
 {
 	if (m_settings.magSize < 0 || m_mags >= m_settings.nrOfMags) {
@@ -706,14 +844,49 @@ bool FireArm::addMagazine()
 	}
 	++m_mags;
 	if (m_rounds <= 0 && m_reloadLeft <= 0) {
-		m_rounds = m_settings.magSize;
+		m_rounds = m_settings.reloadAmount > 0 ? 1 : m_settings.magSize;
 		--m_mags;
+	}
+	return true;
+}
+
+bool FireArm::resupply(float percent, uint32_t now)
+{
+	const int size = m_settings.magSize;
+	const int mags = m_settings.nrOfMags;
+	const bool rounds = mags == 1 || mags == -1; // the load is the magazine's rounds
+	// slot 0x9c (0x005f4520): magSize -1 takes nothing; the magazine not full,
+	// or a spare missing (native counts spares, not the loaded magazine).
+	if (size < 0 || (rounds ? m_rounds >= size : m_mags >= mags)) {
+		return false;
+	}
+	if (m_resupplyTick + 30 < now) {
+		m_resupplyCredit = 0;
+	}
+	const float delta = static_cast<float>(rounds ? size : mags) * percent * 0.01f;
+	m_resupplyCredit += delta;
+	if (m_resupplyCredit > 1) { // strictly above, then truncated
+		const int n = static_cast<int>(m_resupplyCredit);
+		m_resupplyCredit -= static_cast<float>(n);
+		if (rounds) {
+			m_rounds = std::min(size, m_rounds + n);
+		} else {
+			m_mags = std::min(mags, m_mags + n);
+		}
+	}
+	if (delta > 0) {
+		m_resupplyTick = now;
 	}
 	return true;
 }
 
 bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 {
+	m_animationPulses = 0;
+	if (!trigger) {
+		m_animationFireHeld = false;
+	}
+	m_fireSoundThisTick = m_fireSoundHeld = false;
 	const bool altPressed = altTrigger && !m_altWas;
 	m_altWas = altTrigger;
 	// The pulse meter's scan runs on (0x005d99e0, after the ammo's update).
@@ -729,41 +902,38 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	if (m_showIn >= 0 && m_showIn-- == 0) {
 		m_hidden = false;
 	}
-	if (m_launchIn >= 0 && m_soft) {
-		// The soft throw held: the power grows, the timer waits.
+	if (m_launchIn >= 0) {
 		fire(seconds, false);
-		if (altTrigger) {
+		m_triggerWas = trigger;
+		if (m_soft && altTrigger) {
 			m_softTicks = std::min(m_softTicks + 1, 30);
 			m_power = static_cast<float>(m_softTicks) / 30;
-		} else {
+		} else if (m_soft) {
 			m_soft = false;
 		}
-	} else if (m_launchIn >= 0) {
-		// 0x005e4c80: the thrown round leaves when its waits are through;
-		// meanwhile the component is busy (no new round).
-		fire(seconds, false);
-		if (m_launchIn == 0) {
-			m_launchIn = -1;
-			fired = true;
-		} else {
+		// Retail timestamps the pull-back at the press, not the release.
+		if (m_pullbackIn >= 0) {
+			if (m_pullbackIn > 0) {
+				--m_pullbackIn;
+			}
+			if (m_pullbackIn == 0 && !m_soft) {
+				m_pullbackIn = -1;
+				m_animationPulses |= 1; // state 3: the uncocked throw
+			}
+		} else if (!m_soft && m_launchIn > 0) {
 			--m_launchIn;
+		}
+		if (m_pullbackIn < 0 && !m_soft && m_launchIn == 0) {
+			m_launchIn = -1;
+			fired = launch();
+			// A charged SingleFireComp already played its sound at state 3.
+			if (m_settings.thrown) {
+				m_fireSoundThisTick = true;
+			}
 		}
 	} else {
 		const bool soft = m_settings.softThrow && altPressed && !trigger;
-		fired = fire(seconds, trigger || soft);
-		if (fired && m_settings.thrown) {
-			m_power = 1;
-			if (soft) {
-				m_soft = true;
-				m_softTicks = 0;
-				m_power = 0;
-				m_launchIn = std::max(m_settings.pullbackTicks + m_settings.launchDelayTicks - 1, 0);
-				fired = false;
-			} else if (m_settings.pullbackTicks + m_settings.launchDelayTicks > 0) {
-				m_launchIn = m_settings.pullbackTicks + m_settings.launchDelayTicks - 1;
-				fired = false;
-			}
-		}
+		fired = fire(seconds, trigger || soft, soft);
 	}
 	if (fired && m_settings.pulseScan) {
 		m_scanning = true; // 0x005d9cf0
@@ -771,10 +941,11 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	if (fired && m_settings.thrown) {
 		m_hidden = true; // the launch (0x005e5720) puts the firearm away
 	}
+	m_firedThisTick = fired;
 	return fired;
 }
 
-bool FireArm::fire(float seconds, bool trigger)
+bool FireArm::fire(float seconds, bool trigger, bool soft)
 {
 	const bool pressed = trigger && !m_triggerWas;
 	m_triggerWas = trigger;
@@ -784,12 +955,29 @@ bool FireArm::fire(float seconds, bool trigger)
 	} else if (mode == kFireBurst && pressed && m_burstLeft <= 0) {
 		m_burstLeft = std::max(m_settings.burstSize, 1);
 	}
+	// The heat cools only while the fire component is idle: the weapon update
+	// (0x005c5d5e) calls the cooling (0x005c1fe0) for fire state 0 only, and
+	// state 4 (a round's interval) still holds on the tick that ends it, before
+	// the component's update. So a held trigger never cools.
+	const bool inRoundInterval = m_cooldown > 0;
+	m_sinceFire += seconds;
+	if (m_reloadIn > 0) {
+		--m_reloadIn;
+	}
 	if (m_cooldown > 0) {
 		--m_cooldown;
 	}
-	if (m_reloadLeft > 0 || m_overheatLeft > 0) {
+	if (m_shiftIn > 0) {
+		--m_shiftIn;
+	} else if (m_shiftPending && m_cooldown <= 0 && m_reloadLeft <= 0) {
+		m_shiftPending = false;
+		m_shiftIn = m_settings.shiftDelayTicks;
+		m_animationPulses |= 32;
+	}
+	if (m_reloadLeft > 0 || overheated()) {
 		m_pending = false;
 		m_burstLeft = 0;
+		m_animationFireHeld = false;
 	}
 	if (mode == kFireSingle) {
 		trigger = m_pending;
@@ -817,6 +1005,37 @@ bool FireArm::fire(float seconds, bool trigger)
 	}
 	if (m_reloadLeft > 0) {
 		m_reloadLeft -= seconds;
+		if (m_settings.reloadAmount > 0) {
+			if (m_reloadStageLeft > 0) {
+				m_reloadStageLeft -= seconds;
+				const int reloadTicks = static_cast<int>(m_settings.reloadTime * 30);
+				const float swapRemaining = (reloadTicks - static_cast<int>(reloadTicks * std::clamp(m_settings.changeMagAt, 0.0f, 1.0f))) / 30.0f;
+				if (!m_reloadFilled && m_reloadStageLeft <= swapRemaining + 1e-4f
+					&& m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+					m_reloadFilled = true;
+					++m_rounds;
+					if (m_settings.nrOfMags >= 0) {
+						--m_mags;
+					}
+				}
+				if (m_reloadStageLeft <= 1e-4f) {
+					--m_reloadRoundsLeft;
+					if (m_reloadRoundsLeft > 0 && m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+						m_reloadStageLeft = reloadTicks / 30.0f;
+						m_reloadFilled = false;
+						m_reloadSoundEvent = 5;
+					} else {
+						m_reloadStageLeft = 0;
+						m_reloadLeft = std::min(m_reloadLeft, static_cast<int>(m_settings.lastShotExtraTime * 30) / 30.0f);
+						m_reloadSoundEvent = 6;
+					}
+				}
+			}
+			if (m_reloadLeft <= 1e-4f) {
+				m_reloadLeft = m_reloadStageLeft = 0;
+			}
+			return false;
+		}
 		// The swap at changeMagAt of the reload (0x005f4830 / 0x005f3c40),
 		// busy on to its end.
 		if (!m_reloadFilled && m_reloadLeft <= m_settings.reloadTime * (1 - m_settings.changeMagAt) + 1e-4f) {
@@ -831,9 +1050,11 @@ bool FireArm::fire(float seconds, bool trigger)
 		}
 		return false;
 	}
-	m_heat = std::max(0.0f, m_heat - m_settings.coolDownPerSec * seconds);
-	if (m_overheatLeft > 0) {
-		m_overheatLeft = std::max(0.0f, m_overheatLeft - seconds);
+	// heat = the heat at the last round - the time since it x coolDownPerSec.
+	if (!inRoundInterval) {
+		m_heat = std::max(0.0f, m_heatAtFire - m_settings.coolDownPerSec * m_sinceFire);
+	}
+	if (overheated()) {
 		return false;
 	}
 	// A magazine size of -1: no magazine (vehicle guns that heat up instead).
@@ -854,11 +1075,9 @@ bool FireArm::fire(float seconds, bool trigger)
 		// the firearm's update (0x005c58a0, slot 0xc8) turns into the
 		// reload (0x005c0f40). A magazine given to an empty gun (a resupply)
 		// is so taken in.
-		if (m_settings.autoReload && m_cooldown <= 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
+		if (m_settings.autoReload && m_cooldown <= 0 && m_reloadIn <= 0 && m_launchIn < 0 && (m_mags > 0 || m_settings.nrOfMags < 0)
 			&& m_settings.reloadTime > 0 && batteryAllowsReload()) {
-			reloadStarted();
-			m_reloadLeft = m_settings.reloadTime;
-			m_reloadFilled = false;
+			beginReload();
 			return false;
 		}
 	}
@@ -883,9 +1102,47 @@ bool FireArm::fire(float seconds, bool trigger)
 			return false;
 		}
 	}
-	if (!trigger || m_cooldown > 0 || (!unlimited && m_rounds <= 0)) {
+	if (!trigger || m_launchIn >= 0 || m_cooldown > 0 || m_shiftPending || m_shiftIn > 0 || (!unlimited && m_rounds <= 0)) {
 		return false;
 	}
+	m_pending = false;
+	m_fireSoundThisTick = true;
+	if (m_settings.thrown) {
+		m_uncocked = true;
+		m_animationPulses = 16; // ThrownAnimationComp state 2, 0x005e1380
+		m_fireSoundHeld = true;
+		m_soft = soft;
+		m_softTicks = 0;
+		m_power = soft ? 0 : 1;
+		m_pullbackIn = std::max(m_settings.pullbackTicks, 0);
+		m_launchIn = std::max(m_settings.launchDelayTicks, 0);
+		if (m_pullbackIn > 0 || soft) {
+			return false;
+		}
+		m_pullbackIn = -1;
+		m_animationPulses |= 1;
+	} else {
+		if (m_settings.loopingFire) {
+			m_animationFireHeld = true;
+		} else {
+			m_animationPulses |= 1;
+		}
+		if (m_settings.singleFire && m_settings.launchDelayTicks > 0) {
+			m_launchIn = m_settings.launchDelayTicks;
+			return false;
+		}
+	}
+	if (m_launchIn > 0) {
+		return false;
+	}
+	m_launchIn = -1;
+	m_fireSoundHeld = false;
+	return launch();
+}
+
+bool FireArm::launch()
+{
+	const bool unlimited = m_settings.magSize < 0;
 	m_pending = false;
 	if (m_burstLeft > 0) {
 		--m_burstLeft;
@@ -893,16 +1150,21 @@ bool FireArm::fire(float seconds, bool trigger)
 	m_cooldown = m_settings.ticksBetweenShots();
 	m_busyUntilRelease = m_settings.busyUntilButtonRelease;
 	if (m_settings.heatAddWhenFire > 0) {
+		// The batch fire (0x005c3cb0): over 1 the heat becomes overheatPenalty
+		// and cools back down to 1 (the gun stops while it is 1 or more).
 		m_heat += m_settings.heatAddWhenFire;
-		if (m_heat >= 1) {
-			m_heat = 1;
-			m_overheatLeft = m_settings.overheatPenalty;
+		if (m_heat > 1) {
+			m_heat = m_settings.overheatPenalty;
 		}
+		m_heatAtFire = m_heat;
+		m_sinceFire = 0;
 	}
 	if (unlimited) {
 		return true;
 	}
 	--m_rounds;
+	m_shiftPending = m_settings.useShiftAnimation && m_rounds > 0;
+	m_reloadIn = m_settings.minimumReloadTicks;
 	// A ReplenishingAmmoComp's round (0x005d81d0): the battery pays
 	// abilityCost for it.
 	if (m_settings.replenishing && m_settings.abilityCost > 0) {
@@ -917,10 +1179,9 @@ bool FireArm::fire(float seconds, bool trigger)
 	// empty, the trigger clicks (0x005c2ee0), until c_PIReload (the
 	// firearm's action 10). ammo.nrOfMags -1: magazines without end (the
 	// drones' detonators).
-	if (m_rounds == 0 && m_settings.autoReload && (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
-		reloadStarted();
-		m_reloadLeft = m_settings.reloadTime;
-		m_reloadFilled = false;
+	if (m_rounds == 0 && m_settings.autoReload && m_reloadIn <= 0
+		&& (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
+		beginReload();
 	}
 	return true;
 }
@@ -998,14 +1259,25 @@ physics::Vec3 deviateVelocity(const physics::Vec3& velocity, const physics::Vec3
 	return velocity + up * (scale * alongUp) + right * (scale * alongRight);
 }
 
-void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds, bool overrideArming)
+void armFollow(Projectile& p, float targetSpeed, bool overrideArming)
 {
 	const ProjectileSettings& s = *p.settings;
-	const float targetSpeed = std::sqrt(physics::lengthSquared(targetVelocity));
 	if (targetSpeed > p.targetTopSpeed || (targetSpeed < s.armingSpeed && !p.armed)) {
 		p.targetTopSpeed = targetSpeed;
 	}
 	p.armed = p.targetTopSpeed > s.armingSpeed || overrideArming;
+}
+
+float followSpeedCap(const Projectile& p, bool overrideArming)
+{
+	const ProjectileSettings& s = *p.settings;
+	return s.useTargetSpeed && !overrideArming ? (p.armed ? s.speedModifier : 1.0f) * p.targetTopSpeed : s.maxSpeed;
+}
+
+void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds, bool overrideArming)
+{
+	const ProjectileSettings& s = *p.settings;
+	armFollow(p, std::sqrt(physics::lengthSquared(targetVelocity)), overrideArming);
 	const float ownSpeed = std::sqrt(physics::lengthSquared(p.velocity));
 	physics::Vec3 point = aim;
 	if (ownSpeed > 0) {
@@ -1014,10 +1286,7 @@ void followMagnet(Projectile& p, const physics::Vec3& aim, const physics::Vec3& 
 	physics::Vec3 direction = point - p.position;
 	const float length = std::sqrt(physics::lengthSquared(direction));
 	direction = length > 1e-4f ? direction * (1 / length) : physics::Vec3 {};
-	float cap = s.maxSpeed;
-	if (s.useTargetSpeed && !overrideArming) {
-		cap = (p.armed ? s.speedModifier : 1.0f) * p.targetTopSpeed; // 0x005ec770, 0x005ec7a0
-	}
+	const float cap = followSpeedCap(p, overrideArming);
 	if (ownSpeed >= cap) {
 		if (ownSpeed > 0.01f) {
 			p.velocity = p.velocity - p.velocity * (std::min(s.deAcceleration * seconds, ownSpeed) / ownSpeed);
@@ -1078,16 +1347,30 @@ physics::Vec3 noseOf(const Projectile& p)
 	return speed > 1e-4f ? p.velocity * (1 / speed) : physics::Vec3 {};
 }
 
-void thrustProjectile(Projectile& p, float seconds)
+void thrustProjectile(Projectile& p, float seconds, bool overrideArming)
 {
 	const ProjectileSettings& s = *p.settings;
 	if (s.acceleration <= 0 || s.maxSpeed <= 0 || s.seek == ProjectileSettings::Seek::Magnet || s.seek == ProjectileSettings::Seek::Beacon || p.stuck || p.resting) {
 		return;
 	}
-	const bool engineOn = s.targetActivation ? (p.lockedOn != 0 || p.lockedBait != 0) : p.age >= s.startDelay;
+	const bool target = p.lockedOn != 0 || p.lockedBait != 0;
+	const bool engineOn = s.targetActivation ? target : p.age >= s.startDelay;
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
+	// A round with a follow thrusts while under its cap (followSpeedCap: the
+	// target's speed for the heat seekers, else maxSpeed) and brakes by
+	// deAcceleration against its heading at the cap, or with magneticBehaviour
+	// whenever it has no target (0x005b44ff..0x005b4551).
+	const bool follows = s.seek != ProjectileSettings::Seek::None;
+	const float cap = follows ? followSpeedCap(p, overrideArming) : s.maxSpeed;
+	if (!engineOn || speed <= 0.01f) {
+		return;
+	}
+	if (follows && ((s.magneticBehaviour && !target) || speed >= cap)) {
+		p.velocity = p.velocity - p.velocity * (std::min(s.deAcceleration * seconds, speed) / speed);
+		return;
+	}
 	const physics::Vec3 nose = noseOf(p);
-	if (!engineOn || speed >= s.maxSpeed || physics::lengthSquared(nose) < 0.25f) {
+	if (speed >= cap || physics::lengthSquared(nose) < 0.25f) {
 		return;
 	}
 	// 0x005ed1a0 answers true past followTime too (without turning).

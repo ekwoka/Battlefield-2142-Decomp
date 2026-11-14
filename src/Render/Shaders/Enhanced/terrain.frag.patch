@@ -1,0 +1,9 @@
+Enhanced variant of terrain.frag: enhanced_shadow.glsl (the cascades). No AO:
+terrain.frag already uses all 16 sampler slots Metal allows a shader (0-10 the
+maps, 11-12 the shadows, 13-15 the envmap and the side layers), so a 17th for
+the AO map makes the library fail and takes the whole lit set with it.
+<<<<
+#include "shadow.glsl"
+====
+#include "enhanced_shadow.glsl"
+>>>>

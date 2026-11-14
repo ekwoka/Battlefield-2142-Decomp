@@ -134,6 +134,8 @@ TEST(Nametags_Font)
 	const float white[4] = {1, 1, 1, 1};
 	font.write("A A", 0, 0, white, quads);
 	CHECK(quads.size() == 2 && quads[1].x0 == 9);
+	// The font's DXT1 texture has no alpha (black cells), so its quads must add (source alpha, ONE), not blend over.
+	CHECK(quads[0].blend[0] == 7 && quads[0].blend[1] == 2 && quads[1].blend[0] == 7 && quads[1].blend[1] == 2);
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -261,11 +263,16 @@ TEST(Nametags_JoinedWorld)
 	templates.registerType(3, "Soldier");
 	world::ObjectTemplate* soldierTemplate = templates.create("Soldier", "pac_light_soldier");
 	soldierTemplate->settings()["armor.maxHitPoints"] = "100";
+	world::ObjectTemplate* kitTemplate = templates.create("Kit", "assault_kit");
+	kitTemplate->settings()["kitType"] = "Assault";
 	world::ObjectManager objects;
 	game::GameWorld round(templates, objects);
 	round.startRound();
 	const uint32_t mine = objects.create(soldierTemplate, {0, 0, 0})->id();
 	const uint32_t friendBody = objects.create(soldierTemplate, {0, 0, 20})->id();
+	const uint32_t ordinaryBody = objects.create(soldierTemplate, {2, 0, 15})->id();
+	const uint32_t trackerBody = objects.create(soldierTemplate, {0, 0, -10})->id();
+	const uint32_t assaultKit = objects.create(kitTemplate, {0, 0, 0})->id();
 	// The server's world as the HUD has it.
 	struct Joined : host::HudWorld {
 		std::vector<PlayerInfo> players;
@@ -316,9 +323,34 @@ TEST(Nametags_JoinedWorld)
 	mate.soldier = friendBody;
 	mate.position = {0, 0, 20};
 	mate.name = "Leader";
-	joined.players = {me, mate};
+	game::GameWorld::PlayerInfo ordinary = mate;
+	ordinary.id = 2;
+	ordinary.squad = 0;
+	ordinary.squadLeader = false;
+	ordinary.soldier = ordinaryBody;
+	ordinary.position = {2, 0, 15};
+	ordinary.kit = assaultKit;
+	ordinary.name = "Teammate";
+	game::GameWorld::PlayerInfo tracker = ordinary;
+	tracker.id = 5;
+	tracker.soldier = trackerBody;
+	tracker.position = {0, 0, -10};
+	tracker.name = "Offscreen Medic";
+	game::GameWorld::PlayerInfo commander = mate;
+	commander.id = 3;
+	commander.commander = true;
+	commander.squadLeader = false;
+	commander.squad = 0;
+	commander.soldier = objects.create(soldierTemplate, {-5, 0, 25})->id();
+	commander.position = {-5, 0, 25};
+	commander.name = "Commander";
+	joined.players = {me, mate, ordinary, commander, tracker};
 	joined.requests = {{1, 1, 3, {0, 0, 30}, 0}};
 	nametags::IconRegistry icons;
+	icons.icons[0x5a] = {"ordinary-player.dds", 0, 0, 1, 1, 16, 16};
+	icons.icons[0x6a] = {"squad-leader.dds", 0, 0, 1, 1, 16, 16};
+	icons.icons[0x69] = {"commander.dds", 0, 0, 1, 1, 16, 16};
+	icons.icons[0x2d] = {"medic-help.dds", 0, 0, 1, 1, 16, 16};
 	icons.icons[nametags::requestIconId(3, false)] = {"supplyRequest.dds", 0, 0, 1, 1, 16, 16};
 	icons.icons[nametags::requestIconId(3, true)] = {"supplyRequestSelected.dds", 0, 0, 1, 1, 16, 16};
 	nametags::Nametags tags(files);
@@ -343,8 +375,71 @@ TEST(Nametags_JoinedWorld)
 	// The friend's name (the font's glyphs) and the squad's request, which
 	// the crosshair selects (it is straight ahead).
 	CHECK(hasTexture(quads, "Fonts/BF1942.dds"));
+	CHECK(hasTexture(quads, "ordinary-player.dds"));
+	CHECK(hasTexture(quads, "squad-leader.dds"));
+	CHECK(hasTexture(quads, "commander.dds"));
 	CHECK(hasTexture(quads, "supplyRequest.dds") || hasTexture(quads, "supplyRequestSelected.dds"));
 	CHECK(tags.selectedRequest() == 1 * 4 + 3);
+	// This final frame follows multiple tag refreshes. Retail setup initially
+	// clears show-icon bit 0x10, then its same-team updater enables it for a
+	// friendly player; the native final-frame regression expects that result.
+	// The ordinary teammate's feet-based PlayerInfo position is converted to
+	// the retail soldier origin, then uses the standing icon offset of -0.6 m.
+	// This intentionally places the marker below the independent name anchor.
+	const hud::HudQuad* ordinaryIcon = nullptr;
+	for (const hud::HudQuad& q : quads) {
+		if (q.texture == "ordinary-player.dds") {
+			ordinaryIcon = &q;
+		}
+	}
+	CHECK(ordinaryIcon != nullptr);
+	if (ordinaryIcon) {
+		CHECK(std::fabs((ordinaryIcon->x0 + ordinaryIcon->x1) * 0.5f - 473.2f) < 1.0f);
+		CHECK((ordinaryIcon->y0 + ordinaryIcon->y1) * 0.5f > 300.0f);
+		float firstNameGlyph = 1e9f;
+		for (const hud::HudQuad& q : quads) {
+			if (q.texture == "Fonts/BF1942.dds") {
+				firstNameGlyph = std::min(firstNameGlyph, q.y0);
+			}
+		}
+		CHECK(firstNameGlyph < (ordinaryIcon->y0 + ordinaryIcon->y1) * 0.5f);
+	}
+	const auto ordinaryIconY = [&]() {
+		float y = -1;
+		for (const hud::HudQuad& q : quads) {
+			if (q.texture == "ordinary-player.dds") {
+				y = (q.y0 + q.y1) * 0.5f;
+				break;
+			}
+		}
+		return y;
+	};
+	const float standingIconY = ordinaryIconY();
+	joined.players[2].pose = game::SoldierPose::Crouch;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	const float crouchedIconY = ordinaryIconY();
+	joined.players[2].pose = game::SoldierPose::Prone;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	const float proneIconY = ordinaryIconY();
+	CHECK(standingIconY > 0 && crouchedIconY > standingIconY);
+	CHECK(std::fabs(proneIconY - crouchedIconY) < 0.1f);
+	joined.players[2].pose = game::SoldierPose::Stand;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	// With the manager's shown byte false, retail's active radio/help flags
+	// keep compatible medic response icons available.
+	tags.setShown(false);
+	tags.radioCall(0, nametags::CallMedic, true);
+	for (int i = 0; i < 3; ++i) {
+		quads = tags.frame(round, objects, view, 1 / 30.0f);
+	}
+	CHECK(hasTexture(quads, "medic-help.dds"));
+	CHECK(hasTexture(quads, "Menu/Nametag/loactionArrow.dds"));
+	CHECK(!hasTexture(quads, "ordinary-player.dds"));
+	CHECK(!hasTexture(quads, "squad-leader.dds"));
+	CHECK(!hasTexture(quads, "commander.dds"));
+	// The name renderer is independent of the manager's icon shown byte.
+	CHECK(hasTexture(quads, "Fonts/BF1942.dds"));
+	CHECK(!hasTexture(quads, "supplyRequest.dds") && !hasTexture(quads, "supplyRequestSelected.dds"));
 }
 
 // An object tag's refresh (0x100f40d0): below healthActivationLevel (the

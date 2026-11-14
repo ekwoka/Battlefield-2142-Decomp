@@ -1,5 +1,7 @@
+#include <cstdio>
 #include "GameAudio.h"
 
+#include <cstdio>
 #include "Game/GameWorld.h"
 #include "HudWorld.h"
 #include "Game/Vehicle.h"
@@ -16,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 namespace dice::hfe {
 
@@ -39,21 +42,6 @@ float number(const world::ObjectTemplate& t, const char* key, float fallback)
 {
 	const std::string& value = setting(t, key);
 	return value.empty() ? fallback : static_cast<float>(std::atof(value.c_str()));
-}
-
-// Whether a point is within a vehicle's box (its collision LOD's, in its
-// own frame).
-bool insideBox(const game::GameWorld::VehicleInfo& v, const physics::Vec3& p)
-{
-	const physics::Vec3 d = p - v.position;
-	const physics::Vec3& f = v.forward;
-	const physics::Vec3& r = v.right;
-	const physics::Vec3 up {f.y * r.z - f.z * r.y, f.z * r.x - f.x * r.z, f.x * r.y - f.y * r.x};
-	const float x = d.x * r.x + d.y * r.y + d.z * r.z;
-	const float y = d.x * up.x + d.y * up.y + d.z * up.z;
-	const float z = d.x * f.x + d.y * f.y + d.z * f.z;
-	return x >= v.boxMin.x && x <= v.boxMax.x && y >= v.boxMin.y && y <= v.boxMax.y && z >= v.boxMin.z
-		&& z <= v.boxMax.z;
 }
 
 // The soldier's own material against the floors the shipped cells pair
@@ -94,18 +82,18 @@ void GameAudio::listener(Camera& camera)
 		camera.velocity = {};
 	}
 	bool titanSeat = false, inside = false;
+	uint32_t titan = 0;
 	if (alive && me.vehicle) {
 		titanSeat = m_round.isTitan(me.vehicle);
 		inside = titanSeat;
+		titan = titanSeat ? me.vehicle : 0;
 	} else if (alive && !m_round.titans().empty()) {
-		for (const auto& v : m_round.vehicleList()) {
-			if (m_round.isTitan(v.object) && insideBox(v, me.position + physics::Vec3 {0, 1.0f, 0})) {
-				inside = true;
-				break;
-			}
-		}
+		titan = m_round.titanHolding(me.position + physics::Vec3 {0, 1.0f, 0});
+		inside = titan != 0;
 	}
 	m_listenerState.insideTitan = inside;
+	const world::Object* titanObject = titan ? m_objects.find(titan) : nullptr;
+	m_listenerState.insideTitanTeam = titanObject ? titanObject->team() : 0;
 	m_manager.setListenerRoot(alive ? (me.vehicle ? me.vehicle : me.soldier) : 0, titanSeat);
 	interior(me, alive && camera.firstPerson);
 	m_manager.setWindAllowed(alive && camera.firstPerson && !inside);
@@ -140,6 +128,12 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 			if (seat >= 0 && static_cast<size_t>(seat) < seats.size()) {
 				m_interior.pco = seats[static_cast<size_t>(seat)].name;
 			}
+			// Pods are Parachute control objects, outside the ordinary vehicle layout.
+			if (m_interior.pco.empty()) {
+				const auto* root = m_objects.find(vehicle);
+				if (root && root->objectTemplate() && root->objectTemplate()->typeName() == "Parachute")
+					m_interior.pco = root->objectTemplate()->name();
+			}
 			const world::ObjectTemplate* t = m_templates.find(m_interior.pco);
 			if (t) {
 				m_interior.obstruction = number(*t, "listenerObstruction", 0);
@@ -149,8 +143,18 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 				const world::ObjectTemplate& rt = *root->objectTemplate();
 				m_interior.maxHitPoints = number(rt, "armor.maxHitPoints", number(rt, "armor.hitPoints", 0));
 			}
-			const auto make = [&](const char* event) -> sound::ISound* {
-				const std::string name = "S_" + m_interior.pco + event;
+			const auto resolve = [&](const char* event) {
+				// Variants such as eu_pod0 share the base pod's authored sounds.
+				if (t) for (const auto& child : t->children()) {
+					if (child.name.size() >= std::strlen(event)
+						&& child.name.compare(child.name.size() - std::strlen(event), std::strlen(event), event) == 0
+						&& m_manager.hasSound(child.name)) return child.name;
+				}
+				return "S_" + m_interior.pco + event;
+			};
+			m_interior.ambientName = resolve("_Ambient");
+			m_interior.damagedName = resolve("_AmbientDamaged");
+			const auto make = [&](const std::string& name) -> sound::ISound* {
 				sound::ISoundTemplate* st = m_manager.hasSound(name) ? m_manager.soundTemplate(name) : nullptr;
 				sound::ISound* sound = st ? st->createSound() : nullptr;
 				if (sound) {
@@ -158,8 +162,8 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 				}
 				return sound;
 			};
-			m_interior.ambient = make("_Ambient");
-			m_interior.damaged = make("_AmbientDamaged");
+			m_interior.ambient = make(m_interior.ambientName);
+			m_interior.damaged = make(m_interior.damagedName);
 		}
 	}
 	m_listenerState.seat = m_interior.pco;
@@ -171,12 +175,12 @@ void GameAudio::interior(const game::GameWorld::PlayerInfo& me, bool firstPerson
 	}
 	m_interior.speedInput = std::clamp((std::sqrt(physics::lengthSquared(me.velocity)) - 0.1f) * 0.033333335f, 0.0f, 1.0f);
 	bool damaged = false;
-	if (m_interior.maxHitPoints > 0 && m_manager.hasSound("S_" + m_interior.pco + "_AmbientDamaged")) {
+	if (m_interior.maxHitPoints > 0 && m_manager.hasSound(m_interior.damagedName)) {
 		const float hp = m_round.hitPoints(vehicle);
 		damaged = hp >= 0 && hp < m_interior.maxHitPoints * m_interior.damagedLimit;
 	}
-	const std::string event = damaged ? "_AmbientDamaged" : "_Ambient";
-	m_listenerState.ambient = m_manager.hasSound("S_" + m_interior.pco + event) ? "S_" + m_interior.pco + event : "";
+	const std::string& name = damaged ? m_interior.damagedName : m_interior.ambientName;
+	m_listenerState.ambient = m_manager.hasSound(name) ? name : "";
 	m_manager.setInteriorAmbient(damaged ? m_interior.damaged : m_interior.ambient, m_interior.obstruction);
 }
 
@@ -202,7 +206,13 @@ void GameAudio::soldierHud(const game::GameWorld::PlayerInfo& me, bool alive)
 		}
 		return;
 	}
-	const std::string& panting = setting(*t, "vehicleHud.pantingSound");
+	// The shipped data puts vehicleHud.pantingSound / injurySound on the worn Kit, not the soldier template.
+	const world::Object* kit = me.kit ? m_objects.find(me.kit) : nullptr;
+	const auto hudSetting = [&](const char* key) -> const std::string& {
+		const std::string& own = kit && kit->objectTemplate() ? setting(*kit->objectTemplate(), key) : setting(*t, key);
+		return own.empty() ? setting(*t, key) : own;
+	};
+	const std::string& panting = hudSetting("vehicleHud.pantingSound");
 	if (me.stamina > 0) {
 		if (me.stamina >= 0.2f && m_panting) {
 			m_manager.stopSound(m_pantingSound);
@@ -221,7 +231,7 @@ void GameAudio::soldierHud(const game::GameWorld::PlayerInfo& me, bool alive)
 	}
 	const float f = std::clamp(hp / max, 0.0f, 1.0f);
 	if (m_lastHealth >= 0 && f < m_lastHealth && f != 0 && m_injuryTimer <= 0) {
-		const std::string& injury = setting(*t, "vehicleHud.injurySound");
+		const std::string& injury = hudSetting("vehicleHud.injurySound");
 		if (!injury.empty()) {
 			m_manager.playSound(injury);
 			++m_listenerState.injuries;
@@ -252,8 +262,6 @@ void GameAudio::materialRadio()
 		return;
 	}
 	m_materialScanIn = 3;
-	std::vector<game::GameWorld::VehicleInfo> titans;
-	bool listed = false;
 	const double now = m_round.roundTime();
 	for (const auto& p : m_round.playerList()) {
 		if (!p.alive || p.vehicle) {
@@ -264,22 +272,13 @@ void GameAudio::materialRadio()
 		if (!material || !material->triggerRadio) {
 			continue;
 		}
-		if (!listed) {
-			listed = true;
-			for (const auto& v : m_round.vehicleList()) {
-				if (m_round.isTitan(v.object)) {
-					titans.push_back(v);
-				}
-			}
+		// Titans are not in vehicleList(), so the Titan holding the soldier comes from the round's own hull test.
+		const uint32_t held = m_round.titanHolding(p.position + physics::Vec3 {0, 1.0f, 0}, true);
+		if (!held) {
+			continue; // no Titan under the soldier: not a Titan floor, nothing to announce
 		}
-		bool friendly = false;
-		for (const auto& titan : titans) {
-			if (insideBox(titan, p.position + physics::Vec3 {0, 1.0f, 0})) {
-				const world::Object* object = m_objects.find(titan.object);
-				friendly = object && object->team() == p.team;
-				break;
-			}
-		}
+		const world::Object* object = m_objects.find(held);
+		const bool friendly = object && object->team() == p.team;
 		const int own = friendly ? 0 : 1, other = friendly ? 0 : 2;
 		for (const auto& [index, team] : {std::pair<int, int> {own, p.team}, {other, p.team == 1 ? 2 : 1}}) {
 			const physics::MaterialCell::RadioMessage* radio = materials->radioMessage(touched, kSoldierBodyMaterial, index);
@@ -327,6 +326,11 @@ void GameAudio::tick(const Camera& given)
 	materialRadio();
 	for (const auto& sound : m_round.takeSounds()) {
 		m_sounds.play(sound.sound, toSound(sound.position));
+	}
+	// A bundle plays its Sound children as it starts (0x00619700 makes the
+	// "Start" sound); the round's own bundles too, not only the renderer's.
+	for (const auto& sound : m_round.takeEffectSounds()) {
+		m_sounds.play(sound.name, toSound(sound.position));
 	}
 	weapons(camera);
 	engines();
@@ -383,16 +387,20 @@ void GameAudio::weapons(const Camera& camera)
 			: event.kind == Kind::SwitchFireRate                          ? sound::GameSounds::WeaponEvent::SwitchFireRate
 			: event.kind == Kind::TriggerClick                            ? sound::GameSounds::WeaponEvent::TriggerClick
 																		  : sound::GameSounds::WeaponEvent::Deploy;
-		const uint64_t user = (static_cast<uint64_t>(static_cast<uint32_t>(event.player)) << 32) | event.object;
+		const game::GameWorld::PlayerInfo* seated = event.player >= 0 ? info(event.player) : nullptr;
+		// A seat carries several fire components (cannon, launcher): each is
+		// its own sound component (0x005dbdc0), so key the state by weapon.
+		const uint32_t part = seated && seated->vehicle ? static_cast<uint32_t>(std::hash<std::string>()(event.weapon)) : 0;
+		const uint64_t user = (static_cast<uint64_t>(static_cast<uint32_t>(event.player)) << 32) | (event.object ^ part);
 		sound::GameSounds::FireInfo fire;
 		if (event.kind == Kind::Fire) {
 			const game::GameWorld::PlayerInfo* p = event.player >= 0 ? info(event.player) : nullptr;
-			// The fire component's mode (slot 0xdc): the hand weapon's, a seat
-			// gun's automatic (the rewrite's seats fire while held).
-			fire.mode = p && !p->vehicle ? p->fireMode : 2;
+			// The fire component's mode (slot 0xdc): the hand weapon's or the
+			// seat gun's own (no fire.addFireRate: automatic).
+			fire.mode = p && !p->vehicle ? p->fireMode : event.fireMode >= 0 ? event.fireMode : 2;
 			const int burst = weapon ? std::max(1, static_cast<int>(number(*weapon, "fire.burstSize", 3))) : 1;
 			fire.burstRounds = fire.mode == 0 ? 1 : fire.mode == 1 ? burst : std::max(1, p ? p->roundsInMag : 1);
-			fire.held = false;
+			fire.held = event.fireHeld;
 			fire.roundsPerMinute = weapon ? static_cast<int>(number(*weapon, "fire.roundsPerMinute", 600)) : 600;
 			Trigger& trigger = m_triggers[user];
 			trigger.firing = true;
@@ -402,12 +410,13 @@ void GameAudio::weapons(const Camera& camera)
 			m_sounds.releaseTrigger(user);
 			m_triggers.erase(user);
 		}
-		m_sounds.weapon(kind, event.weapon, firstPerson, toSound(event.position), muteOnFire, user, event.object, &fire);
+		m_sounds.weapon(kind, event.weapon, firstPerson, toSound(event.position), muteOnFire, user, event.object, &fire,
+			event.reloadState);
 	}
 	for (auto it = m_triggers.begin(); it != m_triggers.end();) {
 		const int player = static_cast<int>(static_cast<uint32_t>(it->first >> 32));
 		const game::GameWorld::PlayerInfo* p = info(player);
-		const bool held = p && p->alive && p->firing;
+		const bool held = p && p->alive && (p->firing || p->altFiring);
 		if (!held || m_tick - it->second.lastRound > it->second.interval) {
 			m_sounds.releaseTrigger(it->first);
 			it = m_triggers.erase(it);
@@ -500,9 +509,49 @@ void GameAudio::stepNewStyle(NewStyleEngine& e, bool on, float clutch, float rpm
 	}
 }
 
+// 0x00564710 with its own-speed flag clear: a zero value stops the easing
+// at once; above 1e-4 a silent sound starts from 1e-4; while playing the
+// value follows |audioValue| through 0x006afeb0 (smooth time
+// rotationalbundle-sound-smooth-time 0.15, a step of 1/30 s), clamped to
+// 0..1, and stops below 5e-5.
+bool GameAudio::stepRotationSound(RotationSound& s, float audioValue)
+{
+	const float target = std::fabs(audioValue);
+	if (audioValue == 0) {
+		s.value = 0;
+		s.speed = 0;
+	}
+	if (!s.playing && target > 1e-4f) {
+		s.playing = true;
+		s.value = 1e-4f;
+	}
+	if (!s.playing) {
+		return false;
+	}
+	const float omega = 2.0f / Vars::global().number("rotationalbundle-sound-smooth-time", 0.15f);
+	const float dt = 1.0f / 30;
+	const float x = omega * dt;
+	const float decay = 1.0f / (1 + x + 0.48f * x * x + 0.235f * x * x * x);
+	float change = s.value - target;
+	if (std::fabs(change) < 1e-4f) {
+		change = 0;
+	}
+	const float temp = (s.speed + omega * change) * dt;
+	s.speed = (s.speed - omega * temp) * decay;
+	if (std::fabs(s.speed) < 1e-4f) {
+		s.speed = 0;
+	}
+	s.value = std::clamp(target + (change + temp) * decay, 0.0f, 1.0f);
+	if (s.value < 5e-5f) {
+		s = RotationSound {};
+	}
+	return s.playing;
+}
+
 void GameAudio::engines()
 {
 	std::set<uint32_t> aboard;
+	std::set<uint64_t> rotating;
 	std::map<uint32_t, physics::Vec3> speeds;
 	for (const auto& player : m_round.playerList()) {
 		if (player.alive && player.vehicle) {
@@ -523,14 +572,14 @@ void GameAudio::engines()
 			if (part.type != "Engine") {
 				continue;
 			}
-			// The old engines run (+0x24c) and say their own rpm; newCar2's is
+			// The old engines run (+0x24c) and say their own audio value (+0x258); newCar2's is
 			// the vehicle's, on while someone is aboard.
 			bool running = true;
 			float rpm = vehicle->rpm();
 			for (const auto& engine : vehicle->engines()) {
 				if (engine.part == static_cast<int>(index)) {
 					running = engine.running;
-					rpm = engine.rpm;
+					rpm = engine.audioValue();
 				}
 			}
 			if (!running) {
@@ -553,14 +602,25 @@ void GameAudio::engines()
 				m_sounds.loop(owner, "S_" + part.name + "_Idle", at, {}, e.input, id);
 				m_sounds.loop(owner, "S_" + part.name + "_Rpm1", at, {}, e.input, id, &e.rpm1Scale);
 				m_sounds.loop(owner, "S_" + part.name + "_Rpm2", at, {}, e.input, id, &e.rpm2Scale);
+				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, e.input, id);
 				continue;
 			}
-			// The old style: |rpm| x 0.8333 for all three.
+			// The old style: |audio value| x 0.8333 for Idle, Rpm1 and Rpm2 (0x007fe740). RotationRpm
+			// (the aircraft's air_distant whoosh) gets the engine's audio value itself, eased
+			// (0x0064cb80 -> 0x00564710).
 			const float input = std::fabs(rpm * 0.8333333f);
 			for (const char* loop : {"_Idle", "_Rpm1", "_Rpm2"}) {
 				m_sounds.loop(owner, "S_" + part.name + loop, at, {}, input, id);
 			}
+			RotationSound& rotation = m_rotationSounds[owner];
+			if (stepRotationSound(rotation, rpm)) {
+				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, rotation.value, id);
+			}
+			rotating.insert(owner);
 		}
+	}
+	for (auto it = m_rotationSounds.begin(); it != m_rotationSounds.end();) {
+		it = rotating.count(it->first) ? std::next(it) : m_rotationSounds.erase(it);
 	}
 }
 
@@ -629,10 +689,21 @@ void GameAudio::radio()
 	if (!playerInfo(local, me)) {
 		return;
 	}
+	// 0x0042e17e..0x0042e2d6: inside one's own Titan a message plays its
+	// "_inside" variant when there is one (Betty instead of the commander);
+	// a message named "_inside" plays only there.
+	const bool ownTitan = m_listenerState.insideTitan && m_listenerState.insideTitanTeam == me.team;
 	for (const auto& message : heard) {
 		++radioHeard;
 		sound::VoiceMessages::Heard in;
 		in.message = message.voice;
+		if (in.message.find("_inside") != std::string::npos) {
+			if (!ownTitan) {
+				continue;
+			}
+		} else if (ownTitan && m_voices->message(in.message + "_inside") >= 0) {
+			in.message += "_inside";
+		}
 		in.listenerTeam = me.team;
 		in.listener = toSound(me.position);
 		game::GameWorld::PlayerInfo sender;
@@ -668,6 +739,10 @@ void GameAudio::radio()
 			}
 		}
 		const sound::VoiceMessages::Result result = m_voices->heard(in);
+		// One line per radio message so a session log shows whether the voice started (and at what group gain).
+		std::printf("radio-voice: %s sender=%d own=%d played=%d sample=%d group2-volume=%.2f\n", message.voice.c_str(), message.sender,
+			in.senderIsListener, static_cast<int>(result.played), result.sample, m_manager.volumeForGroup(2));
+		std::fflush(stdout);
 		if (result.played != sound::VoiceMessages::Played::None) {
 			++voiceOvers;
 		}
@@ -675,6 +750,25 @@ void GameAudio::radio()
 			onRadioText(message.sender, message.channel, result.text);
 		}
 	}
+}
+
+std::string GameAudio::ticketStateMessage(int team, int state, int localTeam, const std::string& gameMode)
+{
+	// Titan mode (the mode's name holding "ti") has both teams' Titan
+	// shield/hull lines; the other modes only the local team's ticket level.
+	const int level = state % 20;
+	const bool titans = gameMode.find("ti") != std::string::npos;
+	const bool own = team == localTeam;
+	if (level <= 0 || level > 15) {
+		return {};
+	}
+	if (level == 15) {
+		return own ? "AUTO_RULES_TITANS_less_points_friendly" : "AUTO_RULES_TITANS_less_points_enemy";
+	}
+	if (titans) {
+		return "AUTO_RULES_ticketlevel_titans_" + std::to_string(level) + (own ? "_friendly" : "_enemy");
+	}
+	return own ? "AUTO_RULES_ticketlevel_" + std::to_string(level) : std::string();
 }
 
 void GameAudio::silos()
@@ -820,12 +914,35 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 				}
 			}
 		}
+		// A Titan's consoles and core (Radio.friendlyDestroyedMessage
+		// "AUTO_TITAN_BB_consoledestroyeda" and the like) are its parts, not
+		// world objects: watched by their template, on the Titan's team.
+		for (int team = 1; team <= 2; ++team) {
+			for (const auto& part : m_round.titanParts(team)) {
+				if (m_watched.count(part.id)) {
+					continue;
+				}
+				const world::ObjectTemplate* t = m_templates.find(part.name);
+				if (!t || !(t->settings().count("radio.friendlyDestroyedMessage") || t->settings().count("radio.destroyedMessage")
+						|| t->settings().count("radio.enemyDestroyedMessage") || t->settings().count("radio.damageMessage")
+						|| t->settings().count("radio.repairedMessage"))) {
+					continue;
+				}
+				Watched w;
+				w.team = team;
+				w.titanPart = true;
+				w.hitPoints = part.hitPoints;
+				w.destroyed = part.hitPoints <= 0;
+				w.objectTemplate = t;
+				m_watched[part.id] = w;
+			}
+		}
 		m_firstScan = false;
 	}
 	for (auto it = m_watched.begin(); it != m_watched.end();) {
 		const world::Object* object = m_objects.find(it->first);
 		Watched& watched = it->second;
-		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : watched.titanPart ? watched.objectTemplate : nullptr;
 		if (!t) {
 			// Gone (a wreck removed) before its end was seen: destroyed.
 			if (watched.objectTemplate && !watched.destroyed && watched.destroyedArmed && watched.hitPoints >= 0) {
@@ -843,7 +960,7 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			it = m_watched.erase(it);
 			continue;
 		}
-		if (object->team() != watched.team) {
+		if (object && object->team() != watched.team) {
 			const int to = object->team(), from = watched.team;
 			// A silo's index, 1..5 as the voice table has them: its place
 			// among the silos ordered by control point id, the order the
@@ -874,8 +991,8 @@ std::vector<std::pair<int, std::string>> GameAudio::autoRadio()
 			watched.team = to;
 		}
 		const float hp = m_round.hitPoints(it->first);
-		const int team = teamOf(*object);
-		if (hp >= 0) {
+		const int team = object ? teamOf(*object) : watched.team;
+		if (hp >= 0 || watched.titanPart) { // a wrecked part keeps a few negative hit points (-8 of a console's -10)
 			if (watched.hitPoints >= 0 && hp < watched.hitPoints && hp > 0 && watched.damageArmed) {
 				watched.damageArmed = false;
 				send(team, setting(*t, "radio.damageMessage"));

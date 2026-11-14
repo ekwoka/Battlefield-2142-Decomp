@@ -396,6 +396,8 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 	}
 	titan.parts.clear();
 	titan.meshes.clear();
+	titan.nodes.clear();
+	std::string nodePath;
 	std::vector<const world::ObjectTemplate*> carriedTemplates;
 	const auto addPart = [&](const world::ObjectTemplate& t, int parent, const physics::Mat3& rotation,
 							   const physics::Vec3& position) {
@@ -446,6 +448,8 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 		titan.parts.push_back(part);
 		return static_cast<int>(index);
 	};
+	const physics::CollisionMeshFile* inheritedMesh = nullptr;
+	std::vector<uint32_t> inheritedMaterials;
 	std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int,
 		std::vector<int>, int, std::string)>
 		visit = [&](const world::ObjectTemplate& t, const physics::Mat3& rotation, const physics::Vec3& position,
@@ -457,10 +461,19 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 				seat = t.name();
 			}
 			int node = parentPart;
+			int own = -1;
 			if (depth == 0 || hasArmour(t)) {
 				node = addPart(t, parentPart, rotation, position);
 				titan.parts[static_cast<size_t>(node)].seat = seat;
 				chain.push_back(node);
+				own = node;
+			}
+			const std::string savedPath = nodePath;
+			if (depth > 0) {
+				std::string n = t.name();
+				std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				nodePath += (nodePath.empty() ? "" : "/") + n;
+				titan.nodes[nodePath] = {chain, own};
 			}
 			if (sameName(t.typeName(), "SpawnPoint") && depth > 0) {
 				titan.spawnPoints.push_back({0, position, rotation.yawPitchRoll().x});
@@ -470,6 +483,25 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 				titan.carried.push_back({0, position, rotation.yawPitchRoll().x});
 			}
 			const std::string* meshName = collisionMeshOf(t);
+			const physics::CollisionMeshFile* savedMesh = inheritedMesh;
+			const std::vector<uint32_t> savedMaterials = inheritedMaterials;
+			// A child with no mesh of its own is the ancestor's mesh's
+			// geometry its collisionPart names (a gun's base and barrel).
+			if (!meshName && inheritedMesh && depth > 0 && integer(t, "hasCollisionPhysics", 0) != 0) {
+				const int geometry = static_cast<int>(number(t, "collisionPart", -1));
+				if (geometry > 0 && static_cast<size_t>(geometry) < inheritedMesh->geometries.size()) {
+					TitanMesh m;
+					m.mesh = inheritedMesh;
+					m.geometry = geometry;
+					m.materials = inheritedMaterials;
+					m.rotation = rotation;
+					m.position = position;
+					m.node = node;
+					m.chain = chain;
+					m.groups = integer(t, "collisionGroups", 0);
+					titan.meshes.push_back(std::move(m));
+				}
+			}
 			if (meshName && integer(t, "hasCollisionPhysics", 1) != 0 && m_collisionTemplates && m_files) {
 				const std::string& file = t.creationFile();
 				const size_t slash = file.find_last_of("/\\");
@@ -485,6 +517,8 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 					m.chain = chain;
 					m.groups = integer(t, "collisionGroups", 0);
 					titan.meshes.push_back(std::move(m));
+					inheritedMesh = mesh;
+					inheritedMaterials = materialMap(t);
 				}
 			}
 			for (const world::ChildTemplate& child : t.children()) {
@@ -498,6 +532,9 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 					rotation.transform({child.position.x, child.position.y, child.position.z}) + position, node, chain,
 					depth + 1, seat);
 			}
+			inheritedMesh = savedMesh;
+			inheritedMaterials = savedMaterials;
+			nodePath = savedPath;
 		};
 	visit(*object->objectTemplate(), physics::Mat3 {}, physics::Vec3 {}, -1, {}, 0, std::string());
 	// The gun seats' armour: the first armoured node under each seat's hub
@@ -522,6 +559,7 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 				return;
 			}
 			Titan::PodArray array;
+			array.seat = t.name();
 			bool launcher = false;
 			if (depth > 0 && sameName(t.typeName(), "PlayerControlObject")) {
 				std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int)> scan =
@@ -543,6 +581,7 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 							if (!launcher && podLauncherOf(*c, projectile, velocity, start, false)) {
 								launcher = true;
 								array.projectile = projectile;
+								array.weapon = c->name();
 								array.velocity = velocity;
 								array.launcher = here + local.transform(start);
 								array.direction = local.transform({0, 0, 1});
@@ -652,10 +691,13 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 	std::vector<std::shared_ptr<const TitanLodPart>> parts;
 	for (const physics::CollisionUser user :
 		{physics::CollisionUser::Projectile, physics::CollisionUser::Vehicle, physics::CollisionUser::Soldier}) {
+		if (m.geometry > 0 && user != physics::CollisionUser::Projectile) {
+			continue; // a child's geometry takes rounds only
+		}
 		auto part = std::make_shared<TitanLodPart>();
 		part->lod = static_cast<int>(user);
 		part->groups = static_cast<uint32_t>(m.groups);
-		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
+		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, static_cast<size_t>(m.geometry))) {
 			const physics::CollisionLod* lod = physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(user));
 			if (!lod || lod->faces.empty()) {
 				continue;
@@ -677,7 +719,7 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 			continue;
 		}
 		part->mesh = std::make_shared<physics::CollisionWorld>();
-		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials);
+		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry));
 		for (const physics::Vec3& p : part->points) {
 			part->radius = std::max(part->radius, std::sqrt(physics::lengthSquared(p)));
 		}
@@ -692,6 +734,7 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 // (0x00651c60 hides a wrecked node's children; the core room's doors open).
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
+	++titan.meshVersion;
 	Body* body = findBody(titan.object);
 	const world::Object* object = m_objects.find(titan.object);
 	if (!body && object && m_files && m_collisionTemplates) {
@@ -736,9 +779,8 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	// the team the first PlayerControlObject up the object's tree's, slot
 	// 0x9c; team 1 has 0x100, team 2 0x200); so each team's soldiers meet the
 	// soldier mesh and the other team's fields' soldier LODs. The shipped
-	// fields have none (their meshes carry the projectile and vehicle LODs
-	// only, and a mesh without a soldier LOD stops no soldier): soldiers pass
-	// them all, and the team rule sorts vehicles (the vehicle bay's shield,
+	// fields use their vehicle LOD for soldiers via the retail loader fallback.
+	// The team rule also sorts vehicles (the vehicle bay's shield,
 	// material 4117, lets its own team's in). A projectile has no
 	// PlayerControlObject and group 8: rounds meet every field, and only a
 	// penetrable material lets them through (the projectiles' penetration).
@@ -941,6 +983,46 @@ std::vector<GameWorld::TitanInfo> GameWorld::titans() const
 		list.push_back(info);
 	}
 	return list;
+}
+
+bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
+{
+	fraction = 1;
+	const Body* body = findBody(titan);
+	if (!body) {
+		return false;
+	}
+	const physics::CollisionWorld* mesh = (team == 1 || team == 2) && body->teamSoldierMesh[team - 1]
+		? body->teamSoldierMesh[team - 1].get()
+		: body->soldierMesh.get();
+	physics::CollisionWorld::Hit hit {};
+	if (!mesh || !mesh->raycast(from, to, hit)) {
+		return false;
+	}
+	fraction = hit.fraction;
+	return true;
+}
+
+physics::Vec3 GameWorld::titanToLocal(uint32_t titan, const physics::Vec3& world) const
+{
+	const Body* body = findBody(titan);
+	return body ? body->body.rotation.untransform(world - body->body.position) : world;
+}
+
+physics::Vec3 GameWorld::titanToWorld(uint32_t titan, const physics::Vec3& local) const
+{
+	const Body* body = findBody(titan);
+	return body ? body->body.position + body->body.rotation.transform(local) : local;
+}
+
+uint32_t GameWorld::titanMeshVersion(uint32_t titan) const
+{
+	for (const Titan& t : m_titans) {
+		if (t.object == titan) {
+			return t.meshVersion;
+		}
+	}
+	return 0;
 }
 
 std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team) const
@@ -1947,6 +2029,7 @@ void GameWorld::registerSilo(world::Object& object)
 	}
 	silo.missile = projectileFor(*setting(*firearm, "projectileTemplate"));
 	silo.loaded = true; // a full magazine (ammo.magSize 1)
+	silo.number = static_cast<int>(m_silos.size()) + 1;
 	m_silos.push_back(silo);
 }
 
@@ -1966,6 +2049,7 @@ std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
 		info.reloadLeft = silo.loaded ? 0 : silo.reloadLeft;
 		info.reloadTime = silo.reloadTime;
 		info.launched = silo.launched;
+		info.number = silo.number;
 		for (const auto& spawner : m_spawners) {
 			if (std::find(spawner->spawned().begin(), spawner->spawned().end(), silo.object) != spawner->spawned().end()) {
 				info.controlPoint = spawner->settings().controlPointId;
@@ -2088,8 +2172,12 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 // projectile's update 0x005b3e60): from seek.trackingDelay on it turns
 // towards the locked Titan's middle (followStep: msilo_missile's
 // follow.maxYaw 4 and maxPitch 1 degrees a tick, predictionFactor 0.3 by
-// default, magneticBehaviour 1: the first turn after the lock is not
-// capped, a Titan behind it is turned to at the full rates); the speed is
+// default, magneticBehaviour 1: a Titan behind it is turned to at the full
+// rates). The uncapped turn of a new target is the launch tick's alone: the
+// update sets the follow's target every tick (0x005b4047), setTarget
+// (0x005ed260) marks it new only when it changed, and the follow starts
+// trackingDelay later (0x005b2c84), so the climb out of the silo bends over
+// at 1 degree a tick instead of snapping at the Titan. The speed is
 // kept along the new heading (hasDirection). From startDelay on its
 // acceleration pushes it along its heading up to maxSpeed, unless its
 // target is gone (magneticBehaviour without a target: it coasts).
@@ -2099,8 +2187,8 @@ void GameWorld::steerBeacon(Projectile& p, float seconds)
 	const Titan* titan = titanByObject(p.lockedOn);
 	if (p.age >= s.seekDelay && titan) {
 		p.followTurned = followStep(p, titanAim(*titan), titan->velocity, seconds, p.newTarget);
-		p.newTarget = false;
 	}
+	p.newTarget = false;
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
 	if (p.age < s.startDelay || speed <= 0.01f || speed >= s.maxSpeed || (s.magneticBehaviour && !titan)) {
 		return;
@@ -2116,7 +2204,7 @@ void GameWorld::steerBeacon(Projectile& p, float seconds)
 // pod is a rigid body of its own (its Mesh physics: gravityModifier 1.5,
 // drag 1, dragModifier 3/1/3); its ForceObjects steer it: eu_pod_FOFWD
 // pushes on PIThrottle with force 35, eu_pod_FOStrafe on PIYaw with 20,
-// applied as the drones' are (node slot 0xa0: force x 30 / mass a second).
+// applied at their offsets to the physics node's acceleration (slot 0xa0).
 bool GameWorld::podLauncherOf(const world::ObjectTemplate& node, std::string& projectile, float& velocity,
 	physics::Vec3& start, bool altFire) const
 {
@@ -2172,10 +2260,22 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 		const world::ObjectTemplate* c = m_templates.find(child.name);
 		const std::string* input = c ? setting(*c, "input") : nullptr;
 		if (c && input && sameName(c->typeName(), "ForceObject")) {
+			const physics::Vec3 at {child.position.x, child.position.y, child.position.z};
+			const physics::Vec3 direction = physics::Mat3::fromYawPitchRoll(
+				{child.rotation.x, child.rotation.y, child.rotation.z}).rows[2];
 			if (sameName(*input, "PIThrottle")) {
 				p.forward = number(*c, "force", 0);
+				p.forwardAt = at;
+				p.forwardDirection = direction;
 			} else if (sameName(*input, "PIYaw")) {
 				p.strafe = number(*c, "force", 0);
+				p.strafeAt = at;
+				p.strafeDirection = direction;
+			} else if (sameName(*input, "PIMouseLookX")) {
+				p.mouseTurn = number(*c, "force", 0);
+				p.mouseTurnAt = {child.position.x, child.position.y, child.position.z};
+				p.mouseTurnDirection = physics::Mat3::fromYawPitchRoll(
+					{child.rotation.x, child.rotation.y, child.rotation.z}).rows[2];
 			}
 		}
 		if (c && sameName(c->typeName(), "ForceObject") && number(*c, "keepUp", 0) != 0 && !p.keepUp) {
@@ -2221,9 +2321,16 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 			player.body.yawDegrees = face;
 		}
 	}
+	if (m_player && player.id == m_player->id) {
+		std::printf("pod-launch: %s from %.0f %.0f %.0f at %.0f %.0f %.0f\n", projectile.c_str(), from.x, from.y, from.z, velocity.x, velocity.y, velocity.z);
+	}
 	m_pods.push_back(p);
-	player.vehicle = pod->id();
-	player.seat = 0;
+	if (Body* body = findBody(pod->id())) {
+		seatPlayer(player, *body, 0);
+	} else {
+		player.vehicle = pod->id();
+		player.seat = 0;
+	}
 	soldier->setHidden(true);
 	player.body.position = from + physics::Vec3 {0, 1, 0};
 	player.body.velocity = {};
@@ -2231,7 +2338,7 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 	return true;
 }
 
-bool GameWorld::launchPod(int id, bool exitKey)
+bool GameWorld::launchPod(int id, bool exitKey, bool checkRoom)
 {
 	Player* player = findPlayer(id);
 	if (!player || !player->alive || player->manDown) {
@@ -2242,32 +2349,46 @@ bool GameWorld::launchPod(int id, bool exitKey)
 			return false;
 		}
 	}
-	if (!player->vehicle) {
-		// At a Titan's pod array: the soldier within one of its entry points.
-		for (const Titan& titan : m_titans) {
-			const world::Object* object = m_objects.find(titan.object);
-			if (!object || titan.wrecked || titan.team != player->team) {
-				continue;
-			}
-			const physics::Mat3 rotation =
-				physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
-			const physics::Vec3 at {object->position().x, object->position().y, object->position().z};
-			for (const Titan::PodArray& array : titan.podArrays) {
-				for (const auto& [entry, radius] : array.entries) {
-					const physics::Vec3 e = at + rotation.transform(entry);
-					if (physics::lengthSquared(e - player->body.position) <= (radius + 1) * (radius + 1)) {
-						const Body* hull = findBody(titan.object);
-						if (!tiltAllowsFire(hull ? hull->body.rotation : rotation, array.maxTilt)) {
-							return false;
-						}
-						return startPod(*player, array.projectile, at + rotation.transform(array.launcher),
-							rotation.transform(array.direction) * array.velocity + titan.velocity, titan.object);
-					}
-				}
-			}
+	// Titan arrays are ordinary occupied control-object seats. Fire uses
+	// the launcher's current posed transform, including its mouse yaw.
+	if (Titan* titan = titanByObject(player->vehicle)) {
+		Body* body = findBody(player->vehicle);
+		const auto* root = m_objects.find(player->vehicle);
+		if (!body || !root || titan->wrecked || player->seat < 0) return false;
+		const auto& seats = vehicleLayout(*root->objectTemplate()).seats;
+		if (static_cast<size_t>(player->seat) >= seats.size()) return false;
+		for (const auto& array : titan->podArrays) {
+			if (!sameName(array.seat, seats[player->seat].name)) continue;
+			if (!tiltAllowsFire(body->body.rotation, array.maxTilt)) return false;
+			const auto& seat = seats[player->seat];
+			world::Vec3 offset, angles;
+			if (!partPose(body->object, seat.yawBundle, offset, angles, player->seat)) return false;
+			const auto yaw = physics::Mat3::fromYawPitchRoll({angles.x, 0, 0});
+			const auto direction = body->body.rotation.transform(yaw.transform(array.direction));
+			const auto from = body->body.position + body->body.rotation.transform(
+				seat.yawPivot + yaw.transform(array.launcher - seat.yawPivot));
+			const auto velocity = direction * array.velocity + titan->velocity;
+			const auto turn = physics::Mat3::fromYawPitchRoll({
+				std::atan2(direction.x, direction.z) * 57.29578f,
+				-std::asin(std::clamp(direction.y, -1.0f, 1.0f)) * 57.29578f, 0});
+			const auto* weapon = m_templates.find(array.weapon);
+			if (!weapon || !m_templates.find(array.projectile)) return false;
+			const auto carrier = body->object;
+			body->occupants[player->seat] = -1;
+			raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(carrier)});
+			player->body.yawDegrees = std::atan2(direction.x, direction.z) * 57.29578f;
+			player->vehicle = 0;
+			player->seat = -1;
+			player->seatAnimation.reset();
+			player->seatAnimationPath.clear();
+			if (!startPod(*player, array.projectile, from, velocity, carrier)) return false;
+			effects::ObjectEffects(m_templates).weaponFiredAt(*weapon, from, turn, m_effects);
+			return true;
 		}
-		return false;
+		return false; // a Titan gun is not a pod launcher
 	}
+	if (!player->vehicle) return false;
+
 	// A seat with a pod launcher on alternate fire (the APCs' pod seats):
 	// the pod leaves along the soldier's aim from the seat.
 	Body* body = findBody(player->vehicle);
@@ -2303,7 +2424,10 @@ bool GameWorld::launchPod(int id, bool exitKey)
 			std::string p;
 			float v = 0;
 			physics::Vec3 s;
-			if (launches(*c, p, v, s)) {
+			// The exit key (0x004bda00) takes the first launcher whose fire
+			// component isPodLauncher, whatever its fire input (the Shepherd's
+			// air_pod_launcher has none).
+			if (podLauncherOf(*c, p, v, s, true) || (exitKey && podLauncherOf(*c, p, v, s, false))) {
 				launchers.push_back(c);
 			}
 			scan(*c, depth + 1);
@@ -2344,7 +2468,8 @@ bool GameWorld::launchPod(int id, bool exitKey)
 			}
 		}
 	}
-	const bool found = launcher && launches(*launcher, projectile, velocity, start);
+	const bool found = launcher && (podLauncherOf(*launcher, projectile, velocity, start, true)
+		|| (exitKey && podLauncherOf(*launcher, projectile, velocity, start, false)));
 	if (found) {
 		maxTilt = number(*launcher, "fire.maximumVehicleTiltForFire", 0);
 	}
@@ -2355,7 +2480,44 @@ bool GameWorld::launchPod(int id, bool exitKey)
 	float gunYaw = 0, gunPitch = player->input.aimPitch;
 	gunAim(body->object, player->seat, gunYaw, gunPitch);
 	const float y = yaw + gunYaw * 3.14159265f / 180.0f, p = gunPitch * 3.14159265f / 180.0f;
-	const physics::Vec3 direction {std::sin(y) * std::cos(p), std::sin(p), std::cos(y) * std::cos(p)};
+	physics::Vec3 direction {std::sin(y) * std::cos(p), std::sin(p), std::cos(y) * std::cos(p)};
+	// The pod leaves along the launcher's own axis, as the Titans' pod arrays'
+	// do (array.direction): the APC pod seats mount pod_launcher at
+	// setRotation 0/-90/0, straight up, and the rider steers the pod down
+	// (shortcut: the seat's own mounting rotation in the vehicle is taken as none).
+	// A launcher mounted unturned keeps the soldier's aim.
+	physics::Vec3 launcherPlace; // in the seat template's frame
+	if (launcher && seatTemplate) {
+		bool turned = false;
+		physics::Mat3 launcherTurn;
+		const std::function<bool(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int)> find =
+			[&](const world::ObjectTemplate& node, const physics::Mat3& r, const physics::Vec3& base, int depth) {
+				for (const world::ChildTemplate& child : node.children()) {
+					const world::ObjectTemplate* c = m_templates.find(child.name);
+					if (!c || depth > 4) {
+						continue;
+					}
+					const physics::Mat3 local =
+						physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * r;
+					if (c == launcher) {
+						launcherTurn = local;
+						launcherPlace = r.transform({child.position.x, child.position.y, child.position.z}) + base;
+						return true;
+					}
+					if (find(*c, local, r.transform({child.position.x, child.position.y, child.position.z}) + base, depth + 1)) {
+						return true;
+					}
+				}
+				return false;
+			};
+		if (find(*seatTemplate, physics::Mat3 {}, physics::Vec3 {}, 0)) {
+			const physics::Vec3 axis = launcherTurn.transform({0, 0, 1});
+			turned = std::fabs(axis.z - 1.0f) > 1e-3f;
+			if (turned) {
+				direction = body->body.rotation.transform(axis);
+			}
+		}
+	}
 	// setCheckObstruction (0x005c2310 from 0x005c50e0): anything along the
 	// launcher refuses the press (pod_launcher, pod_launcher_cq,
 	// eu_apc_alps': -1.5 2 1). The launcher's place: its seat weapon's,
@@ -2375,8 +2537,35 @@ bool GameWorld::launchPod(int id, bool exitKey)
 			return false; // obstructed: the press is a release (event 9)
 		}
 	}
-	const physics::Vec3 from = body->body.position + body->body.rotation.transform(seat.position) + direction * (start.z + 1.5f)
+	physics::Vec3 from = body->body.position + body->body.rotation.transform(seat.position) + direction * (start.z + 1.5f)
 		+ physics::Vec3 {0, 1.5f, 0};
+	// The Shepherd's air_pod_launcher (no fire input, velocity 10) hangs
+	// under the hull pointing down: the pod drops from it.
+	if (checkRoom && !setting(*launcher, "fire.fireInput")) { // the Shepherd's air_pod_launcher has no input at all
+		from = body->body.position + body->body.rotation.transform(seat.position + launcherPlace) + direction * start.z; // the launcher's own place (projectileStartPosition, none: 0)
+		// 0x004bda00: rays from the launcher's place along its firing direction,
+		// 3 m, the middle one and four at (+-1, +-1) (the terrain's and the
+		// objects'); any hit and the soldier walks out instead.
+		physics::Vec3 across = physics::cross(direction, physics::Vec3 {0, 1, 0});
+		const float acrossLength = std::sqrt(physics::lengthSquared(across));
+		across = acrossLength > 1e-3f ? across * (1.0f / acrossLength) : physics::Vec3 {1, 0, 0}; // straight down or up
+		const physics::Vec3 up = physics::cross(across, direction);
+		if (fireObstructed(from, direction, across, up, 0.0f, 3.0f, 1.0f, body->object)) {
+			return false;
+		}
+	} else if (checkRoom) {
+		// The pod seats' launchers (pointing up): 3 m over the seat, as the
+		// exit key's rays do there (a ray up and four at the corners).
+		const physics::Vec3 at = body->body.position + body->body.rotation.transform(seat.position);
+		for (const physics::Vec3 corner : {physics::Vec3 {0, 0, 0}, physics::Vec3 {1, 0, 1}, physics::Vec3 {-1, 0, 1},
+				 physics::Vec3 {1, 0, -1}, physics::Vec3 {-1, 0, -1}}) {
+			uint32_t blocker = 0;
+			const physics::Vec3 start = at + body->body.rotation.transform(corner) + physics::Vec3 {0, 0.5f, 0};
+			if (firstHit(start, start + physics::Vec3 {0, 3, 0}, blocker) && blocker != body->object) {
+				return false;
+			}
+		}
+	}
 	// Out of the seat first.
 	if (static_cast<size_t>(player->seat) < body->occupants.size()) {
 		body->occupants[static_cast<size_t>(player->seat)] = -1;
@@ -2392,7 +2581,10 @@ bool GameWorld::launchPod(int id, bool exitKey)
 	player->seat = -1;
 	player->seatAnimation.reset();
 	player->seatAnimationPath.clear();
-	return startPod(*player, projectile, from, direction * velocity + body->body.velocity, body->object);
+	const auto launchRotation = body->body.rotation;
+	if (!startPod(*player, projectile, from, direction * velocity + body->body.velocity, body->object)) return false;
+	if (launcher) effects::ObjectEffects(m_templates).weaponFiredAt(*launcher, from, launchRotation, m_effects);
+	return true;
 }
 
 bool GameWorld::fireObstructed(const physics::Vec3& at, const physics::Vec3& forward, const physics::Vec3& right,
@@ -2431,14 +2623,22 @@ std::vector<GameWorld::PodInfo> GameWorld::pods() const
 	return list;
 }
 
-// Each pod: steered by its rider's throttle and strafe along the rider's
-// heading (none with its controls off: a beacon's drop), the rider carried in it; at rest for half a second (landed) or
-// gone, the rider steps out beside it (the Parachute's landing) and the pod
-// stays as it lies.
+// Pods share the Parachute collision landing (0x005cf750): contact starts
+// a 0.05 s exit timer, then the pod is hidden and removed 0.1 s later.
 void GameWorld::stepPods(float seconds)
 {
 	for (auto it = m_pods.begin(); it != m_pods.end();) {
 		Pod& pod = *it;
+		if (pod.removeIn >= 0) {
+			pod.removeIn -= seconds;
+			if (pod.removeIn <= 0) {
+				m_objects.remove(pod.object);
+				it = m_pods.erase(it);
+				continue;
+			}
+			++it;
+			continue;
+		}
 		Player* player = findPlayer(pod.player);
 		Body* body = findBody(pod.object);
 		world::Object* soldier = player ? m_objects.find(player->object) : nullptr;
@@ -2447,12 +2647,24 @@ void GameWorld::stepPods(float seconds)
 		if (body && !done) {
 			pod.position = body->body.position;
 			pod.velocity = body->body.velocity;
-			const float yaw = player->body.yawDegrees * 3.14159265f / 180.0f;
-			const physics::Vec3 forward {std::sin(yaw), 0, std::cos(yaw)}, right {std::cos(yaw), 0, -std::sin(yaw)};
 			const float throttle = pod.controlsOff ? 0.0f : player->input.throttle;
 			const float strafe = pod.controlsOff ? 0.0f : player->input.strafe;
-			body->body.velocity = body->body.velocity
-				+ (forward * (throttle * pod.forward) + right * (strafe * pod.strafe)) * (30.0f * seconds / pod.mass);
+			// Retail ForceObjects (0x0062c920) apply their local forward
+			// force at the child's offset, not at the pod centre. The same
+			// force therefore accelerates and tilts the rigid body.
+			const auto thrust = [&](const physics::Vec3& at, const physics::Vec3& direction, float force) {
+				body->body.addForce(body->body.rotation.transform(at),
+					body->body.rotation.transform(direction) * force);
+			};
+			thrust(pod.forwardAt, pod.forwardDirection, throttle * pod.forward);
+			thrust(pod.strafeAt, pod.strafeDirection, strafe * pod.strafe);
+			// The shipped pod has a third ForceObject on PIMouseLookX,
+			// offset behind its centre. Its force turns the pod, so thrust
+			// follows its actual heading. Match the input scaling used by
+			// vehicle camera bundles; slot 0xa0 adds force as acceleration.
+			const float mouse = pod.controlsOff ? 0.0f : std::clamp(pod.mouseInput / 5.0f, -1.0f, 1.0f);
+			body->body.addForce(body->body.rotation.transform(pod.mouseTurnAt),
+				body->body.rotation.transform(pod.mouseTurnDirection) * (mouse * pod.mouseTurn));
 			// keepUp (0x0062b750): the regulators' couple turns the
 			// ForceObject's offset p back over the centre: out = 2a (w x p) +
 			// (a^2 + b^2) ((0, |p|, 0) - p) on each regulated axis, x 15,
@@ -2476,16 +2688,22 @@ void GameWorld::stepPods(float seconds)
 				body->body.rotation = physics::Mat3::fromYawPitchRoll({body->body.rotation.yawPitchRoll().x, 0, 0});
 				body->body.angularVelocity = {};
 			}
-			const float speed = std::sqrt(physics::lengthSquared(body->body.velocity));
-			pod.still = speed < 1.5f && pod.age > 1.0f ? pod.still + seconds : 0;
 			player->body.position = body->body.position + physics::Vec3 {0, 1, 0};
 			player->body.velocity = {};
 			soldier->setPosition({body->body.position.x, body->body.position.y, body->body.position.z});
-			done = pod.still > 0.5f || pod.age > 90.0f;
+			if (pod.landing > 0) {
+				pod.landing -= seconds;
+				if (pod.landing <= 0) { pod.landing = 0; done = true; }
+			}
 		} else if (!body) {
 			done = true;
 		}
 		if (done) {
+			if (player && m_player && player->id == m_player->id) {
+				std::printf("pod-landed: at %.1f %.1f %.1f after %.1f s, velocity %.1f %.1f %.1f, landing timer %.2f, surface normal %.2f %.2f %.2f\n",
+				pod.position.x, pod.position.y, pod.position.z, pod.age, pod.velocity.x, pod.velocity.y, pod.velocity.z, pod.landing,
+				pod.landingNormal.x, pod.landingNormal.y, pod.landingNormal.z);
+			}
 			if (player && player->vehicle == pod.object) {
 				player->vehicle = 0;
 				player->seat = -1;
@@ -2493,12 +2711,24 @@ void GameWorld::stepPods(float seconds)
 					soldier->setHidden(false);
 					const physics::Vec3 at = pod.position + physics::Vec3 {1.2f, 1.0f, 0};
 					player->body.position = at;
-					player->body.velocity = {};
+					player->body.velocity = body ? body->body.velocity : physics::Vec3 {};
+					// The native contact solver can still retain the impact velocity
+					// at ejection. Do not drive the rider into the surface; keep
+					// tangential and outward velocity relative to that surface.
+					const float into = physics::dot(player->body.velocity - pod.landingSurfaceVelocity, pod.landingNormal);
+					if (pod.landing >= 0 && into < 0) player->body.velocity = player->body.velocity - pod.landingNormal * into;
 					soldier->setPosition({at.x, at.y - 1.0f, at.z});
 				}
 				raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(pod.object)});
 			}
-			it = m_pods.erase(it);
+			if (pod.landing >= 0) {
+				if (world::Object* object = m_objects.find(pod.object)) object->setHidden(true);
+				pod.player = -1;
+				pod.removeIn = 0.1f;
+				++it;
+			} else {
+				it = m_pods.erase(it);
+			}
 			continue;
 		}
 		++it;
@@ -2530,6 +2760,15 @@ bool GameWorld::titanPodEntry(int id, physics::Vec3& entry, float& radius) const
 		}
 		float best = 1e30f;
 		for (const Titan::PodArray& array : titan.podArrays) {
+			const auto layout = m_layouts.find(object->objectTemplate()->name());
+			bool taken = false;
+			if (layout != m_layouts.end()) {
+				for (size_t i = 0; i < layout->second.seats.size(); ++i) {
+					if (sameName(layout->second.seats[i].name, array.seat)
+						&& i < body->occupants.size() && body->occupants[i] >= 0) taken = true;
+				}
+			}
+			if (taken) continue;
 			for (const auto& [offset, r] : array.entries) {
 				const physics::Vec3 e = at + body->body.rotation.transform(offset);
 				const float d = physics::lengthSquared(e - player->body.position);
@@ -2570,6 +2809,8 @@ bool GameWorld::titanGunEntry(int id, physics::Vec3& entry, float& radius, int& 
 		}
 		float best = 1e30f;
 		for (const VehicleLayout::Entry& e : layout->second.entries) {
+			if (e.seat >= 0 && static_cast<size_t>(e.seat) < layout->second.seats.size()
+				&& layout->second.seats[e.seat].podLauncher) continue;
 			const bool taken = e.seat < 0 || (static_cast<size_t>(e.seat) < body->occupants.size() && body->occupants[static_cast<size_t>(e.seat)] >= 0);
 			if (taken || !titanGunWorks(titan.object, e.seat) || (wanted >= 0 && e.seat != wanted)
 				|| std::find(skip.begin(), skip.end(), e.seat) != skip.end()) {
@@ -2650,6 +2891,19 @@ uint32_t GameWorld::enclosingTitan(int player) const
 	return 0;
 }
 
+uint32_t GameWorld::cameraTitan(const physics::Vec3& camera) const
+{
+	// A joined client's Titans are the remote ones.
+	for (const auto* titans : {&m_titans, &m_remoteTitans}) {
+		for (const Titan& titan : *titans) {
+			if (insideTitanHull(titan, camera)) {
+				return titan.object;
+			}
+		}
+	}
+	return 0;
+}
+
 // 0x006f2b00: the hull is the first object of the Titan's tree with a LOD
 // of collision type 5 (the coreroom's closed shell, 240 faces). From the
 // point a ray to the hull's origin raised by the hull object's radius +
@@ -2658,6 +2912,29 @@ uint32_t GameWorld::enclosingTitan(int player) const
 // with the normals as stored (flag 1): a face entered on the way means
 // outside. So: inside when the nearest face the ray crosses is crossed on
 // its way out.
+uint32_t GameWorld::titanHolding(const physics::Vec3& point, bool near) const
+{
+	for (const Titan& titan : m_titans) {
+		if (!titan.wrecked && insideTitanHull(titan, point)) {
+			return titan.object;
+		}
+	}
+	uint32_t best = 0;
+	float bestDistance = 1e30f;
+	for (const Titan& titan : m_titans) {
+		const world::Object* object = near && !titan.wrecked ? m_objects.find(titan.object) : nullptr;
+		if (!object) {
+			continue;
+		}
+		const float d = std::hypot(point.x - object->position().x, point.z - object->position().z);
+		if (d <= titan.radius && d < bestDistance) {
+			best = titan.object;
+			bestDistance = d;
+		}
+	}
+	return best;
+}
+
 bool GameWorld::insideTitanHull(const Titan& titan, const physics::Vec3& point) const
 {
 	const world::Object* object = m_objects.find(titan.object);
@@ -2668,8 +2945,8 @@ bool GameWorld::insideTitanHull(const Titan& titan, const physics::Vec3& point) 
 		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
 	const physics::Vec3 origin {object->position().x, object->position().y, object->position().z};
 	for (const TitanMesh& m : titan.meshes) {
-		if (!m.mesh) {
-			continue;
+		if (!m.mesh || m.geometry != 0) {
+			continue; // a child's geometry (the guns') holds no hull
 		}
 		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, 0)) {
 			const physics::CollisionLod* hull = physics::collisionLodFor(*m.mesh, sub, 5);
@@ -2722,3 +2999,54 @@ bool GameWorld::insideTitanHull(const Titan& titan, const physics::Vec3& point) 
 
 } // namespace dice::hfe::game
 
+
+namespace dice::hfe::game {
+
+int GameWorld::titanPartLook(uint32_t object, const std::string& path) const
+{
+	std::string key = path;
+	std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	for (const Titan& titan : m_titans) {
+		if (titan.object != object) {
+			continue;
+		}
+		const auto found = titan.nodes.find(key);
+		if (found == titan.nodes.end()) {
+			return 0;
+		}
+		// A node under a part that is down (a wrecked console's forcefield)
+		// goes with it (0x00651c60 hides a wrecked node's children).
+		for (const int index : found->second.chain) {
+			if (index <= 0 || index == found->second.own) {
+				continue;
+			}
+			const TitanPart& above = titan.parts[static_cast<size_t>(index)];
+			if (above.off || above.state >= 1) {
+				return 2;
+			}
+		}
+		if (found->second.own > 0) {
+			const TitanPart& part = titan.parts[static_cast<size_t>(found->second.own)];
+			if (part.off && part.kind == TitanPartInfo::Shield) {
+				return 2;
+			}
+			return part.state >= 1 ? 1 : 0;
+		}
+		return 0;
+	}
+	return 0;
+}
+
+} // namespace dice::hfe::game
+
+namespace dice::hfe::game {
+bool GameWorld::setBodyVelocity(uint32_t object, const physics::Vec3& velocity)
+{
+	Body* body = findBody(object);
+	if (body) {
+		wake(*body); // the test fixture must not have its velocity cleared by sleep
+		body->body.velocity = velocity;
+	}
+	return body != nullptr;
+}
+} // namespace dice::hfe::game

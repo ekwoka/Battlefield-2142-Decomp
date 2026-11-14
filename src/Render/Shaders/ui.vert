@@ -15,7 +15,7 @@ layout(location = 8) in vec2 inUnusedDirtCoord;
 layout(location = 9) in vec2 inUnusedCrackCoord;
 
 layout(set = 1, binding = 0) uniform Screen {
-	vec4 size; // the screen: 800, 600 for the HUD, the stage for menus
+	vec4 size; // the screen: 800, 600 for the HUD, the stage for menus; z the HUD's x scale (LevelSources::hudXScale), 0 for menus
 };
 
 layout(location = 0) out vec2 outTexCoord;
@@ -27,5 +27,10 @@ void main()
 	gl_Position = vec4(inPosition.x / size.x * 2.0 - 1.0, 1.0 - inPosition.y / size.y * 2.0, 0.0, 1.0);
 	outTexCoord = inTexCoord;
 	outColor = vec4(inColor, inAlpha);
+	if (size.z > 0.0 && inAlpha != 0.01) {
+		gl_Position.x *= size.z;
+	} else if (size.z > 0.0) {
+		outColor.a = 1.0; // the hudfix's markers: unmoved and opaque
+	}
 	outAdd = vec4(inAddRG, inAddB, inAddA);
 }

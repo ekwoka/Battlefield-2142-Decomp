@@ -203,10 +203,41 @@ TEST(Vehicle_TyreForceOpposesSliding)
 	const Vec3 force = game::tyreForce(engine, contact, {-0.5f, 0, 0}, {0, 0, 1}, {1, 0, 0}, &along, &across);
 	CHECK(force.x < 0 && near(force.z, 0));
 	CHECK(near(across, -1.0f)); // -0.5 * wheelLatScale 0.1 = half the peak, times wheelLatFrictionMod 2
-	// Tilted ground grips less: the cube of the normal's height.
+	// Tilted ground grips less: the fourth power of the normal's height (retail 0x006b71f0).
 	contact.normalY = 0.5f;
 	const Vec3 tilted = game::tyreForce(engine, contact, {-0.5f, 0, 0}, {0, 0, 1}, {1, 0, 0});
-	CHECK(near(tilted.x, force.x * 0.125f));
+	CHECK(near(tilted.x, force.x * 0.0625f));
+}
+
+// Expected values are retail BF2142.exe 0x006b71f0's own output, run in unicorn with the EU FAV's
+// shipped newCar2 wheel settings (friLatBrakeMod 0.5 to exercise it) and the debug variables'
+// initial values (grip scale 1, load exponent 3, slip-ratio mode off).
+TEST(Vehicle_TyreForceMatchesRetailRoutine)
+{
+	game::EngineSettings e;
+	e.wheelLongFrictionMod = 0.94f;
+	e.wheelLongDriveFrictionMod = 1.5f;
+	e.wheelLongPeakAt = 0.1f;
+	e.wheelLongMinDynamicFriction = 0.7f;
+	e.wheelLongScale = 0.1f;
+	e.friLatBrakeMod = 0.5f;
+	e.wheelLatFrictionMod = 1.2f;
+	e.wheelLatDriveFrictionMod = 1.4f;
+	e.wheelLatPeakAt = 0.3f;
+	e.wheelLatMinDynamicFriction = 0.7f;
+	e.wheelLatScale = 0.05f;
+	const auto close = [](float a, float b) { return std::fabs(a - b) < 1e-5f; };
+	game::TyreContact c;
+	c.normalY = 0.8f;
+	c.grip = 0.9f;
+	c.drive = true;
+	Vec3 f = game::tyreForce(e, c, {3, 0, -12}, {0, 0, 1}, {1, 0, 0});
+	CHECK(close(f.x, 0.309657604f) && close(f.y, 0) && close(f.z, -0.363847673f));
+	c = {};
+	c.normalY = 0.6f;
+	c.brakeLatMod = true;
+	f = game::tyreForce(e, c, {-2.5f, 0, 4}, {0, 0, 1}, {1, 0, 0});
+	CHECK(close(f.x, -0.0324000046f) && close(f.y, 0) && close(f.z, 0.109641619f));
 }
 
 TEST(Vehicle_CarSettlesDrivesTurnsAndBrakes)
@@ -332,6 +363,45 @@ TEST(Vehicle_WheelsSpinInTheAir)
 	CHECK(car.vehicle->wheels()[2].spin < spun);
 }
 
+// An object's face under a wheel (the Spring's solve, 0x006ba7d0): the
+// wheel moves out by its push-out less its root's, as the root's stood
+// when the latest contact was added, along their mean normal, within
+// 0..1 m. The spring then takes that as its compression.
+TEST(Vehicle_ObjectContactCompressesTheSpringByThePushLessTheRoots)
+{
+	Car car;
+	if (!car.vehicle) {
+		return;
+	}
+	car.ground.height = [](float, float) { return -100.0f; };
+	car.ground.heightAndNormal = [](float, float, Vec3& normal) {
+		normal = {0, 1, 0};
+		return -100.0f;
+	};
+	car.body.gravityModifier = 0;
+	const Vec3 up {0, 1, 0};
+	// The root was shoved 0.2 m down before the wheel's contact: 0.3 + 0.2.
+	car.vehicle->touchObject(2, {0, 0.3f, 0}, {0, -0.2f, 0}, up, {}, 0.8f);
+	Vec3 normal;
+	CHECK(std::fabs(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) - 0.5f) < 1e-5f);
+	car.run(1);
+	CHECK(std::fabs(car.vehicle->wheels()[2].compression - 0.5f) < 1e-5f);
+	CHECK(car.vehicle->wheels()[2].contact);
+	// The latest contact's root push counts; pushes combine per axis.
+	car.vehicle->touchObject(2, {0, 0.3f, 0}, {0, -0.2f, 0}, up, {}, 0.8f);
+	car.vehicle->touchObject(2, {0, 0.4f, 0}, {}, up, {}, 0.8f);
+	CHECK(std::fabs(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) - 0.4f) < 1e-5f);
+	car.run(1);
+	// Within 1 m however far the root went.
+	car.vehicle->touchObject(2, {0, 0.6f, 0}, {0, -0.9f, 0}, up, {}, 0.8f);
+	CHECK(std::fabs(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) - 1.0f) < 1e-5f);
+	car.run(1);
+	CHECK(std::fabs(car.vehicle->wheels()[2].compression - 1.0f) < 1e-5f);
+	// The root pushed up past the wheel's own push: no compression.
+	car.vehicle->touchObject(2, {0, 0.1f, 0}, {0, 0.3f, 0}, up, {}, 0.8f);
+	CHECK(car.vehicle->objectCompression(car.vehicle->wheels()[2], normal) == 0.0f);
+}
+
 // The shipped FAVs' wheels and their collision parts. A Spring's
 // collisionPart is a geometry of the vehicle's collision mesh (0x0063ccc0
 // hands the template's +0x74 to the collision manager's slot 0x28,
@@ -385,7 +455,8 @@ TEST(Vehicle_ShippedWheelsResolveToTheirCollisionParts)
 		const physics::CollisionSubGeometry* hull = physics::collisionPart(*mesh, 0);
 		const physics::CollisionSubGeometry* wreck = physics::collisionPart(*mesh, 0, 1);
 		CHECK(hull && wreck && physics::collisionLodFor(*mesh, *hull, 1) && physics::collisionLodFor(*mesh, *wreck, 1));
-		CHECK(physics::collisionLodFor(*mesh, *hull, 2) && !physics::collisionLodFor(*mesh, *wreck, 2));
+		CHECK(physics::collisionLodFor(*mesh, *hull, 2));
+		CHECK(physics::collisionLodFor(*mesh, *wreck, 2) == physics::collisionLodFor(*mesh, *wreck, 1));
 		// Only the hull collides: its vehicle LOD's faces, not the wreck's too.
 		physics::CollisionWorld world;
 		world.addMesh(*mesh, physics::CollisionUser::Vehicle, {}, {}, 1, {});

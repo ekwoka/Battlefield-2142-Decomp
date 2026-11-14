@@ -61,9 +61,9 @@ struct HudQuad {
 	bool clipped = false;
 	float clip[4] = {0, 0, 0, 0}; // x0, y0, x1, y1
 	// addNodeBlendEffect <source> <destination> (0x007b20c0: a
-	// "<node>BlendEffect" render-state node above the node): Direct3D 9
-	// D3DBLEND values for the quads below it (the vehicle HUDs' "7 2":
-	// D3DBLEND_DESTALPHA, D3DBLEND_ONE). 0 0: the HUD's usual
+	// "<node>BlendEffect" render-state node above the node): Meme blend
+	// values, translated by Render/HudBlend.h (the vehicle HUDs' "7 2":
+	// source alpha, ONE). 0 0: the HUD's usual
 	// source-alpha blend.
 	int blend[2] = {0, 0};
 	// setPictureNodeCenterPoint x y: the rotation's pivot (the picture
@@ -75,6 +75,10 @@ struct HudQuad {
 	// about the quad's centre (the map's reload wipe, 0x0078a990's fan
 	// from the top centre through the corners); < 0 or 2 pi: all of it.
 	float sweep = -1;
+	// With sweepAbout set, the wedge's centre (instead of the quad's centre):
+	// a round bar's fill is a part of the node, masked about its middle.
+	bool sweepAbout = false;
+	float sweepCentre[2] = {0, 0};
 };
 
 // The parts of a convex polygon (x, y, u, v corners) inside the wedge of
@@ -83,6 +87,14 @@ struct HudQuad {
 // polygon for a sweep of 2 pi or more (HudQuad::sweep).
 std::vector<std::vector<std::array<float, 4>>> sweepPieces(
 	const std::vector<std::array<float, 4>>& polygon, float cx, float cy, float sweep);
+
+// The text of a deployment map label: a CPNAME_<level>_<size|Ti>_<Name> key the
+// string tables lack (Remagen's Titan-mode names) reads as "<Name>" split at its
+// capitals; other labels are only tidied (ID_/CP_ prefix, underscores).
+std::string spawnLabelText(std::string label);
+// The Titan's own spawn entry, told from its base point when both read the same
+// (Remaster's string tables lack Minsk's "CPNAME_Mi_Ti_EU_Titan", which then reads "EU Titan").
+std::string titanSpawnLabel(const std::string& titan, const std::string& baseName);
 
 class HudManager {
 public:
@@ -122,6 +134,28 @@ public:
 		std::array<float, 4> iconColor {-1, 0, 0, 0};
 	};
 	void setList(int data, std::vector<std::vector<std::string>> rows);
+	// A cell's own settings where a list mixes cell kinds in one column (the
+	// squad list's rows, 0x007a5f10 / 0x007a65a0): the text cell's
+	// (0x007db6b0) or picture cell's (0x007db860) x offset from its column
+	// (+0x58), a picture's size (+0x50/+0x54; > 0: the text is its texture
+	// path), the alignment (-1 the column's) and its colour (red below 0:
+	// the row's). By row and cell, alongside setList's rows.
+	struct ListCell {
+		float offset = 0;
+		float iconWidth = 0, iconHeight = 0;
+		int alignment = -1;
+		std::array<float, 4> color {-1, 0, 0, 0};
+	};
+	void setListCells(int data, std::vector<std::vector<ListCell>> cells) { m_listCells[data] = std::move(cells); }
+	ListCell listCellStyle(int data, int row, int column) const
+	{
+		const auto it = m_listCells.find(data);
+		if (it == m_listCells.end() || row < 0 || static_cast<size_t>(row) >= it->second.size()
+			|| column < 0 || static_cast<size_t>(column) >= it->second[static_cast<size_t>(row)].size()) {
+			return {};
+		}
+		return it->second[static_cast<size_t>(row)][static_cast<size_t>(column)];
+	}
 	// Edit boxes by data id (setEditNodeData: 1 chat, 2 the squad name, 3
 	// the commander's chat): their text, the box with the keys (-1 none;
 	// it draws a caret) and the scripts' maximum length (0 none).
@@ -184,7 +218,7 @@ public:
 	struct MapMarker {
 		std::string texture; // under Menu/HUD/Texture/
 		float x, z;          // world position
-		float size;          // pixels (fixed: icons don't scale with the zoom)
+		float size;          // HUD pixels, unless worldSize or zoomWithMap is set
 		float yaw = 0;       // degrees, clockwise (0 points north)
 		float color[4] = {1, 1, 1, 1};
 		int id = -1;         // >= 0: clickable (mapMarkerAt returns it)
@@ -196,6 +230,8 @@ public:
 		// > 0: the icon's side in metres (it scales with the map's zoom:
 		// the radar rings, 0x0078f060), over `size`.
 		float worldSize = 0;
+		bool upright = false; // stays screen-up on a turned map (the silos' baked-in numbers)
+		std::string label;    // readable label beside a deployment spawn marker
 		// Kept on the map (the record's +0x30; 0x0077efb0 -> 0x0077e100):
 		// its point at least 0.02 / the zoom (+0x7cc over 0x0077b7b0's y)
 		// of the map's side in from the map's edges, about 3 pixels of
@@ -204,7 +240,11 @@ public:
 		// false: drawn at its own alpha, not the map's icon alpha (a
 		// call's marker on a teammate, 0x007841e0).
 		bool iconAlpha = true;
+		// vehicleHud.zoomOnMinimap: size and offset follow the map projection.
+		bool zoomWithMap = false;
 	};
+	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
+	static constexpr float kSpawnMarkerSize = 16.0f;
 	void setMap(const std::string& texture, float originX, float originZ, float width, float depth);
 	void setMapFocus(float x, float z) { m_mapFocus[0] = x; m_mapFocus[1] = z; }
 	// The zoom (0x00779600: an index into the zoom levels, 1 at start), the
@@ -410,6 +450,7 @@ private:
 	std::map<int, std::vector<std::vector<std::string>>> m_lists;
 	std::map<int, std::vector<std::array<float, 4>>> m_listRowColors;
 	std::map<int, std::vector<std::array<float, 4>>> m_listRowBackgrounds;
+	std::map<int, std::vector<std::vector<ListCell>>> m_listCells;
 	std::map<int, std::vector<int>> m_occupiedStates;
 	std::map<int, std::string> m_editText;
 	std::map<int, int> m_editMaxLength;

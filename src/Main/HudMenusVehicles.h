@@ -120,9 +120,18 @@ class ObjectTemplateManager;
 
 namespace dice::hfe::menu {
 
+// Gunship missile indicator: the horizontal compass strip scrolls left
+// for positive values. Sweep from the left clipping edge to the right.
+inline float missileFuelAngle(float lifeRemaining) { return 340.0f * (2.0f * lifeRemaining - 1.0f); }
+
+
 // A template's setting, or `otherwise` when it has none.
 std::string hudSetting(const world::ObjectTemplate* t, const char* key, const std::string& otherwise = {});
 float hudNumber(const world::ObjectTemplate* t, const char* key, float otherwise);
+
+// The shipped pilot HUDs with a thrust indicator. Input is the requested
+// signed throttle, not a measurement of engine force.
+float aircraftHudThrust(int guiIndex, float throttle);
 
 // The HUD manager's colour pick (slot 0xa8, 0x0074eb60): below
 // `threshold` the low colour (0.949, 0.184, 0.184, 1), else white.
@@ -536,9 +545,13 @@ struct VehicleHudInput {
 	float speed = 0;      // m/s
 	float climb = 0;      // m/s up
 	float altitude = 0;   // over the sea
+	// The controlled object's matrix y components (0x007a2b50: [edi+4] the
+	// right row's, [edi+0x24] the forward row's): VehicleBanking and
+	// AngleOfAttack, the gunships' horizon bar.
+	float rightY = 0, forwardY = 0;
 	std::vector<SeatDot> seats;
-	// The torque the HUD eases toward (the vehicle HUD's +0x2f4: nothing in
-	// BF2142.exe writes it, so 0) and the control object's sprint (its slots
+	// The signed requested thrust for the aircraft indicators; retail's
+	// corresponding HUD source has no identified writer. The control object's sprint (its slots
 	// 0x108 stamina, 0x100 sprinting; the rewrite's vehicles have no
 	// stamina of their own, so 1 and not sprinting).
 	float torque = 0;
@@ -587,6 +600,8 @@ private:
 // The map relation of a vehicle (0x00781680).
 enum class MapRelation { Neutral = 0x10, Friendly = 0x12, Enemy = 0x13, Own = 0x25 };
 MapRelation vehicleRelation(bool hasOccupant, bool localInside, int occupantTeam, int vehicleTeam, int localTeam);
+// Relative map colours; squad applies only to a friendly player or vehicle.
+std::array<float, 4> mapRelationColor(MapRelation relation, bool squad = false);
 // Whether the map shows the vehicle, its texture and size; false when not.
 struct VehicleMarker {
 	std::string texture;
@@ -624,6 +639,8 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 //     (+0x74c) while the local player's overhead view is on (player slot
 //     0xdc, +0x8f, set with +0x8e by 0x00593840: the commander's overhead
 //     camera), whose picture shows the Titan itself.
+//     It also forces size and offset to scale with the projected map
+//     (0x00795379 -> 0x0077bdd0), rather than remaining fixed pixels.
 // The silo icons' files are numbered frames (mini_titanSilo_01..06,
 // mini_reload_01..06); the frame is the silo's place in its control
 // points' order here (the frame's pick, through the texture's own frames,
@@ -701,6 +718,8 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 // (79 shipped hand weapons set it: their crosshair overlays go while the
 // soldier sprints).
 int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed, bool sprintTest = false);
+int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* weapon, float deviation,
+	bool zoomed, bool sprintTest, bool crosshairActive);
 // The argument 0x007a01e0 hands the gui index getters (VehicleHud slot
 // 0x3c, WeaponHud slot 0x38): on (1) unless the HUD's sprint flag is off
 // and its weapon flag on. The sprint flag (+0x2a8) is the control
@@ -802,7 +821,7 @@ float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation);
 //     without one).
 struct RadarMarker {
 	std::string texture;
-	float x = 0, z = 0, size = 16;
+	float x = 0, z = 0, size = 16, yaw = 0;
 };
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
 

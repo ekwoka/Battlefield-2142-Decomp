@@ -499,7 +499,9 @@ Value NativeRegistry::defaultListMethod(Interpreter& vm, NativeList& list, const
 	const auto scrollTo = [&](int first) {
 		list.firstIndex = std::clamp(first, 0, lastFirst);
 		list.populate(vm);
-		return Value(list.firstIndex);
+		// The scroll pane moves its thumb by this: the position as a fraction
+		// of the scrollable rows (ScrollTainer.moveSlider: dragTop + length * it).
+		return Value(lastFirst > 0 ? static_cast<double>(list.firstIndex) / lastFirst : 0.0);
 	};
 	if (member == "fillList" || member == "refreshList") {
 		list.firstIndex = std::clamp(list.firstIndex, 0, lastFirst);
@@ -534,8 +536,9 @@ Value NativeRegistry::defaultListMethod(Interpreter& vm, NativeList& list, const
 		return scrollTo(toInt(vm, arg(0), 0));
 	}
 	if (member == "scrollPercent") {
-		const double percent = std::clamp(vm.toNumber(arg(0)), 0.0, 100.0);
-		return scrollTo(static_cast<int>(std::lround(percent / 100.0 * lastFirst)));
+		// A fraction 0..1: the thumb's drag (ScrollTainer.slide passes (y - top) / length).
+		const double fraction = std::clamp(vm.toNumber(arg(0)), 0.0, 1.0);
+		return scrollTo(static_cast<int>(std::lround(fraction * lastFirst)));
 	}
 	if (member == "scrollToSelection") {
 		if (list.selectedIndex >= 0 && (list.selectedIndex < list.firstIndex || list.selectedIndex >= list.firstIndex + shown)) {

@@ -2,9 +2,11 @@
 
 #include "SoundManager.h"
 #include "SoundObjectTemplate.h"
+#include "Sound/SoundEngine/EnhancedAudio.h"
 #include "Sound/SoundEngine/SoundEnvelope.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -79,6 +81,37 @@ ISound* GameSounds::create(const std::string& templateName, uint32_t owner)
 		}
 	}
 	return sound;
+}
+
+const std::string& GameSounds::sameWords(const std::string& templateName) const
+{
+	const auto known = m_sameWords.find(templateName);
+	if (known != m_sameWords.end()) {
+		return known->second;
+	}
+	const auto lowercase = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return text;
+	};
+	const auto words = [&lowercase](const std::string& name) {
+		std::vector<std::string> list;
+		size_t start = 0;
+		for (size_t end; (end = name.find('_', start)) != std::string::npos; start = end + 1) {
+			list.push_back(lowercase(name.substr(start, end - start)));
+		}
+		list.push_back(lowercase(name.substr(start)));
+		std::sort(list.begin(), list.end());
+		return list;
+	};
+	const std::vector<std::string> wanted = words(templateName);
+	std::string found = templateName;
+	for (const auto& t : m_manager.templates().templates()) {
+		if (t && t->name().size() == templateName.size() && words(t->name()) == wanted && sampleCount(t->name()) > 0) {
+			found = t->name();
+			break;
+		}
+	}
+	return m_sameWords[templateName] = found;
 }
 
 int GameSounds::sampleCount(const std::string& templateName) const
@@ -254,6 +287,7 @@ void GameSounds::release(WeaponState& state)
 		}
 	}
 	state.looping = false;
+	state.loopSlot = -1;
 }
 
 void GameSounds::releaseTrigger(uint64_t user)
@@ -270,6 +304,7 @@ void GameSounds::releaseTrigger(uint64_t user)
 			}
 		}
 		it->second.looping = false;
+		it->second.loopSlot = -1;
 	}
 	if (m_manager.muted(4)) {
 		m_manager.setMuted(4, false);
@@ -279,6 +314,37 @@ void GameSounds::releaseTrigger(uint64_t user)
 void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position,
 	bool muteOnFire, uint32_t object, const FireInfo& info)
 {
+	// Pick the perspective before checking an automatic loop. The local
+	// player can change camera while holding fire; its old loop must stop.
+	int slot = 2;
+	// DefaultSoundComp creates all event templates even when a mod leaves
+	// one unconfigured. In particular the vanilla heavy walker's main cannon
+	// has an empty Fire1P_Outdoor template but a configured Fire1P sample.
+	// Template existence alone must not select that silent variant.
+	const bool outdoorSound = sampleCount(prefix + "Fire1P_Outdoor") > 0;
+	// Enhanced audio: a 1P sound filed under the same words (a port addition).
+	const std::string fire1P = enhancedAudioEnabled() && firstPerson && !outdoorSound && sampleCount(prefix + "Fire1P") == 0
+		? sameWords(prefix + "Fire1P")
+		: prefix + "Fire1P";
+	const bool firstPersonSound = sampleCount(fire1P) > 0;
+	if (firstPerson && (outdoorSound || firstPersonSound)) {
+		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
+	}
+	if (state.looping && state.loopSlot != slot) {
+		const int oldSlot = state.loopSlot;
+		for (ISound*& sound : state.fire) {
+			if (sound) {
+				sound->stopImmediately();
+				sound->release();
+				sound = nullptr;
+			}
+		}
+		state.looping = false;
+		state.loopSlot = -1;
+		if (oldSlot != 2 && m_manager.muted(4)) {
+			m_manager.setMuted(4, false);
+		}
+	}
 	// 0x005dbdc0. Sounds a burst already played are skipped (+0x3c); an
 	// automatic loop under way (+0x43) plays on.
 	if (state.skip > 0) {
@@ -288,20 +354,23 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (state.looping) {
 		return;
 	}
-	// The slot: in first person (with a Fire1P or Fire1P_Outdoor) slot 1
-	// where it has one and the engine finds the listener outdoors (manager
-	// slot 0x98, 0x007fa320), else 0, the world's effects ducking with
-	// muteOnFire (reason 4); otherwise slot 2, Fire3P.
-	int slot = 2;
-	const bool outdoorSound = m_manager.hasSound(prefix + "Fire1P_Outdoor");
-	if (firstPerson && (outdoorSound || m_manager.hasSound(prefix + "Fire1P"))) {
-		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
-		if (muteOnFire) {
-			m_manager.setMuted(4, true);
-		}
+	// The slot: first person selects Fire1P / Fire1P_Outdoor; otherwise
+	// Fire3P. First-person fire ducks the world's effects (reason 4).
+	// 0x005dbec3..0x005dbee7: a local player's weapon sets reason 4 (muteOnFire) before the
+	// sample is looked at, so a gun with no 1P sample still ducks the world's effects.
+	// No 1P sample (the right Shepherd gunner's Fire1P is misnamed in both mods'
+	// eu_at.tweak): retail 0x005dbdc0 picks slot 0/1 on first person alone and plays
+	// nothing. Enhanced audio (a port addition) lets the 3P sample stand in, kept
+	// head-relative so occlusion and HRTF don't treat the player's own gun as distant.
+	const bool head = firstPerson;
+	if (head && muteOnFire) {
+		m_manager.setMuted(4, true);
+	}
+	if (firstPerson && slot == 2 && !enhancedAudioEnabled()) {
+		return;
 	}
 	static const char* const kSlots[3] = {"Fire1P", "Fire1P_Outdoor", "Fire3P"};
-	const std::string name = prefix + kSlots[slot];
+	const std::string name = slot == 0 ? fire1P : prefix + kSlots[slot];
 	const int samples = sampleCount(name);
 	int sample = -1, loops = 1;
 	bool keep = false;
@@ -309,6 +378,7 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 		if (info.mode == 2) {
 			// Automatic: the sample loops until the trigger is let go.
 			state.looping = true;
+			state.loopSlot = slot;
 			keep = true;
 			loops = 0;
 		} else if (info.burstRounds > 1) {
@@ -338,7 +408,6 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (!m_manager.hasSound(name)) {
 		return;
 	}
-	const bool head = slot != 2;
 	if (m_log) {
 		std::printf("sound: %s%s%s\n", name.c_str(), head ? " (first person)" : "", loops == 0 ? " loops" : "");
 	}
@@ -348,6 +417,11 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	ISound* sound = create(name, head ? 0 : object);
 	if (!sound) {
 		return;
+	}
+	if (keep && state.fire[static_cast<size_t>(slot)]) {
+		state.fire[static_cast<size_t>(slot)]->stopImmediately();
+		state.fire[static_cast<size_t>(slot)]->release();
+		state.fire[static_cast<size_t>(slot)] = nullptr;
 	}
 	if (head) {
 		sound->setHeadRelative(true);

@@ -49,6 +49,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 namespace dice::hfe::render {
 
@@ -77,6 +78,26 @@ inline float viewFarDistance(float levelViewDistance, float viewDistanceScale)
 {
 	const float stored = static_cast<float>(static_cast<int>(std::clamp(levelViewDistance, 20.0f, 3000.0f) + 0.5f));
 	return stored * viewDistanceScale;
+}
+
+// A skinned mesh's radius (RendDX9 0x101a7b10, the geometry record's +0x1c,
+// which its LOD pick 0x101616c0 reads): the box's farthest corner from its
+// centre, the half diagonal.
+inline float boxHalfDiagonal(const std::array<float, 3>& min, const std::array<float, 3>& max)
+{
+	const float x = max[0] - min[0], y = max[1] - min[1], z = max[2] - min[2];
+	return 0.5f * std::sqrt(x * x + y * y + z * z);
+}
+
+// A soldier's radius. The object's radius (0x006f7ec0) is its collision
+// component's when it has one (+0x4c, 0x006dedb0: the first LOD's +0xc0,
+// the box corner farthest from the origin), and every soldier template
+// names the built-in Soldier_CollisionMesh (0x006e4880: x and z +-0.4,
+// y -1..0.8 about the physics origin). Its UAVTarget child has no radius,
+// so it doesn't widen it (kit weapons assumed at the origin; unchecked).
+inline float soldierCullRadius()
+{
+	return std::sqrt(0.4f * 0.4f + 1.0f + 0.4f * 0.4f);
 }
 
 // The view distance scale a frame uses. While the commander's overhead

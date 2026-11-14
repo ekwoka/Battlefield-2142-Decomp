@@ -1,5 +1,6 @@
 #include "BfSoundEngine.h"
 
+#include "EnhancedAudio.h"
 #include "Music.h"
 #include "OpenALProvider.h"
 #include "OpenALSample.h"
@@ -533,6 +534,7 @@ void BfSoundEngine::update(int ticks)
 	m_starting.clear();
 
 	updateSamples(ticks);
+	enhancedEndTick(m_listenerPosition);
 	m_now += ticks;
 	updateFades();
 	++m_frame;

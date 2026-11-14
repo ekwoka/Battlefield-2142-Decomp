@@ -63,15 +63,22 @@ private:
 
 const CollisionLod* collisionLodFor(const CollisionMeshFile& file, const CollisionSubGeometry& part, uint32_t type)
 {
-	if (file.version < 9) {
-		return type < part.lods.size() ? &part.lods[type] : nullptr;
-	}
-	for (const CollisionLod& lod : part.lods) {
-		if (lod.collisionType == type) {
-			return &lod;
+	const auto exact = [&](uint32_t wanted) -> const CollisionLod* {
+		if (file.version < 9) {
+			return wanted < part.lods.size() ? &part.lods[wanted] : nullptr;
 		}
+		for (const CollisionLod& lod : part.lods) {
+			if (lod.collisionType == wanted) return &lod;
+		}
+		return nullptr;
+	};
+	// Retail loader 0x006e4fe0: missing soldier LOD uses vehicle;
+	// missing AI-navigation LOD uses the resulting soldier LOD.
+	if (const CollisionLod* lod = exact(type)) return lod;
+	if (type == 3) {
+		if (const CollisionLod* lod = exact(2)) return lod;
 	}
-	return nullptr;
+	return (type == 2 || type == 3) ? exact(1) : nullptr;
 }
 
 const CollisionSubGeometry* collisionPart(const CollisionMeshFile& file, size_t geometry, size_t state)

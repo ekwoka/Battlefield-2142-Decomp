@@ -1,4 +1,6 @@
 #include "Viewer.h"
+#include "MouseCapture.h"
+#include "MissileViewSmoothing.h"
 #include "DisplayModes.h"
 
 #include "Render/GpuContext.h"
@@ -22,6 +24,7 @@
 #include <cstring>
 #include <cstdio>
 
+
 namespace dice::hfe {
 
 struct Window::Impl {
@@ -39,6 +42,7 @@ struct Window::Impl {
 	Uint64 opened = 0;
 	std::set<SDL_Scancode> held;
 	std::set<SDL_Scancode> releaseNext; // key: pressed for one frame, released on the next
+	std::set<SDL_Scancode> fullscreenKeys; // consumed until key-up so Enter cannot reach gameplay or Flash
 	Uint32 heldButtons = 0;
 	std::string text;       // the last scripted text (its event points at it)
 	std::string shot;       // a screenshot the next frame takes
@@ -46,20 +50,44 @@ struct Window::Impl {
 
 	// Pushes the events of the commands now due.
 	void runScript();
+	// A detached launch is not the active app on macOS: until the window first has input focus, ask for it
+	// (throttled, bounded) from every screen's frame, so menus and movies get hover and clicks without an Alt-Tab.
+	Uint64 lastRaise = 0;
+	int raises = 0;
+	bool focusSeen = false;
+	void claimFocus();
 	// The keyboard as read, with the scripted keys held.
 	const bool* keyboard();
 	Uint32 mouseButtons() const { return SDL_GetMouseState(nullptr, nullptr) | heldButtons; }
 	bool merged[SDL_SCANCODE_COUNT] = {};
 };
 
+void Window::Impl::claimFocus()
+{
+	if (focusSeen || (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS)) {
+		focusSeen = true;
+		return;
+	}
+	const Uint64 now = SDL_GetTicksNS();
+	if (raises < 20 && now - lastRaise >= 500'000'000ull) {
+		lastRaise = now;
+		++raises;
+		SDL_RaiseWindow(window);
+	}
+}
+
 void Window::Impl::runScript()
 {
+	claimFocus();
 	const double now = static_cast<double>(SDL_GetTicksNS() - opened) / 1e9;
 	int width = 1, height = 1;
 	SDL_GetWindowSize(window, &width, &height);
 	const SDL_WindowID id = SDL_GetWindowID(window);
 	const auto scancode = [](std::string name) {
 		std::replace(name.begin(), name.end(), '_', ' ');
+		// SDL can rename modifier keys to platform-specific names.
+		if (name == "Left Alt" || name == "Left Option") return SDL_SCANCODE_LALT;
+		if (name == "Right Alt" || name == "Right Option") return SDL_SCANCODE_RALT;
 		return SDL_GetScancodeFromName(name.c_str());
 	};
 	const auto keyEvent = [&](SDL_Scancode code, bool down) {
@@ -67,7 +95,15 @@ void Window::Impl::runScript()
 		event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
 		event.key.windowID = id;
 		event.key.scancode = code;
-		event.key.key = SDL_GetKeyFromScancode(code, SDL_KMOD_NONE, false);
+		SDL_Keymod modifiers = SDL_KMOD_NONE;
+		if (held.count(SDL_SCANCODE_LALT)) modifiers |= SDL_KMOD_LALT;
+		if (held.count(SDL_SCANCODE_RALT)) modifiers |= SDL_KMOD_RALT;
+		if (held.count(SDL_SCANCODE_LSHIFT)) modifiers |= SDL_KMOD_LSHIFT;
+		if (held.count(SDL_SCANCODE_RSHIFT)) modifiers |= SDL_KMOD_RSHIFT;
+		if (held.count(SDL_SCANCODE_LCTRL)) modifiers |= SDL_KMOD_LCTRL;
+		if (held.count(SDL_SCANCODE_RCTRL)) modifiers |= SDL_KMOD_RCTRL;
+		event.key.key = SDL_GetKeyFromScancode(code, modifiers, false);
+		event.key.mod = modifiers;
 		event.key.down = down;
 		SDL_PushEvent(&event);
 	};
@@ -124,6 +160,14 @@ void Window::Impl::runScript()
 			const int button = std::atoi(c.arg.c_str());
 			const bool down = c.arg.find(",1") != std::string::npos;
 			heldButtons = down ? heldButtons | SDL_BUTTON_MASK(button) : heldButtons & ~SDL_BUTTON_MASK(button);
+			SDL_Event event {};
+			event.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+			event.button.windowID = id;
+			event.button.button = static_cast<Uint8>(button);
+			event.button.down = down;
+			event.button.x = mouseX;
+			event.button.y = mouseY;
+			SDL_PushEvent(&event);
 		} else if (c.op == "look") {
 			SDL_Event motion {};
 			motion.type = SDL_EVENT_MOUSE_MOTION;
@@ -140,6 +184,12 @@ void Window::Impl::runScript()
 			event.type = SDL_EVENT_TEXT_INPUT;
 			event.text.windowID = id;
 			event.text.text = text.c_str();
+			SDL_PushEvent(&event);
+		} else if (c.op == "wheel") {
+			SDL_Event event {};
+			event.type = SDL_EVENT_MOUSE_WHEEL;
+			event.wheel.windowID = id;
+			event.wheel.y = static_cast<float>(std::atof(c.arg.c_str()));
 			SDL_PushEvent(&event);
 		} else if (c.op == "shot") {
 			shot = c.arg;
@@ -162,6 +212,9 @@ const bool* Window::Impl::keyboard()
 	}
 	for (const SDL_Scancode code : held) {
 		merged[code] = true;
+	}
+	for (const SDL_Scancode code : fullscreenKeys) {
+		merged[code] = false;
 	}
 	return merged;
 }
@@ -341,8 +394,13 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	// for, and print the mean frame cost (CPU preparation and the GPU's).
 	if (const char* bench = std::getenv("BF2142_FRAME_BENCH")) {
 		const int frames = std::max(std::atoi(bench), 1);
+		// BF2142_BENCH_TURN=D: the camera turns D degrees a frame (the
+		// enhanced mode's TAA reprojection under camera motion).
+		const char* turn = std::getenv("BF2142_BENCH_TURN");
+		const float turnRadians = turn ? static_cast<float>(std::atof(turn)) * 3.14159265f / 180.0f : 0.0f;
 		const Uint64 start = SDL_GetTicksNS();
 		for (int i = 0; i < frames; ++i) {
+			camera.yaw += turnRadians;
 			SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu->device());
 			level.draw(again, target.color, target, camera, sources.lights);
 			SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(again);
@@ -355,10 +413,48 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 			static_cast<double>(SDL_GetTicksNS() - start) / 1e6 / frames, frames);
 	}
 	std::vector<uint8_t> pixels;
-	const bool ok = gpu->readPixels(target, pixels) &&
+	bool ok = gpu->readPixels(target, pixels) &&
 		render::writePng(options.screenshot, target.width, target.height, pixels);
-	gpu->releaseTarget(target);
 	std::printf("%s %s\n", ok ? "wrote" : "failed to write", options.screenshot.c_str());
+	// BF2142_SHOT_SEQUENCE=N[:F] (a diagnostic): N more frames, a game tick before each, the fire button held
+	// for the first F of them; each saved beside the screenshot as <name>-<i>.png (a frame sequence in one run).
+	if (const char* sequence = std::getenv("BF2142_SHOT_SEQUENCE")) {
+		const int frames = std::atoi(sequence);
+		const char* colon = std::strchr(sequence, ':');
+		const int fireFrames = colon ? std::atoi(colon + 1) : 0;
+		const std::string stem = options.screenshot.substr(0, options.screenshot.rfind('.'));
+		for (int i = 1; i <= frames && ok; ++i) {
+			ViewerOptions::PlayerInput input;
+			input.fire = i <= fireFrames;
+			if (options.onPlayerInput) {
+				options.onPlayerInput(input);
+			}
+			if (options.onTicks) {
+				options.onTicks(1);
+			}
+			if (options.camera.empty() && options.playerView && options.playerView(view) && (view.firstPerson || view.external)) {
+				camera.position = {view.eye[0], view.eye[1], view.eye[2]};
+				camera.yaw = view.eyeYaw;
+				camera.pitch = view.eyePitch;
+				camera.fovY = view.fovY;
+				camera.roll = view.eyeRoll;
+			}
+			if (options.onView) {
+				const float position[3] = {camera.position.x, camera.position.y, camera.position.z};
+				options.onView(position, camera.yaw, camera.pitch, camera.fovY,
+					static_cast<float>(options.width) / static_cast<float>(options.height));
+			}
+			SDL_GPUCommandBuffer* again = SDL_AcquireGPUCommandBuffer(gpu->device());
+			level.syncObjects();
+			level.draw(again, target.color, target, camera, sources.lights);
+			SDL_SubmitGPUCommandBuffer(again);
+			char name[16];
+			std::snprintf(name, sizeof name, "-%02d.png", i);
+			ok = gpu->readPixels(target, pixels) && render::writePng(stem + name, target.width, target.height, pixels);
+			std::printf("%s %s%s\n", ok ? "wrote" : "failed to write", stem.c_str(), name);
+		}
+	}
+	gpu->releaseTarget(target);
 	return ok ? 0 : 1;
 }
 
@@ -415,6 +511,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		render::Camera camera = level.suggestedCamera();
 		applyCameraOption(camera, options.camera);
 		const bool playing = static_cast<bool>(options.playerView);
+		// A window point in the HUD's 800 x 600, through the HUD pass's x scale (LevelSources::hudXScale).
+		const auto hudX = [&sources](float x, float width) { return 400.0f + (x * 800.0f / width - 400.0f) / sources.hudXScale; };
 		// Text input is on only while a menu or the chat line takes typing:
 		// left on in play, macOS reads held movement keys as typing and
 		// opens its accent picker over the game (port addition).
@@ -422,7 +520,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		if (options.onMenuInput && !options.menuActive) {
 			std::printf("the menu has the mouse and keyboard; close the window to quit\n");
 		} else if (playing) {
-			SDL_SetWindowRelativeMouseMode(window, true);
 			std::printf("WASD run, shift sprints, the mouse looks around, left button fires, Esc %s\n",
 				options.onEscape ? "shows the menu" : "quits");
 		} else {
@@ -430,7 +527,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		}
 		float pitch = -0.2f;
 		float turn = 0;
-		float wheelSteps = 0; // the mouse wheel in play (IDAxis_2), since the last input
+		bool drivingNow = false; // last frame's seat: a driver's mouse pitch is not clamped like a soldier's
+		std::optional<float> lastVehicleCameraPitch;
+		input::PlayWheel playWheel; // the mouse wheel in play (IDAxis_2), since the last input
 		// The game controllers, opened as SDL reports them.
 		std::unique_ptr<input::SdlGameControllers> sdlControllers;
 		if (options.gameControllers) {
@@ -444,16 +543,26 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		render::GpuContext::Target target;
 		Uint64 last = SDL_GetTicksNS();
 		const Uint64 start = last;
+		shown.opened = last; // scripted input starts after the level is ready
+		MissileViewSmoothing missileSmoothing;
 		TickTimer ticks(10, 30.0f); // as BF2Engine
 		ticks.advance(0);
 		bool running = true;
 		bool pointer = false; // the mouse is a pointer (a menu is up)
+		bool captureWantedBefore = false;
+		bool pointerConfinedBefore = false;
+		bool discardFirstRelativeMotion = false;
+		int tracedCaptureState = -1;
+		bool roseCursorHidden = false; // the comm rose is picked by pointing, without a visible cursor
+		// A detached process from the launcher applet may start behind it, and then
+		// never receives focus (so never captures) until the user clicks.
+		SDL_RaiseWindow(window);
+		input::MenuWheelSteps menuWheel;
 		MenuCursor menuCursor;
 		while (running) {
 			const bool wanted = options.wantsPointer && options.wantsPointer();
 			if (playing && wanted != pointer) {
 				pointer = wanted;
-				SDL_SetWindowRelativeMouseMode(window, !pointer);
 			}
 			SDL_Event event;
 			int windowWidth = 1, windowHeight = 1;
@@ -486,9 +595,56 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			if (options.gameControllers) {
 				options.gameControllers->beginFrame();
 			}
+			Uint32 pressedButtons = 0;
+			bool focusGained = false;
 			while (SDL_PollEvent(&event)) {
+				if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) focusGained = true;
 				if (sdlControllers && sdlControllers->handle(event)) {
 					continue;
+				}
+				if (event.type == SDL_EVENT_KEY_DOWN && shown.fullscreenKeys.count(event.key.scancode)) {
+					continue; // swallow repeats too; the shortcut is one press until key-up
+				}
+				if (event.type == SDL_EVENT_KEY_UP && shown.fullscreenKeys.erase(event.key.scancode)) {
+					continue; // do not let Flash observe the key-up from a consumed shortcut
+				}
+				if (event.type == SDL_EVENT_KEY_DOWN
+					&& (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER
+						|| event.key.scancode == SDL_SCANCODE_RETURN || event.key.scancode == SDL_SCANCODE_KP_ENTER)
+					&& (event.key.mod & SDL_KMOD_ALT) != 0) {
+					shown.fullscreenKeys.insert(event.key.scancode);
+					if (!event.key.repeat) {
+						const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+						if (!SDL_SetWindowFullscreen(window, !fullscreen)) {
+							std::fprintf(stderr, "SDL_SetWindowFullscreen: %s\n", SDL_GetError());
+						} else {
+							if (!SDL_SyncWindow(window)) std::fprintf(stderr, "SDL_SyncWindow: %s\n", SDL_GetError());
+							if (std::getenv("BF2142_INPUT_TRACE")) std::printf("fullscreen-toggle requested=%d actual=%d\n",
+								!fullscreen, (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0);
+							// The normal frame path also re-reads size and swapchain pixels;
+							// refresh menu coordinates for any remaining events this frame.
+							SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+						}
+					}
+					continue; // never pass Option-Enter to HUD, deployment, or Flash
+				}
+				if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+					shown.fullscreenKeys.clear();
+				}
+				if (pointer && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_MOTION)) {
+					// Pointer screens: what SDL delivers (every button, every 20th motion), to find lost clicks.
+					static int motions = 0;
+					if (event.type != SDL_EVENT_MOUSE_MOTION || ++motions % 20 == 1) {
+						std::printf("pointer-event: %s button=%d at %.0f,%.0f playing=%d menuUp=%d\n",
+							event.type == SDL_EVENT_MOUSE_MOTION ? "motion" : event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? "down" : "up",
+							event.type == SDL_EVENT_MOUSE_MOTION ? 0 : event.button.button,
+							event.type == SDL_EVENT_MOUSE_MOTION ? event.motion.x : event.button.x,
+							event.type == SDL_EVENT_MOUSE_MOTION ? event.motion.y : event.button.y, playing, menuUp);
+						std::fflush(stdout);
+					}
+				}
+				if (playing && !pointer && !menuUp && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+					pressedButtons |= SDL_BUTTON_MASK(event.button.button);
 				}
 				if (event.type == SDL_EVENT_QUIT) {
 					running = false;
@@ -513,9 +669,22 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						menu({event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? Kind::Down : Kind::Up, x, y});
 					}
 				} else if (menuUp && event.type == SDL_EVENT_MOUSE_WHEEL) {
-					menu({ViewerOptions::MenuInput::Kind::Wheel, 0, 0, static_cast<int>(event.wheel.y)});
+					float x = 0, y = 0;
+					SDL_GetMouseState(&x, &y);
+					menu({ViewerOptions::MenuInput::Kind::Move, x / windowWidth, y / windowHeight});
+					const float delta = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+					if (const int steps = menuWheel.add(delta); steps != 0) {
+						menu({ViewerOptions::MenuInput::Kind::Wheel, 0, 0, steps});
+					}
+				} else if (playing && pointer && event.type == SDL_EVENT_MOUSE_WHEEL && options.onPointerWheel) {
+					float x = 0, y = 0;
+					SDL_GetMouseState(&x, &y);
+					const float delta = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+					if (const int steps = menuWheel.add(delta); steps != 0) {
+						options.onPointerWheel(hudX(x, static_cast<float>(windowWidth)), y / windowHeight * 600, steps);
+					}
 				} else if (playing && !pointer && event.type == SDL_EVENT_MOUSE_WHEEL) {
-					wheelSteps += event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+					playWheel.add(event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y);
 				} else if (menuUp && (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)) {
 					menu({event.type == SDL_EVENT_KEY_DOWN ? ViewerOptions::MenuInput::Kind::Key : ViewerOptions::MenuInput::Kind::KeyUp, 0, 0,
 						flashKeyCode(static_cast<int>(event.key.key))});
@@ -527,17 +696,21 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					&& options.onClick) {
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
-					options.onClick(event.button.x * 800.0f / static_cast<float>(w), event.button.y * 600.0f / static_cast<float>(h));
+					options.onClick(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT && pointer
 					&& options.onRightClick) {
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
-					options.onRightClick(event.button.x * 800.0f / static_cast<float>(w), event.button.y * 600.0f / static_cast<float>(h));
+					options.onRightClick(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && pointer && options.onPointerMove) {
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
-					options.onPointerMove(event.motion.x * 800.0f / static_cast<float>(w), event.motion.y * 600.0f / static_cast<float>(h));
+					options.onPointerMove(hudX(event.motion.x, static_cast<float>(w)), event.motion.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && playing && !pointer) {
+					if (discardFirstRelativeMotion && SDL_GetWindowRelativeMouseMode(window)) {
+						discardFirstRelativeMotion = false;
+						continue;
+					}
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
 					float axisX = 1, axisY = 1;
@@ -546,11 +719,75 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					}
 					turn += event.motion.xrel * 0.15f * scale * axisX;
 					// First person looks up and down to 85 degrees (0x005890a0).
-					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
-					pitch = std::fmax(low, std::fmin(high, pitch - event.motion.yrel * 0.003f * scale * axisY * up));
+					pitch = clampLookPitch(pitch - event.motion.yrel * 0.003f * scale * axisY * up, firstPerson, drivingNow);
 				} else if (event.type == SDL_EVENT_MOUSE_MOTION && (event.motion.state & SDL_BUTTON_RMASK)) {
 					camera.yaw += event.motion.xrel * 0.004f;
 					camera.pitch = std::fmax(-1.5f, std::fmin(1.5f, camera.pitch - event.motion.yrel * 0.004f));
+				}
+			}
+			// SDL owns cursor association and relative-mode deferral on macOS. Change
+			// relative mode only when gameplay's desired state changes; SDL may have
+			// deferred the grab during a focus click, so retry once on focus gain.
+			const bool focused = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+			const bool capture = gameplayMouseCaptureWanted(playing, pointer, menuUp, focused);
+			const char* pointerWhy = options.pointerReason ? options.pointerReason() : nullptr;
+			const bool confine = gameplayPointerConfined(playing, pointer, menuUp, focused, pointerWhy);
+			if (capture != captureWantedBefore) {
+				SDL_SetWindowRelativeMouseMode(window, capture);
+				captureWantedBefore = capture;
+				if (capture) discardFirstRelativeMotion = true;
+			}
+			if (focusGained && capture && !SDL_GetWindowRelativeMouseMode(window)) {
+				SDL_SetWindowRelativeMouseMode(window, true);
+				discardFirstRelativeMotion = true;
+			}
+			if (confine != pointerConfinedBefore) {
+				SDL_SetWindowMouseGrab(window, confine);
+				pointerConfinedBefore = confine;
+			}
+			{
+				// SDL ignores an unchanged rect; relative xrel/yrel are never clamped by it.
+				const int inset = fullscreenEdgeInset((SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0, focused);
+				int ww = 1, wh = 1;
+				SDL_GetWindowSize(window, &ww, &wh);
+				const SDL_Rect edgeGuard{inset, inset, ww - 2 * inset, wh - 2 * inset};
+				SDL_SetWindowMouseRect(window, inset ? &edgeGuard : nullptr);
+			}
+			{
+				const bool hideCursor = gameplaySystemCursorHidden(confine, pointerWhy);
+				if (hideCursor != roseCursorHidden) {
+					if (hideCursor) {
+						SDL_HideCursor();
+					} else {
+						SDL_ShowCursor();
+					}
+					roseCursorHidden = hideCursor;
+				}
+			}
+			// After relative mode let go, so the release doesn't put the cursor back where it was.
+			if (pointer && options.takePointerWarp && !SDL_GetWindowRelativeMouseMode(window)) {
+				float px = 0, py = 0;
+				if (options.takePointerWarp(px, py)) {
+					int ww = 1, wh = 1;
+					SDL_GetWindowSize(window, &ww, &wh);
+					SDL_WarpMouseInWindow(window, (400.0f + (px - 400.0f) * sources.hudXScale) * ww / 800.0f, py * wh / 600.0f);
+				}
+			}
+			{
+				// Always on, one line per change (not per frame): says which flag blocks capture.
+				const bool relative = SDL_GetWindowRelativeMouseMode(window);
+				const bool grabbed = SDL_GetWindowMouseGrab(window);
+				const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+				const bool edgeGuarded = SDL_GetWindowMouseRect(window) != nullptr;
+				const char* why = options.pointerReason ? options.pointerReason() : nullptr;
+				const int state = focused | (pointer << 1) | (menuUp << 2) | (relative << 3) | (grabbed << 4) | (fullscreen << 5)
+					| (playing << 6) | (capture << 7) | (why ? static_cast<int>(why[0]) << 8 : 0) | (edgeGuarded << 16);
+				if (state != tracedCaptureState) {
+					std::printf("mouse-capture: t=%.1f wanted=%d blocker=%s focused=%d pointer=%d(%s) menu=%d playing=%d actual relative=%d grabbed=%d fullscreen=%d edge-guard=%d\n",
+						SDL_GetTicksNS() / 1e9, capture, mouseCaptureBlocker(playing, pointer, menuUp, focused), focused, pointer, why ? why : "-", menuUp,
+						playing, relative, grabbed, fullscreen, edgeGuarded);
+					std::fflush(stdout);
+					tracedCaptureState = state;
 				}
 			}
 			const Uint64 now = SDL_GetTicksNS();
@@ -567,7 +804,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			if (playing && options.onPlayerInput && options.controls) {
 				// The control maps (0x004b141a): on foot the infantry map, in a
 				// vehicle the map of its category.
-				const Uint32 buttons = shown.mouseButtons();
+				const Uint32 buttons = shown.mouseButtons() | pressedButtons;
 				input::GameControllers* pads = options.gameControllers;
 				input::ControlMaps::Source down;
 				down.down = [keys, buttons, pointer, pads](const input::Binding& b) {
@@ -580,7 +817,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						// 4 the side buttons (SDL counts left 1, middle 2, right 3).
 						static const int sdlButton[] = {SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT, SDL_BUTTON_MIDDLE, SDL_BUTTON_X1, SDL_BUTTON_X2};
 						const int button = std::atoi(control.c_str() + 9);
-						return !pointer && button >= 0 && button < 5 && (buttons & SDL_BUTTON_MASK(sdlButton[button])) != 0;
+						return !pointer && button >= 0 && button < 5 && (buttons & SDL_BUTTON_MASK(input::sdlMouseButton(button))) != 0;
 					}
 					const SDL_Scancode code = scancodeFor(control);
 					return code != SDL_SCANCODE_UNKNOWN && keys[code];
@@ -603,9 +840,19 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				down.seconds = dt;
 				ViewerOptions::PlayerView view;
 				const bool driving = options.playerView && options.playerView(view) && view.driving;
+				if (drivingNow && !driving) {
+					pitch = infantryPitchAfterVehicleExit(pitch, drivingNow, driving, lastVehicleCameraPitch);
+					pitch = clampLookPitch(pitch, view.firstPerson, false);
+				}
+				drivingNow = driving;
+				if (driving) {
+					lastVehicleCameraPitch = view.firstPerson || view.external ? std::optional<float> {view.eyePitch} : std::nullopt;
+				} else {
+					lastVehicleCameraPitch.reset();
+				}
 				if (options.takeAimKick) {
-					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
-					pitch = std::fmax(low, std::fmin(high, pitch + options.takeAimKick() / 57.29578f));
+					// Not the soldier's limit while driving: it pinned the pilot's pitch input (the gunship's nose-up).
+					pitch = clampLookPitch(pitch + options.takeAimKick() / 57.29578f, firstPerson, driving);
 				}
 				static const char* kVehicleMaps[] = {input::ControlMaps::kLand, input::ControlMaps::kSea,
 					input::ControlMaps::kAir, input::ControlMaps::kHelicopter};
@@ -626,8 +873,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					const float scale = options.mouseScale ? options.mouseScale() : 1.0f;
 					const float up = options.invertMouse && options.invertMouse() ? -1.0f : 1.0f;
 					turn += c.value(map, "c_PIMouseLookX", down) * 120.0f * dt * scale;
-					const float low = firstPerson ? -1.4835f : -1.2f, high = firstPerson ? 1.4835f : 1.0f;
-					pitch = std::fmax(low, std::fmin(high, pitch - c.value(map, "c_PIMouseLookY", down) * 2.0944f * dt * scale * up));
+					pitch = clampLookPitch(pitch - c.value(map, "c_PIMouseLookY", down) * 2.0944f * dt * scale * up, firstPerson, driving);
 				}
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
@@ -646,7 +892,17 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.crouch = c.pressed(map, "c_PICrouch", down);
 				input.lie = c.pressed(map, "c_PILie", down);
 				input.jump = c.pressed(map, "c_PIAction", down);
-				input.toggleCamera = c.pressed(map, "c_PIToggleCameraMode", down);
+				input.toggleCamera = c.pressed(map, "c_PIToggleCamera", down);
+				// Profiles saved by older native builds lost this unrecognised
+				// constant. Keep C usable until the player rebinds the camera.
+				if (!c.hasBinding(map, "c_PIToggleCamera")) {
+					input.toggleCamera = keys[SDL_SCANCODE_C];
+				}
+				for (int mode = 1; mode <= 4; ++mode) {
+					if (c.pressed(map, "c_PICameraMode" + std::to_string(mode), down)) {
+						input.camera = mode;
+					}
+				}
 				input.voipPushToTalk = c.pressed(map, "c_GIVoipPushToTalk", down);
 				input.voipLeaderChannel = c.pressed(map, "c_GIVoipUseLeaderChannel", down);
 				input.sayAll = c.pressed(map, "c_GISayAll", down);
@@ -657,6 +913,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.mapSize = c.pressed(map, "c_GIMapSize", down);
 				input.mapZoom = c.pressed(map, "c_GIMapZoom", down);
 				input.map3d = c.pressed(map, "c_GI3dMap", down);
+				input.deployment = c.pressed(map, "c_GIEnter", down);
 				input.yes = c.pressed(map, "c_GIYes", down);
 				input.no = c.pressed(map, "c_GINo", down);
 				for (int item = 0; item < 9; ++item) {
@@ -673,21 +930,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				// "addAxisToTriggerMapping c_PINextItem c_PIPrevItem IDFMouse
 				// IDAxis_2": the axis's positive way the first, its negative
 				// the second): a frame it turned presses one.
-				const auto wheelTo = [&](const char* name) {
-					const input::ControlMaps::Map* m = c.find(map);
-					if (!m || !m->count(name)) {
-						return false;
-					}
-					for (const input::Binding& b : m->at(name)) {
-						if (b.kind == input::Binding::Kind::Axis && !b.hold && b.device == "IDFMouse" && b.control == "IDAxis_2"
-							&& wheelSteps * b.sign > 0) {
-							return true;
-						}
-					}
-					return false;
-				};
+				// The shipped profile binds them only in defaultPlayerInputControlMap, which the seat's map falls back to.
+				const float wheelSteps = playWheel.take();
+				const auto wheelTo = [&](const char* name) { return c.wheelPresses(map, name, wheelSteps); };
 				input.itemStep = wheelTo("c_PINextItem") ? 1 : wheelTo("c_PIPrevItem") ? -1 : 0;
-				wheelSteps = 0;
 				options.onPlayerInput(input);
 				turn = 0;
 			} else if (playing && options.onPlayerInput) {
@@ -697,8 +943,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.sprint = keys[SDL_SCANCODE_LSHIFT];
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
-				input.fire = (shown.mouseButtons() & SDL_BUTTON_LMASK) != 0 && !pointer;
-				input.altFire = (shown.mouseButtons() & SDL_BUTTON_RMASK) != 0 && !pointer;
+				input.fire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_LMASK) != 0 && !pointer;
+				input.altFire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_RMASK) != 0 && !pointer;
 				input.flareFire = keys[SDL_SCANCODE_X];
 				input.toggleWeapon = keys[SDL_SCANCODE_F];
 				input.use = keys[SDL_SCANCODE_E];
@@ -709,6 +955,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.lie = keys[SDL_SCANCODE_Z];
 				input.jump = keys[SDL_SCANCODE_SPACE];
 				input.toggleCamera = keys[SDL_SCANCODE_C];
+				input.deployment = keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER];
+				for (int mode = 0; mode < 4; ++mode) {
+					if (keys[SDL_SCANCODE_F9 + mode]) input.camera = mode + 1;
+				}
 				input.commanderScreen = keys[SDL_SCANCODE_CAPSLOCK];
 				input.ctrl = keys[SDL_SCANCODE_LCTRL] || keys[SDL_SCANCODE_RCTRL];
 				input.shift = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
@@ -729,8 +979,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 						input.seat = seat + 1;
 					}
 				}
+				const float wheelSteps = playWheel.take();
 				input.itemStep = wheelSteps > 0 ? 1 : wheelSteps < 0 ? -1 : 0; // up the next item, down the previous
-				wheelSteps = 0;
 				options.onPlayerInput(input);
 				turn = 0;
 			}
@@ -778,6 +1028,16 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					camera.position = head - camera.forward() * 4.0f + camera.right() * 0.6f;
 				}
 			}
+			// The projectile follows fixed 30 Hz simulation samples. Interpolate
+			// only the ridden missile camera at the actual render phase.
+			MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
+			const auto smooth = missileSmoothing.sample(view.firstPerson ? view.projectileSerial : 0, elapsedTicks > 0,
+				static_cast<float>(ticks.interpolation(static_cast<double>(now - start) / 1e9)), raw);
+			if (view.firstPerson && view.projectileSerial) {
+				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
+				camera.yaw = smooth.yaw;
+				camera.pitch = smooth.pitch;
+			}
 			const float speed = (keys[SDL_SCANCODE_LSHIFT] ? 200.0f : 40.0f) * dt;
 			const auto key = [keys](SDL_Scancode code) { return keys[code] ? 1.0f : 0.0f; };
 			if (!playing) camera.position = camera.position + camera.forward() * ((key(SDL_SCANCODE_W) - key(SDL_SCANCODE_S)) * speed) +
@@ -823,6 +1083,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		}
 		gpu->releaseTarget(target);
 		SDL_SetWindowRelativeMouseMode(window, false);
+		SDL_SetWindowMouseGrab(window, false);
+		SDL_SetWindowMouseRect(window, nullptr);
 		SDL_StopTextInput(window);
 	}
 	return 0;
@@ -857,6 +1119,18 @@ std::unique_ptr<Window> Window::open(int width, int height)
 	if (!window->impl->window) {
 		std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
 		return nullptr;
+	}
+	// Optional 128x128 RGBA icon (local launcher supplies the retail one); on macOS this sets the Dock icon.
+	if (const char* iconPath = std::getenv("BF2142_ICON")) {
+		if (std::FILE* f = std::fopen(iconPath, "rb")) {
+			static unsigned char pixels[128 * 128 * 4];
+			if (std::fread(pixels, 1, sizeof pixels, f) == sizeof pixels)
+				if (SDL_Surface* icon = SDL_CreateSurfaceFrom(128, 128, SDL_PIXELFORMAT_RGBA32, pixels, 128 * 4)) {
+					SDL_SetWindowIcon(window->impl->window, icon);
+					SDL_DestroySurface(icon);
+				}
+			std::fclose(f);
+		}
 	}
 	std::string error;
 	window->impl->gpu = render::GpuContext::create(window->impl->window, error);

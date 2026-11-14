@@ -34,6 +34,18 @@ int mountFromCon(io::FileManager& files, const std::string& conText)
 
 } // namespace
 
+TEST(FileManager_ModMountsInstallRelativeBaseArchive)
+{
+	if (!gameDir()) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir());
+	files.addSearchPath("mods/a_separate_mod");
+	CHECK(files.mountArchive("mods/bf2142/Sound_client.zip", "Sound"));
+	CHECK(files.exists("Sound/Cockpits/Missile_Warning.wav"));
+}
+
 TEST(FileManager_MountsGameArchives)
 {
 	if (!gameDir()) {

@@ -91,10 +91,71 @@ std::vector<uint32_t> GameWorld::objectsOutOfWorld(float limit) const
 	return list;
 }
 
+uint64_t GameWorld::stateFingerprint() const
+{
+	uint64_t hash = 14695981039346656037ull; // FNV-1a over the raw bytes
+	const auto mix = [&hash](const void* data, size_t size) {
+		for (size_t i = 0; i < size; ++i) {
+			hash = (hash ^ static_cast<const unsigned char*>(data)[i]) * 1099511628211ull;
+		}
+	};
+	for (const auto& owned : m_objects.objects()) {
+		const uint32_t id = owned->id();
+		mix(&id, sizeof id);
+		mix(&owned->position(), sizeof(world::Vec3));
+		mix(&owned->rotation(), sizeof(world::Vec3));
+	}
+	return hash;
+}
+
 bool GameWorld::isDroppedKit(uint32_t object) const
 {
-	return std::any_of(
+	return m_remoteDroppedKits.count(object) != 0 || std::any_of(
 		m_droppedKits.begin(), m_droppedKits.end(), [object](const DroppedKit& kit) { return kit.object == object; });
+}
+
+// The first surface straight down from `from` (up to kDropRay): the nearest
+// of the static objects', the bodies' (a Titan's decks among them; not
+// `ignore`'s) and the terrain. False with none in reach.
+bool GameWorld::surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& surface, uint32_t& object) const
+{
+	const physics::Vec3 to {from.x, from.y - kDropRay, from.z};
+	float nearest = 2;
+	object = 0;
+	physics::CollisionWorld::Hit hit {};
+	if (m_projectileCollision.raycast(from, to, hit)) {
+		nearest = hit.fraction;
+	}
+	for (const Body& body : m_bodies) {
+		if (!body.projectileMesh || body.object == ignore) {
+			continue;
+		}
+		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
+		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
+		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
+			nearest = hit.fraction;
+			object = body.object;
+		}
+	}
+	if (m_ground.height) {
+		const float ground = (from.y - m_ground.height(from.x, from.z)) / kDropRay;
+		if (ground >= 0 && ground < nearest) {
+			nearest = ground;
+			object = 0;
+		}
+	}
+	surface = from.y - kDropRay * nearest;
+	return nearest <= 1;
+}
+
+float GameWorld::restHeight(const Player& player, float x, float z) const
+{
+	float surface = 0;
+	uint32_t object = 0;
+	if (surfaceBelow({x, player.body.position.y, z}, player.object, surface, object)) {
+		return surface;
+	}
+	return m_ground.height ? m_ground.height(x, z) : player.body.position.y;
 }
 
 void GameWorld::dropKit(Player& player)
@@ -131,37 +192,13 @@ void GameWorld::dropKit(Player& player)
 	}
 	player.kitObject = 0;
 
-	// Straight down from the soldier: the nearest of the static objects',
-	// the bodies' (a Titan's decks among them) and the terrain.
+	// Straight down from the soldier: the nearest surface.
 	const world::Vec3 at = soldier ? soldier->position() : kit->position();
-	const physics::Vec3 from {at.x, at.y, at.z};
-	const physics::Vec3 to {at.x, at.y - kDropRay, at.z};
-	float nearest = 2;
 	uint32_t hitObject = 0;
-	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(from, to, hit)) {
-		nearest = hit.fraction;
-	}
-	for (const Body& body : m_bodies) {
-		if (!body.projectileMesh || body.object == player.object) {
-			continue;
-		}
-		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
-		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
-			nearest = hit.fraction;
-			hitObject = body.object;
-		}
-	}
-	if (m_ground.height) {
-		const float ground = (at.y - m_ground.height(at.x, at.z)) / kDropRay;
-		if (ground >= 0 && ground < nearest) {
-			nearest = ground;
-			hitObject = 0;
-		}
-	}
-	if (nearest <= 1) {
-		kit->setPosition({at.x, at.y - kDropRay * nearest, at.z});
+	float surface = at.y;
+	const bool landed = surfaceBelow({at.x, at.y, at.z}, player.object, surface, hitObject);
+	if (landed) {
+		kit->setPosition({at.x, surface, at.z});
 		// 0x00561b20: on a Titan, it rides with it.
 		if (const Titan* titan = hitObject ? titanByObject(hitObject) : nullptr) {
 			if (const world::Object* root = m_objects.find(titan->object)) {
@@ -356,7 +393,6 @@ bool GameWorld::pickUpClosestKit(Player& player, float radius)
 	}
 	player.kitObject = taken.object;
 	if (world::Object* kit = m_objects.find(taken.object)) {
-		kit->setHidden(true);
 		kit->setPosition(soldier->position());
 	}
 	player.carried = std::move(taken.carried);

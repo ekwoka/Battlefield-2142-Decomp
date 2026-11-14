@@ -72,3 +72,23 @@ endif()
 if(UNIX)
 	target_link_libraries(speex PRIVATE m)
 endif()
+
+# Steam Audio (Apache-2) for the enhanced mode's occlusion and transmission
+# (src/Sound/Enhanced). The prebuilt SDK: its source build needs Valve's
+# own PFFFT/MySOFA/FlatBuffers dependency layout. Headers only at build
+# time; libphonon is loaded at run time (as OpenAL is), so the game still
+# starts without it.
+if(NOT BF2142_RETAIL_COMPAT AND NOT CMAKE_CROSSCOMPILING)
+	FetchContent_Declare(steamaudio
+		URL https://github.com/ValveSoftware/steam-audio/releases/download/v4.8.1/steamaudio_4.8.1.zip
+		URL_HASH SHA256=4a0aa5ec1176f38f0b0993a37c2259d9e86f27e22d5e24f83ec4c3cb9a1d5449
+		DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+	FetchContent_MakeAvailable(steamaudio)
+	if(APPLE)
+		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/osx/libphonon.dylib)
+	elseif(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/windows-x64/phonon.dll)
+	elseif(UNIX AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/linux-x64/libphonon.so)
+	endif()
+endif()

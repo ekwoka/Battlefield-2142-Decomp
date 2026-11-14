@@ -291,6 +291,25 @@ TEST(NavMesh_RejectsBadFiles)
 	CHECK(!ai::parseNavMesh(writeQtr(broken), clb, &error));
 }
 
+TEST(NavMesh_UnavailableClusterPortalsKeepPolygonNavigation)
+{
+	ai::NavMesh grid = buildGrid();
+	CHECK(!grid.links.empty());
+	for (auto& link : grid.links) {
+		link.polygon = 0xffffffffu;
+	}
+	std::string error;
+	const auto parsed = ai::parseNavMesh(writeQtr(grid), writeClb(grid), &error);
+	CHECK(parsed.has_value());
+	if (!parsed) {
+		return;
+	}
+	CHECK(!ai::findPath(*parsed, {0.2f, 0, 0.2f}, {8.2f, 0, 4.2f}).empty());
+	CHECK(ai::entryLink(*parsed, {0, 0}) == nullptr);
+	grid.links.front().polygon = static_cast<uint32_t>(grid.polygons.size() + 1);
+	CHECK(!ai::parseNavMesh(writeQtr(grid), writeClb(grid), &error));
+}
+
 TEST(NavMesh_FindsThePolygonUnderAPoint)
 {
 	const ai::NavMesh m = buildGrid();
@@ -786,6 +805,7 @@ TEST(PathFollower_BlockedGoesOnFromItsCluster)
 	for (int i = 0; i < 25; ++i) {
 		now += 0.1f;
 		steer = follower.steer(m, beyond, now);
+		follower.refresh(beyond, now); // as the bot manager does after the moves
 	}
 	CHECK(steer.ok && !follower.failed());
 	CHECK(!follower.waypoints().empty());
@@ -803,8 +823,91 @@ TEST(PathFollower_BlockedGoesOnFromItsCluster)
 	for (int i = 0; i < 25; ++i) {
 		t += 0.1f;
 		shortTrip.steer(m, behind, t);
+		shortTrip.refresh(behind, t);
 	}
 	CHECK(shortTrip.failed());
+}
+
+// The look-ahead's reach (0x10093522..0x1009352e) is 3-D: a vehicle 19.5 m
+// past its waypoint across the ground but 4.9 m above it (20.1 m) skips
+// nothing; level with it, it skips ahead.
+TEST(PathFollower_LookAheadReachIs3D)
+{
+	const ai::NavMesh m = buildCorridor(40, 4, 20);
+	ai::FollowerSettings settings;
+	settings.soldier = false;
+	const auto skippedFrom = [&](float height) {
+		ai::PathFollower follower;
+		follower.request(m, {2, 0, 2}, {158, 0, 2}, settings, 0);
+		follower.steer(m, {2, 0, 2}, 0.1f); // steered: due a refresh
+		const size_t before = follower.current();
+		const ai::Vec3 w = follower.waypoints()[before].p;
+		follower.refresh({w.x + 19.5f, height, w.z}, 0.1f);
+		return follower.current() > before;
+	};
+	CHECK(skippedFrom(0));
+	CHECK(!skippedFrom(4.9f));
+}
+
+// The blocked flag (+0xda) a refresh raised holds until the reroute: its
+// timer runs only while the flag is down (0x10095a22 / 0x10095a8f), so clear
+// rays afterwards don't hold off the reroute from the bot's cluster. A
+// follower not steered for 3 s isn't refreshed (0x10092400).
+// The segment search isn't held to its clusters: 0x100962e0 hands the
+// search space a set of them (0x10096514), but starting the search resets
+// the space (0x100418cd -> 0x100415f0 -> 0x1003e6c0 -> 0x100bc170) and that
+// clears the set's pointer (0x100bc1df) before the first expansion.
+TEST(PathFollower_SegmentSearchIsNotHeldToItsClusters)
+{
+	ai::NavMesh m = buildCorridor(40, 4, 20); // 160 x 8 m, clusters 0-9 of 16 m linked on the upper row, a wall at x 80-84
+	// The lower row of columns 1-7 (x 4-32) becomes an eleventh cluster with
+	// no links: no cluster path runs through it, the straight way does.
+	ai::Cluster stray;
+	stray.firstPolygon = static_cast<uint32_t>(m.clusterPolygons.size());
+	stray.firstLink = static_cast<uint16_t>(m.links.size());
+	stray.firstDistance = static_cast<uint16_t>(m.linkDistances.size());
+	const uint16_t strayId = static_cast<uint16_t>(m.clusters.size());
+	for (uint32_t p = 2; p < 16; ++p) { // lower row: polygon (x, t) is 2x + t
+		m.polygons[p].cluster = strayId;
+		m.clusterPolygons.push_back(p);
+	}
+	stray.polygonCount = 14;
+	m.clusters.push_back(stray);
+	ai::PathFollower follower;
+	follower.request(m, {2, 0, 1}, {150, 0, 2}, ai::FollowerSettings(), 0);
+	CHECK(follower.planned() && !follower.failed());
+	bool crosses = false;
+	for (const ai::Waypoint& w : follower.waypoints()) {
+		crosses = crosses || (w.polygon >= 0 && m.polygons[static_cast<size_t>(w.polygon)].cluster == strayId);
+	}
+	CHECK(crosses); // held to clusters 0-2 it would climb to the upper row in column 0
+}
+
+TEST(PathFollower_BlockedFlagHoldsUntilTheReroute)
+{
+	const ai::NavMesh m = buildCorridor(40, 4, 20);
+	ai::FollowerSettings settings;
+	settings.soldier = false;
+	ai::PathFollower follower;
+	follower.request(m, {2, 0, 2}, {158, 0, 2}, settings, 0);
+	CHECK(!follower.refreshDue(0)); // not steered yet
+	float now = 0;
+	const auto tick = [&](const Vec3& at) {
+		now += 0.1f;
+		follower.steer(m, at, now);
+		follower.refresh(at, now);
+	};
+	for (int i = 0; i < 3; ++i) {
+		tick({2, 0, 2});
+	}
+	CHECK(std::fabs(follower.waypoints().front().p.x - 2) < 1e-3f);
+	tick({100, 0, 2}); // past the wall: blocked
+	for (int i = 0; i < 8; ++i) {
+		tick({6, 0, 2}); // in sight again
+	}
+	CHECK(!follower.failed() && !follower.waypoints().empty());
+	CHECK(std::fabs(follower.waypoints().front().p.x - 6) < 0.01f); // planned again from where the bot is
+	CHECK(follower.refreshDue(now + 2.9f) && !follower.refreshDue(now + 3.1f));
 }
 
 // The infantry steering's sidestep (0x100ce860, 0x100e63c0) round a

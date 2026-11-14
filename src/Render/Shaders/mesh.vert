@@ -27,6 +27,7 @@ layout(set = 1, binding = 0) uniform Transforms {
 	// meshes, a skinned mesh's tangent-space map; 2 the object's).
 	// y: an AnimatedUV technique (RaShaderBM _HASUVANIMATION_, below).
 	vec4 normalSpace;
+	vec4 trunkSunDirection;
 	mat4 parts[64];         // bundled-mesh part transforms (identity for others; a
 	                        // static mesh is sent only the first)
 	// The bundled instance's UV matrices (RendDX9 +0x28c): rows 0 and 1,
@@ -52,6 +53,7 @@ layout(location = 8) out float outObjectY; // the object's origin height (the he
 layout(location = 9) out vec3 outBasisX;
 layout(location = 10) out vec3 outBasisY;
 layout(location = 11) out vec3 outBasisZ;
+layout(location = 12) out float outTrunkSun;
 
 void main()
 {
@@ -68,6 +70,7 @@ void main()
 	outWorldPosition = (world * local).xyz;
 	mat3 toWorld = mat3(world) * mat3(part);
 	outNormal = toWorld * inNormal;
+	outTrunkSun = max(dot(normalize(outNormal), trunkSunDirection.xyz), 0.0);
 	if (normalSpace.x > 1.5) {
 		outBasisX = toWorld[0];
 		outBasisY = toWorld[1];

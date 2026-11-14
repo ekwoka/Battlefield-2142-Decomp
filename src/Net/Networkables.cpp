@@ -1922,6 +1922,12 @@ int TeamNetState::tickets(int team) const
 	return bit && (mask & bit) ? values[static_cast<size_t>(bitIndex(bit))][0] : -1;
 }
 
+int TeamNetState::ticketState(int team) const
+{
+	const uint32_t bit = team == 1 ? 0x400u : team == 2 ? 0x400000u : 0;
+	return bit && (mask & bit) ? values[static_cast<size_t>(bitIndex(bit))][2] : -1;
+}
+
 void TeamNetState::setTickets(int team, int tickets, bool flag, int value)
 {
 	const uint32_t bit = team == 1 ? 0x400u : team == 2 ? 0x400000u : 0;

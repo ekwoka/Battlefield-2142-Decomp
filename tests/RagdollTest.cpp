@@ -12,11 +12,20 @@
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "Main/HudWorld.h"
+#include "Main/GameAudio.h"
+#include "Main/HudMenusComm.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/CollisionWorld.h"
 #include "Physics/MaterialManager.h"
 #include "Terrain/Heightmap.h"
+#include "Sound/Game/GameSounds.h"
+#include "Sound/Game/SoundConsole.h"
+#include "Sound/Game/SoundManager.h"
+#include "Sound/Game/SoundObjectTemplate.h"
+#include "Sound/Game/VoiceMessages.h"
+#include "Sound/SoundEngine/OggStream.h"
+#include "Hud/Hud.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -47,19 +56,29 @@ struct Game {
 	world::ObjectTemplateManager templates;
 	world::ObjectManager objects;
 	physics::CollisionTemplateManager collisionTemplates;
+	physics::MaterialManager materials;
 	std::unique_ptr<game::GameWorld> world;
 	std::vector<std::string> events;
 	bool valueHolders = false;
 
-	explicit Game(const char* gameDir)
+	explicit Game(const char* gameDir, const char* modPath = "mods/bf2142", bool clientArchives = false)
 	{
 		files.setRootPath(gameDir);
-		files.addSearchPath("mods/bf2142");
+		files.addSearchPath(modPath);
+		if (std::string(modPath) != "mods/bf2142") {
+			files.addSearchPath("mods/bf2142");
+		}
 		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
 			[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
 		std::string out;
 		console.run("ServerArchives.con", {}, out);
+		if (clientArchives) {
+			files.setMountingAllowed(true);
+			console.run("ClientArchives.con", {}, out);
+			files.setMountingAllowed(false);
+		}
 		anim::registerAnimationConsoleMethods(console, systems);
+		physics::registerMaterialConsoleMethods(console, materials);
 		templates.registerType(1, "ControlPoint");
 		templates.registerType(2, "SpawnPoint");
 		templates.registerType(3, "Soldier");
@@ -92,17 +111,20 @@ struct Game {
 		world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
 		objects.create(spawn, {0, 0, 20}, {90, 0, 0})->setControlPointId(1);
 		objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+		console.run("Common/Material/MaterialManagerSettings.con", {}, out);
 	}
 
 	// The world, once the test's templates are in place.
-	void start(const physics::MaterialManager* materials = nullptr)
+	// `slope`: the ground rises by that much a metre along x (0: flat).
+	void start(const physics::MaterialManager* materials = nullptr, uint32_t surface = 0, float slope = 0)
 	{
 		world = std::make_unique<game::GameWorld>(templates, objects);
 		world->enablePhysics(files, collisionTemplates,
-			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
-				 normal = {0, 1, 0};
-				 return 0.0f;
-			 }},
+			{[slope](float x, float) { return x * slope; }, [slope](float x, float, physics::Vec3& normal) {
+				 const float length = std::sqrt(slope * slope + 1);
+				 normal = {-slope / length, 1 / length, 0};
+				 return x * slope;
+			 }, [surface](float, float) { return surface; }},
 			materials);
 		world->setAnimationSystems(&systems, [this](const std::string& path) {
 			std::string out;
@@ -1117,6 +1139,188 @@ TEST(Hull_WheelsProbeStaticObjects)
 	CHECK(std::abs(rest[0] - rest[1]) < 0.25f);
 }
 
+// The mesh group's order (0x006dd1b0): a mover's passes, its own solve,
+// then its child parts (the wheels' probes) against the root where the
+// solve put it. Car A on a deck, run in step with and without car B dropped
+// onto its roof; A is the earlier mover. The tick B's shove first moves
+// A (in A's turn, before A's solve), A's wheels already probe from there,
+// so its springs take the shove the next tick, not a tick later.
+TEST(Hull_WheelsProbeAfterTheirRootSolves)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	std::unique_ptr<Game> games[2];
+	uint32_t a = 0;
+	for (int shove = 0; shove < 2; ++shove) {
+		games[shove] = std::make_unique<Game>(gameDir);
+		Game& game = *games[shove];
+		const float base = 2.0f;
+		a = makeCar(game, {3, base + 1.5f, 0});
+		if (shove) {
+			makeCar(game, {3, base + 5.0f, 0}); // falling onto A's roof once A stands
+		}
+		const physics::CollisionLod lod = boxedLod(1, {{-10, 0, -10}, {10, 0, -10}, {10, 0, 10}, {-10, 0, 10}},
+			{{{0, 1, 2}, 0}, {{0, 2, 3}, 0}, {{0, 2, 1}, 0}, {{0, 3, 2}, 0}});
+		physics::CollisionSubGeometry part;
+		part.lods = {lod};
+		physics::CollisionGeometry geometry;
+		geometry.subGeometries = {part};
+		physics::CollisionMeshFile mesh;
+		mesh.version = 10;
+		mesh.geometries = {geometry};
+		game.collisionTemplates.add("deck_mesh", mesh);
+		game.templates.registerType(11, "SimpleObject");
+		world::ObjectTemplate* deck = game.templates.create("SimpleObject", "deck");
+		deck->settings()["collisionMesh"] = "deck_mesh";
+		game.objects.create(deck, {3, base, 0}, {0, 0, 0});
+		game.start();
+	}
+	int moved = -1, felt = -1;
+	for (int k = 0; k < 60 && felt < 0; ++k) {
+		float y[2], compression[2] = {};
+		for (int shove = 0; shove < 2; ++shove) {
+			games[shove]->world->tick(1 / 30.0f);
+			y[shove] = games[shove]->objects.find(a)->position().y;
+			if (const game::Vehicle* vehicle = games[shove]->world->vehicle(a)) {
+				for (const auto& wheel : vehicle->wheels()) {
+					compression[shove] += wheel.compression;
+				}
+			}
+		}
+		if (moved < 0 && std::fabs(y[1] - y[0]) > 1e-4f) {
+			moved = k;
+		}
+		if (felt < 0 && std::fabs(compression[1] - compression[0]) > 1e-4f) {
+			felt = k;
+		}
+	}
+	std::fprintf(stderr, "  B first moved A at tick %d; A's springs first differed at tick %d\n", moved, felt);
+	CHECK(moved >= 0);
+	CHECK(felt == moved + 1);
+}
+
+// The tick's order (retail 0x004afb20, 0x006dd1b0): the soldiers'
+// collision runs after every node's move and before the mesh group's
+// turns, so a soldier's push on a small body (under 0.6 m: 0x006c3890's
+// pushed object, a mesh GenericProjectile) reaches that body's response
+// before it solves, the same tick. A soldier walks into a small one that has just landed, in step
+// with the same world where it walks beside it: the crate's way first
+// differs the tick the soldier's does (before, a tick later).
+// Two soldiers standing too close (0x006c2620): the first one's pass
+// pushes both, each by the overlap, before either solves; the second's
+// pass leaves the pair alone (0x006dcce0's stamp). Stepping each soldier
+// whole, the second met the first already pushed, and stayed put.
+TEST(Physics_SoldiersPushEachOtherTheSame)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	int ids[2];
+	uint32_t soldiers[2];
+	for (int i = 0; i < 2; ++i) {
+		ids[i] = game.world->addPlayer(i ? "B" : "A", 2, false);
+		game.world->spawnSoldier(ids[i]);
+		game::GameWorld::PlayerInfo info;
+		CHECK(game.world->playerInfo(ids[i], info));
+		soldiers[i] = info.soldier;
+	}
+	for (int k = 0; k < 30; ++k) { // settle on the ground apart
+		for (int i = 0; i < 2; ++i) {
+			game.world->setSoldierPosition(soldiers[i], {i * 5.0f, 0, 0});
+		}
+		game.world->tick(1 / 30.0f);
+	}
+	for (int i = 0; i < 2; ++i) {
+		game.world->setSoldierPosition(soldiers[i], {i * 0.3f, 0, 0});
+	}
+	game.world->tick(1 / 30.0f);
+	float x[2];
+	for (int i = 0; i < 2; ++i) {
+		game::GameWorld::PlayerInfo info;
+		CHECK(game.world->playerInfo(ids[i], info));
+		x[i] = info.position.x;
+	}
+	std::printf("pushed apart: A %.4f, B %.4f\n", x[0], x[1] - 0.3f);
+	CHECK(x[0] < -0.05f);
+	CHECK(std::fabs(x[0] + (x[1] - 0.3f)) < 1e-3f);
+}
+
+TEST(Physics_SoldierPushesASmallBodyTheSameTick)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	std::unique_ptr<Game> games[2];
+	uint32_t crate = 0;
+	for (int into = 0; into < 2; ++into) {
+		games[into] = std::make_unique<Game>(gameDir);
+		Game& game = *games[into];
+		const float h = 0.25f;
+		std::vector<std::array<float, 3>> v;
+		for (int i = 0; i < 8; ++i) {
+			v.push_back({(i & 1) ? h : -h, (i & 2) ? h : -h, (i & 4) ? h : -h});
+		}
+		const physics::CollisionLod lod = boxedLod(1, v,
+			{{{0, 2, 1}, 0}, {{1, 2, 3}, 0}, {{4, 5, 6}, 0}, {{5, 7, 6}, 0}, {{0, 1, 4}, 0}, {{1, 5, 4}, 0},
+				{{2, 6, 3}, 0}, {{3, 6, 7}, 0}, {{0, 4, 2}, 0}, {{2, 4, 6}, 0}, {{1, 3, 5}, 0}, {{3, 7, 5}, 0}});
+		physics::CollisionSubGeometry part;
+		part.lods = {lod};
+		physics::CollisionGeometry geometry;
+		geometry.subGeometries = {part};
+		physics::CollisionMeshFile mesh;
+		mesh.version = 10;
+		mesh.geometries = {geometry};
+		game.collisionTemplates.add("crate_mesh", mesh);
+		game.templates.registerType(12, "GenericProjectile");
+		world::ObjectTemplate* t = game.templates.create("GenericProjectile", "crate");
+		t->settings()["collisionMesh"] = "crate_mesh";
+		t->settings()["hasMobilePhysics"] = "1";
+		t->settings()["physicsType"] = "Mesh";
+		t->settings()["mass"] = "20";
+		crate = game.objects.create(t, {0, 2.4f, 0}, {0, 0, 0})->id();
+		game.start();
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo info;
+		game.world->playerInfo(game.world->localPlayer(), info);
+		CHECK(game.world->setSoldierPosition(info.soldier, {into ? 0.0f : 3.0f, 0, -1.5f}));
+	}
+	int crateDiffers = -1, soldierDiffers = -1;
+	game::SoldierInput walk;
+	walk.throttle = 1;
+	for (int k = 0; k < 60 && crateDiffers < 0; ++k) {
+		physics::Vec3 at[2], feet[2];
+		for (int into = 0; into < 2; ++into) {
+			Game& game = *games[into];
+			game.world->setPlayerInput(walk);
+			game.world->tick(1 / 30.0f);
+			const world::Object* o = game.objects.find(crate);
+			at[into] = o ? physics::Vec3 {o->position().x, o->position().y, o->position().z} : physics::Vec3 {};
+			game::GameWorld::PlayerInfo info;
+			game.world->playerInfo(game.world->localPlayer(), info);
+			feet[into] = info.position;
+		}
+		// A pushed object doesn't hold the soldier back (its contact is
+		// skipped), so the meeting is geometric: the soldier's spheres
+		// (0.25 m) reach the crate's face (z -0.25) where its move put it.
+		if (soldierDiffers < 0 && feet[1].z > -0.5f) {
+			soldierDiffers = k;
+		}
+		if (physics::lengthSquared(at[1] - at[0]) > 1e-8f) {
+			crateDiffers = k;
+		}
+	}
+	std::fprintf(stderr, "  the soldier first reached the crate at tick %d, the crate first moved at tick %d\n", soldierDiffers,
+		crateDiffers);
+	CHECK(soldierDiffers >= 0);
+	CHECK(crateDiffers == soldierDiffers);
+}
+
 namespace {
 
 // A static SimpleObject `name` at `at` whose collision mesh is `lods`.
@@ -1408,6 +1612,8 @@ TEST(RagDoll_ImpactSoundFromTheFootStepsMaterial)
 			heard.push_back(sound.sound);
 		}
 	}
+	// The kill's own generated "S_<soldier>_Death" cue is not an impact; only impacts must come from material 5500.
+	heard.erase(std::remove_if(heard.begin(), heard.end(), [](const std::string& s) { return s.size() > 6 && s.compare(s.size() - 6, 6, "_Death") == 0; }), heard.end());
 	CHECK(!heard.empty());
 	CHECK(std::all_of(heard.begin(), heard.end(), [](const std::string& s) { return s == "S_Soldier_RagDoll_Impact"; }));
 }
@@ -1706,6 +1912,319 @@ TEST(Physics_LandSoundForTheLocalPlayerOnly)
 	CHECK(heardBy[1] == heardBy[0] + 1); // the same steps and take-off, and the landing
 }
 
+// Diagnostic against the installed soldier BAFs and material cells: ordinary
+// movement must send animation sound events through the round's queued sound
+// path. Run both archive sets because Remaster replaces the soldier data.
+TEST(Physics_InstalledSoldierWalkingQueuesFootsteps)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Game game(gameDir, mod, true);
+		if (const auto* configured = game.materials.cell(5500, 0)) {
+			std::fprintf(stderr, "  %s installed material 5500/0:", mod);
+			for (const std::string& sound : configured->soundTemplates) {
+				std::fprintf(stderr, " %s", sound.c_str());
+			}
+			std::fprintf(stderr, "\n");
+		}
+		// Route the installed material cell through a named probe so the test
+		// can observe its queued GameAudio dispatch without an audio device.
+		game.materials.createCell(5500, 0).soundTemplates = {"ProbeStep", "ProbeStep", "ProbeStep", "ProbeStep"};
+		game.start(&game.materials);
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		const int local = game.world->localPlayer();
+		const anim::AnimationSystemTemplate* animationSystem =
+			game.systems.get("Objects/Soldiers/Common/Animations/AnimationSystem3p.inc", [] {});
+		for (const char* name : {"stand_walk", "stand_run"}) {
+			const int index = animationSystem ? animationSystem->findBundle(name) : -1;
+			if (index >= 0) {
+				const anim::Bundle& bundle = animationSystem->bundles()[static_cast<size_t>(index)];
+				CHECK(bundle.events.empty()); // shipped movement bundles lack footstep event markers
+				std::fprintf(stderr, "  %s %s bundle length %.3f events %zu clips %zu\n", mod, name, bundle.length,
+					bundle.events.size(), bundle.clips.size());
+			}
+		}
+		sound::SoundManager manager(nullptr, game.templates);
+		manager.registerTemplateType();
+		auto* probe = dynamic_cast<sound::SoundObjectTemplate*>(game.templates.create(
+			sound::SoundObjectTemplate::kClassId, "ProbeStep"));
+		CHECK(probe != nullptr);
+		if (probe) {
+			probe->setSoundFilenames("probe.wav");
+		}
+		sound::GameSounds gameSounds(manager);
+		std::vector<std::string> played;
+		gameSounds.onTrigger = [&](const sound::GameSounds::Triggered& event) { played.push_back(event.name); };
+		GameAudio audio(*game.world, game.objects, game.templates, manager, gameSounds, nullptr);
+		game::SoldierInput walk;
+		walk.throttle = 0.2f;
+		game.world->setInput(local, walk);
+		GameAudio::Camera camera;
+		camera.firstPerson = true;
+		const auto advance = [&](int ticks) {
+			for (int i = 0; i < ticks; ++i) {
+				game.world->tick(1 / 30.0f);
+				audio.tick(camera);
+			}
+		};
+		advance(120);
+		const size_t walkCount = played.size();
+		walk.throttle = 1;
+		game.world->setInput(local, walk);
+		advance(120);
+		game::GameWorld::PlayerInfo info;
+		CHECK(game.world->playerInfo(local, info));
+		const size_t walkSteps = static_cast<size_t>(std::count(played.begin(), played.begin() + walkCount, "ProbeStep"));
+		const size_t runSteps = static_cast<size_t>(std::count(played.begin() + walkCount, played.end(), "ProbeStep"));
+		std::fprintf(stderr, "  %s: material=%u pos=(%.2f %.2f %.2f), walking=%zu running=%zu GameAudio samples\n",
+			mod, game.world->footstepMaterial(local), info.position.x, info.position.y, info.position.z, walkSteps, runSteps);
+		CHECK(walkSteps >= 2 && runSteps >= 4);
+	}
+}
+
+// The original movement selector chooses slots by stance/sprint, then the
+// material manager tries the default surface for a missing slot or cell.
+// Standing still on a 16 degree slope leaves the body a small residual
+// integrated velocity into it (0.13 m/s across, over the 0.1 walking gate),
+// but it does not move: the gate reads the measured displacement as retail's
+// 0x007fda00 does (slot 0x64), so no footsteps play (seen on a Suez stair).
+TEST(Physics_StandingOnASlopeMakesNoFootsteps)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	Game game(gameDir, "mods/Project_Remaster_v17_Final", true);
+	game.materials.createCell(5500, 0).soundTemplates = {"WalkDefault", "CrouchDefault", "ProneDefault", "SprintDefault"};
+	game.start(&game.materials, 0, 0.287f);
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int player = game.world->localPlayer();
+	game.run(2);
+	(void)game.world->takeSounds();
+	float drift = 0, measured = 0;
+	for (int i = 0; i < 90; ++i) {
+		game.run(1 / 30.0f);
+		const physics::SoldierBody* body = game.world->soldierBody(player);
+		CHECK(body != nullptr);
+		if (!body) break;
+		drift = std::max(drift, std::sqrt(body->velocity.x * body->velocity.x + body->velocity.z * body->velocity.z));
+		const physics::Vec3& m = body->measuredVelocity;
+		measured = std::max(measured, std::sqrt(m.x * m.x + m.y * m.y + m.z * m.z));
+	}
+	CHECK(drift > 0.1f);   // the integrator's pending push into the slope, as retail's +0x20
+	CHECK(measured < 0.1f); // but the reported (slot 0x64) velocity, the footsteps' and animation's: no motion
+	const auto standing = game.world->takeSounds();
+	std::fprintf(stderr, "  standing on the slope: integrated %.3f m/s, measured %.6f m/s\n", drift, measured);
+	CHECK(std::none_of(standing.begin(), standing.end(), [](const auto& s) { return s.sound == "WalkDefault"; }));
+	// Walking on it still steps.
+	game::SoldierInput input;
+	input.throttle = 1;
+	game.world->setInput(player, input);
+	game.run(3);
+	const auto walking = game.world->takeSounds();
+	CHECK(std::count_if(walking.begin(), walking.end(), [](const auto& s) { return s.sound == "WalkDefault"; }) >= 2);
+}
+
+// Running, a hop or a jump keeps the wanted velocity through the air
+// (0x006c2230 returns early without clearing it, 0x00588420's air branch
+// never sets it): landing carries on at running speed instead of braking
+// to a stop for a tick (the judder walking over a Titan's deck seams).
+TEST(Physics_LandingWhileRunningDoesNotBrake)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	Game game(gameDir, "mods/Project_Remaster_v17_Final", true);
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int player = game.world->localPlayer();
+	game.run(1);
+	game::SoldierInput input;
+	input.throttle = 1;
+	game.world->setInput(player, input);
+	game.run(1.5f);
+	input.jump = true;
+	game.world->setInput(player, input);
+	game.run(1 / 30.0f);
+	input.jump = false;
+	game.world->setInput(player, input);
+	bool left = false, landed = false;
+	float slowest = 1e9f;
+	int after = 0;
+	for (int i = 0; i < 90 && after < 6; ++i) {
+		game.run(1 / 30.0f);
+		const physics::SoldierBody* body = game.world->soldierBody(player);
+		CHECK(body != nullptr);
+		if (!body) break;
+		left = left || !body->onGround();
+		if (left && body->onGround()) landed = true;
+		if (landed) {
+			slowest = std::min(slowest, std::sqrt(body->velocity.x * body->velocity.x + body->velocity.z * body->velocity.z));
+			++after;
+		}
+	}
+	std::fprintf(stderr, "  slowest ground speed in the 6 ticks after landing: %.2f m/s\n", slowest);
+	CHECK(left && landed);
+	CHECK(slowest > 1.5f);
+}
+
+TEST(Physics_FootstepsChooseMovementSlotAndSurfaceFallback)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+	for (uint32_t surface : {0u, 7u, 12345u}) {
+		Game game(gameDir, mod, true);
+		for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+			auto* soldier = game.templates.find(name);
+			soldier->settings()["sprintDissipationTime"] = "20";
+			soldier->settings()["sprintRecoverTime"] = "5";
+		}
+		game.materials.createCell(5500, 0).soundTemplates = {"WalkDefault", "CrouchDefault", "ProneDefault", "SprintDefault"};
+		game.materials.createCell(5500, 7).soundTemplates = {"WalkSeven"};
+		game.start(&game.materials, surface);
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		const int player = game.world->localPlayer();
+		game.run(1);
+		(void)game.world->takeSounds();
+		game::SoldierInput input;
+		input.throttle = 1;
+		game.world->setInput(player, input);
+		game.run(3);
+		const auto walking = game.world->takeSounds();
+		const std::string walk = surface == 7 ? "WalkSeven" : "WalkDefault";
+		CHECK(std::count_if(walking.begin(), walking.end(), [&](const auto& s) { return s.sound == walk; }) >= 2);
+		CHECK(std::none_of(walking.begin(), walking.end(), [](const auto& s) { return s.sound == "SprintDefault"; }));
+		input.sprint = true;
+		game.world->setInput(player, input);
+		game.run(3);
+		const auto sprint = game.world->takeSounds();
+		CHECK(std::count_if(sprint.begin(), sprint.end(), [](const auto& s) { return s.sound == "SprintDefault"; }) >= 2);
+		input.sprint = false;
+		input.pose = game::SoldierPose::Crouch;
+		game.world->setInput(player, input);
+		game.run(3);
+		const auto crouch = game.world->takeSounds();
+		CHECK(std::count_if(crouch.begin(), crouch.end(), [](const auto& s) { return s.sound == "CrouchDefault"; }) >= 2);
+		input.pose = game::SoldierPose::Prone;
+		game.world->setInput(player, input);
+		game.run(4);
+		const auto prone = game.world->takeSounds();
+		CHECK(std::count_if(prone.begin(), prone.end(), [](const auto& s) { return s.sound == "ProneDefault"; }) >= 2);
+	}
+	}
+}
+
+TEST(Physics_InstalledFootstepMaterialsSelectWalkAndSprint)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (uint32_t surface : {0u, 4u, 7u, 4101u}) {
+			Game game(gameDir, mod, true);
+			for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+				auto* soldier = game.templates.find(name);
+				soldier->settings()["sprintDissipationTime"] = "20";
+				soldier->settings()["sprintRecoverTime"] = "5";
+			}
+			game.start(&game.materials, surface);
+			CHECK(game.world->spawnPlayer(2) != nullptr);
+			const int player = game.world->localPlayer();
+			game.run(1);
+			(void)game.world->takeSounds();
+			game::SoldierInput input;
+			input.throttle = 1;
+			game.world->setInput(player, input);
+			game.run(3);
+			const auto walking = game.world->takeSounds();
+			const char* walk = surface == 4 ? "S_Walk_Tarmac" : surface == 4101 ? "S_Walk_Titan" : "S_Walk_Dirt";
+			CHECK(std::count_if(walking.begin(), walking.end(), [&](const auto& event) { return event.sound == walk; }) >= 2);
+			input.sprint = true;
+			game.world->setInput(player, input);
+			game.run(3);
+			const auto sprinting = game.world->takeSounds();
+			const char* sprint = surface == 4 ? "S_Sprint_Tarmac" : surface == 4101 ? "S_Sprint_Titan" : "S_Sprint_Dirt";
+			CHECK(std::count_if(sprinting.begin(), sprinting.end(), [&](const auto& event) { return event.sound == sprint; }) >= 2);
+			std::fprintf(stderr, "  %s surface %u: walk=%s sprint=%s\n", mod, surface, walk, sprint);
+		}
+	}
+}
+
+// Q's shipped Radio rose maps Request Medic to Radio.callForMedic. That
+// command uses the local radio echo, which GameAudio resolves through the
+// installed VoiceMessages table and voice samples.
+TEST(GameAudio_InstalledQCommoRosePlaysLocalVoice)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir, "mods/bf2142", true);
+	game.start(&game.materials);
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int local = game.world->localPlayer();
+	sound::SoundManager manager(nullptr, game.templates);
+	manager.registerTemplateType();
+	sound::GameSounds gameSounds(manager);
+	sound::VoiceMessages voices(manager);
+	sound::registerVoiceMessageConsoleMethods(game.console, voices);
+	voices.reset("English", "English");
+	std::string output;
+	CHECK(game.console.run("Sound/VoiceMessages.con", {}, output));
+	voices.build();
+	const auto validateVoiceSamples = [&](const char* message) {
+		const int messageId = voices.message(message), voiceId = voices.voice("grunt");
+		const auto samples = voices.samples(messageId, voiceId);
+		CHECK(samples.second > 0);
+		for (int index = samples.first; index < samples.first + samples.second; ++index) {
+			const std::string path = voices.radioFile(2, index);
+			std::vector<uint8_t> encoded;
+			CHECK(game.files.readFile(path, encoded));
+			sound::OggInfo info;
+			const bool valid = sound::probeOggVorbis(encoded, path.c_str(), info);
+			std::fprintf(stderr, "  installed Q sample %s: valid=%d %uHz channels=%d frames=%u\n", path.c_str(), valid,
+				info.sampleRate, info.channels, info.frames);
+			CHECK(valid && info.frames > 0);
+		}
+	};
+	validateVoiceSamples("medic");
+	validateVoiceSamples("roger_that");
+	std::vector<std::pair<std::string, bool>> played;
+	voices.onPlay = [&](const std::string& file, bool localVoice) { played.emplace_back(file, localVoice); };
+	GameAudio audio(*game.world, game.objects, game.templates, manager, gameSounds, &voices);
+	const std::string command = "Radio.callForMedic";
+	bindMethod(game.console, command, ConsoleAccess::Anyone, [&, local] {
+		game.world->radioMessage(local, 6, "medic");
+		game.world->hearRadio(local, 6, "medic", local); // main.cpp's local sender echo
+	});
+	bindMethod(game.console, "game.radioMessage", ConsoleAccess::Anyone,
+		[&, local](std::string channel, std::string voice) {
+			const int target = game::GameWorld::targetChannel(channel);
+			game.world->radioMessage(local, target, voice);
+			game.world->hearRadio(local, target, voice, local);
+		});
+	hud::HudManager hud([](const std::string&, std::string&) { return false; });
+	menu::CommRoses roses(hud);
+	roses.bind(game.console, [&](const std::string& line) {
+		game.console.execute(line, output, ConsoleAccess::Anyone);
+	});
+	CHECK(game.console.run("Menu/HUD/HudSetup/Communication/Radio.con", {}, output));
+	CHECK(roses.find("Radio") && roses.find("Radio")->command(7) == command);
+	roses.openRadio(false);
+	CHECK(game.console.execute("RadioInterface.selectOrder 7", output, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	audio.tick(camera);
+	roses.openRadio(false);
+	CHECK(game.console.execute("RadioInterface.selectOrder 8", output, ConsoleAccess::Anyone) != ConsoleResult::Error);
+	audio.tick(camera);
+	CHECK(audio.voiceOvers == 2 && played.size() == 2 && !played[0].second && !played[1].second);
+	for (const auto& sample : played) {
+		CHECK(game.files.exists(sample.first));
+		std::fprintf(stderr, "  Q Radio sample: %s (exists=%d)\n", sample.first.c_str(), game.files.exists(sample.first));
+	}
+}
+
 // The third-person muzzle flash follows the gun: the weapon's e_muzz child
 // is spawned against the weapon object's anchor at its place on the weapon
 // (FireComp 0x005f25f0 places the muzzle bundles by the weapon's matrix),
@@ -1772,6 +2291,61 @@ TEST(RagDoll_MuzzleFlashFollowsTheGun)
 		std::fprintf(stderr, "  moved by %.2f/%.2f/%.2f\n", moved.x, moved.y, moved.z);
 		CHECK(std::fabs(moved.x - 3) < 0.3f && std::fabs(moved.z) < 0.3f);
 	}
+}
+
+// A shot starts every child bundle of the weapon with startOnEffects 0,
+// whatever its name or place in the list (game::fireBundles: FireComp's
+// list 0x005f25f0, event 0 at 0x0061a5e2), and not one that a first-person
+// event starts (512): eu_av lists its reload puff e_muzz_eu_av_reload
+// before its launch flash e_muzz_eu_av, and the flash never showed.
+TEST(RagDoll_ShotStartsItsStartOnEffectsZeroBundles)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.templates.registerType(20, "EffectBundle");
+	game.templates.registerType(21, "SpriteParticleSystem");
+	for (const char* name : {"test_reload_puff", "test_shot_flash"}) {
+		world::ObjectTemplate* system = game.templates.create("SpriteParticleSystem", name);
+		system->settings()["emitFrequency"] = "60";
+		system->settings()["emitTime"] = "0.5";
+		system->settings()["timeToLive"] = "0.1";
+		system->settings()["isLocalSystem"] = "1";
+		system->settings()["textureName"] = std::string("objects\\effects\\textures\\") + name;
+	}
+	world::ObjectTemplate* reload = game.templates.create("EffectBundle", "e_muzz_test_reload");
+	reload->settings()["setStartOnEffects"] = "512";
+	reload->children().push_back({"test_reload_puff", {}, {}});
+	game.templates.create("EffectBundle", "e_test_shot")->children().push_back({"test_shot_flash", {}, {}});
+	auto& children = game.templates.find("eu_ar_rifle")->children();
+	children.insert(children.begin(), {"e_muzz_test_reload", {0, 0.05f, 0.3f}, {}});
+	children.push_back({"e_test_shot", {0, 0.05f, 0.6f}, {}});
+	game.start();
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int me = game.world->localPlayer();
+	game.world->localMuzzleEffects = true;
+	game.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	game.world->playerInfo(me, info);
+	game::SoldierInput input;
+	input.fire = true;
+	game.world->setPlayerInput(input);
+	game.world->tick(1 / 30.0f);
+	game.world->setPlayerInput({});
+	game.world->tick(1 / 30.0f);
+	const auto started = [&](const char* system) {
+		for (const auto& emitter : game.world->effects().emitterList()) {
+			if (emitter->anchor == info.weapon && emitter->anchor != 0
+				&& emitter->particleTemplate().texture.find(system) != std::string::npos) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(started("test_shot_flash"));
+	CHECK(!started("test_reload_puff"));
 }
 
 // Seat cameras on the mouse (0x00563bd0 on a Camera bundle with inputToYaw
@@ -2132,6 +2706,45 @@ TEST(CombatArea_OutsideTimerThenDamage)
 	areas.areas[0].points = {{-50, -50}, {50, -50}, {50, 50}, {-50, 50}};
 	game.run(20);
 	CHECK(game.world->playerInfo(me, info) && (!info.alive || game.world->outsideCombatArea(me) < 0));
+}
+
+// A soldier's template has no vehicleCategory, which reads VCLand (0): the
+// areas that bind VCLand (vehicles 0) and the ones that bind everything
+// (vehicles 4) apply to him. Bridge at Remagen's gpm_ti: the playable
+// "0_Titan" is vehicles 0, the "32_Titan" strip vehicles 4 holds 12 of its 88
+// control points; read as category 4 a soldier on foot was bound to the strip
+// alone and punished outside it, while in a land vehicle (category 0) he was
+// not.
+TEST(CombatArea_SoldierOnFootIsBoundByTheLandArea)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game::CombatAreas areas;
+	game::registerCombatAreaConsoleMethods(game.console, areas);
+	std::string out;
+	for (const char* line : {"CombatAreaManager.use 1", "CombatAreaManager.timeAllowedOutside 2",
+			 "CombatAreaManager.damage 50", "CombatArea.create land", "CombatArea.vehicles 0",
+			 "CombatArea.addAreaPoint -50/-50", "CombatArea.addAreaPoint 50/-50", "CombatArea.addAreaPoint 50/50",
+			 "CombatArea.addAreaPoint -50/50", "CombatArea.create strip", "CombatArea.vehicles 4",
+			 "CombatArea.addAreaPoint 100/100", "CombatArea.addAreaPoint 200/100", "CombatArea.addAreaPoint 200/200",
+			 "CombatArea.addAreaPoint 100/200"}) {
+		game.console.execute(line, out);
+	}
+	game.start();
+	game.world->setCombatAreas(&areas);
+	CHECK(game.world->spawnPlayer(2) != nullptr); // at the origin: in "land", outside "strip"
+	const int me = game.world->localPlayer();
+	game.run(5);
+	game::GameWorld::PlayerInfo info;
+	CHECK(game.world->insideCombatArea(me) && game.world->outsideCombatArea(me) < 0);
+	CHECK(game.world->playerInfo(me, info) && info.alive);
+	// Outside both: punished.
+	areas.areas[0].points = {{300, 300}, {350, 300}, {350, 350}, {300, 350}};
+	game.run(1);
+	CHECK(!game.world->insideCombatArea(me) && game.world->outsideCombatArea(me) > 0);
 }
 
 // A neutral APC (no teamOnVehicle) carrying a SpawnPoint: entered by a
@@ -2677,6 +3290,39 @@ TEST(RagDoll_RemoteSeatedTurretAndGrips)
 	std::fprintf(stderr, "  the left wrist moved %.3f m with the grip, %.3f m from it\n", moved, off);
 	CHECK(moved > 0.05f);
 	CHECK(off < 0.25f);
+}
+
+// A joined game's worn kit (helmet, vest, pack) is its soldier's child
+// (0x005718d0 -> 0x00571d10 addChild): skinned to the remote soldier's pose.
+// A kit ghost no one wears lies on the ground (geometry.dropGeom).
+TEST(RagDoll_RemoteWornKitTakesItsSoldiersPose)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	game.start();
+	const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+	CHECK(skeleton != nullptr);
+	if (!skeleton) {
+		return;
+	}
+	const uint32_t soldier = game.objects.create(game.templates.find("us_light_soldier"), {3, 1, 0})->id();
+	const uint32_t worn = game.objects.create(game.templates.find("us_light_soldier"), {3, 1, 0})->id();
+	const uint32_t lying = game.objects.create(game.templates.find("us_light_soldier"), {9, 0, 0})->id();
+	game::GameWorld::RemoteSoldierState foot;
+	for (int i = 0; i < 10; ++i) {
+		game.world->animateRemoteSoldier(soldier, foot, 1 / 30.0f);
+	}
+	std::vector<anim::Matrix> body, kit;
+	CHECK(game.world->skeletonPose(soldier, *skeleton, body) && body.size() > 9);
+	CHECK(!game.world->skeletonPose(worn, *skeleton, kit)); // not his yet
+	game.world->setRemoteKits({{worn, soldier}}, {lying});
+	CHECK(game.world->skeletonPose(worn, *skeleton, kit) && kit.size() == body.size());
+	CHECK(kit.size() > 9 && kit[9][13] == body[9][13]);
+	CHECK(!game.world->isDroppedKit(worn));
+	CHECK(game.world->isDroppedKit(lying));
 }
 
 // A radio message's emote (0x005edbf0): the sender's 3P system plays the

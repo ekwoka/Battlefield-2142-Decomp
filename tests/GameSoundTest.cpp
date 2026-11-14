@@ -13,6 +13,7 @@
 #include "Main/GameAudio.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Sound/Game/GameSounds.h"
+#include "Sound/SoundEngine/EnhancedAudio.h"
 #include "Sound/Game/SoundConsole.h"
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/SoundObjectTemplate.h"
@@ -68,6 +69,47 @@ struct Sounds {
 };
 
 } // namespace
+
+// A released GameSounds positional one-shot snapshots its obstruction before
+// playback. The rays must end at its actual position, even far from origin.
+TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
+{
+	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
+	if (!dir) return;
+	#ifdef _WIN32
+	_putenv_s("ALSOFT_DRIVERS", "null");
+	#else
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	#endif
+	auto* engine = sound::getSoundEngine();
+	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+	{
+		world::ObjectTemplateManager templates;
+		sound::SoundManager manager(engine, templates);
+		manager.registerTemplateType();
+		addSoundTemplate(templates, "StepAtPosition", std::string(dir) + "/Cockpits/Missile_Warning.wav");
+		auto* soundTemplate = manager.soundTemplate("StepAtPosition");
+		CHECK(soundTemplate != nullptr);
+		if (soundTemplate) {
+			soundTemplate->setIs3dSound(true);
+			soundTemplate->setLoopCount(1);
+			const sound::Vec3 offset {2, 0, 0};
+			soundTemplate->setPosition(&offset);
+		}
+		engine->reloadSoundFiles();
+		manager.setListener({100, 10, 100}, {0, 0, 1}, {0, 1, 0}, {}, false);
+		std::vector<sound::Vec3> ends;
+		manager.setObstructionTest([&ends](const sound::Vec3&, const sound::Vec3& to, uint32_t,
+			sound::SoundManager::RayHit&) { ends.push_back(to); return false; });
+		sound::GameSounds sounds(manager);
+		CHECK(sounds.play("StepAtPosition", {110, 10, 100}));
+		CHECK(!ends.empty());
+		if (!ends.empty()) CHECK(ends[0].x > 111 && ends[0].y > 9 && ends[0].z > 99);
+		for (int i = 0; i < 60; ++i) manager.update(1);
+	}
+	engine->shutdown();
+	sound::shutdownSoundEngine();
+}
 
 // 0x007f9af0 / 0x007f9f50: firing (reason 4) brings the world's effects
 // (group 0) to 0.4 in steps of 0.1667 and back up in steps of 0.333; a
@@ -191,6 +233,105 @@ TEST(GameSounds_WeaponSounds)
 	});
 	s.game.weapon(E::Fire, "rifle", true, {});
 	CHECK(s.triggered.back().name == "S_rifle_Fire1P");
+}
+
+// A generated event template can exist without a sample. The vanilla
+// heavy walker's main cannon leaves Fire1P_Outdoor empty, so outdoors a
+// first-person shot must fall back to its configured Fire1P sample.
+TEST(GameSounds_EmptyOutdoorFireVariantFallsBackToFirstPerson)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_walker_cannon_Fire1P");
+	auto* outdoor = dynamic_cast<sound::SoundObjectTemplate*>(
+		s.templates.create(sound::SoundObjectTemplate::kClassId, "S_walker_cannon_Fire1P_Outdoor"));
+	CHECK(outdoor != nullptr && !outdoor->hasFiles());
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 0;
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "walker_cannon", true, {}, true, 1, 0, &fire);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_walker_cannon_Fire1P");
+}
+
+// The right Shepherd gunner's Fire1P is misnamed in the shipped data, so
+// only its Fire3P has a sample. Ordinary: silent, as retail. Enhanced: the
+// local player's shot plays it head-relative (like the left gunner's 2D
+// Fire1P), not 3D at the muzzle where occlusion and HRTF would muffle it.
+TEST(GameSounds_FirstPersonShotWithOnlyThirdPersonSampleStaysHeadRelative)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_gunner_Fire3P");
+	s.templates.create(sound::SoundObjectTemplate::kClassId, "S_gunner_Fire1P"); // no file
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 0;
+	// Ordinary (retail 0x005dbdc0): the empty first-person slot plays nothing,
+	// but muteOnFire still ducks the world (reason 4 is set before the
+	// sample is looked at, 0x005dbec3..0x005dbee7).
+	sound::setEnhancedAudio(false);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
+	CHECK(s.triggered.empty());
+	CHECK(s.manager.muted(4));
+	s.manager.setMuted(4, false);
+	// Enhanced: the 3P sample stands in, head-relative.
+	sound::setEnhancedAudio(true);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
+	sound::setEnhancedAudio(false);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_gunner_Fire3P" && s.triggered[0].firstPerson);
+	CHECK(s.manager.muted(4));
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", false, {4, 0, 0}, true, 2, 0, &fire);
+	CHECK(s.triggered.size() == 2 && !s.triggered[1].firstPerson && s.triggered[1].position.x == 4);
+}
+
+// Enhanced audio: a gun whose Fire1P is filed under the same words in
+// another order (the right Shepherd gun: S_eu_at_minigun_R_firearm_Fire1P
+// for S_eu_at_R_minigun_firearm_Fire1P) plays that 1P sound, as its twin
+// does. Ordinary audio stays retail: nothing (0x005dbdc0), the duck alone.
+TEST(GameSounds_EnhancedFindsAFirstPersonSoundUnderReorderedWords)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_at_gun_R_firearm_Fire1P");
+	addSoundTemplate(s.templates, "S_at_R_gun_firearm_Fire3P");
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 0;
+	sound::setEnhancedAudio(false);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
+	CHECK(s.triggered.empty() && s.manager.muted(4));
+	s.manager.setMuted(4, false);
+	sound::setEnhancedAudio(true);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
+	sound::setEnhancedAudio(false);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_at_gun_R_firearm_Fire1P" && s.triggered[0].firstPerson);
+	CHECK(s.manager.muted(4));
+}
+
+// The shipped data's shape: the right Shepherd gun's eu_at.tweak adds
+// S_eu_at_R_minigun_firearm_Fire1P (no file) but configures the sound under
+// another word order with `activeSafe Sound`, which no one created. Retail
+// applies that block to nothing; enhanced audio creates the sound so the lookup
+// above finds it (the right gun then plays the left one's 2D sample).
+TEST(GameSounds_EnhancedCreatesTheSoundAnActiveSafeBlockConfigures)
+{
+	for (const bool enhanced : {false, true}) {
+		Sounds s;
+		world::ObjectManager objects;
+		Console console;
+		world::registerWorldConsoleMethods(console, s.templates, objects);
+		sound::registerSoundConsoleMethods(console, s.manager);
+		if (enhanced) {
+			s.templates.onMissingSound = [&s](world::ObjectTemplate& created) { s.manager.applyEventDefaults(created); };
+		}
+		s.templates.create("Sound", "S_at_R_gun_firearm_Fire1P"); // addTemplate: no file
+		std::string out;
+		CHECK(console.execute("ObjectTemplate.activeSafe Sound S_at_gun_R_firearm_Fire1P", out) == ConsoleResult::Ok);
+		console.execute("ObjectTemplate.soundFilename \"sound/weapons/miniguns/drone_gun_mono.wav\"", out);
+		CHECK((s.templates.find("S_at_gun_R_firearm_Fire1P") != nullptr) == enhanced);
+		CHECK(s.game.sampleCount("S_at_gun_R_firearm_Fire1P") == (enhanced ? 1 : 0));
+		sound::setEnhancedAudio(enhanced);
+		sound::GameSounds::FireInfo fire;
+		fire.mode = 0;
+		s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
+		sound::setEnhancedAudio(false);
+		CHECK(s.triggered.size() == (enhanced ? 1u : 0u));
+		CHECK(!enhanced || (s.triggered[0].name == "S_at_gun_R_firearm_Fire1P" && s.triggered[0].firstPerson));
+	}
 }
 
 // 0x007fa100: two rays up and one down, 15 m; a 6 m room gives
@@ -414,8 +555,10 @@ TEST(GameAudio_WeaponsOfARound)
 	range.world->setPlayerInput(fire);
 	GameAudio::Camera camera;
 	camera.firstPerson = true;
+	int acceptedShots = 0;
 	for (int tick = 0; tick < 12; ++tick) {
 		range.world->tick(1 / 30.0f);
+		acceptedShots += range.world->playerWeapon()->firedThisTick();
 		audio.tick(camera);
 	}
 	// The rifle has no ammo.autoReload: run dry it stays empty, and a new
@@ -426,6 +569,7 @@ TEST(GameAudio_WeaponsOfARound)
 	range.world->tick(1 / 30.0f);
 	range.world->setPlayerInput(fire);
 	range.world->tick(1 / 30.0f);
+	acceptedShots += range.world->playerWeapon()->firedThisTick();
 	audio.tick(camera);
 	CHECK(range.count("S_eu_ar_rifle_TriggerClick") == 1);
 	game::SoldierInput reload;
@@ -436,22 +580,27 @@ TEST(GameAudio_WeaponsOfARound)
 	range.world->setPlayerInput(fire);
 	for (int tick = 0; tick < 30; ++tick) {
 		range.world->tick(1 / 30.0f);
+		acceptedShots += range.world->playerWeapon()->firedThisTick();
 		audio.tick(camera);
 	}
-	// An automatic rifle with one sample: it loops from the first round
-	// (0x005dbdc0's +0x43) until the reload stops it, and again after.
-	CHECK(range.count("S_eu_ar_rifle_Fire1P") == 2 && range.count("S_eu_ar_rifle_Fire3P") == 0);
+	// Held automatic fire starts a loop, and the reload starts a fresh loop.
+	CHECK(acceptedShots >= 4 && range.count("S_eu_ar_rifle_Fire1P") == 2 && range.count("S_eu_ar_rifle_Fire3P") == 0);
 	CHECK(range.count("S_eu_ar_rifle_Reload1P") == 1 && audio.weaponSounds >= 4);
 	range.world->setPlayerInput(reload);
 	range.world->tick(1 / 30.0f);
 	range.world->setPlayerInput(fire);
 	// From the chase camera the same rifle is a 3P sound.
 	camera.firstPerson = false;
+	int thirdPersonAcceptedShots = 0;
 	for (int tick = 0; tick < 40; ++tick) {
 		range.world->tick(1 / 30.0f);
+		const int fired = range.world->playerWeapon()->firedThisTick();
+		acceptedShots += fired;
+		thirdPersonAcceptedShots += fired;
 		audio.tick(camera);
 	}
-	CHECK(range.count("S_eu_ar_rifle_Fire3P") >= 1);
+	CHECK(thirdPersonAcceptedShots >= 2); // enough rounds to distinguish one free-running loop
+	CHECK(range.count("S_eu_ar_rifle_Fire3P") == 1);
 }
 
 // A round's own Sound child (created and played with it) loops while it
@@ -505,6 +654,12 @@ TEST(GameAudio_RadioVoiceOverAndAutomaticMessages)
 	audio.tick({});
 	CHECK(audio.radioHeard == 1 && audio.voiceOvers == 1 && !played.empty()
 		&& played.back() == "sound/vo/English/grunt/No_filter/a.ogg");
+	// The local radio menu echoes its selected message to the sender. It
+	// must play the radio sample without a speaker filter.
+	const int local = range.world->localPlayer();
+	range.world->hearRadio(local, game::GameWorld::targetChannel("TCTeam"), "roger_that", local);
+	audio.tick({});
+	CHECK(played.back() == "sound/vo/English/grunt/filter/a.ogg");
 	// EU takes the silo: played here only, the local player's (EU's) message
 	// (0x00656e80 through game slot 0x60).
 	object->setTeam(2);
@@ -644,6 +799,28 @@ TEST(GameSounds_FireSampleRules)
 	CHECK(s.game.sampleCount("S_nade_Fire3P") == 4 && s.game.sampleCount("S_mg_Fire3P") == 1);
 }
 
+// An automatic local weapon changes its loop when the listener leaves the
+// first-person camera while fire remains held.
+TEST(GameSounds_AutomaticFireTracksCameraPerspective)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_mg_Fire1P");
+	addSoundTemplate(s.templates, "S_mg_Fire3P");
+	sound::GameSounds::FireInfo automatic;
+	automatic.mode = 2;
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "mg", true, {4, 5, 6}, true, 17, 9, &automatic);
+	CHECK(s.triggered.size() == 1 && s.triggered.back().name == "S_mg_Fire1P");
+	CHECK(s.game.fireLooping(17) && s.manager.muted(4));
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "mg", false, {4, 5, 6}, true, 17, 9, &automatic);
+	CHECK(s.triggered.size() == 2 && s.triggered.back().name == "S_mg_Fire3P");
+	CHECK(s.game.fireLooping(17) && !s.manager.muted(4));
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "mg", true, {4, 5, 6}, true, 17, 9, &automatic);
+	CHECK(s.triggered.size() == 3 && s.triggered.back().name == "S_mg_Fire1P");
+	CHECK(s.game.fireLooping(17) && s.manager.muted(4));
+	s.game.releaseTrigger(17);
+	CHECK(!s.game.fireLooping(17) && !s.manager.muted(4));
+}
+
 // 0x005dbfe0 by the reload state and samples: one sample plays at a
 // magazine reload; three samples play nothing for a magazine and 0, 1, 1
 // for a shell reload's first, middle and last; two samples' second at
@@ -777,6 +954,22 @@ TEST(GameAudio_NewStyleEngineAudio)
 	CHECK(e.shifted);
 }
 
+// An old-style engine's RotationRpm (0x00564710): it starts from 1e-4,
+// eases to the unscaled |audio value| (not x 0.8333) and stops at zero.
+TEST(GameAudio_EngineRotationSound)
+{
+	Vars::global().clear();
+	GameAudio::RotationSound s;
+	CHECK(!GameAudio::stepRotationSound(s, 0));
+	CHECK(GameAudio::stepRotationSound(s, -0.64f));
+	CHECK(s.value > 1e-4f && s.value < 0.64f);
+	for (int i = 0; i < 60; ++i) {
+		GameAudio::stepRotationSound(s, -0.64f);
+	}
+	CHECK(near(s.value, 0.64f, 0.001f));
+	CHECK(!GameAudio::stepRotationSound(s, 0) && !s.playing && s.value == 0);
+}
+
 // The soldier HUD's injury sound (0x006575f0 from 0x007a0f80): once when
 // the armour's fraction falls, then not again for 2 s; the local player
 // on foot.
@@ -811,6 +1004,194 @@ TEST(GameAudio_InjurySound)
 	CHECK(audio.listenerState().injuries == 2);
 	// On foot in the open, first person: the wind is wanted.
 	CHECK(audio.listenerState().windWanted && audio.listenerState().seat.empty());
+}
+
+// The shipped S_Injury lives on the worn Kit's vehicleHud, not the soldier template.
+TEST(GameAudio_InjurySoundFromKit)
+{
+	Range range;
+	range.templates.registerType(7, "Kit");
+	range.templates.create("Kit", "EU_Assault")->settings()["vehicleHud.injurySound"] = "S_Injury";
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	range.world->tick(1 / 30.0f);
+	audio.tick(camera);
+	game::GameWorld::PlayerInfo me;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), me) && me.soldier != 0 && me.kit != 0);
+	range.world->setHitPoints(me.soldier, 80);
+	range.world->tick(1 / 30.0f);
+	audio.tick(camera);
+	CHECK(audio.listenerState().injuries == 1);
+}
+
+TEST(GameSounds_LocalAutomaticFireUsesRetailLoop)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_rifle_Fire1P");
+	addSoundTemplate(s.templates, "S_rifle_Fire3P");
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 2;
+	for (int i = 0; i < 5; ++i) {
+		s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "rifle", true, {}, true, 1, 0, &fire);
+		CHECK(s.game.fireLooping(1));
+	}
+	CHECK(s.triggered.size() == 1);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "rifle", false, {}, true, 1, 0, &fire);
+	CHECK(s.game.fireLooping(1));
+	CHECK(s.triggered.size() == 2);
+	s.game.releaseTrigger(1);
+	CHECK(!s.game.fireLooping(1));
+}
+
+// A seat's launcher (fire.addFireRate 0) plays its one-shot sample for each
+// round; a seat's minigun (no fire rates: automatic) loops it until released;
+// the cannon and rockets of one seat are separate fire components, so one's
+// rounds don't cut the other's loop.
+TEST(GameSounds_SeatCannonAndRocketsDoNotCutEachOther)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_cannon_Fire3P");
+	addSoundTemplate(s.templates, "S_rocket_Fire3P");
+	using E = sound::GameSounds::WeaponEvent;
+	sound::GameSounds::FireInfo single;
+	single.mode = 0;
+	single.burstRounds = 1;
+	single.roundsPerMinute = 120;
+	for (int i = 0; i < 3; ++i) {
+		s.game.weapon(E::Fire, "rocket", false, {}, true, 10, 0, &single);
+	}
+	CHECK(s.triggered.size() == 3 && !s.game.fireLooping(10));
+	sound::GameSounds::FireInfo automatic;
+	automatic.mode = 2;
+	automatic.burstRounds = 1;
+	s.game.weapon(E::Fire, "cannon", false, {}, true, 11, 0, &automatic);
+	s.game.weapon(E::Fire, "cannon", false, {}, true, 11, 0, &automatic);
+	CHECK(s.triggered.size() == 4 && s.game.fireLooping(11));
+	// Rockets fired while the cannon holds its loop (another state key).
+	s.game.weapon(E::Fire, "rocket", false, {}, true, 12, 0, &single);
+	CHECK(s.triggered.size() == 5 && s.game.fireLooping(11) && !s.game.fireLooping(12));
+	s.game.releaseTrigger(11);
+	CHECK(!s.game.fireLooping(11));
+}
+
+// A round's detonation starts its detonation.endEffectTemplate in the
+// round's own effects; that bundle's start sound (S_<bundle>_Start) is
+// heard like any other effect's (explosions, the commander's strikes).
+TEST(GameAudio_DetonationEndEffectStartSound)
+{
+	Range range;
+	range.templates.registerType(7, "EffectBundle");
+	addSoundTemplate(range.templates, "S_e_boom_Start");
+	range.templates.create("EffectBundle", "e_boom")->children().push_back({"S_e_boom_Start", {}, {}});
+	world::ObjectTemplate* bullet = range.templates.find("bullet");
+	bullet->settings()["detonation.endEffectTemplate"] = "e_boom";
+	bullet->settings()["detonation.explosionRadius"] = "2";
+	bullet->settings()["detonation.explosionDamage"] = "0";
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::SoldierInput fire;
+	fire.fire = true;
+	fire.aimPitch = -60; // into the ground in front
+	range.world->setPlayerInput(fire);
+	GameAudio::Camera camera;
+	for (int tick = 0; tick < 15; ++tick) {
+		range.world->tick(1 / 30.0f);
+		audio.tick(camera);
+	}
+	CHECK(!range.world->impacts().empty());
+	CHECK(range.count("S_e_boom_Start") >= 1);
+}
+
+// A round with a detonation component but no blast (the silo missile's
+// explosionRadius 0) still goes off on impact: 0x005e9300 has no radius
+// gate, so its end effect (e_EMP_wave) and that bundle's sound play.
+TEST(GameAudio_DetonationWithoutBlastRadiusStillStartsEndEffect)
+{
+	Range range;
+	range.templates.registerType(7, "EffectBundle");
+	addSoundTemplate(range.templates, "S_e_boom_Start");
+	range.templates.create("EffectBundle", "e_boom")->children().push_back({"S_e_boom_Start", {}, {}});
+	world::ObjectTemplate* bullet = range.templates.find("bullet");
+	bullet->settings()["detonation.endEffectTemplate"] = "e_boom";
+	bullet->settings()["detonation.explosionRadius"] = "0";
+	bullet->settings()["detonation.explosionDamage"] = "0";
+	GameAudio audio(*range.world, range.objects, range.templates, range.manager, range.game, nullptr);
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::SoldierInput fire;
+	fire.fire = true;
+	fire.aimPitch = -60; // into the ground in front
+	range.world->setPlayerInput(fire);
+	GameAudio::Camera camera;
+	for (int tick = 0; tick < 15; ++tick) {
+		range.world->tick(1 / 30.0f);
+		audio.tick(camera);
+	}
+	CHECK(!range.world->impacts().empty());
+	CHECK(range.count("S_e_boom_Start") >= 1);
+}
+
+// Pod-engine style: an attached loop without a sound-intensity mapping.
+TEST(GameAudio_ConstantEffectLoopFollowsPod)
+{
+	Sounds sounds;
+	Console console;
+	sound::registerSoundConsoleMethods(console, sounds.manager);
+	addSoundTemplate(sounds.templates, "S_pod_motor_Start");
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.loopCount 0", out) == ConsoleResult::Ok);
+	CHECK(sounds.templates.find("S_pod_motor_Start")->settings()["loopCount"] == "0");
+	auto* bundle = sounds.templates.create("EffectBundle", "pod_motor");
+	bundle->children().clear();
+	bundle->children().push_back({"S_pod_motor_Start", {}, {}});
+	bundle->settings()["SoundIntensityUsed"] = "0";
+	effects::EffectManager effects(sounds.templates);
+	effects.setAnchor(7, {0, 100, 0}, {});
+	CHECK(effects.spawnAttached("pod_motor", 7, {}));
+	CHECK(effects.takeSounds().empty());
+	CHECK(effects.bundleLoops().size() == 1);
+	effects.setAnchor(7, {100, 50, 0}, {});
+	const auto loops = effects.bundleLoops();
+	if (loops.size() == 1) CHECK(loops[0].position.x == 100 && loops[0].position.y == 50);
+	effects.releaseAnchor(7);
+	CHECK(effects.bundleLoops().empty());
+}
+
+// A magazine-sized burst (the Titan ground cannon: burst 10, magazine 10)
+// starts its reload with the last round. The reload sound (0x005dbfe0) ends
+// the burst's skips, so it must follow that round's fire sound: one play per
+// burst, none left over for the next burst.
+TEST(GameSounds_ReloadAfterLastBurstRoundKeepsOnePlayPerBurst)
+{
+	Sounds s;
+	addSoundTemplate(s.templates, "S_cannon_Fire3P");
+	using E = sound::GameSounds::WeaponEvent;
+	sound::GameSounds::FireInfo burst;
+	burst.mode = 1;
+	burst.burstRounds = 10;
+	for (int round = 0; round < 3; ++round) {
+		for (int i = 0; i < 10; ++i) {
+			s.game.weapon(E::Fire, "cannon", false, {}, true, 1, 0, &burst);
+		}
+		s.game.weapon(E::Reload, "cannon", false, {}, true, 1, 0, nullptr, 0);
+	}
+	CHECK(s.triggered.size() == 3);
+}
+
+// The ticket state's announcement (0x00449070): state % 20; Titan mode
+// names both teams' lines, the other modes only the local team's level.
+TEST(GameAudio_TicketStateMessages)
+{
+	CHECK(GameAudio::ticketStateMessage(1, 10, 1, "gpm_ti") == "AUTO_RULES_ticketlevel_titans_10_friendly");
+	CHECK(GameAudio::ticketStateMessage(2, 7, 1, "gpm_ti") == "AUTO_RULES_ticketlevel_titans_7_enemy");
+	CHECK(GameAudio::ticketStateMessage(1, 22, 1, "gpm_ti") == "AUTO_RULES_ticketlevel_titans_2_friendly");
+	CHECK(GameAudio::ticketStateMessage(1, 20, 1, "gpm_ti").empty());
+	CHECK(GameAudio::ticketStateMessage(1, 0, 1, "gpm_ti").empty());
+	CHECK(GameAudio::ticketStateMessage(2, 15, 1, "gpm_ti") == "AUTO_RULES_TITANS_less_points_enemy");
+	CHECK(GameAudio::ticketStateMessage(1, 3, 1, "gpm_cq") == "AUTO_RULES_ticketlevel_3");
+	CHECK(GameAudio::ticketStateMessage(2, 3, 1, "gpm_cq").empty());
+	CHECK(GameAudio::ticketStateMessage(1, 16, 1, "gpm_ti").empty());
 }
 
 // The weapon sound component's +0x41 (0x005dbfe0 sets it with each reload

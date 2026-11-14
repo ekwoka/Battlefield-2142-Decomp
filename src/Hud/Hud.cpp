@@ -247,6 +247,7 @@ struct HudManager::Node {
 	// setOccupiedNodePosVariable (0x007afc40, slot 0xcc).
 	int occupiedSeat = 0;
 	int occupiedData = 0;
+	int occupiedWidth = 0, occupiedHeight = 0; // createOccupiedNode sprite size, independent of setNodeSize
 	// Object markers (Bf2ObjectMarkerNode 0x007e5f30): textures and sizes
 	// per state (slots 0xd8 / 0xdc, 4 each), the targets at most (+8, slot
 	// 0xc8), the lock-on type (+0x54, 2), the weapon (+0x58), the range cut
@@ -351,14 +352,16 @@ const HudFont* HudManager::font(const std::string& path)
 	const std::string key = lower(slashes(path));
 	auto& slot = m_fonts[key];
 	if (!slot) {
-		// "Fonts/x.dif": the language's 800 x 600 one first (the HUD is
-		// laid out for 800 x 600), then the language's own, then English's
-		// (hud::language(); the Local fonts exist only per language).
+		// "Fonts/x.dif": the language's own first, then English's (hud::language();
+		// the Local fonts exist only per language). Never the 800 x 600 set: the
+		// exe's HUD font loader (0x007ee320, 0x007caf00) tries the name, then
+		// "Fonts\<GSLanguage>\" and has no resolution folder, so the HUD draws
+		// the 1024 fonts (larger glyphs) at every size; only RendDX9's menu fonts
+		// (0x10185e90) pick "800" by window width.
 		const std::string file = key.substr(key.rfind('/') + 1);
 		const std::string folder = "Fonts/" + language() + "/";
 		std::string text;
-		for (const std::string& candidate : {folder + "800/" + file, "Fonts/800/" + file, folder + file,
-				 "Fonts/English/800/" + file, "Fonts/English/" + file, key}) {
+		for (const std::string& candidate : {folder + file, "Fonts/English/" + file, slashes(path)}) {
 			if (m_reader && m_reader(candidate, text)) {
 				if (auto parsed = parseHudFont(text)) {
 					slot = std::make_unique<HudFont>(std::move(*parsed));
@@ -408,6 +411,8 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 	m_buttonHits.clear();
 	m_listHits.clear();
 	m_mouseOverHits.clear();
+	// A hidden mini-map (the commander's collapsed tab) takes no clicks.
+	m_miniMapView.drawn = false;
 	m_clock += seconds;
 	++m_frameNumber;
 	layoutTransformLists();
@@ -550,7 +555,11 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		if (!node.posVariables[axis].empty()) {
 			const auto it = m_numbers.find(lower(node.posVariables[axis]));
 			if (it != m_numbers.end()) {
-				(axis == 0 ? x : y) = (axis == 0 ? originX : originY) + it->second + static_cast<float>(node.offset[axis]);
+				// Occupied-node variables are offsets from the node position
+				// (0x007e1520), unlike ordinary position variables.
+				const float base = (axis == 0 ? originX : originY)
+					+ (node.type == kOccupied ? static_cast<float>(axis == 0 ? node.x : node.y) : 0.0f);
+				(axis == 0 ? x : y) = base + it->second + static_cast<float>(node.offset[axis]);
 			}
 		}
 	}
@@ -621,7 +630,9 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		const bool over = m_pointer[0] >= ax && m_pointer[0] <= ax + aw && m_pointer[1] >= ay && m_pointer[1] <= ay + ah;
 		const std::string& normal = node.buttonTextures[1].empty() ? node.buttonTextures[0] : node.buttonTextures[1];
 		quad(over && !node.buttonTextures[2].empty() ? node.buttonTextures[2] : normal, x, y, x + w, y + h, 0, 0, 1, 1, 0);
-		if ((!node.buttonCommands.empty() || !node.altCommands.empty()) && color[3] > 0) {
+		// The node's fade, not its colour: shipped buttons such as the
+		// commander's Resign are drawn transparent (alpha 0) over a picture.
+		if ((!node.buttonCommands.empty() || !node.altCommands.empty()) && alpha > 0) {
 			m_buttonHits.push_back({ax, ay, ax + aw, ay + ah, &node});
 		}
 		break;
@@ -634,12 +645,21 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		}
 		break;
 	case kBar: {
+		const size_t barFirst = out.size();
+		// A round bar is drawn in its texture's own colours: the ability ring is authored
+		// "setNodeColor 0 0 0 1" over an orange gradient, yet the retail ring shows transparent
+		// with an orange fill (user's retail capture). The mask state that spares the RGB
+		// (RendDX9 ops 0x500/0x402/0x203) is not decoded, so this follows the capture, not the shader.
+		if (node.barRound != 0 && node.rgbVariables[0].empty() && !tint) {
+			color[0] = color[1] = color[2] = 1;
+		}
 		quad(node.barTextures[0], x, y, x + w, y + h, 0, 0, 1, 1, 0);
 		float value = node.valueVariable.empty() ? 0 : number(node.valueVariable);
 		if (node.spanMax != node.spanMin) {
 			value = (value - node.spanMin) / (node.spanMax - node.spanMin);
 		}
 		value = std::clamp(node.inverse ? 1 - value : value, 0.0f, 1.0f);
+		const float sweepValue = value; // the wedge takes the unsnapped value (0x007eb2c0 -> 0x007eafc0)
 		if (node.snap > 0) {
 			value = std::floor(value * static_cast<float>(node.snap) + 0.5f) / static_cast<float>(node.snap);
 		}
@@ -667,6 +687,20 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 			default: // from the left
 				quad(node.barTextures[1], bx0, by0, bx0 + fx, by1, u0, v0, u0 + fu, v1, 0);
 				break;
+			}
+		}
+		// setBarNodeRound (slot 0x120 0x007e9380, mode at +0x9c): the render
+		// calls 0x007eafc0 with the value; it builds a fan about the node's
+		// middle from straight up through angle 2 pi * value (corners at
+		// 7/4, 5/4, 3/4, 1/4 pi, 0.95 box) and draws it into the node's mask;
+		// the background and the (linearly clipped) fill both follow.
+		// Clockwise-from-up is inferred from the y flip of 0x007eae30.
+		if (node.barRound != 0 && sweepValue > 0) {
+			for (size_t i = barFirst; i < out.size(); ++i) {
+				out[i].sweep = sweepValue * 6.2831853f;
+				out[i].sweepAbout = true;
+				out[i].sweepCentre[0] = x + w * 0.5f;
+				out[i].sweepCentre[1] = y + h * 0.5f;
 			}
 		}
 		break;
@@ -718,7 +752,8 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 			&& static_cast<size_t>(node.occupiedSeat) < states->second.size()) {
 			state = std::clamp(states->second[static_cast<size_t>(node.occupiedSeat)], 0, 7);
 		}
-		quad(kSeatTextures[state], x, y, x + w, y + h, 0, 0, 1, 1, 0);
+		quad(kSeatTextures[state], x, y, x + static_cast<float>(node.occupiedWidth),
+			y + static_cast<float>(node.occupiedHeight), 0, 0, 1, 1, 0);
 		break;
 	}
 	default:
@@ -1195,7 +1230,32 @@ void HudManager::drawList(const Node& node, float x, float y, const float color[
 		}
 		const auto rowColors = m_listRowColors.find(node.listData);
 		const bool ownColor = rowColors != m_listRowColors.end() && r < rowColors->second.size();
+		const auto cells = m_listCells.find(node.listData);
+		const std::vector<ListCell>* rowCells = cells != m_listCells.end() && r < cells->second.size() ? &cells->second[r] : nullptr;
 		for (size_t i = 0; i < rows[r].size() && i < columns.size(); ++i) {
+			if (rowCells && i < rowCells->size()) {
+				const ListCell& cell = (*rowCells)[i];
+				const float* own = cell.color[0] >= 0 ? cell.color.data() : nullptr;
+				if (cell.iconWidth > 0) {
+					// A picture cell (0x007dfb8d): the column's x plus its offset,
+					// centred in the row; white unless it has a colour.
+					if (!rows[r][i].empty()) {
+						const float ix = x + columns[i].x + cell.offset;
+						const float iy = std::floor(rowY + (node.rowHeight - cell.iconHeight) * 0.5f);
+						out.push_back({kTextureRoot + slashes(rows[r][i]), ix, iy, ix + cell.iconWidth, iy + cell.iconHeight, 0, 0, 1,
+							1, {own ? own[0] : 1.0f, own ? own[1] : 1.0f, own ? own[2] : 1.0f, (own ? own[3] : 1.0f) * color[3]}, 0});
+					}
+					continue;
+				}
+				ListColumn placed = columns[i];
+				placed.x += cell.offset;
+				if (cell.alignment >= 0) {
+					placed.alignment = cell.alignment;
+				}
+				drawCell(node, rows[r][i], x, rowY, placed, columnEnd(i),
+					own ? own : ownColor ? rowColors->second[r].data() : textColor, color[3], out);
+				continue;
+			}
 			if (columns[i].iconSize > 0) {
 				if (!rows[r][i].empty()) {
 					const float size = columns[i].iconSize;
@@ -1259,8 +1319,10 @@ void HudManager::drawCell(const Node& node, const std::string& text, float x, fl
 			continue;
 		}
 		if (c == '|' && i + 1 < text.size() && (text[i + 1] == 'c' || text[i + 1] == 'C')) {
+			// The strings' "|C1001": retail skips 6 (0x007dff79); bare "|c" is native's own row mark.
+			const bool code = i + 6 <= text.size() && std::all_of(text.begin() + i + 2, text.begin() + i + 6, [](char d) { return d >= '0' && d <= '9'; });
 			highlight = !highlight;
-			i += 1;
+			i += code ? 5 : 1;
 			continue;
 		}
 		const HudFont* f = fontAt(fontIndex);
@@ -1349,10 +1411,12 @@ bool HudManager::click(float x, float y, bool alternate)
 			continue;
 		}
 		const int data = it->node->listData;
-		// The column whose left edge is the nearest one left of the pointer.
+		// The column whose left edge is the nearest one left of the pointer;
+		// of columns sharing that edge the last (the squad list's lock is
+		// column 8 over its frame's 7, JOIN 10 over its button's 9: 0x007a81b0).
 		int column = 0;
 		for (size_t i = 0; i < it->columns.size(); ++i) {
-			if (x >= it->columns[i] && it->columns[i] > it->columns[static_cast<size_t>(column)]) {
+			if (x >= it->columns[i] && it->columns[i] >= it->columns[static_cast<size_t>(column)]) {
 				column = static_cast<int>(i);
 			}
 		}
@@ -1411,9 +1475,10 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 	}
 	// Turned back about the node's centre (the map is drawn turned by
 	// +0x80c).
-	if (m_mapTurn != 0) {
+	const float turn = number("MapFullSize") != 0 ? 0.0f : m_mapTurn; // the big map stays north-up
+	if (turn != 0) {
 		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
-		const float c = std::cos(-m_mapTurn), s = std::sin(-m_mapTurn);
+		const float c = std::cos(-turn), s = std::sin(-turn);
 		const float dx = x - cx, dy = y - cy;
 		x = cx + dx * c + dy * s;
 		y = cy + dy * c - dx * s;
@@ -1662,10 +1727,40 @@ void HudManager::shownArea(float refX, float refY, float area[4]) const
 // covers the node; it is cut to the node and drawn white at the map's
 // transparency (0x7b0: MenuMapAlpha while playing, else 1; below).
 //
-// Markers (0x0077c610) keep their pixel size at every zoom: a marker's
+// Ordinary markers (0x0077c610) keep their pixel size at every zoom: a marker's
 // rectangle is floor(its point - size / 2) by floor(size) (the exe takes
 // a further half pixel off each for Direct3D 9's pixel centres), turned
 // by its yaw and cut to the node.
+std::string spawnLabelText(std::string label)
+{
+	if (label.rfind("CPNAME_", 0) == 0) {
+		size_t cut = 0;
+		for (int part = 0; part < 3 && cut != std::string::npos; ++part) {
+			cut = label.find('_', cut);
+			cut = cut == std::string::npos ? cut : cut + 1;
+		}
+		if (cut != std::string::npos && cut < label.size()) {
+			label.erase(0, cut);
+			for (size_t i = label.size(); i-- > 1;) {
+				if (std::isupper(static_cast<unsigned char>(label[i])) && std::islower(static_cast<unsigned char>(label[i - 1]))) {
+					label.insert(i, " ");
+				}
+			}
+		}
+	}
+	if (label.rfind("ID_", 0) == 0) {
+		label.erase(0, 3);
+	}
+	label.erase(0, label.rfind("CP_", 0) == 0 || label.rfind("cp_", 0) == 0 ? 3 : 0);
+	std::replace(label.begin(), label.end(), '_', ' ');
+	return label;
+}
+
+std::string titanSpawnLabel(const std::string& titan, const std::string& baseName)
+{
+	return spawnLabelText(baseName) == titan ? titan + " (inside)" : titan;
+}
+
 void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out)
 {
 	m_mapHits.clear();
@@ -1674,6 +1769,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		return;
 	}
 	const bool full = number("MapFullSize") != 0;
+	const bool spawning = number("SpawnShow") != 0;
 	const float* pos = full ? node.maxiPos : node.miniPos;
 	const float* size = full ? node.maxiSize : node.miniSize;
 	// The commander screen's map at setCommanderPos/Size (-300/-300,
@@ -1758,7 +1854,9 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
 	// a positive turn counter-clockwise on the screen; HudQuad's rotation
 	// is clockwise), then cut to the node.
-	const float turnDegrees = m_mapTurn * 57.29578f;
+	// The big map (the player's view turned, then opened) is drawn north-up.
+	const float mapTurn = full ? 0.0f : m_mapTurn;
+	const float turnDegrees = mapTurn * 57.29578f;
 	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
 	const auto turned = [&](HudQuad& q) {
 		if (turnDegrees != 0) {
@@ -1783,6 +1881,8 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		}
 	}
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
+	std::vector<Hit> labelRects;
+	std::vector<HudQuad> tooltips; // drawn last, over the later markers' icons
 	for (const MapMarker& marker : m_mapMarkers) {
 		float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
 		float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
@@ -1798,39 +1898,94 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		// map's turn, then with the map about the node's centre: its point
 		// moves with the map and it keeps its heading on it.
 		if (turnDegrees != 0) {
-			const float c = std::cos(m_mapTurn), s = std::sin(m_mapTurn);
+			const float c = std::cos(mapTurn), s = std::sin(mapTurn);
 			const float dx = sx - centreX, dy = sy - centreY;
 			sx = centreX + dx * c + dy * s;
 			sy = centreY + dy * c - dx * s;
 		}
-		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size;
+		// 0x0077bdd0: zoomOnMinimap forces the vehicle's size AND offset
+		// through current map size / maxi size, with the relation's 0.7
+		// scale (0x00785836). Fixed-size aircraft must not drift off its deck.
+		const float scaleX = marker.zoomWithMap ? 0.7f * mapW / m_mapReference[0] : 1.0f;
+		const float scaleY = marker.zoomWithMap ? 0.7f * mapH / m_mapReference[1] : 1.0f;
+		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX;
+		const float height = marker.height > 0 ? marker.height * scaleY : pixels;
+		const float offsetX = marker.offsetX * scaleX, offsetY = marker.offsetY * scaleY;
 		const float side = std::floor(pixels);
-		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
+		const float tall = std::floor(height);
 		// 0x0077c610: the rectangle at floor(point + offset - size / 2), turned
 		// about its centre less the offset (the point).
-		const float x0 = std::floor(sx + marker.offsetX - pixels * 0.5f);
-		const float y0 = std::floor(sy + marker.offsetY - (marker.height > 0 ? marker.height : pixels) * 0.5f);
+		const float x0 = std::floor(sx + offsetX - pixels * 0.5f);
+		const float y0 = std::floor(sy + offsetY - height * 0.5f);
 		if (x0 + side <= nx || x0 >= nx + nw || y0 + tall <= ny || y0 >= ny + nh) {
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
 			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
-			marker.yaw - turnDegrees};
+			marker.upright ? 0.0f : marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;
-			q.pivot[0] = x0 + side * 0.5f - marker.offsetX;
-			q.pivot[1] = y0 + tall * 0.5f - marker.offsetY;
+			q.pivot[0] = x0 + side * 0.5f - offsetX;
+			q.pivot[1] = y0 + tall * 0.5f - offsetY;
 		}
 		if (!clipTo(q, nx, ny, nx + nw, ny + nh)) {
 			continue;
 		}
 		out.push_back(q);
+		// The retail deployment map draws the spawn points as bare icons, no
+		// text. The name is the port's addition to tell the points apart, so
+		// it shows only under the pointer (a tooltip), not beside every icon.
+		const bool hovered = m_pointer[0] >= x0 && m_pointer[0] <= x0 + side && m_pointer[1] >= y0 && m_pointer[1] <= y0 + tall;
+		if (!marker.label.empty() && spawning && hovered) {
+			std::string label = marker.label;
+			if (m_localize) {
+				const std::string localized = m_localize(label);
+				if (localized != label) {
+					label = localized;
+				}
+			}
+			label = spawnLabelText(std::move(label));
+			const std::string fontPath = "Fonts/hudFontLocalBold_9.dif";
+			if (const HudFont* f = font(fontPath)) {
+				const float textWidth = f->width(label);
+				float labelX = x0 + side + 3;
+				if (labelX + textWidth > nx + nw - 2) {
+					labelX = x0 - textWidth - 3;
+				}
+				if (textWidth <= nw - 4) {
+					labelX = std::clamp(labelX, nx + 2, nx + nw - textWidth - 2);
+				}
+				const float lastLabelY = std::max(ny + 1, ny + nh - f->lineHeight - 1);
+				float labelY = std::clamp(sy - f->lineHeight * 0.5f, ny + 1, lastLabelY);
+				// Titan bases can have several spawn choices at one map point.
+				// Stack their names so each stays readable and independently clickable.
+				for (size_t attempt = 0; attempt <= labelRects.size(); ++attempt) {
+					const auto collision = std::find_if(labelRects.begin(), labelRects.end(), [&](const Hit& r) {
+						return labelX < r.x1 + 2 && labelX + textWidth + 2 > r.x0
+							&& labelY < r.y1 + 2 && labelY + f->lineHeight + 2 > r.y0;
+					});
+					if (collision == labelRects.end()) break;
+					labelY = collision->y1 + 2;
+					if (labelY > lastLabelY) labelY = ny + 1;
+				}
+				labelRects.push_back({labelX, labelY, labelX + textWidth, labelY + f->lineHeight, marker.id});
+				const float shadow[4] = {0, 0, 0, alpha};
+				const float text[4] = {1, 1, 1, alpha};
+				std::vector<HudQuad> labelQuads;
+				drawString(fontPath, label, labelX + 1, labelY + 1, 0, 0, shadow, labelQuads);
+				drawString(fontPath, label, labelX, labelY, 0, 0, text, labelQuads);
+				for (HudQuad& glyph : labelQuads) {
+					if (clipTo(glyph, nx, ny, nx + nw, ny + nh)) tooltips.push_back(std::move(glyph));
+				}
+			}
+		}
 		if (marker.id >= 0) {
-			m_mapHits.push_back({std::max(x0, nx), std::max(y0, ny), std::min(x0 + side, nx + nw), std::min(y0 + tall, ny + nh),
-				marker.id});
+			m_mapHits.push_back({std::max(x0, nx), std::max(y0, ny), std::min(x0 + side, nx + nw),
+				std::min(y0 + tall, ny + nh), marker.id});
 		}
 	}
+	out.insert(out.end(), tooltips.begin(), tooltips.end());
 }
 
 // dice::meme::Bf2MiniMenuMapNode (factory 0x007e8fb0, constructor
@@ -2124,6 +2279,8 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		[m](std::string parent, std::string name, int seat, int x, int y, int w, int h) {
 			Node* n = m->create(kOccupied, parent, name, x, y, w, h);
 			n->occupiedSeat = seat;
+			n->occupiedWidth = w;
+			n->occupiedHeight = h;
 			return true;
 		});
 	bindMethod(console, "HudBuilder.createCompassNode", access,
@@ -2560,6 +2717,14 @@ void registerHudConsoleMethods(Console& console, HudManager& hud)
 		}
 		n->showCommands.emplace_back(event, command);
 		m->noteShowCommands(n);
+		return true;
+	});
+	// setNodePos x y (0x007b08e0: the active node, slot 0xcc; Remaster's HudRotation.con moves its sides with it).
+	bindMethod(console, "HudBuilder.setNodePos", access, [active](int x, int y) {
+		if (Node* n = active()) {
+			n->x = x;
+			n->y = y;
+		}
 		return true;
 	});
 	// setNodeSize w h (0x007b0a10: the node made last, slot 0xc8).

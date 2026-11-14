@@ -164,7 +164,9 @@ void RigidBody::addFriction(const Vec3& worldPoint, const Vec3& force)
 	const float n = static_cast<float>(frictionCount);
 	const float mean = 1.0f / static_cast<float>(frictionCount + 1);
 	frictionAcceleration = (frictionAcceleration * n + force) * mean;
-	frictionTorque = (frictionTorque * n + cross(worldPoint - worldCenterOfMass(), force)) * mean;
+	// 0x006c7980: the arm is from the body's position (slot 0x40), not its centre of mass;
+	// unlike the point force 0x006c7b10, it never reads centerOfMassOffset (+0x120).
+	frictionTorque = (frictionTorque * n + cross(worldPoint - position, force)) * mean;
 	++frictionCount;
 }
 

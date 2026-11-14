@@ -19,6 +19,39 @@ bool near(float a, float b) { return std::fabs(a - b) < 1e-3f; }
 
 } // namespace
 
+TEST(WorldConsole_TemplateLookupLifecycle)
+{
+	world::ObjectTemplateManager templates;
+	CHECK(templates.find("LatePart") == nullptr);
+	auto* first = templates.create("SimpleObject", "LatePart");
+	CHECK(first && templates.find("latePART") == first);
+	CHECK(templates.create("Bundle", "LATEpart") == first);
+	const auto id = first->id();
+	templates.destroy(first);
+	CHECK(templates.find("LatePart") == nullptr && templates.findById(id) == nullptr);
+	auto* replacement = templates.create("Bundle", "latepart");
+	CHECK(replacement && replacement->id() != id && templates.find("LATEPART") == replacement);
+	CHECK(templates.find("") == nullptr);
+	const std::string highA = std::string("Part") + static_cast<char>(0xc0);
+	const std::string highB = std::string("PART") + static_cast<char>(0xe0);
+	auto* high = templates.create("SimpleObject", highA);
+	CHECK(high && templates.find(highA) == high && templates.find(highB) == nullptr);
+}
+
+TEST(WorldConsole_AnimatedBundleSkeletonProperty)
+{
+	Console console;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "AnimatedBundle");
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string out;
+	CHECK(console.execute("ObjectTemplate.create AnimatedBundle flag_eu", out) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.skeleton Objects\\Common\\Flags\\flag_setup.ske", out) == ConsoleResult::Ok);
+	const world::ObjectTemplate* flag = templates.find("flag_eu");
+	CHECK(flag && flag->settings().at("skeleton") == "Objects\\Common\\Flags\\flag_setup.ske");
+}
+
 // Overgrowth collision objects (OvergrowthCollision.con) are placed by a
 // matrix; the rotation must come back as the engine's yaw/pitch/roll.
 TEST(WorldConsole_AbsoluteTransformation)

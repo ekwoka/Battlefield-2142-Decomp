@@ -82,6 +82,8 @@ public:
 	void setEventSink(ScriptEventSink sink) { m_events = std::move(sink); }
 	// Called when the round ends (sgl_endGame or no tickets left).
 	std::function<void(int winner, int victoryType)> onEndGame;
+	// A team's ticketState set to a new value (the scripts' setTicketState).
+	std::function<void(int team, int state)> onTicketState;
 
 	void startRound();
 	void tick(float seconds);

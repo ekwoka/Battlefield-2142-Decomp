@@ -4,6 +4,8 @@
 // pages starting from and writing back to them.
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Hud/Hud.h"
+#include "Main/HudAlerts.h"
 #include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/SettingsObjects.h"
@@ -277,6 +279,55 @@ TEST(SettingsObjects_LocalProfiles)
 	call("dice.bf2.Profile", "connectToSubAccount", {ui::avm1::Value("acct")});
 	CHECK(profiles.currentDirectory() == "0004" && profiles.list().size() == 4);
 	std::filesystem::remove_all(dir);
+}
+
+// A help card shown once is saved to General.con at once, listed once, kept
+// with the other General settings, and not shown again after a relaunch.
+TEST(SettingsObjects_PlayedHelpPersists)
+{
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "bf2142_playedhelp_test";
+	std::filesystem::remove_all(dir);
+	std::filesystem::create_directories(dir / "Default");
+	{
+		std::ofstream(dir / "Default" / "General.con") << "GeneralSettings.setAutoReload 1\nGeneralSettings.setPlayedVOHelp \"HUD_HELP_Old\"\n";
+	}
+	const auto launch = [&dir](const std::function<void(menu::HelpPopups&, hud::HudManager&)>& body) {
+		Console console;
+		menu::HelpPopups help;
+		help.bind(console);
+		menu::SettingsObjects settings;
+		settings.registerConsole(console);
+		settings.setDirectory(dir.string(), "Default");
+		settings.load(console);
+		help.onPlayed = [&](const std::string& key) {
+			run(console, "GeneralSettings.setPlayedVOHelp \"" + key + "\"");
+			settings.saveGeneral();
+		};
+		hud::HudManager hudManager(nullptr);
+		body(help, hudManager);
+	};
+	launch([](menu::HelpPopups& help, hud::HudManager& hud) {
+		CHECK(!help.show(hud, "hud_help_old", ""));
+		CHECK(help.show(hud, "HUD_HELP_New", ""));
+	});
+	const std::string text = readFile(dir / "Default" / "General.con");
+	CHECK(text.find("setAutoReload 1") != std::string::npos);
+	CHECK(text.find("HUD_HELP_New") != std::string::npos);
+	CHECK(text.find("HUD_HELP_New") == text.rfind("HUD_HELP_New"));
+	launch([](menu::HelpPopups& help, hud::HudManager& hud) {
+		CHECK(!help.show(hud, "HUD_HELP_New", ""));
+		CHECK(!help.show(hud, "hud_help_new", ""));
+	});
+	std::filesystem::remove_all(dir);
+}
+
+TEST(SettingsObjects_RetailAudioQualityMapping)
+{
+	CHECK(menu::audioQualityIndex("Low") == 2);
+	CHECK(menu::audioQualityIndex("Medium") == 1);
+	CHECK(menu::audioQualityIndex("High") == 0);
+	CHECK(menu::audioQualityIndex("UltraHigh") == 0);
+	CHECK(menu::audioQualityIndex("medium") == 1);
 }
 
 // The video options' modes as RendDX9 lists them (0x10010830 with

@@ -114,6 +114,14 @@ vec3 gradedAt(vec2 uv)
 	return color;
 }
 
+// The EMP's sampler1 is POINT with no mips (PostProduction_nv3x.fx), on a
+// coordinate already wrapped by frac(): the texel it falls in.
+float randomPoint(vec2 uv)
+{
+	ivec2 size = textureSize(randomTexture, 0);
+	return texelFetch(randomTexture, min(ivec2(uv * vec2(size)), size - 1), 0).r;
+}
+
 void main()
 {
 	vec2 uv = inTexCoord;
@@ -121,9 +129,9 @@ void main()
 	if (hasMode(8)) {
 		// psDx9_EMP20: the noise row moves the image across; the static
 		// takes from it (and adds a little red); the contrast again.
-		float offset = texture(randomTexture, vec2(0.0, fract(uv.y * emp.x))).r - 0.5;
+		float offset = randomPoint(vec2(0.0, fract(uv.y * emp.x))) - 0.5;
 		vec2 img = vec2(fract(uv.x + offset * emp.y), uv.y);
-		float noise = texture(randomTexture, fract(uv * emp.z * timeValues.y)).r - 0.5;
+		float noise = randomPoint(fract(uv * emp.z * timeValues.y)) - 0.5;
 		float n = max(0.0, noise * 2.0);
 		vec3 accum = transform(empColorRow, gradedAt(img)) - n;
 		accum.r += n * 0.3;

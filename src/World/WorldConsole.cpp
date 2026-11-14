@@ -305,8 +305,12 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	registerInertConsoleRows(console);
 
 	// activeSafe <type> <name>: the type is only checked in debug builds.
-	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string, std::string name) {
-		templates.setActive(templates.find(firstWord(name)));
+	bindMethod(console, "ObjectTemplate.activeSafe", access, [&templates](std::string type, std::string name) {
+		ObjectTemplate* found = templates.find(firstWord(name));
+		if (!found && templates.onMissingSound && firstWord(type) == "Sound" && (found = templates.create("Sound", firstWord(name)))) {
+			templates.onMissingSound(*found);
+		}
+		templates.setActive(found);
 	});
 
 	ConsoleMethod createComponent;
@@ -394,9 +398,9 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(setObjectTemplate);
 
-	// Soldier skeletons (0x004de37d): write-only methods; the renderer reads
-	// them from the template's settings.
-	for (const char* property : {"skeleton1P", "skeleton3P"}) {
+	// AnimatedBundle and soldier skeleton paths are kept on the template for
+	// the renderer; the soldier paths retain their existing meaning.
+	for (const char* property : {"skeleton", "skeleton1P", "skeleton3P"}) {
 		bindMethod(console, std::string("ObjectTemplate.") + property, access, [&templates, property](std::string path) {
 			if (templates.active()) {
 				templates.active()->settings()[property] = firstWord(path);

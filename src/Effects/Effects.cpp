@@ -283,12 +283,13 @@ bool Emitter::alive() const
 	if (!m_active) {
 		return false; // never started (its quality, or out of view)
 	}
-	// A trail draws its path as long as its anchor carries it.
-	if (t.trail && anchor != 0 && !m_stopped) {
+	// A trail draws its path as long as its anchor or bundle carries it.
+	if (t.trail && held() && !m_stopped) {
 		return true;
 	}
-	// An attached looping system emits until it is stopped.
-	return !m_stopped && (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (anchor != 0 && t.isLooping));
+	// A held looping or endless (emit time 0) system emits until it is stopped.
+	return !m_stopped
+		&& (m_age < t.emitDelay + t.emitTime + t.preWarmTime || (held() && (t.isLooping || t.emitTime == 0)));
 }
 
 void Emitter::place(const Vec3& position, const Mat3& rotation)
@@ -594,13 +595,12 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	if (span > 0 && seconds > span) {
 		seconds = span;
 	}
-	// The system's velocity, inherited by world particles born now (set
-	// from outside with speedFromPhysics).
-	if (physicsVelocity) {
-		m_velocity = inheritedVelocity;
-	} else if (!m_prewarming) {
-		m_velocity = (m_position - m_previous) * (1 / seconds);
-	}
+	// The system's velocity, inherited by world particles born now: only
+	// what speedFromPhysics sets from outside (0x00618ae0 -> the systems'
+	// setters). The systems' constructors zero it (sprite 0x10137290, mesh
+	// 0x10146820) and their updates never derive it from their own moves,
+	// so a rocket's sparks aren't thrown forward at the rocket's speed.
+	m_velocity = physicsVelocity ? inheritedVelocity : Vec3 {};
 	// The particles: fixed steps of 0.01 s, the remainder carried.
 	const float total = seconds + m_carry;
 	const int steps = static_cast<int>(std::lround(total * 100.0f));
@@ -673,7 +673,10 @@ void Emitter::step(float seconds, game::Random& random, const EmitContext& conte
 	}
 	const float interval = 1 / frequency;
 	while (m_emitClock + interval <= m_clock + 1e-5f) {
-		if (t.emitTime > 0 || !t.isLooping) {
+		// An emit time of 0 isn't run down (0x10140590): the system emits
+		// until it is stopped (the gunships' jets, the damage smoke), by its
+		// anchor or its bundle's life (bundleLife).
+		if (t.emitTime != 0 || (!t.isLooping && !held())) {
 			m_emitLeft -= interval;
 			if (m_emitLeft <= 0) {
 				if (t.isLooping) {
@@ -1071,6 +1074,11 @@ std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const
 		if (facing <= 1e-4f || facing < cosLimit) {
 			continue;
 		}
+		// shortcut: stands in for 0x101655c0's edge-neighbour walk from the hit face; a
+		// disconnected face within the half diagonal still gets a piece (the walk needs the hit's face index).
+		if (std::fabs(dotv(centre - a, n)) > halfSize * 1.4143f) {
+			continue;
+		}
 		std::vector<DecalVertex> polygon(square, square + 4);
 		const Vec3 corners[3] = {a, b, c};
 		for (int e = 0; e < 3 && polygon.size() >= 3; ++e) {
@@ -1324,7 +1332,23 @@ bool EffectManager::spawn(const std::string& name, const Vec3& position, const M
 	if (!t) {
 		return false;
 	}
-	spawnTemplate(*t, position, rotation, 0, view, nullptr);
+	std::vector<Emitter*> started;
+	spawnTemplate(*t, position, rotation, 0, view, &started);
+	if (t->typeName() == "EffectBundle") {
+		// The bundle's life: its timeToLive (CRD_NONE/1/0 by the template's
+		// constructor, 0x0061a9b0) sampled once (0x00619700); one with no
+		// parent and no end lives 0.5 s (0x00618600).
+		float life = 1;
+		if (const std::string* ttl = setting(*t, "timeToLive")) {
+			life = game::RandomDistribution::parse(*ttl).sample(m_random);
+		}
+		if (life < 0) {
+			life = 0.5f;
+		}
+		for (Emitter* emitter : started) {
+			emitter->bundleLife = life;
+		}
+	}
 	return true;
 }
 
@@ -1348,8 +1372,8 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		light.mountRotation = rotation;
 		placeLight(light);
 	}
-	// The looping start sounds of bundles that set their sound intensity
-	// (SoundIntensityUsed or a mapping) stay with the bundle (bundleLoops),
+	// All looping start sounds stay with the bundle (bundleLoops), including
+	// constant-input loops such as the pod motor without SoundIntensityUsed.
 	// their envelopes at that intensity: modifier 5 as the start sets it
 	// (0x0061a1c0 -> 0x00618e30), with no motion yet.
 	std::vector<HeldSound> held;
@@ -1359,7 +1383,7 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		const std::string* loops = sound ? setting(*sound, "loopCount") : nullptr;
 		const bool intensity = started.bundle
 			&& (bundleModifiers(*started.bundle).modifiers[5].used || bundleModifiers(*started.bundle).modifiers[5].mapped());
-		if (!intensity || !loops || std::atoi(loops->c_str()) != 0) {
+		if (!loops || std::atoi(loops->c_str()) != 0) {
 			++i;
 			continue;
 		}
@@ -1371,7 +1395,7 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 		h.localPosition = m_startedSounds[i].position;
 		h.mountPosition = position;
 		h.mountRotation = rotation;
-		h.intensity = started.intensity;
+		h.intensity = intensity ? started.intensity : 0.0f;
 		held.push_back(std::move(h));
 		m_startedSounds.erase(m_startedSounds.begin() + static_cast<std::ptrdiff_t>(i));
 	}
@@ -1601,6 +1625,14 @@ void EffectManager::update(float seconds)
 	}
 	context.poolUsed = &m_poolUsed;
 	for (const auto& emitter : m_emitters) {
+		// The bundle's life runs down by the tick (no age scale) while above
+		// 0; below 0 the bundle stops (0x0061a760). Exactly 0 never ends.
+		if (emitter->bundleLife > 0) {
+			emitter->bundleLife -= seconds;
+			if (emitter->bundleLife < 0) {
+				emitter->stop();
+			}
+		}
 		emitter->update(seconds, m_random, context);
 	}
 	m_emitters.erase(std::remove_if(m_emitters.begin(), m_emitters.end(),
@@ -2037,7 +2069,8 @@ void EffectManager::collectMeshes(const Emitter& emitter, std::vector<MeshSprite
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
 		const float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f), 0.0f, 1.0f);
 		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
-		if (size <= 0 || alpha <= 0) {
+		// Retail 0x10135b40..0x10135b58 applies signed scale; ADS uses -1.
+		if (size == 0 || alpha <= 0) {
 			continue;
 		}
 		const Vec3 color = t.color1 * (1 - blend) + t.color2 * blend;
@@ -2174,9 +2207,12 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 		const float blend = std::min(t.colorBlendGraph.at(f), 1.0f);
 		float alpha = std::clamp(std::min(t.transparencyGraph.at(f), 1.0f) * p.alpha, 0.0f, 1.0f);
 		const float size = std::min(t.sizeGraph.at(f), 1.0f) * t.particleMaxSize + p.sizeOffset;
-		if (size <= 0 || alpha <= 0 || alpha < t.alphaCull) {
+		if (size <= 0 || alpha <= 0) {
 			continue;
 		}
+		// alphaCull tests the particle's +0x2c (its alpha intensity by the
+		// fade below), not the graph, which is the shader's (0x10130bd0).
+		float cullAlpha = p.alpha;
 		const Vec3 at = emitter.worldPosition(p);
 		if (view.settings) {
 			const float depth = physics::dot(at - view.eye, view.forward);
@@ -2186,12 +2222,18 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 					continue;
 				}
 				alpha *= near;
+				cullAlpha *= near;
 			} else {
-				alpha *= view.fade(depth, t.lodDistance);
+				const float fade = view.fade(depth, t.lodDistance);
+				alpha *= fade;
+				cullAlpha *= fade;
 			}
 			if (alpha <= 0) {
 				continue;
 			}
+		}
+		if (cullAlpha < t.alphaCull) {
+			continue;
 		}
 		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
 			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};
@@ -2346,8 +2388,18 @@ uint32_t flags(const world::ObjectTemplate& t, const char* name, const char* oth
 // Moves `at`/`turn` from a parent's space to its child's, after the pose
 // the game gives the part (as the renderer's collectParts).
 void placeChild(const world::ChildTemplate& child, uint32_t object, const ObjectEffects::PartPose& partPose, Vec3& at,
-	Mat3& turn)
+	Mat3& turn, const ObjectEffects::PartBone& partBone)
 {
+	// A bone part (boneIndex, 0x0063d470): the bone's local matrix is its
+	// place, as the renderer draws it (the Talon's engine pods).
+	std::array<float, 16> bone;
+	if (partBone && object != 0 && partBone(object, child.name, bone)) {
+		const Mat3 boneTurn {{Vec3 {bone[0], bone[1], bone[2]}, Vec3 {bone[4], bone[5], bone[6]},
+			Vec3 {bone[8], bone[9], bone[10]}}};
+		at = at + turn.transform({bone[12], bone[13], bone[14]});
+		turn = boneTurn * turn;
+		return;
+	}
 	Mat3 childTurn = Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
 	Vec3 childAt = at + turn.transform({child.position.x, child.position.y, child.position.z});
 	Vec3 offset, rotation;
@@ -2421,7 +2473,8 @@ ObjectEffects::Placed groundTriggerOf(const world::ObjectTemplate& t, const std:
 } // namespace
 
 std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectTemplateManager& templates,
-	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose, BundleCache* cache)
+	const world::ObjectTemplate& root, uint32_t object, const PartPose& partPose, BundleCache* cache,
+	const PartBone& partBone)
 {
 	std::vector<Placed> out;
 	std::vector<std::string> path;
@@ -2438,7 +2491,7 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 				}
 				Vec3 childAt = at;
 				Mat3 childTurn = turn;
-				placeChild(child, object, partPose, childAt, childTurn);
+				placeChild(child, object, partPose, childAt, childTurn, partBone);
 				path.push_back(child.name);
 				chain.push_back(&child);
 				const std::string& type = c->typeName();
@@ -2470,7 +2523,7 @@ std::vector<ObjectEffects::Placed> ObjectEffects::bundlesOf(const world::ObjectT
 						}
 						Vec3 groundAt = childAt;
 						Mat3 groundTurn = childTurn;
-						placeChild(grand, object, partPose, groundAt, groundTurn);
+						placeChild(grand, object, partPose, groundAt, groundTurn, partBone);
 						path.push_back(grand.name);
 						chain.push_back(&grand);
 						out.push_back(groundTriggerOf(*g, path, chain, groundAt, groundTurn, parent));
@@ -2522,12 +2575,12 @@ scene::WindSettings::LocalWind ObjectEffects::localWindOf(const world::ObjectTem
 }
 
 void ObjectEffects::place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position,
-	Mat3& rotation)
+	Mat3& rotation, const PartBone& partBone)
 {
 	position = {};
 	rotation = {};
 	for (const world::ChildTemplate* child : bundle.chain) {
-		placeChild(*child, object, partPose, position, rotation);
+		placeChild(*child, object, partPose, position, rotation, partBone);
 	}
 }
 
@@ -2536,7 +2589,7 @@ void ObjectEffects::startBundle(const ObjectState& object, Tracked& tracked, siz
 {
 	Placed& b = tracked.bundles[index];
 	if (partPose && !created) {
-		place(b, object.id, partPose, b.position, b.rotation);
+		place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 	}
 	effects.spawnAttached(b.bundle->name(), object.id, b.position, b.rotation, view, static_cast<uint32_t>(index + 1), false);
 	// The start sends its children event 0 (0x0061a1c0).
@@ -2565,7 +2618,7 @@ void ObjectEffects::groundTrigger(const ObjectState& object, Placed& g, EffectMa
 		return;
 	}
 	if (partPose && !created) {
-		place(g, object.id, partPose, g.position, g.rotation);
+		place(g, object.id, partPose, g.position, g.rotation, m_partBone);
 	}
 	groundTriggerAt(object.position + object.rotation.transform(g.position), g.rotation * object.rotation, g, object.id,
 		effects);
@@ -2638,7 +2691,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			}
 			Tracked tracked;
 			tracked.objectTemplate = object.objectTemplate;
-			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose, &m_hasBundles);
+			tracked.bundles = bundlesOf(m_templates, *object.objectTemplate, object.id, partPose, &m_hasBundles, m_partBone);
 			found = m_objects.insert_or_assign(object.id, std::move(tracked)).first;
 		}
 		Tracked& tracked = found->second;
@@ -2671,7 +2724,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 					continue;
 				}
 				Placed& b = tracked.bundles[tag - 1];
-				place(b, object.id, partPose, b.position, b.rotation);
+				place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 				effects.setMount(object.id, tag, b.position, b.rotation);
 			}
 		}
@@ -2690,10 +2743,14 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		// muzzle's flash and smoke), again on each round unless its
 		// minDistanceUnderWaterSurface (+0x3f4) is 0 or more and it still
 		// runs; 0x0061e090 sets off the GroundEffectBundles.
-		for (const std::string& weapon : object.firedWeapons) {
+		for (const auto& fire : object.firedWeapons) {
 			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 				Placed& b = tracked.bundles[i];
-				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], weapon)) {
+				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], fire.weapon)) {
+					continue;
+				}
+				if (!fire.seat.empty() && !equalsIgnoreCase(object.objectTemplate->name(), fire.seat)
+					&& std::none_of(b.path.begin(), b.path.end(), [&](const auto& part) { return equalsIgnoreCase(part, fire.seat); })) {
 					continue;
 				}
 				if (b.kind == Placed::Kind::GroundTrigger && b.parent < 0) {
@@ -2712,7 +2769,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				// The affector's wind, placed with its part (its object's
 				// position and matrix, slots 0x60 / 0x78).
 				if (partPose) {
-					place(b, object.id, partPose, b.position, b.rotation);
+					place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 				}
 				m_localWinds.push_back(localWindOf(*b.bundle, object.position + object.rotation.transform(b.position),
 					b.rotation * object.rotation));
@@ -2952,7 +3009,7 @@ void ObjectEffects::updateGround(const ObjectState& object, const Vec3& velocity
 	// speed, a draft's with the engine), and no rays to cast.
 	const bool idle = !object.occupied && object.engine <= 0 && speed < 0.5f;
 	if (partPose && !idle) {
-		place(b, object.id, partPose, b.position, b.rotation);
+		place(b, object.id, partPose, b.position, b.rotation, m_partBone);
 	}
 	const Vec3 at = object.position + object.rotation.transform(b.position);
 	std::string effect;

@@ -30,6 +30,17 @@ float ease(float current, float target)
 
 float soldierSpeed(int index) { return kSpeeds[std::clamp(index, 0, 6)]; }
 
+SoldierAnimationDirection soldierAnimationDirection(const physics::Vec3& velocity, float lookYawDegrees)
+{
+	const float speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+	if (speed <= 0.01f) {
+		return {};
+	}
+	const float yaw = lookYawDegrees * 3.14159265f / 180.0f;
+	return {(velocity.x * std::sin(yaw) + velocity.z * std::cos(yaw)) / speed,
+		(velocity.x * std::cos(yaw) - velocity.z * std::sin(yaw)) / speed};
+}
+
 void SprintStamina::configure(float dissipationTime, float recoverTime, float limit, float useModifier,
 	float rechargeModifier)
 {
@@ -120,12 +131,15 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 	// 0x0058d350): crouching or prone it can't (in a vehicle neither, but
 	// then this isn't called). Without the template's numbers, sprinting
 	// is the key.
-	if (input.sprint) {
+	// The zoomed weapon's speed index applies only when sprinting is off. The
+	// soldier cannot sprint while aiming, including the tick zoom starts.
+	const bool sprintInput = input.sprint && !m_zoomed;
+	if (sprintInput) {
 		m_stamina.request(m_sprintHeld);
 	}
-	m_sprintHeld = input.sprint;
+	m_sprintHeld = sprintInput;
 	m_stamina.update(input.pose == SoldierPose::Crouch || input.pose == SoldierPose::Prone, m_recoverDelay, seconds);
-	const bool sprinting = m_stamina.configured() ? m_stamina.sprinting() : input.sprint;
+	const bool sprinting = m_stamina.configured() ? m_stamina.sprinting() : sprintInput;
 	// The look (0x0058a6d0): a turn under 0.001 counts as none. Standing
 	// (the shaped throttle within 0.01 of 0; strafing doesn't count), the
 	// turn twists the head (+0x278) and the body stays while the twist is
@@ -159,8 +173,9 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 		bodyTurn += step;
 	}
 	body.yawDegrees += bodyTurn;
-	// Heading (+z forward when yaw is 0, +x to the right).
-	const float yaw = body.yawDegrees * 3.14159265f / 180.0f;
+	// Movement follows the view, including head twist, so W/S and A/D
+	// stay independent and diagonal strafing follows the crosshair.
+	const float yaw = (body.yawDegrees + m_twist) * 3.14159265f / 180.0f;
 	const physics::Vec3 forward {std::sin(yaw), 0, std::cos(yaw)};
 	const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
 	const float speed = soldierSpeed(soldierSpeedIndex(input.pose, sprinting, m_zoomed)); // +0x310 (0x00586020)

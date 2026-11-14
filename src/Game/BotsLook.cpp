@@ -108,10 +108,27 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 	}
 	L.decidedAt = std::min(L.decidedAt, m_time);
 	const float elapsed = m_time - L.decidedAt;
+	// enhanced.botMovement (not retail, whose soldier walks sideways while
+	// it looks about): walking with no enemy in sight, none lost in the last
+	// 5 s and no round passing, the look stays along the way.
+	// shortcut: a fixed 5 s, tune from play.
+	const bool threat = std::any_of(bot.known.begin(), bot.known.end(),
+		[this](const Known& k) { return k.everSeen && (k.lostAt < 0 || m_time - k.lostAt < 5); });
+	const bool alongWay = m_settings.playerLikeMovement() && !self.vehicle && !threat && bot.roundsSeen.empty()
+		&& L.moveX * L.moveX + L.moveZ * L.moveZ >= 0.01f
+		&& (std::fabs(input.throttle) >= 0.01f || std::fabs(input.strafe) >= 0.01f);
+	if (alongWay) {
+		L.offset = {L.moveX, std::sin(bot.pitch * kRadiansPerDegree), L.moveZ};
+		L.offsetFromRoot = false;
+		L.plan = true;
+		L.sectorPlan = false;
+		L.aheadOfMove = false;
+		L.needPlan = true; // the sectors choose again once this ends
+	}
 	// A soldier's look chosen ahead of its walk is dropped once the walk
 	// turns from it (the override).
 	const bool override = L.aheadOfMove && !within(L.sector, L.moveX, L.moveZ, kCos20);
-	if (!(elapsed >= L.duration || L.force || L.needPlan) && !override) {
+	if (alongWay || (!(elapsed >= L.duration || L.force || L.needPlan) && !override)) {
 		// The plan keeps its look.
 	} else {
 		if (override) {
@@ -302,7 +319,15 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 		return;
 	}
 	// The look statement: the aim turns the view along the offset.
-	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
+	physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
+	// Turret LookAt is evaluated from the gun's round origin in aim(). Keep
+	// the idle sector's short look point in that same frame: a root-eye point
+	// can fall inside a long barrel's muzzle sweep and its apparent bearing
+	// then changes as the muzzle moves around the yaw pivot.
+	if (!L.offsetFromRoot && self.vehicle) {
+		physics::Mat3 hull;
+		m_world.gunFrame(self.vehicle, self.seat, eye, hull);
+	}
 	const physics::Vec3 point = L.offsetFromRoot ? self.position + L.offset : eye + L.offset * 5.0f;
 	L.quiet = true;
 	const float throttle = input.throttle, strafe = input.strafe;

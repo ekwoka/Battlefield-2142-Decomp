@@ -110,6 +110,16 @@ float soldierSpeed(int index);
 // The speed index of a pose (0x00586020).
 int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed = false);
 
+struct SoldierAnimationDirection {
+	float forward = 0;
+	float side = 0;
+};
+
+// Project horizontal movement into the soldier's animation frame. Infantry
+// movement follows the look direction (body yaw plus head twist), which can
+// differ from the body's yaw while it catches up.
+SoldierAnimationDirection soldierAnimationDirection(const physics::Vec3& velocity, float lookYawDegrees);
+
 // The turn: the body (the soldier object's yaw, +0x25c) follows the look
 // with a lag: the look is the body plus the head's twist (+0x278); see
 // update. Firing, the camera and what the soldier sets down go along the

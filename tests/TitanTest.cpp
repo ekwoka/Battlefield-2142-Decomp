@@ -1,16 +1,31 @@
-// Titan mode on the shipped levels (needs $BF2142_GAME_DIR): Minsk's and
-// Minsk_Titan16's gpm_ti gameplay objects with every object template, the
-// terrain, the collision meshes and the materials. The Titans spawn with
+// Titan mode on the shipped levels (needs $BF2142_GAME_DIR): Minsk's,
+// Suez_Canal's and Minsk_Titan16's gpm_ti gameplay objects with every object
+// template, terrain, collision meshes and materials. The Titans spawn with
 // their parts and spawn points, the missile silos fire at the enemy Titan
 // and wear its shield and then its hull down, the core's sequence (four
 // consoles, the doors, the core) destroys a Titan, the commander's order
 // moves it, and gpm_ti.py keeps the tickets and ends the round.
 #include "Console/Vars.h"
 #include "Game/Bots.h"
+#include "Hud/Hud.h"
+#include "Main/HudMenus.h"
+#include "Main/HudMenusVehicles.h"
+#include "Main/PlayerCamera.h"
+#include "Main/GameAudio.h"
+#include "Sound/Game/SoundManager.h"
+#include "Sound/Game/GameSounds.h"
+#include "Sound/Game/VoiceMessages.h"
+#include "Sound/Game/SoundObjectTemplate.h"
+#include "Main/TitanShotTrace.h"
+#include "Animation/AnimationSystem.h"
+#include "SeatAim.h"
 #include "Game/GameLogic.h"
 #include "Main/HostedGame.h"
 #include "Net/GameClient.h"
 #include "Net/GhostLayout.h"
+#ifdef BF2142_RENDER_TESTS
+#include "Render/LevelRenderer.h"
+#endif
 #include "TitanLevel.h"
 
 #include <algorithm>
@@ -21,6 +36,8 @@
 #include <cstdio>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
+#include <map>
 #include <thread>
 
 using namespace dice::hfe;
@@ -103,6 +120,15 @@ TEST(Titan_MinskTitansSpawn)
 	CHECK(level.count("VehicleSpawn") == 2);
 	// The five silos, neutral and loaded.
 	CHECK(level.world->missileSilos().size() == 5);
+	// Numbered 1..5 as they were added (0x004d1770's count): the map's
+	// _NN frames and the 3D icons ICObjectCannon0N, not their control ids.
+	{
+		const auto silos = level.world->missileSilos();
+		for (size_t i = 0; i < silos.size(); ++i) {
+			std::fprintf(stderr, "  silo %d: control point %d\n", silos[i].number, silos[i].controlPoint);
+			CHECK(silos[i].number == static_cast<int>(i) + 1);
+		}
+	}
 	// A soldier spawns in a Titan when its spawn points are chosen, and
 	// stands on its floor.
 	const int bot = level.world->addPlayer("Bot", 2, true);
@@ -127,6 +153,138 @@ TEST(Titan_MinskTitansSpawn)
 	const auto* eu = level.titan(2);
 	std::fprintf(stderr, "  soldier in the Titan at %.1f (Titan at %.1f)\n", info.position.y, eu ? eu->position.y : 0.0f);
 	CHECK(eu && info.position.y > eu->position.y - 15 && info.position.y < eu->position.y + 25); // on its decks, not fallen through
+}
+
+// Real Remaster Suez walker, driver seat, primary minigun and the level's
+// terrain. Calibrate its ground impact, then fire at an enemy infantry line
+// at four lateral offsets. The template-only regression in VehicleModelsTest
+// covers both factions and mods; this keeps the actual seat/fire path tied to
+// a shipped map and its materials.
+TEST(Titan_SuezWalkerPrimaryFireAgainstEnemyInfantry)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	constexpr float dt = 1.0f / 30.0f;
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	uint32_t walker = 0;
+	for (const auto& vehicle : level.world->vehicleList()) {
+		const world::Object* object = level.objects.find(vehicle.object);
+		std::string name = object && object->objectTemplate() ? object->objectTemplate()->name() : "";
+		std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (name == "us_heavy_mech" && vehicle.driverFree) {
+			walker = vehicle.object;
+			break;
+		}
+	}
+	CHECK(walker != 0);
+	if (!walker) return;
+	const world::Object* machine = level.objects.find(walker);
+	const int team = machine->team() ? machine->team() : 2;
+	CHECK(level.world->spawnPlayer(team) != nullptr);
+	game::GameWorld::PlayerInfo driver;
+	CHECK(level.world->playerInfo(level.world->localPlayer(), driver));
+	const world::Vec3 seatOrigin = machine->position();
+	bool entered = false;
+	for (float radius = 0; radius <= 6 && !entered; radius += 1.5f) {
+		for (int k = 0; k < 8 && !entered; ++k) {
+			const float angle = static_cast<float>(k) * 0.785398163f;
+			level.world->setSoldierPosition(driver.soldier,
+				{seatOrigin.x + radius * std::sin(angle), seatOrigin.y - 1, seatOrigin.z + radius * std::cos(angle)});
+			game::SoldierInput use;
+			use.use = true;
+			level.world->setPlayerInput(use);
+			level.world->tick(dt);
+			level.world->setPlayerInput({});
+			level.world->tick(dt);
+			entered = level.world->playerVehicle() && level.world->playerVehicle()->id() == walker;
+		}
+	}
+	CHECK(entered);
+	if (!entered) return;
+	game::SoldierInput aim;
+	aim.aimPitch = -20;
+	const auto fireToGround = [&](int target) {
+		const size_t impactsBefore = level.world->impacts().size();
+		const size_t projectilesBefore = level.world->projectiles().size();
+		bool launched = false;
+		for (int tick = 0; tick < 180 && !launched; ++tick) {
+			game::SoldierInput fire = aim;
+			fire.fire = true;
+			level.world->setPlayerInput(fire);
+			if (target >= 0) { game::SoldierInput stand; level.world->setInput(target, stand); }
+			level.world->tick(dt);
+			launched = level.world->projectiles().size() > projectilesBefore
+				|| level.world->impacts().size() > impactsBefore;
+		}
+		CHECK(launched);
+		for (int tick = 0; tick < 240 && level.world->impacts().size() == impactsBefore; ++tick) {
+			level.world->setPlayerInput(aim);
+			if (target >= 0) { game::SoldierInput stand; level.world->setInput(target, stand); }
+			level.world->tick(dt);
+		}
+		level.world->setPlayerInput(aim);
+		CHECK(level.world->impacts().size() > impactsBefore);
+		return level.world->impacts().back();
+	};
+	physics::Vec3 mean {};
+	int calibration = 0;
+	for (int i = 0; i < 4; ++i) {
+		const auto hit = fireToGround(-1);
+		if (hit.object == 0) { mean = mean + hit.point; ++calibration; }
+	}
+	CHECK(calibration == 4);
+	if (!calibration) return;
+	mean = mean * (1.0f / static_cast<float>(calibration));
+	const terrain::Heightmap* ground = level.heightmaps.primary();
+	CHECK(ground != nullptr);
+	if (!ground) return;
+	uint32_t traceTarget = 0;
+	level.world->setBlastRayTraceSink([&traceTarget](const auto& ray) {
+		if (ray.soldier != traceTarget) return;
+		std::fprintf(stderr, "    Suez cover-ray soldier=%u bone=%d offset=%d %s blocker=%u from=(%.3f,%.3f,%.3f) to=(%.3f,%.3f,%.3f)\n",
+			ray.soldier, ray.bone, ray.offset, ray.clear ? "clear" : "blocked", ray.blocker,
+			ray.from.x, ray.from.y, ray.from.z, ray.to.x, ray.to.y, ray.to.z);
+	});
+	std::fprintf(stderr, "  Suez Suez walker %s at (%.2f,%.2f,%.2f), ground impact mean=(%.2f,%.2f,%.2f)\n",
+		"us_heavy_mech_minigun_firearm_Projectile", seatOrigin.x, seatOrigin.y, seatOrigin.z, mean.x, mean.y, mean.z);
+	for (const float offset : {0.5f, 1.0f, 1.5f, 2.0f}) {
+		const int enemy = level.world->addPlayer("Splash target", team == 1 ? 2 : 1, true);
+		CHECK(level.world->spawnSoldier(enemy));
+		game::GameWorld::PlayerInfo victim;
+		CHECK(level.world->playerInfo(enemy, victim));
+		const float x = mean.x + offset;
+		const float y = ground->heightAt(x, mean.z);
+		CHECK(level.world->setSoldierPosition(victim.soldier, {x, y, mean.z}));
+		for (int i = 0; i < 12; ++i) {
+			game::SoldierInput stand;
+			level.world->setInput(enemy, stand);
+			level.world->tick(dt);
+		}
+		const float before = level.world->hitPoints(victim.soldier);
+		traceTarget = victim.soldier;
+		const auto hit = fireToGround(enemy);
+		const world::Object* soldier = level.objects.find(victim.soldier);
+		const float distance = soldier ? std::sqrt(std::pow(hit.point.x - soldier->position().x, 2)
+			+ std::pow(hit.point.y + 0.071f - (soldier->position().y + 1.0f), 2)
+			+ std::pow(hit.point.z - soldier->position().z, 2)) : 0;
+		const float after = level.world->hitPoints(victim.soldier);
+		const float damageMod = level.materials.damageMod(40, 24);
+		const float falloff = distance < 1.8f ? 1.0f : std::max(0.0f, (2.0f - distance) / 0.2f);
+		const float dealt = before - after;
+		const float visibleShare = falloff * damageMod * 100.0f > 0 ? dealt / (falloff * damageMod * 100.0f) : 0;
+		const physics::Vec3 detonation {hit.point.x + hit.normal.x * 0.071f,
+			hit.point.y + hit.normal.y * 0.071f, hit.point.z + hit.normal.z * 0.071f};
+		const bool directRayClear = soldier && level.world->soldierPathClear(team, detonation, {soldier->position().x,
+			soldier->position().y + 1, soldier->position().z});
+		const float horizontalActual = soldier ? std::hypot(hit.point.x - soldier->position().x, hit.point.z - soldier->position().z) : 0;
+		std::fprintf(stderr, "  Suez primary ground targetOffset=%.2f actualHorizontal=%.3f distance=%.3f impactObject=%u falloff=%.3f projectileMaterial=40 vs soldierMaterial=24 mod=%.4f directRay=%s visibleShare=%.3f finalDamage=%.2f surfaceMaterial=%u hp=%.2f->%.2f\n",
+			offset, horizontalActual, distance, hit.object, falloff, damageMod, directRayClear ? "clear" : "blocked",
+			visibleShare, dealt, hit.material, before, after);
+		CHECK(hit.object == 0);
+	}
+	level.world->setBlastRayTraceSink({});
 }
 
 // A silo taken by PAC reloads (120 s, reloadOnTeamChange), fires its
@@ -367,305 +525,79 @@ TEST(Titan_MovesToTheCommandersTarget)
 	CHECK(!level.titan(1)->canMove);
 }
 
-// A joined client's Titans (the client's frame 0x00590e10 runs the Titan
-// sync, 0x00561e20 -> 0x005aca70; 0x00562100 takes its messages): moved
-// from the server's orders and states (ECPhysicsETitanSync, 9/0 and 9/2)
-// as the server moves its own, a tick at a time, so the client's Titan is
-// where the server's is at each tick, and moves at its velocity from the
-// order's first tick on (before, a client took the velocity from its
-// updates' places and lagged the start). A client that missed the orders
-// catches up from the Titans' last orders and states (titanSyncState).
-TEST(Titan_ClientSyncMovesAsTheServer)
+// Selecting a Titan must use its own moving spawn points even when its
+// control-point group also contains the level's ordinary ground spawns.
+TEST(Titan_SuezDeploymentSelectsInteriorOnly)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
 	}
-	TitanLevel server(gameDir, "Minsk", 48);
-	TitanLevel client(gameDir, "Minsk", 48, false);
-	CHECK(server.loaded && client.loaded);
-	if (!server.loaded || !client.loaded) {
+	TitanLevel level(gameDir, "Suez_Canal", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) {
 		return;
 	}
-	// The client's ghosts of both Titans, where CreateObject and their
-	// first state put them.
-	std::map<int, uint32_t> ghost, real;
-	for (const auto& t : server.world->titans()) {
-		const world::Object* o = server.objects.find(t.object);
-		world::Object* made = client.objects.create(client.templates.find(o->objectTemplate()->name()), o->position(), o->rotation());
-		CHECK(made != nullptr);
-		if (!made) {
-			return;
-		}
-		made->setTeam(t.team);
-		CHECK(client.world->addRemoteTitan(made->id()));
-		ghost[t.team] = made->id();
-		real[t.team] = t.object;
-	}
-	client.world->tick(1 / 30.0f); // their meshes and radii
-	bool joined = false;
-	const auto deliver = [&] {
-		for (const auto& m : server.world->takeTitanSync()) {
-			if (joined) {
-				client.world->titanSyncMessage(m);
-			}
-		}
-	};
-	float worst = 0, worstSpeed = 0;
-	const auto step = [&](int ticks, bool compare) {
-		for (int i = 0; i < ticks; ++i) {
-			// The client's clock is up to the server's when the messages
-			// come (they go out after the server's tick).
-			server.world->tick(1 / 30.0f);
-			client.world->stepTitanSync(server.world->ticks());
-			deliver();
-			client.world->tick(1 / 30.0f);
-			if (!compare) {
-				continue;
-			}
-			for (int team = 1; team <= 2; ++team) {
-				const world::Vec3 a = server.objects.find(real[team])->position(), b = client.objects.find(ghost[team])->position();
-				worst = std::max({worst, std::fabs(a.x - b.x), std::fabs(a.z - b.z)});
-				physics::Vec3 v;
-				CHECK(client.world->titanSyncPlaced(ghost[team], &v));
-				for (const auto& t : server.world->titans()) {
-					if (t.team == team) {
-						worstSpeed = std::max({worstSpeed, std::fabs(t.velocity.x - v.x), std::fabs(t.velocity.z - v.z)});
-					}
-				}
-			}
-		}
-	};
-	// The server's first orders (each Titan's own place, 0x005aca70's
-	// server side) go out before the client joins; then the commander's.
-	step(90, false);
-	CHECK(server.world->moveTitan(1, 300, -200) == game::GameWorld::TitanMove::Accepted);
-	step(20 * 30, false);
-	const world::Vec3 before = server.objects.find(real[1])->position();
-	const world::Vec3 stale = client.objects.find(ghost[1])->position();
-	CHECK(std::fabs(before.x - stale.x) + std::fabs(before.z - stale.z) > 1); // moved, unseen
-	// The client joins: the last orders and states, then the messages.
-	joined = true;
-	for (const auto& m : server.world->titanSyncState()) {
-		client.world->titanSyncMessage(m);
-	}
-	client.world->stepTitanSync(server.world->ticks());
-	step(15 * 30, true);
-	// The other Titan ordered while the client watches: both follow.
-	{
-		const world::Vec3 a = server.objects.find(real[2])->position(), b = server.objects.find(real[1])->position();
-		CHECK(server.world->moveTitan(2, a.x + 0.2f * (b.x - a.x), a.z + 0.2f * (b.z - a.z))
-			== game::GameWorld::TitanMove::Accepted);
-	}
-	step(20 * 30, true);
-	std::fprintf(stderr, "  client against server: place %.6f m, velocity %.6f m/s at worst\n", worst, worstSpeed);
-	CHECK(worst < 1e-3f);
-	CHECK(worstSpeed < 1e-4f);
-	// A client gone wrong (its Titan's armour read as down: no push) is put
-	// back by the server's next state where they differ (0x005ab8a0).
-	client.world->setRemoteTitanHitPoints(ghost[1], 0);
-	step(20, false);
-	const world::Vec3 a = server.objects.find(real[1])->position(), b = client.objects.find(ghost[1])->position();
-	const float off = std::fabs(a.x - b.x) + std::fabs(a.z - b.z);
-	CHECK(off > 1e-3f);
-	client.world->setRemoteTitanHitPoints(ghost[1], 6e6f);
-	step(45, false);
-	worst = 0;
-	step(60, true);
-	std::fprintf(stderr, "  %.4f m off with the armour misread, %.6f m a state later\n", off, worst);
-	CHECK(worst < 1e-3f);
-	const world::Vec3 now = server.objects.find(real[1])->position();
-	CHECK(std::fabs(now.x - before.x) + std::fabs(now.z - before.z) > 10); // it went on moving
-}
-
-// A joined client's Titans take their height and heading from CreateObject:
-// the server's always says one ghost with the root's place and its
-// rotation in degrees, as floats (0x0050b0f0 sets +0x30 to 1; 0x004ab8a0
-// and the late-join replay), and the client numbers the tree's ghosts
-// from it (0x004b3f70 -> 0x0067d3d0); a Titan's mode mask (0x005fdce0,
-// 0xf61270) keeps its place and orientation out of every ghost write,
-// its first state included (0x0057f420). So the client's Titan stands
-// where the server's does to the bit, turned as it is (Minsk's EU Titan
-// by -4.964 degrees), not by a 14-bit quaternion.
-TEST(Titan_JoinedClientPlacedByCreateObject)
-{
-	const char* gameDir = std::getenv("BF2142_GAME_DIR");
-	if (!gameDir) {
-		return;
-	}
-	TitanLevel level(gameDir, "Minsk", 48);
-	CHECK(level.loaded && level.world->titans().size() == 2);
-	if (!level.loaded || level.world->titans().size() != 2) {
-		return;
-	}
-	game::GameLogic logic;
-	logic.startRound();
-	host::HostSetup setup;
-	setup.level = "Minsk";
-	setup.gameMode = "gpm_ti";
-	setup.mapSize = 48;
-	setup.gamePort = 0;
-	setup.queryPort = 0;
-	host::HostedGame hosted(*level.world, logic, level.templates, setup);
-	CHECK(hosted.start());
-	net::GameClient client;
-	client.world().setGhostTemplates([&level](uint32_t id) {
-		const world::ObjectTemplate* t = level.templates.findById(id);
-		return t ? net::ghostTemplateFrom(level.templates, *t) : net::GhostTemplateNode {};
-	});
-	net::GameClientOptions options;
-	options.playerName = "Joiner";
-	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
-	const auto titanGhost = [&](const game::GameWorld::TitanInfo& t) -> const net::RemoteObject* {
-		const world::Object* o = level.objects.find(t.object);
-		for (const net::RemoteObject& g : client.world().objectList()) {
-			if (o && g.part == 0 && g.templateId == o->objectTemplate()->id()) {
-				return client.world().object(g.ghost);
-			}
-		}
-		return nullptr;
-	};
-	int updates = 0;
-	for (int frame = 0; frame < 4000 && updates < 90; ++frame) {
-		client.update();
-		hosted.tick();
-		level.world->tick(1 / 30.0f);
-		bool both = true;
-		for (const auto& t : level.world->titans()) {
-			const net::RemoteObject* g = titanGhost(t);
-			both = both && g && g->health >= 0; // a state of its own read
-		}
-		updates += both ? 1 : 0;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	}
-	CHECK(updates >= 90);
-	for (const auto& t : level.world->titans()) {
-		const world::Object* o = level.objects.find(t.object);
-		const net::RemoteObject* g = titanGhost(t);
-		CHECK(o && g);
-		if (!o || !g) {
-			continue;
-		}
-		CHECK(g->hasPosition && !g->hasOrientation);
-		CHECK(g->position.x == o->position().x && g->position.y == o->position().y && g->position.z == o->position().z);
-		CHECK(g->rotation.x == o->rotation().x && g->rotation.y == o->rotation().y && g->rotation.z == o->rotation().z);
-		// Every ghost of the tree from the one CreateObject.
-		const net::RemoteObject* seat = client.world().object(static_cast<uint16_t>(g->ghost + 1));
-		CHECK(seat && seat->rootGhost == g->ghost);
-	}
-	bool turned = false;
-	for (const auto& t : level.world->titans()) {
-		turned = turned || std::fabs(level.objects.find(t.object)->rotation().x + 4.964f) < 1e-3f;
-	}
-	CHECK(turned);
-	client.disconnect();
-}
-
-// OptimizeEnclosingObjectsNetworking (a var, 0 by default): a client whose
-// soldier stands in a Titan's hull (the soldier's node +0x120, slot 0xa8
-// of its +0x18c, 0x00585cb0) doesn't get the soldiers enclosed otherwise
-// more than 20 m away scored, or at 0.01 with GhostNotEnclosed
-// (0x0057d560). Here an enemy 60 m off the EU Titan, outside it, walking:
-// its ghost's updates in 3 s, the var off, on, and on with
-// GhostNotEnclosed.
-TEST(Titan_EnclosedClientLeavesOutsideSoldiersUnscored)
-{
-	const char* gameDir = std::getenv("BF2142_GAME_DIR");
-	if (!gameDir) {
-		return;
-	}
-	TitanLevel level(gameDir, "Minsk", 48);
-	const auto* titan = level.loaded ? level.titan(2) : nullptr;
+	const game::GameWorld::TitanInfo* titan = level.titan(2);
 	CHECK(titan != nullptr);
 	if (!titan) {
 		return;
 	}
-	const world::Object* titanObject = level.objects.find(titan->object);
-	const physics::Mat3 turn =
-		physics::Mat3::fromYawPitchRoll({titanObject->rotation().x, titanObject->rotation().y, titanObject->rotation().z});
-	const physics::Vec3 inside = physics::Vec3 {titanObject->position().x, titanObject->position().y, titanObject->position().z}
-		+ turn.transform({0, -0.081f, -53.4f + 18});
-	game::GameLogic logic;
-	logic.startRound();
-	host::HostSetup setup;
-	setup.level = "Minsk";
-	setup.gameMode = "gpm_ti";
-	setup.mapSize = 48;
-	setup.gamePort = 0;
-	setup.queryPort = 0;
-	host::HostedGame hosted(*level.world, logic, level.templates, setup);
-	CHECK(hosted.start());
-	net::GameClient client;
-	net::GameClientOptions options;
-	options.playerName = "Inside";
-	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
-	const int enemy = level.world->addPlayer("Outside", 1, true);
-	CHECK(level.world->spawnSoldier(enemy));
-	int me = -1;
-	float x = 0;
-	const auto step = [&] {
-		client.update();
-		hosted.tick();
-		game::GameWorld::PlayerInfo info;
-		if (me >= 0 && level.world->playerInfo(me, info) && info.alive) {
-			level.world->setSoldierPosition(info.soldier, inside);
+	const uint32_t ownTitan = titan->object;
+	const int ownTeam = titan->team;
+	const int titanControlPoint = titan->controlPoint;
+	const std::vector<uint32_t> interiors = level.world->titanSpawnPoints(ownTeam);
+	CHECK(interiors.size() == 7);
+	int groundPoints = 0;
+	for (const auto& object : level.objects.objects()) {
+		const world::ObjectTemplate* templ = object->objectTemplate();
+		if (!templ || templ->typeName() != "SpawnPoint") {
+			continue;
 		}
-		if (level.world->playerInfo(enemy, info) && info.alive) {
-			x += 0.1f;
-			level.world->setSoldierPosition(info.soldier, inside + turn.transform({60, 0, std::fmod(x, 10.0f)}));
-		}
-		level.world->tick(1 / 30.0f);
-		std::this_thread::sleep_for(std::chrono::milliseconds(2));
-	};
-	const auto pump = [&](const std::function<bool()>& done, int milliseconds) {
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
-		while (std::chrono::steady_clock::now() < deadline) {
-			step();
-			if (done()) {
-				return true;
+		int controlPoint = object->controlPointId();
+		if (controlPoint < 0) {
+			const auto setting = templ->settings().find("controlPointId");
+			if (setting != templ->settings().end()) {
+				controlPoint = std::atoi(setting->second.c_str());
 			}
 		}
-		return false;
-	};
-	CHECK(pump([&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 8000));
-	me = client.world().localPlayer();
-	client.selectTeam(2);
-	game::GameWorld::PlayerInfo info;
-	CHECK(pump([&] { return level.world->playerInfo(me, info) && info.team == 2; }, 4000));
-	client.selectSpawnGroup(-1);
-	CHECK(pump([&] { return level.world->playerInfo(me, info) && info.alive; }, 8000));
-	step();
-	CHECK(level.world->enclosingTitan(me) == titan->object);
-	CHECK(level.world->enclosingTitan(enemy) == 0);
-	const auto updates = [&] {
-		const net::RemotePlayer* p = client.world().player(enemy);
-		const net::RemoteObject* o = p && p->soldierGhost ? client.world().object(p->soldierGhost) : nullptr;
-		return o ? o->updates : 0u;
-	};
-	const auto during = [&](int ticks) {
-		const uint32_t from = updates();
-		for (int i = 0; i < ticks; ++i) {
-			step();
+		if (controlPoint == titanControlPoint
+			&& std::find(interiors.begin(), interiors.end(), object->id()) == interiors.end()) {
+			++groundPoints;
 		}
-		return updates() - from;
-	};
-	Vars& vars = Vars::global();
-	during(60);
-	const uint32_t off = during(90);
-	vars.set("OptimizeEnclosingObjectsNetworking", "1");
-	during(15);
-	const uint32_t on = during(90);
-	vars.set("GhostNotEnclosed", "1");
-	during(15);
-	const uint32_t notEnclosed = during(90);
-	vars.set("OptimizeEnclosingObjectsNetworking", "0");
-	vars.set("GhostNotEnclosed", "0");
-	std::fprintf(stderr, "  the enemy outside: %u updates in 3 s, %u with the var, %u with GhostNotEnclosed too\n", off, on,
-		notEnclosed);
-	CHECK(off > 20);
-	CHECK(on == 0);
-	CHECK(notEnclosed > 0);
-	client.disconnect();
+	}
+	CHECK(groundPoints > 0); // Suez's Titan CP group is genuinely mixed.
+
+	const int bot = level.world->addPlayer("Titan deploy", ownTeam, true);
+	level.world->setSpawnTitan(bot, ownTitan);
+	CHECK(level.world->spawnChoice(bot) == game::GameWorld::kSpawnOnTitan);
+	CHECK(level.world->spawnTitan(bot) == ownTitan);
+	CHECK(level.world->spawnSoldier(bot));
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(bot, info) && info.alive);
+	float nearestInterior = std::numeric_limits<float>::max();
+	for (uint32_t id : interiors) {
+		const world::Object* point = level.objects.find(id);
+		if (point) {
+			nearestInterior = std::min(nearestInterior, std::sqrt(physics::lengthSquared(info.position - physics::Vec3 {point->position().x, point->position().y, point->position().z})));
+		}
+	}
+	CHECK(nearestInterior < 2.0f);
+
+	const int invalid = level.world->addPlayer("Invalid Titan deploy", ownTeam, true);
+	level.world->setSpawnTitan(invalid, 0xffffffffu);
+	CHECK(!level.world->spawnSoldier(invalid)); // no ground-spawn fallback for an invalid Titan choice
+	const game::GameWorld::TitanInfo* enemyTitan = level.titan(1);
+	const int enemy = level.world->addPlayer("Enemy Titan deploy", ownTeam, true);
+	CHECK(enemyTitan != nullptr);
+	if (enemyTitan) {
+		level.world->setSpawnTitan(enemy, enemyTitan->object);
+		CHECK(!level.world->spawnSoldier(enemy)); // enemy Titan choice is refused without a ground fallback
+	}
+	level.world->setGameMode("gpm_cq");
+	const int conquest = level.world->addPlayer("Conquest Titan deploy", ownTeam, true);
+	level.world->setSpawnTitan(conquest, ownTitan);
+	CHECK(!level.world->spawnSoldier(conquest)); // Conquest does not gain Titan deployment
 }
 
 // Minsk_Titan16 (gpm_ti 16): its own archives' Titans and silos
@@ -705,11 +637,13 @@ TEST(Titan_PodArrayDropsASoldier)
 	if (!gameDir) {
 		return;
 	}
-	TitanLevel level(gameDir, "Minsk", 48);
+	geom::GeometryTemplateManager geometries;
+	TitanLevel level(gameDir, "Minsk", 48, true, nullptr, false, &geometries);
 	if (!level.loaded) {
 		return;
 	}
-	const int bot = level.world->addPlayer("Pac", 1, false);
+	CHECK(level.world->spawnPlayer(1) != nullptr);
+	const int bot = level.world->localPlayer();
 	level.world->setSpawnChoice(bot, 501);
 	game::GameWorld::PlayerInfo info;
 	physics::Vec3 entry;
@@ -726,8 +660,39 @@ TEST(Titan_PodArrayDropsASoldier)
 	CHECK(level.world->titanPodEntry(bot, entry, radius));
 	level.world->playerInfo(bot, info);
 	CHECK(level.world->setSoldierPosition(info.soldier, entry));
+	// This fixture loads generic templates without the game's sound factory.
+	// Supply the sound child that activeSafe cannot create in that fixture.
+	if (!level.templates.find("S_e_POD_Launch_Start")) {
+		level.templates.registerType(0x7ffff1, "Sound");
+		level.templates.create("Sound", "S_e_POD_Launch_Start");
+	}
+	game::SoldierInput enterPod;
+	enterPod.use = true;
+	level.world->setInput(bot, enterPod);
+	level.run(0.1f);
+	CHECK(!level.world->ridingPod(bot));
+	level.world->takeEffectSounds();
 	CHECK(level.world->launchPod(bot));
+	const auto launchSounds = level.world->takeEffectSounds();
+	CHECK(std::any_of(launchSounds.begin(), launchSounds.end(), [](const auto& s) { return s.name == "S_e_POD_Launch_Start"; }));
 	CHECK(level.world->ridingPod(bot) && level.world->pods().size() == 1);
+	sound::SoundManager manager(nullptr, level.templates);
+	manager.registerTemplateType();
+	auto* ambient = dynamic_cast<sound::SoundObjectTemplate*>(level.templates.create(sound::SoundObjectTemplate::kClassId, "S_test_pod_Ambient"));
+	CHECK(ambient != nullptr);
+	if (ambient) ambient->setSoundFilenames("pod.wav");
+	// eu_pod0 references shared base-pod audio, rather than S_eu_pod0_*.
+	auto* podTemplate = level.templates.find("eu_pod0");
+	CHECK(podTemplate != nullptr);
+	if (podTemplate) podTemplate->children().push_back({"S_test_pod_Ambient"});
+	sound::GameSounds sounds(manager);
+	GameAudio audio(*level.world, level.objects, level.templates, manager, sounds, nullptr);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	audio.tick(camera);
+	CHECK(audio.listenerState().seat == "eu_pod0");
+	CHECK(audio.listenerState().ambient == "S_test_pod_Ambient");
+	CHECK(std::fabs(audio.listenerState().listenerObstruction - 0.01f) < 0.0001f);
 	float second = 0;
 	// Its keepUp ForceObject's couple (0x0062b750) holds it near upright in
 	// the air.
@@ -745,6 +710,8 @@ TEST(Titan_PodArrayDropsASoldier)
 		second, info.position.x, info.position.y, info.position.z, entry.x, entry.y, entry.z, tilt);
 	CHECK(tilt < 30);
 	CHECK(!level.world->ridingPod(bot) && info.alive && info.vehicle == 0);
+	audio.tick(camera);
+	CHECK(audio.listenerState().ambient.empty());
 	CHECK(info.position.y < 200); // down from the Titan's 287 to the ground
 }
 
@@ -767,7 +734,7 @@ TEST(Titan_GunSeatsAreMannedAndFire)
 	const uint32_t eu = level.world->titanOf(2);
 	CHECK(eu != 0);
 	const std::vector<game::GameWorld::SeatLayout> seats = level.world->vehicleSeats(eu);
-	CHECK(seats.size() == 6);
+	CHECK(seats.size() == 8);
 	int ground = -1, aa = -1;
 	for (size_t i = 0; i < seats.size(); ++i) {
 		std::fprintf(stderr, "  seat %zu %s: gun %s, frame %.0f, yaw %.0f..%.0f, pitch %.0f..%.0f\n", i, seats[i].name.c_str(),
@@ -808,21 +775,23 @@ TEST(Titan_GunSeatsAreMannedAndFire)
 	input.switchSeat = ground + 1;
 	level.world->setInput(gunner, input);
 	level.run(0.1f);
-	input = {};
-	input.turn = 500; // degrees this tick
-	level.world->setInput(gunner, input);
-	level.run(1);
+	// The bundles turn at their own speeds (stepGunner): lead the gun past
+	// its yaw limit, then down to -30.
+	const auto tick = [&](const game::SoldierInput& in) { level.world->setInput(gunner, in); level.run(1 / 30.0f); };
+	const auto gun = [&](float& y, float& p) { level.world->gunAim(eu, ground, y, p); };
+	float look = 0;
+	const float limit = seats[static_cast<size_t>(ground)].frameYaw + seats[static_cast<size_t>(ground)].maxYaw;
+	seataim::steerGun(tick, gun, look, limit + 20, NAN);
 	level.world->playerInfo(gunner, info);
 	CHECK(info.seat == ground);
 	float yaw = 0, pitch = 0;
 	CHECK(level.world->gunAim(eu, ground, yaw, pitch));
 	std::fprintf(stderr, "  rear ground cannon aim: yaw %.1f, pitch %.1f\n", yaw, pitch);
-	CHECK(std::fabs(std::remainder(yaw - (seats[static_cast<size_t>(ground)].frameYaw + seats[static_cast<size_t>(ground)].maxYaw), 360.0f)) < 0.5f);
-	input.turn = 0;
-	input.aimPitch = -30;
-	level.world->setInput(gunner, input);
-	level.run(0.1f);
-	CHECK(level.world->gunAim(eu, ground, yaw, pitch) && pitch == -30);
+	CHECK(std::fabs(std::remainder(yaw - limit, 360.0f)) < 0.5f);
+	seataim::steerGun(tick, gun, look, NAN, -30);
+	CHECK(level.world->gunAim(eu, ground, yaw, pitch) && std::fabs(pitch + 30) < 0.5f);
+	input = {};
+	input.aimPitch = look;
 	// Fire: its rounds leave backwards and down.
 	const size_t before = level.world->projectiles().size();
 	input.turn = 0;
@@ -852,10 +821,8 @@ TEST(Titan_GunSeatsAreMannedAndFire)
 }
 
 // The team forcefields (collisionGroups 0x100 the PAC Titan's own, 0x200
-// the EU Titan's): an object passes its own team's and meets the other's,
-// but the shipped fields' meshes carry no soldier LOD, so soldiers of both
-// teams walk through (a mesh without a soldier LOD stops no soldier) while
-// rounds meet them (their projectile LOD); the Titan's object spawners
+// the EU Titan's): an object passes its own team's and meets the other's.
+// The Titan's object spawners
 // (as_titan_ATSpawner / AGSpawner) and supply point are objects of their
 // own carried with it.
 TEST(Titan_ForcefieldsAndCarriedObjects)
@@ -891,7 +858,7 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 			};
 		walk(*object->objectTemplate(), physics::Mat3 {}, {}, 0);
 		CHECK(fields.size() == 1);
-		int blocked = 0, walked = 0;
+		int blocked = 0;
 		for (const physics::Vec3& offset : fields) {
 			const physics::Vec3 at = titan.position + turn.transform(offset);
 			for (const physics::Vec3 axis : {physics::Vec3 {1, 0, 0}, physics::Vec3 {0, 0, 1}}) {
@@ -899,13 +866,12 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 					const physics::Vec3 a = at + turn.transform(axis * 3.0f + physics::Vec3 {0, up, 0});
 					const physics::Vec3 b = at + turn.transform(axis * -3.0f + physics::Vec3 {0, up, 0});
 					blocked += level.world->lineOfSight(a, b) ? 0 : 1;
-					walked += level.world->soldierPathClear(1, a, b) == level.world->soldierPathClear(2, a, b) ? 1 : 0;
 				}
 			}
 		}
-		std::fprintf(stderr, "  %s Titan's spawn room field: %d of 6 ways stop rounds, %d the same for both teams' soldiers\n",
-			team == 1 ? "PAC" : "EU", blocked, walked);
-		CHECK(blocked > 0 && walked == 6);
+		std::fprintf(stderr, "  %s Titan's spawn room field: %d of 6 ways stop rounds\n",
+			team == 1 ? "PAC" : "EU", blocked);
+		CHECK(blocked > 0);
 	}
 	// The carried objects: two spawners and a supply point.
 	const auto pac = *level.titan(1);
@@ -930,6 +896,177 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 	for (size_t i = 0; i < carried.size(); ++i) {
 		const world::Object* o = level.objects.find(carried[i]);
 		CHECK(o && std::fabs(o->position().x - before[i].x - dx) < 0.01f && std::fabs(o->position().z - before[i].z - dz) < 0.01f);
+	}
+}
+
+TEST(Titan_InteriorFieldCollisionUsesTeamAndRetailLod)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		for (int team = 1; team <= 2; ++team) {
+			const auto* titan = level.titan(team);
+			CHECK(titan != nullptr);
+			if (!titan) continue;
+			const world::Object* root = level.objects.find(titan->object);
+			const physics::Mat3 rootRotation = physics::Mat3::fromYawPitchRoll(
+				{root->rotation().x, root->rotation().y, root->rotation().z});
+			int fields = 0, verified = 0;
+			struct Probe { uint32_t console; physics::Vec3 from, to; };
+			std::vector<Probe> consoleProbes;
+			const auto parts = level.world->titanParts(team);
+			std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int, uint32_t)> visit;
+			visit = [&](const world::ObjectTemplate& t, const physics::Mat3& rotation, const physics::Vec3& position, int depth, uint32_t console) {
+				if (depth > 8) return;
+				for (const auto& part : parts) if (part.kind == game::GameWorld::TitanPartInfo::Console && part.name == t.name()) {
+					console = part.id;
+				}
+				const auto groups = t.settings().find("collisionGroups");
+				if (groups != t.settings().end() && (std::atoi(groups->second.c_str()) & 0x300)
+					&& t.name().find("forcefield_corridor") != std::string::npos) {
+					++fields;
+					const std::string file = t.creationFile();
+					const size_t slash = file.find_last_of("/\\");
+					const auto* mesh = level.collisionTemplates.mesh(t.name(), level.files,
+						slash == std::string::npos ? "" : file.substr(0, slash + 1));
+					CHECK(mesh != nullptr);
+					if (mesh) {
+						const auto* sub = physics::collisionPart(*mesh, 0);
+						const auto* lod = sub ? physics::collisionLodFor(*mesh, *sub, 2) : nullptr;
+						CHECK(lod != nullptr);
+						bool found = false;
+						if (lod) for (const auto& face : lod->faces) {
+							const auto& a = lod->vertices[face.vertices[0]];
+							const auto& b = lod->vertices[face.vertices[1]];
+							const auto& c = lod->vertices[face.vertices[2]];
+							physics::Vec3 va {a[0], a[1], a[2]}, vb {b[0], b[1], b[2]}, vc {c[0], c[1], c[2]};
+							physics::Vec3 normal = physics::cross(vc - vb, vb - va);
+							const float len = std::sqrt(physics::lengthSquared(normal));
+							if (len < 1e-5f) continue;
+							normal = rootRotation.transform(rotation.transform(normal * (0.2f / len)));
+							const physics::Vec3 center = titan->position + rootRotation.transform(position + rotation.transform((va + vb + vc) * (1.0f / 3)));
+							const auto from = center - normal, to = center + normal;
+							if (level.world->soldierPathClear(team, from, to)
+								&& !level.world->soldierPathClear(3 - team, from, to)) {
+								found = true;
+								if (console) consoleProbes.push_back({console, from, to});
+								break;
+							}
+						}
+						if (found) ++verified;
+					}
+				}
+				for (const auto& child : t.children()) if (const auto* c = level.templates.find(child.name)) {
+					visit(*c, physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * rotation,
+						position + rotation.transform({child.position.x, child.position.y, child.position.z}), depth + 1, console);
+				}
+			};
+			visit(*root->objectTemplate(), {}, {}, 0, 0);
+			std::fprintf(stderr, "  %s team %d corridor fields %d, team-filtered %d\n", mod, team, fields, verified);
+			CHECK(fields > 0 && verified == fields);
+			CHECK(!consoleProbes.empty());
+			for (const auto& probe : consoleProbes) level.world->setHitPoints(probe.console, 0);
+			level.run(0.2f);
+			for (const auto& probe : consoleProbes) CHECK(level.world->soldierPathClear(3 - team, probe.from, probe.to));
+		}
+	}
+}
+
+// The Titan's outer shield (as_titan_forcefield / eu_forcefield) is death
+// material 0x29a: an enemy soldier or gunship touching it while it stands
+// dies; the Titan's own team passes it, and a wrecked shield is gone. (From
+// the 8 Nov log: a pilot left a gunship that sat on the enemy shield and
+// walked its dome.)
+TEST(Titan_OuterShieldKillsEnemies)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const int shieldDown : {0, 1}) {
+			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			const auto titan = *level.titan(1);
+			const world::Object* object = level.objects.find(titan.object);
+			const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+			const auto local = [&](float y) { return titan.position + turn.transform({0, y, -30}); };
+			float dome = -1; // the shield's top over the rear deck, from the enemy's mesh
+			for (float y = 40; y > 0; y -= 0.25f) {
+				if (!level.world->soldierPathClear(2, local(y + 0.25f), local(y))) { dome = y; break; }
+			}
+			CHECK(dome > 0);
+			if (shieldDown) {
+				level.world->setHitPoints(titan.object, 6e6f * 0.59f);
+				level.run(0.5f);
+			}
+			int enemy = -1, own = -1;
+			for (const int team : {2, 1}) {
+				const int id = level.world->addPlayer("Walker", team, true);
+				CHECK(level.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo info;
+				level.world->playerInfo(id, info);
+				// Set down on the dome, a half metre over it; the own team's is 10 m aside.
+				CHECK(level.world->setSoldierPosition(info.soldier, local(dome + 0.5f) + (team == 1 ? turn.transform({10, 0, 0}) : physics::Vec3 {})));
+				(team == 2 ? enemy : own) = id;
+			}
+			// An enemy gunship set down on the dome (retail 0x005c72f0: 1e10 on
+			// the death material, unscaled by the material table).
+			const physics::Vec3 aside = titan.position + turn.transform({-14, dome + 2, -30});
+			world::ObjectTemplate* gunship = level.templates.find("us_ag");
+			CHECK(gunship != nullptr);
+			world::Object* craft = gunship ? level.objects.create(gunship, {aside.x, aside.y, aside.z}, {0, 0, 0}) : nullptr;
+			const uint32_t craftId = craft ? craft->id() : 0;
+			if (craft) craft->setTeam(2);
+			level.run(2);
+			const float craftHp = level.world->hitPoints(craftId);
+			std::fprintf(stderr, "  %s shield %s: enemy gunship hp %.0f\n", mod, shieldDown ? "down" : "up", craftHp);
+			CHECK(shieldDown ? craftHp > 0 : craftHp < 0);
+			game::GameWorld::PlayerInfo e, o;
+			level.world->playerInfo(enemy, e);
+			level.world->playerInfo(own, o);
+			std::fprintf(stderr, "  %s shield %s: enemy soldier %s, own soldier %s\n", mod, shieldDown ? "down" : "up",
+				e.alive ? "alive" : "dead", o.alive ? "alive" : "dead");
+			CHECK(shieldDown ? e.alive : !e.alive);
+			CHECK(o.alive);
+		}
+	}
+}
+
+// A walker's leg sphere reaches below its hull box. That additional
+// contact must still honor the outer shield's team filtering.
+TEST(Titan_WalkerLegsRespectOuterShieldTeam)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (int team : {1, 2}) {
+			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			const auto titan = *level.titan(1);
+			const auto* ship = level.objects.find(titan.object);
+			const auto turn = physics::Mat3::fromYawPitchRoll({ship->rotation().x, ship->rotation().y, ship->rotation().z});
+			const auto local = [&](float y) { return titan.position + turn.transform({0, y, -30}); };
+			float dome = -1;
+			for (float y = 40; y > 0; y -= 0.25f) {
+				if (!level.world->soldierPathClear(2, local(y + 0.25f), local(y))) { dome = y; break; }
+			}
+			CHECK(dome > 0);
+			const auto at = local(dome + 3.2f);
+			auto* t = level.templates.find("us_heavy_mech");
+			CHECK(t);
+			if (!t || dome <= 0) continue;
+			auto* walker = level.objects.create(t, {at.x, at.y, at.z});
+			walker->setTeam(team);
+			const auto id = walker->id();
+			level.run(0.3f);
+			const float hp = level.world->hitPoints(id);
+			std::fprintf(stderr, "  %s walker team %d shield health %.0f\n", mod, team, hp);
+			CHECK(team == 1 ? hp > 0 : hp < 0);
+		}
 	}
 }
 
@@ -978,6 +1115,60 @@ TEST(Titan_BotsManHalfTheGuns)
 	}
 	std::fprintf(stderr, "  of 6 bots aboard: %d at the guns, %d on foot aboard\n", gunners, aboard);
 	CHECK(gunners >= 1 && gunners <= 3);
+}
+
+// On Suez gpm_ti the generic SAI fallback also contains the two
+// non-capturable Titan control points. An on-foot bot should be routed to a
+// live silo instead of treating a Titan marker as a capture objective.
+TEST(Titan_BotsChooseCapturableSilos)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48);
+	if (!level.loaded) {
+		return;
+	}
+	for (const game::GameWorld::TitanInfo& titan : level.world->titans()) {
+		CHECK(menu::titanHudHealth(titan) == 100);
+	}
+	std::vector<uint8_t> qtr, clb;
+	CHECK(level.files.readFile("Levels/Suez_Canal/AIPathFinding/Infantry.qtr", qtr));
+	CHECK(level.files.readFile("Levels/Suez_Canal/AIPathFinding/Infantry.clb", clb));
+	const auto mesh = ai::parseNavMesh(qtr, clb);
+	CHECK(mesh.has_value());
+	if (!mesh) {
+		return;
+	}
+	game::BotManager bots(*level.world, {});
+	bots.setNavMesh(&*mesh);
+	const int id = level.world->addPlayer("SiloBot", 2, true);
+	CHECK(level.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo self;
+	CHECK(level.world->playerInfo(id, self) && self.alive && !self.vehicle);
+	CHECK(level.world->setSoldierPosition(self.soldier,
+		{357.9f, level.world->terrainHeight(357.9f, 49.4f) + 1.0f, 49.4f}));
+	bots.update(1 / 30.0f);
+	const std::vector<physics::Vec3> route = bots.route(id);
+	CHECK(!route.empty());
+	if (route.empty()) {
+		return;
+	}
+	const physics::Vec3 target = route.back();
+	bool siloTarget = false;
+	for (const game::GameWorld::SiloInfo& silo : level.world->missileSilos()) {
+		if (silo.team == 2) {
+			continue;
+		}
+		for (const game::GameWorld::ControlPointInfo& point : level.world->controlPointList()) {
+			const float dx = point.position.x - target.x, dz = point.position.z - target.z;
+			if (point.id == silo.controlPoint && point.capturable && dx * dx + dz * dz <= point.radius * point.radius) {
+				siloTarget = true;
+			}
+		}
+	}
+	CHECK(siloTarget);
 }
 
 // 0x004bbf60's tail / 0x006f2b00: a PAC soldier inside EU's Titan's
@@ -1198,74 +1389,52 @@ TEST(Titan_PodSeatsChangeToTheTitanPodNearATitan)
 	}
 }
 
-// The air transports' seats (eu_at's pilot, gunners and passengers:
-// exitThroughPodLauncher, each with an air_pod_launcher on PIFire): the
-// exit key fires the seat's pod launcher whatever its input (0x004bda00
-// mask 0x400 -> event 6), and so does the fire button, the launcher's
-// round being the pod (eu_pod_drop, enterOnSpawn) that seats the soldier
-// who fired it: either way the soldier leaves in a pod, not in the air.
-TEST(Titan_AirTransportSeatsLaunchPods)
+// A real APC pod dropped onto the friendly Suez Titan's upper deck. The
+// pod must eject on contact and disappear shortly afterwards, without waiting
+// for world-space velocity to settle on the Titan.
+TEST(Titan_ApcPodLandsAndDisappearsOnDeck)
 {
-	const char* gameDir = std::getenv("BF2142_GAME_DIR");
-	if (!gameDir) {
-		return;
-	}
-	TitanLevel level(gameDir, "Minsk", 48);
-	if (!level.loaded || !level.templates.find("eu_at") || !level.templates.find("eu_pod_drop")) {
-		return;
-	}
-	level.run(0.5f);
-	for (const bool exitKey : {true, false}) {
-		const float x = exitKey ? 0.0f : 60.0f, z = 0;
-		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + 3.0f, z});
-		at->setTeam(2);
-		level.run(2 / 30.0f);
-		const int player = level.world->addPlayer(exitKey ? "Exit" : "Fire", 2, false);
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+		CHECK(level.loaded && level.titan(2) && level.templates.find("eu_apc_pods"));
+		if (!level.loaded || !level.titan(2) || !level.templates.find("eu_apc_pods")) return;
+		const auto titan = *level.titan(2);
+		const world::Object* hull = level.objects.find(titan.object);
+		const physics::Mat3 frame = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
+		const physics::Vec3 at = titan.position + frame.transform({0, 35, -20});
+		world::Object* apc = level.objects.create(level.templates.find("eu_apc_pods"), {at.x, at.y, at.z});
+		apc->setTeam(2);
+		const uint32_t apcId = apc->id();
+		level.run(1 / 30.0f);
+		const int player = level.world->addPlayer("Pod rider", 2, false);
+		level.world->setSpawnVehicle(player, apcId);
 		CHECK(level.world->spawnSoldier(player));
-		// In at its entry point (the use key's reach).
-		physics::Vec3 entry;
-		CHECK(level.world->entryPoint(at->id(), entry));
-		game::GameWorld::PlayerInfo info;
-		level.world->playerInfo(player, info);
-		level.world->setSoldierPosition(info.soldier, {entry.x, entry.y - 1.0f, entry.z});
-		game::SoldierInput use;
-		use.use = true;
-		level.world->setInput(player, use);
-		level.run(1 / 30.0f);
-		level.world->setInput(player, {});
-		level.run(1 / 30.0f);
-		// A passenger's seat (eu_at_Passenger2_Left..).
+		const auto seats = level.world->vehicleSeats(apcId);
 		int seat = -1;
-		const auto seats = level.world->vehicleSeats(at->id());
-		for (size_t i = 0; i < seats.size() && seat < 0; ++i) {
+		for (size_t i = 0; i < seats.size(); ++i) {
 			std::string name = seats[i].name;
 			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			seat = name.find("passenger") != std::string::npos ? static_cast<int>(i) : -1;
+			if (name.find("podcannon") != std::string::npos) { seat = static_cast<int>(i); break; }
 		}
 		CHECK(seat > 0);
-		game::SoldierInput input;
-		input.switchSeat = seat + 1;
-		level.world->setInput(player, input);
-		level.run(1 / 30.0f);
-		level.world->setInput(player, {});
-		level.run(1 / 30.0f);
-		CHECK(level.world->playerInfo(player, info) && info.vehicle == at->id() && info.seat == seat);
-		game::SoldierInput leave;
-		leave.use = exitKey;
-		leave.fire = !exitKey;
-		level.world->setInput(player, leave);
-		level.run(1 / 30.0f);
-		level.world->setInput(player, {});
-		level.run(1 / 30.0f);
-		std::string pod;
-		for (const auto& p : level.world->pods()) {
-			if (p.player == player) {
-				const world::Object* o = level.objects.find(p.object);
-				pod = o && o->objectTemplate() ? o->objectTemplate()->name() : "";
-			}
-		}
-		std::fprintf(stderr, "  %s: %s\n", exitKey ? "the exit key" : "fire", pod.c_str());
-		CHECK(pod == "eu_pod_drop");
+		game::SoldierInput input; input.switchSeat = seat + 1;
+		level.world->setInput(player, input); level.run(1 / 30.0f);
+		level.world->setInput(player, {}); level.run(1 / 30.0f);
+		CHECK(level.world->launchPod(player));
+		CHECK(!level.world->pods().empty());
+		if (level.world->pods().empty()) return;
+		const uint32_t pod = level.world->pods().back().object;
+		CHECK(level.world->setBodyVelocity(pod, {0, -15, 0}));
+		int ticks = 0;
+		while (ticks < 180 && level.world->ridingPod(player)) { level.run(1 / 30.0f); ++ticks; }
+		game::GameWorld::PlayerInfo info; level.world->playerInfo(player, info);
+		std::fprintf(stderr, "  %s: rider left after %.2f s at y %.1f (Titan %.1f)\n", mod, ticks / 30.0f, info.position.y, titan.position.y);
+		CHECK(!level.world->ridingPod(player) && info.alive && info.vehicle == 0);
+		CHECK(info.position.y > titan.position.y + 3 && info.position.y < titan.position.y + 18);
+		level.run(0.3f);
+		CHECK(level.objects.find(pod) == nullptr);
 	}
 }
 
@@ -1354,6 +1523,2307 @@ TEST(Titan_FallingBotOpensItsParachute)
 	CHECK(info.position.y < pac.position.y - 100); // on the ground
 }
 
+// The gunship a Titan's AGSpawner holds (holdObject) is a stopped node, not a
+// heavy moving object: a soldier running into it is neither squashed nor run
+// over (1000 damage, no attacker: "is no more").
+TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48);
+	if (!level.loaded) {
+		return;
+	}
+	const int team = 2; // the human player's side in the reported session (--play 2)
+	const auto titan = *level.titan(team);
+	CHECK(level.world->moveTitan(team, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	level.run(5);
+	uint32_t ag = 0;
+	for (const auto& object : level.objects.objects()) {
+		const std::string& name = object->objectTemplate() ? object->objectTemplate()->name() : std::string();
+		if (name.size() == 5 && name.substr(2) == "_ag") {
+			ag = object->id();
+		}
+	}
+	CHECK(ag != 0);
+	if (!ag) {
+		return;
+	}
+	int deaths = 0, tries = 0;
+	// Soldiers running at the held gunship from the -z side (yaw 0 faces +z).
+	for (float dx = -6; dx <= 6; dx += 1.0f) {
+		for (const bool sprint : {false, true}) {
+			const int runner = level.world->addPlayer("Runner", titan.team, false);
+			level.world->setSpawnTitan(runner, titan.object);
+			if (!level.world->spawnSoldier(runner)) {
+				continue;
+			}
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(runner, info);
+			const world::Vec3 at = level.objects.find(ag)->position();
+			level.world->setSoldierPosition(info.soldier, {at.x + dx, 159.95f, at.z - 10});
+			level.run(0.5f); // settles on the deck
+			game::SoldierInput run;
+			run.throttle = 1;
+			run.sprint = sprint;
+			level.world->setInput(runner, run);
+			++tries;
+			level.run(4);
+			level.world->setInput(runner, {});
+			level.world->playerInfo(runner, info);
+			if (!info.alive) {
+				++deaths;
+				std::fprintf(stderr, "  died running at x offset %.1f%s\n", dx, sprint ? " sprinting" : "");
+			}
+		}
+	}
+	std::fprintf(stderr, "  %d of %d died\n", deaths, tries);
+	CHECK(deaths == 0);
+}
+
+// A pilot in the held gunship of a moving Titan's AGSpawner starts the
+// engine: the hold lets go at 0.1 rpm.
+static void heldGunshipReleasesIntact(const char* mod)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+	if (!level.loaded) {
+		return;
+	}
+	const int team = 2;
+	const auto titan = *level.titan(team);
+	CHECK(level.world->moveTitan(team, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	level.run(5);
+	uint32_t ag = 0;
+	for (const auto& object : level.objects.objects()) {
+		const std::string& name = object->objectTemplate() ? object->objectTemplate()->name() : std::string();
+		if (name.size() == 5 && name.substr(2) == "_ag") {
+			ag = object->id();
+		}
+	}
+	CHECK(ag != 0);
+	if (!ag) {
+		return;
+	}
+	const int pilot = level.world->addPlayer("Pilot", titan.team, false);
+	level.world->setSpawnTitan(pilot, titan.object);
+	CHECK(level.world->spawnSoldier(pilot));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(pilot, info);
+	const world::Vec3 at = level.objects.find(ag)->position();
+	level.world->setSoldierPosition(info.soldier, {at.x, at.y, at.z - 4});
+	level.run(0.5f);
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(pilot, use);
+	level.run(0.1f);
+	level.world->setInput(pilot, {});
+	level.run(0.5f);
+	level.world->playerInfo(pilot, info);
+	CHECK(info.vehicle == ag);
+	const auto holding = [&] {
+		for (const auto& s : level.world->spawners()) {
+			if (s->lastSpawned() == ag) {
+				return s->holding();
+			}
+		}
+		return false;
+	};
+	CHECK(holding());
+	const float y0 = level.objects.find(ag)->position().y;
+	// The engine starts with the pilot aboard: the rotor reaches 0.1 rpm in
+	// under a second and the hold lets go, the gunship at rest on the Titan
+	// (its wheels' springs not kicking it off the deck).
+	level.run(1);
+	CHECK(!holding());
+	CHECK(level.world->hitPoints(ag) > 900);
+	// Full throttle: it lifts off the moving Titan.
+	game::SoldierInput fly;
+	fly.throttle = 1;
+	level.world->setInput(pilot, fly);
+	level.run(5);
+	level.world->playerInfo(pilot, info);
+	const float y1 = level.objects.find(ag)->position().y;
+	std::fprintf(stderr, "  y %.2f (held at %.2f), pilot alive %d in vehicle %d, hp %.0f, rpm %.2f\n", y1, y0, info.alive,
+		info.vehicle == ag, level.world->hitPoints(ag), level.world->vehicle(ag)->rpm());
+	CHECK(info.alive && info.vehicle == ag);
+	CHECK(level.world->hitPoints(ag) > 900);
+	CHECK(y1 > y0 + 3);
+}
+
+TEST(Titan_HeldGunshipReleasesIntact)
+{
+	heldGunshipReleasesIntact(nullptr);
+}
+
+TEST(Titan_HeldGunshipReleasesIntactRemaster)
+{
+	heldGunshipReleasesIntact("mods/Project_Remaster_v17_Final");
+}
+
+// A walker crossing a Suez canal bridge. The legs' contacts with the deck are
+// the legs' own record, solved without friction like the ground's (0x006ce740;
+// the response's generic slot 0x2c is a bare return): through the generic
+// friction a walker falling gravityModifier 4 onto the deck had 0.8 of its
+// approach braked off its forward speed each tick (7.4 m/s to 1.5) and
+// jittered, taking the bridge at a crawl. And the feet's probes (0x00650e90)
+// meet the objects' meshes after the heightmap: over a deck both feet were
+// "off the ground" and the walker was pushed sideways by 30 until it fell in.
+struct BridgeCrossing {
+	float x, z, yaw, deckY;
+	float from = 55, to = 40; // metres before the middle to start at, after it to reach
+	float lateral = 0;        // metres to the right of the bridge's axis (the lane)
+};
+
+static void walkerCrossesBridge(const char* mod, const char* tmpl, const BridgeCrossing& bridge, bool sprint, bool steering = false, bool survey = false, bool crowded = false, bool requireSmooth = false)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
+	if (!level.loaded || !level.templates.find(tmpl)) {
+		return;
+	}
+	const float rad = bridge.yaw * 3.14159265f / 180;
+	const float dx = std::sin(rad), dz = std::cos(rad);
+	const float from = bridge.from; // the approach road, short of the bridge
+	const float x = bridge.x - dx * from, z = bridge.z - dz * from;
+	world::Object* walker = level.objects.create(level.templates.find(tmpl), {x, level.world->terrainHeight(x, z) + 6, z}, {bridge.yaw, 0, 0});
+	walker->setTeam(2);
+	if (crowded) {
+		// An occupied-looking obstruction in the lane: this tests collision
+		// response, not the bot path planner or the screenshot's exact state.
+		world::Object* blocker = level.objects.create(level.templates.find("us_heavy_mech"),
+			{bridge.x, bridge.deckY + 4, bridge.z}, {bridge.yaw, 0, 0});
+		blocker->setTeam(2);
+	}
+	level.run(2);
+	const int player = level.world->addPlayer("Walker", 2, false);
+	CHECK(level.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(player, info);
+	const world::Vec3 at = walker->position();
+	level.world->setSoldierPosition(info.soldier, {at.x + dx * 1.5f, level.world->terrainHeight(at.x, at.z), at.z + dz * 1.5f});
+	level.run(0.5f);
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(player, use);
+	level.run(0.2f);
+	level.world->setInput(player, {});
+	level.run(0.5f);
+	level.world->playerInfo(player, info);
+	CHECK(info.vehicle == walker->id());
+	game::SoldierInput drive;
+	drive.throttle = 1;
+	drive.sprint = sprint;
+	float lowestOnDeck = 1e9f, highestOnDeck = -1e9f, maxTickRise = 0, maxTickFall = 0, along = -from;
+	float previousY = walker->position().y, riseAt = 0, fallAt = 0;
+	float maxYawDelta = 0;
+	const float initialYaw = walker->rotation().x;
+	int samples = 0;
+	const float hp = level.world->hitPoints(walker->id());
+	for (int i = 0; i < static_cast<int>(30 * (from + bridge.to) / 5) && along < bridge.to; ++i) {
+		// Small alternating steering pulses exercise seams without a long
+		// open-loop turn carrying the vehicle into a railing.
+		drive.strafe = steering ? ((i / 6) % 2 == 0 ? 0.2f : -0.2f) : 0;
+		level.world->setInput(player, drive);
+		level.world->tick(1 / 30.0f);
+		const world::Vec3 p = walker->position();
+		along = (p.x - bridge.x) * dx + (p.z - bridge.z) * dz;
+		if (std::getenv("BF2142_BRIDGE_TRACE") && mod && bridge.x == 65 && !sprint && !steering && !crowded && std::fabs(along) < 5) {
+			float vy = 0;
+			for (const auto& v : level.world->vehicleList()) if (v.object == walker->id()) vy = v.velocity.y;
+			std::fprintf(stderr, "  BRIDGETICK tick=%d along=%.3f y=%.4f dy=%+.4f vy=%+.4f hp=%.1f\n",
+				i, along, p.y, p.y - previousY, vy, level.world->hitPoints(walker->id()));
+
+		}
+		if (std::fabs(along) < 15 || (bridge.from > 100 && !requireSmooth)) {
+			lowestOnDeck = std::min(lowestOnDeck, p.y);
+			highestOnDeck = std::max(highestOnDeck, p.y);
+			if (p.y - previousY > maxTickRise) { maxTickRise = p.y - previousY; riseAt = along; }
+			if (previousY - p.y > maxTickFall) { maxTickFall = previousY - p.y; fallAt = along; }
+			maxYawDelta = std::max(maxYawDelta, std::fabs(std::remainder(walker->rotation().x - initialYaw, 360.0f)));
+			++samples;
+		}
+		previousY = p.y;
+	}
+	std::fprintf(stderr, "  %s %s steering=%d crowded=%d at %.0f %.0f: along %.1f y-range %.3f..%.3f peak tick rise %.3f at %.1f fall %.3f at %.1f yaw-change %.2f samples %d hp %.0f/%.0f\n", mod ? "remaster" : "vanilla",
+		tmpl, steering, crowded, bridge.x, bridge.z, along, lowestOnDeck, highestOnDeck, maxTickRise, riseAt, maxTickFall, fallAt, maxYawDelta, samples, level.world->hitPoints(walker->id()), hp);
+	CHECK(samples > 0);
+	if (requireSmooth) {
+		// More than 5 cm in a 1/30-second tick is a visible jump on this
+		// level deck. This catches the 16 cm alternating contact dropout.
+		CHECK(maxTickRise < 0.05f);
+		CHECK(maxTickFall < 0.05f);
+	}
+	if (!survey) {
+		CHECK(along >= bridge.to);
+		CHECK(lowestOnDeck > bridge.deckY + 2.0f);
+		CHECK(level.world->hitPoints(walker->id()) >= hp);
+	}
+}
+
+struct WalkResult {
+	bool entered = false;
+	float along = 0, lowest = 1e9f, hp = 0, hp0 = 0;
+	float stuckAlong = 1e9f, stuckLateral = 0; // where it stopped for over a second short of the far side
+	world::Vec3 stuckAt;
+};
+
+// One walker driven over `bridge` on its lane in an already loaded level; the
+// walker is removed after, so the level serves the whole sweep.
+static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCrossing& bridge, bool sprint)
+{
+	WalkResult r;
+	const float rad = bridge.yaw * 3.14159265f / 180;
+	const float dx = std::sin(rad), dz = std::cos(rad);
+	const float from = bridge.from; // the approach road, short of the bridge
+	const float x = bridge.x - dx * from + dz * bridge.lateral, z = bridge.z - dz * from - dx * bridge.lateral;
+	world::Object* walker = level.objects.create(level.templates.find(tmpl), {x, level.world->terrainHeight(x, z) + 6, z}, {bridge.yaw, 0, 0});
+	walker->setTeam(2);
+	level.run(2);
+	const int player = level.world->addPlayer("Walker", 2, false);
+	CHECK(level.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(player, info);
+	const world::Vec3 at = walker->position();
+	level.world->setSoldierPosition(info.soldier, {at.x + dx * 1.5f, level.world->terrainHeight(at.x, at.z), at.z + dz * 1.5f});
+	level.run(0.5f);
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(player, use);
+	level.run(0.2f);
+	level.world->setInput(player, {});
+	level.run(0.5f);
+	level.world->playerInfo(player, info);
+	r.entered = info.vehicle == walker->id();
+	game::SoldierInput drive;
+	drive.throttle = 1;
+	drive.sprint = sprint;
+	r.along = -from;
+	r.hp0 = level.world->hitPoints(walker->id());
+	world::Vec3 window[30] = {};
+	for (int i = 0; i < static_cast<int>(30 * (from + bridge.to) / 5) && r.along < bridge.to; ++i) {
+		level.world->setInput(player, drive);
+		level.world->tick(1 / 30.0f);
+		const world::Vec3 p = walker->position();
+		r.along = (p.x - bridge.x) * dx + (p.z - bridge.z) * dz;
+		if (std::fabs(r.along) < 15 || bridge.from > 100) {
+			r.lowest = std::min(r.lowest, p.y); // the heightmap is the canal bed far below
+		}
+		// Stopped: under 1 m moved in the last second, short of the far side.
+		const world::Vec3 old = window[i % 30];
+		window[i % 30] = p;
+		if (i >= 90 && r.stuckAlong > 1e8f && r.along < bridge.to && std::hypot(p.x - old.x, p.z - old.z) < 1.0f) {
+			r.stuckAlong = r.along;
+			r.stuckAt = p;
+		}
+	}
+	r.hp = level.world->hitPoints(walker->id());
+	level.world->setInput(player, {});
+	level.objects.remove(walker->id());
+	level.run(0.2f);
+	return r;
+}
+
+// The sweep: the Suez bridges both ways across the deck's lanes (the 12 m deck
+// of bridge_industrial_01_c and the big road's two spans, whose joint at x -245
+// was where a walker stopped: the hull's points against the rails and the
+// seam's end faces braked it, which retail's walker response never takes,
+// 0x00854170). Lanes within 6 m of the axis; the vanilla mech in vanilla, the
+// Remaster's in Remaster. WALKER_SWEEP=1 logs every lane to 9 m, both mechs,
+// walking and sprinting, and where each stopped.
+TEST(Titan_WalkerSweepsTheSuezBridges)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	const bool all = std::getenv("WALKER_SWEEP") != nullptr;
+	struct Span {
+		float x, z, yaw, deckY, from, to;
+	};
+	const Span spans[] = {{65, -36, 90, 47.2f, 55, 40}, {-512, -36, 90, 47.2f, 55, 40}, {-99, -128, 0, 47.2f, 55, 40},
+		{-245, -32, 90, 50.8f, 175, 130}};
+	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
+		if (!level.loaded) {
+			continue;
+		}
+		for (const char* tmpl : {"us_heavy_mech", "as_heavy_mech"}) {
+			if (!level.templates.find(tmpl) || (!all && (tmpl[0] == 'u') != (mod == nullptr))) {
+				continue;
+			}
+			for (const Span& span : spans) {
+				for (const bool back : {false, true}) {
+					int index = 0;
+					for (const float lane : {-9.0f, -6.0f, -3.0f, 0.0f, 3.0f, 6.0f, 9.0f}) {
+						++index;
+						for (const bool sprint : {false, true}) {
+							if (!all && (std::fabs(lane) > 6 || sprint != (index & 1))) {
+								continue;
+							}
+							BridgeCrossing b {span.x, span.z, span.yaw + (back ? 180.0f : 0.0f), span.deckY, span.from, span.to, lane};
+							const WalkResult r = walkBridge(level, tmpl, b, sprint);
+							const bool crossed = r.along >= span.to && r.lowest > span.deckY + 2.0f;
+							if (all) {
+								std::fprintf(stderr, "SWEEP %s %s span(%.0f,%.0f) %s lane %+.0f %s: along %.1f lowest %.1f %s", mod ? "rem" : "van",
+									tmpl, span.x, span.z, back ? "back" : "fwd", lane, sprint ? "sprint" : "walk", r.along, r.lowest,
+									crossed ? "CROSSED" : "SHORT");
+								if (r.stuckAlong < 1e8f) {
+									std::fprintf(stderr, " stuck at along %.1f pos %.1f %.1f %.1f", r.stuckAlong, r.stuckAt.x, r.stuckAt.y, r.stuckAt.z);
+								}
+								std::fprintf(stderr, "\n");
+							} else {
+								if (!crossed) {
+									std::fprintf(stderr, "  %s %s span(%.0f,%.0f) %s lane %+.0f: along %.1f lowest %.1f stuck at %.1f %.1f %.1f\n",
+										mod ? "rem" : "van", tmpl, span.x, span.z, back ? "back" : "fwd", lane, r.along, r.lowest,
+										r.stuckAt.x, r.stuckAt.y, r.stuckAt.z);
+								}
+								CHECK(crossed);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// A walker against a prop on level ground: how far along it gets in 8 s.
+static float walkerAgainstProp(const char* prop, float yaw, float sink = 0)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return 1e9f;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, false, nullptr, false);
+	if (!level.loaded || !level.templates.find("us_heavy_mech") || !level.templates.find(prop)) {
+		return 1e9f;
+	}
+	// A flat 60 m run along x on the canal's west plain.
+	float fx = 0, fz = 0;
+	bool found = false;
+	for (float z = -400; z < 400 && !found; z += 10) {
+		for (float x = -700; x < 700 && !found; x += 10) {
+			float lo = 1e9f, hi = -1e9f;
+			for (float d = 0; d <= 60; d += 2) {
+				for (float w = -6; w <= 6; w += 6) {
+					const float h = level.world->terrainHeight(x + d, z + w);
+					lo = std::min(lo, h);
+					hi = std::max(hi, h);
+				}
+			}
+			if (hi - lo < 0.05f && lo > 5) {
+				fx = x, fz = z, found = true;
+			}
+		}
+	}
+	CHECK(found);
+	if (!found) {
+		return 1e9f;
+	}
+	const float y = level.world->terrainHeight(fx + 30, fz);
+	level.objects.create(level.templates.find(prop), {fx + 30, y - sink, fz}, {yaw, 0, 0});
+	world::Object* walker = level.objects.create(level.templates.find("us_heavy_mech"), {fx + 2, y + 6, fz}, {90, 0, 0});
+	walker->setTeam(2);
+	level.world->startRound();
+	level.run(2);
+	const int player = level.world->addPlayer("Walker", 2, false);
+	CHECK(level.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(player, info);
+	level.world->setSoldierPosition(info.soldier, {fx + 3.5f, y, fz});
+	level.run(0.5f);
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(player, use);
+	level.run(0.2f);
+	level.world->setInput(player, {});
+	level.run(0.5f);
+	level.world->playerInfo(player, info);
+	CHECK(info.vehicle == walker->id());
+	game::SoldierInput drive;
+	drive.throttle = 1;
+	for (int i = 0; i < 240; ++i) {
+		level.world->setInput(player, drive);
+		level.world->tick(1 / 30.0f);
+	}
+	return walker->position().x - (fx + 30);
+}
+
+// The legs' sphere (1.5 m at the foot, 0.0x006cec60) decides what a walker meets
+// on an object: a ledge low under the legs is climbed (the contact's push is
+// up), a wall at their height stops it. container_seald_b is 2.6 m of box,
+// sunk 2.2 m into the plain it leaves a 0.4 m ledge (under stepHeight 0.5).
+TEST(Titan_WalkerClimbsALedgeAndStopsAtAWall)
+{
+	const float ledge = walkerAgainstProp("container_seald_b", 0, 2.2f);
+	const float wall = walkerAgainstProp("container_seald_b", 0, 0);
+	std::fprintf(stderr, "  ledge: %.1f m past it, wall: %.1f m\n", ledge, wall);
+	if (ledge < 1e8f) {
+		CHECK(ledge > 20); // over the ledge and on at the free pace (29.7 m)
+		CHECK(wall < 0);   // held short of the wall (it stands at 0)
+	}
+}
+
+TEST(Titan_WalkerCrossesTheSuezBridges)
+{
+	// The canal bridges of StaticObjects.con: bridge_industrial_01_c (65, -36),
+	// (-512, -36) and (-99, -128), bc_big_bridge_a (-185, -32) and (-303, -32).
+	// Walking and sprinting, with the vanilla and the Remaster mech.
+	// The two bc_big_bridge_a spans are one road across the canal, driven on
+	// the lane at z -32 from the west bank to the east bank.
+	const BridgeCrossing bridges[] = {{65, -36, 90, 47.2f}, {-512, -36, 90, 47.2f}, {-99, -128, 0, 47.2f}, {-245, -32, 90, 50.8f, 175, 130}};
+	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		for (const BridgeCrossing& bridge : bridges) {
+			for (const bool sprint : {false, true}) {
+				walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
+			}
+		}
+	}
+}
+
+// Both shipped walker models must stay in contact with Suez bridge decks,
+// rather than alternate between the hull box and leg sphere.
+TEST(Titan_WalkerBridgeContactDoesNotOscillate)
+{
+	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech"}) {
+			for (const bool sprint : {false, true}) {
+				for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
+						 BridgeCrossing {-512, -36, 90, 47.2f}, BridgeCrossing {-99, -128, 0, 47.2f},
+						 BridgeCrossing {-245, -32, 90, 50.8f, 175, 130}})
+					walkerCrossesBridge(mod, vehicle, bridge, sprint, false, false, false, true);
+			}
+		}
+	}
+}
+
+// Record vertical movement and progress with more actual vehicles and small
+// steering inputs. This survey records evidence; it is not a retail-motion
+// acceptance threshold. The long bridge has joints, ramps and props.
+TEST(Titan_SuezBridgeMotionSurvey)
+{
+    const BridgeCrossing bridge {-245, -32, 90, 50.8f, 175, 130};
+    for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+        for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech", "eu_tank", "eu_apc"}) {
+            for (bool steering : {false, true})
+                walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
+        }
+    }
+}
+
+// Controlled collision survey with a second walker in the same lane.
+// It is not a substitute for bot routing through the pictured underpass.
+TEST(Titan_SuezBridgeCrowdingSurvey)
+{
+    for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
+                                         BridgeCrossing {-512, -36, 90, 47.2f},
+                                         BridgeCrossing {-245, -32, 90, 50.8f, 175, 130}})
+        walkerCrossesBridge("mods/Project_Remaster_v17_Final", "us_heavy_mech", bridge, false, false, true, true);
+}
+
+// Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906, so a bot sent there cannot plan and walks
+// straight into the first wall. A foot bot standing 60 m from silo 906 (the nearest) must prefer one it can plan to.
+TEST(Titan_BotsPreferSilosOnTheNavMesh)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, nullptr, true);
+	std::vector<uint8_t> qtr, clb;
+	if (!level.files.readFile("Levels/Suez_Canal/AIPathFinding/Infantry.qtr", qtr)
+		|| !level.files.readFile("Levels/Suez_Canal/AIPathFinding/Infantry.clb", clb)) {
+		return;
+	}
+	const auto mesh = ai::parseNavMesh(qtr, clb);
+	CHECK(mesh.has_value());
+	if (!mesh) return;
+	const auto points = level.world->controlPointList();
+	const auto cp = std::find_if(points.begin(), points.end(), [](const auto& p) { return p.id == 906; });
+	CHECK(cp != points.end());
+	if (cp == points.end()) return;
+	CHECK(mesh->findPolygon({cp->position.x, cp->position.y, cp->position.z}) < 0); // the premise: 906 is off the mesh
+	physics::Vec3 from;
+	bool found = false;
+	for (float x = -80; x <= 80 && !found; x += 2) {
+		for (float z = -80; z <= 80 && !found; z += 2) {
+			if (std::fabs(std::hypot(x, z) - 60) > 1.5f) continue;
+			physics::Vec3 at = cp->position + physics::Vec3 {x, 0, z};
+			at.y = level.world->terrainHeight(at.x, at.z) + 1;
+			if (mesh->findPolygon({at.x, at.y, at.z}) >= 0) { from = at; found = true; }
+		}
+	}
+	CHECK(found);
+	if (!found) return;
+	game::BotManager bots(*level.world, {});
+	bots.setNavMesh(&*mesh);
+	const int id = level.world->addPlayer("Chooser", 2, true);
+	CHECK(level.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	level.world->setSoldierPosition(info.soldier, from);
+	for (int tick = 0; tick < 30 * 5; ++tick) {
+		bots.update(1 / 30.0f);
+		level.world->tick(1 / 30.0f);
+	}
+	const auto route = bots.route(id);
+	CHECK(!route.empty());
+	if (route.empty()) return;
+	const float toOffMesh = std::hypot(route.back().x - cp->position.x, route.back().z - cp->position.z);
+	std::fprintf(stderr, "  bot's goal is %.0f m from the off-mesh silo 906\n", toOffMesh);
+	CHECK(toOffMesh > 100.0f);
+}
+
+// Rounds from above onto each part of a Titan (guns, consoles): which take
+// the hit, and whether the shooter's hitmarker rises.
+TEST(Titan_RoundsHitItsPartsAndRaiseTheHitmarker)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	level.run(1);
+	const int shooter = level.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* rifle = level.templates.find("Unl_AV_Rifle");
+	const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+	CHECK(!round.empty());
+	int tried = 0, struck = 0, marked = 0;
+	for (const auto& part : level.world->titanParts(2)) {
+		if (part.kind != game::GameWorld::TitanPartInfo::Gun && part.kind != game::GameWorld::TitanPartInfo::Console) {
+			continue;
+		}
+		// From outside along the line from the Titan's middle through the gun.
+		int covered = 0;
+		physics::Vec3 out = part.position - level.titan(2)->position;
+		out.y = 0;
+		out = out * (1.0f / std::max(std::sqrt(physics::lengthSquared(out)), 1e-3f));
+		const physics::Vec3 across {out.z, 0, -out.x};
+		for (float dy = -3; dy <= 3; dy += 1.5f) {
+			for (float side = -3; side <= 3; side += 1.5f) {
+				const float was = level.world->hitPoints(part.id);
+				level.world->launchProjectile(round, part.position + out * 25.0f + across * side + physics::Vec3 {0, dy, 0}, out * -300.0f, shooter);
+				level.run(0.15f);
+				covered += level.world->hitPoints(part.id) < was ? 1 : 0;
+			}
+		}
+		std::fprintf(stderr, "  %s: %d of 25 rounds from outside hurt the part itself\n", part.name.c_str(), covered);
+		float f = 1;
+		uint32_t object = 0;
+		const physics::Vec3 top = part.position + physics::Vec3 {0, 4, 0};
+		const bool seg = level.world->segmentHit(top, part.position - physics::Vec3 {0, 1, 0}, 0, f, object);
+		const float before = level.world->hitPoints(part.id);
+		level.world->launchProjectile(round, top, {0, -300, 0}, shooter);
+		level.run(0.2f);
+		const bool hurt = level.world->hitPoints(part.id) < before;
+		const bool mark = level.world->takeHitIndicator(shooter);
+		const auto& im = level.world->impacts();
+		std::fprintf(stderr, "  %s kind %d at %.0f %.0f %.0f: ray hit %d object %u (part %u) hurt %d marker %d impact %.0f %.0f %.0f obj %u\n",
+			part.name.c_str(), part.kind, part.position.x, part.position.y, part.position.z, seg, object, part.id, hurt, mark,
+			im.empty() ? 0.f : im.back().point.x, im.empty() ? 0.f : im.back().point.y, im.empty() ? 0.f : im.back().point.z,
+			im.empty() ? 0u : im.back().object);
+		++tried;
+		struck += covered > 0 ? 1 : 0;
+		(void)hurt;
+		marked += mark;
+		level.run(3);
+	}
+	CHECK(tried > 0);
+	CHECK(struck >= 3); // the AA and ground cannons take rounds (their children's geometries)
+	CHECK(marked > 0);
+}
+
+// Where a pod dropped over the enemy Titan comes to rest, shield up or down,
+// at several speeds (the pod array's launch is 150 m/s).
+TEST(Titan_PodsLandOnTheEnemyTitansRoof)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	for (const bool down : {false, true}) {
+		TitanLevel level(dir, "Minsk", 48);
+		if (!level.loaded) {
+			return;
+		}
+		const auto pac = *level.titan(1);
+		if (down) {
+			level.world->setHitPoints(pac.object, pac.hitPoints * 0.5f);
+			level.run(1);
+		}
+		const world::Object* object = level.objects.find(pac.object);
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+		world::ObjectTemplate* podTemplate = level.templates.find("eu_pod");
+		if (!podTemplate) {
+			return;
+		}
+		for (const float speed : {0.0f, 50.0f, 100.0f, 150.0f}) {
+			for (const physics::Vec3 spot : {physics::Vec3 {-12, 0, -3}, {0, 0, -40}, {12, 0, -55}}) {
+				const physics::Vec3 at = pac.position + turn.transform({spot.x, 150, spot.z});
+				world::Object* pod = level.objects.create(podTemplate, {at.x, at.y, at.z}, {0, 0, 0});
+				level.run(1 / 30.0f);
+				level.world->setBodyVelocity(pod->id(), {0, -speed, 0});
+				level.run(15);
+				const physics::Vec3 rest = {pod->position().x, pod->position().y, pod->position().z};
+				const physics::Vec3 rel = turn.untransform(rest - pac.position);
+				std::fprintf(stderr, "  shield %s, %3.0f m/s down over %.0f/%.0f: rest at %.1f/%.1f/%.1f\n", down ? "down" : "up", speed, spot.x, spot.z,
+					rel.x, rel.y, rel.z);
+			}
+		}
+	}
+}
+
+// A grid of pods dropped over the PAC Titan with its shield down: where each rests.
+TEST(Titan_PodGridOverTheEnemyTitan)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	const auto pac = *level.titan(1);
+	level.world->setHitPoints(pac.object, pac.hitPoints * 0.55f);
+	level.run(1);
+	const world::Object* object = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	std::fprintf(stderr, "  PAC yaw %.1f\n", object->rotation().x);
+	world::ObjectTemplate* podTemplate = level.templates.find("eu_pod");
+	if (!podTemplate) {
+		return;
+	}
+	std::vector<std::pair<world::Object*, physics::Vec3>> pods;
+	for (float x = -25; x <= 30; x += 5) {
+		for (float z = -85; z <= 25; z += 5) {
+			const physics::Vec3 at = pac.position + turn.transform({x, 120, z});
+			pods.push_back({level.objects.create(podTemplate, {at.x, at.y, at.z}, {0, 0, 0}), {x, 0, z}});
+		}
+	}
+	level.run(2 / 30.0f);
+	for (auto& [pod, spot] : pods) {
+		level.world->setBodyVelocity(pod->id(), {0, -40, 0});
+	}
+	level.run(14);
+	for (float z = 25; z >= -85; z -= 5) {
+		std::string row;
+		for (auto& [pod, spot] : pods) {
+			if (spot.z != z) {
+				continue;
+			}
+			const physics::Vec3 rel = turn.untransform(physics::Vec3 {pod->position().x, pod->position().y, pod->position().z} - pac.position);
+			char cell[16];
+			std::snprintf(cell, sizeof cell, "%4.0f", rel.y < -99 ? -99.0f : rel.y);
+			row += cell;
+		}
+		std::fprintf(stderr, "  z %4.0f:%s\n", z, row.c_str());
+	}
+	int inside = 0;
+	for (auto& [pod, spot] : pods) {
+		const physics::Vec3 rel = turn.untransform(physics::Vec3 {pod->position().x, pod->position().y, pod->position().z} - pac.position);
+		if (rel.y > -20 && rel.y < 6.5f) {
+			++inside;
+			std::fprintf(stderr, "  pod over %.0f/%.0f rests inside at %.1f/%.1f/%.1f\n", spot.x, spot.z, rel.x, rel.y, rel.z);
+		}
+	}
+	std::fprintf(stderr, "  %d of %zu pods came to rest below the roof line\n", inside, pods.size());
+}
+
+// The Shepherd landed on the enemy Titan's deck: E walks out on the deck, no
+// pod from under the hull.
+TEST(Titan_ShepherdOnTheDeckLeavesOnFoot)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Minsk", 48);
+	world::ObjectTemplate* shepherd = level.loaded ? level.templates.find("eu_at") : nullptr;
+	if (!shepherd) {
+		return;
+	}
+	const auto pac = *level.titan(1);
+	const world::Object* object = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	level.world->setHitPoints(pac.object, 6e6f * 0.59f);
+	level.run(0.5f);
+	const physics::Vec3 at = pac.position + turn.transform({0, 19.5f, -30}); // just over the rear deck, clear of the vehicle bay shield
+	world::Object* vehicle = level.objects.create(shepherd, {at.x, at.y, at.z}, {object->rotation().x, 0, 0});
+	vehicle->setTeam(2);
+	level.run(6);
+	const int me = level.world->addPlayer("Me", 2, false);
+	const bool spawned = level.world->spawnSoldier(me);
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(me, info);
+	const physics::Vec3 rest {vehicle->position().x, vehicle->position().y, vehicle->position().z};
+	level.world->setSoldierPosition(info.soldier, {rest.x + 2.0f, rest.y - 1.0f, rest.z});
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(me, use);
+	level.run(0.1f);
+	level.world->setInput(me, {});
+	level.run(2);
+	level.world->playerInfo(me, info);
+	const uint32_t in = info.vehicle;
+	level.world->setInput(me, use);
+	level.run(0.1f);
+	level.world->setInput(me, {});
+	level.run(3);
+	level.world->playerInfo(me, info);
+	const physics::Vec3 rel = turn.untransform(info.position - pac.position);
+	std::fprintf(stderr, "  spawned %d in %u, Shepherd rests at %.0f above the Titan origin; after E: vehicle %u, pods %zu, soldier at %.1f/%.1f/%.1f\n",
+		spawned, in, turn.untransform(rest - pac.position).y, info.vehicle, level.world->pods().size(), rel.x, rel.y, rel.z);
+	CHECK(spawned && in == vehicle->id());
+	CHECK(level.world->pods().empty());
+	CHECK(rel.y > 8); // out on the deck, not inside the hull
+}
+
+// Dropping off the PAC Titan's rear deck onto the catwalk below (Remaster's
+// Minsk, as played): where the soldier ends up and whether he lives.
+TEST(Titan_DropToTheRearCatwalk)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	for (const bool down : {false, true}) {
+		TitanLevel level(dir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
+		if (!level.loaded) {
+			return;
+		}
+		const auto pac = *level.titan(1);
+		if (down) {
+			level.world->setHitPoints(pac.object, pac.hitPoints * 0.55f);
+			level.run(1);
+		}
+		const int me = level.world->addPlayer("Me", 2, false);
+		CHECK(level.world->spawnSoldier(me));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(me, info);
+		// The log's last deck sample: world offsets -62.9 / 10.6 / -7.0 from the Titan's origin.
+		for (const float edge : {-61.5f, -62.5f, -64.0f}) {
+			level.world->playerInfo(me, info);
+			if (!info.alive) {
+				level.world->spawnSoldier(me);
+				level.world->playerInfo(me, info);
+			}
+			level.world->setSoldierPosition(info.soldier, pac.position + physics::Vec3 {edge, 11.0f, 0.1f});
+			float lowest = 1e9f, last = 0;
+			for (int tick = 0; tick < 90; ++tick) {
+				level.run(1 / 30.0f);
+				level.world->playerInfo(me, info);
+				lowest = std::min(lowest, info.position.y - pac.position.y);
+				last = info.position.y - pac.position.y;
+				if (!info.alive) {
+					std::fprintf(stderr, "  shield %s, dropped at x %.0f: DIED at tick %d, y %.1f (above the origin), vy %.1f\n", down ? "down" : "up", edge, tick,
+						last, info.velocity.y);
+					break;
+				}
+			}
+			if (info.alive) {
+				std::fprintf(stderr, "  shield %s, dropped at x %.0f: alive, settled at y %.1f (lowest %.1f), hull %u\n", down ? "down" : "up", edge, last, lowest,
+					level.world->titanHolding(info.position) ? 1u : 0u);
+			}
+		}
+	}
+}
+
+// The coreroom hull test's footprint over the PAC Titan's rear (world offsets
+// from its origin): '#' inside, '.' outside, at the catwalk's height and the deck's.
+TEST(Titan_HullZoneAtTheRearCatwalk)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
+	if (!level.loaded) {
+		return;
+	}
+	const auto pac = *level.titan(1);
+	for (const float y : {5.2f, 10.6f}) {
+		std::fprintf(stderr, "  y %.1f (rows z from +30 to -30, columns x from -80 to -20 step 4)\n", y);
+		for (float z = 30; z >= -30; z -= 5) {
+			std::string row;
+			for (float x = -80; x <= -20; x += 4) {
+				row += level.world->titanHolding(pac.position + physics::Vec3 {x, y, z}) ? '#' : '.';
+			}
+			std::fprintf(stderr, "   z %4.0f %s\n", z, row.c_str());
+		}
+	}
+}
+
+TEST(Titan_SuezTitanPositions)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Suez_Canal", 48);
+	if (!level.loaded) {
+		return;
+	}
+	for (int team : {1, 2}) {
+		if (const auto* t = level.titan(team)) {
+			std::fprintf(stderr, "  team %d Titan at %.0f/%.0f/%.0f radius %.0f\n", team, t->position.x, t->position.y, t->position.z, t->radius);
+		}
+	}
+	std::fprintf(stderr, "  terrain under it: %.0f\n", level.world->terrainHeight(level.titan(2)->position.x, level.titan(2)->position.z));
+}
+
+// The 8 Nov Suez log: the local soldier stood at 8.0/8.6/-18.0 from the enemy
+// Titan's origin (shield up), stepped to 8.9/-18.7 and fell through to y 4.0
+// and past it (127 damage). Drop soldiers over a grid there: where do they stand?
+TEST(Titan_SuezInteriorFloorProbe)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	if (!level.loaded || !level.titan(2)) {
+		return;
+	}
+	const auto ti = *level.titan(2);
+	const int me = level.world->addPlayer("Me", 1, false);
+	for (float z = -17.0f; z >= -19.0f; z -= 0.5f) {
+		std::string row;
+		for (float x = 7.0f; x <= 10.0f; x += 0.5f) {
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(me, info);
+			if (!info.alive) {
+				level.world->spawnSoldier(me);
+				level.world->playerInfo(me, info);
+			}
+			level.world->setSoldierPosition(info.soldier, ti.position + physics::Vec3 {x, 9.0f, z});
+			float fastest = 0;
+			for (int tick = 0; tick < 60 && info.alive; ++tick) {
+				level.run(1 / 30.0f);
+				level.world->playerInfo(me, info);
+				fastest = std::min(fastest, info.velocity.y);
+			}
+			CHECK(info.alive); // landing in the standing Titan's pit is not a road kill
+			char cell[48];
+			std::snprintf(cell, sizeof cell, " %s%4.1f(%3.0f v%.0f h%u)", info.alive ? "" : "X", info.position.y - ti.position.y,
+				level.world->hitPoints(info.soldier), fastest, level.world->titanHolding(info.position) ? 1u : 0u);
+			row += cell;
+		}
+		std::fprintf(stderr, "  z %5.1f:%s\n", z, row.c_str());
+	}
+}
+
+// Both Titan AA positions share the firearm but own independent aim and fire.
+TEST(Titan_AASeatAimAndFireOwnership)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  const int player = level.world->joinPlayer(2);
+  CHECK(level.world->spawnSoldier(player));
+  anim::AnimationSystems systems(nullptr);
+  PlayerCamera camera(*level.world, systems, nullptr);
+  game::GameWorld::PlayerInfo info;
+  CHECK(level.world->playerInfo(player, info));
+  const auto* titan = level.titan(2);
+  CHECK(titan != nullptr);
+  if (!titan) continue;
+  CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+  physics::Vec3 entry; float radius = 0; int seat = -1;
+  CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+  CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+  game::SoldierInput input; input.use = true;
+  level.world->setInput(player, input); level.run(0.1f);
+  const uint32_t id = level.world->titanOf(2);
+  const auto seats = level.world->vehicleSeats(id);
+  int count = 0;
+  for (size_t i = 0; i < seats.size(); ++i) {
+   if (seats[i].name.find("aacannon") == std::string::npos) continue;
+   ++count;
+   input = {}; input.switchSeat = static_cast<int>(i) + 1;
+   level.world->setInput(player, input); level.run(0.1f);
+   float look = 0; // the bundles turn at their own speeds (stepGunner): lead the gun up
+   seataim::steerGun([&](const game::SoldierInput& in) { level.world->setInput(player, in); level.run(1 / 30.0f); },
+    [&](float& y, float& p) { level.world->gunAim(id, static_cast<int>(i), y, p); }, look, NAN, 30);
+   input = {}; input.aimPitch = look;
+   float yaw = 0, pitch = 0;
+   CHECK(level.world->gunAim(id, static_cast<int>(i), yaw, pitch));
+   CHECK(std::fabs(pitch - 30) < 0.5f);
+   world::Vec3 off, rotation;
+   CHECK(level.world->partPose(id, seats[i].pitchBundle, off, rotation));
+   CHECK(std::fabs(rotation.y + 30) < 0.5f);
+   camera.tick(1 / 30.0f);
+   PlayerCamera::View view;
+   CHECK(camera.view(view, 16.0f / 9.0f));
+   CHECK(std::fabs(view.pitch - 30.0f * 3.14159265f / 180.0f) < 0.03f);
+   level.world->takeObjectWeaponFires();
+   input.fire = true; level.world->setInput(player, input); level.run(1.2f);
+   const auto events = level.world->takeObjectWeaponFires();
+   const auto found = events.find(id);
+   CHECK(found != events.end());
+   if (found != events.end()) {
+    for (const auto& event : found->second) CHECK(event.seat == seats[i].name);
+   }
+   input = {}; level.world->setInput(player, input); level.run(0.2f);
+  }
+  CHECK(count == 2);
+ }
+}
+
+TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+ for (int team : {1, 2}) {
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  const int player = level.world->joinPlayer(team);
+  CHECK(level.world->spawnSoldier(player));
+  game::GameWorld::PlayerInfo info;
+  CHECK(level.world->playerInfo(player, info));
+  const auto* titan = level.titan(team);
+  if (!titan) { CHECK(titan); continue; }
+  CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+  physics::Vec3 entry; float radius = 0; int seat = -1;
+  CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+  CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+  game::SoldierInput input; input.use = true;
+  level.world->setInput(player, input); level.run(0.1f);
+  const uint32_t id = level.world->titanOf(team);
+  const auto seats = level.world->vehicleSeats(id);
+  anim::AnimationSystems systems(nullptr);
+  PlayerCamera camera(*level.world, systems, nullptr);
+  int count = 0;
+  for (size_t i = 0; i < seats.size(); ++i) {
+   if (seats[i].name.find("groundcanone3") == std::string::npos) continue;
+   ++count;
+   input = {}; input.switchSeat = static_cast<int>(i) + 1;
+   level.world->setInput(player, input); level.run(0.1f);
+   input = {}; input.turn = 15;
+   level.world->setInput(player, input); level.run(1 / 30.0f);
+   float look = 0; // the bundles turn at their own speeds (stepGunner): lead the gun
+   for (const float aim : {-15.0f, -40.0f}) {
+    seataim::steerGun([&](const game::SoldierInput& in) { level.world->setInput(player, in); level.run(1 / 30.0f); },
+     [&](float& y, float& p) { level.world->gunAim(id, static_cast<int>(i), y, p); }, look, NAN, aim);
+    camera.tick(1 / 30.0f);
+    PlayerCamera::View view;
+    CHECK(camera.view(view, 16.0f / 9.0f));
+    std::fprintf(stderr, "ground %s team %d seat %zu aim %.1f view %.1f yaw %.1f\n", mod, team, i, aim, view.pitch * 180 / 3.14159265f, view.yaw * 180 / 3.14159265f);
+    CHECK(std::fabs(view.pitch - aim * 3.14159265f / 180.0f) < 0.04f);
+   }
+   input = {}; input.aimPitch = look; input.fire = true;
+   level.world->setInput(player, input); level.run(0.2f);
+   const auto& projectiles = level.world->projectiles();
+   const game::Projectile* shot = nullptr;
+   for (const auto& p : projectiles) if (p.player == player && p.age < 0.25f) shot = &p;
+   CHECK(shot != nullptr);
+   if (shot) {
+    PlayerCamera::View view; CHECK(camera.view(view, 16.0f / 9.0f));
+    const float len = std::sqrt(physics::lengthSquared(shot->velocity));
+    const float shotPitch = std::asin(shot->velocity.y / len);
+    CHECK(std::fabs(shotPitch - view.pitch) < 0.12f);
+    const float shotYaw = std::atan2(shot->velocity.x, shot->velocity.z);
+    std::fprintf(stderr, "shot yaw %.1f view %.1f age %.2f\n", shotYaw * 180 / 3.14159265f, view.yaw * 180 / 3.14159265f, shot->age);
+    CHECK(std::fabs(std::remainder(shotYaw - view.yaw, 2 * 3.14159265f)) < 0.12f);
+   }
+   input = {}; level.world->setInput(player, input); level.run(0.3f);
+  }
+  CHECK(count == 4);
+ }
+ }
+}
+
+// The ground cannon's burst (10) empties its magazine (10), so the reload
+// starts with the last round. Its sound event (which ends the burst's sound
+// skips, 0x005dbfe0) must come after that round's fire event, or a second
+// burst sound starts on round 10.
+TEST(Titan_GroundCannonReloadSoundFollowsLastRound)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ TitanLevel level(dir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
+ CHECK(level.loaded);
+ if (!level.loaded) return;
+ const int team = 2;
+ const int player = level.world->joinPlayer(team);
+ CHECK(level.world->spawnSoldier(player));
+ game::GameWorld::PlayerInfo info;
+ CHECK(level.world->playerInfo(player, info));
+ const auto* titan = level.titan(team);
+ if (!titan) { CHECK(titan); return; }
+ CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+ physics::Vec3 entry; float radius = 0; int seat = -1;
+ CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+ CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+ game::SoldierInput input; input.use = true;
+ level.world->setInput(player, input); level.run(0.1f);
+ const auto seats = level.world->vehicleSeats(level.world->titanOf(team));
+ int cannon = -1;
+ for (size_t i = 0; i < seats.size() && cannon < 0; ++i) {
+  if (seats[i].name.find("groundcanone3") != std::string::npos) cannon = static_cast<int>(i);
+ }
+ CHECK(cannon >= 0);
+ if (cannon < 0) return;
+ input = {}; input.switchSeat = cannon + 1;
+ level.world->setInput(player, input); level.run(0.5f);
+ level.world->takeWeaponSounds();
+ input = {}; input.fire = true;
+ level.world->setInput(player, input); level.run(1.5f);
+ input = {}; level.world->setInput(player, input); level.run(0.2f);
+ int fires = 0, reloads = 0, firesAfterReload = 0;
+ for (const auto& e : level.world->takeWeaponSounds()) {
+  if (e.kind == game::GameWorld::WeaponSoundEvent::Fire) { ++fires; if (reloads) ++firesAfterReload; }
+  if (e.kind == game::GameWorld::WeaponSoundEvent::Reload) ++reloads;
+ }
+ std::fprintf(stderr, "ground cannon burst: %d fire events, %d reloads, %d fires after the reload\n", fires, reloads, firesAfterReload);
+ CHECK(fires == 10 && reloads == 1 && firesAfterReload == 0);
+}
+
+TEST(Titan_VehicleSeatHudUsesAuthoredIconOffsets)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  hud::HudManager hud([&](const std::string& path, std::string& text) {
+   std::vector<uint8_t> bytes;
+   if (!level.files.readFile(path, bytes)) return false;
+   text.assign(bytes.begin(), bytes.end()); return true;
+  });
+  hud::registerHudConsoleMethods(level.console, hud);
+  level.console.setScriptOutput(false, false);
+  std::string out;
+  CHECK(level.console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+  hud.set("ShowIngameHud", 1); hud.set("ShowSoldierHud", 1); hud.set("ShowVehicleHud", 1);
+  hud.set("VehicleIconShow", 1); hud.set("MenuBackgroundAlpha", 1);
+  hud.setString("VehicleIconPathString", "test_vehicle_silhouette.tga");
+  for (const char* name : {"eu_titan_playtest", "as_titan_playtest", "eu_tank", "eu_apc", "as_fav", "us_ag"}) {
+   auto* t = level.templates.find(name);
+   CHECK(t != nullptr);
+   if (!t) continue;
+   auto* o = level.objects.create(t, {});
+   const auto seats = level.world->vehicleSeats(o->id());
+   menu::VehicleHudInput input; input.vehicle = t;
+   for (const auto& seat : seats) {
+    menu::SeatDot dot;
+    const auto* st = level.templates.find(seat.name);
+    const std::string pos = menu::hudSetting(st, "vehicleHud.vehicleIconPos");
+    if (std::sscanf(pos.c_str(), "%f/%f", &dot.x, &dot.y) == 2) dot.state = 4;
+    input.seats.push_back(dot);
+   }
+   menu::VehicleHud vehicleHud;
+   vehicleHud.update(hud, input);
+   const auto quads = hud.frame(0);
+   const hud::HudQuad* icon = nullptr;
+   std::vector<const hud::HudQuad*> dots;
+   for (const auto& q : quads) {
+    if (q.texture.find("test_vehicle_silhouette") != std::string::npos) icon = &q;
+    if (q.texture.find("vehiclePositionEmpty") != std::string::npos) dots.push_back(&q);
+   }
+   CHECK(icon != nullptr);
+   size_t expected = 0;
+   for (const auto& dot : input.seats) {
+    if (!dot.state || (dot.x == 0 && dot.y == 0)) continue;
+    CHECK(expected < dots.size());
+    if (icon && expected < dots.size()) {
+     CHECK(std::fabs(dots[expected]->x0 - (icon->x0 - 1 + dot.x)) < 0.01f);
+     CHECK(std::fabs(dots[expected]->y0 - (icon->y0 + dot.y)) < 0.01f);
+     CHECK(std::fabs(dots[expected]->x1 - dots[expected]->x0 - 8) < 0.01f);
+     CHECK(std::fabs(dots[expected]->y1 - dots[expected]->y0 - 8) < 0.01f);
+    }
+    ++expected;
+   }
+   std::fprintf(stderr, "seat HUD %s %s: %zu authored seats, %zu drawn dots\n", mod, name, expected, dots.size());
+   CHECK(expected >= 2 && expected == dots.size());
+  }
+ }
+}
+
+// Collision and damage are separate: friendly fire settings must not remove
+// the Titan's projectile faces. Exercise the installed stationary AA rounds
+// against both teams' actual Titans, including the approach from below.
+TEST(Titan_StationaryAARoundsMeetFriendlyAndEnemyTitan)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		TitanLevel level(gameDir, "Sidi_Power_Plant", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		for (int team = 1; team <= 2; ++team) {
+			const auto* found = level.titan(team);
+			CHECK(found != nullptr);
+			if (!found) continue;
+			const auto titan = *found;
+			const auto parts = level.world->titanParts(team);
+			for (int shooterTeam : {team, 3 - team}) {
+				const int shooter = level.world->addPlayer("AA test", shooterTeam, true);
+				for (const char* round : {"static_aa_cannon_Projectile", "static_aa_missile_projectile"}) {
+					for (int direction : {-1, 1}) {
+						const auto from = titan.position + physics::Vec3 {0, direction * 60.0f, 0};
+						const size_t before = level.world->impacts().size();
+						CHECK(level.world->launchProjectile(round, from, {0, -direction * 300.0f, 0}, shooter));
+						level.run(0.4f);
+						const auto& impacts = level.world->impacts();
+						bool hit = false;
+						for (size_t i = before; i < impacts.size(); ++i) {
+							const uint32_t object = impacts[i].object;
+							hit |= object == titan.object || std::any_of(parts.begin(), parts.end(),
+								[object](const auto& part) { return part.id == object; });
+						}
+						std::fprintf(stderr, "  %s titan=%d shooter=%d round=%s approach=%s impact=%d\n",
+							mod, team, shooterTeam, round, direction < 0 ? "below" : "above", hit);
+						CHECK(hit);
+					}
+				}
+			}
+		}
+	}
+}
+
+TEST(Titan_FriendlyStationaryAAGunFiresAtTitan)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (bool missile : {false, true}) {
+		TitanLevel level(gameDir, "Sidi_Power_Plant", 48, true, "mods/Project_Remaster_v17_Final");
+		CHECK(level.loaded);
+		if (!level.loaded) return;
+		const auto titan = *level.titan(2);
+		auto* aaTemplate = level.templates.find("static_aa");
+		CHECK(aaTemplate != nullptr);
+		if (!aaTemplate) return;
+		const auto pos = titan.position + physics::Vec3 {0, -40, -80};
+		auto* gun = level.objects.create(aaTemplate, {pos.x, pos.y, pos.z});
+		gun->setTeam(2);
+		const uint32_t gunId = gun->id();
+		level.run(0.2f);
+		const int player = level.world->addPlayer("AA gunner", 2, false);
+		CHECK(level.world->spawnSoldier(player));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(player, info);
+		bool entered = false;
+		for (float r : {0.0f, 1.5f, 3.0f, 4.5f}) {
+			for (int k = 0; k < 8 && !entered; ++k) {
+				const float a = k * 0.785398f;
+				level.world->setSoldierPosition(info.soldier, pos + physics::Vec3 {r * std::sin(a), 0, r * std::cos(a)});
+				game::SoldierInput input;
+				input.use = true;
+				level.world->setInput(player, input);
+				level.run(0.067f);
+				level.world->setInput(player, {});
+				level.run(0.067f);
+				level.world->playerInfo(player, info);
+				entered = info.vehicle == gunId;
+			}
+			if (entered) break;
+		}
+		CHECK(entered);
+		if (!entered) return;
+		game::SoldierInput input;
+		input.aimPitch = 27;
+		level.world->setInput(player, input);
+		level.run(2.0f);
+		{
+			const auto before = level.world->impacts().size();
+			input.fire = !missile;
+			input.altFire = missile;
+			level.world->setInput(player, input);
+			level.run(1.0f);
+			level.world->setInput(player, {});
+			level.run(2.0f);
+			bool hit = false;
+			const auto parts = level.world->titanParts(2);
+			const auto& impacts = level.world->impacts();
+			for (size_t i = before; i < impacts.size(); ++i) {
+				const auto object = impacts[i].object;
+				hit |= object == titan.object || std::any_of(parts.begin(), parts.end(), [object](const auto& part) { return part.id == object; });
+			}
+			std::fprintf(stderr, "  stationary AA %s Titan impact=%d\n", missile ? "missile" : "cannon", hit);
+			CHECK(hit);
+		}
+	}
+}
+
+TEST(Titan_FriendlyWalkerAAGunOnSuez)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	const bool crowded = std::getenv("BF2142_TITAN_CROWD_TEST") != nullptr;
+	for (bool alt : {false, true}) for (bool down : {false, true}) {
+		geom::GeometryTemplateManager geometries;
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final", crowded, &geometries);
+		CHECK(level.loaded);
+		if (!level.loaded) return;
+		const auto titan = *level.titan(2);
+		if (down) { level.world->setHitPoints(titan.object, titan.maxHitPoints * 0.59f); level.run(0.5f); }
+		auto* vehicle = level.templates.find("us_heavy_mech");
+		CHECK(vehicle != nullptr);
+		if (!vehicle) return;
+		physics::Vec3 pos = titan.position + physics::Vec3 {0, 0, -100};
+		pos.y = level.world->terrainHeight(pos.x, pos.z) + 3;
+		auto* made = level.objects.create(vehicle, {pos.x, pos.y, pos.z});
+		made->setTeam(2);
+		const uint32_t walker = made->id();
+		level.run(2);
+		game::BotManager bots(*level.world, {});
+		if (crowded) {
+			for (int i = 0; i < 43; ++i) {
+				const int bot = level.world->addPlayer("Crowd", i % 2 + 1, true);
+				CHECK(level.world->spawnSoldier(bot));
+			}
+			level.afterTick = [&bots] { bots.update(1.0f / 30); };
+		}
+		const int player = level.world->addPlayer("Walker gunner", 2, false);
+		CHECK(level.world->spawnSoldier(player));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(player, info);
+		bool entered = false;
+		for (float r : {0.0f, 2.0f, 4.0f, 6.0f}) {
+			for (int k = 0; k < 8 && !entered; ++k) {
+				const float a = k * 0.785398f;
+				const auto p = level.objects.find(walker)->position();
+				level.world->setSoldierPosition(info.soldier, {p.x + r * std::sin(a), p.y, p.z + r * std::cos(a)});
+				game::SoldierInput input;
+				input.use = true;
+				level.world->setInput(player, input);
+				level.run(0.067f);
+				level.world->setInput(player, {});
+				level.run(0.067f);
+				level.world->playerInfo(player, info);
+				entered = info.vehicle == walker;
+			}
+			if (entered) break;
+		}
+		CHECK(entered);
+		if (!entered) continue;
+		game::SoldierInput input;
+		input.switchSeat = 2;
+		level.world->setInput(player, input);
+		level.run(0.067f);
+		level.world->playerInfo(player, info);
+		CHECK(info.seat == 1);
+		input = {};
+		const auto p = level.objects.find(walker)->position();
+		// The bundles turn at their own speeds (stepGunner): lead the gun up.
+		float look = 0;
+		seataim::steerGun([&](const game::SoldierInput& in) { level.world->setInput(player, in); level.run(1.0f / 30); },
+			[&](float& y, float& pitch) { level.world->gunAim(walker, 1, y, pitch); }, look, NAN,
+			std::atan2(titan.position.y - p.y, titan.position.z - p.z) * 57.29578f);
+		input.aimPitch = look;
+		input.fire = !alt;
+		input.altFire = alt;
+		level.world->setInput(player, input);
+		level.run(1.0f / 30);
+		uint64_t serial = 0;
+		for (const auto& shot : level.world->projectiles()) {
+			if (shot.player == player && shot.settings) {
+				serial = shot.serial;
+				CHECK(shot.settings->name == (alt ? "us_heavy_mech_AA_missile" : "us_heavy_mech_AAcannon_Projectile"));
+			}
+		}
+		CHECK(serial != 0);
+		level.world->setInput(player, {});
+		const auto parts = level.world->titanParts(2);
+		size_t previous = level.world->impacts().size();
+		bool hit = false, removed = false;
+		for (int tick = 0; tick < 90 && !hit; ++tick) {
+			level.run(1.0f / 30);
+			const auto& impacts = level.world->impacts();
+			for (size_t i = previous; i < impacts.size(); ++i) {
+				const auto object = impacts[i].object;
+				hit |= object == titan.object || std::any_of(parts.begin(), parts.end(),
+					[object](const auto& part) { return part.id == object; });
+			}
+			previous = impacts.size();
+			if (hit) removed = std::none_of(level.world->projectiles().begin(), level.world->projectiles().end(),
+				[serial](const auto& shot) { return shot.serial == serial; });
+		}
+		std::fprintf(stderr, "  walker %s shield=%s Titan impact=%d projectile removed=%d\n",
+			alt ? "missile" : "cannon", down ? "down" : "up", hit, removed);
+		CHECK(hit && removed);
+	}
+}
+
+// The launcher trace must capture a real local projectile's lifecycle and its
+// Titan transform; otherwise a player reproduction cannot diagnose crossing.
+TEST(Titan_WalkerShotTraceRecordsLifecycle)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	CHECK(level.world->spawnPlayer(2) != nullptr);
+	const auto titan = *level.titan(2);
+	const int player = level.world->localPlayer();
+	std::FILE* out = std::tmpfile();
+	CHECK(out != nullptr);
+	if (!out) return;
+	host::TitanShotTrace trace;
+	CHECK(level.world->launchProjectile("us_heavy_mech_AA_missile", titan.position + physics::Vec3 {0, -60, 0}, {0, 300, 0}, player));
+	trace.update(*level.world, level.objects, out);
+	for (int i = 0; i < 30; ++i) { level.run(1.0f / 30); trace.update(*level.world, level.objects, out); }
+	std::rewind(out);
+	std::string output;
+	char buffer[1024];
+	while (const size_t n = std::fread(buffer, 1, sizeof(buffer), out)) output.append(buffer, n);
+	std::fclose(out);
+	CHECK(output.find("titan-shot: start") != std::string::npos);
+	CHECK(output.find("titan-shot: step") != std::string::npos);
+	CHECK(output.find("shield=1 mesh=1") != std::string::npos);
+	CHECK(output.find("titan-shot: end") != std::string::npos);
+	CHECK(output.find("titan-shot: recent-impact") != std::string::npos);
+}
+
+// Titans have their own simulation, but must still reach the shared map
+// vehicle pass; a spawn selector alone does not draw their silhouette.
+TEST(Titan_MapListIncludesAuthoredSilhouette)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  level.files.setMountingAllowed(true);
+  std::string out;
+  CHECK(level.console.run("ClientArchives.con", {}, out));
+  level.files.setMountingAllowed(false);
+  const auto extra = level.world->mapObjects();
+  auto all = level.world->vehicleList();
+  all.insert(all.end(), extra.begin(), extra.end());
+  CHECK(level.world->titans().size() == 2);
+  for (const auto& titan : level.world->titans()) {
+   CHECK(std::count_if(all.begin(), all.end(), [&](const auto& v) { return v.object == titan.object; }) == 1);
+   const auto it = std::find_if(all.begin(), all.end(), [&](const auto& v) { return v.object == titan.object; });
+   if (it == all.end()) continue;
+   const auto* object = level.objects.find(titan.object);
+   CHECK(object && object->objectTemplate());
+   if (!object || !object->objectTemplate()) continue;
+   menu::VehicleMarker marker;
+   CHECK(menu::vehicleMarker(*object->objectTemplate(), menu::MapRelation::Friendly, false, false, marker));
+   CHECK(marker.texture.find("mini_titan.tga") != std::string::npos);
+   CHECK(marker.width == 20 && marker.height == 35);
+   CHECK(marker.offsetX == 0 && marker.offsetY == 8);
+   CHECK(it->position.x == titan.position.x && it->position.z == titan.position.z);
+   CHECK(it->yaw == object->rotation().x);
+   std::vector<uint8_t> bytes;
+   CHECK(level.files.readFile("Menu/HUD/Texture/" + marker.texture, bytes));
+   CHECK(!bytes.empty());
+  }
+ }
+}
+
+TEST(Titan_MapFootprintContainsParkedGunship)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		const char* name = std::string(mod) == "mods/bf2142" ? "Suez_Canal" : "Bridge_at_Remagen";
+		TitanLevel level(dir, name, 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		level.run(3);
+		const auto vehicles = level.world->vehicleList();
+		for (const auto& titan : level.world->titans()) {
+			const auto* object = level.objects.find(titan.object);
+			CHECK(object && object->objectTemplate());
+			if (!object || !object->objectTemplate()) continue;
+			const auto gunship = std::find_if(vehicles.begin(), vehicles.end(), [&](const auto& v) {
+				const auto* aircraft = level.objects.find(v.object);
+				const auto* t = aircraft ? aircraft->objectTemplate() : nullptr;
+				return t && t->name() == (titan.team == 1 ? "as_ag" : "us_ag");
+			});
+			CHECK(gunship != vehicles.end());
+			if (gunship == vehicles.end()) continue;
+			for (const bool full : {false, true}) {
+				for (const bool inside : {false, true}) {
+					Console console;
+					hud::HudManager manager(nullptr);
+					hud::registerHudConsoleMethods(console, manager);
+					std::string out;
+					for (const char* line : {
+							 // SpawnInterface/HudElementsMap.con's geometry (both mods).
+							 "hudBuilder.createMapNode Global Minimap",
+							 "hudBuilder.setMaxiPos -122/-271",
+							 "hudBuilder.setMaxiSize 512/512",
+							 "hudBuilder.setMiniPos 245/-291",
+							 "hudBuilder.setMiniSize 146/146",
+							 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+						 }) {
+						CHECK(console.execute(line, out) == ConsoleResult::Ok);
+					}
+					const auto* ground = level.heightmaps.primary();
+					manager.setMap("map.dds", ground->originX(), ground->originZ(), ground->worldWidth(), ground->worldDepth());
+					manager.setMapFocus(titan.position.x, titan.position.z);
+					manager.setMapArea(titan.position.x - 256, titan.position.z - 256,
+						titan.position.x + 256, titan.position.z + 256);
+					manager.setMapInVehicle(true);
+					manager.setMapZoom(1);
+					manager.set("MapFullSize", full ? 1 : 0);
+					menu::VehicleMarker look;
+					CHECK(menu::vehicleMarker(*object->objectTemplate(), menu::MapRelation::Friendly, inside, false, look));
+					hud::HudManager::MapMarker icon {look.texture, titan.position.x, titan.position.z, look.width, object->rotation().x};
+					icon.height = look.height;
+					icon.offsetX = look.offsetX;
+					icon.offsetY = look.offsetY;
+					icon.zoomWithMap = menu::mapIcons(*object->objectTemplate()).zoomOnMinimap;
+					manager.setMapMarkers({icon, {"gunship.dds", gunship->position.x, gunship->position.z, 16}});
+					const auto quads = manager.frame(0);
+					CHECK(quads.size() == 3);
+					if (quads.size() != 3) continue;
+					const auto& ship = quads[1];
+					const auto& aircraft = quads[2];
+					const float angle = -ship.rotation * 3.14159265f / 180;
+					const float dx = (aircraft.x0 + aircraft.x1) / 2 - ship.pivot[0];
+					const float dy = (aircraft.y0 + aircraft.y1) / 2 - ship.pivot[1];
+					const float x = ship.pivot[0] + dx * std::cos(angle) - dy * std::sin(angle);
+					const float y = ship.pivot[1] + dx * std::sin(angle) + dy * std::cos(angle);
+					CHECK(x >= ship.x0 && x <= ship.x1 && y >= ship.y0 && y <= ship.y1);
+				}
+			}
+		}
+	}
+}
+
+// The local map follows the active gun camera, including each seat's
+// authored mounting direction, instead of the Titan root's fixed yaw.
+TEST(Titan_GunMinimapHeadingFollowsCamera)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  for (int team : {1, 2}) {
+   TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+   CHECK(level.loaded); if (!level.loaded) continue;
+   const int player = level.world->joinPlayer(team);
+   CHECK(level.world->spawnSoldier(player));
+   game::GameWorld::PlayerInfo info;
+   CHECK(level.world->playerInfo(player, info));
+   const auto* titan = level.titan(team);
+   CHECK(titan); if (!titan) continue;
+   anim::AnimationSystems systems(nullptr);
+   PlayerCamera camera(*level.world, systems, nullptr);
+   float heading = 123;
+   CHECK(!camera.seatMapHeading(heading)); // on-foot fallback
+   CHECK(heading == 123);
+   CHECK(level.world->setSoldierPosition(info.soldier, titan->position));
+   physics::Vec3 entry; float radius = 0; int seat = -1;
+   CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+   CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+   game::SoldierInput input; input.use = true;
+   level.world->setInput(player, input); level.run(.1f);
+   const auto seats = level.world->vehicleSeats(titan->object);
+   CHECK(seats.size() == 8);
+   int differentFromHull = 0;
+   for (size_t i = 0; i < seats.size(); ++i) {
+    if (seats[i].podLauncher) continue;
+    input = {}; input.switchSeat = static_cast<int>(i) + 1;
+    level.world->setInput(player, input); level.run(.1f);
+    float first = 0;
+    for (int step = 0; step < 2; ++step) {
+     input = {}; input.turn = step ? 15 : -15; input.aimPitch = -20;
+     level.world->setInput(player, input); level.run(.1f);
+     camera.tick(1 / 30.0f);
+     CHECK(level.world->playerInfo(player, info));
+     CHECK(info.vehicle == titan->object && info.seat == static_cast<int>(i));
+     PlayerCamera::View eye; CHECK(camera.view(eye, 16.0f / 9));
+     CHECK(camera.seatMapHeading(heading));
+     CHECK(std::fabs(std::remainder(heading - eye.yaw * 180 / 3.14159265f, 360.0f)) < .001f);
+     if (std::fabs(std::remainder(heading - info.yaw, 360.0f)) > 1) ++differentFromHull;
+     if (!step) first = heading;
+     else CHECK(std::fabs(std::remainder(heading - first, 360.0f)) > .1f);
+    }
+   }
+   CHECK(differentFromHull > 0);
+  }
+ }
+}
+
+TEST(Titan_PodSeatEntersAimsAndFires)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (int team : {1, 2}) {
+		 for (float side : {-30.0f, 30.0f}) {
+			TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			CHECK(level.world->spawnPlayer(team) != nullptr);
+			const int player = level.world->localPlayer();
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(player, info));
+			const auto* titan = level.titan(team);
+			CHECK(titan != nullptr);
+			if (!titan) continue;
+			const auto* titanRoot = level.objects.find(titan->object);
+			CHECK(titanRoot != nullptr);
+			if (!titanRoot) continue;
+			const auto hullTurn = physics::Mat3::fromYawPitchRoll({titanRoot->rotation().x, titanRoot->rotation().y, titanRoot->rotation().z});
+			CHECK(level.world->setSoldierPosition(info.soldier, titan->position + hullTurn.transform({side, 10, 0})));
+			physics::Vec3 entry;
+			float radius = 0;
+			CHECK(level.world->titanPodEntry(player, entry, radius));
+			CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+			game::SoldierInput input;
+			input.use = true;
+			level.world->setInput(player, input);
+			level.run(0.1f);
+			CHECK(level.world->playerInfo(player, info));
+			CHECK(info.vehicle == titan->object && info.seat >= 0);
+			CHECK(!level.world->ridingPod(player) && level.world->pods().empty());
+			const auto seats = level.world->vehicleSeats(info.vehicle);
+			if (info.seat < 0 || static_cast<size_t>(info.seat) >= seats.size()) continue;
+			const auto seat = seats[info.seat];
+			CHECK(seat.podLauncher && !seat.camera.empty());
+			CHECK(!seat.kitWeapon()); // its own launcher and camera, not the soldier's gun
+			// An occupied array cannot accept a second soldier.
+			const int other = level.world->addPlayer("Other pod rider", team, false);
+			CHECK(level.world->spawnSoldier(other));
+			game::GameWorld::PlayerInfo otherInfo;
+			CHECK(level.world->playerInfo(other, otherInfo));
+			CHECK(level.world->setSoldierPosition(otherInfo.soldier, entry - physics::Vec3 {0, 1, 0}));
+			level.world->setInput(other, input);
+			level.run(0.1f);
+			CHECK(level.world->playerInfo(other, otherInfo));
+			CHECK(otherInfo.vehicle == 0);
+			// Release E, then use it again to leave without launching.
+			level.world->setInput(player, {}); level.run(0.1f);
+			level.world->setInput(player, input); level.run(0.1f);
+			CHECK(level.world->playerInfo(player, info) && info.vehicle == 0);
+			CHECK(level.world->pods().empty());
+			CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+			level.world->setInput(player, {}); level.run(0.1f);
+			level.world->setInput(player, input); level.run(0.1f);
+			CHECK(level.world->playerInfo(player, info) && info.vehicle == titan->object);
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera camera(*level.world, systems, nullptr);
+			camera.tick(1 / 30.0f);
+			PlayerCamera::View before, after;
+			CHECK(camera.view(before, 16.0f / 9));
+			// The launcher's bundle turns at its own speed (stepGunner): hold the turn.
+			input = {}; input.turn = 15; input.aimPitch = -30;
+			for (int tick = 0; tick < 15; ++tick) {
+				level.world->setInput(player, input);
+				level.run(1 / 30.0f);
+			}
+			camera.tick(1 / 30.0f);
+			CHECK(camera.view(after, 16.0f / 9));
+			CHECK(std::fabs(std::remainder(after.yaw - before.yaw, 6.2831853f)) > 0.1f);
+			CHECK(level.world->pods().empty());
+			float aimYaw = 0, aimPitch = 0;
+			CHECK(level.world->gunAim(info.vehicle, info.seat, aimYaw, aimPitch));
+			const auto* hull = level.objects.find(info.vehicle);
+			const float radians = (aimYaw + (hull ? hull->rotation().x : 0)) * 3.14159265f / 180;
+			// Authored launcher elevation stays 40 degrees; mouse yaw selects heading.
+			const physics::Vec3 expected {std::sin(radians) * std::cos(0.6981317f), std::sin(0.6981317f), std::cos(radians) * std::cos(0.6981317f)};
+			// One team uses primary fire, the other alternate fire.
+			input = {}; input.fire = team == 1; input.altFire = team == 2;
+			level.world->setInput(player, input);
+			level.world->tick(1 / 30.0f);
+			CHECK(level.world->ridingPod(player));
+			camera.tick(1 / 30.0f);
+			PlayerCamera::View podView;
+			CHECK(camera.view(podView, 16.0f / 9));
+			CHECK(std::none_of(level.world->projectiles().begin(), level.world->projectiles().end(), [](const auto& p) {
+				return p.settings && p.settings->name == "eu_pod0";
+			}));
+			const auto pods = level.world->pods();
+			CHECK(pods.size() == 1);
+			if (pods.size() == 1) {
+				const auto podSeats = level.world->vehicleSeats(pods.front().object);
+				CHECK(podSeats.size() == 1 && !podSeats.front().cameras.empty());
+				const auto v = pods[0].velocity;
+				const float speed = std::sqrt(physics::lengthSquared(v));
+				CHECK(speed > 90);
+				CHECK(physics::dot(v * (1 / speed), expected) > 0.99f);
+			}
+		 }
+		}
+	}
+}
+
+#ifdef BF2142_RENDER_TESTS
+TEST(Titan_PodStrafeStaysScreenRelativeAfterTurning)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		// Coasting, A, D, S, W: retail's ForceObjects (0x0062c920) push force x
+		// input, clamped to +-maxForceOnObject, so S's -1 on eu_pod_FOFWD
+		// (35 / 35) thrusts the pod backwards along its own hull.
+		const float inputs[5][2] = {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+		physics::Vec3 velocity[5], right, ahead;
+		int trial = 0;
+		for (const auto& [strafe, throttle] : inputs) {
+			TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) return;
+			CHECK(level.world->spawnPlayer(1) != nullptr);
+			const int player = level.world->localPlayer();
+			game::GameWorld::PlayerInfo me;
+			CHECK(level.world->playerInfo(player, me));
+			const auto* titan = level.titan(1);
+			CHECK(titan);
+			if (!titan) return;
+			CHECK(level.world->setSoldierPosition(me.soldier, titan->position + physics::Vec3 {30, 10, 0}));
+			physics::Vec3 entry;
+			float radius = 0;
+			CHECK(level.world->titanPodEntry(player, entry, radius));
+			CHECK(level.world->setSoldierPosition(me.soldier, entry - physics::Vec3 {0, 1, 0}));
+			game::SoldierInput input;
+			input.use = true;
+			level.world->setInput(player, input);
+			level.run(0.1f);
+			level.world->setInput(player, {});
+			CHECK(level.world->launchPod(player));
+			CHECK(level.world->pods().size() == 1);
+			if (level.world->pods().size() != 1) return;
+			const uint32_t pod = level.world->pods().front().object;
+			const float launchYaw = level.objects.find(pod)->rotation().x;
+			CHECK(level.world->setBodyVelocity(pod, {0, 15, 0}));
+			for (int tick = 0; tick < 30; ++tick) {
+				input = {};
+				input.turn = 5;
+				input.aimPitch = 2.5f * (tick + 1);
+				level.world->setInput(player, input);
+				level.run(1 / 30.0f);
+			}
+			CHECK(std::fabs(std::remainder(level.objects.find(pod)->rotation().x - launchYaw, 360.0f)) > 1);
+			world::Vec3 offset, mountTurn;
+			CHECK(level.world->partPose(pod, "eu_pod_CameraMount", offset, mountTurn));
+			CHECK(mountTurn.y < -1);
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera camera(*level.world, systems, nullptr);
+			camera.tick(1 / 30.0f);
+			PlayerCamera::View eye;
+			CHECK(camera.view(eye, 16.0f / 9));
+			if (!camera.view(eye, 16.0f / 9)) return;
+			render::Camera rendered;
+			rendered.position = {eye.position[0], eye.position[1], eye.position[2]};
+			rendered.yaw = eye.yaw; rendered.pitch = eye.pitch; rendered.roll = eye.roll;
+			const auto screen = rendered.view();
+			if (trial == 0) {
+				right = {screen.at(0, 0), screen.at(1, 0), screen.at(2, 0)};
+				const world::Vec3 hull = level.objects.find(pod)->rotation();
+				ahead = physics::Mat3::fromYawPitchRoll({hull.x, hull.y, hull.z}).rows[2];
+			}
+			input.turn = 0;
+			input.strafe = strafe;
+			input.throttle = throttle;
+			level.world->setInput(player, input);
+			level.run(0.1f);
+			CHECK(level.world->ridingPod(player) && level.world->pods().size() == 1);
+			if (level.world->pods().size() != 1) return;
+			velocity[trial++] = level.world->pods().front().velocity;
+		}
+		const float left = physics::dot(velocity[1] - velocity[0], right);
+		const float rightward = physics::dot(velocity[2] - velocity[0], right);
+		const float back = physics::dot(velocity[3] - velocity[0], ahead);
+		const float forward = physics::dot(velocity[4] - velocity[0], ahead);
+		std::fprintf(stderr, "  %s: A %.3f, D %.3f m/s along screen-right; S %.3f, W %.3f along the hull's forward\n",
+			mod, left, rightward, back, forward);
+		CHECK(left < -0.5f);
+		CHECK(rightward > 0.5f);
+		CHECK(back < -0.5f);
+		CHECK(forward > 0.5f);
+	}
+}
+#endif
+
+// Standing still on a moving Titan's deck: the soldier moves with it (its
+// measured velocity is the deck's) but its animations see no movement, as
+// the walker's input takes the floor's velocity off (0x0063ce30).
+TEST(Titan_SoldierStandingOnAMovingDeckDoesNotWalk)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.world->moveTitan(1, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	level.run(20);
+	const auto pac = *level.titan(1);
+	const world::Object* titan = level.objects.find(pac.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({titan->rotation().x, titan->rotation().y, titan->rotation().z});
+	CHECK(level.world->spawnPlayer(1) != nullptr);
+	const int me = level.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(me, info);
+	CHECK(level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({0, 11.5f, -40})));
+	level.run(2);
+	float carried = 0, animated = 0;
+	for (int i = 0; i < 90; ++i) {
+		level.run(1 / 30.0f);
+		const physics::SoldierBody* body = level.world->soldierBody(me);
+		CHECK(body != nullptr);
+		if (!body) {
+			break;
+		}
+		carried = std::max(carried, std::sqrt(physics::lengthSquared(body->measuredVelocity)));
+		animated = std::max(animated, std::sqrt(physics::lengthSquared(body->animationVelocity())));
+	}
+	std::fprintf(stderr, "  on the moving deck: measured %.3f m/s, animation %.3f m/s\n", carried, animated);
+	CHECK(carried > 0.2f); // it rides along
+	CHECK(animated < 0.1f); // and stands
+}
+
+// A console's and the core's automatic radio (Radio.friendlyDestroyedMessage /
+// enemyDestroyedMessage, 0x00656d10): Betty to the Titan's team, the commander
+// to the attackers.
+TEST(Titan_ConsoleDestroyedRadio)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	sound::SoundManager manager {nullptr, level.templates};
+	sound::GameSounds sounds {manager};
+	// The voice table's pairs (VoiceMessages_AutomaticallyTriggered.con):
+	// outside the commander reads it, inside one's own Titan ("_inside") Betty.
+	sound::VoiceMessages voices {manager};
+	voices.reset("English", "English");
+	voices.addRadioFilter("commander", "Sound/VO/Activate_radio.wav");
+	for (const char* letter : {"a", "b", "c", "d"}) {
+		const std::string bb = std::string("AUTO_TITAN_BB_consoledestroyed") + letter;
+		voices.addMessage(bb);
+		voices.addRadioVoice("commander", "commander/filter/AUTO_TITAN_C_consoledestroyed" + std::string(letter) + ".ogg", bb);
+		voices.addMessage(bb + "_inside");
+		voices.addRadioVoice("commander", "betty/filter/" + bb + ".ogg", bb);
+	}
+	voices.build();
+	std::vector<std::string> played;
+	voices.onPlay = [&](const std::string& file, bool) { played.push_back(file); };
+	GameAudio audio(*level.world, level.objects, level.templates, manager, sounds, &voices);
+	const int attacker = level.world->addPlayer("Eu", 2, true);
+	uint32_t console = 0;
+	physics::Vec3 inside;
+	for (const auto& part : level.world->titanParts(1)) {
+		if (part.kind == game::GameWorld::TitanPartInfo::Console && !console) {
+			console = part.id;
+			inside = part.position + physics::Vec3 {0, 0.5f, 0};
+		}
+	}
+	CHECK(console != 0);
+	const world::Object* me = level.world->spawnPlayer(1);
+	CHECK(me != nullptr);
+	if (!me) {
+		return;
+	}
+	CHECK(level.world->setSoldierPosition(me->id(), inside));
+	for (int i = 0; i < 70; ++i) {
+		level.world->tick(1 / 30.0f);
+		audio.autoRadio();
+	}
+	level.world->applyDamage(console, 1e6f, attacker);
+	std::vector<std::pair<int, std::string>> sent;
+	for (int i = 0; i < 70 && sent.empty(); ++i) {
+		level.world->tick(1 / 30.0f);
+		sent = audio.autoRadio();
+	}
+	for (const auto& s : sent) {
+		std::fprintf(stderr, "  radio to %d: %s\n", s.first, s.second.c_str());
+	}
+	audio.tick({});
+	CHECK(audio.listenerState().insideTitan && audio.listenerState().insideTitanTeam == 1);
+	CHECK(!played.empty() && played.back().find("betty/filter/AUTO_TITAN_BB_consoledestroyed") != std::string::npos);
+	CHECK(sent.size() == 2 && sent[0].first == 1 && sent[0].second.rfind("AUTO_TITAN_BB_consoledestroyed", 0) == 0
+		&& sent[1].first == 2 && sent[1].second.rfind("AUTO_TITAN_C_consoledestroyed", 0) == 0);
+}
+
+
+// From a Titan gun's seat, the cockpit geometry (0x00612880) is that gun's
+// alone: the Titan's other guns keep their exterior geometry.
+TEST(Titan_GunSeatCockpitLeavesTheOtherGuns)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	const int team = 2;
+	CHECK(level.world->spawnPlayer(team) != nullptr);
+	const int player = level.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(player, info));
+	const auto* titan = level.titan(team);
+	if (!titan) { CHECK(titan); return; }
+	CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+	physics::Vec3 entry; float radius = 0; int seat = -1;
+	CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+	CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+	game::SoldierInput input; input.use = true;
+	level.world->setPlayerInput(input); level.run(0.1f);
+	const auto seats = level.world->vehicleSeats(level.world->titanOf(team));
+	int cannon = -1;
+	for (size_t i = 0; i < seats.size() && cannon < 0; ++i) {
+		if (seats[i].name.find("groundcanone3") != std::string::npos) cannon = static_cast<int>(i);
+	}
+	CHECK(cannon >= 0);
+	if (cannon < 0) return;
+	input = {}; input.switchSeat = cannon + 1;
+	level.world->setPlayerInput(input); level.run(0.5f);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(*level.world, systems, nullptr);
+	camera.tick(1 / 30.0f);
+	PlayerCamera::Cockpit cockpit;
+	CHECK(camera.cockpit(cockpit));
+	std::fprintf(stderr, "  seat %s (mesh %d), cockpit geometry %d\n", cockpit.seat.c_str(), cockpit.seatHasGeometry, cockpit.subGeometry);
+	CHECK(cockpit.seat == seats[static_cast<size_t>(cannon)].name);
+	std::string other;
+	for (const auto& s : seats) {
+		if (s.name.find("groundcanone3") != std::string::npos && s.name != cockpit.seat) other = s.name;
+	}
+	CHECK(!other.empty());
+	CHECK(PlayerCamera::cockpitCovers(cockpit, cockpit.seat + "/gun"));
+	CHECK(!PlayerCamera::cockpitCovers(cockpit, other + "/gun"));
+}
+
+// A joined client's Titans (the client's frame 0x00590e10 runs the Titan
+// sync, 0x00561e20 -> 0x005aca70; 0x00562100 takes its messages): moved
+// from the server's orders and states (ECPhysicsETitanSync, 9/0 and 9/2)
+// as the server moves its own, a tick at a time, so the client's Titan is
+// where the server's is at each tick, and moves at its velocity from the
+// order's first tick on (before, a client took the velocity from its
+// updates' places and lagged the start). A client that missed the orders
+// catches up from the Titans' last orders and states (titanSyncState).
+TEST(Titan_ClientSyncMovesAsTheServer)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel server(gameDir, "Minsk", 48);
+	TitanLevel client(gameDir, "Minsk", 48, false);
+	CHECK(server.loaded && client.loaded);
+	if (!server.loaded || !client.loaded) {
+		return;
+	}
+	// The client's ghosts of both Titans, where CreateObject and their
+	// first state put them.
+	std::map<int, uint32_t> ghost, real;
+	for (const auto& t : server.world->titans()) {
+		const world::Object* o = server.objects.find(t.object);
+		world::Object* made = client.objects.create(client.templates.find(o->objectTemplate()->name()), o->position(), o->rotation());
+		CHECK(made != nullptr);
+		if (!made) {
+			return;
+		}
+		made->setTeam(t.team);
+		CHECK(client.world->addRemoteTitan(made->id()));
+		ghost[t.team] = made->id();
+		real[t.team] = t.object;
+	}
+	client.world->tick(1 / 30.0f); // their meshes and radii
+	bool joined = false;
+	const auto deliver = [&] {
+		for (const auto& m : server.world->takeTitanSync()) {
+			if (joined) {
+				client.world->titanSyncMessage(m);
+			}
+		}
+	};
+	float worst = 0, worstSpeed = 0;
+	const auto step = [&](int ticks, bool compare) {
+		for (int i = 0; i < ticks; ++i) {
+			// The client's clock is up to the server's when the messages
+			// come (they go out after the server's tick).
+			server.world->tick(1 / 30.0f);
+			client.world->stepTitanSync(server.world->ticks());
+			deliver();
+			client.world->tick(1 / 30.0f);
+			if (!compare) {
+				continue;
+			}
+			for (int team = 1; team <= 2; ++team) {
+				const world::Vec3 a = server.objects.find(real[team])->position(), b = client.objects.find(ghost[team])->position();
+				worst = std::max({worst, std::fabs(a.x - b.x), std::fabs(a.z - b.z)});
+				physics::Vec3 v;
+				CHECK(client.world->titanSyncPlaced(ghost[team], &v));
+				for (const auto& t : server.world->titans()) {
+					if (t.team == team) {
+						worstSpeed = std::max({worstSpeed, std::fabs(t.velocity.x - v.x), std::fabs(t.velocity.z - v.z)});
+					}
+				}
+			}
+		}
+	};
+	// The server's first orders (each Titan's own place, 0x005aca70's
+	// server side) go out before the client joins; then the commander's.
+	step(90, false);
+	CHECK(server.world->moveTitan(1, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	step(20 * 30, false);
+	const world::Vec3 before = server.objects.find(real[1])->position();
+	const world::Vec3 stale = client.objects.find(ghost[1])->position();
+	CHECK(std::fabs(before.x - stale.x) + std::fabs(before.z - stale.z) > 1); // moved, unseen
+	// The client joins: the last orders and states, then the messages.
+	joined = true;
+	for (const auto& m : server.world->titanSyncState()) {
+		client.world->titanSyncMessage(m);
+	}
+	client.world->stepTitanSync(server.world->ticks());
+	step(15 * 30, true);
+	// The other Titan ordered while the client watches: both follow.
+	{
+		const world::Vec3 a = server.objects.find(real[2])->position(), b = server.objects.find(real[1])->position();
+		CHECK(server.world->moveTitan(2, a.x + 0.2f * (b.x - a.x), a.z + 0.2f * (b.z - a.z))
+			== game::GameWorld::TitanMove::Accepted);
+	}
+	step(20 * 30, true);
+	std::fprintf(stderr, "  client against server: place %.6f m, velocity %.6f m/s at worst\n", worst, worstSpeed);
+	CHECK(worst < 1e-3f);
+	CHECK(worstSpeed < 1e-4f);
+	// A client gone wrong (its Titan's armour read as down: no push) is put
+	// back by the server's next state where they differ (0x005ab8a0).
+	client.world->setRemoteTitanHitPoints(ghost[1], 0);
+	step(20, false);
+	const world::Vec3 a = server.objects.find(real[1])->position(), b = client.objects.find(ghost[1])->position();
+	const float off = std::fabs(a.x - b.x) + std::fabs(a.z - b.z);
+	CHECK(off > 1e-3f);
+	client.world->setRemoteTitanHitPoints(ghost[1], 6e6f);
+	step(45, false);
+	worst = 0;
+	step(60, true);
+	std::fprintf(stderr, "  %.4f m off with the armour misread, %.6f m a state later\n", off, worst);
+	CHECK(worst < 1e-3f);
+	const world::Vec3 now = server.objects.find(real[1])->position();
+	CHECK(std::fabs(now.x - before.x) + std::fabs(now.z - before.z) > 10); // it went on moving
+}
+
+// A joined client's Titans take their height and heading from CreateObject:
+// the server's always says one ghost with the root's place and its
+// rotation in degrees, as floats (0x0050b0f0 sets +0x30 to 1; 0x004ab8a0
+// and the late-join replay), and the client numbers the tree's ghosts
+// from it (0x004b3f70 -> 0x0067d3d0); a Titan's mode mask (0x005fdce0,
+// 0xf61270) keeps its place and orientation out of every ghost write,
+// its first state included (0x0057f420). So the client's Titan stands
+// where the server's does to the bit, turned as it is (Minsk's EU Titan
+// by -4.964 degrees), not by a 14-bit quaternion.
+TEST(Titan_JoinedClientPlacedByCreateObject)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	CHECK(level.loaded && level.world->titans().size() == 2);
+	if (!level.loaded || level.world->titans().size() != 2) {
+		return;
+	}
+	game::GameLogic logic;
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Minsk";
+	setup.gameMode = "gpm_ti";
+	setup.mapSize = 48;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	client.world().setGhostTemplates([&level](uint32_t id) {
+		const world::ObjectTemplate* t = level.templates.findById(id);
+		return t ? net::ghostTemplateFrom(level.templates, *t) : net::GhostTemplateNode {};
+	});
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto titanGhost = [&](const game::GameWorld::TitanInfo& t) -> const net::RemoteObject* {
+		const world::Object* o = level.objects.find(t.object);
+		for (const net::RemoteObject& g : client.world().objectList()) {
+			if (o && g.part == 0 && g.templateId == o->objectTemplate()->id()) {
+				return client.world().object(g.ghost);
+			}
+		}
+		return nullptr;
+	};
+	int updates = 0;
+	for (int frame = 0; frame < 4000 && updates < 90; ++frame) {
+		client.update();
+		hosted.tick();
+		level.world->tick(1 / 30.0f);
+		bool both = true;
+		for (const auto& t : level.world->titans()) {
+			const net::RemoteObject* g = titanGhost(t);
+			both = both && g && g->health >= 0; // a state of its own read
+		}
+		updates += both ? 1 : 0;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	CHECK(updates >= 90);
+	for (const auto& t : level.world->titans()) {
+		const world::Object* o = level.objects.find(t.object);
+		const net::RemoteObject* g = titanGhost(t);
+		CHECK(o && g);
+		if (!o || !g) {
+			continue;
+		}
+		CHECK(g->hasPosition && !g->hasOrientation);
+		CHECK(g->position.x == o->position().x && g->position.y == o->position().y && g->position.z == o->position().z);
+		CHECK(g->rotation.x == o->rotation().x && g->rotation.y == o->rotation().y && g->rotation.z == o->rotation().z);
+		// Every ghost of the tree from the one CreateObject.
+		const net::RemoteObject* seat = client.world().object(static_cast<uint16_t>(g->ghost + 1));
+		CHECK(seat && seat->rootGhost == g->ghost);
+	}
+	bool turned = false;
+	for (const auto& t : level.world->titans()) {
+		turned = turned || std::fabs(level.objects.find(t.object)->rotation().x + 4.964f) < 1e-3f;
+	}
+	CHECK(turned);
+	client.disconnect();
+}
+
+// The Titan the camera is in, as BF2142.exe tells RendDX9 each frame
+// (0x006fa940 -> 0x006fa8b0): the hull test from the camera (0x006f2db0 ->
+// 0x006f2b00), whatever the soldier's place (the soldier branch is gated by
+// an int nothing sets). The renderer's room boxes, which it used instead,
+// don't fit the hull, so the Titan's shield (skipped from inside) came and
+// went on the decks and in the upper hangar.
+TEST(Titan_CameraTitanIsTheHullHoldingTheCamera)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	const auto* titan = level.loaded ? level.titan(2) : nullptr;
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	const world::Object* titanObject = level.objects.find(titan->object);
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({titanObject->rotation().x, titanObject->rotation().y, titanObject->rotation().z});
+	const physics::Vec3 origin {titanObject->position().x, titanObject->position().y, titanObject->position().z};
+	const physics::Vec3 inside = origin + turn.transform({0, -0.081f, -53.4f + 18});
+	const physics::Vec3 outside = inside + turn.transform({60, 0, 0});
+	CHECK(level.world->cameraTitan(inside) == titan->object);
+	CHECK(level.world->cameraTitan(outside) == 0);
+	CHECK(level.world->cameraTitan(origin + physics::Vec3 {0, 200, 0}) == 0); // the commander's overhead view
+	// The soldier in the hull doesn't take the camera with him.
+	CHECK(level.world->spawnPlayer(2) != nullptr);
+	const int me = level.world->localPlayer();
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(me, info));
+	CHECK(level.world->setSoldierPosition(info.soldier, inside));
+	CHECK(level.world->enclosingTitan(me) == titan->object);
+	CHECK(level.world->cameraTitan(outside) == 0);
+	CHECK(level.world->cameraTitan(inside) == titan->object);
+}
+
+// OptimizeEnclosingObjectsNetworking (a var, 0 by default): a client whose
+// soldier stands in a Titan's hull (the soldier's node +0x120, slot 0xa8
+// of its +0x18c, 0x00585cb0) doesn't get the soldiers enclosed otherwise
+// more than 20 m away scored, or at 0.01 with GhostNotEnclosed
+// (0x0057d560). Here an enemy 60 m off the EU Titan, outside it, walking:
+// its ghost's updates in 3 s, the var off, on, and on with
+// GhostNotEnclosed.
+TEST(Titan_EnclosedClientLeavesOutsideSoldiersUnscored)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	const auto* titan = level.loaded ? level.titan(2) : nullptr;
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	const world::Object* titanObject = level.objects.find(titan->object);
+	const physics::Mat3 turn =
+		physics::Mat3::fromYawPitchRoll({titanObject->rotation().x, titanObject->rotation().y, titanObject->rotation().z});
+	const physics::Vec3 inside = physics::Vec3 {titanObject->position().x, titanObject->position().y, titanObject->position().z}
+		+ turn.transform({0, -0.081f, -53.4f + 18});
+	game::GameLogic logic;
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Minsk";
+	setup.gameMode = "gpm_ti";
+	setup.mapSize = 48;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Inside";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const int enemy = level.world->addPlayer("Outside", 1, true);
+	CHECK(level.world->spawnSoldier(enemy));
+	int me = -1;
+	float x = 0;
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		game::GameWorld::PlayerInfo info;
+		if (me >= 0 && level.world->playerInfo(me, info) && info.alive) {
+			level.world->setSoldierPosition(info.soldier, inside);
+		}
+		if (level.world->playerInfo(enemy, info) && info.alive) {
+			x += 0.1f;
+			level.world->setSoldierPosition(info.soldier, inside + turn.transform({60, 0, std::fmod(x, 10.0f)}));
+		}
+		level.world->tick(1 / 30.0f);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	};
+	const auto pump = [&](const std::function<bool()>& done, int milliseconds) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+		while (std::chrono::steady_clock::now() < deadline) {
+			step();
+			if (done()) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(pump([&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 8000));
+	me = client.world().localPlayer();
+	client.selectTeam(2);
+	game::GameWorld::PlayerInfo info;
+	CHECK(pump([&] { return level.world->playerInfo(me, info) && info.team == 2; }, 4000));
+	client.selectSpawnGroup(-1);
+	CHECK(pump([&] { return level.world->playerInfo(me, info) && info.alive; }, 8000));
+	step();
+	CHECK(level.world->enclosingTitan(me) == titan->object);
+	CHECK(level.world->enclosingTitan(enemy) == 0);
+	const auto updates = [&] {
+		const net::RemotePlayer* p = client.world().player(enemy);
+		const net::RemoteObject* o = p && p->soldierGhost ? client.world().object(p->soldierGhost) : nullptr;
+		return o ? o->updates : 0u;
+	};
+	const auto during = [&](int ticks) {
+		const uint32_t from = updates();
+		for (int i = 0; i < ticks; ++i) {
+			step();
+		}
+		return updates() - from;
+	};
+	Vars& vars = Vars::global();
+	during(60);
+	const uint32_t off = during(90);
+	vars.set("OptimizeEnclosingObjectsNetworking", "1");
+	during(15);
+	const uint32_t on = during(90);
+	vars.set("GhostNotEnclosed", "1");
+	during(15);
+	const uint32_t notEnclosed = during(90);
+	vars.set("OptimizeEnclosingObjectsNetworking", "0");
+	vars.set("GhostNotEnclosed", "0");
+	std::fprintf(stderr, "  the enemy outside: %u updates in 3 s, %u with the var, %u with GhostNotEnclosed too\n", off, on,
+		notEnclosed);
+	CHECK(off > 20);
+	CHECK(on == 0);
+	CHECK(notEnclosed > 0);
+	client.disconnect();
+}
+
+// The air transports' seats (eu_at's pilot, gunners and passengers:
+// exitThroughPodLauncher, each with an air_pod_launcher on PIFire): the
+// exit key fires the seat's pod launcher whatever its input (0x004bda00
+// mask 0x400 -> event 6), its round being the pod (eu_pod_drop,
+// enterOnSpawn) that seats the soldier who fired it. The fire button does
+// not: a passenger's primary fire is his own weapon's.
+TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded || !level.templates.find("eu_at") || !level.templates.find("eu_pod_drop")) {
+		return;
+	}
+	level.run(0.5f);
+	for (const bool exitKey : {true, false}) {
+		const float x = exitKey ? 0.0f : 60.0f, z = 0;
+		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + 3.0f, z});
+		at->setTeam(2);
+		level.run(2 / 30.0f);
+		const int player = level.world->addPlayer(exitKey ? "Exit" : "Fire", 2, false);
+		CHECK(level.world->spawnSoldier(player));
+		// In at its entry point (the use key's reach).
+		physics::Vec3 entry;
+		CHECK(level.world->entryPoint(at->id(), entry));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(player, info);
+		level.world->setSoldierPosition(info.soldier, {entry.x, entry.y - 1.0f, entry.z});
+		game::SoldierInput use;
+		use.use = true;
+		level.world->setInput(player, use);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		level.run(1 / 30.0f);
+		// A passenger's seat (eu_at_Passenger2_Left..).
+		int seat = -1;
+		const auto seats = level.world->vehicleSeats(at->id());
+		for (size_t i = 0; i < seats.size() && seat < 0; ++i) {
+			std::string name = seats[i].name;
+			std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			seat = name.find("passenger") != std::string::npos ? static_cast<int>(i) : -1;
+		}
+		CHECK(seat > 0);
+		game::SoldierInput input;
+		input.switchSeat = seat + 1;
+		level.world->setInput(player, input);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		level.run(1 / 30.0f);
+		CHECK(level.world->playerInfo(player, info) && info.vehicle == at->id() && info.seat == seat);
+		level.run(1.1f); // the exit key (0x004bda00) acts only more than a second after entering
+		game::SoldierInput leave;
+		leave.use = exitKey;
+		leave.fire = !exitKey;
+		level.world->setInput(player, leave);
+		level.run(1 / 30.0f);
+		level.world->setInput(player, {});
+		// (Read at once: a pod launched under a parked transport lands in a tick or two, 0x005cf750.)
+		std::string pod;
+		for (const auto& p : level.world->pods()) {
+			if (p.player == player) {
+				const world::Object* o = level.objects.find(p.object);
+				pod = o && o->objectTemplate() ? o->objectTemplate()->name() : "";
+			}
+		}
+		std::fprintf(stderr, "  %s: %s\n", exitKey ? "the exit key" : "fire", pod.c_str());
+		if (exitKey) {
+			// The exit key's rays (0x004bda00) run from the launcher along its
+			// firing direction, 3 m: the transport parked on the ground
+			// leaves its soldier standing beside it, not in a pod.
+			CHECK(level.world->playerInfo(player, info) && info.vehicle != at->id() && (pod == "eu_pod_drop" || pod.empty()));
+		} else {
+			// The primary fire is the passenger's own weapon's: no pod.
+			CHECK(pod.empty() && level.world->playerInfo(player, info) && info.vehicle == at->id());
+		}
+	}
+}
+
 // Suez_Canal's EU Titan: a soldier walking out of its spawn room crosses
 // the deck's seams, a centimetre or two down, and spends a tick in the air
 // at each. The Soldier asks for no velocity in the air (0x00588420) and the
@@ -1401,4 +3871,232 @@ TEST(Titan_SoldierWalksOverTheDeckSeams)
 		sum / counted, slowest);
 	CHECK(airborne > 0 && info.alive);
 	CHECK(slowest > 3.3f && sum / counted > 3.6f);
+}
+
+// Bridge at Remagen's real gpm_ti combat areas: the playable "0_Titan" binds
+// VCLand (vehicles 0), "25_Titan" the aircraft (5) and the "32_Titan" strip
+// everything (4). The retail test (0x004ca5d0 -> 0x004d9d50 with the argument
+// 4) takes the category of the controlled object, and an object without the
+// vehicle-category interface, a soldier on foot, reads 0 (xor eax, eax at
+// 0x004d9dba): so he is inside the land area wherever the strip is not.
+TEST(Titan_RemagenSoldierOnFootIsInsideTheLandArea)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.areas.use && level.areas.areas.size() == 3);
+	const terrain::Heightmap* ground = level.heightmaps.primary();
+	const int me = level.world->addPlayer("Walker", 2, false);
+	CHECK(level.world->spawnSoldier(me));
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(me, info));
+	// Control points of the level (the Square, the Hotel, the Monorail
+	// Station), all outside the strip, all inside the land area.
+	for (const auto& at : {std::pair<float, float> {-172, 45}, {259, 347}, {380, 522}}) {
+		CHECK(level.areas.inside(at.first, at.second, 0));
+		CHECK(!level.areas.inside(at.first, at.second, 4)); // the strip alone: what a category-4 soldier met
+		CHECK(level.world->setSoldierPosition(info.soldier, {at.first, ground->heightAt(at.first, at.second), at.second}));
+		CHECK(level.world->insideCombatArea(me) && level.world->outsideCombatArea(me) < 0);
+	}
+	// Beyond the playable area's edge he is outside.
+	CHECK(level.world->setSoldierPosition(info.soldier, {-600, ground->heightAt(-600, 0), 0}));
+	CHECK(!level.world->insideCombatArea(me));
+}
+
+// A silo's missile has no obstacle avoidance. msilo_missile's onlyDetonateOnMaterial 4100
+// within onlyDetonateOnMaterialTimeLimit 6.5 s (retail 0x005b51e6..0x005b5281, collision
+// handler 0x005b4ff0): a contact with another material that is no Titan's destroys that
+// object on the server and the round flies on; once the 6.5 s are over any contact sets it
+// off. Its follow lifts the 4/1 degree turn caps (magneticBehaviour) only on the tick its
+// target changed: the projectile update hands it the target every tick (0x005b4047),
+// setTarget (0x005ed260) raises +0x94 only for a new target, and the turn clears it
+// (0x005ecee7). The first turn, trackingDelay 3 s after the launch (0x005b2c84), is capped,
+// so the vertical climb bends over at 1 degree a tick instead of snapping flat at the Titan
+// and skimming the roofs. Bridge at Remagen, PAC's silos at EU's Titan: cp602 and cp603 (the
+// latter went off 394 m short when the first turn snapped) reach the Titan; cp604, 670 m
+// from it, still meets the tall bp1_residential_house_02_e after the 6.5 s.
+TEST(Titan_SiloMissileBendsOverGraduallyAndReachesTheTitan)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, nullptr, true);
+	if (!level.loaded) {
+		return;
+	}
+	struct Flight {
+		bool ended = false;
+		float endAge = 0, toTitan = -1;
+		physics::Vec3 at3 {}, at35 {};
+		bool have3 = false, have35 = false;
+	};
+	const auto fly = [&](int controlPoint) {
+		const auto silos = level.world->missileSilos();
+		const auto silo = std::find_if(silos.begin(), silos.end(), [&](const auto& s) { return s.controlPoint == controlPoint; });
+		CHECK(silo != silos.end());
+		Flight flight;
+		if (silo == silos.end()) {
+			return flight;
+		}
+		level.world->setControlPointTeam(controlPoint, 1);
+		bool have = false;
+		physics::Vec3 last {};
+		float lastAge = 0;
+		level.afterTick = [&] {
+			bool found = false;
+			for (const auto& p : level.world->projectiles()) {
+				if (!p.alive || !p.settings || p.settings->name != "msilo_missile" || p.shooter != silo->object) {
+					continue;
+				}
+				found = true;
+				if (!flight.have3 && p.age >= 3.0f) {
+					flight.at3 = p.position;
+					flight.have3 = true;
+				}
+				if (!flight.have35 && p.age >= 3.5f) {
+					flight.at35 = p.position;
+					flight.have35 = true;
+				}
+				last = p.position;
+				lastAge = p.age;
+				have = true;
+			}
+			if (!found && have && !flight.ended) {
+				flight.ended = true;
+				flight.endAge = lastAge;
+				const auto* eu = level.titan(2);
+				flight.toTitan = eu ? std::sqrt(physics::lengthSquared(eu->position - last)) : -1.0f;
+			}
+		};
+		for (int second = 0; second < 150 && !flight.ended; ++second) {
+			level.run(1);
+		}
+		level.afterTick = nullptr;
+		level.world->setControlPointTeam(controlPoint, 0);
+		level.run(1);
+		return flight;
+	};
+	for (int controlPoint : {602, 603}) {
+		const Flight flight = fly(controlPoint);
+		CHECK(flight.ended && flight.have3 && flight.have35);
+		// Half a second into tracking it still climbs steeply.
+		const physics::Vec3 d = flight.at35 - flight.at3;
+		CHECK(d.y > 4 && d.y > 2 * std::sqrt(d.x * d.x + d.z * d.z));
+		CHECK(flight.endAge > 8.5f && flight.toTitan > 0 && flight.toTitan < 100);
+	}
+	const Flight blocked = fly(604);
+	CHECK(blocked.ended && blocked.endAge > 6.5f && blocked.toTitan > 300);
+}
+
+// RendDX9's decal clip (0x10165f60 -> 0x101655c0) starts at the face the
+// round hit and walks its edge neighbours, at most 4 deep (0x101f79d4): a
+// rifle round's decal on the Suez EU Titan's hull lies on the hull about
+// the hit, never on a face of the same mesh elsewhere in its column.
+TEST(Titan_HullDecalStaysOnTheHull)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	if (!level.loaded) {
+		return;
+	}
+	level.run(1);
+	const auto* titan = level.titan(2);
+	CHECK(titan != nullptr);
+	if (!titan) {
+		return;
+	}
+	const int shooter = level.world->addPlayer("Shooter", 1, true);
+	const world::ObjectTemplate* rifle = level.templates.find("eu_ar_rifle");
+	const std::string round = rifle && rifle->settings().count("projectileTemplate") ? rifle->settings().at("projectileTemplate") : "";
+	CHECK(!round.empty());
+	const physics::Vec3 c = titan->position;
+	for (int side = 0; side < 4; ++side) {
+		const float a = side * 1.5707963f;
+		const physics::Vec3 out {std::sin(a), 0, std::cos(a)};
+		for (float dy = -6; dy <= 14; dy += 2) {
+			for (float across = -20; across <= 20; across += 5) {
+				const physics::Vec3 from = c + out * 45.0f + physics::Vec3 {out.z, 0, -out.x} * across + physics::Vec3 {0, dy, 0};
+				level.world->launchProjectile(round, from, out * -400.0f, shooter);
+			}
+			level.run(0.2f);
+		}
+	}
+	int decals = 0, far = 0, empty = 0;
+	float worst = 0;
+	for (const effects::Decal& d : level.world->effects().decals()) {
+		if (d.object != titan->object) {
+			continue;
+		}
+		const physics::CollisionWorld* mesh =
+			d.part >= 0 ? level.world->partCollision(d.object, d.part) : level.world->projectileCollision(d.object);
+		if (!mesh) {
+			continue;
+		}
+		std::vector<std::array<effects::Vec3, 3>> faces;
+		mesh->forEachFaceNear(d.position, d.size * 0.5f * 1.4143f,
+			[&](const physics::Vec3& p, const physics::Vec3& q, const physics::Vec3& r, uint32_t, uint32_t) {
+				faces.push_back({p, q, r});
+			});
+		const auto pieces = effects::clipDecal(d.position, d.normal, d.tangent, d.size * 0.5f, d.frame, faces, 60, 0.01f);
+		++decals;
+		empty += pieces.empty() ? 1 : 0;
+		float most = 0;
+		for (const auto& p : pieces) {
+			most = std::max(most, std::sqrt(physics::lengthSquared(p.position - d.position)));
+		}
+		worst = std::max(worst, most);
+		far += most > d.size * 2 ? 1 : 0;
+	}
+	std::fprintf(stderr, "  %d decals on the EU Titan, %d with pieces off the hull (worst %.1f m), %d with none\n", decals,
+		far, worst, empty);
+	CHECK(decals > 10);
+	CHECK(far == 0);
+	CHECK(empty == 0); // the hit face always keeps its piece
+}
+
+// Wake_Island_2142 (gpm_ca 64): the two dock Titans are RCTitan trees in a
+// mode that is not gpm_ti. Retail lists them in any mode and only the
+// movement tick (0x00561e20) is gpm_ti's, so they keep their parts and stay put.
+TEST(Titan_WakeStaticTitansKeepPartsAndStayPut)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Wake_Island_2142", 64, true, nullptr, false, nullptr, "gpm_ca");
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.world->titans().size() == 2);
+	std::vector<physics::Vec3> before;
+	for (int team = 1; team <= 2; ++team) {
+		const auto* titan = level.titan(team);
+		CHECK(titan != nullptr);
+		if (!titan) {
+			before.push_back({});
+			continue;
+		}
+		CHECK(level.world->isTitan(titan->object));
+		CHECK(!level.world->titanParts(team).empty());
+		CHECK(titan->consoles > 0);
+		before.push_back(titan->position);
+	}
+	level.run(20);
+	for (int team = 1; team <= 2; ++team) {
+		if (const auto* titan = level.titan(team)) {
+			const physics::Vec3 d = titan->position - before[team - 1];
+			CHECK(physics::lengthSquared(d) < 0.01f);
+		}
+	}
 }

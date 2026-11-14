@@ -49,6 +49,7 @@
 #include "Game/SoldierControl.h"
 #include "Physics/RigidBody.h"
 
+#include <functional>
 #include <array>
 #include <memory>
 #include <string>
@@ -210,13 +211,17 @@ public:
 		std::string steering; // the RotationalBundle above it, if any
 		// What an object's mesh gave the wheel's own response last tick (its
 		// vertical probes in 0x006bb050 add to the wheel's response, slot
-		// 0x2c, as the heightmap's points do): the highest crossing, the
-		// mean normal, the mean velocity of what it touched and that
-		// surface's grip. The spring and the tyre read it as the ground
-		// when it is above the terrain.
+		// 0x2c, 0x006ba4c0): the push-out combined per axis (+0x94), the
+		// root's push-out as it stood at the latest of them (+0xa0, through
+		// slot 0x90 -> slot 0x8c), the mean normal, the mean velocity of
+		// what it touched and that surface's grip. The Spring's solve
+		// (0x006ba7d0, class 0x9481) moves the wheel out by
+		// (push - root push) . normal, within 0..1 m; the spring and the
+		// tyre read that as the ground when it is deeper than the terrain.
 		struct ObjectGround {
 			int count = 0;
-			float height = 0;
+			Vec3 push;
+			Vec3 rootPush;
 			Vec3 normal;
 			Vec3 velocity;
 			float grip = 0.8f;
@@ -266,6 +271,15 @@ public:
 		bool autoRotateOnEnter = false;
 		bool restoreRotationOnExit = false;
 		bool autoRotating = false;
+		// A RotationalBundle's multiply (+0x340) and offset (+0x334): the
+		// frame is turned by angle x multiply + offset (0x00564940, per axis).
+		float angleScale = 1;
+		Vec3 angleOffset;
+		Vec3 turnAngles() const
+		{
+			return {angle[0] * angleScale + angleOffset.x, angle[1] * angleScale + angleOffset.y,
+				angle[2] * angleScale + angleOffset.z};
+		}
 		// This tick, in object space.
 		physics::Mat3 rotation;
 		Vec3 position;
@@ -295,6 +309,7 @@ public:
 		// State.
 		bool running = false; // +0x24c
 		float stopTimer = -1; // +0x28c
+		bool seated = false;  // message 4 seen, 5 not yet
 		float rpm = 0;        // +0x25c
 		float load = 0;       // +0x260, the feedback this tick
 		int loadCount = 0;    // +0x268
@@ -310,6 +325,9 @@ public:
 		float currentRatio() const;  // slot 0x1b8 (0x0064d3f0): differential x 3.5 / the table's ratio
 		float currentTorque() const; // slot 0x1a4 (0x00629660): the curve at |rpm| x torque
 		void feedback(float push);   // feedbackLoop 0x0064dd10 with the push along the axis
+		// The engine audio's value (+0x258, 0x0064cb80): a helicopter's is its angle of attack,
+		// clamp(2 aoa, -0.5, 0.5) + 0.5; the others' the rpm within +-1.
+		float audioValue() const;
 	};
 	struct WingPart {
 		int part = -1;
@@ -481,7 +499,7 @@ public:
 	}
 	// Whether its engines push it through the air (a propeller engine).
 	bool flies() const;
-	// Someone aboard (the engines' messages 4 and 5: 0x0064c890; the force
+	// The pilot aboard, the root PCO's own seat (the engines' messages 4 and 5: 0x0064c890; the force
 	// only with the PCO occupied, 0x005c87b0) and the tick (for the legs'
 	// latched inputs).
 	// Entering (0x005cdd60 / 0x005ce600) also sets the PCO's own sprint up
@@ -515,6 +533,13 @@ public:
 	void legsRespond(physics::RigidBody& body, const physics::Ground& ground, float seconds,
 		float gravity = physics::tuning::kGravity);
 	const std::vector<Wheel>& wheels() const { return m_wheels; }
+	// Each Spring's first step that finds it moving takes its rate as 0 again (a node let go of a hold).
+	void restartWheels()
+	{
+		for (Wheel& w : m_wheels) {
+			w.firstStep = true;
+		}
+	}
 	float mass() const { return m_mass; }
 	int gear() const { return m_gear; }
 	// normalised: 0 at minRpm, 1 at maxRpm; the first old engine's for the others
@@ -523,9 +548,14 @@ public:
 	float clutch() const { return m_clutch; }
 
 	void setInput(const VehicleInput& input) { m_input = input; }
-	// A probe of wheel `index` met an object's face at `height` (see
+	// A probe of wheel `index` met an object's face, pushing the wheel by
+	// `push` while the root's push-out stood at `rootPush` (see
 	// Wheel::objectGround); taken by the next tick.
-	void touchObject(size_t index, float height, const Vec3& normal, const Vec3& velocity, float grip);
+	void touchObject(size_t index, const Vec3& push, const Vec3& rootPush, const Vec3& normal, const Vec3& velocity,
+		float grip);
+	// The Spring solve's displacement from the wheel's object contacts
+	// (0..1 m along their mean normal) and that normal; -1 without any.
+	float objectCompression(const Wheel& wheel, Vec3& normal) const;
 	void setWheelMaterial(size_t index, uint32_t material)
 	{
 		if (index < m_wheels.size()) {
@@ -542,6 +572,12 @@ public:
 	// One tick: suspension and tyre forces on `body`; call before it steps.
 	void tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip,
 		float gravity = physics::tuning::kGravity);
+	// Only the bundles' turn on the driver's input: a parked (sleeping) node's bundles still turn.
+	void tickParts(const physics::RigidBody& body, float seconds, float gravity = physics::tuning::kGravity)
+	{
+		regulateInput(body, gravity, seconds);
+		updateParts(seconds);
+	}
 
 private:
 	void updateParts(float seconds);

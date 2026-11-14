@@ -26,7 +26,7 @@
 // open kit (0x007977a0) sets Kit<row>Item<item>Active / FieldUnlocked /
 // Show / Icon / Alpha; KitCustom<row>Icon the chosen item of each row;
 // CustomInfoShow, CustomSoldierPicture
-// (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].tga, the 1 for
+// (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].dds, the 1 for
 // heavy armour, 0x007975e0), KitItemInfoString with LargeInfoPic /
 // SmallInfoPic (0x007981e0), OpenCloseKitCustomString, HeavyArmorActive,
 // NotAntiVechicleKitChoosen; Ability0..6Active, the abilities the kit
@@ -93,6 +93,9 @@ public:
 	// Each frame: the kit buttons, the open kit's grid and the unlock
 	// screen's variables for the local player's team.
 	void update(int team);
+	// Enhanced mode (Scene/EnhancedSettings.h): update() skips its HUD
+	// writes while nothing it shows has changed. Retail rewrites them every frame.
+	bool skipUnchanged = false;
 	// Whether the local player's soldier lives (the ability icons are
 	// worked out only while it doesn't; a death rebuilds the open kit, as
 	// entering the spawn screen does).
@@ -137,6 +140,7 @@ private:
 	void updateAbilityIcons();
 	std::string text(const std::string& key) const { return m_localize ? m_localize(key) : key; }
 	std::string setting(const std::string& templateName, const std::string& key) const;
+	bool mainWeapon(const std::string& itemTemplate) const; // its itemIndex is the kit's main weapon one
 
 	game::GameWorld& m_round;
 	game::GameLogic& m_logic;
@@ -154,6 +158,21 @@ private:
 	std::array<std::array<Item, kItems>, kRows> m_grid;
 	std::array<std::array<int, kRows>, kKits> m_chosen {}; // the active item per row, per kit (-1 none)
 	bool m_chosenSet = false;
+	// What the last full update() showed, for skipUnchanged. Every grid change
+	// goes through build(), which counts.
+	unsigned m_builds = 0;
+	struct Shown {
+		unsigned builds = 0;
+		int team = 0, kit = 0;
+		bool heavy = false, customOpen = false;
+		std::vector<std::string> kits;
+		bool operator==(const Shown& o) const
+		{
+			return builds == o.builds && team == o.team && kit == o.kit && heavy == o.heavy && customOpen == o.customOpen
+				&& kits == o.kits;
+		}
+	} m_shown;
+	bool m_shownValid = false;
 	bool m_alive = false;
 	std::array<bool, 7> m_abilityIcons {}; // Ability0..6Active (+0xae..+0xb4)
 };

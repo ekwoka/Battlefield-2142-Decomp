@@ -364,12 +364,21 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 	// destroyed (the helicopter exit).
 	const auto collide = [&](MeshActor& c, bool cRoot) {
 		const float ratio = c.radius > 0 ? m.radius / c.radius : 1e30f;
+		// A candidate the pair destroys gets its wreck's meshes (wreckCollision): `c` then points at freed ones.
+		const physics::CollisionWorld* was = c.body ? c.body->vehicleMesh.get() : nullptr;
+		const auto wrecked = [&] { return c.body && c.body->vehicleMesh.get() != was; };
+		const physics::CollisionWorld* own = mover.vehicleMesh.get();
 		if (ratio >= 0.25f) {
+			meshPair(c, m, seconds, false);
+			if (mover.vehicleMesh.get() != own) {
+				return false; // and the mover's likewise
+			}
+			if (wrecked()) {
+				return true;
+			}
 			if (ratio <= 4.0f) {
-				meshPair(c, m, seconds, false);
 				return meshPair(m, c, seconds, false);
 			}
-			meshPair(c, m, seconds, false);
 			if (!c.fixed) {
 				return meshPair(m, c, seconds, false);
 			}
@@ -379,7 +388,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			return true;
 		}
 		const bool alive = meshPair(m, c, seconds, false);
-		if (mRoot && c.trunkFromTypeFour) {
+		if (mRoot && c.trunkFromTypeFour && !wrecked()) {
 			meshPair(c, m, seconds, true);
 		}
 		return alive;
@@ -453,7 +462,11 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 		// Its parts in their pose now (partActors), each a candidate with
 		// a response of its own.
 		partActors(other, parts);
+		const physics::CollisionWorld* was = other.vehicleMesh.get();
 		for (MeshActor& c : parts) {
+			if (other.vehicleMesh.get() != was) {
+				break; // destroyed by the pair before: its parts' actors are stale
+			}
 			if (moved && partMoves(other, c)) {
 				continue;
 			}
@@ -462,6 +475,9 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 					return false;
 				}
 				refresh();
+				if (other.vehicleMesh.get() != was) {
+					break;
+				}
 			}
 			if (mRoot) {
 				wheelProbes(mover, c, seconds);
@@ -480,7 +496,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			}
 			refresh();
 		}
-		if (mRoot) {
+		if (mRoot && other.vehicleMesh.get() == c.mesh) { // not a candidate the pair just wrecked
 			wheelProbes(mover, c, seconds);
 			if (!asleep(other)) {
 				wheelProbes(other, m, seconds);
@@ -758,6 +774,9 @@ void GameWorld::legsSphere(Body& walker, MeshActor& a, MeshActor& b)
 {
 	if (!walker.vehicle || !b.mesh || walker.wreckTime >= 0) {
 		return;
+	}
+	if (teamPasses(a, b) || teamPasses(b, a)) {
+		return; // the legs pass friendly forcefields like the hull and wheels
 	}
 	if (b.body && b.body->vehicle && b.body->vehicle->legs()) {
 		return; // another walker: its response is the legs' too
@@ -1157,6 +1176,9 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 	const Mat3& r = body.body.rotation;
 	const Vec3 right = r.transform({1, 0, 0}), up = r.transform({0, 1, 0}), forward = r.transform({0, 0, 1});
 	MeshActor a = actorOf(body);
+	if (teamPasses(a, b) || teamPasses(b, a)) {
+		return; // the wheel's probe is the mover of its own: it passes its team's fields as the hull does
+	}
 	const auto& wheels = body.vehicle->wheels();
 	for (size_t w = 0; w < wheels.size(); ++w) {
 		const Vehicle::Wheel& wheel = wheels[w];
@@ -1203,12 +1225,11 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 				addMeshContact(a, b, hit.point, hit.normal, hit.depth, body.material, hit.material, false, false);
 			if (shares.velocityA != 0) {
 				const float grip = m_materials ? m_materials->friction(body.material, hit.material) : 0.8f;
-				// The solve's Spring branch moves the wheel out along the mean
-				// normal by its push, within 0..1 m (0x006ba7d0): the spring
-				// takes the height that gives it.
-				const float push = std::clamp(-hit.depth * shares.depthA, 0.0f, 1.0f);
-				const float height = (start + along).y + push * hit.normal.y;
-				body.vehicle->touchObject(w, height, hit.normal, b.pointVelocity(hit.point), grip);
+				// The wheel's response (0x006ba4c0): its push-out, and the
+				// root's as it stands now (contacts added later aren't in it);
+				// the Spring's solve takes the difference (0x006ba7d0).
+				const physics::Vec3 push = hit.normal * (-hit.depth * shares.depthA);
+				body.vehicle->touchObject(w, push, body.response.pushOut(), hit.normal, b.pointVelocity(hit.point), grip);
 			}
 		}
 	}
@@ -1352,12 +1373,14 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	// as_titan_forcefield, the vehicle bays' eu_forcefield_big and
 	// as_titan_vb_shield: every face of it); the team rule lets a team's
 	// own through, so an enemy pod or vehicle meeting a standing shield is
-	// destroyed with its riders. A shield wrecked at 61 per cent of its
+	// destroyed with its riders. The kill is the game logic's damage with 1e10 and
+	// no materials (0x005c72f0 pushes 0 for both, no attacker): the material table's
+	// damageMod(0x29a, 0x29a) is 0 and must not scale it. A shield wrecked at 61 per cent of its
 	// Titan (destroyOnParentDamageLevel) has left the parts (Titans.cpp).
 	if (otherMaterial == kKillMaterial
 		&& (sameName(t->typeName(), "PlayerControlObject") || sameName(t->typeName(), "Parachute"))) {
 		if (hitPoints(self) > 0) {
-			damage(self, 1e10f, kKillMaterial, kKillMaterial, -1);
+			loseHitPoints(self, 1e10f, -1);
 		}
 		return;
 	}
@@ -1424,7 +1447,21 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 		return;
 	}
 	if (Player* soldier = soldierPlayer(victim)) {
-		roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		// A soldier landing on or walking into an object that moves slower
+		// than he does is the mover: the ground rule (over 9.1 m/s, no
+		// mass factor), not the object running him over. Dropping into a
+		// pit of the standing Titan (mass 1e6, factor 3) was a 127 kill.
+		// shortcut: the speed comparison stands in for retail's dispatch, not read from the exe.
+		// Retail (0x005a4690) sends every object hitting a soldier to the road
+		// kill; the death material (the Titans' shields) is its instant case.
+		const Body* body = findBody(attacker);
+		if (attackerMaterial != kKillMaterial && body
+			&& physics::lengthSquared(body->body.velocity)
+				< physics::lengthSquared(soldier->body.velocity + soldier->body.carriedVelocity())) { // the world's speed, carry included
+			groundCollisionDamage(victim, velocity, normal, attackerMaterial, victimMaterial);
+		} else {
+			roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		}
 		return;
 	}
 	if (attacker == victim || hitPoints(victim) < 0) {

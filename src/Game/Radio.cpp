@@ -324,11 +324,15 @@ bool GameWorld::insideCombatArea(const Player& player) const
 	if (!m_combatAreas || !m_combatAreas->use) {
 		return true;
 	}
-	int category = 4; // a soldier's template has no category: VCNoVehicleCategory
+	// 0x004ca5d0 passes the category 4 to 0x004d9d50, which then takes the
+	// controlled object's own: through the vehicle-category interface, and an
+	// object without it, a soldier on foot, reads 0 (VCLand, 0x004d9dba). The
+	// 4 is that "ask the object" marker, not a category.
+	int category = 0;
 	physics::Vec3 at = player.body.position;
 	if (player.vehicle) {
 		const world::Object* vehicle = m_objects.find(player.vehicle);
-		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 4;
+		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 0;
 		if (vehicle) {
 			at = {vehicle->position().x, vehicle->position().y, vehicle->position().z};
 		}
@@ -535,7 +539,7 @@ int GameWorld::spotCrosshair(int player)
 {
 	const int target = crosshairTarget(player);
 	if (target >= 0) {
-		reportBattlefieldObjects(player, {target});
+		radioSpot(player, target);
 	}
 	return target;
 }

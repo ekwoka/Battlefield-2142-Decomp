@@ -110,7 +110,13 @@ bool FileManager::mountArchive(const std::string& archive, const std::string& mo
 		return false;
 	}
 	const std::string archiveName = normalizePath(archive);
-	for (const std::string& searchPath : m_searchPaths) {
+	// Mod archive scripts also use install-relative paths such as
+	// mods/bf2142/Objects/Weapons_server.zip for their shared assets.
+	std::vector<std::string> archivePaths = m_searchPaths;
+	if (!m_root.empty()) {
+		archivePaths.push_back(m_root);
+	}
+	for (const std::string& searchPath : archivePaths) {
 		const std::string real = findFileIgnoringCase(searchPath, archiveName);
 		if (real.empty()) {
 			continue;

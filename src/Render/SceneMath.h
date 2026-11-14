@@ -15,6 +15,22 @@ namespace dice::hfe::render {
 
 // ---- the dynamic shadows ----------------------------------------------------
 
+// An orthographic projection over [-r, r] across and [0, depth] along the
+// view (Direct3D's depth 0..1).
+inline Mat4 orthographic(float radius, float depth)
+{
+	Mat4 r;
+	r.m = {1 / radius, 0, 0, 0, 0, 1 / radius, 0, 0, 0, 0, 1 / depth, 0, 0, 0, 0, 1};
+	return r;
+}
+
+// Clip space to the maps' texture coordinates (v down) and depth.
+inline const Mat4 kClipToTexture {{0.5f, 0, 0, 0, 0, -0.5f, 0, 0, 0, 0, 1, 0, 0.5f, 0.5f, 0, 1}};
+
+// The light's depth range: far enough above the region for the tallest
+// casters (Titans hover some 100 m up) and below it for the ground.
+constexpr float kShadowHeadroom = 400;
+
 // The shadow region's half side by quality (VideoSettings 1 low, 2 medium,
 // 3 high) over shadowManager.shadowMapDepthDistance, at least 10 m.
 inline float shadowRegionRadius(int quality, float depthDistance)

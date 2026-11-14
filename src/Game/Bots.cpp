@@ -35,6 +35,23 @@ constexpr float kChestHeight = 1.0f;
 // collision mesh's, sqrt(1.32) m).
 constexpr float kSoldierRadius = 1.1489125f;
 constexpr float kSoldierSpeed = 5.0f;  // SoldierMobile's maxSpeed (Objects/Soldiers/Common/ai/Objects.ai)
+// Native recovery policy: bound the actual mesh route, not just the straight
+// line. 400 m is about 80 seconds at the nominal 5 m/s infantry speed.
+bool infantryRecoveryRoute(const ai::NavMesh* mesh, const ai::Vec3& from, const ai::Vec3& target)
+{
+	constexpr float maxWalk = 400.0f;
+	const ai::Vec3 delta = target - from;
+	if (!mesh || delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > maxWalk * maxWalk) return false;
+	const auto path = ai::findPath(*mesh, from, target);
+	if (path.empty()) return false;
+	float distance = 0;
+	for (size_t i = 1; i < path.size(); ++i) {
+		const ai::Vec3 step = path[i] - path[i - 1];
+		distance += std::sqrt(step.x * step.x + step.y * step.y + step.z * step.z);
+		if (distance > maxWalk) return false;
+	}
+	return true;
+}
 // The aim controller's output is a PIMouseLookX/Y value (inputs 4, 5).
 // The soldier (BF2142.exe 0x0058a6d0, from 0x0058abc4) turns 5 degrees per
 // unit on each call (*0x00a68e4c yaw, *0x00a68f24 pitch, both 5.0, set by
@@ -845,6 +862,7 @@ BotManager::~BotManager()
 	if (!std::getenv("BF2142_BOT_STATS")) {
 		return;
 	}
+	std::fprintf(stderr, "%s", titanGridStats().c_str());
 	std::fprintf(stderr, "bot behaviours (seconds run, all bots):\n");
 	for (const auto& [name, seconds] : m_behaviourSeconds) {
 		std::fprintf(stderr, "  %-28s %8.1f\n", name.c_str(), seconds);
@@ -885,6 +903,12 @@ std::string BotManager::behaviour(int player) const
 {
 	const auto it = m_bots.find(player);
 	return it != m_bots.end() ? it->second.behaviour : std::string();
+}
+
+SoldierInput BotManager::lastInputFor(int player) const
+{
+	const auto it = m_bots.find(player);
+	return it != m_bots.end() ? it->second.lastInput : SoldierInput {};
 }
 
 int BotManager::target(int player) const
@@ -1405,8 +1429,38 @@ std::string BotManager::aiTemplateOf(const std::string& objectTemplate) const
 //     0x100c6240.)
 //   - the path followers' refresh (0x100c6cc0): N / 16 + 1 bots a frame,
 //     round robin, gather the objects within 50 m and, a path followed
-//     within the last 3 s, update it (0x10095ac0); here every bot each tick.
+//     within the last 3 s, update it (0x10095ac0); here its look-ahead
+//     (refreshFollowers; the no-progress test stays with the moves).
 // Rounds flying past are noticed every frame (0x1004ed30 is an event).
+// The follower refresh (0x100c6cc0), after the moves (0x100c91c0) and
+// before thinking: N / 16 + 1 bots a frame, round robin over all of them;
+// one steered within the last 3 s (0x10092400) looks ahead from where it
+// is now (its vehicle's position at the wheel, as drive() steers it).
+void BotManager::refreshFollowers()
+{
+	if (m_bots.empty()) {
+		return;
+	}
+	const size_t count = m_bots.size() / 16 + 1;
+	for (size_t k = 0; k < count; ++k) {
+		m_refreshCursor = (m_refreshCursor + 1) % m_bots.size();
+		auto it = std::next(m_bots.begin(), static_cast<std::ptrdiff_t>(m_refreshCursor));
+		if (!it->second.follower.refreshDue(m_time)) {
+			continue;
+		}
+		const auto p = m_playerIndex.find(it->first);
+		if (p == m_playerIndex.end()) {
+			continue;
+		}
+		const GameWorld::PlayerInfo& self = m_players[p->second];
+		physics::Vec3 at = self.position;
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			at = self.vehicle && v.object == self.vehicle ? v.position : at;
+		}
+		it->second.follower.refresh(toAi(at), m_time);
+	}
+}
+
 void BotManager::update(float seconds)
 {
 	m_time += seconds;
@@ -1638,6 +1692,24 @@ void BotManager::update(float seconds)
 			if (vehicle) {
 				velocity = vehicle->velocity;
 			}
+			// A soldier's PIMouseLookX turns it 5 degrees a unit each tick
+			// (BF2142.exe 0x0058abdd) and stays held over a skipped frame while
+			// it moves (0x10098c00): the original's unit covers both ticks. The
+			// executed frame's turn here is already the whole elapsed time's
+			// (aim), so held again it went twice as far, past the target, and
+			// back the next frame: the look swung while walking. On foot the
+			// skipped frame turns no more (a vehicle's turn is its steering).
+			if (!self.vehicle) {
+				input.turn = 0;
+			} else if (bot.gunTurn) {
+				// A gun's turn (a gunner's, or a driver's whose look turns
+				// the gun) is the same degrees again, not a rate: held, it
+				// stops where the aim's error ran out, as the executed frame's
+				// does ("not past the target in one tick").
+				const float left = bot.gunTurnLeft;
+				input.turn = left >= 0 ? std::clamp(input.turn, 0.0f, left) : std::clamp(input.turn, left, 0.0f);
+				bot.gunTurnLeft -= input.turn;
+			}
 			if (bot.skips >= 16 || physics::lengthSquared(velocity) <= 0.01f) {
 				input.throttle = vehicle ? -std::clamp(0.5f * physics::dot(vehicle->velocity, vehicle->forward), -0.4f, 0.4f) : 0.0f;
 				input.strafe = 0;
@@ -1651,6 +1723,7 @@ void BotManager::update(float seconds)
 	for (const GameWorld::PlayerInfo* self : executed) {
 		Bot& bot = m_bots[self->id];
 		bot.skips = 0;
+		bot.gunTurn = false;
 		const float elapsed = bot.lastAct < 0 ? seconds : m_time - bot.lastAct;
 		bot.lastAct = m_time;
 		bot.sinceThink += elapsed;
@@ -1663,9 +1736,31 @@ void BotManager::update(float seconds)
 		// drops in a pod, riding it down without steering.
 		physics::Vec3 podEntry;
 		float podRadius = 0;
+		if (driveToMesh(bot, *self, input) || titanPod(bot, *self, input, elapsed)) {
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			m_behaviourSeconds[bot.behaviour] += elapsed;
+			continue;
+		}
 		if (m_world.ridingPod(self->id)) {
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
+			continue;
+		}
+		if (self->vehicle && m_world.isTitan(self->vehicle)) {
+			const auto seats = m_world.vehicleSeats(self->vehicle);
+			if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size() && seats[self->seat].podLauncher) {
+				input.fire = true;
+				bot.lastInput = input;
+				m_world.setInput(self->id, input);
+				continue;
+			}
+		}
+		if (titanPlay(bot, *self, input, elapsed)) {
+			bot.reloadedLast = input.reload;
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			m_behaviourSeconds[bot.behaviour] += elapsed;
 			continue;
 		}
 		// Its Titan's guns (the gun hubs are seats of equipment type Fixed in
@@ -1690,8 +1785,13 @@ void BotManager::update(float seconds)
 				}
 			}
 			const std::vector<int> gunners = m_world.vehicleOccupants(m_world.titanOf(self->team));
-			const long manned = std::count_if(gunners.begin(), gunners.end(), [](int p) { return p >= 0; });
-			const long guns = static_cast<long>(m_world.vehicleSeats(m_world.titanOf(self->team)).size());
+			const auto titanSeats = m_world.vehicleSeats(m_world.titanOf(self->team));
+			long manned = 0, guns = 0;
+			for (size_t i = 0; i < titanSeats.size(); ++i) {
+				if (titanSeats[i].podLauncher) continue;
+				++guns;
+				if (i < gunners.size() && gunners[i] >= 0) ++manned;
+			}
 			if (gunSeat >= 0) {
 				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, claimed);
 			} else if ((manned + static_cast<long>(claimed.size())) * 2 < guns) {
@@ -1700,14 +1800,27 @@ void BotManager::update(float seconds)
 		}
 		bot.titanGun = toGun ? gunSeat : -1;
 		if (toGun) {
-			const physics::Vec3 d = podEntry - self->position;
+			// Use the same physics origin and authored radius as vehicle entry.
+			// The console's centre can be inside solid geometry.
+			const physics::Vec3 d = podEntry - (self->position + physics::Vec3 {0, kChestHeight, 0});
 			const float want = std::atan2(d.x, d.z) * 57.29578f;
 			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);
 			input.throttle = std::fabs(std::remainder(want - self->yaw, 360.0f)) < 45 ? 1.0f : 0.0f;
-			input.use = physics::lengthSquared(d) < podRadius * podRadius * 0.5f && !bot.usedLast;
+			input.use = physics::lengthSquared(d) <= podRadius * podRadius && !bot.usedLast;
+			if (!input.use) {
+				titanGunWalk(bot, *self, input, elapsed, podEntry, podRadius, gunSeat);
+			}
 			bot.usedLast = input.use;
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
+			continue;
+		}
+		// enhanced.botTitan: past the guns' share, its Titan's deck gunship and transport.
+		if (titanCrew(bot, *self, input, elapsed)) {
+			bot.usedLast = input.use;
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			m_behaviourSeconds[bot.behaviour] += elapsed;
 			continue;
 		}
 		if (m_world.titanPodEntry(self->id, podEntry, podRadius)) {
@@ -1753,6 +1866,7 @@ void BotManager::update(float seconds)
 				m_drivenName[self->vehicle] = o->objectTemplate()->name();
 			}
 		}
+		titanRide(bot, *self, input);
 		bot.usedLast = input.use;
 		bot.switchedLast = input.switchSeat > 0;
 		bot.firedLast = input.fire;
@@ -1760,6 +1874,7 @@ void BotManager::update(float seconds)
 		bot.lastInput = input;
 		m_world.setInput(self->id, input);
 	}
+	refreshFollowers();
 	// Thinking.
 	std::vector<std::pair<int, int>> planned, unplanned; // (age, player)
 	for (const GameWorld::PlayerInfo* self : executed) {
@@ -2015,7 +2130,7 @@ bool BotManager::spotSighting(const GameWorld::PlayerInfo& self, const GameWorld
 	if (!spot) {
 		return false;
 	}
-	m_world.reportBattlefieldObjects(self.id, {other.id});
+	m_world.radioSpot(self.id, other.id, 0x1b);
 	const auto templateOf = [this](uint32_t id) -> const world::ObjectTemplate* {
 		const world::Object* o = id ? m_world.objects().find(id) : nullptr;
 		return o ? o->objectTemplate() : nullptr;
@@ -2092,7 +2207,10 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 					point = other.position
 						+ physics::Vec3 {(random() * 2 - 1) * 0.3f, 0.2f + random() * 1.5f, (random() * 2 - 1) * 0.3f};
 				}
-				clear = m_world.lineOfSight(eye, point, self.vehicle, seenThrough);
+				// The ray's filter (BF2142.exe 0x00898040, 0x008988f0) passes the
+				// list AIDLL 0x100ed700 hands it: the seer, the sensed object
+				// and the vehicle that object rides.
+				clear = m_world.lineOfSight(eye, point, self.vehicle, seenThrough, other.vehicle);
 			}
 			visible = clear;
 		}
@@ -2243,6 +2361,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 				bot.goalReached = false;
 			}
 			bot.goal = bot.orderPosition = at;
+			bot.vehicleApproach = false;
 			bot.goalOrder = -1;
 			bot.goalMap = self.vehicle && self.driving ? 1 : 0;
 			bot.via.clear();
@@ -2263,6 +2382,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 				bot.goalReached = false;
 			}
 			bot.goal = bot.orderPosition = at;
+			bot.vehicleApproach = false;
 			bot.goalOrder = -1;
 			bot.goalMap = 0;
 			bot.via.clear();
@@ -2274,6 +2394,90 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	const auto& areas = m_settings.strategy.areas;
 	physics::Vec3 orderAt;
 	bool hasOrder = false;
+	bool titanSiloOrder = false;
+	// AIDLL's shipped strategic areas do not describe gpm_ti objectives.
+	// Its generic fallback sees the two moving Titan control points alongside
+	// the five silos; the Titan points cannot change hands, and bots can spend
+	// their whole round treating them as capture objectives. Give on-foot bots
+	// and ground-vehicle drivers a silo goal directly, using the mode's actual
+	// silo/control-point state.
+	// Existing Titan gun and pod behavior runs before updateGoal and is left
+	// alone. Ground-vehicle drivers can use the same objective with their
+	// vehicle mesh and the area's vehicle order position; passengers keep
+	// their normal seat behavior.
+	if (m_world.gameMode() == "gpm_ti" && self.team >= 1 && self.team <= 2 && (!self.vehicle || self.driving)) {
+		const std::vector<GameWorld::SiloInfo> silos = m_world.missileSilos();
+		const auto actionable = [&](const GameWorld::SiloInfo& silo) -> const GameWorld::ControlPointInfo* {
+			if (silo.team == self.team) {
+				return nullptr;
+			}
+			for (const GameWorld::ControlPointInfo& point : points) {
+				if (point.id == silo.controlPoint && point.capturable) {
+					return &point;
+				}
+			}
+			return nullptr;
+		};
+		const GameWorld::ControlPointInfo* targetPoint = nullptr;
+		// Keep an unfinished silo assignment stable. Once that silo changes to
+		// our team, the next update selects another live target.
+		if (bot.goalOrder >= 0 && static_cast<size_t>(bot.goalOrder) < areas.size()) {
+			const int current = areas[static_cast<size_t>(bot.goalOrder)].controlPoint;
+			for (const GameWorld::SiloInfo& silo : silos) {
+				if (silo.controlPoint == current) {
+					if (const GameWorld::ControlPointInfo* point = actionable(silo)) {
+						targetPoint = point;
+					}
+					break;
+				}
+			}
+		}
+		if (!targetPoint) {
+			float best = std::numeric_limits<float>::infinity();
+			for (const GameWorld::SiloInfo& silo : silos) {
+				const GameWorld::ControlPointInfo* point = actionable(silo);
+				if (!point) {
+					continue;
+				}
+				int assigned = 0;
+				for (const auto& [id, other] : m_bots) {
+					if (id == self.id || other.goalOrder < 0 || static_cast<size_t>(other.goalOrder) >= areas.size()) {
+						continue;
+					}
+					const GameWorld::PlayerInfo* mate = playerOf(id);
+					if (mate && mate->team == self.team && areas[static_cast<size_t>(other.goalOrder)].controlPoint == silo.controlPoint) {
+						++assigned;
+					}
+				}
+				// Spread new orders over available silos without taking a bot
+				// away from its existing capture. Neutral silos need one flag
+				// rise; enemy silos need a neutralize and capture, so favor the
+				// former when travel distances are otherwise comparable.
+				const float preference = point->team == 0 ? 0.0f : 900.0f;
+				// A silo off the navigation mesh (Suez's vanilla mesh has none near silos 901, 905 and 906) cannot be
+				// planned to: the bot then walks straight at it and stops at the first wall. Prefer reachable ones.
+				const ai::NavMesh* reach = self.vehicle && self.driving ? m_vehicleNavMesh : m_navMesh;
+				const float unreachable = reach && reach->findPolygon(toAi(point->position), 5.0f) < 0 ? 9.0e6f : 0.0f;
+				const float score = physics::lengthSquared(point->position - self.position) +
+					static_cast<float>(assigned) * 250000.0f + preference + unreachable;
+				if (score < best) {
+					best = score;
+					targetPoint = point;
+				}
+			}
+		}
+		if (targetPoint) {
+			orderAt = targetPoint->position;
+			hasOrder = true;
+			titanSiloOrder = true;
+		}
+	}
+	// enhanced.botTitan: an APC's driver takes its pods beside the enemy Titan once its shield is down.
+	if (physics::Vec3 launch; titanPodGoal(bot, self, launch) || titanRideGoal(bot, self, launch)) {
+		orderAt = launch;
+		hasOrder = true;
+		titanSiloOrder = true;
+	}
 	// A driver heads for the areas' vehicle order positions over the
 	// vehicle mesh.
 	const int map = self.vehicle && self.driving ? 1 : 0;
@@ -2286,10 +2490,24 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	// and an infantry goal off the vehicle mesh fails every path request
 	// (0x100966c0), which left drivers standing at their spawn.
 	const Squad* squad = self.squad ? this->squad(self.team, self.squad) : nullptr;
-	if (squad && squad->state == 2 && squad->kind != 4) {
+	// Rejected vehicle objectives whose 30 s are up, before a squad member's
+	// hold below can return: the one the bot holds for chooses again.
+	std::set<int> expiredRejections;
+	if (map == 1) {
+		for (auto it = bot.rejectedVehiclePoints.begin(); it != bot.rejectedVehiclePoints.end();) {
+			if (m_time >= it->second) {
+				expiredRejections.insert(it->first);
+				it = bot.rejectedVehiclePoints.erase(it);
+			} else ++it;
+		}
+	}
+	const bool heldRejectionDue = bot.goalControlPoint >= 0 && expiredRejections.count(bot.goalControlPoint) > 0;
+	if (titanSiloOrder) {
+		// The mode-specific target above supersedes a generic SAI squad order.
+	} else if (squad && squad->state == 2 && squad->kind != 4) {
 		orderAt = squad->orderAt;
 		hasOrder = true;
-	} else if (squad && squad->state != 2 && bot.hasGoal && !bot.orderRegoal && bot.goalMap == map) {
+	} else if (squad && squad->state != 2 && bot.hasGoal && bot.goalMap == map && !bot.orderRegoal && !heldRejectionDue) {
 		return;
 	} else if (self.team == 1 || self.team == 2) {
 		const Side& side = m_sides[self.team];
@@ -2350,8 +2568,9 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 		}
 	}
 	for (size_t i = 0; i < areas.size() && !point; ++i) {
-		if (areas[i].hasOrderPosition[0]) {
-			const physics::Vec3 at {areas[i].orderPosition[0][0], areas[i].orderPosition[0][1], areas[i].orderPosition[0][2]};
+		for (int m = 0; m <= 1 && !point; ++m) {
+			if (!areas[i].hasOrderPosition[m]) continue;
+			const physics::Vec3 at {areas[i].orderPosition[m][0], areas[i].orderPosition[m][1], areas[i].orderPosition[m][2]};
 			if (horizontal2(at - orderAt) < 1) {
 				for (const GameWorld::ControlPointInfo& p : points) {
 					if (p.id == areas[i].controlPoint) {
@@ -2360,6 +2579,33 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 					}
 				}
 			}
+		}
+	}
+	// A failed bounded approach search temporarily rejects that objective.
+	// Prefer another enemy/neutral point; if none exists, try a friendly one.
+	const bool retryRejected = point && expiredRejections.count(point->id) > 0;
+	if (map == 1 && point && bot.rejectedVehiclePoints.count(point->id)) {
+		const GameWorld::ControlPointInfo* alternative = nullptr;
+		physics::Vec3 start = self.position;
+		for (const auto& vehicle : m_vehicles) if (vehicle.object == self.vehicle) start = vehicle.position;
+		ai::PathOptions vehicleOptions;
+		vehicleOptions.vehicle = true;
+		for (int pass = 0; pass < 2 && !alternative; ++pass) {
+			float best = std::numeric_limits<float>::infinity();
+			for (const auto& p : points) {
+				if (bot.rejectedVehiclePoints.count(p.id) || (pass == 0 && p.team == self.team) || !m_vehicleNavMesh
+					|| ai::findPath(*m_vehicleNavMesh, toAi(start), toAi(p.position), vehicleOptions).empty()) continue;
+				const float d = horizontal2(p.position - self.position);
+				if (d < best) { best = d; alternative = &p; }
+			}
+		}
+		if (alternative) {
+			point = alternative;
+			areaIndex = areaOfControlPoint(point->id);
+			orderAt = point->position;
+		} else {
+			bot.orderRegoal = false;
+			return; // stopped until this objective's retry deadline
 		}
 	}
 	if (map == 1 && areaIndex >= 0 && areas[static_cast<size_t>(areaIndex)].hasOrderPosition[1]) {
@@ -2373,18 +2619,20 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	// leader) have passed (0x1009e7a0).
 	const float again = self.squadLeader ? 20.0f : 35.0f;
 	const bool stale = bot.hasGoal && bot.goalReached && m_time - bot.goalAt > again;
-	const bool regoal = bot.orderRegoal; // the squad's re-goal (0x100c0130)
+	const bool regoal = bot.orderRegoal || retryRejected;
 	bot.orderRegoal = false;
 	if (!changed && !stale && !regoal) {
 		return;
 	}
 	bot.orderPosition = orderAt;
+	bot.vehicleApproach = false;
 	bot.goalMap = map;
 	bot.via.clear();
 	if (areaIndex >= 0 && bot.goalOrder != areaIndex) {
 		bot.lastArea = bot.goalOrder;
 	}
 	bot.goalOrder = areaIndex;
+	bot.goalControlPoint = point ? point->id : -1;
 	bot.goalAt = m_time;
 	bot.goalReached = false;
 	bot.hasGoal = true;
@@ -2401,7 +2649,10 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 		// order position itself; otherwise a spot of the point's, and when
 		// 20 tries find none on the map, the order position again
 		// (the area's vt+0x10), not the point.
-		if (map == 1 || horizontal2(orderAt - point->position) > point->radius * point->radius) {
+		// enhanced.botRecovery (not retail) keeps the driver's reachable-approach
+		// goal below, for an order position the vehicle mesh doesn't reach.
+		const bool approachDriver = map == 1 && m_settings.stuckRecovery();
+		if (!approachDriver && (map == 1 || horizontal2(orderAt - point->position) > point->radius * point->radius)) {
 			bot.goal = orderAt;
 			return;
 		}
@@ -2411,13 +2662,67 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 			return;
 		}
 		bot.goal = orderAt;
+		bool found = false;
 		for (int attempt = 0; attempt < 20; ++attempt) {
 			const float angle = random() * 6.2831853f;
 			const float distance = std::sqrt(random()) * r;
 			const physics::Vec3 at = point->position + physics::Vec3 {std::sin(angle) * distance, 0, std::cos(angle) * distance};
 			if (valid(at)) {
 				bot.goal = at;
+				found = true;
 				break;
+			}
+		}
+		if (found && map == 1 && mesh) {
+			for (const auto& v : m_vehicles) {
+				if (v.object == self.vehicle) {
+					ai::PathOptions options;
+					options.vehicle = true;
+					found = !ai::findPath(*mesh, toAi(v.position), toAi(bot.goal), options).empty();
+					break;
+				}
+			}
+		}
+		if (!found) {
+			// Retail's failed search asks the area for the map's order
+			// position (AIDLL 0x100604f6). If that is absent or off the
+			// vehicle mesh, find a reachable approach and go on foot.
+			bot.goal = orderAt;
+			const world::Object* driven = self.vehicle ? m_world.objects().find(self.vehicle) : nullptr;
+			const std::string rootAi = driven && driven->objectTemplate() ? aiTemplateOf(driven->objectTemplate()->name()) : "";
+			const bool groundVehicle = !(m_settings.typeFlags(rootAi) & (kITAir | kITHelicopter));
+			if (map == 1 && mesh && groundVehicle) {
+				ai::FollowerSettings settings;
+				settings.soldier = false;
+				settings.options.vehicle = true;
+				settings.climb = m_settings.climbLimits(1);
+				const GameWorld::VehicleInfo* vehicle = nullptr;
+				for (const GameWorld::VehicleInfo& v : m_vehicles) {
+					if (v.object == self.vehicle) vehicle = &v;
+				}
+				if (!vehicle) return;
+				settings.radius = vehicleBox(*vehicle).centreRadius;
+				const ai::Vec3 authored = toAi(orderAt);
+				const auto onward = [&](const ai::Vec3& approach) {
+					if (horizontal2(fromAi(approach) - point->position) <= point->radius * point->radius) return true;
+					const ai::Vec3 target = toAi(point->position);
+					return infantryRecoveryRoute(m_navMesh, approach, target);
+				};
+				const auto approach = ai::vehicleApproachPoint(*mesh, toAi(vehicle->position), toAi(point->position),
+					areaIndex >= 0 && areas[static_cast<size_t>(areaIndex)].hasOrderPosition[1] ? &authored : nullptr, settings, onward);
+				if (approach) {
+					bot.goal = fromAi(*approach);
+					bot.vehicleApproach = horizontal2(bot.goal - point->position) > point->radius * point->radius;
+					bot.approachInfantryGoal = point->position;
+					bot.via.clear(); // the complete path was checked from here to the approach
+				} else {
+					// Stop retrying an unusable order: choose another area on the
+					// next update, and allow this one again after 30 seconds.
+					bot.goal = vehicle->position;
+					bot.via.clear();
+					bot.rejectedVehiclePoints[point->id] = m_time + 30;
+					bot.orderRegoal = true;
+				}
 			}
 		}
 		return;
@@ -2489,6 +2794,9 @@ void BotManager::think(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 		bot.lobHold = false;
 		bot.orderMove = false;
 	}
+	if (bot.pattern.rfind("BBPFire", 0) != 0 && bot.pattern != "BBPHeliFire3d") {
+		bot.firePlanBuilt = false; // the bot's plan is another behaviour's now (0x1007d04c)
+	}
 }
 
 // Bot vt+4 (0x1009a4c0): runs the chosen behaviour's plan for `seconds`
@@ -2507,8 +2815,13 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.pattern.clear();
 		bot.lobHold = false;
 		bot.orderMove = false;
+		bot.firePlanBuilt = false;
 	}
 	if (self.vehicle != bot.seatedVehicle || self.seat != bot.seatedSeat) {
+		if (!self.vehicle && bot.approachExitRequested && bot.seatedVehicle == bot.approachExitRequested) {
+			bot.abandonedVehicle = bot.approachExitRequested;
+			bot.abandonedAt = m_time;
+		}
 		if (self.vehicle && self.vehicle == bot.vehicleTarget) {
 			// Seated where the get-in plan went (the statement's destructor
 			// 0x100d4a90): out of the root's seat with the driver's taken and
@@ -2537,6 +2850,55 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		bot.seatedVehicle = self.vehicle;
 		bot.seatedSeat = self.seat;
 		bot.seatedAt = m_time;
+	}
+	bot.approachExitRequested = 0; // a request that did not produce an exit is not abandonment
+	// Enhanced: the stuck driver (drive) stops and presses use until the game
+	// lets it out; the exit counts as abandonment (no re-entry for 30 s).
+	if (bot.stuckExit && bot.stuckExit != self.vehicle) {
+		bot.stuckExit = 0;
+	}
+	if (bot.stuckExit && m_settings.stuckRecovery()) {
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			if (v.object == self.vehicle) {
+				const float speed = physics::dot(v.velocity, v.forward);
+				input.throttle = std::fabs(speed) > 1 ? (speed > 0 ? -1.0f : 1.0f) : 0;
+				if (physics::lengthSquared(v.velocity) < 4.0f) {
+					input.use = !bot.usedLast;
+					if (input.use) {
+						bot.approachExitRequested = self.vehicle;
+					}
+				}
+				return;
+			}
+		}
+	}
+	// A reachable approach can be outside the capture area. Stop there and
+	// continue on foot; otherwise a bot can remain seated indefinitely.
+	if (self.vehicle && self.driving && bot.vehicleApproach && bot.via.empty()
+		&& horizontal2(bot.goal - self.position) < 6.0f * 6.0f) {
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			if (v.object == self.vehicle) {
+				if (!infantryRecoveryRoute(m_navMesh, toAi(v.position), toAi(bot.approachInfantryGoal))) {
+					// The actual arrival can differ from the planned approach.
+					if (bot.goalControlPoint >= 0) bot.rejectedVehiclePoints[bot.goalControlPoint] = m_time + 30;
+					bot.goal = v.position;
+					bot.via.clear();
+					bot.follower.reset();
+					bot.vehicleApproach = false;
+					bot.orderRegoal = true;
+					return;
+				}
+				const float speed = physics::dot(v.velocity, v.forward);
+				input.throttle = std::fabs(speed) > 1 ? (speed > 0 ? -1.0f : 1.0f) : 0;
+				if (physics::lengthSquared(v.velocity) < 4.0f) {
+					input.use = !bot.usedLast;
+					if (input.use) {
+						bot.approachExitRequested = self.vehicle;
+					}
+				}
+				return;
+			}
+		}
 	}
 	const std::string& pattern = bot.pattern;
 	if (pattern != "BBPMedicAssist" && pattern != "BBPAmmoAssist" && pattern != "BBPRepairVehicle"
@@ -2587,8 +2949,8 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 					input.turn = turn;
 				}
 			}
-			if (!moving && bot.via.empty()) {
-				bot.arbitration.replan = true; // the plan is done: think again soon
+			if (!moving && (bot.via.empty() || (driving && bot.moveFailed))) {
+				bot.arbitration.replan = true; // the plan is done (or its move failed): think again soon
 			}
 		}
 	} else if (pattern == "BBPRevive") {
@@ -2639,10 +3001,12 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		// 0x1006fd90 presses the seat's select key (0x100aa5f0) or gets out.
 		bool working = false;
 		physics::Vec3 at;
+		const GameWorld::VehicleInfo* target = nullptr;
 		for (const GameWorld::VehicleInfo& vehicle : m_vehicles) {
 			if (vehicle.object == (self.vehicle ? self.vehicle : bot.vehicleTarget)) {
 				working = vehicle.working;
 				at = vehicle.position;
+				target = &vehicle;
 			}
 		}
 		if (self.vehicle && bot.vehicleTarget == self.vehicle && bot.seatTarget >= 0) {
@@ -2826,7 +3190,9 @@ physics::Vec3 flatUnit(const physics::Vec3& v)
 bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	const std::string& pattern = bot.pattern;
-	if (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft") {
+	const int titanMode = bot.titanFlyMode; // BotsTitan.cpp's order for this tick
+	bot.titanFlyMode = 0;
+	if (!titanMode && (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft")) {
 		return false;
 	}
 	const GameWorld::VehicleInfo* vehicle = nullptr;
@@ -2886,7 +3252,14 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	GameWorld::PlayerInfo target;
 	const bool fighting = pattern == "BBPHeliFire3d" && bot.target >= 0 && m_world.playerInfo(bot.target, target)
 		&& target.alive;
-	if (fighting) {
+	if (titanMode == 2 || titanMode == 4) {
+		pilot.flyTo(toAi(bot.titanFlyTo), titanMode == 4 ? 30.0f : 0.0f);
+	} else if (titanMode == 1) {
+		pilot.flyTo(toAi(at), 0);
+		bot.heli.controls.throttle = 0; // as the take-off wait below
+	} else if (titanMode) {
+		pilot.reset();
+	} else if (fighting) {
 		const auto seats = m_world.vehicleSeats(self.vehicle);
 		// The pilot's weapon (0x100dd4a0, flags 7, from BBPHeliFire3d's plan
 		// 0x1007f9d0): of the seat's weapons with a strength above 0 against
@@ -3619,6 +3992,7 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 	bot.planSlot = gunning ? bot.seatWeapon : bot.weaponSlot;
 	bot.manoeuvre = bot.chase = bot.guidedMove = false; // a new plan's statements start afresh
 	bot.backOffAt = -1e9f;
+	bot.firePlanBuilt = false;
 }
 
 // The weapon choice for the target BBFire settled on (0x10074ef0, called
@@ -4104,6 +4478,9 @@ float BotManager::reviveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, con
 float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, uint32_t vehicle, int seat, bool other) const
 {
 	const bool soldier = vehicle == 0;
+	if (!soldier && other && !self.vehicle && vehicle == bot.abandonedVehicle && m_time - bot.abandonedAt < 30) {
+		return 0;
+	}
 	const float health = healthOf(soldier ? self.soldier : vehicle);
 	std::vector<std::string> guns;
 	std::string rootAi, seatAi;
@@ -4327,8 +4704,8 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // BBChange's urgency (0x1006c520). The current seat: on foot 1.2 x its
 // value; in a vehicle 2 x the seat's value (250 at the driver's seat
 // with others aboard), and the way out is the soldier's own value, or
-// 10000 when the vehicle is worth nothing (a wreck) or stands more than
-// 4 m off the vehicle mesh (0x100880e0). The vehicles within 75 m
+// 10000 when the vehicle is worth nothing (a wreck) or has stood more
+// than 4 s in a commander's strike spot (0x100880e0, `struck`). The vehicles within 75 m
 // (IAIInformationEnvironment 0x100ca9e0; one without a Mobile plug-in
 // within 75/sqrt(2) m) on the vehicle mesh, each seat at its value x the
 // distance factor max(0, min(0.5, (R^2 - 0.8 d^2) / R^2) + 0.5), x5 for
@@ -4351,7 +4728,7 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 //     only that one counts, x5.
 // From a vehicle the other vehicles are weighed too unless the way out is
 // already the best, a bail_out is held, the bot's object is ITAir or it is
-// off the mesh; the bot's own vehicle is left out. A driver of a Mobile
+// in a strike spot past 4 s; the bot's own vehicle is left out. A driver of a Mobile
 // root (and a soldier) takes one with UseNoPathfindingToGetToObject
 // (Unit +0x15, 0x00884eaf), or one without a Mobile part, or one whose
 // spot on the infantry map lies within its radius + the bot's of it (the
@@ -4400,7 +4777,12 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 			return 0;
 		}
 		from = own->position;
-		bool offMesh = m_vehicleNavMesh && m_vehicleNavMesh->findPolygon(toAi(own->position), 4.0f) < 0;
+		// In a commander's strike spot for more than 4 s (0x100880e0 on the
+		// strike manager DAT_1013950c, its time since the strike over 4.0 at
+		// 0x1006c759): the way out at 10000, and no other vehicle weighed.
+		float struck = -1;
+		int strikeSide = 0;
+		bool inStrike = strikeSpotHit(self.team, own->position, strikeSide, &struck) && struck > 4.0f;
 		const std::vector<int> occupants = m_world.vehicleOccupants(own->object);
 		const int aboard = static_cast<int>(std::count_if(occupants.begin(), occupants.end(), [](int p) { return p >= 0; }));
 		const bool driving = self.seat == 0;
@@ -4416,10 +4798,9 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 				? m_settings.typeFlags(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name)) : 0;
 		}
 		// 0x1006c520 runs that test (0x100880e0, its 10000) only for an
-		// object that isn't ITAir (the bot object's flags bit 1): a pilot
-		// over the vehicle mesh's reach stays.
+		// object that isn't ITAir (the bot object's flags bit 1).
 		if (objectTypes & kITAir) {
-			offMesh = false;
+			inStrike = false;
 		}
 		chosen = own->object;
 		chosenSeat = self.seat;
@@ -4455,14 +4836,14 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 				leave = 10000;
 			}
 		}
-		if (current < 0.001f || offMesh) {
+		if (current < 0.001f || inStrike) {
 			leave = 10000;
 		}
 		if (leave > best) {
 			best = leave;
 			chosenSeat = -2;
 		}
-		weighOthers = chosenSeat != -2 && !bailOut && !(objectTypes & kITAir) && !offMesh;
+		weighOthers = chosenSeat != -2 && !bailOut && !(objectTypes & kITAir) && !inStrike;
 	} else {
 		current = 1.2f * seatValue(bot, self, 0, 0, false);
 		best = current;
@@ -4488,7 +4869,8 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		if (d2 > kReach * kReach || (!mobile && d2 > kReach * kReach * 0.5f)) {
 			continue;
 		}
-		if (m_vehicleNavMesh && mobile && m_vehicleNavMesh->findPolygon(toAi(vehicle.position)) < 0) {
+		if (m_vehicleNavMesh && mobile && m_vehicleNavMesh->findPolygon(toAi(vehicle.position)) < 0
+			&& !(m_settings.stuckRecovery() && !m_meshGaveUp.count(vehicle.object) && !wayToVehicleMesh(vehicle.position, vehicle.object).empty())) {
 			continue; // not on the vehicle mesh
 		}
 		float f = std::max(0.0f, std::min(0.5f, (kReach * kReach - 0.8f * d2) / (kReach * kReach)) + 0.5f);
@@ -5806,12 +6188,10 @@ void BotManager::runOver(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInp
 	const float error = std::remainder(std::atan2(lead.x - vehicle->position.x, lead.z - vehicle->position.z) - heading,
 		2 * 3.14159265f);
 	const ai::DriveSettings settings = driveSettings(self);
-	const float yawRate = bot.lastYawAt >= 0 && m_time > bot.lastYawAt
-		? std::remainder(heading - bot.lastYaw, 2 * 3.14159265f) / (m_time - bot.lastYawAt)
-		: 0.0f;
-	bot.lastYaw = heading;
-	bot.lastYawAt = m_time;
-	input.strafe = std::clamp(3 * settings.yawScale * std::clamp(error, -1.5707964f, 1.5707964f) - yawRate, -1.0f, 1.0f);
+	// The car's controller (0x100de001 -> 0x100e9d40): its turn rate is the
+	// angular velocity's y (see ai::DriveSense::yawRate).
+	input.strafe = std::clamp(3 * settings.yawScale * std::clamp(error, -1.5707964f, 1.5707964f) - vehicle->angularVelocity.y,
+		-1.0f, 1.0f);
 	input.throttle = 1;
 }
 
@@ -5977,8 +6357,11 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const float wantPitch = pitchOf(want);
 	const float ey = angleBetween(trueYaw, wantYaw) * kRadians;
 	const float ep = (wantPitch - truePitch) * kRadians;
+	const int aimTarget = hasTarget ? bot.target : -1;
+	const bool aimTargetChanged = gunning && aimTarget != bot.lastAimTarget;
+	bot.lastAimTarget = aimTarget;
 	float wy = 0, wp = 0;
-	if (seconds > 0 && physics::lengthSquared(bot.lastAimPoint) > 0) {
+	if (!aimTargetChanged && seconds > 0 && physics::lengthSquared(bot.lastAimPoint) > 0) {
 		wy = angleBetween(yawOf(bot.lastAimPoint), wantYaw) * kRadians / seconds;
 		wp = (wantPitch - pitchOf(bot.lastAimPoint)) * kRadians / seconds;
 	}
@@ -5996,7 +6379,8 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		lead *= 0.5f;
 	}
 	const float bias = average < -1e-4f ? -std::min(0.75f, -20 * average) : 0.0f;
-	float up = bias - g.proportional * ep - g.derivative * (ep - bot.pitchError) + lead;
+	const float pitchErrorDelta = aimTargetChanged ? 0.0f : ep - bot.pitchError;
+	float up = bias - g.proportional * ep - g.derivative * pitchErrorDelta + lead;
 	up = std::clamp(up, -4.0f, 4.0f) * 0.5f;
 	if (up != 0 && std::fabs(up) < 0.01f) {
 		up = up > 0 ? 0.01f : -0.01f;
@@ -6009,7 +6393,9 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	if ((ey > 0) == (wy > 0)) {
 		yawLead *= 0.5f;
 	}
-	float right = -gain * ey - g.derivative * (ey - bot.yawError) + yawLead;
+	const float yawErrorDelta = aimTargetChanged ? 0.0f
+		: gunning ? std::remainder(ey - bot.yawError, 2 * 3.14159265f) : ey - bot.yawError;
+	float right = -gain * ey - g.derivative * yawErrorDelta + yawLead;
 	right = std::clamp(right, -limit, limit);
 	if (std::fabs(right) < 0.001f) {
 		right = 0; // the soldier's dead zone (0x0091fdc0)
@@ -6027,12 +6413,33 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	if ((errorDegrees >= 0 && turn > errorDegrees) || (errorDegrees < 0 && turn < errorDegrees)) {
 		turn = errorDegrees;
 	}
+	// stepGunner applies this degree delta directly to the seat gun's yaw
+	// (GameWorld.cpp, Body::Gun), bypassing rotationAxisStep. The input adapter
+	// therefore has to enforce the yaw bundle's authored maxSpeed itself;
+	// otherwise a normal ControlInfo output of 2..4 becomes 10..20 degrees in
+	// one 1/30 s tick even on the shipped tank's 25 deg/s turret and walker
+	// gunner's 120 deg/s turret. Mouse/player inputs retain their existing path.
+	if (gunning) {
+		const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(self.vehicle);
+		if (self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size() && seats[static_cast<size_t>(self.seat)].yawSpeed > 0) {
+			// Bot plans execute round-robin: a degree command may be held for
+			// the physics ticks between decisions, so cap each command to one
+			// 1/30-second simulation step instead of scaling by the elapsed plan
+			// time passed into the controller.
+			const float maxTurn = seats[static_cast<size_t>(self.seat)].yawSpeed / kInputTicksPerSecond;
+			turn = std::clamp(turn, -maxTurn, maxTurn);
+		}
+	}
 	float pitchStep = up * kInputDegreesPerTick * kInputTicksPerSecond * seconds * zoomScale;
 	const float pitchErrorDegrees = ep * kDegrees;
 	if ((pitchErrorDegrees >= 0 && pitchStep > pitchErrorDegrees) || (pitchErrorDegrees < 0 && pitchStep < pitchErrorDegrees)) {
 		pitchStep = pitchErrorDegrees;
 	}
 	input.turn += turn;
+	if (gunning) {
+		bot.gunTurn = true;
+		bot.gunTurnLeft = errorDegrees - turn;
+	}
 	bot.pitch = std::clamp(truePitch + pitchStep, -kPitchLimit, kPitchLimit);
 	input.aimPitch = bot.pitch;
 }
@@ -6057,6 +6464,8 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 //     Titans and the static AP/AV guns); its value 1 sets a flag the plan
 //     overwrites before it reads it (no effect);
 //   - never with a close-combat weapon (type 7);
+//   - on the path from 0x10079dff (a vehicle seat's), also when the plan
+//     has no moves (firePlanHolds, 0x10079e2f, after the type 7 test);
 //   - otherwise when the bot stands more than 30 m from the spot (50 m
 //     when neither the bot's object nor the target is ITSoldier) with the
 //     target on the far side (the two directions' dot under 0).
@@ -6085,6 +6494,9 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 		const world::Object* o = m_world.objects().find(object);
 		return o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : std::string();
 	};
+	if (firePlanHolds(self, target)) {
+		return true; // local_9 from 0x10079e2f: the spot's move in place of the others (0x1007ae2a)
+	}
 	const std::string ownAi = self.vehicle ? aiOf(self.vehicle) : aiOf(self.soldier);
 	const AiPlugin* ownMobile = m_settings.plugin(ownAi, "Mobile");
 	bool keep = false;
@@ -6125,6 +6537,52 @@ bool BotManager::fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& s
 		keep = physics::lengthSquared(toSpot) > reach * reach && physics::dot(toSpot, toTarget) < 0;
 	}
 	return keep;
+}
+
+// The fire plan's builder (0x100795a0) has two paths for a bot with a Mobile
+// part. It takes the one from 0x10079dff when the bot object's ControlInfo
+// drives and aims with different inputs, (drive mask & aim mask) == 0
+// (0x1007969c: 0x100cf5c0 / 0x100cf5a0 -> BF2142.exe's adaptor 0x009d6b98
+// slots 0x20 / 0x14 -> the template's +0x40 / +0x28), or is isFloating
+// (0x100cf660 -> slot 0x38, +0xfe): every shipped vehicle seat (PIYaw and
+// PIThrottle against PIMouseLookX / Y; the hover tank shares PIRoll and
+// floats). SoldierCtrl turns and aims with PIMouseLookX and takes the path
+// from 0x1007af96, as do the gunships' and transports' pilots (all four
+// axes in both masks). On the first path the plan is built without its moves
+// (local_9, 0x10079e2f) against an ITSoldier target (0x10079e29), or one
+// whose Mobile part has no polygon on the bot's map (its location record,
+// 0x100a4510 at 0x10079e19); with an order spot it goes there instead
+// (0x1007ae2a, fireKeepsToOrder). Without a ControlInfo (the tests' bare
+// templates) the driver keeps the other path, as before.
+bool BotManager::firePlanHolds(const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) const
+{
+	if (!self.vehicle || !self.driving) {
+		return false;
+	}
+	const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(self.vehicle);
+	const AiPlugin* control = self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size()
+		? m_settings.plugin(aiTemplateOf(seats[static_cast<size_t>(self.seat)].name), "ControlInfo")
+		: nullptr;
+	if (!control || ((control->driveMask & control->aimMask) != 0 && !control->floating)) {
+		return false;
+	}
+	if (!target.vehicle) {
+		return true; // ITSoldier
+	}
+	// The record is the engine's (0x10055650), left as it was while the
+	// object is over 10 m above the ground: what it holds for an aircraft
+	// isn't known, so those keep their moves, as before.
+	const world::Object* object = m_world.objects().find(target.vehicle);
+	const std::string ai = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : std::string();
+	if (!m_vehicleNavMesh || !m_settings.plugin(ai, "Mobile") || (m_settings.typeFlags(ai) & (kITAir | kITHelicopter))) {
+		return false;
+	}
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		if (v.object == target.vehicle) {
+			return m_vehicleNavMesh->findPolygon(toAi(v.position)) < 0;
+		}
+	}
+	return false;
 }
 
 // The guided plan's order spot (0x10078570, when it is built): the
@@ -6319,9 +6777,27 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (bot.sharedTarget != bot.target) {
 		bot.sharedTarget = bot.target;
 		shareTarget(self, target);
+	}
+	if (bot.firePlanUnit != target.vehicle) {
+		// The target got into or out of a vehicle: the plan's target is the
+		// unit (a soldier, or the vehicle it mans), so the keeper sees another
+		// target (0x1007d0d3) and the builder runs again.
+		bot.firePlanUnit = target.vehicle;
+		bot.firePlanBuilt = false;
+	}
+	if (!bot.firePlanBuilt) {
+		// The builder's own choices, made each time it runs: for a new target
+		// or weapon (planFire), and again when Fire takes over from another
+		// behaviour with the same target (0x1007cf10 keeps a plan only while
+		// it is still the bot's, 0x1007d04c). Its driving statements start
+		// afresh (the guided move on foot is left as it was).
+		bot.firePlanBuilt = true;
+		bot.manoeuvre = bot.chase = false;
+		bot.backOffAt = -1e9f;
 		// A guided weapon's plan on foot keeps its own order spot.
 		const bool guided = !self.vehicle && guidanceKind(m_world.templates().find(weaponName(self, bot.weaponSlot))) != 0;
 		bot.orderMove = guided ? guidedOrderSpot(self, bot.orderSpot) : fireKeepsToOrder(bot, self, target, &bot.orderSpot);
+		bot.fireHolds = firePlanHolds(self, target);
 	}
 	const physics::Vec3 targetAt = (inSight ? target.position : known->position)
 		+ physics::Vec3 {0, target.vehicle ? 1.0f : kChestHeight, 0};
@@ -6554,7 +7030,11 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (weapon.firingPose == 2) {
 		want = SoldierPose::Crouch;
 	} else if (weapon.firingPose == 3) {
-		want = SoldierPose::Prone;
+		// enhanced.botMovement (not retail, where every Lying weapon lies
+		// down at any range): only a sniper, and only for a far target.
+		// shortcut: a fixed 50 m, tune from play if snipers feel wrong.
+		const bool crouch = m_settings.playerLikeMovement() && (weapon.type != WeaponAi::Sniper || distance < 50);
+		want = crouch ? SoldierPose::Crouch : SoldierPose::Prone;
 	}
 	if (guidedPlan) {
 		input.pose = bot.pose; // the guided plan takes no firing pose
@@ -6696,9 +7176,9 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	// A bot in a squad reports its target to its squad as its trigger goes
 	// down and comes up (AIDLL 0x1009a1d0, 0x1009a2a0 -> IAIGame vt+0x6c ->
 	// BF2142.exe 0x008958a0: event 0x41, type 1; 30 s and 3 s on the
-	// squad's minimap, which the rewrite doesn't show).
+	// squad's minimap, whose type 1 carries no enemy flag: 0x00508590).
 	if (self.squad != 0 && input.fire != bot.reportedFiring) {
-		m_world.reportBattlefieldObjects(self.id, {bot.target});
+		m_world.reportBattlefieldObjects(self.id, {bot.target}, 3, 1);
 	}
 	bot.reportedFiring = input.fire;
 	// The AI deviation on each round (BF2142.exe 0x00892b70).
@@ -6932,6 +7412,19 @@ bool BotManager::follow(Bot& bot, const ai::NavMesh& mesh, const ai::MapSpot& st
 {
 	const bool other = bot.followId != goalId;
 	const bool moved = horizontal2(bot.followTo - to) > 4 && m_time - bot.followAt >= 1;
+	if (!settings.soldier && bot.follower.stuck() && !other && physics::lengthSquared(bot.followTo - to) < 1e-6f) {
+		// A vehicle's no-progress flag (+0xd8, 0x10092bc0) survives a request
+		// for the same goal while the route stands: more than one waypoint,
+		// or the current one on the unit's polygon (0x10095fc0's early
+		// return, 0x100960a6..0x100960fe). Another goal resets it (0x100923a0),
+		// a full replan clears it (0x10096155).
+		const auto& route = bot.follower.waypoints();
+		const size_t at = bot.follower.current();
+		const bool stands = route.size() > 1 || (at < route.size() && route[at].polygon == mesh.findPolygon(start.point));
+		if (stands) {
+			return false;
+		}
+	}
 	if (bot.follower.failed() && m_time - bot.followAt < 1 && !other) {
 		return false;
 	}
@@ -7105,7 +7598,22 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	bot.zoomPress = bot.zoom.level() > 0 && !bot.zoomKey;
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	bot.look.quiet = true; // the walk's own look (a plan's aim holds the agent)
+	// The walk's steering statement (0x100cd3b0, a plan's own, 0x10079489)
+	// runs the controller (0x100cd4f3) with its own last errors (+0x18 /
+	// +0x1c) and no lead: the plan's aim keeps its errors, aim point and
+	// pitch history, or its derivative and bias read the walk's look.
+	const physics::Vec3 aimPoint = bot.lastAimPoint;
+	const int aimTarget = bot.lastAimTarget;
+	const float yawError = bot.yawError, pitchError = bot.pitchError;
+	const std::array<float, 10> pitchErrors = bot.pitchErrors;
+	const int pitchErrorCount = bot.pitchErrorCount;
 	aim(bot, self, eye + d * 5.0f, {}, false, {}, input, seconds);
+	bot.lastAimPoint = aimPoint;
+	bot.lastAimTarget = aimTarget;
+	bot.yawError = yawError;
+	bot.pitchError = pitchError;
+	bot.pitchErrors = pitchErrors;
+	bot.pitchErrorCount = pitchErrorCount;
 	bot.look.quiet = false;
 	bot.follower.progress(toAi(self.position), std::fabs(input.throttle), m_time);
 	return true;
@@ -7161,6 +7669,13 @@ physics::Vec3 backOffSpot(const physics::Vec3& target, physics::Vec3 forward, fl
 //    chooses again each second (+0x100).
 // The rewrite drives with the vehicles' MoveTo (drive) at the Mobile
 // maxSpeed (the move's half-speed approach isn't modelled).
+// This is the builder's path from 0x1007af96, which the shipped vehicle
+// seats don't take (firePlanHolds): on theirs (0x10079dff) a plan against a
+// soldier or a target off the bot's map has no moves (bot.fireHolds), and
+// the moves against other targets differ (the chase the same Serial; then
+// MoveToObjectFinding keeping 0.35 maxRange when beyond half of it or within
+// max(18, 1.05 minRange), and a nearer set, 0x1007a6d0..0x1007ad60). Those
+// aren't rewritten: other targets still get this path's moves.
 bool BotManager::driveFirePlan(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
 	const Known& known, bool inSight, const WeaponAi& weapon, bool explosivePlan, float seconds, SoldierInput& input)
 {
@@ -7172,10 +7687,37 @@ bool BotManager::driveFirePlan(Bot& bot, const GameWorld::PlayerInfo& self, cons
 		input.throttle = 0;
 		input.strafe = 0;
 	};
+	if (bot.orderMove) {
+		// The plan keeps to the order's spot (+0x248, fireKeepsToOrder): with
+		// the flag and a spot the builder sets vt+0x254(1) and builds
+		// MoveToFinding to the spot (0x100d11c0) in place of the chase and the
+		// manoeuvre, on both of its Mobile paths (0x1007ae2a -> 0x1007ae83,
+		// 0x1007c8f1 -> 0x1007c947), for a driver as on foot.
+		bot.chase = false;
+		bot.manoeuvre = false;
+		if (!drive(bot, self, bot.orderSpot, 450000 + bot.goalOrder, seconds, input)) {
+			stop();
+		}
+		return false;
+	}
+	if (bot.fireHolds) {
+		// Built without its moves (firePlanHolds): the driver stays where it
+		// is and the plan's aim and trigger go on; nothing is forgotten.
+		bot.chase = false;
+		bot.manoeuvre = false;
+		stop();
+		return false;
+	}
 	if (!inSight || bot.chase) {
 		bot.manoeuvre = false;
 		bot.chase = true; // the then-branch runs to its end
 		if (!drive(bot, self, target.position, 400000 + target.id, seconds, input)) {
+			if (bot.moveFailed) {
+				// The move failed: the plan ends there, before ForgetObject.
+				bot.chase = false;
+				stop();
+				return true;
+			}
 			// Arrived: ForgetObject, and the failing statement ends the plan.
 			bot.chase = false;
 			bot.known.erase(std::remove_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == target.id; }),
@@ -7218,7 +7760,7 @@ bool BotManager::driveFirePlan(Bot& bot, const GameWorld::PlayerInfo& self, cons
 			[mesh](const physics::Vec3& spot) { return !mesh || mesh->findPolygon(toAi(spot)) >= 0; });
 	}
 	if (!drive(bot, self, bot.backOff, 410000 + target.id, seconds, input)) {
-		bot.backOffAt = -1e9f; // at the spot: choose again
+		bot.backOffAt = -1e9f; // at the spot, or the move there failed: choose again
 	}
 	return false;
 }
@@ -7229,6 +7771,25 @@ bool BotManager::driveFirePlan(Bot& bot, const GameWorld::PlayerInfo& self, cons
 // lines name (AIBehaviours.ai: Car and ArmedCar CarMoveTo, Mech
 // MechMoveTo, FloatingTank FloatingTankMoveTo for BotManager::drive, Tank
 // TankMoveTo; BotSettings::moveInterpreter).
+// The drivers' list of other objects (the follower's +0x64, filled by
+// 0x10094df0 in the round-robin refresh 0x100c6dbe; read by 0x100fbff0,
+// 0x100fc660 and 0x100fbdb0) takes an object through the filter 0x10092780:
+// primary (0x100a8c60) with a Mobile part (+0x3c, made only for the Mobile
+// plug-in, 0x1003ba6e), or typed ITObstacle (+8 bit 13). A stationary gun
+// (STATIC_AA_AI: Physical, Armament, Unit, ControlInfo) is neither. Without
+// AI scripts every vehicle counts. Not modelled: the query's 50 m radius
+// round the bot (0x42480000, information environment slot 0x20) and that
+// the list is refreshed only on the bot's refresh turn.
+bool BotManager::driversSee(uint32_t object) const
+{
+	const world::Object* o = m_world.objects().find(object);
+	const std::string ai = o && o->objectTemplate() ? aiTemplateOf(o->objectTemplate()->name()) : "";
+	if (ai.empty() || !m_settings.aiTemplates.count(lower(ai))) {
+		return true;
+	}
+	return (m_settings.primary(ai) && m_settings.plugin(ai, "Mobile")) || (m_settings.typeFlags(ai) & kITObstacle);
+}
+
 ai::DriveSettings BotManager::driveSettings(const GameWorld::PlayerInfo& self) const
 {
 	ai::DriveSettings d;
@@ -7276,6 +7837,7 @@ ai::DriveSettings BotManager::driveSettings(const GameWorld::PlayerInfo& self) c
 bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 	SoldierInput& input, float radius)
 {
+	bot.moveFailed = false;
 	const GameWorld::VehicleInfo* vehicle = nullptr;
 	for (const GameWorld::VehicleInfo& v : m_vehicles) {
 		vehicle = v.object == self.vehicle ? &v : vehicle;
@@ -7298,11 +7860,7 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	ai::DriveSense sense;
 	sense.now = m_time;
 	sense.speed = physics::dot(vehicle->velocity, forward);
-	if (bot.lastYawAt >= 0 && m_time > bot.lastYawAt) {
-		sense.yawRate = std::remainder(heading - bot.lastYaw, 2 * 3.14159265f) / (m_time - bot.lastYawAt);
-	}
-	bot.lastYaw = heading;
-	bot.lastYawAt = m_time;
+	sense.yawRate = vehicle->angularVelocity.y; // see ai::DriveSense
 	sense.tilt = std::max(std::fabs(physics::dot(vehicle->angularVelocity, vehicle->right)),
 		std::fabs(physics::dot(vehicle->angularVelocity, vehicle->forward)));
 	sense.position = toAi(at);
@@ -7314,12 +7872,20 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		if (v.object == vehicle->object) {
 			continue;
 		}
+		if (!driversSee(v.object)) {
+			continue;
+		}
 		const VehicleBox other = vehicleBox(v);
 		const physics::Vec3 up {v.forward.y * v.right.z - v.forward.z * v.right.y, v.forward.z * v.right.x - v.forward.x * v.right.z,
 			v.forward.x * v.right.y - v.forward.y * v.right.x};
 		const physics::Vec3 centre = v.position + v.right * other.centre.x + up * other.centre.y + v.forward * other.centre.z;
-		sense.obstacles.push_back(
-			{static_cast<int>(v.object), toAi(v.position), toAi(centre), toAi(v.velocity), other.radius, other.centreRadius});
+		ai::DriveObstacle obstacle {static_cast<int>(v.object), toAi(v.position), toAi(centre), toAi(v.velocity), other.radius,
+			other.centreRadius};
+		// A human in its driver's seat (0x100e9571..0x100e9593, see ai::DriveObstacle).
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			obstacle.humanDriven = obstacle.humanDriven || (p.alive && !p.ai && p.vehicle == v.object && p.seat == 0);
+		}
+		sense.obstacles.push_back(obstacle);
 	}
 	const bool floating = m_settings.moveInterpreter(equipmentOf(self)) == "FloatingTankMoveTo";
 	const physics::Vec3 lastVelocity = bot.lastVelocity;
@@ -7341,6 +7907,8 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	physics::Vec3 point = to;
 	sense.remaining = std::sqrt(horizontal2(to - at));
 	ai::FollowerSettings floatingFollower;
+	// enhanced.cornerSteer (not retail; off by default): cars and tanks.
+	const bool cornerSteer = m_settings.cornerSteering() && settings.driver != ai::Driver::Mech && !floating;
 	if (m_vehicleNavMesh) {
 		ai::FollowerSettings follower;
 		follower.soldier = false;
@@ -7353,6 +7921,43 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		// DAT_10139470 vt+0xc0) and its room rays (the unit's, 0x100aa510).
 		follower.options.profile = m_settings.costProfile(equipmentOf(self));
 		follower.climb = m_settings.climbLimits(1);
+		if (bot.vehicleApproach && bot.follower.failed() && bot.followId == goalId) {
+			// A complete mesh route is still only a plan. If physical travel
+			// fails, dismount here only when infantry has a complete route to
+			// the objective within the bounded walking distance.
+			const bool onFoot = infantryRecoveryRoute(m_navMesh, toAi(at), toAi(bot.approachInfantryGoal));
+
+			bot.goal = at;
+			bot.via.clear();
+			bot.follower.reset();
+			bot.followId = -1;
+			if (!onFoot) {
+				if (bot.goalControlPoint >= 0) bot.rejectedVehiclePoints[bot.goalControlPoint] = m_time + 30;
+				bot.vehicleApproach = false;
+				bot.orderRegoal = true;
+			}
+			brake();
+			return true;
+		}
+		if (m_settings.stuckRecovery() && bot.follower.stuck() && bot.followId == goalId) {
+			// enhanced.botRecovery, an addition beyond the original game: no
+			// progress for 20 s (the follower's test, AIDLL 0x10092bc0). Without
+			// it the bot asks for the same route again (follow) and a driver
+			// wedged against the mesh's edge stays put; here it gets out (act)
+			// and goes on foot, and the bots riding with it too, or they would
+			// sit in it with no driver. (What retail does with the stuck flag
+			// after 0x10092bc0 is not established.)
+			bot.stuckExit = self.vehicle;
+			for (const GameWorld::PlayerInfo& p : m_players) {
+				if (const auto other = m_bots.find(p.id); other != m_bots.end() && p.alive && p.vehicle == self.vehicle) {
+					other->second.stuckExit = self.vehicle;
+				}
+			}
+			bot.follower.reset();
+			bot.followId = -1;
+			brake();
+			return true;
+		}
 		if (bot.driveObject != vehicle->object) {
 			bot.driveObject = vehicle->object;
 			bot.driveSpot = ai::MapSpot();
@@ -7386,10 +7991,20 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		}
 		if (!follow(bot, *m_vehicleNavMesh, bot.driveSpot, to, goalId, follower, at)) {
 			brake();
-			// No progress for 20 s (0x10092bc0): the move fails and the
-			// behaviour plans again (0x100c91c0 hands the stuck bot to the
-			// game, IAIGameEffector vt+0x24 -> 0x0089e940 -> GameLogic slot
-			// 0x58, 0x008924f0, which only returns 0: nothing to rewrite).
+			if (bot.follower.stuck()) {
+				// The follower's step refuses a point while the flag stands
+				// (0x10095720 at 0x10095729), so the interpreter brakes and
+				// ends the move done but not ok (CarMoveTo 0x100911a6,
+				// MechMoveTo likewise; emulated in work/suez-stall). Not an
+				// arrival: the callers see moveFailed.
+				bot.moveFailed = true;
+				return false;
+			}
+			// No path. (No progress for 20 s, 0x10092bc0, sets the follower's
+			// +0xd8; follow then asks for the same route at once. The scheduler
+			// 0x100c91c0 hands such a bot to the game, IAIGameEffector vt+0x24
+			// -> 0x0089e940 -> GameLogic slot 0x58, 0x008924f0, a no-op; how
+			// retail's vehicle move ends after it is not established.)
 			return true;
 		}
 		const ai::PathFollower::Steer steer = bot.follower.steer(*m_vehicleNavMesh, toAi(at), m_time, &bot.driveSpot);
@@ -7402,6 +8017,17 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 			return true;
 		}
 		point = fromAi(steer.point);
+		if (cornerSteer && bot.corner.latched) {
+			Bot::Corner& c = bot.corner;
+			// Within 1.5 m, or past it along the way it was chosen on.
+			const physics::Vec3 chosen = c.point - c.latchedFrom, left = c.point - at;
+			const bool reached = horizontal2(left) < 1.5f * 1.5f || chosen.x * left.x + chosen.z * left.z < 0;
+			if (reached || m_time - c.latchedAt > 15 || c.goal != goalId) {
+				c.latched = false;
+			} else {
+				point = c.point;
+			}
+		}
 		sense.remaining = bot.follower.remaining(toAi(at));
 		sense.maxBend = bot.follower.maxBend(toAi(at), toAi(forward), sense.speed, settings.lookAheadTime, m_time);
 		// The room rays (0x100e8170, TankMoveTo's 0x100de8a0, MechMoveTo's
@@ -7488,7 +8114,69 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 		bot.follower.progress(toAi(at), std::max(std::fabs(out.throttle), std::fabs(out.strafe)), m_time);
 		return true;
 	}
+	const int stateBefore = bot.drive.state;
 	const ai::DriveOutput out = ai::driveControl(settings, bot.drive, sense);
+	if (cornerSteer && m_vehicleNavMesh && (bot.drive.state == 9 || bot.drive.state == 11)
+		&& (stateBefore == 0 || stateBefore == 2 || stateBefore == 3) && bot.drive.avoided == -1 && std::cos(sense.error) > 0.9f) {
+		// Refused for room while facing the point (the controller's front rays,
+		// no obstacle). Retail backs straight and comes back on the same line
+		// (CURRENT-STATUS: the FAV at the long bridge's wreck). A refusal
+		// counts again only after a back-and-return (over 1.5 s since the
+		// last one) within 5 m of the first and with no less of the path
+		// left (within 2 m): a tank creeping on through a narrow spot, or out
+		// of its spawn, flips 0/11 and is making progress. On the second such
+		// refusal, steer at a point beside it that the body clears
+		// (ai::cornerApproach). After two such points, or with none by the
+		// third refusal, the move fails here instead of backing along the
+		// same line again.
+		Bot::Corner& c = bot.corner;
+		if (m_time - c.lastAt > 30 || horizontal2(at - c.at) > 25 || sense.remaining < c.remaining - 2) {
+			c.refusals = 0;
+			c.corrections = 0;
+			c.at = at;
+			c.remaining = sense.remaining;
+		}
+		if (c.refusals == 0 || m_time - c.lastAt > 1.5f) {
+			++c.refusals;
+		}
+		c.lastAt = m_time;
+		if (c.refusals >= 2 && !c.latched) {
+			const bool cooling = m_time < c.failedUntil && horizontal2(at - c.failedAt) <= 25;
+			std::optional<ai::Vec3> wider;
+			if (!cooling && c.corrections < 2) {
+				const float shrunk = m_settings.pathfindingMaps.size() > 1 ? m_settings.pathfindingMaps[1].radius : 0;
+				wider = ai::cornerApproach(*m_vehicleNavMesh, m_settings.climbLimits(1), settings, toAi(at), toAi(point), shrunk);
+			}
+			if (wider) {
+				c.refusals = 0;
+				c.latched = true;
+				c.point = fromAi(*wider);
+				c.latchedAt = m_time;
+				c.latchedFrom = at;
+				c.goal = goalId;
+				++c.corrections;
+			} else if (c.refusals >= 3) {
+				c.refusals = 0;
+				c.failedAt = at;
+				c.failedUntil = m_time + 30;
+				c.corrections = 0;
+				// Stop here, as a failed approach does (above): the objective is
+				// rejected for 30 s, and without another one the bot holds its
+				// place (updateGoal) instead of driving back onto the same line.
+				bot.goal = at;
+				bot.via.clear();
+				bot.follower.reset();
+				bot.followId = -1;
+				if (bot.goalControlPoint >= 0) {
+					bot.rejectedVehiclePoints[bot.goalControlPoint] = m_time + 30;
+				}
+				bot.orderRegoal = true;
+				bot.moveFailed = true;
+				brake();
+				return false;
+			}
+		}
+	}
 	if (out.stop) {
 		brake(); // something sits on the goal (0x10091050 on 666)
 		return false;
@@ -7741,7 +8429,16 @@ void BotManager::routeVia(Bot& bot, const GameWorld::PlayerInfo& self, int targe
 			}
 		}
 		if (area != target) {
-			physics::Vec3 point = at;
+			// After 20 points off the mesh, the area's position for the map
+			// (vt+0x10, 0x1005d7f0: its base plus the map's entry, which
+			// 0x1005d4f0, run by 0x100629e0 once the base is the control
+			// point's, turns from the setOrderPosition into an offset), not
+			// the control point's (0x10060300). (A map without an order
+			// position would give the origin there; the control point is kept.)
+			const ai::StrategicArea& sa = s.areas[static_cast<size_t>(area)];
+			physics::Vec3 point = map >= 0 && map <= 1 && sa.hasOrderPosition[map]
+				? physics::Vec3 {sa.orderPosition[map][0], sa.orderPosition[map][1], sa.orderPosition[map][2]}
+				: at;
 			for (int attempt = 0; attempt < 20; ++attempt) {
 				const float angle = random() * 6.2831853f;
 				const float distance = std::sqrt(random()) * radius * 0.8f;
@@ -8995,8 +9692,13 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 		}
 	});
 	// The mesh generator's settings (the editor traces the maps with them;
-	// the bots read the generated .qtr/.clb): accepted, not used.
-	bindMethod(console, "aiPathfinding.map.radius", access, [](float) {});
+	// the bots read the generated .qtr/.clb): accepted, not used by retail.
+	// The radius is kept for enhanced.cornerSteer (not retail).
+	bindMethod(console, "aiPathfinding.map.radius", access, [activeMap](float radius) {
+		if (BotSettings::PathfindingMap* m = activeMap()) {
+			m->radius = radius;
+		}
+	});
 	bindMethod(console, "aiPathfinding.map.allowedHeightDiff", access, [](float) {});
 	bindMethod(console, "aiPathfinding.map.addVehicleForClusterCost", access, [](std::string) {});
 	bindMethod(console, "aiPathfinding.traceMap", access, [s](std::string name) {

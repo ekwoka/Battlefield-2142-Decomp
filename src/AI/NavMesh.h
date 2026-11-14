@@ -249,7 +249,9 @@ const ClusterLink* entryLink(const NavMesh& mesh, const ClusterStep& step);
 // class's multiplier and a slope factor (0x100bc300); the heuristic is the
 // straight line to the goal point (0x100bc590); the search ends when the
 // goal polygon is generated. `allowedClusters` (search +0x30), when not
-// null, restricts the search to polygons whose cluster is flagged in it.
+// null, restricts the search to polygons whose cluster is flagged in it
+// (findPath's corridor; the bots' segment searches never keep one, see
+// PathFollower::planSegment).
 // Empty when there is no path.
 std::vector<PathStep> findPolygonPath(const NavMesh& mesh, uint32_t startPolygon, const Vec3& from,
 	uint32_t goalPolygon, const Vec3& to, const PathOptions& options = {},

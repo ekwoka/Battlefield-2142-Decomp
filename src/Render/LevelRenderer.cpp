@@ -2,12 +2,14 @@
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
 #include "MeshLights.h"
+#include "Scene/EnhancedSettings.h"
 #include "Scene/OvergrowthSettings.h"
 #include "MeshQueues.h"
 #include "SceneMath.h"
 #include "RoadStatics.h"
 #include "StaticLightmaps.h"
 #include "TextureSuffix.h"
+#include "TreeMaterials.h"
 
 #include <array>
 #include <limits>
@@ -41,6 +43,40 @@
 namespace dice::hfe::render {
 
 namespace {
+
+// BF2142_LIGHT_TRACE=1 (a diagnostic, off by default): each frame on stderr, "light-trace:" lines with the
+// effects' dynamic lights listed, every mesh whose point-light picks changed since the last frame, the lighting
+// and post-production uniforms and the first-person sprites within 5 m when they change. For a shading flicker
+// seen live: a wall's light set or the frame's grade changing for a moment, or a sprite over the view.
+struct LightTrace {
+	bool on = std::getenv("BF2142_LIGHT_TRACE") != nullptr;
+	int frame = 0;
+	std::unordered_map<std::string, std::string> picks;
+	std::string lighting[2], post, firstPerson;
+	// Prints `text` under `label` when it differs from `last`.
+	void changed(std::string& last, const char* label, const std::string& text)
+	{
+		if (text != last) {
+			std::fprintf(stderr, "light-trace: frame %d %s %s\n", frame, label, text.c_str());
+			last = text;
+		}
+	}
+};
+LightTrace& lightTrace()
+{
+	static LightTrace trace;
+	return trace;
+}
+std::string traceFloats(const float* v, int n)
+{
+	std::string out;
+	char text[32];
+	for (int i = 0; i < n; ++i) {
+		std::snprintf(text, sizeof text, i ? "/%.3f" : "%.3f", v[i]);
+		out += text;
+	}
+	return out;
+}
 
 constexpr int kDefaultTerrainPatches = 8; // colormaps per side without terrain data
 // The low-detail texture's x and z planes: its v a metre up (TEXSCALE.y,
@@ -123,7 +159,7 @@ void specularUniforms(LightingUniforms& uniforms, const S& submesh, const Camera
 template <class S>
 void meshKindUniforms(LightingUniforms& uniforms, const S& submesh, bool hemiAndShadows)
 {
-	uniforms.material[2] += hemiAndShadows ? kMaterialHemi : kMaterialNoShadows;
+	uniforms.material[2] += !hemiAndShadows ? kMaterialNoShadows : submesh.noHemi ? 0.0f : kMaterialHemi;
 	if (submesh.normalMap) {
 		uniforms.material[2] += kMaterialNormalMap;
 	}
@@ -253,6 +289,7 @@ LevelRenderer::~LevelRenderer()
 		SDL_ReleaseGPUBuffer(device, m_flareVertices);
 	}
 	releasePostTargets();
+	releaseEnhancedTargets();
 	releaseMultisampleTargets();
 }
 
@@ -327,11 +364,12 @@ SDL_GPUTexture* LevelRenderer::cubeTexture(const io::FileManager& files, const s
 }
 
 const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, const std::string& geometryName,
-	int wantedGeometry, int wantedLod)
+	int wantedGeometry, int wantedLod, bool overgrowth)
 {
-	const std::string key = wantedGeometry < 0 && wantedLod == 0
+	const std::string key = (wantedGeometry < 0 && wantedLod == 0
 		? lower(geometryName)
-		: lower(geometryName) + "#" + std::to_string(wantedGeometry) + "/" + std::to_string(wantedLod);
+		: lower(geometryName) + "#" + std::to_string(wantedGeometry) + "/" + std::to_string(wantedLod))
+		+ (overgrowth ? "#overgrowth" : "");
 	const auto it = m_meshes.find(key);
 	if (it != m_meshes.end()) {
 		return it->second.get();
@@ -398,6 +436,64 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	const geom::VertexElement* partIndex =
 		bundled || skinned ? file->element(geom::VertexUsage::BlendIndices) : nullptr;
 	const geom::VertexElement* blendWeight = skinned ? file->element(geom::VertexUsage::BlendWeight) : nullptr;
+	std::vector<uint16_t> particleIndices;
+	std::vector<std::vector<IndexRange>> particleSlots;
+	if (geometry->meshParticle) {
+		// Blend indices select a particle matrix in the pre-batched mesh.
+		// Preserve the original ranges and append triangles grouped by slot;
+		// a slot's triangles need not be contiguous in the source.
+		if (!bundled || !partIndex || partIndex->type != geom::VertexType::D3DColor ||
+			static_cast<uint32_t>(partIndex->offset) + 4 > file->vertexStride) {
+			return missing("mesh particle has invalid blend indices in " + geometry->path);
+		}
+		if (lod.partCount == 0 || lod.partCount > 256) {
+			return missing("mesh particle has invalid batch size in " + geometry->path);
+		}
+		uint64_t totalIndices = file->indices.size();
+		for (const geom::MeshMaterial& material : lod.materials) {
+			totalIndices += material.indexCount;
+		}
+		if (totalIndices > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t)) {
+			return missing("mesh particle index buffer too large in " + geometry->path);
+		}
+		particleIndices = file->indices;
+		particleIndices.reserve(static_cast<size_t>(totalIndices));
+		particleSlots.resize(lod.materials.size());
+		for (size_t m = 0; m < lod.materials.size(); ++m) {
+			const geom::MeshMaterial& material = lod.materials[m];
+			if (material.indexCount % 3 != 0) {
+				return missing("mesh particle material has incomplete triangle in " + geometry->path);
+			}
+			std::vector<std::vector<uint16_t>> bySlot(lod.partCount);
+			for (uint32_t i = 0; i < material.indexCount; i += 3) {
+				const size_t start = static_cast<size_t>(material.indexStart) + i;
+				uint32_t triangleSlot = 0;
+				for (size_t v = 0; v < 3; ++v) {
+					const uint16_t index = file->indices[start + v];
+					if (index >= material.vertexCount) {
+						return missing("mesh particle index outside material in " + geometry->path);
+					}
+					const size_t vertex = static_cast<size_t>(material.vertexStart) + index;
+					const uint32_t slot = file->vertices[vertex * file->vertexStride + partIndex->offset];
+					if (slot >= lod.partCount) {
+						return missing("mesh particle slot outside batch in " + geometry->path);
+					}
+					if (v != 0 && slot != triangleSlot) {
+						return missing("mesh particle triangle has mixed particle slots in " + geometry->path);
+					}
+					triangleSlot = slot;
+				}
+				auto& indices = bySlot[triangleSlot];
+				indices.insert(indices.end(), file->indices.begin() + start, file->indices.begin() + start + 3);
+			}
+			particleSlots[m].resize(lod.partCount);
+			for (size_t s = 0; s < bySlot.size(); ++s) {
+				particleSlots[m][s] = {static_cast<uint32_t>(particleIndices.size()),
+					static_cast<uint32_t>(bySlot[s].size())};
+				particleIndices.insert(particleIndices.end(), bySlot[s].begin(), bySlot[s].end());
+			}
+		}
+	}
 	// The tangents (Vertex::tangent): the binormal is cross(tangent,
 	// normal) times 1 - 2 x the third blend index byte for bundled and
 	// skinned meshes (RaShaderBM/SM createWorld2TanMat / getTangentBasis),
@@ -452,6 +548,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	auto gpuMesh = std::make_unique<GpuMesh>();
 	gpuMesh->bundled = bundled;
 	gpuMesh->skinned = skinned;
+	gpuMesh->particleSlotCount = geometry->meshParticle ? lod.partCount : 0;
+	if (skinned) gpuMesh->skinnedRadius = boxHalfDiagonal(lod.bounds.min, lod.bounds.max);
 	gpuMesh->radiusShadowBounds = geometry->useRadiusForShadowDepth || geometry->useRadiusForShadowSpatial;
 	gpuMesh->titanInterior = geometry->titanInterior;
 	gpuMesh->titanExterior = geometry->titanExterior;
@@ -529,8 +627,9 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	}
 	gpuMesh->vertices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices.data(),
 		static_cast<uint32_t>(vertices.size() * sizeof(Vertex)));
-	gpuMesh->indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, file->indices.data(),
-		static_cast<uint32_t>(file->indices.size() * sizeof(uint16_t)));
+	const std::vector<uint16_t>& indices = geometry->meshParticle ? particleIndices : file->indices;
+	gpuMesh->indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
+		static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
 	const auto& materials = lod.materials;
 	// The texture class of the mesh's materials (scene::TextureClass): a
 	// tree's are the overgrowth's (0x10151830 with the template's +0x2a2).
@@ -548,7 +647,11 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	const scene::QualitySettings defaults;
 	const scene::QualitySettings& quality = sources.quality ? *sources.quality : defaults;
 	for (size_t m = 0; m < materials.size(); ++m) {
-		const geom::MeshMaterial& material = materials[m];
+		geom::MeshMaterial material = materials[m];
+		for (std::string& path : material.maps) {
+			path = meshTexturePath(path, geometry->path,
+				[&](const std::string& candidate) { return sources.files.exists(candidate); });
+		}
 		// Alpha-tested materials use "<name>_alphatest.dds" where it exists:
 		// the plain textures keep alpha in 0..0.5 for alpha to coverage
 		// (0x10151830). A tree's maps all do (its +0x2a2 branch): its
@@ -559,9 +662,10 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// OvergrowthAtlas.tai then. (The rest of a tree, its trunks and
 		// their alpha-tested "tile_" maps, keep "_alphatest": the rewrite's
 		// trunks have no shader to double a plain alpha.)
-		const bool leaf = treeLeaf(tree, material.maps);
-		const bool coverage = leaf && m_coverageTextures;
 		std::string diffusePath = material.maps.empty() ? std::string() : material.maps[0];
+		const TreeMaterial overgrowthKind = overgrowthMaterial(diffusePath); // by the mesh's own name
+		const bool leaf = treeLeaf(tree, material.maps) || (overgrowth && tree && overgrowthKind == TreeMaterial::Leaf);
+		const bool coverage = leaf && m_coverageTextures;
 		if ((material.alphaMode == 2 || tree) && !coverage && diffusePath.size() > 4) {
 			const std::string alphaTest = diffusePath.substr(0, diffusePath.size() - 4) + "_alphatest.dds";
 			if (sources.files.exists(alphaTest)) {
@@ -593,26 +697,31 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
+		if (geometry->meshParticle) {
+			submesh.particleSlots = std::move(particleSlots[m]);
+		}
 		if (atlas) {
 			submesh.uvAtlas[0] = atlas->size[0];
 			submesh.uvAtlas[1] = atlas->size[1];
 			submesh.uvAtlas[2] = atlas->offset[0];
 			submesh.uvAtlas[3] = atlas->offset[1];
 		}
-		// 0x100c3880: alpha mode 1 is blended (AlphaBlendEnable, no depth
-		// writes, no culling, SrcBlend SRCALPHA / DestBlend INVSRCALPHA), or
-		// with the template's hasAdditiveAlpha added (DestBlend ONE, the
-		// BMadditive shader, no alpha test).
+		// Alpha mode 1 normally blends over the scene. StaticMesh.fx's
+		// alpha_one technique explicitly uses SRCALPHA / ONE too: glow3
+		// and similar meshes have opaque black around their light texture.
+		// Respect that material technique independently of a geometry's
+		// hasAdditiveAlpha switch, which selects the BMadditive path.
+		const std::string technique = lower(material.technique);
+		const std::string effect = lower(material.effect);
 		submesh.blended = material.alphaMode == 1;
-		submesh.additive = submesh.blended && geometry->hasAdditiveAlpha;
+		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
+			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
 		if (submesh.additive) {
 			submesh.uvScroll[0] = geometry->simpleUVTranslation[0];
 			submesh.uvScroll[1] = geometry->simpleUVTranslation[1];
 		}
 		// StaticMesh.fx techniques name their layers: "BaseDetailDirtCrack..."
 		// with maps base, detail, dirt, crack in that order (normal maps follow).
-		const std::string technique = lower(material.technique);
-		const std::string effect = lower(material.effect);
 		if (!submesh.additive) {
 			if (effect == "staticmesh.fx" && !skinned) {
 				submesh.specularKind = technique.find("detail") != std::string::npos && material.alphaMode != 2 ? 2 : 1;
@@ -629,8 +738,15 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			submesh.alphaReference = 0.5f;
 			submesh.coverageTexture = plainTexture && diffuse;
 		}
+		const auto treeKind = overgrowth && tree ? overgrowthKind
+			: treeMaterial(tree, material.alphaMode, effect == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0);
+		submesh.trunk = treeTrunk(leaf, treeKind);
+		if (submesh.trunk) submesh.specularKind = 0;
 		// BundledMesh.fx's "AnimatedUV..." techniques (_HASUVANIMATION_).
 		submesh.animatedUV = bundled && technique.find("animateduv") != std::string::npos;
+		// A "...NoHemiLight" technique drops _USEHEMIMAP_ (the material's +0x3d set at
+		// 0x101496a0; permutation bit 0x40 only without it: 0x100c4028 / 0x100c5709).
+		submesh.noHemi = bundled && technique.find("nohemilight") != std::string::npos;
 		if (lower(material.effect) == "staticmesh.fx" && technique.compare(0, 10, "basedetail") == 0) {
 			const bool hasDirt = technique.find("dirt") != std::string::npos;
 			const bool hasCrack = technique.find("crack") != std::string::npos;
@@ -685,6 +801,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		submesh.envMap = !submesh.additive &&
 			((effect == "staticmesh.fx" && !skinned) ||
 				(bundled && technique.find("envmap") != std::string::npos && quality.meshHemiAndShadows()));
+		if (submesh.trunk) submesh.envMap = false;
 		// Normal maps (RaShaderBM/SM _HASNORMALMAP_), only at the top
 		// lighting level: the loaders skip "_b.dds" (bundled, 0x101499b0) and
 		// "_b.dds" / "_b_os.dds" (skinned, 0x100d4160) otherwise. A bundled
@@ -720,7 +837,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 }
 
 void LevelRenderer::addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
-	const Mat4& local, const Mat4& objectWorld, uint32_t object, int depth)
+	const Mat4& local, const Mat4& objectWorld, uint32_t object, int depth, const std::string& path,
+	const std::string& inheritedSkeleton)
 {
 	if (depth > 8) {
 		return; // guards against templates that contain themselves
@@ -728,7 +846,8 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 	if (objectTemplate.typeName() == "LightSource") {
 		const effects::LightSourceLook look = effects::lightSourceOf(objectTemplate);
 		if (look.enabled && !look.directional && object != 0) {
-			m_objectLights.push_back({object, local, look});
+			const size_t slash = path.rfind('/');
+			m_objectLights.push_back({object, local, look, slash == std::string::npos ? std::string() : path.substr(0, slash)});
 		}
 		return;
 	}
@@ -737,16 +856,20 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			const Mat4 world = local * objectWorld;
 			Instance instance {gpuMesh, world, object, local, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
 			instance.geometry = objectTemplate.geometry();
+			if (depth > 0) {
+				instance.source = path; // the template names from the root's child down, '/'-joined
+			}
 			if (gpuMesh->skinned) {
-				// A soldier's skeleton3P; an AnimatedBundle's skeleton (its
-				// skeleton instance, 0x005c06a0's +0x198, whose node
-				// matrices its update hands the skinned mesh, 0x005c00e0).
-				auto setting = objectTemplate.settings().find("skeleton3P");
-				if (setting == objectTemplate.settings().end() && objectTemplate.typeName() == "AnimatedBundle") {
-					setting = objectTemplate.settings().find("skeleton");
-				}
-				if (setting != objectTemplate.settings().end()) {
-					instance.skeleton = skeleton(sources.files, setting->second);
+				const auto skeleton3P = objectTemplate.settings().find("skeleton3P");
+				const auto skeletonPath = objectTemplate.settings().find("skeleton");
+				const std::string& selected = skeleton3P != objectTemplate.settings().end() ? skeleton3P->second
+					: skeletonPath != objectTemplate.settings().end() ? skeletonPath->second : inheritedSkeleton;
+				if (!selected.empty()) {
+					instance.skeleton = skeleton(sources.files, selected);
+				} else if (objectTemplate.typeName() == "Kit") {
+					// shortcut: the soldiers' shared 3P skeleton, all shipped soldiers name it; read it from the wearer if a mod differs.
+					instance.skeleton = skeleton(sources.files, "Objects/Soldiers/Common/Animations/3p_setup.ske");
+					instance.wornKit = true;
 				}
 				if (!sources.previewAnimation.empty()) {
 					instance.animation = animation(sources.files, sources.previewAnimation);
@@ -758,11 +881,23 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				instance.partsTemplate = &objectTemplate;
 			}
 			lightmapFor(sources, objectTemplate.geometry(), 0, world, instance.lightmap, instance.lightmapTransform);
+			if (!instance.lightmap && (gpuMesh->titanInterior || gpuMesh->titanExterior) && !gpuMesh->bundled && !gpuMesh->skinned) {
+				// The Titans' parts are lit by their own baked maps (RendDX9 0x10152870), whole, not an atlas cell.
+				instance.lightmap = titanLightmap(sources, objectTemplate.geometry(), gpuMesh->titanExterior ? 0 : -1);
+				instance.lightmapTransform[0] = instance.lightmapTransform[1] = 1;
+				instance.lightmapTransform[2] = instance.lightmapTransform[3] = 0;
+			}
 			if (instance.lightmap) {
 				++m_stats.lightmappedInstances;
 			}
 			m_instances.push_back(instance);
 		}
+	}
+	std::string childSkeleton = inheritedSkeleton;
+	if (const auto it = objectTemplate.settings().find("skeleton3P"); it != objectTemplate.settings().end()) {
+		childSkeleton = it->second;
+	} else if (const auto it = objectTemplate.settings().find("skeleton"); it != objectTemplate.settings().end()) {
+		childSkeleton = it->second;
 	}
 	// Object.disableChildren: a placed object's children are out of the scene.
 	if (depth == 0 && object != 0) {
@@ -770,11 +905,15 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			return;
 		}
 	}
+	// A kit's children are its inventory (knife, rifle, beacon...), made as objects of their own, not parts of its mesh.
+	if (objectTemplate.typeName() == "Kit") {
+		return;
+	}
 	for (const world::ChildTemplate& child : objectTemplate.children()) {
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
 			addTemplate(sources, *childTemplate, objectTransform(child.position, child.rotation) * local, objectWorld,
-				object, depth + 1);
+				object, depth + 1, path.empty() ? child.name : path + "/" + child.name, childSkeleton);
 		}
 	}
 }
@@ -1635,16 +1774,9 @@ void LevelRenderer::buildRoads(const LevelSources& sources)
 		road.boundsMin[1] = file->boundsMin[2];
 		road.boundsMax[0] = file->boundsMax[0];
 		road.boundsMax[1] = file->boundsMax[2];
-		{
-			const Vec3f lo {file->boundsMin[0], file->boundsMin[1], file->boundsMin[2]};
-			const Vec3f hi {file->boundsMax[0], file->boundsMax[1], file->boundsMax[2]};
-			const Vec3f mid = (lo + hi) * 0.5f;
-			road.center = {mid.x * road.world.at(0, 0) + mid.y * road.world.at(1, 0) + mid.z * road.world.at(2, 0) + road.world.at(3, 0),
-				mid.x * road.world.at(0, 1) + mid.y * road.world.at(1, 1) + mid.z * road.world.at(2, 1) + road.world.at(3, 1),
-				mid.x * road.world.at(0, 2) + mid.y * road.world.at(1, 2) + mid.z * road.world.at(2, 2) + road.world.at(3, 2)};
-			const Vec3f half = (hi - lo) * 0.5f;
-			road.radius = std::sqrt(dot(half, half));
-		}
+		// The header's sphere is already world space, as the bounds are.
+		road.center = {file->position[0], file->position[1], file->position[2]};
+		road.radius = file->radius;
 		m_roads.push_back(road);
 	}
 	std::stable_sort(m_roads.begin(), m_roads.end(), [](const Road& a, const Road& b) { return a.priority < b.priority; });
@@ -1954,11 +2086,17 @@ void LevelRenderer::syncObjects()
 		}
 		instance.world = instance.local * objectWorld;
 		instance.hidden = current->hidden() || hiddenInView;
+		const int look = m_sources->partLook && !instance.source.empty() ? m_sources->partLook(instance.object, instance.source) : 0;
+		instance.hidden = instance.hidden || look == 2;
 		// The cockpit from inside: another geometry of its mesh.
 		if (instance.mesh->geometries > 1) {
 			int geometry = -1, lod = 0;
-			if (!(m_sources->geometryFor && m_sources->geometryFor(instance.object, geometry, lod))) {
+			if (!(m_sources->geometryFor && m_sources->geometryFor(instance.object, instance.source, geometry, lod))) {
 				geometry = -1;
+				lod = 0;
+			}
+			if (look == 1 && instance.mesh->geometries > 2) {
+				geometry = 2; // a wrecked part: the mesh's wreck geometry
 				lod = 0;
 			}
 			if (geometry != instance.shownGeometry || lod != instance.shownLod) {
@@ -1974,8 +2112,8 @@ void LevelRenderer::syncObjects()
 		instance.fade = current->fade();
 		instance.objectOrigin = {current->position().x, current->position().y, current->position().z};
 		if (instance.cullRadius < 0) {
-			// The object's radius (slot 0x8c) as the mesh's sphere, x the
-			// template's cullRadiusScale (+0x58, 1 by default; read once).
+			// Object slot 0x8c uses the collision radius before the render
+			// mesh's. A walker's mesh bounds omit its displaced leg parts.
 			const world::ObjectTemplate* t = current->objectTemplate();
 			float scale = 1;
 			if (t) {
@@ -1985,7 +2123,17 @@ void LevelRenderer::syncObjects()
 				}
 				instance.cullActor = t->typeName() == "Soldier" || t->typeName() == "PlayerControlObject";
 			}
-			instance.cullRadius = std::max(instance.mesh->bounds.radius, 0.0f) * scale;
+			// A soldier: his collision box's; another skinned mesh has no
+			// sphere, so its geometry's box radius (RendDX9 0x10160d60).
+			float radius = t && t->typeName() == "Soldier" ? soldierCullRadius()
+				: instance.mesh->skinned ? instance.mesh->skinnedRadius : instance.mesh->bounds.radius;
+			if (instance.source.empty() && m_sources->objectRadius) {
+				const float objectRadius = m_sources->objectRadius(instance.object);
+				if (objectRadius > 0) {
+					radius = objectRadius;
+				}
+			}
+			instance.cullRadius = std::max(radius, 0.0f) * scale;
 		}
 		if (!instance.parts.empty() && m_sources->partTransforms) {
 			std::vector<anim::Matrix> placed(instance.parts.size(), anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
@@ -2022,6 +2170,8 @@ void LevelRenderer::syncObjects()
 			const std::string path = m_sources->animationFor(instance.object);
 			if (!path.empty()) {
 				instance.animation = animation(m_sources->files, path);
+				instance.animationDuration = m_sources->animationDurationFor
+					? m_sources->animationDurationFor(instance.object) : 0.0f;
 			}
 		}
 	}
@@ -2199,7 +2349,8 @@ void LevelRenderer::buildOverlay()
 			continue;
 		}
 		// A wedge (HudQuad::sweep): the polygon cut to each quarter turn.
-		const auto pieces = q.sweep >= 0 ? hud::sweepPieces(polygon, (q.x0 + q.x1) * 0.5f, (q.y0 + q.y1) * 0.5f, q.sweep)
+		const auto pieces = q.sweep >= 0 ? hud::sweepPieces(polygon, q.sweepAbout ? q.sweepCentre[0] : (q.x0 + q.x1) * 0.5f,
+													 q.sweepAbout ? q.sweepCentre[1] : (q.y0 + q.y1) * 0.5f, q.sweep)
 										 : std::vector<std::vector<std::array<float, 4>>> {polygon};
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
 		for (const auto& piece : pieces) {
@@ -2674,6 +2825,8 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	m_listedLights.clear();
 	m_cameraLights.clear();
 	m_terrainLights.clear();
+	m_ownedLights.clear();
+	std::vector<effects::PointLight> owned;
 	if (!m_sources) {
 		return;
 	}
@@ -2688,15 +2841,29 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		m_lightLimits.skinnedMesh = m_sources->lights.maxLightsPerSkinnedMesh;
 	}
 	const float cull = m_lightLimits.cullDistance;
+	LightTrace& trace = lightTrace();
+	if (trace.on) {
+		++trace.frame;
+		std::fprintf(stderr, "light-trace: frame %d camera %.2f/%.2f/%.2f yaw %.3f pitch %.3f in-titan %d limits cull %.0f static %d bundled %d skinned %d\n",
+			trace.frame, camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch, m_cameraInTitan ? 1 : 0, cull,
+			m_lightLimits.staticMesh, m_lightLimits.bundledMesh, m_lightLimits.skinnedMesh);
+	}
 	if (cull <= 0) {
 		return;
 	}
+	const char* from = "placed";
 	const auto consider = [&](const effects::PointLight& light) {
 		const Vec3f at {light.position.x, light.position.y, light.position.z};
 		const Vec3f d = at - camera.position;
 		const float reach = std::max(light.range2, 0.0f);
 		if (std::sqrt(dot(d, d)) - reach > cull || !m_frameFrustum.containsSphere(at, reach)) {
 			return;
+		}
+		if (trace.on && std::strcmp(from, "placed") != 0) {
+			std::fprintf(stderr, "light-trace: frame %d light %zu from %s at %.2f/%.2f/%.2f r %.2f/%.2f col %.2f/%.2f/%.2f spec %.2f/%.2f/%.2f spot %d lm %d emitter %d\n",
+				trace.frame, m_pointLights.size(), from, at.x, at.y, at.z, light.range1, light.range2, light.color.x, light.color.y,
+				light.color.z, light.specColor.x, light.specColor.y, light.specColor.z, light.spot ? 1 : 0, light.affectsLightmapped ? 1 : 0,
+				light.supportsEmitter ? 1 : 0);
 		}
 		m_pointLights.push_back(light);
 		ListedLight listed;
@@ -2712,8 +2879,12 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	// VideoSettings' dynamic lighting 0 turns the dynamic lights off (the
 	// light manager's slot 0xf4, 0x10010040): the effects' lights.
 	const bool dynamicLights = !m_sources->quality || m_sources->quality->dynamicLightsEnabled();
-	for (const effects::EffectManager* manager :
-		{m_sources->effects, m_sources->objectEffects, m_hasFirstPerson ? m_firstPerson.effects : nullptr}) {
+	const effects::EffectManager* const managers[3] = {m_sources->effects, m_sources->objectEffects,
+		m_hasFirstPerson ? m_firstPerson.effects : nullptr};
+	static const char* const kManagerNames[3] = {"world-effects", "object-effects", "first-person-effects"};
+	for (int m = 0; m < 3; ++m) {
+		const effects::EffectManager* manager = managers[m];
+		from = kManagerNames[m];
 		if (!manager || !dynamicLights) {
 			continue;
 		}
@@ -2721,6 +2892,7 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 			consider(light);
 		}
 	}
+	from = "placed";
 	const world::Object* current = nullptr;
 	Mat4 objectWorld;
 	for (const ObjectLight& placed : m_objectLights) {
@@ -2756,6 +2928,17 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		light.specColor = placed.look.specColor;
 		light.supportsEmitter = placed.look.supportsEmitter;
 		consider(light);
+		// The light manager's registry (+0x120) for the owner-grouped pick: no frustum or cull test.
+		ListedLight listed;
+		listed.position[0] = light.position.x;
+		listed.position[1] = light.position.y;
+		listed.position[2] = light.position.z;
+		listed.radius = std::max(light.range2, 0.0f);
+		listed.spot = light.spot;
+		listed.affectsLightmapped = light.affectsLightmapped;
+		listed.owner = m_lightOwners.emplace(std::make_pair(placed.object, placed.parent), static_cast<int>(m_lightOwners.size())).first->second;
+		m_ownedLights.push_back(listed);
+		owned.push_back(light);
 	}
 	// The rest's: the nearest the camera first.
 	std::vector<std::pair<float, int>> byCamera;
@@ -2774,6 +2957,8 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	int terrainPicked[kMaxPointLights];
 	m_terrainLights.assign(terrainPicked,
 		terrainPicked + pickTerrainLights(m_listedLights.data(), m_listedLights.size(), eye, kMaxPointLights, terrainPicked));
+	m_ownedBase = m_pointLights.size();
+	m_pointLights.insert(m_pointLights.end(), owned.begin(), owned.end());
 }
 
 void LevelRenderer::bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh, SDL_GPUTexture* envMap) const
@@ -2977,9 +3162,9 @@ void LevelRenderer::buildDecals()
 		// away by angle); one on a static object or a vehicle to that
 		// object's collision faces (the projectile LOD's, the mesh the
 		// exe's add 0x005a36d0 passes) about the hit, turned away past
-		// decalGeomClipAngle as 0x101655c0 does. With decalGeomClipAngle 0,
-		// off the terrain without faces, or with nothing left, the flat
-		// square (0x10164940).
+		// decalGeomClipAngle as 0x101655c0 does. With nothing left the add
+		// frees the decal (0x10166735 -> 0x10164660): not drawn. With
+		// decalGeomClipAngle 0, the flat square (0x10164940).
 		if (ps.decalGeomClipAngle > 0 && !decal.clipped) {
 			std::vector<effects::DecalVertex> pieces;
 			if (decal.object == 0 && decal.surface == 0 && ground && ground->loaded() &&
@@ -2994,7 +3179,10 @@ void LevelRenderer::buildDecals()
 			}
 			decal.clipped = std::make_shared<const std::vector<effects::DecalVertex>>(std::move(pieces));
 		}
-		if (decal.clipped && !decal.clipped->empty()) {
+		if (decal.clipped) {
+			if (decal.clipped->empty()) {
+				continue;
+			}
 			const uint32_t first = static_cast<uint32_t>(vertices.size());
 			for (const effects::DecalVertex& p : *decal.clipped) {
 				effects::Vec3 position = p.position;
@@ -3104,7 +3292,13 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 			LightingUniforms base = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
 			applyPointLights(base);
+			size_t particleIndex = 0;
 			for (const effects::MeshSprite& particle : particles) {
+				// RendDX9 fills the batch from its highest slot down (0x1013459f).
+				const uint32_t slot = particleMesh->particleSlotCount
+					? particleMesh->particleSlotCount - 1 - static_cast<uint32_t>(particleIndex % particleMesh->particleSlotCount)
+					: 0;
+				++particleIndex;
 				Mat4 world;
 				for (int row = 0; row < 3; ++row) {
 					const effects::Vec3& r = particle.rotation.rows[static_cast<size_t>(row)];
@@ -3119,6 +3313,11 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 				TransformUniforms transforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 				for (const Submesh& submesh : particleMesh->submeshes) {
+					const IndexRange range = particleMesh->particleSlotCount ? submesh.particleSlots[slot]
+						: IndexRange {submesh.firstIndex, submesh.indexCount};
+					if (range.indexCount == 0) {
+						continue;
+					}
 					LightingUniforms uniforms = base;
 					uniforms.material[2] = additive ? kMaterialAdditive : kMaterialBlended;
 					uniforms.material[3] = std::max(particle.color[3], 1e-3f);
@@ -3135,7 +3334,7 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 					};
 					SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 					bindMeshLayers(pass, nullptr);
-					SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+					SDL_DrawGPUIndexedPrimitives(pass, range.indexCount, 1, range.firstIndex, submesh.vertexOffset, 0);
 				}
 			}
 		});
@@ -3207,6 +3406,33 @@ void LevelRenderer::lightmapFor(const LevelSources& sources, const std::string& 
 	}
 }
 
+// RendDX9 0x10152870 (branching on isTitanExterior, 0x10152a13): the interior
+// statics' map is "/Common/Textures/<titan>_Lightmap_Interior.dds" (R the light, B 0;
+// `lod` < 0), the hull's "<level>/Lightmaps/Titans/<titan>_Lightmap<lod>.dds". <titan>
+// is as_titan_playtest, eu_titan_playtest, or their _wake.
+SDL_GPUTexture* LevelRenderer::titanLightmap(const LevelSources& sources, const std::string& geometry, int lod)
+{
+	const std::string prefix = lower(geometry).substr(0, 8);
+	if (prefix != "as_titan" && prefix != "eu_titan") {
+		return nullptr;
+	}
+	const std::string key = prefix + std::to_string(lod);
+	const auto cached = m_titanLightmaps.find(key);
+	if (cached != m_titanLightmaps.end()) {
+		return cached->second;
+	}
+	SDL_GPUTexture* found = nullptr;
+	for (const char* variant : {"_playtest", "_wake"}) {
+		const std::string name = prefix + variant;
+		found = texture(sources.files, lod < 0 ? "common/textures/" + name + "_Lightmap_Interior.dds"
+											   : sources.levelPath + "Lightmaps/Titans/" + name + "_Lightmap" + std::to_string(lod) + ".dds");
+		if (found) {
+			break;
+		}
+	}
+	return m_titanLightmaps[key] = found;
+}
+
 // An instance's sphere in the world: its parts' spheres where they are now.
 BoundingSphere LevelRenderer::instanceBounds(const Instance& instance, const GpuMesh& mesh) const
 {
@@ -3275,10 +3501,19 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	}();
 	// The Titans' parts (TitanParts.h).
 	m_cameraInTitan = cameraInTitan(camera);
+	{
+		// RendDX9 0x10029b70: the inside-Titan blend moves 0.5 a second (+0x898).
+		const uint64_t now = SDL_GetTicks();
+		const float dt = m_titanBlendTicks ? static_cast<float>(now - m_titanBlendTicks) / 1000.0f : 0.0f;
+		m_titanBlendTicks = now;
+		m_titanBlend = std::clamp(m_titanBlend + (m_cameraInTitan ? 0.5f : -0.5f) * dt, 0.0f, 1.0f);
+	}
 	if (m_sources && m_sources->cameraInTitanOut) {
 		*m_sources->cameraInTitanOut = m_cameraInTitan;
 	}
 	const TitanView titanView {m_cameraInTitan, renderer.showAllTitanParts};
+	const uint32_t titan1 = m_sources && m_sources->titanObject ? m_sources->titanObject(1) : 0;
+	const uint32_t titan2 = m_sources && m_sources->titanObject ? m_sources->titanObject(2) : 0;
 	const int lightingQuality = m_sources && m_sources->quality ? m_sources->quality->lighting : 3;
 	// The object manager's distance fade (DistanceFade.h): the geometry
 	// quality's scales, the view distance GSViewDistance x the view
@@ -3327,15 +3562,35 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		bool interior = false;
+		// Projectiles are world-space transient models, like their tracer
+		// and trail effects. The Titan's indoor actor cutoff must not hide
+		// the missile body while leaving its trail visible through openings.
+		// Ordinary frustum/depth tests still apply to these models.
+		// The native renderer has the retail camera's Titan membership
+		// (cameraInTitan) but not its portal visibility. Applying the retail
+		// static-mesh switch globally makes the entire outside world,
+		// unmarked Titan details, or rooms disappear at the boundary. Keep
+		// static geometry available on both sides and let depth/frustum tests
+		// resolve visibility. Bundled and skinned meshes retain distance culling.
 		if (base.titanInterior || base.titanExterior || titanView.cameraInside) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = origin - camera.position;
 			const float distance = std::sqrt(dot(d, d));
+			// The authored Titan trees contain bundled signs and monitors marked
+			// exterior, including parts visible from their rooms. With our coarse
+			// room-box test that flag cannot safely hide children of either Titan.
+			// Keep their distance, frustum, depth and part-destruction checks.
+			const bool titanChild = instance.object != 0 && !instance.source.empty() &&
+				(instance.object == titan1 || instance.object == titan2);
 			const TitanDraw how = base.skinned
 				? titanSkinnedDraw(titanView, distance, renderer.indoorSkinnedMeshCullDistance)
-				: base.bundled ? titanBundledDraw(titanView, base.titanExterior, distance, renderer.indoorBundledMeshCullDistance)
-							   : titanStaticDraw(titanView, base.titanInterior);
-			if (how == TitanDraw::Skip) {
+				: base.bundled ? titanBundledDraw(titanView, base.titanExterior && !titanChild, distance, renderer.indoorBundledMeshCullDistance)
+							   // A Titan's own static pieces: the rooms from inside, the hull from outside
+							   // (0x100bdb00, 0x100bdb2c / 0x100bdc16). Both drawn, their walls share planes
+							   // and the nearer one changed with the view. The world's other statics stay.
+							   : base.titanInterior || base.titanExterior ? titanStaticDraw(titanView, base.titanInterior)
+							   : TitanDraw::Normal;
+			if (how == TitanDraw::Skip && !instance.placed) {
 				continue;
 			}
 			interior = how == TitanDraw::Interior && base.bundled;
@@ -3348,7 +3603,13 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
 		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
 			// 0x006fb320 on the objects in view; one faded out isn't drawn.
-			const Vec3f d = instance.objectOrigin - camera.position;
+			// A child instance uses its own mesh radius, so its distance must
+			// also be measured from the child's world position. Using the root
+			// puts a Titan's small signs roughly 70 m away even when the camera
+			// is beside them and can fade them out with the camera or FOV.
+			const Vec3f fadeOrigin = instance.source.empty() ? instance.objectOrigin
+				: Vec3f {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const Vec3f d = fadeOrigin - camera.position;
 			instance.distanceFade = stepDistanceFade(instance.distanceFade, instance.cullRadius, dot(d, d),
 				instance.cullActor ? cullActor : cullRoot);
 			if (instance.distanceFade <= 0.0f) {
@@ -3370,7 +3631,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 				if (!entry.resolved) {
 					entry.resolved = true;
 					if (m_sources->geometries.find(instance.geometry + "_lod")) {
-						entry.mesh = mesh(*m_sources, instance.geometry + "_lod");
+						entry.mesh = mesh(*m_sources, instance.geometry + "_lod", -1, 0, true);
 					}
 					uploaded = true;
 				}
@@ -3448,7 +3709,12 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 				if (!entry.resolved) {
 					entry.resolved = true;
 					entry.mesh = mesh(*m_sources, instance.geometry, -1, lod);
-					if (instance.lightmap) {
+					if (instance.lightmap && (base.titanInterior || base.titanExterior)) {
+						// The interior's one map for every LOD; the hull's <titan>_Lightmap<LOD> (0x10152870).
+						entry.lightmap = titanLightmap(*m_sources, instance.geometry, base.titanExterior ? lod : -1);
+						entry.lightmapTransform[0] = entry.lightmapTransform[1] = 1;
+						entry.lightmapTransform[2] = entry.lightmapTransform[3] = 0;
+					} else if (instance.lightmap) {
 						lightmapFor(*m_sources, instance.geometry, lod, instance.world, entry.lightmap, entry.lightmapTransform);
 					}
 					uploaded = true;
@@ -3483,10 +3749,16 @@ bool LevelRenderer::cameraInTitan(const Camera& camera) const
 		return true; // ObjectDrawer.isInsideTitanOverride (+0x91)
 	}
 	// The exe tells RendDX9 the Titan the camera is in (game slot 0x110:
-	// the player's soldier's Titan, else a ray from the camera up through
-	// the Titan's hull, 0x006fa8b0 / 0x006f2b00). The rewrite takes the
-	// camera inside a Titan when it is within the box of one of its rooms
+	// a ray from the camera up through the Titan's hull, 0x006fa8b0 /
+	// 0x006f2b00; GameWorld::cameraTitan). The rooms' boxes don't
+	// fit the hull: they took the open decks fore and aft for inside and the
+	// upper hangar for outside, so the shield (an exterior bundled mesh)
+	// came and went as the camera crossed a box's face. Without the game
+	// (the viewer, the tests) the camera is inside within the box of a room
 	// (a static mesh marked isTitanInterior).
+	if (m_sources && m_sources->cameraInTitan) {
+		return m_sources->cameraInTitan(camera.position);
+	}
 	for (const Instance& instance : m_instances) {
 		const GpuMesh& mesh = *instance.mesh;
 		if (!mesh.titanInterior || mesh.bundled || mesh.skinned || instance.hidden) {
@@ -3802,7 +4074,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_firstPersonZoomed = viewZoom(camera) > 1.05f;
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups, camera, false, m_firstPersonZoomed);
-	collectPointLights(camera);
 	if (m_hasFirstPerson && m_firstPerson.effects) {
 		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
 			mesh(*m_sources, geometry);
@@ -3815,12 +4086,37 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const float menuSeconds = m_lastMenuTicks ? static_cast<float>(now - m_lastMenuTicks) / 1000.0f : 0.0f;
 	m_lastMenuTicks = now;
 	buildMenu(menuSeconds);
-	const Mat4 viewProjection = camera.view() *
-		(overheadOn ? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height),
-						  camera.nearPlane, 6000.0f)
-					: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane,
-						  6000.0f));
+	const Mat4 projection = overheadOn
+		? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height), camera.nearPlane,
+			  6000.0f)
+		: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
+	// The enhanced mode's passes this frame, and TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
+	beginEnhancedFrame(camera, target.width, target.height, overheadOn, post && m_sceneColor, projection);
+	const Mat4 viewProjection = m_enh.jittered ? camera.view() * projection * m_enh.jitter : camera.view() * projection;
 	prepareInstances(camera, viewProjection);
+	// The lights' list against this frame's view (RendDX9 0x100a93f0 builds its frustum from the camera it
+	// is called with), so after prepareInstances has made m_frameFrustum.
+	collectPointLights(camera);
+	if (LightTrace& trace = lightTrace(); trace.on && m_hasFirstPerson && m_firstPerson.effects) {
+		// The first-person sprites within 5 m, the size of the view (a muzzle's glow and smoke), when they change.
+		effects::ParticleView view = particleView(camera);
+		view.zoomed = m_firstPersonZoomed;
+		std::string text;
+		m_firstPerson.effects->forEachGroup(view, [&](const std::string& path, bool additive, const std::vector<effects::Sprite>& sprites) {
+			char line[200];
+			for (const effects::Sprite& sprite : sprites) {
+				const Vec3f d = Vec3f {sprite.position.x, sprite.position.y, sprite.position.z} - camera.position;
+				if (dot(d, d) > 25.0f) {
+					continue;
+				}
+				std::snprintf(line, sizeof line, " [%s%s size %.2f rgba %.2f/%.2f/%.2f/%.2f dist %.2f]", path.substr(path.find_last_of("/\\") + 1).c_str(),
+					additive ? " additive" : "", sprite.size, sprite.color[0], sprite.color[1], sprite.color[2], sprite.color[3],
+					std::sqrt(dot(d, d)));
+				text += line;
+			}
+		});
+		trace.changed(trace.firstPerson, "first-person sprites", text.empty() ? "none" : text);
+	}
 	// The particle systems seen this frame (RendDX9's draws stamp the frame
 	// of each system whose box meets the view frustum, 0x101a4720): one
 	// unseen for 60 frames stops emitting (Emitter::lastSeenFrame). The
@@ -3840,6 +4136,32 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_poses.clear();
 	// The shadow maps, before the world pass that reads them.
 	renderShadows(commands, camera, lights, seconds);
+	const float aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
+	if (m_enh.csm) {
+		renderCascades(commands, camera, lights, seconds, aspect);
+	}
+	// The terrain's cells this frame (before the enhanced prepass, which draws them too).
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	const scene::RendererSettings rendererDefaults;
+	const scene::RendererSettings& renderer =
+		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
+	bool terrainUpdated = false;
+	const auto updateTerrain = [&] {
+		terrainUpdated = true;
+		if (!m_terrainCells.empty()) {
+			updateTerrainCells(camera, frustum);
+		} else {
+			m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
+			const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+			m_terrainHeightAboveGround = std::fabs(camera.position.y -
+				(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+		}
+	};
+	if (m_enh.prepass) {
+		updateTerrain();
+		renderEnhancedPrepass(commands, camera, viewProjection, seconds, aspect);
+	}
+	m_enh.aoBound = m_enh.ssao; // the world's opaque draws take the AO
 	// The heat shimmer reads a copy of the scene: the world pass ends before it.
 	const bool shimmer = post && m_sceneColor && !m_shimmerGroups.empty() && m_gpu.shimmerPipeline();
 	if (!m_cloakedList.empty() || shimmer) {
@@ -3880,7 +4202,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
 	transforms.partsUsed = 0; // terrain.vert has none
 	SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
-	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	TerrainDetailUniforms detail {};
 	for (int i = 0; i < kMaxDetailLayers; ++i) {
 		detail.tiling[i] = m_detailTiling[i];
@@ -3920,16 +4241,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// LOD's delta and MORPHDELTAADDER the deltas a cell's stitched edge
 	// vertices take whole (0x1014d700): at LOD 1 the vertices that drop at
 	// LOD 1 move fully to it, at LOD 2 those that drop at LOD 2.
-	const scene::RendererSettings rendererDefaults;
-	const scene::RendererSettings& renderer =
-		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
-	if (!m_terrainCells.empty()) {
-		updateTerrainCells(camera, frustum);
-	} else {
-		m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
-		const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
-		m_terrainHeightAboveGround = std::fabs(camera.position.y -
-			(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+	if (!terrainUpdated) {
+		updateTerrain();
 	}
 	const auto morphFor = [&](int lod, bool morph) {
 		const TerrainMorph m = terrainMorph(lod, morph, m_terrainLodSwitch, renderer, camera.position.x,
@@ -4199,11 +4512,28 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		{lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0, true),
 			lighting(m_viewFog, lights, lights.staticSunColor, lights.staticSkyColor, 0.5f, true)},
 	};
+	// RaShaderSTM getDiffuse*Lighting: + lightmap.r x SinglePointColor, the baked lamps.
+	// SinglePointColor fades to (1, 1, 1) with the inside-Titan blend (0x10028301).
+	for (LightingUniforms& u : uniformsFor[1]) {
+		for (int i = 0; i < 3; ++i) {
+			u.hemiObject[i] = lights.singlePointColor[static_cast<size_t>(i)] + (1.0f - lights.singlePointColor[static_cast<size_t>(i)]) * m_titanBlend;
+		}
+	}
+	if (LightTrace& trace = lightTrace(); trace.on) {
+		for (int lm = 0; lm < 2; ++lm) {
+			const LightingUniforms& u = uniformsFor[lm][0];
+			trace.changed(trace.lighting[lm], lm ? "lighting lightmapped" : "lighting",
+				"sun " + traceFloats(u.sunDirection, 4) + " " + traceFloats(u.sunColor, 4) + " sky " + traceFloats(u.skyColor, 4) +
+					" fog " + traceFloats(u.fogColor, 4) + " " + traceFloats(u.fogRange, 4) + " spec " + traceFloats(u.specular, 4));
+		}
+	}
 	// The objects' point lights are their own (drawInstance).
 	const float windSpeed = m_sources && m_sources->wind ? m_sources->wind->speedAt() : 0.0f;
 	// The lighting level's bundled and skinned meshes (QualitySettings).
 	const bool hemiAndShadows = !m_sources || !m_sources->quality || m_sources->quality->meshHemiAndShadows();
 	const GpuMesh* bound = nullptr;
+	bool culling = false;
+	const uint32_t inside = m_sources && m_sources->cockpitVehicle ? m_sources->cockpitVehicle() : 0;
 	const auto drawInstance = [&](const DrawItem& item, MeshQueue queue) {
 		const Instance& instance = *item.instance;
 		bool any = false;
@@ -4213,17 +4543,58 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 														 : LightedMesh::Static;
 		int picked[kMaxPointLights];
 		int pickedCount = 0;
-		if (!m_listedLights.empty()) {
-			const float origin[3] = {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+		const float origin[3] = {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+		if (item.lightmap && item.mesh->titanInterior && lightKind == LightedMesh::Static) {
+			// 0x100bdb00 draws every shown isTitanInterior static through 0x100bd0a0, whose pick is the
+			// lights its object owns (pickOwnedLights), whatever the view; not gated on m_cameraInTitan,
+			// as the port also draws the rooms from outside (prepareInstances) and inside a corridor.
+			const auto owner = m_lightOwners.find({instance.object, instance.source});
+			pickedCount = owner == m_lightOwners.end() ? 0
+				: pickOwnedLights(m_ownedLights.data(), m_ownedLights.size(), owner->second, origin,
+					  std::max(item.mesh->bounds.radius, 0.0f), std::min(m_lightLimits.staticMesh, kMaxPointLights), picked);
+			for (int i = 0; i < pickedCount; ++i) {
+				picked[i] += static_cast<int>(m_ownedBase);
+			}
+		} else if (!m_listedLights.empty()) {
 			pickedCount = pickMeshLights(m_listedLights.data(), m_listedLights.size(), origin,
 				std::max(item.mesh->bounds.radius, 0.0f), lightKind, item.lightmap != nullptr, m_lightLimits, picked,
-				kMaxPointLights);
+				kMaxPointLights, m_sources && m_sources->enhanced && m_sources->enhanced->enabled && m_sources->enhanced->lightRank);
+		}
+		if (LightTrace& trace = lightTrace(); trace.on) {
+			std::string set;
+			char text[96];
+			for (int i = 0; i < pickedCount; ++i) {
+				const effects::PointLight& l = m_pointLights[static_cast<size_t>(picked[i])];
+				std::snprintf(text, sizeof text, " %.2f/%.2f/%.2f:%.2f", l.position.x, l.position.y, l.position.z, l.range2);
+				set += text;
+			}
+			// Keyed by what stays put while the instance list is rebuilt (placed models and debris come and go):
+			// its object, geometry, child template and place on the object (in the world for object 0).
+			const Mat4& place = instance.object ? instance.local : instance.world;
+			std::snprintf(text, sizeof text, "%u %.2f/%.2f/%.2f ", instance.object, place.at(3, 0), place.at(3, 1), place.at(3, 2));
+			std::string& last = trace.picks[text + instance.geometry + " " + instance.source];
+			if (set != last) {
+				std::fprintf(stderr, "light-trace: frame %d picks object %u kind %d lm %d at %.2f/%.2f/%.2f r %.1f:%s ->%s\n", trace.frame,
+					instance.object, static_cast<int>(lightKind), item.lightmap ? 1 : 0, instance.world.at(3, 0), instance.world.at(3, 1),
+					instance.world.at(3, 2), item.mesh->bounds.radius, last.c_str(), set.c_str());
+				last = set;
+			}
 		}
 		for (const Submesh& submesh : item.mesh->submeshes) {
 			any = any || queueFor(item, submesh) == queue;
 		}
 		if (!any) {
 			return;
+		}
+		// The occupant's own exterior hull (the gunner's cockpitSubGeom 1):
+		// back faces culled, or the view is inside the hull's far side. Wrecks,
+		// crew kits and dropped kits (also geometry 1) stay two-sided.
+		if (queue == MeshQueue::Opaque) {
+			const bool cull = instance.shownGeometry == 1 && inside != 0 && instance.object == inside;
+			if (cull != culling) {
+				culling = cull;
+				SDL_BindGPUGraphicsPipeline(pass, cull ? m_gpu.meshPipeline(MeshQueue::Opaque, true) : m_gpu.meshPipeline());
+			}
 		}
 		if (item.mesh != bound) {
 			bound = item.mesh;
@@ -4234,6 +4605,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		}
 		transforms.worldViewProjection = instance.world * viewProjection;
 		transforms.world = instance.world;
+		const Vec3f trunkSun = normalize(Vec3f {-lights.sunDirection[0], -lights.sunDirection[1], -lights.sunDirection[2]});
+		transforms.trunkSunDirection[0] = trunkSun.x;
+		transforms.trunkSunDirection[1] = trunkSun.y;
+		transforms.trunkSunDirection[2] = trunkSun.z;
 		// A static mesh reads only the first part (pushUniformSize).
 		if (instance.parts.empty() && !bound->skinned) {
 			transforms.parts[0] = Mat4 {};
@@ -4314,9 +4689,27 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
+			if (submesh.trunk) {
+				uniforms = lighting(m_viewFog, lights, lights.treeSunColor, lights.treeAmbientColor, 0, false);
+			}
 			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
+			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
 			specularUniforms(uniforms, submesh, camera, lights);
+			// RaShaderSTM: _POINTLIGHT_ forces _ENVMAP_ 0; RendDX9 sets 0x400 when the
+			// drawable has gathered lights (0x100bd2dc, 0x100bc14e).
+			bool titanLit = false;
+			if (lightmapped && bound->titanInterior && !bound->bundled && !bound->skinned) {
+				titanLit = pickedCount > 0;
+				// RendDX9 draws an interior static only from inside a Titan, by the interior path
+				// (0x100bdb00: skipped from outside, 0x100bdb2c; 0x100bd0a0 from inside), so that is
+				// its only lighting. The port also draws the rooms from outside (prepareInstances):
+				// with the outdoor formula there they changed as the camera crossed the hull.
+				// Inside a Titan RendDX9 zeroes the static sun and sky (0x100283aa) and
+				// StaticSpecularColor is 0.7 x the inside-Titan blend (0x10028301), 2 s to full.
+				uniforms.material[2] += kMaterialTitanInterior;
+				uniforms.specular[0] = uniforms.specular[1] = uniforms.specular[2] = 0.7f * m_titanBlend;
+			}
 			if (bound->skinned || bound->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);
 				std::copy(hemiObject, hemiObject + 4, uniforms.hemiObject);
@@ -4324,7 +4717,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			// The Titan interior path binds the indoor cube (0x100c3880,
 			// EnvMapManager +0x6c) for the envmap materials.
 			SDL_GPUTexture* const envMap = item.interior && m_indoorEnvMap ? m_indoorEnvMap : m_envMap;
-			layerUniforms(uniforms, submesh, envMap != nullptr);
+			layerUniforms(uniforms, submesh, envMap != nullptr && !titanLit);
 			uniforms.layers[3] = simpleShadow;
 			if (leafCoverage) {
 				// RaShaderLeafOG with HASALPHA2MASK: the texture's alpha
@@ -4357,6 +4750,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	};
 	for (const DrawItem& item : m_drawList) {
 		drawInstance(item, MeshQueue::Opaque);
+	}
+	if (culling) {
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.meshPipeline());
 	}
 	// Decals over the opaque surfaces.
 	if (m_decalVertices && !m_decalGroups.empty()) {
@@ -4448,6 +4844,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		drawSunFlare(commands, pass, viewProjection, camera);
 	}
 	// The transparent materials, farthest object first.
+	m_enh.aoBound = false; // nor the transparent ones, the additive ones or the first person
 	meshBound = nullptr; // the water's, the sun flare's
 	useMeshPipeline(MeshQueue::Transparent, false);
 	std::vector<std::pair<float, const DrawItem*>> transparent;
@@ -4522,7 +4919,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// the HUD and menu over it.
 	if (post && m_sceneColor) {
 		SDL_EndGPURenderPass(pass);
+		m_postSource = m_sceneColor;
+		if (m_enh.prepass) {
+			showEnhancedBuffer(commands);
+		}
+		if (m_enh.taa) {
+			resolveTaa(commands); // m_postSource: the resolve
+		}
 		const PostUniforms postUniforms = preparePost(commands, cloaked);
+		if (LightTrace& trace = lightTrace(); trace.on) {
+			trace.changed(trace.post, "post", "rows " + traceFloats(postUniforms.colorRow[0], 12) + " contrast " +
+				traceFloats(postUniforms.contrast, 4) + " bloom " + traceFloats(postUniforms.bloom, 4) + " tinnitus " +
+				traceFloats(postUniforms.tinnitus, 4) + " emp " + traceFloats(postUniforms.emp, 4));
+		}
 		SDL_GPUColorTargetInfo finalColor {};
 		finalColor.texture = color;
 		finalColor.load_op = SDL_GPU_LOADOP_DONT_CARE;
@@ -4550,7 +4959,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The HUD over everything.
 	if (m_overlayVertices && !m_overlayGroups.empty()) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.uiPipeline());
-		const float screen[4] = {800, 600, 0, 0};
+		const float screen[4] = {800, 600, m_sources ? m_sources->hudXScale : 1.0f, 0};
 		SDL_PushGPUVertexUniformData(commands, 0, screen, sizeof(screen));
 		SDL_GPUBufferBinding vertexBinding {m_overlayVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
@@ -4592,19 +5001,24 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 																							: GpuContext::UiStencil::Off));
 			}
 			SDL_SetGPUStencilReference(pass, static_cast<Uint8>(group.stencil == Stencil::Clear ? 0 : group.stencilLevel));
-			SDL_GPUTextureSamplerBinding sampler {group.texture, group.repeat ? m_gpu.repeatSampler() : m_gpu.clampSampler()};
+			// shortcut: fonts always get RegularScaled's linear; RendDX9.dll 0x10181a90 points them (Regular) at window width <= 1024, port with the Fonts/800 path.
+			SDL_GPUTextureSamplerBinding sampler {group.texture, m_gpu.menuSampler(group.repeat)};
 			SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 			SDL_DrawGPUPrimitives(pass, group.vertexCount, 1, group.firstVertex, 0);
 		}
 	}
 	SDL_EndGPURenderPass(pass);
+	endEnhancedFrame(camera, overheadOn);
+	m_gpu.setEnhancedLit(false); // the variants stay inside this frame
 }
 
 void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
 	float aspect, const scene::LightSettings& lights)
 {
 	const FirstPersonScene& scene = m_firstPerson;
-	const Mat4 viewProjection = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
+	// TAA's jitter on both of its views (Enhanced/LevelRendererEnhanced.cpp).
+	const auto jittered = [this](const Mat4& m) { return m_enh.jittered ? m * m_enh.jitter : m; };
+	const Mat4 viewProjection = jittered(camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane));
 	// In a seat camera's inside view with allowInsideStaticSun the cockpit
 	// takes the camera's static sun and ambient (BF2142.exe 0x006104d0..
 	// 0x00610580: insideStaticSunDirection / Color / AmbientColor, flickering
@@ -4721,7 +5135,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	// with the first-person meshes' view (slot 0xdc, +0xfc); then
 	// RSMT1PersonTransparency back to front (the sights' glass, the displays).
 	const Mat4 particleViewProjection = m_firstPersonZoomed ? viewProjection
-		: camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f);
+		: jittered(camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f));
 	drawMeshParticles(commands, pass, particleViewProjection, lights, {scene.effects});
 	drawParticles(commands, pass, particleViewProjection, camera, lights, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups);

@@ -223,6 +223,73 @@ TEST(Effects_ObjectBundlesStartAndStopAsTheOriginal)
 	CHECK(!manager.emitting(9) && objects.tracked() == 0);
 }
 
+// A bundle under a bone part (boneIndex, 0x0063d470: the Talon's engine
+// pods) sits where the bone puts the part, its template place replaced, as
+// the renderer draws the part.
+TEST(Effects_BundlesFollowBoneParts)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	world::ObjectTemplate* jet = templates.create("EffectBundle", "e_jet");
+	jet->children().push_back({"flame", {}, {}});
+	world::ObjectTemplate* pod = templates.create("Bundle", "pod");
+	pod->children().push_back({"e_jet", {0, 0, -1}, {}});
+	world::ObjectTemplate* ship = templates.create("PlayerControlObject", "ship");
+	ship->children().push_back({"pod", {5, 0, 0}, {}});
+	// The bone: pitched 90 degrees (z down to -y) at (1, 2, 3).
+	const effects::ObjectEffects::PartBone bone = [](uint32_t object, const std::string& part,
+													  std::array<float, 16>& m) {
+		if (object != 7 || part != "pod") {
+			return false;
+		}
+		m = {1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 1, 2, 3, 1};
+		return true;
+	};
+	const auto unboned = effects::ObjectEffects::bundlesOf(templates, *ship, 7);
+	CHECK(unboned.size() == 1 && std::fabs(unboned[0].position.x - 5) < 1e-5f
+		&& std::fabs(unboned[0].position.z + 1) < 1e-5f);
+	const auto boned = effects::ObjectEffects::bundlesOf(templates, *ship, 7, {}, nullptr, bone);
+	CHECK(boned.size() == 1);
+	const physics::Vec3 at = boned[0].position, z = boned[0].rotation.transform({0, 0, 1});
+	CHECK(std::fabs(at.x - 1) < 1e-5f && std::fabs(at.y - 3) < 1e-5f && std::fabs(at.z - 3) < 1e-5f);
+	CHECK(std::fabs(z.y + 1) < 1e-5f); // its z turned down with the pod
+}
+
+TEST(Effects_GenericProjectileStartsAndCarriesItsFireBundle)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	world::ObjectTemplate* trail = templates.create("EffectBundle", "e_rocket_trail");
+	trail->settings()["setStartOnEffects"] = "0";
+	trail->settings()["startAtCreation"] = "0";
+	trail->children().push_back({"flame", {0, 0, -0.1f}, {}});
+	world::ObjectTemplate* rocket = templates.create("GenericProjectile", "rocket");
+	rocket->children().push_back({"e_rocket_trail", {}, {}});
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 0x80000001u; // projectile effect anchor, separate from game object ids
+	state.objectTemplate = rocket;
+	state.velocity = {0, 0, 50};
+	state.startEvent = true; // the round's engine start (0x005b2c10): event 0 to its own children
+	objects.update({state}, manager);
+	state.startEvent = false;
+	CHECK(manager.emitting(state.id, 1)); // the projectile's fire event starts the trail
+	manager.update(1 / 30.0f);
+	manager.update(1 / 30.0f); // emission advances in fixed 10 ms steps
+	CHECK(!sprites(manager).empty());
+	state.position = {0, 0, 2};
+	objects.update({state}, manager);
+	manager.update(1 / 30.0f);
+	const auto particles = sprites(manager);
+	CHECK(!particles.empty() && std::fabs(particles.front().position.z - 1.9f) < 1e-3f);
+	objects.update({}, manager);
+	CHECK(!manager.emitting(state.id) && objects.tracked() == 0);
+	for (int i = 0; i < 40; ++i) manager.update(1 / 30.0f);
+	CHECK(manager.emitters() == 0 && sprites(manager).empty());
+}
+
 // A bundle with minDistanceUnderWaterSurface >= 0 (the amphibious APCs'
 // wake, the soldiers' e_sold_swim) runs only while its depth under the
 // water is within [min, max], whatever started it; a seated soldier's
@@ -874,6 +941,31 @@ TEST(Effects_LocalWinds)
 	CHECK(blowing.empty());
 }
 
+// A system's particles inherit only the velocity speedFromPhysics sets
+// (0x00618ae0); the systems' own moves give them none (the constructors
+// zero it, sprite 0x10137290 / mesh 0x10146820): a rocket's sparks stay
+// where they are born, they aren't thrown on at the rocket's speed.
+TEST(Effects_MovingSystemGivesItsParticlesNoVelocity)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* spark = addPuff(templates);
+	spark->settings()["emitFrequency"] = "30";
+	spark->settings()["emitTime"] = "0";
+	spark->settings()["timeToLive"] = "2";
+	effects::EffectManager manager(templates);
+	manager.setAnchor(4, {}, {});
+	CHECK(manager.spawnAttached("e_puff", 4, {}, {}, effects::EffectManager::View::Any, 1));
+	for (int i = 1; i <= 10; ++i) {
+		manager.setAnchor(4, {100.0f * static_cast<float>(i) / 30.0f, 0, 0}, {}); // 100 m/s along x
+		manager.update(1 / 30.0f);
+	}
+	const auto& particles = manager.emitterList()[0]->particles();
+	CHECK(particles.size() >= 5);
+	for (const effects::Particle& p : particles) {
+		CHECK(std::fabs(p.velocity.x) < 1.0f);
+	}
+}
+
 // alphaCull, pivotOffset, drawOrder and collisionEnable of a sprite system.
 TEST(Effects_SpriteDrawAndCollision)
 {
@@ -912,6 +1004,108 @@ TEST(Effects_SpriteDrawAndCollision)
 	int drawn = 0;
 	culled.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& s) { drawn += static_cast<int>(s.size()); });
 	CHECK(drawn == 0);
+}
+
+// RendDX9's collector (0x10130bd0) culls on the particle's alpha (+0x2c:
+// its alpha intensity, +0x58, by the LOD fade); the transparency graph is
+// the vertex shader's and never culls. The gunships' jet hotspot
+// (em_rearjetHelo_hotspot: graph 0/-0.09/0/0.09, alphaCull 0.1) draws,
+// also at a hover's alpha intensity of 0.25.
+TEST(Effects_AlphaCullIgnoresTheTransparencyGraph)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* hotspot = addPuff(templates);
+	hotspot->settings()["transparencyGraph"] = "0/-0.09/0/0.09";
+	hotspot->settings()["alphaCull"] = "0.1";
+	hotspot->settings()["emitFrequency"] = "60";
+	hotspot->settings()["timeToLive"] = "0.1";
+	hotspot->settings()["emitTime"] = "0";
+	effects::EffectManager manager(templates);
+	manager.setAnchor(3, {}, {});
+	CHECK(manager.spawnAttached("e_puff", 3, {}, {}, effects::EffectManager::View::Any, 1));
+	manager.setModifier(3, 1, 0, 0.25f);
+	for (int i = 0; i < 6; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	const auto drawn = sprites(manager);
+	CHECK(!drawn.empty());
+	for (const auto& s : drawn) {
+		CHECK(s.color[3] > 0 && s.color[3] <= 0.09f * 0.25f + 1e-4f); // drawn at graph x intensity
+	}
+	manager.setModifier(3, 1, 0, 0.05f); // below alphaCull: culled
+	for (int i = 0; i < 6; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(sprites(manager).empty());
+}
+
+// An emit time of 0 isn't run down (RendDX9 0x10140590): an attached
+// system emits until its bundle stops (the jets' setStopOnEffects).
+TEST(Effects_ZeroEmitTimeEmitsUntilStopped)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* jet = addPuff(templates);
+	jet->settings()["emitFrequency"] = "60";
+	jet->settings()["timeToLive"] = "0.1";
+	jet->settings()["emitTime"] = "0";
+	effects::EffectManager manager(templates);
+	manager.setAnchor(3, {}, {});
+	CHECK(manager.spawnAttached("e_puff", 3, {}, {}, effects::EffectManager::View::Any, 1));
+	for (int i = 0; i < 90; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitting(3, 1) && !sprites(manager).empty()); // still going after 3 s
+	manager.stopAttached(3, 1);
+	for (int i = 0; i < 10; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitters() == 0);
+}
+
+// A bundle spawned on its own lives its timeToLive (sampled at creation,
+// 0x00619700; 1 s by the template's constructor, 0x0061a9b0), an infinite
+// one 0.5 s (no parent, 0x00618600); its emit-time-0 and looping systems
+// emit until then (0x0061a760), its particles living on.
+TEST(Effects_WorldBundleLivesItsTimeToLive)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* glow = addPuff(templates);
+	glow->settings()["emitFrequency"] = "30";
+	glow->settings()["timeToLive"] = "0.2";
+	glow->settings()["emitTime"] = "0";
+	world::ObjectTemplate* bundle = templates.find("e_puff");
+	const auto emitsAt = [&](float seconds) {
+		effects::EffectManager manager(templates);
+		manager.spawn("e_puff", {0, 0, 0});
+		for (float t = 0; t < seconds; t += 1 / 30.0f) {
+			manager.update(1 / 30.0f);
+		}
+		return !manager.emitterList().empty() && !manager.emitterList()[0]->stopped();
+	};
+	// The Titan core's explosion (e_vexp_eu_titanCore): 50 s.
+	bundle->settings()["timeToLive"] = "CRD_NONE/50/0/0";
+	CHECK(emitsAt(49.5f) && !emitsAt(50.5f));
+	// No timeToLive: 1 s.
+	bundle->settings().erase("timeToLive");
+	CHECK(emitsAt(0.9f) && !emitsAt(1.1f));
+	// Infinite with no parent: 0.5 s.
+	bundle->settings()["timeToLive"] = "CRD_NONE/-1/0/0";
+	CHECK(emitsAt(0.4f) && !emitsAt(0.6f));
+	// A looping system is held the same way; stopped, its particles live on.
+	glow->settings()["emitTime"] = "0.1";
+	glow->settings()["isLooping"] = "1";
+	bundle->settings()["timeToLive"] = "CRD_NONE/3/0/0";
+	CHECK(emitsAt(2.9f) && !emitsAt(3.1f));
+	effects::EffectManager manager(templates);
+	manager.spawn("e_puff", {0, 0, 0});
+	for (int i = 0; i < 92; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(!sprites(manager).empty()); // 3.07 s: stopped, the last ones still there
+	for (int i = 0; i < 15; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	CHECK(manager.emitters() == 0);
 }
 
 // An EffectBundle's modifiers (0x00618e30): with a mapping set anywhere, the
@@ -985,6 +1179,41 @@ TEST(Effects_MeshParticlesDirectionalScale)
 		}
 	});
 	CHECK(checked > 0);
+}
+
+TEST(Effects_MeshParticlesSignedScale)
+{
+	for (const float scale : {-1.0f, 0.0f, 2.0f}) {
+		world::ObjectTemplateManager templates;
+		templates.registerType(3, "MeshParticleSystem");
+		auto* spike = templates.create("MeshParticleSystem", "mp_spike");
+		spike->setGeometry("mp_smokespike");
+		spike->settings()["emitFrequency"] = "33";
+		spike->settings()["emitTime"] = "2";
+		spike->settings()["timeToLive"] = "3";
+		spike->settings()["emitSpeed"] = "10";
+		spike->settings()["gravity"] = "0";
+		spike->settings()["particleMaxSize"] = std::to_string(scale);
+		spike->settings()["randomSize"] = "0";
+		spike->settings()["sizeGraph"] = "0/0/0/1";
+		spike->settings()["transparencyGraph"] = "0/-0.25/0.25/0";
+		spike->settings()["directionalScale"] = "3";
+		spike->settings()["alignRotationToSpeed"] = "1";
+		effects::EffectManager manager(templates);
+		CHECK(manager.spawn("mp_spike", {}));
+		manager.update(0.5f);
+		size_t drawn = 0;
+		manager.forEachMeshGroup([&](const std::string&, bool, const std::vector<effects::MeshSprite>& list) {
+			for (const auto& mesh : list) {
+				CHECK(mesh.size == scale);
+				CHECK(mesh.color[3] > 0);
+				CHECK(std::fabs(mesh.stretch - 30) < 1e-4f);
+				++drawn;
+			}
+		});
+		CHECK(!manager.emitterList().front()->particles().empty());
+		CHECK(scale == 0 ? drawn == 0 : drawn > 0);
+	}
 }
 
 // A mesh particle's turn (RendDX9 0x10144d90, 0x101357c0): one random

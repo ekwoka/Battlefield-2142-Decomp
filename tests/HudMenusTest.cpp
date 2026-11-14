@@ -64,6 +64,39 @@ struct Squads {
 
 } // namespace
 
+TEST(HudMenus_CommanderApplicationRow)
+{
+	Squads s;
+	const int me = s.world.addPlayer("Me", 2, false);
+	s.world.setCommanderEnabled(true);
+	int actions = 0, mutinies = 0;
+	bool resigned = false;
+	s.squads.onCommanderAction = [&](bool resign) { ++actions; resigned = resign; };
+	s.squads.onMutiny = [&] { ++mutinies; };
+	s.squads.update(me);
+	// 0x007a4800: the heading, APPLY without a commander and no arrow.
+	CHECK(s.hud.listCell(5, 0, 5) == "HUD_HUD_MENU_COMMANDER_HEADING" && s.hud.listCell(5, 0, 14) == "0");
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_APPLY" && s.hud.listCell(5, 0, 12).empty());
+	s.squads.clickSquadList(me, 0, 10);
+	CHECK(actions == 1 && !resigned);
+	CHECK(s.world.setCommander(2, me));
+	s.squads.update(me);
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_COMMANDER_RESIGN");
+	s.squads.clickSquadList(me, 0, 10);
+	CHECK(actions == 2 && resigned);
+	const int other = s.world.addPlayer("Other", 2, false);
+	CHECK(s.world.setCommander(2, other));
+	s.squads.update(me);
+	// Another's command: MUTINY; the arrow lists him under the row.
+	CHECK(s.hud.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_MUTINITY");
+	s.squads.clickSquadList(me, 0, 10);
+	CHECK(actions == 2 && mutinies == 1);
+	CHECK(s.hud.listCell(5, 0, 12) == "Ingame/Respawn/button_down.tga" && s.row(other, 4) == -1);
+	s.squads.clickSquadList(me, 0, 12);
+	s.squads.update(me);
+	CHECK(s.squads.commanderExpanded() && s.row(other, 4) == 1 && s.hud.listCell(5, 0, 12) == "Ingame/Respawn/button_up.tga");
+}
+
 TEST(HudMenus_SquadListJoinLeaveCreate)
 {
 	Squads s;
@@ -74,11 +107,21 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	s.world.joinSquad(a, 1);
 	s.world.joinSquad(b, 1);
 	s.squads.update(me);
-	// Squad 1 (Alpha) with its two, the leader first; one unassigned.
+	// Squad 1 (Alpha) with its two, shut at first (0x007a7620 clears every
+	// squad's bit); one unassigned. The name is upper-cased (0x0065b2c0),
+	// both in the list's font 1.
 	CHECK(s.hud.number("NrOfSquads") == 1 && s.hud.number("NrOfUnassigned") == 1);
 	const int alpha = s.row(1, 2);
-	CHECK(alpha == 0 && s.hud.listCell(5, alpha, 5) == "Alpha" && s.hud.listCell(5, alpha, 6) == "2/6");
-	CHECK(s.row(a, 4) == 1 && s.row(b, 4) == 2);
+	CHECK(alpha == 0 && s.hud.listCell(5, alpha, 5) == "\xa7" "1ALPHA\xa7" "0"
+		&& s.hud.listCell(5, alpha, 6) == "\xa7" "12/6\xa7" "0" && s.hud.listCell(5, alpha, 1) == "1");
+	CHECK(s.row(a, 4) == -1 && s.row(b, 4) == -1);
+	// Its arrow (column 12) lists them, the leader first.
+	s.squads.clickSquadList(me, alpha, 12);
+	s.squads.update(me);
+	CHECK(s.row(a, 4) == 1 && s.row(b, 4) == 2 && s.hud.listCell(5, 1, 4) == "\xa7" "1A");
+	s.squads.clickSquadList(me, alpha, 12);
+	s.squads.update(me);
+	CHECK(s.row(a, 4) == -1);
 	// JOIN on the squad's row (column 10) joins it; LEAVE leaves.
 	CHECK(s.hud.listCell(5, alpha, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN");
 	s.squads.clickSquadList(me, alpha, 10);
@@ -98,7 +141,7 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	game::GameWorld::PlayerInfo info;
 	CHECK(s.world.playerInfo(me, info) && info.squad == 2 && info.squadLeader && s.squads.locked(2, 2));
 	s.squads.update(me);
-	CHECK(s.hud.listCell(5, s.row(2, 2), 5) == "Bravo" && s.hud.number("IsSquadLeader") == 1);
+	CHECK(s.hud.listCell(5, s.row(2, 2), 5) == "\xa7" "1BRAVO\xa7" "0" && s.hud.number("IsSquadLeader") == 1);
 	// A locked squad can't be joined from the list; its leader unlocks it
 	// (column 8).
 	s.world.joinSquad(a, 0);
@@ -110,104 +153,166 @@ TEST(HudMenus_SquadListJoinLeaveCreate)
 	CHECK(s.squadOf(a) == 2);
 }
 
-// SquadMenu.createSquad without the create box (0x007a5ad0 → 0x007d6910):
-// the squad is made all the same, with the first free id; a member of
-// another squad leaves it first; one alone in his keeps it.
-TEST(HudMenus_CreateSquadWithoutTheBox)
+// The squad list's rows as 0x007a5f10 / 0x007a65a0 build them and the
+// columns 0x007a3e72 lays out (x 0, 5, 22, 22, 45, 45, 85, 116, 116, 133,
+// 133, 216, 216): the lock in its frame, the JOIN button and the arrow are
+// pictures; a click on a shared edge takes the later column (0x007a81b0's
+// lock 8, JOIN 10, arrow 12). The player's squad opens when he joins or
+// leads it and shuts when he leaves (0x00756b60 events 2/0x16, 2/0x18,
+// 2/0x15).
+TEST(HudMenus_SquadListRowsAndArrows)
 {
-	Squads s;
-	const int me = s.world.addPlayer("Me", 2, false);
-	const int a = s.world.addPlayer("A", 2, true);
-	const int b = s.world.addPlayer("B", 2, true);
-	s.world.joinSquad(a, 1);
-	CHECK(!s.squads.createShown());
-	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
-	// In squad 1 with A: a new squad (3) and squad 1 left.
-	s.world.joinSquad(b, 1);
-	CHECK(s.squads.createSquad(b) && s.squadOf(b) == 3 && s.squadOf(a) == 1);
-	// Alone in his squad: kept.
-	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	manager.setCommandRunner([&](const std::string& line) {
+		std::string ignored;
+		console.execute(line, ignored, ConsoleAccess::Anyone);
+	});
+	for (const char* line : {"hudBuilder.createSplitNode Global Root", "hudBuilder.createListNode Root Squads 12 74 246 463 19 1",
+			 "hudBuilder.setListNodeData 5", "hudBuilder.setListNodeConCmd 1 SquadMenu.singleClickNew"}) {
+		console.execute(line, out, ConsoleAccess::Anyone);
+	}
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	menu::SquadMenu squads(round, manager);
+	const int me = round.joinPlayer(2); // the local player: the console's clicks are his
+	squads.bind(console);
+	const int lead = round.addPlayer("Lead", 2, true);
+	round.joinSquad(lead, 1);
+	round.joinSquad(round.addPlayer("Other", 2, true), 3);
+	const auto refresh = [&] {
+		squads.update(me);
+		manager.frame(0.1f);
+	};
+	refresh();
+	// Row 0: Alpha. Its pictures and their settings.
+	CHECK(manager.listCell(5, 0, 0) == "Ingame/Respawn/iconframe.tga" && manager.listCellStyle(5, 0, 0).offset == 5
+		&& manager.listCellStyle(5, 0, 0).iconWidth == 15);
+	CHECK(manager.listCell(5, 0, 8) == "Ingame/Respawn/icon_lock.tga" && manager.listCellStyle(5, 0, 8).color[0] == 0.5f);
+	CHECK(manager.listCell(5, 0, 9) == "Ingame/Respawn/button_longlight7.tga" && manager.listCellStyle(5, 0, 9).iconWidth == 80
+		&& manager.listCellStyle(5, 0, 9).iconHeight == 17);
+	CHECK(manager.listCell(5, 0, 12) == "Ingame/Respawn/button_down.tga" && manager.listCellStyle(5, 0, 12).iconWidth == 17);
+	CHECK(manager.listCellStyle(5, 0, 10).color[0] == 0 && manager.listCellStyle(5, 0, 10).alignment == 2);
+	const auto clickAt = [&](float x, int row) {
+		CHECK(manager.click(12 + x, 74 + 19 * static_cast<float>(row) + 5));
+		return manager.lastListClick().column;
+	};
+	// Lock (8), JOIN (10), arrow (12) and the name (5); the lock's click
+	// isn't the leader's (no squad): nothing changes.
+	CHECK(clickAt(120, 0) == 8 && clickAt(220, 0) == 12 && clickAt(60, 0) == 5);
+	// The arrow, through the list's click: Alpha opens with its member.
+	refresh();
+	CHECK(squads.expanded(1) && manager.listCell(5, 1, 13) == std::to_string(lead) && manager.listCell(5, 1, 14) == "4");
+	// Joining Charlie (JOIN, row 2 now) opens it and turns it green; Alpha's
+	// JOIN then greys out, and Charlie's reads LEAVE.
+	CHECK(manager.listCell(5, 2, 13) == "3" && clickAt(150, 2) == 10);
+	refresh();
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.playerInfo(me, info) && info.squad == 3 && squads.expanded(3));
+	CHECK(manager.listCell(5, 2, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_LEAVE" && manager.listCellStyle(5, 2, 1).color[1] > 0.5f);
+	CHECK(manager.listCell(5, 0, 10) == "HUD_TEXT_MENU_SPAWN_SQUAD_JOIN" && manager.listCellStyle(5, 0, 10).color[0] > 0.6f);
+	// Leaving shuts it; Alpha stays open.
+	clickAt(150, 2);
+	refresh();
+	CHECK(round.playerInfo(me, info) && info.squad == 0 && !squads.expanded(3) && squads.expanded(1));
+	// A locked squad's lock is black.
+	round.joinSquad(me, 4);
+	refresh();
+	CHECK(squads.expanded(4));
+	int delta = -1;
+	for (int r = 0; r < 16; ++r) {
+		delta = manager.listCell(5, r, 13) == "4" && manager.listCell(5, r, 14) == "2" ? r : delta;
+	}
+	squads.clickSquadList(me, delta, 8);
+	squads.update(me);
+	CHECK(squads.locked(2, 4) && manager.listCellStyle(5, delta, 8).color[0] == 0);
 }
 
-// A private squad (the squad manager's join 0x004c7290, the HUD's
-// category-2 lines 0x00756b60 and question kind 0): the leader's lock
-// (column 8, slot 0x20) is the round's; a player without the squad's bit
-// in his invite mask is refused, its leader asked (2/0x11) and the player
-// told (2/0xc); a bot hears nothing (no connection); the invite's bit lets
-// him in and the join clears it; a leader's no keeps that player's later
-// requests from asking (0x007a7d10 / 0x007a5e30); a full squad answers
-// 2/0xb; an emptied squad loses its lock.
-TEST(HudMenus_PrivateSquadAsksTheLeader)
+// A member's row (0x007a65a0): his kit icon (HUD slot 0x64) and the
+// vehicle icon's place (slot 0x60, empty on foot) in boxes, his name, both
+// in his state colour (dead black, his squad green, others blue), a
+// leader's green mini_Squad_<n>_small, the voice box while he has voice
+// (talking yellow, muted the mute icon), and the local player's grey fill.
+TEST(HudMenus_SquadMemberRowIcons)
 {
-	Squads s;
-	s.world.spawnPlayer(2);
-	const int me = s.world.localPlayer();
-	const int asker = s.world.addPlayer("Asker", 2, false);
-	const int bot = s.world.addPlayer("Bot", 2, true);
-	CHECK(me >= 0 && s.world.joinSquad(me, 1));
-	s.squads.setLocalizer([](const std::string& key) -> std::string {
-		if (key == "HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN") {
-			return "#PLAYERNAME# has asked to join your squad";
-		}
-		if (key == "HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN") {
-			return "#SQUADNAME# squad is private";
-		}
-		if (key == "HUD_HUD_SQUAD_FULL") {
-			return "#TEAMNAME# #SQUADNAME# squad is full";
-		}
-		return key;
-	});
-	std::vector<std::string> lines;
-	std::vector<std::pair<int, std::string>> asked;
-	s.squads.onLine = [&](const std::string& line) { lines.push_back(line); };
-	s.squads.onJoinRequest = [&](int player, const std::string& line) { asked.push_back({player, line}); };
-	s.squads.teamName = [](int team) { return team == 2 ? std::string("EU") : std::string("PAC"); };
-	s.squads.update(me);
-	s.squads.clickSquadList(me, s.row(1, 2), 8);
-	CHECK(s.world.squadPrivate(2, 1) && s.squads.locked(2, 1));
-	using Join = game::GameWorld::SquadJoin;
-	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Private && s.squadOf(asker) == 0);
-	auto toLeader = s.world.takeSquadMessages(me);
-	auto toAsker = s.world.takeSquadMessages(asker);
-	CHECK(toLeader.size() == 1 && toLeader[0].id == 0x11 && toLeader[0].value == asker);
-	CHECK(toAsker.size() == 1 && toAsker[0].id == 0xc && toAsker[0].value == 1);
-	s.squads.squadMessage(toLeader[0].id, toLeader[0].value);
-	CHECK(asked.size() == 1 && asked[0].first == asker && asked[0].second == "Asker has asked to join your squad");
-	// The local player's own refusal line (a squad he asked).
-	s.squads.squadMessage(0xc, 1);
-	CHECK(!lines.empty() && lines.back() == "Alpha squad is private");
-	// A bot is refused too and hears nothing; its leader is asked.
-	CHECK(s.world.requestJoinSquad(bot, 1) == Join::Private && s.world.takeSquadMessages(bot).empty());
-	toLeader = s.world.takeSquadMessages(me);
-	CHECK(toLeader.size() == 1 && toLeader[0].value == bot);
-	// Turned down: that player's next request asks nothing.
-	s.squads.denyJoinRequest(bot);
-	s.squads.squadMessage(0x11, bot);
-	CHECK(asked.size() == 1);
-	// Invited (slot 0x30's bit): the join takes and clears it.
-	s.world.setSquadInvite(asker, 1, true);
-	CHECK(s.world.squadInvites(asker) == (1u << 1));
-	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Joined && s.squadOf(asker) == 1 && s.world.squadInvites(asker) == 0);
-	CHECK(s.world.takeSquadMessages(me).empty());
-	// Six: full (2/0xb to the player, the squad).
-	for (int i = 0; i < 4; ++i) {
-		const int member = s.world.addPlayer("M" + std::to_string(i), 2, true);
-		s.world.joinSquad(member, 1);
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(4, "Kit");
+	for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+		templates.create("Soldier", name)->settings()["armor.maxHitPoints"] = "100";
 	}
-	const int late = s.world.addPlayer("Late", 2, false);
-	s.world.setSquadInvite(late, 1, true);
-	CHECK(s.world.requestJoinSquad(late, 1) == Join::Full);
-	const auto toLate = s.world.takeSquadMessages(late);
-	CHECK(toLate.size() == 1 && toLate[0].id == 0xb && toLate[0].value == 1);
-	s.squads.squadMessage(0xb, 1);
-	CHECK(lines.back() == "EU Alpha squad is full");
-	// Emptied, the squad goes with its lock.
-	for (const auto& p : s.world.playerList()) {
-		if (p.squad == 1) {
-			s.world.joinSquad(p.id, 0);
-		}
+	templates.create("Kit", "EU_Assault")->settings()["vehicleHud.vehicleIcon"] = "Ingame\\Kits\\Icons\\kit_assault.tga";
+	world::ObjectTemplate* point = templates.create("ControlPoint", "cp_eu");
+	point->settings()["controlPointId"] = "2";
+	point->settings()["team"] = "2";
+	point->settings()["unableToChangeTeam"] = "1";
+	objects.create(point, {0, 0, 0});
+	objects.create(templates.create("SpawnPoint", "sp"), {0, 0, 0})->setControlPointId(2);
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	hud::HudManager hud(nullptr);
+	menu::SquadMenu squads(round, hud);
+	const int me = round.joinPlayer(2);
+	const int mate = round.addPlayer("Mate", 2, true);
+	const int other = round.addPlayer("Other", 2, true);
+	const int dead = round.addPlayer("Dead", 2, true);
+	for (const int id : {me, mate, other}) {
+		CHECK(round.spawnSoldier(id));
 	}
-	CHECK(!s.world.squadPrivate(2, 1));
+	round.joinSquad(me, 1);
+	round.joinSquad(mate, 1);
+	round.joinSquad(other, 3);
+	round.joinSquad(dead, 3);
+	int talking = mate, muted = -1;
+	squads.voiceState = [&](int id) { return id == talking ? 1 : id == muted ? 2 : id == me ? 0 : -1; };
+	squads.update(me); // the player's own squad opens
+	const auto rowOf = [&](int id) {
+		for (int r = 0; r < 32; ++r) {
+			if (hud.listCell(5, r, 13) == std::to_string(id) && hud.listCell(5, r, 14) == "4") {
+				return r;
+			}
+		}
+		return -1;
+	};
+	const int mateRow = rowOf(mate), meRow = rowOf(me);
+	CHECK(mateRow > 0 && meRow > 0 && rowOf(other) == -1);
+	CHECK(hud.listCell(5, mateRow, 0) == "Ingame/Respawn/iconframe_box.tga" && hud.listCell(5, mateRow, 1).empty()
+		&& hud.listCell(5, mateRow, 2) == "Ingame/Respawn/iconframe_box.tga");
+	CHECK(hud.listCell(5, mateRow, 3) == "Ingame/Kits/Icons/kit_assault.tga");
+	const auto green = hud.listCellStyle(5, mateRow, 3).color;
+	CHECK(std::fabs(green[1] - 0.466666669f) < 1e-6f && hud.listCellStyle(5, mateRow, 4).color == green);
+	CHECK(hud.listCell(5, mateRow, 12) == "Ingame/Respawn/icon_speaker.tga" && hud.listCellStyle(5, mateRow, 12).color[1] == 1
+		&& hud.listCellStyle(5, mateRow, 12).color[2] == 0);
+	// The first to join leads: his squad icon.
+	game::GameWorld::PlayerInfo info;
+	CHECK(round.playerInfo(me, info) && info.squadLeader);
+	CHECK(hud.listCell(5, meRow, 9) == "Ingame/Player/Icons/Minimap/mini_Squad_1_small.tga"
+		&& hud.listCellStyle(5, meRow, 9).iconWidth == 16 && hud.listCellStyle(5, meRow, 9).color[0] == 0.400000006f);
+	CHECK(hud.listCell(5, mateRow, 9).empty() && hud.listCell(5, meRow, 12) == "Ingame/Respawn/icon_speaker.tga");
+	// Charlie opened: the other blue, the dead one black with the death icon,
+	// a muted voice's icon.
+	muted = other;
+	squads.clickSquadList(me, [&] {
+		for (int r = 0; r < 32; ++r) {
+			if (hud.listCell(5, r, 13) == "3" && hud.listCell(5, r, 14) == "2") {
+				return r;
+			}
+		}
+		return -1;
+	}(), 12);
+	squads.update(me);
+	const int otherRow = rowOf(other), deadRow = rowOf(dead);
+	CHECK(otherRow > 0 && deadRow > 0);
+	CHECK(hud.listCellStyle(5, otherRow, 4).color[2] == 1 && hud.listCellStyle(5, otherRow, 4).color[0] == 0);
+	CHECK(hud.listCell(5, otherRow, 12) == "Ingame/Respawn/icon_speakerMute.tga");
+	CHECK(hud.listCell(5, deadRow, 3) == "Ingame/Scoreboard/Icons/icon_Death.tga" && hud.listCellStyle(5, deadRow, 4).color[1] == 0
+		&& hud.listCellStyle(5, deadRow, 4).color[3] == 1 && hud.listCell(5, deadRow, 12).empty());
 }
 
 TEST(HudMenus_InviteList)
@@ -603,6 +708,7 @@ TEST(HudVehicle_SeatsAndMarkers)
 	console.execute("hudBuilder.setOccupiedNodePosVariable 0 OccupyingPlayerPos1X", out);
 	console.execute("hudBuilder.setOccupiedNodePosVariable 1 OccupyingPlayerPos1Y", out);
 	console.execute("hudBuilder.setOccupiedNodeData 1", out);
+	console.execute("hudBuilder.setNodeSize 16 19", out);
 	menu::VehicleHud vehicleHud;
 	menu::VehicleHudInput in;
 	in.armor = 0.25f;
@@ -614,7 +720,7 @@ TEST(HudVehicle_SeatsAndMarkers)
 	CHECK(hud.number("VehicleArmorColorGreen") < 0.2f);
 	bool dot = false;
 	for (const auto& q : hud.frame(0)) {
-		dot = dot || (q.texture.find("vehiclePositionPlayerBlue") != std::string::npos && q.x0 == 72 && q.y0 == 12);
+		dot = dot || (q.texture.find("vehiclePositionPlayerBlue") != std::string::npos && q.x0 == 78 && q.y0 == -20 && q.x1 - q.x0 == 8 && q.y1 - q.y0 == 8);
 	}
 	CHECK(dot);
 	using R = menu::MapRelation;
@@ -622,6 +728,14 @@ TEST(HudVehicle_SeatsAndMarkers)
 	CHECK(menu::vehicleRelation(true, false, 2, 1, 1) == R::Enemy);
 	CHECK(menu::vehicleRelation(false, false, 0, 0, 1) == R::Neutral);
 	CHECK(menu::vehicleRelation(false, false, 0, 1, 1) == R::Friendly);
+	const auto blue = menu::mapRelationColor(R::Friendly);
+	const auto green = menu::mapRelationColor(R::Friendly, true);
+	const auto red = menu::mapRelationColor(R::Enemy);
+	const auto neutral = menu::mapRelationColor(R::Neutral);
+	CHECK(blue[2] > blue[1] && blue[1] > blue[0]);
+	CHECK(green[1] > green[0] && green[1] > green[2]);
+	CHECK(red[0] > red[1] && red[0] > red[2]);
+	CHECK(neutral[0] == 1 && neutral[1] == 1 && neutral[2] == 1);
 	world::ObjectTemplateManager templates;
 	world::ObjectManager objects;
 	templates.registerType(1, "PlayerControlObject");
@@ -681,11 +795,11 @@ TEST(HudVehicle_PassengersAndScoreboardSquads)
 	in.walkLength = 1.6f;
 	in.walkTime = 0.4f;
 	vehicleHud.update(hudManager, in);
-	CHECK(std::fabs(hudManager.number("MechFootAnimationValue") - 2) < 1e-5f);
+	CHECK(std::fabs(hudManager.number("MechFootAnimationValue") - 2 * 57.29578f) < 1e-3f); // degrees
 	in.walking = false;
 	in.walkTime = 1.2f;
 	vehicleHud.update(hudManager, in);
-	CHECK(std::fabs(hudManager.number("MechFootAnimationValue") - 2) < 1e-5f);
+	CHECK(std::fabs(hudManager.number("MechFootAnimationValue") - 2 * 57.29578f) < 1e-3f); // degrees
 
 	std::vector<menu::ScoreboardMember> members {
 		{0, 2, false, 30, 0, 3, 1, 50}, {1, 0, false, 20, 0, 2, 2, 0}, {2, 1, true, 10, 0, 1, 0, 0}, {3, 2, false, 5, 0, 0, 4, 30}};
@@ -974,24 +1088,34 @@ TEST(HudQuestions_AskAnswerAndTimeout)
 	std::vector<std::string> lines;
 	std::vector<std::tuple<int, int, bool, bool>> answers; // kind, value, yes, quiet
 	q.localize = [](const std::string& id) { return id; };
-	q.onLine = [&lines](const std::string& line) { lines.push_back(line); };
-	q.onAnswer = [&answers](const menu::HudQuestions::Question& asked, bool yes, bool quiet) {
+	std::string events; // c a clear, q a question line, l a personal line, a an answer
+	q.onLine = [&](const std::string& line) { lines.push_back(line); events += 'l'; };
+	q.onQuestion = [&](const std::string& line) { lines.push_back(line); events += 'q'; };
+	q.onClear = [&events] { events += 'c'; };
+	q.onAnswer = [&](const menu::HudQuestions::Question& asked, bool yes, bool quiet) {
 		answers.push_back({asked.kind, asked.value, yes, quiet});
+		events += 'a';
 	};
 	q.ask(menu::HudQuestions::Invite, 3, "invited to Charlie");
 	CHECK(lines.size() == 2 && lines[0] == "invited to Charlie" && lines[1] == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
+	CHECK(events == "clq"); // the question text a personal line (0x0079c720), the prompt the question line
 	q.tick(5);
 	q.ask(menu::HudQuestions::CommanderOffer, 1, "commander of the PAC");
 	// The invite has 15 s left, the offer 20: the invite stays in front.
 	CHECK(q.front() && q.front()->kind == menu::HudQuestions::Invite);
+	events.clear();
 	q.answer(true);
+	// The answered question's lines go first (0x0079d6e0), then the next's.
+	CHECK(events == "caclq");
 	CHECK(answers.size() == 1 && std::get<0>(answers[0]) == menu::HudQuestions::Invite && std::get<1>(answers[0]) == 3
 		&& std::get<2>(answers[0]) && !std::get<3>(answers[0]));
 	CHECK(q.front() && q.front()->kind == menu::HudQuestions::CommanderOffer && lines.back() == "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT");
 	// Unanswered for its 20 s: a quiet no and the timed-out line.
 	q.tick(19.9f);
 	CHECK(answers.size() == 1);
+	events.clear();
 	q.tick(0.2f);
+	CHECK(events == "cal");
 	CHECK(answers.size() == 2 && std::get<0>(answers[1]) == menu::HudQuestions::CommanderOffer && !std::get<2>(answers[1])
 		&& std::get<3>(answers[1]));
 	CHECK(lines.back() == "HUD_TEXT_MENU_COMMANDER_APPLICATION_TIMED_OUT" && !q.front());
@@ -1249,6 +1373,18 @@ TEST(HudMenus_DemoCameraFiles)
 // Commander.zoomCommander 0x007d7be0, detailedView 0x007d8db0,
 // spottedMouseOver 0x00751f80, CommanderMenu.sendRadioMessage 0x007a9f60,
 // SquadLeader.sendRequestForOrder 0x007c7cd0, issueSquadRequest 0x007d6820).
+TEST(HudMenus_CommanderWheelZoom)
+{
+	CHECK(menu::commanderWheelZoom(0, 1) == 1);
+	CHECK(menu::commanderWheelZoom(1, 1) == 2);
+	CHECK(menu::commanderWheelZoom(2, 1) == 2);
+	CHECK(menu::commanderWheelZoom(2, -1) == 1);
+	CHECK(menu::commanderWheelZoom(1, -1) == 0);
+	CHECK(menu::commanderWheelZoom(0, -1) == 0);
+	CHECK(menu::commanderWheelZoom(0, 20) == 2);
+	CHECK(menu::commanderWheelZoom(2, -20) == 0);
+}
+
 TEST(HudMenus_CommanderRoseRows)
 {
 	CHECK(menu::commanderZoomStep(0) == 1 && menu::commanderZoomStep(1) == 2 && menu::commanderZoomStep(2) == 0);
@@ -1394,11 +1530,13 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	tank->settings()["vehicleHud.miniMapIcon"] = "Ingame/mini_tank.tga";
 	objects.create(decoyTemplate, {40, 0, 10});
 	const uint32_t car = objects.create(tank, {100, 0, 100})->id();
+	objects.find(car)->setRotation({135, 0, 0});
 	RadarWorld world;
 	game::GameWorld::PlayerInfo onFoot;
 	onFoot.id = 5;
 	onFoot.alive = true;
 	onFoot.position = {10, 0, 10};
+	onFoot.yaw = 90;
 	game::GameWorld::PlayerInfo riding = onFoot;
 	riding.id = 6;
 	riding.vehicle = car;
@@ -1406,6 +1544,7 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	game::GameWorld::PlayerInfo far = onFoot;
 	far.id = 7;
 	far.position = {-200, 0, 10};
+	far.yaw = -45;
 	world.players = {onFoot, riding, far};
 	auto markers = menu::radarMarkers(world, round, {5, 6, 7});
 	CHECK(markers.size() == 3);
@@ -1414,6 +1553,7 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 		CHECK(markers[1].x == 20 && markers[1].z == 10); // in a vehicle: his own place
 		CHECK(markers[2].x == -200);                     // too far from it
 		CHECK(markers[0].texture == "Ingame/Player/Icons/Minimap/mini_Soldier.dds" && markers[0].size == 16);
+		CHECK(markers[0].yaw == 90 && markers[2].yaw == -45);
 	}
 	// Without a decoy template's targetType the enemy is where he is.
 	decoyTemplate->settings()["targetType"] = "TTHeat";
@@ -1423,6 +1563,28 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	world.vehicles = {car};
 	markers = menu::radarMarkers(world, round, {});
 	CHECK(markers.size() == 1 && markers[0].texture == "Ingame/mini_tank.tga" && markers[0].x == 100 && markers[0].size == 16);
+	CHECK(markers.size() == 1 && markers[0].yaw == 135);
+}
+
+// The gunships' horizon (0x007a2b50) and climb arrow: a banked, pitched
+// vehicle moves the bar; the climb is degrees for the compass strip.
+TEST(HudVehicle_HorizonAndClimb)
+{
+	hud::HudManager hud(nullptr);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("VehicleBanking") == 0 && hud.number("AngleOfAttack") == 296);
+	in.rightY = -0.5f; // rolled right 30 degrees
+	in.forwardY = 0.2f; // nose up
+	in.climb = 5;
+	vehicleHud.update(hud, in);
+	CHECK(std::fabs(hud.number("VehicleBanking") + 30.0f) < 1e-3f); // counter-rolls (clockwise-positive quads)
+	CHECK(hud.number("AngleOfAttack") == std::ceil(0.2f * 100.0f + 296.0f));
+	// 4 pi / maxClimbSpeed(10) x 5 x 0.1 rad = 0.628 rad = 36 degrees
+	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
+	vehicleHud.update(hud, in); // retail's "easing" assigns both terms: no accumulation
+	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
 }
 
 // The map's radio call markers (menu::MapCalls; 0x007918d0 case
@@ -1589,7 +1751,7 @@ TEST(HudVehicle_TorqueAndStamina)
 	in.seconds = 0.5f;
 	vehicleHud.update(hud, in);
 	CHECK(hud.number("TorqueAngle") == 0 && hud.string("TorqueString") == "0");
-	CHECK(std::fabs(hud.number("SecondTorqueAngle") - 6.2831855f) < 1e-4f);
+	CHECK(std::fabs(hud.number("SecondTorqueAngle") - 360.0f) < 1e-2f); // radians x 57.29578: degrees
 	CHECK(hud.number("VehicleStaminaShow") == 0 && hud.number("VehicleStamina") == 1);
 	in.torque = 1;
 	vehicleHud.update(hud, in);
@@ -1606,6 +1768,24 @@ TEST(HudVehicle_TorqueAndStamina)
 	in.stamina = 1;
 	vehicleHud.update(hud, in);
 	CHECK(hud.number("VehicleStaminaShow") == 0);
+}
+
+TEST(HudVehicle_AircraftThrustIndicators)
+{
+	for (int gui : {7, 15, 64, 66}) {
+		CHECK(menu::aircraftHudThrust(gui, 0.75f) == 0.75f);
+		CHECK(menu::aircraftHudThrust(gui, -2.0f) == -1.0f);
+	}
+	CHECK(menu::aircraftHudThrust(20, 1.0f) == 0.0f);
+	hud::HudManager hud(nullptr);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.torque = menu::aircraftHudThrust(15, 1.0f);
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("TorqueAngle") > 0);
+	in.torque = menu::aircraftHudThrust(15, -1.0f);
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("SecondTorqueAngle") < 360);
 }
 
 // The item list in a seat (0x0079c470): the PIFire group by item index
@@ -2381,6 +2561,134 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	info.alive = false;
 	CHECK(!bar.update(info, false).show);
 	CHECK(!bar.hide().show && bar.out().sound == -1);
+}
+
+// The original HUD manager's uplink state machine (BF2142.exe 0x0044a470): progress while the capture bar is up.
+TEST(HudMenus_TitanUplinkState)
+{
+	menu::UplinkHud u;
+	u.update(0.1f, false, 0);
+	CHECK(!u.show && !u.showLost && u.complete == 0 && !u.captureComplete);
+	u.update(1.0f, true, 0.5f); // a second inside the capture radius: halfway
+	CHECK(u.show && !u.showLost && std::fabs(u.complete - 0.5f) < 1e-6f && !u.captureComplete);
+	u.update(0.5f, false, 0);   // left before it finished: nothing was armed, the progress resets
+	CHECK(!u.show && !u.showLost && u.complete == 0);
+	u.update(1.5f, true, 0.2f);
+	u.update(1.0f, true, 1.0f); // past a full two seconds: held at 1, the lost timer armed, the flag is up
+	CHECK(!u.show && u.complete == 1.0f && u.captureComplete);
+	u.update(1.0f, false, 0.0f); // leaving after completing: "uplink lost" shows while the timer falls
+	CHECK(u.showLost && !u.show && u.complete == 0);
+	u.update(1.0f, false, 0.0f);
+	u.update(1.0f, false, 0.0f);
+	CHECK(!u.showLost); // 1 - 3 x 0.5 is below 0
+}
+
+TEST(HudMenus_MiddleTicketsShownForTitanArmourNotConquestTickets)
+{
+	CHECK(menu::middleTicketsShown(100, 100));  // Titan mode: both Titans at full armour
+	CHECK(menu::middleTicketsShown(37, 100));
+	CHECK(!menu::middleTicketsShown(600, 600)); // Conquest
+	CHECK(menu::middleTicketsShown(600, 12));   // either side counts
+}
+
+// SquadMenu.createSquad without the create box (0x007a5ad0 → 0x007d6910):
+// the squad is made all the same, with the first free id; a member of
+// another squad leaves it first; one alone in his keeps it.
+TEST(HudMenus_CreateSquadWithoutTheBox)
+{
+	Squads s;
+	const int me = s.world.addPlayer("Me", 2, false);
+	const int a = s.world.addPlayer("A", 2, true);
+	const int b = s.world.addPlayer("B", 2, true);
+	s.world.joinSquad(a, 1);
+	CHECK(!s.squads.createShown());
+	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+	// In squad 1 with A: a new squad (3) and squad 1 left.
+	s.world.joinSquad(b, 1);
+	CHECK(s.squads.createSquad(b) && s.squadOf(b) == 3 && s.squadOf(a) == 1);
+	// Alone in his squad: kept.
+	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
+}
+
+// A private squad (the squad manager's join 0x004c7290, the HUD's
+// category-2 lines 0x00756b60 and question kind 0): the leader's lock
+// (column 8, slot 0x20) is the round's; a player without the squad's bit
+// in his invite mask is refused, its leader asked (2/0x11) and the player
+// told (2/0xc); a bot hears nothing (no connection); the invite's bit lets
+// him in and the join clears it; a leader's no keeps that player's later
+// requests from asking (0x007a7d10 / 0x007a5e30); a full squad answers
+// 2/0xb; an emptied squad loses its lock.
+TEST(HudMenus_PrivateSquadAsksTheLeader)
+{
+	Squads s;
+	s.world.spawnPlayer(2);
+	const int me = s.world.localPlayer();
+	const int asker = s.world.addPlayer("Asker", 2, false);
+	const int bot = s.world.addPlayer("Bot", 2, true);
+	CHECK(me >= 0 && s.world.joinSquad(me, 1));
+	s.squads.setLocalizer([](const std::string& key) -> std::string {
+		if (key == "HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN") {
+			return "#PLAYERNAME# has asked to join your squad";
+		}
+		if (key == "HUD_HUD_SQUAD_PRIVATE_REQUEST_JOIN") {
+			return "#SQUADNAME# squad is private";
+		}
+		if (key == "HUD_HUD_SQUAD_FULL") {
+			return "#TEAMNAME# #SQUADNAME# squad is full";
+		}
+		return key;
+	});
+	std::vector<std::string> lines;
+	std::vector<std::pair<int, std::string>> asked;
+	s.squads.onLine = [&](const std::string& line) { lines.push_back(line); };
+	s.squads.onJoinRequest = [&](int player, const std::string& line) { asked.push_back({player, line}); };
+	s.squads.teamName = [](int team) { return team == 2 ? std::string("EU") : std::string("PAC"); };
+	s.squads.update(me);
+	s.squads.clickSquadList(me, s.row(1, 2), 8);
+	CHECK(s.world.squadPrivate(2, 1) && s.squads.locked(2, 1));
+	using Join = game::GameWorld::SquadJoin;
+	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Private && s.squadOf(asker) == 0);
+	auto toLeader = s.world.takeSquadMessages(me);
+	auto toAsker = s.world.takeSquadMessages(asker);
+	CHECK(toLeader.size() == 1 && toLeader[0].id == 0x11 && toLeader[0].value == asker);
+	CHECK(toAsker.size() == 1 && toAsker[0].id == 0xc && toAsker[0].value == 1);
+	s.squads.squadMessage(toLeader[0].id, toLeader[0].value);
+	CHECK(asked.size() == 1 && asked[0].first == asker && asked[0].second == "Asker has asked to join your squad");
+	// The local player's own refusal line (a squad he asked).
+	s.squads.squadMessage(0xc, 1);
+	CHECK(!lines.empty() && lines.back() == "Alpha squad is private");
+	// A bot is refused too and hears nothing; its leader is asked.
+	CHECK(s.world.requestJoinSquad(bot, 1) == Join::Private && s.world.takeSquadMessages(bot).empty());
+	toLeader = s.world.takeSquadMessages(me);
+	CHECK(toLeader.size() == 1 && toLeader[0].value == bot);
+	// Turned down: that player's next request asks nothing.
+	s.squads.denyJoinRequest(bot);
+	s.squads.squadMessage(0x11, bot);
+	CHECK(asked.size() == 1);
+	// Invited (slot 0x30's bit): the join takes and clears it.
+	s.world.setSquadInvite(asker, 1, true);
+	CHECK(s.world.squadInvites(asker) == (1u << 1));
+	CHECK(s.world.requestJoinSquad(asker, 1) == Join::Joined && s.squadOf(asker) == 1 && s.world.squadInvites(asker) == 0);
+	CHECK(s.world.takeSquadMessages(me).empty());
+	// Six: full (2/0xb to the player, the squad).
+	for (int i = 0; i < 4; ++i) {
+		const int member = s.world.addPlayer("M" + std::to_string(i), 2, true);
+		s.world.joinSquad(member, 1);
+	}
+	const int late = s.world.addPlayer("Late", 2, false);
+	s.world.setSquadInvite(late, 1, true);
+	CHECK(s.world.requestJoinSquad(late, 1) == Join::Full);
+	const auto toLate = s.world.takeSquadMessages(late);
+	CHECK(toLate.size() == 1 && toLate[0].id == 0xb && toLate[0].value == 1);
+	s.squads.squadMessage(0xb, 1);
+	CHECK(lines.back() == "EU Alpha squad is full");
+	// Emptied, the squad goes with its lock.
+	for (const auto& p : s.world.playerList()) {
+		if (p.squad == 1) {
+			s.world.joinSquad(p.id, 0);
+		}
+	}
+	CHECK(!s.world.squadPrivate(2, 1));
 }
 
 // A joined game's left click (the HUD's input, 0x00754290): with a soldier

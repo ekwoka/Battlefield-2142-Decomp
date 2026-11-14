@@ -12,6 +12,16 @@
 
 namespace dice::hfe::menu {
 
+int audioQualityIndex(const std::string& quality)
+{
+	std::string name = quality;
+	std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (name == "low") return 2;
+	if (name == "high" || name == "ultrahigh") return 0;
+	return 1; // Medium and unknown profile values use the ordinary default.
+}
+
+
 namespace {
 
 // One console call of a settings object: its name, its arguments' types
@@ -286,7 +296,18 @@ void SettingsObjects::registerConsole(Console& console)
 				return get(key);
 			}
 			if (list) {
-				m_lists[key].push_back(formatArgs(types.c_str(), args));
+				auto& entries = m_lists[key];
+				std::string entry = formatArgs(types.c_str(), args);
+				// A played help key is listed once, matched without regard to case.
+				const auto same = [&entry](const std::string& other) {
+					return other.size() == entry.size() && std::equal(other.begin(), other.end(), entry.begin(), [](char a, char b) {
+						return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+					});
+				};
+				if (key == "GeneralSettings.PlayedVOHelp" && std::any_of(entries.begin(), entries.end(), same)) {
+					return std::string();
+				}
+				entries.push_back(std::move(entry));
 			} else {
 				std::string value;
 				for (size_t i = 0; i < args.size() && i < count; ++i) {
@@ -546,6 +567,11 @@ bool SettingsObjects::save() const
 		ok = saveUserSettings() && ok;
 	}
 	return ok;
+}
+
+bool SettingsObjects::saveGeneral() const
+{
+	return write(file("General.con"), generalScript());
 }
 
 bool SettingsObjects::saveProfile() const

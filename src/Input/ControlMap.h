@@ -46,8 +46,10 @@
 #pragma once
 
 #include <functional>
+#include <algorithm>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe {
@@ -55,6 +57,57 @@ class Console;
 }
 
 namespace dice::hfe::input {
+
+// DirectInput numbers the right button before the middle button; SDL does
+// the reverse. Keep this translation shared with input regression tests.
+constexpr int sdlMouseButton(int directInputButton)
+{
+	return directInputButton == 1 ? 3 : directInputButton == 2 ? 2 : directInputButton + 1;
+}
+
+// SDL trackpads report fractional wheel steps; retain them across events.
+class WheelSteps {
+public:
+	int add(float delta) {
+		m_pending += delta;
+		const int steps = static_cast<int>(m_pending);
+		m_pending -= static_cast<float>(steps);
+		return steps;
+	}
+private:
+	float m_pending = 0;
+};
+
+// Flash list rows are discrete. Trackpad acceleration must not turn one
+// event into dozens of rows, or queue momentum after the gesture stops.
+class MenuWheelSteps {
+public:
+	int add(float delta) {
+		if (delta == 0) return 0;
+		const int direction = delta > 0 ? 1 : -1;
+		if (direction != m_direction) m_pending = 0;
+		m_direction = direction;
+		m_pending = std::clamp(m_pending + std::clamp(delta, -1.0f, 1.0f), -1.0f, 1.0f);
+		if (std::abs(m_pending) < 0.9999f) return 0;
+		m_pending = 0;
+		return direction;
+	}
+private:
+	float m_pending = 0;
+	int m_direction = 0;
+};
+
+// The wheel in play: whole notches only (a trackpad's small or accelerated
+// events must not step the item list every frame they touch), summed over
+// the frame; the frame's sign presses c_PINextItem / c_PIPrevItem.
+class PlayWheel {
+public:
+	void add(float delta) { m_frame += m_steps.add(delta); }
+	float take() { return std::exchange(m_frame, 0.0f); }
+private:
+	MenuWheelSteps m_steps;
+	float m_frame = 0;
+};
 
 // One binding of a player input.
 struct Binding {
@@ -71,6 +124,11 @@ struct Binding {
 
 class ControlMaps {
 public:
+	bool hasBinding(const std::string& map, const std::string& input) const { return bindings(map, input) != nullptr; }
+	// Whether a mouse wheel turn of `amount` (positive up) presses the axis-to-trigger input (IDAxis_2: the
+	// first name of addAxisToTriggerMapping for up, the second for down). Looked up like value(): the
+	// player map, then defaultPlayerInputControlMap, where the shipped Controls.con binds c_PINextItem.
+	bool wheelPresses(const std::string& map, const std::string& input, float amount) const;
 	// Maps by name, each from a player input (c_PIThrottle) to its bindings.
 	using Map = std::map<std::string, std::vector<Binding>>;
 

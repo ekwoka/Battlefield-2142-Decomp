@@ -115,6 +115,9 @@ public:
 	// silo's index, its ancestor's slot 0x38, into the Radio's +0x18) that
 	// the team-change messages (0x00656e80) end with: "_<index>" for a
 	// missile silo, else "".
+	// The ticket state's announcement (0x00449070, from the state change at
+	// 0x0044b7e8 with state % 20): "" for none.
+	static std::string ticketStateMessage(int team, int state, int localTeam, const std::string& gameMode);
 	static std::string siloSuffix(int index) { return index > 0 ? "_" + std::to_string(index) : std::string(); }
 
 	// Who the local player is and what the players are, for the radio
@@ -135,6 +138,7 @@ public:
 		float listenerObstruction = 0;
 		bool windWanted = false;
 		bool insideTitan = false;
+		int insideTitanTeam = 0; // the team of the Titan the listener is in
 		bool panting = false;
 		int injuries = 0;
 	};
@@ -157,6 +161,14 @@ public:
 	};
 	static void stepNewStyle(NewStyleEngine& engine, bool on, float clutch, float rpm, int gear, float speed,
 		double clock);
+	// An old-style engine's RotationRpm sound (0x00564710 from 0x0064cb80):
+	// its input eased towards the engine's |audio value|; false while it is
+	// not playing.
+	struct RotationSound {
+		float value = 0, speed = 0; // +0x1d4, +0x1d8
+		bool playing = false;       // +0x1dc
+	};
+	static bool stepRotationSound(RotationSound& sound, float audioValue);
 
 private:
 	void listener(Camera& camera);
@@ -185,6 +197,7 @@ private:
 		float hitPoints = -1;
 		bool damageArmed = true, destroyedArmed = true, repairedArmed = false;
 		bool destroyed = false;
+		bool titanPart = false; // a Titan's console or core: no world object of its own
 		const world::ObjectTemplate* objectTemplate = nullptr;
 	};
 	bool m_firstScan = true;
@@ -206,7 +219,7 @@ private:
 	struct Interior {
 		uint32_t vehicle = 0;
 		int seat = -2;
-		std::string pco;
+		std::string pco, ambientName, damagedName;
 		sound::ISound* ambient = nullptr;
 		sound::ISound* damaged = nullptr;
 		float obstruction = 0, damagedLimit = 0.5f, maxHitPoints = 0;
@@ -229,6 +242,7 @@ private:
 	std::map<uint64_t, Trigger> m_triggers;
 	int m_tick = 0;
 	std::map<uint64_t, NewStyleEngine> m_newStyle;
+	std::map<uint64_t, RotationSound> m_rotationSounds;
 	std::map<std::string, bool> m_newStyleEngines; // engine template -> audio.newStyleAudio
 	std::map<std::pair<const void*, int>, double> m_materialRadioNext; // the cells' next times (0x0060c5e0)
 	int m_materialScanIn = 0;

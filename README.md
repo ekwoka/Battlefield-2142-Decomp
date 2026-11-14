@@ -203,7 +203,9 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | E | Enter or leave a vehicle nearby |
 | F1 … F8 | Change seats |
 | F / X | In a seat: next weapon / flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |
-| C | First person ↔ chase view |
+| C | Cycle vehicle cameras (living infantry stays in first person) |
+| Enter | Open or close deployment; its Suicide button requests redeployment |
+| 7 | Select frag grenades when equipped; left button throws (G is kit pickup/drop) |
 | Tab | Scoreboard |
 | M / N / Left Alt | Big map / minimap zoom / 3D name tags |
 | Q / T | Radio menu / squad and commander menu |
@@ -273,6 +275,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 |---|---|
 | `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
 | `--offline` | The menu finds no account service, so it plays offline. |
+| `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. |
 | `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |
 | `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
 | `--keys "<s>:<op> …"` | A level's game input without a window (with `--play`, `--connect`, `--host`; after `--simulate`, or before `--screenshot`): from that second on, `down:` / `up:` / `press:<control>` (the control map's names: `c_GIRadioComm`, `c_GITacticalComm`, `c_GISayAll`, `c_GISayTeam`, `c_GISaySquad`, `c_GIYes`, `c_GINo`, `c_GIShowScoreboard`, `c_PIFire`…), `text:<text>` and `key:<Flash code>` (13 Enter, 27 Esc) to the open say box, `move:` / `click:` / `rclick:<x>/<y>` on the HUD's 800 × 600 screen, `console:<line>` (`_` a space). It prints each step and what changed: the rose shown, the say box, new chat rows, the radio heard. A hosted or joined game runs in real time. |

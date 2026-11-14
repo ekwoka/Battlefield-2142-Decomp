@@ -25,22 +25,6 @@ namespace dice::hfe::render {
 
 namespace {
 
-// An orthographic projection over [-r, r] across and [0, depth] along the
-// view (Direct3D's depth 0..1).
-Mat4 orthographic(float radius, float depth)
-{
-	Mat4 r;
-	r.m = {1 / radius, 0, 0, 0, 0, 1 / radius, 0, 0, 0, 0, 1 / depth, 0, 0, 0, 0, 1};
-	return r;
-}
-
-// Clip space to the maps' texture coordinates (v down) and depth.
-const Mat4 kClipToTexture {{0.5f, 0, 0, 0, 0, -0.5f, 0, 0, 0, 0, 1, 0, 0.5f, 0.5f, 0, 1}};
-
-// The light's depth range: far enough above the region for the tallest
-// casters (Titans hover some 100 m up) and below it for the ground.
-constexpr float kShadowHeadroom = 400;
-
 // The region's half side by quality (VideoSettings 1 low, 2 medium, 3
 // high) over shadowMapDepthDistance (40 m), and the map's size.
 float shadowRadius(const scene::ShadowSettings& s)
@@ -67,7 +51,15 @@ const std::vector<anim::Matrix>& LevelRenderer::poseFor(const Instance& instance
 	if (instance.skeleton
 		&& !(m_sources && m_sources->skeletonPose && instance.object != 0
 			&& m_sources->skeletonPose(instance.object, *instance.skeleton, pose))) {
-		pose = anim::evaluatePose(*instance.skeleton, instance.animation.get(), seconds * anim::kFramesPerSecond);
+		if (instance.wornKit) {
+			pose.clear(); // not worn (dropped): unskinned, as before
+			return pose;
+		}
+		float frame = seconds * anim::kFramesPerSecond;
+		if (instance.animation && instance.animationDuration > 0.0f) {
+			frame = seconds * static_cast<float>(instance.animation->frameCount) / instance.animationDuration;
+		}
+		pose = anim::evaluatePose(*instance.skeleton, instance.animation.get(), frame);
 	}
 	return pose;
 }
@@ -213,6 +205,10 @@ float LevelRenderer::simpleShadowFor(const Mat4& world, bool skinned, bool shado
 void LevelRenderer::useShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot,
 	uint32_t firstSampler, bool hemi, bool undergrowth)
 {
+	if (m_gpu.enhancedLit()) { // the lit pipelines' enhanced variants (Enhanced/LevelRendererEnhanced.cpp)
+		useEnhancedShadows(commands, pass, slot, firstSampler, hemi, undergrowth);
+		return;
+	}
 	ShadowUniforms uniforms = m_shadowUniforms;
 	uniforms.extra[2] = undergrowth ? 1.0f : 0.0f;
 	SDL_PushGPUFragmentUniformData(commands, slot, &uniforms, sizeof(uniforms));
@@ -244,10 +240,15 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 		m_shadowUniforms.hemiConstants[1] = hemi.offset[2];
 		m_shadowUniforms.hemiConstants[2] = hemi.size;
 		m_shadowUniforms.hemiConstants[3] = lights.hemiLerpBias;
-		m_shadowUniforms.hemiSky[0] = lights.skyColor[0];
-		m_shadowUniforms.hemiSky[1] = lights.skyColor[1];
-		m_shadowUniforms.hemiSky[2] = lights.skyColor[2];
-		m_shadowUniforms.hemiSky[3] = 1;
+		// Inside a Titan HemiMapSkyColor is 1.3 grey, not the level's sky (0x1002dc48).
+		m_shadowUniforms.hemiSky[0] = m_cameraInTitan ? 1.3f : lights.skyColor[0];
+		m_shadowUniforms.hemiSky[1] = m_cameraInTitan ? 1.3f : lights.skyColor[1];
+		m_shadowUniforms.hemiSky[2] = m_cameraInTitan ? 1.3f : lights.skyColor[2];
+		m_shadowUniforms.hemiSky[3] = m_cameraInTitan ? 2 : 1;
+	}
+	if (m_enh.csm) { // the cascades take over (renderCascades)
+		m_shadow.enabled = false;
+		return;
 	}
 	m_shadow.enabled = settings.dynamicShadowsEnabled && settings.quality > 0 && lights.enableSun &&
 		m_gpu.emptyShadowMap() != nullptr;
@@ -321,8 +322,6 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 
 void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* map, bool statics, float seconds)
 {
-	const scene::ShadowSettings defaults;
-	const scene::ShadowSettings& settings = m_sources && m_sources->shadows ? *m_sources->shadows : defaults;
 	SDL_GPUDepthStencilTargetInfo depth {};
 	depth.texture = map;
 	depth.clear_depth = 1.0f;
@@ -332,16 +331,27 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 	depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
 	SDL_BindGPUGraphicsPipeline(pass, m_gpu.shadowCasterPipeline());
-	// The light's axes, for the region test.
-	const Mat4& vp = m_shadow.viewProjection;
-	const GpuMesh* bound = nullptr;
-	TransformUniforms transforms {};
 	size_t casters = 0, draws = 0;
 	if (!statics) {
 		for (const Instance& instance : m_instances) {
 			instance.shadowCaster = false;
 		}
 	}
+	drawShadowCasterInstances(commands, pass, m_shadow.viewProjection, m_shadow.radius, statics, seconds, casters, draws);
+	SDL_EndGPURenderPass(pass);
+	if (std::getenv("BF2142_SHADOW_STATS")) {
+		std::printf("shadow map (%s): %zu casters, %zu draws, region %.0f/%.0f/%.0f r %.0f\n", statics ? "static" : "dynamic",
+			casters, draws, m_shadow.center.x, m_shadow.center.y, m_shadow.center.z, m_shadow.radius);
+	}
+}
+
+void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& vp,
+	float regionRadius, bool statics, float seconds, size_t& casters, size_t& draws)
+{
+	const scene::ShadowSettings defaults;
+	const scene::ShadowSettings& settings = m_sources && m_sources->shadows ? *m_sources->shadows : defaults;
+	const GpuMesh* bound = nullptr;
+	TransformUniforms transforms {};
 	for (const Instance& instance : m_instances) {
 		const GpuMesh* gpuMesh = instance.mesh;
 		if (!gpuMesh || instance.fade < 1.0f) {
@@ -378,7 +388,7 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 		// The sphere's centre in the light's clip space (x, y in -1..1).
 		const float cx = sphere.center.x * vp.at(0, 0) + sphere.center.y * vp.at(1, 0) + sphere.center.z * vp.at(2, 0) + vp.at(3, 0);
 		const float cy = sphere.center.x * vp.at(0, 1) + sphere.center.y * vp.at(1, 1) + sphere.center.z * vp.at(2, 1) + vp.at(3, 1);
-		const float r = sphere.radius / m_shadow.radius;
+		const float r = sphere.radius / regionRadius;
 		if (std::fabs(cx) > 1 + r || std::fabs(cy) > 1 + r) {
 			continue;
 		}
@@ -392,7 +402,7 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 			}
 		}
 		++casters;
-		instance.shadowCaster = !statics;
+		instance.shadowCaster = instance.shadowCaster || !statics;
 		if (gpuMesh != bound) {
 			bound = gpuMesh;
 			SDL_GPUBufferBinding vertexBinding {bound->vertices, 0};
@@ -433,11 +443,6 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 			++draws;
 		}
-	}
-	SDL_EndGPURenderPass(pass);
-	if (std::getenv("BF2142_SHADOW_STATS")) {
-		std::printf("shadow map (%s): %zu casters, %zu draws, region %.0f/%.0f/%.0f r %.0f\n", statics ? "static" : "dynamic",
-			casters, draws, m_shadow.center.x, m_shadow.center.y, m_shadow.center.z, m_shadow.radius);
 	}
 }
 
@@ -812,6 +817,7 @@ PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool clo
 			effects.frameSeconds = static_cast<float>(value);
 		}
 	}
+	effects.inTitan = m_cameraInTitan;
 	const uint64_t now = SDL_GetTicks();
 	if (effects.frameSeconds <= 0) {
 		effects.frameSeconds = m_lastPostTicks ? static_cast<float>(now - m_lastPostTicks) / 1000.0f : 1.0f / 30.0f;
@@ -829,7 +835,7 @@ PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool clo
 		bloom.texel[0] = 1.0f / static_cast<float>(m_bloomSize[0]);
 		bloom.texel[1] = 1.0f / static_cast<float>(m_bloomSize[1]);
 		bloom.params[0] = 0;
-		fullscreenPass(commands, m_bloomTargets[0], m_sceneColor, bloom);
+		fullscreenPass(commands, m_bloomTargets[0], m_postSource, bloom);
 		bloom.params[0] = 1;
 		fullscreenPass(commands, m_bloomTargets[1], m_bloomTargets[0], bloom);
 		bloom.params[0] = 3;
@@ -849,7 +855,7 @@ PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool clo
 		m_historyNext = (m_historyNext + 3) % 4;
 		// A new tinnitus starts from four copies of this frame.
 		for (int i = 0; i < (m_historyValid ? 1 : 4); ++i) {
-			fullscreenPass(commands, m_history[(m_historyNext + i) % 4], m_sceneColor, copy);
+			fullscreenPass(commands, m_history[(m_historyNext + i) % 4], m_postSource, copy);
 		}
 		m_historyValid = true;
 	} else {
@@ -864,7 +870,7 @@ void LevelRenderer::drawPost(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* 
 	SDL_PushGPUFragmentUniformData(commands, 0, &uniforms, sizeof(uniforms));
 	const auto orWhite = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.whiteTexture(); };
 	const auto orBlack = [this](SDL_GPUTexture* t) { return t ? t : m_gpu.blackTexture(); };
-	SDL_GPUTexture* scene = m_sceneColor;
+	SDL_GPUTexture* scene = m_postSource; // the scene, or TAA's resolve of it
 	const auto history = [&](int age) { return orBlack(m_history[(m_historyNext + age) % 4] ? m_history[(m_historyNext + age) % 4] : nullptr); };
 	SDL_GPUTextureSamplerBinding samplers[11] = {
 		{scene, m_gpu.clampSampler()},

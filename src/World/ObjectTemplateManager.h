@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace dice::hfe::world {
@@ -22,6 +23,14 @@ namespace dice::hfe::world {
 // ObjectTemplate.
 using TemplateFactory = std::function<std::unique_ptr<ObjectTemplate>(uint32_t classId, const std::string& typeName,
 	const std::string& name, uint32_t id)>;
+
+// Match CaseInsensitiveLess's ASCII folding, including non-ASCII bytes.
+struct TemplateNameHash {
+	size_t operator()(const std::string& name) const noexcept;
+};
+struct TemplateNameEqual {
+	bool operator()(const std::string& a, const std::string& b) const noexcept;
+};
 
 class ObjectTemplateManager {
 public:
@@ -47,6 +56,10 @@ public:
 
 	ObjectTemplate* active() const { return m_active; }
 	void setActive(ObjectTemplate* objectTemplate) { m_active = objectTemplate; }
+	// Enhanced audio (a port addition): when set, `activeSafe Sound <name>` creates a Sound the data
+	// never created and passes it here; retail leaves its block unapplied (eu_at.tweak's right gun
+	// Fire1P is misnamed).
+	std::function<void(ObjectTemplate&)> onMissingSound;
 
 	// Templates created while loading a level are flagged so they can be
 	// unloaded with it.
@@ -80,7 +93,7 @@ private:
 	std::map<uint32_t, std::string> m_typeNames;
 	std::map<uint32_t, TemplateFactory> m_factories;
 	std::vector<std::unique_ptr<ObjectTemplate>> m_templates; // creation order
-	std::map<std::string, ObjectTemplate*, CaseInsensitiveLess> m_byName;
+	std::unordered_map<std::string, ObjectTemplate*, TemplateNameHash, TemplateNameEqual> m_byName;
 	std::map<uint32_t, ObjectTemplate*> m_byId;
 	ObjectTemplate* m_active = nullptr;
 	uint32_t m_nextId = 0;           // network-shared templates

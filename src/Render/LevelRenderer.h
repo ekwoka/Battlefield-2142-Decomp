@@ -64,6 +64,7 @@ struct LightSettings;
 struct OvergrowthSettings;
 struct ParticleSystemSettings;
 struct QualitySettings;
+struct EnhancedSettings;
 struct WindSettings;
 struct PostProductionSettings;
 struct ShadowSettings;
@@ -147,21 +148,32 @@ struct LevelSources {
 	// The animation an object plays now (a .baf path), asked each frame;
 	// empty keeps the preview animation.
 	std::function<std::string(uint32_t object)> animationFor;
+	// The authored AnimationManager.length of the selected clip (seconds);
+	// zero uses the clip's native 24 fps duration.
+	std::function<float(uint32_t object)> animationDurationFor;
 	// The pose of an object's skeleton from the game's animation systems
 	// (world matrices per node); false to play the preview animation.
 	std::function<bool(uint32_t object, const anim::Skeleton& skeleton, std::vector<anim::Matrix>& world)> skeletonPose;
+	// Object slot 0x8c: the collision-based radius including its children.
+	// Zero means no physics body; use the render mesh's radius instead.
+	std::function<float(uint32_t object)> objectRadius;
 	// All mesh-part transforms of an object (relative to it) when the game
 	// places them itself (held weapons); false otherwise.
 	std::function<bool(uint32_t object, std::vector<anim::Matrix>& parts)> partTransforms;
 	// Parts the game moves (wheels, steering): an offset and yaw/pitch/roll
 	// before the part's placement in its parent; asked each frame.
 	std::function<bool(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation)> partPose;
+	// A Titan part's look by its template's name: 0 whole, 1 wrecked (its wreck geometry), 2 gone (hidden).
+	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
 	std::function<bool(uint32_t object, const std::string& part, anim::Matrix& local)> partBone;
 	// The HUD drawn over the frame (quads in its 800 x 600 screen), asked
 	// each frame with the seconds since the last one.
 	std::function<std::vector<hud::HudQuad>(float seconds)> overlay;
+	// Remaster's widescreen HUD fix (Shaders_client_hudfix.zip's PortedMenuShader.fx vsFFP): every HUD vertex's
+	// x times fAspectComp (12/16) about the screen's centre, except those of alpha exactly 0.01; 1 without it.
+	float hudXScale = 1.0f;
 	// A Flash menu over everything (the main menu, the end of round).
 	std::function<ui::MenuFrame(float seconds)> menu;
 	// Effects to draw (particles), if any.
@@ -189,7 +201,9 @@ struct LevelSources {
 	// The geometry and LOD an object's meshes with more than one geometry
 	// draw instead of the exterior (a vehicle's cockpit seen from inside,
 	// BF2142.exe 0x00612880); false for the default. Asked by syncObjects.
-	std::function<bool(uint32_t object, int& geometry, int& lod)> geometryFor;
+	std::function<bool(uint32_t object, const std::string& source, int& geometry, int& lod)> geometryFor;
+	// The vehicle the view is inside (its cockpit drawn), 0 for none.
+	std::function<uint32_t()> cockpitVehicle;
 	// Rain and snow (rainManager.*), if any.
 	const scene::RainSettings* rain = nullptr;
 	// renderer.global*LodDistanceScale and terrainCuller.* (defaults if null).
@@ -237,10 +251,16 @@ struct LevelSources {
 	// drawer's slot 0x40, which RendDX9's NametagManager reads too,
 	// 0x100f3490: the 3D icons' showInside / showOutside); may be null.
 	bool* cameraInTitanOut = nullptr;
+	// Whether the camera is in a Titan, as the exe decides it
+	// (GameWorld::cameraTitan, 0x006fa8b0); null: within a room's box.
+	std::function<bool(const Vec3f& camera)> cameraInTitan;
 	// GameLogic.maximumLevelViewDistance (GSViewDistance): the view
 	// distance the objects' distance fade cuts at (DistanceFade.h); null:
 	// 500, the unset GSViewDistance BF2142.exe 0x00434610 reads.
 	std::function<float()> viewDistance;
+	// enhanced.* (Scene/EnhancedSettings.h): the render passes that aren't
+	// retail (Enhanced/LevelRendererEnhanced.cpp); null or off: none.
+	const scene::EnhancedSettings* enhanced = nullptr;
 };
 
 struct LevelStats {
@@ -293,6 +313,10 @@ public:
 		const Camera& camera, const scene::LightSettings& lights);
 
 private:
+	struct IndexRange {
+		uint32_t firstIndex = 0;
+		uint32_t indexCount = 0;
+	};
 	struct Submesh {
 		uint32_t firstIndex;
 		uint32_t indexCount;
@@ -300,6 +324,7 @@ private:
 		SDL_GPUTexture* texture;
 		float alphaReference;
 		int rig = -1; // skinned meshes: the bone set this material uses
+		std::vector<IndexRange> particleSlots {}; // indices per pre-batched particle slot
 		SDL_GPUTexture* detail = nullptr; // static mesh layers, null if unused
 		SDL_GPUTexture* dirt = nullptr;
 		SDL_GPUTexture* crack = nullptr;
@@ -341,6 +366,7 @@ private:
 		// 0x100de6d0; its leaf materials, treeLeaf / 0x100db6f0):
 		// RaShaderLeaf's sway, alpha test and two sides.
 		bool leaf = false;
+		bool trunk = false;
 		// A tree's leaves whose plain texture was kept for alpha to coverage
 		// (0x10151830 skips the "_alphatest" one while antialiasing with
 		// Alpha2Mask): its alpha runs 0..0.5 and RaShaderLeaf doubles it.
@@ -349,6 +375,9 @@ private:
 		// _HASUVANIMATION_): its coordinates go through the instance's UV
 		// matrices (AnimatedUV.h).
 		bool animatedUV = false;
+		// A bundled material whose technique names "NoHemiLight": no hemi map (RaShaderBM
+		// _USEHEMIMAP_ off), the sky colour's ambient instead.
+		bool noHemi = false;
 	};
 	struct RigBone {
 		int node;
@@ -357,6 +386,9 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		// A skinned mesh's radius for the objects' distance fade
+		// (boxHalfDiagonal of the LOD's box); bounds stay unknown for one.
+		float skinnedRadius = 0;
 		bool tree = false; // a static mesh under "vegitation" (+0x2a2; renderer.drawTrees)
 		// A static mesh under "objects/water/" (the template's +0x2a8, set by
 		// its load 0x100de6d0): it keeps its lightmap at the low lighting
@@ -389,6 +421,7 @@ private:
 		std::vector<std::vector<RigBone>> rigs;
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUBuffer* indices = nullptr;
+		uint32_t particleSlotCount = 0;
 		std::vector<Submesh> submeshes;
 	};
 	struct Instance {
@@ -401,10 +434,12 @@ private:
 		std::vector<Mat4> parts; // bundled meshes: part transforms relative to the object
 		std::shared_ptr<anim::Skeleton> skeleton; // skinned meshes
 		std::shared_ptr<anim::Animation> animation;
+		float animationDuration = 0; // authored clip length, seconds; zero is 24 fps
 		bool hidden = false; // its object is hidden
+		bool wornKit = false; // posed only by its wearer's skeleton (a kit has none of its own)
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
-		// object's +0x2c), its object's origin, its cull radius (the mesh's
+		// object's +0x2c), its object's origin, its cull radius (the object's
 		// radius x cullRadiusScale; below 0 not yet read) and whether its
 		// template is a Soldier or PlayerControlObject (+0x144's scale).
 		float distanceFade = 1;
@@ -412,6 +447,7 @@ private:
 		float cullRadius = -1;
 		bool cullActor = false;
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
+		std::string source; // the child template it was made from (empty for the object's own)
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
@@ -447,6 +483,12 @@ private:
 		std::array<UVMatrix, kAnimatedUVMatrices> uvMatrices {};
 		std::vector<AnimatedUVState> uvStates;
 		bool animatedUV = false; // a part has animatedUVTranslation or animatedUVRotation
+		// The enhanced mode's motion vectors: where it was drawn last frame
+		// (its world, parts and a skinned mesh's pose), and that frame's number.
+		mutable Mat4 previousWorld;
+		mutable std::vector<Mat4> previousParts;
+		mutable std::vector<anim::Matrix> previousPose;
+		mutable unsigned previousFrame = ~0u;
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {
@@ -489,7 +531,7 @@ private:
 		uint32_t priority = 0;
 		float boundsMin[2] {}; // world x, z
 		float boundsMax[2] {};
-		// The bounds' centre (world) and half diagonal: the road renderer's
+		// The compiled file's header sphere (world): the road renderer's
 		// distance cull (0x100ba1d0, the road's +0x50 / +0x5c).
 		Vec3f center;
 		float radius = 0;
@@ -511,15 +553,17 @@ private:
 
 	// A geometry of a mesh file at a LOD; geometryIndex -1 is the one the
 	// world shows (the exterior: 1 of bundled and skinned meshes with more
-	// than one).
+	// than one). overgrowth: a "<geometry>_lod" mesh as the overgrowth draws
+	// it (overgrowthMaterial), cached apart from the same geometry placed alone.
 	const GpuMesh* mesh(const LevelSources& sources, const std::string& geometryName, int geometryIndex = -1,
-		int lod = 0);
+		int lod = 0, bool overgrowth = false);
 	// A texture by path, its top mip levels skipped by its class at the
 	// texture quality (RendDX9's texture classes, scene::TextureClass).
 	SDL_GPUTexture* texture(const io::FileManager& files, const std::string& path,
 		scene::TextureClass textureClass = scene::TextureClass::Default);
 	void addTemplate(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& local,
-		const Mat4& objectWorld, uint32_t object, int depth);
+		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {},
+		const std::string& inheritedSkeleton = {});
 	void addObject(const LevelSources& sources, const world::Object& object);
 	// A part that animates its texture coordinates, placed relative to its object.
 	struct AnimatedUVPart {
@@ -646,6 +690,10 @@ private:
 	void renderShadows(SDL_GPUCommandBuffer* commands, const Camera& camera, const scene::LightSettings& lights,
 		float seconds);
 	void drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* map, bool statics, float seconds);
+	// The casters of one map (statics or the dynamic objects) into `pass`
+	// as seen by `vp`, over a region `regionRadius` metres across its half.
+	void drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Mat4& vp,
+		float regionRadius, bool statics, float seconds, size_t& casters, size_t& draws);
 	// After binding a lit pipeline: its Shadows block at uniform `slot` and
 	// the maps (and the hemi map) from sampler `firstSampler`.
 	void useShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,
@@ -673,9 +721,14 @@ private:
 		Vec3f axes[3];   // its rotation's rows
 	};
 	std::vector<TitanHemiMap> m_titanHemiMaps;
+	// A Titan's baked maps by prefix ("as_titan", "eu_titan") and LOD (-1 the interior), null when missing.
+	std::map<std::string, SDL_GPUTexture*> m_titanLightmaps;
+	SDL_GPUTexture* titanLightmap(const LevelSources& sources, const std::string& geometry, int lod);
 	// The camera inside a Titan this frame (the object drawer's slot 0x40,
 	// TitanParts.h), and the hull parts' LOD pairs.
 	bool m_cameraInTitan = false;
+	float m_titanBlend = 0;           // the inside-Titan blend, 0..1 (0x10029b70)
+	uint64_t m_titanBlendTicks = 0;
 	TitanExteriorLods m_titanExteriorLods;
 	bool cameraInTitan(const Camera& camera) const;
 	void loadTitanHemiMaps(const LevelSources& sources);
@@ -757,6 +810,84 @@ private:
 		const BloomUniforms& uniforms);
 	void releasePostTargets();
 
+	// ---- the enhanced mode (Enhanced/LevelRendererEnhanced.cpp) ----------
+	// Not retail: with enhanced.enabled (Scene/EnhancedSettings.h) a depth
+	// prepass with view-space normals and motion vectors, GTAO on the lit
+	// shaders' ambient term, TAA before the post-production, cascaded sun
+	// shadows. Off, none of it runs and the frame is drawn as before.
+	struct EnhancedShadowUniforms { // enhanced_shadow.glsl's Shadows block
+		ShadowUniforms base;
+		Mat4 cascadeMatrix[4];
+		float cascadeFar[4] {};
+		float cascadeBias[4] {};
+		float cascadeParams[4] {}; // cascades, an atlas texel in uv, 1 with the static atlas
+		float viewEye[4] {};
+		float viewForward[4] {};
+		float aoParams[4] {}; // 1 / width, 1 / height, 1 to apply, strength
+	};
+	struct Enhanced {
+		bool on = false; // this frame's passes
+		bool taa = false, ssao = false, csm = false, prepass = false;
+		int reported = -1; // the passes last printed
+		bool jittered = false;
+		Mat4 jitter;                 // post-multiplied onto the view-projections
+		Mat4 projection;             // the world's, unjittered
+		Mat4 view;
+		Mat4 viewProjection;         // unjittered
+		Mat4 previousViewProjection; // last frame's, unjittered
+		bool previousValid = false;
+		Vec3f previousEye;
+		bool previousOverhead = false;
+		unsigned frame = 0;
+		uint32_t size[2] {};
+		SDL_GPUTexture* depth = nullptr;       // the prepass's (the shadow maps' depth format)
+		SDL_GPUTexture* normalDepth = nullptr; // view-space normal, linear depth
+		SDL_GPUTexture* motion = nullptr;      // uv now less uv last frame
+		SDL_GPUTexture* aoRaw = nullptr;
+		SDL_GPUTexture* ao = nullptr;
+		SDL_GPUTexture* history[2] = {};       // TAA's resolves
+		int historyNext = 0;
+		bool historyValid = false;
+		bool aoBound = false; // useShadows binds the AO (the world's opaque draws), else white
+		// The cascades: two atlases of 2 x 2 (the dynamic objects', the
+		// static meshes' and the terrain's), each cascade `cascadeSize` texels.
+		SDL_GPUTexture* cascadeDynamic = nullptr;
+		SDL_GPUTexture* cascadeStatic = nullptr;
+		uint32_t cascadeSize = 0;
+		Mat4 cascadeViewProjection[4];
+		float cascadeRadius[4] {};
+		Vec3f cascadeCenter[4];
+		float staticRadius[4] {};
+		Vec3f staticCenter[4];
+		bool staticValid = false;
+		size_t staticInstances = 0;
+		EnhancedShadowUniforms shadows;
+	};
+	Enhanced m_enh;
+	// What the bloom, the tinnitus's history and post.frag read: the scene,
+	// or TAA's resolve of it.
+	SDL_GPUTexture* m_postSource = nullptr;
+	// Picks this frame's passes and TAA's jitter (before the view-projection is made).
+	void beginEnhancedFrame(const Camera& camera, uint32_t width, uint32_t height, bool overhead, bool post,
+		const Mat4& projection);
+	void renderCascades(SDL_GPUCommandBuffer* commands, const Camera& camera, const scene::LightSettings& lights,
+		float seconds, float aspect);
+	// Depth, then normals and motion, then the AO (the world pass reads it).
+	void renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const Camera& camera, const Mat4& viewProjection,
+		float seconds, float aspect);
+	// The terrain's depth: the cells drawn this frame, or (`coarse`, the
+	// cascades' casters) every cell at its lowest LOD.
+	void drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
+		const Mat4& viewProjection, bool coarse);
+	void resolveTaa(SDL_GPUCommandBuffer* commands);
+	// BF2142_ENHANCED_VIEW=ao|aoraw|normals|motion: that buffer over the scene (red: one channel).
+	void showEnhancedBuffer(SDL_GPUCommandBuffer* commands);
+	void endEnhancedFrame(const Camera& camera, bool overhead);
+	void useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,
+		bool hemi, bool undergrowth);
+	void ensureEnhancedTargets(uint32_t width, uint32_t height);
+	void releaseEnhancedTargets();
+
 	GpuContext& m_gpu;
 	std::map<std::string, std::unique_ptr<GpuMesh>> m_meshes; // by geometry name (lower case)
 	std::map<std::string, SDL_GPUTexture*> m_textures;         // by path (lower case)
@@ -827,7 +958,7 @@ private:
 		SDL_GPUTexture* texture;
 		uint32_t firstVertex;
 		uint32_t vertexCount;
-		int blend[2] = {0, 0}; // HudQuad::blend (D3DBLEND source, destination)
+		int blend[2] = {0, 0}; // HudQuad::blend (Meme source, destination)
 	};
 	SDL_GPUBuffer* m_overlayVertices = nullptr;
 	// The menu layer: its triangles by texture, and the textures of images
@@ -870,6 +1001,11 @@ private:
 	std::vector<ListedLight> m_listedLights;        // the same, for the meshes' picks
 	std::vector<int> m_cameraLights;                // the nearest the camera of them (applyPointLights)
 	std::vector<int> m_terrainLights;               // the Point ones nearest the camera (applyTerrainLights)
+	// Every placed dynamic light, owner-grouped, for the Titan-interior statics (pickOwnedLights); their
+	// PointLights follow the listed ones in m_pointLights from m_ownedBase.
+	std::vector<ListedLight> m_ownedLights;
+	std::map<std::pair<uint32_t, std::string>, int> m_lightOwners; // (object, parent template path) -> owner
+	size_t m_ownedBase = 0;
 	LightLimits m_lightLimits;
 	MsvcRand m_flickerRand;
 	Frustum m_frameFrustum;
@@ -881,6 +1017,7 @@ private:
 		uint32_t object = 0;
 		Mat4 local; // in the object's space
 		effects::LightSourceLook look;
+		std::string parent; // its parent's template path from the root's child ('' the root), as Instance::source
 	};
 	std::vector<ObjectLight> m_objectLights;
 	void applyPointLights(LightingUniforms& uniforms) const;

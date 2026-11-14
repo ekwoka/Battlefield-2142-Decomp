@@ -71,6 +71,51 @@ TEST(SoldierPhysics_RunsAtThePoseSpeed)
 	CHECK(std::fabs(body.velocity.z) < 0.2f);
 }
 
+TEST(SoldierPhysics_ADSAndSprintAreMutuallyExclusiveAcrossTransitions)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	control.stamina().configure(10, 10, 0.1f);
+	game::SoldierInput input;
+	input.throttle = 1;
+	input.sprint = true;
+	control.setZoomed(true); // starting sprint while ADS is already active
+	for (int i = 0; i < 30; ++i) {
+		control.update(input, body);
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(!control.stamina().sprinting());
+	CHECK(game::soldierSpeedIndex(game::SoldierPose::Stand, control.stamina().sprinting(), true) == 2);
+
+	control.setZoomed(false);
+	control.update(input, body); // held sprint is accepted after zoom ends
+	CHECK(control.stamina().sprinting());
+	body.step(1 / 30.0f, slope(0));
+	control.setZoomed(true); // entering ADS while already sprinting stops it that tick
+	control.update(input, body);
+	CHECK(!control.stamina().sprinting());
+	CHECK(game::soldierSpeedIndex(game::SoldierPose::Stand, control.stamina().sprinting(), true) == 2);
+
+	control.setZoomed(false);
+	control.update(input, body); // shift was held through ADS, and can sprint again
+	CHECK(control.stamina().sprinting());
+}
+
+TEST(SoldierPhysics_AnimationMovementUsesTheViewHeading)
+{
+	constexpr float yaw = 35.0f;
+	const float radians = yaw * 3.14159265f / 180.0f;
+	const physics::Vec3 velocity {6.3f * std::sin(radians), 0, 6.3f * std::cos(radians)};
+	const game::SoldierAnimationDirection direction = game::soldierAnimationDirection(velocity, yaw);
+	CHECK(std::fabs(direction.forward - 1.0f) < 1e-4f);
+	CHECK(std::fabs(direction.side) < 1e-4f);
+	// With the body's yaw before its head twist catches up, the same sprint
+	// fails the shipped forward-animation threshold (5.5 m/s).
+	const game::SoldierAnimationDirection bodyFrame = game::soldierAnimationDirection(velocity, 0);
+	CHECK(6.3f * bodyFrame.forward < 5.5f);
+}
+
 TEST(SoldierPhysics_WalksUpAHill)
 {
 	physics::SoldierBody body;
@@ -141,15 +186,21 @@ TEST(SoldierPhysics_GripCorrectsUpToTheLargerLimit)
 		body.setDesiredVelocity({0, 0, speed});
 		body.step(1 / 30.0f, slope(0));
 	};
+	// The node moves with the previous response (0x004afbee): what a tick
+	// asks for shows in the velocity after the next step, which asks the same.
+	const auto settle = [&stepWanting](float speed) {
+		stepWanting(speed);
+		stepWanting(speed);
+	};
 	// From standing, the first ticks take 1.5712 m/s each (no hold yet).
-	stepWanting(3.9f);
+	settle(3.9f);
 	CHECK(std::fabs(body.velocity.z - 1.5712f * 0.99f) < 0.01f);
 	for (int i = 0; i < 30; ++i) {
 		stepWanting(3.9f);
 	}
 	CHECK(std::fabs(body.velocity.z - 3.9f * 0.99f) < 0.02f);
 	// Holding, a change of 2 m/s goes in one tick.
-	stepWanting(1.9f);
+	settle(1.9f);
 	std::printf("  2 m/s slower in a tick: %.3f m/s\n", body.velocity.z);
 	CHECK(std::fabs(body.velocity.z - 1.9f * 0.99f) < 0.02f);
 	// A change of 3 m/s is past the hold: 1.5712 of it, and the hold is lost.
@@ -157,11 +208,20 @@ TEST(SoldierPhysics_GripCorrectsUpToTheLargerLimit)
 		stepWanting(3.9f);
 	}
 	const float was = body.velocity.z;
-	stepWanting(0.9f);
+	settle(0.9f);
 	CHECK(std::fabs(body.velocity.z - (was - 1.5712f) * 0.99f) < 0.01f);
-	const float lost = body.velocity.z;
-	stepWanting(lost - 2.0f); // 2 m/s more: without the hold, 1.5712 of it
-	CHECK(std::fabs(body.velocity.z - (lost - 1.5712f) * 0.99f) < 0.01f);
+	// Without the hold a 2 m/s change takes 1.5712 of it: the first ask loses
+	// the hold (3 m/s over the limit), the second, made where the first's
+	// correction leaves the soldier, is cut to 1.5712 as the hold is gone.
+	for (int i = 0; i < 40; ++i) {
+		stepWanting(3.9f);
+	}
+	const float steady = body.velocity.z;
+	stepWanting(0.9f);
+	const float next = (steady - 1.5712f) * 0.99f;
+	stepWanting(next - 2.0f);
+	stepWanting(next - 2.0f);
+	CHECK(std::fabs(body.velocity.z - (next - 1.5712f) * 0.99f) < 0.01f);
 }
 
 namespace {
@@ -695,22 +755,36 @@ TEST(SoldierControl_SprintStaminaRunsOut)
 	CHECK(!stamina.sprinting());
 }
 
-// Two soldiers closer than two radii push each other apart (0x006c2620).
+// Two soldiers closer than two radii push each other apart (0x006c2620):
+// one contact, in the pass of the soldier that comes first, gives both
+// their push; the second's pass leaves the pair alone.
 TEST(SoldierPhysics_SoldiersPushApart)
 {
-	physics::SoldierBody a;
+	const float dt = 1 / 30.0f;
+	physics::SoldierBody a, b;
 	a.position = {0, 1, 0};
-	a.step(1 / 30.0f, slope(0));
-	a.soldiers = {{{0.3f, 1, 0}, 0}};
-	a.step(1 / 30.0f, slope(0));
+	b.position = {0.3f, 1, 0};
+	a.step(dt, slope(0));
+	b.step(dt, slope(0));
+	a.soldiers = {{&b, false}};
+	b.soldiers = {{&a, true}};
+	a.moveNode(dt);
+	b.moveNode(dt);
+	a.pass(dt, slope(0));
+	b.pass(dt, slope(0));
+	a.settle(dt, slope(0));
+	b.settle(dt, slope(0));
 	CHECK(a.position.x < -0.15f);
+	CHECK(std::fabs(a.position.x + b.position.x - 0.3f) < 1e-4f); // the same push each
 	// Lying under the other's feet (heights apart) nothing.
-	physics::SoldierBody b;
-	b.position = {0, 1, 0};
-	b.step(1 / 30.0f, slope(0));
-	b.soldiers = {{{0.3f, 3, 0}, 0}};
-	b.step(1 / 30.0f, slope(0));
-	CHECK(std::fabs(b.position.x) < 1e-4f);
+	physics::SoldierBody c, d;
+	c.position = {0, 1, 0};
+	c.step(dt, slope(0));
+	d.position = {0.3f, 3, 0};
+	c.soldiers = {{&d, false}};
+	c.step(dt, slope(0));
+	CHECK(std::fabs(c.position.x) < 1e-4f);
+	CHECK(std::fabs(d.position.x - 0.3f) < 1e-4f);
 }
 
 namespace {
@@ -1021,4 +1095,98 @@ TEST(SoldierControl_ZoomedWalkIsSlowed)
 	CHECK(game::soldierSpeedIndex(SoldierPose::Stand, true, true) == 4);
 	CHECK(game::soldierSpeedIndex(SoldierPose::Crouch, false, true) == 1);
 	CHECK(game::soldierSpeed(2) == 1.5f);
+}
+
+TEST(SoldierControl_ViewRelativeDiagonals)
+{
+	for (float throttle : {-1.0f, 1.0f}) {
+		for (float strafe : {-1.0f, 1.0f}) {
+			physics::SoldierBody body;
+			body.position = {0, 1, 0};
+			game::SoldierControl control;
+			game::SoldierInput input;
+			input.throttle = throttle;
+			input.strafe = strafe;
+			for (int tick = 0; tick < 90; ++tick) {
+				control.update(input, body);
+				body.step(1 / 30.0f, slope(0));
+			}
+			CHECK(body.velocity.x * strafe > 2.5f && body.velocity.z * throttle > 2.5f);
+			CHECK(std::sqrt(body.velocity.x * body.velocity.x + body.velocity.z * body.velocity.z) <= 3.91f);
+		}
+	}
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	game::SoldierInput look;
+	look.turn = 30;
+	control.update(look, body);
+	look = {};
+	look.strafe = 1;
+	for (int tick = 0; tick < 90; ++tick) {
+		control.update(look, body);
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(body.velocity.x > 3 && body.velocity.z < -1.8f);
+}
+
+// The ground correction while far from the wanted velocity (0x006c23a2):
+// sliding, held to grip x 1.5712 a tick, until it fits and grips (then up
+// to grip x 2.3568). Inverted, a soldier pushing into a wall drove at the
+// grip limit every tick and shook against it.
+TEST(SoldierPhysics_FarFromTheWantedVelocitySlidesAtTheLowLimit)
+{
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	for (int i = 0; i < 30; ++i) {
+		body.step(1 / 30.0f, slope(0));
+	}
+	CHECK(body.onGround());
+	float largest = 0;
+	for (int i = 0; i < 6; ++i) {
+		const float before = body.velocity.z;
+		body.setDesiredVelocity({0, 0, 20});
+		body.step(1 / 30.0f, slope(0));
+		largest = std::max(largest, body.velocity.z - before);
+	}
+	std::printf("  largest change a tick %.3f m/s\n", largest);
+	CHECK(largest > 1.4f && largest < 1.6f);
+}
+
+// Object and terrain contacts are solved after integrating the node. Each
+// published pose must clear the wall and the floor even with forward held.
+TEST(SoldierPhysics_ContactStepPublishesTheResolvedPose)
+{
+	physics::CollisionWorld world;
+	world.addMesh(testMesh(), physics::CollisionUser::Soldier, {}, {});
+	physics::SoldierBody body;
+	body.world = &world;
+	body.position = {0, 1, 2.6f};
+	game::SoldierControl control;
+	game::SoldierInput forward;
+	forward.throttle = 1;
+	const auto ground = slope(0);
+	float nearest = 0;
+	float lowest = body.position.y;
+	for (int tick = 0; tick < 60; ++tick) {
+		control.update(forward, body);
+		body.step(1 / 30.0f, ground);
+		nearest = std::max(nearest, body.position.z);
+		lowest = std::min(lowest, body.position.y);
+	}
+	const float limit = 3 - physics::soldier::kRadius;
+	CHECK(nearest > limit - 0.001f);
+	CHECK(nearest <= limit + 0.001f);
+	CHECK(lowest >= 1.0f - 0.001f);
+}
+
+// The response starts with a minimum normal.y of 0.5 on each tick.
+// A steep triangle still pushes the soldier out.
+TEST(SoldierPhysics_SteepTerrainPushesWithoutGrantingFooting)
+{
+	physics::SoldierBody body;
+	body.position = {0, 0.98f, 0};
+	body.step(1 / 30.0f, slope(2.0f));
+	CHECK(body.position.y > 0.98f);
+	CHECK(!body.onGround());
 }

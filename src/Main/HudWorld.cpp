@@ -36,6 +36,14 @@ int HudWorld::playerTeam() const
 
 // --- the local round
 
+float LocalHudWorld::pilotThrust(uint32_t vehicle) const
+{
+	PlayerInfo player;
+	const game::Vehicle* v = m_round.vehicle(vehicle);
+	return v && playerInfo(localPlayer(), player) && player.vehicle == vehicle && player.seat == 0
+		? v->input().throttle : 0.0f;
+}
+
 float LocalHudWorld::objectHealth(uint32_t object) const
 {
 	const float hp = m_round.hitPoints(object);
@@ -294,6 +302,22 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 		}
 		ControlPointInfo cp {1000 + o.ghost, o.team, {o.position.x, o.position.y, o.position.z},
 			templateNumber(t, "radius", 10), templateNumber(t, "unableToChangeTeam", 0) == 0};
+		cp.name = t ? t->name() : std::string();
+		cp.flagHeight = o.captureProgress;
+		cp.flagRate = o.captureRate;
+		cp.showOnMinimap = templateNumber(t, "showOnMinimap", 1) != 0;
+		if (t) {
+			for (const char* key : {"controlPointName", "name"}) {
+				const auto it = t->settings().find(key);
+				if (it != t->settings().end() && !it->second.empty()) {
+					cp.name = it->second;
+					if (cp.name.size() >= 2 && cp.name.front() == '"' && cp.name.back() == '"') {
+						cp.name = cp.name.substr(1, cp.name.size() - 2);
+					}
+					break;
+				}
+			}
+		}
 		for (const auto& [id, group] : m_world.spawnGroups()) {
 			if (group.ghost == o.ghost) {
 				cp.id = id;
@@ -365,6 +389,13 @@ std::vector<HudWorld::VehicleInfo> RemoteHudWorld::vehicleList() const
 		out.push_back(v);
 	}
 	return out;
+}
+
+float RemoteHudWorld::pilotThrust(uint32_t vehicle) const
+{
+	PlayerInfo player;
+	return playerInfo(localPlayer(), player) && player.vehicle == vehicle && player.seat == 0
+		? m_world.input().get(net::kPIThrottle) : 0.0f;
 }
 
 std::vector<int> RemoteHudWorld::vehicleOccupants(uint32_t vehicle) const
@@ -734,6 +765,22 @@ HudWorld::Weapon RemoteHudWorld::seatGroupWeapon(int group) const
 		w.mags = own.magazines;
 	}
 	return w;
+}
+
+// The drones' pulses, with what the local player's minimap lists as
+// spotted (radio spots, the squad's reports) when it is his team's.
+std::vector<int> LocalHudWorld::revealedPlayers(int team) const
+{
+	std::vector<int> out = m_round.revealedPlayers(team);
+	game::GameWorld::PlayerInfo me;
+	if (m_round.playerInfo(m_round.localPlayer(), me) && me.team == team) {
+		for (const int id : m_round.mapSpottedPlayers(me.id)) {
+			if (std::find(out.begin(), out.end(), id) == out.end()) {
+				out.push_back(id);
+			}
+		}
+	}
+	return out;
 }
 
 std::vector<int> RemoteHudWorld::revealedPlayers(int) const

@@ -201,7 +201,7 @@ void CollisionWorld::forEachFaceIndexNear(const Vec3& center, float radius,
 	}
 }
 
-void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts) const
+void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts, uint32_t ignore) const
 {
 	++m_stamp;
 	const int x0 = static_cast<int>(std::floor((center.x - radius) / kCell));
@@ -216,7 +216,7 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 			}
 			for (uint32_t index : cell->second) {
 				const Triangle& t = m_triangles[index];
-				if (t.stamp == m_stamp) {
+				if (t.stamp == m_stamp || (ignore != 0 && t.owner == ignore)) {
 					continue;
 				}
 				t.stamp = m_stamp;

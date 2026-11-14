@@ -126,9 +126,17 @@ void streamTrack(const std::atomic<bool>& stopRequested, const SoundFile& track)
 
 bool setTrack(const char* path)
 {
+	if (!path || !*path) {
+		stop(0.0f);
+		delete g_track;
+		g_track = nullptr;
+		return true;
+	}
 	if (g_track && g_track->path() == path) {
 		return true;
 	}
+	// The streaming thread holds this SoundFile until it has been joined.
+	stop(0.0f);
 	delete g_track;
 	// Music doesn't go through the file cache: two references and a usage
 	// mark keep it loadable, and it is enabled at every quality level.
@@ -146,11 +154,7 @@ bool playTrack(const char* path)
 	if (g_track) {
 		g_track->unload(true, true);
 	}
-	if (path) {
-		return setTrack(path);
-	}
-	g_running = false;
-	return true;
+	return setTrack(path);
 }
 
 bool start()

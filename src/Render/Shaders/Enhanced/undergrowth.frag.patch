@@ -1,0 +1,14 @@
+Enhanced variant of undergrowth.frag: enhanced_shadow.glsl, the GTAO on the
+GI term (the AO of the ground the plants stand on: they aren't in the
+prepass).
+<<<<
+#include "shadow.glsl"
+====
+#define ENHANCED_AO_BINDING 5
+#include "enhanced_shadow.glsl"
+>>>>
+<<<<
+		light = lightmap.g * sun * 2.0 * shadow + lightmap.b * gi;
+====
+		light = lightmap.g * sun * 2.0 * shadow + lightmap.b * gi * enhancedAO();
+>>>>

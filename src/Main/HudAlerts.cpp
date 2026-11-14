@@ -15,6 +15,12 @@ namespace {
 
 const char* const kTargetTypes[] = {"TTNone", "TTLaser", "TTHeat", "TTMagnet", "TTUnique", "TTBeacon", "TTDecoy", "TTPod"};
 
+std::string lowered(std::string s)
+{
+	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return s;
+}
+
 std::string unquoted(std::string s)
 {
 	s.erase(std::remove(s.begin(), s.end(), '"'), s.end());
@@ -145,7 +151,7 @@ void HelpPopups::bind(Console& console)
 	bindMethod(console, "GeneralSettings.setHelpPopups", access, [this](bool on) { setEnabled(on); });
 	// The played list (GeneralSettings' slots 0x174 / 0x178): the settings
 	// object keeps and saves the lines and then calls this.
-	bindMethod(console, "GeneralSettings.setPlayedVOHelp", access, [this](std::string key) { m_played.insert(unquoted(key)); });
+	bindMethod(console, "GeneralSettings.setPlayedVOHelp", access, [this](std::string key) { m_played.insert(lowered(unquoted(key))); });
 }
 
 // The help manager's messages (0x00645d40: the keys at +0x208 + i x 0x1c,
@@ -369,6 +375,8 @@ bool HelpPopups::tutorial(hud::HudManager& hud, const Context& context, float se
 	return false;
 }
 
+bool HelpPopups::played(const std::string& key) const { return m_played.count(lowered(key)) != 0; }
+
 bool HelpPopups::show(hud::HudManager& hud, const std::string& rawKey, const std::string& sound)
 {
 	const std::string key = unquoted(rawKey);
@@ -384,7 +392,7 @@ bool HelpPopups::show(hud::HudManager& hud, const std::string& rawKey, const std
 		m_voiceHook(sound.empty() ? key : unquoted(sound));
 	}
 	// 0x00645c10: recorded as played (GeneralSettings slot 0x174).
-	m_played.insert(key);
+	m_played.insert(lowered(key));
 	if (onPlayed) {
 		onPlayed(key);
 	}
@@ -405,6 +413,16 @@ void HelpPopups::showText(hud::HudManager& hud, const std::string& text, float s
 
 void HelpPopups::update(hud::HudManager& hud, const Context& context, float seconds)
 {
+	// Help cards persist across the transition into deployment. They can cover
+	// the map's upper spawn choices, so clear them for the duration of this
+	// screen and let the map's own labels explain the available points.
+	if (context.spawnScreen) {
+		hud.set("IngameHelpShow", 0);
+		m_timer = 0;
+		m_tutorialShowing = false;
+		m_sinceTutorial = 0;
+		return;
+	}
 	// The HUD manager's count down (0x007539c0).
 	if (m_timer > 0) {
 		m_timer -= seconds;

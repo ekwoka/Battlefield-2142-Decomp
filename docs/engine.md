@@ -1961,6 +1961,26 @@ slot `0x34`, beside GLKilledBy 3, GLAssistKill 9, GLTinnitus 0xd).
 
 ### Fire modes, tracers, camera recoil, armour effects and leaving a seat
 
+**Weapon reload and animation phases.** An ammo component with nonzero
+`ammo.reloadAmount` loads one round per stage and consumes one finite
+reserve per round, with first/last extra times and the authored swap point.
+It holds animation message 2 for the insertion stages and emits reload sound
+states 4, 5 and 6; whole-magazine reloads still pulse message 2 and emit
+state 3. The first- and third-person rigs receive the same held messages and
+the configured shift pulse 32. A shift waits for the shot cycle and keeps
+the firearm busy for `animation.shiftDelay`. `animation.loopingFire` holds
+message 1 until release instead of pulsing it for each shot.
+
+`ammo.minimumTimeUntilReload` delays an empty weapon's automatic reload
+request after the shot; it does not replace `ammo.reloadTime`. The
+countdown advances only while the firearm is updated, so it can pause while
+the weapon is stowed or an unmanned gun is not already reloading. The
+SingleFireComp show-after-reload delay is scheduled without inventing a
+hide event. The separate throwable soft-delay contribution to the original
+conditional `wp-delay-ticks` busy calculation is not yet modeled. Original
+instruction-path probes and native tests do not establish live retail
+animation or audible equivalence.
+
 **The fire component's flags.** `fire.busyUntilButtonRelease`
 (SingleFireComp `+0x9c`, setter `0x004e3f33`, constructor `0x005d5790`;
 the rocket, AA and AV launchers): after a round (fire, slot 36
@@ -2003,23 +2023,37 @@ in between (`FireArm::fire`). The round's start and its wait:
   default; the grenades 1, the sonar 0.05): the throw waits that long
   (state 2), then fireLaunchDelay (state 3) before it goes (`0x005e4c80`;
   slot 36 `0x005e5a10` starts state 2, the update is slot 5). Rewritten
-  (`FireArmSettings::thrown`, `FireArm::throwing`): the round is decided
-  and spent on the press and leaves pull-back + launch-delay ticks later
-  (a frag grenade's 30 + 12). **The underarm (soft) throw**: with
+  (`FireArmSettings::thrown`, `FireArm::throwing`): the press starts
+  pin-removal animation pulse 16 and the held fire sound; the end of
+  pull-back starts uncocked-throw pulse 1. Ammo is spent at projectile
+  release, not at the press. These setters truncate seconds x 30
+  (a vanilla frag grenade's 30 + 11 ticks; Remaster's 21 + 16).
+  Thrown ammo waits its authored `ammo.minimumTimeUntilReload` after
+  release before reloading; other firearms' reload-delay handling is unchanged.
+  **The underarm (soft) throw**: with
   `fire.altFireInput` (PIAltFire on seven throwables) the alternate press
   (slot 13 `0x005e4d80`) starts the throw with the soft flag (`+0x178`),
-  under which the timer (`0x005e4c80`) waits; while held the power
+  under which phase transitions (`0x005e4c80`) wait; while held the power
   (`+0x168`) is min(1, ticks held × 1/30) (`0x005e4eb0`; `+0x90` is the
   constructor's 1/30, not a property), the arm's animation taking min(power,
-  0.99); the release clears the flag and the round leaves after the
-  pull-back and launch delay at the weapon's speed × power plus the
+  0.99); the release clears the flag. Pull-back time has already elapsed
+  during the hold, so a long hold leaves only launch delay, not another
+  pull-back. The round leaves at the weapon's speed × power plus the
   thrower's velocity (`0x005e5720`; its random spin `+0xac` × power too,
   see **The rounds' own look**). A
   normal throw's power is 1 (`0x005e4b40`). `FireArmSettings::softThrow`,
   `FireArm::throwPower`, `GameWorld::fire`. fireLaunchDelaySoft (`+0x9c`)
   is read only by slot 11 (`0x005e4e70`: max(fireLaunchDelay, soft) +
-  `+0xa4`, the busy time) and isn't applied; the arm's animation isn't
-  either.
+  `+0xa4`, the busy time), which remains unmodeled. Exact selection of the
+  short-throw animation pulse 4 is not established.
+- `fire.fireLaunchDelay` on SingleFireComp (`0x005d4d80`) enters
+  charge state 3 before release state 4. The rewrite starts weapon
+  animation and sound at charge acceptance, but spends ammo, creates
+  the projectile, applies recoil and starts muzzle effects only at
+  release. Remaster's handheld `EU_Rorsch_Mk_V` charges for 2.5 s
+  (75 ticks), matching its authored fire-animation effect time.
+  Its `e_muzz_static_av` uses `startOnEffects 0`, so that animation
+  event does not also start the same muzzle bundle.
 - `fire.addBarrelName` (`0x004e45a6` → `0x005d6ae0`, MultiFireComp
   `+0x94`): the gun's children of those names are its barrels
   (`0x005d6d20`), fired in turn (`+0x9c` set by default, `+0x1a8`) from
@@ -2298,7 +2332,19 @@ SoldierCamera, at the crouch pose's eye, yaw the seat's + the body's +
 the twist, pitch within ±85. Rewritten: `GameWorld::stepSeatedLook`,
 `poseSeated` (the bundles' share above the seat left at 0),
 `seatedSoldierView` and `PlayerCamera::view`. Not decoded: whether a
-passenger's own weapon fires there (the open seats carry none).
+passenger's own weapon fires there (the open seats carry none). The
+rewrite lets an air transport's passenger seat (a camera-less seat whose
+only PIFire weapon is the pod launcher, `SeatLayout::kitWeapon`; a
+Titan's pod array has its own camera and keeps its launcher) fire the
+soldier's weapon along that camera: from the crouch eye, the twist
+starting at 0 in the seat (`+0x278` is one field on foot and seated), the
+vehicle's reported velocity carried, and the weapon's deviation updated
+from the seated look (crouch, no movement, not in the air). These seats
+also use the infantry recoil graph for yaw and pitch; the seated camera
+includes the pending pitch kick until the viewer consumes it. Their HUD
+uses the carried weapon's ammunition, GUI and live crosshair spread,
+refreshing these when switching from a pilot or door-gun seat. Seats
+with their own weapons or cameras retain the vehicle HUD path.
 
 On a joined client the seated look comes from the server: the soldier's
 networkable (`0x005fc1a0` fills masks 2 and 4 from `+0x25c` and `+0x278`
@@ -3679,6 +3725,14 @@ roll), coloured by the colour graph and faded by the transparency graph
 pass (RendDX9's MeshParticles draw `0x101351e0`: the hemi map constants `0x10135460`, then
 `0x10135020`).
 
+The bundled geometry is pre-batched: its blend-index byte selects a
+particle matrix. Retail fills slots from the highest down
+(`0x1013459f`). Native groups each material's triangles by that byte,
+preserving their vertex offsets and original index ranges, and draws one
+slot per particle instead of the whole batch. Triangles for a slot need
+not be contiguous. The shipped ADS spike mesh has 26 slots; some particle
+meshes have one.
+
 **Lights.** LightSource templates (class `0x94c7`; the fields as the
 writer `0x00617030` lists them: lightType `+0x70`, isDynamic `+0x64`,
 affectLightmappedObjects `+0x6d`, affectingType `+0x90`,
@@ -3830,6 +3884,16 @@ camera, where the original has no cap), `applyTerrainLights`,
 `terrain.frag` (after the fog, as the passes go over the finished
 terrain), `pickUndergrowthLights` / `applyUndergrowthLights` and
 `undergrowth.frag` (per pixel where the original lights per vertex).
+
+**Signed mesh-particle scale.** Mesh particles retain negative sizes:
+RendDX9's `particleMaxSize` setter (`0x10135d40`, template slot `0x134`)
+stores the value unchanged at `+0x1e8`. The draw (`0x10135b03..0x10135b58`)
+multiplies the clamped size graph by that value, adds the random size,
+and applies the signed scale to the mesh matrix (`0x101a28e0`).
+The shipped active-defence spikes use `particleMaxSize -1`, a constant
+size graph of 1 and `directionalScale 3`. `collectMeshes` preserves
+that mirrored scale instead of discarding the particles; zero scale
+and transparent particles remain omitted. Sprite sizing is unchanged.
 
 **Non-screen-aligned particles and trails.** A
 NonScreenAlignedParticleSystem's particles are squares lying across the
@@ -4131,8 +4195,10 @@ transparency and size graphs), randomSize `+0x1b8`, randomIntensity
 - *the draw* (`0x10132e90` and the like): a particle's alpha times (1 −
   min((d − s) / (end − s), 1))² past s = startLodPercentageOfLodDistance
   (0.85) of its class's end, d its depth in the view; a particle whose
-  alpha is below the template's alphaCull (+0xa0, the exe's slot 0x154,
-  `0x00539094` → `0x00626c50`) isn't drawn (the collector `0x10130bd0`).
+  faded alpha intensity (+0x2c: +0x58 by that fade; the transparency graph
+  is the shader's and doesn't count) is below the template's alphaCull
+  (+0xa0, the exe's slot 0x154, `0x00539094` → `0x00626c50`) isn't drawn
+  (the collector `0x10130bd0`).
   pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8) moves the quad's centre off
   the particle by that many half-sizes (`particle.vert`; 0/−0.5 stands
   it on it). drawOrder Back / Front is applied by its name (Back draws the
@@ -4592,11 +4658,16 @@ the children: p0 / 4 and 0.5 × `+0x140`² × p2, taken by a child whose own
 R is under 0.8 (`*0x00a07f00`) × its root's. Rewritten in
 `render/DistanceFade.h` and `LevelRenderer::prepareInstances`: each
 object's instance in view steps its fade (`Instance::distanceFade`) with
-R = its mesh's sphere × cullRadiusScale (the exe's slot 0x8c is the
-collision mesh's radius, else the render object's, and the children's),
-the actor scale for Soldier and PlayerControlObject templates, the
-geometry quality's scales, the view's zoom, GSViewDistance from
-GameLogic.maximumLevelViewDistance × the view distance scale; faded out
+R = the root's `GameWorld::objectRadius` × cullRadiusScale when it has a
+physics body, otherwise its mesh's radius (the exe's slot 0x8c is the
+collision mesh's radius, else the render object's, and the children's).
+`LevelSources::objectRadius` supplies this through the gameplay host:
+using a walker's visual mesh bounds alone omitted its displaced parts
+and faded out the EU walker at 180 m and both walkers at 250 m.
+Child mesh instances retain their own radius rather than inheriting the
+root's. The fade uses the actor scale for Soldier and PlayerControlObject
+templates, the geometry quality's scales, the view's zoom, GSViewDistance
+from GameLogic.maximumLevelViewDistance × the view distance scale; faded out
 it isn't drawn, part-faded it is drawn blended. The walk's filter flag
 0x1000000, which skips the fade, is the AI's alone: the only walk with it
 is IAIObjectEnvironment's (`0x0089b860`, filter vtable `0x009d6730`
@@ -4786,7 +4857,18 @@ its systems' age (`+0x12c`, slots 0x7c / 0x78), and `speedFromPhysics`
 (`+0x45c`) has the exe set, each tick (`0x00618ae0`), the velocity its
 particles inherit to the root object's physics velocity's direction
 times the square root of its speed (slots 0x40 / 0x4c, the instance's
-`+0xcc` / `+0xdc`). Rewritten in `src/Effects` (`spriteFrame`,
+`+0xcc` / `+0xdc`). The bundle's own `timeToLive` (template `+0x3fc`,
+CRD_NONE/1/0 by its constructor `0x0061a9b0`) is sampled into the
+instance's `+0x194` as it is made (`0x00619700`); one with no parent and
+a negative life gets 0.5 s (the post-create slot 0x1c, `0x00618600`); the
+update (`0x0061a760`) runs it down by the tick while above 0 and stops
+and removes the bundle below 0 (−1 and exactly 0 never end; a held
+`+0x30` forces −1). Until then its looping and emit-time-0 systems emit:
+the Titan core's 50 s blast (`e_vexp_eu_titanCore`), the consoles' 6 s
+`e_titan_consol`. The rewrite applies it to bundles spawned on their own
+(`Emitter::bundleLife`); attached ones keep emitting until stopped (what
+sets `+0x30` on a parented bundle isn't traced, so a finite life there,
+the PAC Titan engines' 500 s, isn't run down). Rewritten in `src/Effects` (`spriteFrame`,
 `ParticleTemplate`, `EffectManager::setPhysicsVelocity`) and
 `particle.vert`; the rewrite's zoomed first person is the view's field of
 view narrower than its first. The flags act each frame (`0x0061a1c0`):
@@ -7979,9 +8061,14 @@ prints each sound triggered.
   the time left, halved after a downshift (the engine-audio-sway-* vars).
   Not read: the period of the sway's clock (`_CIfmod`; the rewrite takes
   the round's seconds) and the contact int (engine `+0x298` -> `+0x188`)
-  whose negative values add 0.3 to the jitter (taken as none). The rewrite
-  sounds the engines of vehicles someone is in; the parts' RotationRpm
-  isn't played.
+  whose negative values add 0.3 to the jitter (taken as none). The old-style
+  value is clamp(rpm, ±1), or for a helicopter engine clamp(2·aoa, ±0.5) +
+  0.5 (`0x0064cb80`). That value, unscaled, also drives the Engine's
+  RotationRpm (the aircraft's `air_distant` loop; `0x00564710`): eased
+  through `0x006afeb0` (rotationalbundle-sound-smooth-time 0.15, a 1/30 s
+  step), clamped to 0..1, started from 1e-4 above 1e-4 and stopped below
+  5e-5. The rewrite sounds the engines of vehicles someone is in; other
+  parts' RotationRpm isn't played.
 - Projectiles: DefaultProjSoundComp's Looping (`0x005ea930`) follows a
   projectile in flight.
 - The round's own sounds (footsteps, ragdoll impacts, `takeSounds`) and
@@ -9302,7 +9389,16 @@ second.
   pixels; the row centred), white, or the squad's colour for a squad
   member; not when glued to the edge.
 - **The players' icons** (the selectable pass `0x1016a950`, same team,
-  selectable, the first occupant of a vehicle `0x100f33c0`): `+0x60`
+  selectable, the first occupant of a vehicle `0x100f33c0`): setup initially
+  clears show-icon bit `0x10` (`0x100f3e70`), then player-tag refresh
+  `0x100f0840` sets it for matching local/remote team values and clears it
+  for opposing teams (`0x100f0954` / `0x100f0964`; called from `0x100f3917`).
+  Thus, after refresh, the ordinary friendly player's `+0x60` icon can pass
+  the icon-bit gate when the manager's shown byte is true; this pass is
+  independent of the name row. When that byte is false, this pass
+  still admits tags whose flags contain `0x20000` and `0x4000` and whose `+0xc0`
+  team-colour byte is nonzero; `0x100f0310` sets those flags for an active
+  radio/help response. The renderer's later gates still apply. `+0x60`
   (`0x100f0310`) ICObject + 10 for a soldier or vehicle, + 25 for the
   commander, + 25 + the squad for a squad leader (the Objects atlas'
   marker, star and numbered circles), in the tag's colour, at the icon
@@ -9882,24 +9978,63 @@ slot `0xb4`), but with the player's `ability.increasedRepairAbility`
 (slot `0x2a0`'s `+0x48`) at 0 only one of his own vehicle (the same
 root, `0x006f1d70`); with it above 0 the sphere again with the message
 `0x005910c0(0x400, material)` takes everything in it too. Each target:
-repairing alone mends a vehicle (`+0x17` bit 0) of the team or of none;
+repairing alone checks a vehicle (`+0x17` bit 0) of the team or of none;
 healing or ammo a soldier of the team (with ammo also another vehicle of
-the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). So
-without the unlock a medic heals and a supporter rearms only his
-passengers, and an engineer mends nothing, his own vehicle included
-(only riders' soldiers are targets); the rewrite treated every seated or
-standing teammate in range and the engineer's own vehicle. All of it
-runs only from a seat whose template has autoUseAbility (the control
-object's 0xc4c5 interface, `0x0042b2f0`, slot `0x13c`); the rewrite ran
-it in any seat. Each target that took something in that pass (slots
-`0x108` / `0x10c` answering true; the set `0x0056e4d0`) then gets a
-second dose: the strength times the seat's slot `0x17c` (`0x005c6d60` →
-the template's interface at `+0x298`, slot 0x168 `0x0059dbd0`:
+the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). The
+repair call (`0x0059a446`) asks slot `0x108` to check only, with the
+self-check bypass at 0. `0x004bc410` asks `0x004cc380`, which resolves
+the giver's controlled object's root (`0x006f1d70`) and rejects that root
+as a non-soldier target. Thus even if the second sphere supplies it, the
+engineer cannot mend the occupied vehicle's root in this retail path.
+Original-instruction execution with synthetic objects and stubbed services
+confirms own-root rejection and another vehicle's acceptance; it is not a
+full-game test. Native now excludes the occupied root from repair-only
+targets. Its first pass checks eligibility without applying effects; the
+second pass applies the single retail dose (shared among healing/repair
+targets).
+Without the unlock a medic heals and a supporter rearms only
+his passengers, and an engineer mends nothing (only riders' soldiers are
+targets). All of it runs only from a seat whose template has
+autoUseAbility (the control object's 0xc4c5 interface, `0x0042b2f0`,
+slot `0x13c`); the rewrite ran it in any seat. Each target that passes
+the first, check-only call (slots `0x108` / `0x10c` answering true; the
+set `0x0056e4d0`) is treated once in the next pass: the strength times
+the seat's slot `0x17c` (`0x005c6d60` → the template's interface at
+`+0x298`, slot 0x168 `0x0059dbd0`:
 `abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
 executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
 `0x005caff0`; no shipped vehicle sets it), for healing and repair
-shared by the count of those targets, for ammo whole. So a medic alone
-with one passenger heals him twice as fast as the first pass alone.
+shared by the count of those targets, for ammo whole. The first call
+returns without treating the target (`0x004bc43b` for healing and repair,
+`0x004cf83b` for ammo). A kit with ammo only also rearms another vehicle
+(`0x0059a303`: a target with interface `0x998890`. It must be a
+PlayerControlObject whose root is not ours, from the team or team 0. Because it
+comes from the second sphere, this needs `increasedRepairAbility > 0`;
+`Unlock{EU,Pac}_SupportEngineer1` sets 1.15). In check-only mode, `0x004cf7b0`
+asks for an own-weapon ammo-fullness index below 15 (slot `0x154`), not a
+seat-count limit. `0x005c8060` averages the control object's own weapon
+loads, multiplies by 15 and floors; `0x005c93af` caches it at object
+`+0x314`. For the dose, it walks the root
+PlayerControlObject's slot `0x64` list. For each entry's slot `0x74` items,
+it calls interface `0x94c0` slot `0x88` (`0x005f5110`, `FireArm::resupply`)
+with the whole strength. It answers whether any weapon took ammo.
+Creation `0x005cd538` calls collector `0x0058c340` to build the persistent
+PCO map, including empty child/nested seats. Getter `0x0059d1d0` returns
+that cache; soldiers attached later on boarding are not added by it.
+Passenger kits are separately targeted by the first sphere, not traversed
+again by this vehicle refill. Original collector/getter/ammo-traversal
+instructions were exercised with a synthetic hierarchy and stubbed
+allocation/insertion, services and weapon refill, not a full retail
+creation/boarding/tick run. Individual child-target enumeration by the
+second sphere remains unverified. `0x004bd5f0` then stamps the giver (slot `0x260`, tick and 1; 0 and 1
+when nothing was taken) and the receiving players (tick and 0). It gives
+PlayerGiveAmmoPoint when the root's player is another teammate. Native now
+selects other eligible vehicle roots and calls `FireArm::resupply` on
+their active/stored seat weapons, including retained weapons in empty
+seats, without traversing passenger kits. Root-seat ammo must be missing;
+full and unlimited weapons take nothing. Never-used seat weapons need
+no eager creation, since they are implicitly full. The dose is whole and
+has no unlock multiplier (`GameWorld_KitAbilityInAVehicleRearmsOtherSeats`).
 
 **Unlock abilities.** `ability.setMaterialDamageMod <material> <mod>`
 (`0x0054eadc` → the Ability's slot `0x94`) scales the damage a projectile
@@ -10017,9 +10152,12 @@ unlocked shot never acquires). Wire guidance (LPTargetComp, the 11
 TSWireGuided weapons, ctor `0x005e2100`; `0x005e2e20` → `0x005e27a0`
 every tick): the steering point is o + f × (max(0, (m − o)·f) +
 `target.wireGuidedLookAheadDistance` (`+0xb4`, 20)) from the shooter's
-camera o and forward f, m the missile; guidance goes beyond
-`target.maxDistance` or with the line o–m cut, unless
-`dontLooseGuidanceOnObstruction` (`+0xb8`); `disableGuidanceOnReload`
+camera o and forward f, m the missile. Beyond `target.maxDistance`, or
+with the line o–m cut and not `dontLooseGuidanceOnObstruction` (`+0xb8`),
+the point stays where it was (`0x005e2ac5` returns before the target's
+move) but the round stays guided (`+0x64` kept): it chases that point
+(the follow `0x005ecb30` never reads the lock) and the steering comes
+back once the line clears, so the reload waits; `disableGuidanceOnReload`
 (`+0xb1`, as_av / eu_av) lets the missile go unguided at the reload's
 start (`0x005c0f40` → slot `0x48`, `0x005e23b0`). The component guides
 one round, its last (`+0x1c`, slot `0xbc`, which `0x005e2e20` steers): a
@@ -10133,13 +10271,22 @@ Vehicles take damage through their armour settings:
   damageMod 0, e_ActiveDef, the force-field sounds), goes off there and
   doesn't penetrate (`stepProjectiles`). The bots never fire it (the ads
   have no aiTemplate).
-- **Critical damage:** below `armor.criticalDamage` a vehicle burns down at
-  `hpLostWhileCriticalDamage` a second (FAV: 18 below 151, out in 5.6 s from
-  100).
-- **Water and rolling:** in water deeper than `armor.waterLevel` over its
-  centre for longer than `waterDamageDelay`, a vehicle loses
-  `hpLostWhileInWater` a second (`hpLostWhileInDeepWater` past
-  `deepWaterLevel`). Upside down, it loses `hpLostWhileUpSideDown`.
+- **Critical damage:** at or below `armor.criticalDamage` a vehicle burns
+  down at `hpLostWhileCriticalDamage` a second, taken once a second as one
+  hit (`0x00654de9`; FAV: 18 at or below 151).
+- **Water:** the signed `armor.waterLevel` and `armor.deepWaterLevel` are
+  added to the vehicle's position (`0x006527a3`): it is in water when
+  `position.y + waterLevel` is under the water's height. The shipped -0.3
+  counts an origin up to 0.3 m over the water as in it. Each level's timer
+  then deals `hpLostWhileInWater` or `hpLostWhileInDeepWater` at once.
+- **Upside down** (`0x00652b10`): tested once a second. With
+  `hpLostWhileUpSideDown` over 0.01, the body's up axis under 0.3 of the
+  world's (about 73 degrees of tilt) while it lies on something
+  (`0x00652800`: its lowest point, position less its radius, under the water
+  or the terrain, or an object within twice the radius below) costs that
+  amount at once. A test that finds it upright arms the next, and the first
+  upside-down test after one only disarms, so the loss starts one to two
+  seconds after a roll. Every loss goes through the damage routine.
 - **Destruction:** a destroyed vehicle explodes with `armor.explosion*`
   (FAV: 300 over 6 m), kills everyone aboard, and stays as a wreck for
   `timeToStayAsWreck`. Its spawner then puts out a new one.
@@ -11667,8 +11814,11 @@ while they have the keys. `src/Main/HudMenusChat`:
   the big map (menu state 2, `0x0074fd90`: `MapShow` at full size) while
   alive; c_GIMapZoom (N) steps the minimap's zoom 0, 1, 2 (`0x0079a040` /
   `0x00799fb0`, not on the spawn screen) and takes tutorial 0x3d back;
-  c_GI3dMap (left Alt) flips the 3D name tags and icons (the
-  NametagManager's `+0x465`, slots `0x64` / `0x68`).
+  c_GI3dMap (left Alt) is annotated as toggling the 3D tag manager's
+  shown byte (`+0x465`, getter/setter slots `0x64` / `0x68`). The retail
+  getter's icon-pass behavior is verified; its input call site was not
+  independently matched in the 9 November investigation. Name rendering
+  does not check this byte in the inspected renderer.
 
 ### HUD nodes: transform lists, effects, markers and the map menus
 
@@ -11705,13 +11855,14 @@ active node to):
   its children sit `distance` pixels along the angle (radians, 0 right,
   pi/2 down) times what is left of the fade. `addNodeBlendEffect <src>
   <dest>` (`0x007b20c0`, a `<node>BlendEffect` render-state node) gives
-  the quads below it those Direct3D 9 blend factors (the vehicle HUDs'
-  `7 2`: `D3DBLEND_DESTALPHA`, `D3DBLEND_ONE`; the render-state node
-  hands each quad below it through, `0x00870c40`); `HudQuad::blend`
-  carries them to the renderer, which draws those quads with a UI
-  pipeline of the same factors (`GpuContext::uiBlendPipeline`, made the
-  first time a pair is used; the target's alpha is 1 after the
-  post-production, so `7 2` adds the glass over the view). `setNodeTimesBlink <n> <mode>` and
+  the quads below it Meme blend-function values. These are translated
+  in `Render/HudBlend.h` before selecting SDL factors. In particular the
+  default effect factory (`0x007e4360`) constructs `7 8`, the ordinary
+  source-alpha/inverse-source-alpha pair; vehicle HUDs use `7 2` for
+  source-alpha/ONE additive strokes. Treating 7 as raw D3DBLEND_DESTALPHA
+  exposed the transparent-white backgrounds of the vehicle HUD textures
+  as opaque blocks. `HudQuad::blend` carries the Meme pair to
+  `GpuContext::uiBlendPipeline`, cached on first use. `setNodeTimesBlink <n> <mode>` and
   `setNodeIntervalBlink <s>` (`0x007b1c00`, `0x007b1da0`: the blink
   effect's slots `0xdc`, `0xd8`): once shown, the node is off every other
   interval for its first n blinks.
@@ -12072,8 +12223,9 @@ velocity the soldier's response is asked for (`0x00588420`, response slot
   `(c - b) x (b - a)` (`0x006e8080`); faces are wound clockwise, so the
   normals point out of the object. Each LOD serves the user its collision
   type names (0 projectiles, 1 vehicles, 2 soldiers, 3 AI navigation;
-  `0x006e4880`, by order in version 8 files); a mesh without a soldier LOD,
-  like a bush's, does not stop soldiers;
+  `0x006e4880`, by order in version 8 files). The loader falls back from
+  soldier to vehicle, and from navigation to the resulting soldier LOD
+  (`0x006e4fe0`); a mesh with neither soldier nor vehicle LOD does not stop soldiers;
 - movement (`0x006c2230`): the difference between the average contact
   velocity and the wanted one, along the ground, corrected by at most
   `normal.y^5 * friction * 1.5712` m/s per tick, or up to 2.3568 while
@@ -13584,12 +13736,12 @@ bit read through the response's slot `0x50`: soldier against an object
 `0x006c3890`, mesh against mesh `0x006bb050` (already in `meshPair`),
 run-over `0x006c2e50`. A projectile's tree has no PlayerControlObject and
 its group (8) shares no bit, so rounds meet every field. The shipped
-fields' collision meshes carry only the projectile and vehicle LODs (and a
-mesh without a soldier LOD stops no soldier), so soldiers of both teams
-walk through them; the rule sorts vehicles (the vehicle bay's shield,
-material 4117, lets its own team's in) and rounds stop at them unless the
-material is penetrable. The rewrite builds each team's soldier mesh only
-when a field has a soldier LOD (`Body::teamSoldierMesh`). Vehicles meet
+fields' collision meshes carry projectile and vehicle LODs; the loader's
+soldier-to-vehicle fallback supplies the collision for enemy soldiers. The
+same team rule sorts vehicles (the vehicle bay's shield, material 4117,
+lets its own team's in) and rounds stop at fields unless the material is
+penetrable. The rewrite builds each team's soldier mesh with the other
+team's fields (`Body::teamSoldierMesh`). Vehicles meet
 each Titan part's vehicle LOD as a candidate of its own with its
 collisionGroups (`Titan::vehicleParts`, `collideMover`), so a team's
 vehicles pass their own fields; the Titan, a major actor moved by its sync
@@ -13730,8 +13882,12 @@ pod arrays (titan_pod_array1/2: entered at their EntryPoints, the launcher
 pod_launcher at 150 m/s; pod_launcher_cq in other modes). The pod is a
 rigid body of its own (gravityModifier 1.5, drag 1, dragModifier 3/1/3);
 its ForceObjects steer it (eu_pod_FOFWD 35 on PIThrottle, eu_pod_FOStrafe
-20 on PIYaw, × 30 / mass a second as the drones' are). At rest it lets the
-soldier out. The pod's keepUp torque is rewritten (`stepPods`;
+20 on PIYaw, eu_pod_FOTurn 5 on PIMouseLookX; each force × input, clamped
+to ±maxForceOnObject, so S's −1 thrusts the pod backwards). The node's slot 0xa0 adds
+these as accelerations at their child offsets, without a mass divisor
+(`0x0062c920` -> `0x006c7b10` -> `0x006c96b0` -> `0x006c5bb0`).
+Eligible landing contact starts the Parachute's 0.05-second exit timer;
+the pod is then hidden and removed. The pod's keepUp torque is rewritten (`stepPods`;
 `eu_pod_ForceObject`, regulatePosX / Z −0.5/1 with keepUp: two
 linear regulators (`0x006678a0`, out = 2am·v + (a² + b²)m(goal − p)) give
 the root node (slot `0xa4`) ±15 × out / m at ±p, a couple turning the
@@ -13742,6 +13898,16 @@ GameServer `0x004b0b90`: the nearest RCTitan, the game logic's objects of
 type 7 (`0x0058e400`), within it by the horizontal distance turns the pod
 and its rider to face it; rewritten in `startPod`, the rider's camera
 pitch from the second look-at left out).
+
+The pod's `Parachute` root also participates in seat-camera discovery:
+it inherits PlayerControlObject in retail. Launch initializes its seat's
+camera/bundle state, and `partPose` exposes the camera mount's pitch even
+though pod physics is separate from `Vehicle`. This keeps the authored
+camera's right/up/forward frame attached to the steering hull instead of
+falling back to an unrelated view. Retail Inside takes the camera's world
+matrix (`0x00610620`, called by `0x00612d80`); its ForceObjects push in their
+world frame (`0x0062ca4e..0x0062cc22`). No camera-relative thrust inversion
+or artificial horizon lock is added.
 
 Pods against a shielded Titan: no shield-state code, a material. The
 Titans' fields map their vehicle LOD to material 666 (`0x29a`; eu_forcefield
@@ -13769,9 +13935,33 @@ eu_Titan_Cannon_AA_01/02AI: a Unit with setHasExposedSoldier,
 Armament setIsAntiAircraft), which AIDLL's seat choice (BBChange) and
 behaviours cover, but no strategy of its sends a bot into a Titan (its nav
 meshes are on the ground). The rewrite's choice: while fewer than half its
-Titan's guns are manned, a bot aboard walks straight to the nearest free
-working gun's console and takes it (`titanGunEntry`); the Titan isn't
-among the bots' vehicles, so it stays and runs the Fixed behaviours; the
+Titan's guns are manned or claimed, a bot aboard approaches the nearest free
+working gun's console and takes it (`titanGunEntry`). With
+`enhanced.botTitan` enabled, it follows the Titan's collision-derived walk
+grid around the room's pillars and ramps to a walkable point inside the
+console's authored entry sphere, rather than into the console's solid centre.
+The use-key test matches vehicle entry's physics origin (one metre above
+the feet) and full radius. This is native enhanced AI, not retail parity.
+The Titan isn't
+among the bots' vehicles, so it stays and runs the Fixed behaviours. With
+`enhanced.botTitan` enabled, the bots past the guns' share crew their deck's
+aircraft first (`titanCrew`, BotsTitan.cpp; the ordinary vehicle choice
+skips them, the deck being off the vehicle mesh): a pilot for the gunship,
+then the transport, then the gunship's gunner and the transport's riders,
+one claim a seat. Each walks the Titan's grid to the aircraft's authored
+entry point (round the parked aircraft, whose box the grid lacks, when that
+point is off its middle, as the gunships' is) and presses use; a claim
+unmet in 60 s skips that aircraft for 120 s. The gunship's pilot climbs
+off the deck above the Titan towards the nearest silo the team doesn't hold
+until 200 m clear, then flies as any gunship (on the deck the ordinary
+pilot waits while soldiers are near, and the crew always is). With the
+enemy shield up the transport's pilot (`titanSortie`) waits 6..18 s for
+riders (20 s more while one is still walking), with one aboard flies to the
+nearest such silo, high over the Titan and 70 m over the ground on the way,
+30 m over the silo, until its riders are out by pod (the exit key; at most
+15 s), and lands back anywhere on its Titan's deck (the hover drifts as it
+sinks). With the shield down, the boarding run as before. This is native
+enhanced AI, not retail parity. The
 rest walk to the nearest pod array and drop (the arrays'
 titan_pod_array_1_ai template makes them vehicles to the AI). Boarding the
 enemy Titan and attacking its consoles and core has no AI to rewrite.
@@ -14617,10 +14807,15 @@ changes (0x100966c0 → 0x10095fc0).
     last waypoint (the start for the first) to the link into the cluster
     two steps on along the cluster path (0x10092250: links[firstLink +
     entry], its position and polygon), or the goal when there is none.
-    The search may enter only the start's cluster, the cluster path's next
-    three from the cursor and the segment goal's cluster (vslot 0xb4: the
-    successors 0x100bcbb0 refuse any other); a trip of 100 m or less only
-    the start's and the goal's clusters. Each node becomes a waypoint
+    The segment code builds a set of the start's cluster, the cluster
+    path's next three from the cursor and the segment goal's cluster and
+    hands it to the search space (vslot 0xb4, 0x100406e0, at 0x10096514;
+    the successors refuse polygons outside it at 0x100bcc9d), but starting
+    the search (vslot 0x20 -> 0x10041800) resets the space first
+    (0x100418cd -> 0x100415f0 -> 0x1003e6c0 -> 0x100bc170), which clears
+    that pointer (0x100bc1df) before the first expansion: the search runs
+    over the whole mesh (emulated in work/suez-stall: only those two writes
+    touch it). Each node becomes a waypoint
     (0x10095b20, the first replacing the last one kept), the goal on the
     last segment; then the string-pull, the look-ahead twice and the
     cursor on. While the cluster path goes on (0x10095720) the waypoints
@@ -14629,10 +14824,7 @@ changes (0x100966c0 → 0x10095fc0).
     3-D, 0x10093e50) is 30 m or more and over ten waypoints are ahead,
     unless the current waypoint's cluster is the cursor's index or its
     cluster (a mix-up kept). The rewrite searches a segment a tick (the
-    original's are time-sliced), and where a segment's search fails it
-    searches the whole mesh: the original fails the move, which measured
-    on random 20–100 m trips (clusters 7–26 m) fails 312 of 321 on
-    Cerbere, 351 of 393 on Camp Gibraltar and 255 of 397 on Minsk.
+    original's are time-sliced); a failed search fails the move.
 - **String-pull** (0x10093610), twice, for waypoints 5 m or more from the
   bot (3-D, from the mover's own position, vslot 0x2c: a vehicle's origin
   above the mesh counts its height): where the line from the previous
@@ -14862,6 +15054,17 @@ changes (0x100966c0 → 0x10095fc0).
     other behaviours up by 990), 10299 → 10179, 1380 (seven seeds: the
     base crashed on seed 0) → 2281, 3992 → 2941. The rise is transports parked at their order
     with their passengers, which the count takes for stuck.
+  - **The drivers' list of other objects** (the follower's `+0x64`, unit
+    vt+0xf0 → `+0xd8`; read by 0x100fbff0, 0x100fc660 and 0x100fbdb0):
+    filled by 0x10094df0 in the manager's round-robin refresh (0x100c6dbe)
+    from the information environment's 50 m sphere round the bot (slot
+    0x20, grids vt+0xd4(1) and (0)) through the filter 0x10092780: primary
+    objects (0x100a8c60) with a Mobile part (`+0x3c`, made only for the
+    Mobile plug-in, 0x1003ba6e), or ITObstacle ones (`+8` bit 13). The
+    stationary guns (STATIC_AA_AI, the static AV) are neither, so drivers
+    don't go round the Suez bridge locks' AA on the walkways over the road
+    (`BotManager::driversSee`). Not rewritten: the 50 m radius and the
+    refresh turn (the rewrite's list is taken each tick).
   - **Other vehicles** (0x100fbff0): the one in the way (within the
     forward speed + max(r, 5) + both radii, the forward line crossing its
     sphere) is passed in state 6 on a side chosen by the room beside it
@@ -14879,13 +15082,29 @@ changes (0x100966c0 → 0x10095fc0).
     5 s (20 s when that soldier is a bot, player slot `0x84`): a vehicle
     with ITHasCarHorn (the FAVs' `Car_horn`) holds PIFire for 2 s
     (`0x100a5cf0` lets go); any other sends the radio request
-    (`AIDLL 0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have. Not
-    rewritten: the other driver being told (its +0x28 calls).
+    (`AIDLL 0x100a5990`: 0xb, 6, 3), which the rewrite's bots don't have.
+  - **Avoiding** (the side flipped): the machines (car 0x100e9571..0x100e9593,
+    tank 0x100dfcfc, mech 0x100e3225) give way to driving on (the obstacle
+    states 4/5/6/13/14 → 0), except round a vehicle a human drives: no bot
+    controls it (bot manager slot 0x14, 0x100c79a0: the map of each bot's
+    controlled object's adaptor, filled by slot 0x2c from 0x10098200,
+    BF2142.exe 0x008a50d0) and its root PlayerControlObject is in use by a
+    player (Unit slot 0x44, 0x008a1b30 → interface 0xc4c5 slots 0x18 / 0x10).
+    Then that tick's copy of the flag is clear (cases 2 and 3 and the default
+    read it; the flag stays). They also switch the avoided object's physics
+    node back on (Physical plug-in slot 0x70(1) and (2), 0x008a3ff0: node
+    `+0xc`, for the adaptor's team `+0x10`); nothing turns a vehicle's off,
+    so it isn't rewritten. Neither is a message to the other driver.
   - **Car** (0x100e9d40): the error mirrored when moving against the
-    direction wanted; turn = 3 × yawScale × error − turn rate; the target
-    speed lowered on a tilt and capped (keeping the cap's sign); throttle =
-    target / 15 + min(1, (target − speed) / 3). Full throttle when off the
-    line (under 1.5 m/s).
+    direction wanted; turn = 3 × yawScale × error − turn rate, the turn rate
+    the object's world angular velocity's y (Mobile part slot 0x20, 0x100ab490
+    → Mobile plug-in slot 0x1c, 0x008a1870 → the object's slot 0x68; read at
+    0x100e9f68; the hover tank's controller 0x100de382 and RunOver through
+    this controller read the same); the target speed lowered on a tilt and
+    capped (keeping the cap's sign); throttle = target / 15 + min(1, (target
+    − |v_xz| × motion) / 3), the horizontal speed (0x100e9dc5..0x100e9dda,
+    0x100ea080). Full throttle when off the line (|v_xz| under 1.5 m/s,
+    0x100ea123).
   - **Car** sprints (PISprint, input 13) at full throttle over 0.8
     maxSpeed.
   - **Tank** (machine 0x100de8a0, controller 0x100e0540): the car's
@@ -15166,9 +15385,11 @@ seat at its value × max(0, min(0.5, (R² − 0.8 d²) / R²) + 0.5), × 5 for a
 soldier under a quarter of its health within 20 m. On foot the current
 value is 1.2 × the soldier's own; in a vehicle 2 × the seat's (250 at the
 driver's seat with others aboard), and the way out is the soldier's own
-value, or 10000 for a wreck or a vehicle more than 4 m off the vehicle
-mesh (0x100880e0), a test 0x1006c520 runs only for a bot object that
-isn't ITAir (its flags' bit 1): a pilot stays in the air. A seat another
+value, or 10000 for a wreck or a vehicle that has stood more than 4 s in
+a commander's strike spot (0x100880e0 on the strike manager DAT_1013950c,
+its time since the strike over 4.0; earlier misread here as 4 m off the
+vehicle mesh), a test 0x1006c520 runs only for a bot object that isn't
+ITAir (its flags' bit 1). A seat another
 bot reserved is worth nothing to others, but not to the bot sitting in it
 (the rewrite's reading: a passenger heading for the vehicle would
 otherwise turn its driver out). The other seats' factor (0x1006b910): 1 with the
@@ -16036,30 +16257,9 @@ in `src/AI/NavMesh`:
 - Ported: the parser, point lookup, the polygon and cluster A* with the
   original's costs and heuristics.
 - How the bots combine the two searches is in "Following paths" above
-  (rolling segments of three clusters); `findPath` (tools, tests) keeps
-  a cluster corridor for one polygon search.
-- **Cost classes and the bot kinds' profiles.** A polygon's class
-  (`+0x01`) names its material (0x10058570): Invalid 0, Ground 1, Road 2,
-  Shallows 3, DeepWater 4, DangerObject 5, OtherDangerObject 6,
-  BothDangerObject 7. Each `aiSettings.setVehicle` type (the bot kind)
-  gets its own profile (AIDLL 0x10051050 appends the default 0x100bdfb0:
-  1, but Invalid −1 and classes 5 and 7 1000), and
-  `aiSettings.setVehicleMaterialCost <kind> <material> <cost>` sets one
-  class's multiplier on it (0x1000be20 → 0x1004fcf0 → 0x100bdcc0). A
-  negative multiplier is impassable (0x100bdd00). The pathfinder takes the
-  kind's profile (DAT_10139470 vt+0xc0: the goal's polygon 0x1003f000,
-  the searches, the look-ahead) and so do the drivers' room rays
-  (0x1003f930 with the unit's kind, 0x100aa510). From
-  `AI/AIBehaviours.ai`: Tank, FloatingTank and Mech Shallows 1.5 and
-  DeepWater −1, Car Shallows 1.8 and DeepWater −1, ArmedCar 1 and 2,
-  Infantery 1.5 and 6. So tanks, mechs and cars neither plan nor measure
-  room into deep water, and a room ray that would enter it ends there with
-  class 4 (its diagonal then doesn't count, a side gives full reach).
-  Class-4 polygons on the vehicle and infantry meshes: Camp Gibraltar
-  650 and 989, Suez_Canal 93 and 121, Verdun 5 and 159, minsk_coop none
-  and 1,122, Cerbere_Landing none. (The rewrite gave
-  every bot the default profile, so the material costs went unused:
-  `BotSettings::costProfile`.)
+  (rolling segments toward the cluster path's links, each searched over
+  the whole mesh); `findPath` (tools, tests) keeps a cluster corridor for
+  one polygon search.
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.

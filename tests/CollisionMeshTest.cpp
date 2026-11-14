@@ -11,6 +11,33 @@
 
 namespace fs = std::filesystem;
 
+TEST(CollisionMesh_RetailLodFallback)
+{
+	using namespace dice::hfe::physics;
+	for (const uint32_t version : {8u, 10u}) {
+		CollisionMeshFile mesh {};
+		mesh.version = version;
+		CollisionSubGeometry part;
+		CollisionLod projectile {}, vehicle {}, soldier {};
+		projectile.collisionType = 0;
+		vehicle.collisionType = 1;
+		soldier.collisionType = 2;
+		part.lods = {projectile, vehicle};
+		CHECK(collisionLodFor(mesh, part, 0) == &part.lods[0]);
+		CHECK(collisionLodFor(mesh, part, 1) == &part.lods[1]);
+		CHECK(collisionLodFor(mesh, part, 2) == &part.lods[1]);
+		CHECK(collisionLodFor(mesh, part, 3) == &part.lods[1]);
+		CHECK(collisionLodFor(mesh, part, 4) == nullptr);
+		part.lods.push_back(soldier);
+		CHECK(collisionLodFor(mesh, part, 2) == &part.lods[2]);
+		CHECK(collisionLodFor(mesh, part, 3) == &part.lods[2]);
+		part.lods.resize(1);
+		CHECK(collisionLodFor(mesh, part, 1) == nullptr);
+		CHECK(collisionLodFor(mesh, part, 2) == nullptr);
+		CHECK(collisionLodFor(mesh, part, 3) == nullptr);
+	}
+}
+
 TEST(CollisionMesh_ParsesGameMeshes)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");

@@ -254,7 +254,8 @@ struct ParticleTemplate {
 	// seen in its steady state, not starting.
 	bool staticSystem = false;
 	// alphaCull (the sprite template's +0xa0, slot 0x154): a particle whose
-	// alpha is below it isn't drawn (the sprites' collector 0x10130bd0).
+	// alpha intensity times its fade (+0x2c) is below it isn't drawn (the
+	// sprites' collector 0x10130bd0); the transparency graph doesn't count.
 	float alphaCull = 0;
 	// pivotOffset (+0x1b0 / +0x1b4, slot 0x1c8): the quad's centre moved by
 	// this many half-sizes off the particle (0/-0.5: standing on it).
@@ -290,7 +291,7 @@ struct Particle {
 	float rotationSpeed = 0; // radians a second (0x1013fdc0 +0x7c)
 	float intensity = 1;     // the system's, at birth (+0xc)
 	float randomIntensity = 0; // randomIntensity x (-1..1) (+0x10)
-	float alpha = 1;         // the bundle's alpha intensity at birth (+0x2c)
+	float alpha = 1;         // the bundle's alpha intensity at birth (+0x58; +0x2c is it faded)
 	Vec3 angles; // mesh particles: yaw/pitch/roll, degrees (+0xa8)
 	Vec3 spin;   // mesh particles: their speed, degrees a second (+0x9c)
 	float frameClock = 0;    // the flipbook's (+0x78)
@@ -336,6 +337,7 @@ public:
 	void place(const Vec3& position, const Mat3& rotation);
 	const Vec3& position() const { return m_position; }
 	const Mat3& rotation() const { return m_rotation; }
+	float age() const { return m_age; }
 	// Ends the emission (a looping system's too); the particles live on.
 	void stop() { m_stopped = true; }
 	bool stopped() const { return m_stopped; }
@@ -394,6 +396,14 @@ public:
 	uint32_t anchor = 0;
 	uint32_t tag = 0;
 	uint32_t bundle = 0; // the AttachedBundle it belongs to (0: none)
+	// The life left of the world-spawned EffectBundle it came from (the
+	// bundle's +0x194: its timeToLive sampled at creation, 0x00619700; an
+	// unparented infinite one gets 0.5 s, 0x00618600; run down by the tick
+	// while above 0 and the bundle stopped below 0, 0x0061a760). -1: none.
+	float bundleLife = -1;
+	// Its emission is held by an anchor or a living bundle: a looping or
+	// emit-time-0 system emits until then.
+	bool held() const { return anchor != 0 || bundleLife >= 0; }
 	Vec3 mountPosition, localPosition;
 	Mat3 mountRotation, localRotation;
 
@@ -483,7 +493,7 @@ struct ParticleView {
 struct MeshSprite {
 	Vec3 position;
 	Mat3 rotation;
-	float size;
+	float size; // signed mesh scale (negative values mirror the geometry)
 	std::array<float, 4> color;
 	float stretch = 1; // along its z (directionalScale)
 };
@@ -587,10 +597,17 @@ struct Decal {
 // A triangle whose normal is more than maxAngleDegrees from the decal's is
 // skipped (acos(n . normal) > angle x 0.0174533; the terrain path passes an
 // angle of 0: none skipped). At most 128 vertices (0x7f). The original walks
-// the triangles from the hit one through their edge neighbours, at most 4
-// deep (0x101f79d4), stopping where the square lies inside a face; the
-// rewrite takes every triangle it is given (the terrain's 3 x 3 cells about
-// the hit, 0x10164d70), which gives the same pieces for decals that small.
+// the triangles from the hit one (the hit's face, 0x101662f7) through their
+// edge neighbours (mesh slot 0x38, 0x10165a02; the terrain's table
+// 0x101f7880), at most 4 deep (0x101f79d4, 0x10165a60), each once (the set
+// 0x1021e3b8), stopping where the square lies inside a face (0x101659c2), so
+// it never meets a face of the mesh away from the hit. The rewrite takes the
+// triangles it is given (the terrain's 3 x 3 cells about the hit,
+// 0x10164d70; a mesh's faces in the grid column over the hit, any height)
+// and stands in for the walk by skipping a triangle whose plane is further
+// from the centre than the square's half diagonal: the hit face (distance 0)
+// and every face folded off it inside the square stay, a parallel face above
+// or below (a Titan's upper hull over the hit) doesn't get a copy.
 // Triangles facing away from the decal are skipped. Empty if nothing is
 // left: RendDX9 then frees the decal (0x10164660).
 std::vector<DecalVertex> clipDecal(const Vec3& centre, const Vec3& normal, const Vec3& tangent, float halfSize,
@@ -993,6 +1010,7 @@ public:
 	{
 		m_placedMeshes = std::move(groups);
 	}
+	const std::vector<std::pair<std::string, std::vector<MeshSprite>>>& placedMeshes() const { return m_placedMeshes; }
 	// Calls `draw` for each group of sprites sharing a texture and blending
 	// (the heat shimmer's with `shimmer`: forEachShimmerGroup), faded by
 	// distance from `view` when it has settings.
@@ -1250,7 +1268,8 @@ public:
 		// names): the fire's event 0 to each weapon's children, which starts
 		// the bundles whose startOnEffects is 0 (0x0061a4e0: the muzzle
 		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
-		std::vector<std::string> firedWeapons;
+		struct WeaponFire { std::string weapon, seat; };
+		std::vector<WeaponFire> firedWeapons;
 		// Events 0 and 1 to the object's own children this update (a
 		// round's: its engine's start, 0x005b2c10, sends 0x44 then 0; its
 		// stop, 0x005b2ca0 at a lost target or the round's end 0x005b4cb0,
@@ -1275,6 +1294,11 @@ public:
 	}
 	// A part's pose in its parent (the game's partPose); may be empty.
 	using PartPose = std::function<bool(uint32_t object, const std::string& part, Vec3& offset, Vec3& rotation)>;
+	// A bone part's local matrix (boneIndex, 0x0063d470: row-major, row
+	// vectors, the translation in 12..14), which replaces the part's own
+	// place in its parent; the game's partBone, as the renderer draws it.
+	using PartBone = std::function<bool(uint32_t object, const std::string& part, std::array<float, 16>& local)>;
+	void setPartBone(PartBone bone) { m_partBone = std::move(bone); }
 
 	explicit ObjectEffects(const world::ObjectTemplateManager& templates) : m_templates(templates) {}
 	// Once a tick: the objects there are now. Starts, moves and stops their
@@ -1342,7 +1366,7 @@ public:
 	// the walk skips the branches without one (a Titan's tree is large).
 	using BundleCache = std::map<const world::ObjectTemplate*, bool>;
 	static std::vector<Placed> bundlesOf(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& root,
-		uint32_t object = 0, const PartPose& partPose = {}, BundleCache* cache = nullptr);
+		uint32_t object = 0, const PartPose& partPose = {}, BundleCache* cache = nullptr, const PartBone& partBone = {});
 
 private:
 	struct Tracked {
@@ -1372,9 +1396,11 @@ private:
 	const world::ObjectTemplateManager& m_templates;
 	std::map<uint32_t, Tracked> m_objects;
 	BundleCache m_hasBundles;
+	PartBone m_partBone;
 	std::vector<scene::WindSettings::LocalWind> m_localWinds;
 	// A bundle's place along its chain under the parts' current poses.
-	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation);
+	static void place(const Placed& bundle, uint32_t object, const PartPose& partPose, Vec3& position, Mat3& rotation,
+		const PartBone& partBone = {});
 public:
 	// The tag the breath bundle is spawned with on its soldier.
 	static constexpr uint32_t kBreathTag = 0xb7ea7;

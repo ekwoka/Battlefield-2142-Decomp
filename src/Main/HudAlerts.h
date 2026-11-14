@@ -208,7 +208,7 @@ public:
 	// GeneralSettings' played help keys (setPlayedVOHelp), and the hook
 	// that records a new one (runs the console line).
 	std::function<void(const std::string& key)> onPlayed;
-	bool played(const std::string& key) const { return m_played.count(key) != 0; }
+	bool played(const std::string& key) const;
 	// The help manager's messages (0x00645d40).
 	struct Tutorial {
 		const char* key;   // "" for the unused ones
