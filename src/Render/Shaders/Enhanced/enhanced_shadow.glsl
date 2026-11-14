@@ -153,6 +153,8 @@ vec4 hemiLight(vec3 worldPosition, vec3 normal, float objectY, vec3 sky, vec4 ob
 	vec2 uv = ((worldPosition + vec3(hemiConstants.z * 0.5) + normal).xz - hemiConstants.xy) / hemiConstants.z;
 	uv.y = 1.0 - uv.y;
 	vec4 ground = texture(hemiMap, uv);
+	// Inside a Titan (hemiSky.w 2): RendDX9's 0x65 grey ground (shadow.glsl).
+	if (hemiSky.w > 1.5) ground = vec4(101.0 / 255.0);
 	float localHeight = (worldPosition.y - objectY) * 0.5;
 	float overTerrain = object.w;
 	float offset = clamp(localHeight * 2.0 - 1.0 + overTerrain, -2.0 * (1.0 - overTerrain), 0.8);
