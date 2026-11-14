@@ -282,8 +282,10 @@ void main()
 		if ((layers & 512) != 0) {
 			// _TITANINTERIOR_ inside a Titan: the static sun and sky are 0, so
 			// the light is the interior map's R (times the doubling) and G only
-			// masks the specular; no fog (RaShaderSTM.fx).
-			light = vec3(2.0 * lightmap.r);
+			// masks the specular; no fog (RaShaderSTM.fx). R x SinglePointColor, the level's
+			// fading to white over the inside-Titan blend (0x10028350): the first frames
+			// inside are lit as the hull's lamps were outside.
+			light = 2.0 * lightmap.r * hemiObject.rgb;
 			shine = specularTerm(lit, lightmap.g, gloss);
 			fog = 0.0;
 			if (lightCount.x > 0.5) {

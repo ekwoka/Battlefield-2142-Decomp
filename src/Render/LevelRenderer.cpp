@@ -4626,9 +4626,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				// its only lighting. The port also draws the rooms from outside (prepareInstances):
 				// with the outdoor formula there they changed as the camera crossed the hull.
 				// Inside a Titan RendDX9 zeroes the static sun and sky (0x100283aa) and
-				// StaticSpecularColor is 0.7 (shortcut: its 2 s ramp from the level's is skipped).
+				// StaticSpecularColor is 0.7 x the inside-Titan blend (0x10028301), 2 s to full.
 				uniforms.material[2] += kMaterialTitanInterior;
-				uniforms.specular[0] = uniforms.specular[1] = uniforms.specular[2] = 0.7f;
+				uniforms.specular[0] = uniforms.specular[1] = uniforms.specular[2] = 0.7f * m_titanBlend;
 			}
 			if (bound->skinned || bound->bundled) {
 				meshKindUniforms(uniforms, submesh, hemiAndShadows);
