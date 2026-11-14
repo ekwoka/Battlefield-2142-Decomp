@@ -10592,8 +10592,11 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		input.strafe = 0;
 		input.fire = false;
 		input.altFire = false;
-	} else if (input.pose == SoldierPose::Swim) {
-		input.pose = SoldierPose::Stand;
+	} else {
+		if (input.pose == SoldierPose::Swim) {
+			input.pose = SoldierPose::Stand;
+		}
+		input.pose = player.control.stancePose(input.pose, stance::waterTooDeep(player.body.position, m_ground));
 	}
 	player.body.stance = static_cast<int>(input.pose);
 	// A ladder: the soldier sits in its container and climbs (0x0059f6b0)

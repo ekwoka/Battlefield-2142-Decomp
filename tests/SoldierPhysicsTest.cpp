@@ -1190,3 +1190,41 @@ TEST(SoldierPhysics_SteepTerrainPushesWithoutGrantingFooting)
 	CHECK(body.position.y > 0.98f);
 	CHECK(!body.onGround());
 }
+
+TEST(SoldierPhysics_ProneLimitsFollowTheStanceKeys)
+{
+	// 0x005889d0 / 0x00586f40: a second down after lying from standing (only a
+	// crouch gets up), a second after getting up before lying again, none
+	// after a jump, and none in water over the origin less 0.85 m.
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	game::SoldierControl control;
+	const auto tick = [&](game::SoldierPose requested, bool deep = false) {
+		game::SoldierInput input;
+		input.pose = control.stancePose(requested, deep);
+		control.update(input, body);
+		return control.pose();
+	};
+	using Pose = game::SoldierPose;
+	CHECK(tick(Pose::Prone) == Pose::Prone);
+	CHECK(tick(Pose::Stand) == Pose::Prone); // held down
+	for (int i = 0; i < 30; ++i) {
+		tick(Pose::Prone);
+	}
+	CHECK(tick(Pose::Stand) == Pose::Stand);
+	CHECK(tick(Pose::Prone) == Pose::Stand); // the second after getting up
+	for (int i = 0; i < 30; ++i) {
+		tick(Pose::Stand);
+	}
+	CHECK(tick(Pose::Prone) == Pose::Prone);
+	CHECK(tick(Pose::Crouch) == Pose::Crouch); // a crouch gets up at once
+	for (int i = 0; i < 31; ++i) {
+		tick(Pose::Crouch);
+	}
+	CHECK(tick(Pose::Prone, true) == Pose::Crouch); // too deep
+
+	physics::Ground water;
+	water.waterLevel = [](float, float) { return 0.2f; };
+	CHECK(game::stance::waterTooDeep({0, 1.0f, 0}, water));  // 0.2 over the feet
+	CHECK(!game::stance::waterTooDeep({0, 1.1f, 0}, water)); // 0.1 over them
+}

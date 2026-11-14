@@ -64,6 +64,7 @@
 #include "HudMenus.h"
 #include "DeploymentLifecycle.h"
 #include "DeploymentTeam.h"
+#include "StanceKeys.h"
 #include "TitanShotTrace.h"
 #include "HudMenusChat.h"
 #include "HudMenusComm.h"
@@ -10409,8 +10410,9 @@ int runGame(Options& options, Session& session)
 				}
 				return true;
 			};
-			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, &playerCamera, &remoteLook, lastAimPitch = 0.0f,
-										toggleCameraWas = false, cameraWas = 0, autoReloadTick = 0](const ViewerOptions::PlayerInput& raw) mutable {
+			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, &playerCamera, &remoteLook, &prediction, lastAimPitch = 0.0f,
+										toggleCameraWas = false, cameraWas = 0, autoReloadTick = 0, stance = ProneToggle{},
+										stanceSteps = 0u](const ViewerOptions::PlayerInput& raw) mutable {
 				scoreboardHeld = options.scoreboard || raw.scoreboard;
 				if (!session.client) {
 					return;
@@ -10421,7 +10423,20 @@ int runGame(Options& options, Session& session)
 				remoteLook.yaw = std::remainder(remoteLook.yaw + in.turnDegrees, 360.0f);
 				remoteLook.pitch = in.aimPitchDegrees;
 				remoteLook.fire = in.fire;
-				remoteLook.stance = in.lie ? 2 : in.crouch ? 1 : 0;
+				// The stance keys as the local round's (StanceKeys.h), the
+				// toggle taking the pose our prediction last stepped to (the
+				// server applies the same SoldierControl::stancePose).
+				const net::RemoteWorld& remote = session.client->world();
+				const net::RemotePlayer* own = remote.player(remote.localPlayer());
+				if (!own || !own->alive || own->vehicleGhost != 0) {
+					stance.prone = false; // dead, not spawned or seated: up on foot again
+				} else if (prediction.active() && prediction.stats().steps != stanceSteps) {
+					stance.prone = prediction.control().pose() == game::SoldierPose::Prone;
+					stanceSteps = prediction.stats().steps;
+				}
+				const bool wasProne = stance.prone;
+				stance.update(in.lie, in.crouch, in.jump);
+				remoteLook.stance = stance.prone ? 2 : in.crouch ? 1 : 0;
 				if (in.toggleCamera && !toggleCameraWas) {
 					playerCamera.toggleMode();
 					if (std::getenv("BF2142_INPUT_TRACE")) std::printf("camera-toggle mode=%d first=%d\n", static_cast<int>(playerCamera.mode()), playerCamera.firstPerson);
@@ -10453,6 +10468,10 @@ int runGame(Options& options, Session& session)
 				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's
 				// press is also our own 0x004d2a50's (the seat's item popup,
 				// updateHud).
+				input.jump = in.jump && !wasProne && !stance.prone;
+				input.pose = stance.prone ? game::SoldierPose::Prone
+					: in.crouch           ? game::SoldierPose::Crouch
+										  : game::SoldierPose::Stand;
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;
@@ -10498,7 +10517,7 @@ int runGame(Options& options, Session& session)
 			// Deployment already owns input before the first soldier exists.
 			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &joinPending, &commanderScreen,
 										&session, &hudManager,
-										&commanderKeyWas, &playerCamera, wasAlive = false, spawnedProne = false,
+										&commanderKeyWas, &playerCamera, wasAlive = false, stance = ProneToggle{}, stanceTick = 0u,
 										toggleCameraWas = false, cameraWas = 0, actionWas = false, lastPitch = 0.0f, itemHeld = false](
 										const ViewerOptions::PlayerInput& raw) mutable {
 				scoreboardHeld = options.scoreboard || raw.scoreboard;
@@ -10571,15 +10590,24 @@ int runGame(Options& options, Session& session)
 					input.throttle = input.strafe = input.turn = input.pitchAxis = input.rollAxis = 0;
 					input.fire = input.altFire = input.flareFire = false;
 				}
-				// Stance: crouch or lie while their keys are held. A spawn where
-				// only lying fits (the squad leader's scatter, 0x006c3340) starts
-				// prone until a stance key is pressed.
+				// Stance (StanceKeys.h): a lie press toggles prone, crouch is
+				// held. A spawn where only lying fits (the squad leader's
+				// scatter, 0x006c3340) starts prone.
 				game::GameWorld::PlayerInfo me;
 				const bool alive = round.playerInfo(round.localPlayer(), me) && me.alive;
 				if (alive && !wasAlive) {
-					spawnedProne = me.spawnedProne;
+					stance.prone = me.spawnedProne;
+				}
+				if (me.seat >= 0) {
+					stance.prone = false; // seated: leave the vehicle standing
 				}
 				wasAlive = alive;
+				// A press the soldier refused or held off is spent, as the
+				// original's: the toggle takes the pose the last tick gave.
+				if (round.ticks() != stanceTick) {
+					stance.prone = me.pose == game::SoldierPose::Prone;
+					stanceTick = round.ticks();
+				}
 				if (!alive) {
 					// Dead: the keys fly the free camera, c_PIAction (Space)
 					// swaps it with the death / followed view (sv.allowFreeCam).
@@ -10599,14 +10627,12 @@ int runGame(Options& options, Session& session)
 				actionWas = in.jump;
 				lastPitch = in.aimPitchDegrees;
 				// Jumping while lying gets up (a crouch press), else jumps.
-				if (in.crouch || in.lie || (in.jump && spawnedProne)) {
-					spawnedProne = false;
-				}
-				input.jump = in.jump && !in.lie;
-				input.pose = in.lie ? game::SoldierPose::Prone
-					: in.crouch     ? game::SoldierPose::Crouch
-					: spawnedProne  ? game::SoldierPose::Prone
-									: game::SoldierPose::Stand;
+				const bool wasProne = stance.prone;
+				stance.update(in.lie, in.crouch, in.jump);
+				input.jump = in.jump && !wasProne && !stance.prone;
+				input.pose = stance.prone ? game::SoldierPose::Prone
+					: in.crouch           ? game::SoldierPose::Crouch
+										  : game::SoldierPose::Stand;
 				round.setPlayerInput(input);
 			};
 			// The spawn screen: a pointer, and clicking a spawn icon picks it.

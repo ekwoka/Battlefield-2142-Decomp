@@ -115,16 +115,20 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 			}
 		}
 	}
-	for (float* timer : {&m_jumpTime, &m_noProne, &m_getUp, &m_recoverDelay, &m_rise}) {
+	for (float* timer : {&m_jumpTime, &m_noProne, &m_getUp, &m_minProne, &m_reProne, &m_recoverDelay, &m_rise}) {
 		if (*timer > 0) {
 			*timer -= seconds;
 		}
 	}
 	// Up from prone (0x005889d0, pose 2 to 0 or 1): a second before a jump
-	// (+0x3fc), and +0x40c's 0.6 s (the jump hold, jumpHold).
+	// (+0x3fc), a second before lying again (+0x404), and +0x40c's 0.6 s
+	// (the jump hold, jumpHold). Down from standing: a second down (+0x400).
 	if (m_lastPose == SoldierPose::Prone && input.pose != SoldierPose::Prone && input.pose != SoldierPose::Swim) {
 		m_getUp = jump::kGetUpTime;
+		m_reProne = stance::kReProneTime;
 		m_rise = jump::kRiseTime;
+	} else if (m_lastPose == SoldierPose::Stand && input.pose == SoldierPose::Prone) {
+		m_minProne = stance::kMinProneTime;
 	}
 	m_lastPose = input.pose;
 	// The sprint (0x00645760 on the key's events, 0x006457f0 each tick from

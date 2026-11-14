@@ -104,8 +104,11 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 	if (m_body.swimming()) {
 		input.pose = game::SoldierPose::Swim;
 		input.strafe = 0;
-	} else if (input.pose == game::SoldierPose::Swim) {
-		input.pose = game::SoldierPose::Stand;
+	} else {
+		if (input.pose == game::SoldierPose::Swim) {
+			input.pose = game::SoldierPose::Stand;
+		}
+		input.pose = m_control.stancePose(input.pose, game::stance::waterTooDeep(m_body.position, m_round.ground()));
 	}
 	m_body.stance = static_cast<int>(input.pose);
 	m_control.update(input, m_body, kTick);
