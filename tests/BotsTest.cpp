@@ -5308,6 +5308,52 @@ TEST(Bots_ReloadAfterTheFight)
 // it while the target is nearer than the distance it keeps (the plan's
 // preferred range, here 22.9 m: driveFirePlan's manoeuvre past 1.1 times
 // it). Its turn held over a skipped frame stops at the target.
+// The sight ray passes the vehicle its target rides (AIDLL 0x100ed700 hands
+// the seer, the sensed object and that vehicle to the ray's filter,
+// BF2142.exe 0x008988f0): a rider inside a closed hull is seen.
+TEST(Bots_SeesARiderInsideItsHull)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	field.collisionTemplates.create("eu_tank", "Objects/Vehicles/EU_TANK/");
+	world::ObjectTemplate* tank = field.templates.create("PlayerControlObject", "hull");
+	for (const auto& [key, value] : field.templates.find("car")->settings()) {
+		tank->settings()[key] = value;
+	}
+	tank->settings()["collisionMesh"] = "eu_tank";
+	tank->settings()["seatInformation"] = "hull 0/0.2/0 0/0/0";
+	tank->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	tank->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	std::string out;
+	field.console.execute("aiSettings.setViewDistance 200", out);
+	const uint32_t id = field.objects.create(tank, {0, 1.2f, 9}, {180, 0, 0})->id();
+	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	const int enemy = field.world->addPlayer("Enemy", 1, false);
+	field.world->spawnSoldier(enemy);
+	field.world->setSoldierPosition(field.info(enemy).soldier, {2, 0, 9});
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(enemy, 0);
+	CHECK(field.info(enemy).vehicle == id);
+	// A ray through the hull stops at it, unless the hull is the rider's.
+	// (The shipped hulls hide the rider's point from most sides in play; this
+	// one leaves it open, so the bot's own check below passes either way.)
+	const physics::Vec3 eye {0, 1.6f, 0}, past {0, 1.6f, 30};
+	bool through = false;
+	CHECK(!field.world->lineOfSight(eye, past, 0, through));
+	CHECK(field.world->lineOfSight(eye, past, 0, through, id));
+	game::BotManager bots(*field.world, field.settings);
+	bool knew = false;
+	for (int tick = 0; tick < 30 * 15 && !knew; ++tick) {
+		field.ticks(1, &bots);
+		knew = bots.knows(bot, enemy);
+	}
+	CHECK(knew);
+}
+
 TEST(Bots_DriverAimsAndFiresTheTurret)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");

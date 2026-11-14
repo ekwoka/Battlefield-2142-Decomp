@@ -814,7 +814,7 @@ public:
 	// (material slot 0x88; the filter's slot 4, 0x00897d50) don't stop it;
 	// `seenThrough` tells whether one lay on the way (the out flag: the
 	// nearest such face before the ray's end).
-	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, bool& seenThrough) const;
+	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, bool& seenThrough, uint32_t alsoIgnore = 0) const;
 	// Whether a team's soldier could pass from one point to the other through
 	// the moving objects' soldier meshes (a Titan's: with the other team's
 	// forcefields, not its own).

@@ -6565,7 +6565,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 	return true;
 }
 
-bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, bool& seenThrough) const
+bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, bool& seenThrough, uint32_t alsoIgnore) const
 {
 	seenThrough = false;
 	// A mesh's faces from `a` to `b`, see-through ones passed (each pass
@@ -6597,7 +6597,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		return false;
 	}
 	for (const Body& body : m_bodies) {
-		if (!body.projectileMesh || body.object == ignore) {
+		if (!body.projectileMesh || body.object == ignore || (alsoIgnore && body.object == alsoIgnore)) {
 			continue;
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);

@@ -2179,7 +2179,10 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 					point = other.position
 						+ physics::Vec3 {(random() * 2 - 1) * 0.3f, 0.2f + random() * 1.5f, (random() * 2 - 1) * 0.3f};
 				}
-				clear = m_world.lineOfSight(eye, point, self.vehicle, seenThrough);
+				// The ray's filter (BF2142.exe 0x00898040, 0x008988f0) passes the
+				// list AIDLL 0x100ed700 hands it: the seer, the sensed object
+				// and the vehicle that object rides.
+				clear = m_world.lineOfSight(eye, point, self.vehicle, seenThrough, other.vehicle);
 			}
 			visible = clear;
 		}
