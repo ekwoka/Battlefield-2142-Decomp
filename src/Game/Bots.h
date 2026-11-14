@@ -1280,6 +1280,13 @@ private:
 		int titanFlyMode = 0;      // a transport pilot's order for fly(), read once: 1 hold, 2 fly to titanFlyTo, 3 parked
 		physics::Vec3 titanFlyTo;
 		bool titanFlyDown = false; // over the deck: coming down
+		uint32_t meshVehicle = 0;  // driveToMesh: the vehicle it drives, and whether that has been on the vehicle mesh
+		bool meshReached = false;
+		std::vector<physics::Vec3> meshWay; // what is left of its way there
+		physics::Vec3 meshAt;               // where it last made 3 m of way, and when
+		float meshAtTime = 0;
+		float meshBackUntil = 0;            // wedged: backing off until then
+		float meshSince = 0;                // when it took the wheel there
 		uint32_t titanRide = 0;    // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
 		float titanRideAt = -1e9f;
 		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way, and when
@@ -1856,6 +1863,15 @@ private:
 	};
 	TitanPlan m_titanPlans[3];
 	int titanRole(const GameWorld::PlayerInfo& self);
+	// enhanced.botRecovery (not retail): a mod's vehicle mesh may stop short of a base's vehicle pads (Remaster's
+	// Suez Titan layout leaves the fenced PAC base out). The way from such a spot to the mesh: a search over a 4 m
+	// grid within 90 m whose steps no obstacle crosses at hull height (fences count); empty for none. Kept by spot.
+	// (`ignore`: the vehicle itself. A spot with no way is tried again after 10 s: a parked vehicle may have been in it.)
+	const std::vector<physics::Vec3>& wayToVehicleMesh(const physics::Vec3& from, uint32_t ignore);
+	std::map<std::pair<int, int>, std::pair<float, std::vector<physics::Vec3>>> m_meshWays;
+	// Its driver along that way; false once the vehicle has been on the mesh.
+	bool driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	std::set<uint32_t> m_meshGaveUp; // vehicles a driver could not bring to the mesh in a minute: left, and not taken again
 	bool titanRespawn(const GameWorld::PlayerInfo& self);
 	const GameWorld::VehicleInfo* titanTransport(int team, const GameWorld::TitanInfo& home);
 	bool titanRideGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);

@@ -920,6 +920,151 @@ void BotManager::titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 	}
 }
 
+const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Vec3& from, uint32_t ignore)
+{
+	constexpr float kGrid = 4;
+	constexpr int kHalf = 22; // 88 m
+	const std::pair<int, int> key {static_cast<int>(std::floor(from.x / kGrid)), static_cast<int>(std::floor(from.z / kGrid))};
+	const auto known = m_meshWays.find(key);
+	if (known != m_meshWays.end() && (!known->second.second.empty() || m_time - known->second.first < 10)) {
+		return known->second.second;
+	}
+	m_meshWays[key].first = m_time;
+	std::vector<physics::Vec3>& way = m_meshWays[key].second;
+	way.clear();
+	if (!m_vehicleNavMesh) {
+		return way;
+	}
+	const int side = 2 * kHalf + 1;
+	const auto at = [&](int i) {
+		physics::Vec3 p {from.x + (i % side - kHalf) * kGrid, 0, from.z + (i / side - kHalf) * kGrid};
+		p.y = m_world.terrainHeight(p.x, p.z);
+		return p;
+	};
+	// A step is open when nothing crosses it at 1 m and 1.8 m, on its line and 1.5 m to either side (a hull's width).
+	const auto open = [&](const physics::Vec3& a, const physics::Vec3& b) {
+		const physics::Vec3 d = b - a;
+		const float length = horizontal(d);
+		const physics::Vec3 across = physics::Vec3 {d.z, 0, -d.x} * (1.5f / std::max(length, 0.01f));
+		for (const float aside : {0.0f, 1.0f, -1.0f}) {
+			for (const float up : {1.0f, 1.8f}) {
+				bool through = false;
+				const physics::Vec3 lift = across * aside + physics::Vec3 {0, up, 0};
+				if (!m_world.lineOfSight(a + lift, b + lift, ignore, through) || through) {
+					return false;
+				}
+			}
+		}
+		return std::fabs(d.y) < 0.6f * length; // not up a wall of terrain
+	};
+	std::vector<int> cameFrom(static_cast<size_t>(side * side), -1);
+	std::queue<int> frontier;
+	const int start = kHalf * side + kHalf;
+	cameFrom[static_cast<size_t>(start)] = start;
+	frontier.push(start);
+	int goal = -1;
+	while (!frontier.empty() && goal < 0) {
+		const int c = frontier.front();
+		frontier.pop();
+		const physics::Vec3 here = c == start ? physics::Vec3 {from.x, m_world.terrainHeight(from.x, from.z), from.z} : at(c);
+		for (int dz = -1; dz <= 1 && goal < 0; ++dz) {
+			for (int dx = -1; dx <= 1; ++dx) {
+				const int x = c % side + dx, z = c / side + dz, n = z * side + x;
+				if ((!dx && !dz) || x < 0 || z < 0 || x >= side || z >= side || cameFrom[static_cast<size_t>(n)] >= 0 || !open(here, at(n))) {
+					continue;
+				}
+				cameFrom[static_cast<size_t>(n)] = c;
+				const physics::Vec3 p = at(n);
+				if (m_vehicleNavMesh->findPolygon(ai::Vec3 {p.x, p.y, p.z}) >= 0) {
+					goal = n;
+					break;
+				}
+				frontier.push(n);
+			}
+		}
+	}
+	for (int c = goal; c >= 0 && c != start; c = cameFrom[static_cast<size_t>(c)]) {
+		way.insert(way.begin(), at(c));
+	}
+	if (std::getenv("BF2142_BOT_STATS")) { // DIAG
+		std::fprintf(stderr, "mesh way from %.0f %.0f: %zu points%s", from.x, from.z, way.size(), way.empty() ? "\n" : ", to ");
+		if (!way.empty()) std::fprintf(stderr, "%.0f %.0f\n", way.back().x, way.back().z);
+	}
+	return way;
+}
+
+bool BotManager::driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
+{
+	if (!m_settings.stuckRecovery() || !self.vehicle || !self.driving || !m_vehicleNavMesh || m_world.isTitan(self.vehicle)) {
+		return false;
+	}
+	if (bot.meshVehicle != self.vehicle) {
+		bot.meshVehicle = self.vehicle;
+		bot.meshReached = false;
+		bot.meshWay.clear();
+		bot.meshSince = m_time;
+	}
+	const world::Object* object = m_world.objects().find(self.vehicle);
+	const GameWorld::VehicleInfo* vehicle = nullptr;
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		vehicle = v.object == self.vehicle ? &v : vehicle;
+	}
+	// Only from where it was parked: once on the mesh the drivers' own planning has it, off its edge too.
+	if (bot.meshReached || !vehicle || !object || !object->objectTemplate()
+		|| (m_settings.typeFlags(aiTemplateOf(object->objectTemplate()->name())) & kITAir)
+		|| !m_settings.plugin(aiTemplateOf(object->objectTemplate()->name()), "Mobile")) {
+		return false;
+	}
+	const physics::Vec3 here = vehicle->position;
+	if (m_vehicleNavMesh->findPolygon(ai::Vec3 {here.x, here.y, here.z}) >= 0) {
+		bot.meshReached = true;
+		return false;
+	}
+	if (m_time - bot.meshSince > 60) {
+		// shortcut: the grid search knows no hull's turning room; a vehicle it cannot bring out is given up
+		m_meshGaveUp.insert(self.vehicle);
+		input.use = std::fmod(m_time, 1.0f) < 0.1f;
+		bot.behaviour = "MoveTo (to the mesh)";
+		return true;
+	}
+	// Its way, kept while it makes way; looked up again from where it stands after 6 s without 3 m made.
+	if (horizontal(here - bot.meshAt) > 3) {
+		bot.meshAt = here;
+		bot.meshAtTime = m_time;
+	}
+	if (bot.meshWay.empty() || m_time - bot.meshAtTime > 6) {
+		if (const std::vector<physics::Vec3>& way = wayToVehicleMesh(here, self.vehicle); !way.empty()) {
+			bot.meshWay = way;
+		}
+		if (m_time - bot.meshAtTime > 6) {
+			bot.meshBackUntil = m_time + 2.5f; // wedged against something: back off first
+		}
+		bot.meshAtTime = m_time;
+	}
+	while (bot.meshWay.size() > 1 && horizontal(bot.meshWay.front() - here) < 5) {
+		bot.meshWay.erase(bot.meshWay.begin());
+	}
+	if (bot.meshWay.empty()) {
+		return false;
+	}
+	const physics::Vec3 d = bot.meshWay.front() - here;
+	const float off = std::remainder((std::atan2(d.x, d.z) - std::atan2(vehicle->forward.x, vehicle->forward.z)) * 57.29578f, 360.0f);
+	if (m_settings.moveInterpreter(equipmentOf(self)) == "FloatingTankMoveTo") {
+		// The hover tank slides: PIYaw is sideways on it, so it goes straight at the point as it stands.
+		input.throttle = 0.7f * std::cos(off * 0.017453292f);
+		input.strafe = 0.7f * std::sin(off * 0.017453292f);
+	} else {
+		input.strafe = std::clamp(off / 30, -1.0f, 1.0f);
+		input.throttle = std::fabs(off) < 60 ? 0.7f : 0.3f;
+	}
+	if (m_time < bot.meshBackUntil) {
+		input.throttle = -0.7f;
+		input.strafe = -input.strafe;
+	}
+	bot.behaviour = "MoveTo (to the mesh)";
+	return true;
+}
+
 std::string BotManager::titanGridStats()
 {
 	std::string out;

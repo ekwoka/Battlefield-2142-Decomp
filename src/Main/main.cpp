@@ -8357,6 +8357,12 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			game::GameWorld::PlayerInfo me;
+			// Diagnostic, BF2142_DRIVE_TRACE=1: where the local player's vehicle is, twice a second (a way out of a base).
+			static const bool driveTrace = std::getenv("BF2142_DRIVE_TRACE") != nullptr;
+			if (driveTrace && round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
+				std::printf("drive-trace: %.1f %.1f %.1f yaw %.0f\n", me.position.x, me.position.y, me.position.z, me.yaw);
+				std::fflush(stdout);
+			}
 			if (!round.playerInfo(round.localPlayer(), me) || !me.alive || me.vehicle) {
 				return;
 			}

@@ -1736,7 +1736,7 @@ void BotManager::update(float seconds)
 		// drops in a pod, riding it down without steering.
 		physics::Vec3 podEntry;
 		float podRadius = 0;
-		if (titanPod(bot, *self, input, elapsed)) {
+		if (driveToMesh(bot, *self, input) || titanPod(bot, *self, input, elapsed)) {
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
 			m_behaviourSeconds[bot.behaviour] += elapsed;
@@ -4856,7 +4856,8 @@ float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		if (d2 > kReach * kReach || (!mobile && d2 > kReach * kReach * 0.5f)) {
 			continue;
 		}
-		if (m_vehicleNavMesh && mobile && m_vehicleNavMesh->findPolygon(toAi(vehicle.position)) < 0) {
+		if (m_vehicleNavMesh && mobile && m_vehicleNavMesh->findPolygon(toAi(vehicle.position)) < 0
+			&& !(m_settings.stuckRecovery() && !m_meshGaveUp.count(vehicle.object) && !wayToVehicleMesh(vehicle.position, vehicle.object).empty())) {
 			continue; // not on the vehicle mesh
 		}
 		float f = std::max(0.0f, std::min(0.5f, (kReach * kReach - 0.8f * d2) / (kReach * kReach)) + 0.5f);
