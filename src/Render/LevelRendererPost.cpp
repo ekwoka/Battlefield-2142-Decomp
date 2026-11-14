@@ -240,9 +240,10 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 		m_shadowUniforms.hemiConstants[1] = hemi.offset[2];
 		m_shadowUniforms.hemiConstants[2] = hemi.size;
 		m_shadowUniforms.hemiConstants[3] = lights.hemiLerpBias;
-		m_shadowUniforms.hemiSky[0] = lights.skyColor[0];
-		m_shadowUniforms.hemiSky[1] = lights.skyColor[1];
-		m_shadowUniforms.hemiSky[2] = lights.skyColor[2];
+		// Inside a Titan HemiMapSkyColor is 1.3 grey, not the level's sky (0x1002dc48).
+		m_shadowUniforms.hemiSky[0] = m_cameraInTitan ? 1.3f : lights.skyColor[0];
+		m_shadowUniforms.hemiSky[1] = m_cameraInTitan ? 1.3f : lights.skyColor[1];
+		m_shadowUniforms.hemiSky[2] = m_cameraInTitan ? 1.3f : lights.skyColor[2];
 		m_shadowUniforms.hemiSky[3] = m_cameraInTitan ? 2 : 1;
 	}
 	if (m_enh.csm) { // the cascades take over (renderCascades)
