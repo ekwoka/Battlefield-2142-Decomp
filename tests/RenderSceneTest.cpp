@@ -939,6 +939,28 @@ TEST(RenderScene_AntialiasingAndAlphaToCoverage)
 	CHECK(near(AlphaToCoverage::undergrowthAlphaScale(0), 1));
 }
 
+// A Titan-interior static's lights (0x100aa0d0): only its own children,
+// nearest first, the nearer neighbour's light never.
+TEST(RenderScene_TitanInteriorLightsAreTheOwners)
+{
+	render::ListedLight lights[4];
+	const float at[4][3] = {{3, 0, 0}, {12, 0, 0}, {-9, 0, 0}, {40, 0, 0}};
+	const int owners[4] = {1, 0, 0, 0};
+	for (int i = 0; i < 4; ++i) {
+		std::copy(at[i], at[i] + 3, lights[i].position);
+		lights[i].radius = 22;
+		lights[i].owner = owners[i];
+	}
+	const float origin[3] = {0, 0, 0};
+	int picked[4];
+	int n = render::pickOwnedLights(lights, 4, 0, origin, 18, 2, picked);
+	CHECK(n == 2 && picked[0] == 2 && picked[1] == 1);
+	CHECK(render::pickOwnedLights(lights, 4, -1, origin, 18, 2, picked) == 0);
+	lights[2].affectsLightmapped = false; // 0x11b09
+	n = render::pickOwnedLights(lights, 4, 0, origin, 18, 2, picked);
+	CHECK(n == 1 && picked[0] == 1);
+}
+
 // The meshes' point lights (MeshLights.h, 0x100a9f80 / 0x100a7f00) and
 // the flicker (0x0064a920).
 TEST(RenderScene_MeshLightsPickedPerMesh)

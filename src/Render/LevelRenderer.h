@@ -992,6 +992,11 @@ private:
 	std::vector<ListedLight> m_listedLights;        // the same, for the meshes' picks
 	std::vector<int> m_cameraLights;                // the nearest the camera of them (applyPointLights)
 	std::vector<int> m_terrainLights;               // the Point ones nearest the camera (applyTerrainLights)
+	// Every placed dynamic light, owner-grouped, for the Titan-interior statics (pickOwnedLights); their
+	// PointLights follow the listed ones in m_pointLights from m_ownedBase.
+	std::vector<ListedLight> m_ownedLights;
+	std::map<std::pair<uint32_t, std::string>, int> m_lightOwners; // (object, parent template path) -> owner
+	size_t m_ownedBase = 0;
 	LightLimits m_lightLimits;
 	MsvcRand m_flickerRand;
 	Frustum m_frameFrustum;
@@ -1003,6 +1008,7 @@ private:
 		uint32_t object = 0;
 		Mat4 local; // in the object's space
 		effects::LightSourceLook look;
+		std::string parent; // its parent's template path from the root's child ('' the root), as Instance::source
 	};
 	std::vector<ObjectLight> m_objectLights;
 	void applyPointLights(LightingUniforms& uniforms) const;

@@ -783,7 +783,8 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 	if (objectTemplate.typeName() == "LightSource") {
 		const effects::LightSourceLook look = effects::lightSourceOf(objectTemplate);
 		if (look.enabled && !look.directional && object != 0) {
-			m_objectLights.push_back({object, local, look});
+			const size_t slash = path.rfind('/');
+			m_objectLights.push_back({object, local, look, slash == std::string::npos ? std::string() : path.substr(0, slash)});
 		}
 		return;
 	}
@@ -2755,6 +2756,8 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	m_listedLights.clear();
 	m_cameraLights.clear();
 	m_terrainLights.clear();
+	m_ownedLights.clear();
+	std::vector<effects::PointLight> owned;
 	if (!m_sources) {
 		return;
 	}
@@ -2772,8 +2775,8 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	LightTrace& trace = lightTrace();
 	if (trace.on) {
 		++trace.frame;
-		std::fprintf(stderr, "light-trace: frame %d camera %.2f/%.2f/%.2f yaw %.3f pitch %.3f limits cull %.0f static %d bundled %d skinned %d\n",
-			trace.frame, camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch, cull,
+		std::fprintf(stderr, "light-trace: frame %d camera %.2f/%.2f/%.2f yaw %.3f pitch %.3f in-titan %d limits cull %.0f static %d bundled %d skinned %d\n",
+			trace.frame, camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch, m_cameraInTitan ? 1 : 0, cull,
 			m_lightLimits.staticMesh, m_lightLimits.bundledMesh, m_lightLimits.skinnedMesh);
 	}
 	if (cull <= 0) {
@@ -2856,6 +2859,17 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 		light.specColor = placed.look.specColor;
 		light.supportsEmitter = placed.look.supportsEmitter;
 		consider(light);
+		// The light manager's registry (+0x120) for the owner-grouped pick: no frustum or cull test.
+		ListedLight listed;
+		listed.position[0] = light.position.x;
+		listed.position[1] = light.position.y;
+		listed.position[2] = light.position.z;
+		listed.radius = std::max(light.range2, 0.0f);
+		listed.spot = light.spot;
+		listed.affectsLightmapped = light.affectsLightmapped;
+		listed.owner = m_lightOwners.emplace(std::make_pair(placed.object, placed.parent), static_cast<int>(m_lightOwners.size())).first->second;
+		m_ownedLights.push_back(listed);
+		owned.push_back(light);
 	}
 	// The rest's: the nearest the camera first.
 	std::vector<std::pair<float, int>> byCamera;
@@ -2874,6 +2888,8 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 	int terrainPicked[kMaxPointLights];
 	m_terrainLights.assign(terrainPicked,
 		terrainPicked + pickTerrainLights(m_listedLights.data(), m_listedLights.size(), eye, kMaxPointLights, terrainPicked));
+	m_ownedBase = m_pointLights.size();
+	m_pointLights.insert(m_pointLights.end(), owned.begin(), owned.end());
 }
 
 void LevelRenderer::bindMeshLayers(SDL_GPURenderPass* pass, const Submesh* submesh, SDL_GPUTexture* envMap) const
@@ -4443,8 +4459,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 														 : LightedMesh::Static;
 		int picked[kMaxPointLights];
 		int pickedCount = 0;
-		if (!m_listedLights.empty()) {
-			const float origin[3] = {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+		const float origin[3] = {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+		if (item.lightmap && item.mesh->titanInterior && lightKind == LightedMesh::Static) {
+			// 0x100bdb00 draws every shown isTitanInterior static through 0x100bd0a0, whose pick is the
+			// lights its object owns (pickOwnedLights), whatever the view; not gated on m_cameraInTitan,
+			// as the port also draws the rooms from outside (prepareInstances) and inside a corridor.
+			const auto owner = m_lightOwners.find({instance.object, instance.source});
+			pickedCount = owner == m_lightOwners.end() ? 0
+				: pickOwnedLights(m_ownedLights.data(), m_ownedLights.size(), owner->second, origin,
+					  std::max(item.mesh->bounds.radius, 0.0f), std::min(m_lightLimits.staticMesh, kMaxPointLights), picked);
+			for (int i = 0; i < pickedCount; ++i) {
+				picked[i] += static_cast<int>(m_ownedBase);
+			}
+		} else if (!m_listedLights.empty()) {
 			pickedCount = pickMeshLights(m_listedLights.data(), m_listedLights.size(), origin,
 				std::max(item.mesh->bounds.radius, 0.0f), lightKind, item.lightmap != nullptr, m_lightLimits, picked,
 				kMaxPointLights, m_sources && m_sources->enhanced && m_sources->enhanced->enabled && m_sources->enhanced->lightRank);
