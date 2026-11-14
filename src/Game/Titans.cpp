@@ -2172,8 +2172,12 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 // projectile's update 0x005b3e60): from seek.trackingDelay on it turns
 // towards the locked Titan's middle (followStep: msilo_missile's
 // follow.maxYaw 4 and maxPitch 1 degrees a tick, predictionFactor 0.3 by
-// default, magneticBehaviour 1: the first turn after the lock is not
-// capped, a Titan behind it is turned to at the full rates); the speed is
+// default, magneticBehaviour 1: a Titan behind it is turned to at the full
+// rates). The uncapped turn of a new target is the launch tick's alone: the
+// update sets the follow's target every tick (0x005b4047), setTarget
+// (0x005ed260) marks it new only when it changed, and the follow starts
+// trackingDelay later (0x005b2c84), so the climb out of the silo bends over
+// at 1 degree a tick instead of snapping at the Titan. The speed is
 // kept along the new heading (hasDirection). From startDelay on its
 // acceleration pushes it along its heading up to maxSpeed, unless its
 // target is gone (magneticBehaviour without a target: it coasts).
@@ -2183,8 +2187,8 @@ void GameWorld::steerBeacon(Projectile& p, float seconds)
 	const Titan* titan = titanByObject(p.lockedOn);
 	if (p.age >= s.seekDelay && titan) {
 		p.followTurned = followStep(p, titanAim(*titan), titan->velocity, seconds, p.newTarget);
-		p.newTarget = false;
 	}
+	p.newTarget = false;
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
 	if (p.age < s.startDelay || speed <= 0.01f || speed >= s.maxSpeed || (s.magneticBehaviour && !titan)) {
 		return;

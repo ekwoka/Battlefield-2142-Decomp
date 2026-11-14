@@ -954,6 +954,22 @@ TEST(GameAudio_NewStyleEngineAudio)
 	CHECK(e.shifted);
 }
 
+// An old-style engine's RotationRpm (0x00564710): it starts from 1e-4,
+// eases to the unscaled |audio value| (not x 0.8333) and stops at zero.
+TEST(GameAudio_EngineRotationSound)
+{
+	Vars::global().clear();
+	GameAudio::RotationSound s;
+	CHECK(!GameAudio::stepRotationSound(s, 0));
+	CHECK(GameAudio::stepRotationSound(s, -0.64f));
+	CHECK(s.value > 1e-4f && s.value < 0.64f);
+	for (int i = 0; i < 60; ++i) {
+		GameAudio::stepRotationSound(s, -0.64f);
+	}
+	CHECK(near(s.value, 0.64f, 0.001f));
+	CHECK(!GameAudio::stepRotationSound(s, 0) && !s.playing && s.value == 0);
+}
+
 // The soldier HUD's injury sound (0x006575f0 from 0x007a0f80): once when
 // the armour's fraction falls, then not again for 2 s; the local player
 // on foot.

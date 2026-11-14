@@ -8061,9 +8061,14 @@ prints each sound triggered.
   the time left, halved after a downshift (the engine-audio-sway-* vars).
   Not read: the period of the sway's clock (`_CIfmod`; the rewrite takes
   the round's seconds) and the contact int (engine `+0x298` -> `+0x188`)
-  whose negative values add 0.3 to the jitter (taken as none). The rewrite
-  sounds the engines of vehicles someone is in; the parts' RotationRpm
-  isn't played.
+  whose negative values add 0.3 to the jitter (taken as none). The old-style
+  value is clamp(rpm, ±1), or for a helicopter engine clamp(2·aoa, ±0.5) +
+  0.5 (`0x0064cb80`). That value, unscaled, also drives the Engine's
+  RotationRpm (the aircraft's `air_distant` loop; `0x00564710`): eased
+  through `0x006afeb0` (rotationalbundle-sound-smooth-time 0.15, a 1/30 s
+  step), clamped to 0..1, started from 1e-4 above 1e-4 and stopped below
+  5e-5. The rewrite sounds the engines of vehicles someone is in; other
+  parts' RotationRpm isn't played.
 - Projectiles: DefaultProjSoundComp's Looping (`0x005ea930`) follows a
   projectile in flight.
 - The round's own sounds (footsteps, ragdoll impacts, `takeSounds`) and
@@ -13930,9 +13935,33 @@ eu_Titan_Cannon_AA_01/02AI: a Unit with setHasExposedSoldier,
 Armament setIsAntiAircraft), which AIDLL's seat choice (BBChange) and
 behaviours cover, but no strategy of its sends a bot into a Titan (its nav
 meshes are on the ground). The rewrite's choice: while fewer than half its
-Titan's guns are manned, a bot aboard walks straight to the nearest free
-working gun's console and takes it (`titanGunEntry`); the Titan isn't
-among the bots' vehicles, so it stays and runs the Fixed behaviours; the
+Titan's guns are manned or claimed, a bot aboard approaches the nearest free
+working gun's console and takes it (`titanGunEntry`). With
+`enhanced.botTitan` enabled, it follows the Titan's collision-derived walk
+grid around the room's pillars and ramps to a walkable point inside the
+console's authored entry sphere, rather than into the console's solid centre.
+The use-key test matches vehicle entry's physics origin (one metre above
+the feet) and full radius. This is native enhanced AI, not retail parity.
+The Titan isn't
+among the bots' vehicles, so it stays and runs the Fixed behaviours. With
+`enhanced.botTitan` enabled, the bots past the guns' share crew their deck's
+aircraft first (`titanCrew`, BotsTitan.cpp; the ordinary vehicle choice
+skips them, the deck being off the vehicle mesh): a pilot for the gunship,
+then the transport, then the gunship's gunner and the transport's riders,
+one claim a seat. Each walks the Titan's grid to the aircraft's authored
+entry point (round the parked aircraft, whose box the grid lacks, when that
+point is off its middle, as the gunships' is) and presses use; a claim
+unmet in 60 s skips that aircraft for 120 s. The gunship's pilot climbs
+off the deck above the Titan towards the nearest silo the team doesn't hold
+until 200 m clear, then flies as any gunship (on the deck the ordinary
+pilot waits while soldiers are near, and the crew always is). With the
+enemy shield up the transport's pilot (`titanSortie`) waits 6..18 s for
+riders (20 s more while one is still walking), with one aboard flies to the
+nearest such silo, high over the Titan and 70 m over the ground on the way,
+30 m over the silo, until its riders are out by pod (the exit key; at most
+15 s), and lands back anywhere on its Titan's deck (the hover drifts as it
+sinks). With the shield down, the boarding run as before. This is native
+enhanced AI, not retail parity. The
 rest walk to the nearest pod array and drop (the arrays'
 titan_pod_array_1_ai template makes them vehicles to the AI). Boarding the
 enemy Titan and attacking its consoles and core has no AI to rewrite.

@@ -3486,7 +3486,11 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 		p.targetTopSpeed = 0; // the follow's setTarget(none), 0x005ed260
 		p.armed = false;
 	}
+	// The update sets the follow's target every tick (0x005b4047) and
+	// setTarget (0x005ed260) marks it new only when it changed: a turn
+	// after a later tick is capped again.
 	if (!followActive(p)) {
+		p.newTarget = false;
 		return;
 	}
 	if (const world::Object* target = p.lockedOn ? m_objects.find(p.lockedOn) : nullptr) {
@@ -3494,8 +3498,8 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 		armFollow(p, body ? std::sqrt(physics::lengthSquared(body->body.velocity)) : 0.0f, overridesArming(p));
 		p.followTurned = followStep(p, {target->position().x, target->position().y, target->position().z},
 			body ? body->body.velocity : physics::Vec3 {}, seconds, p.newTarget);
-		p.newTarget = false;
 	}
+	p.newTarget = false;
 }
 
 // overrideArmingSpeed of the round's target (TargetObject +0x2a7 through

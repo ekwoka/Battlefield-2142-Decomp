@@ -528,6 +528,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		float pitch = -0.2f;
 		float turn = 0;
 		bool drivingNow = false; // last frame's seat: a driver's mouse pitch is not clamped like a soldier's
+		std::optional<float> lastVehicleCameraPitch;
 		input::PlayWheel playWheel; // the mouse wheel in play (IDAxis_2), since the last input
 		// The game controllers, opened as SDL reports them.
 		std::unique_ptr<input::SdlGameControllers> sdlControllers;
@@ -839,8 +840,16 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				down.seconds = dt;
 				ViewerOptions::PlayerView view;
 				const bool driving = options.playerView && options.playerView(view) && view.driving;
-				if (drivingNow && !driving) pitch = clampLookPitch(pitch, firstPerson, false);
+				if (drivingNow && !driving) {
+					pitch = infantryPitchAfterVehicleExit(pitch, drivingNow, driving, lastVehicleCameraPitch);
+					pitch = clampLookPitch(pitch, view.firstPerson, false);
+				}
 				drivingNow = driving;
+				if (driving) {
+					lastVehicleCameraPitch = view.firstPerson || view.external ? std::optional<float> {view.eyePitch} : std::nullopt;
+				} else {
+					lastVehicleCameraPitch.reset();
+				}
 				if (options.takeAimKick) {
 					// Not the soldier's limit while driving: it pinned the pilot's pitch input (the gunship's nose-up).
 					pitch = clampLookPitch(pitch + options.takeAimKick() / 57.29578f, firstPerson, driving);

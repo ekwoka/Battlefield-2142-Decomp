@@ -957,6 +957,49 @@ TEST(Hud_MapMarkerOffset)
 	}
 }
 
+TEST(Hud_MapScaledVehicleFootprint)
+{
+	for (const bool full : {false, true}) {
+		Console console;
+		hud::HudManager manager(nullptr);
+		hud::registerHudConsoleMethods(console, manager);
+		std::string out;
+		for (const char* line : {
+				 "hudBuilder.createMapNode Global Minimap",
+				 "hudBuilder.setMaxiPos -256/-256",
+				 "hudBuilder.setMaxiSize 512/512",
+				 "hudBuilder.setMiniPos -100/-100",
+				 "hudBuilder.setMiniSize 200/200",
+				 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 }) {
+			CHECK(console.execute(line, out) == ConsoleResult::Ok);
+		}
+		manager.setMap("map.dds", -1024, -1024, 2048, 2048);
+		manager.setMapFocus(0, 0);
+		manager.setMapZoom(2);
+		manager.setMapInVehicle(true);
+		manager.set("MapFullSize", full ? 1 : 0);
+		hud::HudManager::MapMarker titan {"titan.dds", 0, 0, 20, 90};
+		titan.height = 35;
+		titan.offsetX = 0.94f;
+		titan.offsetY = 8;
+		titan.zoomWithMap = true;
+		manager.setMapMarkers({titan, {"gunship.dds", 0, 0, 16}});
+		const auto quads = manager.frame(0);
+		CHECK(quads.size() == 3);
+		if (quads.size() != 3) continue;
+		const auto& ship = quads[1];
+		const auto& aircraft = quads[2];
+		const float scale = 0.7f * (full ? 512 : 200 * std::pow(2.3f, 2)) / 512;
+		CHECK(ship.x1 - ship.x0 == std::floor(20 * scale));
+		CHECK(ship.y1 - ship.y0 == std::floor(35 * scale));
+		CHECK(ship.pivotSet && ship.rotation == 90);
+		CHECK(std::abs(ship.pivot[0] - ((ship.x0 + ship.x1) / 2 - 0.94f * scale)) < 0.001f);
+		CHECK(std::abs(ship.pivot[1] - ((ship.y0 + ship.y1) / 2 - 8 * scale)) < 0.001f);
+		CHECK(aircraft.x1 - aircraft.x0 == 16 && aircraft.y1 - aircraft.y0 == 16);
+	}
+}
+
 TEST(Hud_PlayerMapHeading)
 {
 	Console console;

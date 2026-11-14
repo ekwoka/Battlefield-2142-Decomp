@@ -1727,7 +1727,7 @@ void HudManager::shownArea(float refX, float refY, float area[4]) const
 // covers the node; it is cut to the node and drawn white at the map's
 // transparency (0x7b0: MenuMapAlpha while playing, else 1; below).
 //
-// Markers (0x0077c610) keep their pixel size at every zoom: a marker's
+// Ordinary markers (0x0077c610) keep their pixel size at every zoom: a marker's
 // rectangle is floor(its point - size / 2) by floor(size) (the exe takes
 // a further half pixel off each for Direct3D 9's pixel centres), turned
 // by its yaw and cut to the node.
@@ -1903,13 +1903,20 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			sx = centreX + dx * c + dy * s;
 			sy = centreY + dy * c - dx * s;
 		}
-		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size;
+		// 0x0077bdd0: zoomOnMinimap forces the vehicle's size AND offset
+		// through current map size / maxi size, with the relation's 0.7
+		// scale (0x00785836). Fixed-size aircraft must not drift off its deck.
+		const float scaleX = marker.zoomWithMap ? 0.7f * mapW / m_mapReference[0] : 1.0f;
+		const float scaleY = marker.zoomWithMap ? 0.7f * mapH / m_mapReference[1] : 1.0f;
+		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX;
+		const float height = marker.height > 0 ? marker.height * scaleY : pixels;
+		const float offsetX = marker.offsetX * scaleX, offsetY = marker.offsetY * scaleY;
 		const float side = std::floor(pixels);
-		const float tall = marker.height > 0 ? std::floor(marker.height) : side;
+		const float tall = std::floor(height);
 		// 0x0077c610: the rectangle at floor(point + offset - size / 2), turned
 		// about its centre less the offset (the point).
-		const float x0 = std::floor(sx + marker.offsetX - pixels * 0.5f);
-		const float y0 = std::floor(sy + marker.offsetY - (marker.height > 0 ? marker.height : pixels) * 0.5f);
+		const float x0 = std::floor(sx + offsetX - pixels * 0.5f);
+		const float y0 = std::floor(sy + offsetY - height * 0.5f);
 		if (x0 + side <= nx || x0 >= nx + nw || y0 + tall <= ny || y0 >= ny + nh) {
 			continue;
 		}
@@ -1919,8 +1926,8 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
 			q.pivotSet = true;
-			q.pivot[0] = x0 + side * 0.5f - marker.offsetX;
-			q.pivot[1] = y0 + tall * 0.5f - marker.offsetY;
+			q.pivot[0] = x0 + side * 0.5f - offsetX;
+			q.pivot[1] = y0 + tall * 0.5f - offsetY;
 		}
 		if (!clipTo(q, nx, ny, nx + nw, ny + nh)) {
 			continue;

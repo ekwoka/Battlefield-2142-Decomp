@@ -1148,6 +1148,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		icon.height = look.height;
 		icon.offsetX = look.offsetX;
 		icon.offsetY = look.offsetY;
+		icon.zoomWithMap = icons.zoomOnMinimap;
 		const auto color = dice::hfe::menu::mapRelationColor(relation);
 		std::copy(color.begin(), color.end(), icon.color);
 		markers.push_back(icon);

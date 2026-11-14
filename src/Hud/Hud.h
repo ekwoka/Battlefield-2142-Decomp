@@ -218,7 +218,7 @@ public:
 	struct MapMarker {
 		std::string texture; // under Menu/HUD/Texture/
 		float x, z;          // world position
-		float size;          // pixels (fixed: icons don't scale with the zoom)
+		float size;          // HUD pixels, unless worldSize or zoomWithMap is set
 		float yaw = 0;       // degrees, clockwise (0 points north)
 		float color[4] = {1, 1, 1, 1};
 		int id = -1;         // >= 0: clickable (mapMarkerAt returns it)
@@ -240,6 +240,8 @@ public:
 		// false: drawn at its own alpha, not the map's icon alpha (a
 		// call's marker on a teammate, 0x007841e0).
 		bool iconAlpha = true;
+		// vehicleHud.zoomOnMinimap: size and offset follow the map projection.
+		bool zoomWithMap = false;
 	};
 	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
 	static constexpr float kSpawnMarkerSize = 16.0f;

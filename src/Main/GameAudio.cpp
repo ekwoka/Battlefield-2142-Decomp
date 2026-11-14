@@ -509,9 +509,49 @@ void GameAudio::stepNewStyle(NewStyleEngine& e, bool on, float clutch, float rpm
 	}
 }
 
+// 0x00564710 with its own-speed flag clear: a zero value stops the easing
+// at once; above 1e-4 a silent sound starts from 1e-4; while playing the
+// value follows |audioValue| through 0x006afeb0 (smooth time
+// rotationalbundle-sound-smooth-time 0.15, a step of 1/30 s), clamped to
+// 0..1, and stops below 5e-5.
+bool GameAudio::stepRotationSound(RotationSound& s, float audioValue)
+{
+	const float target = std::fabs(audioValue);
+	if (audioValue == 0) {
+		s.value = 0;
+		s.speed = 0;
+	}
+	if (!s.playing && target > 1e-4f) {
+		s.playing = true;
+		s.value = 1e-4f;
+	}
+	if (!s.playing) {
+		return false;
+	}
+	const float omega = 2.0f / Vars::global().number("rotationalbundle-sound-smooth-time", 0.15f);
+	const float dt = 1.0f / 30;
+	const float x = omega * dt;
+	const float decay = 1.0f / (1 + x + 0.48f * x * x + 0.235f * x * x * x);
+	float change = s.value - target;
+	if (std::fabs(change) < 1e-4f) {
+		change = 0;
+	}
+	const float temp = (s.speed + omega * change) * dt;
+	s.speed = (s.speed - omega * temp) * decay;
+	if (std::fabs(s.speed) < 1e-4f) {
+		s.speed = 0;
+	}
+	s.value = std::clamp(target + (change + temp) * decay, 0.0f, 1.0f);
+	if (s.value < 5e-5f) {
+		s = RotationSound {};
+	}
+	return s.playing;
+}
+
 void GameAudio::engines()
 {
 	std::set<uint32_t> aboard;
+	std::set<uint64_t> rotating;
 	std::map<uint32_t, physics::Vec3> speeds;
 	for (const auto& player : m_round.playerList()) {
 		if (player.alive && player.vehicle) {
@@ -565,15 +605,22 @@ void GameAudio::engines()
 				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, e.input, id);
 				continue;
 			}
-			// The old style: |rpm| x 0.8333 for all. shortcut: RotationRpm (the gunships' air_distant
-			// whoosh). Retail (0x005630b4 creates it, 0x00564840 steps it) feeds both envelopes a
-			// critically damped (0.0333 s) ratio of the part's rotation speed to its template
-			// maxSpeed, plays above 1e-4 and stops below 5e-5; engine rpm stands in for that ratio.
+			// The old style: |audio value| x 0.8333 for Idle, Rpm1 and Rpm2 (0x007fe740). RotationRpm
+			// (the aircraft's air_distant whoosh) gets the engine's audio value itself, eased
+			// (0x0064cb80 -> 0x00564710).
 			const float input = std::fabs(rpm * 0.8333333f);
-			for (const char* loop : {"_Idle", "_Rpm1", "_Rpm2", "_RotationRpm"}) {
+			for (const char* loop : {"_Idle", "_Rpm1", "_Rpm2"}) {
 				m_sounds.loop(owner, "S_" + part.name + loop, at, {}, input, id);
 			}
+			RotationSound& rotation = m_rotationSounds[owner];
+			if (stepRotationSound(rotation, rpm)) {
+				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, rotation.value, id);
+			}
+			rotating.insert(owner);
 		}
+	}
+	for (auto it = m_rotationSounds.begin(); it != m_rotationSounds.end();) {
+		it = rotating.count(it->first) ? std::next(it) : m_rotationSounds.erase(it);
 	}
 }
 

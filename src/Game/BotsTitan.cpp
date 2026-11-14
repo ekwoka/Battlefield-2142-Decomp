@@ -198,8 +198,12 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 
 // Each cell's cost to a spot that sees the point (in the Titan's frame)
 // from kFireNear..kFireFar; without such a spot, to the cells nearest it.
+// Entry fields instead end inside the authored interaction sphere. With
+// `around`, the cells under that object's collision box (an aircraft parked
+// on the deck, which the grid was built without) are walked out of but not
+// through.
 const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::TitanInfo& titan, int team, uint32_t part,
-	const physics::Vec3& point, bool nearestOnly)
+	const physics::Vec3& point, bool nearestOnly, float entryRadius, uint32_t around)
 {
 	const auto found = g.fields.find(part);
 	if (found != g.fields.end()) {
@@ -207,6 +211,14 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 	}
 	std::vector<float>& field = g.fields[part];
 	field.assign(g.cells.size(), kInfinity);
+	std::vector<char> blocked(g.cells.size(), 0);
+	if (physics::Vec3 low, high; around && m_world.objectBox(around, low, high)) {
+		for (size_t c = 0; c < g.cells.size(); ++c) {
+			const physics::Vec3 at = m_world.titanToLocal(around, m_world.titanToWorld(titan.object, g.cells[c].at + physics::Vec3 {0, 1, 0}));
+			blocked[c] = at.x > low.x - 0.5f && at.x < high.x + 0.5f && at.z > low.z - 0.5f && at.z < high.z + 0.5f
+				&& at.y > low.y - 2 && at.y < high.y + 1;
+		}
+	}
 	using Entry = std::pair<float, int>;
 	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
 	float nearest = 1e9f;
@@ -214,24 +226,32 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 	for (size_t c = 0; c < g.cells.size(); ++c) {
 		const physics::Vec3 eye = g.cells[c].at + physics::Vec3 {0, 1.5f, 0};
 		const float d = std::sqrt(physics::lengthSquared(point - eye));
+		if (blocked[c]) {
+			continue;
+		}
 		if (d < nearest && !g.cells[c].out.empty()) {
 			nearest = d;
 			nearestCell = static_cast<int>(c);
 		}
 		float f = 1;
-		if (!nearestOnly && d >= kFireNear && d <= kFireFar && (!m_world.titanLocalRay(titan.object, team, eye, point, f) || f * d > d - 1.0f)) {
+		// Leave room for cellAt's snap: reaching a terminal cell must also
+		// put the actual soldier inside the interaction sphere.
+		const float reach = std::max(0.0f, entryRadius - kCell);
+		const bool inEntry = entryRadius > 0
+			&& physics::lengthSquared(point - (g.cells[c].at + physics::Vec3 {0, 1, 0})) <= reach * reach;
+		if (inEntry || (!nearestOnly && d >= kFireNear && d <= kFireFar && (!m_world.titanLocalRay(titan.object, team, eye, point, f) || f * d > d - 1.0f))) {
 			field[c] = 0;
 			open.push({0, static_cast<int>(c)});
 		}
 	}
-	if (open.empty() && nearestCell >= 0) {
+	if (open.empty() && nearestCell >= 0 && entryRadius <= 0) {
 		field[static_cast<size_t>(nearestCell)] = 0;
 		open.push({0, nearestCell});
 	}
 	while (!open.empty()) {
 		const auto [cost, c] = open.top();
 		open.pop();
-		if (cost > field[static_cast<size_t>(c)]) {
+		if (cost > field[static_cast<size_t>(c)] || (blocked[static_cast<size_t>(c)] && cost > 0)) {
 			continue;
 		}
 		for (const auto& [from, step] : g.cells[static_cast<size_t>(c)].in) {
@@ -251,6 +271,25 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 			point.x, point.y, point.z, zero, reach, field.size(), nearest);
 	}
 	return field;
+}
+
+bool BotManager::titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
+	const physics::Vec3& entry, float radius, int seat)
+{
+	if (!m_settings.titanPlay()) {
+		return false;
+	}
+	const auto titans = m_world.titans();
+	const auto* titan = titanOf(titans, self.team);
+	if (!titan) {
+		return false;
+	}
+	TitanGrid& grid = titanGrid(*titan, self.team);
+	// Gun-seat fields have their own keys, separate from object/boarder fields.
+	const auto& field = titanField(grid, *titan, self.team, 0x40000000u + static_cast<uint32_t>(seat),
+		m_world.titanToLocal(titan->object, entry), true, radius);
+	bot.behaviour = "TitanGun";
+	return titanWalk(bot, self, input, seconds, grid, *titan, field);
 }
 
 bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
@@ -720,6 +759,9 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 		}
 		return fly(bot, self, input, seconds);
 	}
+	if (titanSortie(bot, self, input, seconds)) {
+		return true;
+	}
 	if (!titanPodReady(self)) {
 		return false;
 	}
@@ -739,6 +781,271 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 		}
 	}
 	return false;
+}
+
+// The deck aircraft of its own Titan for a bot on foot aboard it, or null.
+// In order: a pilot for the gunship, then for the transport; the gunship's
+// gunner once its pilot sits; riders for the transport while its pilot
+// waits on the deck. Each seat is claimed by one bot walking to it (the
+// claim it has kept first).
+const GameWorld::VehicleInfo* BotManager::titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home)
+{
+	const Bot& me = m_bots[self.id];
+	const GameWorld::VehicleInfo* best = nullptr;
+	int bestRank = 4;
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		const world::Object* o = m_world.objects().find(v.object);
+		if (!v.working || v.freeSeats <= 0 || !aboard(home, v.position) || !o || !o->objectTemplate() || (o->team() != 0 && o->team() != self.team)
+			|| !(m_settings.typeFlags(aiTemplateOf(o->objectTemplate()->name())) & kITAir)
+			|| (me.titanCrewSkipFor == v.object && m_time < me.titanCrewSkipUntil)) {
+			continue;
+		}
+		const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(v.object);
+		if (seats.empty()) {
+			continue;
+		}
+		const bool transport = podSeat(seats[0]);
+		const std::vector<int> occupants = m_world.vehicleOccupants(v.object);
+		const int pilot = occupants.empty() ? -1 : occupants[0];
+		const bool parked = std::sqrt(physics::lengthSquared(v.velocity - home.velocity)) < 2;
+		int claims = 0;
+		for (const auto& [id, other] : m_bots) {
+			const GameWorld::PlayerInfo* mate = id == self.id || other.titanCrew != v.object ? nullptr : playerOf(id);
+			claims += mate && mate->team == self.team && mate->alive && !mate->vehicle;
+		}
+		int rank = 4, wanted = 0;
+		if (pilot < 0) {
+			// Its pilot first; then, while the pilot is still on the way,
+			// the gunner or the riders.
+			rank = (transport ? 1 : 0) + (claims > 0 ? 2 : 0);
+			wanted = v.freeSeats;
+		} else if (!parked) {
+			continue;
+		} else if (!transport) {
+			rank = 2;
+			wanted = 1;
+		} else {
+			const auto flier = m_bots.find(pilot);
+			if (flier == m_bots.end() || flier->second.titanSortie != 0) {
+				continue;
+			}
+			rank = 3;
+			wanted = v.freeSeats;
+		}
+		if (claims >= wanted) {
+			continue;
+		}
+		if (me.titanCrew == v.object) {
+			return &v;
+		}
+		if (rank < bestRank) {
+			bestRank = rank;
+			best = &v;
+		}
+	}
+	return best;
+}
+
+// A bot on foot aboard its own Titan, past the guns' share: to the deck
+// aircraft it crews, over the Titan's grid, and in (the use key beside it;
+// the first free seat is the pilot's while no one flies it). Given up after
+// a minute on the way, that aircraft not tried again for two.
+bool BotManager::titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
+{
+	if (!m_settings.titanPlay() || m_world.gameMode() != "gpm_ti" || self.vehicle) {
+		bot.titanCrew = 0;
+		return false;
+	}
+	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
+	const GameWorld::TitanInfo* home = titanOf(titans, self.team);
+	const GameWorld::VehicleInfo* v = home && aboard(*home, self.position) ? titanAircraft(self, *home) : nullptr;
+	if (!v) {
+		bot.titanCrew = 0;
+		return false;
+	}
+	if (bot.titanCrew != v->object) {
+		bot.titanCrew = v->object;
+		bot.titanCrewSince = m_time;
+	} else if (m_time - bot.titanCrewSince > 60) {
+		bot.titanCrewSkipFor = v->object;
+		bot.titanCrewSkipUntil = m_time + 120;
+		bot.titanCrew = 0;
+		return false;
+	}
+	TitanGrid& g = titanGrid(*home, self.team);
+	bot.behaviour = "TitanCrew";
+	// Its authored entry point (entry is within the point's radius of the
+	// body, which on a raised pad the centre is too high or far to give).
+	physics::Vec3 entry = v->position;
+	m_world.entryPoint(v->object, entry);
+	// Around the aircraft to an entry off its middle (the gunships' is 5 m
+	// behind it), straight to one at its middle (the transports' cabin).
+	const bool outside = horizontal(entry - v->position) > 3;
+	const physics::Vec3 d = entry - self.position;
+	input.use = (physics::lengthSquared(d) < 9 || (horizontal(d) < 7 && std::fabs(d.y) < 5)) && std::fmod(m_time, 0.6f) < 0.1f;
+	titanWalk(bot, self, input, seconds, g, *home,
+		titanField(g, *home, self.team, 0x20000000u ^ v->object, m_world.titanToLocal(home->object, entry), true, 0, outside ? v->object : 0));
+	return true;
+}
+
+// A transport of its own Titan's deck while the enemy's shield is up (with
+// it down, titanPod's boarding run): its pilot waits 6..18 s on the deck for
+// riders (on while one of them is still walking to it, 20 s at most), with
+// one aboard flies to the nearest silo the team doesn't hold, high on the
+// way and 30 m over it, waits there until the riders are out (15 s at most)
+// and lands back on its Titan's deck. Its riders leave by pod (the exit key) over
+// such a silo; with no pilot, at once.
+bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
+{
+	const world::Object* object = m_world.objects().find(self.vehicle);
+	const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(self.vehicle);
+	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
+	const GameWorld::TitanInfo* home = titanOf(titans, self.team);
+	if (!home || !object || !object->objectTemplate() || seats.empty()
+		|| !(m_settings.typeFlags(aiTemplateOf(object->objectTemplate()->name())) & kITAir)) {
+		bot.titanSortie = 0;
+		return false;
+	}
+	const std::vector<int> occupants = m_world.vehicleOccupants(self.vehicle);
+	const std::vector<GameWorld::SiloInfo> silos = m_world.missileSilos();
+	if (!podSeat(seats[0])) {
+		// A gunship from the deck: off it and 200 m clear of the Titan (high,
+		// toward the nearest silo the team doesn't hold, else ahead of the
+		// Titan), then the ordinary pilot's. On the deck that one waits
+		// while soldiers are near, and the Titan's crew always is.
+		bot.titanSortie = self.driving && horizontal(self.position - home->position) < 200
+			&& (bot.titanSortie == 1 || aboard(*home, self.position)) ? 1 : 0;
+		if (!bot.titanSortie) {
+			return false;
+		}
+		const GameWorld::SiloInfo* best = nullptr;
+		for (const GameWorld::SiloInfo& silo : silos) {
+			if (silo.team != self.team && (!best || horizontal(silo.position - self.position) < horizontal(best->position - self.position))) {
+				best = &silo;
+			}
+		}
+		const physics::Vec3 to = best ? best->position : m_world.titanToWorld(home->object, {0, 0, 400});
+		bot.behaviour = "TitanTakeoff";
+		bot.titanFlyTo = {to.x, std::max(m_world.terrainHeight(to.x, to.z) + 70, m_world.titanToWorld(home->object, {0, 40, 0}).y), to.z};
+		bot.titanFlyMode = 4;
+		return fly(bot, self, input, seconds);
+	}
+	const bool onDeck = aboard(*home, self.position);
+	if (!self.driving) {
+		const bool pilot = !occupants.empty() && occupants[0] >= 0;
+		if (onDeck && pilot) {
+			bot.behaviour = "TitanSortie";
+			return true; // seated until it is off
+		}
+		if (onDeck) {
+			return false;
+		}
+		bool over = !pilot;
+		for (const GameWorld::SiloInfo& silo : silos) {
+			over = over || (silo.team != self.team && horizontal(silo.position - self.position) < 40
+				&& self.position.y - m_world.terrainHeight(self.position.x, self.position.z) > 12);
+		}
+		bot.behaviour = "TitanSortie";
+		input.use = over && std::fmod(m_time, 1.0f) < 0.1f;
+		return true;
+	}
+	const auto riders = std::count_if(occupants.begin() + 1, occupants.end(), [](int r) { return r >= 0; });
+	const physics::Vec3 relative = self.velocity - home->velocity;
+	if (bot.titanWaitFor != self.vehicle) {
+		bot.titanWaitFor = self.vehicle;
+		bot.titanWaitUntil = m_time + 6 + 12 * random();
+		bot.titanSortie = onDeck ? 0 : 2;
+		if (onDeck) {
+			bot.titanPad = m_world.titanToLocal(home->object, self.position);
+		}
+	}
+	const auto siloOf = [&](int point) -> const GameWorld::SiloInfo* {
+		for (const GameWorld::SiloInfo& silo : silos) {
+			if (silo.controlPoint == point && silo.team != self.team) {
+				return &silo;
+			}
+		}
+		return nullptr;
+	};
+	const auto nearestSilo = [&]() -> const GameWorld::SiloInfo* {
+		const GameWorld::SiloInfo* best = nullptr;
+		for (const GameWorld::SiloInfo& silo : silos) {
+			if (silo.team != self.team && (!best || horizontal(silo.position - self.position) < horizontal(best->position - self.position))) {
+				best = &silo;
+			}
+		}
+		return best;
+	};
+	bot.behaviour = "TitanSortie";
+	if (bot.titanSortie == 0) {
+		bool coming = false;
+		for (const auto& [id, other] : m_bots) {
+			const GameWorld::PlayerInfo* mate = id == self.id || other.titanCrew != self.vehicle ? nullptr : playerOf(id);
+			coming = coming || (mate && mate->team == self.team && mate->alive && !mate->vehicle);
+		}
+		const int free = static_cast<int>(std::count(occupants.begin(), occupants.end(), -1)) + static_cast<int>(seats.size() - std::min(seats.size(), occupants.size()));
+		const bool go = riders > 0 && (free == 0 || m_time >= bot.titanWaitUntil + (coming ? 20 : 0));
+		const GameWorld::SiloInfo* silo = go ? nearestSilo() : nullptr;
+		if (!silo) {
+			if (onDeck) {
+				bot.titanFlyMode = 1;
+			} else {
+				bot.titanSortie = 2;
+			}
+		} else {
+			bot.titanSortie = 1;
+			bot.titanSortieSilo = silo->controlPoint;
+			bot.titanSortieUntil = 0;
+		}
+	}
+	if (bot.titanSortie == 1) {
+		const GameWorld::SiloInfo* silo = siloOf(bot.titanSortieSilo);
+		if (!silo && riders > 0 && (silo = nearestSilo())) {
+			bot.titanSortieSilo = silo->controlPoint;
+		}
+		if (!silo) {
+			bot.titanSortie = 2;
+		} else {
+			const float d = horizontal(silo->position - self.position);
+			if (d < 40 && bot.titanSortieUntil <= 0) {
+				bot.titanSortieUntil = m_time + 15;
+			}
+			if (bot.titanSortieUntil > 0 && (riders == 0 || m_time > bot.titanSortieUntil)) {
+				bot.titanSortie = 2;
+				bot.titanFlyDown = false;
+			} else {
+				// Over the Titan until clear of it: below its deck the pilot
+				// only presses down onto it.
+				const float clear = horizontal(self.position - home->position) < 200 ? m_world.titanToWorld(home->object, {0, 40, 0}).y : 0.0f;
+				bot.titanFlyTo = {silo->position.x,
+					std::max(clear, m_world.terrainHeight(silo->position.x, silo->position.z) + (d > 150 ? 70.0f : 30.0f)), silo->position.z};
+				bot.titanFlyMode = 4;
+			}
+		}
+	}
+	if (bot.titanSortie == 2) {
+		const physics::Vec3 pad = m_world.titanToWorld(home->object, bot.titanPad);
+		const float d = horizontal(pad - self.position);
+		const float up = self.position.y - pad.y;
+		// Down anywhere on the deck (the hover drifts as it sinks) is home:
+		// that spot its pad from now on.
+		if ((d < 8 || onDeck) && up < 4 && physics::lengthSquared(relative) < 4) {
+			bot.titanPad = m_world.titanToLocal(home->object, self.position);
+			bot.titanSortie = 0;
+			bot.titanWaitUntil = m_time + 6 + 12 * random();
+			bot.titanFlyMode = 3;
+		} else {
+			// Down once over the pad, and on down while within 60 m of it (the hover drifts).
+			bot.titanFlyDown = d < 60 && (bot.titanFlyDown || d < 20);
+			bot.titanFlyTo = pad + physics::Vec3 {0, bot.titanFlyDown ? 1.5f : d > 150 ? 25.0f + 30 * self.team : 45.0f, 0};
+			bot.titanFlyMode = d > 150 ? 4 : 2;
+		}
+	}
+	if (static std::map<int, float> last; std::getenv("BF2142_BOT_STATS") && m_time - last[self.id] > 5 && (last[self.id] = m_time, true)) { // DIAG
+		std::fprintf(stderr, "sortie %d t %.0f state %d mode %d riders %ld at %.0f %.0f %.0f to %.0f %.0f %.0f\n", self.id, m_time, bot.titanSortie, bot.titanFlyMode,
+			static_cast<long>(riders), self.position.x, self.position.y, self.position.z, bot.titanFlyTo.x, bot.titanFlyTo.y, bot.titanFlyTo.z);
+	}
+	return fly(bot, self, input, seconds);
 }
 
 // The team's plan, made anew every 5 s (the virtual commander). Squads

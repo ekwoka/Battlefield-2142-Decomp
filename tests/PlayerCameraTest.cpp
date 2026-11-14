@@ -4,6 +4,7 @@
 #include "Animation/AnimationSystem.h"
 #include "Game/GameWorld.h"
 #include "Main/PlayerCamera.h"
+#include "Main/Viewer.h"
 #include "Main/MissileViewSmoothing.h"
 #ifdef BF2142_RENDER_TESTS
 #include "Render/LevelRenderer.h"
@@ -15,6 +16,16 @@
 #include <cmath>
 
 using namespace dice::hfe;
+
+TEST(PlayerCamera_ExitAdoptsLastVehicleViewPitch)
+{
+	const float seatedPitch = 10.0f * 3.14159265f / 180.0f;
+	const float oldAimPitch = -75.0f * 3.14159265f / 180.0f;
+	CHECK(infantryPitchAfterVehicleExit(oldAimPitch, true, false, seatedPitch) == seatedPitch);
+	CHECK(infantryPitchAfterVehicleExit(oldAimPitch, true, false, std::nullopt) == oldAimPitch);
+	CHECK(infantryPitchAfterVehicleExit(oldAimPitch, true, true, seatedPitch) == oldAimPitch);
+	CHECK(infantryPitchAfterVehicleExit(oldAimPitch, false, false, seatedPitch) == oldAimPitch);
+}
 
 TEST(PlayerCamera_JoinedSeatZooms)
 {

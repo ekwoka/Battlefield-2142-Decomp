@@ -2,6 +2,7 @@ add_executable(bf2142_tests TestMain.cpp MemoryTest.cpp SoundEngineTest.cpp Game
 target_link_libraries(bf2142_tests PRIVATE Memory SoundEngine GameSound IO Console Geometry Texture Animation Game Stats Physics World Terrain Effects Hud Input Net AI UI SwfCharacters SwfPlayer Avm1 Voip VoipMenu Movie)
 target_sources(bf2142_tests PRIVATE MouseCaptureTest.cpp)
 target_sources(bf2142_tests PRIVATE EnhancedRenderTest.cpp)
+target_sources(bf2142_tests PRIVATE TitanBotsTest.cpp)
 if(TARGET Render)
 	target_link_libraries(bf2142_tests PRIVATE Render)
 	target_compile_definitions(bf2142_tests PRIVATE BF2142_RENDER_TESTS=1)

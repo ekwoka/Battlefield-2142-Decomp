@@ -1800,14 +1800,27 @@ void BotManager::update(float seconds)
 		}
 		bot.titanGun = toGun ? gunSeat : -1;
 		if (toGun) {
-			const physics::Vec3 d = podEntry - self->position;
+			// Use the same physics origin and authored radius as vehicle entry.
+			// The console's centre can be inside solid geometry.
+			const physics::Vec3 d = podEntry - (self->position + physics::Vec3 {0, kChestHeight, 0});
 			const float want = std::atan2(d.x, d.z) * 57.29578f;
 			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);
 			input.throttle = std::fabs(std::remainder(want - self->yaw, 360.0f)) < 45 ? 1.0f : 0.0f;
-			input.use = physics::lengthSquared(d) < podRadius * podRadius * 0.5f && !bot.usedLast;
+			input.use = physics::lengthSquared(d) <= podRadius * podRadius && !bot.usedLast;
+			if (!input.use) {
+				titanGunWalk(bot, *self, input, elapsed, podEntry, podRadius, gunSeat);
+			}
 			bot.usedLast = input.use;
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
+			continue;
+		}
+		// enhanced.botTitan: past the guns' share, its Titan's deck gunship and transport.
+		if (titanCrew(bot, *self, input, elapsed)) {
+			bot.usedLast = input.use;
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			m_behaviourSeconds[bot.behaviour] += elapsed;
 			continue;
 		}
 		if (m_world.titanPodEntry(self->id, podEntry, podRadius)) {
@@ -3239,8 +3252,8 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	GameWorld::PlayerInfo target;
 	const bool fighting = pattern == "BBPHeliFire3d" && bot.target >= 0 && m_world.playerInfo(bot.target, target)
 		&& target.alive;
-	if (titanMode == 2) {
-		pilot.flyTo(toAi(bot.titanFlyTo), 0);
+	if (titanMode == 2 || titanMode == 4) {
+		pilot.flyTo(toAi(bot.titanFlyTo), titanMode == 4 ? 30.0f : 0.0f);
 	} else if (titanMode == 1) {
 		pilot.flyTo(toAi(at), 0);
 		bot.heli.controls.throttle = 0; // as the take-off wait below

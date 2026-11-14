@@ -19,6 +19,12 @@ class GameControllers;
 
 namespace dice::hfe {
 
+inline float infantryPitchAfterVehicleExit(float pitch, bool wasDriving, bool driving,
+	std::optional<float> lastVehicleCameraPitch)
+{
+	return wasDriving && !driving && lastVehicleCameraPitch ? *lastVehicleCameraPitch : pitch;
+}
+
 struct ViewerOptions {
 	std::string screenshot; // render one frame to this PNG instead of opening a window
 	int width = 1280;

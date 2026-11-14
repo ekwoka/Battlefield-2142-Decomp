@@ -2932,6 +2932,78 @@ TEST(Titan_MapListIncludesAuthoredSilhouette)
  }
 }
 
+TEST(Titan_MapFootprintContainsParkedGunship)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		const char* name = std::string(mod) == "mods/bf2142" ? "Suez_Canal" : "Bridge_at_Remagen";
+		TitanLevel level(dir, name, 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		level.run(3);
+		const auto vehicles = level.world->vehicleList();
+		for (const auto& titan : level.world->titans()) {
+			const auto* object = level.objects.find(titan.object);
+			CHECK(object && object->objectTemplate());
+			if (!object || !object->objectTemplate()) continue;
+			const auto gunship = std::find_if(vehicles.begin(), vehicles.end(), [&](const auto& v) {
+				const auto* aircraft = level.objects.find(v.object);
+				const auto* t = aircraft ? aircraft->objectTemplate() : nullptr;
+				return t && t->name() == (titan.team == 1 ? "as_ag" : "us_ag");
+			});
+			CHECK(gunship != vehicles.end());
+			if (gunship == vehicles.end()) continue;
+			for (const bool full : {false, true}) {
+				for (const bool inside : {false, true}) {
+					Console console;
+					hud::HudManager manager(nullptr);
+					hud::registerHudConsoleMethods(console, manager);
+					std::string out;
+					for (const char* line : {
+							 // SpawnInterface/HudElementsMap.con's geometry (both mods).
+							 "hudBuilder.createMapNode Global Minimap",
+							 "hudBuilder.setMaxiPos -122/-271",
+							 "hudBuilder.setMaxiSize 512/512",
+							 "hudBuilder.setMiniPos 245/-291",
+							 "hudBuilder.setMiniSize 146/146",
+							 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+						 }) {
+						CHECK(console.execute(line, out) == ConsoleResult::Ok);
+					}
+					const auto* ground = level.heightmaps.primary();
+					manager.setMap("map.dds", ground->originX(), ground->originZ(), ground->worldWidth(), ground->worldDepth());
+					manager.setMapFocus(titan.position.x, titan.position.z);
+					manager.setMapArea(titan.position.x - 256, titan.position.z - 256,
+						titan.position.x + 256, titan.position.z + 256);
+					manager.setMapInVehicle(true);
+					manager.setMapZoom(1);
+					manager.set("MapFullSize", full ? 1 : 0);
+					menu::VehicleMarker look;
+					CHECK(menu::vehicleMarker(*object->objectTemplate(), menu::MapRelation::Friendly, inside, false, look));
+					hud::HudManager::MapMarker icon {look.texture, titan.position.x, titan.position.z, look.width, object->rotation().x};
+					icon.height = look.height;
+					icon.offsetX = look.offsetX;
+					icon.offsetY = look.offsetY;
+					icon.zoomWithMap = menu::mapIcons(*object->objectTemplate()).zoomOnMinimap;
+					manager.setMapMarkers({icon, {"gunship.dds", gunship->position.x, gunship->position.z, 16}});
+					const auto quads = manager.frame(0);
+					CHECK(quads.size() == 3);
+					if (quads.size() != 3) continue;
+					const auto& ship = quads[1];
+					const auto& aircraft = quads[2];
+					const float angle = -ship.rotation * 3.14159265f / 180;
+					const float dx = (aircraft.x0 + aircraft.x1) / 2 - ship.pivot[0];
+					const float dy = (aircraft.y0 + aircraft.y1) / 2 - ship.pivot[1];
+					const float x = ship.pivot[0] + dx * std::cos(angle) - dy * std::sin(angle);
+					const float y = ship.pivot[1] + dx * std::sin(angle) + dy * std::cos(angle);
+					CHECK(x >= ship.x0 && x <= ship.x1 && y >= ship.y0 && y <= ship.y1);
+				}
+			}
+		}
+	}
+}
+
 // The local map follows the active gun camera, including each seat's
 // authored mounting direction, instead of the Titan root's fixed yaw.
 TEST(Titan_GunMinimapHeadingFollowsCamera)
@@ -3841,10 +3913,15 @@ TEST(Titan_RemagenSoldierOnFootIsInsideTheLandArea)
 // within onlyDetonateOnMaterialTimeLimit 6.5 s (retail 0x005b51e6..0x005b5281, collision
 // handler 0x005b4ff0): a contact with another material that is no Titan's destroys that
 // object on the server and the round flies on; once the 6.5 s are over any contact sets it
-// off. Bridge at Remagen, PAC's silos at EU's Titan: cp602 passes two obstacles (4.8 s and
-// 6.1 s) and reaches the Titan at 9.2 s; cp604, 670 m from it, passes two (5.0 s, 5.9 s) and
-// goes off in the next obstacle at 7.7 s, 513 m short (the same at 3e8d211).
-TEST(Titan_SiloMissileFliesThroughObstaclesUntilItsTimeLimit)
+// off. Its follow lifts the 4/1 degree turn caps (magneticBehaviour) only on the tick its
+// target changed: the projectile update hands it the target every tick (0x005b4047),
+// setTarget (0x005ed260) raises +0x94 only for a new target, and the turn clears it
+// (0x005ecee7). The first turn, trackingDelay 3 s after the launch (0x005b2c84), is capped,
+// so the vertical climb bends over at 1 degree a tick instead of snapping flat at the Titan
+// and skimming the roofs. Bridge at Remagen, PAC's silos at EU's Titan: cp602 and cp603 (the
+// latter went off 394 m short when the first turn snapped) reach the Titan; cp604, 670 m
+// from it, still meets the tall bp1_residential_house_02_e after the 6.5 s.
+TEST(Titan_SiloMissileBendsOverGraduallyAndReachesTheTitan)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
@@ -3857,7 +3934,8 @@ TEST(Titan_SiloMissileFliesThroughObstaclesUntilItsTimeLimit)
 	struct Flight {
 		bool ended = false;
 		float endAge = 0, toTitan = -1;
-		int through = 0; // obstacles crossed 3 s to 6.5 s after the launch (the silo's own tube is at 1.1 s)
+		physics::Vec3 at3 {}, at35 {};
+		bool have3 = false, have35 = false;
 	};
 	const auto fly = [&](int controlPoint) {
 		const auto silos = level.world->missileSilos();
@@ -3878,8 +3956,13 @@ TEST(Titan_SiloMissileFliesThroughObstaclesUntilItsTimeLimit)
 					continue;
 				}
 				found = true;
-				if (have && p.age > 3 && p.age < 6.5f && !level.world->lineOfSight(last, p.position)) {
-					++flight.through;
+				if (!flight.have3 && p.age >= 3.0f) {
+					flight.at3 = p.position;
+					flight.have3 = true;
+				}
+				if (!flight.have35 && p.age >= 3.5f) {
+					flight.at35 = p.position;
+					flight.have35 = true;
 				}
 				last = p.position;
 				lastAge = p.age;
@@ -3900,12 +3983,16 @@ TEST(Titan_SiloMissileFliesThroughObstaclesUntilItsTimeLimit)
 		level.run(1);
 		return flight;
 	};
-	const Flight reaches = fly(602);
-	CHECK(reaches.ended && reaches.through >= 2);
-	CHECK(reaches.endAge > 8.5f && reaches.endAge < 10 && reaches.toTitan > 0 && reaches.toTitan < 100);
+	for (int controlPoint : {602, 603}) {
+		const Flight flight = fly(controlPoint);
+		CHECK(flight.ended && flight.have3 && flight.have35);
+		// Half a second into tracking it still climbs steeply.
+		const physics::Vec3 d = flight.at35 - flight.at3;
+		CHECK(d.y > 4 && d.y > 2 * std::sqrt(d.x * d.x + d.z * d.z));
+		CHECK(flight.endAge > 8.5f && flight.toTitan > 0 && flight.toTitan < 100);
+	}
 	const Flight blocked = fly(604);
-	CHECK(blocked.ended && blocked.through >= 2);
-	CHECK(blocked.endAge > 6.5f && blocked.endAge < 8.5f && blocked.toTitan > 300);
+	CHECK(blocked.ended && blocked.endAge > 6.5f && blocked.toTitan > 300);
 }
 
 // RendDX9's decal clip (0x10165f60 -> 0x101655c0) starts at the face the

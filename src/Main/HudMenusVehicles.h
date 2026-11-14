@@ -639,6 +639,8 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 //     (+0x74c) while the local player's overhead view is on (player slot
 //     0xdc, +0x8f, set with +0x8e by 0x00593840: the commander's overhead
 //     camera), whose picture shows the Titan itself.
+//     It also forces size and offset to scale with the projected map
+//     (0x00795379 -> 0x0077bdd0), rather than remaining fixed pixels.
 // The silo icons' files are numbered frames (mini_titanSilo_01..06,
 // mini_reload_01..06); the frame is the silo's place in its control
 // points' order here (the frame's pick, through the texture's own frames,

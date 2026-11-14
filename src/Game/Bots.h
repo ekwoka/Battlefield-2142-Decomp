@@ -1277,9 +1277,17 @@ private:
 		bool titanPodGoalSet = false;
 		uint32_t titanWaitFor = 0; // BotsTitan.cpp: the transport or APC whose driver it waits in for riders, and until when
 		float titanWaitUntil = 0;
-		int titanFlyMode = 0;      // a transport pilot's order for fly(), read once: 1 hold, 2 fly to titanFlyTo, 3 parked
+		int titanFlyMode = 0;      // a transport pilot's order for fly(), read once: 1 hold, 2 fly to titanFlyTo, 3 parked, 4 as 2 with 30 m over the ground
 		physics::Vec3 titanFlyTo;
 		bool titanFlyDown = false; // over the deck: coming down
+		uint32_t titanCrew = 0;    // enhanced.botTitan: its Titan's deck aircraft it walks to and crews (claimed), since when
+		float titanCrewSince = 0;
+		uint32_t titanCrewSkipFor = 0; // one it gave up on the way to, until then
+		float titanCrewSkipUntil = 0;
+		int titanSortie = 0;       // its transport's run with the enemy shield up: 0 on its deck, 1 out to a silo, 2 home; a gunship's: 1 taking off
+		int titanSortieSilo = -1;  // that silo's control point
+		physics::Vec3 titanPad;    // the transport's pad on its Titan's deck (the Titan's frame)
+		float titanSortieUntil = 0; // over the silo: home once the riders are out, or then
 		uint32_t meshVehicle = 0;  // driveToMesh: the vehicle it drives, and whether that has been on the vehicle mesh
 		bool meshReached = false;
 		std::vector<physics::Vec3> meshWay; // what is left of its way there
@@ -1852,7 +1860,9 @@ private:
 	std::map<std::pair<uint32_t, int>, std::shared_ptr<TitanGrid>> m_titanGrids; // by Titan and team
 	TitanGrid& titanGrid(const GameWorld::TitanInfo& titan, int team);
 	const std::vector<float>& titanField(TitanGrid& grid, const GameWorld::TitanInfo& titan, int team, uint32_t part, const physics::Vec3& point,
-		bool nearest = false);
+		bool nearest = false, float entryRadius = 0, uint32_t around = 0);
+	bool titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
+		const physics::Vec3& entry, float radius, int seat);
 	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
 		const GameWorld::TitanInfo& titan, const std::vector<float>& field);
 	// The team's plan (its virtual commander): a role a squad, 0 the silos, 1 board the enemy Titan, 2 defend its own.
@@ -1881,6 +1891,11 @@ private:
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	// Its own Titan's deck gunship and transport: a bot aboard walks to one and gets in (titanCrew); a transport's
+	// pilot with the enemy's shield up flies riders to a silo, where they drop in pods, and lands back (titanSortie).
+	const GameWorld::VehicleInfo* titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home);
+	bool titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 
 public:
 	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
