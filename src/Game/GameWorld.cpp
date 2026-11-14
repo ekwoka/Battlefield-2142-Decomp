@@ -10515,6 +10515,19 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				object->setHidden(true);
 			}
 			followKit(player, *object); // the kit is the soldier's child: where the seat put him this tick
+			if (seat && seat->kitWeapon()) {
+				// Passengers use whatever weapons they have: it fires along the
+				// seat's look, from the seat.
+				LadderView look;
+				if (seatedSoldierView(player.id, look)) {
+					player.body.yawDegrees = look.yaw;
+				}
+				if (input.selectItem > 0 && !player.selectHeld) {
+					equip(player, input.selectItem);
+				}
+				player.selectHeld = input.selectItem > 0;
+				stepSoldierWeapon(player, seconds);
+			}
 			return;
 		}
 	}
@@ -13170,7 +13183,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// 0x005c0f40): the active weapon of each of the three groups. A
 	// weapon reloading, full or without a magazine to take does nothing
 	// (FireArm::startReload).
-	if (player.input.reload && !player.reloadWas) {
+	if (player.input.reload && !player.reloadWas && !seat.kitWeapon()) {
 		if (gun.weapon && gun.weapon->startReload()) {
 			weaponSound(WeaponSoundEvent::Reload, player, body.object, primary.weapon, body.body.position);
 		}
@@ -13183,14 +13196,18 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			}
 		}
 	}
-	player.reloadWas = player.input.reload;
+	if (!seat.kitWeapon()) {
+		player.reloadWas = player.input.reload; // a passenger's reload edge is the soldier's own (stepSoldierWeapon)
+	}
 	// The fire event goes to each group's active weapon (0x004cc7a0 ->
 	// 0x005cacf0), which fires on its own input only (0x005c50e0); an input
 	// that is the seat's specialToggleWeaponInput fires nothing while held
 	// (0x005c69a0).
 	const auto pressed = [&](int input, bool held) { return held && working && input != seat.specialToggleInput; };
 	if (groups & 1) {
-		if (gun.active[0] >= 0 && primary.podLauncher) {
+		if (seat.kitWeapon()) {
+			// The soldier's own weapon takes the primary fire (stepSoldierWeapon).
+		} else if (gun.active[0] >= 0 && primary.podLauncher) {
 			// A pod launcher on PIFire (the air transports' seats'
 			// air_pod_launcher, a ThrownFireComp): its round is the pod, a
 			// Parachute PCO with enterOnSpawn, which seats the soldier who

@@ -278,6 +278,9 @@ private:
 		bool fired = false; // local: an accepted shot in the current simulation tick
 	};
 	bool current(Me& me) const;
+	// A seat that leaves the primary fire to the soldier's own weapon (the air
+	// transports' passenger seats): his arms and weapon are drawn in it.
+	bool kitSeat(const Me& me) const;
 	std::function<bool(Remote&)> m_remote;
 	int m_lastRemoteShot = -1000;
 	void startWeaponEffects(int effect);

@@ -2661,6 +2661,136 @@ TEST(VehicleModels_DoorGunCameraArmUsesMultiply)
 	}
 }
 
+// The transport's passenger seats (positions 4 to 7) leave the primary fire to
+// the soldier's own weapon; the pod launcher there is the exit key's alone.
+TEST(VehicleModels_TransportPassengerFiresHisOwnWeapon)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_at")) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 2, 6});
+	const auto seats = g.world->vehicleSeats(at);
+	CHECK(seats.size() >= 7);
+	if (seats.size() < 7) {
+		return;
+	}
+	for (size_t i = 0; i < seats.size(); ++i) {
+		CHECK(seats[i].kitWeapon() == (i >= 3)); // the pilot and the door guns keep theirs
+	}
+	CHECK(g.enter(at));
+	game::SoldierInput input;
+	input.switchSeat = 4;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(1);
+	game::GameWorld::PlayerInfo me;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == at && me.seat == 3);
+	const auto before = g.world->playerRounds(g.world->localPlayer(), false, false);
+	input = {};
+	input.fire = true;
+	for (int tick = 0; tick < 20; ++tick) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+	}
+	g.world->setPlayerInput({});
+	const auto after = g.world->playerRounds(g.world->localPlayer(), false, false);
+	CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == at); // not launched in a pod
+	std::fprintf(stderr, "  rounds %d -> %d\n", before.empty() ? 0 : before[0].count, after.empty() ? 0 : after[0].count);
+	CHECK(!after.empty() && after[0].count > (before.empty() ? 0 : before[0].count));
+}
+
+// A passenger reloads his weapon from the seat.
+TEST(VehicleModels_TransportPassengerReloads)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_at")) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 40, 6});
+	CHECK(g.enter(at));
+	game::SoldierInput input;
+	input.switchSeat = 4;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(1);
+	const game::FireArm* gun = g.world->playerWeapon();
+	CHECK(gun != nullptr);
+	if (!gun) {
+		return;
+	}
+	input = {};
+	input.fire = true;
+	for (int tick = 0; tick < 12; ++tick) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+	}
+	g.world->setPlayerInput({});
+	const int spent = gun->roundsInMag();
+	input = {};
+	input.reload = true;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	const bool started = g.world->playerWeapon()->reloading();
+	g.run(6);
+	std::fprintf(stderr, "  magazine %d, reloading %d, then %d\n", spent, started ? 1 : 0, g.world->playerWeapon()->roundsInMag());
+	CHECK(started);
+	CHECK(!g.world->playerWeapon()->reloading() && g.world->playerWeapon()->roundsInMag() > spent);
+	game::GameWorld::PlayerInfo me;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == at);
+}
+
+// A passenger's rounds leave the transport that carries him: they start inside
+// its hull and must not meet it.
+TEST(VehicleModels_TransportPassengerRoundsClearTheHull)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_at")) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 40, 6});
+	CHECK(g.enter(at));
+	game::SoldierInput input;
+	input.switchSeat = 4;
+	g.world->setPlayerInput(input);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	g.run(1);
+	const float hp = g.world->hitPoints(at);
+	input = {};
+	input.fire = true;
+	float farthest = 0;
+	int seen = 0;
+	for (int tick = 0; tick < 30; ++tick) {
+		g.world->setPlayerInput(input);
+		g.world->tick(1 / 30.0f);
+		input.fire = tick < 6;
+		const physics::Vec3 hull = g.position(at);
+		for (const auto& p : g.world->projectiles()) {
+			if (p.alive && p.player == g.world->localPlayer()) {
+				++seen;
+				farthest = std::max(farthest, std::sqrt(physics::lengthSquared(p.position - hull)));
+			}
+		}
+	}
+	std::fprintf(stderr, "  rounds seen %d, farthest %.1f m from the hull, hull %.0f -> %.0f\n", seen, farthest, hp,
+		g.world->hitPoints(at));
+	CHECK(seen > 0 && farthest > 20);
+	CHECK(g.world->hitPoints(at) == hp);
+}
+
 // StickyCollisionComp (0x005e83d0): C4 (maxStickAngle 180, every stick
 // flag 1) dropped on the tank sticks to it and rides it; the AP mine
 // (stickToVehicles 0, maxStickAngle 45) bounces off the tank and sticks

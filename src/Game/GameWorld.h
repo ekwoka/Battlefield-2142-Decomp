@@ -1485,6 +1485,11 @@ public:
 		bool hasExit = false;
 		std::vector<SeatWeapon> weapons; // all of the seat's firearms (SeatWeapon)
 		int primary = -1;                // the index of the SeatWeapon part in `weapons`
+		// A seat whose only PIFire weapon is a pod launcher (the air transports'
+		// passenger seats: air_pod_launcher, which the exit key launches,
+		// exitThroughPodLauncher) leaves the primary fire to the soldier's own
+		// weapon: its passengers fire whatever they carry.
+		bool kitWeapon() const { return podLauncher && group == 0; }
 		// specialToggleWeaponInput (PCO template +0x46c, 0x40 none; 0x005c7f80):
 		// a press of that input moves the PIFire group on as PIToggleWeapon
 		// does, and while it is held that input fires nothing (0x005c69a0 in

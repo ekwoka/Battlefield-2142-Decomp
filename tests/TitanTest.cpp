@@ -3578,10 +3578,10 @@ TEST(Titan_EnclosedClientLeavesOutsideSoldiersUnscored)
 // The air transports' seats (eu_at's pilot, gunners and passengers:
 // exitThroughPodLauncher, each with an air_pod_launcher on PIFire): the
 // exit key fires the seat's pod launcher whatever its input (0x004bda00
-// mask 0x400 -> event 6), and so does the fire button, the launcher's
-// round being the pod (eu_pod_drop, enterOnSpawn) that seats the soldier
-// who fired it: either way the soldier leaves in a pod, not in the air.
-TEST(Titan_AirTransportSeatsLaunchPods)
+// mask 0x400 -> event 6), its round being the pod (eu_pod_drop,
+// enterOnSpawn) that seats the soldier who fired it. The fire button does
+// not: a passenger's primary fire is his own weapon's.
+TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
@@ -3649,7 +3649,8 @@ TEST(Titan_AirTransportSeatsLaunchPods)
 			// leaves its soldier standing beside it, not in a pod.
 			CHECK(level.world->playerInfo(player, info) && info.vehicle != at->id() && (pod == "eu_pod_drop" || pod.empty()));
 		} else {
-			CHECK(pod == "eu_pod_drop");
+			// The primary fire is the passenger's own weapon's: no pod.
+			CHECK(pod.empty() && level.world->playerInfo(player, info) && info.vehicle == at->id());
 		}
 	}
 }

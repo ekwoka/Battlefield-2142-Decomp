@@ -138,6 +138,15 @@ PlayerCamera::PlayerCamera(game::GameWorld& round, anim::AnimationSystems& syste
 
 PlayerCamera::~PlayerCamera() = default;
 
+bool PlayerCamera::kitSeat(const Me& me) const
+{
+	if (!me.vehicle || me.seat < 0) {
+		return false;
+	}
+	const auto seats = m_round.vehicleSeats(me.vehicle);
+	return static_cast<size_t>(me.seat) < seats.size() && seats[static_cast<size_t>(me.seat)].kitWeapon();
+}
+
 bool PlayerCamera::current(Me& me) const
 {
 	if (m_remote) {
@@ -852,7 +861,7 @@ void PlayerCamera::stepSeatZoom(const Me& me, bool altPressed, float seconds)
 			gun = m_round.templates().find(seats[static_cast<size_t>(me.seat)].weapon);
 		}
 	}
-	m_inSeat = me.vehicle != 0;
+	m_inSeat = me.vehicle != 0 && !kitSeat(me);
 	// The seat camera's own field of view (slot 0x58 of the active camera,
 	// 0x00610150: insideFOV in the inside view, else worldFOV).
 	const float camera = m_inSeat && gun ? seatFov(m_mode == game::camera::Mode::Inside) : 0.0f;
@@ -1017,7 +1026,7 @@ void PlayerCamera::tick(float seconds)
 	}
 	// A shot's recoil force (0x005dd3f0): recoilForceUp, times zoomModifier
 	// while zoomed in (0x005dd090).
-	if (fired && m_recoil.hasRecoilForce && !me.vehicle) {
+	if (fired && m_recoil.hasRecoilForce && (!me.vehicle || kitSeat(me))) {
 		m_recoilForce = m_recoilForceUp.sample(m_random) * (m_zoom.level() > 0 ? m_recoil.zoomModifier : 1.0f);
 		m_lastShotTick = m_tick;
 	}
@@ -1027,7 +1036,7 @@ void PlayerCamera::tick(float seconds)
 	// The zoom: the alternate fire's press steps it (0x005da670), a reload
 	// zooms out (0x005da630); the player's field of view follows over
 	// zoomDelay (0x005da3f0 -> 0x00591740).
-	if (!me.vehicle && m_zoomSettings.present()) {
+	if ((!me.vehicle || kitSeat(me)) && m_zoomSettings.present()) {
 		const int step = std::exchange(m_itemStep, 0);
 		if (altPressed && m_zoomSettings.takesPress(reloading || me.zoomBusy, me.overheated)) { // 0x005c50e0, 0x005d3c40
 			const float factor = m_zoom.cycle(m_zoomSettings);
@@ -1044,7 +1053,7 @@ void PlayerCamera::tick(float seconds)
 	}
 	const bool reloadStarted = reloading && !m_reloadingWas;
 	m_reloadingWas = reloading;
-	if (me.vehicle && m_zoom.level() > 0) {
+	if (me.vehicle && !kitSeat(me) && m_zoom.level() > 0) {
 		m_zoom.reset();
 		m_fov.set(m_baseFov, 0);
 	}
@@ -1054,7 +1063,7 @@ void PlayerCamera::tick(float seconds)
 	// The eye's height by pose (seated counts as crouching).
 	const int pose = me.vehicle ? 1 : me.stance >= 0 && me.stance < 3 ? me.stance : 0;
 	m_eye.tick(pose);
-	if (!m_rig || me.vehicle) {
+	if (!m_rig || (me.vehicle && !kitSeat(me))) {
 		m_lastYaw = me.yaw;
 		m_lastPitch = me.aimPitch;
 		return;
@@ -1064,7 +1073,7 @@ void PlayerCamera::tick(float seconds)
 	// (message 4).
 	anim::AnimationInput input;
 	const physics::Vec3 v {me.velocity[0], me.velocity[1], me.velocity[2]};
-	const float speed = std::sqrt(v.x * v.x + v.z * v.z);
+	const float speed = me.vehicle ? 0.0f : std::sqrt(v.x * v.x + v.z * v.z); // a seat's ride is not a walk
 	const float yaw = me.bodyYaw * kDegrees;
 	input.speed = speed;
 	if (speed > 0.01f) {
@@ -1221,7 +1230,7 @@ bool PlayerCamera::view(View& view, float aspect) const
 			view.position = {seated.position.x, seated.position.y + m_eye.poses[1], seated.position.z};
 			view.yaw = seated.yaw * kDegrees;
 			view.pitch = seated.pitch * kDegrees;
-			view.fovY = aspectFov(m_baseFov, aspect);
+			view.fovY = aspectFov(kitSeat(me) ? m_fov.current : m_baseFov, aspect); // a passenger's weapon zooms
 			view.roll = 0;
 			return true;
 		}
@@ -1484,7 +1493,7 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 	std::vector<Model> out;
 	View eye;
 	Me me;
-	if (!m_rig || !view(eye, 4.0f / 3.0f) || !current(me) || me.vehicle) {
+	if (!m_rig || !view(eye, 4.0f / 3.0f) || !current(me) || (me.vehicle && !kitSeat(me))) {
 		return out;
 	}
 	// On a ladder the weapon is put away (0x005878b0) and the first-person
