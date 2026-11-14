@@ -208,7 +208,7 @@ struct ShadowUniforms {
 	Mat4 shadowMatrix;           // world -> the maps' uv and depth
 	float params[4] {};          // x: 1 on, y: a texel in uv, z: depth bias, w: 1 with the static map
 	float hemiConstants[4] {};   // xy: corner (x, z), z: size (0 none), w: lerp bias
-	float hemiSky[4] {};         // rgb: the sky colour, w: 1 for the sun's occlusion
+	float hemiSky[4] {};         // rgb: the sky colour, w: 1 for the sun's occlusion, 2 with the camera in a Titan
 	float extra[4] {0, 0.8f, 0, 0}; // x: shadowIntensityBias, y: the fade's start, z: 1 for the undergrowth
 };
 

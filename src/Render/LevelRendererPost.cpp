@@ -243,7 +243,7 @@ void LevelRenderer::renderShadows(SDL_GPUCommandBuffer* commands, const Camera& 
 		m_shadowUniforms.hemiSky[0] = lights.skyColor[0];
 		m_shadowUniforms.hemiSky[1] = lights.skyColor[1];
 		m_shadowUniforms.hemiSky[2] = lights.skyColor[2];
-		m_shadowUniforms.hemiSky[3] = 1;
+		m_shadowUniforms.hemiSky[3] = m_cameraInTitan ? 2 : 1;
 	}
 	if (m_enh.csm) { // the cascades take over (renderCascades)
 		m_shadow.enabled = false;

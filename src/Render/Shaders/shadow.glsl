@@ -74,6 +74,9 @@ vec4 hemiLight(vec3 worldPosition, vec3 normal, float objectY, vec3 sky, vec4 ob
 	vec2 uv = ((worldPosition + vec3(hemiConstants.z * 0.5) + normal).xz - hemiConstants.xy) / hemiConstants.z;
 	uv.y = 1.0 - uv.y;
 	vec4 ground = texture(hemiMap, uv);
+	// Inside a Titan (hemiSky.w 2) the level's ground colour is taken as grey: its desert
+	// chroma otherwise tints the interior's bundled meshes (not yet traced in RendDX9).
+	if (hemiSky.w > 1.5) ground.rgb = vec3(dot(ground.rgb, vec3(0.3333)));
 	// localHeight at half a metre's scale (InvHemiHeightScale), lifted by
 	// the object's HeightOverTerrain (calcGroundUVAndLerp).
 	float localHeight = (worldPosition.y - objectY) * 0.5;
