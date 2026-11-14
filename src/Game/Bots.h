@@ -551,6 +551,10 @@ struct BotSettings {
 	const bool* enhanced = nullptr;
 	const bool* botRecovery = nullptr;
 	bool stuckRecovery() const { return enhanced && *enhanced && (!botRecovery || *botRecovery); }
+	// enhanced.botMovement, also read live: bots on foot lie down only for
+	// far targets and look round only where they walk (not retail).
+	const bool* botMovement = nullptr;
+	bool playerLikeMovement() const { return enhanced && *enhanced && botMovement && *botMovement; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }

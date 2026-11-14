@@ -6986,7 +6986,11 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (weapon.firingPose == 2) {
 		want = SoldierPose::Crouch;
 	} else if (weapon.firingPose == 3) {
-		want = SoldierPose::Prone;
+		// enhanced.botMovement (not retail, where every Lying weapon lies
+		// down at any range): only a sniper, and only for a far target.
+		// shortcut: a fixed 50 m, tune from play if snipers feel wrong.
+		const bool crouch = m_settings.playerLikeMovement() && (weapon.type != WeaponAi::Sniper || distance < 50);
+		want = crouch ? SoldierPose::Crouch : SoldierPose::Prone;
 	}
 	if (guidedPlan) {
 		input.pose = bot.pose; // the guided plan takes no firing pose

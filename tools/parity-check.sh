@@ -19,7 +19,7 @@ run() {
 
 off1="$(run)"
 off2="$(run)"
-on="$(run --enhanced --console "enhanced.botRecovery 0" --console "enhanced.cornerSteer 0")"
+on="$(run --enhanced --console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.cornerSteer 0")"
 echo "off: $off1 / $off2, on: $on"
 if [[ -z "$off1" ]]; then
 	echo "FAIL: no fingerprint printed"; exit 1

@@ -3647,6 +3647,7 @@ int runGame(Options& options, Session& session)
 	botSettings.random = ai::Random::seeded(game::botRandomSeed(options.simulate <= 0));
 	botSettings.enhanced = &enhancedSettings.enabled;
 	botSettings.botRecovery = &enhancedSettings.botRecovery;
+	botSettings.botMovement = &enhancedSettings.botMovement;
 	botSettings.cornerSteer = &enhancedSettings.cornerSteer;
 	game::registerBotConsoleMethods(console, botSettings);
 	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.

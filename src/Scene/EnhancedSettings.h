@@ -27,6 +27,7 @@ struct EnhancedSettings {
 	bool prepass = false; // enhanced.prepass: the depth/normal/motion prepass even when neither taa nor ssao reads it
 	// Gameplay, also only with enhanced.enabled; changes the simulation:
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
+	bool botMovement = true; // enhanced.botMovement: bots on foot lie down only for far targets and don't walk sideways to look about (Game/Bots.cpp, BotsLook.cpp)
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 };
 
@@ -46,6 +47,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.prepass = v; });
 	bindProperty<bool>(console, "enhanced.botRecovery", ConsoleAccess::Anyone, [&settings] { return settings.botRecovery; },
 		[&settings](const bool& v) { settings.botRecovery = v; });
+	bindProperty<bool>(console, "enhanced.botMovement", ConsoleAccess::Anyone, [&settings] { return settings.botMovement; },
+		[&settings](const bool& v) { settings.botMovement = v; });
 	bindProperty<bool>(console, "enhanced.cornerSteer", ConsoleAccess::Anyone, [&settings] { return settings.cornerSteer; },
 		[&settings](const bool& v) { settings.cornerSteer = v; });
 }
