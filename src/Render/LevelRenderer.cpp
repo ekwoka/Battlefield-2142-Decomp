@@ -3505,6 +3505,10 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			const TitanDraw how = base.skinned
 				? titanSkinnedDraw(titanView, distance, renderer.indoorSkinnedMeshCullDistance)
 				: base.bundled ? titanBundledDraw(titanView, base.titanExterior && !titanChild, distance, renderer.indoorBundledMeshCullDistance)
+							   // A Titan's own static pieces: the rooms from inside, the hull from outside
+							   // (0x100bdb00, 0x100bdb2c / 0x100bdc16). Both drawn, their walls share planes
+							   // and the nearer one changed with the view. The world's other statics stay.
+							   : base.titanInterior || base.titanExterior ? titanStaticDraw(titanView, base.titanInterior)
 							   : TitanDraw::Normal;
 			if (how == TitanDraw::Skip && !instance.placed) {
 				continue;
@@ -4615,8 +4619,12 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			// RaShaderSTM: _POINTLIGHT_ forces _ENVMAP_ 0; RendDX9 sets 0x400 when the
 			// drawable has gathered lights (0x100bd2dc, 0x100bc14e).
 			bool titanLit = false;
-			if (lightmapped && bound->titanInterior && !bound->bundled && !bound->skinned && m_cameraInTitan) {
+			if (lightmapped && bound->titanInterior && !bound->bundled && !bound->skinned) {
 				titanLit = pickedCount > 0;
+				// RendDX9 draws an interior static only from inside a Titan, by the interior path
+				// (0x100bdb00: skipped from outside, 0x100bdb2c; 0x100bd0a0 from inside), so that is
+				// its only lighting. The port also draws the rooms from outside (prepareInstances):
+				// with the outdoor formula there they changed as the camera crossed the hull.
 				// Inside a Titan RendDX9 zeroes the static sun and sky (0x100283aa) and
 				// StaticSpecularColor is 0.7 (shortcut: its 2 s ramp from the level's is skipped).
 				uniforms.material[2] += kMaterialTitanInterior;
