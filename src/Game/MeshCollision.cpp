@@ -364,12 +364,21 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 	// destroyed (the helicopter exit).
 	const auto collide = [&](MeshActor& c, bool cRoot) {
 		const float ratio = c.radius > 0 ? m.radius / c.radius : 1e30f;
+		// A candidate the pair destroys gets its wreck's meshes (wreckCollision): `c` then points at freed ones.
+		const physics::CollisionWorld* was = c.body ? c.body->vehicleMesh.get() : nullptr;
+		const auto wrecked = [&] { return c.body && c.body->vehicleMesh.get() != was; };
+		const physics::CollisionWorld* own = mover.vehicleMesh.get();
 		if (ratio >= 0.25f) {
+			meshPair(c, m, seconds, false);
+			if (mover.vehicleMesh.get() != own) {
+				return false; // and the mover's likewise
+			}
+			if (wrecked()) {
+				return true;
+			}
 			if (ratio <= 4.0f) {
-				meshPair(c, m, seconds, false);
 				return meshPair(m, c, seconds, false);
 			}
-			meshPair(c, m, seconds, false);
 			if (!c.fixed) {
 				return meshPair(m, c, seconds, false);
 			}
@@ -379,7 +388,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			return true;
 		}
 		const bool alive = meshPair(m, c, seconds, false);
-		if (mRoot && c.trunkFromTypeFour) {
+		if (mRoot && c.trunkFromTypeFour && !wrecked()) {
 			meshPair(c, m, seconds, true);
 		}
 		return alive;
@@ -453,7 +462,11 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 		// Its parts in their pose now (partActors), each a candidate with
 		// a response of its own.
 		partActors(other, parts);
+		const physics::CollisionWorld* was = other.vehicleMesh.get();
 		for (MeshActor& c : parts) {
+			if (other.vehicleMesh.get() != was) {
+				break; // destroyed by the pair before: its parts' actors are stale
+			}
 			if (moved && partMoves(other, c)) {
 				continue;
 			}
@@ -462,6 +475,9 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 					return false;
 				}
 				refresh();
+				if (other.vehicleMesh.get() != was) {
+					break;
+				}
 			}
 			if (mRoot) {
 				wheelProbes(mover, c, seconds);
@@ -480,7 +496,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			}
 			refresh();
 		}
-		if (mRoot) {
+		if (mRoot && other.vehicleMesh.get() == c.mesh) { // not a candidate the pair just wrecked
 			wheelProbes(mover, c, seconds);
 			if (!asleep(other)) {
 				wheelProbes(other, m, seconds);
