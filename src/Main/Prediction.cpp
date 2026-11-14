@@ -38,6 +38,11 @@ void SoldierPrediction::start(const world::ObjectTemplate* soldier, int32_t last
 	m_control.stamina().configure(setting(soldier, "sprintDissipationTime"), setting(soldier, "sprintRecoverTime"),
 		setting(soldier, "sprintLimit"));
 	m_control.jumpLoss = setting(soldier, "sprintLossAtJump");
+	// Lying (the soldier's pose, mask 0x20): a squad spawn where only lying
+	// fits stays down until our stance toggle asks otherwise, as the server's.
+	if ((state.mask & 0x20) && state.soldierValues[0] == static_cast<int>(game::SoldierPose::Prone)) {
+		m_control.holdProne();
+	}
 	m_body.world = &m_round.staticCollision();
 	m_body.server = false;
 	m_body.frictionOf = [this](uint32_t own, uint32_t other) { return m_round.soldierFriction(own, other); };
@@ -108,7 +113,7 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 		if (input.pose == game::SoldierPose::Swim) {
 			input.pose = game::SoldierPose::Stand;
 		}
-		input.pose = m_control.stancePose(input.pose, game::stance::waterTooDeep(m_body.position, m_round.ground()));
+		input.pose = m_control.stancePose(input.pose, game::stance::waterTooDeep(m_body.position, m_round.ground()), input.jump);
 	}
 	m_body.stance = static_cast<int>(input.pose);
 	m_control.update(input, m_body, kTick);

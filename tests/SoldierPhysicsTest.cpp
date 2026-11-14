@@ -1228,3 +1228,31 @@ TEST(SoldierPhysics_ProneLimitsFollowTheStanceKeys)
 	CHECK(game::stance::waterTooDeep({0, 1.0f, 0}, water));  // 0.2 over the feet
 	CHECK(!game::stance::waterTooDeep({0, 1.1f, 0}, water)); // 0.1 over them
 }
+
+TEST(SoldierPhysics_ProneSpawnHoldsUntilTheToggleAsks)
+{
+	// A squad spawn where only lying fits (0x006c3340): down while the input
+	// asks only to stand (a joined client before its toggle learns the pose),
+	// up at once (no lying-down timer) once it asked for prone or jumped.
+	using Pose = game::SoldierPose;
+	physics::SoldierBody body;
+	body.position = {0, 1, 0};
+	const auto tick = [&](game::SoldierControl& control, Pose requested, bool jump = false) {
+		game::SoldierInput input;
+		input.pose = control.stancePose(requested, false, jump);
+		control.update(input, body);
+		return control.pose();
+	};
+	game::SoldierControl control;
+	control.holdProne();
+	CHECK(tick(control, Pose::Stand) == Pose::Prone);
+	CHECK(tick(control, Pose::Stand) == Pose::Prone);
+	CHECK(tick(control, Pose::Prone) == Pose::Prone);
+	CHECK(tick(control, Pose::Stand) == Pose::Stand);
+
+	game::SoldierControl jumped;
+	jumped.holdProne();
+	CHECK(tick(jumped, Pose::Stand, true) == Pose::Stand);
+	jumped.reset();
+	CHECK(tick(jumped, Pose::Stand) == Pose::Stand);
+}

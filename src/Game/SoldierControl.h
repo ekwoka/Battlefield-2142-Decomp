@@ -153,8 +153,14 @@ public:
 	// needs 0x00586f40 (no jump's no-prone time, no second after getting
 	// up, the water not too deep), else the pose stays; lying down from
 	// standing, only a crouch gets up within a second.
-	SoldierPose stancePose(SoldierPose requested, bool waterTooDeep) const
+	SoldierPose stancePose(SoldierPose requested, bool waterTooDeep, bool jump = false)
 	{
+		if (m_holdProne) {
+			if (requested == SoldierPose::Stand && !jump) {
+				return SoldierPose::Prone;
+			}
+			m_holdProne = false;
+		}
 		if (requested == SoldierPose::Prone && m_lastPose != SoldierPose::Prone) {
 			const bool canLie = m_noProne <= 0 && m_reProne <= 0 && !waterTooDeep;
 			return canLie ? requested : m_lastPose == SoldierPose::Crouch ? SoldierPose::Crouch : SoldierPose::Stand;
@@ -165,6 +171,15 @@ public:
 		return requested;
 	}
 	SoldierPose pose() const { return m_lastPose; } // the last update's
+	// Lying from the start (a squad spawn where only lying fits, 0x006c3340,
+	// or a client's prediction started from a lying soldier): no lying-down
+	// timers, and down while the input asks only to stand (a joined client
+	// does until its toggle takes the pose).
+	void holdProne()
+	{
+		m_lastPose = SoldierPose::Prone;
+		m_holdProne = true;
+	}
 	// The weapon in hand zoomed (its zoom index not 0): standing, not
 	// sprinting, the soldier walks at speed index 2.
 	void setZoomed(bool zoomed) { m_zoomed = zoomed; }
@@ -198,6 +213,7 @@ public:
 		m_slopeDelay = m_airTime = -1;
 		m_jumpTime = m_noProne = m_getUp = m_minProne = m_reProne = m_recoverDelay = m_rise = 0;
 		m_lastPose = SoldierPose::Stand;
+		m_holdProne = false;
 		m_sprintHeld = false;
 	}
 
@@ -218,6 +234,7 @@ private:
 	float m_recoverDelay = 0; // +0x408
 	float m_rise = 0;         // +0x40c
 	SoldierPose m_lastPose = SoldierPose::Stand;
+	bool m_holdProne = false;
 	bool m_sprintHeld = false;
 	bool m_jumped = false;
 	SprintStamina m_stamina;

@@ -7233,6 +7233,9 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// +0x2c0, the object's +0x444), which the input filter (0x005ca2e0)
 	// reads: on, the pod's inputs 0..3 (steering, pitch, roll, throttle)
 	// are zeroed, so a beacon's pod drops unsteered. The beacon's spawn
+	if (player.spawnedProne && !player.ai) { // bots ask their pose held, not by a toggle
+		player.control.holdProne();
+	}
 	// point is its SpawnPoint child (none of the shipped ones sets it).
 	if (withSquad && !squadPod.empty() && startPod(player, squadPod, player.body.position, {}, 0, facing)) {
 		bool off = true;
@@ -10596,7 +10599,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		if (input.pose == SoldierPose::Swim) {
 			input.pose = SoldierPose::Stand;
 		}
-		input.pose = player.control.stancePose(input.pose, stance::waterTooDeep(player.body.position, m_ground));
+		input.pose = player.control.stancePose(input.pose, stance::waterTooDeep(player.body.position, m_ground), input.jump);
 	}
 	player.body.stance = static_cast<int>(input.pose);
 	// A ladder: the soldier sits in its container and climbs (0x0059f6b0)
