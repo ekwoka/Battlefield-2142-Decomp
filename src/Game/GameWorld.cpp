@@ -11267,7 +11267,8 @@ bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& 
 	for (const Vehicle::Part& p : state->parts()) {
 		if (p.moves && sameName(p.name, part)) {
 			offset = {};
-			rotation = {p.angle[0], p.angle[1], p.angle[2]};
+			const physics::Vec3 turn = p.turnAngles();
+			rotation = {turn.x, turn.y, turn.z};
 			return true;
 		}
 	}

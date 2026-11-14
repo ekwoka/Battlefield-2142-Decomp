@@ -294,7 +294,7 @@ void Vehicle::updateParts(float seconds)
 				rotationAxisStep(part.axes[axis], in, seconds, part.angle[axis], part.rate[axis]);
 			}
 		}
-		const Mat3 turn = Mat3::fromYawPitchRoll({part.angle[0], part.angle[1], part.angle[2]});
+		const Mat3 turn = Mat3::fromYawPitchRoll(part.turnAngles());
 		if (part.parent >= 0) {
 			const Part& parent = m_parts[static_cast<size_t>(part.parent)];
 			part.rotation = turn * part.base * parent.rotation;

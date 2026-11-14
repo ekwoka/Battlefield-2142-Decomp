@@ -271,6 +271,15 @@ public:
 		bool autoRotateOnEnter = false;
 		bool restoreRotationOnExit = false;
 		bool autoRotating = false;
+		// A RotationalBundle's multiply (+0x340) and offset (+0x334): the
+		// frame is turned by angle x multiply + offset (0x00564940, per axis).
+		float angleScale = 1;
+		Vec3 angleOffset;
+		Vec3 turnAngles() const
+		{
+			return {angle[0] * angleScale + angleOffset.x, angle[1] * angleScale + angleOffset.y,
+				angle[2] * angleScale + angleOffset.z};
+		}
 		// This tick, in object space.
 		physics::Mat3 rotation;
 		Vec3 position;

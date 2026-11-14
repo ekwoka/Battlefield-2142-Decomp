@@ -2635,6 +2635,32 @@ TEST(VehicleModels_SuppressedInputWhileZoomed)
 	CHECK(std::fabs(turned[0]) > 1 && std::fabs(turned[1] / turned[0] - 0.6f) < 0.02f);
 }
 
+// A RotationalBundle turns by angle x multiply + offset (0x00564940). The
+// transport's door-gun camera arm (rest roll 90, multiply -1) swings from 90
+// to -10 as the gunner settles in; unscaled it ended at 190, upside down.
+TEST(VehicleModels_DoorGunCameraArmUsesMultiply)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("as_at")) {
+		return;
+	}
+	const uint32_t at = g.start("as_at", {0, 2, 6});
+	CHECK(g.enter(at));
+	g.run(3); // startAutoRotateOnEnter: the arms roll to their +100 limit
+	world::Vec3 offset, rotation;
+	// The left arm's roll runs 0 to +100 on its axis, the right's 0 to -100;
+	// multiply -1 turns each frame the other way, to -100 and +100.
+	for (const bool left : {true, false}) {
+		const char* arm = left ? "as_at_L_gun_cameraArm" : "as_at_R_gun_cameraArm";
+		CHECK(g.world->partPose(at, arm, offset, rotation));
+		std::fprintf(stderr, "  %s roll %.1f\n", arm, rotation.z);
+		CHECK(std::fabs(rotation.z - (left ? -100.0f : 100.0f)) < 1);
+	}
+}
+
 // StickyCollisionComp (0x005e83d0): C4 (maxStickAngle 180, every stick
 // flag 1) dropped on the tank sticks to it and rides it; the AP mine
 // (stickToVehicles 0, maxStickAngle 45) bounces off the tank and sticks

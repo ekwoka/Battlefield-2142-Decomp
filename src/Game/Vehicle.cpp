@@ -310,6 +310,10 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		part.rememberExcess = number(t, "rememberExcessInput", 0) != 0;
 		part.autoRotateOnEnter = number(t, "startAutoRotateOnEnter", 0) != 0;
 		part.restoreRotationOnExit = number(t, "restoreRotationOnExit", 0) != 0;
+		if (t.typeName() == "RotationalBundle") {
+			part.angleScale = number(t, "multiply", 1);
+			part.angleOffset = vector(t, "offset");
+		}
 	};
 	// Depth-first over the tree with each node's offset and rotation.
 	const std::function<void(const world::ObjectTemplate&, Vec3, Mat3, Steering, Place, int)> visit =
