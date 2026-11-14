@@ -93,6 +93,49 @@ TEST(FirstPerson_PlacementPutsTheCameraBoneAtTheEye)
 	CHECK(near(sprung[12], 10.01f) && near(sprung[13], 20.02f) && near(sprung[14], 29.97f));
 }
 
+TEST(FirstPerson_RemasterShotgunShiftAndReloadMessages)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/Project_Remaster_v17_Final");
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	CHECK(console.run("ServerArchives.con", {}, out));
+	CHECK(console.run("ClientArchives.con", {}, out));
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(console, systems);
+	CHECK(console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out));
+	const auto load = [&](const std::string& path) { return systems.get(path, [&] { console.run(path, {}, out); }); };
+	const auto* soldier = load("Objects/Soldiers/Common/Animations/AnimationSystem1p.inc");
+	const auto* shotgun = load("Objects/Weapons/Handheld/EU_Jackhammer/AnimationSystem1p.inc");
+	const auto* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/1p_setup.ske");
+	CHECK(soldier && shotgun && skeleton);
+	if (!soldier || !shotgun || !skeleton) return;
+	anim::FirstPersonRig rig(systems, *skeleton, soldier);
+	rig.setWeapon(shotgun);
+	anim::AnimationInput input;
+	for (int i = 0; i < 90; ++i) rig.update(input, 1 / 30.0f);
+	const auto playing = [&](const char* name) {
+		const auto names = rig.playing();
+		return std::find(names.begin(), names.end(), name) != names.end();
+	};
+	input.pulses = 32;
+	rig.update(input, 1 / 30.0f);
+	CHECK(playing("shift"));
+	input.pulses = 0;
+	for (int i = 0; i < 60; ++i) rig.update(input, 1 / 30.0f);
+	input.messages = 2;
+	rig.update(input, 1 / 30.0f);
+	CHECK(playing("reload"));
+}
+
 TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");

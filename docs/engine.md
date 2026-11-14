@@ -1961,6 +1961,26 @@ slot `0x34`, beside GLKilledBy 3, GLAssistKill 9, GLTinnitus 0xd).
 
 ### Fire modes, tracers, camera recoil, armour effects and leaving a seat
 
+**Weapon reload and animation phases.** An ammo component with nonzero
+`ammo.reloadAmount` loads one round per stage and consumes one finite
+reserve per round, with first/last extra times and the authored swap point.
+It holds animation message 2 for the insertion stages and emits reload sound
+states 4, 5 and 6; whole-magazine reloads still pulse message 2 and emit
+state 3. The first- and third-person rigs receive the same held messages and
+the configured shift pulse 32. A shift waits for the shot cycle and keeps
+the firearm busy for `animation.shiftDelay`. `animation.loopingFire` holds
+message 1 until release instead of pulsing it for each shot.
+
+`ammo.minimumTimeUntilReload` delays an empty weapon's automatic reload
+request after the shot; it does not replace `ammo.reloadTime`. The
+countdown advances only while the firearm is updated, so it can pause while
+the weapon is stowed or an unmanned gun is not already reloading. The
+SingleFireComp show-after-reload delay is scheduled without inventing a
+hide event. The separate throwable soft-delay contribution to the original
+conditional `wp-delay-ticks` busy calculation is not yet modeled. Original
+instruction-path probes and native tests do not establish live retail
+animation or audible equivalence.
+
 **The fire component's flags.** `fire.busyUntilButtonRelease`
 (SingleFireComp `+0x9c`, setter `0x004e3f33`, constructor `0x005d5790`;
 the rocket, AA and AV launchers): after a round (fire, slot 36

@@ -2132,6 +2132,47 @@ TEST(GameWorld_LeaderTakesBackTheBeacon)
 // rifle waits for the key. A busyUntilButtonRelease launcher (eu_av) keeps
 // its round's wire while the trigger is held: its reload, auto or not, is
 // refused until the release (the fire component's slot 0x44, 0x005d5b60).
+TEST(GameWorld_IncrementalReloadEmitsEverySoundPhase)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	auto* rifle = range.templates.find("eu_ar_rifle");
+	rifle->settings()["itemIndex"] = "3";
+	rifle->settings()["ammo.magSize"] = "3";
+	rifle->settings()["ammo.nrOfMags"] = "3";
+	rifle->settings()["ammo.reloadAmount"] = "1";
+	rifle->settings()["ammo.reloadTime"] = "0.2";
+	rifle->settings()["ammo.lastShotExtraTime"] = "0.1";
+	auto* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	range.world->autoReload = false;
+	CHECK(range.world->spawnPlayer(2));
+	for (int i = 0; i < 30; ++i) range.world->tick(1 / 30.0f);
+	game::SoldierInput input;
+	input.fire = true;
+	input.aimPitch = 45;
+	for (int i = 0; i < 30 && range.world->playerWeapon()->roundsInMag() > 0; ++i) {
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+	range.world->takeWeaponSounds();
+	input = {};
+	input.reload = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	std::vector<int> phases;
+	for (int i = 0; i < 30; ++i) {
+		for (const auto& event : range.world->takeWeaponSounds()) {
+			if (event.kind == game::GameWorld::WeaponSoundEvent::Reload) phases.push_back(event.reloadState);
+		}
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(phases == std::vector<int>({4, 5, 5, 6}));
+	CHECK(range.world->playerWeapon()->roundsInMag() == 3 && !range.world->playerWeapon()->reloading());
+}
+
 TEST(GameWorld_AutoReload)
 {
 	for (const bool autoReload : {true, false}) {

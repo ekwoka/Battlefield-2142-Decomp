@@ -600,12 +600,15 @@ void FireArm::beginReload()
 	reloadStarted();
 	m_reloadFilled = false;
 	if (m_settings.reloadAmount > 0) {
-		int rounds = std::max(0, m_settings.magSize - m_rounds);
+		m_reloadRoundsLeft = std::max(0, m_settings.magSize - m_rounds);
 		if (m_settings.nrOfMags >= 0) {
-			rounds = std::min(rounds, m_mags);
+			m_reloadRoundsLeft = std::min(m_reloadRoundsLeft, m_mags);
 		}
-		m_reloadStageLeft = m_settings.reloadTime + m_settings.firstShotExtraTime;
-		m_reloadLeft = rounds * m_settings.reloadTime + m_settings.firstShotExtraTime + m_settings.lastShotExtraTime;
+		const float reloadTime = static_cast<int>(m_settings.reloadTime * 30) / 30.0f;
+		const float firstExtra = static_cast<int>(m_settings.firstShotExtraTime * 30) / 30.0f;
+		const float lastExtra = static_cast<int>(m_settings.lastShotExtraTime * 30) / 30.0f;
+		m_reloadStageLeft = reloadTime + firstExtra;
+		m_reloadLeft = m_reloadRoundsLeft * reloadTime + firstExtra + lastExtra;
 		m_reloadSoundEvent = 4;
 	} else {
 		m_reloadStageLeft = 0;
@@ -631,7 +634,7 @@ bool FireArm::selectable() const
 bool FireArm::startReload()
 {
 	if (m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
-		|| m_busyUntilRelease || m_shiftPending || m_shiftIn > 0 || m_settings.magSize < 0
+		|| m_busyUntilRelease || m_shiftIn > 0 || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
 		return false;
@@ -1005,7 +1008,9 @@ bool FireArm::fire(float seconds, bool trigger, bool soft)
 		if (m_settings.reloadAmount > 0) {
 			if (m_reloadStageLeft > 0) {
 				m_reloadStageLeft -= seconds;
-				if (!m_reloadFilled && m_reloadStageLeft <= m_settings.reloadTime * (1 - m_settings.changeMagAt) + 1e-4f
+				const int reloadTicks = static_cast<int>(m_settings.reloadTime * 30);
+				const float swapRemaining = (reloadTicks - static_cast<int>(reloadTicks * std::clamp(m_settings.changeMagAt, 0.0f, 1.0f))) / 30.0f;
+				if (!m_reloadFilled && m_reloadStageLeft <= swapRemaining + 1e-4f
 					&& m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
 					m_reloadFilled = true;
 					++m_rounds;
@@ -1014,13 +1019,14 @@ bool FireArm::fire(float seconds, bool trigger, bool soft)
 					}
 				}
 				if (m_reloadStageLeft <= 1e-4f) {
-					if (m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
-						m_reloadStageLeft = m_settings.reloadTime;
-						m_reloadLeft = std::max(m_reloadLeft, m_settings.reloadTime + m_settings.lastShotExtraTime);
+					--m_reloadRoundsLeft;
+					if (m_reloadRoundsLeft > 0 && m_rounds < m_settings.magSize && (m_mags > 0 || m_settings.nrOfMags < 0)) {
+						m_reloadStageLeft = reloadTicks / 30.0f;
 						m_reloadFilled = false;
 						m_reloadSoundEvent = 5;
 					} else {
 						m_reloadStageLeft = 0;
+						m_reloadLeft = std::min(m_reloadLeft, static_cast<int>(m_settings.lastShotExtraTime * 30) / 30.0f);
 						m_reloadSoundEvent = 6;
 					}
 				}

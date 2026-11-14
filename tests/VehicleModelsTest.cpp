@@ -1684,19 +1684,21 @@ TEST(Vehicles_GunshipMissileEarlyImpactReload)
 			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			g.world->setPlayerInput({}); g.run(4);
 			const game::FireArm* launcher = g.world->gun(v, 1);
-			CHECK(launcher && launcher->settings().reloadTime >= 3.0f);
+			CHECK(launcher && launcher->settings().minimumReloadTicks == 90 && launcher->settings().reloadTime == 2.0f);
 			if (!launcher) continue;
 			in = {}; in.fire = true;
 			g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
-			CHECK(launcher->roundsInMag() == 0 && launcher->reloading());
+			CHECK(launcher->roundsInMag() == 0 && !launcher->reloading());
 			g.world->setPlayerInput({}); g.run(0.6f);
 			game::GameWorld::ProjectileCamera view;
 			CHECK(!g.world->projectileCamera(g.world->localPlayer(), view));
 			in.fire = true;
 			for (int i = 0; i < 40; ++i) { g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); }
 			CHECK(!g.world->projectileCamera(g.world->localPlayer(), view));
-			CHECK(launcher->reloading());
-			g.world->setPlayerInput({}); g.run(1.5f);
+			CHECK(!launcher->reloading());
+			g.world->setPlayerInput({}); g.run(1.2f);
+			CHECK(launcher->reloading() && launcher->roundsInMag() == 0);
+			g.run(2.0f);
 			CHECK(!launcher->reloading() && launcher->roundsInMag() == 1);
 			in.fire = true; g.world->setPlayerInput(in); g.world->tick(1 / 30.0f);
 			CHECK(g.world->projectileCamera(g.world->localPlayer(), view));
@@ -4448,7 +4450,13 @@ TEST(Vehicles_GunshipPilotGunFiresPerPressAndReloads)
 				g.world->tick(1 / 30.0f);
 				fired += rounds() > before;
 				g.world->setPlayerInput({});
-				g.run(1.2f); // past the cooldown, and the reload when the magazine ran out
+				g.run(1.2f);
+				const int reloadWait = gun->settings().minimumReloadTicks
+					+ static_cast<int>(std::ceil(gun->settings().reloadTime * 30)) + 10;
+				for (int tick = 0; tick < reloadWait
+					&& (gun->reloading() || (gun->roundsInMag() == 0 && gun->magsLeft() != 0)); ++tick) {
+					g.world->tick(1 / 30.0f);
+				}
 			}
 			CHECK(fired == 40);
 		}
@@ -7907,8 +7915,13 @@ TEST(Vehicles_GunshipRearmedOnAPadReloadsWithItsSound)
 				// Fire the pilot weapon dry (it stays busy until the trigger is let
 				// go, busyUntilButtonRelease: press and release): no round for 5 s.
 				game::SoldierInput fire;
+				const auto* gun = g.world->gun(v, 0);
+				CHECK(gun);
+				if (!gun) continue;
+				const int dryWait = gun->settings().minimumReloadTicks
+					+ static_cast<int>(std::ceil(gun->settings().reloadTime * 30)) + 30 * 5;
 				int shots = 0, idle = 0;
-				for (int i = 0; i < 30 * 240 && idle < 30 * 5; ++i) {
+				for (int i = 0; i < 30 * 240 && idle < dryWait; ++i) {
 					fire.fire = i % 2 == 0;
 					g.world->setPlayerInput(fire);
 					g.world->tick(1 / 30.0f);
@@ -7989,8 +8002,13 @@ TEST(Vehicles_GunshipRearmedOnAPadTriggersThePilotsReloadSound)
 				return n;
 			};
 			game::SoldierInput fire;
+			const auto* gun = g.world->gun(v, 0);
+			CHECK(gun);
+			if (!gun) continue;
+			const int dryWait = gun->settings().minimumReloadTicks
+				+ static_cast<int>(std::ceil(gun->settings().reloadTime * 30)) + 30 * 5;
 			int idle = 0;
-			for (int i = 0; i < 30 * 240 && idle < 30 * 5; ++i) {
+			for (int i = 0; i < 30 * 240 && idle < dryWait; ++i) {
 				fire.fire = i % 2 == 0;
 				g.world->setPlayerInput(fire);
 				g.world->tick(1 / 30.0f);

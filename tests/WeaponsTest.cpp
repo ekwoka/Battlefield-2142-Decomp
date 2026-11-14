@@ -124,6 +124,57 @@ TEST(Weapons_MinimumAutoReloadDelayIsSeparateFromReloadTime)
 	CHECK(gun.reloading());
 }
 
+TEST(Weapons_IncrementalReloadUsesRetailPhasesAndTicks)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 6;
+	settings.nrOfMags = -1;
+	settings.reloadAmount = 1;
+	settings.reloadTime = 0.8f;
+	settings.lastShotExtraTime = 1.35f;
+	settings.changeMagAt = 0.9f;
+	game::FireArm gun(settings);
+	for (int i = 0; i < 80 && gun.roundsInMag() > 0; ++i) {
+		gun.tick(1 / 30.0f, true);
+	}
+	gun.tick(1 / 30.0f, false);
+	CHECK(gun.startReload());
+	std::vector<int> events {gun.takeReloadSoundEvent()};
+	int ticks = 0;
+	while (gun.reloading() && ticks < 250) {
+		CHECK(gun.reloadLeft() >= 0 && gun.reloadLeft() <= settings.reloadTime);
+		gun.tick(1 / 30.0f, false);
+		++ticks;
+		if (const int event = gun.takeReloadSoundEvent()) {
+			events.push_back(event);
+		}
+		if (ticks == 20) CHECK(gun.roundsInMag() == 0);
+		if (ticks == 21) CHECK(gun.roundsInMag() == 1);
+	}
+	CHECK(ticks == 184 && gun.roundsInMag() == 6);
+	CHECK(events == std::vector<int>({4, 5, 5, 5, 5, 5, 6}));
+}
+
+TEST(Weapons_ParsesAnimationAndReloadSettings)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	auto* weapon = templates.create("GenericFireArm", "configured");
+	weapon->components().push_back("SingleFireComp");
+	weapon->settings()["ammo.reloadAmount"] = "1";
+	weapon->settings()["ammo.firstShotExtraTime"] = "0.25";
+	weapon->settings()["ammo.lastShotExtraTime"] = "1.25";
+	weapon->settings()["ammo.minimumTimeUntilReload"] = "5.4";
+	weapon->settings()["animation.useShiftAnimation"] = "1";
+	weapon->settings()["animation.shiftDelay"] = "0.75";
+	weapon->settings()["animation.loopingFire"] = "1";
+	weapon->settings()["fire.showWeaponAfterReloadDelay"] = "0.4";
+	const auto settings = game::FireArmSettings::fromTemplate(*weapon);
+	CHECK(settings.reloadAmount == 1 && settings.firstShotExtraTime == 0.25f && settings.lastShotExtraTime == 1.25f);
+	CHECK(settings.minimumReloadTicks == 162 && settings.shiftDelayTicks == 22);
+	CHECK(settings.useShiftAnimation && settings.loopingFire && settings.showAfterReloadTicks == 12);
+}
+
 TEST(Weapons_ShiftAndHeldFireAnimation)
 {
 	game::FireArmSettings tool;
@@ -141,8 +192,10 @@ TEST(Weapons_ShiftAndHeldFireAnimation)
 	bolt.magSize = 2;
 	bolt.useShiftAnimation = true;
 	bolt.shiftDelayTicks = 4;
+	bolt.allowZoomOnROF = true;
 	game::FireArm rifle(bolt);
 	CHECK(rifle.tick(1 / 30.0f, true));
+	CHECK(!rifle.zoomBusy());
 	bool shifted = false;
 	int shots = 1;
 	for (int i = 0; i < 10; ++i) {
@@ -150,6 +203,7 @@ TEST(Weapons_ShiftAndHeldFireAnimation)
 		if (rifle.animationPulses() & 32) {
 			shifted = true;
 			CHECK(shots == 1);
+			CHECK(rifle.zoomBusy());
 		}
 	}
 	CHECK(shifted && shots == 2);
@@ -1177,6 +1231,53 @@ TEST(Weapons_RetailProjectileGeometryAndTracerTemplates)
 		const auto models = game::projectileRenderStates(templates, {mine});
 		CHECK(mine.alive && mine.age >= 2.99f && models.size() == 1);
 		CHECK(models.size() == 1 && models[0].objectTemplate == empMine);
+	}
+}
+
+TEST(Weapons_RemasterIncrementalWeaponTemplates)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/Project_Remaster_v17_Final");
+	files.addSearchPath("mods/bf2142");
+	CHECK(files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons"));
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	Console console(&files);
+	world::registerWorldConsoleMethods(console, templates, objects);
+	registerArchiveTemplateCommands(console, templates, files,
+		{"Objects/Weapons/Handheld/EU_Jackhammer", "Objects/Weapons/Handheld/EU_Gauss_Rifle"});
+	world::registerUntypedTemplateProperties(console, templates,
+		{"ammo.magSize", "ammo.nrOfMags", "ammo.reloadAmount", "ammo.reloadTime", "ammo.changeMagAt",
+			"ammo.firstShotExtraTime", "ammo.lastShotExtraTime", "ammo.magLinkWeapon",
+			"animation.useShiftAnimation", "animation.shiftDelay", "fire.roundsPerMinute"});
+	std::string out;
+	CHECK(console.run("Objects/Weapons/Handheld/EU_Jackhammer/EU_Jackhammer.con", {}, out));
+	CHECK(console.run("Objects/Weapons/Handheld/EU_Gauss_Rifle/EU_Gauss_Rifle_Alt.con", {}, out));
+	for (const char* name : {"EU_Jackhammer", "EU_Gauss_Rifle_Alt"}) {
+		const auto* t = templates.find(name);
+		CHECK(t);
+		if (!t) continue;
+		const auto settings = game::FireArmSettings::fromTemplate(*t);
+		const bool shotgun = std::string(name) == "EU_Jackhammer";
+		CHECK(settings.reloadAmount == 1 && settings.magSize == (shotgun ? 6 : 4));
+		CHECK(settings.useShiftAnimation && settings.shiftDelayTicks == (shotgun ? 10 : 22));
+		CHECK(shotgun || settings.magLinkWeapon == "EU_Gauss_Rifle_Rocket");
+		game::FireArm gun(settings);
+		gun.setUseFireModes(false);
+		for (int i = 0; i < 1000 && gun.roundsInMag() > 0; ++i) gun.tick(1 / 30.0f, true);
+		CHECK(gun.roundsInMag() == 0);
+		gun.tick(1 / 30.0f, false);
+		CHECK(gun.startReload());
+		int elapsed = 0;
+		while (gun.reloading() && elapsed < 300) {
+			gun.tick(1 / 30.0f, false);
+			++elapsed;
+		}
+		CHECK(elapsed == (shotgun ? 184 : 140));
+		CHECK(gun.roundsInMag() == settings.magSize && gun.magsLeft() == settings.nrOfMags - settings.magSize);
 	}
 }
 

@@ -433,7 +433,7 @@ struct FireArmSettings {
 	// 0x005883d0: the item before).
 	bool toggleWhenNoAmmo = false;
 	// ammo.changeMagAt (+0x24, 0.7 by default): the reload start (0x005f4830)
-	// puts the magazine's swap at round(reloadTicks x changeMagAt) and the
+	// puts the magazine's swap at reloadTicks x changeMagAt and the
 	// end at reloadTicks; the update (0x005f3c40) fills at the swap and is
 	// busy until the end.
 	float changeMagAt = 0.7f;
@@ -596,7 +596,7 @@ public:
 			fire(seconds, false);
 		}
 	}
-	void dropReload() { m_reloadLeft = m_reloadStageLeft = 0; m_reloadSoundEvent = 0; }
+	void dropReload() { m_reloadLeft = m_reloadStageLeft = 0; m_reloadRoundsLeft = m_reloadSoundEvent = 0; }
 	// The firearm's enable (0x005c47d0: drawn): delayToUse starts, and the
 	// ammo's on-enable runs (0x005f4bb0): held by a soldier (or without
 	// reloadWithoutPlayer) a reload under way is dropped; instantReloadOnEnable.
@@ -616,7 +616,13 @@ public:
 	// toggleWhenNoAmmo's test (0x005f39c0): false with an empty magazine
 	// that can't be reloaded.
 	bool selectable() const;
-	float reloadLeft() const { return m_reloadLeft; } // seconds (the HUD's reload bar)
+	float reloadLeft() const
+	{
+		if (m_settings.reloadAmount > 0 && m_reloadLeft > 0) {
+			return std::min(m_settings.reloadTime, m_reloadStageLeft > 0 ? m_reloadStageLeft : m_reloadLeft);
+		}
+		return m_reloadLeft;
+	}
 	float heat() const { return std::min(m_heat, 1.0f); } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
 	// when full.
@@ -635,7 +641,7 @@ public:
 	// The firearm busy for a zoom press (0x005c50e0's test): reloading, or
 	// cycling without fire.allowZoomOnROF (0x005d3c40). The press is then
 	// taken only with zoomWhenBusy (anim::ZoomSettings::takesPress).
-	bool zoomBusy() const { return reloading() || m_shiftPending || m_shiftIn > 0 || (cycling() && !m_settings.allowZoomOnROF); }
+	bool zoomBusy() const { return reloading() || m_shiftIn > 0 || (cycling() && !m_settings.allowZoomOnROF); }
 	// The holder's ability battery (0..1) for a ReplenishingAmmoComp's
 	// abilityCost (FireArmSettings::replenishing), set before each tick and
 	// enable; and what the rounds since the last call cost it.
@@ -703,7 +709,7 @@ private:
 	int m_cooldown = 0;
 	float m_reloadLeft = 0;
 	float m_reloadStageLeft = 0;
-	int m_reloadSoundEvent = 0;
+	int m_reloadRoundsLeft = 0, m_reloadSoundEvent = 0;
 	bool m_reloadFilled = false; // the magazine swapped (changeMagAt) in this reload
 	int m_readyIn = 0;           // ticks of delayToUse left
 	float m_heat = 0;
