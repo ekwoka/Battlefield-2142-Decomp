@@ -734,6 +734,7 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 // (0x00651c60 hides a wrecked node's children; the core room's doors open).
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
+	++titan.meshVersion;
 	Body* body = findBody(titan.object);
 	const world::Object* object = m_objects.find(titan.object);
 	if (!body && object && m_files && m_collisionTemplates) {
@@ -982,6 +983,46 @@ std::vector<GameWorld::TitanInfo> GameWorld::titans() const
 		list.push_back(info);
 	}
 	return list;
+}
+
+bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
+{
+	fraction = 1;
+	const Body* body = findBody(titan);
+	if (!body) {
+		return false;
+	}
+	const physics::CollisionWorld* mesh = (team == 1 || team == 2) && body->teamSoldierMesh[team - 1]
+		? body->teamSoldierMesh[team - 1].get()
+		: body->soldierMesh.get();
+	physics::CollisionWorld::Hit hit {};
+	if (!mesh || !mesh->raycast(from, to, hit)) {
+		return false;
+	}
+	fraction = hit.fraction;
+	return true;
+}
+
+physics::Vec3 GameWorld::titanToLocal(uint32_t titan, const physics::Vec3& world) const
+{
+	const Body* body = findBody(titan);
+	return body ? body->body.rotation.untransform(world - body->body.position) : world;
+}
+
+physics::Vec3 GameWorld::titanToWorld(uint32_t titan, const physics::Vec3& local) const
+{
+	const Body* body = findBody(titan);
+	return body ? body->body.position + body->body.rotation.transform(local) : local;
+}
+
+uint32_t GameWorld::titanMeshVersion(uint32_t titan) const
+{
+	for (const Titan& t : m_titans) {
+		if (t.object == titan) {
+			return t.meshVersion;
+		}
+	}
+	return 0;
 }
 
 std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team) const

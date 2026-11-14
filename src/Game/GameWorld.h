@@ -2451,6 +2451,14 @@ public:
 	// the Titan's box; false for none.
 	// `seat` >= 0 asks for that seat only; `skip`: seats others are going to.
 	bool titanGunEntry(int player, physics::Vec3& entry, float& radius, int& seat, const std::vector<int>& skip = {}) const;
+	// For the bots' Titan walk grid (BotsTitan.cpp): a ray in the Titan's
+	// own frame against what `team`'s soldiers meet of it (false when
+	// clear), the frame's two transforms, and a count that changes whenever
+	// those meshes are rebuilt (a part went down).
+	bool titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
+	physics::Vec3 titanToLocal(uint32_t titan, const physics::Vec3& world) const;
+	physics::Vec3 titanToWorld(uint32_t titan, const physics::Vec3& local) const;
+	uint32_t titanMeshVersion(uint32_t titan) const;
 	bool ridingPod(int player) const;
 	// Hanging under a soldier's parachute (Parachutes.cpp).
 	bool ridingParachute(int player) const;
@@ -4470,6 +4478,7 @@ private:
 		};
 		std::vector<PodArray> podArrays;
 		bool meshesDirty = true;
+		uint32_t meshVersion = 0; // rebuildTitanMeshes' count (titanMeshVersion)
 		uint32_t serial = 0;      // its parts' ids: kTitanPartIds + serial << 12 + part
 		std::vector<int> seatParts; // each gun seat's armour (its hub's first armoured node), -1 for none
 		// The wreck (0x00652380): when it became one (+0x60), the root's

@@ -555,6 +555,9 @@ struct BotSettings {
 	// far targets and look round only where they walk (not retail).
 	const bool* botMovement = nullptr;
 	bool playerLikeMovement() const { return enhanced && *enhanced && botMovement && *botMovement; }
+	// enhanced.botTitan, also read live: the bots' play aboard a Titan (BotsTitan.cpp; not retail).
+	const bool* botTitan = nullptr;
+	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
@@ -1270,6 +1273,17 @@ private:
 		float waitingSince = -1;  // Idle: a driver waiting for a passenger
 		bool usedLast = false;    // presses: use and the defibrillator want a release between
 		int titanGun = -1;        // Titan mode: the gun seat of its Titan it goes to man (claimed)
+		physics::Vec3 titanPodGoal, titanPodGoalFor; // BotsTitan.cpp: an APC driver's launch place, and the landing spot it was chosen for
+		bool titanPodGoalSet = false;
+		uint32_t titanWaitFor = 0; // BotsTitan.cpp: the transport or APC whose driver it waits in for riders, and until when
+		float titanWaitUntil = 0;
+		int titanFlyMode = 0;      // a transport pilot's order for fly(), read once: 1 hold, 2 fly to titanFlyTo, 3 parked
+		physics::Vec3 titanFlyTo;
+		bool titanFlyDown = false; // over the deck: coming down
+		uint32_t titanRide = 0;    // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
+		float titanRideAt = -1e9f;
+		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way, and when
+		float titanAtTime = 0;
 		bool switchedLast = false;
 		bool reloadedLast = false; // c_PIReload pressed at the last execution (a release between presses)
 		// The comm object's received radio messages (bot vt+0xa4, +0xc: a
@@ -1826,6 +1840,37 @@ private:
 	std::vector<GameWorld::WeaponAmmo> seatAmmo(const GameWorld::PlayerInfo& self,
 		const std::vector<std::pair<int, std::string>>& weapons) const;
 	void handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	// BotsTitan.cpp (enhanced.botTitan): true when it took the bot's input.
+	struct TitanGrid;
+	std::map<std::pair<uint32_t, int>, std::shared_ptr<TitanGrid>> m_titanGrids; // by Titan and team
+	TitanGrid& titanGrid(const GameWorld::TitanInfo& titan, int team);
+	const std::vector<float>& titanField(TitanGrid& grid, const GameWorld::TitanInfo& titan, int team, uint32_t part, const physics::Vec3& point,
+		bool nearest = false);
+	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
+		const GameWorld::TitanInfo& titan, const std::vector<float>& field);
+	// The team's plan (its virtual commander): a role a squad, 0 the silos, 1 board the enemy Titan, 2 defend its own.
+	struct TitanPlan {
+		float nextAt = 0, share = 0.5f;
+		bool wasDown = false;
+		std::map<int, int> roles; // by squad, 100 + the player for a bot outside squads
+	};
+	TitanPlan m_titanPlans[3];
+	int titanRole(const GameWorld::PlayerInfo& self);
+	bool titanRespawn(const GameWorld::PlayerInfo& self);
+	const GameWorld::VehicleInfo* titanTransport(int team, const GameWorld::TitanInfo& home);
+	bool titanRideGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
+	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	std::string titanGridStats();
+	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
+	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
+	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+
+public:
+	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
+	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
+
+private:
 	// The zoom key's press (Bot::zoomPress, set by the plans' statements)
 	// on the weapon in hand: a press steps the level (0x005da670; not while
 	// reloading), a weapon change, a seat and a reload with zoomOutOnReload

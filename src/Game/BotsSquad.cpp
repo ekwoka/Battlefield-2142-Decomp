@@ -1741,7 +1741,9 @@ void BotManager::chooseRespawn(const GameWorld::PlayerInfo& self)
 			return w != m_settings.weapons.end() && w->second.antiAir;
 		});
 	}
-	m_world.setSpawnChoice(self.id, r.controlPoint);
+	if (!titanRespawn(self)) {
+		m_world.setSpawnChoice(self.id, r.controlPoint);
+	}
 }
 
 } // namespace dice::hfe::game

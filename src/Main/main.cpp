@@ -3648,6 +3648,7 @@ int runGame(Options& options, Session& session)
 	botSettings.enhanced = &enhancedSettings.enabled;
 	botSettings.botRecovery = &enhancedSettings.botRecovery;
 	botSettings.botMovement = &enhancedSettings.botMovement;
+	botSettings.botTitan = &enhancedSettings.botTitan;
 	botSettings.cornerSteer = &enhancedSettings.cornerSteer;
 	game::registerBotConsoleMethods(console, botSettings);
 	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.
@@ -8346,7 +8347,7 @@ int runGame(Options& options, Session& session)
 		} else {
 			std::fprintf(stderr, "game mode %s did not start\n", options.gameMode.c_str());
 		}
-		// Testing aid: BF2142_TITAN_SHIELDS_DOWN=<team> takes that team's Titan
+		// Testing aid: BF2142_TITAN_SHIELDS_DOWN=<team> (3: both) takes that team's Titan
 		// to 55 % once, so its shield is down (the terminals and core show).
 		// Diagnostic for "clipped into the Titan": twice a second while the local
 		// soldier is over or inside a Titan, its place in the Titan's frame and
@@ -8373,7 +8374,7 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			for (const auto& titan : round.titans()) {
-				if (titan.team == std::atoi(team) && titan.maxHitPoints > 0) {
+				if ((titan.team == std::atoi(team) || std::atoi(team) == 3) && titan.maxHitPoints > 0) { // 3: both
 					round.setHitPoints(titan.object, titan.maxHitPoints * 0.55f);
 					done = true;
 					if (std::getenv("BF2142_TITAN_WRECK_CONSOLES")) {
@@ -8385,6 +8386,26 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
+			}
+		};
+		// Testing aid: BF2142_TITAN_BOARD=<n> puts n soldiers of each team on
+		// the enemy Titan's spawn points 20 s in (the bots' boarding stands in).
+		auto titanBoard = [&round, &bots, tick = 0]() mutable {
+			static const char* count = std::getenv("BF2142_TITAN_BOARD");
+			if (!count || ++tick != 600) {
+				return;
+			}
+			for (int team = 1; team <= 2; ++team) {
+				const std::vector<physics::Vec3> spots = bots.titanLandingSpots(3 - team, team);
+				int moved = 0;
+				for (const auto& p : round.playerList()) {
+					if (p.team == team && p.alive && !p.vehicle && moved < std::atoi(count) && !spots.empty()) {
+						const physics::Vec3 at = spots[(static_cast<size_t>(moved) * 7919 + 13) % spots.size()];
+						round.setSoldierPosition(p.soldier, {at.x, at.y + 0.3f, at.z});
+						++moved;
+					}
+				}
+				std::printf("titan-board: %d of team %d aboard the enemy Titan (%zu landing spots)\n", moved, team, spots.size());
 			}
 		};
 		host::TitanShotTrace titanShotTrace;
@@ -8402,6 +8423,7 @@ int runGame(Options& options, Session& session)
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
 			shieldsDown();
+			titanBoard();
 			titanWalkTrace();
 			titanShotTrace.update(round, objects);
 			playerCamera.tick(1.0f / 30.0f);
@@ -8426,6 +8448,7 @@ int runGame(Options& options, Session& session)
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
 			shieldsDown();
+			titanBoard();
 			titanWalkTrace();
 			titanShotTrace.update(round, objects);
 			playerCamera.tick(1.0f / 30.0f);

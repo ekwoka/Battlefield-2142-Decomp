@@ -862,6 +862,7 @@ BotManager::~BotManager()
 	if (!std::getenv("BF2142_BOT_STATS")) {
 		return;
 	}
+	std::fprintf(stderr, "%s", titanGridStats().c_str());
 	std::fprintf(stderr, "bot behaviours (seconds run, all bots):\n");
 	for (const auto& [name, seconds] : m_behaviourSeconds) {
 		std::fprintf(stderr, "  %-28s %8.1f\n", name.c_str(), seconds);
@@ -1735,6 +1736,12 @@ void BotManager::update(float seconds)
 		// drops in a pod, riding it down without steering.
 		physics::Vec3 podEntry;
 		float podRadius = 0;
+		if (titanPod(bot, *self, input, elapsed)) {
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			m_behaviourSeconds[bot.behaviour] += elapsed;
+			continue;
+		}
 		if (m_world.ridingPod(self->id)) {
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
@@ -1748,6 +1755,13 @@ void BotManager::update(float seconds)
 				m_world.setInput(self->id, input);
 				continue;
 			}
+		}
+		if (titanPlay(bot, *self, input, elapsed)) {
+			bot.reloadedLast = input.reload;
+			bot.lastInput = input;
+			m_world.setInput(self->id, input);
+			m_behaviourSeconds[bot.behaviour] += elapsed;
+			continue;
 		}
 		// Its Titan's guns (the gun hubs are seats of equipment type Fixed in
 		// their AI templates, which AIDLL's seat choice covers, but no
@@ -1839,6 +1853,7 @@ void BotManager::update(float seconds)
 				m_drivenName[self->vehicle] = o->objectTemplate()->name();
 			}
 		}
+		titanRide(bot, *self, input);
 		bot.usedLast = input.use;
 		bot.switchedLast = input.switchSeat > 0;
 		bot.firedLast = input.fire;
@@ -2443,6 +2458,12 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 			hasOrder = true;
 			titanSiloOrder = true;
 		}
+	}
+	// enhanced.botTitan: an APC's driver takes its pods beside the enemy Titan once its shield is down.
+	if (physics::Vec3 launch; titanPodGoal(bot, self, launch) || titanRideGoal(bot, self, launch)) {
+		orderAt = launch;
+		hasOrder = true;
+		titanSiloOrder = true;
 	}
 	// A driver heads for the areas' vehicle order positions over the
 	// vehicle mesh.
@@ -3156,7 +3177,9 @@ physics::Vec3 flatUnit(const physics::Vec3& v)
 bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	const std::string& pattern = bot.pattern;
-	if (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft") {
+	const int titanMode = bot.titanFlyMode; // BotsTitan.cpp's order for this tick
+	bot.titanFlyMode = 0;
+	if (!titanMode && (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft")) {
 		return false;
 	}
 	const GameWorld::VehicleInfo* vehicle = nullptr;
@@ -3216,7 +3239,14 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	GameWorld::PlayerInfo target;
 	const bool fighting = pattern == "BBPHeliFire3d" && bot.target >= 0 && m_world.playerInfo(bot.target, target)
 		&& target.alive;
-	if (fighting) {
+	if (titanMode == 2) {
+		pilot.flyTo(toAi(bot.titanFlyTo), 0);
+	} else if (titanMode == 1) {
+		pilot.flyTo(toAi(at), 0);
+		bot.heli.controls.throttle = 0; // as the take-off wait below
+	} else if (titanMode) {
+		pilot.reset();
+	} else if (fighting) {
 		const auto seats = m_world.vehicleSeats(self.vehicle);
 		// The pilot's weapon (0x100dd4a0, flags 7, from BBPHeliFire3d's plan
 		// 0x1007f9d0): of the seat's weapons with a strength above 0 against
