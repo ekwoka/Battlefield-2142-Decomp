@@ -1906,7 +1906,7 @@ private:
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
-	bool podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot);
+	bool podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot, const physics::Vec3* launcher = nullptr);
 	void steerPod(const GameWorld::PlayerInfo& self, const physics::Vec3& spot, SoldierInput& input) const;
 	// Its own Titan's deck gunship and transport: a bot aboard walks to one and gets in (titanCrew); a transport's
 	// pilot with the enemy's shield up flies riders to a silo, where they drop in pods, and lands back (titanSortie).

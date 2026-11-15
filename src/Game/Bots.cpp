@@ -1749,8 +1749,9 @@ void BotManager::update(float seconds)
 			continue;
 		}
 		if (m_world.ridingPod(self->id)) {
+			// Only a drop from its own Titan's array, where the place was chosen (titanPod steers the boarding pods).
 			physics::Vec3 spot;
-			if (podLanding(bot, *self, spot)) {
+			if (m_time - bot.podLandingAt < 20 && podLanding(bot, *self, spot)) {
 				steerPod(*self, spot, input);
 			}
 			bot.podAimOff = 1e9f;
@@ -1761,11 +1762,11 @@ void BotManager::update(float seconds)
 		if (self->vehicle && m_world.isTitan(self->vehicle)) {
 			const auto seats = m_world.vehicleSeats(self->vehicle);
 			if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size() && seats[self->seat].podLauncher) {
-				// Outside Titan mode: the array swung round to its landing place first (the
-				// bundle's own speed and limits apply), then fired once there or turning no more.
+				// enhanced.botTitan: the array swung round to its landing place first (the bundle's
+				// own speed and limits apply), then fired once there or turning no more.
 				physics::Vec3 spot, from, way;
 				input.fire = true;
-				if (podLanding(bot, *self, spot) && m_world.podArrayAim(self->id, from, way)) {
+				if (m_world.podArrayAim(self->id, from, way) && podLanding(bot, *self, spot, &from)) {
 					const float off = std::remainder(std::atan2(spot.x - from.x, spot.z - from.z) * 57.29578f - std::atan2(way.x, way.z) * 57.29578f, 360.0f);
 					input.turn = off;
 					input.fire = std::fabs(off) < 3 || std::fabs(off) > std::fabs(bot.podAimOff) - 0.05f;
@@ -1844,6 +1845,10 @@ void BotManager::update(float seconds)
 			continue;
 		}
 		if (m_world.titanPodEntry(self->id, podEntry, podRadius)) {
+			// Chosen on the way, from the array: its entry press can launch the pod on taking the
+			// seat (exitThroughPodLauncher) before the bot thinks again.
+			physics::Vec3 spot;
+			podLanding(bot, *self, spot, &podEntry);
 			const physics::Vec3 d = podEntry - self->position;
 			const float want = std::atan2(d.x, d.z) * 57.29578f;
 			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);

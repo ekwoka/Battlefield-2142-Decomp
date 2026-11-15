@@ -780,24 +780,28 @@ void BotManager::steerPod(const GameWorld::PlayerInfo& self, const physics::Vec3
 	input.strafe = std::clamp((want.x * std::cos(yaw) - want.z * std::sin(yaw)) / 8, -1.0f, 1.0f);
 }
 
-// enhanced.botTitan outside Titan mode (Remaster's Wake Island 2142 CoOp
-// parks each team's Titan off the coast): a drop from its own Titan aims for
-// dry land within a pod's reach, the place nearest its objective (the nearest
-// control point the team doesn't hold), not wherever the array points.
-bool BotManager::podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot)
+// enhanced.botTitan: a drop from its own Titan (Remaster's CoOp maps park it as
+// a spawn, Wake Island 2142's off the coast; in Titan mode it flies over
+// Molokai's buildings, whose roofs have no mesh) aims for dry, walkable ground
+// within a pod's reach, the place nearest its objective (the nearest control
+// point the team doesn't hold: a silo in Titan mode), not wherever the array
+// points. Boarding pods for the enemy Titan are titanPod's.
+bool BotManager::podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot, const physics::Vec3* launcher)
 {
-	if (!m_settings.titanPlay() || m_world.gameMode() == "gpm_ti") {
+	if (!m_settings.titanPlay()) {
 		return false;
 	}
-	if (m_time - bot.podLandingAt < 20) { // chosen aboard; kept for the walk, the aim and the ride
+	if (m_time - bot.podLandingAt < 20) { // chosen on the way to the array; kept for the aim and the ride
 		spot = bot.podLanding;
 		return true;
 	}
+	// From the launcher (a seated soldier's position is his Titan's, tens of metres off).
+	const physics::Vec3 origin = launcher ? *launcher : self.position;
 	const GameWorld::ControlPointInfo* goal = nullptr;
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
 	float best = kInfinity;
 	for (const GameWorld::ControlPointInfo& p : points) {
-		const float d = horizontal(p.position - self.position) + (p.team == self.team || !p.capturable ? 1e5f : 0.0f);
+		const float d = horizontal(p.position - origin) + (p.team == self.team || !p.capturable ? 1e5f : 0.0f);
 		if (d < best) {
 			best = d;
 			goal = &p;
@@ -811,15 +815,19 @@ bool BotManager::podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics
 	// A pod left to fall carries about 77 m from Wake's Titans; steered, further. Past
 	// that reach: the nearest dry place, whatever the objective, as close as it gets.
 	constexpr float kReach = 110;
-	// Dry 10 m all round too: a pod comes down within a few metres of where it was steered.
-	const auto dry = [&](float x, float z) { return m_world.terrainHeight(x, z) >= water + 1; };
+	// Dry ground on the infantry mesh (within 2 m of it: not a slope or ledge beside it), there and
+	// 10 m all round: a pod comes down within a few metres of where it was steered.
+	const auto standable = [&](float x, float z) {
+		const float y = m_world.terrainHeight(x, z);
+		return y >= water + 1 && (!m_navMesh || m_navMesh->findPolygon(ai::Vec3 {x, y, z}, 2.0f) >= 0);
+	};
 	best = kInfinity;
 	for (float r = 30; r <= 250; r += 10) {
 		for (int k = 0; k < 72; ++k) {
-			physics::Vec3 p = self.position + physics::Vec3 {std::sin(k * 0.08726646f), 0, std::cos(k * 0.08726646f)} * r;
+			physics::Vec3 p = origin + physics::Vec3 {std::sin(k * 0.08726646f), 0, std::cos(k * 0.08726646f)} * r;
 			p.y = m_world.terrainHeight(p.x, p.z);
-			if (!dry(p.x, p.z) || !dry(p.x + 10, p.z) || !dry(p.x - 10, p.z) || !dry(p.x, p.z + 10) || !dry(p.x, p.z - 10)
-				|| (m_navMesh && m_navMesh->findPolygon(ai::Vec3 {p.x, p.y, p.z}, 5.0f) < 0)) {
+			if (!standable(p.x, p.z) || !standable(p.x + 10, p.z) || !standable(p.x - 10, p.z) || !standable(p.x, p.z + 10)
+				|| !standable(p.x, p.z - 10)) {
 				continue;
 			}
 			const float d = r <= kReach ? horizontal(p - goal->position) : 1e5f + r;
