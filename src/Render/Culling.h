@@ -149,24 +149,20 @@ inline int lodForDistance(float distance, const std::vector<float>& switchDistan
 	return 0;
 }
 
-// A geometry's switch distances as RendDX9 fills them when the mesh loads
-// (static meshes 0x100d4d30, bundled and skinned 0x100a31d0): entry i is
-// the template's setSubGeometryLodDistance for LOD i if it set one, else a
-// running distance that starts at 50 m and grows by 50 m for each entry
-// left to it and by the set distance for each set one (the editor's writer
-// 0x100d3320 leaves out exactly the values 50, 100, 150 ...).
-inline std::vector<float> lodSwitchDistances(const std::vector<float>& set, int lodCount)
+// A geometry's switch distances for the `lodCount` LODs left after
+// `skipped`: the mesh loads at GeometryTemplate.create with 50 m steps
+// (0x100d4d30: (skipped + 1) x 50, then 50 more each), and the .tweak's
+// setSubGeometryLodDistance then overwrites only its own entry, lod -
+// skipped (0x100d4040's loaded path). So an unset entry (NaN: the setter's
+// gaps) keeps its step; the editor's writer 0x100d3320 leaves out exactly
+// the entries equal to 50, 100, 150 ...
+inline std::vector<float> lodSwitchDistances(const std::vector<float>& set, int lodCount, int skipped = 0)
 {
 	std::vector<float> distances;
-	float running = 50.0f;
 	for (int i = 0; i + 1 < lodCount; ++i) {
-		if (i < static_cast<int>(set.size())) {
-			distances.push_back(set[static_cast<size_t>(i)]);
-			running += set[static_cast<size_t>(i)];
-		} else {
-			distances.push_back(running);
-			running += 50.0f;
-		}
+		const size_t at = static_cast<size_t>(i + skipped);
+		const bool given = at < set.size() && !std::isnan(set[at]);
+		distances.push_back(given ? set[at] : 50.0f * static_cast<float>(skipped + i + 1));
 	}
 	return distances;
 }

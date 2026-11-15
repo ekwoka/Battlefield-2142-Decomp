@@ -74,11 +74,23 @@ TEST(MeshQueues_GeometryTemplatesLodDistancesAndMeshParticles)
 	CHECK(render::lodForDistance(5000, d, 2) == 1 && render::lodForDistance(5000, d, 1) == 0);
 	CHECK(render::lodForDistance(5000, d, 4, 0) == 3 && render::lodForDistance(76, d, 4, 2) == 0);
 	// Unset distances: 50 m, then 50 m more each (0x100d4d30); a set one
-	// moves the later defaults on by itself.
+	// replaces only its own entry (0x100d4040 on the loaded mesh).
 	const std::vector<float> defaults = render::lodSwitchDistances({}, 4);
 	CHECK(defaults.size() == 3 && defaults[0] == 50 && defaults[1] == 100 && defaults[2] == 150);
 	const std::vector<float> mixed = render::lodSwitchDistances({30}, 3);
-	CHECK(mixed.size() == 2 && mixed[0] == 30 && mixed[1] == 80);
+	CHECK(mixed.size() == 2 && mixed[0] == 30 && mixed[1] == 100);
+	// beacon_tower_01_a sets only LOD 2 ("0 2 120"): LODs 0 and 1 keep 50 and 100,
+	// not the setter's zero-filled gaps (the tower lost its railings at any distance).
+	console.execute("GeometryTemplate.create StaticMesh beacon_test", output, ConsoleAccess::Anyone);
+	console.execute("GeometryTemplate.setSubGeometryLodDistance 0 2 120", output, ConsoleAccess::Anyone);
+	const geom::GeometryTemplate* beacon = geometries.find("beacon_test");
+	CHECK(beacon && beacon->lodDistances.size() == 1);
+	const std::vector<float> tower = render::lodSwitchDistances(beacon ? beacon->lodDistances[0] : std::vector<float> {}, 4);
+	CHECK(tower.size() == 3 && tower[0] == 50 && tower[1] == 100 && tower[2] == 120);
+	CHECK(render::lodForDistance(10, tower, 4) == 0);
+	// With one LOD skipped, entry i is LOD i + 1's: the tweak's LOD 2 is entry 1.
+	const std::vector<float> skipped = render::lodSwitchDistances(beacon ? beacon->lodDistances[0] : std::vector<float> {}, 3, 1);
+	CHECK(skipped.size() == 2 && skipped[0] == 100 && skipped[1] == 120);
 	CHECK(render::lodDistance(120, 2, 10) == 50);
 	// MeshParticleMesh templates are bundled-mesh files.
 	console.execute("GeometryTemplate.create MeshParticleMesh mp_spark2", output, ConsoleAccess::Anyone);

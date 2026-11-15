@@ -3687,11 +3687,17 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		const bool noLods = renderer.staticNoLods && !base.skinned && !base.bundled;
 		if (m_sources && !noLods && instance.shownGeometry < 0 && base.lodCount > 1 && !instance.geometry.empty()) {
 			const Vec3f origin {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
-			const Vec3f toCamera = (sphere.radius >= 0 ? sphere.center : origin) - camera.position;
-			const float distance = lodDistance(std::sqrt(dot(toCamera, toCamera)), zoom, sphere.radius);
+			// A static mesh measures from its object's origin and takes off its LOD 0 box's
+			// half-diagonal (0x100bdc54, 0x100bdcdd: LOD +0x1c, set by 0x101a7b10), not a vertex sphere.
+			const bool plainStatic = !base.skinned && !base.bundled && !base.tree && !instance.overgrowth;
+			const Vec3f toCamera = (plainStatic || sphere.radius < 0 ? origin : sphere.center) - camera.position;
+			const float radius = plainStatic ? boxHalfDiagonal({base.boxMin.x, base.boxMin.y, base.boxMin.z},
+												   {base.boxMax.x, base.boxMax.y, base.boxMax.z})
+											 : sphere.radius;
+			const float distance = lodDistance(std::sqrt(dot(toCamera, toCamera)), zoom, radius);
 			// The LODs left after the skipped ones switch as a mesh of that many.
 			const int kept = static_cast<int>(base.lodCount) - base.skippedLods;
-			const std::vector<float> distances = lodSwitchDistances(base.lodDistances, kept);
+			const std::vector<float> distances = lodSwitchDistances(base.lodDistances, kept, base.skippedLods);
 			// renderer +0x974: VideoSettings' geometry quality, 0.5 / 0.8 / 1 (0x10010040).
 			const float quality = m_sources->quality ? m_sources->quality->geometryLodFactor() : 1.0f;
 			const float scale = quality * (base.skinned ? renderer.skinnedMeshLodDistanceScale

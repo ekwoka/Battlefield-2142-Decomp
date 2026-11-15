@@ -43,8 +43,8 @@ struct GeometryTemplate {
 	bool useRadiusForShadowDepth = false;
 	bool useRadiusForShadowSpatial = false;
 	// GeometryTemplate.setSubGeometryLodDistance <geometry> <lod> <distance>
-	// (RendDX9 0x1007303a): how far each LOD of a geometry is drawn; 0 or
-	// missing for unset.
+	// (RendDX9 0x1007303a): how far each LOD of a geometry is drawn; NaN or
+	// missing for unset (render::lodSwitchDistances).
 	std::vector<std::vector<float>> lodDistances;
 	// GeometryTemplate.maxSkip3pLods / maxSkipWreckLods (RendDX9 0x10073920
 	// / 0x10073a8a; the template's +0xc0 / +0xc4, both 1 by default,

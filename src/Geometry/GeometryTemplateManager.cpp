@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 
 namespace dice::hfe::geom {
@@ -181,7 +182,7 @@ void registerGeometryConsoleMethods(Console& console, GeometryTemplateManager& g
 			}
 			auto& distances = lods[static_cast<size_t>(geometry)];
 			if (distances.size() <= static_cast<size_t>(lod)) {
-				distances.resize(static_cast<size_t>(lod) + 1, 0.0f);
+				distances.resize(static_cast<size_t>(lod) + 1, std::nanf("")); // gaps unset: they keep their 50 m steps
 			}
 			distances[static_cast<size_t>(lod)] = distance;
 		});
