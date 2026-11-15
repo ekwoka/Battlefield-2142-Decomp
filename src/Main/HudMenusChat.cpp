@@ -10,8 +10,13 @@ namespace dice::hfe::menu {
 
 namespace {
 
-constexpr float kLineSeconds = 5.0f; // each category's lifetime (+0x154..+0x174)
-constexpr size_t kMaxTyped = 150;    // setEditNodeMaxLength 150 (HudElementsChat.con)
+constexpr size_t kMaxTyped = 150; // setEditNodeMaxLength 150 (HudElementsChat.con)
+
+// Each category's lifetime (+0x154..+0x174): 5 s by default (0x007b6d80), set by the
+// ingameChat/ingamePersonal setup (0x0075d526.., 0x0075d7f6..) to 15 s, kills 20 s, questions 500 s.
+constexpr std::array<float, 9> kLineSeconds {15, 20, 15, 15, 15, 15, 15, 15, 500};
+// Each category's rows (+0xc4, 0x007b4b10): three for chat, kills, personal and questions.
+constexpr size_t kMaxRows = 3;
 
 std::string replaced(std::string text, const std::string& from, const std::string& to)
 {
@@ -54,7 +59,14 @@ std::array<float, 4> HudChat::colorOf(Speaker speaker)
 
 void HudChat::push(Line line)
 {
-	m_left[static_cast<size_t>(std::clamp(line.category, 0, 8))] = kLineSeconds;
+	line.category = std::clamp(line.category, 0, 8);
+	const auto category = static_cast<size_t>(line.category);
+	m_left[category] = kLineSeconds[category];
+	// A full category scrolls its oldest line out (0x007b47b0).
+	const auto same = [&line](const Line& l) { return l.category == line.category; };
+	if (static_cast<size_t>(std::count_if(m_lines.begin(), m_lines.end(), same)) >= kMaxRows) {
+		m_lines.erase(std::find_if(m_lines.begin(), m_lines.end(), same));
+	}
 	m_lines.push_back(std::move(line));
 }
 
@@ -178,22 +190,18 @@ void HudChat::key(int code)
 
 void HudChat::update(float seconds)
 {
-	// Each category's oldest line goes when its time runs out.
+	// 0x007b4a40: once a category's time from its latest line runs out, it
+	// loses its oldest line each update until it is empty.
 	for (int category = 0; category < 9; ++category) {
+		const auto oldest = std::find_if(m_lines.begin(), m_lines.end(), [category](const Line& l) { return l.category == category; });
 		float& left = m_left[static_cast<size_t>(category)];
-		if (left <= 0) {
+		if (oldest == m_lines.end()) {
 			continue;
 		}
 		left -= seconds;
-		if (left > 0) {
-			continue;
-		}
-		const auto oldest = std::find_if(m_lines.begin(), m_lines.end(), [category](const Line& l) { return l.category == category; });
-		if (oldest != m_lines.end()) {
+		if (left <= 0) {
 			m_lines.erase(oldest);
-		}
-		if (std::any_of(m_lines.begin(), m_lines.end(), [category](const Line& l) { return l.category == category; })) {
-			left = kLineSeconds;
+			left = 0;
 		}
 	}
 	std::vector<std::vector<std::string>> chat, personal;

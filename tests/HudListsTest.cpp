@@ -62,9 +62,23 @@ TEST(HudLists_ChatLinesAndSayBoxes)
 	CHECK(chat.chatRows()[0] == "\xa7" "1<TEAM> Alice: hello\xa7" "0");
 	CHECK(chat.chatRows()[1] == "\xa7" "1Bob [Rifle] Alice\xa7" "0");
 	CHECK(hud.number("ChatListShow") == 1 && hud.listCell(13, 0, 0) == "You were killed by Bob"); // the personal list
-	// Each category keeps its lines 5 s from the latest.
-	chat.update(4.95f);
+	// Each category keeps its lines from the latest: chat 15 s, kills 20 s.
+	chat.update(14.95f);
+	CHECK(chat.chatRows().size() == 1 && chat.chatRows()[0] == "\xa7" "1Bob [Rifle] Alice\xa7" "0");
+	chat.update(5.0f);
 	CHECK(chat.chatRows().size() == 0 && hud.number("ChatListShow") == 0);
+	// A steady stream of kills keeps three rows, the newest last, and they all
+	// go 20 s after the last one.
+	for (int i = 0; i < 40; ++i) {
+		chat.addKill("Bob", "V" + std::to_string(i), "KILLMESSAGE_WEAPON_X", false, menu::HudChat::Speaker::Enemy);
+		chat.update(1.0f);
+	}
+	CHECK(chat.chatRows().size() == 3 && chat.chatRows()[2] == "\xa7" "1Bob [Rifle] V39\xa7" "0");
+	chat.update(19.0f);
+	chat.update(0.1f);
+	chat.update(0.1f);
+	chat.update(0.1f);
+	CHECK(chat.chatRows().empty());
 	// A death of one's own: HUD_HUD_KILLEDBY_MYSELF's #PLAYERNAME# (0x007518d0).
 	chat.setLocalizer([](const std::string& key) {
 		return key == "HUD_HUD_KILLEDBY_MYSELF" ? std::string("#PLAYERNAME# is no more.") : key;
@@ -72,7 +86,8 @@ TEST(HudLists_ChatLinesAndSayBoxes)
 	chat.addKill("", "Carol", "", false, menu::HudChat::Speaker::Team);
 	chat.update(0.1f);
 	CHECK(chat.chatRows().size() == 1 && chat.chatRows()[0] == "\xa7" "1Carol is no more.\xa7" "0");
-	chat.update(5.0f);
+	chat.update(20.0f);
+	chat.update(0.1f);
 
 	// Typing: the box opens, printable characters go in, Enter sends.
 	std::string said;
