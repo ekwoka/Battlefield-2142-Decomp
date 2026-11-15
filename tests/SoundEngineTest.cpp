@@ -161,45 +161,6 @@ TEST(SoundEngine_WalkerCannonLoopsBlockAndPlaysTailOnRelease)
 	snd::shutdownSoundEngine();
 }
 
-// A tapped automatic gun (the static AA cannon: loopCount 0, stopType 1):
-// the trigger's release stops the loop and lets the handle go at once
-// (GameSounds::releaseTrigger). The stopped loop then plays its shot out
-// on its own, not cut by the release.
-TEST(SoundEngine_ReleasedStoppedLoopPlaysItsShotOut)
-{
-	if (!testDir()) {
-		return;
-	}
-	setenv("ALSOFT_DRIVERS", "null", 1);
-	snd::ISoundEngine* engine = snd::getSoundEngine();
-	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
-	snd::ISoundTemplate* templ = engine->createTemplate();
-	templ->setSoundFilename(path("Weapons/cannon/Static_AA_fire_1p.wav").c_str());
-	templ->setIs3dSound(false);
-	templ->setLoopCount(0);
-	templ->setStopType(1);
-	snd::ISound* gun = templ->createSound();
-	engine->reloadSoundFiles();
-	const auto run = [&](int ms) {
-		for (int t = 0; t < ms; t += 20) {
-			engine->update(1);
-			std::this_thread::sleep_for(std::chrono::milliseconds(20));
-		}
-	};
-	gun->playLooped(0);
-	run(60); // a tap
-	CHECK(engine->statistics()->playingSamples == 1);
-	gun->stop();
-	gun->release();
-	run(100);
-	CHECK(engine->statistics()->playingSamples == 1); // the shot, not a cut
-	run(3000);
-	CHECK(engine->statistics()->playingSamples == 0);
-	templ->release();
-	engine->shutdown();
-	snd::shutdownSoundEngine();
-}
-
 TEST(SoundEngine_PlaysWavAndOgg)
 {
 	if (!testDir()) {

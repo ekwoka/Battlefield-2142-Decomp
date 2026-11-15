@@ -133,7 +133,7 @@ int Sound::release()
 
 bool Sound::detach()
 {
-	if (m_loopCount == 0 && !m_stopping) {
+	if (m_loopCount == 0) {
 		return false;
 	}
 	// Envelope inputs point into the owner, which is going away.
@@ -274,7 +274,6 @@ bool Sound::scheduleSample(int index, const Vec3* position, int loopCount)
 		return false;
 	}
 	m_loopCount = loopCount;
-	m_stopping = false;
 	m_lastPlayOffset = position ? *position : Vec3 {};
 	soundEngine().scheduleSample(*this, index, position);
 	return true;
@@ -338,7 +337,6 @@ void Sound::fadeOut(int ticks)
 		}
 		if (soundEngine().isInitialized()) {
 			soundEngine().stopSound(this, false);
-			m_stopping = true;
 		}
 		return;
 	}

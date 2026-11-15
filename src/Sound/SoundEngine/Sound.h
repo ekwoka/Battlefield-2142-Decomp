@@ -112,7 +112,6 @@ private:
 	int m_lastSampleIndex = -1;
 	bool m_headRelative = false;
 	bool m_fading = false;
-	bool m_stopping = false; // stopped to its stop type's ending: a loop can play that out alone
 	std::unique_ptr<Fade> m_fade;
 };
 

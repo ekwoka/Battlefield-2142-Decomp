@@ -292,15 +292,15 @@ void GameSounds::release(WeaponState& state)
 
 void GameSounds::releaseTrigger(uint64_t user)
 {
-	// 0x005db6c0: a looping fire sound stops (its stop type's end), and
-	// reason 4 is lifted.
+	// 0x005db6c0: a looping fire sound stops (slot 13, its stop type's end),
+	// and reason 4 is lifted. The instances stay held: releasing one still
+	// looping would cut it (BF2142Audio 0x10017900: no detach for a loop),
+	// so a tapped shot plays out until the next fire or the component goes.
 	const auto it = m_weapons.find(user);
 	if (it != m_weapons.end() && it->second.looping) {
-		for (ISound*& sound : it->second.fire) {
+		for (ISound* sound : it->second.fire) {
 			if (sound) {
 				sound->stop();
-				sound->release();
-				sound = nullptr;
 			}
 		}
 		it->second.looping = false;

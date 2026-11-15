@@ -6,6 +6,8 @@
 // hands the sound layer from a round. With $BF2142_GAME_DIR, also the
 // shipped Sound/VoiceMessages.con.
 #include "Console/Console.h"
+#include <chrono>
+#include <thread>
 #include "Console/Vars.h"
 #include "Physics/MaterialManager.h"
 #include "Game/GameWorld.h"
@@ -106,6 +108,53 @@ TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
 		CHECK(!ends.empty());
 		if (!ends.empty()) CHECK(ends[0].x > 111 && ends[0].y > 9 && ends[0].z > 99);
 		for (int i = 0; i < 60; ++i) manager.update(1);
+	}
+	engine->shutdown();
+	sound::shutdownSoundEngine();
+}
+
+// A tapped automatic gun (the static AA cannon, stopType 1): the trigger's
+// release (0x005db6c0) only stops its looping fire sound, keeping the
+// instance, so the shot plays out; releasing it would cut it (the engine
+// can't detach a loop, BF2142Audio 0x10017900).
+TEST(GameSounds_TappedAutomaticShotPlaysOutAfterRelease)
+{
+	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
+	if (!dir) return;
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	auto* engine = sound::getSoundEngine();
+	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+	{
+		world::ObjectTemplateManager templates;
+		sound::SoundManager manager(engine, templates);
+		manager.registerTemplateType();
+		addSoundTemplate(templates, "S_aa_Fire1P", std::string(dir) + "/Weapons/cannon/Static_AA_fire_1p.wav");
+		if (auto* t = manager.soundTemplate("S_aa_Fire1P")) {
+			t->setIs3dSound(false);
+			t->setLoopCount(1);
+			t->setStopType(1);
+		}
+		engine->reloadSoundFiles();
+		sound::GameSounds sounds(manager);
+		const auto run = [&](int ms) {
+			for (int t = 0; t < ms; t += 20) {
+				manager.update(1);
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			}
+		};
+		sound::GameSounds::FireInfo automatic;
+		automatic.mode = 2;
+		automatic.roundsPerMinute = 300;
+		sounds.weapon(sound::GameSounds::WeaponEvent::Fire, "aa", true, {}, true, 1, 0, &automatic);
+		CHECK(sounds.fireLooping(1));
+		run(60); // a tap
+		CHECK(engine->statistics()->playingSamples == 1);
+		sounds.releaseTrigger(1);
+		CHECK(!sounds.fireLooping(1));
+		run(100);
+		CHECK(engine->statistics()->playingSamples == 1); // the shot, not a cut
+		run(3000);
+		CHECK(engine->statistics()->playingSamples == 0); // and then it ends
 	}
 	engine->shutdown();
 	sound::shutdownSoundEngine();
