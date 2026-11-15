@@ -5577,8 +5577,14 @@ void GameWorld::equip(Player& player, int slot)
 		return;
 	}
 	// toggleWhenNoAmmo (0x005f39c0 via the firearm's 0x005c1150): an empty
-	// weapon that can't be reloaded can't be selected.
-	if (const auto& kept = player.carried[static_cast<size_t>(index)].weapon; kept && !kept->selectable()) {
+	// weapon that can't be reloaded can't be selected. Except C4: with the
+	// ammo empty, 0x005c1150 asks ExplosivesFireComp's slot 0xb0
+	// (0x005e6310: not in charge mode, +0x164 != 1), and the last charge's
+	// fire (0x005e6d4f: no mags, one round) queues the detonator mode
+	// (0x005e6700, +0x168 = 2), left only when rounds plus mags pass 1
+	// (0x005e661f). So the emptied C4 comes back as its detonator.
+	if (const auto& kept = player.carried[static_cast<size_t>(index)].weapon;
+		kept && !kept->selectable() && !kept->settings().explosives) {
 		return;
 	}
 	// The squad's size (slot 0x188, minimumSquadSizeForSelection): refused,
@@ -5602,6 +5608,7 @@ void GameWorld::equip(Player& player, int slot)
 	player.weapon = next.weapon ? std::move(next.weapon) : std::make_unique<FireArm>(settings);
 	player.weapon->setBattery(std::max(0.0f, player.battery)); // a hub's instant reload asks it (0x005d79a0)
 	player.weapon->enable(true); // the draw (0x005c47d0): delayToUse, instantReloadOnEnable
+	player.detonatorDrawn = settings.explosives && !player.weapon->selectable();
 	player.projectile = projectileFor(settings.projectileTemplate);
 	player.weaponTemplate = next.name;
 	weaponSound(WeaponSoundEvent::Deploy, player, player.object, next.name, player.body.position);
@@ -10938,7 +10945,8 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 	// the player's kit template's +0x2c8 (3, the Kit constructor
 	// 0x00570080's). None: no switch. Done here at the next tick, once the
 	// round is away.
-	if (player.weapon && !player.weapon->selectable() && !player.weapon->throwing() && !player.vehicle) {
+	if (player.weapon && !player.weapon->selectable() && !player.weapon->throwing() && !player.vehicle
+		&& !player.detonatorDrawn) {
 		const int from = player.inHand;
 		if (player.previousSlot > 0) {
 			equip(player, player.previousSlot);

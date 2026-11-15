@@ -432,6 +432,7 @@ struct FireArmSettings {
 	// soldier switches away (0x005f4a40 -> firearm slot 0xe0, the pick
 	// 0x005883d0: the item before).
 	bool toggleWhenNoAmmo = false;
+	bool explosives = false; // an ExplosivesFireComp (C4): see GameWorld::equip
 	// ammo.changeMagAt (+0x24, 0.7 by default): the reload start (0x005f4830)
 	// puts the magazine's swap at reloadTicks x changeMagAt and the
 	// end at reloadTicks; the update (0x005f3c40) fills at the swap and is

@@ -3649,6 +3649,9 @@ private:
 		float recoilForceUp = 0, recoilForceLeftRight = 0;
 		int64_t lastShotTick = -1000;
 		float aimKickPitch = 0;
+		// An emptied C4 drawn again: its detonator (see equip), which the
+		// toggleWhenNoAmmo switch leaves in hand.
+		bool detonatorDrawn = false;
 		// Seated: the seat's animation system (seatAnimationSystem).
 		std::unique_ptr<anim::AnimationState> seatAnimation;
 		std::string seatAnimationPath;

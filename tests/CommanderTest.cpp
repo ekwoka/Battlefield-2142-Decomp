@@ -1067,3 +1067,46 @@ TEST(Commander_ScanBringsFarEnemiesIntoScope)
 	CHECK(scanned > 20);
 	client.disconnect();
 }
+
+// C4 thrown at a commander asset sticks to its face and, set off by its
+// owner's alternate fire, hurts it (Unl_c4_Projectile: 1000 at radius 10,
+// explosion material 80).
+TEST(Commander_C4HurtsAssets)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"commander_uav_drone_control", "commander_movement_analyst", "commander_emp_strike",
+				 "commander_orbital_strike_64"}) {
+			Field field(mod, true);
+			if (!field.loaded) {
+				CHECK(field.loaded);
+				return;
+			}
+			// The charge's own properties as the game registers them.
+			world::registerUntypedTemplateProperties(field.console, field.templates,
+				{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+					"detonation.detonateOnWaterCollision", "floaterMod"});
+			std::string out;
+			field.console.run("Objects/Weapons/Handheld/Unl_c4/unl_c4.con", {}, out);
+			const uint32_t asset = field.place(name, 2, 0, 40);
+			const float before = field.world->hitPoints(asset);
+			const int enemy = field.soldier(1, 0, 25);
+			CHECK(field.world->launchProjectile("Unl_c4_Projectile", {0, 1.5f, 34}, {0, 0, 15}, enemy));
+			field.run(2);
+			const game::Projectile* c4 = nullptr;
+			for (const auto& p : field.world->projectiles()) {
+				c4 = p.alive && p.settings && p.settings->name == "Unl_c4_Projectile" ? &p : c4;
+			}
+			CHECK(c4 && c4->stuck && c4->settings->remote);
+			game::SoldierInput detonate;
+			detonate.altFire = true;
+			field.world->setInput(enemy, detonate);
+			field.world->tick(1 / 30.0f);
+			const float after = field.world->hitPoints(asset);
+			std::fprintf(stderr, "  %s/%s: hp %.0f -> %.0f\n", mod, name, before, after);
+			CHECK(after < before);
+		}
+	}
+}

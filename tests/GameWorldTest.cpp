@@ -1847,6 +1847,55 @@ TEST(GameWorld_MinesAndC4)
 	}
 }
 
+// The last C4 charge (ExplosivesFireComp, magSize 1, no mags,
+// toggleWhenNoAmmo): the soldier puts the emptied C4 away, but slot 5
+// brings it back as the detonator (0x005c1150 -> 0x005e6310: selectable
+// out of charge mode) and it stays in hand, so its alternate fire sets
+// the charge off.
+TEST(GameWorld_EmptiedC4ComesBackAsDetonator)
+{
+	Range range;
+	world::ObjectTemplate* charge = nullptr;
+	giveGadget(range, "unl_c4", charge);
+	charge->settings()["detonation.explosionDamage"] = "1000";
+	charge->settings()["detonation.explosionMaterial"] = "80";
+	world::ObjectTemplate* c4 = range.templates.find("unl_c4");
+	c4->components().push_back("ExplosivesFireComp");
+	c4->settings()["ammo.magSize"] = "1";
+	c4->settings()["ammo.nrOfMags"] = "0";
+	c4->settings()["ammo.toggleWhenNoAmmo"] = "1";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto held = [&range] {
+		game::GameWorld::PlayerInfo me;
+		range.world->playerInfo(range.world->localPlayer(), me);
+		const world::Object* weapon = range.objects.find(me.weapon);
+		return weapon && weapon->objectTemplate() ? weapon->objectTemplate()->name() : std::string();
+	};
+	throwGadget(range);
+	CHECK(range.world->projectilesInFlight() == 1);
+	CHECK(held() == "eu_ar_rifle"); // put away after the last charge
+	game::SoldierInput input;
+	input.selectItem = 5;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 30; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(held() == "unl_c4");
+	// Away from the charge before setting it off.
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	range.world->setSoldierPosition(me.soldier, me.position + physics::Vec3 {0, 0, 30});
+	input = {};
+	input.altFire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->projectilesInFlight() == 0);
+	range.world->playerInfo(range.world->localPlayer(), me);
+	CHECK(me.alive);
+}
+
 // The radius trigger (0x005e8aa0): the anti-personnel mine (MTYPco,
 // allowFriendlyFireDetonation 1) spares its owner's bots always and his
 // human teammates only with the server's friendlyFireWithMines off; an

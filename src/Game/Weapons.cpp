@@ -485,6 +485,11 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 			})) {
 			s.multiFire = true;
 		}
+		if (c.size() == 18 && std::equal(c.begin(), c.end(), "ExplosivesFireComp", [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			})) {
+			s.explosives = true;
+		}
 		if (c.size() == 14 && std::equal(c.begin(), c.end(), "ThrownFireComp", [](char a, char b) {
 				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
 			})) {
