@@ -119,6 +119,13 @@ TEST(Nametags_ProjectionAndEdge)
 	bool clamped = false;
 	CHECK(nametags::Nametags::project(view, {0, 0, -10}, x, y, true, 0.65f, &clamped));
 	CHECK(clamped && std::fabs(std::hypot((x - 400) / 400, (y - 300) / 300) - 0.65f) < 1e-3f);
+	// Under a squeezed HUD pass (hudfix 12/16) the point lands where the pass
+	// puts it back on the model: 400 + (x - 400) * scale is the unsqueezed x.
+	float wide = 0;
+	CHECK(nametags::Nametags::project(view, {1, 1, 10}, wide, y, false, 0.65f));
+	view.hudXScale = 0.75f;
+	CHECK(nametags::Nametags::project(view, {1, 1, 10}, x, y, false, 0.65f));
+	CHECK(std::fabs(400 + (x - 400) * 0.75f - wide) < 1e-3f);
 }
 
 // The tags' font, Fonts/BF1942.font.

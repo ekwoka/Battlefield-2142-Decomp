@@ -10378,8 +10378,8 @@ int runGame(Options& options, Session& session)
 		viewer.onCamera = [&round](const float position[3], const float forward[3]) {
 			round.setCamera({position[0], position[1], position[2]}, {forward[0], forward[1], forward[2]});
 		};
-		viewer.onView = [&tagView, &tagViewSeen](const float position[3], float yaw, float pitch, float fovY, float aspect) {
-			tagView = {{position[0], position[1], position[2]}, yaw, pitch, fovY, aspect};
+		viewer.onView = [&tagView, &tagViewSeen, &sources](const float position[3], float yaw, float pitch, float fovY, float aspect) {
+			tagView = {{position[0], position[1], position[2]}, yaw, pitch, fovY, aspect, sources.hudXScale};
 			tagViewSeen = true;
 			if (g_demo) {
 				// The view a camera recording takes (0x005f9630: the camera's

@@ -604,7 +604,7 @@ bool Nametags::project(const View& view, const std::array<float, 3>& point, floa
 	} else if (std::fabs(nx) > 1.05f || std::fabs(ny) > 1.05f) {
 		return false;
 	}
-	x = 400 + nx * 400;
+	x = 400 + nx * 400 / view.hudXScale; // undo the HUD pass's squeeze: retail's Nametag shader has none
 	y = 300 - ny * 300;
 	return true;
 }
