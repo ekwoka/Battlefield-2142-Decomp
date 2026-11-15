@@ -767,6 +767,76 @@ bool BotManager::titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physi
 	return true;
 }
 
+// A pod's thrusters against the way still to go to `spot`, less the way it drifts.
+void BotManager::steerPod(const GameWorld::PlayerInfo& self, const physics::Vec3& spot, SoldierInput& input) const
+{
+	const world::Object* pod = m_world.objects().find(self.vehicle);
+	if (!pod) {
+		return;
+	}
+	const physics::Vec3 want = spot - self.position - self.velocity * 1.5f;
+	const float yaw = pod->rotation().x * 0.017453292f;
+	input.throttle = std::clamp((want.x * std::sin(yaw) + want.z * std::cos(yaw)) / 8, -1.0f, 1.0f);
+	input.strafe = std::clamp((want.x * std::cos(yaw) - want.z * std::sin(yaw)) / 8, -1.0f, 1.0f);
+}
+
+// enhanced.botTitan outside Titan mode (Remaster's Wake Island 2142 CoOp
+// parks each team's Titan off the coast): a drop from its own Titan aims for
+// dry land within a pod's reach, the place nearest its objective (the nearest
+// control point the team doesn't hold), not wherever the array points.
+bool BotManager::podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot)
+{
+	if (!m_settings.titanPlay() || m_world.gameMode() == "gpm_ti") {
+		return false;
+	}
+	if (m_time - bot.podLandingAt < 20) { // chosen aboard; kept for the walk, the aim and the ride
+		spot = bot.podLanding;
+		return true;
+	}
+	const GameWorld::ControlPointInfo* goal = nullptr;
+	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
+	float best = kInfinity;
+	for (const GameWorld::ControlPointInfo& p : points) {
+		const float d = horizontal(p.position - self.position) + (p.team == self.team || !p.capturable ? 1e5f : 0.0f);
+		if (d < best) {
+			best = d;
+			goal = &p;
+		}
+	}
+	if (!goal) {
+		return false;
+	}
+	float water = -kInfinity;
+	m_world.waterLevel(water);
+	// A pod left to fall carries about 77 m from Wake's Titans; steered, further. Past
+	// that reach: the nearest dry place, whatever the objective, as close as it gets.
+	constexpr float kReach = 110;
+	// Dry 10 m all round too: a pod comes down within a few metres of where it was steered.
+	const auto dry = [&](float x, float z) { return m_world.terrainHeight(x, z) >= water + 1; };
+	best = kInfinity;
+	for (float r = 30; r <= 250; r += 10) {
+		for (int k = 0; k < 72; ++k) {
+			physics::Vec3 p = self.position + physics::Vec3 {std::sin(k * 0.08726646f), 0, std::cos(k * 0.08726646f)} * r;
+			p.y = m_world.terrainHeight(p.x, p.z);
+			if (!dry(p.x, p.z) || !dry(p.x + 10, p.z) || !dry(p.x - 10, p.z) || !dry(p.x, p.z + 10) || !dry(p.x, p.z - 10)
+				|| (m_navMesh && m_navMesh->findPolygon(ai::Vec3 {p.x, p.y, p.z}, 5.0f) < 0)) {
+				continue;
+			}
+			const float d = r <= kReach ? horizontal(p - goal->position) : 1e5f + r;
+			if (d < best) {
+				best = d;
+				spot = p;
+			}
+		}
+	}
+	if (best >= kInfinity) {
+		return false;
+	}
+	bot.podLanding = spot;
+	bot.podLandingAt = m_time;
+	return true;
+}
+
 bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	if (bot.titanSortieVehicle && bot.titanSortieVehicle != self.vehicle) {
@@ -801,10 +871,7 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 		if (horizontal(*spot - self.position) > 250) {
 			return false; // a drop from its own Titan: as before
 		}
-		const physics::Vec3 want = *spot - self.position - self.velocity * 1.5f;
-		const float yaw = pod->rotation().x * 0.017453292f;
-		input.throttle = std::clamp((want.x * std::sin(yaw) + want.z * std::cos(yaw)) / 8, -1.0f, 1.0f);
-		input.strafe = std::clamp((want.x * std::cos(yaw) - want.z * std::sin(yaw)) / 8, -1.0f, 1.0f);
+		steerPod(self, *spot, input);
 		if (m_stats) { // DIAG
 			std::fprintf(stderr, "pod %d t %.1f at %.0f %.0f %.0f v %.0f %.0f %.0f spot d %.0f dy %.0f yaw %.0f thr %.2f str %.2f\n", self.id, m_time, self.position.x, self.position.y,
 				self.position.z, self.velocity.x, self.velocity.y, self.velocity.z, horizontal(*spot - self.position), spot->y - self.position.y, pod->rotation().x, input.throttle, input.strafe);

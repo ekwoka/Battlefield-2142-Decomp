@@ -1749,6 +1749,11 @@ void BotManager::update(float seconds)
 			continue;
 		}
 		if (m_world.ridingPod(self->id)) {
+			physics::Vec3 spot;
+			if (podLanding(bot, *self, spot)) {
+				steerPod(*self, spot, input);
+			}
+			bot.podAimOff = 1e9f;
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
 			continue;
@@ -1756,7 +1761,16 @@ void BotManager::update(float seconds)
 		if (self->vehicle && m_world.isTitan(self->vehicle)) {
 			const auto seats = m_world.vehicleSeats(self->vehicle);
 			if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size() && seats[self->seat].podLauncher) {
+				// Outside Titan mode: the array swung round to its landing place first (the
+				// bundle's own speed and limits apply), then fired once there or turning no more.
+				physics::Vec3 spot, from, way;
 				input.fire = true;
+				if (podLanding(bot, *self, spot) && m_world.podArrayAim(self->id, from, way)) {
+					const float off = std::remainder(std::atan2(spot.x - from.x, spot.z - from.z) * 57.29578f - std::atan2(way.x, way.z) * 57.29578f, 360.0f);
+					input.turn = off;
+					input.fire = std::fabs(off) < 3 || std::fabs(off) > std::fabs(bot.podAimOff) - 0.05f;
+					bot.podAimOff = off;
+				}
 				bot.lastInput = input;
 				m_world.setInput(self->id, input);
 				continue;
@@ -1840,6 +1854,7 @@ void BotManager::update(float seconds)
 			m_world.setInput(self->id, input);
 			continue;
 		}
+		bot.podLandingAt = -1e9f; // off its Titan and out of its pod: the next drop chooses afresh
 		updateGoal(bot, *self);
 		act(bot, *self, input, elapsed);
 		handleWeapon(bot, *self, input);

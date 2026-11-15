@@ -2474,6 +2474,9 @@ public:
 	// For a soldier aboard its own Titan (within its box): the nearest entry
 	// point of the Titan's pod arrays, in the world, and its radius.
 	bool titanPodEntry(int player, physics::Vec3& entry, float& radius) const;
+	// For a player in a Titan pod array's seat: where its pod would leave and
+	// the way it would fly (the launcher's posed transform, as launchPod fires).
+	bool podArrayAim(int player, physics::Vec3& from, physics::Vec3& direction) const;
 	// For the help manager's tick (0x00646cb0), on foot: a ladder (class
 	// 0x9c40) whose object lies within `radius` of the soldier (0x00646880;
 	// case 0x43 asks 3 m), and a vehicle with a free seat whose entry point

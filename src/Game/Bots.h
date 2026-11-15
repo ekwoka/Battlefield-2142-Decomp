@@ -1282,6 +1282,9 @@ private:
 		int titanGun = -1;        // Titan mode: the gun seat of its Titan it goes to man (claimed)
 		physics::Vec3 titanPodGoal, titanPodGoalFor; // BotsTitan.cpp: an APC driver's launch place, and the landing spot it was chosen for
 		bool titanPodGoalSet = false;
+		physics::Vec3 podLanding;  // BotsTitan.cpp podLanding: where a drop from its own Titan comes down, outside Titan mode
+		float podLandingAt = -1e9f;
+		float podAimOff = 1e9f;    // the pod array's last yaw error, degrees
 		uint32_t titanWaitFor = 0; // BotsTitan.cpp: the transport or APC whose driver it waits in for riders, and until when
 		float titanWaitUntil = 0;
 		int titanFlyMode = 0;      // a transport pilot's order for fly(), read once: 1 hold, 2 fly to titanFlyTo, 3 parked, 4 as 2 with 30 m over the ground
@@ -1903,6 +1906,8 @@ private:
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot);
+	void steerPod(const GameWorld::PlayerInfo& self, const physics::Vec3& spot, SoldierInput& input) const;
 	// Its own Titan's deck gunship and transport: a bot aboard walks to one and gets in (titanCrew); a transport's
 	// pilot with the enemy's shield up flies riders to a silo, where they drop in pods, and lands back (titanSortie).
 	const GameWorld::VehicleInfo* titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home);

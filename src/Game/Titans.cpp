@@ -2433,13 +2433,8 @@ bool GameWorld::launchPod(int id, bool exitKey, bool checkRoom)
 		for (const auto& array : titan->podArrays) {
 			if (!sameName(array.seat, seats[player->seat].name)) continue;
 			if (!tiltAllowsFire(body->body.rotation, array.maxTilt)) return false;
-			const auto& seat = seats[player->seat];
-			world::Vec3 offset, angles;
-			if (!partPose(body->object, seat.yawBundle, offset, angles, player->seat)) return false;
-			const auto yaw = physics::Mat3::fromYawPitchRoll({angles.x, 0, 0});
-			const auto direction = body->body.rotation.transform(yaw.transform(array.direction));
-			const auto from = body->body.position + body->body.rotation.transform(
-				seat.yawPivot + yaw.transform(array.launcher - seat.yawPivot));
+			physics::Vec3 from, direction;
+			if (!podArrayAim(id, from, direction)) return false;
 			const auto velocity = direction * array.velocity + titan->velocity;
 			const auto turn = physics::Mat3::fromYawPitchRoll({
 				std::atan2(direction.x, direction.z) * 57.29578f,
@@ -2811,6 +2806,28 @@ void GameWorld::stepPods(float seconds)
 bool GameWorld::ridingPod(int player) const
 {
 	return std::any_of(m_pods.begin(), m_pods.end(), [player](const Pod& pod) { return pod.player == player; });
+}
+
+bool GameWorld::podArrayAim(int id, physics::Vec3& from, physics::Vec3& direction) const
+{
+	const Player* player = findPlayer(id);
+	const Titan* titan = player ? titanByObject(player->vehicle) : nullptr;
+	const Body* body = titan ? const_cast<GameWorld*>(this)->findBody(player->vehicle) : nullptr;
+	const auto* root = titan ? m_objects.find(player->vehicle) : nullptr;
+	if (!body || !root || player->seat < 0) return false;
+	const auto& seats = const_cast<GameWorld*>(this)->vehicleLayout(*root->objectTemplate()).seats;
+	if (static_cast<size_t>(player->seat) >= seats.size()) return false;
+	const auto& seat = seats[player->seat];
+	for (const auto& array : titan->podArrays) {
+		if (!sameName(array.seat, seat.name)) continue;
+		world::Vec3 offset, angles;
+		if (!partPose(body->object, seat.yawBundle, offset, angles, player->seat)) return false;
+		const auto yaw = physics::Mat3::fromYawPitchRoll({angles.x, 0, 0});
+		direction = body->body.rotation.transform(yaw.transform(array.direction));
+		from = body->body.position + body->body.rotation.transform(seat.yawPivot + yaw.transform(array.launcher - seat.yawPivot));
+		return true;
+	}
+	return false;
 }
 
 bool GameWorld::titanPodEntry(int id, physics::Vec3& entry, float& radius) const

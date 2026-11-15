@@ -1,3 +1,4 @@
+#include "AI/NavMesh.h"
 #include "Game/Bots.h"
 #include "TitanLevel.h"
 #include "World/TemplateFiles.h"
@@ -7,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <optional>
 #include <vector>
 
 using namespace dice::hfe;
@@ -469,4 +471,98 @@ TEST(Titan_BotGridRebuiltAroundOpenedCoreDoors)
 	std::fprintf(stderr, "  before:\n%s  after:\n%s", before.c_str(), kept.titanGridStats().c_str());
 	CHECK(kept.titanGridStats() != before);
 	CHECK(kept.titanGridStats() == whole.titanGridStats());
+}
+
+// enhanced.botTitan outside Titan mode: Remaster's Wake Island 2142 CoOp spawns
+// each team on a parked Titan off the coast. Bots aboard drop by pod; they
+// aim the array and steer the pod at land towards their objective, not the sea.
+TEST(Titan_BotsPodToLandOnWakeCoop)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Wake_Island_2142", 64, true, "mods/Project_Remaster_v17_Final", false, nullptr, "gpm_coop");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	CHECK(level.heightmaps.hasSea());
+	level.world->setWaterLevel(level.heightmaps.seaWaterLevel());
+	game::BotSettings settings;
+	loadAircraftAi(level, settings);
+	std::string out;
+	level.console.run("AI/AIDefaultStrategies.ai", {}, out);
+	level.console.run("AI/AIDefaultStrategiesAdd.ai", {}, out);
+	CHECK(level.console.run("Levels/Wake_Island_2142/GameModes/gpm_coop/64/ai/StrategicAreas.ai", {}, out));
+	settings.viewDistance = 300;
+	const bool enhanced = true;
+	settings.enhanced = &enhanced;
+	settings.botTitan = &enhanced;
+	game::BotManager bots(*level.world, settings);
+	// The infantry navigation mesh, as main loads it: landings must be walkable.
+	std::optional<ai::NavMesh> mesh;
+	{
+		std::vector<uint8_t> qtr, clb;
+		CHECK(level.files.readFile("Levels/Wake_Island_2142/AIPathFinding/Infantry.qtr", qtr)
+			&& level.files.readFile("Levels/Wake_Island_2142/AIPathFinding/Infantry.clb", clb));
+		mesh = ai::parseNavMesh(qtr, clb);
+		CHECK(mesh.has_value());
+		bots.setNavMesh(mesh ? &*mesh : nullptr);
+	}
+	const float water = level.heightmaps.seaWaterLevel();
+	struct Drop { int team = 0; bool riding = false, landed = false, seated = false; physics::Vec3 from, at; };
+	std::map<int, Drop> drops;
+	for (int team : {1, 2}) {
+		const auto* titan = level.titan(team);
+		CHECK(titan != nullptr);
+		if (!titan) continue;
+		// Spawn points that put a soldier straight into a vehicle (the island's
+		// transports and walker) are not this test's: only those on foot board.
+		for (int i = 0, aboard = 0; aboard < 10 && i < 40; ++i) {
+			const int id = level.world->addPlayer("Wake" + std::to_string(team) + std::to_string(i), team, true);
+			CHECK(level.world->spawnSoldier(id));
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(id, info));
+			if (info.vehicle) continue;
+			CHECK(level.world->setSoldierPosition(info.soldier,
+				level.world->titanToWorld(titan->object, {static_cast<float>(aboard * 2) - 7.5f, 11.5f, -40})));
+			drops[id].team = team;
+			++aboard;
+		}
+	}
+	level.afterTick = [&] {
+		bots.update(1 / 30.0f);
+		for (auto& [id, d] : drops) {
+			const bool riding = level.world->ridingPod(id);
+			game::GameWorld::PlayerInfo info;
+			if (!level.world->playerInfo(id, info)) continue;
+			if (info.vehicle && info.vehicle == level.world->titanOf(d.team) && info.seat >= 0) {
+				const auto seats = level.world->vehicleSeats(info.vehicle);
+				d.seated = d.seated || (static_cast<size_t>(info.seat) < seats.size() && seats[static_cast<size_t>(info.seat)].podLauncher);
+			}
+			if (riding && !d.riding) d.from = info.position;
+			if (!riding && d.riding && !d.landed) {
+				d.landed = true;
+				d.at = info.position;
+			}
+			d.riding = riding;
+		}
+	};
+	level.run(90);
+	int landed = 0, wet = 0;
+	for (const auto& [id, d] : drops) {
+		CHECK(d.landed || !d.seated); // in a pod array's seat: it fired, whatever the array's aim
+		if (!d.landed) continue;
+		++landed;
+		const float ground = level.world->terrainHeight(d.at.x, d.at.z);
+		const bool sea = ground < water;
+		wet += sea;
+		float point = 1e9f; // towards an objective: Wake's Titans park 100..250 m off the nearest control point
+		for (const auto& cp : level.world->controlPointList()) {
+			point = std::min(point, std::hypot(cp.position.x - d.at.x, cp.position.z - d.at.z));
+		}
+		CHECK(point < 60);
+		std::fprintf(stderr, "  team %d bot %d: pod from %.0f %.0f to %.0f %.0f %.0f ground %.1f water %.1f %s\n", d.team, id,
+			d.from.x, d.from.z, d.at.x, d.at.y, d.at.z, ground, water, sea ? "SEA" : "land");
+	}
+	std::fprintf(stderr, "  wake coop: %d pod landings, %d in the sea\n", landed, wet);
+	CHECK(landed >= 4);
+	CHECK(wet == 0);
 }
