@@ -10471,14 +10471,14 @@ int runGame(Options& options, Session& session)
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload || joinedAutoReload(in.fire, autoReloadTick++);
 				input.mouseLook = in.mouseLook;
-				// The position and weapon keys go to the server as
-				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's
-				// press is also our own 0x004d2a50's (the seat's item popup,
-				// updateHud).
 				input.jump = in.jump && !wasProne && !stance.prone;
 				input.pose = stance.prone ? game::SoldierPose::Prone
 					: in.crouch           ? game::SoldierPose::Crouch
 										  : game::SoldierPose::Stand;
+				// The position and weapon keys go to the server as
+				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's
+				// press is also our own 0x004d2a50's (the seat's item popup,
+				// updateHud).
 				input.switchSeat = in.seat;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;
@@ -10602,6 +10602,12 @@ int runGame(Options& options, Session& session)
 				// scatter, 0x006c3340) starts prone.
 				game::GameWorld::PlayerInfo me;
 				const bool alive = round.playerInfo(round.localPlayer(), me) && me.alive;
+				// A press the soldier refused or held off is spent, as the
+				// original's: the toggle takes the pose the last tick gave.
+				if (round.ticks() != stanceTick) {
+					stance.prone = me.pose == game::SoldierPose::Prone;
+					stanceTick = round.ticks();
+				}
 				if (alive && !wasAlive) {
 					stance.prone = me.spawnedProne;
 				}
@@ -10609,12 +10615,6 @@ int runGame(Options& options, Session& session)
 					stance.prone = false; // seated: leave the vehicle standing
 				}
 				wasAlive = alive;
-				// A press the soldier refused or held off is spent, as the
-				// original's: the toggle takes the pose the last tick gave.
-				if (round.ticks() != stanceTick) {
-					stance.prone = me.pose == game::SoldierPose::Prone;
-					stanceTick = round.ticks();
-				}
 				if (!alive) {
 					// Dead: the keys fly the free camera, c_PIAction (Space)
 					// swaps it with the death / followed view (sv.allowFreeCam).

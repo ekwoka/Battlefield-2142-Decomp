@@ -7233,6 +7233,9 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.body.position = {where.x, where.y + 1.0f, where.z};
 	player.body.yawDegrees = facing;
 	player.control.reset();
+	if (player.spawnedProne && !player.ai) { // bots ask their pose held, not by a toggle
+		player.control.holdProne();
+	}
 	player.body.world = &m_collision;
 	// The kit's rifle (EU_Assault / Pac_Assault) and what else it carries.
 	fillKit(player, kitTemplate, primary);
@@ -7331,9 +7334,6 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// +0x2c0, the object's +0x444), which the input filter (0x005ca2e0)
 	// reads: on, the pod's inputs 0..3 (steering, pitch, roll, throttle)
 	// are zeroed, so a beacon's pod drops unsteered. The beacon's spawn
-	if (player.spawnedProne && !player.ai) { // bots ask their pose held, not by a toggle
-		player.control.holdProne();
-	}
 	// point is its SpawnPoint child (none of the shipped ones sets it).
 	if (withSquad && !squadPod.empty() && startPod(player, squadPod, player.body.position, {}, 0, facing)) {
 		bool off = true;
