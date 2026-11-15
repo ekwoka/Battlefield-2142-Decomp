@@ -1392,14 +1392,13 @@ void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad
 	hud.setString("SquadInfoIconPath", icon);
 }
 
-CaptureBar captureBar(const std::vector<game::GameWorld::ControlPointInfo>& points, const physics::Vec3& at)
+CaptureBar captureBar(const std::vector<game::GameWorld::ControlPointInfo>& points, const physics::Vec3& at, bool inside)
 {
 	const game::GameWorld::ControlPointInfo* best = nullptr;
-	float bestDistance = 0;
+	float bestDistance = 1000;
 	for (const auto& point : points) {
-		const float dx = point.position.x - at.x, dz = point.position.z - at.z;
-		const float distance = std::sqrt(dx * dx + dz * dz);
-		if (point.capturable && distance <= point.radius && (!best || distance < bestDistance)) {
+		const float distance = std::sqrt(physics::lengthSquared(point.position - at));
+		if (inside && point.capturable && distance <= bestDistance) {
 			best = &point;
 			bestDistance = distance;
 		}

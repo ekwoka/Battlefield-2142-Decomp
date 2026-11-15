@@ -2172,8 +2172,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		}
 	}
 	// The capture bar (HudElementsConquest.con "Controlpoint Info": shown
-	// while the soldier is in a capturable point's radius, the point
-	// getOccupyingCP picks; the flag's height 0..1 on the "taken" bar as it
+	// while the scripts hold the player inside a point (setIsInsideCP, from
+	// its radius trigger), the closest capturable one; the flag's height 0..1 on the "taken" bar as it
 	// rises on a neutral point, on the "neutral" bar as an owned flag is
 	// lowered; the Titan bars read the same variables, "Retargeting" /
 	// "Deactivating"). shortcut: which bar a stalled flag uses is a guess.
@@ -2184,7 +2184,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			game::GameWorld::PlayerInfo self;
 			if (world.playerInfo(world.localPlayer(), self)) {
 				at = self.position;
-				bar = dice::hfe::menu::captureBar(world.controlPointList(), at);
+				bar = dice::hfe::menu::captureBar(world.controlPointList(), at, world.insideControlPoint());
 			}
 		}
 		hud.set("CPInterfaceEnabled", bar.enabled ? 1 : 0);

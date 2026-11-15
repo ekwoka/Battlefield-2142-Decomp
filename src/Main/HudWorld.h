@@ -66,6 +66,9 @@ public:
 	virtual float tickets(int team) const = 0;
 	virtual int commander(int team) const = 0; // -1: none
 	virtual std::vector<ControlPointInfo> controlPointList() const = 0;
+	// The local player is inside a control point's trigger (the scripts'
+	// setIsInsideCP), which the capture bar shows on.
+	virtual bool insideControlPoint() const { return false; }
 	// The control points a team may spawn at (the spawn manager's groups)
 	// and the one a player picked.
 	virtual std::vector<int> spawnablePoints(int team) const = 0;
@@ -213,6 +216,7 @@ public:
 	float tickets(int team) const override;
 	int commander(int team) const override { return m_round.commander(team); }
 	std::vector<ControlPointInfo> controlPointList() const override { return m_round.controlPointList(); }
+	bool insideControlPoint() const override { return m_round.playerInsideControlPoint; }
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
 	bool spawnGroupActive(int group, int player) const override { return m_round.spawnGroupActive(group, player); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
@@ -323,6 +327,7 @@ public:
 	int commander(int team) const override;
 	bool overheadCamera(int team, float& x, float& z) const override;
 	std::vector<ControlPointInfo> controlPointList() const override;
+	bool insideControlPoint() const override;
 	std::vector<int> spawnablePoints(int team) const override;
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
 	// The vehicles the server's spawn groups ride (their ghosts' objects).

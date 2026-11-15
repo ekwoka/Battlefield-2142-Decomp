@@ -113,6 +113,10 @@ public:
 	virtual std::vector<uint32_t> triggerCandidates(const std::string& filter) = 0;
 	// Height used for a candidate at a hemisphere's dividing plane.
 	virtual float triggerHemisphereHeight(uint32_t, float objectY) { return objectY; }
+	// A candidate's radius: the original's culler query (ObjectManager slot
+	// 0x44, 0x006fe530; per object 0x00705183, 0x00706c70) takes an object
+	// whose sphere about its root touches the trigger's.
+	virtual float triggerObjectRadius(uint32_t) { return 0; }
 	virtual bool objectPosition(uint32_t object, float position[3]) = 0;
 
 	// pmgr_*: players.

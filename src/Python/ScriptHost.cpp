@@ -856,7 +856,9 @@ void ScriptHost::update()
 				continue;
 			}
 			const float dx = p[0] - centre[0], dy = p[1] - centre[1], dz = p[2] - centre[2];
-			const float r = impl.triggers[i].radius;
+			// shortcut: a soldier has no body here, so radius 0; retail's
+			// soldier sphere wasn't read (infantry capture is unchanged).
+			const float r = impl.triggers[i].radius + impl.game.triggerObjectRadius(candidate);
 			const bool within = dx * dx + dy * dy + dz * dz <= r * r
 				&& (!impl.triggers[i].hemisphere || impl.game.triggerHemisphereHeight(candidate, p[1]) >= centre[1]);
 			if (within) {

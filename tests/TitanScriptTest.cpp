@@ -4,15 +4,98 @@
 // destruction (VehicleDestroyed) ends the round for the other team.
 #include "Game/GameLogic.h"
 #include "Game/ScriptBridge.h"
+#include "Main/HudMenus.h"
 #include "Python/ScriptHost.h"
 #include "TitanLevel.h"
 #include <algorithm>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 using namespace dice::hfe;
+
+// A walker driver beside Port Bavaria's first silo (704, a 6 m sphere):
+// its root is 6.6 m away in 3D (3 m up), but the original's trigger query
+// takes an object whose sphere about its root touches the trigger's, so
+// the walker is inside and captures, and the HUD's uplink is real.
+TEST(ScriptHost_PortBavariaWalkerSiloCapture)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	titantest::TitanLevel level(gameDir, "Port_Bavaria", 48, false, nullptr, true);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::GameLogic logic;
+	logic.mapSize = 48;
+	game::ServerSettings settings;
+	settings.gameMode = "gpm_ti";
+	settings.mapName = "Port_Bavaria";
+	game::ScriptBridge bridge(*level.world, logic, settings, "mods/bf2142");
+	std::string errors;
+	script::ScriptHost host(bridge, {std::string(gameDir) + "/python", std::string(gameDir) + "/mods/bf2142/python"},
+		[&errors](const std::string& line) {
+			if (line.compare(0, 7, "stderr:") == 0) errors += line + "\n";
+		});
+	level.sink = [&host](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); };
+	logic.setEventSink(level.sink);
+	level.afterTick = [&] { logic.tick(1.0f / 30); host.update(); };
+	level.world->startRound();
+	logic.startRound();
+	CHECK(host.startGameMode("gpm_ti"));
+	host.setGameStatus(game::GameStatus::PreGame);
+	host.setGameStatus(game::GameStatus::Playing);
+	level.run(0.5f);
+	const auto silos = level.world->missileSilos();
+	CHECK(!silos.empty());
+	if (silos.empty()) return;
+	game::ControlPoint* cp = nullptr;
+	for (const auto& point : level.world->controlPoints()) {
+		if (point.id == silos.front().controlPoint) cp = level.world->controlPointOf(point.object->id());
+	}
+	CHECK(cp);
+	auto* walkerTemplate = level.templates.find("us_heavy_mech");
+	CHECK(walkerTemplate);
+	if (!cp || !walkerTemplate) return;
+	const auto pos = cp->object->position();
+	const float x = pos.x + 4, z = pos.z + 4;
+	const float ground = level.world->terrainHeight(x, z);
+	auto* walker = level.objects.create(walkerTemplate, {x, ground + 6, z});
+	walker->setTeam(2);
+	level.run(3);
+	auto* soldier = level.world->spawnPlayer(2);
+	CHECK(soldier);
+	if (!soldier) return;
+	const auto at = walker->position();
+	CHECK(level.world->setSoldierPosition(soldier->id(), {at.x + 1.5f, ground, at.z}));
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setPlayerInput(use);
+	level.world->tick(1.0f / 30);
+	level.world->setPlayerInput({});
+	game::GameWorld::PlayerInfo info;
+	CHECK(level.world->playerInfo(level.world->localPlayer(), info));
+	CHECK(info.vehicle == walker->id() && info.seat == 0);
+	const auto occupants = bridge.objectCall(walker->id(), "getOccupyingPlayers", {});
+	CHECK(occupants.kind == game::ScriptValue::Kind::List && occupants.list.size() == 1);
+	level.run(21);
+	CHECK(level.world->playerInfo(level.world->localPlayer(), info));
+	const auto p = walker->position();
+	const float distance = std::sqrt((p.x - pos.x) * (p.x - pos.x) + (p.y - pos.y) * (p.y - pos.y) + (p.z - pos.z) * (p.z - pos.z));
+	const float walkerRadius = level.world->objectRadius(walker->id());
+	const auto bar = menu::captureBar(level.world->controlPointList(), info.position, level.world->playerInsideControlPoint);
+	menu::UplinkHud uplink;
+	uplink.update(0.1f, bar.enabled, bar.value);
+	std::fprintf(stderr, "  cp=%d hemi=%lld walker 3d=%.3f radius=%.2f inside=%d HUD=%d uplink=%d team=%d flag=%.3f\n", cp->id,
+		static_cast<long long>(bridge.objectCall(cp->object->id(), "cp_getParam", {game::ScriptValue::string("isHemisphere")}).asInt()),
+		distance, walkerRadius, level.world->playerInsideControlPoint, bar.enabled, uplink.show, cp->team, cp->flagHeight);
+	CHECK(info.vehicle == walker->id() && distance > 6 && distance < 6 + walkerRadius);
+	CHECK(level.world->playerInsideControlPoint && bar.enabled && uplink.show);
+	CHECK(cp->team == 2);
+	if (!errors.empty()) std::fprintf(stderr, "%s", errors.c_str());
+	CHECK(errors.empty());
+}
 
 TEST(ScriptHost_TitanModeTicketsAndTheEnd)
 {

@@ -586,14 +586,16 @@ struct ScoreboardLine {
 };
 std::vector<ScoreboardLine> scoreboardBySquad(const std::vector<ScoreboardMember>& members);
 
-// The capture bar's variables for a soldier at `at`: the closest capturable
-// control point whose radius holds him (the scripts' getOccupyingCP), and
-// the flag's height as the bar value.
+// The capture bar's variables for a player at `at`. Retail (0x0078ce50)
+// shows it only while the scripts have set the player inside a point
+// (setIsInsideCP, player slot 0x158, which their radius trigger decides),
+// for the closest capturable point within 1000 m in 3D (0x0077b340); it
+// never tests the point's radius itself. The flag's height is the value.
 struct CaptureBar {
 	bool enabled = false, neutralShow = false, takenShow = false;
 	float value = 0;
 };
-CaptureBar captureBar(const std::vector<game::GameWorld::ControlPointInfo>& points, const physics::Vec3& at);
+CaptureBar captureBar(const std::vector<game::GameWorld::ControlPointInfo>& points, const physics::Vec3& at, bool inside);
 
 // The Titan HUD's "uplink" state, a per-frame state machine the original HUD manager keeps itself (BF2142.exe
 // 0x0044a470, the variables bound in 0x00450780): while the capture bar's CPInterfaceEnabled is on,

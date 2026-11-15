@@ -1269,7 +1269,7 @@ TEST(Hud_NonEnglishTextHasGlyphs)
 // The capture bar and the capture voice (HudMenus.h captureBar, GameWorld.h captureVoice).
 #include "Main/HudMenus.h"
 
-TEST(CaptureBar_ShowsTheFlagMovingInTheClosestPointsRadius)
+TEST(CaptureBar_ShowsTheClosestPointsFlagWhileTheScriptsHoldThePlayerInside)
 {
 	using Info = dice::hfe::game::GameWorld::ControlPointInfo;
 	Info neutral {1, 0, {0, 0, 0}, 10};
@@ -1278,15 +1278,25 @@ TEST(CaptureBar_ShowsTheFlagMovingInTheClosestPointsRadius)
 	Info owned {2, 1, {100, 0, 0}, 10};
 	owned.flagHeight = 0.7f;
 	owned.flagRate = -0.05f;
-	auto bar = dice::hfe::menu::captureBar({neutral, owned}, {3, 0, 0});
+	auto bar = dice::hfe::menu::captureBar({neutral, owned}, {3, 0, 0}, true);
 	CHECK(bar.enabled && bar.takenShow && !bar.neutralShow);
 	CHECK(std::fabs(bar.value - 0.4f) < 1e-5f);
-	bar = dice::hfe::menu::captureBar({neutral, owned}, {101, 0, 0});
+	bar = dice::hfe::menu::captureBar({neutral, owned}, {101, 0, 0}, true);
 	CHECK(bar.enabled && bar.neutralShow && !bar.takenShow);
 	CHECK(std::fabs(bar.value - 0.7f) < 1e-5f);
-	CHECK(!dice::hfe::menu::captureBar({neutral, owned}, {50, 0, 0}).enabled);
+	// Inside the radius horizontally but not set inside by the trigger: no bar
+	// (a walker's root above a silo, 5.9 m out on the ground, 6.6 m in 3D).
+	CHECK(!dice::hfe::menu::captureBar({neutral, owned}, {3, 0, 0}, false).enabled);
+	// The closest point is by 3D distance: 4 m along beats 10 m straight up,
+	// which would be closest on the ground.
+	Info above {3, 0, {0, 10, 0}, 10};
+	above.flagHeight = 0.9f;
+	Info along {4, 0, {4, 0, 0}, 10};
+	along.flagHeight = 0.2f;
+	CHECK(std::fabs(dice::hfe::menu::captureBar({above, along}, {0, 0, 0}, true).value - 0.2f) < 1e-5f);
 	owned.capturable = false;
-	CHECK(!dice::hfe::menu::captureBar({owned}, {100, 0, 0}).enabled);
+	CHECK(!dice::hfe::menu::captureBar({owned}, {100, 0, 0}, true).enabled);
+	CHECK(!dice::hfe::menu::captureBar({neutral}, {1001, 0, 0}, true).enabled);
 }
 
 TEST(HudTitan_HealthUsesArmourPercentAndRetailTicketRounding)

@@ -287,6 +287,24 @@ int RemoteHudWorld::commander(int team) const
 	return -1;
 }
 
+// shortcut: the scripts' isInsideCP isn't sent to a joined client yet, so
+// stand in with their trigger's test (a sphere of the point's radius about
+// the player's position); replicate the flag if hemispheres or a vehicle's
+// root ever make the two differ online.
+bool RemoteHudWorld::insideControlPoint() const
+{
+	PlayerInfo me;
+	if (!playerInfo(localPlayer(), me)) {
+		return false;
+	}
+	for (const ControlPointInfo& point : controlPointList()) {
+		if (point.capturable && physics::lengthSquared(point.position - me.position) <= point.radius * point.radius) {
+			return true;
+		}
+	}
+	return false;
+}
+
 std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 {
 	// The control points' ghosts (ControlPoint networkables: team, flag);
