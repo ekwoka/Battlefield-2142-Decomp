@@ -7302,6 +7302,77 @@ TEST(Vehicles_StaticAALocksAlongTheTurnedTurretCamera)
 	}
 }
 
+// A wire-guided round from a seat steers along the seat's camera
+// (LPTargetComp 0x005e27a0: the shooter's active camera), not the seated
+// soldier's own look, which stays where he sat down while the seat turns:
+// the walkers' rockets, turned and pitched past the torso's limit, end
+// where an untouched walker's do. No render camera is set, as for a bot
+// or a remote driver.
+TEST(Vehicles_WalkerRocketWireFollowsTheSeatCamera)
+{
+	if (!gameDir()) return;
+	constexpr float dt = 1 / 30.0f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* walker : {"us_heavy_mech", "as_heavy_mech"}) {
+		  float straight = -1;
+		  for (bool turned : {false, true}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find(walker));
+			if (!g.loaded || !g.templates.find(walker)) continue;
+			const uint32_t mech = g.start(walker, {0, 4, 8});
+			g.animate();
+			CHECK(g.enter(mech));
+			PlayerCamera camera(*g.world, *g.systems, nullptr);
+			game::SoldierInput aim;
+			aim.turn = turned ? 5.0f : 0.0f;
+			aim.aimPitch = turned ? 60.0f : 0.0f; // past the torso's pitch: the look and the sight part
+			for (int i = 0; i < 30; ++i) { g.world->setPlayerInput(aim); g.world->tick(dt); camera.tick(dt); }
+			aim.turn = 0;
+			for (int i = 0; i < 60; ++i) { g.world->setPlayerInput(aim); g.world->tick(dt); camera.tick(dt); }
+			PlayerCamera::View sight;
+			CHECK(camera.view(sight, 16.0f / 9.0f));
+			const size_t before = g.world->projectiles().size();
+			uint64_t serial = 0;
+			for (int i = 0; i < 90 && !serial; ++i) {
+				aim.altFire = true;
+				g.world->setPlayerInput(aim);
+				g.world->tick(dt);
+				for (size_t n = before; n < g.world->projectiles().size(); ++n) {
+					const auto& p = g.world->projectiles()[n];
+					if (p.shooter != mech || !p.settings || p.settings->name.find("dumrockets") == std::string::npos) continue;
+					serial = p.serial;
+					break;
+				}
+			}
+			CHECK(serial != 0);
+			aim.altFire = false;
+			// Its distance off the camera's line, horizontally (the rockets
+			// drop): the side pods' rounds converge on it.
+			const physics::Vec3 eye {sight.position[0], sight.position[1], sight.position[2]};
+			const float sx = std::sin(sight.yaw), sz = std::cos(sight.yaw);
+			float off = 0, out = 0;
+			for (int i = 0; i < 30; ++i) {
+				g.world->setPlayerInput(aim);
+				g.world->tick(dt);
+				for (const auto& p : g.world->projectiles()) {
+					if (p.serial != serial || !p.alive) continue;
+					const physics::Vec3 d = p.position - eye;
+					out = d.x * sx + d.z * sz;
+					off = std::fabs(d.x * sz - d.z * sx);
+				}
+			}
+			std::fprintf(stderr, "  %s %s rocket: sight yaw %.1f, %.0f m out, %.1f m off the camera line\n", mod, walker,
+				sight.yaw * 180 / 3.14159265f, out, off);
+			CHECK(out > 30);
+			// The pods' rounds cross the line as the follow ends (0.35 s): turned, they
+			// end where an untouched walker's do.
+			if (!turned) straight = off;
+			else CHECK(straight >= 0 && std::fabs(off - straight) < 0.5f);
+		  }
+		}
+	}
+}
+
 TEST(Vehicles_AltFireLauncherLocksAndItsMissileChases)
 {
 	if (!gameDir()) return;

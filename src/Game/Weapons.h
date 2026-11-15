@@ -861,6 +861,7 @@ struct Projectile {
 	// +0xb1, or a newer round). Out of range or with the line cut the round
 	// stays guided and chases wirePoint, the last point set (0x005e2ac5).
 	float wireLookAhead = 20;
+	int wireCamera = 0; // the firearm's zoom.startCameraId: a seated shooter's steering camera
 	float wireMaxDistance = 0;
 	bool wireKeepOnObstruction = false;
 	bool wireLost = false;

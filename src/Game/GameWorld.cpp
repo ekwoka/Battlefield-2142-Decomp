@@ -3711,6 +3711,7 @@ void GameWorld::wireSettings(Projectile& p, const world::ObjectTemplate& firearm
 	p.wireLookAhead = number(firearm, "target.wireGuidedLookAheadDistance", 20);
 	p.wireMaxDistance = number(firearm, "target.maxDistance", 0);
 	p.wireKeepOnObstruction = integer(firearm, "target.dontLooseGuidanceOnObstruction", 0) != 0;
+	p.wireCamera = std::max(integer(firearm, "zoom.startCameraId", 0), 0);
 }
 
 void GameWorld::steerSeeker(Projectile& p, float seconds)
@@ -3920,6 +3921,15 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 		eye = camera.position;
 	}
 	physics::Vec3 aim {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	// Seated, the camera is the seat's Camera object, not the soldier's own
+	// look (which doesn't turn with the seat).
+	physics::Vec3 cameraAt;
+	physics::Mat3 cameraTurn;
+	if (Body* seated = !fromRound && shooter->vehicle ? findBody(shooter->vehicle) : nullptr;
+		seated && seatCameraFrame(*seated, shooter->seat, p.wireCamera, cameraAt, cameraTurn)) {
+		aim = cameraTurn.rows[2] * (1 / std::sqrt(physics::lengthSquared(cameraTurn.rows[2])));
+		eye = cameraAt;
+	}
 	// The local player's active camera is the view being drawn (a walker's
 	// chase or cockpit camera, not the soldier's eye); remote and bot
 	// shooters keep the estimate. The obstruction test below stays on `eye`.
