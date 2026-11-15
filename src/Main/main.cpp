@@ -3810,6 +3810,14 @@ int runGame(Options& options, Session& session)
 		for (const char* name : {"BottomRightStaticHud", "MinSizeAlpha", "Minimap", "ItemSelectionHud"}) {
 			hudManager.shiftNode(name, 120);
 		}
+		// The full-screen gunner frames and screen filters, as Remaster's
+		// Menu_server_hudfix.zip re-cuts them (0 0 1024 1024 -> -134 0 1367
+		// 1024), so the 12/16 squeeze still covers a wide screen.
+		for (const char* name : {"IFVGunnerHudFrame", "IFVRocketHudFrame", "LightHoverHeatHudFilter", "EuGunshipCoFilter",
+				 "EUGunshipHeatHudFilter", "GunshipCoFilter", "GunshipHeatHudFilter", "TankEuGunnerHudFrame",
+				 "TankGunnerHudFrame", "GunEuFrame", "GunPacFrame"}) {
+			hudManager.spanNode(name, -134, 1367);
+		}
 		std::printf("native HUD: enhanced widescreen, x scaled by 12/16, sides moved 120\n");
 	}
 	// The name tags' icons and bars (the HUD manager's set-up, 0x0075cfa0).

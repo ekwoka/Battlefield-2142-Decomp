@@ -332,6 +332,17 @@ bool HudManager::shiftNode(const std::string& name, int dx)
 }
 
 HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
+bool HudManager::spanNode(const std::string& name, int x, int w)
+{
+	Node* n = find(name);
+	if (!n) {
+		return false;
+	}
+	n->x = x;
+	n->w = w;
+	return true;
+}
+
 	int w, int h)
 {
 	auto& slot = m_nodes[lower(name)];
