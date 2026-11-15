@@ -266,6 +266,45 @@ private:
 	Fields m_fields;
 };
 
+// The flares / active defence meter (0x007be490, the first call of the
+// weapon HUD's frame 0x007c38c0; HudElementsVehicleBasic.con's flare bar and
+// icons, which take the vehicle stamina's place). Per weapon group 0..2 of
+// the control object (slot 0x78(g), interface 0x94c0): a firearm whose fire
+// input (slot 0x38) is c_PIFlareFire (47) shows the meter, any other firearm
+// clears FlaresReloadTimeShow (+0x1dc) and FlareUseShow (+0x1dd), so the
+// PIFlareFire group, the last, decides. FlaresReloadTime (+0x1e0):
+// - reloading (the ammo's state above 1, slot 0xc8 -> 0x005d7650): the
+//   reload's progress, 1 - its share left (slot 0x94 -> 0x005f3830), and
+//   the press stamp (+0x1e4) cleared;
+// - else since the stamp: 1 - the time since / one round's interval
+//   (60 / roundsPerMinute x 30 ticks: the shield's 5 s for ads_land/air);
+// - else (no stamp) 1.
+// FlaresReloadTimeShow = the value above 0 or FlareUseShow still on;
+// FlareUseShow = shown, above 0 and not reloading (the countermeasure icon,
+// else the reload icon). The stamp is the time c_PIFlareFire is first held
+// (0x007561c1 -> 0x007be360, only while 0), whether or not a round leaves.
+// FlareBlink (+0x1de) blinks on the value below 0.98 (see HudBlink).
+struct FlareHudInput {
+	bool present = false;   // the seat's PIFlareFire group holds a firearm
+	bool otherGuns = false; // its PIFire or PIAltFire group does too
+	bool reloading = false;
+	float reload = 0;    // the reload's progress, 0..1
+	float interval = 0;  // one round's interval, seconds
+	bool pressed = false; // c_PIFlareFire held
+	float seconds = 0;
+};
+class FlareHud {
+public:
+	void update(hud::HudManager& hud, const FlareHudInput& in);
+
+private:
+	float m_value = 0;     // +0x1e0
+	bool m_show = false;   // +0x1dc
+	bool m_use = false;    // +0x1dd
+	float m_since = -1;    // seconds since the stamp (+0x1e4); -1 none
+	HudBlink m_blink {0.98f, 0, 0.7f, 0.15f};
+};
+
 // The crosshair's four parts (0x007be770, each frame from 0x007c1f10's
 // weapon HUD): the spread is ceil(deviation x deviationFactor) pixels
 // (the weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default),

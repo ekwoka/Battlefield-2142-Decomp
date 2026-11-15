@@ -5424,6 +5424,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	}
 	info.firing = player->alive && player->input.fire;
 	info.altFiring = player->alive && player->input.altFire;
+	info.flareFiring = player->alive && player->input.flareFire;
 	info.firePresses = player->firePresses;
 	info.reloadPresses = player->reloadPresses;
 	info.kills = player->kills;

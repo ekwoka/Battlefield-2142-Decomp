@@ -1509,6 +1509,42 @@ void updateSecondaryWeapon(hud::HudManager& hud, const host::HudWorld& world, co
 	}
 }
 
+// The flares / active defence meter (0x007be490, see FlareHud), each frame
+// whatever the commander screen. A joined game's seat has no firearm here:
+// its meter stays at ready.
+dice::hfe::menu::FlareHud g_flareHud;
+
+void updateFlares(hud::HudManager& hud, const host::HudWorld& world, const world::Object* vehicle, float dt)
+{
+	dice::hfe::menu::FlareHudInput in;
+	in.seconds = dt;
+	const host::HudWorld::Weapon flare = vehicle ? world.seatGroupWeapon(2) : host::HudWorld::Weapon {};
+	if (flare.weapon) {
+		in.present = true;
+		in.otherGuns = world.seatGroupWeapon(0).weapon || world.seatGroupWeapon(1).weapon;
+		const game::FireArmSettings gun = flare.gun ? flare.gun->settings() : game::FireArmSettings::fromTemplate(*flare.weapon);
+		in.interval = 60.0f / static_cast<float>(std::max(gun.roundsPerMinute, 1));
+		if (flare.gun && flare.gun->reloading()) {
+			in.reloading = true;
+			in.reload = gun.reloadTime > 0 ? 1 - flare.gun->reloadLeft() / gun.reloadTime : 0;
+		}
+	}
+	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me)) {
+		in.pressed = me.flareFiring;
+	}
+	g_flareHud.update(hud, in);
+	if (std::getenv("BF2142_INPUT_TRACE") && in.present) {
+		static int last = -1;
+		const int now = static_cast<int>(hud.number("FlaresReloadTime") * 20) * 4 + static_cast<int>(hud.number("FlareUseShow")) * 2
+			+ static_cast<int>(hud.number("FlaresReloadTimeShow"));
+		if (now != last) {
+			std::printf("hud-flare value=%.2f show=%d use=%d reloading=%d\n", hud.number("FlaresReloadTime"),
+				static_cast<int>(hud.number("FlaresReloadTimeShow")), static_cast<int>(hud.number("FlareUseShow")), in.reloading ? 1 : 0);
+			last = now;
+		}
+	}
+}
+
 void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
 	bool scoreboard = false, bool commanderScreen = false, std::optional<float> viewHeading = {})
 {
@@ -1800,11 +1836,12 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	hud.set("PrimaryAmmoShow", 0);
 	// A seat's second gun (0x007c2d50, the control object's slot 0x78(1):
 	// the active weapon of its PIAltFire group, +0x88; the PIFlareFire
-	// group has no HUD) sets the Secondary* block as 0x007c1f10 the Primary*
+	// group has the flare meter instead) sets the Secondary* block as 0x007c1f10 the Primary*
 	// ones; without one, or with weaponHud.showInfo 0 (block +0xd0), the
 	// block's show (+0x16d) is cleared. A joined game's from our own state's group 1
 	// (its place in the group, rounds and magazines).
 	updateSecondaryWeapon(hud, world, playerVehicle, commanderScreen, dt);
+	updateFlares(hud, world, playerVehicle, dt);
 	// With the commander screen open (the HUD manager's slot 0x234) the
 	// weapon HUD's frame (0x007c40c0) skips the update and clears its show
 	// flags (PrimaryAmmoShow +0x15d, the clips, the reload, the crosshair

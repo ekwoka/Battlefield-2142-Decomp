@@ -638,6 +638,8 @@ public:
 		// the presses of the fire (+0x250, counted on each rising edge by
 		// 0x0059b260; mask 0x4000000's two bits).
 		bool firing = false, altFiring = false;
+		// c_PIFlareFire held (the weapon HUD's flare press stamp, 0x007561c1).
+		bool flareFiring = false;
 		uint32_t firePresses = 0;
 		// c_PIReload's presses (the server's input handling 0x004bda00 calls
 		// player vtable 0x1fc, 0x0059b330, setting +0x28c, which the next

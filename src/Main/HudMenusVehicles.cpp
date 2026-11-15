@@ -289,6 +289,39 @@ void WeaponHud::hide(hud::HudManager& hud, bool secondary)
 	hud.set(P + "ClipBlink", 0);
 }
 
+// --- The flares / active defence meter (0x007be490) ---
+
+void FlareHud::update(hud::HudManager& hud, const FlareHudInput& in)
+{
+	// The press stamp (0x007be360, from the input handling): only while unset.
+	if (m_since >= 0) {
+		m_since += in.seconds;
+	} else if (in.pressed) {
+		m_since = 0;
+	}
+	if (in.otherGuns) {
+		m_show = m_use = false; // the earlier groups' firearms clear both
+	}
+	if (!in.present) {
+		m_show = m_use = false;
+	} else {
+		if (in.reloading) {
+			m_value = in.reload;
+			m_since = -1;
+		} else if (m_since > 0) {
+			m_value = 1 - m_since / std::max(in.interval, 1.0f / 30.0f);
+		} else if (m_since < 0) {
+			m_value = 1;
+		}
+		m_show = m_value > 0 || m_use;
+		m_use = m_show && m_value > 0 && !in.reloading;
+	}
+	hud.set("FlaresReloadTime", m_value);
+	hud.set("FlaresReloadTimeShow", m_show ? 1 : 0);
+	hud.set("FlareUseShow", m_use ? 1 : 0);
+	hud.set("FlareBlink", m_blink.tick(m_value, in.seconds) ? 1 : 0);
+}
+
 // --- The crosshair's parts (0x007be770) ---
 
 CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length)

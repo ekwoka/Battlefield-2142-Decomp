@@ -527,6 +527,11 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 		});
 	});
 	s.abilityCost = s.replenishing ? number(t, "ammo.abilityCost", 0) : 0;
+	s.activeDefense = std::any_of(t.components().begin(), t.components().end(), [](const std::string& c) {
+		return c.size() == 21 && std::equal(c.begin(), c.end(), "ActiveDefenseAmmoComp", [](char a, char b) {
+			return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+		});
+	});
 	return s;
 }
 
@@ -1184,7 +1189,7 @@ bool FireArm::launch()
 	// empty, the trigger clicks (0x005c2ee0), until c_PIReload (the
 	// firearm's action 10). ammo.nrOfMags -1: magazines without end (the
 	// drones' detonators).
-	if (m_rounds == 0 && m_settings.autoReload && m_reloadIn <= 0
+	if (m_rounds == 0 && m_settings.autoReload && !m_settings.activeDefense && m_reloadIn <= 0
 		&& (m_mags > 0 || m_settings.nrOfMags < 0) && batteryAllowsReload()) {
 		beginReload();
 	}

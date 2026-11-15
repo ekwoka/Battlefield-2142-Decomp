@@ -242,6 +242,34 @@ TEST(Weapons_FireRateAndReload)
 	CHECK(shots > 4 && arm.magsLeft() == 4);
 }
 
+// The active defence (ads_land / ads_air: 12 rounds per minute, one round,
+// 12 s reload, endless magazines): its ammo use (0x005d9980) asks for no
+// reload, so the update starts it once the round's 5 s interval is over.
+TEST(Weapons_ActiveDefenceReloadsAfterTheShield)
+{
+	game::FireArmSettings settings;
+	settings.roundsPerMinute = 12;
+	settings.magSize = 1;
+	settings.nrOfMags = -1;
+	settings.reloadTime = 12;
+	settings.autoReload = true;
+	settings.activeDefense = true;
+	game::FireArm arm(settings);
+	CHECK(arm.tick(1 / 30.0f, true));
+	int tick = 1;
+	for (; tick < 300 && !arm.reloading(); ++tick) {
+		arm.tick(1 / 30.0f, false);
+	}
+	CHECK(tick >= 150 && tick <= 152); // 1800 / 12 ticks
+	for (int i = 0; i < 359; ++i) {
+		arm.tick(1 / 30.0f, false);
+	}
+	CHECK(arm.reloading());
+	arm.tick(1 / 30.0f, false);
+	arm.tick(1 / 30.0f, false);
+	CHECK(!arm.reloading() && arm.roundsInMag() == 1);
+}
+
 // A SupplyObject's refill (the ammo's slot 0xa8, 0x005f5110 -> 0x005f4ef0)
 // gives refillAmmoSpeed x 0.2 per cent of the whole load each 0.2 s update:
 // nrOfMags magazines as spares, or magSize rounds into the magazine with

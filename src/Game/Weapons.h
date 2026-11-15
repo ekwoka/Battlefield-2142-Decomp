@@ -553,6 +553,12 @@ struct FireArmSettings {
 	// magazine has no end), the defibrillator 0.
 	bool replenishing = false;
 	float abilityCost = 0;
+	// An ActiveDefenseAmmoComp (ads_land, ads_air): its round's ammo use
+	// (0x005d9980, slot 0x38) takes the round without the default's
+	// reload request (0x005f45e0's +0x44), so the auto reload waits for the
+	// ammo's update (0x005f3c40) once the fire component is no longer busy
+	// (0x005c14f0): after the round's interval, the shield's 5 s.
+	bool activeDefense = false;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }

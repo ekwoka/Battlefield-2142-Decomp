@@ -2762,3 +2762,54 @@ TEST(HudMenus_OrderMapIcons)
 	CHECK(menu::orderMapIcon(10, false) == "Ingame/Commander/tools/orbit_strike.tga");
 	CHECK(menu::orderMapIcon(10, true).empty() && menu::orderMapIcon(-1, false).empty() && menu::orderMapIcon(11, false).empty());
 }
+
+// The flares / active defence meter (0x007be490): ready full with the
+// countermeasure icon; the press drains it over one round's interval (the
+// ads' 5 s shield) with the icon blinking; the reload fills it with the
+// reload icon; then ready again. Off the seat (no PIFlareFire firearm) hidden.
+TEST(HudFlare_ActiveDefenceMeter)
+{
+	hud::HudManager hud(nullptr);
+	menu::FlareHud flare;
+	menu::FlareHudInput in;
+	in.present = true;
+	in.otherGuns = true;
+	in.interval = 5;
+	in.seconds = 0.5f;
+	flare.update(hud, in);
+	CHECK(hud.number("FlaresReloadTime") == 1 && hud.number("FlaresReloadTimeShow") == 1);
+	CHECK(hud.number("FlareUseShow") == 1 && hud.number("FlareBlink") == 0);
+	// The press: the stamp's frame keeps the value, the next drains it.
+	in.pressed = true;
+	flare.update(hud, in);
+	CHECK(hud.number("FlaresReloadTime") == 1);
+	in.pressed = false;
+	flare.update(hud, in);
+	CHECK(std::fabs(hud.number("FlaresReloadTime") - 0.9f) < 1e-4f);
+	CHECK(hud.number("FlareUseShow") == 1 && hud.number("FlareBlink") == 1);
+	for (int i = 0; i < 7; ++i) {
+		flare.update(hud, in);
+	}
+	CHECK(std::fabs(hud.number("FlaresReloadTime") - 0.2f) < 1e-4f && hud.number("FlareUseShow") == 1);
+	// The reload (after the interval): its progress, the reload icon.
+	in.reloading = true;
+	in.reload = 0.25f;
+	flare.update(hud, in);
+	CHECK(hud.number("FlaresReloadTime") == 0.25f && hud.number("FlaresReloadTimeShow") == 1);
+	CHECK(hud.number("FlareUseShow") == 0);
+	// Done: ready (the stamp went with the reload).
+	in.reloading = false;
+	flare.update(hud, in);
+	CHECK(hud.number("FlaresReloadTime") == 1 && hud.number("FlareUseShow") == 1);
+	// A press held through the reload stamps again once ready.
+	in.reloading = in.pressed = true;
+	flare.update(hud, in);
+	in.reloading = false;
+	flare.update(hud, in);
+	flare.update(hud, in);
+	CHECK(hud.number("FlaresReloadTime") < 1);
+	// No PIFlareFire firearm: hidden.
+	in.present = false;
+	flare.update(hud, in);
+	CHECK(hud.number("FlaresReloadTimeShow") == 0 && hud.number("FlareUseShow") == 0);
+}
