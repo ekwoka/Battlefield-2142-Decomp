@@ -3799,6 +3799,19 @@ int runGame(Options& options, Session& session)
 		std::printf("native HUD: Direct3D widescreen patch, x scaled by 12/16\n");
 	}
 	run("Menu/HUD/HudSetup/HudSetupMain.con");
+	// enhanced.hudWidescreen: the same 4:3 HUD for a mod without the patch,
+	// with HudRotation.con's 120 moves of the sides. The commander screen,
+	// which Remaster also re-cut into left/right/middle, stays centred.
+	if (enhancedSettings.enabled && enhancedSettings.hudWidescreen && hudXScale == 1.0f) {
+		hudXScale = 12.0f / 16.0f;
+		for (const char* name : {"BottomLeftStaticHud", "SquadInfo", "SquadOrderInfo", "IngameChat", "IngameChatInput", "PlayerNames"}) {
+			hudManager.shiftNode(name, -120);
+		}
+		for (const char* name : {"BottomRightStaticHud", "MinSizeAlpha", "Minimap", "ItemSelectionHud"}) {
+			hudManager.shiftNode(name, 120);
+		}
+		std::printf("native HUD: enhanced widescreen, x scaled by 12/16, sides moved 120\n");
+	}
 	// The name tags' icons and bars (the HUD manager's set-up, 0x0075cfa0).
 	run("Menu/Nametag/nametags.con");
 	if (!options.dedicated) {

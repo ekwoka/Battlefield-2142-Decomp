@@ -311,6 +311,26 @@ HudManager::Node* HudManager::find(const std::string& name) const
 	return it == m_nodes.end() ? nullptr : it->second.get();
 }
 
+bool HudManager::shiftNode(const std::string& name, int dx)
+{
+	Node* n = find(name);
+	if (!n) {
+		return false;
+	}
+	if (n->type == kMap) {
+		n->miniPos[0] += static_cast<float>(dx);
+		return true;
+	}
+	if (n->type == kSplit) {
+		n->type = kTransform;
+		n->x = n->y = 0;
+		n->w = 800;
+		n->h = 600;
+	}
+	n->x += dx;
+	return true;
+}
+
 HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
 	int w, int h)
 {

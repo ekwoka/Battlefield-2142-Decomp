@@ -30,6 +30,8 @@ struct EnhancedSettings {
 	bool botMovement = true; // enhanced.botMovement: bots on foot lie down only for far targets and don't walk sideways to look about (Game/Bots.cpp, BotsLook.cpp)
 	bool botTitan = true; // enhanced.botTitan: bots aboard a Titan walk its decks to the consoles and the core (Game/BotsTitan.cpp)
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
+	// Interface, also only with enhanced.enabled:
+	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 };
 
 inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& settings)
@@ -54,6 +56,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.botTitan = v; });
 	bindProperty<bool>(console, "enhanced.cornerSteer", ConsoleAccess::Anyone, [&settings] { return settings.cornerSteer; },
 		[&settings](const bool& v) { settings.cornerSteer = v; });
+	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
+		[&settings](const bool& v) { settings.hudWidescreen = v; });
 }
 
 } // namespace dice::hfe::scene

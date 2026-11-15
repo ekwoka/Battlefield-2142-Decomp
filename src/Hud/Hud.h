@@ -116,6 +116,10 @@ public:
 	Node* find(const std::string& name) const;
 	Node* create(int type, const std::string& parent, const std::string& name, int x, int y, int w, int h);
 	Node* active() const { return m_active; }
+	// Moves a node dx across (a map node: its minimap). A split, which passes
+	// its parent's origin on, first becomes a full-screen transform, as
+	// Remaster's hudfix rewrites them; false when there is no such node.
+	bool shiftNode(const std::string& name, int dx);
 
 	// Rows of a list data source (setListNodeData: 1 enemy and 2 friendly
 	// scores, 9 and 10 their totals, 3 chat...), as cell texts, and where

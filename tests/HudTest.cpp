@@ -142,6 +142,32 @@ TEST(Hud_RoundBarWedge)
 	}
 }
 
+// enhanced.hudWidescreen: shiftNode turns a split into a full-screen
+// transform, so its children move with it, as Remaster's hudfix does.
+TEST(Hud_ShiftNodeMovesASplitsChildren)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode BottomLeftStatic Side",
+			 "hudBuilder.createPictureNode Side Box 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
+		 }) {
+		console.execute(line, out);
+	}
+	const auto at = [&](float x, float y) {
+		const auto quads = manager.frame(0);
+		return std::any_of(quads.begin(), quads.end(), [&](const hud::HudQuad& q) { return q.x0 == x && q.y0 == y; });
+	};
+	CHECK(at(-1, 563)); // a split passes BottomLeftStatic's origin on
+	CHECK(manager.shiftNode("Side", -120));
+	CHECK(!manager.shiftNode("NoSuchNode", 120));
+	CHECK(at(-121, 563)); // now a full-screen transform at -120, 0 under it
+	CHECK(!at(-1, 563));
+}
+
 // The corner roots (the "Ingame" MemeFile's transforms): a picture at 0, 0
 // under BottomLeftStatic and BottomRightStatic draws at -1, 563 and 401, 563.
 TEST(Hud_CornerRootsFromTheMemeFile)
