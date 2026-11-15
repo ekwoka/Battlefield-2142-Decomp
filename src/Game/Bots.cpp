@@ -1680,7 +1680,11 @@ void BotManager::update(float seconds)
 			// repeated (the original's held inputs make no new press).
 			++bot.skips;
 			SoldierInput input = bot.lastInput;
-			input.fire = input.altFire = false;
+			// Enhanced transport miniguns must stay spun up between decisions.
+			if (!m_settings.titanPlay() || bot.skips >= 16 || !self.vehicle
+				|| self.vehicle != bot.continuousFireVehicle || self.seat != bot.continuousFireSeat) {
+				input.fire = input.altFire = false;
+			}
 			input.use = false;
 			input.selectItem = 0;
 			input.switchSeat = 0;
@@ -1723,6 +1727,8 @@ void BotManager::update(float seconds)
 	for (const GameWorld::PlayerInfo* self : executed) {
 		Bot& bot = m_bots[self->id];
 		bot.skips = 0;
+		bot.continuousFireVehicle = 0;
+		bot.continuousFireSeat = -1;
 		bot.gunTurn = false;
 		const float elapsed = bot.lastAct < 0 ? seconds : m_time - bot.lastAct;
 		bot.lastAct = m_time;
@@ -6811,6 +6817,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	std::string weaponTemplate;
 	int fireGroup = 0;
 	int seatIndex = -1; // the seat weapon fought with (SeatLayout::weapons)
+	bool transportGun = false;
 	if (gunning) {
 		// The seat's chosen weapon: pressed on its own fire input (the AI
 		// weapon's slot 0x60, BF2142.exe 0x008927c0: the fire component's
@@ -6823,6 +6830,11 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		seatIndex = chosen;
 		if (static_cast<size_t>(self.seat) < seats.size()) {
 			const GameWorld::SeatLayout& seat = seats[static_cast<size_t>(self.seat)];
+			const world::Object* vehicle = m_world.objects().find(self.vehicle);
+			transportGun = !self.driving && m_settings.titanPlay() && vehicle && vehicle->objectTemplate()
+				&& (m_settings.typeFlags(aiTemplateOf(vehicle->objectTemplate()->name())) & kITAir)
+				&& (seat.podLauncher || std::any_of(seat.weapons.begin(), seat.weapons.end(),
+					[](const GameWorld::SeatWeapon& w) { return w.podLauncher; }));
 			if (chosen >= 0 && static_cast<size_t>(chosen) < seat.weapons.size()) {
 				const GameWorld::SeatWeapon& w = seat.weapons[static_cast<size_t>(chosen)];
 				weaponTemplate = w.weapon;
@@ -7172,6 +7184,10 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 			input.fire = input.altFire = false;
 			input.reload = !bot.reloadedLast;
 		}
+	}
+	if (transportGun && automatic && weapon.type != WeaponAi::FireAndForget && (input.fire || input.altFire)) {
+		bot.continuousFireVehicle = self.vehicle;
+		bot.continuousFireSeat = self.seat;
 	}
 	// A bot in a squad reports its target to its squad as its trigger goes
 	// down and comes up (AIDLL 0x1009a1d0, 0x1009a2a0 -> IAIGame vt+0x6c ->

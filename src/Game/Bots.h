@@ -809,6 +809,11 @@ public:
 	bool enabled() const { return !m_noNavMesh; }
 	// The vehicles' (AIPathFinding/Vehicle.qtr), for driving bots.
 	void setVehicleNavMesh(const ai::NavMesh* mesh) { m_vehicleNavMesh = mesh; }
+	// enhanced.botTitan in gpm_ti: makes the Titans' walking grids now, at the
+	// level's load (a second or two of rays each, else spent mid-round).
+	void prepareTitanGrids();
+	// The grids' cells and links, a line each (and, for $BF2142_BOT_STATS, the vehicles).
+	std::string titanGridStats();
 	// The server's maximum of players (sv.maxPlayers; AIDLL reads the game's
 	// through DAT_10139454 slot 4) for AIMain's kick on a human's join and
 	// fill on a leave (BotsSquad.cpp's population); 0 for none.
@@ -1236,6 +1241,8 @@ private:
 		int thinkAge = 0, senseAge = 0; // entry +8, +0x10
 		int skips = 0;               // bot +0x1b4
 		SoldierInput lastInput;
+		uint32_t continuousFireVehicle = 0;
+		int continuousFireSeat = -1;
 		// A seat gun's aim this frame (aim): the error, in degrees, its turn
 		// left; a skipped frame's held turn goes no further.
 		bool gunTurn = false;
@@ -1284,10 +1291,13 @@ private:
 		float titanCrewSince = 0;
 		uint32_t titanCrewSkipFor = 0; // one it gave up on the way to, until then
 		float titanCrewSkipUntil = 0;
-		int titanSortie = 0;       // its transport's run with the enemy shield up: 0 on its deck, 1 out to a silo, 2 home; a gunship's: 1 taking off
+		uint32_t titanSortieVehicle = 0; // the transport this pilot has considered for a deck sortie
+		uint32_t titanSortieRider = 0;  // the deck sortie a passenger joined
+		int titanSortie = 0;       // transport: 0 waiting, 1 dropping riders, 2 supporting silos, 3 ordinary AI; gunship: 1 taking off
 		int titanSortieSilo = -1;  // that silo's control point
-		physics::Vec3 titanPad;    // the transport's pad on its Titan's deck (the Titan's frame)
-		float titanSortieUntil = 0; // over the silo: home once the riders are out, or then
+		float titanSortieUntil = 0; // over the silo: wait for riders until then
+		int titanSupportSilo = -1, titanSupportStep = 0;
+		float titanSupportUntil = 0;
 		uint32_t meshVehicle = 0;  // driveToMesh: the vehicle it drives, and whether that has been on the vehicle mesh
 		bool meshReached = false;
 		std::vector<physics::Vec3> meshWay; // what is left of its way there
@@ -1299,6 +1309,8 @@ private:
 		float titanRideAt = -1e9f;
 		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way, and when
 		float titanAtTime = 0;
+		float titanFireFrom = -1;     // aboard the enemy's Titan: when it stopped to fire, and the break from that until
+		float titanFireRestUntil = 0;
 		bool switchedLast = false;
 		bool reloadedLast = false; // c_PIReload pressed at the last execution (a release between presses)
 		// The comm object's received radio messages (bot vt+0xa4, +0xc: a
@@ -1865,6 +1877,7 @@ private:
 		const physics::Vec3& entry, float radius, int seat);
 	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
 		const GameWorld::TitanInfo& titan, const std::vector<float>& field);
+	bool titanLeave(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);
 	// The team's plan (its virtual commander): a role a squad, 0 the silos, 1 board the enemy Titan, 2 defend its own.
 	struct TitanPlan {
 		float nextAt = 0, share = 0.5f;
@@ -1887,7 +1900,6 @@ private:
 	bool titanRideGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
-	std::string titanGridStats();
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);

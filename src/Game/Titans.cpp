@@ -735,6 +735,11 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
 	++titan.meshVersion;
+	// Unknown until the soldier faces are compared below.
+	titan.meshChanges.push_back({titan.meshVersion, false, true, {}, {}});
+	if (titan.meshChanges.size() > 16) {
+		titan.meshChanges.erase(titan.meshChanges.begin());
+	}
 	Body* body = findBody(titan.object);
 	const world::Object* object = m_objects.find(titan.object);
 	if (!body && object && m_files && m_collisionTemplates) {
@@ -848,6 +853,43 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		vehicleParts.insert(vehicleParts.end(), m.lodParts.begin(), m.lodParts.end());
 	}
 	titan.vehicleParts = std::move(vehicleParts);
+	// The soldier faces that came or went: those of each mesh that went
+	// down or came back (a mesh's LOD parts sit in the Titan's frame).
+	std::vector<char> nowLive(titan.meshes.size());
+	for (size_t i = 0; i < titan.meshes.size(); ++i) {
+		nowLive[i] = live(titan.meshes[i]);
+	}
+	if (titan.meshesLive.size() == nowLive.size() && body->soldierMesh) {
+		Titan::MeshChange& change = titan.meshChanges.back();
+		change.known = true;
+		change.changed = false;
+		for (size_t i = 0; i < nowLive.size(); ++i) {
+			const TitanMesh& m = titan.meshes[i];
+			if (nowLive[i] == titan.meshesLive[i]) {
+				continue;
+			}
+			if (!m.lodPartsMade) {
+				change.known = false;
+				break;
+			}
+			for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts) {
+				if (part->lod != static_cast<int>(physics::CollisionUser::Soldier) || !part->mesh) {
+					continue;
+				}
+				part->mesh->forEachFace([&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
+					for (const physics::Vec3& p : {a, b, c}) {
+						if (!change.changed) {
+							change.low = change.high = p;
+							change.changed = true;
+						}
+						change.low = {std::min(change.low.x, p.x), std::min(change.low.y, p.y), std::min(change.low.z, p.z)};
+						change.high = {std::max(change.high.x, p.x), std::max(change.high.y, p.y), std::max(change.high.z, p.z)};
+					}
+				});
+			}
+		}
+	}
+	titan.meshesLive = std::move(nowLive);
 	body->teamSoldierMesh[0] = teams[0];
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
@@ -1023,6 +1065,37 @@ uint32_t GameWorld::titanMeshVersion(uint32_t titan) const
 		}
 	}
 	return 0;
+}
+
+bool GameWorld::titanMeshChange(uint32_t titan, uint32_t since, physics::Vec3& low, physics::Vec3& high, bool& changed) const
+{
+	changed = false;
+	for (const Titan& t : m_titans) {
+		if (t.object != titan) {
+			continue;
+		}
+		if (since > t.meshVersion) {
+			return false;
+		}
+		// Every rebuild after `since` must be on record and known.
+		uint32_t next = since + 1;
+		for (const Titan::MeshChange& change : t.meshChanges) {
+			if (change.version < next) {
+				continue;
+			}
+			if (change.version != next || !change.known) {
+				return false;
+			}
+			if (change.changed) {
+				low = changed ? physics::Vec3 {std::min(low.x, change.low.x), std::min(low.y, change.low.y), std::min(low.z, change.low.z)} : change.low;
+				high = changed ? physics::Vec3 {std::max(high.x, change.high.x), std::max(high.y, change.high.y), std::max(high.z, change.high.z)} : change.high;
+				changed = true;
+			}
+			++next;
+		}
+		return next == t.meshVersion + 1;
+	}
+	return false;
 }
 
 std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team) const

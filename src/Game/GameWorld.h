@@ -2463,6 +2463,10 @@ public:
 	physics::Vec3 titanToLocal(uint32_t titan, const physics::Vec3& world) const;
 	physics::Vec3 titanToWorld(uint32_t titan, const physics::Vec3& local) const;
 	uint32_t titanMeshVersion(uint32_t titan) const;
+	// What changed in those rays since version `since`: the Titan-frame box
+	// of the soldier faces that came or went (`changed` false when none
+	// did). False when that is not known: everything may have changed.
+	bool titanMeshChange(uint32_t titan, uint32_t since, physics::Vec3& low, physics::Vec3& high, bool& changed) const;
 	bool ridingPod(int player) const;
 	// Hanging under a soldier's parachute (Parachutes.cpp).
 	bool ridingParachute(int player) const;
@@ -4484,6 +4488,15 @@ private:
 		std::vector<PodArray> podArrays;
 		bool meshesDirty = true;
 		uint32_t meshVersion = 0; // rebuildTitanMeshes' count (titanMeshVersion)
+		// Each rebuild's change to the soldier faces (titanMeshChange): the
+		// meshes live at the last rebuild, and the recent rebuilds' boxes.
+		struct MeshChange {
+			uint32_t version = 0;
+			bool known = false, changed = false;
+			physics::Vec3 low, high;
+		};
+		std::vector<char> meshesLive;
+		std::vector<MeshChange> meshChanges;
 		uint32_t serial = 0;      // its parts' ids: kTitanPartIds + serial << 12 + part
 		std::vector<int> seatParts; // each gun seat's armour (its hub's first armoured node), -1 for none
 		// The wreck (0x00652380): when it became one (+0x60), the root's

@@ -13956,15 +13956,36 @@ off the deck above the Titan towards the nearest silo the team doesn't hold
 until 200 m clear, then flies as any gunship (on the deck the ordinary
 pilot waits while soldiers are near, and the crew always is). With the
 enemy shield up the transport's pilot (`titanSortie`) waits 6..18 s for
-riders (20 s more while one is still walking), with one aboard flies to the
-nearest such silo, high over the Titan and 70 m over the ground on the way,
-30 m over the silo, until its riders are out by pod (the exit key; at most
-15 s), and lands back anywhere on its Titan's deck (the hover drifts as it
-sinks). With the shield down, the boarding run as before. This is native
-enhanced AI, not retail parity. The
+riders (20 s more while one is still walking), then flies to the nearest
+such silo even if it is empty, high over the Titan and 70 m over the ground
+on the way, 30 m over the silo. Non-gunner riders leave by pod (the exit key;
+at most 15 s); combat gunners stay aboard. The pilot then supports silos
+instead of returning to its Titan: it chooses a station 150 m to the side,
+supports it for 20 s after arriving within 40 m, then chooses another silo
+(another station around the same silo if only one exists). Friendly pilots'
+assignments spread them out, and enemy or neutral silos are preferred.
+Gunners use their ordinary target, aim, friendly-fire and heat checks.
+Enhanced transport gunners hold an automatic trigger between round-robin
+decisions: clearing it on every skipped frame cancelled the EU minigun's
+authored half-second spin-up before any round could fire. Other bots keep
+the original skipped-frame input policy. Maps without silos use ordinary
+flight. There is no mandatory return. The
+Titan transport's `_spawn` variant remains a mobile spawn point, subject to
+team, control-point, armour and seat availability. Transports not departing
+the Titan deck use ordinary AI. With the shield down, the boarding run is
+unchanged. This is native enhanced AI, not retail parity. The
 rest walk to the nearest pod array and drop (the arrays'
 titan_pod_array_1_ai template makes them vehicles to the AI). Boarding the
 enemy Titan and attacking its consoles and core has no AI to rewrite.
+With `enhanced.botTitan`, a boarder with no grid route to a whole console
+or the core (a hull ledge it dropped onto and cannot climb back from, or a
+spot off the grid) walks outward and jumps until it drops off the hull and
+parachutes down (`titanLeave`), instead of standing under the ordinary
+ground AI. Boarders stop to fire for at most 6 s, then walk on for 4 s,
+so an unreachable defender cannot hold them. While enemies are aboard, bots
+without a Titan role respawn on their own Titan until there are two
+defenders on foot aboard for each boarder. This is native enhanced AI, not
+retail parity.
 
 Why nobody fires on Suez_Canal gpm_ti 48 (15 bots, 300 s: 0 rounds, the
 silos left neutral), and why retail is the same: the level load

@@ -8593,6 +8593,9 @@ int runGame(Options& options, Session& session)
 		// The AI runs on this server (AIDLL's interface; a wreck's armour
 		// drains three times as fast, 0x00652380).
 		round.setAiRunning(bots.enabled() && options.bots > 0);
+		if (bots.enabled() && options.bots > 0) {
+			bots.prepareTitanGrids(); // the Titans stand after the first step
+		}
 		// The SAI's kit choice at a bot's respawn (AIDLL 0x100f04a0) draws
 		// from the team's kits.
 		for (int team = 1; team <= 2; ++team) {

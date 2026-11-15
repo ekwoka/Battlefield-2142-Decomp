@@ -76,7 +76,19 @@ struct BotManager::TitanGrid {
 	std::map<uint32_t, std::vector<float>> fields; // a part's id: each cell's cost to a spot that sees it
 	std::vector<int> landing;                      // titanLandingSpots' cells
 	bool landingDone = false;
-	std::map<uint32_t, std::pair<physics::Vec3, float>> hunted; // a boarder's field: where he was (Titan frame) and when it was made
+	std::map<uint32_t, std::pair<physics::Vec3, float>> seeds; // a moving thing's field (a boarder, a deck aircraft): where it was (Titan frame) and when it was made
+
+	// Where that thing's field is made about: where it is, once it has moved 3 m and its field is a second old (dropped then).
+	const physics::Vec3& seedOf(uint32_t key, const physics::Vec3& at, float now)
+	{
+		auto& [seed, made] = seeds[key];
+		if (!fields.count(key) || (now - made > 1 && physics::lengthSquared(at - seed) > 9)) {
+			fields.erase(key);
+			seed = at;
+			made = now;
+		}
+		return seed;
+	}
 
 	const std::vector<int>* column(int ix, int iz) const
 	{
@@ -112,6 +124,17 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 	if (held && held->version == version) {
 		return *held;
 	}
+	// A part going down or coming back changes the faces in a box only:
+	// the rays that miss it are kept from the last grid, only those that
+	// may meet it are cast again (a whole grid is over a million rays).
+	physics::Vec3 low, high;
+	bool changed = true;
+	const bool known = held && m_world.titanMeshChange(titan.object, held->version, low, high, changed);
+	if (known && !changed) {
+		held->version = version;
+		return *held;
+	}
+	const std::shared_ptr<const TitanGrid> old = known ? held : nullptr;
 	held = std::make_shared<TitanGrid>();
 	TitanGrid& g = *held;
 	g.version = version;
@@ -121,17 +144,35 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 	g.minX = g.minZ = -r;
 	g.nx = g.nz = static_cast<int>(2 * r / kCell) + 1;
 	g.columns.resize(static_cast<size_t>(g.nx) * g.nz);
+	const bool reuse = old && old->nx == g.nx && old->nz == g.nz && old->minX == g.minX && old->minZ == g.minZ;
+	constexpr float kSlack = 0.05f;
+	// Whether a ray's box (two points' with the heights above them) misses the changed faces.
+	const auto clear = [&](const physics::Vec3& a, const physics::Vec3& b, float above) {
+		return std::max(a.x, b.x) < low.x - kSlack || std::min(a.x, b.x) > high.x + kSlack || std::max(a.z, b.z) < low.z - kSlack
+			|| std::min(a.z, b.z) > high.z + kSlack || std::max(a.y, b.y) + above < low.y - kSlack || std::min(a.y, b.y) > high.y + kSlack;
+	};
+	std::vector<int> fromOld; // each cell's in the last grid, -1 for a new one
 	// The floors: down each column, every surface with a soldier's headroom over it.
 	for (int iz = 0; iz < g.nz; ++iz) {
 		for (int ix = 0; ix < g.nx; ++ix) {
 			const float x = g.minX + ix * kCell, z = g.minZ + iz * kCell;
+			std::vector<int>& column = g.columns[static_cast<size_t>(iz) * g.nx + ix];
+			if (reuse && clear({x, kBottom, z}, {x, kTop, z}, 0)) {
+				for (int c : old->columns[static_cast<size_t>(iz) * g.nx + ix]) {
+					column.push_back(static_cast<int>(g.cells.size()));
+					g.cells.push_back({old->cells[static_cast<size_t>(c)].at, {}, {}});
+					fromOld.push_back(c);
+				}
+				continue;
+			}
 			float y = kTop, f = 1;
 			for (int n = 0; n < 24 && y > kBottom + 1 && ray({x, y, z}, {x, kBottom, z}, f); ++n) {
 				const float floor = y + (kBottom - y) * f;
 				float up = 1;
 				if (!ray({x, floor + 0.35f, z}, {x, floor + kHeadroom, z}, up)) {
-					g.columns[static_cast<size_t>(iz) * g.nx + ix].push_back(static_cast<int>(g.cells.size()));
+					column.push_back(static_cast<int>(g.cells.size()));
 					g.cells.push_back({{x, floor, z}, {}, {}});
+					fromOld.push_back(-1);
 				}
 				y = floor - 0.25f;
 			}
@@ -143,6 +184,7 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 		for (int ix = 0; ix < g.nx; ++ix) {
 			for (int a : g.columns[static_cast<size_t>(iz) * g.nx + ix]) {
 				const physics::Vec3 pa = g.cells[static_cast<size_t>(a)].at;
+				const int oldA = reuse ? fromOld[static_cast<size_t>(a)] : -1;
 				for (int dz = -1; dz <= 1; ++dz) {
 					for (int dx = -1; dx <= 1; ++dx) {
 						const std::vector<int>* col = dx || dz ? g.column(ix + dx, iz + dz) : nullptr;
@@ -152,16 +194,30 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 						for (int b : *col) {
 							const physics::Vec3 pb = g.cells[static_cast<size_t>(b)].at;
 							const float dy = pb.y - pa.y, length = std::sqrt(physics::lengthSquared(pb - pa));
+							const bool level = std::fabs(dy) <= kStep;
+							if (!level && !(dy < 0 && dy >= -kDrop && (dx == 0 || dz == 0))) {
+								continue;
+							}
+							const float cost = level ? length : length + 2;
+							const int oldB = oldA >= 0 ? fromOld[static_cast<size_t>(b)] : -1;
+							// The rays below lie 0.5..1.6 m over the two floors.
+							if (oldB >= 0 && clear(pa, pb, 1.6f)) {
+								const auto& was = old->cells[static_cast<size_t>(oldA)].out;
+								if (std::any_of(was.begin(), was.end(), [&](const auto& link) { return link.first == oldB; })) {
+									g.cells[static_cast<size_t>(a)].out.push_back({b, cost});
+								}
+								continue;
+							}
 							float f = 1;
-							if (std::fabs(dy) <= kStep) {
+							if (level) {
 								if (!ray(pa + physics::Vec3 {0, 0.6f, 0}, pb + physics::Vec3 {0, 0.6f, 0}, f)
 									&& !ray(pa + physics::Vec3 {0, 1.6f, 0}, pb + physics::Vec3 {0, 1.6f, 0}, f)) {
-									g.cells[static_cast<size_t>(a)].out.push_back({b, length});
+									g.cells[static_cast<size_t>(a)].out.push_back({b, cost});
 								}
-							} else if (dy < 0 && dy >= -kDrop && (dx == 0 || dz == 0)) {
+							} else {
 								const physics::Vec3 over {pb.x, pa.y + 1.0f, pb.z};
 								if (!ray(pa + physics::Vec3 {0, 1.0f, 0}, over, f) && !ray(over, pb + physics::Vec3 {0, 0.5f, 0}, f)) {
-									g.cells[static_cast<size_t>(a)].out.push_back({b, length + 2});
+									g.cells[static_cast<size_t>(a)].out.push_back({b, cost});
 								}
 							}
 						}
@@ -194,6 +250,17 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 		}
 	}
 	return g;
+}
+
+void BotManager::prepareTitanGrids()
+{
+	if (m_settings.titanPlay() && m_world.gameMode() == "gpm_ti") {
+		for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+			for (int team : {1, 2}) {
+				titanGrid(titan, team);
+			}
+		}
+	}
 }
 
 // Each cell's cost to a spot that sees the point (in the Titan's frame)
@@ -261,7 +328,7 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 			}
 		}
 	}
-	if (std::getenv("BF2142_BOT_STATS") && !(part & 0x80000000u)) { // DIAG
+	if (m_stats && !(part & 0x80000000u)) { // DIAG
 		size_t zero = 0, reach = 0;
 		for (float f : field) {
 			zero += f == 0;
@@ -300,8 +367,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
 	const GameWorld::TitanInfo* titan = nullptr;
 	for (const GameWorld::TitanInfo& t : titans) {
-		const physics::Vec3 d = self.position - t.position;
-		if (!t.wreck && d.x * d.x + d.z * d.z < 160.0f * 160.0f && d.y > kBottom && d.y < kTop) {
+		if (!t.wreck && aboard(t, self.position)) {
 			titan = &t;
 		}
 	}
@@ -314,8 +380,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 	std::vector<const GameWorld::PlayerInfo*> boarders;
 	if (own) {
 		for (const GameWorld::PlayerInfo& p : m_players) {
-			const physics::Vec3 d = p.position - titan->position;
-			if (p.alive && p.team != self.team && !p.vehicle && d.x * d.x + d.z * d.z < 160.0f * 160.0f && d.y > kBottom && d.y < kTop) {
+			if (p.alive && p.team != self.team && !p.vehicle && aboard(*titan, p.position)) {
 				boarders.push_back(&p);
 			}
 		}
@@ -346,7 +411,8 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 				const physics::Vec3 d = transport->position - self.position;
 				input.use = horizontal(d) < 7 && std::fabs(d.y) < 5 && std::fmod(m_time, 0.6f) < 0.1f;
 				titanWalk(bot, self, input, seconds, g, *titan,
-					titanField(g, *titan, self.team, transport->object, m_world.titanToLocal(titan->object, transport->position), true));
+					titanField(g, *titan, self.team, transport->object,
+						g.seedOf(transport->object, m_world.titanToLocal(titan->object, transport->position), m_time), true));
 				return true;
 			}
 			std::vector<const GameWorld::TitanPartInfo*> posts;
@@ -366,9 +432,17 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		}
 	}
 	// An enemy in sight: the ordinary fight, standing (no mesh to walk here).
-	if (fireUrgency(bot, self, m_players) > 0 && bot.target >= 0) {
+	// Aboard the enemy's Titan, 6 s of that and then 4 s of the way on: a
+	// defender out of reach would otherwise hold a boarder there for good.
+	if (fireUrgency(bot, self, m_players) > 0 && bot.target >= 0 && (own || m_time >= bot.titanFireRestUntil)) {
 		const auto known = std::find_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == bot.target; });
 		if (known != bot.known.end() && known->lostAt < 0) {
+			if (bot.titanFireFrom < 0) {
+				bot.titanFireFrom = m_time;
+			} else if (!own && m_time - bot.titanFireFrom > 6) {
+				bot.titanFireFrom = -1;
+				bot.titanFireRestUntil = m_time + 4;
+			}
 			bot.behaviour = "Fire";
 			fire(bot, self, input, seconds);
 			input.throttle = input.strafe = 0;
@@ -376,12 +450,13 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 			return true;
 		}
 	}
+	bot.titanFireFrom = -1;
 	TitanGrid& g = titanGrid(*titan, self.team);
 	const physics::Vec3 local = m_world.titanToLocal(titan->object, self.position);
 	const int cell = g.cellAt(local);
 	if (cell < 0) {
 		m_behaviourSeconds[own ? "~T own nocell" : "~T enemy nocell"] += seconds; // DIAG
-		return false;
+		return !own && titanLeave(bot, self, input, seconds, *titan);
 	}
 	// Two defenders in three go after the nearest boarder: to a spot that
 	// sees him from kFireNear..kFireFar (the fight above takes over once he
@@ -393,13 +468,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		}
 		const uint32_t key = 0x80000000u | static_cast<uint32_t>(prey->id);
 		const physics::Vec3 at = m_world.titanToLocal(titan->object, prey->position + physics::Vec3 {0, 1.2f, 0});
-		auto& [seed, made] = g.hunted[key];
-		if (!g.fields.count(key) || (m_time - made > 1 && physics::lengthSquared(at - seed) > 9)) {
-			g.fields.erase(key);
-			seed = at;
-			made = m_time;
-		}
-		const std::vector<float>& f = titanField(g, *titan, self.team, key, seed);
+		const std::vector<float>& f = titanField(g, *titan, self.team, key, g.seedOf(key, at, m_time));
 		if (f[static_cast<size_t>(cell)] < kInfinity) {
 			bot.behaviour = "TitanHunt";
 			if (f[static_cast<size_t>(cell)] <= 0) {
@@ -443,13 +512,13 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 	}
 	if (!goal) {
 		static int said = 0;
-		if (said++ < 6 && std::getenv("BF2142_BOT_STATS")) { // DIAG
+		if (said++ < 6 && m_stats) { // DIAG
 			std::fprintf(stderr, "titan nogoal: bot local %.1f %.1f %.1f cell %d out %zu; parts:", local.x, local.y, local.z, cell, g.cells[static_cast<size_t>(cell)].out.size());
 			for (const auto& part : parts) std::fprintf(stderr, " %s/%d/%d", part.name.c_str(), static_cast<int>(part.kind), part.wreck ? 1 : 0);
 			std::fprintf(stderr, "\n");
 		}
 		m_behaviourSeconds[own ? "~T own nogoal" : "~T enemy nogoal"] += seconds; // DIAG
-		return false;
+		return !own && titanLeave(bot, self, input, seconds, *titan);
 	}
 	bot.behaviour = own ? "TitanDefend" : "TitanAttack";
 	const float here = (*field)[static_cast<size_t>(cell)];
@@ -467,7 +536,39 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		handleWeapon(bot, self, input);
 		return true;
 	}
-	return titanWalk(bot, self, input, seconds, g, *titan, *field);
+	return titanWalk(bot, self, input, seconds, g, *titan, *field) || (!own && titanLeave(bot, self, input, seconds, *titan));
+}
+
+// A boarder with no way to any console or the core (a ledge of the hull it
+// dropped onto and cannot climb back from, a spot off the grid): no navmesh
+// covers a Titan, so the ordinary AI would stand there for good. Instead it
+// walks out from the Titan's middle, jumping, until it drops off the hull;
+// the parachute takes it down, and the ordinary AI on the ground.
+bool BotManager::titanLeave(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan)
+{
+	m_behaviourSeconds["~T enemy leave"] += seconds; // DIAG
+	const physics::Vec3 local = m_world.titanToLocal(titan.object, self.position);
+	physics::Vec3 out {local.x, 0, local.z};
+	if (physics::lengthSquared(out) < 1) {
+		out = {1, 0, 0};
+	}
+	// Wedged for 2 s: a quarter turn, alternating sides each 4 s.
+	if (physics::lengthSquared(self.position - bot.titanAt) > 1.0f) {
+		bot.titanAt = self.position;
+		bot.titanAtTime = m_time;
+	} else if (m_time - bot.titanAtTime > 2) {
+		const float side = std::fmod(m_time, 8.0f) < 4 ? 1.0f : -1.0f;
+		out = {out.x - side * out.z, 0, out.z + side * out.x};
+	}
+	const physics::Vec3 d = m_world.titanToWorld(titan.object, local + out) - self.position;
+	const float off = std::remainder(std::atan2(d.x, d.z) * 57.29578f - self.yaw, 360.0f);
+	input.turn = std::clamp(off, -360 * seconds, 360 * seconds);
+	input.throttle = std::fabs(off) < 60 ? 1.0f : 0.0f;
+	input.strafe = 0;
+	input.jump = std::fmod(m_time, 1.5f) < 0.2f;
+	bot.behaviour = "TitanLeave";
+	handleWeapon(bot, self, input);
+	return true;
 }
 
 // A step down a field of the grid; false where it has no way on (or the bot is off the grid).
@@ -612,7 +713,7 @@ bool BotManager::titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physi
 		pods = pods || podSeat(seat);
 	}
 	const std::vector<physics::Vec3> spots = pods ? titanLandingSpots(3 - self.team, self.team) : std::vector<physics::Vec3> {};
-	{ static std::map<int, float> last2; if (std::getenv("BF2142_BOT_STATS") && m_time - last2[self.id] > 30 && (last2[self.id] = m_time, true)) { // DIAG
+	{ static std::map<int, float> last2; if (m_stats && m_time - last2[self.id] > 30 && (last2[self.id] = m_time, true)) { // DIAG
 		const world::Object* v = m_world.objects().find(self.vehicle);
 		std::fprintf(stderr, "podgoal? %d team %d %s pods %d spots %zu\n", self.id, self.team, v && v->objectTemplate() ? v->objectTemplate()->name().c_str() : "?", pods ? 1 : 0, spots.size()); } }
 	if (spots.empty()) {
@@ -635,7 +736,7 @@ bool BotManager::titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physi
 	}
 	if (bot.titanPodGoalSet && horizontal(bot.titanPodGoalFor - spots.front()) < 20) {
 		goal = bot.titanPodGoal;
-		if (static std::map<int, float> last; std::getenv("BF2142_BOT_STATS") && m_time - last[self.id] > 20 && (last[self.id] = m_time, true)) { // DIAG
+		if (static std::map<int, float> last; m_stats && m_time - last[self.id] > 20 && (last[self.id] = m_time, true)) { // DIAG
 			std::fprintf(stderr, "podgoal %d t %.0f at %.0f %.0f %.0f goal %.0f %.0f %.0f d %.0f ready %d behaviour %s\n", self.id, m_time, self.position.x, self.position.y, self.position.z,
 				goal.x, goal.y, goal.z, horizontal(goal - self.position), titanPodReady(self) ? 1 : 0, bot.behaviour.c_str());
 		}
@@ -657,7 +758,7 @@ bool BotManager::titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physi
 	}
 	if (best >= 1e9f) {
 		static int said = 0;
-		if (said++ < 3 && std::getenv("BF2142_BOT_STATS")) std::fprintf(stderr, "podgoal %d: no launch place among %zu spots\n", self.id, spots.size()); // DIAG
+		if (said++ < 3 && m_stats) std::fprintf(stderr, "podgoal %d: no launch place among %zu spots\n", self.id, spots.size()); // DIAG
 		return false;
 	}
 	bot.titanPodGoal = goal;
@@ -668,6 +769,19 @@ bool BotManager::titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physi
 
 bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
+	if (bot.titanSortieVehicle && bot.titanSortieVehicle != self.vehicle) {
+		bot.titanSortieVehicle = 0;
+		bot.titanSortie = 0;
+		bot.titanSupportSilo = -1;
+		bot.titanSupportStep = 0;
+		bot.titanSupportUntil = 0;
+	}
+	if (bot.titanSortieRider != self.vehicle) {
+		bot.titanSortieRider = 0;
+	}
+	if (!self.vehicle) {
+		bot.titanSortie = 0;
+	}
 	if (!m_settings.titanPlay() || m_world.gameMode() != "gpm_ti" || !self.vehicle) {
 		return false;
 	}
@@ -691,7 +805,7 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 		const float yaw = pod->rotation().x * 0.017453292f;
 		input.throttle = std::clamp((want.x * std::sin(yaw) + want.z * std::cos(yaw)) / 8, -1.0f, 1.0f);
 		input.strafe = std::clamp((want.x * std::cos(yaw) - want.z * std::sin(yaw)) / 8, -1.0f, 1.0f);
-		if (std::getenv("BF2142_BOT_STATS")) { // DIAG
+		if (m_stats) { // DIAG
 			std::fprintf(stderr, "pod %d t %.1f at %.0f %.0f %.0f v %.0f %.0f %.0f spot d %.0f dy %.0f yaw %.0f thr %.2f str %.2f\n", self.id, m_time, self.position.x, self.position.y,
 				self.position.z, self.velocity.x, self.velocity.y, self.velocity.z, horizontal(*spot - self.position), spot->y - self.position.y, pod->rotation().x, input.throttle, input.strafe);
 		}
@@ -712,6 +826,10 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 	const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - self.team);
 	if (enemy && !enemy->shield && podSeat(seats[0]) && object && object->objectTemplate()
 		&& (m_settings.typeFlags(aiTemplateOf(object->objectTemplate()->name())) & kITAir)) {
+		if (bot.titanSortieVehicle == self.vehicle) {
+			bot.titanSortie = 2;
+		}
+		bot.titanSortieRider = 0;
 		const std::vector<physics::Vec3> spots = titanLandingSpots(enemy->team, self.team);
 		if (spots.empty()) {
 			return false;
@@ -753,7 +871,7 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 				bot.titanFlyMode = 1;
 			}
 		}
-		if (static std::map<int, float> last; std::getenv("BF2142_BOT_STATS") && m_time - last[self.id] > 5 && (last[self.id] = m_time, true)) { // DIAG
+		if (static std::map<int, float> last; m_stats && m_time - last[self.id] > 5 && (last[self.id] = m_time, true)) { // DIAG
 			std::fprintf(stderr, "fly %d t %.0f mode %d at %.0f %.0f %.0f spot %.0f %.0f %.0f d %.0f up %.0f\n", self.id, m_time, bot.titanFlyMode, self.position.x, self.position.y,
 				self.position.z, spot.x, spot.y, spot.z, d, up);
 		}
@@ -761,6 +879,10 @@ bool BotManager::titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierIn
 	}
 	if (titanSortie(bot, self, input, seconds)) {
 		return true;
+	}
+	if (enemy && enemy->shield && podSeat(seats[0]) && object && object->objectTemplate()
+		&& (m_settings.typeFlags(aiTemplateOf(object->objectTemplate()->name())) & kITAir)) {
+		return false;
 	}
 	if (!titanPodReady(self)) {
 		return false;
@@ -883,18 +1005,18 @@ bool BotManager::titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 	const bool outside = horizontal(entry - v->position) > 3;
 	const physics::Vec3 d = entry - self.position;
 	input.use = (physics::lengthSquared(d) < 9 || (horizontal(d) < 7 && std::fabs(d.y) < 5)) && std::fmod(m_time, 0.6f) < 0.1f;
+	const uint32_t key = 0x20000000u ^ v->object;
 	titanWalk(bot, self, input, seconds, g, *home,
-		titanField(g, *home, self.team, 0x20000000u ^ v->object, m_world.titanToLocal(home->object, entry), true, 0, outside ? v->object : 0));
+		titanField(g, *home, self.team, key, g.seedOf(key, m_world.titanToLocal(home->object, entry), m_time), true, 0, outside ? v->object : 0));
 	return true;
 }
 
 // A transport of its own Titan's deck while the enemy's shield is up (with
 // it down, titanPod's boarding run): its pilot waits 6..18 s on the deck for
-// riders (on while one of them is still walking to it, 20 s at most), with
-// one aboard flies to the nearest silo the team doesn't hold, high on the
-// way and 30 m over it, waits there until the riders are out (15 s at most)
-// and lands back on its Titan's deck. Its riders leave by pod (the exit key) over
-// such a silo; with no pilot, at once.
+// riders (20 s more while one is still walking), then flies to a silo the
+// team doesn't hold. Riders leave by pod over the silo, or if the pilot is
+// lost. Gunners stay aboard and use ordinary combat AI; after the drop the
+// pilot supports a silo for 20 s, then repositions to another.
 bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
 	const world::Object* object = m_world.objects().find(self.vehicle);
@@ -908,6 +1030,19 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	}
 	const std::vector<int> occupants = m_world.vehicleOccupants(self.vehicle);
 	const std::vector<GameWorld::SiloInfo> silos = m_world.missileSilos();
+	const auto gunnerSeat = [&](size_t seat) {
+		if (seat >= seats.size()) {
+			return false;
+		}
+		const auto armed = [&](const GameWorld::SeatWeapon& w) {
+			if (w.weapon.empty() || w.podLauncher) {
+				return false;
+			}
+			const WeaponAi ai = weaponAi(w.weapon);
+			return std::any_of(ai.strength.begin(), ai.strength.end(), [](float strength) { return strength > 0; });
+		};
+		return armed(seats[seat]) || std::any_of(seats[seat].weapons.begin(), seats[seat].weapons.end(), armed);
+	};
 	if (!podSeat(seats[0])) {
 		// A gunship from the deck: off it and 200 m clear of the Titan (high,
 		// toward the nearest silo the team doesn't hold, else ahead of the
@@ -931,11 +1066,35 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		return fly(bot, self, input, seconds);
 	}
 	const bool onDeck = aboard(*home, self.position);
+	const auto overDeck = [&] {
+		if (!onDeck) {
+			return false;
+		}
+		const physics::Vec3 local = m_world.titanToLocal(home->object, self.position);
+		float fraction = 1;
+		return m_world.titanLocalRay(home->object, self.team, local + physics::Vec3 {0, 1, 0},
+			local - physics::Vec3 {0, 8, 0}, fraction);
+	};
 	if (!self.driving) {
-		const bool pilot = !occupants.empty() && occupants[0] >= 0;
+		bot.titanSortieVehicle = 0;
+		const int pilotId = !occupants.empty() ? occupants[0] : -1;
+		const bool pilot = pilotId >= 0;
+		if (pilot) {
+			const auto found = m_bots.find(pilotId);
+			const bool active = found != m_bots.end()
+				&& ((found->second.titanSortieVehicle == self.vehicle && found->second.titanSortie < 2)
+					|| (found->second.titanSortieVehicle != self.vehicle && overDeck()));
+			bot.titanSortieRider = active ? self.vehicle : 0;
+		}
+		if (bot.titanSortieRider != self.vehicle) {
+			return false;
+		}
 		if (onDeck && pilot) {
 			bot.behaviour = "TitanSortie";
 			return true; // seated until it is off
+		}
+		if (pilot && gunnerSeat(static_cast<size_t>(self.seat))) {
+			return false;
 		}
 		if (onDeck) {
 			return false;
@@ -949,15 +1108,22 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		input.use = over && std::fmod(m_time, 1.0f) < 0.1f;
 		return true;
 	}
-	const auto riders = std::count_if(occupants.begin() + 1, occupants.end(), [](int r) { return r >= 0; });
-	const physics::Vec3 relative = self.velocity - home->velocity;
-	if (bot.titanWaitFor != self.vehicle) {
+	bot.titanSortieRider = 0;
+	int riders = 0;
+	for (size_t seat = 1; seat < occupants.size(); ++seat) {
+		riders += occupants[seat] >= 0 && !gunnerSeat(seat);
+	}
+	if (bot.titanSortieVehicle != self.vehicle) {
+		bot.titanSortieVehicle = self.vehicle;
+		bot.titanSortie = overDeck() ? 0 : 3;
+		if (bot.titanSortie == 3) {
+			return false;
+		}
 		bot.titanWaitFor = self.vehicle;
 		bot.titanWaitUntil = m_time + 6 + 12 * random();
-		bot.titanSortie = onDeck ? 0 : 2;
-		if (onDeck) {
-			bot.titanPad = m_world.titanToLocal(home->object, self.position);
-		}
+	}
+	if (bot.titanSortie == 3) {
+		return false;
 	}
 	const auto siloOf = [&](int point) -> const GameWorld::SiloInfo* {
 		for (const GameWorld::SiloInfo& silo : silos) {
@@ -976,7 +1142,6 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		}
 		return best;
 	};
-	bot.behaviour = "TitanSortie";
 	if (bot.titanSortie == 0) {
 		bool coming = false;
 		for (const auto& [id, other] : m_bots) {
@@ -984,10 +1149,10 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 			coming = coming || (mate && mate->team == self.team && mate->alive && !mate->vehicle);
 		}
 		const int free = static_cast<int>(std::count(occupants.begin(), occupants.end(), -1)) + static_cast<int>(seats.size() - std::min(seats.size(), occupants.size()));
-		const bool go = riders > 0 && (free == 0 || m_time >= bot.titanWaitUntil + (coming ? 20 : 0));
+		const bool go = free == 0 || m_time >= bot.titanWaitUntil + (coming ? 20 : 0);
 		const GameWorld::SiloInfo* silo = go ? nearestSilo() : nullptr;
 		if (!silo) {
-			if (onDeck) {
+			if (onDeck && !go) {
 				bot.titanFlyMode = 1;
 			} else {
 				bot.titanSortie = 2;
@@ -1000,8 +1165,9 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	}
 	if (bot.titanSortie == 1) {
 		const GameWorld::SiloInfo* silo = siloOf(bot.titanSortieSilo);
-		if (!silo && riders > 0 && (silo = nearestSilo())) {
+		if (!silo && (silo = nearestSilo())) {
 			bot.titanSortieSilo = silo->controlPoint;
+			bot.titanSortieUntil = 0;
 		}
 		if (!silo) {
 			bot.titanSortie = 2;
@@ -1024,27 +1190,56 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		}
 	}
 	if (bot.titanSortie == 2) {
-		const physics::Vec3 pad = m_world.titanToWorld(home->object, bot.titanPad);
-		const float d = horizontal(pad - self.position);
-		const float up = self.position.y - pad.y;
-		// Down anywhere on the deck (the hover drifts as it sinks) is home:
-		// that spot its pad from now on.
-		if ((d < 8 || onDeck) && up < 4 && physics::lengthSquared(relative) < 4) {
-			bot.titanPad = m_world.titanToLocal(home->object, self.position);
-			bot.titanSortie = 0;
-			bot.titanWaitUntil = m_time + 6 + 12 * random();
-			bot.titanFlyMode = 3;
-		} else {
-			// Down once over the pad, and on down while within 60 m of it (the hover drifts).
-			bot.titanFlyDown = d < 60 && (bot.titanFlyDown || d < 20);
-			bot.titanFlyTo = pad + physics::Vec3 {0, bot.titanFlyDown ? 1.5f : d > 150 ? 25.0f + 30 * self.team : 45.0f, 0};
-			bot.titanFlyMode = d > 150 ? 4 : 2;
+		const GameWorld::SiloInfo* support = nullptr;
+		for (const auto& silo : silos) {
+			if (silo.controlPoint == bot.titanSupportSilo) {
+				support = &silo;
+			}
 		}
+		const bool next = bot.titanSupportUntil > 0 && m_time >= bot.titanSupportUntil;
+		if (!support || next) {
+			const int previous = bot.titanSupportSilo;
+			float best = kInfinity;
+			for (const auto& silo : silos) {
+				if (silos.size() > 1 && silo.controlPoint == previous) {
+					continue;
+				}
+				int assigned = 0;
+				for (const auto& [id, other] : m_bots) {
+					const auto* mate = id == self.id ? nullptr : playerOf(id);
+					assigned += mate && mate->alive && mate->driving && mate->team == self.team
+						&& other.titanSupportSilo == silo.controlPoint;
+				}
+				const float score = horizontal(silo.position - self.position)
+					+ 300.0f * assigned + (silo.team == self.team ? 200.0f : 0.0f);
+				if (score < best) {
+					best = score;
+					support = &silo;
+				}
+			}
+			if (!support) {
+				return false;
+			}
+			bot.titanSupportSilo = support->controlPoint;
+			bot.titanSupportUntil = 0;
+			++bot.titanSupportStep;
+		}
+		// Within the side guns' 220 m reach, with separate support stations.
+		const float angle = (self.id % 8 + bot.titanSupportStep) * 0.78539816f;
+		physics::Vec3 station = support->position + physics::Vec3 {150 * std::sin(angle), 0, 150 * std::cos(angle)};
+		const float clear = horizontal(self.position - home->position) < 200
+			? m_world.titanToWorld(home->object, {0, 40, 0}).y : 0;
+		station.y = std::max({clear, m_world.terrainHeight(station.x, station.z) + 30,
+			m_world.terrainHeight(support->position.x, support->position.z) + 60 + 10 * self.team});
+		if (bot.titanSupportUntil <= 0 && horizontal(station - self.position) < 40) {
+			bot.titanSupportUntil = m_time + 20;
+		}
+		bot.behaviour = "TitanSupport";
+		bot.titanFlyTo = station;
+		bot.titanFlyMode = 4;
+		return fly(bot, self, input, seconds);
 	}
-	if (static std::map<int, float> last; std::getenv("BF2142_BOT_STATS") && m_time - last[self.id] > 5 && (last[self.id] = m_time, true)) { // DIAG
-		std::fprintf(stderr, "sortie %d t %.0f state %d mode %d riders %ld at %.0f %.0f %.0f to %.0f %.0f %.0f\n", self.id, m_time, bot.titanSortie, bot.titanFlyMode,
-			static_cast<long>(riders), self.position.x, self.position.y, self.position.z, bot.titanFlyTo.x, bot.titanFlyTo.y, bot.titanFlyTo.z);
-	}
+	bot.behaviour = "TitanSortie";
 	return fly(bot, self, input, seconds);
 }
 
@@ -1102,7 +1297,7 @@ int BotManager::titanRole(const GameWorld::PlayerInfo& self)
 			};
 			give(2, defend, own->position);
 			give(1, board, enemy->position);
-			if (std::getenv("BF2142_BOT_STATS") && plan.roles != old) { // DIAG
+			if (m_stats && plan.roles != old) { // DIAG
 				std::fprintf(stderr, "titan plan t %.0f team %d: %d groups, %d enemies aboard, enemy shield %s:", m_time, self.team, count, boarders, down ? "down" : "up");
 				for (const auto& [key, role] : plan.roles) {
 					std::fprintf(stderr, " %d=%s", key, role == 1 ? "board" : "defend");
@@ -1135,15 +1330,34 @@ const GameWorld::VehicleInfo* BotManager::titanTransport(int team, const GameWor
 // Where a bot with a role spawns: a defender on its Titan; a boarder in a
 // spawn vehicle of the team within 200 m of the enemy's Titan (a transport
 // parked on its deck, an APC beside it), else on its own Titan while the
-// transport there has room. False: the SAI's choice stands.
+// transport there has room; any other while enemies are aboard its Titan
+// and it has fewer than two on foot there for each. False: the SAI's choice
+// stands.
 bool BotManager::titanRespawn(const GameWorld::PlayerInfo& self)
 {
 	const int role = titanRole(self);
 	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
 	const GameWorld::TitanInfo* own = titanOf(titans, self.team);
 	const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - self.team);
-	if (!role || !own || !enemy) {
+	if (!own || !enemy) {
 		return false;
+	}
+	if (!role) {
+		if (!m_settings.titanPlay()) {
+			return false;
+		}
+		// Enemies aboard: the rest come back to its Titan too, while it has
+		// fewer than two on foot aboard for each of them.
+		int boarders = 0, defenders = 0;
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			if (p.alive && !p.vehicle && aboard(*own, p.position)) {
+				boarders += p.team == enemy->team;
+				defenders += p.team == self.team;
+			}
+		}
+		if (!boarders || defenders >= 2 * boarders) {
+			return false;
+		}
 	}
 	if (role == 1) {
 		if (enemy->shield) {
@@ -1232,8 +1446,13 @@ const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Ve
 	constexpr float kGrid = 4;
 	constexpr int kHalf = 22; // 88 m
 	const std::pair<int, int> key {static_cast<int>(std::floor(from.x / kGrid)), static_cast<int>(std::floor(from.z / kGrid))};
+	// The search walks the terrain: nothing for a vehicle parked above it (a Titan's deck, a roof).
+	if (static const std::vector<physics::Vec3> none; from.y - m_world.terrainHeight(from.x, from.z) > 5) {
+		return none;
+	}
 	const auto known = m_meshWays.find(key);
-	if (known != m_meshWays.end() && (!known->second.second.empty() || m_time - known->second.first < 10)) {
+	// (A search that found no way costs up to 50 ms: not made again for a minute.)
+	if (known != m_meshWays.end() && (!known->second.second.empty() || m_time - known->second.first < 60)) {
 		return known->second.second;
 	}
 	m_meshWays[key].first = m_time;
@@ -1293,7 +1512,7 @@ const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Ve
 	for (int c = goal; c >= 0 && c != start; c = cameFrom[static_cast<size_t>(c)]) {
 		way.insert(way.begin(), at(c));
 	}
-	if (std::getenv("BF2142_BOT_STATS")) { // DIAG
+	if (m_stats) { // DIAG
 		std::fprintf(stderr, "mesh way from %.0f %.0f: %zu points%s", from.x, from.z, way.size(), way.empty() ? "\n" : ", to ");
 		if (!way.empty()) std::fprintf(stderr, "%.0f %.0f\n", way.back().x, way.back().z);
 	}
@@ -1388,7 +1607,7 @@ std::string BotManager::titanGridStats()
 		const std::string name = o && o->objectTemplate() ? o->objectTemplate()->name() : "?";
 		{
 			char line[200];
-			std::snprintf(line, sizeof line, "  vehicle %s team %d at %.0f %.0f %.0f free %d driverFree %d working %d\n", name.c_str(), o->team(), v.position.x, v.position.y, v.position.z,
+			std::snprintf(line, sizeof line, "  vehicle %s team %d at %.0f %.0f %.0f free %d driverFree %d working %d\n", name.c_str(), o ? o->team() : 0, v.position.x, v.position.y, v.position.z,
 				v.freeSeats, v.driverFree ? 1 : 0, v.working ? 1 : 0);
 			out += line;
 		}
