@@ -291,41 +291,29 @@ SpotChoice spotChoice(const host::HudWorld& world, game::GameWorld& round, int e
 	return out;
 }
 
-int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3], float reach)
+int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3], float reach,
+	float cone)
 {
 	game::GameWorld::PlayerInfo me;
 	if (!world.playerInfo(viewer, me) || !me.alive) {
 		return -1;
 	}
-	const physics::Vec3 from {eye[0], eye[1], eye[2]};
-	const physics::Vec3 along {dir[0], dir[1], dir[2]};
-	int found = -1;
-	float best = reach;
+	std::vector<game::GameWorld::ViewCandidate> candidates;
 	for (const game::GameWorld::PlayerInfo& p : world.playerList()) {
-		if (!p.alive || p.id == me.id || p.team == me.team) {
+		if (!p.alive || p.id == me.id) {
 			continue;
 		}
 		// The body's centre (the feet + 1 m, as PlayerInfo has them).
-		physics::Vec3 centre = p.position + physics::Vec3 {0, 1.0f, 0};
-		float radius = 0.6f;
+		game::GameWorld::ViewCandidate c {p.id, p.team, p.position + physics::Vec3 {0, 1.0f, 0}, 0};
 		if (p.vehicle) {
 			if (const world::Object* v = round.objects().find(p.vehicle)) {
-				centre = {v->position().x, v->position().y, v->position().z};
-				radius = 2.5f;
+				c.position = {v->position().x, v->position().y, v->position().z};
+				c.vehicle = p.vehicle;
 			}
 		}
-		const physics::Vec3 d = centre - from;
-		const float t = physics::dot(d, along);
-		if (t <= 0 || t >= best || physics::lengthSquared(d) - t * t > radius * radius) {
-			continue;
-		}
-		if (!round.lineOfSight(from, centre, p.vehicle ? p.vehicle : me.vehicle)) {
-			continue;
-		}
-		best = t;
-		found = p.id;
+		candidates.push_back(c);
 	}
-	return found;
+	return round.viewTarget({eye[0], eye[1], eye[2]}, {dir[0], dir[1], dir[2]}, reach, me.team, me.vehicle, candidates, nullptr, cone);
 }
 
 } // namespace dice::hfe::menu

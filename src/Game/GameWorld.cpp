@@ -6907,7 +6907,8 @@ bool GameWorld::groundMaterialAlong(const physics::Vec3& from, const physics::Ve
 	return false;
 }
 
-bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const
+bool GameWorld::objectRayHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
+	uint32_t& object) const
 {
 	float nearest = 2;
 	physics::CollisionWorld::Hit hit {};
@@ -6926,6 +6927,34 @@ bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uin
 			object = body.object;
 		}
 	}
+	fraction = nearest;
+	return nearest <= 1;
+}
+
+bool GameWorld::groundRayHit(const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
+{
+	if (m_ground.raycast) {
+		physics::Vec3 normal {}, point {};
+		return m_ground.raycast(from, to, fraction, point, normal);
+	}
+	if (m_ground.height) {
+		const float length = std::sqrt(physics::lengthSquared(to - from));
+		const int samples = std::max(2, static_cast<int>(length / 2));
+		for (int i = 1; i < samples; ++i) {
+			fraction = static_cast<float>(i) / samples;
+			const physics::Vec3 at = from + (to - from) * fraction;
+			if (at.y < m_ground.height(at.x, at.z)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const
+{
+	float nearest = 2;
+	objectRayHit(from, to, ignore, nearest, object);
 	if (m_ground.raycast) {
 		float fraction = 0;
 		physics::Vec3 normal {}, point {};

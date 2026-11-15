@@ -4742,6 +4742,7 @@ int runGame(Options& options, Session& session)
 		}
 		// The bots see as far as the level's fog lets them (AIDLL 0x10056b20).
 		botSettings.levelFog = lights.fogStartEndAndBase;
+		round.viewDistance = [&botSettings] { return botSettings.levelViewDistance; }; // the spot pick's reach
 		game::BotManager bots(round, botSettings);
 		bots.attach(botSettings); // the scripted-bot commands (ai.botMoveTo...)
 		bots.setServerMaxPlayers(options.maxPlayers); // AIMain's kick and fill (sv.maxPlayers when hosting)
@@ -5376,7 +5377,7 @@ int runGame(Options& options, Session& session)
 					const host::LocalHudWorld local(round, gameLogic);
 					const host::HudWorld& world = g_remoteHud ? static_cast<const host::HudWorld&>(*g_remoteHud) : local;
 					choice = dice::hfe::menu::spotChoice(world, round,
-						dice::hfe::menu::crosshairEnemy(world, round, hudLocal(), eye, dir, g_overheadHeight + 100));
+						dice::hfe::menu::crosshairEnemy(world, round, hudLocal(), eye, dir, g_overheadHeight + 100, 1)); // not traced: the ray alone
 				} else if (net::GameClient* server = joinedServer(); server && g_remoteHud) {
 					game::GameWorld::PlayerInfo me;
 					if (g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me) && me.alive) {
@@ -5384,11 +5385,11 @@ int runGame(Options& options, Session& session)
 						const float eye[3] = {me.position.x, me.position.y + 1.6f, me.position.z};
 						const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 						choice = dice::hfe::menu::spotChoice(*g_remoteHud, round,
-							dice::hfe::menu::crosshairEnemy(*g_remoteHud, round, me.id, eye, dir));
+							dice::hfe::menu::crosshairEnemy(*g_remoteHud, round, me.id, eye, dir, round.spotReach()));
 					}
 				} else if (round.localPlayer() >= 0) {
 					const host::LocalHudWorld local(round, gameLogic);
-					choice = dice::hfe::menu::spotChoice(local, round, round.crosshairTarget(round.localPlayer()));
+					choice = dice::hfe::menu::spotChoice(local, round, round.crosshairTarget(round.localPlayer(), round.spotReach()));
 				}
 				if (!spotRefused()) {
 					net::SpottedInfo spot;

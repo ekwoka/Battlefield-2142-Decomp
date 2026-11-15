@@ -246,12 +246,10 @@ SpotChoice spotChoice(const host::HudWorld& world, game::GameWorld& round, int e
 // The radio.spottedMessage of a template (its quotes taken off), "" without one.
 std::string spottedMessage(const world::ObjectTemplate* t);
 // The crosshair's enemy of `viewer` as a joined client sees it (GameWorld::
-// crosshairTarget's test over the HudWorld's players: a soldier as a 0.6 m
-// sphere about its middle, a vehicle as a 2.5 m one about its origin, the
-// nearest along the ray from `eye` along the unit `dir` within `reach`
-// with nothing in between); -1 for none.
+// viewTarget over the HudWorld's players from `eye` along the unit `dir`
+// within `reach`, `cone` its view cosine); -1 for none.
 int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3],
-	float reach = 300);
+	float reach = 500, float cone = 0.995f);
 
 // Where a joined game's left click goes (the HUD's input, 0x00754290: the
 // pointer's buttons for the HUD's own nodes while playing). With a

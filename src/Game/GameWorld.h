@@ -1795,11 +1795,38 @@ public:
 	};
 	std::vector<BattlefieldReport> takeBattlefieldReports() { return std::exchange(m_battlefieldReports, {}); }
 	// The HUD's crosshair object (the HUD manager's +0x1f0, filled by
-	// 0x0075be30 as a comm rose opens): what the player's view ray meets
-	// out to `reach` (HUD vt+0x18c with the player's slot 0x98(1)), when
-	// it is an enemy's soldier or the vehicle an enemy rides; the enemy
-	// player (-1 for none) and where the ray met it.
-	int crosshairTarget(int player, float reach = 300, physics::Vec3* point = nullptr) const;
+	// 0x0075be30 as a comm rose opens): what the player's view picks out to
+	// `reach` (HUD vt+0x18c, 0x0075bfe0, with the player's slot 0x98,
+	// 0x005916f0: GSViewDistance, spotReach), when it is an enemy's soldier
+	// or the vehicle an enemy rides; the enemy player (-1 for none) and
+	// where the pick met it. See viewTarget.
+	int crosshairTarget(int player, float reach = 500, physics::Vec3* point = nullptr) const;
+	// One object the view pick may choose (viewTarget): a soldier at its
+	// middle, or a crewed vehicle (`vehicle`, its root) at its origin.
+	// shortcut: players only; retail's object query also lets an empty
+	// vehicle in the cone hide what lies behind it.
+	struct ViewCandidate {
+		int player = -1;
+		int team = 0;
+		physics::Vec3 position {};
+		uint32_t vehicle = 0;
+	};
+	// The view pick (0x0075bfe0) from `eye` along the unit `dir`: the
+	// heightmap's ray sets the reach to 1.3 x its hit; the scene's ray out
+	// to that (slot 0x68: vehicles' collision meshes, static objects; a
+	// soldier as a 0.6 m sphere about its middle) shortens it to what it
+	// meets; then any candidate
+	// nearer than that within the rose's 0.995 cosine of the view (+0x200,
+	// 0x0075c833; slot 0x190, 0x00752960) and in sight takes it, the
+	// nearest last. The chosen candidate's player when of another team than
+	// `team` (0x0075be30's team test), else -1; an empty vehicle or a
+	// friend picked hides what lies behind it. `cone` 1: the ray alone.
+	int viewTarget(const physics::Vec3& eye, const physics::Vec3& dir, float reach, int team, uint32_t ownVehicle,
+		const std::vector<ViewCandidate>& candidates, physics::Vec3* point = nullptr, float cone = 0.995f) const;
+	// GameLogic.maximumLevelViewDistance as GSViewDistance holds it (0x004cc870:
+	// rounded, 20..3000); null: 500, the unset value 0x005916f0 reads.
+	std::function<float()> viewDistance;
+	float spotReach() const;
 	// Radio.sendSpottedMessage (0x007c8160): the crosshair object reported
 	// through the game's slot 0xd4, the reports' path (event 0x41: the
 	// squad's minimap knows it, reportBattlefieldObjects). The enemy
@@ -3745,6 +3772,12 @@ private:
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const;
 	// firstHit passing through `ignore`'s body.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const;
+	// firstHit's parts: the scene's objects alone (static objects' and
+	// bodies' projectile meshes, `ignore`'s passed through), and the
+	// terrain alone; the fraction along the segment of the first.
+	bool objectRayHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
+		uint32_t& object) const;
+	bool groundRayHit(const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
 	// `pending`: the damage (after the material cell) this blast has dealt
 	// objects so far (0x005a8900's list at 0x00a6aadc / 0x00a6abcc).
 	float blastShare(const physics::Vec3& at, const Player& target, float beside,

@@ -2004,7 +2004,9 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	round.playerInfo(c, mate);
 	const float yaw = me.yaw * 3.14159265f / 180.0f;
 	const dice::hfe::physics::Vec3 ahead {std::sin(yaw), 0, std::cos(yaw)};
-	round.setSoldierPosition(mate.soldier, me.position + ahead * 8.0f + dice::hfe::physics::Vec3 {3, 0, 0});
+	// The mate beside the line (a friend in it would be picked: SpotPickCone).
+	const dice::hfe::physics::Vec3 side {std::cos(yaw), 0, -std::sin(yaw)};
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 8.0f + side * 3.0f);
 	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f);
 	round.tick(1.0f / 30);
 	CHECK(round.crosshairTarget(c) == -1 || round.crosshairTarget(c) == b);
@@ -2014,6 +2016,103 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	CHECK(!round.squadKnows(1, 0, b));
 	CHECK(round.spotCrosshair(a) == b);
 	CHECK(round.squadKnows(1, 0, b));
+}
+
+// The view pick's cone (0x0075bfe0 with the rose's 0.995 cosine, +0x200):
+// an enemy 3.8 deg off the view, well clear of the ray, is picked; a nearer
+// friend in the cone is picked instead and hides him (0x0075be30's team
+// test then reports nobody).
+TEST(GameWorld_SpotPickCone)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	dice::hfe::game::GameWorld::PlayerInfo me, enemy, mate;
+	round.playerInfo(a, me);
+	round.playerInfo(b, enemy);
+	round.playerInfo(c, mate);
+	const float yaw = me.yaw * 3.14159265f / 180.0f;
+	const dice::hfe::physics::Vec3 ahead {std::sin(yaw), 0, std::cos(yaw)};
+	const dice::hfe::physics::Vec3 side {std::cos(yaw), 0, -std::sin(yaw)};
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f + side * 2.0f);
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 15.0f + side * 20.0f);
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(a) == b);
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f + side * 4.0f); // 7.6 deg
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(a) == -1);
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f + side * 2.0f);
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 15.0f + side * 1.0f);
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(a) == -1);
+	// The reach is GSViewDistance as held (rounded, 20..3000; 500 unset).
+	CHECK(round.spotReach() == 500);
+	round.viewDistance = [] { return 812.4f; };
+	CHECK(round.spotReach() == 812);
+	round.viewDistance = [] { return 5.0f; };
+	CHECK(round.spotReach() == 20);
+}
+
+// The view pick's ray meets a crewed walker's collision mesh anywhere, not
+// only near its origin (0x0075bfe0, the scene's ray, then 0x0075be30's crew
+// of the object met): aimed at a part of the mesh well off the origin and
+// outside the cone, the walker's crew is picked. Needs $BF2142_GAME_DIR.
+TEST(GameWorld_SpotPickWalkerMesh)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	namespace game = dice::hfe::game;
+	namespace physics = dice::hfe::physics;
+	HostGarage garage(gameDir, "us_heavy_mech", {0, 0, 0});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	game::GameWorld& round = *garage.round;
+	round.tick(1 / 30.0f);
+	const dice::hfe::world::Vec3& o = garage.objects.find(garage.vehicle)->position();
+	const physics::Vec3 origin {o.x, o.y, o.z};
+	const physics::Vec3 eye = origin + physics::Vec3 {0, 0, 8};
+	physics::Vec3 dir {};
+	bool found = false;
+	// Directions from 8 m that meet the walker's mesh more than 2.5 m from
+	// its origin (the old 2.5 m ball) and outside the 0.995 cone.
+	for (int i = 0; i < 61 * 61 && !found; ++i) {
+		const float yaw = (i % 61 - 30) * 3.14159265f / 180.0f, pitch = (i / 61 - 30) * 3.14159265f / 180.0f;
+		const physics::Vec3 d {std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+		const physics::Vec3 off = origin - eye;
+		const float along = physics::dot(off, d);
+		float fraction = 0;
+		uint32_t object = 0;
+		if (physics::lengthSquared(off) - along * along > 2.5f * 2.5f
+			&& along < 0.99f * std::sqrt(physics::lengthSquared(off))
+			&& round.segmentHit(eye, eye + d * 100.0f, 0, fraction, object) && object == garage.vehicle) {
+			dir = d;
+			found = true;
+		}
+	}
+	CHECK(found);
+	const std::vector<game::GameWorld::ViewCandidate> crew {{7, 2, origin, garage.vehicle}};
+	physics::Vec3 at;
+	CHECK(round.viewTarget(eye, dir, 500, 1, 0, crew, &at) == 7);
+	CHECK(round.viewTarget(eye, dir, 500, 2, 0, crew) == -1); // his own team
+	CHECK(round.viewTarget(eye, dir, 500, 1, 0, {}) == -1);   // empty
+	// Aimed low from 40 m: the ground is met about 35 m out, short of the
+	// walker; the heightmap's ray only sets the reach to 1.3 x that, so the
+	// walker 5.5 deg off the view is still picked.
+	const physics::Vec3 low = origin + physics::Vec3 {0, 0, 40};
+	const float down = 5.5f * 3.14159265f / 180.0f;
+	const physics::Vec3 lowDir {0, -std::sin(down), -std::cos(down)};
+	float ground = 0;
+	uint32_t met = 1;
+	CHECK(round.segmentHit(low, low + lowDir * 500.0f, garage.vehicle, ground, met) && met == 0 && ground * 500 < 38);
+	CHECK(round.viewTarget(low, lowDir, 500, 1, 0, crew) == 7);
 }
 
 // The minimaps' spotted lists (Bf2MenuMapNode +0xa94): a radio spot lists
@@ -2310,9 +2409,9 @@ TEST(GameWorld_SpottedMessageVoice)
 	round.playerInfo(b, enemy);
 	const float sky[3] = {enemy.position.x, enemy.position.y + 260, enemy.position.z};
 	const float down[3] = {0, -1, 0};
-	CHECK(menu::crosshairEnemy(local, round, a, sky, down, 360) == b);
+	CHECK(menu::crosshairEnemy(local, round, a, sky, down, 360, 1) == b);
 	const float empty[3] = {enemy.position.x + 20, enemy.position.y + 260, enemy.position.z};
-	CHECK(menu::crosshairEnemy(local, round, a, empty, down, 360) == -1);
+	CHECK(menu::crosshairEnemy(local, round, a, empty, down, 360, 1) == -1);
 }
 
 // NetworkableInfo.* (Objects/Common/Networkables.con): c_NIGhostAlways is
