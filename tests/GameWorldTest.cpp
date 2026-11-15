@@ -6263,14 +6263,17 @@ TEST(GameWorld_WaterDamageDelays)
 	};
 	range.world->setWaterLevel(range.objects.find(car)->position().y + 2);
 	run(0.4f);
-	CHECK(range.world->hitPoints(car) == 100);
+	// Going under is also a collision with the water (0x006b98a5); without
+	// a material table its damageMod is 1, a fraction of a point here.
+	const float hp = range.world->hitPoints(car);
+	CHECK(hp > 99 && hp <= 100);
 	run(0.2f); // the deep timer's 0.5 s
-	CHECK(range.world->hitPoints(car) == 80);
+	CHECK(range.world->hitPoints(car) == hp - 20);
 	run(2.3f); // 2.9 s: deep at 1.5 and 2.5
-	CHECK(range.world->hitPoints(car) == 40);
+	CHECK(range.world->hitPoints(car) == hp - 60);
 	run(0.2f); // the water timer's 3 s
 	std::fprintf(stderr, "  after 3.1 s: %.0f\n", range.world->hitPoints(car));
-	CHECK(range.world->hitPoints(car) == 35);
+	CHECK(range.world->hitPoints(car) == hp - 65);
 }
 
 // The water levels are signed offsets added to the position (0x006527a3:

@@ -8441,3 +8441,43 @@ TEST(Vehicles_HelicopterEngineSoundFollowsTheCollective)
 		CHECK(std::fabs(up - down) > 0.1f); // the gunships' main engine (negative axis, canReverse 0) opens on throttle down
 	}
 }
+// Going under the water (0x006b98a5) is a collision with no other object
+// on the terrain material 1 (Water_deep): the parachute lands on the
+// surface (0x005cf750) and the rider swims there, not 30 m down on the
+// seabed.
+TEST(Vehicles_ParachuteLandsOnTheWater)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		if (!g.loaded) {
+			continue;
+		}
+		g.start("supply_crate", {50, -29.5f, 50}, 0.5f, -30, 0); // seabed -30, water 0
+		CHECK(g.world->spawnPlayer(2));
+		game::GameWorld::PlayerInfo me;
+		g.world->playerInfo(g.world->localPlayer(), me);
+		g.world->setSoldierPosition(me.soldier, {0, 60, 0});
+		game::SoldierInput nine;
+		nine.selectItem = 9;
+		g.drive({}, 1.5f);
+		g.drive(nine, 1 / 30.0f);
+		CHECK(g.world->parachutes().size() == 1);
+		float lowest = 1e9f;
+		for (int i = 0; i < 40 * 30 && !g.world->parachutes().empty(); ++i) {
+			if (const world::Object* chute = g.objects.find(g.world->parachutes()[0].object)) {
+				lowest = std::min(lowest, chute->position().y);
+			}
+			g.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  %s: parachute down to %.1f m\n", mod, lowest);
+		CHECK(g.world->parachutes().empty());
+		CHECK(lowest > -3);
+		g.run(1);
+		g.world->playerInfo(g.world->localPlayer(), me);
+		CHECK(me.alive && me.vehicle == 0);
+		CHECK(g.position(me.soldier).y > -4);
+	}
+}

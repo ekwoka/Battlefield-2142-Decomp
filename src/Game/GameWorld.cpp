@@ -38,6 +38,7 @@ constexpr float kDetonationTriggerFrequency = 0.25f;
 // about the physics origin, a metre over the feet.
 constexpr float kSoldierBoxWidth = 0.8f;
 constexpr float kSoldierBoxHeight = 1.8f;
+constexpr uint32_t kWaterDeepMaterial = 1; // the water's terrain material (0x006b98d7's push 1)
 
 float number(const world::ObjectTemplate& t, const char* name, float fallback)
 {
@@ -15138,8 +15139,18 @@ bool GameWorld::stepBody(Body& b, float seconds)
 		// Buoyancy, after the ground's points (0x006b9260).
 		if (m_ground.waterLevel) {
 			const float level = m_ground.waterLevel(body.position.x, body.position.z);
+			bool entered = false;
 			b.submerged = physics::applyBuoyancy(body, b.boxMin, b.boxMax, b.points, level, b.floaterMod,
-				physics::tuning::kGravity, b.submerged, true);
+				physics::tuning::kGravity, b.submerged, true, &entered);
+			// Going under (0x006b98a5): the collision event with no other,
+			// straight up, at the surface over it, the first point's material
+			// against the terrain material 1 (Water_deep, hasWaterPhysics):
+			// a parachute or pod lands on the water (0x005cf750).
+			if (entered) {
+				const uint32_t own = b.pointMaterials.empty() ? 0 : b.pointMaterials[0];
+				collisionEvent(b.object, 0, body.velocity, {0, 1, 0}, {body.position.x, level, body.position.z}, own,
+					kWaterDeepMaterial);
+			}
 		}
 	}
 	return true;
