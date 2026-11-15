@@ -1024,8 +1024,8 @@ const GameWorld::VehicleInfo* BotManager::titanAircraft(const GameWorld::PlayerI
 		if (claims >= wanted) {
 			continue;
 		}
-		if (me.titanCrew == v.object) {
-			return &v;
+		if (me.titanCrew == v.object && rank < 3) {
+			return &v; // a rider's claim gives way to a gunship gunner's seat
 		}
 		if (rank < bestRank) {
 			bestRank = rank;
@@ -1110,6 +1110,17 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		};
 		return armed(seats[seat]) || std::any_of(seats[seat].weapons.begin(), seats[seat].weapons.end(), armed);
 	};
+	// Same-team deck aircraft already flying to (or holding over) a silo: each
+	// counts 300 m against it, so the team's aircraft spread over the silos.
+	const auto siloTaken = [&](int point) {
+		int taken = 0;
+		for (const auto& [id, other] : m_bots) {
+			const GameWorld::PlayerInfo* mate = id == self.id ? nullptr : playerOf(id);
+			taken += mate && mate->alive && mate->driving && mate->team == self.team
+				&& ((other.titanSortie == 1 && other.titanSortieSilo == point) || (other.titanSortie == 2 && other.titanSupportSilo == point));
+		}
+		return taken;
+	};
 	if (!podSeat(seats[0])) {
 		// A gunship from the deck: off it and 200 m clear of the Titan (high,
 		// toward the nearest silo the team doesn't hold, else ahead of the
@@ -1120,12 +1131,33 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		if (!bot.titanSortie) {
 			return false;
 		}
-		const GameWorld::SiloInfo* best = nullptr;
-		for (const GameWorld::SiloInfo& silo : silos) {
-			if (silo.team != self.team && (!best || horizontal(silo.position - self.position) < horizontal(best->position - self.position))) {
-				best = &silo;
+		// On the deck it waits up to 20 s for a gunner walking to it (3 s for one to set off).
+		if (aboard(*home, self.position) && !bot.heli.airborne) {
+			if (bot.titanWaitFor != self.vehicle) {
+				bot.titanWaitFor = self.vehicle;
+				bot.titanWaitUntil = m_time + 20;
+			}
+			bool coming = m_time < bot.titanWaitUntil - 17;
+			for (const auto& [id, other] : m_bots) {
+				const GameWorld::PlayerInfo* mate = id == self.id || other.titanCrew != self.vehicle ? nullptr : playerOf(id);
+				coming = coming || (mate && mate->team == self.team && mate->alive && !mate->vehicle);
+			}
+			if (coming && m_time < bot.titanWaitUntil && occupants.size() > 1 && occupants[1] < 0) {
+				bot.behaviour = "TitanTakeoff";
+				bot.titanFlyMode = 1;
+				return fly(bot, self, input, seconds);
 			}
 		}
+		const GameWorld::SiloInfo* best = nullptr;
+		float bestScore = kInfinity;
+		for (const GameWorld::SiloInfo& silo : silos) {
+			const float score = horizontal(silo.position - self.position) + 300.0f * siloTaken(silo.controlPoint);
+			if (silo.team != self.team && score < bestScore) {
+				best = &silo;
+				bestScore = score;
+			}
+		}
+		bot.titanSortieSilo = best ? best->controlPoint : -1;
 		const physics::Vec3 to = best ? best->position : m_world.titanToWorld(home->object, {0, 0, 400});
 		bot.behaviour = "TitanTakeoff";
 		bot.titanFlyTo = {to.x, std::max(m_world.terrainHeight(to.x, to.z) + 70, m_world.titanToWorld(home->object, {0, 40, 0}).y), to.z};
@@ -1202,9 +1234,12 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	};
 	const auto nearestSilo = [&]() -> const GameWorld::SiloInfo* {
 		const GameWorld::SiloInfo* best = nullptr;
+		float bestScore = kInfinity;
 		for (const GameWorld::SiloInfo& silo : silos) {
-			if (silo.team != self.team && (!best || horizontal(silo.position - self.position) < horizontal(best->position - self.position))) {
+			const float score = horizontal(silo.position - self.position) + 300.0f * siloTaken(silo.controlPoint);
+			if (silo.team != self.team && score < bestScore) {
 				best = &silo;
+				bestScore = score;
 			}
 		}
 		return best;

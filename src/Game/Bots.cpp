@@ -3294,7 +3294,9 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 			float bestScore = 0;
 			for (size_t i = 0; i < seats[0].weapons.size(); ++i) {
 				const GameWorld::SeatWeapon& w = seats[0].weapons[i];
-				if (w.weapon.empty()) {
+				// Only the Armament's AI weapons (0x10031d80 skips a firearm
+				// without a weaponTemplate): ads_air would score as a rifle.
+				if (w.weapon.empty() || (!m_settings.weapons.empty() && !m_settings.weapons.count(lower(w.aiTemplate)))) {
 					continue;
 				}
 				const WeaponAi ai = weaponAi(w.weapon);
@@ -3334,9 +3336,12 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		} else {
 			const float length = std::sqrt(physics::lengthSquared(to));
 			const physics::Vec3 dir = length > 0.01f ? to * (1 / length) : vehicle->forward;
+			// The sight ray past the target's own vehicle too (as the bots' sight): a
+			// seated target is inside its hull. See-through faces still block, as before.
+			bool seenThrough = false;
 			if (dist >= 20 && dist <= maxRange && physics::dot(dir, vehicle->forward) > 0.5f
 				&& m_world.lineOfSight(at + vehicle->forward * 4.0f, target.position + physics::Vec3 {0, 1, 0},
-					vehicle->object)) {
+					vehicle->object, seenThrough, target.vehicle) && !seenThrough) {
 				// HeliAimAt's aim (0x100dcf10): the lead from the gun (the
 				// hull's frame) for the round, the hull's motion inherited;
 				// an indirect weapon's with precision 0.75, no inherited
