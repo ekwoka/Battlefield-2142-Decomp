@@ -7256,6 +7256,52 @@ TEST(Vehicles_HeatSeekersThrustToTheirTargetsSpeed)
 // alt-fire. Locked from the seat on a gunship 150 m up the sight line, the
 // missile leaves with that target and its motor takes it to the target's
 // speed x 1.1.
+// target.useCameraDirectionToTarget aims the lock cone along the seat's
+// Camera object (retail 0x005e1b30 reads the control object's camera),
+// which on the static AA rides the turret: turned and pitched away from
+// where the gunner sat down, it still locks what its sight holds.
+TEST(Vehicles_StaticAALocksAlongTheTurnedTurretCamera)
+{
+	if (!gameDir()) return;
+	constexpr float dt = 1 / 30.0f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (float heading : {90.0f, -150.0f}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find("static_aa") && g.templates.find("as_ag"));
+			if (!g.loaded || !g.templates.find("static_aa") || !g.templates.find("as_ag")) continue;
+			if (world::ObjectTemplate* heat = g.templates.find("HeatObject")) heat->settings()["disableWhenEmptyVehicle"] = "0";
+			const uint32_t aa = g.start("static_aa", {0, 2, 8}, 0);
+			for (int i = 0; i < 30; ++i) { g.world->setPlayerInput({}); g.world->tick(dt); }
+			g.animate();
+			CHECK(g.enter(aa));
+			PlayerCamera camera(*g.world, *g.systems, nullptr);
+			game::SoldierInput aim;
+			aim.turn = heading > 0 ? 5.0f : -5.0f; // full yaw speed (input / 5)
+			aim.aimPitch = 45;
+			for (int i = 0; i < std::abs(heading) / 3; ++i) { g.world->setPlayerInput(aim); g.world->tick(dt); camera.tick(dt); }
+			aim.turn = 0;
+			for (int i = 0; i < 30; ++i) { g.world->setPlayerInput(aim); g.world->tick(dt); camera.tick(dt); }
+			PlayerCamera::View sight;
+			CHECK(camera.view(sight, 16.0f / 9.0f));
+			const physics::Vec3 along {std::sin(sight.yaw) * std::cos(sight.pitch), std::sin(sight.pitch), std::cos(sight.yaw) * std::cos(sight.pitch)};
+			const physics::Vec3 eye {sight.position[0], sight.position[1], sight.position[2]};
+			world::Object* target = g.objects.create(g.templates.find("as_ag"), {eye.x + 150 * along.x, eye.y + 150 * along.y, eye.z + 150 * along.z});
+			target->setTeam(1);
+			const uint32_t jet = target->id();
+			for (int i = 0; i < 40; ++i) {
+				g.world->setBodyVelocity(jet, {});
+				g.world->setPlayerInput(aim);
+				g.world->tick(dt);
+				camera.tick(dt);
+			}
+			const auto lock = g.world->weaponLock(g.world->localPlayer());
+			std::fprintf(stderr, "  %s static AA turned %.0f: sight %.1f/%.1f, lock state %d target %u (jet %u)\n", mod, heading,
+				sight.yaw * 180 / 3.14159265f, sight.pitch * 180 / 3.14159265f, lock.state, lock.target, jet);
+			CHECK(lock.state == 2 && lock.target == jet);
+		}
+	}
+}
+
 TEST(Vehicles_AltFireLauncherLocksAndItsMissileChases)
 {
 	if (!gameDir()) return;

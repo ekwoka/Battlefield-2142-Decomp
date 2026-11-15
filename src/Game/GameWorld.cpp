@@ -6263,8 +6263,16 @@ void GameWorld::stepWeaponLock(Player& player, float seconds)
 	const float y = aimYaw * 3.14159265f / 180.0f, p = aimPitch * 3.14159265f / 180.0f;
 	physics::Vec3 aim {std::sin(y) * std::cos(p), std::sin(p), std::cos(y) * std::cos(p)};
 	if (player.vehicle) {
+		physics::Vec3 cameraAt;
+		physics::Mat3 cameraTurn;
 		if (!camera) {
 			aim = frame.transform(aim);
+		} else if (Body* body = findBody(player.vehicle); body
+				   && seatCameraFrame(*body, player.seat, std::max(integer(*weapon, "zoom.startCameraId", 0), 0), cameraAt, cameraTurn)) {
+			// In a seat the camera is the seat's Camera object (riding the
+			// static AA's turret; the gunship TV missile's camera 11), not
+			// the seated soldier's own look.
+			aim = cameraTurn.rows[2] * (1 / std::sqrt(physics::lengthSquared(cameraTurn.rows[2])));
 		}
 		if (const Body* body = findBody(player.vehicle)) {
 			from = from + aim * (body->objectRadius + 0.5f); // out of its own hull
