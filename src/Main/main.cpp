@@ -4839,6 +4839,7 @@ int runGame(Options& options, Session& session)
 		bool commanderKeyWas = false; // Caps Lock as of the last input
 		std::optional<std::pair<float, float>> mapMenuPoint;
 		std::function<bool(float, float)> placeAt;
+		std::function<bool(float, float)> placeAtWorld; // the same, at a world x/z (the comm rose's point)
 		std::optional<Ability> armedTool;
 		std::optional<game::GameWorld::OrderType> armedOrder;
 		const auto myTeam = [&] {
@@ -5914,9 +5915,9 @@ int runGame(Options& options, Session& session)
 		// (+0x28c), through sendOrder's handler.
 		bindMethod(console, "SquadLeader.issueSquadRequest", ConsoleAccess::Anyone, [&] {
 			dice::hfe::menu::issueSquadRequest(armedOrder.has_value(), rosePoint, [&](float x, float z) {
-				if (placeAt) {
+				if (placeAtWorld) {
 					leaderOrder = true;
-					placeAt(x, z);
+					placeAtWorld(x, z);
 				}
 			});
 		});
@@ -6001,6 +6002,12 @@ int runGame(Options& options, Session& session)
 				return true;
 			}
 			if ((!armedTool && !armedOrder) || !hudManager.mapWorldAt(x, y, worldX, worldZ)) {
+				return false;
+			}
+			return placeAtWorld(worldX, worldZ);
+		};
+		placeAtWorld = [&](float worldX, float worldZ) {
+			if (!armedTool && !armedOrder) {
 				return false;
 			}
 			if (armedTool) {
