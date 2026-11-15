@@ -286,3 +286,41 @@ TEST(SoundEngine_StaticLoopTracksActualPitchedPlayback)
 	engine->shutdown();
 	snd::shutdownSoundEngine();
 }
+
+// stopType 2 (the walkers' AA guns, loopCount 0): the release cuts to the
+// end block at once, a decaying echo (the PAC gun's 0.74 s, the US gun's
+// 1.67 s), not the loop block again first. A looping OpenAL source reports
+// no buffer processed, so the loop block was never unqueued and the gun
+// fired another whole loop after the trigger was let go.
+TEST(SoundEngine_StopType2CutsToTheEndBlock)
+{
+	if (!testDir()) return;
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	snd::ISoundEngine* engine = snd::getSoundEngine();
+	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+	struct Gun { const char* file; float tail; };
+	for (const Gun& gun : {Gun {"Weapons/miniguns/MiniGuns_fire_1p_HiTech_short_decay.wav", 0.74f},
+			 Gun {"Weapons/miniguns/AA_Gun_Rapid_fire_1p.wav", 1.67f}}) {
+		snd::ISoundTemplate* templ = engine->createTemplate();
+		templ->setSoundFilename(path(gun.file).c_str());
+		templ->setIs3dSound(false);
+		templ->setLoopCount(0);
+		templ->setStopType(2);
+		snd::ISound* sound = templ->createSound();
+		engine->reloadSoundFiles();
+		const auto pump = [&] { engine->update(1); std::this_thread::sleep_for(std::chrono::milliseconds(10)); };
+		sound->playLooped(0);
+		const auto start = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(300)) pump();
+		sound->stop();
+		const auto stopped = std::chrono::steady_clock::now();
+		while (sound->isPlaying() && std::chrono::steady_clock::now() - stopped < std::chrono::seconds(5)) pump();
+		const float played = std::chrono::duration<float>(std::chrono::steady_clock::now() - stopped).count();
+		std::fprintf(stderr, "  %s: %.2f s after the stop (end block %.2f s)\n", gun.file, played, gun.tail);
+		CHECK(played > gun.tail - 0.2f && played < gun.tail + 0.3f);
+		sound->release();
+		templ->release();
+	}
+	engine->shutdown();
+	snd::shutdownSoundEngine();
+}

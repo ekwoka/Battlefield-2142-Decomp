@@ -569,6 +569,9 @@ bool OpenALSample::stop(bool immediate)
 	case 2: // cut to the end block right away
 		if (file->loopEnd() != static_cast<int32_t>(file->frames())) {
 			al().alSourceStop(m_source);
+			// A looping source reports no buffer processed: unloop it first, or
+			// the loop block stays queued ahead of the end block and plays again.
+			al().alSourcei(m_source, AL_LOOPING, 0);
 			unqueueAll();
 			if (queueEndBlock()) {
 				al().alSourcePlay(m_source);
