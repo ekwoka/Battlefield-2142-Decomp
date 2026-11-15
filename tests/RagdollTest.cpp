@@ -1773,12 +1773,15 @@ TEST(Physics_ContactSound)
 	}
 	Game game(gameDir);
 	physics::MaterialManager materials;
-	for (uint32_t m = 0; m < 256; ++m) { // whatever its vertices' materials are, against the terrain's 0
-		materials.createCell(m, 0).soundTemplates = {"S_Crash"};
+	// A distinct terrain ID keeps the contact and collision cells separate,
+	// even when a vehicle vertex has material 0.
+	for (uint32_t m = 0; m < 256; ++m) {
+		materials.createCell(m, 1000).soundTemplates = {"S_Crash"};
+		materials.createCell(1000, m).soundTemplates = {"S_Collision"};
 	}
 	const uint32_t car = makeCar(game, {3, 3.0f, 0});
 	game.objects.find(car)->setRotation({0, 0, 180}); // landing on its roof, not its springs
-	game.start(&materials);
+	game.start(&materials, 1000);
 	int sounds = 0;
 	for (int i = 0; i < 30; ++i) {
 		game.world->tick(1 / 30.0f);
@@ -1788,6 +1791,85 @@ TEST(Physics_ContactSound)
 	}
 	std::fprintf(stderr, "  %d contact sounds in the first second\n", sounds);
 	CHECK(sounds >= 1 && sounds <= 2);
+}
+
+TEST(Physics_CollisionDamagePlaysMaterialImpactSound)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	struct Case {
+		bool immune;
+		bool visible;
+	};
+	const Case cases[] = {{false, true}, {true, true}, {false, false}};
+	for (const Case& test : cases) {
+		Game game(gameDir);
+		physics::MaterialManager materials;
+		for (uint32_t m = 0; m < 256; ++m) {
+			materials.createCell(m, 1000).soundTemplates = {"S_Contact"};
+			auto& cell = materials.createCell(1000, m);
+			cell.soundTemplates = {"S_Collision"};
+			if (test.immune) {
+				cell.damageMod = 0;
+			}
+		}
+		const uint32_t car = makeCar(game, {3, 3.0f, 0});
+		game.objects.find(car)->setRotation({0, 0, 180});
+		game.start(&materials, 1000);
+		game.world->setImpactView(test.visible ? physics::Vec3 {3, 0, 0} : physics::Vec3 {1000, 0, 0}, 5);
+		const float before = game.world->hitPoints(car);
+		int impactSounds = 0, impactSoundsOnDamageTick = 0, contactSounds = 0;
+		bool damaged = false;
+		for (int i = 0; i < 30; ++i) {
+			game.world->tick(1 / 30.0f);
+			int impactSoundsThisTick = 0;
+			for (const auto& sound : game.world->takeSounds()) {
+				impactSoundsThisTick += sound.sound == "S_Collision";
+				contactSounds += sound.sound == "S_Contact";
+			}
+			impactSounds += impactSoundsThisTick;
+			if (!damaged && game.world->hitPoints(car) < before) {
+				damaged = true;
+				impactSoundsOnDamageTick = impactSoundsThisTick;
+			}
+		}
+		CHECK((impactSounds >= 1) == test.visible);
+		CHECK(contactSounds >= 1);
+		CHECK(damaged != test.immune);
+		if (!test.immune && test.visible) CHECK(impactSoundsOnDamageTick >= 1);
+	}
+}
+
+TEST(Physics_CollisionDamageWallImpactSoundsWithZeroDamageModifier)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	const uint32_t car = makeCar(game, {3, 1.2f, 0});
+	auto* wall = addStatic(game, "wall", {wallLod(6)}, {3, -1, 25});
+	wall->settings()["mapMaterial.0"] = "249";
+	physics::MaterialManager materials;
+	for (uint32_t m = 0; m < 256; ++m) {
+		auto& cell = materials.createCell(249, m);
+		cell.soundTemplates = {"S_WallImpact"};
+		cell.damageMod = 0;
+	}
+	game.start(&materials, 1000);
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	game.run(3);
+	const float before = game.world->hitPoints(car);
+	(void)game.world->takeSounds();
+	CHECK(driveCar(game, car, 6) < 25);
+	int impacts = 0;
+	for (const auto& sound : game.world->takeSounds()) {
+		impacts += sound.sound == "S_WallImpact";
+	}
+	CHECK(impacts >= 1);
+	CHECK(game.world->hitPoints(car) == before);
 }
 
 // Buoyancy (0x006b9260): a box all under the water is lifted as gravity

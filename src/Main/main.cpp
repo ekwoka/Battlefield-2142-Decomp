@@ -9429,6 +9429,9 @@ int runGame(Options& options, Session& session)
 		// GSViewDistance (GameLogic.maximumLevelViewDistance, 0x004cc870):
 		// where the objects' distance fade cuts (render/DistanceFade.h).
 		sources.viewDistance = [&botSettings] { return botSettings.levelViewDistance; };
+		sources.impactView = [&round](const render::Vec3f& position, float farDistance) {
+			round.setImpactView({position.x, position.y, position.z}, farDistance);
+		};
 		// The seat camera's static interior sun (PlayerCamera::insideSun).
 		sources.insideSun = [&playerCamera](render::InsideSun& sun) {
 			PlayerCamera::InsideSun inside;

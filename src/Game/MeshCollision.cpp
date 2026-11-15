@@ -607,7 +607,7 @@ void GameWorld::partsMove(Body& mover, size_t index, float seconds)
 				const uint32_t terrain = m_ground.material ? m_ground.material(point.x, point.z) : 0;
 				const float speed = physics::lengthSquared(velocity);
 				if (self.handleCollisionSpeed < speed) {
-					collisionEvent(self.object, 0, velocity, normal, point - m.position, own, terrain);
+					collisionEvent(self.object, 0, velocity, normal, point, own, terrain);
 				}
 				if (self.handleCollisionSpeed * self.handleCollisionSpeed <= speed) {
 					recordContactEffect(self, own, terrain, velocity, point, normal);
@@ -1112,8 +1112,8 @@ physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const 
 		// response; ContactResponse::solve): a mover pushed out over 0.5 m
 		// three solves running hits with many times its speed.
 		const float stuck = a.body ? 1.0f + responseOf(a).stuckPush() : 1.0f;
-		collisionEvent(objectA, objectB, relative * stuck, normal, point - a.position, materialA, materialB);
-		collisionEvent(objectB, objectA, -relative * stuck, normal, point - b.position, materialB, materialA);
+		collisionEvent(objectA, objectB, relative * stuck, normal, point, materialA, materialB);
+		collisionEvent(objectB, objectA, -relative * stuck, normal, point, materialB, materialA);
 	}
 	// The contact effect (0x6bcab2), past both nodes' handleCollisionSpeed:
 	// in A's root's response if only A is mobile, B's if A is not, the
@@ -1353,7 +1353,6 @@ bool sameName(const std::string& a, const std::string& b)
 void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& velocity, const Vec3& normal,
 	const Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial)
 {
-	(void)point;
 	if (m_predicting) {
 		return;
 	}
@@ -1401,19 +1400,19 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	memory.push_back({other, ownMaterial, otherMaterial, 1.0f});
 	// The server's slot 0x104 (0x004ba3f0) with the velocity turned round.
 	if (other == 0) {
-		groundCollisionDamage(self, -velocity, normal, otherMaterial, ownMaterial);
+		groundCollisionDamage(self, -velocity, normal, point, otherMaterial, ownMaterial);
 	} else {
-		objectCollisionDamage(other, self, -velocity, normal, otherMaterial, ownMaterial);
+		objectCollisionDamage(other, self, -velocity, normal, point, otherMaterial, ownMaterial);
 	}
 }
 
 // 0x005a3db0: the ground (or nothing) hurting `victim`: the material
 // cell's damageMod (slot 0x64) x speed x speed x the angle (|cos| between
 // the motion and the normal, at least armor.angleMod); a soldier only
-// over 9.1 m/s, and then by the speed over 9.1. No one is credited. (The
-// impact's sound, effect and decal, 0x005a36d0, are left out.)
-void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, const Vec3& normal, uint32_t groundMaterial,
-	uint32_t victimMaterial)
+// over 9.1 m/s, and then by the speed over 9.1. No one is credited. The
+// impact's material effect and sound are index 0 of the ground/victim cell.
+void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, const Vec3& normal, const Vec3& point,
+	uint32_t groundMaterial, uint32_t victimMaterial)
 {
 	const world::Object* object = m_objects.find(victim);
 	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
@@ -1425,6 +1424,7 @@ void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, con
 	if (soldier && speed < kSoldierTerrainSpeed) {
 		return;
 	}
+	queueMaterialImpact(groundMaterial, victimMaterial, 0, point, normal);
 	const float n = lengthOf(normal);
 	float angle = n > 0 ? std::fabs(physics::dot(velocity, normal) / (speed * n)) : 1.0f;
 	angle = std::max(angle, number(*t, "armor.angleMod", 0)); // armor template +0xf0
@@ -1441,7 +1441,7 @@ void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, con
 // armour's +0xf4, 1, which nothing sets), credited to the attacker's
 // driver (0x005a30b0).
 void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const Vec3& velocity, const Vec3& normal,
-	uint32_t attackerMaterial, uint32_t victimMaterial)
+	const Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial)
 {
 	if (soldierPlayer(attacker)) {
 		return;
@@ -1458,7 +1458,7 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 		if (attackerMaterial != kKillMaterial && body
 			&& physics::lengthSquared(body->body.velocity)
 				< physics::lengthSquared(soldier->body.velocity + soldier->body.carriedVelocity())) { // the world's speed, carry included
-			groundCollisionDamage(victim, velocity, normal, attackerMaterial, victimMaterial);
+			groundCollisionDamage(victim, velocity, normal, point, attackerMaterial, victimMaterial);
 		} else {
 			roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
 		}
@@ -1467,6 +1467,7 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 	if (attacker == victim || hitPoints(victim) < 0) {
 		return;
 	}
+	queueMaterialImpact(attackerMaterial, victimMaterial, 0, point, normal);
 	const float speed = lengthOf(velocity);
 	const float n = lengthOf(normal);
 	const float angle = speed > 0 && n > 0 ? std::fabs(physics::dot(velocity, normal) / (speed * n)) : 0.0f;

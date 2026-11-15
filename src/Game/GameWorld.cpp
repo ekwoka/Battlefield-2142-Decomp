@@ -2908,6 +2908,71 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 	return true;
 }
 
+uint32_t GameWorld::materialImpactIndex(uint32_t first, uint32_t second, const physics::Vec3& velocity,
+	const physics::Vec3& normal) const
+{
+	if (!m_materials) {
+		return 0;
+	}
+	const float speed = std::sqrt(physics::lengthSquared(velocity));
+	const float normalLength = std::sqrt(physics::lengthSquared(normal));
+	if (speed <= 0 || normalLength <= 0) {
+		return 0;
+	}
+	const float elasticity = m_materials->elasticity(first) * m_materials->elasticity(second);
+	if (elasticity <= 0) {
+		return 0;
+	}
+	const float cosine = std::clamp(-physics::dot(velocity, normal) / (speed * normalLength), -1.0f, 1.0f);
+	const float rebound = elasticity * std::sqrt(std::max(0.0f, 1.0f - cosine * cosine));
+	const float impactAngle = (1.0f - rebound) * 1.57079632679f;
+	return std::cos(impactAngle) >= cosine ? 1u : 0u;
+}
+
+static const std::string* materialImpactTemplate(const physics::MaterialManager* materials, uint32_t first,
+	uint32_t second, uint32_t index, std::vector<std::string> physics::MaterialCell::*templates)
+{
+	if (!materials) {
+		return nullptr;
+	}
+	// Each cell tries the requested index then 0, before the (first, 0) cell.
+	for (const uint32_t surface : {second, 0u}) {
+		if (const physics::MaterialCell* cell = materials->cell(first, surface)) {
+			const auto& choices = cell->*templates;
+			for (const uint32_t variant : {index, 0u}) {
+				if (variant < choices.size() && !choices[variant].empty()) {
+					return &choices[variant];
+				}
+			}
+		}
+	}
+	return nullptr;
+}
+
+bool GameWorld::materialImpactInView(const physics::Vec3& point) const
+{
+	// 0x005a36d0 uses the active render view; headless worlds have none.
+	return !m_impactView || physics::lengthSquared(point - m_impactView->position)
+		<= m_impactView->farDistance * m_impactView->farDistance;
+}
+
+void GameWorld::queueMaterialImpact(uint32_t first, uint32_t second, uint32_t index, const physics::Vec3& point,
+	const physics::Vec3& normal)
+{
+	if (!materialImpactInView(point)) {
+		return;
+	}
+	if (const auto* effect = materialImpactTemplate(m_materials, first, second, index, &physics::MaterialCell::effectTemplates)) {
+		m_effects.spawn(*effect, point, standingOn(normal));
+	}
+	if (const auto* sound = materialImpactTemplate(m_materials, first, second, index, &physics::MaterialCell::soundTemplates)) {
+		m_sounds.push_back({*sound, point + normal * 0.05f});
+		if (m_sounds.size() > 256) {
+			m_sounds.erase(m_sounds.begin(), m_sounds.end() - 256);
+		}
+	}
+}
+
 bool GameWorld::detonateHit(Projectile& p, const physics::Vec3& point, const physics::Vec3& normal, uint32_t hitObject,
 	std::optional<uint32_t> hitMaterial)
 {
@@ -4768,31 +4833,35 @@ void GameWorld::stepProjectiles(float seconds)
 			// A shield hit (its contact, above) is no face to go through.
 			const bool onShield = shieldHit && hitBody && hitBody->shieldLeft > 0 && hitObject == hitBody->object
 				&& hit.material == static_cast<uint32_t>(hitBody->shieldMaterial) && hitSoldier == 0;
+			const physics::Vec3 impactVelocity = p.velocity;
 			const bool through = !dud && !onShield && penetrate(p, hit, hitObject, hitBody, hitSoldier != 0);
 			// Any detonation component goes off (0x005e9300 has no radius
 			// gate): the silo missile's radius 0 still starts its end effect.
 			if (p.settings->detonates && !through && !dud) {
 				detonateHit(p, hit.point, hit.normal, hitObject, hit.material);
 			}
-			// The impact effect for the two materials, facing out of the surface.
-			const physics::MaterialCell* cell = m_materials ? m_materials->cell(ownMaterial, hit.material) : nullptr;
-			if (cell && !cell->effectTemplates.empty() && !cell->effectTemplates[0].empty()) {
-				physics::Mat3 facing;
-				const physics::Vec3 up = hit.normal;
-				const physics::Vec3 other = std::fabs(up.x) < 0.9f ? physics::Vec3 {1, 0, 0} : physics::Vec3 {0, 0, 1};
-				physics::Vec3 side = physics::cross(other, up);
-				side = side * (1.0f / std::sqrt(physics::lengthSquared(side)));
-				facing.rows = {side, up, physics::cross(side, up)};
-				m_effects.spawn(cell->effectTemplates[0], hit.point, facing);
+			// 0x005a4dd0: a sufficiently fast or approaching hit, at least
+			// 11 ticks since this projectile's previous impact feedback.
+			const bool playImpact = (physics::dot(impactVelocity, hit.normal) < -0.5f
+				|| std::sqrt(physics::lengthSquared(impactVelocity)) > 10.0f)
+				&& m_ticks - p.lastImpactTick >= 11;
+			uint32_t impactIndex = 0;
+			if (playImpact) {
+				p.lastImpactTick = m_ticks;
+				impactIndex = materialImpactIndex(ownMaterial, hit.material, impactVelocity, hit.normal);
+				queueMaterialImpact(ownMaterial, hit.material, impactIndex, hit.point, hit.normal);
 			}
 			// Its decal (the cell's decal template) on the terrain or a static
 			// object, or in a vehicle's space; none on soldiers.
-			if (cell && !hitBody && !cell->decalTemplates.empty() && !cell->decalTemplates[0].empty()
+			const std::string* decal = playImpact && materialImpactInView(hit.point)
+				? materialImpactTemplate(m_materials, ownMaterial, hit.material, impactIndex, &physics::MaterialCell::decalTemplates)
+				: nullptr;
+			if (decal && !hitBody
 				&& std::none_of(m_players.begin(), m_players.end(),
 					[hitObject](const auto& player) { return hitObject != 0 && player->object == hitObject; })
 				&& !m_remoteSoldiers.count(hitObject)) {
-				m_effects.spawnDecal(cell->decalTemplates[0], hit.point, hit.normal, hitObject);
-			} else if (cell && hitBody && !cell->decalTemplates.empty() && !cell->decalTemplates[0].empty()) {
+				m_effects.spawnDecal(*decal, hit.point, hit.normal, hitObject);
+			} else if (decal && hitBody) {
 				// On a vehicle: kept in its space, moving with it (the
 				// object's own decal set, 0x0063c000 / RendDX9 0x100e6b70);
 				// on one of its collisionPart children, that part's own set
@@ -4801,13 +4870,13 @@ void GameWorld::stepProjectiles(float seconds)
 				physics::Mat3 partRotation;
 				physics::Vec3 partPosition;
 				if (hitPart >= 0 && !shieldHit && collisionPartFrame(hitBody->object, hitPart, partRotation, partPosition)) {
-					m_effects.spawnPartDecal(cell->decalTemplates[0], hit.point, hit.normal, hitBody->object, hitPart,
+					m_effects.spawnPartDecal(*decal, hit.point, hit.normal, hitBody->object, hitPart,
 						hitBody->body.rotation.transform(partPosition) + hitBody->body.position,
 						partRotation * hitBody->body.rotation);
 				} else if (const world::Object* holder = m_objects.find(hitBody->object)) {
 					const world::Vec3& at = holder->position();
 					const world::Vec3& turn = holder->rotation();
-					m_effects.spawnDecal(cell->decalTemplates[0], hit.point, hit.normal, hitBody->object,
+					m_effects.spawnDecal(*decal, hit.point, hit.normal, hitBody->object,
 						{at.x, at.y, at.z}, {turn.x, turn.y, turn.z});
 				}
 			}
@@ -8264,6 +8333,11 @@ void GameWorld::setCamera(const physics::Vec3& position, const physics::Vec3& fo
 	m_hasCamera = true;
 	m_cameraPosition = position;
 	m_cameraForward = forward;
+}
+
+void GameWorld::setImpactView(const physics::Vec3& position, float farDistance)
+{
+	m_impactView = ImpactView {position, farDistance};
 }
 
 // The ragdolls' levels of detail (the manager's frame 0x008ae120): with a
@@ -14997,7 +15071,7 @@ bool GameWorld::stepBody(Body& b, float seconds)
 			const uint32_t terrain = m_ground.material ? m_ground.material(point.x, point.z) : 0;
 			const float speed = physics::lengthSquared(velocity);
 			if (self.handleCollisionSpeed < speed) {
-				collisionEvent(self.object, 0, velocity, normal, point - self.body.position, own, terrain);
+				collisionEvent(self.object, 0, velocity, normal, point, own, terrain);
 			}
 			if (self.handleCollisionSpeed * self.handleCollisionSpeed <= speed) {
 				recordContactEffect(self, own, terrain, velocity, point, normal);

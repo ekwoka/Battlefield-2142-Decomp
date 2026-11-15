@@ -2460,7 +2460,7 @@ everyone's firing itself, from the fire states it runs (see [joined
 games' radio, tools and menus](#joined-games-radio-tools-and-menus)): the
 rewrite's `GameWorld::fireRemoteRound`, each round a projectile from the
 muzzle along the networked aim with its tracer at tracerInterval (the
-fire comp's `+0x78` count), its impact effects and decals where it hits
+fire comp's `+0x78` count), its impact effects, sounds and decals where it hits
 (the others' soldiers by their skeletonCollisionBone capsules), and no
 damage: the client game logic (vtable `0x0092a530`) has a return
 (`0x008c961e`) in the four hit slots `0xf8`..`0x104`, where the server's
@@ -9763,8 +9763,8 @@ Rewritten in `GameWorld::explode`, `blastShare` and `empBlast`;
   the offset (`detonationPoint`), the depth test against the water level
   (`GameWorld::detonateHit`; the rewrite's rounds reach the bottom, so it
   is the bottom's depth) and the end effect's up (`0x005e8f50`); not
-  useMMOnEndEffect (the rewrite plays the material pair's effect on every
-  hit already) nor preventDetonationFromDestroyedParent. The direction is the object's axis
+  useMMOnEndEffect (the rewrite plays the material pair's effect and sound
+  (cell index 0, `0x005a36d0`) on every hit already) nor preventDetonationFromDestroyedParent. The direction is the object's axis
   nearest the line plus the line (y only when strictly nearest). It wakes
   the node and goes in through slot `0xa4` at (blast − object) /
   max(distance, 1) from the object, itself over max(distance, 1); a

@@ -258,6 +258,8 @@ struct LevelSources {
 	// distance the objects' distance fade cuts at (DistanceFade.h); null:
 	// 500, the unset GSViewDistance BF2142.exe 0x00434610 reads.
 	std::function<float()> viewDistance;
+	// The active view position and scaled far distance, including overhead.
+	std::function<void(const Vec3f& position, float farDistance)> impactView;
 	// enhanced.* (Scene/EnhancedSettings.h): the render passes that aren't
 	// retail (Enhanced/LevelRendererEnhanced.cpp); null or off: none.
 	const scene::EnhancedSettings* enhanced = nullptr;

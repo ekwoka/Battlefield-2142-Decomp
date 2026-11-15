@@ -851,6 +851,7 @@ struct Projectile {
 	// vehicle moves from under it.
 	uint32_t lyingOn = 0;
 	float age = 0;
+	uint32_t lastImpactTick = 0; // projectile hit feedback throttle (0x005a4dd0, +0xfc/+0x100)
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
 	uint32_t lockedBait = 0; // or the round (serial) carrying a TTMagnet target (the booster's MagneticBait)
 	// Wire guidance (LPTargetComp, 0x005e2e20 -> 0x005e27a0) from its

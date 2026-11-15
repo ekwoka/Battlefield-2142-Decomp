@@ -835,6 +835,225 @@ TEST(GameWorld_ProjectileImpactOnFlatGround)
 	}
 }
 
+// A round's hit plays its material cell's sound with the effect
+// (0x005a36d0): the bullets' clang on vehicle armour.
+TEST(GameWorld_ProjectileHitPlaysMaterialCellSound)
+{
+	Range range;
+	physics::MaterialManager materials;
+	materials.createCell(38, 0).soundTemplates = {"S_Impact_Metal_Solid"};
+	range.world->enablePhysics(range.files, range.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }, {}, {}, {}},
+		&materials);
+	auto* bullet = range.templates.find("bullet");
+	bullet->settings()["gravityModifier"] = "0";
+	bullet->settings()["material"] = "38";
+	(void)range.world->takeSounds();
+	CHECK(range.world->launchProjectile("bullet", {0, 0.35f, 10}, {150, -20, 0}));
+	range.world->tick(1.0f / 30.0f);
+	int earlyClangs = 0;
+	for (const auto& sound : range.world->takeSounds()) {
+		earlyClangs += sound.sound == "S_Impact_Metal_Solid";
+	}
+	CHECK(earlyClangs == 0);
+	for (int i = 0; i < 11; ++i) {
+		range.world->tick(1.0f / 30.0f);
+		(void)range.world->takeSounds();
+	}
+	CHECK(range.world->launchProjectile("bullet", {0, 0.35f, 10}, {150, -20, 0}));
+	range.world->tick(1.0f / 30.0f);
+	CHECK(!range.world->impacts().empty());
+	int clangs = 0;
+	for (const auto& sound : range.world->takeSounds()) {
+		clangs += sound.sound == "S_Impact_Metal_Solid";
+	}
+	CHECK(clangs == 1);
+}
+
+TEST(GameWorld_ProjectileImpactRequiresSpeedOrApproach)
+{
+	const float tangent = std::sqrt(99.75f);
+	CHECK(std::sqrt(tangent * tangent + 0.25f) == 10.0f);
+	struct Case {
+		physics::Vec3 velocity;
+		bool plays;
+	};
+	const Case cases[] = {
+		{{0, -0.499f, 0}, false},
+		{{0, -0.5f, 0}, false},
+		{{0, -0.501f, 0}, true},
+		{{tangent, -0.5f, 0}, false},
+		{{10.01f, -0.5f, 0}, true},
+	};
+	for (const Case& test : cases) {
+		Range range;
+		physics::MaterialManager materials;
+		materials.createCell(38, 0).soundTemplates = {"S_Impact"};
+		range.world->enablePhysics(range.files, range.collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 0.0f;
+			 }, {}, {}, {}},
+			&materials);
+		auto* bullet = range.templates.find("bullet");
+		bullet->settings()["gravityModifier"] = "0";
+		bullet->settings()["material"] = "38";
+		for (int i = 0; i < 12; ++i) {
+			range.world->tick(1.0f / 30.0f);
+		}
+		(void)range.world->takeSounds();
+		CHECK(range.world->launchProjectile("bullet", {0, 0.005f, 10}, test.velocity));
+		range.world->tick(1.0f / 30.0f);
+		CHECK(range.world->impacts().size() == 1);
+		int sounds = 0;
+		for (const auto& sound : range.world->takeSounds()) {
+			sounds += sound.sound == "S_Impact";
+		}
+		CHECK(sounds == (test.plays ? 1 : 0));
+	}
+}
+
+TEST(GameWorld_ProjectileImpactUsesActiveViewDistance)
+{
+	struct Case {
+		float distance;
+		bool visible;
+	};
+	const Case cases[] = {{4.99f, true}, {5.0f, true}, {5.01f, false}};
+	for (const Case& test : cases) {
+		Range range;
+		range.templates.registerType(6, "Decal");
+		range.templates.create("Decal", "impact_decal")->settings()["decalTextureName"] = "test_decal";
+		range.templates.registerType(7, "SpriteParticleSystem");
+		auto* effect = range.templates.create("SpriteParticleSystem", "impact_effect");
+		effect->settings()["textureName"] = "test_particle";
+		effect->settings()["emitTime"] = "1";
+		physics::MaterialManager materials;
+		auto& cell = materials.createCell(38, 0);
+		cell.soundTemplates = {"S_Impact"};
+		cell.effectTemplates = {"impact_effect"};
+		cell.decalTemplates = {"impact_decal"};
+		range.world->enablePhysics(range.files, range.collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 0.0f;
+			 }, {}, {}, {}},
+			&materials);
+		range.world->setImpactView({0, 0, 10}, 5);
+		auto* bullet = range.templates.find("bullet");
+		bullet->settings()["gravityModifier"] = "0";
+		bullet->settings()["material"] = "38";
+		for (int i = 0; i < 12; ++i) {
+			range.world->tick(1.0f / 30.0f);
+		}
+		(void)range.world->takeSounds();
+		CHECK(range.world->launchProjectile("bullet", {test.distance, 0.35f, 10}, {0, -20, 0}));
+		range.world->tick(1.0f / 30.0f);
+		CHECK(range.world->impacts().size() == 1);
+		int sounds = 0;
+		for (const auto& sound : range.world->takeSounds()) {
+			sounds += sound.sound == "S_Impact";
+		}
+		CHECK(sounds == (test.visible ? 1 : 0));
+		CHECK(range.world->effects().emitters() == (test.visible ? 1u : 0u));
+		CHECK(range.world->effects().decals().size() == (test.visible ? 1u : 0u));
+	}
+}
+
+TEST(GameWorld_ProjectileRicochetUsesMaterialCellSoundIndex)
+{
+	struct Case {
+		physics::Vec3 velocity;
+		float elasticity;
+		bool ricochet;
+	};
+	const Case cases[] = {
+		{{0, -20, 0}, 0.2f, false},
+		{{150, -20, 0}, 0.2f, false},
+		{{150, -20, 0}, 0.5f, true},
+	};
+	for (const Case& test : cases) {
+		Range range;
+		physics::MaterialManager materials;
+		materials.define(0).elasticity = test.elasticity;
+		materials.define(38).elasticity = test.elasticity;
+		materials.createCell(38, 0).soundTemplates = {"S_Impact_Metal_Solid", "S_Impact_Ricochet01"};
+		range.world->enablePhysics(range.files, range.collisionTemplates,
+			{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+				 normal = {0, 1, 0};
+				 return 0.0f;
+			 }, {}, {}, {}},
+			&materials);
+		auto* bullet = range.templates.find("bullet");
+		bullet->settings()["gravityModifier"] = "0";
+		bullet->settings()["material"] = "38";
+		for (int i = 0; i < 12; ++i) {
+			range.world->tick(1.0f / 30.0f);
+			(void)range.world->takeSounds();
+		}
+		CHECK(range.world->launchProjectile("bullet", {0, 0.35f, 10}, test.velocity));
+		range.world->tick(1.0f / 30.0f);
+		int clangs = 0, ricochets = 0;
+		for (const auto& sound : range.world->takeSounds()) {
+			clangs += sound.sound == "S_Impact_Metal_Solid";
+			ricochets += sound.sound == "S_Impact_Ricochet01";
+		}
+		CHECK(clangs == (test.ricochet ? 0 : 1));
+		CHECK(ricochets == (test.ricochet ? 1 : 0));
+	}
+}
+
+TEST(GameWorld_ProjectileImpactFallsBackToMaterialTemplate)
+{
+	struct Case {
+		std::vector<std::string> specific;
+		std::vector<std::string> fallback;
+		const char* expected;
+	};
+	const Case cases[] = {
+		{{"S_Impact_Specific", "S_Impact_SpecificRicochet"}, {"S_Impact_Default", "S_Impact_DefaultRicochet"},
+			"S_Impact_SpecificRicochet"},
+		{{"S_Impact_Specific"}, {"S_Impact_Default", "S_Impact_DefaultRicochet"}, "S_Impact_Specific"},
+		{{}, {"S_Impact_Default", "S_Impact_DefaultRicochet"}, "S_Impact_DefaultRicochet"},
+		{{}, {"S_Impact_Default"}, "S_Impact_Default"},
+	};
+	for (const Case& test : cases) {
+		Range range;
+		physics::MaterialManager materials;
+		materials.define(17).elasticity = 0.5f;
+		materials.define(38).elasticity = 0.5f;
+		materials.createCell(38, 17).soundTemplates = test.specific;
+		materials.createCell(38, 0).soundTemplates = test.fallback;
+		physics::Ground ground;
+		ground.height = [](float, float) { return 0.0f; };
+		ground.heightAndNormal = [](float, float, physics::Vec3& normal) {
+			normal = {0, 1, 0};
+			return 0.0f;
+		};
+		ground.material = [](float, float) { return 17u; };
+		range.world->enablePhysics(range.files, range.collisionTemplates, ground, &materials);
+		auto* bullet = range.templates.find("bullet");
+		bullet->settings()["gravityModifier"] = "0";
+		bullet->settings()["material"] = "38";
+		for (int i = 0; i < 12; ++i) {
+			range.world->tick(1.0f / 30.0f);
+			(void)range.world->takeSounds();
+		}
+		CHECK(range.world->launchProjectile("bullet", {0, 0.35f, 10}, {150, -20, 0}));
+		range.world->tick(1.0f / 30.0f);
+		int sounds = 0, expected = 0;
+		for (const auto& sound : range.world->takeSounds()) {
+			sounds += sound.sound.rfind("S_Impact_", 0) == 0;
+			expected += sound.sound == test.expected;
+		}
+		CHECK(sounds == 1);
+		CHECK(expected == 1);
+	}
+}
+
 // Retail heightmap cells consist of two triangles along x+z=1. A saddle
 // distinguishes this from the native heightAt bilinear interpolation.
 // The physics' terrain query (0x006d2fc0): the cell's triangle (split along
@@ -2825,6 +3044,126 @@ void makeMobile(world::ObjectTemplate& t, const char* mesh)
 }
 
 } // namespace
+
+TEST(GameWorld_ProjectileImpactUsesIncomingVelocityBeforePenetration)
+{
+	Range range;
+	range.templates.registerType(6, "SimpleObject");
+	range.collisionTemplates.add("impact_wall_mesh", wallMesh(2, 3));
+	auto* wall = range.templates.create("SimpleObject", "impact_wall");
+	wall->settings()["collisionMesh"] = "impact_wall_mesh";
+	wall->settings()["mapMaterial.0"] = "42";
+	const uint32_t wallId = range.objects.create(wall, {0, 0, 12})->id();
+	auto* bullet = range.templates.find("bullet");
+	bullet->settings()["gravityModifier"] = "0";
+	bullet->settings()["material"] = "38";
+	bullet->components().push_back("DefaultPenetrateComp");
+	physics::MaterialManager materials;
+	materials.define(38).elasticity = 1;
+	auto& surface = materials.define(42);
+	surface.elasticity = 1;
+	surface.damageLoss = 0;
+	surface.isOneSided = true;
+	surface.penetrationDeviation = 10;
+	materials.createCell(38, 42).soundTemplates = {"S_Impact_Direct", "S_Impact_Ricochet"};
+	range.world->enablePhysics(range.files, range.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }, {}, {}, {}},
+		&materials);
+	range.world->startRound();
+	for (int i = 0; i < 12; ++i) {
+		range.world->tick(1.0f / 30.0f);
+		(void)range.world->takeSounds();
+	}
+	CHECK(range.world->launchProjectile("bullet", {0, 1, 10}, {0, 0, 150}));
+	range.world->tick(1.0f / 30.0f);
+	CHECK(!range.world->impacts().empty() && range.world->impacts().back().object == wallId);
+	CHECK(range.world->projectiles().size() == 1);
+	if (!range.world->projectiles().empty()) {
+		const auto& velocity = range.world->projectiles().front().velocity;
+		CHECK(velocity.z < 0.8f * std::sqrt(physics::lengthSquared(velocity)));
+	}
+	int direct = 0, ricochet = 0;
+	for (const auto& sound : range.world->takeSounds()) {
+		direct += sound.sound == "S_Impact_Direct";
+		ricochet += sound.sound == "S_Impact_Ricochet";
+	}
+	CHECK(direct == 1 && ricochet == 0);
+}
+
+TEST(GameWorld_ProjectileImpactCooldownFollowsTheProjectile)
+{
+	Range range;
+	range.templates.registerType(6, "SimpleObject");
+	range.collisionTemplates.add("impact_wall_mesh", wallMesh(2, 3));
+	auto* wall = range.templates.create("SimpleObject", "impact_wall");
+	wall->settings()["collisionMesh"] = "impact_wall_mesh";
+	wall->settings()["mapMaterial.0"] = "42";
+	const uint32_t first = range.objects.create(wall, {0, 0, 12})->id();
+	const uint32_t second = range.objects.create(wall, {0, 0, 13})->id();
+	const uint32_t third = range.objects.create(wall, {0, 0, 62})->id();
+	auto* bullet = range.templates.find("bullet");
+	bullet->settings()["gravityModifier"] = "0";
+	bullet->settings()["material"] = "38";
+	bullet->components().push_back("DefaultPenetrateComp");
+	physics::MaterialManager materials;
+	auto& surface = materials.define(42);
+	surface.damageLoss = 0;
+	surface.isOneSided = true;
+	surface.penetrationDeviation = 0;
+	materials.createCell(38, 42).soundTemplates = {"S_Impact_Wall"};
+	range.world->enablePhysics(range.files, range.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }, {}, {}, {}},
+		&materials);
+	range.world->startRound();
+	for (int i = 0; i < 12; ++i) {
+		range.world->tick(1.0f / 30.0f);
+		(void)range.world->takeSounds();
+	}
+	const auto takeImpactSounds = [&range] {
+		int sounds = 0;
+		for (const auto& sound : range.world->takeSounds()) {
+			sounds += sound.sound == "S_Impact_Wall";
+		}
+		return sounds;
+	};
+	CHECK(range.world->launchProjectile("bullet", {0, 1, 10}, {0, 0, 150}));
+	range.world->tick(1.0f / 30.0f);
+	const uint32_t firstTick = range.world->ticks();
+	CHECK(!range.world->impacts().empty() && range.world->impacts().back().object == first);
+	CHECK(takeImpactSounds() == 1);
+	range.world->tick(1.0f / 30.0f);
+	CHECK(range.world->impacts().size() == 2 && range.world->impacts().back().object == second);
+	CHECK(takeImpactSounds() == 0);
+	bool reachedThird = false;
+	for (int i = 0; i < 12; ++i) {
+		range.world->tick(1.0f / 30.0f);
+		const int sounds = takeImpactSounds();
+		if (!range.world->impacts().empty() && range.world->impacts().back().object == third) {
+			CHECK(range.world->ticks() - firstTick == 11);
+			CHECK(sounds == 1);
+			reachedThird = true;
+			break;
+		}
+		CHECK(sounds == 0);
+	}
+	CHECK(reachedThird);
+
+	// An out-of-view first impact still starts the projectile's cooldown.
+	range.world->setImpactView({0, 1, 13}, 0.5f);
+	CHECK(range.world->launchProjectile("bullet", {0, 1, 10}, {0, 0, 150}));
+	range.world->tick(1.0f / 30.0f);
+	CHECK(range.world->impacts().back().object == first);
+	CHECK(takeImpactSounds() == 0);
+	range.world->tick(1.0f / 30.0f);
+	CHECK(range.world->impacts().back().object == second);
+	CHECK(takeImpactSounds() == 0);
+}
 
 // The squad beacon's pod (0x005e5fd0 -> 0x005b2200 -> 0x004bef90): the
 // beacon's thrower has spawn.spawnInPod 1 and spawn.spawnVehicle

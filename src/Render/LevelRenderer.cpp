@@ -3982,6 +3982,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	Camera camera = overheadOn ? overheadCamera(overhead) : viewCamera;
 	m_distanceFadeOn = !overheadOn;
 	m_viewDistanceScale = frameViewDistanceScale(m_sources && m_sources->quality ? m_sources->quality->viewDistanceScale : 1.0f, overheadOn);
+	if (m_sources && m_sources->impactView) {
+		const float farDistance = viewFarDistance(m_sources->viewDistance ? m_sources->viewDistance() : 500.0f, m_viewDistanceScale);
+		m_sources->impactView(camera.position, farDistance);
+	}
 	if (switches.tweakNearPlaneSet && switches.tweakNearPlane > 0) {
 		camera.nearPlane = switches.tweakNearPlane;
 	}

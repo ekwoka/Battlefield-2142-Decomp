@@ -422,6 +422,8 @@ public:
 	// detail (0x008ae120); without one (a server) every body steps at
 	// level 0.
 	void setCamera(const physics::Vec3& position, const physics::Vec3& forward);
+	// Active render view for material impact effects, sounds and decals.
+	void setImpactView(const physics::Vec3& position, float farDistance);
 	// The clock the ragdolls' frame budget (ragdoll_clientMaxUpdateTime)
 	// is measured with, in seconds (by default the steady clock: the
 	// original reads the performance counter, 0x004423f0).
@@ -2902,12 +2904,18 @@ private:
 	// memory of each pair (0x00653ef0) to the server game logic's slot 0x104
 	// (0x004ba3f0): the ground's damage (0x005a3db0) or an object's
 	// (0x005a4690, a soldier's road kill 0x005a43c0).
+	// `point` is the world-space contact point.
 	void collisionEvent(uint32_t self, uint32_t other, const physics::Vec3& velocity, const physics::Vec3& normal,
 		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial);
+	uint32_t materialImpactIndex(uint32_t first, uint32_t second, const physics::Vec3& velocity,
+		const physics::Vec3& normal) const;
+	bool materialImpactInView(const physics::Vec3& point) const;
+	void queueMaterialImpact(uint32_t first, uint32_t second, uint32_t index, const physics::Vec3& point,
+		const physics::Vec3& normal);
 	void groundCollisionDamage(uint32_t victim, const physics::Vec3& velocity, const physics::Vec3& normal,
-		uint32_t groundMaterial, uint32_t victimMaterial);
+		const physics::Vec3& point, uint32_t groundMaterial, uint32_t victimMaterial);
 	void objectCollisionDamage(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity,
-		const physics::Vec3& normal, uint32_t attackerMaterial, uint32_t victimMaterial);
+		const physics::Vec3& normal, const physics::Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial);
 	void roadKill(uint32_t attacker, Player& victim, const physics::Vec3& velocity, uint32_t attackerMaterial,
 		uint32_t victimMaterial);
 	int collisionCredit(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity) const;
@@ -4209,6 +4217,11 @@ private:
 	std::map<uint32_t, double> m_remoteBodyStarted; // when each remote body began (its death on the client)
 	bool m_hasCamera = false;
 	physics::Vec3 m_cameraPosition, m_cameraForward {0, 0, 1};
+	struct ImpactView {
+		physics::Vec3 position;
+		float farDistance;
+	};
+	std::optional<ImpactView> m_impactView;
 	void setRagDollLevels();
 	float ragDollDistance(const anim::RagDoll& body) const;
 	std::function<double()> m_clock;

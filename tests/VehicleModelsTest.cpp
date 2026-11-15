@@ -5221,6 +5221,12 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 			render::LevelSources sources {files, templates, noPlacedObjects, geometries, noTerrain,
 				nullptr, lights, sky, water, "", ""};
 			sources.renderer = &renderSettings;
+			render::Vec3f impactViewPosition {};
+			float impactViewFar = 0;
+			sources.impactView = [&](const render::Vec3f& position, float farDistance) {
+				impactViewPosition = position;
+				impactViewFar = farDistance;
+			};
 			bool shown = false;
 			client::RoundVisuals visuals(templates);
 			std::vector<client::RoundVisuals::Mesh> roundMeshes;
@@ -5252,6 +5258,8 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 				return pixels;
 			};
 			const auto blank = frame();
+			CHECK(impactViewPosition.x == camera.position.x && impactViewPosition.y == camera.position.y
+				&& impactViewPosition.z == camera.position.z && impactViewFar == 500.0f);
 			shown = true;
 			const auto missile = frame();
 			size_t changed = 0;
@@ -5267,6 +5275,22 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 			CHECK(render::writePng(std::string(output) + "/" + label + ".png", target.width, target.height, missile));
 			shown = false;
 			CHECK(frame() == blank);
+			if (label == "vanilla-aa-tracer") {
+				scene::QualitySettings quality;
+				quality.viewDistanceScale = 0.5f;
+				sources.quality = &quality;
+				sources.viewDistance = [] { return 300.0f; };
+				(void)frame();
+				CHECK(impactViewPosition.x == camera.position.x && impactViewFar == 150.0f);
+				sources.overheadView = [](render::OverheadView& view) {
+					view.x = 37;
+					view.z = -54;
+					return true;
+				};
+				(void)frame();
+				CHECK(impactViewPosition.x == 37 && impactViewPosition.z == -54 && impactViewFar == 300.0f);
+				CHECK(std::fabs(impactViewPosition.y - camera.position.y) > 1);
+			}
 			gpu->releaseTarget(target);
 		};
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
