@@ -29,6 +29,9 @@ inline std::optional<hud::HudManager::MapMarker> mapOrderMarker(int kind, bool f
 	// commander callback supplies 15x47 HUD units; the leader texture uses
 	// its native 15x31 dimensions. Both are centered on the projected point.
 	marker.height = fromCommander ? 47 : 31;
+	// 0x0077c610 turns an icon by (+0x28 - turn), then with the map by +turn:
+	// on screen it shows +0x28, which 0x0078b110 never sets.
+	marker.upright = true;
 	return marker;
 }
 

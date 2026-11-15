@@ -1007,6 +1007,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 					(point.capturable ? "/miniMap_CP.tga" : "/miniMap_CPBase.tga"),
 				// 0x0077dc72 / 0x0077dd04 construct 32x32 on both maps.
 				point.position.x, point.position.z, 32};
+			flag.upright = true; // 0x0077c610 nets the map's turn out; the flag never sets an angle (+0x28)
 			markers.push_back(flag);
 		}
 		if (spawning && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
@@ -1262,12 +1263,14 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			arrow.color[0] = arrow.color[1] = arrow.color[2] = 0; // 0x00792b0d: (0, 0, 0)
 			arrow.clamp = true; // at the icon's point, which is kept on the map
 			arrow.iconAlpha = look.iconAlpha;
+			arrow.upright = !in.call.empty(); // a call's arrow has no turn (mateMarker)
 			list.push_back(arrow);
 		}
 		hud::HudManager::MapMarker mate {look.texture, player.position.x, player.position.z, look.size, look.yaw};
 		std::copy(look.color, look.color + 4, mate.color);
 		mate.clamp = true;
 		mate.iconAlpha = look.iconAlpha;
+		mate.upright = look.arrow || !in.call.empty(); // the heading is on the arrow, or there is none
 		if (spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
 			mate.id = kMarkerLeader; // the spawn screen's selectable leader marker
 		}
@@ -1298,6 +1301,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	float uavRadius = 0;
 	if (round.uavArea(me.team, uav, uavRadius)) {
 		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 16});
+		markers.back().upright = true; // no angle of their own: 0x0077c610 shows them screen-up
 	}
 	for (const auto& strike : round.strikes()) {
 		if (strike.team == me.team) {
@@ -1305,11 +1309,13 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 					? "Ingame/Commander/tools/orbit_strike.tga"
 					: "Ingame/Commander/tools/force_strike.tga",
 				strike.target.x, strike.target.z, 19});
+			markers.back().upright = true;
 		}
 	}
 	for (const uint32_t crate : round.supplyCrates()) {
 		if (const world::Object* object = round.objects().find(crate)) {
 			markers.push_back({"Ingame/Minimap/Icons/icon_supplies.tga", object->position().x, object->position().z, 15});
+			markers.back().upright = true;
 		}
 	}
 	// The squad's leader order and commander order, each by its kind
@@ -1329,9 +1335,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		for (const bool fromCommander : {false, true}) {
 			game::GameWorld::SquadOrder order;
 			if (world.squadOrder(me.team, squad, fromCommander, order)) {
-				const std::string icon = menu::orderMapIcon(static_cast<int>(order.type), fromCommander);
-				if (!icon.empty()) {
-					markers.push_back({icon, order.position.x, order.position.z, 24});
+				if (auto marker = dice::hfe::main::mapOrderMarker(static_cast<int>(order.type), fromCommander, order.position.x, order.position.z)) {
+					markers.push_back(*marker);
 				}
 			}
 		}
@@ -1378,6 +1383,9 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		markers.push_back(spotted);
 	}
 	markers.insert(markers.end(), callMarkers.begin(), callMarkers.end());
+	for (hud::HudManager::MapMarker& spawn : spawnMarkers) {
+		spawn.upright = true;
+	}
 	markers.insert(markers.end(), spawnMarkers.begin(), spawnMarkers.end());
 	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {

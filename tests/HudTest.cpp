@@ -595,6 +595,7 @@ TEST(Hud_MapOrderMarkerSizeAndAnchor)
 	CHECK(leader->size == 15 && leader->height == 31);
 	CHECK(commander->size == 15 && commander->height == 47);
 	CHECK(leader->offsetX == 0 && leader->offsetY == 0 && commander->offsetX == 0 && commander->offsetY == 0);
+	CHECK(leader->upright && commander->upright); // screen-up on a turned map, as 0x0077c610 draws them
 	const auto destroy = main::mapOrderMarker(8, false, 0, 0);
 	const auto mine = main::mapOrderMarker(9, true, 0, 0);
 	CHECK(destroy && destroy->texture == "Ingame/Minimap/Icons/orderDestroy.tga");
