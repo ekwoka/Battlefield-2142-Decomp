@@ -207,6 +207,7 @@ public:
 		float spin = 0;       // rad/s (Spring 0x27c)
 		float angle = 0;      // radians (0x280)
 		bool contact = false;
+		bool contactEnabled = true; // the selected collision state has vehicle-LOD vertices
 		std::string spring;   // template names, for drawing
 		std::string steering; // the RotationalBundle above it, if any
 		// What an object's mesh gave the wheel's own response last tick (its
@@ -533,6 +534,7 @@ public:
 	void legsRespond(physics::RigidBody& body, const physics::Ground& ground, float seconds,
 		float gravity = physics::tuning::kGravity);
 	const std::vector<Wheel>& wheels() const { return m_wheels; }
+	void setWheelCollisionState(const physics::CollisionMeshFile& mesh, size_t state);
 	// Each Spring's first step that finds it moving takes its rate as 0 again (a node let go of a hold).
 	void restartWheels()
 	{

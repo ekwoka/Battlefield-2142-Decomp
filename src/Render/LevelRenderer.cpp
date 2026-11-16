@@ -1,6 +1,7 @@
 #include "LevelRenderer.h"
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
+#include "Enhanced/EnhancedMath.h"
 #include "MeshLights.h"
 #include "Scene/EnhancedSettings.h"
 #include "Scene/OvergrowthSettings.h"
@@ -159,6 +160,7 @@ void specularUniforms(LightingUniforms& uniforms, const S& submesh, const Camera
 template <class S>
 void meshKindUniforms(LightingUniforms& uniforms, const S& submesh, bool hemiAndShadows)
 {
+	if (submesh.giMap) uniforms.material[2] += kMaterialGIMap;
 	uniforms.material[2] += !hemiAndShadows ? kMaterialNoShadows : submesh.noHemi ? 0.0f : kMaterialHemi;
 	if (submesh.normalMap) {
 		uniforms.material[2] += kMaterialNormalMap;
@@ -819,6 +821,18 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				}
 			}
 		}
+		if (bundled && !submesh.additive) {
+			// RendDX9 0x10149c27..0x10149c7f: after the diffuse,
+			// the second _b map is a normal, SpecularLUT is separate,
+			// and any remaining texture is GI (the shipped wreck's _w).
+			for (size_t i = 1; i < material.maps.size(); ++i) {
+				const std::string path = lower(material.maps[i]);
+				if ((i == 1 && normalMapKind(true, false, path, technique)) || path.find("specularlut") != std::string::npos) continue;
+				submesh.giMap = texture(sources.files, material.maps[i], textureClass);
+			}
+			// RaShaderBM resolves GI + ENVMAP in favour of GI.
+			if (submesh.giMap) submesh.envMap = false;
+		}
 		if (skinned && !submesh.additive) {
 			submesh.specularKind = 5; // RaShaderSM: pow(N.H, SpecularPower) x the gloss
 		}
@@ -855,6 +869,24 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 		if (const GpuMesh* gpuMesh = mesh(sources, objectTemplate.geometry())) {
 			const Mat4 world = local * objectWorld;
 			Instance instance {gpuMesh, world, object, local, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
+			// Only lamp halos use whole-source visibility. Other additive
+			// surfaces (windows, signs, effects) keep their per-pixel depth test.
+			const auto hasGlowLight = [&](const auto& self, const world::ObjectTemplate& t, int level) -> bool {
+				if (level > 8) return false;
+				if (t.typeName() == "LightSource") {
+					const auto glow = t.settings().find("supportsGlow");
+					return glow != t.settings().end() && std::atoi(glow->second.c_str()) != 0;
+				}
+				for (const auto& child : t.children()) {
+					const auto* next = sources.templates.find(child.name);
+					if (next && self(self, *next, level + 1)) return true;
+				}
+				return false;
+			};
+			instance.occlusionGlow = !gpuMesh->submeshes.empty()
+				&& std::all_of(gpuMesh->submeshes.begin(), gpuMesh->submeshes.end(),
+					[](const Submesh& s) { return s.additive; })
+				&& hasGlowLight(hasGlowLight, objectTemplate, 0);
 			instance.geometry = objectTemplate.geometry();
 			if (depth > 0) {
 				instance.source = path; // the template names from the root's child down, '/'-joined
@@ -2088,6 +2120,11 @@ void LevelRenderer::syncObjects()
 		instance.hidden = current->hidden() || hiddenInView;
 		const int look = m_sources->partLook && !instance.source.empty() ? m_sources->partLook(instance.object, instance.source) : 0;
 		instance.hidden = instance.hidden || look == 2;
+		const bool vehicleWreck = m_sources->vehicleWreckLook && m_sources->vehicleWreckLook(instance.object);
+		// The root and its children each switch their own mesh instance.
+		// A child with no wreck geometry disappears (0x006539f0).
+		if (vehicleWreck && ((instance.mesh->bundled && instance.mesh->geometries < 3) ||
+			(!instance.mesh->bundled && instance.mesh->geometries < 2))) instance.hidden = true;
 		// The cockpit from inside: another geometry of its mesh.
 		if (instance.mesh->geometries > 1) {
 			int geometry = -1, lod = 0;
@@ -2095,8 +2132,13 @@ void LevelRenderer::syncObjects()
 				geometry = -1;
 				lod = 0;
 			}
-			if (look == 1 && instance.mesh->geometries > 2) {
+			static const bool forceWreck = std::getenv("BF2142_FORCE_WRECK") != nullptr; // diagnostic: every vehicle as its wreck
+			if ((look == 1 || forceWreck) && instance.mesh->geometries > 2) {
 				geometry = 2; // a wrecked part: the mesh's wreck geometry
+				lod = 0;
+			}
+			if (vehicleWreck && !instance.hidden) {
+				geometry = instance.mesh->bundled ? 2 : 1;
 				lod = 0;
 			}
 			if (geometry != instance.shownGeometry || lod != instance.shownLod) {
@@ -2115,7 +2157,7 @@ void LevelRenderer::syncObjects()
 			}
 		}
 		instance.fade = current->fade();
-		instance.objectOrigin = {current->position().x, current->position().y, current->position().z};
+		instance.objectOrigin = {objectWorld.at(3, 0), objectWorld.at(3, 1), objectWorld.at(3, 2)};
 		if (instance.cullRadius < 0) {
 			// Object slot 0x8c uses the collision radius before the render
 			// mesh's. A walker's mesh bounds omit its displaced leg parts.
@@ -2588,7 +2630,8 @@ std::array<float, 3> LevelRenderer::particleLight(const effects::Vec3& at, float
 	const scene::LightSettings& lights = m_sources->lights;
 	const float altitude = m_sources->hemi ? m_sources->hemi->height : 0;
 	const float offset = std::clamp(std::clamp((at.y - altitude) / 10.0f, 0.0f, 1.0f) + lightMapOffset, 0.0f, 1.0f);
-	const float lm = quality >= 3 ? hemiShadowAt(at.x, at.z) : 1.0f;
+	// enhanced.particleShadows: the cascades shade it instead (enh_particle.frag).
+	const float lm = quality >= 3 && !m_enh.particleShadows ? hemiShadowAt(at.x, at.z) : 1.0f;
 	const float lut = std::clamp(lm + offset, 0.0f, 1.0f);
 	const float f = lights.defaultEffectLightAffectionFactor;
 	std::array<float, 3> out;
@@ -2672,6 +2715,26 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 	std::vector<Vertex> vertices;
 	effects::ParticleView view = particleView(camera);
 	view.zoomed = zoomed;
+	float lightMost = 0; // the strongest single light on a particle (1: as much again as the sun's)
+	size_t lightStats[3] {}; // BF2142_PARTICLE_LIGHT_STATS: additive, blended, lights reaching a blended one
+	// enhanced.particleLights: the point lights on what isn't itself a glow.
+	// shortcut: last frame's list (collectPointLights runs after this), a frame late; reorder if it shows.
+	const auto lightAt = [&](const effects::Vec3& at, float lightMapOffset, bool additive) {
+		std::array<float, 3> light = particleLight(at, lightMapOffset);
+		++lightStats[additive ? 0 : 1];
+		if (m_enh.particleLights && !additive) {
+			for (const effects::PointLight& l : m_pointLights) {
+				const float dx = l.position.x - at.x, dy = l.position.y - at.y, dz = l.position.z - at.z;
+				const float k = enhanced::particleLightFalloff(dx * dx + dy * dy + dz * dz, l.range2);
+				lightStats[2] += k > 0;
+				lightMost = std::max(lightMost, std::max(l.color.x, std::max(l.color.y, l.color.z)) * k);
+				light[0] += l.color.x * k;
+				light[1] += l.color.y * k;
+				light[2] += l.color.z * k;
+			}
+		}
+		return light;
+	};
 	for (const effects::EffectManager* manager : managers) {
 		if (!manager) {
 			continue;
@@ -2684,9 +2747,12 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 			const uint32_t first = static_cast<uint32_t>(vertices.size());
 			static const float corners[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
 			for (const effects::Sprite& sprite : sprites) {
-				const std::array<float, 3> light = particleLight(sprite.position, sprite.lightMapOffset);
+				const std::array<float, 3> light = lightAt(sprite.position, sprite.lightMapOffset, additive);
+				// How much of the cascades' shadow it takes (enh_particle.vert reads the unused slot).
+				const float shade = m_enh.particleShadows ? 1 - std::clamp(sprite.lightMapOffset, 0.0f, 1.0f) : 0.0f;
 				for (const auto& corner : corners) {
 					Vertex v {};
+					v.lightmapCoord[0] = shade;
 					v.position[0] = sprite.position.x;
 					v.position[1] = sprite.position.y;
 					v.position[2] = sprite.position.z;
@@ -2724,7 +2790,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 				}
 				const uint32_t first = static_cast<uint32_t>(vertices.size());
 				for (const effects::WorldVertex& w : triangles) {
-					const std::array<float, 3> light = particleLight(w.position, w.lightMapOffset);
+					const std::array<float, 3> light = lightAt(w.position, w.lightMapOffset, additive);
 					Vertex v {};
 					v.position[0] = w.position.x;
 					v.position[1] = w.position.y;
@@ -2808,6 +2874,10 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 		} else {
 			vertices.resize(first);
 		}
+	}
+	if (std::getenv("BF2142_PARTICLE_LIGHT_STATS")) {
+		std::printf("particle lights: on %d, %zu lights listed, %zu additive and %zu blended particles, %zu light hits, strongest %.2f\n",
+			m_enh.particleLights ? 1 : 0, m_pointLights.size(), lightStats[0], lightStats[1], lightStats[2], lightMost);
 	}
 	if (vertices.empty()) {
 		groups.clear();
@@ -3353,7 +3423,17 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 	if (!buffer || groups.empty()) {
 		return;
 	}
-	const LightingUniforms fog = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
+	LightingUniforms fog = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
+	// enhanced.particleShadows: the blended ones through enh_particle.frag, which
+	// takes a shaded particle's light over a sunlit one's (particleLight) in material.rgb.
+	const bool shadowed = m_enh.particleShadows && m_enh.shadows.cascadeParams[0] > 0.5f;
+	if (shadowed) {
+		const bool unlit = m_particleSettings.particleSystemShaderQuality <= 1;
+		const float f = lights.defaultEffectLightAffectionFactor;
+		for (size_t i = 0; i < 3; ++i) {
+			fog.material[i] = unlit ? 1.0f : (1 + (lights.effectShadowColor[i] - 1) * f) / std::max(1 + (lights.effectSunColor[i] - 1) * f, 1e-3f);
+		}
+	}
 	ParticleUniforms uniforms {};
 	uniforms.viewProjection = viewProjection;
 	const Vec3f right = camera.right();
@@ -3368,9 +3448,18 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 	bool bound = false, additive = false;
 	for (const ParticleGroup& group : groups) {
 		if (!bound || group.additive != additive) {
-			SDL_BindGPUGraphicsPipeline(pass, m_gpu.particlePipeline(group.additive));
+			const bool shade = shadowed && !group.additive;
+			SDL_BindGPUGraphicsPipeline(pass, shade ? m_gpu.enhancedPipelines().particle : m_gpu.particlePipeline(group.additive));
 			SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
 			SDL_PushGPUFragmentUniformData(commands, 0, &fog, sizeof(fog));
+			if (shade) {
+				SDL_PushGPUFragmentUniformData(commands, 1, &m_enh.shadows, sizeof(m_enh.shadows));
+				SDL_GPUTextureSamplerBinding maps[2] = {
+					{m_enh.cascadeDynamic, m_gpu.shadowSampler()},
+					{m_enh.staticValid ? m_enh.cascadeStatic : m_gpu.emptyShadowMap(), m_gpu.shadowSampler()},
+				};
+				SDL_BindGPUFragmentSamplers(pass, 1, maps, 2);
+			}
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 			bound = true;
 			additive = group.additive;
@@ -3606,6 +3695,12 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
+		if (instance.occlusionGlow && m_sources && m_sources->glowVisible) {
+			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			if (!m_sources->glowVisible(camera.position, source, instance.object)) {
+				continue;
+			}
+		}
 		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
 			// 0x006fb320 on the objects in view; one faded out isn't drawn.
 			// A child instance uses its own mesh radius, so its distance must
@@ -4756,7 +4851,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				{lightmapped ? item.lightmap : m_gpu.whiteTexture(), m_gpu.clampSampler()},
 				{orWhite(submesh.detail), m_gpu.repeatSampler()},
 				{orWhite(submesh.normalMap ? submesh.normalMap : submesh.dirt), m_gpu.repeatSampler()},
-				{orWhite(submesh.crack), m_gpu.repeatSampler()},
+				{orWhite(submesh.giMap ? submesh.giMap : submesh.crack), m_gpu.repeatSampler()},
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 			bindMeshLayers(pass, &submesh, envMap);
@@ -5126,7 +5221,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 				{m_gpu.whiteTexture(), m_gpu.clampSampler()},
 				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
 				{submesh.normalMap ? submesh.normalMap : m_gpu.whiteTexture(), m_gpu.repeatSampler()},
-				{m_gpu.whiteTexture(), m_gpu.repeatSampler()},
+				{submesh.giMap ? submesh.giMap : m_gpu.whiteTexture(), m_gpu.repeatSampler()},
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 			bindMeshLayers(pass, &submesh);

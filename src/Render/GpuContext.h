@@ -228,6 +228,7 @@ constexpr float kMaterialNormalMap = 64;  // a normal map (the dirt map's bindin
 constexpr float kMaterialNoShadows = 128; // receives no dynamic shadows (the low lighting level's BM/SM)
 constexpr float kMaterialTrunk = 256; // RaShaderTrunkSTMBase/Detail
 constexpr float kMaterialTitanInterior = 512; // RaShaderSTM _TITANINTERIOR_ with the camera in a Titan
+constexpr float kMaterialGIMap = 1024; // RaShaderBM _HASGIMAP_: binding 4, unused by bundled cracks
 // mesh.frag's samplers: 0-4 the material's maps, 5-7 the shadows and the
 // hemi map (shadow.glsl), 8 a static mesh's detail normal map, 9 its crack
 // normal map, 10 the envmap (a cube).
@@ -388,7 +389,7 @@ public:
 	// A sampled colour texture of the swapchain's format (post-production targets).
 	SDL_GPUTexture* createColorTexture(uint32_t width, uint32_t height);
 	// A sampled depth texture of shadowDepthFormat().
-	SDL_GPUTexture* createShadowMap(uint32_t size);
+	SDL_GPUTexture* createShadowMap(uint32_t size, uint32_t height = 0); // square unless a height is given
 	SDL_GPUSampler* repeatSampler() const { return m_repeatSampler; }
 	SDL_GPUSampler* clampSampler() const { return m_clampSampler; }
 	// The Flash menu's: base level only, bilinear (RendDX9.dll's SwiffMenu.fx/Font.fx states).
@@ -416,6 +417,8 @@ public:
 		SDL_GPUGraphicsPipeline* undergrowth = nullptr;
 		SDL_GPUGraphicsPipeline* road = nullptr;
 		SDL_GPUGraphicsPipeline* roadMesh = nullptr;
+		// The blended particles' (Enhanced/particle.*.patch): the cascades' shadow at the particle.
+		SDL_GPUGraphicsPipeline* particle = nullptr;
 		// The prepass's depth (mesh.vert / shadowcaster.frag, terrain.vert /
 		// depth.frag) into shadowDepthFormat(); the cascades' terrain casters.
 		SDL_GPUGraphicsPipeline* depth = nullptr;

@@ -979,11 +979,11 @@ void Vehicle::updateOldWheel(Wheel& wheel, physics::RigidBody& body, const physi
 	const Vec3 centre = body.position + body.rotation.transform(wheel.mount);
 	const Vec3 bottom = centre - up * wheel.radius;
 	Vec3 normal {0, 1, 0};
-	float groundHeight = ground.heightAndNormal(bottom.x, bottom.z, normal);
+	float groundHeight = wheel.contactEnabled ? ground.heightAndNormal(bottom.x, bottom.z, normal) : bottom.y;
 	Vec3 surfaceVelocity;
 	float compression = std::max(0.0f, groundHeight - bottom.y);
 	Vec3 objectNormal;
-	const float pushed = objectCompression(wheel, objectNormal);
+	const float pushed = wheel.contactEnabled ? objectCompression(wheel, objectNormal) : -1.0f;
 	if (wheel.objectGround.count > 0 && pushed > compression) {
 		compression = pushed;
 		groundHeight = bottom.y + pushed;

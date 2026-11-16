@@ -55,6 +55,7 @@
 #include "Geometry/MeshFile.h"
 #include "Terrain/Heightmap.h"
 #include "Scene/LightSettings.h"
+#include "Scene/EnhancedSettings.h"
 #include "TitanLevel.h"
 #include <filesystem>
 #endif
@@ -4123,6 +4124,36 @@ TEST(Vehicles_RocketHurtsTheWalker)
 // A wreck's mesh instances (0x006539f0(object, 1)): the root's turns to
 // its wreck sub-geometry (us_heavy_mech's whole wreck shape) and the
 // parts, with one sub-geometry, leave the rays.
+TEST(Vehicles_WreckLookHonoursDelayAndOptOut)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded) return;
+	auto* t = g.templates.find("as_apc");
+	CHECK(t);
+	if (!t) return;
+	t->settings()["armor.wreckDelay"] = "0.5";
+	t->settings()["armor.dontUseWreck"] = "0";
+	const uint32_t vehicle = g.start("as_apc", {0, 4, 0}, 0.1f);
+	CHECK(!g.world->vehicleWreckLook(vehicle));
+	g.world->applyDamage(vehicle, g.world->hitPoints(vehicle) + 1);
+	CHECK(g.objects.find(vehicle)->destroyed());
+	CHECK(!g.world->vehicleWreckLook(vehicle));
+	t->settings()["armor.wreckDelay"] = "0.005";
+	CHECK(g.world->vehicleWreckLook(vehicle));
+	t->settings()["armor.wreckDelay"] = "0.5";
+	g.run(0.2f);
+	CHECK(!g.world->vehicleWreckLook(vehicle));
+	g.run(0.4f);
+	CHECK(g.world->vehicleWreckLook(vehicle));
+	t->settings()["armor.dontUseWreck"] = "1";
+	CHECK(!g.world->vehicleWreckLook(vehicle));
+	t->settings()["armor.dontUseWreck"] = "0";
+	t->settings()["armor.wreckDelay"] = "0.005";
+	CHECK(g.world->vehicleWreckLook(vehicle));
+	CHECK(!g.world->vehicleWreckLook(0));
+}
+
 TEST(Vehicles_WalkerWreckMeetsRaysAsItsWreckShape)
 {
 	if (!gameDir()) {
@@ -6164,6 +6195,134 @@ TEST(Vehicles_MissileHomingOnAParkedVehicle)
 }
 
 #ifdef BF2142_RENDER_TESTS
+// Destroy the real vehicle through armour, then compare its displayed
+// wreck against intact look and against the same wreck with a white GI
+// map. No particles can make either pixel comparison pass accidentally.
+TEST(Vehicles_DestroyedWreckPixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		CHECK(gpu);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); SDL_Quit(); return; }
+		const auto changed = [](const auto& a, const auto& b) {
+			size_t n = 0;
+			for (size_t i = 0; i + 3 < a.size() && i + 3 < b.size(); i += 4)
+				if (std::abs(int(a[i]) - int(b[i])) + std::abs(int(a[i+1]) - int(b[i+1])) + std::abs(int(a[i+2]) - int(b[i+2])) > 6) ++n;
+			return n;
+		};
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"})
+		for (const char* name : {"as_apc", "us_heavy_mech"})
+		for (bool enhanced : {false, true}) {
+			Garage g(gameDir(), mod, true);
+			CHECK(g.loaded);
+			if (!g.loaded) continue;
+			const uint32_t vehicle = g.start(name, {0, 4, 0}, 0.1f);
+			for (const auto& o : g.objects.objects()) if (o->id() != vehicle) o->setHidden(true);
+			auto* t = g.templates.find(name);
+			CHECK(t);
+			if (!t) continue;
+			t->settings()["armor.wreckDelay"] = "0";
+			t->settings()["armor.dontUseWreck"] = "0";
+			terrain::HeightmapCluster noTerrain;
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+			lights.skyColor = {0.4f, 0.4f, 0.4f};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			settings.drawSkyDome = settings.drawTerrain = false;
+			scene::EnhancedSettings features;
+			features.enabled = enhanced;
+			features.taa = features.csm = false;
+			render::LevelSources sources {g.files, g.templates, g.objects, g.geometries, noTerrain, nullptr, lights, sky, water, "", ""};
+			sources.renderer = &settings;
+			sources.enhanced = &features;
+			bool useWreck = true;
+			sources.vehicleWreckLook = [&](uint32_t id) { return useWreck && g.world->vehicleWreckLook(id); };
+			auto renderer = std::make_unique<render::LevelRenderer>(*gpu);
+			renderer->build(sources);
+			auto target = gpu->createOffscreenTarget(720, 480);
+			const auto p = g.position(vehicle);
+			render::Camera camera;
+			camera.position = {p.x - 11, p.y + 6, p.z - 14};
+			camera.yaw = std::atan2(11.0f, 14.0f);
+			camera.pitch = -std::atan2(3.0f, std::hypot(11.0f, 14.0f));
+			const auto frame = [&]() {
+				renderer->syncObjects();
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer->draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				return pixels;
+			};
+			const auto intact = frame();
+			g.world->applyDamage(vehicle, g.world->hitPoints(vehicle) + 1);
+			CHECK(g.world->vehicleWreckLook(vehicle));
+			const auto wreck = frame();
+			CHECK(changed(intact, wreck) > 1000);
+			useWreck = false;
+			const auto wrongLook = frame();
+			CHECK(changed(wreck, wrongLook) > 1000);
+			// AO rotates its sampling pattern between frames. Check the
+			// restored geometry's silhouette independently of that shading.
+			size_t silhouetteChange = 0;
+			for (size_t i = 0; i + 3 < intact.size(); i += 4) {
+				const auto occupied = [&](const auto& image) {
+					return std::abs(int(image[i]) - int(intact[0])) + std::abs(int(image[i+1]) - int(intact[1]))
+						+ std::abs(int(image[i+2]) - int(intact[2])) > 6;
+				};
+				if (occupied(intact) != occupied(wrongLook)) ++silhouetteChange;
+			}
+			CHECK(silhouetteChange < 20);
+			useWreck = true;
+			// Replace only the authored GI file in this test's in-memory
+			// VFS. Rebuild to bypass the renderer's texture cache.
+			const auto* geometry = g.geometries.find(t->geometry());
+			CHECK(geometry);
+			std::vector<uint8_t> bytes;
+			CHECK(geometry && g.files.readFile(geometry->path, bytes));
+			const auto mesh = geom::parseMesh(bytes, geom::MeshKind::Bundled);
+			CHECK(mesh && mesh->geometries.size() >= 3);
+			if (!mesh || mesh->geometries.size() < 3) { gpu->releaseTarget(target); continue; }
+			uint32_t header[32] {};
+			header[0] = 0x20534444; header[1] = 124; header[2] = 0x100f;
+			header[3] = header[4] = 1; header[5] = 4;
+			header[19] = 32; header[20] = 0x41; header[22] = 32;
+			header[23] = 0xff; header[24] = 0xff00; header[25] = 0xff0000; header[26] = 0xff000000; header[27] = 0x1000;
+			const auto* start = reinterpret_cast<const uint8_t*>(header);
+			std::vector<uint8_t> white(start, start + sizeof(header));
+			white.insert(white.end(), 4, 255);
+			size_t giMaps = 0;
+			for (const auto& lod : mesh->geometries[2].lods)
+				for (const auto& material : lod.materials)
+					for (const auto& path : material.maps)
+						if (path.size() > 6 && path.compare(path.size() - 6, 6, "_w.dds") == 0) {
+							g.files.addMemoryFile(path, white); ++giMaps;
+						}
+			CHECK(giMaps > 0);
+			renderer = std::make_unique<render::LevelRenderer>(*gpu);
+			renderer->build(sources);
+			const auto unmasked = frame();
+			const size_t maskPixels = changed(wreck, unmasked);
+			CHECK(maskPixels > 100);
+			const std::string label = (std::string(mod).find("Remaster") == std::string::npos ? "vanilla-" : "remaster-")
+				+ std::string(name) + (enhanced ? "-enhanced" : "-ordinary");
+			std::fprintf(stderr, "  %s: wreck changed %zu pixels, GI mask changed %zu\n", label.c_str(), changed(intact, wreck), maskPixels);
+			CHECK(render::writePng(std::string(output) + "/" + label + "-intact.png", target.width, target.height, intact));
+			CHECK(render::writePng(std::string(output) + "/" + label + "-wreck.png", target.width, target.height, wreck));
+			CHECK(render::writePng(std::string(output) + "/" + label + "-unmasked.png", target.width, target.height, unmasked));
+			gpu->releaseTarget(target);
+		}
+	}
+	SDL_Quit();
+}
+
 // The actual bridge glow is a black-background quad using StaticMesh.fx's
 // alpha_one technique. Its black texels must not darken the scene behind it.
 // With fog they must not brighten it either: scene-colour fog added to
@@ -6317,6 +6476,19 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
             // bound darkening by that measured baseline noise. The isolated
             // asset check above requires exactly zero darkened pixels.
             CHECK(dark <= noise); CHECK(bright > 100); CHECK(bright > noise * 3);
+            // A lamp whose centre the game reports blocked draws no halo at all
+            // (the deck above it used to show the quad's upper half on the road).
+            sources.glowVisible = [](const render::Vec3f&, const render::Vec3f&, uint32_t) { return false; };
+            const auto blocked = frame();
+            size_t leaked = 0;
+            for (size_t i = 0; i + 3 < blocked.size() && i + 3 < background.size(); i += 4) {
+                int delta = 0;
+                for (int c = 0; c < 3; ++c) delta += int(blocked[i+c]) - int(background[i+c]);
+                if (delta > 9) ++leaked;
+            }
+            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: %zu brightened pixels\n", label, leaked);
+            // The scene's own frame-to-frame noise is about as large as its measured baseline.
+            CHECK(leaked < bright / 3);
             gpu->releaseTarget(target);
         }
     }
@@ -8625,3 +8797,46 @@ TEST(Titan_WreckSequencePixelsOptIn)
 	SDL_Quit();
 }
 #endif
+
+// Destroyed wheel states must stop holding up the replacement hull, including
+// a parked/asleep vehicle and one killed before landing. Keep delay/opt-out
+// controls: destruction alone is not the collision-state transition.
+TEST(Vehicles_WreckSuspensionSettlesBothMods)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"eu_fav", "us_ag"}) {
+			for (int scenario = 0; scenario < 4; ++scenario) {
+				Garage g(gameDir(), mod);
+				auto* t = g.templates.find(name);
+				CHECK(t != nullptr);
+				if (!t) continue;
+				t->settings()["armor.wreckDelay"] = scenario == 2 ? "0.6" : "0";
+				t->settings()["armor.dontUseWreck"] = scenario == 3 ? "1" : "0";
+				const bool airborne = scenario == 1;
+				const auto id = g.start(name, {0, airborne ? 6.0f : 3.0f, 0}, airborne ? 1/30.0f : 4.0f);
+				const float liveY = g.position(id).y;
+				CHECK(g.world->vehicle(id) != nullptr);
+				if (!airborne) CHECK(g.world->bodyAsleep(id));
+				g.world->applyDamage(id, g.world->hitPoints(id) + 1);
+				if (scenario == 2) {
+					g.run(0.3f);
+					CHECK(std::fabs(g.position(id).y - liveY) < 0.05f);
+				}
+				g.run(5);
+				const float wreckY = g.position(id).y;
+				std::fprintf(stderr, "  %s %s scenario %d: live %.3f -> wreck %.3f\n", mod, name, scenario, liveY, wreckY);
+				if (scenario == 3) {
+					CHECK(std::fabs(wreckY - liveY) < 0.05f);
+				} else {
+					// The hull settles near its collision supports rather than
+					// the live FAV (1.05 m) or gunship (2.78 m) suspension height.
+					CHECK(wreckY > 0.1f);
+					CHECK(wreckY < (std::string(name) == "eu_fav" ? 0.8f : 2.1f));
+					CHECK(g.world->bodyAsleep(id));
+					for (const auto& wheel : g.world->vehicle(id)->wheels()) CHECK(!wheel.contact);
+				}
+			}
+		}
+	}
+}

@@ -24,6 +24,11 @@ struct EnhancedSettings {
 	bool ssao = true;     // enhanced.ssao: ground-truth ambient occlusion on the ambient term
 	bool csm = true;      // enhanced.csm: cascaded sun shadows with PCF
 	bool lightRank = true; // enhanced.lightRank: a mesh's point lights rank by distance over reach, so a small flash doesn't displace a wall light (Render/MeshLights.h)
+	bool staticShadows = true; // enhanced.staticShadows: the terrain and lightmapped surfaces also take the static meshes' and the terrain's cascade shadows, over their baked ones (with csm)
+	bool softShadows = true; // enhanced.softShadows: the two nearest cascades' shadows sharp at the caster's contact and wider with its distance (with csm)
+	bool titanShadows = true; // enhanced.titanShadows: a Titan's hull casts into the cascades as it moves (with csm)
+	bool particleShadows = true; // enhanced.particleShadows: smoke and dust take the cascades' shadows (with csm)
+	bool particleLights = true; // enhanced.particleLights: smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps)
 	bool prepass = false; // enhanced.prepass: the depth/normal/motion prepass even when neither taa nor ssao reads it
 	// Gameplay, also only with enhanced.enabled; changes the simulation:
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
@@ -46,6 +51,16 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.csm = v; });
 	bindProperty<bool>(console, "enhanced.lightRank", ConsoleAccess::Anyone, [&settings] { return settings.lightRank; },
 		[&settings](const bool& v) { settings.lightRank = v; });
+	bindProperty<bool>(console, "enhanced.staticShadows", ConsoleAccess::Anyone, [&settings] { return settings.staticShadows; },
+		[&settings](const bool& v) { settings.staticShadows = v; });
+	bindProperty<bool>(console, "enhanced.softShadows", ConsoleAccess::Anyone, [&settings] { return settings.softShadows; },
+		[&settings](const bool& v) { settings.softShadows = v; });
+	bindProperty<bool>(console, "enhanced.titanShadows", ConsoleAccess::Anyone, [&settings] { return settings.titanShadows; },
+		[&settings](const bool& v) { settings.titanShadows = v; });
+	bindProperty<bool>(console, "enhanced.particleShadows", ConsoleAccess::Anyone, [&settings] { return settings.particleShadows; },
+		[&settings](const bool& v) { settings.particleShadows = v; });
+	bindProperty<bool>(console, "enhanced.particleLights", ConsoleAccess::Anyone, [&settings] { return settings.particleLights; },
+		[&settings](const bool& v) { settings.particleLights = v; });
 	bindProperty<bool>(console, "enhanced.prepass", ConsoleAccess::Anyone, [&settings] { return settings.prepass; },
 		[&settings](const bool& v) { settings.prepass = v; });
 	bindProperty<bool>(console, "enhanced.botRecovery", ConsoleAccess::Anyone, [&settings] { return settings.botRecovery; },

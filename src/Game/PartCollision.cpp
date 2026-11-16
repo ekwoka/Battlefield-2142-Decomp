@@ -36,8 +36,8 @@
 // 0x006e5e90), and returns 0 otherwise, which clears the object's flag
 // 0x100 (slot 0x54(0, 0x100)): out of the scene's rays. The shipped
 // vehicles' geometry 0 has the wreck's shape as its second sub-geometry
-// (us_heavy_mech's: 6746 faces), the parts have one: a wreck is its root's
-// wreck shape alone. Every other LOD query goes through the instance's
+// (us_heavy_mech's: 6746 faces); parts can have an empty second state
+// (the FAV's wheels), which also supplies no contacts. Every LOD query goes through the instance's
 // sub-geometry too: the vehicle LOD the ground pass and the mesh physics
 // read, and the soldier LOD (setBodyLods).
 #include "GameWorld.h"
@@ -338,6 +338,11 @@ void GameWorld::wreckCollision(Body& body)
 	if (wreckShape) {
 		setBodyLods(body, *body.meshFile, body.meshMaterials, 1);
 	}
+	if (body.vehicle) {
+		body.vehicle->setWheelCollisionState(*body.meshFile, 1);
+	}
+	// The new shape may no longer be supported where the live one slept.
+	wake(body);
 }
 
 bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const physics::Vec3& to,

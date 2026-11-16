@@ -360,7 +360,11 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 		// The dynamic map takes the bundled and skinned meshes (RendDX9's
 		// SkinnedMeshDrawShadowMap 0x10162c70 for the skinned ones, at the LOD
 		// the light manager's slot 0x230 allows).
-		const bool dynamic = gpuMesh->skinned || gpuMesh->bundled;
+		// enhanced.titanShadows: a Titan's hull (static meshes that move) too, so its
+		// shadow follows it and reaches the terrain, which reads only this map.
+		// Not from inside: the rooms would lose their sun.
+		const bool dynamic = gpuMesh->skinned || gpuMesh->bundled ||
+			(m_enh.titanShadows && !m_cameraInTitan && gpuMesh->titanExterior);
 		if (dynamic == statics) {
 			continue;
 		}

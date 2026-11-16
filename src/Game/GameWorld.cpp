@@ -1267,6 +1267,18 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 	}
 }
 
+bool GameWorld::vehicleWreckLook(uint32_t object) const
+{
+	const Body* body = findBody(object);
+	const world::Object* o = m_objects.find(object);
+	if (!body || !body->vehicle || body->wreckTime < 0 || isTitan(object) || !o || !o->objectTemplate()) {
+		return false;
+	}
+	const auto& t = *o->objectTemplate();
+	const float delay = number(t, "armor.wreckDelay", 0);
+	return number(t, "armor.dontUseWreck", 0) == 0 && (delay <= 0.01f || body->wreckAge >= delay);
+}
+
 float GameWorld::timeToLiveLeft(uint32_t object) const
 {
 	const auto it = m_abandonment.find(object);
@@ -1379,6 +1391,9 @@ void GameWorld::holdSpawned(ObjectSpawner& spawner)
 				body->vehicle->restartWheels();
 			}
 			sleep(*body);
+			if (body->collisionWrecked) {
+				wake(*body); // release must not pin the replacement wreck above its supports
+			}
 			// At rest on the spawner's parent: a Titan's motion goes with it.
 			for (const Titan& titan : m_titans) {
 				for (const Titan::Spawn& carried : titan.carried) {

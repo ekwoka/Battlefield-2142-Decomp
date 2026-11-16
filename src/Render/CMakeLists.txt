@@ -55,4 +55,6 @@ bf2142_embed_shaders(Render
 	enh_terrain.frag=Shaders/terrain.frag+Shaders/Enhanced/terrain.frag.patch
 	enh_road.frag=Shaders/road.frag+Shaders/Enhanced/road.frag.patch
 	enh_undergrowth.frag=Shaders/undergrowth.frag+Shaders/Enhanced/undergrowth.frag.patch
+	enh_particle.vert=Shaders/particle.vert+Shaders/Enhanced/particle.vert.patch
+	enh_particle.frag=Shaders/particle.frag+Shaders/Enhanced/particle.frag.patch
 )

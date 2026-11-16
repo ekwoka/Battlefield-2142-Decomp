@@ -125,15 +125,27 @@ layout(location = 0) out vec4 outColor;
 
 // A mesh's own lights, the shaders' "_pointlight_" passes added up (d the
 // surface-to-light vector, R the range, H the half vector to the eye):
-//   RaShaderSTM: (saturate(N.L) colour + pow(saturate(N.H), 32) gloss
-//     StaticSpecularColor) (1 - saturate(|d|^2 / R^2));
+//   RaShaderSTM: 2 x the layers' colour x saturate((saturate(N.L) colour +
+//     pow(saturate(N.H), 32) gloss specularColor) (1 - saturate(|d|^2 /
+//     R^2)) x fog visibility), the specular in the saturated sum and under the colour like
+//     the diffuse (psStaticMesh: FinalColor += 2 (diffuse x
+//     getPointPixelLighting)); specularColor the light's (the file's second
+//     half: _POINTLIGHT_ turns _ENVMAP_ off). Never by the lightmap, also
+//     on a lightmapped mesh: the pass's shader key is the material's with
+//     pointlight (RendDX9 0x100beac6..0x100beb06: the table 0x101f73f0,
+//     whose entries leave lightmap, bit 0x1, clear, | 0x400), so _LIGHTMAP_
+//     is 0 there and getPointPixelLighting's "pointDiff *= lightmap" is
+//     compiled out. (A Titan interior's light is in its own term.)
 //   RaShaderBM: (saturate(N.L) + pow(N.H, 64) gloss) (1 - saturate(9 |d|^2 /
 //     R^2)), white (Lights[0].color isn't read);
 //   RaShaderSM: (saturate(N.L) colour + pow(saturate(N.H), 20) gloss
 //     specularColor) (1 - saturate(|d| / R^2)) (a length, not its square, as
 //     the shader has it); specularColor the template's speccolor.
-// The diffuse goes to `light` (times the albedo), the specular to `shine`.
-void meshPointLights(vec3 normal, float gloss, vec3 lightmapMask, inout vec3 light, inout vec3 shine)
+// Skinned diffuse goes to `light`, specular to `shine`. Static and
+// bundled point passes are added after the base fog/envmap/GI; the
+// bundled point-light variant explicitly disables its GI map.
+void meshPointLights(vec3 normal, float gloss, float visibility,
+	vec3 albedo, inout vec3 light, inout vec3 shine, inout vec3 pointColor)
 {
 	int kind = int(lightCount.y + 0.5);
 	int count = int(lightCount.x + 0.5);
@@ -147,18 +159,13 @@ void meshPointLights(vec3 normal, float gloss, vec3 lightmapMask, inout vec3 lig
 		float nh = clamp(dot(normal, normalize(direction + toEye)), 0.0, 1.0);
 		if (kind == 1) {
 			float attenuation = 1.0 - clamp(d2 / (r * r), 0.0, 1.0);
-			if (lightmapMask.x >= 0.0) {
-				// RaShaderSTM getPointPixelLighting: x the lightmap x 2, saturated, x 2.
-				light += 2.0 * clamp(lightColor[i].rgb * nl * lightmapMask * attenuation, 0.0, 1.0);
-				shine += pow(nh, 32.0) * gloss * specular.rgb * lightmapMask * attenuation;
-			} else {
-				light += lightColor[i].rgb * nl * attenuation;
-				shine += pow(nh, 32.0) * gloss * specular.rgb * attenuation;
-			}
+			// The material colour multiplies the specular too. Fog goes
+			// inside the clamp (RaShaderSTM getPointPixelLighting), not
+			// over the already saturated contribution a second time.
+			pointColor += albedo * 2.0 * clamp((lightColor[i].rgb * nl + pow(nh, 32.0) * gloss * lightSpot[i].rgb) * attenuation * visibility, 0.0, 1.0);
 		} else if (kind == 2) {
 			float attenuation = 1.0 - clamp(9.0 * d2 / (r * r), 0.0, 1.0);
-			light += vec3(nl * attenuation);
-			shine += vec3(pow(nh, 64.0) * gloss * attenuation);
+			pointColor += (albedo * nl + vec3(pow(nh, 64.0) * gloss)) * attenuation * visibility;
 		} else {
 			// The specular takes the Light record's specularColor: the
 			// template's speccolor (lightSpot.xyz, applyMeshLights).
@@ -270,11 +277,10 @@ void main()
 	vec3 sun = sunColor.rgb * max(dot(lit, sunDirection.xyz), 0.0);
 	vec3 light;
 	vec3 shine = vec3(0.0);
-	vec3 pointMask = vec3(-1.0); // a lightmapped static's 2 x lightmap for its point lights
+	vec3 pointColor = vec3(0.0);
 	bool shadowed = (layers & 128) == 0;
 	if (material.y > 0.0) {
 		vec4 lightmap = texture(lightMap, inLightmapCoord);
-		pointMask = 2.0 * lightmap.rgb;
 		float sunVisible = lightmap.g * shadowFactor(inWorldPosition, false);
 		// getDiffusePixelLighting: the sky by the bumped normal against
 		// skyNormal (0.78, 0.52, 0.65) in the tangent frame.
@@ -320,7 +326,7 @@ void main()
 	if ((layers & 512) != 0) {
 		// the interior's one light is in its term above
 	} else if (lightCount.y > 0.5) {
-		meshPointLights(lit, gloss, pointMask, light, shine);
+		meshPointLights(lit, gloss, 1.0 - fog, albedo.rgb, light, shine, pointColor);
 	} else {
 		light += pointLights(lit);
 	}
@@ -335,5 +341,10 @@ void main()
 		float share = perPixel ? (1.0 - clamp(en * en * 0.95, 0.0, 1.0)) * gloss : gloss * 2.0 * (1.0 - abs(en));
 		color = mix(color, texture(envMap, reflect(-toEye, lit)).rgb, share);
 	}
-	outColor = vec4(mix(color, fogColor.rgb, fog), alpha);
+	if ((layers & 1024) != 0) {
+		// RaShaderBM: GI multiplies the base diffuse AND specular;
+		// _POINTLIGHT_ disables GI, so the separate added term stays lit.
+		color *= texture(crackMap, inTexCoord * atlasScale + uvOffset.xy).rgb;
+	}
+	outColor = vec4(mix(color, fogColor.rgb, fog) + pointColor, alpha);
 }

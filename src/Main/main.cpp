@@ -9477,6 +9477,12 @@ int runGame(Options& options, Session& session)
 		sources.renderer = &rendererSettings;
 		sources.post = &postSettings;
 		sources.shadows = &shadowSettings;
+		sources.glowVisible = [&round](const render::Vec3f& eye, const render::Vec3f& light, uint32_t owner) {
+			const world::Object* cameraObject = round.playerVehicle() ? round.playerVehicle() : round.player();
+			bool seenThrough = false;
+			return round.lineOfSight({eye.x, eye.y, eye.z}, {light.x, light.y, light.z}, owner, seenThrough,
+				cameraObject ? cameraObject->id() : 0);
+		};
 		sources.enhanced = &enhancedSettings;
 		sources.hemi = &hemiSettings;
 		sources.particles = &particleSettings;
@@ -10219,6 +10225,7 @@ int runGame(Options& options, Session& session)
 			return round.partBone(object, part, local);
 		};
 		sources.partLook = [&round](uint32_t object, const std::string& part) { return round.titanPartLook(object, part); };
+		sources.vehicleWreckLook = [&round](uint32_t object) { return round.vehicleWreckLook(object); };
 		sources.partPose = [&round, &session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
 							   world::Vec3& rotation) {
 			if (round.partPose(object, part, offset, rotation)) {
