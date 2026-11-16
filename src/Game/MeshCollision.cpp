@@ -300,6 +300,7 @@ void GameWorld::collideBodies(float seconds)
 			}
 		}
 	}
+	m_retiredMeshes.clear();
 }
 
 void GameWorld::collideMover(Body& mover, size_t index, float seconds)

@@ -318,6 +318,14 @@ void GameWorld::wreckCollision(Body& body)
 		return;
 	}
 	body.collisionWrecked = true;
+	// Wrecked from inside the collision pass (a contact's damage), the pass
+	// still holds the old meshes' raw pointers (MeshActor::mesh): they stay
+	// alive until the pass ends (port: the original's instance outlives it).
+	for (const auto* old : {&body.vehicleMesh, &body.projectileMesh, &body.soldierMesh, &body.trunk}) {
+		if (*old) {
+			m_retiredMeshes.push_back(*old);
+		}
+	}
 	// The root's instance: its wreck sub-geometry, or out of the rays.
 	auto world = std::make_shared<physics::CollisionWorld>();
 	const bool wreckShape = body.meshFile->geometries[0].subGeometries.size() >= 2;

@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -4887,6 +4888,7 @@ TEST(GameWorld_ArmorEffectLevels)
 	CHECK(game::GameWorld::armorEffectStep(levels, 40, 80, 50, group) == Step::Stop); // repaired past them all
 	CHECK(game::GameWorld::armorPercent(40, 100, 50) == 40 && game::GameWorld::armorPercent(-10, 100, 50) == -20);
 	CHECK(game::GameWorld::armorPercent(0.5f, 100, 50) == 1);
+	CHECK(game::GameWorld::armorPercent(-1e10f, 100, 50) == INT32_MIN); // the force field's loss: _ftol's 0x80000000
 	// Object 3 can die spectacularly (the generator gives 1891080048 for
 	// it), 1 and 2 never; for 3 a hit of over 20 % of armor.hitPoints is,
 	// or one leaving over 25 %.

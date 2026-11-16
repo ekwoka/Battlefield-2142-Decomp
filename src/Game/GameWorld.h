@@ -3287,6 +3287,8 @@ private:
 	std::function<void(const BlastRayTrace&)> m_blastRayTraceSink;
 	std::vector<uint32_t> m_checked; // object ids already considered for a body (sorted)
 	std::vector<Body> m_bodies;
+	// Meshes a wreck replaced during the collision pass, kept until it ends (wreckCollision).
+	std::vector<std::shared_ptr<physics::CollisionWorld>> m_retiredMeshes;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
 	physics::CollisionWorld m_projectileCollision; // static objects, projectile LOD
 	// The static objects' projectile-LOD radius (the largest part's), for

@@ -14,6 +14,7 @@
 #include <functional>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -1585,7 +1586,12 @@ bool GameWorld::spectacularHit(uint32_t id, float before, float after, float hit
 int GameWorld::armorPercent(float hitPoints, float maxHitPoints, float wreckHitPoints)
 {
 	const float of = hitPoints < 0 ? wreckHitPoints : maxHitPoints;
-	return of > 0 ? static_cast<int>(std::ceil(hitPoints / of * 100.0f)) : 0;
+	if (!(of > 0)) {
+		return 0;
+	}
+	// _ftol's out-of-range result (0x80000000) for the force field's 1e10 loss.
+	const float percent = std::ceil(hitPoints / of * 100.0f);
+	return percent >= -2147483648.0f && percent < 2147483648.0f ? static_cast<int>(percent) : INT32_MIN;
 }
 
 GameWorld::ArmorEffectStep GameWorld::armorEffectStep(const std::vector<int>& levels, int before, int now, int current,
