@@ -821,8 +821,10 @@ TEST(Titan_GunSeatsAreMannedAndFire)
 }
 
 // The team forcefields (collisionGroups 0x100 the PAC Titan's own, 0x200
-// the EU Titan's): an object passes its own team's and meets the other's.
-// The Titan's object spawners
+// the EU Titan's): an object passes its own team's and meets the other's,
+// but the spawn room's field mesh carries no soldier LOD, so soldiers of
+// both teams walk through it (a mesh without a soldier LOD stops no
+// soldier) while rounds meet it (its projectile LOD); the Titan's object spawners
 // (as_titan_ATSpawner / AGSpawner) and supply point are objects of their
 // own carried with it.
 TEST(Titan_ForcefieldsAndCarriedObjects)
@@ -858,7 +860,7 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 			};
 		walk(*object->objectTemplate(), physics::Mat3 {}, {}, 0);
 		CHECK(fields.size() == 1);
-		int blocked = 0;
+		int blocked = 0, walked = 0;
 		for (const physics::Vec3& offset : fields) {
 			const physics::Vec3 at = titan.position + turn.transform(offset);
 			for (const physics::Vec3 axis : {physics::Vec3 {1, 0, 0}, physics::Vec3 {0, 0, 1}}) {
@@ -866,12 +868,13 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 					const physics::Vec3 a = at + turn.transform(axis * 3.0f + physics::Vec3 {0, up, 0});
 					const physics::Vec3 b = at + turn.transform(axis * -3.0f + physics::Vec3 {0, up, 0});
 					blocked += level.world->lineOfSight(a, b) ? 0 : 1;
+					walked += level.world->soldierPathClear(1, a, b) == level.world->soldierPathClear(2, a, b) ? 1 : 0;
 				}
 			}
 		}
-		std::fprintf(stderr, "  %s Titan's spawn room field: %d of 6 ways stop rounds\n",
-			team == 1 ? "PAC" : "EU", blocked);
-		CHECK(blocked > 0);
+		std::fprintf(stderr, "  %s Titan's spawn room field: %d of 6 ways stop rounds, %d the same for both teams' soldiers\n",
+			team == 1 ? "PAC" : "EU", blocked, walked);
+		CHECK(blocked > 0 && walked == 6);
 	}
 	// The carried objects: two spawners and a supply point.
 	const auto pac = *level.titan(1);
@@ -3747,10 +3750,17 @@ TEST(Titan_EnclosedClientLeavesOutsideSoldiersUnscored)
 // The air transports' seats (eu_at's pilot, gunners and passengers:
 // exitThroughPodLauncher, each with an air_pod_launcher on PIFire): the
 // exit key fires the seat's pod launcher whatever its input (0x004bda00
-// mask 0x400 -> event 6), its round being the pod (eu_pod_drop,
-// enterOnSpawn) that seats the soldier who fired it. The fire button does
-// not: a passenger's primary fire is his own weapon's.
-TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
+// mask 0x400 -> event 6) when its rays are clear: from the launcher along
+// its firing direction, 3 m, the middle one and four at (+-1, +-1)
+// (DAT_00a85220 slot 0x68); any hit and the soldier leaves as usual
+// (0x004bb570). So in the air he leaves in the pod (eu_pod_drop,
+// enterOnSpawn, seating the soldier who fired it), parked on the ground he
+// steps out. The fire button fires the seat's group-0 weapon on its input
+// (0x004cc7a0 -> 0x005cacf0 -> 0x005c50e0): air_pod_launcher's
+// fire.fireInput is the default PIFire (8, 0x005f1228), so it launches the
+// pod too. (enhanced.passengerWeapons gives that fire to the soldier's own
+// weapon instead: VehicleModels_TransportPassengerFiresHisOwnWeapon.)
+TEST(Titan_AirTransportSeatsLaunchPods)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
@@ -3761,12 +3771,19 @@ TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 		return;
 	}
 	level.run(0.5f);
-	for (const bool exitKey : {true, false}) {
-		const float x = exitKey ? 0.0f : 60.0f, z = 0;
-		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + 3.0f, z});
+	struct Case {
+		const char* name;
+		bool exitKey;
+		float height; // over the terrain
+	};
+	for (const Case& c : {Case {"the exit key in the air", true, 150}, Case {"fire in the air", false, 150},
+			 Case {"the exit key parked", true, 3}}) {
+		const bool exitKey = c.exitKey;
+		const float x = c.height > 10 ? (exitKey ? 0.0f : 60.0f) : 120.0f, z = 0;
+		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + c.height, z});
 		at->setTeam(2);
 		level.run(2 / 30.0f);
-		const int player = level.world->addPlayer(exitKey ? "Exit" : "Fire", 2, false);
+		const int player = level.world->addPlayer(c.name, 2, false);
 		CHECK(level.world->spawnSoldier(player));
 		// In at its entry point (the use key's reach).
 		physics::Vec3 entry;
@@ -3803,7 +3820,6 @@ TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 		level.world->setInput(player, leave);
 		level.run(1 / 30.0f);
 		level.world->setInput(player, {});
-		// (Read at once: a pod launched under a parked transport lands in a tick or two, 0x005cf750.)
 		std::string pod;
 		for (const auto& p : level.world->pods()) {
 			if (p.player == player) {
@@ -3811,15 +3827,13 @@ TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 				pod = o && o->objectTemplate() ? o->objectTemplate()->name() : "";
 			}
 		}
-		std::fprintf(stderr, "  %s: %s\n", exitKey ? "the exit key" : "fire", pod.c_str());
-		if (exitKey) {
-			// The exit key's rays (0x004bda00) run from the launcher along its
-			// firing direction, 3 m: the transport parked on the ground
-			// leaves its soldier standing beside it, not in a pod.
-			CHECK(level.world->playerInfo(player, info) && info.vehicle != at->id() && (pod == "eu_pod_drop" || pod.empty()));
+		std::fprintf(stderr, "  %s: pod %s, riding %d\n", c.name, pod.c_str(), level.world->ridingPod(player) ? 1 : 0);
+		CHECK(level.world->playerInfo(player, info) && info.vehicle != at->id());
+		if (c.height > 10) {
+			CHECK(pod == "eu_pod_drop" && level.world->ridingPod(player));
 		} else {
-			// The primary fire is the passenger's own weapon's: no pod.
-			CHECK(pod.empty() && level.world->playerInfo(player, info) && info.vehicle == at->id());
+			// The rays meet the ground under the parked transport: out on foot.
+			CHECK(pod.empty() && !level.world->ridingPod(player) && info.alive && info.vehicle == 0);
 		}
 	}
 }

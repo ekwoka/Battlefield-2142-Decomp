@@ -8910,7 +8910,7 @@ bool GameWorld::seatedSoldierView(int id, LadderView& view)
 		* physics::Mat3::fromYawPitchRoll(seat.rotation) * mount.turn * body->body.rotation;
 	view.position = body->body.position + body->body.rotation.transform(mount.place(seat.position));
 	view.yaw = rotation.yawPitchRoll().x;
-	view.pitch = std::clamp(player->input.aimPitch + (seat.kitWeapon() ? player->aimKickPitch : 0.0f), -85.0f, 85.0f);
+	view.pitch = std::clamp(player->input.aimPitch + (passengerWeapon(seat) ? player->aimKickPitch : 0.0f), -85.0f, 85.0f);
 	return true;
 }
 
@@ -10651,7 +10651,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				}
 			}
 			SoldierInput turned = input;
-			if (seat && seat->kitWeapon()) {
+			if (seat && passengerWeapon(*seat)) {
 				stepWeaponRecoil(player, turned);
 			}
 			if (seat) {
@@ -10668,9 +10668,9 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				object->setHidden(true);
 			}
 			followKit(player, *object); // the kit is the soldier's child: where the seat put him this tick
-			if (seat && seat->kitWeapon()) {
-				// Passengers use whatever weapons they have: it fires along the
-				// seat's look, from the seat.
+			if (seat && passengerWeapon(*seat)) {
+				// enhanced.passengerWeapons (not retail): passengers use whatever
+				// weapons they have: it fires along the seat's look, from the seat.
 				LadderView look;
 				if (seatedSoldierView(player.id, look)) {
 					player.body.yawDegrees = look.yaw;
@@ -13451,7 +13451,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// 0x005c0f40): the active weapon of each of the three groups. A
 	// weapon reloading, full or without a magazine to take does nothing
 	// (FireArm::startReload).
-	if (player.input.reload && !player.reloadWas && !seat.kitWeapon()) {
+	if (player.input.reload && !player.reloadWas && !passengerWeapon(seat)) {
 		if (gun.weapon && gun.weapon->startReload()) {
 			weaponSound(WeaponSoundEvent::Reload, player, body.object, primary.weapon, body.body.position);
 			m_weaponSounds.back().reloadState = gun.weapon->takeReloadSoundEvent();
@@ -13466,7 +13466,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			}
 		}
 	}
-	if (!seat.kitWeapon()) {
+	if (!passengerWeapon(seat)) {
 		player.reloadWas = player.input.reload; // a passenger's reload edge is the soldier's own (stepSoldierWeapon)
 	}
 	// The fire event goes to each group's active weapon (0x004cc7a0 ->
@@ -13475,7 +13475,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// (0x005c69a0).
 	const auto pressed = [&](int input, bool held) { return held && working && input != seat.specialToggleInput; };
 	if (groups & 1) {
-		if (seat.kitWeapon()) {
+		if (passengerWeapon(seat)) {
 			// The soldier's own weapon takes the primary fire (stepSoldierWeapon).
 		} else if (gun.active[0] >= 0 && primary.podLauncher) {
 			// A pod launcher on PIFire (the air transports' seats'

@@ -1135,6 +1135,18 @@ public:
 	// sv.hitIndicator (settings +0xfb, on by default): whether a player's
 	// hits light his crosshair's hit indicator (0x004ba070).
 	void setHitIndicatorEnabled(bool on) { m_hitIndicatorEnabled = on; }
+	// enhanced.enabled and enhanced.passengerWeapons (Scene/EnhancedSettings.h,
+	// read live; not retail): with both on, a seat whose only PIFire weapon
+	// is its pod launcher (SeatLayout::kitWeapon) leaves the primary fire,
+	// reload and zoom to the soldier's own weapon. Retail fires the seat's
+	// launcher on PIFire (its fire.fireInput default 8, 0x005f1228; the
+	// group's active weapon, 0x004cc7a0 -> 0x005cacf0 -> 0x005c50e0): the
+	// soldier leaves in a pod. Off (null) by default.
+	void setPassengerWeapons(const bool* enhanced, const bool* option)
+	{
+		m_passengerWeaponsEnhanced = enhanced;
+		m_passengerWeapons = option;
+	}
 	// The hit indicator (player slot 0x20c(1), 0x0059b460: the alpha to 1
 	// and the networked flag +0x2a8 set): a joined client's own state
 	// carries the flag, read and cleared by slot 0x210 (0x0059b480).
@@ -1493,10 +1505,11 @@ public:
 		int primary = -1;                // the index of the SeatWeapon part in `weapons`
 		// A seat whose only PIFire weapon is a pod launcher (the air transports'
 		// passenger seats: air_pod_launcher, which the exit key launches,
-		// exitThroughPodLauncher) leaves the primary fire to the soldier's own
-		// weapon: its passengers fire whatever they carry. A seat with a camera
+		// exitThroughPodLauncher) can leave the primary fire to the soldier's own
+		// weapon under enhanced.passengerWeapons (GameWorld::passengerWeapon;
+		// not retail, where the fire launches the pod). A seat with a camera
 		// of its own (a Titan's pod array, titan_pod_launcher_podCamera) aims and
-		// fires its launcher instead.
+		// fires its launcher either way.
 		bool kitWeapon() const { return podLauncher && group == 0 && cameras.empty(); }
 		// specialToggleWeaponInput (PCO template +0x46c, 0x40 none; 0x005c7f80):
 		// a press of that input moves the PIFire group on as PIToggleWeapon
@@ -1646,6 +1659,13 @@ public:
 	};
 	// A vehicle's seats (for checks and the HUD) and who sits in them.
 	std::vector<SeatLayout> vehicleSeats(uint32_t object);
+	// A pod-launcher seat whose fire is the soldier's own weapon's: only
+	// under enhanced.passengerWeapons (setPassengerWeapons).
+	bool passengerWeapon(const SeatLayout& seat) const
+	{
+		return seat.kitWeapon() && m_passengerWeaponsEnhanced && *m_passengerWeaponsEnhanced && m_passengerWeapons
+			&& *m_passengerWeapons;
+	}
 	std::vector<int> vehicleOccupants(uint32_t object) const;
 	// A seat's gun aim (degrees, yaw relative to the vehicle, pitch up
 	// positive); false for seats without a gun.
@@ -3135,6 +3155,8 @@ private:
 	FriendlyFire m_friendlyFire;
 	bool m_friendlyFireWithMines = true;
 	bool m_hitIndicatorEnabled = true;
+	const bool* m_passengerWeaponsEnhanced = nullptr; // setPassengerWeapons
+	const bool* m_passengerWeapons = nullptr;
 	// The seats' IK objects (seatIkTargets): the template path from the
 	// vehicle's root, by root template and seat (ik null: none).
 	struct IkPath {

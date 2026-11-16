@@ -8,7 +8,7 @@
 // fingerprint (main.cpp, --simulate); tools/parity-check.sh runs the same
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
-// (botRecovery, cornerSteer): they change the simulation by design, so the
+// (botRecovery, cornerSteer, passengerWeapons): they change the simulation by design, so the
 // check turns them off (cornerSteer is off by default).
 #pragma once
 
@@ -30,6 +30,7 @@ struct EnhancedSettings {
 	bool botMovement = true; // enhanced.botMovement: bots on foot lie down only for far targets and don't walk sideways to look about (Game/Bots.cpp, BotsLook.cpp)
 	bool botTitan = true; // enhanced.botTitan: bots aboard a Titan walk its decks to the consoles and the core (Game/BotsTitan.cpp)
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
+	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
 	// Interface, also only with enhanced.enabled:
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 };
@@ -56,6 +57,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.botTitan = v; });
 	bindProperty<bool>(console, "enhanced.cornerSteer", ConsoleAccess::Anyone, [&settings] { return settings.cornerSteer; },
 		[&settings](const bool& v) { settings.cornerSteer = v; });
+	bindProperty<bool>(console, "enhanced.passengerWeapons", ConsoleAccess::Anyone, [&settings] { return settings.passengerWeapons; },
+		[&settings](const bool& v) { settings.passengerWeapons = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
 }

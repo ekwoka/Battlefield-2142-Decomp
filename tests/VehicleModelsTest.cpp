@@ -77,6 +77,8 @@ struct Garage {
 	physics::MaterialManager materials;
 	std::unique_ptr<game::GameWorld> world;
 	bool loaded = false;
+	// enhanced.passengerWeapons with enhanced.enabled for the round (read live).
+	bool passengerWeapons = false;
 
 	explicit Garage(const char* gameDir, const char* modPath = "mods/bf2142", bool clientAssets = false,
 		const std::function<void(Garage&)>& beforeLoad = {})
@@ -168,6 +170,7 @@ struct Garage {
 		world::Object* made = objects.create(t, {at.x, at.y, at.z}, {yaw, 0, 0});
 		made->setTeam(2);
 		world = std::make_unique<game::GameWorld>(templates, objects);
+		world->setPassengerWeapons(&passengerWeapons, &passengerWeapons);
 		const uint32_t material = groundMaterial;
 		groundHeight = ground;
 		world->enablePhysics(files, collisionTemplates,
@@ -2675,8 +2678,10 @@ TEST(VehicleModels_DoorGunCameraArmUsesMultiply)
 	}
 }
 
-// The transport's passenger seats (positions 4 to 7) leave the primary fire to
-// the soldier's own weapon; the pod launcher there is the exit key's alone.
+// Under enhanced.passengerWeapons (not retail: there the fire launches the
+// seat's air_pod_launcher, Titan_AirTransportSeatsLaunchPods) the transport's
+// passenger seats (positions 4 to 7) leave the primary fire to the soldier's
+// own weapon; the pod launcher there is the exit key's alone.
 TEST(VehicleModels_TransportPassengerFiresHisOwnWeapon)
 {
 	if (!gameDir()) {
@@ -2686,6 +2691,7 @@ TEST(VehicleModels_TransportPassengerFiresHisOwnWeapon)
 	if (!g.loaded || !g.templates.find("as_at")) {
 		return;
 	}
+	g.passengerWeapons = true;
 	const uint32_t at = g.start("as_at", {0, 2, 6});
 	const auto seats = g.world->vehicleSeats(at);
 	CHECK(seats.size() >= 7);
@@ -2725,6 +2731,7 @@ TEST(VehicleModels_TransportPassengerRecoilAndHudAfterPilot)
 		Garage g(gameDir(), mod);
 		CHECK(g.loaded);
 		if (!g.loaded) return;
+		g.passengerWeapons = true; // enhanced.passengerWeapons
 		const uint32_t at = g.start("as_at", {0, 2, 6});
 		CHECK(g.enter(at));
 		game::GameWorld::PlayerInfo me;
@@ -2797,7 +2804,7 @@ TEST(VehicleModels_TransportPassengerRecoilAndHudAfterPilot)
 	}
 }
 
-// A passenger reloads his weapon from the seat.
+// A passenger reloads his weapon from the seat (enhanced.passengerWeapons).
 TEST(VehicleModels_TransportPassengerReloads)
 {
 	if (!gameDir()) {
@@ -2807,6 +2814,7 @@ TEST(VehicleModels_TransportPassengerReloads)
 	if (!g.loaded || !g.templates.find("as_at")) {
 		return;
 	}
+	g.passengerWeapons = true;
 	const uint32_t at = g.start("as_at", {0, 40, 6});
 	CHECK(g.enter(at));
 	game::SoldierInput input;
@@ -2843,7 +2851,7 @@ TEST(VehicleModels_TransportPassengerReloads)
 }
 
 // A passenger's rounds leave the transport that carries him: they start inside
-// its hull and must not meet it.
+// its hull and must not meet it (enhanced.passengerWeapons).
 TEST(VehicleModels_TransportPassengerRoundsClearTheHull)
 {
 	if (!gameDir()) {
@@ -2853,6 +2861,7 @@ TEST(VehicleModels_TransportPassengerRoundsClearTheHull)
 	if (!g.loaded || !g.templates.find("as_at")) {
 		return;
 	}
+	g.passengerWeapons = true;
 	const uint32_t at = g.start("as_at", {0, 40, 6});
 	CHECK(g.enter(at));
 	game::SoldierInput input;
@@ -2886,7 +2895,7 @@ TEST(VehicleModels_TransportPassengerRoundsClearTheHull)
 
 // A passenger's round goes where his camera looks: from the seat's eye along
 // the seated view (the head's twist on foot is left behind), carried along by
-// the flying transport as a door gun's rounds are.
+// the flying transport as a door gun's rounds are (enhanced.passengerWeapons).
 TEST(VehicleModels_TransportPassengerFiresWhereHeLooks)
 {
 	if (!gameDir()) {
@@ -2896,6 +2905,7 @@ TEST(VehicleModels_TransportPassengerFiresWhereHeLooks)
 	if (!g.loaded || !g.templates.find("as_at")) {
 		return;
 	}
+	g.passengerWeapons = true;
 	const uint32_t at = g.start("as_at", {0, 40, 6}, 3, 0, -10000, 30);
 	CHECK(g.world->spawnPlayer(2));
 	game::SoldierInput input;

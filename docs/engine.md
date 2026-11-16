@@ -2300,7 +2300,10 @@ transports' (eu_at, as_at) hull and seats, the pod arrays): the exit key (player
 `0x94c0` whose fire is one, whatever its input: the transports'
 air_pod_launcher is on PIFire, the APC pod seats' on PIAltFire; the fire
 button on a PIFire pod launcher launches the pod the same way, its round
-eu_pod_drop having enterOnSpawn; `launchPod(player, exitKey)`) when a ray up the frame (3 m past it) and four
+eu_pod_drop having enterOnSpawn; `launchPod(player, exitKey)`; under
+`enhanced.passengerWeapons`, not retail, a seat whose only PIFire weapon is
+that launcher gives the fire to the soldier's own weapon instead,
+`GameWorld::passengerWeapon`) when a ray up the frame (3 m past it) and four
 at the (±1, ±1) corners meet nothing and more than a second has passed,
 then player slot `0x238(8)` and event 6; else the usual exit
 (`enterOrLeaveVehicle`, without the second). `allowTogglePosition`
@@ -16291,6 +16294,30 @@ in `src/AI/NavMesh`:
   (rolling segments toward the cluster path's links, each searched over
   the whole mesh); `findPath` (tools, tests) keeps a cluster corridor for
   one polygon search.
+- **Cost classes and the bot kinds' profiles.** A polygon's class
+  (`+0x01`) names its material (0x10058570): Invalid 0, Ground 1, Road 2,
+  Shallows 3, DeepWater 4, DangerObject 5, OtherDangerObject 6,
+  BothDangerObject 7. Each `aiSettings.setVehicle` type (the bot kind)
+  gets its own profile (AIDLL 0x10051050 appends the default 0x100bdfb0:
+  1, but Invalid −1 and classes 5 and 7 1000), and
+  `aiSettings.setVehicleMaterialCost <kind> <material> <cost>` sets one
+  class's multiplier on it (0x1000be20 → 0x1004fcf0 → 0x100bdcc0). A
+  negative multiplier is impassable (0x100bdd00). The pathfinder takes the
+  kind's profile (DAT_10139470 vt+0xc0: the goal's polygon 0x1003f000,
+  the searches, the look-ahead) and so do the drivers' room rays
+  (0x1003f930 with the unit's kind, 0x100aa510). From
+  `AI/AIBehaviours.ai`: Tank, FloatingTank and Mech Shallows 1.5 and
+  DeepWater −1, Car Shallows 1.8 and DeepWater −1, ArmedCar 1 and 2,
+  Infantery 1.5 and 6. So tanks, mechs and cars neither plan nor measure
+  room into deep water, and a room ray that would enter it ends there with
+  class 4 (its diagonal then doesn't count, a side gives full reach).
+  Class-4 polygons on the vehicle and infantry meshes: Camp Gibraltar
+  650 and 989, Suez_Canal 93 and 121, Verdun 5 and 159, minsk_coop none
+  and 1,122, Cerbere_Landing none. The rewrite builds the profile from
+  those settings (`BotSettings::costProfile`, the names as written,
+  0x100fdf60): a driver's follower takes its vehicle's kind
+  (`equipmentOf`) for its searches and room rays, a bot on foot the
+  Infantery profile for its map spot and searches.
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.

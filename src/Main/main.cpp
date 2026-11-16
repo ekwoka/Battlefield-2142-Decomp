@@ -1571,7 +1571,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const auto playerSeats = inVehicle ? round.vehicleSeats(playerVehicle->id()) : std::vector<game::GameWorld::SeatLayout> {};
 	const bool kitSeat = inVehicle && world.playerInfo(world.localPlayer(), seatedPlayer) && seatedPlayer.seat >= 0
 		&& static_cast<size_t>(seatedPlayer.seat) < playerSeats.size()
-		&& playerSeats[static_cast<size_t>(seatedPlayer.seat)].kitWeapon();
+		&& round.passengerWeapon(playerSeats[static_cast<size_t>(seatedPlayer.seat)]);
 	{
 		const world::ObjectTemplate* t = inVehicle ? playerVehicle->objectTemplate() : nullptr;
 		const auto category = t ? t->settings().find("vehicleCategory") : decltype(t->settings().end()) {};
@@ -4799,6 +4799,7 @@ int runGame(Options& options, Session& session)
 		// 0x00561e20 checks the server's game mode).
 		round.setGameMode(options.gameMode);
 		round.setCombatAreas(&combatAreas);
+		round.setPassengerWeapons(&enhancedSettings.enabled, &enhancedSettings.passengerWeapons);
 		if (session.admin) {
 			const net::ServerSettings& sv = session.admin->settings;
 			round.setFriendlyFire({static_cast<float>(sv.soldierFriendlyFire), static_cast<float>(sv.vehicleFriendlyFire),
