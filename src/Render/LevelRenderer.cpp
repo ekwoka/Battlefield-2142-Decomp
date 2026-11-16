@@ -2101,10 +2101,15 @@ void LevelRenderer::syncObjects()
 			}
 			if (geometry != instance.shownGeometry || lod != instance.shownLod) {
 				const GpuMesh* shown = mesh(*m_sources, instance.geometry, geometry, geometry < 0 ? 0 : lod);
+				// A three-geometry mesh showing its first casts with its second
+				// (BundledMeshDrawShadowMap 0x100c6871): a cockpit shadows as the hull.
+				instance.shadowMesh = geometry == 0 && instance.mesh->bundled && instance.mesh->geometries == 3
+					? mesh(*m_sources, instance.geometry, 1, lod)
+					: nullptr;
 				if (shown) {
 					instance.mesh = shown;
-					m_gpu.flushUploads();
 				}
+				m_gpu.flushUploads();
 				instance.shownGeometry = geometry;
 				instance.shownLod = lod;
 			}

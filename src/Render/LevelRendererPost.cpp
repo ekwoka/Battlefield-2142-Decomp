@@ -353,7 +353,7 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 	const GpuMesh* bound = nullptr;
 	TransformUniforms transforms {};
 	for (const Instance& instance : m_instances) {
-		const GpuMesh* gpuMesh = instance.mesh;
+		const GpuMesh* gpuMesh = instance.shadowMesh ? instance.shadowMesh : instance.mesh;
 		if (!gpuMesh || instance.fade < 1.0f) {
 			continue;
 		}
@@ -393,7 +393,7 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 			continue;
 		}
 		// The LOD the world pass picked for it if any, else its own.
-		if (instance.lods.size() > 1) {
+		if (instance.lods.size() > 1 && !instance.shadowMesh) {
 			for (size_t lod = instance.lods.size(); lod-- > 1;) {
 				if (instance.lods[lod].resolved && instance.lods[lod].mesh) {
 					gpuMesh = instance.lods[lod].mesh;

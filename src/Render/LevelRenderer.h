@@ -453,6 +453,7 @@ private:
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
+		const GpuMesh* shadowMesh = nullptr; // cast instead of the shown geometry (null: the shown)
 		// The exterior's LODs by distance, loaded when first drawn: the mesh
 		// and that LOD's lightmap (the atlas keys name the LOD).
 		struct Lod {
