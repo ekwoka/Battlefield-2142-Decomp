@@ -10956,7 +10956,7 @@ int runGame(Options& options, Session& session)
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera,
-										&questions, &session, &localKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										&questions, &session, &localKit, &membersShown, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
 										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
@@ -10972,11 +10972,17 @@ int runGame(Options& options, Session& session)
 					g_spawnScreenHidden = false;
 					if (g_remoteHud) g_remoteHud->requestedSpawn = false;
 				}
+				const bool deploymentWasShown = dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden);
+				const bool enterConfirms = dice::main::deploymentConfirmPressed(false,
+					deploymentPressed && playerPresent, deploymentWasShown, membersShown);
 				if (deploymentPressed && playerPresent) {
-					if (alive) g_deploymentOpen = !g_deploymentOpen;
-					else g_spawnScreenHidden = !g_spawnScreenHidden;
+					// Retail toggles menu state 1, not every visible deployment
+					// tab: from squad states 18/19 the first Enter returns to KIT.
+					membersShown = false;
+					if (alive) g_deploymentOpen = !enterConfirms;
+					else g_spawnScreenHidden = enterConfirms;
 					g_bigMap = false;
-					// Retail 0x00751855: reopening deployment cancels the
+					// Retail 0x00754e88..0x00754eac: opening deployment cancels the
 					// submitted group, retaining the highlighted point.
 					if (dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden)) {
 						if (session.client) {
@@ -10986,21 +10992,24 @@ int runGame(Options& options, Session& session)
 					}
 				}
 				deploymentWas = in.deployment;
-				const bool done = hudManager.number("HudDone") != 0;
+				const bool done = hudManager.number("HudDone") != 0 || enterConfirms;
 				const auto action = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
-					bool submitted = alive;
 					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
 						session.client->selectKit(localKit);
 						session.client->selectSpawnGroup(joinedSpawnGroup(g_remoteHud->chosenSpawnMarker));
-						g_remoteHud->requestedSpawn = submitted = true;
+						g_remoteHud->requestedSpawn = true;
 					} else if (!alive && !session.client) {
-						submitted = round.requestSpawn(round.localPlayer());
+						round.requestSpawn(round.localPlayer());
 					}
-					if (submitted) {
-						g_deploymentOpen = false;
-						if (!alive) g_spawnScreenHidden = true;
-					}
+					// setDone(true) closes even with no highlighted spawn group.
+					g_deploymentOpen = false;
+					if (!alive) g_spawnScreenHidden = true;
+				}
+				if ((deploymentPressed || done) && std::getenv("BF2142_INPUT_TRACE")) {
+					std::printf("deployment-input: enter=%d was-shown=%d confirms=%d alive=%d queued=%d\n",
+						deploymentPressed, deploymentWasShown, done, alive,
+						session.client ? g_remoteHud && g_remoteHud->requestedSpawn : round.spawnRequested(round.localPlayer()));
 				}
 				spawnWasRequested = !session.client && round.spawnRequested(round.localPlayer());
 				hudManager.set("HudDone", 0);

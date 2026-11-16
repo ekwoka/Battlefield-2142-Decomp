@@ -34,14 +34,20 @@ TEST(DeploymentDone_InitialAndDeathRespawnLifecycle)
 	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
 }
 
-TEST(DeploymentScreen_EnterHidesDeathScreenWhileTimerRuns)
+TEST(DeploymentScreen_EnterClosesAndConfirmsWhileTimerRuns)
 {
 	using dice::main::deploymentScreenShown;
 	CHECK(deploymentScreenShown(false, false, false)); // dead: shown
 	CHECK(!deploymentScreenShown(false, false, true)); // dead, Enter pressed: hidden
 	CHECK(deploymentScreenShown(true, true, false) && !deploymentScreenShown(true, false, true));
-	// Hiding is not DONE: the timer keeps running and only DONE (or the server) spawns.
+	// Enter on the open screen is DONE; opening it is not confirmation.
 	CHECK(dice::main::deploymentDoneAction(false, true, false, false, 3) == dice::main::DeploymentDoneAction::None);
+	CHECK(dice::main::deploymentConfirmPressed(false, true, true));
+	CHECK(!dice::main::deploymentConfirmPressed(false, true, false));
+	CHECK(dice::main::deploymentConfirmPressed(true, false, true));
+	CHECK(!dice::main::deploymentConfirmPressed(false, false, true));
+	CHECK(!dice::main::deploymentConfirmPressed(false, true, true, true)); // SQUAD -> KIT
+	CHECK(dice::main::deploymentConfirmPressed(true, false, true, true)); // DONE closes either tab
 }
 
 TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)

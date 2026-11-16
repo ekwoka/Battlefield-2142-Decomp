@@ -29,6 +29,15 @@ namespace dice::main {
 		return respawnIn > 0 ? "HUD_CENTERINFOBOX_timetospawn" : "HUD_CENTERINFOBOX_instantspawn";
 	}
 
+	// Enter closes state 1 by calling setDone(true), just like the button
+	// (dead: 0x00754f29; alive: 0x00754e49..0x00754e65). Opening it
+	// calls setDone(false) and, while dead, clears the submitted group.
+	// From squad states 18/19 Enter selects state 1 first; it does not close.
+	constexpr bool deploymentConfirmPressed(bool doneButton, bool enterPressed, bool screenShown, bool squadTab = false)
+	{
+		return doneButton || (enterPressed && screenShown && !squadTab);
+	}
+
 	// Enter toggles the spawn screen (menu state 1, 0x00754d74 -> 0x0074fd90) alive or dead; the respawn
 	// timer is the server's (0x004bfe40) and never looks at the screen. Dead, it starts shown.
 	constexpr bool deploymentScreenShown(bool alive, bool open, bool hiddenWhileDead)

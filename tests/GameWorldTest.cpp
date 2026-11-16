@@ -1,3 +1,4 @@
+#include "Main/DeploymentLifecycle.h"
 // Round simulation: control points and object spawners.
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
@@ -7903,4 +7904,35 @@ TEST(GameWorld_DeploymentConfirmedLostPointNeverFallsBack)
 	game::GameWorld::PlayerInfo info;
 	CHECK(range.world->playerInfo(me, info) && !info.alive);
 	CHECK(!range.world->spawnRequested(me));
+}
+
+TEST(GameWorld_DeploymentEnterAndDoneConfirmTheSameSpawn)
+{
+	for (bool useEnter : {false, true}) {
+		Range range;
+		const int me = range.world->joinPlayer(2);
+		range.world->requireSpawnConfirmation(me);
+		range.world->setSpawnChoice(me, 2);
+		const auto confirm = [&] {
+			if (dice::main::deploymentConfirmPressed(!useEnter, useEnter, true)) range.world->requestSpawn(me);
+		};
+		confirm(); // initial deployment: either DONE or Enter on the open screen
+		range.world->tick(1 / 30.0f);
+		game::GameWorld::PlayerInfo info;
+		CHECK(range.world->playerInfo(me, info) && info.alive);
+		range.world->setSpawnTime(2);
+		range.world->suicide(info.soldier);
+		confirm(); // the same input queues through a running death timer
+		for (int i = 0; i < 30; ++i) range.world->tick(1 / 30.0f);
+		CHECK(range.world->playerInfo(me, info) && !info.alive && info.respawnIn > 0);
+		CHECK(range.world->spawnRequested(me));
+		// Opening the closed screen does not act as DONE; it cancels instead.
+		CHECK(!dice::main::deploymentConfirmPressed(false, true, false));
+		range.world->cancelSpawnRequest(me);
+		for (int i = 0; i < 90; ++i) range.world->tick(1 / 30.0f);
+		CHECK(range.world->playerInfo(me, info) && !info.alive && info.respawnIn == 0);
+		confirm(); // close again after expiry: either input spawns
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->playerInfo(me, info) && info.alive);
+	}
 }
