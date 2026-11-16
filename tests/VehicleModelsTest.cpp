@@ -1381,6 +1381,76 @@ TEST(Vehicles_BotPilotsFlyToAPointAndHover)
 	}
 }
 
+// A burst at the tail engine is beyond the hull origin's 4 m reach. The
+// part's world position must count, including the vehicle's rotation.
+TEST(Vehicles_StaticAAEmpReachesTransportParts)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"as_at", "eu_at"}) {
+			for (float yaw : {0.0f, 90.0f}) {
+				Garage g(gameDir(), mod);
+				CHECK(g.loaded && g.templates.find(name));
+				if (!g.loaded || !g.templates.find(name)) continue;
+				const auto& children = g.templates.find(name)->children();
+				const auto tail = std::find_if(children.begin(), children.end(), [](const auto& c) {
+					return c.name.find("TailEngine") != std::string::npos;
+				});
+				CHECK(tail != children.end());
+				if (tail == children.end()) continue;
+				const uint32_t v = g.start(name, {20, 60, 20}, 1 / 30.0f, 0, -10000, yaw);
+				const auto* object = g.objects.find(v);
+				const auto rotation = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+				const physics::Vec3 burst = g.position(v) + rotation.transform({tail->position.x, tail->position.y, tail->position.z});
+				CHECK(physics::lengthSquared(burst - g.position(v)) > 16);
+				const float hp = g.world->hitPoints(v);
+				CHECK(g.world->detonate("static_aa_missile_projectile", burst + physics::Vec3 {200, 0, 0}));
+				CHECK(g.world->empLevel(v) == 0);
+				CHECK(g.world->detonate("static_aa_missile_projectile", burst));
+				std::fprintf(stderr, "  %s %s yaw %.0f tail EMP %d\n", mod, name, yaw, g.world->empLevel(v));
+				CHECK(g.world->empLevel(v) > 0);
+				CHECK(g.world->hitPoints(v) == hp);
+			}
+		}
+	}
+}
+
+// Nested offsets compose in the parent's rotated frame. Each server part
+// contributes independently; a separate armour or a disabled subtree stops
+// propagation to the hull. Tiny amounts and the exact radius stay excluded.
+TEST(Vehicles_StaticAAEmpPartFalloffAndArmourBoundary)
+{
+	if (!gameDir()) return;
+	for (int scenario = 0; scenario < 8; ++scenario) {
+		Garage g(gameDir());
+		CHECK(g.loaded);
+		if (!g.loaded) continue;
+		// Use a small EMP amount to expose per-part accumulation and the
+		// 0.1 cutoff without saturating the hull's three steps.
+		g.templates.find("static_aa_missile_projectile")->settings()["detonation.explosionDamage"] = "6";
+		auto* hull = g.templates.find("as_at");
+		hull->children().clear();
+		auto* parent = g.templates.create("SimpleObject", "emp_test_parent");
+		auto* leaf = g.templates.create("SimpleObject", "emp_test_leaf");
+		hull->children().push_back({parent->name(), {0, 0, -10}, {90, 0, 0}});
+		parent->children().push_back({leaf->name(), {0, 0, 6}, {}});
+		if (scenario == 4) parent->components().push_back("Armor"); // no takesEmpDamage: still the nearest armour
+		if (scenario == 5) parent->setFlags(world::TemplateFlags::ClientOnly);
+		if (scenario == 7) parent->children().push_back({leaf->name(), {0, 0, 6}, {}});
+		const uint32_t v = g.start("as_at", {20, 60, 20}, 1 / 30.0f);
+		if (scenario == 6) g.objects.find(v)->setChildrenDisabled(true);
+		const auto* object = g.objects.find(v);
+		const auto rotation = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+		const float distance = scenario == 1 ? 4.0f : scenario == 2 ? 3.95f : scenario == 3 ? 3.9f : 2.0f;
+		// Local leaf at (6, 0, -10), with the blast further along x.
+		const auto burst = g.position(v) + rotation.transform({6 + distance, 0, -10});
+		CHECK(g.world->detonate("static_aa_missile_projectile", burst));
+		const int expected = scenario == 0 || scenario == 3 ? 1 : scenario == 7 ? 2 : 0;
+		std::fprintf(stderr, "  EMP part scenario %d: %d expected %d\n", scenario, g.world->empLevel(v), expected);
+		CHECK(g.world->empLevel(v) == expected);
+	}
+}
+
 // Spawning into a vehicle: the APC carries a SpawnPoint with
 // setEnterOnSpawn 1 (eu_apc_SpawnPoint): chosen as a mobile spawn point,
 // the soldier appears in its nearest free seat (0x005a98e0). A spawn
