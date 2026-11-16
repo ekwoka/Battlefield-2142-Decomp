@@ -15,6 +15,7 @@
 #include "EnvMaps.h"
 #include "Fog.h"
 #include "TerrainLod.h"
+#include "TickBlend.h"
 #include "TitanParts.h"
 #include "Terrain/Undergrowth.h"
 #include "Effects/Effects.h"
@@ -33,6 +34,7 @@
 #include <map>
 #include <unordered_map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -130,6 +132,8 @@ struct FirstPersonScene {
 	// Effects of the first-person models (the muzzle flash), drawn in the
 	// same pass; may be null.
 	const effects::EffectManager* effects = nullptr;
+	// The unsmoothed eye used to place these models and their effects.
+	std::optional<Camera> placementCamera;
 };
 
 struct LevelSources {
@@ -306,7 +310,8 @@ public:
 
 	// Follows the world's objects: moves instances with their objects, adds
 	// new objects and drops removed ones (call once a frame before draw).
-	void syncObjects();
+	// Objects are drawn between their last two ticks' transforms (TickBlend.h).
+	void syncObjects(TickBlend blend = {});
 	// The effects' debris pieces (effects::DebrisPiece) as instances of their
 	// mesh with only their geometryPart shown, replaced each frame.
 	void syncDebris();
@@ -499,6 +504,7 @@ private:
 		mutable std::vector<Mat4> previousParts;
 		mutable std::vector<anim::Matrix> previousPose;
 		mutable unsigned previousFrame = ~0u;
+		std::vector<Mat4> partsTicked, partsPrevious; // the parts at the last two ticks (TickBlend.h)
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {
@@ -591,6 +597,12 @@ private:
 	const AnimatedUVLook& animatedUVLook(const world::ObjectTemplate& objectTemplate) const;
 	mutable std::unordered_map<const world::ObjectTemplate*, AnimatedUVLook> m_animatedUVLooks;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
+	// Each object's transform at the last two ticks and as drawn (TickBlend.h).
+	struct ObjectBlend {
+		Mat4 previous, current, drawn;
+	};
+	std::unordered_map<uint32_t, ObjectBlend> m_objectBlend;
+	Mat4 drawnTransform(const world::Object& object) const;
 	// syncPlaced's: the templates asked for this frame, and each template's
 	// parts at rest (collectParts without an object).
 	std::vector<LevelSources::PlacedTemplate> m_placedScratch;
@@ -1075,6 +1087,7 @@ private:
 	SDL_GPUBuffer* m_firstPersonParticleVertices = nullptr;
 	std::vector<ParticleGroup> m_firstPersonParticleGroups;
 	FirstPersonScene m_firstPerson;
+	Mat4 m_firstPersonViewAdjustment;
 	bool m_hasFirstPerson = false;
 	const GpuMesh* m_skyMesh = nullptr;
 	SDL_GPUTexture* m_skyTexture = nullptr;

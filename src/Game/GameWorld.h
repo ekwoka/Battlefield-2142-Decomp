@@ -2081,6 +2081,8 @@ public:
 	const std::vector<Strike>& strikes() const { return m_strikes; }
 	// Supply crates dropped by the commanders (their objects).
 	std::vector<uint32_t> supplyCrates() const;
+	// Seconds since a commander's crate was dropped (-1: not one).
+	float supplyCrateAge(uint32_t object) const;
 	// A supply object's storage for its name tag's bar (RendDX9 0x1016c1e0
 	// with Nametag.showSupply: the SupplyObject's +0x194 over its
 	// sharedStorageSize +0x2bc, 0..1) and the bar's kind (the tag's +0xc8:
@@ -3782,6 +3784,15 @@ private:
 	// shake's own-object test).
 	void explode(const physics::Vec3& at, const ProjectileSettings& settings, int attacker, float facing = 0,
 		uint32_t exclude = 0, uint32_t hitObject = 0, const physics::Vec3* up = nullptr);
+	// Damage to an armoured round (ProjectileSettings::hitPoints): `amount`
+	// times the cell of `material` against its armour, 0.1 or less dropped
+	// (0x005a8900). Out of hit points it goes off in the next projectile
+	// update (the time-up event 0x18, see ProjectileSettings::hitPoints).
+	void damageRound(Projectile& round, float amount, uint32_t material);
+	// The defuser's removal (0x005d8ac0 after its heal, 0x005d8d09..0x005d8dff):
+	// the armoured round goes without going off, and each of the holder's
+	// firearms that fires its template gets a round back (slot 0x84(1)).
+	void defuseRound(Projectile& round, Player& holder);
 	// The object a segment meets first (static objects' projectile LOD,
 	// bodies, the terrain as 0); false when nothing is in the way.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object) const;

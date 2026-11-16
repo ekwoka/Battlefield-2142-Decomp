@@ -6,6 +6,7 @@
 #include "Render/GpuContext.h"
 #include "Render/LevelRenderer.h"
 #include "Render/PngWriter.h"
+#include "Scene/EnhancedSettings.h"
 #include "Game/TickTimer.h"
 #include "Input/ControlMap.h"
 #include "Input/GameControllers.h"
@@ -23,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
+#include <utility>
 
 
 namespace dice::hfe {
@@ -544,9 +546,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		Uint64 last = SDL_GetTicksNS();
 		const Uint64 start = last;
 		shown.opened = last; // scripted input starts after the level is ready
-		MissileViewSmoothing missileSmoothing;
+		MissileViewSmoothing viewSmoothing;
 		TickTimer ticks(10, 30.0f); // as BF2Engine
 		ticks.advance(0);
+		int blendTicks = 0;           // the last ticking frame's count (0x0040c300 -> 0x0043ec00)
+		bool tickedSinceSync = false; // the objects have not yet taken the latest ticks
 		bool running = true;
 		bool pointer = false; // the mouse is a pointer (a menu is up)
 		bool captureWantedBefore = false;
@@ -984,10 +988,19 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onPlayerInput(input);
 				turn = 0;
 			}
-			const int elapsedTicks = ticks.advance(static_cast<double>(now - start) / 1e9);
+			const double seconds = static_cast<double>(now - start) / 1e9;
+			const int elapsedTicks = ticks.advance(seconds);
 			if (elapsedTicks > 0 && options.onTicks) {
 				options.onTicks(elapsedTicks);
 			}
+			if (elapsedTicks > 0) {
+				blendTicks = elapsedTicks;
+				tickedSinceSync = true;
+			}
+			// enhanced.tickBlend (experimental): drawn between the last two ticks
+			// (Render/TickBlend.h); otherwise as each tick left it.
+			const bool tickBlend = sources.enhanced && sources.enhanced->enabled && sources.enhanced->tickBlend;
+			const float blendAlpha = render::tickBlendAlpha(seconds, ticks.previousTickTime(), blendTicks, ticks.tickLength());
 			ViewerOptions::PlayerView view;
 			{
 				int w = 1, h = 1;
@@ -1028,15 +1041,24 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					camera.position = head - camera.forward() * 4.0f + camera.right() * 0.6f;
 				}
 			}
-			// The projectile follows fixed 30 Hz simulation samples. Interpolate
-			// only the ridden missile camera at the actual render phase.
-			MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
-			const auto smooth = missileSmoothing.sample(view.firstPerson ? view.projectileSerial : 0, elapsedTicks > 0,
-				static_cast<float>(ticks.interpolation(static_cast<double>(now - start) / 1e9)), raw);
-			if (view.firstPerson && view.projectileSerial) {
+			// The ridden projectile's camera between its fixed 30 Hz samples;
+			// with enhanced.tickBlend every game camera, as the objects it looks
+			// at, each kind of view keeping its own history.
+			const uint32_t missileKey = view.firstPerson ? view.projectileSerial : 0;
+			const uint32_t viewKey = !tickBlend ? missileKey
+				: !playing ? 0
+				: missileKey ? missileKey
+				: 0x80000000u | (firstPerson ? 1u : view.external ? 2u : 3u);
+			if (viewKey) {
+				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
+				const auto smooth = tickBlend
+					? viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump)
+					: viewSmoothing.sample(viewKey, elapsedTicks > 0, static_cast<float>(ticks.interpolation(seconds)), raw);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
 				camera.yaw = smooth.yaw;
 				camera.pitch = smooth.pitch;
+			} else {
+				viewSmoothing.sample(0, false, 0, {}); // forget the last view's history
 			}
 			const float speed = (keys[SDL_SCANCODE_LSHIFT] ? 200.0f : 40.0f) * dt;
 			const auto key = [keys](SDL_Scancode code) { return keys[code] ? 1.0f : 0.0f; };
@@ -1064,7 +1086,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onView(position, camera.yaw, camera.pitch, camera.fovY,
 					height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f);
 			}
-			level.syncObjects();
+			const bool tickedForObjects = std::exchange(tickedSinceSync, false);
+			level.syncObjects(tickBlend ? render::TickBlend {tickedForObjects, blendAlpha} : render::TickBlend {});
 			level.draw(commands, swapchain, target, camera, sources.lights);
 			SDL_SubmitGPUCommandBuffer(commands);
 			if (!shown.shot.empty()) {

@@ -56,18 +56,27 @@ struct Field {
 	bool loaded = false;
 	uint32_t groundMaterial = 0;
 
+	// `materialTable`: the shipped damage table (Common/Material) handed to
+	// the world, as the game does.
 	explicit Field(const std::string& mod = "mods/bf2142", bool collisionMeshes = false,
-		sound::ISoundEngine* audioEngine = nullptr)
+		sound::ISoundEngine* audioEngine = nullptr, bool materialTable = false)
 		: soundManager(audioEngine, templates)
 	{
 		if (audioEngine) {
 			soundManager.registerTemplateType();
 			sound::registerSoundConsoleMethods(console, soundManager);
+		}
+		if (audioEngine || materialTable) {
 			physics::registerMaterialConsoleMethods(console, materials);
 		}
 		if (const char* gameDir = std::getenv("BF2142_GAME_DIR")) {
 			files.setRootPath(gameDir);
 			files.addSearchPath(mod);
+			if (materialTable && files.mountArchive("Common_server.zip", "Common")) {
+				std::string out;
+				console.run("Common/Material/materialManagerDefine.con", {}, out);
+				console.run("Common/Material/materialManagerSettings.con", {}, out);
+			}
 			if (files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons")) {
 				if (collisionMeshes) {
 					physics::registerCollisionConsoleMethods(console, collisionTemplates);
@@ -132,7 +141,7 @@ struct Field {
 				{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 					 normal = {0, 1, 0};
 					 return 0.0f;
-				 }, [this](float, float) { return groundMaterial; }}, audioEngine ? &materials : nullptr);
+				 }, [this](float, float) { return groundMaterial; }}, audioEngine || materialTable ? &materials : nullptr);
 		}
 		world->setEventSink([this](const std::string& event, const game::ScriptArgs& args) {
 			events.emplace_back(event, args);
@@ -1108,5 +1117,287 @@ TEST(Commander_C4HurtsAssets)
 			std::fprintf(stderr, "  %s/%s: hp %.0f -> %.0f\n", mod, name, before, after);
 			CHECK(after < before);
 		}
+	}
+}
+
+// The shipped damage table against the armour of C4 and the mines
+// (defaultMaterial 90): of the weapons' rounds and blasts only
+// Detonation_Defuse_DMG 32 (the explosive shotgun round's blast) x10,
+// Detonation_C4 80 x1, Bullet_Heavy_Sniper 131 x12 and Engineer_Defuse 132
+// x20 do anything; the bullets, shells, missiles and grenades are 0. The
+// vehicles' own explosions (99-101) have no cell and take the lookup's
+// fallback of 1.
+TEST(ArmouredRounds_DamageTableAgainstCharges)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	Field field("mods/bf2142", true, nullptr, true);
+	CHECK(field.materials.cellCount() > 0);
+	const physics::MaterialManager& m = field.materials;
+	CHECK(m.damageMod(32, 90) == 10.0f && m.damageMod(80, 90) == 1.0f && m.damageMod(131, 90) == 12.0f
+		&& m.damageMod(132, 90) == 20.0f);
+	for (const uint32_t weapon : {27u, 29u, 30u, 31u, 38u, 39u, 40u, 41u, 42u, 43u, 44u, 45u, 46u, 49u, 50u, 52u, 53u,
+			 55u, 56u, 57u, 69u, 70u, 71u, 88u, 92u, 109u, 118u, 121u, 124u, 130u, 133u}) {
+		if (m.damageMod(weapon, 90) != 0) {
+			std::fprintf(stderr, "  material %u hurts armour 90: %g\n", weapon, m.damageMod(weapon, 90));
+		}
+		CHECK(m.damageMod(weapon, 90) == 0);
+	}
+	CHECK(m.damageMod(99, 90) == 1.0f && m.damageMod(101, 90) == 1.0f);
+}
+
+// C4 lying on the ground: a submachine-gun round does nothing, a heavy
+// sniper round (100 x 12 against its 1000) sets it off, and a charge 1 m
+// from a blast (Detonation_C4, 1000 x 1) goes off with it.
+TEST(ArmouredRounds_C4ShotAndChained)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	Field field("mods/bf2142", true, nullptr, true);
+	if (!field.loaded) {
+		CHECK(field.loaded);
+		return;
+	}
+	world::registerUntypedTemplateProperties(field.console, field.templates,
+		{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+			"detonation.detonateOnWaterCollision", "floaterMod", "hasOnTimeEffect"});
+	std::string out;
+	field.console.run("Objects/Weapons/Handheld/Unl_c4/unl_c4.con", {}, out);
+	field.console.run("Objects/Weapons/Handheld/unl_adv_sni/unl_adv_sni.con", {}, out);
+	field.console.run("Objects/Weapons/Handheld/EU_SMG/eu_smg.con", {}, out);
+	const world::ObjectTemplate* c4 = field.templates.find("Unl_c4_Projectile");
+	CHECK(c4 && field.templates.find("unl_adv_sni_Projectile") && field.templates.find("eu_smg_Projectile"));
+	if (!c4) {
+		return;
+	}
+	const game::ProjectileSettings settings = game::ProjectileSettings::fromTemplate(*c4);
+	CHECK(settings.hitPoints == 1000 && settings.armourMaterial == 90 && settings.onTimeEffect);
+	const int owner = field.soldier(1, 60, 60);
+	const int shooter = field.soldier(2, 70, 60);
+	for (const float x : {0.0f, 1.0f, 30.0f}) {
+		CHECK(field.world->launchProjectile("Unl_c4_Projectile", {x, 0.3f, 0}, {0, -3, 0}, owner));
+	}
+	field.run(1);
+	const auto charge = [&](float x) -> const game::Projectile* {
+		for (const auto& p : field.world->projectiles()) {
+			if (p.alive && p.settings && p.settings->name == "Unl_c4_Projectile" && std::fabs(p.position.x - x) < 0.3f) {
+				return &p;
+			}
+		}
+		return nullptr;
+	};
+	CHECK(charge(0) && charge(1) && charge(30));
+	const auto shoot = [&](const char* round, float x, float speed) {
+		const game::Projectile* target = charge(x);
+		if (!target) {
+			return;
+		}
+		const physics::Vec3 from {x, 1.0f, -4};
+		physics::Vec3 d = target->position - from;
+		d = d * (speed / std::sqrt(physics::lengthSquared(d)));
+		CHECK(field.world->launchProjectile(round, from, d, shooter));
+		for (int i = 0; i < 10; ++i) {
+			field.world->tick(1 / 30.0f);
+		}
+	};
+	shoot("eu_smg_Projectile", 30, 300);
+	CHECK(charge(30) != nullptr);
+	shoot("unl_adv_sni_Projectile", 30, 1200);
+	CHECK(charge(30) == nullptr);
+	CHECK(charge(0) && charge(1));
+	shoot("unl_adv_sni_Projectile", 0, 1200);
+	CHECK(charge(0) == nullptr);
+	CHECK(charge(1) == nullptr);
+}
+
+// The engineer's defuser (Unl_Defuser: RTHeal with Engineer_Defuse 132,
+// 10 m, while firing) aimed at an enemy C4 5 m ahead: the charge is
+// deleted without going off (0x005d8ac0). Pointed past it, nothing happens.
+TEST(ArmouredRounds_DefuserRemovesCharge)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const bool aimed : {false, true}) {
+		Field field("mods/bf2142", true, nullptr, true);
+		if (!field.loaded) {
+			CHECK(field.loaded);
+			return;
+		}
+		world::registerUntypedTemplateProperties(field.console, field.templates,
+			{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+				"detonation.detonateOnWaterCollision", "floaterMod", "hasOnTimeEffect", "itemIndex", "pickupEnabled",
+				"ammo.replenishingType", "ammo.abilityRadius", "ammo.abilityStrength", "ammo.abilityMaterial",
+				"ammo.abilityDrain", "ammo.onlyActiveWhileFiring", "ammo.reloadWithoutPlayer"});
+		std::string out;
+		field.console.run("Objects/Weapons/Handheld/Unl_c4/unl_c4.con", {}, out);
+		field.console.run("Objects/Weapons/Handheld/Unl_Defuser/Unl_Defuser.con", {}, out);
+		CHECK(field.templates.find("unl_defuser") && field.templates.find("Unl_c4_Projectile"));
+		world::ObjectTemplate* kit = field.templates.create("Kit", "EU_Assault");
+		CHECK(kit != nullptr);
+		if (!kit) {
+			return;
+		}
+		for (const char* item : {"unl_defuser", "Unl_c4"}) {
+			kit->children().push_back({item, {}, {}});
+		}
+		const int enemy = field.soldier(1, 40, 40);
+		CHECK(field.world->launchProjectile("Unl_c4_Projectile", {0, 0.3f, 5}, {0, -3, 0}, enemy));
+		const int engineer = field.soldier(2, 0, 0);
+		field.world->setBattery(engineer, 1);
+		field.run(1);
+		const auto charge = [&] {
+			for (const auto& p : field.world->projectiles()) {
+				if (p.alive && p.settings && p.settings->name == "Unl_c4_Projectile") {
+					return true;
+				}
+			}
+			return false;
+		};
+		CHECK(charge());
+		game::SoldierInput input;
+		input.selectItem = std::atoi(field.templates.find("unl_defuser")->settings()["itemIndex"].c_str());
+		field.world->setInput(engineer, input);
+		field.world->tick(1 / 30.0f);
+		input.selectItem = 0;
+		input.fire = true;
+		input.aimPitch = aimed ? -17.0f : 20.0f;
+		for (int i = 0; i < 30; ++i) {
+			field.world->setInput(engineer, input);
+			field.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  defuser %s: charge %s\n", aimed ? "on it" : "above it", charge() ? "left" : "gone");
+		CHECK(charge() == !aimed);
+		CHECK(field.alive(engineer)); // removed, not set off 5 m away
+	}
+}
+
+// The defuser on an enemy motion mine (Unl_Mine_Motion: armour 1000 of
+// 10000, material 90), lying 5 m ahead and caught in the air as it moves
+// through the beam: deleted without going off, and the engineer, who
+// carries motion mines and has laid one, gets that one back (0x005d8d70:
+// each firearm firing the round's template, slot 0x84(1)).
+TEST(ArmouredRounds_DefuserRemovesMotionMines)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const bool moving : {false, true}) {
+		Field field("mods/bf2142", true, nullptr, true);
+		if (!field.loaded) {
+			CHECK(field.loaded);
+			return;
+		}
+		world::registerUntypedTemplateProperties(field.console, field.templates,
+			{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+				"detonation.detonateOnWaterCollision", "floaterMod", "hasOnTimeEffect", "itemIndex", "altItemIndex",
+				"pickupEnabled", "armingDelay", "ammo.replenishingType", "ammo.abilityRadius", "ammo.abilityStrength",
+				"ammo.abilityMaterial", "ammo.abilityDrain", "ammo.onlyActiveWhileFiring", "ammo.reloadWithoutPlayer",
+				"ammo.autoReload", "ammo.reloadTime", "fire.maxProjectilesInWorld"});
+		std::string out;
+		field.console.run("Objects/Weapons/Handheld/Unl_Mine_Motion/Unl_Mine_Motion.con", {}, out);
+		field.console.run("Objects/Weapons/Handheld/Unl_Defuser/Unl_Defuser.con", {}, out);
+		const world::ObjectTemplate* mine = field.templates.find("Unl_Mine_Motion_Projectile");
+		CHECK(mine && field.templates.find("unl_defuser"));
+		if (!mine) {
+			return;
+		}
+		const game::ProjectileSettings settings = game::ProjectileSettings::fromTemplate(*mine);
+		CHECK(settings.hitPoints == 1000 && settings.maxHitPoints == 10000 && settings.armourMaterial == 90);
+		world::ObjectTemplate* kit = field.templates.create("Kit", "EU_Assault");
+		for (const char* item : {"unl_defuser", "Unl_Mine_Motion"}) {
+			kit->children().push_back({item, {}, {}});
+		}
+		const int enemy = field.soldier(1, 40, 40);
+		const int engineer = field.soldier(2, 0, 0);
+		field.world->setBattery(engineer, 1);
+		const auto rounds = [&] {
+			for (const auto& w : field.world->weaponAmmo(engineer)) {
+				if (w.weapon == "unl_mine_motion") {
+					return w.rounds;
+				}
+			}
+			return -1;
+		};
+		const auto press = [&](game::SoldierInput input, int ticks) {
+			for (int i = 0; i < ticks; ++i) {
+				field.world->setInput(engineer, input);
+				field.world->tick(1 / 30.0f);
+				input.selectItem = 0;
+				input.turn = 0;
+			}
+		};
+		// One of his own laid behind him: the mines take the alternate slot 6.
+		const int full = rounds();
+		game::SoldierInput input;
+		input.selectItem = 6;
+		press(input, 10);
+		input = {};
+		input.turn = 180;
+		press(input, 1);
+		input = {};
+		input.fire = true;
+		press(input, 1);
+		press({}, 20);
+		input = {};
+		input.turn = 180;
+		press(input, 1);
+		const int laid = rounds();
+		std::fprintf(stderr, "  motion mines: %d, %d after laying one\n", full, laid);
+		CHECK(full > 0 && laid == full - 1);
+		input = {};
+		input.selectItem = 5;
+		press(input, 10);
+		const auto enemyMine = [&]() -> const game::Projectile* {
+			for (const auto& p : field.world->projectiles()) {
+				if (p.alive && p.settings && p.settings->name == "Unl_Mine_Motion_Projectile" && p.player == enemy) {
+					return &p;
+				}
+			}
+			return nullptr;
+		};
+		input = {};
+		input.fire = true;
+		if (!moving) {
+			CHECK(field.world->launchProjectile("Unl_Mine_Motion_Projectile", {0, 0.3f, 5}, {0, -3, 0}, enemy));
+			press({}, 30);
+			const game::Projectile* lying = enemyMine();
+			CHECK(lying && lying->resting);
+			// At its centre from the eyes (the feet + 1.6 m).
+			game::GameWorld::PlayerInfo me;
+			field.world->playerInfo(engineer, me);
+			if (lying) {
+				input.aimPitch = -std::atan2(me.position.y + 1.6f - lying->position.y, lying->position.z - me.position.z) * 57.29578f;
+			}
+			press(input, 15);
+		} else {
+			// Thrown up 5 m ahead; the trigger pressed as the mine rises past
+			// 0.7 m, aimed where it will be (the first scan at once, 0x005d84a0).
+			CHECK(field.world->launchProjectile("Unl_Mine_Motion_Projectile", {0, 0.3f, 5}, {0, 6, 0}, enemy));
+			bool fired = false;
+			float top = 0;
+			for (int i = 0; i < 60 && enemyMine(); ++i) {
+				const game::Projectile* m = enemyMine();
+				top = std::max(top, m->position.y);
+				if (!fired && m->position.y > 0.7f && m->velocity.y > 0) {
+					fired = true;
+					CHECK(!m->resting && m->velocity.y > 1);
+					// At where it will be next tick, from the eyes.
+					game::GameWorld::PlayerInfo me;
+					field.world->playerInfo(engineer, me);
+					const physics::Vec3 next = m->position + m->velocity * (1 / 30.0f);
+					input.aimPitch = -std::atan2(me.position.y + 1.6f - next.y, next.z - me.position.z) * 57.29578f;
+				}
+				press(fired ? input : game::SoldierInput {}, 1);
+			}
+			std::fprintf(stderr, "  thrown mine rose to %.2f m\n", top);
+			CHECK(fired);
+		}
+		std::fprintf(stderr, "  %s mine: %s, motion mines %d\n", moving ? "moving" : "lying", enemyMine() ? "left" : "gone", rounds());
+		CHECK(enemyMine() == nullptr);
+		CHECK(field.alive(engineer));
+		CHECK(rounds() == full);
 	}
 }

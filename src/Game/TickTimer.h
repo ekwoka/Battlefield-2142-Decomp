@@ -23,6 +23,9 @@ public:
 	// Time of the last simulated tick, and when the next one is due.
 	double lastTickTime() const { return m_lastTick; }
 	double nextTickTime() const { return m_nextTick; }
+	// The next tick's time as it was before the last advance that ticked
+	// (+0x10): the last tick's when one ran. The frame's draw blend reads it.
+	double previousTickTime() const { return m_previousTick; }
 	// How far `now` is between the last tick and the next (0..1), for
 	// interpolating what is drawn.
 	double interpolation(double now) const;

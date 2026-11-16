@@ -110,6 +110,7 @@ struct HudManager::Node {
 	float rotation = 0;
 	std::string buttonTextures[4]; // 1 normal, 2 under the pointer (0 older scripts)
 	std::vector<std::pair<int, std::string>> buttonCommands; // (event, console line)
+	bool pointerOver = false; // 0x007e9ab0's +0xc2/+0xc3 latch: starts outside
 	// Text.
 	std::string text;
 	std::string textVariable;
@@ -331,7 +332,6 @@ bool HudManager::shiftNode(const std::string& name, int dx)
 	return true;
 }
 
-HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
 bool HudManager::spanNode(const std::string& name, int x, int w)
 {
 	Node* n = find(name);
@@ -343,6 +343,7 @@ bool HudManager::spanNode(const std::string& name, int x, int w)
 	return true;
 }
 
+HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
 	int w, int h)
 {
 	auto& slot = m_nodes[lower(name)];
@@ -455,6 +456,13 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 		}
 	}
 	m_numbers["affectedbyempshow"] = 0;
+	// Run after drawing (commands may change the tree); leaves before enters, so moving
+	// straight from one item to the next keeps the new item's info, not the reset.
+	std::stable_partition(m_hoverChanges.begin(), m_hoverChanges.end(), [](const auto& c) { return !c.second; });
+	for (const auto& [node, over] : m_hoverChanges) {
+		runCommands(node->buttonCommands, over ? 1 : 2);
+	}
+	m_hoverChanges.clear();
 	// setNodeShowConCmd: the nodes that began or stopped being drawn.
 	for (Node* node : m_showCommandNodes) {
 		const bool drawn = node->drawnFrame == m_frameNumber;
@@ -661,6 +669,12 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		const bool over = m_pointer[0] >= ax && m_pointer[0] <= ax + aw && m_pointer[1] >= ay && m_pointer[1] <= ay + ah;
 		const std::string& normal = node.buttonTextures[1].empty() ? node.buttonTextures[0] : node.buttonTextures[1];
 		quad(over && !node.buttonTextures[2].empty() ? node.buttonTextures[2] : normal, x, y, x + w, y + h, 0, 0, 1, 1, 0);
+		// Bf2ButtonNode's mouse move (0x007e9ab0): entering the area runs
+		// event 1 once, leaving it event 2 once (the kit screen's item info).
+		if (over != node.pointerOver) {
+			node.pointerOver = over;
+			m_hoverChanges.emplace_back(&node, over);
+		}
 		// The node's fade, not its colour: shipped buttons such as the
 		// commander's Resign are drawn transparent (alpha 0) over a picture.
 		if ((!node.buttonCommands.empty() || !node.altCommands.empty()) && alpha > 0) {
@@ -1592,8 +1606,19 @@ void HudManager::setMapHeading(float radians)
 	m_mapHeading = radians;
 }
 
+// 0x007791a0: +0xab0 = 0.18 sin(fmod(4 t, 2 pi)); the ring's side is its
+// size times 1 - 0.18 / 2 + that (0x0078eb9c).
+float HudManager::mapPulseScale() const
+{
+	constexpr float amplitude = 0.18f; // +0xaac
+	return 1 - amplitude * 0.5f + amplitude * std::sin(4 * m_mapPulseTime);
+}
+
 void HudManager::tickMapTurn(float seconds, bool alive)
 {
+	// The pulse clock (+0xaa4, 4 rad/s): wrapped at its period, as the
+	// exe's fmod and its reset past 100 s keep it small.
+	m_mapPulseTime = std::fmod(m_mapPulseTime + seconds, 3.14159265f * 0.5f);
 	const bool settled = m_mapSizeSettled; // the update's local copy of +0x816
 	// MapStatic's change (the map's event 10, 0x00779890): the angles to 0.
 	const bool isStatic = number("MapStatic") != 0;
@@ -1939,8 +1964,9 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		// scale (0x00785836). Fixed-size aircraft must not drift off its deck.
 		const float scaleX = marker.zoomWithMap ? 0.7f * mapW / m_mapReference[0] : 1.0f;
 		const float scaleY = marker.zoomWithMap ? 0.7f * mapH / m_mapReference[1] : 1.0f;
-		const float pixels = marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX;
-		const float height = marker.height > 0 ? marker.height * scaleY : pixels;
+		const float pulse = marker.pulse ? mapPulseScale() : 1.0f;
+		const float pixels = (marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX) * pulse;
+		const float height = marker.height > 0 ? marker.height * scaleY * pulse : pixels;
 		const float offsetX = marker.offsetX * scaleX, offsetY = marker.offsetY * scaleY;
 		const float side = std::floor(pixels);
 		const float tall = std::floor(height);

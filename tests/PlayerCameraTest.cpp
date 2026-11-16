@@ -242,6 +242,48 @@ TEST(PlayerCamera_SeatCameraRollsWithTheHull)
 }
 
 #ifdef BF2142_RENDER_TESTS
+TEST(PlayerCamera_TickBlendKeepsFirstPersonModelsInViewSpace)
+{
+	using namespace render;
+	Camera current;
+	current.position = {12, 4, -20};
+	current.yaw = -3.10f;
+	current.pitch = -0.3f;
+	current.roll = 0.2f;
+	const Mat4 model = Mat4::yawPitchRoll(20, -15, 5) * Mat4::translation({12.1f, 3.8f, -19.7f});
+	const Mat4 reference = model * current.view();
+	MissileViewSmoothing smoothing;
+	smoothing.sample(1, true, 0, {{11.85f, 3.95f, -20.1f}, 3.10f, -0.2f});
+	smoothing.sample(1, true, 0, {{12, 4, -20}, current.yaw, current.pitch});
+	for (float alpha : {-0.1f, 0.0f, 0.25f, 0.5f, 1.0f, 1.1f}) {
+		const auto pose = smoothing.sample(1, false, alpha, {});
+		Camera drawn = current;
+		drawn.position = {pose.position[0], pose.position[1], pose.position[2]};
+		drawn.yaw = pose.yaw;
+		drawn.pitch = pose.pitch;
+		drawn.roll = current.roll * alpha;
+		const Mat4 corrected = model * tickBlendViewAdjustment(current.view(), drawn.view()) * drawn.view();
+		for (size_t i = 0; i < reference.m.size(); ++i) {
+			CHECK(std::fabs(corrected.m[i] - reference.m[i]) < 1e-4f);
+		}
+	}
+	CHECK(tickBlendViewAdjustment(current.view(), current.view()).m == Mat4 {}.m);
+	// An already blended cockpit must not receive the weapon's offset again.
+	const Mat4 previousHull = Mat4::translation({10, 50, 20});
+	const Mat4 currentHull = Mat4::translation({10.2f, 50.1f, 20.15f});
+	Camera seat;
+	seat.position = {10.2f, 52.1f, 21.15f};
+	const Mat4 cockpitReference = currentHull * seat.view();
+	for (float alpha : {0.0f, 0.5f, 1.0f}) {
+		Camera drawn = seat;
+		drawn.position = {10 + alpha * 0.2f, 52 + alpha * 0.1f, 21 + alpha * 0.15f};
+		const Mat4 cockpit = blendTransform(previousHull, currentHull, alpha) * drawn.view();
+		for (size_t i = 0; i < cockpit.m.size(); ++i) {
+			CHECK(std::fabs(cockpit.m[i] - cockpitReference.m[i]) < 1e-4f);
+		}
+	}
+}
+
 TEST(PlayerCamera_PodCameraKeepsTheHullScreenAxes)
 {
 	for (const world::Vec3 turn : {world::Vec3 {35, -40, 0}, world::Vec3 {-120, 65, 110},

@@ -727,6 +727,35 @@ TEST(Hud_ListColourCodes)
 
 // The commander screen's map (setCommanderPos/Size) and its overhead view:
 // the map's texture fades out (MenuMapAlpha, +0x7b0 eased) and the map is
+// The commander tools' rings pulse (0x007791a0 / 0x0078eb20): side times
+// 1 - 0.09 + 0.18 sin(4 t); plain markers keep their size.
+TEST(Hud_CommanderRingPulses)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512", "hudBuilder.setCommanderPos -300/-300", "hudBuilder.setCommanderSize 600/600"}) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud::HudManager::MapMarker ring {"ring.dds", 0, 0, 58};
+	ring.pulse = true;
+	manager.setMapMarkers({ring, {"icon.dds", 0, 0, 15}});
+	manager.set("MapFullSize", 1);
+	manager.set("CommanderShow", 1);
+	const auto sides = [&] {
+		const auto quads = manager.frame(0);
+		return quads.size() >= 2 ? std::pair<float, float> {quads[quads.size() - 2].x1 - quads[quads.size() - 2].x0,
+										quads.back().x1 - quads.back().x0}
+								  : std::pair<float, float> {};
+	};
+	CHECK(sides() == std::make_pair(52.0f, 15.0f)); // floor(58 x 0.91)
+	manager.tickMapTurn(3.14159265f / 8, true); // sin(pi / 2)
+	CHECK(sides() == std::make_pair(63.0f, 15.0f)); // floor(58 x 1.09)
+}
+
 // zoomed so the node's height spans the camera's ground width about it
 // (0x0077c4b0), the marks staying on what it sees.
 TEST(Hud_CommanderMapOverhead)
@@ -1442,4 +1471,41 @@ TEST(Hud_MapMarkerClamp)
 		}
 	}
 	CHECK(marks.empty());
+}
+
+// Bf2ButtonNode's mouse move (0x007e9ab0): the pointer entering a button
+// runs its event-1 commands once, leaving runs event 2 once; going straight
+// from one button to the next runs the leave before the enter.
+TEST(Hud_ButtonHoverEnterAndLeave)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::vector<std::string> ran;
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Items",
+			 "hudBuilder.createButtonNode Items A 100 100 50 50",
+			 "hudBuilder.setButtonNodeConCmd \"enter A\" 1",
+			 "hudBuilder.setButtonNodeConCmd \"leave A\" 2",
+			 "hudBuilder.createButtonNode Items B 150 100 50 50",
+			 "hudBuilder.setButtonNodeConCmd \"enter B\" 1",
+			 "hudBuilder.setButtonNodeConCmd \"leave B\" 2",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setCommandRunner([&ran](const std::string& command) { ran.push_back(command); });
+	manager.setPointer(10, 10);
+	manager.frame(0);
+	CHECK(ran.empty()); // buttons start outside: no leave at first sight
+	manager.setPointer(120, 120);
+	manager.frame(0);
+	manager.frame(0);
+	CHECK(ran == std::vector<std::string> {"enter A"});
+	manager.setPointer(170, 120);
+	manager.frame(0);
+	CHECK(ran == (std::vector<std::string> {"enter A", "leave A", "enter B"}));
+	manager.setPointer(10, 10);
+	manager.frame(0);
+	CHECK(ran.back() == "leave B" && ran.size() == 4);
 }

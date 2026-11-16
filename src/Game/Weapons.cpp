@@ -306,6 +306,9 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 		}
 	}
 	s.remote = s.explosionMaterial >= 0 && s.explosionDamage > 0 && s.triggerRadius <= 0 && s.timeToLive.a > 1000; // CRD_NONE/9999
+	s.hitPoints = number(t, "armor.hitPoints", -1);
+	s.maxHitPoints = number(t, "armor.maxHitPoints", s.hitPoints);
+	s.armourMaterial = static_cast<int>(number(t, "armor.defaultMaterial", 0));
 	return s;
 }
 

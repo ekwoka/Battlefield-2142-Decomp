@@ -1375,6 +1375,10 @@ private:
 		int idlePassenger = -1;      // BBPIdle2d's +0xc: whom the driver waits for (0x1006b1f0)
 		bool pickupAsked = false;    // the get-in plan's +0x14: req_pickup said
 		int pilotWeapon = -1;        // BBPHeliFire3d's +0x14: the pilot's weapon (0x100dd4a0)
+		// UseFlareOnMissileLock (0x100d1e80): armed (+0x28), its time (+0x20), the last lock reacted to.
+		bool flareArmed = false;
+		float flareFrom = -1;
+		uint32_t flareSeen = 0;
 		bool reviveShock = false;    // the crouch-then-fire's press made (0x100dda20 +0x18)
 		bool mayAdvance = true;      // +400 (the constructor's 1, 0x1009ac30)
 		// The sensing agent's look-around (bot +0xdc, AIDLL 0x100d7210; see
@@ -1902,6 +1906,7 @@ private:
 	const GameWorld::VehicleInfo* titanTransport(int team, const GameWorld::TitanInfo& home);
 	bool titanRideGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	void useFlareOnLock(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);

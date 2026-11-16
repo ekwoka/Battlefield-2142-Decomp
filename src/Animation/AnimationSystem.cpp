@@ -514,6 +514,19 @@ AnimationState::AnimationState(AnimationSystems& systems, const AnimationSystemT
 {
 }
 
+void AnimationState::reset()
+{
+	m_instances.clear();
+	m_switches.clear();
+	m_previousMessages = 0;
+	m_started = false; // +0x61: the startup pending
+	m_startupPlaying = false;
+	m_weight = 1;
+	m_fadeLeft = 0;
+	m_fadingTrigger = -1;
+	m_idleTime = 0;
+}
+
 uint32_t AnimationState::nextRandom()
 {
 	m_random = m_random * 1103515245u + 12345u;

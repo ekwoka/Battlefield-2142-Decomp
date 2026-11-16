@@ -248,6 +248,10 @@ public:
 		bool iconAlpha = true;
 		// vehicleHud.zoomOnMinimap: size and offset follow the map projection.
 		bool zoomWithMap = false;
+		// The commander tools' placed rings (0x0078eb20 / 0x0078ece0 /
+		// 0x0078eea0): the size times 1 - 0.18 / 2 + 0.18 sin(4 t), t the
+		// map's pulse clock (0x007791a0, +0xaa4 / +0xaa8 / +0xaac).
+		bool pulse = false;
 	};
 	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
 	static constexpr float kSpawnMarkerSize = 16.0f;
@@ -448,6 +452,7 @@ private:
 	uint64_t m_frameNumber = 0;
 	std::vector<Node*> m_transformLists; // in creation order
 	std::vector<Node*> m_showCommandNodes;
+	std::vector<std::pair<Node*, bool>> m_hoverChanges; // buttons the pointer entered (true) or left this frame
 	struct MouseOverHit {
 		float x0, y0, x1, y1;
 		const Node* node;
@@ -486,6 +491,8 @@ private:
 	// +0x816 the size settled; +0x7dc MapStatic as last seen.
 	float m_mapHeading = 0, m_mapAngle = 0, m_mapCompassTarget = 0, m_mapDelayed = 0, m_mapTurn = 0;
 	float m_mapWobble = 0, m_mapWobbleTime = 0, m_mapWobbleSide = 0;
+	float m_mapPulseTime = 0; // +0xaa4, kept within one pulse period
+	float mapPulseScale() const;
 	bool m_mapWobbling = false, m_mapWobbled = false, m_mapTurnCaught = false;
 	bool m_mapAtMini = false, m_mapSizeSettled = false, m_mapStatic = false;
 	bool m_mapLevelSet = false;

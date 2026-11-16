@@ -2075,7 +2075,13 @@ void LevelRenderer::addObject(const LevelSources& sources, const world::Object& 
 	}
 }
 
-void LevelRenderer::syncObjects()
+Mat4 LevelRenderer::drawnTransform(const world::Object& object) const
+{
+	const auto blend = m_objectBlend.find(object.id());
+	return blend != m_objectBlend.end() ? blend->second.drawn : objectTransform(object.position(), object.rotation());
+}
+
+void LevelRenderer::syncObjects(TickBlend blend)
 {
 	if (!m_sources) {
 		return;
@@ -2100,6 +2106,33 @@ void LevelRenderer::syncObjects()
 	if (m_instances.size() != before) {
 		m_gpu.flushUploads();
 	}
+	// Each object between its last two ticks (TickBlend.h); a new one where it is.
+	for (auto it = m_objectBlend.begin(); it != m_objectBlend.end();) {
+		it = objects.find(it->first) ? std::next(it) : m_objectBlend.erase(it);
+	}
+	for (const auto& object : objects.objects()) {
+		const Mat4 now = objectTransform(object->position(), object->rotation());
+		const auto [it, added] = m_objectBlend.try_emplace(object->id(), ObjectBlend {now, now, now});
+		ObjectBlend& o = it->second;
+		if (blend.ticked && !added) {
+			o.previous = o.current;
+		}
+		o.current = now;
+		o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
+			: blendTransform(o.previous, o.current, blend.alpha);
+	}
+	// A part's transform between its last two ticks, as its object's.
+	const auto blendParts = [&blend](Instance& instance) {
+		if (instance.partsTicked.size() != instance.parts.size()) {
+			instance.partsTicked = instance.partsPrevious = instance.parts;
+		} else if (blend.ticked) {
+			instance.partsPrevious.swap(instance.partsTicked);
+		}
+		instance.partsTicked = instance.parts;
+		for (size_t i = 0; i < instance.parts.size(); ++i) {
+			instance.parts[i] = blendTransform(instance.partsPrevious[i], instance.partsTicked[i], blend.alpha);
+		}
+	};
 	// Move instances with their objects.
 	const world::Object* current = nullptr;
 	Mat4 objectWorld;
@@ -2113,7 +2146,7 @@ void LevelRenderer::syncObjects()
 			if (!current) {
 				continue;
 			}
-			objectWorld = objectTransform(current->position(), current->rotation());
+			objectWorld = drawnTransform(*current);
 			hiddenInView = m_sources->hiddenInView && m_sources->hiddenInView(instance.object);
 		}
 		instance.world = instance.local * objectWorld;
@@ -2188,6 +2221,7 @@ void LevelRenderer::syncObjects()
 				for (size_t i = 0; i < placed.size(); ++i) {
 					std::copy(placed[i].begin(), placed[i].end(), instance.parts[i].m.begin());
 				}
+				blendParts(instance);
 				continue;
 			}
 		}
@@ -2196,6 +2230,7 @@ void LevelRenderer::syncObjects()
 			m_animatedUVParts.clear();
 			collectParts(*m_sources, *instance.partsTemplate, Mat4 {}, instance.parts, 0, instance.object,
 				&m_animatedUVParts);
+			blendParts(instance);
 			// The parts' animated UVs (0x0063b9b0, each object update): the
 			// distance each moved along its own z axis in the world.
 			instance.animatedUV = !m_animatedUVParts.empty();
@@ -2979,7 +3014,7 @@ void LevelRenderer::collectPointLights(const Camera& camera)
 			if (!current) {
 				continue;
 			}
-			objectWorld = objectTransform(current->position(), current->rotation());
+			objectWorld = drawnTransform(*current);
 		}
 		if (current->hidden()) {
 			continue;
@@ -3202,7 +3237,7 @@ void LevelRenderer::buildDecals()
 			if (!holder || holder->hidden()) {
 				continue;
 			}
-			place = objectTransform(holder->position(), holder->rotation());
+			place = drawnTransform(*holder);
 			if (decal.part >= 0) {
 				// On a collisionPart child: the part's own set, drawn at the
 				// part's matrix (its frame in the object's, then the object's).
@@ -4027,7 +4062,7 @@ void LevelRenderer::placeTitanHemiMaps(const Camera& /*camera*/)
 		if (!titan) {
 			continue;
 		}
-		const Mat4 world = objectTransform(titan->position(), titan->rotation());
+		const Mat4 world = drawnTransform(*titan);
 		map.origin = {world.at(3, 0), world.at(3, 1), world.at(3, 2)};
 		for (int i = 0; i < 3; ++i) {
 			map.axes[i] = {world.at(i, 0), world.at(i, 1), world.at(i, 2)};
@@ -4168,6 +4203,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_firstPerson = FirstPersonScene {};
 	m_hasFirstPerson = !overheadOn && m_sources && m_sources->firstPerson && m_sources->firstPerson(m_firstPerson) &&
 		switches.draw1pMeshes && switches.drawObjects;
+	m_firstPersonViewAdjustment = m_hasFirstPerson && m_firstPerson.placementCamera
+		? tickBlendViewAdjustment(m_firstPerson.placementCamera->view(), camera.view()) : Mat4 {};
+	if (m_hasFirstPerson && m_firstPerson.placementCamera) {
+		for (FirstPersonModel& model : m_firstPerson.models) {
+			model.world = model.world * m_firstPersonViewAdjustment;
+		}
+	}
 	if (m_hasFirstPerson && switches.tweakNearPlane1pSet && switches.tweakNearPlane1p > 0) {
 		m_firstPerson.nearPlane = switches.tweakNearPlane1p;
 	}
@@ -4182,8 +4224,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// particles drawn with the first-person meshes' view, an unzoomed one
 	// with the world's (0x100990b0; see effects::ParticleTemplate::showZoomed).
 	m_firstPersonZoomed = viewZoom(camera) > 1.05f;
+	Camera particleCamera = m_hasFirstPerson && m_firstPerson.placementCamera
+		? *m_firstPerson.placementCamera : camera;
+	particleCamera.nearPlane = camera.nearPlane;
 	buildParticleBuffer({m_hasFirstPerson ? m_firstPerson.effects : nullptr}, m_firstPersonParticleVertices,
-		m_firstPersonParticleGroups, camera, false, m_firstPersonZoomed);
+		m_firstPersonParticleGroups, particleCamera, false, m_firstPersonZoomed);
 	if (m_hasFirstPerson && m_firstPerson.effects) {
 		m_firstPerson.effects->forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>&) {
 			mesh(*m_sources, geometry);
@@ -5244,10 +5289,11 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	// queues): unzoomed with the world's camera (renderer slot 0x5c), zoomed
 	// with the first-person meshes' view (slot 0xdc, +0xfc); then
 	// RSMT1PersonTransparency back to front (the sights' glass, the displays).
-	const Mat4 particleViewProjection = m_firstPersonZoomed ? viewProjection
-		: jittered(camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f));
+	const Mat4 particleViewProjection = m_firstPersonViewAdjustment * (m_firstPersonZoomed ? viewProjection
+		: jittered(camera.view() * Mat4::perspective(camera.fovY, aspect, camera.nearPlane, 6000.0f)));
 	drawMeshParticles(commands, pass, particleViewProjection, lights, {scene.effects});
-	drawParticles(commands, pass, particleViewProjection, camera, lights, m_firstPersonParticleVertices,
+	const Camera& particleCamera = scene.placementCamera ? *scene.placementCamera : camera;
+	drawParticles(commands, pass, particleViewProjection, particleCamera, lights, m_firstPersonParticleVertices,
 		m_firstPersonParticleGroups);
 	std::vector<std::pair<float, const FirstPersonModel*>> transparent;
 	for (const FirstPersonModel& model : scene.models) {

@@ -617,6 +617,16 @@ std::vector<uint32_t> GameWorld::supplyCrates() const
 	return objects;
 }
 
+float GameWorld::supplyCrateAge(uint32_t object) const
+{
+	for (const Crate& crate : m_crates) {
+		if (crate.commanderDrop && crate.object == object) {
+			return commanderSettings.supplyDropNumSecsToLive - crate.timeLeft;
+		}
+	}
+	return -1;
+}
+
 bool GameWorld::supplyStorage(uint32_t object, float& share, int& kind) const
 {
 	for (const Crate& crate : m_crates) {

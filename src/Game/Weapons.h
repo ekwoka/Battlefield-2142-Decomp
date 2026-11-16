@@ -224,6 +224,17 @@ struct ProjectileSettings {
 	bool allowFriendlyFireDetonation = false;
 	// No trigger and no fuse to speak of (C4): set off by its owner.
 	bool remote = false;
+	// Its Armor component (shipped: the C4 and the AP, EMP and motion mines,
+	// armor.hitPoints 1000, defaultMaterial 90): hit points below 0 none.
+	// Damage reaches it through the material table's cell against the
+	// armour material (against 90 only Detonation_Defuse_DMG 32 x10,
+	// Detonation_C4 80 x1, Bullet_Heavy_Sniper 131 x12 and Engineer_Defuse
+	// 132 x20 are above 0). Out of hit points the armour's update
+	// (0x00654120) posts the round's time-up event 0x18: it goes off as at
+	// the end of its time (hasOnTimeEffect, 1 on all of these).
+	float hitPoints = -1;
+	float maxHitPoints = -1; // armor.maxHitPoints (10000 shipped: the defuser's heal test passes)
+	int armourMaterial = 0;
 	// hasOnTimeEffect (template +0x328, 1 by default, 0x005b3500): its time
 	// run out (events 0x18 / 0x1d), the round detonates (event 0x1f, the
 	// detonation's slot 0x14), else it is only removed (0x20; 0x005b62a0).
@@ -898,6 +909,7 @@ struct Projectile {
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
 	float triggerIn = 0.25f; // the radius trigger's countdown (the component's +0x14, starting full)
 	bool alive = true;
+	float damageTaken = 0; // against settings->hitPoints (GameWorld::damageRound)
 	// Its firearm went (its player left): removed, without its effect, when
 	// this runs out (keepProjectiles, 0x005f1cc0); below 0 not counting.
 	float keepLeft = -1;

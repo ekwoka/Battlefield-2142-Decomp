@@ -6233,6 +6233,41 @@ TEST(GameWorld_NoFireWhileTheMissileFlies)
 	}
 }
 
+// Swimming puts the held weapon away (0x005878b0: pose 3 or +0x30c); out of
+// the water it is drawn again.
+TEST(GameWorld_SwimmingPutsTheWeaponAway)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto run = [&](float seconds) {
+		for (int i = 0; i < static_cast<int>(seconds * 30 + 0.5f); ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+	};
+	const auto heldHidden = [&] {
+		const world::Object* held = range.objects.find(range.world->playerWeaponObject());
+		return held && held->hidden();
+	};
+	run(0.5f);
+	CHECK(range.world->playerWeaponObject() != 0 && !heldHidden());
+	// Under deep water the soldier swims as he floats up: each tick he does,
+	// the weapon is away.
+	range.world->setWaterLevel(6);
+	int swimTicks = 0, shownWhileSwimming = 0;
+	for (int i = 0; i < 90; ++i) {
+		range.world->tick(1 / 30.0f);
+		if (range.world->playerBody()->swimming()) {
+			++swimTicks;
+			shownWhileSwimming += heldHidden() ? 0 : 1;
+		}
+	}
+	CHECK(swimTicks > 0);
+	CHECK(shownWhileSwimming == 0);
+	range.world->setWaterLevel(-100);
+	run(1);
+	CHECK(!heldHidden());
+}
+
 // A vehicle in water (the armour's 0x006521d0): over waterLevel a timer
 // from waterDamageDelay (3 s by default), past deepWaterLevel another from
 // deepWaterDamageDelay; each run out takes its whole hpLost at once and

@@ -3206,6 +3206,27 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 			if (share > 0) hits.push_back({prop, falloff(distance) * settings.explosionDamage * share});
 		}
 	}
+	// Armoured rounds (C4, mines) are objects with armour to the sphere
+	// query: a share of 1 by their position; hidden by something nearer the
+	// blast, none (their radius is under a fifth of any blast's). Marked
+	// here, they go off in the next projectile update, not inside this blast.
+	for (Projectile& round : m_projectiles) {
+		if (!round.alive || round.visual || !round.settings || round.settings->hitPoints < 0) {
+			continue;
+		}
+		const float distance = distanceTo(round.position);
+		if (distance >= radius || !inCone(round.position)) {
+			continue;
+		}
+		const physics::Vec3 line = round.position - at;
+		const float length = std::sqrt(physics::lengthSquared(line));
+		uint32_t first = 0;
+		// Stop 5 cm short of the round: the face it lies on is not in the way.
+		if (length > 0.05f && firstHit(at, at + line * ((length - 0.05f) / length), first, exclude)) {
+			continue;
+		}
+		damageRound(round, falloff(distance) * settings.explosionDamage, static_cast<uint32_t>(settings.explosionMaterial));
+	}
 		// The objects come before the soldiers (0x005a9090 puts soldiers,
 	// 0x9493, aside for a second loop): what the blast does to them is
 	// known when the soldiers' bones are looked for.
@@ -3281,6 +3302,64 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 			continue;
 		}
 		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), material, attacker, true);
+	}
+}
+
+// Where a segment enters an armoured round (C4, mines; an object to the
+// original's rays whether it lies, sticks or moves, as a motion mine
+// chasing): its fraction in [0, 1]. shortcut: a sphere of half the largest side of the
+// round's collision box (0.1 m without one), not its mesh; upgrade if
+// rounds are seen passing by or hit off their faces.
+static bool roundOnSegment(const Projectile& q, const physics::Vec3& from, const physics::Vec3& to, float& t)
+{
+	if (!q.alive || !q.settings || q.settings->hitPoints < 0) {
+		return false;
+	}
+	const physics::Vec3& box = q.settings->boxSize;
+	const float r = physics::lengthSquared(box) > 0 ? 0.5f * std::max({box.x, box.y, box.z}) : 0.1f;
+	const physics::Vec3 d = to - from;
+	const float a = physics::lengthSquared(d);
+	const float b = physics::dot(from - q.position, d);
+	const float disc = b * b - a * (physics::lengthSquared(from - q.position) - r * r);
+	if (a <= 0 || disc < 0) {
+		return false;
+	}
+	t = (-b - std::sqrt(disc)) / a;
+	return t >= 0 && t <= 1;
+}
+
+void GameWorld::damageRound(Projectile& round, float amount, uint32_t material)
+{
+	if (!round.alive || round.visual || !round.settings || round.settings->hitPoints < 0) {
+		return;
+	}
+	const float mod =
+		m_materials ? m_materials->damageMod(material, static_cast<uint32_t>(round.settings->armourMaterial)) : 1.0f;
+	if (amount * mod > 0.1f) {
+		round.damageTaken += amount * mod;
+	}
+}
+
+void GameWorld::defuseRound(Projectile& round, Player& holder)
+{
+	const auto same = [&](const std::string& item) {
+		const world::ObjectTemplate* t = m_templates.find(item);
+		const auto fired = t ? t->settings().find("projectileTemplate") : decltype(t->settings().end()) {};
+		return t && fired != t->settings().end() && fired->second.size() == round.settings->name.size()
+			&& std::equal(fired->second.begin(), fired->second.end(), round.settings->name.begin(),
+				[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+	};
+	for (size_t i = 0; i < holder.carried.size(); ++i) {
+		FireArm* weapon = static_cast<int>(i) == holder.inHand ? holder.weapon.get() : holder.carried[i].weapon.get();
+		if (weapon && same(holder.carried[i].name)) {
+			weapon->giveRoundBack();
+		}
+	}
+	round.alive = false; // the object manager's delete (0xa85220 slot 0x14): no effect
+	round.keepLeft = -1;
+	if (round.ghostObject) {
+		m_objects.remove(round.ghostObject);
+		round.ghostObject = 0;
 	}
 }
 
@@ -4320,6 +4399,15 @@ void GameWorld::stepProjectiles(float seconds)
 			p.alive = false; // 0x005f1cc0's removal (0x20): no effect
 			continue;
 		}
+		// Its armour gone (damageRound): the time-up event 0x18 (0x00654120),
+		// with hasOnTimeEffect the detonation (0x005b3500), remote or not.
+		if (p.settings && p.settings->hitPoints >= 0 && p.damageTaken >= p.settings->hitPoints) {
+			p.alive = false;
+			if (!p.visual && p.settings->explosionRadius > 0 && p.settings->onTimeEffect) {
+				explode(p.position, *p.settings, p.player, p.yaw);
+			}
+			continue;
+		}
 		p.followTurned = false;
 		steerSeeker(p, seconds);
 		if (p.settings) {
@@ -4768,6 +4856,25 @@ void GameWorld::stepProjectiles(float seconds)
 				previous = t;
 			}
 		}
+		// Armoured rounds (C4, mines) are objects to the original's ray; the rewrite's live outside the object manager, so
+		// they are tested here, nearer than anything above.
+		// (roundOnSegment: a sphere, not the mesh).
+		Projectile* hitRound = nullptr;
+		for (Projectile& q : m_projectiles) {
+			float t = 0;
+			if (&q == &p || !roundOnSegment(q, from, to, t) || t >= best) {
+				continue;
+			}
+			best = t;
+			const physics::Vec3 at = from + (to - from) * t;
+			physics::Vec3 out = at - q.position;
+			out = out * (1.0f / std::max(std::sqrt(physics::lengthSquared(out)), 1e-5f));
+			hit = {t, at, out, static_cast<uint32_t>(q.settings->material), 0};
+			hitObject = 0;
+			hitSoldier = 0;
+			hitBody = nullptr;
+			hitRound = &q;
+		}
 		// onlyDetonateOnMaterial within its time (0x005b4ff0): an object of
 		// another material that is no Titan's is destroyed on the server
 		// (3e10 through the game logic's damage) and the projectile flies
@@ -4858,6 +4965,9 @@ void GameWorld::stepProjectiles(float seconds)
 			}
 			const physics::Vec3 travelled = hit.point - p.origin;
 			const float amount = p.settings->damageAt(std::sqrt(physics::lengthSquared(travelled))) * p.damageScale;
+			if (hitRound && !p.visual) {
+				damageRound(*hitRound, amount, ownMaterial);
+			}
 			if (hitObject != 0 && !p.visual) {
 				Player* shooter = findPlayer(p.player);
 				if (shooter && hitObject != shooter->object && hitPoints(hitObject) >= 0) {
@@ -4918,7 +5028,7 @@ void GameWorld::stepProjectiles(float seconds)
 			const std::string* decal = playImpact && materialImpactInView(hit.point)
 				? materialImpactTemplate(m_materials, ownMaterial, hit.material, impactIndex, &physics::MaterialCell::decalTemplates)
 				: nullptr;
-			if (decal && !hitBody
+			if (decal && !hitBody && !hitRound
 				&& std::none_of(m_players.begin(), m_players.end(),
 					[hitObject](const auto& player) { return hitObject != 0 && player->object == hitObject; })
 				&& !m_remoteSoldiers.count(hitObject)) {
@@ -9403,6 +9513,10 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	const bool reloading = player.weapon && player.weapon->reloading();
 	if (reloading && !player.reloadingWas && player.weapon->settings().reloadAmount == 0) {
 		input.pulses |= 2;
+		// ThrownAnimationComp's reload (0x005e1410): the system reset first.
+		if (player.weapon->settings().thrown && player.weaponAnimation) {
+			player.weaponAnimation->reset();
+		}
 	}
 	player.reloadingWas = reloading;
 	if (player.fired) {
@@ -11246,8 +11360,9 @@ void GameWorld::followSoldier(const Player& player, const world::Object& soldier
 	if (world::Object* held = player.weaponObject ? m_objects.find(player.weaponObject) : nullptr) {
 		held->setPosition(soldier.position());
 		held->setRotation(soldier.rotation());
-		// A thrown weapon put away until it shows again (FireArm::hidden).
-		held->setHidden(soldier.hidden() || (player.weapon && player.weapon->hidden()));
+		// A thrown weapon put away until it shows again (FireArm::hidden);
+		// put away while swimming (0x005878b0: pose 3 or +0x30c).
+		held->setHidden(soldier.hidden() || (player.weapon && player.weapon->hidden()) || player.body.swimming());
 		// The muzzle flash still burning follows the gun.
 		physics::Vec3 at;
 		physics::Mat3 rotation;
@@ -12414,6 +12529,39 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	// nothing takes its AI's target instead (the AI interface's slot 8);
 	// the rewrite's bots take the sphere's as before.
 	bool sphere = rescan;
+	// An armoured round first along the ray (C4, mines: GenericProjectile,
+	// interface 0x94c1). The filter (0x005d7880) passes a round of either
+	// team for RTHeal and the heal's test (0x004cc380) asks the cell of the
+	// ability's material against its armour above 0 (Engineer_Defuse 132
+	// against 90: 20) and its hit points under the maximum (1000 of 10000);
+	// the treatment (0x005d8ac0) then deletes a round whose armour isn't
+	// destroyed (+0x16) whatever the heal did.
+	if (rescan && rayEnd && holder && !ability.ammo && !soldiersOnly && battery >= drain) {
+		Projectile* nearest = nullptr;
+		float best = 2;
+		for (Projectile& round : m_projectiles) {
+			float t = 0;
+			if (round.visual || !roundOnSegment(round, at, *rayEnd, t) || t >= best
+				|| round.damageTaken >= round.settings->hitPoints
+				|| round.settings->hitPoints - round.damageTaken >= round.settings->maxHitPoints
+				|| !m_materials
+				|| m_materials->damageMod(ability.material, static_cast<uint32_t>(round.settings->armourMaterial)) <= 0) {
+				continue;
+			}
+			best = t;
+			nearest = &round;
+		}
+		uint32_t blocking = 0;
+		if (nearest && !firstHit(at, at + (*rayEnd - at) * best, blocking, holder->object)) {
+			defuseRound(*nearest, *holder);
+			draw();
+			if (scan) {
+				scan->targets.clear();
+				scan->timer = 1; // 0x005d8e13: looked at again soon
+			}
+			return;
+		}
+	}
 	if (rescan && rayEnd) {
 		uint32_t hitObject = 0;
 		const world::Object* object =

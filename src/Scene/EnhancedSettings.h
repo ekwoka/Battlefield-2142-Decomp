@@ -37,6 +37,8 @@ struct EnhancedSettings {
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 	// Interface, also only with enhanced.enabled:
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
+	// Drawing, also only with enhanced.enabled; experimental, off by default:
+	bool tickBlend = false; // enhanced.tickBlend: objects and the camera drawn between the 30 Hz ticks, as retail's 0x0043f170 (Render/TickBlend.h)
 };
 
 inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& settings)
@@ -73,6 +75,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.cornerSteer = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
+	bindProperty<bool>(console, "enhanced.tickBlend", ConsoleAccess::Anyone, [&settings] { return settings.tickBlend; },
+		[&settings](const bool& v) { settings.tickBlend = v; });
 }
 
 } // namespace dice::hfe::scene

@@ -200,6 +200,13 @@ public:
 	// The held weapon's system (null for none); a new one starts over
 	// (its startup trigger: the deploy).
 	void setWeapon(const AnimationSystemTemplate* weapon);
+	// A thrown weapon's reload (AnimationState::reset).
+	void resetWeapon()
+	{
+		if (m_weapon) {
+			m_weapon->reset();
+		}
+	}
 	const AnimationSystemTemplate* weapon() const { return m_weaponTemplate; }
 	// One tick. Model-space node matrices follow. The systems' events this
 	// tick (the soldier's, then the weapon's) go to `events` if given.

@@ -196,6 +196,7 @@ bool PlayerCamera::current(Me& me) const
 	me.stance = body->stance;
 	if (const game::FireArm* firearm = m_round.playerWeapon()) {
 		me.reloading = firearm->reloading();
+		me.thrown = firearm->settings().thrown;
 		me.overheated = firearm->overheated();
 		me.zoomBusy = firearm->zoomBusy();
 		me.rounds = firearm->roundsInMag();
@@ -1099,6 +1100,11 @@ void PlayerCamera::tick(float seconds)
 		input.pulses |= 2;
 	}
 	m_reloadPulseNext = reloadStarted && zoomDropped && !incrementalReload;
+	// ThrownAnimationComp's reload (0x005e1410) resets the weapon's system
+	// first: the throw it holds (playForever) goes, the next one is drawn.
+	if (reloadStarted && me.thrown && !m_remote) {
+		m_rig->resetWeapon();
+	}
 	m_zoomMessageWas = zoomMessage;
 	if (zoomMessage) {
 		input.messages |= 4;
@@ -1503,6 +1509,11 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 	// On a ladder the weapon is put away (0x005878b0) and the first-person
 	// system has no ladder states: nothing of the soldier is drawn.
 	if (!m_remote && m_round.onLadder(m_round.localPlayer())) {
+		return out;
+	}
+	// Swimming puts it away too (0x005878b0: pose 3 or +0x30c); the
+	// system's swim bundles have no clips.
+	if (me.stance == static_cast<int>(game::SoldierPose::Swim)) {
 		return out;
 	}
 	const anim::Skeleton& skeleton = m_rig->skeleton();

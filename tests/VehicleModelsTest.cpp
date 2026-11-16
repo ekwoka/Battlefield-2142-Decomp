@@ -1381,6 +1381,136 @@ TEST(Vehicles_BotPilotsFlyToAPointAndHover)
 	}
 }
 
+// The stationary AA's EMP round on a hovering gunship (empDamageIgnoreRadius,
+// 2 steps of 1.5 s): level 2, and the pilot's inputs held at 0 while it lasts.
+TEST(Vehicles_StaticAAEmpOnHoveringGunship)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"us_ag", "as_ag"}) {
+			float drop[2] = {};
+			for (int emp = 0; emp < 2; ++emp) {
+				Garage g(gameDir(), mod);
+				if (!g.loaded || !g.templates.find(name) || !g.templates.find("static_aa_missile_projectile")) continue;
+				const uint32_t v = g.start(name, {0, 4, 6});
+				CHECK(g.enter(v));
+				// The pilot's seat holds the ADS (ads_air on PIFlareFire): a bot's flare press reaches it.
+				const auto seats = g.world->vehicleSeats(v);
+				CHECK(!seats.empty() && std::any_of(seats[0].weapons.begin(), seats[0].weapons.end(),
+					[](const auto& w) { return w.group == 2 && w.activeDefense; }));
+				const physics::Vec3 hover {0, 40, 6};
+				pilotFlies(g, v, hover, 0, 25);
+				const physics::Vec3 before = g.position(v);
+				if (emp) {
+					CHECK(g.world->detonate("static_aa_missile_projectile", before + physics::Vec3 {0, 0, 2}));
+					CHECK(g.world->empLevel(v) == 2);
+				}
+				float lowest = before.y;
+				for (int i = 0; i < 90; ++i) {
+					pilotFlies(g, v, hover, 0, 1.5f / 30.0f); // one tick
+					lowest = std::min(lowest, g.position(v).y);
+				}
+				drop[emp] = before.y - lowest;
+				CHECK(g.world->empLevel(v) == 0);
+			}
+			std::fprintf(stderr, "  %s %s: %.1f m drop without EMP, %.1f m with\n", mod, name, drop[0], drop[1]);
+		}
+	}
+}
+
+// The stationary AA's EMP missile let go 150 m from a hovering gunship (its
+// TTHeat seek, 60 m/s): it finds the gunship and its burst EMPs it.
+TEST(Vehicles_StaticAAEmpMissileReachesHoveringGunship)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		for (const char* name : {"us_ag", "as_ag"}) {
+			for (float side : {0.0f, 40.0f, -1.0f}) { // -1: head-on, the pilot pressing PIFlareFire 1 s after the lock
+				const bool ads = side < 0;
+				Garage g(gameDir(), mod);
+				if (!g.loaded || !g.templates.find(name) || !g.templates.find("static_aa_missile_projectile")) continue;
+				const uint32_t v = g.start(name, {0, 4, 6});
+				CHECK(g.enter(v));
+				const physics::Vec3 hover {0, 40, 6};
+				pilotFlies(g, v, hover, 0, 25);
+				const physics::Vec3 from = g.position(v) + physics::Vec3 {ads ? 0.0f : side, -30, -150};
+				const physics::Vec3 to = g.position(v) - from;
+				CHECK(g.world->launchProjectile("static_aa_missile_projectile", from, to * (60.0f / std::sqrt(physics::lengthSquared(to)))));
+				int level = 0;
+				uint32_t locked = 0;
+				float nearest = 1e9f;
+				int lockedTick = -1;
+				for (int i = 0; i < 150 && !level; ++i) {
+					if (ads && lockedTick >= 0 && i == lockedTick + 30) {
+						game::SoldierInput flare;
+						flare.flareFire = true;
+						g.world->setPlayerInput(flare);
+						g.world->tick(1 / 30.0f);
+						continue;
+					}
+					pilotFlies(g, v, hover, 0, 1.5f / 30.0f); // one tick
+					if (locked && lockedTick < 0) lockedTick = i;
+					level = g.world->empLevel(v);
+					for (const auto& p : g.world->projectiles()) {
+						if (!p.alive) continue;
+						locked = locked ? locked : p.lockedOn;
+						nearest = std::min(nearest, std::sqrt(physics::lengthSquared(p.position - g.position(v))));
+					}
+				}
+				std::fprintf(stderr, "  %s %s side %.0f: locked %d, nearest %.1f m, EMP level %d\n", mod, name, side, locked == v, nearest, level);
+				CHECK(locked == v);
+				// The ADS shield (protectionRadius 10) sets the round off at its edge; its EMP burst still
+				// reaches the gunship (empDamageIgnoreRadius), so only the stopping point is checked there.
+				CHECK(ads ? nearest > 8.0f : level == 2);
+			}
+		}
+	}
+}
+
+// The same missile at the transports (as_at, eu_at: no empDamageIgnoreRadius,
+// the burst's 4 m measured from the vehicle).
+TEST(Vehicles_StaticAAEmpMissileOnTransport)
+{
+	if (!gameDir()) return;
+	for (const char* name : {"as_at", "eu_at"}) {
+		for (const physics::Vec3 side : {physics::Vec3 {0, -30, -150}, physics::Vec3 {0, -30, 150}, physics::Vec3 {150, -30, 0},
+				 physics::Vec3 {-150, -30, 0}, physics::Vec3 {0, 60, -100}}) {
+			Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+			if (!g.loaded || !g.templates.find(name)) continue;
+			const uint32_t v = g.start(name, {0, 4, 6});
+			CHECK(g.enter(v));
+			const physics::Vec3 hover {0, 40, 6};
+			pilotFlies(g, v, hover, 0, 25);
+			physics::Vec3 from = g.position(v) + side;
+			from.y = std::max(from.y, 3.0f);
+			const physics::Vec3 to = g.position(v) - from;
+			CHECK(g.world->launchProjectile("static_aa_missile_projectile", from, to * (60.0f / std::sqrt(physics::lengthSquared(to)))));
+			int level = 0;
+			uint32_t locked = 0;
+			physics::Vec3 last, centre;
+			bool gone = false;
+			for (int i = 0; i < 150 && !gone; ++i) {
+				pilotFlies(g, v, hover, 0, 1.5f / 30.0f);
+				level = std::max(level, g.world->empLevel(v));
+				bool flying = false;
+				for (const auto& p : g.world->projectiles()) {
+					if (!p.alive || !p.settings || p.settings->name != "static_aa_missile_projectile") continue;
+					flying = true;
+					locked = locked ? locked : p.lockedOn;
+					last = p.position;
+					centre = g.position(v);
+				}
+				gone = !flying && i > 0;
+			}
+			const physics::Vec3 off = last - centre;
+			std::fprintf(stderr, "  %s from %.0f/%.0f/%.0f: locked %d, burst %.1f m from centre (%.1f, %.1f, %.1f), EMP %d\n", name, side.x,
+				side.y, side.z, locked == v, std::sqrt(physics::lengthSquared(off)), off.x, off.y, off.z, level);
+			CHECK(locked == v);
+			if (std::sqrt(physics::lengthSquared(off)) < 3.0f) CHECK(level >= 2);
+		}
+	}
+}
+
 // A burst at the tail engine is beyond the hull origin's 4 m reach. The
 // part's world position must count, including the vehicle's rotation.
 TEST(Vehicles_StaticAAEmpReachesTransportParts)
@@ -1448,6 +1578,103 @@ TEST(Vehicles_StaticAAEmpPartFalloffAndArmourBoundary)
 		const int expected = scenario == 0 || scenario == 3 ? 1 : scenario == 7 ? 2 : 0;
 		std::fprintf(stderr, "  EMP part scenario %d: %d expected %d\n", scenario, g.world->empLevel(v), expected);
 		CHECK(g.world->empLevel(v) == expected);
+	}
+}
+
+// Fired for real from the static AA at a transport ahead along its sight: the
+// launcher locks (MultiFireArmTargetComp, 0.66 s, 15 degrees), the round
+// takes the lock and EMPs it.
+TEST(Vehicles_StaticAAFiresLockedEmpMissileAtTransport)
+{
+	if (!gameDir()) return;
+	for (const char* name : {"as_at", "us_ag"}) {
+	  for (const physics::Vec3 place : {physics::Vec3 {0, 66, 112}, physics::Vec3 {6, 70, 112}}) { // along the sight (30 degrees up)
+		Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+		if (!g.loaded || !g.templates.find(name) || !g.templates.find("static_aa")) continue;
+		g.templates.find("HeatObject")->settings()["disableWhenEmptyVehicle"] = "0"; // an empty one stays a target here
+		g.templates.find(name)->settings()["hasMobilePhysics"] = "0";            // and stays up there
+		world::Object* target = g.objects.create(g.templates.find(name), {place.x, place.y, place.z}, {0, 0, 0});
+		target->setTeam(1);
+		const uint32_t aimed = target->id();
+		const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, 0);
+		CHECK(g.enter(aa));
+		const int me = g.world->localPlayer();
+		game::SoldierInput aim;
+		int state = 0;
+		for (int i = 0; i < 120 && state != 2; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			state = g.world->weaponLock(me).state;
+		}
+		const auto lock = g.world->weaponLock(me);
+		std::fprintf(stderr, "  static_aa at %s: lock state %d on %s\n", name, lock.state, lock.target == aimed ? "it" : "other/none");
+		CHECK(lock.state == 2 && lock.target == aimed);
+		aim.altFire = true;
+		uint32_t round = 0, roundTarget = 0;
+		for (int i = 0; i < 30 && !round; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			for (const auto& p : g.world->projectiles()) {
+				if (p.alive && p.shooter == aa && p.settings && p.settings->name == "static_aa_missile_projectile") {
+					round = p.serial;
+					roundTarget = p.lockedOn;
+				}
+			}
+		}
+		aim.altFire = false;
+		CHECK(round != 0 && roundTarget == aimed);
+		int level = 0;
+		for (int i = 0; i < 150 && !level; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			level = g.world->empLevel(aimed);
+		}
+		std::fprintf(stderr, "  static_aa at %s: round locked %d, EMP level %d\n", name, roundTarget == aimed, level);
+		CHECK(level > 0);
+	  }
+	}
+}
+
+// The same missile at a gunship flying past at speed.
+TEST(Vehicles_StaticAAEmpMissileReachesMovingGunship)
+{
+	if (!gameDir()) return;
+	for (const char* name : {"us_ag", "as_ag"}) {
+		for (float ahead : {0.0f, 60.0f, 120.0f}) {
+			Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+			if (!g.loaded || !g.templates.find(name)) continue;
+			const uint32_t v = g.start(name, {0, 4, 6});
+			CHECK(g.enter(v));
+			pilotFlies(g, v, {0, 40, 6}, 0, 20);
+			const physics::Vec3 goal {0, 40, 2000};
+			pilotFlies(g, v, goal, 0, 12); // under way
+			physics::Vec3 vel;
+			for (const auto& info : g.world->vehicleList()) if (info.object == v) vel = info.velocity;
+			physics::Vec3 from = g.position(v) + physics::Vec3 {120, -35, ahead};
+			from.y = std::max(from.y, 3.0f);
+			const physics::Vec3 to = g.position(v) - from;
+			CHECK(g.world->launchProjectile("static_aa_missile_projectile", from, to * (60.0f / std::sqrt(physics::lengthSquared(to)))));
+			int level = 0;
+			uint32_t locked = 0;
+			float nearest = 1e9f, topSpeed = 0, lastSpeed = 0;
+			int alive = 0;
+			for (int i = 0; i < 210 && !level; ++i) {
+				pilotFlies(g, v, goal, 0, 1.5f / 30.0f);
+				level = g.world->empLevel(v);
+				for (const auto& p : g.world->projectiles()) {
+					if (!p.alive || !p.settings || p.settings->name != "static_aa_missile_projectile") continue;
+					++alive;
+					locked = locked ? locked : p.lockedOn;
+					lastSpeed = std::sqrt(physics::lengthSquared(p.velocity));
+					topSpeed = std::max(topSpeed, lastSpeed);
+					nearest = std::min(nearest, std::sqrt(physics::lengthSquared(p.position - g.position(v))));
+				}
+			}
+			std::fprintf(stderr, "  %s ahead %.0f: alt %.1f, gunship %.1f m/s, locked %d, nearest %.1f m, missile top %.1f last %.1f m/s, ticks alive %d, EMP %d\n",
+				name, ahead, g.position(v).y, std::sqrt(physics::lengthSquared(vel)), locked == v, nearest, topSpeed, lastSpeed, alive, level);
+			CHECK(locked == v);
+			CHECK(level == 2);
+		}
 	}
 }
 
@@ -4962,6 +5189,138 @@ TEST(Vehicles_DriveOverSuezHills)
 }
 
 #ifdef BF2142_RENDER_TESTS
+TEST(FirstPerson_TickBlendPixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			Garage g(gameDir(), mod, true);
+			CHECK(g.loaded);
+			if (!g.loaded) continue;
+			g.start("eu_tank", {20, 5, 20});
+			g.animate();
+			CHECK(g.world->spawnPlayer(2));
+			PlayerCamera player(*g.world, *g.systems, [&](const std::string& path) {
+				return g.systems->get(path, [&] {
+					std::string text;
+					g.console.run(path, {}, text);
+				});
+			});
+			player.firstPerson = true;
+			for (int tick = 0; tick < 90; ++tick) {
+				g.world->tick(1 / 30.0f);
+				player.tick(1 / 30.0f);
+			}
+			PlayerCamera::View eye;
+			CHECK(player.view(eye, 16.0f / 9.0f));
+			const auto models = player.models();
+			CHECK(models.size() == 2);
+			if (models.size() != 2) continue;
+			render::Camera raw;
+			raw.position = {eye.position[0], eye.position[1], eye.position[2]};
+			raw.yaw = eye.yaw;
+			raw.pitch = eye.pitch;
+			raw.roll = eye.roll;
+			raw.nearPlane = 0.01f;
+			world::ObjectManager noObjects;
+			terrain::HeightmapCluster terrain;
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			settings.drawSkyDome = settings.drawTerrain = false;
+			render::LevelSources sources {g.files, g.templates, noObjects, g.geometries, terrain,
+				nullptr, lights, sky, water, "", ""};
+			sources.renderer = &settings;
+			bool align = false;
+			sources.firstPerson = [&](render::FirstPersonScene& scene) {
+				for (const auto& model : models) {
+					render::FirstPersonModel drawn;
+					drawn.geometry = model.geometry;
+					drawn.geometryIndex = model.geometryIndex;
+					drawn.lod = model.lod;
+					drawn.world.m = model.world;
+					drawn.pose = model.pose;
+					for (const auto& part : model.parts) {
+						render::Mat4 m;
+						m.m = part;
+						drawn.parts.push_back(m);
+					}
+					scene.models.push_back(std::move(drawn));
+				}
+				if (align) scene.placementCamera = raw;
+				return true;
+			};
+			render::LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			auto target = gpu->createOffscreenTarget(640, 360);
+			render::Camera camera = raw;
+			const auto frame = [&]() {
+				renderer.syncObjects();
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer.draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				return pixels;
+			};
+			const auto difference = [](const auto& a, const auto& b) {
+				size_t changed = 0;
+				for (size_t i = 0; i + 3 < a.size() && i + 3 < b.size(); i += 4) {
+					if (a[i] != b[i] || a[i + 1] != b[i + 1] || a[i + 2] != b[i + 2]) ++changed;
+				}
+				return changed;
+			};
+			settings.draw1pMeshes = false;
+			const auto blank = frame();
+			settings.draw1pMeshes = true;
+			const auto reference = frame();
+			CHECK(difference(blank, reference) > 100);
+			// Lighting rotates with the corrected rig, and the gun's display
+			// animates with wall time. Measure geometry, not changing colours.
+			const auto silhouetteDifference = [&](const auto& pixels) {
+				size_t changed = 0;
+				for (size_t i = 0; i + 3 < pixels.size() && i + 3 < blank.size(); i += 4) {
+					const auto occupied = [&](const auto& image) {
+						return image[i] != blank[i] || image[i + 1] != blank[i + 1] || image[i + 2] != blank[i + 2];
+					};
+					if (occupied(pixels) != occupied(reference)) ++changed;
+				}
+				return changed;
+			};
+			for (float alpha : {-0.1f, 0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.1f}) {
+				camera = raw;
+				camera.position = raw.position - render::Vec3f {0.15f, 0.05f, 0.1f} * (1 - alpha);
+				camera.yaw -= 0.04f * (1 - alpha);
+				camera.pitch -= 0.02f * (1 - alpha);
+				camera.roll -= 0.03f * (1 - alpha);
+				align = false;
+				const auto broken = frame();
+				align = true;
+				const auto fixed = frame();
+				const size_t before = silhouetteDifference(broken), after = silhouetteDifference(fixed);
+				std::fprintf(stderr, "  %s alpha %.2f: %zu displaced silhouette pixels before, %zu after\n", mod, alpha, before, after);
+				if (alpha != 1) CHECK(before > 100);
+				CHECK(after < 10);
+				if (alpha == 0.5f) {
+					const std::string label = std::string(mod).find("Remaster") != std::string::npos ? "remaster" : "vanilla";
+					CHECK(render::writePng(std::string(output) + "/" + label + "-weapon-before.png", target.width, target.height, broken));
+					CHECK(render::writePng(std::string(output) + "/" + label + "-weapon-after.png", target.width, target.height, fixed));
+				}
+			}
+			gpu->releaseTarget(target);
+		}
+	}
+	SDL_Quit();
+}
+
 // The bundled walker's visual bounds understate its collision-based radius.
 // Isolate the body so firing effects cannot make an invisible walker pass.
 TEST(Vehicles_WalkerDistanceVisibilityPixelsOptIn)

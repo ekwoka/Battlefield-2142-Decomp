@@ -1838,6 +1838,7 @@ void BotManager::update(float seconds)
 		}
 		// enhanced.botTitan: past the guns' share, its Titan's deck gunship and transport.
 		if (titanCrew(bot, *self, input, elapsed)) {
+			useFlareOnLock(bot, *self, input);
 			bot.usedLast = input.use;
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);
@@ -1863,6 +1864,7 @@ void BotManager::update(float seconds)
 		updateGoal(bot, *self);
 		act(bot, *self, input, elapsed);
 		handleWeapon(bot, *self, input);
+		useFlareOnLock(bot, *self, input);
 		stepZoom(bot, *self, elapsed);
 		m_behaviourSeconds[bot.behaviour + (self->vehicle ? (self->driving ? " (driving)" : " (seated)") : "")] += elapsed;
 		if (m_stats) {
@@ -3556,6 +3558,45 @@ void BotManager::flee(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 // the rising edge) and, because its plans pick their tools through the
 // same one select key, leaves the selection to the plans that use a tool
 // (Revive, the assists, repair, C4, flee) and to a plan's own press.
+// UseFlareOnMissileLock (AIDLL interpreter 0x100d1e80, step type 0x23):
+// every 2d/3d move, idle, get-in and fire plan carries it (built at
+// 0x100d1e20). Once the vehicle's lock count is above 0 it arms at
+// max(its time, now); after 1 s for an ITAir vehicle (0 otherwise) it
+// presses PIFlareFire (input 15, mask 0x8000) and clears the count, except
+// that an ITGround vehicle does so only on a draw above 0.8, else waits
+// 15 s. The count here is the rounds locked on the vehicle (what the lock
+// warning shows), new ones since the last reaction.
+// shortcut: retail's count comes from a BF2142.exe AI interface (+0x28 slot 0x8c, 0x7c/0x78) not yet traced; replace if it counts launcher locks too.
+void BotManager::useFlareOnLock(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
+{
+	if (!self.vehicle) {
+		bot.flareArmed = false;
+		return;
+	}
+	uint32_t newest = bot.flareSeen;
+	for (const Projectile& p : m_world.projectiles()) {
+		if (p.alive && p.lockedOn == self.vehicle && p.serial > newest) {
+			newest = p.serial;
+		}
+	}
+	if (!bot.flareArmed && newest != bot.flareSeen) {
+		bot.flareArmed = true;
+		bot.flareFrom = std::max(bot.flareFrom, m_time);
+	}
+	const world::Object* vehicle = m_world.objects().find(self.vehicle);
+	const uint32_t types = vehicle && vehicle->objectTemplate() ? m_settings.typeFlags(aiTemplateOf(vehicle->objectTemplate()->name())) : 0;
+	if (!bot.flareArmed || m_time - bot.flareFrom < ((types & kITAir) ? 1.0f : 0.0f)) {
+		return;
+	}
+	if ((types & kITGround) && ai::wordToFloat(m_settings.random.next()) * 2.3283064e-10f <= 0.8f) {
+		bot.flareFrom = m_time + 15;
+	} else {
+		input.flareFire = true;
+	}
+	bot.flareSeen = newest;
+	bot.flareArmed = false;
+}
+
 void BotManager::handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input)
 {
 	if (bot.autoController || self.vehicle || !self.alive || self.manDown) {

@@ -1306,19 +1306,33 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 16});
 		markers.back().upright = true; // no angle of their own: 0x0077c610 shows them screen-up
 	}
+	// Each commander tool's mark is a pulsing ring under a 15 x 15 icon
+	// (0x0078eb20 orbital: placedAirstrikeLarge 116; 0x0078eea0 artillery,
+	// 0x0078ece0 supplies: placedAirstrike 58).
+	const auto toolMark = [&markers](const char* ring, float ringSize, const char* icon, float x, float z) {
+		markers.push_back({ring, x, z, ringSize});
+		markers.back().upright = true;
+		markers.back().pulse = true;
+		markers.push_back({icon, x, z, 15});
+		markers.back().upright = true;
+	};
 	for (const auto& strike : round.strikes()) {
 		if (strike.team == me.team) {
-			markers.push_back({strike.ability == game::GameWorld::CommanderAbility::OrbitalStrike
-					? "Ingame/Commander/tools/orbit_strike.tga"
-					: "Ingame/Commander/tools/force_strike.tga",
-				strike.target.x, strike.target.z, 19});
-			markers.back().upright = true;
+			if (strike.ability == game::GameWorld::CommanderAbility::OrbitalStrike) {
+				toolMark("Ingame/Minimap/Icons/placedAirstrikeLarge.tga", 116, "Ingame/Commander/tools/orbit_strike.tga",
+					strike.target.x, strike.target.z);
+			} else {
+				toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Commander/tools/force_strike.tga",
+					strike.target.x, strike.target.z);
+			}
 		}
 	}
+	// A drop shows for 25 s (0x00792354 → 0x0077d7e0, +0xbc8).
 	for (const uint32_t crate : round.supplyCrates()) {
-		if (const world::Object* object = round.objects().find(crate)) {
-			markers.push_back({"Ingame/Minimap/Icons/icon_supplies.tga", object->position().x, object->position().z, 15});
-			markers.back().upright = true;
+		const float age = round.supplyCrateAge(crate);
+		if (const world::Object* object = round.objects().find(crate); object && age >= 0 && age < 25) {
+			toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Minimap/Icons/icon_supplies.tga",
+				object->position().x, object->position().z);
 		}
 	}
 	// The squad's leader order and commander order, each by its kind
@@ -10302,7 +10316,7 @@ int runGame(Options& options, Session& session)
 			lod = cockpit.lod;
 			return true;
 		};
-		sources.firstPerson = [&playerCamera](render::FirstPersonScene& scene) {
+		sources.firstPerson = [&playerCamera, &sources](render::FirstPersonScene& scene) {
 			const std::vector<PlayerCamera::Model> models = playerCamera.models();
 			if (models.empty()) {
 				return false;
@@ -10322,6 +10336,17 @@ int runGame(Options& options, Session& session)
 				scene.models.push_back(std::move(drawn));
 			}
 			scene.effects = &playerCamera.effects();
+			if (sources.enhanced && sources.enhanced->enabled && sources.enhanced->tickBlend) {
+				PlayerCamera::View eye;
+				if (playerCamera.view(eye, 4.0f / 3.0f)) {
+					render::Camera placement;
+					placement.position = {eye.position[0], eye.position[1], eye.position[2]};
+					placement.yaw = eye.yaw;
+					placement.pitch = eye.pitch;
+					placement.roll = eye.roll;
+					scene.placementCamera = placement;
+				}
+			}
 			return true;
 		};
 		ViewerOptions viewer;

@@ -464,6 +464,12 @@ public:
 	// 0: |rate| x length and |rate| x (length - time)); -1 and -1 without
 	// one. The mech HUD's foot animation (0x007a0940) reads it.
 	void walkCycle(float& length, float& time) const;
+	// 0x008badf0 (slot 0x14 with 0 -> slot 8): back to a fresh state, every
+	// playing instance dropped (slot 0x58), the messages cleared and the
+	// startup trigger to run again on the next update. ThrownAnimationComp's
+	// reload (0x005e1410) does this before its message 2, so the throw
+	// held by playForever gives way to the next grenade's deploy.
+	void reset();
 	// Bundle names playing, by priority (for checks and debugging).
 	std::vector<std::string> playing() const;
 

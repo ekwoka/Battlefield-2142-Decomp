@@ -58,6 +58,11 @@ struct BotManagerTestAccess {
 		return manager.seatValue(bot(manager, self.id), self, vehicle, 0, true);
 	}
 	static void time(BotManager& manager, float t) { manager.m_time = t; }
+	static bool flare(BotManager& manager, const GameWorld::PlayerInfo& self) {
+		SoldierInput input;
+		manager.useFlareOnLock(bot(manager, self.id), self, input);
+		return input.flareFire;
+	}
 	static void attack(BotManager& manager, int area) { manager.m_sides[2].attacks = {area}; }
 	static bool firePlanDrive(BotManager& manager, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target, bool inSight) {
 		BotManager::Known known;
@@ -829,6 +834,89 @@ TEST(Bots_EmpDoesNotTurnDriverOut)
 	}
 	CHECK(field.world->vehicleList().front().working);
 	CHECK(self.vehicle == vehicle && self.driving);
+}
+
+// UseFlareOnMissileLock (AIDLL 0x100d1e80): a heat round locks on the bot's ITAir vehicle; the bot
+// presses PIFlareFire once, 1 s after the lock, and not again for the same round.
+TEST(Bots_FlareOnMissileLock)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	CHECK(gameDir != nullptr);
+	if (!gameDir) return;
+	Field field([&](Field& f) {
+		f.files.setRootPath(gameDir);
+		f.files.addSearchPath("mods/bf2142");
+		Console console {&f.files};
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&](std::string archive, std::string mountPoint, bool) { f.files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		f.templates.registerType(7, "PlayerControlObject");
+		f.templates.registerType(8, "EntryPoint");
+		f.templates.registerType(9, "Engine");
+		f.templates.registerType(10, "Spring");
+		f.collisionTemplates.create("as_fav", "Objects/Vehicles/as_fav/");
+		auto* car = f.templates.create("PlayerControlObject", "flare_test_car");
+		car->settings()["hasMobilePhysics"] = "1";
+		car->settings()["physicsType"] = "Mesh";
+		car->settings()["collisionMesh"] = "as_fav";
+		car->settings()["seatInformation"] = "flare_test_car 0/0.5/0.4 0/0/0";
+		car->settings()["mass"] = "1800";
+		car->settings()["aiTemplate"] = "FlareCar";
+		car->settings()["targetType"] = "TTHeat";
+		car->children().push_back({"flare_test_entry", {-1.5f, 0, 0}, {}});
+		car->children().push_back({"flare_test_engine", {0, -0.44f, 0}, {}});
+		auto* engine = f.templates.create("Engine", "flare_test_engine");
+		engine->settings()["engineType"] = "194";
+		auto* wheel = f.templates.create("Spring", "flare_test_wheel");
+		wheel->settings()["strength"] = "40"; wheel->settings()["damping"] = "8";
+		for (float x : {-0.95f, 0.95f}) for (float z : {-1.4f, 1.6f}) engine->children().push_back({"flare_test_wheel", {x, -0.15f, z}, {}});
+		f.templates.create("EntryPoint", "flare_test_entry")->settings()["entryRadius"] = "3";
+		auto* round = f.templates.create("GenericProjectile", "flare_test_missile");
+		for (const char* c : {"DefaultDetonationComp", "SeekClosestTargetComp", "DefaultFollowComp"}) round->components().push_back(c);
+		round->settings()["seek.targetType"] = "TTHeat";
+		round->settings()["seek.maxAngleLock"] = "360";
+		round->settings()["seek.maxDistLock"] = "375";
+		round->settings()["timeToLive"] = "20";
+	});
+	const uint32_t vehicle = field.objects.create(field.templates.find("flare_test_car"), {3, 1.2f, 0}, {30, 0, 0})->id();
+	const int id = field.soldier(2, true, 0, 0);
+	for (int i = 0; i < 90; ++i) field.world->tick(1 / 30.0f);
+	game::SoldierInput use;
+	use.use = true;
+	field.world->setInput(id, use);
+	field.world->tick(1 / 30.0f);
+	field.world->setInput(id, {});
+	field.world->tick(1 / 30.0f);
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	CHECK(self.vehicle == vehicle);
+	game::BotSettings settings;
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplate.create FlareCar", "aiTemplate.addType ITAir"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	game::BotManagerTestAccess::time(bots, 5);
+	CHECK(!game::BotManagerTestAccess::flare(bots, self)); // nothing locked yet
+	const physics::Vec3 at = field.world->vehicleList().front().position;
+	CHECK(field.world->launchProjectile("flare_test_missile", at + physics::Vec3 {0, 60, 200}, {0, -5, -20}));
+	field.world->tick(1 / 30.0f);
+	bool locked = false;
+	for (const auto& p : field.world->projectiles()) locked = locked || (p.alive && p.lockedOn == vehicle);
+	CHECK(locked);
+	int presses = 0;
+	float pressedAt = -1;
+	for (int i = 0; i <= 90; ++i) {
+		const float t = 5 + i / 30.0f;
+		game::BotManagerTestAccess::time(bots, t);
+		if (game::BotManagerTestAccess::flare(bots, self)) {
+			++presses;
+			pressedAt = t;
+		}
+	}
+	CHECK(presses == 1);
+	CHECK(pressedAt >= 6.0f && pressedAt < 6.05f);
 }
 
 // armor.empDamageIgnoreRadius (the gunships') drops the falloff, not the sphere query: an EMP far away
