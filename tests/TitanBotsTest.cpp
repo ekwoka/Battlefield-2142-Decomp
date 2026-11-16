@@ -36,6 +36,7 @@ TEST(Titan_BotsReachGunConsolesFromSpawnRoom)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -82,6 +83,7 @@ TEST(Titan_BotsFlyDeckAircraftFromTitan)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -246,6 +248,7 @@ TEST(Titan_BotsLeaveOtherTransportsToOrdinaryAi)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -315,6 +318,7 @@ TEST(Titan_BotsDeployEmptyDeckTransport)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -409,6 +413,7 @@ TEST(Titan_BotsLeaveStrandedHullLedge)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -437,6 +442,72 @@ TEST(Titan_BotsLeaveStrandedHullLedge)
 		std::fprintf(stderr, "  %s: TitanLeave %d, now local %.1f %.1f %.1f alive %d\n", mod, left, local.x, local.y, local.z, info.alive);
 		CHECK(left);
 		CHECK(!info.alive || local.y < -5 || std::abs(local.x) > 40);
+	}
+}
+
+// A bot on foot on the ground in gpm_ti, below the enemy Titan's control
+// point. Retail (enhanced.botTitan off): with no strategy it goes to the
+// nearest point not its team's (updateGoal's fallback), here the Titan's,
+// which can't change hands. With enhanced.botTitan it heads for a silo it
+// can capture instead.
+TEST(Titan_BotSiloGoalOnlyWithEnhancedTitanPlay)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const bool titanPlay : {false, true}) {
+		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, "mods/bf2142");
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		game::BotSettings settings;
+		const bool enhanced = true;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &titanPlay;
+		const auto* enemy = level.titan(2);
+		CHECK(enemy != nullptr);
+		if (!enemy) continue;
+		const int enemyPoint = enemy->controlPoint;
+		const auto points = level.world->controlPointList();
+		const game::GameWorld::ControlPointInfo* titanPoint = nullptr;
+		for (const auto& p : points) {
+			titanPoint = p.id == enemyPoint ? &p : titanPoint;
+		}
+		CHECK(titanPoint != nullptr);
+		if (!titanPoint) continue;
+		const physics::Vec3 at {titanPoint->position.x,
+			level.heightmaps.primary()->heightAt(titanPoint->position.x, titanPoint->position.z) + 1, titanPoint->position.z};
+		// The nearest point not the bot's team's, as the fallback sees them.
+		const game::GameWorld::ControlPointInfo* nearest = nullptr;
+		for (const auto& p : points) {
+			if (p.team != 1 && (!nearest || physics::lengthSquared(p.position - at) < physics::lengthSquared(nearest->position - at))) {
+				nearest = &p;
+			}
+		}
+		CHECK(nearest == titanPoint && !titanPoint->capturable);
+		game::BotManager bots(*level.world, settings);
+		const int id = level.world->addPlayer("Bot", 1, true);
+		CHECK(level.world->spawnSoldier(id));
+		game::GameWorld::PlayerInfo info;
+		CHECK(level.world->playerInfo(id, info));
+		CHECK(level.world->setSoldierPosition(info.soldier, at));
+		bots.update(1 / 30.0f);
+		const std::vector<physics::Vec3> route = bots.route(id);
+		CHECK(!route.empty());
+		if (route.empty()) continue;
+		const physics::Vec3 goal = route.back();
+		const auto within = [&](const game::GameWorld::ControlPointInfo& p) {
+			const float dx = goal.x - p.position.x, dz = goal.z - p.position.z;
+			return dx * dx + dz * dz <= std::max(p.radius, 10.0f) * std::max(p.radius, 10.0f);
+		};
+		bool silo = false;
+		for (const auto& s : level.world->missileSilos()) {
+			for (const auto& p : points) {
+				silo = silo || (p.id == s.controlPoint && s.team != 1 && p.capturable && within(p));
+			}
+		}
+		std::fprintf(stderr, "  botTitan %d: goal (%.0f, %.0f, %.0f), the enemy Titan's point (%.0f, %.0f, %.0f)\n", titanPlay,
+			goal.x, goal.y, goal.z, titanPoint->position.x, titanPoint->position.y, titanPoint->position.z);
+		CHECK(within(*titanPoint) == !titanPlay);
+		CHECK(silo == titanPlay);
 	}
 }
 
@@ -587,6 +658,7 @@ static std::vector<PodDrop> runPodDrops(const char* gameDir, const std::string& 
 // Wake Island 2142: both Titans park off the coast; drops land ashore, on the mesh, beside a control point.
 TEST(Titan_BotsPodToLandOnWakeCoop)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	int landed = 0, wet = 0;
@@ -606,6 +678,7 @@ TEST(Titan_BotsPodToLandOnWakeCoop)
 // comes down where the mesh is underfoot.
 TEST(Titan_BotsPodToWalkableGroundOnMolokaiTitan)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	int landed = 0, stuck = 0;

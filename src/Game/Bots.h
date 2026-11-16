@@ -552,10 +552,12 @@ struct BotSettings {
 	const bool* botRecovery = nullptr;
 	bool stuckRecovery() const { return enhanced && *enhanced && (!botRecovery || *botRecovery); }
 	// enhanced.botMovement, also read live: bots on foot lie down only for
-	// far targets and look round only where they walk (not retail).
+	// far targets and look round only where they walk; a gunner's aim
+	// starts afresh on a new target (not retail).
 	const bool* botMovement = nullptr;
 	bool playerLikeMovement() const { return enhanced && *enhanced && botMovement && *botMovement; }
-	// enhanced.botTitan, also read live: the bots' play aboard a Titan (BotsTitan.cpp; not retail).
+	// enhanced.botTitan, also read live: the bots' play aboard a Titan (BotsTitan.cpp), and in gpm_ti
+	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.

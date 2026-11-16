@@ -162,6 +162,7 @@ TEST(Titan_MinskTitansSpawn)
 // a shipped map and its materials.
 TEST(Titan_SuezWalkerPrimaryFireAgainstEnemyInfantry)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	constexpr float dt = 1.0f / 30.0f;
@@ -821,8 +822,10 @@ TEST(Titan_GunSeatsAreMannedAndFire)
 }
 
 // The team forcefields (collisionGroups 0x100 the PAC Titan's own, 0x200
-// the EU Titan's): an object passes its own team's and meets the other's.
-// The Titan's object spawners
+// the EU Titan's): an object passes its own team's and meets the other's,
+// but the spawn room's field mesh carries no soldier LOD, so soldiers of
+// both teams walk through it (a mesh without a soldier LOD stops no
+// soldier) while rounds meet it (its projectile LOD); the Titan's object spawners
 // (as_titan_ATSpawner / AGSpawner) and supply point are objects of their
 // own carried with it.
 TEST(Titan_ForcefieldsAndCarriedObjects)
@@ -858,7 +861,7 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 			};
 		walk(*object->objectTemplate(), physics::Mat3 {}, {}, 0);
 		CHECK(fields.size() == 1);
-		int blocked = 0;
+		int blocked = 0, walked = 0;
 		for (const physics::Vec3& offset : fields) {
 			const physics::Vec3 at = titan.position + turn.transform(offset);
 			for (const physics::Vec3 axis : {physics::Vec3 {1, 0, 0}, physics::Vec3 {0, 0, 1}}) {
@@ -866,12 +869,13 @@ TEST(Titan_ForcefieldsAndCarriedObjects)
 					const physics::Vec3 a = at + turn.transform(axis * 3.0f + physics::Vec3 {0, up, 0});
 					const physics::Vec3 b = at + turn.transform(axis * -3.0f + physics::Vec3 {0, up, 0});
 					blocked += level.world->lineOfSight(a, b) ? 0 : 1;
+					walked += level.world->soldierPathClear(1, a, b) == level.world->soldierPathClear(2, a, b) ? 1 : 0;
 				}
 			}
 		}
-		std::fprintf(stderr, "  %s Titan's spawn room field: %d of 6 ways stop rounds\n",
-			team == 1 ? "PAC" : "EU", blocked);
-		CHECK(blocked > 0);
+		std::fprintf(stderr, "  %s Titan's spawn room field: %d of 6 ways stop rounds, %d the same for both teams' soldiers\n",
+			team == 1 ? "PAC" : "EU", blocked, walked);
+		CHECK(blocked > 0 && walked == 6);
 	}
 	// The carried objects: two spawners and a supply point.
 	const auto pac = *level.titan(1);
@@ -904,6 +908,7 @@ TEST(Titan_InteriorFieldCollisionUsesTeamAndRetailLod)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -985,6 +990,7 @@ TEST(Titan_OuterShieldKillsEnemies)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const int shieldDown : {0, 1}) {
 			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 			CHECK(level.loaded);
@@ -1042,6 +1048,7 @@ TEST(Titan_WalkerLegsRespectOuterShieldTeam)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (int team : {1, 2}) {
 			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 			CHECK(level.loaded);
@@ -1397,6 +1404,7 @@ TEST(Titan_ApcPodLandsAndDisappearsOnDeck)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
 		CHECK(level.loaded && level.titan(2) && level.templates.find("eu_apc_pods"));
 		if (!level.loaded || !level.titan(2) || !level.templates.find("eu_apc_pods")) return;
@@ -1663,6 +1671,7 @@ TEST(Titan_HeldGunshipReleasesIntact)
 
 TEST(Titan_HeldGunshipReleasesIntactRemaster)
 {
+	REMASTER_ONLY();
 	heldGunshipReleasesIntact("mods/Project_Remaster_v17_Final");
 }
 
@@ -1852,6 +1861,7 @@ TEST(Titan_WalkerSweepsTheSuezBridges)
 	const Span spans[] = {{65, -36, 90, 47.2f, 55, 40}, {-512, -36, 90, 47.2f, 55, 40}, {-99, -128, 0, 47.2f, 55, 40},
 		{-245, -32, 90, 50.8f, 175, 130}};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
 		if (!level.loaded) {
 			continue;
@@ -1982,6 +1992,7 @@ TEST(Titan_WalkerCrossesTheSuezBridges)
 	// the lane at z -32 from the west bank to the east bank.
 	const BridgeCrossing bridges[] = {{65, -36, 90, 47.2f}, {-512, -36, 90, 47.2f}, {-99, -128, 0, 47.2f}, {-245, -32, 90, 50.8f, 175, 130}};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const BridgeCrossing& bridge : bridges) {
 			for (const bool sprint : {false, true}) {
 				walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
@@ -1995,6 +2006,7 @@ TEST(Titan_WalkerCrossesTheSuezBridges)
 TEST(Titan_WalkerBridgeContactDoesNotOscillate)
 {
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech"}) {
 			for (const bool sprint : {false, true}) {
 				for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
@@ -2013,6 +2025,7 @@ TEST(Titan_SuezBridgeMotionSurvey)
 {
     const BridgeCrossing bridge {-245, -32, 90, 50.8f, 175, 130};
     for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+        if (!test::runs(mod)) continue;
         for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech", "eu_tank", "eu_apc"}) {
             for (bool steering : {false, true})
                 walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
@@ -2024,6 +2037,7 @@ TEST(Titan_SuezBridgeMotionSurvey)
 // It is not a substitute for bot routing through the pictured underpass.
 TEST(Titan_SuezBridgeCrowdingSurvey)
 {
+	REMASTER_ONLY();
     for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
                                          BridgeCrossing {-512, -36, 90, 47.2f},
                                          BridgeCrossing {-245, -32, 90, 50.8f, 175, 130}})
@@ -2031,7 +2045,8 @@ TEST(Titan_SuezBridgeCrowdingSurvey)
 }
 
 // Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906, so a bot sent there cannot plan and walks
-// straight into the first wall. A foot bot standing 60 m from silo 906 (the nearest) must prefer one it can plan to.
+// straight into the first wall. With enhanced.botTitan a foot bot standing 60 m from silo 906 (the nearest) must prefer one
+// it can plan to.
 TEST(Titan_BotsPreferSilosOnTheNavMesh)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -2062,7 +2077,12 @@ TEST(Titan_BotsPreferSilosOnTheNavMesh)
 	}
 	CHECK(found);
 	if (!found) return;
-	game::BotManager bots(*level.world, {});
+	// The silo choice is enhanced.botTitan's (BotManager::updateGoal).
+	game::BotSettings settings;
+	const bool enhanced = true;
+	settings.enhanced = &enhanced;
+	settings.botTitan = &enhanced;
+	game::BotManager bots(*level.world, settings);
 	bots.setNavMesh(&*mesh);
 	const int id = level.world->addPlayer("Chooser", 2, true);
 	CHECK(level.world->spawnSoldier(id));
@@ -2293,6 +2313,7 @@ TEST(Titan_ShepherdOnTheDeckLeavesOnFoot)
 // Minsk, as played): where the soldier ends up and whether he lives.
 TEST(Titan_DropToTheRearCatwalk)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -2343,6 +2364,7 @@ TEST(Titan_DropToTheRearCatwalk)
 // from its origin): '#' inside, '.' outside, at the catwalk's height and the deck's.
 TEST(Titan_HullZoneAtTheRearCatwalk)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -2387,6 +2409,7 @@ TEST(Titan_SuezTitanPositions)
 // and past it (127 damage). Drop soldiers over a grid there: where do they stand?
 TEST(Titan_SuezInteriorFloorProbe)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -2429,6 +2452,7 @@ TEST(Titan_AASeatAimAndFireOwnership)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   TitanLevel level(dir, "Minsk", 48, true, mod);
   CHECK(level.loaded);
   if (!level.loaded) continue;
@@ -2488,6 +2512,7 @@ TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+ if (!test::runs(mod)) continue;
  for (int team : {1, 2}) {
   TitanLevel level(dir, "Minsk", 48, true, mod);
   CHECK(level.loaded);
@@ -2554,6 +2579,7 @@ TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
 // burst sound starts on round 10.
 TEST(Titan_GroundCannonReloadSoundFollowsLastRound)
 {
+	REMASTER_ONLY();
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  TitanLevel level(dir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
@@ -2599,6 +2625,7 @@ TEST(Titan_VehicleSeatHudUsesAuthoredIconOffsets)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   TitanLevel level(dir, "Minsk", 48, true, mod);
   CHECK(level.loaded);
   if (!level.loaded) continue;
@@ -2664,6 +2691,7 @@ TEST(Titan_StationaryAARoundsMeetFriendlyAndEnemyTitan)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Sidi_Power_Plant", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -2700,6 +2728,7 @@ TEST(Titan_StationaryAARoundsMeetFriendlyAndEnemyTitan)
 
 TEST(Titan_FriendlyStationaryAAGunFiresAtTitan)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (bool missile : {false, true}) {
@@ -2764,6 +2793,7 @@ TEST(Titan_FriendlyStationaryAAGunFiresAtTitan)
 
 TEST(Titan_FriendlyWalkerAAGunOnSuez)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	const bool crowded = std::getenv("BF2142_TITAN_CROWD_TEST") != nullptr;
@@ -2866,6 +2896,7 @@ TEST(Titan_FriendlyWalkerAAGunOnSuez)
 // Titan transform; otherwise a player reproduction cannot diagnose crossing.
 TEST(Titan_WalkerShotTraceRecordsLifecycle)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
@@ -2900,6 +2931,7 @@ TEST(Titan_MapListIncludesAuthoredSilhouette)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   TitanLevel level(dir, "Suez_Canal", 48, true, mod);
   CHECK(level.loaded);
   if (!level.loaded) continue;
@@ -2937,6 +2969,7 @@ TEST(Titan_MapFootprintContainsParkedGunship)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		const char* name = std::string(mod) == "mods/bf2142" ? "Suez_Canal" : "Bridge_at_Remagen";
 		TitanLevel level(dir, name, 48, true, mod);
 		CHECK(level.loaded);
@@ -3011,6 +3044,7 @@ TEST(Titan_GunMinimapHeadingFollowsCamera)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   for (int team : {1, 2}) {
    TitanLevel level(dir, "Suez_Canal", 48, true, mod);
    CHECK(level.loaded); if (!level.loaded) continue;
@@ -3063,6 +3097,7 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (int team : {1, 2}) {
 		 for (float side : {-30.0f, 30.0f}) {
 			TitanLevel level(dir, "Suez_Canal", 48, true, mod);
@@ -3168,6 +3203,7 @@ TEST(Titan_PodStrafeStaysScreenRelativeAfterTurning)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		// Coasting, A, D, S, W: retail's ForceObjects (0x0062c920) push force x
 		// input, clamped to +-maxForceOnObject, so S's -1 on eu_pod_FOFWD
 		// (35 / 35) thrusts the pod backwards along its own hull.
@@ -3362,6 +3398,7 @@ TEST(Titan_ConsoleDestroyedRadio)
 // alone: the Titan's other guns keep their exterior geometry.
 TEST(Titan_GunSeatCockpitLeavesTheOtherGuns)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	TitanLevel level(gameDir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
@@ -3607,6 +3644,7 @@ TEST(Titan_JoinedClientPlacedByCreateObject)
 // went on the decks and in the upper hangar.
 TEST(Titan_CameraTitanIsTheHullHoldingTheCamera)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
@@ -3747,10 +3785,17 @@ TEST(Titan_EnclosedClientLeavesOutsideSoldiersUnscored)
 // The air transports' seats (eu_at's pilot, gunners and passengers:
 // exitThroughPodLauncher, each with an air_pod_launcher on PIFire): the
 // exit key fires the seat's pod launcher whatever its input (0x004bda00
-// mask 0x400 -> event 6), its round being the pod (eu_pod_drop,
-// enterOnSpawn) that seats the soldier who fired it. The fire button does
-// not: a passenger's primary fire is his own weapon's.
-TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
+// mask 0x400 -> event 6) when its rays are clear: from the launcher along
+// its firing direction, 3 m, the middle one and four at (+-1, +-1)
+// (DAT_00a85220 slot 0x68); any hit and the soldier leaves as usual
+// (0x004bb570). So in the air he leaves in the pod (eu_pod_drop,
+// enterOnSpawn, seating the soldier who fired it), parked on the ground he
+// steps out. The fire button fires the seat's group-0 weapon on its input
+// (0x004cc7a0 -> 0x005cacf0 -> 0x005c50e0): air_pod_launcher's
+// fire.fireInput is the default PIFire (8, 0x005f1228), so it launches the
+// pod too. (enhanced.passengerWeapons gives that fire to the soldier's own
+// weapon instead: VehicleModels_TransportPassengerFiresHisOwnWeapon.)
+TEST(Titan_AirTransportSeatsLaunchPods)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
@@ -3761,12 +3806,19 @@ TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 		return;
 	}
 	level.run(0.5f);
-	for (const bool exitKey : {true, false}) {
-		const float x = exitKey ? 0.0f : 60.0f, z = 0;
-		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + 3.0f, z});
+	struct Case {
+		const char* name;
+		bool exitKey;
+		float height; // over the terrain
+	};
+	for (const Case& c : {Case {"the exit key in the air", true, 150}, Case {"fire in the air", false, 150},
+			 Case {"the exit key parked", true, 3}}) {
+		const bool exitKey = c.exitKey;
+		const float x = c.height > 10 ? (exitKey ? 0.0f : 60.0f) : 120.0f, z = 0;
+		world::Object* at = level.objects.create(level.templates.find("eu_at"), {x, level.world->terrainHeight(x, z) + c.height, z});
 		at->setTeam(2);
 		level.run(2 / 30.0f);
-		const int player = level.world->addPlayer(exitKey ? "Exit" : "Fire", 2, false);
+		const int player = level.world->addPlayer(c.name, 2, false);
 		CHECK(level.world->spawnSoldier(player));
 		// In at its entry point (the use key's reach).
 		physics::Vec3 entry;
@@ -3803,7 +3855,6 @@ TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 		level.world->setInput(player, leave);
 		level.run(1 / 30.0f);
 		level.world->setInput(player, {});
-		// (Read at once: a pod launched under a parked transport lands in a tick or two, 0x005cf750.)
 		std::string pod;
 		for (const auto& p : level.world->pods()) {
 			if (p.player == player) {
@@ -3811,15 +3862,13 @@ TEST(Titan_AirTransportSeatsLaunchPodsOnTheExitKey)
 				pod = o && o->objectTemplate() ? o->objectTemplate()->name() : "";
 			}
 		}
-		std::fprintf(stderr, "  %s: %s\n", exitKey ? "the exit key" : "fire", pod.c_str());
-		if (exitKey) {
-			// The exit key's rays (0x004bda00) run from the launcher along its
-			// firing direction, 3 m: the transport parked on the ground
-			// leaves its soldier standing beside it, not in a pod.
-			CHECK(level.world->playerInfo(player, info) && info.vehicle != at->id() && (pod == "eu_pod_drop" || pod.empty()));
+		std::fprintf(stderr, "  %s: pod %s, riding %d\n", c.name, pod.c_str(), level.world->ridingPod(player) ? 1 : 0);
+		CHECK(level.world->playerInfo(player, info) && info.vehicle != at->id());
+		if (c.height > 10) {
+			CHECK(pod == "eu_pod_drop" && level.world->ridingPod(player));
 		} else {
-			// The primary fire is the passenger's own weapon's: no pod.
-			CHECK(pod.empty() && level.world->playerInfo(player, info) && info.vehicle == at->id());
+			// The rays meet the ground under the parked transport: out on foot.
+			CHECK(pod.empty() && !level.world->ridingPod(player) && info.alive && info.vehicle == 0);
 		}
 	}
 }
@@ -4001,6 +4050,7 @@ TEST(Titan_SiloMissileBendsOverGraduallyAndReachesTheTitan)
 // the hit, never on a face of the same mesh elsewhere in its column.
 TEST(Titan_HullDecalStaysOnTheHull)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;

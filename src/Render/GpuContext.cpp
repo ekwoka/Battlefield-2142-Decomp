@@ -627,16 +627,12 @@ std::vector<uint32_t> GpuContext::sampleCounts() const
 	return counts;
 }
 
-uint32_t GpuContext::setWorldSamples(uint32_t requested)
+uint32_t GpuContext::setWorldSamples(uint32_t requested, bool enhancedLit)
 {
 	// The most samples at or below the request both targets' formats take
-	// (the original lists the device's multisample types, 0x1000fb60).
-	uint32_t samples = 1;
-	for (const uint32_t count : sampleCounts()) {
-		if (count <= requested) {
-			samples = count;
-		}
-	}
+	// (the original lists the device's multisample types, 0x1000fb60); one
+	// with the enhanced lit variants (WorldSamples.h).
+	const uint32_t samples = m_samples.set(requested, enhancedLit && enhancedLitAvailable(), sampleCounts());
 	if (samples > 1 && samples != m_multisampledCount) {
 		releaseWorldPipelines(m_multisampled);
 		std::string error;
@@ -646,11 +642,10 @@ uint32_t GpuContext::setWorldSamples(uint32_t requested)
 			SDL_Log("antialiasing (%u samples): %s", samples, error.c_str());
 			releaseWorldPipelines(m_multisampled);
 			m_multisampledCount = 1;
-			samples = 1;
+			m_samples.fallBackToSingle();
 		}
 	}
-	m_worldSamples = samples;
-	return samples;
+	return m_samples.samples();
 }
 
 SDL_GPUTexture* GpuContext::createMultisampleTarget(uint32_t width, uint32_t height, bool depth)
@@ -663,7 +658,7 @@ SDL_GPUTexture* GpuContext::createMultisampleTarget(uint32_t width, uint32_t hei
 	info.height = std::max<uint32_t>(height, 1);
 	info.layer_count_or_depth = 1;
 	info.num_levels = 1;
-	info.sample_count = sampleCountOf(m_worldSamples);
+	info.sample_count = sampleCountOf(m_samples.samples());
 	return SDL_CreateGPUTexture(m_device, &info);
 }
 

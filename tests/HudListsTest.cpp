@@ -548,7 +548,9 @@ TEST(HudLists_KitGridShippedKits)
 		return;
 	}
 	checkShippedKitGrid(gameDir, "mods/bf2142");
-	checkShippedKitGrid(gameDir, "mods/Project_Remaster_v17_Final");
+	if (test::remaster()) {
+		checkShippedKitGrid(gameDir, "mods/Project_Remaster_v17_Final");
+	}
 }
 
 TEST(HudLists_KitMenuSkipsUnchangedInEnhancedMode)

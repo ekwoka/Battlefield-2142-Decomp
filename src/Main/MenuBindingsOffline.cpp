@@ -114,7 +114,10 @@ MenuBindings::FavouriteServer parseEntry(const std::string& entry)
 
 std::string formatEntry(const MenuBindings::FavouriteServer& server)
 {
-	return "\"" + server.ip + "\" " + std::to_string(server.port) + " \"" + server.name + "\" " + std::to_string(server.queryPort);
+	// The name is the server's own (a LAN server's hostname): made safe
+	// for the console line (consoleQuotable; port addition).
+	return quotedConsoleArgument(server.ip, kMaxServerText) + " " + std::to_string(server.port) + " "
+		+ quotedConsoleArgument(server.name, kMaxServerText) + " " + std::to_string(server.queryPort);
 }
 
 // The natives compare entries as "%s %d" of the address and game port.
@@ -961,7 +964,7 @@ void MenuBindings::bindOffline()
 				});
 			};
 			if (std::none_of(played.begin(), played.end(), same)) {
-				played.push_back("\"" + name + "\"");
+				played.push_back(quotedConsoleArgument(name));
 				m_objects->setList("GeneralSettings.PlayedVOHelp", std::move(played));
 				m_objects->saveGeneral();
 			}
@@ -1117,8 +1120,17 @@ void MenuBindings::addDemoBookmark(const std::string& serverName, const std::str
 		return;
 	}
 	std::vector<std::string> entries = demoBookmarks();
-	// addDemoBookmark's "qqqi", as the profile writes it.
-	entries.push_back("\"" + serverName + "\" \"" + map + "\" \"" + url + "\" " + std::to_string(time));
+	// The original's list has no bound (0x0048fb70 appends each); here the
+	// oldest go past kMaxDemoBookmarks, so a server's notices cannot grow
+	// the profile without end (port addition).
+	if (entries.size() >= kMaxDemoBookmarks) {
+		entries.erase(entries.begin(), entries.end() - static_cast<long>(kMaxDemoBookmarks - 1));
+	}
+	// addDemoBookmark's "qqqi", as the profile writes it; the texts are the
+	// server's, made safe for the console line (consoleQuotable; port
+	// addition).
+	entries.push_back(quotedConsoleArgument(serverName, kMaxServerText) + " " + quotedConsoleArgument(map, kMaxServerText) + " "
+		+ quotedConsoleArgument(url, kMaxServerText) + " " + std::to_string(time));
 	m_objects->setList(kBookmarkList, entries);
 	if (m_profiles) {
 		m_profiles->save();

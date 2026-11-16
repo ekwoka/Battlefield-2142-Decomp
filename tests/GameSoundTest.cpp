@@ -81,7 +81,7 @@ TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
 	#ifdef _WIN32
 	_putenv_s("ALSOFT_DRIVERS", "null");
 	#else
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	#endif
 	auto* engine = sound::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
@@ -121,7 +121,7 @@ TEST(GameSounds_TappedAutomaticShotPlaysOutAfterRelease)
 {
 	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
 	if (!dir) return;
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	auto* engine = sound::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
 	{

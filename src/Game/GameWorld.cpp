@@ -14,6 +14,7 @@
 #include <functional>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -1600,7 +1601,12 @@ bool GameWorld::spectacularHit(uint32_t id, float before, float after, float hit
 int GameWorld::armorPercent(float hitPoints, float maxHitPoints, float wreckHitPoints)
 {
 	const float of = hitPoints < 0 ? wreckHitPoints : maxHitPoints;
-	return of > 0 ? static_cast<int>(std::ceil(hitPoints / of * 100.0f)) : 0;
+	if (!(of > 0)) {
+		return 0;
+	}
+	// _ftol's out-of-range result (0x80000000) for the force field's 1e10 loss.
+	const float percent = std::ceil(hitPoints / of * 100.0f);
+	return percent >= -2147483648.0f && percent < 2147483648.0f ? static_cast<int>(percent) : INT32_MIN;
 }
 
 GameWorld::ArmorEffectStep GameWorld::armorEffectStep(const std::vector<int>& levels, int before, int now, int current,
@@ -4040,6 +4046,23 @@ bool GameWorld::stepProjectileView(Player& player, float seconds)
 		}
 		return lo < hi ? std::clamp(angle + delta, lo, hi) : angle + delta;
 	};
+	if (guidedCameraEase()) {
+		// enhanced.guidedCameraEase (not retail): each idle axis returns at
+		// its configured angular speed, so the view doesn't jump straight
+		// when a mouse movement ends.
+		const auto recenter = [seconds](float angle, float speed) {
+			const float amount = speed > 0 ? speed * seconds : std::fabs(angle);
+			return angle > 0 ? std::max(0.0f, angle - amount) : std::min(0.0f, angle + amount);
+		};
+		view.yaw = view.snapToZero && std::fabs(turn) < 1e-4f
+			? recenter(view.yaw, view.maxSpeed.x)
+			: step(view.yaw, turn, view.maxSpeed.x, view.minRotation.x, view.maxRotation.x);
+		// Bundle pitch is down positive; rise uses the opposite limits.
+		view.pitch = view.snapToZero && std::fabs(tilt) < 1e-4f
+			? recenter(view.pitch, view.maxSpeed.y)
+			: step(view.pitch, tilt, view.maxSpeed.y, -view.maxRotation.y, -view.minRotation.y);
+		return true;
+	}
 	if (view.snapToZero && std::fabs(turn) < 1e-4f && std::fabs(tilt) < 1e-4f) {
 		view.yaw = view.pitch = 0;
 	} else {
@@ -8925,7 +8948,7 @@ bool GameWorld::seatedSoldierView(int id, LadderView& view)
 		* physics::Mat3::fromYawPitchRoll(seat.rotation) * mount.turn * body->body.rotation;
 	view.position = body->body.position + body->body.rotation.transform(mount.place(seat.position));
 	view.yaw = rotation.yawPitchRoll().x;
-	view.pitch = std::clamp(player->input.aimPitch + (seat.kitWeapon() ? player->aimKickPitch : 0.0f), -85.0f, 85.0f);
+	view.pitch = std::clamp(player->input.aimPitch + (passengerWeapon(seat) ? player->aimKickPitch : 0.0f), -85.0f, 85.0f);
 	return true;
 }
 
@@ -10666,7 +10689,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				}
 			}
 			SoldierInput turned = input;
-			if (seat && seat->kitWeapon()) {
+			if (seat && passengerWeapon(*seat)) {
 				stepWeaponRecoil(player, turned);
 			}
 			if (seat) {
@@ -10683,9 +10706,9 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				object->setHidden(true);
 			}
 			followKit(player, *object); // the kit is the soldier's child: where the seat put him this tick
-			if (seat && seat->kitWeapon()) {
-				// Passengers use whatever weapons they have: it fires along the
-				// seat's look, from the seat.
+			if (seat && passengerWeapon(*seat)) {
+				// enhanced.passengerWeapons (not retail): passengers use whatever
+				// weapons they have: it fires along the seat's look, from the seat.
 				LadderView look;
 				if (seatedSoldierView(player.id, look)) {
 					player.body.yawDegrees = look.yaw;
@@ -12690,12 +12713,19 @@ void GameWorld::stepAbilities(float seconds)
 //   kit's material) takes everything in it as well: the soldiers on foot,
 //   the vehicles (the rewrite's: those of the bodies, the soldiers on
 //   foot as applyAbility's sphere has them).
-// - Each target: repairing alone (neither of the others) checks a vehicle
-//   (the object's +0x17 bit 0) of the team or of none. Slot 0x108 calls
-//   0x004cc380, which rejects the giver's own vehicle root; native now
-//   filters it from repair-only target scans. Healing or ammo treats a soldier (0x9493)
-//   of the team (0x108 heal, 0x10c ammo). With ammo a vehicle not ours
-//   of the team or of none takes slot 0x10c too, rearming its seat weapons.
+// - Each target: repairing alone (neither of the others) takes a root
+//   (the object's +0x17 bit 0, which 0x006f1d70 answers with the object
+//   itself) of the team or of none; healing or ammo treats a soldier
+//   (0x9493) of the team (0x108 heal, 0x10c ammo). With ammo a vehicle not
+//   ours of the team or of none takes slot 0x10c too, rearming its seat
+//   weapons.
+// - Never the engineer's own vehicle: slot 0x108 is the server logic's
+//   (vtable 0x009294e8 slot 66) 0x004bc410, whose eighth argument is
+//   0x004cc380's param_9; both passes push it 0 (0x0059a45c, 0x0059a571),
+//   and with it 0 0x004cc380 refuses a target that is the root
+//   (0x006f1d70) of the giver's control object (player slot 0x4c) and not
+//   a soldier. So the vehicle he sits in fails the first pass's check and
+//   is never treated (the second sphere still finds it).
 // So an engineer's repair in a vehicle needs the unlock, a medic heals
 // and a supporter rearms only their own passengers without it.
 // - All of it only from a seat with autoUseAbility: the control object's
@@ -12704,15 +12734,20 @@ void GameWorld::stepAbilities(float seconds)
 //   constructor 0x005cd9e0). The shipped ground vehicles and gunships set
 //   it on their seats (as_at on 5 of 7), the Titans' and stationary guns
 //   don't.
-// - Retail's first pass only checks eligibility (0x004bc43b / 0x004cf83b).
-//   Each target that passes (the set 0x0056e4d0 fills when slot 0x108 /
-//   0x10c answer true) is treated once in the next pass: the strength
-//   times the seat's slot 0x17c (0x005c6d60 -> the template's
-//   interface +0x298 slot 0x168, 0x0059dbd0: abilityInVehicleStrength-
-//   Modifier, template +0x4b0, 1 by default and in every shipped vehicle),
-//   for healing and repair shared by the count of those targets, for ammo
-//   whole. The native first pass is check-only; the next pass applies that
-//   single dose.
+// - One dose a tick, as an ability in hand gives. The first pass only
+//   checks: 0x108 gets (target, strength, giver, material, armour, 0,
+//   1, 0) (0x0059a45c..0x0059a481) and 0x004bc410 hands its seventh to
+//   0x004cc380 as param_8 (which then also wants the armour's
+//   canBeRepaired and hit points under the most) and returns right after
+//   it when set (0x004bc43b); 0x10c (0x004bd5f0) gets (..., 0, 1)
+//   (0x0059a41e) and returns after 0x004cf7b0 when its seventh is set
+//   (0x004bd638). Each target that passes (the set 0x0056e4d0) is treated
+//   in the next pass, both flags 0 (0x0059a538, 0x0059a571): the strength
+//   times the seat's slot 0x17c (0x005c6d60 -> the template's interface
+//   +0x298 slot 0x168, 0x0059dbd0: abilityInVehicleStrengthModifier,
+//   template +0x4b0, 1 by default and in every shipped vehicle), for
+//   healing and repair shared by the count of those targets, for ammo
+//   whole.
 void GameWorld::stepVehicleAbility(Player& player, float seconds)
 {
 	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
@@ -12778,8 +12813,8 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 			}
 		}
 		for (const Body& body : m_bodies) {
-			// Retail's repairability check rejects the giver's own control-object
-			// root (0x004cc380) for repair-only abilities.
+			// 0x004cc380 with param_9 0 refuses the giver's own root to a
+			// repair (see above): it is never a repair-only target.
 			if ((!repairOnly || body.object != vehicle->object) && inSphere(body.body.position, body.objectRadius)) {
 				take(body.object);
 			}
@@ -12804,7 +12839,7 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 			}
 		}
 	}
-	// Those targets exactly (a scan held, not run again).
+	// Those targets exactly (a scan held, not run again), checked only.
 	AbilityScan fixed;
 	fixed.targets = std::move(targets);
 	std::vector<uint32_t> treated;
@@ -12812,7 +12847,7 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 	if (treated.empty()) {
 		return;
 	}
-	// The second dose, to those treated.
+	// The one dose, to those that passed.
 	Ability second = ability;
 	second.strength *= number(*seat, "abilityInVehicleStrengthModifier", 1);
 	if (!ability.ammo) {
@@ -13454,7 +13489,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// 0x005c0f40): the active weapon of each of the three groups. A
 	// weapon reloading, full or without a magazine to take does nothing
 	// (FireArm::startReload).
-	if (player.input.reload && !player.reloadWas && !seat.kitWeapon()) {
+	if (player.input.reload && !player.reloadWas && !passengerWeapon(seat)) {
 		if (gun.weapon && gun.weapon->startReload()) {
 			weaponSound(WeaponSoundEvent::Reload, player, body.object, primary.weapon, body.body.position);
 			m_weaponSounds.back().reloadState = gun.weapon->takeReloadSoundEvent();
@@ -13469,7 +13504,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			}
 		}
 	}
-	if (!seat.kitWeapon()) {
+	if (!passengerWeapon(seat)) {
 		player.reloadWas = player.input.reload; // a passenger's reload edge is the soldier's own (stepSoldierWeapon)
 	}
 	// The fire event goes to each group's active weapon (0x004cc7a0 ->
@@ -13478,7 +13513,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// (0x005c69a0).
 	const auto pressed = [&](int input, bool held) { return held && working && input != seat.specialToggleInput; };
 	if (groups & 1) {
-		if (seat.kitWeapon()) {
+		if (passengerWeapon(seat)) {
 			// The soldier's own weapon takes the primary fire (stepSoldierWeapon).
 		} else if (gun.active[0] >= 0 && primary.podLauncher) {
 			// A pod launcher on PIFire (the air transports' seats'
@@ -15617,6 +15652,7 @@ void GameWorld::stepDrones(float seconds)
 		it->second -= seconds;
 		it = it->second <= 0 ? m_revealed.erase(it) : std::next(it);
 	}
+	pruneMapSpots();
 	std::vector<uint32_t> lost;
 	for (Drone& drone : m_drones) {
 		world::Object* object = m_objects.find(drone.object);
@@ -15782,9 +15818,7 @@ void GameWorld::reportBattlefieldObjects(int reporter, const std::vector<int>& p
 	// networkableHudShowCloaked, else to no one; only kind 0 marks enemies
 	// (so a cloak's never does), and one alive in a vehicle has the vehicle
 	// listed too over 5 s.
-	m_mapSpots.erase(std::remove_if(m_mapSpots.begin(), m_mapSpots.end(),
-						 [this](const MapSpot& s) { return s.until <= m_time; }),
-		m_mapSpots.end());
+	pruneMapSpots();
 	if (kind != 0) {
 		return;
 	}
@@ -15799,7 +15833,7 @@ void GameWorld::reportBattlefieldObjects(int reporter, const std::vector<int>& p
 		const Player* player = findPlayer(id);
 		if (player && player->team != from->team) {
 			const uint32_t vehicle = player->alive && player->vehicle && reveal > 5 ? player->vehicle : 0;
-			m_mapSpots.push_back({from->team, from->squad, reporter, id, vehicle, m_time + reveal});
+			addMapSpot({from->team, from->squad, reporter, id, vehicle, m_time + reveal}, true);
 		}
 	}
 }
@@ -15812,10 +15846,47 @@ void GameWorld::radioSpot(int reporter, int enemy, uint32_t value)
 	if (!from || !player || player->team == from->team) {
 		return; // 0x00791faa: only an object of another team
 	}
-	m_mapSpots.push_back({from->team, -1, reporter, player->vehicle ? -1 : enemy, player->vehicle, m_time + 12});
+	addMapSpot({from->team, -1, reporter, player->vehicle ? -1 : enemy, player->vehicle, m_time + 12}, false);
 	if (m_radioSpots.size() < 64) { // none taken without a server
 		m_radioSpots.push_back({reporter, enemy, value});
 	}
+}
+
+void GameWorld::pruneMapSpots()
+{
+	m_mapSpots.erase(std::remove_if(m_mapSpots.begin(), m_mapSpots.end(),
+						 [this](const MapSpot& s) { return s.until <= m_time; }),
+		m_mapSpots.end());
+}
+
+// One entry per list and object, as each minimap's list is (0x00790d60
+// adds an object only when 0x007800f0 doesn't find it in +0xa94, so a
+// radio spot of an object already listed leaves its time be). A battlefield
+// report's entry (the radar list's slot 0x20 on the client, not traced)
+// takes the later end instead. The list is fed by joined clients' Spotted
+// events (HostedGame::spotted), so it holds at most kMapSpotLimit entries,
+// the one ending soonest giving way: a port bound, as the round's other
+// client-fed lists have (the original's per-client lists are bounded by
+// the objects there are).
+void GameWorld::addMapSpot(const MapSpot& spot, bool refresh)
+{
+	pruneMapSpots();
+	const int scope = spot.squad == 0 ? spot.reporter : -1;
+	for (MapSpot& s : m_mapSpots) {
+		if (s.team == spot.team && s.squad == spot.squad && (s.squad == 0 ? s.reporter : -1) == scope
+			&& s.enemy == spot.enemy && s.vehicle == spot.vehicle) {
+			if (refresh && spot.until > s.until) {
+				s.until = spot.until;
+				s.reporter = spot.reporter;
+			}
+			return;
+		}
+	}
+	if (m_mapSpots.size() >= kMapSpotLimit) {
+		m_mapSpots.erase(std::min_element(m_mapSpots.begin(), m_mapSpots.end(),
+			[](const MapSpot& x, const MapSpot& y) { return x.until < y.until; }));
+	}
+	m_mapSpots.push_back(spot);
 }
 
 bool GameWorld::mapSpotSeenBy(const MapSpot& spot, int viewer) const

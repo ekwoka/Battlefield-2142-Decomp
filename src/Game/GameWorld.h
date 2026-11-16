@@ -933,6 +933,17 @@ public:
 		float rangeProgress = 0; // travelled path / estimated full path
 	};
 	bool projectileCamera(int player, ProjectileCamera& out) const;
+	// enhanced.enabled and enhanced.guidedCameraEase (Scene/EnhancedSettings.h),
+	// read live: with no input a snapToZeroOnNoInput camera eases each idle
+	// axis back to centre at its maxSpeed (not retail, which puts both
+	// straight at once when neither moves). It steers the round, so it
+	// changes the simulation. Null or false: retail.
+	void setGuidedCameraEase(const bool* enhanced, const bool* ease)
+	{
+		m_enhancedCamera = enhanced;
+		m_guidedCameraEase = ease;
+	}
+	bool guidedCameraEase() const { return m_enhancedCamera && *m_enhancedCamera && m_guidedCameraEase && *m_guidedCameraEase; }
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
 	// the bot manager sets its navigation mesh's polygon lookup.
@@ -1135,6 +1146,18 @@ public:
 	// sv.hitIndicator (settings +0xfb, on by default): whether a player's
 	// hits light his crosshair's hit indicator (0x004ba070).
 	void setHitIndicatorEnabled(bool on) { m_hitIndicatorEnabled = on; }
+	// enhanced.enabled and enhanced.passengerWeapons (Scene/EnhancedSettings.h,
+	// read live; not retail): with both on, a seat whose only PIFire weapon
+	// is its pod launcher (SeatLayout::kitWeapon) leaves the primary fire,
+	// reload and zoom to the soldier's own weapon. Retail fires the seat's
+	// launcher on PIFire (its fire.fireInput default 8, 0x005f1228; the
+	// group's active weapon, 0x004cc7a0 -> 0x005cacf0 -> 0x005c50e0): the
+	// soldier leaves in a pod. Off (null) by default.
+	void setPassengerWeapons(const bool* enhanced, const bool* option)
+	{
+		m_passengerWeaponsEnhanced = enhanced;
+		m_passengerWeapons = option;
+	}
 	// The hit indicator (player slot 0x20c(1), 0x0059b460: the alpha to 1
 	// and the networked flag +0x2a8 set): a joined client's own state
 	// carries the flag, read and cleared by slot 0x210 (0x0059b480).
@@ -1498,10 +1521,11 @@ public:
 		int primary = -1;                // the index of the SeatWeapon part in `weapons`
 		// A seat whose only PIFire weapon is a pod launcher (the air transports'
 		// passenger seats: air_pod_launcher, which the exit key launches,
-		// exitThroughPodLauncher) leaves the primary fire to the soldier's own
-		// weapon: its passengers fire whatever they carry. A seat with a camera
+		// exitThroughPodLauncher) can leave the primary fire to the soldier's own
+		// weapon under enhanced.passengerWeapons (GameWorld::passengerWeapon;
+		// not retail, where the fire launches the pod). A seat with a camera
 		// of its own (a Titan's pod array, titan_pod_launcher_podCamera) aims and
-		// fires its launcher instead.
+		// fires its launcher either way.
 		bool kitWeapon() const { return podLauncher && group == 0 && cameras.empty(); }
 		// specialToggleWeaponInput (PCO template +0x46c, 0x40 none; 0x005c7f80):
 		// a press of that input moves the PIFire group on as PIToggleWeapon
@@ -1651,6 +1675,13 @@ public:
 	};
 	// A vehicle's seats (for checks and the HUD) and who sits in them.
 	std::vector<SeatLayout> vehicleSeats(uint32_t object);
+	// A pod-launcher seat whose fire is the soldier's own weapon's: only
+	// under enhanced.passengerWeapons (setPassengerWeapons).
+	bool passengerWeapon(const SeatLayout& seat) const
+	{
+		return seat.kitWeapon() && m_passengerWeaponsEnhanced && *m_passengerWeaponsEnhanced && m_passengerWeapons
+			&& *m_passengerWeapons;
+	}
 	std::vector<int> vehicleOccupants(uint32_t object) const;
 	// A seat's gun aim (degrees, yaw relative to the vehicle, pitch up
 	// positive); false for seats without a gun.
@@ -1860,6 +1891,7 @@ public:
 	// reports (reportBattlefieldObjects), while their seconds last.
 	std::vector<int> mapSpottedPlayers(int viewer) const;
 	std::vector<uint32_t> mapSpottedVehicles(int viewer) const;
+	size_t mapSpotCount() const { return m_mapSpots.size(); } // the entries kept, live or not yet pruned
 	// Whether a team's squad had a player reported within the last 3 s
 	// (0x100bea30).
 	bool squadKnows(int team, int squad, int player) const;
@@ -3141,6 +3173,8 @@ private:
 	FriendlyFire m_friendlyFire;
 	bool m_friendlyFireWithMines = true;
 	bool m_hitIndicatorEnabled = true;
+	const bool* m_passengerWeaponsEnhanced = nullptr; // setPassengerWeapons
+	const bool* m_passengerWeapons = nullptr;
 	// The seats' IK objects (seatIkTargets): the template path from the
 	// vehicle's root, by root template and seat (ik null: none).
 	struct IkPath {
@@ -3260,6 +3294,8 @@ private:
 	std::function<void(const BlastRayTrace&)> m_blastRayTraceSink;
 	std::vector<uint32_t> m_checked; // object ids already considered for a body (sorted)
 	std::vector<Body> m_bodies;
+	// Meshes a wreck replaced during the collision pass, kept until it ends (wreckCollision).
+	std::vector<std::shared_ptr<physics::CollisionWorld>> m_retiredMeshes;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
 	physics::CollisionWorld m_projectileCollision; // static objects, projectile LOD
 	// The static objects' projectile-LOD radius (the largest part's), for
@@ -3948,6 +3984,8 @@ private:
 		float fov = 1.1f;
 	};
 	std::map<int, ProjectileView> m_projectileViews; // by player
+	const bool* m_enhancedCamera = nullptr;          // setGuidedCameraEase
+	const bool* m_guidedCameraEase = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);
@@ -4288,6 +4326,9 @@ private:
 		double until = 0;
 	};
 	std::vector<MapSpot> m_mapSpots;
+	static constexpr size_t kMapSpotLimit = 64; // port bound (addMapSpot)
+	void addMapSpot(const MapSpot& spot, bool refresh);
+	void pruneMapSpots();
 	std::vector<RadioSpot> m_radioSpots; // takeRadioSpots
 	bool mapSpotSeenBy(const MapSpot& spot, int viewer) const;
 	world::ObjectTemplate* droneTemplate(const world::ObjectTemplate* weapon) const;

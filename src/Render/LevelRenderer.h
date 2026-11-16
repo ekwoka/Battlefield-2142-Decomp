@@ -884,8 +884,11 @@ private:
 	// What the bloom, the tinnitus's history and post.frag read: the scene,
 	// or TAA's resolve of it.
 	SDL_GPUTexture* m_postSource = nullptr;
-	// Picks this frame's passes and TAA's jitter (before the view-projection is made).
-	void beginEnhancedFrame(const Camera& camera, uint32_t width, uint32_t height, bool overhead, bool post,
+	// Picks this frame's passes, before the world's targets: true when the
+	// lit variants draw (the world single-sampled, GpuContext::setWorldSamples).
+	bool planEnhancedFrame(uint32_t width, uint32_t height, bool overhead, bool post);
+	// TAA's jitter and the motion's views (before the view-projection is made).
+	void beginEnhancedFrame(const Camera& camera, uint32_t width, uint32_t height, bool overhead,
 		const Mat4& projection);
 	void renderCascades(SDL_GPUCommandBuffer* commands, const Camera& camera, const scene::LightSettings& lights,
 		float seconds, float aspect);

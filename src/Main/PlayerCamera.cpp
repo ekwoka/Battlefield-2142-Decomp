@@ -144,7 +144,7 @@ bool PlayerCamera::kitSeat(const Me& me) const
 		return false;
 	}
 	const auto seats = m_round.vehicleSeats(me.vehicle);
-	return static_cast<size_t>(me.seat) < seats.size() && seats[static_cast<size_t>(me.seat)].kitWeapon();
+	return static_cast<size_t>(me.seat) < seats.size() && m_round.passengerWeapon(seats[static_cast<size_t>(me.seat)]);
 }
 
 bool PlayerCamera::current(Me& me) const

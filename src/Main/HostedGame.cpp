@@ -2030,6 +2030,8 @@ void HostedGame::applyMoves()
 		// move); after that the input is all zero. (Its keys' presses don't
 		// act again: they are the held keys, as MoveInputState keeps them.)
 		game::SoldierInput input;
+		game::GameWorld::PlayerInfo seat;
+		client.moveState.seated = m_round->playerInfo(client.player, seat) && seat.vehicle != 0;
 		if (!client.moves.empty()) {
 			const net::PlayerMove move = client.moves.front();
 			client.moves.pop_front();

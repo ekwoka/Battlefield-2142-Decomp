@@ -1250,7 +1250,7 @@ TEST(RenderScene_MeshLocalTextures)
 	CHECK(render::meshTexturePath("rifle_01_c.dds", mesh, exists) == "rifle_01_c.dds");
 
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
-	if (!gameDir) return;
+	if (!gameDir || !test::remaster()) return;
 	io::FileManager shipped;
 	shipped.setRootPath(gameDir);
 	CHECK(shipped.mountArchive("mods/Project_Remaster_v17_Final/Objects/Weapons_client.zip", "Objects/Weapons"));
