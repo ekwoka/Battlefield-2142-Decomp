@@ -6166,6 +6166,8 @@ TEST(Vehicles_MissileHomingOnAParkedVehicle)
 #ifdef BF2142_RENDER_TESTS
 // The actual bridge glow is a black-background quad using StaticMesh.fx's
 // alpha_one technique. Its black texels must not darken the scene behind it.
+// With fog they must not brighten it either: scene-colour fog added to
+// those texels reveals the quad's rectangular border above Suez's bridge.
 TEST(Render_Glow3AdditivePixelsOptIn)
 {
     const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
@@ -6189,7 +6191,7 @@ TEST(Render_Glow3AdditivePixelsOptIn)
             terrain::HeightmapCluster noTerrain;
             scene::LightSettings lights;
             lights.fogColor = {160, 170, 180};
-            lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+            lights.fogStartEndAndBase = {0, 16, 1, 0};
             scene::SkySettings sky;
             scene::WaterSettings water;
             scene::RendererSettings settings;
@@ -6228,6 +6230,22 @@ TEST(Render_Glow3AdditivePixelsOptIn)
             CHECK(render::writePng(std::string(output) + "/" + label + "-glow3.png", target.width, target.height, visible));
             CHECK(dark == 0);
             CHECK(bright > 100);
+            // Sample inside each corner of the authored 6 x 6 m quad,
+            // where glow3.dds is black. Project from the same camera as
+            // the draw; this exercises the real texture, shader and blend.
+            const float corner = 2.7f / 8.0f * (target.height * 0.5f) / std::tan(camera.fovY * 0.5f);
+            int borderChange = 0;
+            for (int sx : {-1, 1}) for (int sy : {-1, 1}) {
+                const int x = int(target.width * 0.5f + sx * corner);
+                const int y = int(target.height * 0.5f + sy * corner);
+                for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                    const size_t i = (size_t(y + dy) * target.width + x + dx) * 4;
+                    for (int c = 0; c < 3; ++c)
+                        borderChange = std::max(borderChange, std::abs(int(visible[i+c]) - int(background[i+c])));
+                }
+            }
+            std::fprintf(stderr, "  %s glow3 fogged black border: maximum channel change %d\n", label, borderChange);
+            CHECK(borderChange <= 1);
             gpu->releaseTarget(target);
         }
     }

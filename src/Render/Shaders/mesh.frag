@@ -193,7 +193,10 @@ void main()
 	float fade = material.w > 0.0 ? material.w : 1.0;
 	float fog = fogAmount(inDepth);
 	if ((layers & 16) != 0) {
-		outColor = vec4(mix(albedo.rgb, fogColor.rgb, fog), albedo.a * fade);
+		// SRCALPHA / ONE adds emitted light to an already fogged scene.
+		// Fade that light out, as for additive particles; adding the fog
+		// colour itself makes black glow borders visible as rectangles.
+		outColor = vec4(albedo.rgb, albedo.a * fade * (1.0 - fog));
 		return;
 	}
 	vec3 normal = normalize(inNormal);
