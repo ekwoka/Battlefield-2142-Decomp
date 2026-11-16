@@ -6264,6 +6264,7 @@ int runGame(Options& options, Session& session)
 				// A vehicle's wheels and throttle (the wheel bundles' contact
 				// and FromEngine).
 				if (const game::Vehicle* vehicle = round.vehicle(state.id)) {
+					state.boosting = vehicle->sprint().sprinting();
 					state.engine = state.occupied ? std::min(std::fabs(vehicle->input().throttle), 1.0f) : 0.0f;
 					const physics::Vec3 up = state.rotation.rows[1];
 					for (const game::Vehicle::Wheel& wheel : vehicle->wheels()) {
