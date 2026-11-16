@@ -1553,8 +1553,7 @@ TEST(Vehicles_GunshipMissileCamera)
 	std::fprintf(stderr, "  camera yaw %.1f -> %.1f, the round's %.1f\n", startYaw, camera.yaw, roundYaw);
 	CHECK(std::remainder(camera.yaw - roundYaw, 360.0f) > 0 && std::remainder(camera.yaw - roundYaw, 360.0f) <= 18.01f);
 	CHECK(std::remainder(roundYaw - startYaw, 360.0f) > 1);
-	// No input: recenter at the camera's configured speed without a jump.
-	const float beforeReturn = camera.yaw;
+	// No input: the camera snaps straight (snapToZeroOnNoInput).
 	g.world->setPlayerInput({});
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->projectileCamera(me, camera));
@@ -1563,11 +1562,9 @@ TEST(Vehicles_GunshipMissileCamera)
 			roundYaw = std::atan2(p.velocity.x, p.velocity.z) * 57.29578f;
 		}
 	}
-	const float offset = std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f));
-	CHECK(offset > 1 && offset < 18);
-	CHECK(std::fabs(std::remainder(camera.yaw - beforeReturn, 360.0f)) < 5);
+	CHECK(std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f)) < 1);
 	// Aim down, then stop moving the mouse while retaining its absolute
-	// input pitch. Recentring must not jump the view vertically either.
+	// input pitch. Both idle axes must snap to the round's nose in one tick.
 	input = {};
 	for (int i = 0; i < 10; ++i) {
 		input.aimPitch -= 2.0f;
@@ -1575,11 +1572,24 @@ TEST(Vehicles_GunshipMissileCamera)
 		g.world->tick(1 / 30.0f);
 	}
 	CHECK(g.world->projectileCamera(me, camera));
-	const float downPitch = camera.pitch;
+	float nosePitch = 0;
+	for (const auto& p : g.world->projectiles()) {
+		if (p.player == me && p.alive) {
+			const auto nose = game::noseOf(p);
+			nosePitch = std::atan2(nose.y, std::hypot(nose.x, nose.z)) * 57.29578f;
+		}
+	}
+	CHECK(std::fabs(camera.pitch - nosePitch) > 1);
 	g.world->setPlayerInput(input);
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->projectileCamera(me, camera));
-	CHECK(std::fabs(camera.pitch - downPitch) < 5.0f);
+	for (const auto& p : g.world->projectiles()) {
+		if (p.player == me && p.alive) {
+			const auto nose = game::noseOf(p);
+			nosePitch = std::atan2(nose.y, std::hypot(nose.x, nose.z)) * 57.29578f;
+		}
+	}
+	CHECK(std::fabs(camera.pitch - nosePitch) < 0.01f);
 	// The round's life (5 s) runs out: the seat's camera again.
 	g.run(6);
 	CHECK(!g.world->projectileCamera(me, camera));

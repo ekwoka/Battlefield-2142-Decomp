@@ -4025,19 +4025,14 @@ bool GameWorld::stepProjectileView(Player& player, float seconds)
 		}
 		return lo < hi ? std::clamp(angle + delta, lo, hi) : angle + delta;
 	};
-	// Return each idle axis at its configured angular speed. Setting both
-	// straight in one tick made the view jump when a mouse movement ended.
-	const auto recenter = [seconds](float angle, float speed) {
-		const float amount = speed > 0 ? speed * seconds : std::fabs(angle);
-		return angle > 0 ? std::max(0.0f, angle - amount) : std::min(0.0f, angle + amount);
-	};
-	view.yaw = view.snapToZero && std::fabs(turn) < 1e-4f
-		? recenter(view.yaw, view.maxSpeed.x)
-		: step(view.yaw, turn, view.maxSpeed.x, view.minRotation.x, view.maxRotation.x);
-	// Bundle pitch is down positive; rise uses the opposite limits.
-	view.pitch = view.snapToZero && std::fabs(tilt) < 1e-4f
-		? recenter(view.pitch, view.maxSpeed.y)
-		: step(view.pitch, tilt, view.maxSpeed.y, -view.maxRotation.y, -view.minRotation.y);
+	if (view.snapToZero && std::fabs(turn) < 1e-4f && std::fabs(tilt) < 1e-4f) {
+		view.yaw = view.pitch = 0;
+	} else {
+		view.yaw = step(view.yaw, turn, view.maxSpeed.x, view.minRotation.x, view.maxRotation.x);
+		// Bundle pitch is down positive, so its limits [min, max] bound the
+		// rise (kept up positive here) at [-max, -min].
+		view.pitch = step(view.pitch, tilt, view.maxSpeed.y, -view.maxRotation.y, -view.minRotation.y);
+	}
 	return true;
 }
 
