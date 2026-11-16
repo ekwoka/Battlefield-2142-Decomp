@@ -192,6 +192,7 @@ TEST(Commander_LateStaticAssetsEnterCollisionWorld)
 		return;
 	}
 	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"missile_silo_v2", "commander_movement_analyst"}) {
 			Field field(mod, true);
 			if (!field.loaded) {
@@ -281,6 +282,7 @@ TEST(Commander_InheritedCollisionPartsCollide)
 		{"commander_orbital_strike_64", 30, 448 + 2327, {{{-10, 4, 0}, {10, 4, 0}, true}}, {}}, // the antenna
 	};
 	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
 		for (const Asset& asset : assets) {
 			for (const float yaw : {0.0f, 90.0f}) {
 				Field field(mod, true);
@@ -347,6 +349,7 @@ TEST(Commander_StrikeStationsBlockInfantry)
 		return;
 	}
 	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"commander_emp_strike", "commander_orbital_strike_64"}) {
 			for (int side = 0; side < 4; ++side) {
 				Field field(mod, true);
@@ -916,11 +919,8 @@ TEST(Commander_AiAnswersSquadRequests)
 // that a playable Sound template existed.
 TEST(Commander_RemasterOrbitalStrikeBlastSound)
 {
-	#ifdef _WIN32
-	_putenv_s("ALSOFT_DRIVERS", "null");
-	#else
-	setenv("ALSOFT_DRIVERS", "null", 1);
-	#endif
+	REMASTER_ONLY();
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	sound::ISoundEngine* engine = sound::getSoundEngine();
 	CHECK(engine && engine->initialize(0, "Software Audio", 32) == 0);
 	if (!engine || !engine->isInitialized()) {
@@ -1086,6 +1086,7 @@ TEST(Commander_C4HurtsAssets)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"commander_uav_drone_control", "commander_movement_analyst", "commander_emp_strike",
 				 "commander_orbital_strike_64"}) {
 			Field field(mod, true);

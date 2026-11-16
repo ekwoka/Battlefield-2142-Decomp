@@ -304,12 +304,13 @@ float Sample::updateLoopProgress(int playOffset, int elapsedTicks, bool actualOf
 		if (loopLength <= 0) {
 			progress = 0.0f;
 		} else if (actualOffset) {
-			// AL_SAMPLE_OFFSET tracks the source frames actually played, including
-			// pitch and device timing, rather than estimating from output ticks.
+			// Enhanced audio (not retail): AL_SAMPLE_OFFSET tracks the source
+			// frames actually played, including pitch and device timing,
+			// rather than estimating from output ticks.
 			progress = static_cast<float>(playOffset - file->loopStart()) / loopLength;
 		} else {
-			// Streaming position remains an estimate until decoder queue offsets
-			// are tracked across its recycled buffers.
+			// Retail (0x10015e70): estimated from elapsed ticks at the
+			// engine's output rate. Streams always take this path.
 			const int framesPerTick = static_cast<int>(soundEngine().outputRate() / 30);
 			progress = static_cast<float>((framesPerTick * elapsedTicks - file->loopStart()) % loopLength) /
 				static_cast<float>(loopLength);
@@ -535,7 +536,8 @@ void OpenALSample::update()
 	}
 
 	const float occlusionGain = enhancedOcclusion ? 1.0f : computeOcclusionGain();
-	const float loopProgressValue = updateLoopProgress(playOffset(), engine.now() - startTime, !isStreaming());
+	const float loopProgressValue =
+		updateLoopProgress(playOffset(), engine.now() - startTime, enhancedAudioEnabled() && !isStreaming());
 	const float balance = is3d() ? engine.gain3d() : engine.gain2d();
 	const float volume = clamp01(snd.computeVolume(loopProgressValue, volumeSeed) * balance);
 	al().alSourcef(m_source, AL_GAIN, volume * occlusionGain * directGain);
@@ -602,6 +604,16 @@ StaticSample::~StaticSample()
 int StaticSample::playOffset()
 {
 	const SoundFile* file = soundFile();
+	if (!enhancedAudioEnabled()) {
+		// Retail (0x100133c0) asks OpenAL nothing: 0 while the start block
+		// plays ahead of an endless loop, the loop's end once stopped,
+		// otherwise the loop's start.
+		if (m_loopAfterStart) {
+			return 0;
+		}
+		return m_stopRequested ? file->loopEnd() : file->loopStart();
+	}
+	// Enhanced audio: where the source actually is in what was queued.
 	ALint offset = 0;
 	al().alGetSourcei(m_source, AL_SAMPLE_OFFSET, &offset);
 	const int start = m_startQueued ? file->loopStart() : 0;
@@ -679,7 +691,16 @@ bool StaticSample::queueEndBlock()
 {
 	const SoundFile* file = soundFile();
 	const bool hasEnd = file->endBuffer() != 0;
-	if (m_queuedLoops == 0) m_queuedLoops = 1;
+	ALint queued = 0;
+	al().alGetSourcei(m_source, AL_BUFFERS_QUEUED, &queued);
+	if (queued == 0) {
+		// stopType 2 emptied the queue first: only the end block plays now,
+		// from offset 0, so the start and loop bookkeeping no longer applies.
+		m_startQueued = m_loopQueued = false;
+		m_queuedLoops = 0;
+	} else if (m_queuedLoops == 0) {
+		m_queuedLoops = 1; // the endless loop runs out once, then the end block
+	}
 	if (hasEnd) {
 		const ALuint end = file->endBuffer();
 		al().alSourceQueueBuffers(m_source, 1, &end);

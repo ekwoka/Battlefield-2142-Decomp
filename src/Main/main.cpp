@@ -113,6 +113,7 @@
 #include "Voip/VoipNatives.h"
 
 #include "Nametags.h"
+#include "Render/OverheadView.h" // header-only: the camera's placement, renderer or not
 #if BF2142_HAS_RENDERER
 #include "Render/LevelRenderer.h"
 #include "Viewer.h"
@@ -1588,7 +1589,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const auto playerSeats = inVehicle ? round.vehicleSeats(playerVehicle->id()) : std::vector<game::GameWorld::SeatLayout> {};
 	const bool kitSeat = inVehicle && world.playerInfo(world.localPlayer(), seatedPlayer) && seatedPlayer.seat >= 0
 		&& static_cast<size_t>(seatedPlayer.seat) < playerSeats.size()
-		&& playerSeats[static_cast<size_t>(seatedPlayer.seat)].kitWeapon();
+		&& round.passengerWeapon(playerSeats[static_cast<size_t>(seatedPlayer.seat)]);
 	{
 		const world::ObjectTemplate* t = inVehicle ? playerVehicle->objectTemplate() : nullptr;
 		const auto category = t ? t->settings().find("vehicleCategory") : decltype(t->settings().end()) {};
@@ -3648,7 +3649,7 @@ int runGame(Options& options, Session& session)
 	// General.con; the settings object chains back to helpPopups).
 	helpPopups.onPlayed = [&console, &session](const std::string& key) {
 		std::string output;
-		console.execute("GeneralSettings.setPlayedVOHelp \"" + key + "\"", output);
+		console.execute("GeneralSettings.setPlayedVOHelp " + dice::hfe::menu::quotedConsoleArgument(key), output);
 		session.settings.saveGeneral(); // remembered across launches
 	};
 	// The player's controls (Settings/Controls.con builds the maps once;
@@ -4801,6 +4802,7 @@ int runGame(Options& options, Session& session)
 		// Start the round: spawners take their control points' teams and
 		// put their vehicles out on the first tick.
 		game::GameWorld round(templates, objects);
+		round.setGuidedCameraEase(&enhancedSettings.enabled, &enhancedSettings.guidedCameraEase);
 		// The players as the HUD has them (HudWorld.h): a joined game's,
 		// the server's (g_remoteHud, set while one runs), else the round's.
 		const auto hudPlayer = [&round](int id, game::GameWorld::PlayerInfo& out) {
@@ -4816,6 +4818,7 @@ int runGame(Options& options, Session& session)
 		// 0x00561e20 checks the server's game mode).
 		round.setGameMode(options.gameMode);
 		round.setCombatAreas(&combatAreas);
+		round.setPassengerWeapons(&enhancedSettings.enabled, &enhancedSettings.passengerWeapons);
 		if (session.admin) {
 			const net::ServerSettings& sv = session.admin->settings;
 			round.setFriendlyFire({static_cast<float>(sv.soldierFriendlyFire), static_cast<float>(sv.vehicleFriendlyFire),
@@ -5389,17 +5392,11 @@ int runGame(Options& options, Session& session)
 		const auto spotRefused = [&] { return radioSpam.spot(spamLimits()); };
 		const auto sayRadio = [&](int channel, const std::string& voice, int value, bool checkSpam = true) {
 			if (channel < 0 || voice.empty()) {
-				std::printf("radio-say: dropped channel=%d voice=\"%s\"\n", channel, voice.c_str());
-				std::fflush(stdout);
 				return;
 			}
 			if (checkSpam && spamRefused()) {
-				std::printf("radio-say: refused as spam channel=%d voice=%s\n", channel, voice.c_str());
-				std::fflush(stdout);
 				return;
 			}
-			std::printf("radio-say: channel=%d voice=%s\n", channel, voice.c_str());
-			std::fflush(stdout);
 			if (net::GameClient* server = joinedServer()) {
 				const int index = voices.message(voice);
 				if (index >= 0) {
@@ -5572,9 +5569,13 @@ int runGame(Options& options, Session& session)
 				}
 				return;
 			}
+			// The server's name made safe for the console line, so it stays
+			// the one argument (consoleQuotable; port addition).
 			std::string output;
-			console.execute("GeneralSettings.addFavouriteServer \"" + host + "\" " + std::to_string(port) + " \""
-					+ session.client->world().serverName() + "\" " + std::to_string(static_cast<long long>(std::time(nullptr))),
+			console.execute("GeneralSettings.addFavouriteServer "
+					+ dice::hfe::menu::quotedConsoleArgument(host, dice::hfe::menu::kMaxServerText) + " " + std::to_string(port) + " "
+					+ dice::hfe::menu::quotedConsoleArgument(session.client->world().serverName(), dice::hfe::menu::kMaxServerText)
+					+ " " + std::to_string(static_cast<long long>(std::time(nullptr))),
 				output);
 		});
 		bindMethod(console, "Chat.sayAll", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kAll, line); });
@@ -8548,10 +8549,6 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.insideView();
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
-			shieldsDown();
-			titanBoard();
-			titanWalkTrace();
-			titanShotTrace.update(round, objects);
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);

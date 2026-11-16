@@ -120,8 +120,7 @@ void LevelRenderer::ensureEnhancedTargets(uint32_t width, uint32_t height)
 	m_enh.historyValid = false;
 }
 
-void LevelRenderer::beginEnhancedFrame(const Camera& camera, uint32_t width, uint32_t height, bool overhead, bool post,
-	const Mat4& projection)
+bool LevelRenderer::planEnhancedFrame(uint32_t width, uint32_t height, bool overhead, bool post)
 {
 	const scene::EnhancedSettings* settings = m_sources ? m_sources->enhanced : nullptr;
 	const GpuContext::EnhancedPipelines& p = m_gpu.enhancedPipelines();
@@ -138,21 +137,20 @@ void LevelRenderer::beginEnhancedFrame(const Camera& camera, uint32_t width, uin
 	m_enh.titanShadows = m_enh.csm && settings->titanShadows;
 	m_enh.particleShadows = m_enh.csm && settings->particleShadows && p.particle;
 	m_enh.particleLights = on && settings->particleLights;
-	m_gpu.setEnhancedLit(m_enh.ssao || m_enh.csm);
 	m_enh.aoBound = false;
 	m_enh.jittered = false;
 	m_enh.jitter = Mat4 {};
 	if (!on) {
+		// Turned off: its targets go (made again when it comes back).
+		releaseEnhancedTargets();
 		m_enh.previousValid = false;
-		m_enh.historyValid = false;
-		return;
+		return false;
 	}
 	if (m_enh.prepass) {
 		ensureEnhancedTargets(width, height);
 		if (!m_enh.depth || !m_enh.normalDepth || !m_enh.motion || !m_enh.ao || !m_enh.aoRaw || !m_enh.history[0] ||
 			!m_enh.history[1]) {
 			m_enh.prepass = m_enh.ssao = m_enh.taa = false;
-			m_gpu.setEnhancedLit(m_enh.csm);
 		}
 	}
 	// Printed when they change, so a run (a benchmark) shows what it measured.
@@ -160,6 +158,17 @@ void LevelRenderer::beginEnhancedFrame(const Camera& camera, uint32_t width, uin
 	if (passes != m_enh.reported) {
 		m_enh.reported = passes;
 		std::printf("enhanced: prepass %d taa %d ssao %d csm %d\n", m_enh.prepass, m_enh.taa, m_enh.ssao, m_enh.csm);
+	}
+	// The lit variants (the AO, the cascades), single-sampled: the world
+	// target's count follows (GpuContext::setWorldSamples).
+	return m_enh.ssao || m_enh.csm;
+}
+
+void LevelRenderer::beginEnhancedFrame(const Camera& camera, uint32_t width, uint32_t height, bool overhead,
+	const Mat4& projection)
+{
+	if (!m_enh.on) {
+		return;
 	}
 	m_enh.view = camera.view();
 	m_enh.projection = projection;

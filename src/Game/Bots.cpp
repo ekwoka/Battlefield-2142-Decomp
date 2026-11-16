@@ -1762,8 +1762,9 @@ void BotManager::update(float seconds)
 		if (self->vehicle && m_world.isTitan(self->vehicle)) {
 			const auto seats = m_world.vehicleSeats(self->vehicle);
 			if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size() && seats[self->seat].podLauncher) {
-				// enhanced.botTitan: the array swung round to its landing place first (the bundle's
-				// own speed and limits apply), then fired once there or turning no more.
+				// In a pod array's seat: fire, which launches the pod (the bot's drop, as before).
+				// enhanced.botTitan (podLanding): the array swung round to its landing place first
+				// (the bundle's own speed and limits apply), then fired once there or turning no more.
 				physics::Vec3 spot, from, way;
 				input.fire = true;
 				if (m_world.podArrayAim(self->id, from, way) && podLanding(bot, *self, spot, &from)) {
@@ -1821,13 +1822,17 @@ void BotManager::update(float seconds)
 		}
 		bot.titanGun = toGun ? gunSeat : -1;
 		if (toGun) {
-			// Use the same physics origin and authored radius as vehicle entry.
-			// The console's centre can be inside solid geometry.
-			const physics::Vec3 d = podEntry - (self->position + physics::Vec3 {0, kChestHeight, 0});
+			// enhanced.botTitan: the same physics origin and authored radius as
+			// vehicle entry (the console's centre can be inside solid geometry);
+			// otherwise from the feet within half the radius squared, as before.
+			const bool walk = m_settings.titanPlay();
+			const physics::Vec3 d = podEntry - (self->position + physics::Vec3 {0, walk ? kChestHeight : 0.0f, 0});
 			const float want = std::atan2(d.x, d.z) * 57.29578f;
 			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);
 			input.throttle = std::fabs(std::remainder(want - self->yaw, 360.0f)) < 45 ? 1.0f : 0.0f;
-			input.use = physics::lengthSquared(d) <= podRadius * podRadius && !bot.usedLast;
+			input.use = (walk ? physics::lengthSquared(d) <= podRadius * podRadius
+							  : physics::lengthSquared(d) < podRadius * podRadius * 0.5f)
+				&& !bot.usedLast;
 			if (!input.use) {
 				titanGunWalk(bot, *self, input, elapsed, podEntry, podRadius, gunSeat);
 			}
@@ -2423,17 +2428,20 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 	physics::Vec3 orderAt;
 	bool hasOrder = false;
 	bool titanSiloOrder = false;
-	// AIDLL's shipped strategic areas do not describe gpm_ti objectives.
-	// Its generic fallback sees the two moving Titan control points alongside
-	// the five silos; the Titan points cannot change hands, and bots can spend
-	// their whole round treating them as capture objectives. Give on-foot bots
-	// and ground-vehicle drivers a silo goal directly, using the mode's actual
-	// silo/control-point state.
+	// enhanced.botTitan (not retail): AIDLL's shipped strategic areas do not
+	// describe gpm_ti objectives. Its generic fallback sees the two moving
+	// Titan control points alongside the five silos; the Titan points cannot
+	// change hands, and bots can spend their whole round treating them as
+	// capture objectives. Here on-foot bots and ground-vehicle drivers get a
+	// silo goal directly, using the mode's actual silo/control-point state,
+	// over their squad's order. With the switch off the choice below is
+	// retail's.
 	// Existing Titan gun and pod behavior runs before updateGoal and is left
 	// alone. Ground-vehicle drivers can use the same objective with their
 	// vehicle mesh and the area's vehicle order position; passengers keep
 	// their normal seat behavior.
-	if (m_world.gameMode() == "gpm_ti" && self.team >= 1 && self.team <= 2 && (!self.vehicle || self.driving)) {
+	if (m_settings.titanPlay() && m_world.gameMode() == "gpm_ti" && self.team >= 1 && self.team <= 2
+		&& (!self.vehicle || self.driving)) {
 		const std::vector<GameWorld::SiloInfo> silos = m_world.missileSilos();
 		const auto actionable = [&](const GameWorld::SiloInfo& silo) -> const GameWorld::ControlPointInfo* {
 			if (silo.team == self.team) {
@@ -6429,8 +6437,13 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	const float wantPitch = pitchOf(want);
 	const float ey = angleBetween(trueYaw, wantYaw) * kRadians;
 	const float ep = (wantPitch - truePitch) * kRadians;
+	// enhanced.botMovement (not retail, whose controller carries its errors
+	// and aim point across a change of target): a gunner's derivative and
+	// lead start afresh on a new target, and its yaw error's change is taken
+	// the short way round.
+	const bool freshAim = gunning && m_settings.playerLikeMovement();
 	const int aimTarget = hasTarget ? bot.target : -1;
-	const bool aimTargetChanged = gunning && aimTarget != bot.lastAimTarget;
+	const bool aimTargetChanged = freshAim && aimTarget != bot.lastAimTarget;
 	bot.lastAimTarget = aimTarget;
 	float wy = 0, wp = 0;
 	if (!aimTargetChanged && seconds > 0 && physics::lengthSquared(bot.lastAimPoint) > 0) {
@@ -6466,7 +6479,7 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		yawLead *= 0.5f;
 	}
 	const float yawErrorDelta = aimTargetChanged ? 0.0f
-		: gunning ? std::remainder(ey - bot.yawError, 2 * 3.14159265f) : ey - bot.yawError;
+		: freshAim ? std::remainder(ey - bot.yawError, 2 * 3.14159265f) : ey - bot.yawError;
 	float right = -gain * ey - g.derivative * yawErrorDelta + yawLead;
 	right = std::clamp(right, -limit, limit);
 	if (std::fabs(right) < 0.001f) {

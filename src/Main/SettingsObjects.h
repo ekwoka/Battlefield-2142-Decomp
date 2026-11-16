@@ -39,6 +39,24 @@ namespace dice::hfe::menu {
 // map to engine quality indices 2/1/0/0 (software caps UltraHigh at High).
 int audioQualityIndex(const std::string& quality);
 
+// Text made safe to write in quotes on a line of the profile files, which
+// the console runs again at every start. The console's quotes have no
+// escape (Console::tokenize: a quote always opens or closes an argument),
+// a line ends at a line break, and a '>' after a blank anywhere on the
+// line starts a redirect (Console::execute). So a quote becomes ', every
+// control character (CR, LF, tab...) a space, blanks before a '>' are
+// dropped, and the text is cut to `maxLength` bytes (not inside a UTF-8
+// sequence). The same text comes back unchanged. Port addition: the
+// original writes a server's name and its demo notice as they come
+// (0x0048d940's addDemoBookmark lines, 0x0049aad0's addFavouriteServer),
+// so a server could put commands of its own in a player's profile.
+std::string consoleQuotable(const std::string& text, size_t maxLength = std::string::npos);
+// The same in its quotes: "text".
+std::string quotedConsoleArgument(const std::string& text, size_t maxLength = std::string::npos);
+// The longest text from a server kept in the profile (a favourite's or a
+// bookmark's server name, a demo's map and URL); port addition.
+constexpr size_t kMaxServerText = 255;
+
 class SettingsObjects {
 public:
 	SettingsObjects();

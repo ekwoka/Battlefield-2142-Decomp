@@ -2300,7 +2300,10 @@ transports' (eu_at, as_at) hull and seats, the pod arrays): the exit key (player
 `0x94c0` whose fire is one, whatever its input: the transports'
 air_pod_launcher is on PIFire, the APC pod seats' on PIAltFire; the fire
 button on a PIFire pod launcher launches the pod the same way, its round
-eu_pod_drop having enterOnSpawn; `launchPod(player, exitKey)`) when a ray up the frame (3 m past it) and four
+eu_pod_drop having enterOnSpawn; `launchPod(player, exitKey)`; under
+`enhanced.passengerWeapons`, not retail, a seat whose only PIFire weapon is
+that launcher gives the fire to the soldier's own weapon instead,
+`GameWorld::passengerWeapon`) when a ray up the frame (3 m past it) and four
 at the (±1, ±1) corners meet nothing and more than a second has passed,
 then player slot `0x238(8)` and event 6; else the usual exit
 (`enterOrLeaveVehicle`, without the second). `allowTogglePosition`
@@ -9978,35 +9981,45 @@ slot `0xb4`), but with the player's `ability.increasedRepairAbility`
 (slot `0x2a0`'s `+0x48`) at 0 only one of his own vehicle (the same
 root, `0x006f1d70`); with it above 0 the sphere again with the message
 `0x005910c0(0x400, material)` takes everything in it too. Each target:
-repairing alone checks a vehicle (`+0x17` bit 0) of the team or of none;
-healing or ammo a soldier of the team (with ammo also another vehicle of
-the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). The
-repair call (`0x0059a446`) asks slot `0x108` to check only, with the
-self-check bypass at 0. `0x004bc410` asks `0x004cc380`, which resolves
-the giver's controlled object's root (`0x006f1d70`) and rejects that root
-as a non-soldier target. Thus even if the second sphere supplies it, the
-engineer cannot mend the occupied vehicle's root in this retail path.
-Original-instruction execution with synthetic objects and stubbed services
-confirms own-root rejection and another vehicle's acceptance; it is not a
-full-game test. Native now excludes the occupied root from repair-only
-targets. Its first pass checks eligibility without applying effects; the
-second pass applies the single retail dose (shared among healing/repair
-targets).
+repairing alone takes a root (`+0x17` bit 0, which `0x006f1d70` answers
+with the object itself) of the team or of none; healing or ammo a
+soldier of the team (with ammo also another vehicle of the team, slot
+`0x10c`).
+
+The engineer never mends the vehicle he sits in. Slot `0x108` of the
+server logic (vtable `0x009294e8` slot 66) is `0x004bc410`, which passes
+its eighth argument to `0x004cc380` as `param_9`; both of `0x00599f30`'s
+calls push it 0 (`0x0059a45c`, `0x0059a571`), and with it 0
+`0x004cc380` refuses a target that is the root (`0x006f1d70`) of the
+giver's control object (player slot `0x4c`) and not a soldier. The
+second sphere finds the occupied vehicle, but it fails the check and is
+never treated; `GameWorld_KitAbilityInAVehicle` repairs another car
+beside it and leaves it at 50.
+
+Each target gets one dose a tick, as an ability in hand gives, not two.
+The first pass only checks: slot `0x108` gets (target, strength, giver,
+material, armour, 0, 1, 0) (`0x0059a45c`..`0x0059a481`), and
+`0x004bc410` hands its seventh argument to `0x004cc380` as `param_8`
+(which then also wants the armour's canBeRepaired and hit points under
+the most) and returns right after that call when it is set
+(`0x004bc43b`); slot `0x10c` (`0x004bd5f0`) gets (…, 0, 1)
+(`0x0059a41e`) and returns after `0x004cf7b0` when its seventh is set
+(`0x004bd638`). Each target that passes (the set `0x0056e4d0`) is
+treated in the next pass, both flags 0 (`0x0059a538`, `0x0059a571`):
+the strength times the seat's slot `0x17c` (`0x005c6d60` → the
+template's interface at `+0x298`, slot 0x168 `0x0059dbd0`:
+`abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
+executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
+`0x005caff0`; no shipped vehicle sets it), for healing and repair
+shared by the count of those targets, for ammo whole
+(`GameWorld_KitAbilityInAVehicleTreatsItsPassengers`,
+`GameWorld_KitAbilityInAVehicleResuppliesAmmoOnce`).
+
 Without the unlock a medic heals and a supporter rearms only
 his passengers, and an engineer mends nothing (only riders' soldiers are
 targets). All of it runs only from a seat whose template has
 autoUseAbility (the control object's 0xc4c5 interface, `0x0042b2f0`,
-slot `0x13c`); the rewrite ran it in any seat. Each target that passes
-the first, check-only call (slots `0x108` / `0x10c` answering true; the
-set `0x0056e4d0`) is treated once in the next pass: the strength times
-the seat's slot `0x17c` (`0x005c6d60` → the template's interface at
-`+0x298`, slot 0x168 `0x0059dbd0`:
-`abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
-executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
-`0x005caff0`; no shipped vehicle sets it), for healing and repair
-shared by the count of those targets, for ammo whole. The first call
-returns without treating the target (`0x004bc43b` for healing and repair,
-`0x004cf83b` for ammo). A kit with ammo only also rearms another vehicle
+slot `0x13c`). A kit with ammo only also rearms another vehicle
 (`0x0059a303`: a target with interface `0x998890`. It must be a
 PlayerControlObject whose root is not ours, from the team or team 0. Because it
 comes from the second sphere, this needs `increasedRepairAbility > 0`;
@@ -16281,6 +16294,30 @@ in `src/AI/NavMesh`:
   (rolling segments toward the cluster path's links, each searched over
   the whole mesh); `findPath` (tools, tests) keeps a cluster corridor for
   one polygon search.
+- **Cost classes and the bot kinds' profiles.** A polygon's class
+  (`+0x01`) names its material (0x10058570): Invalid 0, Ground 1, Road 2,
+  Shallows 3, DeepWater 4, DangerObject 5, OtherDangerObject 6,
+  BothDangerObject 7. Each `aiSettings.setVehicle` type (the bot kind)
+  gets its own profile (AIDLL 0x10051050 appends the default 0x100bdfb0:
+  1, but Invalid −1 and classes 5 and 7 1000), and
+  `aiSettings.setVehicleMaterialCost <kind> <material> <cost>` sets one
+  class's multiplier on it (0x1000be20 → 0x1004fcf0 → 0x100bdcc0). A
+  negative multiplier is impassable (0x100bdd00). The pathfinder takes the
+  kind's profile (DAT_10139470 vt+0xc0: the goal's polygon 0x1003f000,
+  the searches, the look-ahead) and so do the drivers' room rays
+  (0x1003f930 with the unit's kind, 0x100aa510). From
+  `AI/AIBehaviours.ai`: Tank, FloatingTank and Mech Shallows 1.5 and
+  DeepWater −1, Car Shallows 1.8 and DeepWater −1, ArmedCar 1 and 2,
+  Infantery 1.5 and 6. So tanks, mechs and cars neither plan nor measure
+  room into deep water, and a room ray that would enter it ends there with
+  class 4 (its diagonal then doesn't count, a side gives full reach).
+  Class-4 polygons on the vehicle and infantry meshes: Camp Gibraltar
+  650 and 989, Suez_Canal 93 and 121, Verdun 5 and 159, minsk_coop none
+  and 1,122, Cerbere_Landing none. The rewrite builds the profile from
+  those settings (`BotSettings::costProfile`, the names as written,
+  0x100fdf60): a driver's follower takes its vehicle's kind
+  (`equipmentOf`) for its searches and room rays, a bot on foot the
+  Infantery profile for its map spot and searches.
 
 On minsk_coop's infantry mesh (76,605 polygons, 2,154 clusters), a 639 m
 query gives a continuous 853 m path.

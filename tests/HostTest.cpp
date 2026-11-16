@@ -1004,6 +1004,90 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 
+// A joined client flooding Spotted (0x0050e910) with radio spots (0x2e):
+// of enemies, its own team, and ghosts that are no one's. The round's
+// spotted lists stay one entry per list and enemy, and are gone once
+// their 12 s have passed.
+TEST(NetHost_SpottedFloodStaysBounded)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	// Not bots: their own sightings would spot too.
+	const int mate = round.addPlayer("Mate", 2, false);
+	CHECK(round.spawnSoldier(mate));
+	std::vector<int> enemies;
+	for (int i = 0; i < 3; ++i) {
+		enemies.push_back(round.addPlayer("Enemy" + std::to_string(i), 1, false));
+		CHECK(round.spawnSoldier(enemies.back()));
+	}
+
+	net::GameClient a;
+	a.world().setGhostTemplates([&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	net::GameClientOptions options;
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		a.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return a.world().gameState() == 1 && a.world().localPlayer() >= 0; }, 6000));
+	const int idA = a.world().localPlayer();
+	a.selectTeam(2);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa;
+		return round.playerInfo(idA, pa) && pa.team == 2;
+	}));
+	const auto ghostOf = [&](int player) -> uint32_t {
+		const net::RemotePlayer* p = a.world().player(player);
+		return p ? p->soldierGhost : 0;
+	};
+	CHECK(pumpUntil(step, [&] {
+		return ghostOf(mate) && std::all_of(enemies.begin(), enemies.end(), [&](int e) { return ghostOf(e) != 0; });
+	}));
+	std::vector<uint32_t> targets {ghostOf(mate), 0xffff, 0x7777, 1};
+	for (const int e : enemies) {
+		targets.push_back(ghostOf(e));
+	}
+	size_t most = 0;
+	const auto watch = [&] {
+		step();
+		most = std::max(most, round.mapSpotCount());
+	};
+	for (int tick = 0; tick < 60; ++tick) {
+		for (int i = 0; i < 20; ++i) {
+			net::SpottedInfo spot;
+			spot.message = 0x2e;
+			spot.spotted = targets[static_cast<size_t>(tick * 20 + i) % targets.size()];
+			spot.team = 1; // the server takes the reporter's own
+			spot.value = 0x1b;
+			a.sendEvent(net::makeSpotted(spot));
+		}
+		watch();
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	// Every enemy listed for the team (the mate sees them), never more
+	// than the team's entry and A's own report's for each; once the events
+	// have all come and 12 s have passed, none.
+	CHECK(pumpUntil(watch, [&] { return round.mapSpottedPlayers(mate).size() == enemies.size(); }, 10000));
+	CHECK(pumpUntil(watch, [&] { return round.mapSpotCount() == 0; }, 30000));
+	std::fprintf(stderr, "  spotted flood: 1200 events, at most %zu map spots\n", most);
+	CHECK(most > 0 && most <= 2 * enemies.size());
+	CHECK(round.mapSpottedPlayers(mate).empty());
+	a.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 // The others' soldiers between machines: the soldier ghost's pose (mask
 // 0x20, +0x268 / +0x26c) and the look's twist (4), the player networkable's
 // fire state (0x40, +0x19c) and presses (0x4000000) and man-down (0x20);
@@ -2153,6 +2237,59 @@ TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
 		round.tick(1.0f / 30);
 	}
 	CHECK(round.mapSpottedPlayers(c).empty());
+}
+
+// The spotted lists hold one entry per list and object (0x00790d60 adds
+// one only when 0x007800f0 doesn't find it, so a radio spot again leaves
+// the first's 12 s), are pruned as they end, and keep at most 64 (a port
+// bound: the soonest ending gives way).
+TEST(GameWorld_MapSpotsDeduplicatedPrunedAndBounded)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	const std::vector<int> enemy {b};
+	for (int i = 0; i < 500; ++i) {
+		round.radioSpot(a, b);
+	}
+	// The team's entry and A's own battlefield report's.
+	CHECK(round.mapSpotCount() == 2);
+	for (int i = 0; i < 6 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	round.radioSpot(a, b); // not extended
+	for (int i = 0; i < int(6.5f * 30); ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(c).empty());
+	for (int i = 0; i < 6 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpotCount() == 0); // pruned without a new spot
+	// Own team or no such player: nothing.
+	round.radioSpot(a, c);
+	round.radioSpot(a, 12345);
+	round.radioSpot(12345, b);
+	CHECK(round.mapSpotCount() == 0 && round.mapSpottedPlayers(a).empty());
+
+	// 10 reporters without a squad, each reporting 10 enemies: 100 lists'
+	// entries, 64 kept, the latest reports among them.
+	std::vector<int> reporters, enemies;
+	for (int i = 0; i < 10; ++i) {
+		reporters.push_back(round.addPlayer("R" + std::to_string(i), 1, false));
+		enemies.push_back(round.addPlayer("E" + std::to_string(i), 2, false));
+	}
+	for (size_t i = 0; i < reporters.size(); ++i) {
+		round.reportBattlefieldObjects(reporters[i], enemies, 3.0f + static_cast<float>(i));
+		CHECK(round.mapSpotCount() <= 64);
+	}
+	CHECK(round.mapSpotCount() == 64);
+	CHECK(round.mapSpottedPlayers(reporters.back()).size() == enemies.size());
+	CHECK(round.mapSpottedPlayers(reporters.front()).empty());
 }
 
 // The local HUD's minimap reads those lists: a teammate's radio spot shows

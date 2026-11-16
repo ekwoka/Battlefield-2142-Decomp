@@ -95,6 +95,7 @@ TEST(FirstPerson_PlacementPutsTheCameraBoneAtTheEye)
 
 TEST(FirstPerson_RemasterShotgunShiftAndReloadMessages)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	io::FileManager files;
