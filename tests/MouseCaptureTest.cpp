@@ -79,6 +79,19 @@ TEST(MouseCapture_CommanderScreenHidesSystemCursor)
 	CHECK(!gameplaySystemCursorHidden(true, nullptr));
 }
 
+TEST(MouseCapture_HeldRoseKeepsCursorHiddenUntilOwnershipChanges)
+{
+	CHECK(!gameplaySystemCursorVisible(true, false, nullptr)); // looking around
+	for (int frame = 0; frame < 120; ++frame) {
+		CHECK(!gameplaySystemCursorVisible(false, true, "comm-rose"));
+	}
+	CHECK(gameplaySystemCursorVisible(false, false, "comm-rose")); // focus lost
+	CHECK(gameplaySystemCursorVisible(false, false, "esc-menu"));
+	CHECK(gameplaySystemCursorVisible(false, true, "deployment"));
+	CHECK(!gameplaySystemCursorVisible(false, true, "commander-screen"));
+	CHECK(!gameplaySystemCursorVisible(true, false, nullptr)); // Q released
+}
+
 // Full screen, the cursor stays off the display's edges on every focused screen
 // (the Esc menu too), so hot corners, the Dock and Universal Control never see it.
 TEST(MouseCapture_FullscreenKeepsCursorOffDisplayEdges)

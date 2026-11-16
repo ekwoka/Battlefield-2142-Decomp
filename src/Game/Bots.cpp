@@ -2542,6 +2542,12 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 		// The mode-specific target above supersedes a generic SAI squad order.
 	} else if (squad && squad->state == 2 && squad->kind != 4) {
 		orderAt = squad->orderAt;
+		// 0x100c0184..0x100c01cc: on foot, a human leader's
+		// destination replaces the strategic point while the formation
+		// follows his order and nobody is near the strategic objective.
+		if (!self.vehicle && squad->formation.humanLeads && !nearSquadOrder(*squad)) {
+			orderAt = squad->humanOrderAt;
+		}
 		hasOrder = true;
 	} else if (squad && squad->state != 2 && bot.hasGoal && bot.goalMap == map && !bot.orderRegoal && !heldRejectionDue) {
 		return;
@@ -4378,12 +4384,17 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 		bot.idlePassenger = -1; // 0x1006b1f0: the passenger waited for, for BBPIdle2d
 		for (const GameWorld::PlayerInfo& mate : players) {
 			const auto it = m_bots.find(mate.id);
-			if (mate.id == self.id || mate.team != self.team || !mate.alive || mate.vehicle || it == m_bots.end()
-				|| it->second.vehicleTarget != self.vehicle) {
+			// 0x10069af0 reads req_pickup (type 2); 0x10069c47's
+			// human branch does not require a bot's chosen vehicle. Humans
+			// within 50 m may ask the driver to wait (0x10069d63: 2500),
+			// at 30/70 priority according to their facing (0x10069ea8).
+			const bool humanPickup = !mate.ai && heard(bot, 2, mate.id);
+			const bool botBoarding = it != m_bots.end() && it->second.vehicleTarget == self.vehicle;
+			if (mate.id == self.id || mate.team != self.team || !mate.alive || mate.vehicle || (!humanPickup && !botBoarding)) {
 				continue;
 			}
 			const physics::Vec3 d = self.position - mate.position;
-			if (horizontal2(d) > 40.0f * 40.0f) {
+			if (humanPickup ? physics::lengthSquared(d) > 2500.0f : horizontal2(d) > 40.0f * 40.0f) {
 				continue;
 			}
 			const float facing = std::cos(angleBetween(mate.yaw, headingTo(mate.position, self.position)) * kRadians);

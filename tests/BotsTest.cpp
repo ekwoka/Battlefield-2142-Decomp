@@ -4509,6 +4509,11 @@ TEST(Bots_RadioHeardAndAnswered)
 			humanHeard = humanHeard || (h.sender == bot && h.receiver == human && h.voice == "roger_that");
 		}
 		CHECK(humanHeard);
+		field.ticks(30 * 15, &bots);
+		CHECK(field.info(bot).vehicle == car); // get_in causes boarding, not just a reply
+		field.world->radioMessage(human, game::GameWorld::targetChannel("TCVehicle"), "bail_out");
+		field.ticks(30 * 4, &bots);
+		CHECK(field.info(bot).vehicle == 0);
 	}
 	{
 		CarField field(gameDir);
@@ -6216,6 +6221,45 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 // A member whose bot idles (+0x4d, set by the Idle statement 0x100d2830
 // and cleared by 0x100d28a0) is given its slot again at every look
 // (0x100c0890 -> 0x100bff90), so it keeps up with a leader on the move.
+TEST(Bots_HumanLeaderOrderAndFollowMe)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	const int human = field.soldier(2, false, -60, 0);
+	const int mate = field.soldier(2, true, -57, 0);
+	CHECK(field.world->joinSquad(human, 1));
+	CHECK(field.world->joinSquad(mate, 1));
+	game::GameWorld::PlayerInfo me;
+	CHECK(field.world->playerInfo(human, me) && me.squadLeader);
+	for (int tick = 0; tick < 18 * 8; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	CHECK(field.world->issueSquadLeaderOrder(human, game::GameWorld::OrderType::MapMove, -60, 100));
+	game::GameWorld::PlayerInfo beforeOrder;
+	CHECK(field.world->playerInfo(mate, beforeOrder));
+	for (int tick = 0; tick < 18 * 3; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+	}
+	const auto* squad = bots.squad(2, 1);
+	CHECK(squad && squad->formation.humanLeads);
+	const auto& ordered = game::BotManagerTestAccess::bot(bots, mate);
+	std::printf("  human order: bot goal %.1f %.1f, strategic %.1f %.1f\n", ordered.goal.x, ordered.goal.z,
+		squad ? squad->orderAt.x : 0, squad ? squad->orderAt.z : 0);
+	CHECK(ordered.hasGoal && std::fabs(ordered.goal.x + 60) < 5 && std::fabs(ordered.goal.z - 100) < 5);
+	settle(bots, 5, field.world.get());
+	game::GameWorld::PlayerInfo afterOrder;
+	CHECK(field.world->playerInfo(mate, afterOrder));
+	std::printf("  ordered movement: z %.1f -> %.1f\n", beforeOrder.position.z, afterOrder.position.z);
+	CHECK(afterOrder.position.z > beforeOrder.position.z + 5);
+	field.world->radioMessage(human, game::GameWorld::targetChannel("TCLocalTeam"), "PLAYER_TACTICS_followme");
+	settle(bots, 2, field.world.get());
+	CHECK(squad && !squad->formation.humanLeads && squad->formation.slots[0].member == human);
+
+}
+
 TEST(Bots_IdleMemberFollowsItsSlot)
 {
 	Field field;

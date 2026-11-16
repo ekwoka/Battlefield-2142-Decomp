@@ -475,6 +475,12 @@ TEST(CommRose_LevelsAndCommands)
 	// The tactical rose by role; the vehicle's radio aboard.
 	roses.openTactical(false, true, true);
 	CHECK(roses.shown() == "SquadLeader" && hud.number("SquadLeaderInterfaceShow") == 1);
+	roses.openTactical(false, false, true);
+	CHECK(roses.shown() == "Squad" && hud.number("SquadLeaderInterfaceShow") == 0);
+	roses.openTactical(false, false, false);
+	CHECK(roses.shown() == "Lonewolf" && hud.number("SquadInterfaceShow") == 0);
+	roses.openTactical(true, true, true);
+	CHECK(roses.shown() == "Commander" && hud.number("LonewolfInterfaceShow") == 0);
 	roses.openRadio(true);
 	CHECK(roses.shown() == "RadioVehicle" && hud.number("SquadLeaderInterfaceShow") == 0);
 	roses.close();

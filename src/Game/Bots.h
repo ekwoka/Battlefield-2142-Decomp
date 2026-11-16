@@ -1010,6 +1010,7 @@ public:
 		std::vector<SquadDanger> dangers; // +0x14
 		float requestedAt = 0;      // +0x100: the last req_new_order
 		bool answerOrder = false;   // +0x108: the members say roger_that / negative on their goal
+		physics::Vec3 humanOrderAt; // +0xf4: the human leader's destination (0x100c1eb0)
 		// The world's order this squad last saw (the game's event 0x10089480
 		// reaching 0x100c1eb0 when it changes).
 		GameWorld::OrderType seenType = GameWorld::OrderType::None;
@@ -1640,6 +1641,7 @@ private:
 	void updateSquad(Squad& squad);
 	void syncSquadMembers(Squad& squad);
 	void takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool fromCommander);
+	bool nearSquadOrder(const Squad& squad) const; // 0x100c1e50
 	bool acceptOrder(Squad& squad, int by);
 	void updateMember(Squad& squad, SquadMember& member);
 	bool inFormation(const Squad& squad, const SquadMember& member) const;

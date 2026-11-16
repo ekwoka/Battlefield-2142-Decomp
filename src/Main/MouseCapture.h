@@ -47,6 +47,14 @@ constexpr bool gameplaySystemCursorHidden(bool confined, const char* reason)
 	return confined && reason && (sameText(reason, "comm-rose") || sameText(reason, "commander-screen"));
 }
 
+// Apply one visibility decision after capture and confinement are updated.
+// Showing a pointer first, then hiding only on a rose transition, makes the
+// system cursor reappear on the second frame of a held Q/T menu.
+constexpr bool gameplaySystemCursorVisible(bool capture, bool confined, const char* reason)
+{
+	return !capture && !gameplaySystemCursorHidden(confined, reason);
+}
+
 // The soldier's aim pitch is clamped (85 degrees first person), but a driver's
 // PIPitch/PIMouseLookY is the per-tick change of that pitch, so a clamp pinned
 // at one end swallows the mouse in that direction. Driving only bounds the sum.

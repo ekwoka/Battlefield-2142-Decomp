@@ -617,6 +617,18 @@ bool BotManager::inFormation(const Squad& squad, const SquadMember& member) cons
 	return true;
 }
 
+bool BotManager::nearSquadOrder(const Squad& squad) const
+{
+	if (squad.state != 2 || squad.area < 0 || areaStatus(squad.area, squad.team) == ai::AreaStatus::Owned
+		|| !m_settings.strategy.areas[static_cast<size_t>(squad.area)].takeable[static_cast<size_t>(squad.team)]) {
+		return false;
+	}
+	for (const SquadMember& m : squad.members) {
+		if (m.placed && distance2(squad.orderAt, m.at) < 900.0f) return true;
+	}
+	return false;
+}
+
 // 0x100c1eb0: an order reaching the squad (the game's event 0x10089480).
 // A commander's (the SAI's go to the squads as the commander's) is taken
 // when the squad has none and, without a human commander, no member is
@@ -628,6 +640,10 @@ void BotManager::takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool
 	if (!fromCommander) {
 		const GameWorld::PlayerInfo* leader = squadLeaderOf(squad);
 		if (!squad.members.empty() && leader && !m_bots.count(leader->id)) {
+			// Retail +0xf4 is separate from the strategic order's +0x2c.
+			// 0x100c0192..0x100c01cc reads it while the human leads and
+			// nobody is already engaging the strategic order's area.
+			squad.humanOrderAt = at;
 			squad.answerOrder = true;
 			for (SquadMember& m : squad.members) {
 				m.goalSet = false;
@@ -639,15 +655,7 @@ void BotManager::takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool
 		}
 		return;
 	}
-	bool near = false;
-	if (squad.area >= 0 && areaStatus(squad.area, squad.team) != ai::AreaStatus::Owned) {
-		// 0x100bf780: within +0x50 (900) of the order's spot, on the
-		// order's area, takeable by the side.
-		for (const SquadMember& m : squad.members) {
-			near = near || (squad.state == 2 && m.placed && distance2(squad.orderAt, m.at) < 900.0f
-							   && m_settings.strategy.areas[static_cast<size_t>(squad.area)].takeable[static_cast<size_t>(squad.team)]);
-		}
-	}
+	const bool near = nearSquadOrder(squad);
 	const bool commander = humanCommands(squad.team);
 	if (((!commander && near) || squad.state != 0) && !commander) {
 		return;

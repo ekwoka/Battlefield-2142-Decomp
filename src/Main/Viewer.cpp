@@ -557,7 +557,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		bool pointerConfinedBefore = false;
 		bool discardFirstRelativeMotion = false;
 		int tracedCaptureState = -1;
-		bool roseCursorHidden = false; // the comm rose is picked by pointing, without a visible cursor
 		// A detached process from the launcher applet may start behind it, and then
 		// never receives focus (so never captures) until the user clicks.
 		SDL_RaiseWindow(window);
@@ -577,11 +576,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			const bool menuUp = options.onMenuInput && (!options.menuActive || options.menuActive());
 			if (menuUp && options.menuCursor) {
 				menuCursor.show(options.menuCursor());
-			}
-			// A movie hides the cursor while it plays (0x0040bd90); a menu or
-			// a pointer shows it again.
-			if ((menuUp || pointer) && !SDL_CursorVisible()) {
-				SDL_ShowCursor();
 			}
 			const bool typing = menuUp || (options.onHudText && options.wantsText && options.wantsText());
 			if (typing != textInput) {
@@ -758,14 +752,13 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				SDL_SetWindowMouseRect(window, inset ? &edgeGuard : nullptr);
 			}
 			{
-				const bool hideCursor = gameplaySystemCursorHidden(confine, pointerWhy);
-				if (hideCursor != roseCursorHidden) {
-					if (hideCursor) {
-						SDL_HideCursor();
-					} else {
+				const bool visible = gameplaySystemCursorVisible(capture, confine, pointerWhy);
+				if (visible != SDL_CursorVisible()) {
+					if (visible) {
 						SDL_ShowCursor();
+					} else {
+						SDL_HideCursor();
 					}
-					roseCursorHidden = hideCursor;
 				}
 			}
 			// After relative mode let go, so the release doesn't put the cursor back where it was.
@@ -783,13 +776,14 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const bool grabbed = SDL_GetWindowMouseGrab(window);
 				const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
 				const bool edgeGuarded = SDL_GetWindowMouseRect(window) != nullptr;
+				const bool cursorVisible = SDL_CursorVisible();
 				const char* why = options.pointerReason ? options.pointerReason() : nullptr;
 				const int state = focused | (pointer << 1) | (menuUp << 2) | (relative << 3) | (grabbed << 4) | (fullscreen << 5)
-					| (playing << 6) | (capture << 7) | (why ? static_cast<int>(why[0]) << 8 : 0) | (edgeGuarded << 16);
+					| (playing << 6) | (capture << 7) | (why ? static_cast<int>(why[0]) << 8 : 0) | (edgeGuarded << 16) | (cursorVisible << 17);
 				if (state != tracedCaptureState) {
-					std::printf("mouse-capture: t=%.1f wanted=%d blocker=%s focused=%d pointer=%d(%s) menu=%d playing=%d actual relative=%d grabbed=%d fullscreen=%d edge-guard=%d\n",
+					std::printf("mouse-capture: t=%.1f wanted=%d blocker=%s focused=%d pointer=%d(%s) menu=%d playing=%d actual relative=%d grabbed=%d fullscreen=%d edge-guard=%d cursor-visible=%d\n",
 						SDL_GetTicksNS() / 1e9, capture, mouseCaptureBlocker(playing, pointer, menuUp, focused), focused, pointer, why ? why : "-", menuUp,
-						playing, relative, grabbed, fullscreen, edgeGuarded);
+						playing, relative, grabbed, fullscreen, edgeGuarded, cursorVisible);
 					std::fflush(stdout);
 					tracedCaptureState = state;
 				}
