@@ -162,6 +162,7 @@ TEST(Titan_MinskTitansSpawn)
 // a shipped map and its materials.
 TEST(Titan_SuezWalkerPrimaryFireAgainstEnemyInfantry)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	constexpr float dt = 1.0f / 30.0f;
@@ -907,6 +908,7 @@ TEST(Titan_InteriorFieldCollisionUsesTeamAndRetailLod)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -988,6 +990,7 @@ TEST(Titan_OuterShieldKillsEnemies)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const int shieldDown : {0, 1}) {
 			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 			CHECK(level.loaded);
@@ -1045,6 +1048,7 @@ TEST(Titan_WalkerLegsRespectOuterShieldTeam)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (int team : {1, 2}) {
 			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 			CHECK(level.loaded);
@@ -1400,6 +1404,7 @@ TEST(Titan_ApcPodLandsAndDisappearsOnDeck)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
 		CHECK(level.loaded && level.titan(2) && level.templates.find("eu_apc_pods"));
 		if (!level.loaded || !level.titan(2) || !level.templates.find("eu_apc_pods")) return;
@@ -1666,6 +1671,7 @@ TEST(Titan_HeldGunshipReleasesIntact)
 
 TEST(Titan_HeldGunshipReleasesIntactRemaster)
 {
+	REMASTER_ONLY();
 	heldGunshipReleasesIntact("mods/Project_Remaster_v17_Final");
 }
 
@@ -1855,6 +1861,7 @@ TEST(Titan_WalkerSweepsTheSuezBridges)
 	const Span spans[] = {{65, -36, 90, 47.2f, 55, 40}, {-512, -36, 90, 47.2f, 55, 40}, {-99, -128, 0, 47.2f, 55, 40},
 		{-245, -32, 90, 50.8f, 175, 130}};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
 		if (!level.loaded) {
 			continue;
@@ -1985,6 +1992,7 @@ TEST(Titan_WalkerCrossesTheSuezBridges)
 	// the lane at z -32 from the west bank to the east bank.
 	const BridgeCrossing bridges[] = {{65, -36, 90, 47.2f}, {-512, -36, 90, 47.2f}, {-99, -128, 0, 47.2f}, {-245, -32, 90, 50.8f, 175, 130}};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const BridgeCrossing& bridge : bridges) {
 			for (const bool sprint : {false, true}) {
 				walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
@@ -1998,6 +2006,7 @@ TEST(Titan_WalkerCrossesTheSuezBridges)
 TEST(Titan_WalkerBridgeContactDoesNotOscillate)
 {
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech"}) {
 			for (const bool sprint : {false, true}) {
 				for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
@@ -2016,6 +2025,7 @@ TEST(Titan_SuezBridgeMotionSurvey)
 {
     const BridgeCrossing bridge {-245, -32, 90, 50.8f, 175, 130};
     for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+        if (!test::runs(mod)) continue;
         for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech", "eu_tank", "eu_apc"}) {
             for (bool steering : {false, true})
                 walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
@@ -2027,6 +2037,7 @@ TEST(Titan_SuezBridgeMotionSurvey)
 // It is not a substitute for bot routing through the pictured underpass.
 TEST(Titan_SuezBridgeCrowdingSurvey)
 {
+	REMASTER_ONLY();
     for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
                                          BridgeCrossing {-512, -36, 90, 47.2f},
                                          BridgeCrossing {-245, -32, 90, 50.8f, 175, 130}})
@@ -2296,6 +2307,7 @@ TEST(Titan_ShepherdOnTheDeckLeavesOnFoot)
 // Minsk, as played): where the soldier ends up and whether he lives.
 TEST(Titan_DropToTheRearCatwalk)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -2346,6 +2358,7 @@ TEST(Titan_DropToTheRearCatwalk)
 // from its origin): '#' inside, '.' outside, at the catwalk's height and the deck's.
 TEST(Titan_HullZoneAtTheRearCatwalk)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -2390,6 +2403,7 @@ TEST(Titan_SuezTitanPositions)
 // and past it (127 damage). Drop soldiers over a grid there: where do they stand?
 TEST(Titan_SuezInteriorFloorProbe)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -2432,6 +2446,7 @@ TEST(Titan_AASeatAimAndFireOwnership)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   TitanLevel level(dir, "Minsk", 48, true, mod);
   CHECK(level.loaded);
   if (!level.loaded) continue;
@@ -2491,6 +2506,7 @@ TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+ if (!test::runs(mod)) continue;
  for (int team : {1, 2}) {
   TitanLevel level(dir, "Minsk", 48, true, mod);
   CHECK(level.loaded);
@@ -2557,6 +2573,7 @@ TEST(Titan_GroundGunCameraAndProjectileFollowEachSeat)
 // burst sound starts on round 10.
 TEST(Titan_GroundCannonReloadSoundFollowsLastRound)
 {
+	REMASTER_ONLY();
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  TitanLevel level(dir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
@@ -2602,6 +2619,7 @@ TEST(Titan_VehicleSeatHudUsesAuthoredIconOffsets)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   TitanLevel level(dir, "Minsk", 48, true, mod);
   CHECK(level.loaded);
   if (!level.loaded) continue;
@@ -2667,6 +2685,7 @@ TEST(Titan_StationaryAARoundsMeetFriendlyAndEnemyTitan)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Sidi_Power_Plant", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -2703,6 +2722,7 @@ TEST(Titan_StationaryAARoundsMeetFriendlyAndEnemyTitan)
 
 TEST(Titan_FriendlyStationaryAAGunFiresAtTitan)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (bool missile : {false, true}) {
@@ -2767,6 +2787,7 @@ TEST(Titan_FriendlyStationaryAAGunFiresAtTitan)
 
 TEST(Titan_FriendlyWalkerAAGunOnSuez)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	const bool crowded = std::getenv("BF2142_TITAN_CROWD_TEST") != nullptr;
@@ -2869,6 +2890,7 @@ TEST(Titan_FriendlyWalkerAAGunOnSuez)
 // Titan transform; otherwise a player reproduction cannot diagnose crossing.
 TEST(Titan_WalkerShotTraceRecordsLifecycle)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
@@ -2903,6 +2925,7 @@ TEST(Titan_MapListIncludesAuthoredSilhouette)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   TitanLevel level(dir, "Suez_Canal", 48, true, mod);
   CHECK(level.loaded);
   if (!level.loaded) continue;
@@ -2940,6 +2963,7 @@ TEST(Titan_MapFootprintContainsParkedGunship)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		const char* name = std::string(mod) == "mods/bf2142" ? "Suez_Canal" : "Bridge_at_Remagen";
 		TitanLevel level(dir, name, 48, true, mod);
 		CHECK(level.loaded);
@@ -3014,6 +3038,7 @@ TEST(Titan_GunMinimapHeadingFollowsCamera)
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
   for (int team : {1, 2}) {
    TitanLevel level(dir, "Suez_Canal", 48, true, mod);
    CHECK(level.loaded); if (!level.loaded) continue;
@@ -3066,6 +3091,7 @@ TEST(Titan_PodSeatEntersAimsAndFires)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (int team : {1, 2}) {
 		 for (float side : {-30.0f, 30.0f}) {
 			TitanLevel level(dir, "Suez_Canal", 48, true, mod);
@@ -3171,6 +3197,7 @@ TEST(Titan_PodStrafeStaysScreenRelativeAfterTurning)
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		// Coasting, A, D, S, W: retail's ForceObjects (0x0062c920) push force x
 		// input, clamped to +-maxForceOnObject, so S's -1 on eu_pod_FOFWD
 		// (35 / 35) thrusts the pod backwards along its own hull.
@@ -3365,6 +3392,7 @@ TEST(Titan_ConsoleDestroyedRadio)
 // alone: the Titan's other guns keep their exterior geometry.
 TEST(Titan_GunSeatCockpitLeavesTheOtherGuns)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	TitanLevel level(gameDir, "Minsk", 48, true, "mods/Project_Remaster_v17_Final");
@@ -3610,6 +3638,7 @@ TEST(Titan_JoinedClientPlacedByCreateObject)
 // went on the decks and in the upper hangar.
 TEST(Titan_CameraTitanIsTheHullHoldingTheCamera)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
@@ -4015,6 +4044,7 @@ TEST(Titan_SiloMissileBendsOverGraduallyAndReachesTheTitan)
 // the hit, never on a face of the same mesh elsewhere in its column.
 TEST(Titan_HullDecalStaysOnTheHull)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;

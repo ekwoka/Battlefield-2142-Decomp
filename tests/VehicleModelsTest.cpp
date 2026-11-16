@@ -359,6 +359,7 @@ TEST(Vehicles_HoverTankGunFollowsHullAfterSteering)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Garage g(gameDir(), mod);
 		CHECK(g.loaded && g.templates.find("as_tank"));
 		if (!g.loaded || !g.templates.find("as_tank")) continue;
@@ -936,6 +937,7 @@ TEST(Vehicles_AircraftHudThrustFromPilot)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"as_ag", "us_ag", "as_at", "eu_at"}) {
 			Garage g(gameDir(), mod);
 			CHECK(g.loaded && g.templates.find(name));
@@ -970,6 +972,7 @@ TEST(Vehicles_GunshipPitchesBothWays)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"as_ag", "us_ag"}) {
 			for (int mode = 0; mode < 4; ++mode) {
 				Garage g(gameDir(), mod);
@@ -1618,6 +1621,7 @@ TEST(Vehicles_GunshipMissileMotorAndCamera)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			CHECK(g.loaded && g.templates.find(aircraft));
@@ -1683,6 +1687,7 @@ TEST(Vehicles_GunshipMissileEarlyImpactReload)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			auto* missile = g.templates.find("AAGuided_missile");
@@ -1726,6 +1731,7 @@ TEST(Vehicles_GunshipTVMovingCarrierLaunchHeading)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			for (const physics::Vec3 velocity : {physics::Vec3{25, 0, 0}, physics::Vec3{-25, 0, 0},
 					 physics::Vec3{0, 0, -25}, physics::Vec3{0, 0, 25}}) {
@@ -1789,6 +1795,7 @@ TEST(Vehicles_GunshipTVLaunchUsesCameraDirection)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded || !g.templates.find(aircraft)) continue;
@@ -1830,6 +1837,7 @@ TEST(Vehicles_GunshipTVSelectionRestoresGunnerPitch)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded || !g.templates.find(aircraft)) continue;
@@ -2728,6 +2736,7 @@ TEST(VehicleModels_TransportPassengerRecoilAndHudAfterPilot)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Garage g(gameDir(), mod);
 		CHECK(g.loaded);
 		if (!g.loaded) return;
@@ -3463,6 +3472,7 @@ TEST(Vehicles_StaticAAFireFollowsItsCamera)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
 		Garage g(gameDir(), mod);
 		if (!g.loaded || !g.templates.find("static_aa")) continue;
@@ -3521,6 +3531,7 @@ TEST(Vehicles_StaticGunsLetTheirGunnerExit)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
 		for (const char* name : {"static_av", "static_aa", "static_ap"}) {
 			Garage g(gameDir(), mod);
@@ -3573,6 +3584,7 @@ TEST(Vehicles_StaticAAHeadingAndEmpMissileFlight)
 {
     if (!gameDir()) return;
     for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+        if (!test::runs(mod)) continue;
         for (float heading : {0.0f, 90.0f, 180.0f, -90.0f}) {
             for (bool missile : {false, true}) {
               for (float hullYaw : {0.0f, 90.0f}) {
@@ -3666,6 +3678,7 @@ TEST(Vehicles_WalkerMainGunUsesItsAimAndConfiguredDeviation)
 		return n;
 	};
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
 		Garage g(gameDir(), mod);
 		if (!g.loaded || !g.templates.find("as_heavy_mech")) continue;
@@ -4382,6 +4395,7 @@ TEST(PlayerCamera_TankZoomRetainsShortClicks)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
 		for (const char* name : {"eu_tank", "as_tank"}) {
 			Garage g(gameDir(), mod);
@@ -4431,6 +4445,7 @@ TEST(Vehicles_GunshipPilotGunFiresPerPressAndReloads)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded || !g.templates.find(name)) {
@@ -4498,6 +4513,7 @@ TEST(Vehicles_HelipadRearmsAParkedGunshipByItsWholeLoad)
 	}
 	int tested = 0;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded || !g.templates.find(name) || !g.templates.find("helipad_m")) {
@@ -4553,6 +4569,7 @@ TEST(PlayerCamera_GunshipGunnerTurnsWithTheGun)
 	if (!gameDir()) return;
 	constexpr float kDeg = 3.14159265f / 180;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
 		for (const char* name : {"as_ag", "us_ag"}) {
 			Garage g(gameDir(), mod);
@@ -4707,6 +4724,7 @@ TEST(Vehicles_FavStaysUprightUnderSteeringAndBoost)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"as_fav", "eu_fav"}) {
 			for (float steer : {0.0f, 0.2f}) {
 				for (bool boost : {false, true}) {
@@ -4885,6 +4903,7 @@ TEST(Vehicles_WalkerDistanceVisibilityPixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			for (const char* name : {"us_heavy_mech", "as_heavy_mech"}) {
 				Garage g(gameDir(), mod, true);
 				CHECK(g.loaded);
@@ -5130,6 +5149,7 @@ TEST(Vehicles_AdsSpikesPixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			Garage g(gameDir(), mod, true);
 			CHECK(g.loaded);
 			auto* spike = g.templates.find("em_ActiveDef_shield_Spikes");
@@ -5315,6 +5335,7 @@ TEST(Vehicles_ProjectilePixelsOptIn)
 			gpu->releaseTarget(target);
 		};
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			const std::string prefix = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
 			if (prefix == "remaster") {
 				Garage m(gameDir(), mod, true);
@@ -5407,6 +5428,7 @@ TEST(Titan_SiloLaunchLeavesNoLiveEffectAtItsBase)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		geom::GeometryTemplateManager geometries;
 		titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, true, &geometries);
 		CHECK(level.loaded);
@@ -5746,6 +5768,7 @@ TEST(Vehicles_ApcPodMouseTurns)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		float turns[3] = {};
 		for (int sample = 0; sample < 3; ++sample) {
 			Garage g(gameDir(), mod);
@@ -5787,6 +5810,7 @@ TEST(Vehicles_ApcPodSteeringForces)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) for (const bool titanPod : {false, true}) {
+		if (!test::runs(mod)) continue;
 		physics::Vec3 end[3] = {};
 		float maxTilt[3] = {};
 		for (int sample = 0; sample < 3; ++sample) {
@@ -6190,6 +6214,7 @@ TEST(Render_Glow3AdditivePixelsOptIn)
         auto gpu = render::GpuContext::create(nullptr, error);
         if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
         for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+            if (!test::runs(mod)) continue;
             Garage g(gameDir(), mod, true);
             auto* glow = g.templates.find("glow3");
             CHECK(g.loaded && glow);
@@ -6275,6 +6300,7 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
         auto gpu = render::GpuContext::create(nullptr, error);
         if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
         for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+            if (!test::runs(mod)) continue;
             geom::GeometryTemplateManager geometries;
             titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, true, &geometries);
             CHECK(level.loaded);
@@ -6348,6 +6374,7 @@ TEST(Titan_StaticVisibilityPixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			geom::GeometryTemplateManager geometries;
 			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
 			CHECK(level.loaded);
@@ -6530,6 +6557,7 @@ TEST(Titan_ArrowSignVisibilityPixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			geom::GeometryTemplateManager geometries;
 			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
 			CHECK(level.loaded);
@@ -6630,6 +6658,7 @@ TEST(Titan_AuthoredArrowScenePixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			geom::GeometryTemplateManager geometries;
 			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
 			CHECK(level.loaded);
@@ -6716,6 +6745,7 @@ TEST(Vehicles_InstalledMissileSplashHeadless)
 	CHECK(gameDir() != nullptr);
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* projectile : {"us_heavy_mech_dumrockets_projectile", "as_heavy_mech_dumrockets_projectile",
 				"US_AG_PilotWeapon_Projectile", "eu_av_missile", "as_av_missile"}) {
 			Garage g(gameDir(), mod);
@@ -6774,6 +6804,7 @@ TEST(Vehicles_WalkerPrimarySplashAgainstInfantry)
 		{"as_heavy_mech", "as_heavy_Mech_Cannon_Projectile", 42, 200},
 	};
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const Case& item : cases) {
 			Garage g(gameDir(), mod);
 			CHECK(g.loaded && g.templates.find(item.vehicle) && g.templates.find(item.projectile));
@@ -6884,6 +6915,7 @@ TEST(Vehicles_DetectionRadiusDoesNotProximityDetonateOnInfantry)
 
 TEST(Vehicles_EUWalkerAAGunnerSightAndShot)
 {
+	REMASTER_ONLY();
 	if (!gameDir()) return;
 	for (float heading : {0.f, 90.f, 180.f, -90.f}) for (bool alt : {false, true}) for (bool authored : {false, true}) {
 		Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
@@ -7008,6 +7040,7 @@ TEST(Vehicles_BotWalkingLookDoesNotSwing)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Garage g(gameDir(), mod);
 		if (!g.loaded) return;
 		world::ObjectTemplate* enemyPoint = g.templates.create("ControlPoint", "swing_cp");
@@ -7062,6 +7095,7 @@ TEST(Vehicles_BotWalksUpToATankAndGetsIn)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* tank : {"eu_tank", "as_tank"}) {
 			for (int side = 0; side < 4; ++side) {
 				Garage g(gameDir(), mod);
@@ -7109,6 +7143,7 @@ TEST(Vehicles_BotFiresWhileClosingIn)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Garage g(gameDir(), mod);
 		if (!g.loaded) return;
 		game::BotSettings settings;
@@ -7158,6 +7193,7 @@ TEST(Vehicles_WalkerRocketsAccelerateToMaxSpeed)
 	if (!gameDir()) return;
 	constexpr float dt = 1 / 30.0f;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* walker : {"us_heavy_mech", "as_heavy_mech"}) {
 			Garage g(gameDir(), mod);
 			CHECK(g.loaded && g.templates.find(walker));
@@ -7205,6 +7241,7 @@ TEST(Vehicles_HeatSeekersThrustToTheirTargetsSpeed)
 	constexpr float dt = 1 / 30.0f;
 	const physics::Vec3 sight {0, std::sin(20 * 3.14159265f / 180), std::cos(20 * 3.14159265f / 180)};
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		// From the gun's own seat with no lock (nothing in the sky): it has no
 		// target, so no motor.
 		{
@@ -7304,6 +7341,7 @@ TEST(Vehicles_StaticAALocksAlongTheTurnedTurretCamera)
 	if (!gameDir()) return;
 	constexpr float dt = 1 / 30.0f;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (float heading : {90.0f, -150.0f}) {
 			Garage g(gameDir(), mod);
 			CHECK(g.loaded && g.templates.find("static_aa") && g.templates.find("as_ag"));
@@ -7352,6 +7390,7 @@ TEST(Vehicles_WalkerRocketWireFollowsTheSeatCamera)
 	if (!gameDir()) return;
 	constexpr float dt = 1 / 30.0f;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* walker : {"us_heavy_mech", "as_heavy_mech"}) {
 		  float straight = -1;
 		  for (bool turned : {false, true}) {
@@ -7418,6 +7457,7 @@ TEST(Vehicles_AltFireLauncherLocksAndItsMissileChases)
 	constexpr float dt = 1 / 30.0f;
 	const physics::Vec3 sight {0, std::sin(20 * 3.14159265f / 180), std::cos(20 * 3.14159265f / 180)};
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Garage g(gameDir(), mod);
 		world::ObjectTemplate* round = g.templates.find("static_aa_missile_projectile");
 		CHECK(g.loaded && g.templates.find("static_aa") && g.templates.find("as_ag") && round);
@@ -7470,6 +7510,7 @@ TEST(Vehicles_AltFireLauncherLocksAndItsMissileChases)
 
 TEST(Vehicles_RemasterMadlockProjectile)
 {
+	REMASTER_ONLY();
 	if (!gameDir()) return;
 	for (bool wall : {false, true}) {
 		Garage g(gameDir(), "mods/Project_Remaster_v17_Final", true);
@@ -7544,6 +7585,7 @@ TEST(Vehicles_RemasterMadlockProjectile)
 // the motion mine's lock warning (WarningHud TTMagnet -> HUD_MotionMine_*).
 TEST(Vehicles_TankDamageAlarmAndMotionMineWarning)
 {
+	REMASTER_ONLY();
 	if (!gameDir()) return;
 	std::unique_ptr<sound::SoundManager> manager;
 	Garage g(gameDir(), "mods/Project_Remaster_v17_Final", true, [&manager](Garage& garage) { // the client archives: the sounds' files
@@ -8080,6 +8122,7 @@ TEST(Vehicles_GunshipRearmedOnAPadReloadsWithItsSound)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			for (const char* padName : {"dummy_helipad_repair", "eu_titan_heliRepairRearm"}) {
 				Garage g(gameDir(), mod);
@@ -8153,6 +8196,7 @@ TEST(Vehicles_GunshipRearmedOnAPadTriggersThePilotsReloadSound)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			std::unique_ptr<sound::SoundManager> manager;
 			Garage g(gameDir(), mod, true, [&manager](Garage& garage) {
@@ -8222,6 +8266,7 @@ TEST(Vehicles_GunshipGunnerMissileRearmedOnAPadReloads)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* aircraft : {"as_ag", "us_ag"}) {
 			std::unique_ptr<sound::SoundManager> manager;
 			Garage g(gameDir(), mod, true, [&manager](Garage& garage) {
@@ -8319,6 +8364,7 @@ TEST(PlayerCamera_HovDriverViewTiltsWithTheGunWhileParked)
 	if (!gameDir()) return;
 	constexpr float kDeg = 3.14159265f / 180;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
 		Garage g(gameDir(), mod);
 		if (!g.loaded || !g.templates.find("as_hov_light")) continue;
@@ -8490,6 +8536,7 @@ TEST(Vehicles_ParachuteLandsOnTheWater)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Garage g(gameDir(), mod);
 		if (!g.loaded) {
 			continue;
@@ -8536,6 +8583,7 @@ TEST(Titan_WreckSequencePixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			const std::string prefix = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
 			geom::GeometryTemplateManager geometries;
 			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);

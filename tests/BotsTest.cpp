@@ -6664,6 +6664,7 @@ TEST(Bots_AiRandomIsDicesTwister)
 
 TEST(Bots_VehicleApproachUsesReachableMeshAndAuthoredPosition)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	io::FileManager files;

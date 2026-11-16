@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -24,6 +25,33 @@ inline int& failures()
 	return count;
 }
 
+// Project Remaster is a mod, not part of the game: its tests run only with
+// --remaster (or BF2142_REMASTER_TESTS=1) and then need it under the game's mods.
+inline bool& remaster()
+{
+	static bool on = false;
+	return on;
+}
+
+// Set by a test that returned without running (REMASTER_ONLY).
+inline bool& skipped()
+{
+	static bool s = false;
+	return s;
+}
+
+// Whether a pass over `mod` runs: every mod's, Remaster's only with the flag.
+inline bool runs(const char* mod)
+{
+	return remaster() || !mod || !std::strstr(mod, "Project_Remaster");
+}
+
+template <typename String>
+inline bool runs(const String& mod)
+{
+	return runs(mod.c_str());
+}
+
 struct Registrar {
 	Registrar(const char* name, std::function<void()> body) { registry().push_back({name, std::move(body)}); }
 };
@@ -34,6 +62,15 @@ struct Registrar {
 	static void name();                                              \
 	static test::Registrar name##_registrar(#name, name);            \
 	static void name()
+
+// The test needs Project Remaster: skipped without --remaster.
+#define REMASTER_ONLY()                \
+	do {                               \
+		if (!test::remaster()) {       \
+			test::skipped() = true;    \
+			return;                    \
+		}                              \
+	} while (0)
 
 #define CHECK(expr)                                                                    \
 	do {                                                                               \

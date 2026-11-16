@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -17,18 +19,24 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// A child's exit status for a test that skipped itself.
+constexpr int kSkippedStatus = 77;
+
+enum class Result { Pass, Fail, Skip };
+
 double secondsSince(Clock::time_point start)
 {
 	return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
 // One test's result line; the time only for tests worth noticing.
-void report(bool passed, const char* name, double seconds)
+void report(Result result, const char* name, double seconds)
 {
+	const char* word = result == Result::Pass ? "PASS" : result == Result::Fail ? "FAIL" : "SKIP";
 	if (seconds >= 1.0) {
-		std::printf("%s %s (%.1f s)\n", passed ? "PASS" : "FAIL", name, seconds);
+		std::printf("%s %s (%.1f s)\n", word, name, seconds);
 	} else {
-		std::printf("%s %s\n", passed ? "PASS" : "FAIL", name);
+		std::printf("%s %s\n", word, name);
 	}
 	std::fflush(stdout);
 }
@@ -36,7 +44,7 @@ void report(bool passed, const char* name, double seconds)
 #ifndef _WIN32
 // Runs the tests in up to `jobs` child processes at once, each test's output
 // kept in a temporary file and printed whole when it ends.
-int runParallel(const std::vector<const test::Case*>& cases, int jobs)
+int runParallel(const std::vector<const test::Case*>& cases, int jobs, int& skipped)
 {
 	struct Running {
 		pid_t pid;
@@ -60,7 +68,7 @@ int runParallel(const std::vector<const test::Case*>& cases, int jobs)
 				c->body();
 				std::fflush(stdout);
 				std::fflush(stderr);
-				_exit(test::failures() == 0 ? 0 : 1);
+				_exit(test::failures() != 0 ? 1 : test::skipped() ? kSkippedStatus : 0);
 			}
 			running.push_back({pid, c, out, Clock::now()});
 		}
@@ -79,12 +87,14 @@ int runParallel(const std::vector<const test::Case*>& cases, int jobs)
 				std::fwrite(buffer, 1, n, stdout);
 			}
 			std::fclose(r.out);
-			const bool passed = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+			const bool skip = WIFEXITED(status) && WEXITSTATUS(status) == kSkippedStatus;
+			const bool passed = skip || (WIFEXITED(status) && WEXITSTATUS(status) == 0);
 			if (!passed && !WIFEXITED(status)) {
 				std::printf("%s: crashed (signal %d)\n", r.c->name, WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 			}
 			failed += passed ? 0 : 1;
-			report(passed, r.c->name, secondsSince(r.start));
+			skipped += skip ? 1 : 0;
+			report(skip ? Result::Skip : passed ? Result::Pass : Result::Fail, r.c->name, secondsSince(r.start));
 			break;
 		}
 	}
@@ -97,15 +107,29 @@ int runParallel(const std::vector<const test::Case*>& cases, int jobs)
 // Runs every test, or those whose names contain the filter. Outside
 // Windows the tests run in their own processes, as many at once as there are
 // cores; `-j N` sets how many, `-j 1` runs them one after another in this one.
+// `--remaster` (or BF2142_REMASTER_TESTS=1) adds the Project Remaster tests.
 int main(int argc, char** argv)
 {
 	const char* filter = nullptr;
 	int jobs = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+	const char* remasterEnv = std::getenv("BF2142_REMASTER_TESTS");
+	test::remaster() = remasterEnv && *remasterEnv && std::strcmp(remasterEnv, "0") != 0;
 	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "-j") == 0 && i + 1 < argc) {
 			jobs = std::max(1, std::atoi(argv[++i]));
+		} else if (std::strcmp(argv[i], "--remaster") == 0) {
+			test::remaster() = true;
 		} else {
 			filter = argv[i];
+		}
+	}
+	if (test::remaster()) {
+		const char* gameDir = std::getenv("BF2142_GAME_DIR");
+		const std::string mod = std::string(gameDir ? gameDir : "") + "/mods/Project_Remaster_v17_Final";
+		std::error_code error;
+		if (!gameDir || !std::filesystem::is_directory(mod, error)) {
+			std::fprintf(stderr, "--remaster: Project Remaster not found at %s\n", mod.c_str());
+			return 2;
 		}
 	}
 	std::vector<const test::Case*> cases;
@@ -117,21 +141,25 @@ int main(int argc, char** argv)
 
 	const Clock::time_point start = Clock::now();
 	int failed = 0;
+	int skipped = 0;
 #ifndef _WIN32
 	if (jobs > 1 && cases.size() > 1) {
-		failed = runParallel(cases, jobs);
+		failed = runParallel(cases, jobs, skipped);
 	} else
 #endif
 	{
 		for (const test::Case* c : cases) {
 			const int before = test::failures();
 			const Clock::time_point testStart = Clock::now();
+			test::skipped() = false;
 			c->body();
 			const bool passed = test::failures() == before;
+			const bool skip = passed && test::skipped();
 			failed += passed ? 0 : 1;
-			report(passed, c->name, secondsSince(testStart));
+			skipped += skip ? 1 : 0;
+			report(skip ? Result::Skip : passed ? Result::Pass : Result::Fail, c->name, secondsSince(testStart));
 		}
 	}
-	std::printf("%zu tests, %d failed, %.1f s\n", cases.size(), failed, secondsSince(start));
+	std::printf("%zu tests, %d failed, %d skipped, %.1f s\n", cases.size(), failed, skipped, secondsSince(start));
 	return failed == 0 ? 0 : 1;
 }

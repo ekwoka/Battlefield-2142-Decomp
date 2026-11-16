@@ -2004,6 +2004,7 @@ TEST(Physics_InstalledSoldierWalkingQueuesFootsteps)
 		return;
 	}
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		Game game(gameDir, mod, true);
 		if (const auto* configured = game.materials.cell(5500, 0)) {
 			std::fprintf(stderr, "  %s installed material 5500/0:", mod);
@@ -2075,6 +2076,7 @@ TEST(Physics_InstalledSoldierWalkingQueuesFootsteps)
 // 0x007fda00 does (slot 0x64), so no footsteps play (seen on a Suez stair).
 TEST(Physics_StandingOnASlopeMakesNoFootsteps)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	Game game(gameDir, "mods/Project_Remaster_v17_Final", true);
@@ -2114,6 +2116,7 @@ TEST(Physics_StandingOnASlopeMakesNoFootsteps)
 // to a stop for a tick (the judder walking over a Titan's deck seams).
 TEST(Physics_LandingWhileRunningDoesNotBrake)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	Game game(gameDir, "mods/Project_Remaster_v17_Final", true);
@@ -2155,6 +2158,7 @@ TEST(Physics_FootstepsChooseMovementSlotAndSurfaceFallback)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+	if (!test::runs(mod)) continue;
 	for (uint32_t surface : {0u, 7u, 12345u}) {
 		Game game(gameDir, mod, true);
 		for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
@@ -2202,6 +2206,7 @@ TEST(Physics_InstalledFootstepMaterialsSelectWalkAndSprint)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (uint32_t surface : {0u, 4u, 7u, 4101u}) {
 			Game game(gameDir, mod, true);
 			for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {

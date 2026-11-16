@@ -156,6 +156,7 @@ TEST(GameWorld_ControlPointFlagOwnershipHoistVisibilityAndRestart)
 
 TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	io::FileManager files;
@@ -350,6 +351,7 @@ TEST(GameWorld_ShippedGrenadeAndRorschAnimationTiming)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"bf2142", "Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		const bool remaster = std::string(mod) != "bf2142";
 		for (const char* weapon : {"Unl_Grenade_Frag", "EU_Rorsch_Mk_V"}) {
 			const bool grenade = std::string(weapon) == "Unl_Grenade_Frag";

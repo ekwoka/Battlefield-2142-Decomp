@@ -36,6 +36,7 @@ TEST(Titan_BotsReachGunConsolesFromSpawnRoom)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -82,6 +83,7 @@ TEST(Titan_BotsFlyDeckAircraftFromTitan)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -246,6 +248,7 @@ TEST(Titan_BotsLeaveOtherTransportsToOrdinaryAi)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -315,6 +318,7 @@ TEST(Titan_BotsDeployEmptyDeckTransport)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -409,6 +413,7 @@ TEST(Titan_BotsLeaveStrandedHullLedge)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
 		CHECK(level.loaded);
 		if (!level.loaded) continue;
@@ -587,6 +592,7 @@ static std::vector<PodDrop> runPodDrops(const char* gameDir, const std::string& 
 // Wake Island 2142: both Titans park off the coast; drops land ashore, on the mesh, beside a control point.
 TEST(Titan_BotsPodToLandOnWakeCoop)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	int landed = 0, wet = 0;
@@ -606,6 +612,7 @@ TEST(Titan_BotsPodToLandOnWakeCoop)
 // comes down where the mesh is underfoot.
 TEST(Titan_BotsPodToWalkableGroundOnMolokaiTitan)
 {
+	REMASTER_ONLY();
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	int landed = 0, stuck = 0;
