@@ -364,7 +364,10 @@ public:
 	// server's name from SwiffHost slot 0x338, the map, the URL, the time),
 	// slot 0x34(1) saves the profile, and the DemoLibrary's slot 0x44(1)
 	// sets the new-bookmark flag. Nothing without a profile's objects.
+	// The texts are made safe for Profile.con's line and the list kept to
+	// the newest kMaxDemoBookmarks (port additions).
 	void addDemoBookmark(const std::string& serverName, const std::string& map, const std::string& url, uint32_t time);
+	static constexpr size_t kMaxDemoBookmarks = 100;
 
 	// --- The window and the game's files
 

@@ -26,7 +26,9 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <vector>
 
 using namespace dice::hfe;
 using namespace dice::hfe::ui;
@@ -1736,4 +1738,150 @@ TEST(LocaleFormat_LanguagesAndFormats)
 	CHECK(io::formatDate(std::time_t(0), 0x409).empty() && io::formatDateTime(std::time_t(0), 0x409).empty());
 	const std::time_t when = 1200000000;
 	CHECK(io::formatDateTime(when, 0x407) == io::formatDate(when, 0x407) + " " + io::formatTime(when, 0x407, true));
+}
+
+// A server's texts kept in the profile (the demo notice's bookmark, a
+// favourite's name: port addition, consoleQuotable): quotes, line breaks,
+// ';' and a redirect stay inside their argument, so Profile.con and
+// General.con run back as the same calls and nothing else, and the text
+// comes back as close as the console can hold it. The bookmarks keep the
+// newest MenuBindings::kMaxDemoBookmarks.
+TEST(MenuBindings_ServerTextInTheProfile)
+{
+	namespace fs = std::filesystem;
+	const fs::path scratch = fs::temp_directory_path() / "bf2142_server_text_test";
+	fs::remove_all(scratch);
+	const char* previousConfig = std::getenv("BF2142_CONFIG_DIR");
+	const std::string savedConfig = previousConfig ? previousConfig : "";
+	setenv("BF2142_CONFIG_DIR", scratch.string().c_str(), 1);
+	const std::string dir = menu::SettingsObjects::defaultDirectory();
+	CHECK(fs::path(dir).parent_path() == scratch);
+
+	const std::string hostile = "Evil\" 0\nCanary.fire\r\nvar v_pwned = 1\r\"; Canary.fire; \" > pwned.txt\tend";
+	const std::string map = "Minsk\" \"x\nbeginRem";
+	const std::string url = "http://x/\"\nCanary.fire\n";
+	const std::string kept = menu::consoleQuotable(hostile);
+	CHECK(kept == "Evil' 0 Canary.fire  var v_pwned = 1 '; Canary.fire; '> pwned.txt end");
+	CHECK(menu::consoleQuotable(kept) == kept); // the same text comes back unchanged
+	CHECK(menu::consoleQuotable("a>b >> c") == "a>b>> c");
+	CHECK(menu::consoleQuotable(std::string(300, 'x'), menu::kMaxServerText).size() == menu::kMaxServerText);
+	CHECK(menu::consoleQuotable("\xc3\xa9\xc3\xa9", 3) == "\xc3\xa9"); // not inside a UTF-8 sequence
+
+	{
+		Fake fake;
+		NativeRegistry natives;
+		menu::MenuBindings bindings(natives, fake.services());
+		menu::SettingsObjects objects;
+		objects.setDirectory(dir);
+		bindings.setSettingsObjects(&objects);
+		avm1::Interpreter vm;
+		bindings.addDemoBookmark(hostile, map, url, 1200000000);
+		CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.Multiplay", "addFavourite",
+			{avm1::Value(hostile), avm1::Value("192.168.1.20"), avm1::Value(16567)})));
+		// A list entry put in as it came, without the quoting, is still
+		// written as its one call.
+		objects.setList("GeneralSettings.ServerHistory", {"\"10.0.0.1\" 1\nCanary.fire 2 \"a\"\r\nCanary.fire 0"});
+		CHECK(objects.save());
+	}
+	const auto lines = [](const fs::path& path) {
+		std::ifstream in(path);
+		std::vector<std::string> out;
+		for (std::string line; std::getline(in, line);) {
+			out.push_back(line);
+		}
+		return out;
+	};
+	const auto profileLines = lines(fs::path(dir) / "0001" / "Profile.con");
+	const auto generalLines = lines(fs::path(dir) / "0001" / "General.con");
+	CHECK(!profileLines.empty() && !generalLines.empty());
+	int bookmarkLines = 0, favouriteLines = 0;
+	for (const std::string& line : profileLines) {
+		CHECK(line.rfind("LocalProfile.", 0) == 0);
+		bookmarkLines += line.rfind("LocalProfile.addDemoBookmark ", 0) == 0;
+	}
+	for (const std::string& line : generalLines) {
+		CHECK(line.rfind("GeneralSettings.", 0) == 0);
+		favouriteLines += line.rfind("GeneralSettings.addFavouriteServer ", 0) == 0;
+	}
+	CHECK(bookmarkLines == 1 && favouriteLines == 1);
+
+	// Run back by a new game: only the profile's own calls, nothing else.
+	{
+		Console console;
+		bool fired = false;
+		ConsoleMethod canary;
+		canary.name = "Canary.fire";
+		canary.access = ConsoleAccess::Anyone;
+		canary.maxArgs = 12;
+		canary.invoke = [&fired](const std::vector<std::string>&) {
+			fired = true;
+			return std::string();
+		};
+		console.registerMethod(std::move(canary));
+		std::string output;
+		console.execute("Canary.fire", output, ConsoleAccess::Anyone);
+		CHECK(fired); // the canary works
+		fired = false;
+		std::vector<std::string> ran;
+		console.setLineFilter([&ran](const std::string& line) {
+			ran.push_back(line);
+			return false;
+		});
+		menu::SettingsObjects loaded;
+		loaded.registerConsole(console);
+		loaded.setDirectory(dir);
+		const std::string profileBefore = [&] {
+			std::ifstream in(fs::path(dir) / "0001" / "Profile.con");
+			std::stringstream text;
+			text << in.rdbuf();
+			return text.str();
+		}();
+		CHECK(loaded.load(console));
+		CHECK(!fired);
+		std::string value;
+		CHECK(!console.getVariable("v_pwned", value));
+		for (const std::string& line : ran) {
+			CHECK(line.rfind("Canary", 0) != 0 && line.rfind("var", 0) != 0 && line.rfind("beginRem", 0) != 0);
+		}
+		CHECK(!fs::exists("pwned.txt") && !fs::exists(fs::path(dir) / "0001" / "pwned.txt"));
+		// The texts as kept, each its own argument.
+		Fake fake;
+		NativeRegistry natives;
+		menu::MenuBindings bindings(natives, fake.services());
+		bindings.setSettingsObjects(&loaded);
+		const auto favourites = bindings.favouriteServers();
+		CHECK(favourites.size() == 1 && favourites[0].name == kept && favourites[0].ip == "192.168.1.20" && favourites[0].port == 16567);
+		const auto& marks = loaded.list("LocalProfile.DemoBookmark");
+		CHECK(marks.size() == 1);
+		CHECK(marks.size() == 1
+			&& marks[0] == menu::quotedConsoleArgument(hostile) + " " + menu::quotedConsoleArgument(map) + " "
+					+ menu::quotedConsoleArgument(url) + " 1200000000");
+		CHECK(loaded.list("GeneralSettings.ServerHistory").size() == 1);
+		// Written again, the same file.
+		CHECK(loaded.profileScript() == profileBefore);
+	}
+
+	// The bookmarks: the newest kMaxDemoBookmarks, the oldest dropped.
+	{
+		Fake fake;
+		NativeRegistry natives;
+		menu::MenuBindings bindings(natives, fake.services());
+		menu::SettingsObjects objects;
+		bindings.setSettingsObjects(&objects);
+		const size_t limit = menu::MenuBindings::kMaxDemoBookmarks;
+		for (size_t i = 0; i < limit + 50; ++i) {
+			bindings.addDemoBookmark("Server " + std::to_string(i), "Minsk", "u", static_cast<uint32_t>(i));
+		}
+		const auto& marks = objects.list("LocalProfile.DemoBookmark");
+		CHECK(marks.size() == limit);
+		CHECK(!marks.empty() && marks.front() == "\"Server 50\" \"Minsk\" \"u\" 50");
+		CHECK(!marks.empty() && marks.back() == "\"Server " + std::to_string(limit + 49) + "\" \"Minsk\" \"u\" " + std::to_string(limit + 49));
+	}
+
+	if (savedConfig.empty()) {
+		unsetenv("BF2142_CONFIG_DIR");
+	} else {
+		setenv("BF2142_CONFIG_DIR", savedConfig.c_str(), 1);
+	}
+	fs::remove_all(scratch);
 }

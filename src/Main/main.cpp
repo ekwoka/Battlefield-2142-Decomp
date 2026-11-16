@@ -3631,7 +3631,7 @@ int runGame(Options& options, Session& session)
 	// General.con; the settings object chains back to helpPopups).
 	helpPopups.onPlayed = [&console, &session](const std::string& key) {
 		std::string output;
-		console.execute("GeneralSettings.setPlayedVOHelp \"" + key + "\"", output);
+		console.execute("GeneralSettings.setPlayedVOHelp " + dice::hfe::menu::quotedConsoleArgument(key), output);
 		session.settings.saveGeneral(); // remembered across launches
 	};
 	// The player's controls (Settings/Controls.con builds the maps once;
@@ -5555,9 +5555,13 @@ int runGame(Options& options, Session& session)
 				}
 				return;
 			}
+			// The server's name made safe for the console line, so it stays
+			// the one argument (consoleQuotable; port addition).
 			std::string output;
-			console.execute("GeneralSettings.addFavouriteServer \"" + host + "\" " + std::to_string(port) + " \""
-					+ session.client->world().serverName() + "\" " + std::to_string(static_cast<long long>(std::time(nullptr))),
+			console.execute("GeneralSettings.addFavouriteServer "
+					+ dice::hfe::menu::quotedConsoleArgument(host, dice::hfe::menu::kMaxServerText) + " " + std::to_string(port) + " "
+					+ dice::hfe::menu::quotedConsoleArgument(session.client->world().serverName(), dice::hfe::menu::kMaxServerText)
+					+ " " + std::to_string(static_cast<long long>(std::time(nullptr))),
 				output);
 		});
 		bindMethod(console, "Chat.sayAll", ConsoleAccess::Anyone, [sayLocal](std::string line) { sayLocal(Box::kAll, line); });
