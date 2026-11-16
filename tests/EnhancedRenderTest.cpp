@@ -1,10 +1,13 @@
 // The enhanced mode's render maths (Render/Enhanced/EnhancedMath.h): TAA's
 // jitter, the inverse the prepass reconstructs positions with, and the
-// cascades' splits and spheres.
+// cascades' splits and spheres; the world's sample count with the lit
+// variants (Render/WorldSamples.h).
 #include "Render/Enhanced/EnhancedMath.h"
+#include "Render/WorldSamples.h"
 #include "TestMain.h"
 
 #include <cmath>
+#include <vector>
 
 using namespace dice::hfe::render;
 
@@ -168,4 +171,74 @@ TEST(EnhancedRender_CascadesSplitTheViewAndHoldTheirSlices)
 		}
 		n = f;
 	}
+}
+
+// The world target's count, and the pipelines drawn into it, agree for the
+// enhanced mode on and off, and antialiasing off, 2, 4 and 8.
+TEST(EnhancedRender_WorldSamplesAgreeWithTheLitVariants)
+{
+	const std::vector<std::vector<uint32_t>> devices = {{}, {2, 4}, {2, 4, 8}};
+	for (const std::vector<uint32_t>& supported : devices) {
+		for (const uint32_t requested : {1u, 2u, 4u, 8u}) {
+			for (const bool lit : {false, true}) {
+				WorldSamples world;
+				const uint32_t samples = world.set(requested, lit, supported);
+				CHECK(samples == world.samples());
+				CHECK(world.enhancedLit() == lit);
+				// The lit variants exist single-sampled only.
+				CHECK(!world.enhancedLit() || samples == 1);
+				CHECK(world.multisampled() == (samples > 1));
+				CHECK(world.alphaToCoverage() == (samples > 1));
+				// Enhanced off: the most supported at or below the request, as before.
+				uint32_t expected = 1;
+				for (const uint32_t count : supported) {
+					if (!lit && count <= requested) {
+						expected = count;
+					}
+				}
+				CHECK(samples == expected);
+				CHECK(worldSampleCount(requested, lit, supported) == expected);
+			}
+		}
+	}
+	CHECK(worldSampleCount(8, false, {2, 4}) == 4);
+	CHECK(worldSampleCount(3, false, {2, 4, 8}) == 2);
+	CHECK(worldSampleCount(8, true, {2, 4, 8}) == 1);
+}
+
+// Toggled at runtime: each frame sets its count before its targets; inside a
+// frame the variants only go off, never on over a multisampled world.
+TEST(EnhancedRender_WorldSamplesFollowRuntimeToggles)
+{
+	const std::vector<uint32_t> supported = {2, 4, 8};
+	WorldSamples world;
+	// Antialiased, enhanced off: multisampled, alpha to coverage.
+	CHECK(world.set(4, false, supported) == 4);
+	CHECK(world.alphaToCoverage() && !world.enhancedLit());
+	// Turning the variants on inside that frame is refused.
+	world.setEnhancedLit(true);
+	CHECK(!world.enhancedLit() && world.samples() == 4);
+	// The enhanced mode turned on: the next frame is single-sampled and lit.
+	CHECK(world.set(4, true, supported) == 1);
+	CHECK(world.enhancedLit() && !world.multisampled() && !world.alphaToCoverage());
+	// The frame's end turns the variants off: still single-sampled, so the
+	// single-sampled set draws whatever comes after.
+	world.setEnhancedLit(false);
+	CHECK(!world.enhancedLit() && world.samples() == 1);
+	// On again while single-sampled is allowed.
+	world.setEnhancedLit(true);
+	CHECK(world.enhancedLit());
+	// The antialiasing changed at runtime while lit: still one.
+	CHECK(world.set(8, true, supported) == 1);
+	// The enhanced mode turned off: the antialiasing's count comes back.
+	CHECK(world.set(8, false, supported) == 8);
+	CHECK(world.alphaToCoverage() && !world.enhancedLit());
+	CHECK(world.set(2, false, supported) == 2);
+	// The antialiasing off.
+	CHECK(world.set(1, false, supported) == 1);
+	CHECK(!world.multisampled());
+	// The multisampled pipelines or targets failing: single-sampled.
+	CHECK(world.set(4, false, supported) == 4);
+	world.fallBackToSingle();
+	CHECK(world.samples() == 1 && !world.alphaToCoverage() && !world.enhancedLit());
 }

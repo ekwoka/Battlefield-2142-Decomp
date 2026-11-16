@@ -9,6 +9,7 @@
 #include "AnimatedUV.h"
 #include "MeshQueues.h"
 #include "RenderMath.h"
+#include "WorldSamples.h"
 #include "Texture/DdsFile.h"
 
 #include <SDL3/SDL.h>
@@ -281,9 +282,12 @@ public:
 	// sample count, the most at or below `requested` that the colour and
 	// depth formats support (1: single-sampled, the multisampled set made
 	// the first time a count is asked for). Returns the count in effect.
-	uint32_t setWorldSamples(uint32_t requested);
-	// The enhanced mode draws single sampled (its own targets and passes): the antialiasing setting waits while it is lit.
-	uint32_t worldSamples() const { return m_enhancedLit ? 1 : m_worldSamples; }
+	// `enhancedLit` (not retail): this frame draws the enhanced lit
+	// variants, which are single-sampled, so the world is too
+	// (WorldSamples.h); decided here, before the frame's targets are made.
+	uint32_t setWorldSamples(uint32_t requested, bool enhancedLit = false);
+	// The count the world's targets and pipelines take.
+	uint32_t worldSamples() const { return m_samples.samples(); }
 	// The sample counts above one that both formats take (SDL GPU's 2, 4
 	// and 8), ascending: what the video options offer, as RendDX9 lists
 	// the multisample types the device accepts (0x10007e30, 0x1000fb60).
@@ -296,8 +300,8 @@ public:
 	SDL_GPUGraphicsPipeline* coverageMeshPipeline() const { return world().coverageMesh; }
 	SDL_GPUGraphicsPipeline* coverageUndergrowthPipeline() const { return world().coverageUndergrowth; }
 	SDL_Window* window() const { return m_window; }
-	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_enhancedLit ? m_enhanced.mesh : world().mesh; }
-	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_enhancedLit ? m_enhanced.terrain : world().terrain; }
+	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.mesh : world().mesh; }
+	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_samples.enhancedLit() ? m_enhanced.terrain : world().terrain; }
 	// The surrounding terrain (secondary heightmaps): terrain.vert with
 	// surrounding.frag.
 	SDL_GPUGraphicsPipeline* surroundingPipeline() const { return world().surrounding; }
@@ -307,10 +311,10 @@ public:
 	// no depth writes.
 	// Also blended materials (RendDX9's transparency queues): SRCALPHA /
 	// INVSRCALPHA, no culling (CullMode 1, 0x100c3880).
-	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_enhancedLit ? m_enhanced.fadedMesh : world().fadedMesh; }
+	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.fadedMesh : world().fadedMesh; }
 	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
 	// depth-tested, not written.
-	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_enhancedLit ? m_enhanced.additiveMesh : world().additiveMesh; }
+	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.additiveMesh : world().additiveMesh; }
 	// A mesh queue's pipeline, with back faces culled or not (meshCulled:
 	// the opaque and alpha-tested materials of the bundled and skinned
 	// meshes keep the material settings' CullMode 3, D3DCULL_CCW).
@@ -318,12 +322,12 @@ public:
 	{
 		switch (queue) {
 		case MeshQueue::Opaque:
-			if (m_enhancedLit) {
+			if (m_samples.enhancedLit()) {
 				return culled ? m_enhanced.meshCulled : m_enhanced.mesh; // the enhanced set has no culled blended one
 			}
 			return culled ? world().culledMesh : world().mesh;
 		case MeshQueue::Transparent:
-			if (m_enhancedLit) {
+			if (m_samples.enhancedLit()) {
 				return m_enhanced.fadedMesh;
 			}
 			return culled ? world().culledFadedMesh : world().fadedMesh;
@@ -334,13 +338,13 @@ public:
 	// Alpha-blended, depth-tested but not written.
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return world().water; }
 	// Water's blending plus a depth bias, for road decals.
-	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_enhancedLit ? m_enhanced.road : world().road; }
-	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_enhancedLit ? m_enhanced.roadMesh : world().roadMesh; }
+	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_samples.enhancedLit() ? m_enhanced.road : world().road; }
+	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.roadMesh : world().roadMesh; }
 	// The same state for decals (decal.vert / decal.frag).
 	SDL_GPUGraphicsPipeline* decalPipeline() const { return world().decal; }
 	// Opaque, alpha-tested, Direct3D's front faces culled (Undergrowth.fx's
 	// CullMode CW); undergrowth uniforms in the vertex stage.
-	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_enhancedLit ? m_enhanced.undergrowth : world().undergrowth; }
+	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_samples.enhancedLit() ? m_enhanced.undergrowth : world().undergrowth; }
 	// Particles: depth-tested, not written; blended or added.
 	SDL_GPUGraphicsPipeline* uiPipeline() const { return m_uiPipeline; }
 	// The UI with gameswf's mask states (RendDX9.dll 0x10118920 /
@@ -438,8 +442,10 @@ public:
 	static constexpr SDL_GPUTextureFormat kAOFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
 	const EnhancedPipelines& enhancedPipelines() const { return m_enhanced; }
 	// The lit pipelines' accessors give the variants (when all were made).
-	void setEnhancedLit(bool on) { m_enhancedLit = on && enhancedLitAvailable(); }
-	bool enhancedLit() const { return m_enhancedLit; }
+	// Turning them on takes setWorldSamples (the frame's count); this only
+	// turns them off, or keeps them on while the world is single-sampled.
+	void setEnhancedLit(bool on) { m_samples.setEnhancedLit(on && enhancedLitAvailable()); }
+	bool enhancedLit() const { return m_samples.enhancedLit(); }
 	bool enhancedLitAvailable() const
 	{
 		const EnhancedPipelines& e = m_enhanced;
@@ -484,10 +490,9 @@ private:
 	// world's otherwise.
 	bool createPipelines(std::string& error, uint32_t samples, WorldPipelines& world);
 	void releaseWorldPipelines(WorldPipelines& world);
-	const WorldPipelines& world() const { return worldSamples() > 1 ? m_multisampled : m_singleSampled; }
+	const WorldPipelines& world() const { return m_samples.multisampled() ? m_multisampled : m_singleSampled; }
 	SDL_GPUCopyPass* copyPass();
 	EnhancedPipelines m_enhanced;
-	bool m_enhancedLit = false;
 	SDL_GPUSampler* m_pointSampler = nullptr;
 
 	SDL_GPUDevice* m_device = nullptr;
@@ -496,7 +501,7 @@ private:
 	WorldPipelines m_singleSampled;
 	WorldPipelines m_multisampled; // at m_multisampledCount
 	uint32_t m_multisampledCount = 1;
-	uint32_t m_worldSamples = 1;
+	WorldSamples m_samples; // the world's count, and whether the enhanced variants draw
 	SDL_GPUGraphicsPipeline* m_uiPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiTestPipeline = nullptr;

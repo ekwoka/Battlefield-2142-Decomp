@@ -4001,14 +4001,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	if (post) {
 		ensurePostTargets(target.width, target.height);
 	}
+	// The enhanced mode's passes this frame (Enhanced/LevelRendererEnhanced.cpp):
+	// its lit variants are single-sampled, so they set the world's count too.
+	const bool enhancedLit = planEnhancedFrame(target.width, target.height, overheadOn, post && m_sceneColor);
 	// The antialiasing: the world's passes multisampled, resolved into the
-	// scene texture (or `color` without the post-production).
-	uint32_t samples =
-		m_gpu.setWorldSamples(m_sources && m_sources->quality ? static_cast<uint32_t>(std::max(m_sources->quality->antialiasingSamples, 1)) : 1);
+	// scene texture (or `color` without the post-production). The targets
+	// and every pipeline drawn into them take the count set here.
+	uint32_t samples = m_gpu.setWorldSamples(
+		m_sources && m_sources->quality ? static_cast<uint32_t>(std::max(m_sources->quality->antialiasingSamples, 1)) : 1,
+		enhancedLit);
 	if (samples > 1) {
 		ensureMultisampleTargets(target.width, target.height, samples);
 		if (!m_multisampleColor || !m_multisampleDepth) {
-			samples = m_gpu.setWorldSamples(1);
+			samples = m_gpu.setWorldSamples(1, enhancedLit);
 		}
 	}
 	const bool multisampled = samples > 1;
@@ -4100,8 +4105,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height), camera.nearPlane,
 			  6000.0f)
 		: Mat4::perspective(camera.fovY, static_cast<float>(target.width) / target.height, camera.nearPlane, 6000.0f);
-	// The enhanced mode's passes this frame, and TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
-	beginEnhancedFrame(camera, target.width, target.height, overheadOn, post && m_sceneColor, projection);
+	// TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
+	beginEnhancedFrame(camera, target.width, target.height, overheadOn, projection);
 	const Mat4 viewProjection = m_enh.jittered ? camera.view() * projection * m_enh.jitter : camera.view() * projection;
 	prepareInstances(camera, viewProjection);
 	// The lights' list against this frame's view (RendDX9 0x100a93f0 builds its frustum from the camera it
