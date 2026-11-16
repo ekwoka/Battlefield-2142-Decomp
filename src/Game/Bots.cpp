@@ -1759,11 +1759,12 @@ void BotManager::update(float seconds)
 			m_world.setInput(self->id, input);
 			continue;
 		}
-		if (m_settings.titanPlay() && self->vehicle && m_world.isTitan(self->vehicle)) {
+		if (self->vehicle && m_world.isTitan(self->vehicle)) {
 			const auto seats = m_world.vehicleSeats(self->vehicle);
 			if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size() && seats[self->seat].podLauncher) {
-				// enhanced.botTitan: the array swung round to its landing place first (the bundle's
-				// own speed and limits apply), then fired once there or turning no more.
+				// In a pod array's seat: fire, which launches the pod (the bot's drop, as before).
+				// enhanced.botTitan (podLanding): the array swung round to its landing place first
+				// (the bundle's own speed and limits apply), then fired once there or turning no more.
 				physics::Vec3 spot, from, way;
 				input.fire = true;
 				if (m_world.podArrayAim(self->id, from, way) && podLanding(bot, *self, spot, &from)) {

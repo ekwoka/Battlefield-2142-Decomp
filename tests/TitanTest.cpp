@@ -2045,7 +2045,8 @@ TEST(Titan_SuezBridgeCrowdingSurvey)
 }
 
 // Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906, so a bot sent there cannot plan and walks
-// straight into the first wall. A foot bot standing 60 m from silo 906 (the nearest) must prefer one it can plan to.
+// straight into the first wall. With enhanced.botTitan a foot bot standing 60 m from silo 906 (the nearest) must prefer one
+// it can plan to.
 TEST(Titan_BotsPreferSilosOnTheNavMesh)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -2076,7 +2077,12 @@ TEST(Titan_BotsPreferSilosOnTheNavMesh)
 	}
 	CHECK(found);
 	if (!found) return;
-	game::BotManager bots(*level.world, {});
+	// The silo choice is enhanced.botTitan's (BotManager::updateGoal).
+	game::BotSettings settings;
+	const bool enhanced = true;
+	settings.enhanced = &enhanced;
+	settings.botTitan = &enhanced;
+	game::BotManager bots(*level.world, settings);
 	bots.setNavMesh(&*mesh);
 	const int id = level.world->addPlayer("Chooser", 2, true);
 	CHECK(level.world->spawnSoldier(id));
