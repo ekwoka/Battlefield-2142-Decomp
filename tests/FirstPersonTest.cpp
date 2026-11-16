@@ -11,9 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
-#include <filesystem>
 #include <string>
 
 using namespace dice::hfe;
@@ -95,18 +93,10 @@ TEST(FirstPerson_PlacementPutsTheCameraBoneAtTheEye)
 	CHECK(near(sprung[12], 10.01f) && near(sprung[13], 20.02f) && near(sprung[14], 29.97f));
 }
 
-// Project Remaster's Jackhammer (mods/Project_Remaster_v17_Final, which the
-// retail install doesn't ship): its 1p system plays "shift" on pulse 32 and
-// "reload" on message 2. Without the mod the test is skipped.
 TEST(FirstPerson_RemasterShotgunShiftAndReloadMessages)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
-	std::error_code error;
-	if (!std::filesystem::is_directory(std::filesystem::path(gameDir) / "mods" / "Project_Remaster_v17_Final", error)) {
-		std::fprintf(stderr, "  (mods/Project_Remaster_v17_Final not installed: skipped)\n");
-		return;
-	}
 	io::FileManager files;
 	files.setRootPath(gameDir);
 	files.addSearchPath("mods/Project_Remaster_v17_Final");
