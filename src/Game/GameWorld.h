@@ -933,6 +933,17 @@ public:
 		float rangeProgress = 0; // travelled path / estimated full path
 	};
 	bool projectileCamera(int player, ProjectileCamera& out) const;
+	// enhanced.enabled and enhanced.guidedCameraEase (Scene/EnhancedSettings.h),
+	// read live: with no input a snapToZeroOnNoInput camera eases each idle
+	// axis back to centre at its maxSpeed (not retail, which puts both
+	// straight at once when neither moves). It steers the round, so it
+	// changes the simulation. Null or false: retail.
+	void setGuidedCameraEase(const bool* enhanced, const bool* ease)
+	{
+		m_enhancedCamera = enhanced;
+		m_guidedCameraEase = ease;
+	}
+	bool guidedCameraEase() const { return m_enhancedCamera && *m_enhancedCamera && m_guidedCameraEase && *m_guidedCameraEase; }
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
 	// the bot manager sets its navigation mesh's polygon lookup.
@@ -3964,6 +3975,8 @@ private:
 		float fov = 1.1f;
 	};
 	std::map<int, ProjectileView> m_projectileViews; // by player
+	const bool* m_enhancedCamera = nullptr;          // setGuidedCameraEase
+	const bool* m_guidedCameraEase = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);

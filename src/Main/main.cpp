@@ -4784,6 +4784,7 @@ int runGame(Options& options, Session& session)
 		// Start the round: spawners take their control points' teams and
 		// put their vehicles out on the first tick.
 		game::GameWorld round(templates, objects);
+		round.setGuidedCameraEase(&enhancedSettings.enabled, &enhancedSettings.guidedCameraEase);
 		// The players as the HUD has them (HudWorld.h): a joined game's,
 		// the server's (g_remoteHud, set while one runs), else the round's.
 		const auto hudPlayer = [&round](int id, game::GameWorld::PlayerInfo& out) {

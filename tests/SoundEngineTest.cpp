@@ -1,6 +1,7 @@
 // Runs real BF2142 sound files through the engine. Needs extracted game
 // sounds in $BF2142_SOUND_TEST_DIR (skipped otherwise) and plays them on
 // OpenAL Soft's silent "null" driver.
+#include "Sound/SoundEngine/EnhancedAudio.h"
 #include "Sound/SoundEngine/ISoundEngine.h"
 #include "Sound/SoundEngine/Music.h"
 #include "Sound/SoundEngine/SoundEnvelope.h"
@@ -245,13 +246,15 @@ TEST(SoundEngine_RandomEnvelopeVariantsStayWithinAuthoredBounds)
 	}
 }
 
-// Actual source offsets, not a simulated tick clock: the Shepherd gun has a
-// long loop and pitch 0.8. At medium quality it must advance in 22050-Hz
-// source frames and reroll only after a real loop, not four times too fast.
+// Enhanced audio: actual source offsets, not a simulated tick clock: the
+// Shepherd gun has a long loop and pitch 0.8. At medium quality it must
+// advance in 22050-Hz source frames and reroll only after a real loop, not
+// four times too fast.
 TEST(SoundEngine_StaticLoopTracksActualPitchedPlayback)
 {
 	if (!testDir()) return;
 	setenv("ALSOFT_DRIVERS", "null", 1);
+	snd::setEnhancedAudio(true);
 	auto* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(1, "Software Audio", 16) == 0);
 	auto* templ = engine->createTemplate();
@@ -285,6 +288,100 @@ TEST(SoundEngine_StaticLoopTracksActualPitchedPlayback)
 	templ->release();
 	engine->shutdown();
 	snd::shutdownSoundEngine();
+	snd::setEnhancedAudio(false);
+}
+
+// Retail (enhanced audio off): StaticSample's play offset (0x100133c0) asks
+// OpenAL nothing. It is the loop's start while the loop plays, however far
+// the source got, and the loop's end once stopped; the loop progress
+// (0x10015e70) comes from the engine's ticks, so with the clock held the
+// variation seeds never reroll.
+TEST(SoundEngine_RetailStaticLoopOffsetFromFlags)
+{
+	if (!testDir()) return;
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	snd::setEnhancedAudio(false);
+	auto* engine = snd::getSoundEngine();
+	CHECK(engine->initialize(1, "Software Audio", 16) == 0);
+	auto* templ = engine->createTemplate();
+	templ->setSoundFilename(path("Weapons/Miniguns/Drone_gun_mono.wav").c_str());
+	templ->setIs3dSound(false);
+	templ->setPitch(0.8f);
+	auto* sound = static_cast<snd::Sound*>(templ->createSound());
+	sound->setPlayFlags(snd::Sound::SkipStartBlock);
+	engine->reloadSoundFiles();
+	{
+		snd::StaticSample sample(nullptr);
+		sample.setSound(sound);
+		auto* file = sample.soundFile();
+		CHECK(file && file->loaded());
+		if (file && file->loaded()) {
+			CHECK(sample.start(file->loopStart(), 0) == snd::Sample::StartResult::Started);
+			const auto seed = sample.pitchSeed;
+			std::this_thread::sleep_for(std::chrono::milliseconds(220));
+			sample.update();
+			CHECK(sample.playOffset() == file->loopStart());
+			for (int i = 0; i < 80; ++i) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				sample.update();
+			}
+			CHECK(sample.pitchSeed == seed);
+			sample.stop(false);
+			CHECK(sample.playOffset() == file->loopEnd());
+		}
+	}
+	sound->release();
+	templ->release();
+	engine->shutdown();
+	snd::shutdownSoundEngine();
+}
+
+// stopType 2 empties the queue and plays only the end block from offset 0.
+// Enhanced audio's offset must read that as past the loop (progress 1), as
+// retail's flags do: the start/loop bookkeeping from before the cut no
+// longer describes the queue.
+TEST(SoundEngine_StopType2OffsetIsPastTheLoop)
+{
+	if (!testDir()) return;
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	for (const bool enhanced : {false, true}) {
+		snd::setEnhancedAudio(enhanced);
+		auto* engine = snd::getSoundEngine();
+		CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+		auto* templ = engine->createTemplate();
+		templ->setSoundFilename(path("Weapons/miniguns/AA_Gun_Rapid_fire_1p.wav").c_str());
+		templ->setIs3dSound(false);
+		templ->setLoopCount(0);
+		templ->setStopType(2);
+		auto* sound = static_cast<snd::Sound*>(templ->createSound());
+		sound->setPlayFlags(snd::Sound::SkipStartBlock);
+		engine->reloadSoundFiles();
+		{
+			snd::StaticSample sample(nullptr);
+			sample.setSound(sound);
+			auto* file = sample.soundFile();
+			CHECK(file && file->loaded() && file->endBuffer()
+				&& file->loopEnd() != static_cast<int32_t>(file->frames()));
+			if (file && file->loaded()) {
+				CHECK(sample.start(file->loopStart(), 0) == snd::Sample::StartResult::Started);
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				sample.update();
+				CHECK(sample.playOffset() < file->loopEnd());
+				CHECK(!sample.stop(false)); // the end block plays on
+				for (int i = 0; i < 5; ++i) {
+					CHECK(sample.playOffset() >= file->loopEnd());
+					sample.update();
+					CHECK(sample.loopProgress == 1.0f);
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+			}
+		}
+		sound->release();
+		templ->release();
+		engine->shutdown();
+		snd::shutdownSoundEngine();
+	}
+	snd::setEnhancedAudio(false);
 }
 
 // stopType 2 (the walkers' AA guns, loopCount 0): the release cuts to the

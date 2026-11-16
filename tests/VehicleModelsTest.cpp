@@ -1453,8 +1453,9 @@ TEST(Vehicles_SpawnIntoTheApc)
 // the mouse turns the camera within 18 degrees (snapping back without
 // input) and the guidance (0x005e2e20, the active camera) turns the
 // missile after it; the seat's gun doesn't turn. When the round goes the
-// view is the seat's again (0x005b4b00).
-TEST(Vehicles_GunshipMissileCamera)
+// view is the seat's again (0x005b4b00). With enhanced.guidedCameraEase
+// (`ease`) the camera drifts back instead of snapping.
+static void gunshipMissileCamera(bool ease)
 {
 	if (!gameDir()) {
 		return;
@@ -1465,6 +1466,8 @@ TEST(Vehicles_GunshipMissileCamera)
 	}
 	g.pitAhead();
 	const uint32_t v = g.start("as_ag", {0, 4, 6});
+	static const bool enhanced = true;
+	g.world->setGuidedCameraEase(&enhanced, &ease);
 	CHECK(g.enter(v));
 	const int me = g.world->localPlayer();
 	const auto seats = g.world->vehicleSeats(v);
@@ -1560,7 +1563,9 @@ TEST(Vehicles_GunshipMissileCamera)
 	std::fprintf(stderr, "  camera yaw %.1f -> %.1f, the round's %.1f\n", startYaw, camera.yaw, roundYaw);
 	CHECK(std::remainder(camera.yaw - roundYaw, 360.0f) > 0 && std::remainder(camera.yaw - roundYaw, 360.0f) <= 18.01f);
 	CHECK(std::remainder(roundYaw - startYaw, 360.0f) > 1);
-	// No input: the camera snaps straight (snapToZeroOnNoInput).
+	// No input: retail snaps the camera straight (snapToZeroOnNoInput); the
+	// enhanced camera recenters at its configured speed without a jump.
+	const float beforeReturn = camera.yaw;
 	g.world->setPlayerInput({});
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->projectileCamera(me, camera));
@@ -1569,9 +1574,16 @@ TEST(Vehicles_GunshipMissileCamera)
 			roundYaw = std::atan2(p.velocity.x, p.velocity.z) * 57.29578f;
 		}
 	}
-	CHECK(std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f)) < 1);
+	const float offset = std::fabs(std::remainder(camera.yaw - roundYaw, 360.0f));
+	if (!ease) {
+		CHECK(offset < 1);
+	} else {
+		CHECK(offset > 1 && offset < 18);
+		CHECK(std::fabs(std::remainder(camera.yaw - beforeReturn, 360.0f)) < 5);
+	}
 	// Aim down, then stop moving the mouse while retaining its absolute
-	// input pitch. Both idle axes must snap to the round's nose in one tick.
+	// input pitch: retail snaps the pitch back too; the enhanced camera
+	// doesn't jump the view vertically either.
 	input = {};
 	for (int i = 0; i < 10; ++i) {
 		input.aimPitch -= 2.0f;
@@ -1579,6 +1591,7 @@ TEST(Vehicles_GunshipMissileCamera)
 		g.world->tick(1 / 30.0f);
 	}
 	CHECK(g.world->projectileCamera(me, camera));
+	const float downPitch = camera.pitch;
 	float nosePitch = 0;
 	for (const auto& p : g.world->projectiles()) {
 		if (p.player == me && p.alive) {
@@ -1590,13 +1603,23 @@ TEST(Vehicles_GunshipMissileCamera)
 	g.world->setPlayerInput(input);
 	g.world->tick(1 / 30.0f);
 	CHECK(g.world->projectileCamera(me, camera));
-	for (const auto& p : g.world->projectiles()) {
-		if (p.player == me && p.alive) {
-			const auto nose = game::noseOf(p);
-			nosePitch = std::atan2(nose.y, std::hypot(nose.x, nose.z)) * 57.29578f;
+	if (!ease) {
+		// Straight along the round's nose (the camera's frame) on both axes.
+		physics::Vec3 nose;
+		for (const auto& p : g.world->projectiles()) {
+			if (p.player == me) {
+				nose = game::noseOf(p);
+			}
 		}
+		const float noseYaw = std::atan2(nose.x, nose.z) * 57.29578f;
+		nosePitch = std::atan2(nose.y, std::sqrt(nose.x * nose.x + nose.z * nose.z)) * 57.29578f;
+		std::fprintf(stderr, "  snapped: camera pitch %.1f (was %.1f), the nose's %.1f\n", camera.pitch, downPitch, nosePitch);
+		CHECK(std::fabs(std::remainder(camera.yaw - noseYaw, 360.0f)) < 0.01f);
+		CHECK(std::fabs(camera.pitch - nosePitch) < 0.01f);
+		CHECK(std::fabs(camera.pitch - downPitch) > 5.0f);
+	} else {
+		CHECK(std::fabs(camera.pitch - downPitch) < 5.0f);
 	}
-	CHECK(std::fabs(camera.pitch - nosePitch) < 0.01f);
 	// The round's life (5 s) runs out: the seat's camera again.
 	g.run(6);
 	CHECK(!g.world->projectileCamera(me, camera));
@@ -1614,6 +1637,17 @@ TEST(Vehicles_GunshipMissileCamera)
 	float restoredYaw = 0, restoredPitch = 0;
 	CHECK(g.world->gunAim(v, seat, restoredYaw, restoredPitch));
 	CHECK(std::fabs(restoredPitch) < 1.0f);
+}
+
+TEST(Vehicles_GunshipMissileCamera)
+{
+	gunshipMissileCamera(false);
+}
+
+// enhanced.guidedCameraEase: the camera drifts back to centre.
+TEST(Vehicles_GunshipMissileCameraEases)
+{
+	gunshipMissileCamera(true);
 }
 
 // Exercise the shipped zero-muzzle-speed TV missile in both gunships and mods.

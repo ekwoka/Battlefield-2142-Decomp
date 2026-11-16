@@ -4025,6 +4025,23 @@ bool GameWorld::stepProjectileView(Player& player, float seconds)
 		}
 		return lo < hi ? std::clamp(angle + delta, lo, hi) : angle + delta;
 	};
+	if (guidedCameraEase()) {
+		// enhanced.guidedCameraEase (not retail): each idle axis returns at
+		// its configured angular speed, so the view doesn't jump straight
+		// when a mouse movement ends.
+		const auto recenter = [seconds](float angle, float speed) {
+			const float amount = speed > 0 ? speed * seconds : std::fabs(angle);
+			return angle > 0 ? std::max(0.0f, angle - amount) : std::min(0.0f, angle + amount);
+		};
+		view.yaw = view.snapToZero && std::fabs(turn) < 1e-4f
+			? recenter(view.yaw, view.maxSpeed.x)
+			: step(view.yaw, turn, view.maxSpeed.x, view.minRotation.x, view.maxRotation.x);
+		// Bundle pitch is down positive; rise uses the opposite limits.
+		view.pitch = view.snapToZero && std::fabs(tilt) < 1e-4f
+			? recenter(view.pitch, view.maxSpeed.y)
+			: step(view.pitch, tilt, view.maxSpeed.y, -view.maxRotation.y, -view.minRotation.y);
+		return true;
+	}
 	if (view.snapToZero && std::fabs(turn) < 1e-4f && std::fabs(tilt) < 1e-4f) {
 		view.yaw = view.pitch = 0;
 	} else {
