@@ -43,7 +43,7 @@ public:
 	std::string modDirectory() override { return m_modDirectory; }
 	int worldSize() override { return 1024; }
 	bool isAIGame() override { return false; }
-	void endGame(int winner, int victoryType) override { m_logic.endGame(winner, victoryType); }
+	void endGame(int winner, int victoryType, float delay) override { m_logic.endGame(winner, victoryType, delay); }
 	void textMessage(int player, const std::string& text) override;
 	void gameEvent(const std::string& kind, const ScriptArgs& args) override;
 

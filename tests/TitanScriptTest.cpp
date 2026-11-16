@@ -179,12 +179,18 @@ TEST(ScriptHost_TitanModeTicketsAndTheEnd)
 	CHECK(level.world->playerInfo(dead, info) && !info.alive);
 	CHECK(info.heldVehicle == deadSoldier && info.heldSoldier == 0);
 	// The rest: VehicleDestroyed; the scripts end the round, PAC winning
-	// (sgl_endGame(winner, 3, 25)).
+	// (sgl_endGame(winner, 3, 25)) after the 25 s of the Titan's explosion:
+	// the winner is known at once, the round goes on until then (0x004bbe30).
 	level.world->applyDamage(eu, 1e7f, pac);
 	level.run(0.1f);
+	CHECK(logic.team(2).tickets == 0);
+	CHECK(!logic.ended() && logic.endPending() && winner == -1);
+	CHECK(logic.param("winner", 0, 0).asInt() == 1);
+	level.run(24.5f);
+	CHECK(!logic.ended());
+	level.run(0.6f);
 	std::fprintf(stderr, "  EU's Titan destroyed: tickets %.0f, the round %s, winner %d, victory type %d\n",
 		logic.team(2).tickets, logic.ended() ? "over" : "running", winner, victory);
-	CHECK(logic.team(2).tickets == 0);
 	CHECK(logic.ended() && winner == 1 && victory == 3);
 	if (!errors.empty()) {
 		std::fprintf(stderr, "%s", errors.c_str());

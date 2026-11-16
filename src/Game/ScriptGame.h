@@ -100,7 +100,7 @@ public:
 	virtual std::string modDirectory() = 0;
 	virtual int worldSize() = 0;
 	virtual bool isAIGame() = 0;
-	virtual void endGame(int winner, int victoryType) = 0;
+	virtual void endGame(int winner, int victoryType, float delay) = 0;
 	virtual void textMessage(int player, const std::string& text) = 0;
 	virtual void gameEvent(const std::string& kind, const ScriptArgs& args) = 0; // sendGameEvent, sendHudEvent...
 

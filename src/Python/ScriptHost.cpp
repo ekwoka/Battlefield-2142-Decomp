@@ -356,7 +356,7 @@ PyObject* host_sgl_getWorldSize(PyObject*, PyObject*)
 // sgl_sendHudEvent 0x005681b0, sgl_sendTextMessage 0x00568270.
 PyObject* host_sgl_endGame(PyObject*, PyObject* args)
 {
-	g_host->game.endGame(static_cast<int>(intArg(args, 0)), static_cast<int>(intArg(args, 1)));
+	g_host->game.endGame(static_cast<int>(intArg(args, 0)), static_cast<int>(intArg(args, 1)), static_cast<float>(intArg(args, 2)));
 	return none();
 }
 

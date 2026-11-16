@@ -28,6 +28,7 @@ void GameLogic::startRound()
 	m_ended = false;
 	m_winner = 0;
 	m_victoryType = 0;
+	m_endIn = 0;
 	m_timeLimitRaised = false;
 }
 
@@ -77,6 +78,14 @@ void GameLogic::tick(float seconds)
 {
 	if (m_ended) {
 		return;
+	}
+	if (m_endIn > 0) {
+		m_endIn -= seconds;
+		if (m_endIn <= 0) {
+			m_endIn = 0;
+			endGame(m_winner, m_victoryType);
+			return;
+		}
 	}
 	const int players = m_playerCount ? m_playerCount() : 0;
 	if (m_state == 1) {
@@ -130,14 +139,18 @@ void GameLogic::tick(float seconds)
 	}
 }
 
-void GameLogic::endGame(int winner, int victoryType)
+void GameLogic::endGame(int winner, int victoryType, float delay)
 {
-	if (m_ended) {
+	if (m_ended || m_endIn > 0) {
+		return;
+	}
+	m_winner = winner;
+	m_victoryType = victoryType;
+	if (delay > 0) {
+		m_endIn = delay;
 		return;
 	}
 	m_ended = true;
-	m_winner = winner;
-	m_victoryType = victoryType;
 	if (onEndGame) {
 		onEndGame(winner, victoryType);
 	}
