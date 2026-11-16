@@ -2694,13 +2694,13 @@ TEST(HudMenus_PrivateSquadAsksTheLeader)
 // A joined game's left click (the HUD's input, 0x00754290): with a soldier
 // it goes to the HUD's buttons (a rose's entry, the scoreboard), not to the
 // spawn screen's choice of a point; without one, a spawn icon picks its
-// point and elsewhere any point.
+// point; elsewhere the HUD receives the click, including DONE.
 TEST(HudMenus_JoinedClickReachesTheHud)
 {
 	CHECK(menu::joinedClick(true, -1) == menu::JoinedClick::Hud);
 	CHECK(menu::joinedClick(true, 3) == menu::JoinedClick::Hud);
 	CHECK(menu::joinedClick(false, 3) == menu::JoinedClick::SpawnAt);
-	CHECK(menu::joinedClick(false, -1) == menu::JoinedClick::AnySpawn);
+	CHECK(menu::joinedClick(false, -1) == menu::JoinedClick::Hud);
 }
 
 // The scoreboard's menu state (10, 0x0079ab90) shows the map list with it
@@ -2812,4 +2812,50 @@ TEST(HudFlare_ActiveDefenceMeter)
 	in.present = false;
 	flare.update(hud, in);
 	CHECK(hud.number("FlaresReloadTimeShow") == 0 && hud.number("FlareUseShow") == 0);
+}
+
+TEST(HudMap_UnidentifiedAndTypedSpotPoints)
+{
+	menu::MapPointSpots spots;
+	spots.add(41, -73, 16); // VTNoVehicleType, the ordinary rose's spot
+	CHECK(spots.markers().size() == 1);
+	CHECK(spots.markers()[0].texture == "Ingame/Minimap/Icons/unitSpotted.tga");
+	CHECK(spots.markers()[0].x == 41 && spots.markers()[0].z == -73);
+	spots.tick(11);
+	spots.add(41, -73, 0); // another point, not a refreshed object marker
+	CHECK(spots.markers().size() == 2);
+	CHECK(spots.markers()[1].texture == "Ingame/Vehicles/Icons/Minimap/mini_hovertank.tga");
+	spots.tick(1);
+	CHECK(spots.markers().size() == 1 && spots.markers()[0].left == 11);
+	spots.tick(11);
+	CHECK(spots.markers().empty());
+	spots.add(-4000, -4000, 16); // sky/no ray hit
+	CHECK(spots.markers().empty());
+	for (const auto& [type, texture] : std::vector<std::pair<int, const char*>> {
+		{1, "mini_fav.tga"}, {4, "mini_APC.tga"}, {6, "mini_Jet.tga"}, {21, "mini_mech.tga"},
+		{22, "mini_rib.tga"}, {23, "mini_attack_Heli.tga"}, {24, "mini_Transport_Heli.tga"},
+		{25, "kit_Sniper_outline.tga"}, {26, "mini_Soldier.dds"}, {27, "unitSpotted.tga"}}) {
+		spots.add(1, 2, type);
+		CHECK(spots.markers().back().texture.find(texture) != std::string::npos);
+	}
+	for (int i = 0; i < 100; ++i) spots.add(i, 2, 16);
+	CHECK(spots.markers().size() == 64 && spots.markers().back().x == 99);
+	spots.clear();
+	CHECK(spots.markers().empty());
+}
+
+TEST(HudMap_SpotRayCapturedOnOpeningRadio)
+{
+	hud::HudManager hud([](const std::string&, std::string&) { return false; });
+	menu::CommRoses roses(hud);
+	int captures = 0;
+	roses.onOpenRadio = [&] { ++captures; };
+	roses.openRadio(false);
+	CHECK(captures == 1);
+	roses.openSpotted(); // selecting a specific type retains the same target
+	CHECK(captures == 1);
+	roses.close();
+	CHECK(captures == 1);
+	roses.openRadio(true);
+	CHECK(captures == 2);
 }

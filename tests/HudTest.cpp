@@ -26,11 +26,11 @@ TEST(DeploymentDone_InitialAndDeathRespawnLifecycle)
 	CHECK(deploymentDoneAction(true, false, false, true, 0) == DeploymentDoneAction::None);
 	CHECK(deploymentDoneAction(true, true, false, true, 0) == DeploymentDoneAction::InitialSpawn);
 	CHECK(deploymentDoneAction(true, true, true, false, 0) == DeploymentDoneAction::None);
-	CHECK(deploymentDoneAction(true, true, false, false, 4.1f) == DeploymentDoneAction::None);
-	CHECK(deploymentDoneAction(true, true, false, false, 0.1f) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 4.1f) == DeploymentDoneAction::Respawn);
+	CHECK(deploymentDoneAction(true, true, false, false, 0.1f) == DeploymentDoneAction::Respawn);
 	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
 	// After the initial spawn, each later death waits for its own timer.
-	CHECK(deploymentDoneAction(true, true, false, false, 15) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 15) == DeploymentDoneAction::Respawn);
 	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
 }
 
@@ -354,7 +354,8 @@ TEST(Hud_LocalizationAndLists)
 {
 	// strings.csv: UTF-16LE with a byte-order mark, tab-separated, a column per language.
 	const std::u16string text = u"StringID\tEnglish\tGerman\r\nHUD_TEXT_MENU_SCORE_PLAYERS\tPLAYERS\tSPIELER\r\n"
-								u"QUOTED\t\"a \u00e9 b\"\tx\r\n";
+								u"QUOTED\t\"a \u00e9 b\"\tx\r\n"
+								u"SPAWN\t\"PRESS \"\"DONE\"\" TO SPAWN\"\tx\r\n";
 	std::vector<uint8_t> data {0xff, 0xfe};
 	for (char16_t c : text) {
 		data.push_back(static_cast<uint8_t>(c));
@@ -362,8 +363,9 @@ TEST(Hud_LocalizationAndLists)
 	}
 	io::Localization english;
 	CHECK(english.load(data, "English"));
-	CHECK(english.size() == 2 && english.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "PLAYERS");
+	CHECK(english.size() == 3 && english.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "PLAYERS");
 	CHECK(english.text("QUOTED") == "a \xc3\xa9 b" && english.text("MISSING") == "MISSING");
+	CHECK(english.text("SPAWN") == "PRESS \"DONE\" TO SPAWN");
 	io::Localization german;
 	CHECK(german.load(data, "German") && german.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "SPIELER");
 	CHECK(!io::Localization().load(data, "Klingon"));
@@ -1083,6 +1085,50 @@ TEST(Hud_PlayerMapHeading)
 	if (rotations.size() == 2) CHECK(rotations[0] == 90 && rotations[1] == -90);
 }
 
+// Retail's local view texture has a different aspect and tint from the
+// teammate heading arrow. Exercise the marker through the actual HUD path.
+TEST(Hud_LocalViewIndicatorRetailShapeAndHeading)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600", "hudBuilder.setMiniPos 245/-291", "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1"}) {
+		console.execute(line, out);
+	}
+	manager.setMap("map.dds", -512, -512, 1024, 1024);
+	game::GameWorld::PlayerInfo player;
+	player.yaw = -90; // the vehicle body can face away from its camera
+	manager.setMapMarkers({menu::localViewMapMarker(player, 45)});
+	manager.set("MapFullSize", 1);
+	int indicators = 0;
+	for (const auto& quad : manager.frame(0)) {
+		if (quad.texture.find("mini_LocalArrow2.tga") == std::string::npos) continue;
+		++indicators;
+		CHECK(quad.x1 - quad.x0 == 50);
+		CHECK(quad.y1 - quad.y0 == 70);
+		CHECK(quad.rotation == 45);
+		CHECK(quad.color[0] == 1 && std::fabs(quad.color[1] - 247.0f / 255.0f) < 1e-6f && quad.color[2] == 0);
+	}
+	CHECK(indicators == 1);
+	// On a rotating minimap it follows the camera relative to map turn.
+	manager.set("MapFullSize", 0);
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(3.1415927f / 4);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
+	indicators = 0;
+	for (const auto& quad : manager.frame(1)) {
+		if (quad.texture.find("mini_LocalArrow2.tga") == std::string::npos) continue;
+		++indicators;
+		CHECK(std::fabs(quad.rotation) < 0.01f);
+		CHECK(quad.x1 - quad.x0 == 50 && quad.y1 - quad.y0 == 70);
+	}
+	CHECK(indicators == 1);
+}
+
 // The commander's mini-map tab (Bf2MiniMenuMapNode, 0x007e8a90): the
 // level's map at zoom 0 and half alpha filling the node, the players as
 // 2-pixel dots (4 for the squad's), the zoom square at the map's focus
@@ -1508,4 +1554,15 @@ TEST(Hud_ButtonHoverEnterAndLeave)
 	manager.setPointer(10, 10);
 	manager.frame(0);
 	CHECK(ran.back() == "leave B" && ran.size() == 4);
+}
+
+TEST(DeploymentPrompt_RetailSelectionAndConfirmationStates)
+{
+	using dice::main::deploymentSpawnInfo;
+	CHECK(std::string(deploymentSpawnInfo(false, false, 0)) == "HUD_CENTERINFOBOX_selectspawnpoint");
+	CHECK(std::string(deploymentSpawnInfo(true, false, 0)) == "HUD_CENTERINFOBOX_presstospawn");
+	CHECK(std::string(deploymentSpawnInfo(true, false, 15)) == "HUD_CENTERINFOBOX_presstospawn");
+	CHECK(std::string(deploymentSpawnInfo(true, true, 15)) == "HUD_CENTERINFOBOX_timetospawn");
+	CHECK(std::string(deploymentSpawnInfo(true, true, 0)) == "HUD_CENTERINFOBOX_instantspawn");
+	CHECK(std::string(deploymentSpawnInfo(true, true, 0, false)) == "HUD_CENTERINFOBOX_invalidspawnpoint");
 }

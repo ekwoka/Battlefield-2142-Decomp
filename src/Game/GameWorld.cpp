@@ -6773,6 +6773,33 @@ void GameWorld::setSpawnChoice(int id, int controlPoint)
 	}
 }
 
+void GameWorld::requireSpawnConfirmation(int id)
+{
+	if (Player* player = findPlayer(id)) {
+		player->spawnConfirmationRequired = true;
+		player->spawnRequested = false;
+	}
+}
+
+bool GameWorld::requestSpawn(int id)
+{
+	Player* player = findPlayer(id);
+	if (!player || player->alive || player->spawnChoice == -1) return false;
+	player->spawnRequested = true;
+	return true;
+}
+
+void GameWorld::cancelSpawnRequest(int id)
+{
+	if (Player* player = findPlayer(id)) player->spawnRequested = false;
+}
+
+bool GameWorld::spawnRequested(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->spawnRequested;
+}
+
 int GameWorld::spawnChoice(int id) const
 {
 	const Player* player = findPlayer(id);
@@ -7272,6 +7299,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 				&& !titan.spawnPoints.empty();
 		});
 		if (m_gameMode != "gpm_ti" || player.spawnTitan == 0 || it == m_titans.end()) {
+			player.spawnRequested = false;
 			return nullptr; // never turn a failed Titan choice into an ordinary spawn
 		}
 		selectedTitan = &*it;
@@ -7311,6 +7339,10 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 				chosen.push_back(point);
 			}
 		}
+	}
+	if (player.spawnConfirmationRequired && player.spawnChoice >= 0 && chosen.empty()) {
+		player.spawnRequested = false; // retail 0x004bff13 clears an unavailable group
+		return nullptr;
 	}
 	std::vector<world::Object*> choices = selectedTitan ? chosen : !chosen.empty() ? chosen : points.empty() ? fallback : points;
 	// Points with someone standing on them wait (0x005b24f0's last test);
@@ -7367,6 +7399,11 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			squadAt = const_cast<world::Object*>(vehicle);
 		}
 	}
+	if (player.spawnConfirmationRequired && !withSquad && !mobile
+		&& (player.spawnChoice == kSpawnOnLeader || player.spawnChoice == kSpawnOnBeacon || player.spawnChoice == kSpawnInVehicle)) {
+		player.spawnRequested = false;
+		return nullptr;
+	}
 	if ((!withSquad && !mobile && choices.empty()) || !soldier) {
 		return nullptr;
 	}
@@ -7403,6 +7440,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	const bool ai = player.ai;
 	const int kills = player.kills, deaths = player.deaths, teamKills = player.teamKills;
 	const int fired = player.roundsFired, hits = player.roundsHit;
+	const bool confirmationRequired = player.spawnConfirmationRequired;
 	const int spawnChoice = player.spawnChoice;
 	const uint32_t spawnVehicle = player.spawnVehicle;
 	const uint32_t spawnTitan = player.spawnTitan;
@@ -7424,6 +7462,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.teamKills = teamKills;
 	player.roundsFired = fired;
 	player.roundsHit = hits;
+	player.spawnConfirmationRequired = confirmationRequired;
 	player.spawnChoice = spawnChoice;
 	player.spawnVehicle = spawnVehicle;
 	player.spawnTitan = spawnTitan;
@@ -8147,6 +8186,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 		raise("DropKit", {ScriptValue::player(victim.id), ScriptValue::object(victim.kitObject)});
 	}
 	victim.alive = false;
+	victim.spawnRequested = false;
 	victim.vehicle = 0;
 	victim.seat = -1;
 	// The wait (0x004bb220: player slot 0x108 x sv.spawnTime x 30 ticks):
@@ -10720,14 +10760,16 @@ void GameWorld::stepPlayersAfter(float seconds)
 					finishDeath(player);
 				}
 			}
-			if (player.respawnIn > 0) {
+			const bool hadRespawnTimer = player.respawnIn > 0;
+			if (hadRespawnTimer) {
 				player.respawnIn = std::max(0.0f, player.respawnIn - seconds);
-				if (player.respawnIn == 0 && autoRespawn) {
-					if (player.manDown) {
-						finishDeath(player);
-					}
-					spawnSoldier(player);
-				}
+			}
+			// Retail 0x004bfff8 requires a confirmed group even after the
+			// countdown ends. Bots and diagnostic callers retain autoRespawn.
+			if (autoRespawn && player.respawnIn <= 0
+				&& (player.spawnConfirmationRequired ? player.spawnRequested : hadRespawnTimer)) {
+				if (player.manDown) finishDeath(player);
+				spawnSoldier(player);
 			}
 		}
 	}

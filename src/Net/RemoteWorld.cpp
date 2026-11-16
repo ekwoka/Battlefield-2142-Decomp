@@ -706,6 +706,7 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 					p.rank = n.rank;
 				}
 				if (n.hasSpawnTick) {
+					p.spawnTick = n.spawnTick;
 					p.manDown = n.manDown;
 				}
 				if (n.value294 >= 0) {

@@ -76,6 +76,7 @@ public:
 	// group finds no server interface (0x918c30) and answers true (0x006330ee).
 	virtual bool spawnGroupActive(int /*group*/, int /*player*/) const { return true; }
 	virtual int spawnChoice(int player) const = 0;
+	virtual bool spawnRequested(int /*player*/) const { return false; }
 	// The team's mobile spawn points (GameWorld::spawnVehicles): vehicles.
 	virtual std::vector<uint32_t> spawnVehicles(int) const { return {}; }
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
@@ -220,6 +221,7 @@ public:
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
 	bool spawnGroupActive(int group, int player) const override { return m_round.spawnGroupActive(group, player); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
+	bool spawnRequested(int player) const override { return m_round.spawnRequested(player); }
 	std::vector<uint32_t> spawnVehicles(int team) const override { return m_round.spawnVehicles(team); }
 	// The vehicle bodies and the map's other PlayerControlObjects (the
 	// sentry gun, the drones, the pods: GameWorld::mapObjects), as the
@@ -291,6 +293,8 @@ public:
 	bool soldierJumpHold() const override { return ownJumpHold && ownJumpHold(); }
 	// The spawn group the local player asked for (6/6), -1 none.
 	int chosenSpawn = -1;
+	int chosenSpawnMarker = -1;
+	bool requestedSpawn = false;
 	// Our soldier's ability battery as the prediction has it (the control
 	// record's, filled between records); false: none.
 	std::function<bool(float& battery)> ownBattery;
@@ -330,6 +334,7 @@ public:
 	bool insideControlPoint() const override;
 	std::vector<int> spawnablePoints(int team) const override;
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
+	bool spawnRequested(int player) const override { return player == localPlayer() && requestedSpawn; }
 	// The vehicles the server's spawn groups ride (their ghosts' objects).
 	std::vector<uint32_t> spawnVehicles(int team) const override;
 	// The server's spawn group placed at an object here (a squad leader's

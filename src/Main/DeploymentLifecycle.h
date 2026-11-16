@@ -8,15 +8,25 @@ namespace dice::main {
 	};
 
 	// Keep the deployment button's policy independent of the SDL/HUD callback:
-	// initial deployment has no death timer, while a dead player must wait for
-	// the world-owned countdown before a button press can request a spawn.
-	constexpr DeploymentDoneAction deploymentDoneAction(bool done, bool playerPresent, bool alive, bool initialPending, float respawnIn)
+	// DONE submits immediately; the world waits for its countdown before
+	// creating a soldier (retail 0x0074e765 -> game logic slot 0x5c).
+	constexpr DeploymentDoneAction deploymentDoneAction(bool done, bool playerPresent, bool alive, bool initialPending, float /*respawnIn*/)
 	{
 		if (!done) return DeploymentDoneAction::None;
 		if (!playerPresent) return DeploymentDoneAction::None;
 		if (initialPending && !alive) return DeploymentDoneAction::InitialSpawn;
-		if (!alive && respawnIn <= 0.0f) return DeploymentDoneAction::Respawn;
+		if (!alive) return DeploymentDoneAction::Respawn;
 		return DeploymentDoneAction::None;
+	}
+
+	// 0x0044d278..0x0044d517: an unconfirmed highlighted group asks for
+	// DONE; a confirmed group shows its timer, including an instant retry.
+	constexpr const char* deploymentSpawnInfo(bool selected, bool requested, float respawnIn, bool valid = true)
+	{
+		if (!selected) return "HUD_CENTERINFOBOX_selectspawnpoint";
+		if (!valid) return "HUD_CENTERINFOBOX_invalidspawnpoint";
+		if (!requested) return "HUD_CENTERINFOBOX_presstospawn";
+		return respawnIn > 0 ? "HUD_CENTERINFOBOX_timetospawn" : "HUD_CENTERINFOBOX_instantspawn";
 	}
 
 	// Enter toggles the spawn screen (menu state 1, 0x00754d74 -> 0x0074fd90) alive or dead; the respawn

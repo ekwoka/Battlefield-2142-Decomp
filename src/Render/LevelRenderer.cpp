@@ -130,6 +130,7 @@ void materialUniforms(LightingUniforms& uniforms, const S& submesh, float fade, 
 	uniforms.material[2] = (submesh.detail ? 1.0f : 0.0f) + (submesh.dirt ? 2.0f : 0.0f) + (submesh.crack ? 4.0f : 0.0f)
 		+ (submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f);
 	uniforms.material[3] = fade < 1.0f ? std::max(fade, 1e-3f) : 0.0f;
+	uniforms.tint[3] *= submesh.alphaScale;
 	uniforms.uvOffset[0] = scrollOffset(submesh.uvScroll[0], seconds) + submesh.uvAtlas[2];
 	uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds) + submesh.uvAtlas[3];
 	uniforms.uvOffset[2] = submesh.uvAtlas[0];
@@ -718,6 +719,12 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		submesh.blended = material.alphaMode == 1;
 		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
 			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
+		// The shipped alpha_one ps.1.1 multiplies t0 by (1, 1, 1, 0.8).
+		// Keep this material constant separate from distance/fog fade and
+		// geometry-driven additive effects (RaShaderBMadditive).
+		if (submesh.additive && effect == "staticmesh.fx" && technique == "alpha_one") {
+			submesh.alphaScale = 0.8f;
+		}
 		if (submesh.additive) {
 			submesh.uvScroll[0] = geometry->simpleUVTranslation[0];
 			submesh.uvScroll[1] = geometry->simpleUVTranslation[1];

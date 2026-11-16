@@ -890,6 +890,7 @@ nametags::Nametags* g_nametags = nullptr;
 // heard since the last draw (the caller, the code), and the markers'
 // clock (the round's time).
 dice::hfe::menu::MapCalls g_mapCalls;
+dice::hfe::menu::MapPointSpots g_mapPointSpots;
 std::vector<std::pair<int, int>> g_mapCallsHeard;
 float g_mapCallsTime = -1;
 // A radio call heard (0x33..0x37): the caller's name tag (0x100f19c0) and
@@ -1202,6 +1203,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// player's own call's helpers among the teammates drawn (0x00792980).
 	{
 		const float now = round.roundTime();
+		g_mapPointSpots.tick(g_mapCallsTime < 0 || now < g_mapCallsTime ? 0.0f : now - g_mapCallsTime);
 		g_mapCalls.tick(g_mapCallsTime < 0 || now < g_mapCallsTime ? 0.0f : now - g_mapCallsTime);
 		g_mapCallsTime = now;
 		const dice::hfe::menu::MapCalls::Kit myKit = mapCallKit(round, me.kit);
@@ -1400,6 +1402,14 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		spotted.color[2] = 0.3f;
 		markers.push_back(spotted);
 	}
+	for (const auto& point : g_mapPointSpots.markers()) {
+		hud::HudManager::MapMarker marker {point.texture, point.x, point.z, 16};
+		marker.upright = true;
+		// Retail's positional-report tint (DAT_00b3c270, 0x008f2c50).
+		marker.color[0] = 0.87f;
+		marker.color[1] = marker.color[2] = 0.094f;
+		markers.push_back(marker);
+	}
 	markers.insert(markers.end(), callMarkers.begin(), callMarkers.end());
 	for (hud::HudManager::MapMarker& spawn : spawnMarkers) {
 		spawn.upright = true;
@@ -1407,11 +1417,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	markers.insert(markers.end(), spawnMarkers.begin(), spawnMarkers.end());
 	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {
-		// The player's own icon and its heading arrow, 32 px (0x00792980).
-		markers.push_back({"Ingame/Player/Icons/Minimap/mini_LocalArrow2.tga", me.position.x, me.position.z, 32, viewHeading.value_or(me.yaw)});
-		hud::HudManager::MapMarker arrow {"Ingame/Player/Icons/Minimap/mini_headingArrow.dds", me.position.x, me.position.z, 32,
-			viewHeading.value_or(me.yaw)};
-		markers.push_back(arrow);
+		// Retail's local view layer (0x0078e510), following the active camera.
+		markers.push_back(dice::hfe::menu::localViewMapMarker(me, viewHeading.value_or(me.yaw)));
 		hud.setMapFocus(me.position.x, me.position.z);
 	}
 	if (commanderScreen && g_commanderView) {
@@ -2153,7 +2160,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const int respawnSeconds = !alive && world.playerInfo(world.localPlayer(), respawnInfo)
 			? static_cast<int>(std::ceil(std::max(0.0f, respawnInfo.respawnIn))) : -1;
 		// The shipped SpawnInfo node is gated separately from its text.
-		hud.set("SpawnInfoShow", seconds >= 0 || respawnSeconds > 0 ? 1 : 0);
+		hud.set("SpawnInfoShow", seconds >= 0 || respawnSeconds >= 0 ? 1 : 0);
 		{
 			const auto text = [](const char* key) { return g_localize ? g_localize(key) : std::string(key); };
 			const auto withTime = [&](const char* key, int value) {
@@ -2172,7 +2179,13 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				return at == std::string::npos ? s : s.replace(at, 6, std::to_string(value));
 			};
 			if (seconds >= 0) hud.setString("SpawnInfoString", withTime("HUD_CENTERINFOBOX_timeuntildamage", seconds));
-			else if (respawnSeconds >= 0) hud.setString("SpawnInfoString", withTime("HUD_CENTERINFOBOX_timetospawn", respawnSeconds));
+			else if (respawnSeconds >= 0) {
+				const int selected = world.spawnChoice(world.localPlayer());
+				const auto available = world.spawnablePoints(respawnInfo.team);
+				const bool valid = selected < 0 || std::find(available.begin(), available.end(), selected) != available.end();
+				hud.setString("SpawnInfoString", withTime(dice::main::deploymentSpawnInfo(selected != -1,
+					world.spawnRequested(world.localPlayer()), respawnInfo.respawnIn, valid), respawnSeconds));
+			}
 			else hud.setString("SpawnInfoString", std::string());
 		}
 		// The centred killed lines (KilledState, DeathMessage, TimeToSpawnString of HudElementsKilled.con):
@@ -3490,6 +3503,8 @@ bool setupServer(Options& options, Session& session)
 int runGame(Options& options, Session& session)
 {
 	g_initialDeploymentPending = false;
+	g_spawnScreenHidden = false;
+	g_deploymentOpen = false;
 	io::FileManager files;
 	files.setRootPath(options.gameDir);
 	files.addSearchPath(options.modPath);
@@ -5445,51 +5460,63 @@ int runGame(Options& options, Session& session)
 		// (radio.spottedMessage: "apc_spotted", "infantry_spotted", ...; the
 		// game's slot 0xd0 then 0x50 on TCTeam; HudMenusComm.h SpotChoice).
 		// A joined client picks the object from its own view (its ghost's
-		// id goes up); a server takes the reporter's crosshair from its view.
-		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone,
-			[&commRoses, &round, &gameLogic, &joinedServer, &session, &hudManager, &commanderScreen, &mapMenuPoint, &hudLocal, spotRefused, sayRadio](bool say, std::string) {
-				commRoses.close();
-				dice::hfe::menu::SpotChoice choice;
-				float mapX = 0, mapZ = 0;
-				if (commanderScreen && hudManager.commanderMapZoom() == 2 && mapMenuPoint
-					&& hudManager.mapWorldAt(mapMenuPoint->first, mapMenuPoint->second, mapX, mapZ)) {
-					const float eye[3] = {mapX, round.terrainHeight(mapX, mapZ) + g_overheadHeight, mapZ};
-					const float dir[3] = {0, -1, 0};
-					const host::LocalHudWorld local(round, gameLogic);
-					const host::HudWorld& world = g_remoteHud ? static_cast<const host::HudWorld&>(*g_remoteHud) : local;
-					choice = dice::hfe::menu::spotChoice(world, round,
-						dice::hfe::menu::crosshairEnemy(world, round, hudLocal(), eye, dir, g_overheadHeight + 100, 1)); // not traced: the ray alone
-				} else if (net::GameClient* server = joinedServer(); server && g_remoteHud) {
-					game::GameWorld::PlayerInfo me;
-					if (g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me) && me.alive) {
-						const float yaw = me.yaw * 3.14159265f / 180.0f, pitch = me.aimPitch * 3.14159265f / 180.0f;
-						const float eye[3] = {me.position.x, me.position.y + 1.6f, me.position.z};
-						const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-						choice = dice::hfe::menu::spotChoice(*g_remoteHud, round,
-							dice::hfe::menu::crosshairEnemy(*g_remoteHud, round, me.id, eye, dir, round.spotReach()));
-					}
-				} else if (round.localPlayer() >= 0) {
-					const host::LocalHudWorld local(round, gameLogic);
-					choice = dice::hfe::menu::spotChoice(local, round, round.crosshairTarget(round.localPlayer(), round.spotReach()));
+		// id goes up); the host uses the same saved object and point.
+		dice::hfe::menu::SpotChoice capturedSpot;
+		physics::Vec3 capturedPoint {-4000, -4000, -4000};
+		const auto captureSpot = [&] {
+			capturedSpot = {};
+			capturedPoint = {-4000, -4000, -4000};
+			const host::LocalHudWorld local(round, gameLogic);
+			const host::HudWorld& world = g_remoteHud ? static_cast<const host::HudWorld&>(*g_remoteHud) : local;
+			float mapX = 0, mapZ = 0;
+			int enemy = -1;
+			if (mapMenuPoint && hudManager.mapWorldAt(mapMenuPoint->first, mapMenuPoint->second, mapX, mapZ)) {
+				capturedPoint = {mapX, round.terrainHeight(mapX, mapZ), mapZ};
+				const float eye[3] = {mapX, capturedPoint.y + g_overheadHeight, mapZ};
+				const float dir[3] = {0, -1, 0};
+				enemy = dice::hfe::menu::crosshairEnemy(world, round, hudLocal(), eye, dir, g_overheadHeight + 100, 1);
+			} else if (g_remoteHud) {
+				game::GameWorld::PlayerInfo me;
+				if (world.playerInfo(hudLocal(), me) && me.alive) {
+					const float yaw = me.yaw * 3.14159265f / 180.0f, pitch = me.aimPitch * 3.14159265f / 180.0f;
+					const float eye[3] = {me.position.x, me.position.y + 1.6f, me.position.z};
+					const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+					float point[3] = {-4000, -4000, -4000};
+					enemy = dice::hfe::menu::crosshairEnemy(world, round, me.id, eye, dir, round.spotReach(), 0.995f, point);
+					capturedPoint = {point[0], point[1], point[2]};
 				}
-				if (!spotRefused()) {
+			} else {
+				enemy = round.crosshairTarget(round.localPlayer(), round.spotReach(), &capturedPoint);
+			}
+			capturedSpot = dice::hfe::menu::spotChoice(world, round, enemy);
+		};
+		commRoses.onOpenRadio = [&] { mapMenuPoint.reset(); captureSpot(); };
+		bindMethod(console, "Radio.sendSpottedMessage", ConsoleAccess::Anyone,
+			[&, spotRefused, sayRadio](bool say, std::string type) {
+				// 0x0075be30 captures on opening; 0x007c8160 sends the saved
+				// object, world x/z and VehicleType even after the target moves.
+				const auto choice = capturedSpot;
+				commRoses.close();
+				if (!spotRefused() && (choice.object || capturedPoint.x != -4000 || capturedPoint.z != -4000)) {
 					net::SpottedInfo spot;
 					spot.message = 0x2e;
+					spot.value = static_cast<uint32_t>(nametags::vehicleTypeOf(type));
+					spot.x = capturedPoint.x;
+					spot.z = capturedPoint.z;
 					if (net::GameClient* server = joinedServer()) {
-						if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
-							spot.team = me->team;
-						}
+						if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) spot.team = me->team;
 						spot.spotted = g_remoteHud && choice.object ? g_remoteHud->ghostOf(choice.object) : 0;
 						server->sendEvent(net::makeSpotted(spot));
 					} else if (session.hosted && round.localPlayer() >= 0) {
+						spot.spotted = choice.object ? session.hosted->ghostOfObject(choice.object) : 0;
 						session.hosted->spotted(spot, round.localPlayer());
 					} else if (choice.player >= 0) {
-						round.radioSpot(round.localPlayer(), choice.player);
+						round.radioSpot(round.localPlayer(), choice.player, spot.value);
+					} else {
+						g_mapPointSpots.add(spot.x, spot.z, spot.value);
 					}
 				}
-				if (say) {
-					sayRadio(1, choice.voice, 0);
-				}
+				if (say) sayRadio(1, choice.voice, 0);
 			});
 		dice::hfe::menu::SquadMenu squadMenu(round, hudManager);
 		squadMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
@@ -6135,6 +6162,7 @@ int runGame(Options& options, Session& session)
 			hudManager.set("MinimapRMBMenuState", static_cast<float>(state));
 			g_mapMenu = me.commander ? 0x16 : me.squadLeader ? 0x15 : 0x14;
 			mapMenuPoint = std::make_pair(x, y);
+			captureSpot();
 			return true;
 		};
 		// The bots' navigation mesh (coop and single-player levels have one).
@@ -6686,6 +6714,7 @@ int runGame(Options& options, Session& session)
 			// The Spotted event's message for the host's own player (0x0050e910
 			// posts it there): a client's radio call on its name tag.
 			hosted->onSpotted = [hosted, &round](const net::SpottedInfo& spot) {
+				if (spot.message == 0x2e && !spot.spotted) g_mapPointSpots.add(spot.x, spot.z, spot.value);
 				const int caller = hosted->playerOfGhost(spot.spotter);
 				if (caller >= 0 && caller != round.localPlayer() && spot.message >= 0x33 && spot.message <= 0x37) {
 					heardCall(caller, static_cast<int>(spot.message), false);
@@ -8104,6 +8133,9 @@ int runGame(Options& options, Session& session)
 				// code on the caller's name tag (the NametagManager's events
 				// 0x33..0x37, 0x100f19c0); the caller by its soldier's ghost.
 				net::SpottedInfo spot;
+				if (message.category == 2 && message.id == 0x2e && net::parseSpottedPayload(message.payload, message.id, spot) && !spot.spotted) {
+					g_mapPointSpots.add(spot.x, spot.z, spot.value);
+				}
 				if (message.category == 2 && message.id >= 0x33 && message.id <= 0x37
 					&& net::parseSpottedPayload(message.payload, message.id, spot)) {
 					for (const net::RemotePlayer& p : client.world().playerList()) {
@@ -9654,6 +9686,7 @@ int runGame(Options& options, Session& session)
 		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		nametags.setWorld(g_remoteHud); // a joined game's: the server's players and requests
 		g_nametags = &nametags;
+		g_mapPointSpots.clear();
 		g_mapCalls.clear(); // a new map node's list (0x00784cf0)
 		g_mapCallsHeard.clear();
 		g_mapCallsTime = -1;
@@ -10183,6 +10216,7 @@ int runGame(Options& options, Session& session)
 				if (gui != lastGui || lastDeployment != static_cast<int>(g_deploymentOpen)) {
 					lastGui = gui; lastDeployment = g_deploymentOpen;
 					std::printf("hud-trace gui=%d camera=%d deployment=%d map=%g custom=%g\n", gui, g_cameraMode, g_deploymentOpen, hudManager.number("MapShow"), hudManager.number("CustomInfoShow"));
+					std::printf("spawn-info show=%g text=%s\n", hudManager.number("SpawnInfoShow"), hudManager.string("SpawnInfoString").c_str());
 					for (const auto& q : hud) {
 						if (q.texture.find("ingameMap") != std::string::npos || q.texture.find("combatArea") != std::string::npos)
 							std::printf("hud-map %s rect=%g/%g/%g/%g uv=%g/%g/%g/%g\n", q.texture.c_str(), q.x0,q.y0,q.x1,q.y1,q.u0,q.v0,q.u1,q.v1);
@@ -10606,24 +10640,14 @@ int runGame(Options& options, Session& session)
 					return;
 				}
 				const int point = hudManager.mapMarkerAt(x, y);
-				using dice::hfe::menu::JoinedClick;
-				const JoinedClick to = dice::hfe::menu::joinedClick(session.client->world().hasControlObject(), point);
-				if (to == JoinedClick::Hud) {
-					hudManager.click(x, y);
-				} else if (to == JoinedClick::SpawnAt) {
-					session.client->selectKit(localKit);
-					session.client->selectSpawnGroup(joinedSpawnGroup(point));
-					if (g_remoteHud) {
-						// The spawn screen's selected icon.
-						g_remoteHud->chosenSpawn = point == kMarkerLeader ? game::GameWorld::kSpawnOnLeader
-							: point >= kMarkerVehicle                     ? game::GameWorld::kSpawnInVehicle
-																		  : point;
-					}
+				if (dice::hfe::menu::joinedClick(session.client->world().hasControlObject(), point)
+					== dice::hfe::menu::JoinedClick::SpawnAt && g_remoteHud) {
+					g_remoteHud->chosenSpawnMarker = point;
+					g_remoteHud->chosenSpawn = point == kMarkerLeader ? game::GameWorld::kSpawnOnLeader
+						: point == kMarkerBeacon ? game::GameWorld::kSpawnOnBeacon
+						: point >= kMarkerVehicle ? game::GameWorld::kSpawnInVehicle : point;
 				} else {
-					// The client's own round has no control points (they are
-					// the server's ghosts): a click asks for any spawn point.
-					session.client->selectKit(localKit);
-					session.client->selectSpawnGroup(-1);
+					hudManager.click(x, y);
 				}
 			};
 			// The right button's alternate commands and the pointer's moves
@@ -10631,6 +10655,7 @@ int runGame(Options& options, Session& session)
 			viewer.onRightClick = [&hudManager](float x, float y) { hudManager.click(x, y, true); };
 			viewer.onPointerMove = [&hudManager](float x, float y) { hudManager.setPointer(x, y); };
 		} else if (round.localPlayer() >= 0) {
+			round.requireSpawnConfirmation(round.localPlayer());
 			// Deployment already owns input before the first soldier exists.
 			viewer.onPlayerInput = [&round, &hudPlayer, &hudLocal, &scoreboardHeld, &options, &showMenu, &startedGame, &endOfRound, &joinPending, &commanderScreen,
 										&session, &hudManager,
@@ -10931,42 +10956,55 @@ int runGame(Options& options, Session& session)
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera,
-										&questions, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
-										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false](const ViewerOptions::PlayerInput& in) mutable {
+										&questions, &session, &localKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
 				game::GameWorld::PlayerInfo me;
 				const bool playerPresent = hudPlayer(hudLocal(), me);
 				const bool alive = playerPresent && me.alive;
+				if (spawnWasRequested && !session.client && !round.spawnRequested(round.localPlayer()) && !alive) {
+					g_spawnScreenHidden = false; // rejected point: return to the selection screen
+				}
 				const bool deploymentPressed = in.deployment && !deploymentWas;
-				if (deploymentPressed && alive) {
-					g_deploymentOpen = !g_deploymentOpen;
-					hudManager.set("HudDone", 0);
+				if (alive) {
+					g_initialDeploymentPending = false;
+					g_spawnScreenHidden = false;
+					if (g_remoteHud) g_remoteHud->requestedSpawn = false;
+				}
+				if (deploymentPressed && playerPresent) {
+					if (alive) g_deploymentOpen = !g_deploymentOpen;
+					else g_spawnScreenHidden = !g_spawnScreenHidden;
 					g_bigMap = false;
-				} else if (deploymentPressed && playerPresent && !g_initialDeploymentPending) {
-					// 0x00754d74: the same toggle (0x0074fd90) when dead; it is DONE, not Enter, that spawns.
-					g_spawnScreenHidden = !g_spawnScreenHidden;
-				}
-				if (alive) g_spawnScreenHidden = false;
-				deploymentWas = in.deployment;
-				const bool done = hudManager.number("HudDone") != 0 || (deploymentPressed && !alive && g_initialDeploymentPending);
-				const auto doneAction = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
-				if (done) {
-					if (doneAction == dice::main::DeploymentDoneAction::InitialSpawn
-						|| doneAction == dice::main::DeploymentDoneAction::Respawn) {
-						if (round.spawnSoldier(round.localPlayer())) {
-							g_initialDeploymentPending = false;
-							g_deploymentOpen = false;
-							// Spawned between ticks: the camera takes the soldier now, or this
-							// frame draws him from outside (the next tick would flip it).
-							playerCamera.tick(0);
-						}
-					} else if (alive) {
-						g_deploymentOpen = false;
+					// Retail 0x00751855: reopening deployment cancels the
+					// submitted group, retaining the highlighted point.
+					if (dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden)) {
+						if (session.client) {
+							session.client->selectSpawnGroup(0);
+							if (g_remoteHud) g_remoteHud->requestedSpawn = false;
+						} else round.cancelSpawnRequest(round.localPlayer());
 					}
-					hudManager.set("HudDone", 0);
 				}
-				if (!alive) g_deploymentOpen = false; // death already opens deployment
+				deploymentWas = in.deployment;
+				const bool done = hudManager.number("HudDone") != 0;
+				const auto action = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
+				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
+					bool submitted = alive;
+					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
+						session.client->selectKit(localKit);
+						session.client->selectSpawnGroup(joinedSpawnGroup(g_remoteHud->chosenSpawnMarker));
+						g_remoteHud->requestedSpawn = submitted = true;
+					} else if (!alive && !session.client) {
+						submitted = round.requestSpawn(round.localPlayer());
+					}
+					if (submitted) {
+						g_deploymentOpen = false;
+						if (!alive) g_spawnScreenHidden = true;
+					}
+				}
+				spawnWasRequested = !session.client && round.spawnRequested(round.localPlayer());
+				hudManager.set("HudDone", 0);
+				if (!alive) g_deploymentOpen = false;
 				if (alive && ((in.radioComm && !radioWas) || (in.tacticalComm && !tacticalWas))) {
 					// A rose opens with the pointer on its middle entry (HudManager.setCommMousePos 400 300, the
 					// centre of RadioMiddle: Spotted, request/issue order), so a tap of Q or T picks that entry.

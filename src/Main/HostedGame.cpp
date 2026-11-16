@@ -393,6 +393,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		// A new round: a new player of the client's team, a new database.
 		const int team = client.team ? client.team : 1;
 		client.player = m_round->addPlayer(client.name, team, false);
+		m_round->requireSpawnConfirmation(client.player);
 		m_names[client.player] = client.name;
 		if (const auto& kits = m_logic->team(team).kits; !kits.empty()) {
 			m_round->setKit(client.player, kits.front().name, kits.front().soldier);
@@ -607,6 +608,7 @@ void HostedGame::joined(int id)
 	// lowest free one is taken.
 	const std::string name = afterLogin ? connection->playerInfo.name : "Player" + std::to_string(id);
 	client.player = m_round->addPlayer(name, team, false);
+	m_round->requireSpawnConfirmation(client.player);
 	client.name = name;
 	client.team = team;
 	m_names[client.player] = client.name;
@@ -1287,6 +1289,10 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			// the squad's spawn point once set down; a vehicle's group: that
 			// vehicle; else a control point's.
 			const int group = info.payloadInt();
+			if (group == 0) { // retail 0x00751855: reopening deployment cancels 6/6
+				client.spawnRequested = false;
+				break;
+			}
 			game::GameWorld::PlayerInfo me;
 			m_round->playerInfo(player, me);
 			bool taken = false;
@@ -1683,14 +1689,14 @@ void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
 	spot.spotter = me.soldier ? ghostOfObject(me.soldier) : 0;
 	spot.team = me.team;
 
-	if (spot.message == 0x2e) {
+	if (spot.message == 0x2e && spot.spotted) {
 		// The round takes the spot; sendRadioSpots hands it out with the
 		// enemy's object, as each client's crosshair would have named it.
 		const int enemy = spot.spotted ? playerOfGhost(spot.spotted) : -1;
 		if (enemy >= 0) {
 			m_round->radioSpot(reporter, enemy, spot.value);
 		} else {
-			m_round->spotCrosshair(reporter);
+			return; // invalid object ghost: never repick the reporter's current view
 		}
 		return;
 	}

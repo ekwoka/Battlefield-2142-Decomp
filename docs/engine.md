@@ -11580,6 +11580,18 @@ the top.
   (`menu::crosshairEnemy`) and sends the Spotted event with the spotted
   object's ghost (see [joined games' radio, tools and
   menus](#joined-games-radio-tools-and-menus)).
+  Unresolved spots retain the ray's world point, captured when the radio
+  rose opens (or the map context menu is placed), and the command's
+  VehicleType. The retail message handler's no-object branch (`0x007921b2`)
+  adds a fixed type-3 marker for 12 s, at 16 px by default. `0x0074f570`
+  selects the specific vehicle/infantry/sniper texture; a null texture
+  falls back to `Ingame/Minimap/Icons/unitSpotted.tga` (`0x00790fe5`),
+  the question mark used for an ordinary `VTNoVehicleType` report.
+  These markers stay upright, use the red `DAT_00b3c270` tint (initialized
+  at `0x008f2c50`), and repeated points remain separate (`0x00790d69`).
+  Native `menu::MapPointSpots` retains at most 64 incoming point reports.
+  The host forwards no-object reports with their original x/z and type,
+  rather than trying the reporter's current crosshair again.
 - **`game.radioMessage <TargetChannel> <voice>`** (`0x00423e61` → the
   client's slot `0x50`, `0x004b2b60`: the voice's index in the game
   logic's radio table, the spam check, event 0x14 to the server, a local

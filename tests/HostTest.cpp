@@ -997,6 +997,12 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	client.suicide();
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && !info.alive; }));
 	const int diedAt = ticks;
+	round.autoRespawn = true;
+	client.selectSpawnGroup(-1);
+	for (int i = 0; i < 10; ++i) step();
+	client.selectSpawnGroup(0); // reopening cancels while the timer runs
+	for (int i = 0; i < 100; ++i) step();
+	CHECK(round.playerInfo(me, info) && !info.alive && info.respawnIn == 0);
 	client.selectSpawnGroup(-1);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
 	CHECK(ticks - diedAt >= 2 * 30 - 1);
@@ -1084,6 +1090,24 @@ TEST(NetHost_SpottedFloodStaysBounded)
 	std::fprintf(stderr, "  spotted flood: 1200 events, at most %zu map spots\n", most);
 	CHECK(most > 0 && most <= 2 * enemies.size());
 	CHECK(round.mapSpottedPlayers(mate).empty());
+
+	// A no-object report preserves the world point and selected type through
+	// the actual client/server event. It must not repick the sender's view.
+	net::SpottedInfo pointSpot;
+	pointSpot.message = 0x2e;
+	pointSpot.x = 41;
+	pointSpot.z = -73;
+	pointSpot.value = 16;
+	a.world().takeMessages();
+	a.sendEvent(net::makeSpotted(pointSpot));
+	CHECK(pumpUntil(step, [&] {
+		for (const auto& m : a.world().takeMessages()) {
+			net::SpottedInfo got;
+			if (m.category == 2 && m.id == 0x2e && net::parseSpottedPayload(m.payload, m.id, got)
+				&& !got.spotted && got.x == 41 && got.z == -73 && got.value == 16 && got.team == 2) return true;
+		}
+		return false;
+	}));
 	a.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
@@ -2073,6 +2097,18 @@ TEST(GameWorld_RemovePlayerFreesItsSlot)
 
 // The crosshair object and Radio.sendSpottedMessage (0x0075be30, 0x007c8160):
 // the enemy the view's ray meets is reported to the spotter's squad.
+TEST(GameWorld_SpotMissKeepsGroundPoint)
+{
+	HostRange range;
+	auto& round = *range.round;
+	dice::hfe::physics::Vec3 point {-4000, -4000, -4000};
+	CHECK(round.viewTarget({0, 10, 0}, {0, -1, 0}, 100, 1, 0, {}, &point) == -1);
+	// This fixture samples its height-only terrain every 2 m.
+	CHECK(std::abs(point.x) < 0.01f && point.y <= 0 && point.y > -2.1f && std::abs(point.z) < 0.01f);
+	CHECK(round.viewTarget({0, 10, 0}, {0, 1, 0}, 100, 1, 0, {}, &point) == -1);
+	CHECK(point.x == -4000 && point.z == -4000);
+}
+
 TEST(GameWorld_SpottedCrosshairTarget)
 {
 	HostRange range;

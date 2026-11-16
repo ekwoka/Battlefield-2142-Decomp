@@ -884,6 +884,12 @@ public:
 	// the team's): the spawn menu's choice. Held points the team owns
 	// with spawn points; anywhere else falls back to any.
 	void setSpawnChoice(int player, int controlPoint);
+	// Interactive deployment keeps a highlighted point separate from DONE's
+	// confirmed request (retail player +0xe8, HUD 0x0074e680).
+	void requireSpawnConfirmation(int player);
+	bool requestSpawn(int player);
+	void cancelSpawnRequest(int player);
+	bool spawnRequested(int player) const;
 	// Squads (1..9 per team, up to six soldiers; the first is the leader):
 	// members may spawn on their leader or the leader's spawn beacon
 	// (spawnChoice kSpawnOnLeader / kSpawnOnBeacon). The scripts hear
@@ -3508,6 +3514,7 @@ private:
 		uint32_t firePresses = 0; // +0x250: the fire's presses (0x0059b260)
 		SoldierInput input;
 		std::vector<HitBone> hitBones;
+		bool spawnConfirmationRequired = false, spawnRequested = false;
 		int spawnChoice = -1;
 		uint32_t spawnVehicle = 0; // spawnChoice kSpawnInVehicle: the vehicle
 		uint32_t spawnTitan = 0; // spawnChoice kSpawnOnTitan: the Titan object

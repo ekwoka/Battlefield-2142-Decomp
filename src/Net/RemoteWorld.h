@@ -168,6 +168,7 @@ struct RemotePlayer {
 	bool commander = false;    // mask 0x8000000 (player +0x10c)
 	int kit = -1;              // mask 0x1000: the selected kit
 	int rank = -1;             // mask 0x4000
+	uint32_t spawnTick = 0;    // mask 0x20: server tick when deployment is allowed
 	bool manDown = false;      // mask 0x20 (player +0xe0)
 	// The weapon groups' fire states (masks 0x40, 0x80, 0x20000: the
 	// player's +0x19c..: firing, alt-firing; PlayerNetState::FireState) and

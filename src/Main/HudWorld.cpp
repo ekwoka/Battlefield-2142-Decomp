@@ -157,6 +157,7 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.ai = p.ai;
 	out.created = p.created; // connectedAt stays -1 (the networkable sets +0x1c0 alone, 0x005981a0)
 	out.alive = p.alive;
+	out.respawnIn = p.alive ? 0 : std::max(0.0f, static_cast<int32_t>(p.spawnTick - m_world.serverTick()) / 30.0f);
 	out.hitIndicator = p.local ? hitIndicator : 0;
 	out.kills = p.kills;
 	out.deaths = p.deaths;

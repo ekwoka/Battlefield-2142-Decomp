@@ -345,6 +345,8 @@ private:
 		// additive alpha (RSMTAdditive; 0x100c3880).
 		bool blended = false;
 		bool additive = false;
+		// StaticMesh.fx alpha_one: texture alpha times 0.8; other additive paths keep 1.
+		float alphaScale = 1.0f;
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second
 		// Where the texture lies in an atlas (the overgrowth's distant trees'
 		// textures, OvergrowthAtlas.tai): scale, then offset.

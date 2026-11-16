@@ -6911,6 +6911,102 @@ TEST(Render_Glow3AdditivePixelsOptIn)
     SDL_Quit();
 }
 
+// Alpha_One's shipped pixel shader multiplies texture alpha by 0.8.
+// Keep a geometry-driven additive control at full opacity: the factor
+// belongs to that material technique, not every additive effect.
+TEST(Render_AlphaOneOpacityPixelsOptIn)
+{
+    const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+    if (!output || !gameDir()) return;
+    CHECK(SDL_Init(SDL_INIT_VIDEO));
+    {
+        std::string error;
+        auto gpu = render::GpuContext::create(nullptr, error);
+        CHECK(gpu);
+        if (!gpu) return;
+        for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+            if (!test::runs(mod)) continue;
+            Garage g(gameDir(), mod, true);
+            for (const char* name : {"glow2", "glow3"}) {
+                auto* glow = g.templates.find(name);
+                CHECK(glow);
+                if (!glow) continue;
+                auto* geometry = g.geometries.find(glow->geometry());
+                CHECK(geometry);
+                if (!geometry) continue;
+                std::vector<uint8_t> original;
+                CHECK(g.files.readFile(geometry->path, original));
+                auto mesh = geom::parseMesh(original, geometry->kind);
+                CHECK(mesh && !mesh->geometries.empty());
+                if (!mesh || mesh->geometries.empty()) continue;
+                const auto& material = mesh->geometries[0].lods[0].materials[0];
+                CHECK(material.technique == "Alpha_One");
+                CHECK(!material.maps.empty());
+                // A uniform, dim texture avoids filtering, sRGB and clipping
+                // ambiguities. Only in-memory test data is replaced.
+                for (bool enhanced : {false, true}) for (bool alphaOne : {true, false}) for (uint8_t alpha : {255, 128}) {
+                    auto bytes = original;
+                    if (!alphaOne) {
+                        const std::string from = "Alpha_One", to = "Base_____";
+                        auto at = std::search(bytes.begin(), bytes.end(), from.begin(), from.end());
+                        CHECK(at != bytes.end());
+                        if (at == bytes.end()) continue;
+                        std::copy(to.begin(), to.end(), at);
+                    }
+                    g.files.addMemoryFile(geometry->path, bytes);
+                    geometry->hasAdditiveAlpha = !alphaOne;
+                    uint32_t header[32] {};
+                    header[0] = 0x20534444; header[1] = 124; header[2] = 0x100f;
+                    header[3] = header[4] = 1; header[5] = 4;
+                    header[19] = 32; header[20] = 0x41; header[22] = 32;
+                    header[23] = 0xff; header[24] = 0xff00; header[25] = 0xff0000;
+                    header[26] = 0xff000000; header[27] = 0x1000;
+                    const auto* start = reinterpret_cast<const uint8_t*>(header);
+                    std::vector<uint8_t> texture(start, start + sizeof(header));
+                    texture.insert(texture.end(), {32, 32, 32, alpha});
+                    g.files.addMemoryFile(material.maps[0], texture);
+                    world::ObjectManager objects;
+                    auto* object = objects.create(glow, {0, 0, 0});
+                    terrain::HeightmapCluster noTerrain;
+                    scene::LightSettings lights;
+                    lights.fogStartEndAndBase = {1000, 2000, 1, 0};
+                    scene::SkySettings sky; scene::WaterSettings water; scene::RendererSettings settings;
+                    settings.drawSkyDome = settings.drawTerrain = false;
+                    scene::EnhancedSettings features;
+                    features.enabled = enhanced;
+                    features.taa = features.csm = false;
+                    render::LevelSources sources {g.files, g.templates, objects, g.geometries, noTerrain,
+                        nullptr, lights, sky, water, "", ""};
+                    sources.renderer = &settings; sources.enhanced = &features;
+                    render::LevelRenderer renderer(*gpu); renderer.build(sources);
+                    auto target = gpu->createOffscreenTarget(128, 128);
+                    render::Camera camera; camera.position = {0, 0, -8};
+                    const auto frame = [&]() {
+                        renderer.syncObjects();
+                        auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+                        renderer.draw(commands, target.color, target, camera, lights);
+                        CHECK(SDL_SubmitGPUCommandBuffer(commands));
+                        std::vector<uint8_t> pixels; CHECK(gpu->readPixels(target, pixels)); return pixels;
+                    };
+                    object->setHidden(true); const auto background = frame();
+                    object->setHidden(false); const auto visible = frame();
+                    const float expected = 32.0f * (alpha / 255.0f) * (alphaOne ? 0.8f : 1.0f);
+                    const size_t centre = (64 * 128 + 64) * 4;
+                    std::fprintf(stderr, "  %s %s enhanced=%d alpha_one=%d alpha=%u: delta=%d expected=%.2f\n",
+                        mod, name, enhanced, alphaOne, alpha, int(visible[centre]) - int(background[centre]), expected);
+                    for (int c = 0; c < 3; ++c)
+                        CHECK(std::fabs(float(int(visible[centre+c]) - int(background[centre+c])) - expected) <= 1.0f);
+                    gpu->releaseTarget(target);
+                }
+                g.files.removeMemoryFile(geometry->path);
+                g.files.removeMemoryFile(material.maps[0]);
+                geometry->hasAdditiveAlpha = false;
+            }
+        }
+    }
+    SDL_Quit();
+}
+
 // Actual Suez bridge, using the map's placed glow3 and bridge meshes.
 TEST(Render_SuezBridgeGlowPixelsOptIn)
 {

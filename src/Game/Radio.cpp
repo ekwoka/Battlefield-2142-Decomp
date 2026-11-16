@@ -520,11 +520,12 @@ int GameWorld::viewTarget(const physics::Vec3& eye, const physics::Vec3& dir, fl
 	const ViewCandidate* picked = nullptr;
 	float range = reach, fraction = 1;
 	uint32_t object = 0;
-	physics::Vec3 at {};
+	physics::Vec3 at {-4000, -4000, -4000};
 	// The heightmap's ray (slot 0x8c) only sets the reach: 1.3 x the
 	// distance to its hit (0x0075c1d7); the scene's ray passes the terrain.
 	if (groundRayHit(eye, eye + dir * reach, fraction)) {
 		range = 1.3f * fraction * reach;
+		at = eye + dir * (fraction * reach);
 	}
 	if (objectRayHit(eye, eye + dir * range, ownVehicle, fraction, object)) {
 		range *= fraction;
@@ -554,11 +555,11 @@ int GameWorld::viewTarget(const physics::Vec3& eye, const physics::Vec3& dir, fl
 		picked = &c;
 		at = rayMeets ? eye + dir * along : c.position;
 	}
-	if (!picked || picked->team == team) {
-		return -1;
-	}
 	if (point) {
 		*point = at;
+	}
+	if (!picked || picked->team == team) {
+		return -1;
 	}
 	return picked->player;
 }

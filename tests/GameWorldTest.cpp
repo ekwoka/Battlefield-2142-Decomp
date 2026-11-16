@@ -7854,3 +7854,53 @@ TEST(GameWorld_RepairToolRay)
 		CHECK(facing == 0 ? now > 51 : now == 50);
 	}
 }
+
+// Selection alone never submits retail's player spawn group (+0xe8).
+// DONE may submit before the world timer is ready; reopening cancels it.
+TEST(GameWorld_DeploymentConfirmationQueuesAndCancels)
+{
+	Range range;
+	const int me = range.world->joinPlayer(2);
+	range.world->requireSpawnConfirmation(me);
+	CHECK(!range.world->requestSpawn(me)); // no selected point
+	range.world->setSpawnChoice(me, 2);
+	for (int i = 0; i < 90; ++i) range.world->tick(1 / 30.0f);
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(me, info) && !info.alive);
+	CHECK(range.world->requestSpawn(me));
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, info) && info.alive);
+	CHECK(!range.world->spawnRequested(me));
+	range.world->setSpawnTime(2);
+	range.world->suicide(info.soldier);
+	CHECK(range.world->requestSpawn(me)); // DONE during countdown
+	for (int i = 0; i < 30; ++i) range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, info) && !info.alive && info.respawnIn > 0);
+	range.world->cancelSpawnRequest(me); // reopen deployment
+	for (int i = 0; i < 90; ++i) range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, info) && !info.alive && info.respawnIn == 0);
+	CHECK(range.world->spawnChoice(me) == 2);
+	CHECK(range.world->requestSpawn(me));
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, info) && info.alive);
+	// The policy survives the new soldier; a later death waits for DONE too.
+	range.world->suicide(info.soldier);
+	for (int i = 0; i < 90; ++i) range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, info) && !info.alive);
+	CHECK(range.world->requestSpawn(me));
+	for (int i = 0; i < 90; ++i) range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(me, info) && info.alive);
+}
+
+TEST(GameWorld_DeploymentConfirmedLostPointNeverFallsBack)
+{
+	Range range;
+	const int me = range.world->joinPlayer(2);
+	range.world->requireSpawnConfirmation(me);
+	range.world->setSpawnChoice(me, 999);
+	CHECK(range.world->requestSpawn(me));
+	range.world->tick(1 / 30.0f);
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(me, info) && !info.alive);
+	CHECK(!range.world->spawnRequested(me));
+}

@@ -254,6 +254,8 @@ public:
 	// The host's own player's report (the game's slots 0xd8 / 0xd4 on a
 	// server: the event handled at once).
 	void spotted(const net::SpottedInfo& spot, int reporter);
+	// Translate the host HUD's saved object into the same event as a client.
+	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
 	// host.sgl_sendGameLogicEvent (0x00567d40): the game category's message
 	// `event` with the 4-byte data to `player`'s connection (the game's slot
 	// 0x98); false when no playing client has that player (the host's own).
@@ -520,7 +522,6 @@ private:
 	// reload's every weapon group).
 	net::NetworkableState playerStateOf(int player, bool everyGroup = false) const;
 	const std::vector<net::GhostPartLayout>* layoutFor(const world::ObjectTemplate& t);
-	uint16_t ghostOfObject(uint32_t object, int part = 0) const;
 	std::string nameOf(int player) const;
 	void sendToPlaying(const net::GameEvent& event);
 	void handOutChat(const net::ChatMessage& line);
