@@ -9978,35 +9978,45 @@ slot `0xb4`), but with the player's `ability.increasedRepairAbility`
 (slot `0x2a0`'s `+0x48`) at 0 only one of his own vehicle (the same
 root, `0x006f1d70`); with it above 0 the sphere again with the message
 `0x005910c0(0x400, material)` takes everything in it too. Each target:
-repairing alone checks a vehicle (`+0x17` bit 0) of the team or of none;
-healing or ammo a soldier of the team (with ammo also another vehicle of
-the team, slot `0x10c`, which the rewrite's RTAmmo leaves alone). The
-repair call (`0x0059a446`) asks slot `0x108` to check only, with the
-self-check bypass at 0. `0x004bc410` asks `0x004cc380`, which resolves
-the giver's controlled object's root (`0x006f1d70`) and rejects that root
-as a non-soldier target. Thus even if the second sphere supplies it, the
-engineer cannot mend the occupied vehicle's root in this retail path.
-Original-instruction execution with synthetic objects and stubbed services
-confirms own-root rejection and another vehicle's acceptance; it is not a
-full-game test. Native now excludes the occupied root from repair-only
-targets. Its first pass checks eligibility without applying effects; the
-second pass applies the single retail dose (shared among healing/repair
-targets).
+repairing alone takes a root (`+0x17` bit 0, which `0x006f1d70` answers
+with the object itself) of the team or of none; healing or ammo a
+soldier of the team (with ammo also another vehicle of the team, slot
+`0x10c`).
+
+The engineer never mends the vehicle he sits in. Slot `0x108` of the
+server logic (vtable `0x009294e8` slot 66) is `0x004bc410`, which passes
+its eighth argument to `0x004cc380` as `param_9`; both of `0x00599f30`'s
+calls push it 0 (`0x0059a45c`, `0x0059a571`), and with it 0
+`0x004cc380` refuses a target that is the root (`0x006f1d70`) of the
+giver's control object (player slot `0x4c`) and not a soldier. The
+second sphere finds the occupied vehicle, but it fails the check and is
+never treated; `GameWorld_KitAbilityInAVehicle` repairs another car
+beside it and leaves it at 50.
+
+Each target gets one dose a tick, as an ability in hand gives, not two.
+The first pass only checks: slot `0x108` gets (target, strength, giver,
+material, armour, 0, 1, 0) (`0x0059a45c`..`0x0059a481`), and
+`0x004bc410` hands its seventh argument to `0x004cc380` as `param_8`
+(which then also wants the armour's canBeRepaired and hit points under
+the most) and returns right after that call when it is set
+(`0x004bc43b`); slot `0x10c` (`0x004bd5f0`) gets (…, 0, 1)
+(`0x0059a41e`) and returns after `0x004cf7b0` when its seventh is set
+(`0x004bd638`). Each target that passes (the set `0x0056e4d0`) is
+treated in the next pass, both flags 0 (`0x0059a538`, `0x0059a571`):
+the strength times the seat's slot `0x17c` (`0x005c6d60` → the
+template's interface at `+0x298`, slot 0x168 `0x0059dbd0`:
+`abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
+executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
+`0x005caff0`; no shipped vehicle sets it), for healing and repair
+shared by the count of those targets, for ammo whole
+(`GameWorld_KitAbilityInAVehicleTreatsItsPassengers`,
+`GameWorld_KitAbilityInAVehicleResuppliesAmmoOnce`).
+
 Without the unlock a medic heals and a supporter rearms only
 his passengers, and an engineer mends nothing (only riders' soldiers are
 targets). All of it runs only from a seat whose template has
 autoUseAbility (the control object's 0xc4c5 interface, `0x0042b2f0`,
-slot `0x13c`); the rewrite ran it in any seat. Each target that passes
-the first, check-only call (slots `0x108` / `0x10c` answering true; the
-set `0x0056e4d0`) is treated once in the next pass: the strength times
-the seat's slot `0x17c` (`0x005c6d60` → the template's interface at
-`+0x298`, slot 0x168 `0x0059dbd0`:
-`abilityInVehicleStrengthModifier`, template `+0x4b0`, 1 by default;
-executor `0x004ff6df`, setter slot 0x164 `0x0059dbc0`; saved by
-`0x005caff0`; no shipped vehicle sets it), for healing and repair
-shared by the count of those targets, for ammo whole. The first call
-returns without treating the target (`0x004bc43b` for healing and repair,
-`0x004cf83b` for ammo). A kit with ammo only also rearms another vehicle
+slot `0x13c`). A kit with ammo only also rearms another vehicle
 (`0x0059a303`: a target with interface `0x998890`. It must be a
 PlayerControlObject whose root is not ours, from the team or team 0. Because it
 comes from the second sphere, this needs `increasedRepairAbility > 0`;

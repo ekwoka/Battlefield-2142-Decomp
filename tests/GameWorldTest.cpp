@@ -5418,8 +5418,16 @@ TEST(GameWorld_StaticSupplyTakesTheClosestPointsTeam)
 	CHECK(made && made->team() == 1);
 }
 
-// The seated engineer repairs nearby eligible vehicles with the unlock, but
-// retail's repairability check (0x004cc380) rejects the vehicle he occupies.
+// A seated engineer's kit ability (0x00599f30; hasRepairingAbility,
+// abilityInVehicleRadius 8, abilityInVehicleStrength 0.075 a tick) mends
+// a car beside him only with an unlock's increasedRepairAbility above 0
+// (the second sphere takes the vehicles; the first only riders' soldiers)
+// and only from a seat with autoUseAbility (case 3: without it,
+// nothing); a kit without an Ability component does nothing. The dose is
+// one a tick, 2.25 per cent a second (0x004bc410's first call only
+// checks: 52.25, not the two doses' 54.5). The car he sits in is never
+// mended: 0x004bc410 calls 0x004cc380 with param_9 0, which refuses the
+// giver's own root.
 TEST(GameWorld_KitAbilityInAVehicle)
 {
 	for (int repairs = 0; repairs < 4; ++repairs) {
@@ -5481,8 +5489,10 @@ TEST(GameWorld_KitAbilityInAVehicle)
 
 // A seated medic's kit ability (0x00599f30): retail checks in the first
 // pass and treats once in the second. Without increasedRepairAbility only
-// the passenger of the giver's vehicle is healed; with it the passenger,
-// another car's rider and a nearby soldier on foot share the second dose.
+// the passenger of the giver's vehicle is healed, 0.35 a tick (10.5 per
+// cent a second, not the two doses' 21); with it the passenger, another
+// car's rider and a nearby soldier on foot share that one dose, 3.5 each
+// (not 10.5 + 3.5).
 TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 {
 	for (const bool unlocked : {false, true}) {
@@ -5572,6 +5582,10 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 	}
 }
 
+// A seated supporter's kit ability (0x00599f30, slot 0x10c 0x004bd5f0)
+// rearms his passenger by one dose a tick, abilityInVehicleStrength 2 per
+// cent of a magazine, whole: 60 per cent in a second, a magazine in 50
+// ticks.
 TEST(GameWorld_KitAbilityInAVehicleResuppliesAmmoOnce)
 {
 	Range range;
@@ -5655,6 +5669,12 @@ TEST(GameWorld_KitAbilityInAVehicleResuppliesAmmoOnce)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(reserve() == 9); // one 60% pass must not replenish a whole magazine
+	// 2 per cent a tick, one dose (0x004bd5f0's first call only checks):
+	// the magazine is whole after 50 ticks, not 25.
+	for (int i = 0; i < 25; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(reserve() == 10);
 }
 
 TEST(GameWorld_KitAbilityInAVehicleRearmsOtherSeats)

@@ -12675,12 +12675,19 @@ void GameWorld::stepAbilities(float seconds)
 //   kit's material) takes everything in it as well: the soldiers on foot,
 //   the vehicles (the rewrite's: those of the bodies, the soldiers on
 //   foot as applyAbility's sphere has them).
-// - Each target: repairing alone (neither of the others) checks a vehicle
-//   (the object's +0x17 bit 0) of the team or of none. Slot 0x108 calls
-//   0x004cc380, which rejects the giver's own vehicle root; native now
-//   filters it from repair-only target scans. Healing or ammo treats a soldier (0x9493)
-//   of the team (0x108 heal, 0x10c ammo). With ammo a vehicle not ours
-//   of the team or of none takes slot 0x10c too, rearming its seat weapons.
+// - Each target: repairing alone (neither of the others) takes a root
+//   (the object's +0x17 bit 0, which 0x006f1d70 answers with the object
+//   itself) of the team or of none; healing or ammo treats a soldier
+//   (0x9493) of the team (0x108 heal, 0x10c ammo). With ammo a vehicle not
+//   ours of the team or of none takes slot 0x10c too, rearming its seat
+//   weapons.
+// - Never the engineer's own vehicle: slot 0x108 is the server logic's
+//   (vtable 0x009294e8 slot 66) 0x004bc410, whose eighth argument is
+//   0x004cc380's param_9; both passes push it 0 (0x0059a45c, 0x0059a571),
+//   and with it 0 0x004cc380 refuses a target that is the root
+//   (0x006f1d70) of the giver's control object (player slot 0x4c) and not
+//   a soldier. So the vehicle he sits in fails the first pass's check and
+//   is never treated (the second sphere still finds it).
 // So an engineer's repair in a vehicle needs the unlock, a medic heals
 // and a supporter rearms only their own passengers without it.
 // - All of it only from a seat with autoUseAbility: the control object's
@@ -12689,15 +12696,20 @@ void GameWorld::stepAbilities(float seconds)
 //   constructor 0x005cd9e0). The shipped ground vehicles and gunships set
 //   it on their seats (as_at on 5 of 7), the Titans' and stationary guns
 //   don't.
-// - Retail's first pass only checks eligibility (0x004bc43b / 0x004cf83b).
-//   Each target that passes (the set 0x0056e4d0 fills when slot 0x108 /
-//   0x10c answer true) is treated once in the next pass: the strength
-//   times the seat's slot 0x17c (0x005c6d60 -> the template's
-//   interface +0x298 slot 0x168, 0x0059dbd0: abilityInVehicleStrength-
-//   Modifier, template +0x4b0, 1 by default and in every shipped vehicle),
-//   for healing and repair shared by the count of those targets, for ammo
-//   whole. The native first pass is check-only; the next pass applies that
-//   single dose.
+// - One dose a tick, as an ability in hand gives. The first pass only
+//   checks: 0x108 gets (target, strength, giver, material, armour, 0,
+//   1, 0) (0x0059a45c..0x0059a481) and 0x004bc410 hands its seventh to
+//   0x004cc380 as param_8 (which then also wants the armour's
+//   canBeRepaired and hit points under the most) and returns right after
+//   it when set (0x004bc43b); 0x10c (0x004bd5f0) gets (..., 0, 1)
+//   (0x0059a41e) and returns after 0x004cf7b0 when its seventh is set
+//   (0x004bd638). Each target that passes (the set 0x0056e4d0) is treated
+//   in the next pass, both flags 0 (0x0059a538, 0x0059a571): the strength
+//   times the seat's slot 0x17c (0x005c6d60 -> the template's interface
+//   +0x298 slot 0x168, 0x0059dbd0: abilityInVehicleStrengthModifier,
+//   template +0x4b0, 1 by default and in every shipped vehicle), for
+//   healing and repair shared by the count of those targets, for ammo
+//   whole.
 void GameWorld::stepVehicleAbility(Player& player, float seconds)
 {
 	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
@@ -12763,8 +12775,8 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 			}
 		}
 		for (const Body& body : m_bodies) {
-			// Retail's repairability check rejects the giver's own control-object
-			// root (0x004cc380) for repair-only abilities.
+			// 0x004cc380 with param_9 0 refuses the giver's own root to a
+			// repair (see above): it is never a repair-only target.
 			if ((!repairOnly || body.object != vehicle->object) && inSphere(body.body.position, body.objectRadius)) {
 				take(body.object);
 			}
@@ -12789,7 +12801,7 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 			}
 		}
 	}
-	// Those targets exactly (a scan held, not run again).
+	// Those targets exactly (a scan held, not run again), checked only.
 	AbilityScan fixed;
 	fixed.targets = std::move(targets);
 	std::vector<uint32_t> treated;
@@ -12797,7 +12809,7 @@ void GameWorld::stepVehicleAbility(Player& player, float seconds)
 	if (treated.empty()) {
 		return;
 	}
-	// The second dose, to those treated.
+	// The one dose, to those that passed.
 	Ability second = ability;
 	second.strength *= number(*seat, "abilityInVehicleStrengthModifier", 1);
 	if (!ability.ammo) {
