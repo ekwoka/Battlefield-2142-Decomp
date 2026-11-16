@@ -124,8 +124,9 @@ void registerAnimationConsoleMethods(Console& console, AnimationSystems& systems
 				c->noiseAmplitude = v;
 			}
 		});
-	bindProperty<int>(console, "AnimationManager.ignoreMotherOrientation", kAccess, [] { return 0; },
-		[](const int&) {});
+	bindProperty<int>(console, "AnimationManager.ignoreMotherOrientation", kAccess,
+		[clip] { return clip() ? clip()->ignoreMotherOrientation : -1; },
+		[clip](const int& v) { if (Clip* c = clip()) c->ignoreMotherOrientation = v; });
 
 	// AnimationBundle.*
 	const auto bundleFlag = [&console, bundle](const char* name, bool Bundle::*field) {

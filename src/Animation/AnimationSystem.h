@@ -84,6 +84,7 @@ namespace dice::hfe::anim {
 struct Clip {
 	std::string path;
 	bool looping = true;
+	int ignoreMotherOrientation = -1; // first participating bone; its rotation ignores the posed ancestors
 	float length = 0;     // seconds; 0 plays at 24 frames per second
 	float fadeInTime = 0;
 	int noiseFrequency = 0;     // noiceFreq

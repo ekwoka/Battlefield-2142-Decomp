@@ -1013,3 +1013,98 @@ TEST(AnimationSystem_LadderClimbByPhase)
 	}
 	CHECK(same < 1e-4f && apart > 0.01f);
 }
+
+TEST(AnimationSystem_CrouchedWeaponOverlaysKeepFeetGrounded)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath(mod);
+		Console console(&files);
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&files](std::string a, std::string p, bool) { files.mountArchive(a, p); }, 2);
+		std::string out;
+		console.run("ServerArchives.con", {}, out);
+		console.run("ClientArchives.con", {}, out);
+		anim::AnimationSystems systems([&](const std::string& p, std::vector<uint8_t>& d) { return files.readFile(p, d); });
+		anim::registerAnimationConsoleMethods(console, systems);
+		console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		const auto load = [&](const std::string& p) { return systems.get(p, [&] { console.run(p, {}, out); }); };
+		const auto* bodySystem = load("Objects/Soldiers/Common/Animations/AnimationSystem3p.inc");
+		const auto* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+		CHECK(bodySystem && skeleton);
+		if (!bodySystem || !skeleton) continue;
+		for (const char* weapon : {"as_smg", "eu_ar_rifle", "eu_mg", "as_sni"}) {
+			const auto* gunSystem = load(std::string("Objects/Weapons/Handheld/") + weapon + "/AnimationSystem3p.inc");
+			CHECK(gunSystem);
+			if (!gunSystem) continue;
+			for (uint32_t message : {4u, 5u, 2u}) {
+				anim::AnimationState body(systems, *bodySystem), gun(systems, *gunSystem);
+				anim::AnimationInput input;
+				input.pose = 1;
+				auto pose = anim::setupPose(*skeleton);
+				float maxFoot = 0;
+				for (int tick = 0; tick < 150; ++tick) {
+					input.messages = tick >= 60 ? message : 0;
+					body.update(input, 1 / 30.0f);
+					gun.update(input, 1 / 30.0f);
+					std::vector<bool> touched;
+					body.apply(*skeleton, pose, touched);
+					gun.apply(*skeleton, pose, touched);
+					if (tick >= 60) {
+						const auto world = anim::worldMatrices(*skeleton, pose);
+						for (const char* foot : {"left_foot", "right_foot"}) {
+							const int node = skeleton->find(foot);
+							CHECK(node >= 0);
+							if (node >= 0) maxFoot = std::max(maxFoot, world[static_cast<size_t>(node)][13]);
+						}
+					}
+				}
+				std::fprintf(stderr, "  %s %s message %u max foot %.3f m\n", mod, weapon, message, maxFoot);
+				CHECK(maxFoot < 0.25f);
+			}
+		}
+		// Check the boundary's absolute rotation as well as the lower-body
+		// mask: simply dropping the root track leaves the aimed torso tilted.
+		const std::string path = "Objects/Weapons/Handheld/as_smg/Animations/3p/3p_as_smg_zoom.baf";
+		const auto* overlay = systems.get("boundary-test", [&] {
+			run(console, "animationSystem.createAnimation " + path);
+			run(console, "animationManager.ignoreMotherOrientation 12");
+			run(console, "animationSystem.createBundle aim");
+			run(console, "animationBundle.addAnimation " + path);
+			run(console, "animationSystem.createTrigger Trigger root");
+			run(console, "animationTrigger.addBundle aim");
+		});
+		CHECK(overlay->clips()[0].ignoreMotherOrientation == 12);
+		for (int stance : {0, 1, 2}) {
+			anim::AnimationState body(systems, *bodySystem), aim(systems, *overlay);
+			anim::AnimationInput input;
+			input.pose = stance;
+			auto pose = anim::setupPose(*skeleton);
+			for (int tick = 0; tick < 90; ++tick) {
+				body.update(input, 1 / 30.0f);
+				std::vector<bool> touched;
+				body.apply(*skeleton, pose, touched);
+			}
+			const auto before = pose;
+			aim.update(input, 0.5f);
+			std::vector<bool> touched;
+			aim.apply(*skeleton, pose, touched);
+			for (size_t n = 0; n < 12; ++n) {
+				CHECK(pose.positions[n] == before.positions[n]);
+				CHECK(pose.rotations[n] == before.rotations[n]);
+				CHECK(!touched[n]);
+			}
+			const auto* animation = systems.animation(path);
+			CHECK(animation);
+			const float frame = aim.instances()[0].time / systems.clipLength(overlay->clips()[0]) * animation->frameCount;
+			const auto expected = anim::evaluatePose(*skeleton, animation, frame);
+			const auto actual = anim::worldMatrices(*skeleton, pose);
+			for (size_t row = 0; row < 3; ++row) for (size_t col = 0; col < 3; ++col) {
+				CHECK(std::fabs(expected[12][row * 4 + col] - actual[12][row * 4 + col]) < 0.002f);
+			}
+		}
+	}
+}
