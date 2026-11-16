@@ -8481,3 +8481,119 @@ TEST(Vehicles_ParachuteLandsOnTheWater)
 		CHECK(g.position(me.soldier).y > -4);
 	}
 }
+
+#ifdef BF2142_RENDER_TESTS
+// The Titan's wreck (0x00652380): frames through gpm_ti's 25 s before the
+// round's end, the armour explosions (addArmorEffect -1 .. -36) and the core
+// explosion's flash (-38 %) over the hull. Bots running: 3 % a second.
+TEST(Titan_WreckSequencePixelsOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			const std::string prefix = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
+			geom::GeometryTemplateManager geometries;
+			titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			game::GameWorld& round = *level.world;
+			round.setAiRunning(true);
+			const uint32_t eu = round.titanOf(2);
+			CHECK(eu != 0);
+			const auto* info = level.titan(2);
+			CHECK(info);
+			if (!eu || !info) continue;
+			level.run(1);
+			const physics::Vec3 at = level.titan(2)->position;
+			scene::LightSettings lights;
+			lights.fogStartEndAndBase = {1500, 3000, 1, 0};
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			settings.drawSkyDome = false;
+			render::LevelSources sources {level.files, level.templates, level.objects, geometries, level.heightmaps,
+				nullptr, lights, sky, water, "", ""};
+			sources.renderer = &settings;
+			sources.effects = &round.effects();
+			sources.objectRadius = [&](uint32_t object) { return round.objectRadius(object); };
+			sources.partTransforms = [&](uint32_t object, std::vector<anim::Matrix>& parts) { return round.partTransforms(object, parts); };
+			sources.partBone = [&](uint32_t object, const std::string& part, anim::Matrix& local) { return round.partBone(object, part, local); };
+			sources.partLook = [&](uint32_t object, const std::string& part) { return round.titanPartLook(object, part); };
+			sources.partPose = [&](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
+				return round.partPose(object, part, offset, rotation);
+			};
+			sources.titanObject = [&](int team) { return round.titanOf(team); };
+			bool flashed = false;
+			float sinceShot = 0; // the post clock runs on game time, one draw per shot
+			sources.postEffects = [&](render::PostEffects& effects) {
+				effects.frameSeconds = std::max(sinceShot, 1 / 30.0f);
+				for (const auto& t : round.titans()) {
+					if (t.object == eu && t.coreExplosion && !flashed) {
+						flashed = effects.titanExplosion = true;
+					}
+				}
+			};
+			render::LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			auto target = gpu->createOffscreenTarget(960, 540);
+			render::Camera camera;
+			camera.position = {at.x - 260, at.y + 40, at.z};
+			camera.yaw = 1.57079632679f;
+			camera.pitch = -std::atan2(40.0f, 260.0f);
+			const auto shoot = [&](const std::string& label) {
+				renderer.syncObjects();
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer.draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				CHECK(render::writePng(std::string(output) + "/" + prefix + "-titan-wreck-" + label + ".png",
+					target.width, target.height, pixels));
+				const auto* now = level.titan(2);
+				std::fprintf(stderr, "  %s %s: %s %.0f %%, effect level %d, core explosion %d, %zu meshes\n",
+					prefix.c_str(), label.c_str(), now ? (now->wreck ? "wreck" : "whole") : "gone",
+					now ? now->percent : 0.0f, now ? now->effectLevel : 0, now ? int(now->coreExplosion) : 0,
+					renderer.stats().meshes);
+			};
+			if (std::getenv("BF2142_RENDER_VIDEO")) {
+				// Every tick from 1 s before the kill to the round's end (25 s), for a 30 fps video.
+				sinceShot = 1 / 30.0f;
+				const int pac = round.addPlayer("Pac", 1, true);
+				char label[16];
+				for (int tick = 0; tick < 30 * 26; ++tick) {
+					if (tick == 30) {
+						round.applyDamage(eu, 1e7f, pac);
+					}
+					level.run(1 / 30.0f);
+					std::snprintf(label, sizeof label, "v%04d", tick);
+					shoot(label);
+				}
+				CHECK(flashed);
+				gpu->releaseTarget(target);
+				continue;
+			}
+			shoot("00-before");
+			const int pac = round.addPlayer("Pac", 1, true);
+			round.applyDamage(eu, 1e7f, pac);
+			float elapsed = 0;
+			for (float t : {0.5f, 2.0f, 5.0f, 9.0f, 12.0f, 13.0f, 14.0f, 18.0f, 24.0f}) {
+				level.run(t - elapsed);
+				sinceShot = t - elapsed;
+				elapsed = t;
+				char label[16];
+				std::snprintf(label, sizeof label, "%04.1fs", t);
+				shoot(label);
+			}
+			CHECK(flashed);
+			gpu->releaseTarget(target);
+		}
+	}
+	SDL_Quit();
+}
+#endif
