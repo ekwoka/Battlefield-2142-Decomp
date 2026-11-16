@@ -238,6 +238,8 @@ private:
 		bool firing = false;
 		int lastRound = -1000;
 		int interval = 2;
+		uint32_t object = 0; // the gun's mobile object, its fire sounds follow
+		physics::Vec3 offset; // the shot's place from that object's (world axes)
 	};
 	std::map<uint64_t, Trigger> m_triggers;
 	int m_tick = 0;

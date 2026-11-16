@@ -1186,6 +1186,11 @@ public:
 	// how deep it is in the water (node +0x5c).
 	bool bodyAsleep(uint32_t object) const;
 	float bodySubmerged(uint32_t object) const;
+	// A mobile object's place and velocity now (its node); false without one.
+	bool bodyMotion(uint32_t object, physics::Vec3& position, physics::Vec3& velocity) const;
+	// Test setup (--bot-driver): the nearest living teammate bot on foot
+	// boards a vehicle's first free seat. Its id, or -1.
+	int seatNearestBot(uint32_t vehicle);
 	// Whether a player's soldier is on a ladder (its LadderContainer).
 	bool onLadder(int player) const;
 	// The weapon in hand put away after a throw (FireArm::hidden): not drawn.

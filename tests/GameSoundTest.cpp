@@ -160,6 +160,45 @@ TEST(GameSounds_TappedAutomaticShotPlaysOutAfterRelease)
 	sound::shutdownSoundEngine();
 }
 
+// 0x005dbdc0 plays the fire sounds with no position (slots 4 / 8): a 3P
+// loop sits on its gun's transform and moves with it. A walker's gunner
+// heard the driver's looping rockets left where the burst began.
+TEST(GameSounds_ThirdPersonFireLoopFollowsTheGun)
+{
+	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
+	if (!dir) return;
+	setenv("ALSOFT_DRIVERS", "null", 1);
+	auto* engine = sound::getSoundEngine();
+	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+	{
+		world::ObjectTemplateManager templates;
+		sound::SoundManager manager(engine, templates);
+		manager.registerTemplateType();
+		addSoundTemplate(templates, "S_rockets_Fire3P", std::string(dir) + "/Weapons/cannon/Static_AA_fire_1p.wav");
+		if (auto* t = manager.soundTemplate("S_rockets_Fire3P")) {
+			t->setIs3dSound(true);
+			t->setLoopCount(0);
+			t->setStopType(1);
+		}
+		engine->reloadSoundFiles();
+		sound::GameSounds sounds(manager);
+		sound::GameSounds::FireInfo automatic;
+		automatic.mode = 2;
+		automatic.roundsPerMinute = 225;
+		sounds.weapon(sound::GameSounds::WeaponEvent::Fire, "rockets", false, {10, 2, 30}, true, 7, 0, &automatic);
+		CHECK(sounds.fireLooping(7));
+		sound::ISound* loop = sounds.fireSound(7, 2);
+		CHECK(loop && loop->transform());
+		const auto at = [&] { return loop->transform()->worldTransform()->m[3]; };
+		CHECK(at()[0] == 10 && at()[2] == 30);
+		sounds.moveWeapon(7, {14, 2, 33}, {4, 0, 3});
+		CHECK(at()[0] == 14 && at()[2] == 33 && loop->transform()->velocity()->x == 4);
+		sounds.releaseTrigger(7);
+	}
+	engine->shutdown();
+	sound::shutdownSoundEngine();
+}
+
 // 0x007f9af0 / 0x007f9f50: firing (reason 4) brings the world's effects
 // (group 0) to 0.4 in steps of 0.1667 and back up in steps of 0.333; a
 // voice-over (reason 3, asked for each update) brings groups 0 and 4 to

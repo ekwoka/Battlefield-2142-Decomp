@@ -249,6 +249,7 @@ struct Options {
 	std::string cameraMode = "first"; // --camera-mode first|third: the player's initial/debug view
 	bool zoom = false;           // --zoom: a screenshot's soldier zooms in after its burst
 	int seat = 0;                // --seat N: with --drive, stay aboard in seat N (1 the driver)
+	bool botDriver = false;      // --bot-driver: with --drive and --seat, the nearest teammate bot takes the free driver seat
 	// Set by a game started from the menu (server settings).
 	float botSkill = -1;         // 0..1, -1 for the AI scripts' own
 	int ticketRatio = 100;
@@ -399,6 +400,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.view = true;
 		} else if (arg == "--seat" && hasValue) {
 			options.seat = std::atoi(argv[++i]);
+		} else if (arg == "--bot-driver") {
+			options.botDriver = true;
 		} else if (arg == "--zoom") {
 			options.zoom = true;
 		} else if (arg == "--camera-mode" && hasValue) {
@@ -9114,6 +9117,10 @@ int runGame(Options& options, Session& session)
 							game::GameWorld::PlayerInfo me;
 							round.playerInfo(round.localPlayer(), me);
 							std::printf("  in seat %d of %zu\n", me.seat + 1, round.vehicleSeats(me.vehicle).size());
+							if (options.botDriver) {
+								const int bot = round.seatNearestBot(me.vehicle);
+								std::printf("  bot driver: %d\n", bot);
+							}
 							runActions(); // --actions in the seat
 						} else {
 						// The gunner's seat (F2): turn the gun a quarter round and fire.

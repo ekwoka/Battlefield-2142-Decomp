@@ -412,6 +412,15 @@ void GameAudio::weapons(const Camera& camera)
 		}
 		m_sounds.weapon(kind, event.weapon, firstPerson, toSound(event.position), muteOnFire, user, event.object, &fire,
 			event.reloadState);
+		// The 3P fire sound rides the gun's object, with its velocity.
+		physics::Vec3 at, velocity;
+		if (event.kind == Kind::Fire && m_round.bodyMotion(event.object, at, velocity)) {
+			m_sounds.moveWeapon(user, toSound(event.position), toSound(velocity));
+			if (const auto t = m_triggers.find(user); t != m_triggers.end()) {
+				t->second.object = event.object;
+				t->second.offset = event.position - at;
+			}
+		}
 	}
 	for (auto it = m_triggers.begin(); it != m_triggers.end();) {
 		const int player = static_cast<int>(static_cast<uint32_t>(it->first >> 32));
@@ -421,6 +430,12 @@ void GameAudio::weapons(const Camera& camera)
 			m_sounds.releaseTrigger(it->first);
 			it = m_triggers.erase(it);
 		} else {
+			// shortcut: the offset ignores the object's turning; fine for a
+			// loop held a few seconds, use the barrel's matrix if it drifts.
+			physics::Vec3 at, velocity;
+			if (it->second.object && m_round.bodyMotion(it->second.object, at, velocity)) {
+				m_sounds.moveWeapon(it->first, toSound(at + it->second.offset), toSound(velocity));
+			}
 			++it;
 		}
 	}

@@ -290,6 +290,24 @@ void GameSounds::release(WeaponState& state)
 	state.loopSlot = -1;
 }
 
+void GameSounds::moveWeapon(WeaponState& state, const Vec3& position, const Vec3& velocity)
+{
+	if (state.place) {
+		state.place->matrix.m[3][0] = position.x;
+		state.place->matrix.m[3][1] = position.y;
+		state.place->matrix.m[3][2] = position.z;
+		state.place->m_velocity = velocity;
+	}
+}
+
+void GameSounds::moveWeapon(uint64_t user, const Vec3& position, const Vec3& velocity)
+{
+	const auto it = m_weapons.find(user);
+	if (it != m_weapons.end()) {
+		moveWeapon(it->second, position, velocity);
+	}
+}
+
 void GameSounds::releaseTrigger(uint64_t user)
 {
 	// 0x005db6c0: a looping fire sound stops (slot 13, its stop type's end),
@@ -430,10 +448,20 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 		} else {
 			sound->playLooped(loops);
 		}
-	} else if (sample >= 0) {
-		sound->playSampleAtLooped(&position, sample, 1);
 	} else {
-		sound->playAtLooped(&position, loops);
+		// Retail plays these with no position (slots 4 / 8): the sound sits
+		// on its object's transform, so a loop moves with the gun. A copied
+		// position left a vehicle's looping 3P fire behind as it moved.
+		if (!state.place) {
+			state.place = std::make_shared<Transform>();
+		}
+		moveWeapon(state, position, state.place->m_velocity);
+		sound->setTransform(state.place.get());
+		if (sample >= 0) {
+			sound->playSampleLooped(sample, 1);
+		} else {
+			sound->playLooped(loops);
+		}
 	}
 	if (keep) {
 		if (state.fire[static_cast<size_t>(slot)]) {

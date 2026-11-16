@@ -1662,6 +1662,42 @@ bool GameWorld::bodyAsleep(uint32_t object) const
 	return body && asleep(*body);
 }
 
+bool GameWorld::bodyMotion(uint32_t object, physics::Vec3& position, physics::Vec3& velocity) const
+{
+	const Body* body = findBody(object);
+	if (!body) {
+		return false;
+	}
+	position = body->body.position;
+	velocity = body->body.velocity;
+	return true;
+}
+
+int GameWorld::seatNearestBot(uint32_t vehicle)
+{
+	const Body* body = findBody(vehicle);
+	if (!body || !m_player) {
+		return -1;
+	}
+	Player* best = nullptr;
+	world::Object* bestSoldier = nullptr;
+	float bestDistance = 0;
+	for (const auto& p : m_players) {
+		world::Object* soldier = p && p->ai && p->alive && p->vehicle == 0 && p->team == m_player->team ? m_objects.find(p->object) : nullptr;
+		if (!soldier) {
+			continue;
+		}
+		const physics::Vec3 at {soldier->position().x, soldier->position().y, soldier->position().z};
+		const float d = physics::lengthSquared(at - body->body.position);
+		if (!best || d < bestDistance) {
+			best = p.get();
+			bestSoldier = soldier;
+			bestDistance = d;
+		}
+	}
+	return best && enterOnSpawn(*best, *bestSoldier, body->body.position, 1e9f, vehicle) ? best->id : -1;
+}
+
 float GameWorld::bodySubmerged(uint32_t object) const
 {
 	const Body* body = const_cast<GameWorld*>(this)->findBody(object);
