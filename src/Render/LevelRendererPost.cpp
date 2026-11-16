@@ -353,14 +353,18 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 	const GpuMesh* bound = nullptr;
 	TransformUniforms transforms {};
 	for (const Instance& instance : m_instances) {
-		const GpuMesh* gpuMesh = instance.mesh;
+		const GpuMesh* gpuMesh = instance.shadowMesh ? instance.shadowMesh : instance.mesh;
 		if (!gpuMesh || instance.fade < 1.0f) {
 			continue;
 		}
 		// The dynamic map takes the bundled and skinned meshes (RendDX9's
 		// SkinnedMeshDrawShadowMap 0x10162c70 for the skinned ones, at the LOD
 		// the light manager's slot 0x230 allows).
-		const bool dynamic = gpuMesh->skinned || gpuMesh->bundled;
+		// enhanced.titanShadows: a Titan's hull (static meshes that move) too, so its
+		// shadow follows it and reaches the terrain, which reads only this map.
+		// Not from inside: the rooms would lose their sun.
+		const bool dynamic = gpuMesh->skinned || gpuMesh->bundled ||
+			(m_enh.titanShadows && !m_cameraInTitan && gpuMesh->titanExterior);
 		if (dynamic == statics) {
 			continue;
 		}
@@ -393,7 +397,7 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 			continue;
 		}
 		// The LOD the world pass picked for it if any, else its own.
-		if (instance.lods.size() > 1) {
+		if (instance.lods.size() > 1 && !instance.shadowMesh) {
 			for (size_t lod = instance.lods.size(); lod-- > 1;) {
 				if (instance.lods[lod].resolved && instance.lods[lod].mesh) {
 					gpuMesh = instance.lods[lod].mesh;

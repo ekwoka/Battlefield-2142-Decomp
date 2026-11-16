@@ -1444,3 +1444,43 @@ TEST(Effects_DrawOrderAndDepthSort)
 	CHECK(order.size() == 2 && order[0] == "back" && order[1] == "front");
 	CHECK(farFirst);
 }
+
+TEST(Effects_VehicleBoostSoundStartsAndStops)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	auto* sound = templates.find("S_e_flame_Start");
+	sound->settings()["loopCount"] = "0";
+	auto* nitro = templates.create("EffectBundle", "nitro");
+	// The shipped e_sfx_nitro masks, including exit and boost-end.
+	nitro->settings()["setStartOnEffects"] = "128";
+	nitro->settings()["setStopOnEffects"] = "336";
+	nitro->children().push_back({"S_e_flame_Start", {}, {}});
+	auto* car = templates.create("PlayerControlObject", "car");
+	car->children().push_back({"nitro", {}, {}});
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 9;
+	state.objectTemplate = car;
+	state.occupied = true;
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().empty());
+	for (int cycle = 0; cycle < 3; ++cycle) {
+		state.boosting = true;
+		objects.update({state}, manager);
+		CHECK(manager.bundleLoops().size() == 1);
+		const auto key = manager.bundleLoops()[0].key;
+		objects.update({state}, manager);
+		CHECK(manager.bundleLoops().size() == 1 && manager.bundleLoops()[0].key == key);
+		// Key release or stamina depletion ends the actual boost.
+		state.boosting = false;
+		objects.update({state}, manager);
+		CHECK(manager.bundleLoops().empty());
+	}
+	state.boosting = true;
+	objects.update({state}, manager);
+	state.occupied = false;
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().empty());
+}

@@ -3,6 +3,7 @@ target_link_libraries(bf2142_tests PRIVATE Memory SoundEngine GameSound IO Conso
 target_sources(bf2142_tests PRIVATE MouseCaptureTest.cpp)
 target_sources(bf2142_tests PRIVATE StanceKeysTest.cpp)
 target_sources(bf2142_tests PRIVATE EnhancedRenderTest.cpp)
+target_sources(bf2142_tests PRIVATE MeshPointLightTest.cpp)
 target_sources(bf2142_tests PRIVATE TitanBotsTest.cpp)
 if(TARGET Render)
 	target_link_libraries(bf2142_tests PRIVATE Render)

@@ -727,3 +727,35 @@ TEST(Vehicle_RotationalRegulators)
 	CHECK(near(steered(-0.5f), -0.5f));
 	CHECK(near(steered(0.5f), 0.5f));
 }
+
+TEST(Vehicle_WreckCanKeepAuthoredWheelSupport)
+{
+	Car car;
+	car.templates.find("car_wheel")->settings()["collisionPart"] = "0";
+	physics::CollisionMeshFile mesh;
+	mesh.version = 9;
+	mesh.geometries.resize(1);
+	mesh.geometries[0].subGeometries.resize(2);
+	physics::CollisionLod lod;
+	lod.collisionType = 1;
+	lod.vertices = {{{-0.1f, -0.3f, 0}}, {{0.1f, -0.3f, 0}}, {{0, -0.3f, 0.1f}}};
+	lod.boundsMin = {-0.1f, -0.3f, 0};
+	lod.boundsMax = {0.1f, -0.3f, 0.1f};
+	mesh.geometries[0].subGeometries[1].lods.push_back(lod);
+	car.vehicle = game::Vehicle::fromTemplate(*car.templates.find("car"), car.templates, &mesh);
+	car.vehicle->setWheelCollisionState(mesh, 1);
+	car.body.position.y = 0.7f;
+	car.vehicle->tick(car.body, car.ground, 1/30.0f, 0.8f);
+	CHECK(car.body.acceleration.y > 0);
+	CHECK(car.vehicle->wheels()[0].contact);
+
+	// Switching to an empty state clears contact and the previous spring
+	// displacement; it must not kick the body or retain object support.
+	car.vehicle->touchObject(0, {0, 0.5f, 0}, {}, {0, 1, 0}, {}, 0.8f);
+	car.vehicle->setWheelCollisionState(mesh, 0);
+	car.body.acceleration = {};
+	car.vehicle->tick(car.body, car.ground, 1/30.0f, 0.8f);
+	CHECK(near(car.body.acceleration.y, 0));
+	CHECK(!car.vehicle->wheels()[0].contact);
+	CHECK(car.vehicle->wheels()[0].objectGround.count == 0);
+}

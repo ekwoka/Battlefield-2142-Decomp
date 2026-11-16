@@ -163,7 +163,7 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUSampler(m_device, m_menuClampSampler);
 	SDL_ReleaseGPUSampler(m_device, m_menuRepeatSampler);
 	for (SDL_GPUGraphicsPipeline* pipeline : {m_enhanced.mesh, m_enhanced.meshCulled, m_enhanced.fadedMesh,
-			 m_enhanced.additiveMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh,
+			 m_enhanced.additiveMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh, m_enhanced.particle,
 			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer,
 			 m_enhanced.motion, m_enhanced.motionCulled, m_enhanced.motionOverlay, m_enhanced.gtao, m_enhanced.aoBlur, m_enhanced.taa}) {
 		if (pipeline) {
@@ -519,6 +519,10 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	m_enhanced.roadMesh = enhanced(k_roadmesh_vert_spv, k_roadmesh_vert_spv_size, k_roadmesh_vert_msl,
 		k_roadmesh_vert_msl_size, k_enh_road_frag_spv, k_enh_road_frag_spv_size, k_enh_road_frag_msl,
 		k_enh_road_frag_msl_size, 6, 3, "enhanced road mesh");
+	state(true, false, false, SDL_GPU_CULLMODE_NONE, 0);
+	m_enhanced.particle = enhanced(k_enh_particle_vert_spv, k_enh_particle_vert_spv_size, k_enh_particle_vert_msl,
+		k_enh_particle_vert_msl_size, k_enh_particle_frag_spv, k_enh_particle_frag_spv_size, k_enh_particle_frag_msl,
+		k_enh_particle_frag_msl_size, 3, 2, "enhanced particle");
 	// Depth only into the shadow maps' (sampleable) format: the prepass,
 	// and the cascades' terrain casters with the casters' slope bias.
 	state(false, false, true, SDL_GPU_CULLMODE_NONE, 0);
@@ -776,13 +780,14 @@ SDL_GPUTexture* GpuContext::createRenderTexture(uint32_t width, uint32_t height,
 	return SDL_CreateGPUTexture(m_device, &info);
 }
 
-SDL_GPUTexture* GpuContext::createShadowMap(uint32_t size)
+SDL_GPUTexture* GpuContext::createShadowMap(uint32_t size, uint32_t height)
 {
 	SDL_GPUTextureCreateInfo info {};
 	info.type = SDL_GPU_TEXTURETYPE_2D;
 	info.format = m_shadowDepthFormat;
 	info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-	info.width = info.height = std::max<uint32_t>(size, 1);
+	info.width = std::max<uint32_t>(size, 1);
+	info.height = height ? height : info.width;
 	info.layer_count_or_depth = 1;
 	info.num_levels = 1;
 	return SDL_CreateGPUTexture(m_device, &info);

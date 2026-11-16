@@ -2785,9 +2785,14 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			// Events 0 and 1 reach the root's own children only (0x005b2c10
 			// walks its children, slot 0xec, and their siblings +0x38).
 			const bool child = b.path.size() == 1;
+			// The PCO sprint events 0x2a/0x2b select bits 7/8.
+			// Use the actual stamina-gated state, so depletion also stops nitro.
+			const uint32_t sprintEvent = object.boosting != tracked.boosting
+				? (object.boosting ? 0x80u : 0x100u) : 0u;
+			const uint32_t events = object.effects | sprintEvent;
 			const bool start = (created && b.startAtCreation)
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
-				|| (object.effects & b.startOnEffects) != 0 || (object.startEvent && child && b.startOnEffects == 0);
+				|| (events & b.startOnEffects) != 0 || (object.startEvent && child && b.startOnEffects == 0);
 			if (start && !effects.emitting(object.id, tag)) {
 				startBundle(object, tracked, i, effects, partPose, bundleView, created);
 			}
@@ -2834,11 +2839,13 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				b.lastPointVelocity = pointVelocity;
 				b.hasLastPoint = true;
 			}
-			if (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0) {
+			if ((events & b.stopOnEffects) != 0
+				|| (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0)) {
 				effects.stopAttached(object.id, tag);
 			}
 		}
 		tracked.occupied = object.occupied;
+		tracked.boosting = object.boosting;
 	}
 	for (auto it = m_objects.begin(); it != m_objects.end();) {
 		if (!seen.count(it->first)) {

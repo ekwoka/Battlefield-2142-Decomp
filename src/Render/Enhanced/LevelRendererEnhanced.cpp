@@ -134,6 +134,9 @@ bool LevelRenderer::planEnhancedFrame(uint32_t width, uint32_t height, bool over
 	m_enh.taa = prepassable && settings->taa && post && p.taa && p.motion && p.motionOverlay;
 	m_enh.prepass = prepassable && (settings->prepass || m_enh.ssao || m_enh.taa);
 	m_enh.csm = on && settings->csm && m_gpu.enhancedLitAvailable() && p.terrainCaster;
+	m_enh.titanShadows = m_enh.csm && settings->titanShadows;
+	m_enh.particleShadows = m_enh.csm && settings->particleShadows && p.particle;
+	m_enh.particleLights = on && settings->particleLights;
 	m_enh.aoBound = false;
 	m_enh.jittered = false;
 	m_enh.jitter = Mat4 {};
@@ -689,7 +692,8 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 	if (size != m_enh.cascadeSize) {
 		release(m_gpu.device(), m_enh.cascadeDynamic);
 		release(m_gpu.device(), m_enh.cascadeStatic);
-		m_enh.cascadeDynamic = m_gpu.createShadowMap(size * 2);
+		// The dynamic atlas has a third row of tiles: the Titans' hulls (below).
+		m_enh.cascadeDynamic = m_gpu.createShadowMap(size * 2, size * 3);
 		m_enh.cascadeStatic = m_gpu.createShadowMap(size * 2);
 		m_enh.cascadeSize = size;
 		m_enh.staticValid = false;
@@ -701,13 +705,20 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 	// each a sphere about its slice of the view, its centre snapped to a
 	// quarter of its radius (the static atlas is redrawn only when one moves).
 	const float reach = std::clamp(shadowRegionRadius(settings.quality, settings.shadowMapDepthDistance) * 3.0f, 120.0f, 400.0f);
-	const auto far = enhanced::cascadeSplits(camera.nearPlane, reach);
+	// Nearer the log split than the default: the first cascade ends some 7 m out,
+	// about 2 cm a texel at 1024, for the shadows at the player's feet.
+	const auto far = enhanced::cascadeSplits(camera.nearPlane, reach, 0.9f);
 	const float tanY = std::tan(camera.fovY * 0.5f);
 	const Vec3f forward = camera.forward();
 	const Vec3f towardsLight = normalize(Vec3f {-lights.sunDirection[0], -lights.sunDirection[1], -lights.sunDirection[2]});
 	const Vec3f up = std::fabs(towardsLight.y) > 0.99f ? Vec3f {0, 0, 1} : Vec3f {0, 1, 0};
-	const float depthRange = kShadowHeadroom * 2;
-	bool moved = !m_enh.staticValid || m_enh.staticInstances != m_instances.size();
+	// enhanced.titanShadows: a Titan 200 m up under a low sun is far along the light.
+	const float headroom = m_enh.titanShadows
+		? std::clamp(200.0f / std::max(towardsLight.y, 0.05f), kShadowHeadroom, 2000.0f)
+		: kShadowHeadroom;
+	const float depthRange = headroom * 2;
+	bool moved = !m_enh.staticValid || m_enh.staticInstances != m_instances.size() || headroom != m_enh.staticHeadroom;
+	m_enh.staticHeadroom = headroom;
 	for (int i = 0; i < enhanced::kCascades; ++i) {
 		const float nearSplit = i == 0 ? camera.nearPlane : far[static_cast<size_t>(i - 1)];
 		const enhanced::SliceSphere sphere = enhanced::sliceSphere(nearSplit, far[static_cast<size_t>(i)], tanY * aspect, tanY);
@@ -716,7 +727,7 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 		const Vec3f wanted = camera.position + forward * sphere.distance;
 		const Vec3f center {std::round(wanted.x / step) * step, std::round(wanted.y / step) * step,
 			std::round(wanted.z / step) * step};
-		const Mat4 vp = Mat4::lookAt(center + towardsLight * kShadowHeadroom, center, up) * orthographic(radius, depthRange);
+		const Mat4 vp = Mat4::lookAt(center + towardsLight * headroom, center, up) * orthographic(radius, depthRange);
 		m_enh.cascadeViewProjection[i] = vp;
 		m_enh.cascadeRadius[i] = radius;
 		m_enh.cascadeCenter[i] = center;
@@ -779,12 +790,140 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 		instance.shadowCaster = false;
 	}
 	drawAtlas(m_enh.cascadeDynamic, false);
+	// enhanced.titanShadows past the cascades: each Titan's hull into a tile
+	// fitted to it (the hulls gathered by nearness: at most two Titans) in the
+	// dynamic atlas's third row, which the variants read where no cascade
+	// reaches (enhanced_shadow.glsl farShadow).
+	if (m_enh.titanShadows && !m_cameraInTitan) {
+		struct Hull {
+			Vec3f low, high;
+			std::vector<const Instance*> pieces;
+		};
+		Hull hulls[2];
+		int count = 0;
+		for (const Instance& instance : m_instances) {
+			const GpuMesh* mesh = instance.mesh;
+			if (!mesh || !mesh->titanExterior || mesh->skinned || mesh->bundled || instance.hidden || instance.fade < 1.0f) {
+				continue;
+			}
+			const BoundingSphere s = instanceBounds(instance, *mesh);
+			if (s.radius < 0) {
+				continue;
+			}
+			int at = 0;
+			for (; at < count; ++at) {
+				const Vec3f d = s.center - (hulls[at].low + hulls[at].high) * 0.5f;
+				if (dot(d, d) < 700.0f * 700.0f) {
+					break;
+				}
+			}
+			const Vec3f r {s.radius, s.radius, s.radius};
+			if (at == count) {
+				if (count == 2) {
+					continue;
+				}
+				hulls[count++] = {s.center - r, s.center + r, {}};
+			} else {
+				Hull& h = hulls[at];
+				h.low = {std::min(h.low.x, s.center.x - r.x), std::min(h.low.y, s.center.y - r.y), std::min(h.low.z, s.center.z - r.z)};
+				h.high = {std::max(h.high.x, s.center.x + r.x), std::max(h.high.y, s.center.y + r.y), std::max(h.high.z, s.center.z + r.z)};
+			}
+			hulls[at].pieces.push_back(&instance);
+		}
+		const uint32_t kTile = size;
+		if (count > 0) {
+			SDL_GPUDepthStencilTargetInfo depth {};
+			depth.texture = m_enh.cascadeDynamic;
+			depth.clear_depth = 1.0f;
+			depth.load_op = SDL_GPU_LOADOP_LOAD; // the cascades' pass cleared it
+			depth.store_op = SDL_GPU_STOREOP_STORE;
+			depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+			depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+			SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+			SDL_BindGPUGraphicsPipeline(pass, m_gpu.shadowCasterPipeline());
+			float bias = 0;
+			size_t draws = 0;
+			for (int i = 0; i < count; ++i) {
+				const Vec3f center = (hulls[i].low + hulls[i].high) * 0.5f;
+				const Vec3f diagonal = hulls[i].high - hulls[i].low;
+				const float radius = std::min(0.5f * std::sqrt(dot(diagonal, diagonal)), 600.0f);
+				// The hull, then the ground a Titan's height below it along the light.
+				const float depthRange = 2 * radius + std::min(250.0f / std::max(towardsLight.y, 0.05f), 2500.0f);
+				const Mat4 vp = Mat4::lookAt(center + towardsLight * radius, center, up) * orthographic(radius, depthRange);
+				Mat4 tile;
+				tile.at(0, 0) = 0.5f;
+				tile.at(1, 1) = 1.0f / 3.0f;
+				tile.at(3, 0) = static_cast<float>(i) * 0.5f;
+				tile.at(3, 1) = 2.0f / 3.0f;
+				u.titanMatrix[i] = vp * kClipToTexture * tile;
+				// Half a metre and two texels of the light's depth.
+				bias = std::max(bias, (0.5f + 4 * radius / static_cast<float>(kTile)) / depthRange);
+				const SDL_GPUViewport viewport {static_cast<float>(i * kTile), static_cast<float>(2 * kTile), static_cast<float>(kTile),
+					static_cast<float>(kTile), 0, 1};
+				SDL_SetGPUViewport(pass, &viewport);
+				for (const Instance* piece : hulls[i].pieces) {
+					const GpuMesh* mesh = piece->mesh;
+					for (size_t lod = piece->lods.size(); lod-- > 1;) { // the coarsest loaded
+						if (piece->lods[lod].resolved && piece->lods[lod].mesh) {
+							mesh = piece->lods[lod].mesh;
+							break;
+						}
+					}
+					SDL_GPUBufferBinding vertexBinding {mesh->vertices, 0};
+					SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+					SDL_GPUBufferBinding indexBinding {mesh->indices, 0};
+					SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+					TransformUniforms transforms {};
+					transforms.worldViewProjection = piece->world * vp;
+					transforms.world = piece->world;
+					SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+					if (std::getenv("BF2142_SHADOW_STATS")) {
+						size_t skipped = 0;
+						for (const Submesh& submesh : mesh->submeshes) {
+							skipped += submesh.blended || submesh.additive || submesh.alphaReference > 0;
+						}
+						std::printf("titan map: hull %d piece %s at %.0f/%.0f/%.0f, %zu submeshes, %zu skipped, radius %.0f\n", i,
+							piece->geometry.c_str(), piece->world.at(3, 0), piece->world.at(3, 1), piece->world.at(3, 2),
+							mesh->submeshes.size(), skipped, radius);
+					}
+					for (const Submesh& submesh : mesh->submeshes) {
+						if (submesh.blended || submesh.additive || submesh.alphaReference > 0) {
+							continue; // glass and grilles cast nothing at this scale
+						}
+						const float caster[4] = {};
+						SDL_PushGPUFragmentUniformData(commands, 0, caster, sizeof(caster));
+						SDL_GPUTextureSamplerBinding sampler {submesh.texture, m_gpu.repeatSampler()};
+						SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+						SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+						++draws;
+					}
+				}
+			}
+			SDL_EndGPURenderPass(pass);
+			u.titanParams[0] = static_cast<float>(count);
+			u.titanParams[1] = 1.0f / static_cast<float>(kTile * 2);
+			u.titanParams[2] = bias;
+			if (std::getenv("BF2142_SHADOW_STATS")) {
+				std::printf("titan map: %d hulls, %zu + %zu pieces, %zu draws\n", count, hulls[0].pieces.size(), hulls[1].pieces.size(), draws);
+			}
+		}
+	}
 	u.base.params[0] = 0; // the single region's map is off
 	u.base.extra[0] = settings.shadowIntensityBias;
 	u.base.extra[1] = 0.8f;
 	u.cascadeParams[0] = static_cast<float>(enhanced::kCascades);
 	u.cascadeParams[1] = 1.0f / static_cast<float>(size * 2);
 	u.cascadeParams[2] = m_enh.staticValid ? 1.0f : 0.0f;
+	const scene::EnhancedSettings* enhancedSettings = m_sources ? m_sources->enhanced : nullptr;
+	u.cascadeParams[3] = m_enh.staticValid && enhancedSettings && enhancedSettings->staticShadows ? 1.0f : 0.0f;
+	// enhanced.softShadows (enhanced_shadow.glsl softShadow): the light's depth a
+	// metre, the penumbra's radius a metre between caster and receiver, TAA's frame.
+	u.softParams[0] = 1.0f / depthRange;
+	u.softParams[1] = enhancedSettings && enhancedSettings->softShadows ? 0.025f : 0.0f;
+	u.softParams[2] = m_enh.taa ? static_cast<float>(m_enh.frame % 64) : 0.0f;
+	for (int i = 0; i < enhanced::kCascades; ++i) {
+		u.cascadeTexel[i] = 2 * m_enh.cascadeRadius[i] / static_cast<float>(size);
+	}
 	u.viewEye[0] = camera.position.x;
 	u.viewEye[1] = camera.position.y;
 	u.viewEye[2] = camera.position.z;

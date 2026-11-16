@@ -2387,6 +2387,8 @@ public:
 	// the default): its wearer's seat's crewKitIndex, -1 for the default.
 	int kitGeometry(uint32_t kitObject) const;
 	int propGeometry(uint32_t object) const;
+	// The vehicle's authored wreck look, after wreckDelay and unless dontUseWreck.
+	bool vehicleWreckLook(uint32_t object) const;
 	// Whether heals and repairs may mend `object` (gameLogic slot 0x108's
 	// test 0x004cc380 and the armour's 0x00655a00): its armour template's
 	// canBeRepaired (+0x14c, 1 by default), a wreck (no hit points left)

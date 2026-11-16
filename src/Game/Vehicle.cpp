@@ -633,7 +633,7 @@ void Vehicle::updateEngine(const physics::RigidBody& body, float seconds)
 void Vehicle::touchObject(size_t index, const Vec3& push, const Vec3& rootPush, const Vec3& normal,
 	const Vec3& velocity, float grip)
 {
-	if (index >= m_wheels.size()) {
+	if (index >= m_wheels.size() || !m_wheels[index].contactEnabled) {
 		return;
 	}
 	Wheel::ObjectGround& g = m_wheels[index].objectGround;
@@ -656,6 +656,25 @@ float Vehicle::objectCompression(const Wheel& wheel, Vec3& normal) const
 	const float l = std::sqrt(physics::lengthSquared(g.normal));
 	normal = l > 1e-6f ? g.normal * (1.0f / l) : Vec3 {0, 1, 0}; // 0x006ba7d0: a zero normal is up
 	return std::clamp(physics::dot(g.push - g.rootPush, normal), 0.0f, 1.0f);
+}
+
+void Vehicle::setWheelCollisionState(const physics::CollisionMeshFile& mesh, size_t state)
+{
+	for (Wheel& wheel : m_wheels) {
+		const auto* sub = wheel.collisionPart >= 0
+			? physics::collisionPart(mesh, static_cast<size_t>(wheel.collisionPart), state) : nullptr;
+		const auto* lod = sub ? physics::collisionLodFor(mesh, *sub, 1) : nullptr;
+		// Retail probes the selected instance's vehicle LOD. Empty wreck
+		// states cannot keep supporting the hull on the live wheel radius.
+		wheel.contactEnabled = lod && !lod->vertices.empty();
+		if (wheel.contactEnabled) {
+			wheel.radius = std::max(0.0f, -lod->boundsMin[1]);
+		}
+		wheel.contact = false;
+		wheel.compression = 0;
+		wheel.objectGround = {};
+		wheel.firstStep = true;
+	}
 }
 
 void Vehicle::tick(physics::RigidBody& body, const physics::Ground& ground, float seconds, float grip, float gravity)
@@ -760,13 +779,13 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 	const Vec3 centre = body.position + body.rotation.transform(wheel.mount);
 	const Vec3 bottom = centre - up * wheel.radius;
 	Vec3 normal {0, 1, 0};
-	float groundHeight = ground.heightAndNormal(bottom.x, bottom.z, normal);
+	float groundHeight = wheel.contactEnabled ? ground.heightAndNormal(bottom.x, bottom.z, normal) : bottom.y;
 	// An object under the wheel (a bridge, a deck, another vehicle) is its
 	// ground where it is higher, moving as that object does.
 	Vec3 surfaceVelocity;
 	float compression = std::max(0.0f, groundHeight - bottom.y);
 	Vec3 objectNormal;
-	const float pushed = objectCompression(wheel, objectNormal);
+	const float pushed = wheel.contactEnabled ? objectCompression(wheel, objectNormal) : -1.0f;
 	if (wheel.objectGround.count > 0 && pushed > compression) {
 		compression = pushed;
 		groundHeight = bottom.y + pushed;

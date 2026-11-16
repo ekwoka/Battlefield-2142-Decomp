@@ -165,6 +165,11 @@ struct LevelSources {
 	std::function<bool(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation)> partPose;
 	// A Titan part's look by its template's name: 0 whole, 1 wrecked (its wreck geometry), 2 gone (hidden).
 	std::function<int(uint32_t object, const std::string& part)> partLook;
+	// Ordinary vehicle armour's wreck look (including its delay/opt-out).
+	std::function<bool(uint32_t object)> vehicleWreckLook;
+	// A lamp halo is visible only while its source is visible. Pixel depth
+	// testing alone lets a large glow quad protrude through a bridge deck.
+	std::function<bool(const Vec3f& eye, const Vec3f& source, uint32_t owner)> glowVisible;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
 	std::function<bool(uint32_t object, const std::string& part, anim::Matrix& local)> partBone;
@@ -355,6 +360,7 @@ private:
 		// _HASNORMALMAP_) and its space: 1 the tangent's, 2 the object's
 		// (RaShaderSM _OBJSPACENORMALMAP_); 0 none.
 		SDL_GPUTexture* normalMap = nullptr;
+		SDL_GPUTexture* giMap = nullptr; // bundled GI/burn mask, RGB multiplies base colour and specular
 		int normalKind = 0;
 		// A static mesh's RaShaderSTM per-pixel maps: the detail normal map
 		// ("_deb", NDetail; its alpha the parallax height), the crack normal
@@ -438,6 +444,7 @@ private:
 		std::shared_ptr<anim::Animation> animation;
 		float animationDuration = 0; // authored clip length, seconds; zero is 24 fps
 		bool hidden = false; // its object is hidden
+		bool occlusionGlow = false; // additive halo belonging to a supportsGlow light
 		bool wornKit = false; // posed only by its wearer's skeleton (a kit has none of its own)
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
@@ -453,6 +460,7 @@ private:
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
+		const GpuMesh* shadowMesh = nullptr; // cast instead of the shown geometry (null: the shown)
 		// The exterior's LODs by distance, loaded when first drawn: the mesh
 		// and that LOD's lightmap (the atlas keys name the LOD).
 		struct Lod {
@@ -826,10 +834,16 @@ private:
 		float viewEye[4] {};
 		float viewForward[4] {};
 		float aoParams[4] {}; // 1 / width, 1 / height, 1 to apply, strength
+		Mat4 titanMatrix[2];
+		float titanParams[4] {}; // Titans mapped, a texel in uv, depth bias
+		float cascadeTexel[4] {}; // metres a texel, each cascade
+		float softParams[4] {};   // the light's depth a metre, penumbra a metre (0: plain PCF), TAA's frame
 	};
 	struct Enhanced {
 		bool on = false; // this frame's passes
 		bool taa = false, ssao = false, csm = false, prepass = false;
+		bool titanShadows = false, particleShadows = false, particleLights = false;
+		float staticHeadroom = 0; // the light's reach above the cascades the static atlas was drawn with
 		int reported = -1; // the passes last printed
 		bool jittered = false;
 		Mat4 jitter;                 // post-multiplied onto the view-projections
@@ -852,7 +866,8 @@ private:
 		bool historyValid = false;
 		bool aoBound = false; // useShadows binds the AO (the world's opaque draws), else white
 		// The cascades: two atlases of 2 x 2 (the dynamic objects', the
-		// static meshes' and the terrain's), each cascade `cascadeSize` texels.
+		// static meshes' and the terrain's), each cascade `cascadeSize` texels;
+		// the dynamic one has a third row, the Titans' hulls past the cascades.
 		SDL_GPUTexture* cascadeDynamic = nullptr;
 		SDL_GPUTexture* cascadeStatic = nullptr;
 		uint32_t cascadeSize = 0;

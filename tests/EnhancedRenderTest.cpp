@@ -242,3 +242,12 @@ TEST(EnhancedRender_WorldSamplesFollowRuntimeToggles)
 	world.fallBackToSingle();
 	CHECK(world.samples() == 1 && !world.alphaToCoverage() && !world.enhancedLit());
 }
+
+TEST(EnhancedRender_ParticleLightFallsOffToItsRange)
+{
+	CHECK(enhanced::particleLightFalloff(0, 10) == 1.0f);
+	CHECK(std::fabs(enhanced::particleLightFalloff(25, 10) - 0.75f) < 1e-6f);
+	CHECK(enhanced::particleLightFalloff(100, 10) == 0.0f);
+	CHECK(enhanced::particleLightFalloff(400, 10) == 0.0f);
+	CHECK(enhanced::particleLightFalloff(0, 0) == 0.0f); // a light without reach
+}

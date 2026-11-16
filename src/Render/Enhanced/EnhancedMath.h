@@ -76,6 +76,13 @@ inline Mat4 inverse(const Mat4& a)
 
 constexpr int kCascades = 4;
 
+// A point light's share at a particle, as the undergrowth takes its lights
+// (Undergrowth.fx: saturate(1 - d^2 / R^2), no N.L).
+inline float particleLightFalloff(float distanceSquared, float range)
+{
+	return range > 0 ? std::clamp(1 - distanceSquared / (range * range), 0.0f, 1.0f) : 0.0f;
+}
+
 // Where each cascade ends along the view (metres): the practical split
 // (log and linear blended by `lambda`) from `nearPlane` to `farPlane`.
 inline std::array<float, kCascades> cascadeSplits(float nearPlane, float farPlane, float lambda = 0.75f)

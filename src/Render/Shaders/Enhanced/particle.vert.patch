@@ -1,0 +1,16 @@
+Enhanced variant of particle.vert (enhanced.particleShadows): where the
+particle takes the sun's shadow, its centre for a sprite (one value over the
+quad, so a billboard isn't cut by a shadow's edge), and how much of it (the
+sprite's unused lightmap slot; a placed triangle all).
+<<<<
+layout(location = 2) out float outDepth;
+====
+layout(location = 2) out float outDepth;
+layout(location = 3) out vec4 outShadowAt;
+>>>>
+<<<<
+	outDepth = gl_Position.w;
+====
+	outDepth = gl_Position.w;
+	outShadowAt = vec4(inCenter, inSize < 0.0 ? 1.0 : inUnusedLightmap.x);
+>>>>

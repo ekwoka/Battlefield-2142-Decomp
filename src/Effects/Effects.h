@@ -1232,6 +1232,7 @@ public:
 		Vec3 position;
 		Mat3 rotation;
 		bool occupied = false; // a player is in it
+		bool boosting = false; // actual vehicle sprint, after stamina gating
 		// Effect events the object's own animation fired this update (bit
 		// 9 + N for "effect:N"): those bundles whose startOnEffects has
 		// one start (0x0061a4e0), as a walker's foot steps.
@@ -1373,6 +1374,7 @@ private:
 		const world::ObjectTemplate* objectTemplate = nullptr;
 		std::vector<Placed> bundles;
 		bool occupied = false;
+		bool boosting = false;
 		// The ground bundles' current effect (by bundle), "" while off.
 		std::vector<std::string> groundEffects;
 		std::string breath; // the breathEffect bundle, "" for none
