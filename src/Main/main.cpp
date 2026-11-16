@@ -5372,17 +5372,11 @@ int runGame(Options& options, Session& session)
 		const auto spotRefused = [&] { return radioSpam.spot(spamLimits()); };
 		const auto sayRadio = [&](int channel, const std::string& voice, int value, bool checkSpam = true) {
 			if (channel < 0 || voice.empty()) {
-				std::printf("radio-say: dropped channel=%d voice=\"%s\"\n", channel, voice.c_str());
-				std::fflush(stdout);
 				return;
 			}
 			if (checkSpam && spamRefused()) {
-				std::printf("radio-say: refused as spam channel=%d voice=%s\n", channel, voice.c_str());
-				std::fflush(stdout);
 				return;
 			}
-			std::printf("radio-say: channel=%d voice=%s\n", channel, voice.c_str());
-			std::fflush(stdout);
 			if (net::GameClient* server = joinedServer()) {
 				const int index = voices.message(voice);
 				if (index >= 0) {

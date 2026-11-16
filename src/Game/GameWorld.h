@@ -1855,6 +1855,7 @@ public:
 	// reports (reportBattlefieldObjects), while their seconds last.
 	std::vector<int> mapSpottedPlayers(int viewer) const;
 	std::vector<uint32_t> mapSpottedVehicles(int viewer) const;
+	size_t mapSpotCount() const { return m_mapSpots.size(); } // the entries kept, live or not yet pruned
 	// Whether a team's squad had a player reported within the last 3 s
 	// (0x100bea30).
 	bool squadKnows(int team, int squad, int player) const;
@@ -4281,6 +4282,9 @@ private:
 		double until = 0;
 	};
 	std::vector<MapSpot> m_mapSpots;
+	static constexpr size_t kMapSpotLimit = 64; // port bound (addMapSpot)
+	void addMapSpot(const MapSpot& spot, bool refresh);
+	void pruneMapSpots();
 	std::vector<RadioSpot> m_radioSpots; // takeRadioSpots
 	bool mapSpotSeenBy(const MapSpot& spot, int viewer) const;
 	world::ObjectTemplate* droneTemplate(const world::ObjectTemplate* weapon) const;

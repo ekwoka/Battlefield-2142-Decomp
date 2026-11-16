@@ -1028,6 +1028,7 @@ TEST(Vehicles_RemoteMouseKeepsPitchingUp)
 {
 	for (const float dir : {1.0f, -1.0f}) { // +1: mouse up (nose up)
 		net::MoveInputState state;
+		state.seated = true; // the server's state for a player in a vehicle
 		float aim = 0, last = 0, lastLook = 0, early = 0, late = 0;
 		for (int i = 0; i < 120; ++i) {
 			game::SoldierInput in;

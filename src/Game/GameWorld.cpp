@@ -15614,6 +15614,7 @@ void GameWorld::stepDrones(float seconds)
 		it->second -= seconds;
 		it = it->second <= 0 ? m_revealed.erase(it) : std::next(it);
 	}
+	pruneMapSpots();
 	std::vector<uint32_t> lost;
 	for (Drone& drone : m_drones) {
 		world::Object* object = m_objects.find(drone.object);
@@ -15779,9 +15780,7 @@ void GameWorld::reportBattlefieldObjects(int reporter, const std::vector<int>& p
 	// networkableHudShowCloaked, else to no one; only kind 0 marks enemies
 	// (so a cloak's never does), and one alive in a vehicle has the vehicle
 	// listed too over 5 s.
-	m_mapSpots.erase(std::remove_if(m_mapSpots.begin(), m_mapSpots.end(),
-						 [this](const MapSpot& s) { return s.until <= m_time; }),
-		m_mapSpots.end());
+	pruneMapSpots();
 	if (kind != 0) {
 		return;
 	}
@@ -15796,7 +15795,7 @@ void GameWorld::reportBattlefieldObjects(int reporter, const std::vector<int>& p
 		const Player* player = findPlayer(id);
 		if (player && player->team != from->team) {
 			const uint32_t vehicle = player->alive && player->vehicle && reveal > 5 ? player->vehicle : 0;
-			m_mapSpots.push_back({from->team, from->squad, reporter, id, vehicle, m_time + reveal});
+			addMapSpot({from->team, from->squad, reporter, id, vehicle, m_time + reveal}, true);
 		}
 	}
 }
@@ -15809,10 +15808,47 @@ void GameWorld::radioSpot(int reporter, int enemy, uint32_t value)
 	if (!from || !player || player->team == from->team) {
 		return; // 0x00791faa: only an object of another team
 	}
-	m_mapSpots.push_back({from->team, -1, reporter, player->vehicle ? -1 : enemy, player->vehicle, m_time + 12});
+	addMapSpot({from->team, -1, reporter, player->vehicle ? -1 : enemy, player->vehicle, m_time + 12}, false);
 	if (m_radioSpots.size() < 64) { // none taken without a server
 		m_radioSpots.push_back({reporter, enemy, value});
 	}
+}
+
+void GameWorld::pruneMapSpots()
+{
+	m_mapSpots.erase(std::remove_if(m_mapSpots.begin(), m_mapSpots.end(),
+						 [this](const MapSpot& s) { return s.until <= m_time; }),
+		m_mapSpots.end());
+}
+
+// One entry per list and object, as each minimap's list is (0x00790d60
+// adds an object only when 0x007800f0 doesn't find it in +0xa94, so a
+// radio spot of an object already listed leaves its time be). A battlefield
+// report's entry (the radar list's slot 0x20 on the client, not traced)
+// takes the later end instead. The list is fed by joined clients' Spotted
+// events (HostedGame::spotted), so it holds at most kMapSpotLimit entries,
+// the one ending soonest giving way: a port bound, as the round's other
+// client-fed lists have (the original's per-client lists are bounded by
+// the objects there are).
+void GameWorld::addMapSpot(const MapSpot& spot, bool refresh)
+{
+	pruneMapSpots();
+	const int scope = spot.squad == 0 ? spot.reporter : -1;
+	for (MapSpot& s : m_mapSpots) {
+		if (s.team == spot.team && s.squad == spot.squad && (s.squad == 0 ? s.reporter : -1) == scope
+			&& s.enemy == spot.enemy && s.vehicle == spot.vehicle) {
+			if (refresh && spot.until > s.until) {
+				s.until = spot.until;
+				s.reporter = spot.reporter;
+			}
+			return;
+		}
+	}
+	if (m_mapSpots.size() >= kMapSpotLimit) {
+		m_mapSpots.erase(std::min_element(m_mapSpots.begin(), m_mapSpots.end(),
+			[](const MapSpot& x, const MapSpot& y) { return x.until < y.until; }));
+	}
+	m_mapSpots.push_back(spot);
 }
 
 bool GameWorld::mapSpotSeenBy(const MapSpot& spot, int viewer) const
