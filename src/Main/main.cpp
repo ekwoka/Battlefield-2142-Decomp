@@ -113,6 +113,7 @@
 #include "Voip/VoipNatives.h"
 
 #include "Nametags.h"
+#include "Render/OverheadView.h" // header-only: the camera's placement, renderer or not
 #if BF2142_HAS_RENDERER
 #include "Render/LevelRenderer.h"
 #include "Viewer.h"
@@ -8530,10 +8531,6 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.insideView();
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
-			shieldsDown();
-			titanBoard();
-			titanWalkTrace();
-			titanShotTrace.update(round, objects);
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);

@@ -37,7 +37,7 @@ TEST(Music_ClearingTrackCannotRestartPreviousSong)
 #ifdef _WIN32
 	_putenv_s("ALSOFT_DRIVERS", "null");
 #else
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 #endif
 	auto* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
@@ -59,7 +59,7 @@ TEST(Music_ReplacingTrackStopsPreviousPlayer)
 #ifdef _WIN32
 	_putenv_s("ALSOFT_DRIVERS", "null");
 #else
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 #endif
 	auto* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
@@ -132,7 +132,7 @@ TEST(SoundEngine_WalkerCannonLoopsBlockAndPlaysTailOnRelease)
 	CHECK(snd::readWavFile(path("Weapons/300rpm_medium_cannon/300rpm_medium_cannon_3p.wav").c_str(), wav));
 	CHECK(wav.hasLoop && wav.loopStart == 0 && wav.loopEnd > 0 && wav.loopEnd < int32_t(wav.frames) / 4);
 
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	snd::ISoundEngine* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
 	snd::ISoundTemplate* templ = engine->createTemplate();
@@ -170,7 +170,7 @@ TEST(SoundEngine_PlaysWavAndOgg)
 #ifdef _WIN32
 	_putenv_s("ALSOFT_DRIVERS", "null");
 #else
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 #endif
 	snd::ISoundEngine* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
@@ -253,7 +253,7 @@ TEST(SoundEngine_RandomEnvelopeVariantsStayWithinAuthoredBounds)
 TEST(SoundEngine_StaticLoopTracksActualPitchedPlayback)
 {
 	if (!testDir()) return;
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	snd::setEnhancedAudio(true);
 	auto* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(1, "Software Audio", 16) == 0);
@@ -299,7 +299,7 @@ TEST(SoundEngine_StaticLoopTracksActualPitchedPlayback)
 TEST(SoundEngine_RetailStaticLoopOffsetFromFlags)
 {
 	if (!testDir()) return;
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	snd::setEnhancedAudio(false);
 	auto* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(1, "Software Audio", 16) == 0);
@@ -343,7 +343,7 @@ TEST(SoundEngine_RetailStaticLoopOffsetFromFlags)
 TEST(SoundEngine_StopType2OffsetIsPastTheLoop)
 {
 	if (!testDir()) return;
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	for (const bool enhanced : {false, true}) {
 		snd::setEnhancedAudio(enhanced);
 		auto* engine = snd::getSoundEngine();
@@ -392,7 +392,7 @@ TEST(SoundEngine_StopType2OffsetIsPastTheLoop)
 TEST(SoundEngine_StopType2CutsToTheEndBlock)
 {
 	if (!testDir()) return;
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	snd::ISoundEngine* engine = snd::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
 	struct Gun { const char* file; float tail; };

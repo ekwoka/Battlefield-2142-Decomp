@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <vector>
@@ -23,6 +24,25 @@ inline int& failures()
 {
 	static int count = 0;
 	return count;
+}
+
+// Sets an environment variable for the rest of the run (setenv has no Windows twin).
+inline void setEnv(const char* name, const char* value)
+{
+#ifdef _WIN32
+	_putenv_s(name, value);
+#else
+	setenv(name, value, 1);
+#endif
+}
+
+inline void unsetEnv(const char* name)
+{
+#ifdef _WIN32
+	_putenv_s(name, "");
+#else
+	unsetenv(name);
+#endif
 }
 
 // Project Remaster is a mod, not part of the game: its tests run only with

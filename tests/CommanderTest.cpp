@@ -911,11 +911,7 @@ TEST(Commander_AiAnswersSquadRequests)
 TEST(Commander_RemasterOrbitalStrikeBlastSound)
 {
 	REMASTER_ONLY();
-	#ifdef _WIN32
-	_putenv_s("ALSOFT_DRIVERS", "null");
-	#else
-	setenv("ALSOFT_DRIVERS", "null", 1);
-	#endif
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	sound::ISoundEngine* engine = sound::getSoundEngine();
 	CHECK(engine && engine->initialize(0, "Software Audio", 32) == 0);
 	if (!engine || !engine->isInitialized()) {

@@ -31,6 +31,7 @@
 #include "Net/RemoteInput.h"
 #include "Render/PostProduction.h"
 #include "SeatAim.h"
+#include "Terrain/Heightmap.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -1923,7 +1924,7 @@ TEST(Vehicles_GunshipMouseInputBetweenTicks)
 	CHECK(g.world->gunAim(v, 1, after, pitch));
 	// The four moves make one tick's 4 degrees, 0.8 PIMouseLook units: the
 	// yaw bundle's speed goes towards 0.8 x maxSpeed (stepGunner, 0x00563bd0).
-	const auto& axis = g.world->vehicleSeats(v)[1].yawAxis;
+	const auto axis = g.world->vehicleSeats(v)[1].yawAxis; // vehicleSeats returns a copy
 	const float speed = std::min(0.8f * axis.maxSpeed, axis.acceleration / 30);
 	CHECK(speed > 0 && std::fabs(std::remainder(after - before, 360.0f) - speed / 30) < 0.05f);
 }

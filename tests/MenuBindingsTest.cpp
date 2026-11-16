@@ -1753,7 +1753,7 @@ TEST(MenuBindings_ServerTextInTheProfile)
 	fs::remove_all(scratch);
 	const char* previousConfig = std::getenv("BF2142_CONFIG_DIR");
 	const std::string savedConfig = previousConfig ? previousConfig : "";
-	setenv("BF2142_CONFIG_DIR", scratch.string().c_str(), 1);
+	test::setEnv("BF2142_CONFIG_DIR", scratch.string().c_str());
 	const std::string dir = menu::SettingsObjects::defaultDirectory();
 	CHECK(fs::path(dir).parent_path() == scratch);
 
@@ -1879,9 +1879,9 @@ TEST(MenuBindings_ServerTextInTheProfile)
 	}
 
 	if (savedConfig.empty()) {
-		unsetenv("BF2142_CONFIG_DIR");
+		test::unsetEnv("BF2142_CONFIG_DIR");
 	} else {
-		setenv("BF2142_CONFIG_DIR", savedConfig.c_str(), 1);
+		test::setEnv("BF2142_CONFIG_DIR", savedConfig.c_str());
 	}
 	fs::remove_all(scratch);
 }
