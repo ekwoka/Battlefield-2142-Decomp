@@ -1762,6 +1762,44 @@ TEST(Physics_CollisionDamageAndRoadKill)
 	}
 }
 
+// A soldier dropped onto a parked car: retail's 0x005a4690 sends the pair to
+// the road kill (0x005a43c0), the soldier being the faster the 10 m/s
+// limit, (speed - 10) x speed x the mass factor (3 for the car's 1800 over
+// his 200). enhanced.softLanding takes the ground rule (0x005a3db0: over
+// 9.1 m/s, no mass factor) for a soldier moving faster than the object.
+TEST(Physics_SoldierLandingOnAParkedCar)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	float lost[2] = {};
+	for (const bool soft : {false, true}) {
+		Game game(gameDir);
+		makeCar(game, {3, 1.2f, 0});
+		game.start();
+		bool on = true;
+		const bool off = false;
+		game.world->setSoftLanding(soft ? &on : &off, &on);
+		CHECK(game.world->softLanding() == soft);
+		CHECK(game.world->spawnPlayer(2) != nullptr);
+		game.run(2);
+		const int victim = game.world->addPlayer("Victim", 1, false);
+		CHECK(game.world->spawnSoldier(victim));
+		game::GameWorld::PlayerInfo info;
+		game.world->playerInfo(victim, info);
+		CHECK(game.world->setSoldierPosition(info.soldier, {3, 10, 0}));
+		const float before = game.world->hitPoints(info.soldier);
+		game.run(2);
+		game.world->playerInfo(victim, info);
+		lost[soft] = info.alive ? before - game.world->hitPoints(info.soldier) : before;
+		std::fprintf(stderr, "  %s: the soldier lost %.1f landing on the car%s\n", soft ? "softLanding" : "retail",
+			lost[soft], info.alive ? "" : " (dead)");
+	}
+	CHECK(lost[0] > 0);
+	CHECK(lost[1] < lost[0]);
+}
+
 // The contact effects (0x006b75d0 -> 0x006ba7d0's end): a car falling on
 // its roof plays its material cell's sound (index 0) once, and again
 // only after the slot's 0.5-1.5 s timer has run out.

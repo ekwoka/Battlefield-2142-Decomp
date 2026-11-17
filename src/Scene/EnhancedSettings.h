@@ -9,7 +9,7 @@
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
 // (botRecovery, botMovement, botTitan, guidedCameraEase, cornerSteer,
-// passengerWeapons): they change the simulation by design, so the check turns
+// passengerWeapons, softLanding): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
 
@@ -39,6 +39,7 @@ struct EnhancedSettings {
 	bool guidedCameraEase = true; // enhanced.guidedCameraEase: a guided round's camera eases back to centre instead of snapping (Game/GameWorld.cpp)
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
+	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
 	// Interface, also only with enhanced.enabled:
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 	// Drawing, also only with enhanced.enabled; experimental, off by default:
@@ -83,6 +84,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.cornerSteer = v; });
 	bindProperty<bool>(console, "enhanced.passengerWeapons", ConsoleAccess::Anyone, [&settings] { return settings.passengerWeapons; },
 		[&settings](const bool& v) { settings.passengerWeapons = v; });
+	bindProperty<bool>(console, "enhanced.softLanding", ConsoleAccess::Anyone, [&settings] { return settings.softLanding; },
+		[&settings](const bool& v) { settings.softLanding = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
 	bindProperty<bool>(console, "enhanced.tickBlend", ConsoleAccess::Anyone, [&settings] { return settings.tickBlend; },

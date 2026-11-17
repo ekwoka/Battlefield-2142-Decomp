@@ -950,6 +950,18 @@ public:
 		m_guidedCameraEase = ease;
 	}
 	bool guidedCameraEase() const { return m_enhancedCamera && *m_enhancedCamera && m_guidedCameraEase && *m_guidedCameraEase; }
+	// enhanced.enabled and enhanced.softLanding, read live: a soldier who
+	// lands on or walks into an object slower than he is (the world's
+	// speeds, a Titan's carry included) takes the ground's rule (0x005a3db0)
+	// instead of the road kill (not retail: 0x005a4690 sends every object
+	// hitting a soldier to 0x005a43c0). It changes the simulation. Null or
+	// false: retail.
+	void setSoftLanding(const bool* enhanced, const bool* soft)
+	{
+		m_enhancedLanding = enhanced;
+		m_softLanding = soft;
+	}
+	bool softLanding() const { return m_enhancedLanding && *m_enhancedLanding && m_softLanding && *m_softLanding; }
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
 	// the bot manager sets its navigation mesh's polygon lookup.
@@ -4016,6 +4028,8 @@ private:
 	std::map<int, ProjectileView> m_projectileViews; // by player
 	const bool* m_enhancedCamera = nullptr;          // setGuidedCameraEase
 	const bool* m_guidedCameraEase = nullptr;
+	const bool* m_enhancedLanding = nullptr;         // setSoftLanding
+	const bool* m_softLanding = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);

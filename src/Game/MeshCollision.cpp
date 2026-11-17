@@ -1448,19 +1448,20 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 		return;
 	}
 	if (Player* soldier = soldierPlayer(victim)) {
-		// A soldier landing on or walking into an object that moves slower
-		// than he does is the mover: the ground rule (over 9.1 m/s, no
-		// mass factor), not the object running him over. Dropping into a
-		// pit of the standing Titan (mass 1e6, factor 3) was a 127 kill.
-		// Not retail, kept on purpose: retail's base handler (0x0063c4da ->
-		// 0x004ba3f0 -> 0x005a4690) sends every object hitting a soldier to
-		// the road kill with no speed comparison. There, on a moving Titan the
-		// soldier's node velocity is the Titan's relative (0x006ca3b0) while
-		// the Titan's is the world's, so 0x005a43c0's 3 m/s limit catches a
-		// drop onto its decks and catwalks (x3 for its 1e6 mass). The death
-		// material (the Titans' shields) stays the instant case.
+		// Retail's base handler (0x0063c4da -> 0x004ba3f0 -> 0x005a4690)
+		// sends every object hitting a soldier to the road kill, whose only
+		// speed comparison is its limit (0x005a43c0: 3 or 10 m/s). The
+		// soldier's speed there is his node's slot 0x58 (0x006c99a0: +0x20,
+		// his own motion; 0x006ca3b0 adds a carrying Titan's velocity only
+		// into the step's +0x44), the Titan's the world's, so on a moving
+		// Titan the 3 m/s limit catches a drop onto its decks (x3 for its
+		// 1e6 mass). roadKill measures as retail does.
+		// enhanced.softLanding (not retail): a soldier landing on or walking
+		// into an object slower than he is (the world's speeds) is the
+		// mover, and takes the ground rule (over 9.1 m/s, no mass factor).
+		// The death material (the Titans' shields) stays the instant case.
 		const Body* body = findBody(attacker);
-		if (attackerMaterial != kKillMaterial && body
+		if (softLanding() && attackerMaterial != kKillMaterial && body
 			&& physics::lengthSquared(body->body.velocity)
 				< physics::lengthSquared(soldier->body.velocity + soldier->body.carriedVelocity())) { // the world's speed, carry included
 			groundCollisionDamage(victim, velocity, normal, point, attackerMaterial, victimMaterial);
