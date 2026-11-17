@@ -876,8 +876,9 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 		if (const GpuMesh* gpuMesh = mesh(sources, objectTemplate.geometry())) {
 			const Mat4 world = local * objectWorld;
 			Instance instance {gpuMesh, world, object, local, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
-			// Only lamp halos use whole-source visibility. Other additive
-			// surfaces (windows, signs, effects) keep their per-pixel depth test.
+			// enhanced.glowOcclusion: only lamp halos use whole-source
+			// visibility. Other additive surfaces (windows, signs, effects)
+			// keep their per-pixel depth test.
 			const auto hasGlowLight = [&](const auto& self, const world::ObjectTemplate& t, int level) -> bool {
 				if (level > 8) return false;
 				if (t.typeName() == "LightSource") {
@@ -3737,7 +3738,11 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
-		if (instance.occlusionGlow && m_sources && m_sources->glowVisible) {
+		// Not retail: RendDX9's occlusion queries (0x100050a0) serve only the
+		// sky dome's sun flare (0x100fd900), a terrain culler (0x1009e010)
+		// and ad impressions; a halo gets the per-pixel depth test alone.
+		if (instance.occlusionGlow && m_sources && m_sources->glowVisible && m_sources->enhanced
+			&& m_sources->enhanced->enabled && m_sources->enhanced->glowOcclusion) {
 			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			if (!m_sources->glowVisible(camera.position, source, instance.object)) {
 				continue;

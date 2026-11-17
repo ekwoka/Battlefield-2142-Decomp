@@ -7307,17 +7307,33 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
             // bound darkening by that measured baseline noise. The isolated
             // asset check above requires exactly zero darkened pixels.
             CHECK(dark <= noise); CHECK(bright > 100); CHECK(bright > noise * 3);
-            // A lamp whose centre the game reports blocked draws no halo at all
-            // (the deck above it used to show the quad's upper half on the road).
+            // A lamp whose centre the game reports blocked: retail never
+            // occlusion-tests a halo (RendDX9's queries, 0x100050a0, serve the
+            // sun flare, a terrain culler and ads), so it is still drawn.
+            // enhanced.glowOcclusion skips it (the deck above it used to show
+            // the quad's upper half on the road).
             sources.glowVisible = [](const render::Vec3f&, const render::Vec3f&, uint32_t) { return false; };
-            const auto blocked = frame();
-            size_t leaked = 0;
-            for (size_t i = 0; i + 3 < blocked.size() && i + 3 < background.size(); i += 4) {
-                int delta = 0;
-                for (int c = 0; c < 3; ++c) delta += int(blocked[i+c]) - int(background[i+c]);
-                if (delta > 9) ++leaked;
-            }
-            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: %zu brightened pixels\n", label, leaked);
+            const auto brightened = [&](const std::vector<uint8_t>& pixels) {
+                size_t n = 0;
+                for (size_t i = 0; i + 3 < pixels.size() && i + 3 < background.size(); i += 4) {
+                    int delta = 0;
+                    for (int c = 0; c < 3; ++c) delta += int(pixels[i+c]) - int(background[i+c]);
+                    if (delta > 9) ++n;
+                }
+                return n;
+            };
+            const size_t retail = brightened(frame());
+            scene::EnhancedSettings features;
+            features.enabled = true;
+            features.taa = features.ssao = features.csm = false;
+            sources.enhanced = &features;
+            const size_t leaked = brightened(frame());
+            features.glowOcclusion = false;
+            const size_t optedOut = brightened(frame());
+            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: retail %zu, enhanced %zu, glowOcclusion 0 %zu brightened pixels\n",
+                label, retail, leaked, optedOut);
+            CHECK(retail > 100); CHECK(retail * 3 > bright * 2);
+            CHECK(optedOut * 3 > bright * 2);
             // The scene's own frame-to-frame noise is about as large as its measured baseline.
             CHECK(leaked < bright / 3);
             gpu->releaseTarget(target);

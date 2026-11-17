@@ -171,8 +171,9 @@ struct LevelSources {
 	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Ordinary vehicle armour's wreck look (including its delay/opt-out).
 	std::function<bool(uint32_t object)> vehicleWreckLook;
-	// A lamp halo is visible only while its source is visible. Pixel depth
-	// testing alone lets a large glow quad protrude through a bridge deck.
+	// enhanced.glowOcclusion, not retail: a lamp halo is drawn only while its
+	// source is visible (pixel depth testing alone lets a large glow quad
+	// protrude through a bridge deck). Retail never occlusion-tests a halo.
 	std::function<bool(const Vec3f& eye, const Vec3f& source, uint32_t owner)> glowVisible;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
