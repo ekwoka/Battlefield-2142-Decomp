@@ -3554,7 +3554,8 @@ private:
 		float hitIndicator = 0;
 		bool hitIndicatorFlag = false;
 		// What he last gave (abilityBar): player +0x168 healed or repaired,
-		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160.
+		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160. Received
+		// stamps clear the flag (healHitPoints, the supply crates' refills).
 		bool gaveHeal = false, gaveRepair = false, gaveAmmo = false;
 		int64_t gaveHealTick = -1, gaveAmmoTick = -1;
 		// What he has given since his last point, per cent: heal, repair, ammo.

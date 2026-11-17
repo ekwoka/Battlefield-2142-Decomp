@@ -811,6 +811,7 @@ int g_mapMenu = 0;
 // (HudMenusVehicles.h) and the sound the weapon HUD starts (its overheat).
 dice::hfe::menu::WeaponHud g_weaponHud;
 dice::hfe::menu::AbilityBar g_abilityBar;
+int g_receivedSound = -1; // menu::receivedSound for the local player
 dice::hfe::menu::ItemSelection g_itemSelection;
 dice::hfe::menu::StrategicObjects g_strategicObjects;
 dice::hfe::menu::VehicleHud g_vehicleHud;
@@ -1998,11 +1999,15 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// HudMenusVehicles.h): the gifts in a vehicle, the tool's targets on
 	// foot, the tools' battery as PrimaryAmmo. Its sound is the kit's
 	// AbilityHud's (updateHud's caller plays it).
-	if (game::GameWorld::AbilityBarInfo ability; alive && !commanderScreen && world.abilityBar(ability)) {
+	game::GameWorld::AbilityBarInfo ability;
+	const bool abilityKnown = alive && world.abilityBar(ability);
+	if (abilityKnown && !commanderScreen) {
 		g_abilityBar.update(ability, inVehicle);
 	} else {
 		g_abilityBar.hide();
 	}
+	// The treated player's sound (0x007a1c30, commander screen or not).
+	g_receivedSound = abilityKnown && ability.alive ? dice::hfe::menu::receivedSound(ability, inVehicle) : -1;
 	g_abilityBar.apply(hud);
 	// The item selection on foot: the kit's weapons by slot (their
 	// weaponHud.selectIcon). A weapon key's pick opens it for 0.4 s with
@@ -10080,23 +10085,31 @@ int runGame(Options& options, Session& session)
 				// AbilityHud (on the kits: S_Heal, S_Repair, S_Resupply): the
 				// ability bar's (0x007c3af0 through the kit's AbilityHud
 				// slots 0x3c / 0x40 / 0x44): in a vehicle while what the
-				// player gave shows, on foot while the tool in hand treats.
-				static std::string supplySound;
-				std::string wanted;
+				// player gave shows, on foot while the tool in hand treats;
+				// and the treated player's (0x007a1c30, slots 0x48 / 0x4c).
+				// Retail keeps the two apart; one loop per name here.
+				static std::set<std::string> supplySounds;
+				std::set<std::string> wanted;
 				game::GameWorld::PlayerInfo self;
 				const world::Object* kit = round.playerInfo(round.localPlayer(), self) ? round.objects().find(self.kit) : nullptr;
-				if (kit && g_abilityBar.out().sound >= 0) {
-					wanted = dice::hfe::menu::abilitySound(*kit->objectTemplate(), g_abilityBar.out().sound);
-				}
-				if (wanted != supplySound) {
-					if (!supplySound.empty()) {
-						sounds.stopSound(supplySound);
-					}
-					supplySound = wanted;
-					if (!supplySound.empty()) {
-						sounds.playSound(supplySound);
+				for (const int what : {g_abilityBar.out().sound, g_receivedSound}) {
+					if (kit && what >= 0) {
+						if (std::string name = dice::hfe::menu::abilitySound(*kit->objectTemplate(), what); !name.empty()) {
+							wanted.insert(name);
+						}
 					}
 				}
+				for (const std::string& name : supplySounds) {
+					if (!wanted.count(name)) {
+						sounds.stopSound(name);
+					}
+				}
+				for (const std::string& name : wanted) {
+					if (!supplySounds.count(name)) {
+						sounds.playSound(name);
+					}
+				}
+				supplySounds = std::move(wanted);
 			}
 			squadMenu.update(hudLocal());
 			updateKitAbilities(hudManager, round, gameLogic, templates);

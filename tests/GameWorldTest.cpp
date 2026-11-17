@@ -12,6 +12,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Main/DeploymentTeam.h"
+#include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -1532,6 +1533,75 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 	}
 	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 3 && info.targets.empty());
 	CHECK(info.healFlag && info.sinceHeal >= 15);
+}
+
+TEST(GameWorld_HealedSoldierIsStampedAsReceiving)
+{
+	// 0x00655460: a heal raising a soldier's hit points past their old
+	// ceiling stamps his player as receiving (slot 0x258(now, 0, 0)), what
+	// 0x007a1c30 plays S_Heal by; the medic healing himself too stays the giver.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "8";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->components().push_back("Ability");
+	kit->settings()["ability.hasHealingAbility"] = "1";
+	for (const char* item : {"eu_ar_rifle", "unl_hub_medic"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const uint32_t mine = range.world->playerObject();
+	const int ally = range.world->addPlayer("Ally", 2, true);
+	CHECK(range.world->spawnSoldier(ally));
+	game::GameWorld::PlayerInfo allyInfo;
+	CHECK(range.world->playerInfo(ally, allyInfo));
+	game::GameWorld::AbilityBarInfo info;
+	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal < 0); // nothing yet
+	range.world->setHitPoints(mine, 40);
+	range.world->setHitPoints(allyInfo.soldier, 40);
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 60; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->hitPoints(allyInfo.soldier) > 40);
+	CHECK(range.world->abilityBar(ally, info) && !info.healFlag && !info.repairFlag);
+	CHECK(info.sinceHeal >= 0 && info.sinceHeal < 15);
+	CHECK(menu::receivedSound(info, false) == 0);
+	CHECK(range.world->abilityBar(me, info) && info.healFlag && menu::receivedSound(info, false) == -1);
+	// Full again, the stamp ages out.
+	range.world->setHitPoints(allyInfo.soldier, 100);
+	for (int i = 0; i < 80; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal >= 15 && menu::receivedSound(info, false) == -1);
+}
+
+TEST(ReceivedSound_HealOnFootRepairInAVehicle)
+{
+	// 0x007a1c30: received (flags clear) within 15 ticks.
+	game::GameWorld::AbilityBarInfo info;
+	CHECK(menu::receivedSound(info, false) == -1); // no stamp
+	info.sinceHeal = 0;
+	CHECK(menu::receivedSound(info, false) == 0 && menu::receivedSound(info, true) == 0);
+	info.sinceHeal = 14;
+	CHECK(menu::receivedSound(info, false) == 0);
+	info.sinceHeal = 15;
+	CHECK(menu::receivedSound(info, false) == -1);
+	info.sinceHeal = 3;
+	info.repairFlag = true; // the crew of a mended vehicle
+	CHECK(menu::receivedSound(info, true) == 1 && menu::receivedSound(info, false) == -1);
+	info.healFlag = true; // he gave it
+	CHECK(menu::receivedSound(info, true) == -1);
 }
 
 TEST(GameWorld_ReplenishNoticeIsTheHudsLineOfItsKind)

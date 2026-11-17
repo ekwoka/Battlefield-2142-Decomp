@@ -2029,7 +2029,28 @@ void GameWorld::healHitPoints(uint32_t object, float value, int repairer)
 	m_hitPoints[object] = value;
 	// 0x00655a00: the heal clears the damage list past 50 or at full.
 	if (const world::Object* o = m_objects.find(object); o && o->objectTemplate()) {
-		armourHealed(object, value - before, value >= number(*o->objectTemplate(), "armor.maxHitPoints", 0));
+		const float most = number(*o->objectTemplate(), "armor.maxHitPoints", 0);
+		armourHealed(object, value - before, value >= most);
+		// 0x00655460 on the server: a rise past the old hit points' ceiling,
+		// up to the maximum, stamps the treated as receiving (player slot
+		// 0x258(now, 0, vehicle)): a soldier's player, or each occupant of a
+		// vehicle. 0x007a1c30 plays the kit's healing / repairing sound by it.
+		if (value > std::ceil(before) && value <= most) {
+			const auto received = [this](Player* p, bool repaired) {
+				if (p) {
+					p->gaveHeal = false;
+					p->gaveRepair = repaired;
+					p->gaveHealTick = static_cast<int64_t>(m_ticks);
+				}
+			};
+			if (Player* soldier = soldierPlayer(object)) {
+				received(soldier, false);
+			} else {
+				for (const int id : vehicleOccupants(object)) {
+					received(findPlayer(id), true);
+				}
+			}
+		}
 	}
 	// The armour's state: a wreck at no hit points left (the commander's
 	// assets hold at 0), working above.

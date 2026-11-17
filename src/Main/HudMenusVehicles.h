@@ -379,6 +379,14 @@ private:
 	Out m_out;
 };
 
+// What the treated player hears (0x007a1c30, each HUD frame until his
+// death, 0x007a2386): the stamp's flags clear (received, set by the armour
+// 0x00655460) and its tick under 15 old, the kit's AbilityHud healingSound
+// (slot 0x48), or in a vehicle with the repaired flag its repairingSound
+// (slot 0x4c). 0 healing, 1 repairing, -1 none. Its ammoSound branch
+// (slot 0x50) is not ported.
+int receivedSound(const game::GameWorld::AbilityBarInfo& info, bool inVehicle);
+
 // The Titans' consoles and shields on the HUD (Friendly/EnemyStrategic-
 // Object%iShow, 0..9; the HUD information layer's +0xa89 + (team - 1) x
 // 10, copied for the local team and the other by 0x00448850). Every

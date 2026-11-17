@@ -432,6 +432,14 @@ const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo&
 	return m_out;
 }
 
+int receivedSound(const game::GameWorld::AbilityBarInfo& info, bool inVehicle)
+{
+	if (info.healFlag || info.sinceHeal < 0 || info.sinceHeal >= kGiftTicks) {
+		return -1;
+	}
+	return !info.repairFlag ? 0 : inVehicle ? 1 : -1;
+}
+
 const AbilityBar::Out& AbilityBar::hide()
 {
 	m_out.show = m_out.wrench = false;
