@@ -2043,7 +2043,11 @@ TEST(Physics_InstalledSoldierWalkingQueuesFootsteps)
 		gameSounds.onTrigger = [&](const sound::GameSounds::Triggered& event) { played.push_back(event.name); };
 		GameAudio audio(*game.world, game.objects, game.templates, manager, gameSounds, nullptr);
 		game::SoldierInput walk;
-		walk.throttle = 0.2f;
+		// Walking (0.6 x 0.6 x 3.9 m/s): the steps follow the held weapon's
+		// walk cycle (0x007fda00 -> 0x005ef7f0), twice a cycle. (At a fifth
+		// of the stick, 0.16 m/s, its cycle takes many seconds: no timer
+		// adds steps.)
+		walk.throttle = 0.6f;
 		game.world->setInput(local, walk);
 		GameAudio::Camera camera;
 		camera.firstPerson = true;

@@ -122,6 +122,39 @@ inline bool waterTooDeep(const physics::Vec3& origin, const physics::Ground& gro
 float soldierSpeed(int index);
 // The speed index of a pose (0x00586020).
 int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed = false);
+// The speed the soldier's third-person animation system sees (0x005ef250,
+// the 3p system, +0x2f0 == 0): crouched (pose +0x268 == 1) the horizontal
+// speed x anim-soldier-1p-speed-crouch (1.7, *0x00a71a08, static_init
+// 0x008e7d60), lying (2) x anim-soldier-1p-speed-prone (3.0, *0x00a719e0,
+// static_init 0x008e7d80), either held within 0 and 0x00586df0(3): speed
+// index 3's 3.9 m/s, crouched times the look's scale (0x00586420: zoomed
+// in, the field of view over the camera's times mouseSpeedMod; 1 else).
+// Standing and swimming it stays.
+float soldierAnimationSpeed(float speed, SoldierPose pose, float lookScale = 1);
+
+// The walk cycle the footsteps follow (0x005ef7f0): the 3p animation's
+// (slot 0x40, anim::AnimationState::walkCycle) length and time, -1 and -1
+// without a cycle. Without one (length under 0) on a ladder a 0.9 s cycle
+// on the game clock (DAT_00a7d060 slot 0x14, fmod); otherwise 0 and 0: no
+// steps.
+void soldierStepCycle(float& length, float& time, bool onLadder, double clock);
+
+// The movement sound's rule (0x007fda00, twice from the soldier's update
+// 0x0058d350): each tick it may play, the cycle's half (time < length x
+// 0.5, *0x0090dc48) against the one kept (+0x38); a step when it changed
+// and the soldier moves at 0.1 m/s or more (|slot 0x64|, *0x00920bd8, all
+// three axes), so twice a cycle. The half is kept moving or not.
+struct SoldierFootsteps {
+	static constexpr float kMinSpeed = 0.1f;
+	bool half = false; // +0x38
+	bool step(float length, float time, float speed)
+	{
+		const bool now = time < length * 0.5f;
+		const bool play = speed >= kMinSpeed && now != half;
+		half = now;
+		return play;
+	}
+};
 
 struct SoldierAnimationDirection {
 	float forward = 0;

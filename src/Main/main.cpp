@@ -8604,7 +8604,7 @@ int runGame(Options& options, Session& session)
 			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.insideView();
-			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0);
+			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale());
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
 			shieldsDown();

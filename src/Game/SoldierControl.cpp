@@ -30,6 +30,33 @@ float ease(float current, float target)
 
 float soldierSpeed(int index) { return kSpeeds[std::clamp(index, 0, 6)]; }
 
+void soldierStepCycle(float& length, float& time, bool onLadder, double clock)
+{
+	if (length >= 0) { // *0x009bfa88
+		return;
+	}
+	if (onLadder) {
+		length = 0.9f; // 0x3f666666
+		time = std::fmod(static_cast<float>(clock), length); // the clock as a float (0x005ef92a)
+	} else {
+		length = time = 0;
+	}
+}
+
+float soldierAnimationSpeed(float speed, SoldierPose pose, float lookScale)
+{
+	constexpr float kCrouchScale = 1.7f; // *0x00a71a08 (0x3fd9999a)
+	constexpr float kProneScale = 3.0f;  // *0x00a719e0 (0x40400000)
+	switch (pose) {
+	case SoldierPose::Crouch:
+		return std::clamp(speed * kCrouchScale, 0.0f, soldierSpeed(3) * lookScale);
+	case SoldierPose::Prone:
+		return std::clamp(speed * kProneScale, 0.0f, soldierSpeed(3));
+	default:
+		return speed;
+	}
+}
+
 SoldierAnimationDirection soldierAnimationDirection(const physics::Vec3& velocity, float lookYawDegrees)
 {
 	const float speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);

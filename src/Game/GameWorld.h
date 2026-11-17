@@ -1017,8 +1017,11 @@ public:
 	// kit's isDogtagReplacement containers (+0x2e2) whatever is unlocked.
 	void setDogtagCount(int player, int count);
 	// Whether the player looks through the weapon's zoom (the local
-	// player's camera; the deviation's devModZoom and the gun sway use it).
-	void setZoomed(int player, bool zoomed);
+	// player's camera; the deviation's devModZoom and the gun sway use it),
+	// and the look's scale (0x00586420: the field of view over the camera's
+	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
+	// limit, soldierAnimationSpeed).
+	void setZoomed(int player, bool zoomed, float lookScale = 1);
 	// The distance counter (fire.useDistanceCounter, the rocket launchers'
 	// airburst): the range set (0: off), and the wheel's steps
 	// (PINextItem +1, PIPrevItem -1) while it is on.
@@ -3583,6 +3586,7 @@ private:
 		GunSway sway;
 		std::string feelFor;
 		bool zoomed = false;
+		float lookScale = 1; // setZoomed's
 		// fire.useDistanceCounter's range mode (SingleFireComp +0x178 /
 		// +0x17c): metres, 0 off; and the zoom last tick.
 		int burstDistance = 0;
@@ -3669,9 +3673,8 @@ private:
 		// The jump state the animation's up value comes from (soldier
 		// +0x2e8 / +0x2e9, 0x005eef80).
 		anim::SoldierJumpAnimation jumpAnimation;
-		float footstepPhase = 0;
-		float footstepSoundSeconds = 0;
-		bool footstepPhaseValid = false;
+		// The movement sound's kept half of the walk cycle (0x007fda00).
+		SoldierFootsteps footsteps;
 		// Dead: the body as a ragdoll, and the push of the explosion that
 		// killed it (the soldier's 0x2b0, kept by 0x005ee4d0).
 		std::unique_ptr<anim::RagDoll> ragDoll;
