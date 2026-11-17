@@ -85,8 +85,8 @@ physics::Vec3 ragDollHitForce(physics::Vec3 direction, float hitUp, float hitFor
 enum class RoundState { BeforeStart = 3, Playing = 1 };
 
 // The voice line the local player hears when a control point changes hands
-// ("" for none); siloIndex 1..5 selects Titan mode's silo variants.
-std::string captureVoice(int oldTeam, int newTeam, int localTeam, int siloIndex);
+// ("" for none), outside Titan mode (setControlPointTeam).
+std::string captureVoice(int oldTeam, int newTeam, int localTeam);
 
 // An ObjectSpawner template's settings (ObjectSpawner template 0x2c0-0x304,
 // defaults from its constructor 0x005af920).

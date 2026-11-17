@@ -4150,3 +4150,55 @@ TEST(Titan_WakeStaticTitansKeepPartsAndStayPut)
 		}
 	}
 }
+
+// A silo changing hands in Titan mode (Suez_Canal gpm_ti): the commander's
+// conquest lines (wecapturedacp / welostacp, the HUD's events 0x48 / 0x49 in
+// 0x00756b60) stay silent in a mode named with "ti"; the silo's own Radio
+// says it (0x00656e80), friendly or enemy, ending in the silo's number
+// (0x004d1770's count, "_%d") as the voice table's *silo_1..5 have it.
+TEST(Titan_SiloCaptureVoiceIsTheSilosOwnWithItsNumber)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Suez_Canal", 48);
+	if (!level.loaded) {
+		return;
+	}
+	CHECK(level.world->spawnPlayer(2) != nullptr);
+	const auto silos = level.world->missileSilos();
+	CHECK(!silos.empty());
+	sound::SoundManager manager(nullptr, level.templates);
+	sound::GameSounds sounds(manager);
+	GameAudio audio(*level.world, level.objects, level.templates, manager, sounds, nullptr);
+	audio.autoRadio(); // the first scan: the objects with radio messages
+	int checked = 0;
+	for (size_t i = 0; i < silos.size(); ++i) {
+		const auto& silo = silos[i];
+		if (silo.controlPoint < 0 || silo.number < 1 || silo.number > 5) {
+			continue;
+		}
+		const std::string n = "_" + std::to_string(silo.number);
+		for (const int team : {2, 1}) {
+			if (level.world->missileSilos()[i].team == team) {
+				continue;
+			}
+			level.world->takeRadioHeard();
+			level.world->setControlPointTeam(silo.controlPoint, team);
+			level.run(1 / 30.0f);
+			std::string said;
+			for (const auto& sent : audio.autoRadio()) {
+				said += sent.second + " ";
+			}
+			std::fprintf(stderr, "  silo %d (cp %d) to team %d: %s\n", silo.number, silo.controlPoint, team, said.c_str());
+			CHECK(said.find((team == 2 ? "AUTO_TITAN_C_friendlycapturedsilo" : "AUTO_TITAN_C_enemycapturedsilo") + n + " ")
+				!= std::string::npos);
+			for (const auto& heard : level.world->takeRadioHeard()) {
+				CHECK(heard.voice.find("AUTO_RULES_") != 0);
+			}
+			++checked;
+		}
+	}
+	CHECK(checked >= 2);
+}

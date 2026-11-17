@@ -789,21 +789,19 @@ void GameWorld::stepControlPoints(float seconds)
 	}
 }
 
-std::string captureVoice(int oldTeam, int newTeam, int localTeam, int siloIndex)
+std::string captureVoice(int oldTeam, int newTeam, int localTeam)
 {
 	if (oldTeam == newTeam || localTeam == 0) {
 		return {};
 	}
-	const bool silo = siloIndex >= 1 && siloIndex <= 5;
-	const std::string n = silo ? "_" + std::to_string(siloIndex) : std::string();
 	if (newTeam == localTeam) {
-		return silo ? "AUTO_TITAN_C_friendlycapturedsilo" + n : "AUTO_RULES_wecapturedacp";
+		return "AUTO_RULES_wecapturedacp";
 	}
 	if (oldTeam == localTeam) {
-		return silo ? "AUTO_TITAN_C_friendlylostsilo" + n : "AUTO_RULES_welostacp";
+		return "AUTO_RULES_welostacp";
 	}
-	// shortcut: neutralizing an enemy point is silent; only an enemy capture of a silo has a line
-	return silo && newTeam != 0 ? "AUTO_TITAN_C_enemycapturedsilo" + n : std::string();
+	// shortcut: neutralizing an enemy point is silent
+	return {};
 }
 
 void GameWorld::setControlPointTeam(int controlPointId, int team)
@@ -811,15 +809,14 @@ void GameWorld::setControlPointTeam(int controlPointId, int team)
 	for (ControlPoint& point : m_controlPoints) {
 		if (point.id == controlPointId) {
 			// The commander's capture lines (VoiceMessages_AutomaticallyTriggered.con
-			// AUTO_RULES_wecapturedacp / welostacp; Titan mode's *silo_1..5 by silo index).
-			if (m_player && m_state != RoundState::BeforeStart) {
-				int siloIndex = 0;
-				for (const SiloInfo& silo : missileSilos()) {
-					if (silo.controlPoint == controlPointId) {
-						siloIndex = silo.controlPoint;
-					}
-				}
-				hearRadio(m_player->id, 2, captureVoice(point.team, team, m_player->team, siloIndex));
+			// AUTO_RULES_wecapturedacp / welostacp: the HUD's events 0x48 / 0x49
+			// in 0x00756b60, the first's line at 0x007591a0). Not in Titan mode:
+			// both cases go on only while the game mode's name (game logic
+			// slot 0xf8) has no "ti". A silo's lines,
+			// AUTO_TITAN_C_*silo_N, are its Radio's team-change messages
+			// (0x00656e80, with SiloSyncEvent's "_N", 0x00514030; GameAudio).
+			if (m_player && m_state != RoundState::BeforeStart && m_gameMode.find("ti") == std::string::npos) {
+				hearRadio(m_player->id, 2, captureVoice(point.team, team, m_player->team));
 			}
 			point.team = team;
 			point.object->setTeam(team);

@@ -1483,15 +1483,12 @@ TEST(HudTitan_HealthUsesArmourPercentAndRetailTicketRounding)
 	CHECK(dice::hfe::menu::titanHudHealth(titan) == 0);
 }
 
-TEST(CaptureVoice_IsTeamRelativeAndSiloAware)
+TEST(CaptureVoice_IsTeamRelative)
 {
 	using dice::hfe::game::captureVoice;
-	CHECK(captureVoice(0, 1, 1, 0) == "AUTO_RULES_wecapturedacp");
-	CHECK(captureVoice(1, 2, 1, 0) == "AUTO_RULES_welostacp");
-	CHECK(captureVoice(1, 0, 2, 0).empty());
-	CHECK(captureVoice(0, 2, 1, 3) == "AUTO_TITAN_C_enemycapturedsilo_3");
-	CHECK(captureVoice(0, 1, 1, 3) == "AUTO_TITAN_C_friendlycapturedsilo_3");
-	CHECK(captureVoice(1, 2, 1, 5) == "AUTO_TITAN_C_friendlylostsilo_5");
+	CHECK(captureVoice(0, 1, 1) == "AUTO_RULES_wecapturedacp");
+	CHECK(captureVoice(1, 2, 1) == "AUTO_RULES_welostacp");
+	CHECK(captureVoice(1, 0, 2).empty());
 }
 
 // setNodeLogicShowVariable's value is an int (0x0076e090 names "int",
