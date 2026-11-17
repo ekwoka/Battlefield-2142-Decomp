@@ -9,9 +9,9 @@
 //   gameLogic.setTicketLossPerMin 1 6
 // and the game mode's Python script runs the round through the parameters
 // ("tickets", "ticketChangePerSecond", "ticketLimit"...). Each tick the
-// tickets change by ticketChangePerSecond; crossing a ticket limit raises
-// TicketLimitReached(team, -id) going down and (team, id) going up, and the
-// time limit raises TimeLimitReached.
+// tickets change by ticketChangePerSecond; falling to or below a ticket limit
+// raises TicketLimitReached(team, -id) (rising over one raises nothing), and
+// the time limit raises TimeLimitReached.
 #pragma once
 
 #include "ScriptGame.h"

@@ -37,17 +37,15 @@ void GameLogic::checkLimits(int teamIndex, float before, float after)
 	if (!m_events) {
 		return;
 	}
-	// One event per change: the first crossed limit by id (0x004be900 from
-	// 0x004beaaa); copies, as a handler may change the limits.
+	// One event per change: the first limit crossed going down, by id
+	// (0x004be900 from 0x004beaaa: -id for new <= limit < old; its second
+	// test repeats the same condition, so tickets rising over a limit raise
+	// nothing). Copies, as a handler may change the limits.
 	const std::map<int, int> limits = team(teamIndex).ticketLimits;
 	for (const auto& [id, value] : limits) {
 		const float limit = static_cast<float>(value);
 		if (before > limit && after <= limit) {
 			m_events("TicketLimitReached", {ScriptValue::integer(teamIndex), ScriptValue::integer(-id)});
-			return;
-		}
-		if (before <= limit && after > limit) {
-			m_events("TicketLimitReached", {ScriptValue::integer(teamIndex), ScriptValue::integer(id)});
 			return;
 		}
 	}

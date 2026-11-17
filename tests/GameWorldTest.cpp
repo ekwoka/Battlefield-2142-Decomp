@@ -8182,3 +8182,26 @@ TEST(GameWorld_DeploymentEnterAndDoneConfirmTheSameSpawn)
 		CHECK(range.world->playerInfo(me, info) && info.alive);
 	}
 }
+
+// A ticket limit raises TicketLimitReached(team, -id) only when the tickets
+// fall to or below it (0x004be900: new <= limit < old, its second test the
+// same condition); rising back over it raises nothing.
+TEST(GameLogic_TicketLimitOnlyOnTheWayDown)
+{
+	game::GameLogic logic;
+	std::vector<std::pair<int64_t, int64_t>> raised;
+	logic.setEventSink([&raised](const std::string& event, const game::ScriptArgs& args) {
+		if (event == "TicketLimitReached") {
+			raised.emplace_back(args[0].asInt(), args[1].asInt());
+		}
+	});
+	logic.team(1).ticketLimits[3] = 10;
+	logic.setTickets(1, 20);
+	CHECK(raised.empty());
+	logic.setTickets(1, 10);
+	CHECK(raised.size() == 1 && raised[0].first == 1 && raised[0].second == -3);
+	logic.setTickets(1, 25); // up over the limit
+	CHECK(raised.size() == 1);
+	logic.setTickets(1, 5);
+	CHECK(raised.size() == 2 && raised[1].second == -3);
+}
