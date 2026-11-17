@@ -1079,6 +1079,12 @@ public:
 		uint32_t vehicle = 0;
 	};
 	std::vector<UseKeyExit> takeUseKeyExits() { return std::exchange(m_useKeyExits, {}); }
+	// Rounds the defuser took away, for the AI to forget (0x005d8ac0 posts
+	// AI event 3/0x15 with the round's id before deleting it, when the AI
+	// interface's slot 0x20 is clear, as with the server's bots; 0x00894860
+	// -> IAIMineManager slot 0x10 and IAIEventCourier slot 0x40): the
+	// rounds' serials, the last 64 kept.
+	std::vector<uint32_t> takeAiForgotten() { return std::exchange(m_aiForgotten, {}); }
 	// Where `player` looks (the camera's z axis): on foot his look's yaw
 	// and pitch, seated his seat's gun or camera turned by the hull.
 	physics::Vec3 viewForward(int player) const;
@@ -3169,6 +3175,7 @@ private:
 	void clearCloseTo(int player, CloseToScan& scan);
 	std::vector<AiHit> m_aiHits;
 	std::vector<UseKeyExit> m_useKeyExits;
+	std::vector<uint32_t> m_aiForgotten;
 	struct {
 		std::string weapon; // the weapon whose tones play
 		int state = 0;      // the runtime WeaponHud's +0x10

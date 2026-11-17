@@ -3361,6 +3361,12 @@ void GameWorld::defuseRound(Projectile& round, Player& holder)
 			weapon->giveRoundBack();
 		}
 	}
+	// AI event 3/0x15 with the round's id (0x005d8dc8: the AI interface's
+	// slot 0x20, its +6, 0 when it runs the server's bots): the AI forgets
+	// it (BotManager::forgetObject).
+	if (m_aiForgotten.size() < 64) {
+		m_aiForgotten.push_back(round.serial);
+	}
 	round.alive = false; // the object manager's delete (0xa85220 slot 0x14): no effect
 	round.keepLeft = -1;
 	if (round.ghostObject) {

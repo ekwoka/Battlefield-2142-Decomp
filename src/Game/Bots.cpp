@@ -1487,6 +1487,9 @@ void BotManager::update(float seconds)
 	for (const GameWorld::AiHit& hit : m_world.takeAiHits()) {
 		hitBy(hit.victim, hit.attacker);
 	}
+	for (const uint32_t object : m_world.takeAiForgotten()) {
+		forgetObject(object);
+	}
 	// A human out of a vehicle by the use key (BF2142.exe 0x004bb570 posts
 	// AI event 3/3 with the seat's AI adaptor once he is out; 0x00894860 ->
 	// IAIEventCourier slot 8, 0x1004e0a0 -> AIMain slot 23, 0x10056610):

@@ -1351,9 +1351,11 @@ TEST(ArmouredRounds_DefuserRemovesMotionMines)
 		input = {};
 		input.selectItem = 5;
 		press(input, 10);
+		uint32_t mineSerial = 0;
 		const auto enemyMine = [&]() -> const game::Projectile* {
 			for (const auto& p : field.world->projectiles()) {
 				if (p.alive && p.settings && p.settings->name == "Unl_Mine_Motion_Projectile" && p.player == enemy) {
+					mineSerial = p.serial;
 					return &p;
 				}
 			}
@@ -1400,6 +1402,8 @@ TEST(ArmouredRounds_DefuserRemovesMotionMines)
 		CHECK(enemyMine() == nullptr);
 		CHECK(field.alive(engineer));
 		CHECK(rounds() == full);
+		// AI event 3/0x15 with the round's id (0x005d8ac0): the AI forgets it.
+		CHECK(mineSerial != 0 && field.world->takeAiForgotten() == std::vector<uint32_t> {mineSerial});
 	}
 }
 
