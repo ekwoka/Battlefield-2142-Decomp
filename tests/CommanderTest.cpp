@@ -340,6 +340,51 @@ TEST(Commander_InheritedCollisionPartsCollide)
 	}
 }
 
+// A static made mid-round and then deleted (a spawner's swap, a commander
+// asset's end) takes its collision with it, as retail's goes with the
+// object (the object manager's delete 0x006fdd90 -> slot 0x108, 0x006fa730):
+// no invisible wall where it stood, and placing it again and again leaves
+// one copy of its faces, not a pile.
+TEST(Commander_DeletedStaticLeavesNoCollision)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	Field field("mods/bf2142", true);
+	CHECK(field.loaded);
+	if (!field.loaded || !field.templates.find("missile_silo_v2")) {
+		return;
+	}
+	field.world->tick(1 / 30.0f);
+	const size_t soldierBase = field.world->staticCollision().triangles();
+	const size_t projectileBase = field.world->projectileCollision(0)->triangles();
+	const size_t partBase = field.world->staticPartCount();
+	const physics::Vec3 from {-10, 8, 0.97f}, to {10, 8, 0.97f}; // through the upright tube
+	for (int round = 0; round < 5; ++round) {
+		const world::Object* placed = field.objects.create(field.templates.find("missile_silo_v2"), {0, 0, 0}, {0, 0, 0});
+		const uint32_t id = placed->id();
+		field.world->tick(1 / 30.0f);
+		float fraction = 0;
+		uint32_t owner = 0;
+		CHECK(field.world->segmentHit(from, to, 0, fraction, owner) && owner == id);
+		physics::CollisionWorld::Hit hit {};
+		CHECK(field.world->staticCollision().raycast({-10, 6, 0.97f}, {10, 6, 0.97f}, hit) && hit.owner == id);
+		CHECK(field.world->staticCollision().triangles() == soldierBase + 92 + 60 + 12);
+		CHECK(field.world->projectileCollision(0)->triangles() == projectileBase + 2264 + 532 + 244);
+		CHECK(field.world->staticPartCount() > partBase);
+		field.objects.remove(id);
+		field.world->tick(1 / 30.0f);
+		std::fprintf(stderr, "  placing %d: soldier %zu, projectile %zu faces, %zu parts after the delete\n", round,
+			field.world->staticCollision().triangles(), field.world->projectileCollision(0)->triangles(),
+			field.world->staticPartCount());
+		CHECK(!field.world->segmentHit(from, to, 0, fraction, owner));
+		CHECK(!field.world->staticCollision().raycast({-10, 6, 0.97f}, {10, 6, 0.97f}, hit));
+		CHECK(field.world->staticCollision().triangles() == soldierBase);
+		CHECK(field.world->projectileCollision(0)->triangles() == projectileBase);
+		CHECK(field.world->staticPartCount() == partBase); // the mesh physics' parts too
+	}
+}
+
 // The EMP station and the orbital controller stop a running soldier from
 // each side, in both mods: their soldier shapes are the root's (geometry 0,
 // up to the dish and antenna; the child parts author no soldier LOD).

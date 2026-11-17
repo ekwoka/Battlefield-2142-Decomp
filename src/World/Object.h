@@ -96,6 +96,12 @@ public:
 	Object* find(uint32_t id) const;
 	void remove(uint32_t id);
 	void clear();
+	// How many objects remove() and clear() have taken out so far (a reader
+	// that keeps state per object checks only when it moved).
+	uint64_t removals() const { return m_removals; }
+	// The id the next create() gives: the objects() list is in id order, so
+	// those made since a reader saw this value are its tail.
+	uint32_t nextId() const { return m_nextId; }
 	// The game mode being loaded (gpm_cq, gpm_sp, ...), for Object.notInAI.
 	void setGameMode(const std::string& mode) { m_gameMode = mode; }
 	const std::string& gameMode() const { return m_gameMode; }
@@ -106,6 +112,7 @@ private:
 	std::unordered_map<uint32_t, Object*> m_byId; // find's index
 	Object* m_active = nullptr;
 	uint32_t m_nextId = 1;
+	uint64_t m_removals = 0;
 };
 
 } // namespace dice::hfe::world

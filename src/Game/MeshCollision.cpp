@@ -1237,13 +1237,52 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 }
 
 // A static object's parts leave the grid (a broken prop's physics,
-// 0x00651c60's slot 0xd4 -> 0xc).
+// 0x00651c60's slot 0xd4 -> 0xc; a deleted object's, 0x006fdd90). They stay
+// in the list, so a pass walking it now keeps them, until
+// compactStaticParts.
 void GameWorld::removeStaticParts(uint32_t object)
 {
-	for (auto& [key, indices] : m_staticGrid) {
-		indices.erase(std::remove_if(indices.begin(), indices.end(),
-						  [&](uint32_t index) { return m_staticParts[index].object == object; }),
+	bool any = false;
+	for (StaticPart& part : m_staticParts) {
+		if (part.object == object && !part.removed) {
+			part.removed = true;
+			++m_staticPartsRemoved;
+			any = true;
+		}
+	}
+	if (!any) {
+		return;
+	}
+	for (auto it = m_staticGrid.begin(); it != m_staticGrid.end();) {
+		std::vector<uint32_t>& indices = it->second;
+		indices.erase(std::remove_if(indices.begin(), indices.end(), [&](uint32_t index) { return m_staticParts[index].removed; }),
 			indices.end());
+		it = indices.empty() ? m_staticGrid.erase(it) : std::next(it);
+	}
+}
+
+void GameWorld::compactStaticParts()
+{
+	if (m_staticPartsRemoved == 0) {
+		return;
+	}
+	m_staticPartsRemoved = 0;
+	std::vector<uint32_t> moved(m_staticParts.size(), 0);
+	uint32_t kept = 0;
+	for (size_t i = 0; i < m_staticParts.size(); ++i) {
+		if (!m_staticParts[i].removed) {
+			moved[i] = kept;
+			if (kept != i) {
+				m_staticParts[kept] = std::move(m_staticParts[i]);
+			}
+			++kept;
+		}
+	}
+	m_staticParts.resize(kept);
+	for (auto& [key, indices] : m_staticGrid) {
+		for (uint32_t& index : indices) {
+			index = moved[index];
+		}
 	}
 }
 

@@ -32,6 +32,7 @@ void ObjectManager::remove(uint32_t id)
 			}
 			m_byId.erase(id);
 			m_objects.erase(it);
+			++m_removals;
 			return;
 		}
 	}
@@ -39,6 +40,7 @@ void ObjectManager::remove(uint32_t id)
 
 void ObjectManager::clear()
 {
+	m_removals += m_objects.size();
 	m_objects.clear();
 	m_byId.clear();
 	m_active = nullptr;

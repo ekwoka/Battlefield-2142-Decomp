@@ -49,6 +49,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1271,6 +1272,8 @@ public:
 	// executor 0x004ff358, getter 0x005c67e0; shipped on the Titans).
 	bool firstPersonEffects(uint32_t object) const;
 	const physics::CollisionWorld& staticCollision() const { return m_collision; }
+	// The static objects' parts the mobile mesh physics meets (their grid's list).
+	size_t staticPartCount() const { return m_staticParts.size(); }
 	// The projectile LOD's faces a round's hit lands on, for its decal's
 	// clipping (RendDX9 0x101655c0 walks the hit mesh's faces): the static
 	// objects' (world space) for object 0, else that body's (object space);
@@ -3372,17 +3375,20 @@ private:
 		uint32_t material = 0; // the template's material
 		uint32_t stamp = 0;
 		uint32_t collisionGroups = 0;
+		bool removed = false; // out of the grid (removeStaticParts), dropped by compactStaticParts
 	};
-	struct StaticCollisionObject {
-		uint32_t id = 0;
-		const world::ObjectTemplate* objectTemplate = nullptr;
-		physics::Vec3 position, rotation;
-		bool childrenDisabled = false;
-		bool destroyed = false;
-	};
-	std::vector<StaticCollisionObject> m_staticCollisionObjects;
+	// The objects whose collision is in the static worlds, the next id a
+	// pass hasn't seen and the object manager's removals it has.
+	std::unordered_set<uint32_t> m_staticCollisionObjects;
+	uint32_t m_staticNextId = 1;
+	uint64_t m_staticRemovals = 0;
 	void syncStaticCollision();
+	void addStaticObject(const world::Object& object);
 	bool movesByScript(uint32_t id);
+	// Drops the parts removeStaticParts took out of the grid from the list
+	// (between the passes that walk it).
+	void compactStaticParts();
+	size_t m_staticPartsRemoved = 0;
 	void addStaticPart(StaticPart part);
 	std::vector<StaticPart> m_staticParts;
 	std::unordered_map<int64_t, std::vector<uint32_t>> m_staticGrid; // 16 m cells (x, z) -> parts

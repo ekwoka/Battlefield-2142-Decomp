@@ -468,27 +468,18 @@ void GameWorld::buildStaticCollision()
 	m_collision = {};
 	m_projectileCollision = {};
 	m_staticParts.clear();
+	m_staticPartsRemoved = 0;
 	m_staticGrid.clear();
 	m_ladders.clear();
 	m_staticProjectileRadius.clear();
 	m_staticCollisionObjects.clear();
+	m_staticNextId = m_objects.nextId();
+	m_staticRemovals = m_objects.removals();
 	if (!m_files) {
 		return;
 	}
 	for (const auto& owned : m_objects.objects()) {
-		const world::Object& object = *owned;
-		const world::ObjectTemplate* t = object.objectTemplate();
-		if (!t || flag(*t, "hasMobilePhysics", false) || movesByScript(object.id())) {
-			continue;
-		}
-		m_staticCollisionObjects.push_back({object.id(), t,
-			{object.position().x, object.position().y, object.position().z},
-			{object.rotation().x, object.rotation().y, object.rotation().z}, object.childrenDisabled(), object.destroyed()});
-		if (!object.destroyed()) {
-			addStaticCollision(*t,
-				physics::Mat3::fromYawPitchRoll({object.rotation().x, object.rotation().y, object.rotation().z}),
-				{object.position().x, object.position().y, object.position().z}, object.id(), 0);
-		}
+		addStaticObject(*owned);
 	}
 	// The debris pieces' bodies (Effects.h DebrisPiece): the terrain, the
 	// static objects, their collision meshes and the materials' friction
@@ -512,11 +503,6 @@ void GameWorld::buildStaticCollision()
 	m_effects.setDebrisWorld(std::move(debris));
 }
 
-// Static collision is first built at round start, but ObjectSpawners and
-// commander abilities create more non-mobile collision objects later. Keep
-// that snapshot in sync before the next physics step; rebuilding only when a
-// root is added, removed, moved, hidden, or destroyed avoids per-frame mesh
-// work while preserving its complete template-tree transforms.
 // Supply crates fall under their own script; their mesh must not sit in the
 // static snapshot where it would hurt the crate that owns it.
 bool GameWorld::movesByScript(uint32_t id)
@@ -525,38 +511,62 @@ bool GameWorld::movesByScript(uint32_t id)
 		|| std::any_of(m_players.begin(), m_players.end(), [id](const auto& player) { return player && player->kitObject == id; });
 }
 
+// A static object's collision (its tree's meshes in the soldier and
+// projectile worlds and its parts in the static grid), once.
+void GameWorld::addStaticObject(const world::Object& object)
+{
+	const world::ObjectTemplate* t = object.objectTemplate();
+	if (!t || flag(*t, "hasMobilePhysics", false) || movesByScript(object.id())) {
+		return;
+	}
+	m_staticCollisionObjects.insert(object.id());
+	if (!object.destroyed()) {
+		addStaticCollision(*t, physics::Mat3::fromYawPitchRoll({object.rotation().x, object.rotation().y, object.rotation().z}),
+			{object.position().x, object.position().y, object.position().z}, object.id(), 0);
+	}
+}
+
+// Static collision is first built at round start, but ObjectSpawners and
+// commander abilities create more non-mobile collision objects later, and
+// delete them (a stationary gun swapped by its spawner, a deployable's end).
+// Retail's collision is the object's own (its mesh instance, 0x0063ccc0)
+// and goes with it: the object manager's delete (slot 0x14, 0x006fdd90)
+// takes the object out (slot 0x108, 0x006fa730, releases its slot 0x40 /
+// 0x48 components) before it is destroyed. Here the objects made since the
+// last pass (the tail of the id-ordered list) are added in place (a full
+// rebuild mid-round changed existing bridge collision for the Remaster
+// walker), and when anything was deleted the objects whose collision is in
+// and are gone take it out with them. A moved static is not followed.
 void GameWorld::syncStaticCollision()
 {
-	// Only objects that appeared since the last snapshot are added, in place: a full rebuild
-	// mid-round changed existing bridge collision for the Remaster walker.
-	// shortcut: late removals/moves are not tracked, existing removeStaticParts covers broken props.
-	std::unordered_set<uint32_t> known;
-	for (const auto& old : m_staticCollisionObjects) {
-		known.insert(old.id);
-	}
-	std::vector<StaticCollisionObject> current;
-	bool changed = false;
-	for (const auto& owned : m_objects.objects()) {
-		const world::Object& object = *owned;
-		const world::ObjectTemplate* t = object.objectTemplate();
-		if (!t || flag(*t, "hasMobilePhysics", false) || movesByScript(object.id())) {
-			continue;
-		}
-		current.push_back({object.id(), t,
-			{object.position().x, object.position().y, object.position().z},
-			{object.rotation().x, object.rotation().y, object.rotation().z}, object.childrenDisabled(), object.destroyed()});
-		if (!known.count(object.id())) {
-			changed = true;
-			if (!object.destroyed()) {
-				addStaticCollision(*t,
-					physics::Mat3::fromYawPitchRoll({object.rotation().x, object.rotation().y, object.rotation().z}),
-					{object.position().x, object.position().y, object.position().z}, object.id(), 0);
+	if (m_objects.removals() != m_staticRemovals) {
+		m_staticRemovals = m_objects.removals();
+		for (auto it = m_staticCollisionObjects.begin(); it != m_staticCollisionObjects.end();) {
+			if (m_objects.find(*it)) {
+				++it;
+				continue;
 			}
+			m_collision.removeOwner(*it);
+			m_projectileCollision.removeOwner(*it);
+			removeStaticParts(*it);
+			m_staticProjectileRadius.erase(*it);
+			it = m_staticCollisionObjects.erase(it);
 		}
 	}
-	if (changed || current.size() != m_staticCollisionObjects.size()) {
-		m_staticCollisionObjects = std::move(current);
+	// What went now or since (a broken prop's, Props.cpp) leaves the storage
+	// too, here between the queries.
+	m_collision.compact();
+	m_projectileCollision.compact();
+	const auto& all = m_objects.objects();
+	size_t first = all.size();
+	while (first > 0 && all[first - 1]->id() >= m_staticNextId) {
+		--first;
 	}
+	m_staticNextId = m_objects.nextId();
+	for (size_t i = first; i < all.size(); ++i) {
+		addStaticObject(*all[i]);
+	}
+	compactStaticParts();
 }
 
 void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics::Mat3& rotation,
