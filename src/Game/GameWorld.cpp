@@ -15304,10 +15304,13 @@ bool GameWorld::stepBody(Body& b, float seconds)
 	}
 	stepSleep(b, seconds);
 	if (asleep(b)) {
-		// A resting node's bundles still turn on the driver's input (their own update, as the mech
-		// legs': the Hachimoto's camera mount rides PIPitch with its gun, which turns regardless).
-		if (b.vehicle && !b.occupants.empty() && b.occupants[0] >= 0) {
-			b.vehicle->setOccupied(true);
+		// A resting node's bundles still turn: each is an object of its own
+		// whose update (0x00565a20, from the object manager's 0x006ffa30 ->
+		// slot 0xa8) never asks the physics node's sleep, occupied or not.
+		// The Hachimoto's camera mount rides PIPitch with its gun; an exit
+		// stops a startAutoRotateOnEnter part (and puts it back) at rest too.
+		if (b.vehicle) {
+			b.vehicle->setOccupied(!b.occupants.empty() && b.occupants[0] >= 0);
 			b.vehicle->tickParts(body, seconds);
 		}
 		return false;

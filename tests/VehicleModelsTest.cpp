@@ -9791,3 +9791,52 @@ TEST(Vehicles_WreckSuspensionSettlesBothMods)
 		}
 	}
 }
+
+// A bundle's update (0x00565a20) is its own object's (the object manager's
+// 0x006ffa30 -> slot 0xa8): it runs while the hull's node sleeps, occupied
+// or not. A startAutoRotateOnEnter flap with restoreRotationOnExit (as
+// Vehicle_AutoRotateOnEnter's) on a parked transport opens under a pilot
+// and closes when he leaves, the node asleep throughout.
+TEST(VehicleModels_ParkedVehiclesBundlesUpdateAfterTheExit)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* transport = g.loaded ? g.templates.find("as_at") : nullptr;
+	if (!transport) {
+		return;
+	}
+	world::ObjectTemplate* flap = g.templates.create("RotationalBundle", "test_parked_flap");
+	flap->settings()["maxRotation"] = "0/90/0";
+	flap->settings()["minRotation"] = "0/0/0";
+	flap->settings()["maxSpeed"] = "0/45/0";
+	flap->settings()["acceleration"] = "0/1000/0";
+	flap->settings()["startAutoRotateOnEnter"] = "1";
+	flap->settings()["restoreRotationOnExit"] = "1";
+	transport->children().push_back({"test_parked_flap", {0, 1, 0}, {}});
+	const uint32_t at = g.start("as_at", {0, 2, 6});
+	for (int i = 0; i < 300 && !g.world->bodyAsleep(at); ++i) {
+		g.run(1 / 30.0f);
+	}
+	CHECK(g.world->bodyAsleep(at));
+	CHECK(g.enter(at));
+	g.run(3);
+	world::Vec3 offset, rotation;
+	CHECK(g.world->partPose(at, "test_parked_flap", offset, rotation));
+	const float aboard = rotation.y;
+	const bool asleepAboard = g.world->bodyAsleep(at);
+	game::SoldierInput use;
+	use.use = true;
+	g.world->setPlayerInput(use);
+	g.world->tick(1 / 30.0f);
+	g.world->setPlayerInput({});
+	CHECK(g.world->playerVehicle() == nullptr);
+	g.run(1);
+	CHECK(g.world->partPose(at, "test_parked_flap", offset, rotation));
+	std::fprintf(stderr, "  the flap: %.1f aboard (%s), %.1f a second after the exit (%s)\n", aboard,
+		asleepAboard ? "asleep" : "awake", rotation.y, g.world->bodyAsleep(at) ? "asleep" : "awake");
+	CHECK(asleepAboard && g.world->bodyAsleep(at));
+	CHECK(std::fabs(aboard) > 40);
+	CHECK(std::fabs(rotation.y) < 0.01f);
+}
