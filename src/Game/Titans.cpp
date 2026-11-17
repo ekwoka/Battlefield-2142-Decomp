@@ -692,12 +692,17 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 	for (const physics::CollisionUser user :
 		{physics::CollisionUser::Projectile, physics::CollisionUser::Vehicle, physics::CollisionUser::Soldier}) {
 		if (m.geometry > 0 && user != physics::CollisionUser::Projectile) {
-			// A child's geometry takes rounds only. A port addition, not
-			// retail-verified: retail gives such a child a mesh instance of
-			// the root's mesh at that geometry (0x0063ccc0 -> 0x006d8180 ->
-			// 0x006e5d70), whose per-LOD queries serve every user it has a
-			// LOD for; whether the soldier and vehicle passes reach a child's
-			// instance on a Titan wasn't traced.
+			// A child's geometry gives the rounds' LOD here only: its other
+			// LODs are the Titan body's collision parts. Retail gives such a
+			// child a full mesh instance of the cannon's mesh at that
+			// geometry (0x0063ccc0 -> 0x006d8180 -> 0x006e5d70), a response
+			// of the root's chain (0x006c0090, with no Titan exception), so
+			// the soldiers meet its soldier LOD (0x006c3890 with the part's
+			// instance) and the vehicles its vehicle LOD where the gun turns
+			// it. buildTitanCollisionParts makes those parts (Body::
+			// partMeshes, posed by poseCollisionParts) and soldierMovers and
+			// partActors take them, so a copy here at the rest pose would be
+			// a second, unturned one.
 			continue;
 		}
 		auto part = std::make_shared<TitanLodPart>();

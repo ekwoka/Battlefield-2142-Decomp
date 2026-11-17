@@ -4568,7 +4568,7 @@ private:
 		std::vector<uint32_t> materials;
 		physics::Mat3 rotation;
 		physics::Vec3 position;
-		int geometry = 0; // the mesh's geometry (a child's collisionPart; > 0 at the projectile LOD only)
+		int geometry = 0; // the mesh's geometry (a child's collisionPart; > 0 at the projectile LOD only, its others the body's parts)
 		int node = -1;  // the template node's part (its armour's or its armoured ancestor's)
 		std::vector<int> chain; // the parts it lies under (its collision goes with any of them)
 		int groups = 0;         // collisionGroups: 0x100 / 0x200 a team's own forcefield (PAC's, EU's)

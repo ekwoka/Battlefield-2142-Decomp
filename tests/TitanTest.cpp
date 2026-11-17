@@ -4219,3 +4219,38 @@ TEST(Titan_WakeStaticTitanPartsBurnDownUnderCriticalDamage)
 	std::fprintf(stderr, "  the doors after a second under their critical damage: %.2f\n", level.world->hitPoints(doors));
 	CHECK(std::fabs(level.world->hitPoints(doors) - 1) < 1e-3f);
 }
+
+// A Titan's collisionPart children (the gun hubs' cannons' base and barrel,
+// 0x0063ccc0 with the cannon's mesh) are full mesh instances (0x006d8180):
+// each response of the root's chain (0x006c0090), so the soldier pass
+// meets their soldier LOD where the guns turn them (0x006c3890 with the
+// part's instance) as it meets a vehicle's parts, not a copy at the rest
+// pose (Titans.cpp titanLodParts).
+TEST(Titan_SoldiersMeetTheGunsCollisionParts)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Minsk", 48);
+	if (!level.loaded) {
+		return;
+	}
+	for (int team = 1; team <= 2; ++team) {
+		const auto* titan = level.titan(team);
+		CHECK(titan != nullptr);
+		if (!titan) {
+			continue;
+		}
+		std::vector<physics::SoldierBody::Mover> movers;
+		level.world->soldierMovers(titan->position, team == 1 ? 2 : 1, 0, 0, movers);
+		size_t own = 0;
+		for (const auto& mover : movers) {
+			own += mover.owner == titan->object && mover.mesh ? 1 : 0;
+		}
+		const size_t parts = level.world->collisionPartCount(titan->object);
+		std::fprintf(stderr, "  titan %d: %zu soldier movers of its own, %zu collision parts\n", team, own, parts);
+		// The hull, then each part's soldier LOD once.
+		CHECK(parts >= 6 && own == parts + 1);
+	}
+}
