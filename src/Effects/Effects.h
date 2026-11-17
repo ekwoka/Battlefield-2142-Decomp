@@ -1010,7 +1010,6 @@ public:
 	{
 		m_placedMeshes = std::move(groups);
 	}
-	const std::vector<std::pair<std::string, std::vector<MeshSprite>>>& placedMeshes() const { return m_placedMeshes; }
 	// Calls `draw` for each group of sprites sharing a texture and blending
 	// (the heat shimmer's with `shimmer`: forEachShimmerGroup), faded by
 	// distance from `view` when it has settings.

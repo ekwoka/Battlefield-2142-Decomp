@@ -535,7 +535,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		bool captureWantedBefore = false;
 		bool pointerConfinedBefore = false;
 		bool discardFirstRelativeMotion = false;
-		int tracedCaptureState = -1;
 		input::MenuWheelSteps menuWheel;
 		MenuCursor menuCursor;
 		while (running) {
@@ -593,7 +592,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 							std::fprintf(stderr, "SDL_SetWindowFullscreen: %s\n", SDL_GetError());
 						} else {
 							if (!SDL_SyncWindow(window)) std::fprintf(stderr, "SDL_SyncWindow: %s\n", SDL_GetError());
-							if (std::getenv("BF2142_INPUT_TRACE")) std::printf("fullscreen-toggle requested=%d actual=%d\n",
+							if (static const bool trace = std::getenv("BF2142_INPUT_TRACE") != nullptr; trace) std::printf("fullscreen-toggle requested=%d actual=%d\n",
 								!fullscreen, (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0);
 							// The normal frame path also re-reads size and swapchain pixels;
 							// refresh menu coordinates for any remaining events this frame.
@@ -604,18 +603,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				}
 				if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
 					shown.fullscreenKeys.clear();
-				}
-				if (pointer && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_MOTION)) {
-					// Pointer screens: what SDL delivers (every button, every 20th motion), to find lost clicks.
-					static int motions = 0;
-					if (event.type != SDL_EVENT_MOUSE_MOTION || ++motions % 20 == 1) {
-						std::printf("pointer-event: %s button=%d at %.0f,%.0f playing=%d menuUp=%d\n",
-							event.type == SDL_EVENT_MOUSE_MOTION ? "motion" : event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ? "down" : "up",
-							event.type == SDL_EVENT_MOUSE_MOTION ? 0 : event.button.button,
-							event.type == SDL_EVENT_MOUSE_MOTION ? event.motion.x : event.button.x,
-							event.type == SDL_EVENT_MOUSE_MOTION ? event.motion.y : event.button.y, playing, menuUp);
-						std::fflush(stdout);
-					}
 				}
 				if (playing && !pointer && !menuUp && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
 					pressedButtons |= SDL_BUTTON_MASK(event.button.button);
@@ -744,24 +731,6 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					int ww = 1, wh = 1;
 					SDL_GetWindowSize(window, &ww, &wh);
 					SDL_WarpMouseInWindow(window, (400.0f + (px - 400.0f) * sources.hudXScale) * ww / 800.0f, py * wh / 600.0f);
-				}
-			}
-			{
-				// Always on, one line per change (not per frame): says which flag blocks capture.
-				const bool relative = SDL_GetWindowRelativeMouseMode(window);
-				const bool grabbed = SDL_GetWindowMouseGrab(window);
-				const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
-				const bool edgeGuarded = SDL_GetWindowMouseRect(window) != nullptr;
-				const bool cursorVisible = SDL_CursorVisible();
-				const char* why = options.pointerReason ? options.pointerReason() : nullptr;
-				const int state = focused | (pointer << 1) | (menuUp << 2) | (relative << 3) | (grabbed << 4) | (fullscreen << 5)
-					| (playing << 6) | (capture << 7) | (why ? static_cast<int>(why[0]) << 8 : 0) | (edgeGuarded << 16) | (cursorVisible << 17);
-				if (state != tracedCaptureState) {
-					std::printf("mouse-capture: t=%.1f wanted=%d blocker=%s focused=%d pointer=%d(%s) menu=%d playing=%d actual relative=%d grabbed=%d fullscreen=%d edge-guard=%d cursor-visible=%d\n",
-						SDL_GetTicksNS() / 1e9, capture, mouseCaptureBlocker(playing, pointer, menuUp, focused), focused, pointer, why ? why : "-", menuUp,
-						playing, relative, grabbed, fullscreen, edgeGuarded, cursorVisible);
-					std::fflush(stdout);
-					tracedCaptureState = state;
 				}
 			}
 			const Uint64 now = SDL_GetTicksNS();

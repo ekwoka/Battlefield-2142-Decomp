@@ -1924,12 +1924,8 @@ private:
 	const GameWorld::VehicleInfo* titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home);
 	bool titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	bool titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
-
-public:
 	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
 	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
-
-private:
 	// The zoom key's press (Bot::zoomPress, set by the plans' statements)
 	// on the weapon in hand: a press steps the level (0x005da670; not while
 	// reloading), a weapon change, a seat and a reload with zoomOutOnReload

@@ -18,6 +18,9 @@ namespace dice::hfe {
 
 namespace {
 
+// BF2142_INPUT_TRACE: the weapon input and reload animation traces, read once at startup.
+const bool kInputTrace = std::getenv("BF2142_INPUT_TRACE") != nullptr;
+
 constexpr float kDegrees = 3.14159265f / 180.0f;
 
 float number(const world::ObjectTemplate& t, const std::string& key, float otherwise)
@@ -900,7 +903,7 @@ void PlayerCamera::tick(float seconds)
 		m_alive = false;
 		return;
 	}
-	if (std::getenv("BF2142_INPUT_TRACE") && (altPressed || me.fired || me.reloading != m_reloadingWas || m_tick % 30 == 0)) {
+	if (kInputTrace && (altPressed || me.fired || me.reloading != m_reloadingWas || m_tick % 30 == 0)) {
 		const auto* gun = m_round.playerWeapon();
 		std::printf("input-trace tick=%d weapon=%s rounds=%d mags=%d reload=%d busy=%d alt=%d zoom=%d vehicle=%u seat=%d mode=%d first=%d\n",
 			m_tick, me.weaponTemplate ? me.weaponTemplate->name().c_str() : "none", me.rounds, gun ? gun->magsLeft() : -99,
@@ -1123,7 +1126,7 @@ void PlayerCamera::tick(float seconds)
 	}
 	std::vector<anim::FirstPersonRig::Event> events;
 	m_rig->update(input, seconds, &events);
-	if (std::getenv("BF2142_INPUT_TRACE") && (reloadStarted || (reloading && m_tick % 15 == 0))) {
+	if (kInputTrace && (reloadStarted || (reloading && m_tick % 15 == 0))) {
 		std::printf("reload-animation tick=%d pulse=%d playing", m_tick, reloadStarted);
 		for (const auto& name : m_rig->playing()) std::printf(" %s", name.c_str());
 		std::printf("\n");

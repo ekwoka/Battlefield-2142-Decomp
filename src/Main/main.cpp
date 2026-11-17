@@ -55,7 +55,6 @@
 #include "Prediction.h"
 #include "RemoteGuns.h"
 #include "RoundVisuals.h"
-#include "FxDump.h"
 #include "Movie/MovieDecoder.h"
 #include "Movie/MovieQueue.h"
 #include "Movie/MenuVideo.h"
@@ -65,7 +64,6 @@
 #include "DeploymentLifecycle.h"
 #include "DeploymentTeam.h"
 #include "StanceKeys.h"
-#include "TitanShotTrace.h"
 #include "HudMenusChat.h"
 #include "HudMenusComm.h"
 #include "HudMenusKits.h"
@@ -807,6 +805,8 @@ float g_overheadFov = 0.3f, g_overheadHeight = 260.0f;
 // The map's right-click menu open (the HUD manager's menu states: 0x14
 // MapMenuShow, 0x15 SquadLeaderMenuShow, 0x16 CommanderMenuShow; 0 none).
 int g_mapMenu = 0;
+// BF2142_INPUT_TRACE: the input and HUD traces, read once at startup.
+const bool g_inputTrace = std::getenv("BF2142_INPUT_TRACE") != nullptr;
 // The weapon, item selection and vehicle parts of the HUD
 // (HudMenusVehicles.h) and the sound the weapon HUD starts (its overheat).
 dice::hfe::menu::WeaponHud g_weaponHud;
@@ -1567,7 +1567,7 @@ void updateFlares(hud::HudManager& hud, const host::HudWorld& world, const world
 		in.pressed = me.flareFiring;
 	}
 	g_flareHud.update(hud, in);
-	if (std::getenv("BF2142_INPUT_TRACE") && in.present) {
+	if (g_inputTrace && in.present) {
 		static int last = -1;
 		const int now = static_cast<int>(hud.number("FlaresReloadTime") * 20) * 4 + static_cast<int>(hud.number("FlareUseShow")) * 2
 			+ static_cast<int>(hud.number("FlaresReloadTimeShow"));
@@ -1964,7 +1964,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			}
 		}
 		const std::string sound = g_weaponHud.update(hud, in);
-		if (std::getenv("BF2142_INPUT_TRACE")) {
+		if (g_inputTrace) {
 			static int lastRounds = -999, lastMags = -999;
 			if (in.rounds != lastRounds || in.mags != lastMags) {
 				std::printf("hud-ammo rounds=%d mags=%d text=%s clips=%s\n", in.rounds, in.mags,
@@ -2857,7 +2857,7 @@ std::optional<dice::hfe::menu::MenuMap> serverMap(const Session& session, const 
 
 int main(int argc, char** argv)
 {
-	if (std::getenv("BF2142_INPUT_TRACE")) std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	if (g_inputTrace) std::setvbuf(stdout, nullptr, _IOLBF, 0);
 	Options options;
 	if (!parseOptions(argc, argv, options)) {
 		return 2;
@@ -6601,37 +6601,6 @@ int runGame(Options& options, Session& session)
 				gameAudio.effectLoop(loop.key | (1ull << 48), loop.name, {loop.position.x, loop.position.y, loop.position.z},
 					loop.intensity);
 			}
-			// BF2142_FX_DUMP=1: what glows or smokes around the camera, once a second (Main/FxDump.h); =tick: every tick.
-			static const bool fxDump = std::getenv("BF2142_FX_DUMP") != nullptr;
-			static int fxDumpTick = 0;
-			static const int fxDumpEvery = fxDump && std::strcmp(std::getenv("BF2142_FX_DUMP"), "tick") == 0 ? 1 : 30;
-			if (fxDump && ++fxDumpTick % fxDumpEvery == 0) {
-				const physics::Vec3 at {camera.position.x, camera.position.y, camera.position.z};
-				const auto describe = [&](uint32_t anchor) -> std::string {
-					if ((anchor & 0xf0000000u) == client::kRoundAnchor) {
-						for (const game::Projectile& p : round.projectiles()) {
-							if ((client::kRoundAnchor | (p.serial & 0x0fffffffu)) == anchor && p.settings) {
-								return "round:" + p.settings->name;
-							}
-						}
-						return "round";
-					}
-					const world::Object* object = objects.find(anchor);
-					return object && object->objectTemplate() ? "object:" + object->objectTemplate()->name() : "unknown";
-				};
-				std::vector<std::string> lines;
-				client::fxDumpEmitters(objectEffects, "objects", at, 25.0f, describe, lines);
-				client::fxDumpEmitters(round.effects(), "world", at, 25.0f, describe, lines);
-				client::fxDumpEmitters(playerCamera.effects(), "first-person", at, 25.0f, {}, lines); // its anchors are the view's own
-				std::vector<client::RoundVisuals::Mesh> roundMeshes;
-				roundVisuals.meshes(round.projectiles(), roundMeshes, 0);
-				client::fxDumpRounds(roundMeshes, at, 25.0f, lines);
-				std::printf("fx-dump: t=%d camera=%.1f/%.1f/%.1f %zu entries\n", fxDumpTick / 30, at.x, at.y, at.z, lines.size());
-				for (const std::string& line : lines) {
-					std::printf("%s\n", line.c_str());
-				}
-				std::fflush(stdout);
-			}
 			gameAudio.tick(camera);
 			soundSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 			++soundTicks;
@@ -8536,74 +8505,17 @@ int runGame(Options& options, Session& session)
 		} else {
 			std::fprintf(stderr, "game mode %s did not start\n", options.gameMode.c_str());
 		}
-		// Testing aid: BF2142_TITAN_SHIELDS_DOWN=<team> (3: both) takes that team's Titan
-		// to 55 % once, so its shield is down (the terminals and core show).
-		// Diagnostic for "clipped into the Titan": twice a second while the local
-		// soldier is over or inside a Titan, its place in the Titan's frame and
-		// vertical speed (the log shows where it sinks).
-		auto titanWalkTrace = [&round, tick = 0]() mutable {
-			if (++tick % 15 != 0) {
+		// Diagnostic, BF2142_DRIVE_TRACE=1: where the local player's vehicle is, twice a second (a way out of a base).
+		auto driveTrace = [&round, on = std::getenv("BF2142_DRIVE_TRACE") != nullptr, tick = 0]() mutable {
+			if (!on || ++tick % 15 != 0) {
 				return;
 			}
 			game::GameWorld::PlayerInfo me;
-			// Diagnostic, BF2142_DRIVE_TRACE=1: where the local player's vehicle is, twice a second (a way out of a base).
-			static const bool driveTrace = std::getenv("BF2142_DRIVE_TRACE") != nullptr;
-			if (driveTrace && round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
+			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
 				std::printf("drive-trace: %.1f %.1f %.1f yaw %.0f\n", me.position.x, me.position.y, me.position.z, me.yaw);
 				std::fflush(stdout);
 			}
-			if (!round.playerInfo(round.localPlayer(), me) || !me.alive || me.vehicle) {
-				return;
-			}
-			for (const auto& titan : round.titans()) {
-				const float dx = me.position.x - titan.position.x, dz = me.position.z - titan.position.z;
-				if (std::hypot(dx, dz) < titan.radius + 10 && std::fabs(me.position.y - titan.position.y) < 60) {
-					std::printf("titan-walk: team %d shield %d at %.1f %.1f %.1f vy %.1f hull %u\n", titan.team, titan.shield ? 1 : 0, dx,
-						me.position.y - titan.position.y, dz, me.velocity.y, round.titanHolding(me.position) ? 1u : 0u);
-				}
-			}
 		};
-		auto shieldsDown = [&round, done = false]() mutable {
-			static const char* team = std::getenv("BF2142_TITAN_SHIELDS_DOWN");
-			if (!team || done) {
-				return;
-			}
-			for (const auto& titan : round.titans()) {
-				if ((titan.team == std::atoi(team) || std::atoi(team) == 3) && titan.maxHitPoints > 0) { // 3: both
-					round.setHitPoints(titan.object, titan.maxHitPoints * 0.55f);
-					done = true;
-					if (std::getenv("BF2142_TITAN_WRECK_CONSOLES")) {
-						for (const auto& part : round.titanParts(titan.team)) {
-							if (part.kind == game::GameWorld::TitanPartInfo::Console) {
-								std::printf("titan console %s at %.1f %.1f %.1f\n", part.name.c_str(), part.position.x, part.position.y, part.position.z);
-								round.applyDamage(part.id, 1e7f);
-							}
-						}
-					}
-				}
-			}
-		};
-		// Testing aid: BF2142_TITAN_BOARD=<n> puts n soldiers of each team on
-		// the enemy Titan's spawn points 20 s in (the bots' boarding stands in).
-		auto titanBoard = [&round, &bots, tick = 0]() mutable {
-			static const char* count = std::getenv("BF2142_TITAN_BOARD");
-			if (!count || ++tick != 600) {
-				return;
-			}
-			for (int team = 1; team <= 2; ++team) {
-				const std::vector<physics::Vec3> spots = bots.titanLandingSpots(3 - team, team);
-				int moved = 0;
-				for (const auto& p : round.playerList()) {
-					if (p.team == team && p.alive && !p.vehicle && moved < std::atoi(count) && !spots.empty()) {
-						const physics::Vec3 at = spots[(static_cast<size_t>(moved) * 7919 + 13) % spots.size()];
-						round.setSoldierPosition(p.soldier, {at.x, at.y + 0.3f, at.z});
-						++moved;
-					}
-				}
-				std::printf("titan-board: %d of team %d aboard the enemy Titan (%zu landing spots)\n", moved, team, spots.size());
-			}
-		};
-		host::TitanShotTrace titanShotTrace;
 		const auto step = [&] {
 			remoteStep();
 			if (hosted) {
@@ -8617,10 +8529,7 @@ int runGame(Options& options, Session& session)
 			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale());
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
-			shieldsDown();
-			titanBoard();
-			titanWalkTrace();
-			titanShotTrace.update(round, objects);
+			driveTrace();
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
@@ -10284,7 +10193,7 @@ int runGame(Options& options, Session& session)
 				quads.clear(); // renderer.drawNametags (+0x697, 0x1002cef0)
 			}
 			std::vector<hud::HudQuad> hud = hudManager.frame(seconds);
-			if (std::getenv("BF2142_INPUT_TRACE")) {
+			if (g_inputTrace) {
 				static int lastGui = -999, lastDeployment = -1;
 				const int gui = static_cast<int>(hudManager.number("GuiIndex"));
 				if (gui != lastGui || lastDeployment != static_cast<int>(g_deploymentOpen)) {
@@ -10664,7 +10573,7 @@ int runGame(Options& options, Session& session)
 				remoteLook.stance = stance.prone ? 2 : in.crouch ? 1 : 0;
 				if (in.toggleCamera && !toggleCameraWas) {
 					playerCamera.toggleMode();
-					if (std::getenv("BF2142_INPUT_TRACE")) std::printf("camera-toggle mode=%d first=%d\n", static_cast<int>(playerCamera.mode()), playerCamera.firstPerson);
+					if (g_inputTrace) std::printf("camera-toggle mode=%d first=%d\n", static_cast<int>(playerCamera.mode()), playerCamera.firstPerson);
 				}
 				toggleCameraWas = in.toggleCamera;
 				if (in.camera && in.camera != cameraWas) playerCamera.selectView(in.camera);
@@ -10792,7 +10701,7 @@ int runGame(Options& options, Session& session)
 				// steps a zoomed weapon's zoom.
 				if (in.toggleCamera && !toggleCameraWas) {
 					playerCamera.toggleMode();
-					if (std::getenv("BF2142_INPUT_TRACE")) std::printf("camera-toggle mode=%d first=%d\n", static_cast<int>(playerCamera.mode()), playerCamera.firstPerson);
+					if (g_inputTrace) std::printf("camera-toggle mode=%d first=%d\n", static_cast<int>(playerCamera.mode()), playerCamera.firstPerson);
 				}
 				toggleCameraWas = in.toggleCamera;
 				if (in.camera && in.camera != cameraWas) playerCamera.selectView(in.camera);
@@ -10865,8 +10774,6 @@ int runGame(Options& options, Session& session)
 			viewer.wantsPointer = [pointerReason] { return pointerReason() != nullptr; };
 			viewer.pointerReason = pointerReason;
 			viewer.onClick = [&round, &hudManager, &commanderClick, &mapMenuPoint](float x, float y) {
-				std::printf("pointer-click: %.1f,%.1f rose=%d\n", x, y, g_mapMenu);
-				std::fflush(stdout);
 				if (g_mapMenu != 0) {
 					// An open right-click menu takes the click (its rows'
 					// buttons), and closes unless a row armed an order there.
@@ -11080,7 +10987,7 @@ int runGame(Options& options, Session& session)
 					g_deploymentOpen = false;
 					if (!alive) g_spawnScreenHidden = true;
 				}
-				if ((deploymentPressed || done) && std::getenv("BF2142_INPUT_TRACE")) {
+				if ((deploymentPressed || done) && g_inputTrace) {
 					std::printf("deployment-input: enter=%d was-shown=%d confirms=%d alive=%d queued=%d\n",
 						deploymentPressed, deploymentWasShown, done, alive,
 						session.client ? g_remoteHud && g_remoteHud->requestedSpawn : round.spawnRequested(round.localPlayer()));
@@ -11112,8 +11019,6 @@ int runGame(Options& options, Session& session)
 					// Releasing the rose key chooses the entry under the pointer, as a click would (the user's mouse clicks
 					// do not reach the rose); a tap leaves it on the middle entry.
 					if (alive && !commRoses.shown().empty() && !in.radioComm && !in.tacticalComm) {
-						std::printf("comm-rose: release selects at %.1f,%.1f\n", g_pointerX, g_pointerY);
-						std::fflush(stdout);
 						hudManager.click(g_pointerX, g_pointerY);
 					}
 					if (!commRoses.shown().empty() && !in.radioComm && !in.tacticalComm) {

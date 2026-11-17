@@ -754,10 +754,6 @@ void GameAudio::radio()
 			}
 		}
 		const sound::VoiceMessages::Result result = m_voices->heard(in);
-		// One line per radio message so a session log shows whether the voice started (and at what group gain).
-		std::printf("radio-voice: %s sender=%d own=%d played=%d sample=%d group2-volume=%.2f\n", message.voice.c_str(), message.sender,
-			in.senderIsListener, static_cast<int>(result.played), result.sample, m_manager.volumeForGroup(2));
-		std::fflush(stdout);
 		if (result.played != sound::VoiceMessages::Played::None) {
 			++voiceOvers;
 		}

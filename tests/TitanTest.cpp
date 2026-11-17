@@ -16,7 +16,6 @@
 #include "Sound/Game/GameSounds.h"
 #include "Sound/Game/VoiceMessages.h"
 #include "Sound/Game/SoundObjectTemplate.h"
-#include "Main/TitanShotTrace.h"
 #include "Animation/AnimationSystem.h"
 #include "SeatAim.h"
 #include "Game/GameLogic.h"
@@ -2906,38 +2905,6 @@ TEST(Titan_FriendlyWalkerAAGunOnSuez)
 			alt ? "missile" : "cannon", down ? "down" : "up", hit, removed);
 		CHECK(hit && removed);
 	}
-}
-
-// The launcher trace must capture a real local projectile's lifecycle and its
-// Titan transform; otherwise a player reproduction cannot diagnose crossing.
-TEST(Titan_WalkerShotTraceRecordsLifecycle)
-{
-	REMASTER_ONLY();
-	const char* gameDir = std::getenv("BF2142_GAME_DIR");
-	if (!gameDir) return;
-	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
-	CHECK(level.loaded);
-	if (!level.loaded) return;
-	CHECK(level.world->spawnPlayer(2) != nullptr);
-	const auto titan = *level.titan(2);
-	const int player = level.world->localPlayer();
-	std::FILE* out = std::tmpfile();
-	CHECK(out != nullptr);
-	if (!out) return;
-	host::TitanShotTrace trace;
-	CHECK(level.world->launchProjectile("us_heavy_mech_AA_missile", titan.position + physics::Vec3 {0, -60, 0}, {0, 300, 0}, player));
-	trace.update(*level.world, level.objects, out);
-	for (int i = 0; i < 30; ++i) { level.run(1.0f / 30); trace.update(*level.world, level.objects, out); }
-	std::rewind(out);
-	std::string output;
-	char buffer[1024];
-	while (const size_t n = std::fread(buffer, 1, sizeof(buffer), out)) output.append(buffer, n);
-	std::fclose(out);
-	CHECK(output.find("titan-shot: start") != std::string::npos);
-	CHECK(output.find("titan-shot: step") != std::string::npos);
-	CHECK(output.find("shield=1 mesh=1") != std::string::npos);
-	CHECK(output.find("titan-shot: end") != std::string::npos);
-	CHECK(output.find("titan-shot: recent-impact") != std::string::npos);
 }
 
 // Titans have their own simulation, but must still reach the shared map
