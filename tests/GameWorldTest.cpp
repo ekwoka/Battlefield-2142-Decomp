@@ -1576,32 +1576,105 @@ TEST(GameWorld_HealedSoldierIsStampedAsReceiving)
 	CHECK(range.world->hitPoints(allyInfo.soldier) > 40);
 	CHECK(range.world->abilityBar(ally, info) && !info.healFlag && !info.repairFlag);
 	CHECK(info.sinceHeal >= 0 && info.sinceHeal < 15);
-	CHECK(menu::receivedSound(info, false) == 0);
-	CHECK(range.world->abilityBar(me, info) && info.healFlag && menu::receivedSound(info, false) == -1);
+	CHECK(menu::receivedSounds(info, false, false) == 1);
+	CHECK(range.world->abilityBar(me, info) && info.healFlag && (menu::receivedSounds(info, false, false) & 1) == 0);
 	// Full again, the stamp ages out.
 	range.world->setHitPoints(allyInfo.soldier, 100);
 	for (int i = 0; i < 80; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
-	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal >= 15 && menu::receivedSound(info, false) == -1);
+	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal >= 15 && menu::receivedSounds(info, false, false) == 0);
 }
 
-TEST(ReceivedSound_HealOnFootRepairInAVehicle)
+TEST(ReceivedSounds_HealRepairAndAmmo)
 {
-	// 0x007a1c30: received (flags clear) within 15 ticks.
+	// 0x007a1c30: received (flags clear) within 15 ticks; bits 0 heal,
+	// 1 repair, 2 ammo.
 	game::GameWorld::AbilityBarInfo info;
-	CHECK(menu::receivedSound(info, false) == -1); // no stamp
+	CHECK(menu::receivedSounds(info, false, false) == 0); // no stamps
 	info.sinceHeal = 0;
-	CHECK(menu::receivedSound(info, false) == 0 && menu::receivedSound(info, true) == 0);
+	CHECK(menu::receivedSounds(info, false, false) == 1 && menu::receivedSounds(info, true, false) == 1);
 	info.sinceHeal = 14;
-	CHECK(menu::receivedSound(info, false) == 0);
+	CHECK(menu::receivedSounds(info, false, false) == 1);
 	info.sinceHeal = 15;
-	CHECK(menu::receivedSound(info, false) == -1);
+	CHECK(menu::receivedSounds(info, false, false) == 0);
 	info.sinceHeal = 3;
 	info.repairFlag = true; // the crew of a mended vehicle
-	CHECK(menu::receivedSound(info, true) == 1 && menu::receivedSound(info, false) == -1);
+	CHECK(menu::receivedSounds(info, true, false) == 2 && menu::receivedSounds(info, false, false) == 0);
 	info.healFlag = true; // he gave it
-	CHECK(menu::receivedSound(info, true) == -1);
+	CHECK(menu::receivedSounds(info, true, false) == 0);
+	// Ammo: alongside the heal, not in the frame he got in or out.
+	info = {};
+	info.sinceAmmo = 2;
+	info.sinceHeal = 2;
+	CHECK(menu::receivedSounds(info, false, false) == (1 | 4));
+	CHECK(menu::receivedSounds(info, false, true) == 1);
+	info.ammoFlag = true; // he gave it
+	CHECK(menu::receivedSounds(info, false, false) == 1);
+	info.ammoFlag = false;
+	info.sinceAmmo = 15;
+	CHECK(menu::receivedSounds(info, false, false) == 1);
+}
+
+TEST(GameWorld_RearmedSoldierIsStampedAsReceiving)
+{
+	// 0x004bd5f0: the ammo kit in hand rearms its holder; the target's
+	// player is stamped last (0x004bd700, slot 0x260(now, 0)), so the
+	// giver rearming himself hears his kit's ammoSound, not the bar's.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_ammo");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["ammo.replenishingType"] = "RTAmmo";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "20";
+	hub->settings()["ammo.magSize"] = "1";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	range.templates.find("eu_ar_rifle")->settings()["ammo.nrOfMags"] = "5";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->components().push_back("Ability");
+	kit->settings()["ability.hasAmmoAbility"] = "1";
+	for (const char* item : {"eu_ar_rifle", "unl_hub_ammo"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const auto press = [&](game::SoldierInput input) {
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		range.world->setPlayerInput({});
+		range.world->tick(1 / 30.0f);
+	};
+	// A magazine spent and reloaded.
+	game::SoldierInput rifle;
+	rifle.selectItem = 3;
+	press(rifle);
+	const int full = range.world->playerWeapon()->magsLeft();
+	game::SoldierInput spray;
+	spray.fire = true;
+	spray.aimPitch = 45;
+	range.world->setPlayerInput(spray);
+	for (int i = 0; i < 30 * 6 && range.world->playerWeapon()->roundsInMag() > 0; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->setPlayerInput({});
+	game::SoldierInput reload;
+	reload.reload = true;
+	press(reload);
+	for (int i = 0; i < 30 * 3 && range.world->playerWeapon()->reloading(); ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->magsLeft() == full - 1);
+	game::GameWorld::AbilityBarInfo info;
+	CHECK(range.world->abilityBar(me, info) && info.sinceAmmo < 0);
+	game::SoldierInput take;
+	take.selectItem = 4;
+	press(take);
+	for (int i = 0; i < 45; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && !info.ammoFlag && info.sinceAmmo >= 0 && info.sinceAmmo < 15);
+	CHECK((menu::receivedSounds(info, false, false) & 4) != 0);
 }
 
 TEST(GameWorld_ReplenishNoticeIsTheHudsLineOfItsKind)

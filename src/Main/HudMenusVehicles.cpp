@@ -432,12 +432,17 @@ const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo&
 	return m_out;
 }
 
-int receivedSound(const game::GameWorld::AbilityBarInfo& info, bool inVehicle)
+int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, bool vehicleChanged)
 {
-	if (info.healFlag || info.sinceHeal < 0 || info.sinceHeal >= kGiftTicks) {
-		return -1;
+	const auto recent = [](int64_t since) { return since >= 0 && since < kGiftTicks; };
+	int mask = 0;
+	if (!info.healFlag && recent(info.sinceHeal) && (!info.repairFlag || inVehicle)) {
+		mask |= info.repairFlag ? 1 << 1 : 1 << 0;
 	}
-	return !info.repairFlag ? 0 : inVehicle ? 1 : -1;
+	if (!vehicleChanged && !info.ammoFlag && recent(info.sinceAmmo)) {
+		mask |= 1 << 2;
+	}
+	return mask;
 }
 
 const AbilityBar::Out& AbilityBar::hide()

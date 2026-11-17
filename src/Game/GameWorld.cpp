@@ -12848,7 +12848,10 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 			giver->gaveAmmo = true;
 			giver->gaveAmmoTick = refilled && giver->team == target->team ? static_cast<int64_t>(m_ticks) : refilled ? giver->gaveAmmoTick : -1;
 			if (refilled) {
-				target->gaveAmmo = true;
+				// 0x004bd700: the rearmed soldier's player is stamped as
+				// receiving (slot 0x260(now, 0)), the giver too when he is the
+				// target: 0x007a1c30 plays his kit's ammoSound by it.
+				target->gaveAmmo = false;
 				target->gaveAmmoTick = static_cast<int64_t>(m_ticks);
 				// 0x004bd5f0 (0x004bd681..0x004bd6d6): a player of the giver's team
 				// other than himself gives a point for each limit of what was given.

@@ -811,7 +811,7 @@ int g_mapMenu = 0;
 // (HudMenusVehicles.h) and the sound the weapon HUD starts (its overheat).
 dice::hfe::menu::WeaponHud g_weaponHud;
 dice::hfe::menu::AbilityBar g_abilityBar;
-int g_receivedSound = -1; // menu::receivedSound for the local player
+int g_receivedSounds = 0; // menu::receivedSounds for the local player
 dice::hfe::menu::ItemSelection g_itemSelection;
 dice::hfe::menu::StrategicObjects g_strategicObjects;
 dice::hfe::menu::VehicleHud g_vehicleHud;
@@ -2006,8 +2006,11 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else {
 		g_abilityBar.hide();
 	}
-	// The treated player's sound (0x007a1c30, commander screen or not).
-	g_receivedSound = abilityKnown && ability.alive ? dice::hfe::menu::receivedSound(ability, inVehicle) : -1;
+	// The treated player's sounds (0x007a1c30, commander screen or not; its
+	// +0x2fb is the vehicle state, the frame it changes mutes the ammo).
+	static bool wasInVehicle = false;
+	g_receivedSounds = abilityKnown && ability.alive ? dice::hfe::menu::receivedSounds(ability, inVehicle, inVehicle != wasInVehicle) : 0;
+	wasInVehicle = inVehicle;
 	g_abilityBar.apply(hud);
 	// The item selection on foot: the kit's weapons by slot (their
 	// weaponHud.selectIcon). A weapon key's pick opens it for 0.4 s with
@@ -10133,13 +10136,14 @@ int runGame(Options& options, Session& session)
 				// ability bar's (0x007c3af0 through the kit's AbilityHud
 				// slots 0x3c / 0x40 / 0x44): in a vehicle while what the
 				// player gave shows, on foot while the tool in hand treats;
-				// and the treated player's (0x007a1c30, slots 0x48 / 0x4c).
-				// Retail keeps the two apart; one loop per name here.
+				// and the treated player's (0x007a1c30, slots 0x48 / 0x4c /
+				// 0x50). Retail keeps the two apart; one loop per name here.
 				static std::set<std::string> supplySounds;
 				std::set<std::string> wanted;
 				game::GameWorld::PlayerInfo self;
 				const world::Object* kit = round.playerInfo(round.localPlayer(), self) ? round.objects().find(self.kit) : nullptr;
-				for (const int what : {g_abilityBar.out().sound, g_receivedSound}) {
+				for (const int what : {g_abilityBar.out().sound, g_receivedSounds & 1 ? 0 : -1, g_receivedSounds & 2 ? 1 : -1,
+						 g_receivedSounds & 4 ? 2 : -1}) {
 					if (kit && what >= 0) {
 						if (std::string name = dice::hfe::menu::abilitySound(*kit->objectTemplate(), what); !name.empty()) {
 							wanted.insert(name);

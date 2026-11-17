@@ -928,9 +928,9 @@ void GameWorld::stepCrates(float seconds)
 		};
 		// 0x005d0b20 -> the ammo's slot 0xa8 (FireArm::resupply). A weapon
 		// that took ammo stamps its user's ammo tick with the flag clear
-		// (player slot 0x260(now, 0), 0x005f5256): no ability-bar icon or
-		// S_Resupply for the receiver. Retail's only other cue is the
-		// haptics key item_resupply (bf2142haptics.dll).
+		// (player slot 0x260(now, 0), 0x005f5256): no ability-bar icon, but
+		// the receiver's kit plays its ammoSound (0x007a1c30); retail's
+		// haptics key item_resupply (bf2142haptics.dll) is the other cue.
 		const auto refill = [&](FireArm* weapon, Player* user) {
 			if (!weapon || ammo <= 0 || crate.storage <= 0 || !weapon->resupply(ammo, m_ticks)) {
 				return;
