@@ -1452,9 +1452,13 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 		// than he does is the mover: the ground rule (over 9.1 m/s, no
 		// mass factor), not the object running him over. Dropping into a
 		// pit of the standing Titan (mass 1e6, factor 3) was a 127 kill.
-		// shortcut: the speed comparison stands in for retail's dispatch, not read from the exe.
-		// Retail (0x005a4690) sends every object hitting a soldier to the road
-		// kill; the death material (the Titans' shields) is its instant case.
+		// Not retail, kept on purpose: retail's base handler (0x0063c4da ->
+		// 0x004ba3f0 -> 0x005a4690) sends every object hitting a soldier to
+		// the road kill with no speed comparison. There, on a moving Titan the
+		// soldier's node velocity is the Titan's relative (0x006ca3b0) while
+		// the Titan's is the world's, so 0x005a43c0's 3 m/s limit catches a
+		// drop onto its decks and catwalks (x3 for its 1e6 mass). The death
+		// material (the Titans' shields) stays the instant case.
 		const Body* body = findBody(attacker);
 		if (attackerMaterial != kKillMaterial && body
 			&& physics::lengthSquared(body->body.velocity)
@@ -1489,8 +1493,11 @@ void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity
 {
 	const float speed = lengthOf(velocity);
 	const bool instant = attackerMaterial == kKillMaterial;
+	// The soldier's node velocity, relative to a carrying Titan as retail's
+	// (0x006ca3b0); a fixed body is a static node (slot 0x164 false).
 	const Body* body = findBody(attacker);
-	const float limit = body && physics::lengthSquared(victim.body.velocity) < physics::lengthSquared(body->body.velocity)
+	const float limit = body && !body->fixed
+			&& physics::lengthSquared(victim.body.velocity) < physics::lengthSquared(body->body.velocity)
 		? kSoldierImpactSpeedFaster
 		: kSoldierImpactSpeed;
 	if (speed < limit && !instant) {
@@ -1504,23 +1511,27 @@ void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity
 	}
 }
 
-// 0x005a2ca0: clamp(attacker's mass / victim's, 0.3, 3) when both are
-// mobile (a soldier weighing 200), else 1.
+// 0x005a2ca0: clamp(attacker's mass / victim's, 0.3, 3) when both have a
+// mobile node (slot 0x164: a fixed body's is the static node 0x993218),
+// the soldier weighing 200; else, or for a victim's mass of 0 or less, 1.
 float GameWorld::collisionMassFactor(uint32_t attacker, uint32_t victim) const
 {
 	const Body* a = const_cast<GameWorld*>(this)->findBody(attacker);
-	if (!a) {
+	if (!a || a->fixed) {
 		return 1;
 	}
 	float victimMass = 0;
 	if (soldierPlayer(victim)) {
 		victimMass = kSoldierMass;
-	} else if (const Body* b = const_cast<GameWorld*>(this)->findBody(victim)) {
+	} else if (const Body* b = const_cast<GameWorld*>(this)->findBody(victim); b && !b->fixed) {
 		victimMass = b->mass;
 	} else {
 		return 1;
 	}
-	return std::clamp(a->mass / std::max(victimMass, 1e-6f), 0.3f, 3.0f);
+	if (victimMass <= 0) {
+		return 1;
+	}
+	return std::clamp(a->mass / victimMass, 0.3f, 3.0f);
 }
 
 // 0x005a30b0: the attacker's driver (its PlayerControlObject's player), or

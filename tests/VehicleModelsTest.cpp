@@ -4699,6 +4699,34 @@ TEST(Vehicles_StaticGunnerSitsOnTheCockpit)
 	CHECK(std::fabs(yaw) > 5 && std::fabs(std::remainder(after - before - yaw, 360.0f)) < 1);
 }
 
+// The collision mass factor (0x005a2ca0): clamp(attacker's root mass /
+// victim's, 0.3, 3) only when both nodes are mobile (slot 0x164); the
+// static AV's node is the static one (hasMobilePhysics 0, Body::fixed), so
+// against it, either way round, the factor is 1. A soldier weighs 200.
+TEST(Vehicles_CollisionMassFactorNeedsMobileNodes)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return;
+	}
+	const uint32_t tank = g.objects.create(g.templates.find("eu_tank"), {12, 2, 6}, {0, 0, 0})->id();
+	const uint32_t gun = g.start("static_av", {0, 0.5f, 8}, 1);
+	CHECK(g.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo me;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.soldier != 0);
+	const float tankOnSoldier = g.world->collisionMassFactor(tank, me.soldier);
+	std::fprintf(stderr, "  mass factor: tank on soldier %.2f, static AV on soldier %.2f, tank on static AV %.2f, static AV on tank %.2f\n",
+		tankOnSoldier, g.world->collisionMassFactor(gun, me.soldier), g.world->collisionMassFactor(tank, gun),
+		g.world->collisionMassFactor(gun, tank));
+	CHECK(tankOnSoldier == 3.0f);
+	CHECK(g.world->collisionMassFactor(gun, me.soldier) == 1.0f);
+	CHECK(g.world->collisionMassFactor(tank, gun) == 1.0f);
+	CHECK(g.world->collisionMassFactor(gun, tank) == 1.0f);
+}
+
 TEST(PlayerCamera_ReloadAndWalkerWithGameAssets)
 {
 	if (!gameDir()) return;

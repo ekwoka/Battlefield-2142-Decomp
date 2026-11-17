@@ -1705,6 +1705,8 @@ public:
 		float& pitchTurn);
 	static float regulatedInput(float input, float regulated);
 	bool gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const;
+	// A collision's mass factor (0x005a2ca0, MeshCollision.cpp).
+	float collisionMassFactor(uint32_t attacker, uint32_t victim) const;
 	// A seat's yaw bundle's own rotation (Gun::yaw, degrees, without the
 	// bundle's frame): what the vehicle HUD's GunnerAngle reads (the
 	// bundle's slot 0x188, 0x007a07c0); false for a seat without one.
@@ -2998,7 +3000,6 @@ private:
 	void roadKill(uint32_t attacker, Player& victim, const physics::Vec3& velocity, uint32_t attackerMaterial,
 		uint32_t victimMaterial);
 	int collisionCredit(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity) const;
-	float collisionMassFactor(uint32_t attacker, uint32_t victim) const;
 	struct CollisionMemory {
 		uint32_t other;
 		uint32_t ownMaterial, otherMaterial;
