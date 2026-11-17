@@ -297,7 +297,7 @@ public:
 
 	void ask(Kind kind, int value, const std::string& text);
 	// 0x0079e290 with -1: the kind's questions taken away, unanswered.
-	void forget(Kind kind) { m_questions[static_cast<size_t>(kind)].reset(); }
+	void forget(Kind kind);
 	void answer(bool yes);
 	void tick(float seconds);
 	const Question* front() const;
@@ -306,6 +306,24 @@ public:
 private:
 	void show() const;
 	std::array<std::optional<Question>, 7> m_questions {};
+};
+
+// Commander HUD notifications: the immediate application acknowledgement
+// (0x007d7050), position filled (2/0x22), assignment (2/0x21) and
+// resignation (2/0x25). Shared by local and joined games.
+class CommanderMessages {
+public:
+	std::function<std::string(const std::string&)> localize;
+	std::function<std::string(int)> teamName;
+	std::function<void(const std::string&)> onLine;
+	std::function<void(const std::string&)> onVoice;
+	std::function<void()> onAssigned, onLost, onPositionFilled;
+	void applied(int team) const;
+	// Assignment/resignation payloads name a player; the caller resolves
+	// whether that player is local and belongs to the local team.
+	void handle(int id, int team, bool local, bool sameTeam) const;
+private:
+	void line(const char* key, int team) const;
 };
 
 } // namespace dice::hfe::menu

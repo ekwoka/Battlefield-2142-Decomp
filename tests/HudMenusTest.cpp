@@ -2865,3 +2865,72 @@ TEST(HudMap_SpotRayCapturedOnOpeningRadio)
 	roses.openRadio(true);
 	CHECK(captures == 2);
 }
+
+TEST(HudMenus_LocalRefusalsReachPersonalList)
+{
+	Squads s;
+	const int me = s.world.addPlayer("Me", 2, false);
+	menu::HudChat chat(s.hud);
+	s.squads.setLocalizer([](const std::string& key) {
+		return key == "HUD_HUD_SQUAD_MUST_LEAVE_TO_CREATE" ? std::string("Leave #SQUADNAME# first") : "localized:" + key;
+	});
+	s.squads.onLine = [&](const std::string& line) { chat.addPersonal(line); };
+	s.world.joinSquad(me, 1);
+	CHECK(!s.squads.setCreateSelect(me, true));
+	chat.update(0);
+	CHECK(chat.personalRows() == std::vector<std::string> {"Leave Alpha first"});
+	s.world.setCommanderEnabled(true);
+	CHECK(s.world.setCommander(2, me));
+	CHECK(!s.squads.setCreateSelect(me, true));
+	chat.update(0);
+	CHECK(chat.personalRows().back() == "localized:HUD_HUD_SQUAD_COMMANDER_MUST_RESIGN");
+}
+
+TEST(HudQuestions_RemovalRefreshesVisiblePrompt)
+{
+	menu::HudQuestions questions;
+	std::vector<std::string> shown;
+	int clears = 0, answers = 0;
+	questions.onClear = [&] { ++clears; shown.clear(); };
+	questions.onLine = [&](const std::string& line) { shown.push_back(line); };
+	questions.onQuestion = questions.onLine;
+	questions.onAnswer = [&](const auto&, bool, bool) { ++answers; };
+	questions.ask(menu::HudQuestions::CommanderOffer, 2, "offer");
+	questions.ask(menu::HudQuestions::Vote, 1, "vote");
+	CHECK(shown.front() == "offer");
+	questions.forget(menu::HudQuestions::Vote); // hidden: don't disturb the offer
+	CHECK(shown.front() == "offer");
+	questions.ask(menu::HudQuestions::Vote, 1, "vote");
+	questions.forget(menu::HudQuestions::CommanderOffer);
+	CHECK(shown == std::vector<std::string> {"vote"});
+	questions.forget(menu::HudQuestions::Vote);
+	CHECK(shown.empty() && !questions.front() && answers == 0 && clears > 0);
+}
+
+TEST(HudCommander_ApplicationAndResultFeedback)
+{
+	menu::CommanderMessages messages;
+	std::vector<std::string> lines, voices;
+	int assigned = 0, lost = 0, filled = 0;
+	messages.localize = [](const std::string& key) { return key + " #TEAMNAME#"; };
+	messages.teamName = [](int team) { return team == 1 ? "PAC" : "EU"; };
+	messages.onLine = [&](const auto& line) { lines.push_back(line); };
+	messages.onVoice = [&](const auto& voice) { voices.push_back(voice); };
+	messages.onAssigned = [&] { ++assigned; };
+	messages.onLost = [&] { ++lost; };
+	messages.onPositionFilled = [&] { ++filled; };
+	messages.applied(2);
+	CHECK(lines.back() == "HUD_HUD_COMMANDER_APPLIED EU");
+	messages.handle(0x21, 2, false, false); // enemy assignment: silent
+	CHECK(voices.empty());
+	messages.handle(0x21, 2, false, true);
+	CHECK(voices.back() == "new_commander" && assigned == 0);
+	messages.handle(0x21, 2, true, true);
+	CHECK(voices.back() == "commander_assign" && assigned == 1);
+	messages.handle(0x22, 2, false, false);
+	CHECK(lines.back() == "HUD_COMMANDERAPPLY_POSFILLED EU" && filled == 1);
+	messages.handle(0x25, 2, false, true);
+	CHECK(lost == 0);
+	messages.handle(0x25, 2, true, true);
+	CHECK(lines.back() == "HUD_HUD_COMMANDER_NO_LONGER EU" && lost == 1);
+}

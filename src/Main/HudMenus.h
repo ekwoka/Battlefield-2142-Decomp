@@ -175,12 +175,7 @@ public:
 
 private:
 	std::string text(const std::string& key) const { return m_localize ? m_localize(key) : key; }
-	void message(const std::string& key)
-	{
-		if (onMessage) {
-			onMessage(key);
-		}
-	}
+	void message(const std::string& key, int player, int targetSquad = 0);
 	bool join(int player, int squad);
 	void leave(int player);
 	// The players: the joined game's, else the round's.

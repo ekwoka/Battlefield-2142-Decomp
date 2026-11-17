@@ -105,8 +105,17 @@ bool GameWorld::setCommander(int team, int player)
 	side.commander = player;
 	if (player != -1) {
 		joinSquad(player, 0);
-		// The other applicants hear HUD_COMMANDERAPPLY_POSFILLED (PostRemote
-		// 0x22) and the list is cleared; nobody is offered command.
+		// 0x004c8120: assignment is broadcast (2/0x21); remaining
+		// applicants hear 2/0x22 before their list is cleared.
+		for (const int applicant : side.applicants) {
+			const Player* p = findPlayer(applicant);
+			if (p && !p->ai && applicant != player) {
+				m_squadMessages[applicant].push_back({0x22, 0});
+			}
+		}
+		for (const auto& p : m_players) {
+			if (!p->ai && p->team == team) m_squadMessages[p->id].push_back({0x21, player});
+		}
 		side.applicants.clear();
 		side.candidate = -1;
 		side.pickAt = -1;
@@ -219,6 +228,12 @@ void GameWorld::resignCommander(int player)
 			continue;
 		}
 		setCommander(team, -1);
+		const Player* p = findPlayer(player);
+		if (p && !p->ai) m_squadMessages[player].push_back({0x25, player});
+		// The resignation HUD handler (0x00757099) uses game slot 0x5c:
+		// a server-team voice, not a private confirmation. Send from the
+		// authority here so local and joined teammates hear it once.
+		radioMessage(-1, 13, "commander_resign", team);
 		if (!side.applicants.empty()) {
 			side.pickAt = m_time + kAfterResign;
 		}

@@ -5622,18 +5622,43 @@ int runGame(Options& options, Session& session)
 		dice::hfe::menu::VoteMessages voteMessages;
 		voteMessages.localize = localizeWithKeys;
 		voteMessages.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
+		dice::hfe::menu::CommanderMessages commanderMessages;
+		commanderMessages.localize = localizeWithKeys;
+		commanderMessages.teamName = [&localization, &gameLogic](int team) {
+			return localization.text("HUD_TEAMNAME_" + gameLogic.team(team == 1 ? 1 : 2).name);
+		};
+		commanderMessages.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
+		commanderMessages.onVoice = [&](const std::string& voice) { round.hearRadio(hudLocal(), 2, voice); };
+		const auto closeCommander = [&] {
+			commanderScreen = false;
+			armedTool.reset();
+			armedOrder.reset();
+			moveTitanArmed = false;
+			mapMenuPoint.reset();
+			g_mapMenu = 0;
+			g_commanderView.reset();
+		};
+		commanderMessages.onLost = closeCommander;
 		// Commander.commanderApply (0x007d7050): refused while barred after a
 		// mutiny (VoteMessages::mayApplyForCommander), else the Commander
 		// event's kind 4 (or the round's own application).
 		bindMethod(console, "Commander.commanderApply", ConsoleAccess::Anyone, [&] {
-			if (!voteMessages.mayApplyForCommander()) {
+			game::GameWorld::PlayerInfo me;
+			if (!hudPlayer(hudLocal(), me) || me.commander || !voteMessages.mayApplyForCommander()) {
 				return;
 			}
+			// 0x007d70c7..0x007d70e3: applying enables the application
+			// tutorial and retires the spawn-screen suggestion to apply.
+			helpPopups.enableTutorial(0x18);
+			helpPopups.disableTutorial(0x19);
 			if (net::GameClient* server = joinedServer()) {
 				server->applyForCommander(); // the Commander event, kind 4
-				return;
+			} else {
+				round.applyForCommander(round.localPlayer());
 			}
-			round.applyForCommander(round.localPlayer());
+			// 0x007d71bb..0x007d71da: acknowledge immediately, including
+			// a repeated application; the election offer arrives later.
+			commanderMessages.applied(me.team);
 		});
 		// Commander.commanderMutiny (HUD 0x007d7390 → the vote object's
 		// 0x00573cb0): a mutiny vote (kind 3) against the team's commander,
@@ -5671,6 +5696,21 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		questions.onClear = [&chat] { chat.clearQuestions(); };
+		commanderMessages.onPositionFilled = [&questions] {
+			questions.forget(dice::hfe::menu::HudQuestions::CommanderOffer);
+		};
+		commanderMessages.onAssigned = [&questions] {
+			using Q = dice::hfe::menu::HudQuestions;
+			for (const auto kind : {Q::JoinRequest, Q::Invite, Q::CommanderOrder, Q::CommanderOffer, Q::SquadLeader}) {
+				questions.forget(kind);
+			}
+		};
+		const auto commanderMessage = [&](int id, int player) {
+			game::GameWorld::PlayerInfo me, other;
+			if (!hudPlayer(hudLocal(), me)) return;
+			const bool known = hudPlayer(player, other);
+			commanderMessages.handle(id, me.team, player == me.id, known && other.team == me.team);
+		};
 		// The squad manager's messages to our player (SquadMenu::squadMessage):
 		// the lines, and a request to join our private squad as the
 		// question's kind 0.
@@ -8104,6 +8144,9 @@ int runGame(Options& options, Session& session)
 				if (message.category == 2 && message.id == 0x23) {
 					offers.push_back(message);
 				}
+				if (message.category == 2 && (message.id == 0x21 || message.id == 0x22 || message.id == 0x25)) {
+					commanderMessage(static_cast<int>(message.id), message.payloadInt(0));
+				}
 				// The Titan sync's (ECPhysicsETitanSync, 0x00562100): an order
 				// and the state at its tick (id 0), the server's states (id 2).
 				if (net::TitanSyncInfo sync; message.category == net::kMsgPhysicsCategory
@@ -9840,6 +9883,13 @@ int runGame(Options& options, Session& session)
 			float gunHeading = 0;
 			const std::optional<float> mapHeading = playerCamera.seatMapHeading(gunHeading)
 				? std::optional<float>(gunHeading) : std::nullopt;
+			// Loss of command also arrives through votes, team changes or
+			// disconnects, without a resignation notification. Close the
+			// privileged screen as soon as the authoritative role changes.
+			if (commanderScreen) {
+				game::GameWorld::PlayerInfo me;
+				if (!hudPlayer(hudLocal(), me) || !me.commander) closeCommander();
+			}
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
@@ -9938,9 +9988,9 @@ int runGame(Options& options, Session& session)
 					// Event-only messages the HUD lets through (slot 0x128,
 					// 0x00751540): 0x33 captureFlag as the player comes into a
 					// control point's area outside Titan mode (0x0044b560 on the
-					// capture state), 0x18 commanderApply once he commands
-					// (0x007d.. after the commander screen opens for him).
-					static bool wasInArea = false, wasCommander = false;
+					// capture state). Commander application is raised by its
+					// command above, rather than by a role transition.
+					static bool wasInArea = false;
 					bool inArea = false;
 					if (help.alive && options.gameMode.find("ti") == std::string::npos) {
 						// The control points as the HUD has them (a joined game's
@@ -9954,10 +10004,6 @@ int runGame(Options& options, Session& session)
 						helpPopups.enableTutorial(0x33);
 					}
 					wasInArea = inArea;
-					if (help.commander && !wasCommander) {
-						helpPopups.enableTutorial(0x18);
-					}
-					wasCommander = help.commander;
 					// A weapon key whose weapon the squad is too small for
 					// (0x004d2a50 at 0x004d2ea9: slot 0x188,
 					// minimumSquadSizeForSelection) lets through 0x52
@@ -10049,6 +10095,7 @@ int runGame(Options& options, Session& session)
 					// The squad manager's messages to the server's own player
 					// (0xff: its event manager, 0x004c7290).
 					for (const auto& m : round.takeSquadMessages(round.localPlayer())) {
+						commanderMessage(m.id, m.value);
 						squadMenu.squadMessage(m.id, m.value);
 					}
 					// The team damage limits (sgl_setParam, scoringCommon.py's

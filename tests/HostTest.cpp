@@ -550,6 +550,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		return round.commander(team) == idA && pa && pa->commander;
 	}));
 
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(messagesA.begin(), messagesA.end(), [idA](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == 0x21 && m.payloadInt(0) == idA;
+		});
+	}));
+
 	// The commander's camera (CommanderCam 0x24: x, height, z): the server
 	// makes the team's overhead camera and places it over the point at its
 	// template's height (0x005f8170); the clients see it as its ghost. B's

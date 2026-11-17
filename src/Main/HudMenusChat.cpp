@@ -614,6 +614,17 @@ void HudQuestions::show() const
 	onQuestion(localize ? localize(prompt) : std::string(prompt));
 }
 
+void HudQuestions::forget(Kind kind)
+{
+	auto& q = m_questions[static_cast<size_t>(kind)];
+	const bool visible = q && front() == &*q;
+	q.reset();
+	if (visible) {
+		if (!front() && onClear) onClear();
+		show();
+	}
+}
+
 void HudQuestions::answer(bool yes)
 {
 	const Question* q = front();
@@ -658,6 +669,32 @@ void HudQuestions::tick(float seconds)
 		// shortcut: retail re-shows the next question on its own +0xa8 timer
 		// (0x0079e1e7); shown at once here so the clear doesn't hide it.
 		show();
+	}
+}
+
+void CommanderMessages::line(const char* key, int team) const
+{
+	if (onLine) {
+		onLine(replaced(localize ? localize(key) : std::string(key), "#TEAMNAME#", teamName ? teamName(team) : ""));
+	}
+}
+
+void CommanderMessages::applied(int team) const
+{
+	line("HUD_HUD_COMMANDER_APPLIED", team);
+}
+
+void CommanderMessages::handle(int id, int team, bool local, bool sameTeam) const
+{
+	if (id == 0x22) { // 0x00756f0a: personal line, remove the offer
+		if (onPositionFilled) onPositionFilled();
+		line("HUD_COMMANDERAPPLY_POSFILLED", team);
+	} else if (id == 0x21 && sameTeam) { // 0x00756d7a
+		if (local && onAssigned) onAssigned();
+		if (onVoice) onVoice(local ? "commander_assign" : "new_commander");
+	} else if (id == 0x25 && local) { // 0x00756f63
+		line("HUD_HUD_COMMANDER_NO_LONGER", team);
+		if (onLost) onLost();
 	}
 }
 

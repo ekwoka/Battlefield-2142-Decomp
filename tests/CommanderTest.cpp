@@ -1402,3 +1402,40 @@ TEST(ArmouredRounds_DefuserRemovesMotionMines)
 		CHECK(rounds() == full);
 	}
 }
+
+TEST(Commander_ResultNotificationsReachApplicantsAndTeam)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld world(templates, objects);
+	const int winner = world.addPlayer("Winner", 2, false);
+	const int loser = world.addPlayer("Loser", 2, false);
+	const int mate = world.addPlayer("Mate", 2, false);
+	const int enemy = world.addPlayer("Enemy", 1, false);
+	const int bot = world.addPlayer("Bot", 2, true);
+	world.setCommanderEnabled(true);
+	world.applyForCommander(winner);
+	world.applyForCommander(loser);
+	CHECK(world.setCommander(2, winner));
+	auto notices = world.takeSquadMessages(loser);
+	CHECK(notices.size() == 2 && notices[0].id == 0x22 && notices[1].id == 0x21 && notices[1].value == winner);
+	for (int player : {winner, mate}) {
+		notices = world.takeSquadMessages(player);
+		CHECK(notices.size() == 1 && notices[0].id == 0x21 && notices[0].value == winner);
+	}
+	CHECK(world.takeSquadMessages(enemy).empty() && world.takeSquadMessages(bot).empty());
+	CHECK(world.setCommander(2, winner)); // same commander: no duplicate
+	CHECK(world.takeSquadMessages(winner).empty());
+	world.resignCommander(winner);
+	notices = world.takeSquadMessages(winner);
+	CHECK(notices.size() == 1 && notices[0].id == 0x25 && notices[0].value == winner);
+	const auto heard = world.takeRadioHeard();
+	for (int player : {winner, loser, mate}) {
+		CHECK(std::count_if(heard.begin(), heard.end(), [&](const auto& voice) {
+			return voice.receiver == player && voice.voice == "commander_resign" && voice.channel == 13 && voice.sender == -1;
+		}) == 1);
+	}
+	CHECK(std::none_of(heard.begin(), heard.end(), [&](const auto& voice) { return voice.receiver == enemy || voice.receiver == bot; }));
+	world.resignCommander(winner);
+	CHECK(world.takeSquadMessages(winner).empty());
+}

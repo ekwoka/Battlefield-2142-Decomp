@@ -174,6 +174,25 @@ int SquadMenu::freeSquad(int team) const
 	return 0;
 }
 
+void SquadMenu::message(const std::string& key, int player, int targetSquad)
+{
+	if (onMessage) onMessage(key);
+	if (!onLine) return;
+	std::string line = text(key);
+	game::GameWorld::PlayerInfo me;
+	if (playerInfo(player, me)) {
+		const auto put = [&](const char* token, const std::string& value) {
+			for (size_t at = line.find(token); at != std::string::npos; at = line.find(token, at + value.size())) {
+				line.replace(at, std::strlen(token), value);
+			}
+		};
+		put("#SQUADNAME#", squadLabel(me.team, me.squad));
+		put("#SQUADNAME1#", squadLabel(me.team, me.squad));
+		put("#SQUADNAME2#", squadLabel(me.team, targetSquad));
+	}
+	onLine(line);
+}
+
 bool SquadMenu::setCreateSelect(int player, bool select)
 {
 	game::GameWorld::PlayerInfo me;
@@ -197,10 +216,10 @@ bool SquadMenu::setCreateSelect(int player, bool select)
 			return true;
 		}
 		m_createShow = false;
-		message("HUD_HUD_SQUAD_MAX_REACHED");
+		message("HUD_HUD_SQUAD_MAX_REACHED", player);
 		return false;
 	}
-	message(me.commander ? "HUD_HUD_SQUAD_COMMANDER_MUST_RESIGN" : "HUD_HUD_SQUAD_MUST_LEAVE_TO_CREATE");
+	message(me.commander ? "HUD_HUD_SQUAD_COMMANDER_MUST_RESIGN" : "HUD_HUD_SQUAD_MUST_LEAVE_TO_CREATE", player);
 	return false;
 }
 
@@ -288,7 +307,7 @@ bool SquadMenu::join(int player, int squad)
 		return false;
 	}
 	if (me.squad != 0) {
-		message("HUD_HUD_SQUAD_MUST_LEAVE_TO_JOIN");
+		message("HUD_HUD_SQUAD_MUST_LEAVE_TO_JOIN", player, squad);
 		return false;
 	}
 	// The squad manager's slot 0x34 (0x007a5410 asks no lock of its own):
