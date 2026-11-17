@@ -12791,14 +12791,39 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 					treated->push_back(object);
 				}
 			}
+			const Player* driver = vehicle->occupants.empty() ? nullptr : findPlayer(vehicle->occupants.front());
 			if (giver) {
-				giver->gaveAmmo = true;
-				giver->gaveAmmoTick = refilled ? static_cast<int64_t>(m_ticks) : -1;
-				const Player* driver = vehicle->occupants.empty() ? nullptr : findPlayer(vehicle->occupants.front());
+				// 0x004bd5f0: nothing refilled stamps the giver (0, 1); a refill
+				// (now, 1) only with a driver of his team (0x004bd66b..0x004bd691).
+				if (!refilled) {
+					giver->gaveAmmo = true;
+					giver->gaveAmmoTick = -1;
+				} else if (driver && driver->team == giver->team) {
+					giver->gaveAmmo = true;
+					giver->gaveAmmoTick = static_cast<int64_t>(m_ticks);
+				}
 				const world::Object* target = m_objects.find(object);
 				if (refilled && driver && driver->id != giver->id && driver->team == giver->team
 					&& target && target->team() == giver->team) {
 					replenishPoint(*giver, 2, percent, object);
+				}
+			}
+			// 0x004bd735: then every occupant is stamped as receiving (slot
+			// 0x260(now, 0)) but those whose seat's VehicleHud has useChildHud
+			// (seat +0x64 slot 0x78, the template's block +0xb9): they fight
+			// with their own kit, not the vehicle's guns.
+			if (refilled) {
+				const world::Object* vehicleObject = m_objects.find(object);
+				const VehicleLayout* layout =
+					vehicleObject && vehicleObject->objectTemplate() ? &vehicleLayout(*vehicleObject->objectTemplate()) : nullptr;
+				for (size_t seat = 0; seat < vehicle->occupants.size(); ++seat) {
+					Player* occupant = findPlayer(vehicle->occupants[seat]);
+					const world::ObjectTemplate* seatTemplate =
+						layout && seat < layout->seats.size() ? m_templates.find(layout->seats[seat].name) : nullptr;
+					if (occupant && !(seatTemplate && integer(*seatTemplate, "vehicleHud.useChildHud", 0) != 0)) {
+						occupant->gaveAmmo = false;
+						occupant->gaveAmmoTick = static_cast<int64_t>(m_ticks);
+					}
 				}
 			}
 			continue;

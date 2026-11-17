@@ -39,6 +39,7 @@
 #include "World/WorldConsole.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -4920,6 +4921,142 @@ TEST(Vehicles_HelipadRearmsAParkedGunshipByItsWholeLoad)
 		}
 	}
 	CHECK(tested > 0);
+}
+
+// A vehicle rearmed by a seated support (0x00599f30 -> 0x004bd5f0): every
+// occupant is stamped as receiving (player slot 0x260(now, 0), 0x004bd735)
+// but one whose seat has vehicleHud.useChildHud (the seat's runtime
+// VehicleHud, slot 0x78, the template's block +0xb9); the giver is stamped
+// only with a driver of his team (0x004bd66b). The player with EU_Support's
+// in-vehicle ammo ability (and an increasedRepairAbility unlock, which
+// lets it reach other vehicles) drives an eu_apc beside an eu_tank whose
+// main gun is short and nobody drives: the teammate in the tank's cupola
+// is stamped; with the cupola set to useChildHud 1 (as the transports'
+// passenger seats are) the gun refills but he is not.
+TEST(Vehicles_RearmStampsOccupantsButChildHudSeats)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const bool child : {false, true}) {
+		Garage g(gameDir());
+		world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+		const world::ObjectTemplate* support = g.loaded ? g.templates.find("EU_Support") : nullptr;
+		if (!kit || !support || !g.templates.find("eu_tank") || !g.templates.find("eu_apc")) {
+			continue;
+		}
+		// The player's kit (team 2's default) with the support's in-vehicle ammo.
+		for (const auto& [key, value] : support->settings()) {
+			if (key.rfind("abilityInVehicle", 0) == 0 || key.rfind("ability.", 0) == 0) {
+				kit->settings()[key] = value;
+			}
+		}
+		kit->settings().erase("ability.hasHealingAbility");
+		kit->settings().erase("ability.hasRepairingAbility");
+		CHECK(kit->settings()["ability.hasAmmoAbility"] == "1");
+		world::ObjectTemplate* unlock = g.templates.create("ItemContainer", "test_ammo_unlock");
+		unlock->settings()["ability.increasedRepairAbility"] = "1.5";
+		kit->children().push_back({"test_ammo_unlock", {}, {}});
+		world::Object* apc = g.objects.create(g.templates.find("eu_apc"), {9, 2, 6}, {0, 0, 0});
+		apc->setTeam(2);
+		const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+		g.world->localPlayerOwned = {"test_ammo_unlock"};
+		CHECK(g.enter(tank));
+		const int me = g.world->localPlayer();
+		const auto seats = g.world->vehicleSeats(tank);
+		const game::FireArm* gun = g.world->gun(tank, 0);
+		CHECK(seats.size() >= 2 && gun != nullptr && gun->settings().nrOfMags > 4);
+		if (seats.size() < 2 || !gun || gun->settings().nrOfMags <= 4) {
+			continue;
+		}
+		world::ObjectTemplate* cupola = g.templates.find(seats[1].name);
+		CHECK(cupola != nullptr);
+		if (cupola && child) {
+			cupola->settings()["vehicleHud.useChildHud"] = "1";
+		}
+		g.run(8); // the weapon's draw
+		// Two shells fired from the driver's seat, then out.
+		const int full = gun->magsLeft();
+		for (int i = 0; i < 160 && gun->magsLeft() > full - 2; ++i) {
+			game::SoldierInput tap;
+			tap.fire = true;
+			g.world->setPlayerInput(tap);
+			g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({});
+			g.run(1.2f);
+		}
+		g.run(2);
+		std::fprintf(stderr, "  main gun: %d of %d magazines\n", gun->magsLeft(), full);
+		CHECK(gun->magsLeft() <= full - 2);
+		game::SoldierInput use;
+		use.use = true;
+		g.drive(use, 0.1f);
+		g.drive({}, 1);
+		CHECK(!g.world->playerVehicle());
+		// The teammate into the tank, over to the cupola: nobody drives.
+		const int mate = g.world->addPlayer("Mate", 2, false);
+		g.world->setKit(mate, "EU_Assault", "us_light_soldier");
+		CHECK(g.world->spawnSoldier(mate));
+		game::GameWorld::PlayerInfo mateInfo;
+		const auto board = [&](int player, uint32_t vehicle) {
+			const world::Vec3 at = g.objects.find(vehicle)->position();
+			game::GameWorld::PlayerInfo p;
+			for (float r = 0; r <= 6; r += 1.5f) {
+				for (int k = 0; k < 8; ++k) {
+					const float angle = static_cast<float>(k) * 0.785398f;
+					g.world->playerInfo(player, p);
+					g.world->setSoldierPosition(p.soldier, {at.x + r * std::sin(angle), 0, at.z + r * std::cos(angle)});
+					if (player == me) {
+						g.world->setPlayerInput(use);
+					} else {
+						g.world->setInput(player, use);
+					}
+					g.world->tick(1 / 30.0f);
+					if (player == me) {
+						g.world->setPlayerInput({});
+					} else {
+						g.world->setInput(player, {});
+					}
+					g.world->tick(1 / 30.0f);
+					if (g.world->playerInfo(player, p) && p.vehicle == vehicle) {
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+		CHECK(board(mate, tank));
+		game::SoldierInput move;
+		move.switchSeat = 2;
+		g.world->setInput(mate, move);
+		g.run(0.1f);
+		g.world->setInput(mate, {});
+		g.run(0.5f);
+		CHECK(g.world->playerInfo(mate, mateInfo) && mateInfo.vehicle == tank && mateInfo.seat == 1);
+		// The player drives the APC beside it.
+		CHECK(board(me, apc->id()));
+		game::GameWorld::PlayerInfo info;
+		CHECK(g.world->playerInfo(me, info) && info.seat == 0);
+		const auto refill = [&](bool& stamped, bool& received) {
+			const int before = gun->magsLeft();
+			game::GameWorld::AbilityBarInfo bar;
+			int ticks = 0;
+			for (; ticks < 30 * 120 && gun->magsLeft() == before; ++ticks) {
+				g.world->tick(1 / 30.0f);
+				if (g.world->abilityBar(mate, bar) && bar.sinceAmmo == 0) {
+					stamped = true;
+					received = received || !bar.ammoFlag;
+				}
+			}
+			std::fprintf(stderr, "  a magazine in %.1f s\n", ticks / 30.0f);
+			return gun->magsLeft() > before;
+		};
+		bool stamped = false, received = false;
+		CHECK(refill(stamped, received));
+		std::fprintf(stderr, "  %s cupola: %d magazines, stamped %d, as receiving %d\n", child ? "useChildHud" : "plain",
+			gun->magsLeft(), stamped, received);
+		CHECK(child ? !stamped : received);
+	}
 }
 
 // The gunships' gunner (as_ag / us_ag seat 2, vanilla and Remaster): the
