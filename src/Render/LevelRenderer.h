@@ -860,7 +860,6 @@ private:
 		bool taa = false, ssao = false, csm = false, prepass = false;
 		bool titanShadows = false, particleShadows = false, particleLights = false;
 		float staticHeadroom = 0; // the light's reach above the cascades the static atlas was drawn with
-		int reported = -1; // the passes last printed
 		bool jittered = false;
 		Mat4 jitter;                 // post-multiplied onto the view-projections
 		Mat4 projection;             // the world's, unjittered
@@ -916,8 +915,6 @@ private:
 	void drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
 		const Mat4& viewProjection, bool coarse);
 	void resolveTaa(SDL_GPUCommandBuffer* commands);
-	// BF2142_ENHANCED_VIEW=ao|aoraw|normals|motion: that buffer over the scene (red: one channel).
-	void showEnhancedBuffer(SDL_GPUCommandBuffer* commands);
 	void endEnhancedFrame(const Camera& camera, bool overhead);
 	void useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,
 		bool hemi, bool undergrowth);

@@ -340,7 +340,7 @@ void LevelRenderer::drawShadowCasters(SDL_GPUCommandBuffer* commands, SDL_GPUTex
 	}
 	drawShadowCasterInstances(commands, pass, m_shadow.viewProjection, m_shadow.radius, statics, seconds, casters, draws);
 	SDL_EndGPURenderPass(pass);
-	if (std::getenv("BF2142_SHADOW_STATS")) {
+	if (static const bool stats = std::getenv("BF2142_SHADOW_STATS") != nullptr; stats) {
 		std::printf("shadow map (%s): %zu casters, %zu draws, region %.0f/%.0f/%.0f r %.0f\n", statics ? "static" : "dynamic",
 			casters, draws, m_shadow.center.x, m_shadow.center.y, m_shadow.center.z, m_shadow.radius);
 	}

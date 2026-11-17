@@ -148,12 +148,6 @@ bool LevelRenderer::planEnhancedFrame(uint32_t width, uint32_t height, bool over
 			m_enh.prepass = m_enh.ssao = m_enh.taa = false;
 		}
 	}
-	// Printed when they change, so a run (a benchmark) shows what it measured.
-	const int passes = (m_enh.prepass ? 1 : 0) | (m_enh.taa ? 2 : 0) | (m_enh.ssao ? 4 : 0) | (m_enh.csm ? 8 : 0);
-	if (passes != m_enh.reported) {
-		m_enh.reported = passes;
-		std::printf("enhanced: prepass %d taa %d ssao %d csm %d\n", m_enh.prepass, m_enh.taa, m_enh.ssao, m_enh.csm);
-	}
 	// The lit variants (the AO, the cascades), single-sampled: the world
 	// target's count follows (GpuContext::setWorldSamples).
 	return m_enh.ssao || m_enh.csm;
@@ -616,25 +610,6 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 	}
 }
 
-void LevelRenderer::showEnhancedBuffer(SDL_GPUCommandBuffer* commands)
-{
-	static const char* view = std::getenv("BF2142_ENHANCED_VIEW");
-	if (!view) {
-		return;
-	}
-	const std::string name = view;
-	SDL_GPUTexture* buffer = name == "ao" ? m_enh.ao
-		: name == "aoraw"                 ? m_enh.aoRaw
-		: name == "normals"               ? m_enh.normalDepth
-		: name == "motion"                ? m_enh.motion
-										  : nullptr;
-	if (buffer) {
-		BloomUniforms copy;
-		copy.params[0] = 4; // bloom.frag's copy
-		fullscreenPass(commands, m_sceneColor, buffer, copy);
-	}
-}
-
 // ---- TAA ----------------------------------------------------------------------------
 
 void LevelRenderer::resolveTaa(SDL_GPUCommandBuffer* commands)
@@ -762,11 +737,6 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 			}
 		}
 		SDL_EndGPURenderPass(pass);
-		if (std::getenv("BF2142_SHADOW_STATS")) {
-			std::printf("cascades (%s): %zu casters, %zu draws, ends %.0f/%.0f/%.0f/%.0f m, radii %.0f/%.0f/%.0f/%.0f\n",
-				statics ? "static" : "dynamic", casters, draws, far[0], far[1], far[2], far[3], m_enh.cascadeRadius[0],
-				m_enh.cascadeRadius[1], m_enh.cascadeRadius[2], m_enh.cascadeRadius[3]);
-		}
 	};
 	if (settings.dynamicStaticMeshShadowsEnabled && settings.shadowMapIncludeStaticMeshes) {
 		if (moved) {
@@ -835,7 +805,6 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 			SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
 			SDL_BindGPUGraphicsPipeline(pass, m_gpu.shadowCasterPipeline());
 			float bias = 0;
-			size_t draws = 0;
 			for (int i = 0; i < count; ++i) {
 				const Vec3f center = (hulls[i].low + hulls[i].high) * 0.5f;
 				const Vec3f diagonal = hulls[i].high - hulls[i].low;
@@ -870,15 +839,6 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 					transforms.worldViewProjection = piece->world * vp;
 					transforms.world = piece->world;
 					pushTransforms(commands, transforms);
-					if (std::getenv("BF2142_SHADOW_STATS")) {
-						size_t skipped = 0;
-						for (const Submesh& submesh : mesh->submeshes) {
-							skipped += submesh.blended || submesh.additive || submesh.alphaReference > 0;
-						}
-						std::printf("titan map: hull %d piece %s at %.0f/%.0f/%.0f, %zu submeshes, %zu skipped, radius %.0f\n", i,
-							piece->geometry.c_str(), piece->world.at(3, 0), piece->world.at(3, 1), piece->world.at(3, 2),
-							mesh->submeshes.size(), skipped, radius);
-					}
 					for (const Submesh& submesh : mesh->submeshes) {
 						if (submesh.blended || submesh.additive || submesh.alphaReference > 0) {
 							continue; // glass and grilles cast nothing at this scale
@@ -888,7 +848,6 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 						SDL_GPUTextureSamplerBinding sampler {submesh.texture, m_gpu.repeatSampler()};
 						SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
 						SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
-						++draws;
 					}
 				}
 			}
@@ -896,9 +855,6 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 			u.titanParams[0] = static_cast<float>(count);
 			u.titanParams[1] = 1.0f / static_cast<float>(kTile * 2);
 			u.titanParams[2] = bias;
-			if (std::getenv("BF2142_SHADOW_STATS")) {
-				std::printf("titan map: %d hulls, %zu + %zu pieces, %zu draws\n", count, hulls[0].pieces.size(), hulls[1].pieces.size(), draws);
-			}
 		}
 	}
 	u.base.params[0] = 0; // the single region's map is off
