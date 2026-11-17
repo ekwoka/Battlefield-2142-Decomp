@@ -124,6 +124,31 @@ TEST(Weapons_MinimumAutoReloadDelayIsSeparateFromReloadTime)
 	CHECK(gun.reloading());
 }
 
+// The ammo's on-enable (0x005f4bb0) held by a soldier clears the
+// minimumTimeUntilReload end (+0x18) with the reload state: drawn again
+// mid-wait, an empty autoReload gun reloads at once. Without a soldier
+// (reloadWithoutPlayer) the wait is kept.
+TEST(Weapons_EnableClearsTheMinimumReloadWait)
+{
+	for (const bool soldier : {true, false}) {
+		game::FireArmSettings settings;
+		settings.magSize = 1;
+		settings.nrOfMags = -1;
+		settings.autoReload = true;
+		settings.minimumReloadTicks = 30;
+		settings.reloadTime = 0.2f;
+		game::FireArm gun(settings);
+		CHECK(gun.tick(1 / 30.0f, true));
+		gun.tick(1 / 30.0f, false);
+		CHECK(!gun.reloading());
+		gun.enable(soldier);
+		// The round's 3-tick interval (600 a minute) still runs, then the
+		// reload (soldier) or the rest of the 30-tick wait.
+		for (int i = 0; i < 4; ++i) gun.tick(1 / 30.0f, false);
+		CHECK(gun.reloading() == soldier);
+	}
+}
+
 TEST(Weapons_IncrementalReloadUsesRetailPhasesAndTicks)
 {
 	game::FireArmSettings settings;

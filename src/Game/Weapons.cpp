@@ -562,7 +562,10 @@ void FireArm::enable(bool soldier)
 {
 	m_readyIn = m_settings.delayToUseTicks;
 	if (soldier || !m_settings.reloadWithoutPlayer) {
+		// 0x005f4bb0's reset: the reload's state (+0x3c) and times, and the
+		// minimumTimeUntilReload end (+0x18, set by the round 0x005f4a40).
 		dropReload();
+		m_reloadIn = 0;
 	}
 	// canReload (0x005f4140): not full (allowReloadWithFullMag aside) and
 	// a magazine to take, or magazines without end; a ReplenishingAmmoComp's

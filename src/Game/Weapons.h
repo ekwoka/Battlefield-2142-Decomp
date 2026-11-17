@@ -622,7 +622,8 @@ public:
 	void dropReload() { m_reloadLeft = m_reloadStageLeft = 0; m_reloadRoundsLeft = m_reloadSoundEvent = 0; }
 	// The firearm's enable (0x005c47d0: drawn): delayToUse starts, and the
 	// ammo's on-enable runs (0x005f4bb0): held by a soldier (or without
-	// reloadWithoutPlayer) a reload under way is dropped; instantReloadOnEnable.
+	// reloadWithoutPlayer) a reload under way is dropped and the
+	// minimumTimeUntilReload wait with it; instantReloadOnEnable.
 	void enable(bool soldier);
 	bool readying() const { return m_readyIn > 0; }
 	// A placed round picked up again (the firearm's slot 0x84(1, ...), from
