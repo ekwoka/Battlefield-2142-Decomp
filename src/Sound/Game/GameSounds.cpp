@@ -335,17 +335,30 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	// Pick the perspective before checking an automatic loop. The local
 	// player can change camera while holding fire; its old loop must stop.
 	int slot = 2;
-	// DefaultSoundComp creates all event templates even when a mod leaves
-	// one unconfigured. In particular the vanilla heavy walker's main cannon
-	// has an empty Fire1P_Outdoor template but a configured Fire1P sample.
-	// Template existence alone must not select that silent variant.
-	const bool outdoorSound = sampleCount(prefix + "Fire1P_Outdoor") > 0;
+	// The component's slots (set-up 0x005dc450): each is a sound only when
+	// its template's first file name is not empty (0x005f67a0 tests the
+	// engine template's soundFilename(), BF2142Audio 0x100179f0, which is ""
+	// for a template without files). The generated S_<weapon>_<event>
+	// templates (0x005db760) mostly have none: the vanilla heavy walker's
+	// main cannon has an empty Fire1P_Outdoor but a Fire1P. With no Fire1P,
+	// Fire1P_Outdoor moves into its slot (+0x10 = +0x14, +0x14 = 0).
+	std::string names[3] = {prefix + "Fire1P", prefix + "Fire1P_Outdoor", prefix + "Fire3P"};
+	bool firstPersonSound = m_manager.hasSound(names[0]);
+	bool outdoorSound = m_manager.hasSound(names[1]);
 	// Enhanced audio: a 1P sound filed under the same words (a port addition).
-	const std::string fire1P = enhancedAudioEnabled() && firstPerson && !outdoorSound && sampleCount(prefix + "Fire1P") == 0
-		? sameWords(prefix + "Fire1P")
-		: prefix + "Fire1P";
-	const bool firstPersonSound = sampleCount(fire1P) > 0;
-	if (firstPerson && (outdoorSound || firstPersonSound)) {
+	if (enhancedAudioEnabled() && firstPerson && !firstPersonSound && !outdoorSound) {
+		names[0] = sameWords(names[0]);
+		firstPersonSound = m_manager.hasSound(names[0]);
+	}
+	if (!firstPersonSound) {
+		names[0] = names[1];
+		firstPersonSound = outdoorSound;
+		outdoorSound = false;
+	}
+	// 0x005dbe79..0x005dbee9: a 1P slot and the owner's own view pick slot 0,
+	// or 1 (+0x14) where the engine says the listener is outdoors; anything
+	// else (no 1P sound at all, or another's view) Fire3P.
+	if (firstPerson && firstPersonSound) {
 		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
 	}
 	if (state.looping && state.loopSlot != slot) {
@@ -372,23 +385,18 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (state.looping) {
 		return;
 	}
-	// The slot: first person selects Fire1P / Fire1P_Outdoor; otherwise
-	// Fire3P. First-person fire ducks the world's effects (reason 4).
-	// 0x005dbec3..0x005dbee7: a local player's weapon sets reason 4 (muteOnFire) before the
-	// sample is looked at, so a gun with no 1P sample still ducks the world's effects.
-	// No 1P sample (the right Shepherd gunner's Fire1P is misnamed in both mods'
-	// eu_at.tweak): retail 0x005dbdc0 picks slot 0/1 on first person alone and plays
-	// nothing. Enhanced audio (a port addition) lets the 3P sample stand in, kept
-	// head-relative so occlusion and HRTF don't treat the player's own gun as distant.
-	const bool head = firstPerson;
+	// First-person fire ducks the world's effects (reason 4) when a 1P slot
+	// was picked (0x005dbecc..0x005dbee7), before the sample is looked at.
+	// No 1P sound at all (the right Shepherd gunner's Fire1P is misnamed in
+	// both mods' eu_at.tweak): retail plays the Fire3P slot as for anyone
+	// else, 3D at the gun, and doesn't duck. Enhanced audio (a port addition)
+	// keeps that stand-in head-relative and ducking, so occlusion and HRTF
+	// don't treat the player's own gun as distant.
+	const bool head = slot != 2 || (firstPerson && enhancedAudioEnabled());
 	if (head && muteOnFire) {
 		m_manager.setMuted(4, true);
 	}
-	if (firstPerson && slot == 2 && !enhancedAudioEnabled()) {
-		return;
-	}
-	static const char* const kSlots[3] = {"Fire1P", "Fire1P_Outdoor", "Fire3P"};
-	const std::string name = slot == 0 ? fire1P : prefix + kSlots[slot];
+	const std::string& name = names[slot];
 	const int samples = sampleCount(name);
 	int sample = -1, loops = 1;
 	bool keep = false;

@@ -339,8 +339,35 @@ TEST(GameSounds_EmptyOutdoorFireVariantFallsBackToFirstPerson)
 	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_walker_cannon_Fire1P");
 }
 
+// Only Fire1P_Outdoor has a file: the set-up (0x005dc450) moves it into the
+// Fire1P slot and empties the outdoor one, so it plays in first person
+// indoors and out, never through the outdoor test.
+TEST(GameSounds_OnlyOutdoorFireSampleTakesTheFirstPersonSlot)
+{
+	Sounds s;
+	s.templates.create(sound::SoundObjectTemplate::kClassId, "S_pistol_Fire1P"); // no file
+	addSoundTemplate(s.templates, "S_pistol_Fire1P_Outdoor");
+	addSoundTemplate(s.templates, "S_pistol_Fire3P");
+	sound::GameSounds::FireInfo fire;
+	fire.mode = 0;
+	sound::setEnhancedAudio(false);
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "pistol", true, {}, true, 1, 0, &fire);
+	// A roof over the listener: still the outdoor sample, in the 1P slot.
+	s.manager.setRayTest([](const sound::Vec3& from, const sound::Vec3& to, float& distance) {
+		distance = std::fabs(to.y - from.y) * 0.2f;
+		return true;
+	});
+	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "pistol", true, {}, true, 1, 0, &fire);
+	CHECK(s.triggered.size() == 2);
+	for (const auto& t : s.triggered) {
+		CHECK(t.name == "S_pistol_Fire1P_Outdoor" && t.firstPerson);
+	}
+	CHECK(s.manager.muted(4));
+}
+
 // The right Shepherd gunner's Fire1P is misnamed in the shipped data, so
-// only its Fire3P has a sample. Ordinary: silent, as retail. Enhanced: the
+// only its Fire3P has a sample. Ordinary: that Fire3P at the gun with no
+// duck, as retail (0x005dbe79: no 1P slot, slot 2). Enhanced: the
 // local player's shot plays it head-relative (like the left gunner's 2D
 // Fire1P), not 3D at the muzzle where occlusion and HRTF would muffle it.
 TEST(GameSounds_FirstPersonShotWithOnlyThirdPersonSampleStaysHeadRelative)
@@ -350,28 +377,28 @@ TEST(GameSounds_FirstPersonShotWithOnlyThirdPersonSampleStaysHeadRelative)
 	s.templates.create(sound::SoundObjectTemplate::kClassId, "S_gunner_Fire1P"); // no file
 	sound::GameSounds::FireInfo fire;
 	fire.mode = 0;
-	// Ordinary (retail 0x005dbdc0): the empty first-person slot plays nothing,
-	// but muteOnFire still ducks the world (reason 4 is set before the
-	// sample is looked at, 0x005dbec3..0x005dbee7).
+	// Ordinary (retail 0x005dbdc0): neither 1P slot is a sound (0x005f67a0
+	// needs a file name), so slot 2 plays at the gun and nothing ducks
+	// (reason 4 is set only on the 1P path, 0x005dbecc..0x005dbee7).
 	sound::setEnhancedAudio(false);
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
-	CHECK(s.triggered.empty());
-	CHECK(s.manager.muted(4));
-	s.manager.setMuted(4, false);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_gunner_Fire3P" && !s.triggered[0].firstPerson
+		&& s.triggered[0].position.x == 4);
+	CHECK(!s.manager.muted(4));
 	// Enhanced: the 3P sample stands in, head-relative.
 	sound::setEnhancedAudio(true);
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", true, {4, 0, 0}, true, 1, 0, &fire);
 	sound::setEnhancedAudio(false);
-	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_gunner_Fire3P" && s.triggered[0].firstPerson);
+	CHECK(s.triggered.size() == 2 && s.triggered[1].name == "S_gunner_Fire3P" && s.triggered[1].firstPerson);
 	CHECK(s.manager.muted(4));
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "gunner", false, {4, 0, 0}, true, 2, 0, &fire);
-	CHECK(s.triggered.size() == 2 && !s.triggered[1].firstPerson && s.triggered[1].position.x == 4);
+	CHECK(s.triggered.size() == 3 && !s.triggered[2].firstPerson && s.triggered[2].position.x == 4);
 }
 
 // Enhanced audio: a gun whose Fire1P is filed under the same words in
 // another order (the right Shepherd gun: S_eu_at_minigun_R_firearm_Fire1P
 // for S_eu_at_R_minigun_firearm_Fire1P) plays that 1P sound, as its twin
-// does. Ordinary audio stays retail: nothing (0x005dbdc0), the duck alone.
+// does. Ordinary audio stays retail: its Fire3P at the gun (0x005dbdc0).
 TEST(GameSounds_EnhancedFindsAFirstPersonSoundUnderReorderedWords)
 {
 	Sounds s;
@@ -381,12 +408,12 @@ TEST(GameSounds_EnhancedFindsAFirstPersonSoundUnderReorderedWords)
 	fire.mode = 0;
 	sound::setEnhancedAudio(false);
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
-	CHECK(s.triggered.empty() && s.manager.muted(4));
-	s.manager.setMuted(4, false);
+	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_at_R_gun_firearm_Fire3P" && !s.triggered[0].firstPerson);
+	CHECK(!s.manager.muted(4));
 	sound::setEnhancedAudio(true);
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "at_R_gun_firearm", true, {4, 0, 0}, true, 1, 0, &fire);
 	sound::setEnhancedAudio(false);
-	CHECK(s.triggered.size() == 1 && s.triggered[0].name == "S_at_gun_R_firearm_Fire1P" && s.triggered[0].firstPerson);
+	CHECK(s.triggered.size() == 2 && s.triggered[1].name == "S_at_gun_R_firearm_Fire1P" && s.triggered[1].firstPerson);
 	CHECK(s.manager.muted(4));
 }
 
