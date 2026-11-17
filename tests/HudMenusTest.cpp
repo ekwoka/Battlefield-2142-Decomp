@@ -2907,6 +2907,34 @@ TEST(HudQuestions_RemovalRefreshesVisiblePrompt)
 	CHECK(shown.empty() && !questions.front() && answers == 0 && clears > 0);
 }
 
+// Made commander (2/0x21, 0x00756e07): 0x0079e390 answers the pending
+// commander orders, join requests and invites no (answer 0, quiet 1: the
+// refusals go out, their lines don't), then the squad leader questions,
+// showing the next; the offer of command (kind 3) stays.
+TEST(HudQuestions_NewCommanderRefusesPendingButKeepsTheOffer)
+{
+	using Q = menu::HudQuestions;
+	Q questions;
+	std::vector<std::string> shown;
+	std::vector<std::tuple<Q::Kind, int, bool, bool>> answers;
+	questions.onClear = [&] { shown.clear(); };
+	questions.onLine = [&](const std::string& line) { shown.push_back(line); };
+	questions.onAnswer = [&](const Q::Question& q, bool yes, bool quiet) { answers.emplace_back(q.kind, q.value, yes, quiet); };
+	questions.ask(Q::JoinRequest, 7, "join");
+	questions.ask(Q::Invite, 3, "invite");
+	questions.ask(Q::SquadLeader, 4, "leader");
+	questions.ask(Q::CommanderOffer, 2, "offer");
+	questions.becameCommander();
+	CHECK(answers.size() == 3);
+	if (answers.size() == 3) {
+		CHECK(answers[0] == std::make_tuple(Q::JoinRequest, 7, false, true));
+		CHECK(answers[1] == std::make_tuple(Q::Invite, 3, false, true));
+		CHECK(answers[2] == std::make_tuple(Q::SquadLeader, 4, false, true));
+	}
+	CHECK(questions.front() && questions.front()->kind == Q::CommanderOffer);
+	CHECK(!shown.empty() && shown.front() == "offer");
+}
+
 TEST(HudCommander_ApplicationAndResultFeedback)
 {
 	menu::CommanderMessages messages;

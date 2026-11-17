@@ -625,6 +625,34 @@ void HudQuestions::forget(Kind kind)
 	}
 }
 
+void HudQuestions::answerAll(Kind kind, bool yes, bool quiet, bool showNext)
+{
+	auto& q = m_questions[static_cast<size_t>(kind)];
+	if (q) {
+		const Question asked = *q;
+		q.reset();
+		if (onClear) {
+			onClear(); // 0x0079d6e0 first clears the front's lines (HUD slot 0x180 with 8)
+		}
+		if (onAnswer) {
+			onAnswer(asked, yes, quiet);
+		}
+	}
+	if (showNext) {
+		show();
+	}
+}
+
+void HudQuestions::becameCommander()
+{
+	// 0x00756e11..0x00756e52: 0x0079e390(kind, answer 0, quiet 1, show next)
+	// for kinds 2, 0, 1 (not shown) and 4 (shown).
+	for (const Kind kind : {CommanderOrder, JoinRequest, Invite}) {
+		answerAll(kind, false, true, false);
+	}
+	answerAll(SquadLeader, false, true, true);
+}
+
 void HudQuestions::answer(bool yes)
 {
 	const Question* q = front();

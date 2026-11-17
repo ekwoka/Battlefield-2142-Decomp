@@ -298,6 +298,14 @@ public:
 	void ask(Kind kind, int value, const std::string& text);
 	// 0x0079e290 with -1: the kind's questions taken away, unanswered.
 	void forget(Kind kind);
+	// 0x0079e390: the kind's questions answered (0x0079d6e0) and taken
+	// away, the next one shown after with `showNext` (0x0079d4e0's flag).
+	void answerAll(Kind kind, bool yes, bool quiet, bool showNext);
+	// The local player made commander (2/0x21, 0x00756e07): the commander
+	// orders, squad join requests and squad invites answered no, quietly,
+	// then the squad leader questions (shown next); an offer of command
+	// (kind 3) stays.
+	void becameCommander();
 	void answer(bool yes);
 	void tick(float seconds);
 	const Question* front() const;
