@@ -167,7 +167,7 @@ TEST(GameSounds_ThirdPersonFireLoopFollowsTheGun)
 {
 	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
 	if (!dir) return;
-	setenv("ALSOFT_DRIVERS", "null", 1);
+	test::setEnv("ALSOFT_DRIVERS", "null");
 	auto* engine = sound::getSoundEngine();
 	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
 	{

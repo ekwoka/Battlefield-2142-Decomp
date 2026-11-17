@@ -514,8 +514,8 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 	vehicle->m_drag = number(root, "drag", 0);
 	if (mesh && !mesh->geometries.empty()) {
 		for (const auto& sub : physics::collisionParts(*mesh, 0)) {
-			const auto& lod = sub.lods.size() >= 2 ? sub.lods[1] : sub.lods.front();
 			if (!sub.lods.empty()) {
+				const auto& lod = sub.lods.size() >= 2 ? sub.lods[1] : sub.lods.front();
 				vehicle->m_footprint = (lod.boundsMax[0] - lod.boundsMin[0]) * (lod.boundsMax[2] - lod.boundsMin[2]);
 				break;
 			}
