@@ -885,10 +885,14 @@ struct Projectile {
 	bool wireLost = false;
 	bool wireHasPoint = false;
 	physics::Vec3 wirePoint {};
-	// Local infantry launcher control: leaving the sights or putting away the
-	// launcher releases guidance. Vehicle and AI guidance do not use this.
-	bool wireRequiresSights = false;
-	uint32_t wireWeapon = 0;
+	// A hand launcher's wire (TSWireGuided): putting the launcher away (the
+	// firearm's disable 0x005c42f0 -> LPTargetComp slot 0x64, 0x005e2320)
+	// lets the round go, whatever disableGuidanceOnReload says; leaving the
+	// sights doesn't (the zoom's 0x005c0da0 -> 0x005f5980 only marks +0x20;
+	// the update 0x005e2e20 steers at any zoom level). Seat guns don't use this.
+	bool wireEndsWithWeapon = false;
+	uint32_t wireWeapon = 0;  // the hand weapon that fired it
+	uint32_t wireVehicle = 0; // the vehicle the shooter sat in when it fired (0 on foot)
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
 	bool followTurned = false; // the follow steered it this tick (0x005ed1a0's result)
 	// SeekClosestTargetComp's relock: armed at each shot (0x005b2e70 ->

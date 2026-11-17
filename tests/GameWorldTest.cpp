@@ -2946,13 +2946,18 @@ TEST(GameWorld_GuidedMissileFollowsTheActiveCamera)
 	}
 }
 
-// The infantry AV launchers release their wire when the player leaves the
-// sights. Re-entering them must not reacquire an already released round.
-TEST(GameWorld_InfantryWireGuidanceEndsWhenLeavingSights)
+// A hand launcher's wire (TSWireGuided) steers zoomed or not: LPTargetComp's
+// update (0x005e2e20) has no zoom test, and the zoom's change (0x005c0da0 ->
+// 0x005f5980) only marks +0x20. Putting the launcher away (the firearm's
+// disable 0x005c42f0 -> slot 0x64, 0x005e2320) lets the round go for good;
+// taking it back doesn't reacquire it.
+TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 {
 	for (const bool aimedAtLaunch : {false, true}) {
 		Range range;
+		range.templates.registerType(6, "Kit");
 		auto* launcher = range.templates.find("eu_ar_rifle");
+		launcher->settings()["itemIndex"] = "3";
 		launcher->settings()["projectileTemplate"] = "missile";
 		launcher->settings()["velocity"] = "40";
 		launcher->settings()["ammo.magSize"] = "1";
@@ -2960,6 +2965,14 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenLeavingSights)
 		launcher->settings()["ammo.reloadTime"] = "0.2";
 		launcher->settings()["target.targetSystem"] = "TSWireGuided";
 		launcher->settings()["target.disableGuidanceOnReload"] = "1";
+		world::ObjectTemplate* handgun = range.templates.create("GenericFireArm", "eu_handgun");
+		handgun->settings()["itemIndex"] = "2";
+		handgun->settings()["projectileTemplate"] = "bullet";
+		handgun->settings()["ammo.magSize"] = "12";
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		for (const char* item : {"eu_handgun", "eu_ar_rifle"}) {
+			kit->children().push_back({item, {}, {}});
+		}
 		auto* missile = range.templates.create("GenericProjectile", "missile");
 		missile->settings()["seek.targetType"] = "TTUnique";
 		missile->settings()["seek.trackingDelay"] = "0.01";
@@ -2970,6 +2983,8 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenLeavingSights)
 		CHECK(range.world->spawnPlayer(2) != nullptr);
 		range.world->autoReload = true;
 		const int player = range.world->localPlayer();
+		const auto held = [&] { return range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name(); };
+		CHECK(held() == "eu_ar_rifle");
 		range.world->setZoomed(player, aimedAtLaunch);
 		game::SoldierInput input;
 		input.fire = true;
@@ -2985,30 +3000,49 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenLeavingSights)
 		for (int i = 0; i < 15; ++i) range.world->tick(1 / 30.0f);
 		CHECK(range.world->projectiles().size() == 1);
 		if (range.world->projectiles().empty()) continue;
-		const auto& guided = range.world->projectiles().front();
-		CHECK(guided.wireLost != aimedAtLaunch);
-		const float before = std::atan2(guided.velocity.x, guided.velocity.z);
-		if (aimedAtLaunch) {
-			CHECK(before > 0.08f);
-			CHECK(range.world->playerWeapon()->roundsInMag() == 0);
-			CHECK(!range.world->playerWeapon()->reloading());
-		} else {
-			CHECK(std::fabs(before) < 0.01f);
-		}
-		range.world->setZoomed(player, false);
+		const float first = std::atan2(range.world->projectiles().front().velocity.x,
+			range.world->projectiles().front().velocity.z);
+		CHECK(!range.world->projectiles().front().wireLost);
+		CHECK(first > 0.08f);
+		// Guided, the auto reload waits.
+		CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+		CHECK(!range.world->playerWeapon()->reloading());
+		// Out of (or into) the sights: the wire still steers.
+		range.world->setZoomed(player, !aimedAtLaunch);
+		input.turn = -20;
+		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
+		input.turn = 0;
+		range.world->setPlayerInput(input);
+		for (int i = 0; i < 15; ++i) range.world->tick(1 / 30.0f);
+		CHECK(!range.world->projectiles().front().wireLost);
+		const float before = std::atan2(range.world->projectiles().front().velocity.x,
+			range.world->projectiles().front().velocity.z);
+		CHECK(before > first + 0.08f);
+		// The handgun: the wire is let go.
+		input.selectItem = 2;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		CHECK(held() == "eu_handgun");
 		CHECK(range.world->projectiles().front().wireLost);
-		range.world->setZoomed(player, true);
+		// The launcher back: the released round isn't reacquired.
+		input.selectItem = 0;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.selectItem = 3;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.selectItem = 0;
 		input.turn = -50;
 		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
 		input.turn = 0;
 		range.world->setPlayerInput(input);
 		for (int i = 0; i < 20; ++i) range.world->tick(1 / 30.0f);
+		CHECK(held() == "eu_ar_rifle");
 		const auto& released = range.world->projectiles().front();
 		CHECK(released.wireLost);
 		CHECK(std::fabs(std::atan2(released.velocity.x, released.velocity.z) - before) < 0.01f);
-		CHECK(range.world->playerWeapon()->roundsInMag() == 1);
 	}
 }
 

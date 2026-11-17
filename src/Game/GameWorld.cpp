@@ -2524,13 +2524,12 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		if (gun) {
 			wireSettings(p, *gun);
 			const auto system = gun->settings().find("target.targetSystem");
-			p.wireRequiresSights = !player.ai && p.settings->seek == ProjectileSettings::Seek::Aim
-				&& system != gun->settings().end() && sameName(system->second, "TSWireGuided")
-				&& integer(*gun, "target.disableGuidanceOnReload", 0) != 0;
+			// Put away, its LPTargetComp lets the round go (0x005e2320); fired
+			// from the hip it is guided all the same (0x005e2e20).
+			p.wireEndsWithWeapon = p.settings->seek == ProjectileSettings::Seek::Aim
+				&& system != gun->settings().end() && sameName(system->second, "TSWireGuided");
 			p.wireWeapon = player.weaponObject;
-			if (p.wireRequiresSights && !player.zoomed) {
-				p.wireLost = true;
-			}
+			p.wireVehicle = player.vehicle;
 			limitInWorld(firer, *gun, p);
 		}
 		launchLocked(p, firer);
@@ -4011,7 +4010,10 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 	if (!shooter || !shooter->alive || p.wireLost) {
 		return;
 	}
-	if (p.wireRequiresSights && (!shooter->zoomed || shooter->vehicle || shooter->weaponObject != p.wireWeapon)) {
+	// The hand launcher put away (another weapon, or into a vehicle): the
+	// firearm's disable (0x005c42f0) calls LPTargetComp's slot 0x64
+	// (0x005e2320), which stops the round's guidance and drops it (+0x54).
+	if (p.wireEndsWithWeapon && (shooter->vehicle != p.wireVehicle || shooter->weaponObject != p.wireWeapon)) {
 		p.wireLost = true;
 		return;
 	}
@@ -10618,13 +10620,13 @@ void GameWorld::stepPlayersBefore(float seconds)
 			if (!m_player->vehicle) {
 				wanted = m_player->weapon && wantsAutoReload(*m_player->weapon);
 				// Wait while a round is actively guided (the player's own wire,
-				// held by the sights): reloading at once would cut it and drop
+				// launcher still in hand): reloading at once would cut it and drop
 				// the zoom; it reloads once the round is gone.
 				const Player& me = *m_player;
 				wanted = wanted && !std::any_of(m_projectiles.begin(), m_projectiles.end(), [&me](const Projectile& p) {
 					return p.alive && !p.visual && p.player == me.id && p.settings
 						&& p.settings->seek == ProjectileSettings::Seek::Aim && !p.wireLost
-						&& (!p.wireRequiresSights || (me.zoomed && !me.vehicle && me.weaponObject == p.wireWeapon));
+						&& (!p.wireEndsWithWeapon || (me.vehicle == p.wireVehicle && me.weaponObject == p.wireWeapon));
 				});
 			} else if (const Body* body = findBody(m_player->vehicle);
 					   body && m_player->seat >= 0 && static_cast<size_t>(m_player->seat) < body->guns.size()) {
