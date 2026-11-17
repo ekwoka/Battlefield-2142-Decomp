@@ -953,11 +953,33 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 		quads = manager.frame(1);
 		CHECK(quads.size() == 2 && quads[1].rotation == 0);
 	}
-	// The big map opened after the turn is north-up.
+	// The big map opened after the turn keeps the minimap's last turn
+	// (0x0077cba0 always turns by +0x80c), which holds while it is open
+	// (0x0078f680 updates it only at the minimap's size, +0x709): a new
+	// heading, being dead, or man down don't move it.
+	manager.setMapMarkers({{"mark.dds", 100, 0, 16, 0}});
 	manager.set("MapFullSize", 1);
+	manager.tickMapTurn(1.0f / 60, true); // the size flag (+0x709) follows
+	for (int i = 0; i < 60; ++i) {
+		manager.setMapHeading(0);
+		manager.tickMapTurn(1.0f / 60, i < 30);
+	}
+	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
 	quads = manager.frame(1);
-	CHECK(!quads.empty() && quads[0].rotation == 0);
+	CHECK(!quads.empty() && std::abs(quads[0].rotation + 90) < 0.01f);
+	{
+		// Hit-tested turned too: the point above the centre is east.
+		float cxw = 0, czw = 0, wx = 0, wz = 0;
+		const float bx = quads[0].pivot[0], by = quads[0].pivot[1];
+		CHECK(manager.mapWorldAt(bx, by, cxw, czw) && manager.mapWorldAt(bx, by - 20, wx, wz));
+		CHECK(wx - cxw > 1 && std::abs(wz - czw) < 0.5f);
+	}
 	manager.set("MapFullSize", 0);
+	manager.tickMapTurn(1.0f / 60, true);
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(east);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
 	// A static map: north up again.
 	manager.set("MapStatic", 1);
 	manager.setMapHeading(east);

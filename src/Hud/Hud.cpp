@@ -1519,8 +1519,8 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 		return false;
 	}
 	// Turned back about the node's centre (the map is drawn turned by
-	// +0x80c).
-	const float turn = number("MapFullSize") != 0 ? 0.0f : m_mapTurn; // the big map stays north-up
+	// +0x80c, the big map too).
+	const float turn = m_mapTurn;
 	if (turn != 0) {
 		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
 		const float c = std::cos(-turn), s = std::sin(-turn);
@@ -1910,8 +1910,10 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
 	// a positive turn counter-clockwise on the screen; HudQuad's rotation
 	// is clockwise), then cut to the node.
-	// The big map (the player's view turned, then opened) is drawn north-up.
-	const float mapTurn = full ? 0.0f : m_mapTurn;
+	// The big map too: 0x0077cba0 / 0x0077d200 always turn by +0x80c, which
+	// tickMapTurn holds while the map isn't at the minimap's size (+0x709,
+	// 0x0078f810), so it keeps the minimap's last turn.
+	const float mapTurn = m_mapTurn;
 	const float turnDegrees = mapTurn * 57.29578f;
 	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
 	const auto turned = [&](HudQuad& q) {
