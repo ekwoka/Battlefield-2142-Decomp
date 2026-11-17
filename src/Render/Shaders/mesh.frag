@@ -200,10 +200,15 @@ void main()
 	float fade = material.w > 0.0 ? material.w : 1.0;
 	float fog = fogAmount(inDepth);
 	if ((layers & 16) != 0) {
-		// SRCALPHA / ONE adds emitted light to an already fogged scene.
-		// Fade that light out, as for additive particles; adding the fog
-		// colour itself makes black glow borders visible as rectangles.
-		outColor = vec4(albedo.rgb, albedo.a * fade * (1.0 - fog));
+		// SRCALPHA / ONE with the fixed-function fog on, toward the scene's
+		// fog colour: an AdditiveAlpha geometry draws RaShaderBMadditive's
+		// depthAndFog (RendDX9 0x100c3880, 0x100c5030; Fogenable = true),
+		// the RaShaderBM/STM passes set fogenable = true, and
+		// D3DRS_FOGCOLOR (0x22) is only ever the scene's fog colour
+		// (RendDX9 0x10028bb0, its one write). Fog mixes the colour before
+		// the blend and leaves alpha, so a fogged black texel adds
+		// alpha x fogColor, as in retail.
+		outColor = vec4(mix(albedo.rgb, fogColor.rgb, fog), albedo.a * fade);
 		return;
 	}
 	vec3 normal = normalize(inNormal);

@@ -7132,8 +7132,10 @@ TEST(Vehicles_DestroyedWreckPixelsOptIn)
 
 // The actual bridge glow is a black-background quad using StaticMesh.fx's
 // alpha_one technique. Its black texels must not darken the scene behind it.
-// With fog they must not brighten it either: scene-colour fog added to
-// those texels reveals the quad's rectangular border above Suez's bridge.
+// With fog, retail mixes the colour toward the scene's fog colour before
+// the SRCALPHA / ONE blend (RaShaderBMadditive depthAndFog, RaShaderBM/STM
+// fogenable = true; D3DRS_FOGCOLOR written only by RendDX9 0x10028bb0), so
+// those black texels add alpha x fogColor: the border brightens toward fog.
 TEST(Render_Glow3AdditivePixelsOptIn)
 {
     const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
@@ -7212,7 +7214,7 @@ TEST(Render_Glow3AdditivePixelsOptIn)
                 }
             }
             std::fprintf(stderr, "  %s glow3 fogged black border: maximum channel change %d\n", label, borderChange);
-            CHECK(borderChange <= 1);
+            CHECK(borderChange > 1);
             gpu->releaseTarget(target);
         }
     }
