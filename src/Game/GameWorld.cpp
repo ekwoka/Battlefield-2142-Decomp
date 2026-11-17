@@ -11301,16 +11301,21 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 	const bool fireSound = player.weapon && player.weapon->fireSoundThisTick();
 	const int reloadEvent = player.weapon ? player.weapon->takeReloadSoundEvent() : 0;
 	if (reloadEvent && !fireSound) {
-		weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
-		m_weaponSounds.back().reloadState = reloadEvent;
+		if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate,
+				player.body.position)) {
+			e->reloadState = reloadEvent;
+		}
 	}
 	if (fireSound) {
-		weaponSound(WeaponSoundEvent::Fire, player, player.object, player.weaponTemplate,
-			player.body.position + physics::Vec3 {0, 0.6f, 0});
-		m_weaponSounds.back().fireHeld = player.weapon->fireSoundHeld();
+		if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Fire, player, player.object, player.weaponTemplate,
+				player.body.position + physics::Vec3 {0, 0.6f, 0})) {
+			e->fireHeld = player.weapon->fireSoundHeld();
+		}
 		if (reloadEvent) {
-			weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate, player.body.position);
-			m_weaponSounds.back().reloadState = reloadEvent;
+			if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Reload, player, player.object, player.weaponTemplate,
+					player.body.position)) {
+				e->reloadState = reloadEvent;
+			}
 		}
 	}
 	if (shot) {
@@ -13750,16 +13755,20 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	// (FireArm::startReload).
 	if (player.input.reload && !player.reloadWas && !passengerWeapon(seat)) {
 		if (gun.weapon && gun.weapon->startReload()) {
-			weaponSound(WeaponSoundEvent::Reload, player, body.object, primary.weapon, body.body.position);
-			m_weaponSounds.back().reloadState = gun.weapon->takeReloadSoundEvent();
+			const int state = gun.weapon->takeReloadSoundEvent();
+			if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Reload, player, body.object, primary.weapon, body.body.position)) {
+				e->reloadState = state;
+			}
 		}
 		for (int group = 1; group < 3; ++group) {
 			const int index = gun.active[group];
 			if (index >= 0 && static_cast<size_t>(index) < gun.arms.size() && static_cast<size_t>(index) < seat.weapons.size()
 				&& gun.arms[static_cast<size_t>(index)].weapon && gun.arms[static_cast<size_t>(index)].weapon->startReload()) {
-				weaponSound(WeaponSoundEvent::Reload, player, body.object, seat.weapons[static_cast<size_t>(index)].weapon,
-					body.body.position);
-				m_weaponSounds.back().reloadState = gun.arms[static_cast<size_t>(index)].weapon->takeReloadSoundEvent();
+				const int state = gun.arms[static_cast<size_t>(index)].weapon->takeReloadSoundEvent();
+				if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Reload, player, body.object,
+						seat.weapons[static_cast<size_t>(index)].weapon, body.body.position)) {
+					e->reloadState = state;
+				}
 			}
 		}
 	}
@@ -13961,16 +13970,19 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	}
 	const bool shot = arm.weapon->tick(seconds, trigger);
 	if (arm.weapon->fireSoundThisTick() && (!shot || w.activeDefense || !arm.projectile)) {
-		weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, body.body.position, arm.weapon->fireMode());
-		m_weaponSounds.back().fireHeld = arm.weapon->fireSoundHeld();
+		if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, body.body.position,
+				arm.weapon->fireMode())) {
+			e->fireHeld = arm.weapon->fireSoundHeld();
+		}
 	}
 	// The reload starts after the round (ammo slot 0x3c, then the firearm's update 0x005c58a0): its
 	// sound (0x005dbfe0, which ends a burst's skips) follows the last round's fire sound.
 	const int reloadEvent = arm.weapon->takeReloadSoundEvent();
 	const auto sayReload = [&] {
 		if (reloadEvent) {
-			weaponSound(WeaponSoundEvent::Reload, player, body.object, w.weapon, body.body.position);
-			m_weaponSounds.back().reloadState = reloadEvent;
+			if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Reload, player, body.object, w.weapon, body.body.position)) {
+				e->reloadState = reloadEvent;
+			}
 		}
 	};
 	// The gun's SimpleDeviationComp (0x005dedb0, a tick): the firing's
@@ -14149,8 +14161,10 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	++player.roundsFired;
 	++player.gunShots;
 	if (arm.weapon->fireSoundThisTick()) {
-		weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, firstOrigin, arm.weapon->fireMode());
-		m_weaponSounds.back().fireHeld = arm.weapon->fireSoundHeld();
+		if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Fire, player, body.object, w.weapon, firstOrigin,
+				arm.weapon->fireMode())) {
+			e->fireHeld = arm.weapon->fireSoundHeld();
+		}
 	}
 	sayReload(); // the reload's sound follows the last round's fire sound
 	// The weapon's event 0 (ObjectEffects), kept short where nothing takes
@@ -14448,16 +14462,17 @@ physics::Vec3 GameWorld::seatGunOrigin(const SeatLayout& seat, const SeatWeapon&
 	return from + forward * 1.0f;
 }
 
-void GameWorld::weaponSound(WeaponSoundEvent::Kind kind, const Player& player, uint32_t object,
-	const std::string& weapon, const physics::Vec3& position, int fireMode)
+GameWorld::WeaponSoundEvent* GameWorld::weaponSound(WeaponSoundEvent::Kind kind, const Player& player,
+	uint32_t object, const std::string& weapon, const physics::Vec3& position, int fireMode)
 {
 	if (weapon.empty()) {
-		return;
+		return nullptr;
 	}
 	m_weaponSounds.push_back({kind, player.id, object, weapon, position, fireMode});
 	if (m_weaponSounds.size() > 256) {
 		m_weaponSounds.erase(m_weaponSounds.begin(), m_weaponSounds.end() - 256);
 	}
+	return &m_weaponSounds.back();
 }
 
 void GameWorld::enablePhysics(const io::FileManager& files, physics::CollisionTemplateManager& collisionTemplates,

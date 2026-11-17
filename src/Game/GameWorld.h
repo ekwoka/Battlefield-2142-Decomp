@@ -4222,8 +4222,9 @@ private:
 	void stepDroppedKits();
 	std::vector<SoundEvent> m_sounds;
 	std::vector<WeaponSoundEvent> m_weaponSounds;
-	void weaponSound(WeaponSoundEvent::Kind kind, const Player& player, uint32_t object, const std::string& weapon,
-		const physics::Vec3& position, int fireMode = -1);
+	// The event queued, nullptr for a weapon without a name (none queued).
+	WeaponSoundEvent* weaponSound(WeaponSoundEvent::Kind kind, const Player& player, uint32_t object,
+		const std::string& weapon, const physics::Vec3& position, int fireMode = -1);
 	void stepSeatCorpses(float seconds);
 	// Bodies after PlayerDeath, with their ragdolls (the soldier's armour
 	// stays a wreck until its countdown, 0x00652380, removes the object).
