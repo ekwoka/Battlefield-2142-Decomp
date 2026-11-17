@@ -148,8 +148,24 @@ bool GameSounds::play(const std::string& templateName, const Vec3& position, uin
 		// A sound of its own, released at once: it plays out where it
 		// started (Sound::detach) as an object's component sound would.
 		if (ISound* instance = create(templateName, owner)) {
-			instance->playAt(&position);
-			instance->release();
+			if (sound->loopCount() != 0) {
+				// The place goes in the sound's transform, as an object's
+				// sound has it: the detached occlusion is asked at the
+				// matrix's translation (BF2142Audio 0x10017350), and the
+				// release copies the matrix (Sound::detach), so this one
+				// is needed only until then.
+				Transform place;
+				place.matrix.m[3][0] = position.x;
+				place.matrix.m[3][1] = position.y;
+				place.matrix.m[3][2] = position.z;
+				instance->setTransform(&place);
+				instance->play();
+				instance->release();
+			} else {
+				// A loop can't detach; the release stops it at once.
+				instance->playAt(&position);
+				instance->release();
+			}
 		}
 	}
 	return true;
@@ -332,8 +348,6 @@ void GameSounds::releaseTrigger(uint64_t user)
 void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position,
 	bool muteOnFire, uint32_t object, const FireInfo& info)
 {
-	// Pick the perspective before checking an automatic loop. The local
-	// player can change camera while holding fire; its old loop must stop.
 	int slot = 2;
 	// The component's slots (set-up 0x005dc450): each is a sound only when
 	// its template's first file name is not empty (0x005f67a0 tests the
@@ -361,7 +375,12 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (firstPerson && firstPersonSound) {
 		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
 	}
-	if (state.looping && state.loopSlot != slot) {
+	// Retail's loop plays on in the slot it started in until the trigger is
+	// let go (0x005dbdc0 returns on +0x43 before looking at the view; the
+	// slots are set up once, 0x005dc450, and 0x005db6c0 stops all three).
+	// Enhanced audio (a port addition) restarts it in the new view's slot
+	// when the camera changes mid-loop.
+	if (enhancedAudioEnabled() && state.looping && state.loopSlot != slot) {
 		const int oldSlot = state.loopSlot;
 		for (ISound*& sound : state.fire) {
 			if (sound) {

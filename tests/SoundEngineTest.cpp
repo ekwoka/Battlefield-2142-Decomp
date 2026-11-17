@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -420,4 +422,80 @@ TEST(SoundEngine_StopType2CutsToTheEndBlock)
 	}
 	engine->shutdown();
 	snd::shutdownSoundEngine();
+}
+
+// A released one-shot still playing detaches (BF2142Audio 0x10017900 ->
+// 0x10017350): the matrix is copied, and the occlusion asked once more at
+// its translation (the state's +0x38), not at the template's position plus
+// the play offset.
+TEST(SoundEngine_DetachedOcclusionAtTheMatrixTranslation)
+{
+	// A second of silence, 16-bit mono.
+	const std::filesystem::path wavPath = std::filesystem::temp_directory_path() / "bf2142_detach_test.wav";
+	{
+		const uint32_t rate = 22050, frames = rate, bytes = frames * 2;
+		std::FILE* f = std::fopen(wavPath.string().c_str(), "wb");
+		CHECK(f != nullptr);
+		if (!f) return;
+		const auto u32 = [f](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+		const auto u16 = [f](uint16_t v) { std::fwrite(&v, 2, 1, f); };
+		std::fwrite("RIFF", 1, 4, f);
+		u32(36 + bytes);
+		std::fwrite("WAVEfmt ", 1, 8, f);
+		u32(16);
+		u16(1);
+		u16(1);
+		u32(rate);
+		u32(rate * 2);
+		u16(2);
+		u16(16);
+		std::fwrite("data", 1, 4, f);
+		u32(bytes);
+		const std::vector<char> silence(bytes, 0);
+		std::fwrite(silence.data(), 1, silence.size(), f);
+		std::fclose(f);
+	}
+	struct Place final : snd::ISoundTransform {
+		snd::Matrix4 matrix;
+		snd::Vec3 v {};
+		const snd::Matrix4* worldTransform() override { return &matrix; }
+		const snd::Vec3* velocity() override { return &v; }
+	} place;
+	place.matrix.m[3][0] = 10;
+	place.matrix.m[3][1] = 2;
+	place.matrix.m[3][2] = -4;
+	struct Query final : snd::ISoundOcclusion {
+		std::vector<snd::Vec3> asked;
+		float occlusion(snd::ISound*, const snd::Vec3* position) override
+		{
+			asked.push_back(*position);
+			return 0.25f;
+		}
+	} query;
+	test::setEnv("ALSOFT_DRIVERS", "null");
+	snd::ISoundEngine* engine = snd::getSoundEngine();
+	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+	snd::ISoundTemplate* templ = engine->createTemplate();
+	templ->setSoundFilename(wavPath.string().c_str());
+	const snd::Vec3 templatePosition {1, 0, 0};
+	templ->setPosition(&templatePosition);
+	snd::ISound* sound = templ->createSound();
+	engine->reloadSoundFiles();
+	sound->setTransform(&place);
+	sound->setOcclusion(&query);
+	const snd::Vec3 offset {0, 3, 0};
+	sound->playAt(&offset);
+	engine->update(1);
+	CHECK(sound->isPlaying());
+	query.asked.clear();
+	sound->release(); // detaches: the one-shot plays out
+	CHECK(query.asked.size() == 1);
+	if (!query.asked.empty()) {
+		CHECK(query.asked[0].x == 10 && query.asked[0].y == 2 && query.asked[0].z == -4);
+	}
+	templ->release();
+	engine->shutdown();
+	snd::shutdownSoundEngine();
+	std::error_code ignored;
+	std::filesystem::remove(wavPath, ignored);
 }

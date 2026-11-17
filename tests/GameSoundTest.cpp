@@ -73,7 +73,9 @@ struct Sounds {
 } // namespace
 
 // A released GameSounds positional one-shot snapshots its obstruction before
-// playback. The rays must end at its actual position, even far from origin.
+// playback. The rays end at its place, even far from origin: the transform's
+// translation, as BF2142Audio 0x10017350 asks a detached sound (not the
+// template's position, 2 m along x here).
 TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
 {
 	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
@@ -106,7 +108,7 @@ TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
 		sound::GameSounds sounds(manager);
 		CHECK(sounds.play("StepAtPosition", {110, 10, 100}));
 		CHECK(!ends.empty());
-		if (!ends.empty()) CHECK(ends[0].x > 111 && ends[0].y > 9 && ends[0].z > 99);
+		if (!ends.empty()) CHECK(std::fabs(ends[0].x - 110) < 1 && ends[0].y > 9 && ends[0].z > 99);
 		for (int i = 0; i < 60; ++i) manager.update(1);
 	}
 	engine->shutdown();
@@ -914,10 +916,32 @@ TEST(GameSounds_FireSampleRules)
 	CHECK(s.game.sampleCount("S_nade_Fire3P") == 4 && s.game.sampleCount("S_mg_Fire3P") == 1);
 }
 
-// An automatic local weapon changes its loop when the listener leaves the
-// first-person camera while fire remains held.
+// An automatic local weapon's loop and the camera leaving first person while
+// fire stays held. Retail (0x005dbdc0 returns on the loop flag +0x43 before
+// it picks a slot) plays the 1P loop on, ducking, until the trigger is let
+// go (0x005db6c0). Enhanced audio (a port addition) moves it to the new
+// view's slot.
 TEST(GameSounds_AutomaticFireTracksCameraPerspective)
 {
+	{
+		sound::setEnhancedAudio(false);
+		Sounds s;
+		addSoundTemplate(s.templates, "S_mg_Fire1P");
+		addSoundTemplate(s.templates, "S_mg_Fire3P");
+		sound::GameSounds::FireInfo automatic;
+		automatic.mode = 2;
+		s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "mg", true, {4, 5, 6}, true, 17, 9, &automatic);
+		CHECK(s.triggered.size() == 1 && s.triggered.back().name == "S_mg_Fire1P");
+		CHECK(s.game.fireLooping(17) && s.manager.muted(4));
+		s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "mg", false, {4, 5, 6}, true, 17, 9, &automatic);
+		CHECK(s.triggered.size() == 1);
+		CHECK(s.game.fireLooping(17) && s.manager.muted(4));
+		s.game.releaseTrigger(17);
+		CHECK(!s.game.fireLooping(17) && !s.manager.muted(4));
+		s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "mg", false, {4, 5, 6}, true, 17, 9, &automatic);
+		CHECK(s.triggered.size() == 2 && s.triggered.back().name == "S_mg_Fire3P");
+	}
+	sound::setEnhancedAudio(true);
 	Sounds s;
 	addSoundTemplate(s.templates, "S_mg_Fire1P");
 	addSoundTemplate(s.templates, "S_mg_Fire3P");
@@ -934,6 +958,7 @@ TEST(GameSounds_AutomaticFireTracksCameraPerspective)
 	CHECK(s.game.fireLooping(17) && s.manager.muted(4));
 	s.game.releaseTrigger(17);
 	CHECK(!s.game.fireLooping(17) && !s.manager.muted(4));
+	sound::setEnhancedAudio(false);
 }
 
 // 0x005dbfe0 by the reload state and samples: one sample plays at a
@@ -1153,9 +1178,11 @@ TEST(GameSounds_LocalAutomaticFireUsesRetailLoop)
 		CHECK(s.game.fireLooping(1));
 	}
 	CHECK(s.triggered.size() == 1);
+	// The camera leaving first person mid-loop: the loop plays on (0x005dbdc0
+	// returns on +0x43 before it picks a slot).
 	s.game.weapon(sound::GameSounds::WeaponEvent::Fire, "rifle", false, {}, true, 1, 0, &fire);
 	CHECK(s.game.fireLooping(1));
-	CHECK(s.triggered.size() == 2);
+	CHECK(s.triggered.size() == 1);
 	s.game.releaseTrigger(1);
 	CHECK(!s.game.fireLooping(1));
 }
