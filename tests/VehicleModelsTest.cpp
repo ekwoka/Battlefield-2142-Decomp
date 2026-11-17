@@ -624,8 +624,11 @@ TEST(Vehicles_BotTankAndWalkerAimYawIsContinuous)
 		CHECK(bots.target(bot) < 0);
 		CHECK(idleSectors.size() >= 2);
 		CHECK(idleMaxGunStep > 0.05f);
-		CHECK(idleMaxCommand <= seats[static_cast<size_t>(gunSeat)].yawSpeed / 30.0f + 0.05f);
-		CHECK(idleMaxGunStep <= seats[static_cast<size_t>(gunSeat)].yawSpeed / 30.0f + 0.05f);
+		// The command is the PIMouseLookX unit (5 degrees a unit), the idle
+		// look's held to 1.5 (AIDLL 0x100e5820); the bundle turns at input x
+		// maxSpeed (0x00563bd0), no faster than 1.5 x maxSpeed.
+		CHECK(idleMaxCommand <= 1.5f * 5 + 0.05f);
+		CHECK(idleMaxGunStep <= 1.5f * seats[static_cast<size_t>(gunSeat)].yawSpeed / 30.0f + 0.05f);
 		g.world->playerInfo(bot, botInfo);
 		std::fprintf(stderr, "  IDLEPLAYER %s vehicle=%u expected=%u seat=%d driving=%d alive=%d\n", vehicleName,
 			botInfo.vehicle, vehicle, botInfo.seat, botInfo.driving, botInfo.alive);
@@ -698,8 +701,10 @@ TEST(Vehicles_BotTankAndWalkerAimYawIsContinuous)
 		std::fprintf(stderr, "  SETTLED %s yaw error %.3f degrees\n", vehicleName, settledError);
 		CHECK(settledError < 5.0f);
 		CHECK(seamSamples >= 5);
-		CHECK(maxGunStep <= yawRate / 30.0f + 0.05f);
-		CHECK(maxCommand <= yawRate / 30.0f + 0.05f);
+		// A target's look: the unit no more than 4 (0x100e5820), the gun no
+		// faster than 4 x maxSpeed.
+		CHECK(maxGunStep <= 4 * yawRate / 30.0f + 0.05f);
+		CHECK(maxCommand <= 4 * 5 + 0.05f);
 		CHECK(handoffSeenAt >= 200 && handoffSeenAt <= 225);
 	}
 }
