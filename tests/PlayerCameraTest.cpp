@@ -6,9 +6,9 @@
 #include "Main/PlayerCamera.h"
 #include "Main/Viewer.h"
 #include "Main/MissileViewSmoothing.h"
+#include "Render/TickBlend.h" // header-only: the missile view's jump rule
 #ifdef BF2142_RENDER_TESTS
 #include "Render/LevelRenderer.h"
-#include "Render/TickBlend.h"
 #endif
 #include "TestMain.h"
 #include "World/Object.h"
