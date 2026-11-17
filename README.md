@@ -489,7 +489,10 @@ feeds the simulation.
 - **First-person fire:** a weapon whose `Fire1P` sound is filed under the
   same words in another order still finds it, and a first-person gun with no
   1P sound stays head-relative and ducks the world, so HRTF and occlusion
-  don't treat your own gun as distant.
+  don't treat your own gun as distant. A held automatic's fire loop also
+  restarts in the new perspective's slot when the camera switches between
+  first and third person; the original keeps it in the slot it started in
+  until the trigger is released.
 - **Steam Audio occlusion:** with a Steam Audio build (see
   [Steam Audio (optional)](#steam-audio-optional)), walls and buildings
   between you and a sound muffle it, simulated against the level's static
