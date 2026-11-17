@@ -1,6 +1,7 @@
 // LevelRenderer's dynamic shadows, hemi map, sky layers and
 // post-production (see LevelRenderer.h and PostProduction.h).
 #include "LevelRenderer.h"
+#include "BundledShadow.h"
 #include "MeshQueues.h"
 #include "OvergrowthLod.h"
 #include "SceneMath.h"
@@ -426,6 +427,9 @@ void LevelRenderer::drawShadowCasterInstances(SDL_GPUCommandBuffer* commands, SD
 		for (const Submesh& submesh : bound->submeshes) {
 			if (submesh.blended || submesh.additive) {
 				continue; // glass, decals and glows cast nothing
+			}
+			if (bound->bundled && !bundledMaterialCastsShadow(submesh.alphaMode)) {
+				continue; // a bundled mesh's alpha-tested ones neither (0x100c67e0)
 			}
 			if (submesh.alphaReference > 0 && !settings.allowAlphaShadows) {
 				continue; // leaves and fences: shadowManager.allowAlphaShadows

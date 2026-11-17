@@ -346,6 +346,7 @@ private:
 		// additive alpha (RSMTAdditive; 0x100c3880).
 		bool blended = false;
 		bool additive = false;
+		int alphaMode = 0; // the material's: 0 opaque, 1 blended, 2 alpha tested (RendDX9's +0x15c)
 		// StaticMesh.fx alpha_one: texture alpha times 0.8; other additive paths keep 1.
 		float alphaScale = 1.0f;
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second

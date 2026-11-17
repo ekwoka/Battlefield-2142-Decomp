@@ -1,4 +1,5 @@
 #include "LevelRenderer.h"
+#include "BundledShadow.h"
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
 #include "Enhanced/EnhancedMath.h"
@@ -716,6 +717,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// hasAdditiveAlpha switch, which selects the BMadditive path.
 		const std::string technique = lower(material.technique);
 		const std::string effect = lower(material.effect);
+		submesh.alphaMode = static_cast<int>(material.alphaMode);
 		submesh.blended = material.alphaMode == 1;
 		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
 			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
@@ -2185,10 +2187,17 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			if (geometry != instance.shownGeometry || lod != instance.shownLod) {
 				const GpuMesh* shown = mesh(*m_sources, instance.geometry, geometry, geometry < 0 ? 0 : lod);
 				// A three-geometry mesh showing its first casts with its second
-				// (BundledMeshDrawShadowMap 0x100c6871): a cockpit shadows as the hull.
-				instance.shadowMesh = geometry == 0 && instance.mesh->bundled && instance.mesh->geometries == 3
-					? mesh(*m_sources, instance.geometry, 1, lod)
-					: nullptr;
+				// (BundledMeshDrawShadowMap 0x100c6871): a cockpit shadows as the hull,
+				// at the LOD the swap leaves it (BundledShadow.h).
+				instance.shadowMesh = nullptr;
+				if (geometry == 0 && instance.mesh->bundled && instance.mesh->geometries == 3) {
+					instance.shadowMesh = mesh(*m_sources, instance.geometry, 1, 0);
+					const int shadowLod = instance.shadowMesh
+						? bundledShadowLod(lod, true, static_cast<int>(instance.shadowMesh->lodCount)) : 0;
+					if (shadowLod != 0) {
+						instance.shadowMesh = mesh(*m_sources, instance.geometry, 1, shadowLod);
+					}
+				}
 				if (shown) {
 					instance.mesh = shown;
 				}
