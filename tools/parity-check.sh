@@ -2,7 +2,8 @@
 # Checks that the enhanced mode leaves the simulation alone: runs the same
 # headless bot round twice without --enhanced (the round must repeat),
 # then once with it, and compares the state fingerprints. The enhanced
-# gameplay additions (enhanced.botRecovery) change the simulation by
+# gameplay additions (botRecovery, botMovement, botTitan, guidedCameraEase,
+# cornerSteer, passengerWeapons, softLanding) change the simulation by
 # design and are turned off for the comparison.
 #   tools/parity-check.sh [seconds] [extra game args...]
 set -uo pipefail

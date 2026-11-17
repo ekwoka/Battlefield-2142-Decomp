@@ -118,6 +118,8 @@ cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="
 ninja -C build/native && build/native/tests/bf2142_tests
 # tests run in parallel processes, one per core (the whole suite takes about
 # 16 min); -j N runs N at a time; a name runs only the tests containing it
+# --remaster (or BF2142_REMASTER_TESTS=1) adds the Project Remaster tests; they
+# need mods/Project_Remaster_v17_Final in the install (BF2142_GAME_DIR)
 
 # Release build for playing (much faster than the ASan debug build above)
 cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -298,7 +300,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 |---|---|
 | `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
 | `--offline` | The menu finds no account service, so it plays offline. |
-| `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. |
+| `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. See [Enhanced mode](#enhanced-mode). |
 | `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |
 | `--input-script "<s>:<cmd> …"` | Timed input in a window: `key:` / `down:` / `up:` (SDL key names), `click:` / `move:` (window fractions), `look:dx,dy`, `button:n,0\|1`, `text:`, `shot:file.png`, `quit`. |
 | `--keys "<s>:<op> …"` | A level's game input without a window (with `--play`, `--connect`, `--host`; after `--simulate`, or before `--screenshot`): from that second on, `down:` / `up:` / `press:<control>` (the control map's names: `c_GIRadioComm`, `c_GITacticalComm`, `c_GISayAll`, `c_GISayTeam`, `c_GISaySquad`, `c_GIYes`, `c_GINo`, `c_GIShowScoreboard`, `c_PIFire`…), `text:<text>` and `key:<Flash code>` (13 Enter, 27 Esc) to the open say box, `move:` / `click:` / `rclick:<x>/<y>` on the HUD's 800 × 600 screen, `console:<line>` (`_` a space). It prints each step and what changed: the rose shown, the say box, new chat rows, the radio heard. A hosted or joined game runs in real time. |
@@ -407,6 +409,116 @@ $B --game "$G" --openspy-emulator --emulator-account tester:secret@Tester
 $B --game "$G" +level Camp_Gibraltar +gameMode gpm_cq --host --require-login --simulate 600
 $B --game "$G" --login tester:secret@Tester --connect 127.0.0.1 --play --view
 ```
+
+## Enhanced mode
+
+The enhanced mode holds the rewrite's additions that aren't in the original
+game: new render passes, audio effects, bot behaviour, camera and interface
+changes. They are all ours (`enhanced.*` is not a retail console object) and
+are listed in [`src/Scene/EnhancedSettings.h`](src/Scene/EnhancedSettings.h).
+
+**The rule:** with `enhanced.enabled` off (the default) the game behaves as
+the original. Every enhanced feature needs `enhanced.enabled` *and* its own
+option; an option set while the switch is off does nothing.
+
+### Turning it on
+
+| How | What it does |
+|---|---|
+| `--enhanced` | Start with `enhanced.enabled 1`. |
+| `+enhanced.<name> <value>` | Set an option at start-up, before the audio, the renderer and the bots read it, e.g. `+enhanced.enabled 1 +enhanced.taa 0`. This is what the launcher passes. |
+| `enhanced.<name> <value>` | The console variable, e.g. `--console "enhanced.chaseRoll 0"`. Most options are read live; the audio reads `enhanced.enabled` once, when it opens, so set that one at start-up. |
+
+```sh
+$B --game "$G" +level Camp_Gibraltar --play --view --enhanced
+$B --game "$G" +level Camp_Gibraltar --play --view +enhanced.enabled 1 +enhanced.ssao 0 +enhanced.cornerSteer 1
+```
+
+### Options
+
+"Simulation" marks the options that change the game's simulation by design;
+[`tools/parity-check.sh`](tools/parity-check.sh) turns exactly these off.
+The rest only change what you see or hear.
+
+| Option | Default | Category | What it changes compared with the original | Simulation |
+|---|---|---|---|---|
+| `enabled` | off | all | The master switch. Off, none of the options below apply. | — |
+| `taa` | on | graphics | Temporal anti-aliasing (camera jitter and a history buffer). The world is then drawn single-sampled: TAA replaces the MSAA setting. | no |
+| `ssao` | on | graphics | Ground-truth ambient occlusion (GTAO) darkens the lit shaders' ambient term. | no |
+| `csm` | on | graphics | Cascaded sun shadows with PCF filtering. | no |
+| `lightRank` | on | graphics | A mesh's point lights are ranked by distance over reach, so a small flash doesn't push out a wall light. | no |
+| `staticShadows` | on | graphics | The terrain and lightmapped surfaces also take the static meshes' and the terrain's cascade shadows, over their baked ones (with `csm`). | no |
+| `softShadows` | on | graphics | The two nearest cascades' shadows are sharp where they touch the caster and widen with distance from it (with `csm`). | no |
+| `titanShadows` | on | graphics | A Titan's hull casts into the cascades as it moves (with `csm`). | no |
+| `particleShadows` | on | graphics | Smoke and dust take the cascades' shadows (with `csm`). | no |
+| `particleLights` | on | graphics | Smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps). | no |
+| `glowOcclusion` | on | graphics | A lamp's additive halo is skipped while the line from the camera to its centre is blocked; the original only depth-tests halos per pixel. | no |
+| `prepass` | off | graphics | The depth, normal and motion prepass even when neither `taa` nor `ssao` reads it. | no |
+| `tickBlend` | off | graphics | Objects and the camera are drawn between the 30 Hz simulation ticks, as the original's frame does (0x0043f170). Without it each frame shows the last tick (only a ridden missile's camera is smoothed). | no |
+| `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
+| `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
+| `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
+| `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
+| `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
+| `chaseRoll` | on | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
+| `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
+| `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
+| `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the same 4:3 HUD (x scaled by 12/16) with its side pieces moved out by 120. Ignored when the hudfix's shader is already installed. | no |
+
+`enhanced.enabled` on its own also turns on the enhanced audio (below), lets
+a sound the data names but never creates take its weapon event's defaults,
+and makes the kit screen skip its HUD writes while nothing it shows has
+changed (the original rewrites them every frame).
+
+### Enhanced audio
+
+The audio additions have no option of their own: they follow
+`enhanced.enabled` as it stands when the sound engine opens. None of them
+feeds the simulation.
+
+- **HRTF:** OpenAL Soft is asked for HRTF (binaural 3D sound); the original
+  leaves the device's default.
+- **Filters:** the 3D sources get an EFX direct filter (gain and low-pass),
+  which replaces the original's obstruction gain for them while an
+  occlusion is active. A filter moves towards its new value by at most 0.1
+  an update, the original obstruction's rate, so passing a corner fades.
+- **Loop tracking:** a looping sound's position comes from OpenAL's
+  `AL_SAMPLE_OFFSET` (the frames actually played, with pitch and device
+  timing) instead of the original's estimate from elapsed ticks. Streams
+  keep the estimate.
+- **First-person fire:** a weapon whose `Fire1P` sound is filed under the
+  same words in another order still finds it, and a first-person gun with no
+  1P sound stays head-relative and ducks the world, so HRTF and occlusion
+  don't treat your own gun as distant.
+- **Steam Audio occlusion:** with a Steam Audio build (see
+  [Steam Audio (optional)](#steam-audio-optional)), walls and buildings
+  between you and a sound muffle it, simulated against the level's static
+  meshes. Without the library, occlusion stays the original's obstruction.
+
+### Experimental and off-by-default options
+
+- **`cornerSteer`:** an experimental path-following aid for vehicles that
+  loop at tight corners. It changes how bots drive, so it waits until it is
+  proven.
+- **`prepass`:** the prepass only has a reader in `taa` and `ssao`, which
+  already turn it on; alone it costs a pass and changes nothing on screen.
+- **`hudWidescreen`:** it changes the HUD's layout, and is only meant for a
+  mod without Remaster's own widescreen fix; turn it on if you want it.
+- **`tickBlend`:** drawing between ticks is what the original does, but the
+  rewrite's version (the objects, and every game camera with its own
+  history) is still experimental, so by default each frame shows the last
+  tick.
+
+### Parity checking
+
+`tools/parity-check.sh [seconds] [extra game args...]` runs the same headless
+bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
+the round repeats, and once with it, with the simulation options above
+(`botRecovery`, `botMovement`, `botTitan`, `guidedCameraEase`, `cornerSteer`,
+`passengerWeapons`, `softLanding`) turned off. It compares the state
+fingerprints each run prints and fails if `--enhanced` changed the
+simulation. Anything added to the enhanced mode either leaves the
+fingerprint alone or gets its own option, listed in the script.
 
 ## Progress
 
