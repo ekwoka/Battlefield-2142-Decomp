@@ -1534,7 +1534,13 @@ TEST(Titan_FallingBotOpensItsParachute)
 // The gunship a Titan's AGSpawner holds (holdObject) is a stopped node, not a
 // heavy moving object: a soldier running into it is neither squashed nor run
 // over (1000 damage, no attacker: "is no more").
-TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
+// The retail rule (0x005a4690 -> 0x005a43c0) runs over a soldier whose
+// contact with the held gunship tops 10 m/s; the rewrite's sprinting soldier
+// meets it at up to 11-12 m/s on the moving Titan's deck (his own velocity
+// spikes to 9.6-11 m/s at the contact), so with the retail rule an odd run
+// is fatal. enhanced.softLanding (the soldier the faster: the ground's rule)
+// keeps them all alive; the retail path's count is only reported.
+static void heldGunshipRunners(bool softLanding)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
@@ -1544,6 +1550,8 @@ TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
 	if (!level.loaded) {
 		return;
 	}
+	const bool on = true;
+	level.world->setSoftLanding(&softLanding, &on);
 	const int team = 2; // the human player's side in the reported session (--play 2)
 	const auto titan = *level.titan(team);
 	CHECK(level.world->moveTitan(team, 300, -200) == game::GameWorld::TitanMove::Accepted);
@@ -1587,8 +1595,16 @@ TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
 			}
 		}
 	}
-	std::fprintf(stderr, "  %d of %d died\n", deaths, tries);
-	CHECK(deaths == 0);
+	std::fprintf(stderr, "  %s: %d of %d died\n", softLanding ? "softLanding" : "retail rule", deaths, tries);
+	if (softLanding) {
+		CHECK(deaths == 0);
+	}
+}
+
+TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
+{
+	heldGunshipRunners(false);
+	heldGunshipRunners(true);
 }
 
 // A pilot in the held gunship of a moving Titan's AGSpawner starts the
