@@ -320,13 +320,20 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 	}
 	// The look statement: the aim turns the view along the offset.
 	physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
-	// Turret LookAt is evaluated from the gun's round origin in aim(). Keep
-	// the idle sector's short look point in that same frame: a root-eye point
-	// can fall inside a long barrel's muzzle sweep and its apparent bearing
-	// then changes as the muzzle moves around the yaw pivot.
-	if (!L.offsetFromRoot && self.vehicle) {
-		physics::Mat3 hull;
-		m_world.gunFrame(self.vehicle, self.seat, eye, hull);
+	// The offset statement hands MouseTurretLookAt the offset itself
+	// (AIDLL 0x100de290, slot 7 of 0x1011b390), and 0x1008e6e0 normalises
+	// it and takes its yaw and pitch against the controlled object's frame:
+	// a direction, from no origin. aim() measures a gun's from the gun's
+	// round origin (gunFrame), so the point goes out from there along the
+	// offset; from the root's eye it would come back at a parallax, worst
+	// inside a long barrel's sweep. The same seats aim() treats as guns.
+	physics::Vec3 gunEye = eye;
+	physics::Mat3 hull;
+	float gunYaw = 0, gunPitch = 0;
+	if (!L.offsetFromRoot && self.vehicle && (self.seat > 0 || drivesGun(self))
+		&& m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch)
+		&& m_world.gunFrame(self.vehicle, self.seat, gunEye, hull)) {
+		eye = gunEye;
 	}
 	const physics::Vec3 point = L.offsetFromRoot ? self.position + L.offset : eye + L.offset * 5.0f;
 	L.quiet = true;

@@ -6764,7 +6764,9 @@ TEST(Bots_TurretLooksAround)
 		tank->settings()["aiTemplate"] = "TestTank";
 		tank->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
 		tank->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
-		tank->children().push_back({"tank_turret", {0, 0.9f, 0}, {}});
+		// The turret's pivot 2 m behind the seat (mode 0): the look's
+		// direction must not depend on where the point is measured from.
+		tank->children().push_back({"tank_turret", {0, 0.9f, mode == 0 ? -2.0f : 0.0f}, {}});
 		world::ObjectTemplate* turret = field.templates.create("RotationalBundle", "tank_turret");
 		turret->settings()["inputToYaw"] = "PIMouseLookX";
 		turret->children().push_back({"tank_barrel", {0, 0.2f, 0.5f}, {}});
@@ -6800,19 +6802,34 @@ TEST(Bots_TurretLooksAround)
 		field.board(bot, 0);
 		CHECK(field.info(bot).vehicle == id);
 		game::BotManager bots(*field.world, field.settings);
-		float most = 0;
+		float most = 0, last = 1e9f, worstSettled = 0;
 		bool planned = false;
+		int steady = 0, settled = 0;
+		// The sectors' bearings (+z, +x, -z, -x, +x+z, +x-z, -x-z, -x+z).
+		const float bearing[8] = {0, 90, 180, -90, 45, 135, -135, -45};
 		for (int tick = 0; tick < 30 * 20; ++tick) {
 			field.ticks(1, &bots);
 			float yaw = 0, pitch = 0;
 			if (field.world->gunAim(id, 0, yaw, pitch)) {
 				most = std::max(most, std::fabs(std::remainder(yaw, 360.0f)));
+				// A look's direction is the sector's offset itself (AIDLL
+				// 0x100de290 -> 0x1008e6e0), whatever the gun's origin: a
+				// turret settled on a sector faces its bearing.
+				steady = std::fabs(std::remainder(yaw - last, 360.0f)) < 0.02f ? steady + 1 : 0;
+				last = yaw;
+				const int sector = bots.lookSector(bot);
+				if (mode == 0 && steady >= 10 && sector >= 0 && sector < 8 && bots.lookPlanned(bot)) {
+					++settled;
+					const float hull = field.objects.find(id)->rotation().x;
+					worstSettled = std::max(worstSettled, std::fabs(std::remainder(yaw + hull - bearing[sector], 360.0f)));
+				}
 			}
 			planned = planned || bots.lookPlanned(bot);
 		}
-		std::printf("  %s pattern: the turret turned up to %.1f degrees off the hull, looked %d\n",
-			mode == 2 ? "Limited Turret" : turretPattern ? "Turret" : "Null", most, planned);
+		std::printf("  %s pattern: the turret turned up to %.1f degrees off the hull, looked %d; settled %d ticks, %.2f degrees off the sector at worst\n",
+			mode == 2 ? "Limited Turret" : turretPattern ? "Turret" : "Null", most, planned, settled, worstSettled);
 		CHECK(planned == turretPattern);
+		CHECK(mode != 0 || (settled > 0 && worstSettled < 1));
 		CHECK(mode == 2 || (turretPattern ? most > 20 : most < 1));
 		// The sectors (+z, +x, -z, -x, +x+z, +x-z, -x-z, -x+z) against the
 		// hull facing +z: within 40 degrees only +z.
