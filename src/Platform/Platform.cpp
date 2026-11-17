@@ -1,6 +1,7 @@
 #include "Platform.h"
 
 #include <cstdio>
+#include <cstring>
 
 #ifdef _WIN32
 #include <process.h>
@@ -8,6 +9,9 @@
 #else
 #include <dlfcn.h>
 #include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
 #endif
 
 namespace platform {
@@ -51,6 +55,35 @@ void freeLibrary(void* library)
 #else
 	dlclose(library);
 #endif
+}
+
+std::string executableDirectory()
+{
+	std::string path;
+#ifdef _WIN32
+	char buffer[MAX_PATH];
+	const DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+	if (length > 0 && length < MAX_PATH) {
+		path.assign(buffer, length);
+	}
+#elif defined(__APPLE__)
+	uint32_t size = 0;
+	_NSGetExecutablePath(nullptr, &size);
+	path.resize(size);
+	if (_NSGetExecutablePath(path.data(), &size) == 0) {
+		path.resize(std::strlen(path.c_str()));
+	} else {
+		path.clear();
+	}
+#else
+	char buffer[4096];
+	const ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer));
+	if (length > 0 && static_cast<size_t>(length) < sizeof(buffer)) {
+		path.assign(buffer, static_cast<size_t>(length));
+	}
+#endif
+	const size_t slash = path.find_last_of("/\\");
+	return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
 }
 
 void debugPrint(const char* text)

@@ -6,6 +6,7 @@
 #include <phonon.h>
 
 #include <chrono>
+#include <string>
 
 namespace dice::hfe::sound {
 
@@ -27,9 +28,11 @@ const Phonon* phonon()
 {
 	static Phonon api;
 	static const bool loaded = [] {
-		void* library = platform::loadLibrary(BF2142_PHONON_LIBRARY);
+		// Beside the executable (cmake/Dependencies.cmake bf2142_use_steam_audio).
+		const std::string path = platform::executableDirectory() + BF2142_PHONON_LIBRARY;
+		void* library = platform::loadLibrary(path.c_str());
 		if (!library) {
-			SND_WARNING("Enhanced audio: could not load %s", BF2142_PHONON_LIBRARY);
+			SND_WARNING("Enhanced audio: could not load %s; occlusion stays the original's", path.c_str());
 			return false;
 		}
 		bool complete = true;

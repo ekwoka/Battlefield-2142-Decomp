@@ -116,12 +116,15 @@ brew install python@3                         # for the game-mode scripts (optio
 # Native (macOS) build and tests (ASan/UBSan enabled)
 cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
 ninja -C build/native && build/native/tests/bf2142_tests
-# tests run in parallel processes, one per core (about 30 s); -j 1 runs them
-# one by one (about 4 min under ASan); a name runs only the tests containing it
+# tests run in parallel processes, one per core (the whole suite takes about
+# 16 min); -j N runs N at a time; a name runs only the tests containing it
 
 # Release build for playing (much faster than the ASan debug build above)
 cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C build/release src/Main/bf2142
+
+# Optional: Steam Audio for the enhanced mode's occlusion (a 181 MB download)
+cmake -S . -B build/release -DBF2142_STEAM_AUDIO=ON && ninja -C build/release src/Main/bf2142
 
 # 32-bit Windows build: drop-in replacements for the retail DLLs
 cmake -S . -B build/win32 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake -DCMAKE_BUILD_TYPE=Release
@@ -131,8 +134,9 @@ ninja -C build/win32
 DECOMPILE=1 tools/ghidra/analyze.sh BF2142Audio.dll
 ```
 
-Third-party libraries (libogg, libvorbis, zlib, Speex) are fetched and built by CMake.
-OpenAL is loaded at runtime. On macOS that means OpenAL Soft
+Third-party libraries (libogg, libvorbis, zlib, Speex) are fetched and built by CMake;
+Valve's Steam Audio is fetched only when asked for (see below). OpenAL is
+loaded at runtime. On macOS that means OpenAL Soft
 (`brew install openal-soft`). With Python 3 (3.9 or later, found by CMake)
 the game runs its game-mode scripts (`python/bf2`, `mods/bf2142/python`):
 conquest's control points, tickets and scoring. With OpenSSL (found by
@@ -142,6 +146,25 @@ options page's microphone test); without it voice still builds and runs
 without audio devices. [docs/workflow.md](docs/workflow.md) covers
 analysis, the decompilation helpers, and how to test a rewritten module inside
 the retail game under CrossOver.
+
+### Steam Audio (optional)
+
+[Steam Audio](https://valvesoftware.github.io/steam-audio/) does one thing
+here: the enhanced mode's sound occlusion (`--enhanced`, with sound), where
+walls and buildings between you and a sound muffle it. It is never used in
+the default mode, which behaves as retail. It is opt-in:
+`-DBF2142_STEAM_AUDIO=ON` makes CMake fetch Valve's prebuilt Steam Audio
+4.8.1 SDK (Apache-2.0; a 181 MB zip, 414 MB unpacked), pinned by its
+SHA-256. The build copies its library (`libphonon.dylib`, `phonon.dll` or
+`libphonon.so`) next to the executable, and the game loads it from there.
+Valve ships it for macOS, Windows x64 and Linux x86_64; on other platforms,
+and in the 32-bit Windows build, the option is ignored with a warning.
+Offline, point `-DBF2142_STEAM_AUDIO_URL=/path/to/steamaudio_4.8.1.zip` at a
+copy of the zip (the hash is still checked).
+
+Without it (the default), or when the library is missing at run time, the
+enhanced mode keeps its other audio additions (HRTF and the EFX filters)
+and occlusion stays the original game's obstruction.
 
 ## Running the game
 
@@ -448,7 +471,8 @@ has four phases:
    - Graphics: **SDL3 GPU** with HLSL translated by **SDL_shadercross**
      (Metal, Vulkan and D3D12 backends), plus a small D3DX-effect
      compatibility layer. bgfx is the fallback.
-   - Audio: **OpenAL Soft**
+   - Audio: **OpenAL Soft**; optionally **Steam Audio** for the enhanced
+     mode's occlusion only (see [Steam Audio (optional)](#steam-audio-optional))
    - Video: **FFmpeg** (Bink 1 decoder)
    - Scripting: **CPython 2.3.x** built from source
    - Everything 64-bit clean, with explicit serialisation for 32-bit on-disk

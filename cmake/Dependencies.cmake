@@ -73,22 +73,51 @@ if(UNIX)
 	target_link_libraries(speex PRIVATE m)
 endif()
 
-# Steam Audio (Apache-2) for the enhanced mode's occlusion and transmission
-# (src/Sound/Enhanced). The prebuilt SDK: its source build needs Valve's
-# own PFFFT/MySOFA/FlatBuffers dependency layout. Headers only at build
-# time; libphonon is loaded at run time (as OpenAL is), so the game still
-# starts without it.
-if(NOT BF2142_RETAIL_COMPAT AND NOT CMAKE_CROSSCOMPILING)
-	FetchContent_Declare(steamaudio
-		URL https://github.com/ValveSoftware/steam-audio/releases/download/v4.8.1/steamaudio_4.8.1.zip
-		URL_HASH SHA256=4a0aa5ec1176f38f0b0993a37c2259d9e86f27e22d5e24f83ec4c3cb9a1d5449
-		DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-	FetchContent_MakeAvailable(steamaudio)
-	if(APPLE)
-		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/osx/libphonon.dylib)
+# Steam Audio (Valve's prebuilt SDK, Apache-2.0) for the enhanced mode's
+# occlusion and transmission (src/Sound/Enhanced); never used in the default
+# (retail) mode. The prebuilt SDK: its source build needs Valve's own
+# PFFFT/MySOFA/FlatBuffers dependency layout. Opt-in: it is a 181 MB
+# download (414 MB unpacked).
+# Headers only at build time; libphonon is copied next to the executables
+# that use it (bf2142_use_steam_audio) and loaded from there at run time, so
+# the game still starts without it. Without it (or off), enhanced audio
+# keeps HRTF and the EFX filters and occlusion is the original's obstruction.
+# BF2142_STEAM_AUDIO_URL may name a local copy of the zip (or set
+# FETCHCONTENT_SOURCE_DIR_STEAMAUDIO to an unpacked one); the hash is checked.
+option(BF2142_STEAM_AUDIO "Fetch Valve's Steam Audio SDK (181 MB) for the enhanced mode's occlusion" OFF)
+set(BF2142_STEAM_AUDIO_URL
+	"https://github.com/ValveSoftware/steam-audio/releases/download/v4.8.1/steamaudio_4.8.1.zip"
+	CACHE STRING "Steam Audio 4.8.1's SDK zip: the release's URL or a local file")
+if(BF2142_STEAM_AUDIO)
+	set(BF2142_PHONON_PLATFORM)
+	if(BF2142_RETAIL_COMPAT OR CMAKE_CROSSCOMPILING)
+		# The 32-bit retail-compat build: Steam Audio has no 32-bit library.
+	elseif(APPLE)
+		set(BF2142_PHONON_PLATFORM osx/libphonon.dylib)
 	elseif(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
-		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/windows-x64/phonon.dll)
+		set(BF2142_PHONON_PLATFORM windows-x64/phonon.dll)
 	elseif(UNIX AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/linux-x64/libphonon.so)
+		set(BF2142_PHONON_PLATFORM linux-x64/libphonon.so)
+	endif()
+	if(BF2142_PHONON_PLATFORM)
+		FetchContent_Declare(steamaudio
+			URL ${BF2142_STEAM_AUDIO_URL}
+			URL_HASH SHA256=4a0aa5ec1176f38f0b0993a37c2259d9e86f27e22d5e24f83ec4c3cb9a1d5449
+			DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+		FetchContent_MakeAvailable(steamaudio)
+		set(BF2142_PHONON_LIBRARY ${steamaudio_SOURCE_DIR}/lib/${BF2142_PHONON_PLATFORM})
+	else()
+		message(WARNING "BF2142_STEAM_AUDIO: no Steam Audio library for this platform (macOS, Windows x64 and Linux x86_64 only); building without it")
 	endif()
 endif()
+
+# Links `target` with the enhanced mode's Steam Audio occlusion (when it's
+# built) and copies libphonon next to it, where SteamAudioOcclusion loads it.
+function(bf2142_use_steam_audio target)
+	if(TARGET SteamAudioOcclusion)
+		target_link_libraries(${target} PRIVATE SteamAudioOcclusion)
+		add_custom_command(TARGET ${target} POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BF2142_PHONON_LIBRARY} $<TARGET_FILE_DIR:${target}>
+			VERBATIM)
+	endif()
+endfunction()
