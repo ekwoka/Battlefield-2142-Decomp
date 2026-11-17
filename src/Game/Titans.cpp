@@ -2429,9 +2429,6 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 			player.body.yawDegrees = face;
 		}
 	}
-	if (m_player && player.id == m_player->id) {
-		std::printf("pod-launch: %s from %.0f %.0f %.0f at %.0f %.0f %.0f\n", projectile.c_str(), from.x, from.y, from.z, velocity.x, velocity.y, velocity.z);
-	}
 	m_pods.push_back(p);
 	if (Body* body = findBody(pod->id())) {
 		seatPlayer(player, *body, 0);
@@ -2808,11 +2805,6 @@ void GameWorld::stepPods(float seconds)
 			done = true;
 		}
 		if (done) {
-			if (player && m_player && player->id == m_player->id) {
-				std::printf("pod-landed: at %.1f %.1f %.1f after %.1f s, velocity %.1f %.1f %.1f, landing timer %.2f, surface normal %.2f %.2f %.2f\n",
-				pod.position.x, pod.position.y, pod.position.z, pod.age, pod.velocity.x, pod.velocity.y, pod.velocity.z, pod.landing,
-				pod.landingNormal.x, pod.landingNormal.y, pod.landingNormal.z);
-			}
 			if (player && player->vehicle == pod.object) {
 				player->vehicle = 0;
 				player->seat = -1;

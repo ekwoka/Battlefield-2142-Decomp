@@ -1199,11 +1199,6 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 	}
 	const float now = left - amount;
 	m_hitPoints[object] = now;
-	// Diagnostic (not retail): the local soldier's hits, to tell what killed him.
-	if (m_player && object == m_player->object && amount > 0) {
-		std::printf("damage: local soldier -%.1f to %.1f from %d at %.1f %.1f %.1f vy %.1f\n", amount, now, attacker, m_player->body.position.x,
-			m_player->body.position.y, m_player->body.position.z, m_player->body.velocity.y);
-	}
 	// The armour's damage lists and the team damage test (TeamDamage.cpp:
 	// 0x006557a0, then 0x004c0e40's tail).
 	if (attacker >= 0 && amount > 0) {
@@ -4336,46 +4331,6 @@ void GameWorld::stepProjectiles(float seconds)
 			p.serial = ++m_projectileSerial; // the server's ghosts know it by this
 		}
 	}
-	// Diagnostic (not retail): where the local player's rounds end and the
-	// nearest enemy vehicle then (to tell a miss from a pass-through).
-	if (m_player) {
-		struct Seen {
-			std::string name;
-			physics::Vec3 position;
-		};
-		static std::map<uint32_t, Seen> seen;
-		for (auto it = seen.begin(); it != seen.end();) {
-			const bool flying = std::any_of(m_projectiles.begin(), m_projectiles.end(), [&](const Projectile& q) { return q.serial == it->first && q.alive; });
-			if (!flying) {
-				const Body* nearest = nullptr;
-				float best = 1e9f;
-				for (const Body& body : m_bodies) {
-					const world::Object* o = body.vehicle ? m_objects.find(body.object) : nullptr;
-					if (!o || o->destroyed() || o->team() == m_player->team) {
-						continue;
-					}
-					const float d = std::sqrt(physics::lengthSquared(body.body.position - it->second.position));
-					if (d < best) {
-						best = d;
-						nearest = &body;
-					}
-				}
-				if (best < 40.0f) {
-					const world::Object* o = m_objects.find(nearest->object);
-					std::printf("shot-end: %s at %.1f %.1f %.1f; nearest enemy vehicle %s %.1f m away\n", it->second.name.c_str(), it->second.position.x, it->second.position.y,
-						it->second.position.z, o && o->objectTemplate() ? o->objectTemplate()->name().c_str() : "?", best);
-				}
-				it = seen.erase(it);
-			} else {
-				++it;
-			}
-		}
-		for (const Projectile& q : m_projectiles) {
-			if (q.alive && !q.visual && q.player == m_player->id && q.serial && q.settings && q.settings->damage >= 20) {
-				seen[q.serial] = {q.settings->name, q.position};
-			}
-		}
-	}
 	for (Projectile& p : m_projectiles) {
 		// A RotationalPoint round's contacts test the point its
 		// centerOfCollisionOffset away (0x006c0f90, 0x006c1220).
@@ -4941,18 +4896,6 @@ void GameWorld::stepProjectiles(float seconds)
 			// or going through (0x005b54e0).
 			const bool dud = p.settings->detonateDelay != 0 && p.age - seconds <= p.settings->detonateDelay;
 			const uint32_t ownMaterial = static_cast<uint32_t>(dud ? p.settings->dudMaterial : p.settings->material);
-			// Diagnostic for "shots pass through enemies": what the local
-			// player's rounds strike (first 400 only).
-			if (!p.visual && m_player && p.player == m_player->id) {
-				static int traced = 0;
-				if (traced++ < 400) {
-					const world::Object* struck = m_objects.find(hitObject);
-					std::printf("shot-hit: %s object=%u %s team=%d dist=%.1f\n",
-						hitSoldier ? "soldier" : hitBody ? "vehicle" : hitObject ? "static" : "terrain", hitObject,
-						struck && struck->objectTemplate() ? struck->objectTemplate()->name().c_str() : "-",
-						struck ? struck->team() : -1, std::sqrt(physics::lengthSquared(hit.point - p.origin)));
-				}
-			}
 			const physics::Vec3 travelled = hit.point - p.origin;
 			const float amount = p.settings->damageAt(std::sqrt(physics::lengthSquared(travelled))) * p.damageScale;
 			if (hitRound && !p.visual) {
@@ -9006,8 +8949,11 @@ void GameWorld::playMovementSound(const Player& player)
 		: player.input.sprint && !player.zoomed;
 	const size_t index = player.input.pose == SoldierPose::Prone ? 2
 		: player.input.pose == SoldierPose::Crouch ? 1 : sprinting ? 3 : 0;
-	const char* trace = std::getenv("BF2142_SOUND_LOG");
-	const bool logStep = player.id == localPlayer() && trace && *trace && *trace != '0';
+	static const bool trace = [] {
+		const char* log = std::getenv("BF2142_SOUND_LOG");
+		return log && *log && *log != '0';
+	}();
+	const bool logStep = trace && player.id == localPlayer();
 	for (const uint32_t material : {player.footstepMaterial, 0u}) {
 		const auto* cell = m_materials->cell(kSoldierFootStepsMaterial, material);
 		if (cell && cell->soundTemplates.size() > index && !cell->soundTemplates[index].empty()) {
@@ -13224,9 +13170,6 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 {
 	if (std::any_of(m_pods.begin(), m_pods.end(), [&](const Pod& pod) { return pod.player == player.id; })
 		|| ridingParachute(player.id)) {
-		if (player.vehicle && m_player && player.id == m_player->id) {
-			std::printf("exit-denied: in a pod or on a parachute\n");
-		}
 		return; // a drop pod's or a parachute's rider stays in until it lands (dontAllowExit)
 	}
 	if (player.vehicle) {
@@ -13259,10 +13202,6 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		physics::Vec3 restrictedAt;
 		const bool restricted = leaving && leaving->restrictedExit;
 		if (restricted && !restrictedExit(*body, *fromLayout, seat, restrictedAt)) {
-			if (m_player && player.id == m_player->id) {
-				std::printf("exit-denied: no free exit place on %s seat %d at %.1f %.1f %.1f\n", leaving ? leaving->name.c_str() : "?", seat,
-					body->body.position.x, body->body.position.y, body->body.position.z);
-			}
 			return;
 		}
 		// maintainCameraOnExit (0x005cea00, PlayerControlObject +0x480): the
