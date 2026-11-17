@@ -742,11 +742,15 @@ void PlayerCamera::stepViews(float seconds)
 		if (m_mode != Mode::Inside) {
 			m_external = look;
 			m_externalFov = number(c, "worldFOV", 1.1f); // 0x00610150
-			// Deviation requested by the user, not retail-verified: an outside view follows the hull's bank. The nose
-			// view is fixed to the hull; chase views do so only for aircraft, so a tank's chase camera stays level.
+			// The nose view is the camera's own matrix moved by nosePos
+			// (0x00610800: its slot 0x78 world matrix copied), so it banks
+			// with the hull; Chase and FrontChase look at the root with the
+			// world's up (0x006108e0 -> lookAt 0x006ae080 with (0, 1, 0)), so
+			// they stay level. enhanced.chaseRoll (not retail, asked for by
+			// the user) banks a flying vehicle's chase views too.
 			const game::Vehicle* flier = m_round.playerVehicleState();
-			m_externalRoll = m_mode == Mode::Nose || ((m_mode == Mode::Chase || m_mode == Mode::FrontChase) && flier && flier->flies())
-				? rollOf(seat.chain.back()) : 0.0f;
+			const bool chaseBanks = chaseRoll() && (m_mode == Mode::Chase || m_mode == Mode::FrontChase) && flier && flier->flies();
+			m_externalRoll = m_mode == Mode::Nose || chaseBanks ? rollOf(seat.chain.back()) : 0.0f;
 			m_hasExternal = true;
 		}
 		return;

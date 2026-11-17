@@ -6256,6 +6256,7 @@ int runGame(Options& options, Session& session)
 		// The player's camera: first person by default (--camera-mode third
 		// for the chase view), its first-person systems built the same way.
 		PlayerCamera playerCamera(round, animationSystems, loadAnimationSystem);
+		playerCamera.setChaseRoll(&enhancedSettings.enabled, &enhancedSettings.chaseRoll);
 		playerCamera.firstPerson = playerCamera.spawnFirstPerson = options.cameraMode != "third";
 		// FreeCam.* (the HUD manager's slots 0x130 / 0x134, 0x00752050 /
 		// 0x00752150): the next player to follow, the free and following

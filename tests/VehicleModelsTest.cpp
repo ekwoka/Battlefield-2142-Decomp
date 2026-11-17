@@ -5287,45 +5287,58 @@ TEST(PlayerCamera_GunshipExitRestoresConfiguredInfantryView)
 	}
 }
 
-// A gunship's pilot view is mounted to the hull and should carry the hull's
-// bank, and the outside views follow it too (a requested deviation).
+// A gunship's pilot view is mounted to the hull and carries the hull's bank,
+// as does the nose view (0x00610800: the camera's own matrix). The chase
+// views look at the root with the world's up (0x006108e0 -> 0x006ae080), so
+// they stay level; enhanced.chaseRoll (a requested deviation) banks them.
 TEST(PlayerCamera_GunshipBankingInsideAndOutside)
 {
 	if (!gameDir()) return;
-	Garage g(gameDir());
-	if (!g.loaded || !g.templates.find("as_ag")) return;
-	const uint32_t ship = g.start("as_ag", {0, 3, 8});
-	CHECK(g.enter(ship));
-	anim::AnimationSystems systems(nullptr);
-	PlayerCamera camera(*g.world, systems, nullptr);
-	camera.tick(1 / 30.0f);
-	game::SoldierInput bank;
-	bank.throttle = 1;
-	bank.rollAxis = 1;
-	g.drive(bank, 1.5f);
-	camera.tick(1 / 30.0f);
-	const float hullBank = g.objects.find(ship)->rotation().z;
-	std::fprintf(stderr, "  as_ag pilot hull bank %.2f deg\n", hullBank);
-	CHECK(std::fabs(hullBank) > 0.02f);
-	PlayerCamera::View inside;
-	CHECK(camera.view(inside, 16.0f / 9.0f));
-	CHECK(std::fabs(inside.roll - hullBank * 3.14159265f / 180) < 0.03f);
-	// The real C cycle: whichever outside views the gunship allows after Inside. Nose hangs on the hull and the
-	// chase views follow an aircraft's bank; a fly-by camera is a fixed outside point and stays level.
-	int outsideViews = 0;
-	for (int press = 0; press < 6; ++press) {
-		camera.toggleMode(false);
+	for (const bool chaseRoll : {false, true}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("as_ag")) return;
+		const uint32_t ship = g.start("as_ag", {0, 3, 8});
+		CHECK(g.enter(ship));
+		anim::AnimationSystems systems(nullptr);
+		PlayerCamera camera(*g.world, systems, nullptr);
+		const bool on = true;
+		camera.setChaseRoll(&chaseRoll, &on);
+		CHECK(camera.chaseRoll() == chaseRoll);
 		camera.tick(1 / 30.0f);
-		PlayerCamera::View outside;
-		if (camera.insideView() || !camera.externalView(outside, 16.0f / 9.0f)) continue;
-		const bool flyBy = camera.mode() == game::camera::Mode::FlyBy;
-		const float expected = flyBy ? 0.0f : hullBank * 3.14159265f / 180;
-		std::fprintf(stderr, "  as_ag C press %d mode %d roll %.3f expected %.3f\n", press, static_cast<int>(camera.mode()), outside.roll, expected);
-		CHECK(std::fabs(outside.roll - expected) < 0.05f);
-		++outsideViews;
+		game::SoldierInput bank;
+		bank.throttle = 1;
+		bank.rollAxis = 1;
+		g.drive(bank, 1.5f);
+		camera.tick(1 / 30.0f);
+		const float hullBank = g.objects.find(ship)->rotation().z;
+		std::fprintf(stderr, "  as_ag pilot hull bank %.2f deg\n", hullBank);
+		CHECK(std::fabs(hullBank) > 0.02f);
+		PlayerCamera::View inside;
+		CHECK(camera.view(inside, 16.0f / 9.0f));
+		CHECK(std::fabs(inside.roll - hullBank * 3.14159265f / 180) < 0.03f);
+		// The real C cycle: whichever outside views the gunship allows after
+		// Inside. Nose hangs on the hull; the chase views bank only with
+		// chaseRoll; a fly-by camera is a fixed outside point and stays level.
+		int outsideViews = 0, chaseViews = 0;
+		for (int press = 0; press < 6; ++press) {
+			camera.toggleMode(false);
+			camera.tick(1 / 30.0f);
+			PlayerCamera::View outside;
+			if (camera.insideView() || !camera.externalView(outside, 16.0f / 9.0f)) continue;
+			const game::camera::Mode mode = camera.mode();
+			const bool chase = mode == game::camera::Mode::Chase || mode == game::camera::Mode::FrontChase;
+			const bool banks = mode == game::camera::Mode::Nose || (chase && chaseRoll);
+			const float expected = banks ? hullBank * 3.14159265f / 180 : 0.0f;
+			std::fprintf(stderr, "  as_ag C press %d mode %d roll %.3f expected %.3f\n", press, static_cast<int>(mode),
+				outside.roll, expected);
+			CHECK(std::fabs(outside.roll - expected) < 0.05f);
+			++outsideViews;
+			chaseViews += chase;
+		}
+		CHECK(outsideViews >= 2);
+		CHECK(chaseViews >= 1);
+		CHECK(std::fabs(g.objects.find(ship)->rotation().z) > 0.02f);
 	}
-	CHECK(outsideViews >= 2);
-	CHECK(std::fabs(g.objects.find(ship)->rotation().z) > 0.02f);
 }
 
 

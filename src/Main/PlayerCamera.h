@@ -142,6 +142,16 @@ public:
 	// as the client has them: their ghosts' places and looks, the HudWorld
 	// of the joined game). Without it only the local round's are followed.
 	void setPlayers(const host::HudWorld* players) { m_players = players; }
+	// enhanced.enabled and enhanced.chaseRoll (Scene/EnhancedSettings.h),
+	// read live: a flying vehicle's chase and front-chase views bank with
+	// its hull (not retail: 0x006108e0 looks at the root with the world's
+	// up, 0x006ae080). Null or false: retail, level.
+	void setChaseRoll(const bool* enhanced, const bool* roll)
+	{
+		m_enhancedChase = enhanced;
+		m_chaseRoll = roll;
+	}
+	bool chaseRoll() const { return m_enhancedChase && *m_enhancedChase && m_chaseRoll && *m_chaseRoll; }
 
 	// The first-person camera now: false when it isn't shown (third person,
 	// dead, no soldier).
@@ -309,7 +319,9 @@ private:
 	bool m_hasExternal = false;
 	game::camera::Look m_external;
 	float m_externalFov = 1.1f;
-	float m_externalRoll = 0; // radians: the hull's bank for the nose view and a flying vehicle's chase views
+	float m_externalRoll = 0; // radians: the hull's bank for the nose view (and a flying vehicle's chase views, chaseRoll)
+	const bool* m_enhancedChase = nullptr; // setChaseRoll
+	const bool* m_chaseRoll = nullptr;
 	// The last tick's view (the death camera starts from its forward).
 	game::camera::Look m_lastLook;
 	uint32_t m_lastControlObject = 0;

@@ -41,6 +41,7 @@ struct EnhancedSettings {
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
 	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
 	// Interface, also only with enhanced.enabled:
+	bool chaseRoll = true; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); retail keeps them level
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 	// Drawing, also only with enhanced.enabled; experimental, off by default:
 	bool tickBlend = false; // enhanced.tickBlend: objects and the camera drawn between the 30 Hz ticks, as retail's 0x0043f170 (Render/TickBlend.h)
@@ -86,6 +87,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.passengerWeapons = v; });
 	bindProperty<bool>(console, "enhanced.softLanding", ConsoleAccess::Anyone, [&settings] { return settings.softLanding; },
 		[&settings](const bool& v) { settings.softLanding = v; });
+	bindProperty<bool>(console, "enhanced.chaseRoll", ConsoleAccess::Anyone, [&settings] { return settings.chaseRoll; },
+		[&settings](const bool& v) { settings.chaseRoll = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
 	bindProperty<bool>(console, "enhanced.tickBlend", ConsoleAccess::Anyone, [&settings] { return settings.tickBlend; },
