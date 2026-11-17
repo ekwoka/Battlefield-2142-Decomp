@@ -12482,7 +12482,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		if (left >= most) {
 			return false;
 		}
-		healHitPoints(object, std::min(left + percent * 0.01f * most, most), repairer);
+		healHitPoints(object, left + percent * 0.01f * most, most, repairer);
 		return true;
 	};
 	// Each target treated draws on the battery, when it holds that much.

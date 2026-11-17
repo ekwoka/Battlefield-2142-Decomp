@@ -1972,7 +1972,7 @@ bool GameWorld::repair(uint32_t object, float percent, int repairer)
 	if (left >= most) {
 		return false;
 	}
-	healHitPoints(object, std::min(left + percent * 0.01f * most, most), repairer);
+	healHitPoints(object, left + percent * 0.01f * most, most, repairer);
 	return true;
 }
 
@@ -2023,18 +2023,20 @@ void GameWorld::pythonRepaired(uint32_t object, int repairer)
 	sent.destroyed = false; // slot 0x3c(0)
 }
 
-void GameWorld::healHitPoints(uint32_t object, float value, int repairer)
+void GameWorld::healHitPoints(uint32_t object, float value, float most, int repairer)
 {
 	const float before = hitPoints(object);
-	m_hitPoints[object] = value;
-	// 0x00655a00: the heal clears the damage list past 50 or at full.
+	// 0x00655460 clamps to the maximum only after its stamp test below.
+	m_hitPoints[object] = std::min(value, most);
+	// 0x00655a00: the heal (its whole share, +0x264) clears the damage list past 50 or at full.
 	if (const world::Object* o = m_objects.find(object); o && o->objectTemplate()) {
-		const float most = number(*o->objectTemplate(), "armor.maxHitPoints", 0);
 		armourHealed(object, value - before, value >= most);
 		// 0x00655460 on the server: a rise past the old hit points' ceiling,
 		// up to the maximum, stamps the treated as receiving (player slot
 		// 0x258(now, 0, vehicle)): a soldier's player, or each occupant of a
 		// vehicle. 0x007a1c30 plays the kit's healing / repairing sound by it.
+		// The test is on the unclamped value: a heal overshooting the
+		// maximum (the last one) does not stamp.
 		if (value > std::ceil(before) && value <= most) {
 			const auto received = [this](Player* p, bool repaired) {
 				if (p) {

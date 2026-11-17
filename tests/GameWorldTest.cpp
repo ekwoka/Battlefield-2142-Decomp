@@ -1586,6 +1586,36 @@ TEST(GameWorld_HealedSoldierIsStampedAsReceiving)
 	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal >= 15 && menu::receivedSounds(info, false, false) == 0);
 }
 
+TEST(GameWorld_OvershootingHealDoesNotStamp)
+{
+	// 0x00655a00 hands the setter 0x00655460 hp + pct x 0.01 x max
+	// unclamped; it stamps only when ceil(hp) < v <= max, then clamps. The
+	// heal that would pass the maximum fills him up without the stamp.
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int ally = range.world->addPlayer("Ally", 2, true);
+	CHECK(range.world->spawnSoldier(ally));
+	game::GameWorld::PlayerInfo allyInfo;
+	CHECK(range.world->playerInfo(ally, allyInfo));
+	const uint32_t soldier = allyInfo.soldier;
+	game::GameWorld::AbilityBarInfo info;
+	range.world->setHitPoints(soldier, 95);
+	CHECK(range.world->repair(soldier, 10)); // 105: past the maximum
+	CHECK(range.world->hitPoints(soldier) == 100);
+	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal < 0);
+	range.world->setHitPoints(soldier, 90);
+	CHECK(range.world->repair(soldier, 10)); // exactly the maximum
+	CHECK(range.world->hitPoints(soldier) == 100);
+	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal == 0);
+	for (int i = 0; i < 20; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->setHitPoints(soldier, 50);
+	CHECK(range.world->repair(soldier, 10)); // under it
+	CHECK(range.world->hitPoints(soldier) == 60);
+	CHECK(range.world->abilityBar(ally, info) && info.sinceHeal == 0);
+}
+
 TEST(ReceivedSounds_HealRepairAndAmmo)
 {
 	// 0x007a1c30: received (flags clear) within 15 ticks; bits 0 heal,

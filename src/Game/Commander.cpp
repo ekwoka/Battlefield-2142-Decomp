@@ -923,7 +923,7 @@ void GameWorld::stepCrates(float seconds)
 			// repairer 0x005d0880 gives: a hub's thrower (its parent of
 			// class 0x9539), none for the commander's crate (scoringCommon's
 			// handlers check for one).
-			healHitPoints(target, std::min(most, left + heal * factor * 0.01f * most), giver);
+			healHitPoints(target, left + heal * factor * 0.01f * most, most, giver);
 			crate.storage -= heal;
 		};
 		// 0x005d0b20 -> the ammo's slot 0xa8 (FireArm::resupply). A weapon

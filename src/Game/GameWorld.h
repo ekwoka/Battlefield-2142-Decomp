@@ -4885,7 +4885,9 @@ private:
 	void pythonRepaired(uint32_t object, int repairer);
 	// The armour heal (0x00655a00 -> the setter 0x00655460) of `object` to
 	// `value` by `repairer` (-1 none), then 0x004bc410's repair event.
-	void healHitPoints(uint32_t object, float value, int repairer);
+	// `value` comes unclamped (0x00655a00 passes hp + d): the setter tests
+	// its receiving stamp on it and only then clamps to `most`.
+	void healHitPoints(uint32_t object, float value, float most, int repairer);
 	// The same on a Titan's part (index > 0): `percent` of its maximum,
 	// kept within -wreckHitPoints and maxHitPoints; out of the wreck the
 	// part's subtree is back (0x00654120's repaired branch, 0x00654070) and
