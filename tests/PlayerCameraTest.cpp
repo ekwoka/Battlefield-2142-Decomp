@@ -8,6 +8,7 @@
 #include "Main/MissileViewSmoothing.h"
 #ifdef BF2142_RENDER_TESTS
 #include "Render/LevelRenderer.h"
+#include "Render/TickBlend.h"
 #endif
 #include "TestMain.h"
 #include "World/Object.h"
@@ -358,6 +359,9 @@ TEST(PlayerCamera_ParachuteStaysFirstPerson)
 	CHECK(camera.firstPerson && camera.mode() == game::camera::Mode::Inside);
 }
 
+// The ridden round's camera between its 30 Hz samples, as retail draws the
+// round between its last two transforms (0x0043f170 -> 0x0043ef30); a new
+// round starts afresh.
 TEST(PlayerCamera_MissileViewInterpolation)
 {
 	MissileViewSmoothing smooth;
@@ -370,6 +374,14 @@ TEST(PlayerCamera_MissileViewInterpolation)
 	CHECK(std::fabs(p.yaw - 3.14159265f) < 0.01f);
 	p = smooth.sample(2, true, 0, next);
 	CHECK(p.position[0] == 10 && p.yaw == next.yaw);
+	// Retail's drawing (0x0043ef30): a rise or drop of over 4 m in a tick
+	// isn't blended; the alpha stays within -0.1 .. 1.1 (0x0043f170).
+	MissileViewSmoothing::Pose dive {{12, -2, 2}, -3.10f, -0.4f};
+	p = smooth.sample(2, true, 0.5f, dive, render::kTickBlendJump);
+	CHECK(p.position[0] == 12 && p.position[1] == -2);
+	MissileViewSmoothing::Pose glide {{14, -3, 2}, -3.10f, -0.4f};
+	p = smooth.sample(2, true, 5.0f, glide, render::kTickBlendJump);
+	CHECK(std::fabs(p.position[0] - 14.2f) < 0.001f);
 }
 
 // The cockpit geometry's reach (0x00612880): the seat's own mesh and its

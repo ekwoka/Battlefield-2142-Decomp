@@ -1011,9 +1011,13 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					camera.position = head - camera.forward() * 4.0f + camera.right() * 0.6f;
 				}
 			}
-			// The ridden projectile's camera between its fixed 30 Hz samples;
-			// with enhanced.tickBlend every game camera, as the objects it looks
-			// at, each kind of view keeping its own history.
+			// The ridden projectile's camera between its fixed 30 Hz samples:
+			// retail draws every object between its last two transforms
+			// (0x0043f170 -> 0x0043ef30, always on: 0x009fcd90 is 1), the
+			// guided round among them, and its camera rides that drawn round,
+			// with the same alpha and 4 m height rule. The port draws the other
+			// objects so only with enhanced.tickBlend, which also blends every
+			// game camera, each kind of view keeping its own history.
 			const uint32_t missileKey = view.firstPerson ? view.projectileSerial : 0;
 			const uint32_t viewKey = !tickBlend ? missileKey
 				: !playing ? 0
@@ -1021,9 +1025,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				: 0x80000000u | (firstPerson ? 1u : view.external ? 2u : 3u);
 			if (viewKey) {
 				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
-				const auto smooth = tickBlend
-					? viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump)
-					: viewSmoothing.sample(viewKey, elapsedTicks > 0, static_cast<float>(ticks.interpolation(seconds)), raw);
+				const auto smooth = viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
 				camera.yaw = smooth.yaw;
 				camera.pitch = smooth.pitch;
