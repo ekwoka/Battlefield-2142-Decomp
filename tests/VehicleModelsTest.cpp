@@ -6564,6 +6564,49 @@ TEST(Vehicles_ApcPodMouseTurns)
 	}
 }
 
+// The pod's mouse ForceObject (eu_pod_FOTurn: force 5, maxForceOnObject 5)
+// pushes force x the raw PIMouseLookX + constantForce within its
+// maxForceOnObject (0x0062c920), the axis itself unclamped: with the
+// shipped limit a turn of 4 units turns no faster than one of 1, with the
+// limit raised to 20 it does.
+TEST(Vehicles_ApcPodMouseForceWithinItsLimit)
+{
+	if (!gameDir()) return;
+	float turns[2][2] = {};
+	for (const int limit : {0, 1}) {
+		for (const int fast : {0, 1}) {
+			Garage g(gameDir());
+			if (!g.loaded || !g.templates.find("eu_apc_pods") || !g.templates.find("eu_pod_FOTurn")) return;
+			if (limit) {
+				g.templates.find("eu_pod_FOTurn")->settings()["maxForceOnObject"] = "20";
+			}
+			const uint32_t apc = g.start("eu_apc_pods", {0, 2, 6}, 3);
+			CHECK(g.enter(apc));
+			game::SoldierInput seat; seat.switchSeat = 4;
+			g.world->setPlayerInput(seat); g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({}); g.run(0.5f);
+			game::SoldierInput fire; fire.altFire = true;
+			g.world->setPlayerInput(fire); g.world->tick(1 / 30.0f);
+			if (g.world->pods().empty()) return;
+			const uint32_t id = g.world->pods()[0].object;
+			const float initial = g.objects.find(id)->rotation().x;
+			game::SoldierInput input; input.turn = fast ? 20.0f : 5.0f; // 4 or 1 raw units
+			for (int tick = 0; tick < 8; ++tick) {
+				g.world->setPlayerInput(input); g.world->tick(1 / 30.0f);
+			}
+			const world::Object* pod = g.objects.find(id);
+			CHECK(pod != nullptr);
+			if (!pod) return;
+			turns[limit][fast] = std::remainder(pod->rotation().x - initial, 360.0f);
+		}
+	}
+	std::fprintf(stderr, "  pod mouse yaw: limit 5: %.2f / %.2f, limit 20: %.2f / %.2f degrees\n", turns[0][0], turns[0][1],
+		turns[1][0], turns[1][1]);
+	CHECK(std::fabs(turns[0][1] - turns[0][0]) < 0.2f);
+	CHECK(std::fabs(turns[1][0] - turns[0][0]) < 0.2f);
+	CHECK(std::fabs(turns[1][1]) > 2 * std::fabs(turns[1][0]));
+}
+
 // Actual APC Conquest pods: compare two seconds of throttle and yaw input
 // with an unsteered launch. The authored offset forces must also tilt the pod.
 TEST(Vehicles_ApcPodSteeringForces)

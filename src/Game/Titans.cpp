@@ -692,7 +692,13 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 	for (const physics::CollisionUser user :
 		{physics::CollisionUser::Projectile, physics::CollisionUser::Vehicle, physics::CollisionUser::Soldier}) {
 		if (m.geometry > 0 && user != physics::CollisionUser::Projectile) {
-			continue; // a child's geometry takes rounds only
+			// A child's geometry takes rounds only. A port addition, not
+			// retail-verified: retail gives such a child a mesh instance of
+			// the root's mesh at that geometry (0x0063ccc0 -> 0x006d8180 ->
+			// 0x006e5d70), whose per-LOD queries serve every user it has a
+			// LOD for; whether the soldier and vehicle passes reach a child's
+			// instance on a Titan wasn't traced.
+			continue;
 		}
 		auto part = std::make_shared<TitanLodPart>();
 		part->lod = static_cast<int>(user);
@@ -2361,14 +2367,20 @@ bool GameWorld::startPod(Player& player, const std::string& projectile, const ph
 				{child.rotation.x, child.rotation.y, child.rotation.z}).rows[2];
 			if (sameName(*input, "PIThrottle")) {
 				p.forward = number(*c, "force", 0);
+				p.forwardConstant = number(*c, "constantForce", 0);
+				p.forwardMax = number(*c, "maxForceOnObject", 0);
 				p.forwardAt = at;
 				p.forwardDirection = direction;
 			} else if (sameName(*input, "PIYaw")) {
 				p.strafe = number(*c, "force", 0);
+				p.strafeConstant = number(*c, "constantForce", 0);
+				p.strafeMax = number(*c, "maxForceOnObject", 0);
 				p.strafeAt = at;
 				p.strafeDirection = direction;
 			} else if (sameName(*input, "PIMouseLookX")) {
 				p.mouseTurn = number(*c, "force", 0);
+				p.mouseTurnConstant = number(*c, "constantForce", 0);
+				p.mouseTurnMax = number(*c, "maxForceOnObject", 0);
 				p.mouseTurnAt = {child.position.x, child.position.y, child.position.z};
 				p.mouseTurnDirection = physics::Mat3::fromYawPitchRoll(
 					{child.rotation.x, child.rotation.y, child.rotation.z}).rows[2];
@@ -2740,22 +2752,28 @@ void GameWorld::stepPods(float seconds)
 			pod.velocity = body->body.velocity;
 			const float throttle = pod.controlsOff ? 0.0f : player->input.throttle;
 			const float strafe = pod.controlsOff ? 0.0f : player->input.strafe;
-			// Retail ForceObjects (0x0062c920) apply their local forward
-			// force at the child's offset, not at the pod centre. The same
-			// force therefore accelerates and tilts the rigid body.
-			const auto thrust = [&](const physics::Vec3& at, const physics::Vec3& direction, float force) {
-				body->body.addForce(body->body.rotation.transform(at),
-					body->body.rotation.transform(direction) * force);
+			// Retail ForceObjects (0x0062c920) push force x input +
+			// constantForce, within maxForceOnObject (slot 0x168), along
+			// their own z at the child's offset (slot 0xa0 at slot 0x60's
+			// point), not at the pod centre, so the same force accelerates
+			// and tilts the rigid body.
+			const auto thrust = [&](const physics::Vec3& at, const physics::Vec3& direction, float force, float constant,
+									float most, float in) {
+				float push = force * in + constant;
+				if (most != 0) {
+					push = std::clamp(push, -most, most);
+				}
+				body->body.addForce(body->body.rotation.transform(at), body->body.rotation.transform(direction) * push);
 			};
-			thrust(pod.forwardAt, pod.forwardDirection, throttle * pod.forward);
-			thrust(pod.strafeAt, pod.strafeDirection, strafe * pod.strafe);
-			// The shipped pod has a third ForceObject on PIMouseLookX,
-			// offset behind its centre. Its force turns the pod, so thrust
-			// follows its actual heading. Match the input scaling used by
-			// vehicle camera bundles; slot 0xa0 adds force as acceleration.
-			const float mouse = pod.controlsOff ? 0.0f : std::clamp(pod.mouseInput / 5.0f, -1.0f, 1.0f);
-			body->body.addForce(body->body.rotation.transform(pod.mouseTurnAt),
-				body->body.rotation.transform(pod.mouseTurnDirection) * (mouse * pod.mouseTurn));
+			thrust(pod.forwardAt, pod.forwardDirection, pod.forward, pod.forwardConstant, pod.forwardMax, throttle);
+			thrust(pod.strafeAt, pod.strafeDirection, pod.strafe, pod.strafeConstant, pod.strafeMax, strafe);
+			// The shipped pod's third ForceObject (eu_pod_FOTurn: force 5,
+			// maxForceOnObject 5) takes PIMouseLookX, offset behind the
+			// centre, so it turns the pod. Its input is the raw axis (+0x180,
+			// no clamp of its own): the soldier's turn at 5 degrees a unit,
+			// as the seat bundles take it.
+			const float mouse = pod.controlsOff ? 0.0f : pod.mouseInput / 5.0f;
+			thrust(pod.mouseTurnAt, pod.mouseTurnDirection, pod.mouseTurn, pod.mouseTurnConstant, pod.mouseTurnMax, mouse);
 			// keepUp (0x0062b750): the regulators' couple turns the
 			// ForceObject's offset p back over the centre: out = 2a (w x p) +
 			// (a^2 + b^2) ((0, |p|, 0) - p) on each regulated axis, x 15,
@@ -2802,10 +2820,18 @@ void GameWorld::stepPods(float seconds)
 					soldier->setHidden(false);
 					const physics::Vec3 at = pod.position + physics::Vec3 {1.2f, 1.0f, 0};
 					player->body.position = at;
+					// The rider takes the pod's velocity: retail puts him out at the
+					// landing timer's end (0x005cff20 -> the game's slot 0xac) and,
+					// 0.1 s on with the pod's removal (timer event 0x21, 0x005cff90),
+					// sets his node's velocity (slot 0x5c) to the pod node's (slot
+					// 0x58).
 					player->body.velocity = body ? body->body.velocity : physics::Vec3 {};
-					// The native contact solver can still retain the impact velocity
-					// at ejection. Do not drive the rider into the surface; keep
-					// tangential and outward velocity relative to that surface.
+					// A port addition, standing in for retail's solved contact: the
+					// rewrite's pod still carries its impact speed (15-27 m/s down
+					// in the landing tests) 0.05 s after touching down, which would
+					// drive the rider into the surface and hurt him. Retail's pod node
+					// has stopped by then (inferred: its riders walk away), so
+					// only the speed into the surface is taken away, relative to it.
 					const float into = physics::dot(player->body.velocity - pod.landingSurfaceVelocity, pod.landingNormal);
 					if (pod.landing >= 0 && into < 0) player->body.velocity = player->body.velocity - pod.landingNormal * into;
 					soldier->setPosition({at.x, at.y - 1.0f, at.z});

@@ -4862,8 +4862,12 @@ private:
 		physics::Vec3 dragModifier {1, 1, 1};
 		float forward = 0, strafe = 0; // the ForceObjects' force on PIThrottle / PIYaw
 		physics::Vec3 forwardAt, forwardDirection, strafeAt, strafeDirection;
-		float mouseTurn = 0, mouseInput = 0;
+		float mouseTurn = 0, mouseInput = 0; // mouseInput: the soldier's turn, 5 degrees a raw PIMouseLookX unit
 		physics::Vec3 mouseTurnAt, mouseTurnDirection;
+		// Each ForceObject's constantForce and maxForceOnObject (0: none):
+		// 0x0062c920 pushes force x input + constantForce within it.
+		float forwardConstant = 0, strafeConstant = 0, mouseTurnConstant = 0;
+		float forwardMax = 0, strafeMax = 0, mouseTurnMax = 0;
 		// The PlayerControlObject's +0x444 (slot 0x178, 0x0059d2a0; a spawn
 		// point's disablePodControls): the input filter 0x005ca2e0 zeroes
 		// its inputs 0..3, so the ForceObjects get none.
