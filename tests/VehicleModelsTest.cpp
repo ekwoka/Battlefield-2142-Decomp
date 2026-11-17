@@ -5084,7 +5084,76 @@ TEST(Vehicles_RearmStampsOccupantsButChildHudSeats)
 		std::fprintf(stderr, "  %s cupola: %d magazines, stamped %d, as receiving %d\n", child ? "useChildHud" : "plain",
 			gun->magsLeft(), stamped, received);
 		CHECK(child ? !stamped : received);
+		// The treatment goes on while the gun is short: the second magazine too.
+		bool again = false, againReceived = false;
+		CHECK(refill(again, againReceived));
+		CHECK(gun->magsLeft() == full);
 	}
+}
+
+// The ammo hub in hand (unl_hub_ammo, RTAmmo, not onlyActiveWhileFiring)
+// rearms a vehicle in its sphere: 0x005d8740's query (mask 0x1000400)
+// meets vehicles, the filter 0x005d7d40 passes an RTAmmo target whose
+// control object is short (0x004bd5f0 checking, 0x004cf7b0), and the dose
+// (0x004bd5f0) refills its guns (0x005f5110). Not past full.
+TEST(Vehicles_AmmoHubInHandRearmsAVehicle)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* kit = g.loaded ? g.templates.find("EU_Assault") : nullptr;
+	const world::ObjectTemplate* support = g.loaded ? g.templates.find("EU_Support") : nullptr;
+	if (!kit || !support || !g.templates.find("eu_tank") || !g.templates.find("unl_hub_ammo")) {
+		return;
+	}
+	// Team 2's default kit with the support's hub (item 4, the medic hub's
+	// slot) and battery.
+	for (auto& child : kit->children()) {
+		if (child.name == "unl_hub_medic") {
+			child.name = "unl_hub_ammo";
+		}
+	}
+	kit->settings()["abilityRestoreRate"] = support->settings().at("abilityRestoreRate");
+	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	CHECK(g.enter(tank));
+	const game::FireArm* gun = g.world->gun(tank, 0);
+	CHECK(gun != nullptr);
+	if (!gun) {
+		return;
+	}
+	g.run(8); // the weapon's draw
+	const int full = gun->magsLeft();
+	for (int i = 0; i < 160 && gun->magsLeft() > full - 2; ++i) {
+		game::SoldierInput tap;
+		tap.fire = true;
+		g.world->setPlayerInput(tap);
+		g.world->tick(1 / 30.0f);
+		g.world->setPlayerInput({});
+		g.run(1.2f);
+	}
+	g.run(2);
+	CHECK(gun->magsLeft() <= full - 2);
+	game::SoldierInput use;
+	use.use = true;
+	g.drive(use, 0.1f);
+	g.drive({}, 1);
+	CHECK(!g.world->playerVehicle());
+	// Beside the tank, the hub in hand (item 4).
+	game::GameWorld::PlayerInfo me;
+	CHECK(g.world->playerInfo(g.world->localPlayer(), me));
+	CHECK(g.world->setSoldierPosition(me.soldier, {3.5f, 0, 6}));
+	game::SoldierInput hub;
+	hub.selectItem = 4;
+	int ticks = 0;
+	for (; ticks < 30 * 30 && gun->magsLeft() < full; ++ticks) {
+		g.world->setPlayerInput(hub);
+		g.world->tick(1 / 30.0f);
+	}
+	std::fprintf(stderr, "  hub in hand: %d of %d magazines after %.1f s\n", gun->magsLeft(), full, ticks / 30.0f);
+	CHECK(gun->magsLeft() == full);
+	g.drive(hub, 2);
+	CHECK(gun->magsLeft() == full);
 }
 
 // The gunships' gunner (as_ag / us_ag seat 2, vanilla and Remaster): the

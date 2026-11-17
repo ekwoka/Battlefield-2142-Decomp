@@ -12654,6 +12654,21 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 				found.push_back(target.object);
 			}
 		}
+		// The ammo tool in hand: its sphere (0x005d8740, the object manager's
+		// query slot 0x44 with mask 0x1000400, bounds touching it as in
+		// 0x00599f30) meets vehicles too. The filter (0x005d7d40) passes an
+		// RTAmmo target of any team (0x005d7880, 0x005d7951..0x005d797d) whose
+		// control object is short of ammo (slot 0x110, 0x004bd5f0 checking:
+		// 0x004cf853) and whose cell gives some (0x004cf803). In hand only:
+		// a thrown hub is a SupplyObject (stepCrates).
+		if (ability.ammo && scan && !soldiersOnly) {
+			for (const Body& body : m_bodies) {
+				const float reach = ability.radius + body.objectRadius;
+				if (physics::lengthSquared(body.body.position - at) <= reach * reach && hurt(body.object) && amountFor(body.object) > 0) {
+					found.push_back(body.object);
+				}
+			}
+		}
 		if (!ability.ammo && !soldiersOnly) {
 			for (const Body& body : m_bodies) {
 				const world::Object* object = m_objects.find(body.object);
