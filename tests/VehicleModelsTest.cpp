@@ -4358,18 +4358,27 @@ TEST(Vehicles_RoundsMeetTheWalkersParts)
 	std::fprintf(stderr, "  walked %.1f m: legs %d rays, torso %d rays\n", walked, walkingLegs.hits, walkingTorso.hits);
 	CHECK(walked > 5);
 	CHECK(walkingLegs.hits >= 8 && walkingTorso.hits >= 8);
-	// A ray at the knees' height (the legs reach back from the hips) meets
-	// a leg out at its side (the left or, mid-stride, the right), not the
-	// middle (where the root's one face lies).
+	// Rays across at the knees' heights (the legs reach back from the hips)
+	// meet a leg out at its side (the left or, mid-stride, the right), not
+	// the middle (where the root's one face lies). Where the striding legs
+	// stand depends on the gait's phase, so the rays sweep a band of depths
+	// and heights rather than one point.
 	const world::Object* o = g.objects.find(mech);
 	const physics::Mat3 hull = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
-	float fraction = 0;
-	uint32_t object = 0;
-	CHECK(g.world->segmentHit(now + hull.transform({-12, -1.5f, -0.75f}), now + hull.transform({12, -1.5f, -0.75f}), 0,
-		fraction, object));
-	const float x = -12 + 24 * fraction;
-	std::fprintf(stderr, "  the knee-high ray meets it at x %.2f\n", x);
-	CHECK(object == mech && std::fabs(x) > 1.0f);
+	int sideHits = 0, rays = 0;
+	for (float y : {-1.0f, -1.5f, -2.0f}) {
+		for (float z = -2.0f; z <= 1.01f; z += 0.25f) {
+			float fraction = 0;
+			uint32_t object = 0;
+			++rays;
+			if (g.world->segmentHit(now + hull.transform({-12, y, z}), now + hull.transform({12, y, z}), 0, fraction, object)
+				&& object == mech && std::fabs(-12 + 24 * fraction) > 1.0f) {
+				++sideHits;
+			}
+		}
+	}
+	std::fprintf(stderr, "  knee-high rays meeting a leg out at its side: %d of %d\n", sideHits, rays);
+	CHECK(sideHits >= 3);
 
 	Garage tank(gameDir());
 	const uint32_t t = tank.start("eu_tank", {0, 2, 6});
@@ -4412,12 +4421,17 @@ TEST(Vehicles_SoldierStandsOnTheTurnedTurret)
 	};
 	const float roof = drop(0, -3);
 	const float side = drop(-2, 0);
-	game::SoldierInput look;
-	look.turn = 3; // degrees a tick
-	g.drive(look, 1.0f);
-	g.drive({}, 0.5f);
+	// Turn the turret a quarter round through the look. The bundle turns at
+	// its own speed (stepGunner, 0x00563bd0: input x maxSpeed reached at
+	// acceleration), so the look leads it there rather than turning it 1:1.
 	float yaw = 0, pitch = 0;
 	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	float aimLook = 0;
+	seataim::steerGun([&](const game::SoldierInput& in) { g.world->setPlayerInput(in); g.world->tick(1 / 30.0f); },
+		[&](float& y, float& p) { g.world->gunAim(tank, 0, y, p); }, aimLook, yaw + 90, NAN, 900);
+	g.drive({}, 0.5f);
+	CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+	CHECK(std::fabs(std::fabs(yaw) - 90) < 2);
 	const float turned = drop(-2, 0);
 	std::fprintf(stderr, "  on the turret at rest %.2f; 2 m to the left %.2f, after it turned %.0f degrees %.2f\n", roof, side,
 		yaw, turned);
