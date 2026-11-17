@@ -35,7 +35,7 @@ TEST(Render_StaticPointLightPixelsOptIn)
 		auto* buffer = gpu->createBuffer(SDL_GPU_BUFFERUSAGE_VERTEX, vertices, sizeof(vertices));
 		CHECK(buffer);
 		TransformUniforms transforms {};
-		transforms.partsUsed = 1;
+		transforms.sendParts = false;
 		// Both shader blocks start with ShadowUniforms; the additional
 		// enhanced fields are zero (no AO or shadow contribution).
 		std::array<float, 256> shadows {};
@@ -63,7 +63,7 @@ TEST(Render_StaticPointLightPixelsOptIn)
 			SDL_BindGPUGraphicsPipeline(pass, gpu->meshPipeline());
 			SDL_GPUBufferBinding binding {buffer, 0};
 			SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
-			SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+			pushTransforms(commands, transforms);
 			SDL_PushGPUFragmentUniformData(commands, 0, &light, sizeof(light));
 			SDL_PushGPUFragmentUniformData(commands, 1, shadows.data(), sizeof(shadows));
 			SDL_GPUTextureSamplerBinding samplers[kMeshSamplers + 1];

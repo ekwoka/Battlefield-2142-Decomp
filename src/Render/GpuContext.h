@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -52,6 +53,18 @@ struct Vertex {
 constexpr int kMaxMeshParts = 64;
 constexpr int kMaxPointLights = 8;
 
+// Every uniform block is pushed whole, and none is over 4 KiB: SDL's
+// Vulkan backend binds each slot with a 4096-byte range
+// (MAX_UBO_SECTION_SIZE), and its Metal backend binds a push where it
+// lands in a 32 KiB buffer, so a block longer than its push runs past the
+// buffer's end (tests/ShaderUniformsTest.cpp checks the shaders' blocks).
+// The mesh shaders' Transforms block (slot 0) is TransformUniforms up to
+// `parts`; the parts are a block of their own (kPartsSlot), sent only for
+// meshes that have parts.
+constexpr uint32_t kPartsSlot = 2;         // mesh.vert, roadmesh.vert, motion.vert: Parts
+constexpr uint32_t kPreviousPartsSlot = 3; // motion.vert: PreviousParts
+constexpr uint32_t kMaxUniformBlockSize = 4096;
+
 struct TransformUniforms {
 	Mat4 worldViewProjection;
 	Mat4 world;
@@ -62,30 +75,59 @@ struct TransformUniforms {
 	float sway[4] {};
 	// mesh.vert's normal map frame: x 0 none, 1 the tangent's (bundled,
 	// static and skinned meshes' tangents), 2 the object's (RaShaderSM
-	// _OBJSPACENORMALMAP_).
+	// _OBJSPACENORMALMAP_). y: an AnimatedUV technique (uvMatrices). z:
+	// set by pushTransforms, 1 when the parts block went (sendParts), else
+	// mesh.vert places the vertices by the identity.
 	float normalSpace[4] {};
 	float trunkSunDirection[4] {}; // world-space direction for per-vertex trunk lighting
-	Mat4 parts[kMaxMeshParts]; // bundled-mesh part transforms, skinned meshes' bones
 	// normalSpace.y 1: an "AnimatedUV" bundled technique (RaShaderBM
 	// _HASUVANIMATION_): the texture coordinates are (TexUVRotCenter, 1) x
 	// uvMatrix[blend index 3] + TexDiffuse. Each matrix as two vec4s: rows
 	// 0 and 1 (xy, xy), then row 2 (xy) (AnimatedUV.h).
-	// After the parts: sent only for bundled meshes (uvUsed).
 	float uvMatrices[kAnimatedUVMatrices * 2][4] {};
-	// Not in the shaders' block: how many of `parts` pushUniformSize sends
-	// (a static mesh reads only the first; the other shaders none), and
-	// whether the UV matrices after them go too (all parts then).
-	uint32_t partsUsed = kMaxMeshParts;
-	bool uvUsed = false;
+	// The Parts block (kPartsSlot): bundled-mesh part transforms, skinned
+	// meshes' bones; roadmesh.vert's view-projection is the first.
+	Mat4 parts[kMaxMeshParts];
+	// Not in the shaders' blocks: whether pushTransforms sends `parts`. A
+	// static mesh's vertices all have part 0 and are placed by the identity.
+	bool sendParts = true;
 };
 
-// The bytes of `t` to push: the block up to the parts it uses.
-inline uint32_t pushUniformSize(const TransformUniforms& t)
+// The Transforms block's size: everything before `parts`.
+constexpr uint32_t kTransformsBlockSize = static_cast<uint32_t>(offsetof(TransformUniforms, parts));
+static_assert(kTransformsBlockSize == 448 && sizeof(TransformUniforms::parts) == kMaxUniformBlockSize);
+
+// `t`'s vertex uniforms: the Transforms block whole (slot 0) and, with
+// sendParts, the Parts block whole (kPartsSlot). Without it the slot keeps
+// its last push, which was whole too (only this pushes there), and mesh.vert
+// doesn't read it.
+inline void pushTransforms(SDL_GPUCommandBuffer* commands, const TransformUniforms& t)
 {
-	if (t.uvUsed) {
-		return static_cast<uint32_t>(offsetof(TransformUniforms, uvMatrices) + sizeof(t.uvMatrices));
+	unsigned char block[kTransformsBlockSize];
+	std::memcpy(block, &t, sizeof(block));
+	const float hasParts = t.sendParts ? 1.0f : 0.0f;
+	std::memcpy(block + offsetof(TransformUniforms, normalSpace) + 2 * sizeof(float), &hasParts, sizeof(hasParts));
+	SDL_PushGPUVertexUniformData(commands, 0, block, sizeof(block));
+	if (t.sendParts) {
+		SDL_PushGPUVertexUniformData(commands, kPartsSlot, t.parts, sizeof(t.parts));
 	}
-	return static_cast<uint32_t>(offsetof(TransformUniforms, parts) + sizeof(Mat4) * std::min<uint32_t>(t.partsUsed, kMaxMeshParts));
+}
+
+// The enhanced prepass's motion.vert (not retail): its Motion block (slot
+// 1) and, after it, its PreviousParts block (kPreviousPartsSlot), each
+// pushed whole (pushMotion).
+struct MotionUniforms {
+	Mat4 current;  // world x this frame's view-projection, unjittered
+	Mat4 previous; // last frame's world x its view-projection
+	Mat4 previousParts[kMaxMeshParts];
+};
+constexpr uint32_t kMotionBlockSize = static_cast<uint32_t>(offsetof(MotionUniforms, previousParts));
+static_assert(kMotionBlockSize == 128 && sizeof(MotionUniforms::previousParts) == kMaxUniformBlockSize);
+
+inline void pushMotion(SDL_GPUCommandBuffer* commands, const MotionUniforms& motion)
+{
+	SDL_PushGPUVertexUniformData(commands, 1, &motion, kMotionBlockSize);
+	SDL_PushGPUVertexUniformData(commands, kPreviousPartsSlot, motion.previousParts, sizeof(motion.previousParts));
 }
 
 // Water fragment shader, second uniform block.

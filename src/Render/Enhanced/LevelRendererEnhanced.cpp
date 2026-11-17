@@ -59,11 +59,6 @@ struct TaaUniforms {
 	float params[4] {};
 };
 
-struct MotionUniforms {
-	Mat4 current;  // world x this frame's view-projection, unjittered
-	Mat4 previous; // last frame's world x its view-projection
-	Mat4 previousParts[kMaxMeshParts];
-};
 
 constexpr float kAORadius = 1.5f;    // metres the GTAO searches
 constexpr float kFarPlane = 6000.0f; // the world pass's (LevelRenderer::draw)
@@ -265,8 +260,8 @@ void LevelRenderer::drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURend
 	const scene::RendererSettings defaults;
 	const scene::RendererSettings& renderer = m_sources && m_sources->renderer ? *m_sources->renderer : defaults;
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
-	transforms.partsUsed = 0;
-	SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+	transforms.sendParts = false;
+	pushTransforms(commands, transforms);
 	const auto morph = [&](int lod, bool on) {
 		const TerrainMorph m = terrainMorph(lod, on, m_terrainLodSwitch, renderer, camera.position.x, camera.position.z,
 			m_terrainHeightAboveGround);
@@ -360,14 +355,13 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 		transforms.worldViewProjection = instance.world * viewProjection;
 		transforms.world = instance.world;
 		if (instance.parts.empty() && !mesh.skinned) {
-			transforms.parts[0] = Mat4 {};
-			transforms.partsUsed = 1;
+			transforms.sendParts = false;
 		} else {
 			for (int i = 0; i < kMaxMeshParts; ++i) {
 				transforms.parts[i] = static_cast<size_t>(i) < instance.parts.size() ? instance.parts[static_cast<size_t>(i)]
 																					: Mat4 {};
 			}
-			transforms.partsUsed = kMaxMeshParts;
+			transforms.sendParts = true;
 		}
 		const scene::WindSettings* wind = m_sources ? m_sources->wind : nullptr;
 		transforms.sway[0] = 0;
@@ -376,7 +370,6 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 				? wind->speedAt({instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)})
 				: windSpeed) + 5;
 		transforms.sway[3] = seconds;
-		transforms.uvUsed = false;
 	};
 	// Its opaque materials (the overgrowth's atlas ones left out: their
 	// coordinates need the atlas's offset, which the caster shader hasn't).
@@ -438,7 +431,7 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 			}
 			bindMesh(pass, bound, item.mesh);
 			placeInstance(*item.instance, *item.mesh, transforms);
-			SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+			pushTransforms(commands, transforms);
 			const std::vector<anim::Matrix>& pose = item.mesh->skinned ? poseFor(*item.instance, seconds) : unposed;
 			bool swaying = false;
 			for (const Submesh& submesh : item.mesh->submeshes) {
@@ -450,13 +443,13 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 						continue;
 					}
 					skinPalette(*item.mesh, submesh, pose, transforms);
-					SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+					pushTransforms(commands, transforms);
 				}
 				const bool sway = submesh.leaf && !item.instance->overgrowth;
 				if (sway != swaying) {
 					swaying = sway;
 					transforms.sway[0] = sway ? 1.0f : 0.0f;
-					SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+					pushTransforms(commands, transforms);
 				}
 				cullAs(pass, pipeline, *item.mesh, submesh, p.depth, p.depthCulled);
 				alphaTest(pass, submesh);
@@ -524,8 +517,8 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 			const bool known = instance.previousFrame + 1 == m_enh.frame;
 			bindMesh(pass, bound, &mesh);
 			placeInstance(instance, mesh, transforms);
-			transforms.partsUsed = kMaxMeshParts;
-			SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+			transforms.sendParts = true;
+			pushTransforms(commands, transforms);
 			motion.current = instance.world * m_enh.viewProjection;
 			motion.previous = (known ? instance.previousWorld : instance.world) * m_enh.previousViewProjection;
 			const std::vector<Mat4>& parts = known ? instance.previousParts : instance.parts;
@@ -544,13 +537,13 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 						continue;
 					}
 					skinPalette(mesh, submesh, pose, transforms);
-					SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+					pushTransforms(commands, transforms);
 					skinPalette(mesh, submesh, previousPose, previousPalette);
 					std::copy(std::begin(previousPalette.parts), std::end(previousPalette.parts), std::begin(motion.previousParts));
 					pushed = false;
 				}
 				if (!pushed) {
-					SDL_PushGPUVertexUniformData(commands, 1, &motion, sizeof(motion));
+					pushMotion(commands, motion);
 					pushed = true;
 				}
 				cullAs(pass, pipeline, mesh, submesh, p.motion, p.motionCulled);
@@ -595,9 +588,9 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 							std::copy(skin.begin(), skin.end(), t.parts[b].m.begin());
 						}
 					}
-					SDL_PushGPUVertexUniformData(commands, 0, &t, pushUniformSize(t));
+					pushTransforms(commands, t);
 					std::copy(std::begin(t.parts), std::end(t.parts), std::begin(motion.previousParts));
-					SDL_PushGPUVertexUniformData(commands, 1, &motion, sizeof(motion));
+					pushMotion(commands, motion);
 					alphaTest(pass, submesh, 1.0f);
 					SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 				}
@@ -876,7 +869,7 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 					TransformUniforms transforms {};
 					transforms.worldViewProjection = piece->world * vp;
 					transforms.world = piece->world;
-					SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+					pushTransforms(commands, transforms);
 					if (std::getenv("BF2142_SHADOW_STATS")) {
 						size_t skipped = 0;
 						for (const Submesh& submesh : mesh->submeshes) {

@@ -247,6 +247,12 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 						   const unsigned char* fs, size_t fsSize, const unsigned char* fsMsl, size_t fsMslSize,
 						   uint32_t fragmentSamplers, uint32_t fragmentUniforms,
 						   const char* name, uint32_t vertexUniforms = 1, uint32_t vertexSamplers = 0) -> SDL_GPUGraphicsPipeline* {
+		// The shaders that read the parts' blocks (GpuContext.h kPartsSlot, kPreviousPartsSlot).
+		if (vs == k_mesh_vert_spv || vs == k_roadmesh_vert_spv) {
+			vertexUniforms = std::max(vertexUniforms, kPartsSlot + 1);
+		} else if (vs == k_motion_vert_spv) {
+			vertexUniforms = std::max(vertexUniforms, kPreviousPartsSlot + 1);
+		}
 		SDL_GPUShader* vertex = loadShader(
 			m_device, SDL_GPU_SHADERSTAGE_VERTEX, vs, vsSize, vsMsl, vsMslSize, vertexSamplers, vertexUniforms);
 		SDL_GPUShader* fragment = loadShader(m_device, SDL_GPU_SHADERSTAGE_FRAGMENT, fs, fsSize, fsMsl, fsMslSize,

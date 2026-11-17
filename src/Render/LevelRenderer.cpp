@@ -3438,7 +3438,8 @@ void LevelRenderer::drawMeshParticles(SDL_GPUCommandBuffer* commands, SDL_GPURen
 				world.at(3, 1) = particle.position.y;
 				world.at(3, 2) = particle.position.z;
 				TransformUniforms transforms {world * viewProjection, world, {1, 1, 0, 0}, {}};
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+				transforms.sendParts = false; // no parts: the identity
+				pushTransforms(commands, transforms);
 				for (const Submesh& submesh : particleMesh->submeshes) {
 					const IndexRange range = particleMesh->particleSlotCount ? submesh.particleSlots[slot]
 						: IndexRange {submesh.firstIndex, submesh.indexCount};
@@ -4381,8 +4382,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	applyTerrainLights(terrainLit);
 	applyTerrainLights(terrainUnlit);
 	TransformUniforms transforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
-	transforms.partsUsed = 0; // terrain.vert has none
-	SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+	transforms.sendParts = false; // terrain.vert has none
+	pushTransforms(commands, transforms);
 	TerrainDetailUniforms detail {};
 	for (int i = 0; i < kMaxDetailLayers; ++i) {
 		detail.tiling[i] = m_detailTiling[i];
@@ -4512,7 +4513,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The surrounding terrain.
 	if (!m_surrounding.empty() && switches.drawTerrain) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.surroundingPipeline());
-		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+		pushTransforms(commands, transforms);
 		const TerrainMorphUniforms still = morphFor(2, false);
 		SDL_PushGPUVertexUniformData(commands, 1, &still, sizeof(still));
 		SDL_PushGPUFragmentUniformData(commands, 0, &terrainUnlit, sizeof(terrainUnlit));
@@ -4582,8 +4583,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 						{1 / m_patchSize, 1 / m_patchSize, -(m_patchOrigin[0] / m_patchSize + px),
 							-(m_patchOrigin[1] / m_patchSize + pz)},
 						{}};
-					roadTransforms.partsUsed = 0;
-					SDL_PushGPUVertexUniformData(commands, 0, &roadTransforms, pushUniformSize(roadTransforms));
+					roadTransforms.sendParts = false;
+					pushTransforms(commands, roadTransforms);
 					SDL_PushGPUFragmentUniformData(commands, 0, patch.lightmap ? &terrainLit : &terrainUnlit,
 						sizeof(terrainLit));
 					SDL_GPUTextureSamplerBinding samplers[3] = {
@@ -4638,8 +4639,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 								-(m_patchOrigin[1] / m_patchSize + pz)},
 							{}};
 						meshTransforms.parts[0] = viewProjection;
-						meshTransforms.partsUsed = 1;
-						SDL_PushGPUVertexUniformData(commands, 0, &meshTransforms, pushUniformSize(meshTransforms));
+						meshTransforms.sendParts = true; // roadmesh.vert's view-projection
+						pushTransforms(commands, meshTransforms);
 						SDL_PushGPUFragmentUniformData(commands, 0, patch.lightmap ? &terrainLit : &terrainUnlit,
 							sizeof(terrainLit));
 						SDL_GPUTextureSamplerBinding samplers[3] = {
@@ -4790,15 +4791,14 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		transforms.trunkSunDirection[0] = trunkSun.x;
 		transforms.trunkSunDirection[1] = trunkSun.y;
 		transforms.trunkSunDirection[2] = trunkSun.z;
-		// A static mesh reads only the first part (pushUniformSize).
+		// A static mesh is placed by the identity (pushTransforms).
 		if (instance.parts.empty() && !bound->skinned) {
-			transforms.parts[0] = Mat4 {};
-			transforms.partsUsed = 1;
+			transforms.sendParts = false;
 		} else {
 			for (int i = 0; i < kMaxMeshParts; ++i) {
 				transforms.parts[i] = instance.parts.empty() ? Mat4 {} : instance.parts[static_cast<size_t>(i)];
 			}
-			transforms.partsUsed = kMaxMeshParts;
+			transforms.sendParts = true;
 		}
 		std::copy(item.lightmapTransform, item.lightmapTransform + 4, transforms.lightmapTransform);
 		// The leaves' sway (not the overgrowth's: RaShaderLeaf's OVERGROWTH has none).
@@ -4815,7 +4815,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		// skinned mesh's material says (its normalKind).
 		transforms.normalSpace[0] = bound->skinned ? 0.0f : 1.0f;
 		transforms.normalSpace[1] = 0;
-		transforms.uvUsed = bound->bundled;
 		if (bound->bundled) {
 			for (int i = 0; i < kAnimatedUVMatrices; ++i) {
 				const UVMatrix& m = instance.uvMatrices[static_cast<size_t>(i)];
@@ -4828,7 +4827,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				transforms.uvMatrices[i * 2 + 1][1] = m.r2[1];
 			}
 		}
-		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+		pushTransforms(commands, transforms);
 		bool swaying = false;
 		const bool lightmapped = item.lightmap != nullptr;
 		float hemiObject[4] = {1, 1, 1, 0};
@@ -4857,17 +4856,17 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 				skinPalette(*bound, submesh, pose, transforms);
 				transforms.normalSpace[0] = space;
 				transforms.normalSpace[1] = uvAnimated;
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+				pushTransforms(commands, transforms);
 			} else if (space != transforms.normalSpace[0] || uvAnimated != transforms.normalSpace[1]) {
 				transforms.normalSpace[0] = space;
 				transforms.normalSpace[1] = uvAnimated;
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+				pushTransforms(commands, transforms);
 			}
 			const bool sway = submesh.leaf && !instance.overgrowth;
 			if (sway != swaying) {
 				swaying = sway;
 				transforms.sway[0] = sway ? 1.0f : 0.0f;
-				SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+				pushTransforms(commands, transforms);
 			}
 			LightingUniforms uniforms = uniformsFor[lightmapped][submesh.alphaReference > 0];
 			if (submesh.trunk) {
@@ -4944,13 +4943,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		// Decals.fx's DecalFadeDistanceAndInterval (0x10163810).
 		TransformUniforms decalTransforms {viewProjection, Mat4 {},
 			{m_particleSettings.decalFadeDistance, m_particleSettings.decalFadeDistance * m_particleSettings.decalStartFadePercentage, 0, 0}, {}};
-		decalTransforms.partsUsed = 0;
+		decalTransforms.sendParts = false;
 		// WorldCamPos (+0x3180, set per batch by 0x101631f0): the eye, for the
 		// normal-mapped technique's half vector.
 		decalTransforms.sway[0] = camera.position.x;
 		decalTransforms.sway[1] = camera.position.y;
 		decalTransforms.sway[2] = camera.position.z;
-		SDL_PushGPUVertexUniformData(commands, 0, &decalTransforms, pushUniformSize(decalTransforms));
+		pushTransforms(commands, decalTransforms);
 		SDL_GPUBufferBinding vertexBinding {m_decalVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 		for (const ParticleGroup& group : m_decalGroups) {
@@ -4996,8 +4995,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		};
 		SDL_PushGPUFragmentUniformData(commands, 1, &water, sizeof(water));
 		TransformUniforms waterTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
-		waterTransforms.partsUsed = 0;
-		SDL_PushGPUVertexUniformData(commands, 0, &waterTransforms, pushUniformSize(waterTransforms));
+		waterTransforms.sendParts = false;
+		pushTransforms(commands, waterTransforms);
 		SDL_GPUTexture* flat = m_gpu.whiteTexture();
 		SDL_GPUTextureSamplerBinding samplers[4] = {
 			{m_waterFrames.empty() ? flat : m_waterFrames[frame0], m_gpu.repeatSampler()},
@@ -5254,7 +5253,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		for (size_t i = 0; i < model.parts.size() && i < static_cast<size_t>(kMaxMeshParts); ++i) {
 			transforms.parts[i] = model.parts[i];
 		}
-		SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+		pushTransforms(commands, transforms);
 		for (const Submesh& submesh : gpuMesh->submeshes) {
 			if (queueOf(submesh, 1.0f) != queue) {
 				continue;
@@ -5274,7 +5273,7 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 					std::copy(skin.begin(), skin.end(), transforms.parts[b].m.begin());
 				}
 			}
-			SDL_PushGPUVertexUniformData(commands, 0, &transforms, pushUniformSize(transforms));
+			pushTransforms(commands, transforms);
 			LightingUniforms uniforms = lit[submesh.alphaReference > 0];
 			materialUniforms(uniforms, submesh, 1.0f, seconds);
 			specularUniforms(uniforms, submesh, camera, useLights);

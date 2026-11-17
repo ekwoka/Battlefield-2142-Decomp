@@ -16,12 +16,21 @@ layout(set = 1, binding = 0) uniform Transforms {
 	vec4 sway;
 	vec4 normalSpace;
 	vec4 trunkSunDirection;
-	mat4 parts[64];
+	vec4 uvMatrices[16];
 };
 
 layout(set = 1, binding = 1) uniform Motion {
 	mat4 currentWorldViewProjection;  // unjittered
 	mat4 previousWorldViewProjection; // last frame's world and view-projection
+};
+
+// The parts or bones, this frame's and last frame's (GpuContext.h
+// kPartsSlot and kPreviousPartsSlot: 4 KiB each, SDL's Vulkan range).
+layout(set = 1, binding = 2) uniform Parts {
+	mat4 parts[64];
+};
+
+layout(set = 1, binding = 3) uniform PreviousParts {
 	mat4 previousParts[64];
 };
 

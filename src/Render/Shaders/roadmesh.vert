@@ -20,10 +20,12 @@ layout(set = 1, binding = 0) uniform Transforms {
 	mat4 worldViewProjection;
 	mat4 world;
 	vec4 lightmapTransform; // world xz -> terrain patch lightmap: scale xy, offset zw
-	vec4 unusedSway;
-	vec4 unusedNormalSpace;
-	vec4 unusedTrunkSunDirection;
-	mat4 viewProjection; // TransformUniforms::parts[0]
+};
+
+// TransformUniforms::parts[0] (GpuContext.h kPartsSlot, pushed whole).
+layout(set = 1, binding = 2) uniform Parts {
+	mat4 viewProjection;
+	mat4 unusedParts[63];
 };
 
 layout(location = 0) out vec2 outTexCoord0;

@@ -37,10 +37,13 @@ function(bf2142_embed_shaders target)
 		endif()
 		set(spv ${dir}/${name}.spv)
 		set(msl ${dir}/${name}.msl)
-		add_custom_command(OUTPUT ${spv} ${msl}
+		# The SPIR-V's reflection (its uniform blocks' sizes: tests/ShaderUniformsTest.cpp).
+		set(json ${dir}/${name}.json)
+		add_custom_command(OUTPUT ${spv} ${msl} ${json}
 			COMMAND ${CMAKE_COMMAND} -E make_directory ${dir}
 			COMMAND ${GLSLANG_VALIDATOR} -V --target-env vulkan1.0 --quiet ${includeDirs} -o ${spv} ${input}
 			COMMAND ${SPIRV_CROSS} --msl --msl-version 20100 --msl-decoration-binding --output ${msl} ${spv}
+			COMMAND ${SPIRV_CROSS} ${spv} --reflect --output ${json}
 			DEPENDS ${input} ${includes}
 			COMMENT "Compiling shader ${name}"
 			VERBATIM)

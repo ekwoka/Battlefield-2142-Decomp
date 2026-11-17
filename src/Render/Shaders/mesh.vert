@@ -26,13 +26,19 @@ layout(set = 1, binding = 0) uniform Transforms {
 	// x: the normal map's space (0 none, 1 the tangent's: bundled and static
 	// meshes, a skinned mesh's tangent-space map; 2 the object's).
 	// y: an AnimatedUV technique (RaShaderBM _HASUVANIMATION_, below).
+	// z: 1 with the Parts block (bundled and skinned meshes), 0 for a static
+	// mesh, placed by the identity (the block then isn't sent).
 	vec4 normalSpace;
 	vec4 trunkSunDirection;
-	mat4 parts[64];         // bundled-mesh part transforms (identity for others; a
-	                        // static mesh is sent only the first)
 	// The bundled instance's UV matrices (RendDX9 +0x28c): rows 0 and 1,
-	// then row 2, two vec4s each (sent with bundled meshes only).
+	// then row 2, two vec4s each.
 	vec4 uvMatrices[16];
+};
+
+// Bundled-mesh part transforms, skinned meshes' bones (GpuContext.h
+// kPartsSlot: a block of its own, as SDL binds 4 KiB of a block on Vulkan).
+layout(set = 1, binding = 2) uniform Parts {
+	mat4 parts[64];
 };
 
 layout(location = 0) out vec3 outNormal;
@@ -57,8 +63,11 @@ layout(location = 12) out float outTrunkSun;
 
 void main()
 {
-	mat4 part = parts[clamp(int(inPart + 0.5), 0, 63)] * inWeight +
-		parts[clamp(int(inPart2 + 0.5), 0, 63)] * (1.0 - inWeight);
+	mat4 part = mat4(1.0);
+	if (normalSpace.z > 0.5) {
+		part = parts[clamp(int(inPart + 0.5), 0, 63)] * inWeight +
+			parts[clamp(int(inPart2 + 0.5), 0, 63)] * (1.0 - inWeight);
+	}
 	vec4 local = part * vec4(inPosition, 1.0);
 	if (sway.x > 0.5) {
 		// inPos.xyz += sin((GlobalTime / (ObjRadius + y)) * WindSpeed) *
