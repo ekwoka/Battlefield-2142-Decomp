@@ -661,14 +661,20 @@ float Vehicle::objectCompression(const Wheel& wheel, Vec3& normal) const
 void Vehicle::setWheelCollisionState(const physics::CollisionMeshFile& mesh, size_t state)
 {
 	for (Wheel& wheel : m_wheels) {
+		// 0x006539f0 switches only parts with a collision instance (+0x4c),
+		// through its slot 0x30 (0x006e5df0), which leaves a geometry with
+		// one sub-geometry as it is: a wheel without its own collision part,
+		// or whose part has no state `state`, keeps its contact and radius.
 		const auto* sub = wheel.collisionPart >= 0
 			? physics::collisionPart(mesh, static_cast<size_t>(wheel.collisionPart), state) : nullptr;
-		const auto* lod = sub ? physics::collisionLodFor(mesh, *sub, 1) : nullptr;
-		// Retail probes the selected instance's vehicle LOD. Empty wreck
-		// states cannot keep supporting the hull on the live wheel radius.
-		wheel.contactEnabled = lod && !lod->vertices.empty();
-		if (wheel.contactEnabled) {
-			wheel.radius = std::max(0.0f, -lod->boundsMin[1]);
+		if (sub) {
+			// Retail probes the selected instance's vehicle LOD. An empty
+			// one cannot keep supporting the hull on the live wheel radius.
+			const auto* lod = physics::collisionLodFor(mesh, *sub, 1);
+			wheel.contactEnabled = lod && !lod->vertices.empty();
+			if (wheel.contactEnabled) {
+				wheel.radius = std::max(0.0f, -lod->boundsMin[1]);
+			}
 		}
 		wheel.contact = false;
 		wheel.compression = 0;

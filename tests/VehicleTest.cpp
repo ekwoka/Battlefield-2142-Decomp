@@ -748,6 +748,34 @@ TEST(Vehicle_RotationalRegulators)
 	CHECK(near(steered(0.5f), 0.5f));
 }
 
+// 0x006539f0 switches only parts with a collision instance, and 0x006e5df0
+// leaves a geometry with one sub-geometry unswitched: a wheel without its
+// own collision part, or whose part has no wreck state, keeps holding the
+// hull at its radius once the vehicle is a wreck.
+TEST(Vehicle_WreckLeavesWheelsWithoutWreckGeometry)
+{
+	for (const bool ownPart : {false, true}) {
+		Car car;
+		if (ownPart) {
+			car.templates.find("car_wheel")->settings()["collisionPart"] = "0";
+		}
+		physics::CollisionMeshFile mesh;
+		mesh.version = 9;
+		mesh.geometries.resize(1);
+		mesh.geometries[0].subGeometries.resize(1); // no wreck state
+		car.vehicle = game::Vehicle::fromTemplate(*car.templates.find("car"), car.templates, &mesh);
+		CHECK(car.vehicle->wheels()[0].collisionPart == (ownPart ? 0 : -1));
+		const float radius = car.vehicle->wheels()[0].radius;
+		car.vehicle->setWheelCollisionState(mesh, 1);
+		CHECK(car.vehicle->wheels()[0].contactEnabled);
+		CHECK(car.vehicle->wheels()[0].radius == radius);
+		car.body.position.y = 0.7f;
+		car.vehicle->tick(car.body, car.ground, 1 / 30.0f, 0.8f);
+		CHECK(car.body.acceleration.y > 0);
+		CHECK(car.vehicle->wheels()[0].contact);
+	}
+}
+
 TEST(Vehicle_WreckCanKeepAuthoredWheelSupport)
 {
 	Car car;
