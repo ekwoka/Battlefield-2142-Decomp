@@ -2821,17 +2821,28 @@ void GameWorld::stepPods(float seconds)
 					const physics::Vec3 at = pod.position + physics::Vec3 {1.2f, 1.0f, 0};
 					player->body.position = at;
 					// The rider takes the pod's velocity: retail puts him out at the
-					// landing timer's end (0x005cff20 -> the game's slot 0xac) and,
-					// 0.1 s on with the pod's removal (timer event 0x21, 0x005cff90),
-					// sets his node's velocity (slot 0x5c) to the pod node's (slot
-					// 0x58).
+					// landing timer's end (0x005d01c0 below 0 -> 0x005cff20 -> the
+					// game's slot 0xac), whose occupant exit (0x005cfd70) sets his
+					// node's velocity (slot 0x5c) to the pod node's (slot 0x58), as
+					// the seat exit's exitSpeedMod 1 does (0x004bb570), and queues
+					// the removal 0.1 s on (timer event 0x21, 0x005cff90: an occupant
+					// left in it, the dead one's, made a ragdoll at the pod's
+					// velocity).
 					player->body.velocity = body ? body->body.velocity : physics::Vec3 {};
-					// A port addition, standing in for retail's solved contact: the
-					// rewrite's pod still carries its impact speed (15-27 m/s down
-					// in the landing tests) 0.05 s after touching down, which would
-					// drive the rider into the surface and hurt him. Retail's pod node
-					// has stopped by then (inferred: its riders walk away), so
-					// only the speed into the surface is taken away, relative to it.
+					// A port addition: only the speed into the surface is taken
+					// away, relative to it. The pod's landing and contact are
+					// retail's: the landing (0x005cf750) starts the 0.05 s timer
+					// in the physics, the update after next ends it (0x005d01c0,
+					// this one after the physics, the same single solve between),
+					// and the node's step (0x006c8380) adds a contact's impulse
+					// only at the next step, its y halved (0x00a84b74, as
+					// RigidBody::stepLinear). So the pod node still moves at about
+					// half its impact speed at the exit (15-27 m/s down in the
+					// landing tests), in retail too by that reading, and taken
+					// whole it drives the rider into the ground under
+					// 0x005a3db0's 9.1 m/s rule (Titan_PodArrayDropsASoldier dies).
+					// Retail's riders walk away; what spares them (the soldier's
+					// exit placement or his first contact) wasn't found.
 					const float into = physics::dot(player->body.velocity - pod.landingSurfaceVelocity, pod.landingNormal);
 					if (pod.landing >= 0 && into < 0) player->body.velocity = player->body.velocity - pod.landingNormal * into;
 					soldier->setPosition({at.x, at.y - 1.0f, at.z});
