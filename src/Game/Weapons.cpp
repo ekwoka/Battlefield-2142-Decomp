@@ -462,6 +462,7 @@ FireArmSettings FireArmSettings::fromTemplate(const world::ObjectTemplate& t)
 	s.heatAddWhenFire = number(t, "heatAddWhenFire", 0);
 	s.coolDownPerSec = number(t, "coolDownPerSec", 0);
 	s.overheatPenalty = number(t, "overheatPenalty", 0);
+	s.inheritHeatFromPrimary = number(t, "inheritHeatFromPrimary", 0) != 0;
 	const auto projectile = t.settings().find("projectileTemplate");
 	if (projectile != t.settings().end()) {
 		s.projectileTemplate = projectile->second;
@@ -1164,9 +1165,10 @@ bool FireArm::launch()
 	m_busyUntilRelease = m_settings.busyUntilButtonRelease;
 	if (m_settings.heatAddWhenFire > 0) {
 		// The batch fire (0x005c3cb0): over 1 the heat becomes overheatPenalty
-		// and cools back down to 1 (the gun stops while it is 1 or more).
+		// and cools back down to 1 (the gun stops while it is 1 or more);
+		// not with inheritHeatFromPrimary (it needs template +0x2dc == 0).
 		m_heat += m_settings.heatAddWhenFire;
-		if (m_heat > 1) {
+		if (m_heat > 1 && !m_settings.inheritHeatFromPrimary) {
 			m_heat = m_settings.overheatPenalty;
 		}
 		m_heatAtFire = m_heat;

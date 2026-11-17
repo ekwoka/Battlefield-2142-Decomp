@@ -498,6 +498,50 @@ TEST(Weapons_GunsHeatUp)
 	CHECK(!gun.overheated() && gun.heat() < 1 && gun.tick(1 / 30.0f, true));
 }
 
+// inheritHeatFromPrimary (template +0x2dc) gates the penalty in 0x005c3cb0:
+// over 1 the heat stays what the rounds made it, and cools from there.
+TEST(Weapons_InheritedHeatTakesNoOverheatPenalty)
+{
+	game::FireArmSettings settings;
+	settings.magSize = -1;
+	settings.roundsPerMinute = 1800;
+	settings.heatAddWhenFire = 0.3f;
+	settings.coolDownPerSec = 0.4f;
+	settings.overheatPenalty = 2;
+	settings.inheritHeatFromPrimary = true;
+	game::FireArm gun(settings);
+	int rounds = 0;
+	while (!gun.overheated() && rounds < 100) {
+		rounds += gun.tick(1 / 30.0f, true) ? 1 : 0;
+	}
+	CHECK(rounds == 4);
+	const auto cooling = [](game::FireArm& g) {
+		int ticks = 0;
+		while (g.overheated() && ticks < 300) {
+			g.tick(1 / 30.0f, false);
+			++ticks;
+		}
+		return ticks;
+	};
+	// 1.2 cools below 1 in 0.5 s at 0.4 a second.
+	const int inherited = cooling(gun);
+	CHECK(inherited >= 14 && inherited <= 17);
+	settings.inheritHeatFromPrimary = false;
+	game::FireArm penalised(settings);
+	rounds = 0;
+	while (!penalised.overheated() && rounds < 100) {
+		rounds += penalised.tick(1 / 30.0f, true) ? 1 : 0;
+	}
+	CHECK(rounds == 4);
+	// The penalty, 2, takes 2.5 s.
+	const int penalty = cooling(penalised);
+	CHECK(penalty >= 74 && penalty <= 77);
+	// The template's property.
+	world::ObjectTemplate t(1, "GenericFireArm", "inherits", 1);
+	t.settings()["inheritHeatFromPrimary"] = "1";
+	CHECK(game::FireArmSettings::fromTemplate(t).inheritHeatFromPrimary);
+}
+
 // as_heavy_mech_main_cannon / us_heavy_mech_minigun_firearm: a magazine and
 // heat. Held fire overheats them after about 2.8 s although the cooling
 // (0.5 a second) is faster than the heat added (0.375 a second); a tapped

@@ -398,6 +398,11 @@ struct FireArmSettings {
 	float heatAddWhenFire = 0;
 	float coolDownPerSec = 0;
 	float overheatPenalty = 0;
+	// ObjectTemplate.inheritHeatFromPrimary (template +0x2dc; the saver
+	// 0x005c33a0 writes it from +0x2d4 of its this, 8 below the object's
+	// template, as heatAddWhenFire +0x2cc / overheatPenalty +0x2d8): with it
+	// set, 0x005c3cb0 never puts the heat to overheatPenalty.
+	bool inheritHeatFromPrimary = false;
 	// The fire modes (fire.addFireRate, in order; the template's list at
 	// +0x30): 0 single, 1 burst, 2 automatic. The fire component starts in
 	// the first (2 without one, 0x005f28a0). A burst is fire.burstSize
