@@ -1016,6 +1016,76 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 
+// A group that can't be spawned at drops the request: 0x004bfe40 sets the
+// player's group to 0 (0x004bff13) and posts 6/6 back, so a squad member
+// who asked for his dead leader doesn't spawn on him once he's back.
+TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	round.autoRespawn = false;
+	round.setManDownTime(0);
+	round.setSpawnTime(0);
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int leader = round.addPlayer("Leader", 2, true);
+	CHECK(round.joinSquad(leader, 1));
+	CHECK(round.spawnSoldier(leader));
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	int cleared = 0;
+	client.onEvent = [&cleared](const net::GameEvent& e) {
+		net::PostRemoteInfo post;
+		cleared += net::parsePostRemote(e, post) && post.category == net::kMsgNetworkCategory
+			&& post.id == net::kNeSelectSpawnGroup;
+	};
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
+	uint16_t leaderGhost = 0;
+	int group = -1;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::RemotePlayer& p : client.world().playerList()) {
+			leaderGhost = p.name == "Leader" ? p.soldierGhost : leaderGhost;
+		}
+		for (const auto& [id, g] : client.world().spawnGroups()) {
+			group = leaderGhost && g.ghost == leaderGhost && g.team == 2 ? id : group;
+		}
+		return group >= 0;
+	}));
+	// The leader dies; the member asks for him all the same.
+	dice::hfe::game::GameWorld::PlayerInfo lead;
+	CHECK(round.playerInfo(leader, lead) && lead.soldier != 0);
+	round.setHitPoints(lead.soldier, 0);
+	CHECK(round.playerInfo(leader, lead) && !lead.alive);
+	client.selectSpawnGroup(group);
+	CHECK(pumpUntil(step, [&] { return cleared == 1; })); // 6/6 back: the group is gone
+	CHECK(round.playerInfo(me, info) && !info.alive);
+	// Back, the leader isn't spawned on: the request went with the group.
+	CHECK(round.spawnSoldier(leader));
+	for (int i = 0; i < 60; ++i) step();
+	CHECK(round.playerInfo(me, info) && !info.alive && cleared == 1);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 // A joined client flooding Spotted (0x0050e910) with radio spots (0x2e):
 // of enemies, its own team, and ghosts that are no one's. The round's
 // spotted lists stay one entry per list and enemy, and are gone once

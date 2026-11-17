@@ -2060,8 +2060,21 @@ void HostedGame::applyMoves()
 		// death's sv.spawnTime wait, 0x004bb220), and not in the start's
 		// countdown (0x004bd2a0 sets every spawn time to its end).
 		if (client.spawnRequested && m_round->playerInfo(client.player, me) && !me.alive) {
-			if (me.respawnIn <= 0 && m_logic->roundState() != 2 && m_round->spawnSoldier(client.player)) {
-				client.spawnRequested = false;
+			if (me.respawnIn <= 0 && m_logic->roundState() != 2) {
+				// The round clears its request when the group can't be
+				// spawned at (GameWorld::spawnSoldier); 0x004bfe40 then sets
+				// the player's group to 0 (0x004bff13, slot 0x188) and posts
+				// 6/6 back to him (0x004b6630 case 6 reopens deployment), so
+				// nothing spawns him until he picks again.
+				const bool asked = m_round->requestSpawn(client.player);
+				if (m_round->spawnSoldier(client.player)) {
+					client.spawnRequested = false;
+				} else if (asked && !m_round->spawnRequested(client.player)) {
+					client.spawnRequested = false;
+					sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeSelectSpawnGroup));
+				} else {
+					m_round->cancelSpawnRequest(client.player);
+				}
 			}
 		} else if (me.alive) {
 			client.spawnRequested = false;
