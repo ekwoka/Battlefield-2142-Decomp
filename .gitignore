@@ -8,3 +8,4 @@ __pycache__/
 
 # local online credentials (never commit)
 bf2142-online.cfg
+.claude/worktrees
