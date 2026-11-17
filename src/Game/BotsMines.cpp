@@ -90,16 +90,34 @@ void BotManager::updateMines()
 			}
 		}
 	}
-	for (auto it = m_mines.begin(); it != m_mines.end();) {
-		if (present.count(it->first)) {
-			++it;
-			continue;
+	std::vector<uint32_t> gone;
+	for (const auto& [serial, zone] : m_mines) {
+		if (!present.count(serial)) {
+			gone.push_back(serial);
 		}
-		for (const MineZone::Mark& m : it->second.marks) {
-			m_mineMarks.unmark(m.mesh, m.polygon, m.counterB);
-		}
-		it = m_mines.erase(it);
 	}
+	for (const uint32_t serial : gone) {
+		forgetObject(serial);
+	}
+}
+
+// AI event 3/0x15, the defuser's (BF2142.exe 0x005d8ac0 -> 0x00894860):
+// IAIMineManager slot 0x10 (0x1004b880) takes the mine off at once, not at
+// the next half-second check. IAIEventCourier slot 0x40 (0x1004e1f0 ->
+// the bot manager's 0x100c6440) clears the DefuseMines target (bot +0x100,
+// vt 0x1d4 / 0x1d8) of the bots on it, so their urgency (0x10086870) is
+// worked out again rather than kept; defuseUrgency always works it out
+// from the mines left, so nothing more is held for it here.
+void BotManager::forgetObject(uint32_t object)
+{
+	const auto it = m_mines.find(object);
+	if (it == m_mines.end()) {
+		return;
+	}
+	for (const MineZone::Mark& m : it->second.marks) {
+		m_mineMarks.unmark(m.mesh, m.polygon, m.counterB);
+	}
+	m_mines.erase(it);
 }
 
 bool BotManager::mineMarked(int mesh, uint32_t polygon) const

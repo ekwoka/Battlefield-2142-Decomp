@@ -13,6 +13,7 @@
 #include "Effects/Effects.h"
 #include "Geometry/GeometryTemplateManager.h"
 #include "Render/AnimatedUV.h"
+#include "Render/BundledShadow.h"
 #include "Render/DistanceFade.h"
 #include "Render/MeshLights.h"
 #include "Render/OvergrowthLod.h"
@@ -318,6 +319,21 @@ TEST(RenderScene_ShippedFlagsLoadAndAnimate)
 		}
 		svg << "</svg>";
 	}
+}
+
+// BundledMeshDrawShadowMap (RendDX9 0x100c67e0): the light manager's shadow
+// LOD (+0xbc) stays 0, a cockpit swapped for its exterior casts at the LOD
+// 0 the swap (0x100c3260) leaves, and only opaque materials cast.
+TEST(RenderScene_BundledShadowLodAndMaterialsAsRendDX9)
+{
+	CHECK(render::kLightManagerShadowLod == 0);
+	CHECK(render::bundledShadowLod(2, false, 4) == 2); // its own, at least the manager's
+	CHECK(render::bundledShadowLod(5, false, 3) == 2); // capped at the last
+	CHECK(render::bundledShadowLod(2, true, 4) == 0);  // the swap reset it
+	CHECK(render::bundledShadowLod(0, true, 1) == 0);
+	CHECK(render::bundledMaterialCastsShadow(0));
+	CHECK(!render::bundledMaterialCastsShadow(1)); // blended or additive
+	CHECK(!render::bundledMaterialCastsShadow(2)); // alpha tested, even with allowAlphaShadows
 }
 
 TEST(RenderScene_TitanPartsCulledAsRendDX9)

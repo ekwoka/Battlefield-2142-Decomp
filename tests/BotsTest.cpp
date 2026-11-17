@@ -64,6 +64,9 @@ struct BotManagerTestAccess {
 		return input.flareFire;
 	}
 	static void attack(BotManager& manager, int area) { manager.m_sides[2].attacks = {area}; }
+	static void addMine(BotManager& manager, uint32_t serial) { manager.m_mines[serial].active = true; }
+	static size_t mines(const BotManager& manager) { return manager.m_mines.size(); }
+	static void forget(BotManager& manager, uint32_t serial) { manager.forgetObject(serial); }
 	static bool firePlanDrive(BotManager& manager, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target, bool inSight) {
 		BotManager::Known known;
 		known.player = target.id;
@@ -260,6 +263,23 @@ ai::NavMesh goalTestMesh(const std::vector<std::array<float, 4>>& rectangles)
 }
 
 } // namespace
+
+// AI event 3/0x15 (the defuser's, 0x005d8ac0 -> 0x00894860): the mine
+// manager takes the mine off at once (IAIMineManager slot 0x10,
+// 0x1004b880), not at its next half-second check; other ids are no-ops.
+TEST(Bots_ForgottenMineLeavesAtOnce)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	using Access = game::BotManagerTestAccess;
+	Access::addMine(bots, 7);
+	Access::addMine(bots, 9);
+	Access::forget(bots, 8);
+	CHECK(Access::mines(bots) == 2);
+	Access::forget(bots, 7);
+	CHECK(Access::mines(bots) == 1);
+}
 
 TEST(Bots_GoalRecoveryManagerIntegration)
 {

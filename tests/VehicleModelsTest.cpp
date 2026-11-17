@@ -1521,8 +1521,10 @@ TEST(Vehicles_StaticAAEmpMissileOnTransport)
 }
 
 // A burst at the tail engine is beyond the hull origin's 4 m reach. The
-// part's world position must count, including the vehicle's rotation.
-TEST(Vehicles_StaticAAEmpReachesTransportParts)
+// original's query (0x005a7ab0, mask 0x1000000: roots only, 0x006f7690,
+// 0x006fe530) measures from the root's position, never a part's, so the
+// engine is out of reach while a burst beside the origin is not.
+TEST(Vehicles_StaticAAEmpMissesTransportParts)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
@@ -1543,10 +1545,10 @@ TEST(Vehicles_StaticAAEmpReachesTransportParts)
 				const physics::Vec3 burst = g.position(v) + rotation.transform({tail->position.x, tail->position.y, tail->position.z});
 				CHECK(physics::lengthSquared(burst - g.position(v)) > 16);
 				const float hp = g.world->hitPoints(v);
-				CHECK(g.world->detonate("static_aa_missile_projectile", burst + physics::Vec3 {200, 0, 0}));
-				CHECK(g.world->empLevel(v) == 0);
 				CHECK(g.world->detonate("static_aa_missile_projectile", burst));
 				std::fprintf(stderr, "  %s %s yaw %.0f tail EMP %d\n", mod, name, yaw, g.world->empLevel(v));
+				CHECK(g.world->empLevel(v) == 0);
+				CHECK(g.world->detonate("static_aa_missile_projectile", g.position(v) + physics::Vec3 {1, 0, 0}));
 				CHECK(g.world->empLevel(v) > 0);
 				CHECK(g.world->hitPoints(v) == hp);
 			}
@@ -1554,18 +1556,18 @@ TEST(Vehicles_StaticAAEmpReachesTransportParts)
 	}
 }
 
-// Nested offsets compose in the parent's rotated frame. Each server part
-// contributes independently; a separate armour or a disabled subtree stops
-// propagation to the hull. Tiny amounts and the exact radius stay excluded.
-TEST(Vehicles_StaticAAEmpPartFalloffAndArmourBoundary)
+// Only the root is measured (0x005a7ab0 -> 0x005a6500 with the root's
+// position): a burst 2 m from a part far from the hull origin does nothing,
+// however many parts. At the root, tiny amounts (0.1 or less) and the exact
+// radius stay excluded.
+TEST(Vehicles_StaticAAEmpRootOnlyFalloff)
 {
 	if (!gameDir()) return;
-	for (int scenario = 0; scenario < 8; ++scenario) {
+	for (int scenario = 0; scenario < 6; ++scenario) {
 		Garage g(gameDir());
 		CHECK(g.loaded);
 		if (!g.loaded) continue;
-		// Use a small EMP amount to expose per-part accumulation and the
-		// 0.1 cutoff without saturating the hull's three steps.
+		// A small EMP amount exposes the 0.1 cutoff without saturating the hull's three steps.
 		g.templates.find("static_aa_missile_projectile")->settings()["detonation.explosionDamage"] = "6";
 		auto* hull = g.templates.find("as_at");
 		hull->children().clear();
@@ -1573,19 +1575,17 @@ TEST(Vehicles_StaticAAEmpPartFalloffAndArmourBoundary)
 		auto* leaf = g.templates.create("SimpleObject", "emp_test_leaf");
 		hull->children().push_back({parent->name(), {0, 0, -10}, {90, 0, 0}});
 		parent->children().push_back({leaf->name(), {0, 0, 6}, {}});
-		if (scenario == 4) parent->components().push_back("Armor"); // no takesEmpDamage: still the nearest armour
-		if (scenario == 5) parent->setFlags(world::TemplateFlags::ClientOnly);
-		if (scenario == 7) parent->children().push_back({leaf->name(), {0, 0, 6}, {}});
+		if (scenario == 5) parent->children().push_back({leaf->name(), {0, 0, 6}, {}});
 		const uint32_t v = g.start("as_at", {20, 60, 20}, 1 / 30.0f);
-		if (scenario == 6) g.objects.find(v)->setChildrenDisabled(true);
 		const auto* object = g.objects.find(v);
 		const auto rotation = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
 		const float distance = scenario == 1 ? 4.0f : scenario == 2 ? 3.95f : scenario == 3 ? 3.9f : 2.0f;
-		// Local leaf at (6, 0, -10), with the blast further along x.
-		const auto burst = g.position(v) + rotation.transform({6 + distance, 0, -10});
+		// Scenarios 0 and 5: beside the leaf at local (6, 0, -10); 1-4: along x from the root.
+		const bool atLeaf = scenario == 0 || scenario == 5;
+		const auto burst = g.position(v) + rotation.transform(atLeaf ? physics::Vec3 {6 + distance, 0, -10} : physics::Vec3 {distance, 0, 0});
 		CHECK(g.world->detonate("static_aa_missile_projectile", burst));
-		const int expected = scenario == 0 || scenario == 3 ? 1 : scenario == 7 ? 2 : 0;
-		std::fprintf(stderr, "  EMP part scenario %d: %d expected %d\n", scenario, g.world->empLevel(v), expected);
+		const int expected = scenario == 3 || scenario == 4 ? 1 : 0;
+		std::fprintf(stderr, "  EMP root scenario %d: %d expected %d\n", scenario, g.world->empLevel(v), expected);
 		CHECK(g.world->empLevel(v) == expected);
 	}
 }
@@ -7307,17 +7307,33 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
             // bound darkening by that measured baseline noise. The isolated
             // asset check above requires exactly zero darkened pixels.
             CHECK(dark <= noise); CHECK(bright > 100); CHECK(bright > noise * 3);
-            // A lamp whose centre the game reports blocked draws no halo at all
-            // (the deck above it used to show the quad's upper half on the road).
+            // A lamp whose centre the game reports blocked: retail never
+            // occlusion-tests a halo (RendDX9's queries, 0x100050a0, serve the
+            // sun flare, a terrain culler and ads), so it is still drawn.
+            // enhanced.glowOcclusion skips it (the deck above it used to show
+            // the quad's upper half on the road).
             sources.glowVisible = [](const render::Vec3f&, const render::Vec3f&, uint32_t) { return false; };
-            const auto blocked = frame();
-            size_t leaked = 0;
-            for (size_t i = 0; i + 3 < blocked.size() && i + 3 < background.size(); i += 4) {
-                int delta = 0;
-                for (int c = 0; c < 3; ++c) delta += int(blocked[i+c]) - int(background[i+c]);
-                if (delta > 9) ++leaked;
-            }
-            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: %zu brightened pixels\n", label, leaked);
+            const auto brightened = [&](const std::vector<uint8_t>& pixels) {
+                size_t n = 0;
+                for (size_t i = 0; i + 3 < pixels.size() && i + 3 < background.size(); i += 4) {
+                    int delta = 0;
+                    for (int c = 0; c < 3; ++c) delta += int(pixels[i+c]) - int(background[i+c]);
+                    if (delta > 9) ++n;
+                }
+                return n;
+            };
+            const size_t retail = brightened(frame());
+            scene::EnhancedSettings features;
+            features.enabled = true;
+            features.taa = features.ssao = features.csm = false;
+            sources.enhanced = &features;
+            const size_t leaked = brightened(frame());
+            features.glowOcclusion = false;
+            const size_t optedOut = brightened(frame());
+            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: retail %zu, enhanced %zu, glowOcclusion 0 %zu brightened pixels\n",
+                label, retail, leaked, optedOut);
+            CHECK(retail > 100); CHECK(retail * 3 > bright * 2);
+            CHECK(optedOut * 3 > bright * 2);
             // The scene's own frame-to-frame noise is about as large as its measured baseline.
             CHECK(leaked < bright / 3);
             gpu->releaseTarget(target);

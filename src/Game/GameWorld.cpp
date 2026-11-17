@@ -3361,6 +3361,12 @@ void GameWorld::defuseRound(Projectile& round, Player& holder)
 			weapon->giveRoundBack();
 		}
 	}
+	// AI event 3/0x15 with the round's id (0x005d8dc8: the AI interface's
+	// slot 0x20, its +6, 0 when it runs the server's bots): the AI forgets
+	// it (BotManager::forgetObject).
+	if (m_aiForgotten.size() < 64) {
+		m_aiForgotten.push_back(round.serial);
+	}
 	round.alive = false; // the object manager's delete (0xa85220 slot 0x14): no effect
 	round.keepLeft = -1;
 	if (round.ghostObject) {
@@ -3471,9 +3477,12 @@ float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float
 	return share;
 }
 
-// An EMP (0x005a7ab0, per object 0x005a6500): each queried object applies
-// to its nearest armoured ancestor. Distance is to the queried part, with
-// height times explosionYMod. It takes explosionDamage x (1 - distance /
+// An EMP (0x005a7ab0, per object 0x005a6500). The query's mask 0x1000000
+// is the root flag (0x006f7690 sets it on objects without a parent;
+// 0x006fe530 does not expand children under it), so only roots are hit,
+// never their parts. Distance is to the root's position (slot 0x60, or the
+// interpolated physics frame, node slot 0x178), with height times
+// explosionYMod. It takes explosionDamage x (1 - distance /
 // radius), or x armor.empDamageIgnoreRadiusModifier (default 0.1) with
 // armor.empDamageIgnoreRadius; 0.1 or less is dropped. Nothing is hurt.
 // The armour (0x00652980) turns it into steps: level = min(empDamageNumStep,
@@ -3514,47 +3523,6 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 		if (const float amount = amountFor(*t, body.body.position, body.objectRadius); amount > 0) {
 			add(body.empLevel, *t, amount);
 		}
-		if (object->childrenDisabled()) {
-			continue;
-		}
-		// The query's part position (0x005a7b61), not its armour owner's
-		// centre, supplies the falloff. Native keeps children as template
-		// nodes, so walk their posed frames as poseCollisionParts does.
-		const std::function<void(const world::ObjectTemplate&, const physics::Mat3&, const physics::Vec3&, int)> walk =
-			[&](const world::ObjectTemplate& parent, const physics::Mat3& rotation, const physics::Vec3& position, int depth) {
-				if (depth > 12) return;
-				for (const auto& child : parent.children()) {
-					const auto* part = m_templates.find(child.name);
-					if (!part || (part->flags() & world::TemplateFlags::ClientOnly)) continue;
-					// 0x005a6514 stops at the first armour, even one that
-					// ignores EMP. Its subtree must not feed the root armour.
-					if (part->settings().count("armor.maxHitPoints") || std::any_of(part->components().begin(),
-						part->components().end(), [](const auto& c) { return sameName(c, "Armor"); })) continue;
-					physics::Mat3 local = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
-					physics::Vec3 offset {child.position.x, child.position.y, child.position.z};
-					anim::Matrix bone;
-					world::Vec3 travel, turn;
-					if (partBone(body.object, child.name, bone)) {
-						local.rows = {{{bone[0], bone[1], bone[2]}, {bone[4], bone[5], bone[6]}, {bone[8], bone[9], bone[10]}}};
-						offset = {bone[12], bone[13], bone[14]};
-					} else if (partPose(body.object, child.name, travel, turn)) {
-						offset = local.transform({travel.x, travel.y, travel.z}) + offset;
-						local = physics::Mat3::fromYawPitchRoll({turn.x, turn.y, turn.z}) * local;
-					}
-					const physics::Vec3 placed = rotation.transform(offset) + position;
-					float partRadius = 0;
-					for (const auto& mesh : body.partMeshes) {
-						if (mesh.node >= 0 && sameName(body.partNodes[static_cast<size_t>(mesh.node)].name, child.name)) {
-							partRadius = std::max(partRadius, mesh.radius);
-						}
-					}
-					if (const float amount = amountFor(*t, placed, partRadius); amount > 0) {
-						add(body.empLevel, *t, amount);
-					}
-					walk(*part, local * rotation, placed, depth + 1);
-				}
-			};
-		walk(*t, body.body.rotation, body.body.position, 0);
 	}
 	for (std::vector<Drone>* list : {&m_drones, &m_sentryGuns}) {
 		for (Drone& drone : *list) {
@@ -6231,10 +6199,11 @@ int GameWorld::burstDistance(int id) const
 	return player ? player->burstDistance : 0;
 }
 
-void GameWorld::setZoomed(int id, bool zoomed)
+void GameWorld::setZoomed(int id, bool zoomed, float lookScale)
 {
 	if (Player* player = findPlayer(id)) {
 		player->zoomed = zoomed;
+		player->lookScale = lookScale;
 	}
 }
 
@@ -9527,7 +9496,8 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	const physics::Vec3& v = player.body.velocity;
 	const physics::Vec3 m = player.body.animationVelocity();
 	const float speed = std::sqrt(m.x * m.x + m.z * m.z);
-	input.speed = speed;
+	// Crouched and lying the systems see it scaled (0x005ef250).
+	input.speed = soldierAnimationSpeed(speed, player.input.pose, player.lookScale);
 	const SoldierAnimationDirection direction = soldierAnimationDirection(m, lookYaw(player));
 	input.forward = direction.forward;
 	input.side = direction.side;
@@ -9611,56 +9581,37 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		}
 	}
 	// The body's events go to the soldier's handler (0x00587b90): sound 0
-	// (event 0x36) is the footstep set's sound.
-	bool animationPlayedFootstep = false;
+	// (event 0x36) plays the footstep set's sound through 0x007fd970 (its
+	// slot 3, else 0; see playAnimationSound). The shipped soldier and
+	// weapon systems declare it on the jump bundles only.
 	for (const anim::AnimationState::FiredEvent& event : player.bodyAnimation->takeEvents()) {
 		if (event.type == anim::Bundle::SoundEvent && event.id == 0) {
 			playAnimationSound(player, 0);
-			animationPlayedFootstep = true;
 		}
 	}
-	// The shipped soldier AnimationSystem3p scripts declare sound:0 on the
-	// jump bundles but not on stand_walk / stand_run (their movement bundles
-	// have no events). The original movement trigger still tracks normalized
-	// foot phase: 0.2 and 0.7 are its left/right start offsets. Use those
-	// phase crossings as the missing animation sound events, preserving any
-	// explicit sound:0 events above and requiring grounded locomotion.
-	const bool grounded = player.body.onGround() || player.ladder >= 0;
-	// The movement sound's gate (0x007fda00): the node's reported velocity
-	// (slot 0x64, the measured displacement) at least 0.1 m/s, all three axes.
-	const physics::Vec3& moved = player.body.measuredVelocity;
-	const bool walking = grounded && player.body.stance != 3
-		&& std::sqrt(moved.x * moved.x + moved.y * moved.y + moved.z * moved.z) >= 0.1f;
-	if (walking) {
-		player.footstepSoundSeconds += seconds;
-		const float phase = player.bodyAnimation->stepPhase();
-		bool phaseStep = false;
-		if (player.footstepPhaseValid && !animationPlayedFootstep) {
-			const float previous = player.footstepPhase;
-			const auto crossed = [previous, phase](float point) {
-				return phase >= previous ? previous < point && phase >= point : previous < point || phase >= point;
-			};
-			phaseStep = crossed(0.2f) || crossed(0.7f);
+	// The movement sound (0x007fda00, from the soldier's update 0x0058d350;
+	// apart from the animation's sound events above): on a ladder, on the
+	// ground (the response's +0xf9) or swimming; elsewhere it returns before
+	// the cycle's half is kept. The walk cycle (0x005ef7f0): the held
+	// weapon's 3p system's when it has one (+0x188 slot 0x14(+0x218), its
+	// flags' bit 0 clear -> its animation component, slot 0x1c; asked even
+	// when it has no cycle: the check before it reads the length still 0),
+	// else the body's; see soldierStepCycle for the fallbacks.
+	const bool onLadder = player.ladder >= 0;
+	if (onLadder || player.body.onGround() || player.body.stance == 3) {
+		float length = -1, time = -1;
+		if (const anim::AnimationState* cycle = player.weaponAnimation ? player.weaponAnimation.get()
+				: player.bodyAnimation.get()) {
+			cycle->walkCycle(length, time);
 		}
-		player.footstepPhase = phase;
-		player.footstepPhaseValid = true;
-		// A bundle with phase markers uses them directly. If the phase stays
-		// still (the shipped vanilla stand_walk bundle can do this at low
-		// analog speeds), keep producing steps from elapsed grounded motion
-		// while the soldier is moved by its input: standing on a slope leaves a
-		// small residual velocity (0.13 m/s on 16 degrees) that is no walking.
-		const bool driven = player.input.throttle != 0 || player.input.strafe != 0;
-		const float interval = std::clamp(1.8f / std::max(speed, 0.5f), 0.33f, 1.0f);
-		if (animationPlayedFootstep || (phaseStep && player.footstepSoundSeconds >= 0.2f)
-			|| (driven && player.footstepSoundSeconds >= interval)) {
-			if (!animationPlayedFootstep) {
-				playMovementSound(player);
-			}
-			player.footstepSoundSeconds = 0;
+		soldierStepCycle(length, time, onLadder, m_time);
+		const physics::Vec3& moved = player.body.measuredVelocity;
+		const float movedSpeed = std::sqrt(moved.x * moved.x + moved.y * moved.y + moved.z * moved.z);
+		// Swimming it sets the set's slot 6 / 7 sound going instead (slot
+		// 0x1c); the rewrite has no swim steps.
+		if (player.footsteps.step(length, time, movedSpeed) && player.body.stance != 3) {
+			playMovementSound(player);
 		}
-	} else {
-		player.footstepPhaseValid = false;
-		player.footstepSoundSeconds = 0;
 	}
 	// The pose, kept for drawing, hits and the weapon's parts.
 	if (const anim::Skeleton* skeleton = player.skeleton) {
@@ -9911,7 +9862,7 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 	const physics::Vec3& v = state.velocity;
 	const float speed = std::sqrt(v.x * v.x + v.z * v.z);
 	const float yaw = state.yaw * 3.14159265f / 180.0f;
-	input.speed = speed;
+	input.speed = soldierAnimationSpeed(speed, state.pose); // 0x005ef250's crouched and lying scale
 	if (speed > 0.01f) {
 		input.forward = (v.x * std::sin(yaw) + v.z * std::cos(yaw)) / speed;
 		input.side = (v.x * std::cos(yaw) - v.z * std::sin(yaw)) / speed;
@@ -12537,7 +12488,7 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		if (left >= most) {
 			return false;
 		}
-		healHitPoints(object, std::min(left + percent * 0.01f * most, most), repairer);
+		healHitPoints(object, left + percent * 0.01f * most, most, repairer);
 		return true;
 	};
 	// Each target treated draws on the battery, when it holds that much.

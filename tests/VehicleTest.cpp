@@ -47,7 +47,7 @@ struct Car {
 	std::vector<Vec3> chassis;
 	physics::Ground ground = flatGround();
 
-	explicit Car(bool boost = false)
+	explicit Car(bool boost = false, const char* sprintFactor = "2.25")
 	{
 		templates.registerType(1, "PlayerControlObject");
 		templates.registerType(2, "Engine");
@@ -59,7 +59,7 @@ struct Car {
 			root->settings()["sprintRecoverTime"] = "15";
 			root->settings()["sprintDissipationTime"] = "5";
 			root->settings()["sprintLimit"] = "0.2";
-			root->settings()["sprintFactor"] = "2.25";
+			root->settings()["sprintFactor"] = sprintFactor;
 		}
 		world::ObjectTemplate* engine = templates.create("Engine", "car_engine");
 		engine->settings()["engineType"] = "194";
@@ -336,6 +336,26 @@ TEST(Vehicle_SprintBoost)
 		CHECK(!sprint.sprinting());
 	}
 	CHECK(speeds[1] > speeds[0] + 1);
+}
+
+// The PCO's update (0x005c8e70) steps its sprint (0x006457f0, the boost's
+// events 0x2a / 0x2b) only while its slot 0x114 (0x005c6bb0: sprintFactor,
+// +0x464) is over 0: with the FAV's times but a sprintFactor of 0 the boost
+// never starts and the stamina neither drains nor recovers.
+TEST(Vehicle_SprintNeedsASprintFactor)
+{
+	Car car(true, "0");
+	CHECK(car.vehicle != nullptr);
+	if (!car.vehicle) {
+		return;
+	}
+	car.vehicle->setOccupied(true);
+	game::VehicleInput input;
+	input.throttle = 1;
+	input.sprint = true;
+	car.run(60, input);
+	CHECK(!car.vehicle->sprint().sprinting());
+	CHECK(car.vehicle->sprint().stamina() == 1);
 }
 
 // Off the ground the driven wheel still runs (0x006b8230 -> 0x006b7910
@@ -726,6 +746,34 @@ TEST(Vehicle_RotationalRegulators)
 	CHECK(near(steered(-0.1f), -0.26f, 1e-4f));
 	CHECK(near(steered(-0.5f), -0.5f));
 	CHECK(near(steered(0.5f), 0.5f));
+}
+
+// 0x006539f0 switches only parts with a collision instance, and 0x006e5df0
+// leaves a geometry with one sub-geometry unswitched: a wheel without its
+// own collision part, or whose part has no wreck state, keeps holding the
+// hull at its radius once the vehicle is a wreck.
+TEST(Vehicle_WreckLeavesWheelsWithoutWreckGeometry)
+{
+	for (const bool ownPart : {false, true}) {
+		Car car;
+		if (ownPart) {
+			car.templates.find("car_wheel")->settings()["collisionPart"] = "0";
+		}
+		physics::CollisionMeshFile mesh;
+		mesh.version = 9;
+		mesh.geometries.resize(1);
+		mesh.geometries[0].subGeometries.resize(1); // no wreck state
+		car.vehicle = game::Vehicle::fromTemplate(*car.templates.find("car"), car.templates, &mesh);
+		CHECK(car.vehicle->wheels()[0].collisionPart == (ownPart ? 0 : -1));
+		const float radius = car.vehicle->wheels()[0].radius;
+		car.vehicle->setWheelCollisionState(mesh, 1);
+		CHECK(car.vehicle->wheels()[0].contactEnabled);
+		CHECK(car.vehicle->wheels()[0].radius == radius);
+		car.body.position.y = 0.7f;
+		car.vehicle->tick(car.body, car.ground, 1 / 30.0f, 0.8f);
+		CHECK(car.body.acceleration.y > 0);
+		CHECK(car.vehicle->wheels()[0].contact);
+	}
 }
 
 TEST(Vehicle_WreckCanKeepAuthoredWheelSupport)

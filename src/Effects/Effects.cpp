@@ -2785,11 +2785,19 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 			// Events 0 and 1 reach the root's own children only (0x005b2c10
 			// walks its children, slot 0xec, and their siblings +0x38).
 			const bool child = b.path.size() == 1;
-			// The PCO sprint events 0x2a/0x2b select bits 7/8.
-			// Use the actual stamina-gated state, so depletion also stops nitro.
+			// The PCO's sprint events: its update (0x005c8e70) steps the
+			// sprint (0x006457f0) only while its interface's slot 0x114
+			// (0x005c6bb0: the template's sprintFactor, +0x464) is over 0
+			// (Vehicle::tick), and passes the step's 0x2a (start) and 0x2b
+			// (end) down its tree (0x0063ca60); an EffectBundle (0x0061a4e0)
+			// takes each as bit 1 << (event - 0x23), 0x80 and 0x100: with the
+			// bit in startOnEffects it starts, else with it in stopOnEffects
+			// it stops. The sprint's own state, so the stamina running out
+			// ends it too.
 			const uint32_t sprintEvent = object.boosting != tracked.boosting
 				? (object.boosting ? 0x80u : 0x100u) : 0u;
 			const uint32_t events = object.effects | sprintEvent;
+			const uint32_t stops = (object.effects | (sprintEvent & ~b.startOnEffects)) & b.stopOnEffects;
 			const bool start = (created && b.startAtCreation)
 				|| (object.occupied && !tracked.occupied && (b.startOnEffects & kEntered) != 0)
 				|| (events & b.startOnEffects) != 0 || (object.startEvent && child && b.startOnEffects == 0);
@@ -2839,7 +2847,7 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 				b.lastPointVelocity = pointVelocity;
 				b.hasLastPoint = true;
 			}
-			if ((events & b.stopOnEffects) != 0
+			if (stops != 0
 				|| (!object.occupied && tracked.occupied && (b.stopOnEffects & kExited) != 0)) {
 				effects.stopAttached(object.id, tag);
 			}

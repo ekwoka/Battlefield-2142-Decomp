@@ -1019,6 +1019,7 @@ TEST(AnimationSystem_CrouchedWeaponOverlaysKeepFeetGrounded)
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		io::FileManager files;
 		files.setRootPath(gameDir);
 		files.addSearchPath(mod);

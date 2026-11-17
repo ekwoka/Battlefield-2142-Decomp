@@ -171,8 +171,9 @@ struct LevelSources {
 	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Ordinary vehicle armour's wreck look (including its delay/opt-out).
 	std::function<bool(uint32_t object)> vehicleWreckLook;
-	// A lamp halo is visible only while its source is visible. Pixel depth
-	// testing alone lets a large glow quad protrude through a bridge deck.
+	// enhanced.glowOcclusion, not retail: a lamp halo is drawn only while its
+	// source is visible (pixel depth testing alone lets a large glow quad
+	// protrude through a bridge deck). Retail never occlusion-tests a halo.
 	std::function<bool(const Vec3f& eye, const Vec3f& source, uint32_t owner)> glowVisible;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
@@ -345,6 +346,7 @@ private:
 		// additive alpha (RSMTAdditive; 0x100c3880).
 		bool blended = false;
 		bool additive = false;
+		int alphaMode = 0; // the material's: 0 opaque, 1 blended, 2 alpha tested (RendDX9's +0x15c)
 		// StaticMesh.fx alpha_one: texture alpha times 0.8; other additive paths keep 1.
 		float alphaScale = 1.0f;
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second

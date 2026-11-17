@@ -1764,6 +1764,8 @@ private:
 	ai::MineMarks m_mineMarks;
 	float m_minesNext = 0;
 	void updateMines();
+	// AI event 3/0x15 (0x00894860): an object the game removed, forgotten.
+	void forgetObject(uint32_t object);
 	std::set<int> m_refused; // AI players over aiSettings.setMaxNBots (0x100581a0): never activated
 	// The sides' knowledge of the enemy players (the AI objects of
 	// ai::knowledgeCertainty): when its bots last saw each, and whether one

@@ -30,6 +30,7 @@ struct EnhancedSettings {
 	bool titanShadows = true; // enhanced.titanShadows: a Titan's hull casts into the cascades as it moves (with csm)
 	bool particleShadows = true; // enhanced.particleShadows: smoke and dust take the cascades' shadows (with csm)
 	bool particleLights = true; // enhanced.particleLights: smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps)
+	bool glowOcclusion = true; // enhanced.glowOcclusion: a supportsGlow lamp's additive halo is skipped while the line from the camera to its centre is blocked (Render/LevelRenderer.cpp); retail depth-tests halos per pixel only
 	bool prepass = false; // enhanced.prepass: the depth/normal/motion prepass even when neither taa nor ssao reads it
 	// Gameplay, also only with enhanced.enabled; changes the simulation:
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
@@ -66,6 +67,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.particleShadows = v; });
 	bindProperty<bool>(console, "enhanced.particleLights", ConsoleAccess::Anyone, [&settings] { return settings.particleLights; },
 		[&settings](const bool& v) { settings.particleLights = v; });
+	bindProperty<bool>(console, "enhanced.glowOcclusion", ConsoleAccess::Anyone, [&settings] { return settings.glowOcclusion; },
+		[&settings](const bool& v) { settings.glowOcclusion = v; });
 	bindProperty<bool>(console, "enhanced.prepass", ConsoleAccess::Anyone, [&settings] { return settings.prepass; },
 		[&settings](const bool& v) { settings.prepass = v; });
 	bindProperty<bool>(console, "enhanced.botRecovery", ConsoleAccess::Anyone, [&settings] { return settings.botRecovery; },

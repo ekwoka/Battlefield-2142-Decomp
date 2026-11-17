@@ -1017,8 +1017,11 @@ public:
 	// kit's isDogtagReplacement containers (+0x2e2) whatever is unlocked.
 	void setDogtagCount(int player, int count);
 	// Whether the player looks through the weapon's zoom (the local
-	// player's camera; the deviation's devModZoom and the gun sway use it).
-	void setZoomed(int player, bool zoomed);
+	// player's camera; the deviation's devModZoom and the gun sway use it),
+	// and the look's scale (0x00586420: the field of view over the camera's
+	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
+	// limit, soldierAnimationSpeed).
+	void setZoomed(int player, bool zoomed, float lookScale = 1);
 	// The distance counter (fire.useDistanceCounter, the rocket launchers'
 	// airburst): the range set (0: off), and the wheel's steps
 	// (PINextItem +1, PIPrevItem -1) while it is on.
@@ -1076,6 +1079,12 @@ public:
 		uint32_t vehicle = 0;
 	};
 	std::vector<UseKeyExit> takeUseKeyExits() { return std::exchange(m_useKeyExits, {}); }
+	// Rounds the defuser took away, for the AI to forget (0x005d8ac0 posts
+	// AI event 3/0x15 with the round's id before deleting it, when the AI
+	// interface's slot 0x20 is clear, as with the server's bots; 0x00894860
+	// -> IAIMineManager slot 0x10 and IAIEventCourier slot 0x40): the
+	// rounds' serials, the last 64 kept.
+	std::vector<uint32_t> takeAiForgotten() { return std::exchange(m_aiForgotten, {}); }
 	// Where `player` looks (the camera's z axis): on foot his look's yaw
 	// and pitch, seated his seat's gun or camera turned by the hull.
 	physics::Vec3 viewForward(int player) const;
@@ -3166,6 +3175,7 @@ private:
 	void clearCloseTo(int player, CloseToScan& scan);
 	std::vector<AiHit> m_aiHits;
 	std::vector<UseKeyExit> m_useKeyExits;
+	std::vector<uint32_t> m_aiForgotten;
 	struct {
 		std::string weapon; // the weapon whose tones play
 		int state = 0;      // the runtime WeaponHud's +0x10
@@ -3583,6 +3593,7 @@ private:
 		GunSway sway;
 		std::string feelFor;
 		bool zoomed = false;
+		float lookScale = 1; // setZoomed's
 		// fire.useDistanceCounter's range mode (SingleFireComp +0x178 /
 		// +0x17c): metres, 0 off; and the zoom last tick.
 		int burstDistance = 0;
@@ -3669,9 +3680,8 @@ private:
 		// The jump state the animation's up value comes from (soldier
 		// +0x2e8 / +0x2e9, 0x005eef80).
 		anim::SoldierJumpAnimation jumpAnimation;
-		float footstepPhase = 0;
-		float footstepSoundSeconds = 0;
-		bool footstepPhaseValid = false;
+		// The movement sound's kept half of the walk cycle (0x007fda00).
+		SoldierFootsteps footsteps;
 		// Dead: the body as a ragdoll, and the push of the explosion that
 		// killed it (the soldier's 0x2b0, kept by 0x005ee4d0).
 		std::unique_ptr<anim::RagDoll> ragDoll;
@@ -4882,7 +4892,9 @@ private:
 	void pythonRepaired(uint32_t object, int repairer);
 	// The armour heal (0x00655a00 -> the setter 0x00655460) of `object` to
 	// `value` by `repairer` (-1 none), then 0x004bc410's repair event.
-	void healHitPoints(uint32_t object, float value, int repairer);
+	// `value` comes unclamped (0x00655a00 passes hp + d): the setter tests
+	// its receiving stamp on it and only then clamps to `most`.
+	void healHitPoints(uint32_t object, float value, float most, int repairer);
 	// The same on a Titan's part (index > 0): `percent` of its maximum,
 	// kept within -wreckHitPoints and maxHitPoints; out of the wreck the
 	// part's subtree is back (0x00654120's repaired branch, 0x00654070) and

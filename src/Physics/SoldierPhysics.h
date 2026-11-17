@@ -216,10 +216,11 @@ public:
 	// The velocity of what it stands on (slot 0xd8): a moving object's under
 	// the feet this step, zero on the ground and static objects.
 	Vec3 groundVelocity;
-	// The movement an animation sees (as the walker's input, 0x0063ce30):
-	// the measured velocity, less the ground's when that moves, and then
-	// none under 0.7 m/s (|v|^2 < 0.49, *0x00976200): standing on a moving
-	// Titan is standing.
+	// The movement the soldier's animation sees (0x005ef250, from
+	// 0x00586200 and 0x00586710): the measured velocity (slot 0x64), less
+	// the ground's (slot 0xd8) when that moves, and then none under 0.7 m/s
+	// (|v|^2 < 0.49, *0x00976200): standing on a moving Titan is standing.
+	// (Crouched and lying the speed is scaled: game::soldierAnimationSpeed.)
 	// A Titan's carry (the integration added it to the displacement) is the
 	// ground's motion too: a soldier standing in a moving Titan is standing.
 	Vec3 animationVelocity() const

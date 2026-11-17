@@ -5705,10 +5705,15 @@ int runGame(Options& options, Session& session)
 		commanderMessages.onPositionFilled = [&questions] {
 			questions.forget(dice::hfe::menu::HudQuestions::CommanderOffer);
 		};
-		commanderMessages.onAssigned = [&questions] {
-			using Q = dice::hfe::menu::HudQuestions;
-			for (const auto kind : {Q::JoinRequest, Q::Invite, Q::CommanderOrder, Q::CommanderOffer, Q::SquadLeader}) {
-				questions.forget(kind);
+		// Made commander (2/0x21 for our player, 0x00756e07): the pending
+		// questions answered no as retail does (their refusals sent, their
+		// lines not), an offer of command kept; the scoreboard on its
+		// Squads tab (+0xc8's 0x007ba1a0(1), scoreboard.setToggleShow 1).
+		commanderMessages.onAssigned = [&questions, &hudManager] {
+			questions.becameCommander();
+			const char* tabs[] = {"ToggleScore", "ToggleSquads", "ToggleManage", "ToggleServer"};
+			for (int i = 0; i < 4; ++i) {
+				hudManager.set(tabs[i], i == 1 ? 1.0f : 0.0f);
 			}
 		};
 		const auto commanderMessage = [&](int id, int player) {
@@ -8607,7 +8612,7 @@ int runGame(Options& options, Session& session)
 			}
 			bots.update(1.0f / 30.0f);
 			round.localMuzzleEffects = !playerCamera.insideView();
-			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0);
+			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale());
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
 			shieldsDown();

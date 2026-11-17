@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace physics = dice::hfe::physics;
 namespace game = dice::hfe::game;
@@ -114,6 +115,98 @@ TEST(SoldierPhysics_AnimationMovementUsesTheViewHeading)
 	// fails the shipped forward-animation threshold (5.5 m/s).
 	const game::SoldierAnimationDirection bodyFrame = game::soldierAnimationDirection(velocity, 0);
 	CHECK(6.3f * bodyFrame.forward < 5.5f);
+}
+
+// The speed the 3p animation system sees (0x005ef250): crouched x 1.7
+// (anim-soldier-1p-speed-crouch), lying x 3 (anim-soldier-1p-speed-prone),
+// held within 0 and 0x00586df0(3) (3.9 m/s; crouched times the look's
+// scale, 0x00586420); standing and swimming as measured.
+TEST(SoldierPhysics_AnimationSpeedCrouchedAndProne)
+{
+	const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+	using game::SoldierPose;
+	CHECK(near(game::soldierAnimationSpeed(1.0f, SoldierPose::Stand), 1.0f));
+	CHECK(near(game::soldierAnimationSpeed(6.3f, SoldierPose::Stand), 6.3f));
+	CHECK(near(game::soldierAnimationSpeed(2.1f, SoldierPose::Swim), 2.1f));
+	CHECK(near(game::soldierAnimationSpeed(1.0f, SoldierPose::Crouch), 1.7f));
+	CHECK(near(game::soldierAnimationSpeed(2.0f, SoldierPose::Crouch), 3.4f));
+	CHECK(near(game::soldierAnimationSpeed(3.0f, SoldierPose::Crouch), 3.9f)); // 5.1 held at 3.9
+	CHECK(near(game::soldierAnimationSpeed(0.8f, SoldierPose::Prone), 2.4f));
+	CHECK(near(game::soldierAnimationSpeed(2.0f, SoldierPose::Prone), 3.9f)); // 6 held at 3.9
+	// Zoomed in crouched, the limit is 3.9 x the look's scale; lying not.
+	CHECK(near(game::soldierAnimationSpeed(2.0f, SoldierPose::Crouch, 0.5f), 1.95f));
+	CHECK(near(game::soldierAnimationSpeed(2.0f, SoldierPose::Prone, 0.5f), 3.9f));
+	CHECK(near(game::soldierAnimationSpeed(0.0f, SoldierPose::Crouch), 0.0f));
+}
+
+// The movement sound (0x007fda00): a step each time the walk cycle's time
+// crosses half its length or wraps (the half, time < length x 0.5, changes),
+// so twice a cycle, while the soldier moves at 0.1 m/s or more; no timer.
+TEST(SoldierPhysics_FootstepsAtTheWalkCyclesHalves)
+{
+	game::SoldierFootsteps steps;
+	constexpr float length = 1.2f;
+	constexpr float tick = 1 / 30.0f;
+	std::vector<int> at;
+	float time = 0;
+	for (int i = 0; i < 108; ++i) { // three cycles
+		if (steps.step(length, time, 1.5f)) {
+			at.push_back(i);
+		}
+		time = std::fmod(time + tick, length);
+	}
+	// Time starts in the first half (as kept: false -> true at tick 0),
+	// then 0.6 s (tick 18) the second half, 1.2 s (tick 36) the first ...
+	const std::vector<int> expected {0, 18, 36, 54, 72, 90};
+	for (size_t i = 0; i < at.size(); ++i) std::fprintf(stderr, " %d", at[i]);
+	std::fprintf(stderr, "\n");
+	CHECK(at.size() == expected.size());
+	for (size_t i = 0; i < std::min(at.size(), expected.size()); ++i) {
+		CHECK(std::abs(at[i] - expected[i]) <= 1);
+	}
+	// Under 0.1 m/s none, but the half is still kept: moving again in the
+	// same half plays nothing until it changes.
+	game::SoldierFootsteps slow;
+	CHECK(!slow.step(length, 0.1f, 0.09f));
+	CHECK(slow.half);
+	CHECK(!slow.step(length, 0.2f, 1.0f)); // the same half
+	CHECK(slow.step(length, 0.7f, 1.0f));  // the second half
+	CHECK(!slow.step(length, 0.1f, 0.0999f)); // a change, but too slow
+	CHECK(!slow.step(length, 0.15f, 2.0f));   // and kept
+	CHECK(slow.step(length, 0.65f, 0.1f));    // 0.1 m/s is enough
+}
+
+// The cycle without an animation's (0x005ef7f0): -1 from the animation is
+// none; on a ladder a 0.9 s cycle on the game clock, else 0 and 0, which
+// never changes the half: no steps.
+TEST(SoldierPhysics_FootstepCycleFallbacks)
+{
+	float length = 1.1f, time = 0.3f;
+	game::soldierStepCycle(length, time, true, 5.0);
+	CHECK(length == 1.1f && time == 0.3f); // an animation's cycle stays
+	length = time = -1;
+	game::soldierStepCycle(length, time, true, 2.0);
+	CHECK(std::fabs(length - 0.9f) < 1e-6f && std::fabs(time - 0.2f) < 1e-4f);
+	// Climbing: a step at each 0.45 s of the clock.
+	game::SoldierFootsteps ladder;
+	int ladderSteps = 0;
+	for (int i = 0; i < 90; ++i) {
+		float l = -1, t = -1;
+		game::soldierStepCycle(l, t, true, i / 30.0);
+		ladderSteps += ladder.step(l, t, 1.0f) ? 1 : 0;
+	}
+	std::fprintf(stderr, "  ladder: %d steps in 3 s\n", ladderSteps);
+	CHECK(ladderSteps >= 6 && ladderSteps <= 7);
+	// No cycle off a ladder: none, however fast.
+	game::SoldierFootsteps none;
+	int noneSteps = 0;
+	for (int i = 0; i < 90; ++i) {
+		float l = -1, t = -1;
+		game::soldierStepCycle(l, t, false, i / 30.0);
+		CHECK(l == 0 && t == 0);
+		noneSteps += none.step(l, t, 5.0f) ? 1 : 0;
+	}
+	CHECK(noneSteps == 0);
 }
 
 TEST(SoldierPhysics_WalksUpAHill)

@@ -1,4 +1,5 @@
 #include "LevelRenderer.h"
+#include "BundledShadow.h"
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
 #include "Enhanced/EnhancedMath.h"
@@ -716,6 +717,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		// hasAdditiveAlpha switch, which selects the BMadditive path.
 		const std::string technique = lower(material.technique);
 		const std::string effect = lower(material.effect);
+		submesh.alphaMode = static_cast<int>(material.alphaMode);
 		submesh.blended = material.alphaMode == 1;
 		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
 			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
@@ -876,8 +878,9 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 		if (const GpuMesh* gpuMesh = mesh(sources, objectTemplate.geometry())) {
 			const Mat4 world = local * objectWorld;
 			Instance instance {gpuMesh, world, object, local, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
-			// Only lamp halos use whole-source visibility. Other additive
-			// surfaces (windows, signs, effects) keep their per-pixel depth test.
+			// enhanced.glowOcclusion: only lamp halos use whole-source
+			// visibility. Other additive surfaces (windows, signs, effects)
+			// keep their per-pixel depth test.
 			const auto hasGlowLight = [&](const auto& self, const world::ObjectTemplate& t, int level) -> bool {
 				if (level > 8) return false;
 				if (t.typeName() == "LightSource") {
@@ -2184,10 +2187,17 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			if (geometry != instance.shownGeometry || lod != instance.shownLod) {
 				const GpuMesh* shown = mesh(*m_sources, instance.geometry, geometry, geometry < 0 ? 0 : lod);
 				// A three-geometry mesh showing its first casts with its second
-				// (BundledMeshDrawShadowMap 0x100c6871): a cockpit shadows as the hull.
-				instance.shadowMesh = geometry == 0 && instance.mesh->bundled && instance.mesh->geometries == 3
-					? mesh(*m_sources, instance.geometry, 1, lod)
-					: nullptr;
+				// (BundledMeshDrawShadowMap 0x100c6871): a cockpit shadows as the hull,
+				// at the LOD the swap leaves it (BundledShadow.h).
+				instance.shadowMesh = nullptr;
+				if (geometry == 0 && instance.mesh->bundled && instance.mesh->geometries == 3) {
+					instance.shadowMesh = mesh(*m_sources, instance.geometry, 1, 0);
+					const int shadowLod = instance.shadowMesh
+						? bundledShadowLod(lod, true, static_cast<int>(instance.shadowMesh->lodCount)) : 0;
+					if (shadowLod != 0) {
+						instance.shadowMesh = mesh(*m_sources, instance.geometry, 1, shadowLod);
+					}
+				}
 				if (shown) {
 					instance.mesh = shown;
 				}
@@ -3737,7 +3747,11 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
-		if (instance.occlusionGlow && m_sources && m_sources->glowVisible) {
+		// Not retail: RendDX9's occlusion queries (0x100050a0) serve only the
+		// sky dome's sun flare (0x100fd900), a terrain culler (0x1009e010)
+		// and ad impressions; a halo gets the per-pixel depth test alone.
+		if (instance.occlusionGlow && m_sources && m_sources->glowVisible && m_sources->enhanced
+			&& m_sources->enhanced->enabled && m_sources->enhanced->glowOcclusion) {
 			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			if (!m_sources->glowVisible(camera.position, source, instance.object)) {
 				continue;
