@@ -1267,6 +1267,9 @@ void GameWorld::stepTitans(float seconds)
 		// with the root's or the parent's armour at or below their levels,
 		// and burning down below their critical damage
 		// (hpLostWhileCriticalDamage a second, taken each whole second).
+		// In every game mode: it is each armour's own update (the object
+		// manager's, 0x006ffa30 -> slot 0xa8), gated on the server alone
+		// (slot 0x144), while only the movement is gpm_ti's (0x00561e20).
 		for (size_t i = 1; i < titan.parts.size(); ++i) {
 			TitanPart& part = titan.parts[i];
 			if (part.state != 0) {

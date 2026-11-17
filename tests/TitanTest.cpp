@@ -4185,3 +4185,37 @@ TEST(Titan_SiloCaptureVoiceIsTheSilosOwnWithItsNumber)
 	}
 	CHECK(checked >= 2);
 }
+
+// The parts' armour update (0x00654d80) is each armour's own, on the
+// server in any mode: Wake's static dock Titans (gpm_ca) burn their core
+// doors down under their criticalDamage as Titan mode's do.
+TEST(Titan_WakeStaticTitanPartsBurnDownUnderCriticalDamage)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Wake_Island_2142", 64, true, nullptr, false, nullptr, "gpm_ca");
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	uint32_t doors = 0;
+	float most = 0;
+	for (const auto& part : level.world->titanParts(1)) {
+		if (part.kind == game::GameWorld::TitanPartInfo::CoreDoors) {
+			doors = part.id;
+			most = part.maxHitPoints;
+		}
+	}
+	CHECK(doors != 0 && most == 10);
+	if (!doors) {
+		return;
+	}
+	const int attacker = level.world->addPlayer("Eu", 2, true);
+	level.world->applyDamage(doors, 8, attacker); // to 2, under its criticalDamage 3
+	CHECK(std::fabs(level.world->hitPoints(doors) - 2) < 1e-3f);
+	level.run(1.1f);
+	std::fprintf(stderr, "  the doors after a second under their critical damage: %.2f\n", level.world->hitPoints(doors));
+	CHECK(std::fabs(level.world->hitPoints(doors) - 1) < 1e-3f);
+}
