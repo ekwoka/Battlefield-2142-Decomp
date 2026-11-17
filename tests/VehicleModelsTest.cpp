@@ -1396,6 +1396,7 @@ TEST(Vehicles_StaticAAEmpOnHoveringGunship)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"us_ag", "as_ag"}) {
 			float drop[2] = {};
 			for (int emp = 0; emp < 2; ++emp) {
@@ -1433,6 +1434,7 @@ TEST(Vehicles_StaticAAEmpMissileReachesHoveringGunship)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"us_ag", "as_ag"}) {
 			for (float side : {0.0f, 40.0f, -1.0f}) { // -1: head-on, the pilot pressing PIFlareFire 1 s after the lock
 				const bool ads = side < 0;
@@ -1528,6 +1530,7 @@ TEST(Vehicles_StaticAAEmpMissesTransportParts)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"as_at", "eu_at"}) {
 			for (float yaw : {0.0f, 90.0f}) {
 				Garage g(gameDir(), mod);
@@ -5498,6 +5501,7 @@ TEST(FirstPerson_TickBlendPixelsOptIn)
 		auto gpu = render::GpuContext::create(nullptr, error);
 		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
 		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
 			Garage g(gameDir(), mod, true);
 			CHECK(g.loaded);
 			if (!g.loaded) continue;
@@ -9674,6 +9678,7 @@ TEST(Vehicles_WreckSuspensionSettlesBothMods)
 {
 	if (!gameDir()) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
 		for (const char* name : {"eu_fav", "us_ag"}) {
 			for (int scenario = 0; scenario < 4; ++scenario) {
 				Garage g(gameDir(), mod);
