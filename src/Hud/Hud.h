@@ -122,6 +122,8 @@ public:
 	bool shiftNode(const std::string& name, int dx);
 	// Sets a node's x and width (a full-screen frame widened as the hudfix does); false when there is no such node.
 	bool spanNode(const std::string& name, int x, int w);
+	// Explicit compatibility repair for the shipped Supply label layering bug.
+	bool repairSupplyLabelOrder();
 
 	// Rows of a list data source (setListNodeData: 1 enemy and 2 friendly
 	// scores, 9 and 10 their totals, 3 chat...), as cell texts, and where

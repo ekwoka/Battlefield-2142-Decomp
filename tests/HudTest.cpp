@@ -356,6 +356,72 @@ TEST(Hud_CommanderScreenTabAndResignClicks)
 	}
 }
 
+// Verify the actual shipped node tree in both mods, through ready/cooldown
+// transitions. Other tools keep their own authored ordering.
+TEST(Hud_ShippedSupplyLabelOrder)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath(mod);
+		Console console(&files);
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		CHECK(console.run("ClientArchives.con", {}, out));
+		hud::HudManager manager([&files](const std::string& path, std::string& text) {
+			std::vector<uint8_t> data;
+			if (!files.readFile(path, data)) return false;
+			text.assign(data.begin(), data.end());
+			return true;
+		});
+		hud::registerHudConsoleMethods(console, manager);
+		console.setScriptOutput(false, false);
+		CHECK(console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+		manager.setLocalizer([](const std::string& key) {
+			return key == "HUD_TEXT_COMMANDER_SUPPLIES" ? "SUPPLIES" : key;
+		});
+		CHECK(manager.repairSupplyLabelOrder());
+		CHECK(!manager.repairSupplyLabelOrder()); // already corrected
+		for (const char* name : {"ShowIngameHud", "ShowSoldierHud", "CommanderShow", "CommanderToolsTabShowFull"})
+			manager.set(name, 1);
+		for (bool reloading : {false, true, false}) {
+			manager.set("SupplyReloading", reloading ? 1 : 0);
+			manager.set("SupplyShowFullStatus", reloading ? 0 : 1);
+			manager.set("SupplyTimeUntilReloaded", 0.5f);
+			std::vector<hud::HudQuad> quads;
+			for (int i = 0; i < 90; ++i) quads = manager.frame(1 / 30.0f);
+			// Supply starts at (11, 604) in the original layout. Derive the
+			// region from its icon so Remaster's layout is covered as well.
+			const auto icon = std::find_if(quads.begin(), quads.end(), [](const auto& q) {
+				return q.texture.find("tools/supply_drop.tga") != std::string::npos;
+			});
+			CHECK(icon != quads.end());
+			if (icon == quads.end()) continue;
+			const float left = icon->x0 - 2, top = icon->y0 - 2;
+			int status = -1, glyphs = 0;
+			for (size_t i = 0; i < quads.size(); ++i) {
+				const auto& q = quads[i];
+				if (q.x0 < left || q.x0 >= left + 150 || q.y0 < top || q.y0 >= top + 25) continue;
+				if (q.texture.find("assistance_buttonStatus.tga") != std::string::npos) status = static_cast<int>(i);
+			}
+			CHECK(status >= 0);
+			for (size_t i = 0; i < quads.size(); ++i) {
+				const auto& q = quads[i];
+				if (q.x0 >= left + 23 && q.x0 < left + 109 && q.y0 >= top && q.y0 < top + 27
+					&& q.texture.find(".dds") != std::string::npos) {
+					CHECK(static_cast<int>(i) > status);
+					++glyphs;
+				}
+			}
+			CHECK(glyphs == 8);
+		}
+	}
+}
+
 TEST(Hud_LocalizationAndLists)
 {
 	// strings.csv: UTF-16LE with a byte-order mark, tab-separated, a column per language.

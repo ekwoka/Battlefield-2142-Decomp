@@ -3840,6 +3840,9 @@ int runGame(Options& options, Session& session)
 		std::printf("native HUD: Direct3D widescreen patch, x scaled by 12/16\n");
 	}
 	run("Menu/HUD/HudSetup/HudSetupMain.con");
+	// Explicit repair of the shipped layout; retail also draws these siblings
+	// in authored order. Do not promote all HUD text or alter ready state.
+	hudManager.repairSupplyLabelOrder();
 	// enhanced.hudWidescreen: the same 4:3 HUD for a mod without the patch,
 	// with HudRotation.con's 120 moves of the sides. The commander screen,
 	// which Remaster also re-cut into left/right/middle, stays centred.

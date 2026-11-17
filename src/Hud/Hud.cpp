@@ -343,6 +343,27 @@ bool HudManager::spanNode(const std::string& name, int x, int w)
 	return true;
 }
 
+bool HudManager::repairSupplyLabelOrder()
+{
+	Node* label = find("CommanderSuppliesLabelNormal");
+	Node* ready = find("CommanderSuppliesStatusReady");
+	if (!label || !ready || label->type != kText || ready->type != kPicture
+		|| !label->parent || label->parent != ready->parent) {
+		return false;
+	}
+	auto& children = label->parent->children;
+	const auto text = std::find(children.begin(), children.end(), label);
+	const auto picture = std::find(children.begin(), children.end(), ready);
+	if (text == children.end() || picture == children.end() || text > picture) {
+		return false;
+	}
+	// Asset correction, not a retail renderer rule: both shipped mods place
+	// this label before the opaque ready picture. The other tools put their
+	// normal label after it. Preserve every other sibling's relative order.
+	std::rotate(text, text + 1, picture + 1);
+	return true;
+}
+
 HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
 	int w, int h)
 {
