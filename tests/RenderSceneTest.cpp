@@ -42,6 +42,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1248,6 +1249,27 @@ TEST(Render_HudUsesMemeBlendFactors)
 	CHECK(render::hudBlendToD3D(2) == 2); // additive destination remains ONE
 	CHECK(render::hudBlendToD3D(5) == 9);
 	CHECK(render::hudBlendToD3D(9) == 7);
+}
+
+// The shipped PortedMenuShader.fx's vsFFP (Shaders_client.zip) passes every
+// HUD vertex's colour through: a 0.01 alpha is only Remaster's hudfix marker
+// (unscaled, opaque) with that mod's shader, and ui.vert tests the same
+// flag (Screen.size.w) and tolerance as Render/HudBlend.h.
+TEST(Render_HudAlphaMarkerOnlyWithTheHudfixShader)
+{
+	CHECK(!render::hudfixMarker(0.01f, false)); // the base game, enhanced.hudWidescreen too
+	CHECK(render::hudfixMarker(0.01f, true));
+	CHECK(render::hudfixMarker(0.0105f, true));  // within the tolerance, not float equality
+	CHECK(!render::hudfixMarker(2 / 255.0f, true)); // the 8-bit neighbours stay ordinary
+	CHECK(!render::hudfixMarker(3 / 255.0f, true));
+	CHECK(!render::hudfixMarker(1.0f, true));
+	CHECK(!render::hudfixMarker(0.0f, true));
+	std::ifstream in(std::string(BF2142_SOURCE_DIR) + "/src/Render/Shaders/ui.vert");
+	CHECK(in.good());
+	std::stringstream shader;
+	shader << in.rdbuf();
+	CHECK(shader.str().find("size.w > 0.0 && abs(inAlpha - 0.01) < 0.001") != std::string::npos);
+	CHECK(shader.str().find("inAlpha != 0.01") == std::string::npos);
 }
 
 TEST(RenderScene_MeshLocalTextures)

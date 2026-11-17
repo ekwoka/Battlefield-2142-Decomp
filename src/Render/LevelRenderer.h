@@ -182,8 +182,12 @@ struct LevelSources {
 	// each frame with the seconds since the last one.
 	std::function<std::vector<hud::HudQuad>(float seconds)> overlay;
 	// Remaster's widescreen HUD fix (Shaders_client_hudfix.zip's PortedMenuShader.fx vsFFP): every HUD vertex's
-	// x times fAspectComp (12/16) about the screen's centre, except those of alpha exactly 0.01; 1 without it.
+	// x times fAspectComp (12/16) about the screen's centre, except its markers (hudfixMarkers); 1 without it.
 	float hudXScale = 1.0f;
+	// That shader is loaded: HUD vertices of alpha 0.01 are its markers, unscaled and opaque
+	// (Render/HudBlend.h hudfixMarker). Not with enhanced.hudWidescreen's scale or the base game,
+	// whose PortedMenuShader.fx passes every vertex colour through.
+	bool hudfixMarkers = false;
 	// A Flash menu over everything (the main menu, the end of round).
 	std::function<ui::MenuFrame(float seconds)> menu;
 	// Effects to draw (particles), if any.

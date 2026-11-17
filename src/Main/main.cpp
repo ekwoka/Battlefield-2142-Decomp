@@ -3834,9 +3834,11 @@ int runGame(Options& options, Session& session)
 	// moves the side pieces out by 120. Native doesn't run the .fx; the HUD
 	// pass and its pointer mapping apply the same scale (LevelSources::hudXScale).
 	float hudXScale = 1.0f;
+	bool hudfixMarkers = false; // its alpha-0.01 markers (LevelSources::hudfixMarkers)
 	if (std::string menuShader; files.readText("Shaders/PortedMenuShader.fx", menuShader)
 		&& menuShader.find("fAspectComp = 12.0/16.0") != std::string::npos) {
 		hudXScale = 12.0f / 16.0f;
+		hudfixMarkers = true;
 		std::printf("native HUD: Direct3D widescreen patch, x scaled by 12/16\n");
 	}
 	run("Menu/HUD/HudSetup/HudSetupMain.con");
@@ -9473,6 +9475,7 @@ int runGame(Options& options, Session& session)
 			terrainData ? &*terrainData : nullptr, lights, sky, water,
 			"Levels/" + options.level + "/", options.animation};
 		sources.hudXScale = hudXScale;
+		sources.hudfixMarkers = hudfixMarkers;
 		sources.animationFor = [&round](uint32_t object) { return round.animationFor(object); };
 		sources.animationDurationFor = [&round](uint32_t object) { return round.animationDurationFor(object); };
 		// The loading screen stays up while the renderer builds the level

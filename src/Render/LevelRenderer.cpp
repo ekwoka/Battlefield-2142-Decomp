@@ -5022,7 +5022,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// The HUD over everything.
 	if (m_overlayVertices && !m_overlayGroups.empty()) {
 		SDL_BindGPUGraphicsPipeline(pass, m_gpu.uiPipeline());
-		const float screen[4] = {800, 600, m_sources ? m_sources->hudXScale : 1.0f, 0};
+		const float screen[4] = {800, 600, m_sources ? m_sources->hudXScale : 1.0f,
+			m_sources && m_sources->hudfixMarkers ? 1.0f : 0.0f};
 		SDL_PushGPUVertexUniformData(commands, 0, screen, sizeof(screen));
 		SDL_GPUBufferBinding vertexBinding {m_overlayVertices, 0};
 		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
