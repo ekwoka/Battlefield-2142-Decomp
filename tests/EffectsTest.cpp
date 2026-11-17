@@ -1484,3 +1484,36 @@ TEST(Effects_VehicleBoostSoundStartsAndStops)
 	objects.update({state}, manager);
 	CHECK(manager.bundleLoops().empty());
 }
+
+// The boost's end (PCO event 0x2b) in a bundle's startOnEffects and its
+// stopOnEffects: 0x0061a4e0 starts it (the start bit wins; the stop bit is
+// only looked at without it).
+TEST(Effects_VehicleBoostEndStartsBeforeItStops)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	auto* sound = templates.find("S_e_flame_Start");
+	sound->settings()["loopCount"] = "0";
+	auto* tail = templates.create("EffectBundle", "tail");
+	tail->settings()["setStartOnEffects"] = "256";
+	tail->settings()["setStopOnEffects"] = "384";
+	tail->children().push_back({"S_e_flame_Start", {}, {}});
+	auto* car = templates.create("PlayerControlObject", "car");
+	car->children().push_back({"tail", {}, {}});
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 9;
+	state.objectTemplate = car;
+	state.occupied = true;
+	objects.update({state}, manager);
+	state.boosting = true;
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().empty()); // 0x2a: not in its start bits, stopped
+	state.boosting = false;
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().size() == 1); // 0x2b: started
+	state.boosting = true;
+	objects.update({state}, manager);
+	CHECK(manager.bundleLoops().empty()); // 0x2a: in its stop bits
+}
