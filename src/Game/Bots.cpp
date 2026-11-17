@@ -1710,9 +1710,11 @@ void BotManager::update(float seconds)
 				input.turn = 0;
 			} else if (bot.gunTurn) {
 				// A gun's turn (a gunner's, or a driver's whose look turns
-				// the gun) is the same degrees again, not a rate: held, it
-				// stops where the aim's error ran out, as the executed frame's
-				// does ("not past the target in one tick").
+				// the gun) on a seat without a moving yaw bundle is the same
+				// degrees again, not a rate: held, it stops where the aim's
+				// error ran out, as the executed frame's does ("not past the
+				// target in one tick"). A bundled seat's is the held
+				// PIMouseLookX unit, a rate (aim), and stays as it is.
 				const float left = bot.gunTurnLeft;
 				input.turn = left >= 0 ? std::clamp(input.turn, 0.0f, left) : std::clamp(input.turn, left, 0.0f);
 				bot.gunTurnLeft -= input.turn;
@@ -6513,22 +6515,25 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 	if ((errorDegrees >= 0 && turn > errorDegrees) || (errorDegrees < 0 && turn < errorDegrees)) {
 		turn = errorDegrees;
 	}
-	// stepGunner applies this degree delta directly to the seat gun's yaw
-	// (GameWorld.cpp, Body::Gun), bypassing rotationAxisStep. The input adapter
-	// therefore has to enforce the yaw bundle's authored maxSpeed itself;
-	// otherwise a normal ControlInfo output of 2..4 becomes 10..20 degrees in
-	// one 1/30 s tick even on the shipped tank's 25 deg/s turret and walker
-	// gunner's 120 deg/s turret. Mouse/player inputs retain their existing path.
+	// A seat whose yaw bundle moves (acceleration or continuousSpeed): the
+	// controller's output is the PIMouseLookX it writes into the ControlInfo
+	// (AIDLL 0x100e5820: clamped to the limit, then to 4), and the bundle
+	// takes a bot's input as a person's (0x00565180 reads the same input
+	// record, no AI case; 0x00563bd0: a target speed of input x maxSpeed
+	// reached at acceleration). So the unit goes to the seat as is, 5
+	// degrees a unit (stepGunner divides it back), not scaled by the plan's
+	// elapsed time nor held to the error: the ControlInfo holds it until the
+	// next decision, and the bundle's inertia is the bundle's.
+	bool bundled = false;
 	if (gunning) {
 		const std::vector<GameWorld::SeatLayout> seats = m_world.vehicleSeats(self.vehicle);
-		if (self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size() && seats[static_cast<size_t>(self.seat)].yawSpeed > 0) {
-			// Bot plans execute round-robin: a degree command may be held for
-			// the physics ticks between decisions, so cap each command to one
-			// 1/30-second simulation step instead of scaling by the elapsed plan
-			// time passed into the controller.
-			const float maxTurn = seats[static_cast<size_t>(self.seat)].yawSpeed / kInputTicksPerSecond;
-			turn = std::clamp(turn, -maxTurn, maxTurn);
+		if (self.seat >= 0 && static_cast<size_t>(self.seat) < seats.size()) {
+			const GameWorld::SeatLayout& seat = seats[static_cast<size_t>(self.seat)];
+			bundled = !seat.yawBundle.empty() && (seat.yawAxis.acceleration != 0 || seat.yawAxis.continuousSpeed != 0);
 		}
+	}
+	if (bundled) {
+		turn = right * kInputDegreesPerTick;
 	}
 	float pitchStep = up * kInputDegreesPerTick * kInputTicksPerSecond * seconds * zoomScale;
 	const float pitchErrorDegrees = ep * kDegrees;
@@ -6536,7 +6541,7 @@ void BotManager::aim(Bot& bot, const GameWorld::PlayerInfo& self, const physics:
 		pitchStep = pitchErrorDegrees;
 	}
 	input.turn += turn;
-	if (gunning) {
+	if (gunning && !bundled) {
 		bot.gunTurn = true;
 		bot.gunTurnLeft = errorDegrees - turn;
 	}

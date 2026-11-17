@@ -13648,10 +13648,12 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		// 0x00565a20 -> 0x00563bd0 per axis): a target speed of input x
 		// maxSpeed reached at `acceleration`, so a turret keeps turning after
 		// the mouse stops (eu_tank's 25 degrees a second a unit at 500 a
-		// second, a second). A bot's turn stays degrees a tick (Bots.cpp
-		// caps it at maxSpeed itself).
+		// second, a second). A bot's PIMouseLookX goes the same way: AIDLL
+		// writes its aim controller's output into the same input record
+		// (0x100e5820) and 0x00565180 has no AI case (Bots.cpp sends the
+		// unit as 5 degrees). A bot's pitch stays the angle it wants.
 		const auto moves = [](const RotationAxis& a) { return a.acceleration != 0 || a.continuousSpeed != 0; };
-		const bool yawBundled = !player.ai && !seat.yawBundle.empty() && moves(seat.yawAxis);
+		const bool yawBundled = !seat.yawBundle.empty() && moves(seat.yawAxis);
 		const bool pitchBundled = !player.ai && !seat.pitchBundle.empty() && moves(seat.pitchAxis);
 		float turn = gun.yawBlocked ? 0.0f : yawBundled ? player.input.turn / 5.0f : player.input.turn;
 		// surpressPlayerInputVector (the input pass 0x00565700): while the

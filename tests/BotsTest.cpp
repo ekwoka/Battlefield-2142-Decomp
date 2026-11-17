@@ -5567,6 +5567,95 @@ TEST(Bots_DriverAimsAndFiresTheTurret)
 	CHECK(worst < 8);
 }
 
+// A seat whose yaw bundle moves (maxSpeed, acceleration) turns on a bot's
+// PIMouseLookX as on a person's: AIDLL's aim writes its controller's
+// output, clamped to 3 x skill + 1 and to 4 (0x100e5820), into the
+// ControlInfo, and the bundle (0x00565180 -> 0x00563bd0, no AI case)
+// runs at input x maxSpeed, reached at acceleration. Here 25 degrees a
+// second a unit at 500 a second, a second (eu_tank's turret): the turret
+// starts turning at most 500 / 30 / 30 degrees in its first tick (no jump
+// to the aim's degrees), turns no faster than the limit's units, and
+// settles on the enemy.
+TEST(Bots_GunnerDrivesItsYawBundleByItsLookInput)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	field.templates.create("GenericProjectile", "bullet")->settings()["damage"] = "1";
+	world::ObjectTemplate* tank = field.templates.create("PlayerControlObject", "tank");
+	for (const auto& [key, value] : field.templates.find("car")->settings()) {
+		tank->settings()[key] = value;
+	}
+	tank->settings()["seatInformation"] = "tank 0/0.5/0.4 0/0/0";
+	tank->settings()["aiTemplate"] = "TestTank";
+	tank->children().push_back({"car_entry", {-1.5f, 0, 0}, {}});
+	tank->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
+	tank->children().push_back({"tank_turret", {0, 0.9f, 0}, {}});
+	world::ObjectTemplate* turret = field.templates.create("RotationalBundle", "tank_turret");
+	turret->settings()["inputToYaw"] = "PIMouseLookX";
+	turret->settings()["maxSpeed"] = "25/0/0";
+	turret->settings()["acceleration"] = "500/0/0";
+	turret->children().push_back({"tank_barrel", {0, 0.2f, 0.5f}, {}});
+	world::ObjectTemplate* barrel = field.templates.create("RotationalBundle", "tank_barrel");
+	barrel->settings()["inputToPitch"] = "PIMouseLookY";
+	barrel->settings()["minRotation"] = "0/-20/0";
+	barrel->settings()["maxRotation"] = "0/10/0";
+	barrel->children().push_back({"tank_gun", {0, 0, 1}, {}});
+	world::ObjectTemplate* gun = field.templates.create("GenericFireArm", "tank_gun");
+	gun->settings()["projectileTemplate"] = "bullet";
+	gun->settings()["velocity"] = "300";
+	gun->settings()["aiTemplate"] = "tank_gun";
+	gun->settings()["fire.roundsPerMinute"] = "120";
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile TestTank_Mobile", "aiTemplatePlugIn.maxSpeed 12",
+			 "aiTemplatePlugIn.create Unit TestTank_Unit", "aiTemplatePlugIn.equipmentTypeName Tank",
+			 "aiTemplate.create TestTank", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestTank_Mobile",
+			 "aiTemplate.addPlugIn TestTank_Unit", "weaponTemplate.create tank_gun", "weaponTemplate.setStrength Infantry 5",
+			 "weaponTemplate.maxRange 150", "weaponTemplate.weaponType FireArm",
+			 "weaponTemplate.allowedDeviation 2", "aiSettings.setBehaviourModifier Fire 7.5",
+			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.setBehaviourModifier Fire 1.0",
+			 "aiSettings.setVehicleBehaviour Tank Idle BBIdle BBPIdle2d 5 UCUnion UnitWeights",
+			 "aiSettings.setVehicleBehaviour Tank Fire BBFireInfantery BBPFireInfantery 4 UCUnion UnitWeights",
+			 "aiSettings.setVehicleDefaultBehaviour Tank Idle", "aiSettings.setViewDistance 200"}) {
+		field.console.execute(line, out);
+	}
+	const uint32_t id = field.objects.create(tank, {3, 1.2f, 0}, {0, 0, 0})->id();
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 0);
+	CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 0);
+	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	const int enemy = field.world->addPlayer("Enemy", 1, false);
+	field.world->spawnSoldier(enemy);
+	const float a = 35 * 3.14159265f / 180;
+	const physics::Vec3 at = field.info(bot).position;
+	field.world->setSoldierPosition(field.info(enemy).soldier, {at.x + 15 * std::sin(a), 0, at.z + 15 * std::cos(a)});
+	game::BotManager bots(*field.world, field.settings);
+	float yaw = 0, pitch = 0, last = 0, fastest = 0, first = 0;
+	CHECK(field.world->gunAim(id, 0, last, pitch));
+	for (int tick = 0; tick < 30 * 8; ++tick) {
+		field.ticks(1, &bots);
+		if (field.world->gunAim(id, 0, yaw, pitch)) {
+			const float step = std::fabs(std::remainder(yaw - last, 360.0f));
+			fastest = std::max(fastest, step);
+			if (first == 0) {
+				first = step;
+			}
+			last = yaw;
+		}
+	}
+	const float hull = field.objects.find(id)->rotation().x;
+	const float limit = 3 * field.settings.skill + 1;
+	std::printf("  the bundled turret at %.1f off the hull (the enemy %.1f); its first tick %.3f, fastest %.2f degrees (the limit's %.2f)\n",
+		yaw, std::remainder(35 - hull, 360.0f), first, fastest, limit * 25 / 30.0f);
+	CHECK(first > 0 && first <= 500 / 900.0f + 1e-3f);
+	CHECK(fastest <= limit * 25 / 30.0f + 0.01f);
+	CHECK(std::fabs(std::remainder(yaw + hull - 35, 360.0f)) < 8);
+}
+
 // The vehicle plan's move (0x100795a0: If NOT ObjectDistance [minRange,
 // 1.1 D] then MoveToObjectFinding 0x100cff90): a target nearer than the
 // move's near limit min(1.1 minRange, D) sends the driver off to a spot
