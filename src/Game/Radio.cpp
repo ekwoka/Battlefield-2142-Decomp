@@ -486,7 +486,7 @@ physics::Vec3 GameWorld::viewForward(int id) const
 		}
 		return body->body.rotation.transform(along(yaw, pitch));
 	}
-	return along(lookYaw(*me), me->input.aimPitch);
+	return along(lookYaw(*me), soldierLookPitch(me->input.aimPitch));
 }
 
 int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const

@@ -14,6 +14,7 @@
 #include "Main/DeploymentTeam.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
+#include "Net/RemoteInput.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "Terrain/Heightmap.h"
@@ -6697,6 +6698,44 @@ TEST(GameWorld_AirburstDistance)
 		}
 		CHECK(range.world->projectiles().size() == (zoomed ? 0u : 1u));
 	}
+}
+
+// A seated player's aim pitch is the sum of the mouse's changes
+// (net::MoveInputState, +-57000 degrees), so a hostile client can send one
+// far past a quarter turn. What aims along it takes the soldier's +-85
+// first (game::soldierLookPitch; 0x005890a0): the airburst's view ray
+// here, the pod launch, the wire's guidance and the weapon effects too.
+TEST(GameWorld_HugeAimPitchAimsWithinTheSoldiersBound)
+{
+	CHECK(game::soldierLookPitch(50000) == 85.0f);
+	CHECK(game::soldierLookPitch(-50000) == -85.0f);
+	CHECK(game::soldierLookPitch(30) == 30.0f);
+	CHECK(game::soldierLookPitch(std::nanf("")) == 0.0f);
+	// Decoded from a stream of moves pulling up in a seat: it runs on,
+	// and bounded it's the top of the look.
+	net::MoveInputState state;
+	state.seated = true;
+	net::PlayerMove up;
+	up.axes[static_cast<size_t>(net::kPIMouseLookY)] = -30000; // 1500 degrees a move
+	float decoded = 0;
+	for (int i = 0; i < 100; ++i) {
+		decoded = net::soldierInputFromMove(up, state).aimPitch;
+	}
+	CHECK(decoded == 57000.0f);
+	CHECK(game::soldierLookPitch(decoded) == 85.0f);
+
+	Range range;
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["fire.useDistanceCounter"] = "1";
+	launcher->settings()["fire.minimumDistance"] = "20";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	range.world->setZoomed(me, true);
+	game::SoldierInput input;
+	input.aimPitch = 270; // a quarter turn down taken raw: the ground, a step off
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->burstDistance(me) == 999); // bounded: 85 up, the open sky
 }
 
 // The ladder's camera (LadderContainerCamera: 0/1.5/-0.4 off the

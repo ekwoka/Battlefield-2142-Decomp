@@ -4019,7 +4019,7 @@ void GameWorld::steerSeeker(Projectile& p, float seconds)
 		return;
 	}
 	float yaw = lookYaw(*shooter) * 3.14159265f / 180.0f;
-	float pitch = shooter->input.aimPitch * 3.14159265f / 180.0f;
+	float pitch = soldierLookPitch(shooter->input.aimPitch) * 3.14159265f / 180.0f;
 	physics::Vec3 eye = shooter->body.position + physics::Vec3 {0, 0.6f, 0};
 	// The player's active camera (0x005e2e20: slot 0x1b4(1)): the round's
 	// own while it is the view (the projectile camera).
@@ -6165,7 +6165,7 @@ void GameWorld::stepBurstRange(Player& player, const world::ObjectTemplate* inHa
 		return;
 	}
 	if (player.zoomed && !player.burstZoomWas) {
-		const float yaw = lookYaw(player) * 3.14159265f / 180, pitch = player.input.aimPitch * 3.14159265f / 180;
+		const float yaw = lookYaw(player) * 3.14159265f / 180, pitch = soldierLookPitch(player.input.aimPitch) * 3.14159265f / 180;
 		const physics::Vec3 eye = player.body.position + physics::Vec3 {0, 1.6f, 0};
 		const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 		float lo = 0, hi = 999;
@@ -9424,7 +9424,7 @@ void GameWorld::startEffectsOn(const Player& player, int effect)
 		return;
 	}
 	const float look = lookYaw(player);
-	const float pitch = player.input.aimPitch;
+	const float pitch = soldierLookPitch(player.input.aimPitch);
 	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({look, -pitch, 0});
 	const physics::Vec3 origin = player.body.position + physics::Vec3 {0, 0.6f, 0} + turn.transform({0, 0, 0.5f});
 	startWeaponEffects(weapon->name(), origin, turn, effect);

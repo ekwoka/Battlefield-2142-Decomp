@@ -398,7 +398,8 @@ TEST(NetGame_SoldierInputMapping)
 }
 
 // The aim's pitch decoded from the moves' MouseLookY (soldierInputFromMove):
-// on foot it stops at the soldier's +-89, so looking down again after
+// on foot it stops at the soldier's +-85 (0x005890a0 clamps the pitch
+// +0x270 to (*0x00a68eb0)[1], 85), so looking down again after
 // pulling past the top acts at once; in a seat it runs on (a driver's
 // PIPitch is its change, Vehicles_RemoteMouseKeepsPitchingUp).
 TEST(NetGame_MovePitchClampOnFootAndSeated)
@@ -419,21 +420,21 @@ TEST(NetGame_MovePitchClampOnFootAndSeated)
 		if (seated) {
 			CHECK(seen > 250);
 		} else {
-			CHECK(std::fabs(seen - 89.0f) < 0.01f);
+			CHECK(std::fabs(seen - 85.0f) < 0.01f);
 			move(-2.0f, 150); // and down again: it moves at once
-			CHECK(seen < 88.0f && seen > 85.0f);
+			CHECK(seen < 84.0f && seen > 81.0f);
 			for (int i = 0; i < 150; ++i) {
 				move(-2.0f, 151 + i);
 			}
-			CHECK(std::fabs(seen + 89.0f) < 0.01f);
+			CHECK(std::fabs(seen + 85.0f) < 0.01f);
 		}
 	}
-	// Out of the seat the next move brings a pitch run past 89 back in.
+	// Out of the seat the next move brings a pitch run past 85 back in.
 	net::MoveInputState state;
 	state.seated = true;
 	state.pitch = 3000;
 	state.seated = false;
-	CHECK(net::soldierInputFromMove(net::PlayerMove {}, state).aimPitch == 89.0f);
+	CHECK(net::soldierInputFromMove(net::PlayerMove {}, state).aimPitch == 85.0f);
 }
 
 namespace {

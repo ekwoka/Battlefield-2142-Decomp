@@ -14,6 +14,24 @@ namespace dice::hfe::game {
 
 enum class SoldierPose { Stand = 0, Crouch = 1, Prone = 2, Swim = 3 };
 
+// The soldier's look pitch's bound, degrees either way: Soldier.cpp's
+// camera update (0x005890a0, from the input handling 0x0058a6d0) clamps
+// the pitch (+0x270) to +-(*0x00a68eb0)[1], 85 (static_init 0x008e05e0:
+// {40 the twist, 85}), each time the PIMouseLookY change is added.
+constexpr float kSoldierLookPitchLimit = 85;
+
+// A look pitch fit to aim along (sin / cos): a seated player's input
+// aimPitch is the sum of the mouse's changes and runs far past a quarter
+// turn (net::MoveInputState), so whatever turns it into a direction takes
+// the soldier's bound first.
+constexpr float soldierLookPitch(float aimPitch)
+{
+	return aimPitch < -kSoldierLookPitchLimit ? -kSoldierLookPitchLimit
+		: aimPitch > kSoldierLookPitchLimit   ? kSoldierLookPitchLimit
+		: aimPitch == aimPitch                ? aimPitch
+											  : 0.0f; // NaN
+}
+
 struct SoldierInput {
 	float throttle = 0; // PIThrottle: forward positive
 	float strafe = 0;   // PIYaw on foot: right positive

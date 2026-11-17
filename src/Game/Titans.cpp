@@ -2568,7 +2568,7 @@ bool GameWorld::launchPod(int id, bool exitKey, bool checkRoom)
 		return false; // the press refused: the vehicle tilted too far (air_pod_launcher's 70)
 	}
 	const float yaw = body->body.rotation.yawPitchRoll().x * 3.14159265f / 180.0f;
-	float gunYaw = 0, gunPitch = player->input.aimPitch;
+	float gunYaw = 0, gunPitch = soldierLookPitch(player->input.aimPitch);
 	gunAim(body->object, player->seat, gunYaw, gunPitch);
 	const float y = yaw + gunYaw * 3.14159265f / 180.0f, p = gunPitch * 3.14159265f / 180.0f;
 	physics::Vec3 direction {std::sin(y) * std::cos(p), std::sin(p), std::cos(y) * std::cos(p)};
