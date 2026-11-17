@@ -281,6 +281,49 @@ TEST(Bots_ForgottenMineLeavesAtOnce)
 	CHECK(Access::mines(bots) == 1);
 }
 
+// A driver's order at an area's Vehicle order position, far from its
+// flag, still has that area: retail looks the order's area up by the
+// areas' score at that position (AIDLL 0x10078570 -> 0x10034a10, area slot
+// 0x68) and heads for it through the area's goal for the Mobile part's map
+// (0x1005d940 with 0x100a4330), the order position itself for a driver.
+// The default path (no enhanced recovery).
+TEST(Bots_DriverOrderAtTheVehiclePositionKeepsItsArea)
+{
+	Field field;
+	game::BotSettings settings;
+	ai::StrategicArea area;
+	area.controlPoint = 1;
+	area.hasOrderPosition[0] = area.hasOrderPosition[1] = true;
+	area.orderPosition[0][0] = 100;
+	area.orderPosition[1][0] = -10; // 110 m from the flag
+	settings.strategy.areas.push_back(area);
+	Console console;
+	game::registerBotConsoleMethods(console, settings);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Mobile GoalCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
+			 "aiTemplate.create GoalCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn GoalCar_Mobile"}) console.execute(line, out);
+	game::BotManager bots(*field.world, settings);
+	game::BotManagerTestAccess::attack(bots, 0);
+	const int id = field.soldier(2, true, -30, 0);
+	auto* car = field.templates.create("PlayerControlObject", "goal_test_car");
+	car->settings()["aiTemplate"] = "GoalCar";
+	car->settings()["seatInformation"] = "goal_test_car 0/0/0 0/0/0";
+	car->children().push_back({"goal_test_engine", {}, {}});
+	field.templates.create("Engine", "goal_test_engine")->settings()["engineType"] = "194";
+	const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+	game::GameWorld::PlayerInfo self;
+	CHECK(field.world->playerInfo(id, self));
+	self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+	game::GameWorld::VehicleInfo v {};
+	v.object = vehicle; v.position = self.position; v.working = true; v.forward = {0, 0, 1};
+	v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+	game::BotManagerTestAccess::vehicles(bots, {v});
+	game::BotManagerTestAccess::goal(bots, self);
+	auto& bot = game::BotManagerTestAccess::bot(bots, id);
+	CHECK(bot.hasGoal && bot.goalOrder == 0 && bot.goalMap == 1 && bot.goalControlPoint == 1);
+	CHECK(!bot.vehicleApproach && near(bot.goal.x, -10));
+}
+
 TEST(Bots_GoalRecoveryManagerIntegration)
 {
 	Field field;

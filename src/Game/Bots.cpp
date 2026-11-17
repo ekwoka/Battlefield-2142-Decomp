@@ -2614,6 +2614,12 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 			areaIndex = areaOfControlPoint(p.id);
 		}
 	}
+	// Off every point's radius: the area whose order position, for either
+	// map, it is. Retail looks the order's area up by the areas' score at
+	// the position (AIDLL 0x10078570 -> 0x10034a10, area slot 0x68) and
+	// heads there through the area's goal for the Mobile part's map
+	// (0x1005d940 with 0x100a4330), so a driver sent to an area's Vehicle
+	// order position keeps that area (its via-route, its regoal).
 	for (size_t i = 0; i < areas.size() && !point; ++i) {
 		for (int m = 0; m <= 1 && !point; ++m) {
 			if (!areas[i].hasOrderPosition[m]) continue;
@@ -3362,8 +3368,14 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		} else {
 			const float length = std::sqrt(physics::lengthSquared(to));
 			const physics::Vec3 dir = length > 0.01f ? to * (1 / length) : vehicle->forward;
-			// The sight ray past the target's own vehicle too (as the bots' sight): a
-			// seated target is inside its hull. See-through faces still block, as before.
+			// The plan casts no ray of its own: its fire condition (0x100dad60,
+			// evaluated by 0x100db150) reads the bot's memory record of the
+			// target (its +0x50 flags), which the sensing pass keeps with the
+			// sight ray whose filter passes the seer, the target and the
+			// vehicle it rides (AIDLL 0x100ed700 -> BF2142.exe 0x00898040 /
+			// 0x008988f0), so the stand-in ray here passes the target's
+			// vehicle too: a seated target is inside its hull. See-through
+			// faces still block here (a port choice; the sensing's don't).
 			bool seenThrough = false;
 			if (dist >= 20 && dist <= maxRange && physics::dot(dir, vehicle->forward) > 0.5f
 				&& m_world.lineOfSight(at + vehicle->forward * 4.0f, target.position + physics::Vec3 {0, 1, 0},
