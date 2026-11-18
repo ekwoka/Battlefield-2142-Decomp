@@ -1545,9 +1545,18 @@ void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity
 	}
 	const float term = instant ? 1.0f : (speed - limit) * speed;
 	const float mod = instant && m_materials ? m_materials->damageMod(attackerMaterial, victimMaterial) : 1.0f;
-	const float amount = mod * collisionMassFactor(attacker, victim.object) * term;
+	float amount = mod * collisionMassFactor(attacker, victim.object) * term;
 	if (amount >= 0.1f) {
-		loseHitPoints(victim.object, amount, collisionCredit(attacker, victim.object, velocity));
+		// Retail's damage dispatcher (0x004c0e40 -> 0x005b7290) scales
+		// ordinary impacts by the vehicle's team, independently of kill credit.
+		const world::Object* vehicle = !instant && body && body->vehicle ? m_objects.find(attacker) : nullptr;
+		if (vehicle && victim.team > 0 && vehicle->team() == victim.team) {
+			const float percent = m_friendlyFire.soldier;
+			amount *= (percent < 1 ? 0.0f : std::min(percent, 100.0f)) * 0.01f;
+		}
+		if (amount > 0.0f) {
+			loseHitPoints(victim.object, amount, collisionCredit(attacker, victim.object, velocity));
+		}
 	}
 }
 
