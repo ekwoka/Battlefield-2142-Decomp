@@ -163,7 +163,7 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUSampler(m_device, m_menuClampSampler);
 	SDL_ReleaseGPUSampler(m_device, m_menuRepeatSampler);
 	for (SDL_GPUGraphicsPipeline* pipeline : {m_enhanced.mesh, m_enhanced.meshCulled, m_enhanced.fadedMesh,
-			 m_enhanced.additiveMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh, m_enhanced.particle,
+			 m_enhanced.additiveMesh, m_enhanced.glowMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh, m_enhanced.particle,
 			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer,
 			 m_enhanced.motion, m_enhanced.motionCulled, m_enhanced.motionOverlay, m_enhanced.gtao, m_enhanced.aoBlur, m_enhanced.taa}) {
 		if (pipeline) {
@@ -347,6 +347,10 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 	world.additiveMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "additive mesh");
+	info.depth_stencil_state.enable_depth_test = false;
+	world.glowMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "glow mesh");
+	info.depth_stencil_state.enable_depth_test = true;
 	world.additiveParticle = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "additive particle");
@@ -447,7 +451,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	world.decal = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
 		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 2, 1, "decal");
-	const bool worldMade = world.mesh && world.culledMesh && world.culledFadedMesh && world.surrounding && world.fadedMesh && world.additiveMesh && world.terrain && world.sky && world.water && world.road && world.roadMesh && world.decal &&
+	const bool worldMade = world.mesh && world.culledMesh && world.culledFadedMesh && world.surrounding && world.fadedMesh && world.additiveMesh && world.glowMesh && world.terrain && world.sky && world.water && world.road && world.roadMesh && world.decal &&
 		world.undergrowth && world.particle && world.shimmer && world.additiveParticle && world.camo &&
 		(single || (world.coverageMesh && world.coverageUndergrowth));
 	const bool made = worldMade && (!single || (m_uiPipeline && m_uiSubmitPipeline && m_uiTestPipeline && m_uiClearPipeline &&
@@ -518,6 +522,10 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	m_enhanced.additiveMesh = enhanced(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_enh_mesh_frag_spv, k_enh_mesh_frag_spv_size, k_enh_mesh_frag_msl, k_enh_mesh_frag_msl_size, kMeshSamplers + 1, 2,
 		"enhanced additive mesh");
+	info.depth_stencil_state.enable_depth_test = false;
+	m_enhanced.glowMesh = enhanced(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_enh_mesh_frag_spv, k_enh_mesh_frag_spv_size, k_enh_mesh_frag_msl, k_enh_mesh_frag_msl_size, kMeshSamplers + 1, 2,
+		"enhanced glow mesh");
 	state(true, false, false, SDL_GPU_CULLMODE_NONE, -1.0f);
 	m_enhanced.road = enhanced(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_enh_road_frag_spv, k_enh_road_frag_spv_size, k_enh_road_frag_msl, k_enh_road_frag_msl_size, 6, 3, "enhanced road");
@@ -611,7 +619,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 void GpuContext::releaseWorldPipelines(WorldPipelines& world)
 {
 	for (SDL_GPUGraphicsPipeline* pipeline : {world.mesh, world.culledMesh, world.culledFadedMesh, world.terrain,
-			 world.surrounding, world.sky, world.fadedMesh, world.additiveMesh, world.water, world.road, world.roadMesh,
+			 world.surrounding, world.sky, world.fadedMesh, world.additiveMesh, world.glowMesh, world.water, world.road, world.roadMesh,
 			 world.decal, world.undergrowth, world.particle, world.shimmer, world.additiveParticle, world.camo,
 			 world.coverageMesh, world.coverageUndergrowth}) {
 		if (pipeline) {

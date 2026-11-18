@@ -272,6 +272,7 @@ constexpr float kMaterialNoShadows = 128; // receives no dynamic shadows (the lo
 constexpr float kMaterialTrunk = 256; // RaShaderTrunkSTMBase/Detail
 constexpr float kMaterialTitanInterior = 512; // RaShaderSTM _TITANINTERIOR_ with the camera in a Titan
 constexpr float kMaterialGIMap = 1024; // RaShaderBM _HASGIMAP_: binding 4, unused by bundled cracks
+constexpr float kMaterialGlow = 2048;  // with kMaterialAdditive: BMadditive's defaultTechnique, unfogged (glowMeshPipeline)
 // mesh.frag's samplers: 0-4 the material's maps, 5-7 the shadows and the
 // hemi map (shadow.glsl), 8 a static mesh's detail normal map, 9 its crack
 // normal map, 10 the envmap (a cube).
@@ -299,6 +300,7 @@ struct WorldPipelines {
 	SDL_GPUGraphicsPipeline* sky = nullptr;
 	SDL_GPUGraphicsPipeline* fadedMesh = nullptr;
 	SDL_GPUGraphicsPipeline* additiveMesh = nullptr;
+	SDL_GPUGraphicsPipeline* glowMesh = nullptr;
 	SDL_GPUGraphicsPipeline* water = nullptr;
 	SDL_GPUGraphicsPipeline* road = nullptr;
 	SDL_GPUGraphicsPipeline* roadMesh = nullptr;
@@ -358,6 +360,8 @@ public:
 	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
 	// depth-tested, not written.
 	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.additiveMesh : world().additiveMesh; }
+	// The alpha_one glows (BMadditive's defaultTechnique, ZEnable false): added, not depth-tested.
+	SDL_GPUGraphicsPipeline* glowMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.glowMesh : world().glowMesh; }
 	// A mesh queue's pipeline, with back faces culled or not (meshCulled:
 	// the opaque and alpha-tested materials of the bundled and skinned
 	// meshes keep the material settings' CullMode 3, D3DCULL_CCW).
@@ -459,6 +463,7 @@ public:
 		SDL_GPUGraphicsPipeline* meshCulled = nullptr;
 		SDL_GPUGraphicsPipeline* fadedMesh = nullptr;
 		SDL_GPUGraphicsPipeline* additiveMesh = nullptr;
+		SDL_GPUGraphicsPipeline* glowMesh = nullptr;
 		SDL_GPUGraphicsPipeline* terrain = nullptr;
 		SDL_GPUGraphicsPipeline* undergrowth = nullptr;
 		SDL_GPUGraphicsPipeline* road = nullptr;
@@ -494,7 +499,7 @@ public:
 	bool enhancedLitAvailable() const
 	{
 		const EnhancedPipelines& e = m_enhanced;
-		return e.mesh && e.meshCulled && e.fadedMesh && e.additiveMesh && e.terrain && e.undergrowth && e.road && e.roadMesh;
+		return e.mesh && e.meshCulled && e.fadedMesh && e.additiveMesh && e.glowMesh && e.terrain && e.undergrowth && e.road && e.roadMesh;
 	}
 	// Nearest, clamped (the G-buffer's reads).
 	SDL_GPUSampler* pointSampler() const { return m_pointSampler; }

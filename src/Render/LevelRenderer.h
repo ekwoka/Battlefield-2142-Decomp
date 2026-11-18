@@ -171,9 +171,9 @@ struct LevelSources {
 	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Ordinary vehicle armour's wreck look (including its delay/opt-out).
 	std::function<bool(uint32_t object)> vehicleWreckLook;
-	// enhanced.glowOcclusion, not retail: a lamp halo is drawn only while its
-	// source is visible (pixel depth testing alone lets a large glow quad
-	// protrude through a bridge deck). Retail never occlusion-tests a halo.
+	// The camera's ray to an object: an alpha_one glow's fade (MeshQueues.h
+	// glowFadeStep, retail); enhanced.glowOcclusion (not retail) also skips a
+	// depth-tested lamp halo while its source is hidden.
 	std::function<bool(const Vec3f& eye, const Vec3f& source, uint32_t owner)> glowVisible;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
@@ -351,8 +351,7 @@ private:
 		bool blended = false;
 		bool additive = false;
 		int alphaMode = 0; // the material's: 0 opaque, 1 blended, 2 alpha tested (RendDX9's +0x15c)
-		// StaticMesh.fx alpha_one: texture alpha times 0.8; other additive paths keep 1.
-		float alphaScale = 1.0f;
+		bool glow = false; // an "alpha_one" technique: BMadditive's defaultTechnique (MeshQueues.h glowFadeStep)
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second
 		// Where the texture lies in an atlas (the overgrowth's distant trees'
 		// textures, OvergrowthAtlas.tai): scale, then offset.
@@ -407,6 +406,7 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		bool glow = false; // a submesh is an alpha_one glow
 		// A skinned mesh's radius for the objects' distance fade
 		// (boxHalfDiagonal of the LOD's box); bounds stay unknown for one.
 		float skinnedRadius = 0;
@@ -458,6 +458,8 @@ private:
 		float animationDuration = 0; // authored clip length, seconds; zero is 24 fps
 		bool hidden = false; // its object is hidden
 		bool occlusionGlow = false; // additive halo belonging to a supportsGlow light
+		float glowFade = 0;     // its alpha_one glows' line-of-sight fade (glowFadeStep)
+		uint32_t glowFrame = 0; // the last frame they were drawn (m_glowFrame)
 		bool wornKit = false; // posed only by its wearer's skeleton (a kit has none of its own)
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
@@ -673,6 +675,7 @@ private:
 	float m_overgrowthLodTimer = 0;         // +0x114
 	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
 	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
+	uint32_t m_glowFrame = 0;               // prepareInstances' count (Instance::glowFrame)
 	// The objects' distance fade this frame (DistanceFade.h): off for the
 	// commander's overhead view, whose camera sits hundreds of metres up.
 	// A deviation: the walk's filter flag 0x1000000 that skips the fade is

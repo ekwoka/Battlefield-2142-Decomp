@@ -7135,12 +7135,10 @@ TEST(Vehicles_DestroyedWreckPixelsOptIn)
 	SDL_Quit();
 }
 
-// The actual bridge glow is a black-background quad using StaticMesh.fx's
-// alpha_one technique. Its black texels must not darken the scene behind it.
-// With fog, retail mixes the colour toward the scene's fog colour before
-// the SRCALPHA / ONE blend (RaShaderBMadditive depthAndFog, RaShaderBM/STM
-// fogenable = true; D3DRS_FOGCOLOR written only by RendDX9 0x10028bb0), so
-// those black texels add alpha x fogColor: the border brightens toward fog.
+// The actual bridge glow is a black-background quad whose material names
+// the alpha_one technique. Its black texels must not darken the scene behind
+// it, and fog must not reveal them: an alpha_one material draws
+// RaShaderBMadditive's defaultTechnique (RendDX9 0x100c497e), Fogenable false.
 TEST(Render_Glow3AdditivePixelsOptIn)
 {
     const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
@@ -7173,6 +7171,8 @@ TEST(Render_Glow3AdditivePixelsOptIn)
             settings.drawTerrain = false;
             render::LevelSources sources {g.files, g.templates, objects, g.geometries, noTerrain, nullptr, lights, sky, water, "", ""};
             sources.renderer = &settings;
+            bool unobstructed = false;
+            sources.glowVisible = [&unobstructed](const render::Vec3f&, const render::Vec3f&, uint32_t) { return unobstructed; };
             render::LevelRenderer renderer(*gpu);
             renderer.build(sources);
             auto target = gpu->createOffscreenTarget(640, 360);
@@ -7188,9 +7188,13 @@ TEST(Render_Glow3AdditivePixelsOptIn)
                 CHECK(gpu->readPixels(target, pixels));
                 return pixels;
             };
+            // On frame one the source is blocked and no halo has been visible yet.
+            const auto initiallyBlocked = frame();
             object->setHidden(true);
             const auto background = frame();
+            CHECK(!background.empty() && initiallyBlocked == background);
             object->setHidden(false);
+            unobstructed = true;
             const auto visible = frame();
             size_t dark = 0, bright = 0;
             for (size_t i = 0; i + 3 < visible.size() && i + 3 < background.size(); i += 4) {
@@ -7219,16 +7223,33 @@ TEST(Render_Glow3AdditivePixelsOptIn)
                 }
             }
             std::fprintf(stderr, "  %s glow3 fogged black border: maximum channel change %d\n", label, borderChange);
-            CHECK(borderChange > 1);
+            CHECK(borderChange <= 1);
+            // Orbit 90 degrees to the side of the authored quad. A fixed
+            // plane disappears here, but the billboard should still glow.
+            camera.position = {-8, 0, 0};
+            camera.yaw = 1.57079632679f;
+            const auto edgeOn = frame();
+            object->setHidden(true);
+            const auto sideBackground = frame();
+            CHECK(edgeOn.size() == sideBackground.size());
+            size_t sideBright = 0;
+            for (size_t i = 0; i + 3 < edgeOn.size() && i + 3 < sideBackground.size(); i += 4) {
+                int delta = 0;
+                for (int c = 0; c < 3; ++c) delta += int(edgeOn[i+c]) - int(sideBackground[i+c]);
+                if (delta > 9) ++sideBright;
+            }
+            std::fprintf(stderr, "  %s glow3 edge-on: %zu brightened pixels\n", label, sideBright);
+            CHECK(sideBright > bright * 9 / 10 && sideBright < bright * 11 / 10);
+            CHECK(render::writePng(std::string(output) + "/" + label + "-glow3-side.png", target.width, target.height, edgeOn));
             gpu->releaseTarget(target);
         }
     }
     SDL_Quit();
 }
 
-// Alpha_One's shipped pixel shader multiplies texture alpha by 0.8.
-// Keep a geometry-driven additive control at full opacity: the factor
-// belongs to that material technique, not every additive effect.
+// An alpha_one material draws BMadditive's defaultTechnique (0x100c497e):
+// texture alpha times the visibility fade (1 in view), not StaticMesh.fx's
+// 0.8 (that effect isn't used); a hasAdditiveAlpha control adds the same.
 TEST(Render_AlphaOneOpacityPixelsOptIn)
 {
     const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
@@ -7305,7 +7326,7 @@ TEST(Render_AlphaOneOpacityPixelsOptIn)
                     };
                     object->setHidden(true); const auto background = frame();
                     object->setHidden(false); const auto visible = frame();
-                    const float expected = 32.0f * (alpha / 255.0f) * (alphaOne ? 0.8f : 1.0f);
+                    const float expected = 32.0f * (alpha / 255.0f);
                     const size_t centre = (64 * 128 + 64) * 4;
                     std::fprintf(stderr, "  %s %s enhanced=%d alpha_one=%d alpha=%u: delta=%d expected=%.2f\n",
                         mod, name, enhanced, alphaOne, alpha, int(visible[centre]) - int(background[centre]), expected);
@@ -7388,12 +7409,11 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
             // bound darkening by that measured baseline noise. The isolated
             // asset check above requires exactly zero darkened pixels.
             CHECK(dark <= noise); CHECK(bright > 100); CHECK(bright > noise * 3);
-            // A lamp whose centre the game reports blocked: retail never
-            // occlusion-tests a halo (RendDX9's queries, 0x100050a0, serve the
-            // sun flare, a terrain culler and ads), so it is still drawn.
-            // enhanced.glowOcclusion skips it (the deck above it used to show
-            // the quad's upper half on the road).
-            sources.glowVisible = [](const render::Vec3f&, const render::Vec3f&, uint32_t) { return false; };
+            // A glow whose centre the game reports blocked: retail's ray
+            // (0x100c4ad6) fades it at 6 a second (MeshQueues.h glowFadeStep),
+            // whatever the enhanced switches; seen again it is back at once.
+            bool seen = false;
+            sources.glowVisible = [&seen](const render::Vec3f&, const render::Vec3f&, uint32_t) { return seen; };
             const auto brightened = [&](const std::vector<uint8_t>& pixels) {
                 size_t n = 0;
                 for (size_t i = 0; i + 3 < pixels.size() && i + 3 < background.size(); i += 4) {
@@ -7403,20 +7423,22 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
                 }
                 return n;
             };
+            const size_t fading = brightened(frame());
+            for (int i = 0; i < 3; ++i) { SDL_Delay(120); frame(); } // 6 a second: gone within 1/6 s
             const size_t retail = brightened(frame());
             scene::EnhancedSettings features;
             features.enabled = true;
             features.taa = features.ssao = features.csm = false;
             sources.enhanced = &features;
-            const size_t leaked = brightened(frame());
-            features.glowOcclusion = false;
-            const size_t optedOut = brightened(frame());
-            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: retail %zu, enhanced %zu, glowOcclusion 0 %zu brightened pixels\n",
-                label, retail, leaked, optedOut);
-            CHECK(retail > 100); CHECK(retail * 3 > bright * 2);
-            CHECK(optedOut * 3 > bright * 2);
+            const size_t enhanced = brightened(frame());
+            seen = true;
+            const size_t back = brightened(frame());
+            std::fprintf(stderr, "  %s Suez bridge glow3 blocked: first frame %zu, faded %zu, enhanced %zu, seen again %zu brightened pixels\n",
+                label, fading, retail, enhanced, back);
+            // The first blocked frame's level depends on the wall clock (MeshQueues_GlowFadesWhileBlocked pins the rate).
             // The scene's own frame-to-frame noise is about as large as its measured baseline.
-            CHECK(leaked < bright / 3);
+            CHECK(retail < bright / 3); CHECK(enhanced < bright / 3);
+            CHECK(back * 3 > bright * 2);
             gpu->releaseTarget(target);
         }
     }

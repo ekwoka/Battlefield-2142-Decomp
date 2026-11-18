@@ -97,7 +97,9 @@ void materialUniforms(LightingUniforms& uniforms, const S& submesh, float fade, 
 	uniforms.material[2] = (submesh.detail ? 1.0f : 0.0f) + (submesh.dirt ? 2.0f : 0.0f) + (submesh.crack ? 4.0f : 0.0f)
 		+ (submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f);
 	uniforms.material[3] = fade < 1.0f ? std::max(fade, 1e-3f) : 0.0f;
-	uniforms.tint[3] *= submesh.alphaScale;
+	if (submesh.glow) {
+		uniforms.material[2] += kMaterialGlow;
+	}
 	uniforms.uvOffset[0] = scrollOffset(submesh.uvScroll[0], seconds) + submesh.uvAtlas[2];
 	uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds) + submesh.uvAtlas[3];
 	uniforms.uvOffset[2] = submesh.uvAtlas[0];
@@ -676,23 +678,17 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			submesh.uvAtlas[2] = atlas->offset[0];
 			submesh.uvAtlas[3] = atlas->offset[1];
 		}
-		// Alpha mode 1 normally blends over the scene. StaticMesh.fx's
-		// alpha_one technique explicitly uses SRCALPHA / ONE too: glow3
-		// and similar meshes have opaque black around their light texture.
-		// Respect that material technique independently of a geometry's
-		// hasAdditiveAlpha switch, which selects the BMadditive path.
+		// Alpha mode 1 blends over the scene, or adds with the geometry's
+		// hasAdditiveAlpha (BMadditive's depthAndFog, 0x100c4dd9). A bundled
+		// or skinned material whose technique names "alpha_one" (glow3's
+		// lamp halos) is a glow whatever its alpha mode (MeshQueues.h).
 		const std::string technique = lower(material.technique);
 		const std::string effect = lower(material.effect);
 		submesh.alphaMode = static_cast<int>(material.alphaMode);
-		submesh.blended = material.alphaMode == 1;
-		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
-			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
-		// The shipped alpha_one ps.1.1 multiplies t0 by (1, 1, 1, 0.8).
-		// Keep this material constant separate from distance/fog fade and
-		// geometry-driven additive effects (RaShaderBMadditive).
-		if (submesh.additive && effect == "staticmesh.fx" && technique == "alpha_one") {
-			submesh.alphaScale = 0.8f;
-		}
+		submesh.glow = (bundled || skinned) && technique.find("alpha_one") != std::string::npos;
+		submesh.blended = material.alphaMode == 1 || submesh.glow;
+		submesh.additive = submesh.glow || (submesh.blended && geometry->hasAdditiveAlpha);
+		gpuMesh->glow = gpuMesh->glow || submesh.glow;
 		if (submesh.additive) {
 			submesh.uvScroll[0] = geometry->simpleUVTranslation[0];
 			submesh.uvScroll[1] = geometry->simpleUVTranslation[1];
@@ -859,7 +855,7 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				}
 				return false;
 			};
-			instance.occlusionGlow = !gpuMesh->submeshes.empty()
+			instance.occlusionGlow = !gpuMesh->glow && !gpuMesh->submeshes.empty() // a glow has retail's own ray
 				&& std::all_of(gpuMesh->submeshes.begin(), gpuMesh->submeshes.end(),
 					[](const Submesh& s) { return s.additive; })
 				&& hasGlowLight(hasGlowLight, objectTemplate, 0);
@@ -3577,6 +3573,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	const float overgrowthSeconds =
 		m_lastOvergrowthTicks ? std::min(static_cast<float>(overgrowthNow - m_lastOvergrowthTicks) / 1000.0f, 0.1f) : 0.0f;
 	m_lastOvergrowthTicks = overgrowthNow;
+	++m_glowFrame;
 	const terrain::Heightmap* groundMap = m_sources ? m_sources->heightmaps.primary() : nullptr;
 	const float cameraAboveGround = groundMap && groundMap->loaded()
 		? camera.position.y - groundMap->heightAt(camera.position.x, camera.position.z)
@@ -3687,9 +3684,19 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
+		if (instance.mesh->glow) {
+			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const bool visible = !m_sources || !m_sources->glowVisible
+				|| m_sources->glowVisible(camera.position, source, instance.object);
+			const bool drawnLastFrame = instance.glowFrame != 0 && instance.glowFrame == m_glowFrame - 1;
+			instance.glowFade = glowFadeStep(instance.glowFade, visible, drawnLastFrame, overgrowthSeconds);
+			if (instance.glowFade > kGlowShown) {
+				instance.glowFrame = m_glowFrame;
+			}
+		}
 		// Not retail: RendDX9's occlusion queries (0x100050a0) serve only the
 		// sky dome's sun flare (0x100fd900), a terrain culler (0x1009e010)
-		// and ad impressions; a halo gets the per-pixel depth test alone.
+		// and ad impressions; a depth-tested halo gets no ray of its own.
 		if (instance.occlusionGlow && m_sources && m_sources->glowVisible && m_sources->enhanced
 			&& m_sources->enhanced->enabled && m_sources->enhanced->glowOcclusion) {
 			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
@@ -4731,12 +4738,14 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		static const std::vector<anim::Matrix> unposed;
 		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
 		for (const Submesh& submesh : bound->submeshes) {
-			if (queueFor(item, submesh) != queue) {
+			if (queueFor(item, submesh) != queue || (submesh.glow && instance.glowFade <= kGlowShown)) {
 				continue;
 			}
 			const bool leafCoverage = coverageLeaf(item, submesh);
 			if (leafCoverage) {
 				bindMeshPipeline(m_gpu.coverageMeshPipeline());
+			} else if (submesh.glow) {
+				bindMeshPipeline(m_gpu.glowMeshPipeline());
 			} else {
 				useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended, submesh.leaf));
 			}
@@ -4766,6 +4775,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			}
 			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
+			if (submesh.glow) {
+				uniforms.tint[3] *= instance.glowFade; // BMadditive's Transparency (0x100c4b5f)
+			}
 			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
 			specularUniforms(uniforms, submesh, camera, lights);
 			// RaShaderSTM: _POINTLIGHT_ forces _ENVMAP_ 0; RendDX9 sets 0x400 when the
@@ -4817,7 +4829,28 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 			bindMeshLayers(pass, &submesh, envMap);
+			if (submesh.glow) {
+				// RendDX9 0x100c4b94: take the inverse view direction as
+				// the normal, preserve the mesh's up as far as possible,
+				// and use its right as the reference near parallel.
+				const Vec3f normal = camera.forward() * -1.0f;
+				Vec3f up = normalize({instance.world.at(1, 0), instance.world.at(1, 1), instance.world.at(1, 2)});
+				if (dot(up, normal) > 0.99f) { // signed, as 0x100c4c09: an up facing away is kept
+					up = normalize({instance.world.at(0, 0), instance.world.at(0, 1), instance.world.at(0, 2)});
+				}
+				const Vec3f right = cross(up, normal);
+				up = cross(normal, right);
+				TransformUniforms halo = transforms;
+				halo.world.m = {right.x, right.y, right.z, 0, up.x, up.y, up.z, 0,
+					normal.x, normal.y, normal.z, 0, origin[0], origin[1], origin[2], 1};
+				halo.worldViewProjection = halo.world * viewProjection;
+				halo.sendParts = false; // retail supplies one billboard matrix
+				pushTransforms(commands, halo);
+			}
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+			if (submesh.glow) {
+				pushTransforms(commands, transforms);
+			}
 		}
 	};
 	for (const DrawItem& item : m_drawList) {

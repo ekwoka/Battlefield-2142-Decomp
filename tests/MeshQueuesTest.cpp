@@ -159,3 +159,14 @@ TEST(MeshQueues_TreeLeavesByTheirMaps)
 	CHECK(!render::treeLeaf(true, {"afcolor.dds", "tile_africa_de.dds", lut}));    // BaseDetail
 	CHECK(!render::treeLeaf(false, {"leaf_af_savannahacacia_de.dds", lut}));       // not a tree
 }
+
+// An alpha_one glow's ray fade (0x100c4ad6..0x100c4b4c): 1 when seen; blocked
+// it falls 6 a second while drawn the frame before, else at once to 0.
+TEST(MeshQueues_GlowFadesWhileBlocked)
+{
+	CHECK(render::glowFadeStep(0.0f, true, false, 0.03f) == 1.0f);
+	CHECK(std::fabs(render::glowFadeStep(1.0f, false, true, 0.1f) - 0.4f) < 1e-5f);
+	CHECK(render::glowFadeStep(0.4f, false, true, 0.1f) == 0.0f);   // below 0: 0
+	CHECK(render::glowFadeStep(1.0f, false, false, 0.01f) == 0.0f); // not drawn last frame
+	CHECK(render::glowFadeStep(0.0f, false, true, 0.1f) == 0.0f);   // stays hidden
+}
