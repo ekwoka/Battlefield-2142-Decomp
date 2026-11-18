@@ -1593,6 +1593,32 @@ TEST(HudVehicle_HorizonAndClimb)
 	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
 }
 
+// The revive calls of a soldier that is down (0x00587b90, 0x00585df0): 0x37
+// as he goes down with no call made, 0x36 for each fresh fire press while
+// down, at most 3; none where this game doesn't say his calls; a new
+// soldier counts again.
+TEST(Radio_ReviveCalls)
+{
+	menu::ReviveCalls calls;
+	CHECK(calls.step(1, 10, false, false, true) == 0);
+	CHECK(calls.step(1, 10, true, true, true) == 0x37); // goes down holding fire: the automatic call
+	CHECK(calls.step(1, 10, true, true, true) == 0);    // still held: no fresh press
+	CHECK(calls.step(1, 10, true, false, true) == 0);
+	int manual = 0;
+	for (int i = 0; i < 5; ++i) {
+		manual += calls.step(1, 10, true, true, true) == 0x36;
+		calls.step(1, 10, true, false, true);
+	}
+	CHECK(manual == 3);
+	calls.step(1, 10, false, false, true); // revived
+	CHECK(calls.step(1, 10, true, false, true) == 0); // down again, calls made: no automatic one
+	CHECK(calls.step(1, 11, false, false, true) == 0); // a new soldier
+	CHECK(calls.step(1, 11, true, false, true) == 0x37);
+	CHECK(calls.step(2, 20, false, false, false) == 0); // another game's player
+	CHECK(calls.step(2, 20, true, true, false) == 0);
+	CHECK(calls.step(3, 0, true, false, true) == 0); // no soldier
+}
+
 // The map's radio call markers (menu::MapCalls; 0x007918d0 case
 // 0x33..0x37, 0x00790d60, 0x007840c0, the flags +0x7c..+0x7e): a
 // teammate's call the local kit answers marks him 12 s in the call's icon;

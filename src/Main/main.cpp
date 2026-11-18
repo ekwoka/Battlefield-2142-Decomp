@@ -903,6 +903,21 @@ void heardCall(int caller, int code, bool local)
 	}
 	g_mapCallsHeard.push_back({caller, code});
 }
+// A call's radio line (0x0042d220's switch): its voice and target channel.
+struct CallVoice {
+	int channel;
+	const char* voice;
+};
+const CallVoice* callVoice(int code)
+{
+	static const CallVoice voices[] = {{6, "medic"}, {1, "need_ammo"}, {1, "need_repair"},
+		{0xf, "revive"} /* TCLocalRevive */, {0x10, "revive"} /* TCAutoLocalRevive */};
+	return code >= 0x33 && code <= 0x37 ? &voices[code - 0x33] : nullptr;
+}
+// The local player's call (set with the radio's console methods).
+std::function<void(int code)> g_sayCall = [](int) {};
+// The revive calls of soldiers that are down (HudMenusComm.h ReviveCalls).
+dice::hfe::menu::ReviveCalls g_reviveCalls;
 // A kit's answers to the calls (the kit's slot 0x38 bytes) by its kitType.
 dice::hfe::menu::MapCalls::Kit mapCallKit(game::GameWorld& round, uint32_t kit)
 {
@@ -5440,32 +5455,34 @@ int runGame(Options& options, Session& session)
 		bindMethod(console, "game.radioMessage", ConsoleAccess::Anyone, [sayRadio](std::string channel, std::string voice) {
 			sayRadio(game::GameWorld::targetChannel(channel), voice, 0);
 		});
-		for (const auto& [command, channel, voice] : std::vector<std::tuple<const char*, int, const char*>> {
-				 {"Radio.callForMedic", 6, "medic"}, {"Radio.callForAmmo", 1, "need_ammo"},
-				 {"Radio.callForRepair", 1, "need_repair"}}) {
-			const int c = channel;
-			const std::string v = voice;
-			// The HUD's codes 0x33..0x35 (the game's slot 0xd8) reach the
-			// NametagManager too (0x100f19c0): the local player's own call.
-			const int code = v == "medic" ? nametags::CallMedic : v == "need_ammo" ? nametags::CallAmmo : nametags::CallRepair;
-			// 0x0042d220: the Spotted event with the call's code (the caller's
-			// soldier and team: to the server from a client, handed out by a
-			// server, 0x0050e910: the team's name tags), then the game's slot
-			// 0x54 (the radio, as slot 0x50 without the spam check).
-			bindMethod(console, command, ConsoleAccess::Anyone, [sayRadio, &hudLocal, &joinedServer, &session, &round, c, v, code] {
-				net::SpottedInfo call;
-				call.message = static_cast<uint32_t>(code);
-				if (net::GameClient* server = joinedServer()) {
-					if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
-						call.team = me->team;
-					}
-					server->sendEvent(net::makeSpotted(call));
-				} else if (session.hosted && round.localPlayer() >= 0) {
-					session.hosted->spotted(call, round.localPlayer());
+		// The local player's call (the game's slot 0xd8, 0x0042d220): the
+		// Spotted event with its code (the caller's soldier and team: to the
+		// server from a client, handed out by a server, 0x0050e910: the
+		// team's name tags and maps), then the game's slot 0x54 (the radio,
+		// as slot 0x50 without the spam check); the NametagManager
+		// (0x100f19c0) and the map take it as the local player's own.
+		g_sayCall = [sayRadio, &hudLocal, &joinedServer, &session, &round](int code) {
+			const CallVoice* v = callVoice(code);
+			if (!v) {
+				return;
+			}
+			net::SpottedInfo call;
+			call.message = static_cast<uint32_t>(code);
+			if (net::GameClient* server = joinedServer()) {
+				if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
+					call.team = me->team;
 				}
-				sayRadio(c, v, 0, false);
-				heardCall(hudLocal(), code, true);
-			});
+				server->sendEvent(net::makeSpotted(call));
+			} else if (session.hosted && round.localPlayer() >= 0) {
+				session.hosted->spotted(call, round.localPlayer());
+			}
+			sayRadio(v->channel, v->voice, 0, false);
+			heardCall(hudLocal(), code, true);
+		};
+		for (const auto& [command, code] : std::vector<std::pair<const char*, int>> {
+				 {"Radio.callForMedic", nametags::CallMedic}, {"Radio.callForAmmo", nametags::CallAmmo},
+				 {"Radio.callForRepair", nametags::CallRepair}}) {
+			bindMethod(console, command, ConsoleAccess::Anyone, [c = code] { g_sayCall(c); });
 		}
 		// The crosshair's enemy reported to the squad (0x007c8160: the game's
 		// slot 0xd4, 0x0042d110: the spam check, then the Spotted event with
@@ -6489,8 +6506,9 @@ int runGame(Options& options, Session& session)
 			chat.addChat(from.name, line, 0, speaker, !from.alive);
 		};
 		// The name tags' calls come only through the game's slot 0xd8
-		// (0x0042d220: Radio.callFor*, and the local soldier's own 0x36 / 0x37,
-		// 0x00585df0 / 0x00587b90) and, joined, the Spotted event's message;
+		// (0x0042d220: Radio.callFor*, and the revive calls 0x36 / 0x37,
+		// 0x00585df0 / 0x00587b90: ReviveCalls, g_sayCall and onTicks' bots)
+		// and, joined, the Spotted event's message;
 		// nothing of AIDLL's calls it: a bot's "medic" is a plain
 		// RadioMessage (AIDLL's send, 0x00896270, event 6 / vtable 0x009284b0),
 		// whose handler 0x0042e0c0 plays the voice and the text and lights no
@@ -9661,6 +9679,7 @@ int runGame(Options& options, Session& session)
 		g_nametags = &nametags;
 		g_mapPointSpots.clear();
 		g_mapCalls.clear(); // a new map node's list (0x00784cf0)
+		g_reviveCalls.clear();
 		g_mapCallsHeard.clear();
 		g_mapCallsTime = -1;
 		struct TagsReset {
@@ -10939,7 +10958,7 @@ int runGame(Options& options, Session& session)
 		if (viewer.onPlayerInput) {
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
-			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera,
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu,
 										&questions, &session, &localKit, &membersShown, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
 										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
@@ -10947,6 +10966,14 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				const bool playerPresent = hudPlayer(hudLocal(), me);
 				const bool alive = playerPresent && me.alive;
+				// The local soldier's revive calls (ReviveCalls): going down, and
+				// the fire presses that reach him while down (not the menus').
+				if (playerPresent) {
+					const bool fire = in.fire && !g_deploymentOpen && !showMenu;
+					if (const int code = g_reviveCalls.step(me.id, me.soldier, me.manDown, fire, true)) {
+						g_sayCall(code);
+					}
+				}
 				if (spawnWasRequested && !session.client && !round.spawnRequested(round.localPlayer()) && !alive) {
 					g_spawnScreenHidden = false; // rejected point: return to the selection screen
 				}
@@ -11108,6 +11135,29 @@ int runGame(Options& options, Session& session)
 			}
 			for (int i = 0; i < ticks; ++i) {
 				step(); // its sounds too (stepSounds)
+				// A server's bots going down call for a revive (0x37, ReviveCalls):
+				// the Spotted event to their team (the host's own map and tags
+				// through onSpotted), else straight to the local player's, then
+				// "revive" on TCAutoLocalRevive.
+				if (!session.client) {
+					game::GameWorld::PlayerInfo local;
+					const bool known = round.playerInfo(round.localPlayer(), local);
+					for (const game::GameWorld::PlayerInfo& p : round.playerList()) {
+						const int code = p.ai ? g_reviveCalls.step(p.id, p.soldier, p.manDown, false, true) : 0;
+						const CallVoice* v = callVoice(code);
+						if (!v) {
+							continue;
+						}
+						net::SpottedInfo call;
+						call.message = static_cast<uint32_t>(code);
+						if (session.hosted) {
+							session.hosted->spotted(call, p.id);
+						} else if (known && local.team == p.team) {
+							heardCall(p.id, code, false);
+						}
+						round.radioMessage(p.id, v->channel, v->voice, 0);
+					}
+				}
 				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;
 					showEndOfRound();

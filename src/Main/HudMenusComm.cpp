@@ -125,6 +125,29 @@ bool RadioSpamGate::spot(bool commander)
 	return spam.check(false, commander, t);
 }
 
+int ReviveCalls::step(int player, uint32_t soldier, bool down, bool fire, bool sends)
+{
+	State& s = m_players[player];
+	if (s.soldier != soldier) {
+		s = State {soldier};
+	}
+	const bool wentDown = down && !s.down;
+	const bool pressed = fire && !s.fire; // 0x00645720: 7 only on a fresh press
+	s.down = down;
+	s.fire = fire;
+	if (!sends || !soldier) {
+		return 0;
+	}
+	if (wentDown) {
+		return s.count == 0 ? 0x37 : 0; // 0x00587dee
+	}
+	if (down && pressed && s.count < 3) { // 0x00585e51
+		++s.count;
+		return 0x36;
+	}
+	return 0;
+}
+
 CommRoses::CommRoses(hud::HudManager& hud) : m_hud(hud)
 {
 	// 0x0075e1f0's names and counts.
