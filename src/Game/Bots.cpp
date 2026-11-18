@@ -1145,19 +1145,27 @@ bool BotManager::answerRadio(Bot& bot, int type)
 //  - the queue, by send time: a send due goes out unless a message of its
 //    type was heard within the type's send period (the first of its list:
 //    another said it already), which holds the queue for later.
+// Airborne (the bot's +0x140, slot 0x180) or in an ITAir vehicle moving
+// over 3 m/s: the comm's low-health hold and Idle's wait (0x10069f50's
+// [ebp-0x1c], read by 0x10069af0 at 0x10069ddf) share it.
+bool BotManager::inFlight(const Bot& bot, const GameWorld::PlayerInfo& self) const
+{
+	const GameWorld::VehicleInfo* vehicle = nullptr;
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		vehicle = v.object == self.vehicle ? &v : vehicle;
+	}
+	if (bot.heli.airborne || !vehicle) {
+		return bot.heli.airborne;
+	}
+	const world::Object* object = m_world.objects().find(vehicle->object);
+	const std::string ai = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : std::string();
+	return (m_settings.typeFlags(ai) & kITAir) && std::sqrt(physics::lengthSquared(vehicle->velocity)) > 3;
+}
+
 void BotManager::updateComm(Bot& bot, const GameWorld::PlayerInfo& self)
 {
 	{
-		bool held = bot.heli.airborne;
-		const GameWorld::VehicleInfo* vehicle = nullptr;
-		for (const GameWorld::VehicleInfo& v : m_vehicles) {
-			vehicle = v.object == self.vehicle ? &v : vehicle;
-		}
-		if (vehicle) {
-			const world::Object* object = m_world.objects().find(vehicle->object);
-			const std::string ai = object && object->objectTemplate() ? aiTemplateOf(object->objectTemplate()->name()) : std::string();
-			held = held || ((m_settings.typeFlags(ai) & kITAir) && std::sqrt(physics::lengthSquared(vehicle->velocity)) > 3);
-		}
+		const bool held = inFlight(bot, self);
 		const float health = healthOf(self.vehicle ? self.vehicle : self.soldier);
 		if (!held && health > 0 && health < (self.vehicle ? 0.75f : 0.5f)) {
 			if (!self.vehicle) {
@@ -4398,6 +4406,11 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 	if (self.vehicle && self.driving) {
 		float wait = 0;
 		bot.idlePassenger = -1; // 0x1006b1f0: the passenger waited for, for BBPIdle2d
+		const bool flying = inFlight(bot, self); // 0x10069ddf: no wait in flight
+		int free = 0;
+		for (const GameWorld::VehicleInfo& v : m_vehicles) {
+			free = v.object == self.vehicle ? v.freeSeats : free;
+		}
 		for (const GameWorld::PlayerInfo& mate : players) {
 			const auto it = m_bots.find(mate.id);
 			// 0x10069af0 reads req_pickup (type 2); 0x10069c47's
@@ -4410,7 +4423,19 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 				continue;
 			}
 			const physics::Vec3 d = self.position - mate.position;
-			if (humanPickup ? physics::lengthSquared(d) > 2500.0f : horizontal2(d) > 40.0f * 40.0f) {
+			// 0x10069eee: one the driver can't wait for (a bot with no seat
+			// free, 0x10069dc8; beyond reach, 0x10069dd9; or the driver in
+			// flight, 0x10069de3) has its unanswered req_pickup marked
+			// answered (0x100a6210) and gets "negative" (7) on channel 6, 1 s.
+			if ((mate.ai && free <= 0) || flying
+				|| (humanPickup ? physics::lengthSquared(d) > 2500.0f : horizontal2(d) > 40.0f * 40.0f)) {
+				for (Bot::Radio& r : bot.radio) {
+					if (r.type == 2 && r.sender == mate.id && !r.answered && m_time - r.at < m_settings.radioLifeOf(2)) {
+						r.answered = true;
+						queueRadio(bot, 7, 6, 1.0f);
+						break;
+					}
+				}
 				continue;
 			}
 			const float facing = std::cos(angleBetween(mate.yaw, headingTo(mate.position, self.position)) * kRadians);
@@ -4419,6 +4444,25 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 				bot.idlePassenger = mate.id;
 			}
 			wait = std::max(wait, w);
+		}
+		// Go go go (0x1006a137..0x1006a3a1): a fresh one (0x100a61c0 marks
+		// them answered) is dropped while the passenger waited for is a
+		// human (player slot 0x84); else each sender aboard this vehicle
+		// gets roger_that (6) on channel 7, 1 s, and the wait is dropped
+		// for this think with its timer reset (0x1006a3a7). The next think
+		// waits again, a fresh 10 s, while a passenger still qualifies, as
+		// retail's does. Retail's "negative" (7) while holding (bot slots
+		// 0x1c0 / 0x1c8: +0xfc / +0xfd, set by untraced AI events) has no
+		// counterpart.
+		if (answerRadio(bot, 11)) {
+			const GameWorld::PlayerInfo* waited = bot.idlePassenger >= 0 ? playerOf(bot.idlePassenger) : nullptr;
+			for (const Bot::Radio& r : bot.radio) {
+				const GameWorld::PlayerInfo* sender = r.type == 11 && m_time - r.at < m_settings.radioLifeOf(11) ? playerOf(r.sender) : nullptr;
+				if ((!waited || waited->ai) && sender && sender->vehicle == self.vehicle) {
+					queueRadio(bot, 6, 7, 1.0f);
+					wait = 0;
+				}
+			}
 		}
 		if (wait > 0) {
 			if (bot.waitingSince < 0) {

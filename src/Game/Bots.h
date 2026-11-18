@@ -1497,6 +1497,7 @@ private:
 	void queueRadio(Bot& bot, int type, int channel, float delay, int target = -1);
 	void sendRadioNow(Bot& bot, const GameWorld::PlayerInfo& self, int type, int channel, int target = -1);
 	void updateComm(Bot& bot, const GameWorld::PlayerInfo& self);
+	bool inFlight(const Bot& bot, const GameWorld::PlayerInfo& self) const;
 	// Marks the bot's unanswered messages of a type answered (0x100a61c0):
 	// true when there was one.
 	bool answerRadio(Bot& bot, int type);
