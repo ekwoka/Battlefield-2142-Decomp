@@ -292,11 +292,13 @@ void GameWorld::collideBodies(float seconds)
 	// (0x006c9060: a part's node takes its root's counter, slots 0x158 /
 	// 0x154).
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
-		if (!findDrone(m_bodies[i].object) && !isTitan(m_bodies[i].object) && !m_bodies[i].fixed
-			&& m_objects.find(m_bodies[i].object) && !asleep(m_bodies[i])) {
-			collideMover(m_bodies[i], i, seconds);
-			if (m_objects.find(m_bodies[i].object)) {
-				partsMove(m_bodies[i], i, seconds);
+		Body& body = m_bodies[i];
+		body.rootSolvedBeforeWheels = false;
+		if (!findDrone(body.object) && !isTitan(body.object) && !isRemoteTitan(body.object) && !body.fixed
+			&& m_objects.find(body.object) && !asleep(body)) {
+			collideMover(body, i, seconds);
+			if (m_objects.find(body.object)) {
+				partsMove(body, i, seconds);
 			}
 		}
 	}
@@ -312,7 +314,18 @@ void GameWorld::collideMover(Body& mover, size_t index, float seconds)
 		legsAgainstObjects(mover, seconds);
 	}
 	MeshActor m = actorOf(mover);
-	collideCandidates(mover, index, m, true, seconds);
+	if (!collideCandidates(mover, index, m, CollisionPass::Root, seconds)) {
+		return;
+	}
+	if (mover.vehicle && !mover.vehicle->wheels().empty()) {
+		// 0x006dd1b0 resolves the root before visiting its Spring children.
+		// Probe from the corrected chassis position, with its push cleared.
+		mover.inAir = mover.response.contacts().empty();
+		mover.response.solve(mover.body, !m_predicting);
+		mover.rootSolvedBeforeWheels = true;
+		m = actorOf(mover);
+		collideCandidates(mover, index, m, CollisionPass::Wheels, seconds);
+	}
 }
 
 bool GameWorld::partMoves(const Body& body, const MeshActor& part) const
@@ -320,8 +333,10 @@ bool GameWorld::partMoves(const Body& body, const MeshActor& part) const
 	return part.partMesh >= 0 && body.partMeshes[static_cast<size_t>(part.partMesh)].mover;
 }
 
-bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool mRoot, float seconds)
+bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, CollisionPass pass, float seconds)
 {
+	const bool mRoot = pass == CollisionPass::Root;
+	const bool ownWheels = pass == CollisionPass::Wheels;
 	// The motion's speeds are the roots' nodes' (slot 0x58; a part's node
 	// has none of its own, 0x006c99a0).
 	const float speedM = length(mover.body.velocity);
@@ -406,7 +421,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 	// The static parts near it.
 	++m_staticStamp;
 	float reachM = m.radius;
-	if (mRoot && mover.vehicle) {
+	if (ownWheels) {
 		const auto& wheels = mover.vehicle->wheels();
 		for (size_t w = 0; w < wheels.size(); ++w) {
 			const float part = w < mover.wheelRadii.size() ? mover.wheelRadii[w] : wheels[w].radius;
@@ -434,14 +449,14 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 				if (!c.mesh) {
 					continue;
 				}
-				if (paired(c, 0)) {
+				if (!ownWheels && paired(c, 0)) {
 					if (!collide(c, part.root)) {
 						return false;
 					}
 					refresh(); // the pre-trace may have moved it
 				}
 				// Its wheels' parts as movers of their own (their probes).
-				if (mRoot) {
+				if (ownWheels) {
 					wheelProbes(mover, c, seconds);
 				}
 			}
@@ -471,7 +486,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			if (moved && partMoves(other, c)) {
 				continue;
 			}
-			if (paired(c, length(other.body.velocity))) {
+			if (!ownWheels && paired(c, length(other.body.velocity))) {
 				if (!collide(c, false)) {
 					return false;
 				}
@@ -480,7 +495,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 					break;
 				}
 			}
-			if (mRoot) {
+			if (ownWheels) {
 				wheelProbes(mover, c, seconds);
 			}
 		}
@@ -491,15 +506,16 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			continue;
 		}
 		MeshActor c = actorOf(other);
-		if (paired(c, length(other.body.velocity))) {
+		if (!ownWheels && paired(c, length(other.body.velocity))) {
 			if (!collide(c, true)) {
 				return false;
 			}
 			refresh();
 		}
-		if (mRoot && other.vehicleMesh.get() == c.mesh) { // not a candidate the pair just wrecked
-			wheelProbes(mover, c, seconds);
-			if (!asleep(other)) {
+		if (other.vehicleMesh.get() == c.mesh) { // the pair may have wrecked the candidate
+			if (ownWheels) {
+				wheelProbes(mover, c, seconds);
+			} else if (mRoot && !asleep(other)) {
 				wheelProbes(other, m, seconds);
 			}
 		}
@@ -536,13 +552,13 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			c.collisionGroups = part.groups;
 			c.team = titan.team;
 			c.node = {std::max(tb->mass, 1e6f), true, false};
-			if (paired(c, length(tb->body.velocity))) {
+			if (!ownWheels && paired(c, length(tb->body.velocity))) {
 				if (!collide(c, true)) {
 					return false;
 				}
 				refresh();
 			}
-			if (mRoot) {
+			if (ownWheels) {
 				wheelProbes(mover, c, seconds);
 			}
 		}
@@ -617,7 +633,7 @@ void GameWorld::partsMove(Body& mover, size_t index, float seconds)
 			physics::collidePartWithGround(mover.body, part.response, *m.points, m.rotation, m.position, m_ground, {},
 				touched);
 		}
-		if (!collideCandidates(mover, index, m, false, seconds)) {
+		if (!collideCandidates(mover, index, m, CollisionPass::Part, seconds)) {
 			return;
 		}
 	}

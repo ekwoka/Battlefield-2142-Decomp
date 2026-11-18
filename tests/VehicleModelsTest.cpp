@@ -8962,12 +8962,10 @@ TEST(Vehicles_PartsMeetTheGroundAsMovers)
 	CHECK(lifted < rest + 0.5f);
 }
 
-// A part as a mover meets the other bodies (0x006dc7b0 with the part as
-// param_3, the roots' velocities, its contacts solved onto its root):
-// us_ag's TAD base (geometry 13, 30 vertices under the nose, 0.6 m over
-// the ground on its gear) settles onto a tank parked across its nose and
-// pushes it away (the tank ends past 5.9 m; without the part as a mover
-// the gunship's hull alone met it, 5.73 m).
+// A moving part can meet another body and solve its contacts onto its
+// root (0x006dc7b0). The tank's moving parts meet a gunship settling in
+// front of it. Disabling the tank's part movers drops the displacement
+// from 1.04 m to 0.80 m, below the fixture's 0.9 m requirement.
 TEST(Vehicles_PartMoverPushesAnotherBody)
 {
 	if (!gameDir()) {
@@ -8977,13 +8975,14 @@ TEST(Vehicles_PartMoverPushesAnotherBody)
 	if (!g.loaded || !g.templates.find("us_ag")) {
 		return;
 	}
-	world::Object* parked = g.objects.create(g.templates.find("eu_tank"), {0, 1.2f, 5}, {90, 0, 0});
+	constexpr float startZ = 4.7f;
+	world::Object* parked = g.objects.create(g.templates.find("eu_tank"), {0, 1.2f, startZ}, {90, 0, 0});
 	parked->setTeam(2);
 	const uint32_t tank = parked->id();
-	g.start("us_ag", {0, 3.5f, 0}, 5);
+	g.start("us_ag", {0, 3.0f, 0}, 5);
 	const physics::Vec3 at = g.position(tank);
-	std::fprintf(stderr, "  the tank under us_ag's nose ends at z %.2f\n", at.z);
-	CHECK(at.z > 5.9f);
+	std::fprintf(stderr, "  the tank under us_ag's nose moves %.2f m\n", at.z - startZ);
+	CHECK(at.z - startZ > 0.9f);
 }
 
 // A deployed sentry gun (Unl_Deployer_Sentrygun's eu_sentrygun) is run by

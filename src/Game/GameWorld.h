@@ -2936,6 +2936,7 @@ private:
 		// Touching nothing since its last step (the physics node's +0x249,
 		// slot 0x1b8): the radius trigger's radiusDetonateWithAirVehicles.
 		bool inAir = false;
+		bool rootSolvedBeforeWheels = false;
 		float mass = 1;
 		bool majorActor = false;
 		bool controlObject = false;
@@ -3453,7 +3454,8 @@ private:
 	// parts near it, the other bodies' roots and parts that weren't movers
 	// before it this frame, the Titans' parts. `m` is the root (mRoot) or
 	// one of its mover parts. False when the mover was destroyed.
-	bool collideCandidates(Body& mover, size_t index, MeshActor& m, bool mRoot, float seconds);
+	enum class CollisionPass { Root, Wheels, Part };
+	bool collideCandidates(Body& mover, size_t index, MeshActor& m, CollisionPass pass, float seconds);
 	// The parts as movers of their own, after their root (the dispatch's
 	// chain, 0x006dd1b0): each mover part's ground pass (0x006b9260) and
 	// broad phase (0x006dc7b0); their responses are solved onto the root

@@ -2338,9 +2338,12 @@ void GameWorld::stepLoneVehicle(LoneVehicle& lone, const VehicleInput& driver, f
 	m_predicting = true;
 	b.vehicle->setInput(driver);
 	if (stepBody(b, seconds)) {
+		b.rootSolvedBeforeWheels = false;
 		collideMover(b, m_bodies.size(), seconds);
 		partsMove(b, m_bodies.size(), seconds);
-		b.response.solve(b.body);
+		if (!b.rootSolvedBeforeWheels) {
+			b.response.solve(b.body);
+		}
 		if (walker(b)) {
 			b.legsResponse.solveLegs(b.body);
 		}
@@ -15487,12 +15490,18 @@ void GameWorld::stepPhysicsCollide(float seconds)
 		// The physics node's +0x249 (slot 0x1b8): set at its step, cleared
 		// by a contact (0x006b9260, 0x006bb050 -> slot 0x1b4(0)); the
 		// rewrite's wheels touching the ground count as contacts.
-		b.inAir = b.response.contacts().empty() && b.legsResponse.contacts().empty()
+		b.inAir = (!b.rootSolvedBeforeWheels || b.inAir)
+			&& b.response.contacts().empty() && b.legsResponse.contacts().empty()
 			&& std::all_of(b.partMeshes.begin(), b.partMeshes.end(),
 				[](const Body::PartMesh& p) { return !p.mover || p.response.contacts().empty(); })
 			&& !(b.vehicle && std::any_of(b.vehicle->wheels().begin(), b.vehicle->wheels().end(),
 				[](const Vehicle::Wheel& w) { return w.contact; }));
-		b.response.solve(b.body, !m_predicting); // the server keeps the stuck push
+		// A later mover can still add a contact (e.g. a walker's legs).
+		// Apply that response without solving an empty chassis twice.
+		if (!b.rootSolvedBeforeWheels || !b.response.contacts().empty()
+			|| physics::lengthSquared(b.response.pushOut()) != 0) {
+			b.response.solve(b.body, !m_predicting); // the server keeps the stuck push
+		}
 		// The legs object's response after the hull's (0x006ce740).
 		if (walker(b)) {
 			b.legsResponse.solveLegs(b.body);
