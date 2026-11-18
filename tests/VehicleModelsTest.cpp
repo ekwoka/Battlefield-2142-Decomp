@@ -3915,6 +3915,82 @@ TEST(Vehicles_StaticAAFireFollowsItsCamera)
 	}
 }
 
+// The PAC APC's pod-seat guns (as_apc_pods F3..F6: as_apc_PodcannonN_gun,
+// fire.fireInCameraDof) turn by two nested yaw bundles on PIMouseLookX
+// (AS_APC_PodcannonN, AS_APC_barrelN_base) and pitch the barrel and the
+// camera by bundles of their own. With fireInCameraDof the round leaves
+// along the camera object's matrix (0x005f1a20 -> 0x004b9db0, slot 0x78),
+// so at every yaw and pitch limit it goes where the view (the crosshair)
+// looks.
+TEST(Vehicles_ApcPodGunsFireAtTheCrosshair)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		if (!std::ifstream(std::string(gameDir()) + "/" + mod + "/ServerArchives.con")) continue;
+		for (const int key : {3, 4, 5, 6}) {
+			for (const float side : {1.0f, -1.0f}) {
+				Garage g(gameDir(), mod);
+				if (!g.loaded || !g.templates.find("as_apc_pods")) continue;
+				// Ground under its wheels alone: a round aimed down clears its tick.
+				g.groundShape = [](float x, float z) { return std::fabs(x) < 1.9f && std::fabs(z - 8) < 4 ? 0.0f : -100.0f; };
+				const uint32_t apc = g.start("as_apc_pods", {0, 2, 8});
+				g.animate();
+				CHECK(g.enter(apc));
+				game::SoldierInput seat;
+				seat.switchSeat = key;
+				g.world->setPlayerInput(seat);
+				g.world->tick(1 / 30.0f);
+				game::GameWorld::PlayerInfo me;
+				g.world->playerInfo(g.world->localPlayer(), me);
+				const auto seats = g.world->vehicleSeats(apc);
+				CHECK(me.vehicle == apc && me.seat >= 2 && static_cast<size_t>(me.seat) < seats.size());
+				if (me.seat < 2 || static_cast<size_t>(me.seat) >= seats.size()) continue;
+				CHECK(seats[static_cast<size_t>(me.seat)].weapon.find("Podcannon") != std::string::npos);
+				PlayerCamera camera(*g.world, *g.systems, nullptr);
+				// Hard against the yaw limit one way and the pitch limit (up or down) for 3 s.
+				game::SoldierInput turn;
+				turn.turn = 5 * side;
+				turn.aimPitch = 0;
+				for (int i = 0; i < 90; ++i) {
+					turn.aimPitch += 3 * side;
+					g.world->setPlayerInput(turn);
+					g.world->tick(1 / 30.0f);
+					camera.tick(1 / 30.0f);
+				}
+				game::SoldierInput fire;
+				fire.aimPitch = turn.aimPitch;
+				fire.fire = true;
+				const size_t before = g.world->projectiles().size();
+				bool fired = false;
+				for (int i = 0; i < 30 && !fired; ++i) {
+					PlayerCamera::View sight;
+					camera.tick(1 / 30.0f);
+					CHECK(camera.view(sight, 16.0f / 9.0f));
+					g.world->setPlayerInput(fire);
+					g.world->tick(1 / 30.0f);
+					for (size_t n = before; n < g.world->projectiles().size() && !fired; ++n) {
+						const game::Projectile& p = g.world->projectiles()[n];
+						if (p.shooter != apc) continue;
+						const float yaw = std::atan2(p.heading.x, p.heading.z);
+						const float pitch = std::atan2(p.heading.y, std::hypot(p.heading.x, p.heading.z));
+						const float error = std::acos(std::clamp(std::sin(sight.pitch) * std::sin(pitch)
+							+ std::cos(sight.pitch) * std::cos(pitch) * std::cos(yaw - sight.yaw), -1.0f, 1.0f)) * 57.29578f;
+						float gunYaw = 0, gunPitch = 0;
+						g.world->gunAim(apc, me.seat, gunYaw, gunPitch);
+						std::fprintf(stderr, "  %s F%d %s: view %.1f/%.1f, round %.1f/%.1f (gun %.1f/%.1f), off by %.2f degrees\n",
+							mod, key, side > 0 ? "right/up" : "left/down", sight.yaw * 57.29578f, sight.pitch * 57.29578f,
+							yaw * 57.29578f, pitch * 57.29578f, gunYaw, gunPitch, error);
+						CHECK(error < 1.0f);
+						fired = true;
+					}
+				}
+				CHECK(fired);
+			}
+		}
+	}
+}
+
 // The stationary guns (static_av/aa/ap: hasRestrictedExit, hasMobilePhysics 0) are
 // also in the static world; their own mesh there must not block their
 // gunner's exit (the places' ray and room test, 0x005c7840).
@@ -9926,4 +10002,82 @@ TEST(VehicleModels_ParkedVehiclesBundlesUpdateAfterTheExit)
 	CHECK(asleepAboard && g.world->bodyAsleep(at));
 	CHECK(std::fabs(aboard) > 40);
 	CHECK(std::fabs(rotation.y) < 0.01f);
+}
+
+// A bot in those seats aims by the gun's yaw (GameWorld::gunAim; AIDLL
+// aims from the weapon's own frame, 0x1008e940). The barrel turns by both
+// yaw bundles (AS_APC_PodcannonN and AS_APC_barrelN_base, the latter set
+// +-10 on F4/F5): the aim's yaw counts both, so the rounds, which leave
+// along the camera beside the barrel, go where the bot aims.
+TEST(Vehicles_ApcPodGunBotAimCountsBothYawBundles)
+{
+	if (!gameDir()) return;
+	for (const int key : {3, 4, 5, 6}) {
+		for (const float side : {1.0f, -1.0f}) {
+			Garage g(gameDir());
+			if (!g.loaded || !g.templates.find("as_apc_pods")) return;
+			g.groundShape = [](float x, float z) { return std::fabs(x) < 1.9f && std::fabs(z - 8) < 4 ? 0.0f : -100.0f; };
+			const uint32_t apc = g.start("as_apc_pods", {0, 2, 8});
+			const int bot = g.world->addPlayer("Bot", 2, true);
+			CHECK(g.world->spawnSoldier(bot));
+			game::GameWorld::PlayerInfo info;
+			g.world->playerInfo(bot, info);
+			const physics::Vec3 origin = g.position(apc);
+			for (float radius = 0; radius <= 6 && info.vehicle != apc; radius += 1.5f) {
+				for (int k = 0; k < 8 && info.vehicle != apc; ++k) {
+					const float angle = k * 0.785398163f;
+					g.world->setSoldierPosition(info.soldier, {origin.x + radius * std::sin(angle), origin.y - 1.0f, origin.z + radius * std::cos(angle)});
+					game::SoldierInput use;
+					use.use = true;
+					g.world->setInput(bot, use);
+					g.world->tick(1 / 30.0f);
+					g.world->setInput(bot, {});
+					g.world->tick(1 / 30.0f);
+					g.world->playerInfo(bot, info);
+				}
+			}
+			game::SoldierInput seat;
+			seat.switchSeat = key;
+			g.world->setInput(bot, seat);
+			g.world->tick(1 / 30.0f);
+			g.world->setInput(bot, {});
+			g.world->tick(1 / 30.0f);
+			g.world->playerInfo(bot, info);
+			CHECK(info.vehicle == apc && info.seat == key - 1);
+			if (info.seat != key - 1) continue;
+			float restYaw = 0, pitch = 0;
+			CHECK(g.world->gunAim(apc, info.seat, restYaw, pitch));
+			// Its look hard against the yaw limit one way (a bot's PIMouseLookX, level).
+			game::SoldierInput in;
+			in.turn = 5 * side;
+			for (int i = 0; i < 90; ++i) {
+				g.world->setInput(bot, in);
+				g.world->tick(1 / 30.0f);
+			}
+			in.turn = 0;
+			in.fire = true;
+			const size_t before = g.world->projectiles().size();
+			for (int i = 0; i < 20 && g.world->projectiles().size() == before; ++i) {
+				g.world->setInput(bot, in);
+				g.world->tick(1 / 30.0f);
+			}
+			CHECK(g.world->projectiles().size() > before);
+			if (g.world->projectiles().size() == before) continue;
+			float yaw = 0, bundle = 0;
+			physics::Vec3 eye;
+			physics::Mat3 hull;
+			CHECK(g.world->gunAim(apc, info.seat, yaw, pitch) && g.world->seatYaw(apc, info.seat, bundle));
+			CHECK(g.world->gunFrame(apc, info.seat, eye, hull));
+			const float y = yaw * 0.0174532925f, x = pitch * 0.0174532925f;
+			const physics::Vec3 aim = hull.transform({std::sin(y) * std::cos(x), std::sin(x), std::cos(y) * std::cos(x)});
+			const game::Projectile& p = g.world->projectiles()[before];
+			const float off = std::acos(std::clamp(physics::dot(aim, p.heading) / std::sqrt(physics::lengthSquared(p.heading)), -1.0f, 1.0f)) * 57.29578f;
+			const float turned = std::remainder(yaw - restYaw, 360.0f);
+			std::fprintf(stderr, "  F%d %s: bundle %.1f, aim turned %.1f, round off the aim by %.2f degrees\n", key,
+				side > 0 ? "right" : "left", bundle, turned, off);
+			CHECK(std::fabs(bundle) > 30);
+			CHECK(std::fabs(turned - 2 * bundle) < 0.5f); // both bundles, at the same limits
+			CHECK(off < 1.0f);
+		}
+	}
 }

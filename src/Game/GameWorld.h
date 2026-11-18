@@ -1585,6 +1585,10 @@ public:
 		struct PitchPart {
 			std::string name;
 			float minPitch = -90, maxPitch = 90;
+			// A yaw part above the seat's firearm (as_apc's AS_APC_barrelN_base):
+			// the barrel turns by it too, from its rest turn on the yaw bundle.
+			bool carriesGun = false;
+			float restYaw = 0;
 		};
 		std::vector<PitchPart> morePitchBundles;
 		// Other bundles on the same mouse yaw (a gun's camera chain: eu_at's gunners' cameraBase); same limits, same angle.

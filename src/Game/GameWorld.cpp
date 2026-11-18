@@ -11701,11 +11701,13 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 	// Depth first from the root; `seat` is the seat whose subtree this is.
 	// Each child sits at its offset turned by its parents' rotations, and
 	// adds its own rotation (as Vehicle::fromTemplate places the wheels).
+	std::vector<std::pair<int, size_t>> yawParts; // the seats' moreYawBundles above the node walked
 	const std::function<void(const world::ObjectTemplate&, physics::Vec3, physics::Mat3, int, int)> walk =
 		[&](const world::ObjectTemplate& t, physics::Vec3 at, physics::Mat3 turn, int seat, int depth) {
 			if (depth > 12) {
 				return;
 			}
+			const size_t yawPartsBefore = yawParts.size();
 			const auto& settings = t.settings();
 			places.emplace(t.name(), std::make_pair(at, turn));
 			const auto info = settings.find("seatInformation");
@@ -11833,6 +11835,11 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				}
 				if (t.typeName() == "GenericFireArm") {
 					anchorGun(owner);
+					for (const auto& [partSeat, part] : yawParts) {
+						if (partSeat == seat) {
+							owner.moreYawBundles[part].carriesGun = true;
+						}
+					}
 					if (owner.weapons.empty() && !owner.pitchBundle.empty()
 						&& static_cast<size_t>(seat) < pitchFrames.size()) {
 						// turn = rest x the bundle's frame (rows compose as
@@ -11957,7 +11964,9 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						if (const auto high = settings.find("maxRotation"); high != settings.end()) {
 							part.maxPitch = parseVec3(high->second).x;
 						}
+						part.restYaw = std::remainder(turn.yawPitchRoll().x - owner.frameYaw, 360.0f);
 						owner.moreYawBundles.push_back(part);
+						yawParts.emplace_back(seat, owner.moreYawBundles.size() - 1);
 					}
 					if (mousePitch && owner.pitchBundle.empty()) {
 						anchorGun(owner);
@@ -12035,6 +12044,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 			}
 			carried = carriedBefore;
 			pitchSeat = pitchSeatBefore;
+			yawParts.resize(yawPartsBefore);
 		};
 	walk(vehicle, {}, physics::Mat3 {}, -1, 0);
 	// The object each seat's soldier sits on (SeatLayout::seatParent): found
@@ -12177,14 +12187,24 @@ float GameWorld::animationDurationFor(uint32_t object) const
 
 bool GameWorld::gunAim(uint32_t vehicle, int seat, float& yaw, float& pitch) const
 {
+	static const std::vector<SeatLayout::PitchPart> kNoParts;
 	for (const Body& body : m_bodies) {
 		if (body.object == vehicle && seat >= 0 && static_cast<size_t>(seat) < body.guns.size()
 			&& body.guns[static_cast<size_t>(seat)].weapon) {
 			const auto known = m_layouts.find(m_objects.find(vehicle)->objectTemplate()->name());
-			const float frame = known != m_layouts.end() && static_cast<size_t>(seat) < known->second.seats.size()
-				? known->second.seats[static_cast<size_t>(seat)].frameYaw
-				: 0.0f;
-			yaw = std::remainder(frame + body.guns[static_cast<size_t>(seat)].yaw, 360.0f);
+			const bool laid = known != m_layouts.end() && static_cast<size_t>(seat) < known->second.seats.size();
+			const float frame = laid ? known->second.seats[static_cast<size_t>(seat)].frameYaw : 0.0f;
+			const float turned = body.guns[static_cast<size_t>(seat)].yaw;
+			yaw = frame + turned;
+			// The yaw parts on the same look above the firearm turn the barrel
+			// too, each within its own limits (partPose): AIDLL aims from the
+			// weapon's own frame (0x1008e940), which they carry.
+			for (const SeatLayout::PitchPart& more : laid ? known->second.seats[static_cast<size_t>(seat)].moreYawBundles : kNoParts) {
+				if (more.carriesGun) {
+					yaw += more.restYaw + std::clamp(turned, std::min(more.minPitch, more.maxPitch), std::max(more.minPitch, more.maxPitch));
+				}
+			}
+			yaw = std::remainder(yaw, 360.0f);
 			pitch = body.guns[static_cast<size_t>(seat)].pitch;
 			return true;
 		}
@@ -13979,10 +13999,15 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 		&& static_cast<size_t>(player.seat) < body.looks.size()) {
 		// A camera riding the gun's bundles that is also the seat's mouse-look
 		// camera (the cupola gunners'): its Camera object's matrix carries the
-		// look (partPose), which the round follows (0x005f1a20).
-		const Body::Look& look = body.looks[static_cast<size_t>(player.seat)];
-		direction = (physics::Mat3::fromYawPitchRoll({look.yaw, look.pitch, 0}) * pitchFrame * yawTurn * mount.turn
-			* body.body.rotation).transform(local);
+		// look (partPose), which the round follows (0x005f1a20 -> 0x004b9db0,
+		// slot 0x78). Posed through the tree: the as_apc pod cannons' camera
+		// pitches by its own axis beside the barrel's bundle and turns with a
+		// second yaw bundle (AS_APC_barrelN_base) the gun's yaw doesn't count.
+		physics::Vec3 at;
+		physics::Mat3 turn;
+		if (seatCameraFrame(body, player.seat, std::max(w.startCameraId, 0), at, turn)) {
+			direction = turn.rows[2] * (1 / std::sqrt(physics::lengthSquared(turn.rows[2])));
+		}
 	}
 	const physics::Vec3 straight = direction;
 	// The rounds stray by the deviation (0x005f5540): (minDev + the
