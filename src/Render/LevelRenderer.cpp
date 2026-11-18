@@ -3839,7 +3839,8 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		}
 		m_drawList.push_back(item);
 	}
-	m_titanExteriorLods.endFrame();
+	m_titanExteriorLods.endFrame(m_sources && m_sources->enhanced && m_sources->enhanced->enabled
+		&& m_sources->enhanced->titanHullLods);
 	if (uploaded) {
 		m_gpu.flushUploads();
 	}
