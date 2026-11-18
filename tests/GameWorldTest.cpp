@@ -7085,12 +7085,12 @@ TEST(GameWorld_FireObstruction)
 	CHECK(!world.fireObstructed({0, 1.5f, 8.5f}, ahead, right, up, -1.5f, 2, 1, parked));
 }
 
-// The close-to indications (0x0059a6c0, every 0.2 s on the server): a
-// team object whose Radio has closeToIndicationDist within that plus the
+// The close-to indications (0x0059a6c0, every 0.2 s on the server): an
+// object whose Radio has closeToIndicationDist within that plus the
 // player's radius (on the plane with indicationDistance2D) posts 2/0x3e
-// with its closeToIndicationType once, its going 2/0x3f; another team's
-// counts for nothing; a mine (a projectile) of type 0 too; death posts
-// 2/0x3f with -1.
+// with its closeToIndicationType once, its going 2/0x3f; the enemy Titan
+// too (only a projectile's team is tested, 0x0059a8b0: an enemy mine
+// counts for nothing, our own does); death posts 2/0x3f with -1.
 TEST(GameWorld_CloseToIndication)
 {
 	Range range;
@@ -7107,7 +7107,7 @@ TEST(GameWorld_CloseToIndication)
 	// and within 250 m on the plane.
 	world::Object* ours = range.objects.create(titan, {info.position.x + 150, info.position.y + 100, info.position.z});
 	ours->setTeam(2);
-	world::Object* theirs = range.objects.create(titan, {info.position.x - 100, info.position.y, info.position.z});
+	world::Object* theirs = range.objects.create(titan, {info.position.x - 600, info.position.y, info.position.z});
 	theirs->setTeam(1);
 	const auto run = [&](float seconds) {
 		std::vector<game::GameWorld::CloseToEvent> all;
@@ -7127,6 +7127,25 @@ TEST(GameWorld_CloseToIndication)
 	ours->setPosition({info.position.x + 600, info.position.y, info.position.z});
 	events = run(0.5f);
 	CHECK(events.size() == 1 && !events[0].enter && events[0].type == -1);
+	// The enemy Titan alone in range (the APC riders' pod range near it).
+	theirs->setPosition({info.position.x - 100, info.position.y, info.position.z});
+	events = run(0.5f);
+	CHECK(events.size() == 1 && events[0].type == 1 && events[0].enter);
+	theirs->setPosition({info.position.x - 600, info.position.y, info.position.z});
+	events = run(0.5f);
+	CHECK(events.size() == 1 && !events[0].enter && events[0].type == -1);
+	// Mines (projectiles, type 0, 25 m): the enemy's is not shown, ours is.
+	world::ObjectTemplate* mine = range.templates.create("GenericProjectile", "mine");
+	mine->settings()["Radio.closeToIndicationDist"] = "25";
+	mine->settings()["Radio.indicationDistance2D"] = "1"; // wherever it settles
+	world::Object* enemyMine = range.objects.create(mine, {info.position.x + 10, info.position.y, info.position.z});
+	enemyMine->setTeam(1);
+	CHECK(run(0.5f).empty());
+	enemyMine->setTeam(2);
+	events = run(0.5f);
+	CHECK(events.size() == 1 && events[0].type == 0 && events[0].enter);
+	enemyMine->setPosition({info.position.x + 900, info.position.y, info.position.z});
+	CHECK(run(0.5f).size() == 1);
 	// Two of type 1 in (each new one posts its 0x3e), one going: no leave
 	// while the other stays.
 	ours->setPosition({info.position.x + 100, info.position.y, info.position.z});

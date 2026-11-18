@@ -712,6 +712,57 @@ TEST(HudAlerts_CloseToObjectVariables)
 	CHECK(hudManager.number("CloseToObject0") == 0);
 }
 
+// The shipped APC pod seats' HUD (GuiIndex 18, HudElementsEUAPCDriver.con):
+// CloseToObject1 swaps the short pod-range icon for the long one and runs
+// "sound.playSound POD_power_up", its clearing (type -1) POD_power_down.
+TEST(HudNodes_ApcPodRangeLights)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	hud::HudManager manager([&files](const std::string& path, std::string& text) {
+		std::vector<uint8_t> data;
+		if (!files.readFile(path, data)) {
+			return false;
+		}
+		text.assign(data.begin(), data.end());
+		return true;
+	});
+	hud::registerHudConsoleMethods(console, manager);
+	console.setScriptOutput(false, false);
+	CHECK(console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+	std::vector<std::string> ran;
+	manager.setCommandRunner([&ran](const std::string& line) { ran.push_back(line); });
+	for (const char* name : {"ShowIngameHud", "ShowVehicleHud", "VehicleIconShow", "CrosshairIconShow", "AffectedByEMPShow"}) {
+		manager.set(name, 1);
+	}
+	manager.set("GuiIndex", 18);
+	const auto shown = [&manager]() {
+		const auto quads = manager.frame(1 / 30.0f);
+		return std::make_pair(quadWith(quads, "pod_distance_long_colored") != nullptr,
+			quadWith(quads, "pod_distance_short_colored") != nullptr);
+	};
+	CHECK(shown() == std::make_pair(false, true));
+	ran.clear();
+	menu::closeToObject(manager, 1, true);
+	CHECK(shown() == std::make_pair(true, false));
+	CHECK((ran == std::vector<std::string> {"sound.playSound POD_power_up"}));
+	ran.clear();
+	menu::closeToObject(manager, -1, false);
+	CHECK(shown() == std::make_pair(false, true));
+	CHECK((ran == std::vector<std::string> {"sound.playSound POD_power_down"}));
+}
+
 // The radio's important lines (0x0042e0c0): an id with "<id>_important"
 // in the strings shows that first as the important message for 5 s
 // (0x0042bef0 kind 4 → 0x0074ec50), then its own chat line; an id holding

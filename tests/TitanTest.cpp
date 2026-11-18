@@ -1395,6 +1395,73 @@ TEST(Titan_PodSeatsChangeToTheTitanPodNearATitan)
 	}
 }
 
+// The APC's pod-range lights (CloseToObject1: HudElementsEUAPCDriver.con's
+// pod_distance_long icons, POD_power_up / _down) follow the Titans' Radio
+// closeToIndicationDist 250 (type 1, on the plane, 0x0059a6c0): a pod seat's
+// rider gets 2/0x3e within 250 m of either team's Titan (only projectiles'
+// teams are tested, 0x0059a8b0); his death 2/0x3f. Vanilla's Titans only.
+TEST(Titan_ApcPodRangeIndicationNearEitherTitan)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+		CHECK(level.loaded && level.titan(1) && level.titan(2) && level.templates.find("eu_apc_pods"));
+		if (!level.loaded || !level.titan(1) || !level.titan(2) || !level.templates.find("eu_apc_pods")) return;
+		level.run(0.5f);
+		for (const int titanTeam : {1, 2}) {
+			const physics::Vec3 titanAt = level.titan(titanTeam)->position;
+			const physics::Vec3 other = level.titan(3 - titanTeam)->position;
+			// 150 m from this Titan towards the other one.
+			physics::Vec3 toward = other - titanAt;
+			toward = toward * (1.0f / std::sqrt(toward.x * toward.x + toward.z * toward.z));
+			const float x = titanAt.x + toward.x * 150, z = titanAt.z + toward.z * 150;
+			world::Object* apc = level.objects.create(level.templates.find("eu_apc_pods"), {x, level.world->terrainHeight(x, z) + 2.5f, z});
+			apc->setTeam(2);
+			level.run(2 / 30.0f);
+			const int player = level.world->addPlayer(titanTeam == 2 ? "Own" : "Enemy", 2, false);
+			level.world->setSpawnVehicle(player, apc->id());
+			CHECK(level.world->spawnSoldier(player));
+			int podSeat = -1; // EU_APC_Podcannon1_pods (F3)
+			const auto seats = level.world->vehicleSeats(apc->id());
+			for (size_t i = 0; i < seats.size() && podSeat < 0; ++i) {
+				std::string name = seats[i].name;
+				std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				podSeat = name.find("podcannon") != std::string::npos ? static_cast<int>(i) : -1;
+			}
+			CHECK(podSeat > 0);
+			game::SoldierInput input;
+			input.switchSeat = podSeat + 1;
+			level.world->setInput(player, input);
+			level.run(1 / 30.0f);
+			level.world->setInput(player, {});
+			const auto events = [&](float seconds) {
+				std::vector<game::GameWorld::CloseToEvent> all;
+				for (float t = 0; t < seconds; t += 1 / 30.0f) {
+					level.run(1 / 30.0f);
+					for (const auto& e : level.world->takeCloseToEvents(player)) all.push_back(e);
+				}
+				return all;
+			};
+			auto near = events(0.5f);
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(player, info) && info.vehicle == apc->id() && info.seat == podSeat);
+			std::fprintf(stderr, "  %s, %s Titan 150 m: %zu events%s\n", mod, titanTeam == 2 ? "own" : "enemy", near.size(),
+				near.empty() ? "" : near[0].enter ? " (in)" : " (out)");
+			// Remaster's eu_ / as_titan_playtest have no Radio component
+			// (only its _bots and _wake Titans keep the rows): no lights.
+			const bool authored = std::string(mod) == "mods/bf2142";
+			CHECK(authored ? near.size() == 1 && near[0].enter && near[0].type == 1 : near.empty());
+			// The rider killed: the list cleared (0x0059a5f0, type -1).
+			level.world->setHitPoints(info.soldier, 0);
+			const auto out = events(0.5f);
+			CHECK(authored ? out.size() == 1 && !out[0].enter : out.empty());
+			level.objects.remove(apc->id());
+		}
+	}
+}
+
 // A real APC pod dropped onto the friendly Suez Titan's upper deck. The
 // pod must eject on contact and disappear shortly afterwards, without waiting
 // for world-space velocity to settle on the Titan.

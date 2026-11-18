@@ -443,10 +443,11 @@ public:
 	// 25) within that plus the player's controlled object's radius (slot
 	// 0x90) of it, measured on the plane with indicationDistance2D
 	// (+0x1fc), gathered within the radius + 200 (the collision manager's
-	// sphere query, slot 0x44); only the player's team's objects (an
-	// object's team interface 0x94c1 slot 0x60 against the player's slot
-	// 0xf8) unless the player's ability block (slot 0x2a0) has its +1
-	// flag (player +0x30d, cleared by 0x0059ac00; nothing found sets it).
+	// sphere query, slot 0x44); a projectile (interface 0x94c1, a mine)
+	// only of the player's team (its slot 0x60 against the player's slot
+	// 0xf8), anything else (a Titan) of either team, unless the player's
+	// ability block (slot 0x2a0) has its +1 flag (player +0x30d, cleared
+	// by 0x0059ac00; nothing found sets it).
 	// The first of a closeToIndicationType (+0x204) to come in posts
 	// event 2/0x3e with the player and the type, the last to go 2/0x3f
 	// (the list +0x170, map +0x16c); none in range, or the player dead
