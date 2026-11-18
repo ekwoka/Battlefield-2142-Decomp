@@ -8064,7 +8064,9 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 			brake();
 			return true;
 		}
-		if (m_settings.stuckRecovery() && bot.follower.stuck() && bot.followId == goalId) {
+		const bool wedged = bot.wedgedSince >= 0 && m_time - bot.wedgedSeen <= 0.5f && m_time - bot.wedgedSince >= 20;
+		if (m_settings.stuckRecovery() && ((bot.follower.stuck() && bot.followId == goalId) || wedged)) {
+			bot.wedgedSince = -1;
 			// enhanced.botRecovery, an addition beyond the original game: no
 			// progress for 20 s (the follower's test, AIDLL 0x10092bc0). Without
 			// it the bot asks for the same route again (follow) and a driver
@@ -8310,6 +8312,20 @@ bool BotManager::drive(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	input.strafe = out.turn;
 	input.sprint = input.sprint || out.sprint;
 	bot.follower.progress(toAi(at), std::max(std::fabs(out.throttle), std::fabs(out.turn)), m_time);
+	if (m_settings.stuckRecovery()) {
+		// enhanced.botRecovery (not retail): the follower's test above
+		// restarts with every route request, and a squad member standing
+		// still is given its goal again every 9 s (0x100c0bb0 with
+		// 0x100bf670's 0.1 m), a new spot and a new request, so a driver
+		// wedged on a wall never reaches 20 s there. This watch, the same
+		// 4 m in 20 s with input, keeps running across the requests.
+		const bool trying = std::max(std::fabs(out.throttle), std::fabs(out.turn)) > 0.1f;
+		if (!trying || bot.wedgedSince < 0 || m_time - bot.wedgedSeen > 0.5f || horizontal2(at - bot.wedgedAt) > 16.0f) {
+			bot.wedgedAt = at;
+			bot.wedgedSince = m_time;
+		}
+		bot.wedgedSeen = m_time;
+	}
 	horn(bot, self, *vehicle, input);
 	return true;
 }

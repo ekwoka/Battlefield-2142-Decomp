@@ -545,6 +545,52 @@ TEST(Bots_EnhancedStuckDriverGetsOut)
 	CHECK(game::BotManagerTestAccess::act(bots, passenger).use);
 }
 
+// A driver wedged on a wall while its squad gives it a new goal every 9 s
+// (0x100c0bb0: standing still over 4 m from it): each new goal is a new
+// route request, which restarts the follower's 20 s test, so the follower
+// is never stuck. enhanced.botRecovery's own watch still gets it out after
+// 20 s without 4 m of progress; without the switch it stays, as retail.
+TEST(Bots_EnhancedWedgedDriverGetsOutAcrossRequests)
+{
+	for (const bool on : {false, true}) {
+		Field field;
+		game::BotSettings settings;
+		game::BotManager bots(*field.world, settings);
+		const int id = field.soldier(2, true, -30, 0);
+		auto* car = field.templates.create("PlayerControlObject", "wedged_test_car");
+		car->settings()["seatInformation"] = "wedged_test_car 0/0/0 0/0/0";
+		const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+		game::GameWorld::PlayerInfo self;
+		CHECK(field.world->playerInfo(id, self));
+		self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+		game::GameWorld::VehicleInfo v {};
+		v.object = vehicle; v.position = self.position; v.working = true; v.forward = {1, 0, 0};
+		v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+		game::BotManagerTestAccess::vehicles(bots, {v});
+		auto vehicles = goalTestMesh({{-40, -10, 0, 10}});
+		bots.setVehicleNavMesh(&vehicles);
+		bool enhanced = true, recovery = on;
+		bots.liveSettings().enhanced = &enhanced;
+		bots.liveSettings().botRecovery = &recovery;
+		auto& bot = game::BotManagerTestAccess::bot(bots, id);
+		float exitAt = -1;
+		for (int tick = 0; tick <= 30 * 25 && exitAt < 0; ++tick) {
+			if (tick % (30 * 9) == 0) { // the squad's regoal: a new spot, a new request
+				bot.goal = {-5, 0, tick % (30 * 18) ? 2.0f : -2.0f};
+				bot.followId = 1000 + tick;
+			}
+			game::BotManagerTestAccess::time(bots, tick / 30.0f);
+			game::BotManagerTestAccess::drive(bots, self); // the hull never moves
+			CHECK(!bot.follower.stuck());
+			if (bot.stuckExit == vehicle) {
+				exitAt = tick / 30.0f;
+			}
+		}
+		std::fprintf(stderr, "  botRecovery %d: exit at %.1f s\n", on, exitAt);
+		CHECK(on ? exitAt >= 20 && exitAt < 21 : exitAt < 0);
+	}
+}
+
 // A vehicle move whose follower failed the no-progress test (0x10092bc0):
 // it brakes and ends without arriving, the flag survives a request for the
 // same goal while the route stands (0x10095fc0), another goal clears it, and

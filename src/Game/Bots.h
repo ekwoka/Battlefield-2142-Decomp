@@ -1176,6 +1176,12 @@ private:
 		float abandonedAt = -1e9f;
 		uint32_t approachExitRequested = 0;
 		uint32_t stuckExit = 0; // enhanced: the vehicle a stuck driver is getting out of
+		// enhanced.botRecovery's own no-progress watch for a driver, kept
+		// across route requests: where it last got 4 m further, since when,
+		// and when it was last driving with input (Bots.cpp drive).
+		physics::Vec3 wedgedAt;
+		float wedgedSince = -1;
+		float wedgedSeen = -1;
 		bool moveFailed = false; // drive: the move ended without arriving (the follower's no-progress flag)
 		std::map<int, float> rejectedVehiclePoints;
 
