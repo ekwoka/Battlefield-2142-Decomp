@@ -3201,6 +3201,55 @@ TEST(VehicleModels_TransportPassengerReloads)
 	CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == at);
 }
 
+// The profile's auto reload (GeneralSettings.AutoReload, 0x00594280) reads the
+// weapon the seat's soldier fires: with enhanced.passengerWeapons that is his
+// own, not the seat's pod launcher. Released on the last round, it reloads;
+// with the setting off it stays empty.
+TEST(VehicleModels_TransportPassengerAutoReloads)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const bool autoReload : {true, false}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded || !g.templates.find("as_at")) return;
+			g.passengerWeapons = true;
+			const uint32_t at = g.start("as_at", {0, 40, 6});
+			g.world->autoReload = autoReload;
+			CHECK(g.enter(at));
+			game::SoldierInput input;
+			input.switchSeat = 4;
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			g.world->setPlayerInput({});
+			g.run(1);
+			const auto held = [&] { return g.world->playerWeapon(); };
+			CHECK(held() != nullptr);
+			if (!held()) return;
+			CHECK(!held()->settings().autoReload && held()->settings().magSize > 0); // the profile's reload, not the gun's own
+			input = {};
+			input.fire = true;
+			for (int tick = 0; tick < 600 && held()->roundsInMag() > 0; ++tick) {
+				g.world->setPlayerInput(input);
+				g.world->tick(1 / 30.0f);
+			}
+			g.world->setPlayerInput({}); // let go on the last round
+			CHECK(held()->roundsInMag() == 0 && held()->magsLeft() > 0);
+			bool started = false;
+			for (int tick = 0; tick < 120; ++tick) {
+				g.world->tick(1 / 30.0f);
+				started = started || held()->reloading();
+			}
+			std::fprintf(stderr, "  %s autoReload %d: reloading %d, magazine %d\n", mod, autoReload ? 1 : 0, started ? 1 : 0,
+				held()->roundsInMag());
+			CHECK(started == autoReload);
+			CHECK((held()->roundsInMag() > 0) == autoReload);
+			game::GameWorld::PlayerInfo me;
+			CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == at);
+		}
+	}
+}
+
 // A passenger's rounds leave the transport that carries him: they start inside
 // its hull and must not meet it (enhanced.passengerWeapons).
 TEST(VehicleModels_TransportPassengerRoundsClearTheHull)

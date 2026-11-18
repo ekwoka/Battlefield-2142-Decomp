@@ -577,9 +577,13 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 	if (!playerInfo(localPlayer(), me) || !me.alive) {
 		return w;
 	}
-	if (me.vehicle) {
+	const auto seats = me.vehicle ? m_round.vehicleSeats(me.vehicle) : std::vector<game::GameWorld::SeatLayout> {};
+	// A passenger seat that leaves the fire to the soldier's own weapon
+	// (enhanced.passengerWeapons, not retail) holds the kit's firearm.
+	const bool kitHeld = !me.vehicle
+		|| (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size() && m_round.passengerWeapon(seats[static_cast<size_t>(me.seat)]));
+	if (!kitHeld) {
 		// A seat's gun (its template's weapon).
-		const auto seats = m_round.vehicleSeats(me.vehicle);
 		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
 			const auto& seat = seats[static_cast<size_t>(me.seat)];
 			w.weapon = m_round.templates().find(seat.weapon);

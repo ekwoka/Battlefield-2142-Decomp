@@ -2936,8 +2936,15 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 		}
 	}
 	// On foot, group 0 is the soldier's own weapons (its kit's, in slot
-	// order): the one in hand, its rounds and magazines.
-	if (info.alive && !info.vehicle) {
+	// order): the one in hand, its rounds and magazines. A passenger seat that
+	// leaves the fire to the soldier's own weapon (enhanced.passengerWeapons,
+	// not retail) reports that one too.
+	const auto seats = info.alive && info.vehicle ? m_round->vehicleSeats(info.vehicle) : std::vector<game::GameWorld::SeatLayout> {};
+	const bool ownWeapon = info.alive
+		&& (!info.vehicle
+			|| (info.seat >= 0 && static_cast<size_t>(info.seat) < seats.size()
+				&& m_round->passengerWeapon(seats[static_cast<size_t>(info.seat)])));
+	if (ownWeapon) {
 		for (size_t i = 0; i < info.carried.size(); ++i) {
 			if (info.carried[i].first != info.inHandSlot) {
 				continue;
@@ -2956,8 +2963,7 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 	}
 	// In a seat, the seat's three groups (0x005a98b0's group indices: each
 	// group's active weapon's place in the group's list, 0x005cc5e0's order).
-	if (info.alive && info.vehicle) {
-		const auto seats = m_round->vehicleSeats(info.vehicle);
+	if (info.alive && info.vehicle && !ownWeapon) {
 		if (info.seat >= 0 && static_cast<size_t>(info.seat) < seats.size()) {
 			const auto& weapons = seats[static_cast<size_t>(info.seat)].weapons;
 			for (int g = 0; g < 3; ++g) {

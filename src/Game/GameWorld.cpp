@@ -10576,7 +10576,16 @@ void GameWorld::stepPlayersBefore(float seconds)
 		// presses c_PIReload (input 32, +0x80 = 1).
 		if (autoReload && m_player->alive && !m_player->manDown) {
 			bool wanted = false;
-			if (!m_player->vehicle) {
+			// enhanced.passengerWeapons (not retail): the seat's control object
+			// is the pod launcher's, so the soldier's own weapon in hand is the
+			// one the same test (0x00594280) reads.
+			const Body* seated = m_player->vehicle ? findBody(m_player->vehicle) : nullptr;
+			const world::Object* seatedObject = seated ? m_objects.find(seated->object) : nullptr;
+			const VehicleLayout* seatedLayout = seatedObject ? &vehicleLayout(*seatedObject->objectTemplate()) : nullptr;
+			const bool ownWeapon = !m_player->vehicle
+				|| (seatedLayout && m_player->seat >= 0 && static_cast<size_t>(m_player->seat) < seatedLayout->seats.size()
+					&& passengerWeapon(seatedLayout->seats[static_cast<size_t>(m_player->seat)]));
+			if (ownWeapon) {
 				wanted = m_player->weapon && wantsAutoReload(*m_player->weapon);
 				// Wait while a round is actively guided (the player's own wire,
 				// launcher still in hand): reloading at once would cut it and drop
