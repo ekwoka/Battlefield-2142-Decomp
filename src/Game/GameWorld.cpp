@@ -10937,7 +10937,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	const uint32_t soldierId = player.object;
 	player.body.onContact = [this, soldierId, self](const physics::SoldierBody::Contact& c) {
 		self->contactMaterial = c.otherMaterial; // 0x00586a90: +0x32c
-		collisionEvent(soldierId, c.owner, c.velocity, c.normal, c.point, c.ownMaterial, c.otherMaterial);
+		collisionEvent(soldierId, c.owner, c.velocity, c.normal, c.point, c.ownMaterial, c.otherMaterial, c.otherStaticNode);
 		if (c.owner != 0 && m_objects.find(soldierId)) {
 			collisionEvent(c.owner, soldierId, -c.velocity, c.normal, c.point, c.otherMaterial, c.ownMaterial);
 		}

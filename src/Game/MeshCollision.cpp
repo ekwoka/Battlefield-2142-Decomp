@@ -1407,7 +1407,7 @@ bool sameName(const std::string& a, const std::string& b)
 } // namespace
 
 void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& velocity, const Vec3& normal,
-	const Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial)
+	const Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial, bool otherStaticNode)
 {
 	if (m_predicting) {
 		return;
@@ -1449,16 +1449,17 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	}
 	std::vector<CollisionMemory>& memory = m_collisionMemory[self];
 	for (const CollisionMemory& m : memory) {
-		if (m.other == other && m.ownMaterial == ownMaterial && m.otherMaterial == otherMaterial) {
+		if (m.other == other && m.ownMaterial == ownMaterial && m.otherMaterial == otherMaterial
+			&& m.otherStaticNode == otherStaticNode) {
 			return;
 		}
 	}
-	memory.push_back({other, ownMaterial, otherMaterial, 1.0f});
+	memory.push_back({other, ownMaterial, otherMaterial, 1.0f, otherStaticNode});
 	// The server's slot 0x104 (0x004ba3f0) with the velocity turned round.
 	if (other == 0) {
 		groundCollisionDamage(self, -velocity, normal, point, otherMaterial, ownMaterial);
 	} else {
-		objectCollisionDamage(other, self, -velocity, normal, point, otherMaterial, ownMaterial);
+		objectCollisionDamage(other, self, -velocity, normal, point, otherMaterial, ownMaterial, otherStaticNode);
 	}
 }
 
@@ -1497,7 +1498,7 @@ void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, con
 // armour's +0xf4, 1, which nothing sets), credited to the attacker's
 // driver (0x005a30b0).
 void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const Vec3& velocity, const Vec3& normal,
-	const Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial)
+	const Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial, bool attackerStaticNode)
 {
 	if (soldierPlayer(attacker)) {
 		return;
@@ -1521,7 +1522,7 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 				< physics::lengthSquared(soldier->body.velocity + soldier->body.carriedVelocity())) { // the world's speed, carry included
 			groundCollisionDamage(victim, velocity, normal, point, attackerMaterial, victimMaterial);
 		} else {
-			roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+			roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial, attackerStaticNode);
 		}
 		return;
 	}
@@ -1545,14 +1546,17 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 // speed x the mass factor (the soldier as 200), no material cell (unless
 // 0x29a, then it and 1 for the speed term).
 void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity, uint32_t attackerMaterial,
-	uint32_t victimMaterial)
+	uint32_t victimMaterial, bool attackerStaticNode)
 {
 	const float speed = lengthOf(velocity);
 	const bool instant = attackerMaterial == kKillMaterial;
 	// The soldier's node velocity, relative to a carrying Titan as retail's
 	// (0x006ca3b0); a fixed body is a static node (slot 0x164 false).
 	const Body* body = findBody(attacker);
-	const float limit = body && !body->fixed
+	// 0x005a43c0 and 0x005a2ca0 check the contact object's node. A
+	// Static cargo-bay node borrows the Titan's transform for collision
+	// but has the 10 m/s limit and a mass factor of 1.
+	const float limit = !attackerStaticNode && body && !body->fixed
 			&& physics::lengthSquared(victim.body.velocity) < physics::lengthSquared(body->body.velocity)
 		? kSoldierImpactSpeedFaster
 		: kSoldierImpactSpeed;
@@ -1561,7 +1565,8 @@ void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity
 	}
 	const float term = instant ? 1.0f : (speed - limit) * speed;
 	const float mod = instant && m_materials ? m_materials->damageMod(attackerMaterial, victimMaterial) : 1.0f;
-	float amount = mod * collisionMassFactor(attacker, victim.object) * term;
+	const float mass = attackerStaticNode ? 1.0f : collisionMassFactor(attacker, victim.object);
+	float amount = mod * mass * term;
 	if (amount >= 0.1f) {
 		// Retail's damage dispatcher (0x004c0e40 -> 0x005b7290) scales
 		// ordinary impacts by the vehicle's team, independently of kill credit.

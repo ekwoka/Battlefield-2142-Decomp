@@ -2444,7 +2444,9 @@ TEST(Titan_SuezInteriorFloorProbe)
 				level.world->spawnSoldier(me);
 				level.world->playerInfo(me, info);
 			}
-			level.world->setSoldierPosition(info.soldier, ti.position + physics::Vec3 {x, 9.0f, z});
+			// Each cell is an independent drop at full health.
+			level.world->setHitPoints(info.soldier, 100);
+			CHECK(level.world->setSoldierPosition(info.soldier, ti.position + physics::Vec3 {x, 9.0f, z}));
 			float fastest = 0;
 			for (int tick = 0; tick < 60 && info.alive; ++tick) {
 				level.run(1 / 30.0f);
@@ -2458,6 +2460,49 @@ TEST(Titan_SuezInteriorFloorProbe)
 			row += cell;
 		}
 		std::fprintf(stderr, "  z %5.1f:%s\n", z, row.c_str());
+	}
+}
+
+// The EU Titan cargo bay has its own Static node. Retail's impact routine
+// deals no damage below 10 m/s and uses a mass factor of 1 above it.
+TEST(Titan_SuezCargoBayLandingUsesStaticNodeDamage)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+		const auto* eu = level.titan(2);
+		CHECK(level.loaded && eu);
+		if (!level.loaded || !eu) {
+			continue;
+		}
+		const uint32_t titan = eu->object;
+		const int player = level.world->addPlayer("Boarder", 1, false);
+		CHECK(level.world->spawnSoldier(player));
+		for (float height : {3.9f, 9.0f}) {
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(player, info) && info.alive);
+			const uint32_t soldier = info.soldier;
+			level.world->setHitPoints(soldier, 100);
+			CHECK(level.world->setSoldierPosition(soldier, level.world->titanToWorld(titan, {-19, height, -9})));
+			level.run(2);
+			CHECK(level.world->playerInfo(player, info) && info.alive);
+			const auto feet = level.world->titanToLocal(titan, info.position);
+			const float hp = level.world->hitPoints(soldier);
+			CHECK(std::fabs(feet.y - 1.36f) < 0.1f);
+			CHECK(std::fabs(info.velocity.y) < 0.5f);
+			std::fprintf(stderr, "  %s cargo bay drop %.1f m: %.2f HP, floor %.2f m\n", mod, height, hp, feet.y);
+			if (height < 4) {
+				CHECK(hp == 100);
+			} else {
+				CHECK(hp > 40 && hp < 60);
+			}
+		}
 	}
 }
 

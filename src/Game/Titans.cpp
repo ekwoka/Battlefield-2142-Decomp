@@ -730,7 +730,13 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 			continue;
 		}
 		part->mesh = std::make_shared<physics::CollisionWorld>();
-		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry));
+		// The merged soldier mesh moves with the Titan, but retail's
+		// contact callback receives the actual child (0x006c4513). A
+		// non-mobile Mesh child has a Static node (0x005f6c68).
+		const bool staticNode = user == physics::CollisionUser::Soldier && m.t
+			&& integer(*m.t, "hasMobilePhysics", 0) == 0;
+		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry), 0,
+			staticNode);
 		for (const physics::Vec3& p : part->points) {
 			part->radius = std::max(part->radius, std::sqrt(physics::lengthSquared(p)));
 		}

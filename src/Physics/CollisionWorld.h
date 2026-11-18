@@ -32,6 +32,7 @@ struct SphereContact {
 	// there to the end, 0x006be300); the depth itself for a sphere where
 	// it is.
 	float travel = 0;
+	bool staticNode = false; // the face's own node, even when its world is carried by a mover
 };
 
 // Where the segment a-b comes within `radius` of the segment e0-e1 (a
@@ -55,7 +56,8 @@ public:
 	// `materials` maps the mesh's material indices to material ids (the
 	// template's mapMaterial); `owner` is reported with hits.
 	void addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation, const Vec3& position,
-		uint32_t owner = 0, const std::vector<uint32_t>& materials = {}, size_t geometry = 0, size_t state = 0);
+		uint32_t owner = 0, const std::vector<uint32_t>& materials = {}, size_t geometry = 0, size_t state = 0,
+		bool staticNode = false);
 	// Adds `other`'s faces after this world's, in their order: the same
 	// world as making `other`'s addMesh calls here (a world merged from
 	// meshes built once).
@@ -110,6 +112,7 @@ public:
 		uint32_t material;
 		uint32_t owner;
 		Vec3 faceNormal {}; // the face's own (out of its object)
+		bool staticNode = false;
 	};
 	// The first face the segment from `from` to `to` passes through.
 	bool raycast(const Vec3& from, const Vec3& to, Hit& hit) const;
@@ -158,6 +161,7 @@ private:
 		uint32_t owner;
 		mutable uint32_t stamp = 0;
 		bool removed = false; // out of the queries (removeOwner), dropped at compact()
+		bool staticNode = false;
 	};
 	void forEachFaceIndexNear(const Vec3& center, float radius, const std::function<void(const Triangle&)>& visit) const;
 	static constexpr float kCell = 8.0f;

@@ -3012,7 +3012,7 @@ private:
 	// (0x005a4690, a soldier's road kill 0x005a43c0).
 	// `point` is the world-space contact point.
 	void collisionEvent(uint32_t self, uint32_t other, const physics::Vec3& velocity, const physics::Vec3& normal,
-		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial);
+		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial, bool otherStaticNode = false);
 	uint32_t materialImpactIndex(uint32_t first, uint32_t second, const physics::Vec3& velocity,
 		const physics::Vec3& normal) const;
 	bool materialImpactInView(const physics::Vec3& point) const;
@@ -3021,14 +3021,16 @@ private:
 	void groundCollisionDamage(uint32_t victim, const physics::Vec3& velocity, const physics::Vec3& normal,
 		const physics::Vec3& point, uint32_t groundMaterial, uint32_t victimMaterial);
 	void objectCollisionDamage(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity,
-		const physics::Vec3& normal, const physics::Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial);
+		const physics::Vec3& normal, const physics::Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial,
+		bool attackerStaticNode);
 	void roadKill(uint32_t attacker, Player& victim, const physics::Vec3& velocity, uint32_t attackerMaterial,
-		uint32_t victimMaterial);
+		uint32_t victimMaterial, bool attackerStaticNode);
 	int collisionCredit(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity) const;
 	struct CollisionMemory {
 		uint32_t other;
 		uint32_t ownMaterial, otherMaterial;
 		float left;
+		bool otherStaticNode;
 	};
 	std::map<uint32_t, std::vector<CollisionMemory>> m_collisionMemory; // by the armoured object
 	// The contact effects (0x006b75d0, 0x006ba7d0's end, 0x006b8c40) and

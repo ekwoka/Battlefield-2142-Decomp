@@ -45,7 +45,8 @@ Vec3 closestOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& 
 } // namespace
 
 void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation,
-	const Vec3& position, uint32_t owner, const std::vector<uint32_t>& materials, size_t geometry, size_t state)
+	const Vec3& position, uint32_t owner, const std::vector<uint32_t>& materials, size_t geometry, size_t state,
+	bool staticNode)
 {
 	// The instance's sub-geometry (+0x14: 0 normally, 1 a wreck's).
 	const CollisionSubGeometry* part = collisionPart(mesh, geometry, state);
@@ -73,6 +74,7 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 			t.normal = n * (1.0f / length);
 			t.material = face.material < materials.size() ? materials[face.material] : face.material;
 			t.owner = owner;
+			t.staticNode = staticNode;
 			const uint32_t index = static_cast<uint32_t>(m_triangles.size());
 			m_triangles.push_back(t);
 			const float minX = std::min({t.a.x, t.b.x, t.c.x}), maxX = std::max({t.a.x, t.b.x, t.c.x});
@@ -164,6 +166,7 @@ bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool fron
 				hit.faceNormal = t.normal;
 				hit.material = t.material;
 				hit.owner = t.owner;
+				hit.staticNode = t.staticNode;
 				found = true;
 			}
 		}
@@ -250,7 +253,7 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 					normal = away * (1.0f / length);
 					depth = length - radius;
 				}
-				contacts.push_back({closest, normal, depth, t.material, depth});
+				contacts.push_back({closest, normal, depth, t.material, depth, t.staticNode});
 			}
 		}
 	}
@@ -291,6 +294,7 @@ bool CollisionWorld::segmentContact(const Vec3& from, const Vec3& to, SphereCont
 	contact.normal = hit.faceNormal;
 	contact.depth = std::min(dot(to - hit.point, hit.faceNormal), 0.0f);
 	contact.material = hit.material;
+	contact.staticNode = hit.staticNode;
 	return true;
 }
 
@@ -388,7 +392,7 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 		if (lengthSquared(closestOnTriangle(onFace, t->a, t->b, t->c) - onFace) > 1e-8f) {
 			continue;
 		}
-		contacts.push_back({onFace, t->normal, endDistance, t->material, (fraction - 1) * std::sqrt(lengthSquared(delta))});
+		contacts.push_back({onFace, t->normal, endDistance, t->material, (fraction - 1) * std::sqrt(lengthSquared(delta)), t->staticNode});
 		faceMet = true;
 	}
 	if (faceMet) {
@@ -429,7 +433,7 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 				}
 				normal = normal * (1.0f / flat);
 			}
-			contacts.push_back({point, normal, depth, t->material, -std::sqrt(lengthSquared(end - centre))});
+			contacts.push_back({point, normal, depth, t->material, -std::sqrt(lengthSquared(end - centre)), t->staticNode});
 		}
 	}
 }
@@ -499,6 +503,7 @@ void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float rad
 				}
 				contact.point = nearest;
 				contact.material = t.material;
+				contact.staticNode = t.staticNode;
 				contacts.push_back(contact);
 			}
 		}
