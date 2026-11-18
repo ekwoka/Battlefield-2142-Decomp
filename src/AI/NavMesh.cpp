@@ -272,7 +272,9 @@ bool validate(const NavMesh& mesh, std::string* error)
 		}
 	}
 	for (const ClusterLink& l : mesh.links) {
-		if (l.polygon >= polygons) {
+		// Remaster's navmeshes retain unavailable cluster portals as -1.
+		// Keep the polygon graph usable; cluster searches skip those links.
+		if (l.polygon != 0xffffffffu && l.polygon >= polygons) {
 			return fail(error, "clb: link polygon out of range");
 		}
 	}
@@ -693,7 +695,7 @@ float crossCost(const NavMesh& mesh, const ClusterNode& node, uint16_t target, c
 	float best = 1e9f;
 	for (uint16_t j = 0; j < c.linkCount; ++j) {
 		const uint32_t link = c.firstLink + j;
-		if (mesh.links[link].targetCluster != target) {
+		if (mesh.links[link].polygon >= mesh.polygons.size() || mesh.links[link].targetCluster != target) {
 			continue;
 		}
 		// 0x100bd130
@@ -780,6 +782,9 @@ std::vector<ClusterStep> findClusterRoute(const NavMesh& mesh, uint32_t startPol
 		const Cluster& c = mesh.clusters[nodes[current].cluster];
 		targets.clear();
 		for (uint16_t i = 0; i < c.linkCount; ++i) {
+			if (mesh.links[c.firstLink + i].polygon >= mesh.polygons.size()) {
+				continue;
+			}
 			const uint16_t t = mesh.links[c.firstLink + i].targetCluster;
 			if (std::find(targets.begin(), targets.end(), t) == targets.end()) {
 				targets.push_back(t);
@@ -853,7 +858,7 @@ const ClusterLink* entryLink(const NavMesh& mesh, const ClusterStep& step)
 		return nullptr;
 	}
 	const size_t link = mesh.clusters[step.cluster].firstLink + static_cast<size_t>(step.entry);
-	return link < mesh.links.size() ? &mesh.links[link] : nullptr;
+	return link < mesh.links.size() && mesh.links[link].polygon < mesh.polygons.size() ? &mesh.links[link] : nullptr;
 }
 
 std::vector<Vec3> findPath(const NavMesh& mesh, const Vec3& from, const Vec3& to, const PathOptions& options)

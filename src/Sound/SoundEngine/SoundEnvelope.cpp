@@ -36,7 +36,7 @@ SoundEnvelope::SoundEnvelope(float minX, float maxX, float minY, float maxY, boo
 	}
 	for (unsigned v = 1; v < variants; ++v) {
 		for (size_t i = 0; i < n; ++i) {
-			const float t = static_cast<float>(std::rand()) / 32767.0f;
+			const float t = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
 			m_values[v * n + i] = m_points[i].yLow + (m_points[i].yHigh - m_points[i].yLow) * t;
 		}
 	}

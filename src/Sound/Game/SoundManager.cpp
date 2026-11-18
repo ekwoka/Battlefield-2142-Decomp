@@ -104,6 +104,28 @@ std::vector<DefaultSound> weaponSounds(int flags)
 	return sounds;
 }
 
+void applyDefaults(SoundObjectTemplate& created, const DefaultSound& sound)
+{
+	ISoundTemplate* engineSound = created.engineTemplate();
+	if (!engineSound) {
+		return;
+	}
+	engineSound->setIs3dSound(sound.is3d);
+	engineSound->setLoopCount(sound.loopCount);
+	if (sound.minDistance >= 0) {
+		engineSound->setMinDistance(sound.minDistance);
+	}
+	if (sound.stopType >= 0) {
+		engineSound->setStopType(sound.stopType);
+	}
+	if (sound.volumeGroup >= 0) {
+		engineSound->setVolumeGroup(sound.volumeGroup);
+	}
+	if (sound.reverbLevel >= 0) {
+		engineSound->setReverbLevel(sound.reverbLevel);
+	}
+}
+
 std::vector<DefaultSound> componentSounds(const std::string& component)
 {
 	if (component == "DefaultSoundComp") { // 0x005dc350
@@ -238,23 +260,19 @@ void SoundManager::createDefaultSounds(world::ObjectTemplate& owner, const std::
 		if (world::ObjectTemplate* parent = m_templates.find(ownerName)) {
 			parent->children().push_back({name, {}, {}});
 		}
-		ISoundTemplate* engineSound = created->engineTemplate();
-		if (!engineSound) {
-			continue;
-		}
-		engineSound->setIs3dSound(sound.is3d);
-		engineSound->setLoopCount(sound.loopCount);
-		if (sound.minDistance >= 0) {
-			engineSound->setMinDistance(sound.minDistance);
-		}
-		if (sound.stopType >= 0) {
-			engineSound->setStopType(sound.stopType);
-		}
-		if (sound.volumeGroup >= 0) {
-			engineSound->setVolumeGroup(sound.volumeGroup);
-		}
-		if (sound.reverbLevel >= 0) {
-			engineSound->setReverbLevel(sound.reverbLevel);
+		applyDefaults(*created, sound);
+	}
+}
+
+void SoundManager::applyEventDefaults(world::ObjectTemplate& sound)
+{
+	auto* created = dynamic_cast<SoundObjectTemplate*>(&sound);
+	for (const DefaultSound& event : weaponSounds(0)) {
+		const std::string suffix = "_" + event.event;
+		const std::string& name = sound.name();
+		if (created && name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+			applyDefaults(*created, event);
+			return;
 		}
 	}
 }

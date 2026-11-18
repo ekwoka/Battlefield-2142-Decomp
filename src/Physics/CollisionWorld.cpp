@@ -94,6 +94,7 @@ void CollisionWorld::append(const CollisionWorld& other)
 		m_triangles.push_back(t);
 		m_triangles.back().stamp = 0; // this world's query stamps
 	}
+	m_removed += other.m_removed;
 	// Each cell's indices stay in increasing order, as addMesh leaves them.
 	for (const auto& [key, indices] : other.m_cells) {
 		std::vector<uint32_t>& cell = m_cells[key];
@@ -201,7 +202,7 @@ void CollisionWorld::forEachFaceIndexNear(const Vec3& center, float radius,
 	}
 }
 
-void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts) const
+void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts, uint32_t ignore) const
 {
 	++m_stamp;
 	const int x0 = static_cast<int>(std::floor((center.x - radius) / kCell));
@@ -216,7 +217,7 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 			}
 			for (uint32_t index : cell->second) {
 				const Triangle& t = m_triangles[index];
-				if (t.stamp == m_stamp) {
+				if (t.stamp == m_stamp || (ignore != 0 && t.owner == ignore)) {
 					continue;
 				}
 				t.stamp = m_stamp;
@@ -507,14 +508,45 @@ void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float rad
 size_t CollisionWorld::removeOwner(uint32_t owner)
 {
 	size_t removed = 0;
-	for (auto& [key, indices] : m_cells) {
-		const size_t before = indices.size();
-		indices.erase(std::remove_if(indices.begin(), indices.end(),
-						  [&](uint32_t index) { return m_triangles[index].owner == owner; }),
+	for (Triangle& t : m_triangles) {
+		if (t.owner == owner && !t.removed) {
+			t.removed = true;
+			++removed;
+		}
+	}
+	if (removed == 0) {
+		return 0;
+	}
+	m_removed += removed;
+	for (auto it = m_cells.begin(); it != m_cells.end();) {
+		std::vector<uint32_t>& indices = it->second;
+		indices.erase(std::remove_if(indices.begin(), indices.end(), [&](uint32_t index) { return m_triangles[index].removed; }),
 			indices.end());
-		removed += before - indices.size();
+		it = indices.empty() ? m_cells.erase(it) : std::next(it);
 	}
 	return removed;
+}
+
+void CollisionWorld::compact()
+{
+	if (m_removed == 0) {
+		return;
+	}
+	std::vector<uint32_t> moved(m_triangles.size(), 0);
+	uint32_t kept = 0;
+	for (size_t i = 0; i < m_triangles.size(); ++i) {
+		if (!m_triangles[i].removed) {
+			moved[i] = kept;
+			m_triangles[kept++] = m_triangles[i];
+		}
+	}
+	m_triangles.resize(kept);
+	for (auto& [key, indices] : m_cells) {
+		for (uint32_t& index : indices) {
+			index = moved[index]; // the cells hold live faces only, still in increasing order
+		}
+	}
+	m_removed = 0;
 }
 
 } // namespace dice::hfe::physics

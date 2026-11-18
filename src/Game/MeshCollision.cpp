@@ -300,6 +300,7 @@ void GameWorld::collideBodies(float seconds)
 			}
 		}
 	}
+	m_retiredMeshes.clear();
 }
 
 void GameWorld::collideMover(Body& mover, size_t index, float seconds)
@@ -364,12 +365,21 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 	// destroyed (the helicopter exit).
 	const auto collide = [&](MeshActor& c, bool cRoot) {
 		const float ratio = c.radius > 0 ? m.radius / c.radius : 1e30f;
+		// A candidate the pair destroys gets its wreck's meshes (wreckCollision): `c` then points at freed ones.
+		const physics::CollisionWorld* was = c.body ? c.body->vehicleMesh.get() : nullptr;
+		const auto wrecked = [&] { return c.body && c.body->vehicleMesh.get() != was; };
+		const physics::CollisionWorld* own = mover.vehicleMesh.get();
 		if (ratio >= 0.25f) {
+			meshPair(c, m, seconds, false);
+			if (mover.vehicleMesh.get() != own) {
+				return false; // and the mover's likewise
+			}
+			if (wrecked()) {
+				return true;
+			}
 			if (ratio <= 4.0f) {
-				meshPair(c, m, seconds, false);
 				return meshPair(m, c, seconds, false);
 			}
-			meshPair(c, m, seconds, false);
 			if (!c.fixed) {
 				return meshPair(m, c, seconds, false);
 			}
@@ -379,7 +389,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			return true;
 		}
 		const bool alive = meshPair(m, c, seconds, false);
-		if (mRoot && c.trunkFromTypeFour) {
+		if (mRoot && c.trunkFromTypeFour && !wrecked()) {
 			meshPair(c, m, seconds, true);
 		}
 		return alive;
@@ -453,7 +463,11 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 		// Its parts in their pose now (partActors), each a candidate with
 		// a response of its own.
 		partActors(other, parts);
+		const physics::CollisionWorld* was = other.vehicleMesh.get();
 		for (MeshActor& c : parts) {
+			if (other.vehicleMesh.get() != was) {
+				break; // destroyed by the pair before: its parts' actors are stale
+			}
 			if (moved && partMoves(other, c)) {
 				continue;
 			}
@@ -462,6 +476,9 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 					return false;
 				}
 				refresh();
+				if (other.vehicleMesh.get() != was) {
+					break;
+				}
 			}
 			if (mRoot) {
 				wheelProbes(mover, c, seconds);
@@ -480,7 +497,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, bool 
 			}
 			refresh();
 		}
-		if (mRoot) {
+		if (mRoot && other.vehicleMesh.get() == c.mesh) { // not a candidate the pair just wrecked
 			wheelProbes(mover, c, seconds);
 			if (!asleep(other)) {
 				wheelProbes(other, m, seconds);
@@ -591,7 +608,7 @@ void GameWorld::partsMove(Body& mover, size_t index, float seconds)
 				const uint32_t terrain = m_ground.material ? m_ground.material(point.x, point.z) : 0;
 				const float speed = physics::lengthSquared(velocity);
 				if (self.handleCollisionSpeed < speed) {
-					collisionEvent(self.object, 0, velocity, normal, point - m.position, own, terrain);
+					collisionEvent(self.object, 0, velocity, normal, point, own, terrain);
 				}
 				if (self.handleCollisionSpeed * self.handleCollisionSpeed <= speed) {
 					recordContactEffect(self, own, terrain, velocity, point, normal);
@@ -758,6 +775,9 @@ void GameWorld::legsSphere(Body& walker, MeshActor& a, MeshActor& b)
 {
 	if (!walker.vehicle || !b.mesh || walker.wreckTime >= 0) {
 		return;
+	}
+	if (teamPasses(a, b) || teamPasses(b, a)) {
+		return; // the legs pass friendly forcefields like the hull and wheels
 	}
 	if (b.body && b.body->vehicle && b.body->vehicle->legs()) {
 		return; // another walker: its response is the legs' too
@@ -1093,8 +1113,8 @@ physics::MassShares GameWorld::addMeshContact(MeshActor& a, MeshActor& b, const 
 		// response; ContactResponse::solve): a mover pushed out over 0.5 m
 		// three solves running hits with many times its speed.
 		const float stuck = a.body ? 1.0f + responseOf(a).stuckPush() : 1.0f;
-		collisionEvent(objectA, objectB, relative * stuck, normal, point - a.position, materialA, materialB);
-		collisionEvent(objectB, objectA, -relative * stuck, normal, point - b.position, materialB, materialA);
+		collisionEvent(objectA, objectB, relative * stuck, normal, point, materialA, materialB);
+		collisionEvent(objectB, objectA, -relative * stuck, normal, point, materialB, materialA);
 	}
 	// The contact effect (0x6bcab2), past both nodes' handleCollisionSpeed:
 	// in A's root's response if only A is mobile, B's if A is not, the
@@ -1157,6 +1177,9 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 	const Mat3& r = body.body.rotation;
 	const Vec3 right = r.transform({1, 0, 0}), up = r.transform({0, 1, 0}), forward = r.transform({0, 0, 1});
 	MeshActor a = actorOf(body);
+	if (teamPasses(a, b) || teamPasses(b, a)) {
+		return; // the wheel's probe is the mover of its own: it passes its team's fields as the hull does
+	}
 	const auto& wheels = body.vehicle->wheels();
 	for (size_t w = 0; w < wheels.size(); ++w) {
 		const Vehicle::Wheel& wheel = wheels[w];
@@ -1203,25 +1226,63 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 				addMeshContact(a, b, hit.point, hit.normal, hit.depth, body.material, hit.material, false, false);
 			if (shares.velocityA != 0) {
 				const float grip = m_materials ? m_materials->friction(body.material, hit.material) : 0.8f;
-				// The solve's Spring branch moves the wheel out along the mean
-				// normal by its push, within 0..1 m (0x006ba7d0): the spring
-				// takes the height that gives it.
-				const float push = std::clamp(-hit.depth * shares.depthA, 0.0f, 1.0f);
-				const float height = (start + along).y + push * hit.normal.y;
-				body.vehicle->touchObject(w, height, hit.normal, b.pointVelocity(hit.point), grip);
+				// The wheel's response (0x006ba4c0): its push-out, and the
+				// root's as it stands now (contacts added later aren't in it);
+				// the Spring's solve takes the difference (0x006ba7d0).
+				const physics::Vec3 push = hit.normal * (-hit.depth * shares.depthA);
+				body.vehicle->touchObject(w, push, body.response.pushOut(), hit.normal, b.pointVelocity(hit.point), grip);
 			}
 		}
 	}
 }
 
 // A static object's parts leave the grid (a broken prop's physics,
-// 0x00651c60's slot 0xd4 -> 0xc).
+// 0x00651c60's slot 0xd4 -> 0xc; a deleted object's, 0x006fdd90). They stay
+// in the list, so a pass walking it now keeps them, until
+// compactStaticParts.
 void GameWorld::removeStaticParts(uint32_t object)
 {
-	for (auto& [key, indices] : m_staticGrid) {
-		indices.erase(std::remove_if(indices.begin(), indices.end(),
-						  [&](uint32_t index) { return m_staticParts[index].object == object; }),
+	bool any = false;
+	for (StaticPart& part : m_staticParts) {
+		if (part.object == object && !part.removed) {
+			part.removed = true;
+			++m_staticPartsRemoved;
+			any = true;
+		}
+	}
+	if (!any) {
+		return;
+	}
+	for (auto it = m_staticGrid.begin(); it != m_staticGrid.end();) {
+		std::vector<uint32_t>& indices = it->second;
+		indices.erase(std::remove_if(indices.begin(), indices.end(), [&](uint32_t index) { return m_staticParts[index].removed; }),
 			indices.end());
+		it = indices.empty() ? m_staticGrid.erase(it) : std::next(it);
+	}
+}
+
+void GameWorld::compactStaticParts()
+{
+	if (m_staticPartsRemoved == 0) {
+		return;
+	}
+	m_staticPartsRemoved = 0;
+	std::vector<uint32_t> moved(m_staticParts.size(), 0);
+	uint32_t kept = 0;
+	for (size_t i = 0; i < m_staticParts.size(); ++i) {
+		if (!m_staticParts[i].removed) {
+			moved[i] = kept;
+			if (kept != i) {
+				m_staticParts[kept] = std::move(m_staticParts[i]);
+			}
+			++kept;
+		}
+	}
+	m_staticParts.resize(kept);
+	for (auto& [key, indices] : m_staticGrid) {
+		for (uint32_t& index : indices) {
+			index = moved[index];
+		}
 	}
 }
 
@@ -1332,7 +1393,6 @@ bool sameName(const std::string& a, const std::string& b)
 void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& velocity, const Vec3& normal,
 	const Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial)
 {
-	(void)point;
 	if (m_predicting) {
 		return;
 	}
@@ -1352,12 +1412,14 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	// as_titan_forcefield, the vehicle bays' eu_forcefield_big and
 	// as_titan_vb_shield: every face of it); the team rule lets a team's
 	// own through, so an enemy pod or vehicle meeting a standing shield is
-	// destroyed with its riders. A shield wrecked at 61 per cent of its
+	// destroyed with its riders. The kill is the game logic's damage with 1e10 and
+	// no materials (0x005c72f0 pushes 0 for both, no attacker): the material table's
+	// damageMod(0x29a, 0x29a) is 0 and must not scale it. A shield wrecked at 61 per cent of its
 	// Titan (destroyOnParentDamageLevel) has left the parts (Titans.cpp).
 	if (otherMaterial == kKillMaterial
 		&& (sameName(t->typeName(), "PlayerControlObject") || sameName(t->typeName(), "Parachute"))) {
 		if (hitPoints(self) > 0) {
-			damage(self, 1e10f, kKillMaterial, kKillMaterial, -1);
+			loseHitPoints(self, 1e10f, -1);
 		}
 		return;
 	}
@@ -1378,19 +1440,19 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	memory.push_back({other, ownMaterial, otherMaterial, 1.0f});
 	// The server's slot 0x104 (0x004ba3f0) with the velocity turned round.
 	if (other == 0) {
-		groundCollisionDamage(self, -velocity, normal, otherMaterial, ownMaterial);
+		groundCollisionDamage(self, -velocity, normal, point, otherMaterial, ownMaterial);
 	} else {
-		objectCollisionDamage(other, self, -velocity, normal, otherMaterial, ownMaterial);
+		objectCollisionDamage(other, self, -velocity, normal, point, otherMaterial, ownMaterial);
 	}
 }
 
 // 0x005a3db0: the ground (or nothing) hurting `victim`: the material
 // cell's damageMod (slot 0x64) x speed x speed x the angle (|cos| between
 // the motion and the normal, at least armor.angleMod); a soldier only
-// over 9.1 m/s, and then by the speed over 9.1. No one is credited. (The
-// impact's sound, effect and decal, 0x005a36d0, are left out.)
-void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, const Vec3& normal, uint32_t groundMaterial,
-	uint32_t victimMaterial)
+// over 9.1 m/s, and then by the speed over 9.1. No one is credited. The
+// impact's material effect and sound are index 0 of the ground/victim cell.
+void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, const Vec3& normal, const Vec3& point,
+	uint32_t groundMaterial, uint32_t victimMaterial)
 {
 	const world::Object* object = m_objects.find(victim);
 	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
@@ -1402,6 +1464,7 @@ void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, con
 	if (soldier && speed < kSoldierTerrainSpeed) {
 		return;
 	}
+	queueMaterialImpact(groundMaterial, victimMaterial, 0, point, normal);
 	const float n = lengthOf(normal);
 	float angle = n > 0 ? std::fabs(physics::dot(velocity, normal) / (speed * n)) : 1.0f;
 	angle = std::max(angle, number(*t, "armor.angleMod", 0)); // armor template +0xf0
@@ -1418,18 +1481,38 @@ void GameWorld::groundCollisionDamage(uint32_t victim, const Vec3& velocity, con
 // armour's +0xf4, 1, which nothing sets), credited to the attacker's
 // driver (0x005a30b0).
 void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const Vec3& velocity, const Vec3& normal,
-	uint32_t attackerMaterial, uint32_t victimMaterial)
+	const Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial)
 {
 	if (soldierPlayer(attacker)) {
 		return;
 	}
 	if (Player* soldier = soldierPlayer(victim)) {
-		roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		// Retail's base handler (0x0063c4da -> 0x004ba3f0 -> 0x005a4690)
+		// sends every object hitting a soldier to the road kill, whose only
+		// speed comparison is its limit (0x005a43c0: 3 or 10 m/s). The
+		// soldier's speed there is his node's slot 0x58 (0x006c99a0: +0x20,
+		// his own motion; 0x006ca3b0 adds a carrying Titan's velocity only
+		// into the step's +0x44), the Titan's the world's, so on a moving
+		// Titan the 3 m/s limit catches a drop onto its decks (x3 for its
+		// 1e6 mass). roadKill measures as retail does.
+		// enhanced.softLanding (not retail): a soldier landing on or walking
+		// into an object slower than he is (the world's speeds) is the
+		// mover, and takes the ground rule (over 9.1 m/s, no mass factor).
+		// The death material (the Titans' shields) stays the instant case.
+		const Body* body = findBody(attacker);
+		if (softLanding() && attackerMaterial != kKillMaterial && body
+			&& physics::lengthSquared(body->body.velocity)
+				< physics::lengthSquared(soldier->body.velocity + soldier->body.carriedVelocity())) { // the world's speed, carry included
+			groundCollisionDamage(victim, velocity, normal, point, attackerMaterial, victimMaterial);
+		} else {
+			roadKill(attacker, *soldier, velocity, attackerMaterial, victimMaterial);
+		}
 		return;
 	}
 	if (attacker == victim || hitPoints(victim) < 0) {
 		return;
 	}
+	queueMaterialImpact(attackerMaterial, victimMaterial, 0, point, normal);
 	const float speed = lengthOf(velocity);
 	const float n = lengthOf(normal);
 	const float angle = speed > 0 && n > 0 ? std::fabs(physics::dot(velocity, normal) / (speed * n)) : 0.0f;
@@ -1450,8 +1533,11 @@ void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity
 {
 	const float speed = lengthOf(velocity);
 	const bool instant = attackerMaterial == kKillMaterial;
+	// The soldier's node velocity, relative to a carrying Titan as retail's
+	// (0x006ca3b0); a fixed body is a static node (slot 0x164 false).
 	const Body* body = findBody(attacker);
-	const float limit = body && physics::lengthSquared(victim.body.velocity) < physics::lengthSquared(body->body.velocity)
+	const float limit = body && !body->fixed
+			&& physics::lengthSquared(victim.body.velocity) < physics::lengthSquared(body->body.velocity)
 		? kSoldierImpactSpeedFaster
 		: kSoldierImpactSpeed;
 	if (speed < limit && !instant) {
@@ -1465,23 +1551,27 @@ void GameWorld::roadKill(uint32_t attacker, Player& victim, const Vec3& velocity
 	}
 }
 
-// 0x005a2ca0: clamp(attacker's mass / victim's, 0.3, 3) when both are
-// mobile (a soldier weighing 200), else 1.
+// 0x005a2ca0: clamp(attacker's mass / victim's, 0.3, 3) when both have a
+// mobile node (slot 0x164: a fixed body's is the static node 0x993218),
+// the soldier weighing 200; else, or for a victim's mass of 0 or less, 1.
 float GameWorld::collisionMassFactor(uint32_t attacker, uint32_t victim) const
 {
 	const Body* a = const_cast<GameWorld*>(this)->findBody(attacker);
-	if (!a) {
+	if (!a || a->fixed) {
 		return 1;
 	}
 	float victimMass = 0;
 	if (soldierPlayer(victim)) {
 		victimMass = kSoldierMass;
-	} else if (const Body* b = const_cast<GameWorld*>(this)->findBody(victim)) {
+	} else if (const Body* b = const_cast<GameWorld*>(this)->findBody(victim); b && !b->fixed) {
 		victimMass = b->mass;
 	} else {
 		return 1;
 	}
-	return std::clamp(a->mass / std::max(victimMass, 1e-6f), 0.3f, 3.0f);
+	if (victimMass <= 0) {
+		return 1;
+	}
+	return std::clamp(a->mass / victimMass, 0.3f, 3.0f);
 }
 
 // 0x005a30b0: the attacker's driver (its PlayerControlObject's player), or
@@ -1622,6 +1712,42 @@ bool GameWorld::bodyAsleep(uint32_t object) const
 {
 	const Body* body = const_cast<GameWorld*>(this)->findBody(object);
 	return body && asleep(*body);
+}
+
+bool GameWorld::bodyMotion(uint32_t object, physics::Vec3& position, physics::Vec3& velocity) const
+{
+	const Body* body = findBody(object);
+	if (!body) {
+		return false;
+	}
+	position = body->body.position;
+	velocity = body->body.velocity;
+	return true;
+}
+
+int GameWorld::seatNearestBot(uint32_t vehicle)
+{
+	const Body* body = findBody(vehicle);
+	if (!body || !m_player) {
+		return -1;
+	}
+	Player* best = nullptr;
+	world::Object* bestSoldier = nullptr;
+	float bestDistance = 0;
+	for (const auto& p : m_players) {
+		world::Object* soldier = p && p->ai && p->alive && p->vehicle == 0 && p->team == m_player->team ? m_objects.find(p->object) : nullptr;
+		if (!soldier) {
+			continue;
+		}
+		const physics::Vec3 at {soldier->position().x, soldier->position().y, soldier->position().z};
+		const float d = physics::lengthSquared(at - body->body.position);
+		if (!best || d < bestDistance) {
+			best = p.get();
+			bestSoldier = soldier;
+			bestDistance = d;
+		}
+	}
+	return best && enterOnSpawn(*best, *bestSoldier, body->body.position, 1e9f, vehicle) ? best->id : -1;
 }
 
 float GameWorld::bodySubmerged(uint32_t object) const

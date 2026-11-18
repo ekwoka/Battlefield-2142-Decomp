@@ -15,6 +15,11 @@ void* loadLibrary(const char* name);
 void* findSymbol(void* library, const char* name);
 void freeLibrary(void* library);
 
+// The folder of this process's executable, ending in its separator ("" if
+// unknown): GetModuleFileName, _NSGetExecutablePath, /proc/self/exe. For
+// the libraries shipped beside it.
+std::string executableDirectory();
+
 // Replaces this process with `program` run on `args` (args[0] the
 // program's name): execv, _execv on Windows. Returns only on failure.
 bool restartProcess(const char* program, const std::vector<std::string>& args);

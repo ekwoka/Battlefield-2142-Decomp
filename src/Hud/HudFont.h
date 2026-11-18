@@ -61,8 +61,7 @@ uint32_t nextCode(const std::string& text, size_t& at);
 
 // The game's language (BF2142.exe 0x00405360: the registry's Language,
 // "English" by default, kept as the GSLanguage setting): the column of
-// strings.csv and the fonts' folder (Fonts/<language>/, its 800 x 600
-// fonts in Fonts/<language>/800/), English when that has none. One for
+// strings.csv and the fonts' folder (Fonts/<language>/), English when that has none. One for
 // the process, as the setting is.
 const std::string& language();
 void setLanguage(const std::string& name);

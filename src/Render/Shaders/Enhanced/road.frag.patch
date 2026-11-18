@@ -1,0 +1,12 @@
+Enhanced variant of road.frag: enhanced_shadow.glsl, the GTAO on the GI term.
+<<<<
+#include "shadow.glsl"
+====
+#define ENHANCED_AO_BINDING 5
+#include "enhanced_shadow.glsl"
+>>>>
+<<<<
+			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5) * 2.0;
+====
+			clamp(2.0 * lightmap.b * gi, 0.0, 1.0) * 0.5 * enhancedAO()) * 2.0;
+>>>>

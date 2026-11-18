@@ -10,6 +10,7 @@
 #include "Main/EndOfRoundBindings.h"
 #include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
+#include "Main/MenuGameState.h"
 #include "Main/SettingsObjects.h"
 #include "Net/Demo.h"
 #include "TestMain.h"
@@ -25,7 +26,9 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <vector>
 
 using namespace dice::hfe;
 using namespace dice::hfe::ui;
@@ -491,7 +494,10 @@ TEST(MenuBindings_InstantAction)
 	fake.reachable = false;
 	Menu menu;
 	menu::MenuBindings bindings(menu.player.natives(), fake.services());
-	bindings.setMaps({{"Belgrade", "gpm_sp", 16}, {"Minsk", "gpm_cq", 32}});
+	std::vector<menu::MenuMap> maps;
+	maps.push_back({"Belgrade", "gpm_sp", 16});
+	for (int i = 1; i <= 24; ++i) maps.push_back({"Map" + std::to_string(i), "gpm_sp", 16});
+	bindings.setMaps(maps);
 	std::optional<menu::GameSetup> started;
 	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
 	CHECK(menu.load(gameDir));
@@ -515,14 +521,96 @@ TEST(MenuBindings_InstantAction)
 	menu.run(3);
 	const std::string rows = "singleplay.mc_singleplayer.mcMapsAvailable.m_mcContainer.contents.holder_list.holder_list.";
 	CHECK(menu.text(rows + "row0.cell0.text") == "Belgrade - 16");
+	// The shipped scroll pane requires Mouse.onMouseWheel(delta, target).
+	bool hovered = false;
+	for (const auto& c : menu.player.clickables()) {
+		if (c.target.find("mcMapsAvailable") != std::string::npos && c.target.find("row0") != std::string::npos) {
+			menu.player.mouseMove(c.x + c.width / 2, c.y + c.height / 2);
+			hovered = true;
+			break;
+		}
+	}
+	CHECK(hovered);
+	menu.player.mouseWheel(-3);
+	menu.run(0.2);
+
+	CHECK(menu.text(rows + "row0.cell0.text") != "Belgrade - 16");
+	// The scroll bar's thumb follows: a fraction of its track, not pinned to the bottom
+	// (the list's scroll natives answer the position as a fraction of the scrollable rows).
+	const std::string pane = "singleplay.mc_singleplayer.mcMapsAvailable.";
+	const auto thumb = [&] {
+		const double top = std::stod(menu.text(pane + "m_dragTop")), length = std::stod(menu.text(pane + "iScrollableLength"));
+		return (std::stod(menu.text(pane + "m_mcScrollVertical.slider._y")) - top) / length;
+	};
+	const double scrolled = thumb();
+	CHECK(scrolled > 0.0 && scrolled < 0.5); // 3 rows of 25 (about 12 shown)
+	menu.player.mouseWheel(30);
+	menu.run(0.2);
+	CHECK(menu.text(rows + "row0.cell0.text") == "Belgrade - 16");
+	CHECK(thumb() == 0.0);
+	std::fprintf(stderr, "scrollbar thumb after 3 rows: %.3f, back at the top: %.3f\n", scrolled, thumb());
+	// Dragging the thumb scrolls too. The rows' clip lies above the scroll
+	// bar under a setMask(): the press must reach the thumb, not a row.
+	std::optional<Player::Clickable> slider;
+	for (const auto& c : menu.player.clickables()) {
+		if (c.target == "_level0." + pane + "m_mcScrollVertical.slider") {
+			slider = c;
+		}
+	}
+	CHECK(slider.has_value());
+	if (slider) {
+		const float x = slider->x + slider->width / 2, y = slider->y + slider->height / 2;
+		menu.player.mouseMove(x, y);
+		menu.player.mouseDown();
+		for (int k = 1; k <= 4; ++k) {
+			menu.run(0.05);
+			menu.player.mouseMove(x, y + k * 10);
+		}
+		menu.run(0.1);
+		CHECK(menu.text(rows + "row0.cell0.text") != "Belgrade - 16");
+		const double dragged = thumb();
+		CHECK(dragged > 0.0 && dragged < 1.0);
+		// Released, the thumb no longer follows the mouse.
+		menu.player.mouseUp();
+		menu.run(0.1);
+		menu.player.mouseMove(x, y + 80);
+		menu.run(0.2);
+		CHECK(thumb() == dragged);
+		std::fprintf(stderr, "scrollbar thumb after a 40 px drag: %.3f\n", dragged);
+	}
+	CHECK(menu.click(rows + "row0"));
 	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
 	menu.run(1);
 	CHECK(menu.click("MessageHandler.btnOk"));
 	menu.run(1);
-	CHECK(started && !started->maps.empty() && started->maps[0].level == "Belgrade");
+	CHECK(started && !started->maps.empty());
+	if (started && !started->maps.empty()) {
+		// Instant Action chooses a random available map.
+		CHECK(std::any_of(maps.begin(), maps.end(), [&](const auto& map) { return map.level == started->maps[0].level; }));
+		CHECK(started->maps[0].gameMode == "gpm_sp" && started->maps[0].size == 16);
+	}
 	if (started) {
 		CHECK(started->bots == 16 && started->botsIncludeHumans && started->ticketRatio == 200 && started->spawnTime == 15);
 	}
+	bool disconnected = false;
+	bindings.onDisconnect = [&] { disconnected = true; };
+	const auto chosenBefore = menu.player.natives().listRows("mapListChosen").size();
+	menu::updateMenuGameState(menu.player, bindings, true);
+	menu.run(2);
+	CHECK(menu.player.natives().listRows("mapListChosen").size() == chosenBefore);
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnStartPlaylist"));
+	CHECK(menu.click("singleplay.mc_singleplayer.btnDisconnect2"));
+	menu.run(1);
+	CHECK(disconnected);
+	disconnected = false;
+	CHECK(menu.click("singleplay.mc_singleplayer.btnDisconnect"));
+	menu.run(1);
+	CHECK(disconnected);
+	menu::updateMenuGameState(menu.player, bindings, false);
+	menu.run(1);
+	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnDisconnect2"));
 	for (const std::string& e : menu.player.scriptErrors()) {
 		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
 	}
@@ -1079,20 +1167,29 @@ TEST(MenuBindings_Mods)
 	std::vector<menu::MenuBindings::ModEntry> mods {mod};
 	if (const char* dir = std::getenv("BF2142_GAME_DIR")) {
 		mods = menu::MenuBindings::findMods(dir);
-		CHECK(mods.size() == 1 && mods[0].path == "mods/bf2142" && mods[0].version == "1.51");
 	}
+	// Additional installed mods may sort before the base game.
+	size_t baseIndex = 0;
+	while (baseIndex < mods.size() && mods[baseIndex].path != "mods/bf2142") {
+		++baseIndex;
+	}
+	CHECK(baseIndex < mods.size());
+	if (baseIndex == mods.size()) {
+		return;
+	}
+	CHECK(mods[baseIndex].version == "1.51");
 	bindings.setMods(mods, "mods/bf2142");
 	avm1::Interpreter vm;
 	const auto m = [&](const char* member, std::vector<avm1::Value> args = {}) {
 		return call(vm, natives, "dice.bf2.Mod", member, std::move(args));
 	};
-	CHECK(vm.toNumber(m("getNumMods")) == 1);
-	CHECK(natives.listRows("mods").size() == 1 && natives.listRows("mods")[0][0] == "Battlefield 2142");
+	CHECK(vm.toNumber(m("getNumMods")) == static_cast<double>(mods.size()));
+	CHECK(natives.listRows("mods").size() == mods.size() && natives.listRows("mods")[baseIndex][0] == "Battlefield 2142");
 	CHECK(vm.toString(m("getCurrentModName")) == "bf2142");
 	CHECK(vm.toString(m("getModTitle")).empty()); // none selected
 	m("activateMod");
 	CHECK(activated.empty());
-	m("selectMod", {avm1::Value(0)});
+	m("selectMod", {avm1::Value(static_cast<double>(baseIndex))});
 	CHECK(vm.toString(m("getModTitle")) == "Battlefield 2142");
 	CHECK(vm.toString(m("getModPath")) == "mods/bf2142" && vm.toString(m("getModPathShort")) == "bf2142");
 	CHECK(vm.toString(m("getModLogo")) == "mod.png" && vm.toString(m("getModVersion")) == "1.51");
@@ -1569,6 +1666,34 @@ TEST(MenuBindings_ServerRulesTimesKitsAndProbes)
 	CHECK(!avm1::toBoolean(call(vm, natives, "dice.bf2.AudioSettings", "isInCriticalState")));
 }
 
+// The menu's setPlayedVOHelp: a key listed once (any case), saved to
+// General.con, and then reported played by checkPlayedVOHelp.
+TEST(MenuBindings_SetPlayedVOHelpPersists)
+{
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "bf2142_menu_playedhelp_test";
+	std::filesystem::remove_all(dir);
+	std::filesystem::create_directories(dir / "Default");
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	menu::SettingsObjects objects;
+	objects.setDirectory(dir.string(), "Default");
+	bindings.setSettingsObjects(&objects);
+	avm1::Interpreter vm;
+	const auto gs = [&](const char* member, const char* key) {
+		return call(vm, natives, "dice.bf2.GeneralSettings", member, {avm1::Value(key)});
+	};
+	CHECK(!avm1::toBoolean(gs("checkPlayedVOHelp", "HUD_HELP_Menu")));
+	gs("setPlayedVOHelp", "HUD_HELP_Menu");
+	gs("setPlayedVOHelp", "hud_help_menu");
+	CHECK(avm1::toBoolean(gs("checkPlayedVOHelp", "HUD_HELP_MENU")));
+	CHECK(objects.list("GeneralSettings.PlayedVOHelp").size() == 1);
+	std::ifstream in(dir / "Default" / "General.con");
+	const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	CHECK(text.find("GeneralSettings.setPlayedVOHelp \"HUD_HELP_Menu\"") != std::string::npos);
+	std::filesystem::remove_all(dir);
+}
+
 // SwiffPlayer's language -> LCID table (0x10007730, RendDX9 0x1017af30) and
 // the locale defaults GetNumberFormatA / GetDateFormatA / GetTimeFormatA
 // give the menus (0x10007c60, 0x10007b70, 0x10007bf0, 0x10007aa0).
@@ -1613,4 +1738,150 @@ TEST(LocaleFormat_LanguagesAndFormats)
 	CHECK(io::formatDate(std::time_t(0), 0x409).empty() && io::formatDateTime(std::time_t(0), 0x409).empty());
 	const std::time_t when = 1200000000;
 	CHECK(io::formatDateTime(when, 0x407) == io::formatDate(when, 0x407) + " " + io::formatTime(when, 0x407, true));
+}
+
+// A server's texts kept in the profile (the demo notice's bookmark, a
+// favourite's name: port addition, consoleQuotable): quotes, line breaks,
+// ';' and a redirect stay inside their argument, so Profile.con and
+// General.con run back as the same calls and nothing else, and the text
+// comes back as close as the console can hold it. The bookmarks keep the
+// newest MenuBindings::kMaxDemoBookmarks.
+TEST(MenuBindings_ServerTextInTheProfile)
+{
+	namespace fs = std::filesystem;
+	const fs::path scratch = fs::temp_directory_path() / "bf2142_server_text_test";
+	fs::remove_all(scratch);
+	const char* previousConfig = std::getenv("BF2142_CONFIG_DIR");
+	const std::string savedConfig = previousConfig ? previousConfig : "";
+	test::setEnv("BF2142_CONFIG_DIR", scratch.string().c_str());
+	const std::string dir = menu::SettingsObjects::defaultDirectory();
+	CHECK(fs::path(dir).parent_path() == scratch);
+
+	const std::string hostile = "Evil\" 0\nCanary.fire\r\nvar v_pwned = 1\r\"; Canary.fire; \" > pwned.txt\tend";
+	const std::string map = "Minsk\" \"x\nbeginRem";
+	const std::string url = "http://x/\"\nCanary.fire\n";
+	const std::string kept = menu::consoleQuotable(hostile);
+	CHECK(kept == "Evil' 0 Canary.fire  var v_pwned = 1 '; Canary.fire; '> pwned.txt end");
+	CHECK(menu::consoleQuotable(kept) == kept); // the same text comes back unchanged
+	CHECK(menu::consoleQuotable("a>b >> c") == "a>b>> c");
+	CHECK(menu::consoleQuotable(std::string(300, 'x'), menu::kMaxServerText).size() == menu::kMaxServerText);
+	CHECK(menu::consoleQuotable("\xc3\xa9\xc3\xa9", 3) == "\xc3\xa9"); // not inside a UTF-8 sequence
+
+	{
+		Fake fake;
+		NativeRegistry natives;
+		menu::MenuBindings bindings(natives, fake.services());
+		menu::SettingsObjects objects;
+		objects.setDirectory(dir);
+		bindings.setSettingsObjects(&objects);
+		avm1::Interpreter vm;
+		bindings.addDemoBookmark(hostile, map, url, 1200000000);
+		CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.Multiplay", "addFavourite",
+			{avm1::Value(hostile), avm1::Value("192.168.1.20"), avm1::Value(16567)})));
+		// A list entry put in as it came, without the quoting, is still
+		// written as its one call.
+		objects.setList("GeneralSettings.ServerHistory", {"\"10.0.0.1\" 1\nCanary.fire 2 \"a\"\r\nCanary.fire 0"});
+		CHECK(objects.save());
+	}
+	const auto lines = [](const fs::path& path) {
+		std::ifstream in(path);
+		std::vector<std::string> out;
+		for (std::string line; std::getline(in, line);) {
+			out.push_back(line);
+		}
+		return out;
+	};
+	const auto profileLines = lines(fs::path(dir) / "0001" / "Profile.con");
+	const auto generalLines = lines(fs::path(dir) / "0001" / "General.con");
+	CHECK(!profileLines.empty() && !generalLines.empty());
+	int bookmarkLines = 0, favouriteLines = 0;
+	for (const std::string& line : profileLines) {
+		CHECK(line.rfind("LocalProfile.", 0) == 0);
+		bookmarkLines += line.rfind("LocalProfile.addDemoBookmark ", 0) == 0;
+	}
+	for (const std::string& line : generalLines) {
+		CHECK(line.rfind("GeneralSettings.", 0) == 0);
+		favouriteLines += line.rfind("GeneralSettings.addFavouriteServer ", 0) == 0;
+	}
+	CHECK(bookmarkLines == 1 && favouriteLines == 1);
+
+	// Run back by a new game: only the profile's own calls, nothing else.
+	{
+		Console console;
+		bool fired = false;
+		ConsoleMethod canary;
+		canary.name = "Canary.fire";
+		canary.access = ConsoleAccess::Anyone;
+		canary.maxArgs = 12;
+		canary.invoke = [&fired](const std::vector<std::string>&) {
+			fired = true;
+			return std::string();
+		};
+		console.registerMethod(std::move(canary));
+		std::string output;
+		console.execute("Canary.fire", output, ConsoleAccess::Anyone);
+		CHECK(fired); // the canary works
+		fired = false;
+		std::vector<std::string> ran;
+		console.setLineFilter([&ran](const std::string& line) {
+			ran.push_back(line);
+			return false;
+		});
+		menu::SettingsObjects loaded;
+		loaded.registerConsole(console);
+		loaded.setDirectory(dir);
+		const std::string profileBefore = [&] {
+			std::ifstream in(fs::path(dir) / "0001" / "Profile.con");
+			std::stringstream text;
+			text << in.rdbuf();
+			return text.str();
+		}();
+		CHECK(loaded.load(console));
+		CHECK(!fired);
+		std::string value;
+		CHECK(!console.getVariable("v_pwned", value));
+		for (const std::string& line : ran) {
+			CHECK(line.rfind("Canary", 0) != 0 && line.rfind("var", 0) != 0 && line.rfind("beginRem", 0) != 0);
+		}
+		CHECK(!fs::exists("pwned.txt") && !fs::exists(fs::path(dir) / "0001" / "pwned.txt"));
+		// The texts as kept, each its own argument.
+		Fake fake;
+		NativeRegistry natives;
+		menu::MenuBindings bindings(natives, fake.services());
+		bindings.setSettingsObjects(&loaded);
+		const auto favourites = bindings.favouriteServers();
+		CHECK(favourites.size() == 1 && favourites[0].name == kept && favourites[0].ip == "192.168.1.20" && favourites[0].port == 16567);
+		const auto& marks = loaded.list("LocalProfile.DemoBookmark");
+		CHECK(marks.size() == 1);
+		CHECK(marks.size() == 1
+			&& marks[0] == menu::quotedConsoleArgument(hostile) + " " + menu::quotedConsoleArgument(map) + " "
+					+ menu::quotedConsoleArgument(url) + " 1200000000");
+		CHECK(loaded.list("GeneralSettings.ServerHistory").size() == 1);
+		// Written again, the same file.
+		CHECK(loaded.profileScript() == profileBefore);
+	}
+
+	// The bookmarks: the newest kMaxDemoBookmarks, the oldest dropped.
+	{
+		Fake fake;
+		NativeRegistry natives;
+		menu::MenuBindings bindings(natives, fake.services());
+		menu::SettingsObjects objects;
+		bindings.setSettingsObjects(&objects);
+		const size_t limit = menu::MenuBindings::kMaxDemoBookmarks;
+		for (size_t i = 0; i < limit + 50; ++i) {
+			bindings.addDemoBookmark("Server " + std::to_string(i), "Minsk", "u", static_cast<uint32_t>(i));
+		}
+		const auto& marks = objects.list("LocalProfile.DemoBookmark");
+		CHECK(marks.size() == limit);
+		CHECK(!marks.empty() && marks.front() == "\"Server 50\" \"Minsk\" \"u\" 50");
+		CHECK(!marks.empty() && marks.back() == "\"Server " + std::to_string(limit + 49) + "\" \"Minsk\" \"u\" " + std::to_string(limit + 49));
+	}
+
+	if (savedConfig.empty()) {
+		test::unsetEnv("BF2142_CONFIG_DIR");
+	} else {
+		test::setEnv("BF2142_CONFIG_DIR", savedConfig.c_str());
+	}
+	fs::remove_all(scratch);
 }

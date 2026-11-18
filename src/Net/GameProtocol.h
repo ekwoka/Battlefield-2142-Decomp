@@ -551,7 +551,7 @@ enum NetworkMessage : uint32_t {
 	kNeStartSimulation = 3,
 	kNeDatabaseComplete = 4,
 	kNeReset = 5,
-	kNeSelectSpawnGroup = 6, // c->s, 4 bytes: the spawn group (0x004c1d50)
+	kNeSelectSpawnGroup = 6, // c->s, 4 bytes: the spawn group (0x004c1d50); s->c empty: group cleared (0x004bff13)
 	kNeSelectTeam = 7,       // c->s, 4 bytes: the team (0x004c1dc0)
 	kNeSelectKit = 8,
 	kNePlayerSpawned = 9,

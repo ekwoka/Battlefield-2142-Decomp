@@ -63,6 +63,10 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 // act once).
 struct MoveInputState {
 	float pitch = 0;
+	// In a vehicle's seat (set by the caller before each move: the server
+	// from the player's vehicle, the vehicle prediction always): the aim's
+	// pitch then runs on past the soldier's +-85.
+	bool seated = false;
 	bool useWas = false;
 	int seatWas = 0, itemWas = 0;
 };
@@ -74,7 +78,18 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	input.pitchAxis = move.axis(kPIPitch);
 	input.rollAxis = move.axis(kPIRoll);
 	input.turn = move.axis(kPIMouseLookX) * kDegreesPerMouseLookUnit;
-	state.pitch = std::clamp(state.pitch - move.axis(kPIMouseLookY) * kDegreesPerMouseLookUnit, -89.0f, 89.0f);
+	// On foot the soldier's +-85 (game::kSoldierLookPitchLimit, 0x005890a0
+	// clamping the pitch +0x270 the input handling 0x0058a6d0 adds the
+	// PIMouseLookY change to), so looking past the top or bottom isn't kept
+	// to be undone. In a seat the original keeps no pitch of the soldier's:
+	// the seat's bundles take the PIMouseLookY change itself and clamp their
+	// own rotation (rotationAxisStep). Here a driver's PIPitch and the
+	// seat's bundles take this value's change, so it runs on (a clamp pinned
+	// at one end swallows the mouse that way); the client's look (Viewer,
+	// driving: +-1000 rad, about +-57000 degrees) is the same sum. Whatever
+	// aims along it bounds it first (game::soldierLookPitch).
+	const float limit = state.seated ? 57000.0f : game::kSoldierLookPitchLimit;
+	state.pitch = std::clamp(state.pitch - move.axis(kPIMouseLookY) * kDegreesPerMouseLookUnit, -limit, limit);
 	input.aimPitch = state.pitch;
 	input.sprint = move.trigger(kPISprint);
 	input.fire = move.trigger(kPIFire);

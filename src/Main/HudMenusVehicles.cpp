@@ -289,6 +289,39 @@ void WeaponHud::hide(hud::HudManager& hud, bool secondary)
 	hud.set(P + "ClipBlink", 0);
 }
 
+// --- The flares / active defence meter (0x007be490) ---
+
+void FlareHud::update(hud::HudManager& hud, const FlareHudInput& in)
+{
+	// The press stamp (0x007be360, from the input handling): only while unset.
+	if (m_since >= 0) {
+		m_since += in.seconds;
+	} else if (in.pressed) {
+		m_since = 0;
+	}
+	if (in.otherGuns) {
+		m_show = m_use = false; // the earlier groups' firearms clear both
+	}
+	if (!in.present) {
+		m_show = m_use = false;
+	} else {
+		if (in.reloading) {
+			m_value = in.reload;
+			m_since = -1;
+		} else if (m_since > 0) {
+			m_value = 1 - m_since / std::max(in.interval, 1.0f / 30.0f);
+		} else if (m_since < 0) {
+			m_value = 1;
+		}
+		m_show = m_value > 0 || m_use;
+		m_use = m_show && m_value > 0 && !in.reloading;
+	}
+	hud.set("FlaresReloadTime", m_value);
+	hud.set("FlaresReloadTimeShow", m_show ? 1 : 0);
+	hud.set("FlareUseShow", m_use ? 1 : 0);
+	hud.set("FlareBlink", m_blink.tick(m_value, in.seconds) ? 1 : 0);
+}
+
 // --- The crosshair's parts (0x007be770) ---
 
 CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length)
@@ -397,6 +430,19 @@ const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo&
 		m_out.show = false;
 	}
 	return m_out;
+}
+
+int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, bool vehicleChanged)
+{
+	const auto recent = [](int64_t since) { return since >= 0 && since < kGiftTicks; };
+	int mask = 0;
+	if (!info.healFlag && recent(info.sinceHeal) && (!info.repairFlag || inVehicle)) {
+		mask |= info.repairFlag ? 1 << 1 : 1 << 0;
+	}
+	if (!vehicleChanged && !info.ammoFlag && recent(info.sinceAmmo)) {
+		mask |= 1 << 2;
+	}
+	return mask;
 }
 
 const AbilityBar::Out& AbilityBar::hide()
@@ -693,6 +739,12 @@ float mechFootValue(float length, float time)
 	return std::sin(std::min(time / length, 1.0f) * 6.2831855f) + 1;
 }
 
+float aircraftHudThrust(int guiIndex, float throttle)
+{
+	return guiIndex == 7 || guiIndex == 15 || guiIndex == 64 || guiIndex == 66
+		? std::clamp(throttle, -1.0f, 1.0f) : 0.0f;
+}
+
 void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 {
 	const world::ObjectTemplate* v = in.vehicle;
@@ -716,9 +768,12 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	m_secondTorque += (std::clamp(in.torque + 1.0f, 0.0f, 1.0f) - m_secondTorque) * 0.01f;
 	hud.set("Torque", m_torque);
 	hud.setString("TorqueString", std::to_string(static_cast<int>(std::ceil(m_torque * 100.0f))));
-	hud.set("TorqueAngle", m_torque * 6.2831855f);
+	// The exe keeps these angles in radians and its compass nodes scale them
+	// by 57.29578 (0x00a0d138); our compass variables are degrees.
+	constexpr float kDegrees = 57.29578f;
+	hud.set("TorqueAngle", m_torque * 6.2831855f * kDegrees);
 	hud.set("SecondTorque", m_secondTorque);
-	hud.set("SecondTorqueAngle", m_secondTorque * 6.2831855f);
+	hud.set("SecondTorqueAngle", m_secondTorque * 6.2831855f * kDegrees);
 	// The vehicle's sprint (0x007a2e60's end, the controlled object not the
 	// soldier): VehicleStamina (+0x1d4) the control object's slot 0x108,
 	// VehicleStaminaShow (+0x2ab) while sprinting or below 1,
@@ -751,7 +806,13 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	const float climbSpeed = m_climbSpeed;
 	const float angle = (12.566371f / climbSpeed) * in.climb * 0.1f - m_climbPrevious + m_climbAngle;
 	m_climbAngle = m_climbPrevious = angle;
-	hud.set("VehicleElevationSpeedAngle", angle);
+	hud.set("VehicleElevationSpeedAngle", angle * kDegrees);
+	// 0x007a2b50: the horizon bar. AngleOfAttack ceil(forward.y x 100 + 296)
+	// as an integer (the bar's y); VehicleBanking pi/2 - acos(right.y)
+	// negated, in radians, which the exe turns the other way round than our
+	// quads (clockwise degrees): the bar counter-rolls the vehicle.
+	hud.set("AngleOfAttack", std::ceil(in.forwardY * 100.0f + 296.0f));
+	hud.set("VehicleBanking", std::asin(std::clamp(in.rightY, -1.0f, 1.0f)) * kDegrees);
 	// The other seats' turrets (0x007a2b50 → 0x007a1e00 / 0x007a07c0).
 	const bool one = in.seat && flag(in.seat, "vehicleHud.showOneSecondaryGunnerAngle", false);
 	for (const OtherSeat& other : in.others) {
@@ -772,7 +833,7 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	if (in.walking) {
 		m_footValue = mechFootValue(in.walkLength, in.walkTime);
 	}
-	hud.set("MechFootAnimationValue", m_footValue);
+	hud.set("MechFootAnimationValue", m_footValue * kDegrees);
 	hud.setString("AltitudeString", std::to_string(static_cast<int>(std::ceil(in.altitude))));
 	// The seat dots (0x007a28e0): states 0 (unset) .. 7 per seat, at the
 	// seat's icon position.
@@ -922,6 +983,17 @@ MapRelation vehicleRelation(bool hasOccupant, bool localInside, int occupantTeam
 		return MapRelation::Neutral;
 	}
 	return vehicleTeam == localTeam ? MapRelation::Friendly : MapRelation::Enemy;
+}
+
+std::array<float, 4> mapRelationColor(MapRelation relation, bool squad)
+{
+	if (relation == MapRelation::Friendly) {
+		return squad ? std::array<float, 4> {0.4f, 1, 0, 1} : std::array<float, 4> {0.254f, 0.552f, 0.89f, 1};
+	}
+	if (relation == MapRelation::Enemy) {
+		return {0.87f, 0.094f, 0.094f, 1};
+	}
+	return {1, 1, 1, 1};
 }
 
 const MapIcons& mapIcons(const world::ObjectTemplate& t)
@@ -1115,6 +1187,20 @@ bool lists(const std::vector<int>& modes, int mode)
 
 } // namespace
 
+int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* weapon, float deviation,
+	bool zoomed, bool sprintTest, bool crosshairActive)
+{
+	const int gui = weaponGuiIndex(weapon, zoomed, sprintTest);
+	hud.set("GuiIndex", static_cast<float>(gui));
+	hud.set("CrosshairIconShow", crosshairActive ? 1 : 0);
+	const auto parts = crosshairParts(deviation > 0 ? deviation : hudNumber(weapon, "deviation.minDev", 0), weapon);
+	hud.set("CrossRightPos", parts.right);
+	hud.set("CrossLeftPos", parts.left);
+	hud.set("CrossUpPos", parts.up);
+	hud.set("CrossDownPos", parts.down);
+	return gui;
+}
+
 int vehicleGuiIndex(const VehicleGuiInput& in)
 {
 	// 0x007a01e0: no VehicleHud, the first weapon's HUD as it is.
@@ -1280,7 +1366,7 @@ std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWor
 				}
 			}
 		}
-		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16};
+		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16, enemy.yaw};
 		const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
 		if (kit && kit->objectTemplate()) {
 			const MapIcons& icons = mapIcons(*kit->objectTemplate());
@@ -1296,7 +1382,7 @@ std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWor
 	}
 	for (const uint32_t id : world.spottedVehicles()) {
 		if (const world::Object* vehicle = round.objects().find(id)) {
-			RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", vehicle->position().x, vehicle->position().z, 16};
+			RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", vehicle->position().x, vehicle->position().z, 16, vehicle->rotation().x};
 			if (vehicle->objectTemplate()) {
 				const MapIcons& icons = mapIcons(*vehicle->objectTemplate());
 				if (!icons.icon.empty()) {

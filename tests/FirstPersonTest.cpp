@@ -93,6 +93,50 @@ TEST(FirstPerson_PlacementPutsTheCameraBoneAtTheEye)
 	CHECK(near(sprung[12], 10.01f) && near(sprung[13], 20.02f) && near(sprung[14], 29.97f));
 }
 
+TEST(FirstPerson_RemasterShotgunShiftAndReloadMessages)
+{
+	REMASTER_ONLY();
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/Project_Remaster_v17_Final");
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	CHECK(console.run("ServerArchives.con", {}, out));
+	CHECK(console.run("ClientArchives.con", {}, out));
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(console, systems);
+	CHECK(console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out));
+	const auto load = [&](const std::string& path) { return systems.get(path, [&] { console.run(path, {}, out); }); };
+	const auto* soldier = load("Objects/Soldiers/Common/Animations/AnimationSystem1p.inc");
+	const auto* shotgun = load("Objects/Weapons/Handheld/EU_Jackhammer/AnimationSystem1p.inc");
+	const auto* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/1p_setup.ske");
+	CHECK(soldier && shotgun && skeleton);
+	if (!soldier || !shotgun || !skeleton) return;
+	anim::FirstPersonRig rig(systems, *skeleton, soldier);
+	rig.setWeapon(shotgun);
+	anim::AnimationInput input;
+	for (int i = 0; i < 90; ++i) rig.update(input, 1 / 30.0f);
+	const auto playing = [&](const char* name) {
+		const auto names = rig.playing();
+		return std::find(names.begin(), names.end(), name) != names.end();
+	};
+	input.pulses = 32;
+	rig.update(input, 1 / 30.0f);
+	CHECK(playing("shift"));
+	input.pulses = 0;
+	for (int i = 0; i < 60; ++i) rig.update(input, 1 / 30.0f);
+	input.messages = 2;
+	rig.update(input, 1 / 30.0f);
+	CHECK(playing("reload"));
+}
+
 TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -174,6 +218,88 @@ TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 		const anim::Matrix& c = rig.pose()[0];
 		CHECK(m[14] > c[14] && m[13] < c[13] + 0.05f);
 	}
+}
+
+TEST(FirstPerson_FragComesBackInHandAfterTheThrow)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(console, systems);
+	console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	const auto load = [&](const std::string& path) { return systems.get(path, [&] { console.run(path, {}, out); }); };
+	const anim::AnimationSystemTemplate* soldier = load("Objects/Soldiers/Common/Animations/AnimationSystem1p.inc");
+	const anim::AnimationSystemTemplate* frag = load("Objects/Weapons/Handheld/Unl_Grenade_Frag/AnimationSystem1p.inc");
+	const anim::Skeleton* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/1p_setup.ske");
+	CHECK(soldier && frag && skeleton);
+	if (!soldier || !frag || !skeleton) {
+		return;
+	}
+	anim::FirstPersonRig rig(systems, *skeleton, soldier);
+	rig.setWeapon(frag);
+	const auto playing = [&rig](const std::string& name) {
+		const auto names = rig.playing();
+		return std::find(names.begin(), names.end(), name) != names.end();
+	};
+	const auto run = [&](uint32_t messages, uint32_t pulses, int ticks) {
+		anim::AnimationInput input;
+		input.messages = messages;
+		input.pulses = pulses;
+		rig.update(input, 1 / 30.0f);
+		input.pulses = 0;
+		for (int i = 1; i < ticks; ++i) {
+			rig.update(input, 1 / 30.0f);
+		}
+	};
+	// FireArm::animationMessages: 8 while cocked (in hand, pin in).
+	run(8, 0, 60);
+	CHECK(playing("normal_still"));
+	// The press: pin out (16), the throw (1) after the pull-back, the launch.
+	run(0, 16, 30);
+	run(0, 1, 12);
+	CHECK(playing("uncocked_fire"));
+	run(0, 0, 21);
+	// The throw is held (playForever): only the reset gets rid of it.
+	run(8, 0, 30);
+	CHECK(playing("uncocked_fire"));
+	// The reload (autoReload, 0x005e1410) resets the system, cocks the next
+	// one and sends its pulse: a new grenade is drawn (deploy), then held.
+	rig.resetWeapon();
+	run(8, 2, 1);
+	CHECK(playing("deploy"));
+	CHECK(!playing("uncocked_fire"));
+	run(8, 0, 60);
+	CHECK(playing("normal_still"));
+	CHECK(!playing("uncocked_fire"));
+	// The engineer's motion mine: the same ThrownAnimationComp, its placing
+	// held by playForever until the reload's reset.
+	const anim::AnimationSystemTemplate* mine = load("Objects/Weapons/Handheld/Unl_Mine_Motion/AnimationSystem1p.inc");
+	CHECK(mine != nullptr);
+	if (!mine) {
+		return;
+	}
+	rig.setWeapon(mine);
+	run(8, 0, 60);
+	CHECK(playing("still"));
+	run(0, 17, 30);
+	CHECK(playing("fire"));
+	rig.resetWeapon();
+	run(8, 2, 120);
+	CHECK(!playing("fire"));
+	CHECK(playing("still"));
 }
 
 TEST(FirstPerson_RecoilGraphAndKick)

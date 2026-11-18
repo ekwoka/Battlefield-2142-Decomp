@@ -8,6 +8,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/CombatAreas.h"
 #include "Game/GameWorld.h"
+#include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -45,9 +46,13 @@ struct TitanLevel {
 	std::function<void()> afterTick;
 	bool loaded = false;
 
-	TitanLevel(const char* gameDir, const std::string& name, int size, bool start = true)
+	TitanLevel(const char* gameDir, const std::string& name, int size, bool start = true, const char* mod = nullptr, bool statics = false,
+		geom::GeometryTemplateManager* geometries = nullptr, const char* mode = "gpm_ti")
 	{
 		files.setRootPath(gameDir);
+		if (mod) {
+			files.addSearchPath(mod); // as main: the mod first, the base game behind it
+		}
 		files.addSearchPath("mods/bf2142");
 		files.setMountingAllowed(true);
 		const std::string level = "Levels/" + name + "/";
@@ -56,11 +61,13 @@ struct TitanLevel {
 		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
 			[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
 		CHECK(console.run("ServerArchives.con", {}, out));
+		if (geometries) CHECK(console.run("ClientArchives.con", {}, out));
 		if (files.exists(level + "ServerArchives.con")) {
 			console.run(level + "ServerArchives.con", {}, out);
 		}
 		files.setMountingAllowed(false);
 		world::registerWorldConsoleMethods(console, templates, objects);
+		if (geometries) geom::registerGeometryConsoleMethods(console, *geometries);
 		templates.setCurrentFileProvider([this] { return console.currentFile(); }); // as main does
 		terrain::registerTerrainConsoleMethods(console, heightmaps, files);
 		physics::registerCollisionConsoleMethods(console, collisionTemplates);
@@ -86,19 +93,31 @@ struct TitanLevel {
 		}
 		CHECK(untyped.size() > 100);
 		world::registerUntypedTemplateProperties(console, templates, untyped);
+		// The engine's constants (c_ETHelicopter...), which main registers: without
+		// them a template's setEngineType is refused and its engine has type 0.
+		std::ifstream constants(std::string(BF2142_SOURCE_DIR) + "/symbols/BF2142.exe.constants.csv");
+		while (std::getline(constants, line)) {
+			const size_t comma = line.find(',');
+			if (comma != std::string::npos) {
+				console.registerConstant(line.substr(0, comma), line.substr(comma + 1));
+			}
+		}
 		templates.setLoading(true);
 		world::loadObjectTemplates(console, files, "Objects/", false);
 		templates.setLoading(false);
 		console.run("Common/Material/MaterialManagerSettings.con", {}, out);
 		console.run(level + "Heightdata.con", {}, out);
-		console.run(level + "GameModes/gpm_ti/" + std::to_string(size) + "/GamePlayObjects.con", {"host"}, out);
+		if (statics) {
+			console.run(level + "StaticObjects.con", {}, out);
+		}
+		console.run(level + "GameModes/" + mode + "/" + std::to_string(size) + "/GamePlayObjects.con", {"host"}, out);
 		const terrain::Heightmap* ground = heightmaps.primary();
 		CHECK(ground && ground->loaded());
 		if (!ground || !ground->loaded()) {
 			return;
 		}
 		world = std::make_unique<game::GameWorld>(templates, objects);
-		world->setGameMode("gpm_ti");
+		world->setGameMode(mode);
 		world->setCombatAreas(&areas);
 		world->setEventSink([this](const std::string& event, const game::ScriptArgs& args) {
 			events.push_back({event, args});

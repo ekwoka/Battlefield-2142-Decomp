@@ -144,6 +144,9 @@ bool Sound::detach()
 	auto state = std::make_unique<DetachedState>();
 	state->matrix = worldMatrix();
 	state->m_velocity = velocity();
+	// The last occlusion is asked once, at the copied matrix's translation
+	// (BF2142Audio 0x10017350: the query gets the state's +0x38, row 3 of
+	// the matrix copied to +8), not the template's position or play offset.
 	if (m_occlusion) {
 		const Vec3 position = state->matrix.translation();
 		state->occlusionValue = m_occlusion->occlusion(this, &position);
@@ -274,6 +277,7 @@ bool Sound::scheduleSample(int index, const Vec3* position, int loopCount)
 		return false;
 	}
 	m_loopCount = loopCount;
+	m_lastPlayOffset = position ? *position : Vec3 {};
 	soundEngine().scheduleSample(*this, index, position);
 	return true;
 }

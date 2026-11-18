@@ -8,10 +8,17 @@
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
+#include "Main/GameAudio.h"
 #include "Main/HostedGame.h"
 #include "Main/HudMenus.h"
 #include "Net/GameClient.h"
 #include "Physics/CollisionTemplateManager.h"
+#include "Physics/MaterialManager.h"
+#include "Sound/Game/GameSounds.h"
+#include "Sound/Game/SoundConsole.h"
+#include "Sound/Game/SoundManager.h"
+#include "Sound/Game/VfsSoundFileSystem.h"
+#include "Sound/SoundEngine/ISoundEngine.h"
 #include "TestMain.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -40,19 +47,46 @@ struct Field {
 	io::FileManager files;
 	Console console {&files};
 	world::ObjectTemplateManager templates;
+	sound::SoundManager soundManager;
 	world::ObjectManager objects;
+	physics::MaterialManager materials;
 	physics::CollisionTemplateManager collisionTemplates;
 	std::unique_ptr<game::GameWorld> world;
 	std::vector<std::pair<std::string, game::ScriptArgs>> events;
 	bool loaded = false;
+	uint32_t groundMaterial = 0;
 
-	Field()
+	// `materialTable`: the shipped damage table (Common/Material) handed to
+	// the world, as the game does.
+	explicit Field(const std::string& mod = "mods/bf2142", bool collisionMeshes = false,
+		sound::ISoundEngine* audioEngine = nullptr, bool materialTable = false)
+		: soundManager(audioEngine, templates)
 	{
+		if (audioEngine) {
+			soundManager.registerTemplateType();
+			sound::registerSoundConsoleMethods(console, soundManager);
+		}
+		if (audioEngine || materialTable) {
+			physics::registerMaterialConsoleMethods(console, materials);
+		}
 		if (const char* gameDir = std::getenv("BF2142_GAME_DIR")) {
 			files.setRootPath(gameDir);
-			files.addSearchPath("mods/bf2142");
+			files.addSearchPath(mod);
+			if (materialTable && files.mountArchive("Common_server.zip", "Common")) {
+				std::string out;
+				console.run("Common/Material/materialManagerDefine.con", {}, out);
+				console.run("Common/Material/materialManagerSettings.con", {}, out);
+			}
 			if (files.mountArchive("Objects/Weapons_server.zip", "Objects\\Weapons")) {
+				if (collisionMeshes) {
+					physics::registerCollisionConsoleMethods(console, collisionTemplates);
+				}
 				world::registerWorldConsoleMethods(console, templates, objects);
+				if (collisionMeshes) {
+					// As the game keeps them (its console tables' ObjectTemplate properties).
+					world::registerUntypedTemplateProperties(console, templates,
+						{"collisionMesh", "collisionPart", "hasCollisionPhysics"});
+				}
 				world::registerUntypedTemplateProperties(console, templates,
 					{"rcType", "minTimeBetweenActivation", "uavVehicleTemplate", "uavVehicleSpeed", "uavVehicleRadius",
 						"uavVehicleFlightHeight", "uavVehicleSampleResolution", "armor.maxHitPoints", "armor.hitPoints",
@@ -60,7 +94,8 @@ struct Field {
 						"fire.roundsPerMinute", "fire.burstSize", "fire.batchSize", "fire.fireLaunchDelay",
 						"deviation.subProjectileDev", "ammo.magSize", "ammo.nrOfMags", "velocity", "projectileTemplate",
 						"detonation.explosionDamage", "detonation.explosionRadius", "detonation.explosionMaterial",
-						"detonation.isEMPWeapon", "damage", "minDamage", "timeToLive", "gravityModifier", "material",
+						"detonation.isEMPWeapon", "detonation.endEffectTemplate", "detonation.useMMOnEndEffect",
+						"damage", "minDamage", "timeToLive", "gravityModifier", "material",
 						"seek.targetType", "radius", "healSpeed", "refillAmmoSpeed", "sharedStorageSize",
 						"healStorageSize", "ammoStorageSize", "destroyWhenEmptyStorage", "workOnVehicles"});
 				std::string out;
@@ -74,12 +109,14 @@ struct Field {
 						 "stationary/commander_orbital_Strike/commander_orbital_strike_64.con",
 						 "stationary/commander_uav_drone_control/commander_uav_drone_control.con",
 						 "stationary/commander_movement_analyst/commander_movement_analyst.con",
-						 "stationary/commander_supplybox/supply_crate.con"}) {
+						 "stationary/commander_supplybox/supply_crate.con",
+						 "stationary/missile_silo/missile_silo_v2.con"}) {
 					console.run(base + script, {}, out);
 				}
 				loaded = templates.find("commander_emp_strike") && templates.find("commander_orbital_strike_64")
 					&& templates.find("commander_uav_drone_control") && templates.find("commander_movement_analyst")
-					&& templates.find("supply_crate") && templates.find("OrbitalStrikeControlObjectUS");
+					&& templates.find("supply_crate") && templates.find("missile_silo_v2")
+					&& templates.find("OrbitalStrikeControlObjectUS");
 			}
 		}
 		templates.registerType(1, "ControlPoint");
@@ -104,7 +141,7 @@ struct Field {
 				{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 					 normal = {0, 1, 0};
 					 return 0.0f;
-				 }});
+				 }, [this](float, float) { return groundMaterial; }}, audioEngine || materialTable ? &materials : nullptr);
 		}
 		world->setEventSink([this](const std::string& event, const game::ScriptArgs& args) {
 			events.emplace_back(event, args);
@@ -144,6 +181,254 @@ struct Field {
 };
 
 } // namespace
+
+// Static PCO structures created by a round's ObjectSpawners arrive after
+// GameWorld::startRound has built the level collision. Use the shipped Suez
+// Titan silo and commander scanning station assets to ensure they join that
+// collision snapshot before the next soldier movement step, in both mods.
+TEST(Commander_LateStaticAssetsEnterCollisionWorld)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
+		for (const char* name : {"missile_silo_v2", "commander_movement_analyst"}) {
+			Field field(mod, true);
+			if (!field.loaded) {
+				CHECK(field.loaded);
+				continue;
+			}
+			world::ObjectTemplate* structure = field.templates.find(name);
+			CHECK(structure != nullptr);
+			if (!structure) {
+				continue;
+			}
+			const auto mobile = structure->settings().find("hasMobilePhysics");
+			CHECK(mobile != structure->settings().end() && mobile->second == "0");
+			const world::Object* placed = field.objects.create(structure, {0, 0, 0}, {90, 0, 0}); // Suez's runtime spawns use a yawed map rotation
+			if (std::string(name) == "missile_silo_v2") {
+				// The silo's barrel rests upright (a deviation from the flat pose its mesh has at rest).
+				world::Vec3 offset, rotation;
+				CHECK(field.world->partPose(placed->id(), "Missile_Silo_Barrel", offset, rotation));
+				CHECK(std::fabs(rotation.y + 90.0f) < 1e-3f);
+			}
+			field.world->tick(1 / 30.0f);
+			float hitFraction = 0;
+			uint32_t hitObject = 0;
+			const bool hit = field.world->segmentHit({0, 1, -15}, {0, 1, 15}, 0, hitFraction, hitObject);
+			std::fprintf(stderr, "  %s/%s: collision mesh %s, ray hit %d at %.2f owner %u\n", mod.c_str(), name,
+				structure->settings().at("collisionMesh").c_str(), hit, hitFraction, hitObject);
+			CHECK(hit);
+			CHECK(field.world->spawnPlayer(2) != nullptr);
+			const int player = field.world->localPlayer();
+			game::GameWorld::PlayerInfo info;
+			CHECK(field.world->playerInfo(player, info) && info.alive);
+			field.world->setSoldierPosition(info.soldier, {0, 0, -15});
+			game::SoldierInput walk;
+			walk.throttle = 1;
+			walk.sprint = true;
+			walk.turn = -info.yaw; // face +z, toward the structure
+			float tailMin = 1e9f, tailMax = -1e9f;
+			for (int i = 0; i < 150; ++i) {
+				field.world->setInput(player, walk);
+				walk.turn = 0;
+				field.world->tick(1 / 30.0f);
+				if (i >= 120 && field.world->playerInfo(player, info)) {
+					tailMin = std::min(tailMin, info.position.z);
+					tailMax = std::max(tailMax, info.position.z);
+				}
+			}
+			CHECK(field.world->playerInfo(player, info));
+			std::fprintf(stderr, "  %s/%s: final z %.2f\n", mod.c_str(), name, info.position.z);
+			CHECK(info.position.z < -1.0f);
+			CHECK(tailMax - tailMin < 0.5f);
+		}
+	}
+}
+
+// Child parts that take the root's collision mesh through collisionPart
+// (no collisionMesh of their own): the silo's base and launch tube, the EMP
+// station's mount and dish, the orbital controller's antenna. Each part's
+// LODs join the static worlds at the part's place: the soldier world only
+// where the part authors a soldier (or vehicle) LOD, so the EMP and orbital
+// parts add projectile faces alone. The silo's tube stands upright as
+// partPose turns it, not along its flat rest pose. Placed unturned and
+// yawed 90 degrees (Suez's spawns are yawed).
+TEST(Commander_InheritedCollisionPartsCollide)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	struct Probe {
+		physics::Vec3 from, to;
+		bool hits;
+	};
+	struct Asset {
+		const char* name;
+		size_t soldierTriangles, projectileTriangles; // root + child parts (work/collision-trace/probe.txt)
+		std::vector<Probe> projectile, soldier;
+	};
+	const std::vector<Asset> assets = {
+		{"missile_silo_v2", 92 + 60 + 12, 2264 + 532 + 244,
+			{{{-10, 8, 0.97f}, {10, 8, 0.97f}, true}, // the upright tube, above the base
+				{{-10, 3.2f, 5}, {10, 3.2f, 5}, false}}, // where the flat rest-pose tube would lie
+			{{{-10, 6, 0.97f}, {10, 6, 0.97f}, true}, // the tube's soldier LOD
+				{{-10, 3.2f, 5}, {10, 3.2f, 5}, false}}},
+		{"commander_emp_strike", 10, 907 + 358 + 596,
+			{{{-10, 3.9f, 0}, {10, 3.9f, 0}, true}, // the mount, above the root's projectile LOD
+				{{-10, 4.9f, 0.4f}, {10, 4.9f, 0.4f}, true}}, // the dish, above the mount (4.46 m)
+			{}},
+		{"commander_orbital_strike_64", 30, 448 + 2327, {{{-10, 4, 0}, {10, 4, 0}, true}}, {}}, // the antenna
+	};
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
+		for (const Asset& asset : assets) {
+			for (const float yaw : {0.0f, 90.0f}) {
+				Field field(mod, true);
+				if (!field.loaded) {
+					CHECK(field.loaded);
+					continue;
+				}
+				const world::Object* placed = field.objects.create(field.templates.find(asset.name), {0, 0, 0}, {yaw, 0, 0});
+				field.world->tick(1 / 30.0f);
+				CHECK(field.world->projectileCollision(placed->id()) == nullptr); // static, not a body
+				const size_t soldierTriangles = field.world->staticCollision().triangles();
+				const size_t projectileTriangles = field.world->projectileCollision(0)->triangles();
+				std::fprintf(stderr, "  %s/%s yaw %.0f: soldier %zu, projectile %zu triangles\n", mod.c_str(), asset.name, yaw,
+					soldierTriangles, projectileTriangles);
+				CHECK(soldierTriangles == asset.soldierTriangles);
+				CHECK(projectileTriangles == asset.projectileTriangles);
+				const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({yaw, 0, 0});
+				for (const Probe& probe : asset.projectile) {
+					float fraction = 0;
+					uint32_t owner = 0;
+					const bool hit =
+						field.world->segmentHit(turn.transform(probe.from), turn.transform(probe.to), 0, fraction, owner);
+					std::fprintf(stderr, "    projectile y %.1f z %.2f: hit %d at %.2f\n", probe.from.y, probe.from.z, hit, fraction);
+					CHECK(hit == probe.hits);
+					CHECK(!probe.hits || owner == placed->id());
+					// A round flown down the same line strikes the part (or passes).
+					world::ObjectTemplate* round = field.templates.find("collision_test_round");
+					if (!round) {
+						round = field.templates.create("GenericProjectile", "collision_test_round");
+						round->settings()["gravityModifier"] = "0";
+					}
+					const size_t before = field.world->impacts().size();
+					const physics::Vec3 way = turn.transform(probe.to - probe.from);
+					CHECK(field.world->launchProjectile("collision_test_round", turn.transform(probe.from),
+						way * (300.0f / std::sqrt(physics::lengthSquared(way)))));
+					for (int i = 0; i < 6; ++i) {
+						field.world->tick(1 / 30.0f);
+					}
+					bool struck = false;
+					for (size_t i = before; i < field.world->impacts().size(); ++i) {
+						struck = struck || field.world->impacts()[i].object == placed->id();
+					}
+					std::fprintf(stderr, "    round y %.1f z %.2f: struck %d\n", probe.from.y, probe.from.z, struck);
+					CHECK(struck == probe.hits);
+				}
+				for (const Probe& probe : asset.soldier) {
+					physics::CollisionWorld::Hit hit {};
+					const bool met = field.world->staticCollision().raycast(turn.transform(probe.from), turn.transform(probe.to), hit);
+					std::fprintf(stderr, "    soldier y %.1f z %.2f: hit %d\n", probe.from.y, probe.from.z, met);
+					CHECK(met == probe.hits);
+					CHECK(!probe.hits || hit.owner == placed->id());
+				}
+			}
+		}
+	}
+}
+
+// A static made mid-round and then deleted (a spawner's swap, a commander
+// asset's end) takes its collision with it, as retail's goes with the
+// object (the object manager's delete 0x006fdd90 -> slot 0x108, 0x006fa730):
+// no invisible wall where it stood, and placing it again and again leaves
+// one copy of its faces, not a pile.
+TEST(Commander_DeletedStaticLeavesNoCollision)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	Field field("mods/bf2142", true);
+	CHECK(field.loaded);
+	if (!field.loaded || !field.templates.find("missile_silo_v2")) {
+		return;
+	}
+	field.world->tick(1 / 30.0f);
+	const size_t soldierBase = field.world->staticCollision().triangles();
+	const size_t projectileBase = field.world->projectileCollision(0)->triangles();
+	const size_t partBase = field.world->staticPartCount();
+	const physics::Vec3 from {-10, 8, 0.97f}, to {10, 8, 0.97f}; // through the upright tube
+	for (int round = 0; round < 5; ++round) {
+		const world::Object* placed = field.objects.create(field.templates.find("missile_silo_v2"), {0, 0, 0}, {0, 0, 0});
+		const uint32_t id = placed->id();
+		field.world->tick(1 / 30.0f);
+		float fraction = 0;
+		uint32_t owner = 0;
+		CHECK(field.world->segmentHit(from, to, 0, fraction, owner) && owner == id);
+		physics::CollisionWorld::Hit hit {};
+		CHECK(field.world->staticCollision().raycast({-10, 6, 0.97f}, {10, 6, 0.97f}, hit) && hit.owner == id);
+		CHECK(field.world->staticCollision().triangles() == soldierBase + 92 + 60 + 12);
+		CHECK(field.world->projectileCollision(0)->triangles() == projectileBase + 2264 + 532 + 244);
+		CHECK(field.world->staticPartCount() > partBase);
+		field.objects.remove(id);
+		field.world->tick(1 / 30.0f);
+		std::fprintf(stderr, "  placing %d: soldier %zu, projectile %zu faces, %zu parts after the delete\n", round,
+			field.world->staticCollision().triangles(), field.world->projectileCollision(0)->triangles(),
+			field.world->staticPartCount());
+		CHECK(!field.world->segmentHit(from, to, 0, fraction, owner));
+		CHECK(!field.world->staticCollision().raycast({-10, 6, 0.97f}, {10, 6, 0.97f}, hit));
+		CHECK(field.world->staticCollision().triangles() == soldierBase);
+		CHECK(field.world->projectileCollision(0)->triangles() == projectileBase);
+		CHECK(field.world->staticPartCount() == partBase); // the mesh physics' parts too
+	}
+}
+
+// The EMP station and the orbital controller stop a running soldier from
+// each side, in both mods: their soldier shapes are the root's (geometry 0,
+// up to the dish and antenna; the child parts author no soldier LOD).
+TEST(Commander_StrikeStationsBlockInfantry)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
+		for (const char* name : {"commander_emp_strike", "commander_orbital_strike_64"}) {
+			for (int side = 0; side < 4; ++side) {
+				Field field(mod, true);
+				if (!field.loaded) {
+					CHECK(field.loaded);
+					continue;
+				}
+				field.objects.create(field.templates.find(name), {0, 0, 0}, {90, 0, 0});
+				field.world->tick(1 / 30.0f);
+				CHECK(field.world->spawnPlayer(2) != nullptr);
+				const int player = field.world->localPlayer();
+				game::GameWorld::PlayerInfo info;
+				CHECK(field.world->playerInfo(player, info) && info.alive);
+				const float heading = side * 90.0f; // degrees from +z toward +x
+				const physics::Vec3 way {std::sin(heading / 57.29578f), 0, std::cos(heading / 57.29578f)};
+				field.world->setSoldierPosition(info.soldier, {-way.x * 12, 0, -way.z * 12});
+				game::SoldierInput walk;
+				walk.throttle = 1;
+				walk.sprint = true;
+				walk.turn = heading - info.yaw;
+				for (int i = 0; i < 150; ++i) {
+					field.world->setInput(player, walk);
+					walk.turn = 0;
+					field.world->tick(1 / 30.0f);
+				}
+				CHECK(field.world->playerInfo(player, info));
+				const float along = info.position.x * way.x + info.position.z * way.z; // 0 at the centre
+				std::fprintf(stderr, "  %s/%s side %d: along %.2f at %.2f %.2f %.2f\n", mod.c_str(), name, side, along,
+					info.position.x, info.position.y, info.position.z);
+				CHECK(along < -0.9f);
+			}
+		}
+	}
+}
 
 TEST(Commander_OnePerTeam)
 {
@@ -673,6 +958,86 @@ TEST(Commander_AiAnswersSquadRequests)
 	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
 }
 
+// Exercise the installed Remaster scripts through the same Sound console
+// registration and VFS used by the game. The null OpenAL driver still builds
+// and starts actual Sound instances; StartedSound counts alone did not prove
+// that a playable Sound template existed.
+TEST(Commander_RemasterOrbitalStrikeBlastSound)
+{
+	REMASTER_ONLY();
+	test::setEnv("ALSOFT_DRIVERS", "null");
+	sound::ISoundEngine* engine = sound::getSoundEngine();
+	CHECK(engine && engine->initialize(0, "Software Audio", 32) == 0);
+	if (!engine || !engine->isInitialized()) {
+		return;
+	}
+	{
+		Field field("mods/Project_Remaster_v17_Final", false, engine);
+		if (!field.loaded) {
+			CHECK(false);
+		} else {
+			// Match Project_Remaster_v17_Final/ServerArchives.con and
+			// ClientArchives.con mount points used by the game.
+			CHECK(field.files.mountArchive("Objects/Common_server.zip", "Common"));
+			CHECK(field.files.mountArchive("Objects/Sound_client.zip", "Sound"));
+			CHECK(field.files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
+			field.templates.registerType(0x9474, "EffectBundle");
+			std::string out;
+			field.console.run("Common/Material/ImpactSounds.con", {}, out);
+			field.console.run("Common/Material/MaterialManagerSettings.con", {}, out);
+			field.console.run("Objects/Effects/impacts/explosions/e_exp_orbital_strike/e_exp_orbital_strike.con", {}, out);
+			field.console.run("Objects/Effects/impacts/explosions/e_exp_orbital_strike_distant/e_exp_orbital_strike_distant.con", {}, out);
+			world::registerUntypedTemplateProperties(field.console, field.templates,
+				{"detonation.endEffectTemplate", "detonation.useMMOnEndEffect"});
+			field.console.run("Objects/Weapons/stationary/commander_orbital_strike/commander_orbital_strike.con", {}, out);
+			const world::ObjectTemplate* shell = field.templates.find("commander_orbital_strike_Projectile");
+			CHECK(shell && shell->settings().count("detonation.endEffectTemplate")
+				&& shell->settings().at("detonation.endEffectTemplate") == "e_exp_orbital_strike");
+			CHECK(shell && game::ProjectileSettings::fromTemplate(*shell).useMMOnEndEffect);
+			CHECK(field.templates.find("S_e_exp_orbital_strike_Start")
+				&& field.templates.find("S_e_exp_orbital_strike_distant_Start"));
+			const std::string assetFire3P = "S_commander_orbital_strike_64_GenericFireArm_Fire3P";
+			CHECK(field.templates.find(assetFire3P));
+			sound::VfsSoundFileSystem vfs(field.files);
+			engine->setFileSystem(&vfs);
+			engine->reloadSoundFiles();
+			sound::GameSounds gameSounds(field.soundManager);
+			std::vector<sound::GameSounds::Triggered> triggered;
+			gameSounds.onTrigger = [&triggered](const auto& event) { triggered.push_back(event); };
+			GameAudio audio(*field.world, field.objects, field.templates, field.soundManager, gameSounds, nullptr);
+			GameAudio::Camera camera;
+			camera.position = {0, 3, -60};
+			camera.forward = {0, -0.1f, -1};
+			game::GameWorld& world = *field.world;
+			world.setCommanderEnabled(true);
+			world.setCommander(1, world.addPlayer("Boss", 1, false));
+			field.place("commander_orbital_strike_64", 1, 200, 200);
+			world.takeEffectSounds();
+			CHECK(world.commanderAction(1, Ability::Artillery, 0, -60));
+			for (int i = 0; i < 20 * 30; ++i) {
+				world.tick(1 / 30.0f);
+				audio.tick(camera);
+			}
+			const auto heard = [&triggered](const std::string& name) {
+				return std::any_of(triggered.begin(), triggered.end(), [&name](const auto& event) { return event.name == name; });
+			};
+			CHECK(heard("S_commander_orbital_strike_Projectile_Looping"));
+			CHECK(heard("S_e_exp_orbital_strike_Start"));
+			CHECK(heard("S_Impact_Artillery"));
+			// Remaster v17 creates this firearm event template but does not
+			// assign it a soundFilename in its shipped tweak; retail consequently
+			// has no Fire3P sample for GameSounds to play.
+			CHECK(gameSounds.sampleCount(assetFire3P) == 0);
+			const sound::SoundStatistics* stats = engine->statistics();
+			CHECK(stats && stats->soundsAlive > 0 && stats->samplesAlive > 0 && stats->playingSamples > 0);
+			std::printf("  actual strike sound instances: sounds=%d samples=%d playing=%d\n",
+				stats ? stats->soundsAlive : 0, stats ? stats->samplesAlive : 0, stats ? stats->playingSamples : 0);
+		}
+	}
+	engine->shutdown();
+	sound::shutdownSoundEngine();
+}
+
 // The ghost priorities of a commander's client (0x0057dc10's end): with
 // the satellite scan running every living enemy's control object comes in
 // at 0.5 (0x0057cfb0, radius -1), however far it is; else enemies are
@@ -755,4 +1120,371 @@ TEST(Commander_ScanBringsFarEnemiesIntoScope)
 	CHECK(before == 0);
 	CHECK(scanned > 20);
 	client.disconnect();
+}
+
+// C4 thrown at a commander asset sticks to its face and, set off by its
+// owner's alternate fire, hurts it (Unl_c4_Projectile: 1000 at radius 10,
+// explosion material 80).
+TEST(Commander_C4HurtsAssets)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const char* name : {"commander_uav_drone_control", "commander_movement_analyst", "commander_emp_strike",
+				 "commander_orbital_strike_64"}) {
+			Field field(mod, true);
+			if (!field.loaded) {
+				CHECK(field.loaded);
+				return;
+			}
+			// The charge's own properties as the game registers them.
+			world::registerUntypedTemplateProperties(field.console, field.templates,
+				{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+					"detonation.detonateOnWaterCollision", "floaterMod"});
+			std::string out;
+			field.console.run("Objects/Weapons/Handheld/Unl_c4/unl_c4.con", {}, out);
+			const uint32_t asset = field.place(name, 2, 0, 40);
+			const float before = field.world->hitPoints(asset);
+			const int enemy = field.soldier(1, 0, 25);
+			CHECK(field.world->launchProjectile("Unl_c4_Projectile", {0, 1.5f, 34}, {0, 0, 15}, enemy));
+			field.run(2);
+			const game::Projectile* c4 = nullptr;
+			for (const auto& p : field.world->projectiles()) {
+				c4 = p.alive && p.settings && p.settings->name == "Unl_c4_Projectile" ? &p : c4;
+			}
+			CHECK(c4 && c4->stuck && c4->settings->remote);
+			game::SoldierInput detonate;
+			detonate.altFire = true;
+			field.world->setInput(enemy, detonate);
+			field.world->tick(1 / 30.0f);
+			const float after = field.world->hitPoints(asset);
+			std::fprintf(stderr, "  %s/%s: hp %.0f -> %.0f\n", mod, name, before, after);
+			CHECK(after < before);
+		}
+	}
+}
+
+// The shipped damage table against the armour of C4 and the mines
+// (defaultMaterial 90): of the weapons' rounds and blasts only
+// Detonation_Defuse_DMG 32 (the explosive shotgun round's blast) x10,
+// Detonation_C4 80 x1, Bullet_Heavy_Sniper 131 x12 and Engineer_Defuse 132
+// x20 do anything; the bullets, shells, missiles and grenades are 0. The
+// vehicles' own explosions (99-101) have no cell and take the lookup's
+// fallback of 1.
+TEST(ArmouredRounds_DamageTableAgainstCharges)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	Field field("mods/bf2142", true, nullptr, true);
+	CHECK(field.materials.cellCount() > 0);
+	const physics::MaterialManager& m = field.materials;
+	CHECK(m.damageMod(32, 90) == 10.0f && m.damageMod(80, 90) == 1.0f && m.damageMod(131, 90) == 12.0f
+		&& m.damageMod(132, 90) == 20.0f);
+	for (const uint32_t weapon : {27u, 29u, 30u, 31u, 38u, 39u, 40u, 41u, 42u, 43u, 44u, 45u, 46u, 49u, 50u, 52u, 53u,
+			 55u, 56u, 57u, 69u, 70u, 71u, 88u, 92u, 109u, 118u, 121u, 124u, 130u, 133u}) {
+		if (m.damageMod(weapon, 90) != 0) {
+			std::fprintf(stderr, "  material %u hurts armour 90: %g\n", weapon, m.damageMod(weapon, 90));
+		}
+		CHECK(m.damageMod(weapon, 90) == 0);
+	}
+	CHECK(m.damageMod(99, 90) == 1.0f && m.damageMod(101, 90) == 1.0f);
+}
+
+// C4 lying on the ground: a submachine-gun round does nothing, a heavy
+// sniper round (100 x 12 against its 1000) sets it off, and a charge 1 m
+// from a blast (Detonation_C4, 1000 x 1) goes off with it.
+TEST(ArmouredRounds_C4ShotAndChained)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	Field field("mods/bf2142", true, nullptr, true);
+	if (!field.loaded) {
+		CHECK(field.loaded);
+		return;
+	}
+	world::registerUntypedTemplateProperties(field.console, field.templates,
+		{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+			"detonation.detonateOnWaterCollision", "floaterMod", "hasOnTimeEffect"});
+	std::string out;
+	field.console.run("Objects/Weapons/Handheld/Unl_c4/unl_c4.con", {}, out);
+	field.console.run("Objects/Weapons/Handheld/unl_adv_sni/unl_adv_sni.con", {}, out);
+	field.console.run("Objects/Weapons/Handheld/EU_SMG/eu_smg.con", {}, out);
+	const world::ObjectTemplate* c4 = field.templates.find("Unl_c4_Projectile");
+	CHECK(c4 && field.templates.find("unl_adv_sni_Projectile") && field.templates.find("eu_smg_Projectile"));
+	if (!c4) {
+		return;
+	}
+	const game::ProjectileSettings settings = game::ProjectileSettings::fromTemplate(*c4);
+	CHECK(settings.hitPoints == 1000 && settings.armourMaterial == 90 && settings.onTimeEffect);
+	const int owner = field.soldier(1, 60, 60);
+	const int shooter = field.soldier(2, 70, 60);
+	for (const float x : {0.0f, 1.0f, 30.0f}) {
+		CHECK(field.world->launchProjectile("Unl_c4_Projectile", {x, 0.3f, 0}, {0, -3, 0}, owner));
+	}
+	field.run(1);
+	const auto charge = [&](float x) -> const game::Projectile* {
+		for (const auto& p : field.world->projectiles()) {
+			if (p.alive && p.settings && p.settings->name == "Unl_c4_Projectile" && std::fabs(p.position.x - x) < 0.3f) {
+				return &p;
+			}
+		}
+		return nullptr;
+	};
+	CHECK(charge(0) && charge(1) && charge(30));
+	const auto shoot = [&](const char* round, float x, float speed) {
+		const game::Projectile* target = charge(x);
+		if (!target) {
+			return;
+		}
+		const physics::Vec3 from {x, 1.0f, -4};
+		physics::Vec3 d = target->position - from;
+		d = d * (speed / std::sqrt(physics::lengthSquared(d)));
+		CHECK(field.world->launchProjectile(round, from, d, shooter));
+		for (int i = 0; i < 10; ++i) {
+			field.world->tick(1 / 30.0f);
+		}
+	};
+	shoot("eu_smg_Projectile", 30, 300);
+	CHECK(charge(30) != nullptr);
+	shoot("unl_adv_sni_Projectile", 30, 1200);
+	CHECK(charge(30) == nullptr);
+	CHECK(charge(0) && charge(1));
+	shoot("unl_adv_sni_Projectile", 0, 1200);
+	CHECK(charge(0) == nullptr);
+	CHECK(charge(1) == nullptr);
+}
+
+// The engineer's defuser (Unl_Defuser: RTHeal with Engineer_Defuse 132,
+// 10 m, while firing) aimed at an enemy C4 5 m ahead: the charge is
+// deleted without going off (0x005d8ac0). Pointed past it, nothing happens.
+TEST(ArmouredRounds_DefuserRemovesCharge)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const bool aimed : {false, true}) {
+		Field field("mods/bf2142", true, nullptr, true);
+		if (!field.loaded) {
+			CHECK(field.loaded);
+			return;
+		}
+		world::registerUntypedTemplateProperties(field.console, field.templates,
+			{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+				"detonation.detonateOnWaterCollision", "floaterMod", "hasOnTimeEffect", "itemIndex", "pickupEnabled",
+				"ammo.replenishingType", "ammo.abilityRadius", "ammo.abilityStrength", "ammo.abilityMaterial",
+				"ammo.abilityDrain", "ammo.onlyActiveWhileFiring", "ammo.reloadWithoutPlayer"});
+		std::string out;
+		field.console.run("Objects/Weapons/Handheld/Unl_c4/unl_c4.con", {}, out);
+		field.console.run("Objects/Weapons/Handheld/Unl_Defuser/Unl_Defuser.con", {}, out);
+		CHECK(field.templates.find("unl_defuser") && field.templates.find("Unl_c4_Projectile"));
+		world::ObjectTemplate* kit = field.templates.create("Kit", "EU_Assault");
+		CHECK(kit != nullptr);
+		if (!kit) {
+			return;
+		}
+		for (const char* item : {"unl_defuser", "Unl_c4"}) {
+			kit->children().push_back({item, {}, {}});
+		}
+		const int enemy = field.soldier(1, 40, 40);
+		CHECK(field.world->launchProjectile("Unl_c4_Projectile", {0, 0.3f, 5}, {0, -3, 0}, enemy));
+		const int engineer = field.soldier(2, 0, 0);
+		field.world->setBattery(engineer, 1);
+		field.run(1);
+		const auto charge = [&] {
+			for (const auto& p : field.world->projectiles()) {
+				if (p.alive && p.settings && p.settings->name == "Unl_c4_Projectile") {
+					return true;
+				}
+			}
+			return false;
+		};
+		CHECK(charge());
+		game::SoldierInput input;
+		input.selectItem = std::atoi(field.templates.find("unl_defuser")->settings()["itemIndex"].c_str());
+		field.world->setInput(engineer, input);
+		field.world->tick(1 / 30.0f);
+		input.selectItem = 0;
+		input.fire = true;
+		input.aimPitch = aimed ? -17.0f : 20.0f;
+		for (int i = 0; i < 30; ++i) {
+			field.world->setInput(engineer, input);
+			field.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  defuser %s: charge %s\n", aimed ? "on it" : "above it", charge() ? "left" : "gone");
+		CHECK(charge() == !aimed);
+		CHECK(field.alive(engineer)); // removed, not set off 5 m away
+	}
+}
+
+// The defuser on an enemy motion mine (Unl_Mine_Motion: armour 1000 of
+// 10000, material 90), lying 5 m ahead and caught in the air as it moves
+// through the beam: deleted without going off, and the engineer, who
+// carries motion mines and has laid one, gets that one back (0x005d8d70:
+// each firearm firing the round's template, slot 0x84(1)).
+TEST(ArmouredRounds_DefuserRemovesMotionMines)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const bool moving : {false, true}) {
+		Field field("mods/bf2142", true, nullptr, true);
+		if (!field.loaded) {
+			CHECK(field.loaded);
+			return;
+		}
+		world::registerUntypedTemplateProperties(field.console, field.templates,
+			{"collision.bouncing", "collision.maxStickAngle", "drag", "detonation.explosionForce",
+				"detonation.detonateOnWaterCollision", "floaterMod", "hasOnTimeEffect", "itemIndex", "altItemIndex",
+				"pickupEnabled", "armingDelay", "ammo.replenishingType", "ammo.abilityRadius", "ammo.abilityStrength",
+				"ammo.abilityMaterial", "ammo.abilityDrain", "ammo.onlyActiveWhileFiring", "ammo.reloadWithoutPlayer",
+				"ammo.autoReload", "ammo.reloadTime", "fire.maxProjectilesInWorld"});
+		std::string out;
+		field.console.run("Objects/Weapons/Handheld/Unl_Mine_Motion/Unl_Mine_Motion.con", {}, out);
+		field.console.run("Objects/Weapons/Handheld/Unl_Defuser/Unl_Defuser.con", {}, out);
+		const world::ObjectTemplate* mine = field.templates.find("Unl_Mine_Motion_Projectile");
+		CHECK(mine && field.templates.find("unl_defuser"));
+		if (!mine) {
+			return;
+		}
+		const game::ProjectileSettings settings = game::ProjectileSettings::fromTemplate(*mine);
+		CHECK(settings.hitPoints == 1000 && settings.maxHitPoints == 10000 && settings.armourMaterial == 90);
+		world::ObjectTemplate* kit = field.templates.create("Kit", "EU_Assault");
+		for (const char* item : {"unl_defuser", "Unl_Mine_Motion"}) {
+			kit->children().push_back({item, {}, {}});
+		}
+		const int enemy = field.soldier(1, 40, 40);
+		const int engineer = field.soldier(2, 0, 0);
+		field.world->setBattery(engineer, 1);
+		const auto rounds = [&] {
+			for (const auto& w : field.world->weaponAmmo(engineer)) {
+				if (w.weapon == "unl_mine_motion") {
+					return w.rounds;
+				}
+			}
+			return -1;
+		};
+		const auto press = [&](game::SoldierInput input, int ticks) {
+			for (int i = 0; i < ticks; ++i) {
+				field.world->setInput(engineer, input);
+				field.world->tick(1 / 30.0f);
+				input.selectItem = 0;
+				input.turn = 0;
+			}
+		};
+		// One of his own laid behind him: the mines take the alternate slot 6.
+		const int full = rounds();
+		game::SoldierInput input;
+		input.selectItem = 6;
+		press(input, 10);
+		input = {};
+		input.turn = 180;
+		press(input, 1);
+		input = {};
+		input.fire = true;
+		press(input, 1);
+		press({}, 20);
+		input = {};
+		input.turn = 180;
+		press(input, 1);
+		const int laid = rounds();
+		std::fprintf(stderr, "  motion mines: %d, %d after laying one\n", full, laid);
+		CHECK(full > 0 && laid == full - 1);
+		input = {};
+		input.selectItem = 5;
+		press(input, 10);
+		uint32_t mineSerial = 0;
+		const auto enemyMine = [&]() -> const game::Projectile* {
+			for (const auto& p : field.world->projectiles()) {
+				if (p.alive && p.settings && p.settings->name == "Unl_Mine_Motion_Projectile" && p.player == enemy) {
+					mineSerial = p.serial;
+					return &p;
+				}
+			}
+			return nullptr;
+		};
+		input = {};
+		input.fire = true;
+		if (!moving) {
+			CHECK(field.world->launchProjectile("Unl_Mine_Motion_Projectile", {0, 0.3f, 5}, {0, -3, 0}, enemy));
+			press({}, 30);
+			const game::Projectile* lying = enemyMine();
+			CHECK(lying && lying->resting);
+			// At its centre from the eyes (the feet + 1.6 m).
+			game::GameWorld::PlayerInfo me;
+			field.world->playerInfo(engineer, me);
+			if (lying) {
+				input.aimPitch = -std::atan2(me.position.y + 1.6f - lying->position.y, lying->position.z - me.position.z) * 57.29578f;
+			}
+			press(input, 15);
+		} else {
+			// Thrown up 5 m ahead; the trigger pressed as the mine rises past
+			// 0.7 m, aimed where it will be (the first scan at once, 0x005d84a0).
+			CHECK(field.world->launchProjectile("Unl_Mine_Motion_Projectile", {0, 0.3f, 5}, {0, 6, 0}, enemy));
+			bool fired = false;
+			float top = 0;
+			for (int i = 0; i < 60 && enemyMine(); ++i) {
+				const game::Projectile* m = enemyMine();
+				top = std::max(top, m->position.y);
+				if (!fired && m->position.y > 0.7f && m->velocity.y > 0) {
+					fired = true;
+					CHECK(!m->resting && m->velocity.y > 1);
+					// At where it will be next tick, from the eyes.
+					game::GameWorld::PlayerInfo me;
+					field.world->playerInfo(engineer, me);
+					const physics::Vec3 next = m->position + m->velocity * (1 / 30.0f);
+					input.aimPitch = -std::atan2(me.position.y + 1.6f - next.y, next.z - me.position.z) * 57.29578f;
+				}
+				press(fired ? input : game::SoldierInput {}, 1);
+			}
+			std::fprintf(stderr, "  thrown mine rose to %.2f m\n", top);
+			CHECK(fired);
+		}
+		std::fprintf(stderr, "  %s mine: %s, motion mines %d\n", moving ? "moving" : "lying", enemyMine() ? "left" : "gone", rounds());
+		CHECK(enemyMine() == nullptr);
+		CHECK(field.alive(engineer));
+		CHECK(rounds() == full);
+		// AI event 3/0x15 with the round's id (0x005d8ac0): the AI forgets it.
+		CHECK(mineSerial != 0 && field.world->takeAiForgotten() == std::vector<uint32_t> {mineSerial});
+	}
+}
+
+TEST(Commander_ResultNotificationsReachApplicantsAndTeam)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld world(templates, objects);
+	const int winner = world.addPlayer("Winner", 2, false);
+	const int loser = world.addPlayer("Loser", 2, false);
+	const int mate = world.addPlayer("Mate", 2, false);
+	const int enemy = world.addPlayer("Enemy", 1, false);
+	const int bot = world.addPlayer("Bot", 2, true);
+	world.setCommanderEnabled(true);
+	world.applyForCommander(winner);
+	world.applyForCommander(loser);
+	CHECK(world.setCommander(2, winner));
+	auto notices = world.takeSquadMessages(loser);
+	CHECK(notices.size() == 2 && notices[0].id == 0x22 && notices[1].id == 0x21 && notices[1].value == winner);
+	for (int player : {winner, mate}) {
+		notices = world.takeSquadMessages(player);
+		CHECK(notices.size() == 1 && notices[0].id == 0x21 && notices[0].value == winner);
+	}
+	CHECK(world.takeSquadMessages(enemy).empty() && world.takeSquadMessages(bot).empty());
+	CHECK(world.setCommander(2, winner)); // same commander: no duplicate
+	CHECK(world.takeSquadMessages(winner).empty());
+	world.resignCommander(winner);
+	notices = world.takeSquadMessages(winner);
+	CHECK(notices.size() == 1 && notices[0].id == 0x25 && notices[0].value == winner);
+	const auto heard = world.takeRadioHeard();
+	for (int player : {winner, loser, mate}) {
+		CHECK(std::count_if(heard.begin(), heard.end(), [&](const auto& voice) {
+			return voice.receiver == player && voice.voice == "commander_resign" && voice.channel == 13 && voice.sender == -1;
+		}) == 1);
+	}
+	CHECK(std::none_of(heard.begin(), heard.end(), [&](const auto& voice) { return voice.receiver == enemy || voice.receiver == bot; }));
+	world.resignCommander(winner);
+	CHECK(world.takeSquadMessages(winner).empty());
 }

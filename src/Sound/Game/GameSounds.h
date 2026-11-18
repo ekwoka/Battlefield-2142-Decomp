@@ -111,8 +111,23 @@ public:
 	// The trigger let go (0x005db6c0): an automatic weapon's looping fire
 	// sounds stop and the first-person muting (reason 4) ends.
 	void releaseTrigger(uint64_t user);
+	// Where a weapon component's third-person fire sounds are now: they ride
+	// the gun (retail plays them with no position, 0x005dbdc0 slots 4 / 8,
+	// so the sound follows its object's transform).
+	void moveWeapon(uint64_t user, const Vec3& position, const Vec3& velocity);
 	// Samples of a Sound template (its soundFilename list), 0 for none.
 	int sampleCount(const std::string& templateName) const;
+	// Enhanced audio: a sound with samples named by the same words in
+	// another order (the right Shepherd gun's Fire1P is configured as
+	// S_eu_at_minigun_R_firearm_Fire1P), else the name itself.
+	const std::string& sameWords(const std::string& templateName) const;
+	mutable std::map<std::string, std::string> m_sameWords;
+	// A user's fire sound in a slot (0 1P, 1 1P_Outdoor, 2 3P), for tests.
+	ISound* fireSound(uint64_t user, int slot) const
+	{
+		const auto it = m_weapons.find(user);
+		return it != m_weapons.end() ? it->second.fire[static_cast<size_t>(slot)] : nullptr;
+	}
 	// Whether a user's automatic fire loop plays (for tests).
 	bool fireLooping(uint64_t user) const
 	{
@@ -138,15 +153,18 @@ private:
 		int skip = 0;
 		int reloadPart = 0;
 		bool looping = false;
+		int loopSlot = -1;
 		bool burst = false;
 		int lastTick = 0;
 		// The component's +0x41: set by every reload event but state 2
 		// (0x005dbfe0's end), cleared by the draw (0x005dc1d0) and by the
 		// click it turns into a BoltClick (0x005dc160).
 		bool reloaded = false;
+		std::shared_ptr<Transform> place; // the 3P fire sounds' transform (the gun)
 	};
 	ISound* create(const std::string& templateName, uint32_t owner);
 	void release(WeaponState& state);
+	static void moveWeapon(WeaponState& state, const Vec3& position, const Vec3& velocity);
 	void fire(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position, bool muteOnFire,
 		uint32_t object, const FireInfo& info);
 	void reload(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position, uint32_t object,

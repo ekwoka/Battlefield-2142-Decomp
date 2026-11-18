@@ -5,6 +5,10 @@
 #include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
 #include "IO/Localization/Localization.h"
+#include "Main/DeploymentLifecycle.h"
+#include "Main/HudMenusVehicles.h"
+#include "Main/MapOrderMarker.h"
+#include "Main/MapPlayerMarker.h"
 #include "TestMain.h"
 
 #include <algorithm>
@@ -13,6 +17,48 @@
 #include <cstdlib>
 
 using namespace dice::hfe;
+
+TEST(DeploymentDone_InitialAndDeathRespawnLifecycle)
+{
+	using dice::main::DeploymentDoneAction;
+	using dice::main::deploymentDoneAction;
+	CHECK(deploymentDoneAction(false, true, false, true, 0) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, false, false, true, 0) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, true, 0) == DeploymentDoneAction::InitialSpawn);
+	CHECK(deploymentDoneAction(true, true, true, false, 0) == DeploymentDoneAction::None);
+	CHECK(deploymentDoneAction(true, true, false, false, 4.1f) == DeploymentDoneAction::Respawn);
+	CHECK(deploymentDoneAction(true, true, false, false, 0.1f) == DeploymentDoneAction::Respawn);
+	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
+	// After the initial spawn, each later death waits for its own timer.
+	CHECK(deploymentDoneAction(true, true, false, false, 15) == DeploymentDoneAction::Respawn);
+	CHECK(deploymentDoneAction(true, true, false, false, 0) == DeploymentDoneAction::Respawn);
+}
+
+TEST(DeploymentScreen_EnterClosesAndConfirmsWhileTimerRuns)
+{
+	using dice::main::deploymentScreenShown;
+	CHECK(deploymentScreenShown(false, false, false)); // dead: shown
+	CHECK(!deploymentScreenShown(false, false, true)); // dead, Enter pressed: hidden
+	CHECK(deploymentScreenShown(true, true, false) && !deploymentScreenShown(true, false, true));
+	// Enter on the open screen is DONE; opening it is not confirmation.
+	CHECK(dice::main::deploymentDoneAction(false, true, false, false, 3) == dice::main::DeploymentDoneAction::None);
+	CHECK(dice::main::deploymentConfirmPressed(false, true, true));
+	CHECK(!dice::main::deploymentConfirmPressed(false, true, false));
+	CHECK(dice::main::deploymentConfirmPressed(true, false, true));
+	CHECK(!dice::main::deploymentConfirmPressed(false, false, true));
+	CHECK(!dice::main::deploymentConfirmPressed(false, true, true, true)); // SQUAD -> KIT
+	CHECK(dice::main::deploymentConfirmPressed(true, false, true, true)); // DONE closes either tab
+}
+
+TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)
+{
+	using dice::main::killedInfoShown;
+	CHECK(killedInfoShown(true, 12, false, false));  // man down, screen closed: critically wounded + timer
+	CHECK(!killedInfoShown(true, 12, true, false));  // man down, screen opened
+	CHECK(!killedInfoShown(false, 12, false, false)); // dead: the spawn screen is up
+	CHECK(killedInfoShown(false, 12, false, true));   // dead, Enter pressed: killed + timer
+	CHECK(!killedInfoShown(false, 0, false, true));   // never died (initial deployment)
+}
 
 TEST(Hud_ParsesFonts)
 {
@@ -60,24 +106,72 @@ TEST(Hud_ShowLogicAndBars)
 	CHECK(manager.frame(0).empty());
 }
 
-// setNodeLogicShowVariable's value is an int (0x0076e090 names "int",
-// 0x0076e1ca reads it with operator>>(int&)): "1.5" is 1.
-TEST(Hud_LogicValueIsAnInt)
+// setBarNodeRound (Bf2BarNode slot 0x120 0x007e9380; render 0x007eb2c0 calls
+// 0x007eafc0 when it is set): the quads are wedges of 2 pi * value clockwise
+// from up about the node's middle; drawn in the texture's own colours, whatever the node colour.
+TEST(Hud_RoundBarWedge)
 {
 	Console console;
 	hud::HudManager manager(nullptr);
 	hud::registerHudConsoleMethods(console, manager);
 	std::string out;
 	for (const char* line : {
-			 "hudBuilder.createPictureNode BottomLeftStatic Left 0 0 10 10",
-			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
-			 "hudBuilder.setNodeLogicShowVariable NOT IsSpectator 1.5",
+			 "hudBuilder.createSplitNode Global Items",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.createBarNode Items Ring 2 -16 -16 64 64",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/Bars/repair_tool_gradient.dds",
+			 "hudBuilder.setBarNodeTexture 0 Ingame/GeneralIcons/empty.tga",
+			 "hudBuilder.setBarNodeValueVariable AbilityBar",
+			 "hudBuilder.setNodeColor 0 0 0 1",
+			 "hudBuilder.setBarNodeRound 1 64 64",
 		 }) {
 		console.execute(line, out);
 	}
-	CHECK(!manager.frame(0).empty());
-	manager.set("IsSpectator", 1);
-	CHECK(manager.frame(0).empty());
+	manager.set("AbilityBar", 0.5f);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 2);
+	if (quads.size() == 2) {
+		for (const auto& q : quads) {
+			CHECK(q.sweepAbout && std::fabs(q.sweep - 3.14159265f) < 1e-5f);
+			CHECK(q.sweepCentre[0] == quads[0].x0 + 32 && q.sweepCentre[1] == quads[0].y0 + 32); // the node's middle
+			CHECK(q.color[0] == 1 && q.color[1] == 1 && q.color[2] == 1 && q.color[3] == 1); // the texture's own colours (orange), not the authored 0 0 0
+		}
+		CHECK(quads[1].x1 - quads[1].x0 == 32); // the linear clip stays under the wedge
+	}
+	// Half a turn clockwise from up keeps the right half, the side the type-2 fill keeps.
+	const auto pieces = hud::sweepPieces({{0, 0, 0, 0}, {64, 0, 1, 0}, {64, 64, 1, 1}, {0, 64, 0, 1}}, 32, 32, 3.14159265f);
+	CHECK(!pieces.empty());
+	for (const auto& piece : pieces) {
+		for (const auto& p : piece) {
+			CHECK(p[0] >= 32 - 1e-3f);
+		}
+	}
+}
+
+// enhanced.hudWidescreen: shiftNode turns a split into a full-screen
+// transform, so its children move with it, as Remaster's hudfix does.
+TEST(Hud_ShiftNodeMovesASplitsChildren)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode BottomLeftStatic Side",
+			 "hudBuilder.createPictureNode Side Box 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
+		 }) {
+		console.execute(line, out);
+	}
+	const auto at = [&](float x, float y) {
+		const auto quads = manager.frame(0);
+		return std::any_of(quads.begin(), quads.end(), [&](const hud::HudQuad& q) { return q.x0 == x && q.y0 == y; });
+	};
+	CHECK(at(-1, 563)); // a split passes BottomLeftStatic's origin on
+	CHECK(manager.shiftNode("Side", -120));
+	CHECK(!manager.shiftNode("NoSuchNode", 120));
+	CHECK(at(-121, 563)); // now a full-screen transform at -120, 0 under it
+	CHECK(!at(-1, 563));
 }
 
 // The corner roots (the "Ingame" MemeFile's transforms): a picture at 0, 0
@@ -198,11 +292,143 @@ TEST(Hud_GameHudScripts)
 	CHECK(text);
 }
 
+// The shipped commander screen (HudElementsCommander.con): the collapsed
+// minimap tab's header reopens it (the hidden mini-map no longer takes the
+// click), and Resign, a transparent button (colour alpha 0) over its
+// picture, still takes the click.
+TEST(Hud_CommanderScreenTabAndResignClicks)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	hud::HudManager manager([&files](const std::string& path, std::string& text) {
+		std::vector<uint8_t> data;
+		if (!files.readFile(path, data)) {
+			return false;
+		}
+		text.assign(data.begin(), data.end());
+		return true;
+	});
+	hud::registerHudConsoleMethods(console, manager);
+	console.setScriptOutput(false, false);
+	console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out);
+	std::vector<std::string> ran;
+	manager.setCommandRunner([&ran](const std::string& command) { ran.push_back(command); });
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	for (const char* name : {"ShowIngameHud", "ShowSoldierHud", "CommanderShow", "CommanderSquadTabShowFull",
+			 "CommanderMapTabShowFull", "CommanderToolsTabShowFull"}) {
+		manager.set(name, 1);
+	}
+	std::vector<hud::HudQuad> quads;
+	const auto run = [&] {
+		for (int i = 0; i < 90; ++i) {
+			quads = manager.frame(1 / 30.0f);
+		}
+	};
+	run();
+	float x = 0, z = 0;
+	CHECK(manager.miniMapWorldAt(729, 8, x, z)); // the open tab's map
+	manager.set("CommanderMapTabShowFull", 0);
+	run();
+	CHECK(!manager.miniMapWorldAt(729, 8, x, z));
+	const auto clicked = [&](float px, float py, const std::string& command) {
+		ran.clear();
+		manager.click(px, py);
+		return std::find(ran.begin(), ran.end(), command) != ran.end();
+	};
+	// The collapsed tab sits at 651, -166: its header button at 684, 2 (145 x 17).
+	CHECK(clicked(729, 8, "CommanderMenu.toggleMapTab"));
+	const auto resign = std::find_if(quads.begin(), quads.end(),
+		[](const hud::HudQuad& q) { return q.texture.find("resign_buttonBg") != std::string::npos; });
+	CHECK(resign != quads.end());
+	if (resign != quads.end()) {
+		CHECK(clicked((resign->x0 + resign->x1) / 2, (resign->y0 + resign->y1) / 2, "Commander.commanderResign"));
+	}
+}
+
+// Verify the actual shipped node tree in both mods, through ready/cooldown
+// transitions. Other tools keep their own authored ordering.
+TEST(Hud_ShippedSupplyLabelOrder)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath(mod);
+		Console console(&files);
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		CHECK(console.run("ClientArchives.con", {}, out));
+		hud::HudManager manager([&files](const std::string& path, std::string& text) {
+			std::vector<uint8_t> data;
+			if (!files.readFile(path, data)) return false;
+			text.assign(data.begin(), data.end());
+			return true;
+		});
+		hud::registerHudConsoleMethods(console, manager);
+		console.setScriptOutput(false, false);
+		CHECK(console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+		manager.setLocalizer([](const std::string& key) {
+			return key == "HUD_TEXT_COMMANDER_SUPPLIES" ? "SUPPLIES" : key;
+		});
+		CHECK(manager.repairSupplyLabelOrder());
+		CHECK(!manager.repairSupplyLabelOrder()); // already corrected
+		for (const char* name : {"ShowIngameHud", "ShowSoldierHud", "CommanderShow", "CommanderToolsTabShowFull"})
+			manager.set(name, 1);
+		for (bool reloading : {false, true, false}) {
+			manager.set("SupplyReloading", reloading ? 1 : 0);
+			manager.set("SupplyShowFullStatus", reloading ? 0 : 1);
+			manager.set("SupplyTimeUntilReloaded", 0.5f);
+			std::vector<hud::HudQuad> quads;
+			for (int i = 0; i < 90; ++i) quads = manager.frame(1 / 30.0f);
+			// Supply starts at (11, 604) in the original layout. Derive the
+			// region from its icon so Remaster's layout is covered as well.
+			const auto icon = std::find_if(quads.begin(), quads.end(), [](const auto& q) {
+				return q.texture.find("tools/supply_drop.tga") != std::string::npos;
+			});
+			CHECK(icon != quads.end());
+			if (icon == quads.end()) continue;
+			const float left = icon->x0 - 2, top = icon->y0 - 2;
+			int status = -1, glyphs = 0;
+			for (size_t i = 0; i < quads.size(); ++i) {
+				const auto& q = quads[i];
+				if (q.x0 < left || q.x0 >= left + 150 || q.y0 < top || q.y0 >= top + 25) continue;
+				if (q.texture.find("assistance_buttonStatus.tga") != std::string::npos) status = static_cast<int>(i);
+			}
+			CHECK(status >= 0);
+			for (size_t i = 0; i < quads.size(); ++i) {
+				const auto& q = quads[i];
+				if (q.x0 >= left + 23 && q.x0 < left + 109 && q.y0 >= top && q.y0 < top + 27
+					&& q.texture.find(".dds") != std::string::npos) {
+					CHECK(static_cast<int>(i) > status);
+					++glyphs;
+				}
+			}
+			CHECK(glyphs == 8);
+		}
+	}
+}
+
 TEST(Hud_LocalizationAndLists)
 {
 	// strings.csv: UTF-16LE with a byte-order mark, tab-separated, a column per language.
 	const std::u16string text = u"StringID\tEnglish\tGerman\r\nHUD_TEXT_MENU_SCORE_PLAYERS\tPLAYERS\tSPIELER\r\n"
-								u"QUOTED\t\"a \u00e9 b\"\tx\r\n";
+								u"QUOTED\t\"a \u00e9 b\"\tx\r\n"
+								u"SPAWN\t\"PRESS \"\"DONE\"\" TO SPAWN\"\tx\r\n";
 	std::vector<uint8_t> data {0xff, 0xfe};
 	for (char16_t c : text) {
 		data.push_back(static_cast<uint8_t>(c));
@@ -210,8 +436,9 @@ TEST(Hud_LocalizationAndLists)
 	}
 	io::Localization english;
 	CHECK(english.load(data, "English"));
-	CHECK(english.size() == 2 && english.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "PLAYERS");
+	CHECK(english.size() == 3 && english.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "PLAYERS");
 	CHECK(english.text("QUOTED") == "a \xc3\xa9 b" && english.text("MISSING") == "MISSING");
+	CHECK(english.text("SPAWN") == "PRESS \"DONE\" TO SPAWN");
 	io::Localization german;
 	CHECK(german.load(data, "German") && german.text("HUD_TEXT_MENU_SCORE_PLAYERS") == "SPIELER");
 	CHECK(!io::Localization().load(data, "Klingon"));
@@ -295,45 +522,31 @@ TEST(Hud_CompassScrolls)
 	}
 }
 
-// setBarNodeBorder and setCompassNodeBorder share one executor
-// (0x0076aebf -> 0x007b0780: the active node's slot 0x100), which bars and
-// compasses both answer with 0x007e9270 (+0x74..+0x80): either command
-// sets the same border on either node. A compass's strip period is its
-// width less the right border; a bar fills inside the border.
-TEST(Hud_BarAndCompassShareTheBorder)
+TEST(Hud_GunshipMissileIndicatorMovesRight)
 {
 	Console console;
 	hud::HudManager manager(nullptr);
 	hud::registerHudConsoleMethods(console, manager);
 	std::string out;
 	for (const char* line : {
-			 "hudBuilder.createCompassNode Global Compass 3 100 10 90 10 1 0",
-			 "hudBuilder.setCompassNodeTexture 1 compass.tga",
-			 "hudBuilder.setCompassNodeTextureSize 360 10",
-			 "hudBuilder.setCompassNodeValueVariable VehicleAngle",
-			 "hudBuilder.setBarNodeBorder 0 0 0 60",
-			 "hudBuilder.createBarNode Global Health 3 100 500 200 10",
-			 "hudBuilder.setBarNodeTexture 1 Ingame/full.tga",
-			 "hudBuilder.setBarNodeValueVariable PlayerHealth",
-			 "hudBuilder.setCompassNodeBorder 0 0 20 80",
-		 }) {
-		console.execute(line, out);
-	}
-	manager.set("VehicleAngle", 90);
-	manager.set("PlayerHealth", 1);
-	const auto quads = manager.frame(0);
-	bool compass = false, bar = false;
-	for (const auto& q : quads) {
-		if (q.texture.find("compass.tga") != std::string::npos && q.x0 == 100) {
-			compass = true;
-			CHECK(std::abs(q.u0 - 75 / 360.0f) < 1e-5f); // floor(90 / 360 x (360 - 60))
-		}
-		if (q.texture.find("full.tga") != std::string::npos) {
-			bar = true;
-			CHECK(q.x0 == 120 && q.x1 == 220); // 20 off the left, 80 off the right
+		"hudBuilder.createCompassNode Global Fuel 3 315 440 320 15 0 1",
+		"hudBuilder.setCompassNodeTexture 1 fuel.tga",
+		"hudBuilder.setCompassNodeTextureSize 170 15",
+		"hudBuilder.setCompassNodeBorder 0 0 5 5",
+		"hudBuilder.setCompassNodeValueVariable BombFuelAngle",
+		"hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+	}) console.execute(line, out);
+	float previous = -1;
+	for (float life : {1.0f, 0.98f, 0.5f, 0.0f}) {
+		manager.set("BombFuelAngle", menu::missileFuelAngle(life));
+		const auto quads = manager.frame(0);
+		CHECK(quads.size() == 1);
+		if (!quads.empty()) {
+			CHECK(quads[0].x1 > previous);
+			previous = quads[0].x1;
 		}
 	}
-	CHECK(compass && bar);
+	CHECK(previous >= 634 && previous <= 635);
 }
 
 TEST(Hud_CompassSnaps)
@@ -389,7 +602,7 @@ TEST(Hud_MapAndMarkers)
 	// A 1024 m level centred on the origin; a clickable spawn point at its
 	// north-east quarter.
 	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
-	hud::HudManager::MapMarker spawn {"spawn.dds", 256, 256, 32};
+	hud::HudManager::MapMarker spawn {"spawn.dds", 256, 256, hud::HudManager::kSpawnMarkerSize};
 	spawn.id = 7;
 	manager.setMapMarkers({spawn});
 	manager.set("MapFullSize", 1);
@@ -397,9 +610,9 @@ TEST(Hud_MapAndMarkers)
 	CHECK(quads.size() == 2);
 	if (quads.size() == 2) {
 		CHECK(quads[0].x0 == 278 && quads[0].y0 == 29 && quads[0].x1 == 790 && quads[0].u1 == 1);
-		// 3/4 across, 1/4 down the big map, 32 pixels.
-		CHECK(quads[1].x0 == 278 + 384 - 16 && quads[1].x1 == 278 + 384 + 16);
-		CHECK(quads[1].y0 == 29 + 128 - 16 && quads[1].y1 == 29 + 128 + 16);
+		// 3/4 across, 1/4 down the big map, 16 HUD units.
+		CHECK(quads[1].x0 == 278 + 384 - 8 && quads[1].x1 == 278 + 384 + 8);
+		CHECK(quads[1].y0 == 29 + 128 - 8 && quads[1].y1 == 29 + 128 + 8);
 	}
 	CHECK(manager.mapMarkerAt(278 + 384, 29 + 128) == 7 && manager.mapMarkerAt(300, 400) == -1);
 	// The minimap eases to its zoom (level 1.5 on foot: 2.3^1.5) round the
@@ -454,6 +667,56 @@ TEST(Hud_MapAndMarkers)
 	}
 }
 
+TEST(Hud_MapOrderMarkerSizeAndAnchor)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	auto leader = main::mapOrderMarker(5, false, 0, 0);
+	auto commander = main::mapOrderMarker(5, true, 0, 0);
+	CHECK(leader.has_value() && commander.has_value());
+	CHECK(!main::mapOrderMarker(10, false, 0, 0)); // cancel clears the active marker
+	if (!leader || !commander) {
+		return;
+	}
+	CHECK(leader->texture == "Ingame/Minimap/Icons/orderAttack.tga");
+	CHECK(commander->texture == "Ingame/Minimap/Icons/orderAttackCommander.tga");
+	CHECK(leader->size == 15 && leader->height == 31);
+	CHECK(commander->size == 15 && commander->height == 47);
+	CHECK(leader->offsetX == 0 && leader->offsetY == 0 && commander->offsetX == 0 && commander->offsetY == 0);
+	CHECK(leader->upright && commander->upright); // screen-up on a turned map, as 0x0077c610 draws them
+	const auto destroy = main::mapOrderMarker(8, false, 0, 0);
+	const auto mine = main::mapOrderMarker(9, true, 0, 0);
+	CHECK(destroy && destroy->texture == "Ingame/Minimap/Icons/orderDestroy.tga");
+	CHECK(mine && mine->texture == "Ingame/Minimap/Icons/orderMineCommander.tga");
+	manager.setMapMarkers({*leader, *commander});
+	manager.set("MapFullSize", 1);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 3);
+	if (quads.size() == 3) {
+		const auto& leaderQuad = quads[1];
+		const auto& commanderQuad = quads[2];
+		CHECK(leaderQuad.x1 - leaderQuad.x0 == 15 && leaderQuad.y1 - leaderQuad.y0 == 31);
+		CHECK(commanderQuad.x1 - commanderQuad.x0 == 15 && commanderQuad.y1 - commanderQuad.y0 == 47);
+		// Retail centers both rectangles on the map point (screen 534,285).
+		CHECK(leaderQuad.x0 == 526 && leaderQuad.y0 == 269);
+		CHECK(commanderQuad.x0 == 526 && commanderQuad.y0 == 261);
+		CHECK(!leaderQuad.pivotSet && !commanderQuad.pivotSet);
+	}
+}
+
 
 TEST(Hud_ListBordersSelectionScrollbar)
 {
@@ -495,8 +758,79 @@ TEST(Hud_ListBordersSelectionScrollbar)
 	}
 }
 
+// The strings' "|C1001" toggles the highlight and draws none of its
+// digits (0x007dff79 skips 6); native's bare "|c" row mark still works.
+TEST(Hud_ListColourCodes)
+{
+	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n2\r\n"
+							 "65\t0\t4\t0\t2\t44\t16\t49\t25\r\n"
+							 "49\t0\t4\t0\t2\t50\t16\t55\t25\r\n";
+	Console console;
+	hud::HudManager manager([&font](const std::string& path, std::string& text) {
+		text = font;
+		return path.find("t.dif") != std::string::npos;
+	});
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createListNode Global Lines 10 10 200 100 19 1",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.setListNodeData 2",
+			 "hudBuilder.setListNodeFont Fonts/t.dif 0",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setListColumns(2, {{0, 0, 0}});
+	manager.setListTextColor(2, 1, 1, 1, 1);
+	const auto glyphs = [&](const std::string& text, int& highlighted) {
+		manager.setList(2, {{text}});
+		int n = 0;
+		highlighted = 0;
+		for (const hud::HudQuad& q : manager.frame(0)) {
+			if (q.texture.find("t.dds") != std::string::npos) {
+				++n;
+				highlighted += q.color[1] < 0.7f;
+			}
+		}
+		return n;
+	};
+	int highlighted = 0;
+	CHECK(glyphs("|C1001A|C10011", highlighted) == 2 && highlighted == 1);
+	CHECK(glyphs("|cAA", highlighted) == 2 && highlighted == 2);
+	CHECK(glyphs("|c1A", highlighted) == 2 && highlighted == 2);
+}
+
 // The commander screen's map (setCommanderPos/Size) and its overhead view:
 // the map's texture fades out (MenuMapAlpha, +0x7b0 eased) and the map is
+// The commander tools' rings pulse (0x007791a0 / 0x0078eb20): side times
+// 1 - 0.09 + 0.18 sin(4 t); plain markers keep their size.
+TEST(Hud_CommanderRingPulses)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512", "hudBuilder.setCommanderPos -300/-300", "hudBuilder.setCommanderSize 600/600"}) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud::HudManager::MapMarker ring {"ring.dds", 0, 0, 58};
+	ring.pulse = true;
+	manager.setMapMarkers({ring, {"icon.dds", 0, 0, 15}});
+	manager.set("MapFullSize", 1);
+	manager.set("CommanderShow", 1);
+	const auto sides = [&] {
+		const auto quads = manager.frame(0);
+		return quads.size() >= 2 ? std::pair<float, float> {quads[quads.size() - 2].x1 - quads[quads.size() - 2].x0,
+										quads.back().x1 - quads.back().x0}
+								  : std::pair<float, float> {};
+	};
+	CHECK(sides() == std::make_pair(52.0f, 15.0f)); // floor(58 x 0.91)
+	manager.tickMapTurn(3.14159265f / 8, true); // sin(pi / 2)
+	CHECK(sides() == std::make_pair(63.0f, 15.0f)); // floor(58 x 1.09)
+}
+
 // zoomed so the node's height spans the camera's ground width about it
 // (0x0077c4b0), the marks staying on what it sees.
 TEST(Hud_CommanderMapOverhead)
@@ -678,6 +1012,41 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 		CHECK(std::abs(mx - cx) <= 1 && my < cy - 40);
 		CHECK(std::abs(quads[1].rotation + 90) < 0.01f);
 	}
+	// An upright mark (a silo's number) keeps screen-up on the turned map.
+	{
+		hud::HudManager::MapMarker silo {"silo.dds", 100, 0, 16, 0};
+		silo.upright = true;
+		manager.setMapMarkers({silo});
+		quads = manager.frame(1);
+		CHECK(quads.size() == 2 && quads[1].rotation == 0);
+	}
+	// The big map opened after the turn keeps the minimap's last turn
+	// (0x0077cba0 always turns by +0x80c), which holds while it is open
+	// (0x0078f680 updates it only at the minimap's size, +0x709): a new
+	// heading, being dead, or man down don't move it.
+	manager.setMapMarkers({{"mark.dds", 100, 0, 16, 0}});
+	manager.set("MapFullSize", 1);
+	manager.tickMapTurn(1.0f / 60, true); // the size flag (+0x709) follows
+	for (int i = 0; i < 60; ++i) {
+		manager.setMapHeading(0);
+		manager.tickMapTurn(1.0f / 60, i < 30);
+	}
+	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
+	quads = manager.frame(1);
+	CHECK(!quads.empty() && std::abs(quads[0].rotation + 90) < 0.01f);
+	{
+		// Hit-tested turned too: the point above the centre is east.
+		float cxw = 0, czw = 0, wx = 0, wz = 0;
+		const float bx = quads[0].pivot[0], by = quads[0].pivot[1];
+		CHECK(manager.mapWorldAt(bx, by, cxw, czw) && manager.mapWorldAt(bx, by - 20, wx, wz));
+		CHECK(wx - cxw > 1 && std::abs(wz - czw) < 0.5f);
+	}
+	manager.set("MapFullSize", 0);
+	manager.tickMapTurn(1.0f / 60, true);
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(east);
+		manager.tickMapTurn(1.0f / 60, true);
+	}
 	// A static map: north up again.
 	manager.set("MapStatic", 1);
 	manager.setMapHeading(east);
@@ -741,63 +1110,118 @@ TEST(Hud_MapMarkerOffset)
 	}
 }
 
-// A marker kept on the map (the record's +0x30, 0x0077efb0 -> 0x0077e100):
-// a teammate past the map's west edge sits 0.02 / zoom of the map in from
-// it; one not kept is cut away. A marker kept on the map but off the
-// minimap's node is still cut.
-TEST(Hud_MapMarkerClamp)
+TEST(Hud_MapScaledVehicleFootprint)
+{
+	for (const bool full : {false, true}) {
+		Console console;
+		hud::HudManager manager(nullptr);
+		hud::registerHudConsoleMethods(console, manager);
+		std::string out;
+		for (const char* line : {
+				 "hudBuilder.createMapNode Global Minimap",
+				 "hudBuilder.setMaxiPos -256/-256",
+				 "hudBuilder.setMaxiSize 512/512",
+				 "hudBuilder.setMiniPos -100/-100",
+				 "hudBuilder.setMiniSize 200/200",
+				 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 }) {
+			CHECK(console.execute(line, out) == ConsoleResult::Ok);
+		}
+		manager.setMap("map.dds", -1024, -1024, 2048, 2048);
+		manager.setMapFocus(0, 0);
+		manager.setMapZoom(2);
+		manager.setMapInVehicle(true);
+		manager.set("MapFullSize", full ? 1 : 0);
+		hud::HudManager::MapMarker titan {"titan.dds", 0, 0, 20, 90};
+		titan.height = 35;
+		titan.offsetX = 0.94f;
+		titan.offsetY = 8;
+		titan.zoomWithMap = true;
+		manager.setMapMarkers({titan, {"gunship.dds", 0, 0, 16}});
+		const auto quads = manager.frame(0);
+		CHECK(quads.size() == 3);
+		if (quads.size() != 3) continue;
+		const auto& ship = quads[1];
+		const auto& aircraft = quads[2];
+		const float scale = 0.7f * (full ? 512 : 200 * std::pow(2.3f, 2)) / 512;
+		CHECK(ship.x1 - ship.x0 == std::floor(20 * scale));
+		CHECK(ship.y1 - ship.y0 == std::floor(35 * scale));
+		CHECK(ship.pivotSet && ship.rotation == 90);
+		CHECK(std::abs(ship.pivot[0] - ((ship.x0 + ship.x1) / 2 - 0.94f * scale)) < 0.001f);
+		CHECK(std::abs(ship.pivot[1] - ((ship.y0 + ship.y1) / 2 - 8 * scale)) < 0.001f);
+		CHECK(aircraft.x1 - aircraft.x0 == 16 && aircraft.y1 - aircraft.y0 == 16);
+	}
+}
+
+TEST(Hud_PlayerMapHeading)
 {
 	Console console;
 	hud::HudManager manager(nullptr);
 	hud::registerHudConsoleMethods(console, manager);
 	std::string out;
-	for (const char* line : {
-			 "hudBuilder.createMapNode Global Minimap",
-			 "hudBuilder.setMaxiPos -122/-271",
-			 "hudBuilder.setMaxiSize 512/512",
-			 "hudBuilder.setMiniPos 245/-291",
-			 "hudBuilder.setMiniSize 146/146",
-			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
-		 }) {
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600", "hudBuilder.setMiniPos 245/-291", "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1"}) {
 		console.execute(line, out);
 	}
-	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
-	hud::HudManager::MapMarker kept {"kept.dds", -600, 0, 16};
-	kept.clamp = true;
-	hud::HudManager::MapMarker loose {"loose.dds", -600, 0, 16};
-	hud::HudManager::MapMarker inside {"inside.dds", -510, 300, 16};
-	inside.clamp = true;
-	manager.setMapMarkers({kept, loose, inside});
+	manager.setMap("map.dds", -512, -512, 1024, 1024);
+	game::GameWorld::PlayerInfo player;
+	player.yaw = 90;
+	auto east = menu::playerMapMarker(player);
+	player.yaw = -90;
+	auto west = menu::playerMapMarker(player);
+	manager.setMapMarkers({east, west});
 	manager.set("MapFullSize", 1);
-	std::vector<hud::HudQuad> marks;
-	for (const hud::HudQuad& q : manager.frame(0)) {
-		if (q.texture.find(".dds") != std::string::npos && q.texture.find("ingameMap") == std::string::npos) {
-			marks.push_back(q);
-		}
+	std::vector<float> rotations;
+	for (const auto& quad : manager.frame(0)) {
+		if (quad.texture.find("mini_Soldier.dds") != std::string::npos) rotations.push_back(quad.rotation);
 	}
-	// The big map at (278, 29), 512 pixels, zoom 1: 0.02 x 512 = 10.24.
-	CHECK(marks.size() == 2);
-	if (marks.size() == 2) {
-		CHECK(marks[0].texture.find("kept.dds") != std::string::npos);
-		CHECK(marks[0].x0 == 280 && marks[0].x1 == 296 && marks[0].y0 == 29 + 256 - 8);
-		// Inside the map but nearer its edge than the margin: pushed in.
-		CHECK(marks[1].texture.find("inside.dds") != std::string::npos && marks[1].x0 == 280);
+	CHECK(rotations.size() == 2);
+	if (rotations.size() == 2) CHECK(rotations[0] == 90 && rotations[1] == -90);
+}
+
+// Retail's local view texture has a different aspect and tint from the
+// teammate heading arrow. Exercise the marker through the actual HUD path.
+TEST(Hud_LocalViewIndicatorRetailShapeAndHeading)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600", "hudBuilder.setMiniPos 245/-291", "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1"}) {
+		console.execute(line, out);
 	}
-	// The minimap round the map's centre: the kept marker is on the map's
-	// edge, far off the node, and cut.
+	manager.setMap("map.dds", -512, -512, 1024, 1024);
+	game::GameWorld::PlayerInfo player;
+	player.yaw = -90; // the vehicle body can face away from its camera
+	manager.setMapMarkers({menu::localViewMapMarker(player, 45)});
+	manager.set("MapFullSize", 1);
+	int indicators = 0;
+	for (const auto& quad : manager.frame(0)) {
+		if (quad.texture.find("mini_LocalArrow2.tga") == std::string::npos) continue;
+		++indicators;
+		CHECK(quad.x1 - quad.x0 == 50);
+		CHECK(quad.y1 - quad.y0 == 70);
+		CHECK(quad.rotation == 45);
+		CHECK(quad.color[0] == 1 && std::fabs(quad.color[1] - 247.0f / 255.0f) < 1e-6f && quad.color[2] == 0);
+	}
+	CHECK(indicators == 1);
+	// On a rotating minimap it follows the camera relative to map turn.
 	manager.set("MapFullSize", 0);
-	manager.setMapFocus(0, 0);
-	std::vector<hud::HudQuad> quads;
-	for (int i = 0; i < 20; ++i) {
-		quads = manager.frame(1);
+	for (int i = 0; i < 120; ++i) {
+		manager.setMapHeading(3.1415927f / 4);
+		manager.tickMapTurn(1.0f / 60, true);
 	}
-	marks.clear();
-	for (const hud::HudQuad& q : quads) {
-		if (q.texture.find("kept.dds") != std::string::npos) {
-			marks.push_back(q);
-		}
+	indicators = 0;
+	for (const auto& quad : manager.frame(1)) {
+		if (quad.texture.find("mini_LocalArrow2.tga") == std::string::npos) continue;
+		++indicators;
+		CHECK(std::fabs(quad.rotation) < 0.01f);
+		CHECK(quad.x1 - quad.x0 == 50 && quad.y1 - quad.y0 == 70);
 	}
-	CHECK(marks.empty());
+	CHECK(indicators == 1);
 }
 
 // The commander's mini-map tab (Bf2MiniMenuMapNode, 0x007e8a90): the
@@ -873,6 +1297,78 @@ TEST(Hud_CommanderMiniMapTab)
 	CHECK(!manager.miniMapWorldAt(100, 300, x, z));
 }
 
+TEST(Hud_SpawnLabelOfAnUntranslatedCpNameIsReadable)
+{
+	// Remagen's Titan mode names its points CPNAME_RE_Ti_<Name>; the shipped string
+	// tables only have the 16/32/64 keys, so the key itself reached the map.
+	CHECK(hud::spawnLabelText("CPNAME_RE_Ti_InsertionPoint") == "Insertion Point");
+	CHECK(hud::spawnLabelText("CPNAME_RE_Ti_Hotel") == "Hotel");
+	CHECK(hud::spawnLabelText("CPNAME_RE_64_MonorailStation") == "Monorail Station");
+	CHECK(hud::spawnLabelText("CP_Some_Name") == "Some Name");
+	CHECK(hud::spawnLabelText("ID_Alley") == "Alley");
+	CHECK(hud::spawnLabelText("Insertion Point") == "Insertion Point");
+	CHECK(hud::spawnLabelText("CPNAME_") == "CPNAME ");
+}
+
+TEST(Hud_TitanSpawnIsToldFromItsBasePoint)
+{
+	// Minsk's base is CPNAME_Mi_Ti_EU_Titan, which reads "EU Titan" without its string.
+	CHECK(hud::titanSpawnLabel("EU Titan", "CPNAME_Mi_Ti_EU_Titan") == "EU Titan (inside)");
+	CHECK(hud::titanSpawnLabel("EU Titan", "EU Headquarters") == "EU Titan");
+	CHECK(hud::titanSpawnLabel("EU Titan", "CP_BS_USBASE") == "EU Titan");
+}
+
+TEST(Hud_DeploymentMarkerNameShowsOnlyUnderThePointer)
+{
+	const std::string font = "header\r\n2\r\ntest\r\n128\r\n64\r\n13.000000\r\nglyphs\r\n1\r\n"
+		"65\t0.125000\t4.250000\t0.025000\t2\t44\t16\t49\t25\r\nkerning\r\n0\r\n";
+	hud::HudManager manager([&font](const std::string& path, std::string& text) {
+		if (path.find("hudfontlocalbold_9.dif") == std::string::npos) {
+			return false;
+		}
+		text = font;
+		return true;
+	});
+	Console console;
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Map", "hudBuilder.setMaxiPos -256/-256",
+			 "hudBuilder.setMaxiSize 512/512"}) {
+		console.execute(line, out);
+	}
+	manager.setMap("map.dds", 0, 0, 512, 512);
+	manager.set("MapFullSize", 1);
+	manager.set("SpawnShow", 1);
+	hud::HudManager::MapMarker spawn {"spawn.dds", 256, 256, 32};
+	spawn.id = 3;
+	spawn.label = "A";
+	manager.setMapMarkers({spawn});
+	const auto hasText = [](const std::vector<hud::HudQuad>& quads) {
+		return std::any_of(quads.begin(), quads.end(), [](const hud::HudQuad& q) {
+			return q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos;
+		});
+	};
+	// Retail draws the spawn points as bare icons: no name until the pointer is on one.
+	CHECK(!hasText(manager.frame(0)));
+	manager.setPointer(420, 300); // beside the icon, not on it
+	CHECK(!hasText(manager.frame(0)));
+	manager.setPointer(400, 300);
+	CHECK(hasText(manager.frame(0)));
+	CHECK(manager.mapMarkerAt(400, 300) == 3);
+	manager.setPointer(-1, -1);
+	manager.frame(0);
+	CHECK(manager.mapMarkerAt(420, 300) == -1); // the name is no click target
+	// A long fallback/localized name must not paint over the kit panel.
+	spawn.label = std::string(400, 'A');
+	manager.setMapMarkers({spawn});
+	manager.setPointer(400, 300);
+	for (const auto& q : manager.frame(0)) {
+		if (q.texture.find("/hudfontlocalbold_9.dds") != std::string::npos) {
+			CHECK(q.x0 >= 144 && q.x1 <= 656 && q.y0 >= 44 && q.y1 <= 556);
+		}
+	}
+}
+
 // Non-English text (coverage-7 P8; BF2142.exe 0x00405360): the strings in
 // the game's language and its own fonts (Fonts/<language>/), whose glyphs
 // are by Unicode code point; HUD text is read as UTF-8 (hud::nextCode), so
@@ -938,4 +1434,227 @@ TEST(Hud_NonEnglishTextHasGlyphs)
 		CHECK(checked > 20 && missing == 0);
 	}
 	hud::setLanguage("English");
+}
+
+// The capture bar and the capture voice (HudMenus.h captureBar, GameWorld.h captureVoice).
+#include "Main/HudMenus.h"
+
+TEST(CaptureBar_ShowsTheClosestPointsFlagWhileTheScriptsHoldThePlayerInside)
+{
+	using Info = dice::hfe::game::GameWorld::ControlPointInfo;
+	Info neutral {1, 0, {0, 0, 0}, 10};
+	neutral.flagHeight = 0.4f;
+	neutral.flagRate = 0.05f;
+	Info owned {2, 1, {100, 0, 0}, 10};
+	owned.flagHeight = 0.7f;
+	owned.flagRate = -0.05f;
+	auto bar = dice::hfe::menu::captureBar({neutral, owned}, {3, 0, 0}, true);
+	CHECK(bar.enabled && bar.takenShow && !bar.neutralShow);
+	CHECK(std::fabs(bar.value - 0.4f) < 1e-5f);
+	bar = dice::hfe::menu::captureBar({neutral, owned}, {101, 0, 0}, true);
+	CHECK(bar.enabled && bar.neutralShow && !bar.takenShow);
+	CHECK(std::fabs(bar.value - 0.7f) < 1e-5f);
+	// Inside the radius horizontally but not set inside by the trigger: no bar
+	// (a walker's root above a silo, 5.9 m out on the ground, 6.6 m in 3D).
+	CHECK(!dice::hfe::menu::captureBar({neutral, owned}, {3, 0, 0}, false).enabled);
+	// The closest point is by 3D distance: 4 m along beats 10 m straight up,
+	// which would be closest on the ground.
+	Info above {3, 0, {0, 10, 0}, 10};
+	above.flagHeight = 0.9f;
+	Info along {4, 0, {4, 0, 0}, 10};
+	along.flagHeight = 0.2f;
+	CHECK(std::fabs(dice::hfe::menu::captureBar({above, along}, {0, 0, 0}, true).value - 0.2f) < 1e-5f);
+	owned.capturable = false;
+	CHECK(!dice::hfe::menu::captureBar({owned}, {100, 0, 0}, true).enabled);
+	CHECK(!dice::hfe::menu::captureBar({neutral}, {1001, 0, 0}, true).enabled);
+}
+
+TEST(HudTitan_HealthUsesArmourPercentAndRetailTicketRounding)
+{
+	game::GameWorld::TitanInfo titan;
+	titan.hitPoints = 5'890'000;
+	titan.maxHitPoints = 6'000'000;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 99); // gpm_ti's ceil(100 * hp / max)
+	titan.hitPoints = 3'600'000;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 60); // shield/hull span boundary
+	titan.hitPoints = -1;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 0);
+	titan.maxHitPoints = 0;
+	CHECK(dice::hfe::menu::titanHudHealth(titan) == 0);
+}
+
+TEST(CaptureVoice_IsTeamRelative)
+{
+	using dice::hfe::game::captureVoice;
+	CHECK(captureVoice(0, 1, 1) == "AUTO_RULES_wecapturedacp");
+	CHECK(captureVoice(1, 2, 1) == "AUTO_RULES_welostacp");
+	CHECK(captureVoice(1, 0, 2).empty());
+}
+
+// setNodeLogicShowVariable's value is an int (0x0076e090 names "int",
+// 0x0076e1ca reads it with operator>>(int&)): "1.5" is 1.
+TEST(Hud_LogicValueIsAnInt)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createPictureNode BottomLeftStatic Left 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
+			 "hudBuilder.setNodeLogicShowVariable NOT IsSpectator 1.5",
+		 }) {
+		console.execute(line, out);
+	}
+	CHECK(!manager.frame(0).empty());
+	manager.set("IsSpectator", 1);
+	CHECK(manager.frame(0).empty());
+}
+
+// setBarNodeBorder and setCompassNodeBorder share one executor
+// (0x0076aebf -> 0x007b0780: the active node's slot 0x100), which bars and
+// compasses both answer with 0x007e9270 (+0x74..+0x80): either command
+// sets the same border on either node. A compass's strip period is its
+// width less the right border; a bar fills inside the border.
+TEST(Hud_BarAndCompassShareTheBorder)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createCompassNode Global Compass 3 100 10 90 10 1 0",
+			 "hudBuilder.setCompassNodeTexture 1 compass.tga",
+			 "hudBuilder.setCompassNodeTextureSize 360 10",
+			 "hudBuilder.setCompassNodeValueVariable VehicleAngle",
+			 "hudBuilder.setBarNodeBorder 0 0 0 60",
+			 "hudBuilder.createBarNode Global Health 3 100 500 200 10",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/full.tga",
+			 "hudBuilder.setBarNodeValueVariable PlayerHealth",
+			 "hudBuilder.setCompassNodeBorder 0 0 20 80",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.set("VehicleAngle", 90);
+	manager.set("PlayerHealth", 1);
+	const auto quads = manager.frame(0);
+	bool compass = false, bar = false;
+	for (const auto& q : quads) {
+		if (q.texture.find("compass.tga") != std::string::npos && q.x0 == 100) {
+			compass = true;
+			CHECK(std::abs(q.u0 - 75 / 360.0f) < 1e-5f); // floor(90 / 360 x (360 - 60))
+		}
+		if (q.texture.find("full.tga") != std::string::npos) {
+			bar = true;
+			CHECK(q.x0 == 120 && q.x1 == 220); // 20 off the left, 80 off the right
+		}
+	}
+	CHECK(compass && bar);
+}
+
+// A marker kept on the map (the record's +0x30, 0x0077efb0 -> 0x0077e100):
+// a teammate past the map's west edge sits 0.02 / zoom of the map in from
+// it; one not kept is cut away. A marker kept on the map but off the
+// minimap's node is still cut.
+TEST(Hud_MapMarkerClamp)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	hud::HudManager::MapMarker kept {"kept.dds", -600, 0, 16};
+	kept.clamp = true;
+	hud::HudManager::MapMarker loose {"loose.dds", -600, 0, 16};
+	hud::HudManager::MapMarker inside {"inside.dds", -510, 300, 16};
+	inside.clamp = true;
+	manager.setMapMarkers({kept, loose, inside});
+	manager.set("MapFullSize", 1);
+	std::vector<hud::HudQuad> marks;
+	for (const hud::HudQuad& q : manager.frame(0)) {
+		if (q.texture.find(".dds") != std::string::npos && q.texture.find("ingameMap") == std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	// The big map at (278, 29), 512 pixels, zoom 1: 0.02 x 512 = 10.24.
+	CHECK(marks.size() == 2);
+	if (marks.size() == 2) {
+		CHECK(marks[0].texture.find("kept.dds") != std::string::npos);
+		CHECK(marks[0].x0 == 280 && marks[0].x1 == 296 && marks[0].y0 == 29 + 256 - 8);
+		// Inside the map but nearer its edge than the margin: pushed in.
+		CHECK(marks[1].texture.find("inside.dds") != std::string::npos && marks[1].x0 == 280);
+	}
+	// The minimap round the map's centre: the kept marker is on the map's
+	// edge, far off the node, and cut.
+	manager.set("MapFullSize", 0);
+	manager.setMapFocus(0, 0);
+	std::vector<hud::HudQuad> quads;
+	for (int i = 0; i < 20; ++i) {
+		quads = manager.frame(1);
+	}
+	marks.clear();
+	for (const hud::HudQuad& q : quads) {
+		if (q.texture.find("kept.dds") != std::string::npos) {
+			marks.push_back(q);
+		}
+	}
+	CHECK(marks.empty());
+}
+
+// Bf2ButtonNode's mouse move (0x007e9ab0): the pointer entering a button
+// runs its event-1 commands once, leaving runs event 2 once; going straight
+// from one button to the next runs the leave before the enter.
+TEST(Hud_ButtonHoverEnterAndLeave)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::vector<std::string> ran;
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Items",
+			 "hudBuilder.createButtonNode Items A 100 100 50 50",
+			 "hudBuilder.setButtonNodeConCmd \"enter A\" 1",
+			 "hudBuilder.setButtonNodeConCmd \"leave A\" 2",
+			 "hudBuilder.createButtonNode Items B 150 100 50 50",
+			 "hudBuilder.setButtonNodeConCmd \"enter B\" 1",
+			 "hudBuilder.setButtonNodeConCmd \"leave B\" 2",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setCommandRunner([&ran](const std::string& command) { ran.push_back(command); });
+	manager.setPointer(10, 10);
+	manager.frame(0);
+	CHECK(ran.empty()); // buttons start outside: no leave at first sight
+	manager.setPointer(120, 120);
+	manager.frame(0);
+	manager.frame(0);
+	CHECK(ran == std::vector<std::string> {"enter A"});
+	manager.setPointer(170, 120);
+	manager.frame(0);
+	CHECK(ran == (std::vector<std::string> {"enter A", "leave A", "enter B"}));
+	manager.setPointer(10, 10);
+	manager.frame(0);
+	CHECK(ran.back() == "leave B" && ran.size() == 4);
+}
+
+TEST(DeploymentPrompt_RetailSelectionAndConfirmationStates)
+{
+	using dice::main::deploymentSpawnInfo;
+	CHECK(std::string(deploymentSpawnInfo(false, false, 0)) == "HUD_CENTERINFOBOX_selectspawnpoint");
+	CHECK(std::string(deploymentSpawnInfo(true, false, 0)) == "HUD_CENTERINFOBOX_presstospawn");
+	CHECK(std::string(deploymentSpawnInfo(true, false, 15)) == "HUD_CENTERINFOBOX_presstospawn");
+	CHECK(std::string(deploymentSpawnInfo(true, true, 15)) == "HUD_CENTERINFOBOX_timetospawn");
+	CHECK(std::string(deploymentSpawnInfo(true, true, 0)) == "HUD_CENTERINFOBOX_instantspawn");
+	CHECK(std::string(deploymentSpawnInfo(true, true, 0, false)) == "HUD_CENTERINFOBOX_invalidspawnpoint");
 }

@@ -12,6 +12,50 @@
 
 namespace dice::hfe::menu {
 
+int audioQualityIndex(const std::string& quality)
+{
+	std::string name = quality;
+	std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (name == "low") return 2;
+	if (name == "high" || name == "ultrahigh") return 0;
+	return 1; // Medium and unknown profile values use the ordinary default.
+}
+
+std::string consoleQuotable(const std::string& text, size_t maxLength)
+{
+	std::string out;
+	out.reserve(std::min(text.size(), maxLength));
+	for (const char c : text) {
+		const auto u = static_cast<unsigned char>(c);
+		if (c == '"') {
+			out += '\'';
+		} else if (u < 0x20 || u == 0x7f) {
+			out += ' ';
+		} else {
+			if (c == '>') {
+				while (!out.empty() && out.back() == ' ') {
+					out.pop_back();
+				}
+			}
+			out += c;
+		}
+	}
+	if (out.size() > maxLength) {
+		size_t end = maxLength;
+		while (end > 0 && (static_cast<unsigned char>(out[end]) & 0xc0) == 0x80) {
+			--end; // not inside a UTF-8 sequence
+		}
+		out.resize(end);
+	}
+	return out;
+}
+
+std::string quotedConsoleArgument(const std::string& text, size_t maxLength)
+{
+	return "\"" + consoleQuotable(text, maxLength) + "\"";
+}
+
+
 namespace {
 
 // One console call of a settings object: its name, its arguments' types
@@ -162,7 +206,8 @@ std::string writtenName(const Field& field)
 }
 
 // An argument as the writer puts it: numbers as typed, bools 0/1, quoted
-// text in quotes.
+// text in quotes. Text is made safe for the console first
+// (consoleQuotable), so no value ends its argument or its line.
 std::string formatArgs(const char* types, const std::vector<std::string>& args)
 {
 	std::string out;
@@ -172,7 +217,13 @@ std::string formatArgs(const char* types, const std::vector<std::string>& args)
 			out += ' ';
 		}
 		switch (types[i]) {
-		case 'q': out += "\"" + arg + "\""; break;
+		case 'q': out += quotedConsoleArgument(arg); break;
+		case 's': {
+			std::string bare = consoleQuotable(arg);
+			bare.erase(0, bare.find_first_not_of('>')); // a bare '>' after the blank would redirect
+			out += bare;
+			break;
+		}
 		case 'b': out += std::atoi(arg.c_str()) != 0 ? "1" : "0"; break;
 		case 'i': out += std::to_string(std::atol(arg.c_str())); break;
 		case 'f': {
@@ -185,6 +236,41 @@ std::string formatArgs(const char* types, const std::vector<std::string>& args)
 		}
 	}
 	return out;
+}
+
+// A list entry's arguments as Console::tokenize splits them: words
+// between blanks, or text between quotes (a quote always opens or closes
+// one; an unclosed one runs to the end).
+std::vector<std::string> splitEntry(const std::string& entry)
+{
+	std::vector<std::string> words;
+	size_t pos = 0;
+	while (pos < entry.size()) {
+		while (pos < entry.size() && std::isspace(static_cast<unsigned char>(entry[pos]))) {
+			++pos;
+		}
+		if (pos >= entry.size()) {
+			break;
+		}
+		std::string word;
+		bool quoted = false;
+		while (pos < entry.size()) {
+			const char c = entry[pos++];
+			if (!quoted && (c == ' ' || c == '\t')) {
+				break;
+			}
+			if (c == '"') {
+				if (quoted) {
+					break;
+				}
+				quoted = true;
+				continue;
+			}
+			word.push_back(c);
+		}
+		words.push_back(std::move(word));
+	}
+	return words;
 }
 
 std::vector<std::string> splitValue(const std::string& value, size_t count)
@@ -210,8 +296,11 @@ std::string writeFields(const SettingsObjects& self, const Field (&fields)[N],
 		const size_t count = std::char_traits<char>::length(field.types);
 		if (field.list) {
 			if (const auto it = lists.find(key); it != lists.end()) {
+				// Each entry's arguments as the console splits them, written
+				// again by their types: whatever an entry holds, its line is
+				// that one call (port addition, see consoleQuotable).
 				for (const std::string& entry : it->second) {
-					out += std::string(field.method) + " " + entry + "\n";
+					out += std::string(field.method) + " " + formatArgs(field.types, splitEntry(entry)) + "\n";
 				}
 			}
 			continue;
@@ -286,7 +375,18 @@ void SettingsObjects::registerConsole(Console& console)
 				return get(key);
 			}
 			if (list) {
-				m_lists[key].push_back(formatArgs(types.c_str(), args));
+				auto& entries = m_lists[key];
+				std::string entry = formatArgs(types.c_str(), args);
+				// A played help key is listed once, matched without regard to case.
+				const auto same = [&entry](const std::string& other) {
+					return other.size() == entry.size() && std::equal(other.begin(), other.end(), entry.begin(), [](char a, char b) {
+						return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+					});
+				};
+				if (key == "GeneralSettings.PlayedVOHelp" && std::any_of(entries.begin(), entries.end(), same)) {
+					return std::string();
+				}
+				entries.push_back(std::move(entry));
 			} else {
 				std::string value;
 				for (size_t i = 0; i < args.size() && i < count; ++i) {
@@ -455,7 +555,7 @@ std::string SettingsObjects::userSettingsScript() const
 	std::string out = "rem\nrem Settingsfile automatically saved by bf2142\nrem\n";
 	for (const auto& [name, typed] : m_game) {
 		out += "SettingsManager." + typed.type + "Set " + name + " " +
-			(typed.type == "string" ? "\"" + typed.value + "\"" : typed.value) + "\n";
+			(typed.type == "string" ? quotedConsoleArgument(typed.value) : consoleQuotable(typed.value)) + "\n";
 	}
 	return out;
 }
@@ -546,6 +646,11 @@ bool SettingsObjects::save() const
 		ok = saveUserSettings() && ok;
 	}
 	return ok;
+}
+
+bool SettingsObjects::saveGeneral() const
+{
+	return write(file("General.con"), generalScript());
 }
 
 bool SettingsObjects::saveProfile() const

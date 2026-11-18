@@ -1,0 +1,18 @@
+Enhanced variant of particle.frag (enhanced.particleShadows): the cascades'
+shadow at the particle; material.rgb is a shaded particle's light over a
+sunlit one's (LevelRenderer::drawParticles).
+<<<<
+#include "fog.glsl"
+====
+#include "fog.glsl"
+#define SHADOW_UNIFORM_BINDING 1
+#define SHADOW_MAP_BINDING 1
+#include "enhanced_shadow.glsl"
+layout(location = 3) in vec4 inShadowAt;
+>>>>
+<<<<
+	outColor = vec4(texel.rgb * inColor.rgb, texel.a * inColor.a * (1.0 - fog));
+====
+	float lit = mix(1.0, shadowFactor(inShadowAt.xyz, true), inShadowAt.w);
+	outColor = vec4(texel.rgb * inColor.rgb * mix(material.rgb, vec3(1.0), lit), texel.a * inColor.a * (1.0 - fog));
+>>>>

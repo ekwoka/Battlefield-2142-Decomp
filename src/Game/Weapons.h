@@ -15,6 +15,7 @@
 #include "Physics/RigidBody.h"
 #include "Random.h"
 
+#include <algorithm>
 #include <functional>
 #include <array>
 #include <string>
@@ -27,6 +28,7 @@ struct Material;
 
 namespace dice::hfe::world {
 class ObjectTemplate;
+class ObjectTemplateManager;
 }
 
 namespace dice::hfe::game {
@@ -80,6 +82,10 @@ struct ProjectileSettings {
 	float explosionForce = 0;
 	float explosionYMod = 1; // the height difference counts times this
 	std::string endEffect; // detonation.endEffectTemplate
+	// detonation.useMMOnEndEffect (+0x5e; DefaultDetonationComp 0x005e9300):
+	// after the blast/EMP and its end effect, asks gameLogic slot 0x114 to
+	// play the projectile-material/hit-material effect and sound.
+	bool useMMOnEndEffect = false;
 	// collision.bouncing: it bounces off what it hits (grenades, mines, C4)
 	// and detonates when its time to live runs out, not on impact.
 	bool bounces = false;
@@ -150,6 +156,9 @@ struct ProjectileSettings {
 	float armingSpeed = 0, speedModifier = 1, predictionFactor = 0;
 	bool useTargetSpeed = false, magneticBehaviour = false;
 	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
+	// hasDirection (template +0x335, 0 by default): the motor of a round
+	// without a follow pushes along its own nose (0x005b3e60).
+	bool hasDirection = false;
 	float maxAngleLock = 360;
 	bool ignoreFriendly = true;
 	// seek.directionBonus (the seek template's +0x30, executor 0x004f541e,
@@ -169,7 +178,6 @@ struct ProjectileSettings {
 	// magnet's follow pushes it itself (followMagnet). hasFollow: a
 	// DefaultFollowComp.
 	float startDelay = 0;
-	bool hasDirection = false;
 	bool hasFollow = false;
 	// onlyDetonateOnMaterial (template +0x348, -1 none) for the first
 	// onlyDetonateOnMaterialTimeLimit seconds (+0x34c; 0: always): until
@@ -216,6 +224,17 @@ struct ProjectileSettings {
 	bool allowFriendlyFireDetonation = false;
 	// No trigger and no fuse to speak of (C4): set off by its owner.
 	bool remote = false;
+	// Its Armor component (shipped: the C4 and the AP, EMP and motion mines,
+	// armor.hitPoints 1000, defaultMaterial 90): hit points below 0 none.
+	// Damage reaches it through the material table's cell against the
+	// armour material (against 90 only Detonation_Defuse_DMG 32 x10,
+	// Detonation_C4 80 x1, Bullet_Heavy_Sniper 131 x12 and Engineer_Defuse
+	// 132 x20 are above 0). Out of hit points the armour's update
+	// (0x00654120) posts the round's time-up event 0x18: it goes off as at
+	// the end of its time (hasOnTimeEffect, 1 on all of these).
+	float hitPoints = -1;
+	float maxHitPoints = -1; // armor.maxHitPoints (10000 shipped: the defuser's heal test passes)
+	int armourMaterial = 0;
 	// hasOnTimeEffect (template +0x328, 1 by default, 0x005b3500): its time
 	// run out (events 0x18 / 0x1d), the round detonates (event 0x1f, the
 	// detonation's slot 0x14), else it is only removed (0x20; 0x005b62a0).
@@ -287,6 +306,7 @@ struct ProjectileSettings {
 	// The damage after travelling `distance` metres.
 	float damageAt(float distance) const;
 };
+std::string tracerGeometryFor(const world::ObjectTemplateManager& templates, const ProjectileSettings& settings);
 
 // A blast's falloff with distance (0x005a61a0): 1 within 0.2 of the
 // radius (0x00a6aab4), then falling linearly to 0 at the radius.
@@ -372,12 +392,17 @@ struct FireArmSettings {
 	// the SMGs and handguns don't set it.
 	float velocity = 600;
 	std::string projectileTemplate;
-	// Heat (guns without magazines): each round adds heatAddWhenFire, it
-	// cools by coolDownPerSec, and at 1 the gun stops for overheatPenalty
-	// seconds.
+	// Heat: each round adds heatAddWhenFire; over 1 the heat becomes
+	// overheatPenalty and the gun stops until it has cooled (coolDownPerSec,
+	// only while idle) back to below 1.
 	float heatAddWhenFire = 0;
 	float coolDownPerSec = 0;
 	float overheatPenalty = 0;
+	// ObjectTemplate.inheritHeatFromPrimary (template +0x2dc; the saver
+	// 0x005c33a0 writes it from +0x2d4 of its this, 8 below the object's
+	// template, as heatAddWhenFire +0x2cc / overheatPenalty +0x2d8): with it
+	// set, 0x005c3cb0 never puts the heat to overheatPenalty.
+	bool inheritHeatFromPrimary = false;
 	// The fire modes (fire.addFireRate, in order; the template's list at
 	// +0x30): 0 single, 1 burst, 2 automatic. The fire component starts in
 	// the first (2 without one, 0x005f28a0). A burst is fire.burstSize
@@ -423,11 +448,16 @@ struct FireArmSettings {
 	// soldier switches away (0x005f4a40 -> firearm slot 0xe0, the pick
 	// 0x005883d0: the item before).
 	bool toggleWhenNoAmmo = false;
+	bool explosives = false; // an ExplosivesFireComp (C4): see GameWorld::equip
 	// ammo.changeMagAt (+0x24, 0.7 by default): the reload start (0x005f4830)
-	// puts the magazine's swap at round(reloadTicks x changeMagAt) and the
+	// puts the magazine's swap at reloadTicks x changeMagAt and the
 	// end at reloadTicks; the update (0x005f3c40) fills at the swap and is
 	// busy until the end.
 	float changeMagAt = 0.7f;
+	int reloadAmount = 0;
+	float firstShotExtraTime = 0, lastShotExtraTime = 0;
+	bool loopingFire = false, useShiftAnimation = false;
+	int shiftDelayTicks = 0;
 	// fire.busyUntilButtonRelease (SingleFireComp +0x9c, setter 0x004e3f33):
 	// see FireArm::fire.
 	bool busyUntilButtonRelease = false;
@@ -463,9 +493,14 @@ struct FireArmSettings {
 	// +0x15c) waits fire.pullbackTime (template +0x94, ticks +0x98, 0.2 s
 	// by default; the setter 0x005e4c40) and then fire.fireLaunchDelay
 	// (+0x1c, ticks +0x20: state 3, +0x160) before it leaves (state 4; the
-	// update, slot 5 0x005e4c80). Ticks are the times x 30, rounded.
+	// update, slot 5 0x005e4c80). The setters truncate the times x 30.
 	bool thrown = false;
 	int pullbackTicks = 0, launchDelayTicks = 0;
+	// SingleFireComp also waits fireLaunchDelay (0x005d4d80); its
+	// animation and sound start at the beginning of that wait.
+	bool singleFire = false;
+	// Ammo's authored minimumTimeUntilReload after release.
+	int minimumReloadTicks = 0;
 	// The thrown object's frame and spin (the launch's end, 0x005e5720):
 	// fire.projectileStartRotation (ThrownFireComp +0xb4..+0xbc, yaw /
 	// pitch / roll degrees; executor 0x004e4d83) turns the object's matrix
@@ -481,9 +516,10 @@ struct FireArmSettings {
 	// The underarm (soft) throw: a ThrownFireComp with fire.altFireInput
 	// (PIAltFire on the grenades): the alternate press (0x005e4d80, slot 13)
 	// starts the throw with the soft flag (+0x178), under which the
-	// pull-back / launch-delay timer (0x005e4c80) waits; while it is held
+	// phase transitions (0x005e4c80) wait; pull-back time still elapses.
+	// While it is held
 	// the power (+0x168) is min(1, ticks held / 30) (0x005e4eb0, the
-	// constructor's 1/30 at +0x90); the release lets the timer run and the
+	// constructor's 1/30 at +0x90); the release lets the phases advance and the
 	// round leaves at the weapon's speed x the power (0x005e5720). A
 	// normal throw's power is 1 (0x005e4b40).
 	bool softThrow = false;
@@ -533,6 +569,12 @@ struct FireArmSettings {
 	// magazine has no end), the defibrillator 0.
 	bool replenishing = false;
 	float abilityCost = 0;
+	// An ActiveDefenseAmmoComp (ads_land, ads_air): its round's ammo use
+	// (0x005d9980, slot 0x38) takes the round without the default's
+	// reload request (0x005f45e0's +0x44), so the auto reload waits for the
+	// ammo's update (0x005f3c40) once the fire component is no longer busy
+	// (0x005c14f0): after the round's interval, the shield's 5 s.
+	bool activeDefense = false;
 
 	static FireArmSettings fromTemplate(const world::ObjectTemplate& firearm);
 	int ticksBetweenShots() const { return roundsPerMinute > 0 ? 1800 / roundsPerMinute : 1; }
@@ -547,10 +589,22 @@ public:
 
 	const FireArmSettings& settings() const { return m_settings; }
 	int roundsInMag() const { return m_rounds; }
+	// A real round leaving this tick, including weapons with unlimited ammo.
+	bool firedThisTick() const { return m_firedThisTick; }
+	bool fireSoundThisTick() const { return m_fireSoundThisTick; }
+	bool fireSoundHeld() const { return m_fireSoundHeld; }
+	int takeReloadSoundEvent() { return std::exchange(m_reloadSoundEvent, 0); }
+	uint32_t animationPulses() const { return m_animationPulses; }
+	uint32_t animationMessages() const
+	{
+		return (m_settings.thrown && !m_uncocked ? 8u : 0u)
+			| (m_animationFireHeld ? 1u : 0u)
+			| (m_settings.reloadAmount > 0 && m_reloadStageLeft > 0 ? 2u : 0u);
+	}
 	int magsLeft() const { return m_mags; }
 	bool reloading() const { return m_reloadLeft > 0; }
 	// A thrown round on its way out (ThrownFireComp states 2 and 3).
-	bool throwing() const { return m_launchIn >= 0; }
+	bool throwing() const { return m_settings.thrown && m_launchIn >= 0; }
 	// Put away after a throw until showAfterReloadTicks past the reload's
 	// start (FireArmSettings::showAfterReloadTicks); drawn again by enable.
 	bool hidden() const { return m_hidden; }
@@ -565,10 +619,11 @@ public:
 			fire(seconds, false);
 		}
 	}
-	void dropReload() { m_reloadLeft = 0; }
+	void dropReload() { m_reloadLeft = m_reloadStageLeft = 0; m_reloadRoundsLeft = m_reloadSoundEvent = 0; }
 	// The firearm's enable (0x005c47d0: drawn): delayToUse starts, and the
 	// ammo's on-enable runs (0x005f4bb0): held by a soldier (or without
-	// reloadWithoutPlayer) a reload under way is dropped; instantReloadOnEnable.
+	// reloadWithoutPlayer) a reload under way is dropped and the
+	// minimumTimeUntilReload wait with it; instantReloadOnEnable.
 	void enable(bool soldier);
 	bool readying() const { return m_readyIn > 0; }
 	// A placed round picked up again (the firearm's slot 0x84(1, ...), from
@@ -585,19 +640,32 @@ public:
 	// toggleWhenNoAmmo's test (0x005f39c0): false with an empty magazine
 	// that can't be reloaded.
 	bool selectable() const;
-	float reloadLeft() const { return m_reloadLeft; } // seconds (the HUD's reload bar)
-	float heat() const { return m_heat; } // 0..1
+	float reloadLeft() const
+	{
+		if (m_settings.reloadAmount > 0 && m_reloadLeft > 0) {
+			return std::min(m_settings.reloadTime, m_reloadStageLeft > 0 ? m_reloadStageLeft : m_reloadLeft);
+		}
+		return m_reloadLeft;
+	}
+	float heat() const { return std::min(m_heat, 1.0f); } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
 	// when full.
 	bool addMagazine();
-	bool overheated() const { return m_overheatLeft > 0; }
+	// A SupplyObject's refill (the ammo's slot 0xa8, 0x005f5110): `percent`
+	// of the whole load at engine tick `now`. With nrOfMags 1 or -1 the load
+	// is magSize rounds topped into the magazine (0x005f4ef0's first path),
+	// else nrOfMags magazines added as spares (no instant fill: autoReload
+	// takes one in). The fraction is kept on the weapon and dropped after 30
+	// ticks without a refill. False when the weapon is full (slot 0x9c).
+	bool resupply(float percent, uint32_t now);
+	bool overheated() const { return m_heat >= 1; }
 	// Between rounds: the fire component's state above 1 (a round's cycle,
 	// state 4 until its ticksBetweenShots are past, or the spin-up, state 3).
-	bool cycling() const { return m_cooldown > 0 || m_startDelay >= 0; }
+	bool cycling() const { return m_cooldown > 0 || m_startDelay >= 0 || m_launchIn >= 0; }
 	// The firearm busy for a zoom press (0x005c50e0's test): reloading, or
 	// cycling without fire.allowZoomOnROF (0x005d3c40). The press is then
 	// taken only with zoomWhenBusy (anim::ZoomSettings::takesPress).
-	bool zoomBusy() const { return reloading() || (cycling() && !m_settings.allowZoomOnROF); }
+	bool zoomBusy() const { return reloading() || m_shiftIn > 0 || (cycling() && !m_settings.allowZoomOnROF); }
 	// The holder's ability battery (0..1) for a ReplenishingAmmoComp's
 	// abilityCost (FireArmSettings::replenishing), set before each tick and
 	// enable; and what the rounds since the last call cost it.
@@ -655,16 +723,22 @@ public:
 	static constexpr float kPulseScanStep = 1; // "pulse-meter-scan-step"
 
 private:
-	bool fire(float seconds, bool trigger); // tick's rounds
+	bool fire(float seconds, bool trigger, bool soft = false); // tick's rounds
+	bool launch();
 	FireArmSettings m_settings;
 	int m_rounds;
 	int m_mags;
+	float m_resupplyCredit = 0;   // the ammo's +0x40: a refill's fraction
+	uint32_t m_resupplyTick = 0;  // the ammo's +0x3c: the last refill's tick
 	int m_cooldown = 0;
 	float m_reloadLeft = 0;
+	float m_reloadStageLeft = 0;
+	int m_reloadRoundsLeft = 0, m_reloadSoundEvent = 0;
 	bool m_reloadFilled = false; // the magazine swapped (changeMagAt) in this reload
 	int m_readyIn = 0;           // ticks of delayToUse left
 	float m_heat = 0;
-	float m_overheatLeft = 0;
+	float m_heatAtFire = 0; // the heat the last round left (0x005c3e78)
+	float m_sinceFire = 0;  // seconds since it
 	int m_mode = kFireAutomatic;
 	bool m_useModes = true;
 	bool m_triggerWas = false;
@@ -672,9 +746,17 @@ private:
 	int m_startDelay = -1;   // fireStartDelay's ticks left (-1: none pending)
 	Random m_startRandom {0xcfb}; // 0x005f1650's draws (its seed: the owner's +0x214 or the time, + 0xcfb)
 	bool m_pending = false; // a press waiting for the gun
+	bool m_firedThisTick = false;
+	bool m_fireSoundThisTick = false, m_fireSoundHeld = false;
+	uint32_t m_animationPulses = 0;
+	bool m_animationFireHeld = false, m_shiftPending = false;
+	int m_shiftIn = 0;
+	bool m_uncocked = false;
 	bool m_clicked = false; // a press on an empty magazine (takeClick)
 	int m_burstLeft = 0;
 	int m_launchIn = -1;   // a thrown round's ticks to go (states 2 and 3), -1 none
+	int m_pullbackIn = -1;
+	int m_reloadIn = 0;
 	bool m_soft = false;   // the soft throw's flag (+0x178): the alternate input still held
 	bool m_altWas = false;
 	int m_softTicks = 0;
@@ -682,6 +764,7 @@ private:
 	bool m_hidden = false; // the object's flag 2 cleared by the launch
 	int m_showIn = -1;     // ticks to showing again (-1 none)
 	void reloadStarted();
+	void beginReload();
 	// "A magazine can be taken" for a reload (0x005f4140, or a
 	// ReplenishingAmmoComp's 0x005d79a0), the magazine count aside.
 	bool batteryAllowsReload() const;
@@ -761,6 +844,7 @@ struct Projectile {
 	// gunship's TV missile, velocity 0) still flies off.
 	physics::Vec3 heading;
 	physics::Vec3 acceleration; // gravity, applied the next tick
+	float cameraMissileDistance = 0; // path length since launch (the missile view's range bar)
 	// A RotationalPoint round's own frame and spin (ProjectileSettings::
 	// rotationalPoint; set by a throw, FireArmSettings::startRotation /
 	// randomRotationSpeed): its node turns the frame by the spin each
@@ -791,17 +875,30 @@ struct Projectile {
 	// vehicle moves from under it.
 	uint32_t lyingOn = 0;
 	float age = 0;
+	uint32_t lastImpactTick = 0; // projectile hit feedback throttle (0x005a4dd0, +0xfc/+0x100)
 	uint32_t lockedOn = 0; // the vehicle a seeker chases
 	uint32_t lockedBait = 0; // or the round (serial) carrying a TTMagnet target (the booster's MagneticBait)
 	// Wire guidance (LPTargetComp, 0x005e2e20 -> 0x005e27a0) from its
 	// firearm: target.wireGuidedLookAheadDistance (+0xb4, 20 by default),
 	// target.maxDistance (+0x78), dontLooseGuidanceOnObstruction (+0xb8);
-	// wireLost once guidance is gone (out of range, the line cut, or a
-	// reload with disableGuidanceOnReload +0xb1).
+	// wireLost once guidance is gone (a reload with disableGuidanceOnReload
+	// +0xb1, or a newer round). Out of range or with the line cut the round
+	// stays guided and chases wirePoint, the last point set (0x005e2ac5).
 	float wireLookAhead = 20;
+	int wireCamera = 0; // the firearm's zoom.startCameraId: a seated shooter's steering camera
 	float wireMaxDistance = 0;
 	bool wireKeepOnObstruction = false;
 	bool wireLost = false;
+	bool wireHasPoint = false;
+	physics::Vec3 wirePoint {};
+	// A hand launcher's wire (TSWireGuided): putting the launcher away (the
+	// firearm's disable 0x005c42f0 -> LPTargetComp slot 0x64, 0x005e2320)
+	// lets the round go, whatever disableGuidanceOnReload says; leaving the
+	// sights doesn't (the zoom's 0x005c0da0 -> 0x005f5980 only marks +0x20;
+	// the update 0x005e2e20 steers at any zoom level). Seat guns don't use this.
+	bool wireEndsWithWeapon = false;
+	uint32_t wireWeapon = 0;  // the hand weapon that fired it
+	uint32_t wireVehicle = 0; // the vehicle the shooter sat in when it fired (0 on foot)
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
 	bool followTurned = false; // the follow steered it this tick (0x005ed1a0's result)
 	// SeekClosestTargetComp's relock: armed at each shot (0x005b2e70 ->
@@ -822,6 +919,7 @@ struct Projectile {
 	float yaw = 0;        // the facing it was thrown with (mines' cones)
 	float triggerIn = 0.25f; // the radius trigger's countdown (the component's +0x14, starting full)
 	bool alive = true;
+	float damageTaken = 0; // against settings->hitPoints (GameWorld::damageRound)
 	// Its firearm went (its player left): removed, without its effect, when
 	// this runs out (keepProjectiles, 0x005f1cc0); below 0 not counting.
 	float keepLeft = -1;
@@ -844,6 +942,32 @@ struct Projectile {
 	uint32_t ghostObject = 0; // a server projectile's ghost object it follows (0: the client's own round)
 	uint32_t serial = 0;      // a stable id (the server's projectile ghosts, HostedGame::trackProjectiles)
 };
+
+// A geometry-bearing projectile's per-frame render input. GenericProjectile
+// rounds live outside ObjectManager; the renderer expands the template tree
+// (including geometry parts and child meshes) from this state.
+struct ProjectileRenderState {
+	const world::ObjectTemplate* objectTemplate = nullptr;
+	physics::Vec3 position;
+	physics::Mat3 rotation;
+};
+std::vector<ProjectileRenderState> projectileRenderStates(const world::ObjectTemplateManager& templates,
+	const std::vector<Projectile>& projectiles, uint32_t hiddenSerial = 0);
+
+// The bundles a shot starts on the weapon: FireComp lists all its children,
+// those named "zoom" / "Zoom" apart (0x005f25f0), and a shot sends one list
+// event 0, which starts a bundle only when its startOnEffects is 0
+// (0x0061a4e0 case 0, 0x0061a5e2). So: the EffectBundle children with
+// startOnEffects 0, the zoom-named ones with `zoom`, the others without.
+// A reload or deploy bundle (startOnEffects 512: first-person event 0x2c)
+// isn't one, whatever its name.
+struct FireBundle {
+	std::string name;
+	physics::Vec3 position; // the child's place on the weapon
+	physics::Mat3 rotation;
+};
+std::vector<FireBundle> fireBundles(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& weapon,
+	bool zoom = false);
 
 // The radius trigger's shape test (0x005e8aa0; GameWorld's radius trigger
 // has the rest: the trigger types, the spared side, the line to it): the
@@ -891,6 +1015,11 @@ struct TracerLook {
 	physics::Mat3 axes; // rows x, y, z: scaled
 	bool shown = false;
 };
+struct PlacedTracerLook {
+	std::string geometry;
+	TracerLook look;
+};
+std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& projectiles);
 TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,
 	const physics::Vec3& origin, const physics::Vec3& start, const physics::Vec3& offset, bool hit);
 
@@ -921,6 +1050,17 @@ void throwFrame(Projectile& p, const physics::Vec3& direction, const physics::Ve
 void followMagnet(Projectile& projectile, const physics::Vec3& aim, const physics::Vec3& targetVelocity, float seconds,
 	bool overrideArming = false);
 
+// The follow's speed bookkeeping on a tick it steers at a target
+// (0x005ecb30, follow +0x80 / +0x85): the target's top speed so far, and
+// armed once that is over armingSpeed (or the target overrides it). A lost
+// target clears both (setTarget(none), 0x005ed260).
+void armFollow(Projectile& projectile, float targetSpeed, bool overrideArming = false);
+// The motor's cap (0x005b3e60 at 0x005b44d0): maxSpeed, or with
+// useTargetSpeed (follow slot 0x34, 0x005ec770) that top speed, x
+// speedModifier once armed (slot 0x38, 0x005ec7a0), unless the target
+// overrides arming (slot 0x44, 0x005ed310).
+float followSpeedCap(const Projectile& projectile, bool overrideArming = false);
+
 // DefaultFollowComp's turn (0x005ed1a0 -> 0x005ecb30, once a 30 Hz tick:
 // follow.maxYaw / maxPitch are degrees a tick): towards `target` plus its
 // velocity x (distance / own speed) x predictionFactor, in the missile's
@@ -942,7 +1082,7 @@ bool followStep(Projectile& projectile, const physics::Vec3& target, const physi
 physics::Vec3 noseOf(const Projectile& projectile);
 
 // The engine's push for a tick (see ProjectileSettings::startDelay).
-void thrustProjectile(Projectile& projectile, float seconds);
+void thrustProjectile(Projectile& projectile, float seconds, bool overrideArming = false);
 
 // Whether the follow turns the round this tick (0x005ed1a0): from its
 // start (followFrom, else trackingDelay after the launch) until

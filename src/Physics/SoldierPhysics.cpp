@@ -63,6 +63,7 @@ float SoldierBody::collideWithGround(const Ground& ground, float gravity, float 
 		if (i == 0 && m_groundNormal.y < normal.y) {
 			m_groundNormal = normal;
 			m_onGround = true;
+			groundVelocity = {};
 		}
 	}
 	if (scale < 1) {
@@ -100,8 +101,10 @@ float SoldierBody::collideWithGround(const Ground& ground, float gravity, float 
 }
 
 // 0x006c24b0's last part: with the soldier's material set, the friction
-// from MaterialManager slot 0x88 (the pair's; slots 0x80 / 0x84, the
-// pair's mean elasticity and resistance, aren't read by the movement).
+// from MaterialManager slot 0x88 (the pair's). Slot 0x80's mean elasticity
+// isn't read by the movement; slot 0x84's mean resistance is (0x006c2349: a
+// drag of -error x resistance through node slot 0xa4), not modelled here:
+// 0.01 to 0.1 in the shipped materials, under 1 cm/s a tick.
 void SoldierBody::touchMaterial(uint32_t other)
 {
 	if (material != 0 && frictionOf) {
@@ -145,7 +148,7 @@ float soldier::stanceHeight(int stance)
 	return stance == 2 ? 0.8f : soldier::kHeight; // *0x00a84778
 }
 
-bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation, const Vec3& position)
+bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, const Mat3& rotation, const Vec3& position, uint32_t ignore)
 {
 	int count = 5;
 	float height = soldier::kHeight;
@@ -161,7 +164,7 @@ bool soldierFits(const CollisionWorld& world, const Vec3& origin, int stance, co
 	for (int i = 0; i < count; ++i) {
 		// origin.y + i x spacing + (radius - *0x00a84768, 1)
 		const Vec3 centre {origin.x, origin.y + spacing * static_cast<float>(i) + soldier::kRadius - 1.0f, origin.z};
-		world.querySphere(rotation.untransform(centre - position), soldier::kRadius, contacts);
+		world.querySphere(rotation.untransform(centre - position), soldier::kRadius, contacts, ignore);
 		if (!contacts.empty()) {
 			return false;
 		}
@@ -189,18 +192,23 @@ void SoldierBody::collideWithObjects(float seconds)
 	}
 }
 
-// Another soldier (0x006c2620; slot 9 with scale 1, the solve's passes
+// Another soldier (0x006c2620; the pass with scale 1, the solve's passes
 // with 0.999): when their heights overlap (each from its feet, a metre
 // under the origin, to its stance's height) and their origins are within
 // twice this soldier's radius x the scale across (x, z), each is pushed
-// away from the other by the overlap with no velocity (0x006c24b0 with
-// material 0x2f); 0.01 apart or nearer, along z. The original gives the
-// other its contact as well; here each soldier takes its own when it
-// steps.
-void SoldierBody::collideWithSoldiers(float scale)
+// away from the other by the overlap with no velocity (0x006c24b0 twice,
+// material 0x2f); 0.01 apart or nearer, along z. The other's push waits
+// in its response for its next solve: this tick's if still to come, else
+// the next (only entering the world clears it, slot 0x1c 0x006c1ad0).
+// `pass`: only the soldiers whose pass is still to come.
+void SoldierBody::collideWithSoldiers(float scale, bool pass)
 {
 	const float top = position.y - 1.0f + soldier::stanceHeight(stance);
-	for (const Neighbour& other : soldiers) {
+	for (const Neighbour& neighbour : soldiers) {
+		SoldierBody& other = *neighbour.body;
+		if (pass && neighbour.passed) {
+			continue;
+		}
 		const float otherTop = other.position.y - 1.0f + soldier::stanceHeight(other.stance);
 		if (position.y - 1.0f > otherTop || other.position.y - 1.0f > top) {
 			continue;
@@ -214,6 +222,7 @@ void SoldierBody::collideWithSoldiers(float scale)
 		const float distance = std::sqrt(squared);
 		away = distance >= 0.01f ? away * (1.0f / distance) : Vec3 {0, 0, 1};
 		addContact(away, reach - distance, {});
+		other.addContact(away * -1.0f, reach - distance, {});
 	}
 }
 
@@ -371,8 +380,10 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 		// The Titan carrying the soldier (slot 0xe4, its root against the
 		// candidate's, 0x006f1d70) leaves its point velocity out: the
 		// soldier's own velocity is relative to it already.
+		// Any other mover is met in the world's frame: the soldier's velocity
+		// is relative to the carry, so the carry is added back.
 		const bool carrying = mover && m_carrierTicks > 0 && mover->owner == m_carrier;
-		const Vec3 relative = velocity - (mover && !carrying ? mover->pointVelocity(contact.point) : Vec3 {});
+		const Vec3 relative = mover && !carrying ? velocity + carriedVelocity() - mover->pointVelocity(contact.point) : velocity;
 		if (lengthSquared(relative) > 0) {
 			// 0x005ee2b0 between the two objects' events: the other's point
 			// velocity x 2.5 when faster than 1 m/s relative (a static
@@ -397,6 +408,7 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 		if (contact.point.y < lowest + soldier::kFloorTolerance && m_groundNormal.y < normal.y) {
 			m_groundNormal = normal;
 			m_onGround = true;
+			groundVelocity = mover ? mover->pointVelocity(contact.point) : Vec3 {};
 		}
 	}
 	return true;
@@ -451,7 +463,7 @@ void SoldierBody::solve(float seconds, const Ground& ground, float gravity)
 				collideWithMesh(*mover.mesh, &mover, seconds, soldier::kSolveScale, normals, depth);
 			}
 		}
-		collideWithSoldiers(soldier::kSolveScale);
+		collideWithSoldiers(soldier::kSolveScale, false);
 		deepest = std::min(deepest, depth);
 		const float groundDepth = collideWithGround(ground, gravity, soldier::kSolveScale);
 		if (!normals) {
@@ -716,7 +728,8 @@ void SoldierBody::integrate(float seconds)
 	velocity = velocity * (water * soldier::kWaterDamping + (1.0f - water) * soldier::kLandDamping);
 	// While a Titan carries the soldier (slot 0xe4's root a Titan), the
 	// carry (slot 0xd8) joins the tick's mean velocity.
-	const Vec3 average = flush((previous + velocity) * 0.5f) + carriedVelocity();
+	m_carriedStep = carriedVelocity();
+	const Vec3 average = flush((previous + velocity) * 0.5f) + m_carriedStep;
 	position += average * seconds;
 	if (m_carryTicks > 0) {
 		--m_carryTicks;
@@ -732,21 +745,42 @@ void SoldierBody::integrate(float seconds)
 
 void SoldierBody::step(float seconds, const Ground& ground, float gravity)
 {
-	if (!m_hasLast || lengthSquared(position - m_stepEnd) > 1e-10f) {
-		m_lastPosition = position; // put there from outside: no motion
-		m_hasLast = true;
-	}
-	m_onGround = false; // the response's +0xf9 and normal, each tick
-	m_groundNormal = {0, 0, 0};
-	collideWithGround(ground, gravity);
-	collideWithObjects(seconds);
-	collideWithSoldiers(1);
-	solve(seconds, ground, gravity);
-	move(gravity);
-	carry();
+	moveNode(seconds, gravity);
+	pass(seconds, ground, gravity);
+	settle(seconds, ground, gravity);
+}
+
+// The node advances with the previous response (0x004afbee).
+void SoldierBody::moveNode(float seconds, float gravity)
+{
+	m_start = position;
+	carry(); // 0x006ca660 reads +0x120 set by the previous tick's object pass
 	integrate(seconds);
 	acceleration.y += gravity * gravityModifier;
-	m_stepEnd = position;
+	m_onGround = false;
+	m_groundNormal = {0, 0.5f, 0}; // reset 0x006c1ad0, threshold set by 0x008edda0
+	groundVelocity = {};
+}
+
+// The response's contacts (0x006dcce0: objects, soldiers; slot 0x28: the
+// ground).
+void SoldierBody::pass(float seconds, const Ground& ground, float gravity)
+{
+	collideWithObjects(seconds);
+	collideWithSoldiers(1, true);
+	collideWithGround(ground, gravity);
+}
+
+// The solve resolves this tick's position and the drive accumulates the
+// impulse and input for the next node tick (0x006dd1b0's last loops).
+void SoldierBody::settle(float seconds, const Ground& ground, float gravity)
+{
+	solve(seconds, ground, gravity);
+	move(gravity);
+	if (seconds > 0) {
+		const Vec3 moved = (position - m_start) * (1.0f / seconds); // x 30 at the 1/30 s tick
+		measuredVelocity = {flush(moved.x), flush(moved.y), flush(moved.z)};
+	}
 }
 
 } // namespace dice::hfe::physics

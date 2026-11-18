@@ -888,6 +888,10 @@ bool Clip::hitLocal(swf::Point local, bool shape, bool includeHidden)
 		return true;
 	}
 	if (!drawing.paths.empty() && contains(drawing.bounds, local)) {
+		if (shape && drawingDirty) { // not drawn since the last drawing call
+			drawingMesh = swf::tessellateShape(drawing);
+			drawingDirty = false;
+		}
 		if (!shape || hitMesh(drawingMesh, local)) {
 			return true;
 		}

@@ -109,6 +109,7 @@ struct ListedLight {
 	bool spot = false;
 	bool affectsLightmapped = true;
 	bool supportsEmitter = true;
+	int owner = -1; // its parent object's group (pickOwnedLights), -1 none
 };
 
 // The terrain's filter 0x909 and the undergrowth's 0xb09: Point lights
@@ -172,7 +173,7 @@ constexpr int kUndergrowthPatchLights = 4;
 // `out` (indices); returns how many.
 template<class Accept>
 int pickNearestLights(const ListedLight* lights, size_t count, const float origin[3], float radius, int max,
-	Accept accept, int* out)
+	Accept accept, int* out, bool byReach = false)
 {
 	max = std::min(max, 16);
 	if (max <= 0) {
@@ -191,9 +192,12 @@ int pickNearestLights(const ListedLight* lights, size_t count, const float origi
 		if (d2 >= reach * reach) {
 			continue;
 		}
+		// Not retail (enhanced.lightRank): the rank is d^2 / R^2, so a 1 m flash
+		// far from the origin ranks behind a 22 m light that reaches it.
+		const float key = byReach ? d2 / std::max(l.radius * l.radius, 1e-4f) : d2;
 		// Insert by distance, keeping the nearest `max`.
 		int at = n;
-		while (at > 0 && best[at - 1] > d2) {
+		while (at > 0 && best[at - 1] > key) {
 			--at;
 		}
 		if (at >= max) {
@@ -203,7 +207,7 @@ int pickNearestLights(const ListedLight* lights, size_t count, const float origi
 			best[j] = best[j - 1];
 			out[j] = out[j - 1];
 		}
-		best[at] = d2;
+		best[at] = key;
 		out[at] = static_cast<int>(i);
 		n = std::min(n + 1, max);
 	}
@@ -214,7 +218,7 @@ int pickNearestLights(const ListedLight* lights, size_t count, const float origi
 // `origin` with `meshRadius`, nearest first, into `out` (indices); returns
 // how many.
 inline int pickMeshLights(const ListedLight* lights, size_t count, const float origin[3], float meshRadius,
-	LightedMesh kind, bool lightmapped, const LightLimits& limits, int* out, int capacity)
+	LightedMesh kind, bool lightmapped, const LightLimits& limits, int* out, int capacity, bool byReach = false)
 {
 	return pickNearestLights(lights, count, origin, meshRadius, std::min(limits.maxFor(kind), capacity),
 		[kind, lightmapped](const ListedLight& l) {
@@ -223,7 +227,21 @@ inline int pickMeshLights(const ListedLight* lights, size_t count, const float o
 			}
 			return !(lightmapped && !l.affectsLightmapped); // 0x11b09
 		},
-		out);
+		out, byReach);
+}
+
+// A Titan-interior static's pick (0x100bd0a0 -> slot 0x24, 0x100a81f0 ->
+// 0x100aa0d0, when the renderable's owner +0x324, slot 0xa0, is set): from
+// every registered light (the manager's map +0x120, not the frustum's list
+// +0x138, so no camera test), those within reach that pass 0x11b09, nearest
+// first by d^2 to the origin (0x100ad8c0), then only the ones whose parent
+// (+0x34) is the owner, cut to maxLightsPerStaticMesh (0x100ad040). A
+// corridor piece is lit by its own LightSource children alone.
+inline int pickOwnedLights(const ListedLight* lights, size_t count, int owner, const float origin[3], float radius,
+	int max, int* out)
+{
+	return pickNearestLights(lights, count, origin, radius, max,
+		[owner](const ListedLight& l) { return owner >= 0 && l.owner == owner && l.affectsLightmapped; }, out);
 }
 
 // The undergrowth patch's pick (0x1010e270): filter 0xb09, at most 4.

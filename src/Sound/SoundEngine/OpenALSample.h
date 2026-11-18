@@ -62,9 +62,9 @@ public:
 	bool voiceAssigned = false;
 	float loopProgress = 0.0f;
 
-	// Updates loopProgress from elapsed ticks; a wrap re-rolls the seeds so
-	// every loop gets a new random variation.
-	float updateLoopProgress(int playOffset, int elapsedTicks);
+	// Updates loop progress from the playback position for static samples, or
+	// elapsed ticks for streams; an observed wrap re-rolls the seeds.
+	float updateLoopProgress(int playOffset, int elapsedTicks, bool actualOffset = false);
 
 private:
 	Sound* m_sound = nullptr;
@@ -132,9 +132,9 @@ class StaticSample final : public OpenALSample {
 public:
 	using OpenALSample::OpenALSample;
 	~StaticSample() override;
+	int playOffset() override;
 
 protected:
-	int playOffset() override;
 	bool queueBuffers(int startFrame, int loopCount) override;
 	void updateQueue() override;
 	bool queueEndBlock() override;
@@ -144,6 +144,9 @@ private:
 	// Set while the one-shot start block plays before an infinite loop: the
 	// source switches to looping once the start block is consumed.
 	bool m_loopAfterStart = false;
+	bool m_startQueued = false;
+	bool m_loopQueued = false;
+	int m_queuedLoops = 0;
 };
 
 class StreamingSample final : public OpenALSample {

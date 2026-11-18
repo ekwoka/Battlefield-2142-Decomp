@@ -3,6 +3,7 @@ add_library(Game STATIC
 	BotsScript.cpp
 	BotsSquad.cpp
 	BotsLook.cpp
+	BotsTitan.cpp
 	BotsMines.cpp
 	GameWorld.cpp
 	MeshCollision.cpp

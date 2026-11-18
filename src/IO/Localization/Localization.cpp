@@ -107,6 +107,11 @@ bool Localization::load(const std::vector<uint8_t>& data, const std::string& lan
 		std::string value = fields[column];
 		if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
 			value = value.substr(1, value.size() - 2);
+			// Quoted CSV cells escape a literal quote by doubling it,
+			// including HUD_CENTERINFOBOX_presstospawn's PRESS "DONE".
+			for (size_t quote = 0; (quote = value.find("\"\"", quote)) != std::string::npos; ++quote) {
+				value.erase(quote, 1);
+			}
 		}
 		// 0x006956f0: an id already there keeps its first text
 		// (strings.csv has CREDITS_EA_earedwoodshores twice, in two cases).

@@ -2,9 +2,11 @@
 
 #include "SoundManager.h"
 #include "SoundObjectTemplate.h"
+#include "Sound/SoundEngine/EnhancedAudio.h"
 #include "Sound/SoundEngine/SoundEnvelope.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -81,6 +83,37 @@ ISound* GameSounds::create(const std::string& templateName, uint32_t owner)
 	return sound;
 }
 
+const std::string& GameSounds::sameWords(const std::string& templateName) const
+{
+	const auto known = m_sameWords.find(templateName);
+	if (known != m_sameWords.end()) {
+		return known->second;
+	}
+	const auto lowercase = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return text;
+	};
+	const auto words = [&lowercase](const std::string& name) {
+		std::vector<std::string> list;
+		size_t start = 0;
+		for (size_t end; (end = name.find('_', start)) != std::string::npos; start = end + 1) {
+			list.push_back(lowercase(name.substr(start, end - start)));
+		}
+		list.push_back(lowercase(name.substr(start)));
+		std::sort(list.begin(), list.end());
+		return list;
+	};
+	const std::vector<std::string> wanted = words(templateName);
+	std::string found = templateName;
+	for (const auto& t : m_manager.templates().templates()) {
+		if (t && t->name().size() == templateName.size() && words(t->name()) == wanted && sampleCount(t->name()) > 0) {
+			found = t->name();
+			break;
+		}
+	}
+	return m_sameWords[templateName] = found;
+}
+
 int GameSounds::sampleCount(const std::string& templateName) const
 {
 	const auto* t = dynamic_cast<const SoundObjectTemplate*>(m_manager.templates().find(templateName));
@@ -115,8 +148,24 @@ bool GameSounds::play(const std::string& templateName, const Vec3& position, uin
 		// A sound of its own, released at once: it plays out where it
 		// started (Sound::detach) as an object's component sound would.
 		if (ISound* instance = create(templateName, owner)) {
-			instance->playAt(&position);
-			instance->release();
+			if (sound->loopCount() != 0) {
+				// The place goes in the sound's transform, as an object's
+				// sound has it: the detached occlusion is asked at the
+				// matrix's translation (BF2142Audio 0x10017350), and the
+				// release copies the matrix (Sound::detach), so this one
+				// is needed only until then.
+				Transform place;
+				place.matrix.m[3][0] = position.x;
+				place.matrix.m[3][1] = position.y;
+				place.matrix.m[3][2] = position.z;
+				instance->setTransform(&place);
+				instance->play();
+				instance->release();
+			} else {
+				// A loop can't detach; the release stops it at once.
+				instance->playAt(&position);
+				instance->release();
+			}
 		}
 	}
 	return true;
@@ -254,22 +303,42 @@ void GameSounds::release(WeaponState& state)
 		}
 	}
 	state.looping = false;
+	state.loopSlot = -1;
+}
+
+void GameSounds::moveWeapon(WeaponState& state, const Vec3& position, const Vec3& velocity)
+{
+	if (state.place) {
+		state.place->matrix.m[3][0] = position.x;
+		state.place->matrix.m[3][1] = position.y;
+		state.place->matrix.m[3][2] = position.z;
+		state.place->m_velocity = velocity;
+	}
+}
+
+void GameSounds::moveWeapon(uint64_t user, const Vec3& position, const Vec3& velocity)
+{
+	const auto it = m_weapons.find(user);
+	if (it != m_weapons.end()) {
+		moveWeapon(it->second, position, velocity);
+	}
 }
 
 void GameSounds::releaseTrigger(uint64_t user)
 {
-	// 0x005db6c0: a looping fire sound stops (its stop type's end), and
-	// reason 4 is lifted.
+	// 0x005db6c0: a looping fire sound stops (slot 13, its stop type's end),
+	// and reason 4 is lifted. The instances stay held: releasing one still
+	// looping would cut it (BF2142Audio 0x10017900: no detach for a loop),
+	// so a tapped shot plays out until the next fire or the component goes.
 	const auto it = m_weapons.find(user);
 	if (it != m_weapons.end() && it->second.looping) {
-		for (ISound*& sound : it->second.fire) {
+		for (ISound* sound : it->second.fire) {
 			if (sound) {
 				sound->stop();
-				sound->release();
-				sound = nullptr;
 			}
 		}
 		it->second.looping = false;
+		it->second.loopSlot = -1;
 	}
 	if (m_manager.muted(4)) {
 		m_manager.setMuted(4, false);
@@ -279,6 +348,53 @@ void GameSounds::releaseTrigger(uint64_t user)
 void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstPerson, const Vec3& position,
 	bool muteOnFire, uint32_t object, const FireInfo& info)
 {
+	int slot = 2;
+	// The component's slots (set-up 0x005dc450): each is a sound only when
+	// its template's first file name is not empty (0x005f67a0 tests the
+	// engine template's soundFilename(), BF2142Audio 0x100179f0, which is ""
+	// for a template without files). The generated S_<weapon>_<event>
+	// templates (0x005db760) mostly have none: the vanilla heavy walker's
+	// main cannon has an empty Fire1P_Outdoor but a Fire1P. With no Fire1P,
+	// Fire1P_Outdoor moves into its slot (+0x10 = +0x14, +0x14 = 0).
+	std::string names[3] = {prefix + "Fire1P", prefix + "Fire1P_Outdoor", prefix + "Fire3P"};
+	bool firstPersonSound = m_manager.hasSound(names[0]);
+	bool outdoorSound = m_manager.hasSound(names[1]);
+	// Enhanced audio: a 1P sound filed under the same words (a port addition).
+	if (enhancedAudioEnabled() && firstPerson && !firstPersonSound && !outdoorSound) {
+		names[0] = sameWords(names[0]);
+		firstPersonSound = m_manager.hasSound(names[0]);
+	}
+	if (!firstPersonSound) {
+		names[0] = names[1];
+		firstPersonSound = outdoorSound;
+		outdoorSound = false;
+	}
+	// 0x005dbe79..0x005dbee9: a 1P slot and the owner's own view pick slot 0,
+	// or 1 (+0x14) where the engine says the listener is outdoors; anything
+	// else (no 1P sound at all, or another's view) Fire3P.
+	if (firstPerson && firstPersonSound) {
+		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
+	}
+	// Retail's loop plays on in the slot it started in until the trigger is
+	// let go (0x005dbdc0 returns on +0x43 before looking at the view; the
+	// slots are set up once, 0x005dc450, and 0x005db6c0 stops all three).
+	// Enhanced audio (a port addition) restarts it in the new view's slot
+	// when the camera changes mid-loop.
+	if (enhancedAudioEnabled() && state.looping && state.loopSlot != slot) {
+		const int oldSlot = state.loopSlot;
+		for (ISound*& sound : state.fire) {
+			if (sound) {
+				sound->stopImmediately();
+				sound->release();
+				sound = nullptr;
+			}
+		}
+		state.looping = false;
+		state.loopSlot = -1;
+		if (oldSlot != 2 && m_manager.muted(4)) {
+			m_manager.setMuted(4, false);
+		}
+	}
 	// 0x005dbdc0. Sounds a burst already played are skipped (+0x3c); an
 	// automatic loop under way (+0x43) plays on.
 	if (state.skip > 0) {
@@ -288,20 +404,18 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (state.looping) {
 		return;
 	}
-	// The slot: in first person (with a Fire1P or Fire1P_Outdoor) slot 1
-	// where it has one and the engine finds the listener outdoors (manager
-	// slot 0x98, 0x007fa320), else 0, the world's effects ducking with
-	// muteOnFire (reason 4); otherwise slot 2, Fire3P.
-	int slot = 2;
-	const bool outdoorSound = m_manager.hasSound(prefix + "Fire1P_Outdoor");
-	if (firstPerson && (outdoorSound || m_manager.hasSound(prefix + "Fire1P"))) {
-		slot = outdoorSound && m_manager.outdoors(m_manager.listenerPosition()) ? 1 : 0;
-		if (muteOnFire) {
-			m_manager.setMuted(4, true);
-		}
+	// First-person fire ducks the world's effects (reason 4) when a 1P slot
+	// was picked (0x005dbecc..0x005dbee7), before the sample is looked at.
+	// No 1P sound at all (the right Shepherd gunner's Fire1P is misnamed in
+	// both mods' eu_at.tweak): retail plays the Fire3P slot as for anyone
+	// else, 3D at the gun, and doesn't duck. Enhanced audio (a port addition)
+	// keeps that stand-in head-relative and ducking, so occlusion and HRTF
+	// don't treat the player's own gun as distant.
+	const bool head = slot != 2 || (firstPerson && enhancedAudioEnabled());
+	if (head && muteOnFire) {
+		m_manager.setMuted(4, true);
 	}
-	static const char* const kSlots[3] = {"Fire1P", "Fire1P_Outdoor", "Fire3P"};
-	const std::string name = prefix + kSlots[slot];
+	const std::string& name = names[slot];
 	const int samples = sampleCount(name);
 	int sample = -1, loops = 1;
 	bool keep = false;
@@ -309,6 +423,7 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 		if (info.mode == 2) {
 			// Automatic: the sample loops until the trigger is let go.
 			state.looping = true;
+			state.loopSlot = slot;
 			keep = true;
 			loops = 0;
 		} else if (info.burstRounds > 1) {
@@ -338,7 +453,6 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (!m_manager.hasSound(name)) {
 		return;
 	}
-	const bool head = slot != 2;
 	if (m_log) {
 		std::printf("sound: %s%s%s\n", name.c_str(), head ? " (first person)" : "", loops == 0 ? " loops" : "");
 	}
@@ -349,6 +463,11 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 	if (!sound) {
 		return;
 	}
+	if (keep && state.fire[static_cast<size_t>(slot)]) {
+		state.fire[static_cast<size_t>(slot)]->stopImmediately();
+		state.fire[static_cast<size_t>(slot)]->release();
+		state.fire[static_cast<size_t>(slot)] = nullptr;
+	}
 	if (head) {
 		sound->setHeadRelative(true);
 		if (sample >= 0) {
@@ -356,10 +475,20 @@ void GameSounds::fire(WeaponState& state, const std::string& prefix, bool firstP
 		} else {
 			sound->playLooped(loops);
 		}
-	} else if (sample >= 0) {
-		sound->playSampleAtLooped(&position, sample, 1);
 	} else {
-		sound->playAtLooped(&position, loops);
+		// Retail plays these with no position (slots 4 / 8): the sound sits
+		// on its object's transform, so a loop moves with the gun. A copied
+		// position left a vehicle's looping 3P fire behind as it moved.
+		if (!state.place) {
+			state.place = std::make_shared<Transform>();
+		}
+		moveWeapon(state, position, state.place->m_velocity);
+		sound->setTransform(state.place.get());
+		if (sample >= 0) {
+			sound->playSampleLooped(sample, 1);
+		} else {
+			sound->playLooped(loops);
+		}
 	}
 	if (keep) {
 		if (state.fire[static_cast<size_t>(slot)]) {

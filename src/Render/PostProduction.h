@@ -61,6 +61,8 @@ struct PostEffects {
 	float tinnitusSeconds = 0;
 	// A Titan's core exploded now (event 0x14).
 	bool titanExplosion = false;
+	// The camera is inside a Titan: the level's colour grade fades to none (RendDX9 0x10028090).
+	bool inTitan = false;
 	// Seconds since the last frame (the clocks; 1/30 if 0).
 	float frameSeconds = 0;
 };
@@ -173,6 +175,15 @@ public:
 		std::array<float, 3> tint = settings.defaultColorTint;
 		float saturation = settings.defaultSaturation;
 		std::array<float, 3> contrast = settings.defaultContrast;
+		// RendDX9 0x10028090 blends the level's tint, saturation and contrast with the
+		// constructor's (1,1,1), 1, (1,0,0) by the inside-a-Titan factor, 0.5 a second
+		// (0x1002b1a2..0x1002b1cc); shortcut: dt is taken as seconds, unverified.
+		m_inside = std::clamp(m_inside + (effects.inTitan ? 0.5f : -0.5f) * dt, 0.0f, 1.0f);
+		for (int i = 0; i < 3; ++i) {
+			tint[i] += (1.0f - tint[i]) * m_inside;
+			contrast[i] += ((i == 0 ? 1.0f : 0.0f) - contrast[i]) * m_inside;
+		}
+		saturation += (1.0f - saturation) * m_inside;
 		if (m_flash >= 0) {
 			if (m_flash < 2) {
 				const float t = 1 + m_flash * 20;
@@ -279,6 +290,7 @@ private:
 	}
 	float m_tinnitusTotal = 0, m_tinnitusLeft = 0;
 	float m_flash = -1;
+	float m_inside = 0; // 0 outside a Titan, 1 fully inside
 	float m_scanline = 0;
 	float m_empSwing = 0, m_empDirection = 1;
 	float m_empTime = 0, m_empHeld = 0;

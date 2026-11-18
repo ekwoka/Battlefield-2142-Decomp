@@ -120,9 +120,18 @@ class ObjectTemplateManager;
 
 namespace dice::hfe::menu {
 
+// Gunship missile indicator: the horizontal compass strip scrolls left
+// for positive values. Sweep from the left clipping edge to the right.
+inline float missileFuelAngle(float lifeRemaining) { return 340.0f * (2.0f * lifeRemaining - 1.0f); }
+
+
 // A template's setting, or `otherwise` when it has none.
 std::string hudSetting(const world::ObjectTemplate* t, const char* key, const std::string& otherwise = {});
 float hudNumber(const world::ObjectTemplate* t, const char* key, float otherwise);
+
+// The shipped pilot HUDs with a thrust indicator. Input is the requested
+// signed throttle, not a measurement of engine force.
+float aircraftHudThrust(int guiIndex, float throttle);
 
 // The HUD manager's colour pick (slot 0xa8, 0x0074eb60): below
 // `threshold` the low colour (0.949, 0.184, 0.184, 1), else white.
@@ -257,6 +266,45 @@ private:
 	Fields m_fields;
 };
 
+// The flares / active defence meter (0x007be490, the first call of the
+// weapon HUD's frame 0x007c38c0; HudElementsVehicleBasic.con's flare bar and
+// icons, which take the vehicle stamina's place). Per weapon group 0..2 of
+// the control object (slot 0x78(g), interface 0x94c0): a firearm whose fire
+// input (slot 0x38) is c_PIFlareFire (47) shows the meter, any other firearm
+// clears FlaresReloadTimeShow (+0x1dc) and FlareUseShow (+0x1dd), so the
+// PIFlareFire group, the last, decides. FlaresReloadTime (+0x1e0):
+// - reloading (the ammo's state above 1, slot 0xc8 -> 0x005d7650): the
+//   reload's progress, 1 - its share left (slot 0x94 -> 0x005f3830), and
+//   the press stamp (+0x1e4) cleared;
+// - else since the stamp: 1 - the time since / one round's interval
+//   (60 / roundsPerMinute x 30 ticks: the shield's 5 s for ads_land/air);
+// - else (no stamp) 1.
+// FlaresReloadTimeShow = the value above 0 or FlareUseShow still on;
+// FlareUseShow = shown, above 0 and not reloading (the countermeasure icon,
+// else the reload icon). The stamp is the time c_PIFlareFire is first held
+// (0x007561c1 -> 0x007be360, only while 0), whether or not a round leaves.
+// FlareBlink (+0x1de) blinks on the value below 0.98 (see HudBlink).
+struct FlareHudInput {
+	bool present = false;   // the seat's PIFlareFire group holds a firearm
+	bool otherGuns = false; // its PIFire or PIAltFire group does too
+	bool reloading = false;
+	float reload = 0;    // the reload's progress, 0..1
+	float interval = 0;  // one round's interval, seconds
+	bool pressed = false; // c_PIFlareFire held
+	float seconds = 0;
+};
+class FlareHud {
+public:
+	void update(hud::HudManager& hud, const FlareHudInput& in);
+
+private:
+	float m_value = 0;     // +0x1e0
+	bool m_show = false;   // +0x1dc
+	bool m_use = false;    // +0x1dd
+	float m_since = -1;    // seconds since the stamp (+0x1e4); -1 none
+	HudBlink m_blink {0.98f, 0, 0.7f, 0.15f};
+};
+
 // The crosshair's four parts (0x007be770, each frame from 0x007c1f10's
 // weapon HUD): the spread is ceil(deviation x deviationFactor) pixels
 // (the weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default),
@@ -330,6 +378,16 @@ public:
 private:
 	Out m_out;
 };
+
+// What the treated player hears (0x007a1c30, each HUD frame until his
+// death, 0x007a2386), as a mask of the AbilityHud sounds (1 << 0 healing,
+// 1 << 1 repairing, 1 << 2 ammo). With the heal stamp's flags clear
+// (received: the armour's 0x00655460) and its tick under 15 old, the
+// kit's healingSound (slot 0x48), or in a vehicle with the repaired flag
+// its repairingSound (slot 0x4c). With the ammo stamp's flag clear
+// (0x004bd700, 0x005f5256) and its tick under 15 old, ammoSound (slot
+// 0x50), but not in the frame the player got in or out of a vehicle.
+int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, bool vehicleChanged);
 
 // The Titans' consoles and shields on the HUD (Friendly/EnemyStrategic-
 // Object%iShow, 0..9; the HUD information layer's +0xa89 + (team - 1) x
@@ -536,9 +594,13 @@ struct VehicleHudInput {
 	float speed = 0;      // m/s
 	float climb = 0;      // m/s up
 	float altitude = 0;   // over the sea
+	// The controlled object's matrix y components (0x007a2b50: [edi+4] the
+	// right row's, [edi+0x24] the forward row's): VehicleBanking and
+	// AngleOfAttack, the gunships' horizon bar.
+	float rightY = 0, forwardY = 0;
 	std::vector<SeatDot> seats;
-	// The torque the HUD eases toward (the vehicle HUD's +0x2f4: nothing in
-	// BF2142.exe writes it, so 0) and the control object's sprint (its slots
+	// The signed requested thrust for the aircraft indicators; retail's
+	// corresponding HUD source has no identified writer. The control object's sprint (its slots
 	// 0x108 stamina, 0x100 sprinting; the rewrite's vehicles have no
 	// stamina of their own, so 1 and not sprinting).
 	float torque = 0;
@@ -587,6 +649,8 @@ private:
 // The map relation of a vehicle (0x00781680).
 enum class MapRelation { Neutral = 0x10, Friendly = 0x12, Enemy = 0x13, Own = 0x25 };
 MapRelation vehicleRelation(bool hasOccupant, bool localInside, int occupantTeam, int vehicleTeam, int localTeam);
+// Relative map colours; squad applies only to a friendly player or vehicle.
+std::array<float, 4> mapRelationColor(MapRelation relation, bool squad = false);
 // Whether the map shows the vehicle, its texture and size; false when not.
 struct VehicleMarker {
 	std::string texture;
@@ -624,6 +688,8 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 //     (+0x74c) while the local player's overhead view is on (player slot
 //     0xdc, +0x8f, set with +0x8e by 0x00593840: the commander's overhead
 //     camera), whose picture shows the Titan itself.
+//     It also forces size and offset to scale with the projected map
+//     (0x00795379 -> 0x0077bdd0), rather than remaining fixed pixels.
 // The silo icons' files are numbered frames (mini_titanSilo_01..06,
 // mini_reload_01..06); the frame is the silo's place in its control
 // points' order here (the frame's pick, through the texture's own frames,
@@ -701,6 +767,8 @@ bool seatPostProcessing(const world::ObjectTemplate* controlled, const world::Ob
 // (79 shipped hand weapons set it: their crosshair overlays go while the
 // soldier sprints).
 int weaponGuiIndex(const world::ObjectTemplate* weapon, bool zoomed, bool sprintTest = false);
+int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* weapon, float deviation,
+	bool zoomed, bool sprintTest, bool crosshairActive);
 // The argument 0x007a01e0 hands the gui index getters (VehicleHud slot
 // 0x3c, WeaponHud slot 0x38): on (1) unless the HUD's sprint flag is off
 // and its weapon flag on. The sprint flag (+0x2a8) is the control
@@ -802,7 +870,7 @@ float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation);
 //     without one).
 struct RadarMarker {
 	std::string texture;
-	float x = 0, z = 0, size = 16;
+	float x = 0, z = 0, size = 16, yaw = 0;
 };
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
 

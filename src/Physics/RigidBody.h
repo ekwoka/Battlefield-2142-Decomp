@@ -44,7 +44,6 @@ struct Vec3 {
 float dot(const Vec3& a, const Vec3& b);
 Vec3 cross(const Vec3& a, const Vec3& b);
 float lengthSquared(const Vec3& v);
-
 // How the responses gather their contacts' push outs and cancelled
 // velocities (0x006b6bd0, per axis 0x006b6b60): into 0 the new value; of
 // the same sign the larger; of opposite signs the sum. So two contacts
@@ -217,6 +216,8 @@ struct Ground {
 	// slot 0xe4: the sea level, heightmapcluster.setSeaWaterLevel, -10000
 	// without one), for buoyancy and swimming; empty: none.
 	std::function<float(float x, float z)> waterLevel;
+	// First terrain face hit, if a heightmap segment query is available.
+	std::function<bool(const Vec3& from, const Vec3& to, float& fraction, Vec3& point, Vec3& normal)> raycast;
 };
 
 // The shares of a contact between two objects' nodes (0x006b6cc0, called

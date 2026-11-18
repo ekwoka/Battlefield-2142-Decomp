@@ -514,6 +514,19 @@ AnimationState::AnimationState(AnimationSystems& systems, const AnimationSystemT
 {
 }
 
+void AnimationState::reset()
+{
+	m_instances.clear();
+	m_switches.clear();
+	m_previousMessages = 0;
+	m_started = false; // +0x61: the startup pending
+	m_startupPlaying = false;
+	m_weight = 1;
+	m_fadeLeft = 0;
+	m_fadingTrigger = -1;
+	m_idleTime = 0;
+}
+
 uint32_t AnimationState::nextRandom()
 {
 	m_random = m_random * 1103515245u + 12345u;
@@ -1308,6 +1321,37 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 			pose.positions[node][i] += (position[i] - pose.positions[node][i]) * weight;
 		}
 	};
+	const auto sampleClip = [&](const Clip& clip, const Animation& animation, size_t node, float fraction,
+		Quaternion& rotation, Position& position) {
+		// 0x008b6560 / 0x008b6430 omit indices below the clip's boundary.
+		if (clip.ignoreMotherOrientation >= 0 && node < static_cast<size_t>(clip.ignoreMotherOrientation)) {
+			return false;
+		}
+		if (!sampleNode(animation, node, fraction, clip.looping, rotation, position)) return false;
+		if (static_cast<int>(node) == clip.ignoreMotherOrientation) {
+			// 0x008b8538 -> 0x008b6b70: keep the clip's absolute orientation
+			// at the boundary, expressed relative to the already posed parent.
+			const auto product = [](const Quaternion& a, const Quaternion& b) -> Quaternion {
+				return {a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],
+					a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
+					a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],
+					a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]};
+			};
+			Quaternion parentRotation {0, 0, 0, 1};
+			for (int parent = skeleton.nodes[node].parent; parent >= 0;
+				parent = skeleton.nodes[static_cast<size_t>(parent)].parent) {
+				Quaternion r {0, 0, 0, 1};
+				Position p {};
+				sampleNode(animation, static_cast<size_t>(parent), fraction, clip.looping, r, p);
+				rotation = product(rotation, r);
+				parentRotation = product(parentRotation, pose.rotations[static_cast<size_t>(parent)]);
+			}
+			const Quaternion inverse {-parentRotation[0], -parentRotation[1], -parentRotation[2], parentRotation[3]};
+			rotation = product(rotation, inverse);
+		}
+		return true;
+	};
+
 	const auto drawClip = [&](const Clip& clip, float local, float weight) {
 		const Animation* animation = m_systems.animation(clip.path);
 		if (!animation) {
@@ -1321,7 +1365,7 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 			}
 			Quaternion r;
 			Position p;
-			if (sampleNode(*animation, node, fraction, clip.looping, r, p)) {
+			if (sampleClip(clip, *animation, node, fraction, r, p)) {
 				blendInto(node, r, p, weight, 1);
 			}
 		}
@@ -1378,8 +1422,8 @@ void AnimationState::apply(const Skeleton& skeleton, LocalPose& pose, std::vecto
 			for (size_t node = 0; node < skeleton.nodes.size(); ++node) {
 				Quaternion ra, rb;
 				Position pa, pb;
-				const bool hasA = sampleNode(*a, node, fa, strafe->looping, ra, pa);
-				const bool hasB = sampleNode(*b, node, fb, along->looping, rb, pb);
+				const bool hasA = sampleClip(*strafe, *a, node, fa, ra, pa);
+				const bool hasB = sampleClip(*along, *b, node, fb, rb, pb);
 				if (!hasA && !hasB) {
 					continue;
 				}

@@ -117,6 +117,7 @@ public:
 	// them: 5/6 the radio, 7 spotted, 4 Squad, 8 SquadLeader, 9 Commander,
 	// 3 Lonewolf): the radio rose (RadioVehicle aboard) or the tactical
 	// one for the player's role, its <name>InterfaceShow 1 and the rest 0.
+	std::function<void()> onOpenRadio; // capture the ray before the pointer moves
 	void openRadio(bool inVehicle);
 	void openTactical(bool commander, bool squadLeader, bool inSquad);
 	void openSpotted();
@@ -246,26 +247,36 @@ SpotChoice spotChoice(const host::HudWorld& world, game::GameWorld& round, int e
 // The radio.spottedMessage of a template (its quotes taken off), "" without one.
 std::string spottedMessage(const world::ObjectTemplate* t);
 // The crosshair's enemy of `viewer` as a joined client sees it (GameWorld::
-// crosshairTarget's test over the HudWorld's players: a soldier as a 0.6 m
-// sphere about its middle, a vehicle as a 2.5 m one about its origin, the
-// nearest along the ray from `eye` along the unit `dir` within `reach`
-// with nothing in between); -1 for none.
+// viewTarget over the HudWorld's players from `eye` along the unit `dir`
+// within `reach`, `cone` its view cosine); -1 for none.
 int crosshairEnemy(const host::HudWorld& world, game::GameWorld& round, int viewer, const float eye[3], const float dir[3],
-	float reach = 300);
+	float reach = 500, float cone = 0.995f, float* point = nullptr);
+
+// Unresolved radio reports (0x007921b2): fixed points, type 3, 12 s.
+// Unlike object reports, repeated points are separate entries (0x00790d69).
+class MapPointSpots {
+public:
+	struct Marker { std::string texture; float x, z, left; };
+	void add(float x, float z, uint32_t type);
+	void tick(float seconds);
+	void clear() { m_markers.clear(); }
+	const std::vector<Marker>& markers() const { return m_markers; }
+private:
+	std::vector<Marker> m_markers;
+};
 
 // Where a joined game's left click goes (the HUD's input, 0x00754290: the
 // pointer's buttons for the HUD's own nodes while playing). With a
 // soldier: the HUD (HudManager::click: the roses' entries, the scoreboard,
 // the map's menus); without one, the spawn screen: a spawn icon picks
-// that point, elsewhere any point (the client's round has no control
-// points of its own).
-enum class JoinedClick { Hud, SpawnAt, AnySpawn };
+// that point locally; elsewhere the HUD receives the click (including DONE).
+enum class JoinedClick { Hud, SpawnAt };
 inline JoinedClick joinedClick(bool hasControlObject, int marker)
 {
 	if (hasControlObject) {
 		return JoinedClick::Hud;
 	}
-	return marker >= 0 ? JoinedClick::SpawnAt : JoinedClick::AnySpawn;
+	return marker >= 0 ? JoinedClick::SpawnAt : JoinedClick::Hud;
 }
 
 } // namespace dice::hfe::menu

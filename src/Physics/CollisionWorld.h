@@ -60,16 +60,35 @@ public:
 	// world as making `other`'s addMesh calls here (a world merged from
 	// meshes built once).
 	void append(const CollisionWorld& other);
-	size_t triangles() const { return m_triangles.size(); }
+	// The faces in the queries (those removeOwner took out are not counted).
+	size_t triangles() const { return m_triangles.size() - m_removed; }
+	// Every face in the queries, in order (the enhanced mode's audio scene).
+	template <typename Visit>
+	void forEachFace(Visit&& visit) const
+	{
+		for (const Triangle& t : m_triangles) {
+			if (!t.removed) {
+				visit(t.a, t.b, t.c);
+			}
+		}
+	}
 	// Takes `owner`'s faces out of the queries (an object whose physics goes:
-	// a destroyed prop's, 0x00651c60's slot 0xd4 -> 0xc). Returns how many.
+	// a destroyed prop's, 0x00651c60's slot 0xd4 -> 0xc; a deleted object's,
+	// the object manager's delete 0x006fdd90). Returns how many faces. They
+	// stay stored until compact(), so a query running now keeps its faces.
 	size_t removeOwner(uint32_t owner);
+	// Drops the faces removeOwner took out from the storage (the cells keep
+	// their order). Call between queries.
+	void compact();
+	// Faces taken out but still stored (compact() drops them).
+	size_t removedFaces() const { return m_removed; }
 
 	// The faces a sphere touches (0x006bf010 per face): inside a face the
 	// contact has the face's normal, also with the centre behind the face
 	// (depth below -radius then); an edge or corner only touches from the
 	// front.
-	void querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts) const;
+	// With `ignore` (not 0), the faces of that object are left out.
+	void querySphere(const Vec3& center, float radius, std::vector<SphereContact>& contacts, uint32_t ignore = 0) const;
 
 	// A sphere moving from `start` to `end` (0x006e2350 with a motion over
 	// 0.01, *0x00a85174; the soldiers' swept spheres): each face whose plane
@@ -138,6 +157,7 @@ private:
 		uint32_t material;
 		uint32_t owner;
 		mutable uint32_t stamp = 0;
+		bool removed = false; // out of the queries (removeOwner), dropped at compact()
 	};
 	void forEachFaceIndexNear(const Vec3& center, float radius, const std::function<void(const Triangle&)>& visit) const;
 	static constexpr float kCell = 8.0f;
@@ -149,6 +169,7 @@ private:
 	std::vector<Triangle> m_triangles;
 	std::unordered_map<int64_t, std::vector<uint32_t>> m_cells;
 	mutable uint32_t m_stamp = 0;
+	size_t m_removed = 0;
 };
 
 } // namespace dice::hfe::physics

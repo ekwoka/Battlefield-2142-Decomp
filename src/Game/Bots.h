@@ -545,6 +545,24 @@ bool sphereInRoomBox(const physics::Vec3& origin, const physics::Vec3& forward, 
 uint32_t clockSeedWord(double seconds);
 
 struct BotSettings {
+	// enhanced.enabled and enhanced.botRecovery (Scene/EnhancedSettings.h),
+	// read live: the stuck-vehicle exit, an addition beyond the original
+	// game. Null or false: none.
+	const bool* enhanced = nullptr;
+	const bool* botRecovery = nullptr;
+	bool stuckRecovery() const { return enhanced && *enhanced && (!botRecovery || *botRecovery); }
+	// enhanced.botMovement, also read live: bots on foot lie down only for
+	// far targets and look round only where they walk; a gunner's aim
+	// starts afresh on a new target (not retail).
+	const bool* botMovement = nullptr;
+	bool playerLikeMovement() const { return enhanced && *enhanced && botMovement && *botMovement; }
+	// enhanced.botTitan, also read live: the bots' play aboard a Titan (BotsTitan.cpp), and in gpm_ti
+	// their goal a silo over the squad's order (updateGoal); not retail.
+	const bool* botTitan = nullptr;
+	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
+	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
+	const bool* cornerSteer = nullptr;
+	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
 	float skill = 0.4f;   // aiSettings.setBotSkill (0..1)
 	int maxBots = 16;     // aiSettings.setMaxNBots
 	std::vector<std::string> behaviours; // by id (aiSettings.setBehaviour)
@@ -621,6 +639,7 @@ struct BotSettings {
 		std::string name;
 		float maxSlope = 90;                 // degrees (+0xc holds its cosine, 0 at first)
 		float allowedThresholdHeight = 0.35f; // +0x18
+		float radius = 0; // aiPathfinding.map.radius: the generator shrank the mesh by it (read only by enhanced.cornerSteer)
 		float headClearance = 2;             // +0x14
 	};
 	std::vector<PathfindingMap> pathfindingMaps;
@@ -792,6 +811,11 @@ public:
 	bool enabled() const { return !m_noNavMesh; }
 	// The vehicles' (AIPathFinding/Vehicle.qtr), for driving bots.
 	void setVehicleNavMesh(const ai::NavMesh* mesh) { m_vehicleNavMesh = mesh; }
+	// enhanced.botTitan in gpm_ti: makes the Titans' walking grids now, at the
+	// level's load (a second or two of rays each, else spent mid-round).
+	void prepareTitanGrids();
+	// The grids' cells and links, a line each (and, for $BF2142_BOT_STATS, the vehicles).
+	std::string titanGridStats();
 	// The server's maximum of players (sv.maxPlayers; AIDLL reads the game's
 	// through DAT_10139454 slot 4) for AIMain's kick on a human's join and
 	// fill on a leave (BotsSquad.cpp's population); 0 for none.
@@ -807,6 +831,7 @@ public:
 	// What a bot does now (for tests and debugging): the running
 	// behaviour's name (MoveTo, Idle, Fire, Change, Revive, Flee, ...).
 	std::string behaviour(int player) const;
+	SoldierInput lastInputFor(int player) const;
 	// A bot's value of a seat (0x100d3e70; `vehicle` 0 for its soldier), as
 	// BBChange weighs it; 0 for no such bot.
 	float seatValueFor(int player, uint32_t vehicle, int seat) const;
@@ -985,6 +1010,7 @@ public:
 		std::vector<SquadDanger> dangers; // +0x14
 		float requestedAt = 0;      // +0x100: the last req_new_order
 		bool answerOrder = false;   // +0x108: the members say roger_that / negative on their goal
+		physics::Vec3 humanOrderAt; // +0xf4: the human leader's destination (0x100c1eb0)
 		// The world's order this squad last saw (the game's event 0x10089480
 		// reaching 0x100c1eb0 when it changes).
 		GameWorld::OrderType seenType = GameWorld::OrderType::None;
@@ -1019,6 +1045,7 @@ public:
 	// (for tests).
 	void updateSquadNow(int team, int id);
 private:
+	friend struct BotManagerTestAccess;
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's
 	// constructor 0x100ecee0, its memory cleared on the bot's reset 0x100ed040).
 	struct Known {
@@ -1087,6 +1114,14 @@ private:
 		// back-off spot and when it was last chosen (a repath each second).
 		bool manoeuvre = false;
 		bool chase = false; // the lost target's chase (then forgotten)
+		// The plan was built without its moves (local_9 of 0x100795a0 on its
+		// path from 0x10079dff; firePlanHolds), taken when the plan is built.
+		bool fireHolds = false;
+		// The fire plan stands: 0x1007cf10 hands the bot's plan back while it
+		// is this behaviour's with the same target and weapon, and runs the
+		// builder again otherwise (after any other behaviour's plan).
+		bool firePlanBuilt = false;
+		uint32_t firePlanUnit = 0; // the target's vehicle when it was built (0 on foot)
 		// The guided plan's move on foot (0x10078570's If, not forced, over
 		// MoveToObjectFinding): running until the bot is within its band.
 		bool guidedMove = false;
@@ -1097,6 +1132,7 @@ private:
 		int planTarget = -1;
 		int planSlot = 0;
 		physics::Vec3 lastAimPoint;
+		int lastAimTarget = -2; // derivative and lead history are local to an aim target
 		// The aim's ballistic lead (the aim object's solver record,
 		// 0x100d9a60 -> 0x100fa6f0).
 		ai::LeadSolver lead;
@@ -1129,10 +1165,20 @@ private:
 		SoldierPose pose = SoldierPose::Stand;
 		// Goal (MoveTo).
 		int goalOrder = -1;       // the area the goal lies in, -1 for none
+		int goalControlPoint = -1;
 		physics::Vec3 goal;
 		bool hasGoal = false;
 		float goalAt = -1e9f;
 		bool goalReached = false;
+		bool vehicleApproach = false; // off-mesh objective: leave the vehicle at its reachable approach
+		physics::Vec3 approachInfantryGoal;
+		uint32_t abandonedVehicle = 0;
+		float abandonedAt = -1e9f;
+		uint32_t approachExitRequested = 0;
+		uint32_t stuckExit = 0; // enhanced: the vehicle a stuck driver is getting out of
+		bool moveFailed = false; // drive: the move ended without arriving (the follower's no-progress flag)
+		std::map<int, float> rejectedVehiclePoints;
+
 		physics::Vec3 orderPosition;
 		// Change.
 		uint32_t vehicleTarget = 0;
@@ -1160,9 +1206,22 @@ private:
 		float followAt = -100;
 		float jumpUntil = -1;        // PIAction held (the follower's jump, 0x10095720 / AIDLL 0x10092bc0)
 		ai::DriveState drive;
+		// enhanced.cornerSteer: a corner the driver keeps refusing for room.
+		struct Corner {
+			int refusals = 0;
+			float lastAt = -1e9f;
+			physics::Vec3 at;          // where it refuses
+			float remaining = 0;       // the path left there
+			int corrections = 0;       // wider points tried here
+			bool latched = false;
+			physics::Vec3 point;       // the wider steering point, held until reached
+			float latchedAt = 0;
+			physics::Vec3 latchedFrom; // where it was chosen
+			int goal = -1;             // the move it was chosen for
+			physics::Vec3 failedAt;    // the move failed here: no second search for 30 s
+			float failedUntil = -1e9f;
+		} corner;
 		ai::SidestepState sidestep;  // the move's (0x100ce860 +0x64..+0x80)
-		float lastYaw = 0;           // the vehicle's, for its turn rate
-		float lastYawAt = -1;
 		physics::Vec3 lastVelocity;  // the hover tank's, for its acceleration (FloatingTankMoveTo +0x3c)
 		// Strategic waypoints and areas on the way to the goal (0x10060300).
 		struct Via {
@@ -1185,6 +1244,12 @@ private:
 		int thinkAge = 0, senseAge = 0; // entry +8, +0x10
 		int skips = 0;               // bot +0x1b4
 		SoldierInput lastInput;
+		uint32_t continuousFireVehicle = 0;
+		int continuousFireSeat = -1;
+		// A seat gun's aim this frame (aim): the error, in degrees, its turn
+		// left; a skipped frame's held turn goes no further.
+		bool gunTurn = false;
+		float gunTurnLeft = 0;
 		// MedicAssist, AmmoAssist, RepairVehicle: whom (a player, or a
 		// vehicle's object for RepairVehicle).
 		int assistTarget = -1;
@@ -1218,6 +1283,40 @@ private:
 		float waitingSince = -1;  // Idle: a driver waiting for a passenger
 		bool usedLast = false;    // presses: use and the defibrillator want a release between
 		int titanGun = -1;        // Titan mode: the gun seat of its Titan it goes to man (claimed)
+		physics::Vec3 titanPodGoal, titanPodGoalFor; // BotsTitan.cpp: an APC driver's launch place, and the landing spot it was chosen for
+		bool titanPodGoalSet = false;
+		physics::Vec3 podLanding;  // BotsTitan.cpp podLanding: where a drop from its own Titan comes down, outside Titan mode
+		float podLandingAt = -1e9f;
+		float podAimOff = 1e9f;    // the pod array's last yaw error, degrees
+		uint32_t titanWaitFor = 0; // BotsTitan.cpp: the transport or APC whose driver it waits in for riders, and until when
+		float titanWaitUntil = 0;
+		int titanFlyMode = 0;      // a transport pilot's order for fly(), read once: 1 hold, 2 fly to titanFlyTo, 3 parked, 4 as 2 with 30 m over the ground
+		physics::Vec3 titanFlyTo;
+		bool titanFlyDown = false; // over the deck: coming down
+		uint32_t titanCrew = 0;    // enhanced.botTitan: its Titan's deck aircraft it walks to and crews (claimed), since when
+		float titanCrewSince = 0;
+		uint32_t titanCrewSkipFor = 0; // one it gave up on the way to, until then
+		float titanCrewSkipUntil = 0;
+		uint32_t titanSortieVehicle = 0; // the transport this pilot has considered for a deck sortie
+		uint32_t titanSortieRider = 0;  // the deck sortie a passenger joined
+		int titanSortie = 0;       // transport: 0 waiting, 1 dropping riders, 2 supporting silos, 3 ordinary AI; gunship: 1 taking off
+		int titanSortieSilo = -1;  // that silo's control point
+		float titanSortieUntil = 0; // over the silo: wait for riders until then
+		int titanSupportSilo = -1, titanSupportStep = 0;
+		float titanSupportUntil = 0;
+		uint32_t meshVehicle = 0;  // driveToMesh: the vehicle it drives, and whether that has been on the vehicle mesh
+		bool meshReached = false;
+		std::vector<physics::Vec3> meshWay; // what is left of its way there
+		physics::Vec3 meshAt;               // where it last made 3 m of way, and when
+		float meshAtTime = 0;
+		float meshBackUntil = 0;            // wedged: backing off until then
+		float meshSince = 0;                // when it took the wheel there
+		uint32_t titanRide = 0;    // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
+		float titanRideAt = -1e9f;
+		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way, and when
+		float titanAtTime = 0;
+		float titanFireFrom = -1;     // aboard the enemy's Titan: when it stopped to fire, and the break from that until
+		float titanFireRestUntil = 0;
 		bool switchedLast = false;
 		bool reloadedLast = false; // c_PIReload pressed at the last execution (a release between presses)
 		// The comm object's received radio messages (bot vt+0xa4, +0xc: a
@@ -1279,6 +1378,10 @@ private:
 		int idlePassenger = -1;      // BBPIdle2d's +0xc: whom the driver waits for (0x1006b1f0)
 		bool pickupAsked = false;    // the get-in plan's +0x14: req_pickup said
 		int pilotWeapon = -1;        // BBPHeliFire3d's +0x14: the pilot's weapon (0x100dd4a0)
+		// UseFlareOnMissileLock (0x100d1e80): armed (+0x28), its time (+0x20), the last lock reacted to.
+		bool flareArmed = false;
+		float flareFrom = -1;
+		uint32_t flareSeen = 0;
 		bool reviveShock = false;    // the crouch-then-fire's press made (0x100dda20 +0x18)
 		bool mayAdvance = true;      // +400 (the constructor's 1, 0x1009ac30)
 		// The sensing agent's look-around (bot +0xdc, AIDLL 0x100d7210; see
@@ -1487,6 +1590,8 @@ private:
 	// The guided plan's order spot (0x10078570; see Bots.cpp): whether it
 	// walks there while it fights, and the spot.
 	bool guidedOrderSpot(const GameWorld::PlayerInfo& self, physics::Vec3& spot);
+	bool firePlanHolds(const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target) const;
+	bool driversSee(uint32_t object) const; // on a driver's list of other objects (0x10092780)
 	bool fireKeepsToOrder(const Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::PlayerInfo& target,
 		physics::Vec3* spot = nullptr) const;
 	// Walks (InfanteryMoveTo) or drives (CarMoveTo/TankMoveTo) along a path
@@ -1536,6 +1641,7 @@ private:
 	void updateSquad(Squad& squad);
 	void syncSquadMembers(Squad& squad);
 	void takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool fromCommander);
+	bool nearSquadOrder(const Squad& squad) const; // 0x100c1e50
 	bool acceptOrder(Squad& squad, int by);
 	void updateMember(Squad& squad, SquadMember& member);
 	bool inFormation(const Squad& squad, const SquadMember& member) const;
@@ -1589,7 +1695,7 @@ private:
 	// 0x1008a3b0): the AI commander's second artillery target (0x100888d0).
 	std::map<int, float> m_offMesh;
 	void updateStrikeSpots();
-	bool strikeSpotHit(int team, const physics::Vec3& at, int& side) const;
+	bool strikeSpotHit(int team, const physics::Vec3& at, int& side, float* since = nullptr) const;
 	bool escapeStrike(Squad& squad, SquadMember& member, Bot& bot, const GameWorld::PlayerInfo& self, int side);
 	bool onMeshFor(const GameWorld::PlayerInfo& self, const physics::Vec3& at) const;
 	void trackHumans();
@@ -1658,6 +1764,8 @@ private:
 	ai::MineMarks m_mineMarks;
 	float m_minesNext = 0;
 	void updateMines();
+	// AI event 3/0x15 (0x00894860): an object the game removed, forgotten.
+	void forgetObject(uint32_t object);
 	std::set<int> m_refused; // AI players over aiSettings.setMaxNBots (0x100581a0): never activated
 	// The sides' knowledge of the enemy players (the AI objects of
 	// ai::knowledgeCertainty): when its bots last saw each, and whether one
@@ -1713,6 +1821,8 @@ private:
 	std::vector<GameWorld::PlayerInfo> m_players;   // as of this update
 	std::vector<GameWorld::VehicleInfo> m_vehicles; // as of this update
 	std::map<int, Bot> m_bots;
+	void refreshFollowers();
+	size_t m_refreshCursor = 0; // the follower refresh's round robin (0x100c6cc0, +0xf4)
 	Side m_sides[3];
 	// Squad tasks (squad member +task, 0x100bf470): bot -> (type, target).
 	std::map<int, std::pair<int, int64_t>> m_tasks;
@@ -1770,6 +1880,52 @@ private:
 	std::vector<GameWorld::WeaponAmmo> seatAmmo(const GameWorld::PlayerInfo& self,
 		const std::vector<std::pair<int, std::string>>& weapons) const;
 	void handleWeapon(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	// BotsTitan.cpp (enhanced.botTitan): true when it took the bot's input.
+	struct TitanGrid;
+	std::map<std::pair<uint32_t, int>, std::shared_ptr<TitanGrid>> m_titanGrids; // by Titan and team
+	TitanGrid& titanGrid(const GameWorld::TitanInfo& titan, int team);
+	const std::vector<float>& titanField(TitanGrid& grid, const GameWorld::TitanInfo& titan, int team, uint32_t part, const physics::Vec3& point,
+		bool nearest = false, float entryRadius = 0, uint32_t around = 0);
+	bool titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
+		const physics::Vec3& entry, float radius, int seat);
+	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
+		const GameWorld::TitanInfo& titan, const std::vector<float>& field);
+	bool titanLeave(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);
+	// The team's plan (its virtual commander): a role a squad, 0 the silos, 1 board the enemy Titan, 2 defend its own.
+	struct TitanPlan {
+		float nextAt = 0, share = 0.5f;
+		bool wasDown = false;
+		std::map<int, int> roles; // by squad, 100 + the player for a bot outside squads
+	};
+	TitanPlan m_titanPlans[3];
+	int titanRole(const GameWorld::PlayerInfo& self);
+	// enhanced.botRecovery (not retail): a mod's vehicle mesh may stop short of a base's vehicle pads (Remaster's
+	// Suez Titan layout leaves the fenced PAC base out). The way from such a spot to the mesh: a search over a 4 m
+	// grid within 90 m whose steps no obstacle crosses at hull height (fences count); empty for none. Kept by spot.
+	// (`ignore`: the vehicle itself. A spot with no way is tried again after 10 s: a parked vehicle may have been in it.)
+	const std::vector<physics::Vec3>& wayToVehicleMesh(const physics::Vec3& from, uint32_t ignore);
+	std::map<std::pair<int, int>, std::pair<float, std::vector<physics::Vec3>>> m_meshWays;
+	// Its driver along that way; false once the vehicle has been on the mesh.
+	bool driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	std::set<uint32_t> m_meshGaveUp; // vehicles a driver could not bring to the mesh in a minute: left, and not taken again
+	bool titanRespawn(const GameWorld::PlayerInfo& self);
+	const GameWorld::VehicleInfo* titanTransport(int team, const GameWorld::TitanInfo& home);
+	bool titanRideGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
+	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	void useFlareOnLock(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
+	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
+	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
+	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& spot, const physics::Vec3* launcher = nullptr);
+	void steerPod(const GameWorld::PlayerInfo& self, const physics::Vec3& spot, SoldierInput& input) const;
+	// Its own Titan's deck gunship and transport: a bot aboard walks to one and gets in (titanCrew); a transport's
+	// pilot with the enemy's shield up flies riders to a silo, where they drop in pods, and lands back (titanSortie).
+	const GameWorld::VehicleInfo* titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home);
+	bool titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
+	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The zoom key's press (Bot::zoomPress, set by the plans' statements)
 	// on the weapon in hand: a press steps the level (0x005da670; not while
 	// reloading), a weapon change, a seat and a reload with zoomOutOnReload

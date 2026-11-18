@@ -198,6 +198,9 @@ public:
 	// listener-3d-obstruction tweak (its listenerObstruction) together;
 	// null and 0 to clear.
 	void setInteriorAmbient(ISound* sound, float listenerObstruction);
+	// A Sound the data configured but never created (enhanced audio, WorldConsole's activeSafe): the
+	// defaults of the weapon event its name ends in, as DefaultSoundComp's own sounds have.
+	void applyEventDefaults(world::ObjectTemplate& sound);
 
 private:
 	ISound* findSound(const std::string& name) const;

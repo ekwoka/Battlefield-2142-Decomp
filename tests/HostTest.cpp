@@ -550,6 +550,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		return round.commander(team) == idA && pa && pa->commander;
 	}));
 
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(messagesA.begin(), messagesA.end(), [idA](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == 0x21 && m.payloadInt(0) == idA;
+		});
+	}));
+
 	// The commander's camera (CommanderCam 0x24: x, height, z): the server
 	// makes the team's overhead camera and places it over the point at its
 	// template's height (0x005f8170); the clients see it as its ghost. B's
@@ -997,10 +1003,188 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	client.suicide();
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && !info.alive; }));
 	const int diedAt = ticks;
+	round.autoRespawn = true;
+	client.selectSpawnGroup(-1);
+	for (int i = 0; i < 10; ++i) step();
+	client.selectSpawnGroup(0); // reopening cancels while the timer runs
+	for (int i = 0; i < 100; ++i) step();
+	CHECK(round.playerInfo(me, info) && !info.alive && info.respawnIn == 0);
 	client.selectSpawnGroup(-1);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
 	CHECK(ticks - diedAt >= 2 * 30 - 1);
 	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+// A group that can't be spawned at drops the request: 0x004bfe40 sets the
+// player's group to 0 (0x004bff13) and posts 6/6 back, so a squad member
+// who asked for his dead leader doesn't spawn on him once he's back.
+TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	round.autoRespawn = false;
+	round.setManDownTime(0);
+	round.setSpawnTime(0);
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	const int leader = round.addPlayer("Leader", 2, true);
+	CHECK(round.joinSquad(leader, 1));
+	CHECK(round.spawnSoldier(leader));
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	int cleared = 0;
+	client.onEvent = [&cleared](const net::GameEvent& e) {
+		net::PostRemoteInfo post;
+		cleared += net::parsePostRemote(e, post) && post.category == net::kMsgNetworkCategory
+			&& post.id == net::kNeSelectSpawnGroup;
+	};
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	client.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
+	uint16_t leaderGhost = 0;
+	int group = -1;
+	CHECK(pumpUntil(step, [&] {
+		for (const net::RemotePlayer& p : client.world().playerList()) {
+			leaderGhost = p.name == "Leader" ? p.soldierGhost : leaderGhost;
+		}
+		for (const auto& [id, g] : client.world().spawnGroups()) {
+			group = leaderGhost && g.ghost == leaderGhost && g.team == 2 ? id : group;
+		}
+		return group >= 0;
+	}));
+	// The leader dies; the member asks for him all the same.
+	dice::hfe::game::GameWorld::PlayerInfo lead;
+	CHECK(round.playerInfo(leader, lead) && lead.soldier != 0);
+	round.setHitPoints(lead.soldier, 0);
+	CHECK(round.playerInfo(leader, lead) && !lead.alive);
+	client.selectSpawnGroup(group);
+	CHECK(pumpUntil(step, [&] { return cleared == 1; })); // 6/6 back: the group is gone
+	CHECK(round.playerInfo(me, info) && !info.alive);
+	// Back, the leader isn't spawned on: the request went with the group.
+	CHECK(round.spawnSoldier(leader));
+	for (int i = 0; i < 60; ++i) step();
+	CHECK(round.playerInfo(me, info) && !info.alive && cleared == 1);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+// A joined client flooding Spotted (0x0050e910) with radio spots (0x2e):
+// of enemies, its own team, and ghosts that are no one's. The round's
+// spotted lists stay one entry per list and enemy, and are gone once
+// their 12 s have passed.
+TEST(NetHost_SpottedFloodStaysBounded)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+	// Not bots: their own sightings would spot too.
+	const int mate = round.addPlayer("Mate", 2, false);
+	CHECK(round.spawnSoldier(mate));
+	std::vector<int> enemies;
+	for (int i = 0; i < 3; ++i) {
+		enemies.push_back(round.addPlayer("Enemy" + std::to_string(i), 1, false));
+		CHECK(round.spawnSoldier(enemies.back()));
+	}
+
+	net::GameClient a;
+	a.world().setGhostTemplates([&range](uint32_t id) {
+		const dice::hfe::world::ObjectTemplate* t = range.templates.findById(id);
+		return t ? net::ghostTemplateFrom(range.templates, *t) : net::GhostTemplateNode {};
+	});
+	net::GameClientOptions options;
+	options.playerName = "Alpha";
+	CHECK(a.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		a.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return a.world().gameState() == 1 && a.world().localPlayer() >= 0; }, 6000));
+	const int idA = a.world().localPlayer();
+	a.selectTeam(2);
+	CHECK(pumpUntil(step, [&] {
+		dice::hfe::game::GameWorld::PlayerInfo pa;
+		return round.playerInfo(idA, pa) && pa.team == 2;
+	}));
+	const auto ghostOf = [&](int player) -> uint32_t {
+		const net::RemotePlayer* p = a.world().player(player);
+		return p ? p->soldierGhost : 0;
+	};
+	CHECK(pumpUntil(step, [&] {
+		return ghostOf(mate) && std::all_of(enemies.begin(), enemies.end(), [&](int e) { return ghostOf(e) != 0; });
+	}));
+	std::vector<uint32_t> targets {ghostOf(mate), 0xffff, 0x7777, 1};
+	for (const int e : enemies) {
+		targets.push_back(ghostOf(e));
+	}
+	size_t most = 0;
+	const auto watch = [&] {
+		step();
+		most = std::max(most, round.mapSpotCount());
+	};
+	for (int tick = 0; tick < 60; ++tick) {
+		for (int i = 0; i < 20; ++i) {
+			net::SpottedInfo spot;
+			spot.message = 0x2e;
+			spot.spotted = targets[static_cast<size_t>(tick * 20 + i) % targets.size()];
+			spot.team = 1; // the server takes the reporter's own
+			spot.value = 0x1b;
+			a.sendEvent(net::makeSpotted(spot));
+		}
+		watch();
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	// Every enemy listed for the team (the mate sees them), never more
+	// than the team's entry and A's own report's for each; once the events
+	// have all come and 12 s have passed, none.
+	CHECK(pumpUntil(watch, [&] { return round.mapSpottedPlayers(mate).size() == enemies.size(); }, 10000));
+	CHECK(pumpUntil(watch, [&] { return round.mapSpotCount() == 0; }, 30000));
+	std::fprintf(stderr, "  spotted flood: 1200 events, at most %zu map spots\n", most);
+	CHECK(most > 0 && most <= 2 * enemies.size());
+	CHECK(round.mapSpottedPlayers(mate).empty());
+
+	// A no-object report preserves the world point and selected type through
+	// the actual client/server event. It must not repick the sender's view.
+	net::SpottedInfo pointSpot;
+	pointSpot.message = 0x2e;
+	pointSpot.x = 41;
+	pointSpot.z = -73;
+	pointSpot.value = 16;
+	a.world().takeMessages();
+	a.sendEvent(net::makeSpotted(pointSpot));
+	CHECK(pumpUntil(step, [&] {
+		for (const auto& m : a.world().takeMessages()) {
+			net::SpottedInfo got;
+			if (m.category == 2 && m.id == 0x2e && net::parseSpottedPayload(m.payload, m.id, got)
+				&& !got.spotted && got.x == 41 && got.z == -73 && got.value == 16 && got.team == 2) return true;
+		}
+		return false;
+	}));
+	a.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 
@@ -1119,6 +1303,27 @@ TEST(NetHost_StanceFireSpottedAndInvites)
 		});
 	}));
 	CHECK(hosted.playerOfGhost(botOf(b)->soldierGhost) == bot);
+
+	// A radio spot (2/0x2e, 0x0050e910 -> 0x00791faa): the bot's sighting of
+	// an enemy reaches both joined teammates' minimaps for 12 s.
+	const int enemy = round.addPlayer("Enemy", 1, true);
+	CHECK(round.spawnSoldier(enemy));
+	const auto ghostKnown = [&](net::GameClient& c) {
+		const net::RemotePlayer* p = c.world().player(enemy);
+		return p && p->soldierGhost != 0;
+	};
+	CHECK(pumpUntil(step, [&] { return ghostKnown(a) && ghostKnown(b); }));
+	const auto listed = [enemy](net::GameClient& c) {
+		const std::vector<int> radar = c.world().radarPlayers();
+		return std::find(radar.begin(), radar.end(), enemy) != radar.end();
+	};
+	CHECK(!listed(a) && !listed(b));
+	round.radioSpot(bot, enemy, 0x1b);
+	CHECK(pumpUntil(step, [&] { return listed(a) && listed(b); }));
+	for (int i = 0; i < 13 * 30; ++i) {
+		step();
+	}
+	CHECK(!listed(a) && !listed(b));
 
 	// B leads squad 1 and invites A: A's client is asked (2/0x10, the squad);
 	// A turns it down (Invite without the leader bit), then is invited
@@ -1599,6 +1804,15 @@ TEST(NetHost_VehiclePrediction)
 	}
 	CHECK(round.playerInfo(me, info) && info.vehicle == garage.vehicle && info.seat == 0);
 	CHECK(pumpUntil(step, [&] { return car.active(); }, 4000));
+	std::map<uint16_t, uint32_t> hudGhosts;
+	for (const net::RemoteObject& o : client.world().objectList()) {
+		if (o.part == 0 && o.templateId == garage.templates.find("eu_fav")->id()) hudGhosts[o.ghost] = garage.vehicle;
+	}
+	host::RemoteHudWorld pilotHud(client.world(), round, hudGhosts);
+	drive.throttle = 0.7f;
+	step();
+	CHECK(std::fabs(pilotHud.pilotThrust(garage.vehicle) - 0.7f) < 0.01f);
+	CHECK(pilotHud.pilotThrust(garage.vehicle + 100000) == 0);
 	const dice::hfe::world::Object* v = garage.objects.find(garage.vehicle);
 	const dice::hfe::physics::Vec3 from {v->position().x, v->position().y, v->position().z};
 	// Drive: full throttle, steering one way then the other, a stop.
@@ -1959,6 +2173,18 @@ TEST(GameWorld_RemovePlayerFreesItsSlot)
 
 // The crosshair object and Radio.sendSpottedMessage (0x0075be30, 0x007c8160):
 // the enemy the view's ray meets is reported to the spotter's squad.
+TEST(GameWorld_SpotMissKeepsGroundPoint)
+{
+	HostRange range;
+	auto& round = *range.round;
+	dice::hfe::physics::Vec3 point {-4000, -4000, -4000};
+	CHECK(round.viewTarget({0, 10, 0}, {0, -1, 0}, 100, 1, 0, {}, &point) == -1);
+	// This fixture samples its height-only terrain every 2 m.
+	CHECK(std::abs(point.x) < 0.01f && point.y <= 0 && point.y > -2.1f && std::abs(point.z) < 0.01f);
+	CHECK(round.viewTarget({0, 10, 0}, {0, 1, 0}, 100, 1, 0, {}, &point) == -1);
+	CHECK(point.x == -4000 && point.z == -4000);
+}
+
 TEST(GameWorld_SpottedCrosshairTarget)
 {
 	HostRange range;
@@ -1974,7 +2200,9 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	round.playerInfo(c, mate);
 	const float yaw = me.yaw * 3.14159265f / 180.0f;
 	const dice::hfe::physics::Vec3 ahead {std::sin(yaw), 0, std::cos(yaw)};
-	round.setSoldierPosition(mate.soldier, me.position + ahead * 8.0f + dice::hfe::physics::Vec3 {3, 0, 0});
+	// The mate beside the line (a friend in it would be picked: SpotPickCone).
+	const dice::hfe::physics::Vec3 side {std::cos(yaw), 0, -std::sin(yaw)};
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 8.0f + side * 3.0f);
 	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f);
 	round.tick(1.0f / 30);
 	CHECK(round.crosshairTarget(c) == -1 || round.crosshairTarget(c) == b);
@@ -1984,6 +2212,216 @@ TEST(GameWorld_SpottedCrosshairTarget)
 	CHECK(!round.squadKnows(1, 0, b));
 	CHECK(round.spotCrosshair(a) == b);
 	CHECK(round.squadKnows(1, 0, b));
+}
+
+// The view pick's cone (0x0075bfe0 with the rose's 0.995 cosine, +0x200):
+// an enemy 3.8 deg off the view, well clear of the ray, is picked; a nearer
+// friend in the cone is picked instead and hides him (0x0075be30's team
+// test then reports nobody).
+TEST(GameWorld_SpotPickCone)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	dice::hfe::game::GameWorld::PlayerInfo me, enemy, mate;
+	round.playerInfo(a, me);
+	round.playerInfo(b, enemy);
+	round.playerInfo(c, mate);
+	const float yaw = me.yaw * 3.14159265f / 180.0f;
+	const dice::hfe::physics::Vec3 ahead {std::sin(yaw), 0, std::cos(yaw)};
+	const dice::hfe::physics::Vec3 side {std::cos(yaw), 0, -std::sin(yaw)};
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f + side * 2.0f);
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 15.0f + side * 20.0f);
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(a) == b);
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f + side * 4.0f); // 7.6 deg
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(a) == -1);
+	round.setSoldierPosition(enemy.soldier, me.position + ahead * 30.0f + side * 2.0f);
+	round.setSoldierPosition(mate.soldier, me.position + ahead * 15.0f + side * 1.0f);
+	round.tick(1.0f / 30);
+	CHECK(round.crosshairTarget(a) == -1);
+	// The reach is GSViewDistance as held (rounded, 20..3000; 500 unset).
+	CHECK(round.spotReach() == 500);
+	round.viewDistance = [] { return 812.4f; };
+	CHECK(round.spotReach() == 812);
+	round.viewDistance = [] { return 5.0f; };
+	CHECK(round.spotReach() == 20);
+}
+
+// The view pick's ray meets a crewed walker's collision mesh anywhere, not
+// only near its origin (0x0075bfe0, the scene's ray, then 0x0075be30's crew
+// of the object met): aimed at a part of the mesh well off the origin and
+// outside the cone, the walker's crew is picked. Needs $BF2142_GAME_DIR.
+TEST(GameWorld_SpotPickWalkerMesh)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	namespace game = dice::hfe::game;
+	namespace physics = dice::hfe::physics;
+	HostGarage garage(gameDir, "us_heavy_mech", {0, 0, 0});
+	CHECK(garage.round != nullptr);
+	if (!garage.round) {
+		return;
+	}
+	game::GameWorld& round = *garage.round;
+	round.tick(1 / 30.0f);
+	const dice::hfe::world::Vec3& o = garage.objects.find(garage.vehicle)->position();
+	const physics::Vec3 origin {o.x, o.y, o.z};
+	const physics::Vec3 eye = origin + physics::Vec3 {0, 0, 8};
+	physics::Vec3 dir {};
+	bool found = false;
+	// Directions from 8 m that meet the walker's mesh more than 2.5 m from
+	// its origin (the old 2.5 m ball) and outside the 0.995 cone.
+	for (int i = 0; i < 61 * 61 && !found; ++i) {
+		const float yaw = (i % 61 - 30) * 3.14159265f / 180.0f, pitch = (i / 61 - 30) * 3.14159265f / 180.0f;
+		const physics::Vec3 d {std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+		const physics::Vec3 off = origin - eye;
+		const float along = physics::dot(off, d);
+		float fraction = 0;
+		uint32_t object = 0;
+		if (physics::lengthSquared(off) - along * along > 2.5f * 2.5f
+			&& along < 0.99f * std::sqrt(physics::lengthSquared(off))
+			&& round.segmentHit(eye, eye + d * 100.0f, 0, fraction, object) && object == garage.vehicle) {
+			dir = d;
+			found = true;
+		}
+	}
+	CHECK(found);
+	const std::vector<game::GameWorld::ViewCandidate> crew {{7, 2, origin, garage.vehicle}};
+	physics::Vec3 at;
+	CHECK(round.viewTarget(eye, dir, 500, 1, 0, crew, &at) == 7);
+	CHECK(round.viewTarget(eye, dir, 500, 2, 0, crew) == -1); // his own team
+	CHECK(round.viewTarget(eye, dir, 500, 1, 0, {}) == -1);   // empty
+	// Aimed low from 40 m: the ground is met about 35 m out, short of the
+	// walker; the heightmap's ray only sets the reach to 1.3 x that, so the
+	// walker 5.5 deg off the view is still picked.
+	const physics::Vec3 low = origin + physics::Vec3 {0, 0, 40};
+	const float down = 5.5f * 3.14159265f / 180.0f;
+	const physics::Vec3 lowDir {0, -std::sin(down), -std::cos(down)};
+	float ground = 0;
+	uint32_t met = 1;
+	CHECK(round.segmentHit(low, low + lowDir * 500.0f, garage.vehicle, ground, met) && met == 0 && ground * 500 < 38);
+	CHECK(round.viewTarget(low, lowDir, 500, 1, 0, crew) == 7);
+}
+
+// The minimaps' spotted lists (Bf2MenuMapNode +0xa94): a radio spot lists
+// the enemy for the spotter's whole team for 12 s (0x00791faa, +0xac8); a
+// battlefield report only for the reporter's squad (the reporter alone
+// without one) for its seconds, and only of kind 0 (0x00508590).
+TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	const std::vector<int> enemy {b};
+	CHECK(round.mapSpottedPlayers(a).empty() && round.mapSpottedPlayers(c).empty());
+	// A report from A (no squad) reaches A only, for 3 s.
+	round.reportBattlefieldObjects(a, {b});
+	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c).empty());
+	for (int i = 0; i < 4 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(a).empty());
+	// Kind 1 (a bot's firing report) marks no enemy; a teammate isn't listed.
+	round.reportBattlefieldObjects(a, {b}, 3, 1);
+	round.reportBattlefieldObjects(a, {c});
+	CHECK(round.mapSpottedPlayers(a).empty());
+	// A radio spot: the whole team for 12 s, not the enemy's team.
+	round.radioSpot(a, b);
+	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c) == enemy);
+	CHECK(round.mapSpottedPlayers(b).empty() && round.mapSpottedVehicles(c).empty());
+	for (int i = 0; i < 11 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(c) == enemy);
+	for (int i = 0; i < 2 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(c).empty());
+}
+
+// The spotted lists hold one entry per list and object (0x00790d60 adds
+// one only when 0x007800f0 doesn't find it, so a radio spot again leaves
+// the first's 12 s), are pruned as they end, and keep at most 64 (a port
+// bound: the soonest ending gives way).
+TEST(GameWorld_MapSpotsDeduplicatedPrunedAndBounded)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	const int a = round.addPlayer("A", 1, false);
+	const int b = round.addPlayer("B", 2, false);
+	const int c = round.addPlayer("C", 1, false);
+	CHECK(round.spawnSoldier(a) && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	const std::vector<int> enemy {b};
+	for (int i = 0; i < 500; ++i) {
+		round.radioSpot(a, b);
+	}
+	// The team's entry and A's own battlefield report's.
+	CHECK(round.mapSpotCount() == 2);
+	for (int i = 0; i < 6 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	round.radioSpot(a, b); // not extended
+	for (int i = 0; i < int(6.5f * 30); ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpottedPlayers(c).empty());
+	for (int i = 0; i < 6 * 30; ++i) {
+		round.tick(1.0f / 30);
+	}
+	CHECK(round.mapSpotCount() == 0); // pruned without a new spot
+	// Own team or no such player: nothing.
+	round.radioSpot(a, c);
+	round.radioSpot(a, 12345);
+	round.radioSpot(12345, b);
+	CHECK(round.mapSpotCount() == 0 && round.mapSpottedPlayers(a).empty());
+
+	// 10 reporters without a squad, each reporting 10 enemies: 100 lists'
+	// entries, 64 kept, the latest reports among them.
+	std::vector<int> reporters, enemies;
+	for (int i = 0; i < 10; ++i) {
+		reporters.push_back(round.addPlayer("R" + std::to_string(i), 1, false));
+		enemies.push_back(round.addPlayer("E" + std::to_string(i), 2, false));
+	}
+	for (size_t i = 0; i < reporters.size(); ++i) {
+		round.reportBattlefieldObjects(reporters[i], enemies, 3.0f + static_cast<float>(i));
+		CHECK(round.mapSpotCount() <= 64);
+	}
+	CHECK(round.mapSpotCount() == 64);
+	CHECK(round.mapSpottedPlayers(reporters.back()).size() == enemies.size());
+	CHECK(round.mapSpottedPlayers(reporters.front()).empty());
+}
+
+// The local HUD's minimap reads those lists: a teammate's radio spot shows
+// on the local player's map (LocalHudWorld::revealedPlayers, which the red
+// radar markers draw), for his own team only.
+TEST(LocalHud_TeammateSpotOnMinimap)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	CHECK(round.spawnPlayer(1) != nullptr);
+	const int me = round.localPlayer();
+	const int b = round.addPlayer("B", 2, true);
+	const int c = round.addPlayer("C", 1, true);
+	CHECK(me >= 0 && round.spawnSoldier(b) && round.spawnSoldier(c));
+	round.tick(1.0f / 30);
+	const dice::hfe::host::LocalHudWorld local(round, range.logic);
+	CHECK(local.revealedPlayers(1).empty());
+	round.radioSpot(c, b);
+	CHECK(local.revealedPlayers(1) == std::vector<int> {b});
+	CHECK(local.revealedPlayers(2).empty() && local.spottedVehicles().empty());
 }
 
 // A joined client's combat-area countdown (0x0044c7b0 on the client): the
@@ -2216,6 +2654,13 @@ TEST(GameWorld_SpottedMessageVoice)
 	const float dir[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 	CHECK(menu::crosshairEnemy(local, round, a, eye, dir) == b);
 	CHECK(menu::crosshairEnemy(local, round, a, eye, dir, 10) == -1);
+	// Commander picking looks down over the selected map point, independently of the soldier's aim.
+	round.playerInfo(b, enemy);
+	const float sky[3] = {enemy.position.x, enemy.position.y + 260, enemy.position.z};
+	const float down[3] = {0, -1, 0};
+	CHECK(menu::crosshairEnemy(local, round, a, sky, down, 360, 1) == b);
+	const float empty[3] = {enemy.position.x + 20, enemy.position.y + 260, enemy.position.z};
+	CHECK(menu::crosshairEnemy(local, round, a, empty, down, 360, 1) == -1);
 }
 
 // NetworkableInfo.* (Objects/Common/Networkables.con): c_NIGhostAlways is
@@ -2787,7 +3232,7 @@ TEST(Host_RemoteSeatGunsFireFromTheFireState)
 	const auto fires = [&round](const char* weapon) {
 		int n = 0;
 		for (const auto& [object, list] : round.takeObjectWeaponFires()) {
-			n += static_cast<int>(std::count(list.begin(), list.end(), std::string(weapon)));
+			n += static_cast<int>(std::count_if(list.begin(), list.end(), [&](const auto& fire) { return fire.weapon == weapon; }));
 		}
 		return n;
 	};
@@ -2802,7 +3247,8 @@ TEST(Host_RemoteSeatGunsFireFromTheFireState)
 		&& sounds[0].object == id && sounds[0].weapon == "tank_gun");
 	// At the muzzle: the gun's place and 1 m along it (no projectileStartPosition).
 	CHECK(sounds.size() == 1 && std::fabs(sounds[0].position.y - 2) < 1e-4f && std::fabs(sounds[0].position.z - 12) < 1e-4f);
-	CHECK(round.takeObjectWeaponFires()[id] == std::vector<std::string> {"tank_gun"});
+	const auto fired = round.takeObjectWeaponFires()[id];
+	CHECK(fired.size() == 1 && fired[0].weapon == "tank_gun" && fired[0].seat == seats[0].name);
 	int rounds = 0;
 	for (int i = 0; i < 30 * 5; ++i) {
 		guns.step(round, {seat}, 1 / 30.0f); // held: no second press

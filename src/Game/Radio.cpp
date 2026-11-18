@@ -324,11 +324,15 @@ bool GameWorld::insideCombatArea(const Player& player) const
 	if (!m_combatAreas || !m_combatAreas->use) {
 		return true;
 	}
-	int category = 4; // a soldier's template has no category: VCNoVehicleCategory
+	// 0x004ca5d0 passes the category 4 to 0x004d9d50, which then takes the
+	// controlled object's own: through the vehicle-category interface, and an
+	// object without it, a soldier on foot, reads 0 (VCLand, 0x004d9dba). The
+	// 4 is that "ask the object" marker, not a category.
+	int category = 0;
 	physics::Vec3 at = player.body.position;
 	if (player.vehicle) {
 		const world::Object* vehicle = m_objects.find(player.vehicle);
-		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 4;
+		category = vehicle && vehicle->objectTemplate() ? vehicleCategory(*vehicle->objectTemplate()) : 0;
 		if (vehicle) {
 			at = {vehicle->position().x, vehicle->position().y, vehicle->position().z};
 		}
@@ -482,7 +486,7 @@ physics::Vec3 GameWorld::viewForward(int id) const
 		}
 		return body->body.rotation.transform(along(yaw, pitch));
 	}
-	return along(lookYaw(*me), me->input.aimPitch);
+	return along(lookYaw(*me), soldierLookPitch(me->input.aimPitch));
 }
 
 int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const
@@ -491,51 +495,85 @@ int GameWorld::crosshairTarget(int id, float reach, physics::Vec3* point) const
 	if (!me || !me->alive) {
 		return -1;
 	}
-	const float yaw = lookYaw(*me) * 3.14159265f / 180.0f;
-	const float pitch = me->input.aimPitch * 3.14159265f / 180.0f;
-	const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-	const physics::Vec3 eye = me->body.position + physics::Vec3 {0, 0.6f, 0};
-	// The nearest enemy along the ray with nothing in between (the static
-	// objects, the bodies and the terrain: lineOfSight).
-	int found = -1;
-	float best = reach;
+	std::vector<ViewCandidate> candidates;
 	for (const auto& owned : m_players) {
 		const Player& p = *owned;
-		if (!p.present || !p.alive || p.id == id || p.team == me->team) {
+		if (!p.present || !p.alive || p.id == id) {
 			continue;
 		}
-		// A soldier as a 0.6 m sphere about its middle, a vehicle as a
-		// 2.5 m one about its origin (as the name tags' ray).
-		physics::Vec3 centre = p.body.position;
-		float radius = 0.6f;
+		ViewCandidate c {p.id, p.team, p.body.position, 0};
 		if (p.vehicle) {
 			if (const world::Object* v = m_objects.find(p.vehicle)) {
-				centre = {v->position().x, v->position().y, v->position().z};
-				radius = 2.5f;
+				c.position = {v->position().x, v->position().y, v->position().z};
+				c.vehicle = p.vehicle;
 			}
 		}
-		const physics::Vec3 d = centre - eye;
+		candidates.push_back(c);
+	}
+	return viewTarget(me->body.position + physics::Vec3 {0, 0.6f, 0}, viewForward(id), reach, me->team, me->vehicle,
+		candidates, point);
+}
+
+int GameWorld::viewTarget(const physics::Vec3& eye, const physics::Vec3& dir, float reach, int team, uint32_t ownVehicle,
+	const std::vector<ViewCandidate>& candidates, physics::Vec3* point, float cone) const
+{
+	const ViewCandidate* picked = nullptr;
+	float range = reach, fraction = 1;
+	uint32_t object = 0;
+	physics::Vec3 at {-4000, -4000, -4000};
+	// The heightmap's ray (slot 0x8c) only sets the reach: 1.3 x the
+	// distance to its hit (0x0075c1d7); the scene's ray passes the terrain.
+	if (groundRayHit(eye, eye + dir * reach, fraction)) {
+		range = 1.3f * fraction * reach;
+		at = eye + dir * (fraction * reach);
+	}
+	if (objectRayHit(eye, eye + dir * range, ownVehicle, fraction, object)) {
+		range *= fraction;
+		at = eye + dir * range;
+		for (const ViewCandidate& c : candidates) {
+			if (object && c.vehicle == object) {
+				picked = &c; // 0x0042b2f0: the vehicle's crew
+			}
+		}
+	}
+	for (const ViewCandidate& c : candidates) {
+		if (c.vehicle && c.vehicle == ownVehicle) {
+			continue;
+		}
+		const physics::Vec3 d = c.position - eye;
 		const float along = physics::dot(d, dir);
-		if (along <= 0 || along >= best || physics::lengthSquared(d) - along * along > radius * radius) {
+		const float distance = std::sqrt(physics::lengthSquared(d));
+		const bool rayMeets = !c.vehicle && along > 0 && physics::lengthSquared(d) - along * along <= 0.6f * 0.6f;
+		const float to = rayMeets ? along : distance;
+		if (to <= 0 || to >= range || (!rayMeets && along <= cone * distance)) {
 			continue;
 		}
-		if (!lineOfSight(eye, centre, p.vehicle ? p.vehicle : me->vehicle)) {
+		if (!lineOfSight(eye, c.position, c.vehicle ? c.vehicle : ownVehicle)) {
 			continue;
 		}
-		best = along;
-		found = p.id;
+		range = to;
+		picked = &c;
+		at = rayMeets ? eye + dir * along : c.position;
 	}
-	if (found >= 0 && point) {
-		*point = eye + dir * best;
+	if (point) {
+		*point = at;
 	}
-	return found;
+	if (!picked || picked->team == team) {
+		return -1;
+	}
+	return picked->player;
+}
+
+float GameWorld::spotReach() const
+{
+	return viewDistance ? std::round(std::clamp(viewDistance(), 20.0f, 3000.0f)) : 500.0f;
 }
 
 int GameWorld::spotCrosshair(int player)
 {
-	const int target = crosshairTarget(player);
+	const int target = crosshairTarget(player, spotReach());
 	if (target >= 0) {
-		reportBattlefieldObjects(player, {target});
+		radioSpot(player, target);
 	}
 	return target;
 }

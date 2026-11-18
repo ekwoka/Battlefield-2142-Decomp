@@ -381,8 +381,9 @@ void BotManager::updateStrikeSpots()
 
 // 0x100880e0: whether `at` lies within 40 m (+0xb8) of the member's own
 // side's strike spot, or of the other side's once that side's delay is
-// over; `side` the spot's.
-bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side) const
+// over; `side` the spot's, `since` (when given) the time since that strike
+// began (its +0x30).
+bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side, float* since) const
 {
 	if (team < 1 || team > 2) {
 		return false;
@@ -391,11 +392,17 @@ bool BotManager::strikeSpotHit(int team, const physics::Vec3& at, int& side) con
 	const StrikeSpot& own = m_strikeSpots[team - 1];
 	if (own.active && distance2(own.spot, at) < r2) {
 		side = team;
+		if (since) {
+			*since = m_time - own.at;
+		}
 		return true;
 	}
 	const StrikeSpot& other = m_strikeSpots[2 - team];
 	if (other.active && distance2(other.spot, at) < r2 && m_time > other.at + other.enemyDelay) {
 		side = 3 - team;
+		if (since) {
+			*since = m_time - other.at;
+		}
 		return true;
 	}
 	return false;
@@ -610,6 +617,18 @@ bool BotManager::inFormation(const Squad& squad, const SquadMember& member) cons
 	return true;
 }
 
+bool BotManager::nearSquadOrder(const Squad& squad) const
+{
+	if (squad.state != 2 || squad.area < 0 || areaStatus(squad.area, squad.team) == ai::AreaStatus::Owned
+		|| !m_settings.strategy.areas[static_cast<size_t>(squad.area)].takeable[static_cast<size_t>(squad.team)]) {
+		return false;
+	}
+	for (const SquadMember& m : squad.members) {
+		if (m.placed && distance2(squad.orderAt, m.at) < 900.0f) return true;
+	}
+	return false;
+}
+
 // 0x100c1eb0: an order reaching the squad (the game's event 0x10089480).
 // A commander's (the SAI's go to the squads as the commander's) is taken
 // when the squad has none and, without a human commander, no member is
@@ -621,6 +640,10 @@ void BotManager::takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool
 	if (!fromCommander) {
 		const GameWorld::PlayerInfo* leader = squadLeaderOf(squad);
 		if (!squad.members.empty() && leader && !m_bots.count(leader->id)) {
+			// Retail +0xf4 is separate from the strategic order's +0x2c.
+			// 0x100c0192..0x100c01cc reads it while the human leads and
+			// nobody is already engaging the strategic order's area.
+			squad.humanOrderAt = at;
 			squad.answerOrder = true;
 			for (SquadMember& m : squad.members) {
 				m.goalSet = false;
@@ -632,15 +655,7 @@ void BotManager::takeOrder(Squad& squad, int kind, const physics::Vec3& at, bool
 		}
 		return;
 	}
-	bool near = false;
-	if (squad.area >= 0 && areaStatus(squad.area, squad.team) != ai::AreaStatus::Owned) {
-		// 0x100bf780: within +0x50 (900) of the order's spot, on the
-		// order's area, takeable by the side.
-		for (const SquadMember& m : squad.members) {
-			near = near || (squad.state == 2 && m.placed && distance2(squad.orderAt, m.at) < 900.0f
-							   && m_settings.strategy.areas[static_cast<size_t>(squad.area)].takeable[static_cast<size_t>(squad.team)]);
-		}
-	}
+	const bool near = nearSquadOrder(squad);
 	const bool commander = humanCommands(squad.team);
 	if (((!commander && near) || squad.state != 0) && !commander) {
 		return;
@@ -1734,7 +1749,9 @@ void BotManager::chooseRespawn(const GameWorld::PlayerInfo& self)
 			return w != m_settings.weapons.end() && w->second.antiAir;
 		});
 	}
-	m_world.setSpawnChoice(self.id, r.controlPoint);
+	if (!titanRespawn(self)) {
+		m_world.setSpawnChoice(self.id, r.controlPoint);
+	}
 }
 
 } // namespace dice::hfe::game

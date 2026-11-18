@@ -67,8 +67,8 @@ struct CollisionMeshFile {
 // The LOD a user (0 projectiles, 1 vehicles, 2 soldiers, 3 AI navigation)
 // collides with, or null when the part has none for it: the loader
 // (0x006e4880) files each LOD under its collision type (version 9 on; in
-// version 8 by order) and leaves the other types empty (-1), so a bush with
-// only a projectile LOD does not stop soldiers or vehicles.
+// version 8 by order). Missing soldier LODs fall back to vehicle LODs;
+// missing navigation LODs fall back to soldier, then vehicle (0x006e4fe0).
 const CollisionLod* collisionLodFor(const CollisionMeshFile& file, const CollisionSubGeometry& part, uint32_t type);
 
 // The sub-geometry an instance of `geometry` collides with in `state`

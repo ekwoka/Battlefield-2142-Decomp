@@ -108,10 +108,27 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 	}
 	L.decidedAt = std::min(L.decidedAt, m_time);
 	const float elapsed = m_time - L.decidedAt;
+	// enhanced.botMovement (not retail, whose soldier walks sideways while
+	// it looks about): walking with no enemy in sight, none lost in the last
+	// 5 s and no round passing, the look stays along the way.
+	// shortcut: a fixed 5 s, tune from play.
+	const bool threat = std::any_of(bot.known.begin(), bot.known.end(),
+		[this](const Known& k) { return k.everSeen && (k.lostAt < 0 || m_time - k.lostAt < 5); });
+	const bool alongWay = m_settings.playerLikeMovement() && !self.vehicle && !threat && bot.roundsSeen.empty()
+		&& L.moveX * L.moveX + L.moveZ * L.moveZ >= 0.01f
+		&& (std::fabs(input.throttle) >= 0.01f || std::fabs(input.strafe) >= 0.01f);
+	if (alongWay) {
+		L.offset = {L.moveX, std::sin(bot.pitch * kRadiansPerDegree), L.moveZ};
+		L.offsetFromRoot = false;
+		L.plan = true;
+		L.sectorPlan = false;
+		L.aheadOfMove = false;
+		L.needPlan = true; // the sectors choose again once this ends
+	}
 	// A soldier's look chosen ahead of its walk is dropped once the walk
 	// turns from it (the override).
 	const bool override = L.aheadOfMove && !within(L.sector, L.moveX, L.moveZ, kCos20);
-	if (!(elapsed >= L.duration || L.force || L.needPlan) && !override) {
+	if (alongWay || (!(elapsed >= L.duration || L.force || L.needPlan) && !override)) {
 		// The plan keeps its look.
 	} else {
 		if (override) {
@@ -302,7 +319,22 @@ void BotManager::lookAround(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 		return;
 	}
 	// The look statement: the aim turns the view along the offset.
-	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
+	physics::Vec3 eye = self.position + physics::Vec3 {0, kEye, 0};
+	// The offset statement hands MouseTurretLookAt the offset itself
+	// (AIDLL 0x100de290, slot 7 of 0x1011b390), and 0x1008e6e0 normalises
+	// it and takes its yaw and pitch against the controlled object's frame:
+	// a direction, from no origin. aim() measures a gun's from the gun's
+	// round origin (gunFrame), so the point goes out from there along the
+	// offset; from the root's eye it would come back at a parallax, worst
+	// inside a long barrel's sweep. The same seats aim() treats as guns.
+	physics::Vec3 gunEye = eye;
+	physics::Mat3 hull;
+	float gunYaw = 0, gunPitch = 0;
+	if (!L.offsetFromRoot && self.vehicle && (self.seat > 0 || drivesGun(self))
+		&& m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch)
+		&& m_world.gunFrame(self.vehicle, self.seat, gunEye, hull)) {
+		eye = gunEye;
+	}
 	const physics::Vec3 point = L.offsetFromRoot ? self.position + L.offset : eye + L.offset * 5.0f;
 	L.quiet = true;
 	const float throttle = input.throttle, strafe = input.strafe;

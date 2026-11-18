@@ -193,6 +193,9 @@ TEST(GameControllers_ControlMaps)
 	const auto localize = [](const std::string& key) { return key == "CONTROLLER_IDKey_PageUp" ? std::string("Page Up") : key; };
 	CHECK(maps.withKeyNames("(#PIThrottle_1# and #PIThrottle_2#), '#GIYes#' #PINothing# #GI", localize) ==
 		"(W and S), 'Page Up' #PINothing# #GI");
+	// The shipped HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT, colour codes around the key.
+	CHECK(maps.withKeyNames("Press '|C1001#GIYes#|C1001' to |C1001Accept|C1001", localize) ==
+		"Press '|C1001Page Up|C1001' to |C1001Accept|C1001");
 }
 
 // A stick and a hat flying: the air map's c_PIRoll and c_PIPitch from a

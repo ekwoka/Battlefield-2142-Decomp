@@ -36,8 +36,8 @@
 // 0x006e5e90), and returns 0 otherwise, which clears the object's flag
 // 0x100 (slot 0x54(0, 0x100)): out of the scene's rays. The shipped
 // vehicles' geometry 0 has the wreck's shape as its second sub-geometry
-// (us_heavy_mech's: 6746 faces), the parts have one: a wreck is its root's
-// wreck shape alone. Every other LOD query goes through the instance's
+// (us_heavy_mech's: 6746 faces); parts can have an empty second state
+// (the FAV's wheels), which also supplies no contacts. Every LOD query goes through the instance's
 // sub-geometry too: the vehicle LOD the ground pass and the mesh physics
 // read, and the soldier LOD (setBodyLods).
 #include "GameWorld.h"
@@ -318,6 +318,14 @@ void GameWorld::wreckCollision(Body& body)
 		return;
 	}
 	body.collisionWrecked = true;
+	// Wrecked from inside the collision pass (a contact's damage), the pass
+	// still holds the old meshes' raw pointers (MeshActor::mesh): they stay
+	// alive until the pass ends (port: the original's instance outlives it).
+	for (const auto* old : {&body.vehicleMesh, &body.projectileMesh, &body.soldierMesh, &body.trunk}) {
+		if (*old) {
+			m_retiredMeshes.push_back(*old);
+		}
+	}
 	// The root's instance: its wreck sub-geometry, or out of the rays.
 	auto world = std::make_shared<physics::CollisionWorld>();
 	const bool wreckShape = body.meshFile->geometries[0].subGeometries.size() >= 2;
@@ -338,6 +346,11 @@ void GameWorld::wreckCollision(Body& body)
 	if (wreckShape) {
 		setBodyLods(body, *body.meshFile, body.meshMaterials, 1);
 	}
+	if (body.vehicle) {
+		body.vehicle->setWheelCollisionState(*body.meshFile, 1);
+	}
+	// The new shape may no longer be supported where the live one slept.
+	wake(body);
 }
 
 bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const physics::Vec3& to,
@@ -432,6 +445,7 @@ void GameWorld::partActors(Body& body, std::vector<MeshActor>& out)
 		a.geometry = part.geometry;
 		a.state = state;
 		a.partMesh = part.ownResponse ? static_cast<int>(index) : -1;
+		a.team = root.team; // a part passes its team's force fields as its root does
 		out.push_back(a);
 	}
 }

@@ -9,6 +9,7 @@
 #include "AnimatedUV.h"
 #include "MeshQueues.h"
 #include "RenderMath.h"
+#include "WorldSamples.h"
 #include "Texture/DdsFile.h"
 
 #include <SDL3/SDL.h>
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -51,6 +53,18 @@ struct Vertex {
 constexpr int kMaxMeshParts = 64;
 constexpr int kMaxPointLights = 8;
 
+// Every uniform block is pushed whole, and none is over 4 KiB: SDL's
+// Vulkan backend binds each slot with a 4096-byte range
+// (MAX_UBO_SECTION_SIZE), and its Metal backend binds a push where it
+// lands in a 32 KiB buffer, so a block longer than its push runs past the
+// buffer's end (tests/ShaderUniformsTest.cpp checks the shaders' blocks).
+// The mesh shaders' Transforms block (slot 0) is TransformUniforms up to
+// `parts`; the parts are a block of their own (kPartsSlot), sent only for
+// meshes that have parts.
+constexpr uint32_t kPartsSlot = 2;         // mesh.vert, roadmesh.vert, motion.vert: Parts
+constexpr uint32_t kPreviousPartsSlot = 3; // motion.vert: PreviousParts
+constexpr uint32_t kMaxUniformBlockSize = 4096;
+
 struct TransformUniforms {
 	Mat4 worldViewProjection;
 	Mat4 world;
@@ -61,29 +75,59 @@ struct TransformUniforms {
 	float sway[4] {};
 	// mesh.vert's normal map frame: x 0 none, 1 the tangent's (bundled,
 	// static and skinned meshes' tangents), 2 the object's (RaShaderSM
-	// _OBJSPACENORMALMAP_).
+	// _OBJSPACENORMALMAP_). y: an AnimatedUV technique (uvMatrices). z:
+	// set by pushTransforms, 1 when the parts block went (sendParts), else
+	// mesh.vert places the vertices by the identity.
 	float normalSpace[4] {};
-	Mat4 parts[kMaxMeshParts]; // bundled-mesh part transforms, skinned meshes' bones
+	float trunkSunDirection[4] {}; // world-space direction for per-vertex trunk lighting
 	// normalSpace.y 1: an "AnimatedUV" bundled technique (RaShaderBM
 	// _HASUVANIMATION_): the texture coordinates are (TexUVRotCenter, 1) x
 	// uvMatrix[blend index 3] + TexDiffuse. Each matrix as two vec4s: rows
 	// 0 and 1 (xy, xy), then row 2 (xy) (AnimatedUV.h).
-	// After the parts: sent only for bundled meshes (uvUsed).
 	float uvMatrices[kAnimatedUVMatrices * 2][4] {};
-	// Not in the shaders' block: how many of `parts` pushUniformSize sends
-	// (a static mesh reads only the first; the other shaders none), and
-	// whether the UV matrices after them go too (all parts then).
-	uint32_t partsUsed = kMaxMeshParts;
-	bool uvUsed = false;
+	// The Parts block (kPartsSlot): bundled-mesh part transforms, skinned
+	// meshes' bones; roadmesh.vert's view-projection is the first.
+	Mat4 parts[kMaxMeshParts];
+	// Not in the shaders' blocks: whether pushTransforms sends `parts`. A
+	// static mesh's vertices all have part 0 and are placed by the identity.
+	bool sendParts = true;
 };
 
-// The bytes of `t` to push: the block up to the parts it uses.
-inline uint32_t pushUniformSize(const TransformUniforms& t)
+// The Transforms block's size: everything before `parts`.
+constexpr uint32_t kTransformsBlockSize = static_cast<uint32_t>(offsetof(TransformUniforms, parts));
+static_assert(kTransformsBlockSize == 448 && sizeof(TransformUniforms::parts) == kMaxUniformBlockSize);
+
+// `t`'s vertex uniforms: the Transforms block whole (slot 0) and, with
+// sendParts, the Parts block whole (kPartsSlot). Without it the slot keeps
+// its last push, which was whole too (only this pushes there), and mesh.vert
+// doesn't read it.
+inline void pushTransforms(SDL_GPUCommandBuffer* commands, const TransformUniforms& t)
 {
-	if (t.uvUsed) {
-		return static_cast<uint32_t>(offsetof(TransformUniforms, uvMatrices) + sizeof(t.uvMatrices));
+	unsigned char block[kTransformsBlockSize];
+	std::memcpy(block, &t, sizeof(block));
+	const float hasParts = t.sendParts ? 1.0f : 0.0f;
+	std::memcpy(block + offsetof(TransformUniforms, normalSpace) + 2 * sizeof(float), &hasParts, sizeof(hasParts));
+	SDL_PushGPUVertexUniformData(commands, 0, block, sizeof(block));
+	if (t.sendParts) {
+		SDL_PushGPUVertexUniformData(commands, kPartsSlot, t.parts, sizeof(t.parts));
 	}
-	return static_cast<uint32_t>(offsetof(TransformUniforms, parts) + sizeof(Mat4) * std::min<uint32_t>(t.partsUsed, kMaxMeshParts));
+}
+
+// The enhanced prepass's motion.vert (not retail): its Motion block (slot
+// 1) and, after it, its PreviousParts block (kPreviousPartsSlot), each
+// pushed whole (pushMotion).
+struct MotionUniforms {
+	Mat4 current;  // world x this frame's view-projection, unjittered
+	Mat4 previous; // last frame's world x its view-projection
+	Mat4 previousParts[kMaxMeshParts];
+};
+constexpr uint32_t kMotionBlockSize = static_cast<uint32_t>(offsetof(MotionUniforms, previousParts));
+static_assert(kMotionBlockSize == 128 && sizeof(MotionUniforms::previousParts) == kMaxUniformBlockSize);
+
+inline void pushMotion(SDL_GPUCommandBuffer* commands, const MotionUniforms& motion)
+{
+	SDL_PushGPUVertexUniformData(commands, 1, &motion, kMotionBlockSize);
+	SDL_PushGPUVertexUniformData(commands, kPreviousPartsSlot, motion.previousParts, sizeof(motion.previousParts));
 }
 
 // Water fragment shader, second uniform block.
@@ -207,7 +251,7 @@ struct ShadowUniforms {
 	Mat4 shadowMatrix;           // world -> the maps' uv and depth
 	float params[4] {};          // x: 1 on, y: a texel in uv, z: depth bias, w: 1 with the static map
 	float hemiConstants[4] {};   // xy: corner (x, z), z: size (0 none), w: lerp bias
-	float hemiSky[4] {};         // rgb: the sky colour, w: 1 for the sun's occlusion
+	float hemiSky[4] {};         // rgb: the sky colour, w: 1 for the sun's occlusion, 2 with the camera in a Titan
 	float extra[4] {0, 0.8f, 0, 0}; // x: shadowIntensityBias, y: the fade's start, z: 1 for the undergrowth
 };
 
@@ -225,11 +269,18 @@ constexpr float kMaterialAdditive = 16; // unlit, added (additiveMeshPipeline)
 constexpr float kMaterialHemi = 32;     // a bundled or skinned mesh: the hemi map's ambient
 constexpr float kMaterialNormalMap = 64;  // a normal map (the dirt map's binding; RaShaderBM/SM _HASNORMALMAP_)
 constexpr float kMaterialNoShadows = 128; // receives no dynamic shadows (the low lighting level's BM/SM)
+constexpr float kMaterialTrunk = 256; // RaShaderTrunkSTMBase/Detail
+constexpr float kMaterialTitanInterior = 512; // RaShaderSTM _TITANINTERIOR_ with the camera in a Titan
+constexpr float kMaterialGIMap = 1024; // RaShaderBM _HASGIMAP_: binding 4, unused by bundled cracks
 // mesh.frag's samplers: 0-4 the material's maps, 5-7 the shadows and the
 // hemi map (shadow.glsl), 8 a static mesh's detail normal map, 9 its crack
 // normal map, 10 the envmap (a cube).
 constexpr uint32_t kMeshSamplers = 11;
 constexpr uint32_t kMeshLayerSamplers = 8;
+// terrain.frag's samplers: 0-10 the maps and layers, 11-12 the shadows, 13 the
+// envmap cube, 14-15 the side-projected layers: Metal's whole 16 (an enhanced
+// variant has no slot left for an AO map).
+constexpr uint32_t kTerrainSamplers = 16;
 // LightingUniforms::layers[2] bits.
 constexpr float kLayerDetailNormal = 1; // a static mesh's detail normal map (RaShaderSTM _NDETAIL_)
 constexpr float kLayerCrackNormal = 2;  // its crack normal map (_NCRACK_)
@@ -274,8 +325,12 @@ public:
 	// sample count, the most at or below `requested` that the colour and
 	// depth formats support (1: single-sampled, the multisampled set made
 	// the first time a count is asked for). Returns the count in effect.
-	uint32_t setWorldSamples(uint32_t requested);
-	uint32_t worldSamples() const { return m_worldSamples; }
+	// `enhancedLit` (not retail): this frame draws the enhanced lit
+	// variants, which are single-sampled, so the world is too
+	// (WorldSamples.h); decided here, before the frame's targets are made.
+	uint32_t setWorldSamples(uint32_t requested, bool enhancedLit = false);
+	// The count the world's targets and pipelines take.
+	uint32_t worldSamples() const { return m_samples.samples(); }
 	// The sample counts above one that both formats take (SDL GPU's 2, 4
 	// and 8), ascending: what the video options offer, as RendDX9 lists
 	// the multisample types the device accepts (0x10007e30, 0x1000fb60).
@@ -288,8 +343,8 @@ public:
 	SDL_GPUGraphicsPipeline* coverageMeshPipeline() const { return world().coverageMesh; }
 	SDL_GPUGraphicsPipeline* coverageUndergrowthPipeline() const { return world().coverageUndergrowth; }
 	SDL_Window* window() const { return m_window; }
-	SDL_GPUGraphicsPipeline* meshPipeline() const { return world().mesh; }
-	SDL_GPUGraphicsPipeline* terrainPipeline() const { return world().terrain; }
+	SDL_GPUGraphicsPipeline* meshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.mesh : world().mesh; }
+	SDL_GPUGraphicsPipeline* terrainPipeline() const { return m_samples.enhancedLit() ? m_enhanced.terrain : world().terrain; }
 	// The surrounding terrain (secondary heightmaps): terrain.vert with
 	// surrounding.frag.
 	SDL_GPUGraphicsPipeline* surroundingPipeline() const { return world().surrounding; }
@@ -299,18 +354,26 @@ public:
 	// no depth writes.
 	// Also blended materials (RendDX9's transparency queues): SRCALPHA /
 	// INVSRCALPHA, no culling (CullMode 1, 0x100c3880).
-	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return world().fadedMesh; }
+	SDL_GPUGraphicsPipeline* fadedMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.fadedMesh : world().fadedMesh; }
 	// Additive materials (hasAdditiveAlpha, BMadditive): SRCALPHA / ONE,
 	// depth-tested, not written.
-	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return world().additiveMesh; }
+	SDL_GPUGraphicsPipeline* additiveMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.additiveMesh : world().additiveMesh; }
 	// A mesh queue's pipeline, with back faces culled or not (meshCulled:
 	// the opaque and alpha-tested materials of the bundled and skinned
 	// meshes keep the material settings' CullMode 3, D3DCULL_CCW).
 	SDL_GPUGraphicsPipeline* meshPipeline(MeshQueue queue, bool culled) const
 	{
 		switch (queue) {
-		case MeshQueue::Opaque: return culled ? world().culledMesh : world().mesh;
-		case MeshQueue::Transparent: return culled ? world().culledFadedMesh : world().fadedMesh;
+		case MeshQueue::Opaque:
+			if (m_samples.enhancedLit()) {
+				return culled ? m_enhanced.meshCulled : m_enhanced.mesh; // the enhanced set has no culled blended one
+			}
+			return culled ? world().culledMesh : world().mesh;
+		case MeshQueue::Transparent:
+			if (m_samples.enhancedLit()) {
+				return m_enhanced.fadedMesh;
+			}
+			return culled ? world().culledFadedMesh : world().fadedMesh;
 		case MeshQueue::Additive: break;
 		}
 		return world().additiveMesh;
@@ -318,13 +381,13 @@ public:
 	// Alpha-blended, depth-tested but not written.
 	SDL_GPUGraphicsPipeline* waterPipeline() const { return world().water; }
 	// Water's blending plus a depth bias, for road decals.
-	SDL_GPUGraphicsPipeline* roadPipeline() const { return world().road; }
-	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return world().roadMesh; }
+	SDL_GPUGraphicsPipeline* roadPipeline() const { return m_samples.enhancedLit() ? m_enhanced.road : world().road; }
+	SDL_GPUGraphicsPipeline* roadMeshPipeline() const { return m_samples.enhancedLit() ? m_enhanced.roadMesh : world().roadMesh; }
 	// The same state for decals (decal.vert / decal.frag).
 	SDL_GPUGraphicsPipeline* decalPipeline() const { return world().decal; }
 	// Opaque, alpha-tested, Direct3D's front faces culled (Undergrowth.fx's
 	// CullMode CW); undergrowth uniforms in the vertex stage.
-	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return world().undergrowth; }
+	SDL_GPUGraphicsPipeline* undergrowthPipeline() const { return m_samples.enhancedLit() ? m_enhanced.undergrowth : world().undergrowth; }
 	// Particles: depth-tested, not written; blended or added.
 	SDL_GPUGraphicsPipeline* uiPipeline() const { return m_uiPipeline; }
 	// The UI with gameswf's mask states (RendDX9.dll 0x10118920 /
@@ -342,7 +405,7 @@ public:
 										 : m_uiPipeline;
 	}
 	// The HUD with the blend factors of a HudBuilder.addNodeBlendEffect
-	// (Direct3D 9 D3DBLEND values, 1 ZERO .. 11 SRCALPHASAT, for colour and
+	// (Meme values, translated to Direct3D/SDL by HudBlend.h, for colour and
 	// alpha alike; 0 0 is uiPipeline()'s SRCALPHA / INVSRCALPHA), made the
 	// first time a pair is asked for. Null when the pair can't be built.
 	SDL_GPUGraphicsPipeline* uiBlendPipeline(int source, int destination);
@@ -372,9 +435,11 @@ public:
 	// A sampled colour texture of the swapchain's format (post-production targets).
 	SDL_GPUTexture* createColorTexture(uint32_t width, uint32_t height);
 	// A sampled depth texture of shadowDepthFormat().
-	SDL_GPUTexture* createShadowMap(uint32_t size);
+	SDL_GPUTexture* createShadowMap(uint32_t size, uint32_t height = 0); // square unless a height is given
 	SDL_GPUSampler* repeatSampler() const { return m_repeatSampler; }
 	SDL_GPUSampler* clampSampler() const { return m_clampSampler; }
+	// The Flash menu's: base level only, bilinear (RendDX9.dll's SwiffMenu.fx/Font.fx states).
+	SDL_GPUSampler* menuSampler(bool repeat) const { return repeat ? m_menuRepeatSampler : m_menuClampSampler; }
 	SDL_GPUTexture* whiteTexture() const { return m_white; }
 	SDL_GPUTexture* blackTexture() const { return m_black; }
 	SDL_GPUTexture* whiteCubeTexture() const { return m_whiteCube; }
@@ -384,6 +449,57 @@ public:
 	// Depth with a stencil (the menus' masks): D32_FLOAT_S8_UINT, else
 	// D24_UNORM_S8_UINT (SDL guarantees one of them).
 	SDL_GPUTextureFormat depthFormat() const { return m_depthFormat; }
+
+	// ---- the enhanced mode (Enhanced/LevelRendererEnhanced.cpp) ----------
+	// Not retail. Each is null when it couldn't be made; its pass is off then.
+	struct EnhancedPipelines {
+		// The lit pipelines' variants (Shaders/Enhanced/*.patch: the GTAO on
+		// the ambient, the cascaded shadows), as the retail ones' states.
+		SDL_GPUGraphicsPipeline* mesh = nullptr;
+		SDL_GPUGraphicsPipeline* meshCulled = nullptr;
+		SDL_GPUGraphicsPipeline* fadedMesh = nullptr;
+		SDL_GPUGraphicsPipeline* additiveMesh = nullptr;
+		SDL_GPUGraphicsPipeline* terrain = nullptr;
+		SDL_GPUGraphicsPipeline* undergrowth = nullptr;
+		SDL_GPUGraphicsPipeline* road = nullptr;
+		SDL_GPUGraphicsPipeline* roadMesh = nullptr;
+		// The blended particles' (Enhanced/particle.*.patch): the cascades' shadow at the particle.
+		SDL_GPUGraphicsPipeline* particle = nullptr;
+		// The prepass's depth (mesh.vert / shadowcaster.frag, terrain.vert /
+		// depth.frag) into shadowDepthFormat(); the cascades' terrain casters.
+		SDL_GPUGraphicsPipeline* depth = nullptr;
+		SDL_GPUGraphicsPipeline* depthCulled = nullptr; // back faces culled, as the world's (meshCulled)
+		SDL_GPUGraphicsPipeline* terrainDepth = nullptr;
+		SDL_GPUGraphicsPipeline* terrainCaster = nullptr;
+		// The G-buffer (normalDepth + motion targets), the moving meshes'
+		// motion (depth-tested against the prepass) and the first person's
+		// (untested), the GTAO and its blur, TAA's resolve.
+		SDL_GPUGraphicsPipeline* gbuffer = nullptr;
+		SDL_GPUGraphicsPipeline* motion = nullptr;
+		SDL_GPUGraphicsPipeline* motionCulled = nullptr;
+		SDL_GPUGraphicsPipeline* motionOverlay = nullptr;
+		SDL_GPUGraphicsPipeline* gtao = nullptr;
+		SDL_GPUGraphicsPipeline* aoBlur = nullptr;
+		SDL_GPUGraphicsPipeline* taa = nullptr;
+	};
+	static constexpr SDL_GPUTextureFormat kNormalDepthFormat = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+	static constexpr SDL_GPUTextureFormat kMotionFormat = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+	static constexpr SDL_GPUTextureFormat kAOFormat = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+	const EnhancedPipelines& enhancedPipelines() const { return m_enhanced; }
+	// The lit pipelines' accessors give the variants (when all were made).
+	// Turning them on takes setWorldSamples (the frame's count); this only
+	// turns them off, or keeps them on while the world is single-sampled.
+	void setEnhancedLit(bool on) { m_samples.setEnhancedLit(on && enhancedLitAvailable()); }
+	bool enhancedLit() const { return m_samples.enhancedLit(); }
+	bool enhancedLitAvailable() const
+	{
+		const EnhancedPipelines& e = m_enhanced;
+		return e.mesh && e.meshCulled && e.fadedMesh && e.additiveMesh && e.terrain && e.undergrowth && e.road && e.roadMesh;
+	}
+	// Nearest, clamped (the G-buffer's reads).
+	SDL_GPUSampler* pointSampler() const { return m_pointSampler; }
+	// A sampled render target of `format` (a colour or a depth format).
+	SDL_GPUTexture* createRenderTexture(uint32_t width, uint32_t height, SDL_GPUTextureFormat format, bool depth = false);
 
 	// Uploads are recorded into one copy pass and submitted by flushUploads().
 	SDL_GPUBuffer* createBuffer(SDL_GPUBufferUsageFlags usage, const void* data, uint32_t size);
@@ -419,8 +535,10 @@ private:
 	// world's otherwise.
 	bool createPipelines(std::string& error, uint32_t samples, WorldPipelines& world);
 	void releaseWorldPipelines(WorldPipelines& world);
-	const WorldPipelines& world() const { return m_worldSamples > 1 ? m_multisampled : m_singleSampled; }
+	const WorldPipelines& world() const { return m_samples.multisampled() ? m_multisampled : m_singleSampled; }
 	SDL_GPUCopyPass* copyPass();
+	EnhancedPipelines m_enhanced;
+	SDL_GPUSampler* m_pointSampler = nullptr;
 
 	SDL_GPUDevice* m_device = nullptr;
 	SDL_Window* m_window = nullptr;
@@ -428,7 +546,7 @@ private:
 	WorldPipelines m_singleSampled;
 	WorldPipelines m_multisampled; // at m_multisampledCount
 	uint32_t m_multisampledCount = 1;
-	uint32_t m_worldSamples = 1;
+	WorldSamples m_samples; // the world's count, and whether the enhanced variants draw
 	SDL_GPUGraphicsPipeline* m_uiPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiSubmitPipeline = nullptr;
 	SDL_GPUGraphicsPipeline* m_uiTestPipeline = nullptr;
@@ -443,6 +561,8 @@ private:
 	SDL_GPUTextureFormat m_depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
 	SDL_GPUSampler* m_repeatSampler = nullptr;
 	SDL_GPUSampler* m_clampSampler = nullptr;
+	SDL_GPUSampler* m_menuClampSampler = nullptr;
+	SDL_GPUSampler* m_menuRepeatSampler = nullptr;
 	SDL_GPUTexture* m_white = nullptr;
 	SDL_GPUTexture* m_black = nullptr;
 	SDL_GPUTexture* m_whiteCube = nullptr;

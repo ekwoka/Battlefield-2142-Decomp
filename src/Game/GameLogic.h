@@ -9,9 +9,9 @@
 //   gameLogic.setTicketLossPerMin 1 6
 // and the game mode's Python script runs the round through the parameters
 // ("tickets", "ticketChangePerSecond", "ticketLimit"...). Each tick the
-// tickets change by ticketChangePerSecond; crossing a ticket limit raises
-// TicketLimitReached(team, -id) going down and (team, id) going up, and the
-// time limit raises TimeLimitReached.
+// tickets change by ticketChangePerSecond; falling to or below a ticket limit
+// raises TicketLimitReached(team, -id) (rising over one raises nothing), and
+// the time limit raises TimeLimitReached.
 #pragma once
 
 #include "ScriptGame.h"
@@ -82,6 +82,8 @@ public:
 	void setEventSink(ScriptEventSink sink) { m_events = std::move(sink); }
 	// Called when the round ends (sgl_endGame or no tickets left).
 	std::function<void(int winner, int victoryType)> onEndGame;
+	// A team's ticketState set to a new value (the scripts' setTicketState).
+	std::function<void(int team, int state)> onTicketState;
 
 	void startRound();
 	void tick(float seconds);
@@ -103,7 +105,11 @@ public:
 	// resets the round then (slot 0x24, 0x004be630).
 	std::function<void()> onCountdown;
 	void setTickets(int team, float tickets);
-	void endGame(int winner, int victoryType);
+	// A delay over 0 (gpm_ti's 25 s Titan explosion) keeps the round going
+	// until it passes, the winner known at once (0x004bbe30 arms +0x318,
+	// 0x004c03b0 ends the round when the tick passes it).
+	void endGame(int winner, int victoryType, float delay = 0);
+	bool endPending() const { return m_endIn > 0; }
 
 	// sgl_getParam / sgl_setParam.
 	ScriptValue param(const std::string& name, int team, int id) const;
@@ -142,6 +148,7 @@ private:
 	bool m_ended = false;
 	int m_winner = 0;
 	int m_victoryType = 0;
+	float m_endIn = 0;
 	bool m_timeLimitRaised = false;
 	int m_state = 3;
 	float m_countdown = 0;

@@ -19,6 +19,12 @@ class GameControllers;
 
 namespace dice::hfe {
 
+inline float infantryPitchAfterVehicleExit(float pitch, bool wasDriving, bool driving,
+	std::optional<float> lastVehicleCameraPitch)
+{
+	return wasDriving && !driving && lastVehicleCameraPitch ? *lastVehicleCameraPitch : pitch;
+}
+
 struct ViewerOptions {
 	std::string screenshot; // render one frame to this PNG instead of opening a window
 	int width = 1280;
@@ -60,12 +66,14 @@ struct ViewerOptions {
 		bool voipPushToTalk = false;    // held: c_GIVoipPushToTalk (V)
 		bool voipLeaderChannel = false; // held: c_GIVoipUseLeaderChannel (B)
 		bool toggleCamera = false;      // held: c_PIToggleCameraMode (C)
+		int camera = 0;         // F9..F12: inside, chase, front chase, fly-by
 		int seat = 0;           // F1..F8 held: that vehicle seat (1-based)
 		int item = 0;            // 1..9 held: the weapon in that kit slot
 		bool sayAll = false, sayTeam = false, saySquad = false; // c_GISayAll (K), c_GISayTeam (L), c_GISaySquad
 		bool radioComm = false, tacticalComm = false; // held: c_GIRadioComm (Q), c_GITacticalComm (T)
 		// held: c_GIMapSize (M), c_GIMapZoom (N), c_GI3dMap (left Alt)
 		bool mapSize = false, mapZoom = false, map3d = false;
+		bool deployment = false; // c_GIEnter: toggle the deployment screen
 		bool yes = false, no = false; // c_GIYes / c_GINo: the HUD's questions (0x00754290 → 0x0079e320)
 	};
 	struct PlayerView {
@@ -80,6 +88,7 @@ struct ViewerOptions {
 		// First person: the camera itself (radians; yaw 0 along +z, pitch up
 		// positive) and its vertical field of view.
 		bool firstPerson = false;
+		uint32_t projectileSerial = 0; // interpolate only this projectile camera
 		float eye[3] = {0, 0, 0};
 		float eyeYaw = 0, eyePitch = 0;
 		float fovY = 1.0f;
@@ -100,11 +109,17 @@ struct ViewerOptions {
 	// Menus (the spawn screen): while it says so the mouse is a pointer,
 	// and left clicks go to onClick in the HUD's 800 x 600 screen.
 	std::function<bool()> wantsPointer;
+	// Which term of wantsPointer is true (null when none); only for the log.
+	std::function<const char*()> pointerReason;
 	std::function<void(float x, float y)> onClick;
 	// The right button's clicks and the pointer's moves (the HUD's
 	// right-click map menus, button highlights), same screen.
 	std::function<void(float x, float y)> onRightClick;
 	std::function<void(float x, float y)> onPointerMove;
+	std::function<void(float x, float y, int steps)> onPointerWheel;
+	// A place the pointer was put (HUD 800 x 600) the system cursor must
+	// follow once it shows; true takes it.
+	std::function<bool(float& x, float& y)> takePointerWarp;
 
 	// A Flash menu: all input goes to it (positions as fractions of the
 	// window), Esc included; it asks to quit through wantsQuit.

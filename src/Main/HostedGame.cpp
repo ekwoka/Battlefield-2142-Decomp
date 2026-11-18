@@ -393,6 +393,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		// A new round: a new player of the client's team, a new database.
 		const int team = client.team ? client.team : 1;
 		client.player = m_round->addPlayer(client.name, team, false);
+		m_round->requireSpawnConfirmation(client.player);
 		m_names[client.player] = client.name;
 		if (const auto& kits = m_logic->team(team).kits; !kits.empty()) {
 			m_round->setKit(client.player, kits.front().name, kits.front().soldier);
@@ -607,6 +608,7 @@ void HostedGame::joined(int id)
 	// lowest free one is taken.
 	const std::string name = afterLogin ? connection->playerInfo.name : "Player" + std::to_string(id);
 	client.player = m_round->addPlayer(name, team, false);
+	m_round->requireSpawnConfirmation(client.player);
 	client.name = name;
 	client.team = team;
 	m_names[client.player] = client.name;
@@ -1287,6 +1289,10 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			// the squad's spawn point once set down; a vehicle's group: that
 			// vehicle; else a control point's.
 			const int group = info.payloadInt();
+			if (group == 0) { // retail 0x00751855: reopening deployment cancels 6/6
+				client.spawnRequested = false;
+				break;
+			}
 			game::GameWorld::PlayerInfo me;
 			m_round->playerInfo(player, me);
 			bool taken = false;
@@ -1335,7 +1341,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		case net::kNeSuicide: {
 			game::GameWorld::PlayerInfo me;
 			if (m_round->playerInfo(player, me) && me.alive) {
-				m_round->setHitPoints(me.soldier, 0);
+				m_round->suicide(me.soldier);
 			}
 			break;
 		}
@@ -1683,13 +1689,16 @@ void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
 	spot.spotter = me.soldier ? ghostOfObject(me.soldier) : 0;
 	spot.team = me.team;
 
-	if (spot.message == 0x2e) {
+	if (spot.message == 0x2e && spot.spotted) {
+		// The round takes the spot; sendRadioSpots hands it out with the
+		// enemy's object, as each client's crosshair would have named it.
 		const int enemy = spot.spotted ? playerOfGhost(spot.spotted) : -1;
 		if (enemy >= 0) {
-			m_round->reportBattlefieldObjects(reporter, {enemy});
+			m_round->radioSpot(reporter, enemy, spot.value);
 		} else {
-			m_round->spotCrosshair(reporter);
+			return; // invalid object ghost: never repick the reporter's current view
 		}
+		return;
 	}
 	const std::string payload = net::spottedPayload(spot);
 	for (const auto& p : m_round->playerList()) {
@@ -1705,6 +1714,38 @@ void HostedGame::spotted(const net::SpottedInfo& from, int reporter)
 		}
 		if (!remote && p.id == m_round->localPlayer() && onSpotted) {
 			onSpotted(spot);
+		}
+	}
+}
+
+// The round's radio spots (players' and bots', GameWorld::radioSpot) as
+// 0x0050e910 hands out the Spotted event: message 2/0x2e with the
+// reporter's soldier, the spotted object (the vehicle the enemy rides, else
+// his soldier) and the value to each client of the reporter's team, whose
+// minimap lists the object for 12 s (RemoteWorld). The host's own map has
+// the round's list.
+void HostedGame::sendRadioSpots()
+{
+	for (const game::GameWorld::RadioSpot& s : m_round->takeRadioSpots()) {
+		game::GameWorld::PlayerInfo from, enemy;
+		if (!m_round->playerInfo(s.reporter, from) || !m_round->playerInfo(s.enemy, enemy)) {
+			continue;
+		}
+		net::SpottedInfo spot;
+		spot.spotter = from.soldier ? ghostOfObject(from.soldier) : 0;
+		spot.spotted = ghostOfObject(enemy.vehicle ? enemy.vehicle : enemy.soldier);
+		spot.team = from.team;
+		spot.value = s.value;
+		spot.message = 0x2e;
+		if (!spot.spotted) {
+			continue;
+		}
+		const net::GameEvent e = net::makePostRemote(2, spot.message, net::spottedPayload(spot));
+		for (const auto& [id, client] : m_clients) {
+			game::GameWorld::PlayerInfo p;
+			if (client.stage == Client::Stage::Playing && m_round->playerInfo(client.player, p) && p.team == from.team) {
+				sendTo(id, e);
+			}
 		}
 	}
 }
@@ -1995,6 +2036,8 @@ void HostedGame::applyMoves()
 		// move); after that the input is all zero. (Its keys' presses don't
 		// act again: they are the held keys, as MoveInputState keeps them.)
 		game::SoldierInput input;
+		game::GameWorld::PlayerInfo seat;
+		client.moveState.seated = m_round->playerInfo(client.player, seat) && seat.vehicle != 0;
 		if (!client.moves.empty()) {
 			const net::PlayerMove move = client.moves.front();
 			client.moves.pop_front();
@@ -2017,8 +2060,21 @@ void HostedGame::applyMoves()
 		// death's sv.spawnTime wait, 0x004bb220), and not in the start's
 		// countdown (0x004bd2a0 sets every spawn time to its end).
 		if (client.spawnRequested && m_round->playerInfo(client.player, me) && !me.alive) {
-			if (me.respawnIn <= 0 && m_logic->roundState() != 2 && m_round->spawnSoldier(client.player)) {
-				client.spawnRequested = false;
+			if (me.respawnIn <= 0 && m_logic->roundState() != 2) {
+				// The round clears its request when the group can't be
+				// spawned at (GameWorld::spawnSoldier); 0x004bfe40 then sets
+				// the player's group to 0 (0x004bff13, slot 0x188) and posts
+				// 6/6 back to him (0x004b6630 case 6 reopens deployment), so
+				// nothing spawns him until he picks again.
+				const bool asked = m_round->requestSpawn(client.player);
+				if (m_round->spawnSoldier(client.player)) {
+					client.spawnRequested = false;
+				} else if (asked && !m_round->spawnRequested(client.player)) {
+					client.spawnRequested = false;
+					sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeSelectSpawnGroup));
+				} else {
+					m_round->cancelSpawnRequest(client.player);
+				}
 			}
 		} else if (me.alive) {
 			client.spawnRequested = false;
@@ -2940,12 +2996,12 @@ const HostedGame::Ghost* HostedGame::ghostOf(uint16_t id, size_t& part) const
 net::TeamNetState HostedGame::teamStateOf() const
 {
 	// Both teams' tickets (the bits 0x400 and 0x400000, team +0x84, as
-	// 0x0055f180 clamps them), each with its bit and value (+0x90, +0x8c:
-	// not kept by the rewrite's game logic, 0).
+	// 0x0055f180 clamps them), each with its bit (+0x90, not kept: 0) and
+	// value (+0x8c, the ticket state the clients announce, 0x0044b803).
 	net::TeamNetState state;
 	for (int team = 1; team <= 2; ++team) {
 		const int tickets = static_cast<int>(std::lround(m_logic->team(team).tickets));
-		state.setTickets(team, std::clamp(tickets, 0, 9999));
+		state.setTickets(team, std::clamp(tickets, 0, 9999), false, m_logic->team(team).ticketState);
 	}
 	return state;
 }
@@ -3717,6 +3773,7 @@ void HostedGame::tick()
 	trackObjects();
 	trackProjectiles();
 	sendBattlefieldReports();
+	sendRadioSpots();
 	trackPlayers();
 	trackSpawnGroups();
 	trackRequests();

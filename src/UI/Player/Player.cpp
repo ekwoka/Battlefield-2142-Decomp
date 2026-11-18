@@ -1183,6 +1183,32 @@ bool Player::isInteractive(DisplayObject& object)
 	return false;
 }
 
+namespace {
+
+// Is the stage point outside a mask over this child, as Clip::draw applies
+// them? Flash takes the mouse only where masked content shows; the scroll
+// panes' rows (setMask) otherwise cover their scroll bars.
+bool maskedOut(const Clip& clip, int depth, DisplayObject& child, swf::Point stage)
+{
+	if (child.kind == Kind::Clip) {
+		auto* mask = dynamic_cast<DisplayObject*>(static_cast<Clip&>(child).mask.get());
+		if (mask && !mask->hitTest(stage, true, true)) {
+			return true;
+		}
+	}
+	for (const auto& [d, layer] : clip.children) {
+		if (d >= depth) {
+			break;
+		}
+		if (layer->visible && !layer->isMask && layer->clipDepth >= depth && !layer->hitTest(stage, true, true)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+} // namespace
+
 // The interactive objects under the point: the deepest first, then each
 // interactive ancestor. The menus need all of them: their components take
 // on(release) on the outer instance while the button art inside fades on
@@ -1192,7 +1218,7 @@ bool Player::pick(Clip& clip, swf::Point stage, Chain& chain)
 	for (auto it = clip.children.rbegin(); it != clip.children.rend(); ++it) {
 		const std::shared_ptr<DisplayObject> child = it->second;
 		if (!child->visible || child->isMask || child->clipDepth != 0 || child->kind == Kind::Shape ||
-			child->kind == Kind::MorphShape) {
+			child->kind == Kind::MorphShape || maskedOut(clip, it->first, *child, stage)) {
 			continue;
 		}
 		const bool interactive = isInteractive(*child);
@@ -1415,7 +1441,9 @@ void Player::mouseWheel(int delta)
 	if (!m_root) {
 		return;
 	}
-	broadcast("Mouse", "onMouseWheel", {Value(delta)});
+	const Chain target = pickAt(m_mouseX, m_mouseY);
+	// BF2142's scroll panes consume positive values as scrollDown.
+	broadcast("Mouse", "onMouseWheel", {Value(-delta), target.empty() ? Value() : Value(target.back())});
 	runActions();
 }
 

@@ -204,3 +204,83 @@ TEST(ControlMap_ScriptRoundTrip)
 	CHECK(copy.pressed(infantry, "c_PIFire", [](const std::string& c) { return c == "IDKey_Q"; }));
 	CHECK(!copy.find(infantry)->at("c_PIReload")[0].hold);
 }
+
+TEST(ControlMap_WheelBindingFallsBackToDefaultPlayerMap)
+{
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	// As the shipped Controls.con: the wheel only in defaultPlayerInputControlMap.
+	for (const char* line : {"ControlMap.create InfantryPlayerInputControlMap",
+			 "ControlMap.addKeyToTriggerMapping c_PIUse IDFKeyboard IDKey_E 0 0",
+			 "ControlMap.create defaultPlayerInputControlMap",
+			 "ControlMap.addAxisToTriggerMapping c_PINextItem -1 IDFMouse IDAxis_2 0",
+			 "ControlMap.addAxisToTriggerMapping -1 c_PIPrevItem IDFMouse IDAxis_2 0"}) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	for (const char* map : {input::ControlMaps::kInfantry, input::ControlMaps::kLand}) {
+		CHECK(maps.wheelPresses(map, "c_PINextItem", 1) && !maps.wheelPresses(map, "c_PINextItem", -1));
+		CHECK(maps.wheelPresses(map, "c_PIPrevItem", -1) && !maps.wheelPresses(map, "c_PIPrevItem", 1));
+		CHECK(!maps.wheelPresses(map, "c_PINextItem", 0));
+	}
+}
+
+TEST(ControlMap_NativeMouseAndTrackpad)
+{
+	CHECK(input::sdlMouseButton(0) == 1);
+	CHECK(input::sdlMouseButton(1) == 3); // RMB, not the SDL middle button
+	CHECK(input::sdlMouseButton(2) == 2);
+	input::WheelSteps wheel;
+	CHECK(wheel.add(-0.25f) == 0);
+	CHECK(wheel.add(-0.5f) == 0);
+	CHECK(wheel.add(-0.5f) == -1);
+	CHECK(wheel.add(0.25f) == 0);
+	CHECK(wheel.add(2.5f) == 2);
+	CHECK(wheel.add(0.5f) == 1);
+	Console console;
+	input::ControlMaps maps;
+	input::registerControlMapConsoleMethods(console, maps);
+	std::string out;
+	CHECK(console.execute("ControlMap.create defaultPlayerInputControlMap", out) != ConsoleResult::Error);
+	CHECK(console.execute("ControlMap.addKeyToTriggerMapping c_PIToggleCameraMode IDFKeyboard IDKey_C 10000 0", out) != ConsoleResult::Error);
+	CHECK(maps.pressed(input::ControlMaps::kInfantry, "c_PIToggleCamera", pressedKeys({"IDKey_C"})));
+	CHECK(maps.script().find("c_PIToggleCamera ") != std::string::npos);
+}
+
+TEST(ControlMap_MenuWheelRejectsAccelerationBursts)
+{
+	input::MenuWheelSteps wheel;
+	CHECK(wheel.add(-30) == -1);
+	CHECK(wheel.add(-30) == -1); // consecutive events must not be discarded
+	CHECK(wheel.add(1) == 1); // reversal responds immediately
+	CHECK(wheel.add(0) == 0);
+	CHECK(wheel.add(0.25f) == 0);
+	CHECK(wheel.add(0.25f) == 0);
+	CHECK(wheel.add(0.5f) == 1);
+	CHECK(wheel.add(0.5f) == 0);
+	CHECK(wheel.add(-0.5f) == 0); // reverse clears the old gesture
+	CHECK(wheel.add(-0.5f) == -1);
+}
+
+TEST(ControlMap_PlayWheelStepsOneNotchNotOnePerFrame)
+{
+	input::PlayWheel wheel;
+	// A trackpad flick: forty frames of small events must not step the item
+	// list forty times (a raw per-frame sign test did).
+	int steps = 0;
+	for (int frame = 0; frame < 40; ++frame) {
+		wheel.add(0.05f);
+		steps += wheel.take() > 0 ? 1 : 0;
+	}
+	CHECK(steps == 2);
+	// A mouse wheel: one notch per frame is one step each, the way it turned.
+	CHECK((wheel.add(1), wheel.take()) == 1);
+	CHECK((wheel.add(-1), wheel.take()) == -1);
+	CHECK(wheel.take() == 0); // nothing carried over to an idle frame
+	// An accelerated burst in one frame still presses once.
+	wheel.add(30);
+	wheel.add(30);
+	CHECK(wheel.take() > 0);
+	CHECK(wheel.take() == 0);
+}

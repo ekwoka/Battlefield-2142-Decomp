@@ -518,7 +518,7 @@ TEST(EffectsDetail_GroundBundlesUnderGunsAndFeet)
 	CHECK(rays.empty() && manager.emitters() == 0);
 	// A round: the muzzle bundle (startOnEffects 0) and the dust under the
 	// barrel, 2.5 m over the ground.
-	state.firedWeapons = {"TANK_BARREL"};
+	state.firedWeapons = {{"TANK_BARREL", ""}};
 	objects.update({state}, manager);
 	CHECK(manager.emitting(5, 1));
 	CHECK(rays.size() == 1);
@@ -672,4 +672,30 @@ TEST(EffectsDetail_BundleSoundLoopsAtTheirIntensity)
 	CHECK(std::fabs(manager.bundleLoops()[0].intensity - 1) < 1e-3f);
 	manager.releaseAnchor(9);
 	CHECK(manager.bundleLoops().empty());
+}
+
+TEST(EffectsDetail_SharedWeaponFiresOnlyInOccupiedSeat)
+{
+ world::ObjectTemplateManager templates;
+ sprites(templates, "flash", "Standard");
+ auto* muzzle = templates.create("EffectBundle", "muzzle");
+ muzzle->children().push_back({"flash", {}, {}});
+ auto* gun = templates.create("GenericFireArm", "shared_gun");
+ gun->children().push_back({"muzzle", {}, {}});
+ auto* left = templates.create("PlayerControlObject", "left_seat");
+ auto* right = templates.create("PlayerControlObject", "right_seat");
+ left->children().push_back({"shared_gun", {}, {}});
+ right->children().push_back({"shared_gun", {}, {}});
+ auto* root = templates.create("Bundle", "titan");
+ root->children().push_back({"left_seat", {}, {}});
+ root->children().push_back({"right_seat", {10, 0, 0}, {}});
+ effects::EffectManager manager(templates);
+ effects::ObjectEffects objects(templates);
+ effects::ObjectEffects::ObjectState state;
+ state.id = 9; state.objectTemplate = root;
+ objects.update({state}, manager);
+ state.firedWeapons = {{"shared_gun", "right_seat"}};
+ objects.update({state}, manager);
+ CHECK(!manager.emitting(9, 1));
+ CHECK(manager.emitting(9, 2));
 }

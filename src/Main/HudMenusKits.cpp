@@ -34,6 +34,11 @@ int branchOf(const std::string& value)
 
 std::string orEmpty(const std::string& path) { return path.empty() ? std::string(kEmpty) : path; }
 
+// The kit template's main-weapon itemIndex (+0x2c8, 3 from its constructor
+// 0x005700e9): 0x00798dd0 puts the items with it in the main weapon area.
+// shortcut: its +0x2cc (4) case, gated by 0x0056f410, isn't ported; no shipped unlock has itemIndex 4.
+constexpr int kMainWeaponIndex = 3;
+
 } // namespace
 
 KitMenu::KitMenu(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates, hud::HudManager& hud)
@@ -42,6 +47,11 @@ KitMenu::KitMenu(game::GameWorld& round, game::GameLogic& logic, world::ObjectTe
 	for (auto& kit : m_chosen) {
 		kit.fill(-1);
 	}
+}
+
+bool KitMenu::mainWeapon(const std::string& itemTemplate) const
+{
+	return std::atoi(setting(itemTemplate, "itemIndex").c_str()) == kMainWeaponIndex;
 }
 
 std::string KitMenu::setting(const std::string& templateName, const std::string& key) const
@@ -75,10 +85,10 @@ void KitMenu::bind(Console& console)
 	bindMethod(console, "KitInterface.setHeavyArmor", any, [this](int heavy) { setHeavyArmor(heavy != 0); });
 	// UnlockInterface (0x007b8e60-0x007b9a20): without field-unlock points
 	// (offline) the screen doesn't open and nothing is spent.
-	bindMethod(console, "UnlockInterface.showUnlockInterface", any, [this](int show) {
-		if (!show && m_customOpen) {
-			closeCustomInterface(); // 0x007b95a0's second case
-		}
+	bindMethod(console, "UnlockInterface.showUnlockInterface", any, [this](int) {
+		// Hiding field unlocks must leave customization open: the shipped
+		// top tab opens it first, then sends showUnlockInterface 0.
+		// Map/close buttons explicitly call closeCustomInterface themselves.
 		m_hud.set("UnlocksShow", 0);
 		m_hud.set("UnlockInfoShow", 0);
 	});
@@ -152,6 +162,7 @@ void KitMenu::build(int team)
 	// 0x00798dd0: the open kit's grid.
 	m_team = team;
 	m_built = true;
+	++m_builds;
 	for (auto& row : m_grid) {
 		row.fill({});
 	}
@@ -179,10 +190,11 @@ void KitMenu::build(int team)
 			continue;
 		}
 		if (t->typeName() != "ItemContainer") {
-			// Row 0: the kit's own weapon in the primary slot (the one with a weaponIcon).
-			if (!m_grid[0][0].present && !setting(child.name, "weaponHud.weaponIcon").empty()) {
-				fill(m_grid[0][0], child.name);
-				m_grid[0][0].available = true;
+			// Row 0: the kit's own main weapon, by its itemIndex.
+			const auto free = std::find_if(m_grid[0].begin(), m_grid[0].end(), [](const Item& i) { return !i.present; });
+			if (free != m_grid[0].end() && mainWeapon(child.name)) {
+				fill(*free, child.name);
+				free->available = true;
 			}
 			continue;
 		}
@@ -190,18 +202,46 @@ void KitMenu::build(int team)
 		if (level < 0 || level >= kItems || t->children().empty()) {
 			continue; // the level-15 replacements aren't on the grid
 		}
-		Item& item = m_grid[static_cast<size_t>(branchOf(setting(child.name, "unlockBranch")) + 1)][static_cast<size_t>(level)];
-		fill(item, t->children().front().name);
+		const std::string& unlockItem = t->children().front().name;
+		const int branch = branchOf(setting(child.name, "unlockBranch"));
+		Item* slot = nullptr;
+		if (mainWeapon(unlockItem)) {
+			// A primary weapon unlock (the HAR/LAR rifle...): the main weapon
+			// area's next slot, which the HUD lays out after the kit's own
+			// weapon (Kit0Item1...), not a place in its branch.
+			const auto free = std::find_if(m_grid[0].begin() + 1, m_grid[0].end(), [](const Item& i) { return !i.present; });
+			if (free == m_grid[0].end()) {
+				continue;
+			}
+			slot = &*free;
+		} else {
+			// The branch's other unlocks close up over those weapons.
+			int index = level;
+			for (const world::ChildTemplate& other : kit->children()) {
+				const world::ObjectTemplate* o = m_templates.find(other.name);
+				const int otherLevel = std::atoi(setting(other.name, "unlockLevel").c_str());
+				if (o && o->typeName() == "ItemContainer" && !o->children().empty() && otherLevel < level
+					&& branchOf(setting(other.name, "unlockBranch")) == branch
+					&& mainWeapon(o->children().front().name)) {
+					--index;
+				}
+			}
+			slot = &m_grid[static_cast<size_t>(branch + 1)][static_cast<size_t>(index)];
+		}
+		Item& item = *slot;
+		fill(item, unlockItem);
 		item.container = child.name;
 		item.available = m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), child.name) != m_unlocked.end();
 	}
-	m_grid[0][0].active = true; // no other primary chosen
-	for (int row = 1; row < kRows; ++row) {
+	for (int row = 0; row < kRows; ++row) {
 		const int chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
 		if (chosen >= 0 && m_grid[static_cast<size_t>(row)][static_cast<size_t>(chosen)].available) {
 			m_grid[static_cast<size_t>(row)][static_cast<size_t>(chosen)].active = true;
 		}
 	}
+	// The kit's own weapon stays the primary unless another was chosen.
+	const auto& primary = m_grid[0];
+	m_grid[0][0].active = std::none_of(primary.begin() + 1, primary.end(), [](const Item& i) { return i.active; });
 }
 
 // 0x00798b20, from each rebuild of the open kit (0x00798dd0) while the
@@ -294,6 +334,19 @@ void KitMenu::update(int team)
 		updateAbilityIcons();
 	}
 	const auto& kits = m_logic.team(team == 1 ? 1 : 2).kits;
+	if (skipUnchanged) {
+		Shown now {m_builds, team, m_kit, m_heavy, m_customOpen, {}};
+		for (const auto& kit : kits) {
+			now.kits.push_back(kit.name);
+		}
+		if (m_shownValid && now == m_shown) {
+			return;
+		}
+		m_shown = std::move(now);
+		m_shownValid = true;
+	} else {
+		m_shownValid = false;
+	}
 	// The kit buttons (0x0044e650).
 	for (int i = 0; i < kKits; ++i) {
 		const std::string n = std::to_string(i);
@@ -309,6 +362,8 @@ void KitMenu::update(int team)
 		m_hud.setString("KitIcon" + n + "Path", orEmpty(setting(kitName, "vehicleHud.vehicleIcon")));
 		std::string weaponIcon, altIcon;
 		int unlockLevels = 0;
+		int primaryIndex = 1;
+		std::string chosenWeaponIcon;
 		for (const world::ChildTemplate& child : kit->children()) {
 			const world::ObjectTemplate* t = m_templates.find(child.name);
 			if (!t) {
@@ -316,6 +371,13 @@ void KitMenu::update(int team)
 			}
 			if (t->typeName() == "ItemContainer") {
 				const int level = std::atoi(setting(child.name, "unlockLevel").c_str());
+				if (level >= 0 && level < kItems && !t->children().empty() && mainWeapon(t->children().front().name)) {
+					if (m_chosen[static_cast<size_t>(i)][0] == primaryIndex
+						&& (m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), child.name) != m_unlocked.end())) {
+						chosenWeaponIcon = setting(t->children().front().name, "weaponHud.weaponIcon");
+					}
+					++primaryIndex;
+				}
 				if (branchOf(setting(child.name, "unlockBranch")) == 0 && level < kItems) {
 					unlockLevels = std::max(unlockLevels, level);
 					// 0x0044a3f0: the first branch's unlock in the primary slot.
@@ -323,11 +385,11 @@ void KitMenu::update(int team)
 						altIcon = setting(t->children().front().name, "weaponHud.altWeaponIcon");
 					}
 				}
-			} else if (weaponIcon.empty()) {
+			} else if (weaponIcon.empty() && mainWeapon(child.name)) {
 				weaponIcon = setting(child.name, "weaponHud.weaponIcon");
 			}
 		}
-		m_hud.setString("KitWeaponIcon" + n + "Path", orEmpty(weaponIcon));
+		m_hud.setString("KitWeaponIcon" + n + "Path", orEmpty(chosenWeaponIcon.empty() ? weaponIcon : chosenWeaponIcon));
 		m_hud.set("KitUnlock" + n + "Show", unlockLevels >= 1 ? 1 : 0);
 		m_hud.setString("KitAltWeaponIcon" + n + "Path", orEmpty(altIcon));
 		m_hud.set("KitUnlockArrow" + n + "Show", 0); // no field unlock to take
@@ -366,8 +428,11 @@ void KitMenu::update(int team)
 	m_hud.set("FUBlinkAlpha", 0);
 	m_hud.set("UnlockBlinkAlpha", 0);
 	// 0x007975e0: the soldier picture by team, kit and armour.
+	// Use the matching DDS canvases for both armours. Requesting .tga
+	// finds vanilla's cropped light portrait before trying the mod's DDS;
+	// heavy portraits only have DDS, so toggling armour changed framing.
 	m_hud.setString("CustomSoldierPicture", "Ingame/Customization/soldiers/Soldier_" + std::to_string(std::max(0, team - 1))
-			+ std::to_string(m_kit) + (m_heavy ? "1" : "") + ".tga");
+			+ std::to_string(m_kit) + (m_heavy ? "1" : "") + ".dds");
 	m_hud.setString("OpenCloseKitCustomString",
 		text(m_customOpen ? "HUD_TEXT_MENU_UNLOCK_CLOSE" : "HUD_TEXT_MENU_UNLOCK_OPEN"));
 	// The unlock screen's branches (0x0044a130): the level reached, the
@@ -448,11 +513,11 @@ void KitMenu::chooseKitCustom(int row, int index)
 		return;
 	}
 	const Item& it = m_grid[static_cast<size_t>(row)][static_cast<size_t>(index)];
-	if (!it.present || !it.available || row == 0) {
+	if (!it.present || !it.available) {
 		return;
 	}
 	auto& chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
-	chosen = chosen == index ? -1 : index;
+	chosen = chosen == index || (row == 0 && index == 0) ? -1 : index; // the kit's own weapon is no unlock
 	m_changed = true;
 	m_built = false;
 }
@@ -508,7 +573,7 @@ void KitMenu::commit()
 	for (int k = 0; k < kKits; ++k) {
 		m_kit = k;
 		build(m_team);
-		for (int row = 1; row < kRows; ++row) {
+		for (int row = 0; row < kRows; ++row) {
 			for (const Item& it : m_grid[static_cast<size_t>(row)]) {
 				if (it.active && !it.container.empty()) {
 					containers.push_back(it.container);

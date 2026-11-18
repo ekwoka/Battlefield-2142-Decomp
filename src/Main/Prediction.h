@@ -154,7 +154,7 @@ private:
 // vehicle's tree too (see SoldierPrediction above).
 class VehiclePrediction {
 public:
-	explicit VehiclePrediction(game::GameWorld& round) : m_round(round) {}
+	explicit VehiclePrediction(game::GameWorld& round) : m_round(round) { m_input.seated = true; }
 
 	// Starts predicting a vehicle of this template from the server's
 	// state after `lastMove` (`position` the record's), the moves sent

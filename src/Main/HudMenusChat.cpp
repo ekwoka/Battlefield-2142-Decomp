@@ -10,8 +10,13 @@ namespace dice::hfe::menu {
 
 namespace {
 
-constexpr float kLineSeconds = 5.0f; // each category's lifetime (+0x154..+0x174)
-constexpr size_t kMaxTyped = 150;    // setEditNodeMaxLength 150 (HudElementsChat.con)
+constexpr size_t kMaxTyped = 150; // setEditNodeMaxLength 150 (HudElementsChat.con)
+
+// Each category's lifetime (+0x154..+0x174): 5 s by default (0x007b6d80), set by the
+// ingameChat/ingamePersonal setup (0x0075d526.., 0x0075d7f6..) to 15 s, kills 20 s, questions 500 s.
+constexpr std::array<float, 9> kLineSeconds {15, 20, 15, 15, 15, 15, 15, 15, 500};
+// Each category's rows (+0xc4, 0x007b4b10): three for chat, kills, personal and questions.
+constexpr size_t kMaxRows = 3;
 
 std::string replaced(std::string text, const std::string& from, const std::string& to)
 {
@@ -54,7 +59,14 @@ std::array<float, 4> HudChat::colorOf(Speaker speaker)
 
 void HudChat::push(Line line)
 {
-	m_left[static_cast<size_t>(std::clamp(line.category, 0, 8))] = kLineSeconds;
+	line.category = std::clamp(line.category, 0, 8);
+	const auto category = static_cast<size_t>(line.category);
+	m_left[category] = kLineSeconds[category];
+	// A full category scrolls its oldest line out (0x007b47b0).
+	const auto same = [&line](const Line& l) { return l.category == line.category; };
+	if (static_cast<size_t>(std::count_if(m_lines.begin(), m_lines.end(), same)) >= kMaxRows) {
+		m_lines.erase(std::find_if(m_lines.begin(), m_lines.end(), same));
+	}
 	m_lines.push_back(std::move(line));
 }
 
@@ -101,9 +113,29 @@ void HudChat::addPersonal(const std::string& message)
 	push({message, {1, 1, 1, 1}, 7, true});
 }
 
+void HudChat::addQuestion(const std::string& message)
+{
+	push({message, {1, 1, 1, 1}, 8, true});
+}
+
+void HudChat::clearQuestions()
+{
+	m_lines.erase(std::remove_if(m_lines.begin(), m_lines.end(), [](const Line& l) { return l.category == 8; }), m_lines.end());
+	m_left[8] = 0;
+}
+
 void HudChat::setKilledBy(const std::string& killer)
 {
-	m_hud.setString("DeathMessage", killer.empty() ? std::string() : replaced(text("HUD_CHAT_YOUWEREKILLEDBY"), "#PLAYERNAME#", killer));
+	// A personal line (0x0075a268 -> HUD slot 0x170), as "You killed"; DeathMessage is the centred
+	// killed line (critically wounded / killed, main's updateHud).
+	if (!killer.empty()) {
+		addPersonal(replaced(text("HUD_CHAT_YOUWEREKILLEDBY"), "#PLAYERNAME#", killer));
+	}
+}
+
+void HudChat::addKillScore(const std::string& victim)
+{
+	addPersonal(replaced(text("HUD_CHAT_YOUGOTAKILLSCORE"), "#PLAYERNAME#", victim));
 }
 
 void HudChat::open(Box box)
@@ -158,22 +190,18 @@ void HudChat::key(int code)
 
 void HudChat::update(float seconds)
 {
-	// Each category's oldest line goes when its time runs out.
+	// 0x007b4a40: once a category's time from its latest line runs out, it
+	// loses its oldest line each update until it is empty.
 	for (int category = 0; category < 9; ++category) {
+		const auto oldest = std::find_if(m_lines.begin(), m_lines.end(), [category](const Line& l) { return l.category == category; });
 		float& left = m_left[static_cast<size_t>(category)];
-		if (left <= 0) {
+		if (oldest == m_lines.end()) {
 			continue;
 		}
 		left -= seconds;
-		if (left > 0) {
-			continue;
-		}
-		const auto oldest = std::find_if(m_lines.begin(), m_lines.end(), [category](const Line& l) { return l.category == category; });
-		if (oldest != m_lines.end()) {
+		if (left <= 0) {
 			m_lines.erase(oldest);
-		}
-		if (std::any_of(m_lines.begin(), m_lines.end(), [category](const Line& l) { return l.category == category; })) {
-			left = kLineSeconds;
+			left = 0;
 		}
 	}
 	std::vector<std::vector<std::string>> chat, personal;
@@ -567,15 +595,62 @@ const HudQuestions::Question* HudQuestions::front() const
 void HudQuestions::show() const
 {
 	const Question* q = front();
-	if (!q || !onLine) {
+	if (!q) {
 		return;
 	}
-	onLine(q->text);
+	if (onClear) {
+		onClear();
+	}
+	if (onLine) {
+		onLine(q->text);
+	}
 	if (q->kind == Vote) {
 		return; // the start line names the keys (0x0079c720 case 6)
 	}
+	if (!onQuestion) {
+		return;
+	}
 	const char* prompt = q->kind == TeamKill ? "HUD_HUD_YESNO" : "HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT";
-	onLine(localize ? localize(prompt) : std::string(prompt));
+	onQuestion(localize ? localize(prompt) : std::string(prompt));
+}
+
+void HudQuestions::forget(Kind kind)
+{
+	auto& q = m_questions[static_cast<size_t>(kind)];
+	const bool visible = q && front() == &*q;
+	q.reset();
+	if (visible) {
+		if (!front() && onClear) onClear();
+		show();
+	}
+}
+
+void HudQuestions::answerAll(Kind kind, bool yes, bool quiet, bool showNext)
+{
+	auto& q = m_questions[static_cast<size_t>(kind)];
+	if (q) {
+		const Question asked = *q;
+		q.reset();
+		if (onClear) {
+			onClear(); // 0x0079d6e0 first clears the front's lines (HUD slot 0x180 with 8)
+		}
+		if (onAnswer) {
+			onAnswer(asked, yes, quiet);
+		}
+	}
+	if (showNext) {
+		show();
+	}
+}
+
+void HudQuestions::becameCommander()
+{
+	// 0x00756e11..0x00756e52: 0x0079e390(kind, answer 0, quiet 1, show next)
+	// for kinds 2, 0, 1 (not shown) and 4 (shown).
+	for (const Kind kind : {CommanderOrder, JoinRequest, Invite}) {
+		answerAll(kind, false, true, false);
+	}
+	answerAll(SquadLeader, false, true, true);
 }
 
 void HudQuestions::answer(bool yes)
@@ -586,6 +661,9 @@ void HudQuestions::answer(bool yes)
 	}
 	const Question asked = *q;
 	m_questions[static_cast<size_t>(asked.kind)].reset();
+	if (onClear) {
+		onClear();
+	}
 	if (onAnswer) {
 		onAnswer(asked, yes, false);
 	}
@@ -606,6 +684,9 @@ void HudQuestions::tick(float seconds)
 		}
 		const Question asked = *q;
 		q.reset();
+		if (onClear) {
+			onClear();
+		}
 		if (onAnswer) {
 			onAnswer(asked, asked.kind == TeamKill, true); // a team kill forgiven
 		}
@@ -613,6 +694,35 @@ void HudQuestions::tick(float seconds)
 			const char* id = timedOut[static_cast<int>(asked.kind)];
 			onLine(localize ? localize(id) : std::string(id));
 		}
+		// shortcut: retail re-shows the next question on its own +0xa8 timer
+		// (0x0079e1e7); shown at once here so the clear doesn't hide it.
+		show();
+	}
+}
+
+void CommanderMessages::line(const char* key, int team) const
+{
+	if (onLine) {
+		onLine(replaced(localize ? localize(key) : std::string(key), "#TEAMNAME#", teamName ? teamName(team) : ""));
+	}
+}
+
+void CommanderMessages::applied(int team) const
+{
+	line("HUD_HUD_COMMANDER_APPLIED", team);
+}
+
+void CommanderMessages::handle(int id, int team, bool local, bool sameTeam) const
+{
+	if (id == 0x22) { // 0x00756f0a: personal line, remove the offer
+		if (onPositionFilled) onPositionFilled();
+		line("HUD_COMMANDERAPPLY_POSFILLED", team);
+	} else if (id == 0x21 && sameTeam) { // 0x00756d7a
+		if (local && onAssigned) onAssigned();
+		if (onVoice) onVoice(local ? "commander_assign" : "new_commander");
+	} else if (id == 0x25 && local) { // 0x00756f63
+		line("HUD_HUD_COMMANDER_NO_LONGER", team);
+		if (onLost) onLost();
 	}
 }
 

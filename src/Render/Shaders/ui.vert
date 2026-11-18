@@ -15,7 +15,10 @@ layout(location = 8) in vec2 inUnusedDirtCoord;
 layout(location = 9) in vec2 inUnusedCrackCoord;
 
 layout(set = 1, binding = 0) uniform Screen {
-	vec4 size; // the screen: 800, 600 for the HUD, the stage for menus
+	// the screen: 800, 600 for the HUD, the stage for menus; z the HUD's x
+	// scale (LevelSources::hudXScale), 0 for menus; w 1 with Remaster's hudfix
+	// shader (LevelSources::hudfixMarkers), else 0
+	vec4 size;
 };
 
 layout(location = 0) out vec2 outTexCoord;
@@ -27,5 +30,14 @@ void main()
 	gl_Position = vec4(inPosition.x / size.x * 2.0 - 1.0, 1.0 - inPosition.y / size.y * 2.0, 0.0, 1.0);
 	outTexCoord = inTexCoord;
 	outColor = vec4(inColor, inAlpha);
+	// The hudfix's markers (alpha 0.01, Render/HudBlend.h hudfixMarker):
+	// unmoved and opaque, only with its shader. The original's vsFFP passes
+	// every HUD vertex's colour through, whatever its alpha.
+	const bool hudfixMarker = size.w > 0.0 && abs(inAlpha - 0.01) < 0.001;
+	if (hudfixMarker) {
+		outColor.a = 1.0;
+	} else if (size.z > 0.0) {
+		gl_Position.x *= size.z;
+	}
 	outAdd = vec4(inAddRG, inAddB, inAddA);
 }

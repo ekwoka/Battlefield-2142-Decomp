@@ -317,6 +317,9 @@ public:
 		float yaw = 0, pitch = 0; // radians: yaw 0 along +z, pitch up positive
 		float fovY = 1;
 		float aspect = 4.0f / 3.0f;
+		// The HUD pass's x scale about the centre (LevelSources::hudXScale); the
+		// tags are drawn through it, so project() places them pre-divided.
+		float hudXScale = 1;
 	};
 	// This frame's tags (back to front of nothing: drawn under the HUD).
 	std::vector<hud::HudQuad> frame(game::GameWorld& world, const world::ObjectManager& objects,

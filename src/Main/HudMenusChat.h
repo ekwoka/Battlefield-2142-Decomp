@@ -16,7 +16,7 @@
 //   / _KILLED / _TEAMKILLS / _MYSELF with #PLAYERNAME1#, #WEAPON# (the
 //   weapon's weaponHud.hudName, or the vehicle's vehicleHud.hudName) and
 //   #PLAYERNAME2#, category 1; the victim's own "you were killed by" is
-//   HUD_CHAT_YOUWEREKILLEDBY in DeathMessage (HudElementsKilled.con).
+//   HUD_CHAT_YOUWEREKILLEDBY as a personal line (0x0075a268).
 // - PersonalList (list data 13): personal notices (the chat spam block,
 //   HUD_HUD_MENU_CHAT_SPAM_MESSAGE), 5 s each.
 // - The say boxes (HudManager.enableSay{All,Team,Squad}ChatBox
@@ -75,8 +75,15 @@ public:
 		Speaker color);
 	void addInfo(const std::string& text, int category = 1);
 	void addPersonal(const std::string& text);
-	// The local player's death message (DeathMessage), empty when alive.
+	// A question's line (HUD slot 0x174: category 8, 0x007b6170) and their
+	// removal (slot 0x180 with 8, 0x007c75b0) when it is answered.
+	void addQuestion(const std::string& text);
+	void clearQuestions();
+	// The local player's death: "You were killed by" as a personal line (empty: nothing).
 	void setKilledBy(const std::string& killer);
+	// The local player's kill of an enemy: HUD_CHAT_YOUGOTAKILLSCORE (0x0075a07a)
+	// to the PersonalList (slot 0x170), the centred message area.
+	void addKillScore(const std::string& victim);
 
 	// The say boxes.
 	void open(Box box);
@@ -280,13 +287,25 @@ public:
 		float left = 0;   // seconds (-1 none)
 	};
 	std::function<std::string(const std::string&)> localize;
-	std::function<void(const std::string&)> onLine; // a personal line
+	std::function<void(const std::string&)> onLine; // a personal line (a timed-out one)
+	// The front's lines (HUD slot 0x174) and their removal (slot 0x180 with
+	// 8), first in each answer (0x0079d6e0) and each showing (0x0079c720).
+	std::function<void(const std::string&)> onQuestion;
+	std::function<void()> onClear;
 	// The answer (0x0079d6e0's per kind), `quiet` for a timed-out one.
 	std::function<void(const Question&, bool yes, bool quiet)> onAnswer;
 
 	void ask(Kind kind, int value, const std::string& text);
 	// 0x0079e290 with -1: the kind's questions taken away, unanswered.
-	void forget(Kind kind) { m_questions[static_cast<size_t>(kind)].reset(); }
+	void forget(Kind kind);
+	// 0x0079e390: the kind's questions answered (0x0079d6e0) and taken
+	// away, the next one shown after with `showNext` (0x0079d4e0's flag).
+	void answerAll(Kind kind, bool yes, bool quiet, bool showNext);
+	// The local player made commander (2/0x21, 0x00756e07): the commander
+	// orders, squad join requests and squad invites answered no, quietly,
+	// then the squad leader questions (shown next); an offer of command
+	// (kind 3) stays.
+	void becameCommander();
 	void answer(bool yes);
 	void tick(float seconds);
 	const Question* front() const;
@@ -295,6 +314,24 @@ public:
 private:
 	void show() const;
 	std::array<std::optional<Question>, 7> m_questions {};
+};
+
+// Commander HUD notifications: the immediate application acknowledgement
+// (0x007d7050), position filled (2/0x22), assignment (2/0x21) and
+// resignation (2/0x25). Shared by local and joined games.
+class CommanderMessages {
+public:
+	std::function<std::string(const std::string&)> localize;
+	std::function<std::string(int)> teamName;
+	std::function<void(const std::string&)> onLine;
+	std::function<void(const std::string&)> onVoice;
+	std::function<void()> onAssigned, onLost, onPositionFilled;
+	void applied(int team) const;
+	// Assignment/resignation payloads name a player; the caller resolves
+	// whether that player is local and belongs to the local team.
+	void handle(int id, int team, bool local, bool sameTeam) const;
+private:
+	void line(const char* key, int team) const;
 };
 
 } // namespace dice::hfe::menu
