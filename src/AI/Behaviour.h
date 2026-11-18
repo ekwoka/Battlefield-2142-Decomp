@@ -96,8 +96,17 @@ struct GoalArea {
 	bool exists = false;
 	bool teamHolds = true;  // the area's per-side status (+0x70, 0x1005f210) is 0: its side holds the point
 	bool inside = false;    // the bot inside the area (0x1005ddd0)
-	float radius = 0;       // the area's radius for the bot's team (+0x98)
+	float radius = 0;       // the area's radius for the bot's team (+0x98 + 4 team)
 };
 float gotoUrgency(float d2, float radius, float botRadius, const GoalArea& area, bool& arrived);
+
+// A control point's strategic area (0x100629e0): a square about the point,
+// its own radius r each way (the corner +0x118 is the point less (r, r), the
+// centre +0x84 the point), so the inside test (0x1005ddd0 -> 0x100a3fc0)
+// holds within r on x and on z, and the teams' radii (+0x9c / +0xa0,
+// 0x100623c0) are |corner - centre| = r sqrt 2. createFromControlPoint's
+// third argument goes to +0x98, side 0's, which no bot reads. (dx, dz):
+// the bot from the point.
+GoalArea controlPointArea(bool teamHolds, float dx, float dz, float pointRadius);
 
 } // namespace dice::hfe::ai

@@ -1115,6 +1115,17 @@ TEST(Bots_GotoUrgency)
 	held.inside = false;
 	CHECK(near(ai::gotoUrgency(60 * 60, 0, 0.5f, held, arrived), 1.0f));
 	CHECK(near(ai::gotoUrgency(2500.2f, 0, 0.5f, held, arrived), 0.1f)); // d2 - 50^2 is next to nothing
+
+	// A control point's area (0x100629e0): a square of its own radius, not
+	// createFromControlPoint's 50 (Minsk's Ghost Town: radius 35).
+	const ai::GoalArea corner = ai::controlPointArea(true, -34, 34, 35);
+	CHECK(corner.exists && corner.teamHolds && corner.inside); // 48 m away, inside the square's corner
+	CHECK(!ai::controlPointArea(true, -20, 35.5f, 35).inside);  // 40.7 m away, past its edge
+	CHECK(near(corner.radius, 35 * std::sqrt(2.0f)));
+	CHECK(ai::gotoUrgency(48 * 48, 0, 0.5f, corner, arrived) == 0);
+	const ai::GoalArea edge = ai::controlPointArea(true, -20, 35.5f, 35);
+	CHECK(near(ai::gotoUrgency(60 * 60, 0, 0.5f, edge, arrived), 1.0f));
+	CHECK(!ai::controlPointArea(false, 0, 0, 20).teamHolds);
 }
 
 TEST(Bots_StrategyConditionsAndValues)

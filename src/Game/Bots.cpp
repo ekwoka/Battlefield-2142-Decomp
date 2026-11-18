@@ -4365,10 +4365,8 @@ float BotManager::moveUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 		const ai::StrategicArea& a = m_settings.strategy.areas[static_cast<size_t>(bot.goalOrder)];
 		for (const GameWorld::ControlPointInfo& point : m_world.controlPointList()) {
 			if (point.id == a.controlPoint) {
-				area.exists = true;
-				area.teamHolds = point.team == self.team;
-				area.radius = a.temperature; // the area's per-side value at +0x98 (createFromControlPoint's third argument)
-				area.inside = horizontal2(mover.position - point.position) < area.radius * area.radius;
+				area = ai::controlPointArea(point.team == self.team, mover.position.x - point.position.x,
+					mover.position.z - point.position.z, point.radius);
 			}
 		}
 	} else if (const GameWorld::SquadOrder* order = self.squad ? squadOrder(self.team, self.squad) : nullptr) {
