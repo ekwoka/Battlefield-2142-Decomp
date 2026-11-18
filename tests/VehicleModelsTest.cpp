@@ -7439,6 +7439,23 @@ TEST(Render_SuezBridgeGlowPixelsOptIn)
             // The scene's own frame-to-frame noise is about as large as its measured baseline.
             CHECK(retail < bright / 3); CHECK(enhanced < bright / 3);
             CHECK(back * 3 > bright * 2);
+            // Rayed only once kept by the distance fade (0x006fb320 before RendDX9's 0x100c4ad6):
+            // 1.5 km back along the same view the halo is in the frustum but casts no ray.
+            size_t rays = 0;
+            sources.glowVisible = [&rays, glow](const render::Vec3f&, const render::Vec3f&, uint32_t object) {
+                rays += object == glow->id();
+                return true;
+            };
+            frame();
+            const size_t nearRays = rays;
+            const render::Vec3f near = camera.position;
+            const float span = std::sqrt(9.106f * 9.106f + 0.8f * 0.8f + 7.005f * 7.005f);
+            camera.position = near - render::Vec3f {9.106f, -0.8f, 7.005f} * (1500.0f / span);
+            rays = 0;
+            frame();
+            std::fprintf(stderr, "  %s Suez bridge glow3 rays: near %zu, 1.5 km %zu\n", label, nearRays, rays);
+            CHECK(nearRays > 0); CHECK(rays == 0);
+            camera.position = near;
             gpu->releaseTarget(target);
         }
     }

@@ -3684,6 +3684,26 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
+		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
+			// 0x006fb320 on the objects in view; one faded out isn't drawn.
+			// A child instance uses its own mesh radius, so its distance must
+			// also be measured from the child's world position. Using the root
+			// puts a Titan's small signs roughly 70 m away even when the camera
+			// is beside them and can fade them out with the camera or FOV.
+			const Vec3f fadeOrigin = instance.source.empty() ? instance.objectOrigin
+				: Vec3f {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const Vec3f d = fadeOrigin - camera.position;
+			instance.distanceFade = stepDistanceFade(instance.distanceFade, instance.cullRadius, dot(d, d),
+				instance.cullActor ? cullActor : cullRoot);
+			if (instance.distanceFade <= 0.0f) {
+				continue;
+			}
+			if (instance.distanceFade < 1.0f) {
+				item.fade = instance.fade * instance.distanceFade;
+			}
+		}
+		// After the distance fade: RendDX9 rays only what it draws (0x100c4ad6),
+		// and the object manager never hands it one faded out (0x006fb320).
 		if (instance.mesh->glow) {
 			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const bool visible = !m_sources || !m_sources->glowVisible
@@ -3702,24 +3722,6 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			if (!m_sources->glowVisible(camera.position, source, instance.object)) {
 				continue;
-			}
-		}
-		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
-			// 0x006fb320 on the objects in view; one faded out isn't drawn.
-			// A child instance uses its own mesh radius, so its distance must
-			// also be measured from the child's world position. Using the root
-			// puts a Titan's small signs roughly 70 m away even when the camera
-			// is beside them and can fade them out with the camera or FOV.
-			const Vec3f fadeOrigin = instance.source.empty() ? instance.objectOrigin
-				: Vec3f {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
-			const Vec3f d = fadeOrigin - camera.position;
-			instance.distanceFade = stepDistanceFade(instance.distanceFade, instance.cullRadius, dot(d, d),
-				instance.cullActor ? cullActor : cullRoot);
-			if (instance.distanceFade <= 0.0f) {
-				continue;
-			}
-			if (instance.distanceFade < 1.0f) {
-				item.fade = instance.fade * instance.distanceFade;
 			}
 		}
 		if (instance.overgrowth && m_sources) {
