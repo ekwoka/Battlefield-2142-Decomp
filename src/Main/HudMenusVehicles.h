@@ -995,6 +995,10 @@ struct MateInput {
 	std::optional<float> need;  // the disc's share (see above), mateNeed
 };
 struct MateMarker {
+	// 0x00781680 types his control object: his soldier 0x17/0x18 (a ladder
+	// kept here as on foot), a vehicle seat 0x10..0x13/0x25, which clears
+	// the draw (0x00792f9e) unless a call's marker shows (0x007934e8).
+	bool drawn = true;
 	std::string texture;
 	float size = 16;
 	float color[4] = {1, 1, 1, 1};

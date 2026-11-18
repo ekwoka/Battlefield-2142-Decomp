@@ -1687,6 +1687,13 @@ TEST(HudMap_TeammateMarkers)
 	CHECK(m.texture == "Ingame/Player/Icons/Minimap/mini_Soldier.tga" && m.size == 16 && m.yaw == 30 && !m.arrow);
 	CHECK(std::fabs(m.color[0] - 0.254f) < 1e-6f && std::fabs(m.color[1] - 0.552f) < 1e-6f && std::fabs(m.color[2] - 0.89f) < 1e-6f);
 	CHECK(m.iconAlpha && !m.disc);
+	CHECK(m.drawn);
+	// Seated (a vehicle's control object): not drawn, unless his call shows.
+	menu::MateInput seated;
+	seated.onFoot = false;
+	CHECK(!menu::mateMarker(seated).drawn);
+	seated.call = "Ingame/Player/Icons/Minimap/mini_Medic.tga";
+	CHECK(menu::mateMarker(seated).drawn);
 	in.squad = 3;
 	in.localSquad = 3;
 	m = menu::mateMarker(in);

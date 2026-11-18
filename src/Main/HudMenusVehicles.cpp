@@ -1491,6 +1491,7 @@ std::string MapCalls::icon(int player) const
 MateMarker mateMarker(const MateInput& in)
 {
 	MateMarker m;
+	m.drawn = in.onFoot || !in.call.empty();
 	// 0x0077d9f0 (slot 0x138): the commander's test comes after the squad
 	// leader's.
 	bool commanderIcon = false;

@@ -1272,6 +1272,9 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				player.soldier ? world.objectHealth(player.soldier) : -1, magazines, nrOfMags, magSize);
 		}
 		const dice::hfe::menu::MateMarker look = dice::hfe::menu::mateMarker(in);
+		if (!look.drawn) {
+			continue; // seated: the vehicle's icon stands for him
+		}
 		auto& list = in.call.empty() ? markers : callMarkers;
 		if (look.disc) {
 			hud::HudManager::MapMarker disc {"Ingame/Player/Icons/Minimap/mini_Health.tga", player.position.x, player.position.z, 16};
