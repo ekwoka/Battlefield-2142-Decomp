@@ -511,6 +511,90 @@ TEST(Titan_BotSiloGoalOnlyWithEnhancedTitanPlay)
 	}
 }
 
+// enhanced.botTitan: engineers aboard their own Titan with no enemy aboard
+// walk to its wrecked guns' control stations inside the hull and mend the
+// guns with the repair tool (a gun's wreck back in service above 0 hit points). Consoles are left: the tool's
+// material does nothing on theirs, whole or wrecked (BotManager::titanRepair).
+TEST(Titan_BotEngineersRepairTitanGunsAndConsoles)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		game::BotSettings settings;
+		loadAircraftAi(level, settings);
+		const bool enhanced = true;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &enhanced;
+		game::BotManager bots(*level.world, settings);
+		level.afterTick = [&] { bots.update(1 / 30.0f); };
+		std::map<int, std::vector<uint32_t>> guns;
+		std::map<int, std::pair<uint32_t, uint32_t>> consoles; // damaged, wrecked
+		std::map<int, int> repairers;
+		for (int team : {1, 2}) {
+			const auto* titan = level.titan(team);
+			CHECK(titan != nullptr);
+			if (!titan) continue;
+			for (const auto& part : level.world->titanParts(team)) {
+				if (part.kind == game::GameWorld::TitanPartInfo::Gun) {
+					level.world->applyDamage(part.id, 1e6f);
+					CHECK(level.world->hitPoints(part.id) <= 0);
+					guns[team].push_back(part.id);
+				} else if (part.kind == game::GameWorld::TitanPartInfo::Console) {
+					auto& [damaged, wrecked] = consoles[team];
+					if (!damaged) {
+						damaged = part.id;
+						level.world->applyDamage(part.id, part.maxHitPoints * 0.5f);
+					} else if (!wrecked) {
+						wrecked = part.id;
+						level.world->applyDamage(part.id, 1e6f);
+					}
+				}
+			}
+			for (int i = 0; i < 2; ++i) {
+				const int id = level.world->addPlayer("Engineer" + std::to_string(team) + std::to_string(i), team, true);
+				level.world->setKit(id, team == 1 ? "Pac_Anti-Vehicle" : "EU_Anti-Vehicle", team == 1 ? "pac_light_soldier" : "us_light_soldier");
+				CHECK(level.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo info;
+				CHECK(level.world->playerInfo(id, info));
+				CHECK(level.world->setSoldierPosition(info.soldier,
+					level.world->titanToWorld(titan->object, {static_cast<float>(i * 3) - 1.5f, 11.5f, -40})));
+				repairers[id] = team;
+			}
+		}
+		const auto damagedConsoleBefore = [&](int team) { return level.world->hitPoints(consoles[team].first); };
+		std::map<int, float> consoleBefore {{1, damagedConsoleBefore(1)}, {2, damagedConsoleBefore(2)}};
+		std::map<int, int> repairing;
+		level.afterTick = [&] {
+			bots.update(1 / 30.0f);
+			for (const auto& [id, team] : repairers) {
+				repairing[id] += bots.behaviour(id) == "TitanRepair";
+			}
+		};
+		level.run(240);
+		std::map<int, int> back;
+		for (int team : {1, 2}) {
+			for (uint32_t gun : guns[team]) {
+				back[team] += level.world->hitPoints(gun) > 0;
+			}
+			const auto& [damaged, wrecked] = consoles[team];
+			std::fprintf(stderr, "  %s team %d: %d of %zu wrecked guns back, console %.0f -> %.0f, wrecked console %.0f\n", mod, team,
+				back[team], guns[team].size(), consoleBefore[team], level.world->hitPoints(damaged), level.world->hitPoints(wrecked));
+			// The repair tool's material does nothing on the consoles' (84 against 4110: damageMod 0).
+			CHECK(level.world->hitPoints(damaged) == consoleBefore[team]);
+			CHECK(level.world->hitPoints(wrecked) <= 0);
+		}
+		// Each gun through its control station inside the hull (BotManager::titanRepair); four minutes for two engineers.
+		CHECK(back[1] >= 4 && back[2] >= 4);
+		for (const auto& [id, team] : repairers) {
+			CHECK(repairing[id] > 0);
+		}
+	}
+}
+
 // enhanced.botTitan: with the consoles down (the core's doors open) the
 // walking grids, of which only the changed box is cast again, come out as
 // grids made whole.
@@ -690,4 +774,204 @@ TEST(Titan_BotsPodToWalkableGroundOnMolokaiTitan)
 	std::fprintf(stderr, "  molokai titan: %d pod landings, %d off the mesh\n", landed, stuck);
 	CHECK(landed >= 4);
 	CHECK(stuck == 0);
+}
+
+// enhanced.botCommander: with no commander a bot team's Titan is moved
+// towards a silo, to a spot that leaves every friendly silo's missile path
+// (the climb, then straight at the enemy's middle) clear of its box, and
+// beside the enemy's Titan once that one's shield is down; the UAV goes up
+// over the focus. With the switch off nobody orders it (the server's first
+// order at its own place stands).
+TEST(Titan_BotCommanderMovesTheTitans)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const bool commander : {false, true}) {
+			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			game::BotSettings settings;
+			const bool enhanced = true;
+			settings.enhanced = &enhanced;
+			settings.botTitan = &enhanced;
+			settings.botCommander = &commander;
+			game::BotManager bots(*level.world, settings);
+			bool uav[3] = {};
+			level.afterTick = [&] {
+				bots.update(1 / 30.0f);
+				for (int team : {1, 2}) {
+					physics::Vec3 at;
+					float radius = 0;
+					uav[team] = uav[team] || level.world->uavArea(team, at, radius);
+				}
+			};
+			std::map<int, physics::Vec3> start;
+			std::vector<int> crew;
+			const auto addBots = [&] {
+				for (int team : {1, 2}) {
+					for (int i = 0; i < 2; ++i) {
+						crew.push_back(level.world->addPlayer("Bot" + std::to_string(team) + std::to_string(i), team, true));
+						CHECK(level.world->spawnSoldier(crew.back()));
+					}
+				}
+			};
+			for (int team : {1, 2}) {
+				start[team] = level.titan(team)->position;
+			}
+			addBots();
+			// The test's own reading of the missile paths: the Titan at `at` (moved there; it never turns) has none
+			// of a friendly silo's within its box (+ 10 m).
+			const auto blocks = [&](int team, const physics::Vec3& at) {
+				if (!level.titan(team) || !level.titan(3 - team)) return false;
+				const auto ownInfo = *level.titan(team);
+				const auto enemyInfo = *level.titan(3 - team);
+				const auto* own = &ownInfo;
+				const auto* enemy = &enemyInfo;
+				physics::Vec3 low, high;
+				if (!level.world->objectBox(own->object, low, high)) return false;
+				const physics::Vec3 shift {own->position.x - at.x, 0, own->position.z - at.z};
+				for (const auto& silo : level.world->missileSilos()) {
+					if (silo.team != team) continue;
+					const physics::Vec3 top = silo.position + physics::Vec3 {0, 40, 0};
+					for (int i = 0; i <= 200; ++i) {
+						const physics::Vec3 q = i <= 20 ? silo.position + (top - silo.position) * (i / 20.0f)
+														 : top + (enemy->position - top) * ((i - 20) / 180.0f);
+						const physics::Vec3 l = level.world->titanToLocal(own->object, q + shift);
+						if (l.x > low.x - 10 && l.x < high.x + 10 && l.y > low.y - 10 && l.y < high.y + 10 && l.z > low.z - 10 && l.z < high.z + 10) {
+							return true;
+						}
+					}
+				}
+				return false;
+			};
+			level.run(150);
+			for (int team : {1, 2}) {
+				// (level.titan's answer is one static, overwritten by the next call: copied.)
+				const auto* found = level.titan(team);
+				CHECK(found && found->hasTarget);
+				if (!found || !found->hasTarget) continue;
+				const auto info = *found;
+				const auto* titan = &info;
+				const float ordered = std::hypot(titan->target.x - start[team].x, titan->target.z - start[team].z);
+				const float moved = std::hypot(titan->position.x - start[team].x, titan->position.z - start[team].z);
+				float silo = 1e9f;
+				for (const auto& s : level.world->missileSilos()) {
+					silo = std::min(silo, std::hypot(titan->target.x - s.position.x, titan->target.z - s.position.z));
+				}
+				std::fprintf(stderr, "  %s commander %d team %d: order %.0f m from the start, moved %.0f m, %.0f m from a silo, blocks %d, uav %d\n",
+					mod, commander, team, ordered, moved, silo, blocks(team, titan->target), uav[team]);
+				if (!commander) {
+					CHECK(ordered < 5 && moved < 5 && !uav[team]);
+					continue;
+				}
+				CHECK(ordered > 30 && moved > 100 && silo <= 125);
+				CHECK(!blocks(team, titan->target));
+				CHECK(uav[team]);
+			}
+			if (!commander) continue;
+			// The silo each Titan went to, taken: its missile reaches the enemy, not its own Titan above it. (No bots
+			// meanwhile: none takes the silos back, and the Titans hold their orders.)
+			for (int id : crew) {
+				level.world->removePlayer(id);
+			}
+			crew.clear();
+			std::map<int, float> before;
+			for (int team : {1, 2}) {
+				const auto info = *level.titan(team);
+				const auto* titan = &info;
+				const auto silos = level.world->missileSilos();
+				const game::GameWorld::SiloInfo* nearest = nullptr;
+				for (const auto& s : silos) {
+					if (!nearest || std::hypot(titan->target.x - s.position.x, titan->target.z - s.position.z)
+							< std::hypot(titan->target.x - nearest->position.x, titan->target.z - nearest->position.z)) {
+						nearest = &s;
+					}
+				}
+				CHECK(nearest != nullptr);
+				if (nearest) level.world->setControlPointTeam(nearest->controlPoint, team);
+			}
+			for (int team : {1, 2}) {
+				before[team] = level.titan(team)->hitPoints;
+			}
+			level.run(175);
+			for (int team : {1, 2}) {
+				const float own = level.titan(team)->hitPoints, enemy = level.titan(3 - team)->hitPoints;
+				std::fprintf(stderr, "  %s team %d: own Titan %.0f -> %.0f, enemy's %.0f -> %.0f\n", mod, team, before[team], own, before[3 - team], enemy);
+				CHECK(enemy < before[3 - team]);
+			}
+			// The EU's shield down: the PAC Titan goes beside it.
+			addBots();
+			level.world->setHitPoints(level.titan(2)->object, level.titan(2)->maxHitPoints * 0.59f);
+			level.run(25);
+			const auto pacInfo = *level.titan(1);
+			const auto euInfo = *level.titan(2);
+			const auto* pac = &pacInfo;
+			const auto* eu = &euInfo;
+			const float apart = pac->radius + eu->radius;
+			const float beside = std::hypot(pac->target.x - eu->position.x, pac->target.z - eu->position.z);
+			std::fprintf(stderr, "  %s: PAC order %.0f m from the EU Titan (radii %.0f), blocks %d\n", mod, beside, apart, blocks(1, pac->target));
+			CHECK(beside >= apart + 20 && beside <= apart + 90); // the ring: radii + 30 m (or 50 m further)
+			CHECK(!blocks(1, pac->target));
+		}
+	}
+}
+
+// A gun hangs under the hull; its control station inside (an unarmoured
+// child of the gun's bundle, eu_controlstation_v2_g) is the gun's to the
+// repair tool: 0x004cc380 walks a hit node up (+0x34) to the nearest armour
+// (+0x48). The station keeps its collision (its wreck geometry,
+// 0x00651c60) while the gun is a wreck, so a player's tool aimed at it
+// brings the gun back (canBeRepairedWhenWreck 1).
+TEST(Titan_RepairToolOnGunStationMendsTheGun)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, "mods/bf2142");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	const int team = 2;
+	const int id = level.world->addPlayer("Engineer", team, false);
+	level.world->setKit(id, "EU_Anti-Vehicle", "us_light_soldier");
+	CHECK(level.world->spawnSoldier(id));
+	int mended = 0, tried = 0;
+	for (const auto& part : level.world->titanParts(team)) {
+		if (part.kind != game::GameWorld::TitanPartInfo::Gun) continue;
+		level.world->applyDamage(part.id, 1e6f);
+		CHECK(level.world->hitPoints(part.id) <= 0);
+		const auto meshes = level.world->titanPartMeshes(part.id);
+		CHECK(meshes.size() >= 2); // the gun's own and its station's
+		bool done = false;
+		// Any of its meshes a soldier can stand by (the ground cannons': only the station).
+		for (int k = 0; k < 16 * static_cast<int>(meshes.size()) && !done; ++k) {
+			const physics::Vec3 station = meshes[static_cast<size_t>(k / 16)];
+			const float a = static_cast<float>(k % 8) * 6.2831853f / 8, r = k % 16 < 8 ? 1.5f : 2.2f;
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(id, info));
+			if (!level.world->setSoldierPosition(info.soldier, station + physics::Vec3 {std::sin(a) * r, 0.2f, std::cos(a) * r})) continue;
+			level.run(0.5f);
+			level.world->playerInfo(id, info);
+			if (std::fabs(info.position.y - station.y) > 1.5f) continue;
+			++tried;
+			const float before = level.world->hitPoints(part.id);
+			for (int tick = 0; tick < 90; ++tick) {
+				level.world->playerInfo(id, info);
+				const physics::Vec3 d = station + physics::Vec3 {0, 0.8f, 0} - (info.position + physics::Vec3 {0, 1.6f, 0});
+				game::SoldierInput input;
+				input.turn = std::remainder(std::atan2(d.x, d.z) * 57.29578f - info.yaw, 360.0f);
+				input.aimPitch = std::atan2(d.y, std::hypot(d.x, d.z)) * 57.29578f;
+				input.hasPitch = true;
+				input.selectItem = tick == 0 ? 4 : 0;
+				input.fire = tick > 30;
+				level.world->setInput(id, input);
+				level.run(1 / 30.0f);
+			}
+			done = level.world->hitPoints(part.id) > before;
+		}
+		mended += done;
+		std::fprintf(stderr, "  %s: %s\n", part.name.c_str(), done ? "mended" : "not mended");
+	}
+	CHECK(tried > 0);
+	CHECK(mended == 6);
 }

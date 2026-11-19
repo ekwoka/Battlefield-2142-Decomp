@@ -792,6 +792,9 @@ public:
 	bool segmentHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
 		uint32_t& object) const;
 	void setInput(int player, const SoldierInput& input);
+	// A bot's AI target for the repair tool (the AI interface's slot 8, which
+	// 0x005d84a0 takes when the tool's ray meets nothing to treat); 0 none.
+	void setAiAbilityTarget(int player, uint32_t object);
 	// The pitch (degrees, up positive) the weapon's recoil has kicked the
 	// player's aim by since the last call: the original adds the kick to the
 	// soldier's own angles (0x0058a6d0), so a viewer sending absolute pitches
@@ -2509,6 +2512,9 @@ public:
 		int nametagPushes = 0;
 	};
 	std::vector<TitanPartInfo> titanParts(int team, uint32_t objectId = 0) const;
+	// Where a part's meshes lie (world): its own node's and those of unarmoured nodes under it (a gun's control
+	// station inside the hull, whose hits are the gun's).
+	std::vector<physics::Vec3> titanPartMeshes(uint32_t part) const;
 	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked, 2 gone (a forcefield that is down).
 	int titanPartLook(uint32_t object, const std::string& templateName) const;
 	// The game logic's damage (0x004c0e40) as a shot's hit: through the
@@ -3579,6 +3585,7 @@ private:
 		int previousSlot = -1; // the slot drawn before (0x005883d0's pick: soldier +0x1f4)
 		bool selectHeld = false;
 		bool abilityActive = false; // the gadget in hand is working this tick
+		uint32_t aiAbilityTarget = 0; // a bot's: what its AI treats (setAiAbilityTarget)
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
 		float empLevel = 0;         // the soldier's armour's EMP level (empBlast)
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)

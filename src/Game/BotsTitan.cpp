@@ -11,6 +11,7 @@
 // (the core's doors open the way to the core).
 #include "Bots.h"
 
+#include "Physics/MaterialManager.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -369,6 +370,9 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 			// gets in; a defender stands by a console; the rest take the guns
 			// and the pods, as before.
 			const int role = titanRole(self);
+			if (role != 1 && titanRepair(bot, self, input, seconds, *titan)) {
+				return true;
+			}
 			const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - self.team);
 			// (Not while a spawn vehicle of the team is at the enemy's Titan: the next life starts there.)
 			const auto forward = [&] {
@@ -509,6 +513,94 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		return true;
 	}
 	return titanWalk(bot, self, input, seconds, g, *titan, *field) || (!own && titanLeave(bot, self, input, seconds, *titan));
+}
+
+// An engineer aboard its own Titan with no enemy aboard mends its parts with
+// the repair tool, as a player may (retail's RepairVehicle, 0x10073360,
+// looks at vehicles only): a damaged console, and a gun hub, its wreck too
+// (canBeRepairedWhenWreck 1: back in service above 0 hit points,
+// 0x00654120). A console's wreck can't be mended: the heal 0x00655a00
+// refuses a wreck without canBeRepairedWhenWreck, which no console sets.
+// Two engineers at most to a part, each standing with its eyes within
+// abilityRadius + 1.5 m of one of the part's meshes: a gun hangs under the
+// hull, out of reach, but its control station inside (an unarmoured child
+// of the gun's bundle, eu_controlstation_v2_g / _aa) is the gun's to the tool.
+bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan)
+{
+	if (bot.titanRepair) {
+		m_world.setAiAbilityTarget(self.id, 0);
+	}
+	bot.titanRepair = 0;
+	const int slot = kitSlot(self, WeaponAi::Repair);
+	const world::ObjectTemplate* tool = slot ? m_world.templates().find(weaponName(self, slot)) : nullptr;
+	float reach = 0;
+	bool ammo = false, whileFiring = false;
+	if (!tool || !GameWorld::gadgetScan(*tool, reach, ammo, whileFiring) || ammo) {
+		return false;
+	}
+	TitanGrid& g = titanGrid(titan, self.team);
+	const int cell = g.cellAt(m_world.titanToLocal(titan.object, self.position));
+	if (cell < 0) {
+		return false;
+	}
+	// The tool's material against the part's (applyAbility's cell): the shipped tables give the repair tool (84)
+	// nothing on the consoles' metal (4110) and all on the gun hubs' (4198), in both mods.
+	const auto material = [&](const std::string& name, const char* key) -> uint32_t {
+		const world::ObjectTemplate* t = m_world.templates().find(name);
+		if (!t) {
+			return 0;
+		}
+		const auto it = t->settings().find(key);
+		return it == t->settings().end() ? 0 : static_cast<uint32_t>(std::atoi(it->second.c_str()));
+	};
+	const uint32_t toolMaterial = material(tool->name(), "ammo.abilityMaterial");
+	const std::vector<GameWorld::TitanPartInfo> parts = m_world.titanParts(titan.team);
+	const GameWorld::TitanPartInfo* goal = nullptr;
+	const std::vector<float>* field = nullptr;
+	float best = kInfinity;
+	physics::Vec3 aimAt;
+	for (const GameWorld::TitanPartInfo& part : parts) {
+		if ((part.kind != GameWorld::TitanPartInfo::Gun && part.kind != GameWorld::TitanPartInfo::Console)
+			|| part.hitPoints >= part.maxHitPoints || !m_world.repairable(part.id)
+			|| (m_world.materials() && m_world.materials()->damageMod(toolMaterial, material(part.name, "armor.defaultMaterial")) <= 0)) {
+			continue;
+		}
+		const int others = static_cast<int>(std::count_if(m_bots.begin(), m_bots.end(),
+			[&](const auto& b) { return b.first != self.id && b.second.titanRepair == part.id; }));
+		if (others >= 2) {
+			continue;
+		}
+		// To any of its meshes (a gun's: its control station inside the hull; the gun itself hangs under it), each
+		// field under its own key (a part's id less 0x10000000, the mesh's number at bit 20): the part's own field
+		// is the shooters' (cells that see it).
+		const std::vector<physics::Vec3> meshes = m_world.titanPartMeshes(part.id);
+		for (size_t k = 0; k < meshes.size() && k < 16; ++k) {
+			const std::vector<float>& f = titanField(g, titan, self.team, (part.id - 0x10000000u) ^ static_cast<uint32_t>(k << 20),
+				m_world.titanToLocal(titan.object, meshes[k]) - physics::Vec3 {0, 0.5f, 0}, true, reach + 1.5f);
+			if (f[static_cast<size_t>(cell)] < best) {
+				best = f[static_cast<size_t>(cell)];
+				goal = &part;
+				field = &f;
+				aimAt = meshes[k];
+			}
+		}
+	}
+	if (!goal) {
+		return false;
+	}
+	bot.titanRepair = goal->id;
+	bot.behaviour = "TitanRepair";
+	if (best > 0) {
+		return titanWalk(bot, self, input, seconds, g, titan, *field);
+	}
+	// There: the tool on it. Its ray meets the part's mesh, or something else first (the Titan's own
+	// forcefield over the decks), when the tool takes the AI's target instead (0x005d84a0, setAiAbilityTarget).
+	m_world.setAiAbilityTarget(self.id, goal->id);
+	input.selectItem = self.inHandSlot != slot ? slot : 0;
+	aim(bot, self, aimAt, {}, true, {}, input, seconds);
+	input.fire = self.inHandSlot == slot;
+	input.throttle = input.strafe = 0;
+	return true;
 }
 
 // A boarder with no way to any console or the core (a ledge of the hull it
@@ -1656,6 +1748,256 @@ std::string BotManager::titanGridStats()
 			+ " cells, " + std::to_string(links) + " links, " + std::to_string(g->fields.size()) + " fields\n";
 	}
 	return out;
+}
+
+// enhanced.botCommander (not retail): AIDLL's commander never moves a Titan
+// (its IBFCommander calls are the strikes, the UAV and the supply drop,
+// BotManager::command), and a Titan moves only on a commander's order
+// (GameWorld::moveTitan). A team with bots and no commander gets a virtual
+// one here, every kCommandEvery seconds:
+//   - its focus: the enemy Titan once its shield is down (boarding wins);
+//     else a silo the team holds that is being taken (the lowest flag
+//     under 0.75, as command() reads "being taken"); else the silo most
+//     of its bots are going for (the nearest to its Titan on a tie), kept
+//     kKeepFocus seconds while it is not yet the team's;
+//   - the Titan (while it may move: above 60 %) to the spot nearest that
+//     focus, counting the way there, that leaves every friendly silo's
+//     missile path clear of its box, the focus silo counted as friendly:
+//     a missile climbs out of its silo and runs straight at the enemy's
+//     middle, and a Titan in its way takes it (rounds meet every field);
+//     the order is kept while the focus stays and its spot stays clear;
+//   - the commander's tools at the focus: the UAV; supplies to two or
+//     more of its soldiers on foot there; the orbital strike on two or
+//     more enemies bunched there with no teammate within 40 m (command()'s
+//     rule); the EMP on an enemy vehicle there with none of its own within 40 m.
+namespace {
+constexpr float kCommandEvery = 10;
+constexpr float kKeepFocus = 90;     // shortcut: a fixed hold; the Titan crosses ~95 m in it
+constexpr float kMissileClimb = 45;  // a silo missile's climb before it runs at the Titan (Suez, measured: 45 m up, turned within 40 m)
+constexpr float kSiloClearance = 10; // round the Titan's box
+} // namespace
+
+bool BotManager::titanBlocksSilos(const GameWorld::TitanInfo& own, const GameWorld::TitanInfo& enemy, const physics::Vec3& at,
+	int extraPoint, const std::vector<GameWorld::SiloInfo>& silos) const
+{
+	physics::Vec3 low, high;
+	if (!m_world.objectBox(own.object, low, high)) {
+		return false;
+	}
+	const physics::Vec3 margin {kSiloClearance, kSiloClearance, kSiloClearance};
+	low = low - margin;
+	high = high + margin;
+	// The Titan moved to `at` (it never turns): a point there is where this one has it.
+	const physics::Vec3 shift {own.position.x - at.x, 0, own.position.z - at.z};
+	const auto inside = [&](const physics::Vec3& q) {
+		const physics::Vec3 l = m_world.titanToLocal(own.object, q + shift);
+		return l.x > low.x && l.x < high.x && l.y > low.y && l.y < high.y && l.z > low.z && l.z < high.z;
+	};
+	for (const GameWorld::SiloInfo& silo : silos) {
+		if (silo.team != own.team && silo.controlPoint != extraPoint) {
+			continue;
+		}
+		const physics::Vec3 top = silo.position + physics::Vec3 {0, kMissileClimb, 0};
+		const int steps = std::max(1, static_cast<int>(std::sqrt(physics::lengthSquared(enemy.position - top)) / 10));
+		for (int i = 0; i <= 4; ++i) {
+			if (inside(silo.position + (top - silo.position) * (i / 4.0f))) {
+				return true;
+			}
+		}
+		for (int i = 0; i <= steps; ++i) {
+			if (inside(top + (enemy.position - top) * (static_cast<float>(i) / steps))) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void BotManager::titanCommand()
+{
+	if (!m_settings.titanCommander() || m_world.gameMode() != "gpm_ti") {
+		return;
+	}
+	std::vector<GameWorld::TitanInfo> titans;
+	std::vector<GameWorld::SiloInfo> silos;
+	std::vector<GameWorld::ControlPointInfo> points;
+	for (int team = 1; team <= 2; ++team) {
+		TitanCommand& c = m_titanCommands[team];
+		if (m_time < c.nextAt) {
+			continue;
+		}
+		c.nextAt = m_time + kCommandEvery;
+		const bool bots = std::any_of(m_players.begin(), m_players.end(), [&](const GameWorld::PlayerInfo& p) { return p.ai && p.team == team; });
+		if (!bots || m_world.commander(team) != -1) {
+			continue;
+		}
+		if (titans.empty()) {
+			titans = m_world.titans();
+			silos = m_world.missileSilos();
+			points = m_world.controlPointList();
+		}
+		const GameWorld::TitanInfo* own = titanOf(titans, team);
+		const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - team);
+		if (!own || !enemy) {
+			continue;
+		}
+		const auto pointOf = [&](int id) -> const GameWorld::ControlPointInfo* {
+			for (const GameWorld::ControlPointInfo& p : points) {
+				if (p.id == id) {
+					return &p;
+				}
+			}
+			return nullptr;
+		};
+		int focus = 0;
+		physics::Vec3 at;
+		if (!enemy->shield) {
+			focus = -1;
+			at = enemy->position;
+		} else {
+			float lowest = 0.75f;
+			for (const ControlPoint& cp : m_world.controlPoints()) {
+				const bool silo = std::any_of(silos.begin(), silos.end(), [&](const GameWorld::SiloInfo& s) { return s.controlPoint == cp.id; });
+				if (silo && cp.team == team && cp.flag == team && cp.flagHeight < lowest) {
+					lowest = cp.flagHeight;
+					focus = cp.id;
+					at = {cp.object->position().x, cp.object->position().y, cp.object->position().z};
+				}
+			}
+			if (!focus) {
+				std::map<int, int> going; // by control point
+				for (const auto& [id, bot] : m_bots) {
+					const GameWorld::PlayerInfo* p = playerOf(id);
+					if (p && p->team == team && bot.goalOrder >= 0 && static_cast<size_t>(bot.goalOrder) < m_settings.strategy.areas.size()) {
+						++going[m_settings.strategy.areas[static_cast<size_t>(bot.goalOrder)].controlPoint];
+					}
+				}
+				float best = -1;
+				for (const GameWorld::SiloInfo& silo : silos) {
+					const GameWorld::ControlPointInfo* point = pointOf(silo.controlPoint);
+					if (silo.team == team || !point || !point->capturable) {
+						continue;
+					}
+					// The silo it went for stays its focus for kKeepFocus seconds while not yet the team's.
+					const bool kept = silo.controlPoint == c.focus && m_time < c.focusSince + kKeepFocus;
+					const float score = (kept ? 1e9f : 0.0f) + static_cast<float>(going[silo.controlPoint]) * 10000.0f
+						- horizontal(silo.position - own->position);
+					if (focus == 0 || score > best) {
+						best = score;
+						focus = silo.controlPoint;
+						at = silo.position;
+					}
+				}
+			}
+		}
+		if (!focus) {
+			continue;
+		}
+		if (focus != c.focus) {
+			c.focusSince = m_time;
+			c.focus = focus;
+			c.ordered = false; // a new focus: a new order
+		}
+		titanCommandAssets(team, at, focus > 0);
+		if (!own->canMove) {
+			continue;
+		}
+		const float apart = own->radius + enemy->radius;
+		const float ring = apart + 30;
+		if (c.ordered && !titanBlocksSilos(*own, *enemy, c.target, focus, silos)
+			&& (focus > 0 || std::fabs(horizontal(c.target - enemy->position) - ring) < 60)) {
+			continue;
+		}
+		// The spots: about the silo (over it, 60 m and 120 m off), or a ring beside the enemy's Titan.
+		std::vector<std::pair<float, physics::Vec3>> spots;
+		const std::vector<float> radii = focus > 0 ? std::vector<float> {0, 60, 120} : std::vector<float> {ring, ring + 50};
+		for (const float r : radii) {
+			for (int i = 0; i < (r > 0 ? 16 : 1); ++i) {
+				const float a = static_cast<float>(i) * 6.2831853f / 16;
+				const physics::Vec3 p {at.x + std::sin(a) * r, own->position.y, at.z + std::cos(a) * r};
+				if (horizontal(p - enemy->position) < apart + 20 || titanBlocksSilos(*own, *enemy, p, focus, silos)) {
+					continue;
+				}
+				// Crossing a missile's path on the way costs a shot or two.
+				bool crosses = false;
+				for (int k = 1; k < 5 && !crosses; ++k) {
+					crosses = titanBlocksSilos(*own, *enemy, own->position + (p - own->position) * (k / 5.0f), focus, silos);
+				}
+				spots.push_back({horizontal(p - at) + 0.3f * horizontal(p - own->position) + (crosses ? 400.0f : 0.0f), p});
+			}
+		}
+		std::sort(spots.begin(), spots.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+		for (const auto& [score, p] : spots) {
+			const GameWorld::TitanMove answer = m_world.moveTitan(team, p.x, p.z);
+			if (answer == GameWorld::TitanMove::Accepted) {
+				c.ordered = true;
+				c.target = p;
+				if (std::getenv("BF2142_BOT_STATS")) {
+					std::printf("commander %s %.0f s: Titan at %.0f/%.0f to %.0f/%.0f for %s %d\n", team == 1 ? "PAC" : "EU", m_time,
+						own->position.x, own->position.z, p.x, p.z, focus > 0 ? "point" : "the enemy Titan", focus);
+				}
+				break;
+			}
+			if (answer != GameWorld::TitanMove::Unable) {
+				c.nextAt = std::min(c.nextAt, m_time + 1); // too soon: again in a second
+				break;
+			}
+		}
+	}
+}
+
+void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool silo)
+{
+	using A = GameWorld::CommanderAbility;
+	const auto use = [&](A a, const physics::Vec3& p) {
+		if (!m_world.abilityState(team, a).ready || !m_world.commanderAction(team, a, p.x, p.z, true)) {
+			return false;
+		}
+		if (std::getenv("BF2142_BOT_STATS")) {
+			static const char* const names[] = {"EMP", "orbital strike", "UAV", "satellite", "supplies"};
+			std::printf("commander %s %.0f s: %s at %.0f/%.0f\n", team == 1 ? "PAC" : "EU", m_time, names[static_cast<int>(a)], p.x, p.z);
+		}
+		return true;
+	};
+	const auto count = [&](int side, const physics::Vec3& p, float r, bool onFoot) {
+		return std::count_if(m_players.begin(), m_players.end(), [&](const GameWorld::PlayerInfo& q) {
+			return q.alive && q.team == side && (!onFoot || !q.vehicle) && horizontal(q.position - p) < r;
+		});
+	};
+	use(A::Uav, focus);
+	if (!silo) {
+		return;
+	}
+	if (count(team, focus, 30, true) >= 2) {
+		use(A::Supplies, focus);
+	}
+	physics::Vec3 sum;
+	int enemies = 0;
+	for (const GameWorld::PlayerInfo& q : m_players) {
+		if (q.alive && q.team == 3 - team && horizontal(q.position - focus) < 40) {
+			sum = sum + q.position;
+			++enemies;
+		}
+	}
+	if (enemies >= 2) {
+		const physics::Vec3 middle = sum * (1.0f / static_cast<float>(enemies));
+		if (count(3 - team, middle, 15, false) >= 2 && count(team, middle, 40, false) == 0) {
+			use(A::Artillery, middle); // commander_orbital_strike (RCArtillery)
+		}
+	}
+	const auto teamOf = [&](uint32_t object) {
+		const world::Object* o = m_world.objects().find(object);
+		return o ? o->team() : 0;
+	};
+	for (const GameWorld::VehicleInfo& v : m_vehicles) {
+		if (v.working && teamOf(v.object) == 3 - team && horizontal(v.position - focus) < 60
+			&& std::none_of(m_vehicles.begin(), m_vehicles.end(), [&](const GameWorld::VehicleInfo& mine) {
+				   return teamOf(mine.object) == team && horizontal(mine.position - v.position) < 40;
+			   })) {
+			use(A::OrbitalStrike, v.position); // commander_emp_strike (RCOrbitalStrike)
+			break;
+		}
+	}
 }
 
 } // namespace dice::hfe::game

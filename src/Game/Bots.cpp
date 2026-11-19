@@ -1549,6 +1549,7 @@ void BotManager::update(float seconds)
 	}
 	updateStrategy(seconds);
 	command(seconds);
+	titanCommand(); // enhanced.botCommander (BotsTitan.cpp)
 	for (const GameWorld::PlayerInfo& p : m_players) {
 		if (p.ai && !m_deactivated.count(p.id) && !m_refused.count(p.id) && !m_bots.count(p.id)) {
 			// AIMain's slot 30 (0x100581a0): a new bot is refused once the

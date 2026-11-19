@@ -566,6 +566,10 @@ struct BotSettings {
 	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
+	// enhanced.botCommander, also read live: a virtual commander moves a commanderless bot team's Titan in gpm_ti
+	// and uses its commander's tools (BotsTitan.cpp, titanCommand); not retail.
+	const bool* botCommander = nullptr;
+	bool titanCommander() const { return enhanced && *enhanced && botCommander && *botCommander; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
@@ -1310,6 +1314,7 @@ private:
 		uint32_t titanCrewSkipFor = 0; // one it gave up on the way to, until then
 		float titanCrewSkipUntil = 0;
 		uint32_t titanSortieVehicle = 0; // the transport this pilot has considered for a deck sortie
+		uint32_t titanRepair = 0;  // enhanced.botTitan: the part of its own Titan it is mending (titanRepair)
 		uint32_t titanSortieRider = 0;  // the deck sortie a passenger joined
 		int titanSortie = 0;       // transport: 0 waiting, 1 dropping riders, 2 supporting silos, 3 ordinary AI; gunship: 1 taking off
 		int titanSortieSilo = -1;  // that silo's control point
@@ -1927,6 +1932,20 @@ private:
 	};
 	TitanPlan m_titanPlans[3];
 	int titanRole(const GameWorld::PlayerInfo& self);
+	// enhanced.botCommander: each team's virtual commander (titanCommand). `focus` the control point it moves the
+	// Titan for, -1 the enemy Titan, 0 none; `target` its last move order, taken (`ordered`).
+	struct TitanCommand {
+		float nextAt = 0;
+		int focus = 0;
+		float focusSince = 0; // when the focus last changed
+		bool ordered = false;
+		physics::Vec3 target;
+	};
+	TitanCommand m_titanCommands[3];
+	void titanCommand();
+	bool titanBlocksSilos(const GameWorld::TitanInfo& own, const GameWorld::TitanInfo& enemy, const physics::Vec3& at,
+		int extraPoint, const std::vector<GameWorld::SiloInfo>& silos) const;
+	void titanCommandAssets(int team, const physics::Vec3& focus, bool silo);
 	// enhanced.botRecovery (not retail): a mod's vehicle mesh may stop short of a base's vehicle pads (Remaster's
 	// Suez Titan layout leaves the fenced PAC base out). The way from such a spot to the mesh: a search over a 4 m
 	// grid within 90 m whose steps no obstacle crosses at hull height (fences count); empty for none. Kept by spot.
@@ -1942,6 +1961,7 @@ private:
 	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	void useFlareOnLock(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);

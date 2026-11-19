@@ -820,9 +820,20 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		}
 		return false;
 	};
+	// A wrecked part's subtree goes (0x00651c60 from the wreck, 0x00654120),
+	// but for an unarmoured node right under it that is no team forcefield:
+	// a gun's control station inside the hull (eu_controlstation_v2_g / _aa,
+	// a child of the gun's bundle). It stays, as the only place the repair
+	// tool can reach the gun (0x004cc380 walks a hit node up, +0x34, to the
+	// nearest armour, +0x48) and every gun is canBeRepairedWhenWreck.
+	// shortcut: inferred from that data; which branch of 0x00651c60 keeps
+	// it (slot 0xcc(1) or 0x54(0,2)) is not traced: both meshes have three
+	// geometries. A wrecked console's corridor forcefield (collisionGroups) goes.
 	const auto live = [&](const TitanMesh& m) {
 		return std::none_of(m.chain.begin(), m.chain.end(), [&](int part) {
-			return part > 0 && titan.parts[static_cast<size_t>(part)].off;
+			const TitanPart& p = titan.parts[static_cast<size_t>(part)];
+			const bool station = part == m.node && m.t && m.t != p.t && (m.groups & 0x300) == 0 && p.kind != TitanPartInfo::Shield;
+			return part > 0 && p.off && !station;
 		});
 	};
 	const bool teamFaces = std::any_of(titan.meshes.begin(), titan.meshes.end(),
@@ -1947,6 +1958,22 @@ void GameWorld::titanPartWrecked(Titan& titan, int index, int attacker)
 // the part's collision is back and, as 0x004bc410 has it after the heal,
 // its Python component's onRepairEvent goes with the Titan and the
 // repairer (the gun hubs' TitanWeaponRepaired; the consoles' and cores'
+std::vector<physics::Vec3> GameWorld::titanPartMeshes(uint32_t id) const
+{
+	std::vector<physics::Vec3> at;
+	const Titan* titan = nullptr;
+	int index = 0;
+	if (!titanPart(id, titan, index)) {
+		return at;
+	}
+	for (const TitanMesh& m : titan->meshes) {
+		if (m.node == index && m.t) {
+			at.push_back(titanToWorld(titan->object, m.position));
+		}
+	}
+	return at;
+}
+
 // TitanPart/CoreRepaired can't, their wrecks being unrepairable).
 bool GameWorld::healTitanPart(uint32_t id, float percent, int repairer)
 {
@@ -3231,14 +3258,19 @@ int GameWorld::titanPartLook(uint32_t object, const std::string& path) const
 			return 0;
 		}
 		// A node under a part that is down (a wrecked console's forcefield)
-		// goes with it (0x00651c60 hides a wrecked node's children).
+		// goes with it (0x00651c60 hides a wrecked node's children), but a
+		// gun's control station stays, in its wreck look (rebuildTitanMeshes).
 		for (const int index : found->second.chain) {
 			if (index <= 0 || index == found->second.own) {
 				continue;
 			}
 			const TitanPart& above = titan.parts[static_cast<size_t>(index)];
 			if (above.off || above.state >= 1) {
-				return 2;
+				const size_t slash = key.find_last_of('/');
+				const world::ObjectTemplate* node = m_templates.find(slash == std::string::npos ? key : key.substr(slash + 1));
+				const bool station = found->second.own < 0 && index == found->second.chain.back() && above.kind != TitanPartInfo::Shield
+					&& node && (integer(*node, "collisionGroups", 0) & 0x300) == 0;
+				return station ? 1 : 2;
 			}
 		}
 		if (found->second.own > 0) {
