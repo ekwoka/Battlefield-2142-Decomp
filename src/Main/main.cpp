@@ -3914,17 +3914,24 @@ int runGame(Options& options, Session& session)
 			}
 		}
 	}
-	// Apply the loaded profile before loading the remaining sound files.
-	// Retail maps Medium to index 1; startup's temporary index 2 is only
-	// needed until profile scripts have run.
-	if (soundEngine && session.settingsLoaded) {
-		const std::string quality = session.settings.get("AudioSettings.SoundQuality");
-		const int index = dice::hfe::menu::audioQualityIndex(quality);
-		if (sounds.initialize(index, "0", 32) != 0) {
-			std::fprintf(stderr, "sound: failed to apply profile quality %s (index %d)\n", quality.c_str(), index);
-		} else {
-			std::printf("sound: profile quality %s (index %d)\n", quality.c_str(), index);
+	// Apply the profile before loading the remaining sound files. The
+	// bootstrap initializes audio before the profile scripts are available.
+	int appliedVoiceCount = 0;
+	const auto applyAudioProfile = [&](const std::string& quality) {
+		const int index = menu::audioQualityIndex(quality);
+		const int voices = menu::audioVoiceCount(quality, session.settings.number("AudioSettings.ForceNumberOfVoices", 0));
+		if (soundEngine->isInitialized() && soundEngine->qualityLevel() == index && appliedVoiceCount == voices) {
+			return;
 		}
+		if (sounds.initialize(index, "0", voices) != 0) {
+			std::fprintf(stderr, "sound: failed to apply profile quality %s (index %d), %d voices\n", quality.c_str(), index, voices);
+			return;
+		}
+		appliedVoiceCount = voices;
+		std::printf("sound: profile quality %s (index %d), %d requested voices\n", quality.c_str(), index, voices);
+	};
+	if (soundEngine && session.settingsLoaded) {
+		applyAudioProfile(session.settings.get("AudioSettings.SoundQuality"));
 	}
 	sounds.reloadSoundFiles();
 
@@ -4051,13 +4058,7 @@ int runGame(Options& options, Session& session)
 			const std::string quality = session.menuBindings
 				? session.menuBindings->text("AudioSettings.SoundQuality")
 				: session.settings.get("AudioSettings.SoundQuality");
-			const int index = dice::hfe::menu::audioQualityIndex(quality);
-			if (soundEngine->qualityLevel() != index) {
-				if (sounds.initialize(index, "0", 32) != 0)
-					std::fprintf(stderr, "sound: failed to apply quality %s (index %d)\n", quality.c_str(), index);
-				else
-					std::printf("sound: applied quality %s (index %d)\n", quality.c_str(), index);
-			}
+			applyAudioProfile(quality);
 		}
 		if (!session.menuBindings) {
 			// No menu: the profile's AudioSettings (Audio.con) as the audio
