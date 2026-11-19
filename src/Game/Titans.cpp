@@ -1117,12 +1117,12 @@ bool GameWorld::titanMeshChange(uint32_t titan, uint32_t since, physics::Vec3& l
 	return false;
 }
 
-std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team) const
+std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team, uint32_t objectId) const
 {
 	std::vector<TitanPartInfo> list;
 	for (const Titan& titan : m_titans) {
 		const world::Object* object = m_objects.find(titan.object);
-		if (titan.team != team || !object) {
+		if (titan.team != team || !object || (objectId && titan.object != objectId)) {
 			continue;
 		}
 		const physics::Mat3 rotation =

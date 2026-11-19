@@ -996,12 +996,14 @@ int joinedSpawnGroup(int marker)
 }
 
 void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool commanderScreen, std::optional<float> viewHeading)
+	bool commanderScreen, std::optional<float> viewHeading, uint32_t insideTitan)
 {
 	game::GameWorld::PlayerInfo me;
 	const bool known = world.playerInfo(world.localPlayer(), me);
 	const bool spawning = known && dice::main::deploymentScreenShown(me.alive, g_deploymentOpen, g_spawnScreenHidden);
 	const bool big = spawning || commanderScreen || g_bigMap;
+	const uint32_t minimapTitan = known && me.alive && !big ? insideTitan : 0;
+	hud.setMapInsideTitan(minimapTitan != 0);
 	hud.set("MapShow", known ? 1 : 0);
 	hud.set("MapMinSize", big ? 0 : 1);
 	hud.set("MapFullSize", big ? 1 : 0);
@@ -1148,7 +1150,9 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const bool mine = me.alive && me.vehicle == vehicle.object;
 		const auto relation = dice::hfe::menu::vehicleRelation(occupied, mine, occupantTeam, object->team(), me.team);
 		dice::hfe::menu::VehicleMarker look;
-		if (!dice::hfe::menu::vehicleMarker(t, relation, mine, false, look) || (look.asPlayer && occupied)) {
+		const bool inside = vehicle.object == minimapTitan || (mine && !icons.iconInside.empty()
+			&& !round.isTitan(vehicle.object) && !round.isRemoteTitan(vehicle.object));
+		if (!dice::hfe::menu::vehicleMarker(t, relation, inside, false, look) || (look.asPlayer && occupied)) {
 			continue;
 		}
 		// vehicleHud.useVehicleCameraRotation (0x00794f03): turned by its
@@ -1598,9 +1602,9 @@ void updateFlares(hud::HudManager& hud, const host::HudWorld& world, const world
 }
 
 void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool scoreboard = false, bool commanderScreen = false, std::optional<float> viewHeading = {})
+	bool scoreboard = false, bool commanderScreen = false, std::optional<float> viewHeading = {}, uint32_t insideTitan = 0)
 {
-	updateMap(hud, world, round, logic, commanderScreen, viewHeading);
+	updateMap(hud, world, round, logic, commanderScreen, viewHeading, insideTitan);
 	updateCommander(hud, world, round, commanderScreen);
 	updateTeams(hud, world, logic);
 	dice::hfe::menu::showScoreboard(hud, scoreboard);
@@ -9661,9 +9665,6 @@ int runGame(Options& options, Session& session)
 		struct TagsReset {
 			~TagsReset() { g_nametags = nullptr; }
 		} tagsReset;
-		// The camera inside a Titan, as the renderer found it last frame.
-		static bool cameraInTitan = false;
-		sources.cameraInTitanOut = &cameraInTitan;
 		// The lock-on weapons' markers (Bf2ObjectMarkerNode, 0x007e6520):
 		// the enemy objects carrying a target object of the marker's type
 		// (HeatObject TTHeat on the aircraft, LaserTarget_vehicle TTLaser,
@@ -9810,7 +9811,9 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				if (!hudPlayer(hudLocal(), me) || !me.commander) closeCommander();
 			}
-			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading);
+			const auto& eye = tagView.position;
+			const uint32_t insideTitan = tagViewSeen && !commanderScreen ? round.cameraTitan({eye[0], eye[1], eye[2]}) : 0;
+			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading, insideTitan);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
 			// category of what he controls (0 on foot).
@@ -10185,7 +10188,7 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			// The 3D name tags under the HUD (RendDX9's NametagManager).
-			nametags.setInsideTitan(cameraInTitan);
+			nametags.setInsideTitan(insideTitan);
 			std::vector<hud::HudQuad> quads = nametags.frame(round, round.objects(), tagView, seconds);
 			if (!rendererSettings.drawNametags) {
 				quads.clear(); // renderer.drawNametags (+0x697, 0x1002cef0)

@@ -338,7 +338,7 @@ public:
 	// The camera inside a Titan (the objects' showInside / showOutside;
 	// RendDX9's object drawer slot 0x40, which the manager's frame reads,
 	// 0x100f3490).
-	void setInsideTitan(bool inside) { m_insideTitan = inside; }
+	void setInsideTitan(uint32_t titan) { m_insideTitan = titan; }
 	// A template's render object LODs (RendDX9's mesh instance slot 0x44,
 	// 0x100c7000: its shown LOD's box radius about the centre, lodRenderRadius
 	// by the camera's distance), for a vehicle tag's height; without them,
@@ -431,7 +431,7 @@ private:
 	Settings m_settings;
 	const IconRegistry* m_icons = nullptr;
 	const host::HudWorld* m_world = nullptr;
-	bool m_insideTitan = false;
+	uint32_t m_insideTitan = 0;
 	struct OrderTag {
 		bool set = false;
 		std::array<float, 3> order {}; // the order's point it was placed for

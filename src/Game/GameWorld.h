@@ -2506,7 +2506,7 @@ public:
 		float healthActivationLevel = 100; // as TitanInfo's
 		int nametagPushes = 0;
 	};
-	std::vector<TitanPartInfo> titanParts(int team) const;
+	std::vector<TitanPartInfo> titanParts(int team, uint32_t objectId = 0) const;
 	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked, 2 gone (a forcefield that is down).
 	int titanPartLook(uint32_t object, const std::string& templateName) const;
 	// The game logic's damage (0x004c0e40) as a shot's hit: through the

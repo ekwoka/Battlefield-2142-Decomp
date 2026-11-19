@@ -11,6 +11,7 @@
 #include "Main/HudMenus.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
+#include "Main/Nametags.h"
 #include "Main/GameAudio.h"
 #include "Sound/Game/SoundManager.h"
 #include "Sound/Game/GameSounds.h"
@@ -3935,6 +3936,78 @@ TEST(Titan_CameraTitanIsTheHullHoldingTheCamera)
 	CHECK(level.world->enclosingTitan(me) == titan->object);
 	CHECK(level.world->cameraTitan(outside) == 0);
 	CHECK(level.world->cameraTitan(inside) == titan->object);
+}
+
+// Run the shipped objective icons against the actual Titan armour sequence.
+TEST(Titan_BoardingObjectiveNametags)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
+		if (mod && !test::remaster()) {
+			continue;
+		}
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+		level.files.setMountingAllowed(true);
+		const char* fonts = mod ? "Objects/Fonts_client.zip" : "Fonts_client.zip";
+		CHECK(level.files.mountArchive(fonts, "Fonts"));
+		level.files.setMountingAllowed(false);
+		const auto* info = level.loaded ? level.titan(2) : nullptr;
+		CHECK(info);
+		if (!info) {
+			continue;
+		}
+		const uint32_t titan = info->object;
+		const world::Object* object = level.objects.find(titan);
+		CHECK(level.world->spawnPlayer(1));
+		const auto& pos = object->position();
+		const auto& rot = object->rotation();
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({rot.x, rot.y, rot.z});
+		const physics::Vec3 eye = physics::Vec3 {pos.x, pos.y, pos.z} + turn.transform({0, -0.081f, -35.4f});
+		CHECK(level.world->cameraTitan(eye) == titan);
+		const nametags::Nametags::View view {{eye.x, eye.y, eye.z}};
+		nametags::IconRegistry icons;
+		icons.bind(level.console);
+		std::string out;
+		CHECK(level.console.run("Menu/Nametag/nametags.con", {}, out));
+		nametags::Nametags tags(level.files);
+		tags.setIcons(&icons);
+		const auto countIcons = [&](uint32_t inside, const std::string& texture) {
+			tags.setInsideTitan(inside);
+			const auto quads = tags.frame(*level.world, level.objects, view, 0.0f);
+			return std::count_if(quads.begin(), quads.end(), [&](const hud::HudQuad& q) {
+				return q.texture.find(texture) != std::string::npos && q.color[0] > q.color[2];
+			});
+		};
+		const std::string consoles = "Titan_HUD_Console_Icon";
+		const std::string core = "Titan/core.dds";
+		CHECK(countIcons(0, consoles) == 0);
+		CHECK(countIcons(titan, consoles) == 4);
+		CHECK(countIcons(titan, core) == 0);
+		const auto parts = level.world->titanParts(2, titan);
+		const int attacker = level.world->localPlayer();
+		int left = 4;
+		for (const auto& part : parts) {
+			if (part.kind == game::GameWorld::TitanPartInfo::Console) {
+				level.world->applyDamage(part.id, part.hitPoints + 10, attacker);
+				CHECK(countIcons(titan, consoles) == --left);
+				CHECK(countIcons(titan, core) == 0);
+			}
+		}
+		CHECK(countIcons(titan, consoles) == 0);
+		level.run(2.2f);
+		CHECK(level.titan(2)->coreExposed);
+		CHECK(countIcons(titan, core) == 1);
+		CHECK(countIcons(0, core) == 0);
+		for (const auto& part : parts) {
+			if (part.kind == game::GameWorld::TitanPartInfo::Core) {
+				level.world->applyDamage(part.id, part.hitPoints + 10, attacker);
+				CHECK(countIcons(titan, core) == 0);
+			}
+		}
+	}
 }
 
 // OptimizeEnclosingObjectsNetworking (a var, 0 by default): a client whose

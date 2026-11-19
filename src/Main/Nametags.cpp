@@ -871,6 +871,27 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		return q;
 	};
 
+	const auto projectObjectTag = [&](const TagTemplate& tt, int team, const std::array<float, 3>& position,
+									  float radius, float& x, float& y, float& distance, bool& clamped, float (&colour)[4]) {
+		if ((m_insideTitan ? !tt.showInside : !tt.showOutside)
+			|| (tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
+			return false;
+		}
+		const bool enemy = team != 0 && team != me.team;
+		const float most = enemy ? tt.maxEnemyDistance : tt.maxDistance;
+		const auto at = objectTagPoint(position, tt.offset, tt.useBoundingRadius, radius);
+		distance = std::sqrt(physics::lengthSquared(physics::Vec3 {at[0], at[1], at[2]} - eyeP));
+		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);
+		if (alpha <= 0.01f || !project(view, at, x, y, tt.glue, m_settings.circleRadius, &clamped)
+			|| (clamped && !tt.tracker && !project(view, at, x, y, false, 0))) {
+			return false;
+		}
+		const int tint = !tt.useTeamColor || team == 0 ? Neutral : enemy ? Enemy : Team;
+		std::copy(kColours[tint], kColours[tint] + 4, colour);
+		colour[3] = alpha;
+		return true;
+	};
+
 	// The objects with tags, looked for again once a second (the
 	// templates' Nametag fields are read once per template).
 	m_taggedCheck -= seconds;
@@ -989,35 +1010,17 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			}
 		}
 		const IconRegistry::Icon* icon = m_icons && iconIndex >= 0 ? m_icons->find(0x50 + iconIndex) : nullptr;
-		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
+		if (!icon || (tt.useAliveArmor && (owned->destroyed() ||
+				(hud ? hud->objectHealth(id) == 0 : world.hitPoints(id) == 0)))) {
 			continue;
 		}
-		if (tt.useAliveArmor && (owned->destroyed() || (hud ? hud->objectHealth(id) == 0 : world.hitPoints(id) == 0))) {
-			continue;
-		}
-		const int team = owned->team();
-		if ((tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
-			continue;
-		}
-		const bool enemy = team != 0 && team != me.team;
-		const float most = enemy ? tt.maxEnemyDistance : tt.maxDistance;
-		const std::array<float, 3> at = objectTagPoint({owned->position().x, owned->position().y, owned->position().z},
-			tt.offset, tt.useBoundingRadius, state.radius);
-		const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
-		const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);
-		float x = 0, y = 0;
+		const auto& pos = owned->position();
+		float x = 0, y = 0, distance = 0;
 		bool clamped = false;
-		if (alpha <= 0.01f || !project(view, at, x, y, tt.glue, m_settings.circleRadius, &clamped)) {
-			continue;
-		}
-		if (clamped && !tt.tracker && !project(view, at, x, y, false, 0)) {
-			continue;
-		}
-		const int colour = tt.useTeamColor ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
 		float c[4];
-		std::copy(kColours[colour], kColours[colour] + 4, c);
-		c[3] = alpha;
+		if (!projectObjectTag(tt, owned->team(), {pos.x, pos.y, pos.z}, state.radius, x, y, distance, clamped, c)) {
+			continue;
+		}
 		if (tt.selectable) {
 			consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
 		}
@@ -1025,7 +1028,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// The supply bar (objectTagBar): the hubs' and the MiniMed's storage.
 		if ((tt.showArmor || tt.showSupply) && !clamped) {
 			ObjectBarInput bar;
-			bar.friendly = team == 0 || team == me.team;
+			bar.friendly = owned->team() == 0 || owned->team() == me.team;
 			bar.showArmor = tt.showArmor;
 			bar.showSupply = tt.showSupply;
 			bar.localRepairs = localEngineer;
@@ -1033,10 +1036,42 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			bar.hasSupply = !hud && world.supplyStorage(id, bar.supply, kind);
 			const float fill = objectTagBar(bar);
 			if (fill >= 0) {
-				barQuads(x, y, fill, alpha, tagDrawn.quads);
+				barQuads(x, y, fill, c[3], tagDrawn.quads);
 			}
 		}
 		drawn.push_back(std::move(tagDrawn));
+	}
+
+	// The consoles and core are armoured children of the Titan. Their
+	// transforms and life cycle come from the Titan's parts.
+	if (const world::Object* titan = me.alive && m_insideTitan ? objects.find(m_insideTitan) : nullptr;
+		titan && !titan->destroyed() && !titan->hidden() && m_icons) {
+		using Part = game::GameWorld::TitanPartInfo;
+		for (const auto& part : world.titanParts(titan->team(), titan->id())) {
+			if (part.wreck || (part.kind != Part::Console && part.kind != Part::Core)) {
+				continue;
+			}
+			const TagTemplate& tt = tagTemplate(world.templates().find(part.name));
+			if (!tt.show3dIcon || tt.icon < 0 || (part.kind == Part::Core && part.percent > tt.healthActivationLevel)) {
+				continue;
+			}
+			const auto* icon = m_icons->find(0x50 + tt.icon);
+			float x = 0, y = 0, distance = 0;
+			bool clamped = false;
+			float colour[4];
+			if (!icon || !projectObjectTag(tt, titan->team(),
+					{part.position.x, part.position.y, part.position.z}, 0, x, y, distance, clamped, colour)) {
+				continue;
+			}
+			Drawn tag {distance, {iconQuad(*icon, x, y, colour)}};
+			if (tt.showDistance) {
+				char text[32];
+				std::snprintf(text, sizeof(text), "[%im]", static_cast<int>(std::lround(distance)));
+				m_font.write(text, std::round(x - m_font.width(text) / 2),
+					std::round(y + icon->height / 2), colour, tag.quads);
+			}
+			drawn.push_back(std::move(tag));
+		}
 	}
 
 	// The squad's orders (TTOrder: the exe's order object 0x005b8b20 hands
