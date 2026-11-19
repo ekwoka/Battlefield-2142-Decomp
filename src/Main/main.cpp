@@ -1353,10 +1353,11 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			}
 		}
 	}
-	// A drop shows for 25 s (0x00792354 → 0x0077d7e0, +0xbc8).
+	// A drop shows for 25 s (0x00792354 → 0x0077d7e0, +0xbc8), to its own team only: the drop (0x0043d1f0)
+	// sends HUD event 0x53 to that team's players (0x0043cf80).
 	for (const uint32_t crate : round.supplyCrates()) {
 		const float age = round.supplyCrateAge(crate);
-		if (const world::Object* object = round.objects().find(crate); object && age >= 0 && age < 25) {
+		if (const world::Object* object = round.objects().find(crate); object && object->team() == me.team && age >= 0 && age < 25) {
 			toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Minimap/Icons/icon_supplies.tga",
 				object->position().x, object->position().z);
 		}
