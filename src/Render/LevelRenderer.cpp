@@ -2767,6 +2767,8 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.normal[0] = sprite.color[0] * light[0];
 					v.normal[1] = sprite.color[1] * light[1];
 					v.normal[2] = sprite.color[2] * light[2];
+					// The Enhanced shader uses the tangent slot for the unlit tint.
+					std::copy_n(sprite.color.data(), 3, v.tangent);
 					v.weight = sprite.color[3];
 					v.texCoord[0] = corner[0];
 					v.texCoord[1] = corner[1];
@@ -2806,6 +2808,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.normal[0] = w.color[0] * light[0];
 					v.normal[1] = w.color[1] * light[1];
 					v.normal[2] = w.color[2] * light[2];
+					std::copy_n(w.color.data(), 3, v.tangent);
 					v.weight = w.color[3];
 					v.lightmapCoord[0] = w.u;
 					v.lightmapCoord[1] = w.v;
@@ -3412,14 +3415,14 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 		return;
 	}
 	LightingUniforms fog = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
-	// enhanced.particleShadows: the blended ones through enh_particle.frag, which
-	// takes a shaded particle's light over a sunlit one's (particleLight) in material.rgb.
+	// Enhanced shadows interpolate the directional light already baked into the
+	// vertices by particleLight. Pass the shaded minus sunlit light in material.rgb.
+	// Dividing by a floored sunlit value can amplify the color or flip its sign.
 	const bool shadowed = m_enh.particleShadows && m_enh.shadows.cascadeParams[0] > 0.5f;
 	if (shadowed) {
-		const bool unlit = m_particleSettings.particleSystemShaderQuality <= 1;
-		const float f = lights.defaultEffectLightAffectionFactor;
+		const float f = m_particleSettings.particleSystemShaderQuality <= 1 ? 0.0f : lights.defaultEffectLightAffectionFactor;
 		for (size_t i = 0; i < 3; ++i) {
-			fog.material[i] = unlit ? 1.0f : (1 + (lights.effectShadowColor[i] - 1) * f) / std::max(1 + (lights.effectSunColor[i] - 1) * f, 1e-3f);
+			fog.material[i] = (lights.effectShadowColor[i] - lights.effectSunColor[i]) * f;
 		}
 	}
 	ParticleUniforms uniforms {};
