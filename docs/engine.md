@@ -10138,25 +10138,28 @@ the AA and AT launchers, the walkers' and gunships' guided guns; template
 ticks at `+0x90`), `loseLockDelay` `+0x94` (0.2, ticks `+0x98`)). The
 default component (runtime `0x005e1a70`, interface vtable `0x009733a8`)
 updates in slot 6 (`0x005e1b30`) for TSHeatSeeking and TSLaserGuided
-while the weapon is one of its holder's three in use: the candidate
-(game logic slot `0x1c8`, `0x004cf290`) is the nearest registered target
-object of the round's `seek.targetType` (not the system's), alive, not
-under the shooter's root and not in a root occupied by his team (an empty
-vehicle of either side counts), within min(maxDistance, the round's
-`seek.maxDistLock`) and lockAngle of the direction (the camera's with
-`target.useCameraDirectionToTarget` `+0x7d`, else the weapon's), in
-sight; with the candidate the target, a loss in progress ends; unlocked,
-the target becomes the candidate at once and its clock restarts; locked
-and another (or none), after more than loseLockDelay ticks the candidate
-replaces it unlocked; locked once the tick passes the target's start +
-lockDelay ticks. The shot (`0x005e1ee0`) gives the round the target only
-when locked. The heat and laser rounds (SeekClosestTargetComp, template
+while the weapon is one of its holder's three in use. The query (game
+logic slot `0x1c8`, `0x004cf290`) selects the nearest active registered
+target of the round's `seek.targetType` outside the shooter's root. It
+rejects control objects on the shooter's team (`0x004cf337`–`0x004cf38b`). A vehicle
+takes the team of its first occupied seat, or uses its own team when
+empty (`0x005c9500`). The candidate must be visible and within
+min(`target.maxDistance`, `seek.maxDistLock`) and `target.lockAngle`.
+The angle is measured from the weapon's forward direction, or from the
+camera's if `target.useCameraDirectionToTarget` (`+0x7d`) is set.
+A new candidate must persist beyond `lockDelay` ticks to lock. A held
+lock tolerates an absent or different candidate for `loseLockDelay`
+ticks. Reacquiring the held target cancels that timer. The shot
+(`0x005e1ee0`) gives the round the target only when locked. The heat and
+laser rounds (SeekClosestTargetComp, template
 `0x9540`, ctor `0x005ec300`: maxAngleLock 45°, maxDistLock 9999,
 distLoseLock 0, `seek.reLockTime` `+0x28` / ticks `+0x2c`) home from
 `seek.trackingDelay` on (`0x005ec260`): a destroyed target dropped, the
-nearest candidate from the round along its heading (none: with
-distLoseLock, asked again out to it and the target kept only if found);
-with reLockTime 0, nothing found, the relock flag clear or the target
+nearest candidate from the round along its heading (with
+`seek.ignoreFriendly` the round passes its team as a fallback for the same
+team filter, `0x005ebf0a`–`0x005ebf57`). With no candidate and
+`distLoseLock` set, it queries again at that range to check the held target.
+With reLockTime 0, nothing found, the relock flag clear or the target
 alive it takes the candidate at once, else only once the same one has
 lasted more than reLockTime ticks, clearing the flag the shot set
 (`0x005b2e70`, `0x005ebea0`); DefaultFollowComp turns it

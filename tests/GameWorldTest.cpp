@@ -4824,10 +4824,9 @@ TEST(GameWorld_WeaponLock)
 }
 
 // The lock-on update's candidate (0x005e1b30 -> 0x004cf290): the nearest
-// target object in the cone, not the one nearest the aim; an empty
-// vehicle of the shooter's own side is a candidate too. Locked, another
-// candidate replaces the target only after more than loseLockDelay ticks,
-// unlocked.
+// target object in the cone. These targets have no player-control interface,
+// so the team filter does not use their team fields. A new candidate replaces
+// a held lock only after more than loseLockDelay ticks.
 TEST(GameWorld_WeaponLockTakesTheNearest)
 {
 	Range range;
@@ -4848,7 +4847,7 @@ TEST(GameWorld_WeaponLockTakesTheNearest)
 	world::Object* far = range.objects.create(jet, {me.position.x, eye, me.position.z + 200});
 	far->setTeam(1);
 	world::Object* nearer = range.objects.create(jet, {me.position.x + 20, eye, me.position.z + 80}); // ~14 degrees off
-	nearer->setTeam(2); // an empty one of our own side
+	nearer->setTeam(2);
 	range.world->tick(1 / 30.0f);
 	game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(range.world->localPlayer());
 	CHECK(lock.target == nearer->id() && lock.state == 1);

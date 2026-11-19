@@ -3121,7 +3121,9 @@ private:
 	static physics::Vec3 exitRayStart(const Body& body, const physics::Vec3& place);
 	// A vehicle's team is its first occupant's (0x005c9500), its own when
 	// empty: each tick from the seats.
+	int vehicleOccupantTeam(const Body& body) const;
 	void stepVehicleTeams();
+	int lockTargetTeam(const world::Object& target) const;
 	// The levels' Trigger and AmbientEffectArea objects (AmbientTriggers.h,
 	// Ambience.cpp): linked at the round's start, tested each tick, set off
 	// by shots (event 2) and explosions (event 8) too.

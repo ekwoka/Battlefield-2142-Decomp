@@ -3612,7 +3612,7 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 			const world::Object* o = owned.get();
 			if (!o || o->id() == p.shooter || o->destroyed() || o->hidden() || !o->objectTemplate()
 				|| !targetObjectOf(*o->objectTemplate(), s.seekTargetType) || !targetEnabled(*o, s.seekTargetType)
-				|| (s.ignoreFriendly && o->team() != 0 && o->team() == p.team)) {
+				|| (s.ignoreFriendly && p.team > 0 && lockTargetTeam(*o) == p.team)) {
 				continue;
 			}
 			const physics::Vec3 at {o->position().x, o->position().y, o->position().z};
@@ -6284,6 +6284,23 @@ bool GameWorld::targetEnabled(const world::Object& root, int type)
 	return integer(*t, "disableWhenEmptyVehicle", 0) == 0 || occupied || m_time - body->occupiedAt <= delay;
 }
 
+// The target query calls the root control object's team getter (0x004cf337
+// through 0x004cf38b). Seats may change before stepVehicleTeams publishes
+// the new team at the end of the tick.
+int GameWorld::lockTargetTeam(const world::Object& target) const
+{
+	if (const Body* body = findBody(target.id()); body && body->vehicle) {
+		const int occupantTeam = vehicleOccupantTeam(*body);
+		if (occupantTeam >= 0) {
+			return occupantTeam;
+		}
+		if (body->defaultTeam >= 0 && !body->dontClearTeam) {
+			return body->defaultTeam;
+		}
+	}
+	return target.team();
+}
+
 // A lock-on weapon's lock each tick: the default target component's
 // update (template 0xc50c, runtime 0x005e1a70, interface slot 6
 // 0x005e1b30; target.targetSystem +0x80, maxDistance +0x78, lockAngle
@@ -6292,9 +6309,8 @@ bool GameWorld::targetEnabled(const world::Object& root, int type)
 // while the weapon is in use:
 // - the candidate (game logic slot 0x1c8, 0x004cf290): of the registered
 //   target objects of the round's seek.targetType (not the system's),
-//   alive, not under the shooter's own root and not in a root occupied by
-//   the shooter's team (an empty vehicle of either side counts), within
-//   min(target.maxDistance, the round's seek.maxDistLock, 9999 by
+//   alive, outside the shooter's own root, with friendly control objects
+//   excluded, within min(target.maxDistance, the round's seek.maxDistLock, 9999 by
 //   default) and lockAngle of the direction (the camera's with
 //   target.useCameraDirectionToTarget +0x7d, else the weapon's), in sight
 //   (terrain and the see-through filter): the nearest (directionBonus 0);
@@ -6405,9 +6421,13 @@ void GameWorld::stepWeaponLock(Player& player, float seconds)
 			from = from + aim * (body->objectRadius + 0.5f); // out of its own hull
 		}
 	}
-	const auto occupiedByTeam = [this](uint32_t root, int team) {
+	const auto friendlyTarget = [this, &player](const world::Object& target) {
+		if (sameName(target.objectTemplate()->typeName(), "PlayerControlObject")) {
+			return lockTargetTeam(target) == player.team;
+		}
 		return std::any_of(m_players.begin(), m_players.end(), [&](const auto& other) {
-			return other->present && other->alive && other->team == team && (other->vehicle == root || other->object == root);
+			return other->present && other->alive && other->team == player.team
+				&& (other->vehicle == target.id() || other->object == target.id());
 		});
 	};
 	// The candidate: the nearest.
@@ -6416,7 +6436,7 @@ void GameWorld::stepWeaponLock(Player& player, float seconds)
 	for (const auto& owned : m_objects.objects()) {
 		const world::Object* object = owned.get();
 		if (!object || object->destroyed() || object->hidden() || object->id() == ignore || !object->objectTemplate()
-			|| !targetObjectOf(*object->objectTemplate(), wanted) || occupiedByTeam(object->id(), player.team)
+			|| !targetObjectOf(*object->objectTemplate(), wanted) || friendlyTarget(*object)
 			|| !targetEnabled(*object, wanted)) {
 			continue;
 		}
@@ -7655,6 +7675,16 @@ void GameWorld::setSpawnTitan(int id, uint32_t titan)
 // side reads.) Titans keep theirs. After an exit (0x005c95b0) the
 // left seat's dontClearTeamOnExit (+0x34f) keeps an emptied vehicle's
 // team as it was.
+int GameWorld::vehicleOccupantTeam(const Body& body) const
+{
+	for (const int id : body.occupants) {
+		if (const Player* p = id >= 0 ? findPlayer(id) : nullptr; p && p->present) {
+			return p->team;
+		}
+	}
+	return -1;
+}
+
 void GameWorld::stepVehicleTeams()
 {
 	for (Body& body : m_bodies) {
@@ -7665,13 +7695,7 @@ void GameWorld::stepVehicleTeams()
 		if (!object) {
 			continue;
 		}
-		int team = -1;
-		for (const int id : body.occupants) {
-			if (const Player* p = id >= 0 ? findPlayer(id) : nullptr; p && p->present) {
-				team = p->team;
-				break;
-			}
-		}
+		int team = vehicleOccupantTeam(body);
 		if (team >= 0) {
 			if (body.defaultTeam < 0) {
 				body.defaultTeam = object->team();
@@ -14062,6 +14086,7 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 		p.timeLeft = arm.projectile->timeToLive.sample(m_random);
 		p.shooter = body.object;
 		p.player = player.id;
+		p.team = player.team;
 		if (firearm) {
 			wireSettings(p, *firearm);
 		}

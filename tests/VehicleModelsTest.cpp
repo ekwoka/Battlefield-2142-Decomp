@@ -8456,6 +8456,60 @@ TEST(Vehicles_WalkerRocketsAccelerateToMaxSpeed)
 	}
 }
 
+TEST(Vehicles_GunshipPilotMissilesIgnoreFriendlyAircraft)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const char* gunship : {"as_ag", "us_ag"}) {
+			for (const auto [targetTeam, crewed] : {std::pair {2, true}, std::pair {2, false}, std::pair {1, false}, std::pair {0, false}}) {
+				Garage g(gameDir(), mod);
+				auto* transport = g.templates.find("eu_at");
+				auto* heat = g.templates.find("HeatObject");
+				CHECK(g.loaded && g.templates.find(gunship) && transport && heat);
+				if (!g.loaded || !g.templates.find(gunship) || !transport || !heat) continue;
+				if (!crewed) {
+					// Keep the uncrewed aircraft's heat signature active in the fixture.
+					heat->settings()["disableWhenEmptyVehicle"] = "0";
+				}
+				const uint32_t shooter = g.start(gunship, {0, 4, 6});
+				CHECK(g.enter(shooter));
+				g.run(3);
+				const auto from = g.position(shooter);
+				auto* target = g.objects.create(transport, {from.x + 2.0f, from.y + 2.0f, from.z + 22});
+				target->setTeam(crewed ? 0 : targetTeam);
+				if (crewed) {
+					g.run(1 / 30.0f);
+					const int pilot = g.world->addPlayer("Transport pilot", targetTeam, true);
+					CHECK(g.world->spawnSoldier(pilot));
+					CHECK(g.world->seatNearestBot(target->id()) == pilot);
+				}
+				g.run(0.3f);
+				CHECK(target->team() == targetTeam);
+				const auto lock = g.world->weaponLock(g.world->localPlayer());
+				bool fired = false, tracked = false;
+				for (int tick = 0; tick < 12; ++tick) {
+					game::SoldierInput fire;
+					fire.fire = tick == 0;
+					g.drive(fire, 1 / 30.0f);
+					for (const auto& round : g.world->projectiles()) {
+						if (round.shooter != shooter || !round.settings
+							|| round.settings->seek != game::ProjectileSettings::Seek::Closest) continue;
+						fired = true;
+						tracked = tracked || round.lockedOn == target->id();
+					}
+				}
+				std::fprintf(stderr, "  %s %s: team %d (%s), lock %d, fired %d, tracked %d\n",
+					mod, gunship, targetTeam, crewed ? "crewed" : "empty", lock.state, fired, tracked);
+				CHECK(fired);
+				CHECK(lock.target == (targetTeam == 2 ? 0 : target->id()));
+				CHECK(lock.state == (targetTeam == 2 ? 0 : 2));
+				CHECK(tracked == (targetTeam != 2));
+			}
+		}
+	}
+}
+
 // The heat seekers' motor (0x005b3e60): with follow.targetActivation it runs
 // only while the seek holds a target (0x005b2c10 / 0x005b2ca0), and with
 // follow.useTargetSpeed its cap is the target's top speed x speedModifier
