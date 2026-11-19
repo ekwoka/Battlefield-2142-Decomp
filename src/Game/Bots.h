@@ -1304,6 +1304,7 @@ private:
 		uint32_t titanCrewSkipFor = 0; // one it gave up on the way to, until then
 		float titanCrewSkipUntil = 0;
 		uint32_t titanSortieVehicle = 0; // the transport this pilot has considered for a deck sortie
+		uint32_t titanRepair = 0;  // enhanced.botTitan: the part of its own Titan it is mending (titanRepair)
 		uint32_t titanSortieRider = 0;  // the deck sortie a passenger joined
 		int titanSortie = 0;       // transport: 0 waiting, 1 dropping riders, 2 supporting silos, 3 ordinary AI; gunship: 1 taking off
 		int titanSortieSilo = -1;  // that silo's control point
@@ -1921,6 +1922,7 @@ private:
 	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	void useFlareOnLock(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);

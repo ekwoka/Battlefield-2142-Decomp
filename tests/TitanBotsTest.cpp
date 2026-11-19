@@ -511,6 +511,92 @@ TEST(Titan_BotSiloGoalOnlyWithEnhancedTitanPlay)
 	}
 }
 
+// enhanced.botTitan: engineers aboard their own Titan with no enemy aboard
+// walk to its wrecked gun hubs and mend them with the repair tool (a hub's
+// wreck back in service above 0 hit points). Consoles are left: the tool's
+// material does nothing on theirs, whole or wrecked (BotManager::titanRepair).
+TEST(Titan_BotEngineersRepairTitanGunsAndConsoles)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		game::BotSettings settings;
+		loadAircraftAi(level, settings);
+		const bool enhanced = true;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &enhanced;
+		game::BotManager bots(*level.world, settings);
+		level.afterTick = [&] { bots.update(1 / 30.0f); };
+		std::map<int, std::vector<uint32_t>> guns;
+		std::map<int, std::pair<uint32_t, uint32_t>> consoles; // damaged, wrecked
+		std::map<int, int> repairers;
+		for (int team : {1, 2}) {
+			const auto* titan = level.titan(team);
+			CHECK(titan != nullptr);
+			if (!titan) continue;
+			for (const auto& part : level.world->titanParts(team)) {
+				if (part.kind == game::GameWorld::TitanPartInfo::Gun) {
+					level.world->applyDamage(part.id, 1e6f);
+					CHECK(level.world->hitPoints(part.id) <= 0);
+					guns[team].push_back(part.id);
+				} else if (part.kind == game::GameWorld::TitanPartInfo::Console) {
+					auto& [damaged, wrecked] = consoles[team];
+					if (!damaged) {
+						damaged = part.id;
+						level.world->applyDamage(part.id, part.maxHitPoints * 0.5f);
+					} else if (!wrecked) {
+						wrecked = part.id;
+						level.world->applyDamage(part.id, 1e6f);
+					}
+				}
+			}
+			for (int i = 0; i < 2; ++i) {
+				const int id = level.world->addPlayer("Engineer" + std::to_string(team) + std::to_string(i), team, true);
+				level.world->setKit(id, team == 1 ? "Pac_Anti-Vehicle" : "EU_Anti-Vehicle", team == 1 ? "pac_light_soldier" : "us_light_soldier");
+				CHECK(level.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo info;
+				CHECK(level.world->playerInfo(id, info));
+				CHECK(level.world->setSoldierPosition(info.soldier,
+					level.world->titanToWorld(titan->object, {static_cast<float>(i * 3) - 1.5f, 11.5f, -40})));
+				repairers[id] = team;
+			}
+		}
+		const auto damagedConsoleBefore = [&](int team) { return level.world->hitPoints(consoles[team].first); };
+		std::map<int, float> consoleBefore {{1, damagedConsoleBefore(1)}, {2, damagedConsoleBefore(2)}};
+		std::map<int, int> repairing;
+		level.afterTick = [&] {
+			bots.update(1 / 30.0f);
+			for (const auto& [id, team] : repairers) {
+				repairing[id] += bots.behaviour(id) == "TitanRepair";
+			}
+		};
+		level.run(240);
+		std::map<int, int> back;
+		for (int team : {1, 2}) {
+			for (uint32_t gun : guns[team]) {
+				back[team] += level.world->hitPoints(gun) > 0;
+			}
+			const auto& [damaged, wrecked] = consoles[team];
+			std::fprintf(stderr, "  %s team %d: %d of %zu wrecked guns back, console %.0f -> %.0f, wrecked console %.0f\n", mod, team,
+				back[team], guns[team].size(), consoleBefore[team], level.world->hitPoints(damaged), level.world->hitPoints(wrecked));
+			// The repair tool's material does nothing on the consoles' (84 against 4110: damageMod 0).
+			CHECK(level.world->hitPoints(damaged) == consoleBefore[team]);
+			CHECK(level.world->hitPoints(wrecked) <= 0);
+		}
+		// The EU Titan's two AA guns are the hubs the decks reach (BotManager::titanRepair).
+		CHECK(back[2] >= 2);
+		int busy = 0;
+		for (const auto& [id, team] : repairers) {
+			busy += team == 2 && repairing[id] > 0;
+		}
+		CHECK(busy >= 1);
+	}
+}
+
 // enhanced.botTitan: with the consoles down (the core's doors open) the
 // walking grids, of which only the changed box is cast again, come out as
 // grids made whole.

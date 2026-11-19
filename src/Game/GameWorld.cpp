@@ -7195,6 +7195,13 @@ float GameWorld::aimPitchOf(int id) const
 	return player ? std::clamp(player->input.aimPitch + player->aimKickPitch, -89.0f, 89.0f) : 0.0f;
 }
 
+void GameWorld::setAiAbilityTarget(int player, uint32_t object)
+{
+	if (Player* p = findPlayer(player)) {
+		p->aiAbilityTarget = object;
+	}
+}
+
 void GameWorld::setInput(int id, const SoldierInput& input)
 {
 	if (Player* player = findPlayer(id)) {
@@ -12534,8 +12541,8 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	// thing the ray along the holder's look meets within abilityRadius
 	// (the object manager's ray, DAT_00a85220 slot 0x68, the holder left
 	// out), when it passes the filter (0x005d7d40). A bot whose ray meets
-	// nothing takes its AI's target instead (the AI interface's slot 8);
-	// the rewrite's bots take the sphere's as before.
+	// nothing takes its AI's target instead (the AI interface's slot 8:
+	// setAiAbilityTarget); one without takes the sphere's, as before.
 	bool sphere = rescan;
 	// An armoured round first along the ray (C4, mines: GenericProjectile,
 	// interface 0x94c1). The filter (0x005d7880) passes a round of either
@@ -12572,11 +12579,32 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	}
 	if (rescan && rayEnd) {
 		uint32_t hitObject = 0;
-		const world::Object* object =
-			firstHit(at, *rayEnd, hitObject, holder ? holder->object : 0) && hitObject ? m_objects.find(hitObject) : nullptr;
-		if (object && !ability.ammo && !soldiersOnly && (object->team() == team || object->team() == 0)
+		const bool met = firstHit(at, *rayEnd, hitObject, holder ? holder->object : 0) && hitObject;
+		// A Titan's nodes are objects of its tree to the ray as to the sphere
+		// below: the node whose face it met (a gun hub's bundle), not the root,
+		// which is never repaired (0x00561d90).
+		const Titan* titan = nullptr;
+		if (const Body* body = met && isTitan(hitObject) ? findBody(hitObject) : nullptr) {
+			physics::CollisionWorld::Hit hit {};
+			if (raycastBody(*body, body->body.rotation.untransform(at - body->body.position),
+					body->body.rotation.untransform(*rayEnd - body->body.position), hit) && hit.owner) {
+				hitObject = hit.owner;
+			}
+		}
+		int index = 0;
+		const bool part = met && titanPart(hitObject, titan, index) && index > 0 && titan->team == team;
+		const world::Object* object = met && !part ? m_objects.find(hitObject) : nullptr;
+		if ((part || (object && (object->team() == team || object->team() == 0))) && !ability.ammo && !soldiersOnly
 			&& repairable(hitObject) && hurt(hitObject)) {
 			found.push_back(hitObject);
+		}
+		// A bot whose ray meets nothing to treat takes its AI's target, through the same filter.
+		if (const uint32_t target = found.empty() && holder && holder->ai ? holder->aiAbilityTarget : 0; target && !ability.ammo && !soldiersOnly) {
+			const world::Object* o = m_objects.find(target);
+			const bool own = titanPart(target, titan, index) ? index > 0 && titan->team == team : o && (o->team() == team || o->team() == 0);
+			if (own && repairable(target) && hurt(target)) {
+				found.push_back(target);
+			}
 		}
 		sphere = found.empty() && holder && holder->ai;
 		if (!sphere && scan) {
