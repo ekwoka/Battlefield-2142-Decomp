@@ -40,6 +40,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -275,6 +276,7 @@ public:
 	void setMapLayer(std::string texture) { m_mapLayer = std::move(texture); }
 	const std::string& mapLayer() const { return m_mapLayer; }
 	void setMapMarkers(std::vector<MapMarker> markers) { m_mapMarkers = std::move(markers); }
+	void setSatelliteSweep(std::optional<float> progress) { m_satelliteSweep = progress; }
 	// The map's turn with the player (the map node's update 0x0078f680).
 	// setMapHeading is 0x00778ea0: the camera's heading (radians clockwise
 	// from north, atan2 of its direction's x and z; 0 when the local player
@@ -503,6 +505,7 @@ private:
 	float m_mapOrigin[2] = {0, 0}, m_mapSize[2] = {1, 1};
 	float m_mapFocus[2] = {0, 0};
 	std::vector<MapMarker> m_mapMarkers;
+	std::optional<float> m_satelliteSweep;
 	struct Hit {
 		float x0, y0, x1, y1;
 		int id;

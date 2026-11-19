@@ -2066,6 +2066,20 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		}
 	}
 	out.insert(out.end(), tooltips.begin(), tooltips.end());
+	if (m_satelliteSweep && number("CommanderShow") != 0) {
+		// 0x00779250 / 0x0077d8e0: a 150 m strip travels east until its
+		// trailing edge reaches the map's far side. It extends 30 m past
+		// each north/south edge and follows the same map projection.
+		const float width = 150 * mapW / m_mapSize[0];
+		const float margin = 30 * mapH / m_mapSize[1];
+		const float right = mapX + *m_satelliteSweep * (mapW + width);
+		HudQuad scan {"Menu/HUD/Texture/Ingame/Minimap/map_SatelliteScanLine.dds",
+			right - width, mapY - margin, right, mapY + mapH + margin, 0, 0, 1, 1, {1, 1, 1, 0.8f * alpha}};
+		turned(scan);
+		if (clipTo(scan, nx, ny, nx + nw, ny + nh)) {
+			out.push_back(std::move(scan));
+		}
+	}
 }
 
 // dice::meme::Bf2MiniMenuMapNode (factory 0x007e8fb0, constructor

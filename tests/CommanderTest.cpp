@@ -713,12 +713,19 @@ TEST(Commander_UavAndScanReveal)
 	// 11 s, to the commander only.
 	field.place("commander_movement_analyst", 2, -220, -200);
 	const int mate = field.soldier(2, -300, -300);
+	CHECK(!world.abilityState(2, Ability::Satellite).satelliteSweep);
 	CHECK(world.commanderAction(2, Ability::Satellite, 0, 0));
+	CHECK(world.abilityState(2, Ability::Satellite).satelliteSweep == 0.0f);
 	field.run(0.1f);
 	const std::vector<int> seen = world.scannedPlayers(world.commander(2));
 	CHECK(seen.size() == 2 && world.scannedPlayers(mate).empty() && !world.isRevealed(outside, 2));
-	field.run(11);
+	field.run(5.4f);
+	const auto halfway = world.abilityState(2, Ability::Satellite).satelliteSweep;
+	CHECK(halfway && std::abs(*halfway - 0.5f) < 0.01f);
+	CHECK(!world.abilityState(1, Ability::Satellite).satelliteSweep);
+	field.run(5.6f);
 	CHECK(world.scannedPlayers(world.commander(2)).empty());
+	CHECK(!world.abilityState(2, Ability::Satellite).satelliteSweep);
 	CHECK(std::fabs(world.abilityState(2, Ability::Satellite).timeUntilReady - (27 - 11.1f)) < 0.2f);
 }
 

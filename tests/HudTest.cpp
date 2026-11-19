@@ -883,6 +883,58 @@ TEST(Hud_CommanderMapOverhead)
 	CHECK(quads.size() == 2 && quads[0].color[3] == 1);
 }
 
+TEST(Hud_CommanderMapSatelliteSweep)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setCommanderPos -300/-300",
+			 "hudBuilder.setCommanderSize 600/600",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("map.dds", -300, -300, 600, 600);
+	manager.setMapMarkers({{"mark.dds", 0, 0, 16}});
+	manager.set("MapFullSize", 1);
+	manager.set("CommanderShow", 1);
+	const auto sweep = [&]() -> std::optional<hud::HudQuad> {
+		for (const auto& q : manager.frame(0)) {
+			if (q.texture == "Menu/HUD/Texture/Ingame/Minimap/map_SatelliteScanLine.dds") {
+				return q;
+			}
+		}
+		return std::nullopt;
+	};
+	CHECK(!sweep());
+	manager.setSatelliteSweep(0.1f);
+	const auto early = sweep();
+	CHECK(early && early->x0 == 100 && early->x1 == 175 && early->u0 == 0.5f);
+	manager.setSatelliteSweep(0.5f);
+	const auto middle = sweep();
+	CHECK(middle && middle->x0 == 325 && middle->x1 == 475
+		&& middle->y0 == 0 && middle->y1 == 600 && middle->color[3] == 0.8f);
+	manager.setSatelliteSweep(0.9f);
+	const auto late = sweep();
+	CHECK(late && late->x0 == 625 && late->x1 == 700 && late->u1 == 0.5f);
+	manager.setOverhead(true, 0, 0, 300);
+	manager.setSatelliteSweep(0.5f);
+	const auto overhead = sweep();
+	CHECK(overhead && overhead->x0 == 250 && overhead->x1 == 550);
+	manager.set("CommanderShow", 0);
+	CHECK(!sweep());
+	manager.set("CommanderShow", 1);
+	manager.setSatelliteSweep(std::nullopt);
+	CHECK(!sweep());
+}
+
 // A picture without a texture is a fill in its colour (the commander
 // screen's black borders); setPictureNodeCenterPoint's point (about the
 // screen's centre) is the rotation's pivot.

@@ -366,6 +366,9 @@ GameWorld::CommanderAbilityState GameWorld::abilityState(int team, CommanderAbil
 		break;
 	case CommanderAbility::Satellite:
 		state.active = since < commanderSettings.satelliteScanTime;
+		if (state.active) {
+			state.satelliteSweep = since / commanderSettings.satelliteScanTime;
+		}
 		break;
 	default:
 		state.active = std::any_of(m_strikes.begin(), m_strikes.end(),

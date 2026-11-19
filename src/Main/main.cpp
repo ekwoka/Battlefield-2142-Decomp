@@ -1475,6 +1475,7 @@ void updateCommander(hud::HudManager& hud, const host::HudWorld& world, const ga
 	// The right-click menu (state 0x16), not the screen.
 	hud.set("CommanderMenuShow", commander && screen && g_mapMenu == 0x16 ? 1 : 0);
 	if (!commander) {
+		hud.setSatelliteSweep(std::nullopt);
 		return;
 	}
 	using Ability = game::GameWorld::CommanderAbility;
@@ -1487,6 +1488,9 @@ void updateCommander(hud::HudManager& hud, const host::HudWorld& world, const ga
 			 Tool {Ability::Artillery, "Artillery", "Artillery"}, Tool {Ability::Uav, "UAV", "MinimapUAV"},
 			 Tool {Ability::Satellite, "Satellite", "MinimapSatellite"}, Tool {Ability::Supplies, "Supply", "Supply"}}) {
 		const auto state = round.abilityState(me.team, tool.ability);
+		if (tool.ability == Ability::Satellite) {
+			hud.setSatelliteSweep(state.satelliteSweep);
+		}
 		hud.set(std::string("CommanderNo") + tool.name + "Show", state.available ? 0 : 1);
 		hud.set(std::string(tool.name) + "Armor", state.armor);
 		hud.set(std::string(tool.reloading) + "Reloading", state.ready ? 0 : 1);

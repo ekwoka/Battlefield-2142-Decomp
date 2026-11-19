@@ -2116,6 +2116,7 @@ public:
 		float timeUntilReady = 0; // seconds
 		float reloaded = 0;       // 0..1 of the recharge done (the HUD's *TimeUntilReloaded bar)
 		bool active = false;      // a UAV or scan running, a strike on its way
+		std::optional<float> satelliteSweep; // 0..1 of the active scan, separate from recharge
 	};
 	CommanderAbilityState abilityState(int team, CommanderAbility ability) const;
 	bool abilityReady(int team, CommanderAbility ability) const { return abilityState(team, ability).ready; }
