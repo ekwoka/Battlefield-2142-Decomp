@@ -419,6 +419,8 @@ private:
 		true, true, true, true, true, true};
 };
 
+void updateTitanSiloHud(hud::HudManager& hud, const std::vector<game::GameWorld::SiloInfo>& silos, int localTeam);
+
 struct SelectItem {
 	int index = 0;       // the item index (1 the knife, 2 the sidearm, 3 the primary...)
 	std::string icon;    // weaponHud.selectIcon

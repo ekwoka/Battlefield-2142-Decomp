@@ -2304,34 +2304,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// destroyed; 0: the Titan gone), the HUD manager's variables of
 		// 0x0044f1a0.
 		hud.set("GameMode", 1);
-		// The silos' row (0x0044c350, each frame): the ten CPCannon%i slots
-		// are cleared, then each silo (the objects of class 10 whose
-		// ancestor's control point gives an index 1..9) shows in slot
-		// index - 1 with its team as the player sees it (1 his, 2 the
-		// enemy's, 0 neutral) and the time to its next missile, "%02d:%02d"
-		// minutes and seconds (its weapon's whole seconds), or "--:--" when
-		// loaded or neutral.
-		std::array<bool, 10> siloShown {};
-		const auto silos = round.missileSilos();
-		for (size_t i = 0; i < silos.size(); ++i) {
-			const int index = silos[i].controlPoint > 0 ? silos[i].controlPoint : static_cast<int>(i) + 1;
-			if (index < 1 || index > 9) {
-				continue;
-			}
-			const std::string n = std::to_string(index - 1);
-			siloShown[static_cast<size_t>(index - 1)] = true;
-			const int side = silos[i].team == team ? 1 : silos[i].team != 0 ? 2 : 0;
-			hud.set("CPCannon" + n + "Team", static_cast<float>(side));
-			const int seconds = silos[i].loaded ? 0 : static_cast<int>(silos[i].reloadLeft);
-			char text[16] = "--:--";
-			if (seconds > 0 && side != 0) {
-				std::snprintf(text, sizeof(text), "%02d:%02d", seconds / 60, seconds % 60);
-			}
-			hud.setString("CPCannon" + n + "String", text);
-		}
-		for (size_t i = 0; i < siloShown.size(); ++i) {
-			hud.set("CPCannon" + std::to_string(i) + "Show", siloShown[i] ? 1 : 0);
-		}
+		dice::hfe::menu::updateTitanSiloHud(hud, round.missileSilos(), team);
 		// The consoles and shields (StrategicObject%iShow, HudMenusVehicles.h's
 		// StrategicObjects: 1 from the round's start, cleared by a destroyed
 		// part with vehicleHud.sendDestroyedHudEvent at its guiIndex,

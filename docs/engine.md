@@ -14038,8 +14038,10 @@ retail has it.
 (a console destroyed) and 0Show (the Titan gone); the variables are the HUD
 manager's (`0x0044f1a0`). The silos' row is set each frame by `0x0044c350`:
 the ten slots' CPCannon%iShow (HUD `+0xdb`..) are cleared, then each object
-of class 10 whose first ancestor with a `+0x64` gives an index 1..9 (slot
-`0x38`: the silo's control point) shows in slot index − 1, with
+of class 10 whose first ancestor with a `+0x64` gives a silo number 1..9
+(getter slot `0x38`, assigned by count through setter slot `0x44` at
+`0x004d18a5`) shows in slot number − 1. The native HUD uses
+`SiloInfo::number`, shared with the numbered minimap icons, with
 CPCannon%iTeam (`+0xe8`) 1 for the player's team, 2 for the enemy's and 0
 neutral (the object's team, component `0xc4c5` slot `0x9c`, against the
 local player's slot `0xf8`), and CPCannon%iString (`+0x110`) the time to

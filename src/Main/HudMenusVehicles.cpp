@@ -485,6 +485,32 @@ void StrategicObjects::update(hud::HudManager& hud, int localTeam) const
 	}
 }
 
+void updateTitanSiloHud(hud::HudManager& hud, const std::vector<game::GameWorld::SiloInfo>& silos, int localTeam)
+{
+	// Retail assigns the silo number at 0x004d1884 and uses it as the
+	// one-based HUD index at 0x0044c40a. The map control-point ID links the spawner.
+	std::array<bool, 10> shown {};
+	for (const auto& silo : silos) {
+		if (silo.number < 1 || silo.number > 9) {
+			continue;
+		}
+		const auto slot = static_cast<size_t>(silo.number - 1);
+		const std::string key = "CPCannon" + std::to_string(slot);
+		shown[slot] = true;
+		const int side = silo.team == 0 ? 0 : silo.team == localTeam ? 1 : 2;
+		hud.set(key + "Team", static_cast<float>(side));
+		const int seconds = silo.loaded ? 0 : static_cast<int>(silo.reloadLeft);
+		char timer[16] = "--:--";
+		if (seconds > 0 && side != 0) {
+			std::snprintf(timer, sizeof(timer), "%02d:%02d", seconds / 60, seconds % 60);
+		}
+		hud.setString(key + "String", timer);
+	}
+	for (size_t slot = 0; slot < shown.size(); ++slot) {
+		hud.set("CPCannon" + std::to_string(slot) + "Show", shown[slot] ? 1 : 0);
+	}
+}
+
 // --- The item selection (0x0079bc70..0x0079c720) ---
 
 void ItemSelection::bind(Console& console)

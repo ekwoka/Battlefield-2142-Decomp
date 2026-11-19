@@ -287,6 +287,85 @@ TEST(Titan_SuezWalkerPrimaryFireAgainstEnemyInfantry)
 	level.world->setBlastRayTraceSink({});
 }
 
+TEST(Titan_SiloOwnershipAndReloadAppearInTopHud)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+
+		hud::HudManager hud([&](const std::string& path, std::string& text) {
+			std::vector<uint8_t> bytes;
+			if (!level.files.readFile(path, bytes)) return false;
+			text.assign(bytes.begin(), bytes.end());
+			return true;
+		});
+		hud::registerHudConsoleMethods(level.console, hud);
+		level.console.setScriptOutput(false, false);
+		std::string out;
+		CHECK(level.console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+		hud.set("GameMode", 1);
+		hud.set("ShowIngameHud", 1);
+		hud.set("ShowSoldierHud", 1);
+		hud.set("MiddleTicketsShow", 1);
+		hud.set("MapMinSize", 1);
+		hud.set("MenuBackgroundAlpha", 1);
+		hud.set("FriendlyTicketRed", 0.165f);
+		hud.set("FriendlyTicketBlue", 1);
+		hud.set("EnemyTicketRed", 0.63f);
+		hud.set("EnemyTicketBlue", 0.17f);
+
+		const auto silos = level.world->missileSilos();
+		CHECK(silos.size() == 5);
+		if (silos.size() != 5) continue;
+		const auto iconColors = [&] {
+			std::map<std::string, std::array<float, 3>> icons;
+			for (const auto& quad : hud.frame(0.5f)) {
+				if (quad.texture.find("silo_icons/") != std::string::npos) {
+					icons.emplace(quad.texture, std::array<float, 3> {quad.color[0], quad.color[1], quad.color[2]});
+				}
+			}
+			return icons;
+		};
+		menu::updateTitanSiloHud(hud, silos, 1);
+		const auto neutral = iconColors();
+		CHECK(neutral.size() == 5);
+		CHECK(hud.string("CPCannon0String") == "--:--");
+
+		level.world->setControlPointTeam(silos.front().controlPoint, 1);
+		level.run(7.0f);
+		const auto reloading = level.world->missileSilos();
+		const auto silo1 = std::find_if(reloading.begin(), reloading.end(), [](const auto& silo) { return silo.number == 1; });
+		CHECK(silo1 != reloading.end() && silo1->team == 1 && silo1->launched == 1);
+		menu::updateTitanSiloHud(hud, reloading, 1);
+		const auto friendly = iconColors();
+		const std::string timer = hud.string("CPCannon0String");
+		CHECK(timer == "01:58" || timer == "01:59");
+		menu::updateTitanSiloHud(hud, reloading, 2);
+		const auto enemy = iconColors();
+		CHECK(hud.string("CPCannon0String") == timer);
+		CHECK(friendly.size() == 5 && enemy.size() == 5);
+		for (const auto& [texture, color] : neutral) {
+			const bool first = texture.find("_01.dds") != std::string::npos;
+			if (first && friendly.count(texture) && enemy.count(texture)) {
+				const auto& blue = friendly.at(texture);
+				const auto& red = enemy.at(texture);
+				CHECK(blue[2] > blue[0] && red[0] > red[2]);
+			} else {
+				CHECK(friendly.count(texture) && friendly.at(texture) == color);
+				CHECK(enemy.count(texture) && enemy.at(texture) == color);
+			}
+		}
+		menu::updateTitanSiloHud(hud, {}, 1);
+		CHECK(iconColors().empty());
+	}
+}
+
 TEST(Titan_SiloCapturePreservesMagazineAndTurnsLauncher)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
