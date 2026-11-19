@@ -432,20 +432,25 @@ const HudFont* HudManager::font(const std::string& path)
 
 // The show variable and the logic entries are terms ANDed together; an OR
 // entry joins the term before it ("NOT AffectedByEMPShow 1" then "OR
-// UpdateAllEnabled 1" is one term: either holds). NOT is "!=", the others
-// "==".
+// UpdateAllEnabled 1" is one term: either holds). NOT is "!=", and
+// GREATER compares the HUD value with the threshold (0x00872580).
 bool HudManager::visible(const Node& node) const
 {
 	bool show = true;
 	bool term = node.showVariable.empty() || number(node.showVariable) != 0;
 	bool haveTerm = !node.showVariable.empty();
 	for (const Node::Logic& l : node.logic) {
-		const bool equal = number(l.variable) == l.value;
+		const float value = number(l.variable);
+		const bool equal = value == l.value;
 		if (l.op == "or") {
 			term = haveTerm ? term || equal : equal;
 		} else {
 			show = show && term;
-			term = l.op == "not" ? !equal : equal; // and, equal
+			if (l.op == "greater") {
+				term = value > l.value;
+			} else {
+				term = l.op == "not" ? !equal : equal; // and, equal
+			}
 		}
 		haveTerm = true;
 	}

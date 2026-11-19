@@ -420,6 +420,31 @@ TEST(Hud_ShippedSupplyLabelOrder)
 			}
 			CHECK(glyphs == 8);
 		}
+		// Sat Track uses the same cooldown fill as Supplies, but has a red
+		// destroyed-asset background under its armor-gated gray one.
+		manager.set("MinimapSatelliteReloading", 1);
+		manager.set("MinimapSatelliteTimeUntilReloaded", 0.5f);
+		for (const float armor : {1.0f, 0.25f, 0.0f}) {
+			manager.set("SatelliteArmor", armor);
+			const auto quads = manager.frame(1 / 30.0f);
+			const auto icon = std::find_if(quads.begin(), quads.end(), [](const auto& q) {
+				return q.texture.find("tools/route_scan.tga") != std::string::npos;
+			});
+			CHECK(icon != quads.end());
+			if (icon == quads.end()) continue;
+			const float left = icon->x0 - 2, top = icon->y0 - 2;
+			std::vector<std::string> backgrounds;
+			for (const auto& q : quads) {
+				if (q.x0 == left && q.y0 == top && q.texture.find("assistance_buttonBg") != std::string::npos) {
+					backgrounds.push_back(q.texture);
+				}
+			}
+			CHECK(backgrounds.size() == (armor > 0 ? 2 : 1));
+			CHECK(!backgrounds.empty() && backgrounds.front().find("assistance_buttonBg_destroyed.tga") != std::string::npos);
+			if (armor > 0) {
+				CHECK(!backgrounds.empty() && backgrounds.back().find("assistance_buttonBg.tga") != std::string::npos);
+			}
+		}
 	}
 }
 

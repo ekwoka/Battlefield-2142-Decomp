@@ -7,8 +7,8 @@
 // in an 800 x 600 screen, below six roots the engine creates (Global,
 // TopLayer and the bottom-left and bottom-right static and animated
 // corners). The game drives it through named variables: numbers that show
-// nodes (non-zero shows; then each logic entry ANDs "variable == value",
-// ORs it, or ANDs "variable != value" for NOT), fill bars (0..1), set
+// nodes (non-zero shows; then logic entries compare the variable to their
+// threshold and combine the results), fill bars (0..1), set
 // alpha and colour, and strings for text and texture paths. Each frame
 // draws twice, as RendDX9.dll does: AffectedByEMPShow 0, then 1 (the
 // weapon and vehicle parts).

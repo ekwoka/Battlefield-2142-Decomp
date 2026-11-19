@@ -8503,8 +8503,8 @@ HUD variables, which the game registers by name and binds to its own fields
 
 A node shows when its show variable is non-zero and every
 `setNodeLogicShowVariable` term holds. `AND` and `EQUAL` test `variable ==
-value`, and `NOT` tests `variable != value` (the engine builds a NOT node
-over an EQUAL node; `0x007b0fd0`). An `OR` entry joins the term before it:
+value`, `NOT` tests `variable != value`, and `GREATER` tests
+`variable > value` (`0x007b0fd0` → `0x00872580`). An `OR` entry joins the term before it:
 `NOT AffectedByEMPShow 1` followed by `OR UpdateAllEnabled 1` is one term.
 A colour variable tints the node and everything below it, and a position
 variable sets the coordinate once the game gives it a value.
