@@ -1770,7 +1770,7 @@ std::string BotManager::titanGridStats()
 //     more of its soldiers on foot there; the orbital strike on two or
 //     more enemies bunched there with no teammate within 40 m (command()'s
 //     rule); the EMP on the known crewed enemy vehicle, anywhere on the
-//     field, that threatens the most of ours (parked ones are no threat, and
+//     field, not an aircraft, that threatens the most of ours (parked ones are no threat, and
 //     the Remaster 5 s recharge leaves nothing else to hold it back), at
 //     most one a minute: it kept a disabled turret down every 10 s.
 namespace {
@@ -1995,7 +1995,10 @@ void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool s
 	std::vector<std::pair<uint32_t, physics::Vec3>> crewed; // vehicle, where its side knows one of its crew
 	for (const GameWorld::PlayerInfo& q : m_players) {
 		physics::Vec3 where;
-		if (q.alive && q.team == 3 - team && q.vehicle && m_knowledge[team].count(q.id) && knownPosition(team, q.id, where)) {
+		const world::Object* ride = q.vehicle ? m_world.objects().find(q.vehicle) : nullptr;
+		if (q.alive && q.team == 3 - team && ride && ride->objectTemplate()
+			&& !(m_settings.typeFlags(aiTemplateOf(ride->objectTemplate()->name())) & kITAir) // not aircraft
+			&& m_knowledge[team].count(q.id) && knownPosition(team, q.id, where)) {
 			crewed.push_back({q.vehicle, where});
 		}
 	}
