@@ -11,6 +11,7 @@
 #include "Main/GameAudio.h"
 #include "Main/HostedGame.h"
 #include "Main/HudMenus.h"
+#include "Main/MapCommanderMarkers.h"
 #include "Net/GameClient.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -767,6 +768,83 @@ TEST(Commander_SupplyDrop)
 	// Gone after supplyDropNumSecsToLive (300 s).
 	field.run(240);
 	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
+}
+
+TEST(Commander_MapMarkersUseOwningTeamAndToolTint)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		Field field(mod);
+		CHECK(field.loaded);
+		if (!field.loaded) {
+			continue;
+		}
+		std::string consoleOutput;
+		field.console.run("Objects/Weapons/stationary/eu_drone/eu_drone.con", {}, consoleOutput);
+		CHECK(field.templates.find("eu_drone"));
+		auto& world = *field.world;
+		world.setCommanderEnabled(true);
+		for (int team : {1, 2}) {
+			world.setCommander(team, world.addPlayer("Boss", team, false));
+			field.place("commander_emp_strike", team, team * 100.0f, -100);
+			field.place("commander_orbital_strike_64", team, team * 100.0f, -120);
+			field.place("commander_uav_drone_control", team, team * 100.0f, -140);
+		}
+		for (int team : {1, 2}) {
+			const float x = team * 100.0f;
+			CHECK(world.commanderAction(team, Ability::Uav, x, 20));
+			const world::Object* drone = field.objects.find(world.uavDrone(team));
+			CHECK(drone && drone->team() == team);
+			CHECK(world.commanderAction(team, Ability::OrbitalStrike, x, 40));
+			CHECK(world.commanderAction(team, Ability::Artillery, x, 60));
+			CHECK(world.commanderAction(team, Ability::Supplies, x, 80));
+		}
+
+		using Marker = hud::HudManager::MapMarker;
+		for (int team : {1, 2}) {
+			std::vector<Marker> marks;
+			dice::hfe::main::appendCommanderMapMarkers(marks, world, team);
+			CHECK(marks.size() == 7);
+			if (marks.size() != 7) {
+				continue;
+			}
+			for (const Marker& mark : marks) {
+				CHECK(mark.x == team * 100.0f && mark.upright);
+			}
+			CHECK(marks[0].texture == "Ingame/Minimap/Icons/icon_UAV.tga");
+			CHECK(marks[0].color[0] == 1 && marks[0].color[1] == 1 && marks[0].color[2] == 1);
+			CHECK(marks[2].texture == "Ingame/Commander/tools/orbit_strike.tga");
+			CHECK(marks[4].texture == "Ingame/Commander/tools/force_strike.tga");
+			for (size_t i = 1; i <= 4; ++i) {
+				CHECK(marks[i].color[0] == 1 && marks[i].color[1] == 0 && marks[i].color[2] == 0);
+			}
+			CHECK(marks[6].texture == "Ingame/Minimap/Icons/icon_supplies.tga");
+			for (size_t i : {5, 6}) {
+				CHECK(marks[i].color[0] == 0.254f && marks[i].color[1] == 0.552f && marks[i].color[2] == 0.89f);
+			}
+		}
+
+		std::vector<Marker> marks;
+		dice::hfe::main::appendCommanderMapMarkers(marks, world, 0);
+		CHECK(marks.empty());
+		field.run(3);
+		for (int team : {1, 2}) {
+			for (float z : {40.0f, 60.0f}) {
+				CHECK(std::any_of(world.projectiles().begin(), world.projectiles().end(), [team, z](const game::Projectile& shot) {
+					return shot.team == team && shot.origin.x == team * 100.0f && shot.origin.z == z;
+				}));
+			}
+		}
+		field.run(23);
+		CHECK(world.supplyCrates().size() == 2);
+		dice::hfe::main::appendCommanderMapMarkers(marks, world, 1);
+		CHECK(marks.size() == 1 && marks.front().texture == "Ingame/Minimap/Icons/icon_UAV.tga");
+	}
 }
 
 TEST(Commander_OrderKindsAndLeaderOrders)

@@ -68,6 +68,7 @@
 #include "HudMenusComm.h"
 #include "HudMenusKits.h"
 #include "HudMenusVehicles.h"
+#include "MapCommanderMarkers.h"
 #include "MapPlayerMarker.h"
 #include "MapOrderMarker.h"
 #include "MenuBindings.h"
@@ -1324,44 +1325,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		dots.push_back(dot);
 	}
 	hud.setMiniMapDots(std::move(dots), commanderScreen);
-	// The commanders' work: the UAV's ring, strikes on their way, supply
-	// crates, and the squad's order.
-	physics::Vec3 uav;
-	float uavRadius = 0;
-	if (round.uavArea(me.team, uav, uavRadius)) {
-		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 16});
-		markers.back().upright = true; // no angle of their own: 0x0077c610 shows them screen-up
-	}
-	// Each commander tool's mark is a pulsing ring under a 15 x 15 icon
-	// (0x0078eb20 orbital: placedAirstrikeLarge 116; 0x0078eea0 artillery,
-	// 0x0078ece0 supplies: placedAirstrike 58).
-	const auto toolMark = [&markers](const char* ring, float ringSize, const char* icon, float x, float z) {
-		markers.push_back({ring, x, z, ringSize});
-		markers.back().upright = true;
-		markers.back().pulse = true;
-		markers.push_back({icon, x, z, 15});
-		markers.back().upright = true;
-	};
-	for (const auto& strike : round.strikes()) {
-		if (strike.team == me.team) {
-			if (strike.ability == game::GameWorld::CommanderAbility::OrbitalStrike) {
-				toolMark("Ingame/Minimap/Icons/placedAirstrikeLarge.tga", 116, "Ingame/Commander/tools/orbit_strike.tga",
-					strike.target.x, strike.target.z);
-			} else {
-				toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Commander/tools/force_strike.tga",
-					strike.target.x, strike.target.z);
-			}
-		}
-	}
-	// A drop shows for 25 s (0x00792354 → 0x0077d7e0, +0xbc8), to its own team only: the drop (0x0043d1f0)
-	// sends HUD event 0x53 to that team's players (0x0043cf80).
-	for (const uint32_t crate : round.supplyCrates()) {
-		const float age = round.supplyCrateAge(crate);
-		if (const world::Object* object = round.objects().find(crate); object && object->team() == me.team && age >= 0 && age < 25) {
-			toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Minimap/Icons/icon_supplies.tga",
-				object->position().x, object->position().z);
-		}
-	}
+	dice::hfe::main::appendCommanderMapMarkers(markers, round, me.team);
 	// The squad's leader order and commander order, each by its kind
 	// (menu::orderMapIcon: 0x00779e50 / 0x0077a1a0 → 0x00791090 →
 	// 0x0078b110); the commander's map (player slot 0x128) those of the
