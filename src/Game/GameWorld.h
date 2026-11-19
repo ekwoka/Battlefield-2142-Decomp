@@ -2521,8 +2521,8 @@ public:
 	// Missile silos (templates with isMissileSilo): each fires its
 	// GenericFireArm's projectile at the enemy Titan when loaded (the auto
 	// controller CP_CANNON, AI/AutoControllers.ai), reloading
-	// ammo.reloadTime after each launch and after each change of hands
-	// (reloadOnTeamChange).
+	// ammo.reloadTime when its magazine is empty. Ownership changes
+	// briefly inhibit fire and restart a reload without discarding a loaded round.
 	struct SiloInfo {
 		uint32_t object = 0;
 		int team = 0;
@@ -3513,9 +3513,9 @@ private:
 	void addStaticMesh(const world::ObjectTemplate& t, const physics::CollisionMeshFile& mesh,
 		const std::vector<uint32_t>& materials, size_t geometry, const physics::Mat3& rotation, const physics::Vec3& position,
 		uint32_t owner, bool root);
-	// A stationary control object with seats: a fixed body (Body::fixed),
-	// whose posed parts the rounds meet through raycastBody.
-	static bool stationaryWithSeats(const world::ObjectTemplate& t);
+	// Fixed bodies for gun seats and registered missile silos supply
+	// posed collision parts through raycastBody.
+	bool stationaryWithMovingParts(const world::ObjectTemplate& t, uint32_t object) const;
 
 	struct HitBone {
 		int node;            // skeleton node
@@ -4803,9 +4803,15 @@ private:
 		float reloadTime = 120;   // ammo.reloadTime
 		float launchDelay = 1;    // fire.fireLaunchDelay
 		float launchIn = -1;      // a launch pending (seconds)
+		float captureDelay = 0;
 		float velocity = 4;
-		physics::Vec3 muzzle;     // the barrel's pivot in the silo's frame
-		float muzzleLength = 0;   // the muzzle along the aim from it
+		RotationAxis yawAxis, pitchAxis;
+		float yaw = 0, pitch = 0;
+		float yawRate = 0, pitchRate = 0;
+		physics::Vec3 yawPivot;
+		physics::Mat3 yawFrame;
+		std::vector<world::ChildTemplate> firearmPath;
+		physics::Vec3 projectileStart;
 		const ProjectileSettings* missile = nullptr;
 		uint32_t target = 0;
 		int launched = 0;

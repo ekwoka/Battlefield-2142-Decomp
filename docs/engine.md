@@ -13883,12 +13883,16 @@ level, a change of icon blinking the tag (`TitanInfo` /
 **Missile silos** (`isMissileSilo`, missile_silo_v2): the auto controller
 CP_CANNON (AI/AutoControllers.ai: fov 179, viewDistance 2000,
 reloadOnTeamChange) with the weapon AI missile_silo_Weapon (10–2000 m,
-Titans only). A silo held by a team, loaded and in range fires at the enemy
-Titan; the missile leaves `fire.fireLaunchDelay` (1 s) later straight up (the
-barrel, Missile_Silo_Barrel, turns on its own to its limit: setMinRotation
-0/−90/0, setAcceleration 0/−50/0, startAutoRotateOnEnter) at `velocity`
-(4); the magazine (1) refills `ammo.reloadTime` (120 s) later, and a change
-of hands starts the reload over. The missile (msilo_missile): from
+Titans only). Changing teams resets the reload state while preserving the
+round in a full magazine (PCO team setter `0x005cc320` → AIDLL `0x1004c2a0`
+→ DefaultAmmoComp `0x005f3a40`). The controller inhibits the trigger for
+5 s (AIDLL `0x10096970`, read by `0x1008ecd0` / `0x1008f1e0`) and
+repeats the reload reset during that time (`0x1009a6d5`). After that
+an empty magazine reloads in `ammo.reloadTime` (120 s). A loaded silo
+with a target triggers without that reload. Its base slews towards the
+enemy Titan using the authored yaw axis and the barrel auto-rotates to its
+upright limit. After `fire.fireLaunchDelay` (1 s), the missile leaves the
+posed muzzle at the firearm's velocity (4 m/s). The missile (msilo_missile): from
 `startDelay` (2.5 s) its `acceleration` (10) pushes it to `maxSpeed` (80);
 from seek.trackingDelay (3 s) it turns towards the locked Titan's middle
 (FixedTargetComp TTBeacon; DefaultFollowComp's follow.maxYaw 4 degrees a

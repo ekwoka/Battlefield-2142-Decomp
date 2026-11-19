@@ -287,8 +287,96 @@ TEST(Titan_SuezWalkerPrimaryFireAgainstEnemyInfantry)
 	level.world->setBlastRayTraceSink({});
 }
 
-// A silo taken by PAC reloads (120 s, reloadOnTeamChange), fires its
-// missile at EU's Titan, which hits it: 110000 damage (msilo_missile
+TEST(Titan_SiloCapturePreservesMagazineAndTurnsLauncher)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+
+		const auto readSilo = [&] {
+			const auto silos = level.world->missileSilos();
+			const auto found = std::find_if(silos.begin(), silos.end(), [](const auto& s) { return s.controlPoint == 901; });
+			CHECK(found != silos.end());
+			return found == silos.end() ? game::GameWorld::SiloInfo {} : *found;
+		};
+		const auto silo = readSilo();
+		const auto* object = level.objects.find(silo.object);
+		CHECK(object && silo.team == 0 && silo.loaded);
+		if (!object) continue;
+
+		const auto yaw = [&] {
+			world::Vec3 offset, rotation;
+			CHECK(level.world->partPose(silo.object, "Missile_Silo_base", offset, rotation));
+			return rotation.x;
+		};
+		const auto pitch = [&] {
+			world::Vec3 offset, rotation;
+			CHECK(level.world->partPose(silo.object, "Missile_Silo_Barrel", offset, rotation));
+			return rotation.y;
+		};
+		const auto* target = level.titan(2);
+		CHECK(target);
+		if (!target) continue;
+		const auto targetId = target->object;
+		const auto d = target->position - silo.position;
+		const float bearing = std::atan2(d.x, d.z) * 57.29578f - object->rotation().x;
+		const float initialError = std::fabs(std::remainder(bearing - yaw(), 360.0f));
+
+		level.world->setControlPointTeam(silo.controlPoint, 1);
+		level.run(0.5f);
+		CHECK(readSilo().team == 1 && readSilo().loaded && readSilo().reloadLeft == 0);
+		const float movingYaw = yaw();
+		CHECK(std::fabs(movingYaw) > 1.0f && std::fabs(movingYaw) < 18.0f);
+		CHECK(std::fabs(std::remainder(bearing - movingYaw, 360.0f)) < initialError);
+		CHECK(pitch() < -1.0f && pitch() > -40.0f);
+		level.run(4.4f);
+		CHECK(readSilo().loaded && readSilo().launched == 0);
+		CHECK(std::fabs(pitch() + 90.0f) < 0.01f);
+		level.run(0.9f);
+		CHECK(readSilo().launched == 0);
+		for (int tick = 0; tick < 12 && readSilo().launched == 0; ++tick) {
+			level.run(1.0f / 30.0f);
+		}
+		const auto launched = readSilo();
+		CHECK(launched.launched == 1 && !launched.loaded && launched.reloadLeft > 119.0f);
+		const auto& projectiles = level.world->projectiles();
+		const auto shot = std::find_if(projectiles.begin(), projectiles.end(), [&](const auto& p) {
+			return p.shooter == silo.object && p.alive && p.lockedOn == targetId;
+		});
+		CHECK(shot != projectiles.end());
+		if (shot != projectiles.end()) {
+			CHECK(shot->velocity.y > 3.9f && std::hypot(shot->velocity.x, shot->velocity.z) < 0.01f);
+			// Geometry 2 is the barrel. Its collision frame follows the
+			// visual pose, and the firearm's 0.5 m offset is in that frame.
+			CHECK(level.world->collisionPartCount(silo.object) == 2);
+			physics::Mat3 barrel;
+			physics::Vec3 pivot;
+			CHECK(level.world->collisionPartFrame(silo.object, 1, barrel, pivot));
+			const physics::Mat3 root = physics::Mat3::fromYawPitchRoll(
+				{object->rotation().x, object->rotation().y, object->rotation().z});
+			const auto muzzle = silo.position + root.transform(pivot + barrel.transform({0, 0, 0.5f}));
+			CHECK(physics::lengthSquared(shot->origin - muzzle) < 0.0001f);
+		}
+
+		level.run(30);
+		CHECK(readSilo().reloadLeft < 91.0f);
+		level.world->setControlPointTeam(silo.controlPoint, 2);
+		level.run(0.1f);
+		CHECK(readSilo().team == 2 && !readSilo().loaded && readSilo().reloadLeft == 120);
+		level.run(123.9f);
+		CHECK(readSilo().launched == 1 && !readSilo().loaded);
+		level.run(2.3f);
+		CHECK(readSilo().launched == 2 && !readSilo().loaded);
+	}
+}
+
+// A loaded silo taken by PAC fires its missile at EU's Titan, which hits it: 110000 damage (msilo_missile
 // against veh_titan_armor, cell 1) less what passing the penetrable shield
 // took (material 4112: its thickness x damageLoss 1000, at least 1000) off
 // the shield; with the shield down (60 % and less) the next one comes off
@@ -307,10 +395,10 @@ TEST(Titan_SilosWearTheShieldThenTheHull)
 	level.run(0.5f);
 	auto silos = level.world->missileSilos();
 	const auto silo = std::find_if(silos.begin(), silos.end(), [](const auto& s) { return s.controlPoint == 503; });
-	CHECK(silo != silos.end() && silo->team == 1 && !silo->loaded && silo->reloadLeft > 118);
+	CHECK(silo != silos.end() && silo->team == 1 && silo->loaded && silo->reloadLeft == 0);
 	const auto* eu = level.titan(2);
 	CHECK(eu && eu->hitPoints == 6e6f);
-	// Two minutes of reload, the launch delay, and the flight.
+	// The controller and firearm delays, followed by the flight.
 	float hitAt = -1;
 	for (int second = 0; second < 180 && hitAt < 0; ++second) {
 		level.run(1);
@@ -322,7 +410,7 @@ TEST(Titan_SilosWearTheShieldThenTheHull)
 	const auto fired = std::find_if(silos.begin(), silos.end(), [](const auto& s) { return s.controlPoint == 503; });
 	std::fprintf(stderr, "  missile hit after %.0f s; EU Titan %.0f hit points (%.2f %%), %d launched\n", hitAt,
 		level.titan(2)->hitPoints, level.titan(2)->percent, fired != silos.end() ? fired->launched : -1);
-	CHECK(hitAt > 120 && hitAt < 170);
+	CHECK(hitAt > 6 && hitAt < 35);
 	const float through = 6e6f - level.titan(2)->hitPoints;
 	CHECK(through > 110000 - 5000 && through <= 110000 - 1000 + 1);
 	CHECK(level.titan(2)->shield);

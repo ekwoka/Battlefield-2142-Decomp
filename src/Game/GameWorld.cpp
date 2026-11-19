@@ -583,11 +583,9 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 			ownMaterials = materialMap(t);
 			addStaticMesh(t, *mesh, ownMaterials, 0, rotation, position, owner, depth == 0);
 			// Its children's collisionPart instances are of its mesh
-			// (0x0063d720 -> 0x0063ccc0). A stationary gun with seats is a
-			// fixed body, whose parts turn with its guns and meet the
-			// rounds posed (raycastBody); the others' parts stand where
-			// their templates place them (nothing turns them).
-			parts = depth == 0 && stationaryWithSeats(t) ? nullptr : mesh;
+			// (0x0063d720 -> 0x0063ccc0). A fixed body handles the moving
+			// parts of stationary guns and silos through raycastBody.
+			parts = depth == 0 && stationaryWithMovingParts(t, owner) ? nullptr : mesh;
 			partMaterials = &ownMaterials;
 		}
 	}
@@ -605,7 +603,7 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 			continue;
 		}
 		// The template place, then the game's pose of the part (partPose, as
-		// lookAtPart and the drawing compose it): the silo's upright tube.
+		// lookAtPart and the drawing compose it).
 		physics::Mat3 local = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z});
 		physics::Vec3 at {child.position.x, child.position.y, child.position.z};
 		world::Vec3 poseOffset, poseRotation;
@@ -689,10 +687,13 @@ void GameWorld::addStaticMesh(const world::ObjectTemplate& t, const physics::Col
 	}
 }
 
-bool GameWorld::stationaryWithSeats(const world::ObjectTemplate& t)
+bool GameWorld::stationaryWithMovingParts(const world::ObjectTemplate& t, uint32_t object) const
 {
-	return !flag(t, "hasMobilePhysics", false) && sameName(t.typeName(), "PlayerControlObject")
-		&& t.settings().count("seatInformation") != 0;
+	if (flag(t, "hasMobilePhysics", false) || !sameName(t.typeName(), "PlayerControlObject")) {
+		return false;
+	}
+	return t.settings().count("seatInformation") != 0 || (flag(t, "isMissileSilo", false)
+		&& std::any_of(m_silos.begin(), m_silos.end(), [object](const Silo& silo) { return silo.object == object; }));
 }
 
 ControlPoint* GameWorld::controlPointOf(uint32_t object)
@@ -11521,14 +11522,26 @@ const physics::SoldierBody* GameWorld::soldierBody(int id) const
 
 bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation, int preferredSeat) const
 {
-	// Deviation (not retail-verified): a missile silo's barrel (pitch range -90..0, nothing drives it) rests upright
-	// (pitch -90, its tall launch tube) instead of lying flat; +90 would fold it down into the base.
-	if (part.compare(0, 19, "Missile_Silo_Barrel") == 0) {
-		if (const world::Object* silo = m_objects.find(object); silo && silo->objectTemplate()
-			&& silo->objectTemplate()->name().compare(0, 12, "missile_silo") == 0) {
-			offset = {};
-			rotation = {0, -90, 0}; // partPose pitch is down positive: -90 is the barrel's minRotation, standing straight up
+	const bool siloBase = sameName(part, "Missile_Silo_base");
+	if (siloBase || sameName(part, "Missile_Silo_Barrel")) {
+		for (const Silo& silo : m_silos) {
+			if (silo.object == object) {
+				offset = {};
+				rotation = siloBase ? world::Vec3 {silo.yaw, 0, 0} : world::Vec3 {0, silo.pitch, 0};
+				return true;
+			}
+		}
+		if (m_remotePartPose && m_remotePartPose(object, part, offset, rotation)) {
 			return true;
+		}
+		// A placed silo used as scenery keeps its existing upright pose.
+		if (!siloBase) {
+			const world::Object* placed = m_objects.find(object);
+			if (placed && placed->objectTemplate() && placed->objectTemplate()->name().compare(0, 12, "missile_silo") == 0) {
+				offset = {};
+				rotation = {0, -90, 0};
+				return true;
+			}
 		}
 	}
 	const Vehicle* state = vehicle(object);
@@ -14906,8 +14919,8 @@ void GameWorld::addBodies()
 		if (t && !flag(*t, "hasMobilePhysics", false) && sameName(t->typeName(), "Bundle")) {
 			supplied.push_back(object.id());
 		}
-		// A stationary control object with seats (Body::fixed).
-		const bool fixed = t && stationaryWithSeats(*t);
+		// Stationary guns and silos use a fixed body for their moving parts.
+		const bool fixed = t && stationaryWithMovingParts(*t, object.id());
 		if (!t || (!flag(*t, "hasMobilePhysics", false) && !fixed)) {
 			continue;
 		}

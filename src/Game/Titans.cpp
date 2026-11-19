@@ -180,6 +180,8 @@ const char* pythonEvent(int id)
 constexpr float kSiloRangeMin = 10;
 constexpr float kSiloRangeMax = 2000;
 constexpr float kSiloFov = 179;
+constexpr float kSiloTrackingInput = 0.5f; // CP_CANNON.maxTrackingInput
+constexpr float kSiloCaptureDelay = 5; // AIDLL 0x10096970, checked by both trigger statements
 
 // The Titan sync's tunables (static initialisers 0x008e2b40-0x008e2d20).
 constexpr float kArrival = 5;          // *0x00a6af98
@@ -2105,34 +2107,64 @@ void GameWorld::registerSilo(world::Object& object)
 	Silo silo;
 	silo.object = object.id();
 	silo.team = object.team();
-	// The firearm: depth first, the parents' offsets summed to the barrel's
-	// pivot (the bundles turn about their own origins), the muzzle the
-	// firearm's offset plus fire.projectileStartPosition along the aim.
-	const world::ObjectTemplate* firearm = nullptr;
-	std::function<bool(const world::ObjectTemplate&, physics::Vec3, int)> find = [&](const world::ObjectTemplate& node,
-																					   physics::Vec3 at, int depth) {
-		for (const world::ChildTemplate& child : node.children()) {
-			const world::ObjectTemplate* c = m_templates.find(child.name);
-			if (!c || depth > 6) {
-				continue;
+	// Keep the authored path to the firearm so the launch uses the same
+	// moving base, barrel and muzzle as the scene.
+	const std::function<const world::ObjectTemplate*(const world::ObjectTemplate&, int)> findFirearm =
+		[&](const world::ObjectTemplate& node, int depth) -> const world::ObjectTemplate* {
+			if (depth > 6) {
+				return nullptr;
 			}
-			const physics::Vec3 offset {child.position.x, child.position.y, child.position.z};
-			if (sameName(c->typeName(), "GenericFireArm") && setting(*c, "projectileTemplate")) {
-				firearm = c;
-				silo.muzzle = at;
-				const std::string* start = setting(*c, "fire.projectileStartPosition");
-				silo.muzzleLength = std::sqrt(physics::lengthSquared(offset)) + (start ? vec3Of(*start).z : 0.0f);
-				return true;
+			for (const world::ChildTemplate& child : node.children()) {
+				const world::ObjectTemplate* t = m_templates.find(child.name);
+				if (!t) {
+					continue;
+				}
+				silo.firearmPath.push_back(child);
+				if (sameName(t->typeName(), "GenericFireArm") && setting(*t, "projectileTemplate")) {
+					return t;
+				}
+				if (const world::ObjectTemplate* firearm = findFirearm(*t, depth + 1)) {
+					return firearm;
+				}
+				silo.firearmPath.pop_back();
 			}
-			if (find(*c, at + offset, depth + 1)) {
-				return true;
-			}
-		}
-		return false;
-	};
-	find(*t, {}, 0);
+			return nullptr;
+		};
+	const world::ObjectTemplate* firearm = findFirearm(*t, 0);
 	if (!firearm) {
 		return;
+	}
+	const auto axisOf = [](const world::ObjectTemplate& part, bool yaw) {
+		RotationAxis axis;
+		const auto component = [&](const char* property) {
+			const std::string* value = setting(part, property);
+			const physics::Vec3 vector = value ? vec3Of(*value) : physics::Vec3 {};
+			return yaw ? vector.x : vector.y;
+		};
+		axis.minRotation = component("minRotation");
+		axis.maxRotation = component("maxRotation");
+		axis.maxSpeed = component("maxSpeed");
+		axis.acceleration = component("acceleration");
+		return axis;
+	};
+	physics::Vec3 position;
+	physics::Mat3 rotation;
+	for (const world::ChildTemplate& child : silo.firearmPath) {
+		position += rotation.transform({child.position.x, child.position.y, child.position.z});
+		rotation = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * rotation;
+		if (sameName(child.name, "Missile_Silo_base")) {
+			silo.yawAxis = axisOf(*m_templates.find(child.name), true);
+			silo.yawPivot = position;
+			silo.yawFrame = rotation;
+		} else if (sameName(child.name, "Missile_Silo_Barrel")) {
+			const world::ObjectTemplate& barrel = *m_templates.find(child.name);
+			if (integer(barrel, "startAutoRotateOnEnter", 0) != 0) {
+				silo.pitchAxis = axisOf(barrel, false);
+			}
+		}
+	}
+	if (const std::string* start = setting(*firearm, "fire.projectileStartPosition")) {
+		silo.projectileStart = vec3Of(*start);
 	}
 	silo.reloadTime = number(*firearm, "ammo.reloadTime", 120);
 	silo.launchDelay = number(*firearm, "fire.fireLaunchDelay", 0);
@@ -2146,7 +2178,7 @@ void GameWorld::registerSilo(world::Object& object)
 	silo.missile = projectileFor(*setting(*firearm, "projectileTemplate"));
 	silo.loaded = true; // a full magazine (ammo.magSize 1)
 	silo.number = static_cast<int>(m_silos.size()) + 1;
-	m_silos.push_back(silo);
+	m_silos.push_back(std::move(silo));
 }
 
 std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
@@ -2176,11 +2208,10 @@ std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
 	return list;
 }
 
-// Each silo: a change of hands reloads it (reloadOnTeamChange), the
-// magazine refills ammo.reloadTime after a launch (autoReload,
-// reloadWithoutPlayer); loaded and held by a team, it fires at the enemy
-// Titan in range (10 to 2000 m) and in its view (179 degrees about the
-// barrel's upward aim), the missile leaving fire.fireLaunchDelay later.
+// The retail team change resets the weapon's reload state and preserves
+// its magazine (0x005cc320 -> AIDLL 0x1004c2a0 -> 0x005f3a40). While the
+// controller's five-second timer is active it keeps resetting the reload
+// and inhibits both trigger statements (AIDLL 0x1009a6d5 and 0x1008f1e0).
 void GameWorld::stepSilos(float seconds)
 {
 	for (auto it = m_silos.begin(); it != m_silos.end();) {
@@ -2193,49 +2224,69 @@ void GameWorld::stepSilos(float seconds)
 		++it;
 		if (object->team() != silo.team) {
 			silo.team = object->team();
-			silo.loaded = false;
-			silo.reloadLeft = silo.reloadTime;
+			silo.captureDelay = kSiloCaptureDelay;
+			silo.reloadLeft = silo.loaded ? 0 : silo.reloadTime;
 			silo.launchIn = -1;
 		}
+		const float reloadStep = std::max(0.0f, seconds - silo.captureDelay);
+		silo.captureDelay = std::max(0.0f, silo.captureDelay - seconds);
 		if (!silo.loaded) {
-			silo.reloadLeft -= seconds;
+			silo.reloadLeft -= reloadStep;
 			if (silo.reloadLeft <= 0) {
 				silo.loaded = true;
 				silo.reloadLeft = 0;
 			}
 		}
+		const float oldYaw = silo.yaw, oldPitch = silo.pitch;
+		const bool owned = (silo.team == 1 || silo.team == 2) && titanModeOn();
+		if (owned) {
+			rotationAxisStep(silo.pitchAxis, 1, seconds, silo.pitch, silo.pitchRate);
+		}
+		const Titan* enemy = nullptr;
+		if (owned) {
+			for (const Titan& titan : m_titans) {
+				if (titan.team == 3 - silo.team && !titan.wrecked) {
+					enemy = &titan;
+				}
+			}
+		}
+		float yawInput = 0;
+		if (enemy) {
+			const physics::Vec3 from {object->position().x, object->position().y, object->position().z};
+			const physics::Vec3 d = titanAim(*enemy) - from;
+			const float range = std::sqrt(physics::lengthSquared(d));
+			const float up = range > 0 ? std::asin(std::clamp(d.y / range, -1.0f, 1.0f)) * 57.29578f : 90.0f;
+			if (range < kSiloRangeMin || range > kSiloRangeMax || 90.0f - up > kSiloFov * 0.5f) {
+				enemy = nullptr;
+			} else if (silo.yawAxis.maxSpeed > 0) {
+				const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll(
+					{object->rotation().x, object->rotation().y, object->rotation().z});
+				const physics::Vec3 local = silo.yawFrame.untransform(turn.untransform(d) - silo.yawPivot);
+				const float bearing = std::atan2(local.x, local.z) * 57.29578f;
+				const float error = std::remainder(bearing - silo.yaw, 360.0f);
+				yawInput = std::clamp(error / 5.0f, -kSiloTrackingInput, kSiloTrackingInput);
+			}
+		}
+		rotationAxisStep(silo.yawAxis, yawInput, seconds, silo.yaw, silo.yawRate);
+		if (oldYaw != silo.yaw || oldPitch != silo.pitch) {
+			if (Body* body = findBody(silo.object)) {
+				body->partsPosed = 0; // an earlier query may have cached this tick's pose
+			}
+		}
 		if (silo.launchIn >= 0) {
 			silo.launchIn -= seconds;
-			const Titan* target = titanByObject(silo.target);
 			if (silo.launchIn <= 0) {
 				silo.launchIn = -1;
+				const Titan* target = titanByObject(silo.target);
 				if (target && !target->wrecked) {
 					launchMissile(silo, *target);
 				}
 			}
 			continue;
 		}
-		if (!silo.loaded || (silo.team != 1 && silo.team != 2) || !silo.missile || !titanModeOn()) {
+		if (!silo.loaded || !silo.missile || !enemy || silo.captureDelay > 0 || silo.pitch > silo.pitchAxis.minRotation) {
 			continue;
 		}
-		const Titan* enemy = nullptr;
-		for (const Titan& titan : m_titans) {
-			if (titan.team == 3 - silo.team && !titan.wrecked) {
-				enemy = &titan;
-			}
-		}
-		if (!enemy) {
-			continue;
-		}
-		const physics::Vec3 from {object->position().x, object->position().y, object->position().z};
-		const physics::Vec3 d = titanAim(*enemy) - from;
-		const float range = std::sqrt(physics::lengthSquared(d));
-		const float up = range > 0 ? std::asin(std::clamp(d.y / range, -1.0f, 1.0f)) * 57.29578f : 90.0f;
-		if (range < kSiloRangeMin || range > kSiloRangeMax || 90.0f - up > kSiloFov * 0.5f) {
-			continue;
-		}
-		silo.loaded = false;
-		silo.reloadLeft = silo.reloadTime;
 		silo.target = enemy->object;
 		// The shot: the firearm's batch fire (0x005c3cb0) in fire state 4
 		// calls its Radio's fire message (slot 0x54, 0x00656dd0): from the
@@ -2252,24 +2303,31 @@ void GameWorld::stepSilos(float seconds)
 	}
 }
 
-// The launch: the barrel (Missile_Silo_Barrel: setMinRotation 0/-90/0,
-// setAcceleration 0/-50/0, startAutoRotateOnEnter) turns on its own to its
-// limit, straight up; the missile leaves its muzzle upwards at the
-// firearm's velocity, locked onto the Titan (the wire-guided LPTargetComp's
-// TitanBeacon on it), and turns to it once it tracks.
+// The barrel auto-rotates to its upright limit. Launch from the firearm's
+// posed muzzle, then let the projectile's Titan beacon guide it in flight.
 void GameWorld::launchMissile(Silo& silo, const Titan& target)
 {
 	const world::Object* object = m_objects.find(silo.object);
 	if (!object || !silo.missile) {
 		return;
 	}
-	const physics::Vec3 base {object->position().x, object->position().y, object->position().z};
-	const physics::Mat3 turn =
-		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
-	const physics::Vec3 pivot = base + turn.transform(silo.muzzle);
-	const physics::Vec3 direction {0, 1, 0};
+	physics::Vec3 muzzle {object->position().x, object->position().y, object->position().z};
+	physics::Mat3 turn = physics::Mat3::fromYawPitchRoll(
+		{object->rotation().x, object->rotation().y, object->rotation().z});
+	for (const world::ChildTemplate& child : silo.firearmPath) {
+		muzzle += turn.transform({child.position.x, child.position.y, child.position.z});
+		const physics::Mat3 placed = physics::Mat3::fromYawPitchRoll(
+			{child.rotation.x, child.rotation.y, child.rotation.z});
+		world::Vec3 offset, pose;
+		if (partPose(silo.object, child.name, offset, pose)) {
+			turn = physics::Mat3::fromYawPitchRoll({pose.x, pose.y, pose.z}) * placed * turn;
+		} else {
+			turn = placed * turn;
+		}
+	}
+	const physics::Vec3 direction = turn.rows[2];
 	Projectile p;
-	p.origin = pivot + direction * silo.muzzleLength;
+	p.origin = muzzle + turn.transform(silo.projectileStart);
 	p.position = p.origin;
 	p.velocity = direction * silo.velocity;
 	p.settings = silo.missile;
@@ -2281,6 +2339,8 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 	p.newTarget = true; // the follow's target set (0x005ed260)
 	p.yaw = std::atan2(direction.x, direction.z) * 57.29578f;
 	m_projectiles.push_back(p);
+	silo.loaded = false;
+	silo.reloadLeft = silo.reloadTime;
 	++silo.launched;
 }
 
