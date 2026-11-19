@@ -164,7 +164,8 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUSampler(m_device, m_menuRepeatSampler);
 	for (SDL_GPUGraphicsPipeline* pipeline : {m_enhanced.mesh, m_enhanced.meshCulled, m_enhanced.fadedMesh,
 			 m_enhanced.additiveMesh, m_enhanced.glowMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh, m_enhanced.particle,
-			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer,
+			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster,
+			 m_enhanced.shadowDepthCopy, m_enhanced.gbuffer,
 			 m_enhanced.motion, m_enhanced.motionCulled, m_enhanced.motionOverlay, m_enhanced.gtao, m_enhanced.aoBlur, m_enhanced.taa}) {
 		if (pipeline) {
 			SDL_ReleaseGPUGraphicsPipeline(m_device, pipeline);
@@ -561,6 +562,12 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	m_enhanced.terrainCaster = enhanced(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_depth_frag_spv, k_depth_frag_spv_size, k_depth_frag_msl, k_depth_frag_msl_size, 0, 0,
 		"enhanced terrain caster", 2);
+	info.vertex_input_state = {};
+	info.rasterizer_state.enable_depth_bias = false;
+	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+	m_enhanced.shadowDepthCopy = enhanced(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
+		k_fullscreen_vert_msl_size, k_shadow_depth_copy_frag_spv, k_shadow_depth_copy_frag_spv_size,
+		k_shadow_depth_copy_frag_msl, k_shadow_depth_copy_frag_msl_size, 1, 0, "enhanced shadow depth copy", 0);
 	const auto renders = [&](SDL_GPUTextureFormat format) {
 		return SDL_GPUTextureSupportsFormat(m_device, format, SDL_GPU_TEXTURETYPE_2D,
 			SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);

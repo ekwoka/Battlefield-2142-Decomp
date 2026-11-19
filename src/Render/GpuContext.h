@@ -476,6 +476,7 @@ public:
 		SDL_GPUGraphicsPipeline* depthCulled = nullptr; // back faces culled, as the world's (meshCulled)
 		SDL_GPUGraphicsPipeline* terrainDepth = nullptr;
 		SDL_GPUGraphicsPipeline* terrainCaster = nullptr;
+		SDL_GPUGraphicsPipeline* shadowDepthCopy = nullptr;
 		// The G-buffer (normalDepth + motion targets), the moving meshes'
 		// motion (depth-tested against the prepass) and the first person's
 		// (untested), the GTAO and its blur, TAA's resolve.

@@ -866,7 +866,6 @@ private:
 		bool on = false; // this frame's passes
 		bool taa = false, ssao = false, csm = false, prepass = false;
 		bool titanShadows = false, particleShadows = false, particleLights = false;
-		float staticHeadroom = 0; // the light's reach above the cascades the static atlas was drawn with
 		bool jittered = false;
 		Mat4 jitter;                 // post-multiplied onto the view-projections
 		Mat4 projection;             // the world's, unjittered
@@ -892,13 +891,15 @@ private:
 		// the dynamic one has a third row, the Titans' hulls past the cascades.
 		SDL_GPUTexture* cascadeDynamic = nullptr;
 		SDL_GPUTexture* cascadeStatic = nullptr;
+		SDL_GPUTexture* cascadeStaticMeshes = nullptr; // cached depth before adding morphing terrain
 		uint32_t cascadeSize = 0;
 		Mat4 cascadeViewProjection[4];
 		float cascadeRadius[4] {};
-		Vec3f cascadeCenter[4];
-		float staticRadius[4] {};
-		Vec3f staticCenter[4];
+		Mat4 staticViewProjection[4];
+		std::array<float, 9> staticTerrainLodInputs {};
+		bool staticTerrainDrawn = false;
 		bool staticValid = false;
+		bool staticMeshesValid = false;
 		size_t staticInstances = 0;
 		EnhancedShadowUniforms shadows;
 	};
@@ -917,10 +918,9 @@ private:
 	// Depth, then normals and motion, then the AO (the world pass reads it).
 	void renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const Camera& camera, const Mat4& viewProjection,
 		float seconds, float aspect);
-	// The terrain's depth: the cells drawn this frame, or (`coarse`, the
-	// cascades' casters) every cell at its lowest LOD.
+	// The same terrain as the color pass, culled against the light for casters.
 	void drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
-		const Mat4& viewProjection, bool coarse);
+		const Mat4& viewProjection, bool shadowCaster);
 	void resolveTaa(SDL_GPUCommandBuffer* commands);
 	void endEnhancedFrame(const Camera& camera, bool overhead);
 	void useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,

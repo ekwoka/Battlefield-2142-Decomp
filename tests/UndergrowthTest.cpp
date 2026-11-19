@@ -349,6 +349,16 @@ TEST(TerrainLod_NoCracksOrPops)
 		const float lodSwitch = render::terrainLodSwitch(1, settings);
 		CHECK(lodSwitch == 75);
 		render::pickTerrainLods(cells, perSide, camera.x, camera.z, camera.height, lodSwitch, settings.lod2Start);
+		const auto allVisible = cells;
+		// A cell may leave the camera frustum but still cast a shadow. Keep
+		// the same edge geometry regardless of which pass draws either cell.
+		for (size_t i = 0; i < cells.size(); ++i) {
+			cells[i].visible = (i + i / perSide) % 2 == 0;
+		}
+		render::pickTerrainLods(cells, perSide, camera.x, camera.z, camera.height, lodSwitch, settings.lod2Start, true);
+		for (size_t i = 0; i < cells.size(); ++i) {
+			CHECK(cells[i].lod == allVisible[i].lod && cells[i].mask == allVisible[i].mask);
+		}
 		// Each cell's drawn vertices on its four edges, by global grid point:
 		// the height it draws them at.
 		std::vector<std::map<std::pair<int, int>, float>> edges(cells.size());

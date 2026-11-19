@@ -56,7 +56,7 @@ inline float terrainLodSwitch(float zoom, const scene::RendererSettings& setting
 // LODs and stitch masks of a square grid of cells (row-major, +x then +z),
 // their visibility set.
 inline void pickTerrainLods(std::vector<TerrainLodCell>& cells, int perSide, float cameraX, float cameraZ,
-	float heightAboveGround, float lodSwitch, float lod2Start)
+	float heightAboveGround, float lodSwitch, float lod2Start, bool stitchOffscreen = false)
 {
 	for (TerrainLodCell& cell : cells) {
 		const float dx = cameraX < cell.boundsMin.x ? cell.boundsMin.x - cameraX
@@ -90,11 +90,11 @@ inline void pickTerrainLods(std::vector<TerrainLodCell>& cells, int perSide, flo
 	for (int z = 0; z < perSide; ++z) {
 		for (int x = 0; x < perSide; ++x) {
 			TerrainLodCell& cell = *at(x, z);
-			if (!cell.visible || cell.lod == 0) {
+			if (cell.lod == 0 || (!stitchOffscreen && !cell.visible)) {
 				continue;
 			}
-			const auto finer = [&cell](const TerrainLodCell* other) {
-				return other && other->visible && other->lod == cell.lod - 1;
+			const auto finer = [&cell, stitchOffscreen](const TerrainLodCell* other) {
+				return other && (stitchOffscreen || other->visible) && other->lod == cell.lod - 1;
 			};
 			cell.mask = (finer(at(x, z - 1)) ? 1 : finer(at(x, z + 1)) ? 2 : 0) |
 				(finer(at(x - 1, z)) ? 4 : finer(at(x + 1, z)) ? 8 : 0);

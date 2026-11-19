@@ -1361,8 +1361,10 @@ void LevelRenderer::updateTerrainCells(const Camera& camera, const Frustum& frus
 	for (TerrainLodCell& cell : m_terrainCells) {
 		cell.visible = frustum.containsBox(cell.boundsMin, cell.boundsMax);
 	}
+	// Offscreen cells can cast into the cascades. Use the same stitched
+	// terrain at the view boundary in the color and shadow passes.
 	pickTerrainLods(m_terrainCells, m_terrainCellsPerSide, camera.position.x, camera.position.z,
-		m_terrainHeightAboveGround, m_terrainLodSwitch, settings.lod2Start);
+		m_terrainHeightAboveGround, m_terrainLodSwitch, settings.lod2Start, m_enh.csm);
 }
 
 // The surrounding terrain: each secondary heightmap of the cluster drawn
@@ -4248,31 +4250,25 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	placeTitanHemiMaps(camera);
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	m_poses.clear();
-	// The shadow maps, before the world pass that reads them.
+	// The color, shadow and Enhanced depth passes share this terrain geometry.
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	const scene::RendererSettings rendererDefaults;
+	const scene::RendererSettings& renderer =
+		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
+	if (!m_terrainCells.empty()) {
+		updateTerrainCells(camera, frustum);
+	} else {
+		m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
+		const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+		m_terrainHeightAboveGround = std::fabs(camera.position.y -
+			(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+	}
 	renderShadows(commands, camera, lights, seconds);
 	const float aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
 	if (m_enh.csm) {
 		renderCascades(commands, camera, lights, seconds, aspect);
 	}
-	// The terrain's cells this frame (before the enhanced prepass, which draws them too).
-	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
-	const scene::RendererSettings rendererDefaults;
-	const scene::RendererSettings& renderer =
-		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
-	bool terrainUpdated = false;
-	const auto updateTerrain = [&] {
-		terrainUpdated = true;
-		if (!m_terrainCells.empty()) {
-			updateTerrainCells(camera, frustum);
-		} else {
-			m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
-			const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
-			m_terrainHeightAboveGround = std::fabs(camera.position.y -
-				(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
-		}
-	};
 	if (m_enh.prepass) {
-		updateTerrain();
 		renderEnhancedPrepass(commands, camera, viewProjection, seconds, aspect);
 	}
 	m_enh.aoBound = m_enh.ssao; // the world's opaque draws take the AO
@@ -4355,9 +4351,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// LOD's delta and MORPHDELTAADDER the deltas a cell's stitched edge
 	// vertices take whole (0x1014d700): at LOD 1 the vertices that drop at
 	// LOD 1 move fully to it, at LOD 2 those that drop at LOD 2.
-	if (!terrainUpdated) {
-		updateTerrain();
-	}
 	const auto morphFor = [&](int lod, bool morph) {
 		const TerrainMorph m = terrainMorph(lod, morph, m_terrainLodSwitch, renderer, camera.position.x,
 			camera.position.z, m_terrainHeightAboveGround);
