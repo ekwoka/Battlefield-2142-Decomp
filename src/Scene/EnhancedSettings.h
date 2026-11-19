@@ -8,7 +8,7 @@
 // fingerprint (main.cpp, --simulate); tools/parity-check.sh runs the same
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
-// (botRecovery, botMovement, botTitan, botPilots, guidedCameraEase, cornerSteer,
+// (botRecovery, botMovement, botTitan, guidedCameraEase, cornerSteer,
 // passengerWeapons, softLanding): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
@@ -37,7 +37,6 @@ struct EnhancedSettings {
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
 	bool botMovement = true; // enhanced.botMovement: bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target (Game/Bots.cpp, BotsLook.cpp)
 	bool botTitan = true; // enhanced.botTitan: bots aboard a Titan walk its decks to the consoles and the core; in gpm_ti bots head for the silos (Game/BotsTitan.cpp, Bots.cpp)
-	bool botPilots = true; // enhanced.botPilots: a gunship's bot pilot attacks any target its guns are rated against, not only those that can fight a helicopter (Game/Bots.cpp)
 	bool guidedCameraEase = true; // enhanced.guidedCameraEase: a guided round's camera eases back to centre instead of snapping (Game/GameWorld.cpp)
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
@@ -83,8 +82,6 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.botMovement = v; });
 	bindProperty<bool>(console, "enhanced.botTitan", ConsoleAccess::Anyone, [&settings] { return settings.botTitan; },
 		[&settings](const bool& v) { settings.botTitan = v; });
-	bindProperty<bool>(console, "enhanced.botPilots", ConsoleAccess::Anyone, [&settings] { return settings.botPilots; },
-		[&settings](const bool& v) { settings.botPilots = v; });
 	bindProperty<bool>(console, "enhanced.guidedCameraEase", ConsoleAccess::Anyone, [&settings] { return settings.guidedCameraEase; },
 		[&settings](const bool& v) { settings.guidedCameraEase = v; });
 	bindProperty<bool>(console, "enhanced.cornerSteer", ConsoleAccess::Anyone, [&settings] { return settings.cornerSteer; },

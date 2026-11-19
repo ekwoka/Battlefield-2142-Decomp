@@ -566,11 +566,6 @@ struct BotSettings {
 	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
-	// enhanced.botPilots, also read live: a gunship's pilot scores every
-	// target fully in BBFire3d (fire3dUrgency), not x 0.01 one whose units
-	// can't fight its kind; not retail.
-	const bool* botPilots = nullptr;
-	bool pilotsAttackAll() const { return enhanced && *enhanced && botPilots && *botPilots; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }

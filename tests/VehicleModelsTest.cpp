@@ -1401,21 +1401,18 @@ TEST(Vehicles_BotPilotsFlyToAPointAndHover)
 // passed within 30 m and run 150 m out (the old plan fired nothing); at an
 // ITGround target the on-target test doesn't wait for the closest approach
 // (0x1007ec50), and the taps follow weaponTemplate.fireRate (100: one per
-// 60 / round(0.88 x 150) s at skill 0.85). A soldier can't fight a
-// helicopter (battle strength 0), so retail's BBFire3d scores him x 0.01
-// and the pilot may well keep flying: enhanced.botPilots is on here.
+// 60 / round(0.88 x 150) s at skill 0.85). Vanilla only: a soldier can't
+// fight a helicopter (battle strength 0), so BBFire3d scores him x 0.01
+// (0x1007d6c0) and whether Fire beats MoveTo rests on the mod's weights;
+// Remaster's Fire 5.0 loses here.
 TEST(Vehicles_BotGunshipPilotFiresOnTheFirstApproach)
 {
 	if (!gameDir()) return;
-	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
-		if (!test::runs(mod)) continue;
+	for (const char* mod : {"mods/bf2142"}) {
 		for (const char* name : {"us_ag", "as_ag"}) {
 			Garage g(gameDir(), mod);
 			if (!g.loaded) return;
 			game::BotSettings settings;
-			static const bool on = true;
-			settings.enhanced = &on;
-			settings.botPilots = &on;
 			game::registerBotConsoleMethods(g.console, settings);
 			std::string out;
 			CHECK(g.console.run("AI/AIBehaviours.ai", {}, out));

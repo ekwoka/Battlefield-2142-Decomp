@@ -5376,9 +5376,7 @@ float BotManager::fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		const float score = facing * reach * 0.5f * temperature * motion * freshness * strength * recency;
 		const std::array<float, 8> units = battleArray(*other);
 		// Without the AI scripts (the tests) no unit has strengths: not scaled.
-		// enhanced.botPilots (not retail): a gunship's pilot not either.
-		return m_settings.aiTemplates.empty() || (ownAir && self.driving && m_settings.pilotsAttackAll())
-			? score : score * fire3dUnitScale(units[static_cast<size_t>(ownType)]);
+		return m_settings.aiTemplates.empty() ? score : score * fire3dUnitScale(units[static_cast<size_t>(ownType)]);
 	};
 	float best = 0, currentScore = 0;
 	int bestTarget = -1;
