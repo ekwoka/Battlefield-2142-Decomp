@@ -1769,12 +1769,16 @@ std::string BotManager::titanGridStats()
 //   - the commander's tools at the focus: the UAV; supplies to two or
 //     more of its soldiers on foot there; the orbital strike on two or
 //     more enemies bunched there with no teammate within 40 m (command()'s
-//     rule); the EMP on an enemy vehicle there with none of its own within 40 m.
+//     rule); the EMP on the known crewed enemy vehicle, anywhere on the
+//     field, that threatens the most of ours (parked ones are no threat, and
+//     the Remaster 5 s recharge leaves nothing else to hold it back), at
+//     most one a minute: it kept a disabled turret down every 10 s.
 namespace {
 constexpr float kCommandEvery = 10;
 constexpr float kKeepFocus = 90;     // shortcut: a fixed hold; the Titan crosses ~95 m in it
 constexpr float kMissileClimb = 45;  // a silo missile's climb before it runs at the Titan (Suez, measured: 45 m up, turned within 40 m)
 constexpr float kSiloClearance = 10; // round the Titan's box
+constexpr float kEmpEvery = 60;      // shortcut: the bots' own pace (Remaster's EMP is ready in 5 s; vanilla 115 s), tune by feel
 } // namespace
 
 bool BotManager::titanBlocksSilos(const GameWorld::TitanInfo& own, const GameWorld::TitanInfo& enemy, const physics::Vec3& at,
@@ -1965,16 +1969,13 @@ void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool s
 		});
 	};
 	use(A::Uav, focus);
-	if (!silo) {
-		return;
-	}
-	if (count(team, focus, 30, true) >= 2) {
+	if (silo && count(team, focus, 30, true) >= 2) {
 		use(A::Supplies, focus);
 	}
 	physics::Vec3 sum;
 	int enemies = 0;
 	for (const GameWorld::PlayerInfo& q : m_players) {
-		if (q.alive && q.team == 3 - team && horizontal(q.position - focus) < 40) {
+		if (silo && q.alive && q.team == 3 - team && horizontal(q.position - focus) < 40) {
 			sum = sum + q.position;
 			++enemies;
 		}
@@ -1985,18 +1986,40 @@ void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool s
 			use(A::Artillery, middle); // commander_orbital_strike (RCArtillery)
 		}
 	}
+	// The EMP: of the crewed enemy vehicles its side knows of, anywhere on the field, the one that threatens most:
+	// ours within 60 m of it, its crew, the focus counting 2 more; none of its own vehicles within 40 m.
 	const auto teamOf = [&](uint32_t object) {
 		const world::Object* o = m_world.objects().find(object);
 		return o ? o->team() : 0;
 	};
-	for (const GameWorld::VehicleInfo& v : m_vehicles) {
-		if (v.working && teamOf(v.object) == 3 - team && horizontal(v.position - focus) < 60
-			&& std::none_of(m_vehicles.begin(), m_vehicles.end(), [&](const GameWorld::VehicleInfo& mine) {
-				   return teamOf(mine.object) == team && horizontal(mine.position - v.position) < 40;
-			   })) {
-			use(A::OrbitalStrike, v.position); // commander_emp_strike (RCOrbitalStrike)
-			break;
+	std::vector<std::pair<uint32_t, physics::Vec3>> crewed; // vehicle, where its side knows one of its crew
+	for (const GameWorld::PlayerInfo& q : m_players) {
+		physics::Vec3 where;
+		if (q.alive && q.team == 3 - team && q.vehicle && m_knowledge[team].count(q.id) && knownPosition(team, q.id, where)) {
+			crewed.push_back({q.vehicle, where});
 		}
+	}
+	long best = 0;
+	physics::Vec3 target;
+	for (const auto& [vehicle, where] : crewed) {
+		const auto v = std::find_if(m_vehicles.begin(), m_vehicles.end(), [&](const GameWorld::VehicleInfo& v) { return v.object == vehicle; });
+		const long threatened = count(team, where, 60, false);
+		const bool atFocus = horizontal(where - focus) < 60;
+		if (v == m_vehicles.end() || !v->working || (!threatened && !atFocus)
+			|| std::any_of(m_vehicles.begin(), m_vehicles.end(), [&](const GameWorld::VehicleInfo& mine) {
+				   return teamOf(mine.object) == team && horizontal(mine.position - where) < 40;
+			   })) {
+			continue;
+		}
+		const long crew = std::count_if(crewed.begin(), crewed.end(), [&](const auto& c) { return c.first == vehicle; });
+		const long score = threatened + crew + (atFocus ? 2 : 0);
+		if (score > best) {
+			best = score;
+			target = where;
+		}
+	}
+	if (best && m_time - m_titanCommands[team].empAt >= kEmpEvery && use(A::OrbitalStrike, target)) { // commander_emp_strike (RCOrbitalStrike)
+		m_titanCommands[team].empAt = m_time;
 	}
 }
 

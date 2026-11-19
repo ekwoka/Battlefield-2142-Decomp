@@ -1973,6 +1973,7 @@ private:
 		float nextAt = 0;
 		int focus = 0;
 		float focusSince = 0; // when the focus last changed
+		float empAt = -1e9f;  // when its last EMP went
 		bool ordered = false;
 		physics::Vec3 target;
 	};
