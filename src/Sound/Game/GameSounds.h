@@ -64,7 +64,7 @@ public:
 	// envelope (the new-style engine audio's crossfade, vtable 0x009bfa84
 	// 0x007fe010: the envelope at x times a scale).
 	void loop(uint64_t owner, const std::string& templateName, const Vec3& position, const Vec3& velocity,
-		float input = 0, uint32_t object = 0, const float* volumeScale = nullptr);
+		float input = 0, uint32_t object = 0, const float* volumeScale = nullptr, const Matrix4& rotation = {});
 	void endTick();
 	size_t loops() const { return m_loops.size(); }
 	bool looping(uint64_t owner, const std::string& templateName) const

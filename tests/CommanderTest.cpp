@@ -1065,6 +1065,7 @@ TEST(Commander_RemasterOrbitalStrikeBlastSound)
 			// ClientArchives.con mount points used by the game.
 			CHECK(field.files.mountArchive("Objects/Common_server.zip", "Common"));
 			CHECK(field.files.mountArchive("Objects/Sound_client.zip", "Sound"));
+			CHECK(field.files.mountArchive("mods/bf2142/Sound_client.zip", "Sound"));
 			CHECK(field.files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
 			field.templates.registerType(0x9474, "EffectBundle");
 			std::string out;
@@ -1099,14 +1100,28 @@ TEST(Commander_RemasterOrbitalStrikeBlastSound)
 			field.place("commander_orbital_strike_64", 1, 200, 200);
 			world.takeEffectSounds();
 			CHECK(world.commanderAction(1, Ability::Artillery, 0, -60));
+			const std::string falling = "S_commander_orbital_strike_Projectile_Looping";
+			bool shellPlayingBeforeImpact = false;
 			for (int i = 0; i < 20 * 30; ++i) {
 				world.tick(1 / 30.0f);
 				audio.tick(camera);
+				// While the falling loops are the only events, a playing voice
+				// proves the mixer found and started their sample.
+				if (!triggered.empty() && std::all_of(triggered.begin(), triggered.end(), [&](const auto& event) {
+						return event.name == falling;
+					})) {
+					const auto* stats = engine->statistics();
+					shellPlayingBeforeImpact |= stats && stats->playingSamples > 0;
+				}
 			}
+			CHECK(shellPlayingBeforeImpact);
 			const auto heard = [&triggered](const std::string& name) {
 				return std::any_of(triggered.begin(), triggered.end(), [&name](const auto& event) { return event.name == name; });
 			};
-			CHECK(heard("S_commander_orbital_strike_Projectile_Looping"));
+			// Each of the 16 seven-shell salvos starts seven independent moving loops.
+			CHECK(std::count_if(triggered.begin(), triggered.end(), [&](const auto& event) {
+				return event.name == falling;
+			}) == 16 * 7);
 			CHECK(heard("S_e_exp_orbital_strike_Start"));
 			CHECK(heard("S_Impact_Artillery"));
 			// Remaster v17 creates this firearm event template but does not
