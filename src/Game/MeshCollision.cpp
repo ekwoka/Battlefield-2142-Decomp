@@ -1420,6 +1420,20 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	if (sameName(t->typeName(), "Parachute")) {
 		parachuteCollision(self, other, normal, otherMaterial); // 0x005cf750 (Parachutes.cpp)
 	}
+	// SupplyObject (object vtable 0x0096ece0, slot 0xac 0x005d0790, server):
+	// with hasMobilePhysics (template interface 0xc368 slot 0x34) any
+	// contact marks it landed (+0x198) and has the commander's drops
+	// (0x0043d9c0) find the supply_parachute among its children (0x006f2f70,
+	// by template name) and disable it (its slot 0x54, updateFlags(1, 0)):
+	// the canopy goes once the crate is down. Then the base. Not ported from
+	// 0x0043d9c0: a crate meeting a PlayerControlObject whose 0xc4c5 time
+	// (slot 0xbc) is under 3 s old (0x0043ce80, *0x00920bc0) is removed
+	// instead; and the drop's lifetime counts from this landing (0x0043d820
+	// keeps the time, 0x0043d880), not from the drop.
+	if (sameName(t->typeName(), "SupplyObject") && number(*t, "hasMobilePhysics", 0) != 0
+		&& !object->childDisabled("supply_parachute")) {
+		m_objects.find(self)->disableChild("supply_parachute");
+	}
 	// PlayerControlObject (0x005c72f0): the other's material 0x29a destroys
 	// it (the server's damage, slot 0xe4 -> 0x004c0e40: 1e10, no attacker),
 	// anything else the base. The Parachute's (0x005cf750: the pods) sees

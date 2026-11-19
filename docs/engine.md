@@ -1782,7 +1782,13 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   (0.5/0/0 on PIYaw): `Body::canopy`, ticked in `stepBody`. It comes down
   at about 10.6 m/s (`Vehicles_SoldierParachuteOpensFallsAndLands`). The
   supply crate's supply_parachute Bundle the same way (lift 200, force 5):
-  about 7 m/s (`Vehicles_SupplyCrateComesDownUnderItsParachute`).
+  about 7 m/s (`Vehicles_SupplyCrateComesDownUnderItsParachute`). Its
+  first contact (the SupplyObject's slot `0xac`, `0x005d0790`, server,
+  with hasMobilePhysics) calls the commander's `0x0043d9c0`, which finds
+  the `supply_parachute` among the crate's children (`0x006f2f70`, by
+  template name) and disables it (slot `0x54`, `updateFlags(1, 0)`,
+  `0x006f68f0`): the Bundle and its animatedParachute canopies leave the
+  drawing (`world::Object::disableChild`, read by the renderer each frame).
 - Landing (`0x005cf750`, server, once): the ground, or an object along a
   normal at least 0.3 up (`*0x00a0200c`; any when the other is under a
   quarter of its radius; not an object moving over 5 m/s), starts the
@@ -13170,9 +13176,11 @@ and takes the largest `minTimeBetweenActivation`.
   less 0.1) per team, without an asset. `0x0043d510` creates a
   `supply_crate` at the ground's height plus `gameLogic.supplyDropHeight`
   (50; game logic `+0x1b8`, slots `0x240`/`0x244`, console `0x00425fcc`).
-  `0x0043d880` removes it after `supplyDropNumSecsToLive` (300; `+0x1bc`,
+  `0x0043d880` removes it `supplyDropNumSecsToLive` (300; `+0x1bc`,
   `0x004260db`; both GameLogic properties, handed to the round's
-  `CommanderSettings`). The
+  `CommanderSettings`) after it landed: `0x0043d9c0` keeps the landing
+  time (`0x0043d820`) as it takes the parachute away. The rewrite counts
+  from the drop. The
   crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
   (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles
   (`workOnVehicles`), within its radius (5) plus their own (`0x005d0e80`)

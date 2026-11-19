@@ -3836,7 +3836,8 @@ TEST(Vehicles_HeavyIfvShieldCells)
 // supply_ParachuteForceDown's constantForce 5, straight down,
 // useAbsoluteDirection): its parachute's Wing holds the fall to a few
 // metres a second (free fall would be past 30 m/s after 4 s) until it
-// lands.
+// lands. Down, its first contact (SupplyObject 0x005d0790 -> 0x0043d9c0)
+// disables the supply_parachute child and the canopies under it.
 TEST(Vehicles_SupplyCrateComesDownUnderItsParachute)
 {
 	if (!gameDir()) {
@@ -3854,8 +3855,13 @@ TEST(Vehicles_SupplyCrateComesDownUnderItsParachute)
 	std::fprintf(stderr, "  supply_crate: %.1f m up after 4 s, falling %.2f m/s\n", a.y, speed);
 	CHECK(a.y > 20);
 	CHECK(speed > 0.5f && speed < 15);
+	const world::Object* object = g.objects.find(crate);
+	CHECK(object && !object->childDisabled("supply_parachute"));
 	g.run(30);
 	CHECK(g.position(crate).y < 2);
+	CHECK(object && object->childDisabled("supply_parachute"));
+	CHECK(object && object->childDisabled("supply_parachute/animatedParachute"));
+	CHECK(object && !object->childDisabled(""));
 }
 
 // The soldier's parachute (Parachutes.cpp): falling faster than 10 m/s and
