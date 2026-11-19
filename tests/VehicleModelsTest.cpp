@@ -1818,9 +1818,10 @@ static void gunshipMissileCamera(bool ease)
 	g.run(4); // its delay and reload
 	game::GameWorld::ProjectileCamera camera;
 	CHECK(!g.world->projectileCamera(me, camera));
-	// The TVEffect (RendDX9 0x10048f80) only through a round's camera.
+	// The TVEffect (RendDX9 0x10048f80, never called in retail) only with
+	// enhanced.tvEffect, and then only through a round's camera.
 	render::PostEffects effects;
-	host::roundCameraEffects(*g.world, me, effects);
+	host::roundCameraEffects(*g.world, me, effects, true);
 	CHECK(!effects.tv);
 	// High above the ground, as a gunship flies: the missile, launched at
 	// rest, dives under its engine (acceleration 35) where the camera looks.
@@ -1832,8 +1833,10 @@ static void gunshipMissileCamera(bool ease)
 		g.world->tick(1 / 30.0f);
 	}
 	CHECK(g.world->projectileCamera(me, camera) && camera.takeOverInput);
-	host::roundCameraEffects(*g.world, me, effects);
+	host::roundCameraEffects(*g.world, me, effects, true);
 	CHECK(effects.tv);
+	host::roundCameraEffects(*g.world, me, effects, false); // retail: the plain view
+	CHECK(!effects.tv);
 	// Launched at rest along the active camera's facing (fireInCameraDof,
 	// 0x005f1a20: zoom.startCameraId 11, as_ag_TAD_GuidedMissile_Camera,
 	// set 10 degrees down under the seat), its nose that way.

@@ -9602,7 +9602,7 @@ int runGame(Options& options, Session& session)
 		// What the post-production follows: the vehicle's EMP, a Titan's core
 		// exploding, and a zoomed vehicle weapon's camera effect
 		// (weaponHud.enablePostProcessingOnGuiIndex naming the HUD shown).
-		sources.postEffects = [&round, &playerCamera, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
+		sources.postEffects = [&round, &playerCamera, &enhancedSettings, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
 			game::GameWorld::PlayerInfo me;
 			// The soldier's own EMP on foot, and a tinnitus from an explosion near.
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && !me.vehicle) {
@@ -9610,8 +9610,10 @@ int runGame(Options& options, Session& session)
 			}
 			effects.tinnitusSeconds = round.takeTinnitus();
 			// Through a guided round's camera (useProjectileCamera): the
-			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect").
-			host::roundCameraEffects(round, round.localPlayer(), effects);
+			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect"),
+			// which retail never runs: only with enhanced.tvEffect.
+			host::roundCameraEffects(round, round.localPlayer(), effects,
+				enhancedSettings.enabled && enhancedSettings.tvEffect);
 			effects.viewTinted = playerCamera.viewColor(effects.viewTint, effects.viewSaturation);
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
 				effects.vehicleEmpLevel = round.empLevel(me.vehicle);
