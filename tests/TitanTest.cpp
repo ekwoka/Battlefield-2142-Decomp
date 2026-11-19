@@ -2573,6 +2573,80 @@ TEST(Titan_SuezCargoBayLandingUsesStaticNodeDamage)
 	}
 }
 
+// The crew of a Titan's guns, seated, light their own hit indicator when a
+// round of the gun hurts an enemy soldier (the shooter is the seat's player,
+// as for every vehicle gun: retail 0x004ba440 / 0x004ba500 -> game logic slot
+// 0x128 -> 0x004ba070 hand the round's player on). A soldier and a gunship
+// stand 10 m ahead of the first round. Each seat gets a fresh level so no
+// earlier round is in flight.
+TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* part : {"aacannon", "groundcanone3"}) {
+  for (int nth = 0; nth < 6; ++nth) for (const bool vehicle : {false, true}) {
+   TitanLevel level(dir, "Minsk", 48, true, "mods/bf2142");
+   CHECK(level.loaded);
+   if (!level.loaded) return;
+   const int player = level.world->joinPlayer(2);
+   CHECK(level.world->spawnSoldier(player));
+   game::GameWorld::PlayerInfo info;
+   CHECK(level.world->playerInfo(player, info));
+   const auto* titan = level.titan(2);
+   CHECK(titan != nullptr);
+   if (!titan) return;
+   CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+   physics::Vec3 entry; float radius = 0; int seat = -1;
+   CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+   CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+   game::SoldierInput input; input.use = true;
+   level.world->setInput(player, input); level.run(0.1f);
+   const auto seats = level.world->vehicleSeats(level.world->titanOf(2));
+   int found = -1, count = 0;
+   for (size_t i = 0; i < seats.size(); ++i) {
+    if (seats[i].name.find(part) != std::string::npos && count++ == nth) found = static_cast<int>(i);
+   }
+   if (found < 0) break;
+   input = {}; input.switchSeat = found + 1;
+   level.world->setInput(player, input); level.run(0.1f);
+   const int enemy = level.world->addPlayer("Enemy", 1, true);
+   CHECK(level.world->spawnSoldier(enemy));
+   game::GameWorld::PlayerInfo victim;
+   CHECK(level.world->playerInfo(enemy, victim));
+   level.world->takeHitIndicator(player);
+   input = {}; input.fire = true;
+   level.world->setInput(player, input);
+   bool marked = false, placed = false;
+   float alpha = 0;
+   for (int tick = 0; tick < 90 && !marked; ++tick) {
+    level.run(1 / 30.0f);
+    // The enemy steps into the path of the first round, once (its capsule
+    // stands over the feet).
+    for (const auto& p : level.world->projectiles()) {
+     if (placed || p.player != player) continue;
+     placed = true;
+     const float len = std::sqrt(physics::lengthSquared(p.velocity));
+     const physics::Vec3 at = p.position + p.velocity * (10.0f / len);
+     if (vehicle) {
+      world::Object* tank = level.objects.create(level.templates.find("as_ag"), {at.x, at.y, at.z});
+      CHECK(tank != nullptr);
+      if (tank) tank->setTeam(1);
+     } else {
+      CHECK(level.world->setSoldierPosition(victim.soldier, at - physics::Vec3 {0, 1.0f, 0}));
+     }
+    }
+    game::GameWorld::PlayerInfo shooter;
+    CHECK(level.world->playerInfo(player, shooter));
+    alpha = std::max(alpha, shooter.hitIndicator);
+    marked = level.world->takeHitIndicator(player);
+   }
+   std::fprintf(stderr, "  %s %d %s: round fired %d, marker %d alpha %.2f\n", part, nth, vehicle ? "vehicle" : "soldier", placed, marked, alpha);
+   CHECK(placed);
+   CHECK(marked && alpha > 0.85f); // the flag his own state sends and the HUD's alpha
+  }
+ }
+}
+
 // Both Titan AA positions share the firearm but own independent aim and fire.
 TEST(Titan_AASeatAimAndFireOwnership)
 {
