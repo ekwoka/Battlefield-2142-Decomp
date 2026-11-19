@@ -1334,8 +1334,9 @@ private:
 		float meshSince = 0;                // when it took the wheel there
 		uint32_t titanRide = 0;    // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
 		float titanRideAt = -1e9f;
-		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way, and when
+		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way (in its Titan's frame), and when
 		float titanAtTime = 0;
+		float titanCutOffSince = -1; // aboard its own Titan off the grid or with no way to a whole part: since when
 		float titanFireFrom = -1;     // aboard the enemy's Titan: when it stopped to fire, and the break from that until
 		float titanFireRestUntil = 0;
 		bool switchedLast = false;
@@ -1952,10 +1953,11 @@ private:
 	struct TitanGrid;
 	std::map<std::pair<uint32_t, int>, std::shared_ptr<TitanGrid>> m_titanGrids; // by Titan and team
 	TitanGrid& titanGrid(const GameWorld::TitanInfo& titan, int team);
+	const GameWorld::TitanInfo* titanUnder(const std::vector<GameWorld::TitanInfo>& titans, const GameWorld::PlayerInfo& player);
 	const std::vector<float>& titanField(TitanGrid& grid, const GameWorld::TitanInfo& titan, int team, uint32_t part, const physics::Vec3& point,
 		bool nearest = false, float entryRadius = 0, uint32_t around = 0);
 	bool titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
-		const physics::Vec3& entry, float radius, int seat);
+		const physics::Vec3& entry, float radius, uint32_t key, const char* behaviour);
 	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
 		const GameWorld::TitanInfo& titan, const std::vector<float>& field);
 	bool titanLeave(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);

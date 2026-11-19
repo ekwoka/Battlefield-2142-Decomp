@@ -1867,7 +1867,7 @@ void BotManager::update(float seconds)
 							  : physics::lengthSquared(d) < podRadius * podRadius * 0.5f)
 				&& !bot.usedLast;
 			if (!input.use) {
-				titanGunWalk(bot, *self, input, elapsed, podEntry, podRadius, gunSeat);
+				titanGunWalk(bot, *self, input, elapsed, podEntry, podRadius, 0x40000000u + static_cast<uint32_t>(gunSeat), "TitanGun");
 			}
 			bot.usedLast = input.use;
 			bot.lastInput = input;
@@ -1893,6 +1893,15 @@ void BotManager::update(float seconds)
 			input.turn = std::clamp(std::remainder(want - self->yaw, 360.0f), -360 * elapsed, 360 * elapsed);
 			input.throttle = std::fabs(std::remainder(want - self->yaw, 360.0f)) < 45 ? 1.0f : 0.0f;
 			input.use = horizontal2(d) < podRadius * podRadius && !bot.usedLast;
+			if (!input.use && m_settings.titanPlay()) {
+				// enhanced.botTitan: over the grid, as to a gun (straight at it, a bot below
+				// the deck or behind a wall stands there for good). Keyed by the entry's place
+				// in the Titan's frame, a decimetre's grain (one field to an entry).
+				const physics::Vec3 at = m_world.titanToLocal(m_world.titanOf(self->team), podEntry);
+				const uint32_t key = 0x10000000u | (static_cast<uint32_t>(std::lround(at.x * 10) & 0x3fff) << 14)
+					| static_cast<uint32_t>(std::lround(at.z * 10) & 0x3fff);
+				titanGunWalk(bot, *self, input, elapsed, podEntry, podRadius, key, "TitanPodArray");
+			}
 			bot.usedLast = input.use;
 			bot.lastInput = input;
 			m_world.setInput(self->id, input);

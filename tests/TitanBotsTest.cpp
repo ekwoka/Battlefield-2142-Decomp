@@ -445,6 +445,53 @@ TEST(Titan_BotsLeaveStrandedHullLedge)
 	}
 }
 
+// The same ledge under its own Titan's deck edge (a defender drops onto it
+// hunting a boarder; a drop is one way): it leaves too, where the gun, crew
+// and pod walks would hold it there. A bot on the deck does not.
+TEST(Titan_BotsLeaveOwnTitanHullLedge)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		game::BotSettings settings;
+		const bool enhanced = true;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &enhanced;
+		game::BotManager bots(*level.world, settings);
+		const auto* titan = level.titan(2);
+		CHECK(titan != nullptr);
+		if (!titan) continue;
+		const uint32_t object = titan->object;
+		int ids[2] = {};
+		const physics::Vec3 at[2] = {{-30, 3.5f, -19.5f}, {0, 11.5f, -40}};
+		for (int i = 0; i < 2; ++i) {
+			ids[i] = level.world->addPlayer(i ? "OnDeck" : "OnLedge", 2, true);
+			CHECK(level.world->spawnSoldier(ids[i]));
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(ids[i], info));
+			CHECK(level.world->setSoldierPosition(info.soldier, level.world->titanToWorld(object, at[i])));
+		}
+		bool left[2] = {};
+		level.afterTick = [&] {
+			bots.update(1 / 30.0f);
+			for (int i = 0; i < 2; ++i) left[i] = left[i] || bots.behaviour(ids[i]) == "TitanLeave";
+		};
+		level.run(30);
+		game::GameWorld::PlayerInfo info;
+		CHECK(level.world->playerInfo(ids[0], info));
+		const physics::Vec3 local = level.world->titanToLocal(object, info.position);
+		std::fprintf(stderr, "  %s: ledge TitanLeave %d, now local %.1f %.1f %.1f alive %d; deck TitanLeave %d\n", mod, left[0], local.x,
+			local.y, local.z, info.alive, left[1]);
+		CHECK(left[0]);
+		CHECK(!info.alive || local.y < -5 || std::abs(local.x) > 40);
+		CHECK(!left[1]);
+	}
+}
+
 // A bot on foot on the ground in gpm_ti, below the enemy Titan's control
 // point. Retail (enhanced.botTitan off): with no strategy it goes to the
 // nearest point not its team's (updateGoal's fallback), here the Titan's,
