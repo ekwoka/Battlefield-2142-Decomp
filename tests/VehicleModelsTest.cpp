@@ -1397,7 +1397,8 @@ TEST(Vehicles_BotPilotsFlyToAPointAndHover)
 
 // BBPHeliFire3d (0x1007f180): the attack's If is tested every tick, so a
 // bot pilot with an enemy soldier ahead inside its rockets' maxRange taps
-// them on its first approach, long before it passes within 30 m; at an
+// them at once (here from the pad, 180 m off), not only after it has
+// passed within 30 m and run 150 m out (the old plan fired nothing); at an
 // ITGround target the on-target test doesn't wait for the closest approach
 // (0x1007ec50), and the taps follow weaponTemplate.fireRate (100: one per
 // 60 / round(0.88 x 150) s at skill 0.85). A soldier can't fight a
