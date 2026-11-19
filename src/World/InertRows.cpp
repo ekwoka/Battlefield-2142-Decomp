@@ -64,10 +64,10 @@ constexpr InertRow kInertRows[] = {
 	// level's StaticObjects.con: the editor's.
 	{"Console.allowMultipleFileLoad", Property, 0, 1},
 	// The exe's AI weapon record +0x70 (executor 0x00887e88, getter
-	// 0x00892720, slot 46) and +0x10 (0x008874ab, getter 0x00892500, slot
-	// 50): AIDLL's weapon choice (0x10074ef0) reads neither (engine.md).
+	// 0x00892720, slot 46): AIDLL's weapon choice (0x10074ef0) doesn't read
+	// it (engine.md). (+0x10, fireRate, is BotSettings': BBPHeliFire3d's
+	// trigger reads it.)
 	{"weaponTemplate.shouldRearm", Property, 0, 1},
-	{"weaponTemplate.fireRate", Property, 0, 1},
 	// 0x0042771b -> 0x004bc1e0: makes an object of the template 10 m in
 	// front of the local player's camera. Called only by AI/vehicle.con, a
 	// developer's spawning script nothing runs.

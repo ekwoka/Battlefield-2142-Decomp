@@ -116,6 +116,12 @@ struct WeaponAi {
 	std::array<float, 8> strength {};
 	float deviation = 14;
 	float allowedDeviation = 0.5f;
+	// +0x10 weaponTemplate.fireRate (-1 by default, 0x0088a7b0; getter
+	// 0x00892500, slot 0xc8): BBPHeliFire3d's trigger taps at most
+	// round((1 - (1 - skill) 0.8) round(1.5 fireRate)) times a minute
+	// (0x1007ec50); -1 adds no such limit. Only the gunships' pilot
+	// weapons set it (100).
+	int fireRate = -1;
 	float explosionRadius = 0;  // +0x20
 	bool indirect = false, thrown = false; // thrown: +2 (0x0088a650)
 	bool explodesOnImpact = false; // +0x4e
@@ -560,6 +566,11 @@ struct BotSettings {
 	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
+	// enhanced.botPilots, also read live: a gunship's pilot scores every
+	// target fully in BBFire3d (fire3dUrgency), not x 0.01 one whose units
+	// can't fight its kind; not retail.
+	const bool* botPilots = nullptr;
+	bool pilotsAttackAll() const { return enhanced && *enhanced && botPilots && *botPilots; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
@@ -1364,7 +1375,8 @@ private:
 		physics::Vec3 heliLastVelocity;
 		float heliLastAt = -1;
 		float heliLastDirY = 0;
-		int heliRun = 0;        // 0 approach, 1 away, 2 back
+		int heliRun = 0;        // the moves' Serial: 0 away, 1 back (0x1007f180)
+		int heliTarget = -1, heliWeapon = -1; // the plan's target and weapon (its keeper 0x1007f9d0 rebuilds on a change)
 		float heliTapAt = -1e9f;
 		// When the bot last took a seat (BBChangeLandingCraft's x6 within 15 s).
 		float seatedAt = -1e9f;
@@ -1854,11 +1866,16 @@ private:
 	// BBPHeliFire3d, in each attack-run state, in the firing pass's gate
 	// (range, facing, sight), on target, and trigger presses.
 	struct PilotStats {
-		float fighting = 0, run[3] = {}, pass = 0, onTarget = 0;
+		float fighting = 0, run[2] = {}, pass = 0, onTarget = 0; // run: away, back
 		int presses = 0;
 		std::map<std::string, float> patterns; // the pilot's plan patterns, seconds each
 	};
 	std::map<std::string, PilotStats> m_pilotStats;
+	// $BF2142_BOT_STATS's engagements: seconds a bot ran Fire with a
+	// target, by where it sat, the target's CombatStrengthType and range;
+	// and of those on foot, the seconds zoomed in.
+	std::map<std::string, float> m_engageSeconds;
+	float m_engageZoomed = 0, m_engageOnFoot = 0;
 	// When a human player of each team last got out of a vehicle (the unit
 	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
 	// exit event 0x00894860, read through vt+0x60 by the seat value), and

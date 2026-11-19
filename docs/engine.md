@@ -10659,8 +10659,9 @@ keep their own one-per-owner paths).
   weaponTemplate.fireRate / shouldRearm / isAntiAirWeapon (the exe's AI
   weapon record `0x0088a7b0`: `+0x10` −1, `+0x70` 1, `+0x71` 0; getters
   `0x00892500`, `0x00892720`, `0x00892740`) aren't read by AIDLL's weapon
-  choice (`0x10074ef0`); isAntiAirWeapon is read by the AI interface's
-  slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
+  choice (`0x10074ef0`); fireRate is read by BBPHeliFire3d's trigger
+  (`0x1007ec50`, slot 0xc8: the pilot's tap timer, none at −1);
+  isAntiAirWeapon is read by the AI interface's slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
   (Unit plug-in `+0x15`, executor `0x00884eaf`; 1 on the bipods and the
   ATs) is read by AIDLL through the unit adaptor's slot 0x38
   (`0x008a1d10`; AIDLL `0x100aa570`) in the vehicle choice `0x1006c520`,

@@ -122,6 +122,7 @@ public:
 
 	float reach() const { return m_reach; }
 	float maxAngle() const { return m_maxAngle; }
+	bool closestApproach() const { return m_closestApproach; }
 
 private:
 	float m_reach;

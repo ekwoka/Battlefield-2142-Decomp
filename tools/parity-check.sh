@@ -2,7 +2,7 @@
 # Checks that the enhanced mode leaves the simulation alone: runs the same
 # headless bot round twice without --enhanced (the round must repeat),
 # then once with it, and compares the state fingerprints. The enhanced
-# gameplay additions (botRecovery, botMovement, botTitan, guidedCameraEase,
+# gameplay additions (botRecovery, botMovement, botTitan, botPilots, guidedCameraEase,
 # cornerSteer, passengerWeapons, softLanding) change the simulation by
 # design and are turned off for the comparison.
 #   tools/parity-check.sh [seconds] [extra game args...]
@@ -20,7 +20,7 @@ run() {
 
 off1="$(run)"
 off2="$(run)"
-on="$(run --enhanced --console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0")"
+on="$(run --enhanced --console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.botPilots 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0")"
 echo "off: $off1 / $off2, on: $on"
 if [[ -z "$off1" ]]; then
 	echo "FAIL: no fingerprint printed"; exit 1
