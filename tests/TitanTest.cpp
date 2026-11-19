@@ -4576,3 +4576,41 @@ TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
   }
  }
 }
+
+// The shield up: the underbelly gun hubs sit on the force field's skin (hub 0's
+// origin lies within a metre of it) and their collision hangs below it, so a
+// rocket from below meets the gun first, hurts it (the pilot rockets' material
+// against the hub's: 0.6) and marks; from the side it ends on the force field
+// (mod 0: no damage, no marker). The meshes are the retail files.
+TEST(Titan_ShieldUpRocketsFromBelowHurtTheGunHubAndMark)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  level.run(2);
+  const int shooter = level.world->joinPlayer(2);
+  game::GameWorld::TitanPartInfo hub {};
+  for (const auto& part : level.world->titanParts(1)) {
+   if (part.name.find("groundcanone3_00") != std::string::npos) hub = part;
+  }
+  CHECK(hub.id != 0);
+  if (!hub.id) continue;
+  for (const float elevation : {-70.0f, -20.0f, 0.0f}) {
+   const float e = elevation * 0.0174533f;
+   const physics::Vec3 d {std::cos(e), std::sin(e), 0};
+   level.world->setHitPoints(hub.id, 1000);
+   level.run(0.05f);
+   level.world->takeHitIndicator(shooter);
+   level.world->launchProjectile("US_AG_PilotWeapon_Projectile", hub.position + d * 90.0f, d * -200.0f, shooter);
+   level.run(0.8f);
+   const bool hurt = level.world->hitPoints(hub.id) < 1000, marked = level.world->takeHitIndicator(shooter);
+   std::fprintf(stderr, "  %s shield up, rocket from %.0f deg: gun hurt %d, marker %d\n", mod, elevation, hurt, marked);
+   if (elevation < 0) CHECK(hurt && marked);
+   else CHECK(!hurt && !marked);
+  }
+ }
+}
