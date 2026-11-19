@@ -875,6 +875,13 @@ BotManager::~BotManager()
 	for (const auto& [bot, seconds] : m_stuckPerBot) {
 		stuck += seconds;
 	}
+	for (const auto& [name, p] : m_pilotStats) {
+		std::fprintf(stderr, "  pilot %-20s fighting %6.1f s (run %.1f/%.1f/%.1f), pass %6.1f s, on target %6.1f s, %d presses\n",
+			name.c_str(), p.fighting, p.run[0], p.run[1], p.run[2], p.pass, p.onTarget, p.presses);
+		for (const auto& [pattern, seconds] : p.patterns) {
+			std::fprintf(stderr, "    %-26s %6.1f s\n", pattern.c_str(), seconds);
+		}
+	}
 	std::fprintf(stderr, "bots stuck (30 s windows under 2 m): %.0f s over %zu bots\n", stuck, m_stuckPerBot.size());
 	for (const auto& [name, seconds] : m_stuckSeconds) {
 		std::fprintf(stderr, "  stuck %-34s %6.0f s\n", name.c_str(), seconds);
@@ -3304,6 +3311,9 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		rootAi = aiTemplateOf(object->objectTemplate()->name());
 	}
 	const bool armed = m_settings.plugin(rootAi, "Armament") != nullptr;
+	if (m_stats) {
+		m_pilotStats[rootAi].patterns[titanMode ? "titan " + std::to_string(titanMode) : pattern] += seconds;
+	}
 	const auto hover = [&](const physics::Vec3& spot) {
 		physics::Vec3 p = spot;
 		p.y = m_world.terrainHeight(spot.x, spot.z) + 25;
@@ -3355,6 +3365,11 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		}
 		const WeaponAi weapon = weaponAi(gun);
 		const float maxRange = weapon.maxRange > 0 ? weapon.maxRange : 300.0f;
+		PilotStats* stats = m_stats ? &m_pilotStats[rootAi] : nullptr;
+		if (stats) {
+			stats->fighting += seconds;
+			stats->run[std::clamp(bot.heliRun, 0, 2)] += seconds;
+		}
 		physics::Vec3 to = target.position - at;
 		const float dist = std::sqrt(horizontal2(to));
 		input.fire = false;
@@ -3419,12 +3434,17 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 					bot.heliOnTarget.emplace(weapon.allowedDeviation, fireMode(g) != 2);
 				}
 				const bool onTarget = bot.heliOnTarget->test(hasSolution, bot.heliLead, solved, impact, impactTime, m_time);
+				if (stats) {
+					stats->pass += seconds;
+					stats->onTarget += onTarget ? seconds : 0.0f;
+				}
 				const float rpm = settingNumber(g, "fire.roundsPerMinute", 60);
 				const float taps = std::round((1 - (1 - m_settings.skill) * 0.8f) * std::round(1.5f * rpm));
 				const float spacing = taps > 0 ? 60.0f / taps : 1.0f;
 				if (onTarget && m_time - bot.heliTapAt >= spacing) {
 					(group == 1 ? input.altFire : input.fire) = true;
 					bot.heliTapAt = m_time;
+					stats && ++stats->presses;
 				}
 			} else {
 				pilot.flyTo(toAi(target.position), 50); // HeliMoveToObject, margin 50

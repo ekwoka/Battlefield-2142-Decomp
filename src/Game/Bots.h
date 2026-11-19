@@ -1850,6 +1850,15 @@ private:
 	std::map<int, StuckWindow> m_stuckWindows;
 	std::map<std::string, float> m_stuckSeconds;
 	std::map<int, float> m_stuckPerBot;
+	// $BF2142_BOT_STATS's pilot fire, per aircraft template: seconds in
+	// BBPHeliFire3d, in each attack-run state, in the firing pass's gate
+	// (range, facing, sight), on target, and trigger presses.
+	struct PilotStats {
+		float fighting = 0, run[3] = {}, pass = 0, onTarget = 0;
+		int presses = 0;
+		std::map<std::string, float> patterns; // the pilot's plan patterns, seconds each
+	};
+	std::map<std::string, PilotStats> m_pilotStats;
 	// When a human player of each team last got out of a vehicle (the unit
 	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
 	// exit event 0x00894860, read through vt+0x60 by the seat value), and
