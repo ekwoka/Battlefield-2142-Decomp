@@ -1758,7 +1758,8 @@ std::string BotManager::titanGridStats()
 //   - its focus: the enemy Titan once its shield is down (boarding wins);
 //     else a silo the team holds that is being taken (the lowest flag
 //     under 0.75, as command() reads "being taken"); else the silo most
-//     of its bots are going for (the nearest to its Titan on a tie);
+//     of its bots are going for (the nearest to its Titan on a tie), kept
+//     kKeepFocus seconds while it is not yet the team's;
 //   - the Titan (while it may move: above 60 %) to the spot nearest that
 //     focus, counting the way there, that leaves every friendly silo's
 //     missile path clear of its box, the focus silo counted as friendly:
@@ -1771,6 +1772,7 @@ std::string BotManager::titanGridStats()
 //     rule); the EMP on an enemy vehicle there with none of its own within 40 m.
 namespace {
 constexpr float kCommandEvery = 10;
+constexpr float kKeepFocus = 90;     // shortcut: a fixed hold; the Titan crosses ~95 m in it
 constexpr float kMissileClimb = 45;  // a silo missile's climb before it runs at the Titan (Suez, measured: 45 m up, turned within 40 m)
 constexpr float kSiloClearance = 10; // round the Titan's box
 } // namespace
@@ -1876,7 +1878,10 @@ void BotManager::titanCommand()
 					if (silo.team == team || !point || !point->capturable) {
 						continue;
 					}
-					const float score = static_cast<float>(going[silo.controlPoint]) * 10000.0f - horizontal(silo.position - own->position);
+					// The silo it went for stays its focus for kKeepFocus seconds while not yet the team's.
+					const bool kept = silo.controlPoint == c.focus && m_time < c.focusSince + kKeepFocus;
+					const float score = (kept ? 1e9f : 0.0f) + static_cast<float>(going[silo.controlPoint]) * 10000.0f
+						- horizontal(silo.position - own->position);
 					if (focus == 0 || score > best) {
 						best = score;
 						focus = silo.controlPoint;
@@ -1888,13 +1893,18 @@ void BotManager::titanCommand()
 		if (!focus) {
 			continue;
 		}
+		if (focus != c.focus) {
+			c.focusSince = m_time;
+			c.focus = focus;
+			c.ordered = false; // a new focus: a new order
+		}
 		titanCommandAssets(team, at, focus > 0);
 		if (!own->canMove) {
 			continue;
 		}
 		const float apart = own->radius + enemy->radius;
 		const float ring = apart + 30;
-		if (c.ordered && c.focus == focus && !titanBlocksSilos(*own, *enemy, c.target, focus, silos)
+		if (c.ordered && !titanBlocksSilos(*own, *enemy, c.target, focus, silos)
 			&& (focus > 0 || std::fabs(horizontal(c.target - enemy->position) - ring) < 60)) {
 			continue;
 		}
@@ -1921,7 +1931,6 @@ void BotManager::titanCommand()
 			const GameWorld::TitanMove answer = m_world.moveTitan(team, p.x, p.z);
 			if (answer == GameWorld::TitanMove::Accepted) {
 				c.ordered = true;
-				c.focus = focus;
 				c.target = p;
 				if (std::getenv("BF2142_BOT_STATS")) {
 					std::printf("commander %s %.0f s: Titan at %.0f/%.0f to %.0f/%.0f for %s %d\n", team == 1 ? "PAC" : "EU", m_time,

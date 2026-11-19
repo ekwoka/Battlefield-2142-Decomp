@@ -1916,6 +1916,7 @@ private:
 	struct TitanCommand {
 		float nextAt = 0;
 		int focus = 0;
+		float focusSince = 0; // when the focus last changed
 		bool ordered = false;
 		physics::Vec3 target;
 	};
