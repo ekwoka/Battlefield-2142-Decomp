@@ -1455,6 +1455,85 @@ TEST(Vehicles_BotPilotsFlyToAPointAndHover)
 	}
 }
 
+// BBPHeliFire3d (0x1007f180): the attack's If is tested every tick, so a
+// bot pilot with an enemy soldier ahead inside its rockets' maxRange taps
+// them at once (here from the pad, 180 m off), not only after it has
+// passed within 30 m and run 150 m out (the old plan fired nothing); at an
+// ITGround target the on-target test doesn't wait for the closest approach
+// (0x1007ec50), and the taps follow weaponTemplate.fireRate (100: one per
+// 60 / round(0.88 x 150) s at skill 0.85). Vanilla only: a soldier can't
+// fight a helicopter (battle strength 0), so BBFire3d scores him x 0.01
+// (0x1007d6c0) and whether Fire beats MoveTo rests on the mod's weights;
+// Remaster's Fire 5.0 loses here.
+TEST(Vehicles_BotGunshipPilotFiresOnTheFirstApproach)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142"}) {
+		for (const char* name : {"us_ag", "as_ag"}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded) return;
+			game::BotSettings settings;
+			game::registerBotConsoleMethods(g.console, settings);
+			std::string out;
+			CHECK(g.console.run("AI/AIBehaviours.ai", {}, out));
+			CHECK(g.console.run("AI/AIDefault.ai", {}, out));
+			for (const std::string& script : world::templateScripts(g.files, "Objects/", true)) {
+				if (script.size() > 3 && script.compare(script.size() - 3, 3, ".ai") == 0) g.console.run(script, {}, out);
+			}
+			settings.viewDistance = 300;
+			const uint32_t v = g.start(name, {0, 4, 6});
+			const int bot = g.world->addPlayer("Pilot", 2, true);
+			CHECK(g.world->spawnSoldier(bot));
+			game::GameWorld::PlayerInfo info;
+			g.world->playerInfo(bot, info);
+			const physics::Vec3 at = g.position(v);
+			for (float r = 0; r <= 6 && info.vehicle != v; r += 1.5f) {
+				for (int k = 0; k < 8 && info.vehicle != v; ++k) {
+					g.world->setSoldierPosition(info.soldier, {at.x + r * std::sin(k * 0.785f), at.y - 1, at.z + r * std::cos(k * 0.785f)});
+					game::SoldierInput use;
+					use.use = true;
+					g.world->setInput(bot, use);
+					g.world->tick(1 / 30.0f);
+					g.world->setInput(bot, {});
+					g.world->tick(1 / 30.0f);
+					g.world->playerInfo(bot, info);
+				}
+			}
+			CHECK(info.vehicle == v && info.seat == 0);
+			if (info.vehicle != v) continue;
+			const int enemy = g.world->addPlayer("Enemy", 1, false);
+			CHECK(g.world->spawnSoldier(enemy));
+			game::GameWorld::PlayerInfo e;
+			g.world->playerInfo(enemy, e);
+			g.world->setSoldierPosition(e.soldier, {at.x, 0, at.z + 180}); // ahead (+z), inside maxRange (200 / 250 m)
+			game::BotManager bots(*g.world, settings);
+			float closest = 1e9f, firstShotAt = -1;
+			uint32_t shots = 0;
+			bool fought = false;
+			for (int tick = 0; tick < 30 * 15; ++tick) {
+				bots.update(1 / 30.0f);
+				g.world->setInput(bot, bots.lastInputFor(bot));
+				g.world->tick(1 / 30.0f);
+				g.world->setInput(bot, {});
+				g.world->playerInfo(bot, info);
+				g.world->playerInfo(enemy, e);
+				const physics::Vec3 p = g.position(v);
+				closest = std::min(closest, std::sqrt((p.x - e.position.x) * (p.x - e.position.x) + (p.z - e.position.z) * (p.z - e.position.z)));
+				fought = fought || bots.behaviour(bot) == "Fire";
+				if (info.gunShots > shots && firstShotAt < 0) {
+					firstShotAt = closest;
+				}
+				shots = info.gunShots;
+			}
+			std::fprintf(stderr, "  %s %s: fought %d, first shot with the target %.0f m off at the closest, %u rounds, target %s\n",
+				mod, name, fought, firstShotAt, shots, e.alive ? "alive" : "killed");
+			CHECK(fought);
+			CHECK(firstShotAt > 30);
+			CHECK(shots >= 5 || !e.alive);
+		}
+	}
+}
+
 // The stationary AA's EMP round on a hovering gunship (empDamageIgnoreRadius,
 // 2 steps of 1.5 s): level 2, and the pilot's inputs held at 0 while it lasts.
 TEST(Vehicles_StaticAAEmpOnHoveringGunship)
@@ -1878,9 +1957,10 @@ static void gunshipMissileCamera(bool ease)
 	g.run(4); // its delay and reload
 	game::GameWorld::ProjectileCamera camera;
 	CHECK(!g.world->projectileCamera(me, camera));
-	// The TVEffect (RendDX9 0x10048f80) only through a round's camera.
+	// The TVEffect (RendDX9 0x10048f80, never called in retail) only with
+	// enhanced.tvEffect, and then only through a round's camera.
 	render::PostEffects effects;
-	host::roundCameraEffects(*g.world, me, effects);
+	host::roundCameraEffects(*g.world, me, effects, true);
 	CHECK(!effects.tv);
 	// High above the ground, as a gunship flies: the missile, launched at
 	// rest, dives under its engine (acceleration 35) where the camera looks.
@@ -1892,8 +1972,10 @@ static void gunshipMissileCamera(bool ease)
 		g.world->tick(1 / 30.0f);
 	}
 	CHECK(g.world->projectileCamera(me, camera) && camera.takeOverInput);
-	host::roundCameraEffects(*g.world, me, effects);
+	host::roundCameraEffects(*g.world, me, effects, true);
 	CHECK(effects.tv);
+	host::roundCameraEffects(*g.world, me, effects, false); // retail: the plain view
+	CHECK(!effects.tv);
 	// Launched at rest along the active camera's facing (fireInCameraDof,
 	// 0x005f1a20: zoom.startCameraId 11, as_ag_TAD_GuidedMissile_Camera,
 	// set 10 degrees down under the seat), its nose that way.

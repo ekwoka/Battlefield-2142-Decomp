@@ -822,10 +822,10 @@ std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
 	return out;
 }
 
-void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects)
+void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects, bool tvEffect)
 {
 	game::GameWorld::ProjectileCamera camera;
-	effects.tv = round.projectileCamera(player, camera);
+	effects.tv = tvEffect && round.projectileCamera(player, camera);
 }
 
 } // namespace dice::hfe::host

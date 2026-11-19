@@ -380,7 +380,11 @@ private:
 
 // The view through a guided round's camera (useProjectileCamera,
 // GameWorld::projectileCamera): RendDX9's TVEffect pass (0x10048f80,
-// PostProduction's "TVEffect") is on while the player looks through it.
-void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects);
+// PostProduction's "TVEffect") is on while the player looks through it, but
+// only with enhanced.tvEffect: nothing in RendDX9 calls 0x10048f80 or names the
+// technique elsewhere (no direct call, no pointer to it in the DLL), so retail
+// shows the plain colour view, and the pass shifts each row sideways by up to
+// ~2% of the width, which leans vertical edges (a diagonal tear).
+void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects, bool tvEffect);
 
 } // namespace dice::hfe::host

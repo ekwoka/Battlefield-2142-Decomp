@@ -2430,8 +2430,9 @@ The wire guidance takes the player's active camera (`0x005e2e20`: player
 slot `0x1b4(1)`, its `0xc378` matrix and position), so the steering point
 o + f × (max(0, (m − o)·f) + look-ahead) lies ahead of the round's own
 camera: the round flies where its camera looks. While the view is a
-round's the renderer's TVEffect pass runs (RendDX9 `0x10048f80`,
-PostProduction's `TVEffect`: `PostEffects::tv`). Rewritten in
+round's the TVEffect pass runs only with `enhanced.tvEffect` (RendDX9
+`0x10048f80`, PostProduction's `TVEffect`: `PostEffects::tv`); retail never
+calls it, so its guided view is the plain one (see the TVEffect item below). Rewritten in
 `GameWorld::startProjectileView` / `stepProjectileView` /
 `projectileCamera` (the seat's launch, `stepGunner`, the wire guidance),
 `PlayerCamera::view` (the view, no cockpit) and main.cpp's postEffects.
@@ -5339,10 +5340,16 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    `tvDistortionFreq`, `tvDistortionScale`): no direct call or vtable
    slot reaches it in RendDX9, but it is the view through a guided
    round's camera (`useProjectileCamera`, see the projectile camera
-   above). The rewrite (`PostEffects::tv`) turns it on while
-   `GameWorld::projectileCamera` gives the local player a round's camera
-   (main.cpp's postEffects), and off when the round goes and the view
-   comes back (`0x005b4b00`).
+   above). Rechecked 2026-11-19 over the whole DLL: the function has no
+   call, jump or pointer reference, and the string "TVEffect" is named only
+   at `0x10048fd4` inside it; the technique is never selected, so retail
+   shows the guided view in plain colour. The shader's `img.x` shift is a
+   function of the row only (up to ~34 px at 1920 wide, ~0.3 px per row),
+   which leans vertical edges by up to ~17 degrees: the "diagonal tearing"
+   reported on the gunship's TV missile. The rewrite keeps the pass
+   (`PostEffects::tv`, `BF2142_POST_EFFECT=tv`) behind `enhanced.tvEffect`
+   (off): `host::roundCameraEffects` sets it while
+   `GameWorld::projectileCamera` gives the local player a round's camera.
 
 The rewrite does all of these in one full-screen pass: the passes that
 move pixels (the roll, the fisheye, the TV's bands) read the earlier
@@ -10662,8 +10669,9 @@ keep their own one-per-owner paths).
   weaponTemplate.fireRate / shouldRearm / isAntiAirWeapon (the exe's AI
   weapon record `0x0088a7b0`: `+0x10` −1, `+0x70` 1, `+0x71` 0; getters
   `0x00892500`, `0x00892720`, `0x00892740`) aren't read by AIDLL's weapon
-  choice (`0x10074ef0`); isAntiAirWeapon is read by the AI interface's
-  slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
+  choice (`0x10074ef0`); fireRate is read by BBPHeliFire3d's trigger
+  (`0x1007ec50`, slot 0xc8: the pilot's tap timer, none at −1);
+  isAntiAirWeapon is read by the AI interface's slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
   (Unit plug-in `+0x15`, executor `0x00884eaf`; 1 on the bipods and the
   ATs) is read by AIDLL through the unit adaptor's slot 0x38
   (`0x008a1d10`; AIDLL `0x100aa570`) in the vehicle choice `0x1006c520`,
