@@ -7,6 +7,8 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
+#include <unordered_set>
 
 namespace dice::hfe::hud {
 
@@ -86,6 +88,7 @@ struct HudManager::Node {
 	int type = kSplit;
 	Node* parent = nullptr;
 	std::vector<Node*> children;
+	std::unique_ptr<Node> sameNamedList;
 	int x = 0, y = 0, w = 0, h = 0;
 	float color[4] = {1, 1, 1, 1};
 	std::string showVariable;
@@ -367,7 +370,12 @@ bool HudManager::repairSupplyLabelOrder()
 HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
 	int w, int h)
 {
-	auto& slot = m_nodes[lower(name)];
+	Node* parent = parentName.empty() ? nullptr : find(parentName);
+	auto& named = m_nodes[lower(name)];
+	// The shipped commander scripts give the member list its picture parent's
+	// name. Retail creates a separate child and makes it active for list setters.
+	const bool listSharesParentName = parent && parent == named.get() && parent->type == kPicture && type == kList;
+	auto& slot = listSharesParentName ? parent->sameNamedList : named;
 	if (!slot) {
 		slot = std::make_unique<Node>();
 	}
@@ -383,13 +391,28 @@ HudManager::Node* HudManager::create(int type, const std::string& parentName, co
 	if (type == kTransformList && std::find(m_transformLists.begin(), m_transformLists.end(), node) == m_transformLists.end()) {
 		m_transformLists.push_back(node);
 	}
-	if (Node* parent = parentName.empty() ? nullptr : find(parentName)) {
-		if (node->parent != parent) {
+	m_active = node;
+	if (parent) {
+		if (std::find(parent->children.begin(), parent->children.end(), node) == parent->children.end()) {
+			// Reused names may already be reachable from multiple parents.
+			// Walk the actual child links before adding a new edge.
+			std::vector<Node*> pending {node};
+			std::unordered_set<Node*> visited;
+			while (!pending.empty()) {
+				Node* child = pending.back();
+				pending.pop_back();
+				if (child == parent) {
+					std::fprintf(stderr, "HUD: skipped cyclic link from %s to %s\n", parent->name.c_str(), node->name.c_str());
+					return node;
+				}
+				if (visited.insert(child).second) {
+					pending.insert(pending.end(), child->children.begin(), child->children.end());
+				}
+			}
 			parent->children.push_back(node);
 			node->parent = parent;
 		}
 	}
-	m_active = node;
 	return node;
 }
 

@@ -106,6 +106,58 @@ TEST(Hud_ShowLogicAndBars)
 	CHECK(manager.frame(0).empty());
 }
 
+TEST(Hud_SameNamedListKeepsItsPictureParent)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createPictureNode Global Members 181 10 213 157",
+			 "hudBuilder.setPictureNodeTexture Ingame/test.tga",
+			 "hudBuilder.setNodeShowVariable ShowSquadMemberList",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.createListNode Members MEMBERS 4 66 205 87 16 0",
+			 "hudBuilder.setListNodeBackgroundColor 1 0 0 1",
+		 }) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	CHECK(manager.active() != manager.find("Members"));
+	CHECK(manager.frame(0).empty());
+	manager.set("ShowSquadMemberList", 1);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 2);
+	if (quads.size() == 2) {
+		CHECK(quads[0].texture == "Menu/HUD/Texture/Ingame/test.tga");
+		CHECK(quads[0].x0 == 181 && quads[0].y0 == 10);
+		CHECK(quads[1].texture == "Menu/Console/white.dds");
+		CHECK(quads[1].x0 == 185 && quads[1].y0 == 76);
+	}
+}
+
+TEST(Hud_RejectsCyclesWhenReusingNodeNames)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Group",
+			 "hudBuilder.createSplitNode Group Group",
+			 "hudBuilder.createSplitNode Group Child",
+			 "hudBuilder.createSplitNode Global Alternate",
+			 "hudBuilder.createSplitNode Alternate Child",
+			 "hudBuilder.createSplitNode Child GROUP",
+			 "hudBuilder.createPictureNode Group Icon 0 0 10 10",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.setPictureNodeTexture Ingame/test.tga",
+		 }) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 1 && quads.front().texture == "Menu/HUD/Texture/Ingame/test.tga");
+}
+
 // setBarNodeRound (Bf2BarNode slot 0x120 0x007e9380; render 0x007eb2c0 calls
 // 0x007eafc0 when it is set): the quads are wedges of 2 pi * value clockwise
 // from up about the node's middle; drawn in the texture's own colours, whatever the node colour.
