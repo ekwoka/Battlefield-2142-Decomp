@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -37,6 +38,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <set>
 #include <thread>
 
 using namespace dice::hfe;
@@ -4496,4 +4498,81 @@ TEST(Titan_SoldiersMeetTheGunsCollisionParts)
 		// The hull, then each part's soldier LOD once.
 		CHECK(parts >= 6 && own == parts + 1);
 	}
+}
+
+// A gunship pilot's rockets at the enemy Titan's underbelly guns. The guns
+// are no ObjectManager objects (their hits go through the part ids), and
+// retail's hit handlers (0x004ba440 -> slot 0x128 -> 0x004ba070) credit any
+// damage dealt to an armoured object of a team. With the shield up the
+// rockets stop at the force field (rocket material 55 against its 4118: a
+// damage mod of 0, so 0x005a4dd0 never calls the damage and no marker); with
+// it down they hurt the gun and the pilot's marker lights.
+TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
+  for (const bool shieldDown : {false, true}) {
+   // The gun hub's collision is its small children: sweep the aim until a
+   // rocket lands (shield up: all of them end on the force field).
+   int landed = 0, marked = 0;
+   for (int attempt = 0; attempt < 25 && (shieldDown ? landed == 0 : attempt < 3); ++attempt) {
+    TitanLevel level(dir, "Minsk", 48, true, mod);
+    CHECK(level.loaded);
+    if (!level.loaded) return;
+    level.run(1);
+    const auto* enemy = level.titan(1);
+    CHECK(enemy != nullptr);
+    if (!enemy) return;
+    if (shieldDown) level.world->setHitPoints(enemy->object, 6e6f * 0.5f);
+    level.run(1);
+    game::GameWorld::TitanPartInfo hub {}, shield {};
+    for (const auto& part : level.world->titanParts(1)) {
+     if (part.kind == game::GameWorld::TitanPartInfo::Gun && part.name.find("groundcanone3") != std::string::npos && !hub.id) hub = part;
+     if (part.kind == game::GameWorld::TitanPartInfo::Shield) shield = part;
+    }
+    CHECK(hub.id != 0);
+    if (!hub.id) return;
+    const int pilot = level.world->joinPlayer(2);
+    CHECK(level.world->spawnSoldier(pilot));
+    game::GameWorld::PlayerInfo info;
+    CHECK(level.world->playerInfo(pilot, info));
+    // The gunship hangs 70 m off the gun, nose to it, a little off the line.
+    physics::Vec3 out = hub.position - enemy->position;
+    out.y = 0;
+    out = out * (1.0f / std::sqrt(physics::lengthSquared(out)));
+    const physics::Vec3 side {out.z, 0, -out.x};
+    const physics::Vec3 at = hub.position + out * 70.0f + side * (3.0f * (attempt % 5 - 2)) + physics::Vec3 {0, 2.0f * (attempt / 5 - 2), 0};
+    world::Object* craft = level.objects.create(level.templates.find("us_ag"), {at.x, at.y, at.z},
+     {std::atan2(-out.x, -out.z) * 57.29578f, 0, 0});
+    CHECK(craft != nullptr);
+    if (!craft) return;
+    craft->setTeam(2);
+    level.run(1 / 30.0f);
+    CHECK(level.world->setSoldierPosition(info.soldier, at - physics::Vec3 {0, 1, 0}));
+    game::SoldierInput input; input.use = true;
+    level.world->setInput(pilot, input); level.run(0.1f);
+    input = {}; level.world->setInput(pilot, input); level.run(0.1f);
+    CHECK(level.world->playerInfo(pilot, info) && info.vehicle == craft->id() && info.seat == 0);
+    level.world->takeHitIndicator(pilot);
+    const float gunWas = level.world->hitPoints(hub.id), shieldWas = level.world->hitPoints(shield.id);
+    input.fire = true;
+    level.world->setInput(pilot, input);
+    bool flag = false; (void)flag;
+    for (int tick = 0; tick < 75; ++tick) {
+     level.run(1 / 30.0f);
+     flag = level.world->takeHitIndicator(pilot) || flag;
+    }
+    const bool gunHurt = level.world->hitPoints(hub.id) < gunWas;
+    landed += gunHurt;
+    marked += gunHurt && flag;
+    // Shield up the rockets stop at the force field (no damage to it or the
+    // gun); a marker there can only be the hull's.
+    if (!shieldDown) CHECK(!gunHurt && level.world->hitPoints(shield.id) == shieldWas);
+   }
+   std::fprintf(stderr, "  %s shield %s: gun hit %d, marker with it %d\n", mod, shieldDown ? "down" : "up", landed, marked);
+   if (shieldDown) CHECK(landed > 0 && marked == landed);
+  }
+ }
 }
