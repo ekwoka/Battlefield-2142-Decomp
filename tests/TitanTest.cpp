@@ -2583,9 +2583,11 @@ TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
 {
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+ if (!test::runs(mod)) continue;
  for (const char* part : {"aacannon", "groundcanone3"}) {
   for (int nth = 0; nth < 6; ++nth) for (const bool vehicle : {false, true}) {
-   TitanLevel level(dir, "Minsk", 48, true, "mods/bf2142");
+   TitanLevel level(dir, "Minsk", 48, true, mod);
    CHECK(level.loaded);
    if (!level.loaded) return;
    const int player = level.world->joinPlayer(2);
@@ -2640,10 +2642,11 @@ TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
     alpha = std::max(alpha, shooter.hitIndicator);
     marked = level.world->takeHitIndicator(player);
    }
-   std::fprintf(stderr, "  %s %d %s: round fired %d, marker %d alpha %.2f\n", part, nth, vehicle ? "vehicle" : "soldier", placed, marked, alpha);
+   std::fprintf(stderr, "  %s %s %d %s: round fired %d, marker %d alpha %.2f\n", mod, part, nth, vehicle ? "vehicle" : "soldier", placed, marked, alpha);
    CHECK(placed);
    CHECK(marked && alpha > 0.85f); // the flag his own state sends and the HUD's alpha
   }
+ }
  }
 }
 
@@ -2881,6 +2884,60 @@ TEST(Titan_VehicleSeatHudUsesAuthoredIconOffsets)
    std::fprintf(stderr, "seat HUD %s %s: %zu authored seats, %zu drawn dots\n", mod, name, expected, dots.size());
    CHECK(expected >= 2 && expected == dots.size());
   }
+ }
+}
+
+// The hit indicator's HUD node (GenericVehicleHitIndicator, under VehicleHuds,
+// driven by HitIndicatorIconShow / HitIndicatorIconAlpha) is drawn on the
+// page a Titan AA and ground-cannon seat shows, in both mods.
+TEST(Titan_GunSeatHudDrawsTheHitIndicator)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  hud::HudManager hud([&](const std::string& path, std::string& text) {
+   std::vector<uint8_t> bytes;
+   if (!level.files.readFile(path, bytes)) return false;
+   text.assign(bytes.begin(), bytes.end()); return true;
+  });
+  hud::registerHudConsoleMethods(level.console, hud);
+  level.console.setScriptOutput(false, false);
+  std::string out;
+  CHECK(level.console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+  hud.set("ShowIngameHud", 1); hud.set("ShowSoldierHud", 1); hud.set("ShowVehicleHud", 1); hud.set("InVehicle", 1);
+  hud.set("VehicleIconShow", 1); hud.set("AffectedByEMPShow", 1); hud.set("IsSpectator", 0);
+  hud.set("MenuBackgroundAlpha", 1);
+  const auto hits = [&](float alpha) {
+   hud.set("CrosshairIconShow", 1);
+   hud.set("HitIndicatorIconAlpha", alpha);
+   hud.set("HitIndicatorIconShow", alpha != 0 ? 1 : 0);
+   int n = 0;
+   for (int warm = 0; warm < 30; ++warm) hud.frame(1 / 30.0f);
+   for (const auto& q : hud.frame(0)) {
+    if (q.texture.find("Hit") != std::string::npos || q.texture.find("hit_Indicator") != std::string::npos) ++n;
+   }
+   return n;
+  };
+  const auto seats = level.world->vehicleSeats(level.world->titanOf(2));
+  int checked = 0;
+  for (const auto& seat : seats) {
+   if (seat.name.find("aacannon") == std::string::npos && seat.name.find("groundcanone3") == std::string::npos) continue;
+   menu::VehicleGuiInput gui;
+   gui.controlled = level.templates.find(seat.name);
+   gui.weapon = level.templates.find(seat.weapons.front().weapon);
+   const int index = menu::vehicleGuiIndex(gui);
+   hud.set("GuiIndex", static_cast<float>(index));
+   const int shown = hits(1.0f), hidden = hits(0.0f);
+   std::fprintf(stderr, "  hit indicator HUD %s %s gui %d: %d drawn at alpha 1, %d at 0\n", mod, seat.name.c_str(), index, shown, hidden);
+   CHECK(index == 94 || index == 95);
+   CHECK(shown > 0 && hidden == 0);
+   ++checked;
+  }
+  CHECK(checked == 6);
  }
 }
 
