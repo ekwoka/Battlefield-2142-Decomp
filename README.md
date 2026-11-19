@@ -458,6 +458,7 @@ The rest only change what you see or hear.
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
 | `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
 | `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
+| `botPilots` | on | bots | A gunship's bot pilot picks the best target its guns can hurt (a vehicle, an infantry group, an aircraft, an enemy Titan's gun hubs) and flies shallow attack runs at it; the original's pilots mostly fly their waypoints and fire only when a target lines up. | yes |
 | `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
 | `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
 | `chaseRoll` | on | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
@@ -517,7 +518,7 @@ feeds the simulation.
 `tools/parity-check.sh [seconds] [extra game args...]` runs the same headless
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
-(`botRecovery`, `botMovement`, `botTitan`, `guidedCameraEase`, `cornerSteer`,
+(`botRecovery`, `botMovement`, `botTitan`, `botPilots`, `guidedCameraEase`, `cornerSteer`,
 `passengerWeapons`, `softLanding`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
 simulation. Anything added to the enhanced mode either leaves the

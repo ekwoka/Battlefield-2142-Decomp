@@ -566,6 +566,10 @@ struct BotSettings {
 	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
+	// enhanced.botPilots, also read live: a gunship's pilot hunts targets
+	// and flies attack runs at them (BotsPilot.cpp); not retail.
+	const bool* botPilots = nullptr;
+	bool pilotsHunt() const { return enhanced && *enhanced && botPilots && *botPilots; }
 	// enhanced.botCommander, also read live: a virtual commander moves a commanderless bot team's Titan in gpm_ti
 	// and uses its commander's tools (BotsTitan.cpp, titanCommand); not retail.
 	const bool* botCommander = nullptr;
@@ -1377,6 +1381,15 @@ private:
 		float heliLastDirY = 0;
 		int heliRun = 0;        // the moves' Serial: 0 away, 1 back (0x1007f180)
 		int heliTarget = -1, heliWeapon = -1; // the plan's target and weapon (its keeper 0x1007f9d0 rebuilds on a change)
+		// enhanced.botPilots: the hunted target (a player, or an enemy Titan's
+		// gun part), when it was picked, the run's leg (0 set up, 1 in), its
+		// start and height; and the seating whose first press was counted.
+		int huntPlayer = -1;
+		uint32_t huntPart = 0;
+		float huntPickAt = -1e9f, huntLegAt = -1e9f, huntHeight = 0;
+		int huntLeg = 0;
+		float pilotFirstPressFor = -2e9f;
+		float heliSeating = -2e9f; // the seating counted in the pilot stats
 		float heliTapAt = -1e9f;
 		// When the bot last took a seat (BBChangeLandingCraft's x6 within 15 s).
 		float seatedAt = -1e9f;
@@ -1868,9 +1881,31 @@ private:
 	struct PilotStats {
 		float fighting = 0, run[2] = {}, pass = 0, onTarget = 0; // run: away, back
 		int presses = 0;
+		float hunting = 0;            // enhanced.botPilots: seconds with a hunted target
+		float huntLegs[3] = {};       // of those: setting up, running in, running in with the line blocked
+		float firstAttack = 0;        // seconds from taking the seat to the first press, summed
+		int firstAttacks = 0, seatings = 0;
 		std::map<std::string, float> patterns; // the pilot's plan patterns, seconds each
+		std::map<std::string, std::pair<float, int>> hunted; // enhanced.botPilots: by target kind, seconds and presses
 	};
 	std::map<std::string, PilotStats> m_pilotStats;
+	// The pilot's gun for a target (fly's choice, 0x100dd4a0).
+	struct PilotGun {
+		std::string gun;
+		int group = 0;
+		WeaponAi weapon;
+	};
+	// HeliAimAt (0x100dcf10) at a point moving at `velocity` from `margin`
+	// over the terrain, and BBPHeliFire3d's trigger (0x1007ec50) on it:
+	// true when it pressed.
+	bool pilotStrike(Bot& bot, const GameWorld::VehicleInfo& vehicle, ai::HeliPilot& pilot, const PilotGun& gun,
+		const physics::Vec3& point, const physics::Vec3& velocity, bool ground, float margin, float dt, float seconds,
+		SoldierInput& input, PilotStats* stats);
+	// enhanced.botPilots (BotsPilot.cpp): the gunship pilot's own target and
+	// attack runs; false with nothing worth hunting (the plans fly on).
+	bool hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, ai::HeliPilot& pilot,
+		const std::string& rootAi, float dt, float seconds, SoldierInput& input);
+	PilotGun pilotGunFor(Bot& bot, const GameWorld::PlayerInfo& self, int strengthType);
 	// $BF2142_BOT_STATS's engagements: seconds a bot ran Fire with a
 	// target, by where it sat, the target's CombatStrengthType and range;
 	// and of those on foot, the seconds zoomed in.

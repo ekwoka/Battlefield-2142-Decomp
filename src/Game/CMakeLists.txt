@@ -5,6 +5,7 @@ add_library(Game STATIC
 	BotsLook.cpp
 	BotsTitan.cpp
 	BotsMines.cpp
+	BotsPilot.cpp
 	GameWorld.cpp
 	MeshCollision.cpp
 	Ladders.cpp

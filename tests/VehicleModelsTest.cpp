@@ -1534,6 +1534,82 @@ TEST(Vehicles_BotGunshipPilotFiresOnTheFirstApproach)
 	}
 }
 
+// enhanced.botPilots (BotsPilot.cpp, not retail): with an enemy soldier
+// 180 m off on open ground the pilot takes off and fires rockets on its
+// runs in, in the air. Remaster's retail pilot (the
+// switch off) leaves him alone: BBFire3d scores a soldier x 0.01 against a
+// helicopter and its Fire weight 5.0 loses to the plans' flying.
+TEST(Vehicles_BotGunshipPilotHuntsWithEnhancedPilots)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const bool hunts : {true, false}) {
+			Garage g(gameDir(), mod);
+			if (!g.loaded) return;
+			game::BotSettings settings;
+			static const bool on = true;
+			const bool enhanced = hunts;
+			settings.enhanced = &on;
+			settings.botPilots = &enhanced;
+			game::registerBotConsoleMethods(g.console, settings);
+			std::string out;
+			CHECK(g.console.run("AI/AIBehaviours.ai", {}, out));
+			CHECK(g.console.run("AI/AIDefault.ai", {}, out));
+			for (const std::string& script : world::templateScripts(g.files, "Objects/", true)) {
+				if (script.size() > 3 && script.compare(script.size() - 3, 3, ".ai") == 0) g.console.run(script, {}, out);
+			}
+			settings.viewDistance = 300;
+			const uint32_t v = g.start("us_ag", {0, 4, 6});
+			const int bot = g.world->addPlayer("Pilot", 2, true);
+			CHECK(g.world->spawnSoldier(bot));
+			game::GameWorld::PlayerInfo info;
+			g.world->playerInfo(bot, info);
+			const physics::Vec3 at = g.position(v);
+			for (float r = 0; r <= 6 && info.vehicle != v; r += 1.5f) {
+				for (int k = 0; k < 8 && info.vehicle != v; ++k) {
+					g.world->setSoldierPosition(info.soldier, {at.x + r * std::sin(k * 0.785f), at.y - 1, at.z + r * std::cos(k * 0.785f)});
+					game::SoldierInput use;
+					use.use = true;
+					g.world->setInput(bot, use);
+					g.world->tick(1 / 30.0f);
+					g.world->setInput(bot, {});
+					g.world->tick(1 / 30.0f);
+					g.world->playerInfo(bot, info);
+				}
+			}
+			CHECK(info.vehicle == v && info.seat == 0);
+			if (info.vehicle != v) continue;
+			const int enemy = g.world->addPlayer("Enemy", 1, false);
+			CHECK(g.world->spawnSoldier(enemy));
+			game::GameWorld::PlayerInfo e;
+			g.world->playerInfo(enemy, e);
+			g.world->setSoldierPosition(e.soldier, {at.x + 100, 0, at.z + 150});
+			game::BotManager bots(*g.world, settings);
+			uint32_t shots = 0, airborneShots = 0;
+			for (int tick = 0; tick < 30 * 60; ++tick) {
+				bots.update(1 / 30.0f);
+				g.world->setInput(bot, bots.lastInputFor(bot));
+				g.world->tick(1 / 30.0f);
+				g.world->setInput(bot, {});
+				g.world->playerInfo(bot, info);
+				if (info.gunShots > shots && g.position(v).y > 15) {
+					airborneShots += info.gunShots - shots;
+				}
+				shots = info.gunShots;
+			}
+			g.world->playerInfo(enemy, e);
+			std::fprintf(stderr, "  %s hunts %d: %u rounds in 60 s, %u of them 15 m up or more, target %s\n", mod, hunts, shots,
+				airborneShots, e.alive ? "alive" : "killed");
+			if (hunts) {
+				CHECK(airborneShots > 0 || !e.alive);
+			} else if (std::string(mod) != "mods/bf2142") {
+				CHECK(shots == 0);
+			}
+		}
+	}
+}
+
 // The stationary AA's EMP round on a hovering gunship (empDamageIgnoreRadius,
 // 2 steps of 1.5 s): level 2, and the pilot's inputs held at 0 while it lasts.
 TEST(Vehicles_StaticAAEmpOnHoveringGunship)

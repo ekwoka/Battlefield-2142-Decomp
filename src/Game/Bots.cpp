@@ -880,8 +880,16 @@ BotManager::~BotManager()
 		std::fprintf(stderr, "  %-40s %8.1f\n", name.c_str(), seconds);
 	}
 	for (const auto& [name, p] : m_pilotStats) {
-		std::fprintf(stderr, "  pilot %-20s fighting %6.1f s (away %.1f, back %.1f), pass %6.1f s, on target %6.1f s, %d presses\n",
-			name.c_str(), p.fighting, p.run[0], p.run[1], p.pass, p.onTarget, p.presses);
+		std::fprintf(stderr, "  pilot %-20s fighting %6.1f s (away %.1f, back %.1f), hunting %6.1f s, pass %6.1f s, on target %6.1f s, %d presses;"
+			" %d seatings, first press after %.1f s (%d)\n",
+			name.c_str(), p.fighting, p.run[0], p.run[1], p.hunting, p.pass, p.onTarget, p.presses, p.seatings,
+			p.firstAttacks ? p.firstAttack / p.firstAttacks : -1.0f, p.firstAttacks);
+		if (p.hunting > 0) {
+			std::fprintf(stderr, "    hunt legs: set up %.1f s, in %.1f s, in blocked %.1f s\n", p.huntLegs[0], p.huntLegs[1], p.huntLegs[2]);
+		}
+		for (const auto& [kind, h] : p.hunted) {
+			std::fprintf(stderr, "    hunted %-19s %6.1f s, %d presses\n", kind.c_str(), h.first, h.second);
+		}
 		for (const auto& [pattern, seconds] : p.patterns) {
 			std::fprintf(stderr, "    %-26s %6.1f s\n", pattern.c_str(), seconds);
 		}
@@ -3332,6 +3340,10 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	const bool armed = m_settings.plugin(rootAi, "Armament") != nullptr;
 	if (m_stats) {
 		m_pilotStats[rootAi].patterns[titanMode ? "titan " + std::to_string(titanMode) : pattern] += seconds;
+		if (bot.heliSeating != bot.seatedAt) {
+			bot.heliSeating = bot.seatedAt;
+			++m_pilotStats[rootAi].seatings;
+		}
 	}
 	const auto hover = [&](const physics::Vec3& spot) {
 		physics::Vec3 p = spot;
@@ -3342,7 +3354,14 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	GameWorld::PlayerInfo target;
 	const bool fighting = pattern == "BBPHeliFire3d" && bot.target >= 0 && m_world.playerInfo(bot.target, target)
 		&& target.alive;
-	if (titanMode == 2 || titanMode == 4) {
+	// enhanced.botPilots (BotsPilot.cpp): an armed pilot hunts, unless its
+	// Titan's sortie has it or it sits out the take-off wait.
+	const bool waiting = pattern.rfind("BBPGotoWaypoint", 0) == 0 && m_time < bot.heliWaitUntil;
+	const bool hunting = !titanMode && armed && self.seat == 0 && !waiting && m_settings.pilotsHunt()
+		&& hunt(bot, self, *vehicle, pilot, rootAi, dt, seconds, input);
+	if (hunting) {
+		bot.heliPlanned = false; // the plans start afresh after the hunt
+	} else if (titanMode == 2 || titanMode == 4) {
 		pilot.flyTo(toAi(bot.titanFlyTo), titanMode == 4 ? 30.0f : 0.0f);
 	} else if (titanMode == 1) {
 		pilot.flyTo(toAi(at), 0);
@@ -3350,39 +3369,8 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	} else if (titanMode) {
 		pilot.reset();
 	} else if (fighting) {
-		const auto seats = m_world.vehicleSeats(self.vehicle);
-		// The pilot's weapon (0x100dd4a0, flags 7, from BBPHeliFire3d's plan
-		// 0x1007f9d0): of the seat's weapons with a strength above 0 against
-		// the target's CombatStrengthType, the one scoring most (strictly),
-		// the one in use counting twice (the plan's per-bot +0x14).
-		std::string gun = seats.empty() ? std::string() : seats[0].weapon;
-		int group = 0;
-		if (!seats.empty() && !seats[0].weapons.empty()) {
-			const int type = strengthTypeOf(target);
-			int best = -1;
-			float bestScore = 0;
-			for (size_t i = 0; i < seats[0].weapons.size(); ++i) {
-				const GameWorld::SeatWeapon& w = seats[0].weapons[i];
-				// Only the Armament's AI weapons (0x10031d80 skips a firearm
-				// without a weaponTemplate): ads_air would score as a rifle.
-				if (w.weapon.empty() || (!m_settings.weapons.empty() && !m_settings.weapons.count(lower(w.aiTemplate)))) {
-					continue;
-				}
-				const WeaponAi ai = weaponAi(w.weapon);
-				const float strength = type >= 0 && type < 8 ? ai.strength[static_cast<size_t>(type)] : 0;
-				const float score = strength * (static_cast<int>(i) == bot.pilotWeapon ? 2.0f : 1.0f);
-				if (strength > 0 && score > bestScore) {
-					best = static_cast<int>(i);
-					bestScore = score;
-				}
-			}
-			if (best >= 0) {
-				bot.pilotWeapon = best;
-				gun = seats[0].weapons[static_cast<size_t>(best)].weapon;
-				group = seats[0].weapons[static_cast<size_t>(best)].group;
-			}
-		}
-		const WeaponAi weapon = weaponAi(gun);
+		const PilotGun pg = pilotGunFor(bot, self, strengthTypeOf(target));
+		const WeaponAi& weapon = pg.weapon;
 		const float maxRange = weapon.maxRange > 0 ? weapon.maxRange : 300.0f;
 		if (bot.heliTarget != bot.target || bot.heliWeapon != bot.pilotWeapon) {
 			// The keeper (0x1007f9d0) builds a new plan for another target or weapon.
@@ -3430,70 +3418,13 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		} else if (dist >= 20 && dist <= maxRange && physics::dot(dir, vehicle->forward) > 0.5f
 			&& m_world.lineOfSight(at + vehicle->forward * 4.0f, target.position + physics::Vec3 {0, 1, 0},
 				vehicle->object, seenThrough, target.vehicle) && !seenThrough) {
-			// HeliAimAt's aim (0x100dcf10): the lead from the gun (the
-			// hull's frame) for the round, the hull's motion inherited;
-			// an indirect weapon's with precision 0.75, no inherited
-			// motion and the direction laid flat. No solution: straight
-			// at the target (slot 8).
-			bool indirect = false;
-			const ai::RoundModel round = roundModel(gun, &indirect);
-			physics::Vec3 aimDir = dir;
-			ai::Vec3 solved = toAi(dir), impact;
-			double impactTime = 0;
-			bool hasSolution = false;
-			if (round.speed > 0) {
-				bot.heliLead.setup(toAi(target.position - at), toAi(target.velocity),
-					indirect ? ai::Vec3 {} : toAi(vehicle->velocity), toAi(vehicle->forward), m_time, round);
-				hasSolution = bot.heliLead.solve(m_time, indirect ? 0.75f : 0.5f, false, solved, impact, &impactTime);
-				if (hasSolution) {
-					aimDir = {solved.x, indirect ? 0.0f : solved.y, solved.z};
-					aimDir = aimDir * (1 / std::max(std::sqrt(physics::lengthSquared(aimDir)), 1e-4f));
-				}
-			}
-			pilot.aimAt(toAi(aimDir), 40, bot.heliLastDirY, dt > 0 ? dt : seconds);
-			bot.heliLastDirY = aimDir.y;
-			// The trigger's condition (0x1007ec50), an And of: the target
-			// within maxRange (0x100d4480, 3D); on target (0x100dcab0: the
-			// AI weapon's allowedDeviation, slot 0x94, as the reach), waiting
-			// for the closest approach only for a weapon that isn't automatic
-			// (slot 0x104) at a target that isn't ITGround (its AI object's
-			// flag bit 3); and, for a weapon with a fireRate (slot 0xc8), a
-			// timer. Not ported: an indirect weapon (slot 0x108) at an
-			// ITGround target takes another test (0x100dc850); no shipped
-			// pilot weapon is indirect.
-			const world::ObjectTemplate* g = m_world.templates().find(gun);
-			const bool automatic = fireMode(g) == 2;
 			uint32_t types = 0;
 			if (const world::Object* o = m_world.objects().find(target.vehicle ? target.vehicle : target.soldier);
 				o && o->objectTemplate()) {
 				types = m_settings.typeFlags(aiTemplateOf(o->objectTemplate()->name()));
 			}
 			const bool ground = types ? (types & kITGround) != 0 : !target.vehicle; // a soldier is ITGround (Common/ai/Objects.ai)
-			const bool closest = !automatic && !ground;
-			if (!bot.heliOnTarget || bot.heliOnTarget->closestApproach() != closest) {
-				bot.heliOnTarget.emplace(weapon.allowedDeviation, closest);
-			}
-			const bool onTarget = length <= maxRange
-				&& bot.heliOnTarget->test(hasSolution, bot.heliLead, solved, impact, impactTime, m_time);
-			if (stats) {
-				stats->pass += seconds;
-				stats->onTarget += onTarget ? seconds : 0.0f;
-			}
-			// A press (BAPATrigger 0x100d3110) for a weapon that isn't
-			// automatic, so let go between taps; an automatic one is held.
-			float spacing = 0;
-			if (weapon.fireRate != -1) {
-				const float taps = std::round((1 - (1 - m_settings.skill) * 0.8f) * std::round(1.5f * weapon.fireRate));
-				spacing = taps > 0 ? 60.0f / taps : 1e9f;
-			}
-			const bool released = automatic || m_time - bot.heliTapAt > seconds * 1.5f;
-			if (onTarget && released && m_time - bot.heliTapAt >= spacing) {
-				(group == 1 ? input.altFire : input.fire) = true;
-				bot.heliTapAt = m_time;
-				if (stats) {
-					++stats->presses;
-				}
-			}
+			pilotStrike(bot, *vehicle, pilot, pg, target.position, target.velocity, ground, 40, dt, seconds, input, stats);
 		} else if (bot.heliRun == 0) {
 			// HeliMoveAwayFromObject: 100 m on at its own height, margin 40,
 			// until 150 m from the target.
