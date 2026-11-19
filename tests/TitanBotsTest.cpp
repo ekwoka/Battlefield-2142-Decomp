@@ -777,3 +777,145 @@ TEST(Titan_BotsPodToWalkableGroundOnMolokaiTitan)
 	CHECK(landed >= 4);
 	CHECK(stuck == 0);
 }
+
+// enhanced.botCommander: with no commander a bot team's Titan is moved
+// towards a silo, to a spot that leaves every friendly silo's missile path
+// (the climb, then straight at the enemy's middle) clear of its box, and
+// beside the enemy's Titan once that one's shield is down; the UAV goes up
+// over the focus. With the switch off nobody orders it (the server's first
+// order at its own place stands).
+TEST(Titan_BotCommanderMovesTheTitans)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const bool commander : {false, true}) {
+			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+			CHECK(level.loaded);
+			if (!level.loaded) continue;
+			game::BotSettings settings;
+			const bool enhanced = true;
+			settings.enhanced = &enhanced;
+			settings.botTitan = &enhanced;
+			settings.botCommander = &commander;
+			game::BotManager bots(*level.world, settings);
+			bool uav[3] = {};
+			level.afterTick = [&] {
+				bots.update(1 / 30.0f);
+				for (int team : {1, 2}) {
+					physics::Vec3 at;
+					float radius = 0;
+					uav[team] = uav[team] || level.world->uavArea(team, at, radius);
+				}
+			};
+			std::map<int, physics::Vec3> start;
+			std::vector<int> crew;
+			const auto addBots = [&] {
+				for (int team : {1, 2}) {
+					for (int i = 0; i < 2; ++i) {
+						crew.push_back(level.world->addPlayer("Bot" + std::to_string(team) + std::to_string(i), team, true));
+						CHECK(level.world->spawnSoldier(crew.back()));
+					}
+				}
+			};
+			for (int team : {1, 2}) {
+				start[team] = level.titan(team)->position;
+			}
+			addBots();
+			// The test's own reading of the missile paths: the Titan at `at` (moved there; it never turns) has none
+			// of a friendly silo's within its box (+ 10 m).
+			const auto blocks = [&](int team, const physics::Vec3& at) {
+				if (!level.titan(team) || !level.titan(3 - team)) return false;
+				const auto ownInfo = *level.titan(team);
+				const auto enemyInfo = *level.titan(3 - team);
+				const auto* own = &ownInfo;
+				const auto* enemy = &enemyInfo;
+				physics::Vec3 low, high;
+				if (!level.world->objectBox(own->object, low, high)) return false;
+				const physics::Vec3 shift {own->position.x - at.x, 0, own->position.z - at.z};
+				for (const auto& silo : level.world->missileSilos()) {
+					if (silo.team != team) continue;
+					const physics::Vec3 top = silo.position + physics::Vec3 {0, 40, 0};
+					for (int i = 0; i <= 200; ++i) {
+						const physics::Vec3 q = i <= 20 ? silo.position + (top - silo.position) * (i / 20.0f)
+														 : top + (enemy->position - top) * ((i - 20) / 180.0f);
+						const physics::Vec3 l = level.world->titanToLocal(own->object, q + shift);
+						if (l.x > low.x - 10 && l.x < high.x + 10 && l.y > low.y - 10 && l.y < high.y + 10 && l.z > low.z - 10 && l.z < high.z + 10) {
+							return true;
+						}
+					}
+				}
+				return false;
+			};
+			level.run(150);
+			for (int team : {1, 2}) {
+				// (level.titan's answer is one static, overwritten by the next call: copied.)
+				const auto* found = level.titan(team);
+				CHECK(found && found->hasTarget);
+				if (!found || !found->hasTarget) continue;
+				const auto info = *found;
+				const auto* titan = &info;
+				const float ordered = std::hypot(titan->target.x - start[team].x, titan->target.z - start[team].z);
+				const float moved = std::hypot(titan->position.x - start[team].x, titan->position.z - start[team].z);
+				float silo = 1e9f;
+				for (const auto& s : level.world->missileSilos()) {
+					silo = std::min(silo, std::hypot(titan->target.x - s.position.x, titan->target.z - s.position.z));
+				}
+				std::fprintf(stderr, "  %s commander %d team %d: order %.0f m from the start, moved %.0f m, %.0f m from a silo, blocks %d, uav %d\n",
+					mod, commander, team, ordered, moved, silo, blocks(team, titan->target), uav[team]);
+				if (!commander) {
+					CHECK(ordered < 5 && moved < 5 && !uav[team]);
+					continue;
+				}
+				CHECK(ordered > 30 && moved > 100 && silo <= 125);
+				CHECK(!blocks(team, titan->target));
+				CHECK(uav[team]);
+			}
+			if (!commander) continue;
+			// The silo each Titan went to, taken: its missile reaches the enemy, not its own Titan above it. (No bots
+			// meanwhile: none takes the silos back, and the Titans hold their orders.)
+			for (int id : crew) {
+				level.world->removePlayer(id);
+			}
+			crew.clear();
+			std::map<int, float> before;
+			for (int team : {1, 2}) {
+				const auto info = *level.titan(team);
+				const auto* titan = &info;
+				const auto silos = level.world->missileSilos();
+				const game::GameWorld::SiloInfo* nearest = nullptr;
+				for (const auto& s : silos) {
+					if (!nearest || std::hypot(titan->target.x - s.position.x, titan->target.z - s.position.z)
+							< std::hypot(titan->target.x - nearest->position.x, titan->target.z - nearest->position.z)) {
+						nearest = &s;
+					}
+				}
+				CHECK(nearest != nullptr);
+				if (nearest) level.world->setControlPointTeam(nearest->controlPoint, team);
+			}
+			for (int team : {1, 2}) {
+				before[team] = level.titan(team)->hitPoints;
+			}
+			level.run(175);
+			for (int team : {1, 2}) {
+				const float own = level.titan(team)->hitPoints, enemy = level.titan(3 - team)->hitPoints;
+				std::fprintf(stderr, "  %s team %d: own Titan %.0f -> %.0f, enemy's %.0f -> %.0f\n", mod, team, before[team], own, before[3 - team], enemy);
+				CHECK(enemy < before[3 - team]);
+			}
+			// The EU's shield down: the PAC Titan goes beside it.
+			addBots();
+			level.world->setHitPoints(level.titan(2)->object, level.titan(2)->maxHitPoints * 0.59f);
+			level.run(25);
+			const auto pacInfo = *level.titan(1);
+			const auto euInfo = *level.titan(2);
+			const auto* pac = &pacInfo;
+			const auto* eu = &euInfo;
+			const float apart = pac->radius + eu->radius;
+			const float beside = std::hypot(pac->target.x - eu->position.x, pac->target.z - eu->position.z);
+			std::fprintf(stderr, "  %s: PAC order %.0f m from the EU Titan (radii %.0f), blocks %d\n", mod, beside, apart, blocks(1, pac->target));
+			CHECK(beside >= apart + 20 && beside <= apart + 90); // the ring: radii + 30 m (or 50 m further)
+			CHECK(!blocks(1, pac->target));
+		}
+	}
+}
