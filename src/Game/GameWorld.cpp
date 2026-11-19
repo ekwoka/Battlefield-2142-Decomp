@@ -1171,8 +1171,13 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 		const uint32_t root = shieldCell(object, cellBody, cell) ? cellBody->object : object;
 		const Body* body = findBody(root);
 		const world::Object* o = m_objects.find(root);
+		// A Titan's parts (guns, consoles, the shield: synthetic ids, no
+		// bodies) hang on its tree: the Titan's team is theirs.
+		const Titan* titan = nullptr;
+		int titanIndex = 0;
+		const bool titanHit = titanPart(root, titan, titanIndex);
 		const bool armoured = hitPoints(object) >= 0 || cell || isTitan(root);
-		if (armoured && (soldierPlayer(object) || (body && body->vehicle && o && o->team() != 0) || isTitan(root))) {
+		if (armoured && (soldierPlayer(object) || (body && body->vehicle && o && o->team() != 0) || titanHit)) {
 			showHitIndicator(attacker);
 		}
 	}

@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -38,6 +39,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <set>
 #include <thread>
 
 using namespace dice::hfe;
@@ -2741,6 +2743,83 @@ TEST(Titan_SuezCargoBayLandingUsesStaticNodeDamage)
 	}
 }
 
+// The crew of a Titan's guns, seated, light their own hit indicator when a
+// round of the gun hurts an enemy soldier (the shooter is the seat's player,
+// as for every vehicle gun: retail 0x004ba440 / 0x004ba500 -> game logic slot
+// 0x128 -> 0x004ba070 hand the round's player on). A soldier and a gunship
+// stand 10 m ahead of the first round. Each seat gets a fresh level so no
+// earlier round is in flight.
+TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+ if (!test::runs(mod)) continue;
+ for (const char* part : {"aacannon", "groundcanone3"}) {
+  for (int nth = 0; nth < 6; ++nth) for (const bool vehicle : {false, true}) {
+   TitanLevel level(dir, "Minsk", 48, true, mod);
+   CHECK(level.loaded);
+   if (!level.loaded) return;
+   const int player = level.world->joinPlayer(2);
+   CHECK(level.world->spawnSoldier(player));
+   game::GameWorld::PlayerInfo info;
+   CHECK(level.world->playerInfo(player, info));
+   const auto* titan = level.titan(2);
+   CHECK(titan != nullptr);
+   if (!titan) return;
+   CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+   physics::Vec3 entry; float radius = 0; int seat = -1;
+   CHECK(level.world->titanGunEntry(player, entry, radius, seat));
+   CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+   game::SoldierInput input; input.use = true;
+   level.world->setInput(player, input); level.run(0.1f);
+   const auto seats = level.world->vehicleSeats(level.world->titanOf(2));
+   int found = -1, count = 0;
+   for (size_t i = 0; i < seats.size(); ++i) {
+    if (seats[i].name.find(part) != std::string::npos && count++ == nth) found = static_cast<int>(i);
+   }
+   if (found < 0) break;
+   input = {}; input.switchSeat = found + 1;
+   level.world->setInput(player, input); level.run(0.1f);
+   const int enemy = level.world->addPlayer("Enemy", 1, true);
+   CHECK(level.world->spawnSoldier(enemy));
+   game::GameWorld::PlayerInfo victim;
+   CHECK(level.world->playerInfo(enemy, victim));
+   level.world->takeHitIndicator(player);
+   input = {}; input.fire = true;
+   level.world->setInput(player, input);
+   bool marked = false, placed = false;
+   float alpha = 0;
+   for (int tick = 0; tick < 90 && !marked; ++tick) {
+    level.run(1 / 30.0f);
+    // The enemy steps into the path of the first round, once (its capsule
+    // stands over the feet).
+    for (const auto& p : level.world->projectiles()) {
+     if (placed || p.player != player) continue;
+     placed = true;
+     const float len = std::sqrt(physics::lengthSquared(p.velocity));
+     const physics::Vec3 at = p.position + p.velocity * (10.0f / len);
+     if (vehicle) {
+      world::Object* tank = level.objects.create(level.templates.find("as_ag"), {at.x, at.y, at.z});
+      CHECK(tank != nullptr);
+      if (tank) tank->setTeam(1);
+     } else {
+      CHECK(level.world->setSoldierPosition(victim.soldier, at - physics::Vec3 {0, 1.0f, 0}));
+     }
+    }
+    game::GameWorld::PlayerInfo shooter;
+    CHECK(level.world->playerInfo(player, shooter));
+    alpha = std::max(alpha, shooter.hitIndicator);
+    marked = level.world->takeHitIndicator(player);
+   }
+   std::fprintf(stderr, "  %s %s %d %s: round fired %d, marker %d alpha %.2f\n", mod, part, nth, vehicle ? "vehicle" : "soldier", placed, marked, alpha);
+   CHECK(placed);
+   CHECK(marked && alpha > 0.85f); // the flag his own state sends and the HUD's alpha
+  }
+ }
+ }
+}
+
 // Both Titan AA positions share the firearm but own independent aim and fire.
 TEST(Titan_AASeatAimAndFireOwnership)
 {
@@ -2975,6 +3054,60 @@ TEST(Titan_VehicleSeatHudUsesAuthoredIconOffsets)
    std::fprintf(stderr, "seat HUD %s %s: %zu authored seats, %zu drawn dots\n", mod, name, expected, dots.size());
    CHECK(expected >= 2 && expected == dots.size());
   }
+ }
+}
+
+// The hit indicator's HUD node (GenericVehicleHitIndicator, under VehicleHuds,
+// driven by HitIndicatorIconShow / HitIndicatorIconAlpha) is drawn on the
+// page a Titan AA and ground-cannon seat shows, in both mods.
+TEST(Titan_GunSeatHudDrawsTheHitIndicator)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  hud::HudManager hud([&](const std::string& path, std::string& text) {
+   std::vector<uint8_t> bytes;
+   if (!level.files.readFile(path, bytes)) return false;
+   text.assign(bytes.begin(), bytes.end()); return true;
+  });
+  hud::registerHudConsoleMethods(level.console, hud);
+  level.console.setScriptOutput(false, false);
+  std::string out;
+  CHECK(level.console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+  hud.set("ShowIngameHud", 1); hud.set("ShowSoldierHud", 1); hud.set("ShowVehicleHud", 1); hud.set("InVehicle", 1);
+  hud.set("VehicleIconShow", 1); hud.set("AffectedByEMPShow", 1); hud.set("IsSpectator", 0);
+  hud.set("MenuBackgroundAlpha", 1);
+  const auto hits = [&](float alpha) {
+   hud.set("CrosshairIconShow", 1);
+   hud.set("HitIndicatorIconAlpha", alpha);
+   hud.set("HitIndicatorIconShow", alpha != 0 ? 1 : 0);
+   int n = 0;
+   for (int warm = 0; warm < 30; ++warm) hud.frame(1 / 30.0f);
+   for (const auto& q : hud.frame(0)) {
+    if (q.texture.find("Hit") != std::string::npos || q.texture.find("hit_Indicator") != std::string::npos) ++n;
+   }
+   return n;
+  };
+  const auto seats = level.world->vehicleSeats(level.world->titanOf(2));
+  int checked = 0;
+  for (const auto& seat : seats) {
+   if (seat.name.find("aacannon") == std::string::npos && seat.name.find("groundcanone3") == std::string::npos) continue;
+   menu::VehicleGuiInput gui;
+   gui.controlled = level.templates.find(seat.name);
+   gui.weapon = level.templates.find(seat.weapons.front().weapon);
+   const int index = menu::vehicleGuiIndex(gui);
+   hud.set("GuiIndex", static_cast<float>(index));
+   const int shown = hits(1.0f), hidden = hits(0.0f);
+   std::fprintf(stderr, "  hit indicator HUD %s %s gui %d: %d drawn at alpha 1, %d at 0\n", mod, seat.name.c_str(), index, shown, hidden);
+   CHECK(index == 94 || index == 95);
+   CHECK(shown > 0 && hidden == 0);
+   ++checked;
+  }
+  CHECK(checked == 6);
  }
 }
 
@@ -4605,4 +4738,119 @@ TEST(Titan_SoldiersMeetTheGunsCollisionParts)
 		// The hull, then each part's soldier LOD once.
 		CHECK(parts >= 6 && own == parts + 1);
 	}
+}
+
+// A gunship pilot's rockets at the enemy Titan's underbelly guns. The guns
+// are no ObjectManager objects (their hits go through the part ids), and
+// retail's hit handlers (0x004ba440 -> slot 0x128 -> 0x004ba070) credit any
+// damage dealt to an armoured object of a team. With the shield up the
+// rockets stop at the force field (rocket material 55 against its 4118: a
+// damage mod of 0, so 0x005a4dd0 never calls the damage and no marker); with
+// it down they hurt the gun and the pilot's marker lights.
+TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
+  for (const bool shieldDown : {false, true}) {
+   // The gun hub's collision is its small children: sweep the aim until a
+   // rocket lands (shield up: all of them end on the force field).
+   int landed = 0, marked = 0;
+   for (int attempt = 0; attempt < 25 && (shieldDown ? landed == 0 : attempt < 3); ++attempt) {
+    TitanLevel level(dir, "Minsk", 48, true, mod);
+    CHECK(level.loaded);
+    if (!level.loaded) return;
+    level.run(1);
+    const auto* enemy = level.titan(1);
+    CHECK(enemy != nullptr);
+    if (!enemy) return;
+    if (shieldDown) level.world->setHitPoints(enemy->object, 6e6f * 0.5f);
+    level.run(1);
+    game::GameWorld::TitanPartInfo hub {}, shield {};
+    for (const auto& part : level.world->titanParts(1)) {
+     if (part.kind == game::GameWorld::TitanPartInfo::Gun && part.name.find("groundcanone3") != std::string::npos && !hub.id) hub = part;
+     if (part.kind == game::GameWorld::TitanPartInfo::Shield) shield = part;
+    }
+    CHECK(hub.id != 0);
+    if (!hub.id) return;
+    const int pilot = level.world->joinPlayer(2);
+    CHECK(level.world->spawnSoldier(pilot));
+    game::GameWorld::PlayerInfo info;
+    CHECK(level.world->playerInfo(pilot, info));
+    // The gunship hangs 70 m off the gun, nose to it, a little off the line.
+    physics::Vec3 out = hub.position - enemy->position;
+    out.y = 0;
+    out = out * (1.0f / std::sqrt(physics::lengthSquared(out)));
+    const physics::Vec3 side {out.z, 0, -out.x};
+    const physics::Vec3 at = hub.position + out * 70.0f + side * (3.0f * (attempt % 5 - 2)) + physics::Vec3 {0, 2.0f * (attempt / 5 - 2), 0};
+    world::Object* craft = level.objects.create(level.templates.find("us_ag"), {at.x, at.y, at.z},
+     {std::atan2(-out.x, -out.z) * 57.29578f, 0, 0});
+    CHECK(craft != nullptr);
+    if (!craft) return;
+    craft->setTeam(2);
+    level.run(1 / 30.0f);
+    CHECK(level.world->setSoldierPosition(info.soldier, at - physics::Vec3 {0, 1, 0}));
+    game::SoldierInput input; input.use = true;
+    level.world->setInput(pilot, input); level.run(0.1f);
+    input = {}; level.world->setInput(pilot, input); level.run(0.1f);
+    CHECK(level.world->playerInfo(pilot, info) && info.vehicle == craft->id() && info.seat == 0);
+    level.world->takeHitIndicator(pilot);
+    const float gunWas = level.world->hitPoints(hub.id), shieldWas = level.world->hitPoints(shield.id);
+    input.fire = true;
+    level.world->setInput(pilot, input);
+    bool flag = false; (void)flag;
+    for (int tick = 0; tick < 75; ++tick) {
+     level.run(1 / 30.0f);
+     flag = level.world->takeHitIndicator(pilot) || flag;
+    }
+    const bool gunHurt = level.world->hitPoints(hub.id) < gunWas;
+    landed += gunHurt;
+    marked += gunHurt && flag;
+    // Shield up the rockets stop at the force field (no damage to it or the
+    // gun); a marker there can only be the hull's.
+    if (!shieldDown) CHECK(!gunHurt && level.world->hitPoints(shield.id) == shieldWas);
+   }
+   std::fprintf(stderr, "  %s shield %s: gun hit %d, marker with it %d\n", mod, shieldDown ? "down" : "up", landed, marked);
+   if (shieldDown) CHECK(landed > 0 && marked == landed);
+  }
+ }
+}
+
+// The shield up: the underbelly gun hubs sit on the force field's skin (hub 0's
+// origin lies within a metre of it) and their collision hangs below it, so a
+// rocket from below meets the gun first, hurts it (the pilot rockets' material
+// against the hub's: 0.6) and marks; from the side it ends on the force field
+// (mod 0: no damage, no marker). The meshes are the retail files.
+TEST(Titan_ShieldUpRocketsFromBelowHurtTheGunHubAndMark)
+{
+ const char* dir = std::getenv("BF2142_GAME_DIR");
+ if (!dir) return;
+ for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+  if (!test::runs(mod)) continue;
+  TitanLevel level(dir, "Minsk", 48, true, mod);
+  CHECK(level.loaded);
+  if (!level.loaded) continue;
+  level.run(2);
+  const int shooter = level.world->joinPlayer(2);
+  game::GameWorld::TitanPartInfo hub {};
+  for (const auto& part : level.world->titanParts(1)) {
+   if (part.name.find("groundcanone3_00") != std::string::npos) hub = part;
+  }
+  CHECK(hub.id != 0);
+  if (!hub.id) continue;
+  for (const float elevation : {-70.0f, -20.0f, 0.0f}) {
+   const float e = elevation * 0.0174533f;
+   const physics::Vec3 d {std::cos(e), std::sin(e), 0};
+   level.world->setHitPoints(hub.id, 1000);
+   level.run(0.05f);
+   level.world->takeHitIndicator(shooter);
+   level.world->launchProjectile("US_AG_PilotWeapon_Projectile", hub.position + d * 90.0f, d * -200.0f, shooter);
+   level.run(0.8f);
+   const bool hurt = level.world->hitPoints(hub.id) < 1000, marked = level.world->takeHitIndicator(shooter);
+   std::fprintf(stderr, "  %s shield up, rocket from %.0f deg: gun hurt %d, marker %d\n", mod, elevation, hurt, marked);
+   if (elevation < 0) CHECK(hurt && marked);
+   else CHECK(!hurt && !marked);
+  }
+ }
 }
