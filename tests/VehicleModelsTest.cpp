@@ -358,6 +358,66 @@ TEST(Vehicles_HoverTankThrustsAndStrafes)
 	CHECK(turned > 10);
 }
 
+// The PAC barrel takes the driver's PIPitch axis. The EU turret takes
+// PIMouseLookY, which keeps its normal response while the hull is under EMP.
+TEST(Vehicles_TankBarrelPitchUsesItsAuthoredInputUnderEmp)
+{
+	if (!gameDir()) return;
+	constexpr float tick = 1 / 30.0f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (bool hover : {false, true}) {
+			const char* name = hover ? "as_tank" : "eu_tank";
+			for (int level : {0, 1, 2}) {
+				Garage g(gameDir(), mod);
+				CHECK(g.loaded && g.templates.find(name));
+				if (!g.loaded || !g.templates.find(name)) return;
+				const auto tank = g.start(name, {0, 4, 8});
+				CHECK(g.enter(tank));
+				g.drive({}, 3);
+				if (level > 0) {
+					const float distance = level == 1 ? 2.2f : 0.0f;
+					CHECK(g.world->detonate("static_aa_missile_projectile", g.position(tank) + physics::Vec3 {0, 0, distance}));
+				}
+				CHECK(g.world->empLevel(tank) == level);
+
+				game::SoldierInput aim;
+				float yaw = 0, startPitch = 0, pitch = 0;
+				CHECK(g.world->gunAim(tank, 0, yaw, startPitch));
+				for (int i = 0; i < 24; ++i) {
+					aim.aimPitch += 1;
+					g.drive(aim, tick);
+				}
+				CHECK(g.world->empLevel(tank) == level);
+				CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+				const float deflection = pitch - startPitch;
+				std::fprintf(stderr, "  %s %s EMP %d: barrel elevation change %.2f degrees\n",
+					mod, name, level, deflection);
+				const float expected = hover ? 4.0f - 2.0f * level : 4.0f;
+				CHECK(std::fabs(deflection - expected) < 0.4f);
+
+				const size_t before = g.world->projectiles().size();
+				aim.fire = true;
+				g.drive(aim, tick);
+				const auto& shots = g.world->projectiles();
+				CHECK(std::any_of(shots.begin() + before, shots.end(), [tank](const auto& shot) { return shot.shooter == tank; }));
+				if (hover && level == 2) {
+					aim.fire = false;
+					g.drive(aim, 6);
+					CHECK(g.world->empLevel(tank) == 0);
+					for (int i = 0; i < 24; ++i) {
+						aim.aimPitch += 1;
+						g.drive(aim, tick);
+					}
+					float recoveredPitch = 0;
+					CHECK(g.world->gunAim(tank, 0, yaw, recoveredPitch));
+					CHECK(recoveredPitch - pitch > 3.5f);
+				}
+			}
+		}
+	}
+}
+
 TEST(Vehicles_HoverTankGunFollowsHullAfterSteering)
 {
 	if (!gameDir()) return;

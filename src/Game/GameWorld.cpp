@@ -10800,7 +10800,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				// on PIPitch). A pilot's guns are fixed along the hull (the
 				// mouse flies it): they keep their aim.
 				if (!body->guns.empty()) {
-					stepGunner(player, *body, seconds, seatAims(*body, 0), 7u);
+					stepGunner(player, *body, seconds, seatAims(*body, 0), 7u, scale);
 				}
 			} else if (body->wreckTime < 0 && !isTitan(body->object) && player.seat != 0 && input.altFire && launchPod(player.id)) {
 				return; // a pod seat's alternate fire (Titans.cpp): off in a drop pod
@@ -11960,8 +11960,8 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 				}
 				if (t.typeName() == "RotationalBundle") {
 					const bool mouseYaw = look("inputToYaw", "PIMouseLookX") || (look("inputToYaw", "PIRoll") && armsBelow(t, 0));
-					const bool mousePitch =
-						look("inputToPitch", "PIMouseLookY") || (look("inputToPitch", "PIPitch") && armsBelow(t, 0));
+					const bool driverPitch = look("inputToPitch", "PIPitch") && armsBelow(t, 0);
+					const bool mousePitch = look("inputToPitch", "PIMouseLookY") || driverPitch;
 					if (mouseYaw && owner.yawBundle.empty()) {
 						anchorGun(owner);
 						yawHere = true;
@@ -12009,6 +12009,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						anchorGun(owner);
 						pitchHere = true;
 						owner.pitchBundle = t.name();
+						owner.pitchUsesDriverInput = driverPitch;
 						owner.pitchAxis = axis(1, true);
 						owner.pitchFrame = turn;
 						owner.hasPitchFrame = true;
@@ -13552,7 +13553,7 @@ float GameWorld::regulatedInput(float input, float regulated)
 
 // A gunner turns the seat's bundles with the mouse (yaw free, pitch within
 // the bundle's limits) and fires the seat's guns along them.
-void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims, unsigned groups)
+void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims, unsigned groups, float driverScale)
 {
 	if (player.seat < 0 || static_cast<size_t>(player.seat) >= body.guns.size()) {
 		return;
@@ -13700,10 +13701,13 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		// Bundle pitch is down positive: its limits [min, max] bound the aim
 		// at [-max, -min]; the offset no further than the limits let it.
 		const float low = -seat.maxPitch, high = -seat.minPitch;
+		// The PAC hover tank's barrel uses the filtered PIPitch axis.
+		// Mounts on PIMouseLookY keep their normal input under EMP.
+		const float pitchScale = seat.pitchUsesDriverInput ? driverScale : 1.0f;
 		if (pitchBundled) {
 			// The bundle's own angle (down positive) takes this tick's look
 			// change and this tick's ignoreParentRotation take-back.
-			const float tilt = gun.pitchBlocked || !continuing ? 0.0f : -lookPitchChange / 5.0f;
+			const float tilt = gun.pitchBlocked || !continuing ? 0.0f : -lookPitchChange / 5.0f * pitchScale;
 			float angle = -(gun.pitch + gun.pitchOffset);
 			gun.pitchOffset = 0;
 			rotationAxisStep(seat.pitchAxis, tilt, seconds, angle, gun.pitchRate);
@@ -13713,7 +13717,8 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 				? std::clamp(gun.pitchOffset, low - player.input.aimPitch, high - player.input.aimPitch)
 				: 0.0f;
 			if (!gun.pitchBlocked) {
-				gun.pitch = std::clamp(player.input.aimPitch + gun.pitchOffset - seat.restPitch, low, high);
+				const float wanted = std::clamp(player.input.aimPitch + gun.pitchOffset - seat.restPitch, low, high);
+				gun.pitch = wanted * pitchScale + gun.pitch * (1 - pitchScale);
 			}
 		}
 	}

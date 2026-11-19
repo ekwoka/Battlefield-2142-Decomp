@@ -1571,6 +1571,7 @@ public:
 		// under it); PICameraX / PICameraY bundles (hatches, AS_TANK_Cupola1)
 		// aren't the look's.
 		std::string yawBundle, pitchBundle;
+		bool pitchUsesDriverInput = false; // PIPitch, filtered with the chassis controls
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
 		// The seat's first firearm's rest pitch under the pitch bundle (up
 		// positive): the turn of the parts between them (eu_bipod's
@@ -3236,7 +3237,7 @@ private:
 	// `groups`: which weapon groups fire (bit 0 PIFire, 1 PIAltFire, 2
 	// PIFlareFire); `aims`: the look turns the seat's bundles (not a
 	// pilot's, whose mouse flies the vehicle).
-	void stepGunner(Player& player, Body& body, float seconds, bool aims = true, unsigned groups = 7);
+	void stepGunner(Player& player, Body& body, float seconds, bool aims = true, unsigned groups = 7, float driverScale = 1);
 	// A seat's weapon choice (0x004d2a50 for the player's control object):
 	// c_PIWeaponSelect1..9 take the weapon of that item index in each group
 	// (selectable and usable, slot 0x170), c_PIToggleWeapon and the seat's
