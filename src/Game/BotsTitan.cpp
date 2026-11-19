@@ -522,10 +522,9 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 // 0x00654120). A console's wreck can't be mended: the heal 0x00655a00
 // refuses a wreck without canBeRepairedWhenWreck, which no console sets.
 // Two engineers at most to a part, each standing with its eyes within
-// abilityRadius + 1.5 m of the part's node (a gun's mesh lies about it).
-// shortcut: on the shipped Titans only the EU Titan's AA guns have such a
-// spot (the ground cannons' nodes hang 7-10 m under the decks, the PAC AA
-// guns' 10 m off); a human's 2.5 m ray can't reach those from the decks either.
+// abilityRadius + 1.5 m of one of the part's meshes: a gun hangs under the
+// hull, out of reach, but its control station inside (an unarmoured child
+// of the gun's bundle, eu_controlstation_v2_g / _aa) is the gun's to the tool.
 bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan)
 {
 	if (bot.titanRepair) {
@@ -559,6 +558,7 @@ bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	const GameWorld::TitanPartInfo* goal = nullptr;
 	const std::vector<float>* field = nullptr;
 	float best = kInfinity;
+	physics::Vec3 aimAt;
 	for (const GameWorld::TitanPartInfo& part : parts) {
 		if ((part.kind != GameWorld::TitanPartInfo::Gun && part.kind != GameWorld::TitanPartInfo::Console)
 			|| part.hitPoints >= part.maxHitPoints || !m_world.repairable(part.id)
@@ -570,13 +570,19 @@ bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		if (others >= 2) {
 			continue;
 		}
-		// Its own key (a part's id less 0x10000000): the part's own field is the shooters' (cells that see it).
-		const std::vector<float>& f = titanField(g, titan, self.team, part.id - 0x10000000u,
-			m_world.titanToLocal(titan.object, part.position) - physics::Vec3 {0, 0.5f, 0}, true, reach + 1.5f);
-		if (f[static_cast<size_t>(cell)] < best) {
-			best = f[static_cast<size_t>(cell)];
-			goal = &part;
-			field = &f;
+		// To any of its meshes (a gun's: its control station inside the hull; the gun itself hangs under it), each
+		// field under its own key (a part's id less 0x10000000, the mesh's number at bit 20): the part's own field
+		// is the shooters' (cells that see it).
+		const std::vector<physics::Vec3> meshes = m_world.titanPartMeshes(part.id);
+		for (size_t k = 0; k < meshes.size() && k < 16; ++k) {
+			const std::vector<float>& f = titanField(g, titan, self.team, (part.id - 0x10000000u) ^ static_cast<uint32_t>(k << 20),
+				m_world.titanToLocal(titan.object, meshes[k]) - physics::Vec3 {0, 0.5f, 0}, true, reach + 1.5f);
+			if (f[static_cast<size_t>(cell)] < best) {
+				best = f[static_cast<size_t>(cell)];
+				goal = &part;
+				field = &f;
+				aimAt = meshes[k];
+			}
 		}
 	}
 	if (!goal) {
@@ -587,11 +593,11 @@ bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	if (best > 0) {
 		return titanWalk(bot, self, input, seconds, g, titan, *field);
 	}
-	// There: the tool on it. Its ray meets the part, or the Titan's own forcefield first (decks under
-	// the shield), when the tool takes the AI's target instead (0x005d84a0, setAiAbilityTarget).
+	// There: the tool on it. Its ray meets the part's mesh, or something else first (the Titan's own
+	// forcefield over the decks), when the tool takes the AI's target instead (0x005d84a0, setAiAbilityTarget).
 	m_world.setAiAbilityTarget(self.id, goal->id);
 	input.selectItem = self.inHandSlot != slot ? slot : 0;
-	aim(bot, self, goal->position, {}, true, {}, input, seconds);
+	aim(bot, self, aimAt, {}, true, {}, input, seconds);
 	input.fire = self.inHandSlot == slot;
 	input.throttle = input.strafe = 0;
 	return true;

@@ -12580,9 +12580,10 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	if (rescan && rayEnd) {
 		uint32_t hitObject = 0;
 		const bool met = firstHit(at, *rayEnd, hitObject, holder ? holder->object : 0) && hitObject;
-		// A Titan's nodes are objects of its tree to the ray as to the sphere
-		// below: the node whose face it met (a gun hub's bundle), not the root,
-		// which is never repaired (0x00561d90).
+		// The ray's hit walks up its tree (0x005d84a0: node = node+0x34 until
+		// one with armour, +0x48, whose owner the filter takes): on a Titan
+		// the part owning the face it met (a gun's control station inside the
+		// hull is its gun's), not the root, which is never repaired (0x00561d90).
 		const Titan* titan = nullptr;
 		if (const Body* body = met && isTitan(hitObject) ? findBody(hitObject) : nullptr) {
 			physics::CollisionWorld::Hit hit {};

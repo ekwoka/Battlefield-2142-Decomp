@@ -2510,6 +2510,9 @@ public:
 		int nametagPushes = 0;
 	};
 	std::vector<TitanPartInfo> titanParts(int team) const;
+	// Where a part's meshes lie (world): its own node's and those of unarmoured nodes under it (a gun's control
+	// station inside the hull, whose hits are the gun's).
+	std::vector<physics::Vec3> titanPartMeshes(uint32_t part) const;
 	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked, 2 gone (a forcefield that is down).
 	int titanPartLook(uint32_t object, const std::string& templateName) const;
 	// The game logic's damage (0x004c0e40) as a shot's hit: through the

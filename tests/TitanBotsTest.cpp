@@ -512,8 +512,8 @@ TEST(Titan_BotSiloGoalOnlyWithEnhancedTitanPlay)
 }
 
 // enhanced.botTitan: engineers aboard their own Titan with no enemy aboard
-// walk to its wrecked gun hubs and mend them with the repair tool (a hub's
-// wreck back in service above 0 hit points). Consoles are left: the tool's
+// walk to its wrecked guns' control stations inside the hull and mend the
+// guns with the repair tool (a gun's wreck back in service above 0 hit points). Consoles are left: the tool's
 // material does nothing on theirs, whole or wrecked (BotManager::titanRepair).
 TEST(Titan_BotEngineersRepairTitanGunsAndConsoles)
 {
@@ -587,13 +587,11 @@ TEST(Titan_BotEngineersRepairTitanGunsAndConsoles)
 			CHECK(level.world->hitPoints(damaged) == consoleBefore[team]);
 			CHECK(level.world->hitPoints(wrecked) <= 0);
 		}
-		// The EU Titan's two AA guns are the hubs the decks reach (BotManager::titanRepair).
-		CHECK(back[2] >= 2);
-		int busy = 0;
+		// Each gun through its control station inside the hull (BotManager::titanRepair); four minutes for two engineers.
+		CHECK(back[1] >= 4 && back[2] >= 4);
 		for (const auto& [id, team] : repairers) {
-			busy += team == 2 && repairing[id] > 0;
+			CHECK(repairing[id] > 0);
 		}
-		CHECK(busy >= 1);
 	}
 }
 
@@ -918,4 +916,62 @@ TEST(Titan_BotCommanderMovesTheTitans)
 			CHECK(!blocks(1, pac->target));
 		}
 	}
+}
+
+// A gun hangs under the hull; its control station inside (an unarmoured
+// child of the gun's bundle, eu_controlstation_v2_g) is the gun's to the
+// repair tool: 0x004cc380 walks a hit node up (+0x34) to the nearest armour
+// (+0x48). The station keeps its collision (its wreck geometry,
+// 0x00651c60) while the gun is a wreck, so a player's tool aimed at it
+// brings the gun back (canBeRepairedWhenWreck 1).
+TEST(Titan_RepairToolOnGunStationMendsTheGun)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, "mods/bf2142");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	const int team = 2;
+	const int id = level.world->addPlayer("Engineer", team, false);
+	level.world->setKit(id, "EU_Anti-Vehicle", "us_light_soldier");
+	CHECK(level.world->spawnSoldier(id));
+	int mended = 0, tried = 0;
+	for (const auto& part : level.world->titanParts(team)) {
+		if (part.kind != game::GameWorld::TitanPartInfo::Gun) continue;
+		level.world->applyDamage(part.id, 1e6f);
+		CHECK(level.world->hitPoints(part.id) <= 0);
+		const auto meshes = level.world->titanPartMeshes(part.id);
+		CHECK(meshes.size() >= 2); // the gun's own and its station's
+		bool done = false;
+		// Any of its meshes a soldier can stand by (the ground cannons': only the station).
+		for (int k = 0; k < 16 * static_cast<int>(meshes.size()) && !done; ++k) {
+			const physics::Vec3 station = meshes[static_cast<size_t>(k / 16)];
+			const float a = static_cast<float>(k % 8) * 6.2831853f / 8, r = k % 16 < 8 ? 1.5f : 2.2f;
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(id, info));
+			if (!level.world->setSoldierPosition(info.soldier, station + physics::Vec3 {std::sin(a) * r, 0.2f, std::cos(a) * r})) continue;
+			level.run(0.5f);
+			level.world->playerInfo(id, info);
+			if (std::fabs(info.position.y - station.y) > 1.5f) continue;
+			++tried;
+			const float before = level.world->hitPoints(part.id);
+			for (int tick = 0; tick < 90; ++tick) {
+				level.world->playerInfo(id, info);
+				const physics::Vec3 d = station + physics::Vec3 {0, 0.8f, 0} - (info.position + physics::Vec3 {0, 1.6f, 0});
+				game::SoldierInput input;
+				input.turn = std::remainder(std::atan2(d.x, d.z) * 57.29578f - info.yaw, 360.0f);
+				input.aimPitch = std::atan2(d.y, std::hypot(d.x, d.z)) * 57.29578f;
+				input.hasPitch = true;
+				input.selectItem = tick == 0 ? 4 : 0;
+				input.fire = tick > 30;
+				level.world->setInput(id, input);
+				level.run(1 / 30.0f);
+			}
+			done = level.world->hitPoints(part.id) > before;
+		}
+		mended += done;
+		std::fprintf(stderr, "  %s: %s\n", part.name.c_str(), done ? "mended" : "not mended");
+	}
+	CHECK(tried > 0);
+	CHECK(mended == 6);
 }
