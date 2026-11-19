@@ -13551,8 +13551,8 @@ float GameWorld::regulatedInput(float input, float regulated)
 }
 
 
-// A gunner turns the seat's bundles with the mouse (yaw free, pitch within
-// the bundle's limits) and fires the seat's guns along them.
+// A gunner turns the seat's bundles with the mouse within their limits
+// and fires the seat's guns along them.
 void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims, unsigned groups, float driverScale)
 {
 	if (player.seat < 0 || static_cast<size_t>(player.seat) >= body.guns.size()) {
@@ -13562,6 +13562,12 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	const world::Object* object = m_objects.find(body.object);
 	const VehicleLayout& tree = vehicleLayout(*object->objectTemplate());
 	const SeatLayout& seat = tree.seats[static_cast<size_t>(player.seat)];
+	// A bounded bundle stores its angle relative to its mount. Transport
+	// door guns have stops beyond +/-180, so wrapping would jump to the
+	// opposite stop as they sweep across the rearward seam.
+	const auto constrainYaw = [&seat](float yaw) {
+		return std::isfinite(seat.minYaw) ? std::clamp(yaw, seat.minYaw, seat.maxYaw) : std::remainder(yaw, 360.0f);
+	};
 	// The frame the seat's bundles turn in: the hull, or the turret the
 	// seat rides (eu_tank's cupola on the driver's turret) and the bone
 	// part under it (the mechs' torso).
@@ -13596,7 +13602,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 	const float hullYaw = hull.yawPitchRoll().x;
 	if (seat.ignoreParentYaw != 0 && continuing && std::isfinite(gun.hullYaw)) {
 		const float turned = std::remainder(hullYaw - gun.hullYaw, 360.0f);
-		gun.yaw = std::clamp(std::remainder(gun.yaw - seat.ignoreParentYaw * turned, 360.0f), seat.minYaw, seat.maxYaw);
+		gun.yaw = constrainYaw(gun.yaw - seat.ignoreParentYaw * turned);
 	}
 	// A bot's aimPitch is the bundle's angle it wants (its aim's closed
 	// loop, the ControlInfo adaptor's PID on PIMouseLookY, takes any turn
@@ -13694,9 +13700,9 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		// an invisible gun yaw away from the rendered barrel.
 		if (yawBundled) {
 			rotationAxisStep(seat.yawAxis, turn, seconds, gun.yaw, gun.yawRate);
-			gun.yaw = std::clamp(std::remainder(gun.yaw, 360.0f), seat.minYaw, seat.maxYaw);
+			gun.yaw = constrainYaw(gun.yaw);
 		} else if (!seat.yawBundle.empty()) {
-			gun.yaw = std::clamp(std::remainder(gun.yaw + turn, 360.0f), seat.minYaw, seat.maxYaw);
+			gun.yaw = constrainYaw(gun.yaw + turn);
 		}
 		// Bundle pitch is down positive: its limits [min, max] bound the aim
 		// at [-max, -min]; the offset no further than the limits let it.

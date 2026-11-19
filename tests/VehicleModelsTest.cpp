@@ -6605,6 +6605,64 @@ TEST(Vehicles_TransportGunnerCameraTurnsWithTheGun)
 	CHECK(std::fabs(gunYaw) > 10 && std::fabs(cameraYaw - gunYaw) < 0.01f);
 }
 
+// The side guns' yaw stops extend beyond 180 degrees in the rearward
+// direction. Both the mount and the inside camera must sweep through it.
+TEST(PlayerCamera_TransportDoorGunsReachRearYawStops)
+{
+	if (!gameDir()) return;
+	constexpr float kSeconds = 1 / 30.0f;
+	constexpr float kDegrees = 180.0f / 3.14159265f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const char* name : {"eu_at", "as_at"}) {
+			const float limit = std::string_view(name) == "eu_at" ? 193.5f : 197.5f;
+			for (const int seatKey : {2, 3}) {
+				Garage g(gameDir(), mod);
+				CHECK(g.loaded && g.templates.find(name));
+				if (!g.loaded || !g.templates.find(name)) return;
+				const auto ship = g.start(name, {0, 2, 6});
+				CHECK(g.enter(ship));
+				game::SoldierInput input;
+				input.switchSeat = seatKey;
+				g.drive(input, kSeconds);
+				anim::AnimationSystems systems(nullptr);
+				PlayerCamera camera(*g.world, systems, nullptr);
+				const auto cameraYaw = [&] {
+					camera.tick(kSeconds);
+					PlayerCamera::View view {};
+					CHECK(camera.view(view, 16.0f / 9.0f));
+					return view.yaw * kDegrees;
+				};
+				const int gunSeat = seatKey - 1;
+				const float direction = seatKey == 2 ? -1.0f : 1.0f;
+				input = {};
+				input.turn = direction * 5;
+				float previousYaw = cameraYaw(), sweep = 0, largestStep = 0;
+				for (int i = 0; i < 90; ++i) {
+					g.drive(input, kSeconds);
+					const float yaw = cameraYaw();
+					const float step = std::remainder(yaw - previousYaw, 360.0f);
+					sweep += step;
+					largestStep = std::max(largestStep, std::fabs(step));
+					previousYaw = yaw;
+				}
+				float mount = 0;
+				CHECK(g.world->seatYaw(ship, gunSeat, mount));
+				std::fprintf(stderr, "  %s %s F%d: mount %.1f, camera sweep %.1f, largest step %.1f\n",
+					mod, name, seatKey, mount, sweep, largestStep);
+				CHECK(std::fabs(mount - direction * limit) < 0.1f);
+				CHECK(std::fabs(sweep - direction * limit) < 2);
+				CHECK(largestStep < 6);
+				input.turn = -input.turn;
+				g.drive(input, 0.2f);
+				CHECK(g.world->seatYaw(ship, gunSeat, mount));
+				CHECK(direction * mount < limit - 5 && direction * mount > limit - 25);
+				CHECK(std::remainder(cameraYaw() - previousYaw, 360.0f) * direction < -5);
+			}
+		}
+	}
+}
+
 // The Shepherd's side gunners (eu_at seats F2 and F3): the minigun's rounds
 // leave along the barrel the mouse aims, wherever the gun is turned
 // (fire.fireInCameraDof's frame is the seat camera's, 0x005f1a20, and that

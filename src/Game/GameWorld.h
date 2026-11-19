@@ -1630,7 +1630,7 @@ public:
 		// Titans' gun hubs sit turned 180 or +-90 degrees) and its limits
 		// (minRotation / maxRotation x; free without them).
 		float frameYaw = 0;
-		float minYaw = -1e9f, maxYaw = 1e9f;
+		float minYaw = -std::numeric_limits<float>::infinity(), maxYaw = std::numeric_limits<float>::infinity();
 		// The yaw bundle's regulateVector x (template +0x314) and maxSpeed x:
 		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
 		float regulateYaw = 0, yawSpeed = 0;
