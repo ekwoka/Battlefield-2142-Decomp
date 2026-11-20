@@ -216,11 +216,12 @@ struct QualitySettings {
 	// "_b.dds" / "_b_os.dds" maps: 0x101499b0, 0x100d4160) and static meshes
 	// parallax; at low (3) also bundled and skinned meshes' hemi map, envmap,
 	// shadows and colormap gloss (BM rows 1-2, SM rows 1-2) and static
-	// meshes' crack, dirt and the detail normal maps (STM rows 1-2: the
+	// meshes' envmap, crack, dirt and detail normal maps (STM rows 1-2: the
 	// "_cr", "_crb", "_di", "_deb" maps skipped by 0x10151830).
 	int lightingLevel() const;
 	bool meshNormalMaps() const { return lightingLevel() == 0; }
 	bool meshHemiAndShadows() const { return lightingLevel() < 3; }
+	bool meshEnvMaps() const { return lightingLevel() < 3; }
 	bool staticMeshDirtAndCrack() const { return lightingLevel() < 3; }
 	bool dynamicLightsEnabled() const;
 	bool decalsEnabled() const;

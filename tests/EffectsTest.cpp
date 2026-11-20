@@ -796,10 +796,13 @@ TEST(Effects_QualityLevels)
 	CHECK(q.skipMipLevels(scene::TextureClass::Default) == 1 && q.skipMipLevels(scene::TextureClass::Overgrowth) == 0);
 	// The lighting level (renderer +0x6b4) and what it drops.
 	CHECK(q.lightingLevel() == 0 && q.meshNormalMaps());
+	CHECK(q.meshEnvMaps());
 	q.lighting = 2;
 	CHECK(q.lightingLevel() == 1 && !q.meshNormalMaps() && q.meshHemiAndShadows());
+	CHECK(q.meshEnvMaps());
 	q.lighting = 1;
 	CHECK(q.lightingLevel() == 3 && !q.meshHemiAndShadows() && !q.staticMeshDirtAndCrack());
+	CHECK(!q.meshEnvMaps());
 	CHECK(!q.dynamicLightsEnabled() && !q.decalsEnabled());
 	q.viewDistanceScale = 0.1f;
 	q.applyEffects(s);

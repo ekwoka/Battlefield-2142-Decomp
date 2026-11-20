@@ -4372,10 +4372,10 @@ below it (`0x10148ae0`; the static meshes' table at `0x10210924`, built
 from RaShaderSTM.mfx by `0x100db190`). At medium bundled and skinned meshes
 lose their normal maps (the loaders skip "_b.dds", `0x101499b0`, and
 "_b.dds" / "_b_os.dds", `0x100d4160`); at low also their hemi map,
-envmap, dynamic shadows and colormap gloss, and static meshes their crack,
-dirt and detail normal maps (`0x10151830` skips "_cr", "_crb", "_di",
+envmap, dynamic shadows and colormap gloss, and static meshes their envmap,
+crack, dirt and detail normal maps (`0x10151830` skips "_cr", "_crb", "_di",
 "_deb"). `QualitySettings::lightingLevel`, `meshNormalMaps`,
-`meshHemiAndShadows`, `staticMeshDirtAndCrack`.
+`meshHemiAndShadows`, `meshEnvMaps`, `staticMeshDirtAndCrack`.
 
 **The interior sun.** A seat camera's inside view with
 `allowInsideStaticSun` (BF2142.exe `0x006104d0`..`0x00610580`,
@@ -5192,16 +5192,17 @@ filled at `0x1002a4a0` / `0x1002cef0`):
 vtable `0x101c6378`). At level load `0x100639b0` reads
 `<level>/Envmaps/EnvironmentMapInfo.emi` (`loadEMIFile` `0x10064770`:
 lines `EnvMapN x,y,z,bool`); each frame `0x10064f30` binds the entry
-nearest the camera as the one cube for bundled materials whose technique
-names "envmap" and static meshes (BM `_HASENVMAP_`: `lerp(diffuse,
+nearest the camera as the level cube for static and bundled materials whose
+technique names "envmap" (BM `_HASENVMAP_`: `lerp(diffuse,
 texCUBE(R), gloss / 4)` with a Fresnel alpha; reflection scale
 `setMaterialReflectionScale`, default 0.25), and the Titan interiors bind
 `common/textures/indoorenvmap`. `generateEnvMaps` and `save` are the
 editor's. Every retail level ships its .emi in the server archive (Cerbere
 Landing, Belgrade: one map, `EnvMap0 -88,54,66,1`) and the cubes in the
-client's. The static drawables take the cube unconditionally (`0x100bdb00`,
-`+0x13c`), the bundled ones with an envmap material (`0x100c5030`,
-`+0x37` → `+0x120`; with no cube a technique without, `0x1014e570`).
+client's. Static drawables receive the cube at `+0x13c` (`0x100bdb00`),
+and the material classifier (`0x101512a0`) sets the shader's envmap flag
+only for an authored envmap technique. Bundled drawables bind the cube
+for envmap materials (`0x100c5030`, `+0x37` → `+0x120`).
 RaShaderSTM lerps the lit colour towards the cube: per pixel at the
 reflection off the bumped normal by (1 − saturate(0.95 (E·N)²)) × gloss,
 per vertex by gloss × 2 × (1 − |E·N|); RaShaderBM the diffuse by gloss / 4

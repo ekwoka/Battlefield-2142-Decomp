@@ -766,14 +766,12 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				++m_stats.normalMapped;
 			}
 		}
-		// The level's envmap: every static mesh's material (0x100bdb00 sets
-		// each drawable's cube, +0x13c, to the EnvMapManager's), a bundled
-		// one's with an "envmap" technique (0x100c5030: the material's +0x37,
-		// +0x120) above the low lighting level (RaShaderBM.mfx drops envmap
-		// with the hemi map).
-		submesh.envMap = !submesh.additive &&
-			((effect == "staticmesh.fx" && !skinned) ||
-				(bundled && technique.find("envmap") != std::string::npos && quality.meshHemiAndShadows()));
+		// The static material classifier (0x101512a0) selects the envmap
+		// permutation only for an "envmap" technique, like bundled meshes.
+		// Both shader families drop it at Low lighting.
+		submesh.envMap = quality.meshEnvMaps() && !submesh.additive &&
+			(bundled || (effect == "staticmesh.fx" && !skinned)) &&
+			technique.find("envmap") != std::string::npos;
 		if (submesh.trunk) submesh.envMap = false;
 		// Normal maps (RaShaderBM/SM _HASNORMALMAP_), only at the top
 		// lighting level: the loaders skip "_b.dds" (bundled, 0x101499b0) and
