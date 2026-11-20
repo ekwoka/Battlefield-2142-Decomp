@@ -664,6 +664,11 @@ const std::string& GameAudio::loopingSound(const void*, const std::string& name)
 	return it->second;
 }
 
+// Below this squared speed a round's sound keeps its launch yaw instead of
+// facing along its flight: the round mesh's own threshold (Game/Weapons.cpp,
+// 0x005b3e60 keeps the last frame).
+constexpr float kMinFacingSpeedSquared = 0.025f;
+
 void GameAudio::projectiles()
 {
 	for (const auto& projectile : m_round.projectiles()) {
@@ -681,7 +686,7 @@ void GameAudio::projectiles()
 		physics::Mat3 basis = physics::Mat3::fromYawPitchRoll({projectile.yaw, 0, 0});
 		if (projectile.turns) {
 			basis = projectile.rotation;
-		} else if (physics::lengthSquared(direction) > 0.025f) {
+		} else if (physics::lengthSquared(direction) > kMinFacingSpeedSquared) {
 			basis = physics::lookAtRotation(direction, basis);
 		}
 		sound::Matrix4 rotation;
@@ -691,12 +696,9 @@ void GameAudio::projectiles()
 			rotation.m[i][1] = row.y;
 			rotation.m[i][2] = row.z;
 		}
-		// Orbital shells approach OpenAL Soft's Doppler singularity just
-		// before impact. Keep the sound moving in space at its authored
-		// pitch by omitting the shell velocity from the Doppler calculation.
-		const sound::Vec3 audioVelocity = loop == "S_commander_orbital_strike_Projectile_Looping"
-			? sound::Vec3 {} : toSound(projectile.velocity);
-		m_sounds.loop(ownerKey(2, projectile.serial), loop, toSound(projectile.position), audioVelocity,
+		// The velocity goes to the Doppler as retail's; a fast round's pitch is
+		// tamed in the enhanced mode only (enhancedDopplerVelocity).
+		m_sounds.loop(ownerKey(2, projectile.serial), loop, toSound(projectile.position), toSound(projectile.velocity),
 			0, 0, nullptr, rotation);
 	}
 }

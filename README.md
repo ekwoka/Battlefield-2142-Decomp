@@ -494,6 +494,11 @@ feeds the simulation.
   restarts in the new perspective's slot when the camera switches between
   first and third person; the original keeps it in the slot it started in
   until the trigger is released.
+- **Doppler:** a moving source's speed is held to half the speed of sound
+  over the Doppler factor, so a round diving at you (an orbital strike's
+  shells) rises at most an octave. The original passes the full velocity
+  (dropped only when an axis reaches 300), and its pitch shoots up just
+  before the impact.
 - **Steam Audio occlusion:** with a Steam Audio build (see
   [Steam Audio (optional)](#steam-audio-optional)), walls and buildings
   between you and a sound muffle it, simulated against the level's static

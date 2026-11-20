@@ -2,9 +2,10 @@
 // With enhanced.enabled set when the provider opens, OpenAL Soft is asked
 // for HRTF and the 3D sources get an EFX direct filter (gain + low-pass)
 // from an occlusion module (Sound/Enhanced/SteamAudioOcclusion.h), which
-// replaces the retail obstruction gain for those sources. Off, none of this
-// runs and the provider opens exactly as before. Client-side only: nothing
-// here feeds the simulation.
+// replaces the retail obstruction gain for those sources, and a source's
+// Doppler speed is held below the speed of sound (enhancedDopplerVelocity).
+// Off, none of this runs and the provider opens exactly as before.
+// Client-side only: nothing here feeds the simulation.
 #pragma once
 
 #include "BfOpenAL.h"
@@ -36,6 +37,28 @@ public:
 inline float enhancedSmoothed(float current, float target)
 {
 	return current + std::max(-0.1f, std::min(0.1f, target - current));
+}
+
+// The Doppler: OpenAL's pitch is (SS - DF vls) / (SS - DF vss), vss the
+// source's speed towards the listener. Retail passes the game's velocity,
+// dropped only when an axis reaches 300 (OpenALSample::update), so a round
+// diving at the listener (an orbital strike's shells) still nears SS / DF and
+// its pitch shoots up just before the impact. Enhanced mode holds a source's
+// speed to a fraction of SS / DF: approaching, at most an octave up.
+inline constexpr float kOpenAlSpeedOfSound = 343.3f; // AL_SPEED_OF_SOUND's default; nothing sets it
+inline constexpr float kEnhancedDopplerMaxSpeedFraction = 0.5f;
+
+inline Vec3 enhancedDopplerVelocity(const Vec3& velocity, float dopplerFactor)
+{
+	if (!(dopplerFactor > 0.0f)) {
+		return velocity;
+	}
+	const float maxSpeed = kEnhancedDopplerMaxSpeedFraction * kOpenAlSpeedOfSound / dopplerFactor;
+	const float speedSquared = velocity.lengthSquared();
+	if (speedSquared <= maxSpeed * maxSpeed) {
+		return velocity;
+	}
+	return velocity * (maxSpeed / std::sqrt(speedSquared));
 }
 
 // Read when the provider opens (main.cpp sets it from enhanced.enabled).
