@@ -756,6 +756,7 @@ TEST(Commander_SupplyDrop)
 	// It comes down, then heals its team (healSpeed 3 a second) within 5 m.
 	field.run(12);
 	CHECK(field.objects.find(crate)->position().y < 1.0f);
+	CHECK(field.objects.find(crate)->childDisabled("supply_parachute")); // down (0x0043d9c0)
 	world.playerInfo(hurt, info);
 	const float before = world.hitPoints(info.soldier);
 	field.run(5);
@@ -765,8 +766,11 @@ TEST(Commander_SupplyDrop)
 	CHECK(world.hitPoints(info.soldier) == 40);
 	field.run(45);
 	CHECK(world.abilityReady(2, Ability::Supplies));
-	// Gone after supplyDropNumSecsToLive (300 s).
+	// Gone supplyDropNumSecsToLive (300 s) after it landed, 10 s after the
+	// drop at 5 m/s (0x0043d820 / 0x0043d880), not after the drop.
 	field.run(240);
+	CHECK(world.supplyCrates().size() == 1);
+	field.run(10);
 	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
 }
 

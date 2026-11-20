@@ -3191,6 +3191,42 @@ TEST(GameWorld_DriverInputUnderEmp)
 	CHECK(game::GameWorld::driverInputScale(1, 500, *car) == 1 && game::GameWorld::driverInputScale(2, 500, *car) == 0);
 }
 
+// A commander's crate (0x005d0790 -> 0x0043d9c0) meeting a vehicle its
+// spawner made under 3 s ago (0x0043ce80: interface 0xc4c5 slot 0xbc, the
+// time 0x005aeb80 stamps) is removed; meeting an older one or the ground,
+// it lands: its supply_parachute is disabled and its lifetime starts.
+TEST(GameWorld_SupplyCrateMeetingAFreshSpawnGoes)
+{
+	Level level;
+	level.templates.registerType(4, "SupplyObject");
+	level.templates.registerType(5, "Bundle");
+	level.templates.create("Bundle", "supply_parachute");
+	world::ObjectTemplate* box = level.templates.create("SupplyObject", "supply_crate");
+	box->settings()["hasMobilePhysics"] = "1";
+	box->children().push_back({"supply_parachute", {}, {}});
+	game::GameWorld world(level.templates, level.objects);
+	world.startRound();
+	world.tick(1 / 30.0f);
+	const world::Object* tank = level.objects.objects().back().get();
+	CHECK(tank->objectTemplate()->name() == "tank_us");
+	CHECK(world.commanderAction(2, game::GameWorld::CommanderAbility::Supplies, 100, 100, true));
+	CHECK(world.supplyCrates().size() == 1);
+	const uint32_t first = world.supplyCrates()[0];
+	world.supplyObjectContact(first, tank->id());
+	world.tick(1 / 30.0f);
+	CHECK(world.supplyCrates().empty() && !level.objects.find(first));
+	for (int i = 0; i < 30 * 61; ++i) {
+		world.tick(1 / 30.0f);
+	}
+	CHECK(world.commanderAction(2, game::GameWorld::CommanderAbility::Supplies, 100, 100, true));
+	const uint32_t second = world.supplyCrates()[0];
+	const world::Object* crate = level.objects.find(second);
+	CHECK(crate && !crate->childDisabled("supply_parachute"));
+	world.supplyObjectContact(second, tank->id()); // spawned a minute ago
+	world.tick(1 / 30.0f);
+	CHECK(world.supplyCrates().size() == 1 && crate->childDisabled("supply_parachute"));
+}
+
 // The abandoned vehicle's time to live (the spawn's PlayerControlObject
 // slots 0xa4/0xb8/0xc0, its check 0x005c8ba0 every half second): by its
 // spawner (within `distance`) the countdown stays full; away from it, it
