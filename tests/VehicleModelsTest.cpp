@@ -418,6 +418,63 @@ TEST(Vehicles_TankBarrelPitchUsesItsAuthoredInputUnderEmp)
 	}
 }
 
+// The same barrel with no turning bundle (its acceleration taken out: the
+// look's pitch is the barrel's): under EMP the input filter (0x005ca2e0)
+// scales the input (the driver's scale, half and none at levels 1 and 2 as
+// the turning barrel's above), so the barrel takes that share of each
+// tick's look change and does not catch up with the look; once the EMP is
+// gone it follows the look's changes again from where it is.
+TEST(Vehicles_HoverTankDirectBarrelLosesThePitchInputUnderEmp)
+{
+	if (!gameDir()) return;
+	constexpr float tick = 1 / 30.0f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (int level : {0, 1, 2}) {
+			Garage g(gameDir(), mod);
+			world::ObjectTemplate* barrel = g.templates.find("AS_TANK_barrelbase");
+			CHECK(g.loaded && g.templates.find("as_tank") && barrel);
+			if (!g.loaded || !g.templates.find("as_tank") || !barrel) return;
+			barrel->settings()["acceleration"] = "0/0/0";
+			const auto tank = g.start("as_tank", {0, 4, 8});
+			CHECK(g.enter(tank));
+			g.drive({}, 3);
+			if (level > 0) {
+				const float distance = level == 1 ? 2.2f : 0.0f;
+				CHECK(g.world->detonate("static_aa_missile_projectile", g.position(tank) + physics::Vec3 {0, 0, distance}));
+			}
+			CHECK(g.world->empLevel(tank) == level);
+			game::SoldierInput aim;
+			float yaw = 0, start = 0, pitch = 0;
+			CHECK(g.world->gunAim(tank, 0, yaw, start));
+			for (int i = 0; i < 9; ++i) {
+				aim.aimPitch += 1;
+				g.drive(aim, tick);
+			}
+			CHECK(g.world->empLevel(tank) == level);
+			// Held there: it doesn't creep up to the look.
+			g.drive(aim, 10 * tick);
+			CHECK(g.world->gunAim(tank, 0, yaw, pitch));
+			const float expected = 9.0f * (1 - level / 2.0f);
+			std::fprintf(stderr, "  %s EMP %d: barrel %.2f degrees for the look's 9\n", mod, level, pitch - start);
+			CHECK(std::fabs(pitch - start - expected) < 0.4f);
+			if (level == 2) {
+				g.drive(aim, 6);
+				CHECK(g.world->empLevel(tank) == 0);
+				float after = 0;
+				CHECK(g.world->gunAim(tank, 0, yaw, after));
+				CHECK(std::fabs(after - pitch) < 0.4f); // no jump when the EMP goes
+				for (int i = 0; i < 3; ++i) {
+					aim.aimPitch += 1;
+					g.drive(aim, tick);
+				}
+				CHECK(g.world->gunAim(tank, 0, yaw, after));
+				CHECK(std::fabs(after - pitch - 3) < 0.4f);
+			}
+		}
+	}
+}
+
 TEST(Vehicles_HoverTankGunFollowsHullAfterSteering)
 {
 	if (!gameDir()) return;

@@ -2831,6 +2831,10 @@ private:
 			// the look's pitch (input.aimPitch is the look, not a change).
 			physics::Mat3 hullTurn;
 			float pitchOffset = 0;
+			// A driver's barrel on PIPitch without a moving bundle: the look
+			// the input filter (0x005ca2e0, EMP) kept from it, held back from
+			// the look's pitch as the bundle would never have turned by it.
+			float pitchInputLost = 0;
 			float cameraLauncherPitchAnchor = NAN; // gunner look before blocked TV-launcher input
 			uint64_t gunnedTick = 0;    // the last tick its seat was taken (stepGunner)
 			float stabilizedHeading = 0; // the bundle's parent's yaw last undone (stabilizeGunYaws)

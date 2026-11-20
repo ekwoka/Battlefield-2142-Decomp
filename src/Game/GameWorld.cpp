@@ -13804,9 +13804,24 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			gun.pitchOffset = seat.ignoreParentPitch != 0 && low <= high
 				? std::clamp(gun.pitchOffset, low - player.input.aimPitch, high - player.input.aimPitch)
 				: 0.0f;
+			// The filter scales the pitch input (0x005ca2e0), not the angle:
+			// a person's barrel takes pitchScale of this tick's look change,
+			// and the rest stays lost (held back from the look, within the
+			// limits). A bot's pitch is the angle it wants: its step there
+			// this tick is the input, scaled the same way.
+			if (!continuing || !seat.pitchUsesDriverInput) {
+				gun.pitchInputLost = 0;
+			} else if (!player.ai && !gun.pitchBlocked) {
+				gun.pitchInputLost += lookPitchChange * (1 - pitchScale);
+				if (low <= high) {
+					const float aim = player.input.aimPitch + gun.pitchOffset - seat.restPitch;
+					gun.pitchInputLost = std::clamp(gun.pitchInputLost, aim - high, aim - low);
+				}
+			}
 			if (!gun.pitchBlocked) {
-				const float wanted = std::clamp(player.input.aimPitch + gun.pitchOffset - seat.restPitch, low, high);
-				gun.pitch = wanted * pitchScale + gun.pitch * (1 - pitchScale);
+				const float wanted =
+					std::clamp(player.input.aimPitch + gun.pitchOffset - gun.pitchInputLost - seat.restPitch, low, high);
+				gun.pitch = player.ai ? gun.pitch + (wanted - gun.pitch) * pitchScale : wanted;
 			}
 		}
 	}
