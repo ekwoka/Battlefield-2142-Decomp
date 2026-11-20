@@ -1421,37 +1421,18 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed)
 {
 	std::vector<RadarMarker> out;
-	std::vector<game::GameWorld::PlayerInfo> enemies;
-	bool onFoot = false;
 	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
-		if (world.playerInfo(id, enemy) && enemy.alive) {
-			onFoot = onFoot || !enemy.vehicle;
-			enemies.push_back(enemy);
+		if (!world.playerInfo(id, enemy) || !enemy.alive) {
+			continue;
 		}
-	}
-	// The decoys, looked for only with an enemy on foot to stand in for.
-	std::vector<const world::Object*> decoys;
-	if (onFoot) {
-		for (const auto& object : round.objects().objects()) {
-			const world::ObjectTemplate* t = object->objectTemplate();
-			if (!t || t->typeName() != "TargetObject") {
-				continue;
-			}
-			const auto type = t->settings().find("targetType");
-			if (type != t->settings().end() && targetTypeIndex(type->second) == 6) {
-				decoys.push_back(object.get());
-			}
-		}
-	}
-	for (game::GameWorld::PlayerInfo& enemy : enemies) {
-		if (!enemy.vehicle) {
-			for (const world::Object* decoy : decoys) {
-				const float dx = decoy->position().x - enemy.position.x, dz = decoy->position().z - enemy.position.z;
-				if (dx * dx + dz * dz < 60.0f * 60.0f) {
-					enemy.position = {decoy->position().x, decoy->position().y, decoy->position().z};
-					break;
-				}
+		// His own decoy (0x0075bd30 matches the TargetObject's player; a
+		// thrown round here, GameWorld::decoyOf), within 60 m across.
+		physics::Vec3 decoy;
+		if (!enemy.vehicle && round.decoyOf(enemy.id, decoy)) {
+			const float dx = decoy.x - enemy.position.x, dz = decoy.z - enemy.position.z;
+			if (dx * dx + dz * dz <= 60.0f * 60.0f) {
+				enemy.position = decoy;
 			}
 		}
 		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16, enemy.yaw};

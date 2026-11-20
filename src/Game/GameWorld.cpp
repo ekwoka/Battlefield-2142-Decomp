@@ -8097,6 +8097,12 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 				if (integer(*container, "ability.networkableHudShowCloaked", 0) != 0) {
 					player.hudShowCloaked = true;
 				}
+				if (integer(*container, "ability.networkableHudShowKit", 0) != 0) {
+					player.hudShowKit = true; // +0x10 (0x005708a7)
+				}
+				if (integer(*container, "ability.networkableHudShowVehicle", 0) != 0) {
+					player.hudShowVehicle = true; // +0x11 (0x005708b1)
+				}
 				// The sprint and beacon modifiers (template +0x5c / +0x60 / +0x64,
 				// setters 0x0054e02d / 0x0054e27f / 0x0054e156 through slots 0xb4
 				// / 0xc4 / 0xbc), each that isn't 1 (0x005706b0).
@@ -16557,6 +16563,50 @@ std::vector<int> GameWorld::mapSpottedPlayers(int viewer) const
 		}
 	}
 	return out;
+}
+
+std::vector<int> GameWorld::squadReportedPlayers(int viewer) const
+{
+	std::vector<int> out;
+	for (const MapSpot& spot : m_mapSpots) {
+		// A squad report's entry has its squad (0: the reporter alone); a radio spot's -1.
+		if (spot.squad >= 0 && spot.enemy >= 0 && mapSpotSeenBy(spot, viewer)
+			&& std::find(out.begin(), out.end(), spot.enemy) == out.end()) {
+			out.push_back(spot.enemy);
+		}
+	}
+	return out;
+}
+
+const world::ObjectTemplate* GameWorld::decoyOf(int player, physics::Vec3& at) const
+{
+	for (const Projectile& q : m_projectiles) {
+		if (player < 0 || q.player != player || !q.alive || !q.settings) {
+			continue;
+		}
+		const world::ObjectTemplate* round = m_templates.find(q.settings->name);
+		if (const world::ObjectTemplate* decoy = round ? targetObjectOf(*round, 6) : nullptr) { // TTDecoy
+			at = q.position;
+			return decoy;
+		}
+	}
+	return nullptr;
+}
+
+void GameWorld::squadNetworkHud(int viewer, bool& showKit, bool& showVehicle) const
+{
+	showKit = showVehicle = false;
+	const Player* me = findPlayer(viewer);
+	if (!me) {
+		return;
+	}
+	for (const auto& owned : m_players) {
+		const Player& p = *owned;
+		if (p.team == me->team && (me->squad == 0 ? p.id == viewer : p.squad == me->squad)) {
+			showKit = showKit || p.hudShowKit;
+			showVehicle = showVehicle || p.hudShowVehicle;
+		}
+	}
 }
 
 std::vector<uint32_t> GameWorld::mapSpottedVehicles(int viewer) const

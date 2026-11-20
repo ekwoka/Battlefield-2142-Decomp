@@ -2390,10 +2390,12 @@ TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
 	// A report from A (no squad) reaches A only, for 3 s.
 	round.reportBattlefieldObjects(a, {b});
 	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c).empty());
+	CHECK(round.squadReportedPlayers(a) == enemy && round.squadReportedPlayers(c).empty());
 	for (int i = 0; i < 4 * 30; ++i) {
 		round.tick(1.0f / 30);
 	}
 	CHECK(round.mapSpottedPlayers(a).empty());
+	CHECK(round.squadReportedPlayers(a).empty());
 	// Kind 1 (a bot's firing report) marks no enemy; a teammate isn't listed.
 	round.reportBattlefieldObjects(a, {b}, 3, 1);
 	round.reportBattlefieldObjects(a, {c});
@@ -2402,6 +2404,9 @@ TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
 	round.radioSpot(a, b);
 	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c) == enemy);
 	CHECK(round.mapSpottedPlayers(b).empty() && round.mapSpottedVehicles(c).empty());
+	// Its squad report (the spotter alone here) reveals the network marker
+	// for A; the team's radio spot doesn't for C.
+	CHECK(round.squadReportedPlayers(a) == enemy && round.squadReportedPlayers(c).empty());
 	for (int i = 0; i < 11 * 30; ++i) {
 		round.tick(1.0f / 30);
 	}

@@ -4153,6 +4153,63 @@ TEST(GameWorld_RecoilKicksTheAim)
 
 // A hub (a medic's kit) thrown out on a deck or roof stays there: it was set
 // at the terrain's height, which put it far under a soldier on a Titan.
+// A player's decoy (0x0075bd30, the name tags' network marker): the round he
+// fired carrying a TargetObject of TTDecoy (Bp1_Decoy_Projectile's
+// DecoyObject); nobody else's.
+TEST(GameWorld_DecoyIsTheThrowersRound)
+{
+	Range range;
+	range.templates.registerType(8, "TargetObject");
+	world::ObjectTemplate* target = range.templates.create("TargetObject", "decoy_target");
+	target->settings()["targetType"] = "TTDecoy";
+	range.templates.find("bullet")->children().push_back({"decoy_target", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	physics::Vec3 at;
+	CHECK(range.world->decoyOf(me, at) == nullptr);
+	game::SoldierInput input;
+	input.fire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(!range.world->projectiles().empty());
+	CHECK(range.world->decoyOf(me, at) == target);
+	if (!range.world->projectiles().empty()) {
+		const physics::Vec3 round = range.world->projectiles().front().position;
+		CHECK(at.x == round.x && at.y == round.y && at.z == round.z);
+	}
+	CHECK(range.world->decoyOf(me + 1, at) == nullptr && range.world->decoyOf(-1, at) == nullptr);
+}
+
+// The networkable HUD's kit and vehicle unlocks (ability +0x10 / +0x11,
+// 0x005706b0) count for the whole squad (RendDX9 0x101691c0), for the
+// player alone without a squad.
+TEST(GameWorld_SquadNetworkHudUnlocks)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.create("ItemContainer", "net_kit")->settings()["ability.networkableHudShowKit"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"net_kit", {}, {}});
+	const int me = range.world->addPlayer("Me", 2, true);
+	const int mate = range.world->addPlayer("Mate", 2, false);
+	for (const int id : {me, mate}) {
+		range.world->setKit(id, "EU_Assault", "us_light_soldier");
+	}
+	range.world->setUnlocks(me, {});
+	range.world->setUnlocks(mate, {"net_kit"});
+	CHECK(range.world->spawnSoldier(me) && range.world->spawnSoldier(mate));
+	bool showKit = true, showVehicle = true;
+	range.world->squadNetworkHud(me, showKit, showVehicle);
+	CHECK(!showKit && !showVehicle); // no squad: his own only
+	range.world->squadNetworkHud(mate, showKit, showVehicle);
+	CHECK(showKit && !showVehicle);
+	CHECK(range.world->joinSquad(me, 1) && range.world->joinSquad(mate, 1));
+	range.world->squadNetworkHud(me, showKit, showVehicle);
+	CHECK(showKit && !showVehicle); // the squad's
+}
+
 TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 {
 	Range range;

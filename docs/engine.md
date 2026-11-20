@@ -9549,6 +9549,47 @@ second.
   16-pixel text row before the name (each advancing by its width, then 2
   pixels; the row centred), white, or the squad's colour for a squad
   member; not when glued to the edge.
+- **The network markers** (`0x10169a70`, technique `nametag_barIcons`,
+  drawn after the names, bars and icons): the red diamond
+  ICNetworkEnemySmallCircle `0xa3` over an enemy, ICNetworkFriendlySmallCircle
+  `0xa0` over a friend (`0x10169cdf`), at the icon point, in the tag's
+  colour. An enemy the squad's reports reveal gets one whatever its name's
+  alpha: the client's `0x00508590` calls the manager's slot `0x20`
+  (`0x100f2410`), which through `0x100f2080` sets tag flag `0x800000`
+  until the reveal time ends (swept every 0.5 s by `0x100f2140`). First it
+  looks for the reported soldier's decoy (HudManager slot `0x70`,
+  `0x00753ab0` → `0x0075bd30`: an enabled TargetObject of TTDecoy whose
+  player he is) and marks that (slot `0x1c`, `0x100f3d30`); within 60 m
+  across (`0x009248f0`) the soldier is then not marked. The decoy's tag
+  (flag `0x10000000`, `0x100f4280`) gets the diamond for an enemy owner
+  at its text point, red (an owned tag's colour is the owner's relation,
+  `0x100f4307`), faded over its Nametag range (`+0x48`, 60 m: full to a
+  third of it). An aimed-at player or a squad member
+  gets one only while its name shows (`0x100f392b`). Not on the
+  crosshair's selection (`+0xc4`), off view (`+0xc2`) or pulled to the
+  edge (`+0xc0`); faded by the player cull range only (`FadeOut`, 100 to
+  300 m). `GameWorld::squadReportedPlayers` / the joined client's
+  `RemoteWorld::squadReportedPlayers` (event `0x41` kind 0, no radio
+  spots) feed `nametags::networkMarker`; `GameWorld::decoyOf` finds the
+  decoy (the thrown `Bp1_Decoy_Projectile` carrying `DecoyObject`); the
+  minimap's decoy stand-in uses it too (`menu::radarMarkers`). An enemy
+  decoy aimed at (in the aim cone and in sight) gets the marker while its
+  own tag shows (showItem, alpha 1 − d / 60, `0x100f1330`). The marker
+  blinks (`CrossFadeValue`, `0x10169fb4`) towards its second colour
+  (`ColorIndex2`, `0x1016a113`): white with a call's icon, the highlight
+  after the player's radio line (`0x0042bef0` kind 3, a player's message →
+  local 2/`0x41` ECHudHEFireFlashStart → `0x100f1abe`: tag `+0x68` = 4,
+  the call timer 12 s; `Nametags::radioFlash`, which blinks the name too).
+  After the markers, `0x101691c0` draws over the same tags one icon height
+  above the text point: with a squad member's `networkableHudShowKit`
+  (ability `+0x10`, the squad's walk; the player alone without a squad) the
+  kit's ICObject + KitType on foot, with `networkableHudShowVehicle`
+  (`+0x11`) the vehicle's icon aboard (`GameWorld::squadNetworkHud`,
+  `nametags::networkSquadIcon`). Not ported: the decoy's bounding-radius
+  raise, decoys and the squad's unlocks on a joined client (its rounds
+  carry no thrower, its players no abilities), and a kind-1 (cloak) report's
+  reveal, which shows the kit icon (that pass has no cloak test) for a
+  `networkableHudShowCloaked` squad.
 - **The players' icons** (the selectable pass `0x1016a950`, same team,
   selectable, the first occupant of a vehicle `0x100f33c0`): setup initially
   clears show-icon bit `0x10` (`0x100f3e70`), then player-tag refresh

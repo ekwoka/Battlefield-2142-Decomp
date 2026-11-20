@@ -1623,9 +1623,11 @@ struct RadarWorld : host::HudWorld {
 
 } // namespace
 
-// The squad radar's markers (menu::radarMarkers): a decoy within 60 m of an
-// enemy on foot shows instead of him (0x00508590), one in a vehicle stays
-// where he is; the reports' vehicles by their miniMapIcon (0x00790d60).
+// The squad radar's markers (menu::radarMarkers): an enemy on foot's own
+// decoy (the round he threw carrying a TargetObject of TTDecoy) within 60 m
+// shows instead of him (0x00508590, 0x0075bd30 matching its player); one in
+// a vehicle stays where he is, as does one near another's decoy; the
+// reports' vehicles by their miniMapIcon (0x00790d60).
 TEST(HudRadar_DecoyAndVehicleMarkers)
 {
 	world::ObjectTemplateManager templates;
@@ -1633,41 +1635,47 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	game::GameWorld round(templates, objects);
 	templates.registerType(1, "TargetObject");
 	templates.registerType(2, "PlayerControlObject");
-	world::ObjectTemplate* decoyTemplate = templates.create("TargetObject", "Bp1_Decoy");
+	templates.registerType(3, "GenericProjectile");
+	world::ObjectTemplate* decoyTemplate = templates.create("TargetObject", "DecoyObject");
 	decoyTemplate->settings()["targetType"] = "TTDecoy";
+	templates.create("GenericProjectile", "Bp1_Decoy_Projectile")->children().push_back({"DecoyObject", {}, {}});
 	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
 	tank->settings()["vehicleHud.miniMapIcon"] = "Ingame/mini_tank.tga";
-	objects.create(decoyTemplate, {40, 0, 10});
 	const uint32_t car = objects.create(tank, {100, 0, 100})->id();
 	objects.find(car)->setRotation({135, 0, 0});
+	const int thrower = round.addPlayer("Thrower", 2, false);
+	const int far = round.addPlayer("Far", 2, false);
+	const int other = round.addPlayer("Other", 2, false);
+	CHECK(round.launchProjectile("Bp1_Decoy_Projectile", {40, 0, 10}, {0, 0, 0}, thrower));
+	CHECK(round.launchProjectile("Bp1_Decoy_Projectile", {40, 0, 10}, {0, 0, 0}, far));
 	RadarWorld world;
 	game::GameWorld::PlayerInfo onFoot;
-	onFoot.id = 5;
+	onFoot.id = thrower;
 	onFoot.alive = true;
 	onFoot.position = {10, 0, 10};
 	onFoot.yaw = 90;
 	game::GameWorld::PlayerInfo riding = onFoot;
-	riding.id = 6;
+	riding.id = 60;
 	riding.vehicle = car;
 	riding.position = {20, 0, 10};
-	game::GameWorld::PlayerInfo far = onFoot;
-	far.id = 7;
-	far.position = {-200, 0, 10};
-	far.yaw = -45;
-	world.players = {onFoot, riding, far};
-	auto markers = menu::radarMarkers(world, round, {5, 6, 7});
-	CHECK(markers.size() == 3);
-	if (markers.size() == 3) {
-		CHECK(markers[0].x == 40 && markers[0].z == 10); // at the decoy
+	game::GameWorld::PlayerInfo farAway = onFoot;
+	farAway.id = far;
+	farAway.position = {-200, 0, 10};
+	farAway.yaw = -45;
+	game::GameWorld::PlayerInfo near = onFoot;
+	near.id = other;
+	near.position = {30, 0, 10};
+	world.players = {onFoot, riding, farAway, near};
+	auto markers = menu::radarMarkers(world, round, {thrower, 60, far, other});
+	CHECK(markers.size() == 4);
+	if (markers.size() == 4) {
+		CHECK(markers[0].x == 40 && markers[0].z == 10); // at his decoy
 		CHECK(markers[1].x == 20 && markers[1].z == 10); // in a vehicle: his own place
-		CHECK(markers[2].x == -200);                     // too far from it
+		CHECK(markers[2].x == -200);                     // too far from his
+		CHECK(markers[3].x == 30);                       // the decoys aren't his
 		CHECK(markers[0].texture == "Ingame/Player/Icons/Minimap/mini_Soldier.dds" && markers[0].size == 16);
 		CHECK(markers[0].yaw == 90 && markers[2].yaw == -45);
 	}
-	// Without a decoy template's targetType the enemy is where he is.
-	decoyTemplate->settings()["targetType"] = "TTHeat";
-	markers = menu::radarMarkers(world, round, {5});
-	CHECK(markers.size() == 1 && markers[0].x == 10);
 	// The reports' vehicle.
 	world.vehicles = {car};
 	markers = menu::radarMarkers(world, round, {});

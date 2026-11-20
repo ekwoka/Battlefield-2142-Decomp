@@ -163,6 +163,9 @@ public:
 	// The vehicles (objects) those reports spotted, a joined game's (the
 	// local 2/0x2e of 0x00508590 for a reported player in a vehicle).
 	virtual std::vector<uint32_t> spottedVehicles() const { return {}; }
+	// The enemies a joined game's squad reports reveal (event 0x41 kind 0,
+	// without the radio spots): the name tags' network markers.
+	virtual std::vector<int> squadReportedPlayers() const { return {}; }
 	// The local player outside the combat area (the HUD information layer's
 	// frame 0x0044c7b0): the seconds left before the damage, max(0, the
 	// controlled object's timer (0x004cac70) - the time outside (player
@@ -378,6 +381,7 @@ public:
 	Weapon seatGroupWeapon(int group) const override;
 	std::vector<int> revealedPlayers(int team) const override;
 	std::vector<uint32_t> spottedVehicles() const override;
+	std::vector<int> squadReportedPlayers() const override;
 	float combatAreaTimeLeft() const override;
 
 	// The object of a ghost (0 none) and the ghost of an object.
