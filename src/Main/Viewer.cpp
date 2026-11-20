@@ -991,9 +991,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			const uint32_t missileKey = view.firstPerson ? view.projectileSerial : 0;
 			const uint32_t viewKey = !playing ? 0
 				: missileKey ? missileKey
-				: 0x80000000u | (firstPerson ? 1u : view.external ? 2u : 3u);
+				: 0x80000000u | (firstPerson ? (view.soldierEye ? 4u : 1u) : view.external ? 2u : 3u);
 			if (viewKey) {
-				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
+				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch, camera.roll};
 				const auto smooth = viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
 				if (firstPerson && view.soldierEye && !missileKey) {
@@ -1003,6 +1003,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				} else {
 					camera.yaw = smooth.yaw;
 					camera.pitch = smooth.pitch;
+					camera.roll = smooth.roll; // a banking hull's, as its cockpit
 				}
 			} else {
 				viewSmoothing.sample(0, false, 0, {}); // forget the last view's history

@@ -87,3 +87,11 @@ TEST(TickBlend_CameraSnapsOnAHeightJump)
 	auto p = smooth.sample(7, true, 0.5f, lifted, dice::hfe::render::kTickBlendJump);
 	CHECK(p.position[1] == 6 && p.position[0] == 1);
 }
+
+TEST(TickBlend_CameraRollBlendsTheShortWay)
+{
+	dice::hfe::MissileViewSmoothing smooth;
+	smooth.sample(3, true, 0, {{0, 0, 0}, 0, 0, 3.0f});
+	const auto p = smooth.sample(3, true, 0.5f, {{0, 0, 0}, 0, 0, -3.0f}); // across the seam
+	CHECK(std::fabs(std::remainder(p.roll - 3.14159265f, 6.28318530718f)) < 1e-3f);
+}
