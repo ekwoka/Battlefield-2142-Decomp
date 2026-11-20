@@ -1158,6 +1158,8 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 			 "hudBuilder.createMapNode Global Minimap",
 			 "hudBuilder.setMaxiPos -122/-271",
 			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setCommanderPos -300/-300",
+			 "hudBuilder.setCommanderSize 600/600",
 			 "hudBuilder.setMiniPos 245/-291",
 			 "hudBuilder.setMiniSize 146/146",
 			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
@@ -1200,32 +1202,81 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 		quads = manager.frame(1);
 		CHECK(quads.size() == 2 && quads[1].rotation == 0);
 	}
-	// The big map opened after the turn keeps the minimap's last turn
-	// (0x0077cba0 always turns by +0x80c), which holds while it is open
-	// (0x0078f680 updates it only at the minimap's size, +0x709): a new
-	// heading, being dead, or man down don't move it.
+	// The retail 1.51 entry probe started at 1.5 rad with a settled
+	// minimap. At 60 Hz, expansion starts on update 14 while alive, or
+	// update 1 when opening deployment on death.
+	constexpr float dt = 1.0f / 60;
+	constexpr float initialTurn = 1.5f;
+	struct MapEntry {
+		bool spawning;
+		bool commander;
+		bool alive;
+	};
+	for (const MapEntry entry : {MapEntry{false, false, true}, MapEntry{true, false, true},
+			 MapEntry{false, true, true}, MapEntry{true, false, false}}) {
+		manager.set("MapFullSize", 0);
+		manager.set("SpawnShow", 0);
+		manager.set("CommanderShow", 0);
+		manager.setMapLayer({});
+		manager.setMapMarkers({});
+		for (int i = 0; i < 120; ++i) {
+			manager.setMapHeading(initialTurn);
+			manager.tickMapTurn(dt, true);
+			manager.frame(dt);
+		}
+		CHECK(std::abs(manager.mapTurn() - initialTurn) < 1e-4f);
+
+		manager.setMapLayer("combatArea.dds");
+		manager.set("MapFullSize", 1);
+		manager.set("SpawnShow", entry.spawning);
+		manager.set("CommanderShow", entry.commander);
+		const int expandOn = entry.alive ? 14 : 1;
+		for (int update = 1; update <= expandOn; ++update) {
+			manager.setMapHeading(initialTurn);
+			manager.tickMapTurn(dt, entry.alive);
+			quads = manager.frame(dt);
+			CHECK(quads.size() == 2);
+			if (quads.size() != 2) {
+				continue;
+			}
+			const auto& map = quads[0];
+			if (update < expandOn) {
+				CHECK(manager.mapTurn() > 0 && manager.mapTurn() < initialTurn);
+				CHECK(map.rotation < 0 && quads[1].rotation == map.rotation);
+				CHECK(map.clipped && std::abs(map.clip[2] - map.clip[0] - 146) < 0.01f);
+			} else {
+				CHECK(manager.mapTurn() == 0 && map.rotation == 0 && quads[1].rotation == 0);
+				const float targetWidth = entry.commander ? 600 : 512;
+				const float expectedWidth = 146 + (targetWidth - 146) * (1 - std::exp(-6 * dt));
+				CHECK(std::abs(map.x1 - map.x0 - expectedWidth) < 0.01f);
+			}
+		}
+		manager.setMapMarkers({{"mark.dds", 100, 0, 16, 30}});
+		for (int i = 0; i < 4; ++i) {
+			quads = manager.frame(1);
+		}
+		CHECK(quads.size() == 3);
+		if (quads.size() == 3) {
+			CHECK(quads[0].rotation == 0 && quads[1].rotation == 0);
+			CHECK(quads[2].rotation == 30);
+			const float mx = (quads[2].x0 + quads[2].x1) * 0.5f;
+			const float my = (quads[2].y0 + quads[2].y1) * 0.5f;
+			float wx = 0, wz = 0, northX = 0, northZ = 0;
+			CHECK(manager.mapWorldAt(mx, my, wx, wz));
+			CHECK(std::abs(wx - 100) < 3 && std::abs(wz) < 3);
+			CHECK(manager.mapWorldAt(mx, my - 20, northX, northZ));
+			CHECK(std::abs(northX - wx) < 0.01f && northZ > wz);
+		}
+	}
+	manager.set("SpawnShow", 0);
+	manager.set("CommanderShow", 0);
+	manager.setMapLayer({});
 	manager.setMapMarkers({{"mark.dds", 100, 0, 16, 0}});
-	manager.set("MapFullSize", 1);
-	manager.tickMapTurn(1.0f / 60, true); // the size flag (+0x709) follows
-	for (int i = 0; i < 60; ++i) {
-		manager.setMapHeading(0);
-		manager.tickMapTurn(1.0f / 60, i < 30);
-	}
-	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
-	quads = manager.frame(1);
-	CHECK(!quads.empty() && std::abs(quads[0].rotation + 90) < 0.01f);
-	{
-		// Hit-tested turned too: the point above the centre is east.
-		float cxw = 0, czw = 0, wx = 0, wz = 0;
-		const float bx = quads[0].pivot[0], by = quads[0].pivot[1];
-		CHECK(manager.mapWorldAt(bx, by, cxw, czw) && manager.mapWorldAt(bx, by - 20, wx, wz));
-		CHECK(wx - cxw > 1 && std::abs(wz - czw) < 0.5f);
-	}
 	manager.set("MapFullSize", 0);
-	manager.tickMapTurn(1.0f / 60, true);
 	for (int i = 0; i < 120; ++i) {
 		manager.setMapHeading(east);
-		manager.tickMapTurn(1.0f / 60, true);
+		manager.tickMapTurn(dt, true);
+		manager.frame(dt);
 	}
 	// A static map: north up again.
 	manager.set("MapStatic", 1);
@@ -1393,6 +1444,7 @@ TEST(Hud_LocalViewIndicatorRetailShapeAndHeading)
 	for (int i = 0; i < 120; ++i) {
 		manager.setMapHeading(3.1415927f / 4);
 		manager.tickMapTurn(1.0f / 60, true);
+		manager.frame(1.0f / 60);
 	}
 	indicators = 0;
 	for (const auto& quad : manager.frame(1)) {

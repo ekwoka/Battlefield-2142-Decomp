@@ -1567,9 +1567,8 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 	if (!m.drawn || x < m.x0 || x > m.x1 || y < m.y0 || y > m.y1) {
 		return false;
 	}
-	// Turned back about the node's centre (the map is drawn turned by
-	// +0x80c, the big map too).
-	const float turn = m_mapTurn;
+	// Undo the rotation of the last drawn map about the node's centre.
+	const float turn = m.turn;
 	if (turn != 0) {
 		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
 		const float c = std::cos(-turn), s = std::sin(-turn);
@@ -1675,14 +1674,16 @@ void HudManager::tickMapTurn(float seconds, bool alive)
 		m_mapTurn = m_mapAngle = m_mapDelayed = 0;
 		m_mapStatic = isStatic;
 	}
-	// The commander's map (+0x70a) heads north.
-	const bool commander = number("CommanderShow") != 0;
-	if (commander) {
-		m_mapHeading = 0;
+	// Screen entry clears the turn's settled flag (0x0077ef95) and
+	// targets north (0x0078f7e4) while the map is still small.
+	const bool large = number("MapFullSize") != 0 || number("CommanderShow") != 0;
+	if (large != m_mapRequestedLarge) {
+		m_mapRequestedLarge = large;
+		m_mapTurnCaught = false;
 	}
 	if (m_mapAtMini) {
 		if (!m_mapStatic && alive) {
-			const float target = wrapAngle(m_mapHeading);
+			const float target = large ? 0.0f : wrapAngle(m_mapHeading);
 			const float ease = easeStep(seconds, 9);
 			m_mapAngle = wrapAngle(m_mapAngle);
 			if (const int side = turnSide(target, m_mapAngle, 0.001f)) {
@@ -1737,10 +1738,6 @@ void HudManager::tickMapTurn(float seconds, bool alive)
 			m_mapTurnCaught = true;
 		}
 	}
-	// The size flags for the next frame (+0x709, +0x816): the rewrite's map
-	// takes its size at once, so it is always settled.
-	m_mapAtMini = number("MapFullSize") == 0 && !commander;
-	m_mapSizeSettled = true;
 }
 
 void HudManager::setMapArea(float minX, float minZ, float maxX, float maxZ)
@@ -1869,11 +1866,14 @@ std::string titanSpawnLabel(const std::string& titan, const std::string& baseNam
 void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out)
 {
 	m_mapHits.clear();
+	const MapView previous = m_mapView;
 	m_mapView.drawn = false;
 	if (m_mapTexture.empty()) {
 		return;
 	}
-	const bool full = number("MapFullSize") != 0;
+	// The size update (0x0078fd8e) waits for the turn to settle at north.
+	const bool commander = number("CommanderShow") != 0;
+	const bool full = (number("MapFullSize") != 0 || commander) && m_mapTurn == 0;
 	const bool spawning = number("SpawnShow") != 0;
 	const float* pos = full ? node.maxiPos : node.miniPos;
 	const float* size = full ? node.maxiSize : node.miniSize;
@@ -1881,11 +1881,27 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// 600/600: the square between its black borders).
 	const auto commanderPos = setting("HudBuilder.setCommanderPos");
 	const auto commanderSize = setting("HudBuilder.setCommanderSize");
-	if (number("CommanderShow") != 0 && commanderSize[0] > 0 && commanderSize[1] > 0) {
+	if (full && commander && commanderSize[0] > 0 && commanderSize[1] > 0) {
 		pos = commanderPos.data();
 		size = commanderSize.data();
 	}
-	const float nx = 400 + pos[0], ny = 300 + pos[1], nw = size[0], nh = size[1];
+	// Retail eases the map rectangle toward its authored position and size
+	// at 1 - exp(-6 dt) (0x0079073f through 0x00790a6d).
+	const float layoutStep = easeStep(seconds, 6);
+	const auto easeAxis = [&](float current, float target) {
+		if (!previous.drawn || std::abs(target - current) <= 0.1f) {
+			return target;
+		}
+		return current + (target - current) * layoutStep;
+	};
+	const float nx = easeAxis(previous.x0, 400 + pos[0]);
+	const float ny = easeAxis(previous.y0, 300 + pos[1]);
+	const float nw = easeAxis(previous.x1 - previous.x0, size[0]);
+	const float nh = easeAxis(previous.y1 - previous.y0, size[1]);
+	// The small-size flag for the next turn update uses the 3 px tolerance
+	// at 0x00790b8e. Commander layout has its own size classification.
+	m_mapAtMini = !(full && commander) && nw < node.miniSize[0] + 3 && nh < node.miniSize[1] + 3;
+	m_mapSizeSettled = std::abs(nw - size[0]) < 3 && std::abs(nh - size[1]) < 3;
 	// The map texture's alpha (+0x7b0) eased towards its target (+0x7b8):
 	// 0 with the overhead view on; while playing (the map's state 0,
 	// 0x00780940) the HUD's MenuMapAlpha, the profile's minimap
@@ -1959,9 +1975,6 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
 	// a positive turn counter-clockwise on the screen; HudQuad's rotation
 	// is clockwise), then cut to the node.
-	// The big map too: 0x0077cba0 / 0x0077d200 always turn by +0x80c, which
-	// tickMapTurn holds while the map isn't at the minimap's size (+0x709,
-	// 0x0078f810), so it keeps the minimap's last turn.
 	const float mapTurn = m_mapTurn;
 	const float turnDegrees = mapTurn * 57.29578f;
 	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
@@ -1987,7 +2000,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			out.push_back(layer);
 		}
 	}
-	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
+	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH, mapTurn};
 	std::vector<Hit> labelRects;
 	std::vector<HudQuad> tooltips; // drawn last, over the later markers' icons
 	for (const MapMarker& marker : m_mapMarkers) {

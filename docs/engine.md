@@ -11543,8 +11543,12 @@ Since then (the same day):
   with the map about the centre (`0x0077c610`; `0x0077d660` adds +0x80c
   to the icons' angles), so it sits where its place went and keeps its
   heading on the map: the player's arrow points up. `mapWorldAt` turns a
-  point back first. The rewrite's sizes change at once, so it is always
-  settled.
+  point back using the same angle as the rendered frame. The spawn,
+  M-key and commander entries set the north-target flag through
+  `0x0077eea0` and clear the settled-turn flag. While the map is small,
+  its turn targets zero. The resize begins once the angle settles
+  (`0x0078fd8e`), then position and size ease toward the authored
+  rectangle by `1 - exp(-6 dt)`.
 - **The audio page's RESET TO DEFAULT applies** (`MenuBindings_AudioResetApplies`):
   AudioSettings.reset (`0x10010a60`) is the object's reset (slot 0x24)
   and then what its apply (`0x10010bd0`) does: with canApply (slot 0x1c)
