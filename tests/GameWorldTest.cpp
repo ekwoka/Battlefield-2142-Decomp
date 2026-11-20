@@ -12,6 +12,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Main/DeploymentTeam.h"
+#include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
 #include "Net/RemoteInput.h"
@@ -507,6 +508,41 @@ TEST(GameWorld_HitIndicator)
 		}
 		game::GameWorld::PlayerInfo shooter;
 		CHECK(range.world->playerInfo(me, shooter) && shooter.hitIndicator == 0);
+	}
+}
+
+// The hit direction (0x005b7680): a round over 2% of a human soldier's
+// maxHitPoints stores the way back to where it was fired from (player
+// +0x1d0, atan2 of x over z), counts a hit and is sent in two own-state
+// records; an AI soldier gets none.
+TEST(GameWorld_HitDirection)
+{
+	for (const bool ai : {false, true}) {
+		Range range;
+		const int victim = range.world->addPlayer("Target", 1, ai);
+		CHECK(range.world->spawnSoldier(victim));
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		game::GameWorld::PlayerInfo info, shooter;
+		for (int tick = 0; tick < 4 && range.world->playerInfo(victim, info) && info.hitDirectionHits == 0; ++tick) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->playerInfo(victim, info) && range.world->playerInfo(me, shooter));
+		if (ai) {
+			CHECK(info.hitDirectionHits == 0);
+			continue;
+		}
+		CHECK(info.hitDirectionHits > 0);
+		const float expected = std::atan2(shooter.position.x - info.position.x, shooter.position.z - info.position.z);
+		CHECK(std::fabs(info.hitDirection - expected) < 0.05f);
+		float sent = 0;
+		CHECK(range.world->takeHitDirection(victim, sent) && sent == info.hitDirection);
+		CHECK(range.world->takeHitDirection(victim, sent));
+		range.world->setPlayerInput({});
+		CHECK(!range.world->takeHitDirection(victim, sent)); // two records, then none
 	}
 }
 
@@ -2314,6 +2350,28 @@ TEST(GameWorld_DefibrillatorRevives)
 	}
 	range.world->playerInfo(bot, info);
 	CHECK(!info.alive && !info.manDown && info.soldier == 0 && range.count("PlayerDeath") == 1);
+}
+
+// The local player going down calls for a revive (0x37, ReviveCalls fed
+// the round's own PlayerInfo, whose soldier reads 0 once he is down).
+TEST(GameWorld_DownedPlayerCallsForRevive)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	range.world->setManDownTime(30);
+	menu::ReviveCalls calls;
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(me, info) && info.alive && info.soldier != 0);
+	CHECK(calls.step(me, info.soldier, info.manDown, false, true) == 0);
+	range.world->setHitPoints(info.soldier, 0);
+	int code = 0;
+	for (int i = 0; i < 5 && code == 0; ++i) {
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->playerInfo(me, info));
+		code = calls.step(me, info.soldier, info.manDown, false, true);
+	}
+	CHECK(info.manDown && info.soldier == 0 && code == 0x37);
 }
 
 // An enemy's paddles (0x004ba5c0's team test) leave a downed body down.

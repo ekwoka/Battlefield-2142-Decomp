@@ -1128,7 +1128,7 @@ FireArmSettings GameWorld::withExtraAmmo(const Player& player, const world::Obje
 }
 
 void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
-	int attacker, bool splash)
+	int attacker, bool splash, const physics::Vec3* source)
 {
 	float mod = m_materials ? m_materials->damageMod(projectileMaterial, surfaceMaterial) : 1.0f;
 	// Friendly fire (0x005b7290): an attacker on a team hitting what its
@@ -1182,6 +1182,24 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 			showHitIndicator(attacker);
 		}
 	}
+	// The hit direction (0x005b7680): with an attacker, a hit on a living
+	// soldier (show-damage-ndicator-for-all, 0 unless set, would take any
+	// object's riders) whose share of maxHitPoints (armour slot 0x13c) is
+	// over the game logic's 0.02 (+0x2e8, slot 0x278) stores the way to
+	// its source (player slot 0x214, 0x00593b30: atan2 of x over z from
+	// the soldier's position, 2 records to send) and raises HUD event
+	// 0x39. Teammates are kept unless the round says it hurts them
+	// (projectile slot 0x6c: true but early in a timed round), so they
+	// are kept here.
+	if (Player* victim = source && attacker >= 0 ? soldierPlayer(object) : nullptr; victim && !victim->ai) {
+		const world::Object* o = m_objects.find(object);
+		const float most = o && o->objectTemplate() ? number(*o->objectTemplate(), "armor.maxHitPoints", 0) : 0.0f;
+		if (o && most > 0 && hitPoints(object) > 0 && amount * mod / most > 0.02f) {
+			victim->hitDirection = std::atan2(source->x - o->position().x, source->z - o->position().z);
+			victim->hitDirectionSends = 2;
+			++victim->hitDirectionHits;
+		}
+	}
 	loseHitPoints(object, amount * mod, attacker);
 }
 
@@ -1193,6 +1211,17 @@ void GameWorld::showHitIndicator(int id)
 	}
 	player->hitIndicatorFlag = true;
 	player->hitIndicator = 1;
+}
+
+bool GameWorld::takeHitDirection(int id, float& radians)
+{
+	Player* player = findPlayer(id);
+	if (!player || player->hitDirectionSends <= 0) {
+		return false;
+	}
+	--player->hitDirectionSends;
+	radians = player->hitDirection;
+	return true;
 }
 
 bool GameWorld::takeHitIndicator(int id)
@@ -3318,7 +3347,8 @@ void GameWorld::explode(const physics::Vec3& at, const ProjectileSettings& setti
 		if (hit.amount * mod <= 0.1f) {
 			continue;
 		}
-		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), material, attacker, true);
+		// shortcut: the blast's centre stands for retail's queued point (0x005a9090), close enough for the arrow.
+		damage(hit.object, hit.amount, static_cast<uint32_t>(settings.explosionMaterial), material, attacker, true, &at);
 	}
 }
 
@@ -4942,7 +4972,7 @@ void GameWorld::stepProjectiles(float seconds)
 						victim->armourHitModifier = p.settings->hitImpactModifier;
 						victim->armourHitTick = m_ticks;
 					}
-					damage(hitObject, amount, ownMaterial, hit.material, p.player);
+					damage(hitObject, amount, ownMaterial, hit.material, p.player, false, &p.origin); // +0x1fc, the launch point
 					if (victim) {
 						playHitReaction(*victim, hitNode, p.velocity);
 					}
@@ -5516,6 +5546,8 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	}
 	info.battery = player->battery;
 	info.hitIndicator = player->hitIndicator;
+	info.hitDirection = player->hitDirection;
+	info.hitDirectionHits = player->hitDirectionHits;
 	info.squadLeader = player->squadLeader;
 	info.commander = commander(player->team) == player->id;
 	info.aimPitch = std::clamp(player->input.aimPitch + player->aimKickPitch, -89.0f, 89.0f);
