@@ -831,7 +831,19 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 		if (contacts) {
 			point = pointSum * (1.0f / contacts);
 			normal = normalized(normalSum);
-			compression = std::clamp(physics::dot(push, normal), 0.0f, 1.0f);
+			// The Spring's solve (0x006ba7d0, class 0x9481): (push - root
+			// push) . n within 0..1 m, n the contacts' mean normal (+0xb8;
+			// the root's up only with *0x00a8420c other than its 1,
+			// static_init_008ed790), as objectCompression. The root push
+			// (+0xa0: the root's response's +0x94 as each contact is
+			// recorded, 0x006ba4c0 through slots 0x90 / 0x8c) is 0 for the
+			// ground pass's: the chain dispatch (0x006dd1b0) runs the
+			// root's broad phase, ground pass and solve, which clears its
+			// push (0x006ba7d0's end), before the Spring's broad phase
+			// (0x006dc7b0, which skips the mover's own tree) and its ground
+			// pass (slot 0x28).
+			const Vec3 rootPush {};
+			compression = std::clamp(physics::dot(push, normal) - physics::dot(rootPush, normal), 0.0f, 1.0f);
 		}
 	} else if (wheel.contactEnabled) {
 		const float height = ground.heightAndNormal(bottom.x, bottom.z, normal);
