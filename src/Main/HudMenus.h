@@ -450,13 +450,13 @@ private:
 // "_SQUADMEMBER" with icon_squad<n>.tga (ShowSquadIcon +0x300); anyone
 // else nothing (SquadInfoBarShow +0x2fe 0). SquadInfoText +0x304,
 // SquadInfoIconPath +0x308. The squad order points bar
-// (SquadOrderInfoBarShow +0x2fd, SquadInfoValue +0x30c: +0x310 over
-// +0x318, from the field-unlock progress the server grants) stays off.
+// (SquadOrderInfoBarShow +0x2fd, SquadInfoValue +0x30c) uses the
+// squad's points and threshold sent by the server.
 void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, bool commanderScreen,
 	const std::function<std::string(const std::string&)>& localize);
 // The same for a player as the HUD's world has it (a joined game's: the
 // server's player): whether there is one, commands, its squad and lead.
-void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad, bool squadLeader, bool commanderScreen,
+void updateSquadInfo(hud::HudManager& hud, bool known, const game::GameWorld::PlayerInfo& player, bool commanderScreen,
 	const std::function<std::string(const std::string&)>& localize);
 
 // The commander's own tools' refusals (said to him alone, game slot 0x60):

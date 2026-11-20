@@ -259,6 +259,11 @@ public:
 	bool partPose(uint16_t rootGhost, const std::string& part, Vec3f& offset, Vec3f& rotation) const;
 	std::vector<RemotePlayer> playerList() const;
 	const RemotePlayer* player(int id) const;
+	int fieldUnlockCredits() const { return m_fieldUnlockCredits; }
+	double squadOrderPoints() const { return m_squadOrderPoints; }
+	double squadOrderMax() const { return m_squadOrderMax; }
+	const std::array<uint8_t, 56>& ownedUnlockMasks() const { return m_ownedUnlockMasks; }
+	const std::array<uint8_t, 56>& fieldUnlockMasks() const { return m_fieldUnlockMasks; }
 	int localPlayer() const { return m_localPlayer; }
 	// Our own soldier or vehicle as the last control-object record had it.
 	bool hasControlObject() const { return m_hasControl; }
@@ -536,6 +541,9 @@ private:
 	bool m_controlInLastBlock = false;
 	uint32_t m_controlRecords = 0, m_controlStates = 0;
 	uint32_t m_tick = 0;
+	int m_fieldUnlockCredits = 0;
+	double m_squadOrderPoints = 0, m_squadOrderMax = 0;
+	std::array<uint8_t, 56> m_ownedUnlockMasks {}, m_fieldUnlockMasks {}, m_previousUnlockMasks {};
 	uint32_t m_gameState = 0;
 	bool m_roundStarted = false;
 	RoundInfo m_round;

@@ -1,4 +1,5 @@
 #include "GameWorld.h"
+#include "KitUnlocks.h"
 
 #include <unordered_set>
 #include "Animation/FirstPerson.h"
@@ -5177,6 +5178,17 @@ void GameWorld::restartPlayers(float spawnIn)
 // the control points return to the level's teams.
 void GameWorld::resetRound()
 {
+	for (const auto& [id, upgrades] : m_fieldUnlocks) {
+		if (Player* player = findPlayer(id)) {
+			auto& choices = player->unlocked;
+			choices.erase(std::remove_if(choices.begin(), choices.end(), [&](const std::string& name) {
+				return std::find(upgrades.containers.begin(), upgrades.containers.end(), name) != upgrades.containers.end()
+					&& std::find(player->owned.begin(), player->owned.end(), name) == player->owned.end();
+			}), choices.end());
+		}
+	}
+	m_fieldUnlocks.clear();
+	m_squadOrderScores.clear();
 	std::vector<uint32_t> gone;
 	// The Titans' own objects first: their carried spawners and supply
 	// points (out of m_spawners with them), and their spawn points.
@@ -5341,6 +5353,7 @@ bool GameWorld::removePlayer(int id)
 		resignCommander(id);
 	}
 	raise("PlayerDisconnect", {ScriptValue::player(id)});
+	m_fieldUnlocks.erase(id);
 	keepProjectilesOf(id);
 	// What lingers of it is left to the round (the corpse has its own
 	// countdown); the player itself goes.
@@ -5484,6 +5497,10 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.respawnIn = player->respawnIn;
 	info.manDown = player->manDown;
 	info.squad = player->squad;
+	const auto score = m_squadOrderScores.find({player->team, player->squad});
+	info.squadOrderPoints = score == m_squadOrderScores.end() ? 0 : score->second.points;
+	info.squadOrderMax = score == m_squadOrderScores.end() ? 0 : score->second.maximum;
+	info.fieldUnlockCredits = fieldUnlocks(id);
 	info.cloaked = player->alive && player->cloaked;
 	info.rank = player->rank;
 	info.empLevel = player->alive ? static_cast<int>(std::ceil(player->empLevel)) : 0;
@@ -5806,6 +5823,7 @@ bool GameWorld::joinSquad(int id, int squad)
 	// 0), its lock with it.
 	if (old != 0 && squadMembers(player->team, old).empty()) {
 		m_privateSquads.erase({player->team, old});
+		m_squadOrderScores.erase({player->team, old});
 	}
 	raise("PlayerChangedSquad", {ScriptValue::player(id), ScriptValue::integer(old), ScriptValue::integer(squad)});
 	return true;
@@ -6504,6 +6522,114 @@ void GameWorld::setBattery(int id, float battery)
 	if (Player* player = findPlayer(id)) {
 		player->battery = battery;
 	}
+}
+
+void GameWorld::setSquadOrderMax(int id, int maximum)
+{
+	if (const Player* player = findPlayer(id); player && player->squad != 0) {
+		m_squadOrderScores[{player->team, player->squad}].maximum = std::max(0, maximum);
+	}
+}
+
+void GameWorld::addSquadOrderPoints(int id, double points)
+{
+	const Player* player = findPlayer(id);
+	if (!player || player->squad == 0 || !std::isfinite(points) || points <= 0) return;
+	const auto key = std::make_pair(player->team, player->squad);
+	auto& score = m_squadOrderScores[key];
+	if (score.maximum == 0) return;
+	score.points += points;
+	if (score.points >= score.maximum) {
+		score.points = 0; // 0x004c4dd0 resets the meter after one award.
+		raise("SquadBarFilled", {ScriptValue::integer(key.first), ScriptValue::integer(key.second)});
+	}
+}
+
+void GameWorld::giveFieldUnlock(int id)
+{
+	if (findPlayer(id)) {
+		auto& credits = m_fieldUnlocks[id].credits;
+		credits = std::min(credits + 1, 255); // FieldUnlock carries one byte.
+	}
+}
+
+int GameWorld::fieldUnlocks(int id) const
+{
+	const auto at = m_fieldUnlocks.find(id);
+	return at == m_fieldUnlocks.end() ? 0 : at->second.credits;
+}
+
+const std::vector<std::string>& GameWorld::fieldUnlockItems(int id) const
+{
+	static const std::vector<std::string> empty;
+	const auto at = m_fieldUnlocks.find(id);
+	return at == m_fieldUnlocks.end() ? empty : at->second.containers;
+}
+
+const std::vector<std::string>& GameWorld::ownedKitUnlockItems(int id) const
+{
+	static const std::vector<std::string> empty;
+	const Player* player = findPlayer(id);
+	return player ? player->owned : empty;
+}
+
+bool GameWorld::ownsKitUnlock(int id, const std::string& name) const
+{
+	const Player* player = findPlayer(id);
+	if (!player) return false;
+	const auto& field = fieldUnlockItems(id);
+	return player->allUnlocked || std::find(player->owned.begin(), player->owned.end(), name) != player->owned.end()
+		|| std::find(field.begin(), field.end(), name) != field.end();
+}
+
+bool GameWorld::spendFieldUnlock(int id, const GameLogic& logic, int kit, int branch)
+{
+	const Player* player = findPlayer(id);
+	if (!player || player->team < 1 || player->team > 2 || fieldUnlocks(id) <= 0 || kit < 0 || kit >= 7 ||
+		branch < 0 || branch >= 4 || static_cast<size_t>(kit) >= logic.team(player->team).kits.size()) {
+		return false;
+	}
+	const auto nextLevel = [&](int team) {
+		int next = 8;
+		visitKitUnlocks(m_templates, logic.team(team), kit, [&](const std::string& name, int b, int level) {
+			if (b == branch && !ownsKitUnlock(id, name)) next = std::min(next, level);
+		});
+		return next;
+	};
+	const int localLevel = nextLevel(player->team);
+	if (localLevel == 8) return false;
+	std::vector<std::string> granted;
+	// 0x004baaf0: spend on both factions. The two general branches
+	// (UB_Player and UB_SquadLeader) apply across the four classes.
+	for (int team : {1, 2}) {
+		const int next = team == player->team ? localLevel : nextLevel(team);
+		const auto grant = [&](const std::string& name, int b, int level) {
+			if (b == branch && level == next && !ownsKitUnlock(id, name) &&
+				std::find(granted.begin(), granted.end(), name) == granted.end()) granted.push_back(name);
+		};
+		if (branch < 2) {
+			visitKitUnlocks(m_templates, logic.team(team), kit, grant);
+		} else {
+			for (size_t k = 0; k < 4; ++k) visitKitUnlocks(m_templates, logic.team(team), k, grant);
+		}
+	}
+	if (granted.empty()) return false;
+	auto& upgrades = m_fieldUnlocks[id];
+	upgrades.containers.insert(upgrades.containers.end(), granted.begin(), granted.end());
+	--upgrades.credits;
+	return true;
+}
+
+void GameWorld::setKitUnlockSelection(int id, const GameLogic& logic, int kit, const std::array<int, 4>& levels)
+{
+	Player* player = findPlayer(id);
+	if (!player || kit < 0 || static_cast<size_t>(kit) >= logic.team(player->team).kits.size()) return;
+	const auto selected = [&](const std::string& name, int branch, int level) {
+		auto& chosen = player->unlocked;
+		chosen.erase(std::remove(chosen.begin(), chosen.end(), name), chosen.end());
+		if ((levels[branch] & (1 << level)) && ownsKitUnlock(id, name)) chosen.push_back(name);
+	};
+	visitKitUnlocks(m_templates, logic.team(player->team), kit, selected);
 }
 
 void GameWorld::setOwnedUnlocks(int id, std::vector<std::string> containers)
@@ -7846,8 +7972,8 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 			const auto chosen = [&player](const std::string& name) {
 				return std::find(player.unlocked.begin(), player.unlocked.end(), name) != player.unlocked.end();
 			};
-			const auto owned = [&player, &chosen](const std::string& name) {
-				return chosen(name) || std::find(player.owned.begin(), player.owned.end(), name) != player.owned.end();
+			const auto owned = [this, &player, &chosen](const std::string& name) {
+				return chosen(name) || ownsKitUnlock(player.id, name);
 			};
 			const auto available = [&](const std::string& item) {
 				for (const world::ChildTemplate& base : kitTemplate->children()) {

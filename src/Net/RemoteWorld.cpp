@@ -34,6 +34,9 @@ void RemoteWorld::clear()
 	m_controlInLastBlock = m_controlStateValid = false;
 	m_ghostParts.clear();
 	m_gameState = 0;
+	m_fieldUnlockCredits = 0;
+	m_squadOrderPoints = m_squadOrderMax = 0;
+	m_ownedUnlockMasks = m_fieldUnlockMasks = m_previousUnlockMasks = {};
 	m_roundStarted = false;
 	m_round = {};
 	m_roundEnded = false;
@@ -393,6 +396,11 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (!parsePostRemote(event, info)) {
 			return false;
 		}
+		bool progress = false;
+		double points = 0;
+		if (parseSquadOrderPoints(info, progress, points)) {
+			(progress ? m_squadOrderPoints : m_squadOrderMax) = points;
+		}
 		if (info.category == kMsgGameCategory && info.id == 1) {
 			m_gameState = static_cast<uint32_t>(info.payloadInt());
 		}
@@ -447,12 +455,42 @@ bool RemoteWorld::apply(const GameEvent& event)
 		}
 		return true;
 	}
+	case kEvUnlock:
+		if (event.i(1) == m_localPlayer && event.values.size() == m_ownedUnlockMasks.size() + 2) {
+			m_previousUnlockMasks = m_ownedUnlockMasks;
+			for (size_t i = 0; i < m_ownedUnlockMasks.size(); ++i) {
+				m_ownedUnlockMasks[i] = static_cast<uint8_t>(event.u(i + 2));
+				m_fieldUnlockMasks[i] &= m_ownedUnlockMasks[i];
+			}
+		}
+		return true;
+	case kEvFieldUnlock:
+		if (event.i(1) == m_localPlayer && event.values.size() >= 3) {
+			m_fieldUnlockCredits = event.i(2);
+			if (event.u(0) == 1 && event.values.size() == 5 && event.u(3) < 7 && event.u(4) < 4) {
+				// The server's owned-mask snapshot precedes the spend acknowledgment.
+				for (size_t i = 0; i < m_fieldUnlockMasks.size(); ++i) {
+					m_fieldUnlockMasks[i] |= m_ownedUnlockMasks[i] & ~m_previousUnlockMasks[i];
+				}
+				m_previousUnlockMasks = m_ownedUnlockMasks;
+			}
+		}
+		return true;
 	case kEvRank: // 0x0050ce10: kind 1 sets the player's rank (vtable 0x1a8)
 		if (auto it = m_players.find(event.i(3)); event.u(0) == 1 && it != m_players.end()) {
 			it->second.rank = event.i(1) - 1;
 		}
 		return true;
 	case kEvBeginRound:
+		if (m_roundEnded) {
+			m_fieldUnlockCredits = 0;
+			m_squadOrderPoints = m_squadOrderMax = 0;
+			for (size_t i = 0; i < m_ownedUnlockMasks.size(); ++i) {
+				m_ownedUnlockMasks[i] &= ~m_fieldUnlockMasks[i];
+			}
+			m_fieldUnlockMasks = {};
+			m_previousUnlockMasks = m_ownedUnlockMasks;
+		}
 		m_round.state = event.u(0);
 		m_round.endTick = event.u(1);
 		if (event.i(2) >= 0) {
@@ -1542,6 +1580,9 @@ void RemoteWorld::onLevel(const std::string& data)
 		m_hasControl = false;
 		m_roundStarted = false;
 		m_roundEnded = false;
+		m_fieldUnlockCredits = 0;
+		m_squadOrderPoints = m_squadOrderMax = 0;
+		m_ownedUnlockMasks = m_fieldUnlockMasks = m_previousUnlockMasks = {};
 		for (auto& [id, p] : m_players) {
 			p.alive = false;
 			p.soldierGhost = p.vehicleGhost = p.kitGhost = 0;

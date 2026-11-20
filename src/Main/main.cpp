@@ -22,6 +22,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
+#include "Game/KitUnlocks.h"
 #include "Hud/Hud.h"
 #include "Input/ControlMap.h"
 #include "Input/GameControllers.h"
@@ -4836,6 +4837,16 @@ int runGame(Options& options, Session& session)
 		if (heightmaps.hasSea()) {
 			round.setWaterLevel(heightmaps.seaWaterLevel());
 		}
+		std::vector<std::string> remoteKitSelection;
+		const auto selectRemoteKit = [&](net::GameClient& server, int team, int kit) {
+			std::array<int32_t, 4> masks {-1, -1, -1, -1};
+			game::visitKitUnlocks(templates, gameLogic.team(team), kit, [&](const std::string& name, int branch, int level) {
+				if (std::find(remoteKitSelection.begin(), remoteKitSelection.end(), name) != remoteKitSelection.end()) {
+					masks[branch] = std::max(0, masks[branch]) | (1 << level);
+				}
+			});
+			server.selectKit(kit, masks);
+		};
 		// The spawn screen's kit buttons: the kit (by the team's kit index,
 		// gameLogic.setKit) of the local player's next spawn.
 		int localKit = 1;
@@ -4844,10 +4855,10 @@ int runGame(Options& options, Session& session)
 				// A joined game's (SelectKit, 0x0050ae90): the server's round
 				// takes it by the team's index (0x0050b010).
 				game::GameWorld::PlayerInfo me;
-				const game::Team& team = gameLogic.team(hudPlayer(hudLocal(), me) && me.team == 1 ? 1 : 2);
-				if (index >= 0 && static_cast<size_t>(index) < team.kits.size()) {
+				const int team = hudPlayer(hudLocal(), me) && me.team == 1 ? 1 : 2;
+				if (index >= 0 && static_cast<size_t>(index) < gameLogic.team(team).kits.size()) {
 					localKit = index;
-					server->selectKit(index);
+					selectRemoteKit(*server, team, index);
 				}
 				return;
 			}
@@ -5333,7 +5344,23 @@ int runGame(Options& options, Session& session)
 		dice::hfe::menu::KitMenu kitMenu(round, gameLogic, templates, hudManager);
 		kitMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		kitMenu.bind(console);
+		kitMenu.onSpendFieldUpgrade = [&](int kit, int branch) {
+			if (net::GameClient* server = joinedServer()) {
+				const auto& remote = server->world();
+				if (remote.localPlayer() < 0 || remote.fieldUnlockCredits() <= 0) return false;
+				server->sendEvent(net::makeFieldUnlock(remote.localPlayer(), 0, kit, branch));
+				return true;
+			}
+			return round.spendFieldUnlock(round.localPlayer(), gameLogic, kit, branch);
+		};
 		kitMenu.onEquip = [&](const std::vector<std::string>& containers) {
+			if (net::GameClient* server = joinedServer()) {
+				game::GameWorld::PlayerInfo me;
+				if (!hudPlayer(hudLocal(), me)) return;
+				remoteKitSelection = containers;
+				selectRemoteKit(*server, me.team, localKit);
+				return;
+			}
 			if (round.localPlayer() < 0) {
 				return;
 			}
@@ -7289,7 +7316,7 @@ int runGame(Options& options, Session& session)
 								client.selectSpawnGroup(second == std::string::npos ? -1 : static_cast<int>(arg));
 							} else if (op == "kit") {
 								localKit = static_cast<int>(arg);
-								client.selectKit(localKit);
+								selectRemoteKit(client, myTeam(), localKit);
 							} else if (op == "team") {
 								client.selectTeam(static_cast<int>(arg));
 							} else if (op == "suicide") {
@@ -7300,7 +7327,7 @@ int runGame(Options& options, Session& session)
 								client.joinSquad(static_cast<int>(arg));
 							} else if (op == "leader") {
 								// The spawn screen's squad leader marker.
-								client.selectKit(localKit);
+								selectRemoteKit(client, myTeam(), localKit);
 								const int group = joinedSpawnGroup(kMarkerLeader);
 								client.selectSpawnGroup(group);
 								if (options.verbose) {
@@ -8044,7 +8071,8 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
-				client.selectKit(localKit);
+				const int team = session.joinTeam != 0 ? session.joinTeam : me ? me->team : 2;
+				selectRemoteKit(client, team, localKit);
 				client.selectSpawnGroup(-1);
 			}
 			const net::RemotePlayer* self = client.world().player(client.world().localPlayer());
@@ -9698,21 +9726,43 @@ int runGame(Options& options, Session& session)
 			std::sort(targets.begin(), targets.end(), [](const auto& a, const auto& b) { return a.distance < b.distance; });
 			return targets;
 		});
+		int previousFieldUnlockCredits = 0;
+		game::UnlockMasks lastOwnedMasks {}, lastFieldMasks {};
+		std::vector<std::string> remoteOwned, remoteFieldItems;
 		sources.overlay = [&](float seconds) {
 			// Leaving the spawn screen closes the customise screen (HudManager's menu hide calls 0x00798070, e.g. 0x00754df4);
 			// CustomInfoShow otherwise keeps the minimap's MapItems node hidden (HudElementsMap.con: AND CustomInfoShow 0).
-			if (kitMenu.customOpen() && hudManager.number("SpawnShow") == 0) {
-				kitMenu.closeCustomInterface();
+			if (hudManager.number("SpawnShow") == 0) {
+				if (kitMenu.customOpen()) kitMenu.closeCustomInterface();
+				if (hudManager.number("UnlocksShow") != 0) kitMenu.closeFieldUpgrades();
 			}
-			kitMenu.setUnlocked(round.localPlayerUnlocks, round.unlockAllByDefault);
+			game::GameWorld::PlayerInfo kitPlayer;
+			const bool hasKitPlayer = hudPlayer(hudLocal(), kitPlayer);
+			if (session.client) {
+				const auto& remote = session.client->world();
+				if (lastOwnedMasks != remote.ownedUnlockMasks()) {
+					lastOwnedMasks = remote.ownedUnlockMasks();
+					remoteOwned = game::kitUnlockNames(templates, gameLogic, lastOwnedMasks);
+				}
+				if (lastFieldMasks != remote.fieldUnlockMasks()) {
+					lastFieldMasks = remote.fieldUnlockMasks();
+					remoteFieldItems = game::kitUnlockNames(templates, gameLogic, lastFieldMasks);
+				}
+				kitMenu.setUnlocked(remoteOwned, false);
+				kitMenu.setFieldUpgrades(kitPlayer.fieldUnlockCredits, remoteFieldItems);
+			} else {
+				kitMenu.setUnlocked(round.ownedKitUnlockItems(round.localPlayer()), round.unlockAllByDefault);
+				kitMenu.setFieldUpgrades(kitPlayer.fieldUnlockCredits, round.fieldUnlockItems(round.localPlayer()));
+			}
+			if (kitPlayer.fieldUnlockCredits > previousFieldUnlockCredits) {
+				chat.addPersonal(localization.text("HUD_TEXT_FIELDUPGRADE"));
+				sounds.playSound("fieldunlock");
+			}
+			previousFieldUnlockCredits = kitPlayer.fieldUnlockCredits;
 			kitMenu.setKit(localKit);
 			kitMenu.skipUnchanged = enhancedSettings.enabled;
-			if (game::GameWorld::PlayerInfo me; hudPlayer(hudLocal(), me)) {
-				kitMenu.setAlive(me.alive);
-			} else {
-				kitMenu.setAlive(false);
-			}
-			kitMenu.update(round.playerTeam() == 1 ? 1 : 2);
+			kitMenu.setAlive(hasKitPlayer && kitPlayer.alive);
+			kitMenu.update(hasKitPlayer ? kitPlayer.team : round.playerTeam());
 			kitMenu.commit();
 			trackKills();
 			chat.update(seconds);
@@ -10077,7 +10127,7 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				const host::HudWorld& shown = hudWorld();
 				const bool known = shown.playerInfo(shown.localPlayer(), me);
-				dice::hfe::menu::updateSquadInfo(hudManager, known, me.commander, me.squad, me.squadLeader, commanderScreen,
+				dice::hfe::menu::updateSquadInfo(hudManager, known, me, commanderScreen,
 					[&localization](const std::string& id) { return localization.text(id); });
 			}
 			{
@@ -10912,7 +10962,7 @@ int runGame(Options& options, Session& session)
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu,
-										&questions, &session, &localKit, &membersShown, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
 										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
@@ -10959,8 +11009,9 @@ int runGame(Options& options, Session& session)
 				const bool done = hudManager.number("HudDone") != 0 || enterConfirms;
 				const auto action = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
+					kitMenu.commit();
 					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
-						session.client->selectKit(localKit);
+						selectRemoteKit(*session.client, me.team, localKit);
 						session.client->selectSpawnGroup(joinedSpawnGroup(g_remoteHud->chosenSpawnMarker));
 						g_remoteHud->requestedSpawn = true;
 					} else if (!alive && !session.client) {

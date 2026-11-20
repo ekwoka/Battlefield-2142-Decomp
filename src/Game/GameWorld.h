@@ -71,6 +71,8 @@ class ObjectTemplateManager;
 
 namespace dice::hfe::game {
 
+class GameLogic;
+
 class CombatAreas;
 
 // The death ragdoll's hit push (0x005f0f50): the particle bone for the
@@ -572,6 +574,8 @@ public:
 		bool ai = false;
 		bool spectator = false; // player +0x404 (slots 0x3b8 / 0x3bc): setSpectator
 		bool alive = false;
+		double squadOrderPoints = 0, squadOrderMax = 0;
+		int fieldUnlockCredits = 0;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
 		// What the host module's pmgr_p_get hands the scripts (0x0056ae00's
 		// "vehicle" and "defaultvehicle"): the player's weak handles, the
@@ -875,15 +879,16 @@ public:
 	// The control points of a supply group (host.sgl_getControlPointsInGroup,
 	// 0x00568890: the game logic's vt+0x18c): their objects.
 	std::vector<uint32_t> controlPointsInGroup(int group) const;
-	// Field unlocks the scripts gave (pers_plrGiveFieldUnlock, a squad's
-	// bar filled; the game logic's slot 0x68): the player's count not yet
-	// spent (the unlock menu's spendFieldUnlock).
-	void giveFieldUnlock(int player) { ++m_fieldUnlocks[player]; }
-	int fieldUnlocks(int player) const
-	{
-		const auto it = m_fieldUnlocks.find(player);
-		return it == m_fieldUnlocks.end() ? 0 : it->second;
-	}
+	// 0x004c4c90 / 0x004c4ea0: the scripting setters address the player's squad.
+	void setSquadOrderMax(int player, int maximum);
+	void addSquadOrderPoints(int player, double points);
+	void giveFieldUnlock(int player);
+	int fieldUnlocks(int player) const;
+	const std::vector<std::string>& fieldUnlockItems(int player) const;
+	const std::vector<std::string>& ownedKitUnlockItems(int player) const;
+	bool spendFieldUnlock(int player, const GameLogic& logic, int kit, int branch);
+	bool ownsKitUnlock(int player, const std::string& name) const;
+	void setKitUnlockSelection(int player, const GameLogic& logic, int kit, const std::array<int, 4>& levels);
 	static void readSupplyLines(const world::ObjectTemplate& t, ControlPoint& point);
 	// Where a player wants to spawn next (a control point id, -1 for any of
 	// the team's): the spawn menu's choice. Held points the team owns
@@ -3829,7 +3834,16 @@ private:
 	void placeFlagObjects(const ControlPoint& point);
 	std::vector<uint32_t> m_flagObjects; // every point's cloth, to retire at a new round
 	ScriptEventSink m_events;
-	std::map<int, int> m_fieldUnlocks;
+	struct FieldUnlocks {
+		int credits = 0;
+		std::vector<std::string> containers;
+	};
+	std::map<int, FieldUnlocks> m_fieldUnlocks;
+	struct SquadOrderScore {
+		double points = 0;
+		int maximum = 0;
+	};
+	std::map<std::pair<int, int>, SquadOrderScore> m_squadOrderScores;
 	float m_tinnitus = 0;
 	float m_cameraShake = 0;
 	uint32_t m_blastSelf = 0; // the object whose own blast explode() runs (its rays pass it)

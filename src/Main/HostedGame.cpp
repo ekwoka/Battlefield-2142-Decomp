@@ -1,4 +1,5 @@
 #include "HostedGame.h"
+#include "Game/KitUnlocks.h"
 
 #include "Net/PlayerAuth.h"
 
@@ -409,6 +410,8 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		client.dryTicks = 0;
 		client.stepping = client.stepped = client.recordMove = -1;
 		client.spawnRequested = false;
+		client.fieldUnlockCredits = -1;
+		client.squadOrderPoints = client.squadOrderMax = -1;
 		if (client.stage != Client::Stage::Connected) {
 			client.stage = Client::Stage::Loading;
 			sendLevel(id);
@@ -1353,12 +1356,23 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	case net::kEvContentCheck:
 		checkContent(id, e);
 		return;
+	case net::kEvFieldUnlock:
+		if (e.values.size() == 5 && e.u(0) == 1 && e.i(1) == player &&
+			m_round->spendFieldUnlock(player, *m_logic, e.i(3), e.i(4))) {
+			syncFieldUnlocks(id, client, e.i(3), e.i(4));
+		}
+		return;
 	case net::kEvSelectKit: { // 0x0050b010: the team's kit by index
 		game::GameWorld::PlayerInfo me;
 		if (m_round->playerInfo(player, me)) {
 			const auto& kits = m_logic->team(me.team).kits;
 			const size_t kit = e.u(0);
 			if (kit < kits.size()) {
+				std::array<int, 4> selected {};
+				for (size_t branch = 0; branch < selected.size(); ++branch) {
+					selected[branch] = std::max(0, e.i(branch + 1) - 1);
+				}
+				m_round->setKitUnlockSelection(player, *m_logic, static_cast<int>(kit), selected);
 				m_round->setKit(player, kits[kit].name, kits[kit].soldier);
 			}
 		}
@@ -3700,6 +3714,36 @@ void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
 	client.carried.erase(it);
 }
 
+void HostedGame::syncFieldUnlocks(int id, Client& client, int kit, int branch)
+{
+	game::GameWorld::PlayerInfo player;
+	if (!m_round->playerInfo(client.player, player)) return;
+	if (player.squadOrderMax != client.squadOrderMax) {
+		client.squadOrderMax = player.squadOrderMax;
+		sendTo(id, net::makeSquadOrderPoints(false, player.squadOrderMax));
+	}
+	if (player.squadOrderPoints != client.squadOrderPoints) {
+		client.squadOrderPoints = player.squadOrderPoints;
+		sendTo(id, net::makeSquadOrderPoints(true, player.squadOrderPoints));
+	}
+	const auto& permanent = m_round->ownedKitUnlockItems(client.player);
+	const auto& temporary = m_round->fieldUnlockItems(client.player);
+	if (client.fieldUnlockCredits < 0 || permanent != client.ownedUnlocks || temporary != client.fieldUnlocks) {
+		client.ownedUnlocks = permanent;
+		client.fieldUnlocks = temporary;
+		auto names = permanent;
+		names.insert(names.end(), temporary.begin(), temporary.end());
+		const auto masks = game::kitUnlockMasks(*m_templates, *m_logic, names, m_round->unlockAllByDefault);
+		net::GameEvent owned = eventOf(net::kEvUnlock, {2, static_cast<uint32_t>(client.player)});
+		owned.values.insert(owned.values.end(), masks.begin(), masks.end());
+		sendTo(id, owned);
+	}
+	if (player.fieldUnlockCredits != client.fieldUnlockCredits || kit >= 0) {
+		client.fieldUnlockCredits = player.fieldUnlockCredits;
+		sendTo(id, net::makeFieldUnlock(client.player, player.fieldUnlockCredits, kit, branch));
+	}
+}
+
 void HostedGame::tick()
 {
 	if (!m_attached) {
@@ -3778,6 +3822,9 @@ void HostedGame::tick()
 	applyMoves();
 	trackObjects();
 	trackProjectiles();
+	for (auto& [id, client] : m_clients) {
+		if (client.stage == Client::Stage::Playing) syncFieldUnlocks(id, client);
+	}
 	sendBattlefieldReports();
 	sendRadioSpots();
 	trackPlayers();

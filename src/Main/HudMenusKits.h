@@ -13,7 +13,7 @@
 // Kit%iSprintAbility (0x00449600: 0.75 light, 0.25 heavy armour),
 // Kit%iHeavyArmorShow / HeavyArmor%iActive, PlayerKitIcon%iSelectShow
 // (setPlayerKit, 0x0079aa50), KitUnlockArrow%iShow (a field unlock to
-// take: none offline).
+// take).
 //
 // The customise screen (KitInterface, constructor 0x00798610; rebuild
 // 0x00798dd0) is a grid of five rows of up to six items per kit: row 0
@@ -42,8 +42,7 @@
 //
 // The unlock screen (UnlockInterface, 0x007b8e60-0x007b9a20) spends field
 // unlocks (in-round unlocks a server grants, the player's +0x2d0 points):
-// with none it doesn't open (0x007b95a0), so offline it shows only its
-// per-branch variables (0x0044a130): Kit%iBranch%iUnlockLevel and
+// with none it doesn't open (0x007b95a0). Its per-branch variables (0x0044a130): Kit%iBranch%iUnlockLevel and
 // MaxUnlockLevel (eighths), Alpha, NextUnlockIconPathString,
 // NextUnlockNameString, NextUnlockShow, LargePicShow.
 #pragma once
@@ -64,6 +63,7 @@ class HudManager;
 }
 namespace world {
 class ObjectTemplateManager;
+class ObjectTemplate;
 }
 } // namespace dice::hfe
 
@@ -87,6 +87,9 @@ public:
 		m_allUnlocked = all;
 		m_built = false;
 	}
+	void setFieldUpgrades(int credits, const std::vector<std::string>& containers);
+	void closeFieldUpgrades();
+	std::function<bool(int kit, int branch)> onSpendFieldUpgrade;
 	// The kit picked on the spawn screen (setPlayerKit).
 	void setKit(int kit);
 	int kit() const { return m_kit; }
@@ -129,6 +132,7 @@ public:
 	struct Item {
 		bool present = false;
 		bool available = false;
+		bool fieldUnlocked = false;
 		bool active = false;
 		std::string container; // the ItemContainer (empty for row 0)
 		std::string icon, abilityIcon, picture, description;
@@ -138,6 +142,11 @@ public:
 private:
 	void build(int team);
 	void updateAbilityIcons();
+	void resetFieldInformation();
+	bool owns(const std::string& container) const;
+	const world::ObjectTemplate* nextFieldItem(int kit, int branch) const;
+	void selectFieldUpgrade(int kit, int branch);
+	bool spendFieldUpgrade(int kit, int branch);
 	std::string text(const std::string& key) const { return m_localize ? m_localize(key) : key; }
 	std::string setting(const std::string& templateName, const std::string& key) const;
 	bool mainWeapon(const std::string& itemTemplate) const; // its itemIndex is the kit's main weapon one
@@ -148,6 +157,9 @@ private:
 	hud::HudManager& m_hud;
 	std::function<std::string(const std::string&)> m_localize;
 	std::vector<std::string> m_unlocked;
+	std::vector<std::string> m_fieldItems;
+	int m_fieldCredits = 0;
+	int m_fieldKit = -1, m_fieldBranch = -1;
 	bool m_allUnlocked = false;
 	bool m_built = false;
 	int m_team = 0;

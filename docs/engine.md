@@ -11228,20 +11228,22 @@ choice goes to the server when the soldier spawns or the menu closes
 containers to `GameWorld::setUnlocks` then, and the heavy armour picks the
 kit's heavy soldier.
 
-The unlock screen (`UnlockInterface`, `0x007b8e60`-`0x007b9a20`) spends
-field unlocks: points a server grants during a round (player `+0x2d0`)
-that raise a kit's branch for the round (`+0x2d4`; the server's
-`0x004baaf0`, for UB_Player and UB_SquadLeader all four kits).
-`showUnlockInterface 1` opens it only with points (`0x007b95a0`), so
-offline it never opens; its branches' variables (`0x0044a130`) are kept:
-`Kit%iBranch%iUnlockLevel` and `MaxUnlockLevel` (eighths), `Alpha` (0.2
-once the branch is full), `NextUnlockIconPathString`,
-`NextUnlockNameString`, `NextUnlockShow`, `LargePicShow`;
-`setInformationString` / `resetInformationString` (`UnlockInfoString`,
-`UnlockInfoPic`, `HUD_TEXT_MENU_FU_DEFAULT_TEXT`) and `setFieldUnlock`
-(`Kit%iBranch%iSelected`) too. `selectNextUnlock` / `selectUnlockItem`
-(`0x007b8f30`, `0x007b92c0`) make an unlock the soldier has its branch's
-choice.
+The unlock screen (`UnlockInterface`, `0x007b8e60`–`0x007b9a20`)
+spends credits earned in the current round. The scoring script sets a
+squad's threshold and adds points through `Player.setMaxOrderPoint` and
+`Player.setOrderPoint` (`0x005920c0` and `0x00592030`).
+`GameWorld` tracks progress by team and squad. At the threshold the
+`SquadBarFilled` hook in the shipped stats script grants each member
+a credit, and the meter resets (`0x004c4c90` / `0x004c4dd0`).
+
+The Field Upgrade tab opens when there are credits (`0x007b95a0`).
+A spend advances the selected branch for both factions. UB_Player and
+UB_SquadLeader apply across the four classes (`0x004baaf0`). Temporary
+ownership feeds the existing customization grid and kit build, and
+expires on round reset. Hosted clients receive squad progress via
+PostRemote category 2, id `0x56`, and use the FieldUnlock, Unlock and
+SelectKit events to spend and equip. The host validates ownership when
+accepting loadout choices.
 
 ### The kit and vehicle sweep (2026-11-12)
 
