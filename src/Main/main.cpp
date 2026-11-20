@@ -1250,10 +1250,12 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// arrow and the icon, kept on the map; one with a call's marker over
 	// the rest (0x007841e0, 0x007829c0).
 	const dice::hfe::menu::MapCalls::Kit localKit = mapCallKit(round, me.kit);
+	std::vector<hud::HudManager::MapMarker> localPlayerMarkers;
 	for (const auto& player : world.playerList()) {
-		if (!player.alive || player.team != me.team || player.id == me.id) {
+		if (!player.alive || player.team != me.team) {
 			continue;
 		}
+		const bool local = player.id == me.id;
 		dice::hfe::menu::MateInput in;
 		in.commander = player.commander;
 		in.squadLeader = player.squadLeader;
@@ -1262,8 +1264,10 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		in.sharesVehicle = me.alive && me.vehicle != 0 && player.vehicle == me.vehicle;
 		in.onFoot = player.vehicle == 0 || player.ladder != 0;
 		in.yaw = player.yaw;
-		in.call = g_mapCalls.icon(player.id);
-		if (localKit.heal || localKit.ammo) {
+		if (!local) {
+			in.call = g_mapCalls.icon(player.id);
+		}
+		if (!local && (localKit.heal || localKit.ammo)) {
 			int magazines = -1, nrOfMags = -1, magSize = -1;
 			for (const game::GameWorld::WeaponAmmo& ammo : round.weaponAmmo(player.id)) {
 				if (ammo.inHand) {
@@ -1281,7 +1285,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		if (!look.drawn) {
 			continue; // seated: the vehicle's icon stands for him
 		}
-		auto& list = in.call.empty() ? markers : callMarkers;
+		auto& list = local ? localPlayerMarkers : (in.call.empty() ? markers : callMarkers);
 		if (look.disc) {
 			hud::HudManager::MapMarker disc {"Ingame/Player/Icons/Minimap/mini_Health.tga", player.position.x, player.position.z, 16};
 			std::copy(look.discColor, look.discColor + 4, disc.color);
@@ -1302,7 +1306,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		mate.clamp = true;
 		mate.iconAlpha = look.iconAlpha;
 		mate.upright = look.arrow || !in.call.empty(); // the heading is on the arrow, or there is none
-		if (spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
+		if (!local && spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
 			mate.id = kMarkerLeader; // the spawn screen's selectable leader marker
 		}
 		list.push_back(mate);
@@ -1408,6 +1412,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	if (me.alive) {
 		// Retail's local view layer (0x0078e510), following the active camera.
 		markers.push_back(dice::hfe::menu::localViewMapMarker(me, viewHeading.value_or(me.yaw)));
+		// The soldier icon stays legible over the cone at their shared point.
+		markers.insert(markers.end(), localPlayerMarkers.begin(), localPlayerMarkers.end());
 		hud.setMapFocus(me.position.x, me.position.z);
 	}
 	if (commanderScreen && g_commanderView) {
