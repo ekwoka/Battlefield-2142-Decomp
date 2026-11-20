@@ -4959,13 +4959,16 @@ TEST(GameWorld_WeaponLock)
 }
 
 // The lock-on update's candidate (0x005e1b30 -> 0x004cf290): the nearest
-// target object in the cone. These targets have no player-control interface,
-// so the team filter does not use their team fields. A new candidate replaces
-// a held lock only after more than loseLockDelay ticks.
+// target object in the cone. The team filter takes only a root with a
+// control object (0x0042b2f0, 0x004cf337 .. 0x004cf38b): an empty vehicle
+// of the shooter's side is no candidate, an object of that side without
+// a control object is. A new candidate replaces a held lock only after
+// more than loseLockDelay ticks.
 TEST(GameWorld_WeaponLockTakesTheNearest)
 {
 	Range range;
 	range.templates.registerType(8, "SimpleObject");
+	range.templates.registerType(20, "PlayerControlObject");
 	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
 	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
 	launcher->settings()["target.maxDistance"] = "450";
@@ -4982,7 +4985,11 @@ TEST(GameWorld_WeaponLockTakesTheNearest)
 	world::Object* far = range.objects.create(jet, {me.position.x, eye, me.position.z + 200});
 	far->setTeam(1);
 	world::Object* nearer = range.objects.create(jet, {me.position.x + 20, eye, me.position.z + 80}); // ~14 degrees off
-	nearer->setTeam(2);
+	nearer->setTeam(2); // our side's, without a control object
+	world::ObjectTemplate* hover = range.templates.create("PlayerControlObject", "hover");
+	hover->children().push_back({"HeatObject", {}, {}});
+	world::Object* ownVehicle = range.objects.create(hover, {me.position.x, eye, me.position.z + 40});
+	ownVehicle->setTeam(2); // an empty one of our own side
 	range.world->tick(1 / 30.0f);
 	game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(range.world->localPlayer());
 	CHECK(lock.target == nearer->id() && lock.state == 1);
@@ -7820,6 +7827,53 @@ TEST(GameWorld_DirectionBonusPrefersTheTargetAhead)
 		if (!range.world->projectiles().empty()) {
 			const uint32_t taken = range.world->projectiles().front().lockedOn;
 			CHECK(taken == (bonus ? ahead->id() : nearer->id()));
+		}
+	}
+}
+
+// seek.ignoreFriendly (0x004cf290, 0x004cf337 .. 0x004cf38b): a target is
+// friendly only when its root has a control object (0x0042b2f0), by that
+// one's team against the shooter's control object's, or with no shooter
+// against the round's team when above 0. An empty vehicle of the
+// shooter's side is skipped; an object of that side without a control
+// object is not; a round without an owner or team takes either.
+TEST(GameWorld_SeekerIgnoresFriendlyControlObjectsOnly)
+{
+	for (int round = 0; round < 3; ++round) {
+		Range range;
+		range.templates.registerType(8, "SimpleObject");
+		range.templates.registerType(20, "PlayerControlObject");
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "aa_missile");
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		missile->settings()["seek.targetType"] = "TTHeat";
+		missile->settings()["seek.maxAngleLock"] = "40";
+		range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+		world::ObjectTemplate* jet = range.templates.create("PlayerControlObject", "jet");
+		jet->children().push_back({"HeatObject", {}, {}});
+		world::ObjectTemplate* balloon = range.templates.create("SimpleObject", "balloon");
+		balloon->children().push_back({"HeatObject", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int shooter = round == 2 ? -1 : range.world->localPlayer();
+		world::Object* ownJet = range.objects.create(jet, {0, 20, 40}); // empty, of the shooter's side
+		ownJet->setTeam(2);
+		world::Object* ownBalloon = range.objects.create(balloon, {0, 20, 80}); // no control object
+		ownBalloon->setTeam(2);
+		world::Object* enemy = range.objects.create(jet, {0, 20, 120});
+		enemy->setTeam(1);
+		if (round == 1) {
+			ownBalloon->setPosition({0, 20, 160}); // behind the enemy
+		}
+		CHECK(range.world->launchProjectile("aa_missile", {0, 20, 0}, {0, 0, 40}, shooter));
+		range.world->tick(1 / 30.0f);
+		range.world->tick(1 / 30.0f);
+		CHECK(!range.world->projectiles().empty());
+		if (!range.world->projectiles().empty()) {
+			const uint32_t taken = range.world->projectiles().front().lockedOn;
+			const uint32_t wanted = round == 0 ? ownBalloon->id() : round == 1 ? enemy->id() : ownJet->id();
+			std::fprintf(stderr, "  round %d: took %u (own jet %u, own balloon %u, enemy %u)\n", round, taken, ownJet->id(),
+				ownBalloon->id(), enemy->id());
+			CHECK(taken == wanted);
 		}
 	}
 }

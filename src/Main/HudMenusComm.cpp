@@ -135,15 +135,22 @@ int ReviveCalls::step(int player, uint32_t soldier, bool down, bool fire, bool s
 	}
 	const bool wentDown = down && !s.down;
 	const bool pressed = fire && !s.fire; // 0x00645720: 7 only on a fresh press
+	if (s.down && !down) {
+		s.count = 0; // revived: event 0x19 (0x00587b90) clears +0x330
+	}
 	s.down = down;
 	s.fire = fire;
 	if (!sends || !s.soldier) {
 		return 0;
 	}
 	if (wentDown) {
-		return s.count == 0 ? 0x37 : 0; // 0x00587dee
+		if (s.count != 0) { // 0x00587dee
+			return 0;
+		}
+		++s.count; // the automatic call counts too (0x00587de8..0x00587e2e)
+		return 0x37;
 	}
-	if (down && pressed && s.count < 3) { // 0x00585e51
+	if (down && pressed && s.count < 3) { // 0x00585e51: 2 presses after the automatic call
 		++s.count;
 		return 0x36;
 	}

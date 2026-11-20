@@ -331,8 +331,9 @@ TEST(SettingsObjects_RetailAudioQualityMapping)
 	CHECK(menu::audioVoiceCount("Low", 0) == 16);
 	CHECK(menu::audioVoiceCount("Medium", 0) == 32);
 	CHECK(menu::audioVoiceCount("High", 0) == 64);
-	CHECK(menu::audioVoiceCount("UltraHigh", 0) == 128);
-	CHECK(menu::audioVoiceCount("ultrahigh", -1) == 128);
+	CHECK(menu::audioVoiceCount("UltraHigh", 0) == 64); // software provider: UltraHigh is High
+	CHECK(menu::audioVoiceCount("ultrahigh", -1) == 64);
+	CHECK(menu::audioVoiceCount("UltraHigh", 128) == 128); // the override still applies
 	CHECK(menu::audioVoiceCount("UltraHigh", 32) == 32);
 	CHECK(menu::audioVoiceCount("Medium", 64) == 64);
 

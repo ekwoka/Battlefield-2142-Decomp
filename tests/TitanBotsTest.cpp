@@ -642,6 +642,148 @@ TEST(Titan_BotEngineersRepairTitanGunsAndConsoles)
 	}
 }
 
+// enhanced.botTitan: a bot's repair tool takes its AI's target (the gun it
+// mends, BotManager::titanRepair) only within the tool's reach (+3 m) of one
+// of the part's meshes, and the target goes with the bot's life. An engineer
+// that was mending a gun, its AI then stopped and the tool held up at the sky
+// (the ray meeting nothing to mend), mends it on the spot; carried off to the
+// ground far away, not; back on the spot, again; after its AI thought on, off
+// the Titan with enhanced.botTitan off, not (the claim lasts a think,
+// BotManager::update);
+// killed, and back on the spot in its next life, not (GameWorld::applyAbility;
+// spawnSoldier's fresh Player).
+TEST(Titan_StaleRepairTargetMendsNothingFromAfar)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	const char* mod = "mods/bf2142";
+	if (!test::runs(mod)) return;
+	TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, mod);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::BotSettings settings;
+	loadAircraftAi(level, settings);
+	const bool enhanced = true;
+	bool titanPlay = true;
+	settings.enhanced = &enhanced;
+	settings.botTitan = &titanPlay;
+	game::BotManager bots(*level.world, settings);
+	const int team = 1;
+	const auto* found = level.titan(team);
+	CHECK(found != nullptr);
+	if (!found) return;
+	const uint32_t titan = found->object;
+	std::vector<uint32_t> guns;
+	for (const auto& part : level.world->titanParts(team)) {
+		if (part.kind == game::GameWorld::TitanPartInfo::Gun) {
+			level.world->applyDamage(part.id, part.maxHitPoints * 0.5f);
+			guns.push_back(part.id);
+		}
+	}
+	CHECK(!guns.empty());
+	const auto gunHitPoints = [&] {
+		float sum = 0;
+		for (uint32_t gun : guns) {
+			sum += level.world->hitPoints(gun);
+		}
+		return sum;
+	};
+	const int id = level.world->addPlayer("Engineer", team, true);
+	level.world->setKit(id, "Pac_Anti-Vehicle", "pac_light_soldier");
+	CHECK(level.world->spawnSoldier(id));
+	const auto info = [&] {
+		game::GameWorld::PlayerInfo p;
+		CHECK(level.world->playerInfo(id, p));
+		return p;
+	};
+	CHECK(level.world->setSoldierPosition(info().soldier, level.world->titanToWorld(titan, {-1.5f, 11.5f, -40})));
+	bool thinking = true;
+	game::SoldierInput hold;
+	level.afterTick = [&] {
+		if (thinking) {
+			bots.update(1 / 30.0f);
+		} else {
+			level.world->setInput(id, hold);
+		}
+	};
+	// Mending: at a gun's station, the gun's hit points rising.
+	uint32_t mended = 0;
+	for (int s = 0; s < 150 && !mended; ++s) {
+		std::vector<float> was;
+		for (uint32_t gun : guns) {
+			was.push_back(level.world->hitPoints(gun));
+		}
+		level.run(1);
+		for (size_t i = 0; i < guns.size(); ++i) {
+			mended = bots.behaviour(id) == "TitanRepair" && level.world->hitPoints(guns[i]) > was[i] ? guns[i] : mended;
+		}
+	}
+	CHECK(mended != 0);
+	if (!mended) return;
+	const int toolSlot = info().inHandSlot;
+	const physics::Vec3 spot = level.world->titanToLocal(titan, info().position);
+	thinking = false;
+	hold.fire = true;
+	hold.aimPitch = 89;
+	// Each 4 s after a 3 s settle (the tool's scan holds its targets up to 2 s).
+	const auto mends = [&] {
+		level.run(3);
+		const float was = gunHitPoints();
+		level.run(4);
+		return gunHitPoints() - was;
+	};
+	const auto moveTo = [&](const physics::Vec3& at) { CHECK(level.world->setSoldierPosition(info().soldier, at)); };
+	const float onSpot = mends();
+	physics::Vec3 far = level.world->titanToWorld(titan, spot);
+	far.x += 300;
+	far.y = level.world->terrainHeight(far.x, far.z);
+	moveTo(far);
+	const float fromAfar = mends();
+	moveTo(level.world->titanToWorld(titan, spot));
+	const float back = mends();
+	// (Hurt again: the gun mended may be whole by now.)
+	for (const auto& part : level.world->titanParts(team, titan)) {
+		if (part.kind == game::GameWorld::TitanPartInfo::Gun) {
+			level.world->applyDamage(part.id, part.maxHitPoints * 0.3f);
+		}
+	}
+	// On the spot with the tool drawn and held up at the sky.
+	const auto ready = [&] {
+		moveTo(level.world->titanToWorld(titan, spot));
+		hold = {};
+		hold.selectItem = toolSlot;
+		level.run(0.1f);
+		hold = {};
+		level.run(2);
+		CHECK(info().inHandSlot == toolSlot);
+		hold.fire = true;
+		hold.aimPitch = 89;
+	};
+	// The AI thinking a moment (a lone bot thinks every other frame) with enhanced.botTitan off, off the Titan
+	// (on the spot, the ordinary AI takes the gun's seat at once): the claim and the target let go.
+	moveTo(far);
+	titanPlay = false;
+	thinking = true;
+	level.run(0.1f);
+	thinking = false;
+	ready();
+	const float settingOff = mends();
+	level.world->applyDamage(info().soldier, 1e6f);
+	level.run(1);
+	CHECK(!info().alive);
+	CHECK(level.world->spawnSoldier(id) || info().alive);
+	ready();
+	const float nextLife = mends();
+	// The next life's AI naming the gun again: mended.
+	level.world->setAiAbilityTarget(id, mended);
+	const float named = mends();
+	std::fprintf(stderr,
+		"  gun hit points mended in 4 s: on the spot %.1f, 300 m off %.1f, back %.1f, setting off %.1f, next life %.1f, named again %.1f\n",
+		onSpot, fromAfar, back, settingOff, nextLife, named);
+	CHECK(onSpot > 0 && back > 0 && named > 0);
+	CHECK(fromAfar == 0 && settingOff == 0 && nextLife == 0);
+}
+
 // enhanced.botTitan: with the consoles down (the core's doors open) the
 // walking grids, of which only the changed box is cast again, come out as
 // grids made whole.
@@ -868,31 +1010,9 @@ TEST(Titan_BotCommanderMovesTheTitans)
 				start[team] = level.titan(team)->position;
 			}
 			addBots();
-			// The test's own reading of the missile paths: the Titan at `at` (moved there; it never turns) has none
-			// of a friendly silo's within its box (+ 10 m).
-			const auto blocks = [&](int team, const physics::Vec3& at) {
-				if (!level.titan(team) || !level.titan(3 - team)) return false;
-				const auto ownInfo = *level.titan(team);
-				const auto enemyInfo = *level.titan(3 - team);
-				const auto* own = &ownInfo;
-				const auto* enemy = &enemyInfo;
-				physics::Vec3 low, high;
-				if (!level.world->objectBox(own->object, low, high)) return false;
-				const physics::Vec3 shift {own->position.x - at.x, 0, own->position.z - at.z};
-				for (const auto& silo : level.world->missileSilos()) {
-					if (silo.team != team) continue;
-					const physics::Vec3 top = silo.position + physics::Vec3 {0, 40, 0};
-					for (int i = 0; i <= 200; ++i) {
-						const physics::Vec3 q = i <= 20 ? silo.position + (top - silo.position) * (i / 20.0f)
-														 : top + (enemy->position - top) * ((i - 20) / 180.0f);
-						const physics::Vec3 l = level.world->titanToLocal(own->object, q + shift);
-						if (l.x > low.x - 10 && l.x < high.x + 10 && l.y > low.y - 10 && l.y < high.y + 10 && l.z > low.z - 10 && l.z < high.z + 10) {
-							return true;
-						}
-					}
-				}
-				return false;
-			};
+			// The missile paths as the commander reads them (titanBlocksSilos: its climb and box clearance, the
+			// team's silos and the focus silo): the Titan at `at` (moved there; it never turns) is in none.
+			const auto blocks = [&](int team, const physics::Vec3& at) { return bots.titanOrderBlocksSilos(team, at); };
 			level.run(150);
 			for (int team : {1, 2}) {
 				// (level.titan's answer is one static, overwritten by the next call: copied.)
@@ -968,9 +1088,12 @@ TEST(Titan_BotCommanderMovesTheTitans)
 // A gun hangs under the hull; its control station inside (an unarmoured
 // child of the gun's bundle, eu_controlstation_v2_g) is the gun's to the
 // repair tool: 0x004cc380 walks a hit node up (+0x34) to the nearest armour
-// (+0x48). The station keeps its collision (its wreck geometry,
-// 0x00651c60) while the gun is a wreck, so a player's tool aimed at it
-// brings the gun back (canBeRepairedWhenWreck 1).
+// (+0x48). The gun's wreck puts its whole subtree in its wreck state, by
+// each node's own mesh and nothing else: the look (0x00651c60: three
+// geometries, so the wreck geometry, not hidden) and the collision
+// (0x006539f0 -> 0x006e5df0: the station's second sub-geometry, the same
+// shape as its first), so a player's tool aimed at the station brings the
+// gun back (canBeRepairedWhenWreck 1).
 TEST(Titan_RepairToolOnGunStationMendsTheGun)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -983,10 +1106,17 @@ TEST(Titan_RepairToolOnGunStationMendsTheGun)
 	level.world->setKit(id, "EU_Anti-Vehicle", "us_light_soldier");
 	CHECK(level.world->spawnSoldier(id));
 	int mended = 0, tried = 0;
+	const uint32_t titan = level.titan(team)->object;
 	for (const auto& part : level.world->titanParts(team)) {
 		if (part.kind != game::GameWorld::TitanPartInfo::Gun) continue;
+		const bool aa = part.name.find("aacannon") != std::string::npos;
+		const std::string station = part.name + "_hub/" + part.name + (aa ? "/eu_controlstation_v2_aa" : "/eu_controlstation_v2_g");
+		CHECK(level.world->titanPartLook(titan, station) == 0);
 		level.world->applyDamage(part.id, 1e6f);
 		CHECK(level.world->hitPoints(part.id) <= 0);
+		level.run(0.1f);
+		CHECK(level.world->titanPartLook(titan, station) == 1); // its wreck geometry
+		CHECK(level.world->titanPartLook(titan, part.name + "_hub/" + part.name) == 1);
 		const auto meshes = level.world->titanPartMeshes(part.id);
 		CHECK(meshes.size() >= 2); // the gun's own and its station's
 		bool done = false;

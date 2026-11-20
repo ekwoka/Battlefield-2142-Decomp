@@ -684,11 +684,11 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 }
 
 // A Titan mesh's parts at the projectile, vehicle and soldier LODs (in
-// that order; a LOD the mesh lacks gives none): each its points (the
-// vehicle LOD's first sub-geometry's, the others' every sub-geometry's)
-// and their materials, its box and radius about the Titan's origin, its
+// that order; a LOD the mesh lacks gives none) of its sub-geometry
+// `state` (0 whole, 1 a wreck's, 0x006e5df0): each its points and their
+// materials, its box and radius about the Titan's origin, its
 // collisionGroups and its own collision world at that LOD.
-std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodParts(const TitanMesh& m, uint32_t owner)
+std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodParts(const TitanMesh& m, uint32_t owner, size_t state)
 {
 	std::vector<std::shared_ptr<const TitanLodPart>> parts;
 	for (const physics::CollisionUser user :
@@ -710,7 +710,7 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 		auto part = std::make_shared<TitanLodPart>();
 		part->lod = static_cast<int>(user);
 		part->groups = static_cast<uint32_t>(m.groups);
-		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, static_cast<size_t>(m.geometry))) {
+		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, static_cast<size_t>(m.geometry), state)) {
 			const physics::CollisionLod* lod = physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(user));
 			if (!lod || lod->faces.empty()) {
 				continue;
@@ -737,7 +737,7 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 		// non-mobile Mesh child has a Static node (0x005f6c68).
 		const bool staticNode = user == physics::CollisionUser::Soldier && m.t
 			&& integer(*m.t, "hasMobilePhysics", 0) == 0;
-		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry), 0,
+		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry), state,
 			staticNode);
 		for (const physics::Vec3& p : part->points) {
 			part->radius = std::max(part->radius, std::sqrt(physics::lengthSquared(p)));
@@ -747,10 +747,38 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 	return parts;
 }
 
+namespace {
+
+// A mesh instance's sub-geometry under a wreck (0x006e5df0(1)): its
+// geometry's second when it has more than one, else none (-1: the object's
+// flag 0x100 cleared, out of the scene's rays).
+int wreckState(const physics::CollisionMeshFile& mesh, size_t geometry)
+{
+	return geometry < mesh.geometries.size() && mesh.geometries[geometry].subGeometries.size() > 1 ? 1 : -1;
+}
+
+} // namespace
+
+// A part's wreck (0x00654120 -> 0x00654070) runs 0x006539f0(node, 1) over
+// its subtree: each node's collision instance (+0x4c) goes to its wreck
+// sub-geometry (slot 0x30, 0x006e5df0), or with a single one out of the
+// rays (slot 0x54(0, 0x100)); a repair runs it with 0 (sub-geometry 0, back
+// in the rays). Every node of a shipped Titan part's subtree has two, the
+// second its wreck's shape: none for the forcefields (the corridor and
+// spawn room fields; a single face for the shields), the consoles' and the
+// core room doors' wrecks, the guns' and their control stations' (the
+// gun's only place within the repair tool's reach inside the hull,
+// 0x004cc380 walking a hit node up to the nearest armour).
+int GameWorld::titanMeshState(const Titan& titan, const TitanMesh& m)
+{
+	const bool wrecked = std::any_of(m.chain.begin(), m.chain.end(),
+		[&](int part) { return part > 0 && titan.parts[static_cast<size_t>(part)].off; });
+	return wrecked ? wreckState(*m.mesh, static_cast<size_t>(m.geometry)) : 0;
+}
+
 // The Titan's body (made by addBodies from its root's mesh) gets the whole
-// tree's soldier and projectile LODs, each face reporting its part; a
-// part whose armour is down takes its subtree's collision with it
-// (0x00651c60 hides a wrecked node's children; the core room's doors open).
+// tree's soldier and projectile LODs, each face reporting its part, at the
+// sub-geometry its parts' wrecks leave it (titanMeshState).
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
 	++titan.meshVersion;
@@ -820,29 +848,15 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		}
 		return false;
 	};
-	// A wrecked part's subtree goes (0x00651c60 from the wreck, 0x00654120),
-	// but for an unarmoured node right under it that is no team forcefield:
-	// a gun's control station inside the hull (eu_controlstation_v2_g / _aa,
-	// a child of the gun's bundle). It stays, as the only place the repair
-	// tool can reach the gun (0x004cc380 walks a hit node up, +0x34, to the
-	// nearest armour, +0x48) and every gun is canBeRepairedWhenWreck.
-	// shortcut: inferred from that data; which branch of 0x00651c60 keeps
-	// it (slot 0xcc(1) or 0x54(0,2)) is not traced: both meshes have three
-	// geometries. A wrecked console's corridor forcefield (collisionGroups) goes.
-	const auto live = [&](const TitanMesh& m) {
-		return std::none_of(m.chain.begin(), m.chain.end(), [&](int part) {
-			const TitanPart& p = titan.parts[static_cast<size_t>(part)];
-			const bool station = part == m.node && m.t && m.t != p.t && (m.groups & 0x300) == 0 && p.kind != TitanPartInfo::Shield;
-			return part > 0 && p.off && !station;
-		});
-	};
+	const auto live = [&](const TitanMesh& m) { return titanMeshState(titan, m) >= 0; };
 	const bool teamFaces = std::any_of(titan.meshes.begin(), titan.meshes.end(),
 		[&](const TitanMesh& m) { return (m.groups & 0x300) != 0 && live(m) && soldierLod(*m.mesh); });
 	for (int team = 0; team < 2 && teamFaces; ++team) {
 		teams[team] = std::make_shared<physics::CollisionWorld>();
 	}
 	for (TitanMesh& m : titan.meshes) {
-		if (!live(m)) {
+		const int state = titanMeshState(titan, m);
+		if (state < 0) {
 			continue;
 		}
 		const uint32_t owner = m.node >= 0 ? titan.parts[static_cast<size_t>(m.node)].id : titan.object;
@@ -850,16 +864,17 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		// own groups): the vehicle LOD for the vehicles, the soldier LOD
 		// (the decks and floors) for the parachute and the dropped objects
 		// (otherCollisionLod 2), the projectile LOD for 0. Made once per
-		// mesh: a rebuild (a part down or back) only picks the live ones,
-		// and the merged worlds below take the parts' faces (each part's
-		// world is the mesh's addMesh at that LOD; a LOD without a part
-		// adds no faces).
-		if (!m.lodPartsMade) {
-			m.lodParts = titanLodParts(m, owner);
-			m.lodPartsMade = true;
+		// mesh and sub-geometry: a rebuild (a part down or back) only picks
+		// the live ones, and the merged worlds below take the parts' faces
+		// (each part's world is the mesh's addMesh at that LOD; a LOD
+		// without a part adds no faces).
+		if (!m.lodPartsMade[state]) {
+			m.lodParts[state] = titanLodParts(m, owner, static_cast<size_t>(state));
+			m.lodPartsMade[state] = true;
 		}
-		const auto faces = [&m](physics::CollisionUser user) -> const physics::CollisionWorld* {
-			for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts) {
+		const std::vector<std::shared_ptr<const TitanLodPart>>& lodParts = m.lodParts[state];
+		const auto faces = [&lodParts](physics::CollisionUser user) -> const physics::CollisionWorld* {
+			for (const std::shared_ptr<const TitanLodPart>& part : lodParts) {
 				if (part->lod == static_cast<int>(user)) {
 					return part->mesh.get();
 				}
@@ -880,14 +895,15 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		if (const physics::CollisionWorld* lod = faces(physics::CollisionUser::Projectile)) {
 			projectile->append(*lod);
 		}
-		vehicleParts.insert(vehicleParts.end(), m.lodParts.begin(), m.lodParts.end());
+		vehicleParts.insert(vehicleParts.end(), lodParts.begin(), lodParts.end());
 	}
 	titan.vehicleParts = std::move(vehicleParts);
-	// The soldier faces that came or went: those of each mesh that went
-	// down or came back (a mesh's LOD parts sit in the Titan's frame).
-	std::vector<char> nowLive(titan.meshes.size());
+	// The soldier faces that came or went: those of each mesh whose state
+	// changed, its old sub-geometry's and its new one's (a mesh's LOD parts
+	// sit in the Titan's frame).
+	std::vector<int> nowLive(titan.meshes.size());
 	for (size_t i = 0; i < titan.meshes.size(); ++i) {
-		nowLive[i] = live(titan.meshes[i]);
+		nowLive[i] = titanMeshState(titan, titan.meshes[i]);
 	}
 	if (titan.meshesLive.size() == nowLive.size() && body->soldierMesh) {
 		Titan::MeshChange& change = titan.meshChanges.back();
@@ -898,24 +914,32 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 			if (nowLive[i] == titan.meshesLive[i]) {
 				continue;
 			}
-			if (!m.lodPartsMade) {
-				change.known = false;
-				break;
-			}
-			for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts) {
-				if (part->lod != static_cast<int>(physics::CollisionUser::Soldier) || !part->mesh) {
+			for (const int state : {titan.meshesLive[i], nowLive[i]}) {
+				if (state < 0) {
 					continue;
 				}
-				part->mesh->forEachFace([&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
-					for (const physics::Vec3& p : {a, b, c}) {
-						if (!change.changed) {
-							change.low = change.high = p;
-							change.changed = true;
-						}
-						change.low = {std::min(change.low.x, p.x), std::min(change.low.y, p.y), std::min(change.low.z, p.z)};
-						change.high = {std::max(change.high.x, p.x), std::max(change.high.y, p.y), std::max(change.high.z, p.z)};
+				if (!m.lodPartsMade[state]) {
+					change.known = false;
+					break;
+				}
+				for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts[state]) {
+					if (part->lod != static_cast<int>(physics::CollisionUser::Soldier) || !part->mesh) {
+						continue;
 					}
-				});
+					part->mesh->forEachFace([&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
+						for (const physics::Vec3& p : {a, b, c}) {
+							if (!change.changed) {
+								change.low = change.high = p;
+								change.changed = true;
+							}
+							change.low = {std::min(change.low.x, p.x), std::min(change.low.y, p.y), std::min(change.low.z, p.z)};
+							change.high = {std::max(change.high.x, p.x), std::max(change.high.y, p.y), std::max(change.high.z, p.z)};
+						}
+					});
+				}
+			}
+			if (!change.known) {
+				break;
 			}
 		}
 	}
@@ -924,15 +948,19 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
 	body->projectileMesh = projectile;
-	// The cannons' collisionPart children, posed with the guns; those
-	// under a part that is down go with it.
+	// The cannons' collisionPart children, posed with the guns; under a
+	// wrecked part each at its own instance's wreck sub-geometry
+	// (0x006539f0 over the tree), or out with a single one.
 	if (!titan.collisionPartsBuilt) {
 		buildTitanCollisionParts(titan, *body);
 		titan.collisionPartsBuilt = true;
 	}
 	for (Body::PartMesh& part : body->partMeshes) {
-		part.off = part.source >= 0 && static_cast<size_t>(part.source) < titan.meshes.size()
-			&& !live(titan.meshes[static_cast<size_t>(part.source)]);
+		const bool under = part.source >= 0 && static_cast<size_t>(part.source) < titan.meshes.size()
+			&& titanMeshState(titan, titan.meshes[static_cast<size_t>(part.source)]) != 0;
+		const int state = under && part.file ? wreckState(*part.file, part.geometry) : 0;
+		part.off = state < 0;
+		part.wrecked = state > 0;
 	}
 	// The radius (0x00562090): half the diagonal of the root's box across x
 	// and z; its bottom (0x005aa090: the box's lowest y).
@@ -1908,8 +1936,9 @@ void GameWorld::stepTitanWreck(Titan& titan, float seconds)
 	}
 }
 
-// A part's armour out (0x00654120's wreck branch): its subtree's nodes are
-// put out (0x00651c60), its Python component's onDestroyEvent is raised
+// A part's armour out (0x00654120's wreck branch): its subtree's nodes
+// take their wreck look and collision (0x00651c60 / 0x006539f0,
+// titanPartLook / titanMeshState), its Python component's onDestroyEvent is raised
 // with the Titan (the scripts take the root: TitanPartDestroyed for a
 // console, TitanCoreDestroyed, TitanWeaponDestroyed). The Titan's own: it
 // is a wreck, out of the sync's list (0x005ab390 skips wrecks); its
@@ -1951,13 +1980,6 @@ void GameWorld::titanPartWrecked(Titan& titan, int index, int attacker)
 	}
 }
 
-// The heal of a Titan part (the armour's 0x00655a00 on the node's own
-// armour: canBeRepaired, a wreck only with canBeRepairedWhenWreck; the
-// Titan's root never, 0x00561d90). Out of the wreck (0x00654120's
-// repaired branch: 0x00654070 puts the subtree's nodes back, +0x15 off)
-// the part's collision is back and, as 0x004bc410 has it after the heal,
-// its Python component's onRepairEvent goes with the Titan and the
-// repairer (the gun hubs' TitanWeaponRepaired; the consoles' and cores'
 std::vector<physics::Vec3> GameWorld::titanPartMeshes(uint32_t id) const
 {
 	std::vector<physics::Vec3> at;
@@ -1974,6 +1996,13 @@ std::vector<physics::Vec3> GameWorld::titanPartMeshes(uint32_t id) const
 	return at;
 }
 
+// The heal of a Titan part (the armour's 0x00655a00 on the node's own
+// armour: canBeRepaired, a wreck only with canBeRepairedWhenWreck; the
+// Titan's root never, 0x00561d90). Out of the wreck (0x00654120's
+// repaired branch: 0x00654070 puts the subtree's nodes back, +0x15 off)
+// the part's collision is whole again and, as 0x004bc410 has it after the
+// heal, its Python component's onRepairEvent goes with the Titan and the
+// repairer (the gun hubs' TitanWeaponRepaired; the consoles' and cores'
 // TitanPart/CoreRepaired can't, their wrecks being unrepairable).
 bool GameWorld::healTitanPart(uint32_t id, float percent, int repairer)
 {
@@ -3257,28 +3286,22 @@ int GameWorld::titanPartLook(uint32_t object, const std::string& path) const
 		if (found == titan.nodes.end()) {
 			return 0;
 		}
-		// A node under a part that is down (a wrecked console's forcefield)
-		// goes with it (0x00651c60 hides a wrecked node's children), but a
-		// gun's control station stays, in its wreck look (rebuildTitanMeshes).
+		// A wrecked part's subtree, its own node among them, switches to the
+		// wreck (0x00654120 -> 0x00651c60(node, 1) over the tree, slot 0xec's
+		// children): a node whose render object has two geometries or more
+		// (slot 0x74) shows its wreck geometry (slot 0xcc(1)), one of fewer
+		// is hidden (slot 0x54(0, 2), the drawn flag), which the drawing
+		// tells by the mesh. Every shipped Titan node under an armoured part
+		// (the guns, their control stations and wreck HUDs, the consoles'
+		// forcefields, the shields, the core doors) has three.
 		for (const int index : found->second.chain) {
-			if (index <= 0 || index == found->second.own) {
+			if (index <= 0) {
 				continue;
 			}
-			const TitanPart& above = titan.parts[static_cast<size_t>(index)];
-			if (above.off || above.state >= 1) {
-				const size_t slash = key.find_last_of('/');
-				const world::ObjectTemplate* node = m_templates.find(slash == std::string::npos ? key : key.substr(slash + 1));
-				const bool station = found->second.own < 0 && index == found->second.chain.back() && above.kind != TitanPartInfo::Shield
-					&& node && (integer(*node, "collisionGroups", 0) & 0x300) == 0;
-				return station ? 1 : 2;
+			const TitanPart& part = titan.parts[static_cast<size_t>(index)];
+			if (part.off || part.state >= 1) {
+				return 1;
 			}
-		}
-		if (found->second.own > 0) {
-			const TitanPart& part = titan.parts[static_cast<size_t>(found->second.own)];
-			if (part.off && part.kind == TitanPartInfo::Shield) {
-				return 2;
-			}
-			return part.state >= 1 ? 1 : 0;
 		}
 		return 0;
 	}

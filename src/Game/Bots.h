@@ -1058,6 +1058,9 @@ public:
 	// The squad update (0x100c4240) of one squad now, outside the round robin
 	// (for tests).
 	void updateSquadNow(int team, int id);
+	// enhanced.botCommander: whether the team's Titan moved to `at` would stand in a missile's way from one of
+	// its silos or the commander's focus silo (titanBlocksSilos, for tests).
+	bool titanOrderBlocksSilos(int team, const physics::Vec3& at) const;
 private:
 	friend struct BotManagerTestAccess;
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's
@@ -1384,11 +1387,16 @@ private:
 		int heliTarget = -1, heliWeapon = -1; // the plan's target and weapon (its keeper 0x1007f9d0 rebuilds on a change)
 		// enhanced.botPilots: the hunted target (a player, or an enemy Titan's
 		// gun part), when it was picked, the run's leg (0 set up, 1 in), its
-		// start and height; and the seating whose first press was counted.
+		// start (or the last break-off) and height; whether it broke off and
+		// is yet to leave the stand-off band (or turn its nose off the
+		// target); the seating the hunt was set up for; and the seating whose
+		// first press was counted.
 		int huntPlayer = -1;
 		uint32_t huntPart = 0;
 		float huntPickAt = -1e9f, huntLegAt = -1e9f, huntHeight = 0;
 		int huntLeg = 0;
+		bool huntAway = false;
+		float huntSeating = -2e9f;
 		float pilotFirstPressFor = -2e9f;
 		float heliSeating = -2e9f; // the seating counted in the pilot stats
 		float heliTapAt = -1e9f;

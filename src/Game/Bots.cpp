@@ -1763,6 +1763,12 @@ void BotManager::update(float seconds)
 		bot.continuousFireVehicle = 0;
 		bot.continuousFireSeat = -1;
 		bot.gunTurn = false;
+		// enhanced.botTitan: a repair claim and the tool's AI target last one think; titanRepair names them
+		// again while it is still on the way to the part or at it (off the hull, in a seat, the setting off: none).
+		if (bot.titanRepair) {
+			m_world.setAiAbilityTarget(self->id, 0);
+			bot.titanRepair = 0;
+		}
 		const float elapsed = bot.lastAct < 0 ? seconds : m_time - bot.lastAct;
 		bot.lastAct = m_time;
 		bot.sinceThink += elapsed;
@@ -4439,15 +4445,21 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 			// 0x10069eee: one the driver can't wait for (a bot with no seat
 			// free, 0x10069dc8; beyond reach, 0x10069dd9; or the driver in
 			// flight, 0x10069de3) has its unanswered req_pickup marked
-			// answered (0x100a6210) and gets "negative" (7) on channel 6, 1 s.
+			// answered (0x100a6210) and gets "negative" (7) on channel 6, 1 s;
+			// that ends the scan (0x10069af0 returns after the send), the wait so far kept.
 			if ((mate.ai && free <= 0) || flying
 				|| (humanPickup ? physics::lengthSquared(d) > 2500.0f : horizontal2(d) > 40.0f * 40.0f)) {
+				bool refused = false;
 				for (Bot::Radio& r : bot.radio) {
 					if (r.type == 2 && r.sender == mate.id && !r.answered && m_time - r.at < m_settings.radioLifeOf(2)) {
 						r.answered = true;
 						queueRadio(bot, 7, 6, 1.0f);
+						refused = true;
 						break;
 					}
+				}
+				if (refused) {
+					break;
 				}
 				continue;
 			}
@@ -4462,11 +4474,14 @@ float BotManager::idleUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float
 		// them answered) is dropped while the passenger waited for is a
 		// human (player slot 0x84); else each sender aboard this vehicle
 		// gets roger_that (6) on channel 7, 1 s, and the wait is dropped
-		// for this think with its timer reset (0x1006a3a7). The next think
-		// waits again, a fresh 10 s, while a passenger still qualifies, as
-		// retail's does. Retail's "negative" (7) while holding (bot slots
-		// 0x1c0 / 0x1c8: +0xfc / +0xfd, set by untraced AI events) has no
-		// counterpart.
+		// for this think with its timer reset (0x1006a3a7). The walk is the
+		// type's whole list, messages answered before too (the loop asks no
+		// answered flag; 0x100a61c0 only gates it), as here; roger_that's
+		// 2 s send period (queueRadio) lets one reply through. The next
+		// think waits again, a fresh 10 s, while a passenger still
+		// qualifies, as retail's does. Retail's "negative" (7) while
+		// holding (bot slots 0x1c0 / 0x1c8: +0xfc / +0xfd, set by untraced
+		// AI events) has no counterpart.
 		if (answerRadio(bot, 11)) {
 			const GameWorld::PlayerInfo* waited = bot.idlePassenger >= 0 ? playerOf(bot.idlePassenger) : nullptr;
 			for (const Bot::Radio& r : bot.radio) {

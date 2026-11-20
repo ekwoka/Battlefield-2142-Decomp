@@ -78,6 +78,8 @@ struct BotManager::TitanGrid {
 	std::vector<int> landing;                      // titanLandingSpots' cells
 	bool landingDone = false;
 	std::map<uint32_t, std::pair<physics::Vec3, float>> seeds; // a moving thing's field (a boarder, a deck aircraft): where it was (Titan frame) and when it was made
+	// titanRepair's, by part: its armour's material and its meshes (the Titan's frame; titanPartMeshes).
+	std::map<uint32_t, std::pair<uint32_t, std::vector<physics::Vec3>>> repairParts;
 
 	// Where that thing's field is made about: where it is, once it has moved 3 m and its field is a second old (dropped then).
 	const physics::Vec3& seedOf(uint32_t key, const physics::Vec3& at, float now)
@@ -442,7 +444,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 				return true;
 			}
 			std::vector<const GameWorld::TitanPartInfo*> posts;
-			for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan->team)) {
+			for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan->team, titan->object)) {
 				if (part.kind == GameWorld::TitanPartInfo::Console && !part.wreck) {
 					posts.push_back(&part);
 				}
@@ -503,7 +505,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		}
 	}
 	// The objective: the cheapest whole console to reach; none left, the core.
-	const std::vector<GameWorld::TitanPartInfo> parts = m_world.titanParts(titan->team);
+	const std::vector<GameWorld::TitanPartInfo> parts = m_world.titanParts(titan->team, titan->object);
 	const GameWorld::TitanPartInfo* goal = nullptr;
 	const std::vector<float>* field = nullptr;
 	float best = kInfinity;
@@ -569,10 +571,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 // of the gun's bundle, eu_controlstation_v2_g / _aa) is the gun's to the tool.
 bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan)
 {
-	if (bot.titanRepair) {
-		m_world.setAiAbilityTarget(self.id, 0);
-	}
-	bot.titanRepair = 0;
+	// (Any claim of the last think and the tool's AI target were let go at the top of this one, in BotManager::update.)
 	const int slot = kitSlot(self, WeaponAi::Repair);
 	const world::ObjectTemplate* tool = slot ? m_world.templates().find(weaponName(self, slot)) : nullptr;
 	float reach = 0;
@@ -587,43 +586,60 @@ bool BotManager::titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	}
 	// The tool's material against the part's (applyAbility's cell): the shipped tables give the repair tool (84)
 	// nothing on the consoles' metal (4110) and all on the gun hubs' (4198), in both mods.
-	const auto material = [&](const std::string& name, const char* key) -> uint32_t {
-		const world::ObjectTemplate* t = m_world.templates().find(name);
+	const auto material = [](const world::ObjectTemplate* t, const char* key) -> uint32_t {
 		if (!t) {
 			return 0;
 		}
 		const auto it = t->settings().find(key);
 		return it == t->settings().end() ? 0 : static_cast<uint32_t>(std::atoi(it->second.c_str()));
 	};
-	const uint32_t toolMaterial = material(tool->name(), "ammo.abilityMaterial");
-	const std::vector<GameWorld::TitanPartInfo> parts = m_world.titanParts(titan.team);
+	const uint32_t toolMaterial = material(tool, "ammo.abilityMaterial");
+	// The parts the other engineers hold: two at most to a part.
+	std::map<uint32_t, int> claimed;
+	for (const auto& [id, other] : m_bots) {
+		if (id != self.id && other.titanRepair) {
+			++claimed[other.titanRepair];
+		}
+	}
+	const std::vector<GameWorld::TitanPartInfo> parts = m_world.titanParts(titan.team, titan.object);
 	const GameWorld::TitanPartInfo* goal = nullptr;
 	const std::vector<float>* field = nullptr;
 	float best = kInfinity;
 	physics::Vec3 aimAt;
 	for (const GameWorld::TitanPartInfo& part : parts) {
 		if ((part.kind != GameWorld::TitanPartInfo::Gun && part.kind != GameWorld::TitanPartInfo::Console)
-			|| part.hitPoints >= part.maxHitPoints || !m_world.repairable(part.id)
-			|| (m_world.materials() && m_world.materials()->damageMod(toolMaterial, material(part.name, "armor.defaultMaterial")) <= 0)) {
+			|| part.hitPoints >= part.maxHitPoints || !m_world.repairable(part.id)) {
 			continue;
 		}
-		const int others = static_cast<int>(std::count_if(m_bots.begin(), m_bots.end(),
-			[&](const auto& b) { return b.first != self.id && b.second.titanRepair == part.id; }));
-		if (others >= 2) {
+		if (const auto it = claimed.find(part.id); it != claimed.end() && it->second >= 2) {
+			continue;
+		}
+		// Its armour's material and its meshes, once a grid: neither the template nor the meshes in the Titan's
+		// frame change (a part going down makes a new grid).
+		auto known = g.repairParts.find(part.id);
+		if (known == g.repairParts.end()) {
+			std::vector<physics::Vec3> meshes = m_world.titanPartMeshes(part.id);
+			for (physics::Vec3& mesh : meshes) {
+				mesh = m_world.titanToLocal(titan.object, mesh);
+			}
+			const uint32_t armour = material(m_world.templates().find(part.name), "armor.defaultMaterial");
+			known = g.repairParts.emplace(part.id, std::make_pair(armour, std::move(meshes))).first;
+		}
+		const auto& [armour, meshes] = known->second;
+		if (m_world.materials() && m_world.materials()->damageMod(toolMaterial, armour) <= 0) {
 			continue;
 		}
 		// To any of its meshes (a gun's: its control station inside the hull; the gun itself hangs under it), each
 		// field under its own key (a part's id less 0x10000000, the mesh's number at bit 20): the part's own field
 		// is the shooters' (cells that see it).
-		const std::vector<physics::Vec3> meshes = m_world.titanPartMeshes(part.id);
 		for (size_t k = 0; k < meshes.size() && k < 16; ++k) {
 			const std::vector<float>& f = titanField(g, titan, self.team, (part.id - 0x10000000u) ^ static_cast<uint32_t>(k << 20),
-				m_world.titanToLocal(titan.object, meshes[k]) - physics::Vec3 {0, 0.5f, 0}, true, reach + 1.5f);
+				meshes[k] - physics::Vec3 {0, 0.5f, 0}, true, reach + 1.5f);
 			if (f[static_cast<size_t>(cell)] < best) {
 				best = f[static_cast<size_t>(cell)];
 				goal = &part;
 				field = &f;
-				aimAt = meshes[k];
+				aimAt = m_world.titanToWorld(titan.object, meshes[k]);
 			}
 		}
 	}
@@ -739,7 +755,7 @@ std::vector<physics::Vec3> BotManager::titanLandingSpots(int titanTeam, int team
 		if (!g.landingDone) {
 			g.landingDone = true;
 			std::vector<float> best(g.cells.size(), kInfinity);
-			for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan.team)) {
+			for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan.team, titan.object)) {
 				if ((part.kind == GameWorld::TitanPartInfo::Console || part.kind == GameWorld::TitanPartInfo::Core) && !part.wreck) {
 					const std::vector<float>& f = titanField(g, titan, team, part.id, m_world.titanToLocal(titan.object, part.position));
 					for (size_t c = 0; c < f.size(); ++c) {
@@ -1859,6 +1875,17 @@ bool BotManager::titanBlocksSilos(const GameWorld::TitanInfo& own, const GameWor
 	return false;
 }
 
+bool BotManager::titanOrderBlocksSilos(int team, const physics::Vec3& at) const
+{
+	if (team < 1 || team > 2) {
+		return false;
+	}
+	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
+	const GameWorld::TitanInfo* own = titanOf(titans, team);
+	const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - team);
+	return own && enemy && titanBlocksSilos(*own, *enemy, at, m_titanCommands[team].focus, m_world.missileSilos());
+}
+
 void BotManager::titanCommand()
 {
 	if (!m_settings.titanCommander() || m_world.gameMode() != "gpm_ti") {
@@ -1904,7 +1931,7 @@ void BotManager::titanCommand()
 			float lowest = 0.75f;
 			for (const ControlPoint& cp : m_world.controlPoints()) {
 				const bool silo = std::any_of(silos.begin(), silos.end(), [&](const GameWorld::SiloInfo& s) { return s.controlPoint == cp.id; });
-				if (silo && cp.team == team && cp.flag == team && cp.flagHeight < lowest) {
+				if (silo && cp.object && cp.team == team && cp.flag == team && cp.flagHeight < lowest) {
 					lowest = cp.flagHeight;
 					focus = cp.id;
 					at = {cp.object->position().x, cp.object->position().y, cp.object->position().z};

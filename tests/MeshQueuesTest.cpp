@@ -169,4 +169,6 @@ TEST(MeshQueues_GlowFadesWhileBlocked)
 	CHECK(render::glowFadeStep(0.4f, false, true, 0.1f) == 0.0f);   // below 0: 0
 	CHECK(render::glowFadeStep(1.0f, false, false, 0.01f) == 0.0f); // not drawn last frame
 	CHECK(render::glowFadeStep(0.0f, false, true, 0.1f) == 0.0f);   // stays hidden
+	// A long frame fades at most 6 x 1/15: the loop's clamp (0x0040bd90).
+	CHECK(std::fabs(render::glowFadeStep(1.0f, false, true, render::kRendererFrameSecondsMax) - 0.6f) < 1e-5f);
 }

@@ -221,12 +221,12 @@ private:
 // - 0x37, as it goes down (its event 0x18 in 0x00587b90, 0x00587de8..
 //   0x00587e2e): when it has made no call yet (+0x330 0), said by a
 //   server for a bot (game logic slot 0x144, player slot 0x68) or by the
-//   local player's own game;
+//   local player's own game; it counts (+0x330 1);
 // - 0x36, while down (0x00585df0): a fresh press of c_PIFire (input 8,
-//   the latch +0x358 at 0x00645720), the local player's only, at most 3
-//   (+0x330 counts them).
-// The count is the soldier's: a new soldier starts again (where retail
-// resets +0x330 otherwise is untraced).
+//   the latch +0x358 at 0x00645720), the local player's only, while
+//   +0x330 < 3 (so 2 after the automatic call), each counting.
+// The revive (event 0x19, +0x320 back to 0) clears +0x330; a new soldier
+// starts at 0 too.
 class ReviveCalls {
 public:
 	// A look at `player` (its living soldier, 0 while down; man down or not, the fire held;

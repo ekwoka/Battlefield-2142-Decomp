@@ -88,9 +88,10 @@
 // shown when its own, a friend's or neutral, or alwaysShowOnMinimap, or the
 // enemy's with showOnEnemyMinimap; Minimap.setPaintVehicle filters by
 // vehicleType (0x0077e520). The texture is miniMapIcon (miniMapIconInside
-// while the camera is inside it), its size miniMapIconSize (16 x 16; the
-// inside one), turned by the vehicle; with usePlayerIcon a crewed vehicle
-// is drawn as its occupant instead (slot 0x138).
+// while the camera is inside a Titan, Renderer slot 0x30), its size
+// miniMapIconSize (16 x 16; the inside one), turned by the vehicle; with
+// usePlayerIcon a crewed vehicle is drawn as its occupant instead (slot
+// 0x138).
 #pragma once
 
 #include "Game/GameWorld.h"

@@ -2557,7 +2557,8 @@ public:
 	// Where a part's meshes lie (world): its own node's and those of unarmoured nodes under it (a gun's control
 	// station inside the hull, whose hits are the gun's).
 	std::vector<physics::Vec3> titanPartMeshes(uint32_t part) const;
-	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked, 2 gone (a forcefield that is down).
+	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked (0x00651c60: its wreck
+	// geometry; one of fewer than two is hidden, which the drawing decides by its mesh). (2, gone, isn't given.)
 	int titanPartLook(uint32_t object, const std::string& templateName) const;
 	// The game logic's damage (0x004c0e40) as a shot's hit: through the
 	// armour's rules (a Titan's floors and parts' parent damage), `attacker`
@@ -2740,9 +2741,12 @@ private:
 			float radius = 0; // the LODs' farthest box corner from the part's origin
 			// A Titan's: the TitanMesh whose instance it shares (the node
 			// of the tree with the collision mesh, 0x0063d720's walk), and
-			// whether that mesh is down with its part (rebuildTitanMeshes).
+			// that mesh's state with its parts (rebuildTitanMeshes): out, or
+			// under a wrecked part its sub-geometry 1 (0x006539f0 ->
+			// 0x006e5df0), as a wrecked vehicle's parts are (collisionWrecked).
 			int source = -1;
 			bool off = false;
+			bool wrecked = false;
 			// The instance's other LODs for the mesh physics (the part's
 			// response, 0x005f6a60, in its root's chain, 0x006c0090: the
 			// movers' candidates, 0x006dc7b0, and the soldiers', 0x006c3890),
@@ -2869,6 +2873,10 @@ private:
 			// the look's pitch (input.aimPitch is the look, not a change).
 			physics::Mat3 hullTurn;
 			float pitchOffset = 0;
+			// A driver's barrel on PIPitch without a moving bundle: the look
+			// the input filter (0x005ca2e0, EMP) kept from it, held back from
+			// the look's pitch as the bundle would never have turned by it.
+			float pitchInputLost = 0;
 			float cameraLauncherPitchAnchor = NAN; // gunner look before blocked TV-launcher input
 			uint64_t gunnedTick = 0;    // the last tick its seat was taken (stepGunner)
 			float stabilizedHeading = 0; // the bundle's parent's yaw last undone (stabilizeGunYaws)
@@ -4610,7 +4618,7 @@ private:
 		float destroyOnParentLevel = -1, destroyOnRootLevel = -1, onlyFromChildrenLevel = -100;
 		float criticalTime = 0; // +0xf0: seconds burnt since the last loss
 		int state = 0;          // vtable 0x60 (0x00651c20): 0 alive, 1 wreck, 2 destroyed
-		bool off = false;       // its subtree's collision gone (0x00651c60)
+		bool off = false;       // a wreck: its subtree's instances at their wreck sub-geometry (0x006539f0)
 		bool addNametagOnDestroy = false; // armor.addNametagOnDestroy (+0x195)
 		float healthActivationLevel = 100; // nametag.healthActivationLevel (+0x24)
 		int nametagPushes = 0;
@@ -4655,11 +4663,12 @@ private:
 		int node = -1;  // the template node's part (its armour's or its armoured ancestor's)
 		std::vector<int> chain; // the parts it lies under (its collision goes with any of them)
 		int groups = 0;         // collisionGroups: 0x100 / 0x200 a team's own forcefield (PAC's, EU's)
-		// Its LODs' parts, made once (rebuildTitanMeshes): they depend on
+		// Its LODs' parts per sub-geometry (0 whole, 1 a wreck's,
+		// 0x006e5df0), each made once (rebuildTitanMeshes): they depend on
 		// the mesh and its place in the Titan only, not on which parts are
 		// down.
-		std::vector<std::shared_ptr<const TitanLodPart>> lodParts;
-		bool lodPartsMade = false;
+		std::vector<std::shared_ptr<const TitanLodPart>> lodParts[2];
+		bool lodPartsMade[2] = {false, false};
 	};
 	struct Titan {
 		uint32_t object = 0;
@@ -4725,13 +4734,14 @@ private:
 		bool meshesDirty = true;
 		uint32_t meshVersion = 0; // rebuildTitanMeshes' count (titanMeshVersion)
 		// Each rebuild's change to the soldier faces (titanMeshChange): the
-		// meshes live at the last rebuild, and the recent rebuilds' boxes.
+		// meshes' states at the last rebuild (titanMeshState: -1 out, 0
+		// whole, 1 a wreck's sub-geometry), and the recent rebuilds' boxes.
 		struct MeshChange {
 			uint32_t version = 0;
 			bool known = false, changed = false;
 			physics::Vec3 low, high;
 		};
-		std::vector<char> meshesLive;
+		std::vector<int> meshesLive;
 		std::vector<MeshChange> meshChanges;
 		uint32_t serial = 0;      // its parts' ids: kTitanPartIds + serial << 12 + part
 		std::vector<int> seatParts; // each gun seat's armour (its hub's first armoured node), -1 for none
@@ -4814,7 +4824,10 @@ private:
 	// mesh (its gun hubs' cannons: 0x0063d720 -> 0x0063ccc0 with that
 	// node's mesh), as the body's posed parts (PartCollision.cpp).
 	void buildTitanCollisionParts(Titan& titan, Body& body);
-	static std::vector<std::shared_ptr<const TitanLodPart>> titanLodParts(const TitanMesh& m, uint32_t owner);
+	static std::vector<std::shared_ptr<const TitanLodPart>> titanLodParts(const TitanMesh& m, uint32_t owner, size_t state);
+	// A mesh's collision with its parts (0x006539f0 over a wrecked part's
+	// subtree): 0 whole, 1 its wreck sub-geometry, -1 out of the rays.
+	static int titanMeshState(const Titan& titan, const TitanMesh& m);
 	Titan* titanByObject(uint32_t object);
 	const Titan* titanByObject(uint32_t object) const;
 	bool titanPart(uint32_t id, Titan*& titan, int& part);

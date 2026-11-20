@@ -1152,8 +1152,11 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const bool mine = me.alive && me.vehicle == vehicle.object;
 		const auto relation = dice::hfe::menu::vehicleRelation(occupied, mine, occupantTeam, object->team(), me.team);
 		dice::hfe::menu::VehicleMarker look;
-		const bool inside = vehicle.object == minimapTitan || (mine && !icons.iconInside.empty()
-			&& !round.isTitan(vehicle.object) && !round.isRemoteTitan(vehicle.object));
+		// miniMapIconInside (0x0077dd70: slot 0x50 with Renderer slot 0x30,
+		// the camera inside a Titan): every vehicle that has one while the
+		// camera is inside any Titan, on any map; whose vehicle it is plays
+		// no part.
+		const bool inside = insideTitan != 0;
 		if (!dice::hfe::menu::vehicleMarker(t, relation, inside, false, look) || (look.asPlayer && occupied)) {
 			continue;
 		}
@@ -5472,6 +5475,10 @@ int runGame(Options& options, Session& session)
 			sayRadio(v->channel, v->voice, 0, false);
 			heardCall(hudLocal(), code, true);
 		};
+		// The console's Radio.callFor* outlive this round's locals the call holds.
+		struct SayCallReset {
+			~SayCallReset() { g_sayCall = [](int) {}; }
+		} sayCallReset;
 		for (const auto& [command, code] : std::vector<std::pair<const char*, int>> {
 				 {"Radio.callForMedic", nametags::CallMedic}, {"Radio.callForAmmo", nametags::CallAmmo},
 				 {"Radio.callForRepair", nametags::CallRepair}}) {
@@ -9856,7 +9863,10 @@ int runGame(Options& options, Session& session)
 				if (!hudPlayer(hudLocal(), me) || !me.commander) closeCommander();
 			}
 			const auto& eye = tagView.position;
-			const uint32_t insideTitan = tagViewSeen && !commanderScreen ? round.cameraTitan({eye[0], eye[1], eye[2]}) : 0;
+			// The frame's camera inside a Titan (RendDX9 +0x895, set as each scene
+			// begins in 0x1002cef0; Renderer slot 0x30, 0x10030880): the commander
+			// screen's overhead picture leaves the camera the player's.
+			const uint32_t insideTitan = tagViewSeen ? round.cameraTitan({eye[0], eye[1], eye[2]}) : 0;
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading, insideTitan);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the

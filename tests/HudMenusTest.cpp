@@ -1595,7 +1595,8 @@ TEST(HudVehicle_HorizonAndClimb)
 
 // The revive calls of a soldier that is down (0x00587b90, 0x00585df0): 0x37
 // as he goes down with no call made, 0x36 for each fresh fire press while
-// down, at most 3; none where this game doesn't say his calls; a new
+// down, while fewer than 3 calls are made (the automatic one counts); none
+// where this game doesn't say his calls; a revive (event 0x19) or a new
 // soldier counts again.
 TEST(Radio_ReviveCalls)
 {
@@ -1611,10 +1612,16 @@ TEST(Radio_ReviveCalls)
 		manual += calls.step(1, 0, true, true, true) == 0x36;
 		calls.step(1, 0, true, false, true);
 	}
-	CHECK(manual == 3);
-	calls.step(1, 10, false, false, true); // revived
-	CHECK(calls.step(1, 0, true, false, true) == 0); // down again, calls made: no automatic one
-	calls.step(1, 0, false, false, true);            // dead
+	CHECK(manual == 2); // +0x330 < 3 with the automatic call counted
+	calls.step(1, 10, false, false, true); // revived: +0x330 cleared
+	CHECK(calls.step(1, 0, true, false, true) == 0x37); // down again: the automatic call again
+	manual = 0;
+	for (int i = 0; i < 5; ++i) {
+		manual += calls.step(1, 0, true, true, true) == 0x36;
+		calls.step(1, 0, true, false, true);
+	}
+	CHECK(manual == 2);
+	calls.step(1, 0, false, false, true); // dead
 	CHECK(calls.step(1, 11, false, false, true) == 0); // a new soldier
 	CHECK(calls.step(1, 0, true, false, true) == 0x37);
 	CHECK(calls.step(2, 20, false, false, false) == 0); // another game's player

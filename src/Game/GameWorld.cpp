@@ -3643,6 +3643,36 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 	}
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
 	const physics::Vec3 heading = speed > 1e-4f ? p.velocity * (1.0f / speed) : physics::Vec3 {0, 0, 1};
+	// ignoreFriendly (0x004cf337 .. 0x004cf38b): only a target whose root
+	// has a control object (0x0042b2f0, interface 0xc4c5: a vehicle, or a
+	// soldier, the player's) is friendly, by that one's team (slot 0x9c)
+	// against the shooter's control object's (param_6, the round's +0x184
+	// slot 0x48 at 0x005ebf2e), or with none (gone) against the round's
+	// team (param_13, slot 0x60 at 0x005ebf0a) when above 0. As
+	// stepWeaponLock's.
+	const auto controlTeam = [this](const world::Object& root, int& team) {
+		if (sameName(root.objectTemplate()->typeName(), "PlayerControlObject")) {
+			team = lockTargetTeam(root);
+			return true;
+		}
+		for (const auto& player : m_players) {
+			if (player->present && player->alive && (player->object == root.id() || player->vehicle == root.id())) {
+				team = player->team;
+				return true;
+			}
+		}
+		return false;
+	};
+	int shooterTeam = 0;
+	const world::Object* shooter = p.shooter ? m_objects.find(p.shooter) : nullptr;
+	const bool shooterControl = shooter && shooter->objectTemplate() && controlTeam(*shooter, shooterTeam);
+	const auto friendly = [&](const world::Object& target) {
+		int team = 0;
+		if (!s.ignoreFriendly || !controlTeam(target, team)) {
+			return false;
+		}
+		return shooterControl ? team == shooterTeam : p.team > 0 && team == p.team;
+	};
 	const auto query = [&](float range) -> uint32_t {
 		uint32_t best = 0;
 		float cheapest = 9999; // 0x004cf290's local_28
@@ -3650,7 +3680,7 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 			const world::Object* o = owned.get();
 			if (!o || o->id() == p.shooter || o->destroyed() || o->hidden() || !o->objectTemplate()
 				|| !targetObjectOf(*o->objectTemplate(), s.seekTargetType) || !targetEnabled(*o, s.seekTargetType)
-				|| (s.ignoreFriendly && p.team > 0 && lockTargetTeam(*o) == p.team)) {
+				|| friendly(*o)) {
 				continue;
 			}
 			const physics::Vec3 at {o->position().x, o->position().y, o->position().z};
@@ -8309,6 +8339,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 	}
 	victim.alive = false;
 	victim.spawnRequested = false;
+	victim.aiAbilityTarget = 0; // revived, its AI names the target again (a new life starts from Player(): spawnSoldier)
 	victim.vehicle = 0;
 	victim.seat = -1;
 	// The wait (0x004bb220: player slot 0x108 x sv.spawnTime x 30 ticks):
@@ -12827,7 +12858,24 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		if (const uint32_t target = found.empty() && holder && holder->ai ? holder->aiAbilityTarget : 0; target && !ability.ammo && !soldiersOnly) {
 			const world::Object* o = m_objects.find(target);
 			const bool own = titanPart(target, titan, index) ? index > 0 && titan->team == team : o && (o->team() == team || o->team() == 0);
-			if (own && repairable(target) && hurt(target)) {
+			// Within the ability's reach of the eyes (a part's: of one of its meshes), 3 m over for where the
+			// bot's walk stops (titanRepair: within reach + 1.5 m of a mesh, its eyes a metre over the cell).
+			// 0x005d84a0 asks no distance, its AI naming the target only there; the port's guard, for a
+			// target a stale claim kept.
+			const float slackReach = ability.radius + 3;
+			const auto within = [&](const physics::Vec3& p, float extra) {
+				return physics::lengthSquared(p - at) <= (slackReach + extra) * (slackReach + extra);
+			};
+			bool close = false;
+			if (target >= kTitanPartIds) {
+				for (const physics::Vec3& mesh : titanPartMeshes(target)) {
+					close = close || within(mesh, 0);
+				}
+			} else if (o) {
+				const Body* body = findBody(target);
+				close = within({o->position().x, o->position().y, o->position().z}, body ? body->objectRadius : 0);
+			}
+			if (own && close && repairable(target) && hurt(target)) {
 				found.push_back(target);
 			}
 		}
@@ -13939,9 +13987,24 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			gun.pitchOffset = seat.ignoreParentPitch != 0 && low <= high
 				? std::clamp(gun.pitchOffset, low - player.input.aimPitch, high - player.input.aimPitch)
 				: 0.0f;
+			// The filter scales the pitch input (0x005ca2e0), not the angle:
+			// a person's barrel takes pitchScale of this tick's look change,
+			// and the rest stays lost (held back from the look, within the
+			// limits). A bot's pitch is the angle it wants: its step there
+			// this tick is the input, scaled the same way.
+			if (!continuing || !seat.pitchUsesDriverInput) {
+				gun.pitchInputLost = 0;
+			} else if (!player.ai && !gun.pitchBlocked) {
+				gun.pitchInputLost += lookPitchChange * (1 - pitchScale);
+				if (low <= high) {
+					const float aim = player.input.aimPitch + gun.pitchOffset - seat.restPitch;
+					gun.pitchInputLost = std::clamp(gun.pitchInputLost, aim - high, aim - low);
+				}
+			}
 			if (!gun.pitchBlocked) {
-				const float wanted = std::clamp(player.input.aimPitch + gun.pitchOffset - seat.restPitch, low, high);
-				gun.pitch = wanted * pitchScale + gun.pitch * (1 - pitchScale);
+				const float wanted =
+					std::clamp(player.input.aimPitch + gun.pitchOffset - gun.pitchInputLost - seat.restPitch, low, high);
+				gun.pitch = player.ai ? gun.pitch + (wanted - gun.pitch) * pitchScale : wanted;
 			}
 		}
 	}
@@ -16037,8 +16100,8 @@ void GameWorld::soldierMovers(const physics::Vec3& origin, int team, uint32_t ve
 		// frame now (0x006c3890 with the part's instance, PartCollision.cpp).
 		if (!b.partMeshes.empty()) {
 			poseCollisionParts(b);
-			const size_t state = b.collisionWrecked ? 1 : 0;
 			for (const Body::PartMesh& part : b.partMeshes) {
+				const size_t state = b.collisionWrecked || part.wrecked ? 1 : 0;
 				if (part.off || !part.physics[state].soldier) {
 					continue;
 				}

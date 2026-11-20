@@ -495,6 +495,9 @@ void OpenALSample::update()
 			!isFinite(velocity)) {
 			velocity = {};
 		}
+		if (enhancedAudioEnabled()) {
+			velocity = enhancedDopplerVelocity(velocity, engine.dopplerFactor()); // no Doppler singularity
+		}
 		// Enhanced mode: the scene's occlusion goes on as a filter (EnhancedAudio.h).
 		// Head-relative sounds (first-person weapons) play at the listener whatever their position says.
 		if (!garbage && !snd.headRelative()) {

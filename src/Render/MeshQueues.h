@@ -72,6 +72,9 @@ inline bool meshCulled(bool bundledOrSkinned, bool blended, bool leaf)
 // 0x100c4b07) while it was drawn the frame before, else to 0. At or below
 // kGlowShown the material isn't drawn (0x100c4b76).
 constexpr float kGlowShown = 1.1920929e-7f;
+// The frame's seconds the renderer gets (+0x5d8, the `seconds` here) at most:
+// BF2142.exe's loop (0x0040bd90) clamps its frame time to 1/15 s (0x3d888889).
+constexpr float kRendererFrameSecondsMax = 1.0f / 15.0f;
 inline float glowFadeStep(float fade, bool seen, bool drawnLastFrame, float seconds)
 {
 	if (seen) {

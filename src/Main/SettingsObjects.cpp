@@ -32,10 +32,12 @@ int audioVoiceCount(const std::string& quality, double overrideCount)
 	if (overrideCount >= 1 && overrideCount <= std::numeric_limits<int>::max()) {
 		return static_cast<int>(overrideCount);
 	}
+	// 0x00925e28: Low 16, Medium 32, High 64, UltraHigh 128. The port's provider
+	// is always the software one ("0"), and for a provider other than 3 or 4
+	// 0x00496830 first rewrites UltraHigh as High: 64.
 	const std::string name = audioQualityName(quality);
 	if (name == "low") return 16;
-	if (name == "high") return 64;
-	if (name == "ultrahigh") return 128;
+	if (name == "high" || name == "ultrahigh") return 64;
 	return 32;
 }
 

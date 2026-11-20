@@ -186,6 +186,15 @@ bool BotManager::hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWor
 	if (seats.empty() || !m_world.insideCombatArea(self.id)) {
 		return false;
 	}
+	// A new seat: a new hunt (no target, run or break-off carried over from the last).
+	if (bot.huntSeating != bot.seatedAt) {
+		bot.huntSeating = bot.seatedAt;
+		bot.huntPlayer = -1;
+		bot.huntPart = 0;
+		bot.huntPickAt = bot.huntLegAt = -1e9f;
+		bot.huntLeg = 0;
+		bot.huntAway = false;
+	}
 	float bestStrength[8] = {};
 	for (const GameWorld::SeatWeapon& w : seats[0].weapons) {
 		if (w.weapon.empty() || (!m_settings.weapons.empty() && !m_settings.weapons.count(lower(w.aiTemplate)))) {
@@ -227,67 +236,87 @@ bool BotManager::hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWor
 		c.ground = types ? (types & kITGround) != 0 : !p.vehicle;
 		c.air = (types & kITAir) != 0;
 	};
+	// The scan: every candidate when the target is chosen (every 2 s), else the held one alone, kept up to date
+	// (scored only for the choice).
 	std::vector<Candidate> candidates;
-	for (const GameWorld::PlayerInfo& p : m_players) {
-		physics::Vec3 where;
-		if (!p.alive || p.team != enemy || !knownAt(p, where) || horizontal(where - at) > 700) {
-			continue;
-		}
-		Candidate c;
-		describe(p, c);
-		c.position = where + physics::Vec3 {0, p.vehicle ? 1.0f : 0.9f, 0};
-		const float strength = bestStrength[c.type];
-		if (strength <= 0 || c.type == 6) {
-			continue; // nothing to hurt it with, or a Titan's gunner
-		}
-		float score = strength / (1 + horizontal(where - at) / 250);
-		if (!p.vehicle) {
-			for (const GameWorld::PlayerInfo& q : m_players) {
-				score += q.id != p.id && q.alive && q.team == enemy && !q.vehicle
-						&& physics::lengthSquared(q.position - p.position) < 20 * 20
-					? 0.5f * strength / (1 + horizontal(where - at) / 250)
-					: 0.0f;
-			}
-		}
-		c.score = c.air ? score * 0.5f : score;
-		candidates.push_back(c);
-	}
-	for (const GameWorld::TitanInfo& titan : m_world.titans()) {
-		if (titan.team != enemy || titan.wreck) {
-			continue;
-		}
-		for (const GameWorld::TitanPartInfo& part : m_world.titanParts(enemy)) {
-			if (part.kind != GameWorld::TitanPartInfo::Gun || part.wreck || part.hitPoints <= 0
-				|| horizontal(part.position - at) > 700) {
+	const auto scan = [&](bool all) {
+		candidates.clear();
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			physics::Vec3 where;
+			if ((!all && p.id != bot.huntPlayer) || !p.alive || p.team != enemy || !knownAt(p, where) || horizontal(where - at) > 700) {
 				continue;
 			}
 			Candidate c;
-			c.part = part.id;
-			c.position = part.position;
-			c.velocity = titan.velocity;
-			c.type = 6;
-			c.ground = false; // hits it from below: no closest-approach wait wanted, but it is no ITGround object
-			c.score = 4 / (1 + horizontal(part.position - at) / 250);
+			describe(p, c);
+			c.position = where + physics::Vec3 {0, p.vehicle ? 1.0f : 0.9f, 0};
+			const float strength = bestStrength[c.type];
+			if (strength <= 0 || c.type == 6) {
+				continue; // nothing to hurt it with, or a Titan's gunner
+			}
+			float score = strength / (1 + horizontal(where - at) / 250);
+			if (all && !p.vehicle) {
+				for (const GameWorld::PlayerInfo& q : m_players) {
+					score += q.id != p.id && q.alive && q.team == enemy && !q.vehicle
+							&& physics::lengthSquared(q.position - p.position) < 20 * 20
+						? 0.5f * strength / (1 + horizontal(where - at) / 250)
+						: 0.0f;
+				}
+			}
+			c.score = c.air ? score * 0.5f : score;
 			candidates.push_back(c);
 		}
-	}
+		if (!all && !bot.huntPart) {
+			return;
+		}
+		for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+			if (titan.team != enemy || titan.wreck) {
+				continue;
+			}
+			for (const GameWorld::TitanPartInfo& part : m_world.titanParts(enemy, titan.object)) {
+				if ((!all && part.id != bot.huntPart) || part.kind != GameWorld::TitanPartInfo::Gun || part.wreck
+					|| part.hitPoints <= 0 || horizontal(part.position - at) > 700) {
+					continue;
+				}
+				Candidate c;
+				c.part = part.id;
+				c.position = part.position;
+				c.velocity = titan.velocity;
+				c.type = 6;
+				c.ground = false; // hits it from below: no closest-approach wait wanted, but it is no ITGround object
+				c.score = 4 / (1 + horizontal(part.position - at) / 250);
+				candidates.push_back(c);
+			}
+		}
+	};
 	const Candidate* current = nullptr;
 	const Candidate* best = nullptr;
-	for (const Candidate& c : candidates) {
-		if ((bot.huntPlayer >= 0 && c.player == bot.huntPlayer) || (bot.huntPart && c.part == bot.huntPart)) {
-			current = &c;
+	const auto find = [&] {
+		current = best = nullptr;
+		for (const Candidate& c : candidates) {
+			if ((bot.huntPlayer >= 0 && c.player == bot.huntPlayer) || (bot.huntPart && c.part == bot.huntPart)) {
+				current = &c;
+			}
+			if (!best || c.score > best->score) {
+				best = &c;
+			}
 		}
-		if (!best || c.score > best->score) {
-			best = &c;
-		}
+	};
+	bool choose = m_time >= bot.huntPickAt || (bot.huntPlayer < 0 && !bot.huntPart);
+	scan(choose);
+	find();
+	if (!choose && !current) {
+		choose = true; // the held target lost: the choice now
+		scan(true);
+		find();
 	}
-	if (m_time >= bot.huntPickAt || !current) {
+	if (choose) {
 		bot.huntPickAt = m_time + 2;
 		const Candidate* pick = current && best && best->score <= current->score * 1.3f ? current : best;
 		if (pick != current) {
 			bot.huntPlayer = pick ? pick->player : -1;
 			bot.huntPart = pick ? pick->part : 0;
 			bot.huntLeg = 0;
+			bot.huntAway = false;
 			bot.heliOnTarget.reset();
 		}
 		current = pick;
@@ -321,9 +350,13 @@ bool BotManager::hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWor
 		}
 		const physics::Vec3 ahead = flat(vehicle.forward);
 		// Placed at the start, or anywhere 0.5..1.2 stand-offs off with the
-		// nose on it (the run's height hold makes up the height).
-		const bool placed = horizontal(start - at) < 40
-			|| (dist > 0.5f * standOff && dist < 1.2f * standOff && physics::dot(flat(to), ahead) > 0.85f);
+		// nose on it (the run's height hold makes up the height). After a
+		// break-off, not before it has been out of that band or turned its
+		// nose away, or 10 s on: a run timed out there went straight back
+		// in, never breaking off.
+		const bool lined = dist > 0.5f * standOff && dist < 1.2f * standOff && physics::dot(flat(to), ahead) > 0.85f;
+		bot.huntAway = bot.huntAway && lined && m_time - bot.huntLegAt < 10;
+		const bool placed = !bot.huntAway && (horizontal(start - at) < 40 || lined);
 		if (placed) {
 			bot.huntLeg = 1;
 			bot.huntLegAt = m_time;
@@ -337,6 +370,8 @@ bool BotManager::hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWor
 	if (dist < 50 || dir.y < -0.55f || dir.y > 0.33f || physics::dot(flat(to), flat(vehicle.forward)) < 0.2f
 		|| m_time - bot.huntLegAt > 30) {
 		bot.huntLeg = 0; // break off: on and away, then set up again
+		bot.huntLegAt = m_time;
+		bot.huntAway = true;
 		pilot.flyTo(aiVec(at + flat(vehicle.forward) * 150.0f + physics::Vec3 {0, 15, 0}), 25);
 		return true;
 	}
