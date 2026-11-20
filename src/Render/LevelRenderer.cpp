@@ -940,6 +940,14 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 	}
 }
 
+// A part's name for LevelSources::partPose: under a RotationalBundle, that
+// bundle's name first ("<bundle>/<part>"), which tells apart parts several
+// seats share by name (a Titan's guns' barrels under each gun's own base).
+static std::string poseName(const world::ObjectTemplate* parent, const std::string& part)
+{
+	return parent && parent->typeName() == "RotationalBundle" ? parent->name() + "/" + part : part;
+}
+
 Mat4 LevelRenderer::posedLocal(const world::ObjectTemplate& root, const std::vector<uint16_t>& path, uint32_t object) const
 {
 	Mat4 local;
@@ -956,7 +964,7 @@ Mat4 LevelRenderer::posedLocal(const world::ObjectTemplate& root, const std::vec
 			Mat4 boned;
 			std::copy(bone.begin(), bone.end(), boned.m.begin());
 			m = boned * local;
-		} else if (m_sources->partPose && m_sources->partPose(object, child.name, offset, rotation)) {
+		} else if (m_sources->partPose && m_sources->partPose(object, poseName(t, child.name), offset, rotation)) {
 			m = objectTransform(offset, rotation) * m;
 		}
 		local = m;
@@ -1097,7 +1105,7 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 			// boneIndex (0x0063d470 -> the part's slot 0xe8): the bone's
 			// local matrix is the part's.
 			std::copy(bone.begin(), bone.end(), node.m.begin());
-		} else if (object != 0 && sources.partPose && sources.partPose(object, child.name, offset, rotation)) {
+		} else if (object != 0 && sources.partPose && sources.partPose(object, poseName(&objectTemplate, child.name), offset, rotation)) {
 			// A Spring with rotateUV keeps its mesh unturned: 0x006cace0
 			// and 0x006b7261 skip the set rotation (0x00614b50); its
 			// texture turns instead (AnimatedUV.h).
