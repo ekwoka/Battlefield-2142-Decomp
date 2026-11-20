@@ -20,7 +20,10 @@ inline void appendCommanderMapMarkers(std::vector<hud::HudManager::MapMarker>& m
 	physics::Vec3 uav;
 	float uavRadius = 0;
 	if (round.uavArea(team, uav, uavRadius)) {
-		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 16});
+		// 0x0078f060: a white (0x00a0bfc0) ring over the UAV's whole area, not its icon.
+		markers.push_back({"Ingame/Minimap/icon_uav_circle.tga", uav.x, uav.z, 0});
+		markers.back().worldSize = 2 * uavRadius;
+		markers.back().radar = true;
 		markers.back().upright = true;
 	}
 

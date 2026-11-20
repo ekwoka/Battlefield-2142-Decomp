@@ -255,6 +255,10 @@ public:
 		// 0x0078eea0): the size times 1 - 0.18 / 2 + 0.18 sin(4 t), t the
 		// map's pulse clock (0x007791a0, +0xaa4 / +0xaa8 / +0xaac).
 		bool pulse = false;
+		// The UAV's scan ring (0x0078f060): grows from nothing to its size
+		// while fading out, f = the pulse clock's phase (4 rad/s over 2 pi):
+		// side times f, alpha times 1 - f.
+		bool radar = false;
 	};
 	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
 	static constexpr float kSpawnMarkerSize = 16.0f;

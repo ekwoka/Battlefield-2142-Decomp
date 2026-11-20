@@ -820,7 +820,7 @@ TEST(Commander_MapMarkersUseOwningTeamAndToolTint)
 			for (const Marker& mark : marks) {
 				CHECK(mark.x == team * 100.0f && mark.upright);
 			}
-			CHECK(marks[0].texture == "Ingame/Minimap/Icons/icon_UAV.tga");
+			CHECK(marks[0].texture == "Ingame/Minimap/icon_uav_circle.tga" && marks[0].radar && marks[0].worldSize > 0);
 			CHECK(marks[0].color[0] == 1 && marks[0].color[1] == 1 && marks[0].color[2] == 1);
 			CHECK(marks[2].texture == "Ingame/Commander/tools/orbit_strike.tga");
 			CHECK(marks[4].texture == "Ingame/Commander/tools/force_strike.tga");
@@ -847,7 +847,7 @@ TEST(Commander_MapMarkersUseOwningTeamAndToolTint)
 		field.run(23);
 		CHECK(world.supplyCrates().size() == 2);
 		dice::hfe::main::appendCommanderMapMarkers(marks, world, 1);
-		CHECK(marks.size() == 1 && marks.front().texture == "Ingame/Minimap/Icons/icon_UAV.tga");
+		CHECK(marks.size() == 1 && marks.front().texture == "Ingame/Minimap/icon_uav_circle.tga");
 	}
 }
 

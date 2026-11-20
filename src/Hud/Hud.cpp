@@ -2015,7 +2015,9 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		// scale (0x00785836). Fixed-size aircraft must not drift off its deck.
 		const float scaleX = marker.zoomWithMap ? 0.7f * mapW / m_mapReference[0] : 1.0f;
 		const float scaleY = marker.zoomWithMap ? 0.7f * mapH / m_mapReference[1] : 1.0f;
-		const float pulse = marker.pulse ? mapPulseScale() : 1.0f;
+		// shortcut: the ring's phase is the map's pulse clock, not one reset when the UAV goes up (retail +0xb5c); the same 4 rad/s.
+		const float radar = marker.radar ? 4 * m_mapPulseTime / 6.2831853f : 1.0f;
+		const float pulse = (marker.pulse ? mapPulseScale() : 1.0f) * radar;
 		const float pixels = (marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX) * pulse;
 		const float height = marker.height > 0 ? marker.height * scaleY * pulse : pixels;
 		const float offsetX = marker.offsetX * scaleX, offsetY = marker.offsetY * scaleY;
@@ -2029,7 +2031,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
-			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
+			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f) * (marker.radar ? 1 - radar : 1.0f)},
 			marker.upright ? 0.0f : marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
