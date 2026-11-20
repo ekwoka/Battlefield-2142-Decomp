@@ -2171,11 +2171,13 @@ std::vector<GameWorld::VehicleInfo> GameWorld::vehicleList()
 			continue;
 		}
 		const VehicleLayout& layout = vehicleLayout(*object->objectTemplate());
+		// A silo's fixed body has a layout seat but no entry (mayEnter): none free for the bots.
+		const bool enterable = !flag(*object->objectTemplate(), "isMissileSilo", false);
 		int free = 0;
-		for (size_t i = 0; i < layout.seats.size(); ++i) {
+		for (size_t i = 0; enterable && i < layout.seats.size(); ++i) {
 			free += i >= body.occupants.size() || body.occupants[i] < 0 ? 1 : 0;
 		}
-		const bool driverFree = !layout.seats.empty() && (body.occupants.empty() || body.occupants[0] < 0);
+		const bool driverFree = enterable && !layout.seats.empty() && (body.occupants.empty() || body.occupants[0] < 0);
 		list.push_back({body.object, body.body.position, body.body.rotation.yawPitchRoll().x, free, driverFree,
 			body.wreckTime < 0, // a wreck only: AIDLL 0x1006c520 has no EMP input, so an EMP never turns the crew out
 			body.body.velocity, body.body.angularVelocity, body.body.rotation.rows[2], body.body.rotation.rows[0], {}, {}});
@@ -13497,6 +13499,11 @@ bool GameWorld::mayEnter(const Body& body, int team) const
 {
 	const world::Object* object = m_objects.find(body.object);
 	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+	// A silo has no EntryPoint (retail enters only through those, 0x005a98e0); its
+	// fixed body (for the turning launcher) would otherwise take the 4 m centre fallback.
+	if (t && flag(*t, "isMissileSilo", false)) {
+		return false;
+	}
 	if (!t || object->team() == team || object->team() == 0 || !sameName(t->typeName(), "PlayerControlObject")) {
 		return true;
 	}

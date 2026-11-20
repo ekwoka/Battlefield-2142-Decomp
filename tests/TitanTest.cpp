@@ -459,6 +459,50 @@ TEST(Titan_SiloCapturePreservesMagazineAndTurnsLauncher)
 	}
 }
 
+// A silo has no EntryPoint (retail enters only through those, 0x005a98e0):
+// its fixed body must not take a soldier standing on it, whoever owns it.
+TEST(Titan_SiloTakesNoSoldier)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		const auto silos = level.world->missileSilos();
+		CHECK(!silos.empty());
+		if (silos.empty()) continue;
+		const auto silo = silos.front();
+		for (const auto& v : level.world->vehicleList()) {
+			if (v.object == silo.object) {
+				CHECK(v.freeSeats == 0 && !v.driverFree); // the bots don't head for it
+			}
+		}
+		level.world->setControlPointTeam(silo.controlPoint, 1);
+		level.run(0.1f);
+		CHECK(level.world->spawnPlayer(1) != nullptr);
+		game::GameWorld::PlayerInfo me;
+		CHECK(level.world->playerInfo(level.world->localPlayer(), me));
+		for (int k = 0; k < 4; ++k) {
+			const float angle = static_cast<float>(k) * 1.5707963f;
+			level.world->setSoldierPosition(me.soldier,
+				{silo.position.x + 1.5f * std::sin(angle), silo.position.y, silo.position.z + 1.5f * std::cos(angle)});
+			level.run(1.0f / 30.0f);
+			CHECK(!level.world->vehicleInReach(level.world->localPlayer()));
+			game::SoldierInput use;
+			use.use = true;
+			level.world->setPlayerInput(use);
+			level.run(1.0f / 30.0f);
+			level.world->setPlayerInput({});
+			level.run(1.0f / 30.0f);
+			CHECK(level.world->playerVehicle() == nullptr);
+		}
+	}
+}
+
 // A loaded silo taken by PAC fires its missile at EU's Titan, which hits it: 110000 damage (msilo_missile
 // against veh_titan_armor, cell 1) less what passing the penetrable shield
 // took (material 4112: its thickness x damageLoss 1000, at least 1000) off
