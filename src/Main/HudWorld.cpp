@@ -819,6 +819,11 @@ std::vector<int> RemoteHudWorld::revealedPlayers(int) const
 	return m_world.radarPlayers();
 }
 
+std::vector<int> RemoteHudWorld::squadReportedPlayers() const
+{
+	return m_world.squadReportedPlayers();
+}
+
 std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
 {
 	std::vector<uint32_t> out;

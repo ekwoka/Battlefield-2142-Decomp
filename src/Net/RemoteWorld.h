@@ -460,6 +460,18 @@ public:
 		return vehicles;
 	}
 	uint32_t radarReports() const { return m_radarReports; }
+	// The enemies those reports alone reveal (no radio spots), while their
+	// seconds last: 0x00508590's NametagManager slot 0x20, the network marker.
+	std::vector<int> squadReportedPlayers() const
+	{
+		std::vector<int> players;
+		for (const auto& [id, until] : m_squadReports) {
+			if (until > m_tick) {
+				players.push_back(id);
+			}
+		}
+		return players;
+	}
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
 	// The server's rcon answers (data block 7, PlayerAuth.h
 	// kRconFeedbackBlock), each as the console prints it: the text and a
@@ -565,6 +577,7 @@ private:
 	std::vector<TakeableSet> m_takeable;
 	std::map<int, uint32_t> m_radar; // a player -> the server tick it leaves the minimap
 	std::map<uint16_t, uint32_t> m_radarVehicles; // a vehicle's ghost -> the same
+	std::map<int, uint32_t> m_squadReports; // a player the squad reports reveal -> the tick it ends
 	uint32_t m_radarReports = 0;
 	std::vector<PostRemoteInfo> m_messages;
 	std::vector<std::string> m_consoleLines;

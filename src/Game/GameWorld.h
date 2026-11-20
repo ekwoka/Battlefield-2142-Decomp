@@ -1976,6 +1976,20 @@ public:
 	// reports (reportBattlefieldObjects), while their seconds last.
 	std::vector<int> mapSpottedPlayers(int viewer) const;
 	std::vector<uint32_t> mapSpottedVehicles(int viewer) const;
+	// The enemies the viewer's squad reports reveal (kind 0, not the team's
+	// radio spots): the client's 0x00508590 hands each to the NametagManager
+	// (slot 0x20, 0x100f2410 -> 0x100f2080: tag flag 0x800000 until the
+	// reveal time ends), which draws their network marker.
+	std::vector<int> squadReportedPlayers(int viewer) const;
+	// A player's decoy (0x0075bd30, HudManager slot 0x6c: an enabled
+	// TargetObject of targetType TTDecoy whose player he is): the round he
+	// threw carrying one (Bp1_Decoy_Projectile's DecoyObject); its place
+	// and that TargetObject's template, nullptr for none.
+	const world::ObjectTemplate* decoyOf(int player, physics::Vec3& at) const;
+	// Whether any of `viewer`'s squad (him alone without one) has the
+	// networkable HUD's kit / vehicle unlock (RendDX9 0x101691c0: the team's
+	// squad list, slot 0x58, each member's ability block +0x10 / +0x11).
+	void squadNetworkHud(int viewer, bool& showKit, bool& showVehicle) const;
 	size_t mapSpotCount() const { return m_mapSpots.size(); } // the entries kept, live or not yet pruned
 	// Whether a team's squad had a player reported within the last 3 s
 	// (0x100bea30).
@@ -3725,6 +3739,9 @@ private:
 		// an unlock's when not 3 / when set): squadReportAbility.
 		int hudRevealTime = 3;
 		bool hudShowCloaked = false;
+		// networkableHudShowKit / ShowVehicle (+0x10 / +0x11, copied when set):
+		// squadNetworkHud.
+		bool hudShowKit = false, hudShowVehicle = false;
 		// The unlocks' Ability lists: damage taken by projectile material
 		// (setMaterialDamageMod) and per item named by addExtraAmmoItem the
 		// most magazines (an entry's +4) and rounds a magazine (+8) any

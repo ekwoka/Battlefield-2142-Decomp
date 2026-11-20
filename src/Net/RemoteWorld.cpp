@@ -574,6 +574,8 @@ bool RemoteWorld::apply(const GameEvent& event)
 			}
 			uint32_t& until = m_radar[id];
 			until = std::max(until, m_tick + ticks);
+			uint32_t& reported = m_squadReports[id];
+			reported = std::max(reported, m_tick + ticks);
 			if (p != m_players.end() && p->second.alive && p->second.vehicleGhost && seconds > 5) {
 				SpottedInfo spot;
 				spot.spotted = p->second.vehicleGhost;

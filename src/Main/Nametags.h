@@ -52,7 +52,8 @@ struct Settings {
 	float vehicleNametagOffsetFactor = 0.35f; // 0x101f6770
 	float deathFadeOutTime = 0.6f;          // 0x101f6778
 	float manDownFadeOutTime = 14;          // 0x101f6774
-	float playerCullFar = 300;              // getCullDistance(TTPlayer).y, 0x101f67a8
+	float playerCullNear = 100;             // getCullDistance(TTPlayer).x, 0x101f67a8
+	float playerCullFar = 300;              // getCullDistance(TTPlayer).y, 0x101f67ac
 	float aimedFriendlyDistance = 500;      // an aimed-at friendly's range
 	float aimCone = 0.99999f;               // DAT_101f6744, 0x100ef4c0
 	float circleRadius = 0.65f;             // GSNameTagCircleRadius (glueToEdge)
@@ -98,6 +99,50 @@ struct PlayerTagInput {
 float playerTagAlpha(const Settings& settings, const PlayerTagInput& in, Fade& fade, float seconds);
 // The colour index (0x100f0310's end).
 Colour playerTagColour(const PlayerTagInput& in);
+// The network marker (RendDX9 0x10169a70, technique nametag_barIcons, drawn
+// after the names, bars and icons): ICNetworkEnemySmallCircle 0xa3 (the
+// red diamond) over an enemy, ICNetworkFriendlySmallCircle 0xa0 over a
+// friend (0x10169cdf), at the tag's icon point (transform set 0, +0x88),
+// in the tag's colour. For a living, uncloaked player tag (vehicle: its
+// first occupant's) that is not the crosshair's selection (+0xc4), whose
+// text point is in view (+0xc2), not pulled to the screen's edge (+0xc0),
+// and that is revealed by a squad report (flag 0x800000), aimed at (+0xc3)
+// or of the local squad. Unless revealed, its point is only kept while the
+// name shows (0x100f392b: tag alpha over 0.01). The alpha is the renderer's
+// player fade only (FadeOut: 1 to playerCullNear, 0 at playerCullFar), not
+// the name's.
+struct NetworkMarkerInput {
+	bool friendly = false, sameSquad = false, alive = false;
+	bool revealed = false, aimedAt = false, selected = false;
+	bool onScreen = false, clamped = false;
+	float tagAlpha = 0; // the name's (playerTagAlpha)
+	float distance = 0;
+	// An object tag's own range (+0x48: min(maxEnemyDistance, maxDistance)
+	// unless inverseTeamSpecific, 0x100f4213): FadeOut 1 to a third of it
+	// (0.33), 0 at it; 0 for a player's tag (the cull range above).
+	float fadeRange = 0;
+};
+// The decoy's marker (0x00508590 -> slot 0x1c, 0x100f3d30): the reveal
+// marks the reported enemy's decoy (decoyOf) instead, an object tag of flag
+// 0x10000000 (0x100f4280: a TargetObject of TTDecoy) that the marker pass
+// (0x10169b63) draws for an enemy owner at its text point, its fade range
+// the DecoyObject's 60 m; and the soldier keeps none while the decoy is
+// within kDecoyCover across (0x9248f0).
+constexpr float kDecoyCover = 60;
+// The icon id, or -1 for none; `alpha` its alpha.
+int networkMarker(const Settings& settings, const NetworkMarkerInput& in, float& alpha);
+// The marker's second colour (ColorIndex2, 0x1016a113), which it blinks
+// towards by (1 - min(d / 150, 1) / 2) x the blink (CrossFadeValue): white
+// with a call's icon (+0x64), the highlight with a radio flash (+0x68;
+// white when the tag's own colour is the highlight), else its own colour.
+Colour markerSecondColour(Colour own, int callIcon, bool flash);
+// The squad's network icon over the same tags (0x101691c0, drawn after the
+// markers, 16 px up from the text point at the marker's alpha and colours):
+// with a squad member's networkableHudShowKit (ability +0x10) the kit's
+// ICObject + KitType (player vt+0x1a4: Recon 0 .. Engineer 4) on foot,
+// with networkableHudShowVehicle (+0x11) the vehicle's icon (the
+// manager's slot 0x74, vehicleIconId) aboard; -1 for none.
+int networkSquadIcon(bool showKit, bool showVehicle, bool aboard, int kitType, int vehicleIcon);
 // The rounded distance shown (0x100f0be0 / 0x100ef120): kept until it
 // changes by more than 0 / 2 / 5 / 9 m below 25 / 250 / 400 m / beyond.
 int shownDistance(int shown, float distance);
@@ -172,15 +217,17 @@ std::array<float, 3> objectTagPoint(const std::array<float, 3>& position, const 
 //     branches above, and with 0x10000000 too (0x1016c59c) to the
 //     object's owner (its interface 0x94c1, slot 0x50: a living player of
 //     another team), whose control object's armour bar it would show
-//     (state 2 on foot, 1 in a vehicle). No code sets either flag: the
-//     tag's flags are the Nametag component's (+0x34, read through the
-//     block's +0x24 by 0x100f3ed0 / 0x100f40d0), whose setters
-//     (0x0063ac70..0x0063af70) and constructor (0x0063b760: 0x80000) give
-//     only the named bits, and RendDX9's other writers of the tag's +0xb8
-//     (0x100f3de0, 0x100f44d0, 0x100f4620, 0x100f4730, 0x100f49d0 and the
-//     player passes) add only 0x500201, 0x104079, 0x4079, 0x4031, 7,
-//     0x26808, 0x2000040, 0x25820, 0x4020 and 0x80. So that path never
-//     runs, and showArmor draws no bar of its own anywhere.
+//     (state 2 on foot, 1 in a vehicle). The template flags (the Nametag
+//     component's +0x34, read through the block's +0x24 by 0x100f3ed0 /
+//     0x100f40d0; setters 0x0063ac70..0x0063af70, constructor 0x0063b760:
+//     0x80000) set neither, but 0x800000 is the squad reports' reveal:
+//     BF2142.exe's 0x00508590 calls the manager's slot 0x1c (0x100f3d30,
+//     the reported soldier's decoy's object tag, created when missing) and,
+//     unless that decoy is within 60 m, 0x20 (0x100f2410, his player tag),
+//     which add 0x2000040 and through 0x100f2080 set 0x800000 until the
+//     reveal time ends. 0x10000000 is a TargetObject of TTDecoy's
+//     (0x100f4280), so this path is a revealed decoy's owner's bar; not
+//     ported. showArmor draws no bar of its own.
 struct ObjectBarInput {
 	bool friendly = false;     // the tag's team the player's, or none
 	bool showArmor = false, showSupply = false;
@@ -360,6 +407,14 @@ public:
 	}
 	// A radio call heard (see CallCode); `local` for the local player's own.
 	void radioCall(int caller, int code, bool local);
+	// Another player's radio line shown with him as its sender (0x0042bef0
+	// kind 3, a player's message: local message 2/0x41,
+	// ECHudHEFireFlashStart -> 0x100f1abe): his tag's second colour
+	// (+0x68) becomes the highlight (none when the tag's own colour is the
+	// highlight) until the tag's call timer (+0x6c, started at 12 s,
+	// DAT_101f6740, when not running) ends; the name and the network marker
+	// blink towards it.
+	void radioFlash(int sender);
 	// The tag the crosshair selects now (0x100f16c0: the selectable tag
 	// nearest the screen's centre within 0.08), its object; 0 none.
 	uint32_t selected() const { return m_selectedObject; }
@@ -386,6 +441,7 @@ private:
 		bool aimed = false;
 		int callIcon = -1;  // +0x64
 		float callTime = 0; // +0x6c
+		bool flash = false; // +0x68 set by radioFlash
 	};
 	// A template's Nametag component (its flags, component +0x30 → the
 	// tag's +0xb8: showItem 1, showIcon 2, showName 4, showDistance 8,
@@ -428,6 +484,7 @@ private:
 		bool local;
 	};
 	std::vector<PendingCall> m_pendingCalls;
+	std::vector<int> m_pendingFlashes; // radioFlash's senders
 	uint32_t m_selectedObject = 0;
 	int m_selectedRequest = -1;
 	bool m_shown = true;

@@ -6532,6 +6532,11 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			hudPlayer(hudLocal(), me);
+			// Another player's message (0x0042bef0 kind 3) flashes his tag
+			// (local message 2/0x41, ECHudHEFireFlashStart).
+			if (g_nametags && sender != me.id) {
+				g_nametags->radioFlash(sender);
+			}
 			using Speaker = dice::hfe::menu::HudChat::Speaker;
 			const Speaker speaker = from.commander ? Speaker::Commander
 				: from.team == me.team && from.squad && from.squad == me.squad ? Speaker::Squad
