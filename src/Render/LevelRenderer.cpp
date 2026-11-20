@@ -862,6 +862,19 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 			instance.geometry = objectTemplate.geometry();
 			if (depth > 0) {
 				instance.source = path; // the template names from the root's child down, '/'-joined
+				// Under a RotationalBundle it turns with it, as the seat camera beside it
+				// does (PlayerCamera::findSeatCamera): the Titan guns' wreck HUDs on their
+				// barrels, whose wreck geometry is the static before a wrecked gun's camera.
+				const world::ObjectTemplate* t = m_buildRoot;
+				bool posed = false;
+				for (const uint16_t k : m_buildChildPath) {
+					t = t && k < t->children().size() ? sources.templates.find(t->children()[k].name) : nullptr;
+					posed = posed || (t && t->typeName() == "RotationalBundle");
+				}
+				if (posed && object != 0) {
+					instance.posedRoot = m_buildRoot;
+					instance.posedPath = m_buildChildPath;
+				}
 			}
 			if (gpuMesh->skinned) {
 				const auto skeleton3P = objectTemplate.settings().find("skeleton3P");
@@ -913,13 +926,45 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 	if (objectTemplate.typeName() == "Kit") {
 		return;
 	}
-	for (const world::ChildTemplate& child : objectTemplate.children()) {
+	if (depth == 0) {
+		m_buildRoot = &objectTemplate;
+		m_buildChildPath.clear();
+	}
+	for (size_t k = 0; k < objectTemplate.children().size(); ++k) {
+		const world::ChildTemplate& child = objectTemplate.children()[k];
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
+			m_buildChildPath.push_back(static_cast<uint16_t>(k));
 			addTemplate(sources, *childTemplate, objectTransform(child.position, child.rotation) * local, objectWorld,
 				object, depth + 1, path.empty() ? child.name : path + "/" + child.name, childSkeleton);
+			m_buildChildPath.pop_back();
 		}
 	}
+}
+
+Mat4 LevelRenderer::posedLocal(const world::ObjectTemplate& root, const std::vector<uint16_t>& path, uint32_t object) const
+{
+	Mat4 local;
+	const world::ObjectTemplate* t = &root;
+	for (const uint16_t k : path) {
+		if (!t || k >= t->children().size()) {
+			break;
+		}
+		const world::ChildTemplate& child = t->children()[k];
+		Mat4 m = objectTransform(child.position, child.rotation) * local;
+		world::Vec3 offset, rotation;
+		anim::Matrix bone;
+		if (m_sources->partBone && m_sources->partBone(object, child.name, bone)) {
+			Mat4 boned;
+			std::copy(bone.begin(), bone.end(), boned.m.begin());
+			m = boned * local;
+		} else if (m_sources->partPose && m_sources->partPose(object, child.name, offset, rotation)) {
+			m = objectTransform(offset, rotation) * m;
+		}
+		local = m;
+		t = m_sources->templates.find(child.name);
+	}
+	return local;
 }
 
 std::shared_ptr<anim::Skeleton> LevelRenderer::skeleton(const io::FileManager& files, const std::string& path)
@@ -2122,6 +2167,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			}
 			objectWorld = drawnTransform(*current);
 			hiddenInView = m_sources->hiddenInView && m_sources->hiddenInView(instance.object);
+		}
+		if (instance.posedRoot) {
+			instance.local = posedLocal(*instance.posedRoot, instance.posedPath, instance.object);
 		}
 		instance.world = instance.local * objectWorld;
 		instance.hidden = current->hidden() || hiddenInView;

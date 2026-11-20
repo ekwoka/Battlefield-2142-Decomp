@@ -472,6 +472,11 @@ private:
 		bool cullActor = false;
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
 		std::string source; // the child template it was made from (empty for the object's own)
+		// A child under a RotationalBundle (a Titan gun's wreck HUD on its
+		// barrel): the children's indices from the root's template down, to
+		// place it each sync where its ancestors' poses put it (posedLocal).
+		const world::ObjectTemplate* posedRoot = nullptr;
+		std::vector<uint16_t> posedPath;
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
@@ -591,6 +596,11 @@ private:
 		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {},
 		const std::string& inheritedSkeleton = {});
 	void addObject(const LevelSources& sources, const world::Object& object);
+	// A posed child's placement relative to its object: each level's child
+	// placement, then its part's pose or bone (as collectParts places parts).
+	Mat4 posedLocal(const world::ObjectTemplate& root, const std::vector<uint16_t>& path, uint32_t object) const;
+	std::vector<uint16_t> m_buildChildPath; // addTemplate's children's indices down to the current one
+	const world::ObjectTemplate* m_buildRoot = nullptr;
 	// A part that animates its texture coordinates, placed relative to its object.
 	struct AnimatedUVPart {
 		const AnimatedUVSettings* settings;
