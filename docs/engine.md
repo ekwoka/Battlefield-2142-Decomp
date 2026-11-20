@@ -8613,8 +8613,8 @@ renderer. The weapon HUDs pick their crosshair by `GuiIndex`, the template's
 (`0x007be770`): the spread is the deviation in degrees times
 `weaponHud.deviationFactor` (default 10), and the parts are 20 long about
 the screen centre (Right = 400 + spread, Left = 399 - 20 - spread; the
-spread pushed out by minVisualDeviation and held at maxVisualDeviation,
-see the weapon HUD below). Their
+raw spread, see the weapon HUD below). The machine guns' circle parts take
+`CrossCircle{Up,Right,Down,Left}Pos` from the same spread. Their
 colour comes from the profile's `game.setCrossHairColor` (0-255, in
 `Settings/Profiles/Default/GeneralOptions.con`). Bars fill
 by their value variable (types 0 up, 2 from the right, 3 from the left;
@@ -9028,9 +9028,14 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   / `+0x108` / `+0x10c`, copied each frame by `0x007c1f10` from the
   block's `+0xb0` / `+0xb4` / `+0xb8`, the WeaponHud component's
   deviationFactor / maxVisualDeviation / minVisualDeviation, constructor
-  `0x006390e0`: 10, 1000, 0): the parts sit min + ceil(deviation x
-  factor) out from the centre, at most max (`menu::crosshairParts`; the
-  shipped values run min 2-15, max 23-75).
+  `0x006390e0`: 10, 1000, 0). `Cross*Pos` (`+0x130..+0x13c`, 20 long at
+  `+0x140`) sit the raw s = ceil(deviation x factor) out from the centre.
+  min + s, held at max, places only `Crosshair*Pos` (`+0x110..+0x11c`, 8
+  long at `+0xfc`), which no shipped HUD reads, so the shipped limits
+  (min 2-15, max 23-75) move nothing on screen. `CrossCircle*Pos`
+  (`+0x144..+0x150`, the machine-gun sights) also take s, the part 6 wide
+  (`+0x154`) and 8 out (`+0x158`, both set at `0x007bf43c`): Up 281 - s,
+  Right 408 + s, Down 302 + s, Left 386 - s (`menu::crosshairParts`).
 - **The commander screen** (the HUD manager's slot `0x234`): the weapon
   HUD's frame (`0x007c40c0`) then skips its update and clears its show
   flags (PrimaryAmmoShow `+0x15d`, the clips, the reload, the crosshair

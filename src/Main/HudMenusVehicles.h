@@ -306,28 +306,25 @@ private:
 	HudBlink m_blink {0.98f, 0, 0.7f, 0.15f};
 };
 
-// The crosshair's four parts (0x007be770, each frame from 0x007c1f10's
-// weapon HUD): the spread is ceil(deviation x deviationFactor) pixels
-// (the weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default),
-// pushed out by minVisualDeviation (+0x10c, 0) and held at
-// maxVisualDeviation (+0x108, 1000): an offset min + spread over the
-// maximum is the maximum. Up = 300 - length - offset, Down = 301 + offset,
-// Left = 399 - length - offset, Right = 400 + offset, about the 800 x 600
-// centre (the clamped branch takes the node's half size, the same 400 /
-// 300). The block fields are the WeaponHud component's (constructor
-// 0x006390e0: +0xf8 10, +0xfc 1000, +0x100 0; read through slot 0x50 at
-// +0xb0 / +0xb4 / +0xb8).
-// The machine guns' circle parts (CrossCircle*Pos, +0x144..+0x150) take the
-// raw spread s, unclamped, with the part 6 wide (+0x154) and 8 out (+0x158):
+// The crosshair's parts (0x007be770, each frame from 0x007c1f10's weapon
+// HUD): the spread s is ceil(deviation x deviationFactor) pixels (the
+// weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default).
+// Cross*Pos (+0x130..+0x13c) take s raw with the part 20 long (+0x140):
+// Up = 300 - 20 - s, Down = 301 + s, Left = 399 - 20 - s, Right = 400 + s,
+// about the 800 x 600 centre. minVisualDeviation / maxVisualDeviation
+// (+0x10c / +0x108) clamp only Crosshair*Pos (+0x110..), which no shipped
+// HUD reads, so they move nothing on screen.
+// The machine guns' circle parts (CrossCircle*Pos, +0x144..+0x150) take s
+// too, with the part 6 wide (+0x154) and 8 out (+0x158):
 // Up = 301 - 2*6 - 8 - s, Right = 400 + 8 + s, Down = 300 + 8 - 6 + s,
 // Left = 400 - 6 - 8 - s.
 struct CrosshairParts {
 	float up = 0, down = 0, left = 0, right = 0;
-	int offset = 0;
+	int offset = 0; // s
 	float circleUp = 0, circleDown = 0, circleLeft = 0, circleRight = 0;
 };
-CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length = 20);
-// The same with the weapon template's weaponHud.* (defaults as above).
+CrosshairParts crosshairParts(float deviation, int deviationFactor, float length = 20);
+// The same with the weapon template's weaponHud.deviationFactor.
 CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length = 20);
 
 // The ability bar (0x007c3af0, each frame from the weapon HUD's frame

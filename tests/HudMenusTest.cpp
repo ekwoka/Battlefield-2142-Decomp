@@ -1208,26 +1208,24 @@ TEST(RadioSpam_GameTimerAndSilentSpot)
 	CHECK(!gate.message(false, tell));
 }
 
-// The crosshair's parts (0x007be770): the spread by deviationFactor, pushed
-// out by minVisualDeviation and held at maxVisualDeviation.
+// The crosshair's parts (0x007be770): the raw spread by deviationFactor;
+// min/maxVisualDeviation clamp only the unread Crosshair*Pos.
 TEST(HudWeapon_CrosshairVisualDeviation)
 {
-	auto parts = menu::crosshairParts(1.5f, 10, 0, 1000);
+	auto parts = menu::crosshairParts(1.5f, 10);
 	CHECK(parts.offset == 15 && parts.right == 415 && parts.left == 364 && parts.up == 265 && parts.down == 316);
-	parts = menu::crosshairParts(1.5f, 10, 3, 1000);
-	CHECK(parts.offset == 18 && parts.right == 418 && parts.down == 319);
-	parts = menu::crosshairParts(4.0f, 10, 3, 23);
-	CHECK(parts.offset == 23 && parts.right == 423 && parts.left == 356 && parts.up == 257 && parts.down == 324);
-	// The template's fields, with the constructor's defaults (0x006390e0).
+	parts = menu::crosshairParts(4.0f, 10);
+	CHECK(parts.offset == 40 && parts.right == 440 && parts.left == 339 && parts.up == 240 && parts.down == 341);
+	// The template's deviationFactor; the visual limits move nothing.
 	world::ObjectTemplate rifle(1, "GenericFireArm", "rifle", 1);
 	CHECK(menu::crosshairParts(0.21f, &rifle).offset == 3);
 	rifle.settings()["weaponHud.deviationFactor"] = "20";
 	rifle.settings()["weaponHud.minVisualDeviation"] = "15";
-	rifle.settings()["weaponHud.maxVisualDeviation"] = "75";
-	CHECK(menu::crosshairParts(1.0f, &rifle).offset == 35);
-	CHECK(menu::crosshairParts(9.0f, &rifle).offset == 75);
+	rifle.settings()["weaponHud.maxVisualDeviation"] = "23";
+	CHECK(menu::crosshairParts(0.5f, &rifle).offset == 10);
+	CHECK(menu::crosshairParts(9.0f, &rifle).offset == 180);
 	// The machine guns' circle parts take the raw spread, past the clamp.
-	parts = menu::crosshairParts(1.5f, 10, 3, 5);
+	parts = menu::crosshairParts(1.5f, 10);
 	CHECK(parts.circleUp == 266 && parts.circleRight == 423 && parts.circleDown == 317 && parts.circleLeft == 371);
 	// Set on the HUD with the weapon's deviation: an LMG's tightens as it fires.
 	hud::HudManager hudManager(nullptr);

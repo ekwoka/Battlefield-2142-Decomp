@@ -2336,8 +2336,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			// centre. The deviation is the weapon's soldier deviation now
 			// (GameWorld::weaponDeviation: the turn, speed, stance and
 			// firing), its minimum without one.
-			// minVisualDeviation pushes the parts out, maxVisualDeviation
-			// holds them (menu::crosshairParts).
+			// min/maxVisualDeviation move nothing (menu::crosshairParts).
 			const float now = world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer());
 			dice::hfe::menu::updateSoldierWeaponHud(hud, rifle, now, false,
 				sprintTest, hud.number("CrosshairIconShow") != 0);

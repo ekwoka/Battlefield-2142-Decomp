@@ -324,12 +324,11 @@ void FlareHud::update(hud::HudManager& hud, const FlareHudInput& in)
 
 // --- The crosshair's parts (0x007be770) ---
 
-CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length)
+CrosshairParts crosshairParts(float deviation, int deviationFactor, float length)
 {
 	CrosshairParts parts;
 	const int spread = static_cast<int>(std::ceil(deviation * static_cast<float>(deviationFactor)));
-	// maxVisualDeviation < minVisualDeviation + spread: the maximum.
-	parts.offset = maxVisual < minVisual + spread ? maxVisual : minVisual + spread;
+	parts.offset = spread;
 	const float o = static_cast<float>(parts.offset);
 	parts.up = 300 - length - o;
 	parts.down = 301 + o;
@@ -345,9 +344,7 @@ CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisua
 
 CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length)
 {
-	return crosshairParts(deviation, static_cast<int>(hudNumber(weapon, "weaponHud.deviationFactor", 10)),
-		static_cast<int>(hudNumber(weapon, "weaponHud.minVisualDeviation", 0)),
-		static_cast<int>(hudNumber(weapon, "weaponHud.maxVisualDeviation", 1000)), length);
+	return crosshairParts(deviation, static_cast<int>(hudNumber(weapon, "weaponHud.deviationFactor", 10)), length);
 }
 
 // --- The Titans' consoles (0x0044b680 case 0x32, 0x00448850) ---
