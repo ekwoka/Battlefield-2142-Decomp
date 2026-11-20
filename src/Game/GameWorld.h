@@ -4497,7 +4497,11 @@ private:
 	uint32_t m_ticks = 0; // the engine's tick count (0x00666090: DAT_00a7d1f8)
 	// The launchers of the objects thrown or set down (the projectile
 	// interface's +0x1c8, 0x005b48b0), by object; read when its body is made.
-	std::map<uint32_t, uint32_t> m_launchers;
+	struct MeshLaunch {
+		uint32_t launcher;
+		physics::Vec3 velocity {};
+	};
+	std::map<uint32_t, MeshLaunch> m_meshLaunches;
 	// The box bottoms of templates with MechLegs (their +0x4c4, 0x005cd4f0),
 	// once one of them has a body.
 	std::map<const world::ObjectTemplate*, float> m_legsBottom;

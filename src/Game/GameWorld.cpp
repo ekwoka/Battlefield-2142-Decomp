@@ -11490,13 +11490,47 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 					++it;
 				}
 			}
-			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
-			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)} * 1.0f;
-			at.y = restHeight(player, at.x, at.z);
+			const FireArmSettings& settings = player.weapon->settings();
+			const float pitch = std::clamp(input.aimPitch + player.aimKickPitch, -89.0f, 89.0f);
+			const physics::Mat3 aim = physics::Mat3::fromYawPitchRoll({lookYaw(player), -pitch, 0});
+			// ThrownFireComp (0x005e4f80) uses the infantry view frame. Its
+			// clearance rays use only projectileStartPosition.z as their reach.
+			// Both stock hubs author zero, so they start at the view origin.
+			const float eye = input.pose == SoldierPose::Prone ? -0.5f : input.pose == SoldierPose::Crouch ? 0.08f : 0.6f;
+			physics::Vec3 at = player.body.position + physics::Vec3 {0, eye, 0};
+			const auto start = inHand->settings().find("fire.projectileStartPosition");
+			const float reach = start != inHand->settings().end() ? parseVec3(start->second).z : 0.0f;
+			if (reach != 0.0f) {
+				const physics::Vec3 forward = aim.rows[2] * reach;
+				const physics::Vec3 right = aim.rows[0] * reach;
+				const auto clear = [&](const physics::Vec3& offset) {
+					float hit = 1;
+					uint32_t object = 0;
+					return !objectRayHit(at, at + offset * 1.1f, player.object, hit, object);
+				};
+				bool found = false;
+				for (const physics::Vec3& offset : {forward, right, -right, -forward,
+						 (forward + right) * 0.707f, (forward - right) * 0.707f,
+						 (-forward + right) * 0.707f, (-forward - right) * 0.707f}) {
+					if (clear(offset)) {
+						at = at + offset;
+						found = true;
+						break;
+					}
+				}
+				if (!found) {
+					at.y += 1.0f;
+				}
+			}
+			const physics::Vec3 rotation = (physics::Mat3::fromYawPitchRoll(settings.startRotation) * aim).yawPitchRoll();
 			const auto projectile = inHand->settings().find("projectileTemplate");
 			world::ObjectTemplate* hub = projectile != inHand->settings().end() ? m_templates.find(projectile->second) : nullptr;
-			if (world::Object* placed = hub ? m_objects.create(hub, {at.x, at.y, at.z}, {lookYaw(player), 0, 0}) : nullptr) {
+			if (world::Object* placed = hub ? m_objects.create(hub, {at.x, at.y, at.z}, {rotation.x, rotation.y, rotation.z}) : nullptr) {
 				placed->setTeam(player.team);
+				// The thrown component sets the node's velocity after creation
+				// (0x005e583c): throw speed times power plus root velocity.
+				m_meshLaunches[placed->id()] = {player.object,
+					player.body.velocity + aim.rows[2] * (settings.velocity * player.weapon->throwPower())};
 				Supply supply {placed->id(), player.id, player.team, ability, inHand->name()};
 				// A hub that carries a SupplyObject works as one (the
 				// supply crates' update, 0x005d1710; stepCrates).
@@ -11567,7 +11601,7 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {frame.x, frame.y, frame.z})) {
 				placed->setTeam(player.team);
 				m_deployed[key] = placed->id();
-				m_launchers[placed->id()] = player.object;
+				m_meshLaunches[placed->id()] = {player.object};
 				addSentryGun(player, *placed);
 			}
 		} else if (!gadget && player.projectile) {
@@ -15228,6 +15262,7 @@ void GameWorld::addBodies()
 			continue;
 		}
 		m_checked.insert(checked, object.id());
+		const auto launch = m_meshLaunches.extract(object.id());
 		const world::ObjectTemplate* t = object.objectTemplate();
 		if (t && !flag(*t, "hasMobilePhysics", false) && sameName(t->typeName(), "Bundle")) {
 			supplied.push_back(object.id());
@@ -15272,9 +15307,9 @@ void GameWorld::addBodies()
 		// with noInitialCollisionWithLauncher (template +0x355) and a mesh
 		// response, the response ignores the launcher's root for two ticks
 		// on the server (0x006b8de0; *0x00a84284 = 2).
-		if (const auto launcher = m_launchers.find(object.id()); launcher != m_launchers.end()) {
-			body.launcher = launcher->second;
-			m_launchers.erase(launcher);
+		if (!launch.empty()) {
+			body.launcher = launch.mapped().launcher;
+			body.body.velocity = launch.mapped().velocity;
 			if (flag(*t, "noInitialCollisionWithLauncher", false)) {
 				body.ignored = body.launcher;
 				body.ignoreUntil = m_ticks + 2;

@@ -4386,6 +4386,84 @@ TEST(Titan_AirTransportSeatsLaunchPods)
 	}
 }
 
+TEST(Titan_ThrownSupplyHubsLandOnDeck)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		for (const auto& [kit, expected] : {std::pair {"EU_Assault", "unl_hub_medic_stationary"},
+				 std::pair {"EU_Support", "unl_hub_ammo_stationary_model"}}) {
+			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+			const auto* titan = level.loaded ? level.titan(2) : nullptr;
+			CHECK(titan);
+			if (!titan) {
+				continue;
+			}
+			const int id = level.world->joinPlayer(2);
+			level.world->setKit(id, kit, "us_light_soldier");
+			level.world->setSpawnTitan(id, titan->object);
+			CHECK(level.world->spawnSoldier(id));
+			level.run(1);
+			game::GameWorld::PlayerInfo player;
+			CHECK(level.world->playerInfo(id, player) && player.alive);
+			CHECK(player.position.y > 150 && player.position.y < 170);
+			CHECK(level.world->soldierBody(id) && level.world->soldierBody(id)->onGround());
+
+			level.world->setBattery(id, 1);
+			game::SoldierInput select;
+			select.selectItem = 4;
+			level.world->setInput(id, select);
+			level.run(0.1f);
+			level.world->setInput(id, {});
+			level.run(1);
+
+			game::SoldierInput fire;
+			fire.fire = true;
+			level.world->setInput(id, fire);
+			for (int tick = 0; tick < 60 && level.world->supplyObjects().empty(); ++tick) {
+				level.world->tick(1 / 30.0f);
+			}
+			level.world->setInput(id, {});
+			const auto hubs = level.world->supplyObjects();
+			CHECK(hubs.size() == 1);
+			if (hubs.size() != 1) {
+				continue;
+			}
+			const world::Object* hub = level.objects.find(hubs.front());
+			CHECK(hub && hub->objectTemplate()->name() == expected);
+			if (!hub) {
+				continue;
+			}
+			const world::Vec3 launch = hub->position();
+			CHECK(launch.y - player.position.y > 1.4f && launch.y - player.position.y < 1.8f);
+			CHECK(std::hypot(launch.x - player.position.x, launch.z - player.position.z) < 0.3f);
+			level.run(4 / 30.0f);
+			hub = level.objects.find(hubs.front());
+			CHECK(hub);
+			if (!hub) {
+				continue;
+			}
+			const float yaw = player.yaw * 3.14159265f / 180.0f;
+			const float distance = (hub->position().x - launch.x) * std::sin(yaw) + (hub->position().z - launch.z) * std::cos(yaw);
+			CHECK(distance > 0.8f && distance < 1.0f);
+
+			level.run(2);
+			hub = level.objects.find(hubs.front());
+			CHECK(hub);
+			if (hub) {
+				std::fprintf(stderr, "  %s %s: deck %.3f, launch %.3f, landed %.3f\n", mod, kit,
+					player.position.y, launch.y, hub->position().y);
+				CHECK(std::fabs(hub->position().y - player.position.y) < 0.5f);
+			}
+		}
+	}
+}
+
 // Suez_Canal's EU Titan: a soldier walking out of its spawn room crosses
 // the deck's seams, a centimetre or two down, and spends a tick in the air
 // at each. The Soldier asks for no velocity in the air (0x00588420) and the
