@@ -8331,9 +8331,7 @@ void GameWorld::stepCorpses(float seconds)
 			continue;
 		}
 		if (corpse.ragDoll && corpse.skeleton) {
-			const anim::RagDollTemplate* ragDoll = corpse.ragDoll->ragDollTemplate();
-			const anim::Vec mid = corpse.ragDoll->update(
-				seconds, ragDollWorld(corpse.ragDoll->middle(), ragDoll ? ragDoll->settings.completeCollRadius : 1.5f));
+			const anim::Vec mid = corpse.ragDoll->update(seconds, ragDollWorld(corpse.ragDoll->middle()));
 			corpse.ragDoll->pose(*corpse.skeleton, corpse.pose, corpse.worldPose);
 			playRagDollImpact(*corpse.ragDoll, mid);
 			body->setPosition({mid[0], mid[1], mid[2]});
@@ -8475,7 +8473,7 @@ void GameWorld::stepRemoteBodies(float seconds)
 			&& (m_clock() - m_ragDollFrameStart) * 1000.0 > t->settings.clientMaxUpdateTime) {
 			ragDoll.setLevelOfDetail(2);
 		}
-		const anim::Vec mid = ragDoll.update(seconds, ragDollWorld(ragDoll.middle(), t ? t->settings.completeCollRadius : 1.5f));
+		const anim::Vec mid = ragDoll.update(seconds, ragDollWorld(ragDoll.middle()));
 		ragDoll.pose(*remote->skeleton, remote->pose, remote->worldPose);
 		playRagDollImpact(ragDoll, mid);
 		body->setPosition({mid[0], mid[1], mid[2]});
@@ -8836,19 +8834,17 @@ bool GameWorld::startRagDoll(Player& victim, bool thrown)
 	return true;
 }
 
-// The terrain, and the static objects' soldier collision LOD. The game's
-// list of objects (0x008ab6b0, each step) is every object with collision
-// (slot 0xc4 with 2) the object manager finds (slot 0x44) within
-// ragdoll_completeCollRadius (1.5 m) of the middle particle, kept when its
-// collision mesh's LOD 2 comes within that radius in its own space
-// (0x006aec10); vehicles and other moving objects among them are not
-// tested here (the rewrite's world has no moving soldier-LOD meshes).
-// The ragdoll's world (0x008ab6b0 lists, each solve, the objects with
-// collision whose soldier LOD comes within ragdoll_completeCollRadius of
-// the middle particle): the static objects (one merged mesh here, first
-// in the list) and the bodies (vehicles, physics objects) whose box comes
-// that near, each tested in its own frame at its current pose.
-anim::RagDollWorld GameWorld::ragDollWorld(const anim::Vec& middle, float reach) const
+// The ragdoll's world: the terrain, and the objects with collision (slot
+// 0xc4 with 2) the object manager finds (slot 0x44) within
+// ragdoll_completeCollRadius (1.5 m) of the middle particle (0x008ab6b0,
+// each solve), each tested in its own frame at its current pose: the
+// static objects (one merged mesh here, first in the list) and what a
+// soldier there meets (soldierMovers, with no team rule: 0x008ab6b0 keeps
+// every object with a soldier LOD), each body's soldier LOD and its
+// collisionPart children's. A Titan's decks are such
+// parts (its own objects in the original's grid), so a body falls onto
+// them, not through the Titan.
+anim::RagDollWorld GameWorld::ragDollWorld(const anim::Vec& middle) const
 {
 	anim::RagDollWorld world;
 	if (m_ground.heightAndNormal) {
@@ -8868,23 +8864,8 @@ anim::RagDollWorld GameWorld::ragDollWorld(const anim::Vec& middle, float reach)
 		world.groundMaterial = [this](float x, float z) { return m_ground.material(x, z); };
 	}
 	const physics::Vec3 mid {middle[0], middle[1], middle[2]};
-	auto near = std::make_shared<std::vector<const Body*>>();
-	for (const Body& body : m_bodies) {
-		if (!body.soldierMesh || body.points.empty()) {
-			continue;
-		}
-		physics::Vec3 low = body.points[0], high = body.points[0];
-		for (const physics::Vec3& p : body.points) {
-			low = {std::min(low.x, p.x), std::min(low.y, p.y), std::min(low.z, p.z)};
-			high = {std::max(high.x, p.x), std::max(high.y, p.y), std::max(high.z, p.z)};
-		}
-		const physics::Vec3 local = body.body.rotation.untransform(mid - body.body.position);
-		const physics::Vec3 out {std::max({low.x - local.x, 0.0f, local.x - high.x}),
-			std::max({low.y - local.y, 0.0f, local.y - high.y}), std::max({low.z - local.z, 0.0f, local.z - high.z})};
-		if (physics::lengthSquared(out) <= reach * reach) {
-			near->push_back(&body);
-		}
-	}
+	auto near = std::make_shared<std::vector<physics::SoldierBody::Mover>>();
+	soldierMovers(mid, 0, 0, 0, *near); // no team: every forcefield too
 	const auto toVec = [](const physics::Vec3& v) { return anim::Vec {v.x, v.y, v.z}; };
 	const auto fromVec = [](const anim::Vec& v) { return physics::Vec3 {v[0], v[1], v[2]}; };
 	world.raycast = [this, near, toVec, fromVec](const anim::Vec& from, const anim::Vec& to, anim::Vec& point,
@@ -8897,12 +8878,12 @@ anim::RagDollWorld GameWorld::ragDollWorld(const anim::Vec& middle, float reach)
 			material = hit.material;
 			return true;
 		}
-		for (const Body* body : *near) {
-			const physics::Vec3 la = body->body.rotation.untransform(a - body->body.position);
-			const physics::Vec3 lb = body->body.rotation.untransform(b - body->body.position);
-			if (body->soldierMesh->raycast(la, lb, hit) && physics::dot(lb - la, hit.faceNormal) < 0) {
+		for (const physics::SoldierBody::Mover& m : *near) {
+			const physics::Vec3 la = m.rotation.untransform(a - m.position);
+			const physics::Vec3 lb = m.rotation.untransform(b - m.position);
+			if (m.mesh->raycast(la, lb, hit) && physics::dot(lb - la, hit.faceNormal) < 0) {
 				point = toVec(a + (b - a) * hit.fraction);
-				normal = toVec(body->body.rotation.transform(hit.faceNormal));
+				normal = toVec(m.rotation.transform(hit.faceNormal));
 				material = hit.material;
 				return true;
 			}
@@ -8918,32 +8899,27 @@ anim::RagDollWorld GameWorld::ragDollWorld(const anim::Vec& middle, float reach)
 		for (const physics::SphereContact& c : found) {
 			contacts.push_back({toVec(c.normal), c.depth});
 		}
-		for (const Body* body : *near) {
+		for (const physics::SoldierBody::Mover& m : *near) {
 			found.clear();
-			body->soldierMesh->capsuleEdgeContacts(body->body.rotation.untransform(fromVec(a) - body->body.position),
-				body->body.rotation.untransform(fromVec(b) - body->body.position), radius, found);
+			m.mesh->capsuleEdgeContacts(m.rotation.untransform(fromVec(a) - m.position),
+				m.rotation.untransform(fromVec(b) - m.position), radius, found);
 			for (const physics::SphereContact& c : found) {
-				contacts.push_back({toVec(body->body.rotation.transform(c.normal)), c.depth});
+				contacts.push_back({toVec(m.rotation.transform(c.normal)), c.depth});
 			}
 		}
 	};
 	world.movingNear = [near](const anim::Vec&, float) {
-		for (const Body* body : *near) {
-			if (physics::lengthSquared(body->body.velocity) >= 0.001f * 0.001f) {
-				return true;
-			}
-		}
-		return false;
+		return std::any_of(near->begin(), near->end(),
+			[](const physics::SoldierBody::Mover& m) { return physics::lengthSquared(m.velocity) >= 0.001f * 0.001f; });
 	};
 	world.carriedBy = [near, toVec, fromVec](const anim::Vec& from, anim::Vec& velocity) {
 		const physics::Vec3 a = fromVec(from);
 		const physics::Vec3 b = a - physics::Vec3 {0, 2, 0};
-		for (const Body* body : *near) {
+		for (const physics::SoldierBody::Mover& m : *near) {
 			physics::CollisionWorld::Hit hit;
-			const physics::Vec3 la = body->body.rotation.untransform(a - body->body.position);
-			const physics::Vec3 lb = body->body.rotation.untransform(b - body->body.position);
-			if (body->soldierMesh->raycast(la, lb, hit)) {
-				velocity = toVec(body->body.pointVelocity(a + (b - a) * hit.fraction));
+			if (m.mesh->raycast(m.rotation.untransform(a - m.position), m.rotation.untransform(b - m.position), hit)) {
+				const physics::Vec3 at = a + (b - a) * hit.fraction;
+				velocity = toVec(m.velocity + physics::cross(m.angularVelocity, at - m.centerOfMass));
 				return true;
 			}
 		}
@@ -8958,9 +8934,7 @@ void GameWorld::stepRagDoll(Player& player, float seconds)
 	if (!player.ragDoll || !body || !player.skeleton) {
 		return;
 	}
-	const anim::RagDollTemplate* ragDoll = player.ragDoll->ragDollTemplate();
-	const anim::Vec mid = player.ragDoll->update(
-		seconds, ragDollWorld(player.ragDoll->middle(), ragDoll ? ragDoll->settings.completeCollRadius : 1.5f));
+	const anim::Vec mid = player.ragDoll->update(seconds, ragDollWorld(player.ragDoll->middle()));
 	player.ragDoll->pose(*player.skeleton, player.pose, player.worldPose);
 	playRagDollImpact(*player.ragDoll, mid);
 	body->setPosition({mid[0], mid[1], mid[2]});
