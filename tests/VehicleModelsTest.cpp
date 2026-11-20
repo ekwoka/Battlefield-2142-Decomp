@@ -10547,16 +10547,18 @@ TEST(Titan_WreckedGunSeatShowsStaticOptIn)
 							if (p.name == gun) part = p.id;
 						}
 						CHECK(part != 0);
-						const std::string label = std::string(team == 1 ? "pac-" : "eu-") + kind;
+						const std::string label = std::string(team == 1 ? "pac-" : "eu-") + gun;
 						// Turned off its rest (the ground cannon's barrel rests pitched down,
 						// setMinRotation 0/5/0): the base yaws, the barrel tilts.
 						float yaw0 = 0, pitch0 = 0, yaw1 = 0, pitch1 = 0;
 						round.gunAim(titan, me.seat, yaw0, pitch0);
+						// Each gun its own tilt: guns of a kind share their barrel's template
+						// name, so one posed by another's aim leaves its static off the view.
+						const float tilt = checked % 2 ? 0.2f : -0.25f * static_cast<float>(1 + checked % 3);
 						for (int tick = 0; tick < 60; ++tick) {
 							input = {};
 							input.turn = 2;
-							input.aimPitch = 10;
-							input.hasPitch = true;
+							input.aimPitch = tilt * static_cast<float>(tick + 1); // the mouse's running sum
 							round.setInput(player, input);
 							level.run(1 / 30.0f);
 						}
@@ -10574,10 +10576,9 @@ TEST(Titan_WreckedGunSeatShowsStaticOptIn)
 						CHECK(whole < 0.2f);
 						CHECK(wreck > 0.8f);
 						++checked;
-						break;
 					}
 				}
-				CHECK(checked == 2);
+				CHECK(checked == 6); // each Titan's four cannons and two AA guns
 				gpu->releaseTarget(target);
 			}
 		}

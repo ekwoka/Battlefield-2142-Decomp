@@ -11741,6 +11741,21 @@ const physics::SoldierBody* GameWorld::soldierBody(int id) const
 
 bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation, int preferredSeat) const
 {
+	// "<bundle>/<part>" (LevelRenderer): the seat whose yaw bundle that is
+	// asks for the part, as several seats' parts share a name (a Titan's
+	// guns' barrels, each under its own gun's base).
+	if (const size_t slash = part.rfind('/'); slash != std::string::npos) {
+		const std::string parent = part.substr(0, slash);
+		const world::Object* placed = preferredSeat < 0 ? m_objects.find(object) : nullptr;
+		const auto known = placed && placed->objectTemplate() ? m_layouts.find(placed->objectTemplate()->name()) : m_layouts.end();
+		for (size_t i = 0; known != m_layouts.end() && i < known->second.seats.size(); ++i) {
+			if (sameName(known->second.seats[i].yawBundle, parent)) {
+				preferredSeat = static_cast<int>(i);
+				break;
+			}
+		}
+		return partPose(object, part.substr(slash + 1), offset, rotation, preferredSeat);
+	}
 	const bool siloBase = sameName(part, "Missile_Silo_base");
 	if (siloBase || sameName(part, "Missile_Silo_Barrel")) {
 		for (const Silo& silo : m_silos) {

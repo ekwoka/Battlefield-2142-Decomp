@@ -10327,7 +10327,7 @@ int runGame(Options& options, Session& session)
 			}
 			for (const auto& [ghost, id] : ghostObjects) {
 				net::Vec3f o, r;
-				if (id == object && session.client->world().partPose(ghost, part, o, r)) {
+				if (id == object && session.client->world().partPose(ghost, part.substr(part.rfind('/') + 1), o, r)) {
 					offset = {o.x, o.y, o.z};
 					rotation = {r.x, r.y, r.z};
 					return true;
