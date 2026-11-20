@@ -38,7 +38,8 @@ namespace dice::hfe::menu {
 // BF2142.exe 0x00496f45 and 0x00496a19: Low/Medium/High/UltraHigh
 // map to engine quality indices 2/1/0/0 (software caps UltraHigh at High).
 int audioQualityIndex(const std::string& quality);
-// BF2142.exe 0x00496974 and 0x00925e28: positive profile override or quality default.
+// BF2142.exe 0x00496974 and 0x00925e28: positive profile override or quality
+// default (16/32/64/64: UltraHigh as High on the software provider, 0x00496830).
 int audioVoiceCount(const std::string& quality, double overrideCount);
 
 // Text made safe to write in quotes on a line of the profile files, which
