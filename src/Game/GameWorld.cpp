@@ -15872,8 +15872,8 @@ void GameWorld::soldierMovers(const physics::Vec3& origin, int team, uint32_t ve
 		// frame now (0x006c3890 with the part's instance, PartCollision.cpp).
 		if (!b.partMeshes.empty()) {
 			poseCollisionParts(b);
-			const size_t state = b.collisionWrecked ? 1 : 0;
 			for (const Body::PartMesh& part : b.partMeshes) {
+				const size_t state = b.collisionWrecked || part.wrecked ? 1 : 0;
 				if (part.off || !part.physics[state].soldier) {
 					continue;
 				}

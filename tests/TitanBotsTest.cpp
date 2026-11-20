@@ -1041,9 +1041,12 @@ TEST(Titan_BotCommanderMovesTheTitans)
 // A gun hangs under the hull; its control station inside (an unarmoured
 // child of the gun's bundle, eu_controlstation_v2_g) is the gun's to the
 // repair tool: 0x004cc380 walks a hit node up (+0x34) to the nearest armour
-// (+0x48). The station keeps its collision (its wreck geometry,
-// 0x00651c60) while the gun is a wreck, so a player's tool aimed at it
-// brings the gun back (canBeRepairedWhenWreck 1).
+// (+0x48). The gun's wreck puts its whole subtree in its wreck state, by
+// each node's own mesh and nothing else: the look (0x00651c60: three
+// geometries, so the wreck geometry, not hidden) and the collision
+// (0x006539f0 -> 0x006e5df0: the station's second sub-geometry, the same
+// shape as its first), so a player's tool aimed at the station brings the
+// gun back (canBeRepairedWhenWreck 1).
 TEST(Titan_RepairToolOnGunStationMendsTheGun)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -1056,10 +1059,17 @@ TEST(Titan_RepairToolOnGunStationMendsTheGun)
 	level.world->setKit(id, "EU_Anti-Vehicle", "us_light_soldier");
 	CHECK(level.world->spawnSoldier(id));
 	int mended = 0, tried = 0;
+	const uint32_t titan = level.titan(team)->object;
 	for (const auto& part : level.world->titanParts(team)) {
 		if (part.kind != game::GameWorld::TitanPartInfo::Gun) continue;
+		const bool aa = part.name.find("aacannon") != std::string::npos;
+		const std::string station = part.name + "_hub/" + part.name + (aa ? "/eu_controlstation_v2_aa" : "/eu_controlstation_v2_g");
+		CHECK(level.world->titanPartLook(titan, station) == 0);
 		level.world->applyDamage(part.id, 1e6f);
 		CHECK(level.world->hitPoints(part.id) <= 0);
+		level.run(0.1f);
+		CHECK(level.world->titanPartLook(titan, station) == 1); // its wreck geometry
+		CHECK(level.world->titanPartLook(titan, part.name + "_hub/" + part.name) == 1);
 		const auto meshes = level.world->titanPartMeshes(part.id);
 		CHECK(meshes.size() >= 2); // the gun's own and its station's
 		bool done = false;
