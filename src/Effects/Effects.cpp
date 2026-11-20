@@ -436,14 +436,18 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 			}
 		}
 	}
-	if (std::fabs(p.velocity.x) < 0.001f) {
-		p.velocity.x = 0;
-	}
-	if (std::fabs(p.velocity.y) < 0.001f) {
-		p.velocity.y = 0;
-	}
-	if (std::fabs(p.velocity.z) < 0.001f) {
-		p.velocity.z = 0;
+	// The sprite update (0x1013f0c0) snaps small velocity components to
+	// zero. The mesh update (0x10144110) keeps them for velocity alignment.
+	if (!t.mesh) {
+		if (std::fabs(p.velocity.x) < 0.001f) {
+			p.velocity.x = 0;
+		}
+		if (std::fabs(p.velocity.y) < 0.001f) {
+			p.velocity.y = 0;
+		}
+		if (std::fabs(p.velocity.z) < 0.001f) {
+			p.velocity.z = 0;
+		}
 	}
 	if (t.forceToWaterSurface && context.hasWater && !t.localSystem) {
 		p.position.y = context.waterLevel + t.waterSurfaceOffset;

@@ -3002,6 +3002,49 @@ TEST(Vehicles_DeployablesPoseTheirParts)
 	CHECK(hub == 0 || g.world->partBone(hub, "UNL_HUB_Ammo_lid1", lid));
 }
 
+// The shipped shield lines move at 0.001 m/s along the panel normal.
+// At an oblique yaw both horizontal velocity components are below 0.001.
+TEST(Vehicles_PortableShieldEffectFollowsPanel)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		CHECK(g.loaded);
+		const auto* shield = g.templates.find("portable_shield");
+		CHECK(shield != nullptr);
+		if (!shield) {
+			continue;
+		}
+		effects::EffectManager manager(g.templates);
+		effects::ObjectEffects attachments(g.templates);
+		effects::ObjectEffects::ObjectState placed;
+		placed.id = 1;
+		placed.objectTemplate = shield;
+		placed.rotation = physics::Mat3::fromYawPitchRoll({127, 0, 0});
+		const auto normal = placed.rotation.transform({1, 0, 0});
+		size_t observed = 0;
+		for (int tick = 0; tick < 90; ++tick) {
+			attachments.update({placed}, manager);
+			manager.update(1 / 30.0f);
+			manager.forEachMeshGroup([&](const std::string& geometry, bool, const std::vector<effects::MeshSprite>& meshes) {
+				if (geometry != "mp_port_shield") {
+					return;
+				}
+				for (const auto& mesh : meshes) {
+					CHECK(physics::dot(mesh.rotation.rows[2], normal) > 0.9999f);
+					++observed;
+				}
+			});
+			if (observed > 0) {
+				break;
+			}
+		}
+		CHECK(observed > 0);
+	}
+}
+
 // The deployables as the rounds meet them: each is a mobile mesh body (its
 // root's instance and its collisionPart children's, posed by its bones,
 // 0x0063ccc0 / 0x0063d470). The portable shield's ThrownFireComp turns it
