@@ -243,6 +243,27 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 	return g;
 }
 
+// The Titan a player on foot is aboard: the one whose grid is under him,
+// else the nearest whose box he is in. The boxes (160 m about each) overlap
+// once the commanders bring the Titans within 320 m of each other: the
+// first one found would put a soldier on his own deck aboard the enemy's.
+const GameWorld::TitanInfo* BotManager::titanUnder(const std::vector<GameWorld::TitanInfo>& titans, const GameWorld::PlayerInfo& player)
+{
+	const GameWorld::TitanInfo* nearest = nullptr;
+	for (const GameWorld::TitanInfo& t : titans) {
+		if (t.wreck || !aboard(t, player.position)) {
+			continue;
+		}
+		if (titanGrid(t, player.team).cellAt(m_world.titanToLocal(t.object, player.position)) >= 0) {
+			return &t;
+		}
+		if (!nearest || horizontal(t.position - player.position) < horizontal(nearest->position - player.position)) {
+			nearest = &t;
+		}
+	}
+	return nearest;
+}
+
 void BotManager::prepareTitanGrids()
 {
 	if (m_settings.titanPlay() && m_world.gameMode() == "gpm_ti") {
@@ -323,7 +344,7 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 }
 
 bool BotManager::titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
-	const physics::Vec3& entry, float radius, int seat)
+	const physics::Vec3& entry, float radius, uint32_t key, const char* behaviour)
 {
 	if (!m_settings.titanPlay()) {
 		return false;
@@ -334,34 +355,55 @@ bool BotManager::titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, Soldi
 		return false;
 	}
 	TitanGrid& grid = titanGrid(*titan, self.team);
-	// Gun-seat fields have their own keys, separate from object/boarder fields.
-	const auto& field = titanField(grid, *titan, self.team, 0x40000000u + static_cast<uint32_t>(seat),
-		m_world.titanToLocal(titan->object, entry), true, radius);
-	bot.behaviour = "TitanGun";
+	// Entry fields have their own keys (a gun seat's, a pod array's), separate from object/boarder fields.
+	const auto& field = titanField(grid, *titan, self.team, key, m_world.titanToLocal(titan->object, entry), true, radius);
+	bot.behaviour = behaviour;
 	return titanWalk(bot, self, input, seconds, grid, *titan, field);
 }
 
 bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
+	const float cutOffSince = bot.titanCutOffSince; // held only while each think finds it so
+	bot.titanCutOffSince = -1;
 	if (!m_settings.titanPlay() || self.vehicle || m_world.gameMode() != "gpm_ti") {
 		return false;
 	}
 	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
-	const GameWorld::TitanInfo* titan = nullptr;
-	for (const GameWorld::TitanInfo& t : titans) {
-		if (!t.wreck && aboard(t, self.position)) {
-			titan = &t;
-		}
-	}
+	const GameWorld::TitanInfo* titan = titanUnder(titans, self);
 	if (!titan) {
 		return false;
 	}
 	const bool own = titan->team == self.team;
+	// Cut off aboard its own Titan: off the grid, or where no whole console
+	// (nor the core) can be walked to: a ledge of the outer hull it dropped
+	// onto (a drop is one way), a spot a pod set it down. The guns', the
+	// crews' and the pods' ways all start on the grid and the ordinary AI
+	// has no navmesh here, so it would stand there for good. After 4 s so
+	// (a stair or a pod's landing is off the grid for a moment) it leaves
+	// as a boarder cut off does.
+	if (own) {
+		TitanGrid& g = titanGrid(*titan, self.team);
+		const int cell = g.cellAt(m_world.titanToLocal(titan->object, self.position));
+		bool cut = true;
+		for (const GameWorld::TitanPartInfo& part : cell < 0 ? std::vector<GameWorld::TitanPartInfo> {} : m_world.titanParts(titan->team)) {
+			if ((part.kind == GameWorld::TitanPartInfo::Console || part.kind == GameWorld::TitanPartInfo::Core) && !part.wreck
+				&& titanField(g, *titan, self.team, part.id, m_world.titanToLocal(titan->object, part.position))[static_cast<size_t>(cell)] < kInfinity) {
+				cut = false;
+				break;
+			}
+		}
+		if (cut) {
+			bot.titanCutOffSince = cutOffSince < 0 ? m_time : cutOffSince;
+			if (m_time - bot.titanCutOffSince > 4) {
+				return titanLeave(bot, self, input, seconds, *titan);
+			}
+		}
+	}
 	// The enemies aboard this Titan.
 	std::vector<const GameWorld::PlayerInfo*> boarders;
 	if (own) {
 		for (const GameWorld::PlayerInfo& p : m_players) {
-			if (p.alive && p.team != self.team && !p.vehicle && aboard(*titan, p.position)) {
+			if (p.alive && p.team != self.team && !p.vehicle && titanUnder(titans, p) == titan) {
 				boarders.push_back(&p);
 			}
 		}
@@ -615,9 +657,9 @@ bool BotManager::titanLeave(Bot& bot, const GameWorld::PlayerInfo& self, Soldier
 	if (physics::lengthSquared(out) < 1) {
 		out = {1, 0, 0};
 	}
-	// Wedged for 2 s: a quarter turn, alternating sides each 4 s.
-	if (physics::lengthSquared(self.position - bot.titanAt) > 1.0f) {
-		bot.titanAt = self.position;
+	// Wedged for 2 s (in the Titan's frame: it moves under the commander): a quarter turn, alternating sides each 4 s.
+	if (physics::lengthSquared(local - bot.titanAt) > 1.0f) {
+		bot.titanAt = local;
 		bot.titanAtTime = m_time;
 	} else if (m_time - bot.titanAtTime > 2) {
 		const float side = std::fmod(m_time, 8.0f) < 4 ? 1.0f : -1.0f;
@@ -673,8 +715,8 @@ bool BotManager::titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 	input.turn = std::clamp(off, -360 * seconds, 360 * seconds);
 	input.throttle = std::fabs(off) < 60 ? 1.0f : 0.0f;
 	// No way made in 2 s: a jump, and a step aside.
-	if (physics::lengthSquared(self.position - bot.titanAt) > 1.0f) {
-		bot.titanAt = self.position;
+	if (physics::lengthSquared(local - bot.titanAt) > 1.0f) {
+		bot.titanAt = local;
 		bot.titanAtTime = m_time;
 	} else if (m_time - bot.titanAtTime > 2) {
 		input.jump = std::fmod(m_time, 1.0f) < 0.2f;
@@ -1425,7 +1467,7 @@ int BotManager::titanRole(const GameWorld::PlayerInfo& self)
 			int boarders = 0;
 			std::map<int, physics::Vec3> groups; // where a member of each is
 			for (const GameWorld::PlayerInfo& p : m_players) {
-				boarders += p.alive && p.team == enemy->team && !p.vehicle && aboard(*own, p.position);
+				boarders += p.alive && p.team == enemy->team && !p.vehicle && titanUnder(titans, p) == own;
 				if (p.team == self.team && p.ai) {
 					groups[keyOf(p)] = p.position;
 				}
@@ -1499,7 +1541,7 @@ bool BotManager::titanRespawn(const GameWorld::PlayerInfo& self)
 		// fewer than two on foot aboard for each of them.
 		int boarders = 0, defenders = 0;
 		for (const GameWorld::PlayerInfo& p : m_players) {
-			if (p.alive && !p.vehicle && aboard(*own, p.position)) {
+			if (p.alive && !p.vehicle && titanUnder(titans, p) == own) {
 				boarders += p.team == enemy->team;
 				defenders += p.team == self.team;
 			}
