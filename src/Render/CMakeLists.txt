@@ -45,6 +45,7 @@ bf2142_embed_shaders(Render
 	# The enhanced mode's (not retail; Enhanced/LevelRendererEnhanced.cpp):
 	# its passes, and the lit shaders' variants (name=shader+edits).
 	Shaders/Enhanced/depth.frag
+	Shaders/Enhanced/shadow_depth_copy.frag
 	Shaders/Enhanced/gbuffer.frag
 	Shaders/Enhanced/motion.vert
 	Shaders/Enhanced/motion.frag

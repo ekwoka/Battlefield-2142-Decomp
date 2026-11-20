@@ -4,6 +4,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
+#include "Game/KitUnlocks.h"
 #include "Hud/Hud.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -17,19 +18,11 @@ namespace {
 
 constexpr const char* kEmpty = "Ingame/GeneralIcons/empty.tga";
 
-// UnlockBranch (0x00508xxx): UB_First 0, UB_Second 1, UB_Player 2, UB_SquadLeader 3.
-int branchOf(const std::string& value)
+int fieldBranch(const std::string& value)
 {
-	if (value == "UB_Second" || value == "1") {
-		return 1;
-	}
-	if (value == "UB_Player" || value == "2") {
-		return 2;
-	}
-	if (value == "UB_SquadLeader" || value == "3") {
-		return 3;
-	}
-	return 0;
+	if (value == "UB_First" || value == "0") return 0;
+	const int branch = game::unlockBranch(value);
+	return branch == 0 ? -1 : branch;
 }
 
 std::string orEmpty(const std::string& path) { return path.empty() ? std::string(kEmpty) : path; }
@@ -83,49 +76,34 @@ void KitMenu::bind(Console& console)
 	bindMethod(console, "KitInterface.setInformationString", any, [this](int row, int item) { setInformationString(row, item); });
 	bindMethod(console, "KitInterface.resetInformationString", any, [this](int) { resetInformationString(); });
 	bindMethod(console, "KitInterface.setHeavyArmor", any, [this](int heavy) { setHeavyArmor(heavy != 0); });
-	// UnlockInterface (0x007b8e60-0x007b9a20): without field-unlock points
-	// (offline) the screen doesn't open and nothing is spent.
-	bindMethod(console, "UnlockInterface.showUnlockInterface", any, [this](int) {
-		// Hiding field unlocks must leave customization open: the shipped
-		// top tab opens it first, then sends showUnlockInterface 0.
-		// Map/close buttons explicitly call closeCustomInterface themselves.
-		m_hud.set("UnlocksShow", 0);
-		m_hud.set("UnlockInfoShow", 0);
-	});
-	bindMethod(console, "UnlockInterface.setInformationString", any, [this](int kit, int branch) {
-		// 0x007b9890: the branch's next unlock.
-		std::string description, picture;
-		const auto& kits = m_logic.team(m_team == 1 ? 1 : 2).kits;
-		const world::ObjectTemplate* t = kit >= 0 && static_cast<size_t>(kit) < kits.size() ? m_templates.find(kits[static_cast<size_t>(kit)].name) : nullptr;
-		for (size_t c = 0; t && c < t->children().size(); ++c) {
-			const std::string& name = t->children()[c].name;
-			const world::ObjectTemplate* container = m_templates.find(name);
-			if (!container || container->typeName() != "ItemContainer" || container->children().empty()
-				|| branchOf(setting(name, "unlockBranch")) != branch
-				|| std::find(m_unlocked.begin(), m_unlocked.end(), name) != m_unlocked.end()) {
-				continue;
-			}
-			const std::string item = container->children().front().name;
-			description = setting(item, "weaponHud.descrString");
-			picture = setting(item, "weaponHud.renderedPicture");
-			break;
+	// 0x007b95a0 opens the field-upgrade tab only with a credit.
+	bindMethod(console, "UnlockInterface.showUnlockInterface", any, [this](int show) {
+		if (show != 1) {
+			closeFieldUpgrades();
+			return;
 		}
-		m_hud.setString("UnlockInfoString", description.empty() ? std::string() : text(description));
-		m_hud.setString("UnlockInfoPic", orEmpty(picture));
+		if (m_fieldCredits <= 0) return;
+		closeCustomInterface();
+		m_hud.set("UnlocksShow", 1);
+		m_hud.set("UnlockInfoShow", 1);
+		resetFieldInformation();
+		selectFieldUpgrade(-1, -1);
 	});
-	bindMethod(console, "UnlockInterface.resetInformationString", any, [this](int) {
-		m_hud.setString("UnlockInfoString", text("HUD_TEXT_MENU_FU_DEFAULT_TEXT"));
-		m_hud.setString("UnlockInfoPic", kEmpty);
+	bindMethod(console, "UnlockInterface.setInformationString", any, [this](int kit, const std::string& value) {
+		const auto* item = nextFieldItem(kit, fieldBranch(value));
+		m_hud.setString("UnlockInfoString", item ? text(setting(item->name(), "weaponHud.descrString")) : std::string());
+		m_hud.setString("UnlockInfoPic", item ? orEmpty(setting(item->name(), "weaponHud.renderedPicture")) : kEmpty);
 	});
-	bindMethod(console, "UnlockInterface.setFieldUnlock", any, [this](int kit, int branch) {
-		for (int k = 0; k < kKits; ++k) {
-			for (int b = 0; b < 4; ++b) {
-				m_hud.set("Kit" + std::to_string(k) + "Branch" + std::to_string(b) + "Selected", k == kit && b == branch ? 1 : 0);
-			}
-		}
+	bindMethod(console, "UnlockInterface.resetInformationString", any, [this](int) { resetFieldInformation(); });
+	bindMethod(console, "UnlockInterface.setFieldUnlock", any, [this](int kit, const std::string& branch) {
+		selectFieldUpgrade(kit, fieldBranch(branch));
 	});
-	bindMethod(console, "UnlockInterface.selectUnlock", any, [](int) {});           // no points to spend
-	bindMethod(console, "UnlockInterface.spendFieldUnlock", any, [](int, int) {});  // 0x004c1f30: none offline
+	bindMethod(console, "UnlockInterface.selectUnlock", any, [this](int select) {
+		if (select == 1) spendFieldUpgrade(m_fieldKit, m_fieldBranch);
+	});
+	bindMethod(console, "UnlockInterface.spendFieldUnlock", any, [this](int kit, const std::string& branch) {
+		spendFieldUpgrade(kit, fieldBranch(branch));
+	});
 	bindMethod(console, "UnlockInterface.changeToKit", any, [this](int kit) { setKit(kit); });
 	const auto selectUnlock = [this](int kit, int branch, int level, int on) {
 		// 0x007b8f30: an unlock the soldier has becomes the branch's choice.
@@ -147,6 +125,90 @@ void KitMenu::bind(Console& console)
 		[selectUnlock](int kit, int branch, int level, int on) { return selectUnlock(kit, branch, level, on); });
 	bindMethod(console, "UnlockInterface.selectUnlockItem", any,
 		[selectUnlock](int kit, int branch, int level, int on) { selectUnlock(kit, branch, level, on); });
+}
+
+bool KitMenu::owns(const std::string& container) const
+{
+	return m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), container) != m_unlocked.end()
+		|| std::find(m_fieldItems.begin(), m_fieldItems.end(), container) != m_fieldItems.end();
+}
+
+const world::ObjectTemplate* KitMenu::nextFieldItem(int kit, int branch) const
+{
+	if (kit < 0 || kit >= kKits || branch < 0 || branch >= 4) return nullptr;
+	const world::ObjectTemplate* item = nullptr;
+	int next = kItems;
+	game::visitKitUnlocks(m_templates, m_logic.team(m_team == 1 ? 1 : 2), kit, [&](const std::string& name, int b, int level) {
+		if (b != branch || level >= next || owns(name)) return;
+		const auto* container = m_templates.find(name);
+		if (const auto* child = m_templates.find(container->children().front().name)) {
+			next = level;
+			item = child;
+		}
+	});
+	return item;
+}
+
+void KitMenu::selectFieldUpgrade(int kit, int branch)
+{
+	const bool selectable = m_fieldCredits > 0 && nextFieldItem(kit, branch);
+	m_fieldKit = selectable ? kit : -1;
+	m_fieldBranch = selectable ? branch : -1;
+	for (int k = 0; k < kKits; ++k) {
+		for (int b = 0; b < 4; ++b) {
+			m_hud.set("Kit" + std::to_string(k) + "Branch" + std::to_string(b) + "Selected",
+				k == m_fieldKit && b == m_fieldBranch ? 1 : 0);
+		}
+	}
+}
+
+bool KitMenu::spendFieldUpgrade(int kit, int branch)
+{
+	const auto* next = nextFieldItem(kit, branch);
+	if (m_fieldCredits <= 0 || !next || !onSpendFieldUpgrade || !onSpendFieldUpgrade(kit, branch)) return false;
+	m_hud.setString("PickedUnlockIconPathString", orEmpty(setting(next->name(), "weaponHud.unlockIcon")));
+	m_hud.setString("PickedUnlockNameString", text(setting(next->name(), "weaponHud.hudName")));
+	m_hud.set("UnlockInfoShow", 0);
+	selectFieldUpgrade(-1, -1);
+	return true;
+}
+
+void KitMenu::resetFieldInformation()
+{
+	m_hud.setString("UnlockInfoString", text("HUD_TEXT_MENU_FU_DEFAULT_TEXT"));
+	m_hud.setString("UnlockInfoPic", kEmpty);
+}
+
+void KitMenu::closeFieldUpgrades()
+{
+	m_hud.set("UnlocksShow", 0);
+	m_hud.set("UnlockInfoShow", 0);
+	selectFieldUpgrade(-1, -1);
+}
+
+void KitMenu::setFieldUpgrades(int credits, const std::vector<std::string>& containers)
+{
+	if (credits == m_fieldCredits && containers == m_fieldItems) return;
+	const bool ownershipChanged = containers != m_fieldItems;
+	m_fieldCredits = credits;
+	m_fieldItems = containers;
+	m_built = false;
+	if (credits == 0 && containers.empty()) closeFieldUpgrades();
+	if (ownershipChanged) {
+		// Rebuild ability icons and forget equipment choices that expired.
+		resetAbilityIcons();
+		const int saved = m_kit;
+		for (int kit = 0; kit < kKits; ++kit) {
+			m_kit = kit;
+			build(m_team);
+			for (int row = 0; row < kRows; ++row) {
+				int& chosen = m_chosen[kit][row];
+				if (chosen >= 0 && !m_grid[row][chosen].available) chosen = -1;
+			}
+		}
+		m_kit = saved;
+		m_built = false;
+	}
 }
 
 void KitMenu::setKit(int kit)
@@ -203,7 +265,7 @@ void KitMenu::build(int team)
 			continue; // the level-15 replacements aren't on the grid
 		}
 		const std::string& unlockItem = t->children().front().name;
-		const int branch = branchOf(setting(child.name, "unlockBranch"));
+		const int branch = game::unlockBranch(setting(child.name, "unlockBranch"));
 		Item* slot = nullptr;
 		if (mainWeapon(unlockItem)) {
 			// A primary weapon unlock (the HAR/LAR rifle...): the main weapon
@@ -221,17 +283,19 @@ void KitMenu::build(int team)
 				const world::ObjectTemplate* o = m_templates.find(other.name);
 				const int otherLevel = std::atoi(setting(other.name, "unlockLevel").c_str());
 				if (o && o->typeName() == "ItemContainer" && !o->children().empty() && otherLevel < level
-					&& branchOf(setting(other.name, "unlockBranch")) == branch
+					&& game::unlockBranch(setting(other.name, "unlockBranch")) == branch
 					&& mainWeapon(o->children().front().name)) {
 					--index;
 				}
 			}
+			if (index < 0 || index >= kItems) continue;
 			slot = &m_grid[static_cast<size_t>(branch + 1)][static_cast<size_t>(index)];
 		}
 		Item& item = *slot;
 		fill(item, unlockItem);
 		item.container = child.name;
-		item.available = m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), child.name) != m_unlocked.end();
+		item.available = owns(child.name);
+		item.fieldUnlocked = std::find(m_fieldItems.begin(), m_fieldItems.end(), child.name) != m_fieldItems.end();
 	}
 	for (int row = 0; row < kRows; ++row) {
 		const int chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
@@ -272,9 +336,6 @@ void KitMenu::updateAbilityIcons()
 	if (!kit) {
 		return;
 	}
-	const auto owned = [this](const std::string& container) {
-		return m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), container) != m_unlocked.end();
-	};
 	float sprintUse = 1, sprintRecharge = 1, beacon = 1;
 	bool overheat = false;
 	const auto apply = [&](const world::ObjectTemplate& t) {
@@ -317,7 +378,7 @@ void KitMenu::updateAbilityIcons()
 			apply(*t); // the kit's own items (their Ability, +0x74)
 			continue;
 		}
-		if (owned(child.name)) {
+		if (owns(child.name)) {
 			apply(*t);
 		}
 	}
@@ -373,12 +434,12 @@ void KitMenu::update(int team)
 				const int level = std::atoi(setting(child.name, "unlockLevel").c_str());
 				if (level >= 0 && level < kItems && !t->children().empty() && mainWeapon(t->children().front().name)) {
 					if (m_chosen[static_cast<size_t>(i)][0] == primaryIndex
-						&& (m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), child.name) != m_unlocked.end())) {
+						&& owns(child.name)) {
 						chosenWeaponIcon = setting(t->children().front().name, "weaponHud.weaponIcon");
 					}
 					++primaryIndex;
 				}
-				if (branchOf(setting(child.name, "unlockBranch")) == 0 && level < kItems) {
+				if (game::unlockBranch(setting(child.name, "unlockBranch")) == 0 && level < kItems) {
 					unlockLevels = std::max(unlockLevels, level);
 					// 0x0044a3f0: the first branch's unlock in the primary slot.
 					if (altIcon.empty() && !t->children().empty()) {
@@ -392,7 +453,12 @@ void KitMenu::update(int team)
 		m_hud.setString("KitWeaponIcon" + n + "Path", orEmpty(chosenWeaponIcon.empty() ? weaponIcon : chosenWeaponIcon));
 		m_hud.set("KitUnlock" + n + "Show", unlockLevels >= 1 ? 1 : 0);
 		m_hud.setString("KitAltWeaponIcon" + n + "Path", orEmpty(altIcon));
-		m_hud.set("KitUnlockArrow" + n + "Show", 0); // no field unlock to take
+		bool canUpgrade = false;
+		for (int branch = 0; m_fieldCredits > 0 && branch < 4 && !canUpgrade; ++branch) {
+			canUpgrade = nextFieldItem(i, branch) != nullptr;
+		}
+		m_hud.set("KitUnlockArrow" + n + "Show", canUpgrade ? 1 : 0);
+		m_hud.set("Kit" + n + "UnlockBlinkAlpha", canUpgrade ? 1 : 0);
 		m_hud.set("Kit" + n + "HeavyArmorShow", m_heavy ? 1 : 0);
 		m_hud.set("HeavyArmor" + n + "Active", m_heavy ? 1 : 0);
 		// 0x00449600: light armour sprints 0.75, heavy 0.25 (without the sprint unlock).
@@ -405,7 +471,7 @@ void KitMenu::update(int team)
 			const Item& it = m_grid[static_cast<size_t>(row)][static_cast<size_t>(index)];
 			const std::string p = "Kit" + std::to_string(row) + "Item" + std::to_string(index);
 			m_hud.set(p + "Active", it.active ? 1 : 0);
-			m_hud.set(p + "FieldUnlocked", 0);
+			m_hud.set(p + "FieldUnlocked", it.fieldUnlocked ? 1 : 0);
 			m_hud.set(p + "Show", it.present ? 1 : 0);
 			m_hud.setString(p + "Icon", orEmpty(it.icon));
 			m_hud.set(p + "Alpha", it.available ? 1.0f : 0.3f);
@@ -424,9 +490,8 @@ void KitMenu::update(int team)
 	}
 	m_hud.set("HeavyArmorActive", m_heavy ? 1 : 0);
 	m_hud.set("NotAntiVechicleKitChoosen", 1);
-	m_hud.set("UnlockInfoBarShow", 0);
-	m_hud.set("FUBlinkAlpha", 0);
-	m_hud.set("UnlockBlinkAlpha", 0);
+	m_hud.set("FUBlinkAlpha", m_fieldCredits > 0 ? 1 : 0);
+	m_hud.set("UnlockBlinkAlpha", m_fieldItems.empty() ? 0 : 1);
 	// 0x007975e0: the soldier picture by team, kit and armour.
 	// Use the matching DDS canvases for both armours. Requesting .tga
 	// finds vanilla's cropped light portrait before trying the mod's DDS;
@@ -447,32 +512,26 @@ void KitMenu::update(int team)
 				const std::string& name = kit->children()[c].name;
 				const world::ObjectTemplate* t = m_templates.find(name);
 				const int level = std::atoi(setting(name, "unlockLevel").c_str());
-				if (!t || t->typeName() != "ItemContainer" || branchOf(setting(name, "unlockBranch")) != b || level >= kItems
+				if (!t || t->typeName() != "ItemContainer" || game::unlockBranch(setting(name, "unlockBranch")) != b || level >= kItems
 					|| t->children().empty()) {
 					continue;
 				}
 				++count;
-				const bool have = m_allUnlocked || std::find(m_unlocked.begin(), m_unlocked.end(), name) != m_unlocked.end();
+				const bool have = owns(name);
 				if (have) {
 					reached = std::max(reached, level);
 				}
 			}
-			for (size_t c = 0; kit && c < kit->children().size(); ++c) {
-				const std::string& name = kit->children()[c].name;
-				const world::ObjectTemplate* t = m_templates.find(name);
-				if (t && t->typeName() == "ItemContainer" && !t->children().empty() && branchOf(setting(name, "unlockBranch")) == b
-					&& std::atoi(setting(name, "unlockLevel").c_str()) == reached + 1) {
-					const std::string item = t->children().front().name;
-					nextIcon = setting(item, "weaponHud.unlockIcon");
-					const std::string hudName = setting(item, "weaponHud.hudName");
-					nextName = hudName.empty() ? std::string() : text(hudName);
-					largePic = !setting(item, "weaponHud.weaponIcon").empty();
-				}
+			if (const auto* next = nextFieldItem(k, b)) {
+				nextIcon = setting(next->name(), "weaponHud.unlockIcon");
+				const std::string hudName = setting(next->name(), "weaponHud.hudName");
+				nextName = hudName.empty() ? std::string() : text(hudName);
+				largePic = mainWeapon(next->name());
 			}
 			const std::string p = "Kit" + std::to_string(k) + "Branch" + std::to_string(b);
 			m_hud.set(p + "UnlockLevel", static_cast<float>(reached + 1) * 0.125f);
 			m_hud.set(p + "MaxUnlockLevel", static_cast<float>(count) * 0.125f);
-			m_hud.set(p + "Alpha", 1.0f);
+			m_hud.set(p + "Alpha", nextIcon.empty() ? 0.2f : 1.0f);
 			m_hud.setString(p + "NextUnlockIconPathString", nextIcon);
 			m_hud.setString(p + "NextUnlockNameString", nextName);
 			m_hud.set(p + "NextUnlockShow", nextIcon.empty() ? 0 : 1);

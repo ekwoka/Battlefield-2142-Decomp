@@ -4,6 +4,7 @@
 
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
+#include "Game/Bots.h"
 #include "Game/GameWorld.h"
 #include "Geometry/MeshFile.h"
 #include "IO/File/FileManager.h"
@@ -207,6 +208,41 @@ float playerTagAlpha(const Settings& s, const PlayerTagInput& in, Fade& fade, fl
 	// (0x100f09b0) cap the alpha.
 	const float far = d * 1.0526316f;
 	return std::min(fade.alpha, tagFog(s.fog, far) * clamp01(1 - (far - most * 2 / 3) / (most / 3)));
+}
+
+int networkMarker(const Settings& s, const NetworkMarkerInput& in, float& alpha)
+{
+	alpha = 0;
+	if (!in.alive || in.selected || !in.onScreen || in.clamped || !(in.revealed || in.aimedAt || in.sameSquad)
+		|| (!in.revealed && in.tagAlpha <= 0.01f)) {
+		return -1;
+	}
+	const float near = in.fadeRange > 0 ? in.fadeRange * 0.33f : s.playerCullNear; // 0x10169e88
+	const float span = (in.fadeRange > 0 ? in.fadeRange : s.playerCullFar) - near;
+	alpha = 1 - clamp01(span > 0 ? (in.distance - near) / span : 0);
+	if (alpha <= 0) {
+		return -1;
+	}
+	return in.friendly ? 0xa0 : 0xa3; // 0x10169cdf: localTeam != tagTeam ? 0xa3 : 0xa0
+}
+
+Colour markerSecondColour(Colour own, int callIcon, bool flash)
+{
+	if (callIcon >= 0) {
+		return Neutral;
+	}
+	if (flash) {
+		return own == Highlight ? Neutral : Highlight; // 0x100f1abe
+	}
+	return own;
+}
+
+int networkSquadIcon(bool showKit, bool showVehicle, bool aboard, int kitType, int vehicleIcon)
+{
+	if (!aboard) {
+		return showKit && kitType >= 0 ? 0x50 + kitType : -1; // ICObject + KitType (0x101694f2)
+	}
+	return showVehicle ? vehicleIcon : -1;
 }
 
 float tagFog(const std::array<float, 4>& f, float distance)
@@ -684,10 +720,27 @@ void Nametags::radioCall(int caller, int code, bool local)
 	m_pendingCalls.push_back({caller, code, local});
 }
 
+void Nametags::radioFlash(int sender)
+{
+	m_pendingFlashes.push_back(sender);
+}
+
 std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::ObjectManager& objects,
 	const View& view, float seconds)
 {
 	std::vector<hud::HudQuad> out;
+	// Where an object is drawn this frame less where its tick left it.
+	const auto drawnOffset = [this, &objects](uint32_t id) -> std::array<float, 3> {
+		if (!m_drawn || id == 0) {
+			return {0, 0, 0};
+		}
+		const auto it = m_drawn->find(id);
+		const world::Object* o = it != m_drawn->end() ? objects.find(id) : nullptr;
+		if (!o) {
+			return {0, 0, 0};
+		}
+		return {it->second[0] - o->position().x, it->second[1] - o->position().y, it->second[2] - o->position().z};
+	};
 	if (!m_fontLoaded) {
 		m_selectedObject = 0;
 		m_selectedRequest = -1;
@@ -750,6 +803,17 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		tag.callIcon = icon;
 	}
 	m_pendingCalls.clear();
+	// The radio lines' flashes (0x100f1abe: the timer started at 12 s when
+	// not running).
+	for (const int sender : m_pendingFlashes) {
+		if (const auto it = m_players.find(sender); it != m_players.end()) {
+			if (it->second.callTime <= 0) {
+				it->second.callTime = 12;
+			}
+			it->second.flash = true;
+		}
+	}
+	m_pendingFlashes.clear();
 
 	// The tagged object's points (0x100efb90): the text's at a soldier's
 	// head along its up (standing: 0.6 m over its origin, more with
@@ -767,10 +831,11 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			// about its centre at the LOD the camera's distance picks).
 			const MeshLods* lods = m_meshLods && v->objectTemplate() ? m_meshLods(*v->objectTemplate()) : nullptr;
 			const float height = lods ? lodRenderRadius(*lods, distance, zoom) : 4.0f;
-			at = {v->position().x, v->position().y
+			const std::array<float, 3> d = drawnOffset(p.vehicle);
+			at = {v->position().x + d[0], v->position().y + d[1]
 					+ m_settings.vehicleNametagOffsetFactor * height + m_settings.vehicleNametagOffset,
-				v->position().z};
-			icon = {v->position().x, v->position().y, v->position().z};
+				v->position().z + d[2]};
+			icon = {v->position().x + d[0], v->position().y + d[1], v->position().z + d[2]};
 			return true;
 		}
 		// The soldier's origin taken 1 m over its feet (the original's
@@ -791,9 +856,10 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			under = 0;
 		}
 		const float k = name + std::min(distance * name * 0.05f, 3.0f);
-		at = {p.position.x, p.position.y + 1.0f + k, p.position.z};
+		const std::array<float, 3> d = drawnOffset(p.soldier);
+		at = {p.position.x + d[0], p.position.y + 1.0f + k + d[1], p.position.z + d[2]};
 		const float below = under * (distance > 30 ? 30 / distance : 1.0f);
-		icon = {p.position.x, p.position.y + 1.0f + below, p.position.z};
+		icon = {p.position.x + d[0], p.position.y + 1.0f + below + d[1], p.position.z + d[2]};
 		return true;
 	};
 
@@ -871,6 +937,27 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		return q;
 	};
 
+	const auto projectObjectTag = [&](const TagTemplate& tt, int team, const std::array<float, 3>& position,
+									  float radius, float& x, float& y, float& distance, bool& clamped, float (&colour)[4]) {
+		if ((m_insideTitan ? !tt.showInside : !tt.showOutside)
+			|| (tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
+			return false;
+		}
+		const bool enemy = team != 0 && team != me.team;
+		const float most = enemy ? tt.maxEnemyDistance : tt.maxDistance;
+		const auto at = objectTagPoint(position, tt.offset, tt.useBoundingRadius, radius);
+		distance = std::sqrt(physics::lengthSquared(physics::Vec3 {at[0], at[1], at[2]} - eyeP));
+		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);
+		if (alpha <= 0.01f || !project(view, at, x, y, tt.glue, m_settings.circleRadius, &clamped)
+			|| (clamped && !tt.tracker && !project(view, at, x, y, false, 0))) {
+			return false;
+		}
+		const int tint = !tt.useTeamColor || team == 0 ? Neutral : enemy ? Enemy : Team;
+		std::copy(kColours[tint], kColours[tint] + 4, colour);
+		colour[3] = alpha;
+		return true;
+	};
+
 	// The objects with tags, looked for again once a second (the
 	// templates' Nametag fields are read once per template).
 	m_taggedCheck -= seconds;
@@ -917,8 +1004,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			if (most == 0) {
 				continue;
 			}
-			const std::array<float, 3> at {owned->position().x + tt.offset[0], owned->position().y + tt.offset[1],
-				owned->position().z + tt.offset[2]};
+			const std::array<float, 3> moved = drawnOffset(owned->id());
+			const std::array<float, 3> at {owned->position().x + tt.offset[0] + moved[0],
+				owned->position().y + tt.offset[1] + moved[1], owned->position().z + tt.offset[2] + moved[2]};
 			const float dx = at[0] - eye.x, dz = at[2] - eye.z;
 			const float distance = std::sqrt(dx * dx + dz * dz);
 			const float alpha = most < 0 ? 1.0f : clamp01(1 - distance / most);
@@ -989,35 +1077,18 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			}
 		}
 		const IconRegistry::Icon* icon = m_icons && iconIndex >= 0 ? m_icons->find(0x50 + iconIndex) : nullptr;
-		if (!icon || (m_insideTitan ? !tt.showInside : !tt.showOutside)) {
+		if (!icon || (tt.useAliveArmor && (owned->destroyed() ||
+				(hud ? hud->objectHealth(id) == 0 : world.hitPoints(id) == 0)))) {
 			continue;
 		}
-		if (tt.useAliveArmor && (owned->destroyed() || (hud ? hud->objectHealth(id) == 0 : world.hitPoints(id) == 0))) {
-			continue;
-		}
-		const int team = owned->team();
-		if ((tt.teamSpecific && team != me.team) || (tt.inverse && team == me.team)) {
-			continue;
-		}
-		const bool enemy = team != 0 && team != me.team;
-		const float most = enemy ? tt.maxEnemyDistance : tt.maxDistance;
-		const std::array<float, 3> at = objectTagPoint({owned->position().x, owned->position().y, owned->position().z},
-			tt.offset, tt.useBoundingRadius, state.radius);
-		const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;
-		const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-		const float alpha = most <= 0 ? 0.0f : clamp01(1 - distance / most);
-		float x = 0, y = 0;
+		const std::array<float, 3> moved = drawnOffset(owned->id());
+		const world::Vec3 pos {owned->position().x + moved[0], owned->position().y + moved[1], owned->position().z + moved[2]};
+		float x = 0, y = 0, distance = 0;
 		bool clamped = false;
-		if (alpha <= 0.01f || !project(view, at, x, y, tt.glue, m_settings.circleRadius, &clamped)) {
-			continue;
-		}
-		if (clamped && !tt.tracker && !project(view, at, x, y, false, 0)) {
-			continue;
-		}
-		const int colour = tt.useTeamColor ? (team == 0 ? Neutral : enemy ? Enemy : Team) : Neutral;
 		float c[4];
-		std::copy(kColours[colour], kColours[colour] + 4, c);
-		c[3] = alpha;
+		if (!projectObjectTag(tt, owned->team(), {pos.x, pos.y, pos.z}, state.radius, x, y, distance, clamped, c)) {
+			continue;
+		}
 		if (tt.selectable) {
 			consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
 		}
@@ -1025,7 +1096,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// The supply bar (objectTagBar): the hubs' and the MiniMed's storage.
 		if ((tt.showArmor || tt.showSupply) && !clamped) {
 			ObjectBarInput bar;
-			bar.friendly = team == 0 || team == me.team;
+			bar.friendly = owned->team() == 0 || owned->team() == me.team;
 			bar.showArmor = tt.showArmor;
 			bar.showSupply = tt.showSupply;
 			bar.localRepairs = localEngineer;
@@ -1033,10 +1104,42 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			bar.hasSupply = !hud && world.supplyStorage(id, bar.supply, kind);
 			const float fill = objectTagBar(bar);
 			if (fill >= 0) {
-				barQuads(x, y, fill, alpha, tagDrawn.quads);
+				barQuads(x, y, fill, c[3], tagDrawn.quads);
 			}
 		}
 		drawn.push_back(std::move(tagDrawn));
+	}
+
+	// The consoles and core are armoured children of the Titan. Their
+	// transforms and life cycle come from the Titan's parts.
+	if (const world::Object* titan = me.alive && m_insideTitan ? objects.find(m_insideTitan) : nullptr;
+		titan && !titan->destroyed() && !titan->hidden() && m_icons) {
+		using Part = game::GameWorld::TitanPartInfo;
+		for (const auto& part : world.titanParts(titan->team(), titan->id())) {
+			if (part.wreck || (part.kind != Part::Console && part.kind != Part::Core)) {
+				continue;
+			}
+			const TagTemplate& tt = tagTemplate(world.templates().find(part.name));
+			if (!tt.show3dIcon || tt.icon < 0 || (part.kind == Part::Core && part.percent > tt.healthActivationLevel)) {
+				continue;
+			}
+			const auto* icon = m_icons->find(0x50 + tt.icon);
+			float x = 0, y = 0, distance = 0;
+			bool clamped = false;
+			float colour[4];
+			if (!icon || !projectObjectTag(tt, titan->team(),
+					{part.position.x, part.position.y, part.position.z}, 0, x, y, distance, clamped, colour)) {
+				continue;
+			}
+			Drawn tag {distance, {iconQuad(*icon, x, y, colour)}};
+			if (tt.showDistance) {
+				char text[32];
+				std::snprintf(text, sizeof(text), "[%im]", static_cast<int>(std::lround(distance)));
+				m_font.write(text, std::round(x - m_font.width(text) / 2),
+					std::round(y + icon->height / 2), colour, tag.quads);
+			}
+			drawn.push_back(std::move(tag));
+		}
 	}
 
 	// The squad's orders (TTOrder: the exe's order object 0x005b8b20 hands
@@ -1132,13 +1235,35 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	// The players' tags.
 	const size_t playerDrawnStart = drawn.size();
 	std::map<int, Tag> seen;
+	// The squad reports' reveals (0x100f2080's flag 0x800000) and the network
+	// markers, a pass of their own after every other tag quad (0x1016d179).
+	const std::vector<int> reported = hud ? hud->squadReportedPlayers() : world.squadReportedPlayers(me.id);
+	// A reported soldier whose decoy is within kDecoyCover across has the
+	// decoy marked in his place (0x00508590: slot 0x1c, then no slot 0x20).
+	const auto isReported = [&](int id) {
+		if (std::find(reported.begin(), reported.end(), id) == reported.end()) {
+			return false;
+		}
+		physics::Vec3 decoy;
+		const auto p = std::find_if(players.begin(), players.end(), [id](const auto& q) { return q.id == id; });
+		if (p == players.end() || !world.decoyOf(id, decoy)) {
+			return true;
+		}
+		const float dx = decoy.x - p->position.x, dz = decoy.z - p->position.z;
+		return dx * dx + dz * dz > kDecoyCover * kDecoyCover;
+	};
+	std::vector<hud::HudQuad> markers, squadIcons;
+	// The local squad's networkable HUD unlocks (0x101691c0's walk over the
+	// squad, the local player alone without one: ability +0x10 / +0x11).
+	bool showKit = false, showVehicle = false;
+	world.squadNetworkHud(me.id, showKit, showVehicle);
 	for (const auto& p : players) {
 		if (p.id == me.id) {
 			continue;
 		}
 		Tag tag = m_players.count(p.id) ? m_players[p.id] : Tag {};
 		const world::Object* body = objects.find(p.vehicle ? p.vehicle : p.soldier);
-		if (!body || p.cloaked) {
+		if (!body) {
 			continue;
 		}
 		const float dx = p.position.x - eye.x, dz = p.position.z - eye.z;
@@ -1155,6 +1280,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			if (tag.callTime <= 0) {
 				tag.callTime = 0;
 				tag.callIcon = -1;
+				tag.flash = false; // 0x100f36d0: +0x64 and +0x68 back to -1
 			}
 		}
 		std::array<float, 3> head {}, iconAt {};
@@ -1189,7 +1315,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		const bool calling = tag.callIcon >= 0 && in.friendly;
 		const int helper = in.friendly ? helperIcon(m_calls, kitAbilities(kitTypeOf(p.kit))) : -1;
 		const bool specialIcon = calling || helper >= 0;
-		const float alpha = playerTagAlpha(m_settings, in, tag.fade, seconds);
+		// shortcut: a cloaked player's name and bars stay hidden; retail's bar pass tests the
+		// cloak (0x1016c47e) but its name pass doesn't, and what hides that name isn't traced.
+		const float alpha = p.cloaked ? 0.0f : playerTagAlpha(m_settings, in, tag.fade, seconds);
 		seen[p.id] = tag;
 		// The first occupant only speaks for a vehicle (0x100f33c0, bit
 		// 0x10000).
@@ -1209,6 +1337,57 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		// When ordinary tags are hidden, the retail response flags also glue
 		// compatible helper icons to the screen edge for tracker display.
 		const bool glue = in.sameSquad || calling || (!m_shown && helper >= 0);
+		if (m_icons) {
+			NetworkMarkerInput marker;
+			marker.friendly = in.friendly;
+			marker.sameSquad = in.sameSquad;
+			marker.alive = p.alive;
+			// shortcut: a vehicle's tag (its first occupant's) counts as revealed when any
+			// occupant is; retail reveals each occupant's player tag, of which only the
+			// first occupant's is drawn (0x100f33c0).
+			marker.revealed = isReported(p.id);
+			for (const auto& other : players) {
+				marker.revealed = marker.revealed || (p.vehicle && other.vehicle == p.vehicle && isReported(other.id));
+			}
+			marker.aimedAt = tag.aimed;
+			marker.selected = object == m_selectedObject;
+			float hx = 0, hy = 0;
+			marker.onScreen = project(view, head, hx, hy, false, 0) && hx >= 0 && hx <= 800 && hy >= 0 && hy <= 600;
+			if (glue) {
+				project(view, head, hx, hy, true, m_settings.circleRadius, &marker.clamped);
+			}
+			marker.tagAlpha = alpha;
+			marker.distance = distance;
+			float markerAlpha = 0, mx = 0, my = 0;
+			const int id = networkMarker(m_settings, marker, markerAlpha);
+			const IconRegistry::Icon* icon = id >= 0 ? m_icons->find(id) : nullptr;
+			// Its colour blinks towards the second (CrossFadeValue, 0x10169fb4).
+			const Colour own = playerTagColour(in);
+			const Colour second = markerSecondColour(own, tag.callIcon, tag.flash);
+			const float cross = (1 - clamp01(distance / m_settings.maxCallDistance) * 0.5f) * blink;
+			float c[4];
+			for (int k = 0; k < 3; ++k) {
+				c[k] = kColours[own][k] + (kColours[second][k] - kColours[own][k]) * cross;
+			}
+			c[3] = markerAlpha;
+			// The diamond skips a cloaked player (0x10169c13, vt+0x114).
+			if (icon && !p.cloaked && project(view, iconAt, mx, my, false, 0)) {
+				markers.push_back(iconQuad(*icon, mx, my, c));
+			}
+			// The squad's kit or vehicle icon (0x101691c0): the same gates, one
+			// icon height over the text point, but no cloak test, so a revealed
+			// cloaked enemy shows his kit.
+			int kitType = -1, vehicleIcon = -1;
+			if (const world::Object* v = p.vehicle ? objects.find(p.vehicle) : nullptr) {
+				vehicleIcon = tagTemplate(v->objectTemplate()).vehicleIcon;
+			} else {
+				kitType = game::kitTypeIndex(kitTypeOf(p.kit));
+			}
+			const int squadIconId = id >= 0 ? networkSquadIcon(showKit, showVehicle, p.vehicle != 0, kitType, vehicleIcon) : -1;
+			if (const IconRegistry::Icon* squadIcon = squadIconId >= 0 ? m_icons->find(squadIconId) : nullptr) {
+				squadIcons.push_back(iconQuad(*squadIcon, hx, std::round(hy - squadIcon->height), c));
+			}
+		}
 		float x = 0, y = 0, ix = 0, iy = 0;
 		bool clamped = false;
 		if (alpha <= 0.01f || !project(view, head, x, y, glue, m_settings.circleRadius, &clamped)) {
@@ -1224,9 +1403,12 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		float textColour[4];
 		std::copy(colour, colour + 4, textColour);
 		const float fade = (1 - clamp01(distance / m_settings.maxCallDistance) * 0.5f) * blink;
-		if (calling) {
+		// A radio flash (+0x68 alone, radioFlash) blinks it the same way,
+		// towards white when its own colour is the highlight.
+		if (calling || tag.flash) {
+			const Colour towards = calling || index != Highlight ? Highlight : Neutral;
 			for (int k = 0; k < 3; ++k) {
-				textColour[k] = colour[k] + (kColours[Highlight][k] - colour[k]) * fade;
+				textColour[k] = colour[k] + (kColours[towards][k] - colour[k]) * fade;
 			}
 		}
 		// The text (0x100f2b60): glued to the edge none (unless the call's
@@ -1366,6 +1548,42 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		}
 		drawn.push_back(std::move(d));
 	}
+	// The reported enemies' decoys (kind 3, flag 0x10000000: 0x10169b63),
+	// at the DecoyObject's text point (offset; shortcut: its bounding radius
+	// isn't added, a round has no mesh radius here).
+	// Revealed by a report (slot 0x1c) or aimed at (+0xc3: the crosshair's
+	// object, 0x100f0d30; here its point in the aim cone and in sight); the
+	// latter only while its own tag shows (0x100f392b: showItem and the
+	// object tag's alpha, 0x100f1330: 1 - d / its enemy range).
+	for (const auto& p : m_icons ? players : std::vector<game::GameWorld::PlayerInfo> {}) {
+		physics::Vec3 at;
+		const world::ObjectTemplate* decoy = p.team != me.team && !p.cloaked ? world.decoyOf(p.id, at) : nullptr;
+		if (!decoy) {
+			continue;
+		}
+		const TagTemplate& tt = tagTemplate(decoy);
+		const std::array<float, 3> point {at.x + tt.offset[0], at.y + tt.offset[1], at.z + tt.offset[2]};
+		NetworkMarkerInput marker;
+		marker.alive = p.alive;
+		marker.revealed = std::find(reported.begin(), reported.end(), p.id) != reported.end();
+		marker.fadeRange = tt.inverse ? tt.maxEnemyDistance : std::min(tt.maxEnemyDistance, tt.maxDistance);
+		const float dx = point[0] - eye.x, dz = point[2] - eye.z;
+		marker.distance = std::sqrt(dx * dx + dz * dz);
+		const Vec toward = Vec {point[0], point[1], point[2]} - eye;
+		const float length = std::sqrt(dot(toward, toward));
+		marker.aimedAt = !marker.revealed && length > 0 && dot(toward, forward) / length > m_settings.aimCone
+			&& world.lineOfSight(eyeP, {point[0], point[1], point[2]}, 0);
+		marker.tagAlpha = tt.showItem && marker.fadeRange > 0 ? clamp01(1 - marker.distance / marker.fadeRange) : 0;
+		float mx = 0, my = 0, alpha = 0;
+		marker.onScreen = project(view, point, mx, my, false, 0) && mx >= 0 && mx <= 800 && my >= 0 && my <= 600;
+		const IconRegistry::Icon* icon = m_icons->find(networkMarker(m_settings, marker, alpha));
+		if (icon) {
+			float c[4];
+			std::copy(kColours[Enemy], kColours[Enemy] + 4, c);
+			c[3] = alpha;
+			markers.push_back(iconQuad(*icon, mx, my, c));
+		}
+	}
 	m_players = std::move(seen);
 	if (!m_shown) {
 		// Retail's selectable-icon pass keeps active radio/help icons alive
@@ -1378,6 +1596,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		for (Drawn& d : drawn) {
 			out.insert(out.end(), d.quads.begin(), d.quads.end());
 		}
+		out.insert(out.end(), markers.begin(), markers.end()); // the marker pass reads no shown byte
+		out.insert(out.end(), squadIcons.begin(), squadIcons.end());
 		m_selectedObject = 0;
 		m_selectedRequest = -1;
 		return out;
@@ -1415,6 +1635,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	for (Drawn& d : drawn) {
 		out.insert(out.end(), d.quads.begin(), d.quads.end());
 	}
+	out.insert(out.end(), markers.begin(), markers.end());
+	out.insert(out.end(), squadIcons.begin(), squadIcons.end()); // 0x101691c0 follows 0x10169a70
 	return out;
 }
 

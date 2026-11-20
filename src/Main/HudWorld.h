@@ -163,6 +163,9 @@ public:
 	// The vehicles (objects) those reports spotted, a joined game's (the
 	// local 2/0x2e of 0x00508590 for a reported player in a vehicle).
 	virtual std::vector<uint32_t> spottedVehicles() const { return {}; }
+	// The enemies a joined game's squad reports reveal (event 0x41 kind 0,
+	// without the radio spots): the name tags' network markers.
+	virtual std::vector<int> squadReportedPlayers() const { return {}; }
 	// The local player outside the combat area (the HUD information layer's
 	// frame 0x0044c7b0): the seconds left before the damage, max(0, the
 	// controlled object's timer (0x004cac70) - the time outside (player
@@ -321,6 +324,25 @@ public:
 	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
 	// (0x005912c0); PlayerInfo::hitIndicator of the local player.
 	float hitIndicator = 0;
+	// Our hit direction (0x00596ed0: a record carrying it raises HUD event
+	// 0x39 when its count +0x1d4 was 0, then sets it to 2; each record
+	// counts it down): PlayerInfo::hitDirection / hitDirectionHits.
+	float hitDirection = 0;
+	uint32_t hitDirectionHits = 0;
+	int hitDirectionRecords = 0;
+	void ownHitDirection(bool has, float radians)
+	{
+		if (has) {
+			hitDirection = radians;
+			if (hitDirectionRecords == 0) {
+				++hitDirectionHits;
+			}
+			hitDirectionRecords = 2;
+		}
+		if (hitDirectionRecords > 0) {
+			--hitDirectionRecords;
+		}
+	}
 
 	bool joined() const override { return true; }
 	int localPlayer() const override;
@@ -359,6 +381,7 @@ public:
 	Weapon seatGroupWeapon(int group) const override;
 	std::vector<int> revealedPlayers(int team) const override;
 	std::vector<uint32_t> spottedVehicles() const override;
+	std::vector<int> squadReportedPlayers() const override;
 	float combatAreaTimeLeft() const override;
 
 	// The object of a ghost (0 none) and the ghost of an object.
@@ -380,7 +403,11 @@ private:
 
 // The view through a guided round's camera (useProjectileCamera,
 // GameWorld::projectileCamera): RendDX9's TVEffect pass (0x10048f80,
-// PostProduction's "TVEffect") is on while the player looks through it.
-void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects);
+// PostProduction's "TVEffect") is on while the player looks through it, but
+// only with enhanced.tvEffect: nothing in RendDX9 calls 0x10048f80 or names the
+// technique elsewhere (no direct call, no pointer to it in the DLL), so retail
+// shows the plain colour view, and the pass shifts each row sideways by up to
+// ~2% of the width, which leans vertical edges (a diagonal tear).
+void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects, bool tvEffect);
 
 } // namespace dice::hfe::host

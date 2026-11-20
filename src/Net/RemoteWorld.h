@@ -76,6 +76,7 @@ struct RemoteObject {
 	float health = -1;        // -1: unknown; soldiers: a fraction of maxHitPoints, others: hit points
 	NetworkableKind kind = NetworkableKind::Unknown; // the ghost's root networkable
 	bool hasOrientation = false;
+	bool supplyLanded = false; // SimpleObject 0x20000
 	Quat orientation;         // SimpleObject / GenericProjectile ghosts
 	bool hasVelocity = false;
 	Vec3f velocity;
@@ -259,6 +260,11 @@ public:
 	bool partPose(uint16_t rootGhost, const std::string& part, Vec3f& offset, Vec3f& rotation) const;
 	std::vector<RemotePlayer> playerList() const;
 	const RemotePlayer* player(int id) const;
+	int fieldUnlockCredits() const { return m_fieldUnlockCredits; }
+	double squadOrderPoints() const { return m_squadOrderPoints; }
+	double squadOrderMax() const { return m_squadOrderMax; }
+	const std::array<uint8_t, 56>& ownedUnlockMasks() const { return m_ownedUnlockMasks; }
+	const std::array<uint8_t, 56>& fieldUnlockMasks() const { return m_fieldUnlockMasks; }
 	int localPlayer() const { return m_localPlayer; }
 	// Our own soldier or vehicle as the last control-object record had it.
 	bool hasControlObject() const { return m_hasControl; }
@@ -455,6 +461,18 @@ public:
 		return vehicles;
 	}
 	uint32_t radarReports() const { return m_radarReports; }
+	// The enemies those reports alone reveal (no radio spots), while their
+	// seconds last: 0x00508590's NametagManager slot 0x20, the network marker.
+	std::vector<int> squadReportedPlayers() const
+	{
+		std::vector<int> players;
+		for (const auto& [id, until] : m_squadReports) {
+			if (until > m_tick) {
+				players.push_back(id);
+			}
+		}
+		return players;
+	}
 	std::vector<PostRemoteInfo> takeMessages() { return std::exchange(m_messages, {}); }
 	// The server's rcon answers (data block 7, PlayerAuth.h
 	// kRconFeedbackBlock), each as the console prints it: the text and a
@@ -536,6 +554,9 @@ private:
 	bool m_controlInLastBlock = false;
 	uint32_t m_controlRecords = 0, m_controlStates = 0;
 	uint32_t m_tick = 0;
+	int m_fieldUnlockCredits = 0;
+	double m_squadOrderPoints = 0, m_squadOrderMax = 0;
+	std::array<uint8_t, 56> m_ownedUnlockMasks {}, m_fieldUnlockMasks {}, m_previousUnlockMasks {};
 	uint32_t m_gameState = 0;
 	bool m_roundStarted = false;
 	RoundInfo m_round;
@@ -557,6 +578,7 @@ private:
 	std::vector<TakeableSet> m_takeable;
 	std::map<int, uint32_t> m_radar; // a player -> the server tick it leaves the minimap
 	std::map<uint16_t, uint32_t> m_radarVehicles; // a vehicle's ghost -> the same
+	std::map<int, uint32_t> m_squadReports; // a player the squad reports reveal -> the tick it ends
 	uint32_t m_radarReports = 0;
 	std::vector<PostRemoteInfo> m_messages;
 	std::vector<std::string> m_consoleLines;

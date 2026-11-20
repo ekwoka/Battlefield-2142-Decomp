@@ -160,6 +160,12 @@ public:
 		float yaw = 0, pitch = 0; // radians: yaw 0 along +z, pitch up positive
 		float fovY = 1.0f;        // radians, for the window's aspect (RendDX9 0x10066ac0)
 		float roll = 0;           // radians about the view axis (a seat camera's shakes)
+		// The soldier's own camera (on foot, under a parachute): retail turns
+		// it with the look every frame (0x0043f170's local player, 0x0058b5e0).
+		bool soldierEye = false;
+		float carrierYaw = 0; // radians: the part of yaw its seat gives (drawn blended), 0 on foot
+		float eyeHeight = 0;  // the eye over the soldier at the tick
+		float eyeTarget = 0;  // the pose's height it eases towards
 	};
 	bool view(View& view, float aspect) const;
 	// Local map direction in any vehicle seat with a first-person camera, in degrees.
@@ -213,6 +219,10 @@ public:
 	};
 	std::vector<Model> models() const;
 	const effects::EffectManager& effects() const { return m_effects; }
+	// The first-person effects by the frame (EffectManager::frame); their
+	// anchors are the tick's eye, which the draw carries with the view.
+	void setEffectsPerFrame(bool on) { m_effects.setParticlesPerFrame(on); }
+	void frameEffects(float seconds) { m_effects.frame(seconds, 1); }
 	// The sounds of the effect bundles the first-person view started.
 	std::vector<effects::EffectManager::StartedSound> takeSounds() { return m_effects.takeSounds(); }
 	// The vehicle's cockpit (the Camera's 0x00612880): in first person in a
@@ -369,6 +379,7 @@ private:
 	game::Random m_random {0x759dc150};
 
 	anim::EyeHeight m_eye;
+	int m_eyePose = 0; // the last tick's pose for the eye
 	anim::ZoomState m_zoom;
 	anim::FieldOfView m_fov;
 	// The seat's gun's zoom (seatZoomLevel): the gun it was loaded for.

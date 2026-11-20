@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
 #include <functional>
 
 namespace dice::hfe {
@@ -665,6 +664,11 @@ const std::string& GameAudio::loopingSound(const void*, const std::string& name)
 	return it->second;
 }
 
+// Below this squared speed a round's sound keeps its launch yaw instead of
+// facing along its flight: the round mesh's own threshold (Game/Weapons.cpp,
+// 0x005b3e60 keeps the last frame).
+constexpr float kMinFacingSpeedSquared = 0.025f;
+
 void GameAudio::projectiles()
 {
 	for (const auto& projectile : m_round.projectiles()) {
@@ -675,13 +679,27 @@ void GameAudio::projectiles()
 		if (loop.empty()) {
 			continue;
 		}
-		// Keyed by who fired it and where it left (it has no id of its own).
-		uint32_t bits[3];
-		const float origin[3] = {projectile.origin.x, projectile.origin.y, projectile.origin.z};
-		std::memcpy(bits, origin, sizeof(bits));
-		const uint64_t key = (static_cast<uint64_t>(projectile.shooter) << 32) ^ bits[0] ^ (static_cast<uint64_t>(bits[1]) << 11)
-			^ (static_cast<uint64_t>(bits[2]) << 22);
-		m_sounds.loop(ownerKey(2, key), loop, toSound(projectile.position), toSound(projectile.velocity));
+		// Use the round's serial because shells in a salvo share their launch point.
+		// Aim the sound's local cone with the round (the orbital shells face down).
+		const physics::Vec3 direction = physics::lengthSquared(projectile.heading) > 0
+			? projectile.heading : projectile.velocity;
+		physics::Mat3 basis = physics::Mat3::fromYawPitchRoll({projectile.yaw, 0, 0});
+		if (projectile.turns) {
+			basis = projectile.rotation;
+		} else if (physics::lengthSquared(direction) > kMinFacingSpeedSquared) {
+			basis = physics::lookAtRotation(direction, basis);
+		}
+		sound::Matrix4 rotation;
+		for (size_t i = 0; i < basis.rows.size(); ++i) {
+			const physics::Vec3& row = basis.rows[i];
+			rotation.m[i][0] = row.x;
+			rotation.m[i][1] = row.y;
+			rotation.m[i][2] = row.z;
+		}
+		// The velocity goes to the Doppler as retail's; a fast round's pitch is
+		// tamed in the enhanced mode only (enhancedDopplerVelocity).
+		m_sounds.loop(ownerKey(2, projectile.serial), loop, toSound(projectile.position), toSound(projectile.velocity),
+			0, 0, nullptr, rotation);
 	}
 }
 

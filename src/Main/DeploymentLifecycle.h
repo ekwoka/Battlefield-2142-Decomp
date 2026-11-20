@@ -46,10 +46,10 @@ namespace dice::main {
 	}
 
 	// The centred killed lines (KilledState, HudElementsKilled.con) of a dead or downed local player: shown
-	// while the spawn screen is not (the screen has its own timer bar, SpawnInfoString); man down only shows
-	// it once opened. A player who never died (the initial deployment) has no timer.
+	// while the spawn screen is closed (it has its own timer bar, SpawnInfoString).
+	// A player who never died (the initial deployment) has no timer.
 	constexpr bool killedInfoShown(bool manDown, float respawnIn, bool open, bool hiddenWhileDead)
 	{
-		return (manDown || respawnIn > 0.0f) && !(manDown ? open : deploymentScreenShown(false, open, hiddenWhileDead));
+		return (manDown || respawnIn > 0.0f) && !deploymentScreenShown(false, open, hiddenWhileDead);
 	}
 }

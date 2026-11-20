@@ -9,7 +9,135 @@
 #include <cmath>
 #include <vector>
 
+#ifdef BF2142_RENDER_TESTS
+#include "Geometry/GeometryTemplateManager.h"
+#include "IO/File/FileManager.h"
+#include "Render/LevelRenderer.h"
+#include "Scene/EnhancedSettings.h"
+#include "Scene/PostProductionSettings.h"
+#include "Terrain/Heightmap.h"
+#include "Terrain/TerrainData.h"
+#include "World/Object.h"
+#include "World/ObjectTemplateManager.h"
+
+#include <cstdlib>
+#endif
+
 using namespace dice::hfe::render;
+
+#ifdef BF2142_RENDER_TESTS
+TEST(EnhancedRender_CerbereTerrainDoesNotShadowItselfOptIn)
+{
+	using namespace dice::hfe;
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir || !std::getenv("BF2142_RENDER_TEST_DIR")) {
+		return;
+	}
+	const std::string path = "Levels/Cerbere_Landing/";
+	io::FileManager files;
+	files.setRootPath(dir);
+	files.addSearchPath("mods/bf2142");
+	files.setMountingAllowed(true);
+	files.mountArchive(path + "client.zip", path);
+	files.mountArchive(path + "server.zip", path);
+	std::vector<uint8_t> bytes;
+	CHECK(files.readFile(path + "terraindata.raw", bytes));
+	const auto data = terrain::parseTerrainData(bytes);
+	CHECK(data && data->meshes);
+	if (!data || !data->meshes) {
+		return;
+	}
+	terrain::HeightmapCluster heightmaps;
+	terrain::Heightmap& ground = *heightmaps.addHeightmap(0, 0);
+	ground.setSize(513, 513);
+	ground.setScale({2, 0.0025f, 2});
+	CHECK(ground.load(files, path + "HeightmapPrimary.raw"));
+
+	scene::LightSettings lights;
+	lights.sunDirection = {0.30983f, -0.529709f, -0.789566f}; // Cerbere's sky.con
+	lights.terrainSunColor = data->sunColor;
+	lights.terrainGIColor = data->giColor;
+	scene::SkySettings sky;
+	scene::WaterSettings water;
+	scene::RendererSettings settings;
+	settings.drawUndergrowth = false;
+	scene::EnhancedSettings enhanced;
+	enhanced.enabled = true;
+	enhanced.taa = enhanced.ssao = enhanced.softShadows = false;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	geom::GeometryTemplateManager geometries;
+	LevelSources sources {files, templates, objects, geometries, heightmaps, &*data, lights, sky, water, path, ""};
+	sources.renderer = &settings;
+	sources.enhanced = &enhanced;
+
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = GpuContext::create(nullptr, error);
+		CHECK(gpu && gpu->enhancedLitAvailable() && gpu->enhancedPipelines().terrainCaster);
+		if (gpu && gpu->enhancedLitAvailable() && gpu->enhancedPipelines().terrainCaster) {
+			LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			CHECK(renderer.stats().terrainLods);
+			auto target = gpu->createOffscreenTarget(1280, 720);
+			Camera camera;
+			camera.position = {-1.73f, 76, 59.08f};
+			camera.yaw = 236.13f * 0.0174532925f;
+			camera.pitch = -10 * 0.0174532925f;
+			const auto frame = [&](bool terrainShadows) {
+				enhanced.staticShadows = terrainShadows;
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer.draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				return pixels;
+			};
+			for (float x : {-1.73f, -1.63f}) {
+				camera.position.x = x;
+				const auto shadowed = frame(true);
+				const auto unshadowed = frame(false);
+				CHECK(shadowed.size() == 1280 * 720 * 4 && unshadowed.size() == shadowed.size());
+				if (shadowed.size() != 1280 * 720 * 4 || unshadowed.size() != shadowed.size()) {
+					break;
+				}
+				int darkened = 0;
+				for (int y = 405; y < 470; ++y) {
+					for (int xPixel = 320; xPixel < 760; ++xPixel) {
+						const size_t i = (y * 1280 + xPixel) * 4;
+						darkened += int(unshadowed[i]) - int(shadowed[i]) > 20;
+					}
+				}
+				CHECK(darkened < 100);
+			}
+			// The light manager's sun switch does not gate the sun baked into
+			// the terrain lightmap. The scene has no shadow casters in this view.
+			for (bool useEnhanced : {false, true}) {
+				enhanced.enabled = useEnhanced;
+				lights.enableSun = true;
+				const auto sunOn = frame(false);
+				lights.enableSun = false;
+				const auto sunOff = frame(false);
+				CHECK(sunOn.size() == 1280 * 720 * 4 && sunOff.size() == sunOn.size());
+				if (sunOn.size() != 1280 * 720 * 4 || sunOff.size() != sunOn.size()) {
+					break;
+				}
+				int changed = 0;
+				for (int y = 405; y < 470; ++y) {
+					for (int x = 320; x < 760; ++x) {
+						const size_t pixel = (y * 1280 + x) * 4;
+						changed += std::abs(int(sunOn[pixel]) - int(sunOff[pixel])) > 1;
+					}
+				}
+				CHECK(changed == 0);
+			}
+			gpu->releaseTarget(target);
+		}
+	}
+	SDL_Quit();
+}
+#endif
 
 TEST(EnhancedRender_JitterStaysWithinHalfAPixelAndCycles)
 {

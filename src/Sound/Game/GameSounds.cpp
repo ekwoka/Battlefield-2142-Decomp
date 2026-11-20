@@ -198,8 +198,12 @@ bool GameSounds::playFirstPerson(const std::string& templateName, int sample)
 }
 
 void GameSounds::loop(uint64_t owner, const std::string& templateName, const Vec3& position, const Vec3& velocity,
-	float input, uint32_t object, const float* volumeScale)
+	float input, uint32_t object, const float* volumeScale, const Matrix4& rotation)
 {
+	Matrix4 matrix = rotation;
+	matrix.m[3][0] = position.x;
+	matrix.m[3][1] = position.y;
+	matrix.m[3][2] = position.z;
 	const auto key = std::make_pair(owner, templateName);
 	auto it = m_loops.find(key);
 	if (it == m_loops.end()) {
@@ -216,9 +220,7 @@ void GameSounds::loop(uint64_t owner, const std::string& templateName, const Vec
 		}
 		auto loop = std::make_unique<Loop>();
 		loop->input = input;
-		loop->transform.matrix.m[3][0] = position.x;
-		loop->transform.matrix.m[3][1] = position.y;
-		loop->transform.matrix.m[3][2] = position.z;
+		loop->transform.matrix = matrix;
 		loop->transform.m_velocity = velocity;
 		if (sound) {
 			loop->sound = create(templateName, object);
@@ -242,9 +244,7 @@ void GameSounds::loop(uint64_t owner, const std::string& templateName, const Vec
 	Loop& loop = *it->second;
 	loop.refreshed = true;
 	loop.input = input;
-	loop.transform.matrix.m[3][0] = position.x;
-	loop.transform.matrix.m[3][1] = position.y;
-	loop.transform.matrix.m[3][2] = position.z;
+	loop.transform.matrix = matrix;
 	loop.transform.m_velocity = velocity;
 }
 

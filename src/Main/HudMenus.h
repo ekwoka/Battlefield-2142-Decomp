@@ -450,13 +450,13 @@ private:
 // "_SQUADMEMBER" with icon_squad<n>.tga (ShowSquadIcon +0x300); anyone
 // else nothing (SquadInfoBarShow +0x2fe 0). SquadInfoText +0x304,
 // SquadInfoIconPath +0x308. The squad order points bar
-// (SquadOrderInfoBarShow +0x2fd, SquadInfoValue +0x30c: +0x310 over
-// +0x318, from the field-unlock progress the server grants) stays off.
+// (SquadOrderInfoBarShow +0x2fd, SquadInfoValue +0x30c) uses the
+// squad's points and threshold sent by the server.
 void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, bool commanderScreen,
 	const std::function<std::string(const std::string&)>& localize);
 // The same for a player as the HUD's world has it (a joined game's: the
 // server's player): whether there is one, commands, its squad and lead.
-void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad, bool squadLeader, bool commanderScreen,
+void updateSquadInfo(hud::HudManager& hud, bool known, const game::GameWorld::PlayerInfo& player, bool commanderScreen,
 	const std::function<std::string(const std::string&)>& localize);
 
 // The commander's own tools' refusals (said to him alone, game slot 0x60):
@@ -625,6 +625,45 @@ struct UplinkHud {
 			show = false;
 		} else {
 			show = true;
+		}
+	}
+};
+
+// The hit direction arrow (HudElementsHit.con's HitDirection, the HUD
+// manager's 0x00449d80): HUD event 0x39 (a hit taken, case 57 of
+// 0x0044b680) sets the timer +0x208 to 0.1 s (+0x210) and the show flag
+// +0x214 (HitDirectionShow). Each frame, while shown, HitDirectionAngle
+// (+0x20c) is the view's heading less the hit's direction (radians); the
+// timer falls, and once it is spent the flag drops (the node's 2 s fade
+// follows) with the angle held. Retail's picture turns the other way
+// (0x00870f60), so in the native HUD's degrees it is the hit's direction
+// less the view's heading.
+struct HitDirectionHud {
+	bool show = false;
+	float angle = 0; // degrees, clockwise on screen
+	float timer = 0.1f;
+	uint32_t hits = 0;
+	bool started = false;
+	// The local player's hits taken and last direction (radians, atan2 of
+	// x over z), the view's heading (degrees clockwise from +z).
+	void update(float seconds, uint32_t hitsTaken, float direction, float viewHeading)
+	{
+		const bool hit = started && hitsTaken != hits;
+		started = true;
+		hits = hitsTaken;
+		if (hit) {
+			timer = 0.1f;
+			show = true;
+			seconds = 0;
+		}
+		if (show) {
+			angle = direction * 57.29578f - viewHeading;
+		}
+		if (timer <= 0) {
+			timer = 0.1f;
+			show = false;
+		} else if (show) {
+			timer -= seconds;
 		}
 	}
 };

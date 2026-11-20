@@ -542,6 +542,11 @@ struct PostRemoteInfo {
 bool parsePostRemote(const GameEvent& e, PostRemoteInfo& out);
 GameEvent makePostRemote(uint32_t category, uint32_t id, const std::string& payload = {}, float delay = 0);
 std::string int32Payload(int32_t value);
+// Category 2/id 0x56 from the squad object. Its x86 payload aligns the double at +4.
+GameEvent makeSquadOrderPoints(bool progress, double value);
+bool parseSquadOrderPoints(const PostRemoteInfo& info, bool& progress, double& value);
+// FieldUnlock kind 0 carries the player's credit count; kind 1 also carries kit/branch.
+GameEvent makeFieldUnlock(int player, int credits, int kit = -1, int branch = -1);
 // Known messages (names from the table at 0x00420000.c:15997).
 constexpr uint32_t kMsgGameCategory = 0;   // id 1: the game state (4 bytes; 1 playing, 3 before the start)
 constexpr uint32_t kMsgNetworkCategory = 6; // ECNetwork...

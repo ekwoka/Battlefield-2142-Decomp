@@ -3,10 +3,12 @@
 // 0x0043ec00), then before drawing takes alpha = (now - last tick) /
 // (count x 1/30 s), clamped to -0.1 .. 1.1 and 0 before any tick
 // (0x0040c534 -> 0x0043f170), and draws each object between its previous
-// and its current transform (0x0043ef30, always on: 0x009fcd90 is 1). An
-// object whose height changed by more than 4 m (0x00920ca0) is drawn where it is.
+// and its current transform (0x0043ef30, always on: 0x009fcd90 is 1, read
+// nowhere else). An object whose height changed by more than 4 m
+// (0x00920ca0) is drawn where it is.
 #pragma once
 
+#include "Physics/RigidBody.h"
 #include "RenderMath.h"
 
 #include <algorithm>
@@ -51,41 +53,69 @@ inline Mat4 tickBlendViewAdjustment(const Mat4& rawView, const Mat4& drawnView)
 	return rawView * inverse;
 }
 
-// A row-vector transform between two: the translation row linearly; the axis
-// rows linearly, then made orthogonal again with their lengths kept, so a turn
-// neither shrinks nor shears what is drawn. A turn of more than 60 degrees in
-// one tick (a rotor) is not blended.
-inline Mat4 blendTransform(const Mat4& from, const Mat4& to, float alpha)
+// The inverse of a row-vector affine transform (axes may be scaled).
+inline Mat4 affineInverse(const Mat4& m)
 {
-	if (alpha == 1.0f) {
-		return to;
+	const float a = m.at(0, 0), b = m.at(0, 1), c = m.at(0, 2), d = m.at(1, 0), e = m.at(1, 1), f = m.at(1, 2),
+				g = m.at(2, 0), h = m.at(2, 1), k = m.at(2, 2);
+	const float det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
+	if (std::fabs(det) < 1e-12f) {
+		return {};
 	}
-	const auto row = [](const Mat4& m, int i) { return Vec3f {m.at(i, 0), m.at(i, 1), m.at(i, 2)}; };
-	Vec3f axis[3];
-	float length[3];
-	for (int i = 0; i < 3; ++i) {
-		const Vec3f a = row(from, i), b = row(to, i);
-		const float la = std::sqrt(dot(a, a)), lb = std::sqrt(dot(b, b));
-		if (la <= 0 || lb <= 0 || dot(a, b) < 0.5f * la * lb) {
-			return to;
-		}
-		axis[i] = a + (b - a) * alpha;
-		length[i] = la + (lb - la) * alpha;
-	}
-	const Vec3f x = normalize(axis[0]);
-	const Vec3f y = normalize(axis[1] - x * dot(x, axis[1]));
-	const Vec3f z = normalize(axis[2] - x * dot(x, axis[2]) - y * dot(y, axis[2]));
-	Mat4 r = to;
-	const Vec3f rows[3] = {x * length[0], y * length[1], z * length[2]};
-	for (int i = 0; i < 3; ++i) {
-		r.at(i, 0) = rows[i].x;
-		r.at(i, 1) = rows[i].y;
-		r.at(i, 2) = rows[i].z;
-	}
+	const float s = 1 / det;
+	Mat4 r;
+	r.at(0, 0) = (e * k - f * h) * s;
+	r.at(0, 1) = (c * h - b * k) * s;
+	r.at(0, 2) = (b * f - c * e) * s;
+	r.at(1, 0) = (f * g - d * k) * s;
+	r.at(1, 1) = (a * k - c * g) * s;
+	r.at(1, 2) = (c * d - a * f) * s;
+	r.at(2, 0) = (d * h - e * g) * s;
+	r.at(2, 1) = (b * g - a * h) * s;
+	r.at(2, 2) = (a * e - b * d) * s;
 	for (int j = 0; j < 3; ++j) {
-		r.at(3, j) = from.at(3, j) + (to.at(3, j) - from.at(3, j)) * alpha;
+		r.at(3, j) = -(m.at(3, 0) * r.at(0, j) + m.at(3, 1) * r.at(1, j) + m.at(3, 2) * r.at(2, j));
 	}
 	return r;
+}
+
+// A row-vector transform between two, as 0x0043ef30: the translation
+// linearly (0x0043dd80), the rotation as quaternions slerped by alpha
+// (0x006ac740 / 0x0043de60 to quaternions, 0x006ac980 the slerp, the short
+// way; 0x006ac870 back). The axis lengths, which retail's matrices don't
+// carry, are lerped so a scaled transform keeps its size.
+inline Mat4 blendTransform(const Mat4& from, const Mat4& to, float alpha)
+{
+	const auto collapsed = [](const Mat4& m) {
+		for (int i = 0; i < 3; ++i) {
+			if (m.at(i, 0) * m.at(i, 0) + m.at(i, 1) * m.at(i, 1) + m.at(i, 2) * m.at(i, 2) <= 0) {
+				return true;
+			}
+		}
+		return false;
+	};
+	if (alpha == 1.0f || collapsed(from) || collapsed(to)) {
+		return to; // no turn to blend (a part shown or hidden): where it is now, whole
+	}
+	const auto rotation = [](const Mat4& m) {
+		physics::Mat3 r;
+		for (int i = 0; i < 3; ++i) {
+			r.rows[static_cast<size_t>(i)] = {m.at(i, 0), m.at(i, 1), m.at(i, 2)};
+		}
+		return r;
+	};
+	const physics::Mat3 r = physics::slerpRotation(rotation(from), rotation(to), alpha);
+	Mat4 out = to;
+	for (int i = 0; i < 3; ++i) {
+		const physics::Vec3& row = r.rows[static_cast<size_t>(i)];
+		out.at(i, 0) = row.x;
+		out.at(i, 1) = row.y;
+		out.at(i, 2) = row.z;
+	}
+	for (int j = 0; j < 3; ++j) {
+		out.at(3, j) = from.at(3, j) + (to.at(3, j) - from.at(3, j)) * alpha;
+	}
+	return out;
 }
 
 } // namespace dice::hfe::render

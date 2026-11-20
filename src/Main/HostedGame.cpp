@@ -1,4 +1,6 @@
 #include "HostedGame.h"
+#include "HudMenusVehicles.h"
+#include "Game/KitUnlocks.h"
 
 #include "Net/PlayerAuth.h"
 
@@ -409,6 +411,8 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 		client.dryTicks = 0;
 		client.stepping = client.stepped = client.recordMove = -1;
 		client.spawnRequested = false;
+		client.fieldUnlockCredits = -1;
+		client.squadOrderPoints = client.squadOrderMax = -1;
 		if (client.stage != Client::Stage::Connected) {
 			client.stage = Client::Stage::Loading;
 			sendLevel(id);
@@ -1353,12 +1357,23 @@ void HostedGame::event(int id, const net::GameEvent& e)
 	case net::kEvContentCheck:
 		checkContent(id, e);
 		return;
+	case net::kEvFieldUnlock:
+		if (e.values.size() == 5 && e.u(0) == 1 && e.i(1) == player &&
+			m_round->spendFieldUnlock(player, *m_logic, e.i(3), e.i(4))) {
+			syncFieldUnlocks(id, client, e.i(3), e.i(4));
+		}
+		return;
 	case net::kEvSelectKit: { // 0x0050b010: the team's kit by index
 		game::GameWorld::PlayerInfo me;
 		if (m_round->playerInfo(player, me)) {
 			const auto& kits = m_logic->team(me.team).kits;
 			const size_t kit = e.u(0);
 			if (kit < kits.size()) {
+				std::array<int, 4> selected {};
+				for (size_t branch = 0; branch < selected.size(); ++branch) {
+					selected[branch] = std::max(0, e.i(branch + 1) - 1);
+				}
+				m_round->setKitUnlockSelection(player, *m_logic, static_cast<int>(kit), selected);
 				m_round->setKit(player, kits[kit].name, kits[kit].soldier);
 			}
 		}
@@ -2598,6 +2613,10 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 			s.position = position;
 			s.orientation = quaternionFromYawPitchRoll(object->rotation().x, object->rotation().y, object->rotation().z);
 			s.health = m_round->hitPoints(ghost.object);
+			if (h.kind == net::NetworkableKind::SimpleObject && h.mobile && ghost.objectTemplate->typeName() == "SupplyObject") {
+				s.mask |= 0x20000;
+				s.supplyFlag = object->childDisabled("supply_parachute");
+			}
 			if (h.kind == net::NetworkableKind::SimpleObject && h.mobile) {
 				if (const auto motion = m_motion.find(ghost.object); motion != m_motion.end()) {
 					s.mask |= 0x4 | 0x8;
@@ -2918,6 +2937,7 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 	}
 	s.spawnTick = m_tick + static_cast<uint32_t>(std::ceil(std::max(0.0f, info.respawnIn) * 30));
 	s.hitIndicator = m_round->takeHitIndicator(player); // slot 0x210 (0x0059b480)
+	s.hasHitDirection = m_round->takeHitDirection(player, s.hitDirection); // +0x1d0 while +0x1d4 lasts
 	// What the player gave (the ability bar's flags, set by the game
 	// logic's heal 0x004bc410 and ammo 0x004bd5f0): +0x16a ammo, +0x168
 	// healed, +0x169 repaired; +0x16b is RTTeam's (slot 0x284), never set.
@@ -2936,8 +2956,17 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 		}
 	}
 	// On foot, group 0 is the soldier's own weapons (its kit's, in slot
-	// order): the one in hand, its rounds and magazines.
-	if (info.alive && !info.vehicle) {
+	// order): the one in hand, its rounds and magazines. A passenger seat that
+	// leaves the fire to the soldier's own weapon (enhanced.passengerWeapons,
+	// not retail) reports that one too.
+	const auto seats = info.alive && info.vehicle ? m_round->vehicleSeats(info.vehicle) : std::vector<game::GameWorld::SeatLayout> {};
+	const world::Object* occupied = m_round->objects().find(info.vehicle);
+	const bool personalChute = menu::usingPersonalParachute(occupied ? occupied->objectTemplate() : nullptr);
+	const bool ownWeapon = info.alive
+		&& (!info.vehicle || personalChute
+			|| (info.seat >= 0 && static_cast<size_t>(info.seat) < seats.size()
+				&& m_round->passengerWeapon(seats[static_cast<size_t>(info.seat)])));
+	if (ownWeapon) {
 		for (size_t i = 0; i < info.carried.size(); ++i) {
 			if (info.carried[i].first != info.inHandSlot) {
 				continue;
@@ -2956,8 +2985,7 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 	}
 	// In a seat, the seat's three groups (0x005a98b0's group indices: each
 	// group's active weapon's place in the group's list, 0x005cc5e0's order).
-	if (info.alive && info.vehicle) {
-		const auto seats = m_round->vehicleSeats(info.vehicle);
+	if (info.alive && info.vehicle && !ownWeapon) {
 		if (info.seat >= 0 && static_cast<size_t>(info.seat) < seats.size()) {
 			const auto& weapons = seats[static_cast<size_t>(info.seat)].weapons;
 			for (int g = 0; g < 3; ++g) {
@@ -3694,6 +3722,36 @@ void HostedGame::ghostLost(Client& client, uint32_t sequence, bool delivered)
 	client.carried.erase(it);
 }
 
+void HostedGame::syncFieldUnlocks(int id, Client& client, int kit, int branch)
+{
+	game::GameWorld::PlayerInfo player;
+	if (!m_round->playerInfo(client.player, player)) return;
+	if (player.squadOrderMax != client.squadOrderMax) {
+		client.squadOrderMax = player.squadOrderMax;
+		sendTo(id, net::makeSquadOrderPoints(false, player.squadOrderMax));
+	}
+	if (player.squadOrderPoints != client.squadOrderPoints) {
+		client.squadOrderPoints = player.squadOrderPoints;
+		sendTo(id, net::makeSquadOrderPoints(true, player.squadOrderPoints));
+	}
+	const auto& permanent = m_round->ownedKitUnlockItems(client.player);
+	const auto& temporary = m_round->fieldUnlockItems(client.player);
+	if (client.fieldUnlockCredits < 0 || permanent != client.ownedUnlocks || temporary != client.fieldUnlocks) {
+		client.ownedUnlocks = permanent;
+		client.fieldUnlocks = temporary;
+		auto names = permanent;
+		names.insert(names.end(), temporary.begin(), temporary.end());
+		const auto masks = game::kitUnlockMasks(*m_templates, *m_logic, names, m_round->unlockAllByDefault);
+		net::GameEvent owned = eventOf(net::kEvUnlock, {2, static_cast<uint32_t>(client.player)});
+		owned.values.insert(owned.values.end(), masks.begin(), masks.end());
+		sendTo(id, owned);
+	}
+	if (player.fieldUnlockCredits != client.fieldUnlockCredits || kit >= 0) {
+		client.fieldUnlockCredits = player.fieldUnlockCredits;
+		sendTo(id, net::makeFieldUnlock(client.player, player.fieldUnlockCredits, kit, branch));
+	}
+}
+
 void HostedGame::tick()
 {
 	if (!m_attached) {
@@ -3772,6 +3830,9 @@ void HostedGame::tick()
 	applyMoves();
 	trackObjects();
 	trackProjectiles();
+	for (auto& [id, client] : m_clients) {
+		if (client.stage == Client::Stage::Playing) syncFieldUnlocks(id, client);
+	}
 	sendBattlefieldReports();
 	sendRadioSpots();
 	trackPlayers();

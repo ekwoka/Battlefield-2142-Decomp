@@ -796,10 +796,13 @@ TEST(Effects_QualityLevels)
 	CHECK(q.skipMipLevels(scene::TextureClass::Default) == 1 && q.skipMipLevels(scene::TextureClass::Overgrowth) == 0);
 	// The lighting level (renderer +0x6b4) and what it drops.
 	CHECK(q.lightingLevel() == 0 && q.meshNormalMaps());
+	CHECK(q.meshEnvMaps());
 	q.lighting = 2;
 	CHECK(q.lightingLevel() == 1 && !q.meshNormalMaps() && q.meshHemiAndShadows());
+	CHECK(q.meshEnvMaps());
 	q.lighting = 1;
 	CHECK(q.lightingLevel() == 3 && !q.meshHemiAndShadows() && !q.staticMeshDirtAndCrack());
+	CHECK(!q.meshEnvMaps());
 	CHECK(!q.dynamicLightsEnabled() && !q.decalsEnabled());
 	q.viewDistanceScale = 0.1f;
 	q.applyEffects(s);
@@ -1516,4 +1519,95 @@ TEST(Effects_VehicleBoostEndStartsBeforeItStops)
 	state.boosting = true;
 	objects.update({state}, manager);
 	CHECK(manager.bundleLoops().empty()); // 0x2a: in its stop bits
+}
+
+// Retail moves particles in RendDX9's frame (0x10028ae0 -> 0x1009a4c0) by the
+// frame's time, its systems where their objects are drawn between ticks.
+TEST(Effects_ParticlesMoveByTheFrameAtTheDrawnAnchor)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	effects::EffectManager manager(templates);
+	manager.setParticlesPerFrame(true);
+	manager.setAnchor(7, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_flame", 7, {0, 2, 0}));
+	manager.update(1 / 30.0f);
+	CHECK(sprites(manager).empty()); // the tick moves none
+	manager.setAnchor(7, {3, 0, 0}, {});
+	for (int i = 0; i < 12; ++i) {
+		manager.frame(1 / 120.0f, 0.5f);
+	}
+	auto list = sprites(manager);
+	CHECK(!list.empty());
+	CHECK(std::fabs(list[0].position.x - 1.5f) < 1e-4f); // halfway between the ticks' anchors
+	manager.frame(1 / 120.0f, 1);
+	list = sprites(manager);
+	CHECK(std::fabs(list[0].position.x - 3) < 1e-4f);
+}
+
+// A placed mesh with a key (a round's tracer) is drawn between its last two ticks.
+TEST(Effects_PlacedMeshesBlendBetweenTicks)
+{
+	world::ObjectTemplateManager templates;
+	effects::EffectManager manager(templates);
+	const auto place = [&](float x, float y) {
+		effects::MeshSprite s {{x, y, 0}, {}, 1, {1, 1, 1, 1}, 1, 9};
+		manager.setPlacedMeshes({{"tracer", {s}}});
+	};
+	const auto drawnX = [&] {
+		float x = -1;
+		manager.forEachMeshGroup([&](const std::string&, bool, const std::vector<effects::MeshSprite>& list) {
+			x = list.at(0).position.x;
+		});
+		return x;
+	};
+	place(0, 0);
+	place(10, 0);
+	manager.frame(0.01f, 0.25f);
+	CHECK(std::fabs(drawnX() - 2.5f) < 1e-4f);
+	place(20, 6); // a jump over 4 m in height: where it is
+	CHECK(std::fabs(drawnX() - 20) < 1e-4f);
+	manager.frame(0.01f, 1);
+	CHECK(drawnX() == 20);
+}
+
+// An attached bundle's light is drawn where its object is drawn: between
+// the state before the frame's ticks and after them (two ticks here), its
+// turn slerped (0x0043ef30) - at a quarter of 120 degrees, 30.
+TEST(Effects_LightsBlendFromBeforeTheFramesTicks)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	templates.registerType(5, "LightSource");
+	world::ObjectTemplate* flash = templates.create("LightSource", "flash");
+	flash->settings()["isDynamic"] = "1";
+	flash->settings()["attenuationRange2"] = "5";
+	world::ObjectTemplate* lamp = templates.create("EffectBundle", "e_lamp");
+	lamp->children().push_back({"flame", {}, {}});
+	lamp->children().push_back({"flash", {0, 0, 2}, {}});
+	effects::EffectManager manager(templates);
+	manager.setParticlesPerFrame(true);
+	const effects::Vec3 up {0, 1, 0};
+	manager.setAnchor(7, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_lamp", 7, {}));
+	manager.frame(1 / 120.0f, 1);
+	manager.setAnchor(7, {3, 0, 0}, effects::Mat3::axisAngle(up, 60 * 3.14159265f / 180));
+	manager.update(1 / 30.0f);
+	manager.setAnchor(7, {6, 0, 0}, effects::Mat3::axisAngle(up, 120 * 3.14159265f / 180));
+	manager.update(1 / 30.0f);
+	CHECK(manager.lights().size() == 1);
+	CHECK(std::fabs(manager.lights()[0].position.x - (6 + 2 * std::sin(-120 * 3.14159265f / 180))) < 1e-3f ||
+		std::fabs(manager.lights()[0].position.x - (6 + 2 * std::sin(120 * 3.14159265f / 180))) < 1e-3f);
+	manager.frame(1 / 120.0f, 0.25f);
+	const effects::Vec3 want = effects::Vec3 {1.5f, 0, 0} +
+		effects::Mat3::axisAngle(up, 30 * 3.14159265f / 180).transform({0, 0, 2});
+	const effects::Vec3 got = manager.lights()[0].position;
+	CHECK(std::fabs(got.x - want.x) < 1e-3f && std::fabs(got.y - want.y) < 1e-3f && std::fabs(got.z - want.z) < 1e-3f);
+	manager.frame(1 / 120.0f, 1);
+	CHECK(std::fabs(manager.lights()[0].position.x - want.x) > 0.5f); // at the tick again
+	// Not set again (a muzzle's anchor after its flash): it stands still.
+	manager.update(1 / 30.0f);
+	const float still = manager.lights()[0].position.x;
+	manager.frame(1 / 120.0f, 0.25f);
+	CHECK(std::fabs(manager.lights()[0].position.x - still) < 1e-4f);
 }

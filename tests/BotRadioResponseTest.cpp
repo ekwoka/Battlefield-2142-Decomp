@@ -228,3 +228,117 @@ TEST(BotRadio_RealPickupCallMakesDriverWaitAndAnswer)
 		CHECK(f.info(f.helper).vehicle == car && f.bots->behaviour(f.helper) == "Idle" && speed < 1);
 	}
 }
+
+// AIDLL 0x1006a137..0x1006a3a1: a bot driver hearing "go go go" from a
+// passenger aboard its own vehicle answers roger_that (6) on channel 7.
+TEST(BotRadio_GoGoGoFromPassengerGetsRoger)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		RadioRound f(gameDir, mod, "EU_Anti-Vehicle");
+		const auto at = f.info(f.human).position;
+		const auto look = f.level.world->viewForward(f.human);
+		const float x = at.x + look.x * 20, z = at.z + look.z * 20;
+		const uint32_t car = f.level.objects.create(f.level.templates.find("eu_fav"),
+			{x, f.level.heightmaps.primary()->heightAt(x, z) + 1.5f, z})->id();
+		f.run(2);
+		physics::Vec3 entry;
+		CHECK(f.level.world->entryPoint(car, entry));
+		game::SoldierInput use;
+		use.use = true;
+		for (const int id : {f.helper, f.human}) {
+			CHECK(f.level.world->setSoldierPosition(f.info(id).soldier, entry));
+			f.level.world->setInput(id, use); f.run(1 / 30.0f);
+			f.level.world->setInput(id, {}); f.run(1 / 30.0f);
+			CHECK(f.info(id).vehicle == car);
+		}
+		CHECK(f.info(f.helper).driving && !f.info(f.human).driving);
+		f.startBots(); f.run(0.1f);
+		f.level.world->radioMessage(f.human, game::GameWorld::targetChannel("TCLocalTeam"), "PLAYER_TACTICS_gogogo");
+		f.run(2);
+		bool roger = false;
+		for (const auto& r : f.bots->radioSent(f.helper)) roger = roger || (r.type == 6 && r.channel == 7);
+		std::printf("  %s gogogo: roger on channel 7=%d\n", mod, roger);
+		CHECK(roger);
+	}
+}
+
+// AIDLL 0x1006a29f: while the driver waits for a human (player slot 0x84),
+// a passenger's "go go go" is marked answered and dropped: no roger, and
+// the wait goes on.
+TEST(BotRadio_GoGoGoIgnoredWhileWaitingForHuman)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		RadioRound f(gameDir, mod, "EU_Anti-Vehicle");
+		const int rider = f.add("Rider", false, "EU_Assault");
+		const auto at = f.info(f.human).position;
+		const auto look = f.level.world->viewForward(f.human);
+		const float x = at.x + look.x * 20, z = at.z + look.z * 20;
+		const uint32_t car = f.level.objects.create(f.level.templates.find("eu_fav"),
+			{x, f.level.heightmaps.primary()->heightAt(x, z) + 1.5f, z})->id();
+		f.run(2);
+		physics::Vec3 entry;
+		CHECK(f.level.world->entryPoint(car, entry));
+		game::SoldierInput use;
+		use.use = true;
+		for (const int id : {f.helper, rider}) {
+			CHECK(f.level.world->setSoldierPosition(f.info(id).soldier, entry));
+			f.level.world->setInput(id, use); f.run(1 / 30.0f);
+			f.level.world->setInput(id, {}); f.run(1 / 30.0f);
+			CHECK(f.info(id).vehicle == car);
+		}
+		f.startBots(); f.run(0.1f);
+		f.level.world->radioMessage(f.human, game::GameWorld::targetChannel("TCLocalGroundVehicle"), "req_pickup");
+		f.run(3); // past roger_that's 2 s send period
+		f.level.world->radioMessage(rider, game::GameWorld::targetChannel("TCLocalTeam"), "PLAYER_TACTICS_gogogo");
+		f.run(0.5f);
+		bool roger = false;
+		for (const auto& r : f.bots->radioSent(f.helper)) roger = roger || (r.type == 6 && r.channel == 7);
+		const float idle = f.bots->lastUrgency(f.helper, "Idle");
+		std::printf("  %s gogogo while waiting for a human: roger on channel 7=%d idle=%.1f\n", mod, roger, idle);
+		CHECK(!roger && idle >= 30);
+	}
+}
+
+// AIDLL 0x10069eee: a human asking for a pickup beyond the 50 m the driver
+// waits for (0x10069dd9) gets "negative" (7) on channel 6, and no wait.
+TEST(BotRadio_FarPickupCallGetsNegative)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		RadioRound f(gameDir, mod, "EU_Anti-Vehicle");
+		const auto at = f.info(f.human).position;
+		const auto look = f.level.world->viewForward(f.human);
+		const float x = at.x + look.x * 70, z = at.z + look.z * 70;
+		const uint32_t car = f.level.objects.create(f.level.templates.find("eu_fav"),
+			{x, f.level.heightmaps.primary()->heightAt(x, z) + 1.5f, z})->id();
+		f.run(2);
+		physics::Vec3 entry;
+		CHECK(f.level.world->entryPoint(car, entry));
+		CHECK(f.level.world->setSoldierPosition(f.info(f.helper).soldier, entry));
+		game::SoldierInput use;
+		use.use = true;
+		f.level.world->setInput(f.helper, use); f.run(1 / 30.0f);
+		f.level.world->setInput(f.helper, {}); f.run(1 / 30.0f);
+		CHECK(f.info(f.helper).vehicle == car);
+		f.startBots(); f.run(0.1f);
+		f.level.world->radioMessage(f.human, game::GameWorld::targetChannel("TCLocalGroundVehicle"), "req_pickup");
+		f.run(2);
+		const bool kept = f.bots->keepsRadio(f.helper, 2, f.human);
+		bool negative = false, roger = false;
+		for (const auto& r : f.bots->radioSent(f.helper)) {
+			negative = negative || (r.type == 7 && r.channel == 6);
+			roger = roger || r.type == 6;
+		}
+		const float idle = f.bots->lastUrgency(f.helper, "Idle");
+		std::printf("  %s far pickup: received=%d negative=%d roger=%d idle=%.1f\n", mod, kept, negative, roger, idle);
+		CHECK(kept && negative && !roger && idle < 30);
+	}
+}

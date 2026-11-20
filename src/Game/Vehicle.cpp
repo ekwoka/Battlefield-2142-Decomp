@@ -73,6 +73,21 @@ float wheelRadius(const physics::CollisionMeshFile* mesh, int part)
 	return 0.5f;
 }
 
+// Springs with an authored three-vertex vehicle LOD use it for terrain
+// contact. Some synthetic fixtures and older parts have only a radius.
+std::optional<std::array<Vec3, 3>> wheelTriangle(const physics::CollisionLod* lod)
+{
+	if (!lod || lod->vertices.size() != 3) {
+		return std::nullopt;
+	}
+	std::array<Vec3, 3> triangle;
+	for (size_t i = 0; i < triangle.size(); ++i) {
+		const auto& v = lod->vertices[i];
+		triangle[i] = {v[0], v[1], v[2]};
+	}
+	return triangle;
+}
+
 // The radius the engine turns the wheel with (the Spring node's
 // 0x006cad60): the height (max y - min y, the box's +0x28 from 0x006aeda0)
 // of the wheel object's collision box at LOD 0 (projectiles'), plus the
@@ -470,8 +485,13 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				Wheel wheel;
 				wheel.mount = position;
 				wheel.collisionPart = static_cast<int>(number(t, "collisionPart", -1));
-				wheel.radius = wheelRadius(mesh, static_cast<int>(number(t, "collisionPart", -1)));
-				wheel.spinRadius = wheelSpinRadius(mesh, static_cast<int>(number(t, "collisionPart", -1)));
+				wheel.radius = wheelRadius(mesh, wheel.collisionPart);
+				wheel.spinRadius = wheelSpinRadius(mesh, wheel.collisionPart);
+				if (mesh && wheel.collisionPart >= 0) {
+					if (const auto* part = physics::collisionPart(*mesh, static_cast<size_t>(wheel.collisionPart))) {
+						wheel.terrainVertices = wheelTriangle(physics::collisionLodFor(*mesh, *part, 1));
+					}
+				}
 				wheel.strength = number(t, "strength", 0);
 				wheel.damping = number(t, "damping", 0);
 				wheel.maxSteer = steering.maxSteer;
@@ -672,6 +692,7 @@ void Vehicle::setWheelCollisionState(const physics::CollisionMeshFile& mesh, siz
 			// one cannot keep supporting the hull on the live wheel radius.
 			const auto* lod = physics::collisionLodFor(mesh, *sub, 1);
 			wheel.contactEnabled = lod && !lod->vertices.empty();
+			wheel.terrainVertices = wheelTriangle(lod);
 			if (wheel.contactEnabled) {
 				wheel.radius = std::max(0.0f, -lod->boundsMin[1]);
 			}
@@ -784,17 +805,60 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 	const Vec3 forward = wheelRotation.rows[2];
 	const Vec3 centre = body.position + body.rotation.transform(wheel.mount);
 	const Vec3 bottom = centre - up * wheel.radius;
+	Vec3 point = bottom;
 	Vec3 normal {0, 1, 0};
-	float groundHeight = wheel.contactEnabled ? ground.heightAndNormal(bottom.x, bottom.z, normal) : bottom.y;
-	// An object under the wheel (a bridge, a deck, another vehicle) is its
-	// ground where it is higher, moving as that object does.
+	float compression = 0;
+	const bool useTriangle = wheel.contactEnabled && wheel.terrainVertices.has_value();
+	if (useTriangle) {
+		// The ground pass tests the Spring's posed vehicle-LOD vertices
+		// (0x006b9260). For this three-vertex part, a contact must deepen
+		// the recorded vertical push. The tyre uses the accepted contacts'
+		// mean point and normal (0x006ba4c0, 0x006b7910).
+		Vec3 pointSum, normalSum, push;
+		int contacts = 0;
+		for (const Vec3& vertex : *wheel.terrainVertices) {
+			const Vec3 probe = centre + wheelRotation.transform(vertex);
+			Vec3 surfaceNormal {0, 1, 0};
+			const float height = ground.heightAndNormal(probe.x, probe.z, surfaceNormal);
+			const float depth = height - probe.y;
+			if (depth > push.y) {
+				push = physics::combineAxes(push, surfaceNormal * depth);
+				pointSum += Vec3 {probe.x, height, probe.z};
+				normalSum += surfaceNormal;
+				++contacts;
+			}
+		}
+		if (contacts) {
+			point = pointSum * (1.0f / contacts);
+			normal = normalized(normalSum);
+			// The Spring's solve (0x006ba7d0, class 0x9481): (push - root
+			// push) . n within 0..1 m, n the contacts' mean normal (+0xb8;
+			// the root's up only with *0x00a8420c other than its 1,
+			// static_init_008ed790), as objectCompression. The root push
+			// (+0xa0: the root's response's +0x94 as each contact is
+			// recorded, 0x006ba4c0 through slots 0x90 / 0x8c) is 0 for the
+			// ground pass's: the chain dispatch (0x006dd1b0) runs the
+			// root's broad phase, ground pass and solve, which clears its
+			// push (0x006ba7d0's end), before the Spring's broad phase
+			// (0x006dc7b0, which skips the mover's own tree) and its ground
+			// pass (slot 0x28).
+			const Vec3 rootPush {};
+			compression = std::clamp(physics::dot(push, normal) - physics::dot(rootPush, normal), 0.0f, 1.0f);
+		}
+	} else if (wheel.contactEnabled) {
+		const float height = ground.heightAndNormal(bottom.x, bottom.z, normal);
+		compression = std::max(0.0f, height - bottom.y);
+		point.y += compression;
+	}
+
+	// Prefer the object's contact when it pushes the spring farther.
 	Vec3 surfaceVelocity;
-	float compression = std::max(0.0f, groundHeight - bottom.y);
 	Vec3 objectNormal;
 	const float pushed = wheel.contactEnabled ? objectCompression(wheel, objectNormal) : -1.0f;
-	if (wheel.objectGround.count > 0 && pushed > compression) {
+	const bool onObject = pushed > compression;
+	if (onObject) {
 		compression = pushed;
-		groundHeight = bottom.y + pushed;
+		point = {bottom.x, bottom.y + pushed, bottom.z};
 		normal = objectNormal;
 		surfaceVelocity = wheel.objectGround.velocity;
 		grip = wheel.objectGround.grip;
@@ -826,11 +890,14 @@ void Vehicle::updateWheel(Wheel& wheel, physics::RigidBody& body, const physics:
 	// counts towards the engine's. (The Spring node then scales the spin by
 	// 1.0 for newCar2, 0x00a84c20; 0.9 in water.)
 	{
-		const Vec3 point {bottom.x, wheel.contact ? groundHeight : bottom.y, bottom.z};
 		Vec3 groundVelocity {0, gravity * kTick, 0};
 		Vec3 contactNormal {};
 		if (wheel.contact) {
-			Vec3 velocity = body.pointVelocity(point) - surfaceVelocity;
+			// Terrain contacts read the root node's origin-relative point
+			// velocity (0x006b96e2 -> 0x006c7540).
+			Vec3 velocity = useTriangle && !onObject
+				? body.velocity + physics::cross(body.angularVelocity, point - body.position)
+				: body.pointVelocity(point) - surfaceVelocity;
 			velocity.y += gravity * kTick;
 			groundVelocity = velocity - normal * physics::dot(velocity, normal);
 			contactNormal = normal;

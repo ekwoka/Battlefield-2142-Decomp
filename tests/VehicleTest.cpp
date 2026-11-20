@@ -776,6 +776,35 @@ TEST(Vehicle_WreckLeavesWheelsWithoutWreckGeometry)
 	}
 }
 
+TEST(Vehicle_WheelTriangleContactsGroundWhenItsCentreProbeClearsIt)
+{
+	Car car;
+	car.templates.find("car_wheel")->settings()["collisionPart"] = "0";
+	physics::CollisionMeshFile mesh;
+	mesh.version = 9;
+	mesh.geometries.resize(1);
+	mesh.geometries[0].subGeometries.resize(1);
+	physics::CollisionLod hull;
+	hull.boundsMin = {-0.4f, -0.5f, -0.1f};
+	hull.boundsMax = {0.4f, 0.5f, 0.1f};
+	physics::CollisionLod triangle;
+	triangle.collisionType = 1;
+	triangle.vertices = {{{-0.4f, -0.5f, 0}}, {{-0.3f, -0.5f, 0.1f}}, {{-0.4f, -0.5f, -0.1f}}};
+	triangle.boundsMin = {-0.4f, -0.5f, -0.1f};
+	triangle.boundsMax = {-0.3f, -0.5f, 0.1f};
+	mesh.geometries[0].subGeometries[0].lods = {hull, triangle};
+	car.vehicle = game::Vehicle::fromTemplate(*car.templates.find("car"), car.templates, &mesh);
+	car.body.rotation = physics::Mat3::fromYawPitchRoll({0, 0, 5});
+	const auto& wheel = car.vehicle->wheels().front();
+	// Place the wheel centre 0.51 m up. Its LOD extends to the side, so
+	// the rotated triangle penetrates the ground with the centre probe clear.
+	car.body.position.y = 0.51f - car.body.rotation.transform(wheel.mount).y;
+	CHECK(0.51f - car.body.rotation.rows[1].y * wheel.radius > 0);
+	car.vehicle->tick(car.body, car.ground, 1 / 30.0f, 0.8f);
+	CHECK(wheel.contact);
+	CHECK(wheel.compression > 0.02f);
+}
+
 TEST(Vehicle_WreckCanKeepAuthoredWheelSupport)
 {
 	Car car;

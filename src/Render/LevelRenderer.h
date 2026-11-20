@@ -129,6 +129,7 @@ struct FirstPersonScene {
 	float nearPlane = 0.16f;
 	float farPlane = 15.0f;
 	std::vector<FirstPersonModel> models;
+	bool weaponZoomed = false;
 	// Effects of the first-person models (the muzzle flash), drawn in the
 	// same pass; may be null.
 	const effects::EffectManager* effects = nullptr;
@@ -171,9 +172,9 @@ struct LevelSources {
 	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Ordinary vehicle armour's wreck look (including its delay/opt-out).
 	std::function<bool(uint32_t object)> vehicleWreckLook;
-	// enhanced.glowOcclusion, not retail: a lamp halo is drawn only while its
-	// source is visible (pixel depth testing alone lets a large glow quad
-	// protrude through a bridge deck). Retail never occlusion-tests a halo.
+	// The camera's ray to an object: an alpha_one glow's fade (MeshQueues.h
+	// glowFadeStep, retail); enhanced.glowOcclusion (not retail) also skips a
+	// depth-tested lamp halo while its source is hidden.
 	std::function<bool(const Vec3f& eye, const Vec3f& source, uint32_t owner)> glowVisible;
 	// Parts posed by the object's bundle skeleton (boneIndex): the part's
 	// whole local matrix in its parent's frame, in place of its placement.
@@ -205,8 +206,12 @@ struct LevelSources {
 		const world::ObjectTemplate* objectTemplate = nullptr;
 		effects::Vec3 position;
 		effects::Mat3 rotation; // rows x, y, z
+		uint32_t key = 0;       // a round's serial: drawn between its last two ticks (0: as given)
 	};
 	std::function<void(std::vector<PlacedTemplate>& out)> placedTemplates;
+	// Filled by syncObjects: the moving objects' drawn positions this frame
+	// (between their last two ticks), for what is projected over them.
+	std::unordered_map<uint32_t, std::array<float, 3>>* drawnPositions = nullptr;
 	// The first-person view, asked each frame: false draws none.
 	std::function<bool(FirstPersonScene& scene)> firstPerson;
 	// Objects the world pass leaves out this frame (in first person the
@@ -319,10 +324,11 @@ public:
 	void syncObjects(TickBlend blend = {});
 	// The effects' debris pieces (effects::DebrisPiece) as instances of their
 	// mesh with only their geometryPart shown, replaced each frame.
-	void syncDebris();
+	void syncDebris(const TickBlend& blend);
 	// The placed templates (LevelSources::placedTemplates) as instances of
-	// their geometry, replaced each frame.
-	void syncPlaced();
+	// their geometry, replaced each frame; a keyed one (a round) between its
+	// last two ticks, as retail draws its object (0x0043ef30).
+	void syncPlaced(const TickBlend& blend);
 
 	// Records a render pass into `commands` that clears and draws into
 	// `color` (a swapchain or offscreen texture) using `target`'s depth.
@@ -351,8 +357,8 @@ private:
 		bool blended = false;
 		bool additive = false;
 		int alphaMode = 0; // the material's: 0 opaque, 1 blended, 2 alpha tested (RendDX9's +0x15c)
-		// StaticMesh.fx alpha_one: texture alpha times 0.8; other additive paths keep 1.
-		float alphaScale = 1.0f;
+		bool skadiReticle = false;
+		bool glow = false; // an "alpha_one" technique: BMadditive's defaultTechnique (MeshQueues.h glowFadeStep)
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second
 		// Where the texture lies in an atlas (the overgrowth's distant trees'
 		// textures, OvergrowthAtlas.tai): scale, then offset.
@@ -407,6 +413,7 @@ private:
 	struct GpuMesh {
 		bool bundled = false;
 		bool skinned = false;
+		bool glow = false; // a submesh is an alpha_one glow
 		// A skinned mesh's radius for the objects' distance fade
 		// (boxHalfDiagonal of the LOD's box); bounds stay unknown for one.
 		float skinnedRadius = 0;
@@ -458,6 +465,8 @@ private:
 		float animationDuration = 0; // authored clip length, seconds; zero is 24 fps
 		bool hidden = false; // its object is hidden
 		bool occlusionGlow = false; // additive halo belonging to a supportsGlow light
+		float glowFade = 0;     // its alpha_one glows' line-of-sight fade (glowFadeStep)
+		uint32_t glowFrame = 0; // the last frame they were drawn (m_glowFrame)
 		bool wornKit = false; // posed only by its wearer's skeleton (a kit has none of its own)
 		float fade = 1;      // its object's fade (below 1: drawn blended, after the opaque ones)
 		// The object manager's distance fade (DistanceFade.h: the render
@@ -470,6 +479,11 @@ private:
 		bool cullActor = false;
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
 		std::string source; // the child template it was made from (empty for the object's own)
+		// A child under a RotationalBundle (a Titan gun's wreck HUD on its
+		// barrel): the children's indices from the root's template down, to
+		// place it each sync where its ancestors' poses put it (posedLocal).
+		const world::ObjectTemplate* posedRoot = nullptr;
+		std::vector<uint16_t> posedPath;
 		std::string geometry;  // its geometry template
 		int shownGeometry = -1; // the geometry drawn (-1: the exterior)
 		int shownLod = 0;
@@ -513,6 +527,17 @@ private:
 		mutable std::vector<anim::Matrix> previousPose;
 		mutable unsigned previousFrame = ~0u;
 		std::vector<Mat4> partsTicked, partsPrevious; // the parts at the last two ticks (TickBlend.h)
+		std::vector<uint8_t> partsBlended; // which of them retail blends (blendsBetweenTicks), by part
+		std::vector<int> partsParent;      // the nearest part above each (-1: the object)
+		// Each template child's local matrix (in its parent) at the last two
+		// ticks, in the order collectParts walks them.
+		std::vector<Mat4> nodesTicked, nodesPrevious;
+	};
+	// The children's blend while collectParts walks them (0x0043ef30).
+	struct NodeTickBlend {
+		Instance& instance;
+		TickBlend blend;
+		size_t next = 0;
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {
@@ -589,6 +614,11 @@ private:
 		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {},
 		const std::string& inheritedSkeleton = {});
 	void addObject(const LevelSources& sources, const world::Object& object);
+	// A posed child's placement relative to its object: each level's child
+	// placement, then its part's pose or bone (as collectParts places parts).
+	Mat4 posedLocal(const world::ObjectTemplate& root, const std::vector<uint16_t>& path, uint32_t object) const;
+	std::vector<uint16_t> m_buildChildPath; // addTemplate's children's indices down to the current one
+	const world::ObjectTemplate* m_buildRoot = nullptr;
 	// A part that animates its texture coordinates, placed relative to its object.
 	struct AnimatedUVPart {
 		const AnimatedUVSettings* settings;
@@ -596,7 +626,7 @@ private:
 	};
 	void collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& relative,
 		std::vector<Mat4>& parts, int depth, uint32_t object = 0,
-		std::vector<AnimatedUVPart>* animated = nullptr) const;
+		std::vector<AnimatedUVPart>* animated = nullptr, NodeTickBlend* tick = nullptr) const;
 	// A template's animatedUV* and Spring rotateUV values, read once.
 	struct AnimatedUVLook {
 		AnimatedUVSettings settings;
@@ -610,6 +640,8 @@ private:
 		Mat4 previous, current, drawn;
 	};
 	std::unordered_map<uint32_t, ObjectBlend> m_objectBlend;
+	std::unordered_map<uint32_t, ObjectBlend> m_placedBlend; // by PlacedTemplate::key
+	std::map<std::pair<uint32_t, int>, ObjectBlend> m_decalPartBlend; // collision parts holding decals, by (object, part)
 	Mat4 drawnTransform(const world::Object& object) const;
 	// syncPlaced's: the templates asked for this frame, and each template's
 	// parts at rest (collectParts without an object).
@@ -673,6 +705,8 @@ private:
 	float m_overgrowthLodTimer = 0;         // +0x114
 	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
 	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
+	uint32_t m_glowFrame = 0;               // prepareInstances' count (Instance::glowFrame)
+	uint64_t m_lastGlowTicks = 0;           // the glow fade's clock (glowFadeStep)
 	// The objects' distance fade this frame (DistanceFade.h): off for the
 	// commander's overhead view, whose camera sits hundreds of metres up.
 	// A deviation: the walk's filter flag 0x1000000 that skips the fade is
@@ -863,7 +897,6 @@ private:
 		bool on = false; // this frame's passes
 		bool taa = false, ssao = false, csm = false, prepass = false;
 		bool titanShadows = false, particleShadows = false, particleLights = false;
-		float staticHeadroom = 0; // the light's reach above the cascades the static atlas was drawn with
 		bool jittered = false;
 		Mat4 jitter;                 // post-multiplied onto the view-projections
 		Mat4 projection;             // the world's, unjittered
@@ -889,13 +922,15 @@ private:
 		// the dynamic one has a third row, the Titans' hulls past the cascades.
 		SDL_GPUTexture* cascadeDynamic = nullptr;
 		SDL_GPUTexture* cascadeStatic = nullptr;
+		SDL_GPUTexture* cascadeStaticMeshes = nullptr; // cached depth before adding morphing terrain
 		uint32_t cascadeSize = 0;
 		Mat4 cascadeViewProjection[4];
 		float cascadeRadius[4] {};
-		Vec3f cascadeCenter[4];
-		float staticRadius[4] {};
-		Vec3f staticCenter[4];
+		Mat4 staticViewProjection[4];
+		std::array<float, 9> staticTerrainLodInputs {};
+		bool staticTerrainDrawn = false;
 		bool staticValid = false;
+		bool staticMeshesValid = false;
 		size_t staticInstances = 0;
 		EnhancedShadowUniforms shadows;
 	};
@@ -914,10 +949,9 @@ private:
 	// Depth, then normals and motion, then the AO (the world pass reads it).
 	void renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const Camera& camera, const Mat4& viewProjection,
 		float seconds, float aspect);
-	// The terrain's depth: the cells drawn this frame, or (`coarse`, the
-	// cascades' casters) every cell at its lowest LOD.
+	// The same terrain as the color pass, culled against the light for casters.
 	void drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
-		const Mat4& viewProjection, bool coarse);
+		const Mat4& viewProjection, bool shadowCaster);
 	void resolveTaa(SDL_GPUCommandBuffer* commands);
 	void endEnhancedFrame(const Camera& camera, bool overhead);
 	void useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, uint32_t slot, uint32_t firstSampler,

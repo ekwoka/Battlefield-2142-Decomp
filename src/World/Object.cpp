@@ -1,6 +1,24 @@
 #include "Object.h"
 
+#include <algorithm>
+
 namespace dice::hfe::world {
+
+bool Object::childDisabled(const std::string& path) const
+{
+	const CaseInsensitiveLess less;
+	for (size_t start = 0; !m_disabledChildren.empty() && start <= path.size();) {
+		const size_t slash = std::min(path.find('/', start), path.size());
+		const std::string name = path.substr(start, slash - start);
+		for (const std::string& disabled : m_disabledChildren) {
+			if (!less(name, disabled) && !less(disabled, name)) {
+				return true;
+			}
+		}
+		start = slash + 1;
+	}
+	return false;
+}
 
 Object* ObjectManager::create(ObjectTemplate* objectTemplate, const Vec3& position, const Vec3& rotation)
 {

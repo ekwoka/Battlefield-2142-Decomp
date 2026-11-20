@@ -1018,6 +1018,7 @@ struct TracerLook {
 struct PlacedTracerLook {
 	std::string geometry;
 	TracerLook look;
+	uint32_t serial = 0; // its round's (Projectile::serial)
 };
 std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& projectiles);
 TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,

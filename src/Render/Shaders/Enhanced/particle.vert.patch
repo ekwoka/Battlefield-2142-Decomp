@@ -3,14 +3,22 @@ particle takes the sun's shadow, its centre for a sprite (one value over the
 quad, so a billboard isn't cut by a shadow's edge), and how much of it (the
 sprite's unused lightmap slot; a placed triangle all).
 <<<<
+layout(location = 9) in vec2 inFrameSize;   // and its size (0: the whole texture)
+====
+layout(location = 9) in vec2 inFrameSize;   // and its size (0: the whole texture)
+layout(location = 10) in vec4 inParticleTint; // unlit RGB in the mesh tangent slot
+>>>>
+<<<<
 layout(location = 2) out float outDepth;
 ====
 layout(location = 2) out float outDepth;
 layout(location = 3) out vec4 outShadowAt;
+layout(location = 4) out vec3 outParticleTint;
 >>>>
 <<<<
 	outDepth = gl_Position.w;
 ====
 	outDepth = gl_Position.w;
 	outShadowAt = vec4(inCenter, inSize < 0.0 ? 1.0 : inUnusedLightmap.x);
+	outParticleTint = inParticleTint.rgb;
 >>>>

@@ -436,14 +436,18 @@ void Emitter::simulate(Particle& p, float step, int steps, const EmitContext& co
 			}
 		}
 	}
-	if (std::fabs(p.velocity.x) < 0.001f) {
-		p.velocity.x = 0;
-	}
-	if (std::fabs(p.velocity.y) < 0.001f) {
-		p.velocity.y = 0;
-	}
-	if (std::fabs(p.velocity.z) < 0.001f) {
-		p.velocity.z = 0;
+	// The sprite update (0x1013f0c0) snaps small velocity components to
+	// zero. The mesh update (0x10144110) keeps them for velocity alignment.
+	if (!t.mesh) {
+		if (std::fabs(p.velocity.x) < 0.001f) {
+			p.velocity.x = 0;
+		}
+		if (std::fabs(p.velocity.y) < 0.001f) {
+			p.velocity.y = 0;
+		}
+		if (std::fabs(p.velocity.z) < 0.001f) {
+			p.velocity.z = 0;
+		}
 	}
 	if (t.forceToWaterSurface && context.hasWater && !t.localSystem) {
 		p.position.y = context.waterLevel + t.waterSurfaceOffset;
@@ -1268,9 +1272,19 @@ std::vector<PointLight> EffectManager::lights() const
 		}
 		const float fade = light.life < 0 ? 1.0f : std::clamp(1.0f - light.age / light.life, 0.0f, 1.0f);
 		if (fade > 0) {
-			PointLight lit {light.position, light.color * fade, light.range1, light.range2};
+			// An attached bundle's light is a child of its object: drawn
+			// where the object is drawn between the ticks (0x0043ef30).
+			Vec3 position = light.position, direction = light.direction;
+			if (const auto at = light.anchor != 0 && m_frameAlpha != 1 ? m_anchors.find(light.anchor) : m_anchors.end();
+				at != m_anchors.end()) {
+				const Anchor place = drawnAnchor(at->second);
+				position = place.position +
+					place.rotation.transform(light.mountPosition + light.mountRotation.transform(light.localPosition));
+				direction = place.rotation.transform(light.mountRotation.transform(light.localDirection));
+			}
+			PointLight lit {position, light.color * fade, light.range1, light.range2};
 			lit.spot = light.look.spot;
-			lit.direction = light.direction;
+			lit.direction = direction;
 			lit.cone = light.look.cone;
 			lit.affectsLightmapped = light.look.affectsLightmapped;
 			lit.specColor = light.look.specColor * fade;
@@ -1438,7 +1452,11 @@ bool EffectManager::spawnAttached(const std::string& name, uint32_t anchor, cons
 void EffectManager::placeAttached(Emitter& emitter) const
 {
 	const auto at = m_anchors.find(emitter.anchor);
-	const Anchor place = at != m_anchors.end() ? at->second : Anchor {};
+	placeAttached(emitter, at != m_anchors.end() ? at->second : Anchor {});
+}
+
+void EffectManager::placeAttached(Emitter& emitter, const Anchor& place) const
+{
 	if (emitter.particleTemplate().noRotationFromParent) {
 		// Only the bundle's position (0x1013eff0).
 		emitter.place(place.position + place.rotation.transform(emitter.mountPosition) + emitter.localPosition,
@@ -1463,9 +1481,29 @@ void EffectManager::setPhysicsVelocity(uint32_t anchor, uint32_t tag, const Vec3
 	}
 }
 
+void EffectManager::captureAnchors()
+{
+	if (m_anchorsFrame == m_frames) {
+		return;
+	}
+	m_anchorsFrame = m_frames;
+	for (auto& [id, a] : m_anchors) {
+		a.previousPosition = a.position;
+		a.previousRotation = a.rotation;
+	}
+}
+
 void EffectManager::setAnchor(uint32_t anchor, const Vec3& position, const Mat3& rotation)
 {
-	m_anchors[anchor] = {position, rotation};
+	captureAnchors();
+	const auto [it, added] = m_anchors.try_emplace(anchor);
+	Anchor& a = it->second;
+	if (added) {
+		a.previousPosition = position;
+		a.previousRotation = rotation;
+	}
+	a.position = position;
+	a.rotation = rotation;
 	for (const auto& emitter : m_emitters) {
 		if (emitter->anchor == anchor) {
 			placeAttached(*emitter);
@@ -1588,6 +1626,7 @@ void EffectManager::releaseAnchor(uint32_t anchor)
 
 void EffectManager::update(float seconds)
 {
+	captureAnchors(); // an anchor not set this tick stands still
 	// The decals age and go at the decal manager's timeToLive (0x10164f10).
 	const float decalLife = m_settings ? m_settings->decalTimeToLive : scene::ParticleSystemSettings {}.decalTimeToLive;
 	// A set whose owner wasn't drawn ages twice (0x10164f10 adds the
@@ -1595,7 +1634,7 @@ void EffectManager::update(float seconds)
 	// set): Decal::ownerDrawn.
 	// The static list (+0x2c) isn't aged.
 	for (Decal& decal : m_decals) {
-		if (decal.staticId == 0) {
+		if (decal.staticId == 0 && !m_particlesPerFrame) {
 			decal.age += decal.object != 0 && !decal.ownerDrawn ? 2 * seconds : seconds;
 		}
 	}
@@ -1612,18 +1651,6 @@ void EffectManager::update(float seconds)
 						   [this](const HeldSound& h) { return !m_anchors.count(h.anchor); }),
 		m_heldSounds.end());
 	stepAttachedBundles(seconds);
-	EmitContext context = m_context;
-	context.settings = m_settings;
-	context.wind = m_wind;
-	// The sprite pool's use, counted afresh (systems that ended took theirs).
-	m_poolUsed = 0;
-	for (const auto& emitter : m_emitters) {
-		const ParticleTemplate& t = emitter->particleTemplate();
-		if (!t.mesh && !t.trail && !t.nonScreenAligned) {
-			m_poolUsed += static_cast<int>(emitter->particles().size());
-		}
-	}
-	context.poolUsed = &m_poolUsed;
 	for (const auto& emitter : m_emitters) {
 		// The bundle's life runs down by the tick (no age scale) while above
 		// 0; below 0 the bundle stops (0x0061a760). Exactly 0 never ends.
@@ -1633,11 +1660,10 @@ void EffectManager::update(float seconds)
 				emitter->stop();
 			}
 		}
-		emitter->update(seconds, m_random, context);
 	}
-	m_emitters.erase(std::remove_if(m_emitters.begin(), m_emitters.end(),
-						 [](const std::unique_ptr<Emitter>& e) { return !e->alive(); }),
-		m_emitters.end());
+	if (!m_particlesPerFrame) {
+		stepEmitters(seconds);
+	}
 	for (LiveLight& light : m_lights) {
 		light.age += seconds;
 		if (light.anchor != 0 && !m_anchors.count(light.anchor)) {
@@ -1660,6 +1686,109 @@ void EffectManager::update(float seconds)
 // the anchor's moves over the update, as ObjectEffects takes them from an
 // object's (the anchor's own velocity standing in for the root physics';
 // no Engine input: an armour effect sits on the vehicle's root).
+void EffectManager::stepEmitters(float seconds)
+{
+	EmitContext context = m_context;
+	context.settings = m_settings;
+	context.wind = m_wind;
+	// The sprite pool's use, counted afresh (systems that ended took theirs).
+	m_poolUsed = 0;
+	for (const auto& emitter : m_emitters) {
+		const ParticleTemplate& t = emitter->particleTemplate();
+		if (!t.mesh && !t.trail && !t.nonScreenAligned) {
+			m_poolUsed += static_cast<int>(emitter->particles().size());
+		}
+	}
+	context.poolUsed = &m_poolUsed;
+	for (const auto& emitter : m_emitters) {
+		emitter->update(seconds, m_random, context);
+	}
+	m_emitters.erase(std::remove_if(m_emitters.begin(), m_emitters.end(),
+						 [](const std::unique_ptr<Emitter>& e) { return !e->alive(); }),
+		m_emitters.end());
+}
+
+EffectManager::Anchor EffectManager::drawnAnchor(const Anchor& anchor) const
+{
+	// An anchor whose height changed by more than 4 m in the tick is drawn
+	// where it is (0x0043ef30, *0x00920ca0).
+	if (m_frameAlpha == 1 || std::fabs(anchor.position.y - anchor.previousPosition.y) > 4) {
+		return anchor;
+	}
+	Anchor drawn = anchor;
+	drawn.position = anchor.previousPosition + (anchor.position - anchor.previousPosition) * m_frameAlpha;
+	drawn.rotation = physics::slerpRotation(anchor.previousRotation, anchor.rotation, m_frameAlpha);
+	return drawn;
+}
+
+void EffectManager::frame(float seconds, float alpha)
+{
+	m_frameAlpha = alpha;
+	++m_frames;
+	if (!m_particlesPerFrame) {
+		return;
+	}
+	// The decals age by the frame (0x10164f10).
+	for (Decal& decal : m_decals) {
+		if (decal.staticId == 0) {
+			decal.age += decal.object != 0 && !decal.ownerDrawn ? 2 * seconds : seconds;
+		}
+	}
+	for (const auto& emitter : m_emitters) {
+		if (emitter->anchor != 0 && !emitter->stopped()) {
+			if (const auto at = m_anchors.find(emitter->anchor); at != m_anchors.end()) {
+				placeAttached(*emitter, drawnAnchor(at->second));
+			}
+		}
+	}
+	stepEmitters(seconds);
+}
+
+void EffectManager::setPlacedMeshes(std::vector<std::pair<std::string, std::vector<MeshSprite>>> groups)
+{
+	std::map<uint32_t, MeshSprite> before;
+	for (const auto& [geometry, sprites] : m_placedMeshes) {
+		for (const MeshSprite& s : sprites) {
+			if (s.key != 0) {
+				before[s.key] = s;
+			}
+		}
+	}
+	std::map<uint32_t, MeshSprite> previous;
+	const bool first = m_placedFrame != m_frames; // the first tick since the last frame
+	m_placedFrame = m_frames;
+	for (const auto& [geometry, sprites] : groups) {
+		for (const MeshSprite& s : sprites) {
+			if (s.key != 0) {
+				const auto kept = first ? m_placedPrevious.end() : m_placedPrevious.find(s.key);
+				const auto was = before.find(s.key);
+				previous[s.key] = kept != m_placedPrevious.end() ? kept->second : was != before.end() ? was->second : s;
+			}
+		}
+	}
+	m_placedPrevious = std::move(previous);
+	m_placedMeshes = std::move(groups);
+}
+
+const std::vector<MeshSprite>& EffectManager::placedAsDrawn(const std::vector<MeshSprite>& sprites) const
+{
+	if (m_frameAlpha == 1) {
+		return sprites;
+	}
+	m_placedDrawn = sprites;
+	for (MeshSprite& s : m_placedDrawn) {
+		const auto was = s.key != 0 ? m_placedPrevious.find(s.key) : m_placedPrevious.end();
+		if (was == m_placedPrevious.end() || std::fabs(s.position.y - was->second.position.y) > 4) {
+			continue;
+		}
+		const MeshSprite& a = was->second;
+		s.position = a.position + (s.position - a.position) * m_frameAlpha;
+		s.rotation = physics::slerpRotation(a.rotation, s.rotation, m_frameAlpha);
+		s.stretch = a.stretch + (s.stretch - a.stretch) * m_frameAlpha;
+	}
+	return m_placedDrawn;
+}
+
 void EffectManager::stepAttachedBundles(float seconds)
 {
 	m_attachedBundles.erase(std::remove_if(m_attachedBundles.begin(), m_attachedBundles.end(),
@@ -1930,6 +2059,8 @@ void EffectManager::emitDebris(LiveDebrisEmitter& e, float lead)
 	if (m_debris.size() >= kMaxDebris) {
 		m_debris.erase(m_debris.begin());
 	}
+	piece.previousPosition = piece.position;
+	piece.previousRotation = piece.rotation;
 	m_debris.push_back(piece);
 }
 
@@ -2050,11 +2181,16 @@ void EffectManager::stepDebris(float seconds)
 		m_debrisEmitters.end());
 	// The pieces.
 	for (DebrisPiece& p : m_debris) {
+		if (m_debrisFrame != m_frames) {
+			p.previousPosition = p.position;
+			p.previousRotation = p.rotation;
+		}
 		p.age += seconds;
 		if (!p.resting) {
 			stepPiece(p, seconds);
 		}
 	}
+	m_debrisFrame = m_frames;
 	m_debris.erase(std::remove_if(m_debris.begin(), m_debris.end(), [](const DebrisPiece& p) { return p.age >= p.life; }),
 		m_debris.end());
 }
@@ -2743,10 +2879,16 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		// muzzle's flash and smoke), again on each round unless its
 		// minDistanceUnderWaterSurface (+0x3f4) is 0 or more and it still
 		// runs; 0x0061e090 sets off the GroundEffectBundles.
+		// FireComp sends it to each of the weapon's children (its list,
+		// 0x005f25f0 -> 0x005f31d0) and every object passes an event on to
+		// its own children (0x0063ca60), so the bundles under the weapon's
+		// barrel Bundles (the walkers' e_muzz) start too.
 		for (const auto& fire : object.firedWeapons) {
 			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 				Placed& b = tracked.bundles[i];
-				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], fire.weapon)) {
+				if (b.path.empty() || std::none_of(b.path.begin(), b.path.end() - 1, [&](const auto& part) {
+						return equalsIgnoreCase(part, fire.weapon);
+					})) {
 					continue;
 				}
 				if (!fire.seat.empty() && !equalsIgnoreCase(object.objectTemplate->name(), fire.seat)

@@ -165,8 +165,22 @@ TEST(EffectsDetail_DebrisEmitterPieces)
 		CHECK(std::fabs(s.x - 1.5f) < 1e-5f && std::fabs(s.y - 3) < 1e-5f && s.z == 1); // the 0 axis keeps 1
 		CHECK(p.alpha() < 1 && p.alpha() > 0.7f);
 	}
+	// A piece is an object: drawn from where it was before the frame's
+	// ticks (two here) to where they leave it (0x0043ef30).
+	manager.frame(0.01f, 1);
+	std::vector<effects::Vec3> before;
+	for (const auto& p : manager.debris()) {
+		before.push_back(p.position);
+	}
+	manager.update(1 / 30.0f);
+	manager.update(1 / 30.0f);
+	for (size_t i = 0; i < before.size(); ++i) {
+		const effects::DebrisPiece& p = manager.debris()[i];
+		CHECK(p.previousPosition.y == before[i].y && p.previousPosition.z == before[i].z);
+		CHECK(p.position.y != p.previousPosition.y);
+	}
 	// They fall back, rest on the ground and go after their 2 s.
-	for (int i = 0; i < 45; ++i) {
+	for (int i = 0; i < 43; ++i) {
 		manager.update(1 / 30.0f);
 	}
 	CHECK(manager.debris().size() == 3);
@@ -698,4 +712,51 @@ TEST(EffectsDetail_SharedWeaponFiresOnlyInOccupiedSeat)
  objects.update({state}, manager);
  CHECK(!manager.emitting(9, 1));
  CHECK(manager.emitting(9, 2));
+}
+
+// A walker's main gun (AS_heavy_mech_main_cannon): its muzzle bundles
+// (e_muzz_as_mech, startOnEffects 0) sit one level down, under its barrel
+// Bundles. FireComp's event 0 goes to the gun's children (0x005f31d0) and
+// each passes it on to its own (0x0063ca60), so a round starts both
+// barrels' muzzles, at the barrel tips; another gun's barrel stays dark.
+TEST(EffectsDetail_FireStartsMuzzlesUnderBarrelBundles)
+{
+	world::ObjectTemplateManager templates;
+	sprites(templates, "flash", "Standard");
+	world::ObjectTemplate* muzzle = templates.create("EffectBundle", "e_muzz_mech");
+	muzzle->settings()["setStartOnEffects"] = "0";
+	muzzle->children().push_back({"flash", {}, {}});
+	for (const char* name : {"mech_barrel_right", "mech_barrel_left", "aa_barrel"}) {
+		templates.create("Bundle", name)->children().push_back({"e_muzz_mech", {0, 0, 1}, {}});
+	}
+	world::ObjectTemplate* gun = templates.create("GenericFireArm", "mech_main_cannon");
+	gun->children().push_back({"mech_barrel_right", {0.13f, 0, 1}, {}});
+	gun->children().push_back({"mech_barrel_left", {-0.13f, 0, 1}, {}});
+	templates.create("GenericFireArm", "aa_gun")->children().push_back({"aa_barrel", {}, {}});
+	world::ObjectTemplate* turret = templates.create("RotationalBundle", "mech_turret");
+	turret->children().push_back({"mech_main_cannon", {0, 0.5f, 0}, {}});
+	turret->children().push_back({"aa_gun", {0, 2, 0}, {}});
+	world::ObjectTemplate* mech = templates.create("PlayerControlObject", "mech");
+	mech->children().push_back({"mech_turret", {0, 3, 0}, {}});
+
+	const auto placed = effects::ObjectEffects::bundlesOf(templates, *mech);
+	CHECK(placed.size() == 3);
+	if (!(placed.size() == 3)) {
+		return;
+	}
+	CHECK(std::fabs(placed[0].position.x - 0.13f) < 1e-4f && std::fabs(placed[0].position.y - 3.5f) < 1e-4f
+		&& std::fabs(placed[0].position.z - 2) < 1e-4f); // the right barrel's tip
+
+	effects::EffectManager manager(templates);
+	effects::ObjectEffects objects(templates);
+	effects::ObjectEffects::ObjectState state;
+	state.id = 7;
+	state.objectTemplate = mech;
+	objects.update({state}, manager);
+	CHECK(manager.emitters() == 0);
+	state.firedWeapons = {{"Mech_Main_Cannon", "mech"}};
+	objects.update({state}, manager);
+	CHECK(manager.emitting(7, 1));
+	CHECK(manager.emitting(7, 2));
+	CHECK(!manager.emitting(7, 3));
 }

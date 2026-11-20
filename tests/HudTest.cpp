@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 using namespace dice::hfe;
 
@@ -53,8 +54,8 @@ TEST(DeploymentScreen_EnterClosesAndConfirmsWhileTimerRuns)
 TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)
 {
 	using dice::main::killedInfoShown;
-	CHECK(killedInfoShown(true, 12, false, false));  // man down, screen closed: critically wounded + timer
-	CHECK(!killedInfoShown(true, 12, true, false));  // man down, screen opened
+	CHECK(killedInfoShown(true, 12, false, true));  // man down, screen closed: critically wounded + timer
+	CHECK(!killedInfoShown(true, 12, false, false));  // man down, screen opened
 	CHECK(!killedInfoShown(false, 12, false, false)); // dead: the spawn screen is up
 	CHECK(killedInfoShown(false, 12, false, true));   // dead, Enter pressed: killed + timer
 	CHECK(!killedInfoShown(false, 0, false, true));   // never died (initial deployment)
@@ -104,6 +105,58 @@ TEST(Hud_ShowLogicAndBars)
 	}
 	manager.set("IsSpectator", 1);
 	CHECK(manager.frame(0).empty());
+}
+
+TEST(Hud_SameNamedListKeepsItsPictureParent)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createPictureNode Global Members 181 10 213 157",
+			 "hudBuilder.setPictureNodeTexture Ingame/test.tga",
+			 "hudBuilder.setNodeShowVariable ShowSquadMemberList",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.createListNode Members MEMBERS 4 66 205 87 16 0",
+			 "hudBuilder.setListNodeBackgroundColor 1 0 0 1",
+		 }) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	CHECK(manager.active() != manager.find("Members"));
+	CHECK(manager.frame(0).empty());
+	manager.set("ShowSquadMemberList", 1);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 2);
+	if (quads.size() == 2) {
+		CHECK(quads[0].texture == "Menu/HUD/Texture/Ingame/test.tga");
+		CHECK(quads[0].x0 == 181 && quads[0].y0 == 10);
+		CHECK(quads[1].texture == "Menu/Console/white.dds");
+		CHECK(quads[1].x0 == 185 && quads[1].y0 == 76);
+	}
+}
+
+TEST(Hud_RejectsCyclesWhenReusingNodeNames)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Group",
+			 "hudBuilder.createSplitNode Group Group",
+			 "hudBuilder.createSplitNode Group Child",
+			 "hudBuilder.createSplitNode Global Alternate",
+			 "hudBuilder.createSplitNode Alternate Child",
+			 "hudBuilder.createSplitNode Child GROUP",
+			 "hudBuilder.createPictureNode Group Icon 0 0 10 10",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.setPictureNodeTexture Ingame/test.tga",
+		 }) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 1 && quads.front().texture == "Menu/HUD/Texture/Ingame/test.tga");
 }
 
 // setBarNodeRound (Bf2BarNode slot 0x120 0x007e9380; render 0x007eb2c0 calls
@@ -420,6 +473,81 @@ TEST(Hud_ShippedSupplyLabelOrder)
 			}
 			CHECK(glyphs == 8);
 		}
+		// Sat Track uses the same cooldown fill as Supplies, but has a red
+		// destroyed-asset background under its armor-gated gray one.
+		manager.set("MinimapSatelliteReloading", 1);
+		manager.set("MinimapSatelliteTimeUntilReloaded", 0.5f);
+		for (const float armor : {1.0f, 0.25f, 0.0f}) {
+			manager.set("SatelliteArmor", armor);
+			const auto quads = manager.frame(1 / 30.0f);
+			const auto icon = std::find_if(quads.begin(), quads.end(), [](const auto& q) {
+				return q.texture.find("tools/route_scan.tga") != std::string::npos;
+			});
+			CHECK(icon != quads.end());
+			if (icon == quads.end()) continue;
+			const float left = icon->x0 - 2, top = icon->y0 - 2;
+			std::vector<std::string> backgrounds;
+			for (const auto& q : quads) {
+				if (q.x0 == left && q.y0 == top && q.texture.find("assistance_buttonBg") != std::string::npos) {
+					backgrounds.push_back(q.texture);
+				}
+			}
+			CHECK(backgrounds.size() == (armor > 0 ? 2 : 1));
+			CHECK(!backgrounds.empty() && backgrounds.front().find("assistance_buttonBg_destroyed.tga") != std::string::npos);
+			if (armor > 0) {
+				CHECK(!backgrounds.empty() && backgrounds.back().find("assistance_buttonBg.tga") != std::string::npos);
+			}
+		}
+	}
+}
+
+// The shipped passengers' names panel (HudSetupPlayerNames.con, Remaster's
+// hudfix copy too) draws its lines only under VehiclePassengersShow.
+TEST(Hud_ShippedPassengerNamesPanel)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath(mod);
+		Console console(&files);
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		CHECK(console.run("ClientArchives.con", {}, out));
+		hud::HudManager manager([&files](const std::string& path, std::string& text) {
+			std::vector<uint8_t> data;
+			if (!files.readFile(path, data)) return false;
+			text.assign(data.begin(), data.end());
+			return true;
+		});
+		hud::registerHudConsoleMethods(console, manager);
+		console.setScriptOutput(false, false);
+		CHECK(console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+		for (const char* name : {"ShowIngameHud", "ShowSoldierHud", "MenuBackgroundAlpha", "BottomLeftVehicleFadedAlpha", "OccupyingPlayerName1Show"})
+			manager.set(name, 1);
+		manager.setString("OccupyingPlayerName1String", "1. Driver");
+		// Remaster's hudfix moves the panel to x -114; its HUD pass squeezes
+		// x by 12/16 about the centre (LevelSources::hudXScale).
+		const float squeeze = std::strstr(mod, "Remaster") ? 0.75f : 1.0f;
+		const auto panel = [&](bool show) {
+			manager.set("VehiclePassengersShow", show ? 1 : 0);
+			std::vector<hud::HudQuad> quads;
+			for (int i = 0; i < 60; ++i) quads = manager.frame(1 / 30.0f);
+			return std::count_if(quads.begin(), quads.end(), [&](const auto& q) {
+				const float x0 = 400 + (q.x0 - 400) * squeeze, x1 = 400 + (q.x1 - 400) * squeeze;
+				return q.texture.find("playerNameBg") != std::string::npos && q.color[3] > 0.5f && x0 >= 0 && x1 <= 800
+					&& q.y0 >= 0 && q.y1 <= 600;
+			});
+		};
+		CHECK(panel(false) == 0);
+		// Once per pass: the HUD is drawn twice (0x1002d5d9) and the panel
+		// isn't gated on AffectedByEMPShow.
+		CHECK(panel(true) == 2);
+		CHECK(panel(false) == 0);
 	}
 }
 
@@ -883,6 +1011,58 @@ TEST(Hud_CommanderMapOverhead)
 	CHECK(quads.size() == 2 && quads[0].color[3] == 1);
 }
 
+TEST(Hud_CommanderMapSatelliteSweep)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setCommanderPos -300/-300",
+			 "hudBuilder.setCommanderSize 600/600",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("map.dds", -300, -300, 600, 600);
+	manager.setMapMarkers({{"mark.dds", 0, 0, 16}});
+	manager.set("MapFullSize", 1);
+	manager.set("CommanderShow", 1);
+	const auto sweep = [&]() -> std::optional<hud::HudQuad> {
+		for (const auto& q : manager.frame(0)) {
+			if (q.texture == "Menu/HUD/Texture/Ingame/Minimap/map_SatelliteScanLine.dds") {
+				return q;
+			}
+		}
+		return std::nullopt;
+	};
+	CHECK(!sweep());
+	manager.setSatelliteSweep(0.1f);
+	const auto early = sweep();
+	CHECK(early && early->x0 == 100 && early->x1 == 175 && early->u0 == 0.5f);
+	manager.setSatelliteSweep(0.5f);
+	const auto middle = sweep();
+	CHECK(middle && middle->x0 == 325 && middle->x1 == 475
+		&& middle->y0 == 0 && middle->y1 == 600 && middle->color[3] == 0.8f);
+	manager.setSatelliteSweep(0.9f);
+	const auto late = sweep();
+	CHECK(late && late->x0 == 625 && late->x1 == 700 && late->u1 == 0.5f);
+	manager.setOverhead(true, 0, 0, 300);
+	manager.setSatelliteSweep(0.5f);
+	const auto overhead = sweep();
+	CHECK(overhead && overhead->x0 == 250 && overhead->x1 == 550);
+	manager.set("CommanderShow", 0);
+	CHECK(!sweep());
+	manager.set("CommanderShow", 1);
+	manager.setSatelliteSweep(std::nullopt);
+	CHECK(!sweep());
+}
+
 // A picture without a texture is a fill in its colour (the commander
 // screen's black borders); setPictureNodeCenterPoint's point (about the
 // screen's centre) is the rotation's pivot.
@@ -978,6 +1158,8 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 			 "hudBuilder.createMapNode Global Minimap",
 			 "hudBuilder.setMaxiPos -122/-271",
 			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setCommanderPos -300/-300",
+			 "hudBuilder.setCommanderSize 600/600",
 			 "hudBuilder.setMiniPos 245/-291",
 			 "hudBuilder.setMiniSize 146/146",
 			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
@@ -1020,32 +1202,81 @@ TEST(Hud_MinimapTurnsWithThePlayer)
 		quads = manager.frame(1);
 		CHECK(quads.size() == 2 && quads[1].rotation == 0);
 	}
-	// The big map opened after the turn keeps the minimap's last turn
-	// (0x0077cba0 always turns by +0x80c), which holds while it is open
-	// (0x0078f680 updates it only at the minimap's size, +0x709): a new
-	// heading, being dead, or man down don't move it.
+	// The retail 1.51 entry probe started at 1.5 rad with a settled
+	// minimap. At 60 Hz, expansion starts on update 14 while alive, or
+	// update 1 when opening deployment on death.
+	constexpr float dt = 1.0f / 60;
+	constexpr float initialTurn = 1.5f;
+	struct MapEntry {
+		bool spawning;
+		bool commander;
+		bool alive;
+	};
+	for (const MapEntry entry : {MapEntry{false, false, true}, MapEntry{true, false, true},
+			 MapEntry{false, true, true}, MapEntry{true, false, false}}) {
+		manager.set("MapFullSize", 0);
+		manager.set("SpawnShow", 0);
+		manager.set("CommanderShow", 0);
+		manager.setMapLayer({});
+		manager.setMapMarkers({});
+		for (int i = 0; i < 120; ++i) {
+			manager.setMapHeading(initialTurn);
+			manager.tickMapTurn(dt, true);
+			manager.frame(dt);
+		}
+		CHECK(std::abs(manager.mapTurn() - initialTurn) < 1e-4f);
+
+		manager.setMapLayer("combatArea.dds");
+		manager.set("MapFullSize", 1);
+		manager.set("SpawnShow", entry.spawning);
+		manager.set("CommanderShow", entry.commander);
+		const int expandOn = entry.alive ? 14 : 1;
+		for (int update = 1; update <= expandOn; ++update) {
+			manager.setMapHeading(initialTurn);
+			manager.tickMapTurn(dt, entry.alive);
+			quads = manager.frame(dt);
+			CHECK(quads.size() == 2);
+			if (quads.size() != 2) {
+				continue;
+			}
+			const auto& map = quads[0];
+			if (update < expandOn) {
+				CHECK(manager.mapTurn() > 0 && manager.mapTurn() < initialTurn);
+				CHECK(map.rotation < 0 && quads[1].rotation == map.rotation);
+				CHECK(map.clipped && std::abs(map.clip[2] - map.clip[0] - 146) < 0.01f);
+			} else {
+				CHECK(manager.mapTurn() == 0 && map.rotation == 0 && quads[1].rotation == 0);
+				const float targetWidth = entry.commander ? 600 : 512;
+				const float expectedWidth = 146 + (targetWidth - 146) * (1 - std::exp(-6 * dt));
+				CHECK(std::abs(map.x1 - map.x0 - expectedWidth) < 0.01f);
+			}
+		}
+		manager.setMapMarkers({{"mark.dds", 100, 0, 16, 30}});
+		for (int i = 0; i < 4; ++i) {
+			quads = manager.frame(1);
+		}
+		CHECK(quads.size() == 3);
+		if (quads.size() == 3) {
+			CHECK(quads[0].rotation == 0 && quads[1].rotation == 0);
+			CHECK(quads[2].rotation == 30);
+			const float mx = (quads[2].x0 + quads[2].x1) * 0.5f;
+			const float my = (quads[2].y0 + quads[2].y1) * 0.5f;
+			float wx = 0, wz = 0, northX = 0, northZ = 0;
+			CHECK(manager.mapWorldAt(mx, my, wx, wz));
+			CHECK(std::abs(wx - 100) < 3 && std::abs(wz) < 3);
+			CHECK(manager.mapWorldAt(mx, my - 20, northX, northZ));
+			CHECK(std::abs(northX - wx) < 0.01f && northZ > wz);
+		}
+	}
+	manager.set("SpawnShow", 0);
+	manager.set("CommanderShow", 0);
+	manager.setMapLayer({});
 	manager.setMapMarkers({{"mark.dds", 100, 0, 16, 0}});
-	manager.set("MapFullSize", 1);
-	manager.tickMapTurn(1.0f / 60, true); // the size flag (+0x709) follows
-	for (int i = 0; i < 60; ++i) {
-		manager.setMapHeading(0);
-		manager.tickMapTurn(1.0f / 60, i < 30);
-	}
-	CHECK(std::abs(manager.mapTurn() - east) < 1e-4f);
-	quads = manager.frame(1);
-	CHECK(!quads.empty() && std::abs(quads[0].rotation + 90) < 0.01f);
-	{
-		// Hit-tested turned too: the point above the centre is east.
-		float cxw = 0, czw = 0, wx = 0, wz = 0;
-		const float bx = quads[0].pivot[0], by = quads[0].pivot[1];
-		CHECK(manager.mapWorldAt(bx, by, cxw, czw) && manager.mapWorldAt(bx, by - 20, wx, wz));
-		CHECK(wx - cxw > 1 && std::abs(wz - czw) < 0.5f);
-	}
 	manager.set("MapFullSize", 0);
-	manager.tickMapTurn(1.0f / 60, true);
 	for (int i = 0; i < 120; ++i) {
 		manager.setMapHeading(east);
-		manager.tickMapTurn(1.0f / 60, true);
+		manager.tickMapTurn(dt, true);
+		manager.frame(dt);
 	}
 	// A static map: north up again.
 	manager.set("MapStatic", 1);
@@ -1213,6 +1444,7 @@ TEST(Hud_LocalViewIndicatorRetailShapeAndHeading)
 	for (int i = 0; i < 120; ++i) {
 		manager.setMapHeading(3.1415927f / 4);
 		manager.tickMapTurn(1.0f / 60, true);
+		manager.frame(1.0f / 60);
 	}
 	indicators = 0;
 	for (const auto& quad : manager.frame(1)) {

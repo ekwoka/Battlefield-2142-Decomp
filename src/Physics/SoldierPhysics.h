@@ -203,6 +203,7 @@ public:
 		Vec3 normal;
 		Vec3 point;
 		uint32_t ownMaterial = 0, otherMaterial = 0;
+		bool otherStaticNode = false;
 	};
 	std::function<bool(const Contact&)> onContact;
 	bool swimming() const { return m_swim; }

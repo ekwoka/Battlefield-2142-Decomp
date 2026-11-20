@@ -93,6 +93,77 @@ TEST(Nametags_EnemiesWhenAimedAt)
 	CHECK(nametags::playerTagColour(in) == nametags::Squad);
 }
 
+// The network marker (0x10169a70): the red diamond 0xa3 over an enemy the
+// squad's reports reveal, whatever the name's alpha; over an aimed-at
+// player or a squad member (the friendly 0xa0) only while the name shows;
+// faded by the player cull range alone (1 to 100 m, 0 at 300).
+TEST(Nametags_NetworkMarker)
+{
+	const nametags::Settings s;
+	nametags::NetworkMarkerInput in;
+	in.alive = true;
+	in.onScreen = true;
+	in.distance = 50;
+	float alpha = -1;
+	CHECK(nametags::networkMarker(s, in, alpha) == -1 && alpha == 0); // an ordinary enemy
+	in.revealed = true;
+	CHECK(nametags::networkMarker(s, in, alpha) == 0xa3 && std::fabs(alpha - 1) < 1e-6f);
+	in.distance = 200;
+	CHECK(nametags::networkMarker(s, in, alpha) == 0xa3 && std::fabs(alpha - 0.5f) < 1e-6f);
+	in.distance = 300;
+	CHECK(nametags::networkMarker(s, in, alpha) == -1);
+	// A decoy's object tag fades over its own range (60 m): full to a third.
+	in.fadeRange = 60;
+	in.distance = 19;
+	CHECK(nametags::networkMarker(s, in, alpha) == 0xa3 && std::fabs(alpha - 1) < 1e-6f);
+	in.distance = 40;
+	CHECK(nametags::networkMarker(s, in, alpha) == 0xa3 && std::fabs(alpha - (1 - (40 - 19.8f) / 40.2f)) < 1e-4f);
+	in.distance = 60;
+	CHECK(nametags::networkMarker(s, in, alpha) == -1);
+	in.fadeRange = 0;
+	in.distance = 50;
+	for (bool nametags::NetworkMarkerInput::*off : {&nametags::NetworkMarkerInput::selected,
+			 &nametags::NetworkMarkerInput::clamped}) {
+		nametags::NetworkMarkerInput o = in;
+		o.*off = true;
+		CHECK(nametags::networkMarker(s, o, alpha) == -1);
+	}
+	for (bool nametags::NetworkMarkerInput::*off : {&nametags::NetworkMarkerInput::alive,
+			 &nametags::NetworkMarkerInput::onScreen}) {
+		nametags::NetworkMarkerInput o = in;
+		o.*off = false;
+		CHECK(nametags::networkMarker(s, o, alpha) == -1);
+	}
+	// Aimed at, unrevealed: only while its name shows.
+	in.revealed = false;
+	in.aimedAt = true;
+	CHECK(nametags::networkMarker(s, in, alpha) == -1);
+	in.tagAlpha = 0.5f;
+	CHECK(nametags::networkMarker(s, in, alpha) == 0xa3);
+	// A squad member: the friendly marker.
+	in.aimedAt = false;
+	in.friendly = true;
+	CHECK(nametags::networkMarker(s, in, alpha) == -1);
+	in.sameSquad = true;
+	CHECK(nametags::networkMarker(s, in, alpha) == 0xa0);
+}
+
+// The marker's second colour (0x1016a113) and the squad's kit / vehicle
+// icon (0x101691c0).
+TEST(Nametags_NetworkColoursAndSquadIcons)
+{
+	using namespace nametags;
+	CHECK(markerSecondColour(Enemy, -1, false) == Enemy);
+	CHECK(markerSecondColour(Enemy, -1, true) == Highlight);
+	CHECK(markerSecondColour(Highlight, -1, true) == Neutral);
+	CHECK(markerSecondColour(Squad, 0x2d, true) == Neutral); // a call's icon: white
+	CHECK(networkSquadIcon(true, false, false, 4, 0x5f) == 0x54); // ICObject + Engineer
+	CHECK(networkSquadIcon(false, true, false, 4, 0x5f) == -1);
+	CHECK(networkSquadIcon(true, false, true, 4, 0x5f) == -1);
+	CHECK(networkSquadIcon(false, true, true, 4, 0x5f) == 0x5f);
+	CHECK(networkSquadIcon(true, true, false, -1, 0x5f) == -1);
+}
+
 TEST(Nametags_ShownDistanceSteps)
 {
 	CHECK(nametags::shownDistance(-1, 20.4f) == 20);
@@ -284,7 +355,9 @@ TEST(Nametags_JoinedWorld)
 	struct Joined : host::HudWorld {
 		std::vector<PlayerInfo> players;
 		std::vector<SquadRequest> requests;
+		std::vector<int> reported;
 		bool joined() const override { return true; }
+		std::vector<int> squadReportedPlayers() const override { return reported; }
 		int localPlayer() const override { return 0; }
 		bool playerInfo(int player, PlayerInfo& out) const override
 		{
@@ -447,6 +520,77 @@ TEST(Nametags_JoinedWorld)
 	// The name renderer is independent of the manager's icon shown byte.
 	CHECK(hasTexture(quads, "Fonts/BF1942.dds"));
 	CHECK(!hasTexture(quads, "supplyRequest.dds") && !hasTexture(quads, "supplyRequestSelected.dds"));
+	// The network marker (0x10169a70): an enemy the squad reports reveal gets
+	// the red diamond 0xa3 at its icon point, its name unshown; none before
+	// or after the report.
+	tags.setShown(true);
+	icons.icons[0xa3] = {"enemy-diamond.dds", 0, 0, 1, 1, 16, 16};
+	icons.icons[0xa0] = {"friendly-circle.dds", 0, 0, 1, 1, 16, 16};
+	game::GameWorld::PlayerInfo enemy = ordinary;
+	enemy.id = 7;
+	enemy.team = 2;
+	enemy.kit = 0;
+	enemy.name = "Enemy";
+	enemy.soldier = objects.create(soldierTemplate, {-6, 0, 40})->id();
+	enemy.position = {-6, 0, 40};
+	joined.players.push_back(enemy);
+	const auto diamond = [&]() -> const hud::HudQuad* {
+		for (const hud::HudQuad& q : quads) {
+			if (q.texture == "enemy-diamond.dds") {
+				return &q;
+			}
+		}
+		return nullptr;
+	};
+	for (int i = 0; i < 3; ++i) {
+		quads = tags.frame(round, objects, view, 1 / 30.0f);
+	}
+	CHECK(diamond() == nullptr);
+	joined.reported = {7};
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	CHECK(diamond() != nullptr);
+	if (const hud::HudQuad* q = diamond()) {
+		const float d = std::sqrt(6.0f * 6.0f + 40.0f * 40.0f);
+		float ex = 0, ey = 0;
+		CHECK(nametags::Nametags::project(view, {-6, 1 - 0.6f * 30 / d, 40}, ex, ey, false, 0));
+		CHECK(std::fabs((q->x0 + q->x1) * 0.5f - ex) < 1.0f && std::fabs((q->y0 + q->y1) * 0.5f - ey) < 1.0f);
+		CHECK(q->color[0] > 0.8f && q->color[1] < 0.2f && std::fabs(q->color[3] - 1) < 1e-4f);
+	}
+	// His radio line (radioFlash, 2/0x41) blinks it towards the highlight
+	// (yellow) over the next second.
+	tags.radioFlash(7);
+	float greenest = 0;
+	for (int i = 0; i < 30; ++i) {
+		quads = tags.frame(round, objects, view, 1 / 30.0f);
+		if (const hud::HudQuad* q = diamond()) {
+			greenest = std::max(greenest, q->color[1]);
+		}
+	}
+	CHECK(greenest > 0.5f);
+	// Cloaked (vt+0x114), the revealed enemy loses the diamond but keeps the
+	// kit icon for a networkableHudShowKit squad: 0x101691c0 has no cloak test.
+	templates.registerType(6, "Kit");
+	templates.registerType(7, "ItemContainer");
+	templates.create("ItemContainer", "net_kit")->settings()["ability.networkableHudShowKit"] = "1";
+	templates.create("Kit", "net_assault_kit")->children().push_back({"net_kit", {}, {}});
+	templates.registerType(2, "SpawnPoint");
+	objects.create(templates.create("SpawnPoint", "behind_spawn"), {0, 0, -30}); // the round's own local soldier, out of view
+	const int self = round.addPlayer("Cmdr", 1, true);
+	CHECK(self == me.id);
+	round.setKit(self, "net_assault_kit", "pac_light_soldier");
+	round.setUnlocks(self, {"net_kit"});
+	CHECK(round.spawnSoldier(self));
+	icons.icons[0x50 + 1] = {"assault-kit.dds", 0, 0, 1, 1, 16, 16}; // ICObject + KitType Assault
+	joined.players.back().kit = assaultKit;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	CHECK(diamond() != nullptr && hasTexture(quads, "assault-kit.dds"));
+	joined.players.back().cloaked = true;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	CHECK(diamond() == nullptr && hasTexture(quads, "assault-kit.dds"));
+	joined.players.back().cloaked = false;
+	joined.reported.clear();
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	CHECK(diamond() == nullptr && !hasTexture(quads, "assault-kit.dds"));
 }
 
 // An object tag's refresh (0x100f40d0): below healthActivationLevel (the

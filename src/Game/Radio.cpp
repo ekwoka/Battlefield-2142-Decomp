@@ -659,7 +659,7 @@ void GameWorld::scanCloseTo(Player& player, CloseToScan& scan)
 	// One candidate: its Radio rows, then the distance and team tests.
 	bool any = false;
 	const auto consider = [&](uint64_t key, const world::ObjectTemplate* t, const physics::Vec3& p, int team,
-							  float ownRadius) {
+							  float ownRadius, bool projectile) {
 		if (!t) {
 			return;
 		}
@@ -687,9 +687,11 @@ void GameWorld::scanCloseTo(Player& player, CloseToScan& scan)
 		if (length > static_cast<float>(distance) + radius) {
 			return;
 		}
-		// Only the player's team's (the objects with a team; the ability
-		// flag that would lift this is never set).
-		if (team != 0 && team != player.team) {
+		// Only a projectile's (interface 0x94c1, *0x0099886c) team is tested
+		// (0x0059a8b0); anything else counts for either team: the enemy
+		// Titan lights the APCs' pod range (CloseToObject1) too. The
+		// ability flag that would lift the test is never set.
+		if (projectile && team != player.team) {
 			return;
 		}
 		any = true;
@@ -708,13 +710,13 @@ void GameWorld::scanCloseTo(Player& player, CloseToScan& scan)
 			continue;
 		}
 		consider(o.id(), o.objectTemplate(), {o.position().x, o.position().y, o.position().z}, o.team(),
-			objectRadius(o.id()));
+			objectRadius(o.id()), o.objectTemplate() && o.objectTemplate()->typeName() == "GenericProjectile");
 	}
 	for (const Projectile& q : m_projectiles) {
 		if (!q.alive || q.visual || !q.settings) {
 			continue;
 		}
-		consider((uint64_t {1} << 32) | q.serial, m_templates.find(q.settings->name), q.position, q.team, 0);
+		consider((uint64_t {1} << 32) | q.serial, m_templates.find(q.settings->name), q.position, q.team, 0, true);
 	}
 	if (scan.entries.empty() || !any) {
 		clearCloseTo(player.id, scan);

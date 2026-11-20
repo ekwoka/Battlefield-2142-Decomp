@@ -1782,7 +1782,13 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   (0.5/0/0 on PIYaw): `Body::canopy`, ticked in `stepBody`. It comes down
   at about 10.6 m/s (`Vehicles_SoldierParachuteOpensFallsAndLands`). The
   supply crate's supply_parachute Bundle the same way (lift 200, force 5):
-  about 7 m/s (`Vehicles_SupplyCrateComesDownUnderItsParachute`).
+  about 7 m/s (`Vehicles_SupplyCrateComesDownUnderItsParachute`). Its
+  first contact (the SupplyObject's slot `0xac`, `0x005d0790`, server,
+  with hasMobilePhysics) calls the commander's `0x0043d9c0`, which finds
+  the `supply_parachute` among the crate's children (`0x006f2f70`, by
+  template name) and disables it (slot `0x54`, `updateFlags(1, 0)`,
+  `0x006f68f0`): the Bundle and its animatedParachute canopies leave the
+  drawing (`world::Object::disableChild`, read by the renderer each frame).
 - Landing (`0x005cf750`, server, once): the ground, or an object along a
   normal at least 0.3 up (`*0x00a0200c`; any when the other is under a
   quarter of its radius; not an object moving over 5 m/s), starts the
@@ -2308,8 +2314,9 @@ at the (±1, ±1) corners meet nothing and more than a second has passed,
 then player slot `0x238(8)` and event 6; else the usual exit
 (`enterOrLeaveVehicle`, without the second). `allowTogglePosition`
 (`+0x491`, slots `0x160` / `0x15c`, 1 by default; the Titans' and the pod
-arrays' 0): the position keys (actions `0x1a`..`0x1e`) move a soldier only
-between two seats that both allow it. `seatLeftRotationLimit` /
+arrays' 0): the position keys (actions `0x1a`..`0x1e`) do nothing from a seat
+without it and are refused for a free seat without it (see "The position
+keys"). `seatLeftRotationLimit` /
 `seatRightRotationLimit` (`+0x300` / `+0x304`, read through the seat
 object's interface 0xc4c4 slots 0xd8 / 0xe0): the soldier's camera
 (`0x005890a0`, the soldier's control object `+0x240` set while seated)
@@ -2430,8 +2437,9 @@ The wire guidance takes the player's active camera (`0x005e2e20`: player
 slot `0x1b4(1)`, its `0xc378` matrix and position), so the steering point
 o + f × (max(0, (m − o)·f) + look-ahead) lies ahead of the round's own
 camera: the round flies where its camera looks. While the view is a
-round's the renderer's TVEffect pass runs (RendDX9 `0x10048f80`,
-PostProduction's `TVEffect`: `PostEffects::tv`). Rewritten in
+round's the TVEffect pass runs only with `enhanced.tvEffect` (RendDX9
+`0x10048f80`, PostProduction's `TVEffect`: `PostEffects::tv`); retail never
+calls it, so its guided view is the plain one (see the TVEffect item below). Rewritten in
 `GameWorld::startProjectileView` / `stepProjectileView` /
 `projectileCamera` (the seat's launch, `stepGunner`, the wire guidance),
 `PlayerCamera::view` (the view, no cockpit) and main.cpp's postEffects.
@@ -2902,6 +2910,83 @@ sitter ducks behind the gun (the head 0.45 m lower); `poseSeated` and,
 on a joined client by the ghost's ducking, `animateRemoteSeated` hand it
 the pose (`Vehicles_BipodDuckPlaysTheDuckPose`). A
 straight arm (v1 ∥ v2) gives no plane to bend in, as in the original.
+
+## Drawing between ticks
+
+The simulation steps at 30 Hz; every frame is drawn between the last two
+ticks (`0x0040bd90`: `0x0040c300` keeps the frame's tick count n, then
+`0x0040c534` → `0x0043f170`). Always on: the gate `0x009fcd90` is 1 and
+read nowhere else. The alpha is (now − last tick) / (n × 1/30), clamped to
+−0.1 .. 1.1, 0 before any tick. Each object (`0x0043ef30`, over the roots,
+their children (slot `0xec`) and siblings (`+0x38`); a child only when it is
+a soldier, a RotationalBundle (`0x947d`) or one of its kinds (template slot
+`0x4c` answering through `0x00613bc0`: Camera, Engine, FloatingBundle, Wing,
+LandingGear; not Rotor or Spring), a part on a bone (boneIndex, template
+slot `0xc8`) or a free camera, `0x0043dc40`) is drawn at its translation lerped (`0x0043dd80`) and its
+rotation slerped (`0x006ac740` / `0x0043de60` to quaternions, `0x006ac980`,
+the short way, no limit on the turn; `0x006ac870` back): world matrices for
+roots, local ones for children. An object whose height changed by more
+than 4 m in the tick (`*0x00920ca0`) is drawn where it is. The real
+transforms are put back after the frame (`0x0043eea0`, `+0x1c`).
+
+The local player's root is left to the end. When the player's camera
+(slot `0x1b4`, interface `0xc378`) belongs to a soldier and no device
+`0x400` is active, its matrix is kept, the root blended, and the soldier
+given back its tick rotation: on foot at the blended position, seated its
+whole local matrix. Then the frame's mouse move (device 1, axes 4 and 5)
+goes to the soldier (interface `0xc4d7` slot `0x8c`, `0x0058b5e0`): times 5
+(`*0x00a68e4c`, `*0x00a68f24`) and the zoom scale (`0x00586420`), added to
+the pending turn and pitch (`+0x27c`, `+0x274`), and the camera placed again
+(`0x005890a0`); some states send none (`0x00403060` on `0x00a0f3b0`,
+`0x00b2d148` slot `0x30`, the held item's slot `0x37c`). The tick
+clears both (`0x0058a788`) and turns by its whole input, so the look moves
+every frame. Any other camera (a seat's, the free camera) rides its
+blended object.
+
+The rewrite (`Render/TickBlend.h`, `LevelRenderer::syncObjects`,
+`Viewer.cpp`): objects as above; a template's children by their local
+matrices in the drawn parent, blended only when `0x0043dc40` would
+(`collectParts`); parts the game places itself (held weapons) by the same
+test, flat in their object. The game camera keeps its own last two samples
+(`MissileViewSmoothing`), one history per kind of view, roll included. The
+soldier's eye (on foot, under a parachute, or a seat without a camera of its
+own) rides its blended carrier: on foot its position, seated also the
+seat's share of the turn; the eye's height is blended, then taken one
+0.2 step on towards the pose's, as `0x005890a0` does each frame before
+`0x0043f610` puts the camera back after the draw; its look is the tick's plus
+`GameWorld::pendingLook`, seated stopped at the 40-degree twist unless the
+seat's limits take the rest (`seatedLookPreview`). The first-person weapon
+is placed at the tick's eye and carried with the drawn view
+(`tickBlendViewAdjustment`). Parts the game places itself (held weapons)
+blend in their parent part by the same test. Rounds in flight (placed
+templates) and their tracers (placed meshes) blend by their round's serial,
+as their objects would.
+
+Retail moves the particles in RendDX9's frame, not the tick: `0x10028ae0`
+(with the frame's seconds, clamped to 1e-5 .. 1/15 by `0x0040bd90`) calls
+the particle manager's slot `0x2c` (`0x1009a4c0`), which runs every
+system's update (slot `0xa0`, `0x101407c0`), all while the objects are
+blended. A window's frame now steps the emitters and ages the decals
+(`EffectManager::frame`) of the round's effects and the objects' own
+(engines, exhausts, wakes), the attached systems placed at their anchors as
+drawn; screenshots and headless runs keep stepping them in the tick. An
+anchor, a round's tracer and a debris piece (a Particle template's object)
+blend from where they were before the frame's ticks, however many, to where
+the last one leaves them, as `0x0043f170`'s alpha spans them all; their
+turns are slerped as the objects' (`physics::slerpRotation`, shared with
+`blendTransform`). The effects' lights and the decals on an object's
+collision parts are children of their objects: drawn where those are drawn.
+Sound stays at the tick: the sound manager steps with the ticks (slot
+`0x18`) before the blend, and the one call between `0x0043f170` and
+`0x0043f610` besides the draw is the demo recorder's camera (`0x00516b40`
+→ `0x005fa070`). The port's listener is the last drawn camera
+(`onCamera` → `GameWorld::setCamera`), up to a tick off retail's, whose
+source was not traced. A held weapon's node without a part keeps its template
+place, so folding it into the part below gives the same draw as blending
+each node. The name tags are projected at the objects' drawn positions
+(`LevelSources::drawnPositions`). Bone poses stay per tick, as retail's: the
+soldier's skeleton is stepped only in its tick update (`0x00586200` →
+`0x005ef250` with 1/30 s), and the blend moves objects, not bones.
 
 ## The first-person view
 
@@ -4371,10 +4456,10 @@ below it (`0x10148ae0`; the static meshes' table at `0x10210924`, built
 from RaShaderSTM.mfx by `0x100db190`). At medium bundled and skinned meshes
 lose their normal maps (the loaders skip "_b.dds", `0x101499b0`, and
 "_b.dds" / "_b_os.dds", `0x100d4160`); at low also their hemi map,
-envmap, dynamic shadows and colormap gloss, and static meshes their crack,
-dirt and detail normal maps (`0x10151830` skips "_cr", "_crb", "_di",
+envmap, dynamic shadows and colormap gloss, and static meshes their envmap,
+crack, dirt and detail normal maps (`0x10151830` skips "_cr", "_crb", "_di",
 "_deb"). `QualitySettings::lightingLevel`, `meshNormalMaps`,
-`meshHemiAndShadows`, `staticMeshDirtAndCrack`.
+`meshHemiAndShadows`, `meshEnvMaps`, `staticMeshDirtAndCrack`.
 
 **The interior sun.** A seat camera's inside view with
 `allowInsideStaticSun` (BF2142.exe `0x006104d0`..`0x00610580`,
@@ -5191,16 +5276,17 @@ filled at `0x1002a4a0` / `0x1002cef0`):
 vtable `0x101c6378`). At level load `0x100639b0` reads
 `<level>/Envmaps/EnvironmentMapInfo.emi` (`loadEMIFile` `0x10064770`:
 lines `EnvMapN x,y,z,bool`); each frame `0x10064f30` binds the entry
-nearest the camera as the one cube for bundled materials whose technique
-names "envmap" and static meshes (BM `_HASENVMAP_`: `lerp(diffuse,
+nearest the camera as the level cube for static and bundled materials whose
+technique names "envmap" (BM `_HASENVMAP_`: `lerp(diffuse,
 texCUBE(R), gloss / 4)` with a Fresnel alpha; reflection scale
 `setMaterialReflectionScale`, default 0.25), and the Titan interiors bind
 `common/textures/indoorenvmap`. `generateEnvMaps` and `save` are the
 editor's. Every retail level ships its .emi in the server archive (Cerbere
 Landing, Belgrade: one map, `EnvMap0 -88,54,66,1`) and the cubes in the
-client's. The static drawables take the cube unconditionally (`0x100bdb00`,
-`+0x13c`), the bundled ones with an envmap material (`0x100c5030`,
-`+0x37` → `+0x120`; with no cube a technique without, `0x1014e570`).
+client's. Static drawables receive the cube at `+0x13c` (`0x100bdb00`),
+and the material classifier (`0x101512a0`) sets the shader's envmap flag
+only for an authored envmap technique. Bundled drawables bind the cube
+for envmap materials (`0x100c5030`, `+0x37` → `+0x120`).
 RaShaderSTM lerps the lit colour towards the cube: per pixel at the
 reflection off the bumped normal by (1 − saturate(0.95 (E·N)²)) × gloss,
 per vertex by gloss × 2 × (1 − |E·N|); RaShaderBM the diffuse by gloss / 4
@@ -5339,10 +5425,16 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    `tvDistortionFreq`, `tvDistortionScale`): no direct call or vtable
    slot reaches it in RendDX9, but it is the view through a guided
    round's camera (`useProjectileCamera`, see the projectile camera
-   above). The rewrite (`PostEffects::tv`) turns it on while
-   `GameWorld::projectileCamera` gives the local player a round's camera
-   (main.cpp's postEffects), and off when the round goes and the view
-   comes back (`0x005b4b00`).
+   above). Rechecked 2026-11-19 over the whole DLL: the function has no
+   call, jump or pointer reference, and the string "TVEffect" is named only
+   at `0x10048fd4` inside it; the technique is never selected, so retail
+   shows the guided view in plain colour. The shader's `img.x` shift is a
+   function of the row only (up to ~34 px at 1920 wide, ~0.3 px per row),
+   which leans vertical edges by up to ~17 degrees: the "diagonal tearing"
+   reported on the gunship's TV missile. The rewrite keeps the pass
+   (`PostEffects::tv`, `BF2142_POST_EFFECT=tv`) behind `enhanced.tvEffect`
+   (off): `host::roundCameraEffects` sets it while
+   `GameWorld::projectileCamera` gives the local player a round's camera.
 
 The rewrite does all of these in one full-screen pass: the passes that
 move pixels (the roll, the fisheye, the TV's bands) read the earlier
@@ -8503,8 +8595,8 @@ HUD variables, which the game registers by name and binds to its own fields
 
 A node shows when its show variable is non-zero and every
 `setNodeLogicShowVariable` term holds. `AND` and `EQUAL` test `variable ==
-value`, and `NOT` tests `variable != value` (the engine builds a NOT node
-over an EQUAL node; `0x007b0fd0`). An `OR` entry joins the term before it:
+value`, `NOT` tests `variable != value`, and `GREATER` tests
+`variable > value` (`0x007b0fd0` → `0x00872580`). An `OR` entry joins the term before it:
 `NOT AffectedByEMPShow 1` followed by `OR UpdateAllEnabled 1` is one term.
 A colour variable tints the node and everything below it, and a position
 variable sets the coordinate once the game gives it a value.
@@ -8522,8 +8614,8 @@ renderer. The weapon HUDs pick their crosshair by `GuiIndex`, the template's
 (`0x007be770`): the spread is the deviation in degrees times
 `weaponHud.deviationFactor` (default 10), and the parts are 20 long about
 the screen centre (Right = 400 + spread, Left = 399 - 20 - spread; the
-spread pushed out by minVisualDeviation and held at maxVisualDeviation,
-see the weapon HUD below). Their
+raw spread, see the weapon HUD below). The machine guns' circle parts take
+`CrossCircle{Up,Right,Down,Left}Pos` from the same spread. Their
 colour comes from the profile's `game.setCrossHairColor` (0-255, in
 `Settings/Profiles/Default/GeneralOptions.con`). Bars fill
 by their value variable (types 0 up, 2 from the right, 3 from the left;
@@ -8929,7 +9021,58 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   shows "R2D2"), coloured from `0x00b3c1e0` (team (0.4, 0.6, 1), enemy
   (1, 0.4, 0.4)) or the squad's (0.4, 1, 0) (`0x00b3c380`), packed into
   OccupyingPlayerName1..10 from the last filled line down
-  (`menu::passengerLines`).
+  (`menu::passengerLines`). Their panel (HudSetupPlayerNames.con's
+  PlayerNames node) shows on VehiclePassengersShow (`+0x2b6`), which
+  `0x007a3064` sets each frame while the vehicle HUD's 5 s timer
+  (`+0x18` elapsed, `+0x1c` 5.0, `+0x20` running; `0x0079fdd0` adds the
+  frame first and stops past the limit) runs. Two things start it:
+  entering a seat (`0x007a3920` at `0x007a394e`, before the
+  displaySelectionOnEnter test) and game logic event 0/5,
+  ECGameLogicGLFailedToChangePosition (`0x007a3d70` at `0x007a3dd1`),
+  which the server's position keys (`0x004bda00`) send when they refuse
+  (`GameWorld::seatKey`, below). `0x007a3160` / `0x007a33ab` clear it off
+  a vehicle (`VehicleHud::showPassengers`; main.cpp runs `seatKey` on the
+  local position key against the HUD world's seats, so a joined client
+  gets it too).
+- **The position keys** (`0x004bda00`, `GameWorld::seatKey`), in order:
+  the current seat's `allowTogglePosition 0` ignores the key. The seat
+  already held or a busy primary firearm refuses it (event 0/5).
+  Next, retail checks the current seat's `ObjectTemplate.addPcoPosId` list
+  (`0x004be2ba` → slot `0x68`, `0x005c6820`, template `+0x3e4`).
+  The serializer at `0x005cb0a0` writes one `addPcoPosId` line per entry.
+  An empty list allows any position. A nonempty list silently ignores a
+  missing zero-based seat index, before the vehicle's seat lookup.
+  No `addPcoPosId` occurs in the installed vanilla or Project Remaster v17
+  Final object and level archives' `.con` or `.tweak` entries, so the
+  native rule omits this list. A key past the seats is also ignored.
+  A free seat that allows toggling is taken. Otherwise a bot asking is
+  ignored, a bot in the seat is swapped with the player
+  (`0x004be3db`–`0x004be47a`), and any other request is refused.
+  The shipped `allowTogglePosition 0` seats are the pod arrays
+  (titan_pod_array1/2 and their Wake forms, static_pod_array,
+  static_pod_array_gpk) and the Wake / playtest Titans' hulls.
+
+  **Primary firearm check.** `0x004b9e90` normally uses the controlled
+  object. For a non-soldier, control interface slot `0x148`
+  (`0x005c7fd0`) tests `+0x2c == 0`, live links at `+0x1c` and
+  `+0x20`, and Soldier class `0x9493` on the latter link's target.
+  On success, slot `0x14` (`0x0059e160`) returns that soldier and
+  `0x004b9ee0` checks its active group-zero weapon (PIFire, slot
+  `0x78(0)`). An ordinary child seat attached to a vehicle fails the
+  Soldier-class test. No authored Soldier child seat was identified in
+  either installation. Dynamically attached objects were not tested live.
+
+  The firearm's slot `0x174` (`0x005c11c0`) blocks for fire-component
+  states 1 through 3. The checked base and derived fire vtables share
+  slot `0xd8` → `0x005d5b90`, which reads `+0x150`.
+  For example, SingleFireComp's `+0x15c` write at `0x005d4e41`
+  stores a tick from `0x00666090`. A shot in state 4 does not block on
+  the fire check. The firearm's zoom component can block on the
+  off-server path. Native gameplay and HUD still use held primary input
+  as a stand-in. It can incorrectly refuse an unarmed seat or a gun
+  in state 4, and can miss a charge that persists after release.
+  A faithful replacement needs the active firearm's phase at the point
+  of the key press, including the state available to a joined client.
 - The weapon and vehicle HUDs read their template fields once per
   template (`WeaponHud::Fields`), not every frame.
 
@@ -8937,9 +9080,14 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   / `+0x108` / `+0x10c`, copied each frame by `0x007c1f10` from the
   block's `+0xb0` / `+0xb4` / `+0xb8`, the WeaponHud component's
   deviationFactor / maxVisualDeviation / minVisualDeviation, constructor
-  `0x006390e0`: 10, 1000, 0): the parts sit min + ceil(deviation x
-  factor) out from the centre, at most max (`menu::crosshairParts`; the
-  shipped values run min 2-15, max 23-75).
+  `0x006390e0`: 10, 1000, 0). `Cross*Pos` (`+0x130..+0x13c`, 20 long at
+  `+0x140`) sit the raw s = ceil(deviation x factor) out from the centre.
+  min + s, held at max, places only `Crosshair*Pos` (`+0x110..+0x11c`, 8
+  long at `+0xfc`), which no shipped HUD reads, so the shipped limits
+  (min 2-15, max 23-75) move nothing on screen. `CrossCircle*Pos`
+  (`+0x144..+0x150`, the machine-gun sights) also take s, the part 6 wide
+  (`+0x154`) and 8 out (`+0x158`, both set at `0x007bf43c`): Up 281 - s,
+  Right 408 + s, Down 302 + s, Left 386 - s (`menu::crosshairParts`).
 - **The commander screen** (the HUD manager's slot `0x234`): the weapon
   HUD's frame (`0x007c40c0`) then skips its update and clears its show
   flags (PrimaryAmmoShow `+0x15d`, the clips, the reload, the crosshair
@@ -9124,7 +9272,17 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   commands, slot 0x128) and stops after the crosshair's parts, so no name,
   icons or ammunition (PrimaryAmmoShow stays 0); the second weapon's
   `0x007c2d50` clears SecondaryAmmoShow (`+0x16d`) and stops
-  (`HudWeapon_ShowInfoOff`). vehicleHud.showInfo (`+0xfe`) stays inert.
+  (`HudWeapon_ShowInfoOff`).
+- **vehicleHud.showInfo** (template `+0xfe`, block `+0xb6`) selects
+  the vehicle panel when controlling a seat (`0x007a0d9c` and
+  `0x007a3c46`). The personal parachute sets it to 0 and sets
+  `useChildHud` to 1. Its own action icon uses `UsingParachute`
+  (`0x007a28e0`), set for a `Parachute` whose `isPod` is 0.
+- **CloseToAmmo** (`0x007a1c30` → `0x007a0760`) indicates a received
+  ammo stamp less than 15 ticks old and is suppressed on the frame
+  the player gets in or out of a vehicle. The kit's sound shares that
+  test. Joined own-state records carry the flag and weapon counts but
+  do not deliver the receipt tick.
 - **vehicleHud.useVehicleCameraRotation** (template `+0x108`, block
   `+0xc0`, getter slot 0xdc): the map node (`0x00793b60`, at `0x00794f03`)
   turns the object's icon by its first Camera child's yaw (`0x005c6430` →
@@ -9391,6 +9549,54 @@ second.
   16-pixel text row before the name (each advancing by its width, then 2
   pixels; the row centred), white, or the squad's colour for a squad
   member; not when glued to the edge.
+- **The network markers** (`0x10169a70`, technique `nametag_barIcons`,
+  drawn after the names, bars and icons): the red diamond
+  ICNetworkEnemySmallCircle `0xa3` over an enemy, ICNetworkFriendlySmallCircle
+  `0xa0` over a friend (`0x10169cdf`), at the icon point, in the tag's
+  colour. An enemy the squad's reports reveal gets one whatever its name's
+  alpha: the client's `0x00508590` calls the manager's slot `0x20`
+  (`0x100f2410`), which through `0x100f2080` sets tag flag `0x800000`
+  until the reveal time ends (swept every 0.5 s by `0x100f2140`). First it
+  looks for the reported soldier's decoy (HudManager slot `0x70`,
+  `0x00753ab0` → `0x0075bd30`: an enabled TargetObject of TTDecoy whose
+  player he is) and marks that (slot `0x1c`, `0x100f3d30`); within 60 m
+  across (`0x009248f0`) the soldier is then not marked. The decoy's tag
+  (flag `0x10000000`, `0x100f4280`) gets the diamond for an enemy owner
+  at its text point, red (an owned tag's colour is the owner's relation,
+  `0x100f4307`), faded over its Nametag range (`+0x48`, 60 m: full to a
+  third of it). An aimed-at player or a squad member
+  gets one only while its name shows (`0x100f392b`). Not on the
+  crosshair's selection (`+0xc4`), off view (`+0xc2`) or pulled to the
+  edge (`+0xc0`); faded by the player cull range only (`FadeOut`, 100 to
+  300 m). `GameWorld::squadReportedPlayers` / the joined client's
+  `RemoteWorld::squadReportedPlayers` (event `0x41` kind 0, no radio
+  spots) feed `nametags::networkMarker`; `GameWorld::decoyOf` finds the
+  decoy (the thrown `Bp1_Decoy_Projectile` carrying `DecoyObject`); the
+  minimap's decoy stand-in uses it too (`menu::radarMarkers`). An enemy
+  decoy aimed at (in the aim cone and in sight) gets the marker while its
+  own tag shows (showItem, alpha 1 − d / 60, `0x100f1330`). The marker
+  blinks (`CrossFadeValue`, `0x10169fb4`) towards its second colour
+  (`ColorIndex2`, `0x1016a113`): white with a call's icon, the highlight
+  after the player's radio line (`0x0042bef0` kind 3, a player's message →
+  local 2/`0x41` ECHudHEFireFlashStart → `0x100f1abe`: tag `+0x68` = 4,
+  the call timer 12 s; `Nametags::radioFlash`, which blinks the name too).
+  After the markers, `0x101691c0` draws over the same tags one icon height
+  above the text point: with a squad member's `networkableHudShowKit`
+  (ability `+0x10`, the squad's walk; the player alone without a squad) the
+  kit's ICObject + KitType on foot, with `networkableHudShowVehicle`
+  (`+0x11`) the vehicle's icon aboard (`GameWorld::squadNetworkHud`,
+  `nametags::networkSquadIcon`). A kind-1 report reveals too (`0x00508590`
+  calls slot `0x20` for any kind, the enemy flag clear; `0x100f2080` sets
+  the end to now + its seconds, even if sooner): a squad bot's firing
+  report (AIDLL `0x1009a1d0` 30 s on firing, `0x1009a2a0` 3 s on release)
+  and a cloak's for a `networkableHudShowCloaked` squad
+  (`GameWorld::m_tagReveals`, not the minimap). The diamond skips a cloaked
+  player (vt+0x114, `0x10169c13`) but the kit pass doesn't, so a revealed
+  cloaked enemy shows his kit icon; the port keeps a cloaked player's name
+  hidden (retail's name pass has no cloak test; what hides it there isn't
+  traced). Not ported: the decoy's bounding-radius raise, and decoys and
+  the squad's unlocks on a joined client (its rounds carry no thrower, its
+  players no abilities).
 - **The players' icons** (the selectable pass `0x1016a950`, same team,
   selectable, the first occupant of a vehicle `0x100f33c0`): setup initially
   clears show-icon bit `0x10` (`0x100f3e70`), then player-tag refresh
@@ -10138,25 +10344,28 @@ the AA and AT launchers, the walkers' and gunships' guided guns; template
 ticks at `+0x90`), `loseLockDelay` `+0x94` (0.2, ticks `+0x98`)). The
 default component (runtime `0x005e1a70`, interface vtable `0x009733a8`)
 updates in slot 6 (`0x005e1b30`) for TSHeatSeeking and TSLaserGuided
-while the weapon is one of its holder's three in use: the candidate
-(game logic slot `0x1c8`, `0x004cf290`) is the nearest registered target
-object of the round's `seek.targetType` (not the system's), alive, not
-under the shooter's root and not in a root occupied by his team (an empty
-vehicle of either side counts), within min(maxDistance, the round's
-`seek.maxDistLock`) and lockAngle of the direction (the camera's with
-`target.useCameraDirectionToTarget` `+0x7d`, else the weapon's), in
-sight; with the candidate the target, a loss in progress ends; unlocked,
-the target becomes the candidate at once and its clock restarts; locked
-and another (or none), after more than loseLockDelay ticks the candidate
-replaces it unlocked; locked once the tick passes the target's start +
-lockDelay ticks. The shot (`0x005e1ee0`) gives the round the target only
-when locked. The heat and laser rounds (SeekClosestTargetComp, template
+while the weapon is one of its holder's three in use. The query (game
+logic slot `0x1c8`, `0x004cf290`) selects the nearest active registered
+target of the round's `seek.targetType` outside the shooter's root. It
+rejects control objects on the shooter's team (`0x004cf337`–`0x004cf38b`). A vehicle
+takes the team of its first occupied seat, or uses its own team when
+empty (`0x005c9500`). The candidate must be visible and within
+min(`target.maxDistance`, `seek.maxDistLock`) and `target.lockAngle`.
+The angle is measured from the weapon's forward direction, or from the
+camera's if `target.useCameraDirectionToTarget` (`+0x7d`) is set.
+A new candidate must persist beyond `lockDelay` ticks to lock. A held
+lock tolerates an absent or different candidate for `loseLockDelay`
+ticks. Reacquiring the held target cancels that timer. The shot
+(`0x005e1ee0`) gives the round the target only when locked. The heat and
+laser rounds (SeekClosestTargetComp, template
 `0x9540`, ctor `0x005ec300`: maxAngleLock 45°, maxDistLock 9999,
 distLoseLock 0, `seek.reLockTime` `+0x28` / ticks `+0x2c`) home from
 `seek.trackingDelay` on (`0x005ec260`): a destroyed target dropped, the
-nearest candidate from the round along its heading (none: with
-distLoseLock, asked again out to it and the target kept only if found);
-with reLockTime 0, nothing found, the relock flag clear or the target
+nearest candidate from the round along its heading (with
+`seek.ignoreFriendly` the round passes its team as a fallback for the same
+team filter, `0x005ebf0a`–`0x005ebf57`). With no candidate and
+`distLoseLock` set, it queries again at that range to check the held target.
+With reLockTime 0, nothing found, the relock flag clear or the target
 alive it takes the candidate at once, else only once the same one has
 lasted more than reLockTime ticks, clearing the flag the shot set
 (`0x005b2e70`, `0x005ebea0`); DefaultFollowComp turns it
@@ -10659,8 +10868,9 @@ keep their own one-per-owner paths).
   weaponTemplate.fireRate / shouldRearm / isAntiAirWeapon (the exe's AI
   weapon record `0x0088a7b0`: `+0x10` −1, `+0x70` 1, `+0x71` 0; getters
   `0x00892500`, `0x00892720`, `0x00892740`) aren't read by AIDLL's weapon
-  choice (`0x10074ef0`); isAntiAirWeapon is read by the AI interface's
-  slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
+  choice (`0x10074ef0`); fireRate is read by BBPHeliFire3d's trigger
+  (`0x1007ec50`, slot 0xc8: the pilot's tap timer, none at −1);
+  isAntiAirWeapon is read by the AI interface's slot 39 (`0x008a57b0`). AITemplatePlugIn.setUseNoPathfindingToGetToObject
   (Unit plug-in `+0x15`, executor `0x00884eaf`; 1 on the bipods and the
   ATs) is read by AIDLL through the unit adaptor's slot 0x38
   (`0x008a1d10`; AIDLL `0x100aa570`) in the vehicle choice `0x1006c520`,
@@ -11210,20 +11420,22 @@ choice goes to the server when the soldier spawns or the menu closes
 containers to `GameWorld::setUnlocks` then, and the heavy armour picks the
 kit's heavy soldier.
 
-The unlock screen (`UnlockInterface`, `0x007b8e60`-`0x007b9a20`) spends
-field unlocks: points a server grants during a round (player `+0x2d0`)
-that raise a kit's branch for the round (`+0x2d4`; the server's
-`0x004baaf0`, for UB_Player and UB_SquadLeader all four kits).
-`showUnlockInterface 1` opens it only with points (`0x007b95a0`), so
-offline it never opens; its branches' variables (`0x0044a130`) are kept:
-`Kit%iBranch%iUnlockLevel` and `MaxUnlockLevel` (eighths), `Alpha` (0.2
-once the branch is full), `NextUnlockIconPathString`,
-`NextUnlockNameString`, `NextUnlockShow`, `LargePicShow`;
-`setInformationString` / `resetInformationString` (`UnlockInfoString`,
-`UnlockInfoPic`, `HUD_TEXT_MENU_FU_DEFAULT_TEXT`) and `setFieldUnlock`
-(`Kit%iBranch%iSelected`) too. `selectNextUnlock` / `selectUnlockItem`
-(`0x007b8f30`, `0x007b92c0`) make an unlock the soldier has its branch's
-choice.
+The unlock screen (`UnlockInterface`, `0x007b8e60`–`0x007b9a20`)
+spends credits earned in the current round. The scoring script sets a
+squad's threshold and adds points through `Player.setMaxOrderPoint` and
+`Player.setOrderPoint` (`0x005920c0` and `0x00592030`).
+`GameWorld` tracks progress by team and squad. At the threshold the
+`SquadBarFilled` hook in the shipped stats script grants each member
+a credit, and the meter resets (`0x004c4c90` / `0x004c4dd0`).
+
+The Field Upgrade tab opens when there are credits (`0x007b95a0`).
+A spend advances the selected branch for both factions. UB_Player and
+UB_SquadLeader apply across the four classes (`0x004baaf0`). Temporary
+ownership feeds the existing customization grid and kit build, and
+expires on round reset. Hosted clients receive squad progress via
+PostRemote category 2, id `0x56`, and use the FieldUnlock, Unlock and
+SelectKit events to spend and equip. The host validates ownership when
+accepting loadout choices.
 
 ### The kit and vehicle sweep (2026-11-12)
 
@@ -11379,8 +11591,12 @@ Since then (the same day):
   with the map about the centre (`0x0077c610`; `0x0077d660` adds +0x80c
   to the icons' angles), so it sits where its place went and keeps its
   heading on the map: the player's arrow points up. `mapWorldAt` turns a
-  point back first. The rewrite's sizes change at once, so it is always
-  settled.
+  point back using the same angle as the rendered frame. The spawn,
+  M-key and commander entries set the north-target flag through
+  `0x0077eea0` and clear the settled-turn flag. While the map is small,
+  its turn targets zero. The resize begins once the angle settles
+  (`0x0078fd8e`), then position and size ease toward the authored
+  rectangle by `1 - exp(-6 dt)`.
 - **The audio page's RESET TO DEFAULT applies** (`MenuBindings_AudioResetApplies`):
   AudioSettings.reset (`0x10010a60`) is the object's reset (slot 0x24)
   and then what its apply (`0x10010bd0`) does: with canApply (slot 0x1c)
@@ -13157,11 +13373,25 @@ and takes the largest `minTimeBetweenActivation`.
   (`GameWorld::uavDrone`); the events aren't raised.
 - **Supply drop** (`0x0043d6d0`): every `SupplyDrop-Reload-Time` (60 s,
   less 0.1) per team, without an asset. `0x0043d510` creates a
-  `supply_crate` at the ground's height plus `gameLogic.supplyDropHeight`
-  (50; game logic `+0x1b8`, slots `0x240`/`0x244`, console `0x00425fcc`).
-  `0x0043d880` removes it after `supplyDropNumSecsToLive` (300; `+0x1bc`,
+  `supply_crate` at the highest of terrain, water and the object hit by a
+  downward ray from y=500 to y=0 (`0x006f2d20`), plus
+  `gameLogic.supplyDropHeight` (50; game logic `+0x1b8`, slots
+  `0x240`/`0x244`, console `0x00425fcc`).
+  `0x0043d880` removes it `supplyDropNumSecsToLive` (300; `+0x1bc`,
   `0x004260db`; both GameLogic properties, handed to the round's
-  `CommanderSettings`). The
+  `CommanderSettings`) after it landed: `0x0043d9c0` keeps the landing
+  time (`0x0043d820`) as it takes the parachute away. A crate meeting a
+  PlayerControlObject its spawner made under 3 s ago (`0x0043ce80`: the
+  time `0x005aeb80` stamps through interface `0xc4c5` slot `0xb8`, read by
+  slot `0xbc`; `*0x00920bc0` = 3) is removed instead (`0x0043d7c0`).
+  Landing changes nothing else: the crate stays a mobile body (its
+  landed byte `+0x198` only goes to the clients, `0x005fdf60` /
+  `0x005fe980` → `0x005ffec0` → `0x005d0830`).
+  The native host sends that bit (`SimpleObject` mask `0x20000`) and the
+  joined client disables the canopy subtree. Native crates use their team
+  for the Titan shield filter so friendly drops can reach the deck.
+  `GameWorld::supplyObjectContact`.
+  The
   crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
   (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles
   (`workOnVehicles`), within its radius (5) plus their own (`0x005d0e80`)
@@ -13880,12 +14110,16 @@ level, a change of icon blinking the tag (`TitanInfo` /
 **Missile silos** (`isMissileSilo`, missile_silo_v2): the auto controller
 CP_CANNON (AI/AutoControllers.ai: fov 179, viewDistance 2000,
 reloadOnTeamChange) with the weapon AI missile_silo_Weapon (10–2000 m,
-Titans only). A silo held by a team, loaded and in range fires at the enemy
-Titan; the missile leaves `fire.fireLaunchDelay` (1 s) later straight up (the
-barrel, Missile_Silo_Barrel, turns on its own to its limit: setMinRotation
-0/−90/0, setAcceleration 0/−50/0, startAutoRotateOnEnter) at `velocity`
-(4); the magazine (1) refills `ammo.reloadTime` (120 s) later, and a change
-of hands starts the reload over. The missile (msilo_missile): from
+Titans only). Changing teams resets the reload state while preserving the
+round in a full magazine (PCO team setter `0x005cc320` → AIDLL `0x1004c2a0`
+→ DefaultAmmoComp `0x005f3a40`). The controller inhibits the trigger for
+5 s (AIDLL `0x10096970`, read by `0x1008ecd0` / `0x1008f1e0`) and
+repeats the reload reset during that time (`0x1009a6d5`). After that
+an empty magazine reloads in `ammo.reloadTime` (120 s). A loaded silo
+with a target triggers without that reload. Its base slews towards the
+enemy Titan using the authored yaw axis and the barrel auto-rotates to its
+upright limit. After `fire.fireLaunchDelay` (1 s), the missile leaves the
+posed muzzle at the firearm's velocity (4 m/s). The missile (msilo_missile): from
 `startDelay` (2.5 s) its `acceleration` (10) pushes it to `maxSpeed` (80);
 from seek.trackingDelay (3 s) it turns towards the locked Titan's middle
 (FixedTargetComp TTBeacon; DefaultFollowComp's follow.maxYaw 4 degrees a
@@ -14031,8 +14265,10 @@ retail has it.
 (a console destroyed) and 0Show (the Titan gone); the variables are the HUD
 manager's (`0x0044f1a0`). The silos' row is set each frame by `0x0044c350`:
 the ten slots' CPCannon%iShow (HUD `+0xdb`..) are cleared, then each object
-of class 10 whose first ancestor with a `+0x64` gives an index 1..9 (slot
-`0x38`: the silo's control point) shows in slot index − 1, with
+of class 10 whose first ancestor with a `+0x64` gives a silo number 1..9
+(getter slot `0x38`, assigned by count through setter slot `0x44` at
+`0x004d18a5`) shows in slot number − 1. The native HUD uses
+`SiloInfo::number`, shared with the numbered minimap icons, with
 CPCannon%iTeam (`+0xe8`) 1 for the player's team, 2 for the enemy's and 0
 neutral (the object's team, component `0xc4c5` slot `0x9c`, against the
 local player's slot `0xf8`), and CPCannon%iString (`+0x110`) the time to
@@ -17291,9 +17527,16 @@ commander's EMP strike firearm. The rewrite does this in
 `ObjectEffects::groundTrigger` with the ground probe, which gives no
 normal, so the effect stands upright and faces the bundle's forward.
 Event 0 itself is done too: GameWorld lists each vehicle weapon that
-fired a round (`takeObjectWeaponFires`), and ObjectEffects starts that
-weapon's child bundles whose startOnEffects is 0 (`0x0061a4e0`: the
-muzzle flash and smoke). Each round starts them again unless the bundle is
+fired a round (`takeObjectWeaponFires`), and ObjectEffects starts the
+bundles under that weapon whose startOnEffects is 0 (`0x0061a4e0`: the
+muzzle flash and smoke). FireComp's list is the weapon's own children
+(`0x005f25f0`, from MultiFireComp's init `0x005d7200`), and every object
+passes an event on to its children (`0x0063ca60`), so the bundles under a
+barrel Bundle start too: every walker gun of both sides, the FAV's MG,
+the APCs' EMP launchers, the IFV's main gun and laser launcher, the hover
+tank's driver gun and gunner launcher, the gunships' pilot guns, both
+stationary AA guns and the Titan ground cannon's barrels (until November
+2026 those stayed dark). Each round starts them again unless the bundle is
 depth-gated and still running. It also sets off the ground bundles there.
 Before this, vehicle guns showed no muzzle effects. The fire's sender is
 FireComp's fire (`0x005f31d0`): after the batch it sends event 0 (slot

@@ -673,7 +673,7 @@ TEST(HudWeapon_AmmoClipsAndHeat)
 }
 
 // The item selection (0x0079c290, 0x0079be20, 0x0079c050): packed from slot
-// 0 by item index (reversed with ItemSelection.setReverseItems), the item
+// 0 upwards in descending item-index order by default, the item
 // in hand selected, closed when the timer runs out.
 TEST(HudItemSelection_SlotsAndTimer)
 {
@@ -681,23 +681,61 @@ TEST(HudItemSelection_SlotsAndTimer)
 	Console console;
 	menu::ItemSelection items;
 	items.bind(console);
-	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {5, "", false}}, 3);
+	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {8, "", false}}, 3);
 	items.update(hud, 0.1f);
 	CHECK(hud.number("ShowItemSelect") == 1 && hud.number("ItemSelectActive") == 1);
-	CHECK(hud.string("Item0Index") == "1" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot2Alpha") == 0.4f);
-	CHECK(hud.number("ItemSlot3Active") == 0);
+	CHECK(hud.string("Item0Index") == "8" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot0Alpha") == 0.4f);
+	CHECK(hud.string("Item2Index") == "1" && hud.number("ItemSlot3Active") == 0);
 	items.update(hud, 2.0f);
 	CHECK(hud.number("ShowItemSelect") == 0);
 	std::string out;
-	console.execute("ItemSelection.setReverseItems 1", out);
+	console.execute("ItemSelection.setReverseItems 0", out);
 	items.open({{1, "knife.tga"}, {3, "rifle.tga"}}, 1);
 	items.update(hud, 0);
-	CHECK(hud.string("Item0Index") == "3" && hud.number("ItemSelectActive") == 1);
+	CHECK(hud.string("Item0Index") == "1" && hud.number("ItemSelectActive") == 0);
 }
 
 // The vehicle HUD's seat dots (0x007a28e0, BfOccupiedVehicleNode
 // 0x007e1520), its texts, and the map's vehicle markers (0x00781680,
 // 0x00793b60, 0x0077dd70).
+// The position keys' outcomes (0x004bda00): a refusal is what shows the
+// passengers' names (event 0/5).
+TEST(HudVehicle_PositionKeyOutcomes)
+{
+	using game::GameWorld;
+	const auto outcome = [](auto edit) {
+		GameWorld::SeatKeyInput in;
+		in.current = 0;
+		in.wanted = 1;
+		in.seats = 3;
+		edit(in);
+		return GameWorld::seatKey(in);
+	};
+	CHECK(outcome([](auto&) {}) == GameWorld::SeatKey::Move);
+	CHECK(outcome([](auto& in) { in.wanted = 0; }) == GameWorld::SeatKey::Refused);   // own seat
+	CHECK(outcome([](auto& in) { in.firing = true; }) == GameWorld::SeatKey::Refused); // mid-shot
+	CHECK(outcome([](auto& in) { in.occupant = 7; }) == GameWorld::SeatKey::Refused);  // a human there
+	CHECK(outcome([](auto& in) {
+		in.occupant = 7;
+		in.occupantAi = true;
+	}) == GameWorld::SeatKey::Swap);
+	CHECK(outcome([](auto& in) {
+		in.occupant = 7;
+		in.occupantAi = in.requesterAi = true;
+	}) == GameWorld::SeatKey::Ignored);
+	CHECK(outcome([](auto& in) { in.wanted = 5; }) == GameWorld::SeatKey::Ignored); // no such seat
+	CHECK(outcome([](auto& in) { in.wantedToggles = false; }) == GameWorld::SeatKey::Refused); // a pod array
+	CHECK(outcome([](auto& in) {
+		in.wantedToggles = false;
+		in.occupant = 7;
+		in.occupantAi = true;
+	}) == GameWorld::SeatKey::Swap);
+	CHECK(outcome([](auto& in) {
+		in.currentToggles = false;
+		in.wanted = 0;
+	}) == GameWorld::SeatKey::Ignored); // sitting in one: the key does nothing
+}
+
 TEST(HudVehicle_SeatsAndMarkers)
 {
 	CHECK(menu::seatDotState(false, false, 0, 0, true) == 4);
@@ -782,6 +820,32 @@ TEST(HudVehicle_PassengersAndScoreboardSquads)
 	vehicleHud.update(hudManager, in);
 	CHECK(hudManager.number("OccupyingPlayerName2Show") == 1 && hudManager.string("OccupyingPlayerName2String") == "1. Driver");
 	CHECK(hudManager.number("OccupyingPlayerName3Show") == 0);
+	// Their panel (VehiclePassengersShow, 0x007a3064) shows only while the
+	// 5 s timer (0x0079fdd0) runs: started by entering a seat or a refused
+	// position key, restarted by another, stopped by leaving the vehicle.
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	in.seconds = 0.1f;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	vehicleHud.showPassengers();
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 1);
+	in.seconds = 4.8f;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 1);
+	vehicleHud.showPassengers();
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 1);
+	in.seconds = 0.3f;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	vehicleHud.showPassengers();
+	vehicleHud.update(hudManager, in);
+	vehicleHud.clear(hudManager);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	in.seconds = 0;
 	// The heavy IFV's repair cells (0x007a1e50): cell n at +0x336 + n,
 	// RepairCell(n+1)Active (RepairCell0Active, +0x335, is never set).
 	hudManager.set("RepairCell0Active", 7);
@@ -841,6 +905,36 @@ TEST(HudWeapon_RangeFinderAndSecondary)
 	menu::WeaponHud second;
 	second.update(hudManager, in, true);
 	CHECK(hudManager.string("SecondaryAmmoString") == "10" && hudManager.string("TotSecondaryAmmoString") == "/ 40");
+}
+
+TEST(HudWeapon_RangeFinderDefaultsOn)
+{
+	world::ObjectTemplate rifle(1, "GenericFireArm", "rifle", 1);
+	hud::HudManager hudManager(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.weapon = &rifle;
+	in.rangeHit = true;
+	in.targetDistance = 14;
+	CHECK(!menu::weaponHasRangeFinder(nullptr));
+	CHECK(menu::weaponHasRangeFinder(&rifle));
+	hudManager.setString("TargetDistanceString", "196");
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "14");
+
+	world::ObjectTemplate launcher(1, "GenericFireArm", "launcher", 2);
+	launcher.settings()["weaponHud.hasDistanceCounter"] = "1";
+	in.weapon = &launcher;
+	in.travelled = 37;
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "37");
+
+	world::ObjectTemplate disabled(1, "GenericFireArm", "disabled", 3);
+	disabled.settings()["weaponHud.hasRangeFinder"] = "0";
+	CHECK(!menu::weaponHasRangeFinder(&disabled));
+	in.weapon = &disabled;
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "37");
 }
 
 // The Titan silos' map icons (miniMapInfo "all", 0x00636220; the layers of
@@ -1208,24 +1302,33 @@ TEST(RadioSpam_GameTimerAndSilentSpot)
 	CHECK(!gate.message(false, tell));
 }
 
-// The crosshair's parts (0x007be770): the spread by deviationFactor, pushed
-// out by minVisualDeviation and held at maxVisualDeviation.
+// The crosshair's parts (0x007be770): the raw spread by deviationFactor;
+// min/maxVisualDeviation clamp only the unread Crosshair*Pos.
 TEST(HudWeapon_CrosshairVisualDeviation)
 {
-	auto parts = menu::crosshairParts(1.5f, 10, 0, 1000);
+	auto parts = menu::crosshairParts(1.5f, 10);
 	CHECK(parts.offset == 15 && parts.right == 415 && parts.left == 364 && parts.up == 265 && parts.down == 316);
-	parts = menu::crosshairParts(1.5f, 10, 3, 1000);
-	CHECK(parts.offset == 18 && parts.right == 418 && parts.down == 319);
-	parts = menu::crosshairParts(4.0f, 10, 3, 23);
-	CHECK(parts.offset == 23 && parts.right == 423 && parts.left == 356 && parts.up == 257 && parts.down == 324);
-	// The template's fields, with the constructor's defaults (0x006390e0).
+	parts = menu::crosshairParts(4.0f, 10);
+	CHECK(parts.offset == 40 && parts.right == 440 && parts.left == 339 && parts.up == 240 && parts.down == 341);
+	// The template's deviationFactor; the visual limits move nothing.
 	world::ObjectTemplate rifle(1, "GenericFireArm", "rifle", 1);
 	CHECK(menu::crosshairParts(0.21f, &rifle).offset == 3);
 	rifle.settings()["weaponHud.deviationFactor"] = "20";
 	rifle.settings()["weaponHud.minVisualDeviation"] = "15";
-	rifle.settings()["weaponHud.maxVisualDeviation"] = "75";
-	CHECK(menu::crosshairParts(1.0f, &rifle).offset == 35);
-	CHECK(menu::crosshairParts(9.0f, &rifle).offset == 75);
+	rifle.settings()["weaponHud.maxVisualDeviation"] = "23";
+	CHECK(menu::crosshairParts(0.5f, &rifle).offset == 10);
+	CHECK(menu::crosshairParts(9.0f, &rifle).offset == 180);
+	// The machine guns' circle parts take the raw spread, past the clamp.
+	parts = menu::crosshairParts(1.5f, 10);
+	CHECK(parts.circleUp == 266 && parts.circleRight == 423 && parts.circleDown == 317 && parts.circleLeft == 371);
+	// Set on the HUD with the weapon's deviation: an LMG's tightens as it fires.
+	hud::HudManager hudManager(nullptr);
+	world::ObjectTemplate mg(2, "GenericFireArm", "eu_mg", 1);
+	menu::updateSoldierWeaponHud(hudManager, &mg, 2.0f, false, false, true);
+	CHECK(hudManager.number("CrossCircleLeftPos") == 366 && hudManager.number("CrossCircleRightPos") == 428);
+	menu::updateSoldierWeaponHud(hudManager, &mg, 0.5f, false, false, true);
+	CHECK(hudManager.number("CrossCircleLeftPos") == 381 && hudManager.number("CrossCircleRightPos") == 413
+		&& hudManager.number("CrossCircleDownPos") == 307 && hudManager.number("CrossCircleUpPos") == 276);
 }
 
 // The Titans' consoles and shields on the HUD (0x0044b680 case 0x32,
@@ -1520,9 +1623,11 @@ struct RadarWorld : host::HudWorld {
 
 } // namespace
 
-// The squad radar's markers (menu::radarMarkers): a decoy within 60 m of an
-// enemy on foot shows instead of him (0x00508590), one in a vehicle stays
-// where he is; the reports' vehicles by their miniMapIcon (0x00790d60).
+// The squad radar's markers (menu::radarMarkers): an enemy on foot's own
+// decoy (the round he threw carrying a TargetObject of TTDecoy) within 60 m
+// shows instead of him (0x00508590, 0x0075bd30 matching its player); one in
+// a vehicle stays where he is, as does one near another's decoy; the
+// reports' vehicles by their miniMapIcon (0x00790d60).
 TEST(HudRadar_DecoyAndVehicleMarkers)
 {
 	world::ObjectTemplateManager templates;
@@ -1530,41 +1635,47 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	game::GameWorld round(templates, objects);
 	templates.registerType(1, "TargetObject");
 	templates.registerType(2, "PlayerControlObject");
-	world::ObjectTemplate* decoyTemplate = templates.create("TargetObject", "Bp1_Decoy");
+	templates.registerType(3, "GenericProjectile");
+	world::ObjectTemplate* decoyTemplate = templates.create("TargetObject", "DecoyObject");
 	decoyTemplate->settings()["targetType"] = "TTDecoy";
+	templates.create("GenericProjectile", "Bp1_Decoy_Projectile")->children().push_back({"DecoyObject", {}, {}});
 	world::ObjectTemplate* tank = templates.create("PlayerControlObject", "tank");
 	tank->settings()["vehicleHud.miniMapIcon"] = "Ingame/mini_tank.tga";
-	objects.create(decoyTemplate, {40, 0, 10});
 	const uint32_t car = objects.create(tank, {100, 0, 100})->id();
 	objects.find(car)->setRotation({135, 0, 0});
+	const int thrower = round.addPlayer("Thrower", 2, false);
+	const int far = round.addPlayer("Far", 2, false);
+	const int other = round.addPlayer("Other", 2, false);
+	CHECK(round.launchProjectile("Bp1_Decoy_Projectile", {40, 0, 10}, {0, 0, 0}, thrower));
+	CHECK(round.launchProjectile("Bp1_Decoy_Projectile", {40, 0, 10}, {0, 0, 0}, far));
 	RadarWorld world;
 	game::GameWorld::PlayerInfo onFoot;
-	onFoot.id = 5;
+	onFoot.id = thrower;
 	onFoot.alive = true;
 	onFoot.position = {10, 0, 10};
 	onFoot.yaw = 90;
 	game::GameWorld::PlayerInfo riding = onFoot;
-	riding.id = 6;
+	riding.id = 60;
 	riding.vehicle = car;
 	riding.position = {20, 0, 10};
-	game::GameWorld::PlayerInfo far = onFoot;
-	far.id = 7;
-	far.position = {-200, 0, 10};
-	far.yaw = -45;
-	world.players = {onFoot, riding, far};
-	auto markers = menu::radarMarkers(world, round, {5, 6, 7});
-	CHECK(markers.size() == 3);
-	if (markers.size() == 3) {
-		CHECK(markers[0].x == 40 && markers[0].z == 10); // at the decoy
+	game::GameWorld::PlayerInfo farAway = onFoot;
+	farAway.id = far;
+	farAway.position = {-200, 0, 10};
+	farAway.yaw = -45;
+	game::GameWorld::PlayerInfo near = onFoot;
+	near.id = other;
+	near.position = {30, 0, 10};
+	world.players = {onFoot, riding, farAway, near};
+	auto markers = menu::radarMarkers(world, round, {thrower, 60, far, other});
+	CHECK(markers.size() == 4);
+	if (markers.size() == 4) {
+		CHECK(markers[0].x == 40 && markers[0].z == 10); // at his decoy
 		CHECK(markers[1].x == 20 && markers[1].z == 10); // in a vehicle: his own place
-		CHECK(markers[2].x == -200);                     // too far from it
+		CHECK(markers[2].x == -200);                     // too far from his
+		CHECK(markers[3].x == 30);                       // the decoys aren't his
 		CHECK(markers[0].texture == "Ingame/Player/Icons/Minimap/mini_Soldier.dds" && markers[0].size == 16);
 		CHECK(markers[0].yaw == 90 && markers[2].yaw == -45);
 	}
-	// Without a decoy template's targetType the enemy is where he is.
-	decoyTemplate->settings()["targetType"] = "TTHeat";
-	markers = menu::radarMarkers(world, round, {5});
-	CHECK(markers.size() == 1 && markers[0].x == 10);
 	// The reports' vehicle.
 	world.vehicles = {car};
 	markers = menu::radarMarkers(world, round, {});
@@ -1591,6 +1702,42 @@ TEST(HudVehicle_HorizonAndClimb)
 	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
 	vehicleHud.update(hud, in); // retail's "easing" assigns both terms: no accumulation
 	CHECK(std::fabs(hud.number("VehicleElevationSpeedAngle") - 36.0f) < 1e-2f);
+}
+
+// The revive calls of a soldier that is down (0x00587b90, 0x00585df0): 0x37
+// as he goes down with no call made, 0x36 for each fresh fire press while
+// down, while fewer than 3 calls are made (the automatic one counts); none
+// where this game doesn't say his calls; a revive (event 0x19) or a new
+// soldier counts again.
+TEST(Radio_ReviveCalls)
+{
+	// Down, PlayerInfo::soldier reads 0 (the player isn't alive): the
+	// soldier seen before is the one calling.
+	menu::ReviveCalls calls;
+	CHECK(calls.step(1, 10, false, false, true) == 0);
+	CHECK(calls.step(1, 0, true, true, true) == 0x37); // goes down holding fire: the automatic call
+	CHECK(calls.step(1, 0, true, true, true) == 0);    // still held: no fresh press
+	CHECK(calls.step(1, 0, true, false, true) == 0);
+	int manual = 0;
+	for (int i = 0; i < 5; ++i) {
+		manual += calls.step(1, 0, true, true, true) == 0x36;
+		calls.step(1, 0, true, false, true);
+	}
+	CHECK(manual == 2); // +0x330 < 3 with the automatic call counted
+	calls.step(1, 10, false, false, true); // revived: +0x330 cleared
+	CHECK(calls.step(1, 0, true, false, true) == 0x37); // down again: the automatic call again
+	manual = 0;
+	for (int i = 0; i < 5; ++i) {
+		manual += calls.step(1, 0, true, true, true) == 0x36;
+		calls.step(1, 0, true, false, true);
+	}
+	CHECK(manual == 2);
+	calls.step(1, 0, false, false, true); // dead
+	CHECK(calls.step(1, 11, false, false, true) == 0); // a new soldier
+	CHECK(calls.step(1, 0, true, false, true) == 0x37);
+	CHECK(calls.step(2, 20, false, false, false) == 0); // another game's player
+	CHECK(calls.step(2, 20, true, true, false) == 0);
+	CHECK(calls.step(3, 0, true, false, true) == 0); // no soldier
 }
 
 // The map's radio call markers (menu::MapCalls; 0x007918d0 case
@@ -1661,6 +1808,13 @@ TEST(HudMap_TeammateMarkers)
 	CHECK(m.texture == "Ingame/Player/Icons/Minimap/mini_Soldier.tga" && m.size == 16 && m.yaw == 30 && !m.arrow);
 	CHECK(std::fabs(m.color[0] - 0.254f) < 1e-6f && std::fabs(m.color[1] - 0.552f) < 1e-6f && std::fabs(m.color[2] - 0.89f) < 1e-6f);
 	CHECK(m.iconAlpha && !m.disc);
+	CHECK(m.drawn);
+	// Seated (a vehicle's control object): not drawn, unless his call shows.
+	menu::MateInput seated;
+	seated.onFoot = false;
+	CHECK(!menu::mateMarker(seated).drawn);
+	seated.call = "Ingame/Player/Icons/Minimap/mini_Medic.tga";
+	CHECK(menu::mateMarker(seated).drawn);
 	in.squad = 3;
 	in.localSquad = 3;
 	m = menu::mateMarker(in);
@@ -1825,7 +1979,7 @@ TEST(HudItemSelection_SeatLists)
 	CHECK(items.size() == 2 && items[0].index == 2 && items[1].index == 3 && !items[1].usable);
 	seat.weapons.erase(seat.weapons.begin());
 	seat.weapons[0].group = seat.weapons[1].group = 2;
-	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}});
+	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}, {9, "ParachuteLauncher"}});
 	CHECK(items.size() == 2 && items[0].index == 3 && items[0].icon == "gun.tga" && items[1].index == 1);
 }
 
@@ -1844,15 +1998,14 @@ TEST(HudItemSelection_MouseWheel)
 	pass.inHand = 3;
 	bool fire = false;
 	int item = 0;
-	// Opened on the rifle (3); the next, 4, isn't usable: the first.
+	// Display slots run bottom to top, from item 5 down to item 1.
 	CHECK(pass.apply(list, fire, item, 1, 10.0) == "weaponOver");
-	CHECK(list.shown() && list.selectedItem() == 1);
-	CHECK(list.next() && list.selectedItem() == 2);
-	CHECK(list.previous() && list.selectedItem() == 1);
-	CHECK(list.previous() && list.selectedItem() == 5); // from the first: the last
-	CHECK(list.previous() && list.selectedItem() == 5); // the previous (4) unusable: the last again
-	CHECK(list.next() && list.selectedItem() == 1);     // past the end: the first
-	CHECK(list.next() && list.selectedItem() == 2);
+	CHECK(list.shown() && list.selectedItem() == 2);
+	CHECK(list.next() && list.selectedItem() == 1);
+	CHECK(list.next() && list.selectedItem() == 5);     // wraps to the first slot
+	CHECK(list.next() && list.selectedItem() == 5);     // item 4 is unusable
+	CHECK(list.previous() && list.selectedItem() == 1); // wraps to the last slot
+	CHECK(list.previous() && list.selectedItem() == 2);
 	// The pick: fire takes the selected item's key and is cleared.
 	fire = true;
 	item = 0;
@@ -1876,9 +2029,9 @@ TEST(HudItemSelection_MouseWheel)
 	CHECK(!list.shown());
 	// A step down from the item in hand: the previous usable one.
 	pass.allowed = true;
-	pass.inHand = 3;
+	pass.inHand = 2;
 	CHECK(pass.apply(list, fire, item, -1, 12.0) == "weaponOver");
-	CHECK(list.shown() && list.selectedItem() == 2);
+	CHECK(list.shown() && list.selectedItem() == 3);
 }
 
 // minimumSquadSizeForSelection (0x005c3080, the firearm's slot 0x188): too
@@ -2055,6 +2208,55 @@ TEST(HudVehicle_SelectionOnEnterGate)
 	CHECK(!menu::displaySelectionOnEnter(chute, chute));
 	CHECK(menu::displaySelectionOnEnter(pod, pod));
 	CHECK(!menu::displaySelectionOnEnter(tank, tank));
+}
+
+TEST(HudVehicle_PersonalParachuteActionIcon)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "Parachute");
+	auto* chute = templates.create("Parachute", "parachute");
+	chute->settings()["vehicleHud.showInfo"] = "0";
+	auto* pod = templates.create("Parachute", "pod");
+	pod->settings()["isPod"] = "1";
+	hud::HudManager hud(nullptr);
+	hud.set("MenuBackgroundAlpha", 1);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.vehicle = pod;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("UsingParachute") == 0);
+	CHECK(hud.number("VehicleIconShow") == 1);
+	in.vehicle = chute;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("UsingParachute") == 1);
+	CHECK(hud.number("VehicleIconShow") == 0);
+	CHECK(hud.number("BottomLeftVehicleFadedAlpha") == 0);
+	vehicleHud.clear(hud);
+	CHECK(hud.number("UsingParachute") == 0);
+	CHECK(hud.number("VehicleIconShow") == 0);
+}
+
+TEST(HudActionIcon_AmmoReceipt)
+{
+	hud::HudManager hud(nullptr);
+	game::GameWorld::AbilityBarInfo info;
+	info.alive = true;
+	menu::updateReceivedSupplyHud(hud, &info, false, false); // joined state has no receipt tick
+	CHECK(hud.number("CloseToAmmo") == 0);
+	info.sinceAmmo = 14;
+	CHECK(menu::updateReceivedSupplyHud(hud, &info, false, false) == 4);
+	CHECK(hud.number("CloseToAmmo") == 1);
+	menu::updateReceivedSupplyHud(hud, &info, true, true);
+	CHECK(hud.number("CloseToAmmo") == 0);
+	info.ammoFlag = true;
+	menu::updateReceivedSupplyHud(hud, &info, true, false);
+	CHECK(hud.number("CloseToAmmo") == 0);
+	info.ammoFlag = false;
+	menu::updateReceivedSupplyHud(hud, &info, true, false);
+	CHECK(hud.number("CloseToAmmo") == 1);
+	info.sinceAmmo = 15;
+	menu::updateReceivedSupplyHud(hud, &info, true, false);
+	CHECK(hud.number("CloseToAmmo") == 0);
 }
 
 // zoomOnMinimap, miniMapIconOffset(Inside), standardHelpEnabled and
@@ -2539,8 +2741,13 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	// The tool's battery is AbilityValue and the ammunition bar.
 	CHECK(hud.number("AbilityValueShow") == 1 && std::abs(hud.number("PrimaryAmmo") - 0.6f) < 1e-5f);
 	// A target without armour counts in the averaging's order only.
-	info.targets = {-1.0f, 0.4f};
+	info.targets = {std::nanf(""), 0.4f};
 	CHECK(std::abs(bar.update(info, false).bar - 0.2f) < 1e-5f);
+	// A wreck being mended (a Titan gun at its station): below 0 hit points
+	// the bar and the wrench show, the ring empty (0x007c3af0 hands the
+	// share on as it is; the bar node clamps it).
+	info.targets = {-0.6f};
+	CHECK(bar.update(info, false).show && bar.out().wrench && bar.out().bar < 0 && bar.out().sound == 1);
 	// The support's: the soldiers' ammunition, no wrench, the ammo sound.
 	info.kitRepairing = false;
 	info.kitAmmo = true;
@@ -2587,6 +2794,24 @@ TEST(HudMenus_TitanUplinkState)
 	u.update(1.0f, false, 0.0f);
 	u.update(1.0f, false, 0.0f);
 	CHECK(!u.showLost); // 1 - 3 x 0.5 is below 0
+}
+
+TEST(HudMenus_HitDirectionArrow)
+{
+	menu::HitDirectionHud h;
+	h.update(0.033f, 4, 0, 0); // the first look takes the count as it is
+	CHECK(!h.show);
+	h.update(0.033f, 5, 1.5707964f, 0); // hit from +x (east) while facing north: the right
+	CHECK(h.show && std::fabs(h.angle - 90) < 0.01f);
+	h.update(0.05f, 5, 1.5707964f, 90); // turned to face it: up, recomputed while shown
+	CHECK(h.show && std::fabs(h.angle) < 0.01f);
+	h.update(0.05f, 5, 1.5707964f, 90);
+	h.update(0.05f, 5, 1.5707964f, 90); // 0.1 s spent: the flag drops, the fade is the node's
+	CHECK(!h.show);
+	h.update(0.05f, 5, 1.5707964f, 180); // held after
+	CHECK(!h.show && std::fabs(h.angle) < 0.01f);
+	h.update(0.05f, 6, -3.1415927f, 0); // from behind
+	CHECK(h.show && std::fabs(std::fabs(h.angle) - 180) < 0.01f);
 }
 
 TEST(HudMenus_MiddleTicketsShownForTitanArmourNotConquestTickets)

@@ -45,7 +45,8 @@ Vec3 closestOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& 
 } // namespace
 
 void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, const Mat3& rotation,
-	const Vec3& position, uint32_t owner, const std::vector<uint32_t>& materials, size_t geometry, size_t state)
+	const Vec3& position, uint32_t owner, const std::vector<uint32_t>& materials, size_t geometry, size_t state,
+	bool staticNode)
 {
 	// The instance's sub-geometry (+0x14: 0 normally, 1 a wreck's).
 	const CollisionSubGeometry* part = collisionPart(mesh, geometry, state);
@@ -73,6 +74,7 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 			t.normal = n * (1.0f / length);
 			t.material = face.material < materials.size() ? materials[face.material] : face.material;
 			t.owner = owner;
+			t.staticNode = staticNode;
 			const uint32_t index = static_cast<uint32_t>(m_triangles.size());
 			m_triangles.push_back(t);
 			const float minX = std::min({t.a.x, t.b.x, t.c.x}), maxX = std::max({t.a.x, t.b.x, t.c.x});
@@ -112,13 +114,32 @@ bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool fron
 	const Vec3 direction = to - from;
 	bool found = false;
 	hit.fraction = 1.0f;
-	// Walk the cells the segment's bounding box covers (segments are short:
-	// one tick of a projectile).
-	const int x0 = static_cast<int>(std::floor(std::min(from.x, to.x) / kCell));
-	const int x1 = static_cast<int>(std::floor(std::max(from.x, to.x) / kCell));
-	const int z0 = static_cast<int>(std::floor(std::min(from.z, to.z) / kCell));
-	const int z1 = static_cast<int>(std::floor(std::max(from.z, to.z) / kCell));
-	for (int x = x0; x <= x1; ++x) {
+	// Walk only the cells the segment crosses: column by column along x from
+	// `from`, each column's z cells between where the segment enters and
+	// leaves it. A face is filed in every cell its (x, z) box covers, so the
+	// cell of any crossing is visited. Columns and z spans are widened by
+	// kEdge against rounding at cell borders. Long segments (the renderer's
+	// glow rays, hundreds of metres) used to visit their whole bounding box.
+	constexpr float kEdge = 1e-3f;
+	const int x0 = static_cast<int>(std::floor((std::min(from.x, to.x) - kEdge) / kCell));
+	const int x1 = static_cast<int>(std::floor((std::max(from.x, to.x) + kEdge) / kCell));
+	const int step = direction.x < 0 ? -1 : 1;
+	for (int x = step > 0 ? x0 : x1; x >= x0 && x <= x1; x += step) {
+		// The segment's fractions inside this column (all of it when it runs along z).
+		float t0 = 0, t1 = 1;
+		if (std::fabs(direction.x) > 1e-12f) {
+			const float a = (x * kCell - kEdge - from.x) / direction.x;
+			const float b = ((x + 1) * kCell + kEdge - from.x) / direction.x;
+			t0 = std::max(std::min(a, b), 0.0f);
+			t1 = std::min(std::max(a, b), 1.0f);
+		}
+		// Every crossing nearer than the one found lies in a column already walked.
+		if (t0 > hit.fraction) {
+			break;
+		}
+		const float za = from.z + direction.z * t0, zb = from.z + direction.z * t1;
+		const int z0 = static_cast<int>(std::floor((std::min(za, zb) - kEdge) / kCell));
+		const int z1 = static_cast<int>(std::floor((std::max(za, zb) + kEdge) / kCell));
 		for (int z = z0; z <= z1; ++z) {
 			const auto cell = m_cells.find(cellKey(x, z));
 			if (cell == m_cells.end()) {
@@ -164,6 +185,7 @@ bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool fron
 				hit.faceNormal = t.normal;
 				hit.material = t.material;
 				hit.owner = t.owner;
+				hit.staticNode = t.staticNode;
 				found = true;
 			}
 		}
@@ -250,7 +272,7 @@ void CollisionWorld::querySphere(const Vec3& center, float radius, std::vector<S
 					normal = away * (1.0f / length);
 					depth = length - radius;
 				}
-				contacts.push_back({closest, normal, depth, t.material, depth});
+				contacts.push_back({closest, normal, depth, t.material, depth, t.staticNode});
 			}
 		}
 	}
@@ -291,6 +313,7 @@ bool CollisionWorld::segmentContact(const Vec3& from, const Vec3& to, SphereCont
 	contact.normal = hit.faceNormal;
 	contact.depth = std::min(dot(to - hit.point, hit.faceNormal), 0.0f);
 	contact.material = hit.material;
+	contact.staticNode = hit.staticNode;
 	return true;
 }
 
@@ -388,7 +411,7 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 		if (lengthSquared(closestOnTriangle(onFace, t->a, t->b, t->c) - onFace) > 1e-8f) {
 			continue;
 		}
-		contacts.push_back({onFace, t->normal, endDistance, t->material, (fraction - 1) * std::sqrt(lengthSquared(delta))});
+		contacts.push_back({onFace, t->normal, endDistance, t->material, (fraction - 1) * std::sqrt(lengthSquared(delta)), t->staticNode});
 		faceMet = true;
 	}
 	if (faceMet) {
@@ -429,7 +452,7 @@ void CollisionWorld::sweepSphere(const Vec3& start, const Vec3& end, float radiu
 				}
 				normal = normal * (1.0f / flat);
 			}
-			contacts.push_back({point, normal, depth, t->material, -std::sqrt(lengthSquared(end - centre))});
+			contacts.push_back({point, normal, depth, t->material, -std::sqrt(lengthSquared(end - centre)), t->staticNode});
 		}
 	}
 }
@@ -499,6 +522,7 @@ void CollisionWorld::capsuleEdgeContacts(const Vec3& a, const Vec3& b, float rad
 				}
 				contact.point = nearest;
 				contact.material = t.material;
+				contact.staticNode = t.staticNode;
 				contacts.push_back(contact);
 			}
 		}

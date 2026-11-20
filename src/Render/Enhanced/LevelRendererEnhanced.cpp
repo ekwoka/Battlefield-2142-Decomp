@@ -87,10 +87,12 @@ void LevelRenderer::releaseEnhancedTargets()
 	release(device, m_enh.history[1]);
 	release(device, m_enh.cascadeDynamic);
 	release(device, m_enh.cascadeStatic);
+	release(device, m_enh.cascadeStaticMeshes);
 	m_enh.size[0] = m_enh.size[1] = 0;
 	m_enh.cascadeSize = 0;
 	m_enh.historyValid = false;
 	m_enh.staticValid = false;
+	m_enh.staticMeshesValid = false;
 }
 
 void LevelRenderer::ensureEnhancedTargets(uint32_t width, uint32_t height)
@@ -249,7 +251,7 @@ void LevelRenderer::useEnhancedShadows(SDL_GPUCommandBuffer* commands, SDL_GPURe
 // ---- the prepass ------------------------------------------------------------------
 
 void LevelRenderer::drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Camera& camera,
-	const Mat4& viewProjection, bool coarse)
+	const Mat4& viewProjection, bool shadowCaster)
 {
 	const scene::RendererSettings defaults;
 	const scene::RendererSettings& renderer = m_sources && m_sources->renderer ? *m_sources->renderer : defaults;
@@ -264,15 +266,12 @@ void LevelRenderer::drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURend
 		std::memcpy(&u, &m, sizeof(u));
 		SDL_PushGPUVertexUniformData(commands, 1, &u, sizeof(u));
 	};
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 	if (!m_terrainCells.empty()) {
 		SDL_GPUBufferBinding indexBinding {m_terrainLodIndices, 0};
 		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 		const int perPatch = m_terrainCellsPerPatch;
 		int pushed = -1;
-		if (coarse) {
-			morph(2, false);
-			pushed = 2;
-		}
 		for (size_t p = 0; p < m_terrain.size(); ++p) {
 			const int px = static_cast<int>(p) % m_patchesPerSide, pz = static_cast<int>(p) / m_patchesPerSide;
 			bool bound = false;
@@ -281,12 +280,12 @@ void LevelRenderer::drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURend
 					const size_t c = static_cast<size_t>(pz * perPatch + j) * m_terrainCellsPerSide +
 						static_cast<size_t>(px * perPatch + i);
 					const TerrainLodCell& cell = m_terrainCells[c];
-					if (!coarse && !cell.visible) {
+					if (shadowCaster ? !frustum.containsBox(cell.boundsMin, cell.boundsMax) : !cell.visible) {
 						continue;
 					}
-					const int lod = coarse ? 2 : cell.lod;
+					const int lod = cell.lod;
 					const auto& ranges = m_terrainNodeRanges[static_cast<size_t>(m_terrainCellNodes[c])];
-					TerrainNodeRange range = ranges[static_cast<size_t>(lod * 11 + (coarse ? 0 : cell.mask))];
+					TerrainNodeRange range = ranges[static_cast<size_t>(lod * 11 + cell.mask)];
 					if (range.count == 0) {
 						range = ranges[static_cast<size_t>(lod * 11)];
 					}
@@ -310,9 +309,8 @@ void LevelRenderer::drawTerrainDepth(SDL_GPUCommandBuffer* commands, SDL_GPURend
 		SDL_GPUBufferBinding indexBinding {m_terrainIndices, 0};
 		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 		morph(0, false);
-		const Frustum frustum = Frustum::fromViewProjection(viewProjection);
 		for (const TerrainPatch& patch : m_terrain) {
-			if (!coarse && !frustum.containsBox(patch.boundsMin, patch.boundsMax)) {
+			if (!frustum.containsBox(patch.boundsMin, patch.boundsMax)) {
 				continue;
 			}
 			SDL_GPUBufferBinding vertexBinding {patch.vertices, 0};
@@ -660,18 +658,20 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 	if (size != m_enh.cascadeSize) {
 		release(m_gpu.device(), m_enh.cascadeDynamic);
 		release(m_gpu.device(), m_enh.cascadeStatic);
+		release(m_gpu.device(), m_enh.cascadeStaticMeshes);
 		// The dynamic atlas has a third row of tiles: the Titans' hulls (below).
 		m_enh.cascadeDynamic = m_gpu.createShadowMap(size * 2, size * 3);
 		m_enh.cascadeStatic = m_gpu.createShadowMap(size * 2);
 		m_enh.cascadeSize = size;
 		m_enh.staticValid = false;
+		m_enh.staticMeshesValid = false;
 	}
 	if (!m_enh.cascadeDynamic || !m_enh.cascadeStatic) {
 		return;
 	}
 	// Four cascades to three times the single region's reach (120..400 m),
 	// each a sphere about its slice of the view, its centre snapped to a
-	// quarter of its radius (the static atlas is redrawn only when one moves).
+	// quarter of its radius.
 	const float reach = std::clamp(shadowRegionRadius(settings.quality, settings.shadowMapDepthDistance) * 3.0f, 120.0f, 400.0f);
 	// Nearer the log split than the default: the first cascade ends some 7 m out,
 	// about 2 cm a texel at 1024, for the shadows at the player's feet.
@@ -685,8 +685,18 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 		? std::clamp(200.0f / std::max(towardsLight.y, 0.05f), kShadowHeadroom, 2000.0f)
 		: kShadowHeadroom;
 	const float depthRange = headroom * 2;
-	bool moved = !m_enh.staticValid || m_enh.staticInstances != m_instances.size() || headroom != m_enh.staticHeadroom;
-	m_enh.staticHeadroom = headroom;
+	const scene::RendererSettings switchDefaults;
+	const scene::RendererSettings& switches = m_sources && m_sources->renderer ? *m_sources->renderer : switchDefaults;
+	const bool drawTerrain = switches.drawTerrain && (!m_terrainCells.empty() || m_terrainIndices);
+	// Terrain morphs with camera movement even while the cascade matrices are
+	// snapped in place. Reuse the atlas only while both inputs are unchanged.
+	std::array<float, 9> terrainLodInputs {};
+	if (drawTerrain && !m_terrainCells.empty()) {
+		terrainLodInputs = {camera.position.x, camera.position.z, m_terrainHeightAboveGround, m_terrainLodSwitch,
+			switches.lod2Start, switches.lod0SwitchStart, switches.lod0SwitchStop,
+			switches.lod1SwitchStart, switches.lod1SwitchStop};
+	}
+	bool redrawMeshes = !m_enh.staticValid || m_enh.staticInstances != m_instances.size();
 	for (int i = 0; i < enhanced::kCascades; ++i) {
 		const float nearSplit = i == 0 ? camera.nearPlane : far[static_cast<size_t>(i - 1)];
 		const enhanced::SliceSphere sphere = enhanced::sliceSphere(nearSplit, far[static_cast<size_t>(i)], tanY * aspect, tanY);
@@ -698,9 +708,7 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 		const Mat4 vp = Mat4::lookAt(center + towardsLight * headroom, center, up) * orthographic(radius, depthRange);
 		m_enh.cascadeViewProjection[i] = vp;
 		m_enh.cascadeRadius[i] = radius;
-		m_enh.cascadeCenter[i] = center;
-		moved = moved || radius != m_enh.staticRadius[i] || center.x != m_enh.staticCenter[i].x ||
-			center.y != m_enh.staticCenter[i].y || center.z != m_enh.staticCenter[i].z;
+		redrawMeshes = redrawMeshes || vp.m != m_enh.staticViewProjection[i].m;
 		Mat4 quadrant;
 		quadrant.at(0, 0) = 0.5f;
 		quadrant.at(1, 1) = 0.5f;
@@ -711,27 +719,33 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 		// 5 cm and a texel of the light's depth (the slope bias does the rest).
 		u.cascadeBias[i] = (0.05f + settings.shadowMapDepthBias + 2 * radius / static_cast<float>(size)) / depthRange;
 	}
-	const scene::RendererSettings switchDefaults;
-	const scene::RendererSettings& switches = m_sources && m_sources->renderer ? *m_sources->renderer : switchDefaults;
 	const GpuContext::EnhancedPipelines& p = m_gpu.enhancedPipelines();
-	const auto drawAtlas = [&](SDL_GPUTexture* atlas, bool statics) {
+	const auto drawAtlas = [&](SDL_GPUTexture* atlas, bool statics, bool terrain, SDL_GPUTexture* meshDepth = nullptr) {
 		SDL_GPUDepthStencilTargetInfo depth {};
 		depth.texture = atlas;
 		depth.clear_depth = 1.0f;
-		depth.load_op = SDL_GPU_LOADOP_CLEAR;
+		depth.load_op = meshDepth ? SDL_GPU_LOADOP_DONT_CARE : SDL_GPU_LOADOP_CLEAR;
 		depth.store_op = SDL_GPU_STOREOP_STORE;
 		depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
 		depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+		if (meshDepth) {
+			SDL_BindGPUGraphicsPipeline(pass, p.shadowDepthCopy);
+			const SDL_GPUTextureSamplerBinding binding {meshDepth, m_gpu.pointSampler()};
+			SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
+			SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+		}
 		size_t casters = 0, draws = 0;
 		for (int i = 0; i < enhanced::kCascades; ++i) {
 			const SDL_GPUViewport viewport {static_cast<float>((i & 1) * size), static_cast<float>((i >> 1) * size),
 				static_cast<float>(size), static_cast<float>(size), 0, 1};
 			SDL_SetGPUViewport(pass, &viewport);
-			SDL_BindGPUGraphicsPipeline(pass, m_gpu.shadowCasterPipeline());
-			drawShadowCasterInstances(commands, pass, m_enh.cascadeViewProjection[i], m_enh.cascadeRadius[i], statics,
-				seconds, casters, draws);
-			if (statics && switches.drawTerrain) {
+			if (!meshDepth) {
+				SDL_BindGPUGraphicsPipeline(pass, m_gpu.shadowCasterPipeline());
+				drawShadowCasterInstances(commands, pass, m_enh.cascadeViewProjection[i], m_enh.cascadeRadius[i], statics,
+					seconds, casters, draws);
+			}
+			if (terrain) {
 				SDL_BindGPUGraphicsPipeline(pass, p.terrainCaster);
 				drawTerrainDepth(commands, pass, camera, m_enh.cascadeViewProjection[i], true);
 			}
@@ -739,12 +753,31 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 		SDL_EndGPURenderPass(pass);
 	};
 	if (settings.dynamicStaticMeshShadowsEnabled && settings.shadowMapIncludeStaticMeshes) {
-		if (moved) {
-			drawAtlas(m_enh.cascadeStatic, true);
+		const bool redrawStatic = redrawMeshes || drawTerrain != m_enh.staticTerrainDrawn ||
+			terrainLodInputs != m_enh.staticTerrainLodInputs;
+		if (redrawStatic) {
+			if (redrawMeshes) {
+				m_enh.staticMeshesValid = false;
+			}
+			// Camera motion changes terrain depth even while the snapped
+			// mesh projection stays fixed. Cache those mesh draws separately.
+			if (drawTerrain && !m_terrainCells.empty() && p.shadowDepthCopy) {
+				if (!m_enh.cascadeStaticMeshes) {
+					m_enh.cascadeStaticMeshes = m_gpu.createShadowMap(size * 2);
+				}
+				if (m_enh.cascadeStaticMeshes && !m_enh.staticMeshesValid) {
+					drawAtlas(m_enh.cascadeStaticMeshes, true, false);
+					m_enh.staticMeshesValid = true;
+				}
+			}
+			drawAtlas(m_enh.cascadeStatic, true, drawTerrain,
+				drawTerrain && m_enh.staticMeshesValid ? m_enh.cascadeStaticMeshes : nullptr);
 			m_enh.staticValid = true;
 			m_enh.staticInstances = m_instances.size();
-			std::copy(std::begin(m_enh.cascadeRadius), std::end(m_enh.cascadeRadius), std::begin(m_enh.staticRadius));
-			std::copy(std::begin(m_enh.cascadeCenter), std::end(m_enh.cascadeCenter), std::begin(m_enh.staticCenter));
+			std::copy(std::begin(m_enh.cascadeViewProjection), std::end(m_enh.cascadeViewProjection),
+				std::begin(m_enh.staticViewProjection));
+			m_enh.staticTerrainDrawn = drawTerrain;
+			m_enh.staticTerrainLodInputs = terrainLodInputs;
 		}
 	} else {
 		m_enh.staticValid = false;
@@ -752,7 +785,7 @@ void LevelRenderer::renderCascades(SDL_GPUCommandBuffer* commands, const Camera&
 	for (const Instance& instance : m_instances) {
 		instance.shadowCaster = false;
 	}
-	drawAtlas(m_enh.cascadeDynamic, false);
+	drawAtlas(m_enh.cascadeDynamic, false, false);
 	// enhanced.titanShadows past the cascades: each Titan's hull into a tile
 	// fitted to it (the hulls gathered by nearness: at most two Titans) in the
 	// dynamic atlas's third row, which the variants read where no cascade

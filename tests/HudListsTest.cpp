@@ -12,6 +12,7 @@
 #include "IO/File/FileManager.h"
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusKits.h"
+#include "Main/HudMenus.h"
 #include "Render/TextureSuffix.h"
 #include "Main/MenuBindings.h"
 #include "Stats/Stats.h"
@@ -264,6 +265,96 @@ TEST(HudLists_KitMenu)
 	kits.update(1);
 	CHECK(kits.customOpen() && hud.number("CustomInfoShow") == 1);
 
+}
+
+TEST(HudLists_FieldUpgradeSelectionAndExpiry)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "Kit");
+	templates.registerType(2, "GenericFireArm");
+	templates.registerType(3, "ItemContainer");
+	templates.registerType(4, "ControlPoint");
+	templates.registerType(5, "SpawnPoint");
+	templates.registerType(6, "Soldier");
+	auto* point = templates.create("ControlPoint", "Home");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "2";
+	objects.create(point, {0, 0, 0});
+	auto* spawn = templates.create("SpawnPoint", "Spawn");
+	objects.create(spawn, {0, 1, 0})->setControlPointId(1);
+	templates.create("Soldier", "soldier")->settings()["armor.maxHitPoints"] = "100";
+	const auto makeKit = [&](const std::string& kitName, const std::string& name) {
+		auto* kit = templates.create("Kit", kitName);
+		auto* primary = templates.create("GenericFireArm", kitName + "Rifle");
+		primary->settings()["itemIndex"] = "3";
+		kit->children().push_back({primary->name(), {}, {}});
+		auto* item = templates.create("GenericFireArm", name + "Item");
+		item->settings()["itemIndex"] = "5";
+		item->settings()["weaponHud.hudName"] = "New gadget";
+		item->settings()["weaponHud.unlockIcon"] = "upgrade.tga";
+		auto* container = templates.create("ItemContainer", name);
+		container->children().push_back({item->name(), {}, {}});
+		kit->children().push_back({name, {}, {}});
+	};
+	makeKit("EU", "EuUnlock");
+	makeKit("PAC", "PacUnlock");
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(2).kits.push_back({"EU", "soldier", ""});
+	logic.team(1).kits.push_back({"PAC", "soldier", ""});
+	round.startRound();
+	const int me = round.joinPlayer(2);
+	CHECK(round.joinSquad(me, 1));
+	round.setKit(me, "EU", "soldier");
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.skipUnchanged = true;
+	kits.onSpendFieldUpgrade = [&](int kit, int branch) { return round.spendFieldUnlock(me, logic, kit, branch); };
+	kits.onEquip = [&](const std::vector<std::string>& items) { round.setUnlocks(me, items); };
+	Console console;
+	kits.bind(console);
+	std::string output;
+	const auto execute = [&](const char* command) { CHECK(console.execute(command, output) == ConsoleResult::Ok); };
+	const auto update = [&] {
+		kits.setFieldUpgrades(round.fieldUnlocks(me), round.fieldUnlockItems(me));
+		kits.update(2);
+		menu::updateSquadInfo(hud, round, me, false, {});
+	};
+	round.setSquadOrderMax(me, 10);
+	round.addSquadOrderPoints(me, 4.5);
+	update();
+	CHECK(hud.number("SquadOrderInfoBarShow") == 1 && hud.number("SquadInfoValue") == 0.45f);
+	execute("UnlockInterface.showUnlockInterface 1");
+	CHECK(hud.number("UnlocksShow") == 0);
+	round.giveFieldUnlock(me);
+	round.giveFieldUnlock(me);
+	update();
+	CHECK(hud.number("UnlockInfoBarShow") == 1 && hud.number("KitUnlockArrow0Show") == 1);
+	execute("UnlockInterface.showUnlockInterface 1");
+	CHECK(hud.number("UnlocksShow") == 1 && hud.number("UnlockInfoShow") == 1);
+	execute("UnlockInterface.setFieldUnlock 0 UB_First");
+	CHECK(hud.number("Kit0Branch0Selected") == 1);
+	execute("UnlockInterface.selectUnlock 1");
+	CHECK(hud.number("UnlockInfoShow") == 0 && hud.string("PickedUnlockNameString") == "New gadget");
+	update();
+	CHECK(round.fieldUnlocks(me) == 1 && round.ownsKitUnlock(me, "PacUnlock"));
+	CHECK(kits.item(1, 0).available && hud.number("Kit1Item0FieldUnlocked") == 1);
+	execute("UnlockInterface.spendFieldUnlock 0 UB_First");
+	CHECK(round.fieldUnlocks(me) == 1);
+	kits.chooseKitCustom(1, 0);
+	kits.commit();
+	CHECK(round.unlocksOf(me, false) == std::vector<std::string> {"EuUnlock"});
+	CHECK(round.spawnSoldier(me));
+	game::GameWorld::PlayerInfo spawned;
+	CHECK(round.playerInfo(me, spawned));
+	CHECK(std::find(spawned.carried.begin(), spawned.carried.end(), std::make_pair(5, std::string("EuUnlockItem")))
+		!= spawned.carried.end());
+	round.restartPlayers(1);
+	round.resetRound();
+	update();
+	CHECK(round.fieldUnlocks(me) == 0 && round.unlocksOf(me, false).empty() && !kits.item(1, 0).available);
+	CHECK(hud.number("SquadOrderInfoBarShow") == 0 && hud.number("UnlockInfoBarShow") == 0);
 }
 
 // The spawn screen's ability icons (0x00798b20, from the rebuild while

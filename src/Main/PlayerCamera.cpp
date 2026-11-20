@@ -1073,6 +1073,7 @@ void PlayerCamera::tick(float seconds)
 	// The eye's height by pose (seated counts as crouching).
 	const int pose = me.vehicle ? 1 : me.stance >= 0 && me.stance < 3 ? me.stance : 0;
 	m_eye.tick(pose);
+	m_eyePose = pose;
 	if (!m_rig || (me.vehicle && !kitSeat(me))) {
 		m_lastYaw = me.yaw;
 		m_lastPitch = me.aimPitch;
@@ -1249,6 +1250,9 @@ bool PlayerCamera::view(View& view, float aspect) const
 			view.pitch = seated.pitch * kDegrees;
 			view.fovY = aspectFov(kitSeat(me) ? m_fov.current : m_baseFov, aspect); // a passenger's weapon zooms
 			view.roll = 0;
+			view.soldierEye = true;
+			view.carrierYaw = (seated.yaw - seated.lookYaw) * kDegrees;
+			view.eyeHeight = view.eyeTarget = m_eye.poses[1];
 			return true;
 		}
 		view.fovY = aspectFov(view.fovY, aspect);
@@ -1273,6 +1277,9 @@ bool PlayerCamera::view(View& view, float aspect) const
 	view.pitch = std::clamp(me.aimPitch, -85.0f, 85.0f) * kDegrees;
 	view.fovY = aspectFov(m_fov.current, aspect);
 	view.roll = m_hitShake * kDegrees; // the SoldierCamera's hit shake
+	view.soldierEye = true;
+	view.eyeHeight = m_eye.current;
+	view.eyeTarget = m_eye.poses[m_eyePose];
 	return true;
 }
 

@@ -1762,6 +1762,59 @@ TEST(Physics_CollisionDamageAndRoadKill)
 	}
 }
 
+// The ordinary contact goes through retail's soldier friendly-fire scale
+// (0x005a43c0 -> 0x004c0e40 -> 0x005b7290). The car's 0x10 group
+// disables the separate hull-overlap kill so this measures impact damage.
+TEST(Physics_RoadKillRespectsSoldierFriendlyFire)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	struct Impact {
+		int team;
+		float friendlyFire;
+	};
+	const Impact cases[] = {{2, 100}, {2, 50}, {2, 0}, {1, 0}};
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		float damage[4] {};
+		for (size_t i = 0; i < std::size(cases); ++i) {
+			const auto [team, friendlyFire] = cases[i];
+			Game game(gameDir, mod);
+			const uint32_t car = makeCar(game, {3, 1.2f, 0});
+			game.templates.find("car")->settings()["collisionGroups"] = "16";
+			game.start();
+			game.world->setFriendlyFire({friendlyFire, 0, 0, 0});
+			CHECK(game.world->spawnPlayer(2) != nullptr);
+			game.run(3);
+			driveCar(game, car, 0);
+			CHECK(game.objects.find(car)->team() == 2);
+			const int victim = game.world->addPlayer("Victim", team, false);
+			CHECK(game.world->spawnSoldier(victim));
+			game::GameWorld::PlayerInfo before;
+			CHECK(game.world->playerInfo(victim, before));
+			CHECK(game.world->setSoldierPosition(before.soldier, {3, 0, 7}));
+			for (int tick = 0; tick < 34; ++tick) {
+				CHECK(game.world->setBodyVelocity(car, {0, 0, 6}));
+				game.run(1 / 30.0f);
+			}
+			game::GameWorld::PlayerInfo after;
+			CHECK(game.world->playerInfo(victim, after));
+			CHECK(after.alive && after.soldier == before.soldier);
+			damage[i] = 100 - game.world->hitPoints(before.soldier);
+		}
+		std::fprintf(stderr, "  %s impact damage at 100%% / 50%% / 0%% friendly fire and against an enemy: %.2f / %.2f / %.2f / %.2f\n",
+			mod, damage[0], damage[1], damage[2], damage[3]);
+		CHECK(damage[0] > 10 && damage[0] < 100);
+		CHECK(std::fabs(damage[1] - damage[0] * 0.5f) < 0.01f);
+		CHECK(damage[2] == 0);
+		CHECK(std::fabs(damage[3] - damage[0]) < 0.01f);
+	}
+}
+
 // A soldier dropped onto a parked car: retail's 0x005a4690 sends the pair to
 // the road kill (0x005a43c0), the soldier being the faster the 10 m/s
 // limit, (speed - 10) x speed x the mass factor (3 for the car's 1800 over

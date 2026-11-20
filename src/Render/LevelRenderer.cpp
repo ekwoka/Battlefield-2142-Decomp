@@ -97,7 +97,9 @@ void materialUniforms(LightingUniforms& uniforms, const S& submesh, float fade, 
 	uniforms.material[2] = (submesh.detail ? 1.0f : 0.0f) + (submesh.dirt ? 2.0f : 0.0f) + (submesh.crack ? 4.0f : 0.0f)
 		+ (submesh.additive ? kMaterialAdditive : submesh.blended ? kMaterialBlended : 0.0f);
 	uniforms.material[3] = fade < 1.0f ? std::max(fade, 1e-3f) : 0.0f;
-	uniforms.tint[3] *= submesh.alphaScale;
+	if (submesh.glow) {
+		uniforms.material[2] += kMaterialGlow;
+	}
 	uniforms.uvOffset[0] = scrollOffset(submesh.uvScroll[0], seconds) + submesh.uvAtlas[2];
 	uniforms.uvOffset[1] = scrollOffset(submesh.uvScroll[1], seconds) + submesh.uvAtlas[3];
 	uniforms.uvOffset[2] = submesh.uvAtlas[0];
@@ -667,6 +669,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
+		submesh.skadiReticle = lower(geometry->name) == "eu_gauss_rifle"
+			&& !materials[m].maps.empty() && lower(materials[m].maps.front()) == "green.dds";
 		if (geometry->meshParticle) {
 			submesh.particleSlots = std::move(particleSlots[m]);
 		}
@@ -676,23 +680,17 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 			submesh.uvAtlas[2] = atlas->offset[0];
 			submesh.uvAtlas[3] = atlas->offset[1];
 		}
-		// Alpha mode 1 normally blends over the scene. StaticMesh.fx's
-		// alpha_one technique explicitly uses SRCALPHA / ONE too: glow3
-		// and similar meshes have opaque black around their light texture.
-		// Respect that material technique independently of a geometry's
-		// hasAdditiveAlpha switch, which selects the BMadditive path.
+		// Alpha mode 1 blends over the scene, or adds with the geometry's
+		// hasAdditiveAlpha (BMadditive's depthAndFog, 0x100c4dd9). A bundled
+		// or skinned material whose technique names "alpha_one" (glow3's
+		// lamp halos) is a glow whatever its alpha mode (MeshQueues.h).
 		const std::string technique = lower(material.technique);
 		const std::string effect = lower(material.effect);
 		submesh.alphaMode = static_cast<int>(material.alphaMode);
-		submesh.blended = material.alphaMode == 1;
-		submesh.additive = submesh.blended && (geometry->hasAdditiveAlpha
-			|| (effect == "staticmesh.fx" && technique == "alpha_one"));
-		// The shipped alpha_one ps.1.1 multiplies t0 by (1, 1, 1, 0.8).
-		// Keep this material constant separate from distance/fog fade and
-		// geometry-driven additive effects (RaShaderBMadditive).
-		if (submesh.additive && effect == "staticmesh.fx" && technique == "alpha_one") {
-			submesh.alphaScale = 0.8f;
-		}
+		submesh.glow = (bundled || skinned) && technique.find("alpha_one") != std::string::npos;
+		submesh.blended = material.alphaMode == 1 || submesh.glow;
+		submesh.additive = submesh.glow || (submesh.blended && geometry->hasAdditiveAlpha);
+		gpuMesh->glow = gpuMesh->glow || submesh.glow;
 		if (submesh.additive) {
 			submesh.uvScroll[0] = geometry->simpleUVTranslation[0];
 			submesh.uvScroll[1] = geometry->simpleUVTranslation[1];
@@ -770,14 +768,12 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 				++m_stats.normalMapped;
 			}
 		}
-		// The level's envmap: every static mesh's material (0x100bdb00 sets
-		// each drawable's cube, +0x13c, to the EnvMapManager's), a bundled
-		// one's with an "envmap" technique (0x100c5030: the material's +0x37,
-		// +0x120) above the low lighting level (RaShaderBM.mfx drops envmap
-		// with the hemi map).
-		submesh.envMap = !submesh.additive &&
-			((effect == "staticmesh.fx" && !skinned) ||
-				(bundled && technique.find("envmap") != std::string::npos && quality.meshHemiAndShadows()));
+		// The static material classifier (0x101512a0) selects the envmap
+		// permutation only for an "envmap" technique, like bundled meshes.
+		// Both shader families drop it at Low lighting.
+		submesh.envMap = quality.meshEnvMaps() && !submesh.additive &&
+			(bundled || (effect == "staticmesh.fx" && !skinned)) &&
+			technique.find("envmap") != std::string::npos;
 		if (submesh.trunk) submesh.envMap = false;
 		// Normal maps (RaShaderBM/SM _HASNORMALMAP_), only at the top
 		// lighting level: the loaders skip "_b.dds" (bundled, 0x101499b0) and
@@ -859,13 +855,26 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				}
 				return false;
 			};
-			instance.occlusionGlow = !gpuMesh->submeshes.empty()
+			instance.occlusionGlow = !gpuMesh->glow && !gpuMesh->submeshes.empty() // a glow has retail's own ray
 				&& std::all_of(gpuMesh->submeshes.begin(), gpuMesh->submeshes.end(),
 					[](const Submesh& s) { return s.additive; })
 				&& hasGlowLight(hasGlowLight, objectTemplate, 0);
 			instance.geometry = objectTemplate.geometry();
 			if (depth > 0) {
 				instance.source = path; // the template names from the root's child down, '/'-joined
+				// Under a RotationalBundle it turns with it, as the seat camera beside it
+				// does (PlayerCamera::findSeatCamera): the Titan guns' wreck HUDs on their
+				// barrels, whose wreck geometry is the static before a wrecked gun's camera.
+				const world::ObjectTemplate* t = m_buildRoot;
+				bool posed = false;
+				for (const uint16_t k : m_buildChildPath) {
+					t = t && k < t->children().size() ? sources.templates.find(t->children()[k].name) : nullptr;
+					posed = posed || (t && t->typeName() == "RotationalBundle");
+				}
+				if (posed && object != 0) {
+					instance.posedRoot = m_buildRoot;
+					instance.posedPath = m_buildChildPath;
+				}
 			}
 			if (gpuMesh->skinned) {
 				const auto skeleton3P = objectTemplate.settings().find("skeleton3P");
@@ -917,13 +926,53 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 	if (objectTemplate.typeName() == "Kit") {
 		return;
 	}
-	for (const world::ChildTemplate& child : objectTemplate.children()) {
+	if (depth == 0) {
+		m_buildRoot = &objectTemplate;
+		m_buildChildPath.clear();
+	}
+	for (size_t k = 0; k < objectTemplate.children().size(); ++k) {
+		const world::ChildTemplate& child = objectTemplate.children()[k];
 		if (const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
 			childTemplate && drawnWithObject(childTemplate->typeName())) {
+			m_buildChildPath.push_back(static_cast<uint16_t>(k));
 			addTemplate(sources, *childTemplate, objectTransform(child.position, child.rotation) * local, objectWorld,
 				object, depth + 1, path.empty() ? child.name : path + "/" + child.name, childSkeleton);
+			m_buildChildPath.pop_back();
 		}
 	}
+}
+
+// A part's name for LevelSources::partPose: under a RotationalBundle, that
+// bundle's name first ("<bundle>/<part>"), which tells apart parts several
+// seats share by name (a Titan's guns' barrels under each gun's own base).
+static std::string poseName(const world::ObjectTemplate* parent, const std::string& part)
+{
+	return parent && parent->typeName() == "RotationalBundle" ? parent->name() + "/" + part : part;
+}
+
+Mat4 LevelRenderer::posedLocal(const world::ObjectTemplate& root, const std::vector<uint16_t>& path, uint32_t object) const
+{
+	Mat4 local;
+	const world::ObjectTemplate* t = &root;
+	for (const uint16_t k : path) {
+		if (!t || k >= t->children().size()) {
+			break;
+		}
+		const world::ChildTemplate& child = t->children()[k];
+		Mat4 m = objectTransform(child.position, child.rotation) * local;
+		world::Vec3 offset, rotation;
+		anim::Matrix bone;
+		if (m_sources->partBone && m_sources->partBone(object, child.name, bone)) {
+			Mat4 boned;
+			std::copy(bone.begin(), bone.end(), boned.m.begin());
+			m = boned * local;
+		} else if (m_sources->partPose && m_sources->partPose(object, poseName(t, child.name), offset, rotation)) {
+			m = objectTransform(offset, rotation) * m;
+		}
+		local = m;
+		t = m_sources->templates.find(child.name);
+	}
+	return local;
 }
 
 std::shared_ptr<anim::Skeleton> LevelRenderer::skeleton(const io::FileManager& files, const std::string& path)
@@ -1001,9 +1050,47 @@ const LevelRenderer::AnimatedUVLook& LevelRenderer::animatedUVLook(const world::
 	return m_animatedUVLooks.emplace(&objectTemplate, look).first->second;
 }
 
+// Which children retail draws between ticks (0x0043dc40): a soldier, a
+// RotationalBundle (0x947d) or one of its kinds (their slot 0x4c answers
+// 0x947d through 0x00613bc0: Camera, Engine, FloatingBundle, Wing,
+// LandingGear; Rotor and Spring don't), a part on a bone (boneIndex,
+// template slot 0xc8, not -1) or a free camera. The others keep their
+// tick's place in their (blended) parent.
+static bool blendsBetweenTicks(const world::ObjectTemplate& t)
+{
+	static const char* const kTypes[] = {"Soldier", "RotationalBundle", "Camera", "Engine", "FloatingBundle", "Wing",
+		"LandingGear", "FreeCamera"};
+	const std::string& type = t.typeName();
+	if (std::find(std::begin(kTypes), std::end(kTypes), type) != std::end(kTypes)) {
+		return true;
+	}
+	const auto bone = t.settings().find("boneIndex");
+	return bone != t.settings().end() && std::atoi(bone->second.c_str()) >= 0;
+}
+
+// Each part's blend test and the nearest part above it (-1: the object).
+static void markBlendedParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
+	std::vector<uint8_t>& blended, std::vector<int>& parents, int parent, int depth)
+{
+	for (const world::ChildTemplate& child : objectTemplate.children()) {
+		const world::ObjectTemplate* t = depth < 8 ? sources.templates.find(child.name) : nullptr;
+		if (!t) {
+			continue;
+		}
+		const auto part = t->settings().find("geometryPart");
+		const int index = part != t->settings().end() ? std::atoi(part->second.c_str()) : -1;
+		const bool isPart = index > 0 && static_cast<size_t>(index) < blended.size();
+		if (isPart) {
+			blended[static_cast<size_t>(index)] = blendsBetweenTicks(*t);
+			parents[static_cast<size_t>(index)] = parent;
+		}
+		markBlendedParts(sources, *t, blended, parents, isPart ? index : parent, depth + 1);
+	}
+}
+
 void LevelRenderer::collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
 	const Mat4& relative, std::vector<Mat4>& parts, int depth, uint32_t object,
-	std::vector<AnimatedUVPart>* animated) const
+	std::vector<AnimatedUVPart>* animated, NodeTickBlend* tick) const
 {
 	if (depth > 8) {
 		return;
@@ -1013,24 +1100,40 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 		if (!childTemplate) {
 			continue;
 		}
-		Mat4 local = objectTransform(child.position, child.rotation) * relative;
+		Mat4 node = objectTransform(child.position, child.rotation); // in its parent
 		world::Vec3 offset, rotation;
 		anim::Matrix bone;
 		if (object != 0 && sources.partBone && sources.partBone(object, child.name, bone)) {
 			// boneIndex (0x0063d470 -> the part's slot 0xe8): the bone's
 			// local matrix is the part's.
-			Mat4 boned;
-			std::copy(bone.begin(), bone.end(), boned.m.begin());
-			local = boned * relative;
-		} else if (object != 0 && sources.partPose && sources.partPose(object, child.name, offset, rotation)) {
+			std::copy(bone.begin(), bone.end(), node.m.begin());
+		} else if (object != 0 && sources.partPose && sources.partPose(object, poseName(&objectTemplate, child.name), offset, rotation)) {
 			// A Spring with rotateUV keeps its mesh unturned: 0x006cace0
 			// and 0x006b7261 skip the set rotation (0x00614b50); its
 			// texture turns instead (AnimatedUV.h).
 			if (animatedUVLook(*childTemplate).rotateUV && childTemplate->typeName() == "Spring") {
 				rotation = {};
 			}
-			local = objectTransform(offset, rotation) * local;
+			node = objectTransform(offset, rotation) * node;
 		}
+		if (tick) {
+			// Its local matrix between the last two ticks, in its parent as
+			// drawn (0x0043ef30 on the children: slot 0xe4 / 0xe8).
+			std::vector<Mat4>& ticked = tick->instance.nodesTicked;
+			std::vector<Mat4>& previous = tick->instance.nodesPrevious;
+			const size_t i = tick->next++;
+			if (i >= ticked.size()) {
+				ticked.resize(i + 1, node);
+				previous.resize(i + 1, node);
+			} else if (tick->blend.ticked) {
+				previous[i] = ticked[i];
+			}
+			ticked[i] = node;
+			if (blendsBetweenTicks(*childTemplate)) {
+				node = blendTransform(previous[i], ticked[i], tick->blend.alpha);
+			}
+		}
+		const Mat4 local = node * relative;
 		if (animated) {
 			const AnimatedUVLook& look = animatedUVLook(*childTemplate);
 			if (look.settings.any()) {
@@ -1044,7 +1147,7 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 				parts[static_cast<size_t>(index)] = local;
 			}
 		}
-		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated);
+		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated, tick);
 	}
 }
 
@@ -1365,8 +1468,10 @@ void LevelRenderer::updateTerrainCells(const Camera& camera, const Frustum& frus
 	for (TerrainLodCell& cell : m_terrainCells) {
 		cell.visible = frustum.containsBox(cell.boundsMin, cell.boundsMax);
 	}
+	// Offscreen cells can cast into the cascades. Use the same stitched
+	// terrain at the view boundary in the color and shadow passes.
 	pickTerrainLods(m_terrainCells, m_terrainCellsPerSide, camera.position.x, camera.position.z,
-		m_terrainHeightAboveGround, m_terrainLodSwitch, settings.lod2Start);
+		m_terrainHeightAboveGround, m_terrainLodSwitch, settings.lod2Start, m_enh.csm);
 }
 
 // The surrounding terrain: each secondary heightmap of the cluster drawn
@@ -1942,6 +2047,8 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	const auto& sun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& gi = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
 	LightingUniforms lit = lighting(m_viewFog, lights, sun, gi, coverage ? 0.0f : m_undergrowthAlphaRef, true);
+	// RendDX9's undergrowth pass (0x1010e61e) uses the baked terrain sun.
+	std::copy(sun.begin(), sun.end(), lit.sunColor);
 	LightingUniforms unlit = lighting(m_viewFog, lights, sun, gi, coverage ? 0.0f : m_undergrowthAlphaRef, false);
 	if (coverage) {
 		lit.material[2] = unlit.material[2] = AlphaToCoverage::undergrowthAlphaScale(m_undergrowthAlphaRef);
@@ -2097,16 +2204,89 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
 			: blendTransform(o.previous, o.current, blend.alpha);
 	}
-	// A part's transform between its last two ticks, as its object's.
-	const auto blendParts = [&blend](Instance& instance) {
-		if (instance.partsTicked.size() != instance.parts.size()) {
+	// The collision parts holding decals: children of their objects, drawn
+	// between their ticks in them (0x0043ef30 over the tree).
+	{
+		std::map<std::pair<uint32_t, int>, ObjectBlend> parts;
+		if (m_sources->effects && m_sources->collisionPartFrame) {
+			for (const effects::Decal& decal : m_sources->effects->decals()) {
+				const std::pair<uint32_t, int> key {decal.object, decal.part};
+				effects::Mat3 r;
+				effects::Vec3 t;
+				if (decal.object == 0 || decal.part < 0 || parts.count(key) ||
+					!m_sources->collisionPartFrame(decal.object, decal.part, r, t)) {
+					continue;
+				}
+				Mat4 now;
+				for (int row = 0; row < 3; ++row) {
+					now.at(row, 0) = r.rows[static_cast<size_t>(row)].x;
+					now.at(row, 1) = r.rows[static_cast<size_t>(row)].y;
+					now.at(row, 2) = r.rows[static_cast<size_t>(row)].z;
+				}
+				now.at(3, 0) = t.x;
+				now.at(3, 1) = t.y;
+				now.at(3, 2) = t.z;
+				const auto was = m_decalPartBlend.find(key);
+				ObjectBlend o = was != m_decalPartBlend.end() ? was->second : ObjectBlend {now, now, now};
+				if (blend.ticked && was != m_decalPartBlend.end()) {
+					o.previous = o.current;
+				}
+				o.current = now;
+				o.drawn = blendTransform(o.previous, o.current, blend.alpha);
+				parts[key] = o;
+			}
+		}
+		m_decalPartBlend = std::move(parts);
+	}
+	if (m_sources->drawnPositions) {
+		// What the HUD projects (retail draws it while the objects are blended).
+		auto& out = *m_sources->drawnPositions;
+		out.clear();
+		for (const auto& [id, o] : m_objectBlend) {
+			if (o.drawn.m != o.current.m) {
+				out[id] = {o.drawn.at(3, 0), o.drawn.at(3, 1), o.drawn.at(3, 2)};
+			}
+		}
+	}
+	// Parts the game places itself, in their object (held weapons): each in
+	// the nearest part above it, between its last two ticks when retail
+	// would blend it (blendsBetweenTicks), placed in that part as drawn.
+	// A node between them without a part keeps its template place (only
+	// parts are placed), so it folds into the part below exactly: the slerp
+	// commutes with a fixed turn and the lerp with a fixed transform. (Retail
+	// would blend such a node itself if it had a boneIndex or a blended type;
+	// no shipped handheld template in either mod has one above a part.)
+	const auto blendParts = [this, &blend](Instance& instance) {
+		const size_t n = instance.parts.size();
+		if (instance.partsTicked.size() != n) {
 			instance.partsTicked = instance.partsPrevious = instance.parts;
+			instance.partsBlended.assign(n, 1);
+			instance.partsParent.assign(n, -1);
+			if (instance.partsTemplate) {
+				std::fill(instance.partsBlended.begin(), instance.partsBlended.end(), 0);
+				markBlendedParts(*m_sources, *instance.partsTemplate, instance.partsBlended, instance.partsParent, -1, 0);
+			}
 		} else if (blend.ticked) {
 			instance.partsPrevious.swap(instance.partsTicked);
 		}
 		instance.partsTicked = instance.parts;
-		for (size_t i = 0; i < instance.parts.size(); ++i) {
-			instance.parts[i] = blendTransform(instance.partsPrevious[i], instance.partsTicked[i], blend.alpha);
+		std::vector<uint8_t> done(n, 0);
+		const std::function<const Mat4&(size_t)> drawn = [&](size_t i) -> const Mat4& {
+			if (!done[i]) {
+				done[i] = 1; // a cycle can't occur (a template tree), but never recurse twice
+				const int p = instance.partsParent[i];
+				const Mat4 parentNow = p < 0 ? Mat4 {} : instance.partsTicked[static_cast<size_t>(p)];
+				const Mat4 parentBefore = p < 0 ? Mat4 {} : instance.partsPrevious[static_cast<size_t>(p)];
+				Mat4 local = instance.partsTicked[i] * affineInverse(parentNow);
+				if (instance.partsBlended[i]) {
+					local = blendTransform(instance.partsPrevious[i] * affineInverse(parentBefore), local, blend.alpha);
+				}
+				instance.parts[i] = p < 0 ? local : local * drawn(static_cast<size_t>(p));
+			}
+			return instance.parts[i];
+		};
+		for (size_t i = 0; i < n; ++i) {
+			drawn(i);
 		}
 	};
 	// Move instances with their objects.
@@ -2125,8 +2305,11 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			objectWorld = drawnTransform(*current);
 			hiddenInView = m_sources->hiddenInView && m_sources->hiddenInView(instance.object);
 		}
+		if (instance.posedRoot) {
+			instance.local = posedLocal(*instance.posedRoot, instance.posedPath, instance.object);
+		}
 		instance.world = instance.local * objectWorld;
-		instance.hidden = current->hidden() || hiddenInView;
+		instance.hidden = current->hidden() || hiddenInView || (!instance.source.empty() && current->childDisabled(instance.source));
 		const int look = m_sources->partLook && !instance.source.empty() ? m_sources->partLook(instance.object, instance.source) : 0;
 		instance.hidden = instance.hidden || look == 2;
 		const bool vehicleWreck = m_sources->vehicleWreckLook && m_sources->vehicleWreckLook(instance.object);
@@ -2210,9 +2393,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		if (instance.partsTemplate && m_sources->partPose) {
 			std::fill(instance.parts.begin(), instance.parts.end(), Mat4 {});
 			m_animatedUVParts.clear();
+			NodeTickBlend tick {instance, blend};
 			collectParts(*m_sources, *instance.partsTemplate, Mat4 {}, instance.parts, 0, instance.object,
-				&m_animatedUVParts);
-			blendParts(instance);
+				&m_animatedUVParts, &tick);
 			// The parts' animated UVs (0x0063b9b0, each object update): the
 			// distance each moved along its own z axis in the world.
 			instance.animatedUV = !m_animatedUVParts.empty();
@@ -2239,11 +2422,11 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			}
 		}
 	}
-	syncDebris();
-	syncPlaced();
+	syncDebris(blend);
+	syncPlaced(blend);
 }
 
-void LevelRenderer::syncPlaced()
+void LevelRenderer::syncPlaced(const TickBlend& blend)
 {
 	m_placedScratch.clear();
 	if (m_sources && m_sources->placedTemplates) {
@@ -2256,6 +2439,11 @@ void LevelRenderer::syncPlaced()
 		m_instances.end());
 	m_hadPlaced = !m_placedScratch.empty();
 	bool uploaded = false;
+	for (auto it = m_placedBlend.begin(); it != m_placedBlend.end();) {
+		const bool kept = std::any_of(m_placedScratch.begin(), m_placedScratch.end(),
+			[&it](const LevelSources::PlacedTemplate& p) { return p.key == it->first; });
+		it = kept ? std::next(it) : m_placedBlend.erase(it);
+	}
 	for (const LevelSources::PlacedTemplate& placed : m_placedScratch) {
 		if (!placed.objectTemplate || placed.objectTemplate->geometry().empty()) {
 			continue;
@@ -2277,6 +2465,16 @@ void LevelRenderer::syncPlaced()
 		instance.world.at(3, 0) = placed.position.x;
 		instance.world.at(3, 1) = placed.position.y;
 		instance.world.at(3, 2) = placed.position.z;
+		if (placed.key != 0) {
+			const auto [it, added] = m_placedBlend.try_emplace(placed.key, ObjectBlend {instance.world, instance.world, instance.world});
+			ObjectBlend& o = it->second;
+			if (blend.ticked && !added) {
+				o.previous = o.current;
+			}
+			o.current = instance.world;
+			instance.world = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
+				: blendTransform(o.previous, o.current, blend.alpha);
+		}
 		instance.local = instance.world;
 		instance.geometry = geometry;
 		instance.placed = true;
@@ -2296,7 +2494,7 @@ void LevelRenderer::syncPlaced()
 	}
 }
 
-void LevelRenderer::syncDebris()
+void LevelRenderer::syncDebris(const TickBlend& blend)
 {
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(), [](const Instance& i) { return i.debris; }),
 		m_instances.end());
@@ -2319,17 +2517,25 @@ void LevelRenderer::syncDebris()
 			continue;
 		}
 		Instance instance {gpuMesh, Mat4 {}, 0, Mat4 {}, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
+		// A piece is an object (a Particle template's): drawn between its
+		// ticks as the others (0x0043ef30), where it is after a 4 m drop.
+		effects::Vec3 position = piece.position;
+		effects::Mat3 rotation = piece.rotation;
+		if (blend.alpha != 1 && !tickBlendJumped(piece.previousPosition.y, piece.position.y)) {
+			position = piece.previousPosition + (piece.position - piece.previousPosition) * blend.alpha;
+			rotation = physics::slerpRotation(piece.previousRotation, piece.rotation, blend.alpha);
+		}
 		const effects::Vec3 scale = piece.scale();
 		const float axes[3] = {scale.x, scale.y, scale.z};
 		for (int row = 0; row < 3; ++row) {
-			const effects::Vec3& r = piece.rotation.rows[static_cast<size_t>(row)];
+			const effects::Vec3& r = rotation.rows[static_cast<size_t>(row)];
 			instance.world.at(row, 0) = r.x * axes[row];
 			instance.world.at(row, 1) = r.y * axes[row];
 			instance.world.at(row, 2) = r.z * axes[row];
 		}
-		instance.world.at(3, 0) = piece.position.x;
-		instance.world.at(3, 1) = piece.position.y;
-		instance.world.at(3, 2) = piece.position.z;
+		instance.world.at(3, 0) = position.x;
+		instance.world.at(3, 1) = position.y;
+		instance.world.at(3, 2) = position.z;
 		instance.local = instance.world;
 		instance.geometry = piece.look->geometry;
 		instance.fade = std::min(alpha, 1.0f);
@@ -2771,6 +2977,8 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.normal[0] = sprite.color[0] * light[0];
 					v.normal[1] = sprite.color[1] * light[1];
 					v.normal[2] = sprite.color[2] * light[2];
+					// The Enhanced shader uses the tangent slot for the unlit tint.
+					std::copy_n(sprite.color.data(), 3, v.tangent);
 					v.weight = sprite.color[3];
 					v.texCoord[0] = corner[0];
 					v.texCoord[1] = corner[1];
@@ -2810,6 +3018,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.normal[0] = w.color[0] * light[0];
 					v.normal[1] = w.color[1] * light[1];
 					v.normal[2] = w.color[2] * light[2];
+					std::copy_n(w.color.data(), 3, v.tangent);
 					v.weight = w.color[3];
 					v.lightmapCoord[0] = w.u;
 					v.lightmapCoord[1] = w.v;
@@ -3197,21 +3406,11 @@ void LevelRenderer::buildDecals()
 			if (decal.part >= 0) {
 				// On a collisionPart child: the part's own set, drawn at the
 				// part's matrix (its frame in the object's, then the object's).
-				effects::Mat3 r;
-				effects::Vec3 t;
-				if (!m_sources->collisionPartFrame || !m_sources->collisionPartFrame(decal.object, decal.part, r, t)) {
+				const auto part = m_decalPartBlend.find({decal.object, decal.part}); // syncObjects'
+				if (part == m_decalPartBlend.end()) {
 					continue;
 				}
-				Mat4 part;
-				for (int row = 0; row < 3; ++row) {
-					part.at(row, 0) = r.rows[static_cast<size_t>(row)].x;
-					part.at(row, 1) = r.rows[static_cast<size_t>(row)].y;
-					part.at(row, 2) = r.rows[static_cast<size_t>(row)].z;
-				}
-				part.at(3, 0) = t.x;
-				part.at(3, 1) = t.y;
-				part.at(3, 2) = t.z;
-				place = part * place;
+				place = part->second.drawn * place;
 			}
 			n = turn(n);
 			tangent = turn(tangent);
@@ -3416,14 +3615,14 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 		return;
 	}
 	LightingUniforms fog = lighting(m_viewFog, lights, lights.sunColor, lights.skyColor, 0, false);
-	// enhanced.particleShadows: the blended ones through enh_particle.frag, which
-	// takes a shaded particle's light over a sunlit one's (particleLight) in material.rgb.
+	// Enhanced shadows interpolate the directional light already baked into the
+	// vertices by particleLight. Pass the shaded minus sunlit light in material.rgb.
+	// Dividing by a floored sunlit value can amplify the color or flip its sign.
 	const bool shadowed = m_enh.particleShadows && m_enh.shadows.cascadeParams[0] > 0.5f;
 	if (shadowed) {
-		const bool unlit = m_particleSettings.particleSystemShaderQuality <= 1;
-		const float f = lights.defaultEffectLightAffectionFactor;
+		const float f = m_particleSettings.particleSystemShaderQuality <= 1 ? 0.0f : lights.defaultEffectLightAffectionFactor;
 		for (size_t i = 0; i < 3; ++i) {
-			fog.material[i] = unlit ? 1.0f : (1 + (lights.effectShadowColor[i] - 1) * f) / std::max(1 + (lights.effectSunColor[i] - 1) * f, 1e-3f);
+			fog.material[i] = (lights.effectShadowColor[i] - lights.effectSunColor[i]) * f;
 		}
 	}
 	ParticleUniforms uniforms {};
@@ -3577,6 +3776,14 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	const float overgrowthSeconds =
 		m_lastOvergrowthTicks ? std::min(static_cast<float>(overgrowthNow - m_lastOvergrowthTicks) / 1000.0f, 0.1f) : 0.0f;
 	m_lastOvergrowthTicks = overgrowthNow;
+	++m_glowFrame;
+	// The glow fade's frame time: RendDX9's +0x5d8, the frame's seconds the
+	// game hands the renderer (slot 10, 0x1002cef0), which BF2142.exe's loop
+	// clamps to 1/15 s (0x0040bd90: 0x00402dd0 at 1e-5..0x3d888889).
+	const uint64_t glowNow = SDL_GetTicks();
+	const float glowSeconds =
+		m_lastGlowTicks ? std::min(static_cast<float>(glowNow - m_lastGlowTicks) / 1000.0f, kRendererFrameSecondsMax) : 0.0f;
+	m_lastGlowTicks = glowNow;
 	const terrain::Heightmap* groundMap = m_sources ? m_sources->heightmaps.primary() : nullptr;
 	const float cameraAboveGround = groundMap && groundMap->loaded()
 		? camera.position.y - groundMap->heightAt(camera.position.x, camera.position.z)
@@ -3687,16 +3894,6 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			continue;
 		}
 		DrawItem item {&instance, instance.mesh, instance.lightmap, instance.lightmapTransform, interior};
-		// Not retail: RendDX9's occlusion queries (0x100050a0) serve only the
-		// sky dome's sun flare (0x100fd900), a terrain culler (0x1009e010)
-		// and ad impressions; a halo gets the per-pixel depth test alone.
-		if (instance.occlusionGlow && m_sources && m_sources->glowVisible && m_sources->enhanced
-			&& m_sources->enhanced->enabled && m_sources->enhanced->glowOcclusion) {
-			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
-			if (!m_sources->glowVisible(camera.position, source, instance.object)) {
-				continue;
-			}
-		}
 		if (m_distanceFadeOn && instance.object != 0 && !instance.overgrowth && !instance.debris) {
 			// 0x006fb320 on the objects in view; one faded out isn't drawn.
 			// A child instance uses its own mesh radius, so its distance must
@@ -3713,6 +3910,28 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			}
 			if (instance.distanceFade < 1.0f) {
 				item.fade = instance.fade * instance.distanceFade;
+			}
+		}
+		// After the distance fade: RendDX9 rays only what it draws (0x100c4ad6),
+		// and the object manager never hands it one faded out (0x006fb320).
+		if (instance.mesh->glow) {
+			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			const bool visible = !m_sources || !m_sources->glowVisible
+				|| m_sources->glowVisible(camera.position, source, instance.object);
+			const bool drawnLastFrame = instance.glowFrame != 0 && instance.glowFrame == m_glowFrame - 1;
+			instance.glowFade = glowFadeStep(instance.glowFade, visible, drawnLastFrame, glowSeconds);
+			if (instance.glowFade > kGlowShown) {
+				instance.glowFrame = m_glowFrame;
+			}
+		}
+		// Not retail: RendDX9's occlusion queries (0x100050a0) serve only the
+		// sky dome's sun flare (0x100fd900), a terrain culler (0x1009e010)
+		// and ad impressions; a depth-tested halo gets no ray of its own.
+		if (instance.occlusionGlow && m_sources && m_sources->glowVisible && m_sources->enhanced
+			&& m_sources->enhanced->enabled && m_sources->enhanced->glowOcclusion) {
+			const Vec3f source {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
+			if (!m_sources->glowVisible(camera.position, source, instance.object)) {
+				continue;
 			}
 		}
 		if (instance.overgrowth && m_sources) {
@@ -3839,7 +4058,8 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		}
 		m_drawList.push_back(item);
 	}
-	m_titanExteriorLods.endFrame();
+	m_titanExteriorLods.endFrame(m_sources && m_sources->enhanced && m_sources->enhanced->enabled
+		&& m_sources->enhanced->titanHullLods);
 	if (uploaded) {
 		m_gpu.flushUploads();
 	}
@@ -4235,31 +4455,25 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	placeTitanHemiMaps(camera);
 	const float seconds = static_cast<float>(SDL_GetTicks() - m_startTicks) / 1000.0f;
 	m_poses.clear();
-	// The shadow maps, before the world pass that reads them.
+	// The color, shadow and Enhanced depth passes share this terrain geometry.
+	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
+	const scene::RendererSettings rendererDefaults;
+	const scene::RendererSettings& renderer =
+		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
+	if (!m_terrainCells.empty()) {
+		updateTerrainCells(camera, frustum);
+	} else {
+		m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
+		const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
+		m_terrainHeightAboveGround = std::fabs(camera.position.y -
+			(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
+	}
 	renderShadows(commands, camera, lights, seconds);
 	const float aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
 	if (m_enh.csm) {
 		renderCascades(commands, camera, lights, seconds, aspect);
 	}
-	// The terrain's cells this frame (before the enhanced prepass, which draws them too).
-	const Frustum frustum = Frustum::fromViewProjection(viewProjection);
-	const scene::RendererSettings rendererDefaults;
-	const scene::RendererSettings& renderer =
-		m_sources && m_sources->renderer ? *m_sources->renderer : rendererDefaults;
-	bool terrainUpdated = false;
-	const auto updateTerrain = [&] {
-		terrainUpdated = true;
-		if (!m_terrainCells.empty()) {
-			updateTerrainCells(camera, frustum);
-		} else {
-			m_terrainLodSwitch = terrainLodSwitch(viewZoom(camera), renderer);
-			const terrain::Heightmap* heightmap = m_sources ? m_sources->heightmaps.primary() : nullptr;
-			m_terrainHeightAboveGround = std::fabs(camera.position.y -
-				(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
-		}
-	};
 	if (m_enh.prepass) {
-		updateTerrain();
 		renderEnhancedPrepass(commands, camera, viewProjection, seconds, aspect);
 	}
 	m_enh.aoBound = m_enh.ssao; // the world's opaque draws take the AO
@@ -4297,6 +4511,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const auto& terrainSun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& terrainGI = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
 	LightingUniforms terrainLit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, true);
+	// The terrain upload (0x100af918) and compiled roads (0x100bab4e)
+	// read the baked terrain sun independently of LightManager.enableSun.
+	std::copy(terrainSun.begin(), terrainSun.end(), terrainLit.sunColor);
 	LightingUniforms terrainUnlit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, false);
 	applyTerrainLights(terrainLit);
 	applyTerrainLights(terrainUnlit);
@@ -4342,9 +4559,6 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// LOD's delta and MORPHDELTAADDER the deltas a cell's stitched edge
 	// vertices take whole (0x1014d700): at LOD 1 the vertices that drop at
 	// LOD 1 move fully to it, at LOD 2 those that drop at LOD 2.
-	if (!terrainUpdated) {
-		updateTerrain();
-	}
 	const auto morphFor = [&](int lod, bool morph) {
 		const TerrainMorph m = terrainMorph(lod, morph, m_terrainLodSwitch, renderer, camera.position.x,
 			camera.position.z, m_terrainHeightAboveGround);
@@ -4730,12 +4944,14 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		static const std::vector<anim::Matrix> unposed;
 		const std::vector<anim::Matrix>& pose = bound->skinned ? poseFor(instance, seconds) : unposed;
 		for (const Submesh& submesh : bound->submeshes) {
-			if (queueFor(item, submesh) != queue) {
+			if (queueFor(item, submesh) != queue || (submesh.glow && instance.glowFade <= kGlowShown)) {
 				continue;
 			}
 			const bool leafCoverage = coverageLeaf(item, submesh);
 			if (leafCoverage) {
 				bindMeshPipeline(m_gpu.coverageMeshPipeline());
+			} else if (submesh.glow) {
+				bindMeshPipeline(m_gpu.glowMeshPipeline());
 			} else {
 				useMeshPipeline(queue, meshCulled(bound->bundled || bound->skinned, submesh.blended, submesh.leaf));
 			}
@@ -4765,6 +4981,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			}
 			applyMeshLights(uniforms, picked, pickedCount, lightKind);
 			materialUniforms(uniforms, submesh, item.drawnFade(), seconds);
+			if (submesh.glow) {
+				uniforms.tint[3] *= instance.glowFade; // BMadditive's Transparency (0x100c4b5f)
+			}
 			if (submesh.trunk) uniforms.material[2] += kMaterialTrunk;
 			specularUniforms(uniforms, submesh, camera, lights);
 			// RaShaderSTM: _POINTLIGHT_ forces _ENVMAP_ 0; RendDX9 sets 0x400 when the
@@ -4816,7 +5035,28 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			};
 			SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
 			bindMeshLayers(pass, &submesh, envMap);
+			if (submesh.glow) {
+				// RendDX9 0x100c4b94: take the inverse view direction as
+				// the normal, preserve the mesh's up as far as possible,
+				// and use its right as the reference near parallel.
+				const Vec3f normal = camera.forward() * -1.0f;
+				Vec3f up = normalize({instance.world.at(1, 0), instance.world.at(1, 1), instance.world.at(1, 2)});
+				if (dot(up, normal) > 0.99f) { // signed, as 0x100c4c09: an up facing away is kept
+					up = normalize({instance.world.at(0, 0), instance.world.at(0, 1), instance.world.at(0, 2)});
+				}
+				const Vec3f right = cross(up, normal);
+				up = cross(normal, right);
+				TransformUniforms halo = transforms;
+				halo.world.m = {right.x, right.y, right.z, 0, up.x, up.y, up.z, 0,
+					normal.x, normal.y, normal.z, 0, origin[0], origin[1], origin[2], 1};
+				halo.worldViewProjection = halo.world * viewProjection;
+				halo.sendParts = false; // retail supplies one billboard matrix
+				pushTransforms(commands, halo);
+			}
 			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+			if (submesh.glow) {
+				pushTransforms(commands, transforms);
+			}
 		}
 	};
 	for (const DrawItem& item : m_drawList) {
@@ -5139,7 +5379,9 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		}
 		pushTransforms(commands, transforms);
 		for (const Submesh& submesh : gpuMesh->submeshes) {
-			if (queueOf(submesh, 1.0f) != queue) {
+			// The Skadi's zoom HUD supplies the centered dot. Its bundled
+			// green arcs would draw a second, offset aiming mark.
+			if (queueOf(submesh, 1.0f) != queue || (scene.weaponZoomed && submesh.skadiReticle)) {
 				continue;
 			}
 			useModelPipeline(queue, meshCulled(gpuMesh->bundled || gpuMesh->skinned, submesh.blended, submesh.leaf));

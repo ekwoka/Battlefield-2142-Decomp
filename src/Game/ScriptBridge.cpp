@@ -3,6 +3,7 @@
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -469,6 +470,8 @@ ScriptValue ScriptBridge::playerParam(const std::string& name, int index, const 
 	if (name == "ping") {
 		return ScriptValue::integer(0);
 	}
+	if (name == "orderPoint") return ScriptValue::number(player.squadOrderPoints);
+	if (name == "maxOrderPoint") return ScriptValue::integer(static_cast<int>(player.squadOrderMax));
 	const auto& params = m_playerParams[index];
 	const auto it = params.find(name);
 	return it != params.end() ? it->second : ScriptValue::integer(0);
@@ -477,6 +480,14 @@ ScriptValue ScriptBridge::playerParam(const std::string& name, int index, const 
 void ScriptBridge::setPlayerParam(const std::string& name, int index, const ScriptValue& value)
 {
 	if (!playerValid(index)) {
+		return;
+	}
+	if (name == "orderPoint") {
+		m_world.addSquadOrderPoints(index, value.asNumber());
+		return;
+	}
+	if (name == "maxOrderPoint") {
+		m_world.setSquadOrderMax(index, static_cast<int>(std::clamp<int64_t>(value.asInt(), 0, INT32_MAX)));
 		return;
 	}
 	if (name == "isInsideCP" && index == m_world.localPlayer()) {

@@ -180,6 +180,8 @@ const char* pythonEvent(int id)
 constexpr float kSiloRangeMin = 10;
 constexpr float kSiloRangeMax = 2000;
 constexpr float kSiloFov = 179;
+constexpr float kSiloTrackingInput = 0.5f; // CP_CANNON.maxTrackingInput
+constexpr float kSiloCaptureDelay = 5; // AIDLL 0x10096970, checked by both trigger statements
 
 // The Titan sync's tunables (static initialisers 0x008e2b40-0x008e2d20).
 constexpr float kArrival = 5;          // *0x00a6af98
@@ -682,11 +684,11 @@ void GameWorld::buildTitanParts(Titan& titan, bool remote)
 }
 
 // A Titan mesh's parts at the projectile, vehicle and soldier LODs (in
-// that order; a LOD the mesh lacks gives none): each its points (the
-// vehicle LOD's first sub-geometry's, the others' every sub-geometry's)
-// and their materials, its box and radius about the Titan's origin, its
+// that order; a LOD the mesh lacks gives none) of its sub-geometry
+// `state` (0 whole, 1 a wreck's, 0x006e5df0): each its points and their
+// materials, its box and radius about the Titan's origin, its
 // collisionGroups and its own collision world at that LOD.
-std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodParts(const TitanMesh& m, uint32_t owner)
+std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodParts(const TitanMesh& m, uint32_t owner, size_t state)
 {
 	std::vector<std::shared_ptr<const TitanLodPart>> parts;
 	for (const physics::CollisionUser user :
@@ -708,7 +710,7 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 		auto part = std::make_shared<TitanLodPart>();
 		part->lod = static_cast<int>(user);
 		part->groups = static_cast<uint32_t>(m.groups);
-		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, static_cast<size_t>(m.geometry))) {
+		for (const physics::CollisionSubGeometry& sub : physics::collisionParts(*m.mesh, static_cast<size_t>(m.geometry), state)) {
 			const physics::CollisionLod* lod = physics::collisionLodFor(*m.mesh, sub, static_cast<uint32_t>(user));
 			if (!lod || lod->faces.empty()) {
 				continue;
@@ -730,7 +732,13 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 			continue;
 		}
 		part->mesh = std::make_shared<physics::CollisionWorld>();
-		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry));
+		// The merged soldier mesh moves with the Titan, but retail's
+		// contact callback receives the actual child (0x006c4513). A
+		// non-mobile Mesh child has a Static node (0x005f6c68).
+		const bool staticNode = user == physics::CollisionUser::Soldier && m.t
+			&& integer(*m.t, "hasMobilePhysics", 0) == 0;
+		part->mesh->addMesh(*m.mesh, user, m.rotation, m.position, owner, m.materials, static_cast<size_t>(m.geometry), state,
+			staticNode);
 		for (const physics::Vec3& p : part->points) {
 			part->radius = std::max(part->radius, std::sqrt(physics::lengthSquared(p)));
 		}
@@ -739,10 +747,38 @@ std::vector<std::shared_ptr<const GameWorld::TitanLodPart>> GameWorld::titanLodP
 	return parts;
 }
 
+namespace {
+
+// A mesh instance's sub-geometry under a wreck (0x006e5df0(1)): its
+// geometry's second when it has more than one, else none (-1: the object's
+// flag 0x100 cleared, out of the scene's rays).
+int wreckState(const physics::CollisionMeshFile& mesh, size_t geometry)
+{
+	return geometry < mesh.geometries.size() && mesh.geometries[geometry].subGeometries.size() > 1 ? 1 : -1;
+}
+
+} // namespace
+
+// A part's wreck (0x00654120 -> 0x00654070) runs 0x006539f0(node, 1) over
+// its subtree: each node's collision instance (+0x4c) goes to its wreck
+// sub-geometry (slot 0x30, 0x006e5df0), or with a single one out of the
+// rays (slot 0x54(0, 0x100)); a repair runs it with 0 (sub-geometry 0, back
+// in the rays). Every node of a shipped Titan part's subtree has two, the
+// second its wreck's shape: none for the forcefields (the corridor and
+// spawn room fields; a single face for the shields), the consoles' and the
+// core room doors' wrecks, the guns' and their control stations' (the
+// gun's only place within the repair tool's reach inside the hull,
+// 0x004cc380 walking a hit node up to the nearest armour).
+int GameWorld::titanMeshState(const Titan& titan, const TitanMesh& m)
+{
+	const bool wrecked = std::any_of(m.chain.begin(), m.chain.end(),
+		[&](int part) { return part > 0 && titan.parts[static_cast<size_t>(part)].off; });
+	return wrecked ? wreckState(*m.mesh, static_cast<size_t>(m.geometry)) : 0;
+}
+
 // The Titan's body (made by addBodies from its root's mesh) gets the whole
-// tree's soldier and projectile LODs, each face reporting its part; a
-// part whose armour is down takes its subtree's collision with it
-// (0x00651c60 hides a wrecked node's children; the core room's doors open).
+// tree's soldier and projectile LODs, each face reporting its part, at the
+// sub-geometry its parts' wrecks leave it (titanMeshState).
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
 	++titan.meshVersion;
@@ -812,18 +848,15 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		}
 		return false;
 	};
-	const auto live = [&](const TitanMesh& m) {
-		return std::none_of(m.chain.begin(), m.chain.end(), [&](int part) {
-			return part > 0 && titan.parts[static_cast<size_t>(part)].off;
-		});
-	};
+	const auto live = [&](const TitanMesh& m) { return titanMeshState(titan, m) >= 0; };
 	const bool teamFaces = std::any_of(titan.meshes.begin(), titan.meshes.end(),
 		[&](const TitanMesh& m) { return (m.groups & 0x300) != 0 && live(m) && soldierLod(*m.mesh); });
 	for (int team = 0; team < 2 && teamFaces; ++team) {
 		teams[team] = std::make_shared<physics::CollisionWorld>();
 	}
 	for (TitanMesh& m : titan.meshes) {
-		if (!live(m)) {
+		const int state = titanMeshState(titan, m);
+		if (state < 0) {
 			continue;
 		}
 		const uint32_t owner = m.node >= 0 ? titan.parts[static_cast<size_t>(m.node)].id : titan.object;
@@ -831,16 +864,17 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		// own groups): the vehicle LOD for the vehicles, the soldier LOD
 		// (the decks and floors) for the parachute and the dropped objects
 		// (otherCollisionLod 2), the projectile LOD for 0. Made once per
-		// mesh: a rebuild (a part down or back) only picks the live ones,
-		// and the merged worlds below take the parts' faces (each part's
-		// world is the mesh's addMesh at that LOD; a LOD without a part
-		// adds no faces).
-		if (!m.lodPartsMade) {
-			m.lodParts = titanLodParts(m, owner);
-			m.lodPartsMade = true;
+		// mesh and sub-geometry: a rebuild (a part down or back) only picks
+		// the live ones, and the merged worlds below take the parts' faces
+		// (each part's world is the mesh's addMesh at that LOD; a LOD
+		// without a part adds no faces).
+		if (!m.lodPartsMade[state]) {
+			m.lodParts[state] = titanLodParts(m, owner, static_cast<size_t>(state));
+			m.lodPartsMade[state] = true;
 		}
-		const auto faces = [&m](physics::CollisionUser user) -> const physics::CollisionWorld* {
-			for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts) {
+		const std::vector<std::shared_ptr<const TitanLodPart>>& lodParts = m.lodParts[state];
+		const auto faces = [&lodParts](physics::CollisionUser user) -> const physics::CollisionWorld* {
+			for (const std::shared_ptr<const TitanLodPart>& part : lodParts) {
 				if (part->lod == static_cast<int>(user)) {
 					return part->mesh.get();
 				}
@@ -861,14 +895,15 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		if (const physics::CollisionWorld* lod = faces(physics::CollisionUser::Projectile)) {
 			projectile->append(*lod);
 		}
-		vehicleParts.insert(vehicleParts.end(), m.lodParts.begin(), m.lodParts.end());
+		vehicleParts.insert(vehicleParts.end(), lodParts.begin(), lodParts.end());
 	}
 	titan.vehicleParts = std::move(vehicleParts);
-	// The soldier faces that came or went: those of each mesh that went
-	// down or came back (a mesh's LOD parts sit in the Titan's frame).
-	std::vector<char> nowLive(titan.meshes.size());
+	// The soldier faces that came or went: those of each mesh whose state
+	// changed, its old sub-geometry's and its new one's (a mesh's LOD parts
+	// sit in the Titan's frame).
+	std::vector<int> nowLive(titan.meshes.size());
 	for (size_t i = 0; i < titan.meshes.size(); ++i) {
-		nowLive[i] = live(titan.meshes[i]);
+		nowLive[i] = titanMeshState(titan, titan.meshes[i]);
 	}
 	if (titan.meshesLive.size() == nowLive.size() && body->soldierMesh) {
 		Titan::MeshChange& change = titan.meshChanges.back();
@@ -879,24 +914,32 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 			if (nowLive[i] == titan.meshesLive[i]) {
 				continue;
 			}
-			if (!m.lodPartsMade) {
-				change.known = false;
-				break;
-			}
-			for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts) {
-				if (part->lod != static_cast<int>(physics::CollisionUser::Soldier) || !part->mesh) {
+			for (const int state : {titan.meshesLive[i], nowLive[i]}) {
+				if (state < 0) {
 					continue;
 				}
-				part->mesh->forEachFace([&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
-					for (const physics::Vec3& p : {a, b, c}) {
-						if (!change.changed) {
-							change.low = change.high = p;
-							change.changed = true;
-						}
-						change.low = {std::min(change.low.x, p.x), std::min(change.low.y, p.y), std::min(change.low.z, p.z)};
-						change.high = {std::max(change.high.x, p.x), std::max(change.high.y, p.y), std::max(change.high.z, p.z)};
+				if (!m.lodPartsMade[state]) {
+					change.known = false;
+					break;
+				}
+				for (const std::shared_ptr<const TitanLodPart>& part : m.lodParts[state]) {
+					if (part->lod != static_cast<int>(physics::CollisionUser::Soldier) || !part->mesh) {
+						continue;
 					}
-				});
+					part->mesh->forEachFace([&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
+						for (const physics::Vec3& p : {a, b, c}) {
+							if (!change.changed) {
+								change.low = change.high = p;
+								change.changed = true;
+							}
+							change.low = {std::min(change.low.x, p.x), std::min(change.low.y, p.y), std::min(change.low.z, p.z)};
+							change.high = {std::max(change.high.x, p.x), std::max(change.high.y, p.y), std::max(change.high.z, p.z)};
+						}
+					});
+				}
+			}
+			if (!change.known) {
+				break;
 			}
 		}
 	}
@@ -905,15 +948,19 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
 	body->projectileMesh = projectile;
-	// The cannons' collisionPart children, posed with the guns; those
-	// under a part that is down go with it.
+	// The cannons' collisionPart children, posed with the guns; under a
+	// wrecked part each at its own instance's wreck sub-geometry
+	// (0x006539f0 over the tree), or out with a single one.
 	if (!titan.collisionPartsBuilt) {
 		buildTitanCollisionParts(titan, *body);
 		titan.collisionPartsBuilt = true;
 	}
 	for (Body::PartMesh& part : body->partMeshes) {
-		part.off = part.source >= 0 && static_cast<size_t>(part.source) < titan.meshes.size()
-			&& !live(titan.meshes[static_cast<size_t>(part.source)]);
+		const bool under = part.source >= 0 && static_cast<size_t>(part.source) < titan.meshes.size()
+			&& titanMeshState(titan, titan.meshes[static_cast<size_t>(part.source)]) != 0;
+		const int state = under && part.file ? wreckState(*part.file, part.geometry) : 0;
+		part.off = state < 0;
+		part.wrecked = state > 0;
 	}
 	// The radius (0x00562090): half the diagonal of the root's box across x
 	// and z; its bottom (0x005aa090: the box's lowest y).
@@ -1109,12 +1156,12 @@ bool GameWorld::titanMeshChange(uint32_t titan, uint32_t since, physics::Vec3& l
 	return false;
 }
 
-std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team) const
+std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team, uint32_t objectId) const
 {
 	std::vector<TitanPartInfo> list;
 	for (const Titan& titan : m_titans) {
 		const world::Object* object = m_objects.find(titan.object);
-		if (titan.team != team || !object) {
+		if (titan.team != team || !object || (objectId && titan.object != objectId)) {
 			continue;
 		}
 		const physics::Mat3 rotation =
@@ -1889,8 +1936,9 @@ void GameWorld::stepTitanWreck(Titan& titan, float seconds)
 	}
 }
 
-// A part's armour out (0x00654120's wreck branch): its subtree's nodes are
-// put out (0x00651c60), its Python component's onDestroyEvent is raised
+// A part's armour out (0x00654120's wreck branch): its subtree's nodes
+// take their wreck look and collision (0x00651c60 / 0x006539f0,
+// titanPartLook / titanMeshState), its Python component's onDestroyEvent is raised
 // with the Titan (the scripts take the root: TitanPartDestroyed for a
 // console, TitanCoreDestroyed, TitanWeaponDestroyed). The Titan's own: it
 // is a wreck, out of the sync's list (0x005ab390 skips wrecks); its
@@ -1932,12 +1980,28 @@ void GameWorld::titanPartWrecked(Titan& titan, int index, int attacker)
 	}
 }
 
+std::vector<physics::Vec3> GameWorld::titanPartMeshes(uint32_t id) const
+{
+	std::vector<physics::Vec3> at;
+	const Titan* titan = nullptr;
+	int index = 0;
+	if (!titanPart(id, titan, index)) {
+		return at;
+	}
+	for (const TitanMesh& m : titan->meshes) {
+		if (m.node == index && m.t) {
+			at.push_back(titanToWorld(titan->object, m.position));
+		}
+	}
+	return at;
+}
+
 // The heal of a Titan part (the armour's 0x00655a00 on the node's own
 // armour: canBeRepaired, a wreck only with canBeRepairedWhenWreck; the
 // Titan's root never, 0x00561d90). Out of the wreck (0x00654120's
 // repaired branch: 0x00654070 puts the subtree's nodes back, +0x15 off)
-// the part's collision is back and, as 0x004bc410 has it after the heal,
-// its Python component's onRepairEvent goes with the Titan and the
+// the part's collision is whole again and, as 0x004bc410 has it after the
+// heal, its Python component's onRepairEvent goes with the Titan and the
 // repairer (the gun hubs' TitanWeaponRepaired; the consoles' and cores'
 // TitanPart/CoreRepaired can't, their wrecks being unrepairable).
 bool GameWorld::healTitanPart(uint32_t id, float percent, int repairer)
@@ -2099,34 +2163,64 @@ void GameWorld::registerSilo(world::Object& object)
 	Silo silo;
 	silo.object = object.id();
 	silo.team = object.team();
-	// The firearm: depth first, the parents' offsets summed to the barrel's
-	// pivot (the bundles turn about their own origins), the muzzle the
-	// firearm's offset plus fire.projectileStartPosition along the aim.
-	const world::ObjectTemplate* firearm = nullptr;
-	std::function<bool(const world::ObjectTemplate&, physics::Vec3, int)> find = [&](const world::ObjectTemplate& node,
-																					   physics::Vec3 at, int depth) {
-		for (const world::ChildTemplate& child : node.children()) {
-			const world::ObjectTemplate* c = m_templates.find(child.name);
-			if (!c || depth > 6) {
-				continue;
+	// Keep the authored path to the firearm so the launch uses the same
+	// moving base, barrel and muzzle as the scene.
+	const std::function<const world::ObjectTemplate*(const world::ObjectTemplate&, int)> findFirearm =
+		[&](const world::ObjectTemplate& node, int depth) -> const world::ObjectTemplate* {
+			if (depth > 6) {
+				return nullptr;
 			}
-			const physics::Vec3 offset {child.position.x, child.position.y, child.position.z};
-			if (sameName(c->typeName(), "GenericFireArm") && setting(*c, "projectileTemplate")) {
-				firearm = c;
-				silo.muzzle = at;
-				const std::string* start = setting(*c, "fire.projectileStartPosition");
-				silo.muzzleLength = std::sqrt(physics::lengthSquared(offset)) + (start ? vec3Of(*start).z : 0.0f);
-				return true;
+			for (const world::ChildTemplate& child : node.children()) {
+				const world::ObjectTemplate* t = m_templates.find(child.name);
+				if (!t) {
+					continue;
+				}
+				silo.firearmPath.push_back(child);
+				if (sameName(t->typeName(), "GenericFireArm") && setting(*t, "projectileTemplate")) {
+					return t;
+				}
+				if (const world::ObjectTemplate* firearm = findFirearm(*t, depth + 1)) {
+					return firearm;
+				}
+				silo.firearmPath.pop_back();
 			}
-			if (find(*c, at + offset, depth + 1)) {
-				return true;
-			}
-		}
-		return false;
-	};
-	find(*t, {}, 0);
+			return nullptr;
+		};
+	const world::ObjectTemplate* firearm = findFirearm(*t, 0);
 	if (!firearm) {
 		return;
+	}
+	const auto axisOf = [](const world::ObjectTemplate& part, bool yaw) {
+		RotationAxis axis;
+		const auto component = [&](const char* property) {
+			const std::string* value = setting(part, property);
+			const physics::Vec3 vector = value ? vec3Of(*value) : physics::Vec3 {};
+			return yaw ? vector.x : vector.y;
+		};
+		axis.minRotation = component("minRotation");
+		axis.maxRotation = component("maxRotation");
+		axis.maxSpeed = component("maxSpeed");
+		axis.acceleration = component("acceleration");
+		return axis;
+	};
+	physics::Vec3 position;
+	physics::Mat3 rotation;
+	for (const world::ChildTemplate& child : silo.firearmPath) {
+		position += rotation.transform({child.position.x, child.position.y, child.position.z});
+		rotation = physics::Mat3::fromYawPitchRoll({child.rotation.x, child.rotation.y, child.rotation.z}) * rotation;
+		if (sameName(child.name, "Missile_Silo_base")) {
+			silo.yawAxis = axisOf(*m_templates.find(child.name), true);
+			silo.yawPivot = position;
+			silo.yawFrame = rotation;
+		} else if (sameName(child.name, "Missile_Silo_Barrel")) {
+			const world::ObjectTemplate& barrel = *m_templates.find(child.name);
+			if (integer(barrel, "startAutoRotateOnEnter", 0) != 0) {
+				silo.pitchAxis = axisOf(barrel, false);
+			}
+		}
+	}
+	if (const std::string* start = setting(*firearm, "fire.projectileStartPosition")) {
+		silo.projectileStart = vec3Of(*start);
 	}
 	silo.reloadTime = number(*firearm, "ammo.reloadTime", 120);
 	silo.launchDelay = number(*firearm, "fire.fireLaunchDelay", 0);
@@ -2140,7 +2234,7 @@ void GameWorld::registerSilo(world::Object& object)
 	silo.missile = projectileFor(*setting(*firearm, "projectileTemplate"));
 	silo.loaded = true; // a full magazine (ammo.magSize 1)
 	silo.number = static_cast<int>(m_silos.size()) + 1;
-	m_silos.push_back(silo);
+	m_silos.push_back(std::move(silo));
 }
 
 std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
@@ -2170,11 +2264,10 @@ std::vector<GameWorld::SiloInfo> GameWorld::missileSilos() const
 	return list;
 }
 
-// Each silo: a change of hands reloads it (reloadOnTeamChange), the
-// magazine refills ammo.reloadTime after a launch (autoReload,
-// reloadWithoutPlayer); loaded and held by a team, it fires at the enemy
-// Titan in range (10 to 2000 m) and in its view (179 degrees about the
-// barrel's upward aim), the missile leaving fire.fireLaunchDelay later.
+// The retail team change resets the weapon's reload state and preserves
+// its magazine (0x005cc320 -> AIDLL 0x1004c2a0 -> 0x005f3a40). While the
+// controller's five-second timer is active it keeps resetting the reload
+// and inhibits both trigger statements (AIDLL 0x1009a6d5 and 0x1008f1e0).
 void GameWorld::stepSilos(float seconds)
 {
 	for (auto it = m_silos.begin(); it != m_silos.end();) {
@@ -2187,49 +2280,69 @@ void GameWorld::stepSilos(float seconds)
 		++it;
 		if (object->team() != silo.team) {
 			silo.team = object->team();
-			silo.loaded = false;
-			silo.reloadLeft = silo.reloadTime;
+			silo.captureDelay = kSiloCaptureDelay;
+			silo.reloadLeft = silo.loaded ? 0 : silo.reloadTime;
 			silo.launchIn = -1;
 		}
+		const float reloadStep = std::max(0.0f, seconds - silo.captureDelay);
+		silo.captureDelay = std::max(0.0f, silo.captureDelay - seconds);
 		if (!silo.loaded) {
-			silo.reloadLeft -= seconds;
+			silo.reloadLeft -= reloadStep;
 			if (silo.reloadLeft <= 0) {
 				silo.loaded = true;
 				silo.reloadLeft = 0;
 			}
 		}
+		const float oldYaw = silo.yaw, oldPitch = silo.pitch;
+		const bool owned = (silo.team == 1 || silo.team == 2) && titanModeOn();
+		if (owned) {
+			rotationAxisStep(silo.pitchAxis, 1, seconds, silo.pitch, silo.pitchRate);
+		}
+		const Titan* enemy = nullptr;
+		if (owned) {
+			for (const Titan& titan : m_titans) {
+				if (titan.team == 3 - silo.team && !titan.wrecked) {
+					enemy = &titan;
+				}
+			}
+		}
+		float yawInput = 0;
+		if (enemy) {
+			const physics::Vec3 from {object->position().x, object->position().y, object->position().z};
+			const physics::Vec3 d = titanAim(*enemy) - from;
+			const float range = std::sqrt(physics::lengthSquared(d));
+			const float up = range > 0 ? std::asin(std::clamp(d.y / range, -1.0f, 1.0f)) * 57.29578f : 90.0f;
+			if (range < kSiloRangeMin || range > kSiloRangeMax || 90.0f - up > kSiloFov * 0.5f) {
+				enemy = nullptr;
+			} else if (silo.yawAxis.maxSpeed > 0) {
+				const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll(
+					{object->rotation().x, object->rotation().y, object->rotation().z});
+				const physics::Vec3 local = silo.yawFrame.untransform(turn.untransform(d) - silo.yawPivot);
+				const float bearing = std::atan2(local.x, local.z) * 57.29578f;
+				const float error = std::remainder(bearing - silo.yaw, 360.0f);
+				yawInput = std::clamp(error / 5.0f, -kSiloTrackingInput, kSiloTrackingInput);
+			}
+		}
+		rotationAxisStep(silo.yawAxis, yawInput, seconds, silo.yaw, silo.yawRate);
+		if (oldYaw != silo.yaw || oldPitch != silo.pitch) {
+			if (Body* body = findBody(silo.object)) {
+				body->partsPosed = 0; // an earlier query may have cached this tick's pose
+			}
+		}
 		if (silo.launchIn >= 0) {
 			silo.launchIn -= seconds;
-			const Titan* target = titanByObject(silo.target);
 			if (silo.launchIn <= 0) {
 				silo.launchIn = -1;
+				const Titan* target = titanByObject(silo.target);
 				if (target && !target->wrecked) {
 					launchMissile(silo, *target);
 				}
 			}
 			continue;
 		}
-		if (!silo.loaded || (silo.team != 1 && silo.team != 2) || !silo.missile || !titanModeOn()) {
+		if (!silo.loaded || !silo.missile || !enemy || silo.captureDelay > 0 || silo.pitch > silo.pitchAxis.minRotation) {
 			continue;
 		}
-		const Titan* enemy = nullptr;
-		for (const Titan& titan : m_titans) {
-			if (titan.team == 3 - silo.team && !titan.wrecked) {
-				enemy = &titan;
-			}
-		}
-		if (!enemy) {
-			continue;
-		}
-		const physics::Vec3 from {object->position().x, object->position().y, object->position().z};
-		const physics::Vec3 d = titanAim(*enemy) - from;
-		const float range = std::sqrt(physics::lengthSquared(d));
-		const float up = range > 0 ? std::asin(std::clamp(d.y / range, -1.0f, 1.0f)) * 57.29578f : 90.0f;
-		if (range < kSiloRangeMin || range > kSiloRangeMax || 90.0f - up > kSiloFov * 0.5f) {
-			continue;
-		}
-		silo.loaded = false;
-		silo.reloadLeft = silo.reloadTime;
 		silo.target = enemy->object;
 		// The shot: the firearm's batch fire (0x005c3cb0) in fire state 4
 		// calls its Radio's fire message (slot 0x54, 0x00656dd0): from the
@@ -2246,24 +2359,31 @@ void GameWorld::stepSilos(float seconds)
 	}
 }
 
-// The launch: the barrel (Missile_Silo_Barrel: setMinRotation 0/-90/0,
-// setAcceleration 0/-50/0, startAutoRotateOnEnter) turns on its own to its
-// limit, straight up; the missile leaves its muzzle upwards at the
-// firearm's velocity, locked onto the Titan (the wire-guided LPTargetComp's
-// TitanBeacon on it), and turns to it once it tracks.
+// The barrel auto-rotates to its upright limit. Launch from the firearm's
+// posed muzzle, then let the projectile's Titan beacon guide it in flight.
 void GameWorld::launchMissile(Silo& silo, const Titan& target)
 {
 	const world::Object* object = m_objects.find(silo.object);
 	if (!object || !silo.missile) {
 		return;
 	}
-	const physics::Vec3 base {object->position().x, object->position().y, object->position().z};
-	const physics::Mat3 turn =
-		physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
-	const physics::Vec3 pivot = base + turn.transform(silo.muzzle);
-	const physics::Vec3 direction {0, 1, 0};
+	physics::Vec3 muzzle {object->position().x, object->position().y, object->position().z};
+	physics::Mat3 turn = physics::Mat3::fromYawPitchRoll(
+		{object->rotation().x, object->rotation().y, object->rotation().z});
+	for (const world::ChildTemplate& child : silo.firearmPath) {
+		muzzle += turn.transform({child.position.x, child.position.y, child.position.z});
+		const physics::Mat3 placed = physics::Mat3::fromYawPitchRoll(
+			{child.rotation.x, child.rotation.y, child.rotation.z});
+		world::Vec3 offset, pose;
+		if (partPose(silo.object, child.name, offset, pose)) {
+			turn = physics::Mat3::fromYawPitchRoll({pose.x, pose.y, pose.z}) * placed * turn;
+		} else {
+			turn = placed * turn;
+		}
+	}
+	const physics::Vec3 direction = turn.rows[2];
 	Projectile p;
-	p.origin = pivot + direction * silo.muzzleLength;
+	p.origin = muzzle + turn.transform(silo.projectileStart);
 	p.position = p.origin;
 	p.velocity = direction * silo.velocity;
 	p.settings = silo.missile;
@@ -2275,6 +2395,8 @@ void GameWorld::launchMissile(Silo& silo, const Titan& target)
 	p.newTarget = true; // the follow's target set (0x005ed260)
 	p.yaw = std::atan2(direction.x, direction.z) * 57.29578f;
 	m_projectiles.push_back(p);
+	silo.loaded = false;
+	silo.reloadLeft = silo.reloadTime;
 	++silo.launched;
 }
 
@@ -3164,23 +3286,22 @@ int GameWorld::titanPartLook(uint32_t object, const std::string& path) const
 		if (found == titan.nodes.end()) {
 			return 0;
 		}
-		// A node under a part that is down (a wrecked console's forcefield)
-		// goes with it (0x00651c60 hides a wrecked node's children).
+		// A wrecked part's subtree, its own node among them, switches to the
+		// wreck (0x00654120 -> 0x00651c60(node, 1) over the tree, slot 0xec's
+		// children): a node whose render object has two geometries or more
+		// (slot 0x74) shows its wreck geometry (slot 0xcc(1)), one of fewer
+		// is hidden (slot 0x54(0, 2), the drawn flag), which the drawing
+		// tells by the mesh. Every shipped Titan node under an armoured part
+		// (the guns, their control stations and wreck HUDs, the consoles'
+		// forcefields, the shields, the core doors) has three.
 		for (const int index : found->second.chain) {
-			if (index <= 0 || index == found->second.own) {
+			if (index <= 0) {
 				continue;
 			}
-			const TitanPart& above = titan.parts[static_cast<size_t>(index)];
-			if (above.off || above.state >= 1) {
-				return 2;
+			const TitanPart& part = titan.parts[static_cast<size_t>(index)];
+			if (part.off || part.state >= 1) {
+				return 1;
 			}
-		}
-		if (found->second.own > 0) {
-			const TitanPart& part = titan.parts[static_cast<size_t>(found->second.own)];
-			if (part.off && part.kind == TitanPartInfo::Shield) {
-				return 2;
-			}
-			return part.state >= 1 ? 1 : 0;
 		}
 		return 0;
 	}

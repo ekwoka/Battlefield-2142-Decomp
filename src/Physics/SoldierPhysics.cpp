@@ -392,7 +392,7 @@ bool SoldierBody::collideWithMesh(const CollisionWorld& mesh, const Mover* mover
 				onPush((mover ? mover->pointVelocity(contact.point) : Vec3 {}) * soldier::kPushScale);
 			}
 			if (onContact
-				&& !onContact({mover ? mover->owner : 0, relative, normal, contact.point, material, contact.material})) {
+				&& !onContact({mover ? mover->owner : 0, relative, normal, contact.point, material, contact.material, contact.staticNode})) {
 				return false;
 			}
 		}

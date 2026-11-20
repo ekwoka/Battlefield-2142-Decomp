@@ -215,6 +215,34 @@ private:
 	const game::GameWorld& m_round;
 };
 
+// The calls a soldier that is down makes (BF2142.exe), each through the
+// game's slot 0xd8 (0x0042d220) as Radio.callForMedic's: "revive" on
+// TCLocalRevive or TCAutoLocalRevive, and the Spotted event to the team.
+// - 0x37, as it goes down (its event 0x18 in 0x00587b90, 0x00587de8..
+//   0x00587e2e): when it has made no call yet (+0x330 0), said by a
+//   server for a bot (game logic slot 0x144, player slot 0x68) or by the
+//   local player's own game; it counts (+0x330 1);
+// - 0x36, while down (0x00585df0): a fresh press of c_PIFire (input 8,
+//   the latch +0x358 at 0x00645720), the local player's only, while
+//   +0x330 < 3 (so 2 after the automatic call), each counting.
+// The revive (event 0x19, +0x320 back to 0) clears +0x330; a new soldier
+// starts at 0 too.
+class ReviveCalls {
+public:
+	// A look at `player` (its living soldier, 0 while down; man down or not, the fire held;
+	// `sends`: this game says his calls). The call to make, 0 none.
+	int step(int player, uint32_t soldier, bool down, bool fire, bool sends);
+	void clear() { m_players.clear(); } // a new round: its object handles count from 1 again
+
+private:
+	struct State {
+		uint32_t soldier = 0;
+		int count = 0; // +0x330
+		bool down = false, fire = false;
+	};
+	std::map<int, State> m_players;
+};
+
 // What Radio.sendSpottedMessage spots and says (0x007c8160).
 // - The crosshair object (0x0075be30 with the HUD's ray 0x0075bfe0): the
 //   ray meets an object; when it and its root are canBeSpotted (vehicleHud

@@ -227,7 +227,8 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Mouse wheel | Item list: scroll through the kit (in a vehicle, where its HUD allows it), then fire to take the selected item; zoomed in with a rocket launcher that has a range counter, the airburst distance up / down |
 | E | Enter or leave a vehicle nearby |
 | F1 … F8 | Change seats |
-| F / X | In a seat: next weapon / flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |
+| F | Cycle weapons on foot or in the current seat |
+| X | In a seat: flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |
 | C | Cycle vehicle cameras (living infantry stays in first person) |
 | Enter | Open or close deployment; its Suicide button requests redeployment |
 | 7 | Select frag grenades when equipped; left button throws (G is kit pickup/drop) |
@@ -453,11 +454,14 @@ The rest only change what you see or hear.
 | `particleShadows` | on | graphics | Smoke and dust take the cascades' shadows (with `csm`). | no |
 | `particleLights` | on | graphics | Smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps). | no |
 | `glowOcclusion` | on | graphics | A lamp's additive halo is skipped while the line from the camera to its centre is blocked; the original only depth-tests halos per pixel. | no |
+| `titanHullLods` | on | graphics | A Titan hull half drawn this frame takes its own LOD when the other half was culled, so a far Titan whose front half faded out draws whole; the original keeps the culled half's stale LOD. | no |
 | `prepass` | off | graphics | The depth, normal and motion prepass even when neither `taa` nor `ssao` reads it. | no |
-| `tickBlend` | off | graphics | Objects and the camera are drawn between the 30 Hz simulation ticks, as the original's frame does (0x0043f170). Without it each frame shows the last tick (only a ridden missile's camera is smoothed). | no |
+| `tvEffect` | off | graphics | Experimental: a guided round's view gets the TVEffect pass (grey, rolled by noise bands, rows shifted sideways so vertical edges lean). The original's renderer never runs it and shows the plain view. | no |
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
 | `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
 | `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
+| `botPilots` | on | bots | A gunship's bot pilot picks the best target its guns can hurt (a vehicle, an infantry group, an aircraft, an enemy Titan's gun hubs) and flies shallow attack runs at it; the original's pilots mostly fly their waypoints and fire only when a target lines up. | yes |
+| `botCommander` | on | bots | In Titan mode a team with bots and no commander has its Titan moved and its commander's tools used for it. | yes |
 | `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
 | `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
 | `chaseRoll` | on | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
@@ -493,6 +497,11 @@ feeds the simulation.
   restarts in the new perspective's slot when the camera switches between
   first and third person; the original keeps it in the slot it started in
   until the trigger is released.
+- **Doppler:** a moving source's speed is held to half the speed of sound
+  over the Doppler factor, so a round diving at you (an orbital strike's
+  shells) rises at most an octave. The original passes the full velocity
+  (dropped only when an axis reaches 300), and its pitch shoots up just
+  before the impact.
 - **Steam Audio occlusion:** with a Steam Audio build (see
   [Steam Audio (optional)](#steam-audio-optional)), walls and buildings
   between you and a sound muffle it, simulated against the level's static
@@ -507,18 +516,16 @@ feeds the simulation.
   already turn it on; alone it costs a pass and changes nothing on screen.
 - **`hudWidescreen`:** it changes the HUD's layout, and is only meant for a
   mod without Remaster's own widescreen fix; turn it on if you want it.
-- **`tickBlend`:** drawing between ticks is what the original does, but the
-  rewrite's version (the objects, and every game camera with its own
-  history) is still experimental, so by default each frame shows the last
-  tick.
+- **`tvEffect`:** the original's renderer has the TVEffect pass but nothing
+  calls it, so the original never shows it; it stays off unless you want it.
 
 ### Parity checking
 
 `tools/parity-check.sh [seconds] [extra game args...]` runs the same headless
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
-(`botRecovery`, `botMovement`, `botTitan`, `guidedCameraEase`, `cornerSteer`,
-`passengerWeapons`, `softLanding`) turned off. It compares the state
+(`botRecovery`, `botMovement`, `botTitan`, `botCommander`, `botPilots`, `guidedCameraEase`,
+`cornerSteer`, `passengerWeapons`, `softLanding`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
 simulation. Anything added to the enhanced mode either leaves the
 fingerprint alone or gets its own option, listed in the script.

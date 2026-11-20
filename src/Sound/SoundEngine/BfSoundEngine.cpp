@@ -12,6 +12,7 @@
 #include "SoundTweaks.h"
 
 #include <algorithm>
+#include <limits>
 #include <cctype>
 #include <cfloat>
 #include <climits>
@@ -164,10 +165,9 @@ void BfSoundEngine::setMaxVoices(int count)
 	else if (count < 2) {
 		count = 2;
 	}
-	int voices = count + static_cast<int>(std::lround(soundTweaks().get(Tweak::MinFreeSources)));
-	if (m_provider) {
-		voices = std::min(voices, m_provider->maxVoices() - 1);
-	}
+	const int reserve = static_cast<int>(std::lround(soundTweaks().get(Tweak::MinFreeSources)));
+	const int providerLimit = m_provider ? m_provider->maxVoices() - 1 : std::numeric_limits<int>::max();
+	const int voices = static_cast<int>(std::min<int64_t>(static_cast<int64_t>(count) + reserve, providerLimit));
 	m_maxVoicesInUse = voices;
 	setMaxSources(voices);
 }

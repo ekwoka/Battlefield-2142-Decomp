@@ -27,6 +27,7 @@
 #pragma once
 
 #include <algorithm>
+#include <iterator>
 
 namespace dice::hfe::render {
 
@@ -86,19 +87,30 @@ public:
 	{
 		if (part >= 1 && part <= 4) {
 			m_recorded[part - 1] = distanceLod;
+			m_seen[part - 1] = true;
 		}
 		const int paired = part < 3 ? m_pairs[0] : m_pairs[1];
 		return std::min(paired, lodCount);
 	}
-	// Once a frame, after the draws (0x100bb470).
-	void endFrame()
+	// Once a frame, after the draws (0x100bb470). Retail keeps a culled
+	// part's last record (only the constructor 0x100bb5f0 and 0x100baf40
+	// write it), so a far Titan whose front half the distance fade dropped
+	// draws its back at the front's stale LOD: 0 when the front was never
+	// drawn, the back half alone. `drawnOnly` (enhanced.titanHullLods, not
+	// retail) pairs a part drawn this frame with its own LOD instead.
+	void endFrame(bool drawnOnly = false)
 	{
-		m_pairs[0] = std::min(m_recorded[0], m_recorded[1]);
-		m_pairs[1] = std::min(m_recorded[2], m_recorded[3]);
+		for (int pair = 0; pair < 2; ++pair) {
+			const int a = pair * 2, b = a + 1;
+			m_pairs[pair] = drawnOnly && m_seen[a] != m_seen[b] ? m_recorded[m_seen[a] ? a : b]
+																: std::min(m_recorded[a], m_recorded[b]);
+		}
+		std::fill(std::begin(m_seen), std::end(m_seen), false);
 	}
 
 private:
 	int m_recorded[4] = {0, 0, 0, 0};
+	bool m_seen[4] = {false, false, false, false};
 	int m_pairs[2] = {0, 0};
 };
 

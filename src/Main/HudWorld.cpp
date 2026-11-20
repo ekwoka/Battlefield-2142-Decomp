@@ -1,4 +1,5 @@
 #include "HudWorld.h"
+#include "HudMenusVehicles.h"
 
 #include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
@@ -159,10 +160,17 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.alive = p.alive;
 	out.respawnIn = p.alive ? 0 : std::max(0.0f, static_cast<int32_t>(p.spawnTick - m_world.serverTick()) / 30.0f);
 	out.hitIndicator = p.local ? hitIndicator : 0;
+	out.hitDirection = p.local ? hitDirection : 0;
+	out.hitDirectionHits = p.local ? hitDirectionHits : 0;
 	out.kills = p.kills;
 	out.deaths = p.deaths;
 	out.teamKills = p.teamKills;
 	out.squad = p.squad;
+	if (p.local) {
+		out.squadOrderPoints = m_world.squadOrderPoints();
+		out.squadOrderMax = m_world.squadOrderMax();
+		out.fieldUnlockCredits = m_world.fieldUnlockCredits();
+	}
 	out.squadLeader = p.squadLeader;
 	out.commander = p.commander;
 	out.rank = p.rank;
@@ -577,9 +585,15 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 	if (!playerInfo(localPlayer(), me) || !me.alive) {
 		return w;
 	}
-	if (me.vehicle) {
+	const auto seats = me.vehicle ? m_round.vehicleSeats(me.vehicle) : std::vector<game::GameWorld::SeatLayout> {};
+	// A passenger seat that leaves the fire to the soldier's own weapon
+	// (enhanced.passengerWeapons, not retail) holds the kit's firearm.
+	const world::Object* occupied = vehicle();
+	const bool personalChute = menu::usingPersonalParachute(occupied ? occupied->objectTemplate() : nullptr);
+	const bool kitHeld = !me.vehicle || personalChute
+		|| (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size() && m_round.passengerWeapon(seats[static_cast<size_t>(me.seat)]));
+	if (!kitHeld) {
 		// A seat's gun (its template's weapon).
-		const auto seats = m_round.vehicleSeats(me.vehicle);
 		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
 			const auto& seat = seats[static_cast<size_t>(me.seat)];
 			w.weapon = m_round.templates().find(seat.weapon);
@@ -736,7 +750,8 @@ bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
 	out.battery = std::max(0.0f, battery);
 	out.active = m_abilityScan.active && !m_abilityScan.targets.empty();
 	for (const uint32_t target : m_abilityScan.targets) {
-		out.targets.push_back(out.kitAmmo ? 1.0f : objectHealth(target));
+		const float health = out.kitAmmo ? 1.0f : objectHealth(target);
+		out.targets.push_back(health < 0 ? std::nanf("") : health); // NaN: no armour
 	}
 	return true;
 }
@@ -807,6 +822,11 @@ std::vector<int> RemoteHudWorld::revealedPlayers(int) const
 	return m_world.radarPlayers();
 }
 
+std::vector<int> RemoteHudWorld::squadReportedPlayers() const
+{
+	return m_world.squadReportedPlayers();
+}
+
 std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
 {
 	std::vector<uint32_t> out;
@@ -818,10 +838,10 @@ std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
 	return out;
 }
 
-void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects)
+void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects, bool tvEffect)
 {
 	game::GameWorld::ProjectileCamera camera;
-	effects.tv = round.projectileCamera(player, camera);
+	effects.tv = tvEffect && round.projectileCamera(player, camera);
 }
 
 } // namespace dice::hfe::host

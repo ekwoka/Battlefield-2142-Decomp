@@ -644,8 +644,11 @@ void FireArm::shareMagazine(const FireArm& from, bool mags)
 
 bool FireArm::selectable() const
 {
+	// 0x005f39c0 and the post-shot 0x005f4a40 ask the ammo component
+	// whether it can reload. For replenishing ammo (0x005d79a0), a hub
+	// that just spent its ability battery cannot.
 	return !(m_settings.toggleWhenNoAmmo && m_settings.magSize >= 0 && m_rounds <= 0 && m_reloadLeft <= 0
-		&& !(m_mags > 0 || m_settings.nrOfMags < 0));
+		&& ((m_mags <= 0 && m_settings.nrOfMags >= 0) || !batteryAllowsReload()));
 }
 
 bool FireArm::startReload()
@@ -783,7 +786,7 @@ std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& p
 		TracerLook look = tracerLook(*projectile.settings, projectile.position, projectile.velocity, projectile.origin,
 			projectile.tracerStart, projectile.tracerOffset, projectile.tracerHit);
 		if (look.shown) {
-			out.push_back({projectile.settings->tracerGeometry, look});
+			out.push_back({projectile.settings->tracerGeometry, look, projectile.serial});
 		}
 	}
 	return out;

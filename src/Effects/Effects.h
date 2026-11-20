@@ -496,6 +496,7 @@ struct MeshSprite {
 	float size; // signed mesh scale (negative values mirror the geometry)
 	std::array<float, 4> color;
 	float stretch = 1; // along its z (directionalScale)
+	uint32_t key = 0;  // a placed mesh's owner (a round's serial): drawn between its last two ticks
 };
 
 // "decal" templates (ObjectTemplate.create decal): what a material cell's
@@ -749,6 +750,10 @@ struct DebrisPiece {
 	const DebrisPieceTemplate* look = nullptr;
 	Vec3 position, velocity, spin; // spin: radians a second about the world's axes
 	Mat3 rotation;
+	// Before this frame's ticks: a piece is an object, drawn between them
+	// (0x0043ef30).
+	Vec3 previousPosition;
+	Mat3 previousRotation;
 	float age = 0, life = 10, size = 1, transparency = 0, gravity = 1, drag = 0;
 	bool resting = false;
 	physics::RigidBody body;   // its physics node (position, rotation, velocity, spin mirror it)
@@ -843,6 +848,14 @@ public:
 	// The anchor's object is gone: its emitters stop where they are.
 	void releaseAnchor(uint32_t anchor);
 	void update(float seconds);
+	// Retail moves the particles and ages the decals in RendDX9 each frame
+	// (0x10028ae0 -> the manager's slot 0x2c, 0x1009a4c0), by the frame's
+	// time, while the objects are drawn between their ticks (0x0043f170 ..
+	// 0x0043f610): on, update leaves those to frame, which also places the
+	// attached systems where their anchors are drawn (alpha between the
+	// last two setAnchor ticks) and draws the placed meshes there.
+	void setParticlesPerFrame(bool on) { m_particlesPerFrame = on; }
+	void frame(float seconds, float alpha);
 
 	// What the emitters read (null: the defaults): the manager's settings,
 	// the wind, the water level (forceToWaterSurface) and the camera (the
@@ -999,17 +1012,14 @@ public:
 		}
 		for (const auto& [geometry, sprites] : m_placedMeshes) {
 			if (!sprites.empty()) {
-				draw(geometry, true, sprites);
+				draw(geometry, true, placedAsDrawn(sprites));
 			}
 		}
 	}
 	// Meshes placed from outside, replaced each tick (the projectiles'
 	// tracers, GameWorld::placeTracers): drawn by forEachMeshGroup after the
 	// mesh systems', added. A sprite's rotation rows may carry a scale.
-	void setPlacedMeshes(std::vector<std::pair<std::string, std::vector<MeshSprite>>> groups)
-	{
-		m_placedMeshes = std::move(groups);
-	}
+	void setPlacedMeshes(std::vector<std::pair<std::string, std::vector<MeshSprite>>> groups);
 	// Calls `draw` for each group of sprites sharing a texture and blending
 	// (the heat shimmer's with `shimmer`: forEachShimmerGroup), faded by
 	// distance from `view` when it has settings.
@@ -1092,8 +1102,25 @@ private:
 	struct Anchor {
 		Vec3 position;
 		Mat3 rotation;
+		Vec3 previousPosition; // before this frame's ticks (the frame's blend)
+		Mat3 previousRotation;
 	};
+	// At the first tick after a frame, every anchor's previous place is
+	// where it is (retail keeps each object's last transform every tick).
+	void captureAnchors();
 	void placeAttached(Emitter& emitter) const;
+	void placeAttached(Emitter& emitter, const Anchor& place) const;
+	Anchor drawnAnchor(const Anchor& anchor) const;
+	void stepEmitters(float seconds);
+	const std::vector<MeshSprite>& placedAsDrawn(const std::vector<MeshSprite>& sprites) const;
+	bool m_particlesPerFrame = false;
+	float m_frameAlpha = 1;
+	// Frames drawn (frame()): the ticks between two frames blend from the
+	// state before the first of them (0x0043f170's alpha spans all of them).
+	uint32_t m_frames = 0;
+	uint32_t m_anchorsFrame = ~0u, m_placedFrame = ~0u, m_debrisFrame = ~0u;
+	std::map<uint32_t, MeshSprite> m_placedPrevious; // by key, before this frame's ticks
+	mutable std::vector<MeshSprite> m_placedDrawn;
 	std::map<const world::ObjectTemplate*, BundleModifiers> m_bundleModifiers;
 	const ParticleTemplate* particleTemplate(const world::ObjectTemplate& t);
 	void spawnTemplate(const world::ObjectTemplate& t, const Vec3& position, const Mat3& rotation, int depth, View view,
@@ -1265,7 +1292,8 @@ public:
 		};
 		std::vector<WheelContact> wheels;
 		// The weapons in its tree that fired a round this tick (template
-		// names): the fire's event 0 to each weapon's children, which starts
+		// names): the fire's event 0 to each weapon's children (and theirs,
+		// as under a barrel Bundle), which starts
 		// the bundles whose startOnEffects is 0 (0x0061a4e0: the muzzle
 		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
 		struct WeaponFire { std::string weapon, seat; };
