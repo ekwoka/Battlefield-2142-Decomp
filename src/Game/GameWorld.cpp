@@ -2171,8 +2171,8 @@ std::vector<GameWorld::VehicleInfo> GameWorld::vehicleList()
 			continue;
 		}
 		const VehicleLayout& layout = vehicleLayout(*object->objectTemplate());
-		// A silo's fixed body has a layout seat but no entry (mayEnter): none free for the bots.
-		const bool enterable = !flag(*object->objectTemplate(), "isMissileSilo", false);
+		// No EntryPoint (a silo's fixed body): no way in, so no seat free for the bots.
+		const bool enterable = !layout.entries.empty();
 		int free = 0;
 		for (size_t i = 0; enterable && i < layout.seats.size(); ++i) {
 			free += i >= body.occupants.size() || body.occupants[i] < 0 ? 1 : 0;
@@ -7834,8 +7834,7 @@ bool GameWorld::enterOnSpawn(Player& player, world::Object& soldier, const physi
 		if (seat < 0) {
 			continue;
 		}
-		const std::vector<VehicleLayout::Entry> centre {{{0, 0, 0}, radius}};
-		for (const VehicleLayout::Entry& entry : layout.entries.empty() ? centre : layout.entries) {
+		for (const VehicleLayout::Entry& entry : layout.entries) {
 			const physics::Vec3 at = body.body.position + body.body.rotation.transform(entry.position);
 			const float d = physics::lengthSquared(at - from);
 			if (d <= best || (only && !nearest)) {
@@ -13548,11 +13547,6 @@ bool GameWorld::mayEnter(const Body& body, int team) const
 {
 	const world::Object* object = m_objects.find(body.object);
 	const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
-	// A silo has no EntryPoint (retail enters only through those, 0x005a98e0); its
-	// fixed body (for the turning launcher) would otherwise take the 4 m centre fallback.
-	if (t && flag(*t, "isMissileSilo", false)) {
-		return false;
-	}
 	if (!t || object->team() == team || object->team() == 0 || !sameName(t->typeName(), "PlayerControlObject")) {
 		return true;
 	}
@@ -13686,9 +13680,8 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		if (seat < 0) {
 			continue;
 		}
-		// No entry points (unusual): within 4 m of the centre.
-		const std::vector<VehicleLayout::Entry> fallback {{{0, 0, 0}, 4}};
-		for (const VehicleLayout::Entry& entry : layout.entries.empty() ? fallback : layout.entries) {
+		// Only through its EntryPoints (0x005a98e0); a silo or a seat part has none.
+		for (const VehicleLayout::Entry& entry : layout.entries) {
 			// A seat's own entry leads to that seat only; a Titan has no other.
 			if ((entry.seat >= 0 && !freeAt(body, static_cast<size_t>(entry.seat))) || (titan && entry.seat < 0)) {
 				continue;
@@ -13739,8 +13732,7 @@ bool GameWorld::vehicleInReach(int id) const
 		if (!anyFree) {
 			continue;
 		}
-		const std::vector<VehicleLayout::Entry> fallback {{{0, 0, 0}, 4}};
-		for (const VehicleLayout::Entry& entry : layout.entries.empty() ? fallback : layout.entries) {
+		for (const VehicleLayout::Entry& entry : layout.entries) {
 			if ((entry.seat >= 0 && !freeAt(static_cast<size_t>(entry.seat))) || (titan && entry.seat < 0)) {
 				continue;
 			}

@@ -349,6 +349,13 @@ struct Range {
 		world->startRound();
 	}
 	long count(const char* event) const { return std::count(events.begin(), events.end(), event); }
+	// A soldier gets in only through an EntryPoint (0x005a98e0): one at the centre.
+	void addEntry(world::ObjectTemplate& vehicle, float radius = 4)
+	{
+		templates.registerType(99, "EntryPoint");
+		templates.create("EntryPoint", vehicle.name() + "_entry")->settings()["entryRadius"] = std::to_string(radius);
+		vehicle.children().push_back({vehicle.name() + "_entry", {}, {}});
+	}
 };
 
 TEST(GameWorld_ShippedGrenadeAndRorschAnimationTiming)
@@ -5074,6 +5081,7 @@ TEST(GameWorld_TargetObjectOffAtOnceForTheLocalLeaver)
 		heat->settings()["disableWhenEmptyVehicle"] = "1";
 		heat->settings()["disableWhenEmptyVehicleDelay"] = "5";
 		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		range.addEntry(*crate);
 		makeMobile(*crate, "crate_mesh");
 		crate->children().push_back({"crate_engine", {}, {}});
 		crate->children().push_back({"HeatObject", {}, {}});
@@ -5492,6 +5500,7 @@ TEST(GameWorld_RestrictedExit)
 		range.templates.registerType(23, "Engine");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["soldierExitLocation"] = "-3/0/0";
@@ -5549,6 +5558,7 @@ struct ExitRange : Range {
 		templates.registerType(23, "Engine");
 		templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		jeep = templates.create("PlayerControlObject", "jeep");
+		addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["soldierExitLocation"] = "-3/0/0";
@@ -5793,6 +5803,7 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["armor.maxHitPoints"] = "100";
@@ -5858,6 +5869,7 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->settings()["armor.maxHitPoints"] = "100";
 		jeep->settings()["seatInformation"] = "jeep 0/0.5/0.5 0/0/0";
@@ -5949,6 +5961,7 @@ TEST(GameWorld_KitAbilityInAVehicleResuppliesAmmoOnce)
 	range.templates.registerType(23, "Engine");
 	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	range.addEntry(*jeep);
 	makeMobile(*jeep, "jeep_mesh");
 	jeep->settings()["seatInformation"] = "jeep 0/0.5/0.5 0/0/0";
 	jeep->settings()["autoUseAbility"] = "1";
@@ -6042,6 +6055,7 @@ TEST(GameWorld_KitAbilityInAVehicleRearmsOtherSeats)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->settings()["armor.maxHitPoints"] = "100";
 		jeep->settings()["seatInformation"] = "jeep 0/0.5/0 0/0/0";
@@ -6393,6 +6407,7 @@ TEST(GameWorld_CanBeRepaired)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["armor.maxHitPoints"] = "100";
@@ -6989,6 +7004,7 @@ TEST(GameWorld_OpenSeatLook)
 	range.templates.registerType(23, "Engine");
 	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	range.addEntry(*jeep);
 	makeMobile(*jeep, "jeep_mesh");
 	jeep->settings()["seatInformation"] = "jeep 0/1/0 0/0/0";
 	jeep->children().push_back({"jeep_engine", {}, {}});
