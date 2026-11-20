@@ -321,6 +321,25 @@ public:
 	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
 	// (0x005912c0); PlayerInfo::hitIndicator of the local player.
 	float hitIndicator = 0;
+	// Our hit direction (0x00596ed0: a record carrying it raises HUD event
+	// 0x39 when its count +0x1d4 was 0, then sets it to 2; each record
+	// counts it down): PlayerInfo::hitDirection / hitDirectionHits.
+	float hitDirection = 0;
+	uint32_t hitDirectionHits = 0;
+	int hitDirectionRecords = 0;
+	void ownHitDirection(bool has, float radians)
+	{
+		if (has) {
+			hitDirection = radians;
+			if (hitDirectionRecords == 0) {
+				++hitDirectionHits;
+			}
+			hitDirectionRecords = 2;
+		}
+		if (hitDirectionRecords > 0) {
+			--hitDirectionRecords;
+		}
+	}
 
 	bool joined() const override { return true; }
 	int localPlayer() const override;

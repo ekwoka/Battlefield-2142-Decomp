@@ -2932,6 +2932,7 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 	}
 	s.spawnTick = m_tick + static_cast<uint32_t>(std::ceil(std::max(0.0f, info.respawnIn) * 30));
 	s.hitIndicator = m_round->takeHitIndicator(player); // slot 0x210 (0x0059b480)
+	s.hasHitDirection = m_round->takeHitDirection(player, s.hitDirection); // +0x1d0 while +0x1d4 lasts
 	// What the player gave (the ability bar's flags, set by the game
 	// logic's heal 0x004bc410 and ammo 0x004bd5f0): +0x16a ammo, +0x168
 	// healed, +0x169 repaired; +0x16b is RTTeam's (slot 0x284), never set.

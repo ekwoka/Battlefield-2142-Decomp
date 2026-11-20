@@ -1985,6 +1985,16 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else {
 		g_weaponHud.hide(hud);
 	}
+	// The hit direction arrow (HitDirectionHud: HUD event 0x39 per hit
+	// taken, 0x00449d80 each frame with the view's heading).
+	{
+		static dice::hfe::menu::HitDirectionHud arrow;
+		game::GameWorld::PlayerInfo self;
+		const bool known = world.playerInfo(world.localPlayer(), self);
+		arrow.update(dt, known ? self.hitDirectionHits : arrow.hits, self.hitDirection, viewHeading.value_or(self.yaw));
+		hud.set("HitDirectionShow", arrow.show ? 1 : 0);
+		hud.set("HitDirectionAngle", arrow.angle);
+	}
 	// The hit indicator (0x007be6e0): with the crosshair shown, its alpha
 	// the local player's (slot 0x90, +0x2a4), shown while not 0.
 	if (hud.number("CrosshairIconShow") != 0) {
@@ -2020,10 +2030,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	g_itemList.items.clear();
 	g_itemList.inHand = -1;
 	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me) && me.alive && !inVehicle) {
-		std::vector<dice::hfe::menu::SelectItem> items;
-		for (const auto& [slot, name] : me.carried) {
-			items.push_back({slot, dice::hfe::menu::hudSetting(round.templates().find(name), "weaponHud.selectIcon"), true});
-		}
+		auto items = dice::hfe::menu::kitSelectItems(me.carried,
+			[&round](const std::string& name) { return round.templates().find(name); });
 		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
 			const world::ObjectTemplate* now = nullptr;
 			for (const auto& [slot, name] : me.carried) {
@@ -7356,7 +7364,7 @@ int runGame(Options& options, Session& session)
 					} else if (op == "nextitem" || op == "previtem") {
 						act.itemStep = pressNow ? (op == "nextitem" ? 1 : -1) : 0;
 					} else if (op == "weapon") {
-						act.toggleWeapon = pressNow; // F: a seat's next weapon
+						act.toggleWeapon = pressNow; // F: next weapon
 					} else if (op == "firemode") {
 						act.toggleFireRate = pressNow;
 					} else if (op == "flare") {
@@ -7526,6 +7534,9 @@ int runGame(Options& options, Session& session)
 				// slot 0x20c(1), the alpha to 1).
 				if (state && state->hasOwn && state->own.hitIndicator && remoteHud) {
 					remoteHud->hitIndicator = 1;
+				}
+				if (state && state->hasOwn && remoteHud) {
+					remoteHud->ownHitDirection(state->own.hasHitDirection, state->own.hitDirection);
 				}
 				if (state && record.vehicle != 0 && !state->groups.empty()
 					&& state->groups.front().kind == net::NetworkableKind::SimpleObject) {

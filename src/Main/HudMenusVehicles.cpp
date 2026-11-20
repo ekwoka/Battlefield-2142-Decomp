@@ -718,6 +718,22 @@ void ItemSelection::update(hud::HudManager& hud, float dt)
 
 // --- The vehicle HUD ---
 
+std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find)
+{
+	std::vector<SelectItem> items;
+	for (const auto& [slot, name] : carried) {
+		std::string icon = hudSetting(find(name), "weaponHud.selectIcon");
+		// The stock parachute launcher has no weapon HUD and uses the
+		// dedicated slot 9 input. Keep its empty row out of the weapon list.
+		if (slot == 9 && icon.empty()) {
+			continue;
+		}
+		items.push_back({slot, std::move(icon), true});
+	}
+	return items;
+}
+
 std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
 	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
 	const std::vector<std::pair<int, std::string>>& carried)
@@ -727,13 +743,10 @@ std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat,
 		fire += w.group == 0 ? 1 : 0;
 		alt += w.group == 1 ? 1 : 0;
 	}
-	std::vector<SelectItem> items;
 	if (fire == 0) {
-		for (const auto& [slot, name] : carried) {
-			items.push_back({slot, hudSetting(find(name), "weaponHud.selectIcon"), true});
-		}
-		return items;
+		return kitSelectItems(carried, find);
 	}
+	std::vector<SelectItem> items;
 	const int group = flag(seatTemplate, "vehicleHud.useSelectionIcons", false) && alt > fire ? 1 : 0;
 	for (const auto& w : seat.weapons) {
 		if (w.group == group) {

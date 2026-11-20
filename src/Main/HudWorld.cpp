@@ -159,6 +159,8 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	out.alive = p.alive;
 	out.respawnIn = p.alive ? 0 : std::max(0.0f, static_cast<int32_t>(p.spawnTick - m_world.serverTick()) / 30.0f);
 	out.hitIndicator = p.local ? hitIndicator : 0;
+	out.hitDirection = p.local ? hitDirection : 0;
+	out.hitDirectionHits = p.local ? hitDirectionHits : 0;
 	out.kills = p.kills;
 	out.deaths = p.deaths;
 	out.teamKills = p.teamKills;

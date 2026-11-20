@@ -627,6 +627,11 @@ public:
 		// The hit indicator's alpha (player +0x2a4: 1 at a hit, falling 3 a
 		// second, slot 12 0x005912c0); the crosshair's HitIndicatorIcon.
 		float hitIndicator = 0;
+		// Where the last hit came from (player +0x1d0, radians, atan2 of x
+		// over z from the soldier) and how many have been taken (each one
+		// HUD event 0x39, HitDirectionShow).
+		float hitDirection = 0;
+		uint32_t hitDirectionHits = 0;
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
 		float aimPitch = 0;      // degrees, up positive: the look's (the input's)
@@ -1200,6 +1205,9 @@ public:
 	// carries the flag, read and cleared by slot 0x210 (0x0059b480).
 	void showHitIndicator(int player);
 	bool takeHitIndicator(int player);
+	// The hit direction for the next own-state record (its +0x1d4 count
+	// down, 0x00594cc0): false once both records went.
+	bool takeHitDirection(int player, float& radians);
 	// The sea's height, or none (false).
 	bool waterLevel(float& level) const
 	{
@@ -3615,6 +3623,7 @@ private:
 		int inHand = -1; // index into carried
 		int previousSlot = -1; // the slot drawn before (0x005883d0's pick: soldier +0x1f4)
 		bool selectHeld = false;
+		bool cycleWeaponHeld = false;
 		bool abilityActive = false; // the gadget in hand is working this tick
 		uint32_t aiAbilityTarget = 0; // a bot's: what its AI treats (setAiAbilityTarget)
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
@@ -3633,6 +3642,11 @@ private:
 		// sends (+0x2a8).
 		float hitIndicator = 0;
 		bool hitIndicatorFlag = false;
+		// The hit direction (+0x1d0, radians), the own-state records that
+		// still carry it (+0x1d4, 2 at a hit) and the hits taken.
+		float hitDirection = 0;
+		int hitDirectionSends = 0;
+		uint32_t hitDirectionHits = 0;
 		// What he last gave (abilityBar): player +0x168 healed or repaired,
 		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160. Received
 		// stamps clear the flag (healHitPoints, the supply crates' refills).
@@ -4032,7 +4046,8 @@ private:
 	// -> 0x0062b750): its vertical regulation over what lies under it.
 	void hoverProjectile(Projectile& projectile, float seconds);
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
-		int attacker = -1, bool splash = false); // the attacking player; an explosion's splash
+		int attacker = -1, bool splash = false, // the attacking player; an explosion's splash
+		const physics::Vec3* source = nullptr); // where the hit came from (the hit direction)
 	std::vector<std::unique_ptr<Player>> m_players; // by id
 	Player* m_player = nullptr; // the local player
 	bool m_addingLocal = false; // spawnPlayer is adding it (addPlayer sets m_player before PlayerConnect)

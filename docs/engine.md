@@ -17374,9 +17374,16 @@ commander's EMP strike firearm. The rewrite does this in
 `ObjectEffects::groundTrigger` with the ground probe, which gives no
 normal, so the effect stands upright and faces the bundle's forward.
 Event 0 itself is done too: GameWorld lists each vehicle weapon that
-fired a round (`takeObjectWeaponFires`), and ObjectEffects starts that
-weapon's child bundles whose startOnEffects is 0 (`0x0061a4e0`: the
-muzzle flash and smoke). Each round starts them again unless the bundle is
+fired a round (`takeObjectWeaponFires`), and ObjectEffects starts the
+bundles under that weapon whose startOnEffects is 0 (`0x0061a4e0`: the
+muzzle flash and smoke). FireComp's list is the weapon's own children
+(`0x005f25f0`, from MultiFireComp's init `0x005d7200`), and every object
+passes an event on to its children (`0x0063ca60`), so the bundles under a
+barrel Bundle start too: every walker gun of both sides, the FAV's MG,
+the APCs' EMP launchers, the IFV's main gun and laser launcher, the hover
+tank's driver gun and gunner launcher, the gunships' pilot guns, both
+stationary AA guns and the Titan ground cannon's barrels (until November
+2026 those stayed dark). Each round starts them again unless the bundle is
 depth-gated and still running. It also sets off the ground bundles there.
 Before this, vehicle guns showed no muzzle effects. The fire's sender is
 FireComp's fire (`0x005f31d0`): after the batch it sends event 0 (slot

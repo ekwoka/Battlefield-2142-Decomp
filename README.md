@@ -227,7 +227,8 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Mouse wheel | Item list: scroll through the kit (in a vehicle, where its HUD allows it), then fire to take the selected item; zoomed in with a rocket launcher that has a range counter, the airburst distance up / down |
 | E | Enter or leave a vehicle nearby |
 | F1 … F8 | Change seats |
-| F / X | In a seat: next weapon / flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |
+| F | Cycle weapons on foot or in the current seat |
+| X | In a seat: flares or active defence (keys 1 … 9 pick a seat weapon; the alt-fire button arms a TV-guided missile) |
 | C | Cycle vehicle cameras (living infantry stays in first person) |
 | Enter | Open or close deployment; its Suicide button requests redeployment |
 | 7 | Select frag grenades when equipped; left button throws (G is kit pickup/drop) |

@@ -1265,7 +1265,8 @@ public:
 		};
 		std::vector<WheelContact> wheels;
 		// The weapons in its tree that fired a round this tick (template
-		// names): the fire's event 0 to each weapon's children, which starts
+		// names): the fire's event 0 to each weapon's children (and theirs,
+		// as under a barrel Bundle), which starts
 		// the bundles whose startOnEffects is 0 (0x0061a4e0: the muzzle
 		// flash and smoke) and sets off the GroundEffectBundles (0x0061e090).
 		struct WeaponFire { std::string weapon, seat; };

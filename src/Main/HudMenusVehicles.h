@@ -468,7 +468,7 @@ public:
 	const std::array<Slot, 10>& slots() const { return m_slots; }
 
 private:
-	bool m_reverse = false; // +8
+	bool m_reverse = true; // retail constructor 0x0079bfdd; HUD slot 0 is the bottom row
 	bool m_shown = false;   // +9
 	int m_selected = -1;    // +0xc
 	void select(int itemIndex); // 0x0079c120
@@ -518,6 +518,8 @@ struct ItemListInput {
 // a PIAltFire group (slot 0x70(1)) longer than that, the PIAltFire group
 // (the list's +0x10 = 1). `find` gives a weapon's template (its
 // weaponHud.selectIcon).
+std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find);
 std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
 	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
 	const std::vector<std::pair<int, std::string>>& carried);

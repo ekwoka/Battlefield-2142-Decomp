@@ -5243,6 +5243,41 @@ TEST(PlayerCamera_TankZoomRetainsShortClicks)
 	}
 }
 
+TEST(GameWorld_InfantryCyclesWeapons)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		Garage g(gameDir(), mod);
+		g.start("eu_tank", {50, 0, 50}, 0);
+		const int player = g.world->joinPlayer(2);
+		g.world->setKit(player, "EU_Assault", "us_light_soldier");
+		CHECK(g.world->spawnSoldier(player));
+		game::GameWorld::PlayerInfo info;
+		const auto slot = [&] {
+			CHECK(g.world->playerInfo(player, info));
+			return info.inHandSlot;
+		};
+		game::SoldierInput cycle;
+		cycle.toggleWeapon = true;
+		g.world->setBattery(player, 1);
+		CHECK(slot() == 3);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 4);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 4);
+		game::SoldierInput select;
+		select.selectItem = 1;
+		g.drive(select, 1 / 30.0f);
+		CHECK(slot() == 1);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 2);
+		g.drive({}, 1 / 30.0f);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 3);
+	}
+}
+
 TEST(GameWorld_SupplyHubReturnsToPreviousWeapon)
 {
 	if (!gameDir()) return;
@@ -10661,5 +10696,92 @@ TEST(Vehicles_ApcPodGunBotAimCountsBothYawBundles)
 			CHECK(std::fabs(turned - 2 * bundle) < 0.5f); // both bundles, at the same limits
 			CHECK(off < 1.0f);
 		}
+	}
+}
+
+// The PAC walker's main cannon (AS_heavy_mech_main_cannon) keeps its
+// e_muzz_as_mech under each barrel Bundle, not under the gun. A round's
+// event 0 reaches them through the barrels (0x005f31d0 -> 0x0063ca60), so
+// both barrels' muzzles start, in front of the walker at the barrel tips.
+TEST(Vehicles_WalkerCannonStartsBarrelMuzzles)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		Garage g(gameDir(), mod);
+		if (!g.loaded || !g.templates.find("as_heavy_mech") || !g.templates.find("e_muzz_as_mech")) {
+			continue;
+		}
+		const uint32_t mech = g.start("as_heavy_mech", {0, 4, 6});
+		CHECK(g.enter(mech));
+		g.run(3);
+		g.world->takeObjectWeaponFires();
+		game::SoldierInput input;
+		input.fire = true;
+		std::vector<game::GameWorld::WeaponFire> fires;
+		for (int i = 0; i < 30 && fires.empty(); ++i) {
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			fires = g.world->takeObjectWeaponFires()[mech];
+		}
+		g.world->setPlayerInput({});
+		CHECK(!fires.empty() && fires.front().weapon == "AS_heavy_mech_main_cannon");
+		if (fires.empty()) {
+			continue;
+		}
+		const world::Object* object = g.objects.find(mech);
+		effects::EffectManager manager(g.templates);
+		effects::ObjectEffects bundles(g.templates);
+		effects::ObjectEffects::ObjectState state;
+		state.id = mech;
+		state.objectTemplate = object->objectTemplate();
+		state.position = {object->position().x, object->position().y, object->position().z};
+		state.rotation = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+		const auto pose = [&g](uint32_t id, const std::string& part, physics::Vec3& offset, physics::Vec3& rotation) {
+			world::Vec3 o, r;
+			if (!g.world->partPose(id, part, o, r)) {
+				return false;
+			}
+			offset = {o.x, o.y, o.z};
+			rotation = {r.x, r.y, r.z};
+			return true;
+		};
+		bundles.update({state}, manager, pose);
+		for (const auto& fire : fires) {
+			state.firedWeapons.push_back({fire.weapon, fire.seat});
+		}
+		bundles.update({state}, manager, pose);
+		const auto placed = effects::ObjectEffects::bundlesOf(g.templates, *object->objectTemplate(), mech, pose);
+		int muzzles = 0;
+		for (size_t i = 0; i < placed.size(); ++i) {
+			if (placed[i].bundle->name() != "e_muzz_as_mech" || placed[i].path.size() < 3
+				|| placed[i].path[placed[i].path.size() - 3] != "AS_heavy_mech_main_cannon") {
+				continue;
+			}
+			++muzzles;
+			std::fprintf(stderr, "  %s: %s at %.2f %.2f %.2f (vehicle frame), emitting %d\n", mod,
+				placed[i].path[placed[i].path.size() - 2].c_str(), placed[i].position.x, placed[i].position.y,
+				placed[i].position.z, manager.emitting(mech, static_cast<uint32_t>(i + 1)));
+			CHECK(manager.emitting(mech, static_cast<uint32_t>(i + 1)));
+			CHECK(placed[i].position.z > 3); // the barrel tip, ahead of the hull (vehicle frame)
+		}
+		CHECK(muzzles == 2);
+		// The driver's inside view (not neverDrawAs1p): the bundles' first-
+		// person systems (em_muzz_as_mech_smoke, flame_1p) burn at the mech.
+		CHECK(g.world->firstPersonEffects(mech));
+		effects::EffectManager inside(g.templates);
+		effects::ObjectEffects insideBundles(g.templates);
+		state.firedWeapons.clear();
+		state.firstPerson = true;
+		insideBundles.update({state}, inside, pose);
+		for (const auto& fire : fires) {
+			state.firedWeapons.push_back({fire.weapon, fire.seat});
+		}
+		insideBundles.update({state}, inside, pose);
+		const auto attached = std::count_if(inside.emitterList().begin(), inside.emitterList().end(),
+			[mech](const auto& emitter) { return emitter->anchor == mech; });
+		std::fprintf(stderr, "  %s: %d first-person emitters on the mech\n", mod, static_cast<int>(attached));
+		CHECK(attached >= 2);
 	}
 }

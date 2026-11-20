@@ -673,7 +673,7 @@ TEST(HudWeapon_AmmoClipsAndHeat)
 }
 
 // The item selection (0x0079c290, 0x0079be20, 0x0079c050): packed from slot
-// 0 by item index (reversed with ItemSelection.setReverseItems), the item
+// 0 upwards in descending item-index order by default, the item
 // in hand selected, closed when the timer runs out.
 TEST(HudItemSelection_SlotsAndTimer)
 {
@@ -681,18 +681,18 @@ TEST(HudItemSelection_SlotsAndTimer)
 	Console console;
 	menu::ItemSelection items;
 	items.bind(console);
-	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {5, "", false}}, 3);
+	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {8, "", false}}, 3);
 	items.update(hud, 0.1f);
 	CHECK(hud.number("ShowItemSelect") == 1 && hud.number("ItemSelectActive") == 1);
-	CHECK(hud.string("Item0Index") == "1" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot2Alpha") == 0.4f);
-	CHECK(hud.number("ItemSlot3Active") == 0);
+	CHECK(hud.string("Item0Index") == "8" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot0Alpha") == 0.4f);
+	CHECK(hud.string("Item2Index") == "1" && hud.number("ItemSlot3Active") == 0);
 	items.update(hud, 2.0f);
 	CHECK(hud.number("ShowItemSelect") == 0);
 	std::string out;
-	console.execute("ItemSelection.setReverseItems 1", out);
+	console.execute("ItemSelection.setReverseItems 0", out);
 	items.open({{1, "knife.tga"}, {3, "rifle.tga"}}, 1);
 	items.update(hud, 0);
-	CHECK(hud.string("Item0Index") == "3" && hud.number("ItemSelectActive") == 1);
+	CHECK(hud.string("Item0Index") == "1" && hud.number("ItemSelectActive") == 0);
 }
 
 // The vehicle HUD's seat dots (0x007a28e0, BfOccupiedVehicleNode
@@ -1599,21 +1599,24 @@ TEST(HudVehicle_HorizonAndClimb)
 // soldier counts again.
 TEST(Radio_ReviveCalls)
 {
+	// Down, PlayerInfo::soldier reads 0 (the player isn't alive): the
+	// soldier seen before is the one calling.
 	menu::ReviveCalls calls;
 	CHECK(calls.step(1, 10, false, false, true) == 0);
-	CHECK(calls.step(1, 10, true, true, true) == 0x37); // goes down holding fire: the automatic call
-	CHECK(calls.step(1, 10, true, true, true) == 0);    // still held: no fresh press
-	CHECK(calls.step(1, 10, true, false, true) == 0);
+	CHECK(calls.step(1, 0, true, true, true) == 0x37); // goes down holding fire: the automatic call
+	CHECK(calls.step(1, 0, true, true, true) == 0);    // still held: no fresh press
+	CHECK(calls.step(1, 0, true, false, true) == 0);
 	int manual = 0;
 	for (int i = 0; i < 5; ++i) {
-		manual += calls.step(1, 10, true, true, true) == 0x36;
-		calls.step(1, 10, true, false, true);
+		manual += calls.step(1, 0, true, true, true) == 0x36;
+		calls.step(1, 0, true, false, true);
 	}
 	CHECK(manual == 3);
 	calls.step(1, 10, false, false, true); // revived
-	CHECK(calls.step(1, 10, true, false, true) == 0); // down again, calls made: no automatic one
+	CHECK(calls.step(1, 0, true, false, true) == 0); // down again, calls made: no automatic one
+	calls.step(1, 0, false, false, true);            // dead
 	CHECK(calls.step(1, 11, false, false, true) == 0); // a new soldier
-	CHECK(calls.step(1, 11, true, false, true) == 0x37);
+	CHECK(calls.step(1, 0, true, false, true) == 0x37);
 	CHECK(calls.step(2, 20, false, false, false) == 0); // another game's player
 	CHECK(calls.step(2, 20, true, true, false) == 0);
 	CHECK(calls.step(3, 0, true, false, true) == 0); // no soldier
@@ -1858,7 +1861,7 @@ TEST(HudItemSelection_SeatLists)
 	CHECK(items.size() == 2 && items[0].index == 2 && items[1].index == 3 && !items[1].usable);
 	seat.weapons.erase(seat.weapons.begin());
 	seat.weapons[0].group = seat.weapons[1].group = 2;
-	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}});
+	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}, {9, "ParachuteLauncher"}});
 	CHECK(items.size() == 2 && items[0].index == 3 && items[0].icon == "gun.tga" && items[1].index == 1);
 }
 
@@ -1877,15 +1880,14 @@ TEST(HudItemSelection_MouseWheel)
 	pass.inHand = 3;
 	bool fire = false;
 	int item = 0;
-	// Opened on the rifle (3); the next, 4, isn't usable: the first.
+	// Display slots run bottom to top, from item 5 down to item 1.
 	CHECK(pass.apply(list, fire, item, 1, 10.0) == "weaponOver");
-	CHECK(list.shown() && list.selectedItem() == 1);
-	CHECK(list.next() && list.selectedItem() == 2);
-	CHECK(list.previous() && list.selectedItem() == 1);
-	CHECK(list.previous() && list.selectedItem() == 5); // from the first: the last
-	CHECK(list.previous() && list.selectedItem() == 5); // the previous (4) unusable: the last again
-	CHECK(list.next() && list.selectedItem() == 1);     // past the end: the first
-	CHECK(list.next() && list.selectedItem() == 2);
+	CHECK(list.shown() && list.selectedItem() == 2);
+	CHECK(list.next() && list.selectedItem() == 1);
+	CHECK(list.next() && list.selectedItem() == 5);     // wraps to the first slot
+	CHECK(list.next() && list.selectedItem() == 5);     // item 4 is unusable
+	CHECK(list.previous() && list.selectedItem() == 1); // wraps to the last slot
+	CHECK(list.previous() && list.selectedItem() == 2);
 	// The pick: fire takes the selected item's key and is cleared.
 	fire = true;
 	item = 0;
@@ -1909,9 +1911,9 @@ TEST(HudItemSelection_MouseWheel)
 	CHECK(!list.shown());
 	// A step down from the item in hand: the previous usable one.
 	pass.allowed = true;
-	pass.inHand = 3;
+	pass.inHand = 2;
 	CHECK(pass.apply(list, fire, item, -1, 12.0) == "weaponOver");
-	CHECK(list.shown() && list.selectedItem() == 2);
+	CHECK(list.shown() && list.selectedItem() == 3);
 }
 
 // minimumSquadSizeForSelection (0x005c3080, the firearm's slot 0x188): too
@@ -2625,6 +2627,24 @@ TEST(HudMenus_TitanUplinkState)
 	u.update(1.0f, false, 0.0f);
 	u.update(1.0f, false, 0.0f);
 	CHECK(!u.showLost); // 1 - 3 x 0.5 is below 0
+}
+
+TEST(HudMenus_HitDirectionArrow)
+{
+	menu::HitDirectionHud h;
+	h.update(0.033f, 4, 0, 0); // the first look takes the count as it is
+	CHECK(!h.show);
+	h.update(0.033f, 5, 1.5707964f, 0); // hit from +x (east) while facing north: the right
+	CHECK(h.show && std::fabs(h.angle - 90) < 0.01f);
+	h.update(0.05f, 5, 1.5707964f, 90); // turned to face it: up, recomputed while shown
+	CHECK(h.show && std::fabs(h.angle) < 0.01f);
+	h.update(0.05f, 5, 1.5707964f, 90);
+	h.update(0.05f, 5, 1.5707964f, 90); // 0.1 s spent: the flag drops, the fade is the node's
+	CHECK(!h.show);
+	h.update(0.05f, 5, 1.5707964f, 180); // held after
+	CHECK(!h.show && std::fabs(h.angle) < 0.01f);
+	h.update(0.05f, 6, -3.1415927f, 0); // from behind
+	CHECK(h.show && std::fabs(std::fabs(h.angle) - 180) < 0.01f);
 }
 
 TEST(HudMenus_MiddleTicketsShownForTitanArmourNotConquestTickets)
