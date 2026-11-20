@@ -95,3 +95,16 @@ TEST(TickBlend_CameraRollBlendsTheShortWay)
 	const auto p = smooth.sample(3, true, 0.5f, {{0, 0, 0}, 0, 0, -3.0f}); // across the seam
 	CHECK(std::fabs(std::remainder(p.roll - 3.14159265f, 6.28318530718f)) < 1e-3f);
 }
+
+TEST(TickBlend_AffineInverseUndoesATransform)
+{
+	using namespace dice::hfe::render;
+	Mat4 m = Mat4::yawPitchRoll(30, -20, 70) * Mat4::translation({4, -2, 9});
+	m.at(2, 0) *= 2; m.at(2, 1) *= 2; m.at(2, 2) *= 2; // a stretched axis
+	const Mat4 one = m * affineInverse(m);
+	for (int r = 0; r < 4; ++r) {
+		for (int c = 0; c < 3; ++c) {
+			CHECK(std::fabs(one.at(r, c) - (r == c ? 1.0f : 0.0f)) < 1e-4f);
+		}
+	}
+}

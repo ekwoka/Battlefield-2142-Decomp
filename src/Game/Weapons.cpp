@@ -786,7 +786,7 @@ std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& p
 		TracerLook look = tracerLook(*projectile.settings, projectile.position, projectile.velocity, projectile.origin,
 			projectile.tracerStart, projectile.tracerOffset, projectile.tracerHit);
 		if (look.shown) {
-			out.push_back({projectile.settings->tracerGeometry, look});
+			out.push_back({projectile.settings->tracerGeometry, look, projectile.serial});
 		}
 	}
 	return out;

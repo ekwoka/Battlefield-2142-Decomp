@@ -91,7 +91,7 @@ void RoundVisuals::meshes(const std::vector<game::Projectile>& rounds, std::vect
 		if (!look.geometry) {
 			continue;
 		}
-		out.push_back({look.objectTemplate, round.position, roundFrame(round)});
+		out.push_back({look.objectTemplate, round.position, roundFrame(round), round.serial});
 	}
 }
 

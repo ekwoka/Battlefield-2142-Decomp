@@ -205,8 +205,12 @@ struct LevelSources {
 		const world::ObjectTemplate* objectTemplate = nullptr;
 		effects::Vec3 position;
 		effects::Mat3 rotation; // rows x, y, z
+		uint32_t key = 0;       // a round's serial: drawn between its last two ticks (0: as given)
 	};
 	std::function<void(std::vector<PlacedTemplate>& out)> placedTemplates;
+	// Filled by syncObjects: the moving objects' drawn positions this frame
+	// (between their last two ticks), for what is projected over them.
+	std::unordered_map<uint32_t, std::array<float, 3>>* drawnPositions = nullptr;
 	// The first-person view, asked each frame: false draws none.
 	std::function<bool(FirstPersonScene& scene)> firstPerson;
 	// Objects the world pass leaves out this frame (in first person the
@@ -321,8 +325,9 @@ public:
 	// mesh with only their geometryPart shown, replaced each frame.
 	void syncDebris();
 	// The placed templates (LevelSources::placedTemplates) as instances of
-	// their geometry, replaced each frame.
-	void syncPlaced();
+	// their geometry, replaced each frame; a keyed one (a round) between its
+	// last two ticks, as retail draws its object (0x0043ef30).
+	void syncPlaced(const TickBlend& blend);
 
 	// Records a render pass into `commands` that clears and draws into
 	// `color` (a swapchain or offscreen texture) using `target`'s depth.
@@ -521,6 +526,7 @@ private:
 		mutable unsigned previousFrame = ~0u;
 		std::vector<Mat4> partsTicked, partsPrevious; // the parts at the last two ticks (TickBlend.h)
 		std::vector<uint8_t> partsBlended; // which of them retail blends (blendsBetweenTicks), by part
+		std::vector<int> partsParent;      // the nearest part above each (-1: the object)
 		// Each template child's local matrix (in its parent) at the last two
 		// ticks, in the order collectParts walks them.
 		std::vector<Mat4> nodesTicked, nodesPrevious;
@@ -632,6 +638,7 @@ private:
 		Mat4 previous, current, drawn;
 	};
 	std::unordered_map<uint32_t, ObjectBlend> m_objectBlend;
+	std::unordered_map<uint32_t, ObjectBlend> m_placedBlend; // by PlacedTemplate::key
 	Mat4 drawnTransform(const world::Object& object) const;
 	// syncPlaced's: the templates asked for this frame, and each template's
 	// parts at rest (collectParts without an object).

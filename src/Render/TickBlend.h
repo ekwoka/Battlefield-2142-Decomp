@@ -52,6 +52,32 @@ inline Mat4 tickBlendViewAdjustment(const Mat4& rawView, const Mat4& drawnView)
 	return rawView * inverse;
 }
 
+// The inverse of a row-vector affine transform (axes may be scaled).
+inline Mat4 affineInverse(const Mat4& m)
+{
+	const float a = m.at(0, 0), b = m.at(0, 1), c = m.at(0, 2), d = m.at(1, 0), e = m.at(1, 1), f = m.at(1, 2),
+				g = m.at(2, 0), h = m.at(2, 1), k = m.at(2, 2);
+	const float det = a * (e * k - f * h) - b * (d * k - f * g) + c * (d * h - e * g);
+	if (std::fabs(det) < 1e-12f) {
+		return {};
+	}
+	const float s = 1 / det;
+	Mat4 r;
+	r.at(0, 0) = (e * k - f * h) * s;
+	r.at(0, 1) = (c * h - b * k) * s;
+	r.at(0, 2) = (b * f - c * e) * s;
+	r.at(1, 0) = (f * g - d * k) * s;
+	r.at(1, 1) = (a * k - c * g) * s;
+	r.at(1, 2) = (c * d - a * f) * s;
+	r.at(2, 0) = (d * h - e * g) * s;
+	r.at(2, 1) = (b * g - a * h) * s;
+	r.at(2, 2) = (a * e - b * d) * s;
+	for (int j = 0; j < 3; ++j) {
+		r.at(3, j) = -(m.at(3, 0) * r.at(0, j) + m.at(3, 1) * r.at(1, j) + m.at(3, 2) * r.at(2, j));
+	}
+	return r;
+}
+
 // A row-vector transform between two, as 0x0043ef30: the translation
 // linearly (0x0043dd80), the rotation as quaternions slerped by alpha
 // (0x006ac740 / 0x0043de60 to quaternions, 0x006ac980 the slerp, the short

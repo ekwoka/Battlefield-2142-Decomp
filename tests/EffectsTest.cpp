@@ -1520,3 +1520,53 @@ TEST(Effects_VehicleBoostEndStartsBeforeItStops)
 	objects.update({state}, manager);
 	CHECK(manager.bundleLoops().empty()); // 0x2a: in its stop bits
 }
+
+// Retail moves particles in RendDX9's frame (0x10028ae0 -> 0x1009a4c0) by the
+// frame's time, its systems where their objects are drawn between ticks.
+TEST(Effects_ParticlesMoveByTheFrameAtTheDrawnAnchor)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	effects::EffectManager manager(templates);
+	manager.setParticlesPerFrame(true);
+	manager.setAnchor(7, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_flame", 7, {0, 2, 0}));
+	manager.update(1 / 30.0f);
+	CHECK(sprites(manager).empty()); // the tick moves none
+	manager.setAnchor(7, {3, 0, 0}, {});
+	for (int i = 0; i < 12; ++i) {
+		manager.frame(1 / 120.0f, 0.5f);
+	}
+	auto list = sprites(manager);
+	CHECK(!list.empty());
+	CHECK(std::fabs(list[0].position.x - 1.5f) < 1e-4f); // halfway between the ticks' anchors
+	manager.frame(1 / 120.0f, 1);
+	list = sprites(manager);
+	CHECK(std::fabs(list[0].position.x - 3) < 1e-4f);
+}
+
+// A placed mesh with a key (a round's tracer) is drawn between its last two ticks.
+TEST(Effects_PlacedMeshesBlendBetweenTicks)
+{
+	world::ObjectTemplateManager templates;
+	effects::EffectManager manager(templates);
+	const auto place = [&](float x, float y) {
+		effects::MeshSprite s {{x, y, 0}, {}, 1, {1, 1, 1, 1}, 1, 9};
+		manager.setPlacedMeshes({{"tracer", {s}}});
+	};
+	const auto drawnX = [&] {
+		float x = -1;
+		manager.forEachMeshGroup([&](const std::string&, bool, const std::vector<effects::MeshSprite>& list) {
+			x = list.at(0).position.x;
+		});
+		return x;
+	};
+	place(0, 0);
+	place(10, 0);
+	manager.frame(0.01f, 0.25f);
+	CHECK(std::fabs(drawnX() - 2.5f) < 1e-4f);
+	place(20, 6); // a jump over 4 m in height: where it is
+	CHECK(std::fabs(drawnX() - 20) < 1e-4f);
+	manager.frame(0.01f, 1);
+	CHECK(drawnX() == 20);
+}

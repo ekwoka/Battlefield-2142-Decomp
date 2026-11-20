@@ -2956,8 +2956,22 @@ seat's share of the turn; the eye's height is blended, then taken one
 `GameWorld::pendingLook`, seated stopped at the 40-degree twist unless the
 seat's limits take the rest (`seatedLookPreview`). The first-person weapon
 is placed at the tick's eye and carried with the drawn view
-(`tickBlendViewAdjustment`). Effects, tracers, bone poses and nametags
-still step at 30 Hz.
+(`tickBlendViewAdjustment`). Parts the game places itself (held weapons)
+blend in their parent part by the same test. Rounds in flight (placed
+templates) and their tracers (placed meshes) blend by their round's serial,
+as their objects would.
+
+Retail moves the particles in RendDX9's frame, not the tick: `0x10028ae0`
+(with the frame's seconds, clamped to 1e-5 .. 1/15 by `0x0040bd90`) calls
+the particle manager's slot `0x2c` (`0x1009a4c0`), which runs every
+system's update (slot `0xa0`, `0x101407c0`), all while the objects are
+blended. A window's frame now steps the emitters and ages the decals
+(`EffectManager::frame`), the attached systems placed at their anchors
+between the last two ticks; screenshots and headless runs keep stepping them
+in the tick. The name tags are projected at the objects' drawn positions
+(`LevelSources::drawnPositions`). Bone poses stay per tick, as retail's: the
+soldier's skeleton is stepped only in its tick update (`0x00586200` →
+`0x005ef250` with 1/30 s), and the blend moves objects, not bones.
 
 ## The first-person view
 

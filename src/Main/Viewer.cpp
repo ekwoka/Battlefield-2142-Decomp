@@ -1045,6 +1045,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onView(position, camera.yaw, camera.pitch, camera.fovY,
 					height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f);
 			}
+			if (options.onFrame) {
+				options.onFrame(dt, blendAlpha); // dt: clamped to 1e-5 .. 1/15 above
+			}
 			const bool tickedForObjects = std::exchange(tickedSinceSync, false);
 			level.syncObjects(render::TickBlend {tickedForObjects, blendAlpha});
 			level.draw(commands, swapchain, target, camera, sources.lights);

@@ -9522,6 +9522,8 @@ int runGame(Options& options, Session& session)
 				cameraObject ? cameraObject->id() : 0);
 		};
 		sources.enhanced = &enhancedSettings;
+		std::unordered_map<uint32_t, std::array<float, 3>> drawnPositions; // filled by syncObjects, read by the tags
+		sources.drawnPositions = &drawnPositions;
 		sources.hemi = &hemiSettings;
 		sources.particles = &particleSettings;
 		sources.overgrowth = &overgrowthSettings;
@@ -9641,7 +9643,7 @@ int runGame(Options& options, Session& session)
 			const bool fromRound = round.projectileCamera(round.localPlayer(), view);
 			roundVisuals.meshes(round.projectiles(), roundMeshes, fromRound ? view.serial : 0);
 			for (const client::RoundVisuals::Mesh& mesh : roundMeshes) {
-				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation});
+				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation, mesh.serial});
 			}
 			armorMeshes.clear();
 			round.armorEffectMeshes(armorMeshes); // the armour effects' own meshes (the IFV cells' glow)
@@ -9675,6 +9677,7 @@ int runGame(Options& options, Session& session)
 		nametags.setIcons(&g_tagIcons);
 		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		nametags.setWorld(g_remoteHud); // a joined game's: the server's players and requests
+		nametags.setDrawnPositions(&drawnPositions);
 		g_nametags = &nametags;
 		g_mapPointSpots.clear();
 		g_mapCalls.clear(); // a new map node's list (0x00784cf0)
@@ -10411,6 +10414,15 @@ int runGame(Options& options, Session& session)
 		ViewerOptions viewer;
 		viewer.screenshot = options.screenshot;
 		viewer.camera = options.camera;
+		if (viewer.screenshot.empty()) {
+			// A window draws frames: the particles move by them, as RendDX9's (EffectManager::frame).
+			round.setEffectsPerFrame(true);
+			playerCamera.setEffectsPerFrame(true);
+			viewer.onFrame = [&round, &playerCamera](float seconds, float alpha) {
+				round.frameEffects(seconds, alpha);
+				playerCamera.frameEffects(seconds);
+			};
+		}
 		// Before the first spawn the view is the level's before-spawn camera
 		// (GameLogic.setBeforeSpawnCamera); a joined game's soldier is the
 		// server's control object, which the view follows once it has one.

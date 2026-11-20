@@ -219,6 +219,10 @@ public:
 	};
 	std::vector<Model> models() const;
 	const effects::EffectManager& effects() const { return m_effects; }
+	// The first-person effects by the frame (EffectManager::frame); their
+	// anchors are the tick's eye, which the draw carries with the view.
+	void setEffectsPerFrame(bool on) { m_effects.setParticlesPerFrame(on); }
+	void frameEffects(float seconds) { m_effects.frame(seconds, 1); }
 	// The sounds of the effect bundles the first-person view started.
 	std::vector<effects::EffectManager::StartedSound> takeSounds() { return m_effects.takeSounds(); }
 	// The vehicle's cockpit (the Camera's 0x00612880): in first person in a

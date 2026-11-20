@@ -1453,6 +1453,9 @@ public:
 	// addArmorEffect list.
 	static bool spectacularHit(uint32_t id, float before, float after, float hitPoints);
 	const effects::EffectManager& effects() const { return m_effects; }
+	// A window drawing frames: the particles move by the frame (EffectManager::frame).
+	void setEffectsPerFrame(bool on) { m_effects.setParticlesPerFrame(on); }
+	void frameEffects(float seconds, float alpha) { m_effects.frame(seconds, alpha); }
 	// The start sounds of the bundles the round started (detonation end
 	// effects, impact and armour effects), each heard once where it started.
 	std::vector<effects::EffectManager::StartedSound> takeEffectSounds() { return m_effects.takeSounds(); }

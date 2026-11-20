@@ -14,6 +14,7 @@
 
 #include "Hud/Hud.h"
 
+#include <unordered_map>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -335,6 +336,10 @@ public:
 	// the same player manager and objects on a client); nullptr: frame's
 	// round. The round still answers the sight lines, seats and orders.
 	void setWorld(const host::HudWorld* world) { m_world = world; }
+	// The moving objects' drawn positions this frame (LevelSources::drawnPositions):
+	// retail projects the tags while the objects are drawn between their ticks
+	// (NametagManager in RendDX9's frame, 0x0043f170 .. 0x0043f610).
+	void setDrawnPositions(const std::unordered_map<uint32_t, std::array<float, 3>>* drawn) { m_drawn = drawn; }
 	// The camera inside a Titan (the objects' showInside / showOutside;
 	// RendDX9's object drawer slot 0x40, which the manager's frame reads,
 	// 0x100f3490).
@@ -431,6 +436,7 @@ private:
 	Settings m_settings;
 	const IconRegistry* m_icons = nullptr;
 	const host::HudWorld* m_world = nullptr;
+	const std::unordered_map<uint32_t, std::array<float, 3>>* m_drawn = nullptr;
 	uint32_t m_insideTitan = 0;
 	struct OrderTag {
 		bool set = false;

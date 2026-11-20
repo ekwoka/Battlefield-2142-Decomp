@@ -1058,8 +1058,9 @@ static bool blendsBetweenTicks(const world::ObjectTemplate& t)
 	return bone != t.settings().end() && std::atoi(bone->second.c_str()) >= 0;
 }
 
+// Each part's blend test and the nearest part above it (-1: the object).
 static void markBlendedParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
-	std::vector<uint8_t>& blended, int depth)
+	std::vector<uint8_t>& blended, std::vector<int>& parents, int parent, int depth)
 {
 	for (const world::ChildTemplate& child : objectTemplate.children()) {
 		const world::ObjectTemplate* t = depth < 8 ? sources.templates.find(child.name) : nullptr;
@@ -1068,10 +1069,12 @@ static void markBlendedParts(const LevelSources& sources, const world::ObjectTem
 		}
 		const auto part = t->settings().find("geometryPart");
 		const int index = part != t->settings().end() ? std::atoi(part->second.c_str()) : -1;
-		if (index > 0 && static_cast<size_t>(index) < blended.size()) {
+		const bool isPart = index > 0 && static_cast<size_t>(index) < blended.size();
+		if (isPart) {
 			blended[static_cast<size_t>(index)] = blendsBetweenTicks(*t);
+			parents[static_cast<size_t>(index)] = parent;
 		}
-		markBlendedParts(sources, *t, blended, depth + 1);
+		markBlendedParts(sources, *t, blended, parents, isPart ? index : parent, depth + 1);
 	}
 }
 
@@ -2191,25 +2194,51 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
 			: blendTransform(o.previous, o.current, blend.alpha);
 	}
-	// Parts the game places itself, in their object: between their last two
-	// ticks when retail would blend them (blendsBetweenTicks).
-	// shortcut: flat, so a part under a blended parent keeps the tick's place; walk the parents if one shows.
+	if (m_sources->drawnPositions) {
+		// What the HUD projects (retail draws it while the objects are blended).
+		auto& out = *m_sources->drawnPositions;
+		out.clear();
+		for (const auto& [id, o] : m_objectBlend) {
+			if (o.drawn.m != o.current.m) {
+				out[id] = {o.drawn.at(3, 0), o.drawn.at(3, 1), o.drawn.at(3, 2)};
+			}
+		}
+	}
+	// Parts the game places itself, in their object (held weapons): each in
+	// the nearest part above it, between its last two ticks when retail
+	// would blend it (blendsBetweenTicks), placed in that part as drawn.
+	// shortcut: a node without a part folds into the part below it; give such nodes their own place if one moves.
 	const auto blendParts = [this, &blend](Instance& instance) {
-		if (instance.partsTicked.size() != instance.parts.size()) {
+		const size_t n = instance.parts.size();
+		if (instance.partsTicked.size() != n) {
 			instance.partsTicked = instance.partsPrevious = instance.parts;
-			instance.partsBlended.assign(instance.parts.size(), 1);
+			instance.partsBlended.assign(n, 1);
+			instance.partsParent.assign(n, -1);
 			if (instance.partsTemplate) {
 				std::fill(instance.partsBlended.begin(), instance.partsBlended.end(), 0);
-				markBlendedParts(*m_sources, *instance.partsTemplate, instance.partsBlended, 0);
+				markBlendedParts(*m_sources, *instance.partsTemplate, instance.partsBlended, instance.partsParent, -1, 0);
 			}
 		} else if (blend.ticked) {
 			instance.partsPrevious.swap(instance.partsTicked);
 		}
 		instance.partsTicked = instance.parts;
-		for (size_t i = 0; i < instance.parts.size(); ++i) {
-			if (instance.partsBlended[i]) {
-				instance.parts[i] = blendTransform(instance.partsPrevious[i], instance.partsTicked[i], blend.alpha);
+		std::vector<uint8_t> done(n, 0);
+		const std::function<const Mat4&(size_t)> drawn = [&](size_t i) -> const Mat4& {
+			if (!done[i]) {
+				done[i] = 1; // a cycle can't occur (a template tree), but never recurse twice
+				const int p = instance.partsParent[i];
+				const Mat4 parentNow = p < 0 ? Mat4 {} : instance.partsTicked[static_cast<size_t>(p)];
+				const Mat4 parentBefore = p < 0 ? Mat4 {} : instance.partsPrevious[static_cast<size_t>(p)];
+				Mat4 local = instance.partsTicked[i] * affineInverse(parentNow);
+				if (instance.partsBlended[i]) {
+					local = blendTransform(instance.partsPrevious[i] * affineInverse(parentBefore), local, blend.alpha);
+				}
+				instance.parts[i] = p < 0 ? local : local * drawn(static_cast<size_t>(p));
 			}
+			return instance.parts[i];
+		};
+		for (size_t i = 0; i < n; ++i) {
+			drawn(i);
 		}
 	};
 	// Move instances with their objects.
@@ -2346,10 +2375,10 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		}
 	}
 	syncDebris();
-	syncPlaced();
+	syncPlaced(blend);
 }
 
-void LevelRenderer::syncPlaced()
+void LevelRenderer::syncPlaced(const TickBlend& blend)
 {
 	m_placedScratch.clear();
 	if (m_sources && m_sources->placedTemplates) {
@@ -2362,6 +2391,11 @@ void LevelRenderer::syncPlaced()
 		m_instances.end());
 	m_hadPlaced = !m_placedScratch.empty();
 	bool uploaded = false;
+	for (auto it = m_placedBlend.begin(); it != m_placedBlend.end();) {
+		const bool kept = std::any_of(m_placedScratch.begin(), m_placedScratch.end(),
+			[&it](const LevelSources::PlacedTemplate& p) { return p.key == it->first; });
+		it = kept ? std::next(it) : m_placedBlend.erase(it);
+	}
 	for (const LevelSources::PlacedTemplate& placed : m_placedScratch) {
 		if (!placed.objectTemplate || placed.objectTemplate->geometry().empty()) {
 			continue;
@@ -2383,6 +2417,16 @@ void LevelRenderer::syncPlaced()
 		instance.world.at(3, 0) = placed.position.x;
 		instance.world.at(3, 1) = placed.position.y;
 		instance.world.at(3, 2) = placed.position.z;
+		if (placed.key != 0) {
+			const auto [it, added] = m_placedBlend.try_emplace(placed.key, ObjectBlend {instance.world, instance.world, instance.world});
+			ObjectBlend& o = it->second;
+			if (blend.ticked && !added) {
+				o.previous = o.current;
+			}
+			o.current = instance.world;
+			instance.world = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
+				: blendTransform(o.previous, o.current, blend.alpha);
+		}
 		instance.local = instance.world;
 		instance.geometry = geometry;
 		instance.placed = true;

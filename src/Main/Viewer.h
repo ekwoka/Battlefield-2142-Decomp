@@ -107,6 +107,9 @@ struct ViewerOptions {
 		float eyeHeight = 0, eyeTarget = 0; // the eye over the soldier and its pose's (PlayerCamera::View)
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
+	// Each drawn frame of the window, before the objects are synced: the frame's
+	// seconds (1e-5 .. 1/15, as 0x0040bd90 clamps them) and the tick blend's alpha.
+	std::function<void(float seconds, float alpha)> onFrame;
 	std::function<bool(PlayerView&)> playerView; // false without a player
 	// The recoil's kick to the aim since the last call (degrees, up
 	// positive): the viewer adds it to its pitch, as the original adds it to

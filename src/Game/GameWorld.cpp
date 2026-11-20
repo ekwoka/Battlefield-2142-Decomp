@@ -1888,7 +1888,8 @@ void GameWorld::placeTracers()
 			m_tracerMeshes.push_back({placed.geometry, {}});
 			group = m_tracerMeshes.end() - 1;
 		}
-		group->second.push_back({placed.look.position, placed.look.axes, 1.0f, {1, 1, 1, 1}});
+		// Keyed by its round: retail's tracer is an object, drawn between ticks.
+		group->second.push_back({placed.look.position, placed.look.axes, 1.0f, {1, 1, 1, 1}, 1.0f, placed.serial});
 		any = true;
 	}
 	if (any || had) {

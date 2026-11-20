@@ -688,6 +688,18 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	const View& view, float seconds)
 {
 	std::vector<hud::HudQuad> out;
+	// Where an object is drawn this frame less where its tick left it.
+	const auto drawnOffset = [this, &objects](uint32_t id) -> std::array<float, 3> {
+		if (!m_drawn || id == 0) {
+			return {0, 0, 0};
+		}
+		const auto it = m_drawn->find(id);
+		const world::Object* o = it != m_drawn->end() ? objects.find(id) : nullptr;
+		if (!o) {
+			return {0, 0, 0};
+		}
+		return {it->second[0] - o->position().x, it->second[1] - o->position().y, it->second[2] - o->position().z};
+	};
 	if (!m_fontLoaded) {
 		m_selectedObject = 0;
 		m_selectedRequest = -1;
@@ -767,10 +779,11 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			// about its centre at the LOD the camera's distance picks).
 			const MeshLods* lods = m_meshLods && v->objectTemplate() ? m_meshLods(*v->objectTemplate()) : nullptr;
 			const float height = lods ? lodRenderRadius(*lods, distance, zoom) : 4.0f;
-			at = {v->position().x, v->position().y
+			const std::array<float, 3> d = drawnOffset(p.vehicle);
+			at = {v->position().x + d[0], v->position().y + d[1]
 					+ m_settings.vehicleNametagOffsetFactor * height + m_settings.vehicleNametagOffset,
-				v->position().z};
-			icon = {v->position().x, v->position().y, v->position().z};
+				v->position().z + d[2]};
+			icon = {v->position().x + d[0], v->position().y + d[1], v->position().z + d[2]};
 			return true;
 		}
 		// The soldier's origin taken 1 m over its feet (the original's
@@ -791,9 +804,10 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			under = 0;
 		}
 		const float k = name + std::min(distance * name * 0.05f, 3.0f);
-		at = {p.position.x, p.position.y + 1.0f + k, p.position.z};
+		const std::array<float, 3> d = drawnOffset(p.soldier);
+		at = {p.position.x + d[0], p.position.y + 1.0f + k + d[1], p.position.z + d[2]};
 		const float below = under * (distance > 30 ? 30 / distance : 1.0f);
-		icon = {p.position.x, p.position.y + 1.0f + below, p.position.z};
+		icon = {p.position.x + d[0], p.position.y + 1.0f + below + d[1], p.position.z + d[2]};
 		return true;
 	};
 
@@ -938,8 +952,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			if (most == 0) {
 				continue;
 			}
-			const std::array<float, 3> at {owned->position().x + tt.offset[0], owned->position().y + tt.offset[1],
-				owned->position().z + tt.offset[2]};
+			const std::array<float, 3> moved = drawnOffset(owned->id());
+			const std::array<float, 3> at {owned->position().x + tt.offset[0] + moved[0],
+				owned->position().y + tt.offset[1] + moved[1], owned->position().z + tt.offset[2] + moved[2]};
 			const float dx = at[0] - eye.x, dz = at[2] - eye.z;
 			const float distance = std::sqrt(dx * dx + dz * dz);
 			const float alpha = most < 0 ? 1.0f : clamp01(1 - distance / most);
@@ -1014,7 +1029,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				(hud ? hud->objectHealth(id) == 0 : world.hitPoints(id) == 0)))) {
 			continue;
 		}
-		const auto& pos = owned->position();
+		const std::array<float, 3> moved = drawnOffset(owned->id());
+		const world::Vec3 pos {owned->position().x + moved[0], owned->position().y + moved[1], owned->position().z + moved[2]};
 		float x = 0, y = 0, distance = 0;
 		bool clamped = false;
 		float c[4];
