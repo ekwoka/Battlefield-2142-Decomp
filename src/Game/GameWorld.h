@@ -1366,6 +1366,8 @@ public:
 		int replenishingType = 3; // 0 RTHeal, 1 RTAmmo, 2 RTTeam, 3 no comp
 		bool active = false;
 		float battery = 0;
+		// Per target its armour's hit points over maxHitPoints (below 0 for
+		// a wreck being mended), NaN with no armour.
 		std::vector<float> targets;
 		bool kitAbility = false; // the kit has an Ability component
 		bool kitHealing = false, kitRepairing = false, kitAmmo = false;

@@ -740,7 +740,8 @@ bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
 	out.battery = std::max(0.0f, battery);
 	out.active = m_abilityScan.active && !m_abilityScan.targets.empty();
 	for (const uint32_t target : m_abilityScan.targets) {
-		out.targets.push_back(out.kitAmmo ? 1.0f : objectHealth(target));
+		const float health = out.kitAmmo ? 1.0f : objectHealth(target);
+		out.targets.push_back(health < 0 ? std::nanf("") : health); // NaN: no armour
 	}
 	return true;
 }

@@ -968,6 +968,23 @@ TEST(Titan_RepairToolOnGunStationMendsTheGun)
 				level.run(1 / 30.0f);
 			}
 			done = level.world->hitPoints(part.id) > before;
+			if (done) {
+				// The ability bar reads the gun's own armour (0x007c3af0: hit points
+				// over maxHitPoints), below 0 while it is a wreck.
+				game::GameWorld::AbilityBarInfo bar;
+				const float share = level.world->hitPoints(part.id) / 1000.0f;
+				CHECK(level.world->abilityBar(id, bar) && bar.targets.size() == 1);
+				CHECK(!bar.targets.empty() && share < 0 && std::fabs(bar.targets[0] - share) < 1e-3f);
+				if (mended == 0) {
+					// Working again (above 0): the share fills the ring.
+					level.world->setHitPoints(part.id, 400);
+					for (int tick = 0; tick < 3; ++tick) {
+						level.run(1 / 30.0f);
+					}
+					CHECK(level.world->abilityBar(id, bar) && bar.targets.size() == 1);
+					CHECK(!bar.targets.empty() && bar.targets[0] > 0.39f && bar.targets[0] < 0.5f);
+				}
+			}
 		}
 		mended += done;
 		std::fprintf(stderr, "  %s: %s\n", part.name.c_str(), done ? "mended" : "not mended");
