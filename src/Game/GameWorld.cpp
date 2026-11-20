@@ -3611,6 +3611,36 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 	}
 	const float speed = std::sqrt(physics::lengthSquared(p.velocity));
 	const physics::Vec3 heading = speed > 1e-4f ? p.velocity * (1.0f / speed) : physics::Vec3 {0, 0, 1};
+	// ignoreFriendly (0x004cf337 .. 0x004cf38b): only a target whose root
+	// has a control object (0x0042b2f0, interface 0xc4c5: a vehicle, or a
+	// soldier, the player's) is friendly, by that one's team (slot 0x9c)
+	// against the shooter's control object's (param_6, the round's +0x184
+	// slot 0x48 at 0x005ebf2e), or with none (gone) against the round's
+	// team (param_13, slot 0x60 at 0x005ebf0a) when above 0. As
+	// stepWeaponLock's.
+	const auto controlTeam = [this](const world::Object& root, int& team) {
+		if (sameName(root.objectTemplate()->typeName(), "PlayerControlObject")) {
+			team = lockTargetTeam(root);
+			return true;
+		}
+		for (const auto& player : m_players) {
+			if (player->present && player->alive && (player->object == root.id() || player->vehicle == root.id())) {
+				team = player->team;
+				return true;
+			}
+		}
+		return false;
+	};
+	int shooterTeam = 0;
+	const world::Object* shooter = p.shooter ? m_objects.find(p.shooter) : nullptr;
+	const bool shooterControl = shooter && shooter->objectTemplate() && controlTeam(*shooter, shooterTeam);
+	const auto friendly = [&](const world::Object& target) {
+		int team = 0;
+		if (!s.ignoreFriendly || !controlTeam(target, team)) {
+			return false;
+		}
+		return shooterControl ? team == shooterTeam : p.team > 0 && team == p.team;
+	};
 	const auto query = [&](float range) -> uint32_t {
 		uint32_t best = 0;
 		float cheapest = 9999; // 0x004cf290's local_28
@@ -3618,7 +3648,7 @@ void GameWorld::steerClosest(Projectile& p, float seconds)
 			const world::Object* o = owned.get();
 			if (!o || o->id() == p.shooter || o->destroyed() || o->hidden() || !o->objectTemplate()
 				|| !targetObjectOf(*o->objectTemplate(), s.seekTargetType) || !targetEnabled(*o, s.seekTargetType)
-				|| (s.ignoreFriendly && p.team > 0 && lockTargetTeam(*o) == p.team)) {
+				|| friendly(*o)) {
 				continue;
 			}
 			const physics::Vec3 at {o->position().x, o->position().y, o->position().z};
