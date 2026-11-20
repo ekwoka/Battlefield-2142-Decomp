@@ -1226,6 +1226,17 @@ TEST(HudWeapon_CrosshairVisualDeviation)
 	rifle.settings()["weaponHud.maxVisualDeviation"] = "75";
 	CHECK(menu::crosshairParts(1.0f, &rifle).offset == 35);
 	CHECK(menu::crosshairParts(9.0f, &rifle).offset == 75);
+	// The machine guns' circle parts take the raw spread, past the clamp.
+	parts = menu::crosshairParts(1.5f, 10, 3, 5);
+	CHECK(parts.circleUp == 266 && parts.circleRight == 423 && parts.circleDown == 317 && parts.circleLeft == 371);
+	// Set on the HUD with the weapon's deviation: an LMG's tightens as it fires.
+	hud::HudManager hudManager(nullptr);
+	world::ObjectTemplate mg(2, "GenericFireArm", "eu_mg", 1);
+	menu::updateSoldierWeaponHud(hudManager, &mg, 2.0f, false, false, true);
+	CHECK(hudManager.number("CrossCircleLeftPos") == 366 && hudManager.number("CrossCircleRightPos") == 428);
+	menu::updateSoldierWeaponHud(hudManager, &mg, 0.5f, false, false, true);
+	CHECK(hudManager.number("CrossCircleLeftPos") == 381 && hudManager.number("CrossCircleRightPos") == 413
+		&& hudManager.number("CrossCircleDownPos") == 307 && hudManager.number("CrossCircleUpPos") == 276);
 }
 
 // The Titans' consoles and shields on the HUD (0x0044b680 case 0x32,

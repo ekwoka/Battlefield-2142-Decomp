@@ -335,6 +335,11 @@ CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisua
 	parts.down = 301 + o;
 	parts.left = 399 - length - o;
 	parts.right = 400 + o;
+	constexpr int kCircleWidth = 6, kCircleGap = 8; // +0x154, +0x158 (0x007bf43c)
+	parts.circleUp = static_cast<float>(301 - 2 * kCircleWidth - kCircleGap - spread);
+	parts.circleRight = static_cast<float>(400 + kCircleGap + spread);
+	parts.circleDown = static_cast<float>(300 + kCircleGap - kCircleWidth + spread);
+	parts.circleLeft = static_cast<float>(400 - kCircleWidth - kCircleGap - spread);
 	return parts;
 }
 
@@ -1237,6 +1242,10 @@ int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* we
 	hud.set("CrossLeftPos", parts.left);
 	hud.set("CrossUpPos", parts.up);
 	hud.set("CrossDownPos", parts.down);
+	hud.set("CrossCircleUpPos", parts.circleUp);
+	hud.set("CrossCircleRightPos", parts.circleRight);
+	hud.set("CrossCircleDownPos", parts.circleDown);
+	hud.set("CrossCircleLeftPos", parts.circleLeft);
 	return gui;
 }
 

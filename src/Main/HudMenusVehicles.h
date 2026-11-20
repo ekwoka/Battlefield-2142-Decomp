@@ -317,9 +317,14 @@ private:
 // 300). The block fields are the WeaponHud component's (constructor
 // 0x006390e0: +0xf8 10, +0xfc 1000, +0x100 0; read through slot 0x50 at
 // +0xb0 / +0xb4 / +0xb8).
+// The machine guns' circle parts (CrossCircle*Pos, +0x144..+0x150) take the
+// raw spread s, unclamped, with the part 6 wide (+0x154) and 8 out (+0x158):
+// Up = 301 - 2*6 - 8 - s, Right = 400 + 8 + s, Down = 300 + 8 - 6 + s,
+// Left = 400 - 6 - 8 - s.
 struct CrosshairParts {
 	float up = 0, down = 0, left = 0, right = 0;
 	int offset = 0;
+	float circleUp = 0, circleDown = 0, circleLeft = 0, circleRight = 0;
 };
 CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length = 20);
 // The same with the weapon template's weaponHud.* (defaults as above).
