@@ -2572,8 +2572,13 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	// The tool's battery is AbilityValue and the ammunition bar.
 	CHECK(hud.number("AbilityValueShow") == 1 && std::abs(hud.number("PrimaryAmmo") - 0.6f) < 1e-5f);
 	// A target without armour counts in the averaging's order only.
-	info.targets = {-1.0f, 0.4f};
+	info.targets = {std::nanf(""), 0.4f};
 	CHECK(std::abs(bar.update(info, false).bar - 0.2f) < 1e-5f);
+	// A wreck being mended (a Titan gun at its station): below 0 hit points
+	// the bar and the wrench show, the ring empty (0x007c3af0 hands the
+	// share on as it is; the bar node clamps it).
+	info.targets = {-0.6f};
+	CHECK(bar.update(info, false).show && bar.out().wrench && bar.out().bar < 0 && bar.out().sound == 1);
 	// The support's: the soldiers' ammunition, no wrench, the ammo sound.
 	info.kitRepairing = false;
 	info.kitAmmo = true;

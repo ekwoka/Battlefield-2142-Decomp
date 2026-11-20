@@ -384,8 +384,8 @@ const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo&
 	float value = 0;
 	for (size_t i = 0; i < info.targets.size(); ++i) {
 		float share = info.targets[i];
-		if (!info.kitAmmo && share < 0) {
-			continue; // no armour
+		if (!info.kitAmmo && std::isnan(share)) {
+			continue; // no armour (a wreck's share below 0 still shows the bar, empty)
 		}
 		if (i != 0) {
 			share = (share + value) * 0.5f;

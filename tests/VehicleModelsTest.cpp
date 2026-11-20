@@ -10247,6 +10247,152 @@ TEST(Titan_WreckSequencePixelsOptIn)
 }
 #endif
 
+#ifdef BF2142_RENDER_TESTS
+// A Titan gun seat's view when its gun is wrecked: the barrel carries a
+// wreck HUD (eu_groundcanonwreckhud / eu_aacannonwreckhud, both teams'
+// guns), whose wreck geometry is a scrolling additive static quad a hand's
+// breadth before the camera. Both hang on the barrel (a RotationalBundle):
+// the HUD must turn with it, or the gun's pitch leaves the static above the view.
+TEST(Titan_WreckedGunSeatShowsStaticOptIn)
+{
+	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");
+	if (!output || !gameDir()) return;
+	std::filesystem::create_directories(output);
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = render::GpuContext::create(nullptr, error);
+		if (!gpu) { std::fprintf(stderr, "%s\n", error.c_str()); CHECK(gpu); return; }
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
+			const std::string prefix = std::string(mod) == "mods/bf2142" ? "vanilla" : "remaster";
+			for (const int team : {1, 2}) {
+				geom::GeometryTemplateManager geometries;
+				titantest::TitanLevel level(gameDir(), "Suez_Canal", 48, true, mod, false, &geometries);
+				CHECK(level.loaded);
+				if (!level.loaded) continue;
+				game::GameWorld& round = *level.world;
+				const int player = round.joinPlayer(team);
+				CHECK(round.spawnSoldier(player));
+				game::GameWorld::PlayerInfo me;
+				CHECK(round.playerInfo(player, me));
+				const auto* info = level.titan(team);
+				CHECK(info);
+				if (!info) continue;
+				CHECK(round.setSoldierPosition(me.soldier, info->position + physics::Vec3 {0, 11, -30}));
+				physics::Vec3 entry;
+				float radius = 0;
+				int first = -1;
+				CHECK(round.titanGunEntry(player, entry, radius, first));
+				CHECK(round.setSoldierPosition(me.soldier, entry - physics::Vec3 {0, 1, 0}));
+				game::SoldierInput input;
+				input.use = true;
+				round.setInput(player, input);
+				level.run(0.1f);
+				const uint32_t titan = round.titanOf(team);
+				const auto seats = round.vehicleSeats(titan);
+				scene::LightSettings lights;
+				scene::SkySettings sky;
+				scene::WaterSettings water;
+				scene::RendererSettings settings;
+				render::LevelSources sources {level.files, level.templates, level.objects, geometries, level.heightmaps,
+					nullptr, lights, sky, water, "", ""};
+				sources.renderer = &settings;
+				sources.effects = &round.effects();
+				sources.objectRadius = [&](uint32_t object) { return round.objectRadius(object); };
+				sources.partTransforms = [&](uint32_t object, std::vector<anim::Matrix>& parts) { return round.partTransforms(object, parts); };
+				sources.partBone = [&](uint32_t object, const std::string& part, anim::Matrix& local) { return round.partBone(object, part, local); };
+				sources.partLook = [&](uint32_t object, const std::string& part) { return round.titanPartLook(object, part); };
+				sources.partPose = [&](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
+					return round.partPose(object, part, offset, rotation);
+				};
+				sources.titanObject = [&](int t) { return round.titanOf(t); };
+				render::LevelRenderer renderer(*gpu);
+				renderer.build(sources);
+				auto target = gpu->createOffscreenTarget(640, 360);
+				anim::AnimationSystems systems(nullptr);
+				PlayerCamera camera(round, systems, nullptr);
+				// The static's pale blue (eu_panels_c's top band): blue well over red.
+				const auto shoot = [&](float nearPlane, const std::string& label) {
+					camera.tick(1 / 30.0f);
+					PlayerCamera::View eye;
+					CHECK(camera.view(eye, 16.0f / 9));
+					render::Camera view;
+					view.position = {eye.position[0], eye.position[1], eye.position[2]};
+					view.yaw = eye.yaw;
+					view.pitch = eye.pitch;
+					view.roll = eye.roll;
+					view.fovY = eye.fovY;
+					view.nearPlane = nearPlane;
+					renderer.syncObjects();
+					auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+					renderer.draw(commands, target.color, target, view, lights);
+					CHECK(SDL_SubmitGPUCommandBuffer(commands));
+					std::vector<uint8_t> pixels;
+					CHECK(gpu->readPixels(target, pixels));
+					CHECK(render::writePng(std::string(output) + "/" + prefix + "-gun-seat-" + label + ".png", target.width, target.height, pixels));
+					size_t blue = 0;
+					for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+						blue += pixels[i + 2] > 150 && pixels[i + 2] > pixels[i] + 40;
+					}
+					return static_cast<float>(blue) / static_cast<float>(target.width * target.height);
+				};
+				int checked = 0;
+				for (const char* kind : {"groundcanone3", "aacannon"}) {
+					for (size_t i = 0; i < seats.size(); ++i) {
+						if (seats[i].name.find(kind) == std::string::npos) continue;
+						input = {};
+						input.switchSeat = static_cast<int>(i) + 1;
+						round.setInput(player, input);
+						level.run(0.2f);
+						round.setInput(player, {});
+						CHECK(round.playerInfo(player, me) && me.vehicle == titan && me.seat == static_cast<int>(i));
+						std::string gun = seats[i].name;
+						gun = gun.substr(0, gun.size() - 4); // "<gun>_hub"
+						uint32_t part = 0;
+						for (const auto& p : round.titanParts(team)) {
+							if (p.name == gun) part = p.id;
+						}
+						CHECK(part != 0);
+						const std::string label = std::string(team == 1 ? "pac-" : "eu-") + kind;
+						// Turned off its rest (the ground cannon's barrel rests pitched down,
+						// setMinRotation 0/5/0): the base yaws, the barrel tilts.
+						float yaw0 = 0, pitch0 = 0, yaw1 = 0, pitch1 = 0;
+						round.gunAim(titan, me.seat, yaw0, pitch0);
+						for (int tick = 0; tick < 60; ++tick) {
+							input = {};
+							input.turn = 2;
+							input.aimPitch = 10;
+							input.hasPitch = true;
+							round.setInput(player, input);
+							level.run(1 / 30.0f);
+						}
+						round.setInput(player, {});
+						round.gunAim(titan, me.seat, yaw1, pitch1);
+						std::fprintf(stderr, "  turned %.1f, tilted %.1f degrees\n", std::remainder(yaw1 - yaw0, 360.0f), pitch1 - pitch0);
+						CHECK(std::fabs(std::remainder(yaw1 - yaw0, 360.0f)) + std::fabs(pitch1 - pitch0) > 5);
+						const float whole = shoot(0.1f, label + "-whole"); // our first-person near plane (Viewer.cpp)
+						round.applyDamage(part, 1e6f);
+						level.run(0.1f);
+						CHECK(round.hitPoints(part) <= 0);
+						const float wreck = shoot(0.1f, label + "-wreck");
+						std::fprintf(stderr, "  %s %s: static %.0f %% whole, %.0f %% wrecked\n", prefix.c_str(), label.c_str(),
+							whole * 100, wreck * 100);
+						CHECK(whole < 0.2f);
+						CHECK(wreck > 0.8f);
+						++checked;
+						break;
+					}
+				}
+				CHECK(checked == 2);
+				gpu->releaseTarget(target);
+			}
+		}
+	}
+	SDL_Quit();
+}
+#endif
+
 // Destroyed wheel states must stop holding up the replacement hull, including
 // a parked/asleep vehicle and one killed before landing. Keep delay/opt-out
 // controls: destruction alone is not the collision-state transition.

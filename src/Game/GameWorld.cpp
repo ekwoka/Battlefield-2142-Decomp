@@ -12407,10 +12407,17 @@ bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 			out.targets.push_back(soldier ? static_cast<float>(soldierAmmoLevel(*soldier)) / 15.0f : 1.0f);
 			continue;
 		}
-		const world::Object* o = m_objects.find(target);
+		// 0x007c3af0: the target's own armour (+0x48), its hit points (slot
+		// 0x3c, +0x10) over maxHitPoints (slot 0x8c, template +0xc8). A Titan
+		// part has its armour in the tree (a gun mended at its station): a
+		// wreck's hit points are below 0, so the ring stays empty until it works.
+		const Titan* titan = nullptr;
+		int index = 0;
+		const bool part = titanPart(target, titan, index);
+		const world::ObjectTemplate* t = armourTemplate(target);
 		const float left = hitPoints(target);
-		const float most = o && o->objectTemplate() ? number(*o->objectTemplate(), "armor.maxHitPoints", 0) : 0;
-		out.targets.push_back(left >= 0 && most > 0 ? left / most : -1.0f);
+		const float most = t ? number(*t, "armor.maxHitPoints", 0) : 0;
+		out.targets.push_back(most > 0 && (part || left >= 0) ? left / most : std::nanf(""));
 	}
 	return true;
 }
