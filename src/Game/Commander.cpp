@@ -391,10 +391,10 @@ GameWorld::CommanderAbilityState GameWorld::abilityState(int team, CommanderAbil
 //   7).
 // - UAV: the point is kept (0x005a23b0) and the UAV stays uavTime.
 // - Satellite scan: it runs satelliteScanTime.
-// - Supply drop (0x0043d6d0, 0x0043d510): a supply_crate at the ground's
-//   height plus supplyDropHeight; it goes supplyDropNumSecsToLive after
-//   it landed (0x0043d880 from the time 0x0043d9c0 keeps), and its
-//   parachute goes on landing (supplyObjectContact).
+// - Supply drop (0x0043d6d0, 0x0043d510): a supply_crate starts
+//   supplyDropHeight above the highest surface in the drop column.
+//   It expires supplyDropNumSecsToLive after landing (0x0043d880 from
+//   the time 0x0043d9c0 keeps); its parachute goes on contact.
 bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, float z, bool byAi)
 {
 	if ((team != 1 && team != 2) || (m_commanders[team].commander == -1 && !byAi)) {
@@ -442,6 +442,14 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 		}
 		// It falls from the drop height when it has a body (physics on);
 		// without, it comes down by itself (stepCrates).
+		// 0x0043d510 traces from y=500 to y=0, then takes the highest
+		// of the hit, terrain and water before adding the configured height.
+		constexpr float rayHeight = 500.0f;
+		float fraction = 1;
+		uint32_t hit = 0;
+		if (objectRayHit({x, rayHeight, z}, {x, 0, z}, 0, fraction, hit)) {
+			ground = std::max(ground, rayHeight * (1 - fraction));
+		}
 		world::Object* placed = m_objects.create(crate, {x, ground + commanderSettings.supplyDropHeight, z});
 		if (!placed) {
 			return false;
@@ -890,6 +898,9 @@ void GameWorld::supplyObjectContact(uint32_t self, uint32_t other)
 	world::Object* object = m_objects.find(self);
 	if (object && !object->childDisabled("supply_parachute")) {
 		object->disableChild("supply_parachute");
+		if (Body* body = findBody(self)) {
+			body->canopy.reset();
+		}
 	}
 	if (crate != m_crates.end()) {
 		crate->landed = true;

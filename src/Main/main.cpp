@@ -7865,6 +7865,13 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
+				if (ghost.supplyLanded) {
+					const auto placed = ghostObjects.find(ghost.ghost);
+					world::Object* object = placed != ghostObjects.end() ? objects.find(placed->second) : nullptr;
+					if (object && !object->childDisabled("supply_parachute")) {
+						object->disableChild("supply_parachute");
+					}
+				}
 			}
 			// The players' living soldiers on foot, animated from their ghosts
 			// (GameWorld::animateRemoteSoldier: posed and holding the weapon

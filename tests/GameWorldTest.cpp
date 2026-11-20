@@ -4251,7 +4251,9 @@ TEST(GameWorld_CloakReportRevealsTagsForShowCloakedSquads)
 TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 {
 	Range range;
-	range.collisionTemplates.add("slab_mesh", boxMesh(10));
+	range.collisionTemplates.add("slab_mesh",
+		panelMesh({{-10, 10, -10}, {10, 10, -10}, {10, 10, 10}, {-10, 10, 10}}, {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+	range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
 	range.templates.registerType(6, "Kit");
 	range.templates.registerType(7, "SimpleObject");
 	world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
@@ -4259,13 +4261,16 @@ TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 	range.objects.create(slab, {0, 0, 30}); // its top at y 10
 	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
 	hub->settings()["itemIndex"] = "4";
+	hub->settings()["velocity"] = "4";
 	hub->settings()["projectileTemplate"] = "unl_hub_medic_stationary";
 	hub->settings()["ammo.replenishingType"] = "RTHeal";
 	hub->settings()["ammo.abilityRadius"] = "4";
 	hub->settings()["ammo.abilityStrength"] = "3";
 	hub->settings()["ammo.magSize"] = "1";
 	hub->settings()["fire.roundsPerMinute"] = "60";
-	range.templates.create("GenericProjectile", "unl_hub_medic_stationary")->settings()["armor.maxHitPoints"] = "100";
+	auto* deployed = range.templates.create("GenericProjectile", "unl_hub_medic_stationary");
+	makeMobile(*deployed, "hub_mesh");
+	deployed->settings()["armor.maxHitPoints"] = "100";
 	range.templates.create("Kit", "EU_Assault")->children().push_back({"unl_hub_medic", {}, {}});
 	range.world->startRound();
 	CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -4285,7 +4290,13 @@ TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 	const auto placed = range.world->supplyObjects();
 	CHECK(placed.size() == 1);
 	if (!placed.empty()) {
-		CHECK(std::fabs(range.objects.find(placed[0])->position().y - 10) < 0.5f);
+		const auto* object = range.objects.find(placed.front());
+		CHECK(object && object->position().y > 11);
+		for (int tick = 0; tick < 60; ++tick) {
+			range.world->tick(1 / 30.0f);
+		}
+		object = range.objects.find(placed.front());
+		CHECK(object && std::fabs(object->position().y - 10.2f) < 0.1f);
 	}
 }
 

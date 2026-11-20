@@ -76,6 +76,7 @@ struct RemoteObject {
 	float health = -1;        // -1: unknown; soldiers: a fraction of maxHitPoints, others: hit points
 	NetworkableKind kind = NetworkableKind::Unknown; // the ghost's root networkable
 	bool hasOrientation = false;
+	bool supplyLanded = false; // SimpleObject 0x20000
 	Quat orientation;         // SimpleObject / GenericProjectile ghosts
 	bool hasVelocity = false;
 	Vec3f velocity;

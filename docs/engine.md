@@ -13373,8 +13373,10 @@ and takes the largest `minTimeBetweenActivation`.
   (`GameWorld::uavDrone`); the events aren't raised.
 - **Supply drop** (`0x0043d6d0`): every `SupplyDrop-Reload-Time` (60 s,
   less 0.1) per team, without an asset. `0x0043d510` creates a
-  `supply_crate` at the ground's height plus `gameLogic.supplyDropHeight`
-  (50; game logic `+0x1b8`, slots `0x240`/`0x244`, console `0x00425fcc`).
+  `supply_crate` at the highest of terrain, water and the object hit by a
+  downward ray from y=500 to y=0 (`0x006f2d20`), plus
+  `gameLogic.supplyDropHeight` (50; game logic `+0x1b8`, slots
+  `0x240`/`0x244`, console `0x00425fcc`).
   `0x0043d880` removes it `supplyDropNumSecsToLive` (300; `+0x1bc`,
   `0x004260db`; both GameLogic properties, handed to the round's
   `CommanderSettings`) after it landed: `0x0043d9c0` keeps the landing
@@ -13384,7 +13386,11 @@ and takes the largest `minTimeBetweenActivation`.
   slot `0xbc`; `*0x00920bc0` = 3) is removed instead (`0x0043d7c0`).
   Landing changes nothing else: the crate stays a mobile body (its
   landed byte `+0x198` only goes to the clients, `0x005fdf60` /
-  `0x005fe980` → `0x005ffec0` → `0x005d0830`). `GameWorld::supplyObjectContact`.
+  `0x005fe980` → `0x005ffec0` → `0x005d0830`).
+  The native host sends that bit (`SimpleObject` mask `0x20000`) and the
+  joined client disables the canopy subtree. Native crates use their team
+  for the Titan shield filter so friendly drops can reach the deck.
+  `GameWorld::supplyObjectContact`.
   The
   crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
   (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles

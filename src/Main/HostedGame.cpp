@@ -2613,6 +2613,10 @@ std::vector<net::NetworkableState> HostedGame::statesOf(const Ghost& ghost, size
 			s.position = position;
 			s.orientation = quaternionFromYawPitchRoll(object->rotation().x, object->rotation().y, object->rotation().z);
 			s.health = m_round->hitPoints(ghost.object);
+			if (h.kind == net::NetworkableKind::SimpleObject && h.mobile && ghost.objectTemplate->typeName() == "SupplyObject") {
+				s.mask |= 0x20000;
+				s.supplyFlag = object->childDisabled("supply_parachute");
+			}
 			if (h.kind == net::NetworkableKind::SimpleObject && h.mobile) {
 				if (const auto motion = m_motion.find(ghost.object); motion != m_motion.end()) {
 					s.mask |= 0x4 | 0x8;

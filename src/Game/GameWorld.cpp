@@ -15189,6 +15189,7 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 	body.majorActor = flag(*t, "isMajorActor", false);
 	// Parachute derives from PlayerControlObject in retail (including drop pods).
 	body.controlObject = sameName(t->typeName(), "PlayerControlObject") || sameName(t->typeName(), "Parachute");
+	body.commanderCrate = sameName(t->typeName(), "SupplyObject") && sameName(t->name(), "supply_crate");
 	body.particle = sameName(t->typeName(), "Particle");
 	body.material = static_cast<uint32_t>(integer(*t, "material", 0));
 	body.collisionGroups = static_cast<uint32_t>(integer(*t, "collisionGroups", 0));

@@ -489,7 +489,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 {
 	dice::hfe::world::ObjectTemplateManager templates;
 	templates.registerType(1, "SupplyObject");
-	templates.create("SupplyObject", "supply_crate")->settings()["sharedStorageSize"] = "500";
+	auto* crateTemplate = templates.create("SupplyObject", "supply_crate");
+	crateTemplate->settings()["sharedStorageSize"] = "500";
+	crateTemplate->settings()["networkableInfo"] = "BasicInfo";
+	crateTemplate->settings()["hasCollisionPhysics"] = "1";
+	crateTemplate->settings()["hasMobilePhysics"] = "1";
+	crateTemplate->settings()["physicsType"] = "Mesh";
 	templates.registerType(2, "OverheadCamera");
 	{
 		auto* camera = templates.create("OverheadCamera", "MultiPlayerOverheadCamera");
@@ -649,6 +654,19 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		const dice::hfe::world::Object* crate = objects.find(crates.front());
 		CHECK(crate && std::abs(crate->position().x - 10) < 0.01f && std::abs(crate->position().z - 20) < 0.01f);
 	}
+	const auto seesCrate = [&](bool landed) {
+		for (const net::RemoteObject& ghost : b.world().objectList()) {
+			if (ghost.templateId == crateTemplate->id() && ghost.hasPosition && ghost.supplyLanded == landed) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(pumpUntil(step, [&] { return seesCrate(false); }));
+	if (const auto crates = round.supplyCrates(); !crates.empty()) {
+		round.supplyObjectContact(crates.front(), 0);
+	}
+	CHECK(pumpUntil(step, [&] { return seesCrate(true); }));
 	// Again too soon: refused by the round.
 	a.commanderTool(net::CommanderToolUse::Supplies, 10, 20);
 	CHECK(pumpUntil(step, [&] { return tools.size() == 2; }));

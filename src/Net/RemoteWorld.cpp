@@ -1085,6 +1085,9 @@ bool RemoteWorld::overheadCamera(int team, Vec3f& position) const
 void RemoteWorld::applyState(RemoteObject& o, const NetworkableState& s)
 {
 	o.decoded = s.complete;
+	if (s.kind == NetworkableKind::SimpleObject && (s.mask & 0x20000)) {
+		o.supplyLanded = s.supplyFlag;
+	}
 	if ((s.mask & 0x10000) && s.kind == NetworkableKind::Soldier && !s.ragdollParticles.empty()) {
 		o.ragdoll = true;
 		o.ragdollParticles = s.ragdollParticles;

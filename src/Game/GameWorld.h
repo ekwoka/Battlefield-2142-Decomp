@@ -3074,6 +3074,7 @@ private:
 		float submerged = 0;
 		// collisionGroups (template +0x104 -> response +0x1c, slot 0x50).
 		uint32_t collisionGroups = 0;
+		bool commanderCrate = false; // uses its team to pass friendly Titan shields
 		// otherCollisionLod (SimpleObject +0xec, executor 0x0051ee4d; -1,
 		// that is 1, by default; the node's slot 0x1a4): the LOD of the
 		// other object its mesh meets (MeshCollision.cpp); its collision

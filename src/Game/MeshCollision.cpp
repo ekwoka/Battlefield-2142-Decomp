@@ -183,7 +183,7 @@ GameWorld::MeshActor GameWorld::actorOf(Body& body) const
 	a.particle = body.particle;
 	a.material = body.material;
 	a.collisionGroups = body.collisionGroups;
-	if (body.controlObject) {
+	if (body.controlObject || body.commanderCrate) {
 		if (const world::Object* object = m_objects.find(body.object)) {
 			a.team = object->team();
 		}
@@ -936,8 +936,10 @@ bool GameWorld::meshPair(MeshActor& a, MeshActor& b, float seconds, bool trunkOn
 	// A team's PlayerControlObject passes the other's force fields and
 	// doors (0x006bb050's start: interface 0xc4c5 slot 0x9c, team 1 against
 	// collisionGroups 0x100, team 2 against 0x200; shipped: as_* 256, eu_* 512).
-	const auto passes = [](const MeshActor& pco, const MeshActor& other) {
-		return (pco.team == 1 && (other.collisionGroups & 0x100)) || (pco.team == 2 && (other.collisionGroups & 0x200));
+	// Native commander crates use the same team filter so a friendly
+	// Titan shield does not destroy the arriving crate before touchdown.
+	const auto passes = [](const MeshActor& actor, const MeshActor& other) {
+		return (actor.team == 1 && (other.collisionGroups & 0x100)) || (actor.team == 2 && (other.collisionGroups & 0x200));
 	};
 	if (passes(a, b) || passes(b, a)) {
 		return true;

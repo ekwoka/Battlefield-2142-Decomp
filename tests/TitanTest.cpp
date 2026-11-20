@@ -4386,6 +4386,48 @@ TEST(Titan_AirTransportSeatsLaunchPods)
 	}
 }
 
+TEST(Titan_CommanderCrateDropsFromAboveDeck)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+		const auto* titan = level.titan(2);
+		CHECK(level.loaded && titan);
+		if (!titan) {
+			continue;
+		}
+		level.run(4);
+		const auto floor = level.world->titanToWorld(titan->object, {-19, 1.36f, -9});
+		CHECK(level.world->commanderAction(2, game::GameWorld::CommanderAbility::Supplies, floor.x, floor.z, true));
+		const auto crates = level.world->supplyCrates();
+		CHECK(crates.size() == 1);
+		if (crates.size() != 1) {
+			continue;
+		}
+		const auto* crate = level.objects.find(crates.front());
+		CHECK(crate && crate->position().y >= floor.y + 49.9f);
+		if (!crate) {
+			continue;
+		}
+		const float start = crate->position().y;
+		CHECK(!crate->childDisabled("supply_parachute"));
+		level.run(12);
+		crate = level.objects.find(crates.front());
+		CHECK(crate);
+		if (crate) {
+			std::fprintf(stderr, "  %s commander crate: start %.3f, landed %.3f\n", mod, start, crate->position().y);
+			CHECK(crate->position().y >= floor.y - 0.1f && crate->position().y < start - 49);
+			CHECK(crate->childDisabled("supply_parachute/animatedParachute"));
+		}
+	}
+}
+
 TEST(Titan_ThrownSupplyHubsLandOnDeck)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -4424,6 +4466,7 @@ TEST(Titan_ThrownSupplyHubsLandOnDeck)
 
 			game::SoldierInput fire;
 			fire.fire = true;
+			fire.aimPitch = -45; // reproduce a sideways landing on the deck
 			level.world->setInput(id, fire);
 			for (int tick = 0; tick < 60 && level.world->supplyObjects().empty(); ++tick) {
 				level.world->tick(1 / 30.0f);
@@ -4440,7 +4483,7 @@ TEST(Titan_ThrownSupplyHubsLandOnDeck)
 				continue;
 			}
 			const world::Vec3 launch = hub->position();
-			CHECK(launch.y - player.position.y > 1.4f && launch.y - player.position.y < 1.8f);
+			CHECK(launch.y - player.position.y > 1.3f && launch.y - player.position.y < 1.8f);
 			CHECK(std::hypot(launch.x - player.position.x, launch.z - player.position.z) < 0.3f);
 			level.run(4 / 30.0f);
 			hub = level.objects.find(hubs.front());
@@ -4450,15 +4493,64 @@ TEST(Titan_ThrownSupplyHubsLandOnDeck)
 			}
 			const float yaw = player.yaw * 3.14159265f / 180.0f;
 			const float distance = (hub->position().x - launch.x) * std::sin(yaw) + (hub->position().z - launch.z) * std::cos(yaw);
-			CHECK(distance > 0.8f && distance < 1.0f);
+			CHECK(distance > 0.5f && distance < 0.9f);
 
 			level.run(2);
 			hub = level.objects.find(hubs.front());
 			CHECK(hub);
 			if (hub) {
-				std::fprintf(stderr, "  %s %s: deck %.3f, launch %.3f, landed %.3f\n", mod, kit,
-					player.position.y, launch.y, hub->position().y);
+				const auto angles = hub->rotation();
+				const auto frame = physics::Mat3::fromYawPitchRoll({angles.x, angles.y, angles.z});
+				std::fprintf(stderr, "  %s %s: deck %.3f, launch %.3f, landed %.3f, up %.3f\n",
+					mod, kit, player.position.y, launch.y, hub->position().y, frame.rows[1].y);
 				CHECK(std::fabs(hub->position().y - player.position.y) < 0.5f);
+				if (std::string_view(kit) != "EU_Support") {
+					continue;
+				}
+				// A deployed ammo hub can restore a spare magazine while lying on its side.
+				CHECK(std::fabs(frame.rows[1].y) < 0.25f);
+				game::SoldierInput rifle;
+				rifle.selectItem = 3;
+				level.world->setInput(id, rifle);
+				level.run(0.1f);
+				level.world->setInput(id, {});
+				level.run(2.5f);
+				const auto spareMagazines = [&] {
+					for (const auto& ammo : level.world->weaponAmmo(id)) {
+						if (ammo.inHand && ammo.magSize > 0) {
+							return ammo.magsLeft;
+						}
+					}
+					return -1;
+				};
+				const int full = spareMagazines();
+				game::SoldierInput shoot;
+				shoot.fire = true;
+				shoot.aimPitch = 35;
+				level.world->setInput(id, shoot);
+				level.run(1);
+				level.world->setInput(id, {});
+				game::SoldierInput reload;
+				reload.reload = true;
+				level.world->setInput(id, reload);
+				level.run(1.0f / 30);
+				level.world->setInput(id, {});
+				int spent = full;
+				for (int tick = 0; tick < 180 && spent == full; ++tick) {
+					level.world->tick(1.0f / 30);
+					spent = spareMagazines();
+				}
+				level.run(8);
+				const int refilled = spareMagazines();
+				const auto* rested = level.objects.find(hubs.front());
+				CHECK(rested);
+				if (rested) {
+					const auto a = rested->rotation();
+					const auto up = physics::Mat3::fromYawPitchRoll({a.x, a.y, a.z}).rows[1].y;
+					std::fprintf(stderr, "  %s: spare magazines %d -> %d -> %d, hub up %.3f\n", mod, full, spent, refilled, up);
+					CHECK(std::fabs(up) < 0.25f);
+				}
+				CHECK(full > spent && spent >= 0 && refilled == full);
 			}
 		}
 	}
