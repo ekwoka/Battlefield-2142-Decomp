@@ -1734,11 +1734,12 @@ public:
 	//   - the current seat's allowTogglePosition 0 (0x004be242, interface
 	//     0xc4c4 slot 0x160: the pod arrays, the Wake / playtest Titans'
 	//     hulls): ignored;
-	//   - the seat already held, or its PIFire weapon mid-shot (0x004b9ee0:
+	//   - the seat already held, or the selected PIFire weapon busy (0x004b9ee0:
 	//     firearm slot 0x174, 0x005c11c0, false while the fire component's
 	//     state is 1..3, pressed, held or charging; the zoom half only
 	//     counts off the server): refused, event 0/5
 	//     ECGameLogicGLFailedToChangePosition (the passengers' names);
+	//   - retail filters by addPcoPosId (0x004be2ba), unused in the shipped templates;
 	//   - no such seat: ignored;
 	//   - a free seat that allows toggling: the move;
 	//   - otherwise (taken, or free but not togglable; 0x004be39d): a bot
@@ -1749,7 +1750,7 @@ public:
 		int current = -1, wanted = -1; // seat indices
 		size_t seats = 0;
 		bool currentToggles = true, wantedToggles = true;
-		bool firing = false; // the trigger held (the fire component's state above 0, as ikWeaponMessages)
+		bool firing = false; // Held input stands in for the firearm check at 0x005c11c0.
 		bool requesterAi = false;
 		int occupant = -1; // the wanted seat's player, -1 none
 		bool occupantAi = false;

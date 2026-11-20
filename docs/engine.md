@@ -9035,21 +9035,44 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   local position key against the HUD world's seats, so a joined client
   gets it too).
 - **The position keys** (`0x004bda00`, `GameWorld::seatKey`), in order:
-  the current seat's allowTogglePosition 0 ignores the key; the seat
-  already held, or the current seat's PIFire weapon mid-shot (`0x004b9e90`
-  → `0x004b9ee0`: the firearm's slot `0x174`, `0x005c11c0`, false while
-  its fire component's state, slot `0xd8`, is 1..3: pressed, held or
-  charging; its zoom half, the zoom component's slot `0xd4`, counts only
-  off the server, game logic slot `0x144`) refuses it (event 0/5); a key
-  past the seats is ignored; a free seat that allows toggling is taken;
-  otherwise (taken, or free but not togglable) a bot asking is ignored, a
-  bot in the seat is swapped out, the player taking the seat and the bot
-  his old one (`0x004be3db`..`0x004be47a`), and anything else is refused.
-  The rewrite takes the held fire button as the mid-shot state (as
-  `ikWeaponMessages` does). The shipped allowTogglePosition 0 seats are
-  the pod arrays (titan_pod_array1/2 and their Wake forms,
-  static_pod_array, static_pod_array_gpk) and the Wake / playtest Titans'
-  hulls.
+  the current seat's `allowTogglePosition 0` ignores the key. The seat
+  already held or a busy primary firearm refuses it (event 0/5).
+  Next, retail checks the current seat's `ObjectTemplate.addPcoPosId` list
+  (`0x004be2ba` → slot `0x68`, `0x005c6820`, template `+0x3e4`).
+  The serializer at `0x005cb0a0` writes one `addPcoPosId` line per entry.
+  An empty list allows any position. A nonempty list silently ignores a
+  missing zero-based seat index, before the vehicle's seat lookup.
+  No `addPcoPosId` occurs in the installed vanilla or Project Remaster v17
+  Final object and level archives' `.con` or `.tweak` entries, so the
+  native rule omits this list. A key past the seats is also ignored.
+  A free seat that allows toggling is taken. Otherwise a bot asking is
+  ignored, a bot in the seat is swapped with the player
+  (`0x004be3db`–`0x004be47a`), and any other request is refused.
+  The shipped `allowTogglePosition 0` seats are the pod arrays
+  (titan_pod_array1/2 and their Wake forms, static_pod_array,
+  static_pod_array_gpk) and the Wake / playtest Titans' hulls.
+
+  **Primary firearm check.** `0x004b9e90` normally uses the controlled
+  object. For a non-soldier, control interface slot `0x148`
+  (`0x005c7fd0`) tests `+0x2c == 0`, live links at `+0x1c` and
+  `+0x20`, and Soldier class `0x9493` on the latter link's target.
+  On success, slot `0x14` (`0x0059e160`) returns that soldier and
+  `0x004b9ee0` checks its active group-zero weapon (PIFire, slot
+  `0x78(0)`). An ordinary child seat attached to a vehicle fails the
+  Soldier-class test. No authored Soldier child seat was identified in
+  either installation. Dynamically attached objects were not tested live.
+
+  The firearm's slot `0x174` (`0x005c11c0`) blocks for fire-component
+  states 1 through 3. The checked base and derived fire vtables share
+  slot `0xd8` → `0x005d5b90`, which reads `+0x150`.
+  For example, SingleFireComp's `+0x15c` write at `0x005d4e41`
+  stores a tick from `0x00666090`. A shot in state 4 does not block on
+  the fire check. The firearm's zoom component can block on the
+  off-server path. Native gameplay and HUD still use held primary input
+  as a stand-in. It can incorrectly refuse an unarmed seat or a gun
+  in state 4, and can miss a charge that persists after release.
+  A faithful replacement needs the active firearm's phase at the point
+  of the key press, including the state available to a joined client.
 - The weapon and vehicle HUDs read their template fields once per
   template (`WeaponHud::Fields`), not every frame.
 
