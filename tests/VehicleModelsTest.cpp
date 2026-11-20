@@ -3200,12 +3200,13 @@ TEST(Vehicles_SeatItemSelectionAndFirstWeapons)
 		menu::ItemSelection items;
 		items.open({{1, "cannon.tga"}, {2, "missile.tga"}}, 2, 0.4f);
 		items.flash(2);
-		CHECK(items.flashing() == 1);
+		// The reversed list packs item 2 into HUD slot 0.
+	CHECK(items.flashing() == 0);
 		int toggles = 0;
 		float last = 1;
 		for (int i = 0; i < 14; ++i) {
 			items.update(hud, 0.05f);
-			const float now = hud.number("ItemSlot1Active");
+			const float now = hud.number("ItemSlot0Active");
 			toggles += now != last;
 			last = now;
 		}
