@@ -13367,7 +13367,9 @@ void GameWorld::enterOrLeaveVehicle(Player& player, world::Object& soldier)
 		// A vehicle, or a Titan (its gun seats, Titans.cpp).
 		const Titan* titan = body.vehicle ? nullptr : titanByObject(body.object);
 		const world::Object* object = body.vehicle || (titan && !titan->wrecked) ? m_objects.find(body.object) : nullptr;
-		if (!object || !object->objectTemplate() || !mayEnter(body, player.team)) {
+		// 0x005a98e0 skips an entry point whose first armoured parent is
+		// destroyed (the armour's slot 0x58, 0x005a9b6a): no getting into a wreck.
+		if (!object || !object->objectTemplate() || object->destroyed() || !mayEnter(body, player.team)) {
 			continue;
 		}
 		const VehicleLayout& layout = vehicleLayout(*object->objectTemplate());

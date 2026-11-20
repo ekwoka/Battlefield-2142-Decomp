@@ -874,6 +874,7 @@ TEST(Vehicles_BundleSkeletonPosesBoneParts)
 	CHECK(g.world->partBone(mech, "AS_heavy_mech_torsospring", standing));
 	std::fprintf(stderr, "  as_heavy_mech torso: parked y %.2f, standing y %.2f\n", parked[13], standing[13]);
 	CHECK(standing[13] > parked[13] + 0.2f);
+	g.objects.remove(mech); // each vehicle on its own: stacked, the next one lands on (and wrecks) the last
 	const uint32_t at = g.start("eu_at", {0, 4, 6});
 	g.world->setAnimationSystems(&systems, load);
 	g.run(2);
@@ -883,6 +884,7 @@ TEST(Vehicles_BundleSkeletonPosesBoneParts)
 	CHECK(std::fabs(leg[14] - 2.674f) < 1.5f);
 	// The Talon's engine pods are bone parts: their jets (e_jetHelo) go
 	// where the bones put the pods, not the pods' template places.
+	g.objects.remove(at);
 	const uint32_t ag = g.start("us_ag", {0, 4, 6});
 	g.world->setAnimationSystems(&systems, load);
 	CHECK(g.enter(ag));

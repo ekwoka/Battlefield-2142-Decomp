@@ -4791,6 +4791,7 @@ TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
     if (!craft) return;
     craft->setTeam(2);
     level.run(1 / 30.0f);
+    if (craft->destroyed()) continue; // made inside a building there: wrecked at once (the helicopter exit), no boarding a wreck
     CHECK(level.world->setSoldierPosition(info.soldier, at - physics::Vec3 {0, 1, 0}));
     game::SoldierInput input; input.use = true;
     level.world->setInput(pilot, input); level.run(0.1f);
@@ -4912,4 +4913,47 @@ TEST(Titan_CorpseLiesOnTheDeck)
 			level.world->removePlayer(me);
 		}
 	}
+}
+
+// A gunship wrecked by a hard landing on its Titan's deck lies on its belly
+// (the wreck's mesh has no springs), its gunner's exit place under the deck:
+// it can't be boarded (0x005a98e0 skips a destroyed vehicle's entry points),
+// so nobody gets out of it into the hull (the reported Cerbere_Landing fall).
+TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Cerbere_Landing", 48, true, "mods/Project_Remaster_v17_Final");
+	world::ObjectTemplate* ship = level.loaded ? level.templates.find("us_ag") : nullptr;
+	if (!ship) {
+		return;
+	}
+	level.run(1);
+	const auto titan = *level.titan(2);
+	const world::Object* hull = level.objects.find(titan.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
+	const physics::Vec3 at = titan.position + turn.transform({0, 19, -10}); // 8 m over the deck: wrecked on landing
+	world::Object* vehicle = level.objects.create(ship, {at.x, at.y, at.z}, {hull->rotation().x, 0, 0});
+	vehicle->setTeam(2);
+	level.run(3);
+	CHECK(vehicle->destroyed());
+	const int me = level.world->addPlayer("Me", 2, false);
+	level.world->setSpawnTitan(me, titan.object);
+	CHECK(level.world->spawnSoldier(me));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(me, info);
+	const world::Vec3 v = vehicle->position();
+	level.world->setSoldierPosition(info.soldier, {v.x + 1.5f, v.y, v.z});
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(me, use);
+	level.run(1 / 30.0f);
+	level.world->setInput(me, {});
+	level.run(1);
+	level.world->playerInfo(me, info);
+	std::fprintf(stderr, "  wrecked gunship (hp %.0f): soldier in %u, at %.2f over the Titan's origin\n", level.world->hitPoints(vehicle->id()), info.vehicle,
+		turn.untransform(info.position - titan.position).y);
+	CHECK(info.vehicle != vehicle->id());
 }
