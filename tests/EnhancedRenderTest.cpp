@@ -111,6 +111,27 @@ TEST(EnhancedRender_CerbereTerrainDoesNotShadowItselfOptIn)
 				}
 				CHECK(darkened < 100);
 			}
+			// The light manager's sun switch does not gate the sun baked into
+			// the terrain lightmap. The scene has no shadow casters in this view.
+			for (bool useEnhanced : {false, true}) {
+				enhanced.enabled = useEnhanced;
+				lights.enableSun = true;
+				const auto sunOn = frame(false);
+				lights.enableSun = false;
+				const auto sunOff = frame(false);
+				CHECK(sunOn.size() == 1280 * 720 * 4 && sunOff.size() == sunOn.size());
+				if (sunOn.size() != 1280 * 720 * 4 || sunOff.size() != sunOn.size()) {
+					break;
+				}
+				int changed = 0;
+				for (int y = 405; y < 470; ++y) {
+					for (int x = 320; x < 760; ++x) {
+						const size_t pixel = (y * 1280 + x) * 4;
+						changed += std::abs(int(sunOn[pixel]) - int(sunOff[pixel])) > 1;
+					}
+				}
+				CHECK(changed == 0);
+			}
 			gpu->releaseTarget(target);
 		}
 	}

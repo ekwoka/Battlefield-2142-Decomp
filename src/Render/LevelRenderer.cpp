@@ -1938,6 +1938,8 @@ void LevelRenderer::drawUndergrowth(SDL_GPUCommandBuffer* commands, SDL_GPURende
 	const auto& sun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& gi = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
 	LightingUniforms lit = lighting(m_viewFog, lights, sun, gi, coverage ? 0.0f : m_undergrowthAlphaRef, true);
+	// RendDX9's undergrowth pass (0x1010e61e) uses the baked terrain sun.
+	std::copy(sun.begin(), sun.end(), lit.sunColor);
 	LightingUniforms unlit = lighting(m_viewFog, lights, sun, gi, coverage ? 0.0f : m_undergrowthAlphaRef, false);
 	if (coverage) {
 		lit.material[2] = unlit.material[2] = AlphaToCoverage::undergrowthAlphaScale(m_undergrowthAlphaRef);
@@ -4304,6 +4306,9 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	const auto& terrainSun = m_terrainColorsFromData ? m_terrainSunColor : lights.terrainSunColor;
 	const auto& terrainGI = m_terrainColorsFromData ? m_terrainGIColor : lights.terrainGIColor;
 	LightingUniforms terrainLit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, true);
+	// The terrain upload (0x100af918) and compiled roads (0x100bab4e)
+	// read the baked terrain sun independently of LightManager.enableSun.
+	std::copy(terrainSun.begin(), terrainSun.end(), terrainLit.sunColor);
 	LightingUniforms terrainUnlit = lighting(m_viewFog, lights, terrainSun, terrainGI, 0, false);
 	applyTerrainLights(terrainLit);
 	applyTerrainLights(terrainUnlit);
