@@ -1833,6 +1833,17 @@ bool BotManager::titanBlocksSilos(const GameWorld::TitanInfo& own, const GameWor
 	return false;
 }
 
+bool BotManager::titanOrderBlocksSilos(int team, const physics::Vec3& at) const
+{
+	if (team < 1 || team > 2) {
+		return false;
+	}
+	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
+	const GameWorld::TitanInfo* own = titanOf(titans, team);
+	const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - team);
+	return own && enemy && titanBlocksSilos(*own, *enemy, at, m_titanCommands[team].focus, m_world.missileSilos());
+}
+
 void BotManager::titanCommand()
 {
 	if (!m_settings.titanCommander() || m_world.gameMode() != "gpm_ti") {
@@ -1878,7 +1889,7 @@ void BotManager::titanCommand()
 			float lowest = 0.75f;
 			for (const ControlPoint& cp : m_world.controlPoints()) {
 				const bool silo = std::any_of(silos.begin(), silos.end(), [&](const GameWorld::SiloInfo& s) { return s.controlPoint == cp.id; });
-				if (silo && cp.team == team && cp.flag == team && cp.flagHeight < lowest) {
+				if (silo && cp.object && cp.team == team && cp.flag == team && cp.flagHeight < lowest) {
 					lowest = cp.flagHeight;
 					focus = cp.id;
 					at = {cp.object->position().x, cp.object->position().y, cp.object->position().z};

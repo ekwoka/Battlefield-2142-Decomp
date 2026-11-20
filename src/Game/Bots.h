@@ -1058,6 +1058,9 @@ public:
 	// The squad update (0x100c4240) of one squad now, outside the round robin
 	// (for tests).
 	void updateSquadNow(int team, int id);
+	// enhanced.botCommander: whether the team's Titan moved to `at` would stand in a missile's way from one of
+	// its silos or the commander's focus silo (titanBlocksSilos, for tests).
+	bool titanOrderBlocksSilos(int team, const physics::Vec3& at) const;
 private:
 	friend struct BotManagerTestAccess;
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's

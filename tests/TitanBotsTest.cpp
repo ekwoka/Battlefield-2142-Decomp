@@ -963,31 +963,9 @@ TEST(Titan_BotCommanderMovesTheTitans)
 				start[team] = level.titan(team)->position;
 			}
 			addBots();
-			// The test's own reading of the missile paths: the Titan at `at` (moved there; it never turns) has none
-			// of a friendly silo's within its box (+ 10 m).
-			const auto blocks = [&](int team, const physics::Vec3& at) {
-				if (!level.titan(team) || !level.titan(3 - team)) return false;
-				const auto ownInfo = *level.titan(team);
-				const auto enemyInfo = *level.titan(3 - team);
-				const auto* own = &ownInfo;
-				const auto* enemy = &enemyInfo;
-				physics::Vec3 low, high;
-				if (!level.world->objectBox(own->object, low, high)) return false;
-				const physics::Vec3 shift {own->position.x - at.x, 0, own->position.z - at.z};
-				for (const auto& silo : level.world->missileSilos()) {
-					if (silo.team != team) continue;
-					const physics::Vec3 top = silo.position + physics::Vec3 {0, 40, 0};
-					for (int i = 0; i <= 200; ++i) {
-						const physics::Vec3 q = i <= 20 ? silo.position + (top - silo.position) * (i / 20.0f)
-														 : top + (enemy->position - top) * ((i - 20) / 180.0f);
-						const physics::Vec3 l = level.world->titanToLocal(own->object, q + shift);
-						if (l.x > low.x - 10 && l.x < high.x + 10 && l.y > low.y - 10 && l.y < high.y + 10 && l.z > low.z - 10 && l.z < high.z + 10) {
-							return true;
-						}
-					}
-				}
-				return false;
-			};
+			// The missile paths as the commander reads them (titanBlocksSilos: its climb and box clearance, the
+			// team's silos and the focus silo): the Titan at `at` (moved there; it never turns) is in none.
+			const auto blocks = [&](int team, const physics::Vec3& at) { return bots.titanOrderBlocksSilos(team, at); };
 			level.run(150);
 			for (int team : {1, 2}) {
 				// (level.titan's answer is one static, overwritten by the next call: copied.)
