@@ -3822,7 +3822,7 @@ private:
 	// rd_dieInVehicleForce (0x005f0f50 with +0x2eb) instead of a blast's push.
 	bool startRagDoll(Player& victim, bool thrown = false);
 	void stepRagDoll(Player& player, float seconds);
-	anim::RagDollWorld ragDollWorld(const anim::Vec& middle, float reach) const;
+	anim::RagDollWorld ragDollWorld(const anim::Vec& middle) const;
 	void poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds);
 	void stepControlPoints(float seconds);
 	void createFlagObjects(ControlPoint& point);

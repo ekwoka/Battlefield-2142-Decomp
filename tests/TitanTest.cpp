@@ -17,6 +17,7 @@
 #include "Sound/Game/GameSounds.h"
 #include "Sound/Game/VoiceMessages.h"
 #include "Sound/Game/SoundObjectTemplate.h"
+#include "Animation/AnimationConsole.h"
 #include "Animation/AnimationSystem.h"
 #include "SeatAim.h"
 #include "Game/GameLogic.h"
@@ -4790,6 +4791,7 @@ TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
     if (!craft) return;
     craft->setTeam(2);
     level.run(1 / 30.0f);
+    if (craft->destroyed()) continue; // made inside a building there: wrecked at once (the helicopter exit), no boarding a wreck
     CHECK(level.world->setSoldierPosition(info.soldier, at - physics::Vec3 {0, 1, 0}));
     game::SoldierInput input; input.use = true;
     level.world->setInput(pilot, input); level.run(0.1f);
@@ -4853,4 +4855,105 @@ TEST(Titan_ShieldUpRocketsFromBelowHurtTheGunHubAndMark)
    else CHECK(!hurt && !marked);
   }
  }
+}
+
+// A soldier standing on his own Titan's deck dies there (the reported
+// Cerbere_Landing session, Remaster, the EU Titan): the body lies on the
+// deck, not through the Titan on the ground below (the ragdoll's world,
+// 0x008ab6b0: every object with collision near it, the Titan's parts too).
+TEST(Titan_CorpseLiesOnTheDeck)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	for (const int team : {2, 1}) {
+		TitanLevel level(dir, "Cerbere_Landing", 48, false, "mods/Project_Remaster_v17_Final");
+		if (!level.loaded) {
+			return;
+		}
+		anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+		anim::registerAnimationConsoleMethods(level.console, systems);
+		bool holders = false;
+		level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+			std::string out;
+			if (!holders) {
+				holders = true;
+				level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+			}
+			return systems.get(path, [&] { level.console.run(path, {}, out); });
+		});
+		level.world->startRound();
+		level.run(1);
+		const auto titan = *level.titan(team);
+		const world::Object* hull = level.objects.find(titan.object);
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
+		// Spots on the decks fore and aft of the bridge (the Titans' decks
+		// at 8.8 m and 7.0 m over their origins).
+		for (const physics::Vec3 spot : {physics::Vec3 {4, 9.5f, -50}, physics::Vec3 {-6, 9.5f, -60}, physics::Vec3 {2, 9.5f, -5}}) {
+			const int me = level.world->addPlayer("Me", team, false);
+			level.world->setSpawnTitan(me, titan.object);
+			CHECK(level.world->spawnSoldier(me));
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(me, info);
+			level.world->setSoldierPosition(info.soldier, titan.position + turn.transform(spot));
+			level.run(1);
+			level.world->playerInfo(me, info);
+			const float standing = turn.untransform(info.position - titan.position).y;
+			const uint32_t soldier = info.soldier;
+			level.world->suicide(soldier);
+			CHECK(level.world->ragDoll(soldier) != nullptr);
+			level.run(4);
+			level.world->playerInfo(me, info);
+			const world::Object* body = level.objects.find(soldier);
+			const float lying = body ? turn.untransform(physics::Vec3 {body->position().x, body->position().y, body->position().z} - titan.position).y : -1e9f;
+			std::fprintf(stderr, "  team %d at %.0f/%.0f: stood at %.2f over the Titan's origin, the body lies at %.2f\n", team, spot.x, spot.z, standing, lying);
+			CHECK(standing > 6.5f && !info.alive);
+			CHECK(std::fabs(lying - standing) < 1.0f);
+			level.world->removePlayer(me);
+		}
+	}
+}
+
+// A gunship wrecked by a hard landing on its Titan's deck lies on its belly
+// (the wreck's mesh has no springs), its gunner's exit place under the deck:
+// it can't be boarded (0x005a98e0 skips a destroyed vehicle's entry points),
+// so nobody gets out of it into the hull (the reported Cerbere_Landing fall).
+TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Cerbere_Landing", 48, true, "mods/Project_Remaster_v17_Final");
+	world::ObjectTemplate* ship = level.loaded ? level.templates.find("us_ag") : nullptr;
+	if (!ship) {
+		return;
+	}
+	level.run(1);
+	const auto titan = *level.titan(2);
+	const world::Object* hull = level.objects.find(titan.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
+	const physics::Vec3 at = titan.position + turn.transform({0, 19, -10}); // 8 m over the deck: wrecked on landing
+	world::Object* vehicle = level.objects.create(ship, {at.x, at.y, at.z}, {hull->rotation().x, 0, 0});
+	vehicle->setTeam(2);
+	level.run(3);
+	CHECK(vehicle->destroyed());
+	const int me = level.world->addPlayer("Me", 2, false);
+	level.world->setSpawnTitan(me, titan.object);
+	CHECK(level.world->spawnSoldier(me));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(me, info);
+	const world::Vec3 v = vehicle->position();
+	level.world->setSoldierPosition(info.soldier, {v.x + 1.5f, v.y, v.z});
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(me, use);
+	level.run(1 / 30.0f);
+	level.world->setInput(me, {});
+	level.run(1);
+	level.world->playerInfo(me, info);
+	std::fprintf(stderr, "  wrecked gunship (hp %.0f): soldier in %u, at %.2f over the Titan's origin\n", level.world->hitPoints(vehicle->id()), info.vehicle,
+		turn.untransform(info.position - titan.position).y);
+	CHECK(info.vehicle != vehicle->id());
 }
