@@ -5431,6 +5431,10 @@ int runGame(Options& options, Session& session)
 			sayRadio(v->channel, v->voice, 0, false);
 			heardCall(hudLocal(), code, true);
 		};
+		// The console's Radio.callFor* outlive this round's locals the call holds.
+		struct SayCallReset {
+			~SayCallReset() { g_sayCall = [](int) {}; }
+		} sayCallReset;
 		for (const auto& [command, code] : std::vector<std::pair<const char*, int>> {
 				 {"Radio.callForMedic", nametags::CallMedic}, {"Radio.callForAmmo", nametags::CallAmmo},
 				 {"Radio.callForRepair", nametags::CallRepair}}) {
