@@ -673,7 +673,7 @@ TEST(HudWeapon_AmmoClipsAndHeat)
 }
 
 // The item selection (0x0079c290, 0x0079be20, 0x0079c050): packed from slot
-// 0 by item index (reversed with ItemSelection.setReverseItems), the item
+// 0 upwards in descending item-index order by default, the item
 // in hand selected, closed when the timer runs out.
 TEST(HudItemSelection_SlotsAndTimer)
 {
@@ -681,18 +681,18 @@ TEST(HudItemSelection_SlotsAndTimer)
 	Console console;
 	menu::ItemSelection items;
 	items.bind(console);
-	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {5, "", false}}, 3);
+	items.open({{1, "knife.tga"}, {3, "rifle.tga"}, {8, "", false}}, 3);
 	items.update(hud, 0.1f);
 	CHECK(hud.number("ShowItemSelect") == 1 && hud.number("ItemSelectActive") == 1);
-	CHECK(hud.string("Item0Index") == "1" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot2Alpha") == 0.4f);
-	CHECK(hud.number("ItemSlot3Active") == 0);
+	CHECK(hud.string("Item0Index") == "8" && hud.string("Item1Icon") == "rifle.tga" && hud.number("ItemSlot0Alpha") == 0.4f);
+	CHECK(hud.string("Item2Index") == "1" && hud.number("ItemSlot3Active") == 0);
 	items.update(hud, 2.0f);
 	CHECK(hud.number("ShowItemSelect") == 0);
 	std::string out;
-	console.execute("ItemSelection.setReverseItems 1", out);
+	console.execute("ItemSelection.setReverseItems 0", out);
 	items.open({{1, "knife.tga"}, {3, "rifle.tga"}}, 1);
 	items.update(hud, 0);
-	CHECK(hud.string("Item0Index") == "3" && hud.number("ItemSelectActive") == 1);
+	CHECK(hud.string("Item0Index") == "1" && hud.number("ItemSelectActive") == 0);
 }
 
 // The vehicle HUD's seat dots (0x007a28e0, BfOccupiedVehicleNode
@@ -1858,7 +1858,7 @@ TEST(HudItemSelection_SeatLists)
 	CHECK(items.size() == 2 && items[0].index == 2 && items[1].index == 3 && !items[1].usable);
 	seat.weapons.erase(seat.weapons.begin());
 	seat.weapons[0].group = seat.weapons[1].group = 2;
-	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}});
+	items = menu::seatSelectItems(seat, seatTemplate, find, {{3, "gun"}, {1, "knife"}, {9, "ParachuteLauncher"}});
 	CHECK(items.size() == 2 && items[0].index == 3 && items[0].icon == "gun.tga" && items[1].index == 1);
 }
 
@@ -1877,15 +1877,14 @@ TEST(HudItemSelection_MouseWheel)
 	pass.inHand = 3;
 	bool fire = false;
 	int item = 0;
-	// Opened on the rifle (3); the next, 4, isn't usable: the first.
+	// Display slots run bottom to top, from item 5 down to item 1.
 	CHECK(pass.apply(list, fire, item, 1, 10.0) == "weaponOver");
-	CHECK(list.shown() && list.selectedItem() == 1);
-	CHECK(list.next() && list.selectedItem() == 2);
-	CHECK(list.previous() && list.selectedItem() == 1);
-	CHECK(list.previous() && list.selectedItem() == 5); // from the first: the last
-	CHECK(list.previous() && list.selectedItem() == 5); // the previous (4) unusable: the last again
-	CHECK(list.next() && list.selectedItem() == 1);     // past the end: the first
-	CHECK(list.next() && list.selectedItem() == 2);
+	CHECK(list.shown() && list.selectedItem() == 2);
+	CHECK(list.next() && list.selectedItem() == 1);
+	CHECK(list.next() && list.selectedItem() == 5);     // wraps to the first slot
+	CHECK(list.next() && list.selectedItem() == 5);     // item 4 is unusable
+	CHECK(list.previous() && list.selectedItem() == 1); // wraps to the last slot
+	CHECK(list.previous() && list.selectedItem() == 2);
 	// The pick: fire takes the selected item's key and is cleared.
 	fire = true;
 	item = 0;
@@ -1909,9 +1908,9 @@ TEST(HudItemSelection_MouseWheel)
 	CHECK(!list.shown());
 	// A step down from the item in hand: the previous usable one.
 	pass.allowed = true;
-	pass.inHand = 3;
+	pass.inHand = 2;
 	CHECK(pass.apply(list, fire, item, -1, 12.0) == "weaponOver");
-	CHECK(list.shown() && list.selectedItem() == 2);
+	CHECK(list.shown() && list.selectedItem() == 3);
 }
 
 // minimumSquadSizeForSelection (0x005c3080, the firearm's slot 0x188): too

@@ -5243,6 +5243,41 @@ TEST(PlayerCamera_TankZoomRetainsShortClicks)
 	}
 }
 
+TEST(GameWorld_InfantryCyclesWeapons)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		Garage g(gameDir(), mod);
+		g.start("eu_tank", {50, 0, 50}, 0);
+		const int player = g.world->joinPlayer(2);
+		g.world->setKit(player, "EU_Assault", "us_light_soldier");
+		CHECK(g.world->spawnSoldier(player));
+		game::GameWorld::PlayerInfo info;
+		const auto slot = [&] {
+			CHECK(g.world->playerInfo(player, info));
+			return info.inHandSlot;
+		};
+		game::SoldierInput cycle;
+		cycle.toggleWeapon = true;
+		g.world->setBattery(player, 1);
+		CHECK(slot() == 3);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 4);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 4);
+		game::SoldierInput select;
+		select.selectItem = 1;
+		g.drive(select, 1 / 30.0f);
+		CHECK(slot() == 1);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 2);
+		g.drive({}, 1 / 30.0f);
+		g.drive(cycle, 1 / 30.0f);
+		CHECK(slot() == 3);
+	}
+}
+
 TEST(GameWorld_SupplyHubReturnsToPreviousWeapon)
 {
 	if (!gameDir()) return;

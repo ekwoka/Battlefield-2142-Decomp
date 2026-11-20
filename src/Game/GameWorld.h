@@ -3594,6 +3594,7 @@ private:
 		int inHand = -1; // index into carried
 		int previousSlot = -1; // the slot drawn before (0x005883d0's pick: soldier +0x1f4)
 		bool selectHeld = false;
+		bool cycleWeaponHeld = false;
 		bool abilityActive = false; // the gadget in hand is working this tick
 		uint32_t aiAbilityTarget = 0; // a bot's: what its AI treats (setAiAbilityTarget)
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down

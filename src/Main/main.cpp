@@ -2020,10 +2020,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	g_itemList.items.clear();
 	g_itemList.inHand = -1;
 	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me) && me.alive && !inVehicle) {
-		std::vector<dice::hfe::menu::SelectItem> items;
-		for (const auto& [slot, name] : me.carried) {
-			items.push_back({slot, dice::hfe::menu::hudSetting(round.templates().find(name), "weaponHud.selectIcon"), true});
-		}
+		auto items = dice::hfe::menu::kitSelectItems(me.carried,
+			[&round](const std::string& name) { return round.templates().find(name); });
 		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
 			const world::ObjectTemplate* now = nullptr;
 			for (const auto& [slot, name] : me.carried) {
@@ -7356,7 +7354,7 @@ int runGame(Options& options, Session& session)
 					} else if (op == "nextitem" || op == "previtem") {
 						act.itemStep = pressNow ? (op == "nextitem" ? 1 : -1) : 0;
 					} else if (op == "weapon") {
-						act.toggleWeapon = pressNow; // F: a seat's next weapon
+						act.toggleWeapon = pressNow; // F: next weapon
 					} else if (op == "firemode") {
 						act.toggleFireRate = pressNow;
 					} else if (op == "flare") {

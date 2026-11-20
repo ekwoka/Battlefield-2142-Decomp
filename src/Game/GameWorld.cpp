@@ -10845,6 +10845,8 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 		return;
 	}
 	SoldierInput& input = player.input;
+	const bool cycleWeapon = input.toggleWeapon && !player.cycleWeaponHeld;
+	player.cycleWeaponHeld = input.toggleWeapon;
 	if (input.use && !player.useHeld) {
 		enterOrLeaveVehicle(player, *object);
 	}
@@ -11001,6 +11003,24 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	const bool launcher = input.selectItem == 9 && parachuteLauncher(player, launched, launchAt);
 	if (input.selectItem > 0 && !player.selectHeld && !launcher) {
 		equip(player, input.selectItem);
+	} else if (input.selectItem == 0 && cycleWeapon && !player.body.swimming() && player.inHand >= 0
+		&& static_cast<size_t>(player.inHand) < player.carried.size()) {
+		// Retail's c_PIToggleWeapon walks the item-index order from the
+		// active weapon, wraps, and skips weapons the soldier cannot use.
+		const size_t current = static_cast<size_t>(player.inHand);
+		const size_t count = player.carried.size();
+		for (size_t next = (current + 1) % count; next != current; next = (next + 1) % count) {
+			const Player::Carried& item = player.carried[next];
+			const auto* wanted = m_templates.find(item.name);
+			if (!wanted || (item.slot == 9 && parachuteLauncher(player, launched, launchAt))
+				|| squadTooSmall(player.id, *wanted)) {
+				continue;
+			}
+			equip(player, item.slot);
+			if (player.inHand != static_cast<int>(current)) {
+				break;
+			}
+		}
 	}
 	player.selectHeld = input.selectItem > 0;
 	// Swimming (the response's +0xfa, soldier +0x30c; 0x0058a6d0): the pose
