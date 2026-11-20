@@ -2743,10 +2743,16 @@ void ObjectEffects::update(const std::vector<ObjectState>& objects, EffectManage
 		// muzzle's flash and smoke), again on each round unless its
 		// minDistanceUnderWaterSurface (+0x3f4) is 0 or more and it still
 		// runs; 0x0061e090 sets off the GroundEffectBundles.
+		// FireComp sends it to each of the weapon's children (its list,
+		// 0x005f25f0 -> 0x005f31d0) and every object passes an event on to
+		// its own children (0x0063ca60), so the bundles under the weapon's
+		// barrel Bundles (the walkers' e_muzz) start too.
 		for (const auto& fire : object.firedWeapons) {
 			for (size_t i = 0; i < tracked.bundles.size(); ++i) {
 				Placed& b = tracked.bundles[i];
-				if (b.path.size() < 2 || !equalsIgnoreCase(b.path[b.path.size() - 2], fire.weapon)) {
+				if (b.path.empty() || std::none_of(b.path.begin(), b.path.end() - 1, [&](const auto& part) {
+						return equalsIgnoreCase(part, fire.weapon);
+					})) {
 					continue;
 				}
 				if (!fire.seat.empty() && !equalsIgnoreCase(object.objectTemplate->name(), fire.seat)
