@@ -8148,6 +8148,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 	}
 	victim.alive = false;
 	victim.spawnRequested = false;
+	victim.aiAbilityTarget = 0; // revived, its AI names the target again (a new life starts from Player(): spawnSoldier)
 	victim.vehicle = 0;
 	victim.seat = -1;
 	// The wait (0x004bb220: player slot 0x108 x sv.spawnTime x 30 ticks):
@@ -12646,7 +12647,24 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 		if (const uint32_t target = found.empty() && holder && holder->ai ? holder->aiAbilityTarget : 0; target && !ability.ammo && !soldiersOnly) {
 			const world::Object* o = m_objects.find(target);
 			const bool own = titanPart(target, titan, index) ? index > 0 && titan->team == team : o && (o->team() == team || o->team() == 0);
-			if (own && repairable(target) && hurt(target)) {
+			// Within the ability's reach of the eyes (a part's: of one of its meshes), 3 m over for where the
+			// bot's walk stops (titanRepair: within reach + 1.5 m of a mesh, its eyes a metre over the cell).
+			// 0x005d84a0 asks no distance, its AI naming the target only there; the port's guard, for a
+			// target a stale claim kept.
+			const float slackReach = ability.radius + 3;
+			const auto within = [&](const physics::Vec3& p, float extra) {
+				return physics::lengthSquared(p - at) <= (slackReach + extra) * (slackReach + extra);
+			};
+			bool close = false;
+			if (target >= kTitanPartIds) {
+				for (const physics::Vec3& mesh : titanPartMeshes(target)) {
+					close = close || within(mesh, 0);
+				}
+			} else if (o) {
+				const Body* body = findBody(target);
+				close = within({o->position().x, o->position().y, o->position().z}, body ? body->objectRadius : 0);
+			}
+			if (own && close && repairable(target) && hurt(target)) {
 				found.push_back(target);
 			}
 		}

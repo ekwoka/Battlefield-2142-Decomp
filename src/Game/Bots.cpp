@@ -1763,6 +1763,12 @@ void BotManager::update(float seconds)
 		bot.continuousFireVehicle = 0;
 		bot.continuousFireSeat = -1;
 		bot.gunTurn = false;
+		// enhanced.botTitan: a repair claim and the tool's AI target last one think; titanRepair names them
+		// again while it is still on the way to the part or at it (off the hull, in a seat, the setting off: none).
+		if (bot.titanRepair) {
+			m_world.setAiAbilityTarget(self->id, 0);
+			bot.titanRepair = 0;
+		}
 		const float elapsed = bot.lastAct < 0 ? seconds : m_time - bot.lastAct;
 		bot.lastAct = m_time;
 		bot.sinceThink += elapsed;
