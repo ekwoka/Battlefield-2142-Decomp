@@ -5200,6 +5200,61 @@ TEST(PlayerCamera_TankZoomRetainsShortClicks)
 	}
 }
 
+TEST(GameWorld_SupplyHubReturnsToPreviousWeapon)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const auto& [kit, hubName] : {std::pair {"EU_Assault", "Unl_Hub_Medic"}, std::pair {"EU_Support", "Unl_Hub_Ammo"}}) {
+			Garage g(gameDir(), mod);
+			g.start("eu_tank", {50, 0, 50}, 0);
+			const int player = g.world->joinPlayer(2);
+			g.world->setKit(player, kit, "us_light_soldier");
+			CHECK(g.world->spawnSoldier(player));
+			const auto held = [&] {
+				const auto* object = g.objects.find(g.world->playerWeaponObject());
+				return object && object->objectTemplate() ? object->objectTemplate()->name() : std::string {};
+			};
+			const std::string primary = held();
+			const auto select = [&](int slot) {
+				game::SoldierInput input;
+				input.selectItem = slot;
+				g.drive(input, 1 / 30.0f);
+				g.drive({}, 1 / 30.0f);
+			};
+			const auto drop = [&] {
+				game::SoldierInput input;
+				input.fire = true;
+				g.drive(input, 1 / 30.0f);
+				g.world->setPlayerInput({});
+				for (int i = 0; i < 60 && g.world->supplyObjects().empty(); ++i) {
+					g.run(1 / 30.0f);
+				}
+				g.run(1 / 30.0f); // the tick after launch runs the switch-back
+			};
+			const auto* hub = g.templates.find(hubName);
+			CHECK(hub != nullptr);
+			if (!hub) continue;
+			select(2);
+			const std::string sidearm = held();
+			CHECK(!sidearm.empty() && sidearm != primary);
+			g.world->setBattery(player, 1);
+			select(4);
+			CHECK(held() == hub->name());
+			g.run(1);
+			drop();
+			CHECK(g.world->supplyObjects().size() == 1);
+			CHECK(held() == sidearm);
+			select(4);
+			CHECK(held() == sidearm); // empty hub, battery still charging
+			g.world->setBattery(player, 1);
+			select(4);
+			CHECK(held() == hub->name());
+			CHECK(g.world->playerWeapon() && g.world->playerWeapon()->roundsInMag() == 1);
+		}
+	}
+}
+
 // The gunships' pilot gun (MultiFireComp, fire.addFireRate 0 = single fire, mag 10, ammo.autoReload),
 // vanilla and Remaster alike (Remaster adds only a DefaultZoomComp, which the world never sees): a held
 // trigger fires one round, each fresh press one more, an emptied magazine reloads itself and the

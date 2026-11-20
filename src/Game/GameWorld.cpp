@@ -5698,9 +5698,11 @@ void GameWorld::equip(Player& player, int slot)
 	// fire (0x005e6d4f: no mags, one round) queues the detonator mode
 	// (0x005e6700, +0x168 = 2), left only when rounds plus mags pass 1
 	// (0x005e661f). So the emptied C4 comes back as its detonator.
-	if (const auto& kept = player.carried[static_cast<size_t>(index)].weapon;
-		kept && !kept->selectable() && !kept->settings().explosives) {
-		return;
+	if (const auto& kept = player.carried[static_cast<size_t>(index)].weapon) {
+		kept->setBattery(std::max(0.0f, player.battery));
+		if (!kept->selectable() && !kept->settings().explosives) {
+			return;
+		}
 	}
 	// The squad's size (slot 0x188, minimumSquadSizeForSelection): refused,
 	// and the key noted for the HUD's message 0x52 (0x004d2ea9).
@@ -11096,6 +11098,11 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 			}
 		}
 	}
+	// Replenishing ammo uses the soldier's current battery for selection
+	// as well as firing and reload (0x005d79a0, 0x005d81d0).
+	if (player.weapon) {
+		player.weapon->setBattery(std::max(0.0f, player.battery));
+	}
 	// toggleWhenNoAmmo after the last round (0x005f4a40, after each round):
 	// the soldier switches to the item before (0x005883d0: soldier +0x1f4
 	// if selectable; the selection 0x00589dc0 keeps the PIFire group's
@@ -11161,11 +11168,6 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 	const bool held = input.fire && !activeMissile(player, player.object, player.weaponTemplate, player.projectile);
 	const int roundsBefore = player.weapon ? player.weapon->roundsInMag() : 0;
 	const int magsBefore = player.weapon ? player.weapon->magsLeft() : 0;
-	// A ReplenishingAmmoComp's abilityCost reads and spends the holder's
-	// battery (0x005d79a0, 0x005d81d0; FireArmSettings::replenishing).
-	if (player.weapon) {
-		player.weapon->setBattery(std::max(0.0f, player.battery));
-	}
 	const bool shot = player.weapon && player.weapon->tick(seconds, held, input.altFire); // the alternate: a soft throw
 	if (player.weapon) {
 		if (const float cost = player.weapon->takeBatteryCost(); cost > 0 && player.battery >= 0) {
