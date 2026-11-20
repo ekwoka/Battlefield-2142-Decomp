@@ -392,8 +392,9 @@ GameWorld::CommanderAbilityState GameWorld::abilityState(int team, CommanderAbil
 // - UAV: the point is kept (0x005a23b0) and the UAV stays uavTime.
 // - Satellite scan: it runs satelliteScanTime.
 // - Supply drop (0x0043d6d0, 0x0043d510): a supply_crate at the ground's
-//   height plus supplyDropHeight; it goes after supplyDropNumSecsToLive
-//   (0x0043d880).
+//   height plus supplyDropHeight; it goes supplyDropNumSecsToLive after
+//   it landed (0x0043d880 from the time 0x0043d9c0 keeps; counted here
+//   from the drop). Its parachute goes on landing (collisionEvent).
 bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, float z, bool byAi)
 {
 	if ((team != 1 && team != 2) || (m_commanders[team].commander == -1 && !byAi)) {
@@ -878,6 +879,9 @@ void GameWorld::stepCrates(float seconds)
 			if (p.y > ground) {
 				p.y = std::max(ground, p.y - 5.0f * seconds);
 				object->setPosition(p);
+				if (p.y <= ground) {
+					object->disableChild("supply_parachute"); // down: as the body's contact does (collisionEvent)
+				}
 			}
 		}
 		crate.tick -= seconds;

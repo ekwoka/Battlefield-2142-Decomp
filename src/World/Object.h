@@ -64,6 +64,14 @@ public:
 	// guard_watchtower_01_c's ladder_10m_c / ladder_6m_c) go.
 	bool childrenDisabled() const { return m_childrenDisabled; }
 	void setChildrenDisabled(bool disabled) { m_childrenDisabled = disabled; }
+	// One child's updateFlags(1, 0) as the game runs (0x006f68f0): it and
+	// what hangs under it leave the drawing (the supply crate's
+	// supply_parachute once the crate is down, 0x0043d9c0). By the child's
+	// template name, at any depth.
+	void disableChild(const std::string& name) { m_disabledChildren.push_back(name); }
+	// Whether a template on `path` (the names from the root's child down,
+	// '/'-joined, as the renderer's instances keep them) is disabled.
+	bool childDisabled(const std::string& path) const;
 	// The game's fade of its geometry (the render instance's +0x28, set
 	// through slot 0x104; a corpse's, 0x00652380): 1 opaque, 0 gone.
 	float fade() const { return m_fade; }
@@ -82,6 +90,7 @@ private:
 	bool m_destroyed = false;
 	bool m_hidden = false;
 	bool m_childrenDisabled = false;
+	std::vector<std::string> m_disabledChildren;
 	float m_fade = 1;
 };
 

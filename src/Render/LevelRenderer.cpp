@@ -2124,7 +2124,7 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			hiddenInView = m_sources->hiddenInView && m_sources->hiddenInView(instance.object);
 		}
 		instance.world = instance.local * objectWorld;
-		instance.hidden = current->hidden() || hiddenInView;
+		instance.hidden = current->hidden() || hiddenInView || (!instance.source.empty() && current->childDisabled(instance.source));
 		const int look = m_sources->partLook && !instance.source.empty() ? m_sources->partLook(instance.object, instance.source) : 0;
 		instance.hidden = instance.hidden || look == 2;
 		const bool vehicleWreck = m_sources->vehicleWreckLook && m_sources->vehicleWreckLook(instance.object);
