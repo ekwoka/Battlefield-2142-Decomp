@@ -1587,6 +1587,9 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 		if (viewer.onTicks) {
 			viewer.onTicks(1);
 		}
+		if (viewer.onFrame) {
+			viewer.onFrame(1.0f / 30.0f, 1); // one frame a tick, at the tick (the particles move by it)
+		}
 		if (frame) {
 			frame(1.0f / 30.0f);
 		}

@@ -64,6 +64,10 @@ TEST(TickBlend_TransformSlerpsAsRetail)
 		CHECK(std::fabs(quarter.m[i] - expect.m[i]) < 1e-4f);
 	}
 	CHECK(blendTransform(yaw(0, 0), yaw(40, 10), 1).m == yaw(40, 10).m);
+	// A part shown from collapsed (the zero matrix) comes whole, not sliding in.
+	Mat4 zero;
+	zero.m.fill(0);
+	CHECK(blendTransform(zero, yaw(40, 10), 0.5f).m == yaw(40, 10).m);
 	// Any orientation comes back whole at either end, the short way round.
 	const Mat4 tilted = Mat4::yawPitchRoll(130, -60, 170) * Mat4::translation({1, 2, 3});
 	const Mat4 other = Mat4::yawPitchRoll(-150, 20, -30);

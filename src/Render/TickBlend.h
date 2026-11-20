@@ -86,8 +86,16 @@ inline Mat4 affineInverse(const Mat4& m)
 // carry, are lerped so a scaled transform keeps its size.
 inline Mat4 blendTransform(const Mat4& from, const Mat4& to, float alpha)
 {
-	if (alpha == 1.0f) {
-		return to;
+	const auto collapsed = [](const Mat4& m) {
+		for (int i = 0; i < 3; ++i) {
+			if (m.at(i, 0) * m.at(i, 0) + m.at(i, 1) * m.at(i, 1) + m.at(i, 2) * m.at(i, 2) <= 0) {
+				return true;
+			}
+		}
+		return false;
+	};
+	if (alpha == 1.0f || collapsed(from) || collapsed(to)) {
+		return to; // no turn to blend (a part shown or hidden): where it is now, whole
 	}
 	const auto rotation = [](const Mat4& m) {
 		physics::Mat3 r;

@@ -1102,10 +1102,12 @@ private:
 	struct Anchor {
 		Vec3 position;
 		Mat3 rotation;
-		Vec3 previousPosition; // where the last frame drew it to (the frame's blend)
+		Vec3 previousPosition; // before this frame's ticks (the frame's blend)
 		Mat3 previousRotation;
-		uint32_t frame = 0;    // the frame count it last took them in
 	};
+	// At the first tick after a frame, every anchor's previous place is
+	// where it is (retail keeps each object's last transform every tick).
+	void captureAnchors();
 	void placeAttached(Emitter& emitter) const;
 	void placeAttached(Emitter& emitter, const Anchor& place) const;
 	Anchor drawnAnchor(const Anchor& anchor) const;
@@ -1116,7 +1118,7 @@ private:
 	// Frames drawn (frame()): the ticks between two frames blend from the
 	// state before the first of them (0x0043f170's alpha spans all of them).
 	uint32_t m_frames = 0;
-	uint32_t m_placedFrame = ~0u, m_debrisFrame = ~0u;
+	uint32_t m_anchorsFrame = ~0u, m_placedFrame = ~0u, m_debrisFrame = ~0u;
 	std::map<uint32_t, MeshSprite> m_placedPrevious; // by key, before this frame's ticks
 	mutable std::vector<MeshSprite> m_placedDrawn;
 	std::map<const world::ObjectTemplate*, BundleModifiers> m_bundleModifiers;

@@ -1605,4 +1605,9 @@ TEST(Effects_LightsBlendFromBeforeTheFramesTicks)
 	CHECK(std::fabs(got.x - want.x) < 1e-3f && std::fabs(got.y - want.y) < 1e-3f && std::fabs(got.z - want.z) < 1e-3f);
 	manager.frame(1 / 120.0f, 1);
 	CHECK(std::fabs(manager.lights()[0].position.x - want.x) > 0.5f); // at the tick again
+	// Not set again (a muzzle's anchor after its flash): it stands still.
+	manager.update(1 / 30.0f);
+	const float still = manager.lights()[0].position.x;
+	manager.frame(1 / 120.0f, 0.25f);
+	CHECK(std::fabs(manager.lights()[0].position.x - still) < 1e-4f);
 }

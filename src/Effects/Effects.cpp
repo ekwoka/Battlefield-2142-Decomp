@@ -1481,20 +1481,29 @@ void EffectManager::setPhysicsVelocity(uint32_t anchor, uint32_t tag, const Vec3
 	}
 }
 
+void EffectManager::captureAnchors()
+{
+	if (m_anchorsFrame == m_frames) {
+		return;
+	}
+	m_anchorsFrame = m_frames;
+	for (auto& [id, a] : m_anchors) {
+		a.previousPosition = a.position;
+		a.previousRotation = a.rotation;
+	}
+}
+
 void EffectManager::setAnchor(uint32_t anchor, const Vec3& position, const Mat3& rotation)
 {
+	captureAnchors();
 	const auto [it, added] = m_anchors.try_emplace(anchor);
 	Anchor& a = it->second;
 	if (added) {
 		a.previousPosition = position;
 		a.previousRotation = rotation;
-	} else if (a.frame != m_frames) {
-		a.previousPosition = a.position;
-		a.previousRotation = a.rotation;
 	}
 	a.position = position;
 	a.rotation = rotation;
-	a.frame = m_frames;
 	for (const auto& emitter : m_emitters) {
 		if (emitter->anchor == anchor) {
 			placeAttached(*emitter);
@@ -1617,6 +1626,7 @@ void EffectManager::releaseAnchor(uint32_t anchor)
 
 void EffectManager::update(float seconds)
 {
+	captureAnchors(); // an anchor not set this tick stands still
 	// The decals age and go at the decal manager's timeToLive (0x10164f10).
 	const float decalLife = m_settings ? m_settings->decalTimeToLive : scene::ParticleSystemSettings {}.decalTimeToLive;
 	// A set whose owner wasn't drawn ages twice (0x10164f10 adds the

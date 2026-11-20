@@ -2978,7 +2978,9 @@ collision parts are children of their objects: drawn where those are drawn.
 Sound stays at the tick: the sound manager steps with the ticks (slot
 `0x18`) before the blend, and the one call between `0x0043f170` and
 `0x0043f610` besides the draw is the demo recorder's camera (`0x00516b40`
-→ `0x005fa070`). A held weapon's node without a part keeps its template
+→ `0x005fa070`). The port's listener is the last drawn camera
+(`onCamera` → `GameWorld::setCamera`), up to a tick off retail's, whose
+source was not traced. A held weapon's node without a part keeps its template
 place, so folding it into the part below gives the same draw as blending
 each node. The name tags are projected at the objects' drawn positions
 (`LevelSources::drawnPositions`). Bone poses stay per tick, as retail's: the

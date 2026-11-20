@@ -2243,7 +2243,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 	// would blend it (blendsBetweenTicks), placed in that part as drawn.
 	// A node between them without a part keeps its template place (only
 	// parts are placed), so it folds into the part below exactly: the slerp
-	// commutes with a fixed turn and the lerp with a fixed transform.
+	// commutes with a fixed turn and the lerp with a fixed transform. (Retail
+	// would blend such a node itself if it had a boneIndex or a blended type;
+	// no shipped handheld template in either mod has one above a part.)
 	const auto blendParts = [this, &blend](Instance& instance) {
 		const size_t n = instance.parts.size();
 		if (instance.partsTicked.size() != n) {
