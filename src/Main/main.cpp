@@ -1585,7 +1585,8 @@ void updateFlares(hud::HudManager& hud, const host::HudWorld& world, const world
 }
 
 void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool scoreboard = false, bool commanderScreen = false, std::optional<float> viewHeading = {}, uint32_t insideTitan = 0)
+	bool scoreboard, bool commanderScreen, std::optional<float> viewHeading, uint32_t insideTitan,
+	const nametags::Nametags::View* rangeView)
 {
 	updateMap(hud, world, round, logic, commanderScreen, viewHeading, insideTitan);
 	updateCommander(hud, world, round, commanderScreen);
@@ -1919,9 +1920,10 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// second.
 		static const world::ObjectTemplate* rangeTemplate = nullptr;
 		static bool rangeFinder = false, distanceCounter = false;
-		if (heldGunTemplate != rangeTemplate) {
+		const bool rangeWeaponChanged = heldGunTemplate != rangeTemplate;
+		if (rangeWeaponChanged) {
 			rangeTemplate = heldGunTemplate;
-			rangeFinder = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasRangeFinder", 0) != 0;
+			rangeFinder = dice::hfe::menu::weaponHasRangeFinder(heldGunTemplate);
 			distanceCounter = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasDistanceCounter", 0) != 0;
 		}
 		game::GameWorld::PlayerInfo me;
@@ -1933,10 +1935,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			static bool rangeHit = false;
 			static float rangeDistance = 0;
 			static std::array<float, 3> rangePoint {};
-			if (rangeFinder && (now - rangeAt > 0.1f || now < rangeAt)) {
+			if (rangeFinder && (rangeWeaponChanged || now - rangeAt > 0.1f || now < rangeAt)) {
 				rangeAt = now;
-				const float yaw = me.yaw * 3.14159265f / 180, pitch = me.aimPitch * 3.14159265f / 180;
-				const physics::Vec3 eye {me.position.x, me.position.y + 1.6f, me.position.z};
+				const bool useView = rangeView && !me.vehicle;
+				const float yaw = useView ? rangeView->yaw : me.yaw * 3.14159265f / 180;
+				const float pitch = useView ? rangeView->pitch : me.aimPitch * 3.14159265f / 180;
+				const physics::Vec3 eye = useView
+					? physics::Vec3 {rangeView->position[0], rangeView->position[1], rangeView->position[2]}
+					: me.position + physics::Vec3 {0, 1.6f, 0};
 				const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 				const auto at = [&](float d) { return physics::Vec3 {eye.x + dir.x * d, eye.y + dir.y * d, eye.z + dir.z * d}; };
 				const uint32_t self = me.vehicle ? me.vehicle : me.soldier;
@@ -9900,7 +9906,8 @@ int runGame(Options& options, Session& session)
 			// begins in 0x1002cef0; Renderer slot 0x30, 0x10030880): the commander
 			// screen's overhead picture leaves the camera the player's.
 			const uint32_t insideTitan = tagViewSeen ? round.cameraTitan({eye[0], eye[1], eye[2]}) : 0;
-			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading, insideTitan);
+			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading, insideTitan,
+				tagViewSeen && playerCamera.firstPerson ? &tagView : nullptr);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
 			// category of what he controls (0 on foot).
@@ -10438,6 +10445,7 @@ int runGame(Options& options, Session& session)
 				scene.models.push_back(std::move(drawn));
 			}
 			scene.effects = &playerCamera.effects();
+			scene.weaponZoomed = playerCamera.zoomed();
 			// The weapon and hands sit at the tick's eye; drawn through the
 			// blended view with its per-frame look, they are carried along
 			// (LevelRenderer: tickBlendViewAdjustment).

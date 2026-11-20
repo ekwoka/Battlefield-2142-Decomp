@@ -203,6 +203,8 @@ private:
 	bool m_lit = false;                         // *+8
 };
 
+bool weaponHasRangeFinder(const world::ObjectTemplate* weapon);
+
 struct WeaponHudInput {
 	const world::ObjectTemplate* weapon = nullptr; // its weaponHud.*
 	int rounds = 0;      // in the magazine (the firearm's slot 0xbc)

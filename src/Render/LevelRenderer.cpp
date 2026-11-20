@@ -669,6 +669,8 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 		Submesh submesh {material.indexStart, material.indexCount, static_cast<int32_t>(material.vertexStart),
 			diffuse ? diffuse : m_gpu.whiteTexture(), material.alphaMode == 2 ? 0.5f : 0.0f,
 			skinned && m < gpuMesh->rigs.size() ? static_cast<int>(m) : -1};
+		submesh.skadiReticle = lower(geometry->name) == "eu_gauss_rifle"
+			&& !materials[m].maps.empty() && lower(materials[m].maps.front()) == "green.dds";
 		if (geometry->meshParticle) {
 			submesh.particleSlots = std::move(particleSlots[m]);
 		}
@@ -5377,7 +5379,9 @@ void LevelRenderer::drawFirstPerson(SDL_GPUCommandBuffer* commands, SDL_GPURende
 		}
 		pushTransforms(commands, transforms);
 		for (const Submesh& submesh : gpuMesh->submeshes) {
-			if (queueOf(submesh, 1.0f) != queue) {
+			// The Skadi's zoom HUD supplies the centered dot. Its bundled
+			// green arcs would draw a second, offset aiming mark.
+			if (queueOf(submesh, 1.0f) != queue || (scene.weaponZoomed && submesh.skadiReticle)) {
 				continue;
 			}
 			useModelPipeline(queue, meshCulled(gpuMesh->bundled || gpuMesh->skinned, submesh.blended, submesh.leaf));

@@ -129,6 +129,7 @@ struct FirstPersonScene {
 	float nearPlane = 0.16f;
 	float farPlane = 15.0f;
 	std::vector<FirstPersonModel> models;
+	bool weaponZoomed = false;
 	// Effects of the first-person models (the muzzle flash), drawn in the
 	// same pass; may be null.
 	const effects::EffectManager* effects = nullptr;
@@ -356,6 +357,7 @@ private:
 		bool blended = false;
 		bool additive = false;
 		int alphaMode = 0; // the material's: 0 opaque, 1 blended, 2 alpha tested (RendDX9's +0x15c)
+		bool skadiReticle = false;
 		bool glow = false; // an "alpha_one" technique: BMadditive's defaultTechnique (MeshQueues.h glowFadeStep)
 		float uvScroll[2] = {0, 0}; // additive: simpleUVTranslation, per second
 		// Where the texture lies in an atlas (the overgrowth's distant trees'

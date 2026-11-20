@@ -907,6 +907,36 @@ TEST(HudWeapon_RangeFinderAndSecondary)
 	CHECK(hudManager.string("SecondaryAmmoString") == "10" && hudManager.string("TotSecondaryAmmoString") == "/ 40");
 }
 
+TEST(HudWeapon_RangeFinderDefaultsOn)
+{
+	world::ObjectTemplate rifle(1, "GenericFireArm", "rifle", 1);
+	hud::HudManager hudManager(nullptr);
+	menu::WeaponHud weaponHud;
+	menu::WeaponHudInput in;
+	in.weapon = &rifle;
+	in.rangeHit = true;
+	in.targetDistance = 14;
+	CHECK(!menu::weaponHasRangeFinder(nullptr));
+	CHECK(menu::weaponHasRangeFinder(&rifle));
+	hudManager.setString("TargetDistanceString", "196");
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "14");
+
+	world::ObjectTemplate launcher(1, "GenericFireArm", "launcher", 2);
+	launcher.settings()["weaponHud.hasDistanceCounter"] = "1";
+	in.weapon = &launcher;
+	in.travelled = 37;
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "37");
+
+	world::ObjectTemplate disabled(1, "GenericFireArm", "disabled", 3);
+	disabled.settings()["weaponHud.hasRangeFinder"] = "0";
+	CHECK(!menu::weaponHasRangeFinder(&disabled));
+	in.weapon = &disabled;
+	weaponHud.update(hudManager, in);
+	CHECK(hudManager.string("TargetDistanceString") == "37");
+}
+
 // The Titan silos' map icons (miniMapInfo "all", 0x00636220; the layers of
 // 0x0077dee0 / 0x0077df60; the reload wipe of 0x0078a990) and the wedge's
 // pieces.

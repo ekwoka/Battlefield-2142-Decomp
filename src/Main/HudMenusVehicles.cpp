@@ -84,6 +84,12 @@ std::array<float, 4> hudLevelColor(float value, float threshold)
 
 // --- The weapon HUD (0x007c1f10) ---
 
+bool weaponHasRangeFinder(const world::ObjectTemplate* weapon)
+{
+	// The retail WeaponHud constructor (0x00639288) initializes +0x118 to 1.
+	return weapon && flag(weapon, "weaponHud.hasRangeFinder", true);
+}
+
 void WeaponHud::Fields::read(const world::ObjectTemplate* w)
 {
 	showAmmo = flag(w, "weaponHud.showAmmo", true);   // template +0x11a
@@ -91,7 +97,7 @@ void WeaponHud::Fields::read(const world::ObjectTemplate* w)
 	hasMag = flag(w, "weaponHud.hasMag", true);       // +0x117
 	hasFireRate = flag(w, "weaponHud.hasFireRate", true); // +0x116
 	battery = flag(w, "weaponHud.showBatteryIconInHud", false); // +0x127
-	rangeFinder = flag(w, "weaponHud.hasRangeFinder", false);   // +0x118 (block +0xd4)
+	rangeFinder = weaponHasRangeFinder(w);   // +0x118 (block +0xd4)
 	distanceCounter = flag(w, "weaponHud.hasDistanceCounter", false); // +0x124 (+0xe0)
 	scanProgress = flag(w, "weaponHud.hasScanProgress", false); // +0x125 (+0xe1)
 	ignoreTargetDistance = flag(w, "weaponHud.ignoreTargetDistance", false); // +0x126 (+0xe2)
@@ -176,9 +182,6 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		// DAT_00b2d148 slot 0x18c, its distance from the controlled object
 		// "%i" and the point "%i" x, -z, y; a miss "999"; not with a comm
 		// rose or map menu up, menu states 3-6, 8, 9).
-		if (f.distanceCounter) {
-			hud.setString("TargetDistanceString", in.travelled >= 0 ? std::to_string(in.travelled) : "999");
-		}
 		if (f.rangeFinder) {
 			if (in.rangeHit) {
 				hud.setString("TargetDistanceString", std::to_string(static_cast<int>(std::lround(in.targetDistance))));
@@ -190,6 +193,11 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 					hud.setString(name, "999");
 				}
 			}
+		}
+		// Both features share this label. A projectile counter takes
+		// precedence so enabling the default ray doesn't replace it.
+		if (f.distanceCounter) {
+			hud.setString("TargetDistanceString", in.travelled >= 0 ? std::to_string(in.travelled) : "999");
 		}
 		// 0x007be380: the scan (hasScanProgress, the weapon's 0xc4f2 slots
 		// 0xf8 / 0xfc).
