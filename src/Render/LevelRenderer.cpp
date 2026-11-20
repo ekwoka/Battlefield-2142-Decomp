@@ -2194,6 +2194,40 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
 			: blendTransform(o.previous, o.current, blend.alpha);
 	}
+	// The collision parts holding decals: children of their objects, drawn
+	// between their ticks in them (0x0043ef30 over the tree).
+	{
+		std::map<std::pair<uint32_t, int>, ObjectBlend> parts;
+		if (m_sources->effects && m_sources->collisionPartFrame) {
+			for (const effects::Decal& decal : m_sources->effects->decals()) {
+				const std::pair<uint32_t, int> key {decal.object, decal.part};
+				effects::Mat3 r;
+				effects::Vec3 t;
+				if (decal.object == 0 || decal.part < 0 || parts.count(key) ||
+					!m_sources->collisionPartFrame(decal.object, decal.part, r, t)) {
+					continue;
+				}
+				Mat4 now;
+				for (int row = 0; row < 3; ++row) {
+					now.at(row, 0) = r.rows[static_cast<size_t>(row)].x;
+					now.at(row, 1) = r.rows[static_cast<size_t>(row)].y;
+					now.at(row, 2) = r.rows[static_cast<size_t>(row)].z;
+				}
+				now.at(3, 0) = t.x;
+				now.at(3, 1) = t.y;
+				now.at(3, 2) = t.z;
+				const auto was = m_decalPartBlend.find(key);
+				ObjectBlend o = was != m_decalPartBlend.end() ? was->second : ObjectBlend {now, now, now};
+				if (blend.ticked && was != m_decalPartBlend.end()) {
+					o.previous = o.current;
+				}
+				o.current = now;
+				o.drawn = blendTransform(o.previous, o.current, blend.alpha);
+				parts[key] = o;
+			}
+		}
+		m_decalPartBlend = std::move(parts);
+	}
 	if (m_sources->drawnPositions) {
 		// What the HUD projects (retail draws it while the objects are blended).
 		auto& out = *m_sources->drawnPositions;
@@ -2207,7 +2241,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 	// Parts the game places itself, in their object (held weapons): each in
 	// the nearest part above it, between its last two ticks when retail
 	// would blend it (blendsBetweenTicks), placed in that part as drawn.
-	// shortcut: a node without a part folds into the part below it; give such nodes their own place if one moves.
+	// A node between them without a part keeps its template place (only
+	// parts are placed), so it folds into the part below exactly: the slerp
+	// commutes with a fixed turn and the lerp with a fixed transform.
 	const auto blendParts = [this, &blend](Instance& instance) {
 		const size_t n = instance.parts.size();
 		if (instance.partsTicked.size() != n) {
@@ -2374,7 +2410,7 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			}
 		}
 	}
-	syncDebris();
+	syncDebris(blend);
 	syncPlaced(blend);
 }
 
@@ -2446,7 +2482,7 @@ void LevelRenderer::syncPlaced(const TickBlend& blend)
 	}
 }
 
-void LevelRenderer::syncDebris()
+void LevelRenderer::syncDebris(const TickBlend& blend)
 {
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(), [](const Instance& i) { return i.debris; }),
 		m_instances.end());
@@ -2469,17 +2505,25 @@ void LevelRenderer::syncDebris()
 			continue;
 		}
 		Instance instance {gpuMesh, Mat4 {}, 0, Mat4 {}, nullptr, {1, 1, 0, 0}, {}, nullptr, nullptr};
+		// A piece is an object (a Particle template's): drawn between its
+		// ticks as the others (0x0043ef30), where it is after a 4 m drop.
+		effects::Vec3 position = piece.position;
+		effects::Mat3 rotation = piece.rotation;
+		if (blend.alpha != 1 && !tickBlendJumped(piece.previousPosition.y, piece.position.y)) {
+			position = piece.previousPosition + (piece.position - piece.previousPosition) * blend.alpha;
+			rotation = physics::slerpRotation(piece.previousRotation, piece.rotation, blend.alpha);
+		}
 		const effects::Vec3 scale = piece.scale();
 		const float axes[3] = {scale.x, scale.y, scale.z};
 		for (int row = 0; row < 3; ++row) {
-			const effects::Vec3& r = piece.rotation.rows[static_cast<size_t>(row)];
+			const effects::Vec3& r = rotation.rows[static_cast<size_t>(row)];
 			instance.world.at(row, 0) = r.x * axes[row];
 			instance.world.at(row, 1) = r.y * axes[row];
 			instance.world.at(row, 2) = r.z * axes[row];
 		}
-		instance.world.at(3, 0) = piece.position.x;
-		instance.world.at(3, 1) = piece.position.y;
-		instance.world.at(3, 2) = piece.position.z;
+		instance.world.at(3, 0) = position.x;
+		instance.world.at(3, 1) = position.y;
+		instance.world.at(3, 2) = position.z;
 		instance.local = instance.world;
 		instance.geometry = piece.look->geometry;
 		instance.fade = std::min(alpha, 1.0f);
@@ -3350,21 +3394,11 @@ void LevelRenderer::buildDecals()
 			if (decal.part >= 0) {
 				// On a collisionPart child: the part's own set, drawn at the
 				// part's matrix (its frame in the object's, then the object's).
-				effects::Mat3 r;
-				effects::Vec3 t;
-				if (!m_sources->collisionPartFrame || !m_sources->collisionPartFrame(decal.object, decal.part, r, t)) {
+				const auto part = m_decalPartBlend.find({decal.object, decal.part}); // syncObjects'
+				if (part == m_decalPartBlend.end()) {
 					continue;
 				}
-				Mat4 part;
-				for (int row = 0; row < 3; ++row) {
-					part.at(row, 0) = r.rows[static_cast<size_t>(row)].x;
-					part.at(row, 1) = r.rows[static_cast<size_t>(row)].y;
-					part.at(row, 2) = r.rows[static_cast<size_t>(row)].z;
-				}
-				part.at(3, 0) = t.x;
-				part.at(3, 1) = t.y;
-				part.at(3, 2) = t.z;
-				place = part * place;
+				place = part->second.drawn * place;
 			}
 			n = turn(n);
 			tangent = turn(tangent);

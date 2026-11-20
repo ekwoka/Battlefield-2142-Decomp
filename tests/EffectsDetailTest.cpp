@@ -165,8 +165,22 @@ TEST(EffectsDetail_DebrisEmitterPieces)
 		CHECK(std::fabs(s.x - 1.5f) < 1e-5f && std::fabs(s.y - 3) < 1e-5f && s.z == 1); // the 0 axis keeps 1
 		CHECK(p.alpha() < 1 && p.alpha() > 0.7f);
 	}
+	// A piece is an object: drawn from where it was before the frame's
+	// ticks (two here) to where they leave it (0x0043ef30).
+	manager.frame(0.01f, 1);
+	std::vector<effects::Vec3> before;
+	for (const auto& p : manager.debris()) {
+		before.push_back(p.position);
+	}
+	manager.update(1 / 30.0f);
+	manager.update(1 / 30.0f);
+	for (size_t i = 0; i < before.size(); ++i) {
+		const effects::DebrisPiece& p = manager.debris()[i];
+		CHECK(p.previousPosition.y == before[i].y && p.previousPosition.z == before[i].z);
+		CHECK(p.position.y != p.previousPosition.y);
+	}
 	// They fall back, rest on the ground and go after their 2 s.
-	for (int i = 0; i < 45; ++i) {
+	for (int i = 0; i < 43; ++i) {
 		manager.update(1 / 30.0f);
 	}
 	CHECK(manager.debris().size() == 3);

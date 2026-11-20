@@ -1570,3 +1570,39 @@ TEST(Effects_PlacedMeshesBlendBetweenTicks)
 	manager.frame(0.01f, 1);
 	CHECK(drawnX() == 20);
 }
+
+// An attached bundle's light is drawn where its object is drawn: between
+// the state before the frame's ticks and after them (two ticks here), its
+// turn slerped (0x0043ef30) - at a quarter of 120 degrees, 30.
+TEST(Effects_LightsBlendFromBeforeTheFramesTicks)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	templates.registerType(5, "LightSource");
+	world::ObjectTemplate* flash = templates.create("LightSource", "flash");
+	flash->settings()["isDynamic"] = "1";
+	flash->settings()["attenuationRange2"] = "5";
+	world::ObjectTemplate* lamp = templates.create("EffectBundle", "e_lamp");
+	lamp->children().push_back({"flame", {}, {}});
+	lamp->children().push_back({"flash", {0, 0, 2}, {}});
+	effects::EffectManager manager(templates);
+	manager.setParticlesPerFrame(true);
+	const effects::Vec3 up {0, 1, 0};
+	manager.setAnchor(7, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_lamp", 7, {}));
+	manager.frame(1 / 120.0f, 1);
+	manager.setAnchor(7, {3, 0, 0}, effects::Mat3::axisAngle(up, 60 * 3.14159265f / 180));
+	manager.update(1 / 30.0f);
+	manager.setAnchor(7, {6, 0, 0}, effects::Mat3::axisAngle(up, 120 * 3.14159265f / 180));
+	manager.update(1 / 30.0f);
+	CHECK(manager.lights().size() == 1);
+	CHECK(std::fabs(manager.lights()[0].position.x - (6 + 2 * std::sin(-120 * 3.14159265f / 180))) < 1e-3f ||
+		std::fabs(manager.lights()[0].position.x - (6 + 2 * std::sin(120 * 3.14159265f / 180))) < 1e-3f);
+	manager.frame(1 / 120.0f, 0.25f);
+	const effects::Vec3 want = effects::Vec3 {1.5f, 0, 0} +
+		effects::Mat3::axisAngle(up, 30 * 3.14159265f / 180).transform({0, 0, 2});
+	const effects::Vec3 got = manager.lights()[0].position;
+	CHECK(std::fabs(got.x - want.x) < 1e-3f && std::fabs(got.y - want.y) < 1e-3f && std::fabs(got.z - want.z) < 1e-3f);
+	manager.frame(1 / 120.0f, 1);
+	CHECK(std::fabs(manager.lights()[0].position.x - want.x) > 0.5f); // at the tick again
+}

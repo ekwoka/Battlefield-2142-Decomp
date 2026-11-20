@@ -8,6 +8,7 @@
 // (0x00920ca0) is drawn where it is.
 #pragma once
 
+#include "Physics/RigidBody.h"
 #include "RenderMath.h"
 
 #include <algorithm>
@@ -88,65 +89,20 @@ inline Mat4 blendTransform(const Mat4& from, const Mat4& to, float alpha)
 	if (alpha == 1.0f) {
 		return to;
 	}
-	struct Quat { float w, x, y, z; };
-	float length[2][3];
-	const auto quat = [&length](const Mat4& m, int which, Quat& q) {
-		float r[3][3];
+	const auto rotation = [](const Mat4& m) {
+		physics::Mat3 r;
 		for (int i = 0; i < 3; ++i) {
-			const float l = std::sqrt(m.at(i, 0) * m.at(i, 0) + m.at(i, 1) * m.at(i, 1) + m.at(i, 2) * m.at(i, 2));
-			if (l <= 0) {
-				return false;
-			}
-			length[which][i] = l;
-			for (int j = 0; j < 3; ++j) {
-				r[i][j] = m.at(i, j) / l;
-			}
+			r.rows[static_cast<size_t>(i)] = {m.at(i, 0), m.at(i, 1), m.at(i, 2)};
 		}
-		const float trace = r[0][0] + r[1][1] + r[2][2];
-		if (trace > 0) {
-			const float s = 2 * std::sqrt(trace + 1);
-			q = {s / 4, (r[1][2] - r[2][1]) / s, (r[2][0] - r[0][2]) / s, (r[0][1] - r[1][0]) / s};
-		} else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
-			const float s = 2 * std::sqrt(1 + r[0][0] - r[1][1] - r[2][2]);
-			q = {(r[1][2] - r[2][1]) / s, s / 4, (r[1][0] + r[0][1]) / s, (r[2][0] + r[0][2]) / s};
-		} else if (r[1][1] > r[2][2]) {
-			const float s = 2 * std::sqrt(1 + r[1][1] - r[0][0] - r[2][2]);
-			q = {(r[2][0] - r[0][2]) / s, (r[1][0] + r[0][1]) / s, s / 4, (r[2][1] + r[1][2]) / s};
-		} else {
-			const float s = 2 * std::sqrt(1 + r[2][2] - r[0][0] - r[1][1]);
-			q = {(r[0][1] - r[1][0]) / s, (r[2][0] + r[0][2]) / s, (r[2][1] + r[1][2]) / s, s / 4};
-		}
-		return true;
+		return r;
 	};
-	Quat a, b;
-	if (!quat(from, 0, a) || !quat(to, 1, b)) {
-		return to;
-	}
-	float cosine = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
-	if (cosine < 0) {
-		cosine = -cosine;
-		b = {-b.w, -b.x, -b.y, -b.z};
-	}
-	float wa = 1 - alpha, wb = alpha;
-	if (1 - cosine > 1e-4f) {
-		const float angle = std::acos(std::min(cosine, 1.0f)), sine = std::sin(angle);
-		wa = std::sin((1 - alpha) * angle) / sine;
-		wb = std::sin(alpha * angle) / sine;
-	}
-	Quat q {wa * a.w + wb * b.w, wa * a.x + wb * b.x, wa * a.y + wb * b.y, wa * a.z + wb * b.z};
-	const float n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
-	q = {q.w / n, q.x / n, q.y / n, q.z / n};
-	const float r[3][3] = {
-		{1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y + q.w * q.z), 2 * (q.x * q.z - q.w * q.y)},
-		{2 * (q.x * q.y - q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z + q.w * q.x)},
-		{2 * (q.x * q.z + q.w * q.y), 2 * (q.y * q.z - q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y)},
-	};
+	const physics::Mat3 r = physics::slerpRotation(rotation(from), rotation(to), alpha);
 	Mat4 out = to;
 	for (int i = 0; i < 3; ++i) {
-		const float l = length[0][i] + (length[1][i] - length[0][i]) * alpha;
-		for (int j = 0; j < 3; ++j) {
-			out.at(i, j) = r[i][j] * l;
-		}
+		const physics::Vec3& row = r.rows[static_cast<size_t>(i)];
+		out.at(i, 0) = row.x;
+		out.at(i, 1) = row.y;
+		out.at(i, 2) = row.z;
 	}
 	for (int j = 0; j < 3; ++j) {
 		out.at(3, j) = from.at(3, j) + (to.at(3, j) - from.at(3, j)) * alpha;

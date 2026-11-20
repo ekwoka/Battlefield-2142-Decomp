@@ -323,7 +323,7 @@ public:
 	void syncObjects(TickBlend blend = {});
 	// The effects' debris pieces (effects::DebrisPiece) as instances of their
 	// mesh with only their geometryPart shown, replaced each frame.
-	void syncDebris();
+	void syncDebris(const TickBlend& blend);
 	// The placed templates (LevelSources::placedTemplates) as instances of
 	// their geometry, replaced each frame; a keyed one (a round) between its
 	// last two ticks, as retail draws its object (0x0043ef30).
@@ -639,6 +639,7 @@ private:
 	};
 	std::unordered_map<uint32_t, ObjectBlend> m_objectBlend;
 	std::unordered_map<uint32_t, ObjectBlend> m_placedBlend; // by PlacedTemplate::key
+	std::map<std::pair<uint32_t, int>, ObjectBlend> m_decalPartBlend; // collision parts holding decals, by (object, part)
 	Mat4 drawnTransform(const world::Object& object) const;
 	// syncPlaced's: the templates asked for this frame, and each template's
 	// parts at rest (collectParts without an object).

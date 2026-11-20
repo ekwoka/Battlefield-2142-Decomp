@@ -2966,9 +2966,21 @@ Retail moves the particles in RendDX9's frame, not the tick: `0x10028ae0`
 the particle manager's slot `0x2c` (`0x1009a4c0`), which runs every
 system's update (slot `0xa0`, `0x101407c0`), all while the objects are
 blended. A window's frame now steps the emitters and ages the decals
-(`EffectManager::frame`), the attached systems placed at their anchors
-between the last two ticks; screenshots and headless runs keep stepping them
-in the tick. The name tags are projected at the objects' drawn positions
+(`EffectManager::frame`) of the round's effects and the objects' own
+(engines, exhausts, wakes), the attached systems placed at their anchors as
+drawn; screenshots and headless runs keep stepping them in the tick. An
+anchor, a round's tracer and a debris piece (a Particle template's object)
+blend from where they were before the frame's ticks, however many, to where
+the last one leaves them, as `0x0043f170`'s alpha spans them all; their
+turns are slerped as the objects' (`physics::slerpRotation`, shared with
+`blendTransform`). The effects' lights and the decals on an object's
+collision parts are children of their objects: drawn where those are drawn.
+Sound stays at the tick: the sound manager steps with the ticks (slot
+`0x18`) before the blend, and the one call between `0x0043f170` and
+`0x0043f610` besides the draw is the demo recorder's camera (`0x00516b40`
+→ `0x005fa070`). A held weapon's node without a part keeps its template
+place, so folding it into the part below gives the same draw as blending
+each node. The name tags are projected at the objects' drawn positions
 (`LevelSources::drawnPositions`). Bone poses stay per tick, as retail's: the
 soldier's skeleton is stepped only in its tick update (`0x00586200` →
 `0x005ef250` with 1/30 s), and the blend moves objects, not bones.

@@ -108,3 +108,19 @@ TEST(TickBlend_AffineInverseUndoesATransform)
 		}
 	}
 }
+
+// A held part under a node without a part of its own (LevelRenderer's
+// blendParts): the node keeps its template place, so blending the part's
+// combined transform equals retail's blending the part in the node.
+TEST(TickBlend_FixedNodeFoldsIntoTheBlend)
+{
+	using namespace dice::hfe::render;
+	const Mat4 node = Mat4::yawPitchRoll(25, 40, -10) * Mat4::translation({0.3f, -0.1f, 0.5f});
+	const Mat4 from = Mat4::yawPitchRoll(-30, 5, 0) * Mat4::translation({0, 0.2f, 0});
+	const Mat4 to = Mat4::yawPitchRoll(70, -15, 20) * Mat4::translation({0.1f, 0, 0.4f});
+	const Mat4 folded = blendTransform(from * node, to * node, 0.3f);
+	const Mat4 nested = blendTransform(from, to, 0.3f) * node;
+	for (size_t i = 0; i < folded.m.size(); ++i) {
+		CHECK(std::fabs(folded.m[i] - nested.m[i]) < 1e-4f);
+	}
+}

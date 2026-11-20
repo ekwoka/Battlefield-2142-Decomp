@@ -750,6 +750,10 @@ struct DebrisPiece {
 	const DebrisPieceTemplate* look = nullptr;
 	Vec3 position, velocity, spin; // spin: radians a second about the world's axes
 	Mat3 rotation;
+	// Before this frame's ticks: a piece is an object, drawn between them
+	// (0x0043ef30).
+	Vec3 previousPosition;
+	Mat3 previousRotation;
 	float age = 0, life = 10, size = 1, transparency = 0, gravity = 1, drag = 0;
 	bool resting = false;
 	physics::RigidBody body;   // its physics node (position, rotation, velocity, spin mirror it)
@@ -1098,9 +1102,9 @@ private:
 	struct Anchor {
 		Vec3 position;
 		Mat3 rotation;
-		Vec3 previousPosition; // at the tick before (frame's blend)
+		Vec3 previousPosition; // where the last frame drew it to (the frame's blend)
 		Mat3 previousRotation;
-		uint32_t tick = 0;     // the update count it was last set in
+		uint32_t frame = 0;    // the frame count it last took them in
 	};
 	void placeAttached(Emitter& emitter) const;
 	void placeAttached(Emitter& emitter, const Anchor& place) const;
@@ -1109,8 +1113,11 @@ private:
 	const std::vector<MeshSprite>& placedAsDrawn(const std::vector<MeshSprite>& sprites) const;
 	bool m_particlesPerFrame = false;
 	float m_frameAlpha = 1;
-	uint32_t m_updates = 0;
-	std::map<uint32_t, MeshSprite> m_placedPrevious; // by key, the tick before
+	// Frames drawn (frame()): the ticks between two frames blend from the
+	// state before the first of them (0x0043f170's alpha spans all of them).
+	uint32_t m_frames = 0;
+	uint32_t m_placedFrame = ~0u, m_debrisFrame = ~0u;
+	std::map<uint32_t, MeshSprite> m_placedPrevious; // by key, before this frame's ticks
 	mutable std::vector<MeshSprite> m_placedDrawn;
 	std::map<const world::ObjectTemplate*, BundleModifiers> m_bundleModifiers;
 	const ParticleTemplate* particleTemplate(const world::ObjectTemplate& t);

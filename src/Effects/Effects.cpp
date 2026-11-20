@@ -1272,9 +1272,19 @@ std::vector<PointLight> EffectManager::lights() const
 		}
 		const float fade = light.life < 0 ? 1.0f : std::clamp(1.0f - light.age / light.life, 0.0f, 1.0f);
 		if (fade > 0) {
-			PointLight lit {light.position, light.color * fade, light.range1, light.range2};
+			// An attached bundle's light is a child of its object: drawn
+			// where the object is drawn between the ticks (0x0043ef30).
+			Vec3 position = light.position, direction = light.direction;
+			if (const auto at = light.anchor != 0 && m_frameAlpha != 1 ? m_anchors.find(light.anchor) : m_anchors.end();
+				at != m_anchors.end()) {
+				const Anchor place = drawnAnchor(at->second);
+				position = place.position +
+					place.rotation.transform(light.mountPosition + light.mountRotation.transform(light.localPosition));
+				direction = place.rotation.transform(light.mountRotation.transform(light.localDirection));
+			}
+			PointLight lit {position, light.color * fade, light.range1, light.range2};
 			lit.spot = light.look.spot;
-			lit.direction = light.direction;
+			lit.direction = direction;
 			lit.cone = light.look.cone;
 			lit.affectsLightmapped = light.look.affectsLightmapped;
 			lit.specColor = light.look.specColor * fade;
@@ -1478,13 +1488,13 @@ void EffectManager::setAnchor(uint32_t anchor, const Vec3& position, const Mat3&
 	if (added) {
 		a.previousPosition = position;
 		a.previousRotation = rotation;
-	} else if (a.tick != m_updates) {
+	} else if (a.frame != m_frames) {
 		a.previousPosition = a.position;
 		a.previousRotation = a.rotation;
 	}
 	a.position = position;
 	a.rotation = rotation;
-	a.tick = m_updates;
+	a.frame = m_frames;
 	for (const auto& emitter : m_emitters) {
 		if (emitter->anchor == anchor) {
 			placeAttached(*emitter);
@@ -1644,7 +1654,6 @@ void EffectManager::update(float seconds)
 	if (!m_particlesPerFrame) {
 		stepEmitters(seconds);
 	}
-	++m_updates;
 	for (LiveLight& light : m_lights) {
 		light.age += seconds;
 		if (light.anchor != 0 && !m_anchors.count(light.anchor)) {
@@ -1689,34 +1698,6 @@ void EffectManager::stepEmitters(float seconds)
 		m_emitters.end());
 }
 
-// A rotation between two (rows lerped, then made orthogonal again with
-// their lengths kept); for small turns the slerp of 0x006ac980.
-static Mat3 blendRows(const Mat3& a, const Mat3& b, float t)
-{
-	Mat3 r;
-	float length[3];
-	Vec3 axis[3];
-	for (int i = 0; i < 3; ++i) {
-		const Vec3 v = a.rows[static_cast<size_t>(i)] + (b.rows[static_cast<size_t>(i)] - a.rows[static_cast<size_t>(i)]) * t;
-		const float la = std::sqrt(physics::lengthSquared(a.rows[static_cast<size_t>(i)]));
-		const float lb = std::sqrt(physics::lengthSquared(b.rows[static_cast<size_t>(i)]));
-		length[i] = la + (lb - la) * t;
-		axis[i] = v;
-	}
-	const auto unit = [](const Vec3& v) {
-		const float l = std::sqrt(physics::lengthSquared(v));
-		return l > 1e-12f ? v * (1 / l) : v;
-	};
-	const Vec3 x = unit(axis[0]);
-	const Vec3 y = unit(axis[1] - x * physics::dot(x, axis[1]));
-	const Vec3 z = unit(axis[2] - x * physics::dot(x, axis[2]) - y * physics::dot(y, axis[2]));
-	if (physics::lengthSquared(x) < 0.5f || physics::lengthSquared(y) < 0.5f || physics::lengthSquared(z) < 0.5f) {
-		return b;
-	}
-	r.rows = {x * length[0], y * length[1], z * length[2]};
-	return r;
-}
-
 EffectManager::Anchor EffectManager::drawnAnchor(const Anchor& anchor) const
 {
 	// An anchor whose height changed by more than 4 m in the tick is drawn
@@ -1726,13 +1707,14 @@ EffectManager::Anchor EffectManager::drawnAnchor(const Anchor& anchor) const
 	}
 	Anchor drawn = anchor;
 	drawn.position = anchor.previousPosition + (anchor.position - anchor.previousPosition) * m_frameAlpha;
-	drawn.rotation = blendRows(anchor.previousRotation, anchor.rotation, m_frameAlpha);
+	drawn.rotation = physics::slerpRotation(anchor.previousRotation, anchor.rotation, m_frameAlpha);
 	return drawn;
 }
 
 void EffectManager::frame(float seconds, float alpha)
 {
 	m_frameAlpha = alpha;
+	++m_frames;
 	if (!m_particlesPerFrame) {
 		return;
 	}
@@ -1762,15 +1744,19 @@ void EffectManager::setPlacedMeshes(std::vector<std::pair<std::string, std::vect
 			}
 		}
 	}
-	m_placedPrevious.clear();
+	std::map<uint32_t, MeshSprite> previous;
+	const bool first = m_placedFrame != m_frames; // the first tick since the last frame
+	m_placedFrame = m_frames;
 	for (const auto& [geometry, sprites] : groups) {
 		for (const MeshSprite& s : sprites) {
 			if (s.key != 0) {
+				const auto kept = first ? m_placedPrevious.end() : m_placedPrevious.find(s.key);
 				const auto was = before.find(s.key);
-				m_placedPrevious[s.key] = was != before.end() ? was->second : s;
+				previous[s.key] = kept != m_placedPrevious.end() ? kept->second : was != before.end() ? was->second : s;
 			}
 		}
 	}
+	m_placedPrevious = std::move(previous);
 	m_placedMeshes = std::move(groups);
 }
 
@@ -1787,7 +1773,7 @@ const std::vector<MeshSprite>& EffectManager::placedAsDrawn(const std::vector<Me
 		}
 		const MeshSprite& a = was->second;
 		s.position = a.position + (s.position - a.position) * m_frameAlpha;
-		s.rotation = blendRows(a.rotation, s.rotation, m_frameAlpha);
+		s.rotation = physics::slerpRotation(a.rotation, s.rotation, m_frameAlpha);
 		s.stretch = a.stretch + (s.stretch - a.stretch) * m_frameAlpha;
 	}
 	return m_placedDrawn;
@@ -2063,6 +2049,8 @@ void EffectManager::emitDebris(LiveDebrisEmitter& e, float lead)
 	if (m_debris.size() >= kMaxDebris) {
 		m_debris.erase(m_debris.begin());
 	}
+	piece.previousPosition = piece.position;
+	piece.previousRotation = piece.rotation;
 	m_debris.push_back(piece);
 }
 
@@ -2183,11 +2171,16 @@ void EffectManager::stepDebris(float seconds)
 		m_debrisEmitters.end());
 	// The pieces.
 	for (DebrisPiece& p : m_debris) {
+		if (m_debrisFrame != m_frames) {
+			p.previousPosition = p.position;
+			p.previousRotation = p.rotation;
+		}
 		p.age += seconds;
 		if (!p.resting) {
 			stepPiece(p, seconds);
 		}
 	}
+	m_debrisFrame = m_frames;
 	m_debris.erase(std::remove_if(m_debris.begin(), m_debris.end(), [](const DebrisPiece& p) { return p.age >= p.life; }),
 		m_debris.end());
 }

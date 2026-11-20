@@ -68,6 +68,71 @@ Mat3 Mat3::operator*(const Mat3& o) const
 	return r;
 }
 
+Mat3 slerpRotation(const Mat3& from, const Mat3& to, float alpha)
+{
+	if (alpha == 1.0f) {
+		return to;
+	}
+	struct Quat { float w, x, y, z; };
+	float length[2][3];
+	const auto quat = [&length](const Mat3& m, int which, Quat& q) {
+		float r[3][3];
+		for (size_t i = 0; i < 3; ++i) {
+			const float l = std::sqrt(dot(m.rows[i], m.rows[i]));
+			if (l <= 0) {
+				return false;
+			}
+			length[which][i] = l;
+			r[i][0] = m.rows[i].x / l;
+			r[i][1] = m.rows[i].y / l;
+			r[i][2] = m.rows[i].z / l;
+		}
+		const float trace = r[0][0] + r[1][1] + r[2][2];
+		if (trace > 0) {
+			const float s = 2 * std::sqrt(trace + 1);
+			q = {s / 4, (r[1][2] - r[2][1]) / s, (r[2][0] - r[0][2]) / s, (r[0][1] - r[1][0]) / s};
+		} else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
+			const float s = 2 * std::sqrt(1 + r[0][0] - r[1][1] - r[2][2]);
+			q = {(r[1][2] - r[2][1]) / s, s / 4, (r[1][0] + r[0][1]) / s, (r[2][0] + r[0][2]) / s};
+		} else if (r[1][1] > r[2][2]) {
+			const float s = 2 * std::sqrt(1 + r[1][1] - r[0][0] - r[2][2]);
+			q = {(r[2][0] - r[0][2]) / s, (r[1][0] + r[0][1]) / s, s / 4, (r[2][1] + r[1][2]) / s};
+		} else {
+			const float s = 2 * std::sqrt(1 + r[2][2] - r[0][0] - r[1][1]);
+			q = {(r[0][1] - r[1][0]) / s, (r[2][0] + r[0][2]) / s, (r[2][1] + r[1][2]) / s, s / 4};
+		}
+		return true;
+	};
+	Quat a, b;
+	if (!quat(from, 0, a) || !quat(to, 1, b)) {
+		return to;
+	}
+	float cosine = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+	if (cosine < 0) {
+		cosine = -cosine;
+		b = {-b.w, -b.x, -b.y, -b.z};
+	}
+	float wa = 1 - alpha, wb = alpha;
+	if (1 - cosine > 1e-4f) {
+		const float angle = std::acos(std::min(cosine, 1.0f)), sine = std::sin(angle);
+		wa = std::sin((1 - alpha) * angle) / sine;
+		wb = std::sin(alpha * angle) / sine;
+	}
+	Quat q {wa * a.w + wb * b.w, wa * a.x + wb * b.x, wa * a.y + wb * b.y, wa * a.z + wb * b.z};
+	const float n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+	q = {q.w / n, q.x / n, q.y / n, q.z / n};
+	const Vec3 r[3] = {
+		{1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y + q.w * q.z), 2 * (q.x * q.z - q.w * q.y)},
+		{2 * (q.x * q.y - q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z + q.w * q.x)},
+		{2 * (q.x * q.z + q.w * q.y), 2 * (q.y * q.z - q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y)},
+	};
+	Mat3 out;
+	for (size_t i = 0; i < 3; ++i) {
+		out.rows[i] = r[i] * (length[0][i] + (length[1][i] - length[0][i]) * alpha);
+	}
+	return out;
+}
+
 // Rotation about a unit axis for row vectors (v * M).
 Mat3 Mat3::axisAngle(const Vec3& a, float radians)
 {

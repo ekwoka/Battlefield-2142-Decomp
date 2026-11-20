@@ -10417,9 +10417,11 @@ int runGame(Options& options, Session& session)
 		if (viewer.screenshot.empty()) {
 			// A window draws frames: the particles move by them, as RendDX9's (EffectManager::frame).
 			round.setEffectsPerFrame(true);
+			objectEffects.setParticlesPerFrame(true); // the objects' own (engines, exhausts, wakes)
 			playerCamera.setEffectsPerFrame(true);
-			viewer.onFrame = [&round, &playerCamera](float seconds, float alpha) {
+			viewer.onFrame = [&round, &objectEffects, &playerCamera](float seconds, float alpha) {
 				round.frameEffects(seconds, alpha);
+				objectEffects.frame(seconds, alpha);
 				playerCamera.frameEffects(seconds);
 			};
 		}

@@ -73,6 +73,13 @@ struct Mat3 {
 // where the cross products fail, `reference` itself.
 Mat3 lookAtRotation(const Vec3& way, const Mat3& reference);
 
+// A rotation between two as the original's frame blends them (0x0043ef30):
+// quaternions (0x006ac740 / 0x0043de60) slerped the short way by `alpha`
+// (0x006ac980), back to a matrix (0x006ac870). The rows' lengths, which
+// retail's matrices don't carry, are lerped so a scaled one keeps its size.
+// A row of length 0 gives `to`.
+Mat3 slerpRotation(const Mat3& from, const Mat3& to, float alpha);
+
 namespace tuning {
 constexpr float kGravity = -14.73f;             // PhysicsSystem default (0x006da810), "Physics.gravity"
 constexpr float kLinearDamping = 0.99f;         // per tick (0x00a84b54)
