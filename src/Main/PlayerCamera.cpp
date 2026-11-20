@@ -1273,6 +1273,7 @@ bool PlayerCamera::view(View& view, float aspect) const
 	view.pitch = std::clamp(me.aimPitch, -85.0f, 85.0f) * kDegrees;
 	view.fovY = aspectFov(m_fov.current, aspect);
 	view.roll = m_hitShake * kDegrees; // the SoldierCamera's hit shake
+	view.soldierEye = true;
 	return true;
 }
 

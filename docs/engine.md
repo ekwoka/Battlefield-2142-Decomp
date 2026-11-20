@@ -2910,6 +2910,48 @@ on a joined client by the ghost's ducking, `animateRemoteSeated` hand it
 the pose (`Vehicles_BipodDuckPlaysTheDuckPose`). A
 straight arm (v1 ∥ v2) gives no plane to bend in, as in the original.
 
+## Drawing between ticks
+
+The simulation steps at 30 Hz; every frame is drawn between the last two
+ticks (`0x0040bd90`: `0x0040c300` keeps the frame's tick count n, then
+`0x0040c534` → `0x0043f170`). Always on: the gate `0x009fcd90` is 1 and
+read nowhere else. The alpha is (now − last tick) / (n × 1/30), clamped to
+−0.1 .. 1.1, 0 before any tick. Each object (`0x0043ef30`, over the roots,
+their children (slot `0xec`) and siblings (`+0x38`); a child only when it is
+a soldier, a RotationalBundle (`0x947d`), a camera or a free camera,
+`0x0043dc40`) is drawn at its translation lerped (`0x0043dd80`) and its
+rotation slerped (`0x006ac740` / `0x0043de60` to quaternions, `0x006ac980`,
+the short way, no limit on the turn; `0x006ac870` back): world matrices for
+roots, local ones for children. An object whose height changed by more
+than 4 m in the tick (`*0x00920ca0`) is drawn where it is. The real
+transforms are put back after the frame (`0x0043eea0`, `+0x1c`).
+
+The local player's root is left to the end. When the player's camera
+(slot `0x1b4`, interface `0xc378`) belongs to a soldier and no device
+`0x400` is active, its matrix is kept, the root blended, and the soldier
+given back its tick rotation: on foot at the blended position, seated its
+whole local matrix. Then the frame's mouse move (device 1, axes 4 and 5)
+goes to the soldier (interface `0xc4d7` slot `0x8c`, `0x0058b5e0`): times 5
+(`*0x00a68e4c`, `*0x00a68f24`) and the zoom scale (`0x00586420`), added to
+the pending turn and pitch (`+0x27c`, `+0x274`), and the camera placed again
+(`0x005890a0`); some states send none (`0x00403060` on `0x00a0f3b0`,
+`0x00b2d148` slot `0x30`, the held item's slot `0x37c`). The tick
+clears both (`0x0058a788`) and turns by its whole input, so the look moves
+every frame. Any other camera (a seat's, the free camera) rides its
+blended object.
+
+The rewrite (`Render/TickBlend.h`, `LevelRenderer::syncObjects`,
+`Viewer.cpp`): objects and their parts as above (the parts relative to the
+object, not to their parent); the game camera keeps its own last two
+samples (`MissileViewSmoothing`), one history per kind of view. The
+soldier's eye takes the blended position and the tick's look plus
+`GameWorld::pendingLook` (the turn and pitch change the next tick will
+take). The first-person weapon is placed at the tick's eye and carried
+with the drawn view (`tickBlendViewAdjustment`). Not done: the seated
+soldier's camera still blends its look (retail turns it per frame within
+the seat's limits); the 0.2 eye-height approach in `0x005890a0` runs per
+tick, not per frame; effects, tracers and bone poses step at 30 Hz.
+
 ## The first-person view
 
 **The camera.** On foot the player looks through the soldier's camera, its

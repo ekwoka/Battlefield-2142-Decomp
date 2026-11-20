@@ -562,6 +562,35 @@ TEST(GameWorld_SuicideSkipsManDown)
 	CHECK(range.count("PlayerKilled") == 1 && range.count("PlayerDeath") == 1);
 }
 
+// Retail turns the soldier's eye by each frame's look before the tick
+// takes it (0x0058b5e0, cleared by the tick 0x0058a788): the drawn look
+// (the tick's plus pendingLook) must be where the next tick leaves it.
+TEST(GameWorld_PendingLookIsWhatTheNextTickTakes)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo before, after;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), before) && before.alive);
+	game::SoldierInput look;
+	look.aimPitch = 12;
+	look.turn = 7; // two frames' moves, one tick
+	range.world->setPlayerInput(look);
+	look.turn = 9;
+	range.world->setPlayerInput(look);
+	float turn = 0, pitch = 0;
+	range.world->pendingLook(turn, pitch);
+	CHECK(turn == 16 && std::fabs(pitch - (12 - (before.aimPitch))) < 1e-4f);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(range.world->localPlayer(), after));
+	CHECK(std::fabs(std::remainder(after.yaw - (before.yaw + turn), 360.0f)) < 1e-3f);
+	CHECK(std::fabs(after.aimPitch - (before.aimPitch + pitch)) < 1e-3f);
+	range.world->pendingLook(turn, pitch);
+	CHECK(turn == 0 && pitch == 0);
+}
+
 TEST(GameWorld_InitialDeploymentJoinsWithoutDeathThenSpawnsAtChoice)
 {
 	Range range;

@@ -10381,7 +10381,10 @@ int runGame(Options& options, Session& session)
 				scene.models.push_back(std::move(drawn));
 			}
 			scene.effects = &playerCamera.effects();
-			if (sources.enhanced && sources.enhanced->enabled && sources.enhanced->tickBlend) {
+			// The weapon and hands sit at the tick's eye; drawn through the
+			// blended view with its per-frame look, they are carried along
+			// (LevelRenderer: tickBlendViewAdjustment).
+			{
 				PlayerCamera::View eye;
 				if (playerCamera.view(eye, 4.0f / 3.0f)) {
 					render::Camera placement;
@@ -10572,6 +10575,7 @@ int runGame(Options& options, Session& session)
 					view.eyePitch = eye.pitch;
 					view.fovY = eye.fovY;
 					view.eyeRoll = eye.roll;
+					view.soldierEye = eye.soldierEye; // its look is already the frame's (remoteLook)
 				}
 				return true;
 			};
@@ -10929,6 +10933,10 @@ int runGame(Options& options, Session& session)
 					view.eyePitch = eye.pitch;
 					view.fovY = eye.fovY;
 					view.eyeRoll = eye.roll;
+					view.soldierEye = eye.soldierEye;
+					if (eye.soldierEye) {
+						round.pendingLook(view.lookTurn, view.lookPitch);
+					}
 				} else {
 					external(view);
 				}

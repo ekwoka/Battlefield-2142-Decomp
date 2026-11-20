@@ -99,6 +99,10 @@ struct ViewerOptions {
 		// the death and spectator cameras): eye, eyeYaw, eyePitch, fovY and
 		// eyeRoll hold it, drawn with the usual near plane.
 		bool external = false;
+		// The soldier's own eye (PlayerCamera::View::soldierEye) and the look
+		// the next tick will take (degrees: the turn, the pitch's change).
+		bool soldierEye = false;
+		float lookTurn = 0, lookPitch = 0;
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player

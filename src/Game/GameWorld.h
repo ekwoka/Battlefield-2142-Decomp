@@ -2267,6 +2267,16 @@ public:
 	const Vehicle* vehicle(uint32_t object) const;
 	// The input for the next ticks.
 	void setPlayerInput(const SoldierInput& input) { const float pendingTurn = m_playerInput.turn; m_playerInput = input; m_playerInput.turn += pendingTurn; }
+	// The local player's look given since the last tick, which the next one
+	// takes (degrees): the turn and the pitch's change. Retail shows it at
+	// once: each frame adds the mouse's move to the soldier's +0x27c / +0x274
+	// and places the camera (0x0058b5e0 -> 0x005890a0), the tick clears them
+	// and turns by its whole input (0x0058a788).
+	void pendingLook(float& turn, float& pitch) const
+	{
+		turn = m_playerInput.turn;
+		pitch = m_player ? m_playerInput.aimPitch - m_player->input.aimPitch : 0.0f;
+	}
 	// Titan mode (Titans.cpp; docs/engine.md, "Titans"). The Titan sync
 	// manager (0x005628f0, ECPhysicsETitanSync: set up by 0x00561c00, run by
 	// 0x00561e20 only when the game mode is "gpm_ti") keeps one Titan per

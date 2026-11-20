@@ -7,7 +7,7 @@
 
 namespace dice::hfe {
 // The drawn camera between fixed simulation samples. A new serial (a
-// projectile, or with enhanced.tickBlend another kind of view) starts its own
+// projectile, or another kind of view) starts its own
 // history so a launch, an impact or a switch of view cannot blend with a
 // different camera. With a jump limit (the objects' 4 m height rule,
 // 0x0043ef30 with *0x00920ca0, Render/TickBlend.h) a bigger height change is

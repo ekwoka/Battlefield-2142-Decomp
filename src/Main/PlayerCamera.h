@@ -160,6 +160,9 @@ public:
 		float yaw = 0, pitch = 0; // radians: yaw 0 along +z, pitch up positive
 		float fovY = 1.0f;        // radians, for the window's aspect (RendDX9 0x10066ac0)
 		float roll = 0;           // radians about the view axis (a seat camera's shakes)
+		// The soldier's own camera (on foot, under a parachute): retail turns
+		// it with the look every frame (0x0043f170's local player, 0x0058b5e0).
+		bool soldierEye = false;
 	};
 	bool view(View& view, float aspect) const;
 	// Local map direction in any vehicle seat with a first-person camera, in degrees.

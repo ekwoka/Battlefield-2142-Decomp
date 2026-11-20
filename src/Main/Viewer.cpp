@@ -936,9 +936,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				blendTicks = elapsedTicks;
 				tickedSinceSync = true;
 			}
-			// enhanced.tickBlend (experimental): drawn between the last two ticks
-			// (Render/TickBlend.h); otherwise as each tick left it.
-			const bool tickBlend = sources.enhanced && sources.enhanced->enabled && sources.enhanced->tickBlend;
+			// Drawn between the last two ticks, as retail always is
+			// (Render/TickBlend.h).
 			const float blendAlpha = render::tickBlendAlpha(seconds, ticks.previousTickTime(), blendTicks, ticks.tickLength());
 			ViewerOptions::PlayerView view;
 			{
@@ -980,24 +979,31 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					camera.position = head - camera.forward() * 4.0f + camera.right() * 0.6f;
 				}
 			}
-			// The ridden projectile's camera between its fixed 30 Hz samples:
-			// retail draws every object between its last two transforms
-			// (0x0043f170 -> 0x0043ef30, always on: 0x009fcd90 is 1), the
-			// guided round among them, and its camera rides that drawn round,
-			// with the same alpha and 4 m height rule. The port draws the other
-			// objects so only with enhanced.tickBlend, which also blends every
-			// game camera, each kind of view keeping its own history.
+			// The game camera between its fixed 30 Hz samples: retail draws
+			// every object between its last two transforms (0x0043f170 ->
+			// 0x0043ef30, always on: 0x009fcd90 is 1) and the cameras ride
+			// them (a seat's, the ridden round's, the free camera), with the
+			// same alpha and 4 m height rule; each kind of view keeps its own
+			// history. The soldier's own eye (0x0043f170's local player)
+			// takes only the blended position: the body keeps the tick's
+			// turn and the look is the frame's, the tick's plus what the next
+			// tick will take (0x0058b5e0 -> 0x005890a0, cleared by the tick).
 			const uint32_t missileKey = view.firstPerson ? view.projectileSerial : 0;
-			const uint32_t viewKey = !tickBlend ? missileKey
-				: !playing ? 0
+			const uint32_t viewKey = !playing ? 0
 				: missileKey ? missileKey
 				: 0x80000000u | (firstPerson ? 1u : view.external ? 2u : 3u);
 			if (viewKey) {
 				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
 				const auto smooth = viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
-				camera.yaw = smooth.yaw;
-				camera.pitch = smooth.pitch;
+				if (firstPerson && view.soldierEye && !missileKey) {
+					constexpr float kRadians = 3.14159265f / 180.0f;
+					camera.yaw = raw.yaw + view.lookTurn * kRadians;
+					camera.pitch = std::clamp(raw.pitch + view.lookPitch * kRadians, -85 * kRadians, 85 * kRadians);
+				} else {
+					camera.yaw = smooth.yaw;
+					camera.pitch = smooth.pitch;
+				}
 			} else {
 				viewSmoothing.sample(0, false, 0, {}); // forget the last view's history
 			}
@@ -1028,7 +1034,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f);
 			}
 			const bool tickedForObjects = std::exchange(tickedSinceSync, false);
-			level.syncObjects(tickBlend ? render::TickBlend {tickedForObjects, blendAlpha} : render::TickBlend {});
+			level.syncObjects(render::TickBlend {tickedForObjects, blendAlpha});
 			level.draw(commands, swapchain, target, camera, sources.lights);
 			SDL_SubmitGPUCommandBuffer(commands);
 			if (!shown.shot.empty()) {

@@ -3,6 +3,7 @@
 #include "Render/TickBlend.h"
 
 #include <cmath>
+#include <utility>
 #include "TestMain.h"
 
 TEST(TickTimer_CountsWholeTicks)
@@ -40,7 +41,7 @@ TEST(TickBlend_AlphaFollowsTheRetailFrame)
 	CHECK(tickBlendAlpha(last - 1, last, 1, timer.tickLength()) == -0.1f);
 }
 
-TEST(TickBlend_TransformKeepsAxesWholeAndSkipsBigTurns)
+TEST(TickBlend_TransformSlerpsAsRetail)
 {
 	using namespace dice::hfe::render;
 	const auto yaw = [](float degrees, float x) {
@@ -56,9 +57,24 @@ TEST(TickBlend_TransformKeepsAxesWholeAndSkipsBigTurns)
 	CHECK(std::fabs(half.at(0, 0) - std::cos(20 * 3.14159265f / 180)) < 1e-3f); // the axis turned halfway, unit length
 	CHECK(std::fabs(half.at(0, 0) * half.at(0, 0) + half.at(0, 2) * half.at(0, 2) - 1) < 1e-4f);
 	CHECK(std::fabs(half.at(1, 1) - 1) < 1e-5f);
-	const Mat4 rotor = blendTransform(yaw(0, 0), yaw(90, 10), 0.5f);
-	CHECK(rotor.at(3, 0) == 10 && rotor.at(0, 0) == yaw(90, 10).at(0, 0)); // drawn where it is
+	// No limit on the turn (0x006ac980 slerps any): 90 degrees halfway is 45.
+	const Mat4 quarter = blendTransform(yaw(0, 0), yaw(90, 10), 0.5f);
+	const Mat4 expect = yaw(45, 5);
+	for (size_t i = 0; i < expect.m.size(); ++i) {
+		CHECK(std::fabs(quarter.m[i] - expect.m[i]) < 1e-4f);
+	}
 	CHECK(blendTransform(yaw(0, 0), yaw(40, 10), 1).m == yaw(40, 10).m);
+	// Any orientation comes back whole at either end, the short way round.
+	const Mat4 tilted = Mat4::yawPitchRoll(130, -60, 170) * Mat4::translation({1, 2, 3});
+	const Mat4 other = Mat4::yawPitchRoll(-150, 20, -30);
+	for (const auto& [alpha, want] : {std::pair {0.0f, &tilted}, std::pair {0.9999f, &other}}) {
+		const Mat4 got = blendTransform(tilted, other, alpha);
+		for (int r = 0; r < 3; ++r) {
+			for (int c = 0; c < 3; ++c) {
+				CHECK(std::fabs(got.at(r, c) - want->at(r, c)) < 1e-3f);
+			}
+		}
+	}
 	CHECK(dice::hfe::render::tickBlendJumped(0, 4.5f) && !dice::hfe::render::tickBlendJumped(0, 3.5f));
 }
 
@@ -70,6 +86,4 @@ TEST(TickBlend_CameraSnapsOnAHeightJump)
 	smooth.sample(7, true, 0, ground);
 	auto p = smooth.sample(7, true, 0.5f, lifted, dice::hfe::render::kTickBlendJump);
 	CHECK(p.position[1] == 6 && p.position[0] == 1);
-	p = smooth.sample(7, false, 0.5f, lifted); // no limit (enhanced.tickBlend off): blended
-	CHECK(p.position[1] == 3);
 }

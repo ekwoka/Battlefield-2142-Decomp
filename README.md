@@ -454,7 +454,6 @@ The rest only change what you see or hear.
 | `particleLights` | on | graphics | Smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps). | no |
 | `glowOcclusion` | on | graphics | A lamp's additive halo is skipped while the line from the camera to its centre is blocked; the original only depth-tests halos per pixel. | no |
 | `prepass` | off | graphics | The depth, normal and motion prepass even when neither `taa` nor `ssao` reads it. | no |
-| `tickBlend` | off | graphics | Objects and the camera are drawn between the 30 Hz simulation ticks, as the original's frame does (0x0043f170). Without it each frame shows the last tick (only a ridden missile's camera is smoothed). | no |
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
 | `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
 | `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
@@ -508,10 +507,6 @@ feeds the simulation.
   already turn it on; alone it costs a pass and changes nothing on screen.
 - **`hudWidescreen`:** it changes the HUD's layout, and is only meant for a
   mod without Remaster's own widescreen fix; turn it on if you want it.
-- **`tickBlend`:** drawing between ticks is what the original does, but the
-  rewrite's version (the objects, and every game camera with its own
-  history) is still experimental, so by default each frame shows the last
-  tick.
 
 ### Parity checking
 

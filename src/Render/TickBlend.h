@@ -3,8 +3,9 @@
 // 0x0043ec00), then before drawing takes alpha = (now - last tick) /
 // (count x 1/30 s), clamped to -0.1 .. 1.1 and 0 before any tick
 // (0x0040c534 -> 0x0043f170), and draws each object between its previous
-// and its current transform (0x0043ef30, always on: 0x009fcd90 is 1). An
-// object whose height changed by more than 4 m (0x00920ca0) is drawn where it is.
+// and its current transform (0x0043ef30, always on: 0x009fcd90 is 1, read
+// nowhere else). An object whose height changed by more than 4 m
+// (0x00920ca0) is drawn where it is.
 #pragma once
 
 #include "RenderMath.h"
@@ -51,41 +52,80 @@ inline Mat4 tickBlendViewAdjustment(const Mat4& rawView, const Mat4& drawnView)
 	return rawView * inverse;
 }
 
-// A row-vector transform between two: the translation row linearly; the axis
-// rows linearly, then made orthogonal again with their lengths kept, so a turn
-// neither shrinks nor shears what is drawn. A turn of more than 60 degrees in
-// one tick (a rotor) is not blended.
+// A row-vector transform between two, as 0x0043ef30: the translation
+// linearly (0x0043dd80), the rotation as quaternions slerped by alpha
+// (0x006ac740 / 0x0043de60 to quaternions, 0x006ac980 the slerp, the short
+// way; 0x006ac870 back). The axis lengths, which retail's matrices don't
+// carry, are lerped so a scaled transform keeps its size.
 inline Mat4 blendTransform(const Mat4& from, const Mat4& to, float alpha)
 {
 	if (alpha == 1.0f) {
 		return to;
 	}
-	const auto row = [](const Mat4& m, int i) { return Vec3f {m.at(i, 0), m.at(i, 1), m.at(i, 2)}; };
-	Vec3f axis[3];
-	float length[3];
-	for (int i = 0; i < 3; ++i) {
-		const Vec3f a = row(from, i), b = row(to, i);
-		const float la = std::sqrt(dot(a, a)), lb = std::sqrt(dot(b, b));
-		if (la <= 0 || lb <= 0 || dot(a, b) < 0.5f * la * lb) {
-			return to;
+	struct Quat { float w, x, y, z; };
+	float length[2][3];
+	const auto quat = [&length](const Mat4& m, int which, Quat& q) {
+		float r[3][3];
+		for (int i = 0; i < 3; ++i) {
+			const float l = std::sqrt(m.at(i, 0) * m.at(i, 0) + m.at(i, 1) * m.at(i, 1) + m.at(i, 2) * m.at(i, 2));
+			if (l <= 0) {
+				return false;
+			}
+			length[which][i] = l;
+			for (int j = 0; j < 3; ++j) {
+				r[i][j] = m.at(i, j) / l;
+			}
 		}
-		axis[i] = a + (b - a) * alpha;
-		length[i] = la + (lb - la) * alpha;
+		const float trace = r[0][0] + r[1][1] + r[2][2];
+		if (trace > 0) {
+			const float s = 2 * std::sqrt(trace + 1);
+			q = {s / 4, (r[1][2] - r[2][1]) / s, (r[2][0] - r[0][2]) / s, (r[0][1] - r[1][0]) / s};
+		} else if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
+			const float s = 2 * std::sqrt(1 + r[0][0] - r[1][1] - r[2][2]);
+			q = {(r[1][2] - r[2][1]) / s, s / 4, (r[1][0] + r[0][1]) / s, (r[2][0] + r[0][2]) / s};
+		} else if (r[1][1] > r[2][2]) {
+			const float s = 2 * std::sqrt(1 + r[1][1] - r[0][0] - r[2][2]);
+			q = {(r[2][0] - r[0][2]) / s, (r[1][0] + r[0][1]) / s, s / 4, (r[2][1] + r[1][2]) / s};
+		} else {
+			const float s = 2 * std::sqrt(1 + r[2][2] - r[0][0] - r[1][1]);
+			q = {(r[0][1] - r[1][0]) / s, (r[2][0] + r[0][2]) / s, (r[2][1] + r[1][2]) / s, s / 4};
+		}
+		return true;
+	};
+	Quat a, b;
+	if (!quat(from, 0, a) || !quat(to, 1, b)) {
+		return to;
 	}
-	const Vec3f x = normalize(axis[0]);
-	const Vec3f y = normalize(axis[1] - x * dot(x, axis[1]));
-	const Vec3f z = normalize(axis[2] - x * dot(x, axis[2]) - y * dot(y, axis[2]));
-	Mat4 r = to;
-	const Vec3f rows[3] = {x * length[0], y * length[1], z * length[2]};
+	float cosine = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+	if (cosine < 0) {
+		cosine = -cosine;
+		b = {-b.w, -b.x, -b.y, -b.z};
+	}
+	float wa = 1 - alpha, wb = alpha;
+	if (1 - cosine > 1e-4f) {
+		const float angle = std::acos(std::min(cosine, 1.0f)), sine = std::sin(angle);
+		wa = std::sin((1 - alpha) * angle) / sine;
+		wb = std::sin(alpha * angle) / sine;
+	}
+	Quat q {wa * a.w + wb * b.w, wa * a.x + wb * b.x, wa * a.y + wb * b.y, wa * a.z + wb * b.z};
+	const float n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+	q = {q.w / n, q.x / n, q.y / n, q.z / n};
+	const float r[3][3] = {
+		{1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y + q.w * q.z), 2 * (q.x * q.z - q.w * q.y)},
+		{2 * (q.x * q.y - q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z + q.w * q.x)},
+		{2 * (q.x * q.z + q.w * q.y), 2 * (q.y * q.z - q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y)},
+	};
+	Mat4 out = to;
 	for (int i = 0; i < 3; ++i) {
-		r.at(i, 0) = rows[i].x;
-		r.at(i, 1) = rows[i].y;
-		r.at(i, 2) = rows[i].z;
+		const float l = length[0][i] + (length[1][i] - length[0][i]) * alpha;
+		for (int j = 0; j < 3; ++j) {
+			out.at(i, j) = r[i][j] * l;
+		}
 	}
 	for (int j = 0; j < 3; ++j) {
-		r.at(3, j) = from.at(3, j) + (to.at(3, j) - from.at(3, j)) * alpha;
+		out.at(3, j) = from.at(3, j) + (to.at(3, j) - from.at(3, j)) * alpha;
 	}
-	return r;
+	return out;
 }
 
 } // namespace dice::hfe::render
