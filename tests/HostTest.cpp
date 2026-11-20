@@ -2396,10 +2396,12 @@ TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
 	}
 	CHECK(round.mapSpottedPlayers(a).empty());
 	CHECK(round.squadReportedPlayers(a).empty());
-	// Kind 1 (a bot's firing report) marks no enemy; a teammate isn't listed.
+	// Kind 1 (a bot's firing report) marks no enemy on the minimap but reveals
+	// his name tag; a teammate isn't listed.
 	round.reportBattlefieldObjects(a, {b}, 3, 1);
 	round.reportBattlefieldObjects(a, {c});
 	CHECK(round.mapSpottedPlayers(a).empty());
+	CHECK(round.squadReportedPlayers(a) == enemy && round.squadReportedPlayers(c).empty());
 	// A radio spot: the whole team for 12 s, not the enemy's team.
 	round.radioSpot(a, b);
 	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c) == enemy);

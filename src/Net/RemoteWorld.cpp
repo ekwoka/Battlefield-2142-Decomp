@@ -569,13 +569,15 @@ bool RemoteWorld::apply(const GameEvent& event)
 			const int id = static_cast<int>(event.values[4 + i]);
 			const auto p = m_players.find(id);
 			const bool enemy = kind == 0 && (p == m_players.end() || p->second.team != ourTeam);
+			// Every listed player's name tag is revealed (slot 0x20 ->
+			// 0x100f2080, any kind); kind 1 sets now + the seconds.
+			uint32_t& reported = m_squadReports[id];
+			reported = kind == 0 ? std::max(reported, m_tick + ticks) : m_tick + ticks;
 			if (!enemy) {
 				continue;
 			}
 			uint32_t& until = m_radar[id];
 			until = std::max(until, m_tick + ticks);
-			uint32_t& reported = m_squadReports[id];
-			reported = std::max(reported, m_tick + ticks);
 			if (p != m_players.end() && p->second.alive && p->second.vehicleGhost && seconds > 5) {
 				SpottedInfo spot;
 				spot.spotted = p->second.vehicleGhost;

@@ -567,9 +567,30 @@ TEST(Nametags_JoinedWorld)
 		}
 	}
 	CHECK(greenest > 0.5f);
+	// Cloaked (vt+0x114), the revealed enemy loses the diamond but keeps the
+	// kit icon for a networkableHudShowKit squad: 0x101691c0 has no cloak test.
+	templates.registerType(6, "Kit");
+	templates.registerType(7, "ItemContainer");
+	templates.create("ItemContainer", "net_kit")->settings()["ability.networkableHudShowKit"] = "1";
+	templates.create("Kit", "net_assault_kit")->children().push_back({"net_kit", {}, {}});
+	templates.registerType(2, "SpawnPoint");
+	objects.create(templates.create("SpawnPoint", "behind_spawn"), {0, 0, -30}); // the round's own local soldier, out of view
+	const int self = round.addPlayer("Cmdr", 1, true);
+	CHECK(self == me.id);
+	round.setKit(self, "net_assault_kit", "pac_light_soldier");
+	round.setUnlocks(self, {"net_kit"});
+	CHECK(round.spawnSoldier(self));
+	icons.icons[0x50 + 1] = {"assault-kit.dds", 0, 0, 1, 1, 16, 16}; // ICObject + KitType Assault
+	joined.players.back().kit = assaultKit;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	CHECK(diamond() != nullptr && hasTexture(quads, "assault-kit.dds"));
+	joined.players.back().cloaked = true;
+	quads = tags.frame(round, objects, view, 1 / 30.0f);
+	CHECK(diamond() == nullptr && hasTexture(quads, "assault-kit.dds"));
+	joined.players.back().cloaked = false;
 	joined.reported.clear();
 	quads = tags.frame(round, objects, view, 1 / 30.0f);
-	CHECK(diamond() == nullptr);
+	CHECK(diamond() == nullptr && !hasTexture(quads, "assault-kit.dds"));
 }
 
 // An object tag's refresh (0x100f40d0): below healthActivationLevel (the

@@ -9585,11 +9585,18 @@ second.
   (ability `+0x10`, the squad's walk; the player alone without a squad) the
   kit's ICObject + KitType on foot, with `networkableHudShowVehicle`
   (`+0x11`) the vehicle's icon aboard (`GameWorld::squadNetworkHud`,
-  `nametags::networkSquadIcon`). Not ported: the decoy's bounding-radius
-  raise, decoys and the squad's unlocks on a joined client (its rounds
-  carry no thrower, its players no abilities), and a kind-1 (cloak) report's
-  reveal, which shows the kit icon (that pass has no cloak test) for a
-  `networkableHudShowCloaked` squad.
+  `nametags::networkSquadIcon`). A kind-1 report reveals too (`0x00508590`
+  calls slot `0x20` for any kind, the enemy flag clear; `0x100f2080` sets
+  the end to now + its seconds, even if sooner): a squad bot's firing
+  report (AIDLL `0x1009a1d0` 30 s on firing, `0x1009a2a0` 3 s on release)
+  and a cloak's for a `networkableHudShowCloaked` squad
+  (`GameWorld::m_tagReveals`, not the minimap). The diamond skips a cloaked
+  player (vt+0x114, `0x10169c13`) but the kit pass doesn't, so a revealed
+  cloaked enemy shows his kit icon; the port keeps a cloaked player's name
+  hidden (retail's name pass has no cloak test; what hides it there isn't
+  traced). Not ported: the decoy's bounding-radius raise, and decoys and
+  the squad's unlocks on a joined client (its rounds carry no thrower, its
+  players no abilities).
 - **The players' icons** (the selectable pass `0x1016a950`, same team,
   selectable, the first occupant of a vehicle `0x100f33c0`): setup initially
   clears show-icon bit `0x10` (`0x100f3e70`), then player-tag refresh

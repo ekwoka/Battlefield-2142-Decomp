@@ -4210,6 +4210,44 @@ TEST(GameWorld_SquadNetworkHudUnlocks)
 	CHECK(showKit && !showVehicle); // the squad's
 }
 
+// A cloak's report (kind 2) reveals the cloaker's name tag to a squad only
+// when one of it has networkableHudShowCloaked (sent on as kind 1, else to
+// no one), never on the minimap; a kind-1 report ends at now + its seconds
+// even when sooner (0x100f2080: a bot's 30 s on firing, 3 s on release).
+TEST(GameWorld_CloakReportRevealsTagsForShowCloakedSquads)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.create("ItemContainer", "net_cloak")->settings()["ability.networkableHudShowCloaked"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"net_cloak", {}, {}});
+	const int me = range.world->addPlayer("Me", 2, true);
+	const int mate = range.world->addPlayer("Mate", 2, false);
+	const int loner = range.world->addPlayer("Loner", 2, false);
+	const int enemy = range.world->addPlayer("Enemy", 1, false);
+	for (const int id : {me, mate, loner, enemy}) {
+		range.world->setKit(id, "EU_Assault", "us_light_soldier");
+		range.world->setUnlocks(id, id == mate ? std::vector<std::string> {"net_cloak"} : std::vector<std::string> {});
+		CHECK(range.world->spawnSoldier(id));
+	}
+	CHECK(range.world->joinSquad(me, 1) && range.world->joinSquad(mate, 1) && range.world->joinSquad(loner, 2));
+	const std::vector<int> cloaker {enemy};
+	range.world->reportBattlefieldObjects(loner, {enemy}, 3, 2);
+	CHECK(range.world->squadReportedPlayers(loner).empty()); // no ShowCloaked in squad 2
+	range.world->reportBattlefieldObjects(me, {enemy}, 3, 2);
+	CHECK(range.world->squadReportedPlayers(me) == cloaker && range.world->squadReportedPlayers(mate) == cloaker);
+	CHECK(range.world->squadReportedPlayers(loner).empty() && range.world->mapSpottedPlayers(me).empty());
+	// 30 s then 3 s: gone 3 s later.
+	range.world->reportBattlefieldObjects(mate, {enemy}, 30, 1);
+	range.world->reportBattlefieldObjects(mate, {enemy}, 3, 1);
+	for (int i = 0; i < 4 * 30; ++i) {
+		range.world->tick(1.0f / 30);
+	}
+	CHECK(range.world->squadReportedPlayers(me).empty());
+}
+
 TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 {
 	Range range;

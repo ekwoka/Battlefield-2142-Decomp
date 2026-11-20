@@ -16475,17 +16475,41 @@ void GameWorld::reportBattlefieldObjects(int reporter, const std::vector<int>& p
 	// among them; a cloak (kind 2) goes on as kind 1 when one of them has
 	// networkableHudShowCloaked, else to no one; only kind 0 marks enemies
 	// (so a cloak's never does), and one alive in a vehicle has the vehicle
-	// listed too over 5 s.
+	// listed too over 5 s. Kind 1 reveals the name tags only (m_tagReveals).
 	pruneMapSpots();
-	if (kind != 0) {
-		return;
-	}
 	int reveal = static_cast<int>(std::lround(seconds));
+	bool showCloaked = false;
 	for (const auto& owned : m_players) {
 		const Player& p = *owned;
 		if (p.team == from->team && (from->squad == 0 ? p.id == reporter : p.squad == from->squad)) {
 			reveal = std::max(reveal, p.hudRevealTime);
+			showCloaked = showCloaked || p.hudShowCloaked;
 		}
+	}
+	if (kind == 2 && showCloaked) {
+		kind = 1;
+	}
+	if (kind == 1) {
+		for (const int id : players) {
+			const Player* player = findPlayer(id);
+			if (!player || player->team == from->team) {
+				continue;
+			}
+			const MapSpot spot {from->team, from->squad, reporter, id, 0, m_time + reveal};
+			auto same = std::find_if(m_tagReveals.begin(), m_tagReveals.end(), [&](const MapSpot& s) {
+				return s.team == spot.team && s.squad == spot.squad && s.enemy == id
+					&& (s.squad != 0 || s.reporter == reporter);
+			});
+			if (same != m_tagReveals.end()) {
+				*same = spot; // 0x100f2080: now + the seconds, even if sooner
+			} else if (m_tagReveals.size() < kMapSpotLimit) {
+				m_tagReveals.push_back(spot);
+			}
+		}
+		return;
+	}
+	if (kind != 0) {
+		return;
 	}
 	for (const int id : players) {
 		const Player* player = findPlayer(id);
@@ -16515,6 +16539,9 @@ void GameWorld::pruneMapSpots()
 	m_mapSpots.erase(std::remove_if(m_mapSpots.begin(), m_mapSpots.end(),
 						 [this](const MapSpot& s) { return s.until <= m_time; }),
 		m_mapSpots.end());
+	m_tagReveals.erase(std::remove_if(m_tagReveals.begin(), m_tagReveals.end(),
+						   [this](const MapSpot& s) { return s.until <= m_time; }),
+		m_tagReveals.end());
 }
 
 // One entry per list and object, as each minimap's list is (0x00790d60
@@ -16568,11 +16595,13 @@ std::vector<int> GameWorld::mapSpottedPlayers(int viewer) const
 std::vector<int> GameWorld::squadReportedPlayers(int viewer) const
 {
 	std::vector<int> out;
-	for (const MapSpot& spot : m_mapSpots) {
-		// A squad report's entry has its squad (0: the reporter alone); a radio spot's -1.
-		if (spot.squad >= 0 && spot.enemy >= 0 && mapSpotSeenBy(spot, viewer)
-			&& std::find(out.begin(), out.end(), spot.enemy) == out.end()) {
-			out.push_back(spot.enemy);
+	for (const auto* list : {&m_mapSpots, &m_tagReveals}) {
+		for (const MapSpot& spot : *list) {
+			// A squad report's entry has its squad (0: the reporter alone); a radio spot's -1.
+			if (spot.squad >= 0 && spot.enemy >= 0 && mapSpotSeenBy(spot, viewer)
+				&& std::find(out.begin(), out.end(), spot.enemy) == out.end()) {
+				out.push_back(spot.enemy);
+			}
 		}
 	}
 	return out;

@@ -4506,6 +4506,11 @@ private:
 		double until = 0;
 	};
 	std::vector<MapSpot> m_mapSpots;
+	// The squad reports that reveal name tags only, not the minimap (kind 1:
+	// a squad bot's firing report, a cloak's for a networkableHudShowCloaked
+	// squad; 0x00508590 passes them to the NametagManager's slot 0x20 with
+	// the enemy flag clear): squadReportedPlayers.
+	std::vector<MapSpot> m_tagReveals;
 	static constexpr size_t kMapSpotLimit = 64; // port bound (addMapSpot)
 	void addMapSpot(const MapSpot& spot, bool refresh);
 	void pruneMapSpots();

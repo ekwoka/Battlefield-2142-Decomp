@@ -7374,8 +7374,10 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	// down and comes up (AIDLL 0x1009a1d0, 0x1009a2a0 -> IAIGame vt+0x6c ->
 	// BF2142.exe 0x008958a0: event 0x41, type 1; 30 s and 3 s on the
 	// squad's minimap, whose type 1 carries no enemy flag: 0x00508590).
+	// Down sends 30 s (0x1009a26a), up 3 s (0x1009a2f7): the target's name
+	// tag stays revealed while the bot fires and 3 s after.
 	if (self.squad != 0 && input.fire != bot.reportedFiring) {
-		m_world.reportBattlefieldObjects(self.id, {bot.target}, 3, 1);
+		m_world.reportBattlefieldObjects(self.id, {bot.target}, input.fire ? 30.0f : 3.0f, 1);
 	}
 	bot.reportedFiring = input.fire;
 	// The AI deviation on each round (BF2142.exe 0x00892b70).

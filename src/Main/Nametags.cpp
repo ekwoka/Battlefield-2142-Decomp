@@ -1263,7 +1263,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		}
 		Tag tag = m_players.count(p.id) ? m_players[p.id] : Tag {};
 		const world::Object* body = objects.find(p.vehicle ? p.vehicle : p.soldier);
-		if (!body || p.cloaked) {
+		if (!body) {
 			continue;
 		}
 		const float dx = p.position.x - eye.x, dz = p.position.z - eye.z;
@@ -1315,7 +1315,9 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		const bool calling = tag.callIcon >= 0 && in.friendly;
 		const int helper = in.friendly ? helperIcon(m_calls, kitAbilities(kitTypeOf(p.kit))) : -1;
 		const bool specialIcon = calling || helper >= 0;
-		const float alpha = playerTagAlpha(m_settings, in, tag.fade, seconds);
+		// shortcut: a cloaked player's name and bars stay hidden; retail's bar pass tests the
+		// cloak (0x1016c47e) but its name pass doesn't, and what hides that name isn't traced.
+		const float alpha = p.cloaked ? 0.0f : playerTagAlpha(m_settings, in, tag.fade, seconds);
 		seen[p.id] = tag;
 		// The first occupant only speaks for a vehicle (0x100f33c0, bit
 		// 0x10000).
@@ -1368,11 +1370,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				c[k] = kColours[own][k] + (kColours[second][k] - kColours[own][k]) * cross;
 			}
 			c[3] = markerAlpha;
-			if (icon && project(view, iconAt, mx, my, false, 0)) {
+			// The diamond skips a cloaked player (0x10169c13, vt+0x114).
+			if (icon && !p.cloaked && project(view, iconAt, mx, my, false, 0)) {
 				markers.push_back(iconQuad(*icon, mx, my, c));
 			}
 			// The squad's kit or vehicle icon (0x101691c0): the same gates, one
-			// icon height over the text point.
+			// icon height over the text point, but no cloak test, so a revealed
+			// cloaked enemy shows his kit.
 			int kitType = -1, vehicleIcon = -1;
 			if (const world::Object* v = p.vehicle ? objects.find(p.vehicle) : nullptr) {
 				vehicleIcon = tagTemplate(v->objectTemplate()).vehicleIcon;
