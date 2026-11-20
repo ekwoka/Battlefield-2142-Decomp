@@ -128,14 +128,16 @@ bool RadioSpamGate::spot(bool commander)
 int ReviveCalls::step(int player, uint32_t soldier, bool down, bool fire, bool sends)
 {
 	State& s = m_players[player];
-	if (s.soldier != soldier) {
+	// Down, the player's soldier reads 0 (PlayerInfo::soldier is the living
+	// one's): the calls stay with the last soldier seen.
+	if (soldier && s.soldier != soldier) {
 		s = State {soldier};
 	}
 	const bool wentDown = down && !s.down;
 	const bool pressed = fire && !s.fire; // 0x00645720: 7 only on a fresh press
 	s.down = down;
 	s.fire = fire;
-	if (!sends || !soldier) {
+	if (!sends || !s.soldier) {
 		return 0;
 	}
 	if (wentDown) {

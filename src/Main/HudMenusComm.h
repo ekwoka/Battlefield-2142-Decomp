@@ -229,7 +229,7 @@ private:
 // resets +0x330 otherwise is untraced).
 class ReviveCalls {
 public:
-	// A look at `player` (its soldier, man down or not, the fire held;
+	// A look at `player` (its living soldier, 0 while down; man down or not, the fire held;
 	// `sends`: this game says his calls). The call to make, 0 none.
 	int step(int player, uint32_t soldier, bool down, bool fire, bool sends);
 	void clear() { m_players.clear(); } // a new round: its object handles count from 1 again

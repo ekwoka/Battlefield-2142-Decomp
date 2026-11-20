@@ -1599,21 +1599,24 @@ TEST(HudVehicle_HorizonAndClimb)
 // soldier counts again.
 TEST(Radio_ReviveCalls)
 {
+	// Down, PlayerInfo::soldier reads 0 (the player isn't alive): the
+	// soldier seen before is the one calling.
 	menu::ReviveCalls calls;
 	CHECK(calls.step(1, 10, false, false, true) == 0);
-	CHECK(calls.step(1, 10, true, true, true) == 0x37); // goes down holding fire: the automatic call
-	CHECK(calls.step(1, 10, true, true, true) == 0);    // still held: no fresh press
-	CHECK(calls.step(1, 10, true, false, true) == 0);
+	CHECK(calls.step(1, 0, true, true, true) == 0x37); // goes down holding fire: the automatic call
+	CHECK(calls.step(1, 0, true, true, true) == 0);    // still held: no fresh press
+	CHECK(calls.step(1, 0, true, false, true) == 0);
 	int manual = 0;
 	for (int i = 0; i < 5; ++i) {
-		manual += calls.step(1, 10, true, true, true) == 0x36;
-		calls.step(1, 10, true, false, true);
+		manual += calls.step(1, 0, true, true, true) == 0x36;
+		calls.step(1, 0, true, false, true);
 	}
 	CHECK(manual == 3);
 	calls.step(1, 10, false, false, true); // revived
-	CHECK(calls.step(1, 10, true, false, true) == 0); // down again, calls made: no automatic one
+	CHECK(calls.step(1, 0, true, false, true) == 0); // down again, calls made: no automatic one
+	calls.step(1, 0, false, false, true);            // dead
 	CHECK(calls.step(1, 11, false, false, true) == 0); // a new soldier
-	CHECK(calls.step(1, 11, true, false, true) == 0x37);
+	CHECK(calls.step(1, 0, true, false, true) == 0x37);
 	CHECK(calls.step(2, 20, false, false, false) == 0); // another game's player
 	CHECK(calls.step(2, 20, true, true, false) == 0);
 	CHECK(calls.step(3, 0, true, false, true) == 0); // no soldier
@@ -2624,6 +2627,24 @@ TEST(HudMenus_TitanUplinkState)
 	u.update(1.0f, false, 0.0f);
 	u.update(1.0f, false, 0.0f);
 	CHECK(!u.showLost); // 1 - 3 x 0.5 is below 0
+}
+
+TEST(HudMenus_HitDirectionArrow)
+{
+	menu::HitDirectionHud h;
+	h.update(0.033f, 4, 0, 0); // the first look takes the count as it is
+	CHECK(!h.show);
+	h.update(0.033f, 5, 1.5707964f, 0); // hit from +x (east) while facing north: the right
+	CHECK(h.show && std::fabs(h.angle - 90) < 0.01f);
+	h.update(0.05f, 5, 1.5707964f, 90); // turned to face it: up, recomputed while shown
+	CHECK(h.show && std::fabs(h.angle) < 0.01f);
+	h.update(0.05f, 5, 1.5707964f, 90);
+	h.update(0.05f, 5, 1.5707964f, 90); // 0.1 s spent: the flag drops, the fade is the node's
+	CHECK(!h.show);
+	h.update(0.05f, 5, 1.5707964f, 180); // held after
+	CHECK(!h.show && std::fabs(h.angle) < 0.01f);
+	h.update(0.05f, 6, -3.1415927f, 0); // from behind
+	CHECK(h.show && std::fabs(std::fabs(h.angle) - 180) < 0.01f);
 }
 
 TEST(HudMenus_MiddleTicketsShownForTitanArmourNotConquestTickets)

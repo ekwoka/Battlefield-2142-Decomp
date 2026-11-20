@@ -1985,6 +1985,16 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else {
 		g_weaponHud.hide(hud);
 	}
+	// The hit direction arrow (HitDirectionHud: HUD event 0x39 per hit
+	// taken, 0x00449d80 each frame with the view's heading).
+	{
+		static dice::hfe::menu::HitDirectionHud arrow;
+		game::GameWorld::PlayerInfo self;
+		const bool known = world.playerInfo(world.localPlayer(), self);
+		arrow.update(dt, known ? self.hitDirectionHits : arrow.hits, self.hitDirection, viewHeading.value_or(self.yaw));
+		hud.set("HitDirectionShow", arrow.show ? 1 : 0);
+		hud.set("HitDirectionAngle", arrow.angle);
+	}
 	// The hit indicator (0x007be6e0): with the crosshair shown, its alpha
 	// the local player's (slot 0x90, +0x2a4), shown while not 0.
 	if (hud.number("CrosshairIconShow") != 0) {
@@ -7524,6 +7534,9 @@ int runGame(Options& options, Session& session)
 				// slot 0x20c(1), the alpha to 1).
 				if (state && state->hasOwn && state->own.hitIndicator && remoteHud) {
 					remoteHud->hitIndicator = 1;
+				}
+				if (state && state->hasOwn && remoteHud) {
+					remoteHud->ownHitDirection(state->own.hasHitDirection, state->own.hitDirection);
 				}
 				if (state && record.vehicle != 0 && !state->groups.empty()
 					&& state->groups.front().kind == net::NetworkableKind::SimpleObject) {
