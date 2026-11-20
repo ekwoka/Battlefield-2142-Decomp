@@ -10576,6 +10576,9 @@ int runGame(Options& options, Session& session)
 					view.fovY = eye.fovY;
 					view.eyeRoll = eye.roll;
 					view.soldierEye = eye.soldierEye; // its look is already the frame's (remoteLook)
+					view.eyeCarrierYaw = eye.carrierYaw;
+					view.eyeHeight = eye.eyeHeight;
+					view.eyeTarget = eye.eyeTarget;
 				}
 				return true;
 			};
@@ -10934,6 +10937,9 @@ int runGame(Options& options, Session& session)
 					view.fovY = eye.fovY;
 					view.eyeRoll = eye.roll;
 					view.soldierEye = eye.soldierEye;
+					view.eyeCarrierYaw = eye.carrierYaw;
+					view.eyeHeight = eye.eyeHeight;
+					view.eyeTarget = eye.eyeTarget;
 					if (eye.soldierEye) {
 						round.pendingLook(view.lookTurn, view.lookPitch);
 					}

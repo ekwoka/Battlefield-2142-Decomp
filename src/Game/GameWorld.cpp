@@ -9206,7 +9206,26 @@ bool GameWorld::seatedSoldierView(int id, LadderView& view)
 	view.position = body->body.position + body->body.rotation.transform(mount.place(seat.position));
 	view.yaw = rotation.yawPitchRoll().x;
 	view.pitch = std::clamp(player->input.aimPitch + (passengerWeapon(seat) ? player->aimKickPitch : 0.0f), -85.0f, 85.0f);
+	view.lookYaw = player->seatBodyYaw + player->seatTwist;
 	return true;
+}
+
+void GameWorld::pendingLook(float& turn, float& pitch)
+{
+	turn = m_playerInput.turn;
+	pitch = m_player ? m_playerInput.aimPitch - m_player->input.aimPitch : 0.0f;
+	const Body* body = m_player && m_player->alive && m_player->vehicle ? findBody(m_player->vehicle) : nullptr;
+	const world::Object* vehicleObject = body ? m_objects.find(body->object) : nullptr;
+	if (!vehicleObject || !vehicleObject->objectTemplate() || m_player->seat < 0) {
+		return;
+	}
+	const VehicleLayout& layout = vehicleLayout(*vehicleObject->objectTemplate());
+	if (static_cast<size_t>(m_player->seat) >= layout.seats.size()) {
+		return;
+	}
+	const SeatLayout& seat = layout.seats[static_cast<size_t>(m_player->seat)];
+	turn = seatedLookPreview(m_player->seatTwist, turn, m_player->seatBodyYaw, std::min(seat.leftLimit, seat.rightLimit),
+		std::max(seat.leftLimit, seat.rightLimit));
 }
 
 void GameWorld::poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds)

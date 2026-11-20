@@ -520,6 +520,16 @@ private:
 		mutable std::vector<anim::Matrix> previousPose;
 		mutable unsigned previousFrame = ~0u;
 		std::vector<Mat4> partsTicked, partsPrevious; // the parts at the last two ticks (TickBlend.h)
+		std::vector<uint8_t> partsBlended; // which of them retail blends (blendsBetweenTicks), by part
+		// Each template child's local matrix (in its parent) at the last two
+		// ticks, in the order collectParts walks them.
+		std::vector<Mat4> nodesTicked, nodesPrevious;
+	};
+	// The children's blend while collectParts walks them (0x0043ef30).
+	struct NodeTickBlend {
+		Instance& instance;
+		TickBlend blend;
+		size_t next = 0;
 	};
 	// What the world pass draws of an instance this frame.
 	struct DrawItem {
@@ -608,7 +618,7 @@ private:
 	};
 	void collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& relative,
 		std::vector<Mat4>& parts, int depth, uint32_t object = 0,
-		std::vector<AnimatedUVPart>* animated = nullptr) const;
+		std::vector<AnimatedUVPart>* animated = nullptr, NodeTickBlend* tick = nullptr) const;
 	// A template's animatedUV* and Spring rotateUV values, read once.
 	struct AnimatedUVLook {
 		AnimatedUVSettings settings;

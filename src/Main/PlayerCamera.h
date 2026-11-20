@@ -163,6 +163,9 @@ public:
 		// The soldier's own camera (on foot, under a parachute): retail turns
 		// it with the look every frame (0x0043f170's local player, 0x0058b5e0).
 		bool soldierEye = false;
+		float carrierYaw = 0; // radians: the part of yaw its seat gives (drawn blended), 0 on foot
+		float eyeHeight = 0;  // the eye over the soldier at the tick
+		float eyeTarget = 0;  // the pose's height it eases towards
 	};
 	bool view(View& view, float aspect) const;
 	// Local map direction in any vehicle seat with a first-person camera, in degrees.
@@ -372,6 +375,7 @@ private:
 	game::Random m_random {0x759dc150};
 
 	anim::EyeHeight m_eye;
+	int m_eyePose = 0; // the last tick's pose for the eye
 	anim::ZoomState m_zoom;
 	anim::FieldOfView m_fov;
 	// The seat's gun's zoom (seatZoomLevel): the gun it was loaded for.

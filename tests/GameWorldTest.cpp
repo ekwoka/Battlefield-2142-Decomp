@@ -591,6 +591,18 @@ TEST(GameWorld_PendingLookIsWhatTheNextTickTakes)
 	CHECK(turn == 0 && pitch == 0);
 }
 
+// Seated, the frame's look passes the 40-degree twist only while the body
+// can take the rest within the seat's limits, else it stops at 40 (0x005890a0).
+TEST(GameWorld_SeatedLookPreviewKeepsTheSeatLimits)
+{
+	using game::GameWorld;
+	CHECK(GameWorld::seatedLookPreview(10, 20, 0, -90, 90) == 20);  // within the twist
+	CHECK(GameWorld::seatedLookPreview(30, 20, 0, -90, 90) == 20);  // 50: the body can take 10
+	CHECK(GameWorld::seatedLookPreview(30, 20, 25, -15, 30) == 10); // 50 + 25 past 30: stops at 40
+	CHECK(GameWorld::seatedLookPreview(-30, -20, -10, -15, 30) == -10);
+	CHECK(GameWorld::seatedLookPreview(-30, -20, 0, -15, 30) == -20); // -10 within -15
+}
+
 TEST(GameWorld_InitialDeploymentJoinsWithoutDeathThenSpawnsAtChoice)
 {
 	Range range;

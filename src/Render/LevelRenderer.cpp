@@ -1040,9 +1040,44 @@ const LevelRenderer::AnimatedUVLook& LevelRenderer::animatedUVLook(const world::
 	return m_animatedUVLooks.emplace(&objectTemplate, look).first->second;
 }
 
+// Which children retail draws between ticks (0x0043dc40): a soldier, a
+// RotationalBundle (0x947d) or one of its kinds (their slot 0x4c answers
+// 0x947d through 0x00613bc0: Camera, Engine, FloatingBundle, Wing,
+// LandingGear; Rotor and Spring don't), a part on a bone (boneIndex,
+// template slot 0xc8, not -1) or a free camera. The others keep their
+// tick's place in their (blended) parent.
+static bool blendsBetweenTicks(const world::ObjectTemplate& t)
+{
+	static const char* const kTypes[] = {"Soldier", "RotationalBundle", "Camera", "Engine", "FloatingBundle", "Wing",
+		"LandingGear", "FreeCamera"};
+	const std::string& type = t.typeName();
+	if (std::find(std::begin(kTypes), std::end(kTypes), type) != std::end(kTypes)) {
+		return true;
+	}
+	const auto bone = t.settings().find("boneIndex");
+	return bone != t.settings().end() && std::atoi(bone->second.c_str()) >= 0;
+}
+
+static void markBlendedParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
+	std::vector<uint8_t>& blended, int depth)
+{
+	for (const world::ChildTemplate& child : objectTemplate.children()) {
+		const world::ObjectTemplate* t = depth < 8 ? sources.templates.find(child.name) : nullptr;
+		if (!t) {
+			continue;
+		}
+		const auto part = t->settings().find("geometryPart");
+		const int index = part != t->settings().end() ? std::atoi(part->second.c_str()) : -1;
+		if (index > 0 && static_cast<size_t>(index) < blended.size()) {
+			blended[static_cast<size_t>(index)] = blendsBetweenTicks(*t);
+		}
+		markBlendedParts(sources, *t, blended, depth + 1);
+	}
+}
+
 void LevelRenderer::collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
 	const Mat4& relative, std::vector<Mat4>& parts, int depth, uint32_t object,
-	std::vector<AnimatedUVPart>* animated) const
+	std::vector<AnimatedUVPart>* animated, NodeTickBlend* tick) const
 {
 	if (depth > 8) {
 		return;
@@ -1052,15 +1087,13 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 		if (!childTemplate) {
 			continue;
 		}
-		Mat4 local = objectTransform(child.position, child.rotation) * relative;
+		Mat4 node = objectTransform(child.position, child.rotation); // in its parent
 		world::Vec3 offset, rotation;
 		anim::Matrix bone;
 		if (object != 0 && sources.partBone && sources.partBone(object, child.name, bone)) {
 			// boneIndex (0x0063d470 -> the part's slot 0xe8): the bone's
 			// local matrix is the part's.
-			Mat4 boned;
-			std::copy(bone.begin(), bone.end(), boned.m.begin());
-			local = boned * relative;
+			std::copy(bone.begin(), bone.end(), node.m.begin());
 		} else if (object != 0 && sources.partPose && sources.partPose(object, child.name, offset, rotation)) {
 			// A Spring with rotateUV keeps its mesh unturned: 0x006cace0
 			// and 0x006b7261 skip the set rotation (0x00614b50); its
@@ -1068,8 +1101,26 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 			if (animatedUVLook(*childTemplate).rotateUV && childTemplate->typeName() == "Spring") {
 				rotation = {};
 			}
-			local = objectTransform(offset, rotation) * local;
+			node = objectTransform(offset, rotation) * node;
 		}
+		if (tick) {
+			// Its local matrix between the last two ticks, in its parent as
+			// drawn (0x0043ef30 on the children: slot 0xe4 / 0xe8).
+			std::vector<Mat4>& ticked = tick->instance.nodesTicked;
+			std::vector<Mat4>& previous = tick->instance.nodesPrevious;
+			const size_t i = tick->next++;
+			if (i >= ticked.size()) {
+				ticked.resize(i + 1, node);
+				previous.resize(i + 1, node);
+			} else if (tick->blend.ticked) {
+				previous[i] = ticked[i];
+			}
+			ticked[i] = node;
+			if (blendsBetweenTicks(*childTemplate)) {
+				node = blendTransform(previous[i], ticked[i], tick->blend.alpha);
+			}
+		}
+		const Mat4 local = node * relative;
 		if (animated) {
 			const AnimatedUVLook& look = animatedUVLook(*childTemplate);
 			if (look.settings.any()) {
@@ -1083,7 +1134,7 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 				parts[static_cast<size_t>(index)] = local;
 			}
 		}
-		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated);
+		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated, tick);
 	}
 }
 
@@ -2140,16 +2191,25 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
 			: blendTransform(o.previous, o.current, blend.alpha);
 	}
-	// A part's transform between its last two ticks, as its object's.
-	const auto blendParts = [&blend](Instance& instance) {
+	// Parts the game places itself, in their object: between their last two
+	// ticks when retail would blend them (blendsBetweenTicks).
+	// shortcut: flat, so a part under a blended parent keeps the tick's place; walk the parents if one shows.
+	const auto blendParts = [this, &blend](Instance& instance) {
 		if (instance.partsTicked.size() != instance.parts.size()) {
 			instance.partsTicked = instance.partsPrevious = instance.parts;
+			instance.partsBlended.assign(instance.parts.size(), 1);
+			if (instance.partsTemplate) {
+				std::fill(instance.partsBlended.begin(), instance.partsBlended.end(), 0);
+				markBlendedParts(*m_sources, *instance.partsTemplate, instance.partsBlended, 0);
+			}
 		} else if (blend.ticked) {
 			instance.partsPrevious.swap(instance.partsTicked);
 		}
 		instance.partsTicked = instance.parts;
 		for (size_t i = 0; i < instance.parts.size(); ++i) {
-			instance.parts[i] = blendTransform(instance.partsPrevious[i], instance.partsTicked[i], blend.alpha);
+			if (instance.partsBlended[i]) {
+				instance.parts[i] = blendTransform(instance.partsPrevious[i], instance.partsTicked[i], blend.alpha);
+			}
 		}
 	};
 	// Move instances with their objects.
@@ -2256,9 +2316,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		if (instance.partsTemplate && m_sources->partPose) {
 			std::fill(instance.parts.begin(), instance.parts.end(), Mat4 {});
 			m_animatedUVParts.clear();
+			NodeTickBlend tick {instance, blend};
 			collectParts(*m_sources, *instance.partsTemplate, Mat4 {}, instance.parts, 0, instance.object,
-				&m_animatedUVParts);
-			blendParts(instance);
+				&m_animatedUVParts, &tick);
 			// The parts' animated UVs (0x0063b9b0, each object update): the
 			// distance each moved along its own z axis in the world.
 			instance.animatedUV = !m_animatedUVParts.empty();

@@ -2272,10 +2272,20 @@ public:
 	// once: each frame adds the mouse's move to the soldier's +0x27c / +0x274
 	// and places the camera (0x0058b5e0 -> 0x005890a0), the tick clears them
 	// and turns by its whole input (0x0058a788).
-	void pendingLook(float& turn, float& pitch) const
+	// Seated, 0x005890a0 lets the twist with the turn pass 40 degrees only
+	// while the rest keeps the body within the seat's limits, else stops
+	// it at 40.
+	void pendingLook(float& turn, float& pitch);
+	static float seatedLookPreview(float twist, float turn, float bodyYaw, float low, float high)
 	{
-		turn = m_playerInput.turn;
-		pitch = m_player ? m_playerInput.aimPitch - m_player->input.aimPitch : 0.0f;
+		constexpr float kTwist = 40; // *0x00a68eb0
+		float look = twist + turn;
+		if (look > kTwist && look - kTwist + bodyYaw > high) {
+			look = kTwist;
+		} else if (look < -kTwist && look + kTwist + bodyYaw < low) {
+			look = -kTwist;
+		}
+		return look - twist;
 	}
 	// Titan mode (Titans.cpp; docs/engine.md, "Titans"). The Titan sync
 	// manager (0x005628f0, ECPhysicsETitanSync: set up by 0x00561c00, run by
@@ -2437,6 +2447,7 @@ public:
 	struct LadderView {
 		physics::Vec3 position;
 		float yaw = 0, pitch = 0; // degrees (pitch up positive)
+		float lookYaw = 0; // seated: the soldier's own turn in it (body + twist), the rest the seat's
 	};
 	bool ladderView(int player, LadderView& view) const;
 	// The seated soldier's own camera (the SoldierCamera, 0x005890a0),

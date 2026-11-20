@@ -103,6 +103,8 @@ struct ViewerOptions {
 		// the next tick will take (degrees: the turn, the pitch's change).
 		bool soldierEye = false;
 		float lookTurn = 0, lookPitch = 0;
+		float eyeCarrierYaw = 0; // radians: the seat's share of eyeYaw (PlayerCamera::View::carrierYaw)
+		float eyeHeight = 0, eyeTarget = 0; // the eye over the soldier and its pose's (PlayerCamera::View)
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	std::function<bool(PlayerView&)> playerView; // false without a player
