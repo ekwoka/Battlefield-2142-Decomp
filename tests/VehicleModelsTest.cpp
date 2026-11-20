@@ -2229,6 +2229,56 @@ TEST(Vehicles_GunshipMissileCamera)
 	gunshipMissileCamera(false);
 }
 
+// The position keys against a bot (0x004bda00): the player's key for the
+// bot's seat swaps them, the bot getting the player's old seat; a bot's key
+// for the player's seat, or the player's own while firing, changes nothing.
+TEST(Vehicles_PositionKeySwapsBotOut)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir(), "mods/bf2142");
+	CHECK(g.loaded);
+	if (!g.loaded) return;
+	const uint32_t v = g.start("eu_tank", {0, 4, 6});
+	CHECK(g.enter(v));
+	const int me = g.world->localPlayer();
+	game::GameWorld::PlayerInfo mine, bots;
+	CHECK(g.world->playerInfo(me, mine) && mine.vehicle == v && mine.seat == 0);
+	const int bot = g.world->addPlayer("SwapBot", 2, true);
+	CHECK(g.world->spawnSoldier(bot));
+	g.world->playerInfo(bot, bots);
+	const physics::Vec3 origin = g.position(v);
+	for (float radius = 0; radius <= 6 && bots.vehicle != v; radius += 1.5f) {
+		for (int k = 0; k < 8 && bots.vehicle != v; ++k) {
+			const float angle = k * 0.785398163f;
+			g.world->setSoldierPosition(bots.soldier, {origin.x + radius * std::sin(angle), origin.y - 1.0f,
+				origin.z + radius * std::cos(angle)});
+			game::SoldierInput use; use.use = true;
+			g.world->setInput(bot, use); g.world->tick(1 / 30.0f);
+			g.world->setInput(bot, {}); g.world->tick(1 / 30.0f);
+			g.world->playerInfo(bot, bots);
+		}
+	}
+	CHECK(bots.vehicle == v && bots.seat == 1);
+	if (bots.vehicle != v || bots.seat != 1) return;
+	const auto press = [&](int player, game::SoldierInput in) {
+		g.world->setInput(player, in); g.world->tick(1 / 30.0f);
+		g.world->setInput(player, {}); g.world->tick(1 / 30.0f);
+		g.world->playerInfo(me, mine);
+		g.world->playerInfo(bot, bots);
+	};
+	game::SoldierInput key; key.switchSeat = 1;
+	press(bot, key); // a bot asking for a taken seat: ignored
+	CHECK(mine.seat == 0 && bots.seat == 1);
+	key.switchSeat = 2; key.fire = true;
+	press(me, key); // mid-shot: refused
+	CHECK(mine.seat == 0 && bots.seat == 1);
+	key.fire = false;
+	press(me, key);
+	CHECK(mine.vehicle == v && mine.seat == 1 && bots.vehicle == v && bots.seat == 0);
+	const auto occupants = g.world->vehicleOccupants(v);
+	CHECK(occupants.size() >= 2 && occupants[0] == bot && occupants[1] == me);
+}
+
 // enhanced.guidedCameraEase: the camera drifts back to centre.
 TEST(Vehicles_GunshipMissileCameraEases)
 {

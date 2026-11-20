@@ -10948,9 +10948,8 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			rideParachute(player, *object, *body, seconds); // Parachutes.cpp
 			return;
 		} else {
-			// Changing seats (to a free one; 0x004bda00's position keys): both
-			// seats' allowTogglePosition (template +0x491, 1 by default; the
-			// Titans' and the pod arrays' 0) must allow it.
+			// Changing seats (0x004bda00's position keys, seatKey): allowTogglePosition
+			// is the template's +0x491, 1 by default.
 			const auto togglable = [&](int index) {
 				const world::Object* vehicleObject = m_objects.find(body->object);
 				if (!vehicleObject || !vehicleObject->objectTemplate()) {
@@ -10964,13 +10963,32 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 				return !seatTemplate || number(*seatTemplate, "allowTogglePosition", 1) != 0;
 			};
 			if (input.switchSeat > 0 && !player.switchHeld) {
-				const int wanted = input.switchSeat - 1;
-				if (wanted != player.seat && static_cast<size_t>(wanted) < body->occupants.size()
-					&& body->occupants[static_cast<size_t>(wanted)] < 0 && togglable(player.seat) && togglable(wanted)) {
-					if (player.seat == 0 && body->vehicle) {
+				SeatKeyInput key;
+				key.current = player.seat;
+				key.wanted = input.switchSeat - 1;
+				key.seats = body->occupants.size();
+				key.currentToggles = togglable(player.seat);
+				key.wantedToggles = togglable(key.wanted);
+				key.firing = input.fire;
+				key.requesterAi = player.ai;
+				if (key.wanted < static_cast<int>(key.seats)) {
+					key.occupant = body->occupants[static_cast<size_t>(key.wanted)];
+				}
+				Player* occupant = key.occupant >= 0 ? findPlayer(key.occupant) : nullptr;
+				key.occupantAi = occupant && occupant->ai;
+				const SeatKey outcome = seatKey(key);
+				if (outcome == SeatKey::Move || (outcome == SeatKey::Swap && occupant)) {
+					if ((player.seat == 0 || key.wanted == 0) && body->vehicle) {
 						body->vehicle->setInput({});
 					}
-					seatPlayer(player, *body, wanted);
+					const int old = player.seat;
+					if (outcome == SeatKey::Swap) {
+						occupant->seat = -1; // out of the wanted seat without clearing it (seatPlayer)
+					}
+					seatPlayer(player, *body, key.wanted);
+					if (outcome == SeatKey::Swap) {
+						seatPlayer(*occupant, *body, old); // the bot gets the old seat (0x004be451)
+					}
 				}
 			}
 			player.switchHeld = input.switchSeat > 0;
@@ -13438,6 +13456,26 @@ const FireArm* GameWorld::gun(uint32_t vehicle, int seat) const
 
 // Takes a seat (or leaves the current one for it): the seat's gun is made
 // on first use from its GenericFireArm.
+GameWorld::SeatKey GameWorld::seatKey(const SeatKeyInput& in)
+{
+	if (!in.currentToggles) {
+		return SeatKey::Ignored; // 0x004be24a
+	}
+	if (in.wanted == in.current || in.firing) {
+		return SeatKey::Refused; // 0x004be29a / 0x004be2a4
+	}
+	if (in.wanted < 0 || static_cast<size_t>(in.wanted) >= in.seats) {
+		return SeatKey::Ignored; // 0x004be302
+	}
+	if (in.occupant < 0 && in.wantedToggles) {
+		return SeatKey::Move; // 0x004be353
+	}
+	if (in.requesterAi) {
+		return SeatKey::Ignored; // 0x004be3a6
+	}
+	return in.occupant >= 0 && in.occupantAi ? SeatKey::Swap : SeatKey::Refused;
+}
+
 void GameWorld::seatPlayer(Player& player, Body& body, int seat)
 {
 	const world::Object* object = m_objects.find(body.object);

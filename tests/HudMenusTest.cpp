@@ -698,6 +698,44 @@ TEST(HudItemSelection_SlotsAndTimer)
 // The vehicle HUD's seat dots (0x007a28e0, BfOccupiedVehicleNode
 // 0x007e1520), its texts, and the map's vehicle markers (0x00781680,
 // 0x00793b60, 0x0077dd70).
+// The position keys' outcomes (0x004bda00): a refusal is what shows the
+// passengers' names (event 0/5).
+TEST(HudVehicle_PositionKeyOutcomes)
+{
+	using game::GameWorld;
+	const auto outcome = [](auto edit) {
+		GameWorld::SeatKeyInput in;
+		in.current = 0;
+		in.wanted = 1;
+		in.seats = 3;
+		edit(in);
+		return GameWorld::seatKey(in);
+	};
+	CHECK(outcome([](auto&) {}) == GameWorld::SeatKey::Move);
+	CHECK(outcome([](auto& in) { in.wanted = 0; }) == GameWorld::SeatKey::Refused);   // own seat
+	CHECK(outcome([](auto& in) { in.firing = true; }) == GameWorld::SeatKey::Refused); // mid-shot
+	CHECK(outcome([](auto& in) { in.occupant = 7; }) == GameWorld::SeatKey::Refused);  // a human there
+	CHECK(outcome([](auto& in) {
+		in.occupant = 7;
+		in.occupantAi = true;
+	}) == GameWorld::SeatKey::Swap);
+	CHECK(outcome([](auto& in) {
+		in.occupant = 7;
+		in.occupantAi = in.requesterAi = true;
+	}) == GameWorld::SeatKey::Ignored);
+	CHECK(outcome([](auto& in) { in.wanted = 5; }) == GameWorld::SeatKey::Ignored); // no such seat
+	CHECK(outcome([](auto& in) { in.wantedToggles = false; }) == GameWorld::SeatKey::Refused); // a pod array
+	CHECK(outcome([](auto& in) {
+		in.wantedToggles = false;
+		in.occupant = 7;
+		in.occupantAi = true;
+	}) == GameWorld::SeatKey::Swap);
+	CHECK(outcome([](auto& in) {
+		in.currentToggles = false;
+		in.wanted = 0;
+	}) == GameWorld::SeatKey::Ignored); // sitting in one: the key does nothing
+}
+
 TEST(HudVehicle_SeatsAndMarkers)
 {
 	CHECK(menu::seatDotState(false, false, 0, 0, true) == 4);
@@ -782,6 +820,32 @@ TEST(HudVehicle_PassengersAndScoreboardSquads)
 	vehicleHud.update(hudManager, in);
 	CHECK(hudManager.number("OccupyingPlayerName2Show") == 1 && hudManager.string("OccupyingPlayerName2String") == "1. Driver");
 	CHECK(hudManager.number("OccupyingPlayerName3Show") == 0);
+	// Their panel (VehiclePassengersShow, 0x007a3064) shows only while the
+	// 5 s timer (0x0079fdd0) runs: started by entering a seat or a refused
+	// position key, restarted by another, stopped by leaving the vehicle.
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	in.seconds = 0.1f;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	vehicleHud.showPassengers();
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 1);
+	in.seconds = 4.8f;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 1);
+	vehicleHud.showPassengers();
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 1);
+	in.seconds = 0.3f;
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	vehicleHud.showPassengers();
+	vehicleHud.update(hudManager, in);
+	vehicleHud.clear(hudManager);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	vehicleHud.update(hudManager, in);
+	CHECK(hudManager.number("VehiclePassengersShow") == 0);
+	in.seconds = 0;
 	// The heavy IFV's repair cells (0x007a1e50): cell n at +0x336 + n,
 	// RepairCell(n+1)Active (RepairCell0Active, +0x335, is never set).
 	hudManager.set("RepairCell0Active", 7);

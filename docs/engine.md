@@ -2314,8 +2314,9 @@ at the (±1, ±1) corners meet nothing and more than a second has passed,
 then player slot `0x238(8)` and event 6; else the usual exit
 (`enterOrLeaveVehicle`, without the second). `allowTogglePosition`
 (`+0x491`, slots `0x160` / `0x15c`, 1 by default; the Titans' and the pod
-arrays' 0): the position keys (actions `0x1a`..`0x1e`) move a soldier only
-between two seats that both allow it. `seatLeftRotationLimit` /
+arrays' 0): the position keys (actions `0x1a`..`0x1e`) do nothing from a seat
+without it and are refused for a free seat without it (see "The position
+keys"). `seatLeftRotationLimit` /
 `seatRightRotationLimit` (`+0x300` / `+0x304`, read through the seat
 object's interface 0xc4c4 slots 0xd8 / 0xe0): the soldier's camera
 (`0x005890a0`, the soldier's control object `+0x240` set while seated)
@@ -9020,7 +9021,35 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   shows "R2D2"), coloured from `0x00b3c1e0` (team (0.4, 0.6, 1), enemy
   (1, 0.4, 0.4)) or the squad's (0.4, 1, 0) (`0x00b3c380`), packed into
   OccupyingPlayerName1..10 from the last filled line down
-  (`menu::passengerLines`).
+  (`menu::passengerLines`). Their panel (HudSetupPlayerNames.con's
+  PlayerNames node) shows on VehiclePassengersShow (`+0x2b6`), which
+  `0x007a3064` sets each frame while the vehicle HUD's 5 s timer
+  (`+0x18` elapsed, `+0x1c` 5.0, `+0x20` running; `0x0079fdd0` adds the
+  frame first and stops past the limit) runs. Two things start it:
+  entering a seat (`0x007a3920` at `0x007a394e`, before the
+  displaySelectionOnEnter test) and game logic event 0/5,
+  ECGameLogicGLFailedToChangePosition (`0x007a3d70` at `0x007a3dd1`),
+  which the server's position keys (`0x004bda00`) send when they refuse
+  (`GameWorld::seatKey`, below). `0x007a3160` / `0x007a33ab` clear it off
+  a vehicle (`VehicleHud::showPassengers`; main.cpp runs `seatKey` on the
+  local position key against the HUD world's seats, so a joined client
+  gets it too).
+- **The position keys** (`0x004bda00`, `GameWorld::seatKey`), in order:
+  the current seat's allowTogglePosition 0 ignores the key; the seat
+  already held, or the current seat's PIFire weapon mid-shot (`0x004b9e90`
+  → `0x004b9ee0`: the firearm's slot `0x174`, `0x005c11c0`, false while
+  its fire component's state, slot `0xd8`, is 1..3: pressed, held or
+  charging; its zoom half, the zoom component's slot `0xd4`, counts only
+  off the server, game logic slot `0x144`) refuses it (event 0/5); a key
+  past the seats is ignored; a free seat that allows toggling is taken;
+  otherwise (taken, or free but not togglable) a bot asking is ignored, a
+  bot in the seat is swapped out, the player taking the seat and the bot
+  his old one (`0x004be3db`..`0x004be47a`), and anything else is refused.
+  The rewrite takes the held fire button as the mid-shot state (as
+  `ikWeaponMessages` does). The shipped allowTogglePosition 0 seats are
+  the pod arrays (titan_pod_array1/2 and their Wake forms,
+  static_pod_array, static_pod_array_gpk) and the Wake / playtest Titans'
+  hulls.
 - The weapon and vehicle HUDs read their template fields once per
   template (`WeaponHud::Fields`), not every frame.
 

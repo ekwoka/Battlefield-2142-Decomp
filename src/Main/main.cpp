@@ -821,6 +821,10 @@ std::function<void(const std::string&)> g_hudSound;
 int g_inHandSlot = -1;
 // A joined game's weapon key pressed this frame (0 none) and held.
 int g_remoteItemKey = 0;
+// The local position key pressed this frame (1-based, 0 none) and held.
+int g_positionKey = 0;
+bool g_positionKeyHeld = false;
+bool g_positionKeyFiring = false; // the fire button down with the press
 // The tactical rose opened by the commander or a squad's player
 // (0x00754290 → the squad panel's +0x1e4, SELECTED_ALL_SQUADS).
 bool g_allSquads = false;
@@ -2098,9 +2102,39 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// vehicleHud.displaySelectionOnEnter (block +0xbd; the artillery guns
 	// as_ag / us_ag) the list opens for 2 s (+0x20 = 2.0, menu state 0xb).
 	bool seatEntered = false;
+	const int positionKey = std::exchange(g_positionKey, 0);
 	game::GameWorld::PlayerInfo seated;
 	if (inVehicle && world.playerInfo(world.localPlayer(), seated) && seated.vehicle) {
+		// The server's refusal of a position key (GameWorld::seatKey) sends
+		// event 0/5, which shows the passengers' names (0x007a3d70); the
+		// same rule here from the HUD world's seats, so a joined client too.
+		if (positionKey > 0) {
+			const auto occupants = world.vehicleOccupants(seated.vehicle);
+			const auto seats = round.vehicleSeats(seated.vehicle);
+			const auto toggles = [&](int index) {
+				return index < 0 || static_cast<size_t>(index) >= seats.size()
+					|| dice::hfe::menu::hudNumber(round.templates().find(seats[static_cast<size_t>(index)].name),
+						   "allowTogglePosition", 1) != 0;
+			};
+			game::GameWorld::SeatKeyInput key;
+			key.current = seated.seat;
+			key.wanted = positionKey - 1;
+			key.seats = occupants.size();
+			key.currentToggles = toggles(key.current);
+			key.wantedToggles = toggles(key.wanted);
+			key.firing = g_positionKeyFiring;
+			key.requesterAi = seated.ai;
+			if (key.wanted < static_cast<int>(occupants.size())) {
+				key.occupant = occupants[static_cast<size_t>(key.wanted)];
+			}
+			game::GameWorld::PlayerInfo occupant;
+			key.occupantAi = key.occupant >= 0 && world.playerInfo(key.occupant, occupant) && occupant.ai;
+			if (game::GameWorld::seatKey(key) == game::GameWorld::SeatKey::Refused) {
+				g_vehicleHud.showPassengers();
+			}
+		}
 		if (seated.vehicle != seatVehicleWas || seated.seat != seatWas) {
+			g_vehicleHud.showPassengers(); // 0x007a3920, before displaySelectionOnEnter
 			// The vehicle HUD's +0xb4 (0x007a28e0): the last occupied seat's
 			// controlled object a parachute that isn't a pod holds it back.
 			const auto seats = round.vehicleSeats(seated.vehicle);
@@ -10679,6 +10713,11 @@ int runGame(Options& options, Session& session)
 				// press is also our own 0x004d2a50's (the seat's item popup,
 				// updateHud).
 				input.switchSeat = in.seat;
+				if (in.seat > 0 && !g_positionKeyHeld) {
+					g_positionKey = in.seat;
+					g_positionKeyFiring = in.fire;
+				}
+				g_positionKeyHeld = in.seat > 0;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;
 				if (in.item > 0 && !g_remoteItemHeld) {
@@ -10767,6 +10806,11 @@ int runGame(Options& options, Session& session)
 				input.reload = in.reload;
 				input.mouseLook = in.mouseLook;
 				input.switchSeat = in.seat;
+				if (in.seat > 0 && !g_positionKeyHeld) {
+					g_positionKey = in.seat;
+					g_positionKeyFiring = in.fire;
+				}
+				g_positionKeyHeld = in.seat > 0;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;
 				// C: first person or the chase view; the right button's press

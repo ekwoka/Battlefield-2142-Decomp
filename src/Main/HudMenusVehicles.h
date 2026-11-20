@@ -636,8 +636,18 @@ class VehicleHud {
 public:
 	void update(hud::HudManager& hud, const VehicleHudInput& in);
 	void clear(hud::HudManager& hud);
+	// The passengers' names panel (VehiclePassengersShow, +0x2b6) for 5 s:
+	// entering a seat (0x007a394e) or a refused position key (game logic
+	// event 0/5 ECGameLogicGLFailedToChangePosition, 0x007a3dd1).
+	void showPassengers()
+	{
+		m_passengersOn = true;
+		m_passengersTime = 0;
+	}
 
 private:
+	bool m_passengersOn = false;  // +0x20
+	float m_passengersTime = 0;   // +0x18, against +0x1c = 5 s
 	float m_climbAngle = 0, m_climbPrevious = 0; // +0x204 / +0x208
 	float m_torque = 0, m_secondTorque = 1;     // +0x210 / +0x21c (the constructor's 0, 1)
 	float m_staminaWas = 1, m_staminaTimer = -1; // +0x1d4, +0x23c

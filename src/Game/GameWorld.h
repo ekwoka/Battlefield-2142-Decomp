@@ -1730,6 +1730,31 @@ public:
 		};
 		std::vector<Entry> entries; // EntryPoint children (entryRadius / setEntryRadius)
 	};
+	// A position key's outcome (the server's 0x004bda00, in its order):
+	//   - the current seat's allowTogglePosition 0 (0x004be242, interface
+	//     0xc4c4 slot 0x160: the pod arrays, the Wake / playtest Titans'
+	//     hulls): ignored;
+	//   - the seat already held, or its PIFire weapon mid-shot (0x004b9ee0:
+	//     firearm slot 0x174, 0x005c11c0, false while the fire component's
+	//     state is 1..3, pressed, held or charging; the zoom half only
+	//     counts off the server): refused, event 0/5
+	//     ECGameLogicGLFailedToChangePosition (the passengers' names);
+	//   - no such seat: ignored;
+	//   - a free seat that allows toggling: the move;
+	//   - otherwise (taken, or free but not togglable; 0x004be39d): a bot
+	//     asking is ignored; a bot in it swaps with the player, who takes it
+	//     while the bot gets his old seat (0x004be3db); else refused.
+	enum class SeatKey { Ignored, Move, Swap, Refused };
+	struct SeatKeyInput {
+		int current = -1, wanted = -1; // seat indices
+		size_t seats = 0;
+		bool currentToggles = true, wantedToggles = true;
+		bool firing = false; // the trigger held (the fire component's state above 0, as ikWeaponMessages)
+		bool requesterAi = false;
+		int occupant = -1; // the wanted seat's player, -1 none
+		bool occupantAi = false;
+	};
+	static SeatKey seatKey(const SeatKeyInput& in);
 	// A vehicle's seats (for checks and the HUD) and who sits in them.
 	std::vector<SeatLayout> vehicleSeats(uint32_t object);
 	// A pod-launcher seat whose fire is the soldier's own weapon's: only

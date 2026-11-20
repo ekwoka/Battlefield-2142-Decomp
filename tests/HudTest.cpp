@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 using namespace dice::hfe;
 
@@ -497,6 +498,56 @@ TEST(Hud_ShippedSupplyLabelOrder)
 				CHECK(!backgrounds.empty() && backgrounds.back().find("assistance_buttonBg.tga") != std::string::npos);
 			}
 		}
+	}
+}
+
+// The shipped passengers' names panel (HudSetupPlayerNames.con, Remaster's
+// hudfix copy too) draws its lines only under VehiclePassengersShow.
+TEST(Hud_ShippedPassengerNamesPanel)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		io::FileManager files;
+		files.setRootPath(gameDir);
+		files.addSearchPath(mod);
+		Console console(&files);
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		CHECK(console.run("ServerArchives.con", {}, out));
+		CHECK(console.run("ClientArchives.con", {}, out));
+		hud::HudManager manager([&files](const std::string& path, std::string& text) {
+			std::vector<uint8_t> data;
+			if (!files.readFile(path, data)) return false;
+			text.assign(data.begin(), data.end());
+			return true;
+		});
+		hud::registerHudConsoleMethods(console, manager);
+		console.setScriptOutput(false, false);
+		CHECK(console.run("Menu/HUD/HudSetup/HudSetupMain.con", {}, out));
+		for (const char* name : {"ShowIngameHud", "ShowSoldierHud", "MenuBackgroundAlpha", "BottomLeftVehicleFadedAlpha", "OccupyingPlayerName1Show"})
+			manager.set(name, 1);
+		manager.setString("OccupyingPlayerName1String", "1. Driver");
+		// Remaster's hudfix moves the panel to x -114; its HUD pass squeezes
+		// x by 12/16 about the centre (LevelSources::hudXScale).
+		const float squeeze = std::strstr(mod, "Remaster") ? 0.75f : 1.0f;
+		const auto panel = [&](bool show) {
+			manager.set("VehiclePassengersShow", show ? 1 : 0);
+			std::vector<hud::HudQuad> quads;
+			for (int i = 0; i < 60; ++i) quads = manager.frame(1 / 30.0f);
+			return std::count_if(quads.begin(), quads.end(), [&](const auto& q) {
+				const float x0 = 400 + (q.x0 - 400) * squeeze, x1 = 400 + (q.x1 - 400) * squeeze;
+				return q.texture.find("playerNameBg") != std::string::npos && q.color[3] > 0.5f && x0 >= 0 && x1 <= 800
+					&& q.y0 >= 0 && q.y1 <= 600;
+			});
+		};
+		CHECK(panel(false) == 0);
+		// Once per pass: the HUD is drawn twice (0x1002d5d9) and the panel
+		// isn't gated on AffectedByEMPShow.
+		CHECK(panel(true) == 2);
+		CHECK(panel(false) == 0);
 	}
 }
 

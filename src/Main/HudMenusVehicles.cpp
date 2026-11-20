@@ -897,6 +897,18 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 		hud.set("OccupyingPlayer" + n + "ColorGreen", lines[i].colour[1]);
 		hud.set("OccupyingPlayer" + n + "ColorBlue", lines[i].colour[2]);
 	}
+	// Their panel's show (0x007a3064): the timer 0x0079fdd0 adds the frame
+	// first and stops past its 5 s.
+	if (m_passengersOn) {
+		m_passengersTime += in.seconds;
+		if (m_passengersTime > 5) {
+			m_passengersOn = false;
+		}
+	}
+	if (!m_passengersOn) {
+		m_passengersTime = 0;
+	}
+	hud.set("VehiclePassengersShow", m_passengersTime > 0 ? 1 : 0);
 	// The bottom-left vehicle panel (0x007a0a90: the faded alphas are the
 	// panel's alpha less 1 - MenuBackgroundAlpha; the panels' swap is the
 	// HUD animation "BottomLeft/Alpha", here taken as done).
@@ -998,6 +1010,9 @@ void VehicleHud::clear(hud::HudManager& hud)
 	for (int i = 1; i <= 10; ++i) {
 		hud.set("OccupyingPlayerName" + std::to_string(i) + "Show", 0);
 	}
+	m_passengersOn = false; // 0x007a3160 / 0x007a33ab
+	m_passengersTime = 0;
+	hud.set("VehiclePassengersShow", 0);
 	m_climbAngle = m_climbPrevious = 0;
 	m_staminaWas = 1;
 	m_staminaTimer = -1;
