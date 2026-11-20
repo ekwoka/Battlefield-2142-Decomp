@@ -3579,6 +3579,13 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 		m_lastOvergrowthTicks ? std::min(static_cast<float>(overgrowthNow - m_lastOvergrowthTicks) / 1000.0f, 0.1f) : 0.0f;
 	m_lastOvergrowthTicks = overgrowthNow;
 	++m_glowFrame;
+	// The glow fade's frame time: RendDX9's +0x5d8, the frame's seconds the
+	// game hands the renderer (slot 10, 0x1002cef0), which BF2142.exe's loop
+	// clamps to 1/15 s (0x0040bd90: 0x00402dd0 at 1e-5..0x3d888889).
+	const uint64_t glowNow = SDL_GetTicks();
+	const float glowSeconds =
+		m_lastGlowTicks ? std::min(static_cast<float>(glowNow - m_lastGlowTicks) / 1000.0f, kRendererFrameSecondsMax) : 0.0f;
+	m_lastGlowTicks = glowNow;
 	const terrain::Heightmap* groundMap = m_sources ? m_sources->heightmaps.primary() : nullptr;
 	const float cameraAboveGround = groundMap && groundMap->loaded()
 		? camera.position.y - groundMap->heightAt(camera.position.x, camera.position.z)
@@ -3714,7 +3721,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 			const bool visible = !m_sources || !m_sources->glowVisible
 				|| m_sources->glowVisible(camera.position, source, instance.object);
 			const bool drawnLastFrame = instance.glowFrame != 0 && instance.glowFrame == m_glowFrame - 1;
-			instance.glowFade = glowFadeStep(instance.glowFade, visible, drawnLastFrame, overgrowthSeconds);
+			instance.glowFade = glowFadeStep(instance.glowFade, visible, drawnLastFrame, glowSeconds);
 			if (instance.glowFade > kGlowShown) {
 				instance.glowFrame = m_glowFrame;
 			}

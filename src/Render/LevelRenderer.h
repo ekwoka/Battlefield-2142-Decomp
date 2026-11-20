@@ -676,6 +676,7 @@ private:
 	float m_overgrowthCellSize = 125;       // the cells' side (OvergrowthCells::cellSize)
 	uint64_t m_lastOvergrowthTicks = 0;     // lodTimer's clock
 	uint32_t m_glowFrame = 0;               // prepareInstances' count (Instance::glowFrame)
+	uint64_t m_lastGlowTicks = 0;           // the glow fade's clock (glowFadeStep)
 	// The objects' distance fade this frame (DistanceFade.h): off for the
 	// commander's overhead view, whose camera sits hundreds of metres up.
 	// A deviation: the walk's filter flag 0x1000000 that skips the fade is
