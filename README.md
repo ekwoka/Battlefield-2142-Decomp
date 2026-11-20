@@ -453,12 +453,15 @@ The rest only change what you see or hear.
 | `particleShadows` | on | graphics | Smoke and dust take the cascades' shadows (with `csm`). | no |
 | `particleLights` | on | graphics | Smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps). | no |
 | `glowOcclusion` | on | graphics | A lamp's additive halo is skipped while the line from the camera to its centre is blocked; the original only depth-tests halos per pixel. | no |
+| `titanHullLods` | on | graphics | A Titan hull half drawn this frame takes its own LOD when the other half was culled, so a far Titan whose front half faded out draws whole; the original keeps the culled half's stale LOD. | no |
 | `prepass` | off | graphics | The depth, normal and motion prepass even when neither `taa` nor `ssao` reads it. | no |
 | `tickBlend` | off | graphics | Objects and the camera are drawn between the 30 Hz simulation ticks, as the original's frame does (0x0043f170). Without it each frame shows the last tick (only a ridden missile's camera is smoothed). | no |
+| `tvEffect` | off | graphics | Experimental: a guided round's view gets the TVEffect pass (grey, rolled by noise bands, rows shifted sideways so vertical edges lean). The original's renderer never runs it and shows the plain view. | no |
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
 | `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
 | `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
 | `botPilots` | on | bots | A gunship's bot pilot picks the best target its guns can hurt (a vehicle, an infantry group, an aircraft, an enemy Titan's gun hubs) and flies shallow attack runs at it; the original's pilots mostly fly their waypoints and fire only when a target lines up. | yes |
+| `botCommander` | on | bots | In Titan mode a team with bots and no commander has its Titan moved and its commander's tools used for it. | yes |
 | `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
 | `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
 | `chaseRoll` | on | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
@@ -517,14 +520,16 @@ feeds the simulation.
   rewrite's version (the objects, and every game camera with its own
   history) is still experimental, so by default each frame shows the last
   tick.
+- **`tvEffect`:** the original's renderer has the TVEffect pass but nothing
+  calls it, so the original never shows it; it stays off unless you want it.
 
 ### Parity checking
 
 `tools/parity-check.sh [seconds] [extra game args...]` runs the same headless
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
-(`botRecovery`, `botMovement`, `botTitan`, `botPilots`, `guidedCameraEase`, `cornerSteer`,
-`passengerWeapons`, `softLanding`) turned off. It compares the state
+(`botRecovery`, `botMovement`, `botTitan`, `botCommander`, `botPilots`, `guidedCameraEase`,
+`cornerSteer`, `passengerWeapons`, `softLanding`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
 simulation. Anything added to the enhanced mode either leaves the
 fingerprint alone or gets its own option, listed in the script.
