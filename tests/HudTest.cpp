@@ -53,8 +53,8 @@ TEST(DeploymentScreen_EnterClosesAndConfirmsWhileTimerRuns)
 TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)
 {
 	using dice::main::killedInfoShown;
-	CHECK(killedInfoShown(true, 12, false, false));  // man down, screen closed: critically wounded + timer
-	CHECK(!killedInfoShown(true, 12, true, false));  // man down, screen opened
+	CHECK(killedInfoShown(true, 12, false, true));  // man down, screen closed: critically wounded + timer
+	CHECK(!killedInfoShown(true, 12, false, false));  // man down, screen opened
 	CHECK(!killedInfoShown(false, 12, false, false)); // dead: the spawn screen is up
 	CHECK(killedInfoShown(false, 12, false, true));   // dead, Enter pressed: killed + timer
 	CHECK(!killedInfoShown(false, 0, false, true));   // never died (initial deployment)

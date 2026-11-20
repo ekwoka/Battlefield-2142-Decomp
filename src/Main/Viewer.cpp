@@ -820,6 +820,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				}
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
+				input.leftMouse = (buttons & SDL_BUTTON_LMASK) != 0;
+				input.rightMouse = (buttons & SDL_BUTTON_RMASK) != 0;
 				input.fire = c.pressed(map, "c_PIFire", down);
 				input.altFire = c.pressed(map, "c_PIAltFire", down);
 				input.flareFire = c.pressed(map, "c_PIFlareFire", down);
@@ -886,8 +888,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.sprint = keys[SDL_SCANCODE_LSHIFT];
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
-				input.fire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_LMASK) != 0 && !pointer;
-				input.altFire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_RMASK) != 0 && !pointer;
+				const Uint32 buttons = shown.mouseButtons() | pressedButtons;
+				input.leftMouse = (buttons & SDL_BUTTON_LMASK) != 0;
+				input.rightMouse = (buttons & SDL_BUTTON_RMASK) != 0;
+				input.fire = input.leftMouse && !pointer;
+				input.altFire = input.rightMouse && !pointer;
 				input.flareFire = keys[SDL_SCANCODE_X];
 				input.toggleWeapon = keys[SDL_SCANCODE_F];
 				input.use = keys[SDL_SCANCODE_E];

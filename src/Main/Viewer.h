@@ -47,6 +47,7 @@ struct ViewerOptions {
 		float aimPitchDegrees = 0;
 		bool sprint = false;
 		bool fire = false;
+		bool leftMouse = false, rightMouse = false; // raw buttons for the downed-player HUD
 		// The mouse wheel this frame: c_PINextItem (+1) or c_PIPrevItem (-1),
 		// inputs 0x30 / 0x31 (0 none).
 		int itemStep = 0;

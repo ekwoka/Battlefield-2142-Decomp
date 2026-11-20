@@ -9923,7 +9923,7 @@ int runGame(Options& options, Session& session)
 					help.manDown = known && self.manDown;
 					help.inVehicle = vehicle != nullptr;
 					help.onFoot = help.alive && !vehicle;
-					help.spawnScreen = known && (self.manDown ? g_deploymentOpen : dice::main::deploymentScreenShown(self.alive, g_deploymentOpen, g_spawnScreenHidden));
+					help.spawnScreen = known && dice::main::deploymentScreenShown(self.alive, g_deploymentOpen, g_spawnScreenHidden);
 					help.commanderScreen = commanderScreen;
 					help.menuOpen = scoreboardHeld || commanderScreen || g_mapMenu != 0;
 					help.squad = known ? self.squad : 0;
@@ -11016,18 +11016,29 @@ int runGame(Options& options, Session& session)
 		if (viewer.onPlayerInput) {
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
-			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu,
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu, &startedGame,
 										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
-										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
+										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
 				game::GameWorld::PlayerInfo me;
 				const bool playerPresent = hudPlayer(hudLocal(), me);
 				const bool alive = playerPresent && me.alive;
+				const bool manDown = playerPresent && me.manDown;
+				if (manDown && !manDownWas) {
+					g_deploymentOpen = false;
+					g_spawnScreenHidden = true;
+					helpPopups.show(hudManager, "HUD_HELP_MENU_CONTROLS_callMedicWhenManDown", "man_down_help");
+				}
+				manDownWas = manDown;
+				const bool deploymentWasShown = dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden);
+				const bool menuOpen = showMenu && startedGame;
+				const bool openFromManDown = manDown && !deploymentWasShown && !menuOpen && in.rightMouse && !rightMouseWas;
+				rightMouseWas = in.rightMouse;
 				// The local soldier's revive calls (ReviveCalls): going down, and
 				// the fire presses that reach him while down (not the menus').
 				if (playerPresent) {
-					const bool fire = in.fire && !g_deploymentOpen && !showMenu;
+					const bool fire = (in.fire || (manDown && in.leftMouse)) && !deploymentWasShown && !menuOpen;
 					if (const int code = g_reviveCalls.step(me.id, me.soldier, me.manDown, fire, true)) {
 						g_sayCall(code);
 					}
@@ -11035,13 +11046,12 @@ int runGame(Options& options, Session& session)
 				if (spawnWasRequested && !session.client && !round.spawnRequested(round.localPlayer()) && !alive) {
 					g_spawnScreenHidden = false; // rejected point: return to the selection screen
 				}
-				const bool deploymentPressed = in.deployment && !deploymentWas;
+				const bool deploymentPressed = (in.deployment && !deploymentWas) || openFromManDown;
 				if (alive) {
 					g_initialDeploymentPending = false;
 					g_spawnScreenHidden = false;
 					if (g_remoteHud) g_remoteHud->requestedSpawn = false;
 				}
-				const bool deploymentWasShown = dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden);
 				const bool enterConfirms = dice::main::deploymentConfirmPressed(false,
 					deploymentPressed && playerPresent, deploymentWasShown, membersShown);
 				if (deploymentPressed && playerPresent) {
