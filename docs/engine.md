@@ -9272,7 +9272,17 @@ showBatteryIconInHud +0x127), and their textures through slot 0x4c.
   commands, slot 0x128) and stops after the crosshair's parts, so no name,
   icons or ammunition (PrimaryAmmoShow stays 0); the second weapon's
   `0x007c2d50` clears SecondaryAmmoShow (`+0x16d`) and stops
-  (`HudWeapon_ShowInfoOff`). vehicleHud.showInfo (`+0xfe`) stays inert.
+  (`HudWeapon_ShowInfoOff`).
+- **vehicleHud.showInfo** (template `+0xfe`, block `+0xb6`) selects
+  the vehicle panel when controlling a seat (`0x007a0d9c` and
+  `0x007a3c46`). The personal parachute sets it to 0 and sets
+  `useChildHud` to 1. Its own action icon uses `UsingParachute`
+  (`0x007a28e0`), set for a `Parachute` whose `isPod` is 0.
+- **CloseToAmmo** (`0x007a1c30` → `0x007a0760`) indicates a received
+  ammo stamp less than 15 ticks old and is suppressed on the frame
+  the player gets in or out of a vehicle. The kit's sound shares that
+  test. Joined own-state records carry the flag and weapon counts but
+  do not deliver the receipt tick.
 - **vehicleHud.useVehicleCameraRotation** (template `+0x108`, block
   `+0xc0`, getter slot 0xdc): the map node (`0x00793b60`, at `0x00794f03`)
   turns the object's icon by its first Camera child's yaw (`0x005c6430` →

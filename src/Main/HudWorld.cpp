@@ -1,4 +1,5 @@
 #include "HudWorld.h"
+#include "HudMenusVehicles.h"
 
 #include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
@@ -587,7 +588,9 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 	const auto seats = me.vehicle ? m_round.vehicleSeats(me.vehicle) : std::vector<game::GameWorld::SeatLayout> {};
 	// A passenger seat that leaves the fire to the soldier's own weapon
 	// (enhanced.passengerWeapons, not retail) holds the kit's firearm.
-	const bool kitHeld = !me.vehicle
+	const world::Object* occupied = vehicle();
+	const bool personalChute = menu::usingPersonalParachute(occupied ? occupied->objectTemplate() : nullptr);
+	const bool kitHeld = !me.vehicle || personalChute
 		|| (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size() && m_round.passengerWeapon(seats[static_cast<size_t>(me.seat)]));
 	if (!kitHeld) {
 		// A seat's gun (its template's weapon).

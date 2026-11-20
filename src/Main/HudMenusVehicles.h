@@ -391,6 +391,7 @@ private:
 // (0x004bd700, 0x005f5256) and its tick under 15 old, ammoSound (slot
 // 0x50), but not in the frame the player got in or out of a vehicle.
 int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, bool vehicleChanged);
+int updateReceivedSupplyHud(hud::HudManager& hud, const game::GameWorld::AbilityBarInfo* info, bool inVehicle, bool vehicleChanged);
 
 // The Titans' consoles and shields on the HUD (Friendly/EnemyStrategic-
 // Object%iShow, 0..9; the HUD information layer's +0xa89 + (team - 1) x
@@ -529,6 +530,9 @@ std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat,
 
 // A seat dot's state (0x007a28e0).
 int seatDotState(bool occupied, bool local, int squad, int localSquad, bool sameTeam);
+
+// The personal canopy indicator (0x007a28e0); drop pods are excluded.
+bool usingPersonalParachute(const world::ObjectTemplate* occupied);
 
 // vehicleHud.displaySelectionOnEnter on entering a seat (0x007a3920, from
 // the enter event 0x007a3cb0 for the local player): with the controlled

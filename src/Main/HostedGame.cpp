@@ -1,4 +1,5 @@
 #include "HostedGame.h"
+#include "HudMenusVehicles.h"
 #include "Game/KitUnlocks.h"
 
 #include "Net/PlayerAuth.h"
@@ -2955,8 +2956,10 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 	// leaves the fire to the soldier's own weapon (enhanced.passengerWeapons,
 	// not retail) reports that one too.
 	const auto seats = info.alive && info.vehicle ? m_round->vehicleSeats(info.vehicle) : std::vector<game::GameWorld::SeatLayout> {};
+	const world::Object* occupied = m_round->objects().find(info.vehicle);
+	const bool personalChute = menu::usingPersonalParachute(occupied ? occupied->objectTemplate() : nullptr);
 	const bool ownWeapon = info.alive
-		&& (!info.vehicle
+		&& (!info.vehicle || personalChute
 			|| (info.seat >= 0 && static_cast<size_t>(info.seat) < seats.size()
 				&& m_round->passengerWeapon(seats[static_cast<size_t>(info.seat)])));
 	if (ownWeapon) {

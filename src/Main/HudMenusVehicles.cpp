@@ -447,6 +447,14 @@ int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, 
 	return mask;
 }
 
+int updateReceivedSupplyHud(hud::HudManager& hud, const game::GameWorld::AbilityBarInfo* info, bool inVehicle, bool vehicleChanged)
+{
+	const int sounds = info && info->alive ? receivedSounds(*info, inVehicle, vehicleChanged) : 0;
+	// 0x007a0760 updates CloseToAmmo alongside the receiver's sound.
+	hud.set("CloseToAmmo", (sounds & 4) != 0 ? 1 : 0);
+	return sounds;
+}
+
 const AbilityBar::Out& AbilityBar::hide()
 {
 	m_out.show = m_out.wrench = false;
@@ -913,10 +921,16 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 	// panel's alpha less 1 - MenuBackgroundAlpha; the panels' swap is the
 	// HUD animation "BottomLeft/Alpha", here taken as done).
 	const float background = hud.number("MenuBackgroundAlpha");
-	hud.set("BottomLeftVehicleAlpha", 1);
-	hud.set("BottomLeftHealthAlpha", 0);
-	hud.set("BottomLeftVehicleFadedAlpha", std::clamp(1 - (1 - background), 0.0f, 1.0f));
-	hud.set("BottomLeftHealthFadedAlpha", 0);
+	// The seat transition checks vehicleHud.showInfo before selecting
+	// the vehicle panel (0x007a0d9c / 0x007a3c46).
+	const bool showInfo = flag(in.seat ? in.seat : v, "vehicleHud.showInfo", true);
+	const float alpha = std::clamp(background, 0.0f, 1.0f);
+	hud.set("UsingParachute", usingPersonalParachute(v) ? 1 : 0);
+	hud.set("VehicleIconShow", showInfo ? 1 : 0);
+	hud.set("BottomLeftVehicleAlpha", showInfo ? 1 : 0);
+	hud.set("BottomLeftHealthAlpha", showInfo ? 0 : 1);
+	hud.set("BottomLeftVehicleFadedAlpha", showInfo ? alpha : 0);
+	hud.set("BottomLeftHealthFadedAlpha", showInfo ? 0 : alpha);
 }
 
 std::array<PassengerLine, 10> passengerLines(const std::vector<SeatDot>& seats)
@@ -979,12 +993,16 @@ bool HudBlink::tick(float value, float seconds)
 	return m_lit;
 }
 
+bool usingPersonalParachute(const world::ObjectTemplate* occupied)
+{
+	return occupied && occupied->typeName() == "Parachute" && hudNumber(occupied, "isPod", 0) == 0;
+}
+
 bool displaySelectionOnEnter(const world::ObjectTemplate* controlled, const world::ObjectTemplate* lastOccupied)
 {
 	// 0x007a28e0: +0xb4 = a non-pod Parachute; 0x007a3920 opens the list
 	// only while it is 0.
-	const bool held = lastOccupied && lastOccupied->typeName() == "Parachute" && hudNumber(lastOccupied, "isPod", 0) == 0;
-	return !held && hudNumber(controlled, "vehicleHud.displaySelectionOnEnter", 0) != 0;
+	return !usingPersonalParachute(lastOccupied) && hudNumber(controlled, "vehicleHud.displaySelectionOnEnter", 0) != 0;
 }
 
 bool HudBlink::tickFree(float seconds)
@@ -1001,6 +1019,8 @@ bool HudBlink::tickFree(float seconds)
 
 void VehicleHud::clear(hud::HudManager& hud)
 {
+	hud.set("UsingParachute", 0);
+	hud.set("VehicleIconShow", 0);
 	// 0x007a1ee0 as the controlled object becomes the soldier again.
 	m_firstBundle = m_secondBundle = -1;
 	m_staminaBlink.reset();

@@ -2172,6 +2172,55 @@ TEST(HudVehicle_SelectionOnEnterGate)
 	CHECK(!menu::displaySelectionOnEnter(tank, tank));
 }
 
+TEST(HudVehicle_PersonalParachuteActionIcon)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "Parachute");
+	auto* chute = templates.create("Parachute", "parachute");
+	chute->settings()["vehicleHud.showInfo"] = "0";
+	auto* pod = templates.create("Parachute", "pod");
+	pod->settings()["isPod"] = "1";
+	hud::HudManager hud(nullptr);
+	hud.set("MenuBackgroundAlpha", 1);
+	menu::VehicleHud vehicleHud;
+	menu::VehicleHudInput in;
+	in.vehicle = pod;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("UsingParachute") == 0);
+	CHECK(hud.number("VehicleIconShow") == 1);
+	in.vehicle = chute;
+	vehicleHud.update(hud, in);
+	CHECK(hud.number("UsingParachute") == 1);
+	CHECK(hud.number("VehicleIconShow") == 0);
+	CHECK(hud.number("BottomLeftVehicleFadedAlpha") == 0);
+	vehicleHud.clear(hud);
+	CHECK(hud.number("UsingParachute") == 0);
+	CHECK(hud.number("VehicleIconShow") == 0);
+}
+
+TEST(HudActionIcon_AmmoReceipt)
+{
+	hud::HudManager hud(nullptr);
+	game::GameWorld::AbilityBarInfo info;
+	info.alive = true;
+	menu::updateReceivedSupplyHud(hud, &info, false, false); // joined state has no receipt tick
+	CHECK(hud.number("CloseToAmmo") == 0);
+	info.sinceAmmo = 14;
+	CHECK(menu::updateReceivedSupplyHud(hud, &info, false, false) == 4);
+	CHECK(hud.number("CloseToAmmo") == 1);
+	menu::updateReceivedSupplyHud(hud, &info, true, true);
+	CHECK(hud.number("CloseToAmmo") == 0);
+	info.ammoFlag = true;
+	menu::updateReceivedSupplyHud(hud, &info, true, false);
+	CHECK(hud.number("CloseToAmmo") == 0);
+	info.ammoFlag = false;
+	menu::updateReceivedSupplyHud(hud, &info, true, false);
+	CHECK(hud.number("CloseToAmmo") == 1);
+	info.sinceAmmo = 15;
+	menu::updateReceivedSupplyHud(hud, &info, true, false);
+	CHECK(hud.number("CloseToAmmo") == 0);
+}
+
 // zoomOnMinimap, miniMapIconOffset(Inside), standardHelpEnabled and
 // useVehicleCommRose as the shipped templates give them.
 TEST(HudVehicle_MapOffsetZoomAndFlags)

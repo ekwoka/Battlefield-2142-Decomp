@@ -1634,7 +1634,6 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	hud.set("HitIndicatorIconShow", 0);
 	// In a vehicle: its icon and armour, and a gunner's gun (its HUD by
 	// the firearm's weaponHud.guiIndex, the turret's direction).
-	hud.set("VehicleIconShow", inVehicle ? 1 : 0);
 	hud.set("PrimaryHeatShow", 0);
 	hud.set("TurretIconShow", 0);
 	// The frame's time (the item selection's timer).
@@ -1761,14 +1760,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// frame 0x007c38c0): a seat without a gun shows the soldier's own
 		// (0x007c1f10 run again for player slot 0xb4) and either way the
 		// weapon block takes the soldier's place (UsingChildHud, +0x176).
-		if (known && me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
-			childHud = dice::hfe::menu::hudNumber(round.templates().find(seats[static_cast<size_t>(me.seat)].name),
-						   "vehicleHud.useChildHud", 0) != 0;
-		}
-		childHud = childHud || kitSeat;
-		if (childHud && !heldGunTemplate && !world.joined() && held.gun && held.weapon) {
+		childHud = dice::hfe::menu::hudNumber(look.seat, "vehicleHud.useChildHud", 0) != 0 || kitSeat;
+		const bool personalChute = dice::hfe::menu::usingPersonalParachute(look.vehicle);
+		if (childHud && !heldGunTemplate && held.weapon && (!world.joined() || personalChute)) {
 			heldGun = held.gun;
 			heldGunTemplate = held.weapon;
+			dice::hfe::menu::updateSoldierWeaponHud(hud, held.weapon,
+				world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer()),
+				g_weaponZoomed, false, crosshairActive);
 		}
 		// The gui index (0x007a01e0 -> the runtime VehicleHud's 0x00657660,
 		// HudMenusVehicles.h vehicleGuiIndex): by the seat camera's mode and
@@ -1779,7 +1778,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			gui.controlled = look.seat;
 			gui.weapon = primary.weapon;
 			gui.second = world.seatGroupWeapon(1).weapon;
-			gui.child = !world.joined() ? held.weapon : nullptr;
+			gui.child = !world.joined() || personalChute ? held.weapon : nullptr;
 			gui.cameraMode = g_cameraMode;
 			game::GameWorld::ProjectileCamera riding;
 			gui.projectileCamera = !world.joined() && round.projectileCamera(world.localPlayer(), riding);
@@ -2024,7 +2023,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// The treated player's sounds (0x007a1c30, commander screen or not; its
 	// +0x2fb is the vehicle state, the frame it changes mutes the ammo).
 	static bool wasInVehicle = false;
-	g_receivedSounds = abilityKnown && ability.alive ? dice::hfe::menu::receivedSounds(ability, inVehicle, inVehicle != wasInVehicle) : 0;
+	g_receivedSounds = dice::hfe::menu::updateReceivedSupplyHud(hud, abilityKnown ? &ability : nullptr,
+		inVehicle, inVehicle != wasInVehicle);
 	wasInVehicle = inVehicle;
 	g_abilityBar.apply(hud);
 	// The item selection on foot: the kit's weapons by slot (their
