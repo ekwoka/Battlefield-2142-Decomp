@@ -13179,8 +13179,14 @@ and takes the largest `minTimeBetweenActivation`.
   `0x0043d880` removes it `supplyDropNumSecsToLive` (300; `+0x1bc`,
   `0x004260db`; both GameLogic properties, handed to the round's
   `CommanderSettings`) after it landed: `0x0043d9c0` keeps the landing
-  time (`0x0043d820`) as it takes the parachute away. The rewrite counts
-  from the drop. The
+  time (`0x0043d820`) as it takes the parachute away. A crate meeting a
+  PlayerControlObject its spawner made under 3 s ago (`0x0043ce80`: the
+  time `0x005aeb80` stamps through interface `0xc4c5` slot `0xb8`, read by
+  slot `0xbc`; `*0x00920bc0` = 3) is removed instead (`0x0043d7c0`).
+  Landing changes nothing else: the crate stays a mobile body (its
+  landed byte `+0x198` only goes to the clients, `0x005fdf60` /
+  `0x005fe980` → `0x005ffec0` → `0x005d0830`). `GameWorld::supplyObjectContact`.
+  The
   crate is a `SupplyObject` (template `0x005d1940`), updated every 0.2 s
   (timer event 0x1d, `0x005d1710`). Its team's soldiers, and vehicles
   (`workOnVehicles`), within its radius (5) plus their own (`0x005d0e80`)

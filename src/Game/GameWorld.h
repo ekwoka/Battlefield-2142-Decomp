@@ -2157,6 +2157,9 @@ public:
 	std::vector<uint32_t> supplyCrates() const;
 	// Seconds since a commander's crate was dropped (-1: not one).
 	float supplyCrateAge(uint32_t object) const;
+	// A mobile SupplyObject's collision event (0x005d0790 -> 0x0043d9c0):
+	// `other` is what it met, 0 the ground.
+	void supplyObjectContact(uint32_t self, uint32_t other);
 	// A supply object's storage for its name tag's bar (RendDX9 0x1016c1e0
 	// with Nametag.showSupply: the SupplyObject's +0x194 over its
 	// sharedStorageSize +0x2bc, 0..1) and the bar's kind (the tag's +0xc8:
@@ -4480,7 +4483,11 @@ private:
 		uint32_t object = 0;
 		int team = 0;
 		float storage = 0;   // sharedStorageSize left
-		float timeLeft = 0;  // supplyDropNumSecsToLive
+		// supplyDropNumSecsToLive; a commander's drop counts it from its
+		// landing (0x0043d820 keeps the time, 0x0043d880 checks it).
+		float timeLeft = 0;
+		float age = 0;        // since the drop (the minimap's 25 s, 0x0077d7e0)
+		bool landed = false;  // its first contact (0x005d0790 -> 0x0043d9c0)
 		float tick = 0;  // to the next of its 0.2 s updates (event 0x1d)
 		// The SupplyObject's template when it is a child of the object (a
 		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
@@ -4509,6 +4516,7 @@ private:
 		float timeToLive = 0;
 		float left = 0;
 		double nextCheck = 0;
+		double spawnedAt = 0; // the spawn's time (interface 0xc4c5 slot 0xb8 -> +0xdc, read by slot 0xbc)
 	};
 	std::map<uint32_t, Abandonment> m_abandonment;
 	void stepAbandoned();
