@@ -406,6 +406,7 @@ private:
 		uint16_t ghost = 0; // its networkable's
 		bool alive = false;
 		uint32_t soldier = 0, vehicle = 0;
+		uint32_t kit = 0, kitWearer = 0; // the kit its body wears (PlayerInfo::bodyKit) and that body
 		int seat = -1;
 		int kills = 0, deaths = 0, teamKills = 0;
 	};

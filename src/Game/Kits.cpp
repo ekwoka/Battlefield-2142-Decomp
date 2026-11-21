@@ -11,8 +11,13 @@
 //    (slot 100); the Titan records are asked whether that is a Titan's
 //    (0x00561b20: 0x005aa030 compares the hit object's root with each
 //    team's Titan; 0x005ad2e0 then keeps {kit, kit position - Titan
-//    position}). A soldier drops his kit when he dies and when he picks up
-//    another (0x0058b680 calls the drop first).
+//    position}). A soldier drops his kit when he picks up another
+//    (0x0058b680 calls the drop first) and, dead, once his body has landed:
+//    the soldier's tick (0x0058da3f) asks, on the server, whether his
+//    player is dead and the body landed (0x005eda20: no ragdoll, or one
+//    that touched something ragdollLandedDelay after the death), then the
+//    game logic's slot 0xf4 (0x004b9fd0 -> 0x0058b650) drops it. Until then
+//    the body wears it. A body removed first drops it (0x0058a3b0).
 //  - Its life on the ground: once let go it is enabled as a kit lying
 //    about (0x0056cf90 for the game mode 0x1d4c1) and the collision
 //    manager's timer (slot 0xd0, event 0x1d) removes it
@@ -114,6 +119,13 @@ bool GameWorld::isDroppedKit(uint32_t object) const
 		m_droppedKits.begin(), m_droppedKits.end(), [object](const DroppedKit& kit) { return kit.object == object; });
 }
 
+bool GameWorld::wornKit(uint32_t object) const
+{
+	return object != 0
+		&& (std::any_of(m_players.begin(), m_players.end(), [object](const auto& p) { return p && p->kitObject == object; })
+			|| std::any_of(m_corpses.begin(), m_corpses.end(), [object](const Corpse& c) { return c.kit.object == object; }));
+}
+
 // The first surface straight down from `from` (up to kDropRay): the nearest
 // of the static objects', the bodies' (a Titan's decks among them; not
 // `ignore`'s) and the terrain. False with none in reach.
@@ -160,13 +172,18 @@ float GameWorld::restHeight(const Player& player, float x, float z) const
 
 void GameWorld::dropKit(Player& player)
 {
-	world::Object* kit = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
-	const world::Object* soldier = m_objects.find(player.object);
-	if (!kit) {
+	if (!player.kitObject || !m_objects.find(player.kitObject)) {
 		player.kitObject = 0;
 		return;
 	}
-	raise("DropKit", {ScriptValue::player(player.id), ScriptValue::object(player.kitObject)});
+	const uint32_t body = player.object;
+	layKit(packKit(player), player.id, body);
+}
+
+// The kit's items with what they hold, taken from the player; the kit
+// itself stays where it is (worn by his body until layKit).
+GameWorld::DroppedKit GameWorld::packKit(Player& player)
+{
 	DroppedKit dropped;
 	dropped.object = player.kitObject;
 	dropped.team = player.team;
@@ -178,8 +195,6 @@ void GameWorld::dropKit(Player& player)
 	dropped.inHand = player.inHand;
 	dropped.battery = player.battery;
 	dropped.abilityModifier = player.abilityModifier;
-	const world::ObjectTemplate* t = kit->objectTemplate();
-	dropped.removeAt = m_time + (t ? templateNumber(*t, "timeToLiveAfterDeath", kDefaultKitLife) : kDefaultKitLife);
 	player.carried.clear();
 	player.inHand = -1;
 	player.weapon.reset();
@@ -191,12 +206,27 @@ void GameWorld::dropKit(Player& player)
 		player.weaponObject = 0;
 	}
 	player.kitObject = 0;
+	return dropped;
+}
+
+// The kit let go by its soldier's body (`body`, which may be gone) onto the
+// ground, its life (timeToLiveAfterDeath) starting now (0x0058a590).
+void GameWorld::layKit(DroppedKit dropped, int player, uint32_t body)
+{
+	world::Object* kit = m_objects.find(dropped.object);
+	if (!kit) {
+		return;
+	}
+	raise("DropKit", {findPlayer(player) ? ScriptValue::player(player) : ScriptValue::none(), ScriptValue::object(dropped.object)});
+	const world::ObjectTemplate* t = kit->objectTemplate();
+	dropped.removeAt = m_time + (t ? templateNumber(*t, "timeToLiveAfterDeath", kDefaultKitLife) : kDefaultKitLife);
+	const world::Object* soldier = m_objects.find(body);
 
 	// Straight down from the soldier: the nearest surface.
 	const world::Vec3 at = soldier ? soldier->position() : kit->position();
 	uint32_t hitObject = 0;
 	float surface = at.y;
-	const bool landed = surfaceBelow({at.x, at.y, at.z}, player.object, surface, hitObject);
+	const bool landed = surfaceBelow({at.x, at.y, at.z}, body, surface, hitObject);
 	if (landed) {
 		kit->setPosition({at.x, surface, at.z});
 		// 0x00561b20: on a Titan, it rides with it.
@@ -209,6 +239,7 @@ void GameWorld::dropKit(Player& player)
 		}
 	}
 	kit->setHidden(false);
+	kit->setFade(1);
 	m_droppedKits.push_back(std::move(dropped));
 }
 

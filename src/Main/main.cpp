@@ -8070,12 +8070,13 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
-			// A kit a living player carries is his soldier's child (0x005718d0
-			// -> 0x00571d10): it follows him and is skinned to his skeleton
+			// A player's kit is his soldier's child (0x005718d0 -> 0x00571d10),
+			// dead or alive, until HandleDrop lets it go (the body landed,
+			// 0x0058da3f): it follows him and is skinned to his skeleton
 			// (GameWorld::followKit); a dropped one stays (geometry.dropGeom).
 			std::map<uint32_t, uint32_t> wornKits;
 			for (const net::RemotePlayer& p : client.world().playerList()) {
-				const auto kit = p.alive && p.kitGhost ? ghostObjects.find(p.kitGhost) : ghostObjects.end();
+				const auto kit = p.kitGhost ? ghostObjects.find(p.kitGhost) : ghostObjects.end();
 				const auto body = p.soldierGhost ? ghostObjects.find(p.soldierGhost) : ghostObjects.end();
 				const world::Object* soldier = body != ghostObjects.end() ? objects.find(body->second) : nullptr;
 				if (world::Object* worn = kit != ghostObjects.end() && soldier ? objects.find(kit->second) : nullptr) {
