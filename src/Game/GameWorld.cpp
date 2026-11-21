@@ -509,7 +509,7 @@ void GameWorld::buildStaticCollision()
 bool GameWorld::movesByScript(uint32_t id)
 {
 	return findBody(id) || std::any_of(m_crates.begin(), m_crates.end(), [id](const Crate& c) { return c.object == id; })
-		|| std::any_of(m_players.begin(), m_players.end(), [id](const auto& player) { return player && player->kitObject == id; });
+		|| wornKit(id);
 }
 
 // A static object's collision (its tree's meshes in the soldier and
@@ -5315,6 +5315,9 @@ void GameWorld::resetRound()
 	m_parachutes.clear();
 	for (const Corpse& corpse : m_corpses) {
 		gone.push_back(corpse.object);
+		if (corpse.kit.object) {
+			gone.push_back(corpse.kit.object);
+		}
 	}
 	m_corpses.clear();
 	for (const SeatCorpse& corpse : m_seatCorpses) {
@@ -5564,6 +5567,17 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.seat = player->alive && player->vehicle ? player->seat : -1;
 	info.driving = info.seat == 0 && !isTitan(player->vehicle);
 	info.kit = player->alive ? player->kitObject : 0;
+	if (player->kitObject) {
+		info.bodyKit = player->kitObject;
+		info.bodyKitWearer = player->object;
+	} else {
+		for (const Corpse& corpse : m_corpses) {
+			if (corpse.player == id && corpse.kit.object) {
+				info.bodyKit = corpse.kit.object;
+				info.bodyKitWearer = corpse.object;
+			}
+		}
+	}
 	info.weapon = player->alive ? player->weaponObject : 0;
 	// The host's handles: the soldier (or the corpse) while its object is
 	// kept; aboard, the vehicle (its seat's remote-controlled object reads
@@ -8353,11 +8367,10 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 		}
 	}
 	const bool onFoot = !victim.vehicle;
-	// The kit falls where the soldier lies (0x00589890, Kits.cpp); killed
-	// in a seat it goes with the body.
-	if (onFoot || thrown) {
-		dropKit(victim);
-	} else if (victim.kitObject) {
+	// The body keeps wearing the kit until it has landed, then the kit falls
+	// where it lies (0x0058da3f, Kits.cpp); killed in a seat it goes with the body.
+	const bool keepKit = onFoot || thrown;
+	if (!keepKit && victim.kitObject) {
 		raise("DropKit", {ScriptValue::player(victim.id), ScriptValue::object(victim.kitObject)});
 	}
 	victim.alive = false;
@@ -8378,14 +8391,17 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 		}
 	}
 	victim.respawnIn = m_spawnTime * spawnMod;
-	for (const uint32_t object : {victim.weaponObject, victim.kitObject}) {
+	for (const uint32_t object : {victim.weaponObject, keepKit ? 0u : victim.kitObject}) {
 		if (object) {
 			m_hitPoints.erase(object);
 			m_effects.releaseAnchor(object);
 			m_objects.remove(object);
 		}
 	}
-	victim.weaponObject = victim.kitObject = 0;
+	victim.weaponObject = 0;
+	if (!keepKit) {
+		victim.kitObject = 0;
+	}
 	// Man down (sv.manDownTime): the body lies where it fell and a medic
 	// may revive it; killed in a vehicle, the soldier is gone at once.
 	if (onFoot && m_manDownTime > 0 && !m_giveUp) {
@@ -8487,6 +8503,11 @@ void GameWorld::finishDeath(Player& victim, BodyFate fate)
 	victim.manDown = false;
 	victim.manDownLeft = 0;
 	raise("PlayerDeath", {ScriptValue::player(victim.id), ScriptValue::object(soldier)});
+	// A body that goes, or has already landed, lets its kit go now; a falling
+	// corpse keeps wearing it (stepCorpses).
+	if (victim.kitObject && !(fate == BodyFate::Corpse && soldier && m_objects.find(soldier) && !bodyLanded(victim.id))) {
+		dropKit(victim);
+	}
 	if (soldier) {
 		if (fate == BodyFate::Corpse && m_objects.find(soldier)) {
 			// A wreck: its armour stays at 0 or below.
@@ -8498,6 +8519,10 @@ void GameWorld::finishDeath(Player& victim, BodyFate fate)
 			corpse.pose = victim.pose;
 			corpse.worldPose = victim.worldPose;
 			corpse.diedAt = victim.diedAt;
+			corpse.player = victim.id;
+			if (victim.kitObject) {
+				corpse.kit = packKit(victim);
+			}
 			// The soldier object's own template (its armour's).
 			const world::ObjectTemplate* t = m_objects.find(soldier)->objectTemplate();
 			if (!t && !victim.soldierTemplate.empty()) {
@@ -8542,6 +8567,9 @@ void GameWorld::stepCorpses(float seconds)
 		world::Object* body = m_objects.find(corpse.object);
 		if (!body) {
 			m_hitPoints.erase(corpse.object);
+			if (corpse.kit.object) {
+				layKit(std::move(corpse.kit), corpse.player, 0);
+			}
 			it = m_corpses.erase(it);
 			continue;
 		}
@@ -8553,6 +8581,15 @@ void GameWorld::stepCorpses(float seconds)
 			body->setRotation({0, 0, 0});
 		}
 		const bool landed = !corpse.ragDoll || (corpse.ragDoll->touched() && m_time > corpse.diedAt + corpse.landedDelay);
+		if (world::Object* kit = corpse.kit.object ? m_objects.find(corpse.kit.object) : nullptr) {
+			kit->setPosition(body->position());
+			kit->setRotation(body->rotation());
+			kit->setFade(body->fade());
+			// 0x0058da3f: worn until the body has landed (0x005eda20).
+			if (landed) {
+				layKit(std::exchange(corpse.kit, {}), corpse.player, corpse.object);
+			}
+		}
 		const bool begin = (m_time > corpse.diedAt + corpse.stayAsWreck && landed) || m_time > corpse.diedAt + 60;
 		if (begin && corpse.fadeFrom < 0) {
 			corpse.fadeFrom = m_time;
@@ -8564,6 +8601,9 @@ void GameWorld::stepCorpses(float seconds)
 			body->setFade(std::clamp(static_cast<float>(left / corpse.afterDestroyed), 0.0f, 1.0f));
 		}
 		if (corpse.fadeFrom >= 0 && corpse.afterDestroyed + corpse.fadeFrom - m_time <= 0) {
+			if (corpse.kit.object) {
+				layKit(std::move(corpse.kit), corpse.player, corpse.object); // removed before landing: 0x0058a3b0
+			}
 			m_hitPoints.erase(corpse.object);
 			m_objects.remove(corpse.object);
 			it = m_corpses.erase(it);
@@ -8909,7 +8949,15 @@ void GameWorld::revive(Player& victim, Player* medic, float restoreHitPoints)
 	// The revived soldier's kit (its event 0x19, 0x00587b90): the closest
 	// on the ground within 10 m (his own, as a rule), else a new one of the
 	// player's choice (0x004bfcc0).
-	if (!pickUpClosestKit(victim, 10.0f)) {
+	// shortcut: revived before his body landed he keeps the kit he still wears; retail's revive asks for a ground kit
+	// regardless (its worn-kit outcome unexamined), revisit if a medic's early revive shows a different kit.
+	if (victim.kitObject) {
+		if (world::ObjectTemplate* inHand = m_templates.find(victim.weaponTemplate)) {
+			if (world::Object* held = m_objects.create(inHand, body->position(), body->rotation())) {
+				victim.weaponObject = held->id();
+			}
+		}
+	} else if (!pickUpClosestKit(victim, 10.0f)) {
 		world::ObjectTemplate* kit = m_templates.find(
 			victim.kitTemplate.empty() ? (victim.team == 1 ? "Pac_Assault" : "EU_Assault") : victim.kitTemplate);
 		if (kit) {
@@ -10508,6 +10556,12 @@ bool GameWorld::skeletonPose(uint32_t object, const anim::Skeleton& skeleton, st
 			break;
 		}
 	}
+	for (const Corpse& corpse : m_corpses) {
+		if (object != 0 && corpse.kit.object == object) {
+			object = corpse.object; // a corpse still wearing it (0x0058da3f)
+			break;
+		}
+	}
 	if (const auto worn = m_wornKits.find(object); worn != m_wornKits.end()) {
 		object = worn->second;
 	}
@@ -10913,6 +10967,15 @@ void GameWorld::stepPlayersAfter(float seconds)
 		} else {
 			if (player.manDown) {
 				stepRagDoll(player, seconds);
+				if (player.kitObject) {
+					if (const world::Object* body = m_objects.find(player.object)) {
+						followKit(player, *body);
+					}
+					// 0x0058da3f: the dead soldier's kit goes once his body has landed (0x005eda20).
+					if (bodyLanded(player.id)) {
+						dropKit(player);
+					}
+				}
 				player.manDownLeft -= seconds;
 				if (player.manDownLeft <= 0) {
 					finishDeath(player);
@@ -15300,9 +15363,7 @@ void GameWorld::addBodies()
 		world::Object& object = *owned;
 		// A worn kit follows its soldier and has no independent collision.
 		// Do not mark it checked: when dropped it must acquire its own body.
-		if (std::any_of(m_players.begin(), m_players.end(), [&](const auto& player) {
-				return player && player->kitObject == object.id();
-			})) {
+		if (wornKit(object.id())) {
 			continue;
 		}
 		const auto checked = std::lower_bound(m_checked.begin(), m_checked.end(), object.id());

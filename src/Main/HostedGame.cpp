@@ -2448,7 +2448,26 @@ void HostedGame::trackPlayers()
 			}
 		}
 		PlayerSeen& s = seen->second;
-		if (p.alive && (!s.alive || s.soldier != p.soldier)) {
+		// The kit let go by its body (HandleDrop, 0x0050c1c0: the game logic's
+		// slot 61 with the kit's position): on landing dead (0x0058da3f) or
+		// for another kit (0x0058b680 drops first).
+		if (s.kit && s.kit != p.bodyKit) {
+			if (const uint16_t kitGhost = ghostOfObject(s.kit)) {
+				const world::Object* kit = m_round->objects().find(s.kit);
+				const auto bits = [](float f) {
+					uint32_t u;
+					std::memcpy(&u, &f, sizeof u);
+					return u;
+				};
+				const world::Vec3 at = kit ? kit->position() : world::Vec3 {};
+				sendToPlaying(eventOf(net::kEvHandleDrop, {static_cast<uint32_t>(p.id) & 0xff, kitGhost,
+					ghostOfObject(s.kitWearer), bits(at.x), bits(at.y), bits(at.z)}));
+			}
+		}
+		const bool newKit = p.alive && s.alive && s.soldier == p.soldier && p.kit && p.kit != s.kit;
+		s.kit = p.bodyKit;
+		s.kitWearer = p.bodyKitWearer;
+		if (p.alive && (!s.alive || s.soldier != p.soldier || newKit)) {
 			// Spawned: the kit and the soldier it holds (HandlePickup, 0x0050bfd0).
 			sendToPlaying(eventOf(net::kEvHandlePickup, {static_cast<uint32_t>(p.id) & 0xff, ghostOfObject(p.kit),
 				ghostOfObject(p.soldier), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}));

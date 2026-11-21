@@ -577,6 +577,9 @@ public:
 		double squadOrderPoints = 0, squadOrderMax = 0;
 		int fieldUnlockCredits = 0;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
+		// The kit the player's body still wears, living, down or a corpse yet
+		// to land (0x0058da3f), and that body: its HandleDrop is due when it goes.
+		uint32_t bodyKit = 0, bodyKitWearer = 0;
 		// What the host module's pmgr_p_get hands the scripts (0x0056ae00's
 		// "vehicle" and "defaultvehicle"): the player's weak handles, the
 		// vehicle (+0x80, slot 0x4c) and the default vehicle (+0xcc, slot
@@ -4383,6 +4386,10 @@ private:
 	// other bodies met.
 	bool m_predicting = false;
 	void dropKit(Player& player);
+	DroppedKit packKit(Player& player);
+	void layKit(DroppedKit dropped, int player, uint32_t body);
+	// A kit a soldier or a dead one's body still wears (no collision of its own).
+	bool wornKit(uint32_t object) const;
 	bool surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& surface, uint32_t& object) const;
 	// A thrown gadget's resting height at (x, z): what is under the soldier's reach (a deck, a roof), the terrain else.
 	float restHeight(const Player& player, float x, float z) const;
@@ -4410,6 +4417,8 @@ private:
 		float stayAsWreck = 20;     // armor.timeToStayAsWreck (+0x158)
 		float afterDestroyed = 0;   // armor.timeToStayAfterDestroyed (+0x15c)
 		double fadeFrom = -1;       // +0x64: when the countdown began
+		int player = -1;            // whose body it was
+		DroppedKit kit;             // still worn until the body lands (object 0: none)
 	};
 	std::vector<Corpse> m_corpses;
 	void stepCorpses(float seconds);
