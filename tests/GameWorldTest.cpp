@@ -3069,6 +3069,7 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 		launcher->settings()["ammo.magSize"] = "1";
 		launcher->settings()["ammo.nrOfMags"] = "4";
 		launcher->settings()["ammo.reloadTime"] = "0.2";
+		launcher->settings()["fire.busyUntilButtonRelease"] = "1";
 		launcher->settings()["target.targetSystem"] = "TSWireGuided";
 		launcher->settings()["target.disableGuidanceOnReload"] = "1";
 		world::ObjectTemplate* handgun = range.templates.create("GenericFireArm", "eu_handgun");
@@ -3097,8 +3098,7 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 		input.aimPitch = 3;
 		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
-		input.fire = false;
-		input.turn = 30;
+		input.turn = 30; // fire still held: the launcher stays busy, no reload
 		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
 		input.turn = 0;
@@ -3110,7 +3110,7 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 			range.world->projectiles().front().velocity.z);
 		CHECK(!range.world->projectiles().front().wireLost);
 		CHECK(first > 0.08f);
-		// Guided, the auto reload waits.
+		// Fire held: busyUntilButtonRelease keeps the reload off.
 		CHECK(range.world->playerWeapon()->roundsInMag() == 0);
 		CHECK(!range.world->playerWeapon()->reloading());
 		// Out of (or into) the sights: the wire still steers.
@@ -3155,8 +3155,8 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 // A wire-guided round that goes out of the shooter's sight stays guided
 // (0x005e27a0: a cut line returns at 0x005e2ac5 without moving the target
 // and keeps the guided round +0x64): it chases the last point while the
-// line is cut, the reload waits, and the steering comes back once the
-// line clears.
+// line is cut and the steering comes back once the line clears (fire held
+// throughout, so the launcher's busyUntilButtonRelease keeps the reload off).
 TEST(GameWorld_WireGuidanceSurvivesLostSight)
 {
 	Range range;
@@ -3173,6 +3173,7 @@ TEST(GameWorld_WireGuidanceSurvivesLostSight)
 	launcher->settings()["ammo.magSize"] = "1";
 	launcher->settings()["ammo.nrOfMags"] = "4";
 	launcher->settings()["ammo.reloadTime"] = "0.2";
+	launcher->settings()["fire.busyUntilButtonRelease"] = "1";
 	launcher->settings()["target.targetSystem"] = "TSWireGuided";
 	launcher->settings()["target.disableGuidanceOnReload"] = "1";
 	auto* missile = range.templates.create("GenericProjectile", "missile");
@@ -3189,9 +3190,7 @@ TEST(GameWorld_WireGuidanceSurvivesLostSight)
 	input.fire = true;
 	input.aimPitch = 3;
 	range.world->setPlayerInput(input);
-	range.world->tick(1 / 30.0f);
-	input.fire = false;
-	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f); // fire stays held: the reload would drop the wire
 	for (int i = 0; i < 10; ++i) range.world->tick(1 / 30.0f);
 	CHECK(range.world->projectiles().size() == 1);
 	if (range.world->projectiles().empty()) return;
@@ -8146,10 +8145,12 @@ TEST(GameWorld_OrderTagByItsMarker)
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 1.0f), {10, 3, 20}));     // the point over water
 }
 
-// The profile's auto reload waits while the player still steers an
-// aim-guided round (eu_av with target.disableGuidanceOnReload): reloading at
-// once would cut the wire and drop the zoom. It reloads once the round is gone.
-TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
+// The profile's auto reload against a wire launcher (as_av / eu_av:
+// busyUntilButtonRelease, magSize 1, disableGuidanceOnReload). Retail's
+// auto reload (0x00594280) has no guided-round test: while fire is held the
+// launcher stays busy and the round is steered; on release the reload starts
+// and its start (0x005e23b0) drops the round, which flies on unguided.
+TEST(GameWorld_ProfileAutoReloadDropsGuidanceOnRelease)
 {
 	Range range;
 	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
@@ -8158,6 +8159,7 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 	launcher->settings()["ammo.magSize"] = "1";
 	launcher->settings()["ammo.nrOfMags"] = "4";
 	launcher->settings()["ammo.reloadTime"] = "0.1";
+	launcher->settings()["fire.busyUntilButtonRelease"] = "1";
 	launcher->settings()["target.disableGuidanceOnReload"] = "1";
 	world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "missile");
 	missile->settings()["seek.targetType"] = "TTUnique";
@@ -8172,11 +8174,9 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 	input.fire = true;
 	input.aimPitch = 3;
 	range.world->setPlayerInput(input);
-	range.world->tick(1 / 30.0f);
-	input.fire = false;
-	range.world->setPlayerInput(input);
-	range.world->tick(1 / 30.0f);
-	range.world->tick(1 / 30.0f); // the empty magazine: the reload would have started by now
+	for (int i = 0; i < 5; ++i) {
+		range.world->tick(1 / 30.0f); // fire held: busy, no reload
+	}
 	input.turn = 30;
 	range.world->setPlayerInput(input);
 	range.world->tick(1 / 30.0f);
@@ -8191,12 +8191,22 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 	if (!range.world->projectiles().empty()) {
 		const game::Projectile& round = range.world->projectiles().front();
 		CHECK(!round.wireLost);
-		CHECK(std::atan2(round.velocity.x, round.velocity.z) > 0.1f); // still steered
+		CHECK(std::atan2(round.velocity.x, round.velocity.z) > 0.1f); // steered while held
 	}
-	for (int i = 0; i < 60; ++i) {
-		range.world->tick(1 / 30.0f); // the round expires, then the reload runs
+	input.fire = false;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerWeapon()->reloading()); // released: the reload starts at once
+	CHECK(range.world->projectiles().size() == 1);
+	if (!range.world->projectiles().empty()) {
+		CHECK(range.world->projectiles().front().wireLost); // and drops the round
 	}
-	CHECK(range.world->playerWeapon()->roundsInMag() == 1);
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->roundsInMag() == 1); // reloaded while the round still flies
+	CHECK(range.world->projectiles().size() == 1);
 }
 
 // The Rorsch declares the zoom ability on the firearm, not its unlock container.
