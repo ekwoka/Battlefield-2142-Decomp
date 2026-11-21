@@ -167,7 +167,14 @@ public:
 		float eyeHeight = 0;  // the eye over the soldier at the tick
 		float eyeTarget = 0;  // the pose's height it eases towards
 	};
-	bool view(View& view, float aspect) const;
+	// On foot the view rides the first-person camera bone when cameraShake
+	// is on (anim::rideCameraBone); `cameraBone` false gives the camera
+	// itself, where the first-person skeleton is placed.
+	bool view(View& view, float aspect, bool cameraBone = true) const;
+	// GeneralSettings.CameraShake (GSCameraShake, GeneralSettings +0xb9,
+	// default 1, 0x00408269): the view's ride on the camera bone. The
+	// shakes (speed, hit, recoil, rumble) don't ask it.
+	bool cameraShake = true;
 	// Local map direction in any vehicle seat with a first-person camera, in degrees.
 	// The hull heading in PlayerInfo does not follow a gun or gunner's camera.
 	bool seatMapHeading(float& degrees) const;
@@ -397,6 +404,9 @@ private:
 	float m_hitLeft = 0, m_hitStrength = 0;
 	game::CameraRecoil m_cameraRecoil;
 	float m_recoilShake = 0;
+	// The soldier camera's rumble (anim::cameraProximityShake): its phase,
+	// the nearness the last scan found, the time since it, the roll now.
+	float m_rumblePhase = 0, m_rumbleNearness = 0, m_rumbleScan = 0, m_rumble = 0;
 	uint32_t m_lastGunShots = 0;
 	uint32_t m_shakeVehicle = 0;
 	float m_clock = 0;

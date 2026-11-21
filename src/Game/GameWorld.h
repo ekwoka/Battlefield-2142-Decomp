@@ -2045,6 +2045,16 @@ public:
 	// The local camera's hit shake this tick (the largest; 0 for none),
 	// taken once: 0x00610450's argument.
 	float takeCameraShake() { return std::exchange(m_cameraShake, 0.0f); }
+	// The soldier camera's rumble source (0x00611fc0, each second in the
+	// Inside and Nose views): of the objects the object manager finds within
+	// 7 m of the camera (*0x00a739b8; flags 0x1000008, filter 0x00610010)
+	// whose root is a control object in use (its own seat, 0x005c87b0 with
+	// 0) with a mobile node (slot 0x164) of 5000 kg or more (slot 0x114,
+	// *0x0097940c), the camera's own root aside, the largest (7 - distance)
+	// / 7; 0 for none.
+	// shortcut: measures from each vehicle's root position only; the exe
+	// also meets its child parts at their own positions.
+	float heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot) const;
 	// A player's hit strength for its networkable's record (+0x1d8, 0..25
 	// on the wire): the last blast on its vehicle, for the next two records
 	// (+0x1dc; each call counts one), else 0.

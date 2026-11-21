@@ -8605,6 +8605,7 @@ int runGame(Options& options, Session& session)
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
 			driveTrace();
+			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
@@ -8626,6 +8627,7 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.insideView();
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
+			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);

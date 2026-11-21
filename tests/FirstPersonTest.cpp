@@ -218,6 +218,22 @@ TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 		const anim::Matrix& c = rig.pose()[0];
 		CHECK(m[14] > c[14] && m[13] < c[13] + 0.05f);
 	}
+	// Sprinting (1p_sprint from 5.5 m/s) moves the camera bone a few
+	// centimetres off its setup pose: the view's bob (cameraBoneDelta).
+	{
+		anim::AnimationInput sprint;
+		sprint.speed = 6;
+		sprint.forward = 1;
+		sprint.movementSeconds = 1 / 30.0f;
+		float most = 0;
+		for (int i = 0; i < 120; ++i) {
+			rig.update(sprint, 1 / 30.0f);
+			const anim::Matrix d = anim::cameraBoneDelta(*skeleton, rig.pose(), rig.cameraNode());
+			most = std::max(most, std::sqrt(d[12] * d[12] + d[13] * d[13] + d[14] * d[14]));
+		}
+		CHECK(playing("sprint"));
+		CHECK(most > 0.02f && most < 0.1f);
+	}
 }
 
 TEST(FirstPerson_FragComesBackInHandAfterTheThrow)
@@ -496,4 +512,65 @@ TEST(FirstPerson_SeatZoomWhileCycling)
 	tank.reset(launcher, 1.1f);
 	tank.step(true, false, true, 1.1f, 1 / 30.0f, false, true);
 	CHECK(tank.state.level() == 1);
+}
+
+// The soldier's view rides the animated camera bone (0x005edeb0): the delta
+// is the identity at the setup pose; a bone rolled and lifted in its own
+// frame rolls and lifts the view the same way about and along the view's
+// axes, whatever the yaw and pitch.
+TEST(FirstPerson_ViewRidesTheCameraBone)
+{
+	anim::Skeleton skeleton;
+	skeleton.nodes.push_back({"Camerabone", -1, {0, 0, 0, 1}, {-0.024f, 1.504f, -0.111f}});
+	const std::vector<anim::Matrix> setup = anim::worldMatrices(skeleton, anim::setupPose(skeleton));
+	const anim::Matrix identity = anim::cameraBoneDelta(skeleton, setup, 0);
+	for (int i = 0; i < 16; ++i) {
+		CHECK(near(identity[static_cast<size_t>(i)], i % 5 == 0 ? 1.0f : 0.0f));
+	}
+	const float yaw0 = 0.7f, pitch0 = -0.3f;
+	{
+		anim::Position eye {10, 20, 30};
+		float yaw = yaw0, pitch = pitch0, roll = 0;
+		anim::rideCameraBone(identity, eye, yaw, pitch, roll);
+		CHECK(near(eye[0], 10) && near(eye[1], 20) && near(eye[2], 30) && near(yaw, yaw0) && near(pitch, pitch0) && near(roll, 0));
+	}
+	// The bone rolled 2 degrees about its forward (z) and 3 cm up its y.
+	const float angle = 2 * 3.14159265f / 180;
+	const float h = angle / 2;
+	anim::LocalPose pose = anim::setupPose(skeleton);
+	pose.rotations[0] = {0, 0, std::sin(h), std::cos(h)};
+	pose.positions[0][1] += 0.03f;
+	const anim::Matrix delta = anim::cameraBoneDelta(skeleton, anim::worldMatrices(skeleton, pose), 0);
+	anim::Position eye {10, 20, 30};
+	float yaw = yaw0, pitch = pitch0, roll = 0;
+	anim::rideCameraBone(delta, eye, yaw, pitch, roll);
+	CHECK(near(yaw, yaw0) && near(pitch, pitch0));
+	CHECK(near(std::fabs(roll), angle));
+	// Lifted along the view's up (-sy sp, cp, -cy sp).
+	const float sy = std::sin(yaw0), cy = std::cos(yaw0), sp = std::sin(pitch0), cp = std::cos(pitch0);
+	CHECK(near(eye[0], 10 - 0.03f * sy * sp) && near(eye[1], 20 + 0.03f * cp) && near(eye[2], 30 - 0.03f * cy * sp));
+	// The rolled up, rebuilt as render::Camera does from the roll (Rodrigues
+	// of the world up about the view axis), is the bone's.
+	const float k[3] = {sy * cp, sp, cy * cp};
+	const float c = std::cos(roll), s = std::sin(roll);
+	float up[3] = {-k[2] * s + k[0] * k[1] * (1 - c), c + k[1] * k[1] * (1 - c), k[0] * s + k[2] * k[1] * (1 - c)};
+	float dotK = up[0] * k[0] + up[1] * k[1] + up[2] * k[2];
+	for (int i = 0; i < 3; ++i) up[i] -= dotK * k[i];
+	const float len = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+	const float axes[3][3] = {{cy, 0, -sy}, {-sy * sp, cp, -cy * sp}, {sy * cp, sp, cy * cp}};
+	for (int j = 0; j < 3; ++j) {
+		float want = 0;
+		for (int r = 0; r < 3; ++r) want += delta[static_cast<size_t>(4 + r)] * axes[r][j];
+		CHECK(near(up[j] / len, want, 1e-3f));
+	}
+}
+
+// The soldier camera's rumble: sin(phase x 2 pi) x 0.3 x nearness degrees.
+TEST(FirstPerson_CameraProximityShake)
+{
+	CHECK(near(anim::cameraProximityShake(0.25f, 1), 0.3f));
+	CHECK(near(anim::cameraProximityShake(0.25f, 0.5f), 0.15f));
+	CHECK(near(anim::cameraProximityShake(0.75f, 1), -0.3f));
+	CHECK(anim::cameraProximityShake(0.4f, 0) == 0);
+	CHECK(anim::kCameraProximityRate == 10.0f);
 }

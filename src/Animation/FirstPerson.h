@@ -249,6 +249,29 @@ private:
 Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode,
 	const Position& eye, float yaw, float pitch, const CameraSpring::V& springOffset);
 
+// The soldier's view rides the animated camera bone (GSCameraShake on: the
+// Soldier's control-object slot 0x140, 0x005edeb0, called by the Inside
+// view 0x00610620): view = the bone's animated model matrix x the inverse
+// of its setup one (template +0x358) x the camera's. The skeleton stays
+// placed from the camera itself (0x005ee980 reads slot 0xe4, not the
+// view), so on screen the arms ride the bone and the world bobs.
+// cameraBoneDelta is that first product (identity while the bone holds its
+// setup pose), in the camera's frame (x right, y up, z forward);
+// rideCameraBone applies it to a view at `eye`, yaw and pitch (radians, as
+// firstPersonPlacement), giving the moved eye, yaw, pitch and the roll
+// about the view axis (render::Camera's).
+Matrix cameraBoneDelta(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode);
+void rideCameraBone(const Matrix& delta, Position& eye, float& yaw, float& pitch, float& roll);
+
+// The soldier camera's rumble near heavy vehicles, degrees of roll
+// (0x00610240's middle part, with the camera's parent a Soldier, 0x9493):
+// sin(phase x 2 pi) x 0.3 x nearness (*0x00a739bc), the phase running 10
+// a second wrapped at 1 (*0x00a739b4), the nearness 0x00611fc0's (each
+// second: the largest (7 - distance) / 7 of the heavy vehicles round the
+// camera, GameWorld::heavyVehicleNearness).
+float cameraProximityShake(float phase, float nearness);
+constexpr float kCameraProximityRate = 10.0f; // *0x00a739b4, phase per second
+
 // A seat camera's shakes, degrees of roll (the Camera object's 0x00610240):
 // the speed shake after `time` above the template's cameraShakeStartSpeed
 // (sin(fmod(time x 40, 2 pi)) x 0.5 x the share of the way to

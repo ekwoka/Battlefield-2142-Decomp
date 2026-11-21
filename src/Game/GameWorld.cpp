@@ -2799,6 +2799,22 @@ void GameWorld::setDogtagCount(int id, int count)
 	}
 }
 
+float GameWorld::heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot) const
+{
+	constexpr float kRadius = 7.0f;    // *0x00a739b8
+	constexpr float kHeavy = 5000.0f;  // *0x0097940c
+	float nearness = 0;
+	for (const Body& body : m_bodies) {
+		if (!body.vehicle || body.fixed || body.object == ownRoot || body.vehicle->mass() < kHeavy
+			|| body.occupants.empty() || body.occupants[0] < 0) {
+			continue;
+		}
+		const physics::Vec3 d = body.body.position - camera;
+		nearness = std::max(nearness, (kRadius - std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z)) / kRadius);
+	}
+	return nearness;
+}
+
 float GameWorld::takeSentShake(int id)
 {
 	Player* player = findPlayer(id);

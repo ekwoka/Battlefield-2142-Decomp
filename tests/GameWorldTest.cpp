@@ -8544,3 +8544,53 @@ TEST(GameLogic_TicketLimitOnlyOnTheWayDown)
 	logic.setTickets(1, 5);
 	CHECK(raised.size() == 2 && raised[1].second == -3);
 }
+
+// The soldier camera's rumble source (0x00611fc0): an occupied mobile
+// control object of 5000 kg or more within 7 m gives (7 - d) / 7; an empty
+// one, a light one, the camera's own root or one farther away none.
+TEST(GameWorld_HeavyVehicleNearnessForTheCameraRumble)
+{
+	for (const char* mass : {"6000", "1000"}) {
+		const bool heavy = std::string(mass) == "6000";
+		Range range;
+		range.collisionTemplates.add("crate_mesh", boxMesh(1));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "crate_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		crate->settings()["mass"] = mass;
+		range.addEntry(*crate);
+		makeMobile(*crate, "crate_mesh");
+		crate->children().push_back({"crate_engine", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		world::Object* car = range.objects.create(crate, {info.position.x, 1, info.position.z + 2});
+		const auto press = [&](bool use) {
+			game::SoldierInput input;
+			input.use = use;
+			range.world->setPlayerInput(input);
+			range.world->tick(1 / 30.0f);
+		};
+		range.world->tick(1 / 30.0f);
+		physics::Vec3 at {};
+		for (const auto& v : range.world->vehicleList()) {
+			if (v.object == car->id()) at = v.position + physics::Vec3 {3.5f, 0, 0};
+		}
+		CHECK(range.world->heavyVehicleNearness(at, 0) == 0); // empty
+		press(true);
+		press(false);
+		CHECK(range.world->playerInfo(me, info) && info.vehicle == car->id());
+		physics::Vec3 position {};
+		for (const auto& v : range.world->vehicleList()) {
+			if (v.object == car->id()) position = v.position;
+		}
+		const physics::Vec3 d = position - at;
+		const float expected = heavy ? (7 - std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z)) / 7 : 0.0f;
+		CHECK(std::fabs(range.world->heavyVehicleNearness(at, 0) - expected) < 1e-4f);
+		CHECK(!heavy || expected > 0.4f);
+		CHECK(range.world->heavyVehicleNearness(at, car->id()) == 0);                   // the camera's own root
+		CHECK(range.world->heavyVehicleNearness(at + physics::Vec3 {10, 0, 0}, 0) == 0); // out of reach
+	}
+}

@@ -3232,9 +3232,27 @@ The hit shake (`0x00610450`, slot 19 of `0x00979a50`): 0.6 s
 slot `0x4c`; `GameWorld::takeCameraShake`, rolled on foot too. With
 `cameraShakeSensitivity` (`+0x3cc`) set, `0x00610450` also keeps the
 largest hit and its time (`+0x358` / `+0x360`), which nothing found reads.
-(A soldier camera's own
-bob, `+0x3d8`, and the `0x006101c0` shake started by `0x00610180` are not
-rewritten.) The camera never sinks below the terrain + 0.09
+The soldier camera's rumble (`+0x3d8`, its parent a Soldier, `0x9493`):
+sin(phase × 2π) × 0.3 × the nearness (`*0x00a739bc`), the phase running 10
+a second wrapped at 1 (`*0x00a739b4`); every second (`*0x00a73a00`, from
+the camera update `0x00612511`) `0x00611fc0` sets the nearness (`+0x3d0`)
+in the Inside and Nose views to the largest (7 − d) / 7 (`*0x00a739b8`) of
+the objects round the camera whose root is a control object in use (slot
+`0x18(0)`) with a mobile node (slot `0x164`) of 5000 kg or more (slot
+`0x114`, `*0x0097940c`; filter `0x00610010`), its own root aside
+(`GameWorld::heavyVehicleNearness`, `anim::cameraProximityShake`; the
+rewrite measures from vehicle roots only). The Inside view also asks the
+control object above the camera (slot `0x140`): the Soldier's
+(`0x005edeb0`), with `GSCameraShake` on (GeneralSettings `+0xb9`, default
+1) and the first-person mode (`+0x2f0` 0, not man down `+0x28c`), turns
+the view by its first-person skeleton's animated `Camerabone` (node 0 of
+`+0x2c0`'s instance) × the inverse of that bone's setup matrix (template
+`+0x358`) before the camera's matrix; the skeleton stays placed from the
+camera's own matrix (`0x005ee980`: slot `0xe4`), so the arms ride the bone
+and the world bobs: the run's 0.9 cm / 0.3°, the sprint's 4 cm / 1° on
+eu_ar_rifle (`anim::rideCameraBone`, `PlayerCamera::view`; not under a
+parachute or in a seat, where the rewrite doesn't pose the rig). The
+camera never sinks below the terrain + 0.09
 (`*0x00a73a04`). `PlayerCamera::View::roll`, drawn through
 `render::Camera::roll`. Template defaults (`0x00610fd0`): CVMInside,
 CVMChase, CVMFlyBy and CVMFrontChase on, followStiffness 1, chaseDistance
