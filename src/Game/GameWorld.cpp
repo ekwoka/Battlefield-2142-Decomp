@@ -10869,16 +10869,11 @@ void GameWorld::stepPlayersBefore(float seconds)
 				|| (seatedLayout && m_player->seat >= 0 && static_cast<size_t>(m_player->seat) < seatedLayout->seats.size()
 					&& passengerWeapon(seatedLayout->seats[static_cast<size_t>(m_player->seat)]));
 			if (ownWeapon) {
+				// A round in flight doesn't hold the reload (0x00594280 reads only
+				// the weapon's slot 0x80): a wire launcher (as_av / eu_av,
+				// busyUntilButtonRelease) is guided only while fire is held, and
+				// the reload on release drops its round (disableGuidanceOnReload).
 				wanted = m_player->weapon && wantsAutoReload(*m_player->weapon);
-				// Wait while a round is actively guided (the player's own wire,
-				// launcher still in hand): reloading at once would cut it and drop
-				// the zoom; it reloads once the round is gone.
-				const Player& me = *m_player;
-				wanted = wanted && !std::any_of(m_projectiles.begin(), m_projectiles.end(), [&me](const Projectile& p) {
-					return p.alive && !p.visual && p.player == me.id && p.settings
-						&& p.settings->seek == ProjectileSettings::Seek::Aim && !p.wireLost
-						&& (!p.wireEndsWithWeapon || (me.vehicle == p.wireVehicle && me.weaponObject == p.wireWeapon));
-				});
 			} else if (const Body* body = findBody(m_player->vehicle);
 					   body && m_player->seat >= 0 && static_cast<size_t>(m_player->seat) < body->guns.size()) {
 				const Body::Gun& gun = body->guns[static_cast<size_t>(m_player->seat)];
