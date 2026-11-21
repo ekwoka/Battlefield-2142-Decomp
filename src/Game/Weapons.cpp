@@ -253,7 +253,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.acceleration = number(t, "acceleration", 0);
 	s.deAcceleration = number(t, "deAcceleration", 0);
 	s.maxSpeed = number(t, "maxSpeed", 0);
-	s.hasDirection = number(t, "hasDirection", 0) != 0;
+	s.hasDirection = number(t, "hasDirection", 1) != 0; // 0x005b3648
 	s.startDelay = number(t, "startDelay", 0);
 	s.hasFollow = std::find(components.begin(), components.end(), "DefaultFollowComp") != components.end();
 	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and

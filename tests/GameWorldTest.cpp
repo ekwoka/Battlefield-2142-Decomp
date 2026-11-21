@@ -8300,10 +8300,12 @@ TEST(GameWorld_ToggleWhenNoAmmoFallsBackToThePrimary)
 // The rocket's engine (0x005b3e60): the shipped eu_av fires eu_av_missile at
 // 4 m/s; startDelay (0.2 s) later the engine pushes it by acceleration
 // (100) along the wire-guided follow's heading up to maxSpeed (50). A
-// round without a follow pushes only with hasDirection.
+// round without a follow pushes along its nose with hasDirection, which the
+// template's constructor sets (0x005b3648): an unguided rocket speeds up
+// unless it sets hasDirection 0.
 TEST(GameWorld_RocketEngine)
 {
-	for (const int kind : {0, 1, 2}) { // 0 the AV missile, 1 no follow, 2 no follow but hasDirection
+	for (const int kind : {0, 1, 2}) { // 0 the AV missile, 1 no follow, hasDirection 0, 2 no follow, the default
 		Range range;
 		world::ObjectTemplate* av = range.templates.find("eu_ar_rifle");
 		auto& s = av->settings();
@@ -8328,8 +8330,8 @@ TEST(GameWorld_RocketEngine)
 			m->components().push_back("SeekClosestTargetComp");
 			m->components().push_back("DefaultFollowComp");
 		}
-		if (kind == 2) {
-			m->settings()["hasDirection"] = "1";
+		if (kind == 1) {
+			m->settings()["hasDirection"] = "0";
 		}
 		CHECK(range.world->spawnPlayer(2) != nullptr);
 		game::SoldierInput input;
