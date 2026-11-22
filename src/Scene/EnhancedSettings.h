@@ -46,6 +46,7 @@ struct EnhancedSettings {
 	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow); retail lets it fall through
 	// Interface, also only with enhanced.enabled:
 	bool chaseRoll = true; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); retail keeps them level
+	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 	// Drawing, also only with enhanced.enabled; experimental, off by default:
 	bool tvEffect = false; // enhanced.tvEffect: the guided round's view gets the TVEffect pass (grey, rolled by noise bands, shifting rows sideways so vertical edges lean); RendDX9 never runs it, retail shows the plain view
@@ -101,6 +102,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.titanKitFloors = v; });
 	bindProperty<bool>(console, "enhanced.chaseRoll", ConsoleAccess::Anyone, [&settings] { return settings.chaseRoll; },
 		[&settings](const bool& v) { settings.chaseRoll = v; });
+	bindProperty<bool>(console, "enhanced.killWeaponNames", ConsoleAccess::Anyone, [&settings] { return settings.killWeaponNames; },
+		[&settings](const bool& v) { settings.killWeaponNames = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
 	bindProperty<bool>(console, "enhanced.tvEffect", ConsoleAccess::Anyone, [&settings] { return settings.tvEffect; },
