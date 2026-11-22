@@ -3455,6 +3455,20 @@ physics::CollisionMeshFile boxMesh(float half)
 			{{3, 6, 2}, 0}, {{3, 7, 6}, 0}, {{0, 4, 7}, 0}, {{0, 7, 3}, 0}, {{1, 2, 6}, 0}, {{1, 6, 5}, 0}});
 }
 
+// boxMesh with its faces' normals ((c - b) x (b - a), CollisionWorld) out
+// of the box, as the shipped meshes': the scene's rays count only faces
+// crossed from the front (0x006fb610).
+physics::CollisionMeshFile solidBoxMesh(float half)
+{
+	physics::CollisionMeshFile mesh = boxMesh(half);
+	for (physics::CollisionLod& lod : mesh.geometries[0].subGeometries[0].lods) {
+		for (physics::CollisionFace& face : lod.faces) {
+			std::swap(face.vertices[1], face.vertices[2]);
+		}
+	}
+	return mesh;
+}
+
 void makeMobile(world::ObjectTemplate& t, const char* mesh)
 {
 	t.settings()["collisionMesh"] = mesh;
@@ -3914,7 +3928,7 @@ TEST(GameWorld_LadderRaysAndJumpingOff)
 TEST(GameWorld_SpawnSpotDropsOntoStaticObjects)
 {
 	Range range;
-	range.collisionTemplates.add("slab_mesh", boxMesh(1));
+	range.collisionTemplates.add("slab_mesh", solidBoxMesh(1));
 	range.collisionTemplates.add("car_mesh", boxMesh(1));
 	range.templates.registerType(6, "SimpleObject");
 	range.templates.registerType(7, "PlayerControlObject");
@@ -8420,7 +8434,7 @@ TEST(GameWorld_RepairToolRay)
 {
 	for (const int facing : {0, 180}) {
 		Range range;
-		range.collisionTemplates.add("hull_mesh", boxMesh(2));
+		range.collisionTemplates.add("hull_mesh", solidBoxMesh(2));
 		range.templates.registerType(6, "Kit");
 		range.templates.registerType(20, "PlayerControlObject");
 		world::ObjectTemplate* hull = range.templates.create("PlayerControlObject", "hull");
@@ -8478,7 +8492,7 @@ TEST(GameWorld_RepairToolRay)
 TEST(GameWorld_RepairToolDrainsBattery)
 {
 	Range range;
-	range.collisionTemplates.add("hull_mesh", boxMesh(2));
+	range.collisionTemplates.add("hull_mesh", solidBoxMesh(2));
 	range.templates.registerType(6, "Kit");
 	range.templates.registerType(20, "PlayerControlObject");
 	world::ObjectTemplate* hull = range.templates.create("PlayerControlObject", "hull");

@@ -143,6 +143,19 @@ TEST(CollisionWorld_TraceMatchesEveryFace)
 			}
 		}
 		const Face* front = expected(from, to, 0, true, best);
+		// The scene ray's front-only test (raycastFront), also with the owner left out.
+		if (world.raycastFront(from, to, hit) != (front != nullptr)
+			|| (front && (std::fabs(hit.fraction - best) > 1e-6f || hit.owner != front->owner))) {
+			++mismatches;
+		}
+		if (front) {
+			float next = 1;
+			const Face* other = expected(from, to, front->owner, true, next);
+			if (world.raycastFront(from, to, hit, front->owner) != (other != nullptr)
+				|| (other && (std::fabs(hit.fraction - next) > 1e-6f || hit.owner == front->owner))) {
+				++mismatches;
+			}
+		}
 		SphereContact contact {};
 		const bool crossed = world.segmentContact(from, to, contact);
 		const Vec3 at = from + (to - from) * best;

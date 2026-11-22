@@ -1900,8 +1900,8 @@ public:
 	// on the ground): from a metre over the order's point, the higher of the
 	// water (DAT_00a83e58 slot 0x94) and the terrain (slot 0x68), or what a
 	// ray 100 m down through the static objects (the scene's slot 0x68 with
-	// flags 0x1000100, 0x006f4aa0) meets above that; then up by half the
-	// marker's radius (its object's slot 0x8c).
+	// flags 0x1000100, 0x006f4aa0; front faces only) meets above that; then
+	// up by half the marker's radius (its object's slot 0x8c).
 	float orderMarkerHeight(const physics::Vec3& order, float radius) const;
 	// Where the order's name tag stands (0x005b8b20, handed to the name tag
 	// manager's slot 0x2c): at the order's point when its marker (at
@@ -4031,8 +4031,10 @@ private:
 	// firstHit passing through `ignore`'s body.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const;
 	// firstHit's parts: the scene's objects alone (static objects' and
-	// bodies' projectile meshes, `ignore`'s passed through), and the
-	// terrain alone; the fraction along the segment of the first.
+	// bodies' projectile meshes, `ignore`'s passed through; faces crossed
+	// from the front only, as the scene's ray slot 0x68 tests them,
+	// 0x006fb610), and the terrain alone; the fraction along the segment
+	// of the first.
 	bool objectRayHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
 		uint32_t& object) const;
 	bool groundRayHit(const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;

@@ -7152,7 +7152,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 // 0x68, 0x00700b80) through objects with flags (+0x14) 0x1000100 and
 // without 8 (0x006f4aa0 / 0x006f4ac0; 8 marks the mobile ones, set with
 // their node: 0x005f6ba0, 0x00621b50): static objects alone (the
-// rewrite asks their projectile LOD). A hit puts the box's bottom on it. Without one, a box bottom
+// rewrite asks their projectile LOD, front faces only as 0x006fb610). A hit puts the box's bottom on it. Without one, a box bottom
 // under the terrain (DAT_00a83e58 slot 0x6c) is lifted onto it. Only the
 // test moves: the spawn itself is at the spawner's spot (0x005aeb80's
 // end, the game logic's slot 0x120).
@@ -7164,7 +7164,7 @@ float GameWorld::orderMarkerHeight(const physics::Vec3& order, float radius) con
 		height = std::max(height, m_waterLevel);
 	}
 	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(probe, probe + physics::Vec3 {0, -100, 0}, hit)) {
+	if (m_projectileCollision.raycastFront(probe, probe + physics::Vec3 {0, -100, 0}, hit)) {
 		height = std::max(height, probe.y - 100 * hit.fraction);
 	}
 	return height + radius * 0.5f;
@@ -7183,7 +7183,7 @@ physics::Vec3 GameWorld::dropSpawnSpot(const physics::Vec3& spot, const physics:
 	const physics::Vec3 high = spot + up * top;
 	const physics::Vec3 low = spot + up * bottom;
 	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(high, low, hit)) {
+	if (m_projectileCollision.raycastFront(high, low, hit)) {
 		return high + (low - high) * hit.fraction - up * bottom;
 	}
 	if (m_ground.height) {
@@ -7295,15 +7295,16 @@ bool GameWorld::firstHit(const physics::Vec3& from, const physics::Vec3& to, uin
 	return firstHit(from, to, object, 0);
 }
 
-// The landing's ray (0x005ef250): the scene's (slot 0x68, objects with
-// flags 0x100: their projectile LOD here), else the heightmap cluster's
-// (slot 0x8c); the material of what it meets.
+// The landing's ray (0x005ef250 -> 0x005eef80; also the GroundEffectBundles',
+// 0x0061de40): the scene's (slot 0x68, objects with flags 0x100: their
+// projectile LOD here, faces crossed from the front only, 0x006fb610), else
+// the heightmap cluster's (slot 0x8c); the material of what it meets.
 bool GameWorld::groundMaterialAlong(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore,
 	uint32_t& material) const
 {
 	float nearest = 2;
 	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(from, to, hit)) {
+	if (m_projectileCollision.raycastFront(from, to, hit)) {
 		nearest = hit.fraction;
 		material = hit.material;
 	}
@@ -7313,7 +7314,7 @@ bool GameWorld::groundMaterialAlong(const physics::Vec3& from, const physics::Ve
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit, nullptr, true) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			material = hit.material;
 		}
@@ -7340,7 +7341,7 @@ bool GameWorld::objectRayHit(const physics::Vec3& from, const physics::Vec3& to,
 {
 	float nearest = 2;
 	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(from, to, hit, ignore)) {
+	if (m_projectileCollision.raycastFront(from, to, hit, ignore)) {
 		nearest = hit.fraction;
 		object = hit.owner;
 	}
@@ -7350,7 +7351,7 @@ bool GameWorld::objectRayHit(const physics::Vec3& from, const physics::Vec3& to,
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit, nullptr, true) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			object = body.object;
 		}
