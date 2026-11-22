@@ -3629,10 +3629,16 @@ int runGame(Options& options, Session& session)
 	// through the virtual file system, wrapped by the game's sound manager.
 	sound::VfsSoundFileSystem soundFiles(files);
 	sound::ISoundEngine* soundEngine = options.sound ? sound::getSoundEngine() : nullptr;
+#if defined(_WIN32)
+	// Native 64-bit Windows cannot load retail's 32-bit BF2OpenAL.dll.
+	constexpr const char* defaultAudioProvider = "3"; // Default Device / System OpenAL
+#else
+	constexpr const char* defaultAudioProvider = "0";
+#endif
 	if (soundEngine) {
 		soundEngine->setFileSystem(&soundFiles);
 		sound::setEnhancedAudio(enhancedSettings.enabled); // HRTF and filters: read when the provider opens
-		if (soundEngine->initialize(2, "0", 32) != 0) {
+		if (soundEngine->initialize(2, defaultAudioProvider, 32) != 0) {
 			std::printf("sound: engine initialisation failed, continuing without sound\n");
 			sound::shutdownSoundEngine();
 			soundEngine = nullptr;
@@ -3994,7 +4000,7 @@ int runGame(Options& options, Session& session)
 		if (soundEngine->isInitialized() && soundEngine->qualityLevel() == index && appliedVoiceCount == voices) {
 			return;
 		}
-		if (sounds.initialize(index, "0", voices) != 0) {
+		if (sounds.initialize(index, defaultAudioProvider, voices) != 0) {
 			std::fprintf(stderr, "sound: failed to apply profile quality %s (index %d), %d voices\n", quality.c_str(), index, voices);
 			return;
 		}
