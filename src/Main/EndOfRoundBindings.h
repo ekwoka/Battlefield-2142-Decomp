@@ -178,6 +178,7 @@ int rankExperience(int rank);
 // name, the briefing's key and the maptype's description key.
 struct LevelDescription {
 	std::string name;
+	std::string music;        // the loading screen's track
 	std::string briefingKey;
 	std::string briefing;     // the briefing's own text (used without a locid)
 	std::string gameModeKey;

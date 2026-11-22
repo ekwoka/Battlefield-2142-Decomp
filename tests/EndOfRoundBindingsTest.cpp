@@ -101,6 +101,11 @@ TEST(EndOfRoundBindings_Natives)
 	CHECK(call(vm, natives, eor, "getPlayerScore").isUndefined());
 	CHECK(text(eor, "getMapName") == "Camp Gibraltar");
 	CHECK(text(eor, "getMapPath") == "Camp_Gibraltar");
+	loading.mapName = "Suez_Canal"; // the .desc's <name>
+	bindings.setSummary(loading);
+	CHECK(text(eor, "getMapName") == "Suez Canal");
+	loading.mapName.clear();
+	bindings.setSummary(loading);
 	CHECK(text(eor, "getMapGameModeName") == "CONQUEST");
 	CHECK(avm1::toBoolean(call(vm, natives, eor, "hasMap")));
 	CHECK(text("dice.bf2.Logic", "getNextToolTip").rfind("TEXT_gametip", 0) == 0);
@@ -158,7 +163,7 @@ TEST(EndOfRoundBindings_Natives)
 
 TEST(EndOfRoundBindings_LevelDescription)
 {
-	const std::string desc = "<map>\n\t<name> Minsk </name>\n"
+	const std::string desc = "<map>\n\t<name> Minsk </name>\n\t<music> sound/music/Minsk.ogg </music>\n"
 		"\t<briefing locid=\"LOADINGSCREEN_MAPDESCRIPTION_Minsk\">text</briefing>\n"
 		"\t<modes>\n\t\t<mode type=\"gpm_cq\">\n"
 		"\t\t\t<maptype players=\"16\" type=\"assault\" locid=\"GAMEMODE_DESCRIPTION_assault\">x</maptype>\n"
@@ -168,6 +173,7 @@ TEST(EndOfRoundBindings_LevelDescription)
 		"\t\t</mode>\n\t</modes>\n</map>\n";
 	const menu::LevelDescription cq = menu::parseLevelDescription(desc, "gpm_cq", 32);
 	CHECK(cq.name == "Minsk");
+	CHECK(cq.music == "sound/music/Minsk.ogg");
 	CHECK(cq.briefingKey == "LOADINGSCREEN_MAPDESCRIPTION_Minsk");
 	CHECK(cq.gameModeKey == "GAMEMODE_DESCRIPTION_headon");
 	CHECK(cq.sizes.size() == 2 && cq.sizes[0] == 16 && cq.sizes[1] == 32);
@@ -276,10 +282,11 @@ TEST(EndOfRoundBindings_LoadingScreen)
 	EorMovie movie;
 	menu::EndOfRoundBindings bindings(movie.player.natives());
 	menu::RoundSummary r;
-	r.mapPath = "Minsk";
+	r.mapPath = "Suez_Canal";
+	r.mapName = "Suez_Canal"; // the .desc's <name>, as main.cpp passes it
 	r.gameMode = "gpm_cq";
 	r.mapSize = 32;
-	r.mapDescriptionKey = "LOADINGSCREEN_MAPDESCRIPTION_Minsk";
+	r.mapDescriptionKey = "LOADINGSCREEN_MAPDESCRIPTION_Suez_Canal";
 	r.gameModeDescriptionKey = "GAMEMODE_DESCRIPTION_assault";
 	r.serverName = "Local server";
 	bindings.setSummary(r);
@@ -288,9 +295,9 @@ TEST(EndOfRoundBindings_LoadingScreen)
 	bindings.onReadyToPlay = [&joined](bool) { ++joined; };
 	CHECK(movie.load(gameDir));
 	movie.run(3);
-	CHECK(movie.label("EOR_holder.mc_mapName") == "MINSK");
+	CHECK(movie.label("EOR_holder.mc_mapName") == "SUEZ CANAL");
 	CHECK(movie.label("EOR_holder.mc_mapGameMode") == movie.strings.text("HEADER_gpm_cq"));
-	CHECK(movie.text("EOR_holder.mc_map.m_mcForImageUrl") == "$/Levels/Minsk/Info/gpm_cq_32_menuMap.png");
+	CHECK(movie.text("EOR_holder.mc_map.m_mcForImageUrl") == "$/Levels/Suez_Canal/Info/gpm_cq_32_menuMap.png");
 	CHECK(!movie.label("EOR_holder.mc_mapDescription").empty());
 	CHECK(!avm1::toBoolean(movie.player.evaluate("EOR_holder.mcJoin._visible")));
 	CHECK(movie.missing.empty());
