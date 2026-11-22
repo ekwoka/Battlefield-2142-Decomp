@@ -9,7 +9,7 @@
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
 // (botRecovery, botMovement, botTitan, botCommander, botPilots, guidedCameraEase, cornerSteer,
-// passengerWeapons, softLanding): they change the simulation by design, so the check turns
+// passengerWeapons, softLanding, titanKitFloors): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
 
@@ -43,6 +43,7 @@ struct EnhancedSettings {
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
 	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
+	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow); retail lets it fall through
 	// Interface, also only with enhanced.enabled:
 	bool chaseRoll = true; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); retail keeps them level
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
@@ -96,6 +97,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.passengerWeapons = v; });
 	bindProperty<bool>(console, "enhanced.softLanding", ConsoleAccess::Anyone, [&settings] { return settings.softLanding; },
 		[&settings](const bool& v) { settings.softLanding = v; });
+	bindProperty<bool>(console, "enhanced.titanKitFloors", ConsoleAccess::Anyone, [&settings] { return settings.titanKitFloors; },
+		[&settings](const bool& v) { settings.titanKitFloors = v; });
 	bindProperty<bool>(console, "enhanced.chaseRoll", ConsoleAccess::Anyone, [&settings] { return settings.chaseRoll; },
 		[&settings](const bool& v) { settings.chaseRoll = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },

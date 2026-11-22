@@ -5129,6 +5129,77 @@ TEST(Titan_CorpseLiesOnTheDeck)
 	}
 }
 
+// A kit dropped by a body on the Suez PAC Titan's cargo-bay floor (the
+// reported Remaster session): placed by the scene ray as retail places it
+// (0x00589890 -> 0x006fb610: the projectile LOD, front faces only). Mid-floor
+// it lies on the floor. By the far wall (x 6.84 to 8.04 at z -40) the projectile
+// floor stops 1.2 m short of the walkable one, so the ray passes on through
+// the hull from inside (its faces' backs) to what is below; it stopped on the
+// hull's inside at -8.0 when the ray took both sides. enhanced.titanKitFloors
+// keeps it on the walkable floor there.
+TEST(Titan_KitDropByCargoBayWall)
+{
+	REMASTER_ONLY();
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) {
+		return;
+	}
+	TitanLevel level(dir, "Suez_Canal", 48, false, "mods/Project_Remaster_v17_Final", true);
+	if (!level.loaded) {
+		return;
+	}
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	});
+	bool enhanced = true, floors = false;
+	level.world->setTitanKitFloors(&enhanced, &floors);
+	level.world->startRound();
+	level.run(1);
+	const int team = 1; // PAC
+	const auto titan = *level.titan(team);
+	const world::Object* hull = level.objects.find(titan.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
+	for (const bool on : {false, true}) {
+		floors = on;
+		for (const float x : {0.0f, 7.5f}) { // the body slides 0.2 m wallward by x 7.5
+			const int me = level.world->joinPlayer(team);
+			level.world->setSpawnTitan(me, titan.object);
+			CHECK(level.world->spawnSoldier(me));
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(me, info);
+			level.world->setSoldierPosition(info.soldier, titan.position + turn.transform({x, 0.5f, -40}));
+			level.run(1.5f);
+			level.world->playerInfo(me, info);
+			const physics::Vec3 stood = turn.untransform(info.position - titan.position);
+			const uint32_t soldier = info.soldier;
+			const uint32_t kit = level.world->playerKitObject();
+			CHECK(info.alive && kit != 0 && std::fabs(stood.y - 0.40f) < 0.3f);
+			level.world->suicide(soldier);
+			level.run(5);
+			const world::Object* item = level.objects.find(kit);
+			CHECK(item && level.world->isDroppedKit(kit));
+			const physics::Vec3 lies = item ? turn.untransform(physics::Vec3 {item->position().x, item->position().y, item->position().z} - titan.position)
+											: physics::Vec3 {0, -1e9f, 0};
+			std::fprintf(stderr, "  titanKitFloors %d: stood at %.2f %.2f %.2f, kit at %.2f %.2f %.2f\n", on, stood.x, stood.y, stood.z,
+				lies.x, lies.y, lies.z);
+			if (x == 0 || on) {
+				CHECK(std::fabs(lies.y - 0.40f) < 0.2f); // on the cargo-bay floor
+			} else {
+				CHECK(lies.y < -9); // through the hull, not on its inside
+			}
+			level.world->removePlayer(me);
+		}
+	}
+}
+
 // A gunship wrecked by a hard landing on its Titan's deck lies on its belly
 // (the wreck's mesh has no springs), its gunner's exit place under the deck:
 // it can't be boarded (0x005a98e0 skips a destroyed vehicle's entry points),

@@ -354,14 +354,18 @@ void GameWorld::wreckCollision(Body& body)
 }
 
 bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const physics::Vec3& to,
-	physics::CollisionWorld::Hit& hit, int* partHit) const
+	physics::CollisionWorld::Hit& hit, int* partHit, bool frontOnly) const
 {
+	const auto cast = [frontOnly](const physics::CollisionWorld& mesh, const physics::Vec3& a, const physics::Vec3& b,
+						  physics::CollisionWorld::Hit& out) {
+		return frontOnly ? mesh.raycastFront(a, b, out) : mesh.raycast(a, b, out);
+	};
 	float best = 2;
 	physics::CollisionWorld::Hit candidate {};
 	if (partHit) {
 		*partHit = -1;
 	}
-	if (body.projectileMesh && body.projectileMesh->raycast(from, to, candidate)) {
+	if (body.projectileMesh && cast(*body.projectileMesh, from, to, candidate)) {
 		best = candidate.fraction;
 		hit = candidate;
 	}
@@ -377,7 +381,7 @@ bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const p
 		}
 		const physics::Vec3 a = part.rotation.untransform(from - part.position);
 		const physics::Vec3 b = part.rotation.untransform(to - part.position);
-		if (lod->raycast(a, b, candidate) && candidate.fraction < best) {
+		if (cast(*lod, a, b, candidate) && candidate.fraction < best) {
 			best = candidate.fraction;
 			hit = candidate;
 			hit.point = from + (to - from) * candidate.fraction;

@@ -7,7 +7,8 @@
 //    (slot 0xf0 for each weapon), the kit is let go by the soldier (kit
 //    interface 0xc49c slot 0x14, 0x0056d0a0) and a ray from the soldier's
 //    position 1000 m straight down (the scene's slot 0x68, flags 0x1000100,
-//    the soldier itself left out) places it where it meets something
+//    the soldier itself left out; the projectile LOD, front faces only:
+//    surfaceBelow) places it where it meets something
 //    (slot 100); the Titan records are asked whether that is a Titan's
 //    (0x00561b20: 0x005aa030 compares the hit object's root with each
 //    team's Titan; 0x005ad2e0 then keeps {kit, kit position - Titan
@@ -128,14 +129,18 @@ bool GameWorld::wornKit(uint32_t object) const
 
 // The first surface straight down from `from` (up to kDropRay): the nearest
 // of the static objects', the bodies' (a Titan's decks among them; not
-// `ignore`'s) and the terrain. False with none in reach.
+// `ignore`'s) and the terrain. False with none in reach. As the scene ray
+// (0x006fb610): the projectile LOD, faces crossed from the front only (its
+// two-sided argument is a constant 0), so a floor's underside or a hull's
+// inside is passed through. enhanced.titanKitFloors adds a Titan's
+// soldier-LOD floors.
 bool GameWorld::surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& surface, uint32_t& object) const
 {
 	const physics::Vec3 to {from.x, from.y - kDropRay, from.z};
 	float nearest = 2;
 	object = 0;
 	physics::CollisionWorld::Hit hit {};
-	if (m_projectileCollision.raycast(from, to, hit)) {
+	if (m_projectileCollision.raycastFront(from, to, hit)) {
 		nearest = hit.fraction;
 	}
 	for (const Body& body : m_bodies) {
@@ -144,7 +149,12 @@ bool GameWorld::surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& 
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (raycastBody(body, localFrom, localTo, hit) && hit.fraction < nearest) {
+		if (raycastBody(body, localFrom, localTo, hit, nullptr, true) && hit.fraction < nearest) {
+			nearest = hit.fraction;
+			object = body.object;
+		}
+		if (body.soldierMesh && titanKitFloors() && titanByObject(body.object)
+			&& body.soldierMesh->raycastFront(localFrom, localTo, hit) && hit.fraction < nearest) {
 			nearest = hit.fraction;
 			object = body.object;
 		}

@@ -980,6 +980,20 @@ public:
 		m_softLanding = soft;
 	}
 	bool softLanding() const { return m_enhancedLanding && *m_enhancedLanding && m_softLanding && *m_softLanding; }
+	// enhanced.enabled and enhanced.titanKitFloors, read live: surfaceBelow
+	// (a dropped kit, a placed beacon or shield) also stops on a Titan's
+	// soldier-LOD floors, where the projectile LOD has none (the cargo bay's
+	// wall strips). Not retail: the scene ray reads the projectile LOD only.
+	// It changes the simulation. Null or false: retail.
+	void setTitanKitFloors(const bool* enhanced, const bool* floors)
+	{
+		m_enhancedKitFloors = enhanced;
+		m_titanKitFloors = floors;
+	}
+	bool titanKitFloors() const
+	{
+		return m_enhancedKitFloors && *m_enhancedKitFloors && m_titanKitFloors && *m_titanKitFloors;
+	}
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
 	// the bot manager sets its navigation mesh's polygon lookup.
@@ -3433,9 +3447,9 @@ private:
 	bool setBodyLods(Body& body, const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials,
 		size_t state);
 	// `part`: the collisionPart the segment met (its partMeshes index), -1
-	// the root's faces.
+	// the root's faces. `frontOnly`: only faces crossed from the front.
 	bool raycastBody(const Body& body, const physics::Vec3& localFrom, const physics::Vec3& localTo,
-		physics::CollisionWorld::Hit& hit, int* part = nullptr) const;
+		physics::CollisionWorld::Hit& hit, int* part = nullptr, bool frontOnly = false) const;
 	bool stepBody(Body& body, float seconds);
 	void stepPhysics(float seconds);        // stepPhysicsMove, then stepPhysicsCollide
 	void stepPhysicsMove(float seconds);    // the nodes' move (0x006daa70)
@@ -4183,6 +4197,8 @@ private:
 	const bool* m_guidedCameraEase = nullptr;
 	const bool* m_enhancedLanding = nullptr;         // setSoftLanding
 	const bool* m_softLanding = nullptr;
+	const bool* m_enhancedKitFloors = nullptr;       // setTitanKitFloors
+	const bool* m_titanKitFloors = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);

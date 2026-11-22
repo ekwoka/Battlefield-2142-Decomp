@@ -121,6 +121,9 @@ public:
 	{
 		return trace(from, to, hit, false, ignore);
 	}
+	// The first face the segment crosses from the front (the scene rays'
+	// mesh test 0x006bd070 without its two-sided flag).
+	bool raycastFront(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, true); }
 	// A moving mesh vertex against the faces (the mobile mesh physics'
 	// first pass, 0x006bb050 -> collision-mesh slot 22 0x006e5920): the
 	// vertex's segment from its last pose to now. The first face it
