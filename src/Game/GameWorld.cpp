@@ -2815,6 +2815,23 @@ float GameWorld::heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownR
 	return nearness;
 }
 
+float GameWorld::heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot, const std::vector<uint32_t>& driven) const
+{
+	constexpr float kRadius = 7.0f;    // *0x00a739b8
+	constexpr float kHeavy = 5000.0f;  // *0x0097940c
+	float nearness = 0;
+	for (const uint32_t id : driven) {
+		const world::Object* object = id != ownRoot ? m_objects.find(id) : nullptr;
+		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
+		if (!t || !flag(*t, "hasMobilePhysics", false) || number(*t, "mass", 1) < kHeavy) {
+			continue;
+		}
+		const physics::Vec3 d = physics::Vec3 {object->position().x, object->position().y, object->position().z} - camera;
+		nearness = std::max(nearness, (kRadius - std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z)) / kRadius);
+	}
+	return nearness;
+}
+
 float GameWorld::takeSentShake(int id)
 {
 	Player* player = findPlayer(id);

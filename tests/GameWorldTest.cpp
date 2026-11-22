@@ -8592,5 +8592,12 @@ TEST(GameWorld_HeavyVehicleNearnessForTheCameraRumble)
 		CHECK(!heavy || expected > 0.4f);
 		CHECK(range.world->heavyVehicleNearness(at, car->id()) == 0);                   // the camera's own root
 		CHECK(range.world->heavyVehicleNearness(at + physics::Vec3 {10, 0, 0}, 0) == 0); // out of reach
+		// A joined client's: the driven vehicles its ghosts name, by template and object position.
+		const physics::Vec3 e = physics::Vec3 {car->position().x, car->position().y, car->position().z} - at;
+		const float client = heavy ? (7 - std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z)) / 7 : 0.0f;
+		CHECK(std::fabs(range.world->heavyVehicleNearness(at, 0, {car->id()}) - client) < 1e-4f);
+		CHECK(!heavy || client > 0.4f);
+		CHECK(range.world->heavyVehicleNearness(at, car->id(), {car->id()}) == 0);
+		CHECK(range.world->heavyVehicleNearness(at, 0, {}) == 0); // nobody driving
 	}
 }

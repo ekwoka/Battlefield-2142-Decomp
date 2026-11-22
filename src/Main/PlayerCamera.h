@@ -138,6 +138,9 @@ public:
 		int seat = -1;
 	};
 	void setRemote(std::function<bool(Remote&)> source) { m_remote = std::move(source); }
+	// A joined game's vehicles (object ids) whose driver seat is taken, for the
+	// soldier camera's rumble (GameWorld::heavyVehicleNearness).
+	void setRemoteDriven(std::function<std::vector<uint32_t>()> source) { m_remoteDriven = std::move(source); }
 	// The players a joined game's spectator follows (the server's players
 	// as the client has them: their ghosts' places and looks, the HudWorld
 	// of the joined game). Without it only the local round's are followed.
@@ -311,6 +314,7 @@ private:
 	// transports' passenger seats): his arms and weapon are drawn in it.
 	bool kitSeat(const Me& me) const;
 	std::function<bool(Remote&)> m_remote;
+	std::function<std::vector<uint32_t>()> m_remoteDriven;
 	int m_lastRemoteShot = -1000;
 	void startWeaponEffects(int effect);
 

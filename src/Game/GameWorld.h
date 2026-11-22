@@ -2054,10 +2054,13 @@ public:
 	// whose root is a control object in use (its own seat, 0x005c87b0 with
 	// 0) with a mobile node (slot 0x164) of 5000 kg or more (slot 0x114,
 	// *0x0097940c), the camera's own root aside, the largest (7 - distance)
-	// / 7; 0 for none.
-	// shortcut: measures from each vehicle's root position only; the exe
-	// also meets its child parts at their own positions.
+	// / 7; 0 for none. Roots only: the flags ask for 0x01000000, which an
+	// object has while it has no parent (0x006f76b8, read by 0x006f1d70).
 	float heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot) const;
+	// The same on a joined client, which has no bodies: the vehicles (object
+	// ids) whose driver seat the ghosts say is taken, by their templates'
+	// hasMobilePhysics and mass and their objects' positions.
+	float heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot, const std::vector<uint32_t>& driven) const;
 	// A player's hit strength for its networkable's record (+0x1d8, 0..25
 	// on the wire): the last blast on its vehicle, for the next two records
 	// (+0x1dc; each call counts one), else 0.

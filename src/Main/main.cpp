@@ -7181,6 +7181,19 @@ int runGame(Options& options, Session& session)
 		} menusUnhook {squadMenu, commanderMenu, squadRequests};
 		// A joined game's soldier for the first-person view.
 		if (session.client) {
+			// The vehicles whose driver seat (the root ghost's, part 0) is taken.
+			playerCamera.setRemoteDriven([&session, &ghostObjects] {
+				std::vector<uint32_t> driven;
+				if (session.client) {
+					for (const net::RemoteObject& ghost : session.client->world().objectList()) {
+						const auto object = ghostObjects.find(ghost.ghost);
+						if ((!ghost.rootGhost || ghost.rootGhost == ghost.ghost) && ghost.occupant >= 0 && object != ghostObjects.end()) {
+							driven.push_back(object->second);
+						}
+					}
+				}
+				return driven;
+			});
 			playerCamera.setRemote([&session, &ghostObjects, &objects, &templates, &remoteLook, &ownFeet, &prediction, &round](
 									   PlayerCamera::Remote& me) {
 				if (!session.client || !session.client->world().hasControlObject()) {

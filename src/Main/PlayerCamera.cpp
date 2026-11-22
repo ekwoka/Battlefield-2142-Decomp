@@ -259,11 +259,18 @@ void PlayerCamera::stepShakes(float seconds)
 		m_hitShake = m_hitLeft = 0;
 	}
 	// The soldier camera's rumble (0x00610240 then, every second, 0x00611fc0
-	// from the camera update 0x00612511). A joined game's world has no bodies.
-	if (alive && !m_remote) {
+	// from the camera update 0x00612511, on every machine). The scan clears
+	// the nearness, then looks only in the Inside and Nose views (+0x250 1 / 2).
+	Me eye;
+	if (current(eye) && eye.alive) {
 		if (m_rumbleScan > 1.0f) { // 1 / *0x00a73a00
-			const physics::Vec3 eye {me.position.x, me.position.y + 1 + m_eye.current, me.position.z}; // the body a metre over the feet
-			m_rumbleNearness = m_round.heavyVehicleNearness(eye, me.vehicle);
+			m_rumbleNearness = 0;
+			if (m_mode == game::camera::Mode::Inside || m_mode == game::camera::Mode::Nose) {
+				const physics::Vec3 at {eye.origin[0], eye.origin[1] + m_eye.current, eye.origin[2]}; // origin: a metre over the feet
+				m_rumbleNearness = !m_remote ? m_round.heavyVehicleNearness(at, eye.vehicle)
+					: m_remoteDriven         ? m_round.heavyVehicleNearness(at, eye.vehicle, m_remoteDriven())
+											 : 0.0f;
+			}
 			m_rumbleScan = 0;
 		} else {
 			m_rumbleScan += seconds;
@@ -1271,7 +1278,16 @@ bool PlayerCamera::view(View& view, float aspect, bool cameraBone) const
 			view.yaw = seated.yaw * kDegrees;
 			view.pitch = seated.pitch * kDegrees;
 			view.fovY = aspectFov(kitSeat(me) ? m_fov.current : m_baseFov, aspect); // a passenger's weapon zooms
-			view.roll = m_rumble * kDegrees; // the soldier camera's rumble
+			// The soldier camera is the view's parent, so its bone ride and
+			// shakes apply: a local player in the Inside view is first person
+			// (0x0058d7c5, player slot 0x1bc). The rewrite poses the rig only
+			// where the soldier holds his weapon.
+			view.roll = 0;
+			if (cameraBone && cameraShake && m_rig && kitSeat(me)) {
+				anim::rideCameraBone(anim::cameraBoneDelta(m_rig->skeleton(), m_rig->pose(), m_rig->cameraNode()),
+					view.position, view.yaw, view.pitch, view.roll);
+			}
+			view.roll += (m_hitShake + m_rumble) * kDegrees; // rolled after (0x00610745)
 			view.soldierEye = true;
 			view.carrierYaw = (seated.yaw - seated.lookYaw) * kDegrees;
 			view.eyeHeight = view.eyeTarget = m_eye.poses[1];
@@ -1300,7 +1316,8 @@ bool PlayerCamera::view(View& view, float aspect, bool cameraBone) const
 	view.fovY = aspectFov(m_fov.current, aspect);
 	view.roll = 0;
 	// GSCameraShake: the view rides the animated camera bone (0x005edeb0).
-	// Not under a parachute, where the rewrite doesn't pose the rig.
+	// Retail rides it under a parachute too (first person in the Inside
+	// view); the rewrite doesn't pose the rig there.
 	if (cameraBone && cameraShake && m_rig && !me.vehicle) {
 		anim::rideCameraBone(anim::cameraBoneDelta(m_rig->skeleton(), m_rig->pose(), m_rig->cameraNode()), view.position,
 			view.yaw, view.pitch, view.roll);

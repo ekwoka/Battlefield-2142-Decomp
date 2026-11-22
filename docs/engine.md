@@ -3240,8 +3240,12 @@ in the Inside and Nose views to the largest (7 − d) / 7 (`*0x00a739b8`) of
 the objects round the camera whose root is a control object in use (slot
 `0x18(0)`) with a mobile node (slot `0x164`) of 5000 kg or more (slot
 `0x114`, `*0x0097940c`; filter `0x00610010`), its own root aside
-(`GameWorld::heavyVehicleNearness`, `anim::cameraProximityShake`; the
-rewrite measures from vehicle roots only). The Inside view also asks the
+(`GameWorld::heavyVehicleNearness`, `anim::cameraProximityShake`). Roots
+only: the query's flags `0x1000008` include `0x01000000`, which an object
+has while it has no parent (`0x006f76b8`). The scan clears the nearness
+first, so in the other views it is 0 from the next scan. A joined client
+scans too, over the vehicles whose driver seat its ghosts say is taken
+(`PlayerCamera::setRemoteDriven`). The Inside view also asks the
 control object above the camera (slot `0x140`): the Soldier's
 (`0x005edeb0`), with `GSCameraShake` on (GeneralSettings `+0xb9`, default
 1) and the first-person mode (`+0x2f0` 0, not man down `+0x28c`), turns
@@ -3250,8 +3254,13 @@ the view by its first-person skeleton's animated `Camerabone` (node 0 of
 `+0x358`) before the camera's matrix; the skeleton stays placed from the
 camera's own matrix (`0x005ee980`: slot `0xe4`), so the arms ride the bone
 and the world bobs: the run's 0.9 cm / 0.3°, the sprint's 4 cm / 1° on
-eu_ar_rifle (`anim::rideCameraBone`, `PlayerCamera::view`; not under a
-parachute or in a seat, where the rewrite doesn't pose the rig). The
+eu_ar_rifle (`anim::rideCameraBone`, `PlayerCamera::view`). A seat with a
+camera of its own never rides: the vehicle's slot `0x140` is `0x00662c50`,
+false. A seat without one and a parachute keep the soldier camera, and a
+local player in the Inside or Nose view is first person (`0x0058d7c5`,
+player slot `0x1bc`), so retail rides there as well. The rewrite rides in
+the seats where the soldier holds his own weapon (`kitSeat`), where it
+poses the rig, not under a parachute or in the other open seats. The
 camera never sinks below the terrain + 0.09
 (`*0x00a73a04`). `PlayerCamera::View::roll`, drawn through
 `render::Camera::roll`. Template defaults (`0x00610fd0`): CVMInside,
