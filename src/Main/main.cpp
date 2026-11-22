@@ -2502,17 +2502,31 @@ std::string menuMusicFile(const io::FileManager& files)
 // stop when a game takes over (0x00403370); the menu's
 // Sound.playMenuMusic / stopMenuMusic (SwiffPlayer 0x10059dd0 / 0x10059df0,
 // SwiffHost slots 102 / 103: events 0x16 / 0x15, 0x00404590) the same.
+// State 2 (the level's track) gives way to the menu's at once
+// (0x007fd112) and fades on stop like the menu's.
 void menuMusic(int& state, bool play, sound::SoundManager& sounds, const io::FileManager& files)
 {
-	if (play && state == 0) {
+	if (play && state != 1) {
 		const std::string track = menuMusicFile(files);
 		if (!track.empty() && sounds.loadMusic(track) && sounds.playMusic()) {
 			std::printf("menu music %s\n", track.c_str());
 			state = 1;
 		}
-	} else if (!play && state == 1) {
+	} else if (!play && state != 0) {
 		sounds.stopMusic(5.0f);
 		state = 0;
+	}
+}
+
+// 0x007fd200 on ECMenuMenuEvent_InitLoadingScreen (event 0xa/3, posted by
+// the level load at 0x004cbc59): whatever plays stops at once and the
+// level's .desc <music> starts (0x007fcf00, state 2). RemoveLoadingScreen
+// (0xa/5, JOIN GAME: 0x0040cf44) fades it over 5 s, menuMusic(false).
+void levelMusic(int& state, const std::string& track, sound::SoundManager& sounds)
+{
+	if (!track.empty() && sounds.loadMusic(track) && sounds.playMusic()) {
+		std::printf("level music %s\n", track.c_str());
+		state = 2;
 	}
 }
 
@@ -2846,7 +2860,7 @@ struct Session {
 	dice::hfe::menu::MenuHost menuHost;
 	bool menuScriptsRun = false;
 	// The menu's music object (0x007fd030, the game's +0xf4): 0 silent,
-	// 1 the mod's menu track playing.
+	// 1 the mod's menu track playing, 2 the loading level's track.
 	int menuMusic = 0;
 	// Voice chat (Voip/VoiceChat.h): the menu's settings and mic test, the
 	// joined server's voice; updated on its own thread.
@@ -4667,7 +4681,10 @@ int runGame(Options& options, Session& session)
 	// set at the end of the build, cleared by the button. Not for --screenshot, --simulate,
 	// demos, a game we host or a joined server, which enter the game at once as before.
 	bool joinPending = false;
-	loadingBindings.onReadyToPlay = [&joinPending](bool) { joinPending = false; };
+	loadingBindings.onReadyToPlay = [&joinPending, &session, &sounds, &files](bool) {
+		joinPending = false;
+		menuMusic(session.menuMusic, false, sounds, files); // RemoveLoadingScreen: the level's track fades
+	};
 #if BF2142_HAS_RENDERER
 	std::optional<render::LevelSources> loadingSources;
 	std::unique_ptr<Window::MenuScreen> loadingScreen;
@@ -4689,6 +4706,9 @@ int runGame(Options& options, Session& session)
 			summary.mapName = level.name;
 			summary.mapDescriptionKey = level.briefingKey;
 			summary.gameModeDescriptionKey = level.gameModeKey;
+			if (options.screenshot.empty()) {
+				levelMusic(session.menuMusic, level.music, sounds);
+			}
 		}
 		loadingBindings.setSummary(summary);
 		std::vector<uint8_t> dfm;
@@ -9576,6 +9596,8 @@ int runGame(Options& options, Session& session)
 					options.simulate == 0) {
 					loadingBindings.setLevelLoaded(); // 0x004cbea0: the movie now offers JOIN GAME
 					joinPending = true;
+				} else {
+					menuMusic(session.menuMusic, false, sounds, files); // no JOIN GAME wait: the screen goes now
 				}
 				loadingScreen.reset();
 			}
