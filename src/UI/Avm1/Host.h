@@ -98,6 +98,13 @@ public:
 
 	virtual void gotoFrame(const ObjectRef& clip, int frame, bool play) { (void)clip, (void)frame, (void)play; }
 	virtual void gotoLabel(const ObjectRef& clip, const std::string& label, bool play) { (void)clip, (void)label, (void)play; }
+	// GotoFrame and GoToLabel: gameswf only queues the frame (0x100ac6c8's
+	// cases 0x81 and 0x8c); GotoFrame2 goes at once (gotoFrame above).
+	virtual void queueFrame(const ObjectRef& clip, int frame, bool play) { gotoFrame(clip, frame, play); }
+	virtual void queueLabel(const ObjectRef& clip, const std::string& label, bool play) { gotoLabel(clip, label, play); }
+	// The outermost script call returned (a frame's actions, an event
+	// handler, an interval, a call from the host), however it ended.
+	virtual void scriptDone() {}
 	virtual void play(const ObjectRef& clip) { (void)clip; }
 	virtual void stop(const ObjectRef& clip) { (void)clip; }
 	virtual void nextFrame(const ObjectRef& clip) { (void)clip; }

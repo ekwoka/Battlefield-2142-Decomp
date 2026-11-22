@@ -1085,8 +1085,8 @@ Interpreter::Flow Interpreter::run(Frame& f, size_t begin, size_t end)
 		}
 
 		// --- Movie clips (delegated to the host)
-		case 0x81: m_host->gotoFrame(f.target, r.u16(), false); break; // GotoFrame
-		case 0x8c: m_host->gotoLabel(f.target, r.string(), false); break; // GoToLabel
+		case 0x81: m_host->queueFrame(f.target, r.u16(), false); break; // GotoFrame
+		case 0x8c: m_host->queueLabel(f.target, r.string(), false); break; // GoToLabel
 		case 0x9f: { // GotoFrame2
 			const uint8_t flags = r.u8();
 			const int bias = (flags & 2) ? r.u16() : 0;
