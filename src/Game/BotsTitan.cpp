@@ -2038,8 +2038,16 @@ void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool s
 		});
 	};
 	use(A::Uav, focus);
-	if (silo && count(team, focus, 30, true) >= 2) {
-		use(A::Supplies, focus);
+	// Not while a crate of the team's, landed or still coming down, is there: a crate leaves the world's list once
+	// spent, expired or destroyed (destroyWhenEmptyStorage in both mods), so a listed one still serves.
+	const std::vector<uint32_t> crates = m_world.supplyCrates();
+	const bool supplied = std::any_of(crates.begin(), crates.end(), [&](uint32_t id) {
+		const world::Object* o = m_world.objects().find(id);
+		const world::Vec3 p = o ? o->position() : world::Vec3 {};
+		return o && o->team() == team && horizontal(physics::Vec3 {p.x, p.y, p.z} - focus) < 30;
+	});
+	if (silo && !supplied && count(team, focus, 30, true) >= 2 && use(A::Supplies, focus) && std::getenv("BF2142_BOT_STATS")) {
+		std::printf("commander %s %.0f s: supply crate %u\n", team == 1 ? "PAC" : "EU", m_time, m_world.supplyCrates().back());
 	}
 	physics::Vec3 sum;
 	int enemies = 0;

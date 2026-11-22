@@ -1061,6 +1061,8 @@ public:
 	// enhanced.botCommander: whether the team's Titan moved to `at` would stand in a missile's way from one of
 	// its silos or the commander's focus silo (titanBlocksSilos, for tests).
 	bool titanOrderBlocksSilos(int team, const physics::Vec3& at) const;
+	// enhanced.botCommander: its tools at `focus` now (titanCommandAssets, for tests).
+	void titanCommandAssetsNow(int team, const physics::Vec3& focus, bool silo) { titanCommandAssets(team, focus, silo); }
 private:
 	friend struct BotManagerTestAccess;
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's

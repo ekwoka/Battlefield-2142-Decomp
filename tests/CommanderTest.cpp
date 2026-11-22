@@ -1047,6 +1047,38 @@ TEST(Commander_AiAnswersSquadRequests)
 	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
 }
 
+// enhanced.botCommander's supplies to a silo with two of its soldiers on foot there: not while a crate of the
+// team's still serves the point (it went on dropping one each time the tool was ready); an enemy's crate there or
+// the team's at another point doesn't count; once it expired, another.
+TEST(Commander_TitanAiDropsOneCrateAtATime)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	for (float x : {40.0f, 42.0f, 240.0f, 242.0f}) {
+		field.soldier(1, x, 40);
+	}
+	game::BotSettings settings;
+	game::BotManager bots(world, settings);
+	const auto drops = [&](const physics::Vec3& at) {
+		bots.update(1 / 30.0f); // the players as the bots see them
+		const size_t before = world.supplyCrates().size();
+		bots.titanCommandAssetsNow(1, at, true);
+		return world.supplyCrates().size() - before;
+	};
+	const physics::Vec3 silo {40, 0, 40}, another {240, 0, 40};
+	CHECK(world.commanderAction(2, Ability::Supplies, 40, 41, true)); // the enemy's, right there
+	CHECK(drops(silo) == 1);
+	field.run(61); // the tool ready again, the crate down
+	CHECK(drops(silo) == 0);
+	CHECK(drops(another) == 1);
+	field.run(252); // the first gone 300 s after it landed
+	CHECK(drops(silo) == 1);
+}
+
 // Exercise the installed Remaster scripts through the same Sound console
 // registration and VFS used by the game. The null OpenAL driver still builds
 // and starts actual Sound instances; StartedSound counts alone did not prove
