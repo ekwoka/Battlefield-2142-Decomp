@@ -7355,7 +7355,7 @@ TEST(GameWorld_FireObstruction)
 
 	io::FileManager files;
 	physics::CollisionTemplateManager collisionTemplates;
-	collisionTemplates.add("box_mesh", boxMesh(1));
+	collisionTemplates.add("box_mesh", solidBoxMesh(1));
 	world::ObjectTemplate* box = templates.create("PlayerControlObject", "box");
 	makeMobile(*box, "box_mesh");
 	const uint32_t parked = objects.create(box, {0, 1, 10})->id();

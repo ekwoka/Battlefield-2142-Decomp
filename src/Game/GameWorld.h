@@ -819,7 +819,11 @@ public:
 	bool setSoldierPosition(uint32_t soldier, const physics::Vec3& feet);
 	bool setBodyVelocity(uint32_t object, const physics::Vec3& velocity); // for tests
 	// Whether nothing solid (static objects' projectile LOD, vehicles, the
-	// terrain) lies between two points.
+	// terrain) lies between two points. Faces count only crossed from the
+	// front, as the scene's ray (slot 0x68, 0x006fb610) that the original's
+	// sight lines take: the AI's (0x00897df0), the sound's (0x007fa100,
+	// 0x007fa350), the exits' (0x006f2530), the nametags' (RendDX9
+	// 0x100ef5b0), the wire's (0x005e27a0), the parachute's (0x005e4330).
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
 	// A firearm's ObjectTemplate.setCheckObstruction (start, end, radius;
