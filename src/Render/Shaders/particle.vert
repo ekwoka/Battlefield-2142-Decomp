@@ -33,12 +33,17 @@ void main()
 		position = inCenter;
 		outTexCoord = inUnusedLightmap;
 	} else {
-		float c = cos(inRotation), s = sin(inRotation);
+		// vsParticle: the quad stays screen aligned, its corners (+-1 less the
+		// pivot) x size (RendDX9 0x101301dc: displaceCoords); the rotation
+		// turns the texture coordinates (+-1, 0x1013021e) inside it, scaled by
+		// uvScale 1/sqrt(2), so the quad shows the frame's middle and the
+		// picture is sqrt(2) the quad's size.
 		vec2 shifted = inCorner + inPivot;
-		vec2 corner = vec2(shifted.x * c - shifted.y * s, shifted.x * s + shifted.y * c);
-		position = inCenter + (cameraRight.xyz * corner.x + cameraUp.xyz * corner.y) * inSize;
+		position = inCenter + (cameraRight.xyz * shifted.x + cameraUp.xyz * shifted.y) * inSize;
+		float c = cos(inRotation), s = sin(inRotation);
+		vec2 turned = vec2(inCorner.x * c + inCorner.y * s, -inCorner.x * s + inCorner.y * c) * 0.70710678;
 		vec2 frameSize = inFrameSize.x > 0.0 ? inFrameSize : vec2(1.0);
-		outTexCoord = inFrameCorner + (inCorner * vec2(0.5, -0.5) + 0.5) * frameSize;
+		outTexCoord = inFrameCorner + (turned * vec2(0.5, -0.5) + 0.5) * frameSize;
 	}
 	gl_Position = viewProjection * vec4(position, 1.0);
 	outColor = vec4(inColor, inAlpha);

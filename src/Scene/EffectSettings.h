@@ -226,7 +226,9 @@ struct QualitySettings {
 	bool dynamicLightsEnabled() const;
 	bool decalsEnabled() const;
 	// The effects row: applies it to the manager's settings.
-	void applyEffects(ParticleSystemSettings& settings) const;
+	// gsViewDistance: GSViewDistance as stored (the level's maximumLevelViewDistance,
+	// rounded, 20..3000; 500 unset), which the manager's draw (0x10099860) rereads each frame.
+	void applyEffects(ParticleSystemSettings& settings, float gsViewDistance = 500) const;
 };
 
 // GameLogic.useColdBreath (BF2142.exe 0x00427d38, the game logic's slots

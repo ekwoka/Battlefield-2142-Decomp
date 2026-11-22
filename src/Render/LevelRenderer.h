@@ -1007,6 +1007,10 @@ private:
 		// Decals: the normal map of the group's normal-mapped decals (Decals.fx
 		// technique 2, decalNormalMapName); null for the plain ones.
 		SDL_GPUTexture* normalMap = nullptr;
+		// Fixed-function fog: Trail.fx and NonScreenAlignedParticles.fx set
+		// FogEnable TRUE; Particles.fx's sprites never enable it (and its
+		// additive techniques, like Rain.fx, set it FALSE).
+		bool fogged = false;
 	};
 	SDL_GPUBuffer* m_particleVertices = nullptr;
 	// The heat shimmer's sprites (ParticleHeatShimmer) and the copy of the

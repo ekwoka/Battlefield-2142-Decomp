@@ -807,6 +807,11 @@ TEST(Effects_QualityLevels)
 	q.viewDistanceScale = 0.1f;
 	q.applyEffects(s);
 	CHECK(s.viewDistance == 200); // at least 200
+	// The level's GSViewDistance (0x10099860), not a fixed 500.
+	q.effects = 3;
+	q.viewDistanceScale = 1;
+	q.applyEffects(s, 1000);
+	CHECK(s.viewDistance == 1000);
 }
 
 // A wheel bundle under a wheel's spring follows the wheel's own contact

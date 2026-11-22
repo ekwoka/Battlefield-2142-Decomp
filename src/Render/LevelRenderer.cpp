@@ -2810,10 +2810,12 @@ void LevelRenderer::buildParticles(const Camera& camera)
 {
 	if (m_sources) {
 		// The manager's settings with VideoSettings' effects row over them
-		// (0x100991b0; no shipped script sets ParticleSystemManager.*).
+		// (0x100991b0; no shipped script sets ParticleSystemManager.*), the
+		// view distance from GSViewDistance each frame (0x10099860).
 		m_particleSettings = m_sources->particles ? *m_sources->particles : scene::ParticleSystemSettings {};
 		if (m_sources->quality) {
-			m_sources->quality->applyEffects(m_particleSettings);
+			m_sources->quality->applyEffects(m_particleSettings,
+				viewFarDistance(m_sources->viewDistance ? m_sources->viewDistance() : 500.0f, 1.0f));
 		}
 		const bool water = m_sources->heightmaps.hasSea();
 		const float sea = m_sources->heightmaps.seaWaterLevel();
@@ -2856,7 +2858,9 @@ std::array<float, 3> LevelRenderer::particleLight(const effects::Vec3& at, float
 	// enhanced.particleShadows: the cascades shade it instead (enh_particle.frag).
 	const float lm = quality >= 3 && !m_enh.particleShadows ? hemiShadowAt(at.x, at.z) : 1.0f;
 	const float lut = std::clamp(lm + offset, 0.0f, 1.0f);
-	const float f = lights.defaultEffectLightAffectionFactor;
+	// The factor reaches the pixel shader through vs_1_1's COLOR0, saturated
+	// to 0..1 (Port_Bavaria_Night authors 10, which would turn smoke black).
+	const float f = std::clamp(lights.defaultEffectLightAffectionFactor, 0.0f, 1.0f);
 	std::array<float, 3> out;
 	for (int i = 0; i < 3; ++i) {
 		const float diffuse = lights.effectShadowColor[static_cast<size_t>(i)]
@@ -2941,8 +2945,11 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 	// enhanced.particleLights: the point lights on what isn't itself a glow.
 	// shortcut: last frame's list (collectPointLights runs after this), a frame late; reorder if it shows.
 	const auto lightAt = [&](const effects::Vec3& at, float lightMapOffset, bool additive) {
+		if (additive) {
+			return std::array<float, 3> {1, 1, 1}; // Particles.fx psParticleAdditiveLow/High are unlit
+		}
 		std::array<float, 3> light = particleLight(at, lightMapOffset);
-		if (m_enh.particleLights && !additive) {
+		if (m_enh.particleLights) {
 			for (const effects::PointLight& l : m_pointLights) {
 				const float dx = l.position.x - at.x, dy = l.position.y - at.y, dz = l.position.z - at.z;
 				const float k = enhanced::particleLightFalloff(dx * dx + dy * dy + dz * dz, l.range2);
@@ -2994,7 +3001,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					vertices.push_back(v);
 				}
 			}
-			if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive) {
+			if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive && !groups.back().fogged) {
 				groups.back().vertexCount += static_cast<uint32_t>(vertices.size()) - first;
 			} else {
 				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
@@ -3025,7 +3032,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.part = -1;
 					vertices.push_back(v);
 				}
-				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first, true});
+				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first, true, nullptr, !additive});
 			});
 	}
 	if (weather && m_sources && m_sources->rain) {
@@ -3620,7 +3627,8 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 	// Dividing by a floored sunlit value can amplify the color or flip its sign.
 	const bool shadowed = m_enh.particleShadows && m_enh.shadows.cascadeParams[0] > 0.5f;
 	if (shadowed) {
-		const float f = m_particleSettings.particleSystemShaderQuality <= 1 ? 0.0f : lights.defaultEffectLightAffectionFactor;
+		const float f = m_particleSettings.particleSystemShaderQuality <= 1 ? 0.0f
+			: std::clamp(lights.defaultEffectLightAffectionFactor, 0.0f, 1.0f); // as particleLight
 		for (size_t i = 0; i < 3; ++i) {
 			fog.material[i] = (lights.effectShadowColor[i] - lights.effectSunColor[i]) * f;
 		}
@@ -3636,12 +3644,13 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 	uniforms.cameraUp[1] = up.y;
 	uniforms.cameraUp[2] = up.z;
 	SDL_GPUBufferBinding vertexBinding {buffer, 0};
-	bool bound = false, additive = false;
+	bool bound = false, additive = false, fogged = false;
 	for (const ParticleGroup& group : groups) {
-		if (!bound || group.additive != additive) {
+		if (!bound || group.additive != additive || group.fogged != fogged) {
 			const bool shade = shadowed && !group.additive;
 			SDL_BindGPUGraphicsPipeline(pass, shade ? m_gpu.enhancedPipelines().particle : m_gpu.particlePipeline(group.additive));
 			SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
+			fog.material[3] = group.fogged ? 1.0f : 0.0f; // particle.frag: fixed-function fog
 			SDL_PushGPUFragmentUniformData(commands, 0, &fog, sizeof(fog));
 			if (shade) {
 				SDL_PushGPUFragmentUniformData(commands, 1, &m_enh.shadows, sizeof(m_enh.shadows));
@@ -3654,6 +3663,7 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 			bound = true;
 			additive = group.additive;
+			fogged = group.fogged;
 		}
 		SDL_GPUTextureSamplerBinding sampler {group.texture, group.repeat ? m_gpu.repeatSampler() : m_gpu.clampSampler()};
 		SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);

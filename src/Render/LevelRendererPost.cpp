@@ -519,8 +519,10 @@ void LevelRenderer::drawSky(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* p
 		// CLOUDSFADEOUTDIST: the start and the length (y - x).
 		sky.cloudFade[0] = s.fadeCloudsDistances[0];
 		sky.cloudFade[1] = s.fadeCloudsDistances[1] - s.fadeCloudsDistances[0];
-		sky.cloudFade[2] = s.cloudLerpFactors[0];
-		sky.cloudFade[3] = s.cloudLerpFactors[1];
+		// SkyDome.fx is ps_1_1, whose constants clamp to -1..1 (Port_Bavaria_Night
+		// authors 20/5, which would wash the sky out white).
+		sky.cloudFade[2] = std::clamp(s.cloudLerpFactors[0], -1.0f, 1.0f);
+		sky.cloudFade[3] = std::clamp(s.cloudLerpFactors[1], -1.0f, 1.0f);
 	}
 	sky.domeCenter[0] = camera.position.x;
 	sky.domeCenter[1] = camera.position.y;
