@@ -1718,6 +1718,8 @@ TEST(Titan_ApcPodLandsAndDisappearsOnDeck)
 		CHECK(level.world->setBodyVelocity(pod, {0, -15, 0}));
 		int ticks = 0;
 		while (ticks < 180 && level.world->ridingPod(player)) { level.run(1 / 30.0f); ++ticks; }
+		// Put out (0x005cff20): hidden and out of the collision for its last 0.1 s.
+		CHECK(level.objects.find(pod) && level.objects.find(pod)->hidden() && !level.world->setBodyVelocity(pod, {}));
 		game::GameWorld::PlayerInfo info; level.world->playerInfo(player, info);
 		std::fprintf(stderr, "  %s: rider left after %.2f s at y %.1f (Titan %.1f)\n", mod, ticks / 30.0f, info.position.y, titan.position.y);
 		CHECK(!level.world->ridingPod(player) && info.alive && info.vehicle == 0);
@@ -1772,6 +1774,55 @@ TEST(Titan_ParachuteComesDownOnTheDecks)
 	CHECK(lowest > -1 && lowest < 5); // on the deck (-2.3), not through it
 	CHECK(level.world->parachutes().empty() && !info.vehicle && info.alive);
 	CHECK(feet > -3 && feet < -1.5f);
+}
+
+// A parachute landed on the enemy Titan's deck (its shield down) leaves the
+// collision as it puts its rider out (0x005cff20: updateFlags(0, 0x102),
+// 0x006f68f0 clearing 0x100 takes it out of the ResponsePhysicsManager,
+// slot 0x18), so the collapsing canopy, still there for 0.1 s, can't strike
+// the soldier who just stepped out of it.
+TEST(Titan_LandedParachuteLeavesItsRiderAlone)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+		CHECK(level.loaded && level.titan(1));
+		if (!level.loaded || !level.titan(1)) return;
+		const auto pac = *level.titan(1);
+		level.world->setHitPoints(pac.object, pac.hitPoints * 0.5f);
+		level.run(1);
+		const world::Object* hull = level.objects.find(pac.object);
+		const physics::Mat3 frame = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
+		const int id = level.world->addPlayer("Jumper", 2, false);
+		CHECK(level.world->spawnSoldier(id));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(id, info);
+		level.world->setSoldierPosition(info.soldier, pac.position + frame.transform({0, 45, -40}));
+		game::SoldierInput nine;
+		nine.selectItem = 9;
+		uint32_t chute = 0;
+		bool bodyless = false, out = false;
+		for (int i = 0; i < 30 * 12 && !out; ++i) {
+			level.world->setInput(id, nine);
+			level.run(1 / 30.0f);
+			level.world->playerInfo(id, info);
+			if (!chute && !level.world->parachutes().empty()) chute = level.world->parachutes().back().object;
+			if (chute && info.vehicle != chute) {
+				out = true;
+				// Put out: the canopy is still an object for 0.1 s, but no body.
+				bodyless = level.objects.find(chute) && !level.world->setBodyVelocity(chute, {});
+			}
+		}
+		level.run(1);
+		level.world->playerInfo(id, info);
+		std::fprintf(stderr, "  %s: chute %u, rider out %d at %.1f over the Titan, hit points %.0f, canopy bodyless %d\n", mod, chute, out,
+			frame.untransform(info.position - pac.position).y, info.alive ? level.world->hitPoints(info.soldier) : 0.0f, bodyless);
+		CHECK(chute != 0 && out && info.alive && info.vehicle == 0);
+		CHECK(bodyless);
+		CHECK(level.world->hitPoints(info.soldier) == 100);
+	}
 }
 
 // A bot falling (AIDLL 0x10099b70: its node's velocity at most -1 m/s)
@@ -5242,3 +5293,4 @@ TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 		turn.untransform(info.position - titan.position).y);
 	CHECK(info.vehicle != vehicle->id());
 }
+

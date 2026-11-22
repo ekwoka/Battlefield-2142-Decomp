@@ -522,10 +522,29 @@ void GameWorld::leaveParachute(Player& player, Parachute& chute)
 	raise("ExitVehicle", {ScriptValue::player(player.id), ScriptValue::object(chute.object)});
 }
 
+void GameWorld::putOutOfCollision(uint32_t object)
+{
+	if (world::Object* o = m_objects.find(object)) {
+		o->setHidden(true);
+	}
+	m_bodies.erase(std::remove_if(m_bodies.begin(), m_bodies.end(), [object](const Body& b) { return b.object == object; }), m_bodies.end());
+}
+
 void GameWorld::stepParachutes(float seconds)
 {
 	for (auto it = m_parachutes.begin(); it != m_parachutes.end();) {
 		Parachute& chute = *it;
+		// The timer event 0x21: gone (put out, out of the collision).
+		if (chute.removeIn >= 0) {
+			chute.removeIn -= seconds;
+			if (chute.removeIn <= 0) {
+				m_objects.remove(chute.object);
+				it = m_parachutes.erase(it);
+				continue;
+			}
+			++it;
+			continue;
+		}
 		Body* body = findBody(chute.object);
 		Player* rider = chute.player >= 0 ? findPlayer(chute.player) : nullptr;
 		if (rider && (!rider->alive || rider->vehicle != chute.object)) {
@@ -572,16 +591,8 @@ void GameWorld::stepParachutes(float seconds)
 				if (rider) {
 					leaveParachute(*rider, chute);
 				}
+				putOutOfCollision(chute.object);
 				chute.removeIn = kRemoveDelay;
-			}
-		}
-		// The timer event 0x21: gone.
-		if (chute.removeIn >= 0) {
-			chute.removeIn -= seconds;
-			if (chute.removeIn <= 0) {
-				m_objects.remove(chute.object);
-				it = m_parachutes.erase(it);
-				continue;
 			}
 		}
 		++it;

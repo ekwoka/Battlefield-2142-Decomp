@@ -5060,6 +5060,10 @@ private:
 	// PlayerControlObject's: the landing.
 	void parachuteCollision(uint32_t self, uint32_t other, const physics::Vec3& normal, uint32_t otherMaterial);
 	void leaveParachute(Player& player, Parachute& chute);
+	// The put-out's updateFlags(0, 0x102) (0x005cff20 -> 0x006f68f0):
+	// the object is no longer drawn and, clearing 0x100, leaves the
+	// ResponsePhysicsManager (0x00a82518 slot 0x18) for the 0.1 s it has left.
+	void putOutOfCollision(uint32_t object);
 	// Nothing a soldier of the team stands on, nor what stops a round,
 	// between two points (`ignore`: an object left out).
 	bool soldierRayClear(int team, const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const;

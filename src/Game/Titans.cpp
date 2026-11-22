@@ -2972,7 +2972,7 @@ void GameWorld::stepPods(float seconds)
 				raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(pod.object)});
 			}
 			if (pod.landing >= 0) {
-				if (world::Object* object = m_objects.find(pod.object)) object->setHidden(true);
+				putOutOfCollision(pod.object);
 				pod.player = -1;
 				pod.removeIn = 0.1f;
 				++it;
