@@ -7045,7 +7045,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 {
 	physics::CollisionWorld::Hit hit {};
 	// A stationary gun (Body::fixed) is also in the static world: `ignore` leaves its faces out there too.
-	if (m_projectileCollision.raycast(from, to, hit, ignore)) {
+	if (m_projectileCollision.raycastFront(from, to, hit, ignore)) {
 		return false;
 	}
 	for (const Body& body : m_bodies) {
@@ -7054,7 +7054,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
-		if (raycastBody(body, localFrom, localTo, hit)) {
+		if (raycastBody(body, localFrom, localTo, hit, nullptr, true)) {
 			return false;
 		}
 	}
@@ -7098,7 +7098,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		return false;
 	};
 	const auto statics = [this](const physics::Vec3& a, const physics::Vec3& b, physics::CollisionWorld::Hit& hit) {
-		return m_projectileCollision.raycast(a, b, hit);
+		return m_projectileCollision.raycastFront(a, b, hit);
 	};
 	if (blocked(statics, from, to)) {
 		return false;
@@ -7110,7 +7110,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 		const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
 		const auto parts = [this, &body](const physics::Vec3& a, const physics::Vec3& b, physics::CollisionWorld::Hit& hit) {
-			return raycastBody(body, a, b, hit);
+			return raycastBody(body, a, b, hit, nullptr, true);
 		};
 		if (blocked(parts, localFrom, localTo)) {
 			return false;
