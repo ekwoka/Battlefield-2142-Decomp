@@ -4681,6 +4681,7 @@ int runGame(Options& options, Session& session)
 	// set at the end of the build, cleared by the button. Not for --screenshot, --simulate,
 	// demos, a game we host or a joined server, which enter the game at once as before.
 	bool joinPending = false;
+	std::string loadingTrack; // the level's .desc <music>, played once its archives are mounted
 	loadingBindings.onReadyToPlay = [&joinPending, &session, &sounds, &files](bool) {
 		joinPending = false;
 		menuMusic(session.menuMusic, false, sounds, files); // RemoveLoadingScreen: the level's track fades
@@ -4707,7 +4708,7 @@ int runGame(Options& options, Session& session)
 			summary.mapDescriptionKey = level.briefingKey;
 			summary.gameModeDescriptionKey = level.gameModeKey;
 			if (options.screenshot.empty()) {
-				levelMusic(session.menuMusic, level.music, sounds);
+				loadingTrack = level.music;
 			}
 		}
 		loadingBindings.setSummary(summary);
@@ -4729,6 +4730,9 @@ int runGame(Options& options, Session& session)
 #if BF2142_HAS_RENDERER
 		for (int i = 0; loadingScreen && i < frames; ++i) {
 			loadingScreen->frame();
+			// 0x0040c1ed, each frame: the loading screen mutes groups 0 and 2 (reason 2).
+			sounds.setMuted(2, true);
+			sounds.update(1);
 		}
 #endif
 	};
@@ -4759,6 +4763,9 @@ int runGame(Options& options, Session& session)
 			}
 		}
 		files.setMountingAllowed(false);
+		// 0x004d3ad7: InitLoadingScreen (and its music) after the level's
+		// archives, which may hold the track (Wake: levels/wake_island_2142/Music).
+		levelMusic(session.menuMusic, loadingTrack, sounds);
 		loadingStep(0.1f);
 		std::printf("%zu template scripts run from Objects/\n",
 			world::loadObjectTemplates(console, files, "Objects/", options.bots > 0));
@@ -11296,7 +11303,9 @@ int runGame(Options& options, Session& session)
 		}
 		std::array<int, 3> remoteTicketState {-1, -1, -1}; // a joined game's last seen team +0x8c
 		viewer.onTicks = [&](int ticks) {
+			sounds.setMuted(2, joinPending); // 0x0040c1ed: muted while the loading screen is up
 			if (joinPending) {
+				sounds.update(ticks); // the mute's fade (0x007f9f50) runs while the world waits
 				return; // the loaded level waits on JOIN GAME: nothing runs yet
 			}
 			for (int i = 0; i < ticks; ++i) {
