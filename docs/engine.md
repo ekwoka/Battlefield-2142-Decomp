@@ -3248,7 +3248,9 @@ scans too, over the vehicles whose driver seat its ghosts say is taken
 (`PlayerCamera::setRemoteDriven`). The Inside view also asks the
 control object above the camera (slot `0x140`): the Soldier's
 (`0x005edeb0`), with `GSCameraShake` on (GeneralSettings `+0xb9`, default
-1) and the first-person mode (`+0x2f0` 0, not man down `+0x28c`), turns
+1) and not the third-person mode (`+0x2f0` ≠ 1; with `+0x28c` set,
+`0x005edf8a` instead moves the view by minus the vector at `+0x390`, in either
+mode, which the rewrite doesn't port), turns
 the view by its first-person skeleton's animated `Camerabone` (node 0 of
 `+0x2c0`'s instance) × the inverse of that bone's setup matrix (template
 `+0x358`) before the camera's matrix; the skeleton stays placed from the

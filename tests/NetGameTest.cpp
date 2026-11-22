@@ -1681,6 +1681,12 @@ TEST(NetGame_RemoteWorldVehicleGhosts)
 	exit.values = {2, 0};
 	world.apply(exit);
 	CHECK(world.object(301)->occupant == -1 && world.player(2)->vehicleGhost == 0);
+	// The driver's seat is the root's ghost (the camera rumble's driven test, main.cpp).
+	enter.values = {2, 300, 0};
+	world.apply(enter);
+	root = world.object(300);
+	CHECK(root && root->occupant == 2 && (!root->rootGhost || root->rootGhost == 300) && world.object(301)->rootGhost == 300);
+	world.apply(exit);
 	net::GameEvent destroy;
 	destroy.type = net::kEvDestroyObject;
 	destroy.values = {300, 0};
