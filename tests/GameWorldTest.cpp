@@ -1441,14 +1441,15 @@ TEST(GameWorld_GadgetsHealAndResupply)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(std::abs(range.world->hitPoints(soldier) - (before + 6)) < 0.5f); // 2 s at 3 a second
-	// The hub in hand heals round its holder as well (0x005d8740): 6 a
-	// second with the thrown one.
+	// The hub in hand heals round its holder as well (0x005d8740), its
+	// ammo's update run twice a tick in hand (0x005c58a0): 9 a second with
+	// the thrown one.
 	press(take);
 	const float holding = range.world->hitPoints(soldier);
 	for (int i = 0; i < 30; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
-	CHECK(std::abs(range.world->hitPoints(soldier) - (holding + 6)) < 0.5f);
+	CHECK(std::abs(range.world->hitPoints(soldier) - (holding + 9)) < 0.5f);
 	// Another throw replaces the hub.
 	for (int i = 0; i < 40; ++i) {
 		range.world->tick(1 / 30.0f);
@@ -1535,15 +1536,16 @@ TEST(GameWorld_AbilityBattery)
 	// Nobody to treat: the battery only fills, a tenth a second.
 	run(1);
 	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.01f);
-	// Charged: 3 x 1.5 per cent a second, the battery down 0.5 - 0.1 a second.
-	// (The scan lists a hurt soldier at its next turn, one a second: let it come.)
+	// Charged: the ammo's update runs twice a tick in hand (0x005c58a0), so
+	// 2 x 3 x 1.5 per cent a second, the battery down 2 x 0.5 - 0.1 a second.
+	// (The scan lists a hurt soldier at its next turn: let it come.)
 	range.world->setHitPoints(soldier, 40);
 	run(1.1f);
 	range.world->setHitPoints(soldier, 40);
-	range.world->setBattery(me, 0.5f);
-	run(1);
+	range.world->setBattery(me, 1);
+	run(0.5f);
 	CHECK(std::abs(range.world->hitPoints(soldier) - 44.5f) < 0.3f);
-	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.02f);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.55f) < 0.02f);
 	// Flat: a tick's treatment only now and then, as the battery creeps
 	// over 0.5 / 30 (a fifth of the time).
 	range.world->setBattery(me, 0);
@@ -1595,7 +1597,8 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 0 && info.active);
-	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.45f);
+	// Healed since: the hub in hand treats twice a tick (0x005c58a0), at most 7 in 35 ticks.
+	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.47f);
 	CHECK(info.healFlag && !info.repairFlag && info.sinceHeal == 0);
 	// Full again, he is held (and the sound plays) until the next scan, 2 s on.
 	range.world->setHitPoints(soldier, 100);
@@ -8441,6 +8444,64 @@ TEST(GameWorld_RepairToolRay)
 		const float now = range.world->hitPoints(car);
 		CHECK(facing == 0 ? now > 51 : now == 50);
 	}
+}
+
+// The repair tool's battery while mending one vehicle: the selected
+// firearm's update (0x005c58a0) runs the ammo's update (0x005d8ac0) twice a
+// tick (0x005c5d87, 0x005c6018), each drawing abilityDrain / 30, against the
+// soldier's one abilityRestoreRate / 30 (0x0058d943). With the shipped 0.05
+// both ways the battery falls 0.05 a second while firing and fills again
+// once the trigger is let go.
+TEST(GameWorld_RepairToolDrainsBattery)
+{
+	Range range;
+	range.collisionTemplates.add("hull_mesh", boxMesh(2));
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(20, "PlayerControlObject");
+	world::ObjectTemplate* hull = range.templates.create("PlayerControlObject", "hull");
+	makeMobile(*hull, "hull_mesh");
+	hull->settings()["armor.maxHitPoints"] = "1000";
+	world::ObjectTemplate* tool = range.templates.create("GenericFireArm", "unl_repair");
+	tool->settings()["itemIndex"] = "4";
+	tool->settings()["ammo.magSize"] = "-1";
+	tool->settings()["ammo.replenishingType"] = "RTHeal";
+	tool->settings()["ammo.abilityRadius"] = "2.5";
+	tool->settings()["ammo.abilityStrength"] = "2.5";
+	tool->settings()["ammo.abilityDrain"] = "0.05";
+	tool->settings()["ammo.onlyActiveWhileFiring"] = "1";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->settings()["abilityRestoreRate"] = "0.05";
+	for (const char* item : {"eu_ar_rifle", "unl_repair"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	const uint32_t car = range.objects.create(hull, {0, 2, 4.0f})->id();
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setHitPoints(car, 500);
+	range.world->setBattery(me, 0.65f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	fire.aimPitch = -10;
+	for (int i = 0; i < 270; ++i) {
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->hitPoints(car) > 510);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.20f) < 0.02f);
+	const float mended = range.world->hitPoints(car);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 90; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->hitPoints(car) == mended);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.35f) < 0.02f);
 }
 
 // Selection alone never submits retail's player spawn group (+0xe8).

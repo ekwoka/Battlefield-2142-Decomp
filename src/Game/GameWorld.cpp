@@ -12816,7 +12816,8 @@ std::vector<uint32_t> GameWorld::supplyObjects() const
 // Only the holder's team or team 0 (0x005d7d40). The targets come from a
 // sphere of abilityRadius round the holder (0x005d8740), rescanned every
 // second with none and every two seconds with some, those held treated
-// in between even out of reach.
+// in between even out of reach. In hand it runs twice a tick (the firearm's
+// update 0x005c58a0: stepAbilities), so there twice as often.
 // The battery: nothing is treated unless the holder's battery holds
 // abilityDrain / 30 (template +0x6c, setter 0x005d7ae0; read through
 // 0x005d8160 -> 0x005d7fe0 -> soldier component 0xc4d7 slot 0x90), and
@@ -13365,16 +13366,23 @@ void GameWorld::stepAbilities(float seconds)
 			if (scan->second.targets.empty() && scan->second.timer == 0) {
 				scan->second.timer = 1; // the first scan at once
 			}
-			if (whileFiring) {
-				const float pitch = std::clamp(player.input.aimPitch + player.aimKickPitch, -89.0f, 89.0f) * 3.14159265f / 180.0f;
-				const physics::Vec3 eye = player.body.position + physics::Vec3 {0, 0.6f, 0};
-				const physics::Vec3 look {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-				const physics::Vec3 end = eye + look * ability.radius;
-				applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end);
-				continue;
+			// The selected firearm's update (0x005c58a0) runs its ammo
+			// component's update (+0x1c4 slot 0x18, 0x005d8ac0) twice a tick,
+			// at 0x005c5d87 and again at 0x005c6018: a tool in hand treats,
+			// draws on the battery and counts its rescan time twice against
+			// the soldier's one fill (0x0058d943), so a held repair drains.
+			for (int pass = 0; pass < 2; ++pass) {
+				if (whileFiring) {
+					const float pitch = std::clamp(player.input.aimPitch + player.aimKickPitch, -89.0f, 89.0f) * 3.14159265f / 180.0f;
+					const physics::Vec3 eye = player.body.position + physics::Vec3 {0, 0.6f, 0};
+					const physics::Vec3 look {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+					const physics::Vec3 end = eye + look * ability.radius;
+					applyAbility(ability, eye, player.team, seconds, 0, &scan->second, &player, false, false, nullptr, &end);
+					continue;
+				}
+				const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
+				applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
 			}
-			const physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), -0.5f, std::cos(yaw)} * 1.0f;
-			applyAbility(ability, at, player.team, seconds, 0, &scan->second, &player);
 		}
 	}
 }
