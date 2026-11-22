@@ -24,7 +24,7 @@
 // weaponHud.unlockIcon, and carries its specialAbilityIcon,
 // renderedPicture and descrString (else hudName). The display copy of the
 // open kit (0x007977a0) sets Kit<row>Item<item>Active / FieldUnlocked /
-// Show / Icon / Alpha; KitCustom<row>Icon the chosen item of each row;
+// Show / Icon / Alpha; KitCustom<slot>Icon the item in each drop slot;
 // CustomInfoShow, CustomSoldierPicture
 // (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].dds, the 1 for
 // heavy armour, 0x007975e0), KitItemInfoString with LargeInfoPic /
@@ -32,11 +32,11 @@
 // NotAntiVechicleKitChoosen; Ability0..6Active, the abilities the kit
 // gives (0x00798b20, below).
 //
-// Picking: the original drags an item (chooseKitCustom 0x00798090 takes
-// it on the pointer) onto a slot (selectDroppedItem 0x00798cf0 → equip
-// 0x007986f0: rows 0, 3 and 4 choose one item, rows 1 and 2 share two
-// drop slots). The rewrite's HUD has no dragging: chooseKitCustom equips
-// the item in its own row's slot at once. The choice is committed when
+// Picking: an item is dragged (chooseKitCustom 0x00798090 takes it on the
+// pointer, the button's press) onto a drop slot (selectDroppedItem
+// 0x00798cf0, the slot's release → equip 0x007986f0): rows 0, 3 and 4
+// drop on their own slot, one item each; rows 1 and 2 share slots 1 and 2,
+// so two items of one branch can be carried. The choice is committed when
 // the soldier spawns or the screen closes (0x00799aa0 sends SelectKit with
 // the chosen unlocks): `onEquip` gets the chosen ItemContainers.
 //
@@ -123,6 +123,9 @@ public:
 	void chooseKitSelection(int a, int b);
 	void closeCustomInterface();
 	void chooseKitCustom(int row, int item);
+	void selectDroppedItem(int slot);
+	// The left button's release: the dragged item, not dropped on a slot, is let go.
+	void endDrag();
 	void setInformationString(int row, int item);
 	void resetInformationString();
 	void setHeavyArmor(bool heavy);
@@ -168,7 +171,13 @@ private:
 	bool m_heavy = false;
 	bool m_changed = false; // a choice since the last commit
 	std::array<std::array<Item, kItems>, kRows> m_grid;
-	std::array<std::array<int, kRows>, kKits> m_chosen {}; // the active item per row, per kit (-1 none)
+	struct Pick {
+		int row = -1, index = -1;
+		bool operator==(const Pick& o) const { return row == o.row && index == o.index; }
+	};
+	void equip(int kit, Pick item, int slot);
+	std::array<std::array<Pick, kRows>, kKits> m_slots {}; // the item in each drop slot, per kit
+	Pick m_drag; // the item on the pointer (0x88 / 0x8c)
 	bool m_chosenSet = false;
 	// What the last full update() showed, for skipUnchanged. Every grid change
 	// goes through build(), which counts.

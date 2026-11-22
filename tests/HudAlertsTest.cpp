@@ -198,7 +198,10 @@ TEST(HudNodes_ButtonsMouseOverAndShowCommands)
 	CHECK(manager.click(110, 105, true));
 	CHECK((ran == std::vector<std::string> {"Commander.sendOrder 6 1", "CommanderMenu.deselect"}));
 	ran.clear();
-	manager.click(320, 320); // a release over the drop target
+	manager.click(320, 320); // a press over the drop target runs nothing
+	CHECK(ran.empty());
+	manager.release(320, 320); // its release does
+	manager.release(10, 10);
 	CHECK((ran == std::vector<std::string> {"kitInterface.selectDroppedItem 1"}));
 	ran.clear();
 	manager.set("PodShow", 1);

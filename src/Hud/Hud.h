@@ -322,12 +322,13 @@ public:
 	// The pointer (menus) in the 800 x 600 screen, and a click there:
 	// buttons run their console commands (setButtonNodeConCmd; with
 	// `alternate`, the right button, setButtonNodeAltConCmd) through the
-	// runner, and the mouse-over nodes under it their release commands
-	// (setMouseOverNodeConCmd ... 3). True when a button took the click.
+	// runner. True when a button took the click. The release runs the
+	// mouse-over nodes' commands under it (setMouseOverNodeConCmd ... 3).
 	void setPointer(float x, float y) { m_pointer[0] = x; m_pointer[1] = y; }
 	float pointerX() const { return m_pointer[0]; }
 	float pointerY() const { return m_pointer[1]; }
 	bool click(float x, float y, bool alternate = false);
+	void release(float x, float y);
 
 	// The pointer's textures (HudManager.setMouseTexture*, the HUD
 	// manager's slots from 0x0075e87f: the plain pointer, the map's, and
@@ -339,6 +340,14 @@ public:
 	// The pointer as a quad centred on the pointer (false: no texture or
 	// no pointer).
 	bool pointerQuad(Pointer kind, HudQuad& quad) const;
+	// The picture dragged on the pointer (the kit screen's taken item), centred on it; empty: none.
+	void setDragPicture(std::string texture, float w, float h)
+	{
+		m_dragPicture = std::move(texture);
+		m_dragSize[0] = w;
+		m_dragSize[1] = h;
+	}
+	bool dragQuad(HudQuad& quad) const;
 	// HudManager's other settings, kept by name (setCommPos, setCommSize,
 	// setCommMousePos, setSpottedMenuPos/Size, setSpottedMousePos,
 	// setCommMouseSensitivity, setPointerMouseSensitivity,
@@ -454,6 +463,8 @@ private:
 	void runCommands(const std::vector<std::pair<int, std::string>>& commands, int event);
 	std::string m_pointerTextures[static_cast<int>(Pointer::Count)];
 	float m_pointerSize[2] = {32, 32};
+	std::string m_dragPicture;
+	float m_dragSize[2] = {0, 0};
 	std::map<std::string, std::array<float, 4>> m_settings;
 	uint32_t m_paintKits = 0xff, m_paintVehicles = 0xffffffff;
 	MarkerSource m_markerSource;

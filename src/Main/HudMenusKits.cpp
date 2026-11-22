@@ -37,9 +37,6 @@ constexpr int kMainWeaponIndex = 3;
 KitMenu::KitMenu(game::GameWorld& round, game::GameLogic& logic, world::ObjectTemplateManager& templates, hud::HudManager& hud)
 	: m_round(round), m_logic(logic), m_templates(templates), m_hud(hud)
 {
-	for (auto& kit : m_chosen) {
-		kit.fill(-1);
-	}
 }
 
 bool KitMenu::mainWeapon(const std::string& itemTemplate) const
@@ -71,7 +68,8 @@ void KitMenu::bind(Console& console)
 	bindMethod(console, "KitInterface.closeCustomInterface", any, [this](int) { closeCustomInterface(); });
 	bindMethod(console, "KitInterface.chooseKitSelection", any, [this](int a, int b) { chooseKitSelection(a, b); });
 	bindMethod(console, "KitInterface.chooseKitCustom", any, [this](int row, int item) { chooseKitCustom(row, item); });
-	bindMethod(console, "KitInterface.selectDroppedItem", any, [](int) {}); // no dragging: chooseKitCustom equips
+	bindMethod(console, "KitInterface.selectDroppedItem", any, [this](int slot) { selectDroppedItem(slot); });
+	// 0x00797460 restores the pointer; here endDrag does, after the release's drop.
 	bindMethod(console, "KitInterface.resetMousePic", any, [](int) {});
 	bindMethod(console, "KitInterface.setInformationString", any, [this](int row, int item) { setInformationString(row, item); });
 	bindMethod(console, "KitInterface.resetInformationString", any, [this](int) { resetInformationString(); });
@@ -116,9 +114,14 @@ void KitMenu::bind(Console& console)
 		if (!it.present || !it.available) {
 			return false;
 		}
-		m_chosen[static_cast<size_t>(kit)][static_cast<size_t>(branch + 1)] = on ? level : -1;
-		m_changed = true;
-		m_built = false;
+		Pick& slot = m_slots[static_cast<size_t>(kit)][static_cast<size_t>(branch + 1)];
+		if (on && !(slot == Pick {branch + 1, level})) {
+			equip(kit, {branch + 1, level}, branch + 1);
+		} else if (!on && slot == Pick {branch + 1, level}) {
+			slot = {};
+			m_changed = true;
+			m_built = false;
+		}
 		return true;
 	};
 	bindMethod(console, "UnlockInterface.selectNextUnlock", any,
@@ -201,9 +204,8 @@ void KitMenu::setFieldUpgrades(int credits, const std::vector<std::string>& cont
 		for (int kit = 0; kit < kKits; ++kit) {
 			m_kit = kit;
 			build(m_team);
-			for (int row = 0; row < kRows; ++row) {
-				int& chosen = m_chosen[kit][row];
-				if (chosen >= 0 && !m_grid[row][chosen].available) chosen = -1;
+			for (Pick& p : m_slots[static_cast<size_t>(kit)]) {
+				if (p.row >= 0 && !m_grid[static_cast<size_t>(p.row)][static_cast<size_t>(p.index)].available) p = {};
 			}
 		}
 		m_kit = saved;
@@ -297,10 +299,10 @@ void KitMenu::build(int team)
 		item.available = owns(child.name);
 		item.fieldUnlocked = std::find(m_fieldItems.begin(), m_fieldItems.end(), child.name) != m_fieldItems.end();
 	}
-	for (int row = 0; row < kRows; ++row) {
-		const int chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
-		if (chosen >= 0 && m_grid[static_cast<size_t>(row)][static_cast<size_t>(chosen)].available) {
-			m_grid[static_cast<size_t>(row)][static_cast<size_t>(chosen)].active = true;
+	for (const Pick& p : m_slots[static_cast<size_t>(m_kit)]) {
+		Item* in = p.row >= 0 ? &m_grid[static_cast<size_t>(p.row)][static_cast<size_t>(p.index)] : nullptr;
+		if (in && in->available) {
+			in->active = true;
 		}
 	}
 	// The kit's own weapon stays the primary unless another was chosen.
@@ -433,7 +435,7 @@ void KitMenu::update(int team)
 			if (t->typeName() == "ItemContainer") {
 				const int level = std::atoi(setting(child.name, "unlockLevel").c_str());
 				if (level >= 0 && level < kItems && !t->children().empty() && mainWeapon(t->children().front().name)) {
-					if (m_chosen[static_cast<size_t>(i)][0] == primaryIndex
+					if (m_slots[static_cast<size_t>(i)][0].index == primaryIndex
 						&& owns(child.name)) {
 						chosenWeaponIcon = setting(t->children().front().name, "weaponHud.weaponIcon");
 					}
@@ -466,7 +468,6 @@ void KitMenu::update(int team)
 	}
 	// The open kit's grid (the display copy, 0x007977a0).
 	for (int row = 0; row < kRows; ++row) {
-		std::string chosenIcon;
 		for (int index = 0; index < kItems; ++index) {
 			const Item& it = m_grid[static_cast<size_t>(row)][static_cast<size_t>(index)];
 			const std::string p = "Kit" + std::to_string(row) + "Item" + std::to_string(index);
@@ -475,11 +476,12 @@ void KitMenu::update(int team)
 			m_hud.set(p + "Show", it.present ? 1 : 0);
 			m_hud.setString(p + "Icon", orEmpty(it.icon));
 			m_hud.set(p + "Alpha", it.available ? 1.0f : 0.3f);
-			if (it.active) {
-				chosenIcon = it.icon;
-			}
 		}
-		m_hud.setString("KitCustom" + std::to_string(row) + "Icon", orEmpty(chosenIcon));
+		// The drop slot's item (slot 0 without one: the kit's own weapon).
+		const Pick& in = m_slots[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
+		const Item& slotItem = in.row >= 0 ? m_grid[static_cast<size_t>(in.row)][static_cast<size_t>(in.index)] : m_grid[0][0];
+		m_hud.setString("KitCustom" + std::to_string(row) + "Icon",
+			orEmpty(slotItem.active && (in.row >= 0 || row == 0) ? slotItem.icon : std::string()));
 	}
 	// The kit screen's variables (registered by 0x00796d80: Kit%iItem%iActive
 	// / Alpha / FieldUnlocked, Ability%iActive, HeavyArmor%iActive,
@@ -547,6 +549,7 @@ void KitMenu::chooseKitSelection(int a, int b)
 		return;
 	}
 	m_customOpen = true;
+	endDrag(); // 0x00799c70 clears the taken item (0x88 / 0x8c)
 	if (b == 0) {
 		m_built = false;
 	}
@@ -557,6 +560,7 @@ void KitMenu::closeCustomInterface()
 {
 	// 0x00798070 → 0x00797d30.
 	m_customOpen = false;
+	endDrag();
 	resetInformationString();
 	for (int i = 0; i < kRows; ++i) {
 		m_hud.set("KitCustom" + std::to_string(i) + "SelectShow", 0);
@@ -567,7 +571,8 @@ void KitMenu::closeCustomInterface()
 
 void KitMenu::chooseKitCustom(int row, int index)
 {
-	// 0x00798090 (take) + 0x007986f0 (equip in the row's own slot).
+	// 0x00798090: an available item goes on the pointer (0x007973a0); a
+	// release over a drop slot equips it (selectDroppedItem).
 	if (row < 0 || row >= kRows || index < 0 || index >= kItems) {
 		return;
 	}
@@ -575,8 +580,44 @@ void KitMenu::chooseKitCustom(int row, int index)
 	if (!it.present || !it.available) {
 		return;
 	}
-	auto& chosen = m_chosen[static_cast<size_t>(m_kit)][static_cast<size_t>(row)];
-	chosen = chosen == index || (row == 0 && index == 0) ? -1 : index; // the kit's own weapon is no unlock
+	m_drag = {row, index};
+	// shortcut: drawn at the item's HUD picture size, not the cursor size 0x007973a0 reads from the item.
+	m_hud.setDragPicture(it.icon, row == 0 ? 144.0f : 41.0f, 41.0f);
+}
+
+void KitMenu::selectDroppedItem(int slot)
+{
+	// 0x00798cf0: rows 1 and 2 drop on slot 1 or 2, any other row on its own slot.
+	const Pick item = m_drag;
+	endDrag();
+	const bool shared = (item.row == 1 || item.row == 2) && (slot == 1 || slot == 2);
+	if (item.row < 0 || (!shared && slot != item.row)) {
+		return;
+	}
+	equip(m_kit, item, slot);
+}
+
+void KitMenu::endDrag()
+{
+	m_drag = {};
+	m_hud.setDragPicture({}, 0, 0);
+}
+
+void KitMenu::equip(int kit, Pick item, int slot)
+{
+	// 0x007986f0: rows 1 and 2 keep one item per drop slot; the item leaves
+	// its other slot, and dropped on the slot it's in it comes out. Other
+	// rows choose one item; the kit's own weapon is no unlock.
+	auto& slots = m_slots[static_cast<size_t>(kit)];
+	if (item.row == 1 || item.row == 2) {
+		const bool there = slots[static_cast<size_t>(slot)] == item;
+		for (Pick& p : slots) {
+			if (p == item) p = {};
+		}
+		slots[static_cast<size_t>(slot)] = there ? Pick {} : item;
+	} else {
+		slots[static_cast<size_t>(slot)] = item.row == 0 && item.index == 0 ? Pick {} : item;
+	}
 	m_changed = true;
 	m_built = false;
 }
