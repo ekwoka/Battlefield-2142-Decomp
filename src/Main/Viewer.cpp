@@ -658,6 +658,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
 					options.onClick(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
+				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT && pointer
+					&& options.onRelease) {
+					int w = 1, h = 1;
+					SDL_GetWindowSize(window, &w, &h);
+					options.onRelease(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT && pointer
 					&& options.onRightClick) {
 					int w = 1, h = 1;
@@ -1558,15 +1563,19 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 				} else {
 					note = " (no text box open)";
 				}
-			} else if ((step.op == "move" || step.op == "click" || step.op == "rclick") && point(step.arg, x, y)) {
+			} else if ((step.op == "move" || step.op == "click" || step.op == "press" || step.op == "release" || step.op == "rclick")
+				&& point(step.arg, x, y)) {
 				if (hooks.setPointer) {
 					hooks.setPointer(x, y);
 				}
 				if (viewer.onPointerMove) {
 					viewer.onPointerMove(x, y);
 				}
-				if (step.op == "click" && viewer.onClick) {
+				if ((step.op == "click" || step.op == "press") && viewer.onClick) {
 					viewer.onClick(x, y);
+				}
+				if ((step.op == "click" || step.op == "release") && viewer.onRelease) {
+					viewer.onRelease(x, y);
 				} else if (step.op == "rclick" && viewer.onRightClick) {
 					viewer.onRightClick(x, y);
 				}

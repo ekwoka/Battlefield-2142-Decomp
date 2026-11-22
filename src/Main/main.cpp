@@ -10376,6 +10376,9 @@ int runGame(Options& options, Session& session)
 					quads.push_back(pointer);
 				}
 			}
+			if (hud::HudQuad dragged; hudManager.dragQuad(dragged)) {
+				quads.push_back(dragged); // the kit screen's taken item
+			}
 			return quads;
 		};
 		// A game started from the menu shows it on Esc (Logic.isGameRunning).
@@ -10808,6 +10811,10 @@ int runGame(Options& options, Session& session)
 			// The right button's alternate commands and the pointer's moves
 			// (the roses' mouse-over) as in a local round.
 			viewer.onRightClick = [&hudManager](float x, float y) { hudManager.click(x, y, true); };
+			viewer.onRelease = [&hudManager, &kitMenu](float x, float y) {
+				hudManager.release(x, y); // the kit screen's drop slots
+				kitMenu.endDrag();
+			};
 			viewer.onPointerMove = [&hudManager](float x, float y) { hudManager.setPointer(x, y); };
 		} else if (round.localPlayer() >= 0) {
 			round.requireSpawnConfirmation(round.localPlayer());
@@ -10983,6 +10990,10 @@ int runGame(Options& options, Session& session)
 				if (!mapRightClick(x, y)) {
 					hudManager.click(x, y, true); // the buttons' alternate commands
 				}
+			};
+			viewer.onRelease = [&hudManager, &kitMenu](float x, float y) {
+				hudManager.release(x, y); // the kit screen's drop slots
+				kitMenu.endDrag();
 			};
 			viewer.onPointerWheel = [&](float x, float y, int steps) {
 				float worldX = 0, worldZ = 0;

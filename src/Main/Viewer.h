@@ -122,6 +122,7 @@ struct ViewerOptions {
 	// Which term of wantsPointer is true (null when none); only for the log.
 	std::function<const char*()> pointerReason;
 	std::function<void(float x, float y)> onClick;
+	std::function<void(float x, float y)> onRelease; // the left button's release (drag and drop)
 	// The right button's clicks and the pointer's moves (the HUD's
 	// right-click map menus, button highlights), same screen.
 	std::function<void(float x, float y)> onRightClick;

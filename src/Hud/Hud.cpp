@@ -1194,6 +1194,17 @@ bool HudManager::pointerQuad(Pointer kind, HudQuad& quad) const
 	return true;
 }
 
+bool HudManager::dragQuad(HudQuad& quad) const
+{
+	if (m_dragPicture.empty() || m_pointer[0] < 0 || m_pointer[1] < 0) {
+		return false;
+	}
+	const float w = m_dragSize[0], h = m_dragSize[1];
+	quad = {kTextureRoot + slashes(m_dragPicture), m_pointer[0] - w * 0.5f, m_pointer[1] - h * 0.5f, m_pointer[0] + w * 0.5f,
+		m_pointer[1] + h * 0.5f, 0, 0, 1, 1, {1, 1, 1, 1}, 0};
+	return true;
+}
+
 void HudManager::togglePaintKit(int kit)
 {
 	if (kit >= 0 && kit < 8) {
@@ -1483,19 +1494,22 @@ void HudManager::setMap(const std::string& texture, float originX, float originZ
 	m_mapSize[1] = std::max(depth, 1.0f);
 }
 
+// The left button's release: the mouse-over nodes under the pointer run
+// their event 3 commands (the kit screen's drop targets, 0x00798cf0).
+void HudManager::release(float x, float y)
+{
+	for (const MouseOverHit& hit : m_mouseOverHits) {
+		if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) {
+			runCommands(hit.node->mouseOverCommands, 3);
+		}
+	}
+}
+
 // A click: the topmost button drawn there runs its press (event 0) and
 // release (event 3) commands (the alternate button its
 // setButtonNodeAltConCmd ones). True when a button took it.
 bool HudManager::click(float x, float y, bool alternate)
 {
-	// The mouse-over nodes under the pointer take the release (event 3).
-	if (!alternate) {
-		for (const MouseOverHit& hit : m_mouseOverHits) {
-			if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) {
-				runCommands(hit.node->mouseOverCommands, 3);
-			}
-		}
-	}
 	// A list's row (Bf2NewListBoxNode's click, 0x007dd3b0 reads its cells):
 	// the row is selected, the column under the pointer kept (the list's
 	// +0xc, which the squad menu switches on), and the list's commands run:
