@@ -1804,12 +1804,14 @@ void MenuBindings::bindMultiplay()
 		std::replace(name.begin(), name.end(), '_', ' ');
 		return Value(name);
 	});
-	// "Level size": the level's picture for its mode and size.
+	// "Level size": the level's picture for its mode and size. 0x10044ab0
+	// builds "$/Levels/<level>/Info/<mode>_<size>_preview.png" (the shipped
+	// picture), not the _menuMap.png layout the end-of-round movie shows.
 	n.setFunction(kMultiplay, "getMapImage", [this](Interpreter& vm, const Args& args) {
 		std::istringstream words(vm.toString(arg(args, 0)));
 		std::string level, size;
 		words >> level >> size;
-		return Value("/Levels/" + level + "/Info/" + m_filterGameMode + "_" + size + "_menuMap.png");
+		return Value("/Levels/" + level + "/Info/" + m_filterGameMode + "_" + size + "_preview.png");
 	});
 	n.setFunction(kMultiplay, "getMapMovie", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kMultiplay, "isMovieComplete", [](Interpreter&, const Args&) { return Value(true); });
