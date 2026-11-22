@@ -2724,8 +2724,7 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	info.sinceAmmo = 15;
 	CHECK(!bar.update(info, true).show && bar.out().sound == -1);
 
-	// On foot: the engineer's repair tool on two vehicles at half and full
-	// armour: (1 + 0.5) / 2, the wrench, its sound while treating.
+	// A completed vehicle in the held scan contributes no progress.
 	info = {};
 	info.alive = true;
 	info.kitAbility = info.kitRepairing = true;
@@ -2735,14 +2734,14 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	info.targets = {0.5f, 1.0f};
 	bar.update(info, false);
 	bar.apply(hud);
-	CHECK(hud.number("AbilityBarShow") == 1 && std::abs(hud.number("AbilityBar") - 0.75f) < 1e-5f);
+	CHECK(hud.number("AbilityBarShow") == 1 && std::abs(hud.number("AbilityBar") - 0.5f) < 1e-5f);
 	CHECK(hud.number("WrenchRepairingShow") == 1 && bar.out().sound == 1);
 	CHECK(hud.string("AbilityIconPath") == "Ingame/Player/Bars/abilitybar_smallRepairIcon.tga");
 	// The tool's battery is AbilityValue and the ammunition bar.
 	CHECK(hud.number("AbilityValueShow") == 1 && std::abs(hud.number("PrimaryAmmo") - 0.6f) < 1e-5f);
-	// A target without armour counts in the averaging's order only.
+	// An unavailable target contributes no progress.
 	info.targets = {std::nanf(""), 0.4f};
-	CHECK(std::abs(bar.update(info, false).bar - 0.2f) < 1e-5f);
+	CHECK(std::abs(bar.update(info, false).bar - 0.4f) < 1e-5f);
 	// A wreck being mended (a Titan gun at its station): below 0 hit points
 	// the bar and the wrench show, the ring empty (0x007c3af0 hands the
 	// share on as it is; the bar node clamps it).
@@ -2753,7 +2752,10 @@ TEST(AbilityBar_GiftsInAVehicleAndToolsOnFoot)
 	info.kitAmmo = true;
 	info.targets = {10.0f / 15, 1.0f};
 	CHECK(bar.update(info, false).show && !bar.out().wrench && bar.out().sound == 2);
-	CHECK(std::abs(bar.out().bar - (10.0f / 15 + 1) / 2) < 1e-5f);
+	CHECK(std::abs(bar.out().bar - 10.0f / 15) < 1e-5f);
+	info.targets = {1.0f};
+	CHECK(!bar.update(info, false).show && !bar.out().wrench && bar.out().sound == -1);
+	CHECK(bar.out().valueShow); // battery remains visible
 	// A kit with no ability (the recon's defuser): the repair icon over
 	// 1 - the value, no sound.
 	info.kitAmmo = false;

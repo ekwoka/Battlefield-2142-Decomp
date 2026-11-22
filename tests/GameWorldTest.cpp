@@ -1600,8 +1600,12 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 	// Healed since: the hub in hand treats twice a tick (0x005c58a0), at most 7 in 35 ticks.
 	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.47f);
 	CHECK(info.healFlag && !info.repairFlag && info.sinceHeal == 0);
-	// Full again, he is held (and the sound plays) until the next scan, 2 s on.
+	menu::AbilityBar bar;
+	CHECK(bar.update(info, false).show && bar.out().sound == 0);
+	// Full again, the scan still holds him, but the HUD clears immediately.
 	range.world->setHitPoints(soldier, 100);
+	CHECK(range.world->abilityBar(me, info) && info.targets.size() == 1);
+	CHECK(!bar.update(info, false).show && bar.out().sound == -1);
 	for (int i = 0; i < 10; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
@@ -1788,11 +1792,21 @@ TEST(GameWorld_RearmedSoldierIsStampedAsReceiving)
 	game::SoldierInput take;
 	take.selectItem = 4;
 	press(take);
+	menu::AbilityBar bar;
+	CHECK(range.world->abilityBar(me, info) && info.active);
+	CHECK(bar.update(info, false).show && bar.out().bar < 1);
 	for (int i = 0; i < 45; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->abilityBar(me, info) && !info.ammoFlag && info.sinceAmmo >= 0 && info.sinceAmmo < 15);
 	CHECK((menu::receivedSounds(info, false, false) & 4) != 0);
+	// The sound stamp arrives while refill credit is building. Wait for
+	// the missing magazine to be restored while keeping the hub equipped.
+	for (int i = 0; i < 150; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.active && info.targets.size() == 1);
+	CHECK(!bar.update(info, false).show && bar.out().sound == -1);
 }
 
 TEST(GameWorld_ReplenishNoticeIsTheHudsLineOfItsKind)
@@ -8421,6 +8435,8 @@ TEST(GameWorld_RepairToolRay)
 		tool->settings()["ammo.onlyActiveWhileFiring"] = "1";
 		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->components().push_back("Ability");
+		kit->settings()["ability.hasRepairingAbility"] = "1";
 		for (const char* item : {"eu_ar_rifle", "unl_repair"}) {
 			kit->children().push_back({item, {}, {}});
 		}
@@ -8443,6 +8459,13 @@ TEST(GameWorld_RepairToolRay)
 		}
 		const float now = range.world->hitPoints(car);
 		CHECK(facing == 0 ? now > 51 : now == 50);
+		game::GameWorld::AbilityBarInfo info;
+		menu::AbilityBar bar;
+		CHECK(range.world->abilityBar(range.world->localPlayer(), info));
+		CHECK(bar.update(info, false).show == (facing == 0));
+		range.world->setHitPoints(car, 100);
+		CHECK(range.world->abilityBar(range.world->localPlayer(), info));
+		CHECK(!bar.update(info, false).show && !bar.out().wrench && bar.out().sound == -1);
 	}
 }
 

@@ -392,12 +392,13 @@ const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo&
 		return m_out;
 	}
 	float value = 0;
-	for (size_t i = 0; i < info.targets.size(); ++i) {
-		float share = info.targets[i];
-		if (!info.kitAmmo && std::isnan(share)) {
-			continue; // no armour (a wreck's share below 0 still shows the bar, empty)
+	for (float share : info.targets) {
+		// The target scan lives across ticks. Read its current progress and
+		// ignore completed or unavailable targets before averaging.
+		if (!std::isfinite(share) || share >= 1) {
+			continue;
 		}
-		if (i != 0) {
+		if (m_out.show) {
 			share = (share + value) * 0.5f;
 		}
 		value = share;

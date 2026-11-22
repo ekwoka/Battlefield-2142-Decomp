@@ -749,9 +749,15 @@ bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
 	}
 	out.battery = std::max(0.0f, battery);
 	out.active = m_abilityScan.active && !m_abilityScan.targets.empty();
-	for (const uint32_t target : m_abilityScan.targets) {
-		const float health = out.kitAmmo ? 1.0f : objectHealth(target);
-		out.targets.push_back(health < 0 ? std::nanf("") : health); // NaN: no armour
+	// Joined clients lack the targets' kit inventories. Leave the progress
+	// unknown rather than reporting a full ammo count for every soldier.
+	if (!out.kitAmmo) {
+		for (const uint32_t target : m_abilityScan.targets) {
+			const float share = target == me.soldier ? health() : objectHealth(target);
+			if (share >= 0) {
+				out.targets.push_back(share);
+			}
+		}
 	}
 	return true;
 }

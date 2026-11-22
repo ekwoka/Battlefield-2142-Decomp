@@ -316,9 +316,8 @@ public:
 	// (nothing sends +0x15c / +0x160, and the constructor's 0 keeps the
 	// vehicle branch off), the kit's and the tool's flags, our battery, and
 	// the targets: a soldier's networked health or an object's hit points
-	// over maxHitPoints; for the ammo kit 15 each, as no networkable
-	// carries another soldier's magazines (what the exe's client's copies
-	// of their weapons hold for 0x00588ba0 isn't traced).
+	// over maxHitPoints. Ammo progress is unavailable because other
+	// soldiers' reserve magazines are not synchronized.
 	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override;
 	// Our hit indicator's alpha: 1 when our own state's flag comes
 	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second

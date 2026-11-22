@@ -346,12 +346,11 @@ CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weap
 //   (slot 0x40) for the shown bar with the healed and repaired flags,
 //   healingSound (0x3c) with healed alone, ammoSound (0x44) with the ammo
 //   flag and not healed (the flags, not the ticks: they stay set).
-// - On foot, the gun in hand's ReplenishingAmmoComp: with targets, the bar
-//   shows (and WrenchRepairingShow, +0xf2, but for the ammo kit) their
-//   state: a target's armour share, or the ammo kit's the soldiers'
-//   ammunition / 15, each averaged into the running value from the second
-//   on. The kit's Ability decides the icon and the sound (on while the
-//   comp treats): ammo (the ammo icon, ammoSound), repairing (repair,
+// - On foot, the gun in hand's ReplenishingAmmoComp: the bar shows the
+//   armour or ammo share of targets still short of full. Each share is
+//   averaged into the running value from the second on. The wrench
+//   (WrenchRepairingShow, +0xf2) also shows for armour targets. The kit's
+//   Ability decides the icon and the sound (on while the comp treats): ammo (the ammo icon, ammoSound), repairing (repair,
 //   repairingSound), healing (medic, healingSound); none (the recon's
 //   defuser) the repair icon over 1 - the value, silent. A comp's
 //   AbilityValueShow is on with AbilityValue the holder's battery, which

@@ -12696,21 +12696,40 @@ int GameWorld::soldierAmmoLevel(const Player& player) const
 		if (settings.nrOfMags <= 0 || settings.magSize < 0) {
 			return; // slot 0xb8 -1 (no magazines), or none to measure by
 		}
-		// The firearm's slot 0xb0 counts the magazine in the gun; one less
-		// when that is empty (slot 0xa4(0)).
-		float share = static_cast<float>(weapon->magsLeft() + 1 - (weapon->roundsInMag() == 0 ? 1 : 0))
-			/ static_cast<float>(settings.nrOfMags);
-		if (!first) {
-			share = (share + level) * 0.5f;
-		}
+		// Infantry resupply restores spare magazines. Counting the loaded
+		// magazine here can make a soldier missing one spare look full.
+		const float share = std::clamp(static_cast<float>(weapon->magsLeft()) / settings.nrOfMags, 0.0f, 1.0f);
+		level = first ? share : (share + level) * 0.5f;
 		first = false;
-		level = share;
 	};
 	weigh(player.weaponTemplate, player.weapon.get());
 	for (const Player::Carried& carried : player.carried) {
 		weigh(carried.name, carried.weapon.get());
 	}
 	return static_cast<int>(std::floor(std::clamp(level * 15.0f, 0.0f, 15.0f)));
+}
+
+float GameWorld::vehicleAmmoShare(const Body& body) const
+{
+	if (!body.vehicle || body.wreckTime >= 0 || body.guns.empty()) {
+		return 1;
+	}
+	const auto share = [](const FireArm* weapon) {
+		if (!weapon || weapon->settings().magSize < 0) {
+			return 1.0f;
+		}
+		const FireArmSettings& settings = weapon->settings();
+		const bool rounds = settings.nrOfMags == 1 || settings.nrOfMags == -1;
+		const int capacity = rounds ? settings.magSize : settings.nrOfMags;
+		const int count = rounds ? weapon->roundsInMag() : weapon->magsLeft();
+		return capacity > 0 ? std::clamp(static_cast<float>(count) / capacity, 0.0f, 1.0f) : 1.0f;
+	};
+	const Body::Gun& root = body.guns.front();
+	float level = share(root.weapon.get());
+	for (const Body::Arm& arm : root.arms) {
+		level = std::min(level, share(arm.weapon.get()));
+	}
+	return level;
 }
 
 void GameWorld::abilityBarKit(const world::ObjectTemplate& kit, AbilityBarInfo& out)
@@ -12774,7 +12793,11 @@ bool GameWorld::abilityBar(int id, AbilityBarInfo& out) const
 	for (const uint32_t target : scan->second.targets) {
 		if (out.kitAmmo) {
 			const Player* soldier = soldierPlayer(target);
-			out.targets.push_back(soldier ? static_cast<float>(soldierAmmoLevel(*soldier)) / 15.0f : 1.0f);
+			if (soldier) {
+				out.targets.push_back(static_cast<float>(soldierAmmoLevel(*soldier)) / 15.0f);
+			} else if (const Body* body = findBody(target)) {
+				out.targets.push_back(vehicleAmmoShare(*body));
+			}
 			continue;
 		}
 		// 0x007c3af0: the target's own armour (+0x48), its hit points (slot
@@ -12918,29 +12941,8 @@ void GameWorld::applyAbility(const Ability& ability, const physics::Vec3& at, in
 	const auto hurt = [&](uint32_t object) {
 		if (ability.ammo) {
 			if (const Body* body = findBody(object)) {
-				if (!body->vehicle || body->wreckTime >= 0 || body->guns.empty()) {
-					return false;
-				}
-				// 0x004cf853: the target control object's own ammo level must
-				// be below 15 (full), not its seat count.
-				const auto missing = [](const FireArm* weapon) {
-					if (!weapon || weapon->settings().magSize < 0) {
-						return false;
-					}
-					const FireArmSettings& s = weapon->settings();
-					return s.nrOfMags == 1 || s.nrOfMags == -1 ? weapon->roundsInMag() < s.magSize
-																			: weapon->magsLeft() < s.nrOfMags;
-				};
-				const Body::Gun& root = body->guns.front();
-				if (missing(root.weapon.get())) {
-					return true;
-				}
-				for (const Body::Arm& arm : root.arms) {
-					if (missing(arm.weapon.get())) {
-						return true;
-					}
-				}
-				return false;
+				// 0x004cf853: test the root control object's ammo.
+				return vehicleAmmoShare(*body) < 1;
 			}
 			return true;
 		}

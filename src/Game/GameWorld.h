@@ -4081,6 +4081,7 @@ private:
 	// -1) the magazines (one less with the gun's empty) over nrOfMags,
 	// each averaged into the running value, times 15, floored, 0..15.
 	int soldierAmmoLevel(const Player& player) const;
+	float vehicleAmmoShare(const Body& body) const;
 	// A seated soldier's kit ability (the player's update 0x00599f30, each
 	// tick from 0x0059bd80 while the soldier sits in a vehicle): the kit's
 	// Ability component (ability.hasHealingAbility / hasRepairingAbility /
