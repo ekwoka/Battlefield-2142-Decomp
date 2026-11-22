@@ -228,7 +228,8 @@ std::vector<uint8_t> placeObject(uint16_t depth, uint16_t character, const char*
 //   _root.clicked, 4 a text field bound to `score`, 5 sprite "Widget"
 //   registered to class Widget (constructor sets this.ready).
 //   frame 1: box at depth 1, btn at depth 2 (200,0), field at depth 3;
-//   script: box.gotoAndStop(2); attachMovie("Widget", "w", 5);
+//   script: box.gotoAndStop(2); seen = box._currentframe;
+//   attachMovie("Widget", "w", 5);
 //   score = 42; onEnterFrame counts ticks.
 std::vector<uint8_t> testMovie()
 {
@@ -328,6 +329,7 @@ std::vector<uint8_t> testMovie()
 	{
 		Asm a;
 		a.pushNumber(2).pushNumber(1).push({"box"}).op(0x1c).push({"gotoAndStop"}).op(0x52).op(0x17);
+		a.push({"seen"}).get("box._currentframe").op(0x1d); // seen = box._currentframe;
 		a.pushNumber(5).push({"w", "Widget"}).pushNumber(3).push({"this"}).op(0x1c).push({"attachMovie"}).op(0x52).op(0x17);
 		a.push({"score"}).pushNumber(42).op(0x1d);
 		a.push({"ticks"}).pushNumber(0).op(0x1d);
@@ -376,7 +378,10 @@ TEST(SwfPlayer_SyntheticMovie)
 	for (const std::string& e : player.scriptErrors()) {
 		std::fprintf(stderr, "script error: %s\n", e.c_str());
 	}
-	// gotoAndStop(2) removed the box's square.
+	// gotoAndStop(2) is queued (gameswf 0x100cf5b0): the script that asked
+	// still saw frame 1, the box was on frame 2 (its square removed) once
+	// the script returned.
+	CHECK(text(player, "seen") == "1");
 	CHECK(text(player, "box._currentframe") == "2");
 	CHECK(player.evaluate("box").isObject());
 	// attachMovie made a Widget, constructed by its registered class.

@@ -173,6 +173,11 @@ public:
 	const Timeline* timeline; // never null (empty clips share a one-frame timeline)
 	int frame = -1;           // 0-based, -1 before the first
 	bool playing = true;
+	// Frames gotoAndStop/gotoAndPlay and GotoFrame/GoToLabel asked for:
+	// gameswf queues them (sprite slot 0xa8, 0x100cf5b0) and goes to them
+	// when the clip next advances (0x100cfa40), so a child the target
+	// frame places isn't there yet for the rest of the script.
+	std::vector<int> queuedFrames;
 	std::map<int, std::shared_ptr<DisplayObject>> children;
 
 	// loadMovie() of an image: drawn at the origin instead of the timeline.

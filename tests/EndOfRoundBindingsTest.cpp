@@ -307,6 +307,14 @@ TEST(EndOfRoundBindings_LoadingScreen)
 	bindings.setLevelLoaded();
 	movie.run(1);
 	CHECK(avm1::toBoolean(movie.player.evaluate("_root.bIsReady")));
+	// No tabs on a first load, as in retail: the ready step sends EOR_nav
+	// to "done" (which places mcNav) and mcNav to "briefing" in one go,
+	// but gameswf queues gotos, so mcNav isn't there yet; the first load
+	// then turns the slideshow off and loadProgress never tries again.
+	movie.run(1);
+	CHECK(movie.player.evaluate("EOR_nav.mcNav").isObject());
+	CHECK(!movie.player.evaluate("EOR_nav.mcNav.EOR_nav_briefing").isObject());
+	CHECK(!movie.player.evaluate("EOR_nav.mcNav.EOR_nav_outcome").isObject());
 	CHECK(movie.click("EOR_holder.mcJoin"));
 	movie.run(0.5);
 	CHECK(joined == 1);
