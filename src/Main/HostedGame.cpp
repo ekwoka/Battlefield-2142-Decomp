@@ -2431,6 +2431,17 @@ void HostedGame::trackPlayers()
 	for (const int victim : victims) {
 		const int killer = killers.empty() ? victim : killers.front();
 		sendToPlaying(eventOf(net::kEvPythonCommand, {100, 0, 3, 0, static_cast<uint32_t>(victim), static_cast<uint32_t>(killer)}));
+		// The kill line, to everyone (0x005b7680 -> 0x005b7130): attacker,
+		// victim, has attacker, object, the weapon's and the vehicle's
+		// template ids, armour, position mode 0 and its floats, damage.
+		game::GameWorld::PlayerInfo k;
+		const world::ObjectTemplate *vehicle = nullptr, *weapon = nullptr;
+		const bool attacker = !killers.empty() && m_round->playerInfo(killer, k);
+		if (attacker) {
+			m_round->killTemplates(k, vehicle, weapon);
+		}
+		sendToPlaying(eventOf(net::kEvKilledBy, {static_cast<uint32_t>(attacker ? killer : 0), static_cast<uint32_t>(victim),
+			attacker ? 1u : 0u, 0, weapon ? weapon->id() : 0, vehicle ? vehicle->id() : 0, 0, 0, 0, 0, 0, 0}));
 	}
 	for (const auto& p : m_round->playerList()) {
 		auto seen = m_players.find(p.id);

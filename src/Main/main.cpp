@@ -6127,31 +6127,10 @@ int runGame(Options& options, Session& session)
 				const bool byOther = !killers.empty() && round.playerInfo(killers.front(), k) && k.id != victim;
 				std::string weapon;
 				if (byOther) {
-					if (const world::Object* vehicle = k.vehicle ? round.objects().find(k.vehicle) : nullptr) {
-						const auto it = vehicle->objectTemplate()->settings().find("vehicleHud.hudName");
-						weapon = it != vehicle->objectTemplate()->settings().end() ? it->second : "";
-						// enhanced.killWeaponNames: a vehicle without a hudName (a Titan's gun
-						// hubs) names its seat's gun; retail (0x0075a36b) prints empty brackets.
-						const auto seats = round.vehicleSeats(k.vehicle);
-						const int index = k.seat >= 0 ? round.seatWeaponIndex(k.vehicle, k.seat) : -1;
-						if (weapon.empty() && enhancedSettings.enabled && enhancedSettings.killWeaponNames && index >= 0
-							&& static_cast<size_t>(k.seat) < seats.size()
-							&& static_cast<size_t>(index) < seats[static_cast<size_t>(k.seat)].weapons.size()) {
-							const world::ObjectTemplate* t
-								= templates.find(seats[static_cast<size_t>(k.seat)].weapons[static_cast<size_t>(index)].weapon);
-							const auto name = t ? t->settings().find("weaponHud.hudName") : decltype(t->settings().end()) {};
-							weapon = t && name != t->settings().end() ? name->second : "";
-						}
-					} else {
-						for (const auto& [slot, name] : k.carried) {
-							const world::ObjectTemplate* t = slot == k.inHandSlot ? templates.find(name) : nullptr;
-							const auto it = t ? t->settings().find("weaponHud.hudName") : decltype(t->settings().end()) {};
-							if (t && it != t->settings().end()) {
-								weapon = it->second;
-							}
-						}
-					}
-					weapon.erase(std::remove(weapon.begin(), weapon.end(), '"'), weapon.end());
+					const world::ObjectTemplate *vehicle = nullptr, *gun = nullptr;
+					round.killTemplates(k, vehicle, gun);
+					weapon = dice::hfe::menu::HudChat::killWeapon(vehicle, gun,
+						enhancedSettings.enabled && enhancedSettings.killWeaponNames);
 				}
 				const auto speaker = !byOther                ? dice::hfe::menu::HudChat::Speaker::Neutral
 					: k.team == me.team && k.squad && k.squad == me.squad ? dice::hfe::menu::HudChat::Speaker::Squad
@@ -8201,7 +8180,11 @@ int runGame(Options& options, Session& session)
 				const net::RemotePlayer* victim = client.world().player(kill.victim);
 				const net::RemotePlayer* killer = client.world().player(kill.attacker);
 				if (victim) {
-					chat.addKill(killer && killer != victim ? killer->name : std::string(), victim->name, "",
+					const std::string weapon = killer && killer != victim
+						? dice::hfe::menu::HudChat::killWeapon(templates.findById(kill.vehicleTemplate),
+							  templates.findById(kill.weaponTemplate), enhancedSettings.enabled && enhancedSettings.killWeaponNames)
+						: std::string();
+					chat.addKill(killer && killer != victim ? killer->name : std::string(), victim->name, weapon,
 						killer && killer->team == victim->team, speakerOf(killer));
 					if (killer && self && kill.attacker == client.world().localPlayer() && !killer->commander && killer->team != victim->team) {
 						chat.addKillScore(victim->name); // 0x0075a07a

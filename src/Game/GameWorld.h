@@ -1841,6 +1841,11 @@ public:
 	// PIFlareFire) as an index into its SeatLayout::weapons (-1 none), and
 	// any of its weapons' state (nullptr before the seat was first taken).
 	int seatWeaponIndex(uint32_t vehicle, int seat, int group = 0) const;
+	// A kill's templates as the KilledBy event carries them (0x005b7130):
+	// the killer's vehicle, else its soldier (the weapon's root); and the
+	// weapon, the seat's active gun or the item in hand. nullptr: none.
+	void killTemplates(const PlayerInfo& killer, const world::ObjectTemplate*& vehicle,
+		const world::ObjectTemplate*& weapon); // vehicleSeats may lay the vehicle out
 	// A seat's ducking (PCO +0x18c, object +0x310; setDucking, slot 0x12c,
 	// 0x005c7cf0): 0x005ca2e0 sets it from its occupant's kPICrouch when
 	// the seat's template has allowDucking (the shipped bipods'). Its

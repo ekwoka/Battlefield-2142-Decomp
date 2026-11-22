@@ -51,6 +51,9 @@
 namespace dice::hfe::hud {
 class HudManager;
 }
+namespace dice::hfe::world {
+class ObjectTemplate;
+}
 
 namespace dice::hfe::menu {
 
@@ -73,6 +76,12 @@ public:
 	// text id or name), coloured as the killer.
 	void addKill(const std::string& killer, const std::string& victim, const std::string& weapon, bool teamKill,
 		Speaker color);
+	// The kill line's weapon from the KilledBy templates (0x0075a2b8..0x0075a3c6):
+	// a soldier, ladder or parachute "vehicle" names the weapon's
+	// weaponHud.hudName; another vehicle its vehicleHud.hudName, even empty
+	// (a Titan's gun hubs), and the weapon only without a VehicleHud.
+	// `namedGuns` (enhanced.killWeaponNames) names the weapon for an empty one.
+	static std::string killWeapon(const world::ObjectTemplate* vehicle, const world::ObjectTemplate* weapon, bool namedGuns);
 	void addInfo(const std::string& text, int category = 1);
 	void addPersonal(const std::string& text);
 	// A question's line (HUD slot 0x174: category 8, 0x007b6170) and their

@@ -351,7 +351,24 @@ TEST(NetGame_RemoteWorldFromEvents)
 	killed.type = net::kEvPythonCommand;
 	killed.values = {100, 0, 3, 2, 2, 5}; // type 100, (kind 2, victim 2, attacker 5)
 	world.apply(killed);
-	CHECK(world.player(2)->deaths == 1 && world.player(5)->kills == 1 && world.takeKills().size() == 1);
+	// The counters only: the kill line is KilledBy's (0x0050d520).
+	CHECK(world.player(2)->deaths == 1 && world.player(5)->kills == 1 && world.takeKills().empty());
+	net::GameEvent line;
+	line.type = net::kEvKilledBy;
+	line.values = {5, 2, 1, 0, 0x22, 0x11, 0, 0, 0, 0, 0, 0}; // weapon 0x22, vehicle 0x11
+	{ // HostedGame::trackPlayers' layout survives the wire.
+		net::BitWriter w;
+		CHECK(net::writeGameEvent(w, line));
+		net::BitReader r(w.data().data(), w.data().size());
+		net::GameEvent back;
+		net::KilledByInfo info;
+		CHECK(net::readGameEvent(r, back) && net::parseKilledBy(back, info) && info.value1 == 0x22 && info.value2 == 0x11
+			&& info.attacker == 5 && info.victim == 2 && info.hasAttacker);
+	}
+	world.apply(line);
+	const auto lines = world.takeKills();
+	CHECK(lines.size() == 1 && lines[0].victim == 2 && lines[0].attacker == 5 && lines[0].weaponTemplate == 0x22
+		&& lines[0].vehicleTemplate == 0x11);
 
 	net::GhostBlock ghosts;
 	ghosts.present = true;

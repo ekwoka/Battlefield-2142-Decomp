@@ -209,6 +209,9 @@ struct KillReport {
 	int victim = -1, attacker = -1;
 	int weapon = -1; // KilledBy: its armor byte (KilledByInfo::armorValue)
 	Vec3f from;
+	// KilledBy's template ids (ObjectTemplate::id()): the killer's vehicle or
+	// root (value2, the HUD's +8) and its weapon (value1, +0xc); 0 none.
+	uint32_t vehicleTemplate = 0, weaponTemplate = 0;
 };
 
 class RemoteWorld {

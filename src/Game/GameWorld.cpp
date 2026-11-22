@@ -12534,6 +12534,29 @@ int GameWorld::seatWeaponIndex(uint32_t vehicle, int seat, int group) const
 	return -1;
 }
 
+void GameWorld::killTemplates(const PlayerInfo& killer, const world::ObjectTemplate*& vehicle,
+	const world::ObjectTemplate*& weapon)
+{
+	vehicle = weapon = nullptr;
+	if (const world::Object* object = m_objects.find(killer.vehicle ? killer.vehicle : killer.soldier)) {
+		vehicle = object->objectTemplate();
+	}
+	if (killer.vehicle) {
+		const int index = killer.seat >= 0 ? seatWeaponIndex(killer.vehicle, killer.seat) : -1;
+		const auto seats = vehicleSeats(killer.vehicle);
+		if (index >= 0 && static_cast<size_t>(killer.seat) < seats.size()
+			&& static_cast<size_t>(index) < seats[static_cast<size_t>(killer.seat)].weapons.size()) {
+			weapon = m_templates.find(seats[static_cast<size_t>(killer.seat)].weapons[static_cast<size_t>(index)].weapon);
+		}
+		return;
+	}
+	for (const auto& [slot, name] : killer.carried) {
+		if (slot == killer.inHandSlot) {
+			weapon = m_templates.find(name);
+		}
+	}
+}
+
 bool GameWorld::seatDucking(uint32_t vehicle, int seat) const
 {
 	const world::Object* object = m_objects.find(vehicle);

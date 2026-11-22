@@ -3189,3 +3189,27 @@ TEST(HudCommander_ApplicationAndResultFeedback)
 	messages.handle(0x25, 2, true, true);
 	CHECK(lines.back() == "HUD_HUD_COMMANDER_NO_LONGER EU" && lost == 1);
 }
+
+// The kill line's weapon as 0x0075a2b8..0x0075a3c6 picks it: a soldier
+// names its weapon; a vehicle with a VehicleHud its hudName even when empty
+// (a Titan gun hub: retail's empty brackets) unless enhanced names the gun;
+// a vehicle without a VehicleHud names the weapon.
+TEST(HudMenus_KillWeaponName)
+{
+	world::ObjectTemplate soldier(0x9493, "Soldier", "pac_assault", 1);
+	world::ObjectTemplate tank(0x9496, "PlayerControlObject", "eu_tank", 2);
+	tank.components().push_back("VehicleHud");
+	tank.settings()["vehicleHud.hudName"] = "\"EU TANK\"";
+	world::ObjectTemplate hub(0x9496, "PlayerControlObject", "eu_aacannon_hub", 3);
+	hub.components().push_back("VehicleHud");
+	world::ObjectTemplate bare(0x9496, "PlayerControlObject", "bare", 4);
+	world::ObjectTemplate gun(0x94d3, "GenericFireArm", "EU_AAcannon_Firearm_Barrel", 5);
+	gun.settings()["weaponHud.hudName"] = "\"UNLOCALIZED TITAN AA CANNON\"";
+
+	CHECK(menu::HudChat::killWeapon(&soldier, &gun, false) == "UNLOCALIZED TITAN AA CANNON");
+	CHECK(menu::HudChat::killWeapon(&tank, &gun, false) == "EU TANK");
+	CHECK(menu::HudChat::killWeapon(&hub, &gun, false).empty());
+	CHECK(menu::HudChat::killWeapon(&hub, &gun, true) == "UNLOCALIZED TITAN AA CANNON");
+	CHECK(menu::HudChat::killWeapon(&bare, &gun, false) == "UNLOCALIZED TITAN AA CANNON");
+	CHECK(menu::HudChat::killWeapon(nullptr, &gun, true).empty());
+}

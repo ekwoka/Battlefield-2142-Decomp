@@ -145,14 +145,14 @@ void RemoteWorld::applyStringBlock(const DataBlockChunk& chunk)
 void RemoteWorld::applyPythonCommand(const PythonCommandInfo& info)
 {
 	// 0x00511ba0: type 100 messages are kills, arguments (kind, victim,
-	// attacker, ...); kind 2 is told to the victim, 0 and 1 to the attacker.
+	// attacker, ...); kind 2 is told to the victim, 0 and 1 to the attacker
+	// (HUD message 0x46). The kill line comes from KilledBy (0x0050d520).
 	if (info.type != 100 || info.args.size() < 3) {
 		return;
 	}
 	KillReport report;
 	report.victim = info.args[1];
 	report.attacker = info.args[2];
-	m_kills.push_back(report);
 	if (auto it = m_players.find(report.victim); it != m_players.end()) {
 		++it->second.deaths;
 		it->second.alive = false;
@@ -445,6 +445,8 @@ bool RemoteWorld::apply(const GameEvent& event)
 		report.attacker = info.hasAttacker ? info.attacker : -1;
 		report.weapon = info.armorValue;
 		report.from = info.position;
+		report.vehicleTemplate = info.value2;
+		report.weaponTemplate = info.value1;
 		m_kills.push_back(report);
 		return true;
 	}
