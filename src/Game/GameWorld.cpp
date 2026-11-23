@@ -9287,6 +9287,16 @@ void GameWorld::stepRagDoll(Player& player, float seconds)
 // set's sound loaded for what it stands on (0x007fd840: the cell of
 // material 0x157c against it, templates 0-3; 0x007fda00 picks the
 // material, see Player::footstepMaterial): template 3, else 0.
+// $BF2142_SOUND_LOG set (and not "0"): the local player's step, jump and land sounds go to stdout.
+static bool footstepTrace()
+{
+	static const bool trace = [] {
+		const char* log = std::getenv("BF2142_SOUND_LOG");
+		return log && *log && *log != '0';
+	}();
+	return trace;
+}
+
 void GameWorld::playAnimationSound(const Player& player, int)
 {
 	if (!m_materials) {
@@ -9298,6 +9308,10 @@ void GameWorld::playAnimationSound(const Player& player, int)
 		for (const uint32_t material : {surface, 0u}) {
 			const auto* cell = m_materials->cell(kSoldierFootStepsMaterial, material);
 			if (cell && cell->soundTemplates.size() > index && !cell->soundTemplates[index].empty()) {
+				if (footstepTrace() && player.id == localPlayer()) {
+					std::printf("jump/land sound: tick=%u surface=%u slot=%zu sound=%s onGround=%d vy=%.2f\n", m_ticks, surface,
+						index, cell->soundTemplates[index].c_str(), player.body.onGround() ? 1 : 0, player.body.velocity.y);
+				}
 				m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}});
 				return;
 			}
@@ -9315,18 +9329,14 @@ void GameWorld::playMovementSound(const Player& player)
 		: player.input.sprint && !player.zoomed;
 	const size_t index = player.input.pose == SoldierPose::Prone ? 2
 		: player.input.pose == SoldierPose::Crouch ? 1 : sprinting ? 3 : 0;
-	static const bool trace = [] {
-		const char* log = std::getenv("BF2142_SOUND_LOG");
-		return log && *log && *log != '0';
-	}();
-	const bool logStep = trace && player.id == localPlayer();
+	const bool logStep = footstepTrace() && player.id == localPlayer();
 	for (const uint32_t material : {player.footstepMaterial, 0u}) {
 		const auto* cell = m_materials->cell(kSoldierFootStepsMaterial, material);
 		if (cell && cell->soundTemplates.size() > index && !cell->soundTemplates[index].empty()) {
 			const auto& at = player.body.position;
 			if (logStep) {
-				std::printf("footstep: surface=%u selected=%u slot=%zu sound=%s at %.1f %.1f %.1f\n",
-					player.footstepMaterial, material, index, cell->soundTemplates[index].c_str(), at.x, at.y - 1, at.z);
+				std::printf("footstep: tick=%u surface=%u selected=%u slot=%zu sound=%s at %.1f %.1f %.1f\n",
+					m_ticks, player.footstepMaterial, material, index, cell->soundTemplates[index].c_str(), at.x, at.y - 1, at.z);
 			}
 			m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}});
 			return;
@@ -9940,6 +9950,10 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		// Swimming it sets the set's slot 6 / 7 sound going instead (slot
 		// 0x1c); the rewrite has no swim steps.
 		if (player.footsteps.step(length, time, movedSpeed) && player.body.stance != 3) {
+			if (footstepTrace() && player.id == localPlayer()) {
+				std::printf("footstep cycle: tick=%u length=%.3f time=%.3f speed=%.2f weaponCycle=%d\n", m_ticks, length, time,
+					movedSpeed, player.weaponAnimation ? 1 : 0);
+			}
 			playMovementSound(player);
 		}
 	}
