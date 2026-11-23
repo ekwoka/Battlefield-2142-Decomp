@@ -1061,6 +1061,30 @@ TEST(Weapons_ManualReload)
 	CHECK(!arm.startReload()); // none to spare
 }
 
+// The gunships' rockets and TV missile (ammo.autoReload 1): the ammo's
+// may-reload asked by hand (0x005f4670 with 1) refuses, so R does nothing;
+// the empty magazine still reloads by itself.
+TEST(Weapons_AutoReloadRefusesAReloadByHand)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 10;
+	settings.nrOfMags = 6;
+	settings.reloadTime = 1;
+	settings.autoReload = true;
+	game::FireArm arm(settings);
+	CHECK(arm.tick(1 / 30.0f, true) && arm.roundsInMag() == 9);
+	arm.tick(1 / 30.0f, false);
+	CHECK(!arm.startReload() && !arm.reloading());
+	for (int i = 0; i < 300 && arm.roundsInMag() > 0; ++i) {
+		arm.tick(1 / 30.0f, i % 2 == 0);
+	}
+	CHECK(arm.roundsInMag() == 0);
+	for (int i = 0; i < 60; ++i) {
+		arm.tick(1 / 30.0f, false);
+	}
+	CHECK(arm.roundsInMag() == 10 && arm.magsLeft() == 5);
+}
+
 // The fire modes (0x005f28a0, 0x005f1370, 0x005f1820, 0x005f1da0): single
 // fire takes one round a press, burst burstSize a press (running on
 // released), automatic while held; the toggle steps through the rates.

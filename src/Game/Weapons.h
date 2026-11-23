@@ -701,8 +701,10 @@ public:
 	// The fire component's may-reload (slot 0x44, SingleFireComp
 	// 0x005d5b60: its state +0x150 at 0) refuses while a
 	// busyUntilButtonRelease round waits for the trigger's release (a
-	// guided launcher keeps its wire while the button is held). False when
-	// nothing starts.
+	// guided launcher keeps its wire while the button is held). The ammo's
+	// may-reload (slot 0x44, 0x005f4670), asked by hand (1), refuses any
+	// weapon with ammo.autoReload (the vehicles' guns: it reloads itself).
+	// False when nothing starts.
 	bool startReload();
 	// That wait (busyUntilButtonRelease, the trigger still held since the round).
 	bool busyUntilRelease() const { return m_busyUntilRelease; }

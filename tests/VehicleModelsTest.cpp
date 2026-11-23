@@ -3836,8 +3836,10 @@ TEST(Vehicles_RadioFilterAndFirstPersonEffects)
 // c_PIReload in a seat: the player's update (0x00590e10) sends event 10 to
 // his control object, the seat's PCO hands it down its tree (0x005cacf0 ->
 // 0x0063ca60) and each active firearm reloads (0x005c62c0 -> 0x005c50e0
-// case 10): eu_apc's second turret's grenade launcher (3 a magazine,
-// 2.1 s) reloads a part-used magazine.
+// case 10). Its may-reload asks the ammo with 1 (0x005c0e70), which
+// refuses an ammo.autoReload gun (0x005f4670): every shipped vehicle gun
+// with a magazine has it, so eu_apc's second turret's grenade launcher (3 a
+// magazine) keeps its part-used magazine; the press does nothing.
 TEST(Vehicles_SeatReloadPress)
 {
 	if (!gameDir()) {
@@ -3863,7 +3865,7 @@ TEST(Vehicles_SeatReloadPress)
 		return;
 	}
 	// Its fire mode is the 3-round burst (225 a minute: 8 ticks a round):
-	// the first round out, the reload's press drops the rest of the burst.
+	// the first round out.
 	input = {};
 	input.fire = true;
 	for (int i = 0; i < 4 && launcher->roundsInMag() == 3; ++i) {
@@ -3876,10 +3878,13 @@ TEST(Vehicles_SeatReloadPress)
 	input.reload = true;
 	g.world->setPlayerInput(input);
 	g.world->tick(1 / 30.0f);
-	CHECK(launcher->reloading());
+	CHECK(launcher->settings().autoReload && !launcher->reloading());
 	g.world->setPlayerInput({});
 	g.run(2.5f);
-	CHECK(!launcher->reloading() && launcher->roundsInMag() == 3);
+	// The burst runs on (nothing dropped it) and the emptied magazine then
+	// reloads by itself.
+	std::fprintf(stderr, "  after: %d in the magazine, reloading %d\n", launcher->roundsInMag(), launcher->reloading());
+	CHECK(launcher->roundsInMag() == 0 && launcher->reloading());
 }
 
 // A joined client's mech ghost (GameWorld::animateRemoteVehicle): the
