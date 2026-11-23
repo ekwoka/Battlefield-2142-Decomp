@@ -828,6 +828,8 @@ public:
 	// enhanced.botTitan in gpm_ti: makes the Titans' walking grids now, at the
 	// level's load (a second or two of rays each, else spent mid-round).
 	void prepareTitanGrids();
+	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
+	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The grids' cells and links, a line each (and, for $BF2142_BOT_STATS, the vehicles).
 	std::string titanGridStats();
 	// The server's maximum of players (sv.maxPlayers; AIDLL reads the game's
@@ -2020,8 +2022,6 @@ private:
 	const GameWorld::VehicleInfo* titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home);
 	bool titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	bool titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
-	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
-	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The zoom key's press (Bot::zoomPress, set by the plans' statements)
 	// on the weapon in hand: a press steps the level (0x005da670; not while
 	// reloading), a weapon change, a seat and a reload with zoomOutOnReload

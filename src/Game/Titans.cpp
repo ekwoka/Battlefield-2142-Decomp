@@ -1103,6 +1103,55 @@ bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& fro
 	return true;
 }
 
+uint32_t GameWorld::titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const
+{
+	const Body* body = findBody(titan);
+	physics::CollisionWorld::Hit hit {};
+	if (!body || !raycastBody(*body, from, to, hit)) {
+		return 0;
+	}
+	// A part's face of another material than its armour's is a child's it carries (a console's corridor forcefield,
+	// veh_titan_shield_blue_in 4115, which stops the rounds and takes no damage): the hull's, as far as the aim goes.
+	const Titan* t = nullptr;
+	int index = 0;
+	if (hit.owner && hit.owner != titan && titanPart(hit.owner, t, index)) {
+		const auto& settings = t->parts[static_cast<size_t>(index)].t->settings();
+		const auto armour = settings.find("armor.defaultMaterial");
+		if (armour == settings.end() || static_cast<uint32_t>(std::atoi(armour->second.c_str())) != hit.material) {
+			return titan;
+		}
+	}
+	return hit.owner ? hit.owner : titan;
+}
+
+bool GameWorld::titanPartAimPoint(uint32_t id, physics::Vec3& local) const
+{
+	const Titan* titan = nullptr;
+	int index = 0;
+	const Body* body = titanPart(id, titan, index) ? findBody(titan->object) : nullptr;
+	if (!body || !body->projectileMesh) {
+		return false;
+	}
+	const auto& settings = titan->parts[static_cast<size_t>(index)].t->settings();
+	const auto found = settings.find("armor.defaultMaterial");
+	const uint32_t armour = found == settings.end() ? 0 : static_cast<uint32_t>(std::atoi(found->second.c_str()));
+	physics::Vec3 sum;
+	float area = 0;
+	body->projectileMesh->forEachFaceNear(titan->parts[static_cast<size_t>(index)].position, 25,
+		[&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c, uint32_t material, uint32_t owner) {
+			if (owner == id && material == armour) {
+				const float w = std::sqrt(physics::lengthSquared(physics::cross(b - a, c - a))) + 1e-6f;
+				sum = sum + (a + b + c) * (w / 3);
+				area += w;
+			}
+		});
+	if (area <= 0) {
+		return false;
+	}
+	local = sum * (1 / area);
+	return true;
+}
+
 physics::Vec3 GameWorld::titanToLocal(uint32_t titan, const physics::Vec3& world) const
 {
 	const Body* body = findBody(titan);

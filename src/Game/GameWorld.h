@@ -2702,6 +2702,13 @@ public:
 	// clear), the frame's two transforms, and a count that changes whenever
 	// those meshes are rebuilt (a part went down).
 	bool titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
+	// A round's segment in the Titan's frame as the rounds meet the Titan
+	// (its projectile LOD and posed collision parts): the owner of the first
+	// face (a part's id, the Titan's for the hull), 0 when it meets none.
+	uint32_t titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const;
+	// The middle of a part's faces in that LOD (the Titan's frame), to aim
+	// at; false without any.
+	bool titanPartAimPoint(uint32_t part, physics::Vec3& local) const;
 	physics::Vec3 titanToLocal(uint32_t titan, const physics::Vec3& world) const;
 	physics::Vec3 titanToWorld(uint32_t titan, const physics::Vec3& local) const;
 	uint32_t titanMeshVersion(uint32_t titan) const;
