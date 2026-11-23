@@ -322,6 +322,10 @@ ShapeMesh tessellateShape(const Shape& shape, const TessellateOptions& options)
 			batch.hairline = line.width < options.minStrokeWidth;
 			const double width = std::max<double>(line.width, options.minStrokeWidth);
 			strokePolyline(pts, width, options.curveTolerance, batch.triangles);
+			for (size_t i = 0; i + 1 < pts.size(); ++i) {
+				batch.lines.push_back(pts[i]);
+				batch.lines.push_back(pts[i + 1]);
+			}
 		}
 	}
 	for (auto& [key, segs] : fills) {

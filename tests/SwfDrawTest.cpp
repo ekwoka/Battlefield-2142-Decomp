@@ -161,3 +161,47 @@ TEST(SwfDraw_MenuCharacters)
 		CHECK(clip.currentFrame() == frame);
 	}
 }
+
+// RendDX9.dll 0x10118e60: strokes are one-pixel lines whatever their width
+// or scale. endOfRound's loading bar frame (shape 447, a 1-twip outline of
+// 20 x 20 px) placed at x 31.4, y 0.85 as mcLoadingProgress stays inside
+// its 628 px box instead of growing 31 px stroke caps at the ends.
+TEST(SwfDraw_StrokesAreOnePixel)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	auto zip = io::ZipArchive::open(std::string(gameDir) + "/mods/bf2142/Menu_server.zip");
+	CHECK(zip != nullptr);
+	if (!zip) {
+		return;
+	}
+	std::vector<uint8_t> dfm;
+	CHECK(zip->read("External/FlashMenu/endOfRound.dfm", dfm));
+	const auto swfBytes = ui::decodeDfm(dfm);
+	const auto movie = swfBytes ? ui::parseSwf(*swfBytes) : std::nullopt;
+	CHECK(movie.has_value());
+	if (!movie) {
+		return;
+	}
+	swf::CharacterDictionary dictionary;
+	CHECK(dictionary.load(*swfBytes, *movie));
+	const swf::Shape* frame = dictionary.shape(447);
+	CHECK(frame && frame->lineStyles.size() == 1 && frame->fillStyles.empty());
+	ui::Drawer drawer(dictionary);
+	std::vector<ui::MenuBatch> batches;
+	drawer.shape(447, {31.4f, 0, 0, 0.848f, 194 * 20, 743 * 20}, {}, batches);
+	CHECK(batches.size() == 1);
+	float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+	for (const auto& batch : batches) {
+		for (const auto& v : batch.vertices) {
+			minX = std::min(minX, v.x), maxX = std::max(maxX, v.x);
+			minY = std::min(minY, v.y), maxY = std::max(maxY, v.y);
+		}
+	}
+	CHECK(minX >= 193.4f && maxX <= 822.6f);
+	CHECK(minY >= 742.4f && maxY <= 760.6f);
+	// The stroke's own triangles still serve hit tests.
+	CHECK(drawer.hitShape(447, {200, 0}));
+}

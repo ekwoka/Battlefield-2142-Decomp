@@ -252,6 +252,31 @@ void Drawer::drawMesh(const swf::Shape& shape, const swf::ShapeMesh& mesh, uint6
 			}
 			}
 		}
+		if (part.kind == swf::MeshBatch::Kind::Stroke) {
+			// RendDX9.dll 0x10118e60 draws a line strip as D3DPT_LINESTRIP: one pixel
+			// wide whatever the style's width (0x101171b0 only stores it) or scale.
+			// shortcut: one stage pixel, not one window pixel; upgrade by giving the drawer the window's scale.
+			for (size_t i = 0; i + 1 < part.lines.size(); i += 2) {
+				const swf::Point a = world.apply(part.lines[i]), b = world.apply(part.lines[i + 1]);
+				const float dx = (b.x - a.x) / kTwips, dy = (b.y - a.y) / kTwips;
+				const float length = std::sqrt(dx * dx + dy * dy);
+				if (length < 1e-4f) {
+					continue;
+				}
+				const float nx = -dy / length * 0.5f, ny = dx / length * 0.5f;
+				const float ax = a.x / kTwips, ay = a.y / kTwips, bx = b.x / kTwips, by = b.y / kTwips;
+				const float corners[6][2] = {{ax + nx, ay + ny}, {bx + nx, by + ny}, {bx - nx, by - ny}, {ax + nx, ay + ny},
+					{bx - nx, by - ny}, {ax - nx, ay - ny}};
+				for (const auto& c : corners) {
+					batch.vertices.push_back(
+						{c[0], c[1], 0.5f, 0.5f, {mult[0], mult[1], mult[2], mult[3]}, {add[0], add[1], add[2], add[3]}});
+				}
+			}
+			if (!batch.vertices.empty()) {
+				out.push_back(std::move(batch));
+			}
+			continue;
+		}
 		batch.vertices.reserve(part.triangles.size());
 		for (const swf::Point& p : part.triangles) {
 			const swf::Point uv = toTexture.apply(p);

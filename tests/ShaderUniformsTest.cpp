@@ -165,4 +165,17 @@ TEST(ShaderUniforms_NoBlockOutrunsItsPush)
 		CHECK(block.first == push.name && block.second <= push.pushed);
 	}
 }
+
+// Particles.fx psParticleAdditive*: alpha masks the colour inside the shader and
+// the pixel output clamps before the one/one add, so a colour over 1 keeps its
+// blue (0.5/1.2/2 x 0.5 is 0.25/0.6/1, not the cyan 0.25/0.5/0.5 of clamp-then-mask).
+TEST(ShaderUniforms_AdditiveParticlesMaskBeforeClamp)
+{
+	std::ifstream file(std::filesystem::path(__FILE__).parent_path().parent_path() / "src/Render/Shaders/particle.frag");
+	std::stringstream text;
+	text << file.rdbuf();
+	const std::string source = text.str();
+	const size_t mask = source.find("clamp(outColor.rgb * outColor.a");
+	CHECK(!source.empty() && mask != std::string::npos && source.find("material.w > 1.5") < mask);
+}
 #endif

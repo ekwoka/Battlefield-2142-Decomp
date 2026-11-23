@@ -1,6 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Particles: the texture times the particle's colour. material.w is 1 where
+// Particles: the texture times the particle's colour. material.w is 1 (+2 for additive groups) where
 // retail enables fixed-function fog (trails, non-screen-aligned quads): the
 // colour toward FogColor, alpha kept. Particles.fx's sprites never enable it,
 // so far smoke stays grey and dense.
@@ -25,6 +25,11 @@ layout(location = 0) out vec4 outColor;
 void main()
 {
 	vec4 texel = texture(particleTexture, inTexCoord);
-	float fog = material.w > 0.5 ? fogAmount(inDepth) : 0.0;
+	float fog = mod(material.w, 2.0) > 0.5 ? fogAmount(inDepth) : 0.0;
 	outColor = vec4(mix(texel.rgb * inColor.rgb, fogColor.rgb, fog), texel.a * inColor.a);
+	// Particles.fx psParticleAdditive*: the colour is masked by alpha in the shader and
+	// clamped as the pixel shader's output, before the one/one add (material.w >= 2).
+	if (material.w > 1.5) {
+		outColor.rgb = clamp(outColor.rgb * outColor.a, 0.0, 1.0);
+	}
 }

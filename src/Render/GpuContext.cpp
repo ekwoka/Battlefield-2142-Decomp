@@ -352,9 +352,11 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	world.glowMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "glow mesh");
 	info.depth_stencil_state.enable_depth_test = true;
+	color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE; // particle.frag masks by alpha itself
 	world.additiveParticle = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "additive particle");
+	color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
 	{
 		// Cloaked meshes into their mask: depth-tested, not written, unblended.
