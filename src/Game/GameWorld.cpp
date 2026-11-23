@@ -708,6 +708,32 @@ bool GameWorld::stationaryWithMovingParts(const world::ObjectTemplate& t, uint32
 		&& std::any_of(m_silos.begin(), m_silos.end(), [object](const Silo& silo) { return silo.object == object; }));
 }
 
+// A stationary object whose RotationalBundle turns by itself (the commander assets' dishes and
+// antennas, continousRotationSpeed): the part's update (0x00565a20) runs whatever the root's physics.
+bool GameWorld::hasContinuousPart(const world::ObjectTemplate& t, int depth) const
+{
+	if (depth > 8) {
+		return false;
+	}
+	for (const world::ChildTemplate& child : t.children()) {
+		const world::ObjectTemplate* c = m_templates.find(child.name);
+		if (!c) {
+			continue;
+		}
+		const auto speed = c->settings().find("continousRotationSpeed");
+		if (sameName(c->typeName(), "RotationalBundle") && speed != c->settings().end()) {
+			const physics::Vec3 v = parseVec3(speed->second);
+			if (v.x != 0 || v.y != 0 || v.z != 0) {
+				return true;
+			}
+		}
+		if (hasContinuousPart(*c, depth + 1)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 ControlPoint* GameWorld::controlPointOf(uint32_t object)
 {
 	for (ControlPoint& point : m_controlPoints) {
@@ -11947,6 +11973,11 @@ const Vehicle* GameWorld::vehicle(uint32_t object) const
 			return body.vehicle.get();
 		}
 	}
+	for (const Spinner& spinner : m_spinners) {
+		if (spinner.object == object) {
+			return spinner.vehicle.get();
+		}
+	}
 	return nullptr;
 }
 
@@ -15509,6 +15540,14 @@ void GameWorld::addBodies()
 		}
 		// Stationary guns and silos use a fixed body for their moving parts.
 		const bool fixed = t && stationaryWithMovingParts(*t, object.id());
+		if (t && !fixed && !flag(*t, "hasMobilePhysics", false) && sameName(t->typeName(), "PlayerControlObject")
+			&& hasContinuousPart(*t)) {
+			// Its bundles update on their own (0x00565a20); the root stays in the static world.
+			if (auto spinner = Vehicle::fromTemplate(*t, m_templates, nullptr, Vehicle::Accept::Seats)) {
+				m_spinners.push_back({object.id(), std::move(spinner)});
+			}
+			continue;
+		}
 		if (!t || (!flag(*t, "hasMobilePhysics", false) && !fixed)) {
 			continue;
 		}
@@ -16067,6 +16106,12 @@ void GameWorld::stepPhysicsMove(float seconds)
 {
 	// Each body's step and ground contact, then the mobile mesh physics
 	// between the objects (MeshCollision.cpp), then each response.
+	m_spinners.erase(std::remove_if(m_spinners.begin(), m_spinners.end(),
+						 [this](const Spinner& s) { return !m_objects.find(s.object); }),
+		m_spinners.end());
+	for (Spinner& spinner : m_spinners) {
+		spinner.vehicle->tickParts(physics::RigidBody {}, seconds);
+	}
 	for (auto it = m_bodies.begin(); it != m_bodies.end();) {
 		world::Object* object = m_objects.find(it->object);
 		if (!object) {

@@ -3488,6 +3488,12 @@ private:
 	std::function<void(const BlastRayTrace&)> m_blastRayTraceSink;
 	std::vector<uint32_t> m_checked; // object ids already considered for a body (sorted)
 	std::vector<Body> m_bodies;
+	// A static root whose RotationalBundle turns by itself (the commander assets' dishes): the parts' state alone, no body.
+	struct Spinner {
+		uint32_t object = 0;
+		std::unique_ptr<Vehicle> vehicle;
+	};
+	std::vector<Spinner> m_spinners;
 	// Meshes a wreck replaced during the collision pass, kept until it ends (wreckCollision).
 	std::vector<std::shared_ptr<physics::CollisionWorld>> m_retiredMeshes;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
@@ -3666,6 +3672,7 @@ private:
 	// Fixed bodies for gun seats and registered missile silos supply
 	// posed collision parts through raycastBody.
 	bool stationaryWithMovingParts(const world::ObjectTemplate& t, uint32_t object) const;
+	bool hasContinuousPart(const world::ObjectTemplate& t, int depth = 0) const;
 
 	struct HitBone {
 		int node;            // skeleton node
