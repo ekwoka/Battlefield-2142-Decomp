@@ -2550,6 +2550,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		const float eyeAboveBody = firingPose == SoldierPose::Prone ? 0.6f - 1.10f : firingPose == SoldierPose::Crouch ? 0.6f - 0.52f : 0.6f;
 		const physics::Vec3 eye = seated ? seatedEye : body.position + physics::Vec3 {0, eyeAboveBody, 0};
 		p.origin = eye + straight * 0.5f;
+		// PROVISIONAL: retail's origin routine is not found; this fix is reasoned, not ported.
 		// Beside a thin solid (a door shield, the portable shield) the 0.5 m start lies past its surface, which no ray from
 		// there crosses: the round starts at the eye then, so it meets the face as every shot from further away does.
 		physics::CollisionWorld::Hit across {};
