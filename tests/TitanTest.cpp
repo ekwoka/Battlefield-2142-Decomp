@@ -5301,3 +5301,71 @@ TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 	CHECK(info.vehicle != vehicle->id());
 }
 
+
+// The jump state (0x005ef250 -> 0x005eef80) reads the node's slot 0x64, the
+// tick's displacement x 30 (0x006c5920), not its integrated velocity. On
+// Camp_Gibraltar's roof west of the Tollbooth a running soldier leaves the
+// roof for a tick or three at the 2.3 cm step between two meshes (z 208) and
+// at the parapet's top edge (z 211): it rises and settles by a centimetre or
+// two, never falling past anim_startLandAtSpeed (-0.5 m/s), so no land sound.
+TEST(Physics_GibraltarRoofHopsMakeNoLandSound)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) {
+		return;
+	}
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	});
+	level.world->startRound();
+	// The jump and land sounds are the footstep set's slot 3: named apart here.
+	for (uint32_t surface = 0; surface < 256; ++surface) {
+		if (level.materials.cell(5500, surface)) {
+			auto& sounds = level.materials.createCell(5500, surface).soundTemplates;
+			sounds.resize(std::max<size_t>(sounds.size(), 4));
+			sounds[3] = "S_Land";
+		}
+	}
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	level.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	game::SoldierInput input;
+	input.turn = level.world->soldierBody(id)->yawDegrees; // face +z
+	level.world->setInput(id, input);
+	level.world->tick(1 / 30.0f);
+	input.turn = 0;
+	level.world->setInput(id, input);
+	level.run(2);
+	CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.4f, 205}));
+	level.run(0.3f);
+	(void)level.world->takeSounds();
+	input.throttle = 1;
+	int airborne = 0, landings = 0;
+	for (int i = 0; i < 80; ++i) {
+		level.world->setInput(id, input);
+		level.world->tick(1 / 30.0f);
+		airborne += level.world->soldierBody(id)->onGround() ? 0 : 1;
+		for (const auto& sound : level.world->takeSounds()) {
+			landings += sound.sound == "S_Land";
+		}
+	}
+	const physics::Vec3 at = level.world->soldierBody(id)->position;
+	std::fprintf(stderr, "  over the roof to z %.2f: %d ticks in the air, %d land sounds\n", at.z, airborne, landings);
+	CHECK(at.z > 210.5f && at.y < 24.5f); // reached the parapet, still on the roof
+	CHECK(airborne > 0);
+	CHECK(landings == 0);
+}
