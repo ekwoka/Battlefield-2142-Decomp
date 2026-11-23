@@ -1341,6 +1341,70 @@ TEST(GameWorld_WeaponSwitching)
 	CHECK(held() == "eu_ar_rifle" && range.world->playerWeapon()->roundsInMag() == rifleRounds);
 }
 
+TEST(GameWorld_ActiveCamouflageCanBeSelected)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* camo = range.templates.create("GenericFireArm", "Unl_Active_Camo");
+	camo->components().push_back("CamouflageAmmoComp");
+	for (const auto& [key, value] : {std::pair<const char*, const char*> {"itemIndex", "5"}, {"altItemIndex", "6"},
+			 {"ammo.nrOfMags", "-1"}, {"ammo.magSize", "-1"}, {"ammo.reloadTime", "0.7"}, {"ammo.autoReload", "1"},
+			 {"ammo.instantReloadOnEnable", "1"}, {"delayToUse", "1.1"}, {"fire.addFireRate", "2"},
+			 {"heatAddWhenFire", "0.005"}, {"coolDownPerSec", "0.08"}, {"overheatPenalty", "1.5"}, {"ammo.minimumTimeUntilReload", "0.5"},
+			 {"ammo.reloadWithoutPlayer", "1"}}) {
+		camo->settings()[key] = value;
+	}
+	range.templates.create("GenericFireArm", "knife")->settings()["itemIndex"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* item : {"knife", "eu_ar_rifle", "Unl_Active_Camo"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto held = [&] { return range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name(); };
+	const auto press = [&](int key, bool fire = false) {
+		game::SoldierInput input;
+		input.selectItem = key;
+		input.fire = fire;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.selectItem = 0;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+	};
+	CHECK(held() == "eu_ar_rifle");
+	press(5);
+	CHECK(held() == "Unl_Active_Camo");
+	for (int i = 0; i < 60; ++i) { // cloaked, trigger down
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+	}
+	press(3);
+	CHECK(held() == "eu_ar_rifle");
+	press(5);
+	CHECK(held() == "Unl_Active_Camo");
+	// The wheel (c_PIToggleWeapon) walks the slots and wraps past the camouflage.
+	game::SoldierInput wheel;
+	wheel.toggleWeapon = true;
+	range.world->setPlayerInput(wheel);
+	range.world->tick(1 / 30.0f);
+	CHECK(held() == "knife");
+	wheel.toggleWeapon = false;
+	range.world->setPlayerInput(wheel);
+	range.world->tick(1 / 30.0f);
+	for (int i = 0; i < 2; ++i) { // knife -> rifle -> camouflage
+		wheel.toggleWeapon = true;
+		range.world->setPlayerInput(wheel);
+		range.world->tick(1 / 30.0f);
+		wheel.toggleWeapon = false;
+		range.world->setPlayerInput(wheel);
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(held() == "Unl_Active_Camo");
+}
+
 TEST(GameWorld_ProfileAutoReload)
 {
 	Range range;
