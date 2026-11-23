@@ -1038,8 +1038,11 @@ public:
 	// A bot's squad (AIDLL 0x10089000, on adding a bot and at the round's
 	// reset): the team's non-empty squad with the fewest members (the later
 	// of equals; at most IAIGame slot 0x54, 0x008c0360: 6), squad 1 when all
-	// are empty. Holding three or more with the next squad empty, its last
-	// member moves on to that squad first. The squad joined, 0 for none.
+	// are empty. Holding three or more with the next squad empty, its member
+	// that joined last (a human too) moves on to that squad first. Both
+	// joins are IBFSquad slot 8 (AIDLL 0x100de040 for a bot) -> the squad
+	// manager's join (0x00896380 -> slot 0x34): requestJoinSquad, which
+	// refuses a full or private squad. The squad joined, 0 for none.
 	int joinAiSquad(int id);
 	// The squad's beacon object (0 for none).
 	uint32_t squadBeacon(int team, int squad) const;
@@ -3723,6 +3726,7 @@ private:
 		uint32_t spawnTitan = 0; // spawnChoice kSpawnOnTitan: the Titan object
 		int squad = 0;
 		bool squadLeader = false;
+		uint64_t squadJoinedAt = 0; // join order (AIDLL's squad lists append on each join, 0x100c3f10)
 		std::string kitTemplate, soldierTemplate; // the next spawn's kit (empty: the team's assault kit)
 		std::vector<std::string> unlocked; // ItemContainer templates chosen (equipped)
 		std::vector<std::string> owned;    // and owned but not chosen (replaceWithoutEquip's test)
@@ -4919,6 +4923,7 @@ private:
 	float m_replenishLimits[3] = {100, 100, 100};
 	// A giver's point for `percent` given to `object`: kind 0 heal, 1 repair, 2 ammo.
 	void replenishPoint(Player& giver, int kind, float percent, uint32_t object);
+	uint64_t m_squadJoins = 0; // Player::squadJoinedAt's counter
 	std::set<std::pair<int, int>> m_privateSquads;          // (team, squad): requestJoinSquad
 	std::map<int, uint32_t> m_squadInvites;                  // player -> its invite mask
 	std::map<int, std::vector<SquadMessage>> m_squadMessages; // player -> its 2/x messages

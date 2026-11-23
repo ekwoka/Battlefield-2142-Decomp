@@ -2001,6 +2001,58 @@ TEST(Bots_AddBotSpreadsSquadsAsRetail)
 	CHECK(members(1, 2).size() == 3);
 }
 
+// 0x10089000 with humans: the member moved on is the one that joined its
+// squad last (AIDLL's squad lists append on each join), a human too; a
+// human who joined first stays. The joins are the squad manager's
+// (requestJoinSquad): a private squad refuses a bot it hasn't invited.
+TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
+{
+	const auto squadOf = [](game::GameWorld& world, int id) {
+		game::GameWorld::PlayerInfo info;
+		return world.playerInfo(id, info) ? std::make_pair(info.squad, info.squadLeader) : std::make_pair(-1, false);
+	};
+	{
+		// A human first in squad 1: the third bot moves the second bot on.
+		Field field;
+		Console console;
+		game::BotManager bots(*field.world, scriptedSettings(console));
+		const int human = field.world->addPlayer("H", 1, false);
+		CHECK(field.world->joinSquad(human, 1));
+		const int b0 = bots.addBot("", 1), b1 = bots.addBot("", 1), b2 = bots.addBot("", 1);
+		CHECK(squadOf(*field.world, human) == std::make_pair(1, true));
+		CHECK(squadOf(*field.world, b0).first == 1 && squadOf(*field.world, b2).first == 1);
+		CHECK(squadOf(*field.world, b1) == std::make_pair(2, true));
+	}
+	{
+		// A human in the game before the bots but joining after two of them
+		// is the last to join: he moves on and leads.
+		Field field;
+		Console console;
+		game::BotManager bots(*field.world, scriptedSettings(console));
+		const int human = field.world->addPlayer("H", 1, false);
+		const int b0 = bots.addBot("", 1), b1 = bots.addBot("", 1);
+		CHECK(field.world->joinSquad(human, 1));
+		const int b2 = bots.addBot("", 1);
+		CHECK(squadOf(*field.world, human) == std::make_pair(2, true));
+		CHECK(squadOf(*field.world, b0) == std::make_pair(1, true));
+		CHECK(squadOf(*field.world, b1).first == 1 && squadOf(*field.world, b2).first == 1);
+	}
+	{
+		// A human's private squad (the only one with members) refuses the bot,
+		// whose request reaches its leader (2/0x11).
+		Field field;
+		Console console;
+		game::BotManager bots(*field.world, scriptedSettings(console));
+		const int human = field.world->addPlayer("H", 1, false);
+		CHECK(field.world->joinSquad(human, 1));
+		field.world->setSquadPrivate(1, 1, true);
+		const int bot = bots.addBot("", 1);
+		CHECK(squadOf(*field.world, bot).first == 0);
+		const auto messages = field.world->takeSquadMessages(human);
+		CHECK(messages.size() == 1 && messages.front().id == 0x11 && messages.front().value == bot);
+	}
+}
+
 // A level without AIPathFinding has no bots in the original (no ai.init,
 // ai.addBot refused): with a null mesh the manager runs none.
 TEST(Bots_NoNavigationMeshNoBots)

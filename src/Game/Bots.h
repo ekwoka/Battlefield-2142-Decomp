@@ -945,7 +945,7 @@ public:
 	// getNumberOfDeactivedBots: the bot manager's slots 2, 0x74).
 	int botCount() const;
 	float time() const { return m_time; } // the bot manager's clock (its updates' sum)
-	// ai.addBot: a bot player of the team in an open squad (it spawns as
+	// ai.addBot: a bot player of the team in a squad (GameWorld::joinAiSquad; it spawns as
 	// the round spawns bots); its id, -1 for none.
 	int addBot(const std::string& name, int team);
 	int deactivatedCount() const { return static_cast<int>(m_deactivated.size()); }
