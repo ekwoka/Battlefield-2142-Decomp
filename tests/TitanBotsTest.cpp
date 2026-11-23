@@ -1407,3 +1407,87 @@ TEST(CampGibraltar_ShotsThroughTheFenceHitARailingBehindIt)
 	}
 	CHECK(false);
 }
+
+// Project Remaster's APC pod seats (equipment Passenger, their Armament
+// plug-in commented out) count none of their machine gun (AIDLL 0x100d3b80
+// reads the AI object's Armament only; 0x100d3e70's x2 needs it too): the
+// seat is worth its move only, 20 x 0.5 x 0.3 behind a teammate driving
+// (not of the bot's squad), nothing without a driver.
+TEST(Bots_RemasterApcPodSeatsCountNoGun)
+{
+	REMASTER_ONLY();
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Backstab", 16, true, "mods/Project_Remaster_v17_Final", false, nullptr, "gpm_coop");
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	game::BotSettings settings;
+	loadAircraftAi(level, settings);
+	float x = 0;
+	for (const char* name : {"eu_apc", "as_apc"}) {
+		for (const bool driven : {false, true}) {
+			x += 40;
+			const float z = 0;
+			world::Object* apc = level.objects.create(level.templates.find(name), {x, level.world->terrainHeight(x, z) + 2.5f, z});
+			CHECK(apc != nullptr);
+			if (!apc) {
+				return;
+			}
+			apc->setTeam(2);
+			level.run(1.0f);
+			// Aboard with the use key from beside the hull (the first free seat, the driver's first).
+			const auto board = [&](const char* who, bool ai) {
+				const int id = level.world->addPlayer(who, 2, ai);
+				CHECK(level.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo p;
+				level.world->playerInfo(id, p);
+				const auto at = apc->position();
+				level.world->setSoldierPosition(p.soldier, {at.x, at.y, at.z});
+				game::SoldierInput use;
+				use.use = true;
+				level.world->setInput(id, use);
+				level.run(1 / 30.0f);
+				level.world->setInput(id, {});
+				level.run(1 / 30.0f);
+				level.world->playerInfo(id, p);
+				CHECK(p.vehicle == apc->id());
+				return id;
+			};
+			if (driven) {
+				board("Driver", false);
+			}
+			const int bot = board("Bot", true);
+			int podSeat = -1;
+			const auto seats = level.world->vehicleSeats(apc->id());
+			for (size_t i = 0; i < seats.size() && podSeat < 0; ++i) {
+				std::string seat = seats[i].name;
+				std::transform(seat.begin(), seat.end(), seat.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				podSeat = seat.find("podcannon") != std::string::npos ? static_cast<int>(i) : -1;
+			}
+			CHECK(podSeat > 1);
+			game::SoldierInput input;
+			input.switchSeat = podSeat + 1;
+			level.world->setInput(bot, input);
+			level.run(1 / 30.0f);
+			level.world->setInput(bot, {});
+			level.run(1 / 30.0f);
+			game::GameWorld::PlayerInfo info;
+			CHECK(level.world->playerInfo(bot, info) && info.vehicle == apc->id() && info.seat == podSeat);
+			game::BotManager bots(*level.world, settings);
+			bots.update(1 / 30.0f); // the bot known, before its input reaches the world
+			CHECK(bots.equipment(bot) == "Passenger");
+			const float value = bots.seatValueFor(bot, apc->id(), podSeat);
+			std::printf("  %s pod seat %d %s: %.3f\n", name, podSeat, driven ? "driven" : "no driver", value);
+			if (driven) {
+				CHECK(std::fabs(value - 3.0f) < 0.05f);
+			} else {
+				CHECK(value == 0);
+			}
+			level.world->removePlayer(bot);
+		}
+	}
+}
