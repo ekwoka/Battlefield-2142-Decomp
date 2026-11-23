@@ -1567,6 +1567,14 @@ void GameWorld::objectCollisionDamage(uint32_t attacker, uint32_t victim, const 
 		return;
 	}
 	if (Player* soldier = soldierPlayer(victim)) {
+		// 0x005a43c0's tail (0x005a4605..0x005a4625): an attacker or victim with
+		// the GenericProjectile interface (0x94c1) sends no damage, so a thrown
+		// hub touching its thrower, or anyone, never road-kills (the impact
+		// effect and sound before it still play).
+		if (const world::Object* a = m_objects.find(attacker); a && a->objectTemplate()
+			&& sameName(a->objectTemplate()->typeName(), "GenericProjectile")) {
+			return;
+		}
 		// Retail's base handler (0x0063c4da -> 0x004ba3f0 -> 0x005a4690)
 		// sends every object hitting a soldier to the road kill, whose only
 		// speed comparison is its limit (0x005a43c0: 3 or 10 m/s). The
