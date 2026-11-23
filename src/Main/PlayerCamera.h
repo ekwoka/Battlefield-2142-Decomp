@@ -228,6 +228,13 @@ public:
 		std::vector<anim::Matrix> parts; // bundled
 	};
 	std::vector<Model> models() const;
+	// The frame's tick fraction for the first-person skeleton (FirstPersonRig::blend).
+	void setBlend(float alpha)
+	{
+		if (m_rig) {
+			m_rig->blend(alpha);
+		}
+	}
 	const effects::EffectManager& effects() const { return m_effects; }
 	// The first-person effects by the frame (EffectManager::frame); their
 	// anchors are the tick's eye, which the draw carries with the view.

@@ -106,6 +106,7 @@ struct ViewerOptions {
 		float lookTurn = 0, lookPitch = 0;
 		float eyeCarrierYaw = 0; // radians: the seat's share of eyeYaw (PlayerCamera::View::carrierYaw)
 		float eyeHeight = 0, eyeTarget = 0; // the eye over the soldier and its pose's (PlayerCamera::View)
+		float blendAlpha = 1; // in: the frame's tick fraction
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
 	// Each drawn frame of the window, before the objects are synced: the frame's

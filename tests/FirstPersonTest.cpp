@@ -10,6 +10,7 @@
 #include "TestMain.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <string>
@@ -233,6 +234,107 @@ TEST(FirstPerson_RifleOnTheFirstPersonSkeleton)
 		}
 		CHECK(playing("sprint"));
 		CHECK(most > 0.02f && most < 0.1f);
+	}
+}
+
+TEST(FirstPerson_RenderedPoseBlendsBetweenTicks)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	});
+	anim::registerAnimationConsoleMethods(console, systems);
+	console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	const auto load = [&](const std::string& path) { return systems.get(path, [&] { console.run(path, {}, out); }); };
+	const anim::AnimationSystemTemplate* soldier = load("Objects/Soldiers/Common/Animations/AnimationSystem1p.inc");
+	const anim::AnimationSystemTemplate* rifle = load("Objects/Weapons/Handheld/eu_ar_rifle/AnimationSystem1p.inc");
+	const anim::Skeleton* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/1p_setup.ske");
+	CHECK(soldier && rifle && skeleton);
+	if (!soldier || !rifle || !skeleton) {
+		return;
+	}
+	const float dt = 1 / 30.0f;
+	anim::AnimationInput sprint;
+	sprint.speed = 6;
+	sprint.forward = 1;
+	sprint.movementSeconds = dt;
+	const auto camera = [](const anim::FirstPersonRig& r) {
+		const anim::Matrix& m = r.pose()[static_cast<size_t>(r.cameraNode())];
+		return std::array<float, 3> {m[12], m[13], m[14]};
+	};
+	// Halfway between two ticks the bone is halfway between its two poses.
+	anim::FirstPersonRig rig(systems, *skeleton, soldier);
+	rig.setWeapon(rifle);
+	for (int i = 0; i < 40; ++i) {
+		rig.update(sprint, dt);
+	}
+	float moved = 0;
+	for (int i = 0; i < 20; ++i) {
+		rig.update(sprint, dt);
+		rig.blend(1);
+		const auto now = camera(rig);
+		rig.blend(0);
+		const auto before = camera(rig);
+		rig.blend(0.5f);
+		const auto half = camera(rig);
+		for (size_t k = 0; k < 3; ++k) {
+			CHECK(near(half[k], (now[k] + before[k]) * 0.5f, 1e-5f));
+			moved = std::max(moved, std::fabs(now[k] - before[k]));
+		}
+	}
+	CHECK(moved > 1e-4f); // the bone moves between ticks, so the blend is not a no-op
+	// A reset (a thrown weapon's reload) and a weapon change snap: no blend
+	// from the old pose.
+	rig.resetWeapon();
+	rig.update(sprint, dt);
+	rig.blend(0);
+	const auto reset0 = camera(rig);
+	rig.blend(1);
+	const auto reset1 = camera(rig);
+	for (size_t k = 0; k < 3; ++k) {
+		CHECK(near(reset0[k], reset1[k], 1e-6f));
+	}
+	rig.setWeapon(nullptr);
+	rig.setWeapon(rifle);
+	rig.update(sprint, dt);
+	rig.blend(0);
+	const auto swap0 = camera(rig);
+	rig.blend(1);
+	const auto swap1 = camera(rig);
+	for (size_t k = 0; k < 3; ++k) {
+		CHECK(near(swap0[k], swap1[k], 1e-6f));
+	}
+	// Events come from update() only: drawing more frames per tick changes none.
+	const auto run = [&](int framesPerTick) {
+		anim::FirstPersonRig r(systems, *skeleton, soldier);
+		r.setWeapon(rifle);
+		std::vector<anim::FirstPersonRig::Event> events;
+		for (int i = 0; i < 90; ++i) {
+			anim::AnimationInput in = sprint;
+			in.pulses = i % 15 == 0 ? 1 : (i == 40 ? 2 : 0);
+			r.update(in, dt, &events);
+			for (int f = 0; f < framesPerTick; ++f) {
+				r.blend(static_cast<float>(f) / static_cast<float>(framesPerTick));
+			}
+		}
+		return events;
+	};
+	const auto slow = run(1), fast = run(8);
+	CHECK(slow.size() == fast.size());
+	for (size_t i = 0; i < std::min(slow.size(), fast.size()); ++i) {
+		CHECK(slow[i].id == fast[i].id && slow[i].type == fast[i].type && slow[i].weapon == fast[i].weapon);
 	}
 }
 

@@ -10632,6 +10632,7 @@ int runGame(Options& options, Session& session)
 			// keys go up as moves, a click on a spawn point asks for it (with
 			// the first kit).
 			viewer.playerView = [&session, &playerCamera, &ownFeet](ViewerOptions::PlayerView& view) {
+				playerCamera.setBlend(view.blendAlpha); // the first-person skeleton between its ticks
 				// A demo's camera following a player (0x005f8f40), with the
 				// demo's fov (0x00434610); free, the viewer's own camera.
 				// A camera file played (0x005fa4a0 -> 0x005fa210): its free
@@ -11023,6 +11024,7 @@ int runGame(Options& options, Session& session)
 			};
 			viewer.takeAimKick = [&round] { return round.takeAimKick(round.localPlayer()); };
 			viewer.playerView = [&round, &playerCamera, &hudPlayer, &hudLocal](ViewerOptions::PlayerView& view) {
+				playerCamera.setBlend(view.blendAlpha); // the first-person skeleton between its ticks
 				// The soldier and its vehicle as the HUD has them (a joined
 				// game's: the server's ghosts as the level's objects).
 				const world::Object* player = g_remoteHud ? g_remoteHud->soldier() : round.player();

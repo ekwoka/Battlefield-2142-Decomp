@@ -206,6 +206,7 @@ public:
 		if (m_weapon) {
 			m_weapon->reset();
 		}
+		m_snap = true; // the next pose is not blended from the one before the reset
 	}
 	const AnimationSystemTemplate* weapon() const { return m_weaponTemplate; }
 	// One tick. Model-space node matrices follow. The systems' events this
@@ -216,8 +217,18 @@ public:
 		int id = 0;
 	};
 	void update(const AnimationInput& input, float seconds, std::vector<Event>* events = nullptr);
+	// Enhanced/native smoothing, retail mechanism unknown: the drawn pose is
+	// the last two ticks' poses blended by the frame's tick fraction (slerp
+	// rotations, lerp positions), as objects are tick-blended (TickBlend.h).
+	// Retail's first-person skeleton looks smooth at any frame rate; the
+	// traced animation path (Soldier 0x00586710 -> 0x005f06b0(1/30, 0)) is
+	// per tick, and 0x005f06b0 also takes a frame dt with its flag set from
+	// the Soldier method 0x00585bf0, caller not found. alpha 1 = the tick's
+	// pose; the tick's update() leaves it there. A weapon change or reset
+	// snaps (no blend from the old pose).
+	void blend(float alpha);
 	const Skeleton& skeleton() const { return m_skeleton; }
-	const std::vector<Matrix>& pose() const { return m_world; }
+	const std::vector<Matrix>& pose() const { return m_world; } // as drawn (blend()), else the tick's
 	int cameraNode() const { return m_cameraNode; }
 	// The camera spring: the soldier's system's with the weapon's parts over
 	// it (0x008bc390); null when neither has one.
@@ -231,7 +242,8 @@ private:
 	std::unique_ptr<AnimationState> m_weapon;
 	const AnimationSystemTemplate* m_soldierTemplate = nullptr;
 	const AnimationSystemTemplate* m_weaponTemplate = nullptr;
-	LocalPose m_pose;
+	LocalPose m_pose, m_previous; // this tick's and the last tick's
+	bool m_snap = true;           // the next update's pose has no previous to blend from
 	std::vector<Matrix> m_world;
 	int m_cameraNode = -1;
 	CameraSpring m_spring;

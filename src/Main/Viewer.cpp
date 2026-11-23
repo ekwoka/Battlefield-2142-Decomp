@@ -950,6 +950,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			// (Render/TickBlend.h).
 			const float blendAlpha = render::tickBlendAlpha(seconds, ticks.previousTickTime(), blendTicks, ticks.tickLength());
 			ViewerOptions::PlayerView view;
+			view.blendAlpha = blendAlpha;
 			{
 				int w = 1, h = 1;
 				SDL_GetWindowSizeInPixels(window, &w, &h);
