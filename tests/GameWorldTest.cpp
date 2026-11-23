@@ -1405,6 +1405,48 @@ TEST(GameWorld_ActiveCamouflageCanBeSelected)
 	CHECK(held() == "Unl_Active_Camo");
 }
 
+TEST(GameWorld_UnlockAllAppliesOnlyTheChosenSelection)
+{
+	// With every unlock owned, the kit build still applies the chosen masks (0x00570ab0): mine (branch 0
+	// level 0) and camouflage (branch 1 level 2) share slots 5/6, so the unchosen smoke shotgun must not
+	// take slot 6 from the camouflage.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	range.templates.create("GenericFireArm", "knife")->settings()["itemIndex"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* item : {"knife", "eu_ar_rifle"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	struct Unlock { const char* container; const char* item; const char* level; const char* branch; };
+	for (const Unlock& u : {Unlock {"UnlockEU_Sni0", "Unl_Mine", "0", "UB_First"}, {"UnlockEU_Sni2", "EU_Smk", "2", "UB_First"},
+			 {"UnlockEU_SpecOp2", "Unl_Active_Camo", "2", "UB_Second"}}) {
+		world::ObjectTemplate* gun = range.templates.create("GenericFireArm", u.item);
+		gun->settings()["itemIndex"] = "5";
+		gun->settings()["altItemIndex"] = "6";
+		world::ObjectTemplate* container = range.templates.create("ItemContainer", u.container);
+		container->children().push_back({u.item, {}, {}});
+		container->settings()["unlockLevel"] = u.level;
+		container->settings()["unlockBranch"] = u.branch;
+		kit->children().push_back({u.container, {}, {}});
+	}
+	game::GameLogic logic;
+	logic.team(2).kits = {{"EU_Assault", "us_light_soldier", ""}};
+	range.world->unlockAllByDefault = true;
+	CHECK(range.world->joinPlayer(2) >= 0);
+	range.world->setKitUnlockSelection(range.world->localPlayer(), logic, 0, {1, 4, 0, 0});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), info));
+	std::string at5, at6;
+	for (const auto& [slot, name] : info.carried) {
+		if (slot == 5) at5 = name;
+		if (slot == 6) at6 = name;
+	}
+	CHECK(at5 == "Unl_Mine" && at6 == "Unl_Active_Camo");
+}
+
 TEST(GameWorld_ProfileAutoReload)
 {
 	Range range;

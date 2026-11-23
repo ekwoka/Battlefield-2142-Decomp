@@ -6786,6 +6786,7 @@ void GameWorld::setKitUnlockSelection(int id, const GameLogic& logic, int kit, c
 		chosen.erase(std::remove(chosen.begin(), chosen.end(), name), chosen.end());
 		if ((levels[branch] & (1 << level)) && ownsKitUnlock(id, name)) chosen.push_back(name);
 	};
+	player->unlockChosen = true; // the kit build (0x00570ab0) applies the chosen masks, not everything owned
 	visitKitUnlocks(m_templates, logic.team(player->team), kit, selected);
 }
 
@@ -7702,6 +7703,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	const int squad = player.squad;
 	const bool squadLeader = player.squadLeader;
 	const bool allUnlocked = player.allUnlocked;
+	const bool unlockChosen = player.unlockChosen;
 	const int dogtagCount = player.dogtagCount;
 	player = Player();
 	player.dogtagCount = dogtagCount;
@@ -7725,6 +7727,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.squad = squad;
 	player.squadLeader = squadLeader;
 	player.allUnlocked = allUnlocked;
+	player.unlockChosen = unlockChosen;
 	player.alive = true;
 	player.object = created->id();
 	player.lastSoldier = player.object;
@@ -8153,14 +8156,14 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 					if (other && other->typeName() == "ItemContainer") {
 						for (const world::ChildTemplate& inner : other->children()) {
 							if (sameName(inner.name, item)) {
-								return player.allUnlocked || chosen(other->name());
+								return (player.allUnlocked && !player.unlockChosen) || chosen(other->name());
 							}
 						}
 					}
 				}
 				return false;
 			};
-			bool applies = player.allUnlocked || dogtags || chosen(container->name());
+			bool applies = (player.allUnlocked && !player.unlockChosen) || dogtags || chosen(container->name());
 			if (!applies && integer(*container, "replaceWithoutEquip", 0) != 0) {
 				applies = owned(container->name());
 			}
@@ -8265,7 +8268,7 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 			// customise screen's equipped unlocks; not every unlock of `all`).
 			std::vector<std::string> replaces;
 			if (const auto list = container->settings().find("replaceItem.list");
-				list != container->settings().end() && (!player.allUnlocked || integer(*container, "isFirearmReplacement", 0) != 0)) {
+				list != container->settings().end() && ((!player.allUnlocked || player.unlockChosen) || integer(*container, "isFirearmReplacement", 0) != 0)) {
 				std::stringstream names(list->second);
 				for (std::string name; std::getline(names, name, ';');) {
 					if (!name.empty()) {

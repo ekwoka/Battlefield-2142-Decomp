@@ -3714,6 +3714,8 @@ private:
 		std::vector<std::string> unlocked; // ItemContainer templates chosen (equipped)
 		std::vector<std::string> owned;    // and owned but not chosen (replaceWithoutEquip's test)
 		bool allUnlocked = false;
+		// A kit selection arrived (SelectKit's unlock masks): only the chosen containers apply, the rest are owned.
+		bool unlockChosen = false;
 		// The kit's weapons by slot (itemIndex: 1 knife, 2 sidearm, 3
 		// primary, then gadgets); the one in hand is `weapon`, the others
 		// keep their state here.
