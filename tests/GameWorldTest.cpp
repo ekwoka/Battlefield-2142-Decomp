@@ -4370,13 +4370,16 @@ TEST(GameWorld_ThrownHubSticksUprightAtOnce)
 	range.templates.create("Kit", "EU_Assault")->children().push_back({"unl_hub_medic", {}, {}});
 	range.world->startRound();
 	CHECK(range.world->spawnPlayer(2) != nullptr);
-	range.world->setSoldierPosition(range.world->playerObject(), {0, 11.5f, 30});
+	range.world->setSoldierPosition(range.world->playerObject(), {0, 10.05f, 30});
 	game::SoldierInput take;
 	take.selectItem = 4;
 	range.world->setPlayerInput(take);
 	range.world->tick(1 / 30.0f);
 	range.world->setPlayerInput({});
 	range.world->tick(1 / 30.0f);
+	for (int settle = 0; settle < 20; ++settle) {
+		range.world->tick(1 / 30.0f);
+	}
 	game::SoldierInput fire;
 	fire.fire = true;
 	range.world->setPlayerInput(fire);
@@ -4392,9 +4395,11 @@ TEST(GameWorld_ThrownHubSticksUprightAtOnce)
 	const auto* object = range.objects.find(placed.front());
 	CHECK(object && std::fabs(object->rotation().z) > 10); // thrown tumbling
 	int landed = -1;
+	float lowest = 100;
 	for (int tick = 0; tick < 60 && object; ++tick) {
 		range.world->tick(1 / 30.0f);
 		object = range.objects.find(placed.front());
+		lowest = std::min(lowest, range.world->hitPoints(range.world->playerObject()));
 		// Upright the tick it is down, its bottom on the face.
 		if (landed < 0 && object && object->position().y < 10.25f) {
 			landed = tick;
@@ -4403,6 +4408,7 @@ TEST(GameWorld_ThrownHubSticksUprightAtOnce)
 		}
 	}
 	CHECK(landed >= 0);
+	CHECK(lowest == 100); // its own throw does not road-kill the thrower (8 at 7 m/s before)
 	if (object) {
 		const world::Vec3 at = object->position();
 		CHECK(std::fabs(object->rotation().y) < 0.5f && std::fabs(object->rotation().z) < 0.5f);

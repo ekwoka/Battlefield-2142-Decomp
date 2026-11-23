@@ -11305,6 +11305,11 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	const uint32_t soldierId = player.object;
 	player.body.onContact = [this, soldierId, self](const physics::SoldierBody::Contact& c) {
 		self->contactMaterial = c.otherMaterial; // 0x00586a90: +0x32c
+		// A small mesh round the soldier threw himself (the hubs, 0x006c46a9's own
+		// test) neither holds nor hurts him: no road kill from his own fresh throw.
+		if (const Body* thrown = c.owner ? findBody(c.owner) : nullptr; thrown && thrown->pushedBySoldiers && thrown->launcher == soldierId) {
+			return true;
+		}
 		collisionEvent(soldierId, c.owner, c.velocity, c.normal, c.point, c.ownMaterial, c.otherMaterial, c.otherStaticNode);
 		if (c.owner != 0 && m_objects.find(soldierId)) {
 			collisionEvent(c.owner, soldierId, -c.velocity, c.normal, c.point, c.otherMaterial, c.ownMaterial);
