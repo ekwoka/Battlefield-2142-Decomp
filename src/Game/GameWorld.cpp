@@ -9833,7 +9833,6 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	// integrated one, which holds a pending push into the floor) relative
 	// to a moving floor: a soldier held still on a slope or on a moving
 	// Titan stands instead of walking on the spot.
-	const physics::Vec3& v = player.body.velocity;
 	const physics::Vec3 m = player.body.animationVelocity();
 	const float speed = std::sqrt(m.x * m.x + m.z * m.z);
 	// Crouched and lying the systems see it scaled (0x005ef250).
@@ -9843,9 +9842,11 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	input.side = direction.side;
 	// The up value (0x005ef250 / 0x005eef80): the jump state; standing (or
 	// on a ladder) 0. The jump and land sounds are the footstep set's
-	// (0x007fd970, see playAnimationSound).
+	// (0x007fd970, see playAnimationSound). It reads the same measured
+	// velocity (0x005ef4b7 passes slot 0x64's), so a hop of a centimetre or
+	// two off a seam or an edge falls too slowly to start a landing.
 	{
-		const float velocity[3] = {v.x, v.y, v.z};
+		const float velocity[3] = {m.x, m.y, m.z};
 		const physics::Vec3 feet = player.body.position - physics::Vec3 {0, 1, 0};
 		const uint32_t self = player.object;
 		anim::SoldierJumpAnimation::Sound sound;

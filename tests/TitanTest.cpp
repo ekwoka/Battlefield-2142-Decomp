@@ -5301,3 +5301,169 @@ TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 	CHECK(info.vehicle != vehicle->id());
 }
 
+
+// The jump state (0x005ef250 -> 0x005eef80) reads the node's slot 0x64, the
+// tick's displacement x 30 (0x006c5920), not its integrated velocity. On
+// Camp_Gibraltar's roof west of the Tollbooth a running soldier drifting
+// towards the side wall leaves the roof for a few ticks at the 2.3 cm step
+// between two meshes (z 208) and at the parapet's top edge (z 211): it rises
+// and settles by a centimetre or two, never falling past
+// anim_startLandAtSpeed (-0.5 m/s), so no land sound.
+TEST(Physics_GibraltarRoofHopsMakeNoLandSound)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) {
+		return;
+	}
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	});
+	level.world->startRound();
+	// The jump and land sounds are the footstep set's slot 3: named apart here.
+	for (uint32_t surface = 0; surface < 256; ++surface) {
+		if (level.materials.cell(5500, surface)) {
+			auto& sounds = level.materials.createCell(5500, surface).soundTemplates;
+			sounds.resize(std::max<size_t>(sounds.size(), 4));
+			sounds[3] = "S_Land";
+		}
+	}
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	level.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	game::SoldierInput input;
+	input.turn = level.world->soldierBody(id)->yawDegrees; // face +z
+	level.world->setInput(id, input);
+	level.world->tick(1 / 30.0f);
+	input.turn = 0;
+	level.world->setInput(id, input);
+	level.run(2);
+	CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.4f, 205}));
+	level.run(0.3f);
+	(void)level.world->takeSounds();
+	input.throttle = 1;
+	int airborne = 0, landings = 0;
+	for (int i = 0; i < 80; ++i) {
+		level.world->setInput(id, input);
+		level.world->tick(1 / 30.0f);
+		airborne += level.world->soldierBody(id)->onGround() ? 0 : 1;
+		for (const auto& sound : level.world->takeSounds()) {
+			landings += sound.sound == "S_Land";
+		}
+	}
+	const physics::Vec3 at = level.world->soldierBody(id)->position;
+	std::fprintf(stderr, "  over the roof to z %.2f: %d ticks in the air, %d land sounds\n", at.z, airborne, landings);
+	CHECK(at.z > 210.5f && at.y < 24.5f); // reached the parapet, still on the roof
+	CHECK(airborne > 0);
+	CHECK(landings == 0);
+}
+
+// Camp_Gibraltar, the guard wall tops west of the Tollbooth: running or
+// sprinting along +z at x 43 the soldier crosses guardwall_12m_railinghole_c's
+// top (y 23.331, to z 208) onto guardwall_90deg_c's (y 23.354), whose
+// soldier LOD has a 0.58 m riser at z 207.994. The riser's top edge gives the lowest
+// sphere a radial contact (0x006bede0: centre minus the edge's nearest point;
+// the per-face edge flags that would give the face's normal instead, 0x006bf1ca,
+// are never set: 0x006e1f50's body is unreachable), whose cancelled velocity
+// lifts a sprinting soldier off for a few ticks, as the retail contact code
+// does (0x006c24b0, 0x006c48c0; the materials' elasticity is 0). The jump
+// state reads the measured velocity (0x005ef4b7 passes slot 0x64's,
+// 0x006c5920: the displacement x 30), so a land sound needs a fall past
+// -0.5 m/s: running along x 43.4 the soldier stays down; sprinting, it may
+// land with one.
+TEST(Physics_GibraltarRoofSeamHops)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) {
+		return;
+	}
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	});
+	level.world->startRound();
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	level.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	game::SoldierInput face;
+	face.turn = level.world->soldierBody(id)->yawDegrees; // to +z
+	level.world->setInput(id, face);
+	level.world->tick(1 / 30.0f);
+	level.world->setInput(id, {});
+	level.run(2);
+	struct Run {
+		int airborne = 0, landings = 0;
+		float lift = 0, seamSpeed = 0, endZ = 0, drift = 0;
+	};
+	const auto cross = [&](bool sprint) {
+		Run run;
+		level.world->setInput(id, {});
+		CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.331f, 199}));
+		level.run(1);
+		game::SoldierInput input;
+		input.throttle = 1;
+		input.sprint = sprint;
+		physics::Vec3 last = level.world->soldierBody(id)->position;
+		(void)level.world->takeSounds();
+		for (int i = 0; i < 90 && level.world->soldierBody(id)->position.z < 210.5f; ++i) {
+			level.world->setInput(id, input);
+			level.world->tick(1 / 30.0f);
+			const physics::SoldierBody& body = *level.world->soldierBody(id);
+			const physics::Vec3 moved = body.position - last;
+			last = body.position;
+			// Keep heading +z: turn by the way it went.
+			input.turn = std::hypot(moved.x, moved.z) > 0.05f ? -std::atan2(moved.x, moved.z) * 57.29578f * 0.5f : 0.0f;
+			const bool seam = body.position.z > 207.5f && body.position.z < 209;
+			if (seam) {
+				run.airborne += body.onGround() ? 0 : 1;
+				run.lift = std::max(run.lift, body.position.y - 1 - 23.354f);
+				run.seamSpeed = std::max(run.seamSpeed, std::hypot(moved.x, moved.z) * 30);
+			}
+			run.drift = std::max(run.drift, std::fabs(body.position.x - 43.4f));
+			// Footsteps play on the ground only (+0xf9); in the air the set's
+			// sound is the jump's or the landing's.
+			const size_t sounds = level.world->takeSounds().size();
+			if (seam && !body.onGround()) {
+				run.landings += static_cast<int>(sounds);
+			}
+		}
+		run.endZ = level.world->soldierBody(id)->position.z;
+		std::fprintf(stderr, "  %s over the seam at %.2f m/s (drift %.2f m): %d ticks in the air, %.3f m up, %d jump/land sounds\n",
+			sprint ? "sprinting" : "running", run.seamSpeed, run.drift, run.airborne, run.lift, run.landings);
+		return run;
+	};
+	// Characterisation of the port (the retail contact code gives the same
+	// edge normal and cancel; the hop's size in retail is not measured): the
+	// user's line, at full speed, off by a few centimetres for a few ticks.
+	const Run running = cross(false);
+	const Run sprinting = cross(true);
+	CHECK(running.endZ > 209 && sprinting.endZ > 210 && sprinting.drift < 0.1f && sprinting.seamSpeed > 6);
+	CHECK(running.landings == 0);
+	CHECK(sprinting.airborne <= 5 && sprinting.lift < 0.05f && sprinting.landings <= 1);
+}
