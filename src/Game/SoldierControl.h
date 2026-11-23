@@ -148,6 +148,9 @@ int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed = false);
 // index 3's 3.9 m/s, crouched times the look's scale (0x00586420: zoomed
 // in, the field of view over the camera's times mouseSpeedMod; 1 else).
 // Standing and swimming it stays.
+// The speed the soldier moves at (0x00588420): the pose's speed index; crouched and zoomed it
+// is scaled by the look's scale as well.
+float soldierTargetSpeed(SoldierPose pose, bool sprinting, bool zoomed, float lookScale = 1);
 float soldierAnimationSpeed(float speed, SoldierPose pose, float lookScale = 1);
 
 // The walk cycle the footsteps follow (0x005ef7f0): the 3p animation's
@@ -233,7 +236,7 @@ public:
 	}
 	// The weapon in hand zoomed (its zoom index not 0): standing, not
 	// sprinting, the soldier walks at speed index 2.
-	void setZoomed(bool zoomed) { m_zoomed = zoomed; }
+	void setZoomed(bool zoomed, float lookScale = 1) { m_zoomed = zoomed; m_lookScale = lookScale > 0 ? lookScale : 1.0f; }
 	SprintStamina& stamina() { return m_stamina; }
 	const SprintStamina& stamina() const { return m_stamina; }
 	float jumpLoss = 0;     // the soldier template's sprintLossAtJump (+0x308)
@@ -270,6 +273,7 @@ public:
 
 private:
 	bool m_zoomed = false;
+	float m_lookScale = 1;
 	float m_throttle = 0; // 0x264
 	float m_strafe = 0;   // 0x260
 	float m_twist = 0;    // 0x278
