@@ -3618,8 +3618,8 @@ TEST(Bots_ChangesSeatInsideAVehicle)
 	for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
 			 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
 			 "aiTemplatePlugIn.create Unit TestGunner_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
-			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestGunner",
-			 "aiTemplate.addPlugIn TestGunner_Unit", "weaponTemplate.create car_firearm",
+			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplatePlugIn.create Armament TestGunner_Arms",
+			 "aiTemplate.create TestGunner", "aiTemplate.addPlugIn TestGunner_Unit", "aiTemplate.addPlugIn TestGunner_Arms", "weaponTemplate.create car_firearm",
 			 "weaponTemplate.setStrength Infantry 2", "weaponTemplate.setStrength LightArmour 2",
 			 "weaponTemplate.setStrength HeavyArmour 2", "weaponTemplate.setStrength Helicopter 2",
 			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
@@ -4062,8 +4062,8 @@ struct CarField {
 		for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
 				 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
 				 "aiTemplatePlugIn.create Unit TestGunner_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
-				 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestGunner",
-				 "aiTemplate.addPlugIn TestGunner_Unit", "weaponTemplate.create car_firearm",
+				 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplatePlugIn.create Armament TestGunner_Arms",
+				 "aiTemplate.create TestGunner", "aiTemplate.addPlugIn TestGunner_Unit", "aiTemplate.addPlugIn TestGunner_Arms", "weaponTemplate.create car_firearm",
 				 "weaponTemplate.setStrength Infantry 2", "weaponTemplate.setStrength LightArmour 2",
 				 "weaponTemplate.setStrength HeavyArmour 2", "weaponTemplate.setStrength Helicopter 2",
 				 "weaponTemplate.create car_firearm_b", "weaponTemplate.setStrength Infantry 10",
@@ -4093,7 +4093,7 @@ struct CarField {
 		world->autoRespawn = false;
 		world->startRound();
 	}
-	void addCar(const std::string& name, const std::string& gun)
+	void addCar(const std::string& name, const std::string& gun, const std::string& seatAi = "TestGunner")
 	{
 		world::ObjectTemplate* car = templates.create("PlayerControlObject", name);
 		car->settings()["hasMobilePhysics"] = "1";
@@ -4108,7 +4108,7 @@ struct CarField {
 		car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
 		world::ObjectTemplate* second = templates.create("PlayerControlObject", name + "_second");
 		second->settings()["seatInformation"] = name + "_second 0/0.5/-0.5 0/0/0";
-		second->settings()["aiTemplate"] = "TestGunner";
+		second->settings()["aiTemplate"] = seatAi;
 		second->children().push_back({name + "_base", {0, 0.8f, 0}, {}});
 		world::ObjectTemplate* base = templates.create("RotationalBundle", name + "_base");
 		base->settings()["inputToYaw"] = "PIMouseLookX";
@@ -4164,6 +4164,39 @@ struct CarField {
 };
 
 } // namespace
+
+// A seat whose AI template has no Armament plug-in (Project Remaster's APC
+// pod seats) doesn't count the seat's own gun (AIDLL 0x100d3b80 reads the
+// AI object's +0x34 only; 0x100d3e70's x2 needs it too): driverless it is
+// worth nothing (no move), so the bot gets out rather than sit in it.
+TEST(Bots_SeatWithoutArmamentIgnoresItsGun)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Unit TestPod_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
+			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestPod", "aiTemplate.addPlugIn TestPod_Unit"}) {
+		field.console.execute(line, out);
+	}
+	field.addCar("car_pod", "car_firearm", "TestPod");
+	const uint32_t car = field.car("car_pod", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 1);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 1);
+	game::BotManager bots(*field.world, field.settings);
+	field.ticks(1, &bots);
+	CHECK(bots.seatValueFor(bot, car, 1) == 0);
+	bool left = false;
+	for (int tick = 0; tick < 30 * 3 && !left; ++tick) {
+		field.ticks(1, &bots);
+		left = field.info(bot).vehicle == 0;
+	}
+	CHECK(left);
+}
 
 // The radio in BBChange (0x1006c520): a human's bail_out (type 0) makes a
 // driving bot's way out x modifier x 100 and it gets out; a human's get_in

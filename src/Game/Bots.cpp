@@ -4720,7 +4720,15 @@ float BotManager::seatValue(const Bot& bot, const GameWorld::PlayerInfo& self, u
 		}
 	}
 	const AiPlugin* mobile = soldier ? nullptr : m_settings.plugin(rootAi, "Mobile");
-	const bool armament = !soldier && (m_settings.plugin(seatAi.empty() ? rootAi : seatAi, "Armament") || !guns.empty());
+	const std::string unitAi = seatAi.empty() ? rootAi : seatAi;
+	const bool armed = m_settings.plugin(unitAi, "Armament") != nullptr;
+	const bool defined = !soldier && m_settings.aiTemplates.count(lower(unitAi)) != 0;
+	if (defined && !armed) {
+		// 0x100d3b80: the AI object's Armament (+0x34) only, never the seat's own gun.
+		guns.clear();
+	}
+	// k 2 only with Armament (0x100d3e70); a seat's gun stands in for it only without AI templates (the tests).
+	const bool armament = !soldier && (armed || (!defined && !guns.empty()));
 	// Transport (0x100d3730, 0x1005d840): see orderClose.
 	bool close = false, inArea = false, noMove = false;
 	const GameWorld::VehicleInfo* info = nullptr;
