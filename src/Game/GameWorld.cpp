@@ -1144,7 +1144,12 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 		const Body::Cell* cell = nullptr;
 		const world::Object* o = m_objects.find(shieldCell(object, cellBody, cell) ? cellBody->object : object);
 		const int team = victim ? victim->team : o ? o->team() : 0;
-		if (team == from->team) {
+		// 0x005b7290 finds a PlayerControlObject up the victim's tree (0x0099889c)
+		// before any team test; a thrown hub (GenericProjectile) has none, so
+		// its owner's team destroys it at full damage whatever the server's setting.
+		const bool hasControl = !o || !o->objectTemplate() || !(sameName(o->objectTemplate()->typeName(), "GenericProjectile")
+			|| sameName(o->objectTemplate()->typeName(), "SupplyObject"));
+		if (team == from->team && hasControl) {
 			const bool soldier = victim || (o && o->objectTemplate() && sameName(o->objectTemplate()->typeName(), "Soldier"));
 			const float percent = soldier ? (splash ? m_friendlyFire.soldierSplash : m_friendlyFire.soldier)
 										  : (splash ? m_friendlyFire.vehicleSplash : m_friendlyFire.vehicle);
