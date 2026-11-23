@@ -11390,7 +11390,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	SoldierInput turned = input;
 	stepWeaponRecoil(player, turned);
 	stepWeaponFeel(player, turned, seconds);
-	player.control.setZoomed(player.zoomed);
+	player.control.setZoomed(player.zoomed, player.lookScale);
 	player.control.update(turned, player.body, seconds);
 	player.physicsPending = true; // moved and passed after the nodes' move, solved after the turns
 	stepSoldierWeapon(player, seconds);

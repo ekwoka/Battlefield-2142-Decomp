@@ -103,6 +103,14 @@ TEST(SoldierPhysics_ADSAndSprintAreMutuallyExclusiveAcrossTransitions)
 	CHECK(control.stamina().sprinting());
 }
 
+TEST(SoldierPhysics_CrouchedZoomedSpeedScalesWithLook)
+{
+	using game::SoldierPose;
+	CHECK(std::fabs(game::soldierTargetSpeed(SoldierPose::Crouch, false, true, 0.4f) - 0.8f) < 1e-5f);
+	CHECK(std::fabs(game::soldierTargetSpeed(SoldierPose::Crouch, false, false, 0.4f) - 2.0f) < 1e-5f);
+	CHECK(std::fabs(game::soldierTargetSpeed(SoldierPose::Stand, false, true, 0.4f) - 1.5f) < 1e-5f);
+}
+
 TEST(SoldierPhysics_AnimationMovementUsesTheViewHeading)
 {
 	constexpr float yaw = 35.0f;
