@@ -136,6 +136,30 @@ ninja -C build/win32
 DECOMPILE=1 tools/ghidra/analyze.sh BF2142Audio.dll
 ```
 
+### Native Windows build
+
+This checkout also builds the native port for Windows with LLVM-MinGW. Run
+`build-windows.cmd` to configure and build the renderer-enabled executable;
+`run-windows.cmd --menu --view` starts it against the retail install at
+`C:\Program Files (x86)\Electronic Arts\Battlefield 2142`. The launcher accepts
+the same options as `bf2142`, for example:
+
+```bat
+run-windows.cmd +level Camp_Gibraltar --play --view
+run-windows.cmd +level Camp_Gibraltar --screenshot build\camp-gibraltar.png
+run-windows.cmd +modPath mods/Project_Remaster_v17 +level Camp_Gibraltar --play --view
+run-windows.cmd --play-sound checkboxPress
+```
+
+The local scripts expect CMake, LLVM-MinGW, SDL3, OpenAL Soft, glslang and
+SPIRV-Cross in the adjacent workspace `work/` directory. `build-windows.cmd` uses `Q:` as a
+temporary short path while compiling the embedded shaders; it removes that
+mapping when the build finishes. Windows builds may omit OpenSSL (account
+service login) and FFmpeg (Bink movies) if those libraries are not installed.
+The build also fetches Valve's pinned Steam Audio SDK (181 MB); pass `--enhanced`
+to use it for sound occlusion. Without `--enhanced`, the SDK is present but
+unused, and the game keeps retail sound obstruction.
+
 Third-party libraries (libogg, libvorbis, zlib, Speex) are fetched and built by CMake;
 Valve's Steam Audio is fetched only when asked for (see below). OpenAL is
 loaded at runtime. On macOS that means OpenAL Soft
