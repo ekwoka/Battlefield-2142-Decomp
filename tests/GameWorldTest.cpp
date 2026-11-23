@@ -581,6 +581,8 @@ TEST(GameWorld_SoldiersShootAndDie)
 	CHECK(range.world->playerInfo(range.world->localPlayer(), shooter) && shooter.kills == 1 && shooter.alive);
 	CHECK(range.count("PlayerKilled") == 1);
 	CHECK(info.manDown && range.count("PlayerDeath") == 0); // down, still revivable
+	// The kill line names the weapon whose round dealt the damage (0x005b7130), not what is in hand later (a thrown motion mine).
+	CHECK(shooter.killWeapon == "eu_ar_rifle");
 	CHECK(tick > 6 && tick < 30); // about 0.2 s: three rounds at 600 a minute, 20 m
 	const auto deathSounds = range.world->takeSounds();
 	CHECK(std::any_of(deathSounds.begin(), deathSounds.end(), [](const game::GameWorld::SoundEvent& sound) {

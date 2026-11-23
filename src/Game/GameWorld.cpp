@@ -2576,6 +2576,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		p.timeLeft = player.projectile->timeToLive.sample(m_random);
 		p.shooter = player.object;
 		p.player = player.id;
+		p.weaponName = player.weaponTemplate;
 		p.team = player.team;
 		p.yaw = look;
 		p.keepProjectiles = player.weapon->settings().keepProjectiles;
@@ -4468,6 +4469,7 @@ void GameWorld::stepProjectiles(float seconds)
 		// centerOfCollisionOffset away (0x006c0f90, 0x006c1220).
 		const physics::Vec3 offset = p.settings ? p.settings->collisionOffset : physics::Vec3 {};
 		const physics::Vec3 from = p.position + offset;
+		m_damageWeapon = p.weaponName; // the kills it deals name its weapon, not what is in hand by then (a thrown motion mine)
 		if (!p.alive) {
 			continue; // set off already (remote charges)
 		}
@@ -5123,6 +5125,7 @@ void GameWorld::stepProjectiles(float seconds)
 			p.alive = through;
 		}
 	}
+	m_damageWeapon.clear();
 	m_projectiles.erase(std::remove_if(m_projectiles.begin(), m_projectiles.end(),
 							[](const Projectile& p) { return !p.alive; }),
 		m_projectiles.end());
@@ -5666,6 +5669,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	for (const Player::Carried& item : player->carried) {
 		info.carried.emplace_back(item.slot, item.name);
 	}
+	info.killWeapon = player->killWeapon;
 	if (player->inHand >= 0 && static_cast<size_t>(player->inHand) < player->carried.size()) {
 		info.inHandSlot = player->carried[static_cast<size_t>(player->inHand)].slot;
 	}
@@ -8325,6 +8329,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 		if (!weapon) {
 			weapon = attacker->weaponObject;
 		}
+		attacker->killWeapon = m_damageWeapon;
 	}
 	raise("PlayerKilled", {ScriptValue::player(victim.id),
 							  attacker ? ScriptValue::player(attacker->id) : ScriptValue::none(),
@@ -12564,6 +12569,10 @@ void GameWorld::killTemplates(const PlayerInfo& killer, const world::ObjectTempl
 			&& static_cast<size_t>(index) < seats[static_cast<size_t>(killer.seat)].weapons.size()) {
 			weapon = m_templates.find(seats[static_cast<size_t>(killer.seat)].weapons[static_cast<size_t>(index)].weapon);
 		}
+		return;
+	}
+	if (!killer.killWeapon.empty()) {
+		weapon = m_templates.find(killer.killWeapon);
 		return;
 	}
 	for (const auto& [slot, name] : killer.carried) {
