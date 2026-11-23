@@ -1085,6 +1085,25 @@ TEST(Weapons_AutoReloadRefusesAReloadByHand)
 	CHECK(arm.roundsInMag() == 10 && arm.magsLeft() == 5);
 }
 
+// The gunship's TV missile (rpm 60, magSize 1, minimumTimeUntilReload 3,
+// autoReload): tapping the trigger every tick fires one round per reload.
+TEST(Weapons_GunshipMissileTapCadence)
+{
+	game::FireArmSettings settings;
+	settings.roundsPerMinute = 60;
+	settings.magSize = 1;
+	settings.nrOfMags = 8;
+	settings.minimumReloadTicks = 90;
+	settings.autoReload = true;
+	settings.singleFire = true;
+	game::FireArm arm(settings);
+	int shots = 0;
+	for (int i = 0; i < 30 * 12; ++i) {
+		shots += arm.tick(1 / 30.0f, i % 2 == 0) ? 1 : 0;
+	}
+	CHECK(shots == 3); // at 0, 5 and 10 s: the magazine's reload, not the click rate, paces it
+}
+
 // The fire modes (0x005f28a0, 0x005f1370, 0x005f1820, 0x005f1da0): single
 // fire takes one round a press, burst burstSize a press (running on
 // released), automatic while held; the toggle steps through the rates.
