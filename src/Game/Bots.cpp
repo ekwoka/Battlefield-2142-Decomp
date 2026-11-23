@@ -9014,6 +9014,15 @@ void BotManager::updateStrategy(float seconds)
 			float battle = 0;
 			std::array<float, 2> strategic {};
 			unitStrengths(p, battle, strategic);
+			if (!p.vehicle) {
+				// A soldier whose templates name no AI unit nor kit (the tests' own
+				// templates; the game's kits all do) counts the shipped SoldierUnit's 1 / 1 (Objects.ai).
+				const world::Object* soldier = m_world.objects().find(p.soldier);
+				const world::Object* kit = m_world.objects().find(p.kit);
+				if (!unitAiOf(soldier ? soldier->objectTemplate() : nullptr).unit && !unitAiOf(kit ? kit->objectTemplate() : nullptr).kit) {
+					strategic = {1, 1};
+				}
+			}
 			squad.strategic[0] += strategic[0];
 			squad.strategic[1] += strategic[1];
 			if (p.squadLeader) {
@@ -9058,10 +9067,9 @@ void BotManager::updateStrategy(float seconds)
 		mine.attacks = static_cast<float>(side.attacks.size());
 		mine.defences = static_cast<float>(side.defences.size());
 
-		// Assignment: squads keep areas still chosen; the area with the least
-		// assigned / required gets the nearest free squad next; an area
-		// releases a squad it can spare (assigned - its strength >= 1.1
-		// required).
+		// Assignment: squads keep areas still chosen; an area releases a squad
+		// it can spare (assigned - its strength >= 1.1 required); an area
+		// short of its strength takes the nearest free squads (below).
 		const int boss = m_world.commander(team);
 		GameWorld::PlayerInfo bossInfo;
 		if (boss >= 0 && m_world.playerInfo(boss, bossInfo) && !bossInfo.ai) {
@@ -9100,44 +9108,32 @@ void BotManager::updateStrategy(float seconds)
 				}
 			}
 		}
-		while (!chosen.empty()) {
-			int neediest = -1;
-			int lowest = 0;
-			for (int area : chosen) {
-				const int required = std::max(1, views[static_cast<size_t>(area)].state.required);
-				const int ratio = assigned[area] / required;
-				if (ratio >= 1) {
-					continue;
-				}
-				if (neediest < 0 || ratio < lowest) {
-					neediest = area;
-					lowest = ratio;
-				}
-			}
-			if (neediest < 0) {
-				break;
-			}
-			int bestSquad = -1;
-			float bestDistance = 0;
+		// Each chosen area short of its required strength takes the nearest
+		// squads with no order (0x10062b80 -> 0x10089730, which skips a squad of
+		// strength 0) until it holds more than it requires.
+		for (int area : chosen) {
+			const int required = std::max(1, views[static_cast<size_t>(area)].state.required);
+			std::vector<std::pair<float, int>> free; // distance², squad, nearest first
 			for (const auto& [id, squad] : squads) {
-				if (side.squadArea.count(id)) {
-					continue;
-				}
-				const float d = physics::lengthSquared(squad.at - views[static_cast<size_t>(neediest)].order);
-				if (bestSquad < 0 || d < bestDistance) {
-					bestSquad = id;
-					bestDistance = d;
+				if (!side.squadArea.count(id) && strengthFor(id, area) > 0) {
+					free.push_back({physics::lengthSquared(squad.at - views[static_cast<size_t>(area)].order), id});
 				}
 			}
-			if (bestSquad < 0) {
-				break;
+			std::stable_sort(free.begin(), free.end());
+			std::vector<int> strengths;
+			for (const auto& [d, id] : free) {
+				strengths.push_back(strengthFor(id, area));
 			}
-			side.squadArea[bestSquad] = neediest;
-			assigned[neediest] += strengthFor(bestSquad, neediest);
-			// Each pick posts the order to the squad (0x10062b80 -> 0x100ccc70 /
-			// 0x100cccb0), the same spot again included.
-			if (const auto own = m_squads.find({team, bestSquad}); own != m_squads.end()) {
-				own->second.seenType = GameWorld::OrderType::None;
+			const int picks = ai::squadsToPick(assigned[area], required, strengths);
+			for (int k = 0; k < picks; ++k) {
+				const int id = free[static_cast<size_t>(k)].second;
+				side.squadArea[id] = area;
+				assigned[area] += 2 * strengths[static_cast<size_t>(k)];
+				// Each pick posts the order to the squad (0x10062b80 -> 0x100ccc70 /
+				// 0x100cccb0), the same spot again included.
+				if (const auto own = m_squads.find({team, id}); own != m_squads.end()) {
+					own->second.seenType = GameWorld::OrderType::None;
+				}
 			}
 		}
 		// The orders: defend an owned area that is not contested, attack

@@ -226,6 +226,11 @@ float modifiedTemperature(const Strategy& strategy, float temperature, AreaStatu
 // (0x100c26d0): its members' strategic strengths summed, plus 0.5,
 // rounded to nearest even (the FPU's ROUND).
 int squadStrength(float strategicSum);
+// How many of the free squads (their strengths, nearest first) an area
+// takes (0x10062b80): none when it holds its required strength already;
+// else one at a time, each adding twice its strength (0x10089730), while
+// the assigned strength is not over the required.
+int squadsToPick(int assigned, int required, const std::vector<int>& strengths);
 // Defence value of an owned area (slot 10): (enemyStrength + temp) * 2,
 // x1.5 with a hostile neighbour, else x1.25 with a neutral one.
 float defenceValue(const AreaState& area);

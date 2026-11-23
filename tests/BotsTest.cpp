@@ -6438,6 +6438,18 @@ TEST(Bots_SquadStrengthSumsStrategicStrengths)
 	CHECK(ai::squadStrength(0) == 0);
 }
 
+// An area short of its required strength takes the nearest free squads
+// (0x10062b80): each pick adds twice the squad's strength (0x10089730),
+// and the picks go on while the assigned strength is not over the required.
+TEST(Bots_AreaTakesSquadsUntilOverItsRequiredStrength)
+{
+	CHECK(ai::squadsToPick(0, 15, {12, 12}) == 1);  // 24 > 15 after one: not two
+	CHECK(ai::squadsToPick(0, 24, {12, 12}) == 2);  // 24 is not over 24: one more
+	CHECK(ai::squadsToPick(12, 15, {12, 12}) == 1);
+	CHECK(ai::squadsToPick(15, 15, {12, 12}) == 0); // holds its strength already
+	CHECK(ai::squadsToPick(0, 24, {}) == 0);
+}
+
 // A squad whose order drops (a human joins it, 0x100c3f10) is free again for
 // the SAI (0x10089730 picks state 0 squads; 0x10089a20 counts only orders
 // under way), which posts the order to it again, the same spot included.
