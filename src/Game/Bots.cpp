@@ -9062,9 +9062,17 @@ void BotManager::updateStrategy(float seconds)
 		chosen.insert(chosen.end(), side.defences.begin(), side.defences.end());
 		std::map<int, int> assigned;
 		for (auto it = side.squadArea.begin(); it != side.squadArea.end();) {
-			const bool keep = squads.count(it->first) && std::find(chosen.begin(), chosen.end(), it->second) != chosen.end();
+			// An area counts only its squads with an order under way there
+			// (0x10089a20: state 2 and its area); a squad whose order dropped
+			// (state 0) is free again for the next pick (0x10089730 -> 0x100c0f70).
+			const auto own = m_squads.find({team, it->first});
+			const int state = own != m_squads.end() ? own->second.state : 0;
+			const bool keep = squads.count(it->first) && state != 0
+				&& std::find(chosen.begin(), chosen.end(), it->second) != chosen.end();
 			if (keep) {
-				assigned[it->second] += squads[it->first].strength;
+				if (state == 2 && own->second.area == it->second) {
+					assigned[it->second] += squads[it->first].strength;
+				}
 				++it;
 			} else {
 				releaseSquad(team, it->first, it->second); // 0x100893c0
@@ -9117,6 +9125,11 @@ void BotManager::updateStrategy(float seconds)
 			}
 			side.squadArea[bestSquad] = neediest;
 			assigned[neediest] += squads[bestSquad].strength;
+			// Each pick posts the order to the squad (0x10062b80 -> 0x100ccc70 /
+			// 0x100cccb0), the same spot again included.
+			if (const auto own = m_squads.find({team, bestSquad}); own != m_squads.end()) {
+				own->second.seenType = GameWorld::OrderType::None;
+			}
 		}
 		// The orders: defend an owned area that is not contested, attack
 		// otherwise. (AIDLL's squad takes a new order, 0x100c1eb0 then
