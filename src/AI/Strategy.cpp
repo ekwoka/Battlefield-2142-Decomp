@@ -209,6 +209,11 @@ bool strategyWeightsChanged(const std::vector<float>& previous, const std::vecto
 	return false;
 }
 
+int squadStrength(float strategicSum)
+{
+	return static_cast<int>(std::nearbyint(strategicSum + 0.5f));
+}
+
 int requiredStrength(float enemyStrategicStrength, bool owned, float friendlyRatio)
 {
 	// Owned: round((2 - S(+0xb0)) x max(sum, 1)), +0xb0 only set by the

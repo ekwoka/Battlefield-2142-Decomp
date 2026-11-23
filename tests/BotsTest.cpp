@@ -6427,6 +6427,17 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 	CHECK(squad->state == 2 && std::fabs(squad->orderAt.x - was.x) < 0.01f);
 }
 
+// A squad's strength (0x100c26d0): its members' strategic strengths
+// summed, + 0.5, rounded to nearest even. Three Remaster soldiers
+// (attack 2 each) are 6, not 2 x round(3 + 0.5) = 8 from the member count.
+TEST(Bots_SquadStrengthSumsStrategicStrengths)
+{
+	CHECK(ai::squadStrength(6) == 6);
+	CHECK(ai::squadStrength(7) == 8);
+	CHECK(ai::squadStrength(2.4f) == 3);
+	CHECK(ai::squadStrength(0) == 0);
+}
+
 // A squad whose order drops (a human joins it, 0x100c3f10) is free again for
 // the SAI (0x10089730 picks state 0 squads; 0x10089a20 counts only orders
 // under way), which posts the order to it again, the same spot included.

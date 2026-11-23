@@ -222,6 +222,10 @@ int requiredStrength(float enemyStrategicStrength, bool owned, float friendlyRat
 // The strategy's modifiers on an area's temperature (0x1005def0).
 float modifiedTemperature(const Strategy& strategy, float temperature, AreaStatus status, bool controlPoint,
 	bool hostileNeighbour);
+// A squad's strength for an attack (index 0) or a defence (1)
+// (0x100c26d0): its members' strategic strengths summed, plus 0.5,
+// rounded to nearest even (the FPU's ROUND).
+int squadStrength(float strategicSum);
 // Defence value of an owned area (slot 10): (enemyStrength + temp) * 2,
 // x1.5 with a hostile neighbour, else x1.25 with a neutral one.
 float defenceValue(const AreaState& area);

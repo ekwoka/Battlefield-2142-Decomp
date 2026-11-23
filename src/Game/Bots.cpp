@@ -8997,7 +8997,8 @@ void BotManager::updateStrategy(float seconds)
 		// one squad a frame round robin, here every squad each second.)
 		struct Squad {
 			physics::Vec3 at;
-			int strength = 0;
+			int members = 0;
+			std::array<float, 2> strategic {}; // the members' attack and defence strategic strengths summed
 			int leader = -1;
 		};
 		std::map<int, Squad> squads;
@@ -9006,17 +9007,25 @@ void BotManager::updateStrategy(float seconds)
 				continue;
 			}
 			Squad& squad = squads[p.squad];
-			if (squad.strength == 0 || p.squadLeader) {
+			if (squad.members == 0 || p.squadLeader) {
 				squad.at = p.position;
 			}
-			squad.strength += 1;
+			squad.members += 1;
+			float battle = 0;
+			std::array<float, 2> strategic {};
+			unitStrengths(p, battle, strategic);
+			squad.strategic[0] += strategic[0];
+			squad.strategic[1] += strategic[1];
 			if (p.squadLeader) {
 				squad.leader = p.id;
 			}
 		}
-		for (auto& [id, squad] : squads) {
-			squad.strength = 2 * static_cast<int>(std::lround(squad.strength + 0.5f));
-		}
+		// A squad's strength for an area: attack strengths for an attack, defence
+		// ones for a defence (the area's +0xeb flag, 0x10089a20 / 0x10089730).
+		const auto strengthFor = [&](int id, int area) {
+			const bool attack = std::find(side.attacks.begin(), side.attacks.end(), area) != side.attacks.end();
+			return ai::squadStrength(squads[id].strategic[attack ? 0 : 1]);
+		};
 		// Values.
 		std::vector<std::pair<float, int>> attackCandidates, defenceCandidates;
 		for (size_t i = 0; i < s.areas.size(); ++i) {
@@ -9071,7 +9080,7 @@ void BotManager::updateStrategy(float seconds)
 				&& std::find(chosen.begin(), chosen.end(), it->second) != chosen.end();
 			if (keep) {
 				if (state == 2 && own->second.area == it->second) {
-					assigned[it->second] += squads[it->first].strength;
+					assigned[it->second] += strengthFor(it->first, it->second);
 				}
 				++it;
 			} else {
@@ -9082,8 +9091,8 @@ void BotManager::updateStrategy(float seconds)
 		for (int area : chosen) {
 			const int required = std::max(1, views[static_cast<size_t>(area)].state.required);
 			for (auto it = side.squadArea.begin(); it != side.squadArea.end();) {
-				if (it->second == area && static_cast<float>(assigned[area] - squads[it->first].strength) / required >= 1.1f) {
-					assigned[area] -= squads[it->first].strength;
+				if (it->second == area && static_cast<float>(assigned[area] - strengthFor(it->first, it->second)) / required >= 1.1f) {
+					assigned[area] -= strengthFor(it->first, it->second);
 					releaseSquad(team, it->first, it->second); // 0x100893c0
 					it = side.squadArea.erase(it);
 				} else {
@@ -9124,7 +9133,7 @@ void BotManager::updateStrategy(float seconds)
 				break;
 			}
 			side.squadArea[bestSquad] = neediest;
-			assigned[neediest] += squads[bestSquad].strength;
+			assigned[neediest] += strengthFor(bestSquad, neediest);
 			// Each pick posts the order to the squad (0x10062b80 -> 0x100ccc70 /
 			// 0x100cccb0), the same spot again included.
 			if (const auto own = m_squads.find({team, bestSquad}); own != m_squads.end()) {
