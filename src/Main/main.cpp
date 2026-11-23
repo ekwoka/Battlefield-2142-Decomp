@@ -7043,7 +7043,8 @@ int runGame(Options& options, Session& session)
 				constexpr float kDegreesPerUnit = 5;
 				const float lookX = in.turn / kDegreesPerUnit, lookY = -(in.aimPitch - remoteDeviation.lastPitch) / kDegreesPerUnit;
 				remoteDeviation.lastPitch = in.aimPitch;
-				const int stance = in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0;
+				const int stance = game::SoldierDeviation::stanceIndex(
+					in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0, prediction.onGround(), false);
 				const bool misc = game::SoldierDeviation::miscFlag(in.jump, in.lieKey, prediction.control().getUpTime(),
 					prediction.swimming(), false);
 				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, misc, in.fire, stance,

@@ -6437,7 +6437,8 @@ void GameWorld::stepWeaponFeel(Player& player, SoldierInput& turned, float secon
 		player.aimKickPitch -= (rawY - y) * scale * kDegreesPerUnit;
 	}
 	if (player.deviation.present) {
-		const int stance = turned.pose == SoldierPose::Crouch ? 1 : turned.pose == SoldierPose::Prone ? 2 : 0;
+		const int stance = SoldierDeviation::stanceIndex(
+			turned.pose == SoldierPose::Crouch ? 1 : turned.pose == SoldierPose::Prone ? 2 : 0, player.body.onGround(), seated);
 		const bool misc = SoldierDeviation::miscFlag(turned.jump, turned.lieKey, player.control.getUpTime(),
 			player.body.swimming(), seated);
 		player.deviation.update(turned.throttle, turned.strafe, lookX, lookY, misc, turned.fire, stance, player.zoomed);

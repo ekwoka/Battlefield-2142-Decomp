@@ -1156,7 +1156,8 @@ struct DeviationBuildUp {
 //     lie key held, never being in the air) add - decay up to max, else
 //     decay;
 //   - the firing's build-up decays off the trigger (DeviationBuildUp);
-//   - the stance's modifier (Stand, Crouch, Lie), and zoomed devModZoom
+//   - the stance's modifier (Stand, Crouch, Lie; Stand in the air,
+//     stanceIndex), and zoomed devModZoom
 //     on the whole and minDevModZoom on minDev (else 1 and 1).
 // The deviation = (minDev x minDevModZoom + misc + turn + speed + fire)
 // x zoom x stance. Its +0x44 (set by slot 0xac, 0x00680290: the bots'
@@ -1181,6 +1182,10 @@ struct SoldierDeviation {
 	{
 		return !seated && ((jumpKey && getUpTime <= 0 && !swimming) || lieKey);
 	}
+	// The stance's index (0x005dec46, the pose through jump table
+	// 0x005ded60): a soldier with no parent (+0x34) off the ground (his
+	// node's +0xf9) is standing, whatever his pose.
+	static int stanceIndex(int pose, bool onGround, bool seated) { return seated || onGround ? pose : 0; }
 	// lookX / lookY in PIMouseLook units; stance 0 stand, 1 crouch, 2 lie.
 	void update(float throttle, float strafe, float lookX, float lookY, bool misc, bool firing, int stance, bool zoomed);
 	float deviation() const { return total; }

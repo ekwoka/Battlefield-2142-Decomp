@@ -5595,3 +5595,45 @@ TEST(Weapons_JumpAndLieKeysRaiseMiscDeviation)
 	CHECK(jumpRise > 1);
 	CHECK(getUpRise < 0.01f);
 }
+
+// The stance's modifier (0x005dec46): a soldier with no parent (+0x34) off
+// the ground (its node's +0xf9) takes devModStand, whatever his pose.
+TEST(Weapons_AirborneSoldierTakesStandModifier)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) {
+		return;
+	}
+	level.world->startRound();
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.331f, 199}));
+	level.world->setInput(id, {});
+	level.run(3);
+	const float stand = level.world->weaponDeviation(id);
+	game::SoldierInput crouch;
+	crouch.pose = game::SoldierPose::Crouch;
+	level.world->setInput(id, crouch);
+	level.run(3);
+	const float crouched = level.world->weaponDeviation(id);
+	CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 27, 199}));
+	float air = 0;
+	int airborne = 0;
+	for (int i = 0; i < 10; ++i) {
+		level.world->tick(1 / 30.0f);
+		if (!level.world->soldierBody(id)->onGround()) {
+			++airborne;
+			air = level.world->weaponDeviation(id);
+		}
+	}
+	std::fprintf(stderr, "  standing %.3f, crouched %.3f, crouched in the air %.3f (%d ticks up)\n", stand, crouched, air, airborne);
+	CHECK(std::fabs(stand - crouched) > 0.05f); // the weapon's modifiers differ
+	CHECK(airborne >= 5);
+	CHECK(std::fabs(air - stand) < 0.01f);
+}

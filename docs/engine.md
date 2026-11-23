@@ -10138,7 +10138,10 @@ latched prone pose) is held; both are cleared while seated (the parent,
 (`SoldierDeviation::miscFlag`). Over the network the port's PILie bit is
 the latched pose, so a remote soldier's lie key isn't seen. The deviation = (minDev × minDevModZoom + misc + turn +
 speed + the firing's build-up) × devModZoom × the stance's (zoom
-modifiers 1 when not zoomed). Rounds stray by it as above, and the
+modifiers 1 when not zoomed). The stance's index (`0x005dec46`, the
+pose through the jump table `0x005ded60`: 0 and 3 Stand, 1 Crouch, 2
+Lie) is forced to Stand for a soldier with no parent (`+0x34`) off the
+ground (his node's `+0xf9`; `SoldierDeviation::stanceIndex`). Rounds stray by it as above, and the
 crosshair (`0x007be770`) spreads by it. Its `+0x44` extra is a bot's AI
 deviation (below, Bots: Deviation), added while the holder is an AI
 (its slot `0x1a0` → `0x6c(0)` → `0x68`). Unlike the simple component's,
