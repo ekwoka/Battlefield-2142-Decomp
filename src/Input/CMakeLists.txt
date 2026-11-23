@@ -7,7 +7,7 @@ target_link_libraries(Input PUBLIC Console)
 
 # SDL3's joysticks and gamepads (the window's side), when the build has
 # SDL3 (as the renderer).
-if(NOT CMAKE_CROSSCOMPILING)
+if(NOT CMAKE_CROSSCOMPILING OR SDL3_DIR)
 	find_package(SDL3 CONFIG QUIET)
 endif()
 if(SDL3_FOUND)
