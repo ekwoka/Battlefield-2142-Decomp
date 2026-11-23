@@ -353,9 +353,10 @@ bool GameWorld::openParachute(Player& player)
 		m_objects.remove(made->id());
 		return false;
 	}
-	// The round takes its holder's velocity (velocity 0 of its own), as the
-	// pods take their launcher's.
-	body->body.velocity = player.body.velocity;
+	// The round keeps its own velocity 0: a soldier opening his parachute is
+	// stopped dead and then glides down (reported against retail; unlike the
+	// pods, it takes nothing from its holder).
+	body->body.velocity = {};
 	wake(*body);
 	Parachute chute;
 	chute.object = made->id();

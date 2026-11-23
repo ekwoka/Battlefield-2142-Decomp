@@ -1755,11 +1755,17 @@ TEST(Titan_ParachuteComesDownOnTheDecks)
 	game::SoldierInput nine;
 	nine.selectItem = 9; // held (0x004bba40): it opens once the fire test passes
 	bool opened = false;
+	int openTicks = 0;
 	float lowest = 1e9f;
 	for (int i = 0; i < 30 * 4; ++i) {
 		level.world->setInput(id, nine);
 		level.world->tick(1 / 30.0f);
 		opened = opened || !level.world->parachutes().empty();
+		if (opened && ++openTicks == 3) {
+			// Opening stops the soldier dead; he does not carry his fall into the canopy.
+			level.world->playerInfo(id, info);
+			CHECK(info.velocity.y > -3);
+		}
 		for (const auto& chute : level.world->parachutes()) {
 			if (const world::Object* o = level.objects.find(chute.object)) {
 				const physics::Vec3 at {o->position().x, o->position().y, o->position().z};
