@@ -3156,6 +3156,10 @@ private:
 	// `point` is the world-space contact point.
 	void collisionEvent(uint32_t self, uint32_t other, const physics::Vec3& velocity, const physics::Vec3& normal,
 		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial, bool otherStaticNode = false);
+	// A mesh round's StickyCollisionComp (0x005e83d0) on its body's contact:
+	// on a face it may stick to, set down upright on it and stopped.
+	void stickBody(uint32_t self, uint32_t other, const physics::Vec3& normal, const physics::Vec3& point,
+		uint32_t otherMaterial);
 	uint32_t materialImpactIndex(uint32_t first, uint32_t second, const physics::Vec3& velocity,
 		const physics::Vec3& normal) const;
 	bool materialImpactInView(const physics::Vec3& point) const;
