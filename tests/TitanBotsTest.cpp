@@ -1358,3 +1358,52 @@ TEST(Titan_BotBoardersDestroyConsolesAndCore)
 	std::fprintf(stderr, "  core down to %.0f\n", coreLeft);
 	CHECK(coreLeft < 38000);
 }
+
+// A round that has gone through the fence goes on to the next thin solid: the
+// railing behind it is hit as well (each way out costs its own loss and turns
+// the heading a little, so the railing's thin bars are swept).
+TEST(CampGibraltar_ShotsThroughTheFenceHitARailingBehindIt)
+{
+	REMASTER_ONLY();
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, true, "mods/Project_Remaster_v17_Final", true, nullptr, "gpm_cq");
+	if (!level.loaded) return;
+	world::ObjectTemplate* railing = level.templates.find("pedestrian_railing_8m_c");
+	CHECK(railing != nullptr);
+	for (const auto& object : level.objects.objects()) {
+		if (!railing || object->objectTemplate()->name() != "fence_industry_16m") continue;
+		const auto p = object->position();
+		const float yaw = object->rotation().x * 3.14159265f / 180.0f;
+		const physics::Vec3 across {std::cos(yaw), 0, -std::sin(yaw)};
+		const physics::Vec3 forward {std::sin(yaw), 0, std::cos(yaw)};
+		const physics::Vec3 behind = physics::Vec3 {p.x, p.y, p.z} + across * 2.0f;
+		world::Object* rail = level.objects.create(railing, {behind.x, behind.y, behind.z});
+		rail->setRotation({object->rotation().x, 0, 0});
+		for (int i = 0; i < 3; ++i) level.world->tick(1 / 30.0f);
+		int viaFence = 0, alone = 0;
+		bool fence = false;
+		// The railing's bars are thin, and each way out turns the heading a little: sweep the heights.
+		for (int k = 0; k < 24; ++k) {
+			const float h = 0.05f * (k + 1);
+			for (const bool through : {true, false}) {
+				const size_t before = level.world->impactsTotal();
+				const physics::Vec3 from = physics::Vec3 {p.x, p.y + h, p.z} + across * (through ? -5.0f : 0.8f);
+				level.world->launchProjectile("eu_smg_Projectile", from, across * 400.0f);
+				for (int i = 0; i < 6; ++i) level.world->tick(1 / 30.0f);
+				const size_t fresh = std::min<size_t>(level.world->impactsTotal() - before, level.world->impacts().size());
+				for (size_t n = level.world->impacts().size() - fresh; n < level.world->impacts().size(); ++n) {
+					const auto& impact = level.world->impacts()[n];
+					fence = fence || impact.object == object->id();
+					if (impact.object == rail->id()) ++(through ? viaFence : alone);
+				}
+			}
+		}
+		CHECK(alone > 0);
+		const bool back = viaFence > 0;
+		CHECK(fence);
+		CHECK(back);
+		return;
+	}
+	CHECK(false);
+}

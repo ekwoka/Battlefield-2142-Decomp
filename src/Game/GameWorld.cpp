@@ -2896,6 +2896,9 @@ static physics::Mat3 standingOn(physics::Vec3 up)
 	return facing;
 }
 
+static const std::string* materialImpactTemplate(const physics::MaterialManager* materials, uint32_t first,
+	uint32_t second, uint32_t index, std::vector<std::string> physics::MaterialCell::*templates);
+
 // DefaultPenetrateComp (vtable 0x00975884 slot 8, 0x005eaca0), asked by
 // the round's +0x184 interface (vtable 0x00969b98 slot 0xd4, 0x005b54e0:
 // the component at the round's +0x1ac, base damage the template's +0x30c)
@@ -3001,16 +3004,15 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 		}
 		left -= penetrationLoss(*surface, out, std::sqrt(physics::lengthSquared(exit - hit.point)));
 		if (out && penetrationLeft(*p.settings, left)) {
-			// The way out's impact, facing back along the round.
-			const physics::MaterialCell* cell = m_materials->cell(static_cast<uint32_t>(p.settings->material), exitMaterial);
-			if (cell && !cell->effectTemplates.empty() && !cell->effectTemplates[0].empty()) {
-				physics::Mat3 facing;
-				const physics::Vec3 up = d * -1.0f;
-				const physics::Vec3 other = std::fabs(up.x) < 0.9f ? physics::Vec3 {1, 0, 0} : physics::Vec3 {0, 0, 1};
-				physics::Vec3 side = physics::cross(other, up);
-				side = side * (1.0f / std::sqrt(physics::lengthSquared(side)));
-				facing.rows = {side, up, physics::cross(side, up)};
-				m_effects.spawn(cell->effectTemplates[0], exit, facing);
+			// The way out's impact (0x005eb2b8: game logic slot 0x114 -> 0x004cd100 -> 0x005a36d0, the hit's own effect, sound
+			// and decal routine, with impact index 2), facing back along the round.
+			const uint32_t own = static_cast<uint32_t>(p.settings->material);
+			queueMaterialImpact(own, exitMaterial, 2, exit, d * -1.0f);
+			const std::string* decal = materialImpactInView(exit)
+				? materialImpactTemplate(m_materials, own, exitMaterial, 2, &physics::MaterialCell::decalTemplates)
+				: nullptr;
+			if (decal && !hitBody && !soldier) {
+				m_effects.spawnDecal(*decal, exit, d * -1.0f, hitObject);
 			}
 		}
 	}
