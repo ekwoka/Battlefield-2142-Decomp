@@ -1196,3 +1196,44 @@ TEST(CampGibraltar_BulletsPassTheChainLinkFence)
 	}
 	CHECK(false);
 }
+
+// A round leaves the eye 0.5 m along the aim; a soldier beside a thin solid
+// (the Titans' door shield, the portable shield's slab, a fence) starts it
+// past the surface, which a ray from there never crosses: it starts at the
+// eye then.
+TEST(CampGibraltar_ShotsAtAnAdjacentFenceHit)
+{
+	REMASTER_ONLY();
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, true, "mods/Project_Remaster_v17_Final", true, nullptr, "gpm_cq");
+	if (!level.loaded) return;
+	world::Object* soldier = level.world->spawnPlayer(2);
+	CHECK(soldier != nullptr);
+	if (!soldier) return;
+	for (int i = 0; i < 60; ++i) level.world->tick(1 / 30.0f); // the weapon is up
+	const float yaw = soldier->rotation().x * 3.14159265f / 180.0f;
+	const physics::Vec3 f {std::sin(yaw), 0, std::cos(yaw)};
+	for (const auto& object : level.objects.objects()) {
+		if (object->objectTemplate()->name() != "fence_industry_16m") continue;
+		const auto p = object->position();
+		const physics::Vec3 centre {p.x, p.y + 1.0f, p.z};
+		physics::CollisionWorld::Hit face {};
+		if (!level.world->staticCollision().raycast(centre - f * 20.0f, centre, face) || face.owner != object->id()) continue;
+		const physics::Vec3 feet = face.point - f * 0.15f - physics::Vec3 {0, 1.08f, 0}; // the crouched eye is 1.08 m up
+		game::SoldierInput input;
+		input.pose = game::SoldierPose::Crouch;
+		input.fire = true;
+		const size_t before = level.world->impacts().size();
+		for (int i = 0; i < 4; ++i) {
+			if (!level.world->setSoldierPosition(soldier->id(), feet)) break; // held at the fence
+			level.world->setPlayerInput(input);
+			level.world->tick(1 / 30.0f);
+		}
+		bool hit = false;
+		for (size_t i = before; i < level.world->impacts().size(); ++i) hit = hit || level.world->impacts()[i].object == object->id();
+		CHECK(hit);
+		return;
+	}
+	CHECK(false);
+}

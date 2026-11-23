@@ -2548,7 +2548,14 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		// crouched or prone soldier no longer shoots from a standing height.
 		const SoldierPose firingPose = player.input.pose;
 		const float eyeAboveBody = firingPose == SoldierPose::Prone ? 0.6f - 1.10f : firingPose == SoldierPose::Crouch ? 0.6f - 0.52f : 0.6f;
-		p.origin = (seated ? seatedEye : body.position + physics::Vec3 {0, eyeAboveBody, 0}) + straight * 0.5f;
+		const physics::Vec3 eye = seated ? seatedEye : body.position + physics::Vec3 {0, eyeAboveBody, 0};
+		p.origin = eye + straight * 0.5f;
+		// Beside a thin solid (a door shield, the portable shield) the 0.5 m start lies past its surface, which no ray from
+		// there crosses: the round starts at the eye then, so it meets the face as every shot from further away does.
+		physics::CollisionWorld::Hit across {};
+		if (m_projectileCollision.raycastFront(eye, p.origin, across)) {
+			p.origin = eye;
+		}
 		p.position = p.origin;
 		// The launch (0x005f31d0): the speed along the aim plus the root node's
 		// reported velocity (slot 0x64, +0x78: the last step's displacement x 30,
