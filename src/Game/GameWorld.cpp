@@ -6333,11 +6333,17 @@ void GameWorld::stepWeaponFeel(Player& player, SoldierInput& turned, float secon
 	float lookX = turned.turn / kDegreesPerUnit;
 	float lookY = -pitchChange / kDegreesPerUnit;
 	if (player.sway.present && !seated) { // a seated look has no sway to take
-		const float x = lookX, y = lookY;
-		player.sway.update(seconds, player.zoomed, turned.sprint, player.scopeStabilizer, lookX, lookY,
+		// The nudge goes on the raw look input, which the soldier then scales by the zoom's
+		// look scale (0x0058ac51 calls 0x00586420); the port's turn is already scaled.
+		const float scale = player.lookScale > 0 ? player.lookScale : 1.0f;
+		float rawX = lookX / scale, rawY = lookY / scale;
+		const float x = rawX, y = rawY;
+		player.sway.update(seconds, player.zoomed, turned.sprint, player.scopeStabilizer, rawX, rawY,
 			[this] { return std::max(m_random.unit(), 1e-7f); });
-		turned.turn += (lookX - x) * kDegreesPerUnit;
-		player.aimKickPitch -= (lookY - y) * kDegreesPerUnit;
+		lookX += (rawX - x) * scale;
+		lookY += (rawY - y) * scale;
+		turned.turn += (rawX - x) * scale * kDegreesPerUnit;
+		player.aimKickPitch -= (rawY - y) * scale * kDegreesPerUnit;
 	}
 	if (player.deviation.present) {
 		const int stance = turned.pose == SoldierPose::Crouch ? 1 : turned.pose == SoldierPose::Prone ? 2 : 0;
@@ -11722,11 +11728,12 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 		} else if (!gadget && player.projectile) {
 			fire(player, std::clamp(input.aimPitch + player.aimKickPitch, -89.0f, 89.0f));
 		}
-		// The shot's recoil forces (0x005dd3f0; zoomModifier is the
-		// viewer's: the world keeps no zoom).
+		// The shot's recoil forces (0x005dd3f0): both drawn forces times the zoomModifier
+		// while zoomed (0x005dd090).
 		if (player.recoil.hasRecoilForce) {
-			player.recoilForceUp = player.recoilUp.sample(m_random);
-			player.recoilForceLeftRight = player.recoilLeftRight.sample(m_random);
+			const float zoomScale = player.zoomed ? player.recoil.zoomModifier : 1.0f;
+			player.recoilForceUp = player.recoilUp.sample(m_random) * zoomScale;
+			player.recoilForceLeftRight = player.recoilLeftRight.sample(m_random) * zoomScale;
 			player.lastShotTick = static_cast<int64_t>(m_ticks);
 		}
 		player.fired = true;
