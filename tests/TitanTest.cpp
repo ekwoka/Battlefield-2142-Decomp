@@ -584,6 +584,7 @@ TEST(Titan_SilosWearTheShieldThenTheHull)
 	// -wreckHitPoints over timeToStayAsWreck (100 s), the explosion groups
 	// going off at their levels (-1 to -36 %), the core explosion event at
 	// -38 %; then the wreck is deleted. It coasts to a stop at its height.
+	level.world->setAiRunning(true); // bots on: a Titan wreck still drains at 1 %/s
 	const uint32_t wreck = eu->object;
 	const float height = level.titan(2)->position.y;
 	float exploded = -1, gone = -1;
