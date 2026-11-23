@@ -7028,6 +7028,9 @@ int runGame(Options& options, Session& session)
 		g_remoteDeviation = -1;
 		if (session.client) {
 			session.client->onMoveSent = [&prediction, &carPrediction, &remoteDeviation, &playerCamera](const net::PlayerMove& move) {
+				// The soldier as the move finds him, as the server's stepWeaponFeel reads him before the step.
+				const bool onGround = prediction.onGround(), swimming = prediction.swimming();
+				const float getUp = prediction.control().getUpTime();
 				prediction.step(move);
 				carPrediction.step(move);
 				const game::SoldierInput in = net::soldierInputFromMove(move, remoteDeviation.inputs);
@@ -7044,9 +7047,8 @@ int runGame(Options& options, Session& session)
 				const float lookX = in.turn / kDegreesPerUnit, lookY = -(in.aimPitch - remoteDeviation.lastPitch) / kDegreesPerUnit;
 				remoteDeviation.lastPitch = in.aimPitch;
 				const int stance = game::SoldierDeviation::stanceIndex(
-					in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0, prediction.onGround(), false);
-				const bool misc = game::SoldierDeviation::miscFlag(in.jump, in.lieKey, prediction.control().getUpTime(),
-					prediction.swimming(), false);
+					in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0, onGround, false);
+				const bool misc = game::SoldierDeviation::miscFlag(in.jump, in.lieKey, getUp, swimming, false);
 				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, misc, in.fire, stance,
 					playerCamera.zoomLevel() > 0);
 				g_remoteDeviation = remoteDeviation.deviation.deviation();
