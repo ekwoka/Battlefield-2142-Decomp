@@ -464,7 +464,7 @@ The rest only change what you see or hear.
 | `botCommander` | on | bots | In Titan mode a team with bots and no commander has its Titan moved and its commander's tools used for it. | yes |
 | `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
 | `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
-| `chaseRoll` | on | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
+| `chaseRoll` | off | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
 | `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
 | `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
 | `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the same 4:3 HUD (x scaled by 12/16) with its side pieces moved out by 120. Ignored when the hudfix's shader is already installed. | no |

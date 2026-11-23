@@ -45,7 +45,7 @@ struct EnhancedSettings {
 	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
 	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow); retail lets it fall through
 	// Interface, also only with enhanced.enabled:
-	bool chaseRoll = true; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); retail keeps them level
+	bool chaseRoll = false; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); off by default, as retail keeps them level (0x006108e0 -> lookAt 0x006ae080, up (0, 1, 0))
 	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 	// Drawing, also only with enhanced.enabled; experimental, off by default:
