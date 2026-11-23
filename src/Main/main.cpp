@@ -7044,7 +7044,9 @@ int runGame(Options& options, Session& session)
 				const float lookX = in.turn / kDegreesPerUnit, lookY = -(in.aimPitch - remoteDeviation.lastPitch) / kDegreesPerUnit;
 				remoteDeviation.lastPitch = in.aimPitch;
 				const int stance = in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0;
-				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, !prediction.onGround(), in.fire, stance,
+				const bool misc = game::SoldierDeviation::miscFlag(in.jump, in.lieKey, prediction.control().getUpTime(),
+					prediction.swimming(), false);
+				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, misc, in.fire, stance,
 					playerCamera.zoomLevel() > 0);
 				g_remoteDeviation = remoteDeviation.deviation.deviation();
 			};
@@ -10946,6 +10948,7 @@ int runGame(Options& options, Session& session)
 				const bool wasProne = stance.prone;
 				stance.update(in.lie, in.crouch, in.jump);
 				input.jump = in.jump && !wasProne && !stance.prone;
+				input.lieKey = in.lie;
 				input.pose = stance.prone ? game::SoldierPose::Prone
 					: in.crouch           ? game::SoldierPose::Crouch
 										  : game::SoldierPose::Stand;

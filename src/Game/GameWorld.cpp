@@ -6408,7 +6408,8 @@ void GameWorld::stepWeaponRecoil(Player& player, SoldierInput& turned)
 // The weapon in hand's feel each tick on foot: its gun sway nudges the
 // look (0x005e0da0: PIMouseLookX on the turn, PIMouseLookY on the aim's
 // pitch, 5 degrees a unit, down positive) and its soldier deviation
-// follows the inputs (0x005de980; the misc part while in the air).
+// follows the inputs (0x005de980; the misc part while the jump or lie key
+// is held, SoldierDeviation::miscFlag).
 void GameWorld::stepWeaponFeel(Player& player, SoldierInput& turned, float seconds, bool seated)
 {
 	if (player.feelFor != player.weaponTemplate) {
@@ -6437,8 +6438,9 @@ void GameWorld::stepWeaponFeel(Player& player, SoldierInput& turned, float secon
 	}
 	if (player.deviation.present) {
 		const int stance = turned.pose == SoldierPose::Crouch ? 1 : turned.pose == SoldierPose::Prone ? 2 : 0;
-		player.deviation.update(turned.throttle, turned.strafe, lookX, lookY, !seated && !player.body.onGround(), turned.fire,
-			stance, player.zoomed);
+		const bool misc = SoldierDeviation::miscFlag(turned.jump, turned.lieKey, player.control.getUpTime(),
+			player.body.swimming(), seated);
+		player.deviation.update(turned.throttle, turned.strafe, lookX, lookY, misc, turned.fire, stance, player.zoomed);
 	}
 }
 

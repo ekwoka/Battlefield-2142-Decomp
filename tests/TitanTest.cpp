@@ -5467,3 +5467,131 @@ TEST(Physics_GibraltarRoofSeamHops)
 	CHECK(running.landings == 0);
 	CHECK(sprinting.airborne <= 5 && sprinting.lift < 0.05f && sprinting.landings <= 1);
 }
+
+// The same seam with the weapon in hand: the hop leaves the ground for a few
+// ticks, but the soldier deviation's misc part grows only while the jump or
+// lie key is held (0x0058ac90 -> 0x0058b508 -> 0x005c24f0 -> 0x005de980),
+// never for being in the air, so the crosshair doesn't bloom.
+TEST(Weapons_GibraltarSeamHopKeepsMiscDeviation)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) {
+		return;
+	}
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	});
+	level.world->startRound();
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	level.run(0.5f);
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	game::SoldierInput face;
+	face.turn = level.world->soldierBody(id)->yawDegrees; // to +z
+	level.world->setInput(id, face);
+	level.world->tick(1 / 30.0f);
+	level.world->setInput(id, {});
+	level.run(2);
+	for (const bool sprint : {false, true}) {
+		level.world->setInput(id, {});
+		CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.331f, 199}));
+		level.run(1);
+		game::SoldierInput input;
+		input.throttle = 1;
+		input.sprint = sprint;
+		physics::Vec3 last = level.world->soldierBody(id)->position;
+		float lastDeviation = level.world->weaponDeviation(id), rise = 0;
+		int airborne = 0;
+		for (int i = 0; i < 90 && level.world->soldierBody(id)->position.z < 210.5f; ++i) {
+			level.world->setInput(id, input);
+			level.world->tick(1 / 30.0f);
+			const physics::SoldierBody& body = *level.world->soldierBody(id);
+			const physics::Vec3 moved = body.position - last;
+			last = body.position;
+			input.turn = std::hypot(moved.x, moved.z) > 0.05f ? -std::atan2(moved.x, moved.z) * 57.29578f * 0.5f : 0.0f;
+			const float deviation = level.world->weaponDeviation(id);
+			if (body.position.z > 207.5f && body.position.z < 209) {
+				airborne += body.onGround() ? 0 : 1;
+				rise = std::max(rise, deviation - lastDeviation);
+			}
+			lastDeviation = deviation;
+		}
+		std::fprintf(stderr, "  %s over the seam: %d ticks in the air, deviation %.2f, largest rise a tick %.2f\n",
+			sprint ? "sprinting" : "running", airborne, lastDeviation, rise);
+		CHECK(lastDeviation > 0); // a weapon with a soldier deviation in hand
+		CHECK(rise < 1);
+		if (sprint) {
+			CHECK(airborne > 0); // the hop itself is unchanged
+		}
+	}
+}
+
+// The misc flag's keys (0x0058ac90..0x0058acf0): holding PIAction or PILie
+// raises the misc part the same tick, on the ground or not; PIAction counts
+// for nothing while the get-up time (+0x3fc) runs.
+TEST(Weapons_JumpAndLieKeysRaiseMiscDeviation)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) {
+		return;
+	}
+	level.world->startRound();
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.331f, 199}));
+	const auto settle = [&](game::SoldierInput input) {
+		level.world->setInput(id, input);
+		level.run(12); // the misc part decays (0.04 a tick from 9 at the slowest)
+		return level.world->weaponDeviation(id);
+	};
+	const auto riseOnce = [&](game::SoldierInput input) {
+		const float before = level.world->weaponDeviation(id);
+		level.world->setInput(id, input);
+		level.world->tick(1 / 30.0f);
+		return level.world->weaponDeviation(id) - before;
+	};
+	const float rest = settle({});
+	CHECK(rest > 0); // a weapon with a soldier deviation in hand
+	game::SoldierInput lie;
+	lie.lieKey = true;
+	const float lieRise = riseOnce(lie);
+	settle({});
+	game::SoldierInput jump;
+	jump.jump = true;
+	const float jumpRise = riseOnce(jump);
+	// Up from prone with the jump key held: a tick before the get-up time
+	// starts (0x005889d0 sets it after the flag, 0x0058b4a2), then none.
+	game::SoldierInput prone;
+	prone.pose = game::SoldierPose::Prone;
+	settle(prone);
+	riseOnce(jump);
+	riseOnce(jump);
+	float getUpRise = -1;
+	for (int i = 0; i < 20; ++i) {
+		getUpRise = std::max(getUpRise, riseOnce(jump));
+	}
+	std::fprintf(stderr, "  rest %.2f: lie key +%.2f, jump key +%.2f, jump key getting up %+.2f\n", rest, lieRise, jumpRise,
+		getUpRise);
+	CHECK(lieRise > 1);
+	CHECK(jumpRise > 1);
+	CHECK(getUpRise < 0.01f);
+}

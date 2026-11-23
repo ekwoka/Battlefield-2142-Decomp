@@ -50,6 +50,7 @@ struct SoldierInput {
 	int switchSeat = 0; // PIPosition1..8: move to that seat (1-based; on press)
 	int selectItem = 0; // PIWeaponSelect1..9: the weapon in that kit slot (on press)
 	bool jump = false;  // PIAction (input 9, c_PIAction: Space), held: jumps on landing
+	bool lieKey = false; // PILie (input 37, c_PILie: Z) held, apart from the latched pose: the deviation's misc part
 	// The mouse wheel's c_PINextItem (+1, input 48) or c_PIPrevItem (-1,
 	// input 49) this tick: a zoomed rocket launcher's airburst distance
 	// (0x005d5440).
@@ -246,6 +247,7 @@ public:
 	// still running (above 0).
 	bool jumpHold() const { return m_jumpTime > 0 || m_rise > 0; }
 	float airTime() const { return m_airTime; }
+	float getUpTime() const { return m_getUp; } // +0x3fc
 
 	float throttle() const { return m_throttle; }
 	float strafe() const { return m_strafe; }

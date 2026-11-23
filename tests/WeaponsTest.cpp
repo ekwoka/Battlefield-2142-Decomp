@@ -938,10 +938,23 @@ TEST(Weapons_BlastTwist)
 	CHECK(other[0].at.x == 1 && std::fabs(other[0].force.y - 200 / 2.9f * 2) < 1e-2f);
 }
 
+// The misc flag (0x0058ac90..0x0058acf0): the jump key unless getting up
+// or swimming, or the lie key; never while seated (+0x34).
+TEST(Weapons_SoldierMiscFlagKeys)
+{
+	using D = game::SoldierDeviation;
+	CHECK(D::miscFlag(true, false, 0, false, false));
+	CHECK(D::miscFlag(false, true, 0.5f, true, false));
+	CHECK(!D::miscFlag(false, false, 0, false, false));
+	CHECK(!D::miscFlag(true, false, 0.5f, false, false));
+	CHECK(!D::miscFlag(true, false, 0, true, false));
+	CHECK(!D::miscFlag(true, true, 0, false, true));
+}
+
 // The soldier deviation (0x005de980) with eu_ar_rifle's numbers: standing
 // still it is minDev x devModStand; running adds the speed's part up to its
-// maximum; crouched and zoomed it narrows; in the air the misc part jumps
-// to its maximum; firing builds up and wears off off the trigger. The
+// maximum; crouched and zoomed it narrows; with its flag (a key held) the
+// misc part jumps to its maximum; firing builds up and wears off off the trigger. The
 // 3- and 4-number setters are kept by the console (WorldConsole).
 TEST(Weapons_SoldierDeviation)
 {

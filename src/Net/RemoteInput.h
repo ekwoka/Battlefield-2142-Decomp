@@ -101,6 +101,10 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	input.reload = move.trigger(kPIReload);                 // the same
 	input.mouseLook = move.trigger(kPIMouseLook);           // held (0x00611c80 tests its bit 0x800 and > 0.5)
 	input.itemStep = move.trigger(kPINextItem) ? 1 : move.trigger(kPIPrevItem) ? -1 : 0; // the wheel, each move
+	// shortcut: the port's PILie bit carries the latched prone pose (the
+	// client toggles it, StanceKeys.h), not the held key retail sends, so a
+	// remote soldier's lieKey stays off; send the raw key and toggle here
+	// (0x005889d0) to give it.
 	input.pose = move.trigger(kPILie) ? game::SoldierPose::Prone
 		: move.trigger(kPICrouch)     ? game::SoldierPose::Crouch
 									  : game::SoldierPose::Stand;

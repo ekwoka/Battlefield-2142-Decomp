@@ -1152,8 +1152,9 @@ struct DeviationBuildUp {
 //     (decaying back to it when above); without a turn it decays to 0;
 //   - the speed's part: throttle (|PIThrottle| > 0.01) adds `throttle`,
 //     strafing (|PIYaw|) `strafe`, held at max; without, decay;
-//   - the misc part: while its condition holds (the update's flag; the
-//     rewrite: in the air) add - decay up to max, else decay;
+//   - the misc part: while the update's flag holds (miscFlag: the jump or
+//     lie key held, never being in the air) add - decay up to max, else
+//     decay;
 //   - the firing's build-up decays off the trigger (DeviationBuildUp);
 //   - the stance's modifier (Stand, Crouch, Lie), and zoomed devModZoom
 //     on the whole and minDevModZoom on minDev (else 1 and 1).
@@ -1171,6 +1172,15 @@ struct SoldierDeviation {
 	float turn = 0, speed = 0, misc = 0; // +0x24, +0x28, +0x2c
 	float total = 0;                     // +4
 	static SoldierDeviation fromTemplate(const world::ObjectTemplate& t);
+	// The update's misc flag (the soldier's 0x0058ac90..0x0058acf0, passed at
+	// 0x0058b508 to the firearm's 0x005c24f0, which forwards it): PIAction
+	// held (|v| > 0.001) with no get-up time (+0x3fc) and not swimming
+	// (+0x30c), or PILie held (the raw key, not the latched prone pose);
+	// neither while seated (the soldier's parent, +0x34).
+	static bool miscFlag(bool jumpKey, bool lieKey, float getUpTime, bool swimming, bool seated)
+	{
+		return !seated && ((jumpKey && getUpTime <= 0 && !swimming) || lieKey);
+	}
 	// lookX / lookY in PIMouseLook units; stance 0 stand, 1 crouch, 2 lie.
 	void update(float throttle, float strafe, float lookX, float lookY, bool misc, bool firing, int stance, bool zoomed);
 	float deviation() const { return total; }

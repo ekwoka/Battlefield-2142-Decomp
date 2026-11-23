@@ -10126,8 +10126,17 @@ input's bits pick the parts: PIYaw (strafe, bit 0) and PIThrottle (bit
 3) the speed's (a fixed step each while above 0.01, held at its max,
 decaying without), PIMouseLookX / Y (bits 4, 5) the turn's (their size
 times the factors less the decay); the misc part grows while its flag
-holds (the rewrite: in the air; eu_ar_rifle's `7 7 0.14` puts a jump at
-the maximum). The deviation = (minDev × minDevModZoom + misc + turn +
+holds (eu_ar_rifle's `7 7 0.14` reaches the maximum in a tick). The flag
+is the update's argument (`0x005de980`'s `[ebp+0x120]`): the soldier's
+input handling (`0x0058a6d0`) sets it at `0x0058ac90`..`0x0058acf0` while
+PIAction (input 9) is held (|v| > 0.001) with no get-up time (`+0x3fc`)
+and not swimming (`+0x30c`), or PILie (input 37, the raw key, not the
+latched prone pose) is held; both are cleared while seated (the parent,
+`+0x34`). It reaches the component through the firearm's slot `0xe4`
+(`0x0058b508` → `0x005c24f0`, which forwards it; its other caller,
+`0x005c3f43`, passes 0). Being in the air never sets it
+(`SoldierDeviation::miscFlag`). Over the network the port's PILie bit is
+the latched pose, so a remote soldier's lie key isn't seen. The deviation = (minDev × minDevModZoom + misc + turn +
 speed + the firing's build-up) × devModZoom × the stance's (zoom
 modifiers 1 when not zoomed). Rounds stray by it as above, and the
 crosshair (`0x007be770`) spreads by it. Its `+0x44` extra is a bot's AI

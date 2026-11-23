@@ -90,6 +90,7 @@ public:
 	float lookYaw() const { return m_body.yawDegrees + m_control.twist(); }
 	float aimPitch() const { return m_input.pitch; }
 	bool onGround() const { return m_body.onGround(); }
+	bool swimming() const { return m_body.swimming(); }
 	const game::SoldierControl& control() const { return m_control; }
 	int32_t lastMove() const { return m_lastMove; }
 	// The kit's ability battery (soldier +0x338, 0..1, -1 without a kit):
