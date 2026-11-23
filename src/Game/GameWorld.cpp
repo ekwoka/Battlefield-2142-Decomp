@@ -7753,6 +7753,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	const std::vector<std::string> owned = player.owned;
 	const int squad = player.squad;
 	const bool squadLeader = player.squadLeader;
+	const uint64_t squadJoinedAt = player.squadJoinedAt;
 	const bool allUnlocked = player.allUnlocked;
 	const bool unlockChosen = player.unlockChosen;
 	const int dogtagCount = player.dogtagCount;
@@ -7777,6 +7778,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.owned = owned;
 	player.squad = squad;
 	player.squadLeader = squadLeader;
+	player.squadJoinedAt = squadJoinedAt;
 	player.allUnlocked = allUnlocked;
 	player.unlockChosen = unlockChosen;
 	player.alive = true;

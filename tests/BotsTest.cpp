@@ -1973,6 +1973,7 @@ TEST(Bots_DriveAvoidingGivesWayExceptForAHuman)
 // (the later of equals), and a squad of three or more first passes its
 // last member on to the empty squad after it. Eight bots of a side make
 // squads of 3, 3 and 2, not one full squad of six; the moved member leads.
+// Each bot spawns as it is added, as the round's start does.
 TEST(Bots_AddBotSpreadsSquadsAsRetail)
 {
 	Field field;
@@ -1981,6 +1982,7 @@ TEST(Bots_AddBotSpreadsSquadsAsRetail)
 	std::vector<int> pac;
 	for (int i = 0; i < 8; ++i) {
 		pac.push_back(bots.addBot("", 1));
+		CHECK(field.world->spawnSoldier(pac.back())); // as the round does: the join order outlives the spawn
 		bots.addBot("", 2);
 	}
 	const auto members = [&](int squad, int team = 1) {
