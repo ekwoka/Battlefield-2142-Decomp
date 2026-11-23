@@ -2015,6 +2015,88 @@ TEST(Vehicles_StaticAAFiresLockedEmpMissileAtTransport)
 	}
 }
 
+// The stationary AA's missile at a locked target: the weapon's target
+// component (0x005e1ee0) says "missile_away" once a shot, and the sender hears
+// his own line at once (0x004b2b60's echo, 0x0042e0c0 source 3). The cannon has
+// no target component, and a shot without a lock says nothing.
+TEST(Vehicles_StaticAAMissileCallsOutOncePerLockedShot)
+{
+	if (!gameDir()) return;
+	const auto calls = [](game::GameWorld& w, int me, int& away, int& heard) {
+		for (const auto& e : w.takeLockEvents()) {
+			away += e.kind == game::GameWorld::LockEvent::MissileAway && e.player == me;
+		}
+		for (const auto& h : w.takeRadioHeard()) {
+			heard += h.voice == "missile_away" && h.receiver == me && h.sender == me && h.channel == 14;
+			CHECK(h.voice != "missile_away" || h.receiver == me); // an unoccupied target has no player to hear it
+		}
+	};
+	for (const char* name : {"as_at", "us_ag"}) { // two kinds of target
+		Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+		if (!g.loaded || !g.templates.find(name) || !g.templates.find("static_aa")) continue;
+		g.templates.find("HeatObject")->settings()["disableWhenEmptyVehicle"] = "0";
+		g.templates.find(name)->settings()["hasMobilePhysics"] = "0";
+		world::Object* target = g.objects.create(g.templates.find(name), {0, 66, 112}, {0, 0, 0});
+		target->setTeam(1);
+		const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, 0);
+		CHECK(g.enter(aa));
+		const int me = g.world->localPlayer();
+		game::SoldierInput aim;
+		int state = 0;
+		for (int i = 0; i < 120 && state != 2; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			state = g.world->weaponLock(me).state;
+		}
+		CHECK(state == 2);
+		int away = 0, heard = 0;
+		calls(*g.world, me, away, heard); // the lock's own lines are not it
+		away = heard = 0;
+		aim.fire = true; // LMB: the cannon
+		for (int i = 0; i < 20; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			calls(*g.world, me, away, heard);
+		}
+		aim.fire = false;
+		CHECK(away == 0 && heard == 0);
+		aim.altFire = true; // RMB: the missile, held through its reload
+		std::set<uint32_t> rounds;
+		for (int i = 0; i < 90; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			calls(*g.world, me, away, heard);
+			for (const auto& p : g.world->projectiles()) {
+				if (p.alive && p.shooter == aa && p.settings && p.settings->name == "static_aa_missile_projectile" && p.serial) {
+					rounds.insert(p.serial);
+				}
+			}
+		}
+		std::fprintf(stderr, "  static_aa at %s: %zu missiles, %d calls, %d heard\n", name, rounds.size(), away, heard);
+		CHECK(!rounds.empty());
+		CHECK(away == static_cast<int>(rounds.size()) && heard == away);
+	}
+	// No lock: the same shot says nothing.
+	Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+	if (!g.loaded || !g.templates.find("static_aa")) return;
+	const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, 0);
+	CHECK(g.enter(aa));
+	const int me = g.world->localPlayer();
+	game::SoldierInput aim;
+	aim.altFire = true;
+	int away = 0, heard = 0;
+	bool fired = false;
+	for (int i = 0; i < 60; ++i) {
+		g.world->setPlayerInput(aim);
+		g.world->tick(1 / 30.0f);
+		calls(*g.world, me, away, heard);
+		for (const auto& p : g.world->projectiles()) {
+			fired |= p.alive && p.shooter == aa && p.settings && p.settings->name == "static_aa_missile_projectile";
+		}
+	}
+	CHECK(fired && away == 0 && heard == 0);
+}
+
 // The same missile at a gunship flying past at speed.
 TEST(Vehicles_StaticAAEmpMissileReachesMovingGunship)
 {

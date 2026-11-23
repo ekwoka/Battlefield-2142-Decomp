@@ -14668,6 +14668,11 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 			}
 		}
 	}
+	// The fire event of a weapon's target component (0x005e1ee0), once a
+	// shot: a seat's lock-on launcher says "missile_away" as the soldier's.
+	if (player.lock.system != 0 && sameName(player.lock.weapon, w.weapon)) {
+		missileAway(player);
+	}
 	const int batch = arm.weapon->settings().batchSize;
 	for (int round = 0; round < batch; ++round) {
 		direction = straight;
