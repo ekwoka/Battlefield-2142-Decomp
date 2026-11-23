@@ -1969,6 +1969,38 @@ TEST(Bots_DriveAvoidingGivesWayExceptForAHuman)
 	}
 }
 
+// AIDLL 0x10089000: a new bot joins its side's smallest non-empty squad
+// (the later of equals), and a squad of three or more first passes its
+// last member on to the empty squad after it. Eight bots of a side make
+// squads of 3, 3 and 2, not one full squad of six; the moved member leads.
+TEST(Bots_AddBotSpreadsSquadsAsRetail)
+{
+	Field field;
+	Console console;
+	game::BotManager bots(*field.world, scriptedSettings(console));
+	std::vector<int> pac;
+	for (int i = 0; i < 8; ++i) {
+		pac.push_back(bots.addBot("", 1));
+		bots.addBot("", 2);
+	}
+	const auto members = [&](int squad, int team = 1) {
+		std::vector<int> in;
+		for (const game::GameWorld::PlayerInfo& p : field.world->playerList()) {
+			if (p.team == team && p.squad == squad) in.push_back(p.id);
+		}
+		return in;
+	};
+	CHECK(members(1) == std::vector<int>({pac[0], pac[1], pac[3]}));
+	CHECK(members(2) == std::vector<int>({pac[2], pac[4], pac[6]}));
+	CHECK(members(3) == std::vector<int>({pac[5], pac[7]}));
+	CHECK(members(4).empty());
+	game::GameWorld::PlayerInfo info;
+	CHECK(field.world->playerInfo(pac[0], info) && info.squadLeader);
+	CHECK(field.world->playerInfo(pac[2], info) && info.squadLeader);
+	CHECK(field.world->playerInfo(pac[5], info) && info.squadLeader);
+	CHECK(members(1, 2).size() == 3);
+}
+
 // A level without AIPathFinding has no bots in the original (no ai.init,
 // ai.addBot refused): with a null mesh the manager runs none.
 TEST(Bots_NoNavigationMeshNoBots)

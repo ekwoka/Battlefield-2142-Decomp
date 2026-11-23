@@ -1035,6 +1035,12 @@ public:
 	std::vector<SquadMessage> takeSquadMessages(int player);
 	// A squad of the team with room (a new one if none): the squad id.
 	int openSquad(int team) const;
+	// A bot's squad (AIDLL 0x10089000, on adding a bot and at the round's
+	// reset): the team's non-empty squad with the fewest members (the later
+	// of equals; at most IAIGame slot 0x54, 0x008c0360: 6), squad 1 when all
+	// are empty. Holding three or more with the next squad empty, its last
+	// member moves on to that squad first. The squad joined, 0 for none.
+	int joinAiSquad(int id);
 	// The squad's beacon object (0 for none).
 	uint32_t squadBeacon(int team, int squad) const;
 	// Unlocks: a kit's ItemContainer children (one per branch and level,

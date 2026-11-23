@@ -8828,7 +8828,7 @@ int runGame(Options& options, Session& session)
 				const game::Kit& kit = kits[static_cast<size_t>(i / 2) % kits.size()];
 				round.setKit(bot, kit.name, kit.soldier);
 			}
-			round.joinSquad(bot, round.openSquad(team));
+			round.joinAiSquad(bot); // AIDLL 0x10089000
 			if (!round.spawnSoldier(bot)) {
 				std::fprintf(stderr, "no spawn point for bot %d (team %d)\n", i + 1, team);
 			}

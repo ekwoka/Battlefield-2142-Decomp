@@ -5969,6 +5969,30 @@ int GameWorld::openSquad(int team) const
 	return 0;
 }
 
+int GameWorld::joinAiSquad(int id)
+{
+	const Player* player = findPlayer(id);
+	if (!player) {
+		return 0;
+	}
+	int chosen = 1;
+	size_t fewest = kSquadSize;
+	for (int squad = 1; squad <= 9; ++squad) {
+		const size_t size = squadMembers(player->team, squad).size();
+		if (size > 0 && size <= fewest) {
+			fewest = size;
+			chosen = squad;
+		}
+	}
+	// shortcut: "last" is the last in the player list, not AIDLL's join order; the same while moved members only
+	// enter empty squads (here always) and humans join after the bots.
+	const std::vector<int> members = squadMembers(player->team, chosen);
+	if (chosen < 9 && members.size() >= 3 && squadMembers(player->team, chosen + 1).empty()) {
+		joinSquad(members.back(), chosen + 1);
+	}
+	return joinSquad(id, chosen) ? chosen : 0;
+}
+
 bool GameWorld::joinSquad(int id, int squad)
 {
 	Player* player = findPlayer(id);
