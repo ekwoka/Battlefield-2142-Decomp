@@ -11139,7 +11139,7 @@ int runGame(Options& options, Session& session)
 			// tactical rose), with the pointer to pick an entry.
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu, &startedGame,
 										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
-										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
+										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false, fireHeldByMenu = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
 				game::GameWorld::PlayerInfo me;
@@ -11159,7 +11159,9 @@ int runGame(Options& options, Session& session)
 				// The local soldier's revive calls (ReviveCalls): going down, and
 				// the fire presses that reach him while down (not the menus').
 				if (playerPresent) {
-					const bool fire = (in.fire || (manDown && in.leftMouse)) && !deploymentWasShown && !menuOpen;
+					const bool held = in.fire || (manDown && in.leftMouse);
+					fireHeldByMenu = dice::main::pressHeldByMenu(fireHeldByMenu, held, deploymentWasShown || menuOpen);
+					const bool fire = held && !fireHeldByMenu;
 					if (const int code = g_reviveCalls.step(me.id, me.soldier, me.manDown, fire, true)) {
 						g_sayCall(code);
 					}

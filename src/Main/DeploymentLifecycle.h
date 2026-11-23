@@ -52,4 +52,12 @@ namespace dice::main {
 	{
 		return (manDown || respawnIn > 0.0f) && !deploymentScreenShown(false, open, hiddenWhileDead);
 	}
+
+	// A press that began on the spawn screen or a menu stays theirs until released: the DONE
+	// click (taken on the press) is no fresh c_PIFire for a downed soldier once the screen
+	// closes under the held button (0x00585df0's revive call, "man down").
+	constexpr bool pressHeldByMenu(bool heldBefore, bool held, bool menuShown)
+	{
+		return held && (heldBefore || menuShown);
+	}
 }

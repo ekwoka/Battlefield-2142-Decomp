@@ -604,7 +604,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
 					shown.fullscreenKeys.clear();
 				}
-				if (playing && !pointer && !menuUp && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+				if (latchMousePress(playing, menuUp) && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
 					pressedButtons |= SDL_BUTTON_MASK(event.button.button);
 				}
 				if (event.type == SDL_EVENT_QUIT) {

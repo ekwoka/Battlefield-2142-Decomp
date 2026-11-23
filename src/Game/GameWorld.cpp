@@ -7601,6 +7601,14 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			&& (mobile = spawnPointChild(m_templates, *vehicle->objectTemplate(), offset)) != nullptr) {
 			mobileAt = body->body.position + body->body.rotation.transform(offset);
 			squadAt = const_cast<world::Object*>(vehicle);
+			// A full vehicle's enterOnSpawn point fails its test (0x005b24f0
+			// -> 0x005a98e0): no spawn standing inside its hull.
+			const SpawnPointFlags flags = SpawnPointFlags::of(*mobile);
+			int seat = -1;
+			if ((flags.enterOnSpawn || (player.ai && flags.aiEnterOnSpawn))
+				&& !spawnSeat(team, mobileAt, player.ai ? 15.0f : 5.0f, vehicle->id(), seat)) {
+				mobile = nullptr;
+			}
 		}
 	}
 	if (player.spawnConfirmationRequired && !withSquad && !mobile
@@ -7829,15 +7837,8 @@ bool GameWorld::spawnPointUsable(const world::Object& point, const Player& playe
 	}
 	const physics::Vec3 at {point.position().x, point.position().y, point.position().z};
 	if (f.enterOnSpawn || (player.ai && f.aiEnterOnSpawn)) {
-		const float radius = player.ai ? 15.0f : 5.0f;
-		for (const Body& body : m_bodies) {
-			const world::Object* vehicle = body.vehicle ? m_objects.find(body.object) : nullptr;
-			if (vehicle && !vehicle->destroyed() && mayEnter(body, player.team)
-				&& physics::lengthSquared(body.body.position - at) <= radius * radius) {
-				return true;
-			}
-		}
-		return false;
+		int seat = -1;
+		return spawnSeat(player.team, at, player.ai ? 15.0f : 5.0f, 0, seat) != nullptr; // 0x005b26c9: a free seat
 	}
 	if (f.scatter || f.allowCloseToVehicle || !spotClear) {
 		return true;
@@ -7869,16 +7870,33 @@ bool GameWorld::spawnPointUsable(const world::Object& point, const Player& playe
 // EntryComp objects, class 0x9477; `only`: that vehicle alone).
 bool GameWorld::enterOnSpawn(Player& player, world::Object& soldier, const physics::Vec3& from, float radius, uint32_t only)
 {
-	Body* nearest = nullptr;
 	int freeSeat = -1;
+	Body* nearest = const_cast<Body*>(spawnSeat(player.team, from, radius, only, freeSeat));
+	if (!nearest) {
+		return false;
+	}
+	seatPlayer(player, *nearest, freeSeat);
+	soldier.setHidden(true);
+	raise("EnterVehicle", {ScriptValue::player(player.id), ScriptValue::object(nearest->object)});
+	return true;
+}
+
+// The vehicle and seat enterOnSpawn takes: 0x005a98e0 passes over a vehicle
+// with no free seat (its seats' slot 0x18 at 0x005a9ce9), so a full one is
+// no spawn (the point's test 0x005b24f0 asks it too).
+const GameWorld::Body* GameWorld::spawnSeat(int team, const physics::Vec3& from, float radius, uint32_t only, int& freeSeat) const
+{
+	GameWorld& self = const_cast<GameWorld&>(*this); // the layouts' cache
+	const Body* nearest = nullptr;
+	freeSeat = -1;
 	float best = radius * radius;
-	for (Body& body : m_bodies) {
+	for (const Body& body : m_bodies) {
 		const world::Object* object = body.vehicle ? m_objects.find(body.object) : nullptr;
 		if (!object || !object->objectTemplate() || object->destroyed() || (only && body.object != only)
-			|| !mayEnter(body, player.team)) {
+			|| !mayEnter(body, team)) {
 			continue;
 		}
-		const VehicleLayout& layout = vehicleLayout(*object->objectTemplate());
+		const VehicleLayout& layout = self.vehicleLayout(*object->objectTemplate());
 		int seat = -1;
 		for (size_t i = 0; i < layout.seats.size() && seat < 0; ++i) {
 			if (i >= body.occupants.size() || body.occupants[i] < 0) {
@@ -7898,13 +7916,7 @@ bool GameWorld::enterOnSpawn(Player& player, world::Object& soldier, const physi
 			}
 		}
 	}
-	if (!nearest) {
-		return false;
-	}
-	seatPlayer(player, *nearest, freeSeat);
-	soldier.setHidden(true);
-	raise("EnterVehicle", {ScriptValue::player(player.id), ScriptValue::object(nearest->object)});
-	return true;
+	return nearest;
 }
 
 void GameWorld::setSpawnVehicle(int id, uint32_t vehicle)

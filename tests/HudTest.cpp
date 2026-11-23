@@ -1890,3 +1890,17 @@ TEST(DeploymentPrompt_RetailSelectionAndConfirmationStates)
 	CHECK(std::string(deploymentSpawnInfo(true, true, 0)) == "HUD_CENTERINFOBOX_instantspawn");
 	CHECK(std::string(deploymentSpawnInfo(true, true, 0, false)) == "HUD_CENTERINFOBOX_invalidspawnpoint");
 }
+
+// The DONE click is taken on the press; held on while the screen closes over a
+// downed soldier it must not become his fresh fire press ("man down" call).
+TEST(DeploymentScreen_DoneClickStaysTheMenus)
+{
+	using dice::main::pressHeldByMenu;
+	bool owned = pressHeldByMenu(false, true, true); // pressed on DONE, screen shown
+	CHECK(owned);
+	owned = pressHeldByMenu(owned, true, false); // screen closed, button still down
+	CHECK(owned);
+	owned = pressHeldByMenu(owned, false, false); // released
+	CHECK(!owned);
+	CHECK(!pressHeldByMenu(owned, true, false)); // a fresh press on the closed screen is the soldier's
+}

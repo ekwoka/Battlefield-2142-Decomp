@@ -2000,7 +2000,6 @@ TEST(Vehicles_SpawnIntoTheApc)
 	CHECK(g.world->spawnSoldier(me));
 	game::GameWorld::PlayerInfo info;
 	CHECK(g.world->playerInfo(me, info) && info.vehicle == apc && info.seat == 0);
-
 	// The garage's ground point with setEnterOnSpawn: the APC is 30 m away
 	// (out of 5 m), so a human can't spawn there...
 	world::ObjectTemplate* sp = g.templates.find("garage_sp");
@@ -2025,6 +2024,26 @@ TEST(Vehicles_SpawnIntoTheApc)
 	const int rider = g.world->addPlayer("Rider", 2, true);
 	CHECK(g.world->spawnSoldier(rider));
 	CHECK(g.world->playerInfo(rider, info) && info.vehicle == apc);
+	// Full, the APC's point fails its test (0x005b24f0 -> 0x005a98e0 finds
+	// no free seat): no one spawns standing inside its hull to be run over.
+	const size_t seats = g.world->vehicleSeats(apc).size();
+	for (size_t i = 3; i < seats; ++i) {
+		const int extra = g.world->addPlayer("Seat" + std::to_string(i), 2, false);
+		g.world->setSpawnVehicle(extra, apc);
+		CHECK(g.world->spawnSoldier(extra));
+		CHECK(g.world->playerInfo(extra, info) && info.vehicle == apc);
+	}
+	sp->settings()["setAIEnterOnSpawn"] = "0";
+	for (const auto& object : g.objects.objects()) {
+		if (object->objectTemplate() == sp) {
+			object->setPosition({0, 0, 0}); // back out of the APC's reach
+		}
+	}
+	const int late = g.world->addPlayer("Late", 2, false);
+	g.world->setSpawnVehicle(late, apc);
+	const bool lateSpawned = g.world->spawnSoldier(late);
+	CHECK(g.world->playerInfo(late, info));
+	CHECK(seats > 1 && (!lateSpawned || (info.vehicle != apc && physics::lengthSquared(g.position(info.soldier) - g.position(apc)) > 25)));
 }
 
 // The gunship's TV-guided missile (as_ag's GuidedMissileWeapon: ToggleCameraComp
