@@ -8997,7 +8997,8 @@ void BotManager::updateStrategy(float seconds)
 		// one squad a frame round robin, here every squad each second.)
 		struct Squad {
 			physics::Vec3 at;
-			int strength = 0;
+			int members = 0;
+			std::array<float, 2> strategic {}; // the members' attack and defence strategic strengths summed
 			int leader = -1;
 		};
 		std::map<int, Squad> squads;
@@ -9006,17 +9007,34 @@ void BotManager::updateStrategy(float seconds)
 				continue;
 			}
 			Squad& squad = squads[p.squad];
-			if (squad.strength == 0 || p.squadLeader) {
+			if (squad.members == 0 || p.squadLeader) {
 				squad.at = p.position;
 			}
-			squad.strength += 1;
+			squad.members += 1;
+			float battle = 0;
+			std::array<float, 2> strategic {};
+			unitStrengths(p, battle, strategic);
+			if (!p.vehicle) {
+				// A soldier whose templates name no AI unit nor kit (the tests' own
+				// templates; the game's kits all do) counts the shipped SoldierUnit's 1 / 1 (Objects.ai).
+				const world::Object* soldier = m_world.objects().find(p.soldier);
+				const world::Object* kit = m_world.objects().find(p.kit);
+				if (!unitAiOf(soldier ? soldier->objectTemplate() : nullptr).unit && !unitAiOf(kit ? kit->objectTemplate() : nullptr).kit) {
+					strategic = {1, 1};
+				}
+			}
+			squad.strategic[0] += strategic[0];
+			squad.strategic[1] += strategic[1];
 			if (p.squadLeader) {
 				squad.leader = p.id;
 			}
 		}
-		for (auto& [id, squad] : squads) {
-			squad.strength = 2 * static_cast<int>(std::lround(squad.strength + 0.5f));
-		}
+		// A squad's strength for an area: attack strengths for an attack, defence
+		// ones for a defence (the area's +0xeb flag, 0x10089a20 / 0x10089730).
+		const auto strengthFor = [&](int id, int area) {
+			const bool attack = std::find(side.attacks.begin(), side.attacks.end(), area) != side.attacks.end();
+			return ai::squadStrength(squads[id].strategic[attack ? 0 : 1]);
+		};
 		// Values.
 		std::vector<std::pair<float, int>> attackCandidates, defenceCandidates;
 		for (size_t i = 0; i < s.areas.size(); ++i) {
@@ -9049,10 +9067,9 @@ void BotManager::updateStrategy(float seconds)
 		mine.attacks = static_cast<float>(side.attacks.size());
 		mine.defences = static_cast<float>(side.defences.size());
 
-		// Assignment: squads keep areas still chosen; the area with the least
-		// assigned / required gets the nearest free squad next; an area
-		// releases a squad it can spare (assigned - its strength >= 1.1
-		// required).
+		// Assignment: squads keep areas still chosen; an area releases a squad
+		// it can spare (assigned - its strength >= 1.1 required); an area
+		// short of its strength takes the nearest free squads (below).
 		const int boss = m_world.commander(team);
 		GameWorld::PlayerInfo bossInfo;
 		if (boss >= 0 && m_world.playerInfo(boss, bossInfo) && !bossInfo.ai) {
@@ -9062,9 +9079,17 @@ void BotManager::updateStrategy(float seconds)
 		chosen.insert(chosen.end(), side.defences.begin(), side.defences.end());
 		std::map<int, int> assigned;
 		for (auto it = side.squadArea.begin(); it != side.squadArea.end();) {
-			const bool keep = squads.count(it->first) && std::find(chosen.begin(), chosen.end(), it->second) != chosen.end();
+			// An area counts only its squads with an order under way there
+			// (0x10089a20: state 2 and its area); a squad whose order dropped
+			// (state 0) is free again for the next pick (0x10089730 -> 0x100c0f70).
+			const auto own = m_squads.find({team, it->first});
+			const int state = own != m_squads.end() ? own->second.state : 0;
+			const bool keep = squads.count(it->first) && state != 0
+				&& std::find(chosen.begin(), chosen.end(), it->second) != chosen.end();
 			if (keep) {
-				assigned[it->second] += squads[it->first].strength;
+				if (state == 2 && own->second.area == it->second) {
+					assigned[it->second] += strengthFor(it->first, it->second);
+				}
 				++it;
 			} else {
 				releaseSquad(team, it->first, it->second); // 0x100893c0
@@ -9074,8 +9099,8 @@ void BotManager::updateStrategy(float seconds)
 		for (int area : chosen) {
 			const int required = std::max(1, views[static_cast<size_t>(area)].state.required);
 			for (auto it = side.squadArea.begin(); it != side.squadArea.end();) {
-				if (it->second == area && static_cast<float>(assigned[area] - squads[it->first].strength) / required >= 1.1f) {
-					assigned[area] -= squads[it->first].strength;
+				if (it->second == area && static_cast<float>(assigned[area] - strengthFor(it->first, it->second)) / required >= 1.1f) {
+					assigned[area] -= strengthFor(it->first, it->second);
 					releaseSquad(team, it->first, it->second); // 0x100893c0
 					it = side.squadArea.erase(it);
 				} else {
@@ -9083,40 +9108,33 @@ void BotManager::updateStrategy(float seconds)
 				}
 			}
 		}
-		while (!chosen.empty()) {
-			int neediest = -1;
-			int lowest = 0;
-			for (int area : chosen) {
-				const int required = std::max(1, views[static_cast<size_t>(area)].state.required);
-				const int ratio = assigned[area] / required;
-				if (ratio >= 1) {
-					continue;
-				}
-				if (neediest < 0 || ratio < lowest) {
-					neediest = area;
-					lowest = ratio;
-				}
-			}
-			if (neediest < 0) {
-				break;
-			}
-			int bestSquad = -1;
-			float bestDistance = 0;
+		// Each chosen area short of its required strength takes the nearest
+		// squads with no order (0x10062b80 -> 0x10089730, which skips a squad of
+		// strength 0) until it holds more than it requires.
+		for (int area : chosen) {
+			const int required = std::max(1, views[static_cast<size_t>(area)].state.required);
+			std::vector<std::pair<float, int>> free; // distance², squad, nearest first
 			for (const auto& [id, squad] : squads) {
-				if (side.squadArea.count(id)) {
-					continue;
-				}
-				const float d = physics::lengthSquared(squad.at - views[static_cast<size_t>(neediest)].order);
-				if (bestSquad < 0 || d < bestDistance) {
-					bestSquad = id;
-					bestDistance = d;
+				if (!side.squadArea.count(id) && strengthFor(id, area) > 0) {
+					free.push_back({physics::lengthSquared(squad.at - views[static_cast<size_t>(area)].order), id});
 				}
 			}
-			if (bestSquad < 0) {
-				break;
+			std::stable_sort(free.begin(), free.end());
+			std::vector<int> strengths;
+			for (const auto& [d, id] : free) {
+				strengths.push_back(strengthFor(id, area));
 			}
-			side.squadArea[bestSquad] = neediest;
-			assigned[neediest] += squads[bestSquad].strength;
+			const int picks = ai::squadsToPick(assigned[area], required, strengths);
+			for (int k = 0; k < picks; ++k) {
+				const int id = free[static_cast<size_t>(k)].second;
+				side.squadArea[id] = area;
+				assigned[area] += 2 * strengths[static_cast<size_t>(k)];
+				// Each pick posts the order to the squad (0x10062b80 -> 0x100ccc70 /
+				// 0x100cccb0), the same spot again included.
+				if (const auto own = m_squads.find({team, id}); own != m_squads.end()) {
+					own->second.seenType = GameWorld::OrderType::None;
+				}
+			}
 		}
 		// The orders: defend an owned area that is not contested, attack
 		// otherwise. (AIDLL's squad takes a new order, 0x100c1eb0 then

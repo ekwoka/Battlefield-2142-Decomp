@@ -6427,6 +6427,64 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 	CHECK(squad->state == 2 && std::fabs(squad->orderAt.x - was.x) < 0.01f);
 }
 
+// A squad's strength (0x100c26d0): its members' strategic strengths
+// summed, + 0.5, rounded to nearest even. Three Remaster soldiers
+// (attack 2 each) are 6, not 2 x round(3 + 0.5) = 8 from the member count.
+TEST(Bots_SquadStrengthSumsStrategicStrengths)
+{
+	CHECK(ai::squadStrength(6) == 6);
+	CHECK(ai::squadStrength(7) == 8);
+	CHECK(ai::squadStrength(2.4f) == 3);
+	CHECK(ai::squadStrength(0) == 0);
+}
+
+// An area short of its required strength takes the nearest free squads
+// (0x10062b80): each pick adds twice the squad's strength (0x10089730),
+// and the picks go on while the assigned strength is not over the required.
+TEST(Bots_AreaTakesSquadsUntilOverItsRequiredStrength)
+{
+	CHECK(ai::squadsToPick(0, 15, {12, 12}) == 1);  // 24 > 15 after one: not two
+	CHECK(ai::squadsToPick(0, 24, {12, 12}) == 2);  // 24 is not over 24: one more
+	CHECK(ai::squadsToPick(12, 15, {12, 12}) == 1);
+	CHECK(ai::squadsToPick(15, 15, {12, 12}) == 0); // holds its strength already
+	CHECK(ai::squadsToPick(0, 24, {}) == 0);
+}
+
+// A squad whose order drops (a human joins it, 0x100c3f10) is free again for
+// the SAI (0x10089730 picks state 0 squads; 0x10089a20 counts only orders
+// under way), which posts the order to it again, the same spot included.
+TEST(Bots_SquadThatLostItsOrderIsOrderedAgain)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 3; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, static_cast<float>(i) * 3, 0);
+		team.push_back(id);
+	}
+	const auto run = [&](int ticks) {
+		for (int tick = 0; tick < ticks; ++tick) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+		}
+	};
+	run(18 * 7);
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	CHECK(squad && squad->state == 2 && squad->kind == 0);
+	const int human = field.world->addPlayer("Eu", 2, false);
+	CHECK(field.world->joinSquad(human, 1)); // no human commander: the order drops
+	field.world->spawnSoldier(human);
+	field.move(human, 9, 0);
+	bots.updateSquadNow(2, 1);
+	CHECK(squad->state == 0);
+	run(18 * 4);
+	CHECK(squad->state == 2 && squad->kind == 0);
+}
+
 // A member whose bot idles (+0x4d, set by the Idle statement 0x100d2830
 // and cleared by 0x100d28a0) is given its slot again at every look
 // (0x100c0890 -> 0x100bff90), so it keeps up with a leader on the move.
