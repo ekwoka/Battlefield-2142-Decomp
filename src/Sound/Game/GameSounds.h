@@ -71,6 +71,8 @@ public:
 	{
 		return m_loops.count({owner, templateName}) != 0;
 	}
+	// The velocity a loop of the template was last given (tests); null without one.
+	const Vec3* loopVelocity(const std::string& templateName) const;
 
 	// The DefaultSoundComp's handlers (vtable 0x00971b48) for a weapon
 	// template: its slots +0x10.. are S_<weapon>_Fire1P, Fire1P_Outdoor,
