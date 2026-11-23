@@ -577,7 +577,12 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 	if (depth > 8) {
 		return;
 	}
-	const auto meshName = t.settings().find("collisionMesh");
+	// A static naming its mesh only through setCollisionMesh (crate01_c) has it too (both call setter 0x0051c57b).
+	auto meshName = t.settings().find("collisionMesh");
+	// shortcut: only a childless SimpleObject; Titans, vehicles and parachutes handle theirs elsewhere.
+	if (meshName == t.settings().end() && depth == 0 && t.typeName() == "SimpleObject" && t.children().empty()) {
+		meshName = t.settings().find("setCollisionMesh");
+	}
 	std::vector<uint32_t> ownMaterials;
 	if (meshName != t.settings().end()) {
 		// A name no CollisionManager.createTemplate made is looked for beside
@@ -2554,12 +2559,14 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		const SoldierPose firingPose = player.input.pose;
 		const float eyeAboveBody = firingPose == SoldierPose::Prone ? 0.6f - 1.10f : firingPose == SoldierPose::Crouch ? 0.6f - 0.52f : 0.6f;
 		const physics::Vec3 eye = seated ? seatedEye : body.position + physics::Vec3 {0, eyeAboveBody, 0};
-		p.origin = eye + straight * 0.5f;
-		// Beside a thin solid (a door shield, the portable shield) the 0.5 m start lies past its surface, which no ray from
-		// there crosses: the round starts at the eye then, so it meets the face as every shot from further away does.
-		physics::CollisionWorld::Hit across {};
-		if (m_projectileCollision.raycastFront(eye, p.origin, across)) {
-			p.origin = eye;
+		// The round's frame is the soldier's control object's (camera) place and axes, plus fire.projectileStartPosition
+		// along its right, up and forward (slot 53 0x005f1a20 -> 0x005f1bcd; the rifles author none): no forward offset.
+		p.origin = eye;
+		if (gun) {
+			if (const auto start = gun->settings().find("fire.projectileStartPosition"); start != gun->settings().end()) {
+				const physics::Vec3 at = parseVec3(start->second);
+				p.origin = eye + right * at.x + up * at.y + straight * at.z;
+			}
 		}
 		p.position = p.origin;
 		// The launch (0x005f31d0): the speed along the aim plus the root node's
@@ -2944,28 +2951,33 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 		physics::Vec3 exit = hit.point;
 		uint32_t exitMaterial = hit.material;
 		// The way out (the object's slot 0x7c at 0x005eb094 over the hit to
-		// hit + d x 2.1 r, |t + 2.1 r| its thickness): found from the far end
-		// back, the first face met from its front, so a hit right on a thin
-		// pair of faces (Chicken_Wire_Thin's 3 mm) still finds its back face.
+		// hit + d x 2.1 r, |t + 2.1 r| its thickness): the first face past the
+		// hit; a hit right on a thin pair of faces (Chicken_Wire_Thin's 3 mm)
+		// misses its back face that way, so then it is found from the far end
+		// back, the first face met from its front.
 		if (hitBody && hitBody->projectileMesh && !soldier) {
 			const physics::Mat3& turn = hitBody->body.rotation;
 			const physics::Vec3 at = hitBody->body.position;
-			physics::Vec3 start = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
-			const physics::Vec3 end = turn.untransform(hit.point - at);
-			for (int tries = 0; tries < 8; ++tries) {
-				physics::CollisionWorld::Hit face {};
-				if (!raycastBody(*hitBody, start, end, face, nullptr, true)) {
-					break;
+			for (int pass = 0; pass < 2 && !out; ++pass) {
+				const physics::Vec3 near = turn.untransform(hit.point + d * 0.01f - at);
+				const physics::Vec3 far = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
+				physics::Vec3 start = pass == 0 ? near : far;
+				const physics::Vec3 end = pass == 0 ? far : turn.untransform(hit.point - at);
+				for (int tries = 0; tries < 8; ++tries) {
+					physics::CollisionWorld::Hit face {};
+					if (!raycastBody(*hitBody, start, end, face, nullptr, pass == 1)) {
+						break;
+					}
+					const physics::Vec3 local = start + (end - start) * face.fraction;
+					const uint32_t owner = face.owner ? face.owner : hitBody->object;
+					if (owner == hitObject) {
+						exit = at + turn.transform(local);
+						exitMaterial = face.material;
+						out = true;
+						break;
+					}
+					start = local + turn.untransform(d) * (pass == 0 ? 0.01f : -0.01f); // another object's face first: on past it
 				}
-				const physics::Vec3 local = start + (end - start) * face.fraction;
-				const uint32_t owner = face.owner ? face.owner : hitBody->object;
-				if (owner == hitObject) {
-					exit = at + turn.transform(local);
-					exitMaterial = face.material;
-					out = true;
-					break;
-				}
-				start = local - turn.untransform(d) * 0.01f; // another object's face first: on past it
 			}
 		} else if (!soldier) {
 			const auto r = m_staticProjectileRadius.find(hitObject);

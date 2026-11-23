@@ -108,24 +108,6 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(active);
 
-	// setCollisionMesh and collisionMesh call the same setter (both method
-	// objects invoke the active template's slot 0x8c, 0x0051c57b): the
-	// name is also kept as collisionMesh, so a template naming its mesh only
-	// in its .tweak (crate01_c) gets one.
-	ConsoleMethod setMesh;
-	setMesh.name = "ObjectTemplate.setCollisionMesh";
-	setMesh.kind = ConsoleMethodKind::Method;
-	setMesh.access = access;
-	setMesh.minArgs = 1;
-	setMesh.maxArgs = 1;
-	setMesh.isActive = activeTemplate;
-	setMesh.invoke = [&templates](const std::vector<std::string>& args) -> std::string {
-		auto& settings = templates.active()->settings();
-		settings["setCollisionMesh"] = settings["collisionMesh"] = args[0];
-		return {};
-	};
-	console.registerMethod(setMesh);
-
 	// deviation.setFireDev max perShot decay: a method of three floats
 	// (0x004e7af4 -> 0x004e7c73 -> template 0x005f5360: +0x10, +0x8, +0xc),
 	// which the generic template properties (one value each) can't keep:

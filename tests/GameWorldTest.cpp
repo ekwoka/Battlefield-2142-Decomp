@@ -211,8 +211,7 @@ TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 	CHECK(pacPoint && neutralPoint && pole);
 	if (!pacPoint || !neutralPoint || !pole) return;
 	CHECK(pacPoint->settings().at("team") == "1");
-	// setCollisionMesh is collisionMesh's setter (0x0051c57b).
-	CHECK(pole->settings().at("collisionMesh") == "flagpole");
+	CHECK(pole->settings().find("collisionMesh") == pole->settings().end());
 	CHECK(pole->settings().at("setCollisionMesh") == "flagpole");
 	const auto poleChild = std::find_if(pacPoint->children().begin(), pacPoint->children().end(),
 		[](const world::ChildTemplate& child) { return child.name == "flagpole"; });
@@ -5645,7 +5644,7 @@ TEST(GameWorld_RoundsLeaveBeforeTheMove)
 		across(before.position, after.position), across(round.origin, before.position), across(round.origin, after.position),
 		across(round.position, round.origin));
 	CHECK(across(before.position, after.position) > 0.05f);
-	CHECK(std::fabs(across(round.origin, before.position) - 0.5f) < 0.01f); // half a metre along the look
+	CHECK(across(round.origin, before.position) < 0.01f); // at the eye: the rifle authors no projectileStartPosition (0x005f1a20)
 	CHECK(std::fabs(across(round.position, round.origin) - 10) < 0.5f);       // 300 m/s for a tick
 }
 
