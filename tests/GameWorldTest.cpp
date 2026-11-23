@@ -5525,7 +5525,7 @@ TEST(GameWorld_RoundsLeaveBeforeTheMove)
 		across(before.position, after.position), across(round.origin, before.position), across(round.origin, after.position),
 		across(round.position, round.origin));
 	CHECK(across(before.position, after.position) > 0.05f);
-	CHECK(std::fabs(across(round.origin, before.position) - 0.5f) < 0.01f); // half a metre along the look
+	CHECK(across(round.origin, before.position) < 0.01f); // at the eye: the rifle authors no projectileStartPosition (0x005f1a20)
 	CHECK(std::fabs(across(round.position, round.origin) - 10) < 0.5f);       // 300 m/s for a tick
 }
 
