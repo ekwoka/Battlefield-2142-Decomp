@@ -4338,6 +4338,93 @@ TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 	}
 }
 
+// A thrown hub (a GenericProjectile with StickyCollisionComp, maxStickAngle
+// 45, as both shipped hubs) thrown tumbling (projectileStartRotation
+// 30/210/160) is set down upright where it first meets the slab and stays
+// (0x005e83d0); its own contacts do no collision damage to it (its slot
+// 0xac, 0x005b4ff0, goes to the component, not the base).
+TEST(GameWorld_ThrownHubSticksUprightAtOnce)
+{
+	Range range;
+	range.collisionTemplates.add("slab_mesh",
+		panelMesh({{-10, 10, -10}, {10, 10, -10}, {10, 10, 10}, {-10, 10, 10}}, {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+	range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "SimpleObject");
+	world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
+	slab->settings()["collisionMesh"] = "slab_mesh";
+	range.objects.create(slab, {0, 0, 30});
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["velocity"] = "7";
+	hub->settings()["fire.projectileStartRotation"] = "30/210/160";
+	hub->settings()["fire.pullbackTime"] = "0";
+	hub->components().push_back("ThrownFireComp");
+	hub->settings()["projectileTemplate"] = "unl_hub_medic_stationary";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	hub->settings()["ammo.magSize"] = "1";
+	hub->settings()["fire.roundsPerMinute"] = "60";
+	auto* deployed = range.templates.create("GenericProjectile", "unl_hub_medic_stationary");
+	makeMobile(*deployed, "hub_mesh");
+	deployed->settings()["armor.maxHitPoints"] = "100";
+	deployed->settings()["armor.hitPoints"] = "100";
+	deployed->settings()["mass"] = "50";
+	deployed->settings()["collision.bouncing"] = "1";
+	deployed->settings()["collision.maxStickAngle"] = "45";
+	deployed->settings()["collision.stickToVehicles"] = "0";
+	deployed->components().push_back("StickyCollisionComp");
+	range.templates.create("Kit", "EU_Assault")->children().push_back({"unl_hub_medic", {}, {}});
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setSoldierPosition(range.world->playerObject(), {0, 10.05f, 30});
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	range.world->tick(1 / 30.0f);
+	for (int settle = 0; settle < 20; ++settle) {
+		range.world->tick(1 / 30.0f);
+	}
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	for (int tick = 0; tick < 30 && range.world->supplyObjects().empty(); ++tick) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->setPlayerInput({});
+	const auto placed = range.world->supplyObjects();
+	CHECK(placed.size() == 1);
+	if (placed.empty()) {
+		return;
+	}
+	const auto* object = range.objects.find(placed.front());
+	CHECK(object && std::fabs(object->rotation().z) > 10); // thrown tumbling
+	int landed = -1;
+	float lowest = 100;
+	for (int tick = 0; tick < 60 && object; ++tick) {
+		range.world->tick(1 / 30.0f);
+		object = range.objects.find(placed.front());
+		lowest = std::min(lowest, range.world->hitPoints(range.world->playerObject()));
+		// Upright the tick it is down, its bottom on the face.
+		if (landed < 0 && object && object->position().y < 10.25f) {
+			landed = tick;
+			CHECK(std::fabs(object->rotation().y) < 0.5f && std::fabs(object->rotation().z) < 0.5f);
+			CHECK(std::fabs(object->position().y - 10.2f) < 0.02f);
+		}
+	}
+	CHECK(landed >= 0);
+	CHECK(lowest == 100); // its own throw does not road-kill the thrower (8 at 7 m/s before)
+	if (object) {
+		const world::Vec3 at = object->position();
+		CHECK(std::fabs(object->rotation().y) < 0.5f && std::fabs(object->rotation().z) < 0.5f);
+		CHECK(std::fabs(at.y - 10.2f) < 0.02f);
+		CHECK(range.world->hitPoints(object->id()) == 100);
+	}
+}
+
 TEST(GameWorld_DroppedKitsArePickedUpAndTimeOut)
 {
 	// A dead soldier's kit falls where he lay (0x00589890: the ray straight
@@ -4579,6 +4666,38 @@ TEST(GameWorld_FriendlyFireScaling)
 	const float enemy = lost(50, false), half = lost(50, true), none = lost(0.5f, true);
 	std::fprintf(stderr, "  blast: %.2f from an enemy, %.2f from a teammate at 50%%, %.2f at 0.5%%\n", enemy, half, none);
 	CHECK(enemy > 1 && std::fabs(half - enemy * 0.5f) < 0.01f && none == 0);
+}
+
+// 0x005b7290 scales damage by team only for a victim with a PlayerControlObject
+// up its tree: a deployed hub (GenericProjectile) is hurt by its own team in full.
+TEST(GameWorld_FriendlyFireSparesNoHub)
+{
+	const auto lost = [](int attackerTeam) {
+		Range range;
+		range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "40";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		auto* deployed = range.templates.create("GenericProjectile", "hub_deployed");
+		makeMobile(*deployed, "hub_mesh");
+		deployed->settings()["armor.maxHitPoints"] = "100";
+		deployed->settings()["armor.hitPoints"] = "100";
+		deployed->settings()["mass"] = "50";
+		game::GameWorld::FriendlyFire ff;
+		ff.vehicleSplash = ff.soldierSplash = 0;
+		range.world->setFriendlyFire(ff);
+		world::Object* hub = range.objects.create(deployed, {0, 10, 0});
+		hub->setTeam(2);
+		const int attacker = range.world->addPlayer("Attacker", attackerTeam, true);
+		CHECK(range.world->spawnSoldier(attacker));
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->detonate("blast", {0.5f, 10, 0}, attacker));
+		return 100 - range.world->hitPoints(hub->id());
+	};
+	const float enemy = lost(1), own = lost(2);
+	std::fprintf(stderr, "  hub: %.2f from an enemy, %.2f from its own team at 0%% friendly fire\n", enemy, own);
+	CHECK(enemy > 1 && std::fabs(own - enemy) < 0.01f);
 }
 
 // hasOnTimeEffect (0x005b62a0): a fused round whose time runs out goes off

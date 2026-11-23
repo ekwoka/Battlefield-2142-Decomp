@@ -1422,6 +1422,13 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	if (sameName(t->typeName(), "Parachute")) {
 		parachuteCollision(self, other, normal, otherMaterial); // 0x005cf750 (Parachutes.cpp)
 	}
+	// A GenericProjectile's own event (slot 0xac, 0x005b4ff0) goes to its
+	// collision component (0x005b5373, slot 0x28), never to the base: a
+	// mesh round (the thrown hubs) takes no collision damage of its own.
+	if (sameName(t->typeName(), "GenericProjectile")) {
+		stickBody(self, other, normal, point, otherMaterial);
+		return;
+	}
 	// SupplyObject (object vtable 0x0096ece0, slot 0xac 0x005d0790, server):
 	// with hasMobilePhysics (template interface 0xc368 slot 0x34) each
 	// contact marks it landed (+0x198) and goes to the commander's
@@ -1470,6 +1477,53 @@ void GameWorld::collisionEvent(uint32_t self, uint32_t other, const Vec3& veloci
 	} else {
 		objectCollisionDamage(other, self, -velocity, normal, point, otherMaterial, ownMaterial, otherStaticNode);
 	}
+}
+
+// The tests are stickProjectile's (the same component, 0x005e84fa on):
+// a face within maxStickAngle, a known dry material, terrain or a static
+// object (a mobile body only when it is a PlayerControlObject and the
+// round sticks to vehicles). Stuck (0x005e8519..0x005e85ac): the frame
+// turned so its up is the face's normal, the origin the box's depth
+// below it over the face's plane (0x005e87d2), its physics stopped.
+void GameWorld::stickBody(uint32_t self, uint32_t other, const Vec3& normal, const Vec3& point, uint32_t otherMaterial)
+{
+	world::Object* object = m_objects.find(self);
+	Body* body = findBody(self);
+	const ProjectileSettings* s = object ? projectileFor(object->objectTemplate()->name()) : nullptr;
+	if (!body || body->fixed || !s || !s->sticky || soldierPlayer(other)) {
+		return;
+	}
+	physics::RigidBody& r = body->body;
+	Vec3 n = normalised(normal);
+	if (physics::dot(n, r.position - point) < 0) {
+		n = n * -1.0f; // the face's side the round is on
+	}
+	if (n.y < s->maxStickCos) {
+		return;
+	}
+	if (m_materials && m_materials->materialCount() > 0) {
+		const physics::Material* surface = m_materials->find(otherMaterial);
+		if (!surface || surface->hasWaterPhysics) {
+			return;
+		}
+	}
+	const Body* hit = other ? findBody(other) : nullptr;
+	if (hit) {
+		const world::Object* root = m_objects.find(other);
+		if (!s->stickToVehicles || !root || !root->objectTemplate()
+			|| !sameName(root->objectTemplate()->typeName(), "PlayerControlObject")) {
+			return;
+		}
+	} else if (other == 0 ? !s->stickToTerrain : !s->stickToStaticObjects) {
+		return;
+	}
+	r.rotation = stuckFrame(r.rotation, n);
+	r.position = r.position + n * (-body->boxMin.y - physics::dot(r.position - point, n));
+	body->fixed = true; // shortcut: stuck on a vehicle stays where it met it, no ride (no shipped hub sticks to vehicles)
+	r.velocity = r.averageVelocity = r.angularVelocity = {};
+	object->setPosition({r.position.x, r.position.y, r.position.z});
+	const Vec3 turn = r.rotation.yawPitchRoll();
+	object->setRotation({turn.x, turn.y, turn.z});
 }
 
 // 0x005a3db0: the ground (or nothing) hurting `victim`: the material

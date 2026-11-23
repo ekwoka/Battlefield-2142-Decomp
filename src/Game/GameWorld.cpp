@@ -1150,7 +1150,12 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 		const Body::Cell* cell = nullptr;
 		const world::Object* o = m_objects.find(shieldCell(object, cellBody, cell) ? cellBody->object : object);
 		const int team = victim ? victim->team : o ? o->team() : 0;
-		if (team == from->team) {
+		// 0x005b7290 finds a PlayerControlObject up the victim's tree (0x0099889c)
+		// before any team test; a thrown hub (GenericProjectile) has none, so
+		// its owner's team destroys it at full damage whatever the server's setting.
+		const bool hasControl = !o || !o->objectTemplate() || !(sameName(o->objectTemplate()->typeName(), "GenericProjectile")
+			|| sameName(o->objectTemplate()->typeName(), "SupplyObject"));
+		if (team == from->team && hasControl) {
 			const bool soldier = victim || (o && o->objectTemplate() && sameName(o->objectTemplate()->typeName(), "Soldier"));
 			const float percent = soldier ? (splash ? m_friendlyFire.soldierSplash : m_friendlyFire.soldier)
 										  : (splash ? m_friendlyFire.vehicleSplash : m_friendlyFire.vehicle);
@@ -11344,6 +11349,11 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	const uint32_t soldierId = player.object;
 	player.body.onContact = [this, soldierId, self](const physics::SoldierBody::Contact& c) {
 		self->contactMaterial = c.otherMaterial; // 0x00586a90: +0x32c
+		// A small mesh round the soldier threw himself (the hubs, 0x006c46a9's own
+		// test) neither holds nor hurts him: no road kill from his own fresh throw.
+		if (const Body* thrown = c.owner ? findBody(c.owner) : nullptr; thrown && thrown->pushedBySoldiers && thrown->launcher == soldierId) {
+			return true;
+		}
 		collisionEvent(soldierId, c.owner, c.velocity, c.normal, c.point, c.ownMaterial, c.otherMaterial, c.otherStaticNode);
 		if (c.owner != 0 && m_objects.find(soldierId)) {
 			collisionEvent(c.owner, soldierId, -c.velocity, c.normal, c.point, c.otherMaterial, c.ownMaterial);
