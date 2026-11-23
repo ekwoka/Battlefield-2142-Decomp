@@ -580,7 +580,13 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 	const auto meshName = t.settings().find("collisionMesh");
 	std::vector<uint32_t> ownMaterials;
 	if (meshName != t.settings().end()) {
-		if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files)) {
+		// A name no CollisionManager.createTemplate made is looked for beside
+		// the template's file, as the mesh loader's path (0x006d8740: the
+		// template's directory + name + ".collisionMesh").
+		const std::string& file = t.creationFile();
+		const size_t slash = file.find_last_of("/\\");
+		if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files,
+				slash == std::string::npos ? std::string() : file.substr(0, slash + 1))) {
 			ownMaterials = materialMap(t);
 			addStaticMesh(t, *mesh, ownMaterials, 0, rotation, position, owner, depth == 0);
 			// Its children's collisionPart instances are of its mesh
