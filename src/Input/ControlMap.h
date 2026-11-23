@@ -46,6 +46,7 @@
 #pragma once
 
 #include <functional>
+#include <cmath>
 #include <algorithm>
 #include <map>
 #include <string>

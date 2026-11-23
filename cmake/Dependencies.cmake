@@ -90,8 +90,9 @@ set(BF2142_STEAM_AUDIO_URL
 	CACHE STRING "Steam Audio 4.8.1's SDK zip: the release's URL or a local file")
 if(BF2142_STEAM_AUDIO)
 	set(BF2142_PHONON_PLATFORM)
-	if(BF2142_RETAIL_COMPAT OR CMAKE_CROSSCOMPILING)
-		# The 32-bit retail-compat build: Steam Audio has no 32-bit library.
+	if(BF2142_RETAIL_COMPAT OR (CMAKE_CROSSCOMPILING AND NOT (WIN32 AND CMAKE_HOST_WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)))
+		# The 32-bit retail-compat build has no Steam Audio library. A Windows
+		# x64 toolchain on a Windows host can use Valve's Windows x64 binary.
 	elseif(APPLE)
 		set(BF2142_PHONON_PLATFORM osx/libphonon.dylib)
 	elseif(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
