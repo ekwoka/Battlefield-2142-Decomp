@@ -10355,6 +10355,49 @@ TEST(Vehicles_HelicopterEngineSoundFollowsTheCollective)
 		CHECK(std::fabs(up - down) > 0.1f); // the gunships' main engine (negative axis, canReverse 0) opens on throttle down
 	}
 }
+// The engine sounds move with the vehicle (0x0064cb80 -> 0x007fe410: the root's
+// velocity on the engine audio, its sounds' transform 0x009bf914): seen from
+// the seat the listener's velocity cancels it, so the pitch has no Doppler in
+// the cockpit (it had, with the loops standing still, and none outside).
+TEST(Vehicles_EngineSoundsCarryTheVehicleVelocity)
+{
+	if (!gameDir()) return;
+	std::unique_ptr<sound::SoundManager> manager;
+	Garage g(gameDir(), "mods/bf2142", true, [&manager](Garage& garage) {
+		manager = std::make_unique<sound::SoundManager>(nullptr, garage.templates);
+		manager->registerTemplateType();
+		sound::registerSoundConsoleMethods(garage.console, *manager);
+	});
+	if (!g.loaded || !g.templates.find("us_ag")) return;
+	const uint32_t v = g.start("us_ag", {0, 3, 8}, 3, 0, -10000, 35);
+	CHECK(g.enter(v));
+	sound::GameSounds sounds {*manager};
+	GameAudio audio(*g.world, g.objects, g.templates, *manager, sounds, nullptr);
+	GameAudio::Camera camera;
+	camera.firstPerson = true;
+	game::SoldierInput input;
+	input.throttle = 1;
+	g.world->setPlayerInput(input);
+	for (int i = 0; i < 30 * 5; ++i) {
+		g.world->tick(1 / 30.0f);
+		audio.tick(camera);
+	}
+	physics::Vec3 at, velocity;
+	CHECK(g.world->bodyMotion(v, at, velocity));
+	const auto& parts = g.world->playerVehicleState()->parts();
+	const sound::Vec3* loop = nullptr;
+	for (const auto& part : parts) {
+		if (part.type == "Engine" && !loop) loop = sounds.loopVelocity("S_" + part.name + "_Idle");
+		if (part.type == "Engine" && !loop) loop = sounds.loopVelocity("S_" + part.name + "_Rpm1");
+	}
+	CHECK(loop != nullptr);
+	if (!loop) return;
+	std::fprintf(stderr, "  body velocity %.2f %.2f %.2f, engine loop %.2f %.2f %.2f\n", velocity.x, velocity.y,
+		velocity.z, loop->x, loop->y, loop->z);
+	CHECK(physics::lengthSquared(velocity) > 1);
+	CHECK(loop->x == velocity.x && loop->y == velocity.y && loop->z == velocity.z);
+}
+
 // Going under the water (0x006b98a5) is a collision with no other object
 // on the terrain material 1 (Water_deep): the parachute lands on the
 // surface (0x005cf750) and the rider swims there, not 30 m down on the

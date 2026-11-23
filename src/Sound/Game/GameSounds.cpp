@@ -248,6 +248,14 @@ void GameSounds::loop(uint64_t owner, const std::string& templateName, const Vec
 	loop.transform.m_velocity = velocity;
 }
 
+const Vec3* GameSounds::loopVelocity(const std::string& templateName) const
+{
+	for (const auto& [key, loop] : m_loops) {
+		if (key.second == templateName) return &loop->transform.m_velocity;
+	}
+	return nullptr;
+}
+
 void GameSounds::endTick()
 {
 	++m_tick;
