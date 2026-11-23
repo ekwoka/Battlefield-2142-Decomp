@@ -5333,6 +5333,55 @@ TEST(GameWorld_WeaponLock)
 	CHECK(lock.target == 0 && lock.state == 0);
 }
 
+// A soldier's lock-on shot says "missile_away" once (0x005e1ee0): the local
+// player hears his own line at once, an unlocked shot says nothing.
+TEST(GameWorld_LockedShotCallsOutOnce)
+{
+	Range range;
+	range.templates.registerType(8, "SimpleObject");
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+	launcher->settings()["target.maxDistance"] = "450";
+	launcher->settings()["target.lockAngle"] = "10";
+	launcher->settings()["target.lockDelay"] = "1.5";
+	world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+	jet->children().push_back({"HeatObject", {}, {}});
+	range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const auto count = [&](int& away, int& heard) {
+		for (const auto& e : range.world->takeLockEvents()) {
+			away += e.kind == game::GameWorld::LockEvent::MissileAway;
+		}
+		for (const auto& h : range.world->takeRadioHeard()) {
+			heard += h.voice == "missile_away" && h.receiver == me && h.sender == me && h.channel == 14;
+		}
+	};
+	int away = 0, heard = 0;
+	game::SoldierInput shoot;
+	shoot.fire = true;
+	range.world->setPlayerInput(shoot);
+	range.world->tick(1 / 30.0f);
+	count(away, heard);
+	CHECK(away == 0 && heard == 0);
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(me, info);
+	world::Object* enemy = range.objects.create(jet, {info.position.x, info.position.y + 1.6f, info.position.z + 60});
+	enemy->setTeam(1);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 60; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->weaponLock(me).state == 2);
+	away = heard = 0;
+	count(away, heard);
+	away = heard = 0;
+	range.world->setPlayerInput(shoot);
+	range.world->tick(1 / 30.0f);
+	count(away, heard);
+	CHECK(away == 1 && heard == 1);
+}
+
 // The lock-on update's candidate (0x005e1b30 -> 0x004cf290): the nearest
 // target object in the cone. The team filter takes only a root with a
 // control object (0x0042b2f0, 0x004cf337 .. 0x004cf38b): an empty vehicle

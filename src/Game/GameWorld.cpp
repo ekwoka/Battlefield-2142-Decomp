@@ -14274,7 +14274,13 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		const auto moves = [](const RotationAxis& a) { return a.acceleration != 0 || a.continuousSpeed != 0; };
 		const bool yawBundled = !seat.yawBundle.empty() && moves(seat.yawAxis);
 		const bool pitchBundled = !player.ai && !seat.pitchBundle.empty() && moves(seat.pitchAxis);
-		float turn = gun.yawBlocked ? 0.0f : yawBundled ? player.input.turn / 5.0f : player.input.turn;
+		// The bundles' input handler (0x00565180) puts every control input,
+		// the mouse looks (+0x10, +0x14) among them, times the owning
+		// armour's EMP step 1 - level / empDamageNumStep, so a turret and its
+		// barrel slow and stop under EMP; the PCO filter (0x005ca2e0) leaves
+		// those two inputs alone. A seat of its own PCO has no armour here.
+		const float empScale = player.seat == 0 ? driverInputScale(body.empLevel, -1, *object->objectTemplate()) : 1.0f;
+		float turn = (gun.yawBlocked ? 0.0f : yawBundled ? player.input.turn / 5.0f : player.input.turn) * empScale;
 		// surpressPlayerInputVector (the input pass 0x00565700): while the
 		// seat's weapon is zoomed (its zoom component's index, slot 0xa0,
 		// not 0) each axis's input is times its component, 0 leaving it be.
@@ -14301,9 +14307,9 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		// Bundle pitch is down positive: its limits [min, max] bound the aim
 		// at [-max, -min]; the offset no further than the limits let it.
 		const float low = -seat.maxPitch, high = -seat.minPitch;
-		// The PAC hover tank's barrel uses the filtered PIPitch axis.
-		// Mounts on PIMouseLookY keep their normal input under EMP.
-		const float pitchScale = seat.pitchUsesDriverInput ? driverScale : 1.0f;
+		// The PAC hover tank's barrel uses the filtered PIPitch axis (the
+		// chassis scale); mounts on PIMouseLookY take the bundle's EMP step.
+		const float pitchScale = seat.pitchUsesDriverInput ? driverScale : empScale;
 		if (pitchBundled) {
 			// The bundle's own angle (down positive) takes this tick's look
 			// change and this tick's ignoreParentRotation take-back.
@@ -14321,7 +14327,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			// and the rest stays lost (held back from the look, within the
 			// limits). A bot's pitch is the angle it wants: its step there
 			// this tick is the input, scaled the same way.
-			if (!continuing || !seat.pitchUsesDriverInput) {
+			if (!continuing || (!seat.pitchUsesDriverInput && empScale == 1 && gun.pitchInputLost == 0)) {
 				gun.pitchInputLost = 0;
 			} else if (!player.ai && !gun.pitchBlocked) {
 				gun.pitchInputLost += lookPitchChange * (1 - pitchScale);
@@ -14693,6 +14699,11 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 				earlier.wireLost = true;
 			}
 		}
+	}
+	// The fire event of a weapon's target component (0x005e1ee0), once a
+	// shot: a seat's lock-on launcher says "missile_away" as the soldier's.
+	if (player.lock.system != 0 && sameName(player.lock.weapon, w.weapon)) {
+		missileAway(player);
 	}
 	const int batch = arm.weapon->settings().batchSize;
 	for (int round = 0; round < batch; ++round) {

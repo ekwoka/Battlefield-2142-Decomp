@@ -358,9 +358,98 @@ TEST(Vehicles_HoverTankThrustsAndStrafes)
 	CHECK(turned > 10);
 }
 
-// The PAC barrel takes the driver's PIPitch axis. The EU turret takes
-// PIMouseLookY, which keeps its normal response while the hull is under EMP.
-TEST(Vehicles_TankBarrelPitchUsesItsAuthoredInputUnderEmp)
+// The EU turret's yaw is on PIMouseLookX: the bundle input handler (0x00565180)
+// scales it by the EMP step, the barrel's pitch likewise; the cupola seat has
+// no armour of its own and keeps its input; the turret takes up again from
+// where it stopped when the EMP ends.
+TEST(Vehicles_TankTurretYawFollowsEmpStep)
+{
+	if (!gameDir()) return;
+	constexpr float tick = 1 / 30.0f;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		float turnedAt[3] = {}, cupolaAt[3] = {};
+		for (int level : {0, 1, 2}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find("eu_tank"));
+			if (!g.loaded || !g.templates.find("eu_tank")) return;
+			const auto tank = g.start("eu_tank", {0, 4, 8});
+			CHECK(g.enter(tank));
+			g.drive({}, 3);
+			if (level > 0) {
+				CHECK(g.world->detonate("static_aa_missile_projectile", g.position(tank) + physics::Vec3 {0, 0, level == 1 ? 2.2f : 0.0f}));
+			}
+			CHECK(g.world->empLevel(tank) == level);
+			float before = 0, pitch = 0, after = 0;
+			CHECK(g.world->gunAim(tank, 0, before, pitch));
+			game::SoldierInput look;
+			look.turn = 5; // a full PIMouseLookX
+			for (int i = 0; i < 15; ++i) {
+				g.drive(look, tick);
+			}
+			CHECK(g.world->gunAim(tank, 0, after, pitch));
+			turnedAt[level] = std::remainder(after - before, 360.0f);
+			CHECK(g.world->empLevel(tank) == level);
+			// Firing under EMP is not an input the filter takes.
+			const size_t shots = g.world->projectiles().size();
+			look.fire = true;
+			g.drive(look, tick);
+			look.fire = false;
+			CHECK(std::any_of(g.world->projectiles().begin() + shots, g.world->projectiles().end(),
+				[tank](const auto& shot) { return shot.shooter == tank; }));
+			if (level == 2) {
+				// Frozen while it lasts, then no jump when it ends: the turret
+				// continues from where it stopped.
+				float held = 0, ended = 0, resumed = 0;
+				CHECK(g.world->gunAim(tank, 0, held, pitch));
+				g.drive({}, 6);
+				CHECK(g.world->empLevel(tank) == 0);
+				CHECK(g.world->gunAim(tank, 0, ended, pitch));
+				CHECK(std::fabs(std::remainder(ended - held, 360.0f)) < 1.5f); // only the glide of the moment it stopped
+				g.drive(look, tick);
+				look.fire = false;
+				for (int i = 0; i < 10; ++i) {
+					g.drive(look, tick);
+				}
+				CHECK(g.world->gunAim(tank, 0, resumed, pitch));
+				CHECK(std::remainder(resumed - ended, 360.0f) > 5.0f);
+			}
+		}
+		for (int level : {0, 1, 2}) {
+			// The cupola seat (no armour of its own): not scaled by the hull's EMP.
+			Garage g(gameDir(), mod);
+			const auto tank = g.start("eu_tank", {0, 4, 8});
+			CHECK(g.enter(tank));
+			game::SoldierInput seat;
+			seat.switchSeat = 2;
+			g.drive(seat, tick);
+			g.drive({}, 3);
+			if (level > 0) {
+				CHECK(g.world->detonate("static_aa_missile_projectile", g.position(tank) + physics::Vec3 {0, 0, level == 1 ? 2.2f : 0.0f}));
+			}
+			float before = 0, pitch = 0, after = 0;
+			if (!g.world->gunAim(tank, 1, before, pitch)) continue;
+			game::SoldierInput look;
+			look.turn = 5;
+			for (int i = 0; i < 4; ++i) {
+				g.drive(look, tick);
+			}
+			CHECK(g.world->gunAim(tank, 1, after, pitch));
+			cupolaAt[level] = std::remainder(after - before, 360.0f);
+		}
+		std::fprintf(stderr, "  %s turret yaw in 0.5 s by EMP level: %.2f %.2f %.2f; cupola %.2f %.2f %.2f\n", mod, turnedAt[0],
+			turnedAt[1], turnedAt[2], cupolaAt[0], cupolaAt[1], cupolaAt[2]);
+		CHECK(std::fabs(turnedAt[0]) > 2.0f);
+		CHECK(std::fabs(turnedAt[1] - turnedAt[0] * 0.5f) < std::fabs(turnedAt[0]) * 0.15f);
+		CHECK(std::fabs(turnedAt[2]) < 0.2f);
+		CHECK(std::fabs(cupolaAt[1] - cupolaAt[0]) < 0.3f && std::fabs(cupolaAt[2] - cupolaAt[0]) < 0.3f);
+	}
+}
+
+// The PAC barrel takes the driver's PIPitch axis, the EU barrel PIMouseLookY:
+// the bundle input handler (0x00565180) scales both by the EMP step
+// (1 - level / empDamageNumStep, 2 steps on both tanks).
+TEST(Vehicles_TankBarrelPitchFollowsEmpStep)
 {
 	if (!gameDir()) return;
 	constexpr float tick = 1 / 30.0f;
@@ -393,7 +482,7 @@ TEST(Vehicles_TankBarrelPitchUsesItsAuthoredInputUnderEmp)
 				const float deflection = pitch - startPitch;
 				std::fprintf(stderr, "  %s %s EMP %d: barrel elevation change %.2f degrees\n",
 					mod, name, level, deflection);
-				const float expected = hover ? 4.0f - 2.0f * level : 4.0f;
+				const float expected = 4.0f - 2.0f * level;
 				CHECK(std::fabs(deflection - expected) < 0.4f);
 
 				const size_t before = g.world->projectiles().size();
@@ -401,7 +490,7 @@ TEST(Vehicles_TankBarrelPitchUsesItsAuthoredInputUnderEmp)
 				g.drive(aim, tick);
 				const auto& shots = g.world->projectiles();
 				CHECK(std::any_of(shots.begin() + before, shots.end(), [tank](const auto& shot) { return shot.shooter == tank; }));
-				if (hover && level == 2) {
+				if (level == 2) {
 					aim.fire = false;
 					g.drive(aim, 6);
 					CHECK(g.world->empLevel(tank) == 0);
@@ -1924,6 +2013,88 @@ TEST(Vehicles_StaticAAFiresLockedEmpMissileAtTransport)
 		CHECK(level > 0);
 	  }
 	}
+}
+
+// The stationary AA's missile at a locked target: the weapon's target
+// component (0x005e1ee0) says "missile_away" once a shot, and the sender hears
+// his own line at once (0x004b2b60's echo, 0x0042e0c0 source 3). The cannon has
+// no target component, and a shot without a lock says nothing.
+TEST(Vehicles_StaticAAMissileCallsOutOncePerLockedShot)
+{
+	if (!gameDir()) return;
+	const auto calls = [](game::GameWorld& w, int me, int& away, int& heard) {
+		for (const auto& e : w.takeLockEvents()) {
+			away += e.kind == game::GameWorld::LockEvent::MissileAway && e.player == me;
+		}
+		for (const auto& h : w.takeRadioHeard()) {
+			heard += h.voice == "missile_away" && h.receiver == me && h.sender == me && h.channel == 14;
+			CHECK(h.voice != "missile_away" || h.receiver == me); // an unoccupied target has no player to hear it
+		}
+	};
+	for (const char* name : {"as_at", "us_ag"}) { // two kinds of target
+		Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+		if (!g.loaded || !g.templates.find(name) || !g.templates.find("static_aa")) continue;
+		g.templates.find("HeatObject")->settings()["disableWhenEmptyVehicle"] = "0";
+		g.templates.find(name)->settings()["hasMobilePhysics"] = "0";
+		world::Object* target = g.objects.create(g.templates.find(name), {0, 66, 112}, {0, 0, 0});
+		target->setTeam(1);
+		const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, 0);
+		CHECK(g.enter(aa));
+		const int me = g.world->localPlayer();
+		game::SoldierInput aim;
+		int state = 0;
+		for (int i = 0; i < 120 && state != 2; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			state = g.world->weaponLock(me).state;
+		}
+		CHECK(state == 2);
+		int away = 0, heard = 0;
+		calls(*g.world, me, away, heard); // the lock's own lines are not it
+		away = heard = 0;
+		aim.fire = true; // LMB: the cannon
+		for (int i = 0; i < 20; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			calls(*g.world, me, away, heard);
+		}
+		aim.fire = false;
+		CHECK(away == 0 && heard == 0);
+		aim.altFire = true; // RMB: the missile, held through its reload
+		std::set<uint32_t> rounds;
+		for (int i = 0; i < 90; ++i) {
+			g.world->setPlayerInput(aim);
+			g.world->tick(1 / 30.0f);
+			calls(*g.world, me, away, heard);
+			for (const auto& p : g.world->projectiles()) {
+				if (p.alive && p.shooter == aa && p.settings && p.settings->name == "static_aa_missile_projectile" && p.serial) {
+					rounds.insert(p.serial);
+				}
+			}
+		}
+		std::fprintf(stderr, "  static_aa at %s: %zu missiles, %d calls, %d heard\n", name, rounds.size(), away, heard);
+		CHECK(!rounds.empty());
+		CHECK(away == static_cast<int>(rounds.size()) && heard == away);
+	}
+	// No lock: the same shot says nothing.
+	Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+	if (!g.loaded || !g.templates.find("static_aa")) return;
+	const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, 0);
+	CHECK(g.enter(aa));
+	const int me = g.world->localPlayer();
+	game::SoldierInput aim;
+	aim.altFire = true;
+	int away = 0, heard = 0;
+	bool fired = false;
+	for (int i = 0; i < 60; ++i) {
+		g.world->setPlayerInput(aim);
+		g.world->tick(1 / 30.0f);
+		calls(*g.world, me, away, heard);
+		for (const auto& p : g.world->projectiles()) {
+			fired |= p.alive && p.shooter == aa && p.settings && p.settings->name == "static_aa_missile_projectile";
+		}
+	}
+	CHECK(fired && away == 0 && heard == 0);
 }
 
 // The same missile at a gunship flying past at speed.
