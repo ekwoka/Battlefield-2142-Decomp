@@ -98,7 +98,8 @@ struct Field {
 						"detonation.isEMPWeapon", "detonation.endEffectTemplate", "detonation.useMMOnEndEffect",
 						"damage", "minDamage", "timeToLive", "gravityModifier", "material",
 						"seek.targetType", "radius", "healSpeed", "refillAmmoSpeed", "sharedStorageSize",
-						"healStorageSize", "ammoStorageSize", "destroyWhenEmptyStorage", "workOnVehicles"});
+						"healStorageSize", "ammoStorageSize", "destroyWhenEmptyStorage", "workOnVehicles",
+						"continousRotationSpeed"});
 				std::string out;
 				const std::string base = "Objects/Weapons/";
 				for (const char* script : {"common/RemoteControlledObjects/OrbitalStrikeControlObjectUS.con",
@@ -1623,4 +1624,58 @@ TEST(Commander_ResultNotificationsReachApplicantsAndTeam)
 	CHECK(std::none_of(heard.begin(), heard.end(), [&](const auto& voice) { return voice.receiver == enemy || voice.receiver == bot; }));
 	world.resignCommander(winner);
 	CHECK(world.takeSquadMessages(winner).empty());
+}
+
+// The commander assets' dishes and antennas turn by themselves
+// (continousRotationSpeed on a RotationalBundle under a stationary root: the
+// part's own update, 0x00565a20, runs whatever the root's physics). They
+// need a ticked part state; a stationary root with none keeps none.
+TEST(Commander_ScanningDishesTurnAtTheirAuthoredSpeed)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	struct Dish {
+		const char* object;
+		const char* part;
+		float speed;
+	};
+	const Dish dishes[] = {{"commander_movement_analyst", "commander_movement_analyst_top", 150},
+		{"commander_emp_strike", "commander_EMP_Strike_mount", 60},
+		{"commander_orbital_strike", "commander_Orbital_Strike_Antenna", 4}};
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
+		for (const Dish& dish : dishes) {
+			Field field(mod, true);
+			if (!field.loaded) {
+				CHECK(field.loaded);
+				continue;
+			}
+			const world::Object* placed = field.objects.create(field.templates.find(dish.object), {0, 0, 0});
+			field.world->tick(1 / 30.0f);
+			world::Vec3 offset, rotation;
+			CHECK(field.world->partPose(placed->id(), dish.part, offset, rotation));
+			const float start = rotation.x;
+			for (int i = 0; i < 90; ++i) {
+				field.world->tick(1 / 30.0f);
+			}
+			CHECK(field.world->partPose(placed->id(), dish.part, offset, rotation));
+			const float turned = std::remainder(rotation.x - start - dish.speed * 3.0f, 360.0f);
+			std::fprintf(stderr, "  %s/%s: turned %.2f (authored %.1f deg/s x 3 s)\n", mod.c_str(), dish.part,
+				rotation.x - start, dish.speed);
+			CHECK(std::fabs(turned) < 0.5f);
+		}
+		// A stationary root without a turning part gets no part state.
+		Field field(mod, true);
+		if (!field.loaded) {
+			continue;
+		}
+		world::ObjectTemplate* still = field.templates.find("commander_movement_analyst");
+		world::ObjectTemplate* top = field.templates.find("commander_movement_analyst_top");
+		CHECK(still && top);
+		top->settings()["continousRotationSpeed"] = "0/0/0";
+		const world::Object* placed = field.objects.create(still, {0, 0, 0});
+		field.world->tick(1 / 30.0f);
+		CHECK(field.world->vehicle(placed->id()) == nullptr);
+	}
 }
