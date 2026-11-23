@@ -653,7 +653,8 @@ bool FireArm::selectable() const
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
+	// 0x005f4670 (ammo slot 17, asked with 1 by 0x005c0e70): ammo.autoReload refuses a reload by hand.
+	if (m_settings.autoReload || m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
 		|| m_busyUntilRelease || m_shiftIn > 0 || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
