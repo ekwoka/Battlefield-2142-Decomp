@@ -2125,7 +2125,9 @@ void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool s
 			++enemies;
 		}
 	}
-	if (enemies >= 2) {
+	// Not in Titan mode: the commander screen shows the Titan's move where the artillery strike's button would be
+	// (HudElementsCommanderComm.con, GameMode 1 or 3), so a human commander has no strike there.
+	if (enemies >= 2 && m_world.gameMode() != "gpm_ti") {
 		const physics::Vec3 middle = sum * (1.0f / static_cast<float>(enemies));
 		if (count(3 - team, middle, 15, false) >= 2 && count(team, middle, 40, false) == 0) {
 			use(A::Artillery, middle); // commander_orbital_strike (RCArtillery)

@@ -987,10 +987,14 @@ TEST(Titan_BotCommanderMovesTheTitans)
 			settings.botTitan = &enhanced;
 			settings.botCommander = &commander;
 			game::BotManager bots(*level.world, settings);
-			bool uav[3] = {};
+			bool uav[3] = {}, strike[3] = {};
 			level.afterTick = [&] {
 				bots.update(1 / 30.0f);
 				for (int team : {1, 2}) {
+					// Titan mode's commander screen shows the Titan's move where the artillery strike would be
+					// (HudElementsCommanderComm.con, GameMode 1): no strike for the virtual commander.
+					const auto artillery = level.world->abilityState(team, game::GameWorld::CommanderAbility::Artillery);
+					strike[team] = strike[team] || (artillery.available && !artillery.ready) || artillery.active;
 					physics::Vec3 at;
 					float radius = 0;
 					uav[team] = uav[team] || level.world->uavArea(team, at, radius);
@@ -1036,6 +1040,7 @@ TEST(Titan_BotCommanderMovesTheTitans)
 				CHECK(ordered > 30 && moved > 100 && silo <= 125);
 				CHECK(!blocks(team, titan->target));
 				CHECK(uav[team]);
+				CHECK(!strike[team]);
 			}
 			if (!commander) continue;
 			// The silo each Titan went to, taken: its missile reaches the enemy, not its own Titan above it. (No bots
