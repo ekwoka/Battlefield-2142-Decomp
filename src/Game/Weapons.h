@@ -903,6 +903,7 @@ struct Projectile {
 	// the update 0x005e2e20 steers at any zoom level). Seat guns don't use this.
 	bool wireEndsWithWeapon = false;
 	uint32_t wireWeapon = 0;  // the hand weapon that fired it
+	std::string weaponName;   // its template: the kill line names it (0x005b7130 takes the weapon object that dealt the damage)
 	uint32_t wireVehicle = 0; // the vehicle the shooter sat in when it fired (0 on foot)
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
 	bool followTurned = false; // the follow steered it this tick (0x005ed1a0's result)

@@ -211,7 +211,8 @@ TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 	CHECK(pacPoint && neutralPoint && pole);
 	if (!pacPoint || !neutralPoint || !pole) return;
 	CHECK(pacPoint->settings().at("team") == "1");
-	CHECK(pole->settings().find("collisionMesh") == pole->settings().end());
+	// setCollisionMesh is collisionMesh's setter (0x0051c57b).
+	CHECK(pole->settings().at("collisionMesh") == "flagpole");
 	CHECK(pole->settings().at("setCollisionMesh") == "flagpole");
 	const auto poleChild = std::find_if(pacPoint->children().begin(), pacPoint->children().end(),
 		[](const world::ChildTemplate& child) { return child.name == "flagpole"; });
@@ -220,6 +221,9 @@ TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 
 	auto* pacObject = objects.create(pacPoint, {55.782f, 46.200f, 206.065f});
 	auto* neutralObject = objects.create(neutralPoint, {-34.929f, 42.429f, 143.808f});
+	// crate01_c names its mesh only with the .tweak's setCollisionMesh and
+	// never creates the template: the mesh beside its file is still solid.
+	auto* crate = objects.create(templates.find("crate01_c"), {500.0f, 100.0f, 500.0f});
 	game::GameWorld round(templates, objects);
 	round.enablePhysics(files, collisionTemplates, {[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 		normal = {0, 1, 0};
@@ -227,6 +231,8 @@ TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 	}}, &materials);
 	round.startRound();
 	CHECK(round.controlPoints().size() == 2);
+	physics::CollisionWorld::Hit crateHit {};
+	CHECK(round.staticCollision().raycast({500, 103, 500}, {500, 97, 500}, crateHit) && crateHit.owner == crate->id());
 	const auto findPoint = [&round](int id) -> const game::ControlPoint* {
 		for (const auto& point : round.controlPoints()) if (point.id == id) return &point;
 		return nullptr;
@@ -575,6 +581,8 @@ TEST(GameWorld_SoldiersShootAndDie)
 	CHECK(range.world->playerInfo(range.world->localPlayer(), shooter) && shooter.kills == 1 && shooter.alive);
 	CHECK(range.count("PlayerKilled") == 1);
 	CHECK(info.manDown && range.count("PlayerDeath") == 0); // down, still revivable
+	// The kill line names the weapon whose round dealt the damage (0x005b7130), not what is in hand later (a thrown motion mine).
+	CHECK(shooter.killWeapon == "eu_ar_rifle");
 	CHECK(tick > 6 && tick < 30); // about 0.2 s: three rounds at 600 a minute, 20 m
 	const auto deathSounds = range.world->takeSounds();
 	CHECK(std::any_of(deathSounds.begin(), deathSounds.end(), [](const game::GameWorld::SoundEvent& sound) {

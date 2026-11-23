@@ -580,7 +580,13 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 	const auto meshName = t.settings().find("collisionMesh");
 	std::vector<uint32_t> ownMaterials;
 	if (meshName != t.settings().end()) {
-		if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files)) {
+		// A name no CollisionManager.createTemplate made is looked for beside
+		// the template's file, as the mesh loader's path (0x006d8740: the
+		// template's directory + name + ".collisionMesh").
+		const std::string& file = t.creationFile();
+		const size_t slash = file.find_last_of("/\\");
+		if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files,
+				slash == std::string::npos ? std::string() : file.substr(0, slash + 1))) {
 			ownMaterials = materialMap(t);
 			addStaticMesh(t, *mesh, ownMaterials, 0, rotation, position, owner, depth == 0);
 			// Its children's collisionPart instances are of its mesh
@@ -2542,7 +2548,14 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		// crouched or prone soldier no longer shoots from a standing height.
 		const SoldierPose firingPose = player.input.pose;
 		const float eyeAboveBody = firingPose == SoldierPose::Prone ? 0.6f - 1.10f : firingPose == SoldierPose::Crouch ? 0.6f - 0.52f : 0.6f;
-		p.origin = (seated ? seatedEye : body.position + physics::Vec3 {0, eyeAboveBody, 0}) + straight * 0.5f;
+		const physics::Vec3 eye = seated ? seatedEye : body.position + physics::Vec3 {0, eyeAboveBody, 0};
+		p.origin = eye + straight * 0.5f;
+		// Beside a thin solid (a door shield, the portable shield) the 0.5 m start lies past its surface, which no ray from
+		// there crosses: the round starts at the eye then, so it meets the face as every shot from further away does.
+		physics::CollisionWorld::Hit across {};
+		if (m_projectileCollision.raycastFront(eye, p.origin, across)) {
+			p.origin = eye;
+		}
 		p.position = p.origin;
 		// The launch (0x005f31d0): the speed along the aim plus the root node's
 		// reported velocity (slot 0x64, +0x78: the last step's displacement x 30,
@@ -2563,6 +2576,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 		p.timeLeft = player.projectile->timeToLive.sample(m_random);
 		p.shooter = player.object;
 		p.player = player.id;
+		p.weaponName = player.weaponTemplate;
 		p.team = player.team;
 		p.yaw = look;
 		p.keepProjectiles = player.weapon->settings().keepProjectiles;
@@ -2924,14 +2938,18 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 		bool out = false;
 		physics::Vec3 exit = hit.point;
 		uint32_t exitMaterial = hit.material;
+		// The way out (the object's slot 0x7c at 0x005eb094 over the hit to
+		// hit + d x 2.1 r, |t + 2.1 r| its thickness): found from the far end
+		// back, the first face met from its front, so a hit right on a thin
+		// pair of faces (Chicken_Wire_Thin's 3 mm) still finds its back face.
 		if (hitBody && hitBody->projectileMesh && !soldier) {
 			const physics::Mat3& turn = hitBody->body.rotation;
 			const physics::Vec3 at = hitBody->body.position;
-			physics::Vec3 start = turn.untransform(hit.point + d * 0.01f - at);
-			const physics::Vec3 end = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
+			physics::Vec3 start = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
+			const physics::Vec3 end = turn.untransform(hit.point - at);
 			for (int tries = 0; tries < 8; ++tries) {
 				physics::CollisionWorld::Hit face {};
-				if (!raycastBody(*hitBody, start, end, face)) {
+				if (!raycastBody(*hitBody, start, end, face, nullptr, true)) {
 					break;
 				}
 				const physics::Vec3 local = start + (end - start) * face.fraction;
@@ -2942,15 +2960,14 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 					out = true;
 					break;
 				}
-				start = local + turn.untransform(d) * 0.01f; // another object's face first: on past it
+				start = local - turn.untransform(d) * 0.01f; // another object's face first: on past it
 			}
 		} else if (!soldier) {
 			const auto r = m_staticProjectileRadius.find(hitObject);
-			physics::Vec3 start = hit.point + d * 0.01f;
-			const physics::Vec3 end = hit.point + d * (2.1f * (r != m_staticProjectileRadius.end() ? r->second : 1.0f));
+			physics::Vec3 start = hit.point + d * (2.1f * (r != m_staticProjectileRadius.end() ? r->second : 1.0f));
 			for (int tries = 0; tries < 8; ++tries) {
 				physics::CollisionWorld::Hit face {};
-				if (!m_projectileCollision.raycast(start, end, face)) {
+				if (!m_projectileCollision.raycastFront(start, hit.point, face)) {
 					break;
 				}
 				if (face.owner == hitObject) {
@@ -2959,7 +2976,7 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 					out = true;
 					break;
 				}
-				start = face.point + d * 0.01f;
+				start = face.point - d * 0.01f;
 			}
 		}
 		if (out) {
@@ -4452,6 +4469,7 @@ void GameWorld::stepProjectiles(float seconds)
 		// centerOfCollisionOffset away (0x006c0f90, 0x006c1220).
 		const physics::Vec3 offset = p.settings ? p.settings->collisionOffset : physics::Vec3 {};
 		const physics::Vec3 from = p.position + offset;
+		m_damageWeapon = p.weaponName; // the kills it deals name its weapon, not what is in hand by then (a thrown motion mine)
 		if (!p.alive) {
 			continue; // set off already (remote charges)
 		}
@@ -5107,6 +5125,7 @@ void GameWorld::stepProjectiles(float seconds)
 			p.alive = through;
 		}
 	}
+	m_damageWeapon.clear();
 	m_projectiles.erase(std::remove_if(m_projectiles.begin(), m_projectiles.end(),
 							[](const Projectile& p) { return !p.alive; }),
 		m_projectiles.end());
@@ -5650,6 +5669,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	for (const Player::Carried& item : player->carried) {
 		info.carried.emplace_back(item.slot, item.name);
 	}
+	info.killWeapon = player->killWeapon;
 	if (player->inHand >= 0 && static_cast<size_t>(player->inHand) < player->carried.size()) {
 		info.inHandSlot = player->carried[static_cast<size_t>(player->inHand)].slot;
 	}
@@ -8327,6 +8347,7 @@ void GameWorld::kill(Player& victim, Player* attacker, uint32_t weapon)
 		if (!weapon) {
 			weapon = attacker->weaponObject;
 		}
+		attacker->killWeapon = m_damageWeapon;
 	}
 	raise("PlayerKilled", {ScriptValue::player(victim.id),
 							  attacker ? ScriptValue::player(attacker->id) : ScriptValue::none(),
@@ -12567,6 +12588,10 @@ void GameWorld::killTemplates(const PlayerInfo& killer, const world::ObjectTempl
 			&& static_cast<size_t>(index) < seats[static_cast<size_t>(killer.seat)].weapons.size()) {
 			weapon = m_templates.find(seats[static_cast<size_t>(killer.seat)].weapons[static_cast<size_t>(index)].weapon);
 		}
+		return;
+	}
+	if (!killer.killWeapon.empty()) {
+		weapon = m_templates.find(killer.killWeapon);
 		return;
 	}
 	for (const auto& [slot, name] : killer.carried) {

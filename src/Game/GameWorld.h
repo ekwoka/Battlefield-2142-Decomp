@@ -641,6 +641,7 @@ public:
 		physics::Vec3 velocity;
 		std::vector<std::pair<int, std::string>> carried; // (slot, weapon template)
 		int inHandSlot = 0;
+		std::string killWeapon; // see Player::killWeapon
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
 		float stamina = 1; // the sprint's (SprintStamina, the soldier's +0x378), 0..1
 		bool sprinting = false; // the sprint on (PCO vtable 0x100)
@@ -3830,6 +3831,7 @@ private:
 		int seat = -1;            // its seat (0 the driver's)
 		bool switchHeld = false;
 		std::string weaponTemplate;
+		std::string killWeapon;   // the template of the weapon that dealt its last kill's damage (empty: the item in hand)
 		int roundsFired = 0;      // since the scripts last cleared them
 		int roundsHit = 0;
 		bool useHeld = false;
@@ -4145,6 +4147,7 @@ private:
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
 		int attacker = -1, bool splash = false, // the attacking player; an explosion's splash
 		const physics::Vec3* source = nullptr); // where the hit came from (the hit direction)
+	std::string m_damageWeapon; // the weapon template of the round being stepped
 	std::vector<std::unique_ptr<Player>> m_players; // by id
 	Player* m_player = nullptr; // the local player
 	bool m_addingLocal = false; // spawnPlayer is adding it (addPlayer sets m_player before PlayerConnect)
