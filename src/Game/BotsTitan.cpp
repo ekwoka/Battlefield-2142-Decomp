@@ -304,6 +304,14 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
 	float nearest = 1e9f;
 	int nearestCell = -1;
+	// A Titan part's spots are those its rounds reach: the first face of the
+	// projectile LOD on the way to the middle of its faces is its own (not a
+	// window's glass, a frame or the desk in front of it).
+	physics::Vec3 aim;
+	const bool aimed = !nearestOnly && entryRadius <= 0 && m_world.titanPartAimPoint(part, aim);
+	// A part none of whose spots meets that test (the core, walled in by the hull) is shot from any distance its rounds reach it.
+	for (int pass = 0; pass < (aimed ? 2 : 1) && open.empty(); ++pass) {
+	const bool shot = aimed && pass == 0;
 	for (size_t c = 0; c < g.cells.size(); ++c) {
 		const physics::Vec3 eye = g.cells[c].at + physics::Vec3 {0, 1.5f, 0};
 		const float d = std::sqrt(physics::lengthSquared(point - eye));
@@ -320,10 +328,21 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 		const float reach = std::max(0.0f, entryRadius - kCell);
 		const bool inEntry = entryRadius > 0
 			&& physics::lengthSquared(point - (g.cells[c].at + physics::Vec3 {0, 1, 0})) <= reach * reach;
-		if (inEntry || (!nearestOnly && d >= kFireNear && d <= kFireFar && (!m_world.titanLocalRay(titan.object, team, eye, point, f) || f * d > d - 1.0f))) {
+		const float toAim = shot ? std::sqrt(physics::lengthSquared(aim - eye)) : 0.0f;
+		// Pass 2 (a part walled in by the hull, the core): any distance its rounds reach it from.
+		const float nearLimit = pass == 0 ? kFireNear : 0.0f;
+		const float toAim2 = std::sqrt(physics::lengthSquared(aim - eye));
+		const bool sees = aimed && pass == 1 ? toAim2 >= 1.0f && toAim2 <= kFireFar
+				&& m_world.titanLocalShot(titan.object, eye, aim + (aim - eye) * (0.5f / toAim2)) == part
+			: shot ? toAim >= nearLimit && toAim <= kFireFar
+				&& m_world.titanLocalShot(titan.object, eye, aim + (aim - eye) * (0.5f / toAim)) == part
+							   : d >= kFireNear && d <= kFireFar
+				&& (!m_world.titanLocalRay(titan.object, team, eye, point, f) || f * d > d - 1.0f);
+		if (inEntry || (!nearestOnly && sees)) {
 			field[c] = 0;
 			open.push({0, static_cast<int>(c)});
 		}
+	}
 	}
 	if (open.empty() && nearestCell >= 0 && entryRadius <= 0) {
 		field[static_cast<size_t>(nearestCell)] = 0;
@@ -541,22 +560,71 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		return !own && titanLeave(bot, self, input, seconds, *titan);
 	}
 	bot.behaviour = own ? "TitanDefend" : "TitanAttack";
+	// A boarder's gun: the one in hand while it has rounds (magazine or reserve), else the carried gun with
+	// rounds left that hurts armour most (the ordinary weapon handling would take the dry primary back); none
+	// left, off the Titan (a new life brings rounds) rather than standing there for good.
+	bool loaded = false, primaryDry = false;
+	int spare = 0;
+	if (!own) {
+		float spareStrength = -1;
+		for (const GameWorld::WeaponAmmo& w : m_world.weaponAmmo(self.id)) {
+			const WeaponAi ai = weaponAi(w.weapon);
+			const bool gun = ai.type == WeaponAi::FireArm || ai.type == WeaponAi::Sniper || ai.type == WeaponAi::FireAndForget;
+			for (const auto& [slot, name] : self.carried) {
+				if (name != w.weapon) {
+					continue;
+				}
+				primaryDry = primaryDry || (slot == 3 && w.rounds <= 0);
+				if (gun && w.rounds > 0 && ai.strength[2] > spareStrength) {
+					spare = slot;
+					spareStrength = ai.strength[2];
+				}
+			}
+			loaded = loaded || (gun && w.inHand && w.rounds > 0);
+		}
+		if (!loaded && !spare) {
+			return titanLeave(bot, self, input, seconds, *titan);
+		}
+	}
+	const auto gunInHand = [&] {
+		if (!own && !loaded) {
+			input.selectItem = spare;
+		} else if (!own && primaryDry && input.selectItem == 3) {
+			input.selectItem = 0;
+		}
+	};
 	const float here = (*field)[static_cast<size_t>(cell)];
 	if (here <= 0) {
 		// At a spot that sees it: a defender waits; an attacker shoots in
 		// bursts (a tap for a single-shot weapon, a burst for an automatic).
-		if (!own) {
-			aim(bot, self, goal->position, {}, true, {}, input, seconds);
-			const physics::Vec3 d = goal->position - (self.position + physics::Vec3 {0, 1.6f, 0});
-			const float yawOff = std::remainder(std::atan2(d.x, d.z) * 57.29578f - (self.yaw + input.turn), 360.0f);
-			input.fire = std::fabs(yawOff) < 4 && std::fmod(m_time, 0.8f) < 0.6f && self.roundsInMag != 0 && !self.reloading;
-			input.reload = self.roundsInMag == 0 && !bot.reloadedLast;
-		}
 		input.throttle = input.strafe = 0;
+		if (!own) {
+			physics::Vec3 at = goal->position, local;
+			if (m_world.titanPartAimPoint(goal->id, local)) {
+				at = m_world.titanToWorld(titan->object, local); // the middle of its faces, which the spot's rounds reach
+			}
+			aim(bot, self, at, {}, true, {}, input, seconds);
+			const physics::Vec3 eye = self.position + physics::Vec3 {0, 1.6f, 0};
+			const physics::Vec3 d = at - eye;
+			const float yawOff = std::remainder(std::atan2(d.x, d.z) * 57.29578f - (self.yaw + input.turn), 360.0f);
+			// A teammate in the line of fire (two boarders on one spot): no shot, a step aside.
+			bool mate = false;
+			for (const GameWorld::PlayerInfo& p : m_players) {
+				const physics::Vec3 chest = p.position + physics::Vec3 {0, 1.2f, 0};
+				const float along = std::clamp(physics::dot(chest - eye, d) / std::max(physics::lengthSquared(d), 1e-4f), 0.0f, 1.0f);
+				mate = mate || (p.id != self.id && p.alive && p.team == self.team && !p.vehicle && physics::lengthSquared(eye + d * along - chest) < 0.7f * 0.7f);
+			}
+			input.strafe = mate ? (self.id % 2 ? 1.0f : -1.0f) : 0.0f;
+			input.fire = loaded && !mate && std::fabs(yawOff) < 4 && std::fmod(m_time, 0.8f) < 0.6f && self.roundsInMag != 0 && !self.reloading;
+			input.reload = loaded && self.roundsInMag == 0 && !bot.reloadedLast;
+		}
 		handleWeapon(bot, self, input);
+		gunInHand();
 		return true;
 	}
-	return titanWalk(bot, self, input, seconds, g, *titan, *field) || (!own && titanLeave(bot, self, input, seconds, *titan));
+	const bool walked = titanWalk(bot, self, input, seconds, g, *titan, *field);
+	gunInHand();
+	return walked || (!own && titanLeave(bot, self, input, seconds, *titan));
 }
 
 // An engineer aboard its own Titan with no enemy aboard mends its parts with
@@ -2057,7 +2125,9 @@ void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool s
 			++enemies;
 		}
 	}
-	if (enemies >= 2) {
+	// Not in Titan mode: the commander screen shows the Titan's move where the artillery strike's button would be
+	// (HudElementsCommanderComm.con, GameMode 1 or 3), so a human commander has no strike there.
+	if (enemies >= 2 && m_world.gameMode() != "gpm_ti") {
 		const physics::Vec3 middle = sum * (1.0f / static_cast<float>(enemies));
 		if (count(3 - team, middle, 15, false) >= 2 && count(team, middle, 40, false) == 0) {
 			use(A::Artillery, middle); // commander_orbital_strike (RCArtillery)

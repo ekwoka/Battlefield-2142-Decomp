@@ -987,10 +987,14 @@ TEST(Titan_BotCommanderMovesTheTitans)
 			settings.botTitan = &enhanced;
 			settings.botCommander = &commander;
 			game::BotManager bots(*level.world, settings);
-			bool uav[3] = {};
+			bool uav[3] = {}, strike[3] = {};
 			level.afterTick = [&] {
 				bots.update(1 / 30.0f);
 				for (int team : {1, 2}) {
+					// Titan mode's commander screen shows the Titan's move where the artillery strike would be
+					// (HudElementsCommanderComm.con, GameMode 1): no strike for the virtual commander.
+					const auto artillery = level.world->abilityState(team, game::GameWorld::CommanderAbility::Artillery);
+					strike[team] = strike[team] || (artillery.available && !artillery.ready) || artillery.active;
 					physics::Vec3 at;
 					float radius = 0;
 					uav[team] = uav[team] || level.world->uavArea(team, at, radius);
@@ -1036,6 +1040,7 @@ TEST(Titan_BotCommanderMovesTheTitans)
 				CHECK(ordered > 30 && moved > 100 && silo <= 125);
 				CHECK(!blocks(team, titan->target));
 				CHECK(uav[team]);
+				CHECK(!strike[team]);
 			}
 			if (!commander) continue;
 			// The silo each Titan went to, taken: its missile reaches the enemy, not its own Titan above it. (No bots
@@ -1236,4 +1241,120 @@ TEST(CampGibraltar_ShotsAtAnAdjacentFenceHit)
 		return;
 	}
 	CHECK(false);
+}
+
+// enhanced.botTitan: boarders set down on the enemy Titan's deck with its
+// shield down shoot its consoles from spots their rounds reach (not through
+// a window's glass), and with the consoles gone, from inside the core room, the core.
+TEST(Titan_BotBoardersDestroyConsolesAndCore)
+{
+	REMASTER_ONLY();
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	const char* mod = "mods/Project_Remaster_v17_Final";
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::BotSettings settings;
+	loadAircraftAi(level, settings);
+	const bool enhanced = true;
+	settings.enhanced = &enhanced;
+	settings.botTitan = &enhanced;
+	game::BotManager bots(*level.world, settings);
+	const auto* found = level.titan(2);
+	CHECK(found != nullptr);
+	if (!found) return;
+	const uint32_t eu = found->object;
+	level.world->setHitPoints(eu, found->maxHitPoints * 0.59f);
+	level.run(1);
+	const std::vector<physics::Vec3> spots = bots.titanLandingSpots(2, 1);
+	CHECK(!spots.empty());
+	if (spots.empty()) return;
+	std::vector<int> boarders;
+	for (int i = 0; i < 6; ++i) {
+		const int id = level.world->addPlayer("Boarder" + std::to_string(i), 1, true);
+		CHECK(level.world->spawnSoldier(id));
+		game::GameWorld::PlayerInfo info;
+		CHECK(level.world->playerInfo(id, info));
+		CHECK(level.world->setSoldierPosition(info.soldier, spots[(i * spots.size()) / 6] + physics::Vec3 {0, 1, 0}));
+		boarders.push_back(id);
+	}
+	float t = 0, consolesAt = -1, coreAt = -1, coreLeft = 1e9f;
+	size_t respawns = 0;
+	const bool diag = std::getenv("BF2142_TITAN_DIAG") != nullptr;
+	if (diag) {
+		for (size_t i = 0; i < 6; ++i) {
+			const physics::Vec3 l = level.world->titanToLocal(eu, spots[(i * spots.size()) / 6]);
+			std::fprintf(stderr, "  spot %.1f %.1f %.1f of %zu\n", l.x, l.y, l.z, spots.size());
+		}
+		level.sink = [&](const std::string& event, const game::ScriptArgs&) {
+			if (event == "PlayerKilled") std::fprintf(stderr, "  %.1f s: %s\n", t, event.c_str());
+		};
+	}
+	level.afterTick = [&] {
+		bots.update(1 / 30.0f);
+		t += 1 / 30.0f;
+		const auto parts = level.world->titanParts(2, eu);
+		int consoles = 0;
+		bool core = false;
+		for (const auto& p : parts) {
+			consoles += p.kind == game::GameWorld::TitanPartInfo::Console && !p.wreck;
+			core = core || (p.kind == game::GameWorld::TitanPartInfo::Core && p.wreck);
+		}
+		if (consoles == 0 && consolesAt < 0) consolesAt = t;
+		if (core && coreAt < 0) coreAt = t;
+		for (const auto& p : parts) {
+			if (p.kind == game::GameWorld::TitanPartInfo::Core) coreLeft = std::min(coreLeft, p.hitPoints);
+		}
+		// Kept alive (the test is the boarders' way and aim, not their fights); one that died or leaves (its
+		// rounds spent) comes back with a new kit on the next landing spot, as a respawn on a transport would.
+		for (int id : boarders) {
+			game::GameWorld::PlayerInfo info;
+			if (!level.world->playerInfo(id, info)) continue;
+			if (info.alive && bots.behaviour(id) == "TitanLeave") {
+				level.world->setHitPoints(info.soldier, 0);
+				continue;
+			}
+			if (info.alive) {
+				level.world->setHitPoints(info.soldier, 100);
+			} else if (level.world->spawnSoldier(id) && level.world->playerInfo(id, info)) {
+				level.world->setSoldierPosition(info.soldier, spots[(++respawns * 7919) % spots.size()] + physics::Vec3 {0, 1, 0});
+			}
+		}
+		const int tick = static_cast<int>(std::lround(t * 30));
+		if (diag && tick % (30 * 15) == 0) {
+			std::fprintf(stderr, "  %.0f s: consoles", t);
+			for (const auto& p : parts) {
+				if (p.kind == game::GameWorld::TitanPartInfo::Console || p.kind == game::GameWorld::TitanPartInfo::Core) {
+					std::fprintf(stderr, " %s %.0f/%.0f", p.kind == game::GameWorld::TitanPartInfo::Core ? "core" : "c", p.hitPoints, p.maxHitPoints);
+				}
+			}
+			std::fprintf(stderr, "\n");
+			for (const auto& p : parts) {
+				physics::Vec3 aim;
+				if (p.kind == game::GameWorld::TitanPartInfo::Console && level.world->titanPartAimPoint(p.id, aim)) {
+					const physics::Vec3 l = level.world->titanToLocal(eu, p.position);
+					std::fprintf(stderr, "    console %x %s at %.1f %.1f %.1f aim %.1f %.1f %.1f\n", p.id, p.name.c_str(), l.x, l.y, l.z, aim.x, aim.y, aim.z);
+				}
+			}
+			for (int id : boarders) {
+				game::GameWorld::PlayerInfo info;
+				level.world->playerInfo(id, info);
+				const physics::Vec3 l = level.world->titanToLocal(eu, info.position);
+				std::string ammo;
+				for (const auto& w : level.world->weaponAmmo(id)) {
+					ammo += " " + w.weapon + (w.inHand ? "*" : "") + " " + std::to_string(w.inMag) + "/" + std::to_string(w.rounds);
+				}
+				std::fprintf(stderr, "    %d %s alive %d local %.1f %.1f %.1f fire %d mag %d:%s\n", id, bots.behaviour(id).c_str(), info.alive, l.x, l.y, l.z,
+					bots.lastInputFor(id).fire, info.roundsInMag, ammo.c_str());
+			}
+		}
+	};
+	level.run(600);
+	std::fprintf(stderr, "  consoles down at %.0f s, core at %.0f s, %zu respawns\n", consolesAt, coreAt, respawns);
+	CHECK(consolesAt > 0);
+	// The core is 40000 hit points to small arms: the boarders reach it and hurt it (the whole of it takes a
+	// long while).
+	std::fprintf(stderr, "  core down to %.0f\n", coreLeft);
+	CHECK(coreLeft < 38000);
 }
