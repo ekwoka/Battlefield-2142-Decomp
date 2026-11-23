@@ -2930,14 +2930,18 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 		bool out = false;
 		physics::Vec3 exit = hit.point;
 		uint32_t exitMaterial = hit.material;
+		// The way out (the object's slot 0x7c at 0x005eb094 over the hit to
+		// hit + d x 2.1 r, |t + 2.1 r| its thickness): found from the far end
+		// back, the first face met from its front, so a hit right on a thin
+		// pair of faces (Chicken_Wire_Thin's 3 mm) still finds its back face.
 		if (hitBody && hitBody->projectileMesh && !soldier) {
 			const physics::Mat3& turn = hitBody->body.rotation;
 			const physics::Vec3 at = hitBody->body.position;
-			physics::Vec3 start = turn.untransform(hit.point + d * 0.01f - at);
-			const physics::Vec3 end = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
+			physics::Vec3 start = turn.untransform(hit.point + d * (2.1f * hitBody->radius) - at);
+			const physics::Vec3 end = turn.untransform(hit.point - at);
 			for (int tries = 0; tries < 8; ++tries) {
 				physics::CollisionWorld::Hit face {};
-				if (!raycastBody(*hitBody, start, end, face)) {
+				if (!raycastBody(*hitBody, start, end, face, nullptr, true)) {
 					break;
 				}
 				const physics::Vec3 local = start + (end - start) * face.fraction;
@@ -2948,15 +2952,14 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 					out = true;
 					break;
 				}
-				start = local + turn.untransform(d) * 0.01f; // another object's face first: on past it
+				start = local - turn.untransform(d) * 0.01f; // another object's face first: on past it
 			}
 		} else if (!soldier) {
 			const auto r = m_staticProjectileRadius.find(hitObject);
-			physics::Vec3 start = hit.point + d * 0.01f;
-			const physics::Vec3 end = hit.point + d * (2.1f * (r != m_staticProjectileRadius.end() ? r->second : 1.0f));
+			physics::Vec3 start = hit.point + d * (2.1f * (r != m_staticProjectileRadius.end() ? r->second : 1.0f));
 			for (int tries = 0; tries < 8; ++tries) {
 				physics::CollisionWorld::Hit face {};
-				if (!m_projectileCollision.raycast(start, end, face)) {
+				if (!m_projectileCollision.raycastFront(start, hit.point, face)) {
 					break;
 				}
 				if (face.owner == hitObject) {
@@ -2965,7 +2968,7 @@ bool GameWorld::penetrate(Projectile& p, const physics::CollisionWorld::Hit& hit
 					out = true;
 					break;
 				}
-				start = face.point + d * 0.01f;
+				start = face.point - d * 0.01f;
 			}
 		}
 		if (out) {

@@ -1169,3 +1169,30 @@ TEST(Titan_RepairToolOnGunStationMendsTheGun)
 	CHECK(tried > 0);
 	CHECK(mended == 6);
 }
+
+// Camp Gibraltar's chain-link fence (Chicken_Wire_Thin, a 3 mm pair of
+// faces) lets rounds through: the way out (slot 0x7c, 0x005eb094) is the far
+// face met from its front, found even when the hit lies on the pair.
+TEST(CampGibraltar_BulletsPassTheChainLinkFence)
+{
+	REMASTER_ONLY();
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, true, "mods/Project_Remaster_v17_Final", true, nullptr, "gpm_cq");
+	if (!level.loaded) return;
+	for (const auto& object : level.objects.objects()) {
+		if (object->objectTemplate()->name() != "fence_industry_16m") continue;
+		const auto p = object->position();
+		const float yaw = object->rotation().x * 3.14159265f / 180.0f;
+		const physics::Vec3 across {std::cos(yaw), 0, -std::sin(yaw)};
+		const physics::Vec3 from = physics::Vec3 {p.x, p.y + 1.0f, p.z} + across * -5.0f + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)} * 0.3f;
+		level.world->launchProjectile("eu_smg_Projectile", from, across * 400.0f);
+		for (int i = 0; i < 4; ++i) level.world->tick(1 / 30.0f);
+		bool fence = false;
+		for (const auto& impact : level.world->impacts()) fence = fence || impact.object == object->id();
+		CHECK(fence);
+		CHECK(level.world->impacts().size() > 1 || !level.world->projectiles().empty());
+		return;
+	}
+	CHECK(false);
+}
