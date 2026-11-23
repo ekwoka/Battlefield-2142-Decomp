@@ -3650,7 +3650,7 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 			const bool shade = shadowed && !group.additive;
 			SDL_BindGPUGraphicsPipeline(pass, shade ? m_gpu.enhancedPipelines().particle : m_gpu.particlePipeline(group.additive));
 			SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
-			fog.material[3] = group.fogged ? 1.0f : 0.0f; // particle.frag: fixed-function fog
+			fog.material[3] = (group.fogged ? 1.0f : 0.0f) + (group.additive ? 2.0f : 0.0f); // particle.frag: fixed-function fog, additive mask
 			SDL_PushGPUFragmentUniformData(commands, 0, &fog, sizeof(fog));
 			if (shade) {
 				SDL_PushGPUFragmentUniformData(commands, 1, &m_enh.shadows, sizeof(m_enh.shadows));
