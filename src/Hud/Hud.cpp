@@ -132,7 +132,7 @@ struct HudManager::Node {
 	int barType = 3;
 	std::string barTextures[2];
 	std::string valueVariable;
-	int snap = 0;
+	int snap = 1; // pixels; the bar constructor's default (0x007eac2c)
 	bool inverse = false;
 	float spanMin = 0, spanMax = 1;
 	// Lists (Bf2NewListBoxNode): rows from the game's data source
@@ -754,15 +754,29 @@ void HudManager::draw(Node& node, float originX, float originY, float alpha, con
 		}
 		value = std::clamp(node.inverse ? 1 - value : value, 0.0f, 1.0f);
 		const float sweepValue = value; // the wedge takes the unsnapped value (0x007eb2c0 -> 0x007eafc0)
-		if (node.snap > 0) {
-			value = std::floor(value * static_cast<float>(node.snap) + 0.5f) / static_cast<float>(node.snap);
-		}
 		// The border (top, bottom, left, right): the fill takes the inner
 		// rectangle, filling it along the bar (the conquest screens' point
 		// bars split one node, "0 0 17 76" from the right and "0 0 77 15"
 		// from the left, 152 wide).
 		const float bx0 = x + static_cast<float>(node.border[2]), bx1 = x + w - static_cast<float>(node.border[3]);
 		const float by0 = y + static_cast<float>(node.border[0]), by1 = y + h - static_cast<float>(node.border[1]);
+		// Snap is in HUD pixels (0x007eb3b7..0x007eb676): the empty length
+		// len (1 - value) / snap is floored filling up or from the right and
+		// ceiled filling down or from the left (snapDir swaps), times snap;
+		// at value 0 the whole bar is empty. The 105-pixel snap-4 bars move
+		// in 4-pixel steps, not quarters.
+		if (node.snap > 0) {
+			const float len = node.barType == 0 || node.barType == 1 ? by1 - by0 : bx1 - bx0;
+			if (len > 0) {
+				float empty = std::trunc(len);
+				if (value > 0) {
+					const float cells = len * (1 - value) / static_cast<float>(node.snap);
+					const bool ceiled = (node.barType == 1 || node.barType >= 3) != node.barSnapDir;
+					empty = (ceiled ? std::ceil(cells) : std::floor(cells)) * static_cast<float>(node.snap);
+				}
+				value = std::max(0.0f, len - empty) / len;
+			}
+		}
 		const float u0 = w > 0 ? (bx0 - x) / w : 0, u1 = w > 0 ? (bx1 - x) / w : 1;
 		const float v0 = h > 0 ? (by0 - y) / h : 0, v1 = h > 0 ? (by1 - y) / h : 1;
 		if (value > 0 && bx1 > bx0 && by1 > by0) {

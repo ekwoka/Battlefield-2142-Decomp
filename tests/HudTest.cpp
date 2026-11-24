@@ -107,6 +107,58 @@ TEST(Hud_ShowLogicAndBars)
 	CHECK(manager.frame(0).empty());
 }
 
+// setBarNodeSnap is pixels (0x007eb2c0): the empty length rounds to whole
+// snap cells, ceiled from the left, floored from the right, swapped by
+// snapDir. The HUD's 105-pixel snap-4 bars move in 4-pixel steps.
+TEST(Hud_BarSnapIsPixels)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global Bars",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+			 "hudBuilder.createBarNode Bars Left 3 100 0 105 12",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/left.tga",
+			 "hudBuilder.setBarNodeValueVariable Value",
+			 "hudBuilder.setBarNodeSnap 4",
+			 "hudBuilder.createBarNode Bars Right 2 100 20 105 12",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/right.tga",
+			 "hudBuilder.setBarNodeValueVariable Value",
+			 "hudBuilder.setBarNodeSnap 4",
+			 "hudBuilder.createBarNode Bars LeftDir 3 100 40 105 12",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/leftdir.tga",
+			 "hudBuilder.setBarNodeValueVariable Value",
+			 "hudBuilder.setBarNodeSnap 4",
+			 "hudBuilder.setBarNodeSnapDir 1",
+			 "hudBuilder.createBarNode Bars Default 3 100 60 200 10",
+			 "hudBuilder.setBarNodeTexture 1 Ingame/default.tga",
+			 "hudBuilder.setBarNodeValueVariable Value",
+		 }) {
+		CHECK(console.execute(line, out) != ConsoleResult::Error);
+	}
+	manager.set("Value", 0.6f); // 42 empty pixels: 10.5 cells
+	int seen = 0;
+	for (const auto& q : manager.frame(0)) {
+		if (q.texture.find("left.tga") != std::string::npos && q.texture.find("leftdir") == std::string::npos) {
+			++seen;
+			CHECK(q.x0 == 100 && q.x1 == 161); // 11 cells empty
+			CHECK(std::abs(q.u1 - 61 / 105.0f) < 1e-5f);
+		} else if (q.texture.find("right.tga") != std::string::npos) {
+			++seen;
+			CHECK(q.x0 == 140 && q.x1 == 205); // 10 cells empty
+		} else if (q.texture.find("leftdir.tga") != std::string::npos) {
+			++seen;
+			CHECK(q.x1 == 165); // floored by snapDir
+		} else if (q.texture.find("default.tga") != std::string::npos) {
+			++seen;
+			CHECK(q.x1 == 220); // default snap 1: 80 whole pixels empty
+		}
+	}
+	CHECK(seen == 4);
+}
+
 TEST(Hud_SameNamedListKeepsItsPictureParent)
 {
 	Console console;
