@@ -492,7 +492,8 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 	m_buttonHits.clear();
 	m_listHits.clear();
 	m_mouseOverHits.clear();
-	// A hidden mini-map (the commander's collapsed tab) takes no clicks.
+	// Hidden map / mini-map views (e.g. CustomInfo covering Minimap) take no clicks.
+	m_mapHits.clear();
 	m_miniMapView.drawn = false;
 	m_clock += seconds;
 	++m_frameNumber;
@@ -503,6 +504,9 @@ std::vector<HudQuad> HudManager::frame(float seconds)
 		for (Node* root : m_roots) {
 			draw(*root, 0, 0, 1, nullptr, seconds, quads);
 		}
+	}
+	if (m_mapView.frame != m_frameNumber) {
+		m_mapView.drawn = false;
 	}
 	m_numbers["affectedbyempshow"] = 0;
 	// Run after drawing (commands may change the tree); leaves before enters, so moving
@@ -1512,9 +1516,10 @@ void HudManager::setMap(const std::string& texture, float originX, float originZ
 // their event 3 commands (the kit screen's drop targets, 0x00798cf0).
 void HudManager::release(float x, float y)
 {
-	for (const MouseOverHit& hit : m_mouseOverHits) {
-		if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) {
-			runCommands(hit.node->mouseOverCommands, 3);
+	// Reverse draw order so topmost overlapping drop targets win first.
+	for (auto it = m_mouseOverHits.rbegin(); it != m_mouseOverHits.rend(); ++it) {
+		if (x >= it->x0 && x <= it->x1 && y >= it->y0 && y <= it->y1) {
+			runCommands(it->node->mouseOverCommands, 3);
 		}
 	}
 }
@@ -2028,7 +2033,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			out.push_back(layer);
 		}
 	}
-	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH, mapTurn};
+	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH, mapTurn, m_frameNumber};
 	std::vector<Hit> labelRects;
 	std::vector<HudQuad> tooltips; // drawn last, over the later markers' icons
 	for (const MapMarker& marker : m_mapMarkers) {

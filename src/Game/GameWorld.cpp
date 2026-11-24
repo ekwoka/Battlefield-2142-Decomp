@@ -6974,6 +6974,14 @@ void GameWorld::setUnlocks(int id, std::vector<std::string> containers, bool all
 	}
 }
 
+void GameWorld::setChosenUnlocks(int id, std::vector<std::string> containers)
+{
+	if (Player* player = findPlayer(id)) {
+		player->unlocked = std::move(containers);
+		player->unlockChosen = true;
+	}
+}
+
 // The bot's unlocks (GameWorld.h). The adaptor's slot 40 (0x008a5b90,
 // kit k, levels l0..l3) on the bot's player:
 //   - the kit's chosen unlocks cleared (player slot 0x2c4, 0x005995f0);

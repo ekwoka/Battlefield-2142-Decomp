@@ -5456,7 +5456,7 @@ int runGame(Options& options, Session& session)
 			if (round.localPlayer() < 0) {
 				return;
 			}
-			round.setUnlocks(round.localPlayer(), containers, false);
+			round.setChosenUnlocks(round.localPlayer(), containers);
 			const game::Team& team = gameLogic.team(round.playerTeam() == 1 ? 1 : 2);
 			if (localKit >= 0 && static_cast<size_t>(localKit) < team.kits.size()) {
 				const game::Kit& kit = team.kits[static_cast<size_t>(localKit)];

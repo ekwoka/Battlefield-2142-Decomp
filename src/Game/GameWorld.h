@@ -1077,6 +1077,9 @@ public:
 	// unlocked item for it (the customise screen's choice is not in yet).
 	// Without a stats server nothing is unlocked; `all` unlocks everything.
 	void setUnlocks(int player, std::vector<std::string> containers, bool all = false);
+	// Applies the customise screen's chosen containers without clearing
+	// `allUnlocked` (keeps passive abilities and replaceWithoutEquip items).
+	void setChosenUnlocks(int player, std::vector<std::string> containers);
 	// The unlocks the player owns besides those chosen (player slot 0x2a8):
 	// replaceWithoutEquip containers apply by them (the kit build 0x00570ab0).
 	void setOwnedUnlocks(int player, std::vector<std::string> containers);

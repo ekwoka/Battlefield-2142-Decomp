@@ -13,8 +13,9 @@
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusKits.h"
 #include "Main/HudMenus.h"
-#include "Render/TextureSuffix.h"
 #include "Main/MenuBindings.h"
+#include "Physics/CollisionTemplateManager.h"
+#include "Render/TextureSuffix.h"
 #include "Stats/Stats.h"
 #include "UI/Player/Natives.h"
 #include "World/Object.h"
@@ -447,6 +448,157 @@ TEST(HudLists_KitMenuDragAndDrop)
 	CHECK(hud.dragQuad(dragged) && dragged.texture == "Menu/HUD/Texture/c4.tga");
 	kits.endDrag();
 	CHECK(!hud.dragQuad(dragged));
+}
+
+// Hidden minimap markers must not linger in HudManager::mapMarkerAt() when
+// CustomInfo hides the map; overlapping drop MouseOverNodes (Remaster's
+// UnlockOneMouseOver / UnlockTwoMouseOver) must let the topmost slot win; and
+// setChosenUnlocks() must equip Active Camouflage without wiping allUnlocked
+// abilities/replacements.
+TEST(HudLists_CustomizeDragClearsHiddenMapAndPreservesAllUnlocked)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(4, "Kit");
+	templates.registerType(5, "GenericFireArm");
+	templates.registerType(6, "ItemContainer");
+	auto* cp = templates.create("ControlPoint", "Home");
+	cp->settings()["controlPointId"] = "1";
+	cp->settings()["team"] = "2";
+	objects.create(cp, {0, 0, 0});
+	auto* sp = templates.create("SpawnPoint", "Spawn");
+	objects.create(sp, {0, 1, 0})->setControlPointId(1);
+	templates.create("Soldier", "soldier")->settings()["armor.maxHitPoints"] = "100";
+
+	const auto make = [&](const char* type, const char* name, std::vector<std::pair<const char*, const char*>> settings,
+						  std::vector<const char*> children = {}) {
+		world::ObjectTemplate* t = templates.create(type, name);
+		for (const auto& [key, value] : settings) {
+			t->settings()[key] = value;
+		}
+		for (const char* child : children) {
+			t->children().push_back({child, {}, {}});
+		}
+		return t;
+	};
+	make("GenericFireArm", "sniper", {{"itemIndex", "3"}, {"weaponHud.unlockIcon", "sniper.tga"}});
+	make("GenericFireArm", "item_dummy", {{"itemIndex", "0"}});
+	make("GenericFireArm", "frag", {{"itemIndex", "4"}});
+	make("GenericFireArm", "mine", {{"itemIndex", "5"}, {"altItemIndex", "6"}, {"weaponHud.unlockIcon", "mine.tga"}});
+	make("GenericFireArm", "c4", {{"itemIndex", "5"}, {"altItemIndex", "6"}, {"weaponHud.unlockIcon", "c4.tga"}});
+	auto* camo = make("GenericFireArm", "Unl_Active_Camo",
+		{{"itemIndex", "5"}, {"altItemIndex", "6"}, {"weaponHud.unlockIcon", "camo.tga"}, {"ammo.magSize", "-1"},
+			{"ammo.nrOfMags", "-1"}, {"fire.roundsPerMinute", "1800"}, {"heatAddWhenFire", "0.005"}, {"coolDownPerSec", "0.08"},
+			{"overheatPenalty", "1.5"}});
+	camo->components().push_back("CamouflageAmmoComp");
+	make("ItemContainer", "Sni0", {{"unlockLevel", "0"}}, {"mine"});
+	make("ItemContainer", "SpecOp0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_Second"}}, {"c4"});
+	make("ItemContainer", "SpecOp2", {{"unlockLevel", "2"}, {"unlockBranch", "UB_Second"}}, {"Unl_Active_Camo"});
+	make("ItemContainer", "Player0",
+		{{"unlockLevel", "0"}, {"unlockBranch", "UB_Player"}, {"replaceItem.list", "item_dummy;"}, {"replaceWithoutEquip", "1"}},
+		{"frag"});
+	make("Kit", "EU_Recon", {}, {"sniper", "item_dummy", "Sni0", "SpecOp0", "SpecOp2", "Player0"});
+
+	io::FileManager files;
+	physics::CollisionTemplateManager collisionTemplates;
+	game::GameWorld round(templates, objects);
+	round.unlockAllByDefault = true;
+	physics::Ground ground;
+	ground.height = [](float, float) { return 0.0f; };
+	ground.heightAndNormal = [](float, float, physics::Vec3& n) {
+		n = {0, 1, 0};
+		return 0.0f;
+	};
+	ground.material = [](float, float) { return 0u; };
+	round.enablePhysics(files, collisionTemplates, ground);
+	game::GameLogic logic;
+	logic.team(2).kits.push_back({"EU_Recon", "soldier", ""});
+	round.startRound();
+	const int me = round.joinPlayer(2);
+	round.setKit(me, "EU_Recon", "soldier");
+
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.onEquip = [&](const std::vector<std::string>& items) { round.setChosenUnlocks(me, items); };
+	Console console;
+	hud::registerHudConsoleMethods(console, hud);
+	kits.bind(console);
+	std::string out;
+	hud.setCommandRunner([&](const std::string& command) { console.execute(command, out); });
+	for (const char* line : {
+			 "hudBuilder.createSplitNode Global MapSplit",
+			 "hudBuilder.setNodeLogicShowVariable AND CustomInfoShow 0",
+			 "hudBuilder.createMapNode MapSplit Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.createTransformNode Global CustomInfo 276 26 535 535",
+			 "hudBuilder.setNodeShowVariable CustomInfoShow",
+			 "hudBuilder.createMouseOverNode CustomInfo UnlockOneMouseOver 288 393 60 40",
+			 "hudBuilder.setMouseOverNodeConCmd \"kitInterface.selectDroppedItem 1\" 3",
+			 "hudBuilder.createMouseOverNode CustomInfo UnlockTwoMouseOver 339 393 60 40",
+			 "hudBuilder.setMouseOverNodeConCmd \"kitInterface.selectDroppedItem 2\" 3",
+			 "hudBuilder.createButtonNode CustomInfo KitEquipFive 420 275 43 43",
+			 "hudBuilder.setButtonNodeConCmd \"kitInterface.chooseKitCustom 2 2\" 0",
+			 "hudBuilder.setButtonNodeConCmd \"kitInterface.resetMousePic 1\" 3",
+			 "hudBuilder.createMouseOverNode Global ResetPicArea 0 0 800 600",
+			 "hudBuilder.setMouseOverNodeConCmd \"kitInterface.resetMousePic 1\" 3",
+		 }) {
+		CHECK(console.execute(line, out) == ConsoleResult::Ok);
+	}
+	hud.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	// Place a spawn marker directly underneath KitEquipFive (717, 322).
+	hud::HudManager::MapMarker spawn;
+	spawn.texture = "spawn.dds";
+	spawn.x = 366;
+	spawn.z = -74;
+	spawn.size = hud::HudManager::kSpawnMarkerSize;
+	spawn.id = 4;
+	hud.setMapMarkers({spawn});
+	hud.set("MapFullSize", 1);
+	kits.setUnlocked({}, true);
+	kits.update(2);
+	hud.frame(0);
+	CHECK(hud.mapMarkerAt(717, 322) == 4);
+
+	// Open Customize: map hides and stale map markers must disappear.
+	kits.chooseKitSelection(-1, 0);
+	kits.update(2);
+	hud.frame(0);
+	CHECK(hud.mapMarkerAt(717, 322) == -1);
+
+	// Click Active Camouflage and release on the overlap edge of UnlockTwoMouseOver (x=620, y=430).
+	CHECK(hud.click(717, 322));
+	hud.release(620, 430);
+	kits.endDrag();
+	kits.update(2);
+	kits.commit();
+	CHECK(kits.item(2, 2).active);
+	CHECK(hud.string("KitCustom1Icon") == "Ingame/GeneralIcons/empty.tga");
+	CHECK(hud.string("KitCustom2Icon") == "camo.tga");
+
+	// Spawn Recon: Active Camouflage is selectable and cloaks, and owned
+	// replaceWithoutEquip unlocks (frag grenade) remain intact.
+	CHECK(round.spawnSoldier(me));
+	game::GameWorld::PlayerInfo spawned;
+	CHECK(round.playerInfo(me, spawned));
+	CHECK(std::find(spawned.carried.begin(), spawned.carried.end(), std::make_pair(5, std::string("Unl_Active_Camo")))
+		!= spawned.carried.end());
+	CHECK(std::find(spawned.carried.begin(), spawned.carried.end(), std::make_pair(4, std::string("frag")))
+		!= spawned.carried.end());
+	game::SoldierInput in;
+	in.selectItem = 5;
+	round.setInput(me, in);
+	round.tick(1 / 30.0f);
+	in = {};
+	in.fire = true;
+	round.setInput(me, in);
+	round.tick(1 / 30.0f);
+	CHECK(round.playerInfo(me, spawned) && spawned.cloaked);
 }
 
 // The spawn screen's ability icons (0x00798b20, from the rebuild while

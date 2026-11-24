@@ -534,6 +534,7 @@ private:
 		float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 		float mapX = 0, mapY = 0, mapW = 1, mapH = 1;
 		float turn = 0; // radians at draw time
+		uint64_t frame = 0;
 	} m_mapView, m_miniMapView;
 	float m_mapReference[2] = {0, 0}; // the big map's size (setMaxiSize), the shown area's pixels
 	float m_mapZoomShown[2] = {1, 1}; // the map's zoom as last drawn (2.3^level / the area)
