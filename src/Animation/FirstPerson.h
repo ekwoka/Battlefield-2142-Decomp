@@ -234,6 +234,17 @@ public:
 	// it (0x008bc390); null when neither has one.
 	const CameraSpring* spring() const { return m_hasSpring ? &m_spring : nullptr; }
 	std::vector<std::string> playing() const;
+	// The footsteps' walk cycle seen in first person (0x005ef7f0 with the
+	// soldier's view +0x2f0 == 0): the held weapon's first-person system's
+	// (its animation component, slot 0x18(0) -> 0x1c), else the soldier's
+	// own (+0x2c4); -1 and -1 without a cycle.
+	void walkCycle(float& length, float& time) const
+	{
+		length = time = -1;
+		if (const AnimationState* state = m_weapon ? m_weapon.get() : m_soldier.get()) {
+			state->walkCycle(length, time);
+		}
+	}
 
 private:
 	AnimationSystems& m_systems;

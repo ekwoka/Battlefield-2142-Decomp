@@ -333,8 +333,27 @@ void GameAudio::tick(const Camera& given)
 	m_manager.setListener(camera.position, camera.forward, camera.up, camera.velocity, m_listenerState.insideTitan);
 	autoRadio();
 	materialRadio();
+	// The soldiers' footstep sets ride their soldier's matrix (0x007fd830:
+	// the object's slot 0x78, at the feet, turned by its yaw).
+	const auto where = [&](uint32_t id, sound::Vec3& position, sound::Matrix4& rotation) {
+		const world::Object* object = m_objects.find(id);
+		if (!object) {
+			return false;
+		}
+		const world::Vec3& r = object->rotation();
+		position = toSound(object->position());
+		rotation = toSound(physics::Mat3::fromYawPitchRoll({r.x, r.y, r.z}));
+		return true;
+	};
+	m_sounds.placeHeld(where);
 	for (const auto& sound : m_round.takeSounds()) {
-		m_sounds.play(sound.sound, toSound(sound.position));
+		sound::Vec3 position;
+		sound::Matrix4 rotation;
+		if (sound.object && where(sound.object, position, rotation)) {
+			m_sounds.playOn(sound.object, sound.sound, position, rotation);
+		} else {
+			m_sounds.play(sound.sound, toSound(sound.position));
+		}
 	}
 	// A bundle plays its Sound children as it starts (0x00619700 makes the
 	// "Start" sound); the round's own bundles too, not only the renderer's.

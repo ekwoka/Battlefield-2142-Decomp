@@ -1165,6 +1165,12 @@ void PlayerCamera::tick(float seconds)
 	}
 	std::vector<anim::FirstPersonRig::Event> events;
 	m_rig->update(input, seconds, &events);
+	if (!m_remote && firstPerson && !me.vehicle) {
+		// The local soldier seen in first person steps by these systems (0x005ef7f0, view 0).
+		float length = -1, time = -1;
+		m_rig->walkCycle(length, time);
+		m_round.setFirstPersonWalkCycle(m_round.localPlayer(), length, time);
+	}
 	if (kInputTrace && (reloadStarted || (reloading && m_tick % 15 == 0))) {
 		std::printf("reload-animation tick=%d pulse=%d playing", m_tick, reloadStarted);
 		for (const auto& name : m_rig->playing()) std::printf(" %s", name.c_str());
