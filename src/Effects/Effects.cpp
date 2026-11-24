@@ -770,8 +770,9 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 	if (!m_started) {
 		start(context);
 	}
-	// The distance LOD (0x101393e0): (1 - f)^2 plus the particles' size on
-	// screen, between the template's floor and 1.
+	// The distance LOD (0x101393e0): (1 - f)^2 plus the system's size on
+	// screen (+0x120: its particles' box radius, 0x1012ea30), between the
+	// template's floor and 1.
 	m_lodScale = 1;
 	if (context.settings && context.hasCamera) {
 		const scene::ParticleSystemSettings& s = *context.settings;
@@ -783,7 +784,10 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 			const float f = std::min((distance - fadeStart) / (end - fadeStart), 1.0f);
 			scale = (1 - f) * (1 - f);
 		}
-		const float radius = t.particleMaxSize + t.randomSize;
+		Vec3 centre;
+		float radius;
+		bounds(centre, radius);
+		// shortcut: retail's screen factor is 1.05 / (fov x tan(fov / 2)), picked by the box's longest axis; tan(fovY / 2) kept until the camera's fov getters are decoded.
 		scale += radius / std::max(distance * context.tanHalfFov, 1e-3f);
 		m_lodScale = std::clamp(scale, std::min(t.minEmitScale, 1.0f), 1.0f);
 	}

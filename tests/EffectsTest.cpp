@@ -681,6 +681,21 @@ TEST(Effects_EmitterAsRendDX9)
 		near.update(0.5f);
 		CHECK(near.emitters() == 1 && !near.emitterList()[0]->particles().empty());
 		CHECK(near.emitterList()[0]->lodScale() == 1.0f);
+		// The distance LOD's size term is the particles' box (0x101393e0's
+		// +0x120), not one particle: a spread-out system 450 m off keeps
+		// emitting where (1 - f)^2 = 0.11 (and one 1 m particle adds 0.004).
+		puff->settings()["particleMaxSize"] = "1";
+		puff->settings()["emitRadius"] = "100/100/100";
+		puff->settings()["emitFrequency"] = "100";
+		puff->settings()["emitTime"] = "10";
+		effects::EffectManager wide(templates);
+		wide.setSettings(&settings);
+		wide.setCamera({0, 0, 450}, 0.5f);
+		wide.spawn("e_puff", {});
+		wide.update(0.5f);
+		wide.update(0.1f);
+		CHECK(wide.emitters() == 1 && wide.emitterList()[0]->particles().size() > 2);
+		CHECK(wide.emitterList()[0]->lodScale() > 0.3f); // 0.115 from one particle
 	}
 	// The draw fade: past 0.85 of the class's distance (High: the view
 	// distance), (1 - f)^2.
