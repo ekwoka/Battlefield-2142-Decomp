@@ -1,7 +1,7 @@
 #pragma once
 
 // Not retail: BF2142_FRAME_STATS=<seconds> logs the main thread's time per
-// frame stage (mean and 95th percentile, ms) every <seconds> (5 if not a
+// frame stage (mean, 95th percentile and max, ms) every <seconds> (5 if not a
 // number), so a slow machine can say where its frame goes. Unset, each scope
 // costs one branch.
 
@@ -65,9 +65,11 @@ public:
 			"menu", "particles", "prepare", "shadows", "submit"};
 		const size_t frames = m_samples[Frame].size();
 		const double seconds = static_cast<double>(nowNs - m_windowStart) / 1e9;
+		const size_t hitches = static_cast<size_t>(std::count_if(m_samples[Frame].begin(), m_samples[Frame].end(),
+			[](uint64_t ns) { return ns > 50000000; }));
 		char line[160];
-		std::snprintf(line, sizeof line, "frame-stats: %.1f s, %zu frames, %.1f fps; ms mean/p95:", seconds, frames,
-			static_cast<double>(frames) / seconds);
+		std::snprintf(line, sizeof line, "frame-stats: %.1f s, %zu frames, %.1f fps, %zu over 50 ms; ms mean/p95/max:", seconds,
+			frames, static_cast<double>(frames) / seconds, hitches);
 		std::string report = line;
 		for (int s = 0; s < StageCount; ++s) {
 			std::vector<uint64_t>& v = m_samples[s];
@@ -76,9 +78,10 @@ public:
 				sum += static_cast<double>(x);
 			}
 			const size_t at = std::min(v.size() - 1, v.size() * 95 / 100);
+			const uint64_t most = *std::max_element(v.begin(), v.end());
 			std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(at), v.end());
-			std::snprintf(line, sizeof line, " %s %.2f/%.2f", kNames[s], sum / static_cast<double>(v.size()) / 1e6,
-				static_cast<double>(v[at]) / 1e6);
+			std::snprintf(line, sizeof line, " %s %.2f/%.2f/%.1f", kNames[s], sum / static_cast<double>(v.size()) / 1e6,
+				static_cast<double>(v[at]) / 1e6, static_cast<double>(most) / 1e6);
 			report += line;
 			v.clear();
 		}
