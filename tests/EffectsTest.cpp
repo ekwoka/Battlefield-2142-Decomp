@@ -697,6 +697,38 @@ TEST(Effects_EmitterAsRendDX9)
 		CHECK(wide.emitters() == 1 && wide.emitterList()[0]->particles().size() > 2);
 		CHECK(wide.emitterList()[0]->lodScale() > 0.3f); // 0.115 from one particle
 	}
+	// The flipbook's crossfade (0x10131f80): the frame, the next one
+	// ((frame + 1) % frames, wrapping) and the clock's fraction.
+	{
+		world::ObjectTemplateManager templates;
+		world::ObjectTemplate* puff = addPuff(templates);
+		puff->settings()["animationEnable"] = "1";
+		puff->settings()["animationFrameCount"] = "4";
+		puff->settings()["animationFrameCountX"] = "2";
+		puff->settings()["setAnimationFrameWidthRelative"] = "0.5";
+		puff->settings()["setAnimationFrameHeightRelative"] = "0.5";
+		puff->settings()["rotationGraph"] = "0/0/0/1"; // the clock runs at animationSpeed
+		const auto t = effects::ParticleTemplate::fromTemplate(*puff);
+		CHECK((effects::spriteFrame(t, 3.3f) == std::array<float, 4> {0.5f, 0.5f, 1, 1}));
+		CHECK((effects::spriteFrame(t, 4.3f) == std::array<float, 4> {0, 0, 0.5f, 0.5f}));
+		effects::EffectManager manager(templates);
+		manager.spawn("e_puff", {});
+		for (int i = 0; i < 40; ++i) {
+			manager.update(0.1f);
+		}
+		int sprites = 0, blended = 0;
+		manager.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& list) {
+			for (const effects::Sprite& sprite : list) {
+				const int frame = static_cast<int>(sprite.frame[0] * 2 + sprite.frame[1] * 4);
+				const int next = static_cast<int>(sprite.nextFrame[0] * 2 + sprite.nextFrame[1] * 4);
+				CHECK(next == (frame + 1) % 4);
+				CHECK(sprite.frameBlend >= 0 && sprite.frameBlend < 1);
+				blended += sprite.frameBlend > 0;
+				++sprites;
+			}
+		});
+		CHECK(sprites > 0 && blended > 0);
+	}
 	// The draw fade: past 0.85 of the class's distance (High: the view
 	// distance), (1 - f)^2.
 	{

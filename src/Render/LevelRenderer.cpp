@@ -2975,6 +2975,10 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 				const std::array<float, 3> light = lightAt(sprite.position, sprite.lightMapOffset, additive);
 				// How much of the cascades' shadow it takes (enh_particle.vert reads the unused slot).
 				const float shade = m_enh.particleShadows ? 1 - std::clamp(sprite.lightMapOffset, 0.0f, 1.0f) : 0.0f;
+				const float frameWidth = sprite.frame[2] - sprite.frame[0], frameHeight = sprite.frame[3] - sprite.frame[1];
+				const float nextColumn = frameWidth > 0 ? std::round(sprite.nextFrame[0] / frameWidth) : 0.0f;
+				const float nextRow = frameHeight > 0 ? std::round(sprite.nextFrame[1] / frameHeight) : 0.0f;
+				const float blend = m_particleSettings.particleSystemShaderQuality >= 2 ? sprite.frameBlend : 0.0f;
 				for (const auto& corner : corners) {
 					Vertex v {};
 					v.lightmapCoord[0] = shade;
@@ -2986,6 +2990,9 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.normal[2] = sprite.color[2] * light[2];
 					// The Enhanced shader uses the tangent slot for the unlit tint.
 					std::copy_n(sprite.color.data(), 3, v.tangent);
+					// The next frame (column + 256 x row) and its blend (particle.vert); Low (1) draws one frame.
+					v.tangent[3] = nextColumn + 256 * nextRow;
+					v.lightmapCoord[1] = blend;
 					v.weight = sprite.color[3];
 					v.texCoord[0] = corner[0];
 					v.texCoord[1] = corner[1];

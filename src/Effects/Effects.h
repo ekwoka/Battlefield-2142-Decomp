@@ -212,8 +212,8 @@ struct ParticleTemplate {
 	// a second when drawn (0x10131f80, the template's +0x100 graph); its
 	// frame is the clock's whole part modulo the frames. animationPlayOnce
 	// makes the speed frames / timeToLive (0x10138790, 0x101387f0): one
-	// pass over a life. Particles.fx as shipped (LOW) draws the frame
-	// alone, without blending in the next.
+	// pass over a life. The shader blends it with the next frame by the
+	// clock's fraction (Sprite::frameBlend) at quality Medium and High.
 	bool animated = false;
 	float animationSpeed = 1;
 	bool animationPlayOnce = false;
@@ -452,6 +452,11 @@ struct Sprite {
 	float lightMapOffset = 0;   // the template's lightMapIntensityOffset (calcParticleLighting)
 	std::array<float, 2> pivot {0, 0}; // the template's pivotOffset
 	std::array<float, 4> frame {0, 0, 1, 1}; // the flipbook frame's u0 v0 u1 v1
+	// The next frame ((frame + 1) % frames, 0x10131f80's +0x44) and the
+	// clock's fraction (+0x30): psParticleMedium/High and AdditiveHigh lerp
+	// the two by it.
+	std::array<float, 4> nextFrame {0, 0, 1, 1};
+	float frameBlend = 0;
 };
 
 // The view the particles are drawn from: their fade by distance per LOD

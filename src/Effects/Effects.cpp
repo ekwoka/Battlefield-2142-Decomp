@@ -2378,7 +2378,8 @@ void EffectManager::collect(const Emitter& emitter, std::vector<Sprite>& out, co
 		const Vec3 color = (t.color1 * (1 - blend) + t.color2 * blend) * p.intensity
 			+ Vec3 {p.randomIntensity, p.randomIntensity, p.randomIntensity};
 		out.push_back({at, size, p.rotation, {color.x, color.y, color.z, alpha}, t.lightMapIntensityOffset,
-			{t.pivot[0], t.pivot[1]}, spriteFrame(t, p.frameClock)});
+			{t.pivot[0], t.pivot[1]}, spriteFrame(t, p.frameClock), spriteFrame(t, p.frameClock + 1),
+			t.animated ? p.frameClock - std::floor(p.frameClock) : 0.0f});
 	}
 }
 
