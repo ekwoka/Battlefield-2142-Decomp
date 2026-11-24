@@ -614,6 +614,7 @@ private:
 		const Mat4& objectWorld, uint32_t object, int depth, const std::string& path = {},
 		const std::string& inheritedSkeleton = {});
 	void addObject(const LevelSources& sources, const world::Object& object);
+	void preloadKits(const LevelSources& sources);
 	// A posed child's placement relative to its object: each level's child
 	// placement, then its part's pose or bone (as collectParts places parts).
 	Mat4 posedLocal(const world::ObjectTemplate& root, const std::vector<uint16_t>& path, uint32_t object) const;

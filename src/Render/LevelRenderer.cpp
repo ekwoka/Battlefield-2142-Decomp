@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <set>
 #include <sstream>
 
 namespace dice::hfe::render {
@@ -284,6 +285,7 @@ SDL_GPUTexture* LevelRenderer::texture(const io::FileManager& files, const std::
 		byPath[path] = {skip, it->second};
 		return it->second;
 	}
+	FrameStats::Load timed(path);
 	SDL_GPUTexture* gpuTexture = nullptr;
 	std::vector<uint8_t> data;
 	// The level's customTextureSuffix variant where one exists (0x10018ca0).
@@ -324,6 +326,7 @@ SDL_GPUTexture* LevelRenderer::cubeTexture(const io::FileManager& files, const s
 	if (it != m_cubeTextures.end()) {
 		return it->second;
 	}
+	FrameStats::Load timed(path);
 	SDL_GPUTexture* gpuTexture = nullptr;
 	std::vector<uint8_t> data;
 	const std::string variant = customSuffixedTexturePath(path, m_textureSuffix); // 0x10018ca0
@@ -347,6 +350,7 @@ const LevelRenderer::GpuMesh* LevelRenderer::mesh(const LevelSources& sources, c
 	if (it != m_meshes.end()) {
 		return it->second.get();
 	}
+	FrameStats::Load timed(geometryName);
 	std::unique_ptr<GpuMesh>& slot = m_meshes[key];
 	const geom::GeometryTemplate* geometry = sources.geometries.find(geometryName);
 	std::vector<uint8_t> data;
@@ -980,9 +984,12 @@ std::shared_ptr<anim::Skeleton> LevelRenderer::skeleton(const io::FileManager& f
 {
 	auto& slot = m_skeletons[lower(path)];
 	std::vector<uint8_t> data;
-	if (!slot && files.readFile(path, data)) {
-		if (auto parsed = anim::parseSkeleton(data)) {
-			slot = std::make_shared<anim::Skeleton>(std::move(*parsed));
+	if (!slot) {
+		FrameStats::Load timed(path);
+		if (files.readFile(path, data)) {
+			if (auto parsed = anim::parseSkeleton(data)) {
+				slot = std::make_shared<anim::Skeleton>(std::move(*parsed));
+			}
 		}
 	}
 	return slot;
@@ -992,9 +999,12 @@ std::shared_ptr<anim::Animation> LevelRenderer::animation(const io::FileManager&
 {
 	auto& slot = m_animations[lower(path)];
 	std::vector<uint8_t> data;
-	if (!slot && files.readFile(path, data)) {
-		if (auto parsed = anim::parseAnimation(data)) {
-			slot = std::make_shared<anim::Animation>(std::move(*parsed));
+	if (!slot) {
+		FrameStats::Load timed(path);
+		if (files.readFile(path, data)) {
+			if (auto parsed = anim::parseAnimation(data)) {
+				slot = std::make_shared<anim::Animation>(std::move(*parsed));
+			}
 		}
 	}
 	return slot;
@@ -4191,8 +4201,50 @@ void LevelRenderer::build(const LevelSources& sources)
 	}
 	m_center = placed ? sum * (1.0f / placed) : Vec3f {};
 	m_stats.instances = m_instances.size();
+	preloadKits(sources);
 	m_gpu.flushUploads();
 	progress(1);
+}
+
+// Not retail: the kits' soldiers and weapons first appear after the load (a
+// spawn, a pick-up), where reading their Remaster textures (up to 22 MB,
+// ~70 ms to inflate) held the frame. Load them with the level instead: each
+// world mesh and its first-person geometry (PlayerCamera::models).
+void LevelRenderer::preloadKits(const LevelSources& sources)
+{
+	const uint64_t start = FrameStats::now();
+	const size_t meshes = m_meshes.size(), textures = m_textures.size();
+	std::vector<const world::ObjectTemplate*> pending;
+	for (const auto& t : sources.templates.templates()) {
+		const std::string& type = t->typeName();
+		if (type == "Kit" || type == "Soldier" || type == "GenericFireArm") {
+			pending.push_back(t.get());
+		}
+	}
+	std::set<const world::ObjectTemplate*> seen;
+	while (!pending.empty()) {
+		const world::ObjectTemplate* t = pending.back();
+		pending.pop_back();
+		if (!seen.insert(t).second) {
+			continue;
+		}
+		if (!t->geometry().empty()) {
+			mesh(sources, t->geometry());
+			if (t->typeName() == "Soldier" || t->typeName() == "GenericFireArm") {
+				mesh(sources, t->geometry(), 0, 0); // the arms', the weapon's first-person geometry
+			}
+		}
+		for (const auto& child : t->children()) {
+			if (const world::ObjectTemplate* next = sources.templates.find(child.name)) {
+				pending.push_back(next);
+			}
+		}
+		m_gpu.flushUploads(); // one template's uploads at a time
+	}
+	if (FrameStats::get().enabled()) {
+		std::printf("frame-stats: preloaded kits: %zu templates, %zu meshes, %zu textures, %.0f ms\n", seen.size(),
+			m_meshes.size() - meshes, m_textures.size() - textures, static_cast<double>(FrameStats::now() - start) / 1e6);
+	}
 }
 
 Camera LevelRenderer::suggestedCamera() const
