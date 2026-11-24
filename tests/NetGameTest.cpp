@@ -2294,3 +2294,27 @@ TEST(NetGame_TitanSyncPayload)
 	CHECK(back.velocityX == 1.0625f && back.velocityZ == -0.25f && back.x == -423.621f && back.z == 2.536f);
 	CHECK(!net::parseTitanSync(bytes.substr(0, 0x20), back));
 }
+
+// The squad radar's reports and the radio spots are timed by the server's
+// ticks, which start again with a new level: a map change and clear() drop
+// them, and a new report drops the ones that ran out.
+TEST(NetGame_RemoteWorldSquadReportsEndWithTheLevel)
+{
+	net::RemoteWorld world;
+	world.apply(net::makeDataBlockStart(2, 0)); // the first level
+	auto report = [&](uint32_t kind, uint32_t seconds, uint32_t player) {
+		net::GameEvent e;
+		e.type = net::kEvSquadRadar;
+		e.values = {kind, 0, 1, seconds, player};
+		CHECK(world.apply(e));
+	};
+	report(0, 10, 5);
+	CHECK(world.squadReportedPlayers() == std::vector<int>({5}));
+	CHECK(world.radarPlayers() == std::vector<int>({5}));
+	world.apply(net::makeDataBlockStart(2, 0)); // a map change
+	CHECK(world.squadReportedPlayers().empty() && world.radarPlayers().empty());
+	report(1, 10, 6);
+	CHECK(world.squadReportedPlayers() == std::vector<int>({6}));
+	world.clear();
+	CHECK(world.squadReportedPlayers().empty());
+}

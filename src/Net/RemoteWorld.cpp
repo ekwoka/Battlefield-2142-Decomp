@@ -10,6 +10,19 @@
 
 namespace dice::hfe::net {
 
+namespace {
+
+// Drops the entries whose end tick has passed, so a long round's reports
+// don't pile up in the maps that time them.
+template <typename Map> void dropExpired(Map& until, uint32_t tick)
+{
+	for (auto it = until.begin(); it != until.end();) {
+		it = it->second <= tick ? until.erase(it) : std::next(it);
+	}
+}
+
+} // namespace
+
 RemotePlayer& RemoteWorld::playerSlot(int id)
 {
 	const auto [it, made] = m_players.try_emplace(id);
@@ -50,6 +63,9 @@ void RemoteWorld::clear()
 	m_spawnGroups.clear();
 	m_requests.clear();
 	m_orders.clear();
+	m_radar.clear();
+	m_radarVehicles.clear();
+	m_squadReports.clear();
 }
 
 std::vector<RemoteWorld::SquadRequest> RemoteWorld::squadRequests(int team) const
@@ -418,6 +434,8 @@ bool RemoteWorld::apply(const GameEvent& event)
 			const auto local = m_players.find(m_localPlayer);
 			const int ourTeam = local != m_players.end() ? local->second.team : 0;
 			const uint32_t until = m_tick + 12 * 30;
+			dropExpired(m_radar, m_tick);
+			dropExpired(m_radarVehicles, m_tick);
 			bool soldier = false;
 			for (const auto& [id, p] : m_players) {
 				if (p.soldierGhost == spot.spotted) {
@@ -567,6 +585,9 @@ bool RemoteWorld::apply(const GameEvent& event)
 		const uint32_t ticks = seconds * 30;
 		const auto local = m_players.find(m_localPlayer);
 		const int ourTeam = local != m_players.end() ? local->second.team : 0;
+		dropExpired(m_squadReports, m_tick);
+		dropExpired(m_radar, m_tick);
+		dropExpired(m_radarVehicles, m_tick);
 		for (size_t i = 0; i < count && 4 + i < event.values.size(); ++i) {
 			const int id = static_cast<int>(event.values[4 + i]);
 			const auto p = m_players.find(id);
@@ -1592,6 +1613,10 @@ void RemoteWorld::onLevel(const std::string& data)
 		m_fieldUnlockCredits = 0;
 		m_squadOrderPoints = m_squadOrderMax = 0;
 		m_ownedUnlockMasks = m_fieldUnlockMasks = m_previousUnlockMasks = {};
+		// The old level's reports and spots, timed by its server ticks.
+		m_radar.clear();
+		m_radarVehicles.clear();
+		m_squadReports.clear();
 		for (auto& [id, p] : m_players) {
 			p.alive = false;
 			p.soldierGhost = p.vehicleGhost = p.kitGhost = 0;
