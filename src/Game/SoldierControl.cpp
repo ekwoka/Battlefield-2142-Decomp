@@ -185,8 +185,8 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 	// turn and catches the whole twist up (+0x280). Moving, any twist is
 	// caught up. Catching up turns the body 4 degrees a call (*0x00a68ee0)
 	// towards it and takes that off the twist. (Past the limit the body
-	// also takes the turn itself while the twist keeps it, so that tick the
-	// look moves twice the turn: as the original.)
+	// also takes the turn itself while the twist keeps it, as the original;
+	// the camera then holds the twist within the limit, below.)
 	const float turn = std::fabs(input.turn) < 0.001f ? 0.0f : input.turn;
 	float bodyTurn = turn; // local_2c
 	if (std::fabs(shape(input.throttle)) <= 0.01f) {
@@ -211,6 +211,10 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 		bodyTurn += step;
 	}
 	body.yawDegrees += bodyTurn;
+	// The soldier camera (0x005890a0, called at 0x0058af51) clamps the twist
+	// to the limit and stores it: a turn past it moves the look by the turn
+	// and the catch-up, not twice the turn.
+	m_twist = std::clamp(m_twist, -kTwistLimit, kTwistLimit);
 	// Movement follows the view, including head twist, so W/S and A/D
 	// stay independent and diagonal strafing follows the crosshair.
 	const float yaw = (body.yawDegrees + m_twist) * 3.14159265f / 180.0f;

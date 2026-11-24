@@ -5345,10 +5345,15 @@ TEST(Physics_GibraltarRoofHopsMakeNoLandSound)
 	game::GameWorld::PlayerInfo info;
 	level.world->playerInfo(id, info);
 	game::SoldierInput input;
-	input.turn = level.world->soldierBody(id)->yawDegrees; // face +z
+	// Face 37.8 degrees, the heading the roof run was measured on (z ahead,
+	// drifting towards the side wall). Moving, the body takes the turn whole;
+	// standing, past the 40-degree twist it would run on by the catch-up.
+	input.turn = std::remainder(37.8f - level.world->soldierBody(id)->yawDegrees, 360.0f);
+	input.throttle = 1;
 	level.world->setInput(id, input);
 	level.world->tick(1 / 30.0f);
 	input.turn = 0;
+	input.throttle = 0;
 	level.world->setInput(id, input);
 	level.run(2);
 	CHECK(level.world->setSoldierPosition(info.soldier, {43.4f, 23.4f, 205}));

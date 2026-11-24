@@ -566,11 +566,30 @@ TEST(SoldierControl_HeadTwistsBeforeTheBodyTurns)
 	CHECK(body.yawDegrees == 0 && control.twist() == 30); // within the limit it stays twisted
 	look.turn = 15; // 45: past the limit
 	control.update(look, body);
-	CHECK(std::fabs(body.yawDegrees - 19) < 1e-4f && std::fabs(control.twist() - 41) < 1e-4f); // the turn and 4
+	// The turn and 4; the camera holds the twist at 40 (0x005890a0).
+	CHECK(std::fabs(body.yawDegrees - 19) < 1e-4f && std::fabs(control.twist() - 40) < 1e-4f);
 	for (int i = 0; i < 20; ++i) {
 		control.update(still, body);
 	}
-	CHECK(std::fabs(control.twist()) < 1e-4f && std::fabs(body.yawDegrees - 60) < 1e-4f); // all caught up
+	// At the limit the next tick catches up the held 40, not the 41.
+	CHECK(std::fabs(control.twist()) < 1e-4f && std::fabs(body.yawDegrees - 59) < 1e-4f);
+	// Turning on past the limit: the look moves the turn and 4 a tick, the twist stays at 40.
+	control.reset();
+	body.yawDegrees = 0;
+	look.turn = 10;
+	for (int i = 0; i < 5; ++i) {
+		control.update(look, body); // 36 after the first catch-up, then held at 40
+	}
+	CHECK(std::fabs(control.twist() - 40) < 1e-4f);
+	float before = body.yawDegrees + control.twist();
+	for (int i = 0; i < 10; ++i) {
+		control.update(look, body);
+		const float after = body.yawDegrees + control.twist();
+		CHECK(std::fabs(after - before - 14) < 1e-4f && std::fabs(control.twist() - 40) < 1e-4f);
+		before = after;
+	}
+	control.reset();
+	body.yawDegrees = 60;
 	// Twisted, then walking forward: caught up at 4 a tick.
 	look.turn = 20;
 	control.update(look, body);

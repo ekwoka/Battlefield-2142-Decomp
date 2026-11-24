@@ -1524,8 +1524,10 @@ TEST(ArmouredRounds_DefuserRemovesMotionMines)
 		input.fire = true;
 		press(input, 1);
 		press({}, 20);
+		// Back to the front: the turn undone exactly (standing, a turn past
+		// the 40-degree twist runs on by the catch-up: 180 faces 224).
 		input = {};
-		input.turn = 180;
+		input.turn = -180;
 		press(input, 1);
 		const int laid = rounds();
 		std::fprintf(stderr, "  motion mines: %d, %d after laying one\n", full, laid);
