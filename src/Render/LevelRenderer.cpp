@@ -2623,7 +2623,8 @@ void LevelRenderer::buildOverlay()
 	const uint64_t now = SDL_GetTicks();
 	const float seconds = m_lastOverlayTicks ? static_cast<float>(now - m_lastOverlayTicks) / 1000.0f : 0.0f;
 	m_lastOverlayTicks = now;
-	std::vector<Vertex> vertices;
+	std::vector<Vertex>& vertices = m_overlayScratch;
+	vertices.clear();
 	std::vector<hud::HudQuad> quads;
 	if (m_sources->overlay) {
 		quads = m_sources->overlay(seconds);
@@ -2640,49 +2641,57 @@ void LevelRenderer::buildOverlay()
 		const float cy = q.pivotSet ? q.pivot[1] : (q.y0 + q.y1) * 0.5f;
 		const float c = std::cos(q.rotation * 3.14159265f / 180.0f), s = std::sin(q.rotation * 3.14159265f / 180.0f);
 		// The quad's corners (x, y, u, v), turned about its centre, then cut
-		// to its clip rectangle when it has one (Sutherland-Hodgman).
-		std::vector<std::array<float, 4>> polygon;
-		for (const auto& corner : {std::array<float, 4> {q.x0, q.y0, q.u0, q.v0}, {q.x1, q.y0, q.u1, q.v0},
-				 {q.x1, q.y1, q.u1, q.v1}, {q.x0, q.y1, q.u0, q.v1}}) {
+		// to its clip rectangle when it has one (Sutherland-Hodgman). Four
+		// cuts of a convex quad leave at most 8 corners: held on the stack,
+		// as a heap vector per quad and per cut was most of the overlay's time.
+		using Corner = std::array<float, 4>;
+		struct Polygon {
+			std::array<Corner, 8> p;
+			size_t n = 0;
+			void add(const Corner& c)
+			{
+				if (n < p.size()) { // always: see above
+					p[n++] = c;
+				}
+			}
+		} polygon;
+		for (const Corner& corner : {Corner {q.x0, q.y0, q.u0, q.v0}, Corner {q.x1, q.y0, q.u1, q.v0},
+				 Corner {q.x1, q.y1, q.u1, q.v1}, Corner {q.x0, q.y1, q.u0, q.v1}}) {
 			const float dx = corner[0] - cx, dy = corner[1] - cy;
-			polygon.push_back({cx + dx * c - dy * s, cy + dx * s + dy * c, corner[2], corner[3]});
+			polygon.add({cx + dx * c - dy * s, cy + dx * s + dy * c, corner[2], corner[3]});
 		}
 		if (q.clipped) {
-			for (int edge = 0; edge < 4 && !polygon.empty(); ++edge) {
+			for (int edge = 0; edge < 4 && polygon.n > 0; ++edge) {
 				const int axis = edge % 2;
 				const float limit = q.clip[edge];
 				const bool low = edge < 2;
-				const auto inside = [&](const std::array<float, 4>& p) { return low ? p[axis] >= limit : p[axis] <= limit; };
-				std::vector<std::array<float, 4>> kept;
-				for (size_t i = 0; i < polygon.size(); ++i) {
-					const auto& a = polygon[i];
-					const auto& b = polygon[(i + 1) % polygon.size()];
+				const auto inside = [&](const Corner& p) { return low ? p[axis] >= limit : p[axis] <= limit; };
+				Polygon kept;
+				for (size_t i = 0; i < polygon.n; ++i) {
+					const Corner& a = polygon.p[i];
+					const Corner& b = polygon.p[(i + 1) % polygon.n];
 					if (inside(a)) {
-						kept.push_back(a);
+						kept.add(a);
 					}
 					if (inside(a) != inside(b)) {
 						const float t = (limit - a[axis]) / (b[axis] - a[axis]);
-						std::array<float, 4> p;
+						Corner p;
 						for (int k = 0; k < 4; ++k) {
 							p[k] = a[k] + (b[k] - a[k]) * t;
 						}
-						kept.push_back(p);
+						kept.add(p);
 					}
 				}
-				polygon = std::move(kept);
+				polygon = kept;
 			}
 		}
-		if (polygon.size() < 3) {
+		if (polygon.n < 3) {
 			continue;
 		}
-		// A wedge (HudQuad::sweep): the polygon cut to each quarter turn.
-		const auto pieces = q.sweep >= 0 ? hud::sweepPieces(polygon, q.sweepAbout ? q.sweepCentre[0] : (q.x0 + q.x1) * 0.5f,
-													 q.sweepAbout ? q.sweepCentre[1] : (q.y0 + q.y1) * 0.5f, q.sweep)
-										 : std::vector<std::vector<std::array<float, 4>>> {polygon};
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
-		for (const auto& piece : pieces) {
-			for (size_t i = 1; i + 1 < piece.size(); ++i) {
-				for (const auto& corner : {piece[0], piece[i], piece[i + 1]}) {
+		const auto fan = [&](const Corner* piece, size_t n) {
+			for (size_t i = 1; i + 1 < n; ++i) {
+				for (const Corner& corner : {piece[0], piece[i], piece[i + 1]}) {
 					Vertex v {};
 					v.position[0] = corner[0];
 					v.position[1] = corner[1];
@@ -2695,6 +2704,17 @@ void LevelRenderer::buildOverlay()
 					vertices.push_back(v);
 				}
 			}
+		};
+		if (q.sweep >= 0) {
+			// A wedge (HudQuad::sweep): the polygon cut to each quarter turn.
+			const auto pieces = hud::sweepPieces(std::vector<Corner>(polygon.p.begin(), polygon.p.begin() + static_cast<std::ptrdiff_t>(polygon.n)),
+				q.sweepAbout ? q.sweepCentre[0] : (q.x0 + q.x1) * 0.5f, q.sweepAbout ? q.sweepCentre[1] : (q.y0 + q.y1) * 0.5f,
+				q.sweep);
+			for (const auto& piece : pieces) {
+				fan(piece.data(), piece.size());
+			}
+		} else {
+			fan(polygon.p.data(), polygon.n);
 		}
 		const uint32_t count = static_cast<uint32_t>(vertices.size()) - first;
 		if (!m_overlayGroups.empty() && m_overlayGroups.back().texture == image &&

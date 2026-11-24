@@ -1077,6 +1077,7 @@ private:
 	SDL_GPUTexture* menuTexture(const std::shared_ptr<const ui::MenuImage>& image);
 	void buildMenu(float seconds);
 	std::vector<OverlayGroup> m_overlayGroups;
+	std::vector<Vertex> m_overlayScratch; // buildOverlay's vertices, reused each frame
 	uint64_t m_lastOverlayTicks = 0;
 	uint64_t m_lastMenuTicks = 0;
 	void buildOverlay();
