@@ -1546,6 +1546,10 @@ public:
 	// an offset and yaw/pitch/roll in degrees before the part's own
 	// placement; false for parts the game does not move.
 	bool partPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation, int preferredSeat = -1) const;
+	// Whether partBone / partPose can place any of the object's parts other
+	// than a LookAtObject or a silo's base and barrel (those answer for any
+	// object): a boned body, a vehicle, a Titan or a pod.
+	bool posesParts(uint32_t object) const;
 	// A vehicle's seats and entry points, from its template tree: each
 	// PlayerControlObject with seatInformation is a seat (the root first:
 	// the driver), with its exit (setSoldierExitLocation), and the gun its

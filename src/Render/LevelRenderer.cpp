@@ -1099,30 +1099,78 @@ static void markBlendedParts(const LevelSources& sources, const world::ObjectTem
 	}
 }
 
+const std::vector<LevelRenderer::PartChild>& LevelRenderer::partChildren(const LevelSources& sources,
+	const world::ObjectTemplate& objectTemplate) const
+{
+	const auto known = m_partChildren.find(&objectTemplate);
+	if (known != m_partChildren.end() && known->second.size() == objectTemplate.children().size()) {
+		return known->second;
+	}
+	// shortcut: a template's children and their settings are taken as fixed after first use; a
+	// console edit of geometryPart/boneIndex/type during play would need this cleared.
+	std::vector<PartChild> list;
+	list.reserve(objectTemplate.children().size());
+	for (const world::ChildTemplate& child : objectTemplate.children()) {
+		PartChild c {sources.templates.find(child.name), poseName(&objectTemplate, child.name),
+			objectTransform(child.position, child.rotation)};
+		if (const world::ObjectTemplate* t = c.resolved) {
+			const auto part = t->settings().find("geometryPart");
+			const int index = part != t->settings().end() ? std::atoi(part->second.c_str()) : -1;
+			c.part = index > 0 && index < kMaxMeshParts ? index : -1;
+			c.blends = blendsBetweenTicks(*t);
+			const AnimatedUVLook& look = animatedUVLook(*t);
+			c.keepsTurn = look.rotateUV && t->typeName() == "Spring";
+			const std::string name = lower(child.name);
+			c.asksAnyway = lower(t->typeName()) == "lookatobject" || name == "missile_silo_base" || name == "missile_silo_barrel";
+			c.look = look.settings.any() ? &look : nullptr;
+		}
+		list.push_back(std::move(c));
+	}
+	return m_partChildren[&objectTemplate] = std::move(list);
+}
+
 void LevelRenderer::collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate,
 	const Mat4& relative, std::vector<Mat4>& parts, int depth, uint32_t object,
-	std::vector<AnimatedUVPart>* animated, NodeTickBlend* tick) const
+	std::vector<AnimatedUVPart>* animated, NodeTickBlend* tick, bool posed) const
 {
 	if (depth > 8) {
 		return;
 	}
-	for (const world::ChildTemplate& child : objectTemplate.children()) {
-		const world::ObjectTemplate* childTemplate = sources.templates.find(child.name);
+	const std::vector<PartChild>& children = partChildren(sources, objectTemplate);
+	for (size_t k = 0; k < children.size(); ++k) {
+		const PartChild& cached = children[k];
+		const world::ChildTemplate& child = objectTemplate.children()[k];
+		// One not found when cached may have been made since: looked up, and read, as before.
+		const world::ObjectTemplate* childTemplate = cached.resolved ? cached.resolved : sources.templates.find(child.name);
 		if (!childTemplate) {
 			continue;
 		}
-		Mat4 node = objectTransform(child.position, child.rotation); // in its parent
+		const AnimatedUVLook* uvLook = cached.resolved ? cached.look : nullptr;
+		bool keepsTurn = cached.keepsTurn, blends = cached.blends;
+		int partIndex = cached.part;
+		if (!cached.resolved) {
+			const AnimatedUVLook& look = animatedUVLook(*childTemplate);
+			uvLook = look.settings.any() ? &look : nullptr;
+			keepsTurn = look.rotateUV && childTemplate->typeName() == "Spring";
+			blends = blendsBetweenTicks(*childTemplate);
+			const auto part = childTemplate->settings().find("geometryPart");
+			const int index = part != childTemplate->settings().end() ? std::atoi(part->second.c_str()) : -1;
+			partIndex = index > 0 && index < kMaxMeshParts ? index : -1;
+		}
+		Mat4 node = cached.node; // in its parent
 		world::Vec3 offset, rotation;
 		anim::Matrix bone;
-		if (object != 0 && sources.partBone && sources.partBone(object, child.name, bone)) {
+		// Scenery's parts can't be posed: the game isn't asked (an unresolved child: asked as before).
+		const bool ask = object != 0 && (posed || cached.asksAnyway || !cached.resolved);
+		if (ask && sources.partBone && sources.partBone(object, child.name, bone)) {
 			// boneIndex (0x0063d470 -> the part's slot 0xe8): the bone's
 			// local matrix is the part's.
 			std::copy(bone.begin(), bone.end(), node.m.begin());
-		} else if (object != 0 && sources.partPose && sources.partPose(object, poseName(&objectTemplate, child.name), offset, rotation)) {
+		} else if (ask && sources.partPose && sources.partPose(object, cached.poseName, offset, rotation)) {
 			// A Spring with rotateUV keeps its mesh unturned: 0x006cace0
 			// and 0x006b7261 skip the set rotation (0x00614b50); its
 			// texture turns instead (AnimatedUV.h).
-			if (animatedUVLook(*childTemplate).rotateUV && childTemplate->typeName() == "Spring") {
+			if (keepsTurn) {
 				rotation = {};
 			}
 			node = objectTransform(offset, rotation) * node;
@@ -1140,25 +1188,18 @@ void LevelRenderer::collectParts(const LevelSources& sources, const world::Objec
 				previous[i] = ticked[i];
 			}
 			ticked[i] = node;
-			if (blendsBetweenTicks(*childTemplate)) {
+			if (blends) {
 				node = blendTransform(previous[i], ticked[i], tick->blend.alpha);
 			}
 		}
 		const Mat4 local = node * relative;
-		if (animated) {
-			const AnimatedUVLook& look = animatedUVLook(*childTemplate);
-			if (look.settings.any()) {
-				animated->push_back({&look.settings, local});
-			}
+		if (animated && uvLook) {
+			animated->push_back({&uvLook->settings, local});
 		}
-		const auto part = childTemplate->settings().find("geometryPart");
-		if (part != childTemplate->settings().end()) {
-			const int index = std::atoi(part->second.c_str());
-			if (index > 0 && index < kMaxMeshParts) {
-				parts[static_cast<size_t>(index)] = local;
-			}
+		if (partIndex > 0) {
+			parts[static_cast<size_t>(partIndex)] = local;
 		}
-		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated, tick);
+		collectParts(sources, *childTemplate, local, parts, depth + 1, object, animated, tick, posed);
 	}
 }
 
@@ -2411,7 +2452,7 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			m_animatedUVParts.clear();
 			NodeTickBlend tick {instance, blend};
 			collectParts(*m_sources, *instance.partsTemplate, Mat4 {}, instance.parts, 0, instance.object,
-				&m_animatedUVParts, &tick);
+				&m_animatedUVParts, &tick, !m_sources->partsPosed || m_sources->partsPosed(instance.object));
 			// The parts' animated UVs (0x0063b9b0, each object update): the
 			// distance each moved along its own z axis in the world.
 			instance.animatedUV = !m_animatedUVParts.empty();

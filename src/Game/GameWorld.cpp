@@ -12042,6 +12042,12 @@ const physics::SoldierBody* GameWorld::soldierBody(int id) const
 	return player && player->alive ? &player->body : nullptr;
 }
 
+bool GameWorld::posesParts(uint32_t object) const
+{
+	return m_bonedObjects.count(object) || vehicle(object) || isTitan(object)
+		|| std::any_of(m_pods.begin(), m_pods.end(), [object](const Pod& p) { return p.object == object; });
+}
+
 bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation, int preferredSeat) const
 {
 	// "<bundle>/<part>" (LevelRenderer): the seat whose yaw bundle that is

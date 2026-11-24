@@ -7939,6 +7939,19 @@ TEST(GameWorld_DestroyedGameEventReachesTheSpawners)
 	CHECK(range.world->spawners()[0]->active());
 }
 
+// posesParts: the renderer asks partBone / partPose for a vehicle's parts,
+// not for scenery's (LevelRenderer::collectParts).
+TEST(GameWorld_PosesPartsOnlyForPoseableObjects)
+{
+	ExitRange range;
+	range.id = range.objects.create(range.jeep, {0, 1, 3})->id();
+	const uint32_t rock = range.objects.create(range.templates.create("SimpleObject", "rock"), {20, 0, 20})->id();
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->posesParts(range.id));
+	CHECK(!range.world->posesParts(rock));
+	CHECK(!range.world->posesParts(0));
+}
+
 // toggleMouseLook (0x00611c80): the seat's camera turns on the mouse only
 // while PIMouseLook is held, and springs back by 0.75 a tick without it.
 TEST(GameWorld_ToggleMouseLookCamera)

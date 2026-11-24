@@ -10426,6 +10426,8 @@ int runGame(Options& options, Session& session)
 			return round.partBone(object, part, local);
 		};
 		sources.partLook = [&round](uint32_t object, const std::string& part) { return round.titanPartLook(object, part); };
+		// A joined game's vehicles are posed from their ghosts (partPose below): ask for every part there.
+		sources.partsPosed = [&round, &session](uint32_t object) { return session.client || round.posesParts(object); };
 		sources.vehicleWreckLook = [&round](uint32_t object) { return round.vehicleWreckLook(object); };
 		sources.partPose = [&round, &session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
 							   world::Vec3& rotation) {

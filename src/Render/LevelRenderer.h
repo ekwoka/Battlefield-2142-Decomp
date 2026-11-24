@@ -168,6 +168,9 @@ struct LevelSources {
 	// Parts the game moves (wheels, steering): an offset and yaw/pitch/roll
 	// before the part's placement in its parent; asked each frame.
 	std::function<bool(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation)> partPose;
+	// False when partBone / partPose can only place the object's LookAtObject
+	// and silo parts (GameWorld::posesParts); unset: ask for every part.
+	std::function<bool(uint32_t object)> partsPosed;
 	// A Titan part's look by its template's name: 0 whole, 1 wrecked (its wreck geometry), 2 gone (hidden).
 	std::function<int(uint32_t object, const std::string& part)> partLook;
 	// Ordinary vehicle armour's wreck look (including its delay/opt-out).
@@ -627,7 +630,7 @@ private:
 	};
 	void collectParts(const LevelSources& sources, const world::ObjectTemplate& objectTemplate, const Mat4& relative,
 		std::vector<Mat4>& parts, int depth, uint32_t object = 0,
-		std::vector<AnimatedUVPart>* animated = nullptr, NodeTickBlend* tick = nullptr) const;
+		std::vector<AnimatedUVPart>* animated = nullptr, NodeTickBlend* tick = nullptr, bool posed = true) const;
 	// A template's animatedUV* and Spring rotateUV values, read once.
 	struct AnimatedUVLook {
 		AnimatedUVSettings settings;
@@ -635,6 +638,21 @@ private:
 	};
 	const AnimatedUVLook& animatedUVLook(const world::ObjectTemplate& objectTemplate) const;
 	mutable std::unordered_map<const world::ObjectTemplate*, AnimatedUVLook> m_animatedUVLooks;
+	// What collectParts reads of a template's child that the template alone
+	// decides, resolved on first use (retail keeps parts as linked child
+	// objects, 0x0043ef30, and looks nothing up by name each frame).
+	struct PartChild { // one per objectTemplate.children() entry, in order
+		const world::ObjectTemplate* resolved; // null: not found then, looked up again each walk
+		std::string poseName;                  // for LevelSources::partPose
+		Mat4 node;                             // its placement in its parent
+		int part = -1;                         // geometryPart, -1 if none in range
+		bool blends = false;                   // blendsBetweenTicks
+		bool keepsTurn = false;                // a Spring with rotateUV: the set rotation skipped
+		bool asksAnyway = false;               // a LookAtObject or a silo's base or barrel (posesParts)
+		const AnimatedUVLook* look = nullptr;  // only when it animates its UVs
+	};
+	const std::vector<PartChild>& partChildren(const LevelSources& sources, const world::ObjectTemplate& objectTemplate) const;
+	mutable std::unordered_map<const world::ObjectTemplate*, std::vector<PartChild>> m_partChildren;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
 	// Each object's transform at the last two ticks and as drawn (TickBlend.h).
 	struct ObjectBlend {
