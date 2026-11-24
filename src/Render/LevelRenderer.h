@@ -162,6 +162,8 @@ struct LevelSources {
 	// Object slot 0x8c: the collision-based radius including its children.
 	// Zero means no physics body; use the render mesh's radius instead.
 	std::function<float(uint32_t object)> objectRadius;
+	// The same radius for an object of a template on its own (GameWorld::templateRadius).
+	std::function<float(const world::ObjectTemplate&)> templateRadius;
 	// All mesh-part transforms of an object (relative to it) when the game
 	// places them itself (held weapons); false otherwise.
 	std::function<bool(uint32_t object, std::vector<anim::Matrix>& parts)> partTransforms;
@@ -480,6 +482,7 @@ private:
 		Vec3f objectOrigin {};
 		float cullRadius = -1;
 		bool cullActor = false;
+		bool cullChild = false; // a child object under 0.8 x its group's radius (0x006fb280's second record)
 		const world::ObjectTemplate* partsTemplate = nullptr; // whose children place the parts
 		std::string source; // the child template it was made from (empty for the object's own)
 		// A child under a RotationalBundle (a Titan gun's wreck HUD on its

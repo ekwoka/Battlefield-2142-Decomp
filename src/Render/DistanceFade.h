@@ -126,6 +126,24 @@ inline CullRecord cullRecord(const ObjectCullScales& scales, float zoom, float f
 	return {zoom * scales.minimum * scales.minimum, farDistance, scale * scale * p2, seconds};
 }
 
+// The second record 0x006fb280 makes for a group (a root, Soldier or
+// PlayerControlObject, the walk 0x006fe3b0 starting one at each): p0 x 0.25
+// (*0x00a07f04), p3 x 0.5 (*0x00a07f08) on the non-actor scale.
+inline CullRecord childCullRecord(const ObjectCullScales& scales, float zoom, float farDistance, float seconds)
+{
+	CullRecord r = cullRecord(scales, zoom, farDistance, false, seconds);
+	r.minArea *= 0.25f;
+	r.areaScale *= 0.5f;
+	return r;
+}
+
+// 0x006fe4ab: an object below its group takes the second record when its
+// radius x cullRadiusScale is under 0.8 (*0x00a07f00) x the group's.
+inline bool takesChildRecord(float radius, float groupRadius)
+{
+	return radius < 0.8f * groupRadius;
+}
+
 // 0x006fb320: the fade after this frame, from the last one (`fade`), the
 // cull radius R and |camera - origin|^2.
 inline float stepDistanceFade(float fade, float radius, float centreDistanceSquared, const CullRecord& r)

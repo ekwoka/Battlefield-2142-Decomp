@@ -10423,6 +10423,7 @@ int runGame(Options& options, Session& session)
 			return round.skeletonPose(object, skeleton, world);
 		};
 		sources.objectRadius = [&round](uint32_t object) { return round.objectRadius(object); };
+		sources.templateRadius = [&round](const world::ObjectTemplate& t) { return round.templateRadius(t); };
 		sources.partTransforms = [&round](uint32_t object, std::vector<anim::Matrix>& parts) {
 			return round.partTransforms(object, parts);
 		};

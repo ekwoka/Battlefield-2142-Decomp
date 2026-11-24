@@ -1464,6 +1464,12 @@ public:
 	// object with a collision mesh (+0x4c slot 0x74) and BundledMesh
 	// geometry (its template's slot 0xe4, 0x100a7da0, adds 0).
 	float objectRadius(uint32_t object) const;
+	// The radius (slot 0x8c, 0x006f7ec0) of an object made from `t` on its
+	// own, as the object manager's distance fade sizes a Titan's child
+	// objects: its collision mesh's, or a child's offset plus that child's
+	// radius when farther; a child naming its own collision mesh measures
+	// that one. 0 for a template without collision anywhere below it.
+	float templateRadius(const world::ObjectTemplate& t) const;
 	// A body's collision box in its own space (Body::boxMin / boxMax); false
 	// for an object without one.
 	bool objectBox(uint32_t object, physics::Vec3& low, physics::Vec3& high) const;
@@ -3478,6 +3484,7 @@ private:
 	const Body* findBody(uint32_t object) const { return const_cast<GameWorld*>(this)->findBody(object); }
 	int firstEngineType(const world::ObjectTemplate& root) const;
 	mutable std::map<const world::ObjectTemplate*, int> m_engineTypes; // firstEngineType's answers, by root
+	mutable std::map<const world::ObjectTemplate*, float> m_templateRadii; // templateRadius's answers
 	void addBodies();
 	bool buildBody(const world::ObjectTemplate& t, uint32_t id, const physics::Vec3& position,
 		const physics::Mat3& rotation, Body& body);
