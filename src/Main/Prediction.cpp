@@ -125,8 +125,9 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 	m_body.step(kTick, m_round.ground());
 }
 
-void SoldierPrediction::step(const net::PlayerMove& move)
+SoldierPrediction::Feel SoldierPrediction::step(const net::PlayerMove& move)
 {
+	const Feel before {onGround(), swimming(), m_control.getUpTime()};
 	if (m_active) {
 		tick(move);
 		++m_stats.steps;
@@ -139,6 +140,7 @@ void SoldierPrediction::step(const net::PlayerMove& move)
 	while (m_history.size() > kHistory) {
 		m_history.pop_front();
 	}
+	return before;
 }
 
 void SoldierPrediction::reconcile(int32_t lastMove, const net::NetworkableState& state, const net::Vec3f& feet)

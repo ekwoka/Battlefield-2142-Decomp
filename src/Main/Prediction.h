@@ -78,8 +78,15 @@ public:
 	void stop() { m_active = false; }
 	bool active() const { return m_active; }
 
-	// A move just sent (GameClient::onMoveSent): one tick of it.
-	void step(const net::PlayerMove& move);
+	// The soldier as a move finds him: what the weapon feel reads before the
+	// tick's step (GameWorld::stepWeaponFeel, 0x005de980).
+	struct Feel {
+		bool onGround = false, swimming = false;
+		float getUp = 0;
+	};
+	// A move just sent (GameClient::onMoveSent): one tick of it. Returns the
+	// soldier's state from before the step.
+	Feel step(const net::PlayerMove& move);
 	// A control-object record: the server's state after move `lastMove`.
 	void reconcile(int32_t lastMove, const net::NetworkableState& state, const net::Vec3f& feet);
 

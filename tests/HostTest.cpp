@@ -805,6 +805,27 @@ TEST(Host_LocalHudHealthIsTheSoldiers)
 	CHECK(std::abs(local.health() - 0.487f) < 1e-4f);
 }
 
+// The weapon feel reads the soldier as a move finds him (0x005de980, before
+// the tick's step): on the tick he gets up from prone the get-up time is
+// still 0, and the step then sets it.
+TEST(NetHost_PredictionFeelIsBeforeTheStep)
+{
+	HostRange range;
+	host::SoldierPrediction prediction(*range.round);
+	net::NetworkableState lying;
+	lying.mask = 0x20;
+	lying.soldierValues[0] = static_cast<int>(dice::hfe::game::SoldierPose::Prone);
+	prediction.start(range.templates.find("pac_light_soldier"), 0, lying, {0, 0, 0});
+	dice::hfe::game::SoldierInput down;
+	down.pose = dice::hfe::game::SoldierPose::Prone;
+	CHECK(prediction.step(net::playerInputFrom(down).toMove(1)).getUp == 0);
+	CHECK(prediction.control().pose() == dice::hfe::game::SoldierPose::Prone);
+	const host::SoldierPrediction::Feel up = prediction.step(net::PlayerMove {}); // pose Stand: gets up
+	CHECK(up.getUp == 0 && up.onGround);
+	CHECK(prediction.control().getUpTime() > 0);
+	CHECK(prediction.step(net::PlayerMove {}).getUp > 0);
+}
+
 // The control-object record's mode-3 state end to end: a client predicts
 // its soldier from its own moves (Prediction.h) while the host steps the
 // same moves one a tick; every record corrects the prediction. A bot
