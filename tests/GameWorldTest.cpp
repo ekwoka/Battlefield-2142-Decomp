@@ -2288,6 +2288,94 @@ TEST(GameWorld_EmptiedC4ComesBackAsDetonator)
 	CHECK(me.alive);
 }
 
+// Equipping Unl_c4 (which authors hasMobilePhysics 1 and physicsType Mesh)
+// must not create a colliding world physics Body (or emit world collision
+// sounds), altFire while holding another weapon must not detonate planted C4,
+// and selecting the emptied C4 brings out the visible detonator whose primary
+// fire detonates the charge and plays the detonator's fire sound.
+TEST(GameWorld_HeldC4HasNoPhysicsBodyAndDetonatorScoped)
+{
+	Range range;
+	world::ObjectTemplate* charge = nullptr;
+	giveGadget(range, "unl_c4", charge);
+	charge->settings()["detonation.explosionDamage"] = "1000";
+	charge->settings()["detonation.explosionMaterial"] = "80";
+	world::ObjectTemplate* det = range.templates.create("GenericFireArm", "Unl_c4_detonator");
+	world::ObjectTemplate* c4 = range.templates.find("unl_c4");
+	c4->components().push_back("ExplosivesFireComp");
+	c4->settings()["hasMobilePhysics"] = "1";
+	c4->settings()["hasCollisionPhysics"] = "1";
+	c4->settings()["physicsType"] = "Mesh";
+	c4->settings()["ammo.magSize"] = "1";
+	c4->settings()["ammo.nrOfMags"] = "0";
+	c4->settings()["ammo.toggleWhenNoAmmo"] = "1";
+	c4->settings()["fire.detonatorObject"] = det->name();
+	c4->children().push_back({det->name(), {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->takeSounds();
+	range.world->takeWeaponSounds();
+
+	// Selecting C4 must not spawn a rigid body or emit a collision beep.
+	game::SoldierInput input;
+	input.selectItem = 5;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->physicsBodies() == 0);
+	CHECK(range.world->takeSounds().empty());
+	game::GameWorld::PlayerInfo me;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), me));
+	CHECK(!me.detonatorDrawn);
+
+	// Throw the single charge (toggleWhenNoAmmo returns to rifle).
+	input = {};
+	input.fire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 15; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->projectilesInFlight() == 1);
+
+	// Alt-fire while holding the rifle must not detonate planted C4.
+	input = {};
+	input.altFire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->projectilesInFlight() == 1);
+
+	// Switch back to slot 5: detonator is drawn and not hidden.
+	range.world->playerInfo(range.world->localPlayer(), me);
+	range.world->setSoldierPosition(me.soldier, me.position + physics::Vec3 {0, 0, 30});
+	input = {};
+	input.selectItem = 5;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerInfo(range.world->localPlayer(), me));
+	CHECK(me.detonatorDrawn);
+	CHECK(!range.world->weaponHidden(range.world->localPlayer()));
+
+	// Primary fire while holding the detonator sets off the charge with the detonator sound.
+	range.world->takeWeaponSounds();
+	input = {};
+	input.fire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->projectilesInFlight() == 0);
+	const auto sounds = range.world->takeWeaponSounds();
+	CHECK(std::any_of(sounds.begin(), sounds.end(), [](const game::GameWorld::WeaponSoundEvent& s) {
+		return s.kind == game::GameWorld::WeaponSoundEvent::Fire && s.weapon == "Unl_c4_detonator";
+	}));
+}
+
 // The radius trigger (0x005e8aa0): the anti-personnel mine (MTYPco,
 // allowFriendlyFireDetonation 1) spares its owner's bots always and his
 // human teammates only with the server's friendlyFireWithMines off; an

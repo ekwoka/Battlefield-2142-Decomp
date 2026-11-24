@@ -504,12 +504,21 @@ void GameWorld::buildStaticCollision()
 	m_effects.setDebrisWorld(std::move(debris));
 }
 
+bool GameWorld::heldWeapon(uint32_t object) const
+{
+	return object != 0
+		&& (std::any_of(m_players.begin(), m_players.end(),
+				[object](const auto& p) { return p && p->weaponObject == object; })
+			|| std::any_of(m_remoteSoldiers.begin(), m_remoteSoldiers.end(),
+				[object](const auto& entry) { return entry.second.weaponObject == object; }));
+}
+
 // Supply crates fall under their own script; their mesh must not sit in the
 // static snapshot where it would hurt the crate that owns it.
 bool GameWorld::movesByScript(uint32_t id)
 {
 	return findBody(id) || std::any_of(m_crates.begin(), m_crates.end(), [id](const Crate& c) { return c.object == id; })
-		|| wornKit(id);
+		|| wornKit(id) || heldWeapon(id);
 }
 
 // A static object's collision (its tree's meshes in the soldier and
@@ -5821,6 +5830,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 		info.fireMode = player->weapon->fireMode();
 		info.reloading = player->weapon->reloading();
 	}
+	info.detonatorDrawn = player->alive && player->detonatorDrawn;
 	info.firing = player->alive && player->input.fire;
 	info.altFiring = player->alive && player->input.altFire;
 	info.flareFiring = player->alive && player->input.flareFire;
@@ -6023,6 +6033,10 @@ void GameWorld::equip(Player& player, int slot)
 	}
 	if (world::Object* held = soldier ? m_objects.create(t, soldier->position(), soldier->rotation()) : nullptr) {
 		player.weaponObject = held->id();
+		if (const auto det = t->settings().find("fire.detonatorObject");
+			det != t->settings().end() && !player.detonatorDrawn) {
+			held->disableChild(det->second);
+		}
 	}
 	player.weaponAnimation.reset();
 	if (m_loadAnimationSystem) {
@@ -11661,13 +11675,28 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 		return;
 	}
 	SoldierInput& input = player.input;
-	// Alternate fire sets off the soldier's remote charges (C4).
-	if (input.altFire) {
+	// Alternate fire sets off the soldier's remote charges (C4) when holding
+	// an explosives weapon (or unarmed in tests); primary fire also triggers
+	// when the detonator itself is drawn.
+	const bool canDetonate = !player.weapon || player.weapon->settings().explosives || player.detonatorDrawn;
+	const bool detonatePressed = (input.altFire && canDetonate) || (input.fire && player.detonatorDrawn);
+	if (detonatePressed) {
+		bool detonated = false;
 		for (Projectile& charge : m_projectiles) {
 			if (charge.alive && charge.player == player.id && charge.settings->remote) {
 				explode(charge.position, *charge.settings, player.id, charge.yaw);
 				charge.alive = false;
+				detonated = true;
 			}
+		}
+		if (detonated && !player.weaponTemplate.empty()) {
+			std::string soundTemplate = player.weaponTemplate;
+			if (const world::ObjectTemplate* held = m_templates.find(player.weaponTemplate)) {
+				if (const auto det = held->settings().find("fire.detonatorObject"); det != held->settings().end()) {
+					soundTemplate = det->second;
+				}
+			}
+			weaponSound(WeaponSoundEvent::Fire, player, player.object, soundTemplate, player.body.position);
 		}
 		if (!player.alive) {
 			return; // its own blast: the soldier's object is gone
@@ -15748,9 +15777,9 @@ void GameWorld::addBodies()
 	std::vector<uint32_t> supplied;
 	for (const auto& owned : m_objects.objects()) {
 		world::Object& object = *owned;
-		// A worn kit follows its soldier and has no independent collision.
-		// Do not mark it checked: when dropped it must acquire its own body.
-		if (wornKit(object.id())) {
+		// A worn kit or held weapon follows its soldier and has no independent
+		// collision. Do not mark it checked: a dropped kit must acquire its own body.
+		if (wornKit(object.id()) || heldWeapon(object.id())) {
 			continue;
 		}
 		const auto checked = std::lower_bound(m_checked.begin(), m_checked.end(), object.id());

@@ -188,6 +188,14 @@ bool PlayerCamera::current(Me& me) const
 	me.soldierTemplate = soldier->objectTemplate();
 	const world::Object* weapon = info.weapon ? m_round.objects().find(info.weapon) : nullptr;
 	me.weaponTemplate = weapon ? weapon->objectTemplate() : nullptr;
+	if (info.detonatorDrawn && me.weaponTemplate) {
+		if (const auto det = me.weaponTemplate->settings().find("fire.detonatorObject");
+			det != me.weaponTemplate->settings().end()) {
+			if (const world::ObjectTemplate* detonator = m_round.templates().find(det->second)) {
+				me.weaponTemplate = detonator;
+			}
+		}
+	}
 	me.origin = {body->position.x, body->position.y, body->position.z};
 	// The first-person systems see what the third-person ones do: the
 	// measured movement (GameWorld::stepAnimation).

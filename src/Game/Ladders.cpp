@@ -460,7 +460,7 @@ bool GameWorld::onLadder(int id) const
 bool GameWorld::weaponHidden(int id) const
 {
 	const Player* player = findPlayer(id);
-	return player && player->weapon && player->weapon->hidden();
+	return player && player->weapon && player->weapon->hidden() && !player->detonatorDrawn;
 }
 
 bool GameWorld::zoomUpgrade(int id) const

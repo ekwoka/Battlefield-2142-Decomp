@@ -669,6 +669,7 @@ public:
 		int roundsInMag = -1;
 		int fireMode = 0;
 		bool reloading = false;
+		bool detonatorDrawn = false;
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
@@ -4520,6 +4521,8 @@ private:
 	void layKit(DroppedKit dropped, int player, uint32_t body);
 	// A kit a soldier or a dead one's body still wears (no collision of its own).
 	bool wornKit(uint32_t object) const;
+	// A weapon a soldier currently holds (animated on the soldier, no independent body).
+	bool heldWeapon(uint32_t object) const;
 	bool surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& surface, uint32_t& object) const;
 	// A thrown gadget's resting height at (x, z): what is under the soldier's reach (a deck, a roof), the terrain else.
 	float restHeight(const Player& player, float x, float z) const;
