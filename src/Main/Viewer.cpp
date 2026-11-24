@@ -3,6 +3,7 @@
 #include "MissileViewSmoothing.h"
 #include "DisplayModes.h"
 
+#include "Render/FrameStats.h"
 #include "Render/GpuContext.h"
 #include "Render/LevelRenderer.h"
 #include "Render/PngWriter.h"
@@ -537,7 +538,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		bool discardFirstRelativeMotion = false;
 		input::MenuWheelSteps menuWheel;
 		MenuCursor menuCursor;
+		using Stats = render::FrameStats;
+		Stats& stats = Stats::get();
 		while (running) {
+			const uint64_t eventsStart = stats.enabled() ? Stats::now() : 0;
 			const bool wanted = options.wantsPointer && options.wantsPointer();
 			if (playing && wanted != pointer) {
 				pointer = wanted;
@@ -939,7 +943,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			}
 			const double seconds = static_cast<double>(now - start) / 1e9;
 			const int elapsedTicks = ticks.advance(seconds);
+			if (eventsStart) {
+				stats.add(Stats::Events, Stats::now() - eventsStart); // events, input and the controls
+			}
 			if (elapsedTicks > 0 && options.onTicks) {
+				Stats::Scope timed(Stats::Ticks);
 				options.onTicks(elapsedTicks);
 			}
 			if (elapsedTicks > 0) {
@@ -1040,7 +1048,12 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			SDL_GPUTexture* swapchain = nullptr;
 			Uint32 width = 0;
 			Uint32 height = 0;
-			if (!SDL_WaitAndAcquireGPUSwapchainTexture(commands, window, &swapchain, &width, &height) || !swapchain) {
+			bool acquired = false;
+			{
+				Stats::Scope timed(Stats::Acquire);
+				acquired = SDL_WaitAndAcquireGPUSwapchainTexture(commands, window, &swapchain, &width, &height) && swapchain;
+			}
+			if (!acquired) {
 				SDL_SubmitGPUCommandBuffer(commands);
 				continue;
 			}
@@ -1060,9 +1073,22 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onFrame(dt, blendAlpha); // dt: clamped to 1e-5 .. 1/15 above
 			}
 			const bool tickedForObjects = std::exchange(tickedSinceSync, false);
-			level.syncObjects(render::TickBlend {tickedForObjects, blendAlpha});
-			level.draw(commands, swapchain, target, camera, sources.lights);
-			SDL_SubmitGPUCommandBuffer(commands);
+			{
+				Stats::Scope timed(Stats::Sync);
+				level.syncObjects(render::TickBlend {tickedForObjects, blendAlpha});
+			}
+			{
+				Stats::Scope timed(Stats::Draw);
+				level.draw(commands, swapchain, target, camera, sources.lights);
+			}
+			{
+				Stats::Scope timed(Stats::Submit);
+				SDL_SubmitGPUCommandBuffer(commands);
+			}
+			if (const std::string report = stats.endFrame(Stats::now()); !report.empty()) {
+				std::printf("%s\n", report.c_str());
+				std::fflush(stdout);
+			}
 			if (!shown.shot.empty()) {
 				// The same frame again, off screen, saved.
 				auto offscreen = gpu->createOffscreenTarget(width, height);

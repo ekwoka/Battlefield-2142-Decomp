@@ -4,6 +4,7 @@
 #include "EmbeddedShaders.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace dice::hfe::render {
@@ -74,6 +75,9 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 		}
 		context->m_window = window;
 		context->m_colorFormat = SDL_GetGPUSwapchainTextureFormat(context->m_device, window);
+		// Which backend a slow machine runs: nothing sets the swapchain's parameters, so SDL's defaults.
+		std::printf("gpu: driver %s, present mode vsync (default), mailbox %s\n", SDL_GetGPUDeviceDriver(context->m_device),
+			SDL_WindowSupportsGPUPresentMode(context->m_device, window, SDL_GPU_PRESENTMODE_MAILBOX) ? "supported" : "unsupported");
 	}
 	if (!context->createPipelines(error, 1, context->m_singleSampled)) {
 		return nullptr;

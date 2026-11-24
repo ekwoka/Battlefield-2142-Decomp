@@ -1,4 +1,5 @@
 #include "LevelRenderer.h"
+#include "FrameStats.h"
 #include "BundledShadow.h"
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
@@ -4390,7 +4391,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	depthTarget.clear_stencil = 0;
 	depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 	updateUndergrowth(camera);
-	buildParticles(camera);
+	{
+		FrameStats::Scope timed(FrameStats::Particles);
+		buildParticles(camera);
+	}
 	// The mesh particles' meshes, loaded before the pass begins.
 	if (m_sources) {
 		for (const effects::EffectManager* manager : {m_sources->effects, m_sources->objectEffects}) {
@@ -4438,12 +4442,18 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		});
 		m_gpu.flushUploads();
 	}
-	buildOverlay();
+	{
+		FrameStats::Scope timed(FrameStats::Overlay);
+		buildOverlay();
+	}
 	// The menu keeps its own clock: it plays with or without a HUD.
 	const uint64_t now = SDL_GetTicks();
 	const float menuSeconds = m_lastMenuTicks ? static_cast<float>(now - m_lastMenuTicks) / 1000.0f : 0.0f;
 	m_lastMenuTicks = now;
-	buildMenu(menuSeconds);
+	{
+		FrameStats::Scope timed(FrameStats::Menu);
+		buildMenu(menuSeconds);
+	}
 	const Mat4 projection = overheadOn
 		? overheadProjection(overhead, static_cast<float>(target.width), static_cast<float>(target.height), camera.nearPlane,
 			  6000.0f)
@@ -4451,7 +4461,10 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// TAA's jitter (Enhanced/LevelRendererEnhanced.cpp).
 	beginEnhancedFrame(camera, target.width, target.height, overheadOn, projection);
 	const Mat4 viewProjection = m_enh.jittered ? camera.view() * projection * m_enh.jitter : camera.view() * projection;
-	prepareInstances(camera, viewProjection);
+	{
+		FrameStats::Scope timed(FrameStats::Prepare);
+		prepareInstances(camera, viewProjection);
+	}
 	// The lights' list against this frame's view (RendDX9 0x100a93f0 builds its frustum from the camera it
 	// is called with), so after prepareInstances has made m_frameFrustum.
 	collectPointLights(camera);
@@ -4485,10 +4498,13 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		m_terrainHeightAboveGround = std::fabs(camera.position.y -
 			(heightmap ? heightmap->heightAt(camera.position.x, camera.position.z) : 0.0f));
 	}
-	renderShadows(commands, camera, lights, seconds);
 	const float aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
-	if (m_enh.csm) {
-		renderCascades(commands, camera, lights, seconds, aspect);
+	{
+		FrameStats::Scope timed(FrameStats::Shadows);
+		renderShadows(commands, camera, lights, seconds);
+		if (m_enh.csm) {
+			renderCascades(commands, camera, lights, seconds, aspect);
+		}
 	}
 	if (m_enh.prepass) {
 		renderEnhancedPrepass(commands, camera, viewProjection, seconds, aspect);

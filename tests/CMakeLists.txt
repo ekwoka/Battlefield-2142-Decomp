@@ -13,6 +13,7 @@ if(TARGET Render)
 	target_compile_definitions(bf2142_tests PRIVATE BF2142_RENDER_TESTS=1)
 	# The shaders' reflection (cmake/Shaders.cmake), checked against the pushes.
 	target_sources(bf2142_tests PRIVATE ShaderUniformsTest.cpp)
+	target_sources(bf2142_tests PRIVATE FrameStatsTest.cpp)
 	target_compile_definitions(bf2142_tests PRIVATE BF2142_SHADER_DIR="$<TARGET_PROPERTY:Render,BINARY_DIR>/shaders")
 endif()
 if(WIN32 AND NOT MSVC)
