@@ -8666,6 +8666,9 @@ int runGame(Options& options, Session& session)
 			stepSounds();
 		};
 #else
+		if (!session.client) {
+			std::printf("built without Python: no game-mode script (no control point capture, tickets or scoring)\n");
+		}
 		const auto step = [&] {
 			remoteStep();
 			if (hosted) {

@@ -681,10 +681,14 @@ ScriptHost::ScriptHost(game::ScriptGame& game, std::vector<std::string> paths, L
 		PyImport_AppendInittab("host", initHost);
 		PyConfig config;
 		PyConfig_InitIsolatedConfig(&config);
+#ifdef BF2142_PYTHON_HOME
+		PyConfig_SetBytesString(&config, &config.home, BF2142_PYTHON_HOME);
+#endif
 		const PyStatus status = Py_InitializeFromConfig(&config);
 		PyConfig_Clear(&config);
 		if (PyStatus_Exception(status)) {
-			m_impl->log("python: cannot start the interpreter");
+			// "Error" so the quiet log filter keeps it: without it no game mode runs.
+			m_impl->log(std::string("Error: cannot start the interpreter: ") + (status.err_msg ? status.err_msg : "?"));
 			return;
 		}
 	}

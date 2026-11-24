@@ -12,3 +12,14 @@ add_library(Scripting STATIC ScriptHost.cpp ${embedded})
 target_include_directories(Scripting PUBLIC ${PROJECT_SOURCE_DIR}/src PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(Scripting PUBLIC Game PRIVATE Python3::Python)
 target_compile_definitions(Scripting PUBLIC BF2142_HAS_PYTHON=1)
+if(WIN32)
+	# python313.dll is copied beside bf2142.exe, where the interpreter finds no
+	# Lib\; point it at the install the headers came from (C:/Python313/include).
+	list(GET Python3_INCLUDE_DIRS 0 python_include)
+	get_filename_component(python_home "${python_include}" DIRECTORY)
+	target_compile_definitions(Scripting PRIVATE BF2142_PYTHON_HOME="${python_home}")
+	if(NOT MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+		# Without MS_WIN64, pyconfig.h may assume 32-bit sizes under MinGW; empty matches its own define.
+		target_compile_definitions(Scripting PRIVATE MS_WIN64=)
+	endif()
+endif()
