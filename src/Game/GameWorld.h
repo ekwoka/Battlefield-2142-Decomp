@@ -477,7 +477,7 @@ public:
 	// a weapon taken in hand. `object` is the soldier, or the vehicle a
 	// seat's gun is on; at most the last 256 are kept.
 	struct WeaponSoundEvent {
-		enum Kind { Fire, Reload, Deploy, SwitchFireRate, TriggerClick } kind = Fire;
+		enum Kind { Fire, Reload, Deploy, SwitchFireRate, TriggerClick, Zoom } kind = Fire;
 		int player = -1;
 		uint32_t object = 0;
 		std::string weapon; // the weapon's template
@@ -1089,6 +1089,11 @@ public:
 	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
 	// limit, soldierAnimationSpeed).
 	void setZoomed(int player, bool zoomed, float lookScale = 1);
+	// The alternate fire's press changed the zoom level of `weapon` (the
+	// template with the DefaultZoomComp): its S_<weapon>_Zoom, in or out
+	// (0x005c0da0 compares the level around the zoom component's step ->
+	// sound component slot 0x8c, 0x005dc250, first person only).
+	void zoomSound(int player, const std::string& weapon);
 	// The distance counter (fire.useDistanceCounter, the rocket launchers'
 	// airburst): the range set (0: off), and the wheel's steps
 	// (PINextItem +1, PIPrevItem -1) while it is on.

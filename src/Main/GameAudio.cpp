@@ -395,6 +395,7 @@ void GameAudio::weapons(const Camera& camera)
 			: event.kind == Kind::Reload                                  ? sound::GameSounds::WeaponEvent::Reload
 			: event.kind == Kind::SwitchFireRate                          ? sound::GameSounds::WeaponEvent::SwitchFireRate
 			: event.kind == Kind::TriggerClick                            ? sound::GameSounds::WeaponEvent::TriggerClick
+			: event.kind == Kind::Zoom                                    ? sound::GameSounds::WeaponEvent::Zoom
 																		  : sound::GameSounds::WeaponEvent::Deploy;
 		const game::GameWorld::PlayerInfo* seated = event.player >= 0 ? info(event.player) : nullptr;
 		// A seat carries several fire components (cannon, launcher): each is

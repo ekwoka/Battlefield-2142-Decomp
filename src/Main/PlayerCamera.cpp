@@ -912,8 +912,13 @@ void PlayerCamera::stepSeatZoom(const Me& me, bool altPressed, float seconds)
 	}
 	const game::FireArm* firearm = gun ? m_round.gun(me.vehicle, me.seat) : nullptr;
 	const bool looking = m_mode == game::camera::Mode::Inside || m_mode == game::camera::Mode::Nose;
-	m_seatZoom.step(altPressed && !duckingDisablesInput(), firearm && firearm->reloading(), looking, base, seconds,
+	const int levelWas = m_seatZoom.state.level();
+	const bool pressed = altPressed && !duckingDisablesInput();
+	m_seatZoom.step(pressed, firearm && firearm->reloading(), looking, base, seconds,
 		firearm && firearm->overheated(), firearm && firearm->zoomBusy());
+	if (pressed && gun && m_seatZoom.state.level() != levelWas) {
+		m_round.zoomSound(m_round.localPlayer(), gun->name()); // 0x005c0da0; a reload's zoom-out is silent
+	}
 }
 
 void PlayerCamera::tick(float seconds)
@@ -1078,8 +1083,12 @@ void PlayerCamera::tick(float seconds)
 	if ((!me.vehicle || kitSeat(me)) && m_zoomSettings.present()) {
 		const int step = std::exchange(m_itemStep, 0);
 		if (altPressed && m_zoomSettings.takesPress(reloading || me.zoomBusy, me.overheated)) { // 0x005c50e0, 0x005d3c40
+			const int levelWas = m_zoom.level();
 			const float factor = m_zoom.cycle(m_zoomSettings);
 			m_fov.set(factor > 0 ? factor : m_baseFov, m_zoomSettings.delay);
+			if (weaponTemplate && m_zoom.level() != levelWas) {
+				m_round.zoomSound(m_round.localPlayer(), weaponTemplate->name()); // 0x005c0da0
+			}
 		} else if (step != 0 && m_zoom.level() > 0 && !m_remote
 			&& m_zoom.fineTune(m_zoomSettings, step, m_round.zoomUpgrade(m_round.localPlayer()))) {
 			// The wheel's fine tuning (0x005da890): the new field of view at

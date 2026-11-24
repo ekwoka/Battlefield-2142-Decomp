@@ -5520,12 +5520,22 @@ TEST(PlayerCamera_TankZoomRetainsShortClicks)
 				g.world->tick(1 / 30.0f);
 				camera.tick(1 / 30.0f);
 			};
+			// The gun's S_<gun>_Zoom, in and out (0x005c0da0 -> 0x005dc250).
+			const auto zoomSounds = [&] {
+				int n = 0;
+				for (const auto& e : g.world->takeWeaponSounds()) {
+					n += e.kind == game::GameWorld::WeaponSoundEvent::Zoom;
+				}
+				return n;
+			};
 			for (int i = 0; i < 60; ++i) step();
+			CHECK(zoomSounds() == 0); // entering the seat makes none
 			const float wide = camera.fieldOfView();
 			camera.setAltFire(true);
 			step();
 			camera.setAltFire(false);
 			for (int i = 0; i < 30; ++i) step();
+			CHECK(zoomSounds() == 1);
 			const float zoomed = camera.fieldOfView();
 			std::fprintf(stderr, "  %s %s zoom level %d: fov %.4f -> %.4f\n", mod, name, camera.seatZoomLevel(), wide, zoomed);
 			CHECK(camera.seatZoomLevel() == 1);
@@ -5534,6 +5544,7 @@ TEST(PlayerCamera_TankZoomRetainsShortClicks)
 			step();
 			camera.setAltFire(false);
 			for (int i = 0; i < 30; ++i) step();
+			CHECK(zoomSounds() == 1);
 			CHECK(camera.seatZoomLevel() == 0);
 			CHECK(near(camera.fieldOfView(), wide));
 			// A mouse press/release can occur between 30 Hz camera ticks.

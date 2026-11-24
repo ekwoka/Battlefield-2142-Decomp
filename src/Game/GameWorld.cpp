@@ -6406,6 +6406,15 @@ void GameWorld::setZoomed(int id, bool zoomed, float lookScale)
 	}
 }
 
+void GameWorld::zoomSound(int id, const std::string& weapon)
+{
+	if (const Player* player = findPlayer(id)) {
+		// The object the gun's fire sounds use: the vehicle for a seat's gun.
+		weaponSound(WeaponSoundEvent::Zoom, *player, player->vehicle ? player->vehicle : player->object, weapon,
+			player->body.position);
+	}
+}
+
 float GameWorld::weaponDeviation(int id) const
 {
 	const Player* player = findPlayer(id);
