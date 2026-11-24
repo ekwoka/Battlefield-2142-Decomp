@@ -1226,7 +1226,9 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 		int titanIndex = 0;
 		const bool titanHit = titanPart(root, titan, titanIndex);
 		const bool armoured = hitPoints(object) >= 0 || cell || isTitan(root);
-		if (armoured && (soldierPlayer(object) || (body && body->vehicle && o && o->team() != 0) || titanHit)) {
+		if (armoured
+			&& (soldierPlayer(object) || (body && body->vehicle && o && o->team() != 0)
+				|| (isCommanderAsset(root) && o && o->team() != 0) || titanHit)) {
 			showHitIndicator(attacker);
 		}
 	}
@@ -1333,6 +1335,24 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 	}
 	if (isCommanderAsset(object)) {
 		m_hitPoints[object] = 0; // a wreck until repaired (armor.canBeDestroyed 0)
+		if (left > 0) {
+			staticArmorEffectsAfterDamage(object, 0.0f);
+			raise("VehicleDestroyed", {ScriptValue::object(object), ScriptValue::player(attacker)});
+			if (const world::Object* target = m_objects.find(object); target && target->objectTemplate()) {
+				const world::ObjectTemplate& t = *target->objectTemplate();
+				destroyedGameEvent(t);
+				ProjectileSettings blast;
+				blast.explosionDamage = number(t, "armor.explosionDamage", 0);
+				blast.explosionRadius = number(t, "armor.explosionRadius", 0);
+				blast.explosionMaterial = integer(t, "armor.explosionMaterial", 0);
+				if (const auto effect = t.settings().find("armor.explosionEffect"); effect != t.settings().end()) {
+					blast.endEffect = effect->second;
+				}
+				if (blast.explosionRadius > 0) {
+					explode({target->position().x, target->position().y, target->position().z}, blast, attacker, 0, object);
+				}
+			}
+		}
 		return;
 	}
 	if (Player* victim = soldierPlayer(object)) {
@@ -1356,9 +1376,16 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 
 bool GameWorld::vehicleWreckLook(uint32_t object) const
 {
-	const Body* body = findBody(object);
 	const world::Object* o = m_objects.find(object);
-	if (!body || !body->vehicle || body->wreckTime < 0 || isTitan(object) || !o || !o->objectTemplate()) {
+	if (!o || !o->objectTemplate()) {
+		return false;
+	}
+	if (isCommanderAsset(object)) {
+		const float hp = hitPoints(object);
+		return hp >= 0 && hp <= 0 && number(*o->objectTemplate(), "armor.dontUseWreck", 0) == 0;
+	}
+	const Body* body = findBody(object);
+	if (!body || !body->vehicle || body->wreckTime < 0 || isTitan(object)) {
 		return false;
 	}
 	const auto& t = *o->objectTemplate();
@@ -1856,6 +1883,19 @@ void GameWorld::armorEffectMeshes(std::vector<PlacedMesh>& out) const
 	}
 }
 
+void GameWorld::staticArmorEffectsAfterDamage(uint32_t object, float hitPoints)
+{
+	const world::Object* o = m_objects.find(object);
+	if (!o || !o->objectTemplate()) {
+		return;
+	}
+	StaticArmorState& tracked = m_staticArmorEffects[object];
+	ArmorEffectState state {tracked.hitPoints, tracked.level, tracked.attached, tracked.seen};
+	const physics::Vec3 at {o->position().x, o->position().y, o->position().z};
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	armorEffectsAfter(armorEffectList(*o->objectTemplate()), state, object, at, turn, false, hitPoints);
+}
+
 // Each tick: the vehicles' hit points against what their effects last
 // saw (any change: hits, burning, repairs, the scripts), a wreck's as they
 // drain from 0 to -wreckHitPoints over its timeToStayAsWreck (the
@@ -1879,6 +1919,27 @@ void GameWorld::followArmorEffects()
 		}
 		if (!body.effectsSeen || now != body.effectHitPoints) {
 			armorEffectsAfterDamage(body, now);
+		}
+	}
+	for (const CommanderAsset& asset : m_assets) {
+		if (findBody(asset.object)) {
+			continue;
+		}
+		const auto known = m_hitPoints.find(asset.object);
+		const auto tracked = m_staticArmorEffects.find(asset.object);
+		if (known == m_hitPoints.end() && (tracked == m_staticArmorEffects.end() || !tracked->second.seen)) {
+			continue;
+		}
+		const float now = known != m_hitPoints.end() ? known->second : tracked->second.hitPoints;
+		if (tracked == m_staticArmorEffects.end() || !tracked->second.seen || now != tracked->second.hitPoints) {
+			staticArmorEffectsAfterDamage(asset.object, now);
+		}
+	}
+	for (auto it = m_staticArmorEffects.begin(); it != m_staticArmorEffects.end();) {
+		if (!m_objects.find(it->first)) {
+			it = m_staticArmorEffects.erase(it);
+		} else {
+			++it;
 		}
 	}
 	for (size_t i = 0; i < m_armorAnchors.size();) {
@@ -1910,13 +1971,21 @@ bool GameWorld::armorAnchorFrame(uint32_t anchor, physics::Vec3& at, physics::Ma
 		turn = cell->rotation * body->body.rotation;
 		return true;
 	}
-	body = findBody(anchor);
-	if (!body || !m_objects.find(anchor)) {
+	const world::Object* o = m_objects.find(anchor);
+	if (!o) {
 		return false;
 	}
-	at = body->body.position;
-	turn = body->body.rotation;
-	return true;
+	if (body = findBody(anchor); body) {
+		at = body->body.position;
+		turn = body->body.rotation;
+		return true;
+	}
+	if (isCommanderAsset(anchor)) {
+		at = {o->position().x, o->position().y, o->position().z};
+		turn = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+		return true;
+	}
+	return false;
 }
 
 // The tracer rounds' tracers (TracerLook), in groups by mesh, for the
@@ -16261,6 +16330,9 @@ void GameWorld::stepPhysicsMove(float seconds)
 						 [this](const Spinner& s) { return !m_objects.find(s.object); }),
 		m_spinners.end());
 	for (Spinner& spinner : m_spinners) {
+		if (isCommanderAsset(spinner.object) && hitPoints(spinner.object) == 0) {
+			continue;
+		}
 		spinner.vehicle->tickParts(physics::RigidBody {}, seconds);
 	}
 	for (auto it = m_bodies.begin(); it != m_bodies.end();) {

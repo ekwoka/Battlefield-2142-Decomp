@@ -343,13 +343,14 @@ ScriptValue ScriptBridge::objectCall(uint32_t id, const std::string& method, con
 		return ScriptValue::none();
 	}
 	if (method == "getIsWreck") {
-		return ScriptValue::integer(object->destroyed() ? 1 : 0);
+		const bool assetWreck = m_world.isCommanderAsset(id) && m_world.hitPoints(id) <= 0;
+		return ScriptValue::integer(object->destroyed() || assetWreck ? 1 : 0);
 	}
 	if (method == "isTitan") {
 		return ScriptValue::integer(m_world.isTitan(id) ? 1 : 0); // the Titan sync's 0x00561d90
 	}
 	if (method == "getIsRemoteControlled") {
-		return ScriptValue::integer(0);
+		return ScriptValue::integer(m_world.isCommanderAsset(id) ? 1 : 0);
 	}
 	if (method == "getSupplyGroupId") {
 		// Only gpm_sl.py's unused showControlGroups asks; BF2142.exe has no

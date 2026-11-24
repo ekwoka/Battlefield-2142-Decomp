@@ -1299,8 +1299,131 @@ TEST(Commander_C4HurtsAssets)
 			const float after = field.world->hitPoints(asset);
 			std::fprintf(stderr, "  %s/%s: hp %.0f -> %.0f\n", mod, name, before, after);
 			CHECK(after < before);
+			game::GameWorld::PlayerInfo attackerInfo;
+			CHECK(field.world->playerInfo(enemy, attackerInfo));
+			CHECK(attackerInfo.hitIndicator > 0);
 		}
 	}
+}
+
+// Damaging and destroying a static commander asset (armor.canBeDestroyed 0):
+// hits flash the attacker's hit indicator and spawn static armor damage
+// effects; reaching 0 HP switches to the wreck look (geom2), raises
+// VehicleDestroyed once, stops the asset's spinning dish, and stays
+// repairable so repairing restores normal look and rotation.
+TEST(Commander_AssetDamageWreckEffectsAndSpinner)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "SpawnPoint");
+	templates.registerType(3, "Soldier");
+	templates.registerType(4, "PlayerControlObject");
+	templates.registerType(5, "RotationalBundle");
+	templates.registerType(6, "EffectBundle");
+	templates.registerType(7, "SpriteParticleSystem");
+	templates.registerType(8, "RemoteControlledObject");
+	auto* cp = templates.create("ControlPoint", "Home");
+	cp->settings()["controlPointId"] = "1";
+	cp->settings()["team"] = "1";
+	objects.create(cp, {0, 0, 0});
+	auto* sp = templates.create("SpawnPoint", "Spawn");
+	objects.create(sp, {0, 1, 0})->setControlPointId(1);
+	templates.create("Soldier", "soldier")->settings()["armor.maxHitPoints"] = "100";
+
+	const auto makeEffect = [&](const char* name) {
+		auto* fx = templates.create("EffectBundle", name);
+		fx->settings()["timeToLive"] = "CRD_NONE/1/0/0";
+		auto* ps = templates.create("SpriteParticleSystem", std::string(name) + "_ps");
+		ps->settings()["emitFrequency"] = "10";
+		ps->settings()["emitTime"] = "10";
+		ps->settings()["timeToLive"] = "1";
+		ps->settings()["textureName"] = "spark";
+		fx->children().push_back({ps->name(), {}, {}});
+	};
+	makeEffect("e_asset_smoke");
+	makeEffect("e_asset_fire");
+	makeEffect("e_asset_explode");
+
+	auto* dish = templates.create("RotationalBundle", "asset_dish");
+	dish->settings()["continousRotationSpeed"] = "90/0/0";
+	auto* rc = templates.create("RemoteControlledObject", "asset_rc");
+	rc->settings()["rcType"] = "RCSatellite";
+
+	auto* asset = templates.create("PlayerControlObject", "commander_radar_asset");
+	asset->settings()["armor.maxHitPoints"] = "100";
+	asset->settings()["armor.hitPoints"] = "100";
+	asset->settings()["armor.canBeDestroyed"] = "0";
+	asset->settings()["armor.canBeRepairedWhenWreck"] = "1";
+	asset->settings()["armor.addArmorEffect.list"] =
+		"50 e_asset_smoke 0/1/0 0/0/0;25 e_asset_fire 0/1/0 0/0/0;0 e_asset_explode 0/1/0 0/0/0;";
+	asset->children().push_back({"asset_dish", {0, 2, 0}, {0, 0, 0}});
+	asset->children().push_back({"asset_rc", {}, {}});
+
+	const world::Object* placed = objects.create(asset, {0, 0, 20});
+	const_cast<world::Object*>(placed)->setTeam(2);
+	io::FileManager files;
+	physics::CollisionTemplateManager collisionTemplates;
+	game::GameWorld world(templates, objects);
+	physics::Ground ground;
+	ground.height = [](float, float) { return 0.0f; };
+	ground.heightAndNormal = [](float, float, physics::Vec3& n) {
+		n = {0, 1, 0};
+		return 0.0f;
+	};
+	ground.material = [](float, float) { return 0u; };
+	world.enablePhysics(files, collisionTemplates, ground);
+	int destroyedEvents = 0;
+	world.setEventSink([&](const std::string& event, const game::ScriptArgs& args) {
+		if (event == "VehicleDestroyed" && args.size() >= 1 && args[0].kind == game::ScriptValue::Kind::Object
+			&& static_cast<uint32_t>(args[0].i) == placed->id()) {
+			++destroyedEvents;
+		}
+	});
+	world.startRound();
+	const int enemy = world.joinPlayer(1);
+	world.setKit(enemy, "", "soldier");
+	CHECK(world.spawnSoldier(enemy));
+
+	// Dish rotates while the asset is alive.
+	world::Vec3 off, rot0, rot1;
+	world.tick(0.25f);
+	CHECK(world.isCommanderAsset(placed->id()));
+	CHECK(world.partPose(placed->id(), "asset_dish", off, rot0));
+	world.tick(0.25f);
+	CHECK(world.partPose(placed->id(), "asset_dish", off, rot1));
+	CHECK(std::fabs(rot1.x - rot0.x) > 10.0f);
+
+	// Partial damage spawns static armor smoke effect without wrecking yet.
+	world.applyDamage(placed->id(), 60.0f, enemy);
+	world.tick(1 / 30.0f);
+	CHECK(!world.vehicleWreckLook(placed->id()));
+	CHECK(world.effects().emitters() > 0);
+	CHECK(destroyedEvents == 0);
+
+	// Destroying the asset triggers wreck look, VehicleDestroyed once, and stops the dish.
+	world.applyDamage(placed->id(), 50.0f, enemy);
+	CHECK(world.hitPoints(placed->id()) == 0.0f);
+	CHECK(!placed->destroyed()); // stays repairable
+	CHECK(world.vehicleWreckLook(placed->id()));
+	CHECK(destroyedEvents == 1);
+	world.applyDamage(placed->id(), 50.0f, enemy);
+	CHECK(destroyedEvents == 1);
+
+	world::Vec3 wreckRot0, wreckRot1;
+	CHECK(world.partPose(placed->id(), "asset_dish", off, wreckRot0));
+	world.tick(0.5f);
+	CHECK(world.partPose(placed->id(), "asset_dish", off, wreckRot1));
+	CHECK(std::fabs(wreckRot1.x - wreckRot0.x) < 1e-3f);
+
+	// Repairing restores normal look and resumes dish rotation.
+	CHECK(world.repair(placed->id(), 100.0f));
+	CHECK(!world.vehicleWreckLook(placed->id()));
+	world::Vec3 repairedRot0, repairedRot1;
+	CHECK(world.partPose(placed->id(), "asset_dish", off, repairedRot0));
+	world.tick(0.25f);
+	CHECK(world.partPose(placed->id(), "asset_dish", off, repairedRot1));
+	CHECK(std::fabs(repairedRot1.x - repairedRot0.x) > 10.0f);
 }
 
 // The shipped damage table against the armour of C4 and the mines

@@ -1327,6 +1327,9 @@ public:
 	// boards a vehicle's first free seat. Its id, or -1.
 	int seatNearestBot(uint32_t vehicle);
 	// Whether a player's soldier is on a ladder (its LadderContainer).
+	// Commander assets (placed objects carrying a RemoteControlledObject).
+	bool isCommanderAsset(uint32_t object) const;
+	// The player's soldier on foot: whether he is on a ladder right now.
 	bool onLadder(int player) const;
 	// The weapon in hand put away after a throw (FireArm::hidden): not drawn.
 	bool weaponHidden(int player) const;
@@ -3315,6 +3318,14 @@ private:
 	std::vector<ArmorMesh> m_armorMeshes;
 	void stopArmorEffects(uint32_t anchor);
 	static constexpr uint32_t kArmorEffectTag = 0x7d000000u;
+	struct StaticArmorState {
+		float hitPoints = 0;
+		int level = 0;
+		bool attached = false;
+		bool seen = false;
+	};
+	std::unordered_map<uint32_t, StaticArmorState> m_staticArmorEffects;
+	void staticArmorEffectsAfterDamage(uint32_t object, float hitPoints);
 	std::vector<uint32_t> m_armorAnchors; // the bodies and cells whose armour effects follow them
 	void followArmorEffects();
 	// The tracer rounds' tracers this tick, handed to the effects to draw.
@@ -4782,7 +4793,6 @@ private:
 	void offerCommand(int team);
 	void fireStrike(Strike& strike, StrikeFire& fire);
 	void stepCrates(float seconds);
-	bool isCommanderAsset(uint32_t object) const;
 
 	// Titan mode (Titans.cpp).
 	std::string m_gameMode;
