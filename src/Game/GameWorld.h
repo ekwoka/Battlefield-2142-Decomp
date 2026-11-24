@@ -896,6 +896,11 @@ public:
 		// (top) and its change per second (takeOverChangePerSecond).
 		float flagHeight = 0;
 		float flagRate = 0;
+		// Assault Lines' map flags (0x0078ce50): allowCaptureByTeam (the
+		// point's slot 0x30) and whether the template lists supplyGroupNeeded
+		// groups for a team (slot 0xc4).
+		bool allowCapture[3] = {true, true, true};
+		bool needsSupply[3] = {};
 	};
 	std::vector<ControlPointInfo> controlPointList() const;
 	// The control points of a supply group (host.sgl_getControlPointsInGroup,

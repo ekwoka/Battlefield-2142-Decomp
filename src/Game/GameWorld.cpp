@@ -7557,6 +7557,10 @@ std::vector<GameWorld::ControlPointInfo> GameWorld::controlPointList() const
 		list.push_back({point.id, point.team, {p.x, p.y, p.z}, t ? number(*t, "radius", 10) : 10,
 			!(t && number(*t, "unableToChangeTeam", 0) != 0), !(t && number(*t, "isVisible", 1) == 0),
 			!(t && number(*t, "showOnMinimap", 1) == 0), std::move(name), point.flagHeight, point.takeOverChangePerSecond});
+		for (int team = 1; team <= 2; ++team) {
+			list.back().allowCapture[team] = point.allowCapture[team];
+			list.back().needsSupply[team] = !point.supplyGroupsNeeded[team].empty();
+		}
 	}
 	return list;
 }
