@@ -70,6 +70,7 @@
 #include "HudMenusKits.h"
 #include "HudMenusVehicles.h"
 #include "MapCommanderMarkers.h"
+#include "MapControlPointIcon.h"
 #include "MapPlayerMarker.h"
 #include "MapOrderMarker.h"
 #include "MenuBindings.h"
@@ -1028,12 +1029,12 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// The spawn icons are drawn over the vehicles, silos and teammates (0x00796379
 	// after 0x00796143 and 0x0079629f), so they are collected and added below.
 	std::vector<hud::HudManager::MapMarker> spawnMarkers;
+	const bool assaultLines = round.gameMode().find("sl") != std::string::npos; // 0x00796148
 	for (const auto& point : world.controlPointList()) {
 		// The flags only of the points with showOnMinimap (slot 0x44 in 0x0078bd00): the
 		// Titan maps' silo and Titan points have none. Their spawn icons stay.
 		if (point.showOnMinimap) {
-			hud::HudManager::MapMarker flag {"Ingame/Flags/Icons/Minimap/" + folder(point.team) + // 0x0077dbf0: a point that can't change hands is a base
-					(point.capturable ? "/miniMap_CP.tga" : "/miniMap_CPBase.tga"),
+			hud::HudManager::MapMarker flag {dice::hfe::main::mapControlPointIcon(point, folder(point.team), assaultLines),
 				// 0x0077dc72 / 0x0077dd04 construct 32x32 on both maps.
 				point.position.x, point.position.z, 32};
 			flag.upright = true; // 0x0077c610 nets the map's turn out; the flag never sets an angle (+0x28)

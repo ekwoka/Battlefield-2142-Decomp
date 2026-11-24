@@ -333,6 +333,14 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 		cp.flagHeight = o.captureProgress;
 		cp.flagRate = o.captureRate;
 		cp.showOnMinimap = templateNumber(t, "showOnMinimap", 1) != 0;
+		cp.allowCapture[1] = o.allow[0];
+		cp.allowCapture[2] = o.allow[1];
+		if (t) {
+			game::ControlPoint supply {};
+			game::GameWorld::readSupplyLines(*t, supply);
+			cp.needsSupply[1] = !supply.supplyGroupsNeeded[1].empty();
+			cp.needsSupply[2] = !supply.supplyGroupsNeeded[2].empty();
+		}
 		if (t) {
 			for (const char* key : {"controlPointName", "name"}) {
 				const auto it = t->settings().find(key);
