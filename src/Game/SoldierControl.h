@@ -50,6 +50,7 @@ struct SoldierInput {
 	int switchSeat = 0; // PIPosition1..8: move to that seat (1-based; on press)
 	int selectItem = 0; // PIWeaponSelect1..9: the weapon in that kit slot (on press)
 	bool jump = false;  // PIAction (input 9, c_PIAction: Space), held: jumps on landing
+	bool jumpKey = false; // PIAction raw, when `jump` is masked (the tick a prone soldier's jump key gets him up): the deviation's misc part
 	bool lieKey = false; // PILie (input 37, c_PILie: Z) held, apart from the latched pose: the deviation's misc part
 	// The mouse wheel's c_PINextItem (+1, input 48) or c_PIPrevItem (-1,
 	// input 49) this tick: a zoomed rocket launcher's airburst distance

@@ -10950,6 +10950,7 @@ int runGame(Options& options, Session& session)
 				stance.update(in.lie, in.crouch, in.jump);
 				input.jump = in.jump && !wasProne && !stance.prone;
 				input.lieKey = in.lie;
+				input.jumpKey = in.jump; // the raw key: 0x0058ac66 reads the flag before 0x005889d0's get-up
 				input.pose = stance.prone ? game::SoldierPose::Prone
 					: in.crouch           ? game::SoldierPose::Crouch
 										  : game::SoldierPose::Stand;

@@ -5583,7 +5583,10 @@ TEST(Weapons_JumpAndLieKeysRaiseMiscDeviation)
 	game::SoldierInput prone;
 	prone.pose = game::SoldierPose::Prone;
 	settle(prone);
-	riseOnce(jump);
+	// The tick the jump key gets him up the port masks the jump but keeps the raw key.
+	game::SoldierInput rise;
+	rise.jumpKey = true;
+	const float riseTick = riseOnce(rise);
 	riseOnce(jump);
 	float getUpRise = -1;
 	for (int i = 0; i < 20; ++i) {
@@ -5593,6 +5596,7 @@ TEST(Weapons_JumpAndLieKeysRaiseMiscDeviation)
 		getUpRise);
 	CHECK(lieRise > 1);
 	CHECK(jumpRise > 1);
+	CHECK(riseTick > 1);
 	CHECK(getUpRise < 0.01f);
 }
 
