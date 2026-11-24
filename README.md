@@ -57,6 +57,7 @@ to their owners and still need your own copy of the game.
 source/Battlefield 2142/   your game install, BF2142 1.51 + OpenSpy patch (git-ignored)
 build/                     build trees, Ghidra project, analysis output (git-ignored)
 reference/OpenBattlefield2/ the Refractor 2 reference implementation (git-ignored clone)
+launcher/                  a Tauri + Leptos app that builds and runs the port (development)
 src/                       the rewrite, laid out like DICE's Code/BF2 tree
   Platform/                OS abstraction (dialogs, dynamic libraries, ...)
   Memory/                  dice::hfe::memory (was Memory.dll)
@@ -213,6 +214,10 @@ $B --game "$G" --menu --view                       # the main menu in a window: 
 $B --game "$G" +level Camp_Gibraltar --play --view # straight into a level as an EU soldier
 $B --game "$G" +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15 --simulate 120   # a headless bot round
 ```
+
+For development there is also a small launcher app in [`launcher/`](launcher/README.md). Start it
+with `cargo tauri dev` from the repository root. It builds with ninja, runs the game, and lets you
+tick any of the options below and the enhanced options.
 
 ### How a run behaves
 
@@ -492,6 +497,7 @@ The rest only change what you see or hear.
 | `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
 | `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
 | `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the same 4:3 HUD (x scaled by 12/16) with its side pieces moved out by 120. Ignored when the hudfix's shader is already installed. | no |
+| `singleplayAllModes` | on | interface | The singleplayer page lists every level's every mode and size (Titan, Assault Lines, conquest and the rest), each row naming its mode, not only its single-player layouts; the chosen map starts in its own mode. For testing: the bots may not play those modes (Titan bots need `botTitan` and `botCommander`). | no |
 
 `enhanced.enabled` on its own also turns on the enhanced audio (below), lets
 a sound the data names but never creates take its weapon event's defaults,

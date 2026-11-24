@@ -48,6 +48,7 @@ struct EnhancedSettings {
 	bool chaseRoll = false; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); off by default, as retail keeps them level (0x006108e0 -> lookAt 0x006ae080, up (0, 1, 0))
 	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
+	bool singleplayAllModes = true; // enhanced.singleplayAllModes: the singleplayer page lists every level's every mode and size (Titan, Assault Lines, ...), not only its gpm_sp layouts (Main/MenuBindings.cpp); the bots may not play them. Retail lists gpm_sp only
 	// Drawing, also only with enhanced.enabled; experimental, off by default:
 	bool tvEffect = false; // enhanced.tvEffect: the guided round's view gets the TVEffect pass (grey, rolled by noise bands, shifting rows sideways so vertical edges lean); RendDX9 never runs it, retail shows the plain view
 };
@@ -106,6 +107,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.killWeaponNames = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
+	bindProperty<bool>(console, "enhanced.singleplayAllModes", ConsoleAccess::Anyone, [&settings] { return settings.singleplayAllModes; },
+		[&settings](const bool& v) { settings.singleplayAllModes = v; });
 	bindProperty<bool>(console, "enhanced.tvEffect", ConsoleAccess::Anyone, [&settings] { return settings.tvEffect; },
 		[&settings](const bool& v) { settings.tvEffect = v; });
 }

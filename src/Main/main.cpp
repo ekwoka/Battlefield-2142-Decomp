@@ -3598,6 +3598,18 @@ int runGame(Options& options, Session& session)
 	scene::EnhancedSettings enhancedSettings;
 	enhancedSettings.enabled = options.enhanced;
 	scene::registerEnhancedConsoleMethods(console, enhancedSettings);
+	// enhanced.singleplayAllModes for the menu's singleplayer page. The menu
+	// outlives these settings, so its check goes as runGame returns.
+	const auto menuAllModes = [&enhancedSettings] { return enhancedSettings.enabled && enhancedSettings.singleplayAllModes; };
+	struct MenuAllModesReset {
+		Session& session;
+		~MenuAllModesReset()
+		{
+			if (session.menuBindings) {
+				session.menuBindings->singleplayAllModes = nullptr;
+			}
+		}
+	} menuAllModesReset {session};
 	// The launcher's Enhanced options, before the audio, the renderer and the
 	// bots read them (--console runs only once a round has started).
 	for (const std::string& line : options.enhancedSettings) {
@@ -4186,6 +4198,7 @@ int runGame(Options& options, Session& session)
 	};
 	if (session.menuBindings) {
 		session.menuBindings->setControls(&controls);
+		session.menuBindings->singleplayAllModes = menuAllModes;
 	}
 	if (session.menuBindings) {
 		session.menuBindings->onSettingsApplied = applySettings;
@@ -4242,6 +4255,7 @@ int runGame(Options& options, Session& session)
 		menuBindings->setStatsFile(dice::hfe::menu::MenuBindings::defaultStatsFile());
 		menuBindings->onQuit = [&session]() { session.menuQuit = true; };
 		menuBindings->onLog = [](const std::string& line) { std::printf("menu: %s\n", line.c_str()); };
+		menuBindings->singleplayAllModes = menuAllModes;
 		menuBindings->setMaps(scanMenuMaps(options));
 		// The Mod page's mods (ModInfo, each mods/<name>/Mod.desc).
 		menuBindings->setMods(dice::hfe::menu::MenuBindings::findMods(options.gameDir), options.modPath);

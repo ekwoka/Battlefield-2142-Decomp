@@ -178,6 +178,11 @@ public:
 	std::function<void()> onQuit;
 	// Multiplay.createServer: the game takes over with this setup.
 	std::function<void(const GameSetup&)> onStartGame;
+	// enhanced.singleplayAllModes (Scene/EnhancedSettings.h): while this
+	// answers true, the singleplayer page (the gpm_sp filter) lists every
+	// level's every mode and size, each row naming its mode. Unset or
+	// false: the gpm_sp layouts only, as retail.
+	std::function<bool()> singleplayAllModes;
 	// Logic.disconnectGame: leave the running game for the menu.
 	std::function<void()> onDisconnect;
 	// Whether a game runs under the menu (Logic.isGameRunning).
@@ -518,6 +523,10 @@ private:
 	void resetGeneralValues(const std::vector<std::pair<std::string, ui::avm1::Value>>& values);
 	void showMapLists();
 	std::vector<MenuMap> availableMaps() const;
+	bool listsAllModes() const;
+	// A mode as the game modes' box shows it: TEXT_<id> translated, else
+	// its name in the mod unless "N/A", else the id.
+	std::string gameModeText(const std::string& mode) const;
 
 	void startAccountLogin(const std::string& name, const std::string& password, bool remember);
 	void finishAccountLogin();

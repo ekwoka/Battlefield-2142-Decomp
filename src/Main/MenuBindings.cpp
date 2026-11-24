@@ -1564,13 +1564,7 @@ void MenuBindings::bindLists()
 				rows.push_back({m_natives.localize("HEADER_all")});
 			}
 			for (const std::string& mode : modes) {
-				const std::string key = "TEXT_" + mode;
-				std::string text = m_natives.localize(key);
-				if (text == key) {
-					const std::string name = gameModeName ? gameModeName(mode) : std::string("N/A");
-					text = name == "N/A" ? mode : name;
-				}
-				rows.push_back({text});
+				rows.push_back({gameModeText(mode)});
 			}
 			m_natives.setListRows("gameModes", rows);
 			list.selectedIndex = 0;
@@ -1811,7 +1805,26 @@ void MenuBindings::bindMultiplay()
 		std::istringstream words(vm.toString(arg(args, 0)));
 		std::string level, size;
 		words >> level >> size;
-		return Value("/Levels/" + level + "/Info/" + m_filterGameMode + "_" + size + "_preview.png");
+		// With enhanced.singleplayAllModes a level and size may have no
+		// gpm_sp layout: the picture of the first mode that has one.
+		std::string mode = m_filterGameMode;
+		if (listsAllModes()) {
+			const int players = std::atoi(size.c_str());
+			const auto has = [&](const std::string& m) {
+				return std::any_of(m_maps.begin(), m_maps.end(), [&](const MenuMap& map) {
+					return map.level == level && map.gameMode == m && map.size == players;
+				});
+			};
+			if (!has(mode)) {
+				for (const MenuMap& map : m_maps) {
+					if (map.level == level && map.size == players) {
+						mode = map.gameMode;
+						break;
+					}
+				}
+			}
+		}
+		return Value("/Levels/" + level + "/Info/" + mode + "_" + size + "_preview.png");
 	});
 	n.setFunction(kMultiplay, "getMapMovie", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kMultiplay, "isMovieComplete", [](Interpreter&, const Args&) { return Value(true); });
@@ -2609,8 +2622,18 @@ void MenuBindings::setMaps(std::vector<MenuMap> maps)
 	showMapLists();
 }
 
+// enhanced.singleplayAllModes: only the singleplayer page's filter (the
+// create-server page's modes leave gpm_sp out, setGameModeIndex).
+bool MenuBindings::listsAllModes() const
+{
+	return m_filterGameMode == "gpm_sp" && singleplayAllModes && singleplayAllModes();
+}
+
 std::vector<MenuMap> MenuBindings::availableMaps() const
 {
+	if (listsAllModes()) {
+		return m_maps; // sorted by level, mode, then size (setMaps)
+	}
 	std::vector<MenuMap> maps;
 	for (const MenuMap& map : m_maps) {
 		if (map.gameMode == m_filterGameMode) {
@@ -2620,15 +2643,33 @@ std::vector<MenuMap> MenuBindings::availableMaps() const
 	return maps;
 }
 
+std::string MenuBindings::gameModeText(const std::string& mode) const
+{
+	const std::string key = "TEXT_" + mode;
+	std::string text = m_natives.localize(key);
+	if (text == key) {
+		const std::string name = gameModeName ? gameModeName(mode) : std::string("N/A");
+		text = name == "N/A" ? mode : name;
+	}
+	return text;
+}
+
 // 0x100723c0 / 0x10072a70: "Level Name - size" (underscores as spaces).
+// With enhanced.singleplayAllModes the rows also name their mode, as the
+// list then holds a level's every mode.
 void MenuBindings::showMapLists()
 {
-	const auto rows = [](const std::vector<MenuMap>& maps) {
+	const bool allModes = listsAllModes();
+	const auto rows = [this, allModes](const std::vector<MenuMap>& maps) {
 		ui::NativeRegistry::Rows rows;
 		for (const MenuMap& map : maps) {
 			std::string name = map.level;
 			std::replace(name.begin(), name.end(), '_', ' ');
-			rows.push_back({name + " - " + std::to_string(map.size)});
+			std::string row = name + " - " + std::to_string(map.size);
+			if (allModes) {
+				row += " - " + gameModeText(map.gameMode);
+			}
+			rows.push_back({row});
 		}
 		return rows;
 	};

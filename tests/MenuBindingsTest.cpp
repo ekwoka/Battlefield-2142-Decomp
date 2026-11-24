@@ -420,6 +420,50 @@ TEST(MenuBindings_StartGame)
 	}
 }
 
+// enhanced.singleplayAllModes: the singleplayer page lists every mode and
+// size, each row naming its mode, and a chosen map starts in its own mode.
+// Off (or on another page's filter) the page keeps to gpm_sp, as retail.
+TEST(MenuBindings_SingleplayAllModes)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	bool allModes = false;
+	bindings.singleplayAllModes = [&allModes] { return allModes; };
+	bindings.setMaps({{"Suez_Canal", "gpm_ti", 48}, {"Suez_Canal", "gpm_sp", 32}, {"Minsk", "gpm_cq", 16}});
+	avm1::Interpreter vm;
+	const auto& available = natives.listRows("mapListAvailable");
+	const auto image = [&](const char* id) {
+		return vm.toString(call(vm, natives, "dice.bf2.Multiplay", "getMapImage", {avm1::Value(id)}));
+	};
+
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_sp")});
+	CHECK(available.size() == 1 && available[0][0] == "Suez Canal - 32");
+
+	allModes = true;
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_sp")});
+	CHECK(available.size() == 3);
+	CHECK(available.size() == 3 && available[0][0] == "Minsk - 16 - gpm_cq");
+	CHECK(available.size() == 3 && available[1][0] == "Suez Canal - 32 - gpm_sp");
+	CHECK(available.size() == 3 && available[2][0] == "Suez Canal - 48 - gpm_ti");
+	CHECK(image("Suez_Canal 32") == "/Levels/Suez_Canal/Info/gpm_sp_32_preview.png");
+	CHECK(image("Suez_Canal 48") == "/Levels/Suez_Canal/Info/gpm_ti_48_preview.png");
+
+	call(vm, natives, "dice.bf2.Multiplay", "addMapIndexToMapList", {avm1::Value(2)});
+	CHECK(natives.listRows("mapListChosen").size() == 1 && natives.listRows("mapListChosen")[0][0] == "Suez Canal - 48 - gpm_ti");
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.Multiplay", "createServer")));
+	CHECK(started && started->maps.size() == 1);
+	if (started && !started->maps.empty()) {
+		CHECK(started->maps[0].level == "Suez_Canal" && started->maps[0].gameMode == "gpm_ti" && started->maps[0].size == 48);
+	}
+
+	// Another page's filter is left as it was.
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_cq")});
+	CHECK(available.size() == 1 && available[0][0] == "Minsk - 16");
+}
+
 // The shipped menu after an offline login, drawn with the engine's fonts:
 // the frames carry text, and a frame drawn twice is the same. With
 // $BF2142_MENU_BENCH set, prints the time Player::frame() takes.
