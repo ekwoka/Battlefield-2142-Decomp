@@ -500,8 +500,8 @@ bool PlayerCamera::insideView() const
 	if (!m_alive) {
 		return false;
 	}
-	game::GameWorld::PlayerInfo me;
-	if (!m_remote && m_round.playerInfo(m_round.localPlayer(), me) && me.vehicle) {
+	game::GameWorld::PlayerHandles me;
+	if (!m_remote && m_round.playerHandles(m_round.localPlayer(), me) && me.vehicle) {
 		game::GameWorld::ProjectileCamera round;
 		return m_mode == game::camera::Mode::Inside || m_round.projectileCamera(m_round.localPlayer(), round);
 	}
@@ -1610,6 +1610,14 @@ bool PlayerCamera::hides(uint32_t object) const
 {
 	if (!insideView() || object == 0) {
 		return false;
+	}
+	if (!m_remote) {
+		// current()'s handles, without its full PlayerInfo (asked per object per frame).
+		game::GameWorld::PlayerHandles me;
+		if (!m_round.playerHandles(m_round.localPlayer(), me) || !m_round.player() || !m_round.playerBody() || !me.alive) {
+			return false;
+		}
+		return object == me.soldier || object == me.weapon || object == me.kit;
 	}
 	Me me;
 	if (!current(me) || !me.alive) {

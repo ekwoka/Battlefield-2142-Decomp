@@ -669,6 +669,12 @@ public:
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
+	// PlayerInfo's handles alone, without its copies (the renderer asks per object).
+	struct PlayerHandles {
+		bool alive = false;
+		uint32_t soldier = 0, vehicle = 0, weapon = 0, kit = 0; // 0 while dead
+	};
+	bool playerHandles(int player, PlayerHandles& handles) const;
 	// Radio messages (Radio.cpp). A target channel's value by its name
 	// (TCTeam 1 ... TCSquadAndLocalEnemies 0x12, 0x0042d4a0), -1 for none.
 	static int targetChannel(const std::string& name);

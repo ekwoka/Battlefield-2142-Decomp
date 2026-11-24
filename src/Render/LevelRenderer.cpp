@@ -2251,8 +2251,12 @@ void LevelRenderer::syncObjects(TickBlend blend)
 	}
 	if (m_sources->drawnPositions) {
 		// What the HUD projects (retail draws it while the objects are blended).
+		// Updated in place: clearing and refilling it allocated a node per entry each frame.
 		auto& out = *m_sources->drawnPositions;
-		out.clear();
+		for (auto it = out.begin(); it != out.end();) {
+			const auto o = m_objectBlend.find(it->first);
+			it = o != m_objectBlend.end() && o->second.drawn.m != o->second.current.m ? std::next(it) : out.erase(it);
+		}
 		for (const auto& [id, o] : m_objectBlend) {
 			if (o.drawn.m != o.current.m) {
 				out[id] = {o.drawn.at(3, 0), o.drawn.at(3, 1), o.drawn.at(3, 2)};
@@ -2281,8 +2285,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 			instance.partsPrevious.swap(instance.partsTicked);
 		}
 		instance.partsTicked = instance.parts;
-		std::vector<uint8_t> done(n, 0);
-		const std::function<const Mat4&(size_t)> drawn = [&](size_t i) -> const Mat4& {
+		std::vector<uint8_t>& done = m_partsDoneScratch; // reused: no allocation per instance per frame
+		done.assign(n, 0);
+		const auto drawn = [&](const auto& self, size_t i) -> const Mat4& {
 			if (!done[i]) {
 				done[i] = 1; // a cycle can't occur (a template tree), but never recurse twice
 				const int p = instance.partsParent[i];
@@ -2292,12 +2297,12 @@ void LevelRenderer::syncObjects(TickBlend blend)
 				if (instance.partsBlended[i]) {
 					local = blendTransform(instance.partsPrevious[i] * affineInverse(parentBefore), local, blend.alpha);
 				}
-				instance.parts[i] = p < 0 ? local : local * drawn(static_cast<size_t>(p));
+				instance.parts[i] = p < 0 ? local : local * self(self, static_cast<size_t>(p));
 			}
 			return instance.parts[i];
 		};
 		for (size_t i = 0; i < n; ++i) {
-			drawn(i);
+			drawn(drawn, i);
 		}
 	};
 	// Move instances with their objects.

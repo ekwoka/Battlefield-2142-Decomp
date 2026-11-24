@@ -647,6 +647,7 @@ private:
 	// syncPlaced's: the templates asked for this frame, and each template's
 	// parts at rest (collectParts without an object).
 	std::vector<LevelSources::PlacedTemplate> m_placedScratch;
+	std::vector<uint8_t> m_partsDoneScratch; // syncObjects' blendParts, per instance
 	std::map<const world::ObjectTemplate*, std::vector<Mat4>> m_placedParts;
 	bool m_hadPlaced = false;
 	void buildTerrain(const LevelSources& sources);

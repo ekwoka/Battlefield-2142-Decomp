@@ -5627,12 +5627,28 @@ std::vector<GameWorld::PlayerInfo> GameWorld::playerList() const
 	return list;
 }
 
+bool GameWorld::playerHandles(int id, PlayerHandles& handles) const
+{
+	const Player* player = findPlayer(id);
+	if (!player) {
+		return false;
+	}
+	handles.alive = player->alive;
+	handles.soldier = player->alive ? player->object : 0;
+	handles.vehicle = player->alive ? player->vehicle : 0;
+	handles.weapon = player->alive ? player->weaponObject : 0;
+	handles.kit = player->alive ? player->kitObject : 0;
+	return true;
+}
+
 bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 {
 	const Player* player = findPlayer(id);
 	if (!player) {
 		return false;
 	}
+	PlayerHandles handles;
+	playerHandles(id, handles);
 	info.id = player->id;
 	info.name = player->name;
 	info.team = player->team;
@@ -5641,13 +5657,13 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.connectedAt = player->connectedAt;
 	info.spectator = player->spectator;
 	info.gunShots = player->gunShots;
-	info.alive = player->alive;
+	info.alive = handles.alive;
 	info.killer = player->killer;
-	info.soldier = player->alive ? player->object : 0;
-	info.vehicle = player->alive ? player->vehicle : 0;
+	info.soldier = handles.soldier;
+	info.vehicle = handles.vehicle;
 	info.seat = player->alive && player->vehicle ? player->seat : -1;
 	info.driving = info.seat == 0 && !isTitan(player->vehicle);
-	info.kit = player->alive ? player->kitObject : 0;
+	info.kit = handles.kit;
 	if (player->kitObject) {
 		info.bodyKit = player->kitObject;
 		info.bodyKitWearer = player->object;
@@ -5659,7 +5675,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 			}
 		}
 	}
-	info.weapon = player->alive ? player->weaponObject : 0;
+	info.weapon = handles.weapon;
 	// The host's handles: the soldier (or the corpse) while its object is
 	// kept; aboard, the vehicle (its seat's remote-controlled object reads
 	// as the soldier: slot 0x148).

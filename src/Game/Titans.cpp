@@ -3327,12 +3327,13 @@ namespace dice::hfe::game {
 
 int GameWorld::titanPartLook(uint32_t object, const std::string& path) const
 {
-	std::string key = path;
-	std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	for (const Titan& titan : m_titans) {
 		if (titan.object != object) {
 			continue;
 		}
+		// Lowered only for a Titan's part: the renderer asks for every object's child parts each frame.
+		std::string key = path;
+		std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		const auto found = titan.nodes.find(key);
 		if (found == titan.nodes.end()) {
 			return 0;
