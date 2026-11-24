@@ -117,6 +117,7 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 		input.pose = m_control.stancePose(input.pose, game::stance::waterTooDeep(m_body.position, m_round.ground()), input.jump);
 	}
 	m_body.stance = static_cast<int>(input.pose);
+	m_control.sprintStrafe = m_round.sprintStrafe();
 	m_control.update(input, m_body, kTick);
 	if (m_battery >= 0) {
 		m_battery = std::min(1.0f, m_battery + m_batteryRate * kTick);

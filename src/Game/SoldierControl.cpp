@@ -248,7 +248,8 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 	// 0x00588420: the inputs eased towards the shaped ones, their direction
 	// at most 1 long.
 	m_throttle = ease(m_throttle, shape(input.throttle));
-	m_strafe = ease(m_strafe, shape(input.strafe));
+	// Sprinting (slot 0x100) the strafe is dropped and eases out (0x0058844d).
+	m_strafe = ease(m_strafe, sprinting && !sprintStrafe ? 0.0f : shape(input.strafe));
 	physics::Vec3 direction = forward * m_throttle + right * m_strafe;
 	const float length = std::sqrt(m_throttle * m_throttle + m_strafe * m_strafe);
 	if (length > 1.0f) {

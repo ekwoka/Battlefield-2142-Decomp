@@ -8995,3 +8995,35 @@ TEST(GameWorld_HeavyVehicleNearnessForTheCameraRumble)
 		CHECK(range.world->heavyVehicleNearness(at, 0, {}) == 0); // nobody driving
 	}
 }
+
+// The speed index (0x00586020 -> 0x00588420): standing with a zoomed weapon
+// the soldier walks at index 2 (1.5 m/s) in any direction; the strafe is
+// shaped as the throttle (0x0058a6d0) and moves at the same speed.
+TEST(GameWorld_ZoomedStrafeIsSlowed)
+{
+	for (const bool zoomed : {false, true}) {
+		for (const bool strafing : {false, true}) {
+			Range range;
+			CHECK(range.world->spawnPlayer(2) != nullptr);
+			const int me = range.world->localPlayer();
+			range.world->setZoomed(me, zoomed);
+			game::SoldierInput input;
+			(strafing ? input.strafe : input.throttle) = 1;
+			game::GameWorld::PlayerInfo info;
+			range.world->playerInfo(me, info);
+			physics::Vec3 start = info.position;
+			for (int i = 0; i < 60; ++i) {
+				if (i == 30) {
+					range.world->playerInfo(me, info);
+					start = info.position;
+				}
+				range.world->setPlayerInput(input);
+				range.world->tick(1 / 30.0f);
+			}
+			range.world->playerInfo(me, info);
+			const physics::Vec3 d = info.position - start;
+			const float speed = std::sqrt(d.x * d.x + d.z * d.z);
+			CHECK(std::fabs(speed - (zoomed ? 1.5f : 3.9f)) < 0.1f);
+		}
+	}
+}

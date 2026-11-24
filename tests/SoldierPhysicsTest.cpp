@@ -1357,3 +1357,26 @@ TEST(SoldierPhysics_ProneSpawnHoldsUntilTheToggleAsks)
 	jumped.reset();
 	CHECK(tick(jumped, Pose::Stand) == Pose::Stand);
 }
+
+// 0x00588420: sprinting (slot 0x100) the strafe is dropped and the soldier
+// sprints straight ahead; enhanced.sprintStrafe keeps it (diagonal sprint).
+TEST(SoldierControl_SprintDropsStrafe)
+{
+	for (const bool keep : {false, true}) {
+		physics::SoldierBody body;
+		body.position = {0, 1, 0};
+		game::SoldierControl control;
+		control.sprintStrafe = keep;
+		game::SoldierInput input;
+		input.throttle = 1;
+		input.strafe = 1;
+		input.sprint = true;
+		for (int tick = 0; tick < 90; ++tick) {
+			control.update(input, body);
+			body.step(1 / 30.0f, slope(0));
+		}
+		CHECK(control.stamina().sprinting() || !control.stamina().configured());
+		CHECK(keep ? body.velocity.x > 3.0f : std::fabs(body.velocity.x) < 0.05f);
+		CHECK(body.velocity.z > (keep ? 3.0f : 6.0f));
+	}
+}
