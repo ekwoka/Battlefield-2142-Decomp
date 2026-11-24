@@ -242,6 +242,7 @@ public:
 	SprintStamina& stamina() { return m_stamina; }
 	const SprintStamina& stamina() const { return m_stamina; }
 	float jumpLoss = 0;     // the soldier template's sprintLossAtJump (+0x308)
+	bool sprintStrafe = false; // enhanced.sprintStrafe: keep the strafe while sprinting (retail drops it)
 	bool jumped() const { return m_jumped; } // this tick
 	// The jump hold of the soldier's slot 0xa4 (0x00586580, on its +0x18c
 	// interface): a jump's timer (+0x3f4) or the rise from prone's (+0x40c)

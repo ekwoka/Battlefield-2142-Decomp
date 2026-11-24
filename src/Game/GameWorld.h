@@ -994,6 +994,15 @@ public:
 		m_softLanding = soft;
 	}
 	bool softLanding() const { return m_enhancedLanding && *m_enhancedLanding && m_softLanding && *m_softLanding; }
+	// enhanced.enabled and enhanced.sprintStrafe, read live: a sprinting
+	// soldier keeps his strafe (SoldierControl::sprintStrafe). Not retail:
+	// 0x00588420 drops it while sprinting. Null or false: retail.
+	void setSprintStrafe(const bool* enhanced, const bool* strafe)
+	{
+		m_enhancedSprint = enhanced;
+		m_sprintStrafe = strafe;
+	}
+	bool sprintStrafe() const { return m_enhancedSprint && *m_enhancedSprint && m_sprintStrafe && *m_sprintStrafe; }
 	// enhanced.enabled and enhanced.titanKitFloors, read live: surfaceBelow
 	// (a dropped kit, a placed beacon or shield) also stops on a Titan's
 	// soldier-LOD floors, where the projectile LOD has none (the cargo bay's
@@ -4259,6 +4268,8 @@ private:
 	const bool* m_guidedCameraEase = nullptr;
 	const bool* m_enhancedLanding = nullptr;         // setSoftLanding
 	const bool* m_softLanding = nullptr;
+	const bool* m_enhancedSprint = nullptr; // setSprintStrafe
+	const bool* m_sprintStrafe = nullptr;
 	const bool* m_enhancedKitFloors = nullptr;       // setTitanKitFloors
 	const bool* m_titanKitFloors = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
