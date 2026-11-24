@@ -100,3 +100,12 @@ TEST(MouseCapture_FullscreenKeepsCursorOffDisplayEdges)
 	CHECK(fullscreenEdgeInset(false, true) == 0); // windowed: the Esc menu still lets go
 	CHECK(fullscreenEdgeInset(true, false) == 0); // Cmd-Tab away frees it
 }
+
+// A click whose press and release fall in one frame is kept on the dead and
+// man-down pointer screens too (RMB opens the spawn screen, LMB calls a medic).
+TEST(Viewer_MousePressLatchedUnderPointerScreens)
+{
+	CHECK(latchMousePress(true, false));
+	CHECK(!latchMousePress(true, true));  // the Esc menu has its own clicks
+	CHECK(!latchMousePress(false, false));
+}

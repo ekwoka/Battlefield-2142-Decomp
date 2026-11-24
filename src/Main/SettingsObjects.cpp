@@ -8,17 +8,37 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace dice::hfe::menu {
 
+static std::string audioQualityName(std::string name)
+{
+	std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return name;
+}
+
 int audioQualityIndex(const std::string& quality)
 {
-	std::string name = quality;
-	std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	const std::string name = audioQualityName(quality);
 	if (name == "low") return 2;
 	if (name == "high" || name == "ultrahigh") return 0;
 	return 1; // Medium and unknown profile values use the ordinary default.
+}
+
+int audioVoiceCount(const std::string& quality, double overrideCount)
+{
+	if (overrideCount >= 1 && overrideCount <= std::numeric_limits<int>::max()) {
+		return static_cast<int>(overrideCount);
+	}
+	// 0x00925e28: Low 16, Medium 32, High 64, UltraHigh 128. The port's provider
+	// is always the software one ("0"), and for a provider other than 3 or 4
+	// 0x00496830 first rewrites UltraHigh as High: 64.
+	const std::string name = audioQualityName(quality);
+	if (name == "low") return 16;
+	if (name == "high" || name == "ultrahigh") return 64;
+	return 32;
 }
 
 std::string consoleQuotable(const std::string& text, size_t maxLength)
@@ -135,7 +155,7 @@ const Field kAudio[] = {
 	{"AudioSettings.englishOnlyVoices", "b", "0", false, true},
 	{"AudioSettings.enableEAX", "b", "0", false, true},
 	{"AudioSettings.alwaysAllowSystemOpenAL", "b", "0", false, true},
-	{"AudioSettings.forceNumberOfVoices", "i", "32", false, true},
+	{"AudioSettings.forceNumberOfVoices", "i", "0", false, true},
 };
 
 const Field kVideo[] = {

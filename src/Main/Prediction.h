@@ -78,8 +78,16 @@ public:
 	void stop() { m_active = false; }
 	bool active() const { return m_active; }
 
-	// A move just sent (GameClient::onMoveSent): one tick of it.
-	void step(const net::PlayerMove& move);
+	// The soldier as a move finds him: what the weapon feel reads before the
+	// tick's step (GameWorld::stepWeaponFeel, 0x005de980).
+	struct Feel {
+		bool onGround = false, swimming = false;
+		float getUp = 0;
+		bool prone = false;
+	};
+	// A move just sent (GameClient::onMoveSent): one tick of it. Returns the
+	// soldier's state from before the step.
+	Feel step(const net::PlayerMove& move);
 	// A control-object record: the server's state after move `lastMove`.
 	void reconcile(int32_t lastMove, const net::NetworkableState& state, const net::Vec3f& feet);
 
@@ -90,6 +98,7 @@ public:
 	float lookYaw() const { return m_body.yawDegrees + m_control.twist(); }
 	float aimPitch() const { return m_input.pitch; }
 	bool onGround() const { return m_body.onGround(); }
+	bool swimming() const { return m_body.swimming(); }
 	const game::SoldierControl& control() const { return m_control; }
 	int32_t lastMove() const { return m_lastMove; }
 	// The kit's ability battery (soldier +0x338, 0..1, -1 without a kit):

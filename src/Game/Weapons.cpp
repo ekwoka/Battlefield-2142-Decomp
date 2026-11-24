@@ -253,7 +253,7 @@ ProjectileSettings ProjectileSettings::fromTemplate(const world::ObjectTemplate&
 	s.acceleration = number(t, "acceleration", 0);
 	s.deAcceleration = number(t, "deAcceleration", 0);
 	s.maxSpeed = number(t, "maxSpeed", 0);
-	s.hasDirection = number(t, "hasDirection", 0) != 0;
+	s.hasDirection = number(t, "hasDirection", 1) != 0; // 0x005b3648
 	s.startDelay = number(t, "startDelay", 0);
 	s.hasFollow = std::find(components.begin(), components.end(), "DefaultFollowComp") != components.end();
 	// armingDelay (the GenericProjectile's +0x2fc, its ticks): the seek and
@@ -644,13 +644,17 @@ void FireArm::shareMagazine(const FireArm& from, bool mags)
 
 bool FireArm::selectable() const
 {
+	// 0x005f39c0 and the post-shot 0x005f4a40 ask the ammo component
+	// whether it can reload. For replenishing ammo (0x005d79a0), a hub
+	// that just spent its ability battery cannot.
 	return !(m_settings.toggleWhenNoAmmo && m_settings.magSize >= 0 && m_rounds <= 0 && m_reloadLeft <= 0
-		&& !(m_mags > 0 || m_settings.nrOfMags < 0));
+		&& ((m_mags <= 0 && m_settings.nrOfMags >= 0) || !batteryAllowsReload()));
 }
 
 bool FireArm::startReload()
 {
-	if (m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
+	// 0x005f4670 (ammo slot 17, asked with 1 by 0x005c0e70): ammo.autoReload refuses a reload by hand.
+	if (m_settings.autoReload || m_readyIn > 0 || m_reloadLeft > 0 || m_launchIn >= 0 || (m_settings.thrown && m_reloadIn > 0)
 		|| m_busyUntilRelease || m_shiftIn > 0 || m_settings.magSize < 0
 		|| (m_rounds >= m_settings.magSize && !m_settings.allowReloadWithFullMag)
 		|| (m_mags <= 0 && m_settings.nrOfMags >= 0) || m_settings.reloadTime <= 0 || !batteryAllowsReload()) {
@@ -783,7 +787,7 @@ std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& p
 		TracerLook look = tracerLook(*projectile.settings, projectile.position, projectile.velocity, projectile.origin,
 			projectile.tracerStart, projectile.tracerOffset, projectile.tracerHit);
 		if (look.shown) {
-			out.push_back({projectile.settings->tracerGeometry, look});
+			out.push_back({projectile.settings->tracerGeometry, look, projectile.serial});
 		}
 	}
 	return out;

@@ -512,7 +512,7 @@ Lines explicitly marked inferred, approximate or a guess:
 - engine.md:4175: HUD bar fill directions (types 0 up, 2 from the right, 3 from the left) are "inferred".
 - engine.md:4181: the HUD corner roots' positions are "approximate".
 - engine.md:4297: name tags: "Guesses: the soldier's origin 1 m over its feet, the vehicle height (4 m; RendDX9 asks the render object), the bar's place."
-- docs/coverage.md:35 (gap 11): the soldier deviation's misc part condition ("in the air, inferred").
+- docs/coverage.md:35 (gap 11): the soldier deviation's misc part condition ("in the air, inferred"). Fixed: the jump or lie key held (0x0058ac90..0x0058acf0), never the air.
 - docs/roadmap.md:34 (row 5): "the emitter logic is inferred, not yet decompiled". This was stale and is fixed (row 5 cites the emitters).
 
 Other open decodes engine.md marks as not traced, not found, unknown or a stand-in:

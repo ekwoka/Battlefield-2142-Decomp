@@ -290,7 +290,11 @@ void Player::tick()
 
 void Player::advanceClip(Clip& clip)
 {
-	if (clip.bornTick != m_tick && !clip.image) {
+	if (!clip.queuedFrames.empty()) {
+		// Left from a script scriptDone() didn't follow: 0x100cfa40 goes
+		// to them and steps no frame this tick.
+		applyQueuedFrames(clip);
+	} else if (clip.bornTick != m_tick && !clip.image) {
 		if (clip.frame < 0) {
 			enterFrame(clip, 0, true);
 		} else if (clip.playing && clip.frameCount() > 1) {
@@ -1779,25 +1783,103 @@ void Player::gotoFrame(const ObjectRef& clip, int frame, bool play)
 	}
 }
 
+namespace {
+
+// A frame label's 0-based frame (exact, else ignoring case), or -1.
+int labelFrame(const Clip& clip, const std::string& label)
+{
+	auto it = clip.timeline->labels.find(label);
+	if (it == clip.timeline->labels.end()) {
+		const std::string wanted = lower(label);
+		for (it = clip.timeline->labels.begin(); it != clip.timeline->labels.end(); ++it) {
+			if (lower(it->first) == wanted) {
+				break;
+			}
+		}
+	}
+	return it != clip.timeline->labels.end() ? it->second : -1;
+}
+
+} // namespace
+
 void Player::gotoLabel(const ObjectRef& clip, const std::string& label, bool play)
 {
 	auto* c = dynamic_cast<Clip*>(clip.get());
 	if (!c) {
 		return;
 	}
-	auto it = c->timeline->labels.find(label);
-	if (it == c->timeline->labels.end()) {
-		const std::string wanted = lower(label);
-		for (it = c->timeline->labels.begin(); it != c->timeline->labels.end(); ++it) {
-			if (lower(it->first) == wanted) {
-				break;
+	const int frame = labelFrame(*c, label);
+	if (frame >= 0) {
+		gotoFrame(*c, frame, play);
+	} else {
+		c->playing = play; // Flash: an unknown label only changes play/stop
+	}
+}
+
+void Player::queueFrame(Clip& clip, int frame, bool play)
+{
+	clip.playing = play;
+	if (clip.frameCount() == 0 || clip.image) {
+		return;
+	}
+	if (clip.queuedFrames.empty()) {
+		m_queuedClips.push_back(std::static_pointer_cast<Clip>(clip.shared_from_this()));
+	}
+	clip.queuedFrames.push_back(std::clamp(frame, 0, clip.frameCount() - 1));
+}
+
+void Player::applyQueuedFrames(Clip& clip)
+{
+	// Each queued frame in turn, a repeat of the one just gone to once
+	// (0x100cfa40).
+	const std::vector<int> frames = std::move(clip.queuedFrames);
+	clip.queuedFrames.clear();
+	for (size_t i = 0; i < frames.size(); ++i) {
+		if (i == 0 || frames[i] != frames[i - 1]) {
+			gotoFrame(clip, frames[i], clip.playing);
+		}
+	}
+}
+
+// gameswf goes to a queued frame when the clip next advances (0x100cfa40),
+// and a clip runs its scripts before advancing its children: a goto a
+// script gives a clip below it lands later in the same tick, after the
+// script. Here scripts run after the timelines advanced, so the queue is
+// taken when the outermost script returns.
+// shortcut: a goto queued on an ancestor, or on a clip that already
+// advanced this tick, lands a tick early compared with gameswf; exact
+// order would need gameswf's per-clip action pass.
+void Player::scriptDone()
+{
+	while (!m_queuedClips.empty()) {
+		const std::vector<std::weak_ptr<Clip>> clips = std::move(m_queuedClips);
+		m_queuedClips.clear();
+		for (const auto& weak : clips) {
+			if (auto clip = weak.lock(); clip && !clip->queuedFrames.empty()) {
+				applyQueuedFrames(*clip);
 			}
 		}
 	}
-	if (it != c->timeline->labels.end()) {
-		gotoFrame(*c, it->second, play);
+}
+
+void Player::queueFrame(const ObjectRef& clip, int frame, bool play)
+{
+	if (auto* c = dynamic_cast<Clip*>(clip.get())) {
+		queueFrame(*c, frame, play);
+	}
+}
+
+void Player::queueLabel(const ObjectRef& clip, const std::string& label, bool play)
+{
+	auto* c = dynamic_cast<Clip*>(clip.get());
+	if (!c) {
+		return;
+	}
+	const int frame = labelFrame(*c, label);
+	if (frame >= 0) {
+		queueFrame(*c, frame, play);
 	} else {
-		c->playing = play; // Flash: an unknown label only changes play/stop
+		c->playing = play;
 	}
 }
 

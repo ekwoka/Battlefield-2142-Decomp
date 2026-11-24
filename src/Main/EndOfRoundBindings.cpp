@@ -84,6 +84,9 @@ LevelDescription parseLevelDescription(const std::string& xml, const std::string
 	if (std::regex_search(xml, m, std::regex(R"re(<name>\s*([^<]*?)\s*</name>)re"))) {
 		out.name = m[1];
 	}
+	if (std::regex_search(xml, m, std::regex(R"re(<music>\s*([^<]*?)\s*</music>)re"))) {
+		out.music = m[1]; // 0x00462acd: ModInfo's level record +0x70
+	}
 	if (std::regex_search(xml, m, std::regex(R"re(<briefing[^>]*locid\s*=\s*"([^"]*)")re"))) {
 		out.briefingKey = m[1];
 	}
@@ -303,8 +306,9 @@ std::string EndOfRoundBindings::localized(const std::string& key) const
 std::string EndOfRoundBindings::mapName() const
 {
 	const RoundSummary& s = m_summary;
+	// 0x1001cef0: the .desc's <name> with each '_' a space ("Suez_Canal" -> "Suez Canal").
 	if (!s.mapName.empty()) {
-		return s.mapName;
+		return spaced(s.mapName);
 	}
 	return s.mapPath.empty() ? std::string("Unknown Map") : spaced(s.mapPath);
 }

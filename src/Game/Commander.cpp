@@ -366,6 +366,9 @@ GameWorld::CommanderAbilityState GameWorld::abilityState(int team, CommanderAbil
 		break;
 	case CommanderAbility::Satellite:
 		state.active = since < commanderSettings.satelliteScanTime;
+		if (state.active) {
+			state.satelliteSweep = since / commanderSettings.satelliteScanTime;
+		}
 		break;
 	default:
 		state.active = std::any_of(m_strikes.begin(), m_strikes.end(),
@@ -388,9 +391,10 @@ GameWorld::CommanderAbilityState GameWorld::abilityState(int team, CommanderAbil
 //   7).
 // - UAV: the point is kept (0x005a23b0) and the UAV stays uavTime.
 // - Satellite scan: it runs satelliteScanTime.
-// - Supply drop (0x0043d6d0, 0x0043d510): a supply_crate at the ground's
-//   height plus supplyDropHeight; it goes after supplyDropNumSecsToLive
-//   (0x0043d880).
+// - Supply drop (0x0043d6d0, 0x0043d510): a supply_crate starts
+//   supplyDropHeight above the highest surface in the drop column.
+//   It expires supplyDropNumSecsToLive after landing (0x0043d880 from
+//   the time 0x0043d9c0 keeps); its parachute goes on contact.
 bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, float z, bool byAi)
 {
 	if ((team != 1 && team != 2) || (m_commanders[team].commander == -1 && !byAi)) {
@@ -438,6 +442,14 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 		}
 		// It falls from the drop height when it has a body (physics on);
 		// without, it comes down by itself (stepCrates).
+		// 0x0043d510 traces from y=500 to y=0, then takes the highest
+		// of the hit, terrain and water before adding the configured height.
+		constexpr float rayHeight = 500.0f;
+		float fraction = 1;
+		uint32_t hit = 0;
+		if (objectRayHit({x, rayHeight, z}, {x, 0, z}, 0, fraction, hit)) {
+			ground = std::max(ground, rayHeight * (1 - fraction));
+		}
 		world::Object* placed = m_objects.create(crate, {x, ground + commanderSettings.supplyDropHeight, z});
 		if (!placed) {
 			return false;
@@ -636,7 +648,7 @@ float GameWorld::supplyCrateAge(uint32_t object) const
 {
 	for (const Crate& crate : m_crates) {
 		if (crate.commanderDrop && crate.object == object) {
-			return commanderSettings.supplyDropNumSecsToLive - crate.timeLeft;
+			return crate.age;
 		}
 	}
 	return -1;
@@ -853,6 +865,48 @@ void GameWorld::stepCommander(float seconds)
 // Wing lift and supply_ParachuteForceDown's constantForce 5, straight down:
 // Body::canopy, Parachutes.cpp), about 7 m/s; without a body it comes down
 // at 5 m/s.
+// The commander's handling of a mobile SupplyObject's contact (0x0043d9c0,
+// from its collision event 0x005d0790 on every contact, server):
+// - Met a PlayerControlObject (its template's class 0xc4c2) whose
+//   interface 0xc4c5 (0x0042b2f0: it or a parent) says it spawned under
+//   3 s ago (slot 0xbc, the time 0x005aeb80 stamps through slot 0xb8;
+//   *0x00920bc0 = 3), 0x0043ce80: the crate is removed (0x0043d7c0: out of
+//   the drops' list, ObjectManager slot 0xa4). A vehicle spawning onto it
+//   clears its spot.
+// - Otherwise the supply_parachute among its children (0x006f2f70, by
+//   template name) is disabled (its slot 0x54, updateFlags(1, 0),
+//   0x006f68f0): it and the canopies under it leave the scene. The first
+//   such contact is kept as the landing (0x0043d820 adds (id, now) once),
+//   from which 0x0043d880 counts supplyDropNumSecsToLive.
+// Nothing else changes: the crate stays a mobile body (no flag of its own
+// is set; +0x198, the landed byte, is only sent to the clients,
+// 0x005fdf60 / 0x005fe980 -> 0x005ffec0 -> 0x005d0830, which disable the
+// parachute the same way). It sleeps at rest and others push it as any
+// mobile mesh.
+void GameWorld::supplyObjectContact(uint32_t self, uint32_t other)
+{
+	const auto crate = std::find_if(m_crates.begin(), m_crates.end(), [&](const Crate& c) { return c.object == self; });
+	const world::Object* hit = other ? m_objects.find(other) : nullptr;
+	const auto spawned = m_abandonment.find(other);
+	if (hit && hit->objectTemplate() && sameName(hit->objectTemplate()->typeName(), "PlayerControlObject")
+		&& spawned != m_abandonment.end() && m_time - spawned->second.spawnedAt < 3.0) {
+		if (crate != m_crates.end()) {
+			crate->timeLeft = 0; // stepCrates removes it
+		}
+		return;
+	}
+	world::Object* object = m_objects.find(self);
+	if (object && !object->childDisabled("supply_parachute")) {
+		object->disableChild("supply_parachute");
+		if (Body* body = findBody(self)) {
+			body->canopy.reset();
+		}
+	}
+	if (crate != m_crates.end()) {
+		crate->landed = true;
+	}
+}
+
 void GameWorld::stepCrates(float seconds)
 {
 	constexpr float kTick = 0.2f;
@@ -860,7 +914,10 @@ void GameWorld::stepCrates(float seconds)
 	for (auto it = m_crates.begin(); it != m_crates.end();) {
 		Crate& crate = *it;
 		world::Object* object = m_objects.find(crate.object);
-		crate.timeLeft -= seconds;
+		crate.age += seconds;
+		if (crate.landed || !crate.commanderDrop) {
+			crate.timeLeft -= seconds; // a drop's from its landing (0x0043d880)
+		}
 		if (!object || object->destroyed() || crate.timeLeft <= 0) {
 			if (object) {
 				m_objects.remove(crate.object);
@@ -875,6 +932,9 @@ void GameWorld::stepCrates(float seconds)
 			if (p.y > ground) {
 				p.y = std::max(ground, p.y - 5.0f * seconds);
 				object->setPosition(p);
+				if (p.y <= ground) {
+					supplyObjectContact(crate.object, 0); // down: as a body's ground contact (collisionEvent)
+				}
 			}
 		}
 		crate.tick -= seconds;

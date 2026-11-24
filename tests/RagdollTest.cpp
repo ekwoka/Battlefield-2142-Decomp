@@ -11,7 +11,9 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
+#include "Main/HostedGame.h"
 #include "Main/HudWorld.h"
+#include "Net/GameClient.h"
 #include "Main/GameAudio.h"
 #include "Main/HudMenusComm.h"
 #include "IO/File/FileManager.h"
@@ -32,11 +34,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace dice::hfe;
@@ -1762,6 +1766,59 @@ TEST(Physics_CollisionDamageAndRoadKill)
 	}
 }
 
+// The ordinary contact goes through retail's soldier friendly-fire scale
+// (0x005a43c0 -> 0x004c0e40 -> 0x005b7290). The car's 0x10 group
+// disables the separate hull-overlap kill so this measures impact damage.
+TEST(Physics_RoadKillRespectsSoldierFriendlyFire)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	struct Impact {
+		int team;
+		float friendlyFire;
+	};
+	const Impact cases[] = {{2, 100}, {2, 50}, {2, 0}, {1, 0}};
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		float damage[4] {};
+		for (size_t i = 0; i < std::size(cases); ++i) {
+			const auto [team, friendlyFire] = cases[i];
+			Game game(gameDir, mod);
+			const uint32_t car = makeCar(game, {3, 1.2f, 0});
+			game.templates.find("car")->settings()["collisionGroups"] = "16";
+			game.start();
+			game.world->setFriendlyFire({friendlyFire, 0, 0, 0});
+			CHECK(game.world->spawnPlayer(2) != nullptr);
+			game.run(3);
+			driveCar(game, car, 0);
+			CHECK(game.objects.find(car)->team() == 2);
+			const int victim = game.world->addPlayer("Victim", team, false);
+			CHECK(game.world->spawnSoldier(victim));
+			game::GameWorld::PlayerInfo before;
+			CHECK(game.world->playerInfo(victim, before));
+			CHECK(game.world->setSoldierPosition(before.soldier, {3, 0, 7}));
+			for (int tick = 0; tick < 34; ++tick) {
+				CHECK(game.world->setBodyVelocity(car, {0, 0, 6}));
+				game.run(1 / 30.0f);
+			}
+			game::GameWorld::PlayerInfo after;
+			CHECK(game.world->playerInfo(victim, after));
+			CHECK(after.alive && after.soldier == before.soldier);
+			damage[i] = 100 - game.world->hitPoints(before.soldier);
+		}
+		std::fprintf(stderr, "  %s impact damage at 100%% / 50%% / 0%% friendly fire and against an enemy: %.2f / %.2f / %.2f / %.2f\n",
+			mod, damage[0], damage[1], damage[2], damage[3]);
+		CHECK(damage[0] > 10 && damage[0] < 100);
+		CHECK(std::fabs(damage[1] - damage[0] * 0.5f) < 0.01f);
+		CHECK(damage[2] == 0);
+		CHECK(std::fabs(damage[3] - damage[0]) < 0.01f);
+	}
+}
+
 // A soldier dropped onto a parked car: retail's 0x005a4690 sends the pair to
 // the road kill (0x005a43c0), the soldier being the faster the 10 m/s
 // limit, (speed - 10) x speed x the mass factor (3 for the car's 1800 over
@@ -3452,6 +3509,121 @@ TEST(RagDoll_RemoteWornKitTakesItsSoldiersPose)
 	CHECK(kit.size() > 9 && kit[9][13] == body[9][13]);
 	CHECK(!game.world->isDroppedKit(worn));
 	CHECK(game.world->isDroppedKit(lying));
+}
+
+// A dead soldier's body wears its kit (helmet, vest, pack) until it has
+// landed (0x0058da3f: player dead and 0x005eda20), then the kit lies on the
+// ground under it (0x00589890): while man down and as a corpse after
+// PlayerDeath.
+TEST(RagDoll_DeadBodyWearsItsKitUntilItLands)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const float manDown : {30.0f, 0.0f}) {
+		Game game(gameDir);
+		game.templates.create("Kit", "EU_Assault")->children().push_back({"eu_ar_rifle", {}, {}});
+		game.start();
+		const anim::Skeleton* skeleton = game.systems.skeleton("Objects/Soldiers/Common/Animations/3p_setup.ske");
+		CHECK(skeleton != nullptr && game.world->spawnPlayer(2) != nullptr);
+		const int bot = game.world->addPlayer("Mate", 2, true);
+		CHECK(game.world->spawnSoldier(bot));
+		game::GameWorld::PlayerInfo info, me;
+		game.world->playerInfo(game.world->localPlayer(), me);
+		game.world->playerInfo(bot, info);
+		game.world->setSoldierPosition(info.soldier, me.position + physics::Vec3 {0, 0, 1.2f});
+		game.world->setSpawnTime(30);
+		game.world->setManDownTime(manDown);
+		game.run(0.5f);
+		const uint32_t soldier = info.soldier, kit = info.kit;
+		CHECK(kit != 0);
+		game.world->setHitPoints(soldier, 0);
+		game.world->tick(1 / 30.0f);
+		CHECK(game.count("DropKit") == 0 && !game.world->isDroppedKit(kit));
+		std::vector<anim::Matrix> body, worn;
+		game.run(1);
+		CHECK(!game.world->bodyLanded(bot) || manDown == 0);
+		CHECK(skeleton && game.world->skeletonPose(soldier, *skeleton, body) && game.world->skeletonPose(kit, *skeleton, worn));
+		CHECK(!body.empty() && worn.size() == body.size() && worn[47][13] == body[47][13]); // on its head
+		CHECK(!game.world->isDroppedKit(kit));
+		int ticks = 0;
+		for (; ticks < 30 * 15 && !game.world->isDroppedKit(kit); ++ticks) {
+			game.world->tick(1 / 30.0f);
+		}
+		std::fprintf(stderr, "  man down %.0f s: kit dropped %.2f s after death\n", manDown, 1 + 1 / 30.0f + ticks / 30.0f);
+		CHECK(game.world->isDroppedKit(kit) && game.count("DropKit") == 1);
+		CHECK(ticks / 30.0f + 1 > 3.9f); // ragdollLandedDelay (4 s) after the death
+		const world::Object* lying = game.objects.find(kit);
+		const world::Object* corpse = game.objects.find(soldier);
+		CHECK(lying && corpse && std::abs(lying->position().x - corpse->position().x) < 0.01f);
+	}
+}
+
+// A joined client is told of the kit's drop when the body lands
+// (HandleDrop, 0x0050c1c0), not at the death: until then the bot's player
+// keeps its kit ghost, which main.cpp draws on the body.
+TEST(RagDoll_JoinedClientSeesTheKitDropWhenTheBodyLands)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Game game(gameDir);
+	world::ObjectTemplate* kitTemplate = game.templates.create("Kit", "EU_Assault");
+	kitTemplate->children().push_back({"eu_ar_rifle", {}, {}});
+	kitTemplate->settings()["networkableInfo"] = "KitInfo"; // as the shipped kits: ghosted
+	game.start();
+	game::GameLogic logic;
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.mapSize = 32;
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(*game.world, logic, game.templates, setup);
+	CHECK(hosted.start());
+	CHECK(game.world->spawnPlayer(2) != nullptr);
+	const int bot = game.world->addPlayer("Mate", 2, true);
+	CHECK(game.world->spawnSoldier(bot));
+	game.world->setSpawnTime(30);
+	game.world->setManDownTime(0);
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		game.world->tick(1 / 30.0f);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2)); // the loopback's packets
+	};
+	const auto botKitGhost = [&]() -> uint16_t {
+		const net::RemotePlayer* p = client.world().player(bot);
+		return p ? p->kitGhost : 0;
+	};
+	int frames = 0;
+	for (; frames < 30 * 60 && botKitGhost() == 0; ++frames) {
+		step();
+	}
+	const uint16_t kitGhost = botKitGhost();
+	CHECK(kitGhost != 0);
+	game::GameWorld::PlayerInfo info;
+	CHECK(game.world->playerInfo(bot, info) && info.soldier);
+	game.world->setHitPoints(info.soldier, 0);
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	CHECK(game.count("PlayerDeath") == 1 && botKitGhost() == kitGhost); // dead, still wearing it
+	int ticks = 0;
+	for (; ticks < 30 * 10 && botKitGhost() != 0; ++ticks) {
+		step();
+	}
+	std::fprintf(stderr, "  the client heard the drop %.2f s after the death\n", 1 + ticks / 30.0f);
+	CHECK(botKitGhost() == 0 && game.world->isDroppedKit(info.kit));
+	CHECK(1 + ticks / 30.0f > 3.9f); // ragdollLandedDelay (4 s)
+	client.disconnect();
 }
 
 // A radio message's emote (0x005edbf0): the sender's 3P system plays the

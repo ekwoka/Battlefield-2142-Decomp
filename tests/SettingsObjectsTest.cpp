@@ -328,6 +328,21 @@ TEST(SettingsObjects_RetailAudioQualityMapping)
 	CHECK(menu::audioQualityIndex("High") == 0);
 	CHECK(menu::audioQualityIndex("UltraHigh") == 0);
 	CHECK(menu::audioQualityIndex("medium") == 1);
+	CHECK(menu::audioVoiceCount("Low", 0) == 16);
+	CHECK(menu::audioVoiceCount("Medium", 0) == 32);
+	CHECK(menu::audioVoiceCount("High", 0) == 64);
+	CHECK(menu::audioVoiceCount("UltraHigh", 0) == 64); // software provider: UltraHigh is High
+	CHECK(menu::audioVoiceCount("ultrahigh", -1) == 64);
+	CHECK(menu::audioVoiceCount("UltraHigh", 128) == 128); // the override still applies
+	CHECK(menu::audioVoiceCount("UltraHigh", 32) == 32);
+	CHECK(menu::audioVoiceCount("Medium", 64) == 64);
+
+	Console console;
+	menu::SettingsObjects settings;
+	settings.registerConsole(console);
+	CHECK(settings.number("AudioSettings.ForceNumberOfVoices", -1) == 0);
+	run(console, "AudioSettings.setForceNumberOfVoices 64");
+	CHECK(settings.number("AudioSettings.ForceNumberOfVoices", -1) == 64);
 }
 
 // The video options' modes as RendDX9 lists them (0x10010830 with

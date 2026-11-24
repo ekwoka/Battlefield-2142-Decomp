@@ -66,6 +66,7 @@ public:
 		const world::ObjectTemplate* objectTemplate = nullptr;
 		physics::Vec3 position;
 		physics::Mat3 rotation;
+		uint32_t serial = 0; // the round's (Projectile::serial)
 	};
 	// `viewedFrom`: the round whose camera is the view (Projectile::serial,
 	// 0 none), left out. The original draws it, but its opaque techniques

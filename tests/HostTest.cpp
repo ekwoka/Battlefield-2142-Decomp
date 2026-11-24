@@ -236,6 +236,67 @@ TEST(NetHost_QuaternionRoundTrip)
 	}
 }
 
+TEST(NetHost_FieldUpgradeCreditSpendAndEquip)
+{
+	using namespace dice::hfe;
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "Kit");
+	templates.registerType(2, "ItemContainer");
+	auto* kit = templates.create("Kit", "PAC");
+	kit->children().push_back({"One", {}, {}});
+	kit->children().push_back({"Two", {}, {}});
+	for (const std::string name : {"One", "Two"}) {
+		auto* unlock = templates.create("ItemContainer", name);
+		unlock->settings()["unlockLevel"] = name == "One" ? "0" : "1";
+		unlock->children().push_back({name + "Item", {}, {}});
+	}
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(1).kits.push_back({"PAC", "soldier", ""});
+	round.startRound();
+	logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Camp_Gibraltar";
+	setup.gameMode = "gpm_cq";
+	setup.mapSize = 32;
+	setup.gamePort = setup.queryPort = 0;
+	host::HostedGame hosted(round, logic, templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	CHECK(client.connect("127.0.0.1", hosted.gamePort()));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().roundStarted() && client.world().localPlayer() >= 0; }));
+	const int me = client.world().localPlayer();
+	CHECK(round.joinSquad(me, 1));
+	round.setSquadOrderMax(me, 10);
+	round.addSquadOrderPoints(me, 3.5);
+	round.giveFieldUnlock(me);
+	CHECK(pumpUntil(step, [&] {
+		return client.world().fieldUnlockCredits() == 1 && client.world().squadOrderPoints() == 3.5
+			&& client.world().squadOrderMax() == 10;
+	}));
+	client.sendEvent(net::makeFieldUnlock(me, 0, 0, 0));
+	CHECK(pumpUntil(step, [&] {
+		return client.world().fieldUnlockCredits() == 0 && client.world().fieldUnlockMasks()[0] == 1;
+	}));
+	CHECK(round.ownsKitUnlock(me, "One") && !round.ownsKitUnlock(me, "Two"));
+	client.selectKit(0, {3, -1, -1, -1});
+	CHECK(pumpUntil(step, [&] { return round.unlocksOf(me, false) == std::vector<std::string> {"One"}; }));
+	client.sendEvent(net::makeFieldUnlock(me, 0, 0, 0));
+	client.selectKit(0, {2, -1, -1, -1});
+	CHECK(pumpUntil(step, [&] { return round.unlocksOf(me, false).empty(); }));
+	CHECK(!round.ownsKitUnlock(me, "Two"));
+	round.resetRound();
+	CHECK(pumpUntil(step, [&] {
+		return client.world().squadOrderMax() == 0 && client.world().fieldUnlockMasks()[0] == 0
+			&& client.world().ownedUnlockMasks()[0] == 0;
+	}));
+}
+
 // A hosted round of nothing but its players: the join sequence (blocks 0,
 // 5, 2; LoadComplete; the players and DatabaseComplete; the echo;
 // StartSimulation and the game state), the client's name and kit.
@@ -428,7 +489,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 {
 	dice::hfe::world::ObjectTemplateManager templates;
 	templates.registerType(1, "SupplyObject");
-	templates.create("SupplyObject", "supply_crate")->settings()["sharedStorageSize"] = "500";
+	auto* crateTemplate = templates.create("SupplyObject", "supply_crate");
+	crateTemplate->settings()["sharedStorageSize"] = "500";
+	crateTemplate->settings()["networkableInfo"] = "BasicInfo";
+	crateTemplate->settings()["hasCollisionPhysics"] = "1";
+	crateTemplate->settings()["hasMobilePhysics"] = "1";
+	crateTemplate->settings()["physicsType"] = "Mesh";
 	templates.registerType(2, "OverheadCamera");
 	{
 		auto* camera = templates.create("OverheadCamera", "MultiPlayerOverheadCamera");
@@ -588,6 +654,19 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		const dice::hfe::world::Object* crate = objects.find(crates.front());
 		CHECK(crate && std::abs(crate->position().x - 10) < 0.01f && std::abs(crate->position().z - 20) < 0.01f);
 	}
+	const auto seesCrate = [&](bool landed) {
+		for (const net::RemoteObject& ghost : b.world().objectList()) {
+			if (ghost.templateId == crateTemplate->id() && ghost.hasPosition && ghost.supplyLanded == landed) {
+				return true;
+			}
+		}
+		return false;
+	};
+	CHECK(pumpUntil(step, [&] { return seesCrate(false); }));
+	if (const auto crates = round.supplyCrates(); !crates.empty()) {
+		round.supplyObjectContact(crates.front(), 0);
+	}
+	CHECK(pumpUntil(step, [&] { return seesCrate(true); }));
 	// Again too soon: refused by the round.
 	a.commanderTool(net::CommanderToolUse::Supplies, 10, 20);
 	CHECK(pumpUntil(step, [&] { return tools.size() == 2; }));
@@ -724,6 +803,27 @@ TEST(Host_LocalHudHealthIsTheSoldiers)
 	CHECK(std::abs(local.health() - 1.0f) < 1e-4f);
 	range.round->setHitPoints(range.round->playerObject(), 48.7f);
 	CHECK(std::abs(local.health() - 0.487f) < 1e-4f);
+}
+
+// The weapon feel reads the soldier as a move finds him (0x005de980, before
+// the tick's step): on the tick he gets up from prone the get-up time is
+// still 0, and the step then sets it.
+TEST(NetHost_PredictionFeelIsBeforeTheStep)
+{
+	HostRange range;
+	host::SoldierPrediction prediction(*range.round);
+	net::NetworkableState lying;
+	lying.mask = 0x20;
+	lying.soldierValues[0] = static_cast<int>(dice::hfe::game::SoldierPose::Prone);
+	prediction.start(range.templates.find("pac_light_soldier"), 0, lying, {0, 0, 0});
+	dice::hfe::game::SoldierInput lie;
+	lie.lieKey = true;
+	CHECK(prediction.step(net::PlayerMove {}).getUp == 0); // a lying soldier stays down
+	CHECK(prediction.control().pose() == dice::hfe::game::SoldierPose::Prone);
+	const host::SoldierPrediction::Feel up = prediction.step(net::playerInputFrom(lie).toMove(2)); // a lie press: gets up
+	CHECK(up.getUp == 0 && up.onGround);
+	CHECK(prediction.control().getUpTime() > 0);
+	CHECK(prediction.step(net::PlayerMove {}).getUp > 0);
 }
 
 // The control-object record's mode-3 state end to end: a client predicts
@@ -2329,18 +2429,25 @@ TEST(GameWorld_SpottedEnemiesOnTeamMinimaps)
 	// A report from A (no squad) reaches A only, for 3 s.
 	round.reportBattlefieldObjects(a, {b});
 	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c).empty());
+	CHECK(round.squadReportedPlayers(a) == enemy && round.squadReportedPlayers(c).empty());
 	for (int i = 0; i < 4 * 30; ++i) {
 		round.tick(1.0f / 30);
 	}
 	CHECK(round.mapSpottedPlayers(a).empty());
-	// Kind 1 (a bot's firing report) marks no enemy; a teammate isn't listed.
+	CHECK(round.squadReportedPlayers(a).empty());
+	// Kind 1 (a bot's firing report) marks no enemy on the minimap but reveals
+	// his name tag; a teammate isn't listed.
 	round.reportBattlefieldObjects(a, {b}, 3, 1);
 	round.reportBattlefieldObjects(a, {c});
 	CHECK(round.mapSpottedPlayers(a).empty());
+	CHECK(round.squadReportedPlayers(a) == enemy && round.squadReportedPlayers(c).empty());
 	// A radio spot: the whole team for 12 s, not the enemy's team.
 	round.radioSpot(a, b);
 	CHECK(round.mapSpottedPlayers(a) == enemy && round.mapSpottedPlayers(c) == enemy);
 	CHECK(round.mapSpottedPlayers(b).empty() && round.mapSpottedVehicles(c).empty());
+	// Its squad report (the spotter alone here) reveals the network marker
+	// for A; the team's radio spot doesn't for C.
+	CHECK(round.squadReportedPlayers(a) == enemy && round.squadReportedPlayers(c).empty());
 	for (int i = 0; i < 11 * 30; ++i) {
 		round.tick(1.0f / 30);
 	}

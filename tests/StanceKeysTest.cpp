@@ -1,4 +1,4 @@
-#include "Main/StanceKeys.h"
+#include "Game/StanceKeys.h"
 #include "TestMain.h"
 
 using namespace dice::hfe;

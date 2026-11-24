@@ -71,6 +71,8 @@ class ObjectTemplateManager;
 
 namespace dice::hfe::game {
 
+class GameLogic;
+
 class CombatAreas;
 
 // The death ragdoll's hit push (0x005f0f50): the particle bone for the
@@ -443,10 +445,11 @@ public:
 	// 25) within that plus the player's controlled object's radius (slot
 	// 0x90) of it, measured on the plane with indicationDistance2D
 	// (+0x1fc), gathered within the radius + 200 (the collision manager's
-	// sphere query, slot 0x44); only the player's team's objects (an
-	// object's team interface 0x94c1 slot 0x60 against the player's slot
-	// 0xf8) unless the player's ability block (slot 0x2a0) has its +1
-	// flag (player +0x30d, cleared by 0x0059ac00; nothing found sets it).
+	// sphere query, slot 0x44); a projectile (interface 0x94c1, a mine)
+	// only of the player's team (its slot 0x60 against the player's slot
+	// 0xf8), anything else (a Titan) of either team, unless the player's
+	// ability block (slot 0x2a0) has its +1 flag (player +0x30d, cleared
+	// by 0x0059ac00; nothing found sets it).
 	// The first of a closeToIndicationType (+0x204) to come in posts
 	// event 2/0x3e with the player and the type, the last to go 2/0x3f
 	// (the list +0x170, map +0x16c); none in range, or the player dead
@@ -571,7 +574,12 @@ public:
 		bool ai = false;
 		bool spectator = false; // player +0x404 (slots 0x3b8 / 0x3bc): setSpectator
 		bool alive = false;
+		double squadOrderPoints = 0, squadOrderMax = 0;
+		int fieldUnlockCredits = 0;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
+		// The kit the player's body still wears, living, down or a corpse yet
+		// to land (0x0058da3f), and that body: its HandleDrop is due when it goes.
+		uint32_t bodyKit = 0, bodyKitWearer = 0;
 		// What the host module's pmgr_p_get hands the scripts (0x0056ae00's
 		// "vehicle" and "defaultvehicle"): the player's weak handles, the
 		// vehicle (+0x80, slot 0x4c) and the default vehicle (+0xcc, slot
@@ -622,12 +630,18 @@ public:
 		// The hit indicator's alpha (player +0x2a4: 1 at a hit, falling 3 a
 		// second, slot 12 0x005912c0); the crosshair's HitIndicatorIcon.
 		float hitIndicator = 0;
+		// Where the last hit came from (player +0x1d0, radians, atan2 of x
+		// over z from the soldier) and how many have been taken (each one
+		// HUD event 0x39, HitDirectionShow).
+		float hitDirection = 0;
+		uint32_t hitDirectionHits = 0;
 		physics::Vec3 position;  // the soldier's feet
 		float yaw = 0;           // degrees, 0 facing +z
 		float aimPitch = 0;      // degrees, up positive: the look's (the input's)
 		physics::Vec3 velocity;
 		std::vector<std::pair<int, std::string>> carried; // (slot, weapon template)
 		int inHandSlot = 0;
+		std::string killWeapon; // see Player::killWeapon
 		float heat = 0; // the weapon in hand's (or the seat's gun's), 0..1
 		float stamina = 1; // the sprint's (SprintStamina, the soldier's +0x378), 0..1
 		bool sprinting = false; // the sprint on (PCO vtable 0x100)
@@ -791,6 +805,9 @@ public:
 	bool segmentHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
 		uint32_t& object) const;
 	void setInput(int player, const SoldierInput& input);
+	// A bot's AI target for the repair tool (the AI interface's slot 8, which
+	// 0x005d84a0 takes when the tool's ray meets nothing to treat); 0 none.
+	void setAiAbilityTarget(int player, uint32_t object);
 	// The pitch (degrees, up positive) the weapon's recoil has kicked the
 	// player's aim by since the last call: the original adds the kick to the
 	// soldier's own angles (0x0058a6d0), so a viewer sending absolute pitches
@@ -803,7 +820,11 @@ public:
 	bool setSoldierPosition(uint32_t soldier, const physics::Vec3& feet);
 	bool setBodyVelocity(uint32_t object, const physics::Vec3& velocity); // for tests
 	// Whether nothing solid (static objects' projectile LOD, vehicles, the
-	// terrain) lies between two points.
+	// terrain) lies between two points. Faces count only crossed from the
+	// front, as the scene's ray (slot 0x68, 0x006fb610) that the original's
+	// sight lines take: the AI's (0x00897df0), the sound's (0x007fa100,
+	// 0x007fa350), the exits' (0x006f2530), the nametags' (RendDX9
+	// 0x100ef5b0), the wire's (0x005e27a0), the parachute's (0x005e4330).
 	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
 	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
 	// A firearm's ObjectTemplate.setCheckObstruction (start, end, radius;
@@ -871,15 +892,16 @@ public:
 	// The control points of a supply group (host.sgl_getControlPointsInGroup,
 	// 0x00568890: the game logic's vt+0x18c): their objects.
 	std::vector<uint32_t> controlPointsInGroup(int group) const;
-	// Field unlocks the scripts gave (pers_plrGiveFieldUnlock, a squad's
-	// bar filled; the game logic's slot 0x68): the player's count not yet
-	// spent (the unlock menu's spendFieldUnlock).
-	void giveFieldUnlock(int player) { ++m_fieldUnlocks[player]; }
-	int fieldUnlocks(int player) const
-	{
-		const auto it = m_fieldUnlocks.find(player);
-		return it == m_fieldUnlocks.end() ? 0 : it->second;
-	}
+	// 0x004c4c90 / 0x004c4ea0: the scripting setters address the player's squad.
+	void setSquadOrderMax(int player, int maximum);
+	void addSquadOrderPoints(int player, double points);
+	void giveFieldUnlock(int player);
+	int fieldUnlocks(int player) const;
+	const std::vector<std::string>& fieldUnlockItems(int player) const;
+	const std::vector<std::string>& ownedKitUnlockItems(int player) const;
+	bool spendFieldUnlock(int player, const GameLogic& logic, int kit, int branch);
+	bool ownsKitUnlock(int player, const std::string& name) const;
+	void setKitUnlockSelection(int player, const GameLogic& logic, int kit, const std::array<int, 4>& levels);
 	static void readSupplyLines(const world::ObjectTemplate& t, ControlPoint& point);
 	// Where a player wants to spawn next (a control point id, -1 for any of
 	// the team's): the spawn menu's choice. Held points the team owns
@@ -963,6 +985,20 @@ public:
 		m_softLanding = soft;
 	}
 	bool softLanding() const { return m_enhancedLanding && *m_enhancedLanding && m_softLanding && *m_softLanding; }
+	// enhanced.enabled and enhanced.titanKitFloors, read live: surfaceBelow
+	// (a dropped kit, a placed beacon or shield) also stops on a Titan's
+	// soldier-LOD floors, where the projectile LOD has none (the cargo bay's
+	// wall strips). Not retail: the scene ray reads the projectile LOD only.
+	// It changes the simulation. Null or false: retail.
+	void setTitanKitFloors(const bool* enhanced, const bool* floors)
+	{
+		m_enhancedKitFloors = enhanced;
+		m_titanKitFloors = floors;
+	}
+	bool titanKitFloors() const
+	{
+		return m_enhancedKitFloors && *m_enhancedKitFloors && m_titanKitFloors && *m_titanKitFloors;
+	}
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
 	// the bot manager sets its navigation mesh's polygon lookup.
@@ -999,6 +1035,15 @@ public:
 	std::vector<SquadMessage> takeSquadMessages(int player);
 	// A squad of the team with room (a new one if none): the squad id.
 	int openSquad(int team) const;
+	// A bot's squad (AIDLL 0x10089000, on adding a bot and at the round's
+	// reset): the team's non-empty squad with the fewest members (the later
+	// of equals; at most IAIGame slot 0x54, 0x008c0360: 6), squad 1 when all
+	// are empty. Holding three or more with the next squad empty, its member
+	// that joined last (a human too) moves on to that squad first. Both
+	// joins are IBFSquad slot 8 (AIDLL 0x100de040 for a bot) -> the squad
+	// manager's join (0x00896380 -> slot 0x34): requestJoinSquad, which
+	// refuses a full or private squad. The squad joined, 0 for none.
+	int joinAiSquad(int id);
 	// The squad's beacon object (0 for none).
 	uint32_t squadBeacon(int team, int squad) const;
 	// Unlocks: a kit's ItemContainer children (one per branch and level,
@@ -1191,6 +1236,9 @@ public:
 	// carries the flag, read and cleared by slot 0x210 (0x0059b480).
 	void showHitIndicator(int player);
 	bool takeHitIndicator(int player);
+	// The hit direction for the next own-state record (its +0x1d4 count
+	// down, 0x00594cc0): false once both records went.
+	bool takeHitDirection(int player, float& radians);
 	// The sea's height, or none (false).
 	bool waterLevel(float& level) const
 	{
@@ -1362,6 +1410,8 @@ public:
 		int replenishingType = 3; // 0 RTHeal, 1 RTAmmo, 2 RTTeam, 3 no comp
 		bool active = false;
 		float battery = 0;
+		// Per target its armour's hit points over maxHitPoints (below 0 for
+		// a wreck being mended), NaN with no armour.
 		std::vector<float> targets;
 		bool kitAbility = false; // the kit has an Ability component
 		bool kitHealing = false, kitRepairing = false, kitAmmo = false;
@@ -1434,6 +1484,9 @@ public:
 	// addArmorEffect list.
 	static bool spectacularHit(uint32_t id, float before, float after, float hitPoints);
 	const effects::EffectManager& effects() const { return m_effects; }
+	// A window drawing frames: the particles move by the frame (EffectManager::frame).
+	void setEffectsPerFrame(bool on) { m_effects.setParticlesPerFrame(on); }
+	void frameEffects(float seconds, float alpha) { m_effects.frame(seconds, alpha); }
 	// The start sounds of the bundles the round started (detonation end
 	// effects, impact and armour effects), each heard once where it started.
 	std::vector<effects::EffectManager::StartedSound> takeEffectSounds() { return m_effects.takeSounds(); }
@@ -1570,6 +1623,7 @@ public:
 		// under it); PICameraX / PICameraY bundles (hatches, AS_TANK_Cupola1)
 		// aren't the look's.
 		std::string yawBundle, pitchBundle;
+		bool pitchUsesDriverInput = false; // PIPitch, filtered with the chassis controls
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
 		// The seat's first firearm's rest pitch under the pitch bundle (up
 		// positive): the turn of the parts between them (eu_bipod's
@@ -1584,6 +1638,10 @@ public:
 		struct PitchPart {
 			std::string name;
 			float minPitch = -90, maxPitch = 90;
+			// A yaw part above the seat's firearm (as_apc's AS_APC_barrelN_base):
+			// the barrel turns by it too, from its rest turn on the yaw bundle.
+			bool carriesGun = false;
+			float restYaw = 0;
 		};
 		std::vector<PitchPart> morePitchBundles;
 		// Other bundles on the same mouse yaw (a gun's camera chain: eu_at's gunners' cameraBase); same limits, same angle.
@@ -1624,7 +1682,7 @@ public:
 		// Titans' gun hubs sit turned 180 or +-90 degrees) and its limits
 		// (minRotation / maxRotation x; free without them).
 		float frameYaw = 0;
-		float minYaw = -1e9f, maxYaw = 1e9f;
+		float minYaw = -std::numeric_limits<float>::infinity(), maxYaw = std::numeric_limits<float>::infinity();
 		// The yaw bundle's regulateVector x (template +0x314) and maxSpeed x:
 		// the bundle counter-turns with the hull (0x005644b0, see stepGunner).
 		float regulateYaw = 0, yawSpeed = 0;
@@ -1703,6 +1761,32 @@ public:
 		};
 		std::vector<Entry> entries; // EntryPoint children (entryRadius / setEntryRadius)
 	};
+	// A position key's outcome (the server's 0x004bda00, in its order):
+	//   - the current seat's allowTogglePosition 0 (0x004be242, interface
+	//     0xc4c4 slot 0x160: the pod arrays, the Wake / playtest Titans'
+	//     hulls): ignored;
+	//   - the seat already held, or the selected PIFire weapon busy (0x004b9ee0:
+	//     firearm slot 0x174, 0x005c11c0, false while the fire component's
+	//     state is 1..3, pressed, held or charging; the zoom half only
+	//     counts off the server): refused, event 0/5
+	//     ECGameLogicGLFailedToChangePosition (the passengers' names);
+	//   - retail filters by addPcoPosId (0x004be2ba), unused in the shipped templates;
+	//   - no such seat: ignored;
+	//   - a free seat that allows toggling: the move;
+	//   - otherwise (taken, or free but not togglable; 0x004be39d): a bot
+	//     asking is ignored; a bot in it swaps with the player, who takes it
+	//     while the bot gets his old seat (0x004be3db); else refused.
+	enum class SeatKey { Ignored, Move, Swap, Refused };
+	struct SeatKeyInput {
+		int current = -1, wanted = -1; // seat indices
+		size_t seats = 0;
+		bool currentToggles = true, wantedToggles = true;
+		bool firing = false; // Held input stands in for the firearm check at 0x005c11c0.
+		bool requesterAi = false;
+		int occupant = -1; // the wanted seat's player, -1 none
+		bool occupantAi = false;
+	};
+	static SeatKey seatKey(const SeatKeyInput& in);
 	// A vehicle's seats (for checks and the HUD) and who sits in them.
 	std::vector<SeatLayout> vehicleSeats(uint32_t object);
 	// A pod-launcher seat whose fire is the soldier's own weapon's: only
@@ -1767,6 +1851,11 @@ public:
 	// PIFlareFire) as an index into its SeatLayout::weapons (-1 none), and
 	// any of its weapons' state (nullptr before the seat was first taken).
 	int seatWeaponIndex(uint32_t vehicle, int seat, int group = 0) const;
+	// A kill's templates as the KilledBy event carries them (0x005b7130):
+	// the killer's vehicle, else its soldier (the weapon's root); and the
+	// weapon, the seat's active gun or the item in hand. nullptr: none.
+	void killTemplates(const PlayerInfo& killer, const world::ObjectTemplate*& vehicle,
+		const world::ObjectTemplate*& weapon); // vehicleSeats may lay the vehicle out
 	// A seat's ducking (PCO +0x18c, object +0x310; setDucking, slot 0x12c,
 	// 0x005c7cf0): 0x005ca2e0 sets it from its occupant's kPICrouch when
 	// the seat's template has allowDucking (the shipped bipods'). Its
@@ -1830,8 +1919,8 @@ public:
 	// on the ground): from a metre over the order's point, the higher of the
 	// water (DAT_00a83e58 slot 0x94) and the terrain (slot 0x68), or what a
 	// ray 100 m down through the static objects (the scene's slot 0x68 with
-	// flags 0x1000100, 0x006f4aa0) meets above that; then up by half the
-	// marker's radius (its object's slot 0x8c).
+	// flags 0x1000100, 0x006f4aa0; front faces only) meets above that; then
+	// up by half the marker's radius (its object's slot 0x8c).
 	float orderMarkerHeight(const physics::Vec3& order, float radius) const;
 	// Where the order's name tag stands (0x005b8b20, handed to the name tag
 	// manager's slot 0x2c): at the order's point when its marker (at
@@ -1923,6 +2012,20 @@ public:
 	// reports (reportBattlefieldObjects), while their seconds last.
 	std::vector<int> mapSpottedPlayers(int viewer) const;
 	std::vector<uint32_t> mapSpottedVehicles(int viewer) const;
+	// The enemies the viewer's squad reports reveal (kind 0, not the team's
+	// radio spots): the client's 0x00508590 hands each to the NametagManager
+	// (slot 0x20, 0x100f2410 -> 0x100f2080: tag flag 0x800000 until the
+	// reveal time ends), which draws their network marker.
+	std::vector<int> squadReportedPlayers(int viewer) const;
+	// A player's decoy (0x0075bd30, HudManager slot 0x6c: an enabled
+	// TargetObject of targetType TTDecoy whose player he is): the round he
+	// threw carrying one (Bp1_Decoy_Projectile's DecoyObject); its place
+	// and that TargetObject's template, nullptr for none.
+	const world::ObjectTemplate* decoyOf(int player, physics::Vec3& at) const;
+	// Whether any of `viewer`'s squad (him alone without one) has the
+	// networkable HUD's kit / vehicle unlock (RendDX9 0x101691c0: the team's
+	// squad list, slot 0x58, each member's ability block +0x10 / +0x11).
+	void squadNetworkHud(int viewer, bool& showKit, bool& showVehicle) const;
 	size_t mapSpotCount() const { return m_mapSpots.size(); } // the entries kept, live or not yet pruned
 	// Whether a team's squad had a player reported within the last 3 s
 	// (0x100bea30).
@@ -1978,6 +2081,19 @@ public:
 	// The local camera's hit shake this tick (the largest; 0 for none),
 	// taken once: 0x00610450's argument.
 	float takeCameraShake() { return std::exchange(m_cameraShake, 0.0f); }
+	// The soldier camera's rumble source (0x00611fc0, each second in the
+	// Inside and Nose views): of the objects the object manager finds within
+	// 7 m of the camera (*0x00a739b8; flags 0x1000008, filter 0x00610010)
+	// whose root is a control object in use (its own seat, 0x005c87b0 with
+	// 0) with a mobile node (slot 0x164) of 5000 kg or more (slot 0x114,
+	// *0x0097940c), the camera's own root aside, the largest (7 - distance)
+	// / 7; 0 for none. Roots only: the flags ask for 0x01000000, which an
+	// object has while it has no parent (0x006f76b8, read by 0x006f1d70).
+	float heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot) const;
+	// The same on a joined client, which has no bodies: the vehicles (object
+	// ids) whose driver seat the ghosts say is taken, by their templates'
+	// hasMobilePhysics and mass and their objects' positions.
+	float heavyVehicleNearness(const physics::Vec3& camera, uint32_t ownRoot, const std::vector<uint32_t>& driven) const;
 	// A player's hit strength for its networkable's record (+0x1d8, 0..25
 	// on the wire): the last blast on its vehicle, for the next two records
 	// (+0x1dc; each call counts one), else 0.
@@ -2111,6 +2227,7 @@ public:
 		float timeUntilReady = 0; // seconds
 		float reloaded = 0;       // 0..1 of the recharge done (the HUD's *TimeUntilReloaded bar)
 		bool active = false;      // a UAV or scan running, a strike on its way
+		std::optional<float> satelliteSweep; // 0..1 of the active scan, separate from recharge
 	};
 	CommanderAbilityState abilityState(int team, CommanderAbility ability) const;
 	bool abilityReady(int team, CommanderAbility ability) const { return abilityState(team, ability).ready; }
@@ -2147,6 +2264,9 @@ public:
 	std::vector<uint32_t> supplyCrates() const;
 	// Seconds since a commander's crate was dropped (-1: not one).
 	float supplyCrateAge(uint32_t object) const;
+	// A mobile SupplyObject's collision event (0x005d0790 -> 0x0043d9c0):
+	// `other` is what it met, 0 the ground.
+	void supplyObjectContact(uint32_t self, uint32_t other);
 	// A supply object's storage for its name tag's bar (RendDX9 0x1016c1e0
 	// with Nametag.showSupply: the SupplyObject's +0x194 over its
 	// sharedStorageSize +0x2bc, 0..1) and the bar's kind (the tag's +0xc8:
@@ -2247,6 +2367,26 @@ public:
 	const Vehicle* vehicle(uint32_t object) const;
 	// The input for the next ticks.
 	void setPlayerInput(const SoldierInput& input) { const float pendingTurn = m_playerInput.turn; m_playerInput = input; m_playerInput.turn += pendingTurn; }
+	// The local player's look given since the last tick, which the next one
+	// takes (degrees): the turn and the pitch's change. Retail shows it at
+	// once: each frame adds the mouse's move to the soldier's +0x27c / +0x274
+	// and places the camera (0x0058b5e0 -> 0x005890a0), the tick clears them
+	// and turns by its whole input (0x0058a788).
+	// Seated, 0x005890a0 lets the twist with the turn pass 40 degrees only
+	// while the rest keeps the body within the seat's limits, else stops
+	// it at 40.
+	void pendingLook(float& turn, float& pitch);
+	static float seatedLookPreview(float twist, float turn, float bodyYaw, float low, float high)
+	{
+		constexpr float kTwist = 40; // *0x00a68eb0
+		float look = twist + turn;
+		if (look > kTwist && look - kTwist + bodyYaw > high) {
+			look = kTwist;
+		} else if (look < -kTwist && look + kTwist + bodyYaw < low) {
+			look = -kTwist;
+		}
+		return look - twist;
+	}
 	// Titan mode (Titans.cpp; docs/engine.md, "Titans"). The Titan sync
 	// manager (0x005628f0, ECPhysicsETitanSync: set up by 0x00561c00, run by
 	// 0x00561e20 only when the game mode is "gpm_ti") keeps one Titan per
@@ -2407,6 +2547,7 @@ public:
 	struct LadderView {
 		physics::Vec3 position;
 		float yaw = 0, pitch = 0; // degrees (pitch up positive)
+		float lookYaw = 0; // seated: the soldier's own turn in it (body + twist), the rest the seat's
 	};
 	bool ladderView(int player, LadderView& view) const;
 	// The seated soldier's own camera (the SoldierCamera, 0x005890a0),
@@ -2501,8 +2642,12 @@ public:
 		float healthActivationLevel = 100; // as TitanInfo's
 		int nametagPushes = 0;
 	};
-	std::vector<TitanPartInfo> titanParts(int team) const;
-	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked, 2 gone (a forcefield that is down).
+	std::vector<TitanPartInfo> titanParts(int team, uint32_t objectId = 0) const;
+	// Where a part's meshes lie (world): its own node's and those of unarmoured nodes under it (a gun's control
+	// station inside the hull, whose hits are the gun's).
+	std::vector<physics::Vec3> titanPartMeshes(uint32_t part) const;
+	// How a part of the Titan `object` draws, by its template's name: 0 whole, 1 wrecked (0x00651c60: its wreck
+	// geometry; one of fewer than two is hidden, which the drawing decides by its mesh). (2, gone, isn't given.)
 	int titanPartLook(uint32_t object, const std::string& templateName) const;
 	// The game logic's damage (0x004c0e40) as a shot's hit: through the
 	// armour's rules (a Titan's floors and parts' parent damage), `attacker`
@@ -2516,8 +2661,8 @@ public:
 	// Missile silos (templates with isMissileSilo): each fires its
 	// GenericFireArm's projectile at the enemy Titan when loaded (the auto
 	// controller CP_CANNON, AI/AutoControllers.ai), reloading
-	// ammo.reloadTime after each launch and after each change of hands
-	// (reloadOnTeamChange).
+	// ammo.reloadTime when its magazine is empty. Ownership changes
+	// briefly inhibit fire and restart a reload without discarding a loaded round.
 	struct SiloInfo {
 		uint32_t object = 0;
 		int team = 0;
@@ -2567,6 +2712,13 @@ public:
 	// clear), the frame's two transforms, and a count that changes whenever
 	// those meshes are rebuilt (a part went down).
 	bool titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
+	// A round's segment in the Titan's frame as the rounds meet the Titan
+	// (its projectile LOD and posed collision parts): the owner of the first
+	// face (a part's id, the Titan's for the hull), 0 when it meets none.
+	uint32_t titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const;
+	// The middle of a part's faces in that LOD (the Titan's frame), to aim
+	// at; false without any.
+	bool titanPartAimPoint(uint32_t part, physics::Vec3& local) const;
 	physics::Vec3 titanToLocal(uint32_t titan, const physics::Vec3& world) const;
 	physics::Vec3 titanToWorld(uint32_t titan, const physics::Vec3& local) const;
 	uint32_t titanMeshVersion(uint32_t titan) const;
@@ -2685,9 +2837,12 @@ private:
 			float radius = 0; // the LODs' farthest box corner from the part's origin
 			// A Titan's: the TitanMesh whose instance it shares (the node
 			// of the tree with the collision mesh, 0x0063d720's walk), and
-			// whether that mesh is down with its part (rebuildTitanMeshes).
+			// that mesh's state with its parts (rebuildTitanMeshes): out, or
+			// under a wrecked part its sub-geometry 1 (0x006539f0 ->
+			// 0x006e5df0), as a wrecked vehicle's parts are (collisionWrecked).
 			int source = -1;
 			bool off = false;
+			bool wrecked = false;
 			// The instance's other LODs for the mesh physics (the part's
 			// response, 0x005f6a60, in its root's chain, 0x006c0090: the
 			// movers' candidates, 0x006dc7b0, and the soldiers', 0x006c3890),
@@ -2814,6 +2969,10 @@ private:
 			// the look's pitch (input.aimPitch is the look, not a change).
 			physics::Mat3 hullTurn;
 			float pitchOffset = 0;
+			// A driver's barrel on PIPitch without a moving bundle: the look
+			// the input filter (0x005ca2e0, EMP) kept from it, held back from
+			// the look's pitch as the bundle would never have turned by it.
+			float pitchInputLost = 0;
 			float cameraLauncherPitchAnchor = NAN; // gunner look before blocked TV-launcher input
 			uint64_t gunnedTick = 0;    // the last tick its seat was taken (stepGunner)
 			float stabilizedHeading = 0; // the bundle's parent's yaw last undone (stabilizeGunYaws)
@@ -2936,6 +3095,7 @@ private:
 		// Touching nothing since its last step (the physics node's +0x249,
 		// slot 0x1b8): the radius trigger's radiusDetonateWithAirVehicles.
 		bool inAir = false;
+		bool rootSolvedBeforeWheels = false;
 		float mass = 1;
 		bool majorActor = false;
 		bool controlObject = false;
@@ -2970,6 +3130,7 @@ private:
 		float submerged = 0;
 		// collisionGroups (template +0x104 -> response +0x1c, slot 0x50).
 		uint32_t collisionGroups = 0;
+		bool commanderCrate = false; // uses its team to pass friendly Titan shields
 		// otherCollisionLod (SimpleObject +0xec, executor 0x0051ee4d; -1,
 		// that is 1, by default; the node's slot 0x1a4): the LOD of the
 		// other object its mesh meets (MeshCollision.cpp); its collision
@@ -3011,7 +3172,11 @@ private:
 	// (0x005a4690, a soldier's road kill 0x005a43c0).
 	// `point` is the world-space contact point.
 	void collisionEvent(uint32_t self, uint32_t other, const physics::Vec3& velocity, const physics::Vec3& normal,
-		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial);
+		const physics::Vec3& point, uint32_t ownMaterial, uint32_t otherMaterial, bool otherStaticNode = false);
+	// A mesh round's StickyCollisionComp (0x005e83d0) on its body's contact:
+	// on a face it may stick to, set down upright on it and stopped.
+	void stickBody(uint32_t self, uint32_t other, const physics::Vec3& normal, const physics::Vec3& point,
+		uint32_t otherMaterial);
 	uint32_t materialImpactIndex(uint32_t first, uint32_t second, const physics::Vec3& velocity,
 		const physics::Vec3& normal) const;
 	bool materialImpactInView(const physics::Vec3& point) const;
@@ -3020,14 +3185,16 @@ private:
 	void groundCollisionDamage(uint32_t victim, const physics::Vec3& velocity, const physics::Vec3& normal,
 		const physics::Vec3& point, uint32_t groundMaterial, uint32_t victimMaterial);
 	void objectCollisionDamage(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity,
-		const physics::Vec3& normal, const physics::Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial);
+		const physics::Vec3& normal, const physics::Vec3& point, uint32_t attackerMaterial, uint32_t victimMaterial,
+		bool attackerStaticNode);
 	void roadKill(uint32_t attacker, Player& victim, const physics::Vec3& velocity, uint32_t attackerMaterial,
-		uint32_t victimMaterial);
+		uint32_t victimMaterial, bool attackerStaticNode);
 	int collisionCredit(uint32_t attacker, uint32_t victim, const physics::Vec3& velocity) const;
 	struct CollisionMemory {
 		uint32_t other;
 		uint32_t ownMaterial, otherMaterial;
 		float left;
+		bool otherStaticNode;
 	};
 	std::map<uint32_t, std::vector<CollisionMemory>> m_collisionMemory; // by the armoured object
 	// The contact effects (0x006b75d0, 0x006ba7d0's end, 0x006b8c40) and
@@ -3113,7 +3280,9 @@ private:
 	static physics::Vec3 exitRayStart(const Body& body, const physics::Vec3& place);
 	// A vehicle's team is its first occupant's (0x005c9500), its own when
 	// empty: each tick from the seats.
+	int vehicleOccupantTeam(const Body& body) const;
 	void stepVehicleTeams();
+	int lockTargetTeam(const world::Object& target) const;
 	// The levels' Trigger and AmbientEffectArea objects (AmbientTriggers.h,
 	// Ambience.cpp): linked at the round's start, tested each tick, set off
 	// by shots (event 2) and explosions (event 8) too.
@@ -3225,7 +3394,7 @@ private:
 	// `groups`: which weapon groups fire (bit 0 PIFire, 1 PIAltFire, 2
 	// PIFlareFire); `aims`: the look turns the seat's bundles (not a
 	// pilot's, whose mouse flies the vehicle).
-	void stepGunner(Player& player, Body& body, float seconds, bool aims = true, unsigned groups = 7);
+	void stepGunner(Player& player, Body& body, float seconds, bool aims = true, unsigned groups = 7, float driverScale = 1);
 	// A seat's weapon choice (0x004d2a50 for the player's control object):
 	// c_PIWeaponSelect1..9 take the weapon of that item index in each group
 	// (selectable and usable, slot 0x170), c_PIToggleWeapon and the seat's
@@ -3308,9 +3477,9 @@ private:
 	bool setBodyLods(Body& body, const physics::CollisionMeshFile& mesh, const std::vector<uint32_t>& materials,
 		size_t state);
 	// `part`: the collisionPart the segment met (its partMeshes index), -1
-	// the root's faces.
+	// the root's faces. `frontOnly`: only faces crossed from the front.
 	bool raycastBody(const Body& body, const physics::Vec3& localFrom, const physics::Vec3& localTo,
-		physics::CollisionWorld::Hit& hit, int* part = nullptr) const;
+		physics::CollisionWorld::Hit& hit, int* part = nullptr, bool frontOnly = false) const;
 	bool stepBody(Body& body, float seconds);
 	void stepPhysics(float seconds);        // stepPhysicsMove, then stepPhysicsCollide
 	void stepPhysicsMove(float seconds);    // the nodes' move (0x006daa70)
@@ -3328,6 +3497,12 @@ private:
 	std::function<void(const BlastRayTrace&)> m_blastRayTraceSink;
 	std::vector<uint32_t> m_checked; // object ids already considered for a body (sorted)
 	std::vector<Body> m_bodies;
+	// A static root whose RotationalBundle turns by itself (the commander assets' dishes): the parts' state alone, no body.
+	struct Spinner {
+		uint32_t object = 0;
+		std::unique_ptr<Vehicle> vehicle;
+	};
+	std::vector<Spinner> m_spinners;
 	// Meshes a wreck replaced during the collision pass, kept until it ends (wreckCollision).
 	std::vector<std::shared_ptr<physics::CollisionWorld>> m_retiredMeshes;
 	physics::CollisionWorld m_collision; // static objects, soldier LOD
@@ -3453,7 +3628,8 @@ private:
 	// parts near it, the other bodies' roots and parts that weren't movers
 	// before it this frame, the Titans' parts. `m` is the root (mRoot) or
 	// one of its mover parts. False when the mover was destroyed.
-	bool collideCandidates(Body& mover, size_t index, MeshActor& m, bool mRoot, float seconds);
+	enum class CollisionPass { Root, Wheels, Part };
+	bool collideCandidates(Body& mover, size_t index, MeshActor& m, CollisionPass pass, float seconds);
 	// The parts as movers of their own, after their root (the dispatch's
 	// chain, 0x006dd1b0): each mover part's ground pass (0x006b9260) and
 	// broad phase (0x006dc7b0); their responses are solved onto the root
@@ -3502,9 +3678,10 @@ private:
 	void addStaticMesh(const world::ObjectTemplate& t, const physics::CollisionMeshFile& mesh,
 		const std::vector<uint32_t>& materials, size_t geometry, const physics::Mat3& rotation, const physics::Vec3& position,
 		uint32_t owner, bool root);
-	// A stationary control object with seats: a fixed body (Body::fixed),
-	// whose posed parts the rounds meet through raycastBody.
-	static bool stationaryWithSeats(const world::ObjectTemplate& t);
+	// Fixed bodies for gun seats and registered missile silos supply
+	// posed collision parts through raycastBody.
+	bool stationaryWithMovingParts(const world::ObjectTemplate& t, uint32_t object) const;
+	bool hasContinuousPart(const world::ObjectTemplate& t, int depth = 0) const;
 
 	struct HitBone {
 		int node;            // skeleton node
@@ -3549,10 +3726,13 @@ private:
 		uint32_t spawnTitan = 0; // spawnChoice kSpawnOnTitan: the Titan object
 		int squad = 0;
 		bool squadLeader = false;
+		uint64_t squadJoinedAt = 0; // join order (AIDLL's squad lists append on each join, 0x100c3f10)
 		std::string kitTemplate, soldierTemplate; // the next spawn's kit (empty: the team's assault kit)
 		std::vector<std::string> unlocked; // ItemContainer templates chosen (equipped)
 		std::vector<std::string> owned;    // and owned but not chosen (replaceWithoutEquip's test)
 		bool allUnlocked = false;
+		// A kit selection arrived (SelectKit's unlock masks): only the chosen containers apply, the rest are owned.
+		bool unlockChosen = false;
 		// The kit's weapons by slot (itemIndex: 1 knife, 2 sidearm, 3
 		// primary, then gadgets); the one in hand is `weapon`, the others
 		// keep their state here.
@@ -3565,7 +3745,9 @@ private:
 		int inHand = -1; // index into carried
 		int previousSlot = -1; // the slot drawn before (0x005883d0's pick: soldier +0x1f4)
 		bool selectHeld = false;
+		bool cycleWeaponHeld = false;
 		bool abilityActive = false; // the gadget in hand is working this tick
+		uint32_t aiAbilityTarget = 0; // a bot's: what its AI treats (setAiAbilityTarget)
 		bool cloaked = false;       // CamouflageAmmoComp held with the trigger down
 		float empLevel = 0;         // the soldier's armour's EMP level (empBlast)
 		bool manDown = false;       // killed, the body lying (sv.manDownTime)
@@ -3582,6 +3764,11 @@ private:
 		// sends (+0x2a8).
 		float hitIndicator = 0;
 		bool hitIndicatorFlag = false;
+		// The hit direction (+0x1d0, radians), the own-state records that
+		// still carry it (+0x1d4, 2 at a hit) and the hits taken.
+		float hitDirection = 0;
+		int hitDirectionSends = 0;
+		uint32_t hitDirectionHits = 0;
 		// What he last gave (abilityBar): player +0x168 healed or repaired,
 		// +0x169 repaired, +0x16a ammo; the ticks +0x15c / +0x160. Received
 		// stamps clear the flag (healHitPoints, the supply crates' refills).
@@ -3623,6 +3810,9 @@ private:
 		// an unlock's when not 3 / when set): squadReportAbility.
 		int hudRevealTime = 3;
 		bool hudShowCloaked = false;
+		// networkableHudShowKit / ShowVehicle (+0x10 / +0x11, copied when set):
+		// squadNetworkHud.
+		bool hudShowKit = false, hudShowVehicle = false;
 		// The unlocks' Ability lists: damage taken by projectile material
 		// (setMaterialDamageMod) and per item named by addExtraAmmoItem the
 		// most magazines (an entry's +4) and rounds a magazine (+8) any
@@ -3671,6 +3861,7 @@ private:
 		int seat = -1;            // its seat (0 the driver's)
 		bool switchHeld = false;
 		std::string weaponTemplate;
+		std::string killWeapon;   // the template of the weapon that dealt its last kill's damage (empty: the item in hand)
 		int roundsFired = 0;      // since the scripts last cleared them
 		int roundsHit = 0;
 		bool useHeld = false;
@@ -3797,14 +3988,23 @@ private:
 	// rd_dieInVehicleForce (0x005f0f50 with +0x2eb) instead of a blast's push.
 	bool startRagDoll(Player& victim, bool thrown = false);
 	void stepRagDoll(Player& player, float seconds);
-	anim::RagDollWorld ragDollWorld(const anim::Vec& middle, float reach) const;
+	anim::RagDollWorld ragDollWorld(const anim::Vec& middle) const;
 	void poseSeated(Player& player, world::Object& soldier, const Body& body, const SeatLayout& seat, float seconds);
 	void stepControlPoints(float seconds);
 	void createFlagObjects(ControlPoint& point);
 	void placeFlagObjects(const ControlPoint& point);
 	std::vector<uint32_t> m_flagObjects; // every point's cloth, to retire at a new round
 	ScriptEventSink m_events;
-	std::map<int, int> m_fieldUnlocks;
+	struct FieldUnlocks {
+		int credits = 0;
+		std::vector<std::string> containers;
+	};
+	std::map<int, FieldUnlocks> m_fieldUnlocks;
+	struct SquadOrderScore {
+		double points = 0;
+		int maximum = 0;
+	};
+	std::map<std::pair<int, int>, SquadOrderScore> m_squadOrderScores;
 	float m_tinnitus = 0;
 	float m_cameraShake = 0;
 	uint32_t m_blastSelf = 0; // the object whose own blast explode() runs (its rays pass it)
@@ -3872,8 +4072,10 @@ private:
 	// firstHit passing through `ignore`'s body.
 	bool firstHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t& object, uint32_t ignore) const;
 	// firstHit's parts: the scene's objects alone (static objects' and
-	// bodies' projectile meshes, `ignore`'s passed through), and the
-	// terrain alone; the fraction along the segment of the first.
+	// bodies' projectile meshes, `ignore`'s passed through; faces crossed
+	// from the front only, as the scene's ray slot 0x68 tests them,
+	// 0x006fb610), and the terrain alone; the fraction along the segment
+	// of the first.
 	bool objectRayHit(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, float& fraction,
 		uint32_t& object) const;
 	bool groundRayHit(const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
@@ -3936,6 +4138,7 @@ private:
 	// -1) the magazines (one less with the gun's empty) over nrOfMags,
 	// each averaged into the running value, times 15, floored, 0..15.
 	int soldierAmmoLevel(const Player& player) const;
+	float vehicleAmmoShare(const Body& body) const;
 	// A seated soldier's kit ability (the player's update 0x00599f30, each
 	// tick from 0x0059bd80 while the soldier sits in a vehicle): the kit's
 	// Ability component (ability.hasHealingAbility / hasRepairingAbility /
@@ -3972,7 +4175,9 @@ private:
 	// -> 0x0062b750): its vertical regulation over what lies under it.
 	void hoverProjectile(Projectile& projectile, float seconds);
 	void damage(uint32_t object, float amount, uint32_t projectileMaterial, uint32_t surfaceMaterial,
-		int attacker = -1, bool splash = false); // the attacking player; an explosion's splash
+		int attacker = -1, bool splash = false, // the attacking player; an explosion's splash
+		const physics::Vec3* source = nullptr); // where the hit came from (the hit direction)
+	std::string m_damageWeapon; // the weapon template of the round being stepped
 	std::vector<std::unique_ptr<Player>> m_players; // by id
 	Player* m_player = nullptr; // the local player
 	bool m_addingLocal = false; // spawnPlayer is adding it (addPlayer sets m_player before PlayerConnect)
@@ -4036,12 +4241,15 @@ private:
 	const bool* m_guidedCameraEase = nullptr;
 	const bool* m_enhancedLanding = nullptr;         // setSoftLanding
 	const bool* m_softLanding = nullptr;
+	const bool* m_enhancedKitFloors = nullptr;       // setTitanKitFloors
+	const bool* m_titanKitFloors = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);
 	bool teamHoldsControlPoint(int team) const;
 	bool spawnPointUsable(const world::Object& point, const Player& player, bool spotClear) const;
 	bool enterOnSpawn(Player& player, world::Object& soldier, const physics::Vec3& from, float radius, uint32_t only = 0);
+	const Body* spawnSeat(int team, const physics::Vec3& from, float radius, uint32_t only, int& seat) const;
 	// `ignoreStatic`: an object whose faces in the static world are left out (a stationary gun's own mesh).
 	bool soldierFits(const physics::Vec3& origin, SoldierPose pose, uint32_t ignore, uint32_t ignoreStatic = 0) const;
 	float m_waterLevel = 0;
@@ -4243,6 +4451,10 @@ private:
 	// other bodies met.
 	bool m_predicting = false;
 	void dropKit(Player& player);
+	DroppedKit packKit(Player& player);
+	void layKit(DroppedKit dropped, int player, uint32_t body);
+	// A kit a soldier or a dead one's body still wears (no collision of its own).
+	bool wornKit(uint32_t object) const;
 	bool surfaceBelow(const physics::Vec3& from, uint32_t ignore, float& surface, uint32_t& object) const;
 	// A thrown gadget's resting height at (x, z): what is under the soldier's reach (a deck, a roof), the terrain else.
 	float restHeight(const Player& player, float x, float z) const;
@@ -4270,6 +4482,8 @@ private:
 		float stayAsWreck = 20;     // armor.timeToStayAsWreck (+0x158)
 		float afterDestroyed = 0;   // armor.timeToStayAfterDestroyed (+0x15c)
 		double fadeFrom = -1;       // +0x64: when the countdown began
+		int player = -1;            // whose body it was
+		DroppedKit kit;             // still worn until the body lands (object 0: none)
 	};
 	std::vector<Corpse> m_corpses;
 	void stepCorpses(float seconds);
@@ -4377,6 +4591,11 @@ private:
 		double until = 0;
 	};
 	std::vector<MapSpot> m_mapSpots;
+	// The squad reports that reveal name tags only, not the minimap (kind 1:
+	// a squad bot's firing report, a cloak's for a networkableHudShowCloaked
+	// squad; 0x00508590 passes them to the NametagManager's slot 0x20 with
+	// the enemy flag clear): squadReportedPlayers.
+	std::vector<MapSpot> m_tagReveals;
 	static constexpr size_t kMapSpotLimit = 64; // port bound (addMapSpot)
 	void addMapSpot(const MapSpot& spot, bool refresh);
 	void pruneMapSpots();
@@ -4411,7 +4630,11 @@ private:
 	uint32_t m_ticks = 0; // the engine's tick count (0x00666090: DAT_00a7d1f8)
 	// The launchers of the objects thrown or set down (the projectile
 	// interface's +0x1c8, 0x005b48b0), by object; read when its body is made.
-	std::map<uint32_t, uint32_t> m_launchers;
+	struct MeshLaunch {
+		uint32_t launcher;
+		physics::Vec3 velocity {};
+	};
+	std::map<uint32_t, MeshLaunch> m_meshLaunches;
 	// The box bottoms of templates with MechLegs (their +0x4c4, 0x005cd4f0),
 	// once one of them has a body.
 	std::map<const world::ObjectTemplate*, float> m_legsBottom;
@@ -4460,7 +4683,11 @@ private:
 		uint32_t object = 0;
 		int team = 0;
 		float storage = 0;   // sharedStorageSize left
-		float timeLeft = 0;  // supplyDropNumSecsToLive
+		// supplyDropNumSecsToLive; a commander's drop counts it from its
+		// landing (0x0043d820 keeps the time, 0x0043d880 checks it).
+		float timeLeft = 0;
+		float age = 0;        // since the drop (the minimap's 25 s, 0x0077d7e0)
+		bool landed = false;  // its first contact (0x005d0790 -> 0x0043d9c0)
 		float tick = 0;  // to the next of its 0.2 s updates (event 0x1d)
 		// The SupplyObject's template when it is a child of the object (a
 		// deployed hub's Unl_Hub_*_Supply); null: the object's own.
@@ -4489,6 +4716,7 @@ private:
 		float timeToLive = 0;
 		float left = 0;
 		double nextCheck = 0;
+		double spawnedAt = 0; // the spawn's time (interface 0xc4c5 slot 0xb8 -> +0xdc, read by slot 0xbc)
 	};
 	std::map<uint32_t, Abandonment> m_abandonment;
 	void stepAbandoned();
@@ -4527,7 +4755,7 @@ private:
 		float destroyOnParentLevel = -1, destroyOnRootLevel = -1, onlyFromChildrenLevel = -100;
 		float criticalTime = 0; // +0xf0: seconds burnt since the last loss
 		int state = 0;          // vtable 0x60 (0x00651c20): 0 alive, 1 wreck, 2 destroyed
-		bool off = false;       // its subtree's collision gone (0x00651c60)
+		bool off = false;       // a wreck: its subtree's instances at their wreck sub-geometry (0x006539f0)
 		bool addNametagOnDestroy = false; // armor.addNametagOnDestroy (+0x195)
 		float healthActivationLevel = 100; // nametag.healthActivationLevel (+0x24)
 		int nametagPushes = 0;
@@ -4572,11 +4800,12 @@ private:
 		int node = -1;  // the template node's part (its armour's or its armoured ancestor's)
 		std::vector<int> chain; // the parts it lies under (its collision goes with any of them)
 		int groups = 0;         // collisionGroups: 0x100 / 0x200 a team's own forcefield (PAC's, EU's)
-		// Its LODs' parts, made once (rebuildTitanMeshes): they depend on
+		// Its LODs' parts per sub-geometry (0 whole, 1 a wreck's,
+		// 0x006e5df0), each made once (rebuildTitanMeshes): they depend on
 		// the mesh and its place in the Titan only, not on which parts are
 		// down.
-		std::vector<std::shared_ptr<const TitanLodPart>> lodParts;
-		bool lodPartsMade = false;
+		std::vector<std::shared_ptr<const TitanLodPart>> lodParts[2];
+		bool lodPartsMade[2] = {false, false};
 	};
 	struct Titan {
 		uint32_t object = 0;
@@ -4642,13 +4871,14 @@ private:
 		bool meshesDirty = true;
 		uint32_t meshVersion = 0; // rebuildTitanMeshes' count (titanMeshVersion)
 		// Each rebuild's change to the soldier faces (titanMeshChange): the
-		// meshes live at the last rebuild, and the recent rebuilds' boxes.
+		// meshes' states at the last rebuild (titanMeshState: -1 out, 0
+		// whole, 1 a wreck's sub-geometry), and the recent rebuilds' boxes.
 		struct MeshChange {
 			uint32_t version = 0;
 			bool known = false, changed = false;
 			physics::Vec3 low, high;
 		};
-		std::vector<char> meshesLive;
+		std::vector<int> meshesLive;
 		std::vector<MeshChange> meshChanges;
 		uint32_t serial = 0;      // its parts' ids: kTitanPartIds + serial << 12 + part
 		std::vector<int> seatParts; // each gun seat's armour (its hub's first armoured node), -1 for none
@@ -4693,6 +4923,7 @@ private:
 	float m_replenishLimits[3] = {100, 100, 100};
 	// A giver's point for `percent` given to `object`: kind 0 heal, 1 repair, 2 ammo.
 	void replenishPoint(Player& giver, int kind, float percent, uint32_t object);
+	uint64_t m_squadJoins = 0; // Player::squadJoinedAt's counter
 	std::set<std::pair<int, int>> m_privateSquads;          // (team, squad): requestJoinSquad
 	std::map<int, uint32_t> m_squadInvites;                  // player -> its invite mask
 	std::map<int, std::vector<SquadMessage>> m_squadMessages; // player -> its 2/x messages
@@ -4731,7 +4962,10 @@ private:
 	// mesh (its gun hubs' cannons: 0x0063d720 -> 0x0063ccc0 with that
 	// node's mesh), as the body's posed parts (PartCollision.cpp).
 	void buildTitanCollisionParts(Titan& titan, Body& body);
-	static std::vector<std::shared_ptr<const TitanLodPart>> titanLodParts(const TitanMesh& m, uint32_t owner);
+	static std::vector<std::shared_ptr<const TitanLodPart>> titanLodParts(const TitanMesh& m, uint32_t owner, size_t state);
+	// A mesh's collision with its parts (0x006539f0 over a wrecked part's
+	// subtree): 0 whole, 1 its wreck sub-geometry, -1 out of the rays.
+	static int titanMeshState(const Titan& titan, const TitanMesh& m);
 	Titan* titanByObject(uint32_t object);
 	const Titan* titanByObject(uint32_t object) const;
 	bool titanPart(uint32_t id, Titan*& titan, int& part);
@@ -4792,9 +5026,15 @@ private:
 		float reloadTime = 120;   // ammo.reloadTime
 		float launchDelay = 1;    // fire.fireLaunchDelay
 		float launchIn = -1;      // a launch pending (seconds)
+		float captureDelay = 0;
 		float velocity = 4;
-		physics::Vec3 muzzle;     // the barrel's pivot in the silo's frame
-		float muzzleLength = 0;   // the muzzle along the aim from it
+		RotationAxis yawAxis, pitchAxis;
+		float yaw = 0, pitch = 0;
+		float yawRate = 0, pitchRate = 0;
+		physics::Vec3 yawPivot;
+		physics::Mat3 yawFrame;
+		std::vector<world::ChildTemplate> firearmPath;
+		physics::Vec3 projectileStart;
 		const ProjectileSettings* missile = nullptr;
 		uint32_t target = 0;
 		int launched = 0;
@@ -4855,6 +5095,10 @@ private:
 	// PlayerControlObject's: the landing.
 	void parachuteCollision(uint32_t self, uint32_t other, const physics::Vec3& normal, uint32_t otherMaterial);
 	void leaveParachute(Player& player, Parachute& chute);
+	// The put-out's updateFlags(0, 0x102) (0x005cff20 -> 0x006f68f0):
+	// the object is no longer drawn and, clearing 0x100, leaves the
+	// ResponsePhysicsManager (0x00a82518 slot 0x18) for the 0.1 s it has left.
+	void putOutOfCollision(uint32_t object);
 	// Nothing a soldier of the team stands on, nor what stops a round,
 	// between two points (`ignore`: an object left out).
 	bool soldierRayClear(int team, const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const;

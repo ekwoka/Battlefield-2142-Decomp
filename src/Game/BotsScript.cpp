@@ -195,11 +195,7 @@ int BotManager::addBot(const std::string& name, int team)
 	const std::string given = name.empty() && m_source ? m_source->nextBotName() : name;
 	const int id = m_world.addPlayer(given.empty() ? "Bot" : given, team, true);
 	if (id >= 0) {
-		// AIDLL's 0x10089000 puts a new bot in its side's squad with the
-		// fewest members (at most IAISettings slot 0x54 of them), the first
-		// when all are full, moving a member on to keep the squads even; here
-		// the first open squad.
-		m_world.joinSquad(id, m_world.openSquad(team));
+		m_world.joinAiSquad(id); // AIDLL 0x10089000
 	}
 	return id;
 }

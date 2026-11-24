@@ -88,9 +88,10 @@
 // shown when its own, a friend's or neutral, or alwaysShowOnMinimap, or the
 // enemy's with showOnEnemyMinimap; Minimap.setPaintVehicle filters by
 // vehicleType (0x0077e520). The texture is miniMapIcon (miniMapIconInside
-// while the camera is inside it), its size miniMapIconSize (16 x 16; the
-// inside one), turned by the vehicle; with usePlayerIcon a crewed vehicle
-// is drawn as its occupant instead (slot 0x138).
+// while the camera is inside a Titan, Renderer slot 0x30), its size
+// miniMapIconSize (16 x 16; the inside one), turned by the vehicle; with
+// usePlayerIcon a crewed vehicle is drawn as its occupant instead (slot
+// 0x138).
 #pragma once
 
 #include "Game/GameWorld.h"
@@ -202,6 +203,8 @@ private:
 	bool m_lit = false;                         // *+8
 };
 
+bool weaponHasRangeFinder(const world::ObjectTemplate* weapon);
+
 struct WeaponHudInput {
 	const world::ObjectTemplate* weapon = nullptr; // its weaponHud.*
 	int rounds = 0;      // in the magazine (the firearm's slot 0xbc)
@@ -305,23 +308,25 @@ private:
 	HudBlink m_blink {0.98f, 0, 0.7f, 0.15f};
 };
 
-// The crosshair's four parts (0x007be770, each frame from 0x007c1f10's
-// weapon HUD): the spread is ceil(deviation x deviationFactor) pixels
-// (the weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default),
-// pushed out by minVisualDeviation (+0x10c, 0) and held at
-// maxVisualDeviation (+0x108, 1000): an offset min + spread over the
-// maximum is the maximum. Up = 300 - length - offset, Down = 301 + offset,
-// Left = 399 - length - offset, Right = 400 + offset, about the 800 x 600
-// centre (the clamped branch takes the node's half size, the same 400 /
-// 300). The block fields are the WeaponHud component's (constructor
-// 0x006390e0: +0xf8 10, +0xfc 1000, +0x100 0; read through slot 0x50 at
-// +0xb0 / +0xb4 / +0xb8).
+// The crosshair's parts (0x007be770, each frame from 0x007c1f10's weapon
+// HUD): the spread s is ceil(deviation x deviationFactor) pixels (the
+// weapon HUD's +0x104, weaponHud.deviationFactor, 10 by default).
+// Cross*Pos (+0x130..+0x13c) take s raw with the part 20 long (+0x140):
+// Up = 300 - 20 - s, Down = 301 + s, Left = 399 - 20 - s, Right = 400 + s,
+// about the 800 x 600 centre. minVisualDeviation / maxVisualDeviation
+// (+0x10c / +0x108) clamp only Crosshair*Pos (+0x110..), which no shipped
+// HUD reads, so they move nothing on screen.
+// The machine guns' circle parts (CrossCircle*Pos, +0x144..+0x150) take s
+// too, with the part 6 wide (+0x154) and 8 out (+0x158):
+// Up = 301 - 2*6 - 8 - s, Right = 400 + 8 + s, Down = 300 + 8 - 6 + s,
+// Left = 400 - 6 - 8 - s.
 struct CrosshairParts {
 	float up = 0, down = 0, left = 0, right = 0;
-	int offset = 0;
+	int offset = 0; // s
+	float circleUp = 0, circleDown = 0, circleLeft = 0, circleRight = 0;
 };
-CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length = 20);
-// The same with the weapon template's weaponHud.* (defaults as above).
+CrosshairParts crosshairParts(float deviation, int deviationFactor, float length = 20);
+// The same with the weapon template's weaponHud.deviationFactor.
 CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length = 20);
 
 // The ability bar (0x007c3af0, each frame from the weapon HUD's frame
@@ -341,12 +346,11 @@ CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weap
 //   (slot 0x40) for the shown bar with the healed and repaired flags,
 //   healingSound (0x3c) with healed alone, ammoSound (0x44) with the ammo
 //   flag and not healed (the flags, not the ticks: they stay set).
-// - On foot, the gun in hand's ReplenishingAmmoComp: with targets, the bar
-//   shows (and WrenchRepairingShow, +0xf2, but for the ammo kit) their
-//   state: a target's armour share, or the ammo kit's the soldiers'
-//   ammunition / 15, each averaged into the running value from the second
-//   on. The kit's Ability decides the icon and the sound (on while the
-//   comp treats): ammo (the ammo icon, ammoSound), repairing (repair,
+// - On foot, the gun in hand's ReplenishingAmmoComp: the bar shows the
+//   armour or ammo share of targets still short of full. Each share is
+//   averaged into the running value from the second on. The wrench
+//   (WrenchRepairingShow, +0xf2) also shows for armour targets. The kit's
+//   Ability decides the icon and the sound (on while the comp treats): ammo (the ammo icon, ammoSound), repairing (repair,
 //   repairingSound), healing (medic, healingSound); none (the recon's
 //   defuser) the repair icon over 1 - the value, silent. A comp's
 //   AbilityValueShow is on with AbilityValue the holder's battery, which
@@ -388,6 +392,7 @@ private:
 // (0x004bd700, 0x005f5256) and its tick under 15 old, ammoSound (slot
 // 0x50), but not in the frame the player got in or out of a vehicle.
 int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, bool vehicleChanged);
+int updateReceivedSupplyHud(hud::HudManager& hud, const game::GameWorld::AbilityBarInfo* info, bool inVehicle, bool vehicleChanged);
 
 // The Titans' consoles and shields on the HUD (Friendly/EnemyStrategic-
 // Object%iShow, 0..9; the HUD information layer's +0xa89 + (team - 1) x
@@ -418,6 +423,8 @@ private:
 	std::array<bool, 20> m_alive {true, true, true, true, true, true, true, true, true, true, true, true, true, true,
 		true, true, true, true, true, true};
 };
+
+void updateTitanSiloHud(hud::HudManager& hud, const std::vector<game::GameWorld::SiloInfo>& silos, int localTeam);
 
 struct SelectItem {
 	int index = 0;       // the item index (1 the knife, 2 the sidearm, 3 the primary...)
@@ -466,7 +473,7 @@ public:
 	const std::array<Slot, 10>& slots() const { return m_slots; }
 
 private:
-	bool m_reverse = false; // +8
+	bool m_reverse = true; // retail constructor 0x0079bfdd; HUD slot 0 is the bottom row
 	bool m_shown = false;   // +9
 	int m_selected = -1;    // +0xc
 	void select(int itemIndex); // 0x0079c120
@@ -516,12 +523,17 @@ struct ItemListInput {
 // a PIAltFire group (slot 0x70(1)) longer than that, the PIAltFire group
 // (the list's +0x10 = 1). `find` gives a weapon's template (its
 // weaponHud.selectIcon).
+std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find);
 std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
 	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
 	const std::vector<std::pair<int, std::string>>& carried);
 
 // A seat dot's state (0x007a28e0).
 int seatDotState(bool occupied, bool local, int squad, int localSquad, bool sameTeam);
+
+// The personal canopy indicator (0x007a28e0); drop pods are excluded.
+bool usingPersonalParachute(const world::ObjectTemplate* occupied);
 
 // vehicleHud.displaySelectionOnEnter on entering a seat (0x007a3920, from
 // the enter event 0x007a3cb0 for the local player): with the controlled
@@ -629,8 +641,18 @@ class VehicleHud {
 public:
 	void update(hud::HudManager& hud, const VehicleHudInput& in);
 	void clear(hud::HudManager& hud);
+	// The passengers' names panel (VehiclePassengersShow, +0x2b6) for 5 s:
+	// entering a seat (0x007a394e) or a refused position key (game logic
+	// event 0/5 ECGameLogicGLFailedToChangePosition, 0x007a3dd1).
+	void showPassengers()
+	{
+		m_passengersOn = true;
+		m_passengersTime = 0;
+	}
 
 private:
+	bool m_passengersOn = false;  // +0x20
+	float m_passengersTime = 0;   // +0x18, against +0x1c = 5 s
 	float m_climbAngle = 0, m_climbPrevious = 0; // +0x204 / +0x208
 	float m_torque = 0, m_secondTorque = 1;     // +0x210 / +0x21c (the constructor's 0, 1)
 	float m_staminaWas = 1, m_staminaTimer = -1; // +0x1d4, +0x23c
@@ -995,6 +1017,10 @@ struct MateInput {
 	std::optional<float> need;  // the disc's share (see above), mateNeed
 };
 struct MateMarker {
+	// 0x00781680 types his control object: his soldier 0x17/0x18 (a ladder
+	// kept here as on foot), a vehicle seat 0x10..0x13/0x25, which clears
+	// the draw (0x00792f9e) unless a call's marker shows (0x007934e8).
+	bool drawn = true;
 	std::string texture;
 	float size = 16;
 	float color[4] = {1, 1, 1, 1};

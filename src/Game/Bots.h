@@ -116,6 +116,12 @@ struct WeaponAi {
 	std::array<float, 8> strength {};
 	float deviation = 14;
 	float allowedDeviation = 0.5f;
+	// +0x10 weaponTemplate.fireRate (-1 by default, 0x0088a7b0; getter
+	// 0x00892500, slot 0xc8): BBPHeliFire3d's trigger taps at most
+	// round((1 - (1 - skill) 0.8) round(1.5 fireRate)) times a minute
+	// (0x1007ec50); -1 adds no such limit. Only the gunships' pilot
+	// weapons set it (100).
+	int fireRate = -1;
 	float explosionRadius = 0;  // +0x20
 	bool indirect = false, thrown = false; // thrown: +2 (0x0088a650)
 	bool explodesOnImpact = false; // +0x4e
@@ -560,6 +566,14 @@ struct BotSettings {
 	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
+	// enhanced.botPilots, also read live: a gunship's pilot hunts targets
+	// and flies attack runs at them (BotsPilot.cpp); not retail.
+	const bool* botPilots = nullptr;
+	bool pilotsHunt() const { return enhanced && *enhanced && botPilots && *botPilots; }
+	// enhanced.botCommander, also read live: a virtual commander moves a commanderless bot team's Titan in gpm_ti
+	// and uses its commander's tools (BotsTitan.cpp, titanCommand); not retail.
+	const bool* botCommander = nullptr;
+	bool titanCommander() const { return enhanced && *enhanced && botCommander && *botCommander; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
@@ -814,6 +828,8 @@ public:
 	// enhanced.botTitan in gpm_ti: makes the Titans' walking grids now, at the
 	// level's load (a second or two of rays each, else spent mid-round).
 	void prepareTitanGrids();
+	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
+	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The grids' cells and links, a line each (and, for $BF2142_BOT_STATS, the vehicles).
 	std::string titanGridStats();
 	// The server's maximum of players (sv.maxPlayers; AIDLL reads the game's
@@ -929,7 +945,7 @@ public:
 	// getNumberOfDeactivedBots: the bot manager's slots 2, 0x74).
 	int botCount() const;
 	float time() const { return m_time; } // the bot manager's clock (its updates' sum)
-	// ai.addBot: a bot player of the team in an open squad (it spawns as
+	// ai.addBot: a bot player of the team in a squad (GameWorld::joinAiSquad; it spawns as
 	// the round spawns bots); its id, -1 for none.
 	int addBot(const std::string& name, int team);
 	int deactivatedCount() const { return static_cast<int>(m_deactivated.size()); }
@@ -1044,6 +1060,11 @@ public:
 	// The squad update (0x100c4240) of one squad now, outside the round robin
 	// (for tests).
 	void updateSquadNow(int team, int id);
+	// enhanced.botCommander: whether the team's Titan moved to `at` would stand in a missile's way from one of
+	// its silos or the commander's focus silo (titanBlocksSilos, for tests).
+	bool titanOrderBlocksSilos(int team, const physics::Vec3& at) const;
+	// enhanced.botCommander: its tools at `focus` now (titanCommandAssets, for tests).
+	void titanCommandAssetsNow(int team, const physics::Vec3& focus, bool silo) { titanCommandAssets(team, focus, silo); }
 private:
 	friend struct BotManagerTestAccess;
 	// An enemy a bot knows of (the sensing agent's memory item; the agent's
@@ -1176,6 +1197,12 @@ private:
 		float abandonedAt = -1e9f;
 		uint32_t approachExitRequested = 0;
 		uint32_t stuckExit = 0; // enhanced: the vehicle a stuck driver is getting out of
+		// enhanced.botRecovery's own no-progress watch for a driver, kept
+		// across route requests: where it last got 4 m further, since when,
+		// and when it was last driving with input (Bots.cpp drive).
+		physics::Vec3 wedgedAt;
+		float wedgedSince = -1;
+		float wedgedSeen = -1;
 		bool moveFailed = false; // drive: the move ended without arriving (the follower's no-progress flag)
 		std::map<int, float> rejectedVehiclePoints;
 
@@ -1298,6 +1325,7 @@ private:
 		uint32_t titanCrewSkipFor = 0; // one it gave up on the way to, until then
 		float titanCrewSkipUntil = 0;
 		uint32_t titanSortieVehicle = 0; // the transport this pilot has considered for a deck sortie
+		uint32_t titanRepair = 0;  // enhanced.botTitan: the part of its own Titan it is mending (titanRepair)
 		uint32_t titanSortieRider = 0;  // the deck sortie a passenger joined
 		int titanSortie = 0;       // transport: 0 waiting, 1 dropping riders, 2 supporting silos, 3 ordinary AI; gunship: 1 taking off
 		int titanSortieSilo = -1;  // that silo's control point
@@ -1313,8 +1341,9 @@ private:
 		float meshSince = 0;                // when it took the wheel there
 		uint32_t titanRide = 0;    // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
 		float titanRideAt = -1e9f;
-		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way, and when
+		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way (in its Titan's frame), and when
 		float titanAtTime = 0;
+		float titanCutOffSince = -1; // aboard its own Titan off the grid or with no way to a whole part: since when
 		float titanFireFrom = -1;     // aboard the enemy's Titan: when it stopped to fire, and the break from that until
 		float titanFireRestUntil = 0;
 		bool switchedLast = false;
@@ -1358,7 +1387,22 @@ private:
 		physics::Vec3 heliLastVelocity;
 		float heliLastAt = -1;
 		float heliLastDirY = 0;
-		int heliRun = 0;        // 0 approach, 1 away, 2 back
+		int heliRun = 0;        // the moves' Serial: 0 away, 1 back (0x1007f180)
+		int heliTarget = -1, heliWeapon = -1; // the plan's target and weapon (its keeper 0x1007f9d0 rebuilds on a change)
+		// enhanced.botPilots: the hunted target (a player, or an enemy Titan's
+		// gun part), when it was picked, the run's leg (0 set up, 1 in), its
+		// start (or the last break-off) and height; whether it broke off and
+		// is yet to leave the stand-off band (or turn its nose off the
+		// target); the seating the hunt was set up for; and the seating whose
+		// first press was counted.
+		int huntPlayer = -1;
+		uint32_t huntPart = 0;
+		float huntPickAt = -1e9f, huntLegAt = -1e9f, huntHeight = 0;
+		int huntLeg = 0;
+		bool huntAway = false;
+		float huntSeating = -2e9f;
+		float pilotFirstPressFor = -2e9f;
+		float heliSeating = -2e9f; // the seating counted in the pilot stats
 		float heliTapAt = -1e9f;
 		// When the bot last took a seat (BBChangeLandingCraft's x6 within 15 s).
 		float seatedAt = -1e9f;
@@ -1491,6 +1535,7 @@ private:
 	void queueRadio(Bot& bot, int type, int channel, float delay, int target = -1);
 	void sendRadioNow(Bot& bot, const GameWorld::PlayerInfo& self, int type, int channel, int target = -1);
 	void updateComm(Bot& bot, const GameWorld::PlayerInfo& self);
+	bool inFlight(const Bot& bot, const GameWorld::PlayerInfo& self) const;
 	// Marks the bot's unanswered messages of a type answered (0x100a61c0):
 	// true when there was one.
 	bool answerRadio(Bot& bot, int type);
@@ -1843,6 +1888,42 @@ private:
 	std::map<int, StuckWindow> m_stuckWindows;
 	std::map<std::string, float> m_stuckSeconds;
 	std::map<int, float> m_stuckPerBot;
+	// $BF2142_BOT_STATS's pilot fire, per aircraft template: seconds in
+	// BBPHeliFire3d, in each attack-run state, in the firing pass's gate
+	// (range, facing, sight), on target, and trigger presses.
+	struct PilotStats {
+		float fighting = 0, run[2] = {}, pass = 0, onTarget = 0; // run: away, back
+		int presses = 0;
+		float hunting = 0;            // enhanced.botPilots: seconds with a hunted target
+		float huntLegs[3] = {};       // of those: setting up, running in, running in with the line blocked
+		float firstAttack = 0;        // seconds from taking the seat to the first press, summed
+		int firstAttacks = 0, seatings = 0;
+		std::map<std::string, float> patterns; // the pilot's plan patterns, seconds each
+		std::map<std::string, std::pair<float, int>> hunted; // enhanced.botPilots: by target kind, seconds and presses
+	};
+	std::map<std::string, PilotStats> m_pilotStats;
+	// The pilot's gun for a target (fly's choice, 0x100dd4a0).
+	struct PilotGun {
+		std::string gun;
+		int group = 0;
+		WeaponAi weapon;
+	};
+	// HeliAimAt (0x100dcf10) at a point moving at `velocity` from `margin`
+	// over the terrain, and BBPHeliFire3d's trigger (0x1007ec50) on it:
+	// true when it pressed.
+	bool pilotStrike(Bot& bot, const GameWorld::VehicleInfo& vehicle, ai::HeliPilot& pilot, const PilotGun& gun,
+		const physics::Vec3& point, const physics::Vec3& velocity, bool ground, float margin, float dt, float seconds,
+		SoldierInput& input, PilotStats* stats);
+	// enhanced.botPilots (BotsPilot.cpp): the gunship pilot's own target and
+	// attack runs; false with nothing worth hunting (the plans fly on).
+	bool hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, ai::HeliPilot& pilot,
+		const std::string& rootAi, float dt, float seconds, SoldierInput& input);
+	PilotGun pilotGunFor(Bot& bot, const GameWorld::PlayerInfo& self, int strengthType);
+	// $BF2142_BOT_STATS's engagements: seconds a bot ran Fire with a
+	// target, by where it sat, the target's CombatStrengthType and range;
+	// and of those on foot, the seconds zoomed in.
+	std::map<std::string, float> m_engageSeconds;
+	float m_engageZoomed = 0, m_engageOnFoot = 0;
 	// When a human player of each team last got out of a vehicle (the unit
 	// component's per-team stamp, BF2142.exe vt+0x64 0x008a1b10 set by the
 	// exit event 0x00894860, read through vt+0x60 by the seat value), and
@@ -1884,10 +1965,11 @@ private:
 	struct TitanGrid;
 	std::map<std::pair<uint32_t, int>, std::shared_ptr<TitanGrid>> m_titanGrids; // by Titan and team
 	TitanGrid& titanGrid(const GameWorld::TitanInfo& titan, int team);
+	const GameWorld::TitanInfo* titanUnder(const std::vector<GameWorld::TitanInfo>& titans, const GameWorld::PlayerInfo& player);
 	const std::vector<float>& titanField(TitanGrid& grid, const GameWorld::TitanInfo& titan, int team, uint32_t part, const physics::Vec3& point,
 		bool nearest = false, float entryRadius = 0, uint32_t around = 0);
 	bool titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
-		const physics::Vec3& entry, float radius, int seat);
+		const physics::Vec3& entry, float radius, uint32_t key, const char* behaviour);
 	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
 		const GameWorld::TitanInfo& titan, const std::vector<float>& field);
 	bool titanLeave(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);
@@ -1899,6 +1981,21 @@ private:
 	};
 	TitanPlan m_titanPlans[3];
 	int titanRole(const GameWorld::PlayerInfo& self);
+	// enhanced.botCommander: each team's virtual commander (titanCommand). `focus` the control point it moves the
+	// Titan for, -1 the enemy Titan, 0 none; `target` its last move order, taken (`ordered`).
+	struct TitanCommand {
+		float nextAt = 0;
+		int focus = 0;
+		float focusSince = 0; // when the focus last changed
+		float empAt = -1e9f;  // when its last EMP went
+		bool ordered = false;
+		physics::Vec3 target;
+	};
+	TitanCommand m_titanCommands[3];
+	void titanCommand();
+	bool titanBlocksSilos(const GameWorld::TitanInfo& own, const GameWorld::TitanInfo& enemy, const physics::Vec3& at,
+		int extraPoint, const std::vector<GameWorld::SiloInfo>& silos) const;
+	void titanCommandAssets(int team, const physics::Vec3& focus, bool silo);
 	// enhanced.botRecovery (not retail): a mod's vehicle mesh may stop short of a base's vehicle pads (Remaster's
 	// Suez Titan layout leaves the fenced PAC base out). The way from such a spot to the mesh: a search over a 4 m
 	// grid within 90 m whose steps no obstacle crosses at hull height (fences count); empty for none. Kept by spot.
@@ -1914,6 +2011,7 @@ private:
 	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	void useFlareOnLock(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	bool titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
+	bool titanRepair(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, const GameWorld::TitanInfo& titan);
 	bool titanPodReady(const GameWorld::PlayerInfo& self, physics::Vec3* spot = nullptr);
 	bool titanPodGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	bool titanPod(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
@@ -1924,8 +2022,6 @@ private:
 	const GameWorld::VehicleInfo* titanAircraft(const GameWorld::PlayerInfo& self, const GameWorld::TitanInfo& home);
 	bool titanCrew(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
 	bool titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds);
-	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
-	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The zoom key's press (Bot::zoomPress, set by the plans' statements)
 	// on the weapon in hand: a press steps the level (0x005da670; not while
 	// reloading), a weapon change, a seat and a reload with zoomOutOnReload

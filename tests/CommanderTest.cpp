@@ -11,6 +11,7 @@
 #include "Main/GameAudio.h"
 #include "Main/HostedGame.h"
 #include "Main/HudMenus.h"
+#include "Main/MapCommanderMarkers.h"
 #include "Net/GameClient.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
@@ -97,7 +98,8 @@ struct Field {
 						"detonation.isEMPWeapon", "detonation.endEffectTemplate", "detonation.useMMOnEndEffect",
 						"damage", "minDamage", "timeToLive", "gravityModifier", "material",
 						"seek.targetType", "radius", "healSpeed", "refillAmmoSpeed", "sharedStorageSize",
-						"healStorageSize", "ammoStorageSize", "destroyWhenEmptyStorage", "workOnVehicles"});
+						"healStorageSize", "ammoStorageSize", "destroyWhenEmptyStorage", "workOnVehicles",
+						"continousRotationSpeed"});
 				std::string out;
 				const std::string base = "Objects/Weapons/";
 				for (const char* script : {"common/RemoteControlledObjects/OrbitalStrikeControlObjectUS.con",
@@ -713,12 +715,19 @@ TEST(Commander_UavAndScanReveal)
 	// 11 s, to the commander only.
 	field.place("commander_movement_analyst", 2, -220, -200);
 	const int mate = field.soldier(2, -300, -300);
+	CHECK(!world.abilityState(2, Ability::Satellite).satelliteSweep);
 	CHECK(world.commanderAction(2, Ability::Satellite, 0, 0));
+	CHECK(world.abilityState(2, Ability::Satellite).satelliteSweep == 0.0f);
 	field.run(0.1f);
 	const std::vector<int> seen = world.scannedPlayers(world.commander(2));
 	CHECK(seen.size() == 2 && world.scannedPlayers(mate).empty() && !world.isRevealed(outside, 2));
-	field.run(11);
+	field.run(5.4f);
+	const auto halfway = world.abilityState(2, Ability::Satellite).satelliteSweep;
+	CHECK(halfway && std::abs(*halfway - 0.5f) < 0.01f);
+	CHECK(!world.abilityState(1, Ability::Satellite).satelliteSweep);
+	field.run(5.6f);
 	CHECK(world.scannedPlayers(world.commander(2)).empty());
+	CHECK(!world.abilityState(2, Ability::Satellite).satelliteSweep);
 	CHECK(std::fabs(world.abilityState(2, Ability::Satellite).timeUntilReady - (27 - 11.1f)) < 0.2f);
 }
 
@@ -748,6 +757,7 @@ TEST(Commander_SupplyDrop)
 	// It comes down, then heals its team (healSpeed 3 a second) within 5 m.
 	field.run(12);
 	CHECK(field.objects.find(crate)->position().y < 1.0f);
+	CHECK(field.objects.find(crate)->childDisabled("supply_parachute")); // down (0x0043d9c0)
 	world.playerInfo(hurt, info);
 	const float before = world.hitPoints(info.soldier);
 	field.run(5);
@@ -757,9 +767,89 @@ TEST(Commander_SupplyDrop)
 	CHECK(world.hitPoints(info.soldier) == 40);
 	field.run(45);
 	CHECK(world.abilityReady(2, Ability::Supplies));
-	// Gone after supplyDropNumSecsToLive (300 s).
+	// Gone supplyDropNumSecsToLive (300 s) after it landed, 10 s after the
+	// drop at 5 m/s (0x0043d820 / 0x0043d880), not after the drop.
 	field.run(240);
+	CHECK(world.supplyCrates().size() == 1);
+	field.run(10);
 	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
+}
+
+TEST(Commander_MapMarkersUseOwningTeamAndToolTint)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) {
+			continue;
+		}
+		Field field(mod);
+		CHECK(field.loaded);
+		if (!field.loaded) {
+			continue;
+		}
+		std::string consoleOutput;
+		field.console.run("Objects/Weapons/stationary/eu_drone/eu_drone.con", {}, consoleOutput);
+		CHECK(field.templates.find("eu_drone"));
+		auto& world = *field.world;
+		world.setCommanderEnabled(true);
+		for (int team : {1, 2}) {
+			world.setCommander(team, world.addPlayer("Boss", team, false));
+			field.place("commander_emp_strike", team, team * 100.0f, -100);
+			field.place("commander_orbital_strike_64", team, team * 100.0f, -120);
+			field.place("commander_uav_drone_control", team, team * 100.0f, -140);
+		}
+		for (int team : {1, 2}) {
+			const float x = team * 100.0f;
+			CHECK(world.commanderAction(team, Ability::Uav, x, 20));
+			const world::Object* drone = field.objects.find(world.uavDrone(team));
+			CHECK(drone && drone->team() == team);
+			CHECK(world.commanderAction(team, Ability::OrbitalStrike, x, 40));
+			CHECK(world.commanderAction(team, Ability::Artillery, x, 60));
+			CHECK(world.commanderAction(team, Ability::Supplies, x, 80));
+		}
+
+		using Marker = hud::HudManager::MapMarker;
+		for (int team : {1, 2}) {
+			std::vector<Marker> marks;
+			dice::hfe::main::appendCommanderMapMarkers(marks, world, team);
+			CHECK(marks.size() == 7);
+			if (marks.size() != 7) {
+				continue;
+			}
+			for (const Marker& mark : marks) {
+				CHECK(mark.x == team * 100.0f && mark.upright);
+			}
+			CHECK(marks[0].texture == "Ingame/Minimap/icon_uav_circle.tga" && marks[0].radar && marks[0].worldSize > 0);
+			CHECK(marks[0].color[0] == 1 && marks[0].color[1] == 1 && marks[0].color[2] == 1);
+			CHECK(marks[2].texture == "Ingame/Commander/tools/orbit_strike.tga");
+			CHECK(marks[4].texture == "Ingame/Commander/tools/force_strike.tga");
+			for (size_t i = 1; i <= 4; ++i) {
+				CHECK(marks[i].color[0] == 1 && marks[i].color[1] == 0 && marks[i].color[2] == 0);
+			}
+			CHECK(marks[6].texture == "Ingame/Minimap/Icons/icon_supplies.tga");
+			for (size_t i : {5, 6}) {
+				CHECK(marks[i].color[0] == 0.254f && marks[i].color[1] == 0.552f && marks[i].color[2] == 0.89f);
+			}
+		}
+
+		std::vector<Marker> marks;
+		dice::hfe::main::appendCommanderMapMarkers(marks, world, 0);
+		CHECK(marks.empty());
+		field.run(3);
+		for (int team : {1, 2}) {
+			for (float z : {40.0f, 60.0f}) {
+				CHECK(std::any_of(world.projectiles().begin(), world.projectiles().end(), [team, z](const game::Projectile& shot) {
+					return shot.team == team && shot.origin.x == team * 100.0f && shot.origin.z == z;
+				}));
+			}
+		}
+		field.run(23);
+		CHECK(world.supplyCrates().size() == 2);
+		dice::hfe::main::appendCommanderMapMarkers(marks, world, 1);
+		CHECK(marks.size() == 1 && marks.front().texture == "Ingame/Minimap/icon_uav_circle.tga");
+	}
 }
 
 TEST(Commander_OrderKindsAndLeaderOrders)
@@ -958,6 +1048,38 @@ TEST(Commander_AiAnswersSquadRequests)
 	CHECK(world.squadRequest(1, 1, 2) && said("uav_deny") == 0);
 }
 
+// enhanced.botCommander's supplies to a silo with two of its soldiers on foot there: not while a crate of the
+// team's still serves the point (it went on dropping one each time the tool was ready); an enemy's crate there or
+// the team's at another point doesn't count; once it expired, another.
+TEST(Commander_TitanAiDropsOneCrateAtATime)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	for (float x : {40.0f, 42.0f, 240.0f, 242.0f}) {
+		field.soldier(1, x, 40);
+	}
+	game::BotSettings settings;
+	game::BotManager bots(world, settings);
+	const auto drops = [&](const physics::Vec3& at) {
+		bots.update(1 / 30.0f); // the players as the bots see them
+		const size_t before = world.supplyCrates().size();
+		bots.titanCommandAssetsNow(1, at, true);
+		return world.supplyCrates().size() - before;
+	};
+	const physics::Vec3 silo {40, 0, 40}, another {240, 0, 40};
+	CHECK(world.commanderAction(2, Ability::Supplies, 40, 41, true)); // the enemy's, right there
+	CHECK(drops(silo) == 1);
+	field.run(61); // the tool ready again, the crate down
+	CHECK(drops(silo) == 0);
+	CHECK(drops(another) == 1);
+	field.run(252); // the first gone 300 s after it landed
+	CHECK(drops(silo) == 1);
+}
+
 // Exercise the installed Remaster scripts through the same Sound console
 // registration and VFS used by the game. The null OpenAL driver still builds
 // and starts actual Sound instances; StartedSound counts alone did not prove
@@ -980,6 +1102,7 @@ TEST(Commander_RemasterOrbitalStrikeBlastSound)
 			// ClientArchives.con mount points used by the game.
 			CHECK(field.files.mountArchive("Objects/Common_server.zip", "Common"));
 			CHECK(field.files.mountArchive("Objects/Sound_client.zip", "Sound"));
+			CHECK(field.files.mountArchive("mods/bf2142/Sound_client.zip", "Sound"));
 			CHECK(field.files.mountArchive("Objects/Effects_server.zip", "Objects\\Effects"));
 			field.templates.registerType(0x9474, "EffectBundle");
 			std::string out;
@@ -1014,14 +1137,28 @@ TEST(Commander_RemasterOrbitalStrikeBlastSound)
 			field.place("commander_orbital_strike_64", 1, 200, 200);
 			world.takeEffectSounds();
 			CHECK(world.commanderAction(1, Ability::Artillery, 0, -60));
+			const std::string falling = "S_commander_orbital_strike_Projectile_Looping";
+			bool shellPlayingBeforeImpact = false;
 			for (int i = 0; i < 20 * 30; ++i) {
 				world.tick(1 / 30.0f);
 				audio.tick(camera);
+				// While the falling loops are the only events, a playing voice
+				// proves the mixer found and started their sample.
+				if (!triggered.empty() && std::all_of(triggered.begin(), triggered.end(), [&](const auto& event) {
+						return event.name == falling;
+					})) {
+					const auto* stats = engine->statistics();
+					shellPlayingBeforeImpact |= stats && stats->playingSamples > 0;
+				}
 			}
+			CHECK(shellPlayingBeforeImpact);
 			const auto heard = [&triggered](const std::string& name) {
 				return std::any_of(triggered.begin(), triggered.end(), [&name](const auto& event) { return event.name == name; });
 			};
-			CHECK(heard("S_commander_orbital_strike_Projectile_Looping"));
+			// Each of the 16 seven-shell salvos starts seven independent moving loops.
+			CHECK(std::count_if(triggered.begin(), triggered.end(), [&](const auto& event) {
+				return event.name == falling;
+			}) == 16 * 7);
 			CHECK(heard("S_e_exp_orbital_strike_Start"));
 			CHECK(heard("S_Impact_Artillery"));
 			// Remaster v17 creates this firearm event template but does not
@@ -1487,4 +1624,58 @@ TEST(Commander_ResultNotificationsReachApplicantsAndTeam)
 	CHECK(std::none_of(heard.begin(), heard.end(), [&](const auto& voice) { return voice.receiver == enemy || voice.receiver == bot; }));
 	world.resignCommander(winner);
 	CHECK(world.takeSquadMessages(winner).empty());
+}
+
+// The commander assets' dishes and antennas turn by themselves
+// (continousRotationSpeed on a RotationalBundle under a stationary root: the
+// part's own update, 0x00565a20, runs whatever the root's physics). They
+// need a ticked part state; a stationary root with none keeps none.
+TEST(Commander_ScanningDishesTurnAtTheirAuthoredSpeed)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) {
+		return;
+	}
+	struct Dish {
+		const char* object;
+		const char* part;
+		float speed;
+	};
+	const Dish dishes[] = {{"commander_movement_analyst", "commander_movement_analyst_top", 150},
+		{"commander_emp_strike", "commander_EMP_Strike_mount", 60},
+		{"commander_orbital_strike", "commander_Orbital_Strike_Antenna", 4}};
+	for (const std::string& mod : {std::string("mods/bf2142"), std::string("mods/Project_Remaster_v17_Final")}) {
+		if (!test::runs(mod)) continue;
+		for (const Dish& dish : dishes) {
+			Field field(mod, true);
+			if (!field.loaded) {
+				CHECK(field.loaded);
+				continue;
+			}
+			const world::Object* placed = field.objects.create(field.templates.find(dish.object), {0, 0, 0});
+			field.world->tick(1 / 30.0f);
+			world::Vec3 offset, rotation;
+			CHECK(field.world->partPose(placed->id(), dish.part, offset, rotation));
+			const float start = rotation.x;
+			for (int i = 0; i < 90; ++i) {
+				field.world->tick(1 / 30.0f);
+			}
+			CHECK(field.world->partPose(placed->id(), dish.part, offset, rotation));
+			const float turned = std::remainder(rotation.x - start - dish.speed * 3.0f, 360.0f);
+			std::fprintf(stderr, "  %s/%s: turned %.2f (authored %.1f deg/s x 3 s)\n", mod.c_str(), dish.part,
+				rotation.x - start, dish.speed);
+			CHECK(std::fabs(turned) < 0.5f);
+		}
+		// A stationary root without a turning part gets no part state.
+		Field field(mod, true);
+		if (!field.loaded) {
+			continue;
+		}
+		world::ObjectTemplate* still = field.templates.find("commander_movement_analyst");
+		world::ObjectTemplate* top = field.templates.find("commander_movement_analyst_top");
+		CHECK(still && top);
+		top->settings()["continousRotationSpeed"] = "0/0/0";
+		const world::Object* placed = field.objects.create(still, {0, 0, 0});
+		field.world->tick(1 / 30.0f);
+		CHECK(field.world->vehicle(placed->id()) == nullptr);
+	}
 }

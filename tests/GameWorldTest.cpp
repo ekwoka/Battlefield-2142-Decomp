@@ -12,6 +12,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Main/DeploymentTeam.h"
+#include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
 #include "Net/RemoteInput.h"
@@ -219,6 +220,9 @@ TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 
 	auto* pacObject = objects.create(pacPoint, {55.782f, 46.200f, 206.065f});
 	auto* neutralObject = objects.create(neutralPoint, {-34.929f, 42.429f, 143.808f});
+	// crate01_c names its mesh only with the .tweak's setCollisionMesh and
+	// never creates the template: the mesh beside its file is still solid.
+	auto* crate = objects.create(templates.find("crate01_c"), {500.0f, 100.0f, 500.0f});
 	game::GameWorld round(templates, objects);
 	round.enablePhysics(files, collisionTemplates, {[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
 		normal = {0, 1, 0};
@@ -226,6 +230,8 @@ TEST(GameWorld_BelgradeRemasterFlagsUseTheShippedPoleHeight)
 	}}, &materials);
 	round.startRound();
 	CHECK(round.controlPoints().size() == 2);
+	physics::CollisionWorld::Hit crateHit {};
+	CHECK(round.staticCollision().raycast({500, 103, 500}, {500, 97, 500}, crateHit) && crateHit.owner == crate->id());
 	const auto findPoint = [&round](int id) -> const game::ControlPoint* {
 		for (const auto& point : round.controlPoints()) if (point.id == id) return &point;
 		return nullptr;
@@ -348,6 +354,13 @@ struct Range {
 		world->startRound();
 	}
 	long count(const char* event) const { return std::count(events.begin(), events.end(), event); }
+	// A soldier gets in only through an EntryPoint (0x005a98e0): one at the centre.
+	void addEntry(world::ObjectTemplate& vehicle, float radius = 4)
+	{
+		templates.registerType(99, "EntryPoint");
+		templates.create("EntryPoint", vehicle.name() + "_entry")->settings()["entryRadius"] = std::to_string(radius);
+		vehicle.children().push_back({vehicle.name() + "_entry", {}, {}});
+	}
 };
 
 TEST(GameWorld_ShippedGrenadeAndRorschAnimationTiming)
@@ -510,6 +523,41 @@ TEST(GameWorld_HitIndicator)
 	}
 }
 
+// The hit direction (0x005b7680): a round over 2% of a human soldier's
+// maxHitPoints stores the way back to where it was fired from (player
+// +0x1d0, atan2 of x over z), counts a hit and is sent in two own-state
+// records; an AI soldier gets none.
+TEST(GameWorld_HitDirection)
+{
+	for (const bool ai : {false, true}) {
+		Range range;
+		const int victim = range.world->addPlayer("Target", 1, ai);
+		CHECK(range.world->spawnSoldier(victim));
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		game::GameWorld::PlayerInfo info, shooter;
+		for (int tick = 0; tick < 4 && range.world->playerInfo(victim, info) && info.hitDirectionHits == 0; ++tick) {
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->playerInfo(victim, info) && range.world->playerInfo(me, shooter));
+		if (ai) {
+			CHECK(info.hitDirectionHits == 0);
+			continue;
+		}
+		CHECK(info.hitDirectionHits > 0);
+		const float expected = std::atan2(shooter.position.x - info.position.x, shooter.position.z - info.position.z);
+		CHECK(std::fabs(info.hitDirection - expected) < 0.05f);
+		float sent = 0;
+		CHECK(range.world->takeHitDirection(victim, sent) && sent == info.hitDirection);
+		CHECK(range.world->takeHitDirection(victim, sent));
+		range.world->setPlayerInput({});
+		CHECK(!range.world->takeHitDirection(victim, sent)); // two records, then none
+	}
+}
+
 TEST(GameWorld_SoldiersShootAndDie)
 {
 	Range range;
@@ -532,6 +580,8 @@ TEST(GameWorld_SoldiersShootAndDie)
 	CHECK(range.world->playerInfo(range.world->localPlayer(), shooter) && shooter.kills == 1 && shooter.alive);
 	CHECK(range.count("PlayerKilled") == 1);
 	CHECK(info.manDown && range.count("PlayerDeath") == 0); // down, still revivable
+	// The kill line names the weapon whose round dealt the damage (0x005b7130), not what is in hand later (a thrown motion mine).
+	CHECK(shooter.killWeapon == "eu_ar_rifle");
 	CHECK(tick > 6 && tick < 30); // about 0.2 s: three rounds at 600 a minute, 20 m
 	const auto deathSounds = range.world->takeSounds();
 	CHECK(std::any_of(deathSounds.begin(), deathSounds.end(), [](const game::GameWorld::SoundEvent& sound) {
@@ -560,6 +610,47 @@ TEST(GameWorld_SuicideSkipsManDown)
 	range.world->suicide(info.soldier);
 	CHECK(range.world->playerInfo(bot, info) && !info.alive && !info.manDown && info.deaths == 1);
 	CHECK(range.count("PlayerKilled") == 1 && range.count("PlayerDeath") == 1);
+}
+
+// Retail turns the soldier's eye by each frame's look before the tick
+// takes it (0x0058b5e0, cleared by the tick 0x0058a788): the drawn look
+// (the tick's plus pendingLook) must be where the next tick leaves it.
+TEST(GameWorld_PendingLookIsWhatTheNextTickTakes)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo before, after;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), before) && before.alive);
+	game::SoldierInput look;
+	look.aimPitch = 12;
+	look.turn = 7; // two frames' moves, one tick
+	range.world->setPlayerInput(look);
+	look.turn = 9;
+	range.world->setPlayerInput(look);
+	float turn = 0, pitch = 0;
+	range.world->pendingLook(turn, pitch);
+	CHECK(turn == 16 && std::fabs(pitch - (12 - (before.aimPitch))) < 1e-4f);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(range.world->localPlayer(), after));
+	CHECK(std::fabs(std::remainder(after.yaw - (before.yaw + turn), 360.0f)) < 1e-3f);
+	CHECK(std::fabs(after.aimPitch - (before.aimPitch + pitch)) < 1e-3f);
+	range.world->pendingLook(turn, pitch);
+	CHECK(turn == 0 && pitch == 0);
+}
+
+// Seated, the frame's look passes the 40-degree twist only while the body
+// can take the rest within the seat's limits, else it stops at 40 (0x005890a0).
+TEST(GameWorld_SeatedLookPreviewKeepsTheSeatLimits)
+{
+	using game::GameWorld;
+	CHECK(GameWorld::seatedLookPreview(10, 20, 0, -90, 90) == 20);  // within the twist
+	CHECK(GameWorld::seatedLookPreview(30, 20, 0, -90, 90) == 20);  // 50: the body can take 10
+	CHECK(GameWorld::seatedLookPreview(30, 20, 25, -15, 30) == 10); // 50 + 25 past 30: stops at 40
+	CHECK(GameWorld::seatedLookPreview(-30, -20, -10, -15, 30) == -10);
+	CHECK(GameWorld::seatedLookPreview(-30, -20, 0, -15, 30) == -20); // -10 within -15
 }
 
 TEST(GameWorld_InitialDeploymentJoinsWithoutDeathThenSpawnsAtChoice)
@@ -1250,6 +1341,112 @@ TEST(GameWorld_WeaponSwitching)
 	CHECK(held() == "eu_ar_rifle" && range.world->playerWeapon()->roundsInMag() == rifleRounds);
 }
 
+TEST(GameWorld_ActiveCamouflageCanBeSelected)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* camo = range.templates.create("GenericFireArm", "Unl_Active_Camo");
+	camo->components().push_back("CamouflageAmmoComp");
+	for (const auto& [key, value] : {std::pair<const char*, const char*> {"itemIndex", "5"}, {"altItemIndex", "6"},
+			 {"ammo.nrOfMags", "-1"}, {"ammo.magSize", "-1"}, {"ammo.reloadTime", "0.7"}, {"ammo.autoReload", "1"},
+			 {"ammo.instantReloadOnEnable", "1"}, {"delayToUse", "1.1"}, {"fire.addFireRate", "2"},
+			 {"heatAddWhenFire", "0.005"}, {"coolDownPerSec", "0.08"}, {"overheatPenalty", "1.5"}, {"ammo.minimumTimeUntilReload", "0.5"},
+			 {"ammo.reloadWithoutPlayer", "1"}}) {
+		camo->settings()[key] = value;
+	}
+	range.templates.create("GenericFireArm", "knife")->settings()["itemIndex"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* item : {"knife", "eu_ar_rifle", "Unl_Active_Camo"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const auto held = [&] { return range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name(); };
+	const auto press = [&](int key, bool fire = false) {
+		game::SoldierInput input;
+		input.selectItem = key;
+		input.fire = fire;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		input.selectItem = 0;
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+	};
+	CHECK(held() == "eu_ar_rifle");
+	press(5);
+	CHECK(held() == "Unl_Active_Camo");
+	for (int i = 0; i < 60; ++i) { // cloaked, trigger down
+		game::SoldierInput fire;
+		fire.fire = true;
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+	}
+	press(3);
+	CHECK(held() == "eu_ar_rifle");
+	press(5);
+	CHECK(held() == "Unl_Active_Camo");
+	// The wheel (c_PIToggleWeapon) walks the slots and wraps past the camouflage.
+	game::SoldierInput wheel;
+	wheel.toggleWeapon = true;
+	range.world->setPlayerInput(wheel);
+	range.world->tick(1 / 30.0f);
+	CHECK(held() == "knife");
+	wheel.toggleWeapon = false;
+	range.world->setPlayerInput(wheel);
+	range.world->tick(1 / 30.0f);
+	for (int i = 0; i < 2; ++i) { // knife -> rifle -> camouflage
+		wheel.toggleWeapon = true;
+		range.world->setPlayerInput(wheel);
+		range.world->tick(1 / 30.0f);
+		wheel.toggleWeapon = false;
+		range.world->setPlayerInput(wheel);
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(held() == "Unl_Active_Camo");
+}
+
+TEST(GameWorld_UnlockAllAppliesOnlyTheChosenSelection)
+{
+	// With every unlock owned, the kit build still applies the chosen masks (0x00570ab0): mine (branch 0
+	// level 0) and camouflage (branch 1 level 2) share slots 5/6, so the unchosen smoke shotgun must not
+	// take slot 6 from the camouflage.
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	range.templates.create("GenericFireArm", "knife")->settings()["itemIndex"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* item : {"knife", "eu_ar_rifle"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	struct Unlock { const char* container; const char* item; const char* level; const char* branch; };
+	for (const Unlock& u : {Unlock {"UnlockEU_Sni0", "Unl_Mine", "0", "UB_First"}, {"UnlockEU_Sni2", "EU_Smk", "2", "UB_First"},
+			 {"UnlockEU_SpecOp2", "Unl_Active_Camo", "2", "UB_Second"}}) {
+		world::ObjectTemplate* gun = range.templates.create("GenericFireArm", u.item);
+		gun->settings()["itemIndex"] = "5";
+		gun->settings()["altItemIndex"] = "6";
+		world::ObjectTemplate* container = range.templates.create("ItemContainer", u.container);
+		container->children().push_back({u.item, {}, {}});
+		container->settings()["unlockLevel"] = u.level;
+		container->settings()["unlockBranch"] = u.branch;
+		kit->children().push_back({u.container, {}, {}});
+	}
+	game::GameLogic logic;
+	logic.team(2).kits = {{"EU_Assault", "us_light_soldier", ""}};
+	range.world->unlockAllByDefault = true;
+	CHECK(range.world->joinPlayer(2) >= 0);
+	range.world->setKitUnlockSelection(range.world->localPlayer(), logic, 0, {1, 4, 0, 0});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(range.world->localPlayer(), info));
+	std::string at5, at6;
+	for (const auto& [slot, name] : info.carried) {
+		if (slot == 5) at5 = name;
+		if (slot == 6) at6 = name;
+	}
+	CHECK(at5 == "Unl_Mine" && at6 == "Unl_Active_Camo");
+}
+
 TEST(GameWorld_ProfileAutoReload)
 {
 	Range range;
@@ -1357,14 +1554,15 @@ TEST(GameWorld_GadgetsHealAndResupply)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(std::abs(range.world->hitPoints(soldier) - (before + 6)) < 0.5f); // 2 s at 3 a second
-	// The hub in hand heals round its holder as well (0x005d8740): 6 a
-	// second with the thrown one.
+	// The hub in hand heals round its holder as well (0x005d8740), its
+	// ammo's update run twice a tick in hand (0x005c58a0): 9 a second with
+	// the thrown one.
 	press(take);
 	const float holding = range.world->hitPoints(soldier);
 	for (int i = 0; i < 30; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
-	CHECK(std::abs(range.world->hitPoints(soldier) - (holding + 6)) < 0.5f);
+	CHECK(std::abs(range.world->hitPoints(soldier) - (holding + 9)) < 0.5f);
 	// Another throw replaces the hub.
 	for (int i = 0; i < 40; ++i) {
 		range.world->tick(1 / 30.0f);
@@ -1451,15 +1649,16 @@ TEST(GameWorld_AbilityBattery)
 	// Nobody to treat: the battery only fills, a tenth a second.
 	run(1);
 	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.01f);
-	// Charged: 3 x 1.5 per cent a second, the battery down 0.5 - 0.1 a second.
-	// (The scan lists a hurt soldier at its next turn, one a second: let it come.)
+	// Charged: the ammo's update runs twice a tick in hand (0x005c58a0), so
+	// 2 x 3 x 1.5 per cent a second, the battery down 2 x 0.5 - 0.1 a second.
+	// (The scan lists a hurt soldier at its next turn: let it come.)
 	range.world->setHitPoints(soldier, 40);
 	run(1.1f);
 	range.world->setHitPoints(soldier, 40);
-	range.world->setBattery(me, 0.5f);
-	run(1);
+	range.world->setBattery(me, 1);
+	run(0.5f);
 	CHECK(std::abs(range.world->hitPoints(soldier) - 44.5f) < 0.3f);
-	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.1f) < 0.02f);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.55f) < 0.02f);
 	// Flat: a tick's treatment only now and then, as the battery creeps
 	// over 0.5 / 30 (a fifth of the time).
 	range.world->setBattery(me, 0);
@@ -1511,10 +1710,15 @@ TEST(GameWorld_AbilityBarTargetsAndGifts)
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->abilityBar(me, info) && info.replenishingType == 0 && info.active);
-	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.45f);
+	// Healed since: the hub in hand treats twice a tick (0x005c58a0), at most 7 in 35 ticks.
+	CHECK(info.targets.size() == 1 && info.targets[0] > 0.4f && info.targets[0] < 0.47f);
 	CHECK(info.healFlag && !info.repairFlag && info.sinceHeal == 0);
-	// Full again, he is held (and the sound plays) until the next scan, 2 s on.
+	menu::AbilityBar bar;
+	CHECK(bar.update(info, false).show && bar.out().sound == 0);
+	// Full again, the scan still holds him, but the HUD clears immediately.
 	range.world->setHitPoints(soldier, 100);
+	CHECK(range.world->abilityBar(me, info) && info.targets.size() == 1);
+	CHECK(!bar.update(info, false).show && bar.out().sound == -1);
 	for (int i = 0; i < 10; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
@@ -1701,11 +1905,21 @@ TEST(GameWorld_RearmedSoldierIsStampedAsReceiving)
 	game::SoldierInput take;
 	take.selectItem = 4;
 	press(take);
+	menu::AbilityBar bar;
+	CHECK(range.world->abilityBar(me, info) && info.active);
+	CHECK(bar.update(info, false).show && bar.out().bar < 1);
 	for (int i = 0; i < 45; ++i) {
 		range.world->tick(1 / 30.0f);
 	}
 	CHECK(range.world->abilityBar(me, info) && !info.ammoFlag && info.sinceAmmo >= 0 && info.sinceAmmo < 15);
 	CHECK((menu::receivedSounds(info, false, false) & 4) != 0);
+	// The sound stamp arrives while refill credit is building. Wait for
+	// the missing magazine to be restored while keeping the hub equipped.
+	for (int i = 0; i < 150; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->abilityBar(me, info) && info.active && info.targets.size() == 1);
+	CHECK(!bar.update(info, false).show && bar.out().sound == -1);
 }
 
 TEST(GameWorld_ReplenishNoticeIsTheHudsLineOfItsKind)
@@ -2314,6 +2528,28 @@ TEST(GameWorld_DefibrillatorRevives)
 	}
 	range.world->playerInfo(bot, info);
 	CHECK(!info.alive && !info.manDown && info.soldier == 0 && range.count("PlayerDeath") == 1);
+}
+
+// The local player going down calls for a revive (0x37, ReviveCalls fed
+// the round's own PlayerInfo, whose soldier reads 0 once he is down).
+TEST(GameWorld_DownedPlayerCallsForRevive)
+{
+	Range range;
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	range.world->setManDownTime(30);
+	menu::ReviveCalls calls;
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(me, info) && info.alive && info.soldier != 0);
+	CHECK(calls.step(me, info.soldier, info.manDown, false, true) == 0);
+	range.world->setHitPoints(info.soldier, 0);
+	int code = 0;
+	for (int i = 0; i < 5 && code == 0; ++i) {
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->playerInfo(me, info));
+		code = calls.step(me, info.soldier, info.manDown, false, true);
+	}
+	CHECK(info.manDown && info.soldier == 0 && code == 0x37);
 }
 
 // An enemy's paddles (0x004ba5c0's team test) leave a downed body down.
@@ -2963,6 +3199,7 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 		launcher->settings()["ammo.magSize"] = "1";
 		launcher->settings()["ammo.nrOfMags"] = "4";
 		launcher->settings()["ammo.reloadTime"] = "0.2";
+		launcher->settings()["fire.busyUntilButtonRelease"] = "1";
 		launcher->settings()["target.targetSystem"] = "TSWireGuided";
 		launcher->settings()["target.disableGuidanceOnReload"] = "1";
 		world::ObjectTemplate* handgun = range.templates.create("GenericFireArm", "eu_handgun");
@@ -2991,8 +3228,7 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 		input.aimPitch = 3;
 		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
-		input.fire = false;
-		input.turn = 30;
+		input.turn = 30; // fire still held: the launcher stays busy, no reload
 		range.world->setPlayerInput(input);
 		range.world->tick(1 / 30.0f);
 		input.turn = 0;
@@ -3004,7 +3240,7 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 			range.world->projectiles().front().velocity.z);
 		CHECK(!range.world->projectiles().front().wireLost);
 		CHECK(first > 0.08f);
-		// Guided, the auto reload waits.
+		// Fire held: busyUntilButtonRelease keeps the reload off.
 		CHECK(range.world->playerWeapon()->roundsInMag() == 0);
 		CHECK(!range.world->playerWeapon()->reloading());
 		// Out of (or into) the sights: the wire still steers.
@@ -3049,8 +3285,8 @@ TEST(GameWorld_InfantryWireGuidanceEndsWhenTheLauncherIsPutAway)
 // A wire-guided round that goes out of the shooter's sight stays guided
 // (0x005e27a0: a cut line returns at 0x005e2ac5 without moving the target
 // and keeps the guided round +0x64): it chases the last point while the
-// line is cut, the reload waits, and the steering comes back once the
-// line clears.
+// line is cut and the steering comes back once the line clears (fire held
+// throughout, so the launcher's busyUntilButtonRelease keeps the reload off).
 TEST(GameWorld_WireGuidanceSurvivesLostSight)
 {
 	Range range;
@@ -3067,6 +3303,7 @@ TEST(GameWorld_WireGuidanceSurvivesLostSight)
 	launcher->settings()["ammo.magSize"] = "1";
 	launcher->settings()["ammo.nrOfMags"] = "4";
 	launcher->settings()["ammo.reloadTime"] = "0.2";
+	launcher->settings()["fire.busyUntilButtonRelease"] = "1";
 	launcher->settings()["target.targetSystem"] = "TSWireGuided";
 	launcher->settings()["target.disableGuidanceOnReload"] = "1";
 	auto* missile = range.templates.create("GenericProjectile", "missile");
@@ -3083,9 +3320,7 @@ TEST(GameWorld_WireGuidanceSurvivesLostSight)
 	input.fire = true;
 	input.aimPitch = 3;
 	range.world->setPlayerInput(input);
-	range.world->tick(1 / 30.0f);
-	input.fire = false;
-	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f); // fire stays held: the reload would drop the wire
 	for (int i = 0; i < 10; ++i) range.world->tick(1 / 30.0f);
 	CHECK(range.world->projectiles().size() == 1);
 	if (range.world->projectiles().empty()) return;
@@ -3189,6 +3424,42 @@ TEST(GameWorld_DriverInputUnderEmp)
 	CHECK(game::GameWorld::driverInputScale(0, 100, *car) == 0.5f && game::GameWorld::driverInputScale(0, 200, *car) == 1);
 	car->settings()["autoControllerTemplateName"] = "SentryGun";
 	CHECK(game::GameWorld::driverInputScale(1, 500, *car) == 1 && game::GameWorld::driverInputScale(2, 500, *car) == 0);
+}
+
+// A commander's crate (0x005d0790 -> 0x0043d9c0) meeting a vehicle its
+// spawner made under 3 s ago (0x0043ce80: interface 0xc4c5 slot 0xbc, the
+// time 0x005aeb80 stamps) is removed; meeting an older one or the ground,
+// it lands: its supply_parachute is disabled and its lifetime starts.
+TEST(GameWorld_SupplyCrateMeetingAFreshSpawnGoes)
+{
+	Level level;
+	level.templates.registerType(4, "SupplyObject");
+	level.templates.registerType(5, "Bundle");
+	level.templates.create("Bundle", "supply_parachute");
+	world::ObjectTemplate* box = level.templates.create("SupplyObject", "supply_crate");
+	box->settings()["hasMobilePhysics"] = "1";
+	box->children().push_back({"supply_parachute", {}, {}});
+	game::GameWorld world(level.templates, level.objects);
+	world.startRound();
+	world.tick(1 / 30.0f);
+	const world::Object* tank = level.objects.objects().back().get();
+	CHECK(tank->objectTemplate()->name() == "tank_us");
+	CHECK(world.commanderAction(2, game::GameWorld::CommanderAbility::Supplies, 100, 100, true));
+	CHECK(world.supplyCrates().size() == 1);
+	const uint32_t first = world.supplyCrates()[0];
+	world.supplyObjectContact(first, tank->id());
+	world.tick(1 / 30.0f);
+	CHECK(world.supplyCrates().empty() && !level.objects.find(first));
+	for (int i = 0; i < 30 * 61; ++i) {
+		world.tick(1 / 30.0f);
+	}
+	CHECK(world.commanderAction(2, game::GameWorld::CommanderAbility::Supplies, 100, 100, true));
+	const uint32_t second = world.supplyCrates()[0];
+	const world::Object* crate = level.objects.find(second);
+	CHECK(crate && !crate->childDisabled("supply_parachute"));
+	world.supplyObjectContact(second, tank->id()); // spawned a minute ago
+	world.tick(1 / 30.0f);
+	CHECK(world.supplyCrates().size() == 1 && crate->childDisabled("supply_parachute"));
 }
 
 // The abandoned vehicle's time to live (the spawn's PlayerControlObject
@@ -3295,6 +3566,20 @@ physics::CollisionMeshFile boxMesh(float half)
 	return panelMesh({{-h, -h, -h}, {h, -h, -h}, {h, h, -h}, {-h, h, -h}, {-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}},
 		{{{0, 2, 1}, 0}, {{0, 3, 2}, 0}, {{4, 5, 6}, 0}, {{4, 6, 7}, 0}, {{0, 1, 5}, 0}, {{0, 5, 4}, 0},
 			{{3, 6, 2}, 0}, {{3, 7, 6}, 0}, {{0, 4, 7}, 0}, {{0, 7, 3}, 0}, {{1, 2, 6}, 0}, {{1, 6, 5}, 0}});
+}
+
+// boxMesh with its faces' normals ((c - b) x (b - a), CollisionWorld) out
+// of the box, as the shipped meshes': the scene's rays count only faces
+// crossed from the front (0x006fb610).
+physics::CollisionMeshFile solidBoxMesh(float half)
+{
+	physics::CollisionMeshFile mesh = boxMesh(half);
+	for (physics::CollisionLod& lod : mesh.geometries[0].subGeometries[0].lods) {
+		for (physics::CollisionFace& face : lod.faces) {
+			std::swap(face.vertices[1], face.vertices[2]);
+		}
+	}
+	return mesh;
 }
 
 void makeMobile(world::ObjectTemplate& t, const char* mesh)
@@ -3756,7 +4041,7 @@ TEST(GameWorld_LadderRaysAndJumpingOff)
 TEST(GameWorld_SpawnSpotDropsOntoStaticObjects)
 {
 	Range range;
-	range.collisionTemplates.add("slab_mesh", boxMesh(1));
+	range.collisionTemplates.add("slab_mesh", solidBoxMesh(1));
 	range.collisionTemplates.add("car_mesh", boxMesh(1));
 	range.templates.registerType(6, "SimpleObject");
 	range.templates.registerType(7, "PlayerControlObject");
@@ -4011,10 +4296,107 @@ TEST(GameWorld_RecoilKicksTheAim)
 
 // A hub (a medic's kit) thrown out on a deck or roof stays there: it was set
 // at the terrain's height, which put it far under a soldier on a Titan.
+// A player's decoy (0x0075bd30, the name tags' network marker): the round he
+// fired carrying a TargetObject of TTDecoy (Bp1_Decoy_Projectile's
+// DecoyObject); nobody else's.
+TEST(GameWorld_DecoyIsTheThrowersRound)
+{
+	Range range;
+	range.templates.registerType(8, "TargetObject");
+	world::ObjectTemplate* target = range.templates.create("TargetObject", "decoy_target");
+	target->settings()["targetType"] = "TTDecoy";
+	range.templates.find("bullet")->children().push_back({"decoy_target", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	physics::Vec3 at;
+	CHECK(range.world->decoyOf(me, at) == nullptr);
+	game::SoldierInput input;
+	input.fire = true;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(!range.world->projectiles().empty());
+	CHECK(range.world->decoyOf(me, at) == target);
+	if (!range.world->projectiles().empty()) {
+		const physics::Vec3 round = range.world->projectiles().front().position;
+		CHECK(at.x == round.x && at.y == round.y && at.z == round.z);
+	}
+	CHECK(range.world->decoyOf(me + 1, at) == nullptr && range.world->decoyOf(-1, at) == nullptr);
+}
+
+// The networkable HUD's kit and vehicle unlocks (ability +0x10 / +0x11,
+// 0x005706b0) count for the whole squad (RendDX9 0x101691c0), for the
+// player alone without a squad.
+TEST(GameWorld_SquadNetworkHudUnlocks)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.create("ItemContainer", "net_kit")->settings()["ability.networkableHudShowKit"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"net_kit", {}, {}});
+	const int me = range.world->addPlayer("Me", 2, true);
+	const int mate = range.world->addPlayer("Mate", 2, false);
+	for (const int id : {me, mate}) {
+		range.world->setKit(id, "EU_Assault", "us_light_soldier");
+	}
+	range.world->setUnlocks(me, {});
+	range.world->setUnlocks(mate, {"net_kit"});
+	CHECK(range.world->spawnSoldier(me) && range.world->spawnSoldier(mate));
+	bool showKit = true, showVehicle = true;
+	range.world->squadNetworkHud(me, showKit, showVehicle);
+	CHECK(!showKit && !showVehicle); // no squad: his own only
+	range.world->squadNetworkHud(mate, showKit, showVehicle);
+	CHECK(showKit && !showVehicle);
+	CHECK(range.world->joinSquad(me, 1) && range.world->joinSquad(mate, 1));
+	range.world->squadNetworkHud(me, showKit, showVehicle);
+	CHECK(showKit && !showVehicle); // the squad's
+}
+
+// A cloak's report (kind 2) reveals the cloaker's name tag to a squad only
+// when one of it has networkableHudShowCloaked (sent on as kind 1, else to
+// no one), never on the minimap; a kind-1 report ends at now + its seconds
+// even when sooner (0x100f2080: a bot's 30 s on firing, 3 s on release).
+TEST(GameWorld_CloakReportRevealsTagsForShowCloakedSquads)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.create("ItemContainer", "net_cloak")->settings()["ability.networkableHudShowCloaked"] = "1";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"net_cloak", {}, {}});
+	const int me = range.world->addPlayer("Me", 2, true);
+	const int mate = range.world->addPlayer("Mate", 2, false);
+	const int loner = range.world->addPlayer("Loner", 2, false);
+	const int enemy = range.world->addPlayer("Enemy", 1, false);
+	for (const int id : {me, mate, loner, enemy}) {
+		range.world->setKit(id, "EU_Assault", "us_light_soldier");
+		range.world->setUnlocks(id, id == mate ? std::vector<std::string> {"net_cloak"} : std::vector<std::string> {});
+		CHECK(range.world->spawnSoldier(id));
+	}
+	CHECK(range.world->joinSquad(me, 1) && range.world->joinSquad(mate, 1) && range.world->joinSquad(loner, 2));
+	const std::vector<int> cloaker {enemy};
+	range.world->reportBattlefieldObjects(loner, {enemy}, 3, 2);
+	CHECK(range.world->squadReportedPlayers(loner).empty()); // no ShowCloaked in squad 2
+	range.world->reportBattlefieldObjects(me, {enemy}, 3, 2);
+	CHECK(range.world->squadReportedPlayers(me) == cloaker && range.world->squadReportedPlayers(mate) == cloaker);
+	CHECK(range.world->squadReportedPlayers(loner).empty() && range.world->mapSpottedPlayers(me).empty());
+	// 30 s then 3 s: gone 3 s later.
+	range.world->reportBattlefieldObjects(mate, {enemy}, 30, 1);
+	range.world->reportBattlefieldObjects(mate, {enemy}, 3, 1);
+	for (int i = 0; i < 4 * 30; ++i) {
+		range.world->tick(1.0f / 30);
+	}
+	CHECK(range.world->squadReportedPlayers(me).empty());
+}
+
 TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 {
 	Range range;
-	range.collisionTemplates.add("slab_mesh", boxMesh(10));
+	range.collisionTemplates.add("slab_mesh",
+		panelMesh({{-10, 10, -10}, {10, 10, -10}, {10, 10, 10}, {-10, 10, 10}}, {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+	range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
 	range.templates.registerType(6, "Kit");
 	range.templates.registerType(7, "SimpleObject");
 	world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
@@ -4022,13 +4404,16 @@ TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 	range.objects.create(slab, {0, 0, 30}); // its top at y 10
 	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
 	hub->settings()["itemIndex"] = "4";
+	hub->settings()["velocity"] = "4";
 	hub->settings()["projectileTemplate"] = "unl_hub_medic_stationary";
 	hub->settings()["ammo.replenishingType"] = "RTHeal";
 	hub->settings()["ammo.abilityRadius"] = "4";
 	hub->settings()["ammo.abilityStrength"] = "3";
 	hub->settings()["ammo.magSize"] = "1";
 	hub->settings()["fire.roundsPerMinute"] = "60";
-	range.templates.create("GenericProjectile", "unl_hub_medic_stationary")->settings()["armor.maxHitPoints"] = "100";
+	auto* deployed = range.templates.create("GenericProjectile", "unl_hub_medic_stationary");
+	makeMobile(*deployed, "hub_mesh");
+	deployed->settings()["armor.maxHitPoints"] = "100";
 	range.templates.create("Kit", "EU_Assault")->children().push_back({"unl_hub_medic", {}, {}});
 	range.world->startRound();
 	CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -4048,7 +4433,100 @@ TEST(GameWorld_ThrownHubRestsOnTheSurfaceUnderTheSoldier)
 	const auto placed = range.world->supplyObjects();
 	CHECK(placed.size() == 1);
 	if (!placed.empty()) {
-		CHECK(std::fabs(range.objects.find(placed[0])->position().y - 10) < 0.5f);
+		const auto* object = range.objects.find(placed.front());
+		CHECK(object && object->position().y > 11);
+		for (int tick = 0; tick < 60; ++tick) {
+			range.world->tick(1 / 30.0f);
+		}
+		object = range.objects.find(placed.front());
+		CHECK(object && std::fabs(object->position().y - 10.2f) < 0.1f);
+	}
+}
+
+// A thrown hub (a GenericProjectile with StickyCollisionComp, maxStickAngle
+// 45, as both shipped hubs) thrown tumbling (projectileStartRotation
+// 30/210/160) is set down upright where it first meets the slab and stays
+// (0x005e83d0); its own contacts do no collision damage to it (its slot
+// 0xac, 0x005b4ff0, goes to the component, not the base).
+TEST(GameWorld_ThrownHubSticksUprightAtOnce)
+{
+	Range range;
+	range.collisionTemplates.add("slab_mesh",
+		panelMesh({{-10, 10, -10}, {10, 10, -10}, {10, 10, 10}, {-10, 10, 10}}, {{{0, 1, 2}, 0}, {{0, 2, 3}, 0}}));
+	range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "SimpleObject");
+	world::ObjectTemplate* slab = range.templates.create("SimpleObject", "slab");
+	slab->settings()["collisionMesh"] = "slab_mesh";
+	range.objects.create(slab, {0, 0, 30});
+	world::ObjectTemplate* hub = range.templates.create("GenericFireArm", "unl_hub_medic");
+	hub->settings()["itemIndex"] = "4";
+	hub->settings()["velocity"] = "7";
+	hub->settings()["fire.projectileStartRotation"] = "30/210/160";
+	hub->settings()["fire.pullbackTime"] = "0";
+	hub->components().push_back("ThrownFireComp");
+	hub->settings()["projectileTemplate"] = "unl_hub_medic_stationary";
+	hub->settings()["ammo.replenishingType"] = "RTHeal";
+	hub->settings()["ammo.abilityRadius"] = "4";
+	hub->settings()["ammo.abilityStrength"] = "3";
+	hub->settings()["ammo.magSize"] = "1";
+	hub->settings()["fire.roundsPerMinute"] = "60";
+	auto* deployed = range.templates.create("GenericProjectile", "unl_hub_medic_stationary");
+	makeMobile(*deployed, "hub_mesh");
+	deployed->settings()["armor.maxHitPoints"] = "100";
+	deployed->settings()["armor.hitPoints"] = "100";
+	deployed->settings()["mass"] = "50";
+	deployed->settings()["collision.bouncing"] = "1";
+	deployed->settings()["collision.maxStickAngle"] = "45";
+	deployed->settings()["collision.stickToVehicles"] = "0";
+	deployed->components().push_back("StickyCollisionComp");
+	range.templates.create("Kit", "EU_Assault")->children().push_back({"unl_hub_medic", {}, {}});
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	range.world->setSoldierPosition(range.world->playerObject(), {0, 10.05f, 30});
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setPlayerInput({});
+	range.world->tick(1 / 30.0f);
+	for (int settle = 0; settle < 20; ++settle) {
+		range.world->tick(1 / 30.0f);
+	}
+	game::SoldierInput fire;
+	fire.fire = true;
+	range.world->setPlayerInput(fire);
+	for (int tick = 0; tick < 30 && range.world->supplyObjects().empty(); ++tick) {
+		range.world->tick(1 / 30.0f);
+	}
+	range.world->setPlayerInput({});
+	const auto placed = range.world->supplyObjects();
+	CHECK(placed.size() == 1);
+	if (placed.empty()) {
+		return;
+	}
+	const auto* object = range.objects.find(placed.front());
+	CHECK(object && std::fabs(object->rotation().z) > 10); // thrown tumbling
+	int landed = -1;
+	float lowest = 100;
+	for (int tick = 0; tick < 60 && object; ++tick) {
+		range.world->tick(1 / 30.0f);
+		object = range.objects.find(placed.front());
+		lowest = std::min(lowest, range.world->hitPoints(range.world->playerObject()));
+		// Upright the tick it is down, its bottom on the face.
+		if (landed < 0 && object && object->position().y < 10.25f) {
+			landed = tick;
+			CHECK(std::fabs(object->rotation().y) < 0.5f && std::fabs(object->rotation().z) < 0.5f);
+			CHECK(std::fabs(object->position().y - 10.2f) < 0.02f);
+		}
+	}
+	CHECK(landed >= 0);
+	CHECK(lowest == 100); // its own throw does not road-kill the thrower (8 at 7 m/s before)
+	if (object) {
+		const world::Vec3 at = object->position();
+		CHECK(std::fabs(object->rotation().y) < 0.5f && std::fabs(object->rotation().z) < 0.5f);
+		CHECK(std::fabs(at.y - 10.2f) < 0.02f);
+		CHECK(range.world->hitPoints(object->id()) == 100);
 	}
 }
 
@@ -4293,6 +4771,38 @@ TEST(GameWorld_FriendlyFireScaling)
 	const float enemy = lost(50, false), half = lost(50, true), none = lost(0.5f, true);
 	std::fprintf(stderr, "  blast: %.2f from an enemy, %.2f from a teammate at 50%%, %.2f at 0.5%%\n", enemy, half, none);
 	CHECK(enemy > 1 && std::fabs(half - enemy * 0.5f) < 0.01f && none == 0);
+}
+
+// 0x005b7290 scales damage by team only for a victim with a PlayerControlObject
+// up its tree: a deployed hub (GenericProjectile) is hurt by its own team in full.
+TEST(GameWorld_FriendlyFireSparesNoHub)
+{
+	const auto lost = [](int attackerTeam) {
+		Range range;
+		range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
+		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
+		blast->components().push_back("DefaultDetonationComp");
+		blast->settings()["detonation.explosionDamage"] = "40";
+		blast->settings()["detonation.explosionMaterial"] = "69";
+		auto* deployed = range.templates.create("GenericProjectile", "hub_deployed");
+		makeMobile(*deployed, "hub_mesh");
+		deployed->settings()["armor.maxHitPoints"] = "100";
+		deployed->settings()["armor.hitPoints"] = "100";
+		deployed->settings()["mass"] = "50";
+		game::GameWorld::FriendlyFire ff;
+		ff.vehicleSplash = ff.soldierSplash = 0;
+		range.world->setFriendlyFire(ff);
+		world::Object* hub = range.objects.create(deployed, {0, 10, 0});
+		hub->setTeam(2);
+		const int attacker = range.world->addPlayer("Attacker", attackerTeam, true);
+		CHECK(range.world->spawnSoldier(attacker));
+		range.world->tick(1 / 30.0f);
+		CHECK(range.world->detonate("blast", {0.5f, 10, 0}, attacker));
+		return 100 - range.world->hitPoints(hub->id());
+	};
+	const float enemy = lost(1), own = lost(2);
+	std::fprintf(stderr, "  hub: %.2f from an enemy, %.2f from its own team at 0%% friendly fire\n", enemy, own);
+	CHECK(enemy > 1 && std::fabs(own - enemy) < 0.01f);
 }
 
 // hasOnTimeEffect (0x005b62a0): a fused round whose time runs out goes off
@@ -4823,15 +5333,66 @@ TEST(GameWorld_WeaponLock)
 	CHECK(lock.target == 0 && lock.state == 0);
 }
 
+// A soldier's lock-on shot says "missile_away" once (0x005e1ee0): the local
+// player hears his own line at once, an unlocked shot says nothing.
+TEST(GameWorld_LockedShotCallsOutOnce)
+{
+	Range range;
+	range.templates.registerType(8, "SimpleObject");
+	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
+	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
+	launcher->settings()["target.maxDistance"] = "450";
+	launcher->settings()["target.lockAngle"] = "10";
+	launcher->settings()["target.lockDelay"] = "1.5";
+	world::ObjectTemplate* jet = range.templates.create("SimpleObject", "jet");
+	jet->children().push_back({"HeatObject", {}, {}});
+	range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	const auto count = [&](int& away, int& heard) {
+		for (const auto& e : range.world->takeLockEvents()) {
+			away += e.kind == game::GameWorld::LockEvent::MissileAway;
+		}
+		for (const auto& h : range.world->takeRadioHeard()) {
+			heard += h.voice == "missile_away" && h.receiver == me && h.sender == me && h.channel == 14;
+		}
+	};
+	int away = 0, heard = 0;
+	game::SoldierInput shoot;
+	shoot.fire = true;
+	range.world->setPlayerInput(shoot);
+	range.world->tick(1 / 30.0f);
+	count(away, heard);
+	CHECK(away == 0 && heard == 0);
+	game::GameWorld::PlayerInfo info;
+	range.world->playerInfo(me, info);
+	world::Object* enemy = range.objects.create(jet, {info.position.x, info.position.y + 1.6f, info.position.z + 60});
+	enemy->setTeam(1);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 60; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->weaponLock(me).state == 2);
+	away = heard = 0;
+	count(away, heard);
+	away = heard = 0;
+	range.world->setPlayerInput(shoot);
+	range.world->tick(1 / 30.0f);
+	count(away, heard);
+	CHECK(away == 1 && heard == 1);
+}
+
 // The lock-on update's candidate (0x005e1b30 -> 0x004cf290): the nearest
-// target object in the cone, not the one nearest the aim; an empty
-// vehicle of the shooter's own side is a candidate too. Locked, another
-// candidate replaces the target only after more than loseLockDelay ticks,
-// unlocked.
+// target object in the cone. The team filter takes only a root with a
+// control object (0x0042b2f0, 0x004cf337 .. 0x004cf38b): an empty vehicle
+// of the shooter's side is no candidate, an object of that side without
+// a control object is. A new candidate replaces a held lock only after
+// more than loseLockDelay ticks.
 TEST(GameWorld_WeaponLockTakesTheNearest)
 {
 	Range range;
 	range.templates.registerType(8, "SimpleObject");
+	range.templates.registerType(20, "PlayerControlObject");
 	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
 	launcher->settings()["target.targetSystem"] = "TSHeatSeeking";
 	launcher->settings()["target.maxDistance"] = "450";
@@ -4848,7 +5409,11 @@ TEST(GameWorld_WeaponLockTakesTheNearest)
 	world::Object* far = range.objects.create(jet, {me.position.x, eye, me.position.z + 200});
 	far->setTeam(1);
 	world::Object* nearer = range.objects.create(jet, {me.position.x + 20, eye, me.position.z + 80}); // ~14 degrees off
-	nearer->setTeam(2); // an empty one of our own side
+	nearer->setTeam(2); // our side's, without a control object
+	world::ObjectTemplate* hover = range.templates.create("PlayerControlObject", "hover");
+	hover->children().push_back({"HeatObject", {}, {}});
+	world::Object* ownVehicle = range.objects.create(hover, {me.position.x, eye, me.position.z + 40});
+	ownVehicle->setTeam(2); // an empty one of our own side
 	range.world->tick(1 / 30.0f);
 	game::GameWorld::WeaponLockInfo lock = range.world->weaponLock(range.world->localPlayer());
 	CHECK(lock.target == nearer->id() && lock.state == 1);
@@ -4933,6 +5498,7 @@ TEST(GameWorld_TargetObjectOffAtOnceForTheLocalLeaver)
 		heat->settings()["disableWhenEmptyVehicle"] = "1";
 		heat->settings()["disableWhenEmptyVehicleDelay"] = "5";
 		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		range.addEntry(*crate);
 		makeMobile(*crate, "crate_mesh");
 		crate->children().push_back({"crate_engine", {}, {}});
 		crate->children().push_back({"HeatObject", {}, {}});
@@ -5233,7 +5799,7 @@ TEST(GameWorld_RoundsLeaveBeforeTheMove)
 		across(before.position, after.position), across(round.origin, before.position), across(round.origin, after.position),
 		across(round.position, round.origin));
 	CHECK(across(before.position, after.position) > 0.05f);
-	CHECK(std::fabs(across(round.origin, before.position) - 0.5f) < 0.01f); // half a metre along the look
+	CHECK(across(round.origin, before.position) < 0.01f); // at the eye: the rifle authors no projectileStartPosition (0x005f1a20)
 	CHECK(std::fabs(across(round.position, round.origin) - 10) < 0.5f);       // 300 m/s for a tick
 }
 
@@ -5351,6 +5917,7 @@ TEST(GameWorld_RestrictedExit)
 		range.templates.registerType(23, "Engine");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["soldierExitLocation"] = "-3/0/0";
@@ -5408,6 +5975,7 @@ struct ExitRange : Range {
 		templates.registerType(23, "Engine");
 		templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		jeep = templates.create("PlayerControlObject", "jeep");
+		addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["soldierExitLocation"] = "-3/0/0";
@@ -5652,6 +6220,7 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["armor.maxHitPoints"] = "100";
@@ -5717,6 +6286,7 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->settings()["armor.maxHitPoints"] = "100";
 		jeep->settings()["seatInformation"] = "jeep 0/0.5/0.5 0/0/0";
@@ -5808,6 +6378,7 @@ TEST(GameWorld_KitAbilityInAVehicleResuppliesAmmoOnce)
 	range.templates.registerType(23, "Engine");
 	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	range.addEntry(*jeep);
 	makeMobile(*jeep, "jeep_mesh");
 	jeep->settings()["seatInformation"] = "jeep 0/0.5/0.5 0/0/0";
 	jeep->settings()["autoUseAbility"] = "1";
@@ -5901,6 +6472,7 @@ TEST(GameWorld_KitAbilityInAVehicleRearmsOtherSeats)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->settings()["armor.maxHitPoints"] = "100";
 		jeep->settings()["seatInformation"] = "jeep 0/0.5/0 0/0/0";
@@ -6252,6 +6824,7 @@ TEST(GameWorld_CanBeRepaired)
 		range.templates.registerType(24, "ItemContainer");
 		range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 		world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+		range.addEntry(*jeep);
 		makeMobile(*jeep, "jeep_mesh");
 		jeep->children().push_back({"jeep_engine", {}, {}});
 		jeep->settings()["armor.maxHitPoints"] = "100";
@@ -6848,6 +7421,7 @@ TEST(GameWorld_OpenSeatLook)
 	range.templates.registerType(23, "Engine");
 	range.templates.create("Engine", "jeep_engine")->settings()["engineType"] = "c_ETCar";
 	world::ObjectTemplate* jeep = range.templates.create("PlayerControlObject", "jeep");
+	range.addEntry(*jeep);
 	makeMobile(*jeep, "jeep_mesh");
 	jeep->settings()["seatInformation"] = "jeep 0/1/0 0/0/0";
 	jeep->children().push_back({"jeep_engine", {}, {}});
@@ -7062,7 +7636,7 @@ TEST(GameWorld_FireObstruction)
 
 	io::FileManager files;
 	physics::CollisionTemplateManager collisionTemplates;
-	collisionTemplates.add("box_mesh", boxMesh(1));
+	collisionTemplates.add("box_mesh", solidBoxMesh(1));
 	world::ObjectTemplate* box = templates.create("PlayerControlObject", "box");
 	makeMobile(*box, "box_mesh");
 	const uint32_t parked = objects.create(box, {0, 1, 10})->id();
@@ -7085,12 +7659,12 @@ TEST(GameWorld_FireObstruction)
 	CHECK(!world.fireObstructed({0, 1.5f, 8.5f}, ahead, right, up, -1.5f, 2, 1, parked));
 }
 
-// The close-to indications (0x0059a6c0, every 0.2 s on the server): a
-// team object whose Radio has closeToIndicationDist within that plus the
+// The close-to indications (0x0059a6c0, every 0.2 s on the server): an
+// object whose Radio has closeToIndicationDist within that plus the
 // player's radius (on the plane with indicationDistance2D) posts 2/0x3e
-// with its closeToIndicationType once, its going 2/0x3f; another team's
-// counts for nothing; a mine (a projectile) of type 0 too; death posts
-// 2/0x3f with -1.
+// with its closeToIndicationType once, its going 2/0x3f; the enemy Titan
+// too (only a projectile's team is tested, 0x0059a8b0: an enemy mine
+// counts for nothing, our own does); death posts 2/0x3f with -1.
 TEST(GameWorld_CloseToIndication)
 {
 	Range range;
@@ -7107,7 +7681,7 @@ TEST(GameWorld_CloseToIndication)
 	// and within 250 m on the plane.
 	world::Object* ours = range.objects.create(titan, {info.position.x + 150, info.position.y + 100, info.position.z});
 	ours->setTeam(2);
-	world::Object* theirs = range.objects.create(titan, {info.position.x - 100, info.position.y, info.position.z});
+	world::Object* theirs = range.objects.create(titan, {info.position.x - 600, info.position.y, info.position.z});
 	theirs->setTeam(1);
 	const auto run = [&](float seconds) {
 		std::vector<game::GameWorld::CloseToEvent> all;
@@ -7127,6 +7701,25 @@ TEST(GameWorld_CloseToIndication)
 	ours->setPosition({info.position.x + 600, info.position.y, info.position.z});
 	events = run(0.5f);
 	CHECK(events.size() == 1 && !events[0].enter && events[0].type == -1);
+	// The enemy Titan alone in range (the APC riders' pod range near it).
+	theirs->setPosition({info.position.x - 100, info.position.y, info.position.z});
+	events = run(0.5f);
+	CHECK(events.size() == 1 && events[0].type == 1 && events[0].enter);
+	theirs->setPosition({info.position.x - 600, info.position.y, info.position.z});
+	events = run(0.5f);
+	CHECK(events.size() == 1 && !events[0].enter && events[0].type == -1);
+	// Mines (projectiles, type 0, 25 m): the enemy's is not shown, ours is.
+	world::ObjectTemplate* mine = range.templates.create("GenericProjectile", "mine");
+	mine->settings()["Radio.closeToIndicationDist"] = "25";
+	mine->settings()["Radio.indicationDistance2D"] = "1"; // wherever it settles
+	world::Object* enemyMine = range.objects.create(mine, {info.position.x + 10, info.position.y, info.position.z});
+	enemyMine->setTeam(1);
+	CHECK(run(0.5f).empty());
+	enemyMine->setTeam(2);
+	events = run(0.5f);
+	CHECK(events.size() == 1 && events[0].type == 0 && events[0].enter);
+	enemyMine->setPosition({info.position.x + 900, info.position.y, info.position.z});
+	CHECK(run(0.5f).size() == 1);
 	// Two of type 1 in (each new one posts its 0x3e), one going: no leave
 	// while the other stays.
 	ours->setPosition({info.position.x + 100, info.position.y, info.position.z});
@@ -7671,6 +8264,53 @@ TEST(GameWorld_DirectionBonusPrefersTheTargetAhead)
 	}
 }
 
+// seek.ignoreFriendly (0x004cf290, 0x004cf337 .. 0x004cf38b): a target is
+// friendly only when its root has a control object (0x0042b2f0), by that
+// one's team against the shooter's control object's, or with no shooter
+// against the round's team when above 0. An empty vehicle of the
+// shooter's side is skipped; an object of that side without a control
+// object is not; a round without an owner or team takes either.
+TEST(GameWorld_SeekerIgnoresFriendlyControlObjectsOnly)
+{
+	for (int round = 0; round < 3; ++round) {
+		Range range;
+		range.templates.registerType(8, "SimpleObject");
+		range.templates.registerType(20, "PlayerControlObject");
+		world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "aa_missile");
+		missile->settings()["gravityModifier"] = "0";
+		missile->settings()["timeToLive"] = "CRD_NONE/10/0/0";
+		missile->settings()["seek.targetType"] = "TTHeat";
+		missile->settings()["seek.maxAngleLock"] = "40";
+		range.templates.create("SimpleObject", "HeatObject")->settings()["targetType"] = "TTHeat";
+		world::ObjectTemplate* jet = range.templates.create("PlayerControlObject", "jet");
+		jet->children().push_back({"HeatObject", {}, {}});
+		world::ObjectTemplate* balloon = range.templates.create("SimpleObject", "balloon");
+		balloon->children().push_back({"HeatObject", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int shooter = round == 2 ? -1 : range.world->localPlayer();
+		world::Object* ownJet = range.objects.create(jet, {0, 20, 40}); // empty, of the shooter's side
+		ownJet->setTeam(2);
+		world::Object* ownBalloon = range.objects.create(balloon, {0, 20, 80}); // no control object
+		ownBalloon->setTeam(2);
+		world::Object* enemy = range.objects.create(jet, {0, 20, 120});
+		enemy->setTeam(1);
+		if (round == 1) {
+			ownBalloon->setPosition({0, 20, 160}); // behind the enemy
+		}
+		CHECK(range.world->launchProjectile("aa_missile", {0, 20, 0}, {0, 0, 40}, shooter));
+		range.world->tick(1 / 30.0f);
+		range.world->tick(1 / 30.0f);
+		CHECK(!range.world->projectiles().empty());
+		if (!range.world->projectiles().empty()) {
+			const uint32_t taken = range.world->projectiles().front().lockedOn;
+			const uint32_t wanted = round == 0 ? ownBalloon->id() : round == 1 ? enemy->id() : ownJet->id();
+			std::fprintf(stderr, "  round %d: took %u (own jet %u, own balloon %u, enemy %u)\n", round, taken, ownJet->id(),
+				ownBalloon->id(), enemy->id());
+			CHECK(taken == wanted);
+		}
+	}
+}
+
 // blockInputOnRotBundle (0x005c4220, 0x00565180): while the seat's active
 // weapon names the turret, the turret ignores the gunner's look.
 TEST(GameWorld_BlockInputOnRotBundle)
@@ -7817,10 +8457,12 @@ TEST(GameWorld_OrderTagByItsMarker)
 	CHECK(same(game::GameWorld::orderTagPoint({10, 3, 20}, 1.0f), {10, 3, 20}));     // the point over water
 }
 
-// The profile's auto reload waits while the player still steers an
-// aim-guided round (eu_av with target.disableGuidanceOnReload): reloading at
-// once would cut the wire and drop the zoom. It reloads once the round is gone.
-TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
+// The profile's auto reload against a wire launcher (as_av / eu_av:
+// busyUntilButtonRelease, magSize 1, disableGuidanceOnReload). Retail's
+// auto reload (0x00594280) has no guided-round test: while fire is held the
+// launcher stays busy and the round is steered; on release the reload starts
+// and its start (0x005e23b0) drops the round, which flies on unguided.
+TEST(GameWorld_ProfileAutoReloadDropsGuidanceOnRelease)
 {
 	Range range;
 	world::ObjectTemplate* launcher = range.templates.find("eu_ar_rifle");
@@ -7829,6 +8471,7 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 	launcher->settings()["ammo.magSize"] = "1";
 	launcher->settings()["ammo.nrOfMags"] = "4";
 	launcher->settings()["ammo.reloadTime"] = "0.1";
+	launcher->settings()["fire.busyUntilButtonRelease"] = "1";
 	launcher->settings()["target.disableGuidanceOnReload"] = "1";
 	world::ObjectTemplate* missile = range.templates.create("GenericProjectile", "missile");
 	missile->settings()["seek.targetType"] = "TTUnique";
@@ -7843,11 +8486,9 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 	input.fire = true;
 	input.aimPitch = 3;
 	range.world->setPlayerInput(input);
-	range.world->tick(1 / 30.0f);
-	input.fire = false;
-	range.world->setPlayerInput(input);
-	range.world->tick(1 / 30.0f);
-	range.world->tick(1 / 30.0f); // the empty magazine: the reload would have started by now
+	for (int i = 0; i < 5; ++i) {
+		range.world->tick(1 / 30.0f); // fire held: busy, no reload
+	}
 	input.turn = 30;
 	range.world->setPlayerInput(input);
 	range.world->tick(1 / 30.0f);
@@ -7862,12 +8503,22 @@ TEST(GameWorld_ProfileAutoReloadWaitsForGuidedRound)
 	if (!range.world->projectiles().empty()) {
 		const game::Projectile& round = range.world->projectiles().front();
 		CHECK(!round.wireLost);
-		CHECK(std::atan2(round.velocity.x, round.velocity.z) > 0.1f); // still steered
+		CHECK(std::atan2(round.velocity.x, round.velocity.z) > 0.1f); // steered while held
 	}
-	for (int i = 0; i < 60; ++i) {
-		range.world->tick(1 / 30.0f); // the round expires, then the reload runs
+	input.fire = false;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerWeapon()->reloading()); // released: the reload starts at once
+	CHECK(range.world->projectiles().size() == 1);
+	if (!range.world->projectiles().empty()) {
+		CHECK(range.world->projectiles().front().wireLost); // and drops the round
 	}
-	CHECK(range.world->playerWeapon()->roundsInMag() == 1);
+	for (int i = 0; i < 10; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->playerWeapon()->roundsInMag() == 1); // reloaded while the round still flies
+	CHECK(range.world->projectiles().size() == 1);
 }
 
 // The Rorsch declares the zoom ability on the firearm, not its unlock container.
@@ -7961,10 +8612,12 @@ TEST(GameWorld_ToggleWhenNoAmmoFallsBackToThePrimary)
 // The rocket's engine (0x005b3e60): the shipped eu_av fires eu_av_missile at
 // 4 m/s; startDelay (0.2 s) later the engine pushes it by acceleration
 // (100) along the wire-guided follow's heading up to maxSpeed (50). A
-// round without a follow pushes only with hasDirection.
+// round without a follow pushes along its nose with hasDirection, which the
+// template's constructor sets (0x005b3648): an unguided rocket speeds up
+// unless it sets hasDirection 0.
 TEST(GameWorld_RocketEngine)
 {
-	for (const int kind : {0, 1, 2}) { // 0 the AV missile, 1 no follow, 2 no follow but hasDirection
+	for (const int kind : {0, 1, 2}) { // 0 the AV missile, 1 no follow, hasDirection 0, 2 no follow, the default
 		Range range;
 		world::ObjectTemplate* av = range.templates.find("eu_ar_rifle");
 		auto& s = av->settings();
@@ -7989,8 +8642,8 @@ TEST(GameWorld_RocketEngine)
 			m->components().push_back("SeekClosestTargetComp");
 			m->components().push_back("DefaultFollowComp");
 		}
-		if (kind == 2) {
-			m->settings()["hasDirection"] = "1";
+		if (kind == 1) {
+			m->settings()["hasDirection"] = "0";
 		}
 		CHECK(range.world->spawnPlayer(2) != nullptr);
 		game::SoldierInput input;
@@ -8062,7 +8715,7 @@ TEST(GameWorld_RepairToolRay)
 {
 	for (const int facing : {0, 180}) {
 		Range range;
-		range.collisionTemplates.add("hull_mesh", boxMesh(2));
+		range.collisionTemplates.add("hull_mesh", solidBoxMesh(2));
 		range.templates.registerType(6, "Kit");
 		range.templates.registerType(20, "PlayerControlObject");
 		world::ObjectTemplate* hull = range.templates.create("PlayerControlObject", "hull");
@@ -8077,6 +8730,8 @@ TEST(GameWorld_RepairToolRay)
 		tool->settings()["ammo.onlyActiveWhileFiring"] = "1";
 		range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
 		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->components().push_back("Ability");
+		kit->settings()["ability.hasRepairingAbility"] = "1";
 		for (const char* item : {"eu_ar_rifle", "unl_repair"}) {
 			kit->children().push_back({item, {}, {}});
 		}
@@ -8099,7 +8754,72 @@ TEST(GameWorld_RepairToolRay)
 		}
 		const float now = range.world->hitPoints(car);
 		CHECK(facing == 0 ? now > 51 : now == 50);
+		game::GameWorld::AbilityBarInfo info;
+		menu::AbilityBar bar;
+		CHECK(range.world->abilityBar(range.world->localPlayer(), info));
+		CHECK(bar.update(info, false).show == (facing == 0));
+		range.world->setHitPoints(car, 100);
+		CHECK(range.world->abilityBar(range.world->localPlayer(), info));
+		CHECK(!bar.update(info, false).show && !bar.out().wrench && bar.out().sound == -1);
 	}
+}
+
+// The repair tool's battery while mending one vehicle: the selected
+// firearm's update (0x005c58a0) runs the ammo's update (0x005d8ac0) twice a
+// tick (0x005c5d87, 0x005c6018), each drawing abilityDrain / 30, against the
+// soldier's one abilityRestoreRate / 30 (0x0058d943). With the shipped 0.05
+// both ways the battery falls 0.05 a second while firing and fills again
+// once the trigger is let go.
+TEST(GameWorld_RepairToolDrainsBattery)
+{
+	Range range;
+	range.collisionTemplates.add("hull_mesh", solidBoxMesh(2));
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(20, "PlayerControlObject");
+	world::ObjectTemplate* hull = range.templates.create("PlayerControlObject", "hull");
+	makeMobile(*hull, "hull_mesh");
+	hull->settings()["armor.maxHitPoints"] = "1000";
+	world::ObjectTemplate* tool = range.templates.create("GenericFireArm", "unl_repair");
+	tool->settings()["itemIndex"] = "4";
+	tool->settings()["ammo.magSize"] = "-1";
+	tool->settings()["ammo.replenishingType"] = "RTHeal";
+	tool->settings()["ammo.abilityRadius"] = "2.5";
+	tool->settings()["ammo.abilityStrength"] = "2.5";
+	tool->settings()["ammo.abilityDrain"] = "0.05";
+	tool->settings()["ammo.onlyActiveWhileFiring"] = "1";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->settings()["abilityRestoreRate"] = "0.05";
+	for (const char* item : {"eu_ar_rifle", "unl_repair"}) {
+		kit->children().push_back({item, {}, {}});
+	}
+	const uint32_t car = range.objects.create(hull, {0, 2, 4.0f})->id();
+	range.world->startRound();
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+	const int me = range.world->localPlayer();
+	game::SoldierInput take;
+	take.selectItem = 4;
+	range.world->setPlayerInput(take);
+	range.world->tick(1 / 30.0f);
+	range.world->setHitPoints(car, 500);
+	range.world->setBattery(me, 0.65f);
+	game::SoldierInput fire;
+	fire.fire = true;
+	fire.aimPitch = -10;
+	for (int i = 0; i < 270; ++i) {
+		range.world->setPlayerInput(fire);
+		range.world->tick(1 / 30.0f);
+	}
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->hitPoints(car) > 510);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.20f) < 0.02f);
+	const float mended = range.world->hitPoints(car);
+	range.world->setPlayerInput({});
+	for (int i = 0; i < 90; ++i) {
+		range.world->tick(1 / 30.0f);
+	}
+	CHECK(range.world->hitPoints(car) == mended);
+	CHECK(range.world->playerInfo(me, info) && std::abs(info.battery - 0.35f) < 0.02f);
 }
 
 // Selection alone never submits retail's player spawn group (+0xe8).
@@ -8204,4 +8924,61 @@ TEST(GameLogic_TicketLimitOnlyOnTheWayDown)
 	CHECK(raised.size() == 1);
 	logic.setTickets(1, 5);
 	CHECK(raised.size() == 2 && raised[1].second == -3);
+}
+
+// The soldier camera's rumble source (0x00611fc0): an occupied mobile
+// control object of 5000 kg or more within 7 m gives (7 - d) / 7; an empty
+// one, a light one, the camera's own root or one farther away none.
+TEST(GameWorld_HeavyVehicleNearnessForTheCameraRumble)
+{
+	for (const char* mass : {"6000", "1000"}) {
+		const bool heavy = std::string(mass) == "6000";
+		Range range;
+		range.collisionTemplates.add("crate_mesh", boxMesh(1));
+		range.templates.registerType(20, "PlayerControlObject");
+		range.templates.registerType(23, "Engine");
+		range.templates.create("Engine", "crate_engine")->settings()["engineType"] = "c_ETCar";
+		world::ObjectTemplate* crate = range.templates.create("PlayerControlObject", "crate");
+		crate->settings()["mass"] = mass;
+		range.addEntry(*crate);
+		makeMobile(*crate, "crate_mesh");
+		crate->children().push_back({"crate_engine", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		const int me = range.world->localPlayer();
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(me, info);
+		world::Object* car = range.objects.create(crate, {info.position.x, 1, info.position.z + 2});
+		const auto press = [&](bool use) {
+			game::SoldierInput input;
+			input.use = use;
+			range.world->setPlayerInput(input);
+			range.world->tick(1 / 30.0f);
+		};
+		range.world->tick(1 / 30.0f);
+		physics::Vec3 at {};
+		for (const auto& v : range.world->vehicleList()) {
+			if (v.object == car->id()) at = v.position + physics::Vec3 {3.5f, 0, 0};
+		}
+		CHECK(range.world->heavyVehicleNearness(at, 0) == 0); // empty
+		press(true);
+		press(false);
+		CHECK(range.world->playerInfo(me, info) && info.vehicle == car->id());
+		physics::Vec3 position {};
+		for (const auto& v : range.world->vehicleList()) {
+			if (v.object == car->id()) position = v.position;
+		}
+		const physics::Vec3 d = position - at;
+		const float expected = heavy ? (7 - std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z)) / 7 : 0.0f;
+		CHECK(std::fabs(range.world->heavyVehicleNearness(at, 0) - expected) < 1e-4f);
+		CHECK(!heavy || expected > 0.4f);
+		CHECK(range.world->heavyVehicleNearness(at, car->id()) == 0);                   // the camera's own root
+		CHECK(range.world->heavyVehicleNearness(at + physics::Vec3 {10, 0, 0}, 0) == 0); // out of reach
+		// A joined client's: the driven vehicles its ghosts name, by template and object position.
+		const physics::Vec3 e = physics::Vec3 {car->position().x, car->position().y, car->position().z} - at;
+		const float client = heavy ? (7 - std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z)) / 7 : 0.0f;
+		CHECK(std::fabs(range.world->heavyVehicleNearness(at, 0, {car->id()}) - client) < 1e-4f);
+		CHECK(!heavy || client > 0.4f);
+		CHECK(range.world->heavyVehicleNearness(at, car->id(), {car->id()}) == 0);
+		CHECK(range.world->heavyVehicleNearness(at, 0, {}) == 0); // nobody driving
+	}
 }

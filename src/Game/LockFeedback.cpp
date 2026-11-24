@@ -115,7 +115,9 @@ void GameWorld::lockFeedback(Player& player, uint32_t targetBefore, int stateBef
 void GameWorld::missileAway(const Player& player)
 {
 	// 0x005e1ee0: a round leaving with a target; the local player's says
-	// "missile_away" on TCPlayer (0xe) to the target's player.
+	// "missile_away" on TCPlayer (0xe) to the target's player, through the
+	// game's slot 0x50 (0x004b2b60) with its echo on: the sender hears his
+	// own line at once (0x0042e0c0 with source 3), whoever the target is.
 	if (player.lock.target == 0) {
 		return;
 	}
@@ -125,6 +127,7 @@ void GameWorld::missileAway(const Player& player)
 		if (targetPlayer >= 0) {
 			radioMessage(player.id, 14, "missile_away", targetPlayer);
 		}
+		hearRadio(player.id, 14, "missile_away", player.id);
 	}
 }
 

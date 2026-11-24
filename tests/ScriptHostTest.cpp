@@ -295,6 +295,36 @@ TEST(ScriptHost_SquadAndStatsHooks)
 	CHECK(round.logic.endOfRoundData() == "\\tp0\\B" && round.logic.endOfRoundSerial() == 1);
 }
 
+TEST(ScriptHost_FieldUpgradeFromSquadScoring)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"bf2142", "Project_Remaster_v17_Final"}) {
+		Round round;
+		script::ScriptHost host(*round.bridge,
+			{std::string(gameDir) + "/python", std::string(gameDir) + "/mods/" + mod + "/python"},
+			[](const std::string&) {});
+		round.world->setEventSink([&](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); });
+		CHECK(host.startGameMode("gpm_cq"));
+		host.setGameStatus(game::GameStatus::Playing);
+		const int giver = round.world->addPlayer("Giver", 2, true);
+		const int mate = round.world->addPlayer("Mate", 2, true);
+		const int other = round.world->addPlayer("Other squad", 2, true);
+		CHECK(round.world->joinSquad(giver, 3) && round.world->joinSquad(mate, 3) && round.world->joinSquad(other, 4));
+		CHECK(round.world->spawnSoldier(giver) && round.world->spawnSoldier(mate));
+		const std::string setup = "import bf2, game.scoringCommon as scoring\n"
+			"giver = bf2.playerManager.getPlayerByIndex(" + std::to_string(giver) + ")\n"
+			"mate = bf2.playerManager.getPlayerByIndex(" + std::to_string(mate) + ")\n";
+		CHECK(host.run(setup + "scoring.giveExtraSquadPoint(giver, mate.getVehicle(), 0.5)\n"));
+		game::GameWorld::PlayerInfo info;
+		CHECK(round.world->playerInfo(mate, info) && info.squadOrderPoints == 0.5 && info.squadOrderMax == 10);
+		CHECK(info.fieldUnlockCredits == 0);
+		CHECK(host.run("scoring.giveExtraSquadPoint(mate, giver.getVehicle(), 9.5)\n"));
+		CHECK(round.world->fieldUnlocks(giver) == 1 && round.world->fieldUnlocks(mate) == 1 && round.world->fieldUnlocks(other) == 0);
+		CHECK(round.world->playerInfo(mate, info) && info.squadOrderPoints == 0);
+	}
+}
+
 // The players' ranks (stats +0x20, -1 from 0x005a5fc0): stats.py gives
 // each 0 on PlayerConnect through pmgr_setScore "rank" (0x0056a9d0 →
 // 0x005a53b0); rank.py asks the stats server (pers_plrRequestStats

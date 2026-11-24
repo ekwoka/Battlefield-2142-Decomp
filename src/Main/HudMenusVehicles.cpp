@@ -84,6 +84,12 @@ std::array<float, 4> hudLevelColor(float value, float threshold)
 
 // --- The weapon HUD (0x007c1f10) ---
 
+bool weaponHasRangeFinder(const world::ObjectTemplate* weapon)
+{
+	// The retail WeaponHud constructor (0x00639288) initializes +0x118 to 1.
+	return weapon && flag(weapon, "weaponHud.hasRangeFinder", true);
+}
+
 void WeaponHud::Fields::read(const world::ObjectTemplate* w)
 {
 	showAmmo = flag(w, "weaponHud.showAmmo", true);   // template +0x11a
@@ -91,7 +97,7 @@ void WeaponHud::Fields::read(const world::ObjectTemplate* w)
 	hasMag = flag(w, "weaponHud.hasMag", true);       // +0x117
 	hasFireRate = flag(w, "weaponHud.hasFireRate", true); // +0x116
 	battery = flag(w, "weaponHud.showBatteryIconInHud", false); // +0x127
-	rangeFinder = flag(w, "weaponHud.hasRangeFinder", false);   // +0x118 (block +0xd4)
+	rangeFinder = weaponHasRangeFinder(w);   // +0x118 (block +0xd4)
 	distanceCounter = flag(w, "weaponHud.hasDistanceCounter", false); // +0x124 (+0xe0)
 	scanProgress = flag(w, "weaponHud.hasScanProgress", false); // +0x125 (+0xe1)
 	ignoreTargetDistance = flag(w, "weaponHud.ignoreTargetDistance", false); // +0x126 (+0xe2)
@@ -176,9 +182,6 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		// DAT_00b2d148 slot 0x18c, its distance from the controlled object
 		// "%i" and the point "%i" x, -z, y; a miss "999"; not with a comm
 		// rose or map menu up, menu states 3-6, 8, 9).
-		if (f.distanceCounter) {
-			hud.setString("TargetDistanceString", in.travelled >= 0 ? std::to_string(in.travelled) : "999");
-		}
 		if (f.rangeFinder) {
 			if (in.rangeHit) {
 				hud.setString("TargetDistanceString", std::to_string(static_cast<int>(std::lround(in.targetDistance))));
@@ -190,6 +193,11 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 					hud.setString(name, "999");
 				}
 			}
+		}
+		// Both features share this label. A projectile counter takes
+		// precedence so enabling the default ray doesn't replace it.
+		if (f.distanceCounter) {
+			hud.setString("TargetDistanceString", in.travelled >= 0 ? std::to_string(in.travelled) : "999");
 		}
 		// 0x007be380: the scan (hasScanProgress, the weapon's 0xc4f2 slots
 		// 0xf8 / 0xfc).
@@ -324,25 +332,27 @@ void FlareHud::update(hud::HudManager& hud, const FlareHudInput& in)
 
 // --- The crosshair's parts (0x007be770) ---
 
-CrosshairParts crosshairParts(float deviation, int deviationFactor, int minVisual, int maxVisual, float length)
+CrosshairParts crosshairParts(float deviation, int deviationFactor, float length)
 {
 	CrosshairParts parts;
 	const int spread = static_cast<int>(std::ceil(deviation * static_cast<float>(deviationFactor)));
-	// maxVisualDeviation < minVisualDeviation + spread: the maximum.
-	parts.offset = maxVisual < minVisual + spread ? maxVisual : minVisual + spread;
+	parts.offset = spread;
 	const float o = static_cast<float>(parts.offset);
 	parts.up = 300 - length - o;
 	parts.down = 301 + o;
 	parts.left = 399 - length - o;
 	parts.right = 400 + o;
+	constexpr int kCircleWidth = 6, kCircleGap = 8; // +0x154, +0x158 (0x007bf43c)
+	parts.circleUp = static_cast<float>(301 - 2 * kCircleWidth - kCircleGap - spread);
+	parts.circleRight = static_cast<float>(400 + kCircleGap + spread);
+	parts.circleDown = static_cast<float>(300 + kCircleGap - kCircleWidth + spread);
+	parts.circleLeft = static_cast<float>(400 - kCircleWidth - kCircleGap - spread);
 	return parts;
 }
 
 CrosshairParts crosshairParts(float deviation, const world::ObjectTemplate* weapon, float length)
 {
-	return crosshairParts(deviation, static_cast<int>(hudNumber(weapon, "weaponHud.deviationFactor", 10)),
-		static_cast<int>(hudNumber(weapon, "weaponHud.minVisualDeviation", 0)),
-		static_cast<int>(hudNumber(weapon, "weaponHud.maxVisualDeviation", 1000)), length);
+	return crosshairParts(deviation, static_cast<int>(hudNumber(weapon, "weaponHud.deviationFactor", 10)), length);
 }
 
 // --- The Titans' consoles (0x0044b680 case 0x32, 0x00448850) ---
@@ -382,12 +392,13 @@ const AbilityBar::Out& AbilityBar::update(const game::GameWorld::AbilityBarInfo&
 		return m_out;
 	}
 	float value = 0;
-	for (size_t i = 0; i < info.targets.size(); ++i) {
-		float share = info.targets[i];
-		if (!info.kitAmmo && share < 0) {
-			continue; // no armour
+	for (float share : info.targets) {
+		// The target scan lives across ticks. Read its current progress and
+		// ignore completed or unavailable targets before averaging.
+		if (!std::isfinite(share) || share >= 1) {
+			continue;
 		}
-		if (i != 0) {
+		if (m_out.show) {
 			share = (share + value) * 0.5f;
 		}
 		value = share;
@@ -445,6 +456,14 @@ int receivedSounds(const game::GameWorld::AbilityBarInfo& info, bool inVehicle, 
 	return mask;
 }
 
+int updateReceivedSupplyHud(hud::HudManager& hud, const game::GameWorld::AbilityBarInfo* info, bool inVehicle, bool vehicleChanged)
+{
+	const int sounds = info && info->alive ? receivedSounds(*info, inVehicle, vehicleChanged) : 0;
+	// 0x007a0760 updates CloseToAmmo alongside the receiver's sound.
+	hud.set("CloseToAmmo", (sounds & 4) != 0 ? 1 : 0);
+	return sounds;
+}
+
 const AbilityBar::Out& AbilityBar::hide()
 {
 	m_out.show = m_out.wrench = false;
@@ -482,6 +501,32 @@ void StrategicObjects::update(hud::HudManager& hud, int localTeam) const
 	for (int i = 0; i < 10; ++i) {
 		hud.set("FriendlyStrategicObject" + std::to_string(i) + "Show", shown(own, i) ? 1 : 0);
 		hud.set("EnemyStrategicObject" + std::to_string(i) + "Show", shown(other, i) ? 1 : 0);
+	}
+}
+
+void updateTitanSiloHud(hud::HudManager& hud, const std::vector<game::GameWorld::SiloInfo>& silos, int localTeam)
+{
+	// Retail assigns the silo number at 0x004d1884 and uses it as the
+	// one-based HUD index at 0x0044c40a. The map control-point ID links the spawner.
+	std::array<bool, 10> shown {};
+	for (const auto& silo : silos) {
+		if (silo.number < 1 || silo.number > 9) {
+			continue;
+		}
+		const auto slot = static_cast<size_t>(silo.number - 1);
+		const std::string key = "CPCannon" + std::to_string(slot);
+		shown[slot] = true;
+		const int side = silo.team == 0 ? 0 : silo.team == localTeam ? 1 : 2;
+		hud.set(key + "Team", static_cast<float>(side));
+		const int seconds = silo.loaded ? 0 : static_cast<int>(silo.reloadLeft);
+		char timer[16] = "--:--";
+		if (seconds > 0 && side != 0) {
+			std::snprintf(timer, sizeof(timer), "%02d:%02d", seconds / 60, seconds % 60);
+		}
+		hud.setString(key + "String", timer);
+	}
+	for (size_t slot = 0; slot < shown.size(); ++slot) {
+		hud.set("CPCannon" + std::to_string(slot) + "Show", shown[slot] ? 1 : 0);
 	}
 }
 
@@ -692,6 +737,22 @@ void ItemSelection::update(hud::HudManager& hud, float dt)
 
 // --- The vehicle HUD ---
 
+std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find)
+{
+	std::vector<SelectItem> items;
+	for (const auto& [slot, name] : carried) {
+		std::string icon = hudSetting(find(name), "weaponHud.selectIcon");
+		// The stock parachute launcher has no weapon HUD and uses the
+		// dedicated slot 9 input. Keep its empty row out of the weapon list.
+		if (slot == 9 && icon.empty()) {
+			continue;
+		}
+		items.push_back({slot, std::move(icon), true});
+	}
+	return items;
+}
+
 std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
 	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
 	const std::vector<std::pair<int, std::string>>& carried)
@@ -701,13 +762,10 @@ std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat,
 		fire += w.group == 0 ? 1 : 0;
 		alt += w.group == 1 ? 1 : 0;
 	}
-	std::vector<SelectItem> items;
 	if (fire == 0) {
-		for (const auto& [slot, name] : carried) {
-			items.push_back({slot, hudSetting(find(name), "weaponHud.selectIcon"), true});
-		}
-		return items;
+		return kitSelectItems(carried, find);
 	}
+	std::vector<SelectItem> items;
 	const int group = flag(seatTemplate, "vehicleHud.useSelectionIcons", false) && alt > fire ? 1 : 0;
 	for (const auto& w : seat.weapons) {
 		if (w.group == group) {
@@ -856,14 +914,32 @@ void VehicleHud::update(hud::HudManager& hud, const VehicleHudInput& in)
 		hud.set("OccupyingPlayer" + n + "ColorGreen", lines[i].colour[1]);
 		hud.set("OccupyingPlayer" + n + "ColorBlue", lines[i].colour[2]);
 	}
+	// Their panel's show (0x007a3064): the timer 0x0079fdd0 adds the frame
+	// first and stops past its 5 s.
+	if (m_passengersOn) {
+		m_passengersTime += in.seconds;
+		if (m_passengersTime > 5) {
+			m_passengersOn = false;
+		}
+	}
+	if (!m_passengersOn) {
+		m_passengersTime = 0;
+	}
+	hud.set("VehiclePassengersShow", m_passengersTime > 0 ? 1 : 0);
 	// The bottom-left vehicle panel (0x007a0a90: the faded alphas are the
 	// panel's alpha less 1 - MenuBackgroundAlpha; the panels' swap is the
 	// HUD animation "BottomLeft/Alpha", here taken as done).
 	const float background = hud.number("MenuBackgroundAlpha");
-	hud.set("BottomLeftVehicleAlpha", 1);
-	hud.set("BottomLeftHealthAlpha", 0);
-	hud.set("BottomLeftVehicleFadedAlpha", std::clamp(1 - (1 - background), 0.0f, 1.0f));
-	hud.set("BottomLeftHealthFadedAlpha", 0);
+	// The seat transition checks vehicleHud.showInfo before selecting
+	// the vehicle panel (0x007a0d9c / 0x007a3c46).
+	const bool showInfo = flag(in.seat ? in.seat : v, "vehicleHud.showInfo", true);
+	const float alpha = std::clamp(background, 0.0f, 1.0f);
+	hud.set("UsingParachute", usingPersonalParachute(v) ? 1 : 0);
+	hud.set("VehicleIconShow", showInfo ? 1 : 0);
+	hud.set("BottomLeftVehicleAlpha", showInfo ? 1 : 0);
+	hud.set("BottomLeftHealthAlpha", showInfo ? 0 : 1);
+	hud.set("BottomLeftVehicleFadedAlpha", showInfo ? alpha : 0);
+	hud.set("BottomLeftHealthFadedAlpha", showInfo ? 0 : alpha);
 }
 
 std::array<PassengerLine, 10> passengerLines(const std::vector<SeatDot>& seats)
@@ -926,12 +1002,16 @@ bool HudBlink::tick(float value, float seconds)
 	return m_lit;
 }
 
+bool usingPersonalParachute(const world::ObjectTemplate* occupied)
+{
+	return occupied && occupied->typeName() == "Parachute" && hudNumber(occupied, "isPod", 0) == 0;
+}
+
 bool displaySelectionOnEnter(const world::ObjectTemplate* controlled, const world::ObjectTemplate* lastOccupied)
 {
 	// 0x007a28e0: +0xb4 = a non-pod Parachute; 0x007a3920 opens the list
 	// only while it is 0.
-	const bool held = lastOccupied && lastOccupied->typeName() == "Parachute" && hudNumber(lastOccupied, "isPod", 0) == 0;
-	return !held && hudNumber(controlled, "vehicleHud.displaySelectionOnEnter", 0) != 0;
+	return !usingPersonalParachute(lastOccupied) && hudNumber(controlled, "vehicleHud.displaySelectionOnEnter", 0) != 0;
 }
 
 bool HudBlink::tickFree(float seconds)
@@ -948,6 +1028,8 @@ bool HudBlink::tickFree(float seconds)
 
 void VehicleHud::clear(hud::HudManager& hud)
 {
+	hud.set("UsingParachute", 0);
+	hud.set("VehicleIconShow", 0);
 	// 0x007a1ee0 as the controlled object becomes the soldier again.
 	m_firstBundle = m_secondBundle = -1;
 	m_staminaBlink.reset();
@@ -957,6 +1039,9 @@ void VehicleHud::clear(hud::HudManager& hud)
 	for (int i = 1; i <= 10; ++i) {
 		hud.set("OccupyingPlayerName" + std::to_string(i) + "Show", 0);
 	}
+	m_passengersOn = false; // 0x007a3160 / 0x007a33ab
+	m_passengersTime = 0;
+	hud.set("VehiclePassengersShow", 0);
 	m_climbAngle = m_climbPrevious = 0;
 	m_staminaWas = 1;
 	m_staminaTimer = -1;
@@ -1198,6 +1283,10 @@ int updateSoldierWeaponHud(hud::HudManager& hud, const world::ObjectTemplate* we
 	hud.set("CrossLeftPos", parts.left);
 	hud.set("CrossUpPos", parts.up);
 	hud.set("CrossDownPos", parts.down);
+	hud.set("CrossCircleUpPos", parts.circleUp);
+	hud.set("CrossCircleRightPos", parts.circleRight);
+	hud.set("CrossCircleDownPos", parts.circleDown);
+	hud.set("CrossCircleLeftPos", parts.circleLeft);
 	return gui;
 }
 
@@ -1333,37 +1422,18 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed)
 {
 	std::vector<RadarMarker> out;
-	std::vector<game::GameWorld::PlayerInfo> enemies;
-	bool onFoot = false;
 	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
-		if (world.playerInfo(id, enemy) && enemy.alive) {
-			onFoot = onFoot || !enemy.vehicle;
-			enemies.push_back(enemy);
+		if (!world.playerInfo(id, enemy) || !enemy.alive) {
+			continue;
 		}
-	}
-	// The decoys, looked for only with an enemy on foot to stand in for.
-	std::vector<const world::Object*> decoys;
-	if (onFoot) {
-		for (const auto& object : round.objects().objects()) {
-			const world::ObjectTemplate* t = object->objectTemplate();
-			if (!t || t->typeName() != "TargetObject") {
-				continue;
-			}
-			const auto type = t->settings().find("targetType");
-			if (type != t->settings().end() && targetTypeIndex(type->second) == 6) {
-				decoys.push_back(object.get());
-			}
-		}
-	}
-	for (game::GameWorld::PlayerInfo& enemy : enemies) {
-		if (!enemy.vehicle) {
-			for (const world::Object* decoy : decoys) {
-				const float dx = decoy->position().x - enemy.position.x, dz = decoy->position().z - enemy.position.z;
-				if (dx * dx + dz * dz < 60.0f * 60.0f) {
-					enemy.position = {decoy->position().x, decoy->position().y, decoy->position().z};
-					break;
-				}
+		// His own decoy (0x0075bd30 matches the TargetObject's player; a
+		// thrown round here, GameWorld::decoyOf), within 60 m across.
+		physics::Vec3 decoy;
+		if (!enemy.vehicle && round.decoyOf(enemy.id, decoy)) {
+			const float dx = decoy.x - enemy.position.x, dz = decoy.z - enemy.position.z;
+			if (dx * dx + dz * dz <= 60.0f * 60.0f) {
+				enemy.position = decoy;
 			}
 		}
 		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16, enemy.yaw};
@@ -1491,6 +1561,7 @@ std::string MapCalls::icon(int player) const
 MateMarker mateMarker(const MateInput& in)
 {
 	MateMarker m;
+	m.drawn = in.onFoot || !in.call.empty();
 	// 0x0077d9f0 (slot 0x138): the commander's test comes after the squad
 	// leader's.
 	bool commanderIcon = false;

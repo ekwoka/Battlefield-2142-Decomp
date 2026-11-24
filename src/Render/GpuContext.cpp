@@ -4,6 +4,7 @@
 #include "EmbeddedShaders.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace dice::hfe::render {
@@ -74,6 +75,9 @@ std::unique_ptr<GpuContext> GpuContext::create(SDL_Window* window, std::string& 
 		}
 		context->m_window = window;
 		context->m_colorFormat = SDL_GetGPUSwapchainTextureFormat(context->m_device, window);
+		// Which backend a slow machine runs: nothing sets the swapchain's parameters, so SDL's defaults.
+		std::printf("gpu: driver %s, present mode vsync (default), mailbox %s\n", SDL_GetGPUDeviceDriver(context->m_device),
+			SDL_WindowSupportsGPUPresentMode(context->m_device, window, SDL_GPU_PRESENTMODE_MAILBOX) ? "supported" : "unsupported");
 	}
 	if (!context->createPipelines(error, 1, context->m_singleSampled)) {
 		return nullptr;
@@ -163,8 +167,9 @@ GpuContext::~GpuContext()
 	SDL_ReleaseGPUSampler(m_device, m_menuClampSampler);
 	SDL_ReleaseGPUSampler(m_device, m_menuRepeatSampler);
 	for (SDL_GPUGraphicsPipeline* pipeline : {m_enhanced.mesh, m_enhanced.meshCulled, m_enhanced.fadedMesh,
-			 m_enhanced.additiveMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh, m_enhanced.particle,
-			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster, m_enhanced.gbuffer,
+			 m_enhanced.additiveMesh, m_enhanced.glowMesh, m_enhanced.terrain, m_enhanced.undergrowth, m_enhanced.road, m_enhanced.roadMesh, m_enhanced.particle,
+			 m_enhanced.depth, m_enhanced.depthCulled, m_enhanced.terrainDepth, m_enhanced.terrainCaster,
+			 m_enhanced.shadowDepthCopy, m_enhanced.gbuffer,
 			 m_enhanced.motion, m_enhanced.motionCulled, m_enhanced.motionOverlay, m_enhanced.gtao, m_enhanced.aoBlur, m_enhanced.taa}) {
 		if (pipeline) {
 			SDL_ReleaseGPUGraphicsPipeline(m_device, pipeline);
@@ -347,9 +352,15 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 	world.additiveMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "additive mesh");
+	info.depth_stencil_state.enable_depth_test = false;
+	world.glowMesh = build(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_mesh_frag_spv, k_mesh_frag_spv_size, k_mesh_frag_msl, k_mesh_frag_msl_size, kMeshSamplers, 2, "glow mesh");
+	info.depth_stencil_state.enable_depth_test = true;
+	color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE; // particle.frag masks by alpha itself
 	world.additiveParticle = build(k_particle_vert_spv, k_particle_vert_spv_size, k_particle_vert_msl,
 		k_particle_vert_msl_size, k_particle_frag_spv, k_particle_frag_spv_size, k_particle_frag_msl,
 		k_particle_frag_msl_size, 1, 1, "additive particle");
+	color.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
 	color.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
 	{
 		// Cloaked meshes into their mask: depth-tested, not written, unblended.
@@ -447,7 +458,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
 	world.decal = build(k_decal_vert_spv, k_decal_vert_spv_size, k_decal_vert_msl, k_decal_vert_msl_size,
 		k_decal_frag_spv, k_decal_frag_spv_size, k_decal_frag_msl, k_decal_frag_msl_size, 2, 1, "decal");
-	const bool worldMade = world.mesh && world.culledMesh && world.culledFadedMesh && world.surrounding && world.fadedMesh && world.additiveMesh && world.terrain && world.sky && world.water && world.road && world.roadMesh && world.decal &&
+	const bool worldMade = world.mesh && world.culledMesh && world.culledFadedMesh && world.surrounding && world.fadedMesh && world.additiveMesh && world.glowMesh && world.terrain && world.sky && world.water && world.road && world.roadMesh && world.decal &&
 		world.undergrowth && world.particle && world.shimmer && world.additiveParticle && world.camo &&
 		(single || (world.coverageMesh && world.coverageUndergrowth));
 	const bool made = worldMade && (!single || (m_uiPipeline && m_uiSubmitPipeline && m_uiTestPipeline && m_uiClearPipeline &&
@@ -518,6 +529,10 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	m_enhanced.additiveMesh = enhanced(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
 		k_enh_mesh_frag_spv, k_enh_mesh_frag_spv_size, k_enh_mesh_frag_msl, k_enh_mesh_frag_msl_size, kMeshSamplers + 1, 2,
 		"enhanced additive mesh");
+	info.depth_stencil_state.enable_depth_test = false;
+	m_enhanced.glowMesh = enhanced(k_mesh_vert_spv, k_mesh_vert_spv_size, k_mesh_vert_msl, k_mesh_vert_msl_size,
+		k_enh_mesh_frag_spv, k_enh_mesh_frag_spv_size, k_enh_mesh_frag_msl, k_enh_mesh_frag_msl_size, kMeshSamplers + 1, 2,
+		"enhanced glow mesh");
 	state(true, false, false, SDL_GPU_CULLMODE_NONE, -1.0f);
 	m_enhanced.road = enhanced(k_road_vert_spv, k_road_vert_spv_size, k_road_vert_msl, k_road_vert_msl_size,
 		k_enh_road_frag_spv, k_enh_road_frag_spv_size, k_enh_road_frag_msl, k_enh_road_frag_msl_size, 6, 3, "enhanced road");
@@ -553,6 +568,12 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	m_enhanced.terrainCaster = enhanced(k_terrain_vert_spv, k_terrain_vert_spv_size, k_terrain_vert_msl,
 		k_terrain_vert_msl_size, k_depth_frag_spv, k_depth_frag_spv_size, k_depth_frag_msl, k_depth_frag_msl_size, 0, 0,
 		"enhanced terrain caster", 2);
+	info.vertex_input_state = {};
+	info.rasterizer_state.enable_depth_bias = false;
+	info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+	m_enhanced.shadowDepthCopy = enhanced(k_fullscreen_vert_spv, k_fullscreen_vert_spv_size, k_fullscreen_vert_msl,
+		k_fullscreen_vert_msl_size, k_shadow_depth_copy_frag_spv, k_shadow_depth_copy_frag_spv_size,
+		k_shadow_depth_copy_frag_msl, k_shadow_depth_copy_frag_msl_size, 1, 0, "enhanced shadow depth copy", 0);
 	const auto renders = [&](SDL_GPUTextureFormat format) {
 		return SDL_GPUTextureSupportsFormat(m_device, format, SDL_GPU_TEXTURETYPE_2D,
 			SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
@@ -611,7 +632,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 void GpuContext::releaseWorldPipelines(WorldPipelines& world)
 {
 	for (SDL_GPUGraphicsPipeline* pipeline : {world.mesh, world.culledMesh, world.culledFadedMesh, world.terrain,
-			 world.surrounding, world.sky, world.fadedMesh, world.additiveMesh, world.water, world.road, world.roadMesh,
+			 world.surrounding, world.sky, world.fadedMesh, world.additiveMesh, world.glowMesh, world.water, world.road, world.roadMesh,
 			 world.decal, world.undergrowth, world.particle, world.shimmer, world.additiveParticle, world.camo,
 			 world.coverageMesh, world.coverageUndergrowth}) {
 		if (pipeline) {

@@ -10,6 +10,14 @@ constexpr bool gameplayMouseCaptureWanted(bool playing, bool pointer, bool menuU
 	return playing && !pointer && !menuUp && focused;
 }
 
+// A mouse press between two frames is kept for the frame's raw buttons, pointer screens
+// included: the dead and man-down screens are pointer screens, and their right-click
+// (open the spawn screen) or left-click (call a medic) must not be lost when press and
+// release fall within one frame. The mapped game buttons still ignore it under a pointer.
+constexpr bool latchMousePress(bool playing, bool menuUp)
+{
+	return playing && !menuUp;
+}
 // Why capture is not wanted, for the always-on log line ("none" when it is).
 constexpr const char* mouseCaptureBlocker(bool playing, bool pointer, bool menuUp, bool focused)
 {

@@ -211,12 +211,12 @@ bool QualitySettings::decalsEnabled() const
 	return effects > 1;
 }
 
-void QualitySettings::applyEffects(ParticleSystemSettings& s) const
+void QualitySettings::applyEffects(ParticleSystemSettings& s, float gsViewDistance) const
 {
 	const EffectsRow& row = kEffectsRows[std::clamp(effects, 0, 4)];
-	// 0x100991b0: GSViewDistance (500) x the view distance scale x the
-	// row's, at least 200.
-	s.viewDistance = std::max(500.0f * viewDistanceScale * row.viewScale, 200.0f);
+	// 0x100991b0, 0x10099860: GSViewDistance x the view distance scale x
+	// the row's, at least 200.
+	s.viewDistance = std::max(gsViewDistance * viewDistanceScale * row.viewScale, 200.0f);
 	s.maxParticles = row.pools[0];
 	s.priorityScales = {row.priority[0], row.priority[1], row.priority[2]};
 	s.lodFractions = {row.lod[0], row.lod[1], row.lod[2]};

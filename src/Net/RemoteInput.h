@@ -12,6 +12,7 @@
 #pragma once
 
 #include "Game/SoldierControl.h"
+#include "Game/StanceKeys.h"
 #include "Net/GameProtocol.h"
 
 #include <algorithm>
@@ -31,8 +32,9 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 	out.set(kPIMouseLookX, in.turn / kDegreesPerMouseLookUnit);
 	out.set(kPIMouseLookY, -(in.aimPitch - previousAimPitch) / kDegreesPerMouseLookUnit);
 	out.set(kPISprint, in.sprint ? 1.0f : 0.0f);
+	// The raw keys, as retail sends them: the server toggles prone from the lie key (0x005889d0).
 	out.set(kPICrouch, in.pose == game::SoldierPose::Crouch ? 1.0f : 0.0f);
-	out.set(kPILie, in.pose == game::SoldierPose::Prone ? 1.0f : 0.0f);
+	out.set(kPILie, in.lieKey ? 1.0f : 0.0f);
 	out.set(kPIFire, in.fire ? 1.0f : 0.0f);
 	out.set(kPIAltFire, in.altFire ? 1.0f : 0.0f);
 	out.set(kPIFlareFire, in.flareFire ? 1.0f : 0.0f);
@@ -41,7 +43,7 @@ inline PlayerInput playerInputFrom(const game::SoldierInput& in, float previousA
 	out.set(kPIToggleFireRate, in.toggleFireRate ? 1.0f : 0.0f);
 	out.set(kPIReload, in.reload ? 1.0f : 0.0f);
 	out.set(kPIMouseLook, in.mouseLook ? 1.0f : 0.0f);
-	out.set(kPIAction, in.jump ? 1.0f : 0.0f);
+	out.set(kPIAction, in.jump || in.jumpKey ? 1.0f : 0.0f);
 	out.set(kPINextItem, in.itemStep > 0 ? 1.0f : 0.0f);
 	out.set(kPIPrevItem, in.itemStep < 0 ? 1.0f : 0.0f);
 	if (in.switchSeat >= 1 && in.switchSeat <= 8) {
@@ -69,6 +71,9 @@ struct MoveInputState {
 	bool seated = false;
 	bool useWas = false;
 	int seatWas = 0, itemWas = 0;
+	// The stance keys' state (StanceKeys.h): the caller sets `stance.prone` to the soldier's
+	// last pose before each move, as a refused press is spent.
+	ProneToggle stance;
 };
 inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInputState& state)
 {
@@ -96,14 +101,22 @@ inline game::SoldierInput soldierInputFromMove(const PlayerMove& move, MoveInput
 	input.altFire = move.trigger(kPIAltFire);
 	input.flareFire = move.trigger(kPIFlareFire);
 	input.toggleWeapon = move.trigger(kPIToggleWeapon); // held: the world acts on the press
-	input.jump = move.trigger(kPIAction);
 	input.toggleFireRate = move.trigger(kPIToggleFireRate); // held: the world acts on the press
 	input.reload = move.trigger(kPIReload);                 // the same
 	input.mouseLook = move.trigger(kPIMouseLook);           // held (0x00611c80 tests its bit 0x800 and > 0.5)
 	input.itemStep = move.trigger(kPINextItem) ? 1 : move.trigger(kPIPrevItem) ? -1 : 0; // the wheel, each move
-	input.pose = move.trigger(kPILie) ? game::SoldierPose::Prone
-		: move.trigger(kPICrouch)     ? game::SoldierPose::Crouch
-									  : game::SoldierPose::Stand;
+	// The stance as the server's soldier takes it (0x005889d0): a lie press toggles prone, a
+	// crouch press or the jump key gets up (that jump isn't one).
+	const bool jumpKey = move.trigger(kPIAction), lieKey = move.trigger(kPILie), crouch = move.trigger(kPICrouch);
+	if (state.seated) {
+		state.stance.prone = false;
+	}
+	const bool wasProne = state.stance.prone;
+	state.stance.update(lieKey, crouch, jumpKey);
+	input.jumpKey = jumpKey;
+	input.lieKey = lieKey;
+	input.jump = jumpKey && !wasProne && !state.stance.prone;
+	input.pose = state.stance.prone ? game::SoldierPose::Prone : crouch ? game::SoldierPose::Crouch : game::SoldierPose::Stand;
 	const bool use = move.trigger(kPIUse);
 	input.use = use && !state.useWas;
 	state.useWas = use;

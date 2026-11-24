@@ -352,6 +352,9 @@ private:
 		// JoinAsSpectator (0x005142a0): a spectator, its camera's mode (the
 		// kinds other than 8: 1 free, 6 following) and the player followed.
 		bool spectator = false;
+		double squadOrderPoints = -1, squadOrderMax = -1;
+		int fieldUnlockCredits = -1;
+		std::vector<std::string> ownedUnlocks, fieldUnlocks;
 		int cameraMode = 0, cameraFollow = -1;
 		enum class Stage { Connected, Loading, Database, Playing } stage = Stage::Connected;
 		std::set<uint16_t> created;              // the ghosts it was told of
@@ -403,6 +406,7 @@ private:
 		uint16_t ghost = 0; // its networkable's
 		bool alive = false;
 		uint32_t soldier = 0, vehicle = 0;
+		uint32_t kit = 0, kitWearer = 0; // the kit its body wears (PlayerInfo::bodyKit) and that body
 		int seat = -1;
 		int kills = 0, deaths = 0, teamKills = 0;
 	};
@@ -552,6 +556,7 @@ private:
 	// The teams' networkable takes 0x201 first (0x0042b8b0), so the ghost
 	// manager hands out ids from 0x202 (0x00678610).
 	static constexpr uint16_t kFirstGhost = net::kTeamStateGhost + 1;
+	void syncFieldUnlocks(int id, Client& client, int kit = -1, int branch = -1);
 	std::map<int, Client> m_clients;
 	std::map<int, PlayerSeen> m_players; // by player id
 	std::map<int, std::string> m_names;  // names the clients gave

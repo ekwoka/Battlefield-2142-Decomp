@@ -5,7 +5,9 @@
 //
 // Each tick (one frame at the movie's rate, 30 fps for the menus):
 //   1. timelines advance, root first, then children by depth: the next
-//      frame's PlaceObject/RemoveObject run and its DoActions queue up;
+//      frame's PlaceObject/RemoveObject run and its DoActions queue up
+//      (a clip a script sent to a frame with gotoAndStop/gotoAndPlay,
+//      GotoFrame or GoToLabel goes there instead, as gameswf did);
 //   2. new instances are initialised in creation order (clip event
 //      Construct, the Object.registerClass constructor, Initialize);
 //   3. the queued frame actions run, then onLoad/onUnload events; actions
@@ -174,6 +176,10 @@ public:
 
 	// Timeline control of a clip.
 	void gotoFrame(player::Clip& clip, int frame, bool play);
+	// gotoAndStop/gotoAndPlay's way: plays or stops now, goes to `frame`
+	// when the clip next advances (Clip::queuedFrames).
+	void queueFrame(player::Clip& clip, int frame, bool play);
+	void applyQueuedFrames(player::Clip& clip);
 	void enterFrame(player::Clip& clip, int frame, bool runActions);
 	void advanceClip(player::Clip& clip);
 
@@ -234,6 +240,9 @@ private:
 	void setProperty(const avm1::ObjectRef& clip, int index, const avm1::Value& value) override;
 	void gotoFrame(const avm1::ObjectRef& clip, int frame, bool play) override;
 	void gotoLabel(const avm1::ObjectRef& clip, const std::string& label, bool play) override;
+	void queueFrame(const avm1::ObjectRef& clip, int frame, bool play) override;
+	void queueLabel(const avm1::ObjectRef& clip, const std::string& label, bool play) override;
+	void scriptDone() override;
 	void play(const avm1::ObjectRef& clip) override;
 	void stop(const avm1::ObjectRef& clip) override;
 	void nextFrame(const avm1::ObjectRef& clip) override;
@@ -320,6 +329,7 @@ private:
 	float m_stageWidth = 1024, m_stageHeight = 768;
 	double m_time = 0; // seconds not yet ticked
 	uint64_t m_tick = 0;
+	std::vector<std::weak_ptr<player::Clip>> m_queuedClips; // with queued frames, by first queueFrame
 	int m_instanceCount = 0;
 
 	// Input

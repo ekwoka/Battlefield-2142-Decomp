@@ -138,6 +138,9 @@ public:
 		int seat = -1;
 	};
 	void setRemote(std::function<bool(Remote&)> source) { m_remote = std::move(source); }
+	// A joined game's vehicles (object ids) whose driver seat is taken, for the
+	// soldier camera's rumble (GameWorld::heavyVehicleNearness).
+	void setRemoteDriven(std::function<std::vector<uint32_t>()> source) { m_remoteDriven = std::move(source); }
 	// The players a joined game's spectator follows (the server's players
 	// as the client has them: their ghosts' places and looks, the HudWorld
 	// of the joined game). Without it only the local round's are followed.
@@ -160,8 +163,21 @@ public:
 		float yaw = 0, pitch = 0; // radians: yaw 0 along +z, pitch up positive
 		float fovY = 1.0f;        // radians, for the window's aspect (RendDX9 0x10066ac0)
 		float roll = 0;           // radians about the view axis (a seat camera's shakes)
+		// The soldier's own camera (on foot, under a parachute): retail turns
+		// it with the look every frame (0x0043f170's local player, 0x0058b5e0).
+		bool soldierEye = false;
+		float carrierYaw = 0; // radians: the part of yaw its seat gives (drawn blended), 0 on foot
+		float eyeHeight = 0;  // the eye over the soldier at the tick
+		float eyeTarget = 0;  // the pose's height it eases towards
 	};
-	bool view(View& view, float aspect) const;
+	// On foot the view rides the first-person camera bone when cameraShake
+	// is on (anim::rideCameraBone); `cameraBone` false gives the camera
+	// itself, where the first-person skeleton is placed.
+	bool view(View& view, float aspect, bool cameraBone = true) const;
+	// GeneralSettings.CameraShake (GSCameraShake, GeneralSettings +0xb9,
+	// default 1, 0x00408269): the view's ride on the camera bone. The
+	// shakes (speed, hit, recoil, rumble) don't ask it.
+	bool cameraShake = true;
 	// Local map direction in any vehicle seat with a first-person camera, in degrees.
 	// The hull heading in PlayerInfo does not follow a gun or gunner's camera.
 	bool seatMapHeading(float& degrees) const;
@@ -212,7 +228,18 @@ public:
 		std::vector<anim::Matrix> parts; // bundled
 	};
 	std::vector<Model> models() const;
+	// The frame's tick fraction for the first-person skeleton (FirstPersonRig::blend).
+	void setBlend(float alpha)
+	{
+		if (m_rig) {
+			m_rig->blend(alpha);
+		}
+	}
 	const effects::EffectManager& effects() const { return m_effects; }
+	// The first-person effects by the frame (EffectManager::frame); their
+	// anchors are the tick's eye, which the draw carries with the view.
+	void setEffectsPerFrame(bool on) { m_effects.setParticlesPerFrame(on); }
+	void frameEffects(float seconds) { m_effects.frame(seconds, 1); }
 	// The sounds of the effect bundles the first-person view started.
 	std::vector<effects::EffectManager::StartedSound> takeSounds() { return m_effects.takeSounds(); }
 	// The vehicle's cockpit (the Camera's 0x00612880): in first person in a
@@ -294,6 +321,7 @@ private:
 	// transports' passenger seats): his arms and weapon are drawn in it.
 	bool kitSeat(const Me& me) const;
 	std::function<bool(Remote&)> m_remote;
+	std::function<std::vector<uint32_t>()> m_remoteDriven;
 	int m_lastRemoteShot = -1000;
 	void startWeaponEffects(int effect);
 
@@ -369,6 +397,7 @@ private:
 	game::Random m_random {0x759dc150};
 
 	anim::EyeHeight m_eye;
+	int m_eyePose = 0; // the last tick's pose for the eye
 	anim::ZoomState m_zoom;
 	anim::FieldOfView m_fov;
 	// The seat's gun's zoom (seatZoomLevel): the gun it was loaded for.
@@ -386,6 +415,9 @@ private:
 	float m_hitLeft = 0, m_hitStrength = 0;
 	game::CameraRecoil m_cameraRecoil;
 	float m_recoilShake = 0;
+	// The soldier camera's rumble (anim::cameraProximityShake): its phase,
+	// the nearness the last scan found, the time since it, the roll now.
+	float m_rumblePhase = 0, m_rumbleNearness = 0, m_rumbleScan = 0, m_rumble = 0;
 	uint32_t m_lastGunShots = 0;
 	uint32_t m_shakeVehicle = 0;
 	float m_clock = 0;

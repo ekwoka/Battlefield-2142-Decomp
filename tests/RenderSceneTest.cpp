@@ -368,6 +368,23 @@ TEST(RenderScene_TitanPartsCulledAsRendDX9)
 	CHECK(lods.resolve(4, 2, 3) == 2); // min(3, 2)
 	CHECK(lods.resolve(0, 0, 3) == 1); // part 0 reads the first pair, records nothing
 	CHECK(lods.resolve(3, 3, 1) == 1); // capped at the count
+
+	// A far Titan's front half (part 2) faded out, never drawn: retail's pair
+	// keeps its stale 0 and the back draws at LOD 0; enhanced.titanHullLods
+	// gives the back its own LOD.
+	render::TitanExteriorLods retail, enhanced;
+	for (int frame = 0; frame < 2; ++frame) {
+		retail.resolve(1, 3, 4);
+		retail.endFrame();
+		enhanced.resolve(1, 3, 4);
+		enhanced.endFrame(true);
+	}
+	CHECK(retail.resolve(1, 3, 4) == 0);
+	CHECK(enhanced.resolve(1, 3, 4) == 3);
+	// Both halves drawn: the pair's minimum, as retail.
+	enhanced.resolve(2, 1, 4);
+	enhanced.endFrame(true);
+	CHECK(enhanced.resolve(1, 3, 4) == 1);
 }
 
 TEST(RenderScene_GeometryTemplateTitanAndMaterialSettings)

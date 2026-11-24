@@ -1380,17 +1380,12 @@ void updateSquadInfo(hud::HudManager& hud, game::GameWorld& round, int player, b
 {
 	game::GameWorld::PlayerInfo me;
 	const bool known = round.playerInfo(player, me);
-	updateSquadInfo(hud, known, me.commander, me.squad, me.squadLeader, commanderScreen, localize);
+	updateSquadInfo(hud, known, me, commanderScreen, localize);
 }
 
-void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad, bool squadLeader, bool commanderScreen,
+void updateSquadInfo(hud::HudManager& hud, bool known, const game::GameWorld::PlayerInfo& me, bool commanderScreen,
 	const std::function<std::string(const std::string&)>& localize)
 {
-	struct {
-		bool commander;
-		int squad;
-		bool squadLeader;
-	} me {commander, squad, squadLeader};
 	const auto text = [&localize](const char* id) { return localize ? localize(id) : std::string(id); };
 	bool bar = false, commanderIcon = false, squadIcon = false;
 	std::string line, icon;
@@ -1406,7 +1401,12 @@ void updateSquadInfo(hud::HudManager& hud, bool known, bool commander, int squad
 	hud.set("SquadInfoBarShow", bar ? 1 : 0);
 	hud.set("ShowCommanderIcon", commanderIcon ? 1 : 0);
 	hud.set("ShowSquadIcon", squadIcon ? 1 : 0);
-	hud.set("SquadOrderInfoBarShow", 0);
+	const bool hasUpgrade = known && me.fieldUnlockCredits > 0;
+	const bool showPoints = squadIcon && (me.squadOrderMax > 0 || hasUpgrade);
+	const double progress = me.squadOrderMax > 0 ? std::clamp(me.squadOrderPoints / me.squadOrderMax, 0.0, 1.0) : 0;
+	hud.set("SquadOrderInfoBarShow", showPoints ? 1 : 0);
+	hud.set("SquadInfoValue", static_cast<float>(progress));
+	hud.set("UnlockInfoBarShow", hasUpgrade ? 1 : 0);
 	hud.setString("SquadInfoText", line);
 	hud.setString("SquadInfoIconPath", icon);
 }

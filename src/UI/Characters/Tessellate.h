@@ -12,6 +12,8 @@
 // Strokes: each path with a line style becomes quads along its segments
 // with round joins and round caps (SWF 7 has no other kind), as triangles.
 // Widths below `minStrokeWidth` (one pixel; 0 means hairline) are widened.
+// Those triangles serve hit tests; strokes are drawn from their segments
+// (`lines`) as one-pixel lines, as RendDX9.dll does.
 //
 // Draw order: layer by layer (new-style groups), fills before strokes in a
 // layer, then by style index.
@@ -38,6 +40,7 @@ struct MeshBatch {
 	uint32_t layer = 0;
 	bool hairline = false; // strokes: the file's width was under minStrokeWidth
 	std::vector<Point> triangles; // three per triangle, shape units
+	std::vector<Point> lines; // strokes: two per segment, shape units (what is drawn; the triangles are for hit tests)
 };
 
 struct ShapeMesh {

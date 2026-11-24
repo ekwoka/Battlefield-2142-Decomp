@@ -12,6 +12,7 @@
 #include "IO/File/FileManager.h"
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusKits.h"
+#include "Main/HudMenus.h"
 #include "Render/TextureSuffix.h"
 #include "Main/MenuBindings.h"
 #include "Stats/Stats.h"
@@ -219,7 +220,9 @@ TEST(HudLists_KitMenu)
 	std::vector<std::string> equipped;
 	kits.onEquip = [&](const std::vector<std::string>& c) { equipped = c; };
 	kits.chooseKitCustom(2, 0);
+	kits.selectDroppedItem(2);
 	kits.chooseKitCustom(1, 1);
+	kits.selectDroppedItem(1);
 	kits.setInformationString(1, 1);
 	kits.update(1);
 	CHECK(hud.string("KitCustom1Icon") == "shotgun.tga" && hud.string("KitItemInfoString") == "DESC_SHOTGUN");
@@ -234,12 +237,14 @@ TEST(HudLists_KitMenu)
 	kits.setUnlocked({}, true);
 	kits.update(1);
 	kits.chooseKitCustom(0, 1);
+	kits.selectDroppedItem(0);
 	kits.update(1);
 	CHECK(hud.string("KitWeaponIcon0Path") == "carbine_icon.tga");
 	kits.commit();
 	kits.update(1);
 	CHECK(hud.string("KitWeaponIcon0Path") == "carbine_icon.tga");
 	kits.chooseKitCustom(0, 0);
+	kits.selectDroppedItem(0);
 	kits.update(1);
 	CHECK(hud.string("KitWeaponIcon0Path") == "rifle_icon.tga");
 	// Shipped top tab order: open customization, then hide field unlocks.
@@ -264,6 +269,184 @@ TEST(HudLists_KitMenu)
 	kits.update(1);
 	CHECK(kits.customOpen() && hud.number("CustomInfoShow") == 1);
 
+}
+
+TEST(HudLists_FieldUpgradeSelectionAndExpiry)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "Kit");
+	templates.registerType(2, "GenericFireArm");
+	templates.registerType(3, "ItemContainer");
+	templates.registerType(4, "ControlPoint");
+	templates.registerType(5, "SpawnPoint");
+	templates.registerType(6, "Soldier");
+	auto* point = templates.create("ControlPoint", "Home");
+	point->settings()["controlPointId"] = "1";
+	point->settings()["team"] = "2";
+	objects.create(point, {0, 0, 0});
+	auto* spawn = templates.create("SpawnPoint", "Spawn");
+	objects.create(spawn, {0, 1, 0})->setControlPointId(1);
+	templates.create("Soldier", "soldier")->settings()["armor.maxHitPoints"] = "100";
+	const auto makeKit = [&](const std::string& kitName, const std::string& name) {
+		auto* kit = templates.create("Kit", kitName);
+		auto* primary = templates.create("GenericFireArm", kitName + "Rifle");
+		primary->settings()["itemIndex"] = "3";
+		kit->children().push_back({primary->name(), {}, {}});
+		auto* item = templates.create("GenericFireArm", name + "Item");
+		item->settings()["itemIndex"] = "5";
+		item->settings()["weaponHud.hudName"] = "New gadget";
+		item->settings()["weaponHud.unlockIcon"] = "upgrade.tga";
+		auto* container = templates.create("ItemContainer", name);
+		container->children().push_back({item->name(), {}, {}});
+		kit->children().push_back({name, {}, {}});
+	};
+	makeKit("EU", "EuUnlock");
+	makeKit("PAC", "PacUnlock");
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(2).kits.push_back({"EU", "soldier", ""});
+	logic.team(1).kits.push_back({"PAC", "soldier", ""});
+	round.startRound();
+	const int me = round.joinPlayer(2);
+	CHECK(round.joinSquad(me, 1));
+	round.setKit(me, "EU", "soldier");
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.skipUnchanged = true;
+	kits.onSpendFieldUpgrade = [&](int kit, int branch) { return round.spendFieldUnlock(me, logic, kit, branch); };
+	kits.onEquip = [&](const std::vector<std::string>& items) { round.setUnlocks(me, items); };
+	Console console;
+	kits.bind(console);
+	std::string output;
+	const auto execute = [&](const char* command) { CHECK(console.execute(command, output) == ConsoleResult::Ok); };
+	const auto update = [&] {
+		kits.setFieldUpgrades(round.fieldUnlocks(me), round.fieldUnlockItems(me));
+		kits.update(2);
+		menu::updateSquadInfo(hud, round, me, false, {});
+	};
+	round.setSquadOrderMax(me, 10);
+	round.addSquadOrderPoints(me, 4.5);
+	update();
+	CHECK(hud.number("SquadOrderInfoBarShow") == 1 && hud.number("SquadInfoValue") == 0.45f);
+	execute("UnlockInterface.showUnlockInterface 1");
+	CHECK(hud.number("UnlocksShow") == 0);
+	round.giveFieldUnlock(me);
+	round.giveFieldUnlock(me);
+	update();
+	CHECK(hud.number("UnlockInfoBarShow") == 1 && hud.number("KitUnlockArrow0Show") == 1);
+	execute("UnlockInterface.showUnlockInterface 1");
+	CHECK(hud.number("UnlocksShow") == 1 && hud.number("UnlockInfoShow") == 1);
+	execute("UnlockInterface.setFieldUnlock 0 UB_First");
+	CHECK(hud.number("Kit0Branch0Selected") == 1);
+	execute("UnlockInterface.selectUnlock 1");
+	CHECK(hud.number("UnlockInfoShow") == 0 && hud.string("PickedUnlockNameString") == "New gadget");
+	update();
+	CHECK(round.fieldUnlocks(me) == 1 && round.ownsKitUnlock(me, "PacUnlock"));
+	CHECK(kits.item(1, 0).available && hud.number("Kit1Item0FieldUnlocked") == 1);
+	execute("UnlockInterface.spendFieldUnlock 0 UB_First");
+	CHECK(round.fieldUnlocks(me) == 1);
+	kits.chooseKitCustom(1, 0);
+	kits.selectDroppedItem(1);
+	kits.commit();
+	CHECK(round.unlocksOf(me, false) == std::vector<std::string> {"EuUnlock"});
+	CHECK(round.spawnSoldier(me));
+	game::GameWorld::PlayerInfo spawned;
+	CHECK(round.playerInfo(me, spawned));
+	CHECK(std::find(spawned.carried.begin(), spawned.carried.end(), std::make_pair(5, std::string("EuUnlockItem")))
+		!= spawned.carried.end());
+	round.restartPlayers(1);
+	round.resetRound();
+	update();
+	CHECK(round.fieldUnlocks(me) == 0 && round.unlocksOf(me, false).empty() && !kits.item(1, 0).available);
+	CHECK(hud.number("SquadOrderInfoBarShow") == 0 && hud.number("UnlockInfoBarShow") == 0);
+}
+
+// 0x00798090 / 0x00798cf0 / 0x007986f0: an item is taken on the press and
+// equipped only when released over a drop slot; the two branch rows share
+// slots 1 and 2, so two items of one branch (the recon's IT33 and RDX) go together.
+TEST(HudLists_KitMenuDragAndDrop)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	const auto make = [&](const char* type, const char* name, std::vector<std::pair<const char*, const char*>> settings,
+						  std::vector<const char*> children = {}) {
+		world::ObjectTemplate* t = templates.create(type, name);
+		for (const auto& [key, value] : settings) {
+			t->settings()[key] = value;
+		}
+		for (const char* child : children) {
+			t->children().push_back({child, {}, {}});
+		}
+	};
+	make("GenericFireArm", "sniper", {{"itemIndex", "3"}, {"weaponHud.unlockIcon", "sniper.tga"}});
+	make("GenericFireArm", "mine", {{"itemIndex", "5"}, {"weaponHud.unlockIcon", "mine.tga"}});
+	make("GenericFireArm", "c4", {{"itemIndex", "5"}, {"weaponHud.unlockIcon", "c4.tga"}});
+	make("GenericFireArm", "camo", {{"itemIndex", "5"}, {"weaponHud.unlockIcon", "camo.tga"}});
+	make("GenericFireArm", "beacon", {{"itemIndex", "6"}, {"weaponHud.unlockIcon", "beacon.tga"}});
+	make("ItemContainer", "Sni0", {{"unlockLevel", "0"}}, {"mine"});
+	make("ItemContainer", "SpecOp0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_Second"}}, {"c4"});
+	make("ItemContainer", "SpecOp2", {{"unlockLevel", "2"}, {"unlockBranch", "UB_Second"}}, {"camo"});
+	make("ItemContainer", "Leader0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_SquadLeader"}}, {"beacon"});
+	make("Kit", "Recon", {}, {"sniper", "Sni0", "SpecOp0", "SpecOp2", "Leader0"});
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(1).kits.push_back({"Recon", "soldier", "heavy_soldier"});
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.setUnlocked({}, true);
+	kits.update(1);
+	std::vector<std::string> equipped;
+	kits.onEquip = [&](const std::vector<std::string>& c) { equipped = c; };
+	Console console;
+	kits.bind(console);
+	std::string out;
+	const auto run = [&](const std::string& line) { CHECK(console.execute(line, out) == ConsoleResult::Ok); };
+	// A press alone equips nothing; let go elsewhere, it is dropped.
+	run("kitInterface.chooseKitCustom 2 0");
+	kits.endDrag();
+	run("kitInterface.selectDroppedItem 1"); // a later release over a slot: nothing taken
+	kits.update(1);
+	CHECK(!kits.item(2, 0).active && hud.string("KitCustom1Icon") == "Ingame/GeneralIcons/empty.tga");
+	// RDX into slot 1, IT33 into slot 2: both carried.
+	run("kitInterface.chooseKitCustom 2 0");
+	run("kitInterface.selectDroppedItem 1");
+	run("kitInterface.chooseKitCustom 2 2");
+	run("kitInterface.selectDroppedItem 2");
+	kits.update(1);
+	CHECK(kits.item(2, 0).active && kits.item(2, 2).active);
+	CHECK(hud.string("KitCustom1Icon") == "c4.tga" && hud.string("KitCustom2Icon") == "camo.tga");
+	// A squad leader item drops only on its own slot.
+	run("kitInterface.chooseKitCustom 4 0");
+	run("kitInterface.selectDroppedItem 1");
+	kits.update(1);
+	CHECK(!kits.item(4, 0).active && hud.string("KitCustom1Icon") == "c4.tga");
+	run("kitInterface.chooseKitCustom 4 0");
+	run("kitInterface.selectDroppedItem 4");
+	kits.commit();
+	CHECK((equipped == std::vector<std::string> {"SpecOp0", "SpecOp2", "Leader0"}));
+	// The first branch's mine takes slot 1's place; the C4 is out.
+	run("kitInterface.chooseKitCustom 1 0");
+	run("kitInterface.selectDroppedItem 1");
+	kits.update(1);
+	CHECK(kits.item(1, 0).active && !kits.item(2, 0).active && kits.item(2, 2).active);
+	// IT33 moved to slot 1 leaves slot 2 empty; dropped on its own slot again, it comes out.
+	run("kitInterface.chooseKitCustom 2 2");
+	run("kitInterface.selectDroppedItem 1");
+	kits.update(1);
+	CHECK(hud.string("KitCustom1Icon") == "camo.tga" && hud.string("KitCustom2Icon") == "Ingame/GeneralIcons/empty.tga");
+	CHECK(!kits.item(1, 0).active);
+	run("kitInterface.chooseKitCustom 2 2");
+	run("kitInterface.selectDroppedItem 1");
+	kits.update(1);
+	CHECK(!kits.item(2, 2).active && hud.string("KitCustom1Icon") == "Ingame/GeneralIcons/empty.tga");
+	// The taken item rides the pointer until the release.
+	hud.setPointer(400, 300);
+	run("kitInterface.chooseKitCustom 2 0");
+	hud::HudQuad dragged;
+	CHECK(hud.dragQuad(dragged) && dragged.texture == "Menu/HUD/Texture/c4.tga");
+	kits.endDrag();
+	CHECK(!hud.dragQuad(dragged));
 }
 
 // The spawn screen's ability icons (0x00798b20, from the rebuild while
@@ -503,6 +686,7 @@ static void checkShippedKitGrid(const char* gameDir, const char* modPath)
 				CHECK(icon != weapon->settings().end());
 				if (icon == weapon->settings().end()) { continue; }
 				kits.chooseKitCustom(0, index);
+				kits.selectDroppedItem(0);
 				kits.update(team);
 				CHECK(hud.string("KitWeaponIcon" + std::to_string(kit) + "Path") == icon->second);
 				kits.setKit((kit + 1) % 4);
@@ -511,6 +695,7 @@ static void checkShippedKitGrid(const char* gameDir, const char* modPath)
 				kits.setKit(kit);
 				kits.update(team);
 				kits.chooseKitCustom(0, 0);
+				kits.selectDroppedItem(0);
 				kits.update(team);
 			}
 			// Both armours use the active mod's matching DDS canvases, rather
@@ -581,6 +766,7 @@ TEST(HudLists_KitMenuSkipsUnchangedInEnhancedMode)
 	CHECK(hud.number("Kit0Show") == 1 && hud.number("Kit0SprintAbility") == 0.25f);
 	hud.set("Kit0Show", 7);
 	kits.chooseKitCustom(1, 1);
+	kits.selectDroppedItem(1);
 	kits.update(1);
 	CHECK(hud.number("Kit0Show") == 1 && hud.number("Kit1Item1Active") == 1);
 	hud.set("Kit0Show", 7);

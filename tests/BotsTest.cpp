@@ -545,6 +545,52 @@ TEST(Bots_EnhancedStuckDriverGetsOut)
 	CHECK(game::BotManagerTestAccess::act(bots, passenger).use);
 }
 
+// A driver wedged on a wall while its squad gives it a new goal every 9 s
+// (0x100c0bb0: standing still over 4 m from it): each new goal is a new
+// route request, which restarts the follower's 20 s test, so the follower
+// is never stuck. enhanced.botRecovery's own watch still gets it out after
+// 20 s without 4 m of progress; without the switch it stays, as retail.
+TEST(Bots_EnhancedWedgedDriverGetsOutAcrossRequests)
+{
+	for (const bool on : {false, true}) {
+		Field field;
+		game::BotSettings settings;
+		game::BotManager bots(*field.world, settings);
+		const int id = field.soldier(2, true, -30, 0);
+		auto* car = field.templates.create("PlayerControlObject", "wedged_test_car");
+		car->settings()["seatInformation"] = "wedged_test_car 0/0/0 0/0/0";
+		const uint32_t vehicle = field.objects.create(car, {-30, 0, 0})->id();
+		game::GameWorld::PlayerInfo self;
+		CHECK(field.world->playerInfo(id, self));
+		self.vehicle = vehicle; self.driving = true; self.seat = 0; self.position = {-30, 0, 0};
+		game::GameWorld::VehicleInfo v {};
+		v.object = vehicle; v.position = self.position; v.working = true; v.forward = {1, 0, 0};
+		v.boxMin = {-1, -1, -2}; v.boxMax = {1, 1, 2};
+		game::BotManagerTestAccess::vehicles(bots, {v});
+		auto vehicles = goalTestMesh({{-40, -10, 0, 10}});
+		bots.setVehicleNavMesh(&vehicles);
+		bool enhanced = true, recovery = on;
+		bots.liveSettings().enhanced = &enhanced;
+		bots.liveSettings().botRecovery = &recovery;
+		auto& bot = game::BotManagerTestAccess::bot(bots, id);
+		float exitAt = -1;
+		for (int tick = 0; tick <= 30 * 25 && exitAt < 0; ++tick) {
+			if (tick % (30 * 9) == 0) { // the squad's regoal: a new spot, a new request
+				bot.goal = {-5, 0, tick % (30 * 18) ? 2.0f : -2.0f};
+				bot.followId = 1000 + tick;
+			}
+			game::BotManagerTestAccess::time(bots, tick / 30.0f);
+			game::BotManagerTestAccess::drive(bots, self); // the hull never moves
+			CHECK(!bot.follower.stuck());
+			if (bot.stuckExit == vehicle) {
+				exitAt = tick / 30.0f;
+			}
+		}
+		std::fprintf(stderr, "  botRecovery %d: exit at %.1f s\n", on, exitAt);
+		CHECK(on ? exitAt >= 20 && exitAt < 21 : exitAt < 0);
+	}
+}
+
 // A vehicle move whose follower failed the no-progress test (0x10092bc0):
 // it brakes and ends without arriving, the flag survives a request for the
 // same goal while the route stands (0x10095fc0), another goal clears it, and
@@ -1115,6 +1161,17 @@ TEST(Bots_GotoUrgency)
 	held.inside = false;
 	CHECK(near(ai::gotoUrgency(60 * 60, 0, 0.5f, held, arrived), 1.0f));
 	CHECK(near(ai::gotoUrgency(2500.2f, 0, 0.5f, held, arrived), 0.1f)); // d2 - 50^2 is next to nothing
+
+	// A control point's area (0x100629e0): a square of its own radius, not
+	// createFromControlPoint's 50 (Minsk's Ghost Town: radius 35).
+	const ai::GoalArea corner = ai::controlPointArea(true, -34, 34, 35);
+	CHECK(corner.exists && corner.teamHolds && corner.inside); // 48 m away, inside the square's corner
+	CHECK(!ai::controlPointArea(true, -20, 35.5f, 35).inside);  // 40.7 m away, past its edge
+	CHECK(near(corner.radius, 35 * std::sqrt(2.0f)));
+	CHECK(ai::gotoUrgency(48 * 48, 0, 0.5f, corner, arrived) == 0);
+	const ai::GoalArea edge = ai::controlPointArea(true, -20, 35.5f, 35);
+	CHECK(near(ai::gotoUrgency(60 * 60, 0, 0.5f, edge, arrived), 1.0f));
+	CHECK(!ai::controlPointArea(false, 0, 0, 20).teamHolds);
 }
 
 TEST(Bots_StrategyConditionsAndValues)
@@ -1909,6 +1966,92 @@ TEST(Bots_DriveAvoidingGivesWayExceptForAHuman)
 			CHECK(st.avoiding);
 			CHECK(human ? st.state != 0 : st.state == 0);
 		}
+	}
+}
+
+// AIDLL 0x10089000: a new bot joins its side's smallest non-empty squad
+// (the later of equals), and a squad of three or more first passes its
+// last member on to the empty squad after it. Eight bots of a side make
+// squads of 3, 3 and 2, not one full squad of six; the moved member leads.
+// Each bot spawns as it is added, as the round's start does.
+TEST(Bots_AddBotSpreadsSquadsAsRetail)
+{
+	Field field;
+	Console console;
+	game::BotManager bots(*field.world, scriptedSettings(console));
+	std::vector<int> pac;
+	for (int i = 0; i < 8; ++i) {
+		pac.push_back(bots.addBot("", 1));
+		CHECK(field.world->spawnSoldier(pac.back())); // as the round does: the join order outlives the spawn
+		bots.addBot("", 2);
+	}
+	const auto members = [&](int squad, int team = 1) {
+		std::vector<int> in;
+		for (const game::GameWorld::PlayerInfo& p : field.world->playerList()) {
+			if (p.team == team && p.squad == squad) in.push_back(p.id);
+		}
+		return in;
+	};
+	CHECK(members(1) == std::vector<int>({pac[0], pac[1], pac[3]}));
+	CHECK(members(2) == std::vector<int>({pac[2], pac[4], pac[6]}));
+	CHECK(members(3) == std::vector<int>({pac[5], pac[7]}));
+	CHECK(members(4).empty());
+	game::GameWorld::PlayerInfo info;
+	CHECK(field.world->playerInfo(pac[0], info) && info.squadLeader);
+	CHECK(field.world->playerInfo(pac[2], info) && info.squadLeader);
+	CHECK(field.world->playerInfo(pac[5], info) && info.squadLeader);
+	CHECK(members(1, 2).size() == 3);
+}
+
+// 0x10089000 with humans: the member moved on is the one that joined its
+// squad last (AIDLL's squad lists append on each join), a human too; a
+// human who joined first stays. The joins are the squad manager's
+// (requestJoinSquad): a private squad refuses a bot it hasn't invited.
+TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
+{
+	const auto squadOf = [](game::GameWorld& world, int id) {
+		game::GameWorld::PlayerInfo info;
+		return world.playerInfo(id, info) ? std::make_pair(info.squad, info.squadLeader) : std::make_pair(-1, false);
+	};
+	{
+		// A human first in squad 1: the third bot moves the second bot on.
+		Field field;
+		Console console;
+		game::BotManager bots(*field.world, scriptedSettings(console));
+		const int human = field.world->addPlayer("H", 1, false);
+		CHECK(field.world->joinSquad(human, 1));
+		const int b0 = bots.addBot("", 1), b1 = bots.addBot("", 1), b2 = bots.addBot("", 1);
+		CHECK(squadOf(*field.world, human) == std::make_pair(1, true));
+		CHECK(squadOf(*field.world, b0).first == 1 && squadOf(*field.world, b2).first == 1);
+		CHECK(squadOf(*field.world, b1) == std::make_pair(2, true));
+	}
+	{
+		// A human in the game before the bots but joining after two of them
+		// is the last to join: he moves on and leads.
+		Field field;
+		Console console;
+		game::BotManager bots(*field.world, scriptedSettings(console));
+		const int human = field.world->addPlayer("H", 1, false);
+		const int b0 = bots.addBot("", 1), b1 = bots.addBot("", 1);
+		CHECK(field.world->joinSquad(human, 1));
+		const int b2 = bots.addBot("", 1);
+		CHECK(squadOf(*field.world, human) == std::make_pair(2, true));
+		CHECK(squadOf(*field.world, b0) == std::make_pair(1, true));
+		CHECK(squadOf(*field.world, b1).first == 1 && squadOf(*field.world, b2).first == 1);
+	}
+	{
+		// A human's private squad (the only one with members) refuses the bot,
+		// whose request reaches its leader (2/0x11).
+		Field field;
+		Console console;
+		game::BotManager bots(*field.world, scriptedSettings(console));
+		const int human = field.world->addPlayer("H", 1, false);
+		CHECK(field.world->joinSquad(human, 1));
+		field.world->setSquadPrivate(1, 1, true);
+		const int bot = bots.addBot("", 1);
+		CHECK(squadOf(*field.world, bot).first == 0);
+		const auto messages = field.world->takeSquadMessages(human);
+		CHECK(messages.size() == 1 && messages.front().id == 0x11 && messages.front().value == bot);
 	}
 }
 
@@ -3475,8 +3618,8 @@ TEST(Bots_ChangesSeatInsideAVehicle)
 	for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
 			 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
 			 "aiTemplatePlugIn.create Unit TestGunner_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
-			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestGunner",
-			 "aiTemplate.addPlugIn TestGunner_Unit", "weaponTemplate.create car_firearm",
+			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplatePlugIn.create Armament TestGunner_Arms",
+			 "aiTemplate.create TestGunner", "aiTemplate.addPlugIn TestGunner_Unit", "aiTemplate.addPlugIn TestGunner_Arms", "weaponTemplate.create car_firearm",
 			 "weaponTemplate.setStrength Infantry 2", "weaponTemplate.setStrength LightArmour 2",
 			 "weaponTemplate.setStrength HeavyArmour 2", "weaponTemplate.setStrength Helicopter 2",
 			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
@@ -3919,8 +4062,8 @@ struct CarField {
 		for (const char* line : {"aiTemplatePlugIn.create Mobile TestCar_Mobile", "aiTemplatePlugIn.maxSpeed 20",
 				 "aiTemplate.create TestCar", "aiTemplate.addType ITGround", "aiTemplate.addPlugIn TestCar_Mobile",
 				 "aiTemplatePlugIn.create Unit TestGunner_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
-				 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestGunner",
-				 "aiTemplate.addPlugIn TestGunner_Unit", "weaponTemplate.create car_firearm",
+				 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplatePlugIn.create Armament TestGunner_Arms",
+				 "aiTemplate.create TestGunner", "aiTemplate.addPlugIn TestGunner_Unit", "aiTemplate.addPlugIn TestGunner_Arms", "weaponTemplate.create car_firearm",
 				 "weaponTemplate.setStrength Infantry 2", "weaponTemplate.setStrength LightArmour 2",
 				 "weaponTemplate.setStrength HeavyArmour 2", "weaponTemplate.setStrength Helicopter 2",
 				 "weaponTemplate.create car_firearm_b", "weaponTemplate.setStrength Infantry 10",
@@ -3950,7 +4093,7 @@ struct CarField {
 		world->autoRespawn = false;
 		world->startRound();
 	}
-	void addCar(const std::string& name, const std::string& gun)
+	void addCar(const std::string& name, const std::string& gun, const std::string& seatAi = "TestGunner")
 	{
 		world::ObjectTemplate* car = templates.create("PlayerControlObject", name);
 		car->settings()["hasMobilePhysics"] = "1";
@@ -3965,7 +4108,7 @@ struct CarField {
 		car->children().push_back({"car_engine", {0, -0.44f, 0}, {}});
 		world::ObjectTemplate* second = templates.create("PlayerControlObject", name + "_second");
 		second->settings()["seatInformation"] = name + "_second 0/0.5/-0.5 0/0/0";
-		second->settings()["aiTemplate"] = "TestGunner";
+		second->settings()["aiTemplate"] = seatAi;
 		second->children().push_back({name + "_base", {0, 0.8f, 0}, {}});
 		world::ObjectTemplate* base = templates.create("RotationalBundle", name + "_base");
 		base->settings()["inputToYaw"] = "PIMouseLookX";
@@ -4021,6 +4164,39 @@ struct CarField {
 };
 
 } // namespace
+
+// A seat whose AI template has no Armament plug-in (Project Remaster's APC
+// pod seats) doesn't count the seat's own gun (AIDLL 0x100d3b80 reads the
+// AI object's +0x34 only; 0x100d3e70's x2 needs it too): driverless it is
+// worth nothing (no move), so the bot gets out rather than sit in it.
+TEST(Bots_SeatWithoutArmamentIgnoresItsGun)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	std::string out;
+	for (const char* line : {"aiTemplatePlugIn.create Unit TestPod_Unit", "aiTemplatePlugIn.equipmentTypeName Fixed",
+			 "aiTemplatePlugIn.setSelectKey PIPositionSelect2", "aiTemplate.create TestPod", "aiTemplate.addPlugIn TestPod_Unit"}) {
+		field.console.execute(line, out);
+	}
+	field.addCar("car_pod", "car_firearm", "TestPod");
+	const uint32_t car = field.car("car_pod", 3, 0);
+	const int bot = field.soldier("Bot", true, 0, 0);
+	field.ticks(90);
+	field.board(bot, 1);
+	CHECK(field.info(bot).vehicle == car && field.info(bot).seat == 1);
+	game::BotManager bots(*field.world, field.settings);
+	field.ticks(1, &bots);
+	CHECK(bots.seatValueFor(bot, car, 1) == 0);
+	bool left = false;
+	for (int tick = 0; tick < 30 * 3 && !left; ++tick) {
+		field.ticks(1, &bots);
+		left = field.info(bot).vehicle == 0;
+	}
+	CHECK(left);
+}
 
 // The radio in BBChange (0x1006c520): a human's bail_out (type 0) makes a
 // driving bot's way out x modifier x 100 and it gets out; a human's get_in
@@ -6368,6 +6544,64 @@ TEST(Bots_SquadTakesAnOrderInFormation)
 	CHECK(field.world->issueOrder(2, 1, game::GameWorld::OrderType::Attack, 0, 100, -1));
 	bots.updateSquadNow(2, 1);
 	CHECK(squad->state == 2 && std::fabs(squad->orderAt.x - was.x) < 0.01f);
+}
+
+// A squad's strength (0x100c26d0): its members' strategic strengths
+// summed, + 0.5, rounded to nearest even. Three Remaster soldiers
+// (attack 2 each) are 6, not 2 x round(3 + 0.5) = 8 from the member count.
+TEST(Bots_SquadStrengthSumsStrategicStrengths)
+{
+	CHECK(ai::squadStrength(6) == 6);
+	CHECK(ai::squadStrength(7) == 8);
+	CHECK(ai::squadStrength(2.4f) == 3);
+	CHECK(ai::squadStrength(0) == 0);
+}
+
+// An area short of its required strength takes the nearest free squads
+// (0x10062b80): each pick adds twice the squad's strength (0x10089730),
+// and the picks go on while the assigned strength is not over the required.
+TEST(Bots_AreaTakesSquadsUntilOverItsRequiredStrength)
+{
+	CHECK(ai::squadsToPick(0, 15, {12, 12}) == 1);  // 24 > 15 after one: not two
+	CHECK(ai::squadsToPick(0, 24, {12, 12}) == 2);  // 24 is not over 24: one more
+	CHECK(ai::squadsToPick(12, 15, {12, 12}) == 1);
+	CHECK(ai::squadsToPick(15, 15, {12, 12}) == 0); // holds its strength already
+	CHECK(ai::squadsToPick(0, 24, {}) == 0);
+}
+
+// A squad whose order drops (a human joins it, 0x100c3f10) is free again for
+// the SAI (0x10089730 picks state 0 squads; 0x10089a20 counts only orders
+// under way), which posts the order to it again, the same spot included.
+TEST(Bots_SquadThatLostItsOrderIsOrderedAgain)
+{
+	Field field;
+	game::BotSettings settings;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 3; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, static_cast<float>(i) * 3, 0);
+		team.push_back(id);
+	}
+	const auto run = [&](int ticks) {
+		for (int tick = 0; tick < ticks; ++tick) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+		}
+	};
+	run(18 * 7);
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	CHECK(squad && squad->state == 2 && squad->kind == 0);
+	const int human = field.world->addPlayer("Eu", 2, false);
+	CHECK(field.world->joinSquad(human, 1)); // no human commander: the order drops
+	field.world->spawnSoldier(human);
+	field.move(human, 9, 0);
+	bots.updateSquadNow(2, 1);
+	CHECK(squad->state == 0);
+	run(18 * 4);
+	CHECK(squad->state == 2 && squad->kind == 0);
 }
 
 // A member whose bot idles (+0x4d, set by the Idle statement 0x100d2830

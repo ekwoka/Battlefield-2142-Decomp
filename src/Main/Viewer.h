@@ -47,12 +47,13 @@ struct ViewerOptions {
 		float aimPitchDegrees = 0;
 		bool sprint = false;
 		bool fire = false;
+		bool leftMouse = false, rightMouse = false; // raw buttons for the downed-player HUD
 		// The mouse wheel this frame: c_PINextItem (+1) or c_PIPrevItem (-1),
 		// inputs 0x30 / 0x31 (0 none).
 		int itemStep = 0;
 		bool altFire = false; // the right button
 		bool flareFire = false; // held: c_PIFlareFire (X), a seat's active defence
-		bool toggleWeapon = false; // held: c_PIToggleWeapon (F), a seat's next weapon
+		bool toggleWeapon = false; // held: c_PIToggleWeapon (F), next weapon
 		bool use = false; // enter or leave a vehicle
 		bool toggleFireRate = false; // held: c_PIToggleFireRate (the weapon's next fire mode)
 		bool reload = false;         // held: c_PIReload (R), a new magazine on the press
@@ -99,8 +100,18 @@ struct ViewerOptions {
 		// the death and spectator cameras): eye, eyeYaw, eyePitch, fovY and
 		// eyeRoll hold it, drawn with the usual near plane.
 		bool external = false;
+		// The soldier's own eye (PlayerCamera::View::soldierEye) and the look
+		// the next tick will take (degrees: the turn, the pitch's change).
+		bool soldierEye = false;
+		float lookTurn = 0, lookPitch = 0;
+		float eyeCarrierYaw = 0; // radians: the seat's share of eyeYaw (PlayerCamera::View::carrierYaw)
+		float eyeHeight = 0, eyeTarget = 0; // the eye over the soldier and its pose's (PlayerCamera::View)
+		float blendAlpha = 1; // in: the frame's tick fraction
 	};
 	std::function<void(const PlayerInput&)> onPlayerInput;
+	// Each drawn frame of the window, before the objects are synced: the frame's
+	// seconds (1e-5 .. 1/15, as 0x0040bd90 clamps them) and the tick blend's alpha.
+	std::function<void(float seconds, float alpha)> onFrame;
 	std::function<bool(PlayerView&)> playerView; // false without a player
 	// The recoil's kick to the aim since the last call (degrees, up
 	// positive): the viewer adds it to its pitch, as the original adds it to
@@ -112,6 +123,7 @@ struct ViewerOptions {
 	// Which term of wantsPointer is true (null when none); only for the log.
 	std::function<const char*()> pointerReason;
 	std::function<void(float x, float y)> onClick;
+	std::function<void(float x, float y)> onRelease; // the left button's release (drag and drop)
 	// The right button's clicks and the pointer's moves (the HUD's
 	// right-click map menus, button highlights), same screen.
 	std::function<void(float x, float y)> onRightClick;

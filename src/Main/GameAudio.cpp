@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
 #include <functional>
 
 namespace dice::hfe {
@@ -26,6 +25,16 @@ namespace {
 
 sound::Vec3 toSound(const physics::Vec3& v) { return {v.x, v.y, v.z}; }
 sound::Vec3 toSound(const world::Vec3& v) { return {v.x, v.y, v.z}; }
+sound::Matrix4 toSound(const physics::Mat3& basis)
+{
+	sound::Matrix4 rotation;
+	for (size_t i = 0; i < basis.rows.size(); ++i) {
+		rotation.m[i][0] = basis.rows[i].x;
+		rotation.m[i][1] = basis.rows[i].y;
+		rotation.m[i][2] = basis.rows[i].z;
+	}
+	return rotation;
+}
 
 // A setting of a template ("" when unset).
 const std::string& setting(const world::ObjectTemplate& t, const char* key)
@@ -581,6 +590,14 @@ void GameAudio::engines()
 			continue;
 		}
 		const sound::Vec3 at = toSound(object->position());
+		// The engine audio is its sounds' transform (vtable 0x009bf914): the engine's matrix and
+		// the root's physics velocity, set each tick (0x0064cb80 -> 0x007fe410). Seen from the
+		// seat it cancels the listener's, so the own engine has no Doppler.
+		// shortcut: the root's rotation, not a spinning part's own; use the part's pose if a cone needs it.
+		physics::Vec3 rootAt, rootVelocity;
+		const sound::Vec3 velocity = m_round.bodyMotion(id, rootAt, rootVelocity) ? toSound(rootVelocity) : sound::Vec3 {};
+		const world::Vec3& r = object->rotation();
+		const sound::Matrix4 rotation = toSound(physics::Mat3::fromYawPitchRoll({r.x, r.y, r.z}));
 		const auto& parts = vehicle->parts();
 		for (size_t index = 0; index < parts.size(); ++index) {
 			const auto& part = parts[index];
@@ -614,10 +631,10 @@ void GameAudio::engines()
 				if (e.shifted) {
 					m_sounds.play("S_" + part.name + "_Load", at, id);
 				}
-				m_sounds.loop(owner, "S_" + part.name + "_Idle", at, {}, e.input, id);
-				m_sounds.loop(owner, "S_" + part.name + "_Rpm1", at, {}, e.input, id, &e.rpm1Scale);
-				m_sounds.loop(owner, "S_" + part.name + "_Rpm2", at, {}, e.input, id, &e.rpm2Scale);
-				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, e.input, id);
+				m_sounds.loop(owner, "S_" + part.name + "_Idle", at, velocity, e.input, id, nullptr, rotation);
+				m_sounds.loop(owner, "S_" + part.name + "_Rpm1", at, velocity, e.input, id, &e.rpm1Scale, rotation);
+				m_sounds.loop(owner, "S_" + part.name + "_Rpm2", at, velocity, e.input, id, &e.rpm2Scale, rotation);
+				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, velocity, e.input, id, nullptr, rotation);
 				continue;
 			}
 			// The old style: |audio value| x 0.8333 for Idle, Rpm1 and Rpm2 (0x007fe740). RotationRpm
@@ -625,11 +642,11 @@ void GameAudio::engines()
 			// (0x0064cb80 -> 0x00564710).
 			const float input = std::fabs(rpm * 0.8333333f);
 			for (const char* loop : {"_Idle", "_Rpm1", "_Rpm2"}) {
-				m_sounds.loop(owner, "S_" + part.name + loop, at, {}, input, id);
+				m_sounds.loop(owner, "S_" + part.name + loop, at, velocity, input, id, nullptr, rotation);
 			}
-			RotationSound& rotation = m_rotationSounds[owner];
-			if (stepRotationSound(rotation, rpm)) {
-				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, {}, rotation.value, id);
+			RotationSound& rotationSound = m_rotationSounds[owner];
+			if (stepRotationSound(rotationSound, rpm)) {
+				m_sounds.loop(owner, "S_" + part.name + "_RotationRpm", at, velocity, rotationSound.value, id, nullptr, rotation);
 			}
 			rotating.insert(owner);
 		}
@@ -665,6 +682,11 @@ const std::string& GameAudio::loopingSound(const void*, const std::string& name)
 	return it->second;
 }
 
+// Below this squared speed a round's sound keeps its launch yaw instead of
+// facing along its flight: the round mesh's own threshold (Game/Weapons.cpp,
+// 0x005b3e60 keeps the last frame).
+constexpr float kMinFacingSpeedSquared = 0.025f;
+
 void GameAudio::projectiles()
 {
 	for (const auto& projectile : m_round.projectiles()) {
@@ -675,13 +697,20 @@ void GameAudio::projectiles()
 		if (loop.empty()) {
 			continue;
 		}
-		// Keyed by who fired it and where it left (it has no id of its own).
-		uint32_t bits[3];
-		const float origin[3] = {projectile.origin.x, projectile.origin.y, projectile.origin.z};
-		std::memcpy(bits, origin, sizeof(bits));
-		const uint64_t key = (static_cast<uint64_t>(projectile.shooter) << 32) ^ bits[0] ^ (static_cast<uint64_t>(bits[1]) << 11)
-			^ (static_cast<uint64_t>(bits[2]) << 22);
-		m_sounds.loop(ownerKey(2, key), loop, toSound(projectile.position), toSound(projectile.velocity));
+		// Use the round's serial because shells in a salvo share their launch point.
+		// Aim the sound's local cone with the round (the orbital shells face down).
+		const physics::Vec3 direction = physics::lengthSquared(projectile.heading) > 0
+			? projectile.heading : projectile.velocity;
+		physics::Mat3 basis = physics::Mat3::fromYawPitchRoll({projectile.yaw, 0, 0});
+		if (projectile.turns) {
+			basis = projectile.rotation;
+		} else if (physics::lengthSquared(direction) > kMinFacingSpeedSquared) {
+			basis = physics::lookAtRotation(direction, basis);
+		}
+		// The velocity goes to the Doppler as retail's; a fast round's pitch is
+		// tamed in the enhanced mode only (enhancedDopplerVelocity).
+		m_sounds.loop(ownerKey(2, projectile.serial), loop, toSound(projectile.position), toSound(projectile.velocity),
+			0, 0, nullptr, toSound(basis));
 	}
 }
 

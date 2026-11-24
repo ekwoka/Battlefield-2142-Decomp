@@ -156,9 +156,12 @@ struct ProjectileSettings {
 	float armingSpeed = 0, speedModifier = 1, predictionFactor = 0;
 	bool useTargetSpeed = false, magneticBehaviour = false;
 	float acceleration = 0, deAcceleration = 0, maxSpeed = 0;
-	// hasDirection (template +0x335, 0 by default): the motor of a round
-	// without a follow pushes along its own nose (0x005b3e60).
-	bool hasDirection = false;
+	// hasDirection (template +0x335, 1 by default: the template's
+	// constructor 0x005b3648; only magnetic_ammo and Unl_Mine_Motion set 0):
+	// the motor pushes along the round's nose whether or not a follow steers
+	// it (0x005b4692), so an unguided rocket (the rifle and mech missiles)
+	// speeds up to maxSpeed too.
+	bool hasDirection = true;
 	float maxAngleLock = 360;
 	bool ignoreFriendly = true;
 	// seek.directionBonus (the seek template's +0x30, executor 0x004f541e,
@@ -698,8 +701,10 @@ public:
 	// The fire component's may-reload (slot 0x44, SingleFireComp
 	// 0x005d5b60: its state +0x150 at 0) refuses while a
 	// busyUntilButtonRelease round waits for the trigger's release (a
-	// guided launcher keeps its wire while the button is held). False when
-	// nothing starts.
+	// guided launcher keeps its wire while the button is held). The ammo's
+	// may-reload (slot 0x44, 0x005f4670), asked by hand (1), refuses any
+	// weapon with ammo.autoReload (the vehicles' guns: it reloads itself).
+	// False when nothing starts.
 	bool startReload();
 	// That wait (busyUntilButtonRelease, the trigger still held since the round).
 	bool busyUntilRelease() const { return m_busyUntilRelease; }
@@ -898,6 +903,7 @@ struct Projectile {
 	// the update 0x005e2e20 steers at any zoom level). Seat guns don't use this.
 	bool wireEndsWithWeapon = false;
 	uint32_t wireWeapon = 0;  // the hand weapon that fired it
+	std::string weaponName;   // its template: the kill line names it (0x005b7130 takes the weapon object that dealt the damage)
 	uint32_t wireVehicle = 0; // the vehicle the shooter sat in when it fired (0 on foot)
 	bool newTarget = false; // the follow's +0x94: its target set since its last turn
 	bool followTurned = false; // the follow steered it this tick (0x005ed1a0's result)
@@ -1018,6 +1024,7 @@ struct TracerLook {
 struct PlacedTracerLook {
 	std::string geometry;
 	TracerLook look;
+	uint32_t serial = 0; // its round's (Projectile::serial)
 };
 std::vector<PlacedTracerLook> placedTracerLooks(const std::vector<Projectile>& projectiles);
 TracerLook tracerLook(const ProjectileSettings& settings, const physics::Vec3& round, const physics::Vec3& velocity,
@@ -1145,10 +1152,12 @@ struct DeviationBuildUp {
 //     (decaying back to it when above); without a turn it decays to 0;
 //   - the speed's part: throttle (|PIThrottle| > 0.01) adds `throttle`,
 //     strafing (|PIYaw|) `strafe`, held at max; without, decay;
-//   - the misc part: while its condition holds (the update's flag; the
-//     rewrite: in the air) add - decay up to max, else decay;
+//   - the misc part: while the update's flag holds (miscFlag: the jump or
+//     lie key held, never being in the air) add - decay up to max, else
+//     decay;
 //   - the firing's build-up decays off the trigger (DeviationBuildUp);
-//   - the stance's modifier (Stand, Crouch, Lie), and zoomed devModZoom
+//   - the stance's modifier (Stand, Crouch, Lie; Stand in the air,
+//     stanceIndex), and zoomed devModZoom
 //     on the whole and minDevModZoom on minDev (else 1 and 1).
 // The deviation = (minDev x minDevModZoom + misc + turn + speed + fire)
 // x zoom x stance. Its +0x44 (set by slot 0xac, 0x00680290: the bots'
@@ -1164,6 +1173,19 @@ struct SoldierDeviation {
 	float turn = 0, speed = 0, misc = 0; // +0x24, +0x28, +0x2c
 	float total = 0;                     // +4
 	static SoldierDeviation fromTemplate(const world::ObjectTemplate& t);
+	// The update's misc flag (the soldier's 0x0058ac90..0x0058acf0, passed at
+	// 0x0058b508 to the firearm's 0x005c24f0, which forwards it): PIAction
+	// held (|v| > 0.001) with no get-up time (+0x3fc) and not swimming
+	// (+0x30c), or PILie held (the raw key, not the latched prone pose);
+	// neither while seated (the soldier's parent, +0x34).
+	static bool miscFlag(bool jumpKey, bool lieKey, float getUpTime, bool swimming, bool seated)
+	{
+		return !seated && ((jumpKey && getUpTime <= 0 && !swimming) || lieKey);
+	}
+	// The stance's index (0x005dec46, the pose through jump table
+	// 0x005ded60): a soldier with no parent (+0x34) off the ground (his
+	// node's +0xf9) is standing, whatever his pose.
+	static int stanceIndex(int pose, bool onGround, bool seated) { return seated || onGround ? pose : 0; }
 	// lookX / lookY in PIMouseLook units; stance 0 stand, 1 crouch, 2 lie.
 	void update(float throttle, float strafe, float lookX, float lookY, bool misc, bool firing, int stance, bool zoomed);
 	float deviation() const { return total; }

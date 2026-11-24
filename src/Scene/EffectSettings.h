@@ -216,16 +216,19 @@ struct QualitySettings {
 	// "_b.dds" / "_b_os.dds" maps: 0x101499b0, 0x100d4160) and static meshes
 	// parallax; at low (3) also bundled and skinned meshes' hemi map, envmap,
 	// shadows and colormap gloss (BM rows 1-2, SM rows 1-2) and static
-	// meshes' crack, dirt and the detail normal maps (STM rows 1-2: the
+	// meshes' envmap, crack, dirt and detail normal maps (STM rows 1-2: the
 	// "_cr", "_crb", "_di", "_deb" maps skipped by 0x10151830).
 	int lightingLevel() const;
 	bool meshNormalMaps() const { return lightingLevel() == 0; }
 	bool meshHemiAndShadows() const { return lightingLevel() < 3; }
+	bool meshEnvMaps() const { return lightingLevel() < 3; }
 	bool staticMeshDirtAndCrack() const { return lightingLevel() < 3; }
 	bool dynamicLightsEnabled() const;
 	bool decalsEnabled() const;
 	// The effects row: applies it to the manager's settings.
-	void applyEffects(ParticleSystemSettings& settings) const;
+	// gsViewDistance: GSViewDistance as stored (the level's maximumLevelViewDistance,
+	// rounded, 20..3000; 500 unset), which the manager's draw (0x10099860) rereads each frame.
+	void applyEffects(ParticleSystemSettings& settings, float gsViewDistance = 500) const;
 };
 
 // GameLogic.useColdBreath (BF2142.exe 0x00427d38, the game logic's slots

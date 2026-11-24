@@ -354,14 +354,18 @@ void GameWorld::wreckCollision(Body& body)
 }
 
 bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const physics::Vec3& to,
-	physics::CollisionWorld::Hit& hit, int* partHit) const
+	physics::CollisionWorld::Hit& hit, int* partHit, bool frontOnly) const
 {
+	const auto cast = [frontOnly](const physics::CollisionWorld& mesh, const physics::Vec3& a, const physics::Vec3& b,
+						  physics::CollisionWorld::Hit& out) {
+		return frontOnly ? mesh.raycastFront(a, b, out) : mesh.raycast(a, b, out);
+	};
 	float best = 2;
 	physics::CollisionWorld::Hit candidate {};
 	if (partHit) {
 		*partHit = -1;
 	}
-	if (body.projectileMesh && body.projectileMesh->raycast(from, to, candidate)) {
+	if (body.projectileMesh && cast(*body.projectileMesh, from, to, candidate)) {
 		best = candidate.fraction;
 		hit = candidate;
 	}
@@ -369,16 +373,15 @@ bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const p
 		return best <= 1;
 	}
 	poseCollisionParts(body);
-	const int state = body.collisionWrecked ? 1 : 0;
 	for (size_t i = 0; i < body.partMeshes.size(); ++i) {
 		const Body::PartMesh& part = body.partMeshes[i];
-		const physics::CollisionWorld* lod = part.lod[state].get();
+		const physics::CollisionWorld* lod = part.lod[body.collisionWrecked || part.wrecked ? 1 : 0].get();
 		if (!lod || part.off || segmentDistanceSquared(from, to, part.position) > part.radius * part.radius) {
 			continue;
 		}
 		const physics::Vec3 a = part.rotation.untransform(from - part.position);
 		const physics::Vec3 b = part.rotation.untransform(to - part.position);
-		if (lod->raycast(a, b, candidate) && candidate.fraction < best) {
+		if (cast(*lod, a, b, candidate) && candidate.fraction < best) {
 			best = candidate.fraction;
 			hit = candidate;
 			hit.point = from + (to - from) * candidate.fraction;
@@ -412,11 +415,11 @@ void GameWorld::partActors(Body& body, std::vector<MeshActor>& out)
 		return;
 	}
 	poseCollisionParts(body);
-	const size_t state = body.collisionWrecked ? 1 : 0;
 	const MeshActor root = body.vehicleMesh ? actorOf(body) : MeshActor {};
 	const physics::Vec3 centre = body.body.position + body.body.rotation.transform(body.body.centerOfMass);
 	for (size_t index = 0; index < body.partMeshes.size(); ++index) {
 		const Body::PartMesh& part = body.partMeshes[index];
+		const size_t state = body.collisionWrecked || part.wrecked ? 1 : 0;
 		const Body::PartMesh::Physics& lods = part.physics[state];
 		if (part.off || !lods.vehicle || lods.points.empty()) {
 			continue;
@@ -457,7 +460,7 @@ const physics::CollisionWorld* GameWorld::partCollision(uint32_t object, int par
 		return nullptr;
 	}
 	const Body::PartMesh& mesh = body->partMeshes[static_cast<size_t>(part)];
-	return mesh.off ? nullptr : mesh.lod[body->collisionWrecked ? 1 : 0].get();
+	return mesh.off ? nullptr : mesh.lod[body->collisionWrecked || mesh.wrecked ? 1 : 0].get();
 }
 
 bool GameWorld::collisionPartFrame(uint32_t object, int part, physics::Mat3& rotation, physics::Vec3& position) const

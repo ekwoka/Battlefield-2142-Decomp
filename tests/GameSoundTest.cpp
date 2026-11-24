@@ -1371,3 +1371,20 @@ TEST(GameSounds_BoltClickAfterAReload)
 	event(Event::TriggerClick, false);
 	CHECK(range.count("S_eu_ar_rifle_BoltClick") == 2 && range.count("S_eu_ar_rifle_TriggerClick") == 4);
 }
+
+// Enhanced audio: a source's Doppler speed is held to half the speed of sound
+// over the Doppler factor (EnhancedAudio.h), so a shell diving at the
+// listener rises at most an octave; slower sources and a Doppler factor of 0
+// pass untouched. Retail (enhanced off) never calls it.
+TEST(EnhancedAudio_DopplerSpeedHeldBelowTheSingularity)
+{
+	const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+	const sound::Vec3 slow {0, -100, 0};
+	CHECK(near(sound::enhancedDopplerVelocity(slow, 1.0f).y, -100));
+	const sound::Vec3 dive {0, -299, 250}; // each axis under retail's 300 guard, 390 in all
+	const sound::Vec3 held = sound::enhancedDopplerVelocity(dive, 1.0f);
+	CHECK(near(held.length(), 0.5f * sound::kOpenAlSpeedOfSound));
+	CHECK(near(held.y / held.z, dive.y / dive.z)); // the direction stays
+	CHECK(near(sound::enhancedDopplerVelocity(dive, 2.0f).length(), 0.25f * sound::kOpenAlSpeedOfSound));
+	CHECK(near(sound::enhancedDopplerVelocity(dive, 0.0f).y, -299)); // no Doppler: nothing to hold
+}

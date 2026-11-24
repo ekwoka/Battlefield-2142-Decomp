@@ -258,6 +258,35 @@ void PlayerCamera::stepShakes(float seconds)
 	if (!alive) {
 		m_hitShake = m_hitLeft = 0;
 	}
+	// The soldier camera's rumble (0x00610240 then, every second, 0x00611fc0
+	// from the camera update 0x00612511, on every machine). The scan clears
+	// the nearness, then looks only in the Inside and Nose views (+0x250 1 / 2).
+	Me eye;
+	if (current(eye) && eye.alive) {
+		if (m_rumbleScan > 1.0f) { // 1 / *0x00a73a00
+			m_rumbleNearness = 0;
+			if (m_mode == game::camera::Mode::Inside || m_mode == game::camera::Mode::Nose) {
+				const physics::Vec3 at {eye.origin[0], eye.origin[1] + m_eye.current, eye.origin[2]}; // origin: a metre over the feet
+				m_rumbleNearness = !m_remote ? m_round.heavyVehicleNearness(at, eye.vehicle)
+					: m_remoteDriven         ? m_round.heavyVehicleNearness(at, eye.vehicle, m_remoteDriven())
+											 : 0.0f;
+			}
+			m_rumbleScan = 0;
+		} else {
+			m_rumbleScan += seconds;
+		}
+	} else {
+		m_rumbleNearness = m_rumbleScan = 0;
+	}
+	if (m_rumbleNearness > 0) {
+		m_rumblePhase += seconds * anim::kCameraProximityRate;
+		if (m_rumblePhase > 1) {
+			m_rumblePhase -= 1;
+		}
+		m_rumble = anim::cameraProximityShake(m_rumblePhase, m_rumbleNearness);
+	} else {
+		m_rumblePhase = m_rumble = 0;
+	}
 	if (!alive || !me.vehicle || !findSeatCamera(seat)) {
 		m_speedShake = m_shakeTime = 0;
 		m_shakeVehicle = 0;
@@ -1073,6 +1102,7 @@ void PlayerCamera::tick(float seconds)
 	// The eye's height by pose (seated counts as crouching).
 	const int pose = me.vehicle ? 1 : me.stance >= 0 && me.stance < 3 ? me.stance : 0;
 	m_eye.tick(pose);
+	m_eyePose = pose;
 	if (!m_rig || (me.vehicle && !kitSeat(me))) {
 		m_lastYaw = me.yaw;
 		m_lastPitch = me.aimPitch;
@@ -1153,7 +1183,7 @@ void PlayerCamera::tick(float seconds)
 	// The weapon's bundles follow its root on the animated first-person
 	// skeleton (mesh1): the anchor goes there each tick.
 	View eye;
-	if (view(eye, 4.0f / 3.0f)) {
+	if (view(eye, 4.0f / 3.0f, false)) { // the camera itself, not the bone's ride (0x005ee980)
 		const anim::Skeleton& skeleton = m_rig->skeleton();
 		const int mesh1 = skeleton.find("mesh1");
 		const anim::Matrix place = anim::firstPersonPlacement(skeleton, m_rig->pose(), m_rig->cameraNode(),
@@ -1210,7 +1240,7 @@ bool PlayerCamera::seatMapHeading(float& degrees) const
 	return true;
 }
 
-bool PlayerCamera::view(View& view, float aspect) const
+bool PlayerCamera::view(View& view, float aspect, bool cameraBone) const
 {
 	if (!insideView()) {
 		return false;
@@ -1248,7 +1278,19 @@ bool PlayerCamera::view(View& view, float aspect) const
 			view.yaw = seated.yaw * kDegrees;
 			view.pitch = seated.pitch * kDegrees;
 			view.fovY = aspectFov(kitSeat(me) ? m_fov.current : m_baseFov, aspect); // a passenger's weapon zooms
+			// The soldier camera is the view's parent, so its bone ride and
+			// shakes apply: a local player in the Inside view is first person
+			// (0x0058d7c5, player slot 0x1bc). The rewrite poses the rig only
+			// where the soldier holds his weapon.
 			view.roll = 0;
+			if (cameraBone && cameraShake && m_rig && kitSeat(me)) {
+				anim::rideCameraBone(anim::cameraBoneDelta(m_rig->skeleton(), m_rig->pose(), m_rig->cameraNode()),
+					view.position, view.yaw, view.pitch, view.roll);
+			}
+			view.roll += (m_hitShake + m_rumble) * kDegrees; // rolled after (0x00610745)
+			view.soldierEye = true;
+			view.carrierYaw = (seated.yaw - seated.lookYaw) * kDegrees;
+			view.eyeHeight = view.eyeTarget = m_eye.poses[1];
 			return true;
 		}
 		view.fovY = aspectFov(view.fovY, aspect);
@@ -1272,7 +1314,18 @@ bool PlayerCamera::view(View& view, float aspect) const
 	view.yaw = me.yaw * kDegrees;
 	view.pitch = std::clamp(me.aimPitch, -85.0f, 85.0f) * kDegrees;
 	view.fovY = aspectFov(m_fov.current, aspect);
-	view.roll = m_hitShake * kDegrees; // the SoldierCamera's hit shake
+	view.roll = 0;
+	// GSCameraShake: the view rides the animated camera bone (0x005edeb0).
+	// Retail rides it under a parachute too (first person in the Inside
+	// view); the rewrite doesn't pose the rig there.
+	if (cameraBone && cameraShake && m_rig && !me.vehicle) {
+		anim::rideCameraBone(anim::cameraBoneDelta(m_rig->skeleton(), m_rig->pose(), m_rig->cameraNode()), view.position,
+			view.yaw, view.pitch, view.roll);
+	}
+	view.roll += (m_hitShake + m_rumble) * kDegrees; // the SoldierCamera's hit shake and rumble, rolled after (0x00610745)
+	view.soldierEye = true;
+	view.eyeHeight = m_eye.current;
+	view.eyeTarget = m_eye.poses[m_eyePose];
 	return true;
 }
 
@@ -1510,7 +1563,7 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 	std::vector<Model> out;
 	View eye;
 	Me me;
-	if (!m_rig || !view(eye, 4.0f / 3.0f) || !current(me) || (me.vehicle && !kitSeat(me))) {
+	if (!m_rig || !view(eye, 4.0f / 3.0f, false) || !current(me) || (me.vehicle && !kitSeat(me))) {
 		return out;
 	}
 	// On a ladder the weapon is put away (0x005878b0) and the first-person

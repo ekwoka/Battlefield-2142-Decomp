@@ -3,6 +3,7 @@
 #include "MissileViewSmoothing.h"
 #include "DisplayModes.h"
 
+#include "Render/FrameStats.h"
 #include "Render/GpuContext.h"
 #include "Render/LevelRenderer.h"
 #include "Render/PngWriter.h"
@@ -537,7 +538,10 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 		bool discardFirstRelativeMotion = false;
 		input::MenuWheelSteps menuWheel;
 		MenuCursor menuCursor;
+		using Stats = render::FrameStats;
+		Stats& stats = Stats::get();
 		while (running) {
+			const uint64_t eventsStart = stats.enabled() ? Stats::now() : 0;
 			const bool wanted = options.wantsPointer && options.wantsPointer();
 			if (playing && wanted != pointer) {
 				pointer = wanted;
@@ -604,7 +608,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
 					shown.fullscreenKeys.clear();
 				}
-				if (playing && !pointer && !menuUp && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+				if (latchMousePress(playing, menuUp) && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
 					pressedButtons |= SDL_BUTTON_MASK(event.button.button);
 				}
 				if (event.type == SDL_EVENT_QUIT) {
@@ -658,6 +662,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					int w = 1, h = 1;
 					SDL_GetWindowSize(window, &w, &h);
 					options.onClick(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
+				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_LEFT && pointer
+					&& options.onRelease) {
+					int w = 1, h = 1;
+					SDL_GetWindowSize(window, &w, &h);
+					options.onRelease(hudX(event.button.x, static_cast<float>(w)), event.button.y * 600.0f / static_cast<float>(h));
 				} else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT && pointer
 					&& options.onRightClick) {
 					int w = 1, h = 1;
@@ -820,6 +829,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				}
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
+				input.leftMouse = (buttons & SDL_BUTTON_LMASK) != 0;
+				input.rightMouse = (buttons & SDL_BUTTON_RMASK) != 0;
 				input.fire = c.pressed(map, "c_PIFire", down);
 				input.altFire = c.pressed(map, "c_PIAltFire", down);
 				input.flareFire = c.pressed(map, "c_PIFlareFire", down);
@@ -886,8 +897,11 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.sprint = keys[SDL_SCANCODE_LSHIFT];
 				input.turnDegrees = turn;
 				input.aimPitchDegrees = pitch * 57.29578f;
-				input.fire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_LMASK) != 0 && !pointer;
-				input.altFire = ((shown.mouseButtons() | pressedButtons) & SDL_BUTTON_RMASK) != 0 && !pointer;
+				const Uint32 buttons = shown.mouseButtons() | pressedButtons;
+				input.leftMouse = (buttons & SDL_BUTTON_LMASK) != 0;
+				input.rightMouse = (buttons & SDL_BUTTON_RMASK) != 0;
+				input.fire = input.leftMouse && !pointer;
+				input.altFire = input.rightMouse && !pointer;
 				input.flareFire = keys[SDL_SCANCODE_X];
 				input.toggleWeapon = keys[SDL_SCANCODE_F];
 				input.use = keys[SDL_SCANCODE_E];
@@ -929,18 +943,22 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			}
 			const double seconds = static_cast<double>(now - start) / 1e9;
 			const int elapsedTicks = ticks.advance(seconds);
+			if (eventsStart) {
+				stats.add(Stats::Events, Stats::now() - eventsStart); // events, input and the controls
+			}
 			if (elapsedTicks > 0 && options.onTicks) {
+				Stats::Scope timed(Stats::Ticks);
 				options.onTicks(elapsedTicks);
 			}
 			if (elapsedTicks > 0) {
 				blendTicks = elapsedTicks;
 				tickedSinceSync = true;
 			}
-			// enhanced.tickBlend (experimental): drawn between the last two ticks
-			// (Render/TickBlend.h); otherwise as each tick left it.
-			const bool tickBlend = sources.enhanced && sources.enhanced->enabled && sources.enhanced->tickBlend;
+			// Drawn between the last two ticks, as retail always is
+			// (Render/TickBlend.h).
 			const float blendAlpha = render::tickBlendAlpha(seconds, ticks.previousTickTime(), blendTicks, ticks.tickLength());
 			ViewerOptions::PlayerView view;
+			view.blendAlpha = blendAlpha;
 			{
 				int w = 1, h = 1;
 				SDL_GetWindowSizeInPixels(window, &w, &h);
@@ -980,24 +998,43 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 					camera.position = head - camera.forward() * 4.0f + camera.right() * 0.6f;
 				}
 			}
-			// The ridden projectile's camera between its fixed 30 Hz samples:
-			// retail draws every object between its last two transforms
-			// (0x0043f170 -> 0x0043ef30, always on: 0x009fcd90 is 1), the
-			// guided round among them, and its camera rides that drawn round,
-			// with the same alpha and 4 m height rule. The port draws the other
-			// objects so only with enhanced.tickBlend, which also blends every
-			// game camera, each kind of view keeping its own history.
+			// The game camera between its fixed 30 Hz samples: retail draws
+			// every object between its last two transforms (0x0043f170 ->
+			// 0x0043ef30, always on: 0x009fcd90 is 1) and the cameras ride
+			// them (a seat's, the ridden round's, the free camera), with the
+			// same alpha and 4 m height rule; each kind of view keeps its own
+			// history. The soldier's own eye (0x0043f170's local player)
+			// rides its blended carrier (on foot its position; seated the
+			// seat's position and turn); the look is the frame's: the tick's
+			// plus what the next tick will take (0x0058b5e0 -> 0x005890a0,
+			// cleared by the tick).
 			const uint32_t missileKey = view.firstPerson ? view.projectileSerial : 0;
-			const uint32_t viewKey = !tickBlend ? missileKey
-				: !playing ? 0
+			const uint32_t viewKey = !playing ? 0
 				: missileKey ? missileKey
-				: 0x80000000u | (firstPerson ? 1u : view.external ? 2u : 3u);
+				: 0x80000000u | (firstPerson ? (view.soldierEye ? (view.driving ? 5u : 4u) : 1u) : view.external ? 2u : 3u);
 			if (viewKey) {
-				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch};
+				const bool soldierEye = firstPerson && view.soldierEye && !missileKey;
+				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch, camera.roll};
+				if (soldierEye) {
+					raw.position[1] -= view.eyeHeight;
+					raw.yaw = view.eyeCarrierYaw;
+					raw.eye = view.eyeHeight;
+				}
 				const auto smooth = viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
-				camera.yaw = smooth.yaw;
-				camera.pitch = smooth.pitch;
+				if (soldierEye) {
+					constexpr float kRadians = 3.14159265f / 180.0f;
+					// The eye's height between the ticks, then a step on
+					// towards the pose's (0x005890a0, 0.2 a call), undone after
+					// the frame (0x0043f610) like every blended matrix.
+					camera.position.y += smooth.eye + (view.eyeTarget - smooth.eye) * 0.2f; // *0x00a68e14
+					camera.yaw += smooth.yaw - view.eyeCarrierYaw + view.lookTurn * kRadians;
+					camera.pitch = std::clamp(camera.pitch + view.lookPitch * kRadians, -85 * kRadians, 85 * kRadians);
+				} else {
+					camera.yaw = smooth.yaw;
+					camera.pitch = smooth.pitch;
+					camera.roll = smooth.roll; // a banking hull's, as its cockpit
+				}
 			} else {
 				viewSmoothing.sample(0, false, 0, {}); // forget the last view's history
 			}
@@ -1011,7 +1048,12 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			SDL_GPUTexture* swapchain = nullptr;
 			Uint32 width = 0;
 			Uint32 height = 0;
-			if (!SDL_WaitAndAcquireGPUSwapchainTexture(commands, window, &swapchain, &width, &height) || !swapchain) {
+			bool acquired = false;
+			{
+				Stats::Scope timed(Stats::Acquire);
+				acquired = SDL_WaitAndAcquireGPUSwapchainTexture(commands, window, &swapchain, &width, &height) && swapchain;
+			}
+			if (!acquired) {
 				SDL_SubmitGPUCommandBuffer(commands);
 				continue;
 			}
@@ -1027,10 +1069,26 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				options.onView(position, camera.yaw, camera.pitch, camera.fovY,
 					height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f);
 			}
+			if (options.onFrame) {
+				options.onFrame(dt, blendAlpha); // dt: clamped to 1e-5 .. 1/15 above
+			}
 			const bool tickedForObjects = std::exchange(tickedSinceSync, false);
-			level.syncObjects(tickBlend ? render::TickBlend {tickedForObjects, blendAlpha} : render::TickBlend {});
-			level.draw(commands, swapchain, target, camera, sources.lights);
-			SDL_SubmitGPUCommandBuffer(commands);
+			{
+				Stats::Scope timed(Stats::Sync);
+				level.syncObjects(render::TickBlend {tickedForObjects, blendAlpha});
+			}
+			{
+				Stats::Scope timed(Stats::Draw);
+				level.draw(commands, swapchain, target, camera, sources.lights);
+			}
+			{
+				Stats::Scope timed(Stats::Submit);
+				SDL_SubmitGPUCommandBuffer(commands);
+			}
+			if (const std::string report = stats.endFrame(Stats::now()); !report.empty()) {
+				std::printf("%s\n", report.c_str());
+				std::fflush(stdout);
+			}
 			if (!shown.shot.empty()) {
 				// The same frame again, off screen, saved.
 				auto offscreen = gpu->createOffscreenTarget(width, height);
@@ -1532,15 +1590,19 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 				} else {
 					note = " (no text box open)";
 				}
-			} else if ((step.op == "move" || step.op == "click" || step.op == "rclick") && point(step.arg, x, y)) {
+			} else if ((step.op == "move" || step.op == "click" || step.op == "press" || step.op == "release" || step.op == "rclick")
+				&& point(step.arg, x, y)) {
 				if (hooks.setPointer) {
 					hooks.setPointer(x, y);
 				}
 				if (viewer.onPointerMove) {
 					viewer.onPointerMove(x, y);
 				}
-				if (step.op == "click" && viewer.onClick) {
+				if ((step.op == "click" || step.op == "press") && viewer.onClick) {
 					viewer.onClick(x, y);
+				}
+				if ((step.op == "click" || step.op == "release") && viewer.onRelease) {
+					viewer.onRelease(x, y);
 				} else if (step.op == "rclick" && viewer.onRightClick) {
 					viewer.onRightClick(x, y);
 				}
@@ -1565,6 +1627,9 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 		}
 		if (viewer.onTicks) {
 			viewer.onTicks(1);
+		}
+		if (viewer.onFrame) {
+			viewer.onFrame(1.0f / 30.0f, 1); // one frame a tick, at the tick (the particles move by it)
 		}
 		if (frame) {
 			frame(1.0f / 30.0f);

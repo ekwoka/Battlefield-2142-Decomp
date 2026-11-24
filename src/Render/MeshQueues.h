@@ -63,6 +63,30 @@ inline bool meshCulled(bool bundledOrSkinned, bool blended, bool leaf)
 	return bundledOrSkinned ? !blended : !leaf;
 }
 
+// A bundled or skinned mesh's material whose technique names "alpha_one"
+// (the technique tokens, 0x101495b0 -> +0x3b) is drawn by RaShaderBMadditive's
+// defaultTechnique (0x100c497e, 0x100c4c3b): SRCALPHA / ONE, unfogged and not
+// depth-tested. Its object's fade (+0x284, the shader's transparency) comes
+// from a ray from the camera to the object (0x100c4ad6): 1 while nothing but
+// the object is hit; blocked, it falls by 6 a second (+0x590, 0x1002aca4;
+// 0x100c4b07) while it was drawn the frame before, else to 0. At or below
+// kGlowShown the material isn't drawn (0x100c4b76).
+constexpr float kGlowShown = 1.1920929e-7f;
+// The frame's seconds the renderer gets (+0x5d8, the `seconds` here) at most:
+// BF2142.exe's loop (0x0040bd90) clamps its frame time to 1/15 s (0x3d888889).
+constexpr float kRendererFrameSecondsMax = 1.0f / 15.0f;
+inline float glowFadeStep(float fade, bool seen, bool drawnLastFrame, float seconds)
+{
+	if (seen) {
+		return 1.0f;
+	}
+	if (fade <= kGlowShown) {
+		return fade;
+	}
+	fade -= 6.0f * seconds;
+	return fade < 0.0f || !drawnLastFrame ? 0.0f : fade;
+}
+
 // A tree's leaf material (RendDX9 0x100db6f0, +0x1ec of the static
 // material): in a template flagged a tree (a geometry path with
 // "vegitation", +0x2a2), a material whose texture set has no second map

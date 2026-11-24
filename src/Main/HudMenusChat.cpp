@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "Hud/Hud.h"
+#include "World/ObjectTemplate.h"
 
 #include <algorithm>
 
@@ -101,6 +102,28 @@ void HudChat::addKill(const std::string& killer, const std::string& victim, cons
 	// (0x007518d0, 0x00759bf0 fill it with the player's name).
 	line = replaced(line, "#PLAYERNAME#", victim);
 	push({"\xa7" "1" + line + "\xa7" "0", colorOf(color), 1, false});
+}
+
+std::string HudChat::killWeapon(const world::ObjectTemplate* vehicle, const world::ObjectTemplate* weapon, bool namedGuns)
+{
+	const auto hudName = [](const world::ObjectTemplate* t, const char* key) {
+		const auto it = t ? t->settings().find(key) : decltype(t->settings().end()) {};
+		std::string name = t && it != t->settings().end() ? it->second : "";
+		name.erase(std::remove(name.begin(), name.end(), '"'), name.end());
+		return name;
+	};
+	if (!vehicle) {
+		return {};
+	}
+	// Soldier 0x9493, LadderContainer 0x9c46, Parachute 0xc5a8.
+	const uint32_t cls = vehicle->classId();
+	const auto& parts = vehicle->components();
+	const bool vehicleHud = std::any_of(parts.begin(), parts.end(), [](const std::string& c) { return c == "VehicleHud"; });
+	if (cls == 0x9493 || cls == 0x9c46 || cls == 0xc5a8 || !vehicleHud) {
+		return hudName(weapon, "weaponHud.hudName");
+	}
+	std::string name = hudName(vehicle, "vehicleHud.hudName");
+	return name.empty() && namedGuns ? hudName(weapon, "weaponHud.hudName") : name;
 }
 
 void HudChat::addInfo(const std::string& message, int category)

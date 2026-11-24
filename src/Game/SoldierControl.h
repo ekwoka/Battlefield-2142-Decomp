@@ -41,7 +41,7 @@ struct SoldierInput {
 	bool fire = false;  // PIFire
 	bool altFire = false; // PIAltFire: sets off the soldier's C4
 	bool flareFire = false; // PIFlareFire (input 47, X): a seat's PIFlareFire weapon (the active defence)
-	bool toggleWeapon = false; // c_PIToggleWeapon (input 45, F), held: a seat's next weapon on a press
+	bool toggleWeapon = false; // c_PIToggleWeapon (input 45, F), held: next weapon on a press
 	float aimPitch = 0; // degrees, up positive
 	bool use = false;   // PIUse: enter or leave a vehicle (on press)
 	bool toggleFireRate = false; // c_PIToggleFireRate (input 46), held: the weapon's next fire mode on a press
@@ -50,6 +50,8 @@ struct SoldierInput {
 	int switchSeat = 0; // PIPosition1..8: move to that seat (1-based; on press)
 	int selectItem = 0; // PIWeaponSelect1..9: the weapon in that kit slot (on press)
 	bool jump = false;  // PIAction (input 9, c_PIAction: Space), held: jumps on landing
+	bool jumpKey = false; // PIAction raw, when `jump` is masked (the tick a prone soldier's jump key gets him up): the deviation's misc part
+	bool lieKey = false; // PILie (input 37, c_PILie: Z) held, apart from the latched pose: the deviation's misc part
 	// The mouse wheel's c_PINextItem (+1, input 48) or c_PIPrevItem (-1,
 	// input 49) this tick: a zoomed rocket launcher's airburst distance
 	// (0x005d5440).
@@ -148,6 +150,9 @@ int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed = false);
 // index 3's 3.9 m/s, crouched times the look's scale (0x00586420: zoomed
 // in, the field of view over the camera's times mouseSpeedMod; 1 else).
 // Standing and swimming it stays.
+// The speed the soldier moves at (0x00588420): the pose's speed index; crouched and zoomed it
+// is scaled by the look's scale as well.
+float soldierTargetSpeed(SoldierPose pose, bool sprinting, bool zoomed, float lookScale = 1);
 float soldierAnimationSpeed(float speed, SoldierPose pose, float lookScale = 1);
 
 // The walk cycle the footsteps follow (0x005ef7f0): the 3p animation's
@@ -233,7 +238,7 @@ public:
 	}
 	// The weapon in hand zoomed (its zoom index not 0): standing, not
 	// sprinting, the soldier walks at speed index 2.
-	void setZoomed(bool zoomed) { m_zoomed = zoomed; }
+	void setZoomed(bool zoomed, float lookScale = 1) { m_zoomed = zoomed; m_lookScale = lookScale > 0 ? lookScale : 1.0f; }
 	SprintStamina& stamina() { return m_stamina; }
 	const SprintStamina& stamina() const { return m_stamina; }
 	float jumpLoss = 0;     // the soldier template's sprintLossAtJump (+0x308)
@@ -243,6 +248,7 @@ public:
 	// still running (above 0).
 	bool jumpHold() const { return m_jumpTime > 0 || m_rise > 0; }
 	float airTime() const { return m_airTime; }
+	float getUpTime() const { return m_getUp; } // +0x3fc
 
 	float throttle() const { return m_throttle; }
 	float strafe() const { return m_strafe; }
@@ -270,6 +276,7 @@ public:
 
 private:
 	bool m_zoomed = false;
+	float m_lookScale = 1;
 	float m_throttle = 0; // 0x264
 	float m_strafe = 0;   // 0x260
 	float m_twist = 0;    // 0x278

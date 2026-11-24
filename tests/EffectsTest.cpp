@@ -681,6 +681,53 @@ TEST(Effects_EmitterAsRendDX9)
 		near.update(0.5f);
 		CHECK(near.emitters() == 1 && !near.emitterList()[0]->particles().empty());
 		CHECK(near.emitterList()[0]->lodScale() == 1.0f);
+		// The distance LOD's size term is the particles' box (0x101393e0's
+		// +0x120), not one particle: a spread-out system 450 m off keeps
+		// emitting where (1 - f)^2 = 0.11 (and one 1 m particle adds 0.004).
+		puff->settings()["particleMaxSize"] = "1";
+		puff->settings()["emitRadius"] = "100/100/100";
+		puff->settings()["emitFrequency"] = "100";
+		puff->settings()["emitTime"] = "10";
+		effects::EffectManager wide(templates);
+		wide.setSettings(&settings);
+		wide.setCamera({0, 0, 450}, 0.5f);
+		wide.spawn("e_puff", {});
+		wide.update(0.5f);
+		wide.update(0.1f);
+		CHECK(wide.emitters() == 1 && wide.emitterList()[0]->particles().size() > 2);
+		CHECK(wide.emitterList()[0]->lodScale() > 0.3f); // 0.115 from one particle
+	}
+	// The flipbook's crossfade (0x10131f80): the frame, the next one
+	// ((frame + 1) % frames, wrapping) and the clock's fraction.
+	{
+		world::ObjectTemplateManager templates;
+		world::ObjectTemplate* puff = addPuff(templates);
+		puff->settings()["animationEnable"] = "1";
+		puff->settings()["animationFrameCount"] = "4";
+		puff->settings()["animationFrameCountX"] = "2";
+		puff->settings()["setAnimationFrameWidthRelative"] = "0.5";
+		puff->settings()["setAnimationFrameHeightRelative"] = "0.5";
+		puff->settings()["rotationGraph"] = "0/0/0/1"; // the clock runs at animationSpeed
+		const auto t = effects::ParticleTemplate::fromTemplate(*puff);
+		CHECK((effects::spriteFrame(t, 3.3f) == std::array<float, 4> {0.5f, 0.5f, 1, 1}));
+		CHECK((effects::spriteFrame(t, 4.3f) == std::array<float, 4> {0, 0, 0.5f, 0.5f}));
+		effects::EffectManager manager(templates);
+		manager.spawn("e_puff", {});
+		for (int i = 0; i < 40; ++i) {
+			manager.update(0.1f);
+		}
+		int sprites = 0, blended = 0;
+		manager.forEachGroup([&](const std::string&, bool, const std::vector<effects::Sprite>& list) {
+			for (const effects::Sprite& sprite : list) {
+				const int frame = static_cast<int>(sprite.frame[0] * 2 + sprite.frame[1] * 4);
+				const int next = static_cast<int>(sprite.nextFrame[0] * 2 + sprite.nextFrame[1] * 4);
+				CHECK(next == (frame + 1) % 4);
+				CHECK(sprite.frameBlend >= 0 && sprite.frameBlend < 1);
+				blended += sprite.frameBlend > 0;
+				++sprites;
+			}
+		});
+		CHECK(sprites > 0 && blended > 0);
 	}
 	// The draw fade: past 0.85 of the class's distance (High: the view
 	// distance), (1 - f)^2.
@@ -796,14 +843,22 @@ TEST(Effects_QualityLevels)
 	CHECK(q.skipMipLevels(scene::TextureClass::Default) == 1 && q.skipMipLevels(scene::TextureClass::Overgrowth) == 0);
 	// The lighting level (renderer +0x6b4) and what it drops.
 	CHECK(q.lightingLevel() == 0 && q.meshNormalMaps());
+	CHECK(q.meshEnvMaps());
 	q.lighting = 2;
 	CHECK(q.lightingLevel() == 1 && !q.meshNormalMaps() && q.meshHemiAndShadows());
+	CHECK(q.meshEnvMaps());
 	q.lighting = 1;
 	CHECK(q.lightingLevel() == 3 && !q.meshHemiAndShadows() && !q.staticMeshDirtAndCrack());
+	CHECK(!q.meshEnvMaps());
 	CHECK(!q.dynamicLightsEnabled() && !q.decalsEnabled());
 	q.viewDistanceScale = 0.1f;
 	q.applyEffects(s);
 	CHECK(s.viewDistance == 200); // at least 200
+	// The level's GSViewDistance (0x10099860), not a fixed 500.
+	q.effects = 3;
+	q.viewDistanceScale = 1;
+	q.applyEffects(s, 1000);
+	CHECK(s.viewDistance == 1000);
 }
 
 // A wheel bundle under a wheel's spring follows the wheel's own contact
@@ -1516,4 +1571,95 @@ TEST(Effects_VehicleBoostEndStartsBeforeItStops)
 	state.boosting = true;
 	objects.update({state}, manager);
 	CHECK(manager.bundleLoops().empty()); // 0x2a: in its stop bits
+}
+
+// Retail moves particles in RendDX9's frame (0x10028ae0 -> 0x1009a4c0) by the
+// frame's time, its systems where their objects are drawn between ticks.
+TEST(Effects_ParticlesMoveByTheFrameAtTheDrawnAnchor)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	effects::EffectManager manager(templates);
+	manager.setParticlesPerFrame(true);
+	manager.setAnchor(7, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_flame", 7, {0, 2, 0}));
+	manager.update(1 / 30.0f);
+	CHECK(sprites(manager).empty()); // the tick moves none
+	manager.setAnchor(7, {3, 0, 0}, {});
+	for (int i = 0; i < 12; ++i) {
+		manager.frame(1 / 120.0f, 0.5f);
+	}
+	auto list = sprites(manager);
+	CHECK(!list.empty());
+	CHECK(std::fabs(list[0].position.x - 1.5f) < 1e-4f); // halfway between the ticks' anchors
+	manager.frame(1 / 120.0f, 1);
+	list = sprites(manager);
+	CHECK(std::fabs(list[0].position.x - 3) < 1e-4f);
+}
+
+// A placed mesh with a key (a round's tracer) is drawn between its last two ticks.
+TEST(Effects_PlacedMeshesBlendBetweenTicks)
+{
+	world::ObjectTemplateManager templates;
+	effects::EffectManager manager(templates);
+	const auto place = [&](float x, float y) {
+		effects::MeshSprite s {{x, y, 0}, {}, 1, {1, 1, 1, 1}, 1, 9};
+		manager.setPlacedMeshes({{"tracer", {s}}});
+	};
+	const auto drawnX = [&] {
+		float x = -1;
+		manager.forEachMeshGroup([&](const std::string&, bool, const std::vector<effects::MeshSprite>& list) {
+			x = list.at(0).position.x;
+		});
+		return x;
+	};
+	place(0, 0);
+	place(10, 0);
+	manager.frame(0.01f, 0.25f);
+	CHECK(std::fabs(drawnX() - 2.5f) < 1e-4f);
+	place(20, 6); // a jump over 4 m in height: where it is
+	CHECK(std::fabs(drawnX() - 20) < 1e-4f);
+	manager.frame(0.01f, 1);
+	CHECK(drawnX() == 20);
+}
+
+// An attached bundle's light is drawn where its object is drawn: between
+// the state before the frame's ticks and after them (two ticks here), its
+// turn slerped (0x0043ef30) - at a quarter of 120 degrees, 30.
+TEST(Effects_LightsBlendFromBeforeTheFramesTicks)
+{
+	world::ObjectTemplateManager templates;
+	addFlame(templates, true);
+	templates.registerType(5, "LightSource");
+	world::ObjectTemplate* flash = templates.create("LightSource", "flash");
+	flash->settings()["isDynamic"] = "1";
+	flash->settings()["attenuationRange2"] = "5";
+	world::ObjectTemplate* lamp = templates.create("EffectBundle", "e_lamp");
+	lamp->children().push_back({"flame", {}, {}});
+	lamp->children().push_back({"flash", {0, 0, 2}, {}});
+	effects::EffectManager manager(templates);
+	manager.setParticlesPerFrame(true);
+	const effects::Vec3 up {0, 1, 0};
+	manager.setAnchor(7, {0, 0, 0}, {});
+	CHECK(manager.spawnAttached("e_lamp", 7, {}));
+	manager.frame(1 / 120.0f, 1);
+	manager.setAnchor(7, {3, 0, 0}, effects::Mat3::axisAngle(up, 60 * 3.14159265f / 180));
+	manager.update(1 / 30.0f);
+	manager.setAnchor(7, {6, 0, 0}, effects::Mat3::axisAngle(up, 120 * 3.14159265f / 180));
+	manager.update(1 / 30.0f);
+	CHECK(manager.lights().size() == 1);
+	CHECK(std::fabs(manager.lights()[0].position.x - (6 + 2 * std::sin(-120 * 3.14159265f / 180))) < 1e-3f ||
+		std::fabs(manager.lights()[0].position.x - (6 + 2 * std::sin(120 * 3.14159265f / 180))) < 1e-3f);
+	manager.frame(1 / 120.0f, 0.25f);
+	const effects::Vec3 want = effects::Vec3 {1.5f, 0, 0} +
+		effects::Mat3::axisAngle(up, 30 * 3.14159265f / 180).transform({0, 0, 2});
+	const effects::Vec3 got = manager.lights()[0].position;
+	CHECK(std::fabs(got.x - want.x) < 1e-3f && std::fabs(got.y - want.y) < 1e-3f && std::fabs(got.z - want.z) < 1e-3f);
+	manager.frame(1 / 120.0f, 1);
+	CHECK(std::fabs(manager.lights()[0].position.x - want.x) > 0.5f); // at the tick again
+	// Not set again (a muzzle's anchor after its flash): it stands still.
+	manager.update(1 / 30.0f);
+	const float still = manager.lights()[0].position.x;
+	manager.frame(1 / 120.0f, 0.25f);
+	CHECK(std::fabs(manager.lights()[0].position.x - still) < 1e-4f);
 }

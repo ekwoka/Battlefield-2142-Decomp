@@ -130,6 +130,13 @@ int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed)
 	}
 }
 
+float soldierTargetSpeed(SoldierPose pose, bool sprinting, bool zoomed, float lookScale)
+{
+	// 0x00588420: crouched (+0x268 == 1) and zoomed, the speed index's speed x the look's scale (0x00586420).
+	const float speed = soldierSpeed(soldierSpeedIndex(pose, sprinting, zoomed));
+	return pose == SoldierPose::Crouch && zoomed ? speed * lookScale : speed;
+}
+
 void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& body, float seconds)
 {
 	// The timers: the air's (0x0058a6d0's start) to -1 when they run out,
@@ -209,7 +216,7 @@ void SoldierControl::update(const SoldierInput& input, physics::SoldierBody& bod
 	const float yaw = (body.yawDegrees + m_twist) * 3.14159265f / 180.0f;
 	const physics::Vec3 forward {std::sin(yaw), 0, std::cos(yaw)};
 	const physics::Vec3 right {std::cos(yaw), 0, -std::sin(yaw)};
-	const float speed = soldierSpeed(soldierSpeedIndex(input.pose, sprinting, m_zoomed)); // +0x310 (0x00586020)
+	const float speed = soldierTargetSpeed(input.pose, sprinting, m_zoomed, m_lookScale); // +0x310 (0x00586020)
 	// The jump (0x0058a6d0): PIAction under 0.001 is none; none while the
 	// get-up time runs or swimming, nor unless standing.
 	m_jumped = false;

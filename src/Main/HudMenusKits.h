@@ -13,7 +13,7 @@
 // Kit%iSprintAbility (0x00449600: 0.75 light, 0.25 heavy armour),
 // Kit%iHeavyArmorShow / HeavyArmor%iActive, PlayerKitIcon%iSelectShow
 // (setPlayerKit, 0x0079aa50), KitUnlockArrow%iShow (a field unlock to
-// take: none offline).
+// take).
 //
 // The customise screen (KitInterface, constructor 0x00798610; rebuild
 // 0x00798dd0) is a grid of five rows of up to six items per kit: row 0
@@ -24,7 +24,7 @@
 // weaponHud.unlockIcon, and carries its specialAbilityIcon,
 // renderedPicture and descrString (else hudName). The display copy of the
 // open kit (0x007977a0) sets Kit<row>Item<item>Active / FieldUnlocked /
-// Show / Icon / Alpha; KitCustom<row>Icon the chosen item of each row;
+// Show / Icon / Alpha; KitCustom<slot>Icon the item in each drop slot;
 // CustomInfoShow, CustomSoldierPicture
 // (Ingame/Customization/soldiers/Soldier_<team-1><kit>[1].dds, the 1 for
 // heavy armour, 0x007975e0), KitItemInfoString with LargeInfoPic /
@@ -32,18 +32,17 @@
 // NotAntiVechicleKitChoosen; Ability0..6Active, the abilities the kit
 // gives (0x00798b20, below).
 //
-// Picking: the original drags an item (chooseKitCustom 0x00798090 takes
-// it on the pointer) onto a slot (selectDroppedItem 0x00798cf0 → equip
-// 0x007986f0: rows 0, 3 and 4 choose one item, rows 1 and 2 share two
-// drop slots). The rewrite's HUD has no dragging: chooseKitCustom equips
-// the item in its own row's slot at once. The choice is committed when
+// Picking: an item is dragged (chooseKitCustom 0x00798090 takes it on the
+// pointer, the button's press) onto a drop slot (selectDroppedItem
+// 0x00798cf0, the slot's release → equip 0x007986f0): rows 0, 3 and 4
+// drop on their own slot, one item each; rows 1 and 2 share slots 1 and 2,
+// so two items of one branch can be carried. The choice is committed when
 // the soldier spawns or the screen closes (0x00799aa0 sends SelectKit with
 // the chosen unlocks): `onEquip` gets the chosen ItemContainers.
 //
 // The unlock screen (UnlockInterface, 0x007b8e60-0x007b9a20) spends field
 // unlocks (in-round unlocks a server grants, the player's +0x2d0 points):
-// with none it doesn't open (0x007b95a0), so offline it shows only its
-// per-branch variables (0x0044a130): Kit%iBranch%iUnlockLevel and
+// with none it doesn't open (0x007b95a0). Its per-branch variables (0x0044a130): Kit%iBranch%iUnlockLevel and
 // MaxUnlockLevel (eighths), Alpha, NextUnlockIconPathString,
 // NextUnlockNameString, NextUnlockShow, LargePicShow.
 #pragma once
@@ -64,6 +63,7 @@ class HudManager;
 }
 namespace world {
 class ObjectTemplateManager;
+class ObjectTemplate;
 }
 } // namespace dice::hfe
 
@@ -87,6 +87,9 @@ public:
 		m_allUnlocked = all;
 		m_built = false;
 	}
+	void setFieldUpgrades(int credits, const std::vector<std::string>& containers);
+	void closeFieldUpgrades();
+	std::function<bool(int kit, int branch)> onSpendFieldUpgrade;
 	// The kit picked on the spawn screen (setPlayerKit).
 	void setKit(int kit);
 	int kit() const { return m_kit; }
@@ -120,6 +123,9 @@ public:
 	void chooseKitSelection(int a, int b);
 	void closeCustomInterface();
 	void chooseKitCustom(int row, int item);
+	void selectDroppedItem(int slot);
+	// The left button's release: the dragged item, not dropped on a slot, is let go.
+	void endDrag();
 	void setInformationString(int row, int item);
 	void resetInformationString();
 	void setHeavyArmor(bool heavy);
@@ -129,6 +135,7 @@ public:
 	struct Item {
 		bool present = false;
 		bool available = false;
+		bool fieldUnlocked = false;
 		bool active = false;
 		std::string container; // the ItemContainer (empty for row 0)
 		std::string icon, abilityIcon, picture, description;
@@ -138,6 +145,11 @@ public:
 private:
 	void build(int team);
 	void updateAbilityIcons();
+	void resetFieldInformation();
+	bool owns(const std::string& container) const;
+	const world::ObjectTemplate* nextFieldItem(int kit, int branch) const;
+	void selectFieldUpgrade(int kit, int branch);
+	bool spendFieldUpgrade(int kit, int branch);
 	std::string text(const std::string& key) const { return m_localize ? m_localize(key) : key; }
 	std::string setting(const std::string& templateName, const std::string& key) const;
 	bool mainWeapon(const std::string& itemTemplate) const; // its itemIndex is the kit's main weapon one
@@ -148,6 +160,9 @@ private:
 	hud::HudManager& m_hud;
 	std::function<std::string(const std::string&)> m_localize;
 	std::vector<std::string> m_unlocked;
+	std::vector<std::string> m_fieldItems;
+	int m_fieldCredits = 0;
+	int m_fieldKit = -1, m_fieldBranch = -1;
 	bool m_allUnlocked = false;
 	bool m_built = false;
 	int m_team = 0;
@@ -156,7 +171,13 @@ private:
 	bool m_heavy = false;
 	bool m_changed = false; // a choice since the last commit
 	std::array<std::array<Item, kItems>, kRows> m_grid;
-	std::array<std::array<int, kRows>, kKits> m_chosen {}; // the active item per row, per kit (-1 none)
+	struct Pick {
+		int row = -1, index = -1;
+		bool operator==(const Pick& o) const { return row == o.row && index == o.index; }
+	};
+	void equip(int kit, Pick item, int slot);
+	std::array<std::array<Pick, kRows>, kKits> m_slots {}; // the item in each drop slot, per kit
+	Pick m_drag; // the item on the pointer (0x88 / 0x8c)
 	bool m_chosenSet = false;
 	// What the last full update() showed, for skipUnchanged. Every grid change
 	// goes through build(), which counts.

@@ -132,6 +132,7 @@ void FirstPersonRig::setWeapon(const AnimationSystemTemplate* weapon)
 	m_weapon = weapon ? std::make_unique<AnimationState>(m_systems, *weapon) : nullptr;
 	// The new weapon's clips start from the setup pose.
 	m_pose = setupPose(m_skeleton);
+	m_snap = true;
 	combineSprings();
 }
 
@@ -175,6 +176,7 @@ void FirstPersonRig::update(const AnimationInput& input, float seconds, std::vec
 		m_weapon->update(input, seconds);
 		take(*m_weapon, true);
 	}
+	m_previous = m_pose;
 	std::vector<bool> touched;
 	if (m_soldier) {
 		m_soldier->apply(m_skeleton, m_pose, touched);
@@ -182,7 +184,24 @@ void FirstPersonRig::update(const AnimationInput& input, float seconds, std::vec
 	if (m_weapon) {
 		m_weapon->apply(m_skeleton, m_pose, touched);
 	}
+	if (m_snap) {
+		m_previous = m_pose;
+		m_snap = false;
+	}
 	m_world = worldMatrices(m_skeleton, m_pose);
+}
+
+void FirstPersonRig::blend(float alpha)
+{
+	alpha = std::clamp(alpha, 0.0f, 1.0f);
+	LocalPose drawn = m_pose;
+	for (size_t i = 0; i < drawn.rotations.size() && i < m_previous.rotations.size(); ++i) {
+		drawn.rotations[i] = slerp(m_previous.rotations[i], m_pose.rotations[i], alpha);
+		for (size_t k = 0; k < 3; ++k) {
+			drawn.positions[i][k] = m_previous.positions[i][k] + (m_pose.positions[i][k] - m_previous.positions[i][k]) * alpha;
+		}
+	}
+	m_world = worldMatrices(m_skeleton, drawn);
 }
 
 std::vector<std::string> FirstPersonRig::playing() const
@@ -248,29 +267,13 @@ float recoilAt(const std::vector<float>& graph, int ticksSinceShot, float force)
 	return graph[static_cast<size_t>(size - 1 - ticksSinceShot)] * force;
 }
 
-Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode,
-	const Position& eye, float yaw, float pitch, const CameraSpring::V& springOffset)
+namespace {
+
+// The camera node's setup (bind) matrix in model space, inverted (0x005ee860
+// keeps it at soldier template +0x358, 0x006accd0); it is rigid: the inverse
+// is the transposed rotation and the translation taken back through it.
+Matrix setupInverse(const Skeleton& skeleton, int cameraNode)
 {
-	const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
-	// The view's axes as rows (row vectors: model x, y, z go to right, up,
-	// forward).
-	const float right[3] = {cy, 0, -sy};
-	const float up[3] = {-sy * sp, cp, -cy * sp};
-	const float forward[3] = {sy * cp, sp, cy * cp};
-	float origin[3];
-	for (int i = 0; i < 3; ++i) {
-		origin[i] = eye[static_cast<size_t>(i)] + right[i] * springOffset.x + up[i] * springOffset.y
-			+ forward[i] * springOffset.z;
-	}
-	const Matrix view = {right[0], right[1], right[2], 0, up[0], up[1], up[2], 0, forward[0], forward[1], forward[2], 0,
-		origin[0], origin[1], origin[2], 1};
-	(void)pose;
-	if (cameraNode < 0 || static_cast<size_t>(cameraNode) >= skeleton.nodes.size()) {
-		return view;
-	}
-	// The camera node's setup (bind) matrix, inverted (0x005ee860 keeps it
-	// at soldier template +0x358, 0x006accd0); it is rigid: the inverse is
-	// the transposed rotation and the translation taken back through it.
 	Matrix c = matrixFromRotationTranslation(skeleton.nodes[static_cast<size_t>(cameraNode)].rotation,
 		skeleton.nodes[static_cast<size_t>(cameraNode)].position);
 	for (int parent = skeleton.nodes[static_cast<size_t>(cameraNode)].parent; parent >= 0;
@@ -292,7 +295,89 @@ Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>&
 		inverse[static_cast<size_t>(12 + j)] = -sum;
 	}
 	inverse[15] = 1;
-	return multiply(inverse, view);
+	return inverse;
+}
+
+bool validNode(const Skeleton& skeleton, int node)
+{
+	return node >= 0 && static_cast<size_t>(node) < skeleton.nodes.size();
+}
+
+} // namespace
+
+Matrix firstPersonPlacement(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode,
+	const Position& eye, float yaw, float pitch, const CameraSpring::V& springOffset)
+{
+	const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+	// The view's axes as rows (row vectors: model x, y, z go to right, up,
+	// forward).
+	const float right[3] = {cy, 0, -sy};
+	const float up[3] = {-sy * sp, cp, -cy * sp};
+	const float forward[3] = {sy * cp, sp, cy * cp};
+	float origin[3];
+	for (int i = 0; i < 3; ++i) {
+		origin[i] = eye[static_cast<size_t>(i)] + right[i] * springOffset.x + up[i] * springOffset.y
+			+ forward[i] * springOffset.z;
+	}
+	const Matrix view = {right[0], right[1], right[2], 0, up[0], up[1], up[2], 0, forward[0], forward[1], forward[2], 0,
+		origin[0], origin[1], origin[2], 1};
+	(void)pose;
+	if (!validNode(skeleton, cameraNode)) {
+		return view;
+	}
+	return multiply(setupInverse(skeleton, cameraNode), view);
+}
+
+Matrix cameraBoneDelta(const Skeleton& skeleton, const std::vector<Matrix>& pose, int cameraNode)
+{
+	if (!validNode(skeleton, cameraNode) || static_cast<size_t>(cameraNode) >= pose.size()) {
+		return {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+	}
+	return multiply(pose[static_cast<size_t>(cameraNode)], setupInverse(skeleton, cameraNode)); // 0x005edf5e
+}
+
+void rideCameraBone(const Matrix& delta, Position& eye, float& yaw, float& pitch, float& roll)
+{
+	const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+	const float axes[3][3] = {{cy, 0, -sy}, {-sy * sp, cp, -cy * sp}, {sy * cp, sp, cy * cp}}; // right, up, forward
+	// Row r of delta x the view (0x005edf6e): the new axes, then the origin.
+	float rows[4][3] {};
+	for (int r = 0; r < 4; ++r) {
+		for (int j = 0; j < 3; ++j) {
+			for (int k = 0; k < 3; ++k) {
+				rows[r][j] += delta[static_cast<size_t>(r * 4 + k)] * axes[k][j];
+			}
+		}
+	}
+	for (int j = 0; j < 3; ++j) {
+		eye[static_cast<size_t>(j)] += rows[3][j];
+	}
+	const float* f = rows[2];
+	const float* u = rows[1];
+	const float len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+	if (len < 1e-6f) {
+		return;
+	}
+	const float k[3] = {f[0] / len, f[1] / len, f[2] / len};
+	yaw = std::atan2(k[0], k[2]);
+	pitch = std::asin(std::clamp(k[1], -1.0f, 1.0f));
+	// render::Camera's roll: the level up (world up less its share along
+	// the view axis) turned right-handed about the view axis to this up.
+	float level[3] = {-k[0] * k[1], 1 - k[1] * k[1], -k[2] * k[1]};
+	const float levelLen = std::sqrt(level[0] * level[0] + level[1] * level[1] + level[2] * level[2]);
+	if (levelLen < 1e-4f) {
+		return; // looking straight up or down: no level up to measure from
+	}
+	for (float& c : level) {
+		c /= levelLen;
+	}
+	const float side[3] = {k[1] * level[2] - k[2] * level[1], k[2] * level[0] - k[0] * level[2], k[0] * level[1] - k[1] * level[0]};
+	roll = std::atan2(u[0] * side[0] + u[1] * side[1] + u[2] * side[2], u[0] * level[0] + u[1] * level[1] + u[2] * level[2]);
+}
+
+float cameraProximityShake(float phase, float nearness)
+{
+	return std::sin(phase * 6.2831855f) * 0.3f * nearness; // *0x00a739bc
 }
 
 float cameraSpeedShake(float time, float speed, float startSpeed, float maxSpeed)

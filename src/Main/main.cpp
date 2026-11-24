@@ -22,6 +22,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Game/CombatAreas.h"
 #include "Game/GameLogic.h"
+#include "Game/KitUnlocks.h"
 #include "Hud/Hud.h"
 #include "Input/ControlMap.h"
 #include "Input/GameControllers.h"
@@ -63,11 +64,12 @@
 #include "HudMenus.h"
 #include "DeploymentLifecycle.h"
 #include "DeploymentTeam.h"
-#include "StanceKeys.h"
+#include "Game/StanceKeys.h"
 #include "HudMenusChat.h"
 #include "HudMenusComm.h"
 #include "HudMenusKits.h"
 #include "HudMenusVehicles.h"
+#include "MapCommanderMarkers.h"
 #include "MapPlayerMarker.h"
 #include "MapOrderMarker.h"
 #include "MenuBindings.h"
@@ -819,6 +821,10 @@ std::function<void(const std::string&)> g_hudSound;
 int g_inHandSlot = -1;
 // A joined game's weapon key pressed this frame (0 none) and held.
 int g_remoteItemKey = 0;
+// The local position key pressed this frame (1-based, 0 none) and held.
+int g_positionKey = 0;
+bool g_positionKeyHeld = false;
+bool g_positionKeyFiring = false; // the fire button down with the press
 // The tactical rose opened by the commander or a squad's player
 // (0x00754290 → the squad panel's +0x1e4, SELECTED_ALL_SQUADS).
 bool g_allSquads = false;
@@ -903,6 +909,21 @@ void heardCall(int caller, int code, bool local)
 	}
 	g_mapCallsHeard.push_back({caller, code});
 }
+// A call's radio line (0x0042d220's switch): its voice and target channel.
+struct CallVoice {
+	int channel;
+	const char* voice;
+};
+const CallVoice* callVoice(int code)
+{
+	static const CallVoice voices[] = {{6, "medic"}, {1, "need_ammo"}, {1, "need_repair"},
+		{0xf, "revive"} /* TCLocalRevive */, {0x10, "revive"} /* TCAutoLocalRevive */};
+	return code >= 0x33 && code <= 0x37 ? &voices[code - 0x33] : nullptr;
+}
+// The local player's call (set with the radio's console methods).
+std::function<void(int code)> g_sayCall = [](int) {};
+// The revive calls of soldiers that are down (HudMenusComm.h ReviveCalls).
+dice::hfe::menu::ReviveCalls g_reviveCalls;
 // A kit's answers to the calls (the kit's slot 0x38 bytes) by its kitType.
 dice::hfe::menu::MapCalls::Kit mapCallKit(game::GameWorld& round, uint32_t kit)
 {
@@ -981,12 +1002,14 @@ int joinedSpawnGroup(int marker)
 }
 
 void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool commanderScreen, std::optional<float> viewHeading)
+	bool commanderScreen, std::optional<float> viewHeading, uint32_t insideTitan)
 {
 	game::GameWorld::PlayerInfo me;
 	const bool known = world.playerInfo(world.localPlayer(), me);
 	const bool spawning = known && dice::main::deploymentScreenShown(me.alive, g_deploymentOpen, g_spawnScreenHidden);
 	const bool big = spawning || commanderScreen || g_bigMap;
+	const uint32_t minimapTitan = known && me.alive && !big ? insideTitan : 0;
+	hud.setMapInsideTitan(minimapTitan != 0);
 	hud.set("MapShow", known ? 1 : 0);
 	hud.set("MapMinSize", big ? 0 : 1);
 	hud.set("MapFullSize", big ? 1 : 0);
@@ -1133,7 +1156,12 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const bool mine = me.alive && me.vehicle == vehicle.object;
 		const auto relation = dice::hfe::menu::vehicleRelation(occupied, mine, occupantTeam, object->team(), me.team);
 		dice::hfe::menu::VehicleMarker look;
-		if (!dice::hfe::menu::vehicleMarker(t, relation, mine, false, look) || (look.asPlayer && occupied)) {
+		// miniMapIconInside (0x0077dd70: slot 0x50 with Renderer slot 0x30,
+		// the camera inside a Titan): every vehicle that has one while the
+		// camera is inside any Titan, on any map; whose vehicle it is plays
+		// no part.
+		const bool inside = insideTitan != 0;
+		if (!dice::hfe::menu::vehicleMarker(t, relation, inside, false, look) || (look.asPlayer && occupied)) {
 			continue;
 		}
 		// vehicleHud.useVehicleCameraRotation (0x00794f03): turned by its
@@ -1229,10 +1257,12 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// arrow and the icon, kept on the map; one with a call's marker over
 	// the rest (0x007841e0, 0x007829c0).
 	const dice::hfe::menu::MapCalls::Kit localKit = mapCallKit(round, me.kit);
+	std::vector<hud::HudManager::MapMarker> localPlayerMarkers;
 	for (const auto& player : world.playerList()) {
-		if (!player.alive || player.team != me.team || player.id == me.id) {
+		if (!player.alive || player.team != me.team) {
 			continue;
 		}
+		const bool local = player.id == me.id;
 		dice::hfe::menu::MateInput in;
 		in.commander = player.commander;
 		in.squadLeader = player.squadLeader;
@@ -1241,8 +1271,10 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		in.sharesVehicle = me.alive && me.vehicle != 0 && player.vehicle == me.vehicle;
 		in.onFoot = player.vehicle == 0 || player.ladder != 0;
 		in.yaw = player.yaw;
-		in.call = g_mapCalls.icon(player.id);
-		if (localKit.heal || localKit.ammo) {
+		if (!local) {
+			in.call = g_mapCalls.icon(player.id);
+		}
+		if (!local && (localKit.heal || localKit.ammo)) {
 			int magazines = -1, nrOfMags = -1, magSize = -1;
 			for (const game::GameWorld::WeaponAmmo& ammo : round.weaponAmmo(player.id)) {
 				if (ammo.inHand) {
@@ -1257,7 +1289,10 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				player.soldier ? world.objectHealth(player.soldier) : -1, magazines, nrOfMags, magSize);
 		}
 		const dice::hfe::menu::MateMarker look = dice::hfe::menu::mateMarker(in);
-		auto& list = in.call.empty() ? markers : callMarkers;
+		if (!look.drawn) {
+			continue; // seated: the vehicle's icon stands for him
+		}
+		auto& list = local ? localPlayerMarkers : (in.call.empty() ? markers : callMarkers);
 		if (look.disc) {
 			hud::HudManager::MapMarker disc {"Ingame/Player/Icons/Minimap/mini_Health.tga", player.position.x, player.position.z, 16};
 			std::copy(look.discColor, look.discColor + 4, disc.color);
@@ -1278,7 +1313,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		mate.clamp = true;
 		mate.iconAlpha = look.iconAlpha;
 		mate.upright = look.arrow || !in.call.empty(); // the heading is on the arrow, or there is none
-		if (spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
+		if (!local && spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
 			mate.id = kMarkerLeader; // the spawn screen's selectable leader marker
 		}
 		list.push_back(mate);
@@ -1302,43 +1337,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		dots.push_back(dot);
 	}
 	hud.setMiniMapDots(std::move(dots), commanderScreen);
-	// The commanders' work: the UAV's ring, strikes on their way, supply
-	// crates, and the squad's order.
-	physics::Vec3 uav;
-	float uavRadius = 0;
-	if (round.uavArea(me.team, uav, uavRadius)) {
-		markers.push_back({"Ingame/Minimap/Icons/icon_UAV.tga", uav.x, uav.z, 16});
-		markers.back().upright = true; // no angle of their own: 0x0077c610 shows them screen-up
-	}
-	// Each commander tool's mark is a pulsing ring under a 15 x 15 icon
-	// (0x0078eb20 orbital: placedAirstrikeLarge 116; 0x0078eea0 artillery,
-	// 0x0078ece0 supplies: placedAirstrike 58).
-	const auto toolMark = [&markers](const char* ring, float ringSize, const char* icon, float x, float z) {
-		markers.push_back({ring, x, z, ringSize});
-		markers.back().upright = true;
-		markers.back().pulse = true;
-		markers.push_back({icon, x, z, 15});
-		markers.back().upright = true;
-	};
-	for (const auto& strike : round.strikes()) {
-		if (strike.team == me.team) {
-			if (strike.ability == game::GameWorld::CommanderAbility::OrbitalStrike) {
-				toolMark("Ingame/Minimap/Icons/placedAirstrikeLarge.tga", 116, "Ingame/Commander/tools/orbit_strike.tga",
-					strike.target.x, strike.target.z);
-			} else {
-				toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Commander/tools/force_strike.tga",
-					strike.target.x, strike.target.z);
-			}
-		}
-	}
-	// A drop shows for 25 s (0x00792354 → 0x0077d7e0, +0xbc8).
-	for (const uint32_t crate : round.supplyCrates()) {
-		const float age = round.supplyCrateAge(crate);
-		if (const world::Object* object = round.objects().find(crate); object && age >= 0 && age < 25) {
-			toolMark("Ingame/Minimap/Icons/placedAirstrike.tga", 58, "Ingame/Minimap/Icons/icon_supplies.tga",
-				object->position().x, object->position().z);
-		}
-	}
+	dice::hfe::main::appendCommanderMapMarkers(markers, round, me.team);
 	// The squad's leader order and commander order, each by its kind
 	// (menu::orderMapIcon: 0x00779e50 / 0x0077a1a0 → 0x00791090 →
 	// 0x0078b110); the commander's map (player slot 0x128) those of the
@@ -1420,6 +1419,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	if (me.alive) {
 		// Retail's local view layer (0x0078e510), following the active camera.
 		markers.push_back(dice::hfe::menu::localViewMapMarker(me, viewHeading.value_or(me.yaw)));
+		// The soldier icon stays legible over the cone at their shared point.
+		markers.insert(markers.end(), localPlayerMarkers.begin(), localPlayerMarkers.end());
 		hud.setMapFocus(me.position.x, me.position.z);
 	}
 	if (commanderScreen && g_commanderView) {
@@ -1453,6 +1454,7 @@ void updateCommander(hud::HudManager& hud, const host::HudWorld& world, const ga
 	// The right-click menu (state 0x16), not the screen.
 	hud.set("CommanderMenuShow", commander && screen && g_mapMenu == 0x16 ? 1 : 0);
 	if (!commander) {
+		hud.setSatelliteSweep(std::nullopt);
 		return;
 	}
 	using Ability = game::GameWorld::CommanderAbility;
@@ -1465,6 +1467,9 @@ void updateCommander(hud::HudManager& hud, const host::HudWorld& world, const ga
 			 Tool {Ability::Artillery, "Artillery", "Artillery"}, Tool {Ability::Uav, "UAV", "MinimapUAV"},
 			 Tool {Ability::Satellite, "Satellite", "MinimapSatellite"}, Tool {Ability::Supplies, "Supply", "Supply"}}) {
 		const auto state = round.abilityState(me.team, tool.ability);
+		if (tool.ability == Ability::Satellite) {
+			hud.setSatelliteSweep(state.satelliteSweep);
+		}
 		hud.set(std::string("CommanderNo") + tool.name + "Show", state.available ? 0 : 1);
 		hud.set(std::string(tool.name) + "Armor", state.armor);
 		hud.set(std::string(tool.reloading) + "Reloading", state.ready ? 0 : 1);
@@ -1580,9 +1585,10 @@ void updateFlares(hud::HudManager& hud, const host::HudWorld& world, const world
 }
 
 void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
-	bool scoreboard = false, bool commanderScreen = false, std::optional<float> viewHeading = {})
+	bool scoreboard, bool commanderScreen, std::optional<float> viewHeading, uint32_t insideTitan,
+	const nametags::Nametags::View* rangeView)
 {
-	updateMap(hud, world, round, logic, commanderScreen, viewHeading);
+	updateMap(hud, world, round, logic, commanderScreen, viewHeading, insideTitan);
 	updateCommander(hud, world, round, commanderScreen);
 	updateTeams(hud, world, logic);
 	dice::hfe::menu::showScoreboard(hud, scoreboard);
@@ -1629,7 +1635,6 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	hud.set("HitIndicatorIconShow", 0);
 	// In a vehicle: its icon and armour, and a gunner's gun (its HUD by
 	// the firearm's weaponHud.guiIndex, the turret's direction).
-	hud.set("VehicleIconShow", inVehicle ? 1 : 0);
 	hud.set("PrimaryHeatShow", 0);
 	hud.set("TurretIconShow", 0);
 	// The frame's time (the item selection's timer).
@@ -1756,14 +1761,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// frame 0x007c38c0): a seat without a gun shows the soldier's own
 		// (0x007c1f10 run again for player slot 0xb4) and either way the
 		// weapon block takes the soldier's place (UsingChildHud, +0x176).
-		if (known && me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
-			childHud = dice::hfe::menu::hudNumber(round.templates().find(seats[static_cast<size_t>(me.seat)].name),
-						   "vehicleHud.useChildHud", 0) != 0;
-		}
-		childHud = childHud || kitSeat;
-		if (childHud && !heldGunTemplate && !world.joined() && held.gun && held.weapon) {
+		childHud = dice::hfe::menu::hudNumber(look.seat, "vehicleHud.useChildHud", 0) != 0 || kitSeat;
+		const bool personalChute = dice::hfe::menu::usingPersonalParachute(look.vehicle);
+		if (childHud && !heldGunTemplate && held.weapon && (!world.joined() || personalChute)) {
 			heldGun = held.gun;
 			heldGunTemplate = held.weapon;
+			dice::hfe::menu::updateSoldierWeaponHud(hud, held.weapon,
+				world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer()),
+				g_weaponZoomed, false, crosshairActive);
 		}
 		// The gui index (0x007a01e0 -> the runtime VehicleHud's 0x00657660,
 		// HudMenusVehicles.h vehicleGuiIndex): by the seat camera's mode and
@@ -1774,7 +1779,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			gui.controlled = look.seat;
 			gui.weapon = primary.weapon;
 			gui.second = world.seatGroupWeapon(1).weapon;
-			gui.child = !world.joined() ? held.weapon : nullptr;
+			gui.child = !world.joined() || personalChute ? held.weapon : nullptr;
 			gui.cameraMode = g_cameraMode;
 			game::GameWorld::ProjectileCamera riding;
 			gui.projectileCamera = !world.joined() && round.projectileCamera(world.localPlayer(), riding);
@@ -1915,9 +1920,10 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// second.
 		static const world::ObjectTemplate* rangeTemplate = nullptr;
 		static bool rangeFinder = false, distanceCounter = false;
-		if (heldGunTemplate != rangeTemplate) {
+		const bool rangeWeaponChanged = heldGunTemplate != rangeTemplate;
+		if (rangeWeaponChanged) {
 			rangeTemplate = heldGunTemplate;
-			rangeFinder = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasRangeFinder", 0) != 0;
+			rangeFinder = dice::hfe::menu::weaponHasRangeFinder(heldGunTemplate);
 			distanceCounter = dice::hfe::menu::hudNumber(heldGunTemplate, "weaponHud.hasDistanceCounter", 0) != 0;
 		}
 		game::GameWorld::PlayerInfo me;
@@ -1929,10 +1935,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			static bool rangeHit = false;
 			static float rangeDistance = 0;
 			static std::array<float, 3> rangePoint {};
-			if (rangeFinder && (now - rangeAt > 0.1f || now < rangeAt)) {
+			if (rangeFinder && (rangeWeaponChanged || now - rangeAt > 0.1f || now < rangeAt)) {
 				rangeAt = now;
-				const float yaw = me.yaw * 3.14159265f / 180, pitch = me.aimPitch * 3.14159265f / 180;
-				const physics::Vec3 eye {me.position.x, me.position.y + 1.6f, me.position.z};
+				const bool useView = rangeView && !me.vehicle;
+				const float yaw = useView ? rangeView->yaw : me.yaw * 3.14159265f / 180;
+				const float pitch = useView ? rangeView->pitch : me.aimPitch * 3.14159265f / 180;
+				const physics::Vec3 eye = useView
+					? physics::Vec3 {rangeView->position[0], rangeView->position[1], rangeView->position[2]}
+					: me.position + physics::Vec3 {0, 1.6f, 0};
 				const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 				const auto at = [&](float d) { return physics::Vec3 {eye.x + dir.x * d, eye.y + dir.y * d, eye.z + dir.z * d}; };
 				const uint32_t self = me.vehicle ? me.vehicle : me.soldier;
@@ -1987,6 +1997,16 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else {
 		g_weaponHud.hide(hud);
 	}
+	// The hit direction arrow (HitDirectionHud: HUD event 0x39 per hit
+	// taken, 0x00449d80 each frame with the view's heading).
+	{
+		static dice::hfe::menu::HitDirectionHud arrow;
+		game::GameWorld::PlayerInfo self;
+		const bool known = world.playerInfo(world.localPlayer(), self);
+		arrow.update(dt, known ? self.hitDirectionHits : arrow.hits, self.hitDirection, viewHeading.value_or(self.yaw));
+		hud.set("HitDirectionShow", arrow.show ? 1 : 0);
+		hud.set("HitDirectionAngle", arrow.angle);
+	}
 	// The hit indicator (0x007be6e0): with the crosshair shown, its alpha
 	// the local player's (slot 0x90, +0x2a4), shown while not 0.
 	if (hud.number("CrosshairIconShow") != 0) {
@@ -2009,7 +2029,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// The treated player's sounds (0x007a1c30, commander screen or not; its
 	// +0x2fb is the vehicle state, the frame it changes mutes the ammo).
 	static bool wasInVehicle = false;
-	g_receivedSounds = abilityKnown && ability.alive ? dice::hfe::menu::receivedSounds(ability, inVehicle, inVehicle != wasInVehicle) : 0;
+	g_receivedSounds = dice::hfe::menu::updateReceivedSupplyHud(hud, abilityKnown ? &ability : nullptr,
+		inVehicle, inVehicle != wasInVehicle);
 	wasInVehicle = inVehicle;
 	g_abilityBar.apply(hud);
 	// The item selection on foot: the kit's weapons by slot (their
@@ -2022,10 +2043,8 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	g_itemList.items.clear();
 	g_itemList.inHand = -1;
 	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me) && me.alive && !inVehicle) {
-		std::vector<dice::hfe::menu::SelectItem> items;
-		for (const auto& [slot, name] : me.carried) {
-			items.push_back({slot, dice::hfe::menu::hudSetting(round.templates().find(name), "weaponHud.selectIcon"), true});
-		}
+		auto items = dice::hfe::menu::kitSelectItems(me.carried,
+			[&round](const std::string& name) { return round.templates().find(name); });
 		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
 			const world::ObjectTemplate* now = nullptr;
 			for (const auto& [slot, name] : me.carried) {
@@ -2089,9 +2108,39 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// vehicleHud.displaySelectionOnEnter (block +0xbd; the artillery guns
 	// as_ag / us_ag) the list opens for 2 s (+0x20 = 2.0, menu state 0xb).
 	bool seatEntered = false;
+	const int positionKey = std::exchange(g_positionKey, 0);
 	game::GameWorld::PlayerInfo seated;
 	if (inVehicle && world.playerInfo(world.localPlayer(), seated) && seated.vehicle) {
+		// The server's refusal of a position key (GameWorld::seatKey) sends
+		// event 0/5, which shows the passengers' names (0x007a3d70); the
+		// same rule here from the HUD world's seats, so a joined client too.
+		if (positionKey > 0) {
+			const auto occupants = world.vehicleOccupants(seated.vehicle);
+			const auto seats = round.vehicleSeats(seated.vehicle);
+			const auto toggles = [&](int index) {
+				return index < 0 || static_cast<size_t>(index) >= seats.size()
+					|| dice::hfe::menu::hudNumber(round.templates().find(seats[static_cast<size_t>(index)].name),
+						   "allowTogglePosition", 1) != 0;
+			};
+			game::GameWorld::SeatKeyInput key;
+			key.current = seated.seat;
+			key.wanted = positionKey - 1;
+			key.seats = occupants.size();
+			key.currentToggles = toggles(key.current);
+			key.wantedToggles = toggles(key.wanted);
+			key.firing = g_positionKeyFiring;
+			key.requesterAi = seated.ai;
+			if (key.wanted < static_cast<int>(occupants.size())) {
+				key.occupant = occupants[static_cast<size_t>(key.wanted)];
+			}
+			game::GameWorld::PlayerInfo occupant;
+			key.occupantAi = key.occupant >= 0 && world.playerInfo(key.occupant, occupant) && occupant.ai;
+			if (game::GameWorld::seatKey(key) == game::GameWorld::SeatKey::Refused) {
+				g_vehicleHud.showPassengers();
+			}
+		}
 		if (seated.vehicle != seatVehicleWas || seated.seat != seatWas) {
+			g_vehicleHud.showPassengers(); // 0x007a3920, before displaySelectionOnEnter
 			// The vehicle HUD's +0xb4 (0x007a28e0): the last occupied seat's
 			// controlled object a parachute that isn't a pod holds it back.
 			const auto seats = round.vehicleSeats(seated.vehicle);
@@ -2286,34 +2335,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		// destroyed; 0: the Titan gone), the HUD manager's variables of
 		// 0x0044f1a0.
 		hud.set("GameMode", 1);
-		// The silos' row (0x0044c350, each frame): the ten CPCannon%i slots
-		// are cleared, then each silo (the objects of class 10 whose
-		// ancestor's control point gives an index 1..9) shows in slot
-		// index - 1 with its team as the player sees it (1 his, 2 the
-		// enemy's, 0 neutral) and the time to its next missile, "%02d:%02d"
-		// minutes and seconds (its weapon's whole seconds), or "--:--" when
-		// loaded or neutral.
-		std::array<bool, 10> siloShown {};
-		const auto silos = round.missileSilos();
-		for (size_t i = 0; i < silos.size(); ++i) {
-			const int index = silos[i].controlPoint > 0 ? silos[i].controlPoint : static_cast<int>(i) + 1;
-			if (index < 1 || index > 9) {
-				continue;
-			}
-			const std::string n = std::to_string(index - 1);
-			siloShown[static_cast<size_t>(index - 1)] = true;
-			const int side = silos[i].team == team ? 1 : silos[i].team != 0 ? 2 : 0;
-			hud.set("CPCannon" + n + "Team", static_cast<float>(side));
-			const int seconds = silos[i].loaded ? 0 : static_cast<int>(silos[i].reloadLeft);
-			char text[16] = "--:--";
-			if (seconds > 0 && side != 0) {
-				std::snprintf(text, sizeof(text), "%02d:%02d", seconds / 60, seconds % 60);
-			}
-			hud.setString("CPCannon" + n + "String", text);
-		}
-		for (size_t i = 0; i < siloShown.size(); ++i) {
-			hud.set("CPCannon" + std::to_string(i) + "Show", siloShown[i] ? 1 : 0);
-		}
+		dice::hfe::menu::updateTitanSiloHud(hud, round.missileSilos(), team);
 		// The consoles and shields (StrategicObject%iShow, HudMenusVehicles.h's
 		// StrategicObjects: 1 from the round's start, cleared by a destroyed
 		// part with vehicleHud.sendDestroyedHudEvent at its guiIndex,
@@ -2354,8 +2376,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			// centre. The deviation is the weapon's soldier deviation now
 			// (GameWorld::weaponDeviation: the turn, speed, stance and
 			// firing), its minimum without one.
-			// minVisualDeviation pushes the parts out, maxVisualDeviation
-			// holds them (menu::crosshairParts).
+			// min/maxVisualDeviation move nothing (menu::crosshairParts).
 			const float now = world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer());
 			dice::hfe::menu::updateSoldierWeaponHud(hud, rifle, now, false,
 				sprintTest, hud.number("CrosshairIconShow") != 0);
@@ -2481,17 +2502,31 @@ std::string menuMusicFile(const io::FileManager& files)
 // stop when a game takes over (0x00403370); the menu's
 // Sound.playMenuMusic / stopMenuMusic (SwiffPlayer 0x10059dd0 / 0x10059df0,
 // SwiffHost slots 102 / 103: events 0x16 / 0x15, 0x00404590) the same.
+// State 2 (the level's track) gives way to the menu's at once
+// (0x007fd112) and fades on stop like the menu's.
 void menuMusic(int& state, bool play, sound::SoundManager& sounds, const io::FileManager& files)
 {
-	if (play && state == 0) {
+	if (play && state != 1) {
 		const std::string track = menuMusicFile(files);
 		if (!track.empty() && sounds.loadMusic(track) && sounds.playMusic()) {
 			std::printf("menu music %s\n", track.c_str());
 			state = 1;
 		}
-	} else if (!play && state == 1) {
+	} else if (!play && state != 0) {
 		sounds.stopMusic(5.0f);
 		state = 0;
+	}
+}
+
+// 0x007fd200 on ECMenuMenuEvent_InitLoadingScreen (event 0xa/3, posted by
+// the level load at 0x004cbc59): whatever plays stops at once and the
+// level's .desc <music> starts (0x007fcf00, state 2). RemoveLoadingScreen
+// (0xa/5, JOIN GAME: 0x0040cf44) fades it over 5 s, menuMusic(false).
+void levelMusic(int& state, const std::string& track, sound::SoundManager& sounds)
+{
+	if (!track.empty() && sounds.loadMusic(track) && sounds.playMusic()) {
+		std::printf("level music %s\n", track.c_str());
+		state = 2;
 	}
 }
 
@@ -2825,7 +2860,7 @@ struct Session {
 	dice::hfe::menu::MenuHost menuHost;
 	bool menuScriptsRun = false;
 	// The menu's music object (0x007fd030, the game's +0xf4): 0 silent,
-	// 1 the mod's menu track playing.
+	// 1 the mod's menu track playing, 2 the loading level's track.
 	int menuMusic = 0;
 	// Voice chat (Voip/VoiceChat.h): the menu's settings and mic test, the
 	// joined server's voice; updated on its own thread.
@@ -3594,10 +3629,16 @@ int runGame(Options& options, Session& session)
 	// through the virtual file system, wrapped by the game's sound manager.
 	sound::VfsSoundFileSystem soundFiles(files);
 	sound::ISoundEngine* soundEngine = options.sound ? sound::getSoundEngine() : nullptr;
+#if defined(_WIN32)
+	// Native 64-bit Windows cannot load retail's 32-bit BF2OpenAL.dll.
+	constexpr const char* defaultAudioProvider = "3"; // Default Device / System OpenAL
+#else
+	constexpr const char* defaultAudioProvider = "0";
+#endif
 	if (soundEngine) {
 		soundEngine->setFileSystem(&soundFiles);
 		sound::setEnhancedAudio(enhancedSettings.enabled); // HRTF and filters: read when the provider opens
-		if (soundEngine->initialize(2, "0", 32) != 0) {
+		if (soundEngine->initialize(2, defaultAudioProvider, 32) != 0) {
 			std::printf("sound: engine initialisation failed, continuing without sound\n");
 			sound::shutdownSoundEngine();
 			soundEngine = nullptr;
@@ -3738,6 +3779,8 @@ int runGame(Options& options, Session& session)
 	botSettings.botRecovery = &enhancedSettings.botRecovery;
 	botSettings.botMovement = &enhancedSettings.botMovement;
 	botSettings.botTitan = &enhancedSettings.botTitan;
+	botSettings.botCommander = &enhancedSettings.botCommander;
+	botSettings.botPilots = &enhancedSettings.botPilots;
 	botSettings.cornerSteer = &enhancedSettings.cornerSteer;
 	game::registerBotConsoleMethods(console, botSettings);
 	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.
@@ -3948,17 +3991,24 @@ int runGame(Options& options, Session& session)
 			}
 		}
 	}
-	// Apply the loaded profile before loading the remaining sound files.
-	// Retail maps Medium to index 1; startup's temporary index 2 is only
-	// needed until profile scripts have run.
-	if (soundEngine && session.settingsLoaded) {
-		const std::string quality = session.settings.get("AudioSettings.SoundQuality");
-		const int index = dice::hfe::menu::audioQualityIndex(quality);
-		if (sounds.initialize(index, "0", 32) != 0) {
-			std::fprintf(stderr, "sound: failed to apply profile quality %s (index %d)\n", quality.c_str(), index);
-		} else {
-			std::printf("sound: profile quality %s (index %d)\n", quality.c_str(), index);
+	// Apply the profile before loading the remaining sound files. The
+	// bootstrap initializes audio before the profile scripts are available.
+	int appliedVoiceCount = 0;
+	const auto applyAudioProfile = [&](const std::string& quality) {
+		const int index = menu::audioQualityIndex(quality);
+		const int voices = menu::audioVoiceCount(quality, session.settings.number("AudioSettings.ForceNumberOfVoices", 0));
+		if (soundEngine->isInitialized() && soundEngine->qualityLevel() == index && appliedVoiceCount == voices) {
+			return;
 		}
+		if (sounds.initialize(index, defaultAudioProvider, voices) != 0) {
+			std::fprintf(stderr, "sound: failed to apply profile quality %s (index %d), %d voices\n", quality.c_str(), index, voices);
+			return;
+		}
+		appliedVoiceCount = voices;
+		std::printf("sound: profile quality %s (index %d), %d requested voices\n", quality.c_str(), index, voices);
+	};
+	if (soundEngine && session.settingsLoaded) {
+		applyAudioProfile(session.settings.get("AudioSettings.SoundQuality"));
 	}
 	sounds.reloadSoundFiles();
 
@@ -4085,13 +4135,7 @@ int runGame(Options& options, Session& session)
 			const std::string quality = session.menuBindings
 				? session.menuBindings->text("AudioSettings.SoundQuality")
 				: session.settings.get("AudioSettings.SoundQuality");
-			const int index = dice::hfe::menu::audioQualityIndex(quality);
-			if (soundEngine->qualityLevel() != index) {
-				if (sounds.initialize(index, "0", 32) != 0)
-					std::fprintf(stderr, "sound: failed to apply quality %s (index %d)\n", quality.c_str(), index);
-				else
-					std::printf("sound: applied quality %s (index %d)\n", quality.c_str(), index);
-			}
+			applyAudioProfile(quality);
 		}
 		if (!session.menuBindings) {
 			// No menu: the profile's AudioSettings (Audio.con) as the audio
@@ -4643,7 +4687,11 @@ int runGame(Options& options, Session& session)
 	// set at the end of the build, cleared by the button. Not for --screenshot, --simulate,
 	// demos, a game we host or a joined server, which enter the game at once as before.
 	bool joinPending = false;
-	loadingBindings.onReadyToPlay = [&joinPending](bool) { joinPending = false; };
+	std::string loadingTrack; // the level's .desc <music>, played once its archives are mounted
+	loadingBindings.onReadyToPlay = [&joinPending, &session, &sounds, &files](bool) {
+		joinPending = false;
+		menuMusic(session.menuMusic, false, sounds, files); // RemoveLoadingScreen: the level's track fades
+	};
 #if BF2142_HAS_RENDERER
 	std::optional<render::LevelSources> loadingSources;
 	std::unique_ptr<Window::MenuScreen> loadingScreen;
@@ -4665,6 +4713,9 @@ int runGame(Options& options, Session& session)
 			summary.mapName = level.name;
 			summary.mapDescriptionKey = level.briefingKey;
 			summary.gameModeDescriptionKey = level.gameModeKey;
+			if (options.screenshot.empty()) {
+				loadingTrack = level.music;
+			}
 		}
 		loadingBindings.setSummary(summary);
 		std::vector<uint8_t> dfm;
@@ -4685,6 +4736,9 @@ int runGame(Options& options, Session& session)
 #if BF2142_HAS_RENDERER
 		for (int i = 0; loadingScreen && i < frames; ++i) {
 			loadingScreen->frame();
+			// 0x0040c1ed, each frame: the loading screen mutes groups 0 and 2 (reason 2).
+			sounds.setMuted(2, true);
+			sounds.update(1);
 		}
 #endif
 	};
@@ -4715,6 +4769,9 @@ int runGame(Options& options, Session& session)
 			}
 		}
 		files.setMountingAllowed(false);
+		// 0x004d3ad7: InitLoadingScreen (and its music) after the level's
+		// archives, which may hold the track (Wake: levels/wake_island_2142/Music).
+		levelMusic(session.menuMusic, loadingTrack, sounds);
 		loadingStep(0.1f);
 		std::printf("%zu template scripts run from Objects/\n",
 			world::loadObjectTemplates(console, files, "Objects/", options.bots > 0));
@@ -4832,6 +4889,7 @@ int runGame(Options& options, Session& session)
 		game::GameWorld round(templates, objects);
 		round.setGuidedCameraEase(&enhancedSettings.enabled, &enhancedSettings.guidedCameraEase);
 		round.setSoftLanding(&enhancedSettings.enabled, &enhancedSettings.softLanding);
+		round.setTitanKitFloors(&enhancedSettings.enabled, &enhancedSettings.titanKitFloors);
 		// The players as the HUD has them (HudWorld.h): a joined game's,
 		// the server's (g_remoteHud, set while one runs), else the round's.
 		const auto hudPlayer = [&round](int id, game::GameWorld::PlayerInfo& out) {
@@ -4869,6 +4927,16 @@ int runGame(Options& options, Session& session)
 		if (heightmaps.hasSea()) {
 			round.setWaterLevel(heightmaps.seaWaterLevel());
 		}
+		std::vector<std::string> remoteKitSelection;
+		const auto selectRemoteKit = [&](net::GameClient& server, int team, int kit) {
+			std::array<int32_t, 4> masks {-1, -1, -1, -1};
+			game::visitKitUnlocks(templates, gameLogic.team(team), kit, [&](const std::string& name, int branch, int level) {
+				if (std::find(remoteKitSelection.begin(), remoteKitSelection.end(), name) != remoteKitSelection.end()) {
+					masks[branch] = std::max(0, masks[branch]) | (1 << level);
+				}
+			});
+			server.selectKit(kit, masks);
+		};
 		// The spawn screen's kit buttons: the kit (by the team's kit index,
 		// gameLogic.setKit) of the local player's next spawn.
 		int localKit = 1;
@@ -4877,10 +4945,10 @@ int runGame(Options& options, Session& session)
 				// A joined game's (SelectKit, 0x0050ae90): the server's round
 				// takes it by the team's index (0x0050b010).
 				game::GameWorld::PlayerInfo me;
-				const game::Team& team = gameLogic.team(hudPlayer(hudLocal(), me) && me.team == 1 ? 1 : 2);
-				if (index >= 0 && static_cast<size_t>(index) < team.kits.size()) {
+				const int team = hudPlayer(hudLocal(), me) && me.team == 1 ? 1 : 2;
+				if (index >= 0 && static_cast<size_t>(index) < gameLogic.team(team).kits.size()) {
 					localKit = index;
-					server->selectKit(index);
+					selectRemoteKit(*server, team, index);
 				}
 				return;
 			}
@@ -5366,7 +5434,23 @@ int runGame(Options& options, Session& session)
 		dice::hfe::menu::KitMenu kitMenu(round, gameLogic, templates, hudManager);
 		kitMenu.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		kitMenu.bind(console);
+		kitMenu.onSpendFieldUpgrade = [&](int kit, int branch) {
+			if (net::GameClient* server = joinedServer()) {
+				const auto& remote = server->world();
+				if (remote.localPlayer() < 0 || remote.fieldUnlockCredits() <= 0) return false;
+				server->sendEvent(net::makeFieldUnlock(remote.localPlayer(), 0, kit, branch));
+				return true;
+			}
+			return round.spendFieldUnlock(round.localPlayer(), gameLogic, kit, branch);
+		};
 		kitMenu.onEquip = [&](const std::vector<std::string>& containers) {
+			if (net::GameClient* server = joinedServer()) {
+				game::GameWorld::PlayerInfo me;
+				if (!hudPlayer(hudLocal(), me)) return;
+				remoteKitSelection = containers;
+				selectRemoteKit(*server, me.team, localKit);
+				return;
+			}
 			if (round.localPlayer() < 0) {
 				return;
 			}
@@ -5440,32 +5524,38 @@ int runGame(Options& options, Session& session)
 		bindMethod(console, "game.radioMessage", ConsoleAccess::Anyone, [sayRadio](std::string channel, std::string voice) {
 			sayRadio(game::GameWorld::targetChannel(channel), voice, 0);
 		});
-		for (const auto& [command, channel, voice] : std::vector<std::tuple<const char*, int, const char*>> {
-				 {"Radio.callForMedic", 6, "medic"}, {"Radio.callForAmmo", 1, "need_ammo"},
-				 {"Radio.callForRepair", 1, "need_repair"}}) {
-			const int c = channel;
-			const std::string v = voice;
-			// The HUD's codes 0x33..0x35 (the game's slot 0xd8) reach the
-			// NametagManager too (0x100f19c0): the local player's own call.
-			const int code = v == "medic" ? nametags::CallMedic : v == "need_ammo" ? nametags::CallAmmo : nametags::CallRepair;
-			// 0x0042d220: the Spotted event with the call's code (the caller's
-			// soldier and team: to the server from a client, handed out by a
-			// server, 0x0050e910: the team's name tags), then the game's slot
-			// 0x54 (the radio, as slot 0x50 without the spam check).
-			bindMethod(console, command, ConsoleAccess::Anyone, [sayRadio, &hudLocal, &joinedServer, &session, &round, c, v, code] {
-				net::SpottedInfo call;
-				call.message = static_cast<uint32_t>(code);
-				if (net::GameClient* server = joinedServer()) {
-					if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
-						call.team = me->team;
-					}
-					server->sendEvent(net::makeSpotted(call));
-				} else if (session.hosted && round.localPlayer() >= 0) {
-					session.hosted->spotted(call, round.localPlayer());
+		// The local player's call (the game's slot 0xd8, 0x0042d220): the
+		// Spotted event with its code (the caller's soldier and team: to the
+		// server from a client, handed out by a server, 0x0050e910: the
+		// team's name tags and maps), then the game's slot 0x54 (the radio,
+		// as slot 0x50 without the spam check); the NametagManager
+		// (0x100f19c0) and the map take it as the local player's own.
+		g_sayCall = [sayRadio, &hudLocal, &joinedServer, &session, &round](int code) {
+			const CallVoice* v = callVoice(code);
+			if (!v) {
+				return;
+			}
+			net::SpottedInfo call;
+			call.message = static_cast<uint32_t>(code);
+			if (net::GameClient* server = joinedServer()) {
+				if (const net::RemotePlayer* me = server->world().player(server->world().localPlayer())) {
+					call.team = me->team;
 				}
-				sayRadio(c, v, 0, false);
-				heardCall(hudLocal(), code, true);
-			});
+				server->sendEvent(net::makeSpotted(call));
+			} else if (session.hosted && round.localPlayer() >= 0) {
+				session.hosted->spotted(call, round.localPlayer());
+			}
+			sayRadio(v->channel, v->voice, 0, false);
+			heardCall(hudLocal(), code, true);
+		};
+		// The console's Radio.callFor* outlive this round's locals the call holds.
+		struct SayCallReset {
+			~SayCallReset() { g_sayCall = [](int) {}; }
+		} sayCallReset;
+		for (const auto& [command, code] : std::vector<std::pair<const char*, int>> {
+				 {"Radio.callForMedic", nametags::CallMedic}, {"Radio.callForAmmo", nametags::CallAmmo},
+				 {"Radio.callForRepair", nametags::CallRepair}}) {
+			bindMethod(console, command, ConsoleAccess::Anyone, [c = code] { g_sayCall(c); });
 		}
 		// The crosshair's enemy reported to the squad (0x007c8160: the game's
 		// slot 0xd4, 0x0042d110: the spam check, then the Spotted event with
@@ -6070,19 +6160,10 @@ int runGame(Options& options, Session& session)
 				const bool byOther = !killers.empty() && round.playerInfo(killers.front(), k) && k.id != victim;
 				std::string weapon;
 				if (byOther) {
-					if (const world::Object* vehicle = k.vehicle ? round.objects().find(k.vehicle) : nullptr) {
-						const auto it = vehicle->objectTemplate()->settings().find("vehicleHud.hudName");
-						weapon = it != vehicle->objectTemplate()->settings().end() ? it->second : "";
-					} else {
-						for (const auto& [slot, name] : k.carried) {
-							const world::ObjectTemplate* t = slot == k.inHandSlot ? templates.find(name) : nullptr;
-							const auto it = t ? t->settings().find("weaponHud.hudName") : decltype(t->settings().end()) {};
-							if (t && it != t->settings().end()) {
-								weapon = it->second;
-							}
-						}
-					}
-					weapon.erase(std::remove(weapon.begin(), weapon.end(), '"'), weapon.end());
+					const world::ObjectTemplate *vehicle = nullptr, *gun = nullptr;
+					round.killTemplates(k, vehicle, gun);
+					weapon = dice::hfe::menu::HudChat::killWeapon(vehicle, gun,
+						enhancedSettings.enabled && enhancedSettings.killWeaponNames);
 				}
 				const auto speaker = !byOther                ? dice::hfe::menu::HudChat::Speaker::Neutral
 					: k.team == me.team && k.squad && k.squad == me.squad ? dice::hfe::menu::HudChat::Speaker::Squad
@@ -6482,6 +6563,11 @@ int runGame(Options& options, Session& session)
 				return;
 			}
 			hudPlayer(hudLocal(), me);
+			// Another player's message (0x0042bef0 kind 3) flashes his tag
+			// (local message 2/0x41, ECHudHEFireFlashStart).
+			if (g_nametags && sender != me.id) {
+				g_nametags->radioFlash(sender);
+			}
 			using Speaker = dice::hfe::menu::HudChat::Speaker;
 			const Speaker speaker = from.commander ? Speaker::Commander
 				: from.team == me.team && from.squad && from.squad == me.squad ? Speaker::Squad
@@ -6489,8 +6575,9 @@ int runGame(Options& options, Session& session)
 			chat.addChat(from.name, line, 0, speaker, !from.alive);
 		};
 		// The name tags' calls come only through the game's slot 0xd8
-		// (0x0042d220: Radio.callFor*, and the local soldier's own 0x36 / 0x37,
-		// 0x00585df0 / 0x00587b90) and, joined, the Spotted event's message;
+		// (0x0042d220: Radio.callFor*, and the revive calls 0x36 / 0x37,
+		// 0x00585df0 / 0x00587b90: ReviveCalls, g_sayCall and onTicks' bots)
+		// and, joined, the Spotted event's message;
 		// nothing of AIDLL's calls it: a bot's "medic" is a plain
 		// RadioMessage (AIDLL's send, 0x00896270, event 6 / vtable 0x009284b0),
 		// whose handler 0x0042e0c0 plays the voice and the text and lights no
@@ -6941,8 +7028,10 @@ int runGame(Options& options, Session& session)
 		g_remoteDeviation = -1;
 		if (session.client) {
 			session.client->onMoveSent = [&prediction, &carPrediction, &remoteDeviation, &playerCamera](const net::PlayerMove& move) {
-				prediction.step(move);
+				// The soldier as the move finds him, as the server's stepWeaponFeel reads him before the step.
+				const host::SoldierPrediction::Feel feel = prediction.step(move);
 				carPrediction.step(move);
+				remoteDeviation.inputs.stance.prone = feel.prone;
 				const game::SoldierInput in = net::soldierInputFromMove(move, remoteDeviation.inputs);
 				const world::ObjectTemplate* weapon = g_remoteHud && prediction.active() ? g_remoteHud->heldWeapon().weapon : nullptr;
 				if (weapon != remoteDeviation.weapon) {
@@ -6956,8 +7045,10 @@ int runGame(Options& options, Session& session)
 				constexpr float kDegreesPerUnit = 5;
 				const float lookX = in.turn / kDegreesPerUnit, lookY = -(in.aimPitch - remoteDeviation.lastPitch) / kDegreesPerUnit;
 				remoteDeviation.lastPitch = in.aimPitch;
-				const int stance = in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0;
-				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, !prediction.onGround(), in.fire, stance,
+				const int stance = game::SoldierDeviation::stanceIndex(
+					in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0, feel.onGround, false);
+				const bool misc = game::SoldierDeviation::miscFlag(in.jumpKey, in.lieKey, feel.getUp, feel.swimming, false);
+				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, misc, in.fire, stance,
 					playerCamera.zoomLevel() > 0);
 				g_remoteDeviation = remoteDeviation.deviation.deviation();
 			};
@@ -7119,6 +7210,19 @@ int runGame(Options& options, Session& session)
 		} menusUnhook {squadMenu, commanderMenu, squadRequests};
 		// A joined game's soldier for the first-person view.
 		if (session.client) {
+			// The vehicles whose driver seat (the root ghost's, part 0) is taken.
+			playerCamera.setRemoteDriven([&session, &ghostObjects] {
+				std::vector<uint32_t> driven;
+				if (session.client) {
+					for (const net::RemoteObject& ghost : session.client->world().objectList()) {
+						const auto object = ghostObjects.find(ghost.ghost);
+						if ((!ghost.rootGhost || ghost.rootGhost == ghost.ghost) && ghost.occupant >= 0 && object != ghostObjects.end()) {
+							driven.push_back(object->second);
+						}
+					}
+				}
+				return driven;
+			});
 			playerCamera.setRemote([&session, &ghostObjects, &objects, &templates, &remoteLook, &ownFeet, &prediction, &round](
 									   PlayerCamera::Remote& me) {
 				if (!session.client || !session.client->world().hasControlObject()) {
@@ -7251,6 +7355,7 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		float remoteActionsPitch = 0; // the aim the last --remote-actions move carried
+		bool actProne = false;      // the scripted pose Prone as last sent
 		std::set<size_t> remoteActionsDone; // --remote-actions' requests already sent (by their place in the list)
 		bool joinedLevelLoaded = false; // told the client (LoadComplete goes now)
 		const auto remoteStep = [&] {
@@ -7319,7 +7424,7 @@ int runGame(Options& options, Session& session)
 								client.selectSpawnGroup(second == std::string::npos ? -1 : static_cast<int>(arg));
 							} else if (op == "kit") {
 								localKit = static_cast<int>(arg);
-								client.selectKit(localKit);
+								selectRemoteKit(client, myTeam(), localKit);
 							} else if (op == "team") {
 								client.selectTeam(static_cast<int>(arg));
 							} else if (op == "suicide") {
@@ -7330,7 +7435,7 @@ int runGame(Options& options, Session& session)
 								client.joinSquad(static_cast<int>(arg));
 							} else if (op == "leader") {
 								// The spawn screen's squad leader marker.
-								client.selectKit(localKit);
+								selectRemoteKit(client, myTeam(), localKit);
 								const int group = joinedSpawnGroup(kMarkerLeader);
 								client.selectSpawnGroup(group);
 								if (options.verbose) {
@@ -7353,7 +7458,7 @@ int runGame(Options& options, Session& session)
 					} else if (op == "nextitem" || op == "previtem") {
 						act.itemStep = pressNow ? (op == "nextitem" ? 1 : -1) : 0;
 					} else if (op == "weapon") {
-						act.toggleWeapon = pressNow; // F: a seat's next weapon
+						act.toggleWeapon = pressNow; // F: next weapon
 					} else if (op == "firemode") {
 						act.toggleFireRate = pressNow;
 					} else if (op == "flare") {
@@ -7480,6 +7585,9 @@ int runGame(Options& options, Session& session)
 				playerCamera.setAltFire(act.altFire);
 				remoteLook.fire = act.fire;
 				remoteLook.stance = act.pose == game::SoldierPose::Prone ? 2 : act.pose == game::SoldierPose::Crouch ? 1 : 0;
+				// A scripted pose is a latched one: the wire takes a lie press when it changes.
+				act.lieKey = (act.pose == game::SoldierPose::Prone) != actProne;
+				actProne = act.pose == game::SoldierPose::Prone;
 				client.setInput(net::playerInputFrom(act, remoteActionsPitch));
 				remoteActionsPitch = act.aimPitch;
 			}
@@ -7523,6 +7631,9 @@ int runGame(Options& options, Session& session)
 				// slot 0x20c(1), the alpha to 1).
 				if (state && state->hasOwn && state->own.hitIndicator && remoteHud) {
 					remoteHud->hitIndicator = 1;
+				}
+				if (state && state->hasOwn && remoteHud) {
+					remoteHud->ownHitDirection(state->own.hasHitDirection, state->own.hitDirection);
 				}
 				if (state && record.vehicle != 0 && !state->groups.empty()
 					&& state->groups.front().kind == net::NetworkableKind::SimpleObject) {
@@ -7800,6 +7911,13 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
+				if (ghost.supplyLanded) {
+					const auto placed = ghostObjects.find(ghost.ghost);
+					world::Object* object = placed != ghostObjects.end() ? objects.find(placed->second) : nullptr;
+					if (object && !object->childDisabled("supply_parachute")) {
+						object->disableChild("supply_parachute");
+					}
+				}
 			}
 			// The players' living soldiers on foot, animated from their ghosts
 			// (GameWorld::animateRemoteSoldier: posed and holding the weapon
@@ -7998,12 +8116,13 @@ int runGame(Options& options, Session& session)
 					}
 				}
 			}
-			// A kit a living player carries is his soldier's child (0x005718d0
-			// -> 0x00571d10): it follows him and is skinned to his skeleton
+			// A player's kit is his soldier's child (0x005718d0 -> 0x00571d10),
+			// dead or alive, until HandleDrop lets it go (the body landed,
+			// 0x0058da3f): it follows him and is skinned to his skeleton
 			// (GameWorld::followKit); a dropped one stays (geometry.dropGeom).
 			std::map<uint32_t, uint32_t> wornKits;
 			for (const net::RemotePlayer& p : client.world().playerList()) {
-				const auto kit = p.alive && p.kitGhost ? ghostObjects.find(p.kitGhost) : ghostObjects.end();
+				const auto kit = p.kitGhost ? ghostObjects.find(p.kitGhost) : ghostObjects.end();
 				const auto body = p.soldierGhost ? ghostObjects.find(p.soldierGhost) : ghostObjects.end();
 				const world::Object* soldier = body != ghostObjects.end() ? objects.find(body->second) : nullptr;
 				if (world::Object* worn = kit != ghostObjects.end() && soldier ? objects.find(kit->second) : nullptr) {
@@ -8074,7 +8193,8 @@ int runGame(Options& options, Session& session)
 						}
 					}
 				}
-				client.selectKit(localKit);
+				const int team = session.joinTeam != 0 ? session.joinTeam : me ? me->team : 2;
+				selectRemoteKit(client, team, localKit);
 				client.selectSpawnGroup(-1);
 			}
 			const net::RemotePlayer* self = client.world().player(client.world().localPlayer());
@@ -8101,7 +8221,11 @@ int runGame(Options& options, Session& session)
 				const net::RemotePlayer* victim = client.world().player(kill.victim);
 				const net::RemotePlayer* killer = client.world().player(kill.attacker);
 				if (victim) {
-					chat.addKill(killer && killer != victim ? killer->name : std::string(), victim->name, "",
+					const std::string weapon = killer && killer != victim
+						? dice::hfe::menu::HudChat::killWeapon(templates.findById(kill.vehicleTemplate),
+							  templates.findById(kill.weaponTemplate), enhancedSettings.enabled && enhancedSettings.killWeaponNames)
+						: std::string();
+					chat.addKill(killer && killer != victim ? killer->name : std::string(), victim->name, weapon,
 						killer && killer->team == victim->team, speakerOf(killer));
 					if (killer && self && kill.attacker == client.world().localPlayer() && !killer->commander && killer->team != victim->team) {
 						chat.addKillScore(victim->name); // 0x0075a07a
@@ -8532,6 +8656,7 @@ int runGame(Options& options, Session& session)
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
 			driveTrace();
+			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
@@ -8553,6 +8678,7 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.insideView();
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			round.tick(1.0f / 30.0f);
+			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
 			gameLogic.tick(1.0f / 30.0f);
@@ -8710,7 +8836,7 @@ int runGame(Options& options, Session& session)
 				const game::Kit& kit = kits[static_cast<size_t>(i / 2) % kits.size()];
 				round.setKit(bot, kit.name, kit.soldier);
 			}
-			round.joinSquad(bot, round.openSquad(team));
+			round.joinAiSquad(bot); // AIDLL 0x10089000
 			if (!round.spawnSoldier(bot)) {
 				std::fprintf(stderr, "no spawn point for bot %d (team %d)\n", i + 1, team);
 			}
@@ -9491,6 +9617,8 @@ int runGame(Options& options, Session& session)
 					options.simulate == 0) {
 					loadingBindings.setLevelLoaded(); // 0x004cbea0: the movie now offers JOIN GAME
 					joinPending = true;
+				} else {
+					menuMusic(session.menuMusic, false, sounds, files); // no JOIN GAME wait: the screen goes now
 				}
 				loadingScreen.reset();
 			}
@@ -9507,6 +9635,8 @@ int runGame(Options& options, Session& session)
 				cameraObject ? cameraObject->id() : 0);
 		};
 		sources.enhanced = &enhancedSettings;
+		std::unordered_map<uint32_t, std::array<float, 3>> drawnPositions; // filled by syncObjects, read by the tags
+		sources.drawnPositions = &drawnPositions;
 		sources.hemi = &hemiSettings;
 		sources.particles = &particleSettings;
 		sources.overgrowth = &overgrowthSettings;
@@ -9581,7 +9711,7 @@ int runGame(Options& options, Session& session)
 		// What the post-production follows: the vehicle's EMP, a Titan's core
 		// exploding, and a zoomed vehicle weapon's camera effect
 		// (weaponHud.enablePostProcessingOnGuiIndex naming the HUD shown).
-		sources.postEffects = [&round, &playerCamera, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
+		sources.postEffects = [&round, &playerCamera, &enhancedSettings, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
 			game::GameWorld::PlayerInfo me;
 			// The soldier's own EMP on foot, and a tinnitus from an explosion near.
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && !me.vehicle) {
@@ -9589,8 +9719,10 @@ int runGame(Options& options, Session& session)
 			}
 			effects.tinnitusSeconds = round.takeTinnitus();
 			// Through a guided round's camera (useProjectileCamera): the
-			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect").
-			host::roundCameraEffects(round, round.localPlayer(), effects);
+			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect"),
+			// which retail never runs: only with enhanced.tvEffect.
+			host::roundCameraEffects(round, round.localPlayer(), effects,
+				enhancedSettings.enabled && enhancedSettings.tvEffect);
 			effects.viewTinted = playerCamera.viewColor(effects.viewTint, effects.viewSaturation);
 			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
 				effects.vehicleEmpLevel = round.empLevel(me.vehicle);
@@ -9624,7 +9756,7 @@ int runGame(Options& options, Session& session)
 			const bool fromRound = round.projectileCamera(round.localPlayer(), view);
 			roundVisuals.meshes(round.projectiles(), roundMeshes, fromRound ? view.serial : 0);
 			for (const client::RoundVisuals::Mesh& mesh : roundMeshes) {
-				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation});
+				out.push_back({mesh.objectTemplate, mesh.position, mesh.rotation, mesh.serial});
 			}
 			armorMeshes.clear();
 			round.armorEffectMeshes(armorMeshes); // the armour effects' own meshes (the IFV cells' glow)
@@ -9658,17 +9790,16 @@ int runGame(Options& options, Session& session)
 		nametags.setIcons(&g_tagIcons);
 		nametags.setFog(lights.fogStartEndAndBase); // the enemies' fog fade (0x100f09b0)
 		nametags.setWorld(g_remoteHud); // a joined game's: the server's players and requests
+		nametags.setDrawnPositions(&drawnPositions);
 		g_nametags = &nametags;
 		g_mapPointSpots.clear();
 		g_mapCalls.clear(); // a new map node's list (0x00784cf0)
+		g_reviveCalls.clear();
 		g_mapCallsHeard.clear();
 		g_mapCallsTime = -1;
 		struct TagsReset {
 			~TagsReset() { g_nametags = nullptr; }
 		} tagsReset;
-		// The camera inside a Titan, as the renderer found it last frame.
-		static bool cameraInTitan = false;
-		sources.cameraInTitanOut = &cameraInTitan;
 		// The lock-on weapons' markers (Bf2ObjectMarkerNode, 0x007e6520):
 		// the enemy objects carrying a target object of the marker's type
 		// (HeatObject TTHeat on the aircraft, LaserTarget_vehicle TTLaser,
@@ -9728,21 +9859,43 @@ int runGame(Options& options, Session& session)
 			std::sort(targets.begin(), targets.end(), [](const auto& a, const auto& b) { return a.distance < b.distance; });
 			return targets;
 		});
+		int previousFieldUnlockCredits = 0;
+		game::UnlockMasks lastOwnedMasks {}, lastFieldMasks {};
+		std::vector<std::string> remoteOwned, remoteFieldItems;
 		sources.overlay = [&](float seconds) {
 			// Leaving the spawn screen closes the customise screen (HudManager's menu hide calls 0x00798070, e.g. 0x00754df4);
 			// CustomInfoShow otherwise keeps the minimap's MapItems node hidden (HudElementsMap.con: AND CustomInfoShow 0).
-			if (kitMenu.customOpen() && hudManager.number("SpawnShow") == 0) {
-				kitMenu.closeCustomInterface();
+			if (hudManager.number("SpawnShow") == 0) {
+				if (kitMenu.customOpen()) kitMenu.closeCustomInterface();
+				if (hudManager.number("UnlocksShow") != 0) kitMenu.closeFieldUpgrades();
 			}
-			kitMenu.setUnlocked(round.localPlayerUnlocks, round.unlockAllByDefault);
+			game::GameWorld::PlayerInfo kitPlayer;
+			const bool hasKitPlayer = hudPlayer(hudLocal(), kitPlayer);
+			if (session.client) {
+				const auto& remote = session.client->world();
+				if (lastOwnedMasks != remote.ownedUnlockMasks()) {
+					lastOwnedMasks = remote.ownedUnlockMasks();
+					remoteOwned = game::kitUnlockNames(templates, gameLogic, lastOwnedMasks);
+				}
+				if (lastFieldMasks != remote.fieldUnlockMasks()) {
+					lastFieldMasks = remote.fieldUnlockMasks();
+					remoteFieldItems = game::kitUnlockNames(templates, gameLogic, lastFieldMasks);
+				}
+				kitMenu.setUnlocked(remoteOwned, false);
+				kitMenu.setFieldUpgrades(kitPlayer.fieldUnlockCredits, remoteFieldItems);
+			} else {
+				kitMenu.setUnlocked(round.ownedKitUnlockItems(round.localPlayer()), round.unlockAllByDefault);
+				kitMenu.setFieldUpgrades(kitPlayer.fieldUnlockCredits, round.fieldUnlockItems(round.localPlayer()));
+			}
+			if (kitPlayer.fieldUnlockCredits > previousFieldUnlockCredits) {
+				chat.addPersonal(localization.text("HUD_TEXT_FIELDUPGRADE"));
+				sounds.playSound("fieldunlock");
+			}
+			previousFieldUnlockCredits = kitPlayer.fieldUnlockCredits;
 			kitMenu.setKit(localKit);
 			kitMenu.skipUnchanged = enhancedSettings.enabled;
-			if (game::GameWorld::PlayerInfo me; hudPlayer(hudLocal(), me)) {
-				kitMenu.setAlive(me.alive);
-			} else {
-				kitMenu.setAlive(false);
-			}
-			kitMenu.update(round.playerTeam() == 1 ? 1 : 2);
+			kitMenu.setAlive(hasKitPlayer && kitPlayer.alive);
+			kitMenu.update(hasKitPlayer ? kitPlayer.team : round.playerTeam());
 			kitMenu.commit();
 			trackKills();
 			chat.update(seconds);
@@ -9815,7 +9968,13 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				if (!hudPlayer(hudLocal(), me) || !me.commander) closeCommander();
 			}
-			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading);
+			const auto& eye = tagView.position;
+			// The frame's camera inside a Titan (RendDX9 +0x895, set as each scene
+			// begins in 0x1002cef0; Renderer slot 0x30, 0x10030880): the commander
+			// screen's overhead picture leaves the camera the player's.
+			const uint32_t insideTitan = tagViewSeen ? round.cameraTitan({eye[0], eye[1], eye[2]}) : 0;
+			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading, insideTitan,
+				tagViewSeen && playerCamera.firstPerson ? &tagView : nullptr);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
 			// category of what he controls (0 on foot).
@@ -9871,7 +10030,7 @@ int runGame(Options& options, Session& session)
 					help.manDown = known && self.manDown;
 					help.inVehicle = vehicle != nullptr;
 					help.onFoot = help.alive && !vehicle;
-					help.spawnScreen = known && (self.manDown ? g_deploymentOpen : dice::main::deploymentScreenShown(self.alive, g_deploymentOpen, g_spawnScreenHidden));
+					help.spawnScreen = known && dice::main::deploymentScreenShown(self.alive, g_deploymentOpen, g_spawnScreenHidden);
 					help.commanderScreen = commanderScreen;
 					help.menuOpen = scoreboardHeld || commanderScreen || g_mapMenu != 0;
 					help.squad = known ? self.squad : 0;
@@ -10105,7 +10264,7 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo me;
 				const host::HudWorld& shown = hudWorld();
 				const bool known = shown.playerInfo(shown.localPlayer(), me);
-				dice::hfe::menu::updateSquadInfo(hudManager, known, me.commander, me.squad, me.squadLeader, commanderScreen,
+				dice::hfe::menu::updateSquadInfo(hudManager, known, me, commanderScreen,
 					[&localization](const std::string& id) { return localization.text(id); });
 			}
 			{
@@ -10190,7 +10349,7 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			// The 3D name tags under the HUD (RendDX9's NametagManager).
-			nametags.setInsideTitan(cameraInTitan);
+			nametags.setInsideTitan(insideTitan);
 			std::vector<hud::HudQuad> quads = nametags.frame(round, round.objects(), tagView, seconds);
 			if (!rendererSettings.drawNametags) {
 				quads.clear(); // renderer.drawNametags (+0x697, 0x1002cef0)
@@ -10230,6 +10389,9 @@ int runGame(Options& options, Session& session)
 				if (hudManager.pointerQuad(kind, pointer)) {
 					quads.push_back(pointer);
 				}
+			}
+			if (hud::HudQuad dragged; hudManager.dragQuad(dragged)) {
+				quads.push_back(dragged); // the kit screen's taken item
 			}
 			return quads;
 		};
@@ -10275,7 +10437,7 @@ int runGame(Options& options, Session& session)
 			}
 			for (const auto& [ghost, id] : ghostObjects) {
 				net::Vec3f o, r;
-				if (id == object && session.client->world().partPose(ghost, part, o, r)) {
+				if (id == object && session.client->world().partPose(ghost, part.substr(part.rfind('/') + 1), o, r)) {
 					offset = {o.x, o.y, o.z};
 					rotation = {r.x, r.y, r.z};
 					return true;
@@ -10353,7 +10515,11 @@ int runGame(Options& options, Session& session)
 				scene.models.push_back(std::move(drawn));
 			}
 			scene.effects = &playerCamera.effects();
-			if (sources.enhanced && sources.enhanced->enabled && sources.enhanced->tickBlend) {
+			scene.weaponZoomed = playerCamera.zoomed();
+			// The weapon and hands sit at the tick's eye; drawn through the
+			// blended view with its per-frame look, they are carried along
+			// (LevelRenderer: tickBlendViewAdjustment).
+			{
 				PlayerCamera::View eye;
 				if (playerCamera.view(eye, 4.0f / 3.0f)) {
 					render::Camera placement;
@@ -10369,6 +10535,17 @@ int runGame(Options& options, Session& session)
 		ViewerOptions viewer;
 		viewer.screenshot = options.screenshot;
 		viewer.camera = options.camera;
+		if (viewer.screenshot.empty()) {
+			// A window draws frames: the particles move by them, as RendDX9's (EffectManager::frame).
+			round.setEffectsPerFrame(true);
+			objectEffects.setParticlesPerFrame(true); // the objects' own (engines, exhausts, wakes)
+			playerCamera.setEffectsPerFrame(true);
+			viewer.onFrame = [&round, &objectEffects, &playerCamera](float seconds, float alpha) {
+				round.frameEffects(seconds, alpha);
+				objectEffects.frame(seconds, alpha);
+				playerCamera.frameEffects(seconds);
+			};
+		}
 		// Before the first spawn the view is the level's before-spawn camera
 		// (GameLogic.setBeforeSpawnCamera); a joined game's soldier is the
 		// server's control object, which the view follows once it has one.
@@ -10463,6 +10640,7 @@ int runGame(Options& options, Session& session)
 			// keys go up as moves, a click on a spawn point asks for it (with
 			// the first kit).
 			viewer.playerView = [&session, &playerCamera, &ownFeet](ViewerOptions::PlayerView& view) {
+				playerCamera.setBlend(view.blendAlpha); // the first-person skeleton between its ticks
 				// A demo's camera following a player (0x005f8f40), with the
 				// demo's fov (0x00434610); free, the viewer's own camera.
 				// A camera file played (0x005fa4a0 -> 0x005fa210): its free
@@ -10544,6 +10722,10 @@ int runGame(Options& options, Session& session)
 					view.eyePitch = eye.pitch;
 					view.fovY = eye.fovY;
 					view.eyeRoll = eye.roll;
+					view.soldierEye = eye.soldierEye; // its look is already the frame's (remoteLook)
+					view.eyeCarrierYaw = eye.carrierYaw;
+					view.eyeHeight = eye.eyeHeight;
+					view.eyeTarget = eye.eyeTarget;
 				}
 				return true;
 			};
@@ -10571,7 +10753,6 @@ int runGame(Options& options, Session& session)
 					stance.prone = prediction.control().pose() == game::SoldierPose::Prone;
 					stanceSteps = prediction.stats().steps;
 				}
-				const bool wasProne = stance.prone;
 				stance.update(in.lie, in.crouch, in.jump);
 				remoteLook.stance = stance.prone ? 2 : in.crouch ? 1 : 0;
 				if (in.toggleCamera && !toggleCameraWas) {
@@ -10601,15 +10782,20 @@ int runGame(Options& options, Session& session)
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload || joinedAutoReload(in.fire, autoReloadTick++);
 				input.mouseLook = in.mouseLook;
-				input.jump = in.jump && !wasProne && !stance.prone;
-				input.pose = stance.prone ? game::SoldierPose::Prone
-					: in.crouch           ? game::SoldierPose::Crouch
-										  : game::SoldierPose::Stand;
+				// The raw keys go on the wire; the server and our prediction toggle prone from them.
+				input.jump = in.jump;
+				input.lieKey = in.lie;
+				input.pose = in.crouch ? game::SoldierPose::Crouch : game::SoldierPose::Stand;
 				// The position and weapon keys go to the server as
 				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's
 				// press is also our own 0x004d2a50's (the seat's item popup,
 				// updateHud).
 				input.switchSeat = in.seat;
+				if (in.seat > 0 && !g_positionKeyHeld) {
+					g_positionKey = in.seat;
+					g_positionKeyFiring = in.fire;
+				}
+				g_positionKeyHeld = in.seat > 0;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;
 				if (in.item > 0 && !g_remoteItemHeld) {
@@ -10639,6 +10825,10 @@ int runGame(Options& options, Session& session)
 			// The right button's alternate commands and the pointer's moves
 			// (the roses' mouse-over) as in a local round.
 			viewer.onRightClick = [&hudManager](float x, float y) { hudManager.click(x, y, true); };
+			viewer.onRelease = [&hudManager, &kitMenu](float x, float y) {
+				hudManager.release(x, y); // the kit screen's drop slots
+				kitMenu.endDrag();
+			};
 			viewer.onPointerMove = [&hudManager](float x, float y) { hudManager.setPointer(x, y); };
 		} else if (round.localPlayer() >= 0) {
 			round.requireSpawnConfirmation(round.localPlayer());
@@ -10698,6 +10888,11 @@ int runGame(Options& options, Session& session)
 				input.reload = in.reload;
 				input.mouseLook = in.mouseLook;
 				input.switchSeat = in.seat;
+				if (in.seat > 0 && !g_positionKeyHeld) {
+					g_positionKey = in.seat;
+					g_positionKeyFiring = in.fire;
+				}
+				g_positionKeyHeld = in.seat > 0;
 				input.selectItem = in.item;
 				input.itemStep = in.itemStep;
 				// C: first person or the chase view; the right button's press
@@ -10758,6 +10953,8 @@ int runGame(Options& options, Session& session)
 				const bool wasProne = stance.prone;
 				stance.update(in.lie, in.crouch, in.jump);
 				input.jump = in.jump && !wasProne && !stance.prone;
+				input.lieKey = in.lie;
+				input.jumpKey = in.jump; // the raw key: 0x0058ac66 reads the flag before 0x005889d0's get-up
 				input.pose = stance.prone ? game::SoldierPose::Prone
 					: in.crouch           ? game::SoldierPose::Crouch
 										  : game::SoldierPose::Stand;
@@ -10810,6 +11007,10 @@ int runGame(Options& options, Session& session)
 					hudManager.click(x, y, true); // the buttons' alternate commands
 				}
 			};
+			viewer.onRelease = [&hudManager, &kitMenu](float x, float y) {
+				hudManager.release(x, y); // the kit screen's drop slots
+				kitMenu.endDrag();
+			};
 			viewer.onPointerWheel = [&](float x, float y, int steps) {
 				float worldX = 0, worldZ = 0;
 				if (!commanderScreen || g_mapMenu || !hudManager.mapWorldAt(x, y, worldX, worldZ)) return;
@@ -10832,6 +11033,7 @@ int runGame(Options& options, Session& session)
 			};
 			viewer.takeAimKick = [&round] { return round.takeAimKick(round.localPlayer()); };
 			viewer.playerView = [&round, &playerCamera, &hudPlayer, &hudLocal](ViewerOptions::PlayerView& view) {
+				playerCamera.setBlend(view.blendAlpha); // the first-person skeleton between its ticks
 				// The soldier and its vehicle as the HUD has them (a joined
 				// game's: the server's ghosts as the level's objects).
 				const world::Object* player = g_remoteHud ? g_remoteHud->soldier() : round.player();
@@ -10901,6 +11103,13 @@ int runGame(Options& options, Session& session)
 					view.eyePitch = eye.pitch;
 					view.fovY = eye.fovY;
 					view.eyeRoll = eye.roll;
+					view.soldierEye = eye.soldierEye;
+					view.eyeCarrierYaw = eye.carrierYaw;
+					view.eyeHeight = eye.eyeHeight;
+					view.eyeTarget = eye.eyeTarget;
+					if (eye.soldierEye) {
+						round.pendingLook(view.lookTurn, view.lookPitch);
+					}
 				} else {
 					external(view);
 				}
@@ -10939,24 +11148,44 @@ int runGame(Options& options, Session& session)
 		if (viewer.onPlayerInput) {
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
-			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera,
-										&questions, &session, &localKit, &membersShown, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
-										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, spawnWasRequested = false](const ViewerOptions::PlayerInput& in) mutable {
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu, &startedGame,
+										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false, fireHeldByMenu = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
 				game::GameWorld::PlayerInfo me;
 				const bool playerPresent = hudPlayer(hudLocal(), me);
 				const bool alive = playerPresent && me.alive;
+				const bool manDown = playerPresent && me.manDown;
+				if (manDown && !manDownWas) {
+					g_deploymentOpen = false;
+					g_spawnScreenHidden = true;
+					helpPopups.show(hudManager, "HUD_HELP_MENU_CONTROLS_callMedicWhenManDown", "man_down_help");
+				}
+				manDownWas = manDown;
+				const bool deploymentWasShown = dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden);
+				const bool menuOpen = showMenu && startedGame;
+				const bool openFromManDown = manDown && !deploymentWasShown && !menuOpen && in.rightMouse && !rightMouseWas;
+				rightMouseWas = in.rightMouse;
+				// The local soldier's revive calls (ReviveCalls): going down, and
+				// the fire presses that reach him while down (not the menus').
+				if (playerPresent) {
+					const bool held = in.fire || (manDown && in.leftMouse);
+					fireHeldByMenu = dice::main::pressHeldByMenu(fireHeldByMenu, held, deploymentWasShown || menuOpen);
+					const bool fire = held && !fireHeldByMenu;
+					if (const int code = g_reviveCalls.step(me.id, me.soldier, me.manDown, fire, true)) {
+						g_sayCall(code);
+					}
+				}
 				if (spawnWasRequested && !session.client && !round.spawnRequested(round.localPlayer()) && !alive) {
 					g_spawnScreenHidden = false; // rejected point: return to the selection screen
 				}
-				const bool deploymentPressed = in.deployment && !deploymentWas;
+				const bool deploymentPressed = (in.deployment && !deploymentWas) || openFromManDown;
 				if (alive) {
 					g_initialDeploymentPending = false;
 					g_spawnScreenHidden = false;
 					if (g_remoteHud) g_remoteHud->requestedSpawn = false;
 				}
-				const bool deploymentWasShown = dice::main::deploymentScreenShown(alive, g_deploymentOpen, g_spawnScreenHidden);
 				const bool enterConfirms = dice::main::deploymentConfirmPressed(false,
 					deploymentPressed && playerPresent, deploymentWasShown, membersShown);
 				if (deploymentPressed && playerPresent) {
@@ -10979,8 +11208,9 @@ int runGame(Options& options, Session& session)
 				const bool done = hudManager.number("HudDone") != 0 || enterConfirms;
 				const auto action = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
+					kitMenu.commit();
 					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
-						session.client->selectKit(localKit);
+						selectRemoteKit(*session.client, me.team, localKit);
 						session.client->selectSpawnGroup(joinedSpawnGroup(g_remoteHud->chosenSpawnMarker));
 						g_remoteHud->requestedSpawn = true;
 					} else if (!alive && !session.client) {
@@ -11103,11 +11333,36 @@ int runGame(Options& options, Session& session)
 		}
 		std::array<int, 3> remoteTicketState {-1, -1, -1}; // a joined game's last seen team +0x8c
 		viewer.onTicks = [&](int ticks) {
+			sounds.setMuted(2, joinPending); // 0x0040c1ed: muted while the loading screen is up
 			if (joinPending) {
+				sounds.update(ticks); // the mute's fade (0x007f9f50) runs while the world waits
 				return; // the loaded level waits on JOIN GAME: nothing runs yet
 			}
 			for (int i = 0; i < ticks; ++i) {
 				step(); // its sounds too (stepSounds)
+				// A server's bots going down call for a revive (0x37, ReviveCalls):
+				// the Spotted event to their team (the host's own map and tags
+				// through onSpotted), else straight to the local player's, then
+				// "revive" on TCAutoLocalRevive.
+				if (!session.client) {
+					game::GameWorld::PlayerInfo local;
+					const bool known = round.playerInfo(round.localPlayer(), local);
+					for (const game::GameWorld::PlayerInfo& p : round.playerList()) {
+						const int code = p.ai ? g_reviveCalls.step(p.id, p.soldier, p.manDown, false, true) : 0;
+						const CallVoice* v = callVoice(code);
+						if (!v) {
+							continue;
+						}
+						net::SpottedInfo call;
+						call.message = static_cast<uint32_t>(code);
+						if (session.hosted) {
+							session.hosted->spotted(call, p.id);
+						} else if (known && local.team == p.team) {
+							heardCall(p.id, code, false);
+						}
+						round.radioMessage(p.id, v->channel, v->voice, 0);
+					}
+				}
 				if (gameLogic.ended() || (session.client && session.client->world().roundEnded())) {
 					sinceEnd += 1.0f / 30.0f;
 					showEndOfRound();

@@ -141,6 +141,16 @@ int arbitrate(Arbitration& state, int defaultIndex)
 	return state.running;
 }
 
+GoalArea controlPointArea(bool teamHolds, float dx, float dz, float pointRadius)
+{
+	GoalArea area;
+	area.exists = true;
+	area.teamHolds = teamHolds;
+	area.inside = std::fabs(dx) <= pointRadius && std::fabs(dz) <= pointRadius;
+	area.radius = pointRadius * std::sqrt(2.0f);
+	return area;
+}
+
 float gotoUrgency(float d2, float radius, float botRadius, const GoalArea& area, bool& arrived)
 {
 	const float r = std::max(std::ceil(radius), botRadius + 1);

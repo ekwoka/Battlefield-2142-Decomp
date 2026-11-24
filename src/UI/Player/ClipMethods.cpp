@@ -67,21 +67,23 @@ swf::Rgba rgba(uint32_t rgb, double alphaPercent)
 }
 
 // Frame arguments: 1-based numbers or labels ("label" or "path:label").
+// gameswf queues the frame (0x100ca870, 0x100ca950: sprite slots 0xa8,
+// 0xac) and sets play or stop at once.
 void gotoArg(Player& player, Interpreter& vm, Clip& clip, const Value& frame, bool play)
 {
 	if (frame.isNumber()) {
-		player.gotoFrame(clip, static_cast<int>(frame.asNumber()) - 1, play);
+		player.queueFrame(clip, static_cast<int>(frame.asNumber()) - 1, play);
 		return;
 	}
 	const std::string s = vm.toString(frame);
 	const double n = avm1::stringToNumber(s);
 	if (!std::isnan(n)) {
-		player.gotoFrame(clip, static_cast<int>(n) - 1, play);
+		player.queueFrame(clip, static_cast<int>(n) - 1, play);
 		return;
 	}
 	auto it = clip.timeline->labels.find(s);
 	if (it != clip.timeline->labels.end()) {
-		player.gotoFrame(clip, it->second, play);
+		player.queueFrame(clip, it->second, play);
 	} else {
 		clip.playing = play;
 	}

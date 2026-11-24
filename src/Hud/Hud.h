@@ -7,8 +7,8 @@
 // in an 800 x 600 screen, below six roots the engine creates (Global,
 // TopLayer and the bottom-left and bottom-right static and animated
 // corners). The game drives it through named variables: numbers that show
-// nodes (non-zero shows; then each logic entry ANDs "variable == value",
-// ORs it, or ANDs "variable != value" for NOT), fill bars (0..1), set
+// nodes (non-zero shows; then logic entries compare the variable to their
+// threshold and combine the results), fill bars (0..1), set
 // alpha and colour, and strings for text and texture paths. Each frame
 // draws twice, as RendDX9.dll does: AffectedByEMPShow 0, then 1 (the
 // weapon and vehicle parts).
@@ -40,6 +40,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -254,6 +255,10 @@ public:
 		// 0x0078eea0): the size times 1 - 0.18 / 2 + 0.18 sin(4 t), t the
 		// map's pulse clock (0x007791a0, +0xaa4 / +0xaa8 / +0xaac).
 		bool pulse = false;
+		// The UAV's scan ring (0x0078f060): grows from nothing to its size
+		// while fading out, f = the pulse clock's phase (4 rad/s over 2 pi):
+		// side times f, alpha times 1 - f.
+		bool radar = false;
 	};
 	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
 	static constexpr float kSpawnMarkerSize = 16.0f;
@@ -275,6 +280,7 @@ public:
 	void setMapLayer(std::string texture) { m_mapLayer = std::move(texture); }
 	const std::string& mapLayer() const { return m_mapLayer; }
 	void setMapMarkers(std::vector<MapMarker> markers) { m_mapMarkers = std::move(markers); }
+	void setSatelliteSweep(std::optional<float> progress) { m_satelliteSweep = progress; }
 	// The map's turn with the player (the map node's update 0x0078f680).
 	// setMapHeading is 0x00778ea0: the camera's heading (radians clockwise
 	// from north, atan2 of its direction's x and z; 0 when the local player
@@ -316,12 +322,13 @@ public:
 	// The pointer (menus) in the 800 x 600 screen, and a click there:
 	// buttons run their console commands (setButtonNodeConCmd; with
 	// `alternate`, the right button, setButtonNodeAltConCmd) through the
-	// runner, and the mouse-over nodes under it their release commands
-	// (setMouseOverNodeConCmd ... 3). True when a button took the click.
+	// runner. True when a button took the click. The release runs the
+	// mouse-over nodes' commands under it (setMouseOverNodeConCmd ... 3).
 	void setPointer(float x, float y) { m_pointer[0] = x; m_pointer[1] = y; }
 	float pointerX() const { return m_pointer[0]; }
 	float pointerY() const { return m_pointer[1]; }
 	bool click(float x, float y, bool alternate = false);
+	void release(float x, float y);
 
 	// The pointer's textures (HudManager.setMouseTexture*, the HUD
 	// manager's slots from 0x0075e87f: the plain pointer, the map's, and
@@ -333,6 +340,14 @@ public:
 	// The pointer as a quad centred on the pointer (false: no texture or
 	// no pointer).
 	bool pointerQuad(Pointer kind, HudQuad& quad) const;
+	// The picture dragged on the pointer (the kit screen's taken item), centred on it; empty: none.
+	void setDragPicture(std::string texture, float w, float h)
+	{
+		m_dragPicture = std::move(texture);
+		m_dragSize[0] = w;
+		m_dragSize[1] = h;
+	}
+	bool dragQuad(HudQuad& quad) const;
 	// HudManager's other settings, kept by name (setCommPos, setCommSize,
 	// setCommMousePos, setSpottedMenuPos/Size, setSpottedMousePos,
 	// setCommMouseSensitivity, setPointerMouseSensitivity,
@@ -448,6 +463,8 @@ private:
 	void runCommands(const std::vector<std::pair<int, std::string>>& commands, int event);
 	std::string m_pointerTextures[static_cast<int>(Pointer::Count)];
 	float m_pointerSize[2] = {32, 32};
+	std::string m_dragPicture;
+	float m_dragSize[2] = {0, 0};
 	std::map<std::string, std::array<float, 4>> m_settings;
 	uint32_t m_paintKits = 0xff, m_paintVehicles = 0xffffffff;
 	MarkerSource m_markerSource;
@@ -496,13 +513,15 @@ private:
 	float m_mapPulseTime = 0; // +0xaa4, kept within one pulse period
 	float mapPulseScale() const;
 	bool m_mapWobbling = false, m_mapWobbled = false, m_mapTurnCaught = false;
-	bool m_mapAtMini = false, m_mapSizeSettled = false, m_mapStatic = false;
+	bool m_mapAtMini = true, m_mapSizeSettled = false, m_mapStatic = false;
+	bool m_mapRequestedLarge = false;
 	bool m_mapLevelSet = false;
 	bool m_mapAreaSet = false;
 	float m_mapArea[4] = {0, 0, 0, 0}; // world minX, minZ, maxX, maxZ
 	float m_mapOrigin[2] = {0, 0}, m_mapSize[2] = {1, 1};
 	float m_mapFocus[2] = {0, 0};
 	std::vector<MapMarker> m_mapMarkers;
+	std::optional<float> m_satelliteSweep;
 	struct Hit {
 		float x0, y0, x1, y1;
 		int id;
@@ -514,6 +533,7 @@ private:
 		bool drawn = false;
 		float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 		float mapX = 0, mapY = 0, mapW = 1, mapH = 1;
+		float turn = 0; // radians at draw time
 	} m_mapView, m_miniMapView;
 	float m_mapReference[2] = {0, 0}; // the big map's size (setMaxiSize), the shown area's pixels
 	float m_mapZoomShown[2] = {1, 1}; // the map's zoom as last drawn (2.3^level / the area)

@@ -351,7 +351,24 @@ TEST(NetGame_RemoteWorldFromEvents)
 	killed.type = net::kEvPythonCommand;
 	killed.values = {100, 0, 3, 2, 2, 5}; // type 100, (kind 2, victim 2, attacker 5)
 	world.apply(killed);
-	CHECK(world.player(2)->deaths == 1 && world.player(5)->kills == 1 && world.takeKills().size() == 1);
+	// The counters only: the kill line is KilledBy's (0x0050d520).
+	CHECK(world.player(2)->deaths == 1 && world.player(5)->kills == 1 && world.takeKills().empty());
+	net::GameEvent line;
+	line.type = net::kEvKilledBy;
+	line.values = {5, 2, 1, 0, 0x22, 0x11, 0, 0, 0, 0, 0, 0}; // weapon 0x22, vehicle 0x11
+	{ // HostedGame::trackPlayers' layout survives the wire.
+		net::BitWriter w;
+		CHECK(net::writeGameEvent(w, line));
+		net::BitReader r(w.data().data(), w.data().size());
+		net::GameEvent back;
+		net::KilledByInfo info;
+		CHECK(net::readGameEvent(r, back) && net::parseKilledBy(back, info) && info.value1 == 0x22 && info.value2 == 0x11
+			&& info.attacker == 5 && info.victim == 2 && info.hasAttacker);
+	}
+	world.apply(line);
+	const auto lines = world.takeKills();
+	CHECK(lines.size() == 1 && lines[0].victim == 2 && lines[0].attacker == 5 && lines[0].weaponTemplate == 0x22
+		&& lines[0].vehicleTemplate == 0x11);
 
 	net::GhostBlock ghosts;
 	ghosts.present = true;
@@ -381,7 +398,7 @@ TEST(NetGame_SoldierInputMapping)
 	dice::hfe::game::SoldierInput soldier;
 	soldier.throttle = 1;
 	soldier.fire = true;
-	soldier.pose = dice::hfe::game::SoldierPose::Prone;
+	soldier.lieKey = true;
 	soldier.selectItem = 2;
 	const net::PlayerMove move = net::playerInputFrom(soldier).toMove(0);
 	CHECK(move.axes[net::kPIThrottle] == 100 && move.trigger(net::kPIFire) && move.trigger(net::kPILie));
@@ -395,6 +412,35 @@ TEST(NetGame_SoldierInputMapping)
 		net::MoveInputState state;
 		CHECK(net::soldierInputFromMove(wheel, state).itemStep == step);
 	}
+}
+
+// A move carries the raw lie key and the server toggles prone from it
+// (0x005889d0): a press goes down, the release stays, a press gets up; the
+// held key is the soldier's lieKey; the jump key from prone gets up (no jump).
+TEST(NetGame_LieKeyToggledOnTheServer)
+{
+	using dice::hfe::game::SoldierPose;
+	net::MoveInputState state;
+	dice::hfe::game::SoldierInput in;
+	const auto decode = [&](int i) {
+		return net::soldierInputFromMove(net::playerInputFrom(in).toMove(i), state);
+	};
+	in.lieKey = true;
+	dice::hfe::game::SoldierInput seen = decode(0);
+	CHECK(seen.pose == SoldierPose::Prone && seen.lieKey);
+	in.lieKey = false;
+	seen = decode(1);
+	CHECK(seen.pose == SoldierPose::Prone && !seen.lieKey);
+	in.jump = true;
+	seen = decode(2);
+	CHECK(seen.pose == SoldierPose::Stand && !seen.jump && seen.jumpKey);
+	in.jump = false;
+	in.lieKey = true;
+	decode(3);
+	in.lieKey = false;
+	CHECK(decode(4).pose == SoldierPose::Prone);
+	in.lieKey = true;
+	CHECK(decode(5).pose == SoldierPose::Stand);
 }
 
 // The aim's pitch decoded from the moves' MouseLookY (soldierInputFromMove):
@@ -1681,6 +1727,12 @@ TEST(NetGame_RemoteWorldVehicleGhosts)
 	exit.values = {2, 0};
 	world.apply(exit);
 	CHECK(world.object(301)->occupant == -1 && world.player(2)->vehicleGhost == 0);
+	// The driver's seat is the root's ghost (the camera rumble's driven test, main.cpp).
+	enter.values = {2, 300, 0};
+	world.apply(enter);
+	root = world.object(300);
+	CHECK(root && root->occupant == 2 && (!root->rootGhost || root->rootGhost == 300) && world.object(301)->rootGhost == 300);
+	world.apply(exit);
 	net::GameEvent destroy;
 	destroy.type = net::kEvDestroyObject;
 	destroy.values = {300, 0};
@@ -2241,4 +2293,28 @@ TEST(NetGame_TitanSyncPayload)
 	CHECK(back.team == 2 && back.orderTick == 1894 && back.targetX == -250 && back.targetZ == 7 && back.stateTick == 1834);
 	CHECK(back.velocityX == 1.0625f && back.velocityZ == -0.25f && back.x == -423.621f && back.z == 2.536f);
 	CHECK(!net::parseTitanSync(bytes.substr(0, 0x20), back));
+}
+
+// The squad radar's reports and the radio spots are timed by the server's
+// ticks, which start again with a new level: a map change and clear() drop
+// them, and a new report drops the ones that ran out.
+TEST(NetGame_RemoteWorldSquadReportsEndWithTheLevel)
+{
+	net::RemoteWorld world;
+	world.apply(net::makeDataBlockStart(2, 0)); // the first level
+	auto report = [&](uint32_t kind, uint32_t seconds, uint32_t player) {
+		net::GameEvent e;
+		e.type = net::kEvSquadRadar;
+		e.values = {kind, 0, 1, seconds, player};
+		CHECK(world.apply(e));
+	};
+	report(0, 10, 5);
+	CHECK(world.squadReportedPlayers() == std::vector<int>({5}));
+	CHECK(world.radarPlayers() == std::vector<int>({5}));
+	world.apply(net::makeDataBlockStart(2, 0)); // a map change
+	CHECK(world.squadReportedPlayers().empty() && world.radarPlayers().empty());
+	report(1, 10, 6);
+	CHECK(world.squadReportedPlayers() == std::vector<int>({6}));
+	world.clear();
+	CHECK(world.squadReportedPlayers().empty());
 }

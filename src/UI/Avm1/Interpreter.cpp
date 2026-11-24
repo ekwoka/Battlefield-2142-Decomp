@@ -166,7 +166,9 @@ bool Interpreter::guarded(const std::function<void()>& body)
 	} catch (const std::length_error&) {
 		fail("out of memory");
 	}
-	--m_entryDepth;
+	if (--m_entryDepth == 0 && m_host) {
+		m_host->scriptDone();
+	}
 	return ok;
 }
 

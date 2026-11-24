@@ -1264,6 +1264,34 @@ GameEvent makeRemoveSpawnGroup(int id, uint16_t ghost)
 	return e;
 }
 
+GameEvent makeSquadOrderPoints(bool progress, double value)
+{
+	std::string payload(12, '\0');
+	payload[0] = progress ? 1 : 0;
+	std::memcpy(payload.data() + 4, &value, sizeof(value));
+	return makePostRemote(2, 0x56, payload);
+}
+
+bool parseSquadOrderPoints(const PostRemoteInfo& info, bool& progress, double& value)
+{
+	if (info.category != 2 || info.id != 0x56 || info.payload.size() != 12) return false;
+	progress = info.payload[0] != 0;
+	std::memcpy(&value, info.payload.data() + 4, sizeof(value));
+	return std::isfinite(value) && value >= 0;
+}
+
+GameEvent makeFieldUnlock(int player, int credits, int kit, int branch)
+{
+	GameEvent event;
+	event.type = kEvFieldUnlock;
+	event.values = {kit < 0 ? 0u : 1u, static_cast<uint32_t>(player), static_cast<uint32_t>(credits)};
+	if (kit >= 0) {
+		event.values.push_back(static_cast<uint32_t>(kit));
+		event.values.push_back(static_cast<uint32_t>(branch));
+	}
+	return event;
+}
+
 int32_t PostRemoteInfo::payloadInt(size_t index) const
 {
 	if (payload.size() < (index + 1) * 4) {

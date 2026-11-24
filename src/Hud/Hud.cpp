@@ -7,6 +7,8 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
+#include <unordered_set>
 
 namespace dice::hfe::hud {
 
@@ -86,6 +88,7 @@ struct HudManager::Node {
 	int type = kSplit;
 	Node* parent = nullptr;
 	std::vector<Node*> children;
+	std::unique_ptr<Node> sameNamedList;
 	int x = 0, y = 0, w = 0, h = 0;
 	float color[4] = {1, 1, 1, 1};
 	std::string showVariable;
@@ -367,7 +370,12 @@ bool HudManager::repairSupplyLabelOrder()
 HudManager::Node* HudManager::create(int type, const std::string& parentName, const std::string& name, int x, int y,
 	int w, int h)
 {
-	auto& slot = m_nodes[lower(name)];
+	Node* parent = parentName.empty() ? nullptr : find(parentName);
+	auto& named = m_nodes[lower(name)];
+	// The shipped commander scripts give the member list its picture parent's
+	// name. Retail creates a separate child and makes it active for list setters.
+	const bool listSharesParentName = parent && parent == named.get() && parent->type == kPicture && type == kList;
+	auto& slot = listSharesParentName ? parent->sameNamedList : named;
 	if (!slot) {
 		slot = std::make_unique<Node>();
 	}
@@ -383,13 +391,28 @@ HudManager::Node* HudManager::create(int type, const std::string& parentName, co
 	if (type == kTransformList && std::find(m_transformLists.begin(), m_transformLists.end(), node) == m_transformLists.end()) {
 		m_transformLists.push_back(node);
 	}
-	if (Node* parent = parentName.empty() ? nullptr : find(parentName)) {
-		if (node->parent != parent) {
+	m_active = node;
+	if (parent) {
+		if (std::find(parent->children.begin(), parent->children.end(), node) == parent->children.end()) {
+			// Reused names may already be reachable from multiple parents.
+			// Walk the actual child links before adding a new edge.
+			std::vector<Node*> pending {node};
+			std::unordered_set<Node*> visited;
+			while (!pending.empty()) {
+				Node* child = pending.back();
+				pending.pop_back();
+				if (child == parent) {
+					std::fprintf(stderr, "HUD: skipped cyclic link from %s to %s\n", parent->name.c_str(), node->name.c_str());
+					return node;
+				}
+				if (visited.insert(child).second) {
+					pending.insert(pending.end(), child->children.begin(), child->children.end());
+				}
+			}
 			parent->children.push_back(node);
 			node->parent = parent;
 		}
 	}
-	m_active = node;
 	return node;
 }
 
@@ -432,20 +455,25 @@ const HudFont* HudManager::font(const std::string& path)
 
 // The show variable and the logic entries are terms ANDed together; an OR
 // entry joins the term before it ("NOT AffectedByEMPShow 1" then "OR
-// UpdateAllEnabled 1" is one term: either holds). NOT is "!=", the others
-// "==".
+// UpdateAllEnabled 1" is one term: either holds). NOT is "!=", and
+// GREATER compares the HUD value with the threshold (0x00872580).
 bool HudManager::visible(const Node& node) const
 {
 	bool show = true;
 	bool term = node.showVariable.empty() || number(node.showVariable) != 0;
 	bool haveTerm = !node.showVariable.empty();
 	for (const Node::Logic& l : node.logic) {
-		const bool equal = number(l.variable) == l.value;
+		const float value = number(l.variable);
+		const bool equal = value == l.value;
 		if (l.op == "or") {
 			term = haveTerm ? term || equal : equal;
 		} else {
 			show = show && term;
-			term = l.op == "not" ? !equal : equal; // and, equal
+			if (l.op == "greater") {
+				term = value > l.value;
+			} else {
+				term = l.op == "not" ? !equal : equal; // and, equal
+			}
 		}
 		haveTerm = true;
 	}
@@ -1166,6 +1194,17 @@ bool HudManager::pointerQuad(Pointer kind, HudQuad& quad) const
 	return true;
 }
 
+bool HudManager::dragQuad(HudQuad& quad) const
+{
+	if (m_dragPicture.empty() || m_pointer[0] < 0 || m_pointer[1] < 0) {
+		return false;
+	}
+	const float w = m_dragSize[0], h = m_dragSize[1];
+	quad = {kTextureRoot + slashes(m_dragPicture), m_pointer[0] - w * 0.5f, m_pointer[1] - h * 0.5f, m_pointer[0] + w * 0.5f,
+		m_pointer[1] + h * 0.5f, 0, 0, 1, 1, {1, 1, 1, 1}, 0};
+	return true;
+}
+
 void HudManager::togglePaintKit(int kit)
 {
 	if (kit >= 0 && kit < 8) {
@@ -1455,19 +1494,22 @@ void HudManager::setMap(const std::string& texture, float originX, float originZ
 	m_mapSize[1] = std::max(depth, 1.0f);
 }
 
+// The left button's release: the mouse-over nodes under the pointer run
+// their event 3 commands (the kit screen's drop targets, 0x00798cf0).
+void HudManager::release(float x, float y)
+{
+	for (const MouseOverHit& hit : m_mouseOverHits) {
+		if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) {
+			runCommands(hit.node->mouseOverCommands, 3);
+		}
+	}
+}
+
 // A click: the topmost button drawn there runs its press (event 0) and
 // release (event 3) commands (the alternate button its
 // setButtonNodeAltConCmd ones). True when a button took it.
 bool HudManager::click(float x, float y, bool alternate)
 {
-	// The mouse-over nodes under the pointer take the release (event 3).
-	if (!alternate) {
-		for (const MouseOverHit& hit : m_mouseOverHits) {
-			if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) {
-				runCommands(hit.node->mouseOverCommands, 3);
-			}
-		}
-	}
 	// A list's row (Bf2NewListBoxNode's click, 0x007dd3b0 reads its cells):
 	// the row is selected, the column under the pointer kept (the list's
 	// +0xc, which the squad menu switches on), and the list's commands run:
@@ -1539,9 +1581,8 @@ bool HudManager::mapWorldAt(float x, float y, float& worldX, float& worldZ) cons
 	if (!m.drawn || x < m.x0 || x > m.x1 || y < m.y0 || y > m.y1) {
 		return false;
 	}
-	// Turned back about the node's centre (the map is drawn turned by
-	// +0x80c, the big map too).
-	const float turn = m_mapTurn;
+	// Undo the rotation of the last drawn map about the node's centre.
+	const float turn = m.turn;
 	if (turn != 0) {
 		const float cx = (m.x0 + m.x1) * 0.5f, cy = (m.y0 + m.y1) * 0.5f;
 		const float c = std::cos(-turn), s = std::sin(-turn);
@@ -1647,14 +1688,16 @@ void HudManager::tickMapTurn(float seconds, bool alive)
 		m_mapTurn = m_mapAngle = m_mapDelayed = 0;
 		m_mapStatic = isStatic;
 	}
-	// The commander's map (+0x70a) heads north.
-	const bool commander = number("CommanderShow") != 0;
-	if (commander) {
-		m_mapHeading = 0;
+	// Screen entry clears the turn's settled flag (0x0077ef95) and
+	// targets north (0x0078f7e4) while the map is still small.
+	const bool large = number("MapFullSize") != 0 || number("CommanderShow") != 0;
+	if (large != m_mapRequestedLarge) {
+		m_mapRequestedLarge = large;
+		m_mapTurnCaught = false;
 	}
 	if (m_mapAtMini) {
 		if (!m_mapStatic && alive) {
-			const float target = wrapAngle(m_mapHeading);
+			const float target = large ? 0.0f : wrapAngle(m_mapHeading);
 			const float ease = easeStep(seconds, 9);
 			m_mapAngle = wrapAngle(m_mapAngle);
 			if (const int side = turnSide(target, m_mapAngle, 0.001f)) {
@@ -1709,10 +1752,6 @@ void HudManager::tickMapTurn(float seconds, bool alive)
 			m_mapTurnCaught = true;
 		}
 	}
-	// The size flags for the next frame (+0x709, +0x816): the rewrite's map
-	// takes its size at once, so it is always settled.
-	m_mapAtMini = number("MapFullSize") == 0 && !commander;
-	m_mapSizeSettled = true;
 }
 
 void HudManager::setMapArea(float minX, float minZ, float maxX, float maxZ)
@@ -1841,11 +1880,14 @@ std::string titanSpawnLabel(const std::string& titan, const std::string& baseNam
 void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vector<HudQuad>& out)
 {
 	m_mapHits.clear();
+	const MapView previous = m_mapView;
 	m_mapView.drawn = false;
 	if (m_mapTexture.empty()) {
 		return;
 	}
-	const bool full = number("MapFullSize") != 0;
+	// The size update (0x0078fd8e) waits for the turn to settle at north.
+	const bool commander = number("CommanderShow") != 0;
+	const bool full = (number("MapFullSize") != 0 || commander) && m_mapTurn == 0;
 	const bool spawning = number("SpawnShow") != 0;
 	const float* pos = full ? node.maxiPos : node.miniPos;
 	const float* size = full ? node.maxiSize : node.miniSize;
@@ -1853,11 +1895,27 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// 600/600: the square between its black borders).
 	const auto commanderPos = setting("HudBuilder.setCommanderPos");
 	const auto commanderSize = setting("HudBuilder.setCommanderSize");
-	if (number("CommanderShow") != 0 && commanderSize[0] > 0 && commanderSize[1] > 0) {
+	if (full && commander && commanderSize[0] > 0 && commanderSize[1] > 0) {
 		pos = commanderPos.data();
 		size = commanderSize.data();
 	}
-	const float nx = 400 + pos[0], ny = 300 + pos[1], nw = size[0], nh = size[1];
+	// Retail eases the map rectangle toward its authored position and size
+	// at 1 - exp(-6 dt) (0x0079073f through 0x00790a6d).
+	const float layoutStep = easeStep(seconds, 6);
+	const auto easeAxis = [&](float current, float target) {
+		if (!previous.drawn || std::abs(target - current) <= 0.1f) {
+			return target;
+		}
+		return current + (target - current) * layoutStep;
+	};
+	const float nx = easeAxis(previous.x0, 400 + pos[0]);
+	const float ny = easeAxis(previous.y0, 300 + pos[1]);
+	const float nw = easeAxis(previous.x1 - previous.x0, size[0]);
+	const float nh = easeAxis(previous.y1 - previous.y0, size[1]);
+	// The small-size flag for the next turn update uses the 3 px tolerance
+	// at 0x00790b8e. Commander layout has its own size classification.
+	m_mapAtMini = !(full && commander) && nw < node.miniSize[0] + 3 && nh < node.miniSize[1] + 3;
+	m_mapSizeSettled = std::abs(nw - size[0]) < 3 && std::abs(nh - size[1]) < 3;
 	// The map texture's alpha (+0x7b0) eased towards its target (+0x7b8):
 	// 0 with the overhead view on; while playing (the map's state 0,
 	// 0x00780940) the HUD's MenuMapAlpha, the profile's minimap
@@ -1931,9 +1989,6 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	// turned about the node's centre (0x0077cba0 / 0x0077d200 -> 0x00870f60,
 	// a positive turn counter-clockwise on the screen; HudQuad's rotation
 	// is clockwise), then cut to the node.
-	// The big map too: 0x0077cba0 / 0x0077d200 always turn by +0x80c, which
-	// tickMapTurn holds while the map isn't at the minimap's size (+0x709,
-	// 0x0078f810), so it keeps the minimap's last turn.
 	const float mapTurn = m_mapTurn;
 	const float turnDegrees = mapTurn * 57.29578f;
 	const float centreX = nx + nw * 0.5f, centreY = ny + nh * 0.5f;
@@ -1959,7 +2014,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			out.push_back(layer);
 		}
 	}
-	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH};
+	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH, mapTurn};
 	std::vector<Hit> labelRects;
 	std::vector<HudQuad> tooltips; // drawn last, over the later markers' icons
 	for (const MapMarker& marker : m_mapMarkers) {
@@ -1987,7 +2042,9 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		// scale (0x00785836). Fixed-size aircraft must not drift off its deck.
 		const float scaleX = marker.zoomWithMap ? 0.7f * mapW / m_mapReference[0] : 1.0f;
 		const float scaleY = marker.zoomWithMap ? 0.7f * mapH / m_mapReference[1] : 1.0f;
-		const float pulse = marker.pulse ? mapPulseScale() : 1.0f;
+		// shortcut: the ring's phase is the map's pulse clock, not one reset when the UAV goes up (retail +0xb5c); the same 4 rad/s.
+		const float radar = marker.radar ? 4 * m_mapPulseTime / 6.2831853f : 1.0f;
+		const float pulse = (marker.pulse ? mapPulseScale() : 1.0f) * radar;
 		const float pixels = (marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX) * pulse;
 		const float height = marker.height > 0 ? marker.height * scaleY * pulse : pixels;
 		const float offsetX = marker.offsetX * scaleX, offsetY = marker.offsetY * scaleY;
@@ -2001,7 +2058,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 			continue;
 		}
 		HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
-			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
+			{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f) * (marker.radar ? 1 - radar : 1.0f)},
 			marker.upright ? 0.0f : marker.yaw - turnDegrees};
 		q.sweep = marker.sweep;
 		if (marker.offsetX != 0 || marker.offsetY != 0) {
@@ -2066,6 +2123,20 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		}
 	}
 	out.insert(out.end(), tooltips.begin(), tooltips.end());
+	if (m_satelliteSweep && number("CommanderShow") != 0) {
+		// 0x00779250 / 0x0077d8e0: a 150 m strip travels east until its
+		// trailing edge reaches the map's far side. It extends 30 m past
+		// each north/south edge and follows the same map projection.
+		const float width = 150 * mapW / m_mapSize[0];
+		const float margin = 30 * mapH / m_mapSize[1];
+		const float right = mapX + *m_satelliteSweep * (mapW + width);
+		HudQuad scan {"Menu/HUD/Texture/Ingame/Minimap/map_SatelliteScanLine.dds",
+			right - width, mapY - margin, right, mapY + mapH + margin, 0, 0, 1, 1, {1, 1, 1, 0.8f * alpha}};
+		turned(scan);
+		if (clipTo(scan, nx, ny, nx + nw, ny + nh)) {
+			out.push_back(std::move(scan));
+		}
+	}
 }
 
 // dice::meme::Bf2MiniMenuMapNode (factory 0x007e8fb0, constructor
