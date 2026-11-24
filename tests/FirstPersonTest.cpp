@@ -676,3 +676,62 @@ TEST(FirstPerson_CameraProximityShake)
 	CHECK(anim::cameraProximityShake(0.4f, 0) == 0);
 	CHECK(anim::kCameraProximityRate == 10.0f);
 }
+
+// The footsteps' cycle in first person (0x005ef7f0, view 0) is the held
+// weapon's first-person system's: its sprint plays slower than the
+// third-person one the other soldiers step by (EU_SMG: 34 against 40 half
+// cycles in 10 s at 6.24 m/s), while zoomed the two nearly agree.
+TEST(FirstPerson_SprintStepsSlowerThanThirdPerson)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	console.run("ClientArchives.con", {}, out);
+	anim::AnimationSystems systems([&files](const std::string& path, std::vector<uint8_t>& data) { return files.readFile(path, data); });
+	anim::registerAnimationConsoleMethods(console, systems);
+	console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+	const auto load = [&](const std::string& path) { return systems.get(path, [&] { console.run(path, {}, out); }); };
+	const auto* soldier = load("Objects/Soldiers/Common/Animations/AnimationSystem1p.inc");
+	const auto* smg1p = load("Objects/Weapons/Handheld/EU_SMG/AnimationSystem1p.inc");
+	const auto* smg3p = load("Objects/Weapons/Handheld/EU_SMG/AnimationSystem3p.inc");
+	const auto* skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/1p_setup.ske");
+	CHECK(soldier && smg1p && smg3p && skeleton);
+	if (!soldier || !smg1p || !smg3p || !skeleton) return;
+	const auto halves = [&](float speed, bool zoomed, bool firstPerson) {
+		anim::FirstPersonRig rig(systems, *skeleton, soldier);
+		rig.setWeapon(smg1p);
+		anim::AnimationState third(systems, *smg3p);
+		anim::AnimationInput in;
+		in.messages = zoomed ? 4 : 0;
+		const auto step = [&] {
+			if (firstPerson) rig.update(in, 1 / 30.0f); else third.update(in, 1 / 30.0f);
+		};
+		for (int i = 0; i < 60; ++i) step();
+		in.speed = speed;
+		in.forward = 1;
+		in.movementSeconds = 1 / 30.0f;
+		int count = 0;
+		bool half = false;
+		for (int i = 0; i < 330; ++i) {
+			step();
+			float length, time;
+			if (firstPerson) rig.walkCycle(length, time); else third.walkCycle(length, time);
+			const bool now = time < length * 0.5f;
+			count += i >= 30 && length > 0 && now != half;
+			half = now;
+		}
+		return count;
+	};
+	const int sprint1p = halves(6.24f, false, true), sprint3p = halves(6.24f, false, false);
+	const int zoom1p = halves(1.5f, true, true), zoom3p = halves(1.5f, true, false);
+	std::fprintf(stderr, "  sprint 1P %d 3P %d, zoomed 1P %d 3P %d\n", sprint1p, sprint3p, zoom1p, zoom3p);
+	CHECK(sprint1p > 0 && sprint1p + 4 <= sprint3p);
+	CHECK(std::abs(zoom1p - zoom3p) <= 1);
+}

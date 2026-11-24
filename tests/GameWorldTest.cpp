@@ -4206,6 +4206,27 @@ TEST(GameWorld_FootstepsOnObjectsUseTheirMaterial)
 	}
 }
 
+// The sound obstruction rays' terrain test: a footstep's sound sits 0.9 m
+// under the feet, so the ray from the eye ends under the ground; short as
+// it is, the terrain is met where it crosses, not missed between samples.
+TEST(GameWorld_SegmentMeetsTerrainAtItsUnderGroundEnd)
+{
+	Range range;
+	physics::Ground ground;
+	ground.height = [](float, float) { return 0.0f; };
+	ground.heightAndNormal = [](float, float, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return 0.0f;
+	};
+	range.world->enablePhysics(range.files, range.collisionTemplates, ground);
+	range.world->startRound();
+	float fraction = 0;
+	uint32_t object = 7;
+	CHECK(range.world->segmentHit({0, 1.6f, 0}, {0.4f, -0.9f, 0}, 0, fraction, object));
+	CHECK(object == 0 && std::fabs(fraction - 1.6f / 2.5f) < 0.02f);
+	CHECK(!range.world->segmentHit({0, 1.6f, 0}, {0.4f, 0.1f, 0}, 0, fraction, object));
+}
+
 // The held weapon's effect event N (0x2c + N) reaches its EffectBundle
 // children (0x0063ca60 down the tree; 0x0061a4e0): those whose
 // startOnEffects has bit 9 + N start (e_muzz_eu_av_reload: 512, effect 0).

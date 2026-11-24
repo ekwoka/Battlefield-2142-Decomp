@@ -115,6 +115,71 @@ TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
 	sound::shutdownSoundEngine();
 }
 
+// A soldier's footstep set (0x007fd840) keeps one sound a slot on the
+// soldier: its owner the soldier, riding the soldier's matrix (0x007fd830),
+// played again each step. The template's 0/-0.9/0.4 is in the soldier's
+// frame (facing +x here), so the obstruction rays end under his feet, ahead,
+// and follow him; the soldier gone, it is let go.
+TEST(GameSounds_FootstepSoundRidesItsSoldier)
+{
+	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
+	if (!dir) return;
+	test::setEnv("ALSOFT_DRIVERS", "null");
+	auto* engine = sound::getSoundEngine();
+	CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+	{
+		world::ObjectTemplateManager templates;
+		sound::SoundManager manager(engine, templates);
+		manager.registerTemplateType();
+		addSoundTemplate(templates, "S_Sprint_Dirt", std::string(dir) + "/Cockpits/Missile_Warning.wav");
+		if (auto* t = manager.soundTemplate("S_Sprint_Dirt")) {
+			t->setIs3dSound(true);
+			t->setLoopCount(1);
+			const sound::Vec3 offset {0, -0.9f, 0.4f};
+			t->setPosition(&offset);
+		}
+		engine->reloadSoundFiles();
+		manager.setListener({100, 11.6f, 100}, {1, 0, 0}, {0, 1, 0}, {}, false);
+		std::vector<sound::Vec3> ends;
+		manager.setObstructionTest([&](const sound::Vec3&, const sound::Vec3& to, uint32_t, sound::SoundManager::RayHit& hit) {
+			ends.push_back(to);
+			hit.root = 0;
+			return true;
+		});
+		sound::GameSounds sounds(manager);
+		sound::Matrix4 facingX;
+		facingX.m[0][0] = 0, facingX.m[0][2] = -1; // right -z
+		facingX.m[2][0] = 1, facingX.m[2][2] = 0;  // forward +x
+		sounds.playOn(42, "S_Sprint_Dirt", {100, 10, 100}, facingX);
+		sounds.playOn(42, "S_Sprint_Dirt", {100, 10, 100}, facingX);
+		CHECK(sounds.held() == 1);
+		for (int i = 0; i < 3; ++i) manager.update(1);
+		CHECK(!ends.empty());
+		if (!ends.empty()) {
+			const sound::Vec3 end = ends.back();
+			std::fprintf(stderr, "  ray end %.2f %.2f %.2f\n", end.x, end.y, end.z);
+			CHECK(end.y < 9.9f && end.x > 100 && std::fabs(end.z - 100) < 0.6f);
+		}
+		bool alive = true;
+		sounds.placeHeld([&](uint32_t object, sound::Vec3& position, sound::Matrix4& rotation) {
+			CHECK(object == 42);
+			position = {106, 10, 100};
+			rotation = facingX;
+			return alive;
+		});
+		ends.clear();
+		for (int i = 0; i < 40 && ends.empty(); ++i) manager.update(1);
+		CHECK(!ends.empty());
+		if (!ends.empty()) CHECK(ends.back().x > 105);
+		alive = false;
+		sounds.placeHeld([&](uint32_t, sound::Vec3&, sound::Matrix4&) { return alive; });
+		CHECK(sounds.held() == 0);
+		for (int i = 0; i < 60; ++i) manager.update(1);
+	}
+	engine->shutdown();
+	sound::shutdownSoundEngine();
+}
+
 // A tapped automatic gun (the static AA cannon, stopType 1): the trigger's
 // release (0x005db6c0) only stops its looping fire sound, keeping the
 // instance, so the shot plays out; releasing it would cut it (the engine

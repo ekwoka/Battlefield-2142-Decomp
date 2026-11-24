@@ -43,6 +43,11 @@ struct GameSounds::Loop {
 	bool refreshed = true;
 };
 
+struct GameSounds::Held {
+	ISound* sound = nullptr;
+	Transform transform;
+};
+
 GameSounds::GameSounds(SoundManager& manager) : m_manager(manager)
 {
 	const char* log = std::getenv("BF2142_SOUND_LOG");
@@ -64,6 +69,72 @@ void GameSounds::stopAll()
 		}
 	}
 	m_loops.clear();
+	for (auto& [key, held] : m_held) {
+		if (held->sound) {
+			held->sound->stopImmediately();
+			held->sound->release();
+		}
+	}
+	m_held.clear();
+}
+
+void GameSounds::playOn(uint32_t object, const std::string& templateName, const Vec3& position, const Matrix4& rotation)
+{
+	if (!m_manager.hasSound(templateName)) {
+		return;
+	}
+	auto& held = m_held[{object, templateName}];
+	if (!held) {
+		held = std::make_unique<Held>();
+		held->sound = create(templateName, object);
+		if (held->sound) {
+			held->sound->setTransform(&held->transform);
+		}
+	}
+	held->transform.matrix = rotation;
+	held->transform.matrix.m[3][0] = position.x;
+	held->transform.matrix.m[3][1] = position.y;
+	held->transform.matrix.m[3][2] = position.z;
+	if (m_log) {
+		std::printf("sound: %s on %u at %.1f %.1f %.1f\n", templateName.c_str(), object, position.x, position.y, position.z);
+	}
+	if (onTrigger) {
+		onTrigger({templateName, position, false, -1});
+	}
+	if (held->sound) {
+		held->sound->play();
+	}
+}
+
+void GameSounds::placeHeld(const std::function<bool(uint32_t object, Vec3& position, Matrix4& rotation)>& where)
+{
+	uint32_t last = 0;
+	bool here = false;
+	Vec3 position;
+	Matrix4 rotation;
+	for (auto it = m_held.begin(); it != m_held.end();) {
+		const uint32_t object = it->first.first;
+		if (it == m_held.begin() || object != last) {
+			last = object;
+			rotation = {};
+			here = where(object, position, rotation);
+		}
+		Held& held = *it->second;
+		if (here) {
+			held.transform.matrix = rotation;
+			held.transform.matrix.m[3][0] = position.x;
+			held.transform.matrix.m[3][1] = position.y;
+			held.transform.matrix.m[3][2] = position.z;
+			++it;
+			continue;
+		}
+		// Released, a playing one-shot detaches (Sound::detach copies the
+		// matrix) and plays out there.
+		if (held.sound) {
+			held.sound->release();
+		}
+		it = m_held.erase(it);
+	}
 }
 
 ISound* GameSounds::create(const std::string& templateName, uint32_t owner)

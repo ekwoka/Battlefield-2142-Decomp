@@ -137,11 +137,24 @@ public:
 		return it != m_weapons.end() && it->second.looping;
 	}
 
+	// A sound kept on an object, as a soldier's footstep set keeps one a
+	// slot (0x007fd840): created once with the object as its owner, riding
+	// the object's matrix with no velocity (the set's transform: slot 0
+	// 0x007fd830 the soldier's matrix, slot 1 0x006a07a0 none), and played
+	// again on each step (slot 0x14). The template's position is an offset
+	// in the object's frame, and occlusion is asked there every update.
+	void playOn(uint32_t object, const std::string& templateName, const Vec3& position, const Matrix4& rotation);
+	// Each tick: where the objects holding sounds are now. `where` false
+	// (the object gone) releases its sounds to play out where they are.
+	void placeHeld(const std::function<bool(uint32_t object, Vec3& position, Matrix4& rotation)>& where);
+	size_t held() const { return m_held.size(); }
+
 	void stopAll();
 
 private:
 	class Transform;
 	struct Loop;
+	struct Held;
 
 	// A weapon sound component's state (the object part of vtable
 	// 0x00971aa8): its instances by slot (+0x10.., the 1P / 1P_Outdoor /
@@ -176,6 +189,8 @@ private:
 	std::map<uint64_t, WeaponState> m_weapons;
 	bool m_log = false;
 	std::map<std::pair<uint64_t, std::string>, std::unique_ptr<Loop>> m_loops;
+	// shortcut: kept per template until the object goes; retail's set holds 4 and drops them on a material change (0x007fd840).
+	std::map<std::pair<uint32_t, std::string>, std::unique_ptr<Held>> m_held;
 	int m_tick = 0;
 	int m_firingTick = -100; // muteOnFire's last shot
 	std::map<std::string, int> m_lastDeploy;

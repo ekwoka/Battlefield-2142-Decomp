@@ -436,6 +436,9 @@ public:
 	struct SoundEvent {
 		std::string sound;
 		physics::Vec3 position;
+		// Non-zero: played on this object (a soldier's footstep set,
+		// 0x007fd840), not as a one-shot at `position`.
+		uint32_t object = 0;
 	};
 	std::vector<SoundEvent> takeSounds() { return std::exchange(m_sounds, {}); }
 	// The close-to indications (the player's 0.2 s scan on the server,
@@ -1103,6 +1106,12 @@ public:
 	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
 	// limit, soldierAnimationSpeed).
 	void setZoomed(int player, bool zoomed, float lookScale = 1);
+	// The footsteps' walk cycle in a first-person view (0x005ef7f0 with the
+	// soldier's view +0x2f0 == 0): the held weapon's first-person system's,
+	// else the soldier's own (anim::FirstPersonRig::walkCycle). Taken by the
+	// player's next step update in place of the third-person cycle (length
+	// < 0: none, so no steps), then dropped.
+	void setFirstPersonWalkCycle(int player, float length, float time);
 	// The alternate fire's press changed the zoom level of `weapon` (the
 	// template with the DefaultZoomComp): its S_<weapon>_Zoom, in or out
 	// (0x005c0da0 compares the level around the zoom component's step ->
@@ -3930,6 +3939,8 @@ private:
 		anim::SoldierJumpAnimation jumpAnimation;
 		// The movement sound's kept half of the walk cycle (0x007fda00).
 		SoldierFootsteps footsteps;
+		bool firstPersonCycleSet = false;     // setFirstPersonWalkCycle since the last step update
+		float firstPersonCycle[2] = {-1, -1}; // its length and time
 		// Dead: the body as a ragdoll, and the push of the explosion that
 		// killed it (the soldier's 0x2b0, kept by 0x005ee4d0).
 		std::unique_ptr<anim::RagDoll> ragDoll;

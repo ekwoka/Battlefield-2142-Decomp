@@ -1034,17 +1034,23 @@ bool GameWorld::segmentHit(const physics::Vec3& from, const physics::Vec3& to, u
 	if (m_ground.height) {
 		const float length = std::sqrt(physics::lengthSquared(to - from));
 		const int samples = std::max(2, static_cast<int>(length / 2));
-		for (int i = 1; i < samples; ++i) {
+		// shortcut: 2 m steps, the crossing interpolated; an exact heightmap ray if thin ridges matter.
+		// The end is tested too: a footstep's sound sits 0.9 m under the feet (0/-0.9/0.4).
+		float lastF = 0, lastAbove = from.y - m_ground.height(from.x, from.z);
+		for (int i = 1; i <= samples; ++i) {
 			const float f = static_cast<float>(i) / samples;
 			if (f >= nearest) {
 				break;
 			}
 			const physics::Vec3 at = from + (to - from) * f;
-			if (at.y < m_ground.height(at.x, at.z)) {
-				nearest = f;
+			const float above = at.y - m_ground.height(at.x, at.z);
+			if (above < 0) {
+				nearest = lastAbove > 0 ? lastF + (f - lastF) * lastAbove / (lastAbove - above) : f;
 				object = 0;
 				break;
 			}
+			lastF = f;
+			lastAbove = above;
 		}
 	}
 	fraction = std::min(nearest, 1.0f);
@@ -6406,6 +6412,15 @@ void GameWorld::setZoomed(int id, bool zoomed, float lookScale)
 	}
 }
 
+void GameWorld::setFirstPersonWalkCycle(int id, float length, float time)
+{
+	if (Player* player = findPlayer(id)) {
+		player->firstPersonCycleSet = true;
+		player->firstPersonCycle[0] = length;
+		player->firstPersonCycle[1] = time;
+	}
+}
+
 void GameWorld::zoomSound(int id, const std::string& weapon)
 {
 	if (const Player* player = findPlayer(id)) {
@@ -9397,7 +9412,7 @@ void GameWorld::playAnimationSound(const Player& player, int)
 					std::printf("jump/land sound: tick=%u surface=%u slot=%zu sound=%s onGround=%d vy=%.2f\n", m_ticks, surface,
 						index, cell->soundTemplates[index].c_str(), player.body.onGround() ? 1 : 0, player.body.velocity.y);
 				}
-				m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}});
+				m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}, player.object});
 				return;
 			}
 		}
@@ -9423,7 +9438,7 @@ void GameWorld::playMovementSound(const Player& player)
 				std::printf("footstep: tick=%u surface=%u selected=%u slot=%zu sound=%s at %.1f %.1f %.1f\n",
 					m_ticks, player.footstepMaterial, material, index, cell->soundTemplates[index].c_str(), at.x, at.y - 1, at.z);
 			}
-			m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}});
+			m_sounds.push_back({cell->soundTemplates[index], {at.x, at.y - 1, at.z}, player.object});
 			return;
 		}
 	}
@@ -10018,15 +10033,23 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	// The movement sound (0x007fda00, from the soldier's update 0x0058d350;
 	// apart from the animation's sound events above): on a ladder, on the
 	// ground (the response's +0xf9) or swimming; elsewhere it returns before
-	// the cycle's half is kept. The walk cycle (0x005ef7f0): the held
-	// weapon's 3p system's when it has one (+0x188 slot 0x14(+0x218), its
-	// flags' bit 0 clear -> its animation component, slot 0x1c; asked even
-	// when it has no cycle: the check before it reads the length still 0),
+	// the cycle's half is kept. The walk cycle (0x005ef7f0) by the
+	// soldier's view (+0x2f0: 0 first person, 1 third, as the template's
+	// 1P then 3P systems at +0x2c4 / +0x2cc): in first person the held
+	// weapon's first-person system (+0x188 slot 0x14(+0x218) -> component
+	// slot 0x18(0) -> 0x1c), else the soldier's own, which the view hands
+	// over (setFirstPersonWalkCycle); otherwise the weapon's 3p system,
 	// else the body's; see soldierStepCycle for the fallbacks.
 	const bool onLadder = player.ladder >= 0;
+	const bool firstPersonCycle = std::exchange(player.firstPersonCycleSet, false);
 	if (onLadder || player.body.onGround() || player.body.stance == 3) {
 		float length = -1, time = -1;
-		if (const anim::AnimationState* cycle = player.weaponAnimation ? player.weaponAnimation.get()
+		if (firstPersonCycle) {
+			// Seen in first person: the first-person systems' cycle (their
+			// forward run plays slower than the third-person one's).
+			length = player.firstPersonCycle[0];
+			time = player.firstPersonCycle[1];
+		} else if (const anim::AnimationState* cycle = player.weaponAnimation ? player.weaponAnimation.get()
 				: player.bodyAnimation.get()) {
 			cycle->walkCycle(length, time);
 		}
@@ -10037,8 +10060,8 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		// 0x1c); the rewrite has no swim steps.
 		if (player.footsteps.step(length, time, movedSpeed) && player.body.stance != 3) {
 			if (footstepTrace() && player.id == localPlayer()) {
-				std::printf("footstep cycle: tick=%u length=%.3f time=%.3f speed=%.2f weaponCycle=%d\n", m_ticks, length, time,
-					movedSpeed, player.weaponAnimation ? 1 : 0);
+				std::printf("footstep cycle: tick=%u length=%.3f time=%.3f speed=%.2f firstPerson=%d\n", m_ticks, length, time,
+					movedSpeed, firstPersonCycle ? 1 : 0);
 			}
 			playMovementSound(player);
 		}

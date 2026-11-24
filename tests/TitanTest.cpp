@@ -5646,3 +5646,52 @@ TEST(Weapons_AirborneSoldierTakesStandModifier)
 	CHECK(airborne >= 5);
 	CHECK(std::fabs(air - stand) < 0.01f);
 }
+
+// Seen in first person the soldier steps by the cycle the view hands over
+// (0x005ef7f0 with view 0: the weapon's first-person system), not by his
+// third-person one: a 1 s cycle gives two steps a second; one with no
+// cycle (length -1) gives none. Unfed, the third-person cycle steps.
+TEST(GameWorld_FirstPersonCycleDrivesTheFootsteps)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) return;
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	level.world->setAnimationSystems(&systems, [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	});
+	level.world->startRound();
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	level.run(2);
+	const auto walk = [&](int feed) { // 0 unfed, 1 a 1 s cycle, 2 none
+		game::SoldierInput input;
+		input.throttle = 1;
+		for (int i = 0; i < 30; ++i) {
+			level.world->setInput(id, input);
+			level.world->tick(1 / 30.0f);
+		}
+		(void)level.world->takeSounds();
+		int steps = 0;
+		for (int i = 0; i < 90; ++i) {
+			if (feed) level.world->setFirstPersonWalkCycle(id, feed == 1 ? 1.0f : -1.0f, feed == 1 ? std::fmod(i / 30.0f, 1.0f) : -1.0f);
+			level.world->setInput(id, input);
+			level.world->tick(1 / 30.0f);
+			for (const auto& s : level.world->takeSounds()) steps += s.sound.rfind("S_Walk", 0) == 0 || s.sound.rfind("S_Sprint", 0) == 0;
+		}
+		level.world->setInput(id, {});
+		level.run(1);
+		return steps;
+	};
+	const int unfed = walk(0), fed = walk(1), none = walk(2);
+	std::fprintf(stderr, "  steps in 3 s: third person %d, a 1 s first-person cycle %d, none %d\n", unfed, fed, none);
+	CHECK(unfed >= 7 && fed >= 5 && fed <= 7 && none <= 1);
+}
