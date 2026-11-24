@@ -9935,8 +9935,10 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 	// Titan stands instead of walking on the spot.
 	const physics::Vec3 m = player.body.animationVelocity();
 	const float speed = std::sqrt(m.x * m.x + m.z * m.z);
-	// Crouched and lying the systems see it scaled (0x005ef250).
-	input.speed = soldierAnimationSpeed(speed, player.input.pose, player.lookScale);
+	// Third person (+0x2f0 == 1) takes the unscaled horizontal speed
+	// (0x005ef56a skips crouch/prone scaling outside first person; 3p has
+	// its own 3p_crouch_move and 3p_prone_move value holders).
+	input.speed = speed;
 	const SoldierAnimationDirection direction = soldierAnimationDirection(m, lookYaw(player));
 	input.forward = direction.forward;
 	input.side = direction.side;
@@ -10315,7 +10317,7 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 	const physics::Vec3& v = state.velocity;
 	const float speed = std::sqrt(v.x * v.x + v.z * v.z);
 	const float yaw = state.yaw * 3.14159265f / 180.0f;
-	input.speed = soldierAnimationSpeed(speed, state.pose); // 0x005ef250's crouched and lying scale
+	input.speed = speed; // 0x005ef56a scales crouch/prone in first person only
 	if (speed > 0.01f) {
 		input.forward = (v.x * std::sin(yaw) + v.z * std::cos(yaw)) / speed;
 		input.side = (v.x * std::cos(yaw) - v.z * std::sin(yaw)) / speed;

@@ -334,7 +334,9 @@ void GameAudio::tick(const Camera& given)
 	autoRadio();
 	materialRadio();
 	// The soldiers' footstep sets ride their soldier's matrix (0x007fd830:
-	// the object's slot 0x78, at the feet, turned by its yaw).
+	// the object's slot 0x78, the body centre a metre above the feet, turned
+	// by its yaw). Shipped footstep templates sit at 0/-0.9/0.4 (prone
+	// 0/-0.63/0.25) in that frame, i.e. 0.1 m above flat ground.
 	const auto where = [&](uint32_t id, sound::Vec3& position, sound::Matrix4& rotation) {
 		const world::Object* object = m_objects.find(id);
 		if (!object) {
@@ -342,6 +344,9 @@ void GameAudio::tick(const Camera& given)
 		}
 		const world::Vec3& r = object->rotation();
 		position = toSound(object->position());
+		if (object->objectTemplate() && object->objectTemplate()->typeName() == "Soldier") {
+			position.y += 1.0f;
+		}
 		rotation = toSound(physics::Mat3::fromYawPitchRoll({r.x, r.y, r.z}));
 		return true;
 	};

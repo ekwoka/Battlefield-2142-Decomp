@@ -142,14 +142,14 @@ inline bool waterTooDeep(const physics::Vec3& origin, const physics::Ground& gro
 float soldierSpeed(int index);
 // The speed index of a pose (0x00586020).
 int soldierSpeedIndex(SoldierPose pose, bool sprinting, bool zoomed = false);
-// The speed the soldier's third-person animation system sees (0x005ef250,
-// the 3p system, +0x2f0 == 0): crouched (pose +0x268 == 1) the horizontal
+// The speed the soldier's first-person animation system sees (0x005ef56a,
+// the 1p system, +0x2f0 == 0): crouched (pose +0x268 == 1) the horizontal
 // speed x anim-soldier-1p-speed-crouch (1.7, *0x00a71a08, static_init
 // 0x008e7d60), lying (2) x anim-soldier-1p-speed-prone (3.0, *0x00a719e0,
 // static_init 0x008e7d80), either held within 0 and 0x00586df0(3): speed
 // index 3's 3.9 m/s, crouched times the look's scale (0x00586420: zoomed
 // in, the field of view over the camera's times mouseSpeedMod; 1 else).
-// Standing and swimming it stays.
+// Standing, swimming, and third person (+0x2f0 != 0) keep the raw speed.
 // The speed the soldier moves at (0x00588420): the pose's speed index; crouched and zoomed it
 // is scaled by the look's scale as well.
 float soldierTargetSpeed(SoldierPose pose, bool sprinting, bool zoomed, float lookScale = 1);

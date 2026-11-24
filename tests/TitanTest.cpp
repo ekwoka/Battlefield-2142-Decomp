@@ -5695,3 +5695,71 @@ TEST(GameWorld_FirstPersonCycleDrivesTheFootsteps)
 	std::fprintf(stderr, "  steps in 3 s: third person %d, a 1 s first-person cycle %d, none %d\n", unfed, fed, none);
 	CHECK(unfed >= 7 && fed >= 5 && fed <= 7 && none <= 1);
 }
+
+// Retail 0x005ef56a scales horizontal speed in first person (+0x2f0 == 0) by
+// 1.7 crouched and 3.0 prone (because 1p has only 1p_move, normal 4.2), while
+// third person (+0x2f0 == 1) takes raw speed into 3p_crouch_move / 3p_prone_move.
+TEST(PlayerCamera_FirstPersonCrouchAndProneScaleFootstepCadence)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Camp_Gibraltar", 32, false, nullptr, true, nullptr, "gpm_cq");
+	if (!level.loaded) return;
+	anim::AnimationSystems systems {[&](const std::string& path, std::vector<uint8_t>& data) { return level.files.readFile(path, data); }};
+	anim::registerAnimationConsoleMethods(level.console, systems);
+	bool holders = false;
+	const auto load = [&](const std::string& path) {
+		std::string out;
+		if (!holders) {
+			holders = true;
+			level.console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		}
+		return systems.get(path, [&] { level.console.run(path, {}, out); });
+	};
+	level.world->setAnimationSystems(&systems, load);
+	level.world->startRound();
+	const int id = level.world->joinPlayer(1);
+	CHECK(level.world->spawnSoldier(id));
+	PlayerCamera camera(*level.world, systems, load);
+	const auto measure = [&](game::SoldierPose pose, bool firstPerson) {
+		game::SoldierInput input;
+		input.pose = pose;
+		input.throttle = 1;
+		for (int i = 0; i < 45; ++i) {
+			level.world->setInput(id, input);
+			level.world->tick(1 / 30.0f);
+			if (firstPerson) camera.tick(1 / 30.0f);
+		}
+		(void)level.world->takeSounds();
+		int steps = 0;
+		for (int i = 0; i < 120; ++i) {
+			level.world->setInput(id, input);
+			level.world->tick(1 / 30.0f);
+			if (firstPerson) camera.tick(1 / 30.0f);
+			for (const auto& s : level.world->takeSounds()) {
+				steps += s.sound.rfind("S_Walk", 0) == 0 || s.sound.rfind("S_Sprint", 0) == 0
+					|| s.sound.rfind("S_Prone", 0) == 0;
+			}
+		}
+		level.world->setInput(id, {});
+		for (int i = 0; i < 30; ++i) {
+			level.world->tick(1 / 30.0f);
+			if (firstPerson) camera.tick(1 / 30.0f);
+		}
+		return steps;
+	};
+	const int crouch1p = measure(game::SoldierPose::Crouch, true);
+	const int prone1p = measure(game::SoldierPose::Prone, true);
+	const int crouch3p = measure(game::SoldierPose::Crouch, false);
+	const int prone3p = measure(game::SoldierPose::Prone, false);
+	std::fprintf(stderr, "  4 s steps: crouch 1P=%d 3P=%d, prone 1P=%d 3P=%d\n",
+		crouch1p, crouch3p, prone1p, prone3p);
+	// 1P crouched (~3.4/4.2 -> ~2.5 steps/s -> ~10 in 4 s; unscaled would be ~5-6)
+	// 1P prone (~2.4/4.2 -> ~1.7 steps/s -> ~7 in 4 s; unscaled would be ~2)
+	// 3P crouched (~2.0/1.7 -> ~10 in 4 s; wrongly x1.7 scaled would be ~16+)
+	// 3P prone (~0.8/0.7 -> ~8 in 4 s; wrongly x3.0 scaled would be ~20+)
+	CHECK(crouch1p >= 8 && crouch1p <= 13);
+	CHECK(prone1p >= 5 && prone1p <= 9);
+	CHECK(crouch3p >= 6 && crouch3p <= 13);
+	CHECK(prone3p >= 5 && prone3p <= 12);
+}

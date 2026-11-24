@@ -5,6 +5,7 @@
 // (0x004d8b90, 0x004d7950, 0x004d8110, 0x0042e0c0), and what GameAudio
 // hands the sound layer from a round. With $BF2142_GAME_DIR, also the
 // shipped Sound/VoiceMessages.con.
+#include "Animation/AnimationSystem.h"
 #include "Console/Console.h"
 #include <chrono>
 #include <thread>
@@ -116,10 +117,10 @@ TEST(GameSounds_DetachedOneShotObstructionUsesWorldPosition)
 }
 
 // A soldier's footstep set (0x007fd840) keeps one sound a slot on the
-// soldier: its owner the soldier, riding the soldier's matrix (0x007fd830),
-// played again each step. The template's 0/-0.9/0.4 is in the soldier's
-// frame (facing +x here), so the obstruction rays end under his feet, ahead,
-// and follow him; the soldier gone, it is let go.
+// soldier: its owner the soldier, riding the soldier's body-centre matrix
+// (0x007fd830, 1 m above the feet), played again each step. The template's
+// 0/-0.9/0.4 is in that frame (facing +x here), so the obstruction rays end
+// 0.1 m above the feet, ahead, and follow him; the soldier gone, it is let go.
 TEST(GameSounds_FootstepSoundRidesItsSoldier)
 {
 	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
@@ -1453,3 +1454,122 @@ TEST(EnhancedAudio_DopplerSpeedHeldBelowTheSingularity)
 	CHECK(near(sound::enhancedDopplerVelocity(dive, 2.0f).length(), 0.25f * sound::kOpenAlSpeedOfSound));
 	CHECK(near(sound::enhancedDopplerVelocity(dive, 0.0f).y, -299)); // no Doppler: nothing to hold
 }
+
+// Shipped footstep templates sit at 0/-0.9/0.4 (soundRadius 0.5) in the
+// soldier's body-centre frame (feet + 1.0 m, 0x007fd830). On flat terrain
+// GameAudio must place the held sound at the body centre so the world origin
+// is +0.1 m above ground and terrain obstruction rays stay clear (not -0.9 m
+// underground where every ray hits the ground).
+TEST(GameAudio_SoldierFootstepsOnFlatTerrainAreUnobstructed)
+{
+	const char* dir = std::getenv("BF2142_SOUND_TEST_DIR");
+	if (!dir) return;
+	test::setEnv("ALSOFT_DRIVERS", "null");
+	for (const char* provider : {"Software Audio", "Software Audio + EAX"}) {
+		auto* engine = sound::getSoundEngine();
+		if (engine->initialize(0, provider, 16) != 0) {
+			sound::shutdownSoundEngine();
+			continue;
+		}
+		{
+			world::ObjectTemplateManager templates;
+			world::ObjectManager objects;
+			templates.registerType(1, "ControlPoint");
+			templates.registerType(2, "SpawnPoint");
+			templates.registerType(3, "Soldier");
+			for (const char* name : {"us_light_soldier", "pac_light_soldier"}) {
+				world::ObjectTemplate* soldier = templates.create("Soldier", name);
+				soldier->settings()["armor.maxHitPoints"] = "100";
+				soldier->settings()["animationSystem3p"] = "stub.inc";
+				soldier->settings()["sprintRecoverTime"] = "1";
+				soldier->settings()["sprintDissipationTime"] = "10";
+				soldier->settings()["sprintLimit"] = "0.2";
+			}
+			world::ObjectTemplate* point = templates.create("ControlPoint", "cp_eu");
+			point->settings()["controlPointId"] = "2";
+			point->settings()["team"] = "2";
+			point->settings()["unableToChangeTeam"] = "1";
+			objects.create(point, {0, 0, 0});
+			world::ObjectTemplate* spawn = templates.create("SpawnPoint", "sp");
+			objects.create(spawn, {0, 0, 0}, {0, 0, 0})->setControlPointId(2);
+
+			sound::SoundManager manager(engine, templates);
+			manager.registerTemplateType();
+			addSoundTemplate(templates, "S_Sprint_Dirt", std::string(dir) + "/Cockpits/Missile_Warning.wav");
+			if (auto* t = manager.soundTemplate("S_Sprint_Dirt")) {
+				t->setIs3dSound(true);
+				t->setLoopCount(1);
+				t->setSoundRadius(0.5f);
+				const sound::Vec3 offset {0, -0.9f, 0.4f};
+				t->setPosition(&offset);
+			}
+			engine->reloadSoundFiles();
+
+			physics::MaterialManager materials;
+			materials.createCell(5500, 0).soundTemplates = {
+				"S_Sprint_Dirt", "S_Sprint_Dirt", "S_Sprint_Dirt", "S_Sprint_Dirt"};
+			io::FileManager files;
+			physics::CollisionTemplateManager collisionTemplates;
+			physics::Ground ground;
+			ground.height = [](float, float) { return 0.0f; };
+			ground.heightAndNormal = [](float, float, physics::Vec3& normal) {
+				normal = {0, 1, 0};
+				return 0.0f;
+			};
+
+			anim::AnimationSystems systems(nullptr);
+			game::GameWorld world(templates, objects);
+			world.setAnimationSystems(&systems, [&](const std::string& path) { return systems.get(path, [] {}); });
+			world.enablePhysics(files, collisionTemplates, ground, &materials);
+			world.startRound();
+			CHECK(world.spawnPlayer(2) != nullptr);
+			const int local = world.localPlayer();
+
+			int rayCalls = 0;
+			int rayHits = 0;
+			float minEndY = 1e9f;
+			manager.setObstructionTest([&](const sound::Vec3& from, const sound::Vec3& to, uint32_t,
+				sound::SoundManager::RayHit& hit) {
+				++rayCalls;
+				minEndY = std::min(minEndY, to.y);
+				float fraction = 0;
+				uint32_t owner = 0;
+				const bool blocked = world.segmentHit(
+					{from.x, from.y, from.z}, {to.x, to.y, to.z}, 0, fraction, owner);
+				if (blocked) {
+					++rayHits;
+					hit.root = owner;
+				}
+				return blocked;
+			});
+
+			sound::GameSounds gameSounds(manager);
+			GameAudio audio(world, objects, templates, manager, gameSounds, nullptr);
+			game::SoldierInput sprint;
+			sprint.throttle = 1;
+			sprint.sprint = true;
+			GameAudio::Camera camera;
+			camera.firstPerson = true;
+			for (int i = 0; i < 60; ++i) {
+				world.setInput(local, sprint);
+				world.setFirstPersonWalkCycle(local, 0.6f, std::fmod(i / 30.0f, 0.6f));
+				world.tick(1 / 30.0f);
+				game::GameWorld::PlayerInfo info;
+				CHECK(world.playerInfo(local, info));
+				camera.position = {info.position.x, info.position.y + 1.47f, info.position.z};
+				camera.forward = {0, 0, 1};
+				camera.up = {0, 1, 0};
+				audio.tick(camera);
+				manager.update(1 / 30.0f);
+			}
+			std::fprintf(stderr, "  [%s] flat-ground footstep obstruction: rays=%d hits=%d minEndY=%.2f\n",
+				provider, rayCalls, rayHits, minEndY);
+			CHECK(rayCalls > 0);
+			CHECK(rayHits == 0);
+			CHECK(minEndY > 0.0f);
+		}
+		engine->shutdown();
+		sound::shutdownSoundEngine();
+	}
+}
+

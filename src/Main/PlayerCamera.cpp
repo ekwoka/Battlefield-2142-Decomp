@@ -1117,14 +1117,19 @@ void PlayerCamera::tick(float seconds)
 		m_lastPitch = me.aimPitch;
 		return;
 	}
-	// The first-person systems see what the third-person ones do (pose,
-	// movement in the soldier's frame, fire and reload), and the zoom
-	// (message 4).
+	// The first-person systems see pose, movement in the soldier's frame,
+	// fire, reload, and zoom (message 4). Retail 0x005ef56a scales speed in
+	// first person (+0x2f0 == 0) for crouch (x1.7) and prone (x3.0) because
+	// 1p uses 1p_move rather than separate crouch/prone value holders.
 	anim::AnimationInput input;
 	const physics::Vec3 v {me.velocity[0], me.velocity[1], me.velocity[2]};
 	const float speed = me.vehicle ? 0.0f : std::sqrt(v.x * v.x + v.z * v.z); // a seat's ride is not a walk
 	const float yaw = me.bodyYaw * kDegrees;
-	input.speed = speed;
+	const auto stancePose = me.stance == 1 ? game::SoldierPose::Crouch
+		: me.stance == 2 ? game::SoldierPose::Prone
+		: me.stance == 3 ? game::SoldierPose::Swim
+		: game::SoldierPose::Stand;
+	input.speed = me.vehicle ? 0.0f : game::soldierAnimationSpeed(speed, stancePose, mouseScale());
 	if (speed > 0.01f) {
 		input.forward = (v.x * std::sin(yaw) + v.z * std::cos(yaw)) / speed;
 		input.side = (v.x * std::cos(yaw) - v.z * std::sin(yaw)) / speed;

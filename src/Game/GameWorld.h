@@ -1103,8 +1103,7 @@ public:
 	// Whether the player looks through the weapon's zoom (the local
 	// player's camera; the deviation's devModZoom and the gun sway use it),
 	// and the look's scale (0x00586420: the field of view over the camera's
-	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
-	// limit, soldierAnimationSpeed).
+	// times mouseSpeedMod zoomed in, else 1; crouched zoomed target speed).
 	void setZoomed(int player, bool zoomed, float lookScale = 1);
 	// The footsteps' walk cycle in a first-person view (0x005ef7f0 with the
 	// soldier's view +0x2f0 == 0): the held weapon's first-person system's,

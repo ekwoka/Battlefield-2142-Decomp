@@ -4206,9 +4206,9 @@ TEST(GameWorld_FootstepsOnObjectsUseTheirMaterial)
 	}
 }
 
-// The sound obstruction rays' terrain test: a footstep's sound sits 0.9 m
-// under the feet, so the ray from the eye ends under the ground; short as
-// it is, the terrain is met where it crosses, not missed between samples.
+// The sound obstruction rays' terrain test: when a ray from above the ground
+// crosses below the terrain surface, even a short segment meets the terrain
+// where it crosses instead of stepping past it between samples.
 TEST(GameWorld_SegmentMeetsTerrainAtItsUnderGroundEnd)
 {
 	Range range;
