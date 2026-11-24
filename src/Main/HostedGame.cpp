@@ -2053,6 +2053,7 @@ void HostedGame::applyMoves()
 		game::SoldierInput input;
 		game::GameWorld::PlayerInfo seat;
 		client.moveState.seated = m_round->playerInfo(client.player, seat) && seat.vehicle != 0;
+		client.moveState.stance.prone = seat.pose == game::SoldierPose::Prone; // the pose the last tick gave
 		if (!client.moves.empty()) {
 			const net::PlayerMove move = client.moves.front();
 			client.moves.pop_front();

@@ -83,6 +83,7 @@ public:
 	struct Feel {
 		bool onGround = false, swimming = false;
 		float getUp = 0;
+		bool prone = false;
 	};
 	// A move just sent (GameClient::onMoveSent): one tick of it. Returns the
 	// soldier's state from before the step.

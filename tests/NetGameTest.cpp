@@ -398,7 +398,7 @@ TEST(NetGame_SoldierInputMapping)
 	dice::hfe::game::SoldierInput soldier;
 	soldier.throttle = 1;
 	soldier.fire = true;
-	soldier.pose = dice::hfe::game::SoldierPose::Prone;
+	soldier.lieKey = true;
 	soldier.selectItem = 2;
 	const net::PlayerMove move = net::playerInputFrom(soldier).toMove(0);
 	CHECK(move.axes[net::kPIThrottle] == 100 && move.trigger(net::kPIFire) && move.trigger(net::kPILie));
@@ -412,6 +412,35 @@ TEST(NetGame_SoldierInputMapping)
 		net::MoveInputState state;
 		CHECK(net::soldierInputFromMove(wheel, state).itemStep == step);
 	}
+}
+
+// A move carries the raw lie key and the server toggles prone from it
+// (0x005889d0): a press goes down, the release stays, a press gets up; the
+// held key is the soldier's lieKey; the jump key from prone gets up (no jump).
+TEST(NetGame_LieKeyToggledOnTheServer)
+{
+	using dice::hfe::game::SoldierPose;
+	net::MoveInputState state;
+	dice::hfe::game::SoldierInput in;
+	const auto decode = [&](int i) {
+		return net::soldierInputFromMove(net::playerInputFrom(in).toMove(i), state);
+	};
+	in.lieKey = true;
+	dice::hfe::game::SoldierInput seen = decode(0);
+	CHECK(seen.pose == SoldierPose::Prone && seen.lieKey);
+	in.lieKey = false;
+	seen = decode(1);
+	CHECK(seen.pose == SoldierPose::Prone && !seen.lieKey);
+	in.jump = true;
+	seen = decode(2);
+	CHECK(seen.pose == SoldierPose::Stand && !seen.jump && seen.jumpKey);
+	in.jump = false;
+	in.lieKey = true;
+	decode(3);
+	in.lieKey = false;
+	CHECK(decode(4).pose == SoldierPose::Prone);
+	in.lieKey = true;
+	CHECK(decode(5).pose == SoldierPose::Stand);
 }
 
 // The aim's pitch decoded from the moves' MouseLookY (soldierInputFromMove):

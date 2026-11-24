@@ -816,11 +816,11 @@ TEST(NetHost_PredictionFeelIsBeforeTheStep)
 	lying.mask = 0x20;
 	lying.soldierValues[0] = static_cast<int>(dice::hfe::game::SoldierPose::Prone);
 	prediction.start(range.templates.find("pac_light_soldier"), 0, lying, {0, 0, 0});
-	dice::hfe::game::SoldierInput down;
-	down.pose = dice::hfe::game::SoldierPose::Prone;
-	CHECK(prediction.step(net::playerInputFrom(down).toMove(1)).getUp == 0);
+	dice::hfe::game::SoldierInput lie;
+	lie.lieKey = true;
+	CHECK(prediction.step(net::PlayerMove {}).getUp == 0); // a lying soldier stays down
 	CHECK(prediction.control().pose() == dice::hfe::game::SoldierPose::Prone);
-	const host::SoldierPrediction::Feel up = prediction.step(net::PlayerMove {}); // pose Stand: gets up
+	const host::SoldierPrediction::Feel up = prediction.step(net::playerInputFrom(lie).toMove(2)); // a lie press: gets up
 	CHECK(up.getUp == 0 && up.onGround);
 	CHECK(prediction.control().getUpTime() > 0);
 	CHECK(prediction.step(net::PlayerMove {}).getUp > 0);

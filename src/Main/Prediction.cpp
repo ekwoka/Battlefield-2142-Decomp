@@ -100,6 +100,7 @@ void SoldierPrediction::apply(const net::NetworkableState& s, const net::Vec3f& 
 
 void SoldierPrediction::tick(const net::PlayerMove& move)
 {
+	m_input.stance.prone = m_control.pose() == game::SoldierPose::Prone; // a refused press is spent
 	game::SoldierInput input = net::soldierInputFromMove(move, m_input);
 	if (!m_round.ground().height) {
 		return;
@@ -127,7 +128,7 @@ void SoldierPrediction::tick(const net::PlayerMove& move)
 
 SoldierPrediction::Feel SoldierPrediction::step(const net::PlayerMove& move)
 {
-	const Feel before {onGround(), swimming(), m_control.getUpTime()};
+	const Feel before {onGround(), swimming(), m_control.getUpTime(), m_control.pose() == game::SoldierPose::Prone};
 	if (m_active) {
 		tick(move);
 		++m_stats.steps;

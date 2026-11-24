@@ -64,7 +64,7 @@
 #include "HudMenus.h"
 #include "DeploymentLifecycle.h"
 #include "DeploymentTeam.h"
-#include "StanceKeys.h"
+#include "Game/StanceKeys.h"
 #include "HudMenusChat.h"
 #include "HudMenusComm.h"
 #include "HudMenusKits.h"
@@ -7031,6 +7031,7 @@ int runGame(Options& options, Session& session)
 				// The soldier as the move finds him, as the server's stepWeaponFeel reads him before the step.
 				const host::SoldierPrediction::Feel feel = prediction.step(move);
 				carPrediction.step(move);
+				remoteDeviation.inputs.stance.prone = feel.prone;
 				const game::SoldierInput in = net::soldierInputFromMove(move, remoteDeviation.inputs);
 				const world::ObjectTemplate* weapon = g_remoteHud && prediction.active() ? g_remoteHud->heldWeapon().weapon : nullptr;
 				if (weapon != remoteDeviation.weapon) {
@@ -7046,7 +7047,7 @@ int runGame(Options& options, Session& session)
 				remoteDeviation.lastPitch = in.aimPitch;
 				const int stance = game::SoldierDeviation::stanceIndex(
 					in.pose == game::SoldierPose::Crouch ? 1 : in.pose == game::SoldierPose::Prone ? 2 : 0, feel.onGround, false);
-				const bool misc = game::SoldierDeviation::miscFlag(in.jump, in.lieKey, feel.getUp, feel.swimming, false);
+				const bool misc = game::SoldierDeviation::miscFlag(in.jumpKey, in.lieKey, feel.getUp, feel.swimming, false);
 				remoteDeviation.deviation.update(in.throttle, in.strafe, lookX, lookY, misc, in.fire, stance,
 					playerCamera.zoomLevel() > 0);
 				g_remoteDeviation = remoteDeviation.deviation.deviation();
@@ -7354,6 +7355,7 @@ int runGame(Options& options, Session& session)
 			}
 		};
 		float remoteActionsPitch = 0; // the aim the last --remote-actions move carried
+		bool actProne = false;      // the scripted pose Prone as last sent
 		std::set<size_t> remoteActionsDone; // --remote-actions' requests already sent (by their place in the list)
 		bool joinedLevelLoaded = false; // told the client (LoadComplete goes now)
 		const auto remoteStep = [&] {
@@ -7583,6 +7585,9 @@ int runGame(Options& options, Session& session)
 				playerCamera.setAltFire(act.altFire);
 				remoteLook.fire = act.fire;
 				remoteLook.stance = act.pose == game::SoldierPose::Prone ? 2 : act.pose == game::SoldierPose::Crouch ? 1 : 0;
+				// A scripted pose is a latched one: the wire takes a lie press when it changes.
+				act.lieKey = (act.pose == game::SoldierPose::Prone) != actProne;
+				actProne = act.pose == game::SoldierPose::Prone;
 				client.setInput(net::playerInputFrom(act, remoteActionsPitch));
 				remoteActionsPitch = act.aimPitch;
 			}
@@ -10748,7 +10753,6 @@ int runGame(Options& options, Session& session)
 					stance.prone = prediction.control().pose() == game::SoldierPose::Prone;
 					stanceSteps = prediction.stats().steps;
 				}
-				const bool wasProne = stance.prone;
 				stance.update(in.lie, in.crouch, in.jump);
 				remoteLook.stance = stance.prone ? 2 : in.crouch ? 1 : 0;
 				if (in.toggleCamera && !toggleCameraWas) {
@@ -10778,10 +10782,10 @@ int runGame(Options& options, Session& session)
 				input.toggleFireRate = in.toggleFireRate;
 				input.reload = in.reload || joinedAutoReload(in.fire, autoReloadTick++);
 				input.mouseLook = in.mouseLook;
-				input.jump = in.jump && !wasProne && !stance.prone;
-				input.pose = stance.prone ? game::SoldierPose::Prone
-					: in.crouch           ? game::SoldierPose::Crouch
-										  : game::SoldierPose::Stand;
+				// The raw keys go on the wire; the server and our prediction toggle prone from them.
+				input.jump = in.jump;
+				input.lieKey = in.lie;
+				input.pose = in.crouch ? game::SoldierPose::Crouch : game::SoldierPose::Stand;
 				// The position and weapon keys go to the server as
 				// PIPositionSelect1..8 / PIWeaponSelect1..9; a weapon key's
 				// press is also our own 0x004d2a50's (the seat's item popup,
