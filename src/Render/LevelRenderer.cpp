@@ -902,8 +902,10 @@ void LevelRenderer::addTemplate(const LevelSources& sources, const world::Object
 				collectParts(sources, objectTemplate, Mat4 {}, instance.parts, 0);
 				instance.partsTemplate = &objectTemplate;
 			}
-			lightmapFor(sources, objectTemplate.geometry(), 0, world, instance.lightmap, instance.lightmapTransform);
-			if (!instance.lightmap && (gpuMesh->titanInterior || gpuMesh->titanExterior) && !gpuMesh->bundled && !gpuMesh->skinned) {
+			const bool titanStatic = (gpuMesh->titanInterior || gpuMesh->titanExterior) && !gpuMesh->bundled && !gpuMesh->skinned;
+			if (staticUsesLevelLightmap(titanStatic)) {
+				lightmapFor(sources, objectTemplate.geometry(), 0, world, instance.lightmap, instance.lightmapTransform);
+			} else {
 				// The Titans' parts are lit by their own baked maps (RendDX9 0x10152870), whole, not an atlas cell.
 				instance.lightmap = titanLightmap(sources, objectTemplate.geometry(), gpuMesh->titanExterior ? 0 : -1);
 				instance.lightmapTransform[0] = instance.lightmapTransform[1] = 1;
@@ -2436,6 +2438,43 @@ void LevelRenderer::syncObjects(TickBlend blend)
 				}
 			}
 			instance.cullRadius = std::max(radius, 0.0f) * scale;
+			// A child object (a Titan's gun) is faded on its own in the walk 0x006fe3b0: by its
+			// radius x its cullRadiusScale, with its group's records (0x006fb280: the nearest
+			// Soldier or PlayerControlObject from it up, else the root), the second one while
+			// it is under 0.8 x the group's. A gun's radius reaches its control station.
+			if (!instance.source.empty() && t) {
+				const auto actorType = [](const world::ObjectTemplate& o) {
+					return o.typeName() == "Soldier" || o.typeName() == "PlayerControlObject";
+				};
+				const auto scaleOf = [](const world::ObjectTemplate& o) {
+					const auto it = o.settings().find("cullRadiusScale");
+					return it == o.settings().end() ? 1.0f : static_cast<float>(std::atof(it->second.c_str()));
+				};
+				const auto radiusOf = [&](const world::ObjectTemplate& o) {
+					return m_sources->templateRadius ? m_sources->templateRadius(o) : 0.0f;
+				};
+				const world::ObjectTemplate* own = t;
+				const world::ObjectTemplate* group = t;
+				for (size_t from = 0; own;) {
+					const size_t slash = instance.source.find('/', from);
+					own = m_sources->templates.find(instance.source.substr(from, slash - from));
+					if (own && actorType(*own)) {
+						group = own;
+					}
+					if (slash == std::string::npos) {
+						break;
+					}
+					from = slash + 1;
+				}
+				if (own) {
+					const float ownRadius = radiusOf(*own);
+					instance.cullRadius = (ownRadius > 0 ? ownRadius : std::max(radius, 0.0f)) * scaleOf(*own);
+					const float rootRadius = group == t && m_sources->objectRadius ? m_sources->objectRadius(instance.object) : 0.0f;
+					const float groupRadius = (rootRadius > 0 ? rootRadius : radiusOf(*group)) * scaleOf(*group);
+					instance.cullActor = actorType(*group);
+					instance.cullChild = takesChildRecord(instance.cullRadius, groupRadius);
+				}
+			}
 		}
 		if (!instance.parts.empty() && m_sources->partTransforms) {
 			std::vector<anim::Matrix> placed(instance.parts.size(), anim::Matrix {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
@@ -3909,6 +3948,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	const float viewFar = viewFarDistance(m_sources && m_sources->viewDistance ? m_sources->viewDistance() : 500.0f, m_viewDistanceScale);
 	const CullRecord cullRoot = cullRecord(cullScales, zoom, viewFar, false, overgrowthSeconds);
 	const CullRecord cullActor = cullRecord(cullScales, zoom, viewFar, true, overgrowthSeconds);
+	const CullRecord cullChild = childCullRecord(cullScales, zoom, viewFar, overgrowthSeconds);
 	for (Instance& instance : m_instances) {
 		const bool forceCloak = cloakAll && instance.mesh->skinned && !instance.hidden;
 		if ((instance.hidden || forceCloak) && instance.object != 0 && m_sources &&
@@ -3998,7 +4038,7 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 				: Vec3f {instance.world.at(3, 0), instance.world.at(3, 1), instance.world.at(3, 2)};
 			const Vec3f d = fadeOrigin - camera.position;
 			instance.distanceFade = stepDistanceFade(instance.distanceFade, instance.cullRadius, dot(d, d),
-				instance.cullActor ? cullActor : cullRoot);
+				instance.cullChild ? cullChild : instance.cullActor ? cullActor : cullRoot);
 			if (instance.distanceFade <= 0.0f) {
 				continue;
 			}

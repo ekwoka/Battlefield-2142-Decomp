@@ -96,6 +96,30 @@ TEST(RenderScene_OvergrowthLodPalmFrondsAreAlphaTestedLeaves)
 // fell back to the 80 m minimum and enemies past ~88 m showed only when
 // zoomed. The mesh's box radius (0x101a7b10) x the template's
 // cullRadiusScale 2.5 keeps him much further.
+TEST(RenderScene_ChildObjectsFadeByTheirGroup)
+{
+	const auto scales = render::objectCullScales(3);
+	const render::CullRecord actor = render::cullRecord(scales, 1, 3000, true, 0);
+	const render::CullRecord child = render::childCullRecord(scales, 1, 3000, 0);
+	const auto cutoff = [](float radius, const render::CullRecord& record) {
+		float d = 1;
+		while (d < 3000 && render::stepDistanceFade(1, radius, d * d, record) > 0) d += 1;
+		return d;
+	};
+	// 0x006fb280: a quarter of the minimum area, half the non-actor scale.
+	CHECK(std::fabs(child.minArea - 0.25f * actor.minArea) < 1e-3f);
+	CHECK(std::fabs(child.areaScale - 0.5f * render::cullRecord(scales, 1, 3000, false, 0).areaScale) < 1e-3f);
+	// A Titan AA gun: its mesh's 1.32 m sphere was gone by about 90 m. Its radius
+	// reaches its control station (about 18 m), at least 0.8 x its hub's, so it
+	// keeps the hub's actor record and is drawn far beyond the 150 m it was lost at.
+	CHECK(cutoff(1.32f, actor) < 100);
+	CHECK(!render::takesChildRecord(18.4f, 18.4f));
+	CHECK(cutoff(18.4f, actor) > 500);
+	// A 0.6 m sign under a 60 m Titan takes the second record: about 44 m.
+	CHECK(render::takesChildRecord(0.6f, 60));
+	CHECK(cutoff(0.6f, child) < 50);
+}
+
 TEST(RenderScene_SoldierDistanceFadeUsesTheSkinnedMeshRadius)
 {
 	const auto cutoff = [](float radius, float zoom) {
@@ -1202,6 +1226,9 @@ TEST(RenderScene_StaticLightmapsByLightingQuality)
 	CHECK(staticKeepsLightmap(false, true, 1));
 	CHECK(staticKeepsLightmap(false, false, 2));
 	CHECK(staticKeepsLightmap(false, false, 3));
+	// 0x100bde63: a Titan's statics never take a level atlas cell (Tampa ships stale ones).
+	CHECK(!staticUsesLevelLightmap(true));
+	CHECK(staticUsesLevelLightmap(false));
 }
 
 TEST(RenderScene_CustomTextureSuffix)

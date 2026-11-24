@@ -15354,6 +15354,51 @@ float objectRadiusOf(const world::ObjectTemplateManager& templates, const world:
 
 } // namespace
 
+float GameWorld::templateRadius(const world::ObjectTemplate& root) const
+{
+	if (const auto found = m_templateRadii.find(&root); found != m_templateRadii.end()) {
+		return found->second;
+	}
+	const auto ownMesh = [&](const world::ObjectTemplate& t) -> const physics::CollisionMeshFile* {
+		auto name = t.settings().find("collisionMesh");
+		if (name == t.settings().end()) {
+			name = t.settings().find("setCollisionMesh");
+		}
+		return name == t.settings().end() || !m_collisionTemplates || !m_files ? nullptr
+			: m_collisionTemplates->mesh(name->second, *m_files);
+	};
+	// objectRadiusOf's walk, but each child object with a collision component of
+	// its own (+0x4c) is measured by it: a Titan AA gun's control station.
+	const auto radius = [&](const auto& self, const world::ObjectTemplate& t, const physics::CollisionMeshFile* mesh,
+							int part, int depth) -> float {
+		if (const physics::CollisionMeshFile* own = ownMesh(t)) {
+			mesh = own;
+			part = 0;
+		}
+		float result = mesh && part >= 0 ? meshRadius(*mesh, static_cast<size_t>(part)) : 0.0f;
+		if (sameName(t.typeName(), "PlayerControlObject")) {
+			result += number(t, "boundingRadiusModifierWhenOccupied", 0);
+		}
+		if (depth > 8) {
+			return result;
+		}
+		for (const world::ChildTemplate& child : t.children()) {
+			const world::ObjectTemplate* ct = m_templates.find(child.name);
+			if (!ct) {
+				continue;
+			}
+			const float own = self(self, *ct, mesh, static_cast<int>(number(*ct, "collisionPart", -1)), depth + 1);
+			if (own > 0) {
+				const float offset = std::sqrt(child.position.x * child.position.x + child.position.y * child.position.y
+					+ child.position.z * child.position.z);
+				result = std::max(result, offset + own);
+			}
+		}
+		return result;
+	};
+	return m_templateRadii[&root] = radius(radius, root, nullptr, -1, 0);
+}
+
 int GameWorld::firstEngineType(const world::ObjectTemplate& root) const
 {
 	if (const auto found = m_engineTypes.find(&root); found != m_engineTypes.end()) {
