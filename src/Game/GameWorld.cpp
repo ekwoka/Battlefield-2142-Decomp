@@ -16129,6 +16129,10 @@ bool GameWorld::stepBody(Body& b, float seconds)
 		// hull's points.
 		b.vehicle->legsRespond(body, m_ground, seconds);
 	}
+	// The response's slot 0x9c (0x006b74e0) runs from the object's update,
+	// not the ground pass (0x006b9260 never calls it): walkers and
+	// collisionGroups bit 0 bodies free their contact sound slots too.
+	coolContactEffects(b, seconds);
 	// collisionGroups bit 0: no ground (0x006b9260's start).
 	if (!(b.collisionGroups & 1) && !legs) {
 		// Each contact (0x006b9260): the collision event while |v|^2 is
@@ -16148,7 +16152,6 @@ bool GameWorld::stepBody(Body& b, float seconds)
 				recordContactEffect(self, own, terrain, velocity, point, normal);
 			}
 		};
-		coolContactEffects(self, seconds);
 		physics::collideWithGround(body, b.response, b.points, m_ground, {}, touched);
 		// Buoyancy, after the ground's points (0x006b9260).
 		if (m_ground.waterLevel) {

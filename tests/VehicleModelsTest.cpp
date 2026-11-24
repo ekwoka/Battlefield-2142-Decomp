@@ -1064,6 +1064,43 @@ TEST(Vehicles_BundleSkeletonPosesBoneParts)
 // The legs' object pass (0x006cec60): a contact under the legs' half-radius
 // line is ground for the drive, its normal joining the drive's by axis
 // (0x006b6b60: the larger of one sign, the sum of opposite signs).
+// A walker's contact sound slot is freed by the response's slot 0x9c
+// (0x006b74e0), run from the object's update, not the ground pass the legs
+// replace: walking into a wall again plays S_Walker_collision again.
+TEST(Vehicles_WalkerCollisionSoundRepeats)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	world::ObjectTemplate* wall = g.loaded ? g.templates.find("concrete_wall_16m_c") : nullptr;
+	CHECK(wall != nullptr);
+	if (!wall) {
+		return;
+	}
+	g.objects.create(wall, {0, 0, 20});
+	const uint32_t mech = g.start("as_heavy_mech", {0, 0.5f, 13}, 3);
+	CHECK(g.enter(mech));
+	g.world->takeSounds();
+	int pushesHeard = 0;
+	for (int push = 0; push < 3; ++push) {
+		int heard = 0;
+		for (int i = 0; i < 60; ++i) { // into the wall
+			g.world->setBodyVelocity(mech, {0, 0, 3});
+			g.world->tick(1 / 30.0f);
+			for (const auto& s : g.world->takeSounds()) heard += s.sound == "S_Walker_collision";
+		}
+		for (int i = 0; i < 90; ++i) { // back off and wait past the 0.5..1.5 s slot timer
+			if (i < 30) g.world->setBodyVelocity(mech, {0, 0, -3});
+			g.world->tick(1 / 30.0f);
+			g.world->takeSounds();
+		}
+		std::fprintf(stderr, "  as_heavy_mech push %d: S_Walker_collision x%d, z %.1f\n", push, heard, g.position(mech).z);
+		pushesHeard += heard > 0;
+	}
+	CHECK(pushesHeard >= 2);
+}
+
 TEST(Vehicles_WalkerLegsSphereContacts)
 {
 	if (!gameDir()) {
