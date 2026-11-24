@@ -7141,7 +7141,7 @@ bool GameWorld::spawnGroupActive(int controlPoint, int playerId) const
 	return false;
 }
 
-bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const
+bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, uint32_t alsoIgnore) const
 {
 	physics::CollisionWorld::Hit hit {};
 	// A stationary gun (Body::fixed) is also in the static world: `ignore` leaves its faces out there too.
@@ -7149,7 +7149,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 		return false;
 	}
 	for (const Body& body : m_bodies) {
-		if (!body.projectileMesh || body.object == ignore) {
+		if (!body.projectileMesh || body.object == ignore || (alsoIgnore && body.object == alsoIgnore)) {
 			continue;
 		}
 		const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);

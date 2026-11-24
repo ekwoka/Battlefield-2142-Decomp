@@ -9628,10 +9628,11 @@ int runGame(Options& options, Session& session)
 		sources.renderer = &rendererSettings;
 		sources.post = &postSettings;
 		sources.shadows = &shadowSettings;
+		// RendDX9's halo ray (0x100c4ad6): the scene ray, glass blocking (its
+		// filter 0x101d53e0 passes no see-through face, unlike the AI's).
 		sources.glowVisible = [&round](const render::Vec3f& eye, const render::Vec3f& light, uint32_t owner) {
 			const world::Object* cameraObject = round.playerVehicle() ? round.playerVehicle() : round.player();
-			bool seenThrough = false;
-			return round.lineOfSight({eye.x, eye.y, eye.z}, {light.x, light.y, light.z}, owner, seenThrough,
+			return round.lineOfSight({eye.x, eye.y, eye.z}, {light.x, light.y, light.z}, owner,
 				cameraObject ? cameraObject->id() : 0);
 		};
 		sources.enhanced = &enhancedSettings;

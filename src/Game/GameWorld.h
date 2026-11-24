@@ -825,8 +825,11 @@ public:
 	// sight lines take: the AI's (0x00897df0), the sound's (0x007fa100,
 	// 0x007fa350), the exits' (0x006f2530), the nametags' (RendDX9
 	// 0x100ef5b0), the wire's (0x005e27a0), the parachute's (0x005e4330).
-	// `ignore`: an object (a body) that doesn't count, such as the looker's own.
-	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0) const;
+	// `ignore`: an object (a body) that doesn't count, such as the looker's own;
+	// `alsoIgnore` another body (the halo ray's local player vehicle, RendDX9
+	// filter 0x100c6ad0). Every face counts, see-through ones too (that
+	// filter's material slot 0x10129a90 accepts all; only the AI's skips glass).
+	bool lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore = 0, uint32_t alsoIgnore = 0) const;
 	// A firearm's ObjectTemplate.setCheckObstruction (start, end, radius;
 	// the pod launchers' -1.5 2 1): five rays along the gun (0x005c2310),
 	// from start to end metres along its forward axis through `at`, then the

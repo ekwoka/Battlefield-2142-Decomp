@@ -6270,6 +6270,28 @@ physics::CollisionMeshFile wallMesh()
 // The sight ray passes see-through materials (BF2142.exe 0x00898040 with
 // the filter 0x00897d50) and says so; the sighting then isn't clear (flag
 // 0x40), and a weapon without setFiresThroughTransparent isn't chosen.
+// The scene ray (the halos', the nametags'): a see-through face blocks it as
+// any other (RendDX9's halo filter 0x101d53e0 accepts every material); only
+// the AI's sight passes glass (Bots_SightThroughSeeThrough).
+TEST(GameWorld_SceneRayStopsAtGlass)
+{
+	for (const bool glass : {false, true}) {
+		Field field([glass](Field& f) {
+			f.materials.define(7).isSeeThrough = glass;
+			f.collisionTemplates.add("wall_mesh", wallMesh());
+			world::ObjectTemplate* wall = f.templates.create("SimpleObject", "test_wall");
+			wall->settings()["collisionMesh"] = "wall_mesh";
+			wall->settings()["mapMaterial.0"] = "7";
+			f.objects.create(wall, {0, 0, 10});
+		});
+		CHECK(!field.world->lineOfSight({0, 1.5f, 0}, {0, 1.5f, 20}));
+		CHECK(field.world->lineOfSight({0, 1.5f, 0}, {0, 1.5f, 8}));
+		// The light's own object doesn't hide it.
+		const uint32_t wall = field.objects.objects().back()->id();
+		CHECK(field.world->lineOfSight({0, 1.5f, 0}, {0, 1.5f, 20}, wall));
+	}
+}
+
 TEST(Bots_SightThroughSeeThrough)
 {
 	for (const bool glass : {false, true}) {
