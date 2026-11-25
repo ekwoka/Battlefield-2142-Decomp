@@ -325,6 +325,41 @@ TEST(ScriptHost_FieldUpgradeFromSquadScoring)
 	}
 }
 
+// The squad's order points (0x004c4c90, squad vtable 0x929cd0 +0x3c): any
+// amount is added, zero and negative too, and the bar fills (award, then
+// the +0x40 reset to 0 at 0x004c4dd0) unless the sum is below the maximum,
+// a maximum of 0 included. A squad starts with a maximum of 100 (0x004c87a0).
+TEST(ScriptHost_SquadOrderPointsAsRetail)
+{
+	Round round;
+	int filled = 0;
+	round.world->setEventSink([&](const std::string& event, const game::ScriptArgs&) { filled += event == "SquadBarFilled"; });
+	const int me = round.world->addPlayer("Me", 2, true);
+	CHECK(round.world->joinSquad(me, 1));
+	game::GameWorld::PlayerInfo info;
+	// No maximum set: the constructor's 100.
+	round.world->addSquadOrderPoints(me, 99.5);
+	CHECK(filled == 0 && round.world->playerInfo(me, info) && info.squadOrderPoints == 99.5 && info.squadOrderMax == 100);
+	round.world->addSquadOrderPoints(me, 0.5);
+	CHECK(filled == 1 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
+	// Negative points are added.
+	round.world->setSquadOrderMax(me, 10);
+	round.world->addSquadOrderPoints(me, 4);
+	round.world->addSquadOrderPoints(me, -1.5);
+	CHECK(filled == 1 && round.world->playerInfo(me, info) && info.squadOrderPoints == 2.5);
+	round.world->addSquadOrderPoints(me, 7.5);
+	CHECK(filled == 2 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
+	// A maximum of 0: an add of 0 fills the bar, one that leaves the sum
+	// below 0 doesn't.
+	round.world->setSquadOrderMax(me, 0);
+	round.world->addSquadOrderPoints(me, 0);
+	CHECK(filled == 3 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
+	round.world->addSquadOrderPoints(me, -2);
+	CHECK(filled == 3 && round.world->playerInfo(me, info) && info.squadOrderPoints == -2);
+	round.world->addSquadOrderPoints(me, 2);
+	CHECK(filled == 4 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
+}
+
 // The players' ranks (stats +0x20, -1 from 0x005a5fc0): stats.py gives
 // each 0 on PlayerConnect through pmgr_setScore "rank" (0x0056a9d0 →
 // 0x005a53b0); rank.py asks the stats server (pers_plrRequestStats

@@ -4005,7 +4005,7 @@ private:
 	std::map<int, FieldUnlocks> m_fieldUnlocks;
 	struct SquadOrderScore {
 		double points = 0;
-		int maximum = 0;
+		int maximum = 100; // the squad's constructor (0x004c87a0) sets +0x168 to 100.0
 	};
 	std::map<std::pair<int, int>, SquadOrderScore> m_squadOrderScores;
 	float m_tinnitus = 0;

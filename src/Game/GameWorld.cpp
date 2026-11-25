@@ -5984,11 +5984,16 @@ int GameWorld::joinAiSquad(int id)
 			chosen = squad;
 		}
 	}
+	// A squad of three or more with an empty squad after it passes its last
+	// member on (0x100890fb..0x1008915c), and the new bot follows him: esi,
+	// the squad it joins, becomes the next squad at 0x1008914c and is still
+	// that squad at the append (0x100891e3) and the join (0x100891ff).
 	const std::vector<int> members = squadMembers(player->team, chosen);
 	if (chosen < 9 && members.size() >= 3 && squadMembers(player->team, chosen + 1).empty()) {
 		const auto last = std::max_element(members.begin(), members.end(),
 			[this](int a, int b) { return findPlayer(a)->squadJoinedAt < findPlayer(b)->squadJoinedAt; });
 		requestJoinSquad(*last, chosen + 1);
+		++chosen;
 	}
 	return requestJoinSquad(id, chosen) == SquadJoin::Joined ? chosen : 0;
 }
@@ -6745,12 +6750,16 @@ void GameWorld::setSquadOrderMax(int id, int maximum)
 void GameWorld::addSquadOrderPoints(int id, double points)
 {
 	const Player* player = findPlayer(id);
-	if (!player || player->squad == 0 || !std::isfinite(points) || points <= 0) return;
+	// 0x004c4c90 (squad vtable 0x929cd0 +0x3c) adds any amount, zero and
+	// negative too, then awards and resets (+0x40, 0x004c4dd0) unless the
+	// points are below the maximum (fcomp/test ah,1 at 0x004c4d64): a
+	// maximum of 0 awards on any add that leaves the points at 0 or more.
+	// Only NaN is refused here; it would stick in the sum for good.
+	if (!player || player->squad == 0 || std::isnan(points)) return;
 	const auto key = std::make_pair(player->team, player->squad);
 	auto& score = m_squadOrderScores[key];
-	if (score.maximum == 0) return;
 	score.points += points;
-	if (score.points >= score.maximum) {
+	if (!(score.points < score.maximum)) {
 		score.points = 0; // 0x004c4dd0 resets the meter after one award.
 		raise("SquadBarFilled", {ScriptValue::integer(key.first), ScriptValue::integer(key.second)});
 	}

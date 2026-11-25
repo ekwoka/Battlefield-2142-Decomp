@@ -254,7 +254,13 @@ Each of these needs the retail claim confirmed first (step 1), then matching ret
 or gating behind a flag.
 
 ### A-1. Bot squad split puts the new bot in the wrong squad (round 2, high)
-- **Status:** verify
+- **Status:** done (wave 1). Confirmed in the disassembly: after the move
+  (0x100890fb..0x1008915c), `mov esi, [ecx+4*eax]` at 0x1008914c makes `esi`
+  the next squad, and nothing writes `esi` again before `mov ecx, esi` at
+  0x100891e1/0x100891fb, so the append (0x100891e3) and the join (0x100891ff)
+  both use the next squad. `joinAiSquad` now joins `chosen + 1` after a move.
+  The tests pin {0,1,5}, {2,3}, {4,6,7}, and in the human cases the new bot
+  follows the member who moved.
 - **Commits:** 9d3a0a0, 068490b
 - **Where:** `src/Game/GameWorld.cpp` `joinAiSquad` (~5972)
 - **Retail (AIDLL 0x10089000):** when the chosen squad has 3 or more members and
@@ -319,7 +325,18 @@ or gating behind a flag.
   `controlTeam` lambda in `steerClosest` (5b3110e).
 
 ### A-6. Squad order points ignore zero and negative values (round 2, low)
-- **Status:** verify
+- **Status:** done (wave 1). Confirmed: 0x004c4c90 (squad vtable 0x929cd0
+  +0x3c) does `fld [ebp+8]; fadd [esi+0x160]; fstp [esi+0x160]` with no
+  check on the sign, then `fcomp [esi+0x168]` / `test ah,1` (0x004c4d64)
+  skips the award only when points < max. Otherwise it fires the event and
+  calls +0x40 = 0x004c4dd0, which sets the points to 0.0. A max of 0 is
+  not special. The squad constructor 0x004c87a0 sets max to 100.0, so the
+  port's record now starts at 100, not 0. Only NaN is still refused. The
+  test is `ScriptHost_SquadOrderPointsAsRetail`. Not changed (out of
+  scope): the whole routine is gated on byte +0x184, which is set only on
+  a GameSpyRanked server in a standard game mode (0x00430a00), and the
+  port doesn't model that gate. The set-max routine 0x004c4ea0 stores
+  `(double)(int)` with no clamp, but the port still clamps the max at 0.
 - **Commit:** b3344c1
 - **Where:** `src/Game/GameWorld.cpp` `addSquadOrderPoints`
 - **Retail (0x004c4c90):** always adds the points, then fires the event and resets

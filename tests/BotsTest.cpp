@@ -1971,9 +1971,13 @@ TEST(Bots_DriveAvoidingGivesWayExceptForAHuman)
 
 // AIDLL 0x10089000: a new bot joins its side's smallest non-empty squad
 // (the later of equals), and a squad of three or more first passes its
-// last member on to the empty squad after it. Eight bots of a side make
-// squads of 3, 3 and 2, not one full squad of six; the moved member leads.
-// Each bot spawns as it is added, as the round's start does.
+// last member on to the empty squad after it, where the new bot follows
+// him (esi becomes the next squad at 0x1008914c; append 0x100891e3, join
+// 0x100891ff). Eight bots of a side: bot 3 moves bot 2 on and joins him,
+// bot 4 takes the later of the two 2s, bot 5 squad 1, bot 6 moves bot 4 on
+// and joins him, bot 7 the later 2: squads of 3, 2 and 3, not one full
+// squad of six; the moved member leads. Each bot spawns as it is added, as
+// the round's start does.
 TEST(Bots_AddBotSpreadsSquadsAsRetail)
 {
 	Field field;
@@ -1992,14 +1996,14 @@ TEST(Bots_AddBotSpreadsSquadsAsRetail)
 		}
 		return in;
 	};
-	CHECK(members(1) == std::vector<int>({pac[0], pac[1], pac[3]}));
-	CHECK(members(2) == std::vector<int>({pac[2], pac[4], pac[6]}));
-	CHECK(members(3) == std::vector<int>({pac[5], pac[7]}));
+	CHECK(members(1) == std::vector<int>({pac[0], pac[1], pac[5]}));
+	CHECK(members(2) == std::vector<int>({pac[2], pac[3]}));
+	CHECK(members(3) == std::vector<int>({pac[4], pac[6], pac[7]}));
 	CHECK(members(4).empty());
 	game::GameWorld::PlayerInfo info;
 	CHECK(field.world->playerInfo(pac[0], info) && info.squadLeader);
 	CHECK(field.world->playerInfo(pac[2], info) && info.squadLeader);
-	CHECK(field.world->playerInfo(pac[5], info) && info.squadLeader);
+	CHECK(field.world->playerInfo(pac[4], info) && info.squadLeader);
 	CHECK(members(1, 2).size() == 3);
 }
 
@@ -2014,7 +2018,8 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		return world.playerInfo(id, info) ? std::make_pair(info.squad, info.squadLeader) : std::make_pair(-1, false);
 	};
 	{
-		// A human first in squad 1: the third bot moves the second bot on.
+		// A human first in squad 1: the third bot moves the second bot on
+		// and follows him (0x1008914c).
 		Field field;
 		Console console;
 		game::BotManager bots(*field.world, scriptedSettings(console));
@@ -2022,12 +2027,14 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		CHECK(field.world->joinSquad(human, 1));
 		const int b0 = bots.addBot("", 1), b1 = bots.addBot("", 1), b2 = bots.addBot("", 1);
 		CHECK(squadOf(*field.world, human) == std::make_pair(1, true));
-		CHECK(squadOf(*field.world, b0).first == 1 && squadOf(*field.world, b2).first == 1);
+		CHECK(squadOf(*field.world, b0) == std::make_pair(1, false));
 		CHECK(squadOf(*field.world, b1) == std::make_pair(2, true));
+		CHECK(squadOf(*field.world, b2) == std::make_pair(2, false));
 	}
 	{
 		// A human in the game before the bots but joining after two of them
-		// is the last to join: he moves on and leads.
+		// is the last to join: he moves on and leads, and the new bot
+		// follows him.
 		Field field;
 		Console console;
 		game::BotManager bots(*field.world, scriptedSettings(console));
@@ -2037,7 +2044,8 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		const int b2 = bots.addBot("", 1);
 		CHECK(squadOf(*field.world, human) == std::make_pair(2, true));
 		CHECK(squadOf(*field.world, b0) == std::make_pair(1, true));
-		CHECK(squadOf(*field.world, b1).first == 1 && squadOf(*field.world, b2).first == 1);
+		CHECK(squadOf(*field.world, b1) == std::make_pair(1, false));
+		CHECK(squadOf(*field.world, b2) == std::make_pair(2, false));
 	}
 	{
 		// A human's private squad (the only one with members) refuses the bot,

@@ -11470,9 +11470,11 @@ The unlock screen (`UnlockInterface`, `0x007b8e60`–`0x007b9a20`)
 spends credits earned in the current round. The scoring script sets a
 squad's threshold and adds points through `Player.setMaxOrderPoint` and
 `Player.setOrderPoint` (`0x005920c0` and `0x00592030`).
-`GameWorld` tracks progress by team and squad. At the threshold the
-`SquadBarFilled` hook in the shipped stats script grants each member
-a credit, and the meter resets (`0x004c4c90` / `0x004c4dd0`).
+`GameWorld` tracks progress by team and squad. Any amount is added, zero
+and negative too, and once the sum isn't below the threshold (100 until
+the script sets one, `0x004c87a0`; 0 counts) the `SquadBarFilled` hook
+in the shipped stats script grants each member a credit, and the meter
+resets (`0x004c4c90` / `0x004c4dd0`).
 
 The Field Upgrade tab opens when there are credits (`0x007b95a0`).
 A spend advances the selected branch for both factions. UB_Player and
