@@ -1055,6 +1055,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			}
 			if (!acquired) {
 				SDL_SubmitGPUCommandBuffer(commands);
+				stats.dropFrame(Stats::now()); // nothing drawn: not a frame
 				continue;
 			}
 			gpu->ensureDepth(target, width, height);
@@ -1603,7 +1604,8 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 				}
 				if ((step.op == "click" || step.op == "release") && viewer.onRelease) {
 					viewer.onRelease(x, y);
-				} else if (step.op == "rclick" && viewer.onRightClick) {
+				}
+				if (step.op == "rclick" && viewer.onRightClick) {
 					viewer.onRightClick(x, y);
 				}
 			} else if (step.op == "console" && hooks.console) {
