@@ -7,6 +7,8 @@
 //   Profiles/0001/Audio.con     AudioSettings.*   (0x004961a0)
 //   Profiles/0001/Video.con     VideoSettings.*   (0x00497560)
 //   Settings/Usersettings.con   SettingsManager.* (the GS* game settings)
+//   Profiles/0001/Enhanced.con  the rewrite's own (port addition): the enhanced
+//                               mode's menu settings (GeneralSettings.setSingleplayBotCount)
 //
 // Each file is console lines ("GeneralSettings.setMaxBots 16",
 // "AudioSettings.setEffectsVolume 0.8", strings in quotes) in the
@@ -104,6 +106,8 @@ public:
 	std::string globalScript() const;
 	std::string profileScript() const;
 	std::string userSettingsScript() const;
+	// Enhanced.con (port addition; the original has no such file).
+	std::string enhancedScript() const;
 
 	// Where the files are kept ("" none) and the profile's folder name.
 	void setDirectory(const std::string& profilesDirectory, const std::string& profile = "0001");

@@ -128,7 +128,26 @@ struct GameSetup {
 	int scoreLimit = 0;
 	bool friendlyFire = true;
 	int roundsPerMap = 3;
+	// enhanced.singleplayBotCount: the singleplayer page's target of
+	// players (MenuBindings::singleplayBotCount), 0 when it doesn't apply
+	// (retail: `bots` for every map).
+	int playerTarget = 0;
 };
+
+// A map's bots and server maximum for a game the menu started. Retail
+// (no playerTarget): MaxBots less the player with MaxBotsIncludeHumans,
+// the same for every map, and the setup's maxPlayers. With a target:
+// min(target, the map's size) players with the player counted, so
+// min(target, size) - 1 bots; without MaxBotsIncludeHumans the target
+// counts the bots alone, still under the map's size with the player in
+// it (min(target, size - 1)). A size of 0 (unknown) caps nothing. The
+// maximum is raised to the players there will be, so the bot manager's
+// kick on a human's join (BotManager::population) keeps them.
+struct MapPlayers {
+	int bots = 0;
+	int maxPlayers = 0;
+};
+MapPlayers playersForMap(const GameSetup& setup, int mapSize);
 
 // The network behind the menu, replaceable (tests use fakes). Each
 // function blocks and runs on a worker thread.
@@ -183,6 +202,25 @@ public:
 	// level's every mode and size, each row naming its mode. Unset or
 	// false: the gpm_sp layouts only, as retail.
 	std::function<bool()> singleplayAllModes;
+	// enhanced.singleplayBotCount (Scene/EnhancedSettings.h): while this
+	// answers true, the singleplayer page has a players slider
+	// (MenuSingleplayBots.h) and a game its startServer starts fills each
+	// map with min(target, the map's size) players, the player included
+	// (GameSetup::playerTarget, playersForMap). Unset or false: 16 players
+	// on every map, as retail's page sets.
+	std::function<bool()> singleplayBotCount;
+	// The target: total players with you, kSingleplayPlayersMin..Max;
+	// kept in the profile (GeneralSettings.SingleplayBotCount, the
+	// rewrite's own Enhanced.con: SettingsObjects.h).
+	static constexpr int kSingleplayPlayersMin = 1;
+	static constexpr int kSingleplayPlayersMax = 64;
+	static constexpr int kSingleplayPlayersDefault = 16;
+	int singleplayPlayers() const;
+	void setSingleplayPlayers(int players);
+	// Set while the singleplayer page's startServer runs (its playlist
+	// button and instant action), so its createServer takes the target;
+	// the create-server page's doesn't.
+	void setSingleplayStarting(bool starting) { m_singleplayStarting = starting; }
 	// Logic.disconnectGame: leave the running game for the menu.
 	std::function<void()> onDisconnect;
 	// Whether a game runs under the menu (Logic.isGameRunning).
@@ -683,6 +721,7 @@ private:
 
 	// Starting a game.
 	bool m_gameRunning = false;
+	bool m_singleplayStarting = false; // setSingleplayStarting
 	std::vector<MenuMap> m_maps;
 	std::string m_filterGameMode = "gpm_sp";
 	std::vector<MenuMap> m_mapList;

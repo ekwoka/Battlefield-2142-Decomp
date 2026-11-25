@@ -285,6 +285,10 @@ void Player::tick()
 	enterFrameEvents();
 	m_vm->advance(1000.0 / m_frameRate);
 	runActions();
+	if (m_tickHook) {
+		m_tickHook(*this);
+		runActions();
+	}
 	syncTextFields();
 }
 

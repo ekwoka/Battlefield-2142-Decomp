@@ -1724,7 +1724,8 @@ bool MenuBindings::createServer()
 		return false;
 	}
 	log("create server: " + setup.maps.front().level + " " + setup.maps.front().gameMode + " "
-		+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots");
+		+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots"
+		+ (setup.playerTarget > 0 ? ", " + std::to_string(setup.playerTarget) + " players at most (enhanced)" : std::string()));
 	setCurrentGame(setup.maps.front(), setup.maxPlayers);
 	if (onStartGame) {
 		onStartGame(setup);
@@ -2696,7 +2697,39 @@ GameSetup MenuBindings::gameSetup() const
 	setup.scoreLimit = static_cast<int>(setting("ServerSettings.ScoreLimit", 0));
 	setup.friendlyFire = setting("ServerSettings.FriendlyFire", 1) != 0;
 	setup.roundsPerMap = std::max(1, static_cast<int>(setting("ServerSettings.RoundsPerMap", 3)));
+	if (m_singleplayStarting && singleplayBotCount && singleplayBotCount()) {
+		setup.playerTarget = singleplayPlayers();
+	}
 	return setup;
+}
+
+int MenuBindings::singleplayPlayers() const
+{
+	const double players = setting("GeneralSettings.SingleplayBotCount", kSingleplayPlayersDefault);
+	return std::clamp(static_cast<int>(std::lround(players)), kSingleplayPlayersMin, kSingleplayPlayersMax);
+}
+
+void MenuBindings::setSingleplayPlayers(int players)
+{
+	players = std::clamp(players, kSingleplayPlayersMin, kSingleplayPlayersMax);
+	if (players != singleplayPlayers() || !m_appliedSettings.count("GeneralSettings.SingleplayBotCount")) {
+		storeSetting("GeneralSettings.SingleplayBotCount", Value(players));
+	}
+}
+
+MapPlayers playersForMap(const GameSetup& setup, int mapSize)
+{
+	MapPlayers out;
+	out.maxPlayers = setup.maxPlayers;
+	if (setup.playerTarget <= 0) {
+		out.bots = std::max(0, setup.bots - (setup.botsIncludeHumans ? 1 : 0));
+		return out;
+	}
+	const int room = mapSize > 0 ? mapSize : setup.playerTarget + 1; // with the player
+	out.bots = setup.botsIncludeHumans ? std::min(setup.playerTarget, room) - 1 : std::min(setup.playerTarget, room - 1);
+	out.bots = std::max(0, out.bots);
+	out.maxPlayers = std::max(setup.maxPlayers, out.bots + 1);
+	return out;
 }
 
 // --- SwiffHost and MenuTeamManager (the menu scripts' console objects)

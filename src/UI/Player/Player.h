@@ -99,6 +99,9 @@ public:
 	{
 		m_urlHandler = std::move(handler);
 	}
+	// Called at the end of every tick, after the scripts ran (the game's own
+	// additions to a page: Main/MenuSingleplayBots.h).
+	void setTickHook(std::function<void(Player&)> hook) { m_tickHook = std::move(hook); }
 
 	// Loads an uncompressed or compressed SWF and shows its first frame
 	// (DoInitActions and frame 1's actions have run).
@@ -307,6 +310,7 @@ private:
 	void advanceVideos(double seconds);
 	std::function<void(const std::string&)> m_traceHandler;
 	std::function<void(const std::string&, const std::string&)> m_urlHandler;
+	std::function<void(Player&)> m_tickHook;
 
 	std::vector<uint8_t> m_swf;
 	SwfMovie m_movie;

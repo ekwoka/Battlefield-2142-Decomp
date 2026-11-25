@@ -75,6 +75,7 @@
 #include "MapOrderMarker.h"
 #include "MenuBindings.h"
 #include "MenuGameState.h"
+#include "MenuSingleplayBots.h"
 #include "SettingsObjects.h"
 #include "PlayerCamera.h"
 #include "EndOfRoundBindings.h"
@@ -168,6 +169,7 @@ struct Options {
 	std::string drive;           // --drive <vehicle>: put one before the player and drive it
 	std::string kit;             // --kit <name|n>: the player's kit (the team's kit list, by name or from 1)
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
+	bool menuBotTarget = false;  // enhanced.singleplayBotCount set `bots`: AIDefault.ai's setMaxNBots 16 doesn't cap them
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
 	bool enhanced = false;       // --enhanced: start with enhanced.enabled 1 (Scene/EnhancedSettings.h)
 	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
@@ -3240,6 +3242,12 @@ int main(int argc, char** argv)
 		options.level = map.level;
 		options.gameMode = map.gameMode;
 		options.mapSize = map.size;
+		if (session.startedGame && session.startedGame->playerTarget > 0) {
+			// enhanced.singleplayBotCount: this map's own count (playersForMap).
+			const dice::hfe::menu::MapPlayers players = dice::hfe::menu::playersForMap(*session.startedGame, map.size);
+			options.bots = players.bots;
+			options.maxPlayers = players.maxPlayers;
+		}
 		std::printf("next map: %s (%s, %d)\n", options.level.c_str(), options.gameMode.c_str(), options.mapSize);
 	}
 }
@@ -3599,15 +3607,18 @@ int runGame(Options& options, Session& session)
 	scene::EnhancedSettings enhancedSettings;
 	enhancedSettings.enabled = options.enhanced;
 	scene::registerEnhancedConsoleMethods(console, enhancedSettings);
-	// enhanced.singleplayAllModes for the menu's singleplayer page. The menu
-	// outlives these settings, so its check goes as runGame returns.
+	// enhanced.singleplayAllModes and enhanced.singleplayBotCount for the
+	// menu's singleplayer page. The menu outlives these settings, so its
+	// checks go as runGame returns.
 	const auto menuAllModes = [&enhancedSettings] { return enhancedSettings.enabled && enhancedSettings.singleplayAllModes; };
+	const auto menuBotCount = [&enhancedSettings] { return enhancedSettings.enabled && enhancedSettings.singleplayBotCount; };
 	struct MenuAllModesReset {
 		Session& session;
 		~MenuAllModesReset()
 		{
 			if (session.menuBindings) {
 				session.menuBindings->singleplayAllModes = nullptr;
+				session.menuBindings->singleplayBotCount = nullptr;
 			}
 		}
 	} menuAllModesReset {session};
@@ -4191,6 +4202,7 @@ int runGame(Options& options, Session& session)
 	if (session.menuBindings) {
 		session.menuBindings->setControls(&controls);
 		session.menuBindings->singleplayAllModes = menuAllModes;
+		session.menuBindings->singleplayBotCount = menuBotCount;
 	}
 	if (session.menuBindings) {
 		session.menuBindings->onSettingsApplied = applySettings;
@@ -4248,6 +4260,13 @@ int runGame(Options& options, Session& session)
 		menuBindings->onQuit = [&session]() { session.menuQuit = true; };
 		menuBindings->onLog = [](const std::string& line) { std::printf("menu: %s\n", line.c_str()); };
 		menuBindings->singleplayAllModes = menuAllModes;
+		menuBindings->singleplayBotCount = menuBotCount;
+		// The singleplayer page's players slider (MenuSingleplayBots.h).
+		menu.setTickHook([&session](ui::Player& player) {
+			if (session.menuBindings) {
+				dice::hfe::menu::updateSingleplayBotCount(player, *session.menuBindings);
+			}
+		});
 		menuBindings->setMaps(scanMenuMaps(options));
 		// The Mod page's mods (ModInfo, each mods/<name>/Mod.desc).
 		menuBindings->setMods(dice::hfe::menu::MenuBindings::findMods(options.gameDir), options.modPath);
@@ -4408,9 +4427,13 @@ int runGame(Options& options, Session& session)
 		options.level = map.level;
 		options.gameMode = map.gameMode;
 		options.mapSize = map.size;
-		options.maxPlayers = startedGame->maxPlayers;
-		// The bots fill the server up to their number, the player included.
-		options.bots = std::max(0, startedGame->bots - (startedGame->botsIncludeHumans ? 1 : 0));
+		// The bots fill the server up to their number, the player included;
+		// with enhanced.singleplayBotCount up to the page's target, at most
+		// the map's size, again for each map (the playlist's "next map").
+		const dice::hfe::menu::MapPlayers players = dice::hfe::menu::playersForMap(*startedGame, map.size);
+		options.maxPlayers = players.maxPlayers;
+		options.bots = players.bots;
+		options.menuBotTarget = startedGame->playerTarget > 0;
 		options.botSkill = startedGame->botSkill;
 		options.ticketRatio = startedGame->ticketRatio;
 		options.timeLimit = startedGame->timeLimit;
@@ -4680,6 +4703,11 @@ int runGame(Options& options, Session& session)
 		run("AI/AIDefault.ai");
 		if (options.botSkill >= 0) {
 			botSettings.skill = options.botSkill;
+		}
+		if (options.menuBotTarget) {
+			// enhanced.singleplayBotCount: AIDefault.ai's setMaxNBots 16 would
+			// leave the bots past 16 unactivated (BotManager's refusal).
+			botSettings.maxBots = std::max(botSettings.maxBots, options.bots);
 		}
 		std::printf("bots: skill %.2f, Fire weight %.1f\n", botSettings.skill, botSettings.modifier("Fire"));
 	}

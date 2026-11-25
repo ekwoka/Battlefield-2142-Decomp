@@ -16982,6 +16982,26 @@ ask whether it's done.
   menu runs alone; `createServer` closes it and loads the level as
   `+level … +gameMode … +mapSize …` would, with the bots, their skill and
   the ticket ratio from the menu.
+- **The page's bot count** (mainMenu.dfm sprite 913's frame script): its
+  `startServer`, which both START PLAYLIST (`this._parent.startServer()`)
+  and instant action call, sets `GeneralSettings.setUseBots(true)`,
+  `setMaxBots(16)`, `setMaxBotsIncludeHumans(true)` and
+  `ServerSettings.setMaxPlayers(16)` (with team ratio 100, friendly fire,
+  ticket ratio 200, no time or score limit, 15 s spawns, autobalance) before
+  `createServer`, so every map of a playlist plays with 16 players, you
+  included, whatever its size; `AI/AIDefault.ai` sets
+  `aiSettings.setMaxNBots 16` and `maxBotsIncludeHumans 1` to match (its
+  commented-out block with `overrideMenuSettings 1` is the shipped way to
+  more). The bot skill is a `dice.UIs.Forms.Slider` (linkage `Slider`)
+  placed as `mcBotSkill`, whose `callBackFunctionSpecial`
+  (`adjustBotSkill`) the slider calls on its `_parent` as it moves.
+  `enhanced.singleplayBotCount` (port addition, `Main/MenuSingleplayBots.h`)
+  attaches another `Slider` with a `TextContainer` header (the
+  create-server page's `MULTIPLAY_3_maxplayers`, MAX PLAYERS) and number
+  right of the bot skill, 1..64 players (default 16, kept in the profile's
+  own `Enhanced.con`), and wraps `startServer` so its `createServer` takes
+  the target: each map gets min(target, size) players, you included
+  (`playersForMap`), the server maximum and `setMaxNBots` raised to match.
 - **The create-server page** (`mc_local_create`): the GAME MODE box lists
   the mod's modes without `sp1` and `gpm_sp` (0x10069160), in ModInfo's
   order (+0x10c): the level scan (0x004643d0) lists `<mod>/Levels/` with
