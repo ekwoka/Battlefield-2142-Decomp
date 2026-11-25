@@ -5476,9 +5476,11 @@ nowhere in RendDX9 (no technique string selects them): not drawn; fog
 stays in the shaders, the camouflage is FSQuadDrawer's passes above.
 The game state: the soldier's own EMP level is its armour's on foot
 (the player's `0x005921b0` walks from its control object to the first
-armour, slot `0x14c`), which an EMP raises like a vehicle's when the
-soldier template has `armor.takesEmpDamage` (no shipped soldier sets it);
-`PlayerInfo::empLevel`. The tinnitus event's sender is the blast shake
+armour, slot `0x14c`), which an EMP raises even when the soldier template
+does not set `armor.takesEmpDamage`. That flag gates control filtering,
+not EMP accumulation; shipped soldiers have armour but do not set it.
+The native on-foot path exposes the level as `PlayerInfo::empLevel`.
+The tinnitus event's sender is the blast shake
 (no `sound-tinnitus-range` setting exists in BF2142.exe): `0x005a6e70` posts
 event 0xd for a local soldier on foot within 0.6 × a blast's radius (see
 **Blast shake**; `GameWorld::takeTinnitus`, the setup's 1 + 2 + 4 s). The view's

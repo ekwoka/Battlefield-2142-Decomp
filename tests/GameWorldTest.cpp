@@ -4836,14 +4836,14 @@ TEST(GameWorld_SpawnPointOptions)
 	CHECK(out >= 1.5f - 1e-3f && out <= 9 + 1e-3f);
 }
 
-// The local soldier's own EMP level (its armour, with takesEmpDamage:
+// The local soldier's own EMP level (its armour:
 // level = ceil(amount / empDamageStepSize), wearing off a step every
 // empLevelTime) and the tinnitus of an explosion within 0.6 x its radius
 // (0x005a6e70, event 0xd), both for the post-production.
 TEST(GameWorld_SoldierEmpAndTinnitus)
 {
 	Range range;
-	range.templates.find("us_light_soldier")->settings()["armor.takesEmpDamage"] = "1";
+	range.templates.find("us_light_soldier")->components().push_back("Armor");
 	world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
 	blast->components().push_back("DefaultDetonationComp");
 	blast->settings()["detonation.explosionDamage"] = "1";
@@ -4874,6 +4874,79 @@ TEST(GameWorld_SoldierEmpAndTinnitus)
 	CHECK(range.world->detonate("blast", origin + physics::Vec3 {0, 0, 5}));
 	CHECK(range.world->takeTinnitus() == 7);
 	CHECK(range.world->takeTinnitus() == 0); // taken once
+}
+
+TEST(GameWorld_InfantryEmpDoesNotRequireInputFilterFlag)
+{
+	for (const char* flag : {"absent", "0"}) {
+		Range range;
+		auto* soldier = range.templates.find("us_light_soldier");
+		soldier->components().push_back("Armor");
+		if (std::string(flag) == "0") soldier->settings()["armor.takesEmpDamage"] = flag;
+		auto* emp = range.templates.create("GenericProjectile", "emp");
+		emp->components().push_back("DefaultDetonationComp");
+		emp->settings()["detonation.isEMPWeapon"] = "1";
+		emp->settings()["detonation.explosionMaterial"] = "0";
+		emp->settings()["detonation.explosionRadius"] = "9";
+		emp->settings()["detonation.explosionDamage"] = "500";
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(range.world->localPlayer(), info);
+		const physics::Vec3 origin = info.position + physics::Vec3 {0, 1, 0};
+		CHECK(range.world->detonate("emp", origin + physics::Vec3 {0, 0, 10}));
+		range.world->playerInfo(range.world->localPlayer(), info);
+		CHECK(info.empLevel == 0);
+		CHECK(range.world->detonate("emp", origin));
+		range.world->playerInfo(range.world->localPlayer(), info);
+		CHECK(info.empLevel == 3);
+		CHECK(range.world->hitPoints(info.soldier) == 100);
+		for (int i = 0; i < 30 * 16; ++i) range.world->tick(1 / 30.0f);
+		range.world->playerInfo(range.world->localPlayer(), info);
+		CHECK(info.empLevel == 0);
+		soldier->components().clear();
+		CHECK(range.world->detonate("emp", origin));
+		range.world->playerInfo(range.world->localPlayer(), info);
+		CHECK(info.empLevel == 0);
+	}
+}
+
+TEST(GameWorld_InfantryEmpShippedTemplates)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* mod : {"bf2142", "Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		Range range;
+		range.files.setRootPath(gameDir);
+		range.files.addSearchPath(std::string("mods/") + mod);
+		CHECK(range.files.mountArchive("Objects/Soldiers_server.zip", "Objects/Soldiers"));
+		CHECK(range.files.mountArchive("Objects/Weapons_server.zip", "Objects/Weapons"));
+		Console console(&range.files);
+		geom::GeometryTemplateManager geometries;
+		world::registerWorldConsoleMethods(console, range.templates, range.objects);
+		geom::registerGeometryConsoleMethods(console, geometries);
+		world::registerUntypedTemplateProperties(console, range.templates,
+			{"armor.maxHitPoints", "armor.hitPoints", "armor.takesEmpDamage", "detonation.isEMPWeapon",
+				"detonation.explosionRadius", "detonation.explosionDamage", "detonation.explosionMaterial"});
+		std::string out;
+		CHECK(console.run("Objects/Soldiers/Us/US_LIGHT_SOLDIER.tweak", {}, out));
+		CHECK(console.run("Objects/Weapons/Handheld/Unl_Grenade_EMP/Unl_Grenade_EMP.con", {}, out));
+		auto* soldier = range.templates.find("us_light_soldier");
+		auto* projectile = range.templates.find("Unl_Grenade_EMP_Projectile");
+		CHECK(soldier && projectile);
+		if (!soldier || !projectile) continue;
+		CHECK(std::find(soldier->components().begin(), soldier->components().end(), "Armor") != soldier->components().end());
+		CHECK(soldier->settings().find("armor.takesEmpDamage") == soldier->settings().end());
+		const auto settings = game::ProjectileSettings::fromTemplate(*projectile);
+		CHECK(settings.emp && settings.explosionMaterial >= 0 && settings.explosionRadius > 0);
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(range.world->localPlayer(), info);
+		CHECK(range.world->detonate(projectile->name(), info.position + physics::Vec3 {0, 1, 0}));
+		range.world->playerInfo(range.world->localPlayer(), info);
+		CHECK(info.empLevel > 0);
+		CHECK(range.world->hitPoints(info.soldier) == 100);
+	}
 }
 
 // A blast's camera shake (0x005a6e70): min(damage / 150, 1) x min(force /

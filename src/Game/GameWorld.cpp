@@ -3715,7 +3715,8 @@ float GameWorld::blastShare(const physics::Vec3& at, const Player& target, float
 // ceil(level + amount / empDamageStepSize)), the level falling by one
 // every empLevelTime seconds (0x00652910; the defaults at the armor
 // template's 0x180-0x188: 5 s, 120, 3 steps); its level is that, rounded
-// up (0x00652a00). Only objects with armor.takesEmpDamage feel it.
+// up (0x00652a00). armor.takesEmpDamage gates input filtering, not the
+// armour's accumulation of EMP.
 void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& settings,
 	const std::function<float(const physics::Vec3&)>& distanceTo)
 {
@@ -3762,12 +3763,12 @@ void GameWorld::empBlast(const physics::Vec3& at, const ProjectileSettings& sett
 			}
 		}
 	}
-	// Soldiers on foot: their own armour (0x005a6500 takes any armoured
-	// object; the same takesEmpDamage gate, which no shipped soldier sets).
+	// Soldiers on foot: 0x005a6500 applies EMP to armour regardless of the
+	// takesEmpDamage input-filter flag.
 	for (const auto& player : m_players) {
 		const world::Object* object = player && player->alive && !player->vehicle ? m_objects.find(player->object) : nullptr;
 		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
-		if (!t || integer(*t, "armor.takesEmpDamage", 0) == 0) {
+		if (!t || std::find(t->components().begin(), t->components().end(), "Armor") == t->components().end()) {
 			continue;
 		}
 		if (const float amount = amountFor(*t, player->body.position, 0); amount > 0) {
