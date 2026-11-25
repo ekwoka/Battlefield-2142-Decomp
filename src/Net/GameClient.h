@@ -102,6 +102,7 @@ public:
 	State state() const { return m_state; }
 	const ConnectResult& connectResult() const { return m_connection.result(); }
 	uint32_t disconnectReason() const { return m_connection.disconnectReason(); }
+	void setSilenceLimit(std::chrono::milliseconds limit) { m_connection.silenceLimit = limit; }
 
 	// Receives, answers and sends what is due. Returns false once the
 	// connection is over (refused, failed or disconnected).

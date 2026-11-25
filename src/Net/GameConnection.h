@@ -53,6 +53,8 @@ const char* refusalReason(uint32_t code);
 // A disconnect's reason (type 5): the same codes as a refusal where they
 // apply (0 none given: the other side left, or a kick).
 const char* disconnectReason(uint32_t code);
+// Ours, not a code a server sends: the server went silent (poll()).
+constexpr uint32_t kDisconnectTimedOut = 0xffffffffu;
 
 struct ConnectRequest {
 	std::string key;      // 4 bytes
@@ -149,6 +151,8 @@ public:
 	// (bit 0 that last one).
 	std::function<void(uint32_t acknowledged, uint32_t mask)> onAcknowledge;
 	uint32_t disconnectReason() const { return m_disconnectReason; }
+	// How long the server may stay silent before poll() gives up on it.
+	std::chrono::milliseconds silenceLimit {std::chrono::seconds(30)};
 	// Our clock (ms since the connection object was made).
 	uint32_t now() const;
 	// Round trip to the server from its pongs to our pings (ms), 0 before one.
@@ -195,6 +199,8 @@ private:
 	uint8_t m_connection = 0;
 	NotifyState m_notify;
 	uint32_t m_disconnectReason = 0;
+	// When a datagram last came (steady clock ticks; the keep-alive thread writes it too).
+	std::atomic<std::chrono::steady_clock::rep> m_lastHeard {0};
 	uint32_t m_roundTrip = 0;
 	uint32_t m_fastPongs = 0;
 	std::chrono::steady_clock::time_point m_start = std::chrono::steady_clock::now();

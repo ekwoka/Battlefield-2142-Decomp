@@ -37,6 +37,7 @@ const char* disconnectReason(uint32_t code)
 {
 	switch (code) {
 	case 0: return "the connection was closed";
+	case kDisconnectTimedOut: return "no word from the server for 30 s";
 	case 0x16: return "banned";
 	case 0x1b: return "no content check"; // 0x004af710's refusal of a client without one
 	default: return refusalReason(code);
@@ -182,6 +183,9 @@ bool GameConnection::receive(std::vector<uint8_t>& datagram, int milliseconds)
 		return false;
 	}
 	const bool got = m_socket.receive(datagram, milliseconds) > 0;
+	if (got) {
+		m_lastHeard = std::chrono::steady_clock::now().time_since_epoch().count();
+	}
 	if (got && onDatagram) {
 		onDatagram(false, datagram);
 	}
@@ -393,6 +397,14 @@ bool GameConnection::poll(const std::function<void(const ConnectedPacket&)>& onD
 			break;
 		}
 		handleDatagram(datagram, onData);
+	}
+	// Native addition: a server gone without its disconnect packet (lost, or
+	// the process ended) would leave us connected for good. 30 s, as the
+	// native server's limit for a silent client, past a host's level load.
+	const auto heard = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(m_lastHeard.load()));
+	if (m_connected && !m_replay && std::chrono::steady_clock::now() - heard > silenceLimit) {
+		m_connected = false;
+		m_disconnectReason = kDisconnectTimedOut;
 	}
 	return m_connected;
 }

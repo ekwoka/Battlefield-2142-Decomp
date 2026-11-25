@@ -622,6 +622,27 @@ size_t countType(const std::vector<net::GameEvent>& events, uint32_t type)
 
 } // namespace
 
+// A server gone without its disconnect packet: the client gives up once
+// it has been silent past the limit, instead of staying connected for good.
+TEST(NetGame_SilentServerTimesOut)
+{
+	LoopbackServer server;
+	CHECK(server.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.cdKey = "TEST-KEY";
+	CHECK(client.connect("127.0.0.1", server.port(), options));
+	CHECK(runUntil(client, server, [&] { return client.state() == net::GameClient::State::Connected; }));
+	client.setSilenceLimit(std::chrono::milliseconds(300));
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	while (client.state() == net::GameClient::State::Connected && std::chrono::steady_clock::now() < deadline) {
+		client.update(); // the server is no longer polled: silent
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	CHECK(client.state() != net::GameClient::State::Connected);
+	CHECK(client.disconnectReason() == net::kDisconnectTimedOut);
+}
+
 TEST(NetGame_LoopbackSession)
 {
 	LoopbackServer server;
