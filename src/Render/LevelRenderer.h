@@ -1073,7 +1073,8 @@ private:
 	std::unique_ptr<FpsText> m_fpsText;
 	void appendFpsText(std::vector<hud::HudQuad>& quads);
 	std::vector<ParticleGroup> m_particleGroups;
-	void buildParticles(const Camera& camera);
+	// aspect: the view's height / width (the distance LOD's screen factor).
+	void buildParticles(const Camera& camera, float aspect);
 	// This frame's point lights (the effects' LightSources nearest the
 	// camera), copied into the lit shaders' uniforms.
 	std::vector<effects::PointLight> m_pointLights; // this frame's listed lights (collectPointLights)

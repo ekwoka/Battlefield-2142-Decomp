@@ -77,7 +77,17 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   only the known Walker failure.
 
 ### Q-3. `Player::queueFrame` has no limit within one script call (medium)
-- **Status:** open
+- **Status:** done (wave 2). In SwiffPlayer.dll, `0x100ca870` calls the sprite's
+  slot 0xa8 (`0x100cf5b0`), which appends to the queue at +0x108 every time. Its
+  resize (`0x100048a0`) has no limit. When `0x100cfa40` takes the queue, it goes
+  to the first frame and pops the entries after it that equal it. So retail
+  collapses repeated frames when it reads the queue, and it has no cap.
+  `queueFrame` now drops a frame equal to the last one queued, which gives the
+  same gotos. It also keeps at most 64 entries (`Player::kMaxQueuedFrames`,
+  dropping the oldest). The cap isn't in retail; a comment marks it as a
+  safeguard. Dropping repeats doesn't help with an alternating
+  `gotoAndStop(i%2+1)`, but the cap does. Test:
+  `SwfPlayer_QueuedFramesDropRepeatsAndAreCapped`.
 - **Commit:** 86d196d
 - **Where:** `src/UI/Player/Player.cpp`, `queueFrame` and `applyQueuedFrames`
 - **Problem:** every gotoAndStop, gotoAndPlay, GotoFrame or GoToLabel adds to
@@ -439,7 +449,25 @@ or gating behind a flag.
   comes from the vertex shader's `oFog` or from table fog.
 
 ### A-9. Particle level-of-detail distance uses the wrong point (round 2, medium)
-- **Status:** verify
+- **Status:** done (wave 2). Checked against RendDX9_ori.dll's disassembly:
+  - `0x10135be0` returns true when min ≤ camera ≤ max on all three axes (both
+    faces count as inside), and `0x101393e0` then returns 1.
+  - Otherwise the distance is measured from the box centre (+0x114). The size
+    term is the half-diagonal (+0x120) × k[i] / distance, where i = 1 only when
+    the box's y extent is strictly greater than both its x and z extents.
+  - The caller `0x10098bf0` sets k[1] = 1.05 / (fov·tan(fov/2)) and k[0] =
+    k[1] × height/width. Here fov is RenderView +0x24 (slot 0x24) and
+    height/width is RenderView +0x34 (slot 0x48); the view comes from renderer
+    slot 0x5c, which returns +0xf8.
+  - The box is the particles' box grown by particleMaxSize (`0x101407c0`
+    tail), the same box `Emitter::box`/`bounds` builds.
+  - The emission raises the result to minEmitScale (`0x101403b0`).
+
+  `EffectManager::setCamera` now takes the fov and the aspect;
+  `LevelRenderer` passes the target's height / width. Test:
+  `Effects_DistanceLodAsRendDX9` pins a MassiveSmoke-like 4×104×4 column at
+  0.333539, the same box lying along x at 0.277932 (aspect 0.75) and 0.236227
+  (aspect 0.5625), and the inside / on-face / just-outside cases.
 - **Commit:** 62ac2aa
 - **Where:** `src/Effects/Effects.cpp:781`
 - **Retail (0x101393e0):**

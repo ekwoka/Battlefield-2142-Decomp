@@ -593,6 +593,88 @@ world::ObjectTemplate* addPuff(world::ObjectTemplateManager& templates)
 
 } // namespace
 
+// RendDX9's distance LOD (0x101393e0, the factors from 0x10098bf0): 1 with
+// the camera inside the system's box (0x10135be0, faces included); else,
+// from the box's centre, (1 - f)^2 + radius x k / distance with k =
+// 1.05 / (fov tan(fov / 2)) for a box taller than wide and deep, k x the
+// view's height / width otherwise. The particles here sit at exactly
+// +-a on an axis (a box emitter's CRD_NONE range with its sign flip), 100 m
+// along x from the system, so the boxes are known: 4 x 104 x 4 m (a
+// MassiveSmoke-like column) or 104 x 4 x 4 m. Defaults: LOD class 2's end
+// 500 m, the fade from 350 m.
+TEST(Effects_DistanceLodAsRendDX9)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* puff = addPuff(templates);
+	puff->settings()["emitterType"] = "Box";
+	puff->settings()["emitSpeed"] = "0";
+	puff->settings()["particleMaxSize"] = "2";
+	puff->settings()["emitFrequency"] = "1000";
+	puff->settings()["emitTime"] = "10";
+	scene::ParticleSystemSettings settings;
+	settings.qualityLevel = 2;
+	// The LOD after two updates: the second measures the first's particles
+	// (started with the camera near, the view distance's test at the start
+	// passed; 0x1013fb30).
+	const auto lod = [&](const char* x, const char* y, const effects::Vec3& camera, float fov, float aspect,
+						 effects::Vec3* low = nullptr, effects::Vec3* high = nullptr) {
+		puff->settings()["emitRangeX"] = x;
+		puff->settings()["emitRangeY"] = y;
+		puff->settings()["emitRangeZ"] = "CRD_NONE/0/0/0";
+		effects::EffectManager manager(templates);
+		manager.setSettings(&settings);
+		manager.setCamera({0, 0, 10}, 1.0f);
+		manager.spawn("e_puff", {});
+		manager.update(0.5f);
+		manager.setCamera(camera, fov, aspect);
+		manager.update(0.1f);
+		if (manager.emitters() != 1) {
+			return -1.0f;
+		}
+		effects::Vec3 lo, hi;
+		manager.emitterList()[0]->box(lo, hi);
+		if (low && high) {
+			*low = lo;
+			*high = hi;
+		}
+		return manager.emitterList()[0]->lodScale();
+	};
+	const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+	const char* column = "CRD_NONE/50/0/1";
+	const char* along = "CRD_NONE/100/0/0";
+	// The column: 100 m out along x, +-52 m up and down, +-2 m deep.
+	effects::Vec3 lo, hi;
+	const float tall = lod(along, column, {100, 0, 450}, 1.0f, 0.75f, &lo, &hi);
+	CHECK(lo.x == 98 && hi.x == 102 && lo.y == -52 && hi.y == 52 && lo.z == -2 && hi.z == 2);
+	// 450 m from the column's centre (not 461 m from the system: 0.2848),
+	// k = 1.05 / tan(0.5) = 1.92202, the view's aspect left out:
+	// 0.11111 + 52.0769 x 1.92202 / 450 (the old tan(fov / 2) rule: 0.3229).
+	if (!near(tall, 0.333539f)) { std::fprintf(stderr, "tall = %f\n", tall); CHECK(false); }
+	const float tallWide = lod(along, column, {100, 0, 450}, 1.0f, 0.5625f);
+	CHECK(near(tallWide, 0.333539f));
+	// The same box lying along x: k x height / width.
+	const float flat = lod("CRD_NONE/50/0/1", "CRD_NONE/0/0/0", {0, 0, 450}, 1.0f, 0.75f, &lo, &hi);
+	CHECK(lo.x == -52 && hi.x == 52 && lo.y == -2 && hi.y == 2);
+	if (!near(flat, 0.277932f)) { std::fprintf(stderr, "flat = %f\n", flat); CHECK(false); }
+	const float flat169 = lod("CRD_NONE/50/0/1", "CRD_NONE/0/0/0", {0, 0, 450}, 1.0f, 0.5625f);
+	if (!near(flat169, 0.236227f)) { std::fprintf(stderr, "flat169 = %f\n", flat169); CHECK(false); }
+	// A cube (y no longer than x) takes the aspect too: the 4 m box of
+	// particles at the system's place, 450 m off.
+	const float cube = lod("CRD_NONE/0/0/0", "CRD_NONE/0/0/0", {0, 0, 450}, 1.0f, 0.75f);
+	// 0.11111 + sqrt(12) x 1.92202 x 0.75 / 450
+	CHECK(near(cube, 0.111111f + std::sqrt(12.0f) * 1.92202f * 0.75f / 450));
+	// Inside the box: 1, though the fade (590 m, past 500) is 0 and the
+	// size term, with fov 2.5 (k = 0.139555), is 0.1424. On its top face
+	// still inside; half a metre above it 602.007 x 0.139555 / 602.5.
+	const char* high600 = "CRD_NONE/600/0/1";
+	const float inside = lod(along, high600, {100, 590, 0}, 2.5f, 0.75f, &lo, &hi);
+	CHECK(hi.y == 602);
+	if (!near(inside, 1.0f)) { std::fprintf(stderr, "inside = %f\n", inside); CHECK(false); }
+	CHECK(near(lod(along, high600, {100, 602, 0}, 2.5f, 0.75f), 1.0f));
+	const float above = lod(along, high600, {100, 602.5f, 0}, 2.5f, 0.75f);
+	if (!near(above, 0.139441f)) { std::fprintf(stderr, "above = %f\n", above); CHECK(false); }
+}
+
 // RendDX9's emitter (0x101407c0 / 0x1013f0c0): the sprite template's
 // defaults, quadratic drag towards the wind, pre-warm, the quality level,
 // the view distance and the LOD fade.
@@ -670,13 +752,13 @@ TEST(Effects_EmitterAsRendDX9)
 		settings.qualityLevel = 2;
 		effects::EffectManager far(templates);
 		far.setSettings(&settings);
-		far.setCamera({0, 0, 1000}, 0.5f); // beyond 500 m
+		far.setCamera({0, 0, 1000}, 1.0f); // beyond 500 m
 		far.spawn("e_puff", {});
 		far.update(0.5f);
 		CHECK(far.emitters() == 0);
 		effects::EffectManager near(templates);
 		near.setSettings(&settings);
-		near.setCamera({0, 0, 10}, 0.5f);
+		near.setCamera({0, 0, 10}, 1.0f);
 		near.spawn("e_puff", {});
 		near.update(0.5f);
 		CHECK(near.emitters() == 1 && !near.emitterList()[0]->particles().empty());
@@ -690,7 +772,7 @@ TEST(Effects_EmitterAsRendDX9)
 		puff->settings()["emitTime"] = "10";
 		effects::EffectManager wide(templates);
 		wide.setSettings(&settings);
-		wide.setCamera({0, 0, 450}, 0.5f);
+		wide.setCamera({0, 0, 450}, 1.0f);
 		wide.spawn("e_puff", {});
 		wide.update(0.5f);
 		wide.update(0.1f);

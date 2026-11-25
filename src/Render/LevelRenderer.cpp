@@ -2819,7 +2819,7 @@ void LevelRenderer::buildMenu(float seconds)
 // Two triangles per particle, uploaded for this frame. The managers are
 // told the camera, the water, the wind and the settings first (what their
 // next update reads: the view distance, the distance LOD).
-void LevelRenderer::buildParticles(const Camera& camera)
+void LevelRenderer::buildParticles(const Camera& camera, float aspect)
 {
 	if (m_sources) {
 		// The manager's settings with VideoSettings' effects row over them
@@ -2841,7 +2841,7 @@ void LevelRenderer::buildParticles(const Camera& camera)
 				if (const terrain::Heightmap* heights = m_sources->heightmaps.primary(); heights && heights->loaded()) {
 					manager->setGround([heights](float x, float z) { return heights->heightAt(x, z); });
 				}
-				manager->setCamera({camera.position.x, camera.position.y, camera.position.z}, std::tan(camera.fovY / 2));
+				manager->setCamera({camera.position.x, camera.position.y, camera.position.z}, camera.fovY, aspect);
 			}
 		}
 	}
@@ -4408,7 +4408,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	updateUndergrowth(camera);
 	{
 		FrameStats::Scope timed(FrameStats::Particles);
-		buildParticles(camera);
+		buildParticles(camera, static_cast<float>(target.height) / static_cast<float>(std::max(target.width, 1u)));
 	}
 	// The mesh particles' meshes, loaded before the pass begins.
 	if (m_sources) {
