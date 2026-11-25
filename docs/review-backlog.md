@@ -137,7 +137,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   drop) the frame's stats on the failed-acquire path; document the variable.
 
 ### Q-13. `Titan_WalkerSweepsTheSuezBridges` fails, and is disabled (medium)
-- **Status:** done (wave 3). The test was wrong, not the walker physics. No
+- **Status:** done (wave 3, 8aa76e6). The test was wrong, not the walker physics. No
   lane stopped at the spans' deck or the joint. The vanilla mech stopped
   against objects that retail's `StaticObjects.con` places on and beside the
   road, and that collide in retail too (`physicsType Mesh`,
