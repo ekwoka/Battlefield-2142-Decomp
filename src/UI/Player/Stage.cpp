@@ -226,6 +226,12 @@ bool DisplayObject::defaultValue(Interpreter& vm, bool preferString, Value& out)
 	return true;
 }
 
+bool TextField::defaultValue(Interpreter&, bool, Value& out)
+{
+	out = Value(value);
+	return true;
+}
+
 void DisplayObject::decompose()
 {
 	if (decomposed) {

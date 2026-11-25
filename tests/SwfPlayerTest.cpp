@@ -611,6 +611,13 @@ TEST(SwfPlayer_DiceTextFieldsAndDoublePress)
 		fields.push_back(field);
 	}
 	CHECK(vm.toNumber(player.evaluate("b.tabIndex")) == 2);
+	// An edit text as a value is its text (the create page passes the field to
+	// ServerSettings.setServerName / setPassword); a clip stays its path.
+	vm.callMember(root, "createTextField", {avm1::Value("name"), avm1::Value(30), avm1::Value(0), avm1::Value(500), avm1::Value(200),
+											avm1::Value(20)});
+	vm.setMember(player.evaluate("name"), "text", avm1::Value("LanTest"));
+	CHECK(vm.toString(player.evaluate("name")) == "LanTest");
+	CHECK(vm.toString(root) == "_level0");
 	// _focus = true takes the focus without onSetFocus; _focus reads it.
 	vm.setMember(fields[0], "_focus", avm1::Value(true));
 	CHECK(avm1::toBoolean(player.evaluate("a._focus")) && !avm1::toBoolean(player.evaluate("b._focus")));
