@@ -57,6 +57,24 @@ float soldierAnimationSpeed(float speed, SoldierPose pose, float lookScale)
 	}
 }
 
+std::vector<anim::NodeTurn> soldierAimBend(size_t nodes, float aimPitch, float twist, int stance)
+{
+	if (nodes <= 47) {
+		return {};
+	}
+	constexpr float kRadians = 3.14159265f / 180.0f;
+	const float pitch = stance == 3 ? 0.0f : stance == 2 ? std::clamp(-aimPitch, -30.0f, 5.0f) : std::clamp(-aimPitch, -70.0f, 70.0f);
+	const float turn = std::asin(std::clamp(std::sin(twist * kRadians) * std::cos(aimPitch * kRadians), -1.0f, 1.0f)) / kRadians;
+	const auto rotation = [&](float turnDegrees) {
+		const float a = pitch * 0.25f * kRadians, b = turnDegrees * kRadians;
+		const float ca = std::cos(a), sa = std::sin(a), cb = std::cos(b), sb = std::sin(b);
+		return anim::Matrix {cb, 0, -sb, 0, sa * sb, ca, sa * cb, 0, ca * sb, -sa, ca * cb, 0, 0, 0, 0, 1};
+	};
+	const anim::Matrix spine = rotation(turn / 3.0f);
+	return {{11, spine}, {12, spine}, {13, spine}, {47, rotation(0)}};
+}
+
+
 SoldierAnimationDirection soldierAnimationDirection(const physics::Vec3& velocity, float lookYawDegrees)
 {
 	const float speed = std::sqrt(velocity.x * velocity.x + velocity.z * velocity.z);

@@ -48,6 +48,16 @@ bool sampleNode(const Animation& animation, size_t node, float fraction, bool lo
 // World matrices from local transforms; parents precede children.
 std::vector<Matrix> worldMatrices(const Skeleton& skeleton, const LocalPose& pose);
 
+// A node's extra turn (the hierarchy pass 0x008b8880's per-bone +0x40
+// matrix): its world matrix is local x parent, then its rotation times the
+// turn, its place kept, so it turns in the skeleton's space about its own
+// pivot and its children follow it.
+struct NodeTurn {
+	size_t node;
+	Matrix rotation; // only the 3x3 is used
+};
+std::vector<Matrix> worldMatrices(const Skeleton& skeleton, const LocalPose& pose, const std::vector<NodeTurn>& turns);
+
 // World matrices of all skeleton nodes. With an animation, `frame` (may be
 // fractional; wraps) selects the pose of the animated nodes, interpolated
 // between frames; other nodes keep their setup pose.

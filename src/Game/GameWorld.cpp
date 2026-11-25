@@ -10194,7 +10194,8 @@ void GameWorld::stepAnimation(Player& player, float seconds)
 		if (player.weaponAnimation) {
 			player.weaponAnimation->apply(*skeleton, pose, touched);
 		}
-		player.worldPose = anim::worldMatrices(*skeleton, pose);
+		player.worldPose = anim::worldMatrices(*skeleton, pose,
+			soldierAimBend(skeleton->nodes.size(), aimPitchOf(player.id), player.control.twist(), player.body.stance));
 	}
 }
 
@@ -10563,7 +10564,11 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 		if (remote.weapon) {
 			remote.weapon->apply(*remote.skeleton, remote.pose, touched);
 		}
-		remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose);
+		// The model turns by the body's yaw; the look's twist past it and
+		// the aim bend the spine.
+		const float twist = std::remainder(state.yaw - soldier->rotation().x, 360.0f);
+		remote.worldPose = anim::worldMatrices(*remote.skeleton, remote.pose,
+			soldierAimBend(remote.skeleton->nodes.size(), state.aimPitch, twist, static_cast<int>(state.pose)));
 	}
 	if (world::Object* held = remote.weaponObject ? m_objects.find(remote.weaponObject) : nullptr) {
 		held->setPosition(soldier->position());

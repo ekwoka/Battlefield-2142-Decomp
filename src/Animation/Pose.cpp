@@ -123,11 +123,25 @@ bool sampleNode(const Animation& animation, size_t node, float fraction, bool lo
 
 std::vector<Matrix> worldMatrices(const Skeleton& skeleton, const LocalPose& pose)
 {
+	return worldMatrices(skeleton, pose, {});
+}
+
+std::vector<Matrix> worldMatrices(const Skeleton& skeleton, const LocalPose& pose, const std::vector<NodeTurn>& turns)
+{
 	std::vector<Matrix> world(skeleton.nodes.size());
 	for (size_t i = 0; i < skeleton.nodes.size(); ++i) {
 		const Matrix local = matrixFromRotationTranslation(pose.rotations[i], pose.positions[i]);
 		const int parent = skeleton.nodes[i].parent;
 		world[i] = parent >= 0 && static_cast<size_t>(parent) < i ? multiply(local, world[static_cast<size_t>(parent)]) : local;
+		for (const NodeTurn& turn : turns) {
+			if (turn.node == i) {
+				Matrix turned = multiply(world[i], turn.rotation);
+				for (int k = 12; k < 15; ++k) {
+					turned[static_cast<size_t>(k)] = world[i][static_cast<size_t>(k)];
+				}
+				world[i] = turned;
+			}
+		}
 	}
 	return world;
 }

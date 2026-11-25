@@ -8,6 +8,7 @@
 // the soldier's pose, is the velocity the physics response is asked for.
 #pragma once
 
+#include "Animation/Pose.h"
 #include "Physics/SoldierPhysics.h"
 
 namespace dice::hfe::game {
@@ -183,6 +184,20 @@ struct SoldierAnimationDirection {
 	float forward = 0;
 	float side = 0;
 };
+
+// The aim on the spine (0x005efc00, each soldier posed in third person):
+// the aim's pitch off the body (-asin of the body's up . the aim, degrees,
+// looking up negative) within -70..70 (prone -30..5: the tweakables
+// 0x00a719c8 / 0x00a71a04, 0x00a719d8 / 0x00a719ac; swimming 0) and its
+// turn (asin of the body's right . the aim). Spine2, spine3 and torso
+// (nodes 11-13, the bones' +0x40 turns) each take a quarter of the pitch
+// and a third of the turn, the head (47) a quarter of the pitch: Rx x Ry
+// about the skeleton's axes (0x006ad0f0, 0x006ad180). Node 74 takes the
+// pitch times 0x00a719fc, 0 by default, so none. The head's idle look
+// around (+0x29c..+0x2ac, its turn here) is not kept: 0.
+// aimPitch: degrees, up positive; twist: the look's past the body's yaw,
+// degrees; stance: 0 stand, 1 crouch, 2 prone, 3 swim.
+std::vector<anim::NodeTurn> soldierAimBend(size_t nodes, float aimPitch, float twist, int stance);
 
 // Project horizontal movement into the soldier's animation frame. Infantry
 // movement follows the look direction (body yaw plus head twist), which can

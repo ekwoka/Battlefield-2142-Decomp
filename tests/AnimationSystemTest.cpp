@@ -1109,3 +1109,59 @@ TEST(AnimationSystem_CrouchedWeaponOverlaysKeepFeetGrounded)
 		}
 	}
 }
+
+// The hierarchy pass's per-bone turn (0x008b8880: local x parent, the
+// rotation times the bone's +0x40 matrix, the place kept) and the soldier's
+// aim bend on it (0x005efc00).
+TEST(AnimationSystem_SoldierAimBend)
+{
+	// A chain a-b-c a metre apart up y: b turned a quarter about x keeps its
+	// place, c swings from above b to in front of it.
+	anim::Skeleton chain;
+	chain.nodes = {{"a", -1, {0, 0, 0, 1}, {0, 0, 0}}, {"b", 0, {0, 0, 0, 1}, {0, 1, 0}}, {"c", 1, {0, 0, 0, 1}, {0, 1, 0}}};
+	const anim::Matrix quarter {1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1};
+	const auto turned = anim::worldMatrices(chain, anim::setupPose(chain), {{1, quarter}});
+	const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+	CHECK(near(turned[1][12], 0) && near(turned[1][13], 1) && near(turned[1][14], 0));
+	CHECK(near(turned[2][12], 0) && near(turned[2][13], 1) && near(turned[2][14], 1));
+	CHECK(game::soldierAimBend(chain.nodes.size(), 30, 0, 0).empty()); // not the soldiers' skeleton
+
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	io::FileManager files;
+	files.setRootPath(gameDir);
+	files.addSearchPath("mods/bf2142");
+	Console console(&files);
+	bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+		[&files](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+	std::string out;
+	console.run("ServerArchives.con", {}, out);
+	std::vector<uint8_t> data;
+	CHECK(files.readFile("Objects/Soldiers/Common/Animations/3p_setup.ske", data));
+	const std::optional<anim::Skeleton> skeleton = anim::parseSkeleton(data);
+	CHECK(skeleton && skeleton->nodes.size() > 47 && skeleton->nodes[11].name == "spine2" && skeleton->nodes[47].name == "head");
+	if (!skeleton) {
+		return;
+	}
+	const anim::LocalPose pose = anim::setupPose(*skeleton);
+	const auto at = [&](float pitch, float twist, int stance, size_t node) {
+		const auto world = anim::worldMatrices(*skeleton, pose, game::soldierAimBend(skeleton->nodes.size(), pitch, twist, stance));
+		return std::array<float, 3> {world[node][12], world[node][13], world[node][14]};
+	};
+	// The setup pose faces +z (the toes ahead of the feet), its right on +x.
+	CHECK(at(0, 0, 0, 5)[2] > at(0, 0, 0, 4)[2] && at(0, 0, 0, 6)[0] > at(0, 0, 0, 1)[0]);
+	const size_t head = 47, rightHand = 0x22, leftHand = 0x13;
+	const auto level = at(0, 0, 0, head), up = at(45, 0, 0, head), down = at(-45, 0, 0, head);
+	std::fprintf(stderr, "  head z: up %.3f level %.3f down %.3f\n", up[2], level[2], down[2]);
+	CHECK(up[2] < level[2] - 0.1f && down[2] > level[2] + 0.1f); // leans back looking up, over looking down
+	CHECK(at(45, 0, 0, 11) == at(0, 0, 0, 11)); // spine2 turns about its own place
+	// The twist to the right (+x, the look's yaw past the body's): the right
+	// shoulder back, the left forward (the setup pose's arms are out sideways).
+	CHECK(at(0, 30, 0, rightHand)[2] < at(0, 0, 0, rightHand)[2] - 0.1f);
+	CHECK(at(0, 30, 0, leftHand)[2] > at(0, 0, 0, leftHand)[2] + 0.1f);
+	// Prone bends within 30 degrees up, 5 down; swimming not at all.
+	CHECK(at(45, 0, 2, head) == at(30, 0, 2, head) && at(-45, 0, 2, head) == at(-5, 0, 2, head));
+	CHECK(at(45, 0, 3, head) == level);
+}
