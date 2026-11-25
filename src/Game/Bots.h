@@ -1340,7 +1340,14 @@ private:
 		float meshAtTime = 0;
 		float meshBackUntil = 0;            // wedged: backing off until then
 		float meshSince = 0;                // when it took the wheel there
-		uint32_t titanRide = 0;    // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
+		// groundWalk (enhanced.botTitan): the way over the terrain off the infantry mesh, to groundTo; where
+		// it last made 3 m of way and when; when the last search was made.
+		std::vector<physics::Vec3> groundWay;
+		physics::Vec3 groundTo;
+		physics::Vec3 groundAt;
+		float groundAtTime = 0;
+		float groundPlannedAt = -1e9f;
+		uint32_t titanRide = 0;   // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
 		float titanRideAt = -1e9f;
 		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way (in its Titan's frame), and when
 		float titanAtTime = 0;
@@ -1646,6 +1653,23 @@ private:
 	// which the sidestep doesn't step round.
 	bool steer(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 		SoldierInput& input, float radius = 0, uint32_t object = 0);
+	// enhanced.botTitan (not retail): a level's infantry mesh is its Conquest/Co-op one, and Titan mode
+	// places bases and silos off it (Suez_Canal's mesh ends at x 260: the PAC ground base and silos 901,
+	// 905 and 906 lie beyond it), where retail's follower finds no path and the soldier stands. A soldier
+	// on the ground in gpm_ti with itself or `to` off the mesh walks a terrain grid instead: to `to`, or
+	// onto the mesh when `to` is on it; from the mesh, the mesh's way to its point nearest `to` first
+	// (`meshTo`). True when the grid has the move: `point` is where to head.
+	bool groundWalk(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, physics::Vec3& meshTo,
+		physics::Vec3& point);
+	// The grid's way (4 m cells, A*): steps no obstacle crosses at a soldier's knee and chest, not up a
+	// slope over 40 degrees or into water; to within 5 m of `to`, or (`toMesh`) to the first cell on
+	// the infantry mesh. Empty for none within its search.
+	std::vector<physics::Vec3> groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore) const;
+	// The infantry mesh's point nearest `to` (within 200 m, on the terrain), kept by 4 m cell.
+	bool meshExit(const physics::Vec3& to, physics::Vec3& exit);
+	std::map<std::pair<int, int>, std::pair<bool, physics::Vec3>> m_meshExits;
+	// Whether a soldier at `at` stands on the terrain (not aboard a Titan, on a roof or a deck).
+	bool onTerrain(const physics::Vec3& at) const;
 	bool drive(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 		SoldierInput& input, float radius = 0);
 	// The fire plan's moves for a bot at the wheel (0x100795a0 for an object

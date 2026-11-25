@@ -14310,7 +14310,16 @@ seats have AI templates of equipment type Fixed (eu_Titan_Cannon1–4AI,
 eu_Titan_Cannon_AA_01/02AI: a Unit with setHasExposedSoldier,
 Armament setIsAntiAircraft), which AIDLL's seat choice (BBChange) and
 behaviours cover, but no strategy of its sends a bot into a Titan (its nav
-meshes are on the ground). The rewrite's choice: while fewer than half its
+meshes are on the ground). The levels' infantry meshes are their Conquest and
+Co-op ones and stop short of Titan mode's ground: Suez_Canal's covers x
+-712..260, z -238..163, so the PAC base (the Outpost, x 550..620) and silos
+901, 905 and 906 lie 45 m and more off it, where retail's follower plans no
+way and the soldier stands. With `enhanced.botTitan`, a soldier on the ground
+in gpm_ti with itself or its goal off the mesh walks a 4 m terrain grid (A*;
+steps clear of obstacles at knee and chest height and half a metre to either
+side, under 40 degrees, out of water), from the mesh after the mesh's way to
+its point nearest the goal, onto the mesh when the goal is on it
+(`BotManager::groundWalk`); infantry no longer pass over off-mesh silos. The rewrite's choice: while fewer than half its
 Titan's guns are manned or claimed, a bot aboard approaches the nearest free
 working gun's console and takes it (`titanGunEntry`). With
 `enhanced.botTitan` enabled, it follows the Titan's collision-derived walk

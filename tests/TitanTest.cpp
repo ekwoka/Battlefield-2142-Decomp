@@ -2440,10 +2440,11 @@ TEST(Titan_SuezBridgeCrowdingSurvey)
         walkerCrossesBridge("mods/Project_Remaster_v17_Final", "us_heavy_mech", bridge, false, false, true, true);
 }
 
-// Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906, so a bot sent there cannot plan and walks
-// straight into the first wall. With enhanced.botTitan a foot bot standing 60 m from silo 906 (the nearest) must prefer one
-// it can plan to.
-TEST(Titan_BotsPreferSilosOnTheNavMesh)
+// Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906: retail's follower plans no way there.
+// With enhanced.botTitan a foot bot on the mesh 60 m from silo 906 (the nearest) still takes it as its objective,
+// walks the mesh to its edge nearest the silo and the terrain from there (BotManager::groundWalk), into the
+// silo's capture sphere.
+TEST(Titan_BotsWalkFromTheNavMeshToAnOffMeshSilo)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
@@ -2485,16 +2486,16 @@ TEST(Titan_BotsPreferSilosOnTheNavMesh)
 	game::GameWorld::PlayerInfo info;
 	level.world->playerInfo(id, info);
 	level.world->setSoldierPosition(info.soldier, from);
-	for (int tick = 0; tick < 30 * 5; ++tick) {
+	float reached = -1;
+	for (int tick = 0; tick < 30 * 60 && reached < 0; ++tick) {
 		bots.update(1 / 30.0f);
 		level.world->tick(1 / 30.0f);
+		level.world->playerInfo(id, info);
+		if (std::sqrt(physics::lengthSquared(info.position - cp->position)) <= cp->radius) reached = tick / 30.0f;
 	}
-	const auto route = bots.route(id);
-	CHECK(!route.empty());
-	if (route.empty()) return;
-	const float toOffMesh = std::hypot(route.back().x - cp->position.x, route.back().z - cp->position.z);
-	std::fprintf(stderr, "  bot's goal is %.0f m from the off-mesh silo 906\n", toOffMesh);
-	CHECK(toOffMesh > 100.0f);
+	std::fprintf(stderr, "  in silo 906's sphere after %.0f s, from 60 m off (at %.0f %.0f, %.1f m from its point)\n", reached,
+		info.position.x, info.position.z, std::sqrt(physics::lengthSquared(info.position - cp->position)));
+	CHECK(reached >= 0);
 }
 
 // Rounds from above onto each part of a Titan (guns, consoles): which take

@@ -1865,6 +1865,171 @@ bool BotManager::driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	return true;
 }
 
+bool BotManager::onTerrain(const physics::Vec3& at) const
+{
+	return at.y - m_world.terrainHeight(at.x, at.z) < 3;
+}
+
+bool BotManager::meshExit(const physics::Vec3& to, physics::Vec3& exit)
+{
+	constexpr float kGrid = 4;
+	const std::pair<int, int> key {static_cast<int>(std::floor(to.x / kGrid)), static_cast<int>(std::floor(to.z / kGrid))};
+	if (const auto known = m_meshExits.find(key); known != m_meshExits.end()) {
+		exit = known->second.second;
+		return known->second.first;
+	}
+	bool found = false;
+	for (float r = kGrid; r <= 200 && !found && m_navMesh; r += kGrid) {
+		const int n = std::max(8, static_cast<int>(6.2831853f * r / kGrid));
+		for (int k = 0; k < n && !found; ++k) {
+			const float a = 6.2831853f * static_cast<float>(k) / static_cast<float>(n);
+			physics::Vec3 p = to + physics::Vec3 {std::sin(a) * r, 0, std::cos(a) * r};
+			p.y = m_world.terrainHeight(p.x, p.z);
+			if (m_navMesh->findPolygon(ai::Vec3 {p.x, p.y, p.z}) >= 0) {
+				exit = p;
+				found = true;
+			}
+		}
+	}
+	m_meshExits[key] = {found, exit};
+	return found;
+}
+
+std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore) const
+{
+	constexpr float kGrid = 4, kMargin = 80, kReach = 5;
+	constexpr int kMaxExpanded = 12000;
+	const int x0 = static_cast<int>(std::floor((std::min(from.x, to.x) - kMargin - from.x) / kGrid));
+	const int x1 = static_cast<int>(std::ceil((std::max(from.x, to.x) + kMargin - from.x) / kGrid));
+	const int z0 = static_cast<int>(std::floor((std::min(from.z, to.z) - kMargin - from.z) / kGrid));
+	const int z1 = static_cast<int>(std::ceil((std::max(from.z, to.z) + kMargin - from.z) / kGrid));
+	const int w = x1 - x0 + 1, h = z1 - z0 + 1;
+	const auto cellAt = [&](int i) {
+		physics::Vec3 p {from.x + static_cast<float>(i % w + x0) * kGrid, 0, from.z + static_cast<float>(i / w + z0) * kGrid};
+		p.y = m_world.terrainHeight(p.x, p.z);
+		return p;
+	};
+	float water = -kInfinity;
+	m_world.waterLevel(water);
+	// A step is open when nothing crosses it at a soldier's knee and chest, it isn't up a slope over 40
+	// degrees (the infantry map's maxSlope) and it doesn't end in water.
+	const auto open = [&](const physics::Vec3& a, const physics::Vec3& b) {
+		const physics::Vec3 d = b - a;
+		if (b.y < water - 0.5f || std::fabs(d.y) > 0.84f * horizontal(d)) {
+			return false;
+		}
+		const physics::Vec3 across = physics::Vec3 {d.z, 0, -d.x} * (0.5f / std::max(horizontal(d), 0.01f));
+		for (const float aside : {0.0f, 1.0f, -1.0f}) {
+			for (const float up : {0.7f, 1.6f}) {
+				bool through = false;
+				const physics::Vec3 lift = across * aside + physics::Vec3 {0, up, 0};
+				if (!m_world.lineOfSight(a + lift, b + lift, ignore, through) || through) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+	const size_t cells = static_cast<size_t>(w) * static_cast<size_t>(h);
+	std::vector<float> cost(cells, kInfinity);
+	std::vector<int> cameFrom(cells, -1);
+	std::vector<bool> closed(cells, false);
+	using Entry = std::pair<float, int>;
+	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> frontier;
+	const int start = (0 - z0) * w + (0 - x0);
+	cost[static_cast<size_t>(start)] = 0;
+	frontier.push({horizontal(to - from), start});
+	int goal = -1, expanded = 0;
+	while (!frontier.empty() && goal < 0 && expanded < kMaxExpanded) {
+		const int c = frontier.top().second;
+		frontier.pop();
+		if (closed[static_cast<size_t>(c)]) {
+			continue;
+		}
+		closed[static_cast<size_t>(c)] = true;
+		++expanded;
+		const physics::Vec3 here = c == start ? physics::Vec3 {from.x, m_world.terrainHeight(from.x, from.z), from.z} : cellAt(c);
+		if (c != start && (horizontal(here - to) <= kReach || (toMesh && m_navMesh && m_navMesh->findPolygon(ai::Vec3 {here.x, here.y, here.z}) >= 0))) {
+			goal = c;
+			break;
+		}
+		for (int dz = -1; dz <= 1; ++dz) {
+			for (int dx = -1; dx <= 1; ++dx) {
+				const int x = c % w + dx, z = c / w + dz;
+				if ((!dx && !dz) || x < 0 || z < 0 || x >= w || z >= h) {
+					continue;
+				}
+				const int n = z * w + x;
+				const physics::Vec3 there = cellAt(n);
+				const float step = cost[static_cast<size_t>(c)] + std::sqrt(physics::lengthSquared(there - here));
+				if (closed[static_cast<size_t>(n)] || step >= cost[static_cast<size_t>(n)] || !open(here, there)) {
+					continue;
+				}
+				cost[static_cast<size_t>(n)] = step;
+				cameFrom[static_cast<size_t>(n)] = c;
+				frontier.push({step + horizontal(to - there), n});
+			}
+		}
+	}
+	std::vector<physics::Vec3> way;
+	for (int c = goal; c >= 0 && c != start; c = cameFrom[static_cast<size_t>(c)]) {
+		way.insert(way.begin(), cellAt(c));
+	}
+	return way;
+}
+
+bool BotManager::groundWalk(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, physics::Vec3& meshTo,
+	physics::Vec3& point)
+{
+	if (!m_settings.titanPlay() || !m_navMesh || self.vehicle || m_world.gameMode() != "gpm_ti" || !onTerrain(self.position)
+		|| !onTerrain(to)) {
+		bot.groundWay.clear();
+		return false;
+	}
+	const bool selfOn = m_navMesh->findPolygon(ai::Vec3 {self.position.x, self.position.y, self.position.z}) >= 0;
+	const bool goalOn = m_navMesh->findPolygon(ai::Vec3 {to.x, to.y, to.z}) >= 0;
+	if (selfOn && goalOn) {
+		bot.groundWay.clear();
+		return false;
+	}
+	if (selfOn) {
+		// The mesh's way as far as it goes towards `to`, then the grid.
+		physics::Vec3 exit;
+		if (meshExit(to, exit) && horizontal(self.position - exit) > 10 && horizontal(self.position - to) > horizontal(exit - to) + 5) {
+			meshTo = exit;
+			bot.groundWay.clear();
+			return false;
+		}
+	}
+	if (horizontal(self.position - to) <= 6) {
+		// There (a silo's capture sphere is 6 m): straight on at it, no search that could lead out again.
+		bot.groundWay.clear();
+		bot.groundTo = to;
+		point = to;
+		return true;
+	}
+	if (horizontal(self.position - bot.groundAt) > 3) {
+		bot.groundAt = self.position;
+		bot.groundAtTime = m_time;
+	}
+	// Searched again for another goal, after 6 s without 3 m made, or (3 s after the last search) with no way left short of it.
+	const bool other = horizontal(bot.groundTo - to) > 5;
+	const bool stuck = m_time - bot.groundAtTime > 6;
+	const bool spent = bot.groundWay.empty() && horizontal(self.position - to) > 5;
+	if (other || ((stuck || spent) && m_time - bot.groundPlannedAt >= 3)) {
+		bot.groundWay = groundWay(self.position, to, goalOn, self.soldier);
+		bot.groundTo = to;
+		bot.groundPlannedAt = m_time;
+		bot.groundAtTime = m_time;
+		bot.groundAt = self.position;
+	}
+	while (!bot.groundWay.empty() && horizontal(bot.groundWay.front() - self.position) < 2) {
+		bot.groundWay.erase(bot.groundWay.begin());
+	}
+	point = bot.groundWay.empty() ? to : bot.groundWay.front();
+	return true;
+}
+
 std::string BotManager::titanGridStats()
 {
 	std::string out;

@@ -1581,3 +1581,104 @@ TEST(Bots_RemasterApcPodSeatsCountNoGun)
 		}
 	}
 }
+
+namespace {
+
+// Suez_Canal in gpm_ti with the bots' scripts and both meshes, as main loads them.
+struct SuezBots {
+	TitanLevel level;
+	game::BotSettings settings;
+	bool enhanced = true, titanPlay = true;
+	std::optional<ai::NavMesh> mesh, vehicleMesh;
+	std::optional<game::BotManager> bots;
+	SuezBots(const char* gameDir, bool titan) : level(gameDir, "Suez_Canal", 48, true, "mods/bf2142", true), titanPlay(titan)
+	{
+		CHECK(level.loaded);
+		if (!level.loaded) return;
+		loadAircraftAi(level, settings);
+		std::string out;
+		level.console.run("AI/AIDefaultStrategies.ai", {}, out);
+		level.console.run("AI/AIDefaultStrategiesAdd.ai", {}, out);
+		level.console.run("Levels/Suez_Canal/ai/AI.ai", {}, out);
+		settings.viewDistance = 300;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &titanPlay;
+		bots.emplace(*level.world, settings);
+		for (const char* map : {"Infantry", "Vehicle"}) {
+			std::vector<uint8_t> qtr, clb;
+			const std::string base = std::string("Levels/Suez_Canal/AIPathFinding/") + map;
+			CHECK(level.files.readFile(base + ".qtr", qtr) && level.files.readFile(base + ".clb", clb));
+			(map[0] == 'I' ? mesh : vehicleMesh) = ai::parseNavMesh(qtr, clb);
+		}
+		CHECK(mesh.has_value() && vehicleMesh.has_value());
+		bots->setNavMesh(mesh ? &*mesh : nullptr);
+		bots->setVehicleNavMesh(vehicleMesh ? &*vehicleMesh : nullptr);
+		level.afterTick = [this] { bots->update(1 / 30.0f); };
+	}
+};
+
+} // namespace
+
+// Suez_Canal's infantry mesh is its Conquest one (x -712..260): in Titan mode the PAC ground base (the
+// Outpost, its spawns at x 550..620) and silos 901, 905 and 906 lie off it, 45 m and more from its edge.
+// Retail's follower finds no path there and the soldier stands (the playtest: PAC's bots took no silo).
+// enhanced.botTitan: a bot on foot at the PAC base walks the terrain to each of those silos, into its
+// capture sphere (radius 6, gpm_ti.py's radius trigger); with the switch off it stays where it is.
+TEST(Titan_BotsWalkOffMeshToSuezSilos)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const bool titanPlay : {false, true}) {
+		for (const int target : {906, 901, 905}) {
+			if (!titanPlay && target != 906) continue;
+			SuezBots suez(gameDir, titanPlay);
+			if (!suez.level.loaded || !suez.mesh) return;
+			auto& world = *suez.level.world;
+			physics::Vec3 centre;
+			float radius = 0;
+			for (const auto& p : world.controlPointList()) {
+				if (p.id == target) {
+					centre = p.position;
+					radius = p.radius;
+				} else if (p.capturable) {
+					world.setControlPointTeam(p.id, 1); // the others PAC's: this one the objective
+				}
+			}
+			CHECK(radius == 6);
+			CHECK(suez.mesh->findPolygon({centre.x, centre.y, centre.z}) < 0);
+			const int id = world.addPlayer("Walker", 1, true);
+			CHECK(world.spawnSoldier(id));
+			game::GameWorld::PlayerInfo info;
+			CHECK(world.playerInfo(id, info));
+			const physics::Vec3 base {566, world.terrainHeight(566, -314), -314}; // a PAC ground spawn at the Outpost
+			CHECK(suez.mesh->findPolygon({base.x, base.y, base.z}) < 0);
+			CHECK(world.setSoldierPosition(info.soldier, base));
+			bool inside = false;
+			const float ran = suez.level.runUntil(titanPlay ? 320 : 20, [&] {
+				game::GameWorld::PlayerInfo now;
+				inside = world.playerInfo(id, now) && std::sqrt(physics::lengthSquared(now.position - centre)) <= radius;
+				return inside;
+			});
+			CHECK(world.playerInfo(id, info));
+			const float moved = std::hypot(info.position.x - base.x, info.position.z - base.z);
+			std::fprintf(stderr, "  botTitan %d silo %d: %.0f s, at %.0f %.0f %.0f, %.1f m from its point, %.0f m from the base\n",
+				titanPlay, target, ran, info.position.x, info.position.y, info.position.z,
+				std::sqrt(physics::lengthSquared(info.position - centre)), moved);
+			if (!titanPlay) {
+				CHECK(moved < 5);
+				continue;
+			}
+			CHECK(inside);
+			// It stays for the capture (timeToGetControl 20 s; nobody takes the point here, so it is still the objective).
+			float held = 0;
+			suez.level.afterTick = [&] {
+				suez.bots->update(1 / 30.0f);
+				game::GameWorld::PlayerInfo now;
+				held += world.playerInfo(id, now) && std::sqrt(physics::lengthSquared(now.position - centre)) <= radius ? 1 / 30.0f : 0;
+			};
+			suez.level.run(25);
+			std::fprintf(stderr, "    then %.1f s of 25 inside\n", held);
+			CHECK(held >= 20);
+		}
+	}
+}

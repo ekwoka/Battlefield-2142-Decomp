@@ -2552,10 +2552,12 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 				// rise; enemy silos need a neutralize and capture, so favor the
 				// former when travel distances are otherwise comparable.
 				const float preference = point->team == 0 ? 0.0f : 900.0f;
-				// A silo off the navigation mesh (Suez's vanilla mesh has none near silos 901, 905 and 906) cannot be
-				// planned to: the bot then walks straight at it and stops at the first wall. Prefer reachable ones.
-				const ai::NavMesh* reach = self.vehicle && self.driving ? m_vehicleNavMesh : m_navMesh;
-				const float unreachable = reach && reach->findPolygon(toAi(point->position), 5.0f) < 0 ? 9.0e6f : 0.0f;
+				// A silo off the vehicle mesh (Suez's vanilla meshes have none near silos 901, 905 and 906) cannot be
+				// driven to: prefer reachable ones. On foot the terrain grid takes a soldier there (groundWalk).
+				const float unreachable = self.vehicle && self.driving && m_vehicleNavMesh
+						&& m_vehicleNavMesh->findPolygon(toAi(point->position), 5.0f) < 0
+					? 9.0e6f
+					: 0.0f;
 				const float score = physics::lengthSquared(point->position - self.position) +
 					static_cast<float>(assigned) * 250000.0f + preference + unreachable;
 				if (score < best) {
@@ -7730,14 +7732,17 @@ bool BotManager::steer(Bot& bot, const GameWorld::PlayerInfo& self, const physic
 	physics::Vec3 point = to;
 	bool steered = false;
 	physics::Vec3 d;
-	if (m_navMesh) {
+	physics::Vec3 meshTo = to;
+	if (m_navMesh && groundWalk(bot, self, to, meshTo, point)) {
+		// the grid's next step, walked straight at below
+	} else if (m_navMesh) {
 		ai::FollowerSettings settings;
 		settings.soldier = true;
 		settings.radius = kSoldierRadius;
 		settings.climb = m_settings.climbLimits(0);
 		settings.options.profile = m_settings.costProfile("Infantery");
 		ai::PathFollower::Steer steer;
-		if (follow(bot, *m_navMesh, bot.footSpot, to, goalId, settings, self.position)) {
+		if (follow(bot, *m_navMesh, bot.footSpot, meshTo, goalId, settings, self.position)) {
 			steer = bot.follower.steer(*m_navMesh, toAi(self.position), m_time, &bot.footSpot);
 			if (steer.arrived) {
 				return false;
