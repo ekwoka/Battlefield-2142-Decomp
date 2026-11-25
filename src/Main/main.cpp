@@ -1539,7 +1539,9 @@ void updateSecondaryWeapon(hud::HudManager& hud, const host::HudWorld& world, co
 	in.rounds = second.rounds;
 	in.mags = second.mags >= 0 ? second.mags : 0;
 	if (const game::FireArm* arm = second.gun) {
-		in.reload = arm->reloading() && gun.reloadTime > 0 ? 1 - arm->reloadLeft() / gun.reloadTime : 0;
+		if (const float left = arm->reloadShareLeft(); left > 0) {
+			in.reload = 1 - left; // 0x007c296f: 1 - the firearm's slot 0x9c
+		}
 		in.heat = gun.heatAddWhenFire > 0 ? arm->heat() : 0;
 		in.overheated = arm->overheated();
 	}
@@ -1904,7 +1906,9 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		if (heldGun) {
 			in.rounds = heldGun->roundsInMag();
 			in.mags = heldGun->magsLeft() + 1;
-			in.reload = heldGun->reloading() && gun.reloadTime > 0 ? 1 - heldGun->reloadLeft() / gun.reloadTime : 0;
+			if (const float left = heldGun->reloadShareLeft(); left > 0) {
+				in.reload = 1 - left; // 0x007c296f: 1 - the firearm's slot 0x9c
+			}
 			in.heat = gun.heatAddWhenFire > 0 ? heldGun->heat() : 0;
 			in.overheated = heldGun->overheated();
 			in.fireRate = heldGun->fireMode(); // the fire component's mode (FireArm::fireMode)

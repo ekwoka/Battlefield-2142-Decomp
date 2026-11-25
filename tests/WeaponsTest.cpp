@@ -124,6 +124,42 @@ TEST(Weapons_MinimumAutoReloadDelayIsSeparateFromReloadTime)
 	CHECK(gun.reloading());
 }
 
+// The weapon HUD's reload share (firearm slot 0x9c -> 0x005f3910): an
+// autoReload gun's bar runs over minimumTimeUntilReload + reloadTime from
+// the shot that empties the magazine (us_ag's pilot cannon: 6 s + 1 s),
+// not just the reload.
+TEST(Weapons_ReloadShareCountsTheMinimumWait)
+{
+	game::FireArmSettings settings;
+	settings.magSize = 1;
+	settings.nrOfMags = -1;
+	settings.autoReload = true;
+	settings.minimumReloadTicks = 180;
+	settings.reloadTime = 1;
+	game::FireArm gun(settings);
+	CHECK(gun.reloadShareLeft() == 0); // full: no bar
+	CHECK(gun.tick(1 / 30.0f, true));
+	float previous = gun.reloadShareLeft();
+	CHECK(previous > 0.99f);
+	bool reloaded = false;
+	for (int i = 1; i <= 220 && !reloaded; ++i) {
+		gun.tick(1 / 30.0f, false);
+		const float left = gun.reloadShareLeft();
+		CHECK(left <= previous + 1e-5f);
+		if (i == 90) {
+			CHECK(!gun.reloading());
+			CHECK(std::abs(left - 4 / 7.0f) < 0.01f); // 3 s of 7 gone
+		}
+		if (i == 185) {
+			CHECK(gun.reloading());
+			CHECK(left > 0 && left < 1 / 7.0f);
+		}
+		previous = left;
+		reloaded = i > 185 && left == 0;
+	}
+	CHECK(reloaded && gun.roundsInMag() == 1);
+}
+
 // The ammo's on-enable (0x005f4bb0) held by a soldier clears the
 // minimumTimeUntilReload end (+0x18) with the reload state: drawn again
 // mid-wait, an empty autoReload gun reloads at once. Without a soldier

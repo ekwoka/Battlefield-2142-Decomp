@@ -650,6 +650,30 @@ public:
 		}
 		return m_reloadLeft;
 	}
+	// The weapon HUD's reload share left (firearm slot 0x9c -> the ammo's
+	// 0x005f3910). With autoReload the minimumTimeUntilReload wait counts:
+	// a round that empties the magazine (slot 0x98, 0x005f37e0) with one to
+	// take marks shot + wait (0x005f4a40), and the share is
+	// (mark + reloadTime - now) / (wait + reloadTime), so the bar fills
+	// from the last shot. Else the reload's own share
+	// (0x005f3830). shortcut: a reload held past the wait's end (busy) shows
+	// no bar here where retail's mark keeps running; track the mark if seen.
+	float reloadShareLeft() const
+	{
+		const float reload = m_settings.reloadTime;
+		const float wait = m_settings.autoReload ? m_settings.minimumReloadTicks / 30.0f : 0;
+		if (wait + reload <= 0) {
+			return 0;
+		}
+		if (reloading()) {
+			return std::min(reloadLeft() / (wait + reload), 1.0f);
+		}
+		const bool canReload = m_settings.magSize > 0 && m_rounds <= 0 && (m_mags > 0 || m_settings.nrOfMags < 0);
+		if (wait > 0 && m_reloadIn > 0 && canReload) {
+			return std::min((m_reloadIn / 30.0f + reload) / (wait + reload), 1.0f);
+		}
+		return 0;
+	}
 	float heat() const { return std::min(m_heat, 1.0f); } // 0..1
 	// Resupply (ammo hubs): adds magazines up to the kit's number; false
 	// when full.
