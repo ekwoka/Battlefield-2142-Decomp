@@ -1505,7 +1505,8 @@ TEST(Bots_RemasterApcPodSeatsCountNoGun)
 // it (the AIDLL bot the manager puts in the seat, GameWorld::
 // stepSeatControllers), stops while a person holds the seat and starts again
 // once they leave; a ground cannon fires at an enemy soldier below and its
-// shells, slow and dropping, land on him (the AI's ballistic lead).
+// shells, slow and dropping, land on him (the AI's ballistic lead), and
+// holds its fire at one past its reach (the fire plan's on-target test).
 TEST(Titan_RemasterAAAutoControllerFiresAtTransport)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -1652,13 +1653,13 @@ TEST(Titan_RemasterAAAutoControllerFiresAtTransport)
 		const physics::Vec3 out = hull.transform({std::sin(side * 3.14159265f / 180), 0, std::cos(side * 3.14159265f / 180)});
 		const float across = std::sqrt(out.x * out.x + out.z * out.z);
 		// The barrel pitches 5..75 degrees down only: from the deck its 75 m/s
-		// shells reach some 290 m out over flat ground.
-		const float x = eye.x + out.x / across * 200, z = eye.z + out.z / across * 200;
+		// shells reach some 290 m out over flat ground. At 400 m the solution
+		// lies above the barrel's reach and the gun holds its fire.
+		const float farX = eye.x + out.x / across * 400, farZ = eye.z + out.z / across * 400;
 		const int soldier = level.world->addPlayer("Infantry", enemy, false);
 		CHECK(level.world->spawnSoldier(soldier));
 		level.world->playerInfo(soldier, info);
-		CHECK(level.world->setSoldierPosition(info.soldier, {x, level.world->terrainHeight(x, z) + 0.1f, z}));
-		const float health = level.world->hitPoints(info.soldier);
+		CHECK(level.world->setSoldierPosition(info.soldier, {farX, level.world->terrainHeight(farX, farZ) + 0.1f, farZ}));
 		fired = 0;
 		level.afterTick = [&] {
 			physics::Vec3 from;
@@ -1666,6 +1667,13 @@ TEST(Titan_RemasterAAAutoControllerFiresAtTransport)
 			level.world->gunFrame(titan, ground, from, frame);
 			fired += rounds(&from);
 		};
+		level.run(8);
+		std::fprintf(stderr, "  %s at a soldier 400 m out: %d rounds\n", cannon.name.c_str(), fired);
+		CHECK(fired == 0);
+		const float x = eye.x + out.x / across * 200, z = eye.z + out.z / across * 200;
+		CHECK(level.world->setSoldierPosition(info.soldier, {x, level.world->terrainHeight(x, z) + 0.1f, z}));
+		const float health = level.world->hitPoints(info.soldier);
+		fired = 0;
 		level.run(8);
 		game::GameWorld::PlayerInfo after;
 		level.world->playerInfo(soldier, after);

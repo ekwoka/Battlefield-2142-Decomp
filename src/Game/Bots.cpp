@@ -823,7 +823,10 @@ BotManager::BotManager(GameWorld& world, BotSettings settings) : m_world(world),
 		maxRange = w.maxRange;
 		return w.strength[static_cast<size_t>(strengthTypeOf(info))];
 	};
-	m_world.autoControllerRound = [this](const std::string& weapon, bool& indirect) { return roundModel(weapon, &indirect); };
+	m_world.autoControllerRound = [this](const std::string& weapon, bool& indirect, float& explosionRadius) {
+		explosionRadius = weaponAi(weapon).explosionRadius;
+		return roundModel(weapon, &indirect);
+	};
 }
 
 namespace {

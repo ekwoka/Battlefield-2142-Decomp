@@ -17788,8 +17788,17 @@ void GameWorld::registerSeatControllers(const world::Object& vehicle)
 // indirect weapon), as the gunner bots' turret aim (0x100d9a60) takes it:
 // the Titans' ground cannons (75 m/s, gravityModifier 0.75) drop 60 m
 // over 300 m, so a straight aim put every shell short in one spot.
-// The rewrite's own: the gun fires once it points within 2 degrees of the
-// solved direction.
+// The trigger (the fire plan 0x100777a0's condition, 0x100d9130 with the
+// plan's memos, its test 0x100d91d0) holds while the solve succeeded (the
+// memo the aim statement 0x100dbd10 writes) and the gun, at the target's
+// distance L, lies off the solved direction by less than r across (x and
+// z), by less than sqrt(0.2) r above it and sqrt(0.02) r below it, and
+// within atan(0.02 r) of it; a vehicle target within 15 m and 5 m of
+// height, or the explosive bonus, skips the angle and the height. r is
+// 10 m for an auto controller (bot vt+0x27c), 1 m for a weapon with an
+// explosion radius (adaptor slot 0xac) at a soldier on foot (flag bit 9),
+// whose explosive bonus (bot +0x249, vt+0x264) the weapon choice then
+// gives (guidance 0 taken).
 void GameWorld::stepSeatControllers(float seconds)
 {
 	for (auto it = m_seatControllers.begin(); it != m_seatControllers.end();) {
@@ -17934,17 +17943,22 @@ void GameWorld::stepSeatControllers(float seconds)
 		if (c.target >= 0) {
 			physics::Vec3 want = c.seenAt;
 			bool indirect = false;
-			const ai::RoundModel round = autoControllerRound ? autoControllerRound(primary.weapon, indirect) : ai::RoundModel {};
+			float explosionRadius = 0;
+			const ai::RoundModel round = autoControllerRound ? autoControllerRound(primary.weapon, indirect, explosionRadius) : ai::RoundModel {};
+			const float yr = gunYaw * 0.017453292f, pr = aimPitch * 0.017453292f;
+			const physics::Vec3 forward = hull.transform({std::sin(yr) * std::cos(pr), std::sin(pr), std::cos(yr) * std::cos(pr)});
+			const physics::Vec3 offset = c.seenAt - eye;
+			const float reach = std::sqrt(physics::lengthSquared(offset));
+			physics::Vec3 wantDir = offset * (1 / std::max(reach, 1e-3f));
+			bool solved = round.speed <= 0; // no AI round: the straight line
 			if (round.speed > 0) {
-				const float yr = gunYaw * 0.017453292f, pr = aimPitch * 0.017453292f;
-				const physics::Vec3 forward = hull.transform({std::sin(yr) * std::cos(pr), std::sin(pr), std::cos(yr) * std::cos(pr)});
-				const physics::Vec3 offset = c.seenAt - eye;
 				const auto toAi = [](const physics::Vec3& v) { return ai::Vec3 {v.x, v.y, v.z}; };
 				c.lead.setup(toAi(offset), toAi(c.seenVelocity), toAi(body->body.velocity), toAi(forward), m_time, round);
-				const float reach = std::sqrt(physics::lengthSquared(offset));
-				ai::Vec3 direction = toAi(offset * (1 / std::max(reach, 1e-3f))), impact;
-				if (c.lead.solve(m_time, 0.5f, indirect, direction, impact)) {
-					want = eye + physics::Vec3 {direction.x, direction.y, direction.z} * reach;
+				ai::Vec3 direction = toAi(wantDir), impact;
+				solved = c.lead.solve(m_time, 0.5f, indirect, direction, impact);
+				if (solved) {
+					wantDir = {direction.x, direction.y, direction.z};
+					want = eye + wantDir * reach;
 				}
 			}
 			float wantYaw = 0, wantPitch = 0;
@@ -17957,7 +17971,17 @@ void GameWorld::stepSeatControllers(float seconds)
 			}
 			const float pitchStep = place.pitchAxis.maxSpeed > 0 ? limit * place.pitchAxis.maxSpeed * seconds : std::fabs(pitchError);
 			input.aimPitch = aimPitch + std::clamp(pitchError, -pitchStep, pitchStep);
-			onTarget = std::fabs(yawError) <= 2 && std::fabs(pitchError) <= 2;
+			const Player* aimed = findPlayer(c.target);
+			const bool onFoot = aimed && !aimed->vehicle;
+			const bool explosive = explosionRadius != 0 && onFoot;
+			const float r = explosive ? 1.0f : 10.0f;
+			const float r2 = std::max(r * r, 0.01f);
+			const physics::Vec3 miss = (forward - wantDir) * reach;
+			const float above = miss.y * std::fabs(miss.y); // signed: the gun over the solution
+			const bool loose = explosive || (!onFoot && std::fabs(offset.y) < 5 && reach < 15);
+			const float angle = std::acos(std::clamp(physics::dot(forward, wantDir), -1.0f, 1.0f));
+			onTarget = solved && (loose || angle < std::atan(0.02f * std::max(r, 0.1f)))
+				&& miss.x * miss.x + miss.z * miss.z < r2 && (loose || (above < 0.2f * r2 && above >= -0.02f * r2));
 		} else if (control.scanningSpeed > 0 && yawSpeed > 0) {
 			if (std::isfinite(place.minYaw)) {
 				if (gun.yaw >= place.maxYaw - 0.5f) {

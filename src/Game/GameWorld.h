@@ -4424,8 +4424,8 @@ public:
 	std::function<bool(const std::string& name, AutoControl& out)> autoControllerTemplate;
 	std::function<float(const std::string& weapon, int player, float& maxRange)> autoControllerStrength;
 	// The round a weapon fires as the AI models it (BotManager::roundModel),
-	// with weaponTemplate.indirect (the high arc).
-	std::function<ai::RoundModel(const std::string& weapon, bool& indirect)> autoControllerRound;
+	// with weaponTemplate.indirect (the high arc) and its explosion radius.
+	std::function<ai::RoundModel(const std::string& weapon, bool& indirect, float& explosionRadius)> autoControllerRound;
 
 private:
 	struct Drone {
