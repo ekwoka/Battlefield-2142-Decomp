@@ -624,6 +624,29 @@ size_t countType(const std::vector<net::GameEvent>& events, uint32_t type)
 
 // A server gone without its disconnect packet: the client gives up once
 // it has been silent past the limit, instead of staying connected for good.
+// A window reports the mouse look each frame, a move goes each tick: the
+// frames' looks add up into the next move, its truncation's rest after it.
+TEST(NetGame_MouseLookAddsUpBetweenMoves)
+{
+	net::RemoteWorld world;
+	net::PlayerInput frame;
+	frame.set(net::kPIThrottle, 1.0f);
+	frame.set(net::kPIMouseLookX, 0.333f);
+	frame.set(net::kPIMouseLookY, -0.5f);
+	for (int i = 0; i < 3; ++i) {
+		world.setInput(frame);
+	}
+	const net::PlayerMove move = world.input().toMove(0);
+	CHECK(move.axes[net::kPIMouseLookX] == 99 && move.axes[net::kPIMouseLookY] == -150);
+	CHECK(move.axes[net::kPIThrottle] == 100);
+	world.moveSent(&move);
+	CHECK(std::fabs(world.input().get(net::kPIMouseLookX) - 0.009f) < 1e-4f);
+	CHECK(std::fabs(world.input().get(net::kPIMouseLookY)) < 1e-4f);
+	CHECK(world.input().get(net::kPIThrottle) == 1.0f);
+	world.moveSent(nullptr);
+	CHECK(world.input().get(net::kPIMouseLookX) == 0 && world.input().get(net::kPIMouseLookY) == 0);
+}
+
 TEST(NetGame_SilentServerTimesOut)
 {
 	LoopbackServer server;

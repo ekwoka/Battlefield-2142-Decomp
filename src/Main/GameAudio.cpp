@@ -394,13 +394,13 @@ void GameAudio::tick(const Camera& given)
 // no round has left for longer than its fire interval.
 void GameAudio::weapons(const Camera& camera)
 {
-	const int local = m_round.localPlayer();
+	const int local = localPlayer(); // a joined game's: the server's player
 	std::map<int, game::GameWorld::PlayerInfo> infos;
 	const auto info = [&](int player) -> const game::GameWorld::PlayerInfo* {
 		auto it = infos.find(player);
 		if (it == infos.end()) {
 			game::GameWorld::PlayerInfo p;
-			if (!m_round.playerInfo(player, p)) {
+			if (!playerInfo(player, p)) {
 				return nullptr;
 			}
 			it = infos.emplace(player, p).first;

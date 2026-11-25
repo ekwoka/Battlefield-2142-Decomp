@@ -6653,7 +6653,9 @@ int runGame(Options& options, Session& session)
 			GameAudio::Camera camera;
 			PlayerCamera::View eye;
 			game::GameWorld::PlayerInfo me;
-			const bool alive = round.playerInfo(round.localPlayer(), me);
+			// A joined game's player is the server's (the remote HUD's).
+			const bool alive = g_remoteHud ? g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me)
+										   : round.playerInfo(round.localPlayer(), me);
 			float yaw = alive ? me.yaw * 3.14159265f / 180.0f : 0, pitch = alive ? me.aimPitch * 3.14159265f / 180.0f : 0;
 			if (alive && playerCamera.firstPerson && playerCamera.view(eye, 4.0f / 3.0f)) {
 				camera.position = {eye.position[0], eye.position[1], eye.position[2]};
@@ -6668,6 +6670,8 @@ int runGame(Options& options, Session& session)
 				// The chase camera behind (as the screenshot frames it).
 				camera.position = {at->position().x - std::sin(yaw) * 5, at->position().y + 2.5f,
 					at->position().z - std::cos(yaw) * 5};
+			} else if (alive) { // a joined game's (no soldier of the local round)
+				camera.position = {me.position.x - std::sin(yaw) * 5, me.position.y + 2.5f, me.position.z - std::cos(yaw) * 5};
 			}
 			camera.forward = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 			camera.up = {-std::sin(yaw) * std::sin(pitch), std::cos(pitch), -std::cos(yaw) * std::sin(pitch)};
@@ -8029,6 +8033,7 @@ int runGame(Options& options, Session& session)
 				state.fireMode = p.fire[0].on ? p.fire[0].fireMode : -1;
 				if (p.local && prediction.active()) {
 					state.yaw = prediction.yaw();
+					state.aimPitch = remoteLook.pitch; // the server's comes a round trip late
 					state.onGround = prediction.onGround();
 					const net::Vec3f v = prediction.velocity();
 					state.velocity = {v.x, v.y, v.z};

@@ -353,12 +353,15 @@ void GameClient::sendTick(bool newMove)
 	// three), so a held packet's move goes in the next one.
 	if (m_world.localPlayer() >= 0 && (newMove || m_moves.empty())) {
 		m_moves.push_back(m_world.input().toMove(m_moveIndex++));
+		m_world.moveSent(&m_moves.back());
 		if (onMoveSent) {
 			onMoveSent(m_moves.back());
 		}
 		while (m_moves.size() > 3) {
 			m_moves.pop_front();
 		}
+	} else if (m_world.localPlayer() < 0) {
+		m_world.moveSent(nullptr); // no player yet: the look so far goes nowhere
 	}
 	// 0x006aa140 holds a packet more than 30 ahead of the server's last
 	// acknowledgement; nothing is taken from the queues meanwhile.

@@ -516,9 +516,26 @@ public:
 	std::vector<SquadOrder> squadOrders(int team = 0) const;
 	const SquadOrder* squadOrder(int team, int squad, int store) const;
 
-	// The local player's input, sent with each tick by the GameClient.
-	void setInput(const PlayerInput& input) { m_input = input; }
+	// The local player's input, sent with each tick by the GameClient. The
+	// mouse look is a change, and a window reports one each frame: the
+	// frames' changes add up until a move takes them (moveSent).
+	void setInput(const PlayerInput& input)
+	{
+		const float x = m_input.get(kPIMouseLookX), y = m_input.get(kPIMouseLookY);
+		m_input = input;
+		m_input.set(kPIMouseLookX, x + input.get(kPIMouseLookX));
+		m_input.set(kPIMouseLookY, y + input.get(kPIMouseLookY));
+	}
 	const PlayerInput& input() const { return m_input; }
+	// A move went: what it carried of the mouse look is gone, the rest its
+	// truncation (PlayerMove::setAxis) left waits for the next; none without one.
+	void moveSent(const PlayerMove* move)
+	{
+		for (const int axis : {kPIMouseLookX, kPIMouseLookY}) {
+			const float sent = move ? move->axis(axis) : m_input.get(axis);
+			m_input.set(axis, m_input.get(axis) - sent);
+		}
+	}
 
 	void clear();
 
