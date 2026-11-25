@@ -58,7 +58,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
 
 | ID | Status | Item |
 |---|---|---|
-| Q-1 | pending-commit | `RemoteWorld` squad reports and radar maps never cleared (0b87ad7). The fix is in the working tree: `src/Net/RemoteWorld.cpp` (`dropExpired`, plus clears in `clear()` and `onLevel`) and the test `NetGame_RemoteWorldSquadReportsEndWithTheLevel` in `tests/NetGameTest.cpp`. The test fails without the fix and passes with it. All `NetGame_` and `NetHost` tests pass; the full suite hasn't been run with it yet. |
+| Q-1 | done (0a0b9ad) | `RemoteWorld` squad reports and radar maps never cleared (0b87ad7). The fix is in the working tree: `src/Net/RemoteWorld.cpp` (`dropExpired`, plus clears in `clear()` and `onLevel`) and the test `NetGame_RemoteWorldSquadReportsEndWithTheLevel` in `tests/NetGameTest.cpp`. The test fails without the fix and passes with it. All `NetGame_` and `NetHost` tests pass; the full suite hasn't been run with it yet. |
 
 ## Crashes and correctness bugs
 
