@@ -10420,6 +10420,9 @@ int runGame(Options& options, Session& session)
 			if (!rendererSettings.drawNametags) {
 				quads.clear(); // renderer.drawNametags (+0x697, 0x1002cef0)
 			}
+			for (hud::HudQuad& tag : quads) {
+				tag.underPost = true;
+			}
 			std::vector<hud::HudQuad> hud = hudManager.frame(seconds);
 			if (g_inputTrace) {
 				static int lastGui = -999, lastDeployment = -1;

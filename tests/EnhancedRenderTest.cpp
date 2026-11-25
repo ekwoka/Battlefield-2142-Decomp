@@ -11,6 +11,7 @@
 
 #ifdef BF2142_RENDER_TESTS
 #include "Geometry/GeometryTemplateManager.h"
+#include "Hud/Hud.h"
 #include "IO/File/FileManager.h"
 #include "Render/LevelRenderer.h"
 #include "Scene/EnhancedSettings.h"
@@ -20,12 +21,152 @@
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <array>
 #include <cstdlib>
 #endif
 
 using namespace dice::hfe::render;
 
 #ifdef BF2142_RENDER_TESTS
+// RendDX9's EMP flicker (0x10025be0) in the normal mode: while a vehicle is
+// EMPed each frame is either the plain frame or the one fixed EMP image
+// (the row shift does not move), and a 3D name tag takes the EMP's
+// contrast only on the EMP frames.
+TEST(EnhancedRender_EmpFlickerOptIn)
+{
+	using namespace dice::hfe;
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir || !std::getenv("BF2142_RENDER_TEST_DIR")) return;
+	CHECK(SDL_Init(SDL_INIT_VIDEO));
+	{
+		std::string error;
+		auto gpu = GpuContext::create(nullptr, error);
+		CHECK(gpu);
+		if (!gpu) return;
+		for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+			if (!test::runs(mod)) continue;
+			const std::string path = "Levels/Cerbere_Landing/";
+			io::FileManager files;
+			files.setRootPath(dir);
+			files.addSearchPath(mod);
+			if (std::string(mod) != "mods/bf2142") files.addSearchPath("mods/bf2142");
+			files.setMountingAllowed(true);
+			CHECK(files.mountArchive("mods/bf2142/Common_client.zip", "Common"));
+			CHECK(files.mountArchive(path + "client.zip", path));
+			CHECK(files.mountArchive(path + "server.zip", path));
+			if (std::string(mod) != "mods/bf2142") {
+				CHECK(files.mountArchive("mods/bf2142/" + path + "client.zip", path));
+				CHECK(files.mountArchive("mods/bf2142/" + path + "server.zip", path));
+			}
+			std::vector<uint8_t> bytes;
+			CHECK(files.readFile(path + "terraindata.raw", bytes));
+			const auto data = terrain::parseTerrainData(bytes);
+			CHECK(data && data->meshes);
+			if (!data || !data->meshes) continue;
+			terrain::HeightmapCluster heightmaps;
+			terrain::Heightmap& ground = *heightmaps.addHeightmap(0, 0);
+			ground.setSize(513, 513);
+			ground.setScale({2, 0.0025f, 2});
+			CHECK(ground.load(files, path + "HeightmapPrimary.raw"));
+			scene::LightSettings lights;
+			lights.sunDirection = {0.30983f, -0.529709f, -0.789566f};
+			lights.terrainSunColor = data->sunColor;
+			lights.terrainGIColor = data->giColor;
+			scene::SkySettings sky;
+			scene::WaterSettings water;
+			scene::RendererSettings settings;
+			settings.drawUndergrowth = false;
+			scene::PostProductionSettings post;
+			post.useBloom = false;
+			post.defaultContrast = {2.1f, -1, -0.04f}; // so the tag's colour shows the EMP's contrast
+			scene::EnhancedSettings enhanced; // the normal mode
+			world::ObjectTemplateManager templates;
+			world::ObjectManager objects;
+			geom::GeometryTemplateManager geometries;
+			LevelSources sources {files, templates, objects, geometries, heightmaps, &*data, lights, sky, water, path, ""};
+			sources.renderer = &settings;
+			sources.post = &post;
+			sources.enhanced = &enhanced;
+			int emp = 0;
+			sources.postEffects = [&](PostEffects& effects) {
+				effects.vehicleEmpLevel = emp;
+				effects.frameSeconds = 1.0f / 30.0f;
+			};
+			// A tag: the frame texture's white middle, tinted grey.
+			sources.overlay = [](float) {
+				hud::HudQuad tag {};
+				tag.texture = "common/textures/frame.dds";
+				tag.x0 = 380, tag.y0 = 280, tag.x1 = 420, tag.y1 = 320;
+				tag.u0 = 0.45f, tag.v0 = 0.45f, tag.u1 = 0.55f, tag.v1 = 0.55f;
+				tag.color[0] = 0.5f, tag.color[1] = 0.4f, tag.color[2] = 0.3f, tag.color[3] = 1;
+				tag.underPost = true;
+				return std::vector<hud::HudQuad> {tag};
+			};
+			LevelRenderer renderer(*gpu);
+			renderer.build(sources);
+			CHECK(renderer.stats().terrainLods);
+			auto target = gpu->createOffscreenTarget(640, 360);
+			Camera camera;
+			camera.position = {-1.73f, 76, 59.08f};
+			camera.yaw = 236.13f * 0.0174532925f;
+			camera.pitch = -10 * 0.0174532925f;
+			const auto frame = [&] {
+				auto* commands = SDL_AcquireGPUCommandBuffer(gpu->device());
+				renderer.draw(commands, target.color, target, camera, lights);
+				CHECK(SDL_SubmitGPUCommandBuffer(commands));
+				std::vector<uint8_t> pixels;
+				CHECK(gpu->readPixels(target, pixels));
+				return pixels;
+			};
+			const auto difference = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+				size_t changed = 0;
+				if (a.size() != b.size()) return size_t(-1);
+				for (size_t i = 0; i + 3 < a.size(); i += 4) {
+					changed += std::abs(int(a[i]) - int(b[i])) > 2
+						|| std::abs(int(a[i + 1]) - int(b[i + 1])) > 2
+						|| std::abs(int(a[i + 2]) - int(b[i + 2])) > 2;
+				}
+				return changed;
+			};
+			const auto tagPixel = [](const std::vector<uint8_t>& p) {
+				const size_t at = (size_t(180) * 640 + 320) * 4; // the tag's middle
+				return std::array<int, 3> {p[at], p[at + 1], p[at + 2]};
+			};
+			const auto plain = frame();
+			CHECK(difference(plain, frame()) == 0);
+			emp = 2;
+			std::vector<uint8_t> onImage;
+			int on = 0, off = 0, other = 0;
+			for (int i = 0; i < 90; ++i) {
+				const auto pixels = frame();
+				if (difference(pixels, plain) == 0) {
+					++off;
+				} else if (onImage.empty()) {
+					onImage = pixels;
+					++on;
+				} else if (difference(pixels, onImage) == 0) {
+					++on;
+				} else {
+					++other;
+				}
+			}
+			std::fprintf(stderr, "  %s: %d EMP frames, %d plain, %d other; %zu pixels differ\n", mod, on, off, other,
+				onImage.empty() ? size_t(0) : difference(onImage, plain));
+			CHECK(on > 10 && off > 10 && other == 0);
+			if (!onImage.empty()) {
+				CHECK(difference(onImage, plain) > 1000);
+				const auto a = tagPixel(plain), b = tagPixel(onImage);
+				CHECK(std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]) > 20);
+			}
+			// Recovered: the plain frame again.
+			emp = 0;
+			CHECK(difference(plain, frame()) == 0);
+			gpu->releaseTarget(target);
+		}
+	}
+	SDL_Quit();
+}
+
 TEST(EnhancedRender_CerbereTerrainDoesNotShadowItselfOptIn)
 {
 	using namespace dice::hfe;

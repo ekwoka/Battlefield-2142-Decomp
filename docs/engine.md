@@ -5440,10 +5440,42 @@ at `0x1002df12`..`0x1002e6d0`). The order:
    INTERFERENCE 0 then 8 for levels 1-5, DISTORTIONROLL 0 then 0.02, no
    warp) and a second grade (`0x1004a280`: the view's colour at saturation
    0 when the view is tinted, else neutral); a soldier's level + 3 (5 for
-   3) with the saturation swinging ±3 by 0.01 a frame. `psDx9_EMP20`: the
-   random texture's row shifts the image across by DISTORTIONROLL, the
-   static takes from it and adds a little red, the contrast polynomial
-   again. `renderer.emp*` (`0x10050250`..`0x10050730`) override the table.
+   3) with the saturation swinging ±3 by 0.01 a frame (`DAT_101f506c`,
+   from 1 with direction +1, stepped only when the pass runs and never
+   reset, so a later EMP reaches negative saturation: red to cyan, blue
+   to olive). `psDx9_EMP20`: the random texture's row shifts the image
+   across by DISTORTIONROLL, the static takes from it and adds a little
+   red, the contrast polynomial again. The shift does not move: the row
+   has no time term, and with the table's DISTORTIONFREQ 0 the random
+   test in `0x10049d70` never moves FRACTIME256, which DISTORTIONSCALE 0
+   multiplies anyway. The static samples `random.dds` texel (0,0), whose
+   red (0.33, DXT5, the same in both mods) makes it 0. What moves is the
+   flicker: `0x10025be0`, called every frame at `0x1002e25d`, steps a
+   flip-flop (`DAT_101fa950`, zero at start) that turns on or off with a
+   chance of 1 in 11 a frame each way (`0x100254e0` uniform in (0, 1.1]
+   against 1 or 0.1). While the player is EMPed it returns true only when
+   on; true skips the grade and CameraEffect (`0x1002e26c`) and lets the
+   vehicle and soldier EMP passes run (`0x1002e3c8`, `0x1002e563`). So the
+   frame alternates at random, in runs of about 11 frames, between the
+   graded view and the EMP pass's (no level tint or saturation, the
+   contrast kept). The rewrite does the same (`PostProductionState`,
+   normalised to 30 frames a second like its clocks; retail steps per
+   drawn frame), the flip-flop and swing shared for the process like the
+   DLL's globals (`EmpScreenState`, `LevelRenderer::empScreen`: the
+   renderer is rebuilt per level). The 3D name tags are drawn (NametagManager slot 0x18,
+   `0x1002e35d`) after the grade and before the EMP passes copy the
+   backbuffer, so they take the EMP's colours; the rewrite gives the tag
+   quads (`HudQuad::underPost`) the pass's grade and contrast on those
+   frames (`render::empTagColor`; their tint only, no row shift). The
+   second flip-flop in the soldier branch (`DAT_101fa9a4`, `0x1002e5e8`)
+   is read by nothing else. The 2D HUD's order against the pass
+   (HudManager slot 0x1c, `0x0074e610`, called at `0x1002e530` below
+   level 3 and at `0x1002e6d3`) was not traced to its draw; the rewrite
+   draws the HUD after the pass. `renderer.emp*` (`0x10050250`..`0x10050730`)
+   override the table; no shipped file sets them. The root vehicle's
+   authored `EMPShutdown` sound loops for
+   its local first-person pilot above EMP level 1 and stops when the level
+   falls, the view changes, or the pilot leaves the seat (`0x005c92ef`).
 6. *Titan explosion* (event 0x14, `0x10049360`, run by `0x1004a120`): the
    grade's tint 1 + 20 t with the contrast's constant t / 2 for two
    seconds, then white (tint 40, saturation 0, + 1) until 12 s. The

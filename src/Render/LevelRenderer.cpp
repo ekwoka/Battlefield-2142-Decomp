@@ -2727,6 +2727,10 @@ void LevelRenderer::buildOverlay()
 		if (polygon.n < 3) {
 			continue;
 		}
+		float tint[4] = {q.color[0], q.color[1], q.color[2], q.color[3]};
+		if (q.underPost && (static_cast<int>(m_postFrame.contrast[3]) & kPostEmp)) {
+			empTagColor(m_postFrame, tint);
+		}
 		const uint32_t first = static_cast<uint32_t>(vertices.size());
 		const auto fan = [&](const Corner* piece, size_t n) {
 			for (size_t i = 1; i + 1 < n; ++i) {
@@ -2736,10 +2740,10 @@ void LevelRenderer::buildOverlay()
 					v.position[1] = corner[1];
 					v.texCoord[0] = corner[2];
 					v.texCoord[1] = corner[3];
-					v.normal[0] = q.color[0];
-					v.normal[1] = q.color[1];
-					v.normal[2] = q.color[2];
-					v.weight = q.color[3];
+					v.normal[0] = tint[0];
+					v.normal[1] = tint[1];
+					v.normal[2] = tint[2];
+					v.weight = tint[3];
 					vertices.push_back(v);
 				}
 			}
@@ -4608,6 +4612,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			mesh(*m_sources, geometry);
 		});
 		m_gpu.flushUploads();
+	}
+	if (post && m_sceneColor) {
+		stepPost(); // before prepareInstances: m_cameraInTitan is a frame old (its blend is 0.5 a second)
+	} else {
+		m_postFrame = {};
 	}
 	{
 		FrameStats::Scope timed(FrameStats::Overlay);

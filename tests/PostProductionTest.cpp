@@ -8,6 +8,7 @@
 #include "Console/Console.h"
 #include "TestMain.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -28,6 +29,25 @@ std::array<float, 3> apply(const float rows[3][4], const std::array<float, 3>& i
 		out[static_cast<size_t>(r)] = rows[r][0] * in[0] + rows[r][1] * in[1] + rows[r][2] * in[2];
 	}
 	return out;
+}
+
+int modeOf(const render::PostUniforms& u)
+{
+	return static_cast<int>(u.contrast[3]);
+}
+
+// Frames until the EMP flicker's flip-flop (0x10025be0) runs the pass.
+render::PostUniforms empFrame(render::PostProductionState& state, const render::PostEffects& effects,
+	const scene::PostProductionSettings& settings)
+{
+	render::PostUniforms u;
+	for (int i = 0; i < 400; ++i) {
+		u = state.update(effects, settings, false);
+		if (modeOf(u) & render::kPostEmp) {
+			break;
+		}
+	}
+	return u;
 }
 
 } // namespace
@@ -93,29 +113,158 @@ TEST(PostProduction_FrameModes)
 	effects.viewTinted = true;
 	effects.viewTint = {1, 0.5f, 0.5f};
 	effects.viewSaturation = 0;
-	u = state.update(effects, settings, false);
-	mode = static_cast<int>(u.contrast[3]);
-	CHECK((mode & render::kPostEmp) && near(u.emp[0], 8));
+	u = empFrame(state, effects, settings);
+	mode = modeOf(u);
+	// On its frames the EMP pass takes the grade's place (0x1002e26c).
+	CHECK((mode & render::kPostEmp) && near(u.emp[0], 8) && !(mode & render::kPostGrade));
 	CHECK(near(u.empColorRow[0][0], 0.3086f) && near(u.empColorRow[0][1], 0.6094f * 0.5f));
 	// The template's default saturation 1: the tint alone.
 	effects.viewSaturation = 1;
-	u = state.update(effects, settings, false);
+	u = empFrame(state, effects, settings);
 	CHECK(near(u.empColorRow[0][0], 1) && near(u.empColorRow[0][1], 0) && near(u.empColorRow[1][1], 0.5f));
 	// No EMP but the view's colour: the second grade alone.
 	effects.vehicleEmpLevel = 0;
 	mode = static_cast<int>(state.update(effects, settings, false).contrast[3]);
 	CHECK(!(mode & render::kPostEmp) && (mode & render::kPostViewGrade));
 	effects.viewTinted = false;
-	// A soldier's: level + 3 (5 for 3), the saturation swinging from 0.
+	// A soldier's: level + 3 (5 for 3), the saturation swinging from 1.
+	render::PostProductionState soldier;
 	effects.soldierEmpLevel = 1;
-	u = state.update(effects, settings, false);
-	CHECK((static_cast<int>(u.contrast[3]) & render::kPostEmp) && near(u.emp[0], 8));
-	CHECK(near(u.empColorRow[1][1], 0.6094f * 0.99f + 0.01f, 1e-3f)); // one frame's 0.01
+	u = empFrame(soldier, effects, settings);
+	CHECK((modeOf(u) & render::kPostEmp) && near(u.emp[0], 8));
+	CHECK(near(u.empColorRow[1][1], 0.6094f * (1 - 1.01f) + 1.01f, 1e-3f)); // one on-frame's 0.01 from 1
 	effects.soldierEmpLevel = 0;
 	// The camera effect takes the grade's place; the camouflage needs drawn cloaks.
 	effects.cameraEffect = true;
 	mode = static_cast<int>(state.update(effects, settings, true).contrast[3]);
 	CHECK((mode & render::kPostCameraEffect) && !(mode & render::kPostGrade) && (mode & render::kPostCamo));
+}
+
+TEST(PostProduction_EmpFlickers)
+{
+	// 0x10025be0: a flip-flop, 1 in 11 a frame each way, steps every frame;
+	// while EMPed each frame is either the EMP pass or the plain grade.
+	scene::PostProductionSettings settings;
+	render::PostProductionState state;
+	render::PostEffects effects;
+	effects.frameSeconds = 1.0f / 30;
+	effects.vehicleEmpLevel = 2;
+	int on = 0, switches = 0, runs = 0;
+	bool last = false;
+	const int frames = 33000;
+	for (int i = 0; i < frames; ++i) {
+		const int mode = modeOf(state.update(effects, settings, false));
+		const bool emp = (mode & render::kPostEmp) != 0;
+		CHECK(emp != ((mode & render::kPostGrade) != 0)); // one or the other
+		on += emp;
+		switches += i > 0 && emp != last;
+		runs += emp && (i == 0 || !last);
+		last = emp;
+	}
+	// Half the frames, switching on about 1 frame in 11 (runs of ~11 frames).
+	CHECK(on > frames * 0.45 && on < frames * 0.55);
+	CHECK(switches > frames / 11 * 0.85 && switches < frames / 11 * 1.15);
+	CHECK(runs > 0 && on / runs > 9 && on / runs < 13);
+	// Not EMPed: never, though the flip-flop keeps stepping.
+	effects.vehicleEmpLevel = 0;
+	for (int i = 0; i < 200; ++i) {
+		const int mode = modeOf(state.update(effects, settings, false));
+		CHECK(!(mode & render::kPostEmp) && (mode & render::kPostGrade));
+	}
+	// The zoomed sight's camera effect blinks out with the grade.
+	effects.vehicleEmpLevel = 2;
+	effects.cameraEffect = true;
+	const int mode = modeOf(empFrame(state, effects, settings));
+	CHECK((mode & render::kPostEmp) && !(mode & render::kPostCameraEffect) && !(mode & render::kPostGrade));
+}
+
+TEST(PostProduction_SoldierEmpSwingPersists)
+{
+	// DAT_101f506c starts at 1 and steps 0.01 only on the EMP's frames,
+	// bouncing at +-3; recovery does not reset it, so a later EMP carries on
+	// into negative saturation (the colours inverted: red tags cyan).
+	scene::PostProductionSettings settings;
+	render::PostProductionState state;
+	render::PostEffects effects;
+	effects.frameSeconds = 1.0f / 30;
+	const auto saturation = [](const render::PostUniforms& u) {
+		return (u.empColorRow[1][1] - 0.6094f) / (1 - 0.6094f); // row g, column g: (1 - s) lum + s
+	};
+	effects.soldierEmpLevel = 2;
+	int on = 0;
+	float s = 0;
+	for (int i = 0; i < 100; ++i) {
+		const render::PostUniforms u = state.update(effects, settings, false);
+		if (modeOf(u) & render::kPostEmp) {
+			++on;
+			s = saturation(u);
+			CHECK(near(u.emp[0], 8)); // level 5 of the table
+		}
+	}
+	CHECK(on > 0 && near(s, 1 + 0.01f * on, 1e-3f));
+	// Recovered, then hit again: from where it was.
+	effects.soldierEmpLevel = 0;
+	for (int i = 0; i < 50; ++i) {
+		state.update(effects, settings, false);
+	}
+	effects.soldierEmpLevel = 1;
+	const render::PostUniforms again = empFrame(state, effects, settings);
+	CHECK(near(saturation(again), s + 0.01f, 1e-3f));
+	// Enough on-frames reach 3, turn, and go below 0.
+	float lowest = 3;
+	for (int i = 0; i < 3000; ++i) {
+		const render::PostUniforms u = state.update(effects, settings, false);
+		if (modeOf(u) & render::kPostEmp) {
+			lowest = std::min(lowest, saturation(u));
+			CHECK(saturation(u) < 3.02f && saturation(u) > -3.02f);
+		}
+	}
+	CHECK(lowest < -1);
+}
+
+TEST(PostProduction_EmpStateOutlivesLevels)
+{
+	// RendDX9's globals last the process: a new level's renderer (a new
+	// PostProductionState over the same shared state) carries on the swing.
+	scene::PostProductionSettings settings;
+	render::EmpScreenState shared;
+	render::PostEffects effects;
+	effects.frameSeconds = 1.0f / 30;
+	effects.soldierEmpLevel = 2;
+	{
+		render::PostProductionState first(&shared);
+		for (int i = 0; i < 300; ++i) {
+			first.update(effects, settings, false);
+		}
+	}
+	const float swing = shared.swing;
+	CHECK(swing > 1.1f);
+	render::PostProductionState second(&shared);
+	const render::PostUniforms u = empFrame(second, effects, settings);
+	const float s = (u.empColorRow[1][1] - 0.6094f) / (1 - 0.6094f);
+	CHECK(near(s, swing + 0.01f * shared.direction, 1e-3f));
+}
+
+TEST(PostProduction_EmpTagColor)
+{
+	// A name tag on an EMP frame takes the pass's grade and contrast.
+	render::PostUniforms u;
+	render::colorGrade({1, 1, 1}, -3, u.empColorRow); // a soldier's swing at -3
+	u.contrast[0] = 1;
+	float red[3] = {1, 0, 0};
+	render::empTagColor(u, red);
+	CHECK(red[0] == 0 && red[1] > 0.99f && red[2] > 0.99f); // cyan
+	float blue[3] = {0, 0, 1};
+	render::empTagColor(u, blue);
+	CHECK(near(blue[0], 4 * 0.0820f) && near(blue[1], 4 * 0.0820f) && blue[2] == 0);
+	// A vehicle's neutral grade keeps the colour, under the level's contrast.
+	render::PostUniforms neutral;
+	neutral.contrast[0] = 2.1f;
+	neutral.contrast[1] = -1;
+	neutral.contrast[2] = -0.04f;
+	float grey[3] = {0.5f, 0.5f, 0.5f};
+	render::empTagColor(neutral, grey);
+	CHECK(near(grey[0], 2.1f * 0.5f - 0.25f - 0.04f) && near(grey[2], grey[0]));
 }
 
 TEST(PostProduction_TinnitusTimeline)

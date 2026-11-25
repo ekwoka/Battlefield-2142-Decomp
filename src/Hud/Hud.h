@@ -80,6 +80,9 @@ struct HudQuad {
 	// a round bar's fill is a part of the node, masked about its middle.
 	bool sweepAbout = false;
 	float sweepCentre[2] = {0, 0};
+	// A 3D name tag: RendDX9 draws those before its EMP pass (0x1002e35d),
+	// so the renderer gives it that pass's colour (render::empTagColor).
+	bool underPost = false;
 };
 
 // The parts of a convex polygon (x, y, u, v corners) inside the wedge of

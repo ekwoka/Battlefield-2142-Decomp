@@ -861,7 +861,13 @@ private:
 	bool m_historyValid = false; // the frames above hold a running tinnitus's
 	SDL_GPUTexture* m_camoMask = nullptr;
 	SDL_GPUTexture* m_postTextures[4] = {}; // noise, random, frame, scanline
-	PostProductionState m_postState;
+	// One EMP flicker and swing for the process (RendDX9's globals).
+	static EmpScreenState& empScreen()
+	{
+		static EmpScreenState state;
+		return state;
+	}
+	PostProductionState m_postState {&empScreen()};
 	uint64_t m_lastPostTicks = 0;
 	std::vector<DrawItem> m_cloakedList;
 	bool postEnabled() const;
@@ -894,6 +900,10 @@ private:
 	bool m_coverageTextures = false;
 	// The bloom chain and the tinnitus's history from m_sceneColor, then
 	// the post pass into `pass` (already begun on the target).
+	// The post-production's state for this frame (before the overlay: the
+	// name tags take its EMP), then its GPU passes.
+	void stepPost();
+	PostUniforms m_postFrame;
 	PostUniforms preparePost(SDL_GPUCommandBuffer* commands, bool cloaked);
 	void drawPost(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const PostUniforms& uniforms);
 	void fullscreenPass(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target, SDL_GPUTexture* source,

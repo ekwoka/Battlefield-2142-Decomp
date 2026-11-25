@@ -23,6 +23,8 @@
 //     colour, saturation 0, or neutral); a soldier's level + 3 (5 for 3)
 //     with the saturation swinging between -3 and 3. The noise row shifts
 //     the image, the static darkens it, the grade's contrast applies again.
+//     It flickers: 0x10025be0 runs it (instead of step 2) only on the
+//     frames a random flip-flop is on; the shift itself is fixed.
 //  4. The Titan core explosion (event 0x14, 0x10049360 / 0x1004a120): the
 //     grade brightened 1 + 20 t over two seconds, then white to 12 s.
 #pragma once
@@ -137,9 +139,40 @@ inline std::array<float, 4> empParameters(int level, const scene::PostProduction
 	return p;
 }
 
+// A 3D name tag's colour on a frame the EMP pass runs: RendDX9 draws the
+// tags (NametagManager slot 0x18, 0x1002e35d) before that pass copies the
+// backbuffer, so they take its grade and contrast (a soldier's swing turns
+// red tags cyan and blue ones yellow). shortcut: applied to the tag's tint,
+// exact for white texels, without the row shift or the static (whose
+// random.dds texel (0,0) is under 0.5, so 0, in both mods); render the tags
+// before the EMP pass if a tag texture with colour needs it.
+inline void empTagColor(const PostUniforms& u, float color[3])
+{
+	float out[3];
+	for (int r = 0; r < 3; ++r) {
+		const float a = u.empColorRow[r][0] * color[0] + u.empColorRow[r][1] * color[1] + u.empColorRow[r][2] * color[2];
+		out[r] = std::clamp(u.contrast[0] * a + u.contrast[1] * a * a + u.contrast[2], 0.0f, 1.0f);
+	}
+	std::copy(out, out + 3, color);
+}
+
+// The EMP's flicker flip-flop and the soldier's colour swing: RendDX9
+// globals (DAT_101fa950, DAT_101f506c / DAT_101f5070), so they last the
+// process, across levels.
+struct EmpScreenState {
+	float swing = 1, direction = 1; // their initial values
+	bool gate = false;              // zeroed data
+};
+
 // The post-production's clocks and timed effects across frames.
 class PostProductionState {
 public:
+	// `shared`: the process's EMP state (LevelRenderer's); null keeps its own.
+	explicit PostProductionState(EmpScreenState* shared = nullptr)
+		: m_shared(shared)
+	{
+	}
+
 	// Steps the clocks and works out this frame's passes; `cloaked` when
 	// cloaked meshes were drawn into the camouflage mask.
 	PostUniforms update(const PostEffects& effects, const scene::PostProductionSettings& settings, bool cloaked)
@@ -201,7 +234,20 @@ public:
 		}
 		colorGrade(tint, saturation, u.colorRow);
 		std::copy(contrast.begin(), contrast.end(), u.contrast);
-		mode |= effects.cameraEffect ? kPostCameraEffect : kPostGrade;
+		const int vehicleLevel = std::max(effects.vehicleEmpLevel, 0);
+		const int soldierLevel = std::max(effects.soldierEmpLevel, 0);
+		// RendDX9 0x10025be0, every frame: a flip-flop (DAT_101fa950, from
+		// off) that turns on or off with a chance of 1 in 11 a frame each way.
+		// While EMPed the EMP pass runs, and the grade does not, only when on
+		// (0x1002e26c, 0x1002e3c8, 0x1002e563). Retail steps it per drawn
+		// frame; normalised to 30 a second like the clocks here.
+		if (jitter() * 0.5f + 0.5f < 1 - std::pow(10.0f / 11.0f, frames)) {
+			emp().gate = !emp().gate;
+		}
+		const bool empOn = emp().gate && (vehicleLevel > 0 || soldierLevel > 0);
+		if (!empOn) {
+			mode |= effects.cameraEffect ? kPostCameraEffect : kPostGrade;
+		}
 		// CameraEffect's scanline (DAT_101fbb08: + 0.15 a frame's seconds,
 		// used below 1, held at 0 to 1.5).
 		m_scanline += dt * 0.15f;
@@ -210,9 +256,7 @@ public:
 		}
 		u.time[3] = m_scanline < 1.0f ? m_scanline : 0.0f;
 		// EMP (the frame's 0x1002e3xx): the vehicle's, or the soldier's.
-		const int vehicleLevel = std::max(effects.vehicleEmpLevel, 0);
-		const int soldierLevel = std::max(effects.soldierEmpLevel, 0);
-		if (vehicleLevel > 0 || soldierLevel > 0) {
+		if (empOn) {
 			int level = vehicleLevel;
 			std::array<float, 3> empTint {1, 1, 1};
 			float empSaturation = 1;
@@ -223,12 +267,14 @@ public:
 				}
 			} else {
 				level = soldierLevel == 3 ? 5 : soldierLevel + 3;
-				// DAT_101f506c: 0.01 a frame, bouncing at +-3.
-				m_empSwing += m_empDirection * 0.01f * frames;
-				if (std::fabs(m_empSwing) > 3) {
-					m_empDirection = -m_empDirection;
+				// DAT_101f506c: 0.01 a frame, bouncing at +-3; from 1, never
+				// reset, so later EMPs reach the negative (inverted) colours.
+				EmpScreenState& e = emp();
+				e.swing += e.direction * 0.01f * frames;
+				if (std::fabs(e.swing) > 3) {
+					e.direction = -e.direction;
 				}
-				empSaturation = m_empSwing;
+				empSaturation = e.swing;
 			}
 			const std::array<float, 4> p = empParameters(level, settings);
 			std::copy(p.begin(), p.end(), u.emp);
@@ -245,7 +291,6 @@ public:
 			u.time[1] = m_empHeld;
 			u.time[2] = std::sin(m_empTime * 6.2831855f);
 		} else {
-			m_empSwing = 0;
 			if (vehicleLevel == 0 && effects.viewTinted && effects.vehicleEmpLevel >= 0) {
 				// No EMP: the view's colour as a second grade (ColorTransform
 				// again with the view's tint and saturation, 0x10029852).
@@ -268,14 +313,20 @@ public:
 			u.tvTime[2] = std::sin(m_tvTime * 6.2831855f);
 			mode |= kPostTv;
 		}
-		if (cloaked) {
-			mode |= kPostCamo;
-			u.camo[0] = settings.camouflageOffset[0];
-			u.camo[1] = settings.camouflageOffset[1];
-			u.camo[2] = 1;
-		}
 		u.contrast[3] = static_cast<float>(mode);
+		if (cloaked) {
+			cloak(u, settings);
+		}
 		return u;
+	}
+
+	// The camouflage pass, for cloaked meshes drawn into the mask.
+	static void cloak(PostUniforms& u, const scene::PostProductionSettings& settings)
+	{
+		u.contrast[3] = static_cast<float>(static_cast<int>(u.contrast[3]) | kPostCamo);
+		u.camo[0] = settings.camouflageOffset[0];
+		u.camo[1] = settings.camouflageOffset[1];
+		u.camo[2] = 1;
 	}
 
 	bool tinnitusActive() const { return m_tinnitusLeft > 0; }
@@ -292,7 +343,9 @@ private:
 	float m_flash = -1;
 	float m_inside = 0; // 0 outside a Titan, 1 fully inside
 	float m_scanline = 0;
-	float m_empSwing = 0, m_empDirection = 1;
+	EmpScreenState& emp() { return m_shared ? *m_shared : m_ownEmp; }
+	EmpScreenState* m_shared = nullptr;
+	EmpScreenState m_ownEmp;
 	float m_empTime = 0, m_empHeld = 0;
 	float m_tvTime = 0;
 	uint32_t m_random = 0x2142u;

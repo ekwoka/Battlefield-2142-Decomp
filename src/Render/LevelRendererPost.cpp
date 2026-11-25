@@ -862,7 +862,7 @@ void LevelRenderer::drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTextur
 	}
 }
 
-PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool cloaked)
+void LevelRenderer::stepPost()
 {
 	const scene::PostProductionSettings defaults;
 	const scene::PostProductionSettings& settings = m_sources && m_sources->post ? *m_sources->post : defaults;
@@ -896,7 +896,17 @@ PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool clo
 		effects.frameSeconds = m_lastPostTicks ? static_cast<float>(now - m_lastPostTicks) / 1000.0f : 1.0f / 30.0f;
 	}
 	m_lastPostTicks = now;
-	PostUniforms uniforms = m_postState.update(effects, settings, cloaked);
+	m_postFrame = m_postState.update(effects, settings, false);
+}
+
+PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool cloaked)
+{
+	const scene::PostProductionSettings defaults;
+	const scene::PostProductionSettings& settings = m_sources && m_sources->post ? *m_sources->post : defaults;
+	PostUniforms uniforms = m_postFrame; // stepPost's, once a frame (the tags took its EMP)
+	if (cloaked) {
+		PostProductionState::cloak(uniforms, settings);
+	}
 	const int mode = static_cast<int>(uniforms.contrast[3]);
 	if (mode & kPostBloom) {
 		// 0x10049140: contrast into A, across into B, the 5x5 blur into A,
