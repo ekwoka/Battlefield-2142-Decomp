@@ -1318,6 +1318,11 @@ void HostedGame::event(int id, const net::GameEvent& e)
 				m_round->setSpawnChoice(player, group);
 			}
 			client.spawnRequested = true;
+			if (onLog) {
+				onLog("player " + std::to_string(player) + " asks to spawn at group " + std::to_string(group)
+					+ (taken ? " (squad or vehicle)" : "") + ", alive " + std::to_string(me.alive) + ", wait "
+					+ std::to_string(me.respawnIn) + " s, round state " + std::to_string(m_logic->roundState()));
+			}
 			break;
 		}
 		case net::kNeSelectTeam: { // 0x004c1dc0's request; 0x004b0690 case 7 -> the game logic's slot 0x60
@@ -2085,8 +2090,14 @@ void HostedGame::applyMoves()
 				const bool asked = m_round->requestSpawn(client.player);
 				if (m_round->spawnSoldier(client.player)) {
 					client.spawnRequested = false;
+					if (onLog) {
+						onLog("player " + std::to_string(client.player) + " spawned");
+					}
 				} else if (asked && !m_round->spawnRequested(client.player)) {
 					client.spawnRequested = false;
+					if (onLog) {
+						onLog("player " + std::to_string(client.player) + "'s spawn refused: the group can't be spawned at");
+					}
 					sendTo(id, net::makePostRemote(net::kMsgNetworkCategory, net::kNeSelectSpawnGroup));
 				} else {
 					m_round->cancelSpawnRequest(client.player);

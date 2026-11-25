@@ -6818,7 +6818,7 @@ int runGame(Options& options, Session& session)
 				session.hosted = std::make_unique<host::HostedGame>(round, gameLogic, templates, setup);
 				session.hosted->setStaticObjects(levelObjects);
 				overheadTerrain(*session.hosted);
-				session.hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); };
+				session.hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); std::fflush(stdout); };
 				if (session.hosted->start()) {
 					hosted = session.hosted.get();
 					std::printf("hosting %s (%s, %d) on port %u (all interfaces), LAN query port %u\n", options.level.c_str(),
@@ -8915,6 +8915,12 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			if (enterDeploymentFirst || player) {
+				// Our soldier's name, as a client sends it (--name, else the menu's soldier).
+				const std::string name = !options.playerName.empty() ? options.playerName
+					: session.menuBindings ? session.menuBindings->soldierName() : std::string();
+				if (!name.empty()) {
+					round.setPlayerName(round.localPlayer(), name);
+				}
 				if (enterDeploymentFirst) {
 					const std::vector<int> points = round.spawnablePoints(options.playTeam);
 					round.setSpawnChoice(local, points.empty() ? -1 : points.front());
