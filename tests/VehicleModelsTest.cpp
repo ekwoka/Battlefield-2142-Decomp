@@ -1101,6 +1101,47 @@ TEST(Vehicles_WalkerCollisionSoundRepeats)
 	CHECK(pushesHeard >= 2);
 }
 
+// The Talon's pilot rockets (US_AG_PilotWeapon: a MultiFireComp, single
+// fire, 600 a minute, 10 rounds): a click while a round's 3 ticks run, the
+// tick they end included, is lost (MultiFireComp's press 0x005d5d50 keeps
+// nothing). Clicked every 3 ticks they land 6 apart, as retail's spammed
+// rockets do; every 4 ticks, 4 apart. Held, one goes.
+TEST(Vehicles_TalonRocketsLoseClicksWhileCycling)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (int period : {3, 4, 0}) { // a click (one tick down) every `period` ticks; 0 = held
+		Garage g(gameDir(), "mods/Project_Remaster_v17_Final");
+		const uint32_t ag = g.start("us_ag", {0, 4, 6});
+		CHECK(g.enter(ag));
+		g.drive({}, 3);
+		std::vector<int> ticks;
+		for (int i = 0; i < 60; ++i) {
+			game::SoldierInput in;
+			in.fire = period == 0 || i % period == 0;
+			g.world->setPlayerInput(in);
+			g.world->tick(1 / 30.0f);
+			for (const auto& p : g.world->projectiles()) {
+				if (p.settings && p.settings->name == "US_AG_PilotWeapon_Projectile" && p.age <= 1 / 30.0f + 1e-4f) {
+					ticks.push_back(i);
+				}
+			}
+		}
+		std::string list;
+		for (int t : ticks) list += " " + std::to_string(t);
+		std::fprintf(stderr, "  click every %d ticks: rockets at%s\n", period, list.c_str());
+		if (period == 0) {
+			CHECK(ticks == std::vector<int> {0});
+			continue;
+		}
+		CHECK(ticks.size() >= 5);
+		for (size_t k = 1; k < ticks.size(); ++k) {
+			CHECK(ticks[k] - ticks[k - 1] == (period == 3 ? 6 : 4));
+		}
+	}
+}
+
 TEST(Vehicles_WalkerLegsSphereContacts)
 {
 	if (!gameDir()) {

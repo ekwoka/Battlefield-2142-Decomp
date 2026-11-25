@@ -971,9 +971,14 @@ bool FireArm::fire(float seconds, bool trigger, bool soft)
 	const bool pressed = trigger && !m_triggerWas;
 	m_triggerWas = trigger;
 	const int mode = m_useModes ? m_mode : kFireAutomatic;
-	if (mode == kFireSingle && pressed) {
+	// A MultiFireComp keeps no press: its press (slot 13, 0x005d5d50) sets
+	// +0x1a4, which nothing reads, so a click while the round's interval
+	// runs, the tick it ends included, is lost. Retail's Talon rockets
+	// spammed land 6 ticks apart, 4 at the closest (2026-11-25 capture).
+	const bool takesPress = !m_settings.multiFire || m_cooldown <= 0;
+	if (mode == kFireSingle && pressed && takesPress) {
 		m_pending = true;
-	} else if (mode == kFireBurst && pressed && m_burstLeft <= 0) {
+	} else if (mode == kFireBurst && pressed && takesPress && m_burstLeft <= 0) {
 		m_burstLeft = std::max(m_settings.burstSize, 1);
 	}
 	// The heat cools only while the fire component is idle: the weapon update
