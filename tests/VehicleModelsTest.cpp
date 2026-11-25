@@ -23,6 +23,8 @@
 #include "Sound/Game/SoundConsole.h"
 #include "Sound/Game/SoundObjectTemplate.h"
 #include "Sound/Game/SoundManager.h"
+#include "Sound/Game/VfsSoundFileSystem.h"
+#include "Sound/SoundEngine/SoundFile.h"
 #include "Physics/CollisionTemplateManager.h"
 #include "Physics/MaterialManager.h"
 #include "Main/HudWorld.h"
@@ -1832,6 +1834,128 @@ TEST(Vehicles_BotGunshipPilotHuntsWithEnhancedPilots)
 			} else if (std::string(mod) != "mods/bf2142") {
 				CHECK(shots == 0);
 			}
+		}
+	}
+}
+
+TEST(Vehicles_GunshipEmpShutdownSound)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const char* name : {"us_ag", "as_ag"}) {
+			std::unique_ptr<sound::SoundManager> manager;
+			Garage g(gameDir(), mod, true, [&manager](Garage& garage) {
+				manager = std::make_unique<sound::SoundManager>(nullptr, garage.templates);
+				manager->registerTemplateType();
+				sound::registerSoundConsoleMethods(garage.console, *manager);
+			});
+			CHECK(g.loaded && g.templates.find(name) && g.templates.find("static_aa_missile_projectile"));
+			if (!g.loaded || !g.templates.find(name) || !g.templates.find("static_aa_missile_projectile")) continue;
+			const uint32_t v = g.start(name, {0, 4, 6});
+			CHECK(g.enter(v));
+			game::GameWorld::PlayerInfo me;
+			CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == v && me.seat == 0);
+			std::string soundName;
+			for (const auto& child : g.templates.find(name)->children()) {
+				if (child.name.find("_EMPShutdown") != std::string::npos) soundName = child.name;
+			}
+			const auto* soundTemplate = dynamic_cast<const sound::SoundObjectTemplate*>(g.templates.find(soundName));
+			CHECK(soundTemplate && soundTemplate->hasFiles());
+			std::vector<uint8_t> sample;
+			CHECK(g.files.readFile("sound/effects/emp_shutdown.wav", sample) && !sample.empty());
+			if (soundTemplate && std::getenv("BF2142_EMP_SOUND_TEST")) {
+				sound::VfsSoundFileSystem vfs(g.files);
+				auto* engine = sound::getSoundEngine();
+				engine->setFileSystem(&vfs);
+				CHECK(engine->initialize(0, "Software Audio", 16) == 0);
+				{
+					world::ObjectTemplateManager probeTemplates;
+					sound::SoundManager probeManager(engine, probeTemplates);
+					probeManager.registerTemplateType();
+					auto* probe = dynamic_cast<sound::SoundObjectTemplate*>(probeTemplates.create("Sound", "EmpProbe"));
+					CHECK(probe);
+					if (probe) {
+						probe->setSoundFilenames(soundTemplate->soundFilenames());
+						probe->setVolume(soundTemplate->volume());
+						auto* st = probe->engineTemplate();
+						st->setIs3dSound(false);
+						st->setLoopCount(0);
+						auto* file = static_cast<sound::SoundFile*>(st->loadedSoundFile(0));
+						CHECK(file);
+						if (file) {
+							file->load(engine->qualityLevel());
+							CHECK(file->loaded() && file->frames() > 0);
+						}
+						auto* playing = st->createSound();
+						CHECK(playing);
+						if (playing) {
+							playing->play();
+							engine->update(1);
+							CHECK(playing->isPlaying());
+							playing->stopImmediately();
+							playing->release();
+						}
+					}
+				}
+				engine->shutdown();
+				sound::shutdownSoundEngine();
+			}
+			sound::GameSounds sounds {*manager};
+			int starts = 0;
+			sounds.onTrigger = [&](const sound::GameSounds::Triggered& t) { starts += t.name == soundName; };
+			GameAudio audio(*g.world, g.objects, g.templates, *manager, sounds, nullptr);
+			GameAudio::Camera camera;
+			camera.firstPerson = true;
+			const uint64_t owner = (uint64_t(5) << 56) ^ v;
+			audio.tick(camera);
+			CHECK(!sounds.looping(owner, soundName) && starts == 0);
+			CHECK(g.world->detonate("static_aa_missile_projectile", g.position(v)));
+			CHECK(g.world->empLevel(v) == 2);
+			audio.tick(camera);
+			CHECK(sounds.looping(owner, soundName) && starts == 1);
+			audio.tick(camera);
+			CHECK(sounds.looping(owner, soundName) && starts == 1);
+			camera.firstPerson = false;
+			audio.tick(camera);
+			CHECK(!sounds.looping(owner, soundName));
+			camera.firstPerson = true;
+			audio.tick(camera);
+			CHECK(sounds.looping(owner, soundName) && starts == 2);
+			game::SoldierInput switchSeat;
+			switchSeat.switchSeat = 2;
+			g.world->setPlayerInput(switchSeat);
+			g.run(1 / 30.0f);
+			g.world->setPlayerInput({});
+			g.run(1 / 30.0f);
+			CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == v && me.seat == 1);
+			audio.tick(camera);
+			CHECK(!sounds.looping(owner, soundName));
+			switchSeat.switchSeat = 1;
+			g.world->setPlayerInput(switchSeat);
+			g.run(1 / 30.0f);
+			g.world->setPlayerInput({});
+			CHECK(g.world->playerInfo(g.world->localPlayer(), me) && me.vehicle == v && me.seat == 0);
+			audio.tick(camera);
+			CHECK(sounds.looping(owner, soundName) && starts == 3);
+			for (int i = 0; i < 180 && g.world->empLevel(v) > 1; ++i) {
+				g.run(1 / 30.0f);
+				audio.tick(camera);
+			}
+			CHECK(g.world->empLevel(v) == 1);
+			CHECK(!sounds.looping(owner, soundName));
+			CHECK(g.world->detonate("static_aa_missile_projectile", g.position(v)));
+			CHECK(g.world->empLevel(v) > 1);
+			audio.tick(camera);
+			CHECK(sounds.looping(owner, soundName));
+			game::SoldierInput leave;
+			leave.use = true;
+			g.world->setPlayerInput(leave);
+			g.run(1 / 30.0f);
+			g.world->setPlayerInput({});
+			CHECK(g.world->playerInfo(g.world->localPlayer(), me) && !me.vehicle);
+			audio.tick(camera);
+			CHECK(!sounds.looping(owner, soundName));
 		}
 	}
 }

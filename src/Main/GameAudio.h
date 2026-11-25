@@ -7,6 +7,8 @@
 //   - the engines' idle and rpm loops of the vehicles that have someone
 //     aboard (the engine audio, 0x007fe050: S_<engine>_Idle, _Rpm1, _Rpm2
 //     at |rpm| x 0.8333, 0x007fe740), while the engine runs;
+//   - the local pilot's authored EMPShutdown loop in first person above
+//     EMP level 1;
 //   - the vehicles' rolling-surface loops (groundContactVolume:
 //     GameWorld::rollingSounds);
 //   - the projectiles' flight loops (DefaultProjSoundComp's

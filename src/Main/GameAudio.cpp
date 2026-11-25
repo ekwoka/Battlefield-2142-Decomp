@@ -367,6 +367,25 @@ void GameAudio::tick(const Camera& given)
 	}
 	weapons(camera);
 	engines();
+	// The root PCO's EMPShutdown sound runs for its local first-person
+	// occupant above EMP level 1 (0x005c92ef).
+	game::GameWorld::PlayerInfo me;
+	if (camera.firstPerson && playerInfo(localPlayer(), me) && me.alive && me.vehicle && me.seat == 0
+		&& m_round.empLevel(me.vehicle) > 1) {
+		const world::Object* vehicle = m_objects.find(me.vehicle);
+		const world::ObjectTemplate* t = vehicle ? vehicle->objectTemplate() : nullptr;
+		if (t) {
+			for (const auto& child : t->children()) {
+				const std::string suffix = "_EMPShutdown";
+				if (child.name.size() >= suffix.size()
+					&& child.name.compare(child.name.size() - suffix.size(), suffix.size(), suffix) == 0
+					&& m_manager.hasSound(child.name)) {
+					m_sounds.loop(ownerKey(5, me.vehicle), child.name, toSound(vehicle->position()), {}, 0, me.vehicle);
+					break;
+				}
+			}
+		}
+	}
 	// The vehicles' rolling-surface loops (GameWorld::rollingSounds: the
 	// PCO's contact sound object, 0x005c65d0 / 0x005c6510), at the vehicle
 	// (its position provider, vtable 0x0096cf7c), envelopes on the eased
