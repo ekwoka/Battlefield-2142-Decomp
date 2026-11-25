@@ -5,6 +5,8 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -339,6 +341,48 @@ bool UdpServerSocket::enableBroadcast()
 	int on = 1;
 	return m_socket != -1
 		&& setsockopt(static_cast<Native>(m_socket), SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&on), sizeof(on)) == 0;
+}
+
+std::vector<UdpServerSocket::Interface> UdpServerSocket::interfaces()
+{
+	std::vector<Interface> found;
+	const auto add = [&found](uint32_t ip, uint32_t mask) {
+		if (mask != 0) {
+			found.push_back({ip, ip | ~mask});
+		}
+	};
+#ifdef _WIN32
+	startup();
+	const SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (s == INVALID_SOCKET) {
+		return found;
+	}
+	INTERFACE_INFO list[32];
+	DWORD bytes = 0;
+	if (WSAIoctl(s, SIO_GET_INTERFACE_LIST, nullptr, 0, list, sizeof(list), &bytes, nullptr, nullptr) == 0) {
+		for (DWORD i = 0; i < bytes / sizeof(INTERFACE_INFO); ++i) {
+			const INTERFACE_INFO& entry = list[i];
+			if ((entry.iiFlags & IFF_UP) && (entry.iiFlags & IFF_BROADCAST) && !(entry.iiFlags & IFF_LOOPBACK)) {
+				add(entry.iiAddress.AddressIn.sin_addr.s_addr, entry.iiNetmask.AddressIn.sin_addr.s_addr);
+			}
+		}
+	}
+	closesocket(s);
+#else
+	ifaddrs* list = nullptr;
+	if (getifaddrs(&list) != 0) {
+		return found;
+	}
+	for (const ifaddrs* entry = list; entry; entry = entry->ifa_next) {
+		if (entry->ifa_addr && entry->ifa_netmask && entry->ifa_addr->sa_family == AF_INET
+			&& (entry->ifa_flags & IFF_UP) && (entry->ifa_flags & IFF_BROADCAST) && !(entry->ifa_flags & IFF_LOOPBACK)) {
+			add(reinterpret_cast<const sockaddr_in*>(entry->ifa_addr)->sin_addr.s_addr,
+				reinterpret_cast<const sockaddr_in*>(entry->ifa_netmask)->sin_addr.s_addr);
+		}
+	}
+	freeifaddrs(list);
+#endif
+	return found;
 }
 
 bool UdpServerSocket::resolve(const std::string& host, uint16_t port, Address& out)

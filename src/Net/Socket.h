@@ -95,6 +95,13 @@ public:
 	bool sendTo(const Address& to, const std::vector<uint8_t>& data);
 	// Lets the socket send to broadcast addresses (SO_BROADCAST).
 	bool enableBroadcast();
+	// Every up, non-loopback IPv4 interface: its address and subnet broadcast
+	// (network order). Windows sends 255.255.255.255 out of one adapter only.
+	struct Interface {
+		uint32_t ip = 0;
+		uint32_t broadcast = 0;
+	};
+	static std::vector<Interface> interfaces();
 	// A dotted IPv4 address (or a host name) and a port as an Address.
 	static bool resolve(const std::string& host, uint16_t port, Address& out);
 	// One datagram within `timeoutMilliseconds`: its size, 0 on a timeout, -1 on errors.

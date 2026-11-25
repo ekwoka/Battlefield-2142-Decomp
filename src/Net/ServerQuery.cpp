@@ -285,10 +285,28 @@ std::vector<ServerEntry> browseLan(const std::string& address, uint16_t firstPor
 	}
 	// 0x007249c0: one probe per port, at most 500 ports.
 	lastPort = static_cast<uint16_t>(std::min<int>(lastPort, firstPort + 500));
+	// Native addition: with the limited broadcast, also each interface's subnet
+	// broadcast, since Windows sends 255.255.255.255 out of one adapter only.
+	std::vector<uint32_t> targets {target.ip};
+	const auto local = UdpServerSocket::interfaces();
+	if (target.ip == 0xffffffffu) {
+		for (const auto& entry : local) {
+			if (std::find(targets.begin(), targets.end(), entry.broadcast) == targets.end()) {
+				targets.push_back(entry.broadcast);
+			}
+		}
+	}
+	// A server on this machine answers once per interface: keep the first.
+	const auto isLocal = [&local](const UdpServerSocket::Address& a) {
+		return std::any_of(local.begin(), local.end(), [&a](const auto& entry) { return entry.ip == a.ip; });
+	};
 	for (int port = firstPort; port <= lastPort; ++port) {
 		UdpServerSocket::Address to = target;
 		UdpServerSocket::resolve(address, static_cast<uint16_t>(port), to);
-		socket.sendTo(to, qr2LanProbe());
+		for (uint32_t ip : targets) {
+			to.ip = ip;
+			socket.sendTo(to, qr2LanProbe());
+		}
 	}
 	// 0x00724440: every new address that answers within the time is a server.
 	std::vector<UdpServerSocket::Address> servers;
@@ -300,8 +318,9 @@ std::vector<ServerEntry> browseLan(const std::string& address, uint16_t firstPor
 		if (socket.receiveFrom(datagram, from, 20) <= 0) {
 			continue;
 		}
-		if (!datagram.empty() && datagram[0] == kPacketEchoResponse
-			&& std::find(servers.begin(), servers.end(), from) == servers.end()) {
+		const bool seen = std::find(servers.begin(), servers.end(), from) != servers.end()
+			|| (isLocal(from) && std::any_of(servers.begin(), servers.end(), [&](const auto& s) { return isLocal(s) && s.port == from.port; }));
+		if (!datagram.empty() && datagram[0] == kPacketEchoResponse && !seen) {
 			servers.push_back(from);
 		}
 	}
