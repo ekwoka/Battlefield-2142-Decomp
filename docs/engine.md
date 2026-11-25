@@ -2989,9 +2989,27 @@ Sound stays at the tick: the sound manager steps with the ticks (slot
 source was not traced. A held weapon's node without a part keeps its template
 place, so folding it into the part below gives the same draw as blending
 each node. The name tags are projected at the objects' drawn positions
-(`LevelSources::drawnPositions`). Bone poses stay per tick, as retail's: the
-soldier's skeleton is stepped only in its tick update (`0x00586200` →
-`0x005ef250` with 1/30 s), and the blend moves objects, not bones.
+(`LevelSources::drawnPositions`).
+
+Retail steps the soldiers' animation systems in the frame, not the tick.
+The frame calls ObjectManager slot `0x2c` (`0x007002d0`) with the frame's
+seconds (clamped as above), which runs slot `0xa4` of every object in its
+frame set: the objects with update flag `0x2000` (`0x006f68f0` → manager
+slots `0xf8`/`0xfc`; the tick set is flag `0x800`, slot `0xa8`, run by
+manager slot `0x28`). The Soldier's constructor (`0x0058df00`) sets
+`0x3800`, so each frame `0x00586710` runs `0x005ef250` with the frame's
+time: the active system's update (third or first person by `+0x2f0`;
+slot `0xc`, `0x008baed0`) and the held weapon's. The Soldier's tick update
+(`0x0058d350`) doesn't step them. `0x00586200` → `0x005ef250` with 1/30 s
+is a side path (from `0x00586e50`, `0x006c1df0` and the scene ray
+`0x006fb610`), not the regular step. The pose is evaluated
+(`0x008b8880` → `0x008b8330`) in `0x005f06b0`, which the frame-time
+Soldier method `0x00585bf0` (slot `0xa0`) calls with its flag set; that
+slot's caller wasn't found. The port steps the systems in the tick. Its
+third-person bones stay per tick (the blend moves objects, not bones); the
+first-person skeleton is drawn blended between where the last frame left
+it and the tick's pose (`anim::FirstPersonRig::blend`), the closest the
+tick-stepped systems come to retail's per-frame step.
 
 ## The first-person view
 

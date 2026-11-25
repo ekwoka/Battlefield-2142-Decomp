@@ -90,7 +90,16 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   says it drops repeats.
 
 ### Q-4. The first-person rig blends from the wrong tick on multi-tick frames (low to medium)
-- **Status:** verify (see also A-10)
+- **Status:** done (wave 2). `FirstPersonRig` snapshots `m_previous` on the
+  first `update()` after a `blend()` (the pose where the last frame left the
+  skeleton), so a frame's alpha, which spans all its ticks (`0x0043f170`),
+  blends from there to the last tick's pose. `blend()` clamps alpha to
+  −0.1..1.1 as the objects' does. `setWeapon()` also resets `m_previous` and
+  the drawn matrices to the setup pose, so a frame drawn before the next tick
+  shows the new weapon's start pose. Tests:
+  `FirstPerson_MultiTickFrameBlendsFromTheLastDraw` (three-tick frames, the
+  extrapolated ends and the clamp) and `FirstPerson_WeaponChangeDrawsTheNewPose`.
+  Both fail without the fix.
 - **Commit:** 50e85c9
 - **Where:** `src/Animation/FirstPerson.cpp:179` (`m_previous = m_pose` every tick)
   and `FirstPerson.h:229` (`blend`)
@@ -445,7 +454,22 @@ or gating behind a flag.
   as MassiveSmoke are where this shows.
 
 ### A-10. First-person skeleton blended between ticks with no flag (round 2, medium)
-- **Status:** verify (see Q-4)
+- **Status:** done (wave 2), no flag. Retail steps the soldier's animation
+  systems once a frame with the frame's time, not in the tick: the frame
+  (`0x0040bd90`) calls ObjectManager slot `0x2c` (`0x007002d0`) with its
+  seconds, which runs slot `0xa4` of the objects with update flag `0x2000`
+  (`0x006f68f0` → manager slot `0xf8`). The Soldier's constructor
+  (`0x0058df00`) sets `0x3800`, and its slot `0xa4` is `0x00586710` →
+  `0x005ef250(frame dt)` → the active system's update (`0x008baed0`) and the
+  weapon's. `0x00586200` (1/30 s) is a side path for the scene rays, so the
+  engine.md claim was wrong. The slot `0xa0` caller (`0x00585bf0` →
+  `0x005f06b0`, where the pose is evaluated) is still unfound: no direct
+  `call`/`jmp [reg+0xa0]` site in the exe's disassembly is a Soldier's. A
+  per-tick pose is therefore less like retail than the blend, so the blend
+  stays the default and isn't gated. Moving the port's first-person step
+  into the frame (and its third-person bones, which stay per tick) is a
+  separate change. The comments in `FirstPerson.h` and `docs/engine.md` now
+  say this.
 - **Commit:** 50e85c9
 - **Where:** `src/Animation/FirstPerson.h:229`, called at `src/Main/main.cpp`
   ~10643 and ~11036
