@@ -1576,6 +1576,60 @@ TEST(MenuBindings_CreateServerGameMode)
 	CHECK(menu.player.scriptErrors().empty());
 }
 
+// The same page with a mod of many modes (Project Remaster): the box shows
+// 3 rows ("gameModes 3 0", 0x10065610's +0x1c), so the fill's late choice
+// (gpm_ti found at row 3 before gpm_sp left the list) is out of view, is
+// never released, and the page stays on Titan; with every row clip counted
+// the late row was released and the page moved on to another mode.
+TEST(MenuBindings_CreateServerManyGameModes)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Fake fake;
+	fake.reachable = false;
+	Menu menu;
+	menu::MenuBindings bindings(menu.player.natives(), fake.services());
+	// Levels with no .desc in the game: each adds its mode in level order.
+	bindings.setMaps({{"Zz1", "gpm_coop", 16}, {"Zz2", "gpm_sp", 16}, {"Zz3", "gpm_cq", 32}, {"Zz4", "gpm_ti", 48},
+		{"Zz5", "gpm_nv", 32}, {"Zz6", "gpm_sl", 32}});
+	CHECK(menu.load(gameDir));
+	menu.run(3);
+	CHECK(menu.click("login.mcAccountName.mcInput.inputField"));
+	menu.type("tester");
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(0.5);
+	bindings.finishJobs();
+	menu.run(2);
+	CHECK(menu.click("MessageHandler.btnOk"));
+	menu.run(2);
+	CHECK(menu.click("login.ScrollTainer.m_mcContainer.contents.holder_list.holder_list.row0"));
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(5);
+	CHECK(menu.click("FlashMenu.btnMultiplay"));
+	menu.run(3);
+	CHECK(menu.click("FlashMenu.local_join"));
+	menu.run(3);
+	menu.player.mouseMove(470, 61);
+	menu.player.tick();
+	menu.player.mouseDown();
+	menu.player.tick();
+	menu.player.mouseUp();
+	menu.run(3);
+	const std::string page = "multiplay.mc_local_create.";
+	avm1::Interpreter& vm = *menu.player.interpreter();
+	CHECK(menu.player.natives().listRows("gameModes").size() == 5); // coop, cq, ti, nv, sl
+	CHECK(vm.toString(call(vm, menu.player.natives(), "dice.bf2.ServerSettings", "getGameMode")) == "gpm_ti");
+	CHECK(menu.text(page + "mcGameMode.mcSelectBox.labelSelectBox.text") == menu.strings.text("TEXT_gpm_ti"));
+	// Rows past the third are hidden, as 0x10065610 hides them.
+	const avm1::Value row3 = menu.player.evaluate(page + "mcGameMode.m_mcContainer.contents.holder_list.holder_list.row3");
+	CHECK(row3.isObject() && !avm1::toBoolean(vm.getMember(row3, "_visible")));
+	// No password: "" (0 showed as "*" in the masked box).
+	CHECK(vm.toString(call(vm, menu.player.natives(), "dice.bf2.ServerSettings", "getPassword")).empty());
+	CHECK(menu.player.scriptErrors().empty());
+}
+
 // The LAN server's rules in the info popup (0x10068150 / 0x10068380), the
 // lists' time cells (0x100657b0 / 0x1006a840), the credits' images, the
 // Profile equipment natives from the kit files and the hardware probes.

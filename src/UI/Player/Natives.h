@@ -89,6 +89,8 @@ public:
 	// How many row clips the holder has ("0", "1", ... or "row0", "row1",
 	// ... until one is missing).
 	int visibleRows(avm1::Interpreter& vm) const;
+	// A select box's shown rows (its arguments' second word), else -1.
+	int selectBoxRows() const;
 	std::string rowPrefix(avm1::Interpreter& vm) const;
 	// Writes rows [firstIndex, firstIndex + visibleRows) into the holder's
 	// row clips: cellN.text, isClickable and isSelected; then, with
