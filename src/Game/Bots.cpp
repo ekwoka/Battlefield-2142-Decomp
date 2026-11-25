@@ -1829,10 +1829,14 @@ void BotManager::update(float seconds)
 			continue;
 		}
 		if (m_world.ridingPod(self->id)) {
-			// Only a drop from its own Titan's array, where the place was chosen (titanPod steers the boarding pods).
-			physics::Vec3 spot;
-			if (m_time - bot.podLandingAt < 20 && podLanding(bot, *self, spot)) {
-				steerPod(*self, spot, input);
+			// Only a drop from its own Titan's array, where the place was chosen (titanPod steers the boarding pods),
+			// kept for the whole ride: a ride starting near the choice's 20 s once lost it half way down.
+			if (bot.podRide != self->vehicle) {
+				bot.podRide = self->vehicle;
+				bot.podRideSteered = m_time - bot.podLandingAt < 20;
+			}
+			if (bot.podRideSteered) {
+				steerPod(*self, bot.podLanding, input);
 			}
 			bot.podAimOff = 1e9f;
 			bot.lastInput = input;

@@ -1314,6 +1314,8 @@ private:
 		bool titanPodGoalSet = false;
 		physics::Vec3 podLanding;  // BotsTitan.cpp podLanding: where a drop from its own Titan comes down, outside Titan mode
 		float podLandingAt = -1e9f;
+		uint32_t podRide = 0;      // the pod it rides, steered to podLanding the whole way when
+		bool podRideSteered = false; // the place was chosen within 20 s of the launch
 		float podAimOff = 1e9f;    // the pod array's last yaw error, degrees
 		uint32_t titanWaitFor = 0; // BotsTitan.cpp: the transport or APC whose driver it waits in for riders, and until when
 		float titanWaitUntil = 0;
