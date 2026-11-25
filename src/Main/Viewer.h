@@ -113,6 +113,9 @@ struct ViewerOptions {
 	// seconds (1e-5 .. 1/15, as 0x0040bd90 clamps them) and the tick blend's alpha.
 	std::function<void(float seconds, float alpha)> onFrame;
 	std::function<bool(PlayerView&)> playerView; // false without a player
+	// Each drawn frame, before the HUD is built: the drawable's size in
+	// pixels (enhanced.hudWidescreen lays the HUD out for its aspect).
+	std::function<void(int width, int height)> windowSize;
 	// The recoil's kick to the aim since the last call (degrees, up
 	// positive): the viewer adds it to its pitch, as the original adds it to
 	// the soldier's own angles (GameWorld::takeAimKick).

@@ -500,7 +500,7 @@ The rest only change what you see or hear.
 | `chaseRoll` | off | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
 | `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
 | `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
-| `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the same 4:3 HUD (x scaled by 12/16) with its side pieces moved out by 120. Ignored when the hudfix's shader is already installed. | no |
+| `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the 4:3 HUD squeezed to the window's aspect ((4/3) ÷ aspect: the hudfix's 12/16 at 16:9, about 0.56 at 21:9), with its side pieces moved out to match (120 at 16:9) and the gunner frames widened to cover the window. It is laid out again when the window is resized. Ignored when the hudfix's shader is already installed, whose fixed 16:9 layout stays. | no |
 | `singleplayAllModes` | on | interface | The singleplayer page lists every level's every mode and size (Titan, Assault Lines, conquest and the rest), each row naming its mode, not only its single-player layouts; the chosen map starts in its own mode. For testing: the bots may not play those modes (Titan bots need `botTitan` and `botCommander`). | no |
 
 `enhanced.enabled` on its own also turns on the enhanced audio (below), lets

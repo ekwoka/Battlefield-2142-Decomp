@@ -24,6 +24,7 @@
 #include "Game/GameLogic.h"
 #include "Game/KitUnlocks.h"
 #include "Hud/Hud.h"
+#include "Hud/Widescreen.h"
 #include "Input/ControlMap.h"
 #include "Input/GameControllers.h"
 #include "Net/Fesl.h"
@@ -3901,25 +3902,16 @@ int runGame(Options& options, Session& session)
 	// in authored order. Do not promote all HUD text or alter ready state.
 	hudManager.repairSupplyLabelOrder();
 	// enhanced.hudWidescreen: the same 4:3 HUD for a mod without the patch,
-	// with HudRotation.con's 120 moves of the sides. The commander screen,
-	// which Remaster also re-cut into left/right/middle, stays centred.
-	if (enhancedSettings.enabled && enhancedSettings.hudWidescreen && hudXScale == 1.0f) {
-		hudXScale = 12.0f / 16.0f;
-		for (const char* name : {"BottomLeftStaticHud", "SquadInfo", "SquadOrderInfo", "IngameChat", "IngameChatInput", "PlayerNames"}) {
-			hudManager.shiftNode(name, -120);
-		}
-		for (const char* name : {"BottomRightStaticHud", "MinSizeAlpha", "Minimap", "ItemSelectionHud"}) {
-			hudManager.shiftNode(name, 120);
-		}
-		// The full-screen gunner frames and screen filters, as Remaster's
-		// Menu_server_hudfix.zip re-cuts them (0 0 1024 1024 -> -134 0 1367
-		// 1024), so the 12/16 squeeze still covers a wide screen.
-		for (const char* name : {"IFVGunnerHudFrame", "IFVRocketHudFrame", "LightHoverHeatHudFilter", "EuGunshipCoFilter",
-				 "EUGunshipHeatHudFilter", "GunshipCoFilter", "GunshipHeatHudFilter", "TankEuGunnerHudFrame",
-				 "TankGunnerHudFrame", "GunEuFrame", "GunPacFrame"}) {
-			hudManager.spanNode(name, -134, 1367);
-		}
-		std::printf("native HUD: enhanced widescreen, x scaled by 12/16, sides moved 120\n");
+	// squeezed for the window's own aspect, with its sides and gunner frames
+	// laid out to match (hud::widescreenLayout: the hudfix's 12/16, 120 and
+	// -134..1233 at 16:9). The window hands its size over each frame it
+	// draws (viewer.windowSize), so a resize re-lays the HUD. The commander
+	// screen, which Remaster also re-cut into left/right/middle, stays
+	// centred. With the hudfix installed its fixed 16:9 layout stands.
+	const bool hudWidescreen = enhancedSettings.enabled && enhancedSettings.hudWidescreen && hudXScale == 1.0f;
+	hud::WidescreenLayout hudWidescreenApplied; // the authored HUD to start
+	if (hudWidescreen) {
+		std::printf("native HUD: enhanced widescreen, x scaled for the window's aspect\n");
 	}
 	// The name tags' icons and bars (the HUD manager's set-up, 0x0075cfa0).
 	run("Menu/Nametag/nametags.con");
@@ -10560,6 +10552,13 @@ int runGame(Options& options, Session& session)
 		ViewerOptions viewer;
 		viewer.screenshot = options.screenshot;
 		viewer.camera = options.camera;
+		if (hudWidescreen) {
+			viewer.windowSize = [&](int width, int height) {
+				const hud::WidescreenLayout layout = hud::widescreenLayout(width, height);
+				hud::applyWidescreenLayout(hudManager, hudWidescreenApplied, layout);
+				sources.hudXScale = layout.xScale;
+			};
+		}
 		if (viewer.screenshot.empty()) {
 			// A window draws frames: the particles move by them, as RendDX9's (EffectManager::frame).
 			round.setEffectsPerFrame(true);

@@ -337,6 +337,9 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	printStats(level.stats());
 	render::Camera camera = level.suggestedCamera();
 	applyCameraOption(camera, options.camera);
+	if (options.windowSize) {
+		options.windowSize(options.width, options.height);
+	}
 	ViewerOptions::PlayerView view;
 	view.aspect = static_cast<float>(options.width) / static_cast<float>(options.height);
 	if (options.camera.empty() && options.playerView && options.playerView(view) && (view.firstPerson || view.external)) {
@@ -963,6 +966,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				int w = 1, h = 1;
 				SDL_GetWindowSizeInPixels(window, &w, &h);
 				view.aspect = static_cast<float>(w) / static_cast<float>(std::max(h, 1));
+				if (options.windowSize) {
+					options.windowSize(w, h);
+				}
 			}
 			firstPerson = false;
 			if (playing && options.playerView(view) && view.firstPerson) {

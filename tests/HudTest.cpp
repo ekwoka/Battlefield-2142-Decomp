@@ -3,6 +3,7 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Hud/Hud.h"
+#include "Hud/Widescreen.h"
 #include "IO/File/FileManager.h"
 #include "IO/Localization/Localization.h"
 #include "Main/DeploymentLifecycle.h"
@@ -225,6 +226,71 @@ TEST(Hud_ShiftNodeMovesASplitsChildren)
 	CHECK(!manager.shiftNode("NoSuchNode", 120));
 	CHECK(at(-121, 563)); // now a full-screen transform at -120, 0 under it
 	CHECK(!at(-1, 563));
+}
+
+// enhanced.hudWidescreen's layout for the window's aspect. At 16:9 it is
+// Remaster's hudfix: PortedMenuShader.fx's fAspectComp = 12.0/16.0,
+// HudRotation.con's 120 moves of the sides, Menu_server_hudfix.zip's frames
+// at -134 0 1367 1024. At 4:3 (or narrower) it is the authored HUD.
+TEST(Hud_WidescreenLayoutForTheWindowsAspect)
+{
+	const auto same = [](const hud::WidescreenLayout& l, float scale, int shift, int x, int w) {
+		return std::fabs(l.xScale - scale) < 1e-6f && l.sideShift == shift && l.frameX == x && l.frameWidth == w;
+	};
+	CHECK(same(hud::widescreenLayout(1024, 768), 1.0f, 0, 0, 1024)); // 4:3
+	CHECK(same(hud::widescreenLayout(1600, 1200), 1.0f, 0, 0, 1024));
+	CHECK(same(hud::widescreenLayout(1280, 1024), 1.0f, 0, 0, 1024)); // 5:4 keeps the authored HUD
+	CHECK(same(hud::widescreenLayout(1920, 1080), 0.75f, 120, -134, 1367)); // 16:9: the hudfix's numbers
+	CHECK(same(hud::widescreenLayout(2560, 1440), 0.75f, 120, -134, 1367));
+	CHECK(same(hud::widescreenLayout(3440, 1440), 1440.0f * 4 / (3 * 3440), 285, -317, 1836)); // 21:9 (UWQHD)
+	CHECK(same(hud::widescreenLayout(5120, 1440), 0.375f, 600, -667, 2732)); // 32:9
+	// Whatever the aspect, the squeezed HUD keeps 4:3's shape and the frames
+	// still cover the whole window (their authored 0..1024 on screen).
+	for (const auto& size : {std::pair {1920, 1080}, std::pair {2560, 1080}, std::pair {3440, 1440}, std::pair {3840, 1080},
+			 std::pair {5120, 1440}, std::pair {1366, 768}}) {
+		const auto l = hud::widescreenLayout(size.first, size.second);
+		CHECK(std::fabs(l.xScale * size.first / size.second - 4.0f / 3.0f) < 1e-5f);
+		CHECK(400 + (l.frameX - 400) * l.xScale <= 0);
+		CHECK(400 + (l.frameX + l.frameWidth - 400) * l.xScale >= 1024);
+		// The sides stay inside the window: 9/10 of the room the squeeze opens.
+		CHECK(l.sideShift > 0 && l.sideShift < 400 / l.xScale - 400);
+	}
+}
+
+// A resized window re-lays the HUD from the layout it had: the sides move by
+// the difference, the frames take the new span, and 4:3 puts them back.
+TEST(Hud_WidescreenLayoutFollowsAResize)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createSplitNode BottomRightStatic BottomRightStaticHud",
+			 "hudBuilder.createPictureNode BottomRightStaticHud Gauge 0 0 10 10",
+			 "hudBuilder.setPictureNodeTexture Ingame/a.tga",
+			 "hudBuilder.createPictureNode BottomLeftStatic GunEuFrame 0 0 1024 1024",
+			 "hudBuilder.setPictureNodeTexture Ingame/b.tga",
+		 }) {
+		console.execute(line, out);
+	}
+	const auto quadAt = [&](float x, float y, float w) {
+		const auto quads = manager.frame(0);
+		return std::any_of(quads.begin(), quads.end(),
+			[&](const hud::HudQuad& q) { return q.x0 == x && q.y0 == y && (w == 0 || std::fabs(q.x1 - q.x0 - w) < 1e-3f); });
+	};
+	CHECK(quadAt(401, 563, 0)); // the authored gauge
+	CHECK(quadAt(-1, 563, 1024)); // the authored frame
+	hud::WidescreenLayout applied;
+	hud::applyWidescreenLayout(manager, applied, hud::widescreenLayout(1920, 1080));
+	CHECK(quadAt(521, 563, 0)); // 16:9: the gauge 120 out
+	CHECK(quadAt(-135, 563, 1367));
+	hud::applyWidescreenLayout(manager, applied, hud::widescreenLayout(3440, 1440));
+	CHECK(quadAt(686, 563, 0)); // 21:9: 285 out
+	CHECK(quadAt(-318, 563, 1836));
+	hud::applyWidescreenLayout(manager, applied, hud::widescreenLayout(1024, 768));
+	CHECK(quadAt(401, 563, 0)); // back to 4:3
+	CHECK(quadAt(-1, 563, 1024));
 }
 
 // The corner roots (the "Ingame" MemeFile's transforms): a picture at 0, 0
