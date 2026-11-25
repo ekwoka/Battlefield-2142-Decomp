@@ -32,12 +32,20 @@ them against HEAD before working on an item.
 4. **Build and test** with `nice` and a limited `-j`:
 
    ```sh
-   nice -n 10 ninja -C build/native -j6
-   BF2142_GAME_DIR="$PWD/source/Battlefield 2142" build/native/tests/bf2142_tests -j 4 [filter]
+   nice -n 10 ninja -C build/release -j6
+   BF2142_GAME_DIR="$PWD/source/Battlefield 2142" nice build/release/tests/bf2142_tests [filter]
    ```
 
-   `Titan_WalkerSweepsTheSuezBridges` is a known failure that predates this work.
+   Test in the Release build. Use the Debug build (`build/native`, with sanitizers)
+   only to re-run a failing test when you need the sanitizers or a debugger.
+
+   `Titan_WalkerSweepsTheSuezBridges` is disabled (Q-13); it reports as skipped.
    The Remaster mod isn't installed here, so its legs of the tests skip.
+
+   Run only the tests your change touches, by filter, not the full suite. Run the
+   full suite only at the very end, and only if your change could reach systems
+   those tests don't cover. The main agent runs the full suite once several items
+   are merged, and sends any failures back to an agent (`CLAUDE.md`).
 5. **Close the item.** Change its status to `done (<commit>)`, `rejected (<reason>)`
    or `blocked (<what's missing>)`, and keep a short note on what retail does.
 6. Run at most 3 agents at once in this repo, and don't let agents start helpers
@@ -109,6 +117,20 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   - The variable isn't in README's environment-variable list (~398-406).
 - **Fix:** treat 0 or empty as off; gate the printf behind the variable; end (or
   drop) the frame's stats on the failed-acquire path; document the variable.
+
+### Q-13. `Titan_WalkerSweepsTheSuezBridges` fails, and is disabled (medium)
+- **Status:** open
+- **Where:** `tests/TitanTest.cpp` (`Titan_WalkerSweepsTheSuezBridges`, its first
+  line `DISABLED(...)`)
+- **Problem:** the vanilla `us_heavy_mech` doesn't cross the big road's two
+  spans (`span(-245,-32)`) in several lanes, both ways: it stops on the deck
+  ("stuck at" about y 54.1) and `crossed` fails. It failed before the
+  2026-11-25 vehicle and Titan fixes too. A run takes 2.5 to 8.5 minutes, the
+  longest in the suite, so it's switched off rather than failing every run.
+- **Fix:** find what stops the walker at the spans (the joint at x -245 was
+  fixed once: retail's walker response, `0x00854170`), then delete the
+  `DISABLED` line. `WALKER_SWEEP=1` logs every lane.
+- **Done when:** the test passes with the `DISABLED` line removed.
 
 ## Performance
 

@@ -114,17 +114,20 @@ brew install sdl3 glslang spirv-cross        # for the renderer (optional)
 brew install python@3                         # for the game-mode scripts (optional)
 # put your BF2142 1.51 install (OpenSpy-patched) at "source/Battlefield 2142"
 
-# Native (macOS) build and tests (ASan/UBSan enabled)
-cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
-ninja -C build/native && build/native/tests/bf2142_tests
-# tests run in parallel processes, one per core (the whole suite takes about
-# 16 min); -j N runs N at a time; a name runs only the tests containing it
+# Release build: for playing and for the tests
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C build/release
+BF2142_GAME_DIR="$PWD/source/Battlefield 2142" nice build/release/tests/bf2142_tests
+# the tests run in parallel processes, slowest first (the whole suite takes about
+# a minute): every core when run under nice, else at most 8; -j N runs N at a
+# time; a name runs only the tests containing it
 # --remaster (or BF2142_REMASTER_TESTS=1) adds the Project Remaster tests; they
 # need mods/Project_Remaster_v17_Final in the install (BF2142_GAME_DIR)
 
-# Release build for playing (much faster than the ASan debug build above)
-cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
-ninja -C build/release src/Main/bf2142
+# Debug build with ASan/UBSan: only for investigating a failing test (several
+# times slower); run just the failing tests in it, by name
+cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+ninja -C build/native && build/native/tests/bf2142_tests <failing test>
 
 # Optional: Steam Audio for the enhanced mode's occlusion (a 181 MB download)
 cmake -S . -B build/release -DBF2142_STEAM_AUDIO=ON && ninja -C build/release src/Main/bf2142
