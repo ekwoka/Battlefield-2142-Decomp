@@ -26,4 +26,26 @@ inline float particleMaterialFlags(bool fogged, bool additive)
 	return (fogged ? 1.0f : 0.0f) + (additive ? 2.0f : 0.0f);
 }
 
+// Trails (TrailSystem) and non-screen-aligned quads: RendDX9's trail
+// renderer (0x10133c00: technique 0x10133d90, batches 0x10133000) and NSA
+// renderer (0x1012e920: technique 0x1012ebf0, batches 0x1012d720) pick a
+// technique by particleSystemShaderQuality alone (Trail / NSAParticle
+// ShowFill, Low, Medium, High; particleShaderType 1 the heat shimmer) and set
+// no render state between BeginPass and EndPass, only textures and
+// constants. Trail.fx and NonScreenAlignedParticles.fx have no additive
+// technique: each draws SRCALPHA / INVSRCALPHA (ShowFill ONE / ONE) with
+// FogEnable TRUE, and their pixel shaders don't mask by alpha. A template's
+// particleType Additive (Codename_Excalibur's em_excalibur_trail_TrailGlow,
+// the only shipped one) never reaches them, so such a group draws
+// normal-blend, lit and fogged like the rest.
+struct PlacedParticleDraw {
+	bool additive = false;
+	bool fogged = true;
+};
+
+inline PlacedParticleDraw placedGroupDraw(bool /*templateAdditive*/)
+{
+	return {};
+}
+
 } // namespace dice::hfe::render

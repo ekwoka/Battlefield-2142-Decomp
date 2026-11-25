@@ -230,6 +230,30 @@ TEST(ShaderMath_NormalBlendSpritesFogAdditiveOnesDont)
 	CHECK(particleMaterialFlags(false, false) == 0.0f);
 }
 
+// Trails and non-screen-aligned quads (RendDX9 0x10133d90 / 0x1012ebf0):
+// Trail.fx and NonScreenAlignedParticles.fx have no additive technique, and
+// every one sets SrcBlend SRCALPHA, DestBlend INVSRCALPHA, FogEnable TRUE;
+// the batch draws (0x10133000, 0x1012d720) leave those states alone. So a
+// trail template marked particleType Additive (em_excalibur_trail_TrailGlow)
+// draws normal-blend and fogged: at a 0.625 fog share its saturated
+// 1/0.6/0.2 goes to 0.5/0.475/0.45 toward the fog colour (the alpha blend's
+// source, not a one/one add), alpha untouched, unmasked by it.
+TEST(ShaderMath_TrailsAndPlacedQuadsAlwaysBlendAndFog)
+{
+	using namespace dice::hfe::render;
+	for (bool templateAdditive : {false, true}) {
+		const PlacedParticleDraw drawn = placedGroupDraw(templateAdditive);
+		CHECK(!drawn.additive);
+		CHECK(drawn.fogged);
+		CHECK(particleMaterialFlags(drawn.fogged, drawn.additive) == 1.0f);
+	}
+	const glsl::vec4 texel(0.8f, 0.6f, 0.4f, 0.5f), color(1.5f, 1.0f, 0.5f, 0.8f);
+	const auto r = fogRange({100, 500, 1, 0});
+	const float fog = glsl::fogShare(300, glsl::vec4(r[0], r[1], r[2], r[3]), 0);
+	const PlacedParticleDraw drawn = placedGroupDraw(true);
+	CHECK(approx(glsl::particleColor(texel, color, drawn.additive, fog, glsl::vec3(0.2f, 0.4f, 0.6f)), 0.5f, 0.475f, 0.45f, 0.4f));
+}
+
 // psParticleLow/Medium/High then the fog: texel x colour, saturated as
 // ps_1_4's output is (red 0.8 x 1.5 = 1.2 -> 1), then lerped toward FogColor
 // by the fog's share: 1 x 0.375 + 0.2 x 0.625 = 0.5 (not 0.575, as the

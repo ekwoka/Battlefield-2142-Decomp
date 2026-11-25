@@ -275,7 +275,19 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
 ## Enhancements
 
 ### Q-14. The widescreen HUD is fixed to 16:9, wrong on ultrawide (UWQHD) screens (medium)
-- **Status:** open
+- **Status:** done (wave 3). With `enhanced.hudWidescreen` (and no hudfix), `hud::widescreenLayout`
+  (`src/Hud/Widescreen.h`) works out the layout from the window's pixel size each frame
+  (`ViewerOptions::windowSize`), so a resize updates it. The squeeze is (4/3) ÷ aspect. The sides
+  move 360 (1/squeeze − 1), which is 120 at 16:9. The frames keep their authored on-screen 0..1024,
+  plus one unit at each edge. At 16:9 this gives Remaster's 12/16, ±120 and -134/1367 exactly. 21:9
+  (3440×1440) gives 0.558, 285 and -317/1836, and 32:9 gives 0.375, 600 and -667/2732. A window 4:3
+  or narrower keeps the authored HUD. Tests: `Hud_WidescreenLayoutForTheWindowsAspect`,
+  `Hud_WidescreenLayoutFollowsAResize`. Off-screen screenshots at 3440×1440 and 5120×1440 show a
+  round minimap, the sides at the edges and the gunner frame covering the full width. When the
+  hudfix's shader is installed, its fixed 16:9 layout stays, even with the flag on: its
+  HudRotation.con and the re-cut commander screen aren't available here to extend. Flash menus,
+  from reading the code: `ui.vert` stretches the stage to the window (`size.z` 0 for menus), so at
+  21:9 they stretch about 1.79× wide. That's the same as before, and the pointer mapping matches.
 - **Where:** `src/Main/main.cpp` ~3886–3925 (`hudXScale`, the `enhanced.hudWidescreen` block)
 - **What works:** at 3440×1440 (21:9), with `+widescreen 1` (`src/Main/DisplayModes.h`),
   the mode is offered. The 3D view widens correctly: `aspectFov`, RendDX9's
@@ -546,7 +558,18 @@ or gating behind a flag.
   `enhanced.*` flag.
 
 ### A-12. Additive trails and placed particles aren't fogged (wave 1, medium)
-- **Status:** verify
+- **Status:** done (wave 3). The claim is confirmed, and retail goes further. RendDX9's trail
+  renderer (0x10133c00: technique 0x10133d90, batches 0x10133000) and its NSA renderer
+  (0x1012e920: 0x1012ebf0, 0x1012d720) pick the technique only by particleSystemShaderQuality,
+  plus particleShaderType 1 for heat shimmer (system +0x174 from the template's getter). Between
+  BeginPass and EndPass they set only textures and constants, no render states. Trail.fx and
+  NonScreenAlignedParticles.fx have no additive technique: Low, Medium and High are SRCALPHA /
+  INVSRCALPHA with FogEnable TRUE, and their pixel shaders don't mask by alpha. A template's
+  particleType Additive never reaches these renderers. The only shipped one is Codename_Excalibur's
+  `em_excalibur_trail_TrailGlow`. So placed groups now always draw normal-blend, lit and fogged
+  (`ParticleFog.h` `placedGroupDraw`), which avoids the problem of ONE/ONE fog brightening.
+  Test: `ShaderMath_TrailsAndPlacedQuadsAlwaysBlendAndFog`. Still open: the port fogs placed
+  triangles per pixel rather than per vertex (oFog), a small difference.
 - **Where:** `src/Render/LevelRenderer.cpp`, the placed-triangle path (`fogged = !additive`)
 - **Retail:** Trail.fx and NonScreenAlignedParticles.fx set `FogEnable = TRUE` in
   every technique, additive ones included. (Screen-aligned additive sprites are

@@ -3038,9 +3038,12 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 				if (!image) {
 					return;
 				}
+				// Retail's Trail.fx / NonScreenAlignedParticles.fx: always
+				// normal-blend and fogged, whatever the template's particleType (ParticleFog.h).
+				const PlacedParticleDraw drawn = placedGroupDraw(additive);
 				const uint32_t first = static_cast<uint32_t>(vertices.size());
 				for (const effects::WorldVertex& w : triangles) {
-					const std::array<float, 3> light = lightAt(w.position, w.lightMapOffset, additive);
+					const std::array<float, 3> light = lightAt(w.position, w.lightMapOffset, drawn.additive);
 					Vertex v {};
 					v.position[0] = w.position.x;
 					v.position[1] = w.position.y;
@@ -3055,7 +3058,7 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					v.part = -1;
 					vertices.push_back(v);
 				}
-				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first, true, nullptr, !additive});
+				groups.push_back({image, drawn.additive, first, static_cast<uint32_t>(vertices.size()) - first, true, nullptr, drawn.fogged});
 			});
 	}
 	if (weather && m_sources && m_sources->rain) {
