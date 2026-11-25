@@ -1860,39 +1860,60 @@ void BotManager::update(float seconds)
 			m_behaviourSeconds[bot.behaviour] += elapsed;
 			continue;
 		}
-		// Its Titan's guns (the gun hubs are seats of equipment type Fixed in
+		// Its Titan's guns. The gun hubs are seats of equipment type Fixed in
 		// their AI templates, which AIDLL's seat choice covers, but no
-		// strategy of its sends a bot into a Titan): while fewer than half
-		// its Titan's guns are manned or claimed, a bot aboard claims the
-		// nearest free working gun no other bot claimed, walks straight to
-		// its console and takes it; the Titan isn't among the bots' vehicles,
-		// so it stays and runs the Fixed behaviours there. The rest drop in
-		// pods.
+		// strategy of its sends a bot into a Titan: in retail mode bots crew
+		// no Titan gun. A hub naming an auto controller (Project Remaster's
+		// SentryGunAA, Co_Auto, SentryGunCannon) is left to it in either
+		// mode, as a seated bot would suspend it (allowTakeOver,
+		// GameWorld::stepSeatControllers). enhanced.botTitan: while fewer
+		// than half its Titan's other guns are manned or claimed, a bot
+		// aboard claims the nearest free working one no other bot claimed,
+		// walks straight to its console and takes it; the Titan isn't among
+		// the bots' vehicles, so it stays and runs the Fixed behaviours
+		// there. The rest drop in pods.
 		int gunSeat = bot.titanGun;
 		bool toGun = false;
 		if (!self->vehicle && m_world.titanOf(self->team)) {
-			std::vector<int> claimed;
+			const auto titanSeats = m_world.vehicleSeats(m_world.titanOf(self->team));
+			const auto crewed = [&](int seat) {
+				if (!m_settings.titanPlay() || seat < 0 || static_cast<size_t>(seat) >= titanSeats.size()
+					|| titanSeats[static_cast<size_t>(seat)].podLauncher) {
+					return false;
+				}
+				const world::ObjectTemplate* hub = m_world.templates().find(titanSeats[static_cast<size_t>(seat)].name);
+				const auto controller = hub ? hub->settings().find("autoControllerTemplateName") : decltype(hub->settings().end()) {};
+				return !hub || controller == hub->settings().end() || controller->second.empty();
+			};
+			std::vector<int> skip; // claimed by other bots, or not the bots' to crew
 			for (const auto& [id, other] : m_bots) {
 				const GameWorld::PlayerInfo* mate = nullptr;
 				for (const GameWorld::PlayerInfo& p : m_players) {
 					mate = p.id == id ? &p : mate;
 				}
-				if (id != self->id && other.titanGun >= 0 && mate && mate->team == self->team && mate->alive && !mate->vehicle) {
-					claimed.push_back(other.titanGun);
+				if (id != self->id && other.titanGun >= 0 && crewed(other.titanGun) && mate && mate->team == self->team && mate->alive
+					&& !mate->vehicle) {
+					skip.push_back(other.titanGun);
 				}
 			}
+			const long claimed = static_cast<long>(skip.size());
 			const std::vector<int> gunners = m_world.vehicleOccupants(m_world.titanOf(self->team));
-			const auto titanSeats = m_world.vehicleSeats(m_world.titanOf(self->team));
 			long manned = 0, guns = 0;
 			for (size_t i = 0; i < titanSeats.size(); ++i) {
-				if (titanSeats[i].podLauncher) continue;
+				if (!crewed(static_cast<int>(i))) {
+					skip.push_back(static_cast<int>(i));
+					continue;
+				}
 				++guns;
 				if (i < gunners.size() && gunners[i] >= 0) ++manned;
 			}
+			if (!crewed(gunSeat)) {
+				gunSeat = -1; // a stale claim
+			}
 			if (gunSeat >= 0) {
-				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, claimed);
-			} else if ((manned + static_cast<long>(claimed.size())) * 2 < guns) {
-				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, claimed);
+				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, skip);
+			} else if ((manned + claimed) * 2 < guns) {
+				toGun = m_world.titanGunEntry(self->id, podEntry, podRadius, gunSeat, skip);
 			}
 		}
 		bot.titanGun = toGun ? gunSeat : -1;

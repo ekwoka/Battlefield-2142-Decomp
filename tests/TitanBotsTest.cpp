@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <set>
@@ -32,6 +33,9 @@ void loadAircraftAi(TitanLevel& level, game::BotSettings& settings)
 
 } // namespace
 
+// enhanced.botTitan: bots aboard walk from the spawn room to half their
+// Titan's guns, but never to a hub that names an auto controller (all of
+// Project Remaster's), which the controller keeps.
 TEST(Titan_BotsReachGunConsolesFromSpawnRoom)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -72,7 +76,8 @@ TEST(Titan_BotsReachGunConsolesFromSpawnRoom)
 				gunners += info.vehicle == titan;
 			}
 			std::fprintf(stderr, "  %s team %d: %d of 6 bots manning guns\n", mod, team, gunners);
-			CHECK(gunners == 3);
+			// Remaster's hubs all name an auto controller, which keeps them: no bot walks to one.
+			CHECK(gunners == (std::strstr(mod, "Remaster") ? 0 : 3));
 		}
 	}
 }

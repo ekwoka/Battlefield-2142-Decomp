@@ -1297,46 +1297,53 @@ TEST(Titan_WalkerLegsRespectOuterShieldTeam)
 // takes it (the guns' AI templates are of equipment type Fixed, which the
 // seat logic covers; the walk is the rewrite's, AIDLL has no Titan
 // strategy); the rest make for the pod arrays.
+// No AIDLL strategy sends a bot into a Titan: in retail mode the bots
+// aboard crew none of its guns and go on to the pods; with
+// enhanced.botTitan they man up to half of them (BotManager::update).
 TEST(Titan_BotsManHalfTheGuns)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
 	}
-	TitanLevel level(gameDir, "Minsk", 48);
-	if (!level.loaded) {
-		return;
+	for (const bool enhanced : {false, true}) {
+		TitanLevel level(gameDir, "Minsk", 48);
+		if (!level.loaded) {
+			return;
+		}
+		game::BotSettings settings;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &enhanced;
+		game::BotManager bots(*level.world, settings);
+		level.afterTick = [&] { bots.update(1 / 30.0f); };
+		const auto pac = *level.titan(1);
+		const world::Object* titan = level.objects.find(pac.object);
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({titan->rotation().x, titan->rotation().y, titan->rotation().z});
+		std::vector<int> crew;
+		for (int i = 0; i < 6; ++i) {
+			const int id = level.world->addPlayer("Crew" + std::to_string(i), 1, true);
+			CHECK(level.world->spawnSoldier(id));
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(id, info);
+			// Over the Titan's spawn room deck (10.6 m up at 40 m aft, in its
+			// frame): they come down on it, falling too little for their
+			// parachutes (BotManager::handleWeapon's input 22).
+			CHECK(level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({static_cast<float>(i) - 3, 11.5f, -40})));
+			crew.push_back(id);
+		}
+		level.run(40);
+		int gunners = 0, aboard = 0;
+		for (const int id : crew) {
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(id, info);
+			gunners += info.vehicle == pac.object ? 1 : 0;
+			physics::Vec3 entry;
+			float radius = 0;
+			aboard += info.alive && !info.vehicle && level.world->titanPodEntry(id, entry, radius) ? 1 : 0;
+		}
+		std::fprintf(stderr, "  enhanced %d, of 6 bots aboard: %d at the guns, %d on foot aboard\n", enhanced, gunners, aboard);
+		CHECK(enhanced ? gunners >= 1 && gunners <= 3 : gunners == 0);
 	}
-	game::BotSettings settings;
-	game::BotManager bots(*level.world, settings);
-	level.afterTick = [&] { bots.update(1 / 30.0f); };
-	const auto pac = *level.titan(1);
-	const world::Object* titan = level.objects.find(pac.object);
-	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({titan->rotation().x, titan->rotation().y, titan->rotation().z});
-	std::vector<int> crew;
-	for (int i = 0; i < 6; ++i) {
-		const int id = level.world->addPlayer("Crew" + std::to_string(i), 1, true);
-		CHECK(level.world->spawnSoldier(id));
-		game::GameWorld::PlayerInfo info;
-		level.world->playerInfo(id, info);
-		// Over the Titan's spawn room deck (10.6 m up at 40 m aft, in its
-		// frame): they come down on it, falling too little for their
-		// parachutes (BotManager::handleWeapon's input 22).
-		CHECK(level.world->setSoldierPosition(info.soldier, pac.position + turn.transform({static_cast<float>(i) - 3, 11.5f, -40})));
-		crew.push_back(id);
-	}
-	level.run(40);
-	int gunners = 0, aboard = 0;
-	for (const int id : crew) {
-		game::GameWorld::PlayerInfo info;
-		level.world->playerInfo(id, info);
-		gunners += info.vehicle == pac.object ? 1 : 0;
-		physics::Vec3 entry;
-		float radius = 0;
-		aboard += info.alive && !info.vehicle && level.world->titanPodEntry(id, entry, radius) ? 1 : 0;
-	}
-	std::fprintf(stderr, "  of 6 bots aboard: %d at the guns, %d on foot aboard\n", gunners, aboard);
-	CHECK(gunners >= 1 && gunners <= 3);
 }
 
 // On Suez gpm_ti the generic SAI fallback also contains the two
