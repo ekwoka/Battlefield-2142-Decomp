@@ -2675,6 +2675,11 @@ GameSetup MenuBindings::gameSetup() const
 	setup.scoreLimit = static_cast<int>(setting("ServerSettings.ScoreLimit", 0));
 	setup.friendlyFire = setting("ServerSettings.FriendlyFire", 1) != 0;
 	setup.roundsPerMap = std::max(1, static_cast<int>(setting("ServerSettings.RoundsPerMap", 3)));
+	for (auto [name, field] : {std::pair {"ServerSettings.ServerName", &setup.serverName}, {"ServerSettings.Password", &setup.password}}) {
+		if (const auto it = m_settings.find(name); it != m_settings.end() && it->second.isString()) {
+			*field = it->second.asString();
+		}
+	}
 	return setup;
 }
 

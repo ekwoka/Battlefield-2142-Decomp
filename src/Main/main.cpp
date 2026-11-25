@@ -3181,6 +3181,7 @@ int main(int argc, char** argv)
 			}
 			session.client.reset();
 			session.endedClient.reset();
+			session.hosted.reset(); // the host left: its server closes with it
 			session.joinRequested = false;
 			options.connect.clear();
 			if (options.menu.empty()) {
@@ -4415,6 +4416,10 @@ int runGame(Options& options, Session& session)
 		options.timeLimit = startedGame->timeLimit;
 		options.scoreLimit = startedGame->scoreLimit;
 		options.playTeam = options.playTeam ? options.playTeam : 2;
+		// 0x00477d3e: createServer treats a first map in gpm_sp as the
+		// singleplayer page's game; any other mode is the Multiplay create
+		// page's, a server other machines join.
+		options.host = map.gameMode != "gpm_sp";
 		showMenu = false;
 		gameLogic.mapSize = options.mapSize;
 		std::printf("starting %s (%s, %d) with %d bots\n", options.level.c_str(), options.gameMode.c_str(), options.mapSize,
@@ -6761,6 +6766,11 @@ int runGame(Options& options, Session& session)
 			setup.maxPlayers = options.maxPlayers;
 			setup.gamePort = options.hostPort;
 			setup.queryPort = options.queryPort;
+			setup.loopbackOnly = false; // every interface, as retail's server: clients join from other machines
+			if (startedGame) {
+				setup.serverName = startedGame->serverName.empty() ? setup.serverName : startedGame->serverName;
+				setup.password = startedGame->password;
+			}
 			setup.contentRoot = options.gameDir; // pure with the mod's std_archive.md5 (Net/ContentCheck.h)
 			setup.modDirectory = options.modPath;
 			if (options.requireLogin) {
@@ -6802,7 +6812,7 @@ int runGame(Options& options, Session& session)
 				session.hosted->onLog = [](const std::string& line) { std::printf("host: %s\n", line.c_str()); };
 				if (session.hosted->start()) {
 					hosted = session.hosted.get();
-					std::printf("hosting %s (%s, %d) on 127.0.0.1:%u, LAN query port %u\n", options.level.c_str(),
+					std::printf("hosting %s (%s, %d) on port %u (all interfaces), LAN query port %u\n", options.level.c_str(),
 						options.gameMode.c_str(), options.mapSize, hosted->gamePort(), options.queryPort);
 				} else {
 					std::fprintf(stderr, "cannot host on port %u\n", options.hostPort);

@@ -128,6 +128,8 @@ struct GameSetup {
 	int scoreLimit = 0;
 	bool friendlyFire = true;
 	int roundsPerMap = 3;
+	std::string serverName; // the create page's ServerSettings.setServerName / setPassword
+	std::string password;
 };
 
 // The network behind the menu, replaceable (tests use fakes). Each
