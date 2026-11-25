@@ -7752,6 +7752,14 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			client.simulatedTick(); // this tick's move goes up (and is predicted)
+			// The view looks where the predicted soldier does (body and twist,
+			// as the host's camera, GameWorld::lookYaw), plus the turn not sent
+			// yet: a turn past the twist's limit in one move turns him further
+			// than the mouse did (SoldierControl), and W walks his way.
+			if (prediction.active() && remoteLook.started) {
+				remoteLook.yaw = std::remainder(
+					prediction.lookYaw() + client.world().input().get(net::kPIMouseLookX) * net::kDegreesPerMouseLookUnit, 360.0f);
+			}
 			if (remoteHud) {
 				// The player's update (0x005912c0): 3 a second, 0 under 0.0001.
 				remoteHud->hitIndicator -= 3.0f / 30.0f;
