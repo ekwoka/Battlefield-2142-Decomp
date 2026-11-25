@@ -4315,7 +4315,9 @@ void LevelRenderer::build(const LevelSources& sources)
 // Not retail: the kits' soldiers and weapons first appear after the load (a
 // spawn, a pick-up), where reading their Remaster textures (up to 22 MB,
 // ~70 ms to inflate) held the frame. Load them with the level instead: each
-// world mesh and its first-person geometry (PlayerCamera::models).
+// world mesh and its first-person geometry (PlayerCamera::models). The
+// spawners' vehicles too: a joined client's come as ghosts after its build
+// (Highway_Tampa: 268 ms in its first frame).
 void LevelRenderer::preloadKits(const LevelSources& sources)
 {
 	const uint64_t start = FrameStats::now();
@@ -4325,6 +4327,13 @@ void LevelRenderer::preloadKits(const LevelSources& sources)
 		const std::string& type = t->typeName();
 		if (type == "Kit" || type == "Soldier" || type == "GenericFireArm") {
 			pending.push_back(t.get());
+		} else if (type == "ObjectSpawner") {
+			for (const char* team : {"objectTemplate.team1", "objectTemplate.team2"}) {
+				const auto it = t->settings().find(team);
+				if (const world::ObjectTemplate* spawned = it != t->settings().end() ? sources.templates.find(it->second) : nullptr) {
+					pending.push_back(spawned);
+				}
+			}
 		}
 	}
 	std::set<const world::ObjectTemplate*> seen;

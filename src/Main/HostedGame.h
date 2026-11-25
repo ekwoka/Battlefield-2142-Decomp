@@ -381,6 +381,7 @@ private:
 		net::PlayerMove lastMove;                // the last move taken (0x004ac370: +0x14), all zero before any
 		int dryTicks = 0;                        // ticks in a row it was taken again (+0x30, at most 30)
 		uint32_t ticksStarved = 0;               // for the log
+		size_t mostWaiting = 0;                  // the most moves waiting at once, for the log
 		int historySlot = 7;                     // the record's slot (0x00580830: +0x20f8)
 		// The relative records (0x00580830's other path): the slot the
 		// client has acknowledged (+0x20f0, -1 none), how many relative

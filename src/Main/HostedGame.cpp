@@ -170,6 +170,7 @@ HostedGame::HostedGame(game::GameWorld& round, game::GameLogic& logic, world::Ob
 			// the last to the player's move list (player slot 0xa8,
 			// 0x00583770), which has no limit.
 			it->second.moves.push_back(move);
+			it->second.mostWaiting = std::max(it->second.mostWaiting, it->second.moves.size());
 		}
 	};
 }
@@ -180,7 +181,8 @@ HostedGame::~HostedGame()
 	stopDemo();
 	for (const auto& [id, client] : m_clients) {
 		if (onLog) {
-			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.ticksStarved) + " ticks without one");
+			onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(client.ticksStarved) + " ticks without one, at most "
+				+ std::to_string(client.mostWaiting) + " waiting, " + std::to_string(client.moves.size()) + " at the end");
 		}
 	}
 	m_server.stop();
@@ -1050,7 +1052,8 @@ void HostedGame::left(int id)
 	const int player = it->second.player;
 	sendVoteReplies(m_votes.playerLeft(player));
 	if (onLog) {
-		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.ticksStarved) + " ticks without one");
+		onLog("client " + std::to_string(id) + "'s moves: " + std::to_string(it->second.ticksStarved) + " ticks without one, at most "
+			+ std::to_string(it->second.mostWaiting) + " waiting, " + std::to_string(it->second.moves.size()) + " at the end");
 	}
 	m_clients.erase(it);
 	// The game server's destroyPlayer (0x004acfb0): the round lets the
