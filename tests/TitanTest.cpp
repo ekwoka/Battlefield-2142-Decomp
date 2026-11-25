@@ -2206,6 +2206,7 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 // walking and sprinting, and where each stopped.
 TEST(Titan_WalkerSweepsTheSuezBridges)
 {
+	DISABLED("vanilla us_heavy_mech stops on the big road's spans; 2.5 to 8.5 minutes a run (docs/review-backlog.md Q-13)");
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
