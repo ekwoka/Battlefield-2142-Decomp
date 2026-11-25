@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 #include <sstream>
 
 namespace dice::hfe::nametags {
@@ -1252,6 +1253,15 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		const float dx = decoy.x - p->position.x, dz = decoy.z - p->position.z;
 		return dx * dx + dz * dz > kDecoyCover * kDecoyCover;
 	};
+	// The vehicles with a reported occupant, for the network markers below.
+	std::set<uint32_t> reportedVehicles;
+	if (m_icons) {
+		for (const auto& p : players) {
+			if (p.vehicle && isReported(p.id)) {
+				reportedVehicles.insert(p.vehicle);
+			}
+		}
+	}
 	std::vector<hud::HudQuad> markers, squadIcons;
 	// The local squad's networkable HUD unlocks (0x101691c0's walk over the
 	// squad, the local player alone without one: ability +0x10 / +0x11).
@@ -1345,10 +1355,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			// shortcut: a vehicle's tag (its first occupant's) counts as revealed when any
 			// occupant is; retail reveals each occupant's player tag, of which only the
 			// first occupant's is drawn (0x100f33c0).
-			marker.revealed = isReported(p.id);
-			for (const auto& other : players) {
-				marker.revealed = marker.revealed || (p.vehicle && other.vehicle == p.vehicle && isReported(other.id));
-			}
+			marker.revealed = isReported(p.id) || (p.vehicle && reportedVehicles.count(p.vehicle) != 0);
 			marker.aimedAt = tag.aimed;
 			marker.selected = object == m_selectedObject;
 			float hx = 0, hy = 0;
@@ -1555,33 +1562,35 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	// object, 0x100f0d30; here its point in the aim cone and in sight); the
 	// latter only while its own tag shows (0x100f392b: showItem and the
 	// object tag's alpha, 0x100f1330: 1 - d / its enemy range).
-	for (const auto& p : m_icons ? players : std::vector<game::GameWorld::PlayerInfo> {}) {
-		physics::Vec3 at;
-		const world::ObjectTemplate* decoy = p.team != me.team && !p.cloaked ? world.decoyOf(p.id, at) : nullptr;
-		if (!decoy) {
-			continue;
-		}
-		const TagTemplate& tt = tagTemplate(decoy);
-		const std::array<float, 3> point {at.x + tt.offset[0], at.y + tt.offset[1], at.z + tt.offset[2]};
-		NetworkMarkerInput marker;
-		marker.alive = p.alive;
-		marker.revealed = std::find(reported.begin(), reported.end(), p.id) != reported.end();
-		marker.fadeRange = tt.inverse ? tt.maxEnemyDistance : std::min(tt.maxEnemyDistance, tt.maxDistance);
-		const float dx = point[0] - eye.x, dz = point[2] - eye.z;
-		marker.distance = std::sqrt(dx * dx + dz * dz);
-		const Vec toward = Vec {point[0], point[1], point[2]} - eye;
-		const float length = std::sqrt(dot(toward, toward));
-		marker.aimedAt = !marker.revealed && length > 0 && dot(toward, forward) / length > m_settings.aimCone
-			&& world.lineOfSight(eyeP, {point[0], point[1], point[2]}, 0);
-		marker.tagAlpha = tt.showItem && marker.fadeRange > 0 ? clamp01(1 - marker.distance / marker.fadeRange) : 0;
-		float mx = 0, my = 0, alpha = 0;
-		marker.onScreen = project(view, point, mx, my, false, 0) && mx >= 0 && mx <= 800 && my >= 0 && my <= 600;
-		const IconRegistry::Icon* icon = m_icons->find(networkMarker(m_settings, marker, alpha));
-		if (icon) {
-			float c[4];
-			std::copy(kColours[Enemy], kColours[Enemy] + 4, c);
-			c[3] = alpha;
-			markers.push_back(iconQuad(*icon, mx, my, c));
+	if (m_icons) {
+		for (const auto& p : players) {
+			physics::Vec3 at;
+			const world::ObjectTemplate* decoy = p.team != me.team && !p.cloaked ? world.decoyOf(p.id, at) : nullptr;
+			if (!decoy) {
+				continue;
+			}
+			const TagTemplate& tt = tagTemplate(decoy);
+			const std::array<float, 3> point {at.x + tt.offset[0], at.y + tt.offset[1], at.z + tt.offset[2]};
+			NetworkMarkerInput marker;
+			marker.alive = p.alive;
+			marker.revealed = std::find(reported.begin(), reported.end(), p.id) != reported.end();
+			marker.fadeRange = tt.inverse ? tt.maxEnemyDistance : std::min(tt.maxEnemyDistance, tt.maxDistance);
+			const float dx = point[0] - eye.x, dz = point[2] - eye.z;
+			marker.distance = std::sqrt(dx * dx + dz * dz);
+			const Vec toward = Vec {point[0], point[1], point[2]} - eye;
+			const float length = std::sqrt(dot(toward, toward));
+			marker.aimedAt = !marker.revealed && length > 0 && dot(toward, forward) / length > m_settings.aimCone
+				&& world.lineOfSight(eyeP, {point[0], point[1], point[2]}, 0);
+			marker.tagAlpha = tt.showItem && marker.fadeRange > 0 ? clamp01(1 - marker.distance / marker.fadeRange) : 0;
+			float mx = 0, my = 0, alpha = 0;
+			marker.onScreen = project(view, point, mx, my, false, 0) && mx >= 0 && mx <= 800 && my >= 0 && my <= 600;
+			const IconRegistry::Icon* icon = m_icons->find(networkMarker(m_settings, marker, alpha));
+			if (icon) {
+				float c[4];
+				std::copy(kColours[Enemy], kColours[Enemy] + 4, c);
+				c[3] = alpha;
+				markers.push_back(iconQuad(*icon, mx, my, c));
+			}
 		}
 	}
 	m_players = std::move(seen);

@@ -63,7 +63,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
 ## Crashes and correctness bugs
 
 ### Q-2. Two new Titan tests crash without the Remaster mod (high)
-- **Status:** open
+- **Status:** done (wave 1). Both tests start with `REMASTER_ONLY()` and CHECK the Titan before using it.
 - **Commits:** 7c52206, a563255
 - **Where:** `tests/TitanTest.cpp` ~5160 (`Titan_CorpseLiesOnTheDeck`) and ~5277
   (`Titan_WreckedGunshipOnTheDeckCantBeBoarded`)
@@ -104,7 +104,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   use the shared alpha range; and snap on `setWeapon`. Add a multi-tick frame test.
 
 ### Q-5. `BF2142_FRAME_STATS` problems (low)
-- **Status:** open
+- **Status:** done (wave 1). `FrameStats::intervalFrom`: unset, empty, 0 or negative is off; the `gpu: driver` line only with the stats on; `dropFrame` on a failed acquire; README row. Tests `FrameStats_IntervalFromTheVariable`, `FrameStats_DroppedFrameAddsNothing`.
 - **Commits:** 8e3e8cf, 8a22e02
 - **Problems:**
   - `BF2142_FRAME_STATS=0` turns the stats on, at 5 s (`src/Render/FrameStats.h:31`:
@@ -146,7 +146,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   does, or store a flag per node next to `nodesTicked`.
 
 ### Q-7. Nametag loops (low)
-- **Status:** open
+- **Status:** done (wave 1). The decoy loop sits in `if (m_icons)`; the vehicle reveal reads a set of reported vehicles built once per frame. Same output.
 - **Where:** `src/Main/Nametags.cpp`
 - **Problems:**
   - The decoy loop, `for (const auto& p : m_icons ? players : std::vector<...>{})`,
@@ -156,7 +156,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
     vehicles.
 
 ### Q-8. One `titanParts` call still ignores the Titan's id (low)
-- **Status:** open (left over from round 1)
+- **Status:** done (wave 1). The cut-off check passes `titan->object` too.
 - **Where:** `src/Game/BotsTitan.cpp:409`, the cut-off check from 98163d0
 - **Problem:** this one call still passes `titanParts(titan->team)` without
   `titan->object`; every other call was updated in 709a7bf. It's for consistency
@@ -211,7 +211,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   - drop or explain the redundant flags.
 
 ### Q-12. Small test-tool and key-script nits (low)
-- **Status:** open
+- **Status:** done (wave 1). `rclick` is its own `if`; `--remote-actions` holds the lie key while the asked pose and our ghost's pose (the server's, mask 0x20) differ, so a refused press stays one press.
 - **Problems:**
   - `src/Main/Viewer.cpp`, `runKeyScript`: the `else if (step.op == "rclick")`
     hangs off the new `release` branch. Make it a separate `if`.

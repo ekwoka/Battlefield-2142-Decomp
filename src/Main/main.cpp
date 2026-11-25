@@ -7599,9 +7599,20 @@ int runGame(Options& options, Session& session)
 				playerCamera.setAltFire(act.altFire);
 				remoteLook.fire = act.fire;
 				remoteLook.stance = act.pose == game::SoldierPose::Prone ? 2 : act.pose == game::SoldierPose::Crouch ? 1 : 0;
-				// A scripted pose is a latched one: the wire takes a lie press when it changes.
-				act.lieKey = (act.pose == game::SoldierPose::Prone) != actProne;
-				actProne = act.pose == game::SoldierPose::Prone;
+				// A scripted pose is a latched one: the lie key (a toggle on its press)
+				// is held while the pose asked for and the soldier's differ. The
+				// soldier's is the server's (our ghost's pose); before it has sent
+				// one, the last asked for. A refused press stays held, so it can't
+				// toggle twice.
+				const bool wantProne = act.pose == game::SoldierPose::Prone;
+				{
+					const net::ControlObjectRecord& control = client.world().controlObject();
+					const net::RemoteObject* own = control.vehicle == 0 ? client.world().object(control.ghost) : nullptr;
+					if (own && own->kind == net::NetworkableKind::Soldier) {
+						actProne = own->pose == static_cast<int>(game::SoldierPose::Prone);
+					}
+				}
+				act.lieKey = wantProne != actProne;
 				client.setInput(net::playerInputFrom(act, remoteActionsPitch));
 				remoteActionsPitch = act.aimPitch;
 			}
