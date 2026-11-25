@@ -827,7 +827,8 @@ public:
 	void setVehicleNavMesh(const ai::NavMesh* mesh) { m_vehicleNavMesh = mesh; }
 	// enhanced.botTitan in gpm_ti: makes the Titans' walking grids now, at the
 	// level's load (a second or two of rays each, else spent mid-round).
-	void prepareTitanGrids();
+	// With `titanObject`, that Titan's only (both teams' grids on it; the tests).
+	void prepareTitanGrids(uint32_t titanObject = 0);
 	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
 	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The grids' cells and links, a line each (and, for $BF2142_BOT_STATS, the vehicles).

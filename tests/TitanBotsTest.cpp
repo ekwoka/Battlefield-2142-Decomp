@@ -77,8 +77,10 @@ TEST(Titan_BotsReachGunConsolesFromSpawnRoom)
 }
 
 // enhanced.botTitan: bots aboard their Titan crew its deck gunship and fly
-// it off, and fly its transport to a silo with riders who drop in pods.
-TEST(Titan_BotsFlyDeckAircraftFromTitan)
+// it off, and fly its transport to a silo with riders who drop in pods. The
+// same round runs for each half of the checks (a test each, below): the
+// gunship's, and the transport's and its pods'.
+static void botsFlyDeckAircraftFromTitan(const bool gunship)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
@@ -224,11 +226,26 @@ TEST(Titan_BotsFlyDeckAircraftFromTitan)
 				t.maxRiders = std::max(t.maxRiders, departed[team] ? t.maxRiders : riders);
 			}
 		};
-		level.run(240);
+		// Up to four minutes; done once both teams have reached everything this
+		// half checks below.
+		const float ran = level.runUntil(240, [&] {
+			if (teams.size() < 2) return false;
+			for (const auto& [team, t] : teams) {
+				const bool done = gunship ? t.gunshipFlown
+					: t.transportFlown && t.maxRiders >= 1 && t.drops >= 1 && t.normalFlight && t.supportStarted && t.supportHeld
+						&& t.repositioned && t.gunnersRetained && t.gunShots > 0 && t.spawnedInFlight;
+				if (!done) return false;
+			}
+			return true;
+		});
+		std::fprintf(stderr, "  %s: %.0f s\n", mod, ran);
 		for (const auto& [team, t] : teams) {
 			std::fprintf(stderr, "  %s team %d: gunship flown %d, transport flown %d with up to %d riders, %d pod drops, support %d, held %d (%d ticks), repositioned %d, retained gunners %d, %u gun rounds, restarted %d, mobile spawn %d\n",
 				mod, team, t.gunshipFlown, t.transportFlown, t.maxRiders, t.drops, t.normalFlight, t.supportHeld, t.supportHoldTicks, t.repositioned, t.gunnersRetained, t.gunShots, t.restartedSortie, t.spawnedInFlight);
-			CHECK(t.gunshipFlown);
+			if (gunship) {
+				CHECK(t.gunshipFlown);
+				continue;
+			}
 			CHECK(t.transportFlown);
 			CHECK(t.maxRiders >= 1);
 			CHECK(t.drops >= 1);
@@ -241,6 +258,9 @@ TEST(Titan_BotsFlyDeckAircraftFromTitan)
 		}
 	}
 }
+
+TEST(Titan_BotsFlyDeckAircraftFromTitan_Gunship) { botsFlyDeckAircraftFromTitan(true); }
+TEST(Titan_BotsFlyDeckAircraftFromTitan_TransportAndPods) { botsFlyDeckAircraftFromTitan(false); }
 
 // Air transports away from the deck, even near a Titan, are not deck sorties.
 TEST(Titan_BotsLeaveOtherTransportsToOrdinaryAi)
@@ -621,7 +641,23 @@ TEST(Titan_BotEngineersRepairTitanGunsAndConsoles)
 				repairing[id] += bots.behaviour(id) == "TitanRepair";
 			}
 		};
-		level.run(240);
+		// Up to four minutes; done once the guns checked below are back in service
+		// (four a team) and every engineer has been at it (the consoles are
+		// checked after).
+		const float ran = level.runUntil(240, [&] {
+			for (int team : {1, 2}) {
+				int up = 0;
+				for (uint32_t gun : guns[team]) {
+					up += level.world->hitPoints(gun) > 0;
+				}
+				if (up < 4) return false;
+			}
+			for (const auto& [id, team] : repairers) {
+				if (repairing[id] <= 0) return false;
+			}
+			return true;
+		});
+		std::fprintf(stderr, "  %s: %.0f s\n", mod, ran);
 		std::map<int, int> back;
 		for (int team : {1, 2}) {
 			for (uint32_t gun : guns[team]) {
@@ -798,8 +834,19 @@ TEST(Titan_BotGridRebuiltAroundOpenedCoreDoors)
 	const bool enhanced = true;
 	settings.enhanced = &enhanced;
 	settings.botTitan = &enhanced;
+	// Only team 1's consoles go down: only its Titan's grids (both teams' on
+	// it) are built and compared. The other Titan's mesh stays as it was, so
+	// none of its grids would be cast again.
+	const auto* found = level.titan(1);
+	CHECK(found != nullptr);
+	if (!found) return;
+	const uint32_t titan = found->object;
+	const auto* other = level.titan(2);
+	CHECK(other != nullptr);
+	if (!other) return;
+	const uint32_t otherTitan = other->object, otherVersion = level.world->titanMeshVersion(otherTitan);
 	game::BotManager kept(*level.world, settings);
-	kept.prepareTitanGrids();
+	kept.prepareTitanGrids(titan);
 	const std::string before = kept.titanGridStats();
 	CHECK(before.find("titan grid") != std::string::npos);
 	const int attacker = level.world->addPlayer("Eu", 2, true);
@@ -809,9 +856,10 @@ TEST(Titan_BotGridRebuiltAroundOpenedCoreDoors)
 		}
 	}
 	level.run(1);
-	kept.prepareTitanGrids();
+	CHECK(level.world->titanMeshVersion(otherTitan) == otherVersion);
+	kept.prepareTitanGrids(titan);
 	game::BotManager whole(*level.world, settings);
-	whole.prepareTitanGrids();
+	whole.prepareTitanGrids(titan);
 	std::fprintf(stderr, "  before:\n%s  after:\n%s", before.c_str(), kept.titanGridStats().c_str());
 	CHECK(kept.titanGridStats() != before);
 	CHECK(kept.titanGridStats() == whole.titanGridStats());
@@ -970,14 +1018,14 @@ TEST(Titan_BotsPodToWalkableGroundOnMolokaiTitan)
 // (the climb, then straight at the enemy's middle) clear of its box, and
 // beside the enemy's Titan once that one's shield is down; the UAV goes up
 // over the focus. With the switch off nobody orders it (the server's first
-// order at its own place stands).
-TEST(Titan_BotCommanderMovesTheTitans)
+// order at its own place stands). A test per setting below.
+static void botCommanderMovesTheTitans(const bool commander)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
 	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
-		for (const bool commander : {false, true}) {
+		{
 			TitanLevel level(gameDir, "Suez_Canal", 48, true, mod);
 			CHECK(level.loaded);
 			if (!level.loaded) continue;
@@ -1017,7 +1065,34 @@ TEST(Titan_BotCommanderMovesTheTitans)
 			// The missile paths as the commander reads them (titanBlocksSilos: its climb and box clearance, the
 			// team's silos and the focus silo): the Titan at `at` (moved there; it never turns) is in none.
 			const auto blocks = [&](int team, const physics::Vec3& at) { return bots.titanOrderBlocksSilos(team, at); };
-			level.run(150);
+			// Commander on: up to 150 s, done once both Titans meet every check below (the order and the UAV
+			// come at the first think, the 100 m at about 95 s). Off: the switch is read first thing in
+			// titanCommand, which runs every 10 s; switched on, the order (over 30 m off) and the UAV are there
+			// within 1 s and the Titan is 5 m on by 6 s, so 30 s (three thinks, five times that) shows none.
+			float ran = 0;
+			if (commander) {
+				ran = level.runUntil(150, [&] {
+					for (int team : {1, 2}) {
+						const auto* found = level.titan(team);
+						if (!found || !found->hasTarget) return false;
+						const auto t = *found;
+						float silo = 1e9f;
+						for (const auto& s : level.world->missileSilos()) {
+							silo = std::min(silo, std::hypot(t.target.x - s.position.x, t.target.z - s.position.z));
+						}
+						if (!(std::hypot(t.target.x - start[team].x, t.target.z - start[team].z) > 30
+								&& std::hypot(t.position.x - start[team].x, t.position.z - start[team].z) > 100 && silo <= 125
+								&& !blocks(team, t.target) && uav[team])) {
+							return false;
+						}
+					}
+					return true;
+				});
+			} else {
+				ran = 30;
+				level.run(ran);
+			}
+			std::fprintf(stderr, "  %s commander %d: %.0f s\n", mod, commander, ran);
 			for (int team : {1, 2}) {
 				// (level.titan's answer is one static, overwritten by the next call: copied.)
 				const auto* found = level.titan(team);
@@ -1067,7 +1142,11 @@ TEST(Titan_BotCommanderMovesTheTitans)
 			for (int team : {1, 2}) {
 				before[team] = level.titan(team)->hitPoints;
 			}
-			level.run(175);
+			// Up to 175 s, done once each Titan's missile has hurt the enemy's.
+			const float hit = level.runUntil(175, [&] {
+				return level.titan(2)->hitPoints < before[2] && level.titan(1)->hitPoints < before[1];
+			});
+			std::fprintf(stderr, "  %s: missiles hit after %.0f s\n", mod, hit);
 			for (int team : {1, 2}) {
 				const float own = level.titan(team)->hitPoints, enemy = level.titan(3 - team)->hitPoints;
 				std::fprintf(stderr, "  %s team %d: own Titan %.0f -> %.0f, enemy's %.0f -> %.0f\n", mod, team, before[team], own, before[3 - team], enemy);
@@ -1076,7 +1155,15 @@ TEST(Titan_BotCommanderMovesTheTitans)
 			// The EU's shield down: the PAC Titan goes beside it.
 			addBots();
 			level.world->setHitPoints(level.titan(2)->object, level.titan(2)->maxHitPoints * 0.59f);
-			level.run(25);
+			// Up to 25 s, done once the PAC order is in the ring and clear of the missile paths.
+			const float ordered = level.runUntil(25, [&] {
+				const auto pac = *level.titan(1);
+				const auto eu = *level.titan(2);
+				const float apart = pac.radius + eu.radius;
+				const float beside = std::hypot(pac.target.x - eu.position.x, pac.target.z - eu.position.z);
+				return beside >= apart + 20 && beside <= apart + 90 && !blocks(1, pac.target);
+			});
+			std::fprintf(stderr, "  %s: PAC ordered beside after %.0f s\n", mod, ordered);
 			const auto pacInfo = *level.titan(1);
 			const auto euInfo = *level.titan(2);
 			const auto* pac = &pacInfo;
@@ -1089,6 +1176,9 @@ TEST(Titan_BotCommanderMovesTheTitans)
 		}
 	}
 }
+
+TEST(Titan_BotCommanderMovesTheTitans_Off) { botCommanderMovesTheTitans(false); }
+TEST(Titan_BotCommanderMovesTheTitans_On) { botCommanderMovesTheTitans(true); }
 
 // A gun hangs under the hull; its control station inside (an unarmoured
 // child of the gun's bundle, eu_controlstation_v2_g) is the gun's to the

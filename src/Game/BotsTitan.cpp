@@ -266,10 +266,13 @@ const GameWorld::TitanInfo* BotManager::titanUnder(const std::vector<GameWorld::
 	return nearest;
 }
 
-void BotManager::prepareTitanGrids()
+void BotManager::prepareTitanGrids(uint32_t titanObject)
 {
 	if (m_settings.titanPlay() && m_world.gameMode() == "gpm_ti") {
 		for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+			if (titanObject && titan.object != titanObject) {
+				continue;
+			}
 			for (int team : {1, 2}) {
 				titanGrid(titan, team);
 			}

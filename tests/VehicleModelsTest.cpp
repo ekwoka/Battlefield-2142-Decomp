@@ -4671,13 +4671,14 @@ TEST(Vehicles_SeatedKitMovesWithItsWearer)
 	CHECK(kit->hidden() == soldier->hidden());
 }
 
-// Check the real stationary AA at multiple headings, including both fire groups.
-TEST(Vehicles_StaticAAHeadingAndEmpMissileFlight)
+// Check the real stationary AA at one heading, both fire groups (a test per
+// heading below, so they run side by side: each case loads its own game).
+static void staticAAHeadingAndEmpMissileFlight(float heading)
 {
     if (!gameDir()) return;
     for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
         if (!test::runs(mod)) continue;
-        for (float heading : {0.0f, 90.0f, 180.0f, -90.0f}) {
+        {
             for (bool missile : {false, true}) {
               for (float hullYaw : {0.0f, 90.0f}) {
                for (bool authoredSpread : {false, true}) {
@@ -4758,6 +4759,10 @@ TEST(Vehicles_StaticAAHeadingAndEmpMissileFlight)
     }
 }
 
+TEST(Vehicles_StaticAAHeading0AndEmpMissileFlight) { staticAAHeadingAndEmpMissileFlight(0.0f); }
+TEST(Vehicles_StaticAAHeading90AndEmpMissileFlight) { staticAAHeadingAndEmpMissileFlight(90.0f); }
+TEST(Vehicles_StaticAAHeading180AndEmpMissileFlight) { staticAAHeadingAndEmpMissileFlight(180.0f); }
+TEST(Vehicles_StaticAAHeadingMinus90AndEmpMissileFlight) { staticAAHeadingAndEmpMissileFlight(-90.0f); }
 
 // The walker's main cannon: the installed SimpleDeviationComp is low but
 // nonzero (minDev 0.25), and each actual shot must follow the posed camera
@@ -6240,7 +6245,8 @@ TEST(Vehicles_FavStaysUprightUnderSteeringAndBoost)
 // as main.cpp wires it (0x006d2fc0: the cell triangle's height and face
 // normal), against the port's former one (bilinear height, the normal from
 // heights a cell either side): no more time off the ground, no much rougher ride.
-TEST(Vehicles_DriveOverSuezHills)
+// A test per vehicle below (each drive loads its own garage).
+static void driveOverSuezHills(const char* vehicle)
 {
 	if (!gameDir()) return;
 	struct Drive {
@@ -6346,7 +6352,7 @@ TEST(Vehicles_DriveOverSuezHills)
 	stretches.resize(std::min<size_t>(stretches.size(), 4));
 	CHECK(stretches.size() == 4);
 	for (const auto& [rough, from] : stretches) {
-		for (const char* name : {"eu_fav", "eu_tank"}) {
+		for (const char* name : {vehicle}) {
 			const Drive was = drive(name, from, false), now = drive(name, from, true);
 			std::fprintf(stderr, "  %s at %.0f/%.0f (roughness %.1f): airborne %d -> %d, jolt %.2f (tick %d) -> %.2f (tick %d) m/s, mean %.3f -> %.3f, roll %.1f -> %.1f, pitch %.1f -> %.1f, distance %.0f -> %.0f m\n",
 				name, from.x, from.z, rough, was.airborne, now.airborne, was.jolt, was.joltTick, now.jolt, now.joltTick, was.meanJolt, now.meanJolt, was.roll, now.roll, was.pitch, now.pitch, was.distance, now.distance);
@@ -6360,6 +6366,9 @@ TEST(Vehicles_DriveOverSuezHills)
 		}
 	}
 }
+
+TEST(Vehicles_DriveOverSuezHills_EuFav) { driveOverSuezHills("eu_fav"); }
+TEST(Vehicles_DriveOverSuezHills_EuTank) { driveOverSuezHills("eu_tank"); }
 
 #ifdef BF2142_RENDER_TESTS
 TEST(FirstPerson_TickBlendPixelsOptIn)
@@ -7715,14 +7724,16 @@ TEST(Vehicles_ShepherdExitDropsAPodInFlight)
 	CHECK(g.world->playerVehicle() == nullptr);
 }
 
-// Missiles at each enemy vehicle from four sides: any that passes through.
-TEST(Vehicles_MissilesHitEveryEnemyVehicle)
+// Missiles at an enemy vehicle from four sides: any that passes through (a
+// test per vehicle below, so they run side by side: each shot loads its own
+// game).
+static void missilesHitEnemyVehicle(const char* name)
 {
 	if (!gameDir()) {
 		return;
 	}
 	int through = 0;
-	for (const char* name : {"as_fav", "eu_fav", "as_tank", "eu_tank", "as_apc_pods", "eu_apc_pods", "as_heavy_mech", "us_heavy_mech", "eu_ifv", "as_ag", "us_ag", "as_hov_light"}) {
+	{
 		for (const char* missile : {"unl_av_missile", "eu_av_missile", "as_av_missile"}) {
 			for (int side = 0; side < 4; ++side) {
 				Garage g(gameDir());
@@ -7746,6 +7757,19 @@ TEST(Vehicles_MissilesHitEveryEnemyVehicle)
 	}
 	std::fprintf(stderr, "  %d passes\n", through);
 }
+
+TEST(Vehicles_MissilesHitEnemyAsFav) { missilesHitEnemyVehicle("as_fav"); }
+TEST(Vehicles_MissilesHitEnemyEuFav) { missilesHitEnemyVehicle("eu_fav"); }
+TEST(Vehicles_MissilesHitEnemyAsTank) { missilesHitEnemyVehicle("as_tank"); }
+TEST(Vehicles_MissilesHitEnemyEuTank) { missilesHitEnemyVehicle("eu_tank"); }
+TEST(Vehicles_MissilesHitEnemyAsApcPods) { missilesHitEnemyVehicle("as_apc_pods"); }
+TEST(Vehicles_MissilesHitEnemyEuApcPods) { missilesHitEnemyVehicle("eu_apc_pods"); }
+TEST(Vehicles_MissilesHitEnemyAsHeavyMech) { missilesHitEnemyVehicle("as_heavy_mech"); }
+TEST(Vehicles_MissilesHitEnemyUsHeavyMech) { missilesHitEnemyVehicle("us_heavy_mech"); }
+TEST(Vehicles_MissilesHitEnemyEuIfv) { missilesHitEnemyVehicle("eu_ifv"); }
+TEST(Vehicles_MissilesHitEnemyAsAg) { missilesHitEnemyVehicle("as_ag"); }
+TEST(Vehicles_MissilesHitEnemyUsAg) { missilesHitEnemyVehicle("us_ag"); }
+TEST(Vehicles_MissilesHitEnemyAsHovLight) { missilesHitEnemyVehicle("as_hov_light"); }
 
 // Where a round from the side meets the EU FAV: a grid of heights and offsets.
 TEST(Vehicles_EuFavSideGrid)

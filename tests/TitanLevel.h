@@ -148,6 +148,27 @@ struct TitanLevel {
 			}
 		}
 	}
+	// Runs up to `seconds`, stopping early once `done` (asked after every
+	// `every` seconds of ticks) is true. Returns the seconds run.
+	float runUntil(float seconds, const std::function<bool()>& done, float every = 1)
+	{
+		const int ticks = static_cast<int>(seconds * 30 + 0.5f);
+		const int step = std::max(1, static_cast<int>(every * 30 + 0.5f));
+		int tick = 0;
+		while (tick < ticks) {
+			const int to = std::min(ticks, tick + step);
+			for (; tick < to; ++tick) {
+				world->tick(1 / 30.0f);
+				if (afterTick) {
+					afterTick();
+				}
+			}
+			if (done()) {
+				break;
+			}
+		}
+		return tick / 30.0f;
+	}
 	const game::GameWorld::TitanInfo* titan(int team)
 	{
 		static game::GameWorld::TitanInfo info;

@@ -1941,9 +1941,13 @@ static void heldGunshipRunners(bool softLanding)
 	CHECK(deaths == 0);
 }
 
-TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
+TEST(Titan_HeldGunshipDoesNotCrushSoldiers_RetailRule)
 {
 	heldGunshipRunners(false);
+}
+
+TEST(Titan_HeldGunshipDoesNotCrushSoldiers_SoftLanding)
+{
 	heldGunshipRunners(true);
 }
 
@@ -2340,55 +2344,65 @@ TEST(Titan_WalkerClimbsALedgeAndStopsAtAWall)
 	}
 }
 
-TEST(Titan_WalkerCrossesTheSuezBridges)
+// The canal bridges of StaticObjects.con: bridge_industrial_01_c (65, -36),
+// (-512, -36) and (-99, -128), bc_big_bridge_a (-185, -32) and (-303, -32).
+// Walking and sprinting, with the vanilla and the Remaster mech.
+// The two bc_big_bridge_a spans are one road across the canal, driven on
+// the lane at z -32 from the west bank to the east bank. A test per bridge
+// below (each crossing loads its own level).
+static void walkerCrossesTheSuezBridge(const BridgeCrossing& bridge)
 {
-	// The canal bridges of StaticObjects.con: bridge_industrial_01_c (65, -36),
-	// (-512, -36) and (-99, -128), bc_big_bridge_a (-185, -32) and (-303, -32).
-	// Walking and sprinting, with the vanilla and the Remaster mech.
-	// The two bc_big_bridge_a spans are one road across the canal, driven on
-	// the lane at z -32 from the west bank to the east bank.
-	const BridgeCrossing bridges[] = {{65, -36, 90, 47.2f}, {-512, -36, 90, 47.2f}, {-99, -128, 0, 47.2f}, {-245, -32, 90, 50.8f, 175, 130}};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
-		for (const BridgeCrossing& bridge : bridges) {
-			for (const bool sprint : {false, true}) {
-				walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
-			}
+		for (const bool sprint : {false, true}) {
+			walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
 		}
 	}
 }
 
+TEST(Titan_WalkerCrossesTheSuezBridges_Industrial65) { walkerCrossesTheSuezBridge({65, -36, 90, 47.2f}); }
+TEST(Titan_WalkerCrossesTheSuezBridges_IndustrialMinus512) { walkerCrossesTheSuezBridge({-512, -36, 90, 47.2f}); }
+TEST(Titan_WalkerCrossesTheSuezBridges_IndustrialMinus99) { walkerCrossesTheSuezBridge({-99, -128, 0, 47.2f}); }
+TEST(Titan_WalkerCrossesTheSuezBridges_BigRoad) { walkerCrossesTheSuezBridge({-245, -32, 90, 50.8f, 175, 130}); }
+
 // Both shipped walker models must stay in contact with Suez bridge decks,
-// rather than alternate between the hull box and leg sphere.
-TEST(Titan_WalkerBridgeContactDoesNotOscillate)
+// rather than alternate between the hull box and leg sphere. A test per bridge
+// below (each crossing loads its own level).
+static void walkerBridgeContactDoesNotOscillate(const BridgeCrossing& bridge)
 {
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
 		for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech"}) {
 			for (const bool sprint : {false, true}) {
-				for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
-						 BridgeCrossing {-512, -36, 90, 47.2f}, BridgeCrossing {-99, -128, 0, 47.2f},
-						 BridgeCrossing {-245, -32, 90, 50.8f, 175, 130}})
-					walkerCrossesBridge(mod, vehicle, bridge, sprint, false, false, false, true);
+				walkerCrossesBridge(mod, vehicle, bridge, sprint, false, false, false, true);
 			}
 		}
 	}
 }
 
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_Industrial65) { walkerBridgeContactDoesNotOscillate({65, -36, 90, 47.2f}); }
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_IndustrialMinus512) { walkerBridgeContactDoesNotOscillate({-512, -36, 90, 47.2f}); }
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_IndustrialMinus99) { walkerBridgeContactDoesNotOscillate({-99, -128, 0, 47.2f}); }
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_BigRoad) { walkerBridgeContactDoesNotOscillate({-245, -32, 90, 50.8f, 175, 130}); }
+
 // Record vertical movement and progress with more actual vehicles and small
 // steering inputs. This survey records evidence; it is not a retail-motion
-// acceptance threshold. The long bridge has joints, ramps and props.
-TEST(Titan_SuezBridgeMotionSurvey)
+// acceptance threshold. The long bridge has joints, ramps and props. A test
+// per vehicle below (each crossing loads its own level).
+static void suezBridgeMotionSurvey(const char* vehicle)
 {
     const BridgeCrossing bridge {-245, -32, 90, 50.8f, 175, 130};
     for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
         if (!test::runs(mod)) continue;
-        for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech", "eu_tank", "eu_apc"}) {
-            for (bool steering : {false, true})
-                walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
-        }
+        for (bool steering : {false, true})
+            walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
     }
 }
+
+TEST(Titan_SuezBridgeMotionSurvey_UsHeavyMech) { suezBridgeMotionSurvey("us_heavy_mech"); }
+TEST(Titan_SuezBridgeMotionSurvey_AsHeavyMech) { suezBridgeMotionSurvey("as_heavy_mech"); }
+TEST(Titan_SuezBridgeMotionSurvey_EuTank) { suezBridgeMotionSurvey("eu_tank"); }
+TEST(Titan_SuezBridgeMotionSurvey_EuApc) { suezBridgeMotionSurvey("eu_apc"); }
 
 // Controlled collision survey with a second walker in the same lane.
 // It is not a substitute for bot routing through the pictured underpass.
@@ -2853,14 +2867,14 @@ TEST(Titan_SuezCargoBayLandingUsesStaticNodeDamage)
 // as for every vehicle gun: retail 0x004ba440 / 0x004ba500 -> game logic slot
 // 0x128 -> 0x004ba070 hand the round's player on). A soldier and a gunship
 // stand 10 m ahead of the first round. Each seat gets a fresh level so no
-// earlier round is in flight.
-TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
+// earlier round is in flight. A test per kind of gun below.
+static void gunSeatRoundsRaiseTheHitmarker(const char* part)
 {
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
  if (!test::runs(mod)) continue;
- for (const char* part : {"aacannon", "groundcanone3"}) {
+ {
   for (int nth = 0; nth < 6; ++nth) for (const bool vehicle : {false, true}) {
    TitanLevel level(dir, "Minsk", 48, true, mod);
    CHECK(level.loaded);
@@ -2924,6 +2938,9 @@ TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
  }
  }
 }
+
+TEST(Titan_GunSeatRoundsRaiseTheHitmarker_AACannon) { gunSeatRoundsRaiseTheHitmarker("aacannon"); }
+TEST(Titan_GunSeatRoundsRaiseTheHitmarker_GroundCannon) { gunSeatRoundsRaiseTheHitmarker("groundcanone3"); }
 
 // Both Titan AA positions share the firearm but own independent aim and fire.
 TEST(Titan_AASeatAimAndFireOwnership)
@@ -5021,14 +5038,15 @@ TEST(Titan_SoldiersMeetTheGunsCollisionParts)
 // damage dealt to an armoured object of a team. With the shield up the
 // rockets stop at the force field (rocket material 55 against its 4118: a
 // damage mod of 0, so 0x005a4dd0 never calls the damage and no marker); with
-// it down they hurt the gun and the pilot's marker lights.
-TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
+// it down they hurt the gun and the pilot's marker lights. A test for each
+// below (every attempt loads its own level).
+static void gunshipRocketsAtTheEnemyGunHub(const bool shieldDown)
 {
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
   if (!test::runs(mod)) continue;
-  for (const bool shieldDown : {false, true}) {
+  {
    // The gun hub's collision is its small children: sweep the aim until a
    // rocket lands (shield up: all of them end on the force field).
    int landed = 0, marked = 0;
@@ -5092,6 +5110,9 @@ TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
   }
  }
 }
+
+TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker_ShieldUp) { gunshipRocketsAtTheEnemyGunHub(false); }
+TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker_ShieldDown) { gunshipRocketsAtTheEnemyGunHub(true); }
 
 // The shield up: the underbelly gun hubs sit on the force field's skin (hub 0's
 // origin lies within a metre of it) and their collision hangs below it, so a
