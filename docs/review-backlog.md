@@ -320,6 +320,94 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   the side pieces sit at the screen edges, and the gunner frames cover the
   whole screen. Add a test of the computed values for 4:3, 16:9, 21:9 and 32:9.
 
+### Q-15. A native menu in C++ to replace the Flash menus (large)
+- **Status:** open
+- **Goal:** a menu written in C++, drawn by the game itself, that can replace
+  retail's Flash menus (`menu/*.dfm` run by `src/UI`'s SWF player and AVM1
+  interpreter) page by page. Retail's movies stay the default; the native menu is
+  an `enhanced.*` option.
+- **Why native and not the Tauri launcher:** the menu doesn't stop at the start of
+  a game. Esc shows it over the game (`updateMenuGameState`, `MenuGameState.h`),
+  a playlist runs map after map with the end-of-round screen between, and
+  options change mid-game. A separate launcher process can't draw over the game,
+  would need a relaunch or an IPC channel at every hand-off, and would duplicate
+  profiles, stats, unlocks, the LAN search and the playlist logic that already
+  live in C++. The launcher stays a developer tool (see its map picker).
+
+**How to build it**
+
+1. **Draw through the existing menu hook, not a new renderer path.**
+   `LevelRenderer`'s `sources.menu` is a `std::function<ui::MenuFrame(float)>`
+   (`src/Render/LevelRenderer.h`, set in `src/Main/main.cpp` near
+   `updateMenuGameState`). `ui::MenuFrame` (`src/UI/MenuDraw.h`) is a list of
+   textured, colour-transformed triangle batches in a 1024×768 stage, with
+   stencil masks, drawn over everything. A native menu that returns a
+   `MenuFrame` needs no renderer or shader changes, works over the game and the
+   loading screen, and gets fullscreen, widescreen and screenshots for free.
+   Lay out in stage units and map to the window as the Flash menus do, and reuse
+   `hud::widescreenLayout` (`src/Hud/Widescreen.h`) so wide screens get extra
+   width instead of stretching.
+2. **A small retained widget layer of our own** (`src/UI/Native/`), in this
+   order:
+   - Primitives: a quad batcher writing `MenuVertex`; 9-slice panels and buttons;
+     text through the HUD bitmap fonts (`src/Hud/HudFont.h`, the `.dif`/`.dds`
+     fonts the HUD already draws) or the menu SWF's embedded fonts (the
+     glyph-atlas path in `src/UI/Characters`). Prefer the game's own textures
+     and fonts, from `menu_client.zip` and the HUD archives, so it looks like
+     BF2142.
+   - Widgets: label, button, list (rows, selection, scrolling), slider,
+     dropdown, checkbox, text field (typing, caret, Caps Lock via
+     `MenuBindings::capsLock`), tabs, modal popup. Each widget is a plain struct
+     with a `layout`, `draw(Batcher&)` and `input(Event)`.
+   - Focus and navigation: mouse, keyboard (Tab, arrows, Enter, Esc) and
+     gamepad (`src/Input/GameControllers`) from day one; Flash only did mouse.
+   - Skip Dear ImGui: it would add an SDL GPU backend beside the renderer, and it
+     looks like a developer tool unless it's restyled at length. Use it only, if
+     at all, for a debug overlay.
+3. **Input:** the menu takes the same calls `ui::Player` gets now
+   (`mouseMove`, `mouseDown`/`mouseUp`, `mouseWheel`, `keyDown(code, char)`,
+   `keyUp`) from `Viewer.cpp`'s event loop, so wire it in where the Player is fed
+   and switch on the flag.
+4. **Back end: call `MenuBindings` directly, not the natives.**
+   `src/Main/MenuBindings*` already does what the pages ask for: the level scan
+   and map lists (`availableMaps`, `allGameModes`), `gameSetup()` and the start
+   of a game, the playlist, `SettingsObjects` (the profile `.con` files and
+   `Enhanced.con`), local profiles and soldiers, stats and unlocks (`src/Stats`),
+   the LAN server search and join, the controls page's rebinding, the
+   end-of-round data (`EndOfRoundBindings`). Expose them as a typed C++ API
+   (for example `MenuModel`) that both the AVM1 natives and the native pages
+   call, so the two menus can't drift apart. Pull any page logic that lives in
+   the movies' ActionScript (for example the singleplayer page's `startServer`,
+   which sets 16 players before every start; see `MenuSingleplayBots.cpp`) into
+   that API, with a citation.
+5. **Page order** (each one usable on its own, with Flash still serving the
+   rest; switching between the two at a page boundary):
+   1. Singleplayer playlist: map list with modes and sizes, chosen list, rounds,
+      bot skill, players (the `singleplayBotCount` rule), instant action.
+   2. The Esc menu over a running game: resume, options, leave or quit.
+   3. Options: video (`DisplayModes.h`, widescreen), audio, controls
+      (rebinding, the gamepad axes).
+   4. Profiles, soldiers and the unlock and stats pages.
+   5. LAN browser, join and create server.
+   6. End of round and the loading screen.
+   Keep the online pages (FESL login, server browser on the master server) on
+   Flash until last.
+6. **Flag and parity:** `enhanced.nativeMenu`, off by default, with a README
+   enhanced-table row. Flash stays the retail path and the reference: check
+   each native page against the movie it replaces (same settings written, same
+   game started), and keep the `MenuBindings_` tests passing for both.
+7. **Tests:**
+   - widgets: layout, hit-testing and focus as pure functions over
+     `MenuFrame`/events;
+   - pages: a scripted run (like `--menu-script`: clicks, keys, `print:`) that
+     drives a native page and checks the resulting `GameSetup` and the profile
+     files;
+   - a `--screenshot` of each page at 4:3, 16:9 and 21:9.
+- **Done when:** with `enhanced.nativeMenu` on, a player can go from start-up to
+  a singleplayer playlist, play it map after map, use the Esc menu and change
+  options, with no Flash movie loaded, by mouse, keyboard or gamepad; with it off
+  nothing changes. Later stages are their own items once the first lands.
+
 ## Retail parity: default behaviour that differs from retail
 
 Each of these needs the retail claim confirmed first (step 1), then matching retail
