@@ -2254,8 +2254,9 @@ at the bundle (`GameWorld::armorEffectMeshes`); the world-left groups'
 
 The wreck (`0x00652380`): timeToStayAsWreck (template `+0x158`, 20 by
 default) drains the armour to −wreckHitPoints by wreckHitPoints /
-(timeToStayAsWreck × 30) a tick, three times that with the AI running and
-the object mobile (as for the Titans); drained or its time up, it fades
+(timeToStayAsWreck × 30) a tick, three times that with the AI running in sp1,
+gpm_sp or gpm_coop (AIDLL's slot 0x20 false: the level load's init,
+`0x004af290`) and the object mobile (as for the Titans); drained or its time up, it fades
 for timeToStayAfterDestroyed (`+0x15c`, 0) and goes (`0x00651db0`).
 canBeDestroyed 0 or a time of −1: it never drains. A spectacular death
 (the killing hit's `+0x250`): with destroyOnSpectacularDeath (`+0x165`)
@@ -11494,7 +11495,9 @@ squad's threshold and adds points through `Player.setMaxOrderPoint` and
 and negative too, and once the sum isn't below the threshold (100 until
 the script sets one, `0x004c87a0`; 0 counts) the `SquadBarFilled` hook
 in the shipped stats script grants each member a credit, and the meter
-resets (`0x004c4c90` / `0x004c4dd0`).
+resets (`0x004c4c90` / `0x004c4dd0`). Both setters run only on a ranked
+server (the squad's `+0x184`, below), so offline only with
+`enhanced.squadOrderPoints`.
 
 The Field Upgrade tab opens when there are credits (`0x007b95a0`).
 A spend advances the selected branch for both factions. UB_Player and
@@ -13800,7 +13803,9 @@ squad's points `+0x160` added by the squad's slot `0x3c`, `0x004c4c90`,
 and their maximum, `0x004c6c80`) runs only when the squad's `+0x184` is
 set, which needs `0x00430a00`: a GameSpyRanked server of gpm_cq / ti / sl
 / nv / ca with the settings' `+0x26d` (the online stats); offline it is
-never shown.
+never shown (here: `enhanced.squadOrderPoints` keeps it). The HUD shows a
+member's bar once a maximum over −1 has come (`0x007a2100` case 0x56,
+`+0x302`).
 
 The AI commander's answers to the requests are under Bots ("AI
 commander"); bot squad leaders send none (AIDLL never calls the store).
