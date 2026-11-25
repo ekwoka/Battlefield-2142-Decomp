@@ -311,7 +311,7 @@ public:
 		int fireMode = -1;       // 0 single, 1 burst, 2 automatic (-1 the template's first)
 		int player = -1;         // whose (the sounds' first person for the local player)
 		bool muzzleEffects = true; // off for our own soldier seen from inside
-		// A joined client's own soldier: its shots kick our look (takeOwnKick),
+		// A joined client's own soldier: its shots kick our view (takeOwnKickPitch),
 		// zoomed by the weapon's recoil.zoomModifier; its magazine counts
 		// down ahead of the server's.
 		bool own = false;
@@ -840,10 +840,9 @@ public:
 	// soldier's own angles (0x0058a6d0), so a viewer sending absolute pitches
 	// takes it into its own; until taken it is added to the input's pitch.
 	float takeAimKick(int player);
-	// A joined client's own recoil (RemoteSoldierState::own) not yet
-	// taken into the look: the pitch (up positive) and the turn (degrees).
+	// A joined client's own recoil on its pitch (RemoteSoldierState::own) not
+	// yet taken into its view, up positive.
 	float takeOwnKickPitch() { return std::exchange(m_ownKickPitch, 0.0f); }
-	float takeOwnKickTurn() { return std::exchange(m_ownKickTurn, 0.0f); }
 	// The aim's pitch with the kick not yet taken (degrees, up positive).
 	float aimPitchOf(int player) const;
 	// Moves a soldier (its feet) at once, as the scripts' setPosition does;
@@ -4361,7 +4360,6 @@ private:
 	void stepSoldierAfter(Player& player, float seconds);
 	void stepSoldierWeapon(Player& player, float seconds);
 	void stepWeaponRecoil(Player& player, SoldierInput& turned);
-	bool lookFromClient(const Player& player) const; // a joined client's player
 	void stepWeaponFeel(Player& player, SoldierInput& turned, float seconds, bool seated = false);
 	void stepWeaponLock(Player& player, float seconds);
 	// The first TargetObject template of a tree (the root's own or a
@@ -4654,12 +4652,12 @@ private:
 		anim::RecoilSettings recoil;
 		std::vector<float> recoilGraph;
 		RandomDistribution recoilUp, recoilLeftRight;
-		float recoilForceUp = 0, recoilForceLeftRight = 0;
+		float recoilForceUp = 0;
 		int ticksSinceShot = 1000;
 		uint32_t shots = 0; // rounds fired (remoteSoldierShots)
 	};
 	std::map<uint32_t, RemoteSoldier> m_remoteSoldiers;
-	float m_ownKickPitch = 0, m_ownKickTurn = 0;
+	float m_ownKickPitch = 0;
 	std::map<uint32_t, uint32_t> m_wornKits; // setRemoteKits
 	std::set<uint32_t> m_remoteDroppedKits; // setRemoteKits
 	RemoteSoldier* startRemoteSoldier(uint32_t object);

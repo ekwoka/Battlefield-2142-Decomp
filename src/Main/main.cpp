@@ -7116,6 +7116,7 @@ int runGame(Options& options, Session& session)
 		struct RemoteLook {
 			bool started = false;
 			float yaw = 0, pitch = 0;
+			float kickPitch = 0; // our recoil's, kept out of the input sent
 			bool fire = false;
 			int stance = 0;
 		} remoteLook;
@@ -10800,7 +10801,6 @@ int runGame(Options& options, Session& session)
 				}
 				return true;
 			};
-			viewer.takeAimKick = [&round] { return round.takeOwnKickPitch(); }; // our recoil, into the look we send
 			viewer.onPlayerInput = [&round, &session, &scoreboardHeld, &options, &playerCamera, &remoteLook, &prediction, lastAimPitch = 0.0f,
 										toggleCameraWas = false, cameraWas = 0, autoReloadTick = 0, stance = ProneToggle{},
 										stanceSteps = 0u](const ViewerOptions::PlayerInput& raw) mutable {
@@ -10810,10 +10810,12 @@ int runGame(Options& options, Session& session)
 				}
 				ViewerOptions::PlayerInput in = raw;
 				itemListInput(in); // the HUD's pass first (0x00755d50)
-				in.turnDegrees += round.takeOwnKickTurn(); // our recoil goes to the server as look input
 				// The look as we turn it (the server's angles lag behind).
 				remoteLook.yaw = std::remainder(remoteLook.yaw + in.turnDegrees, 360.0f);
-				remoteLook.pitch = in.aimPitchDegrees;
+				// Our recoil on the view only: the server's soldier kicks its own
+				// (0x0058a6d0 on every machine stepping it); the input carries the mouse.
+				remoteLook.kickPitch += round.takeOwnKickPitch();
+				remoteLook.pitch = std::clamp(in.aimPitchDegrees + remoteLook.kickPitch, -89.0f, 89.0f);
 				remoteLook.fire = in.fire;
 				// The stance keys as the local round's (StanceKeys.h), the
 				// toggle taking the pose our prediction last stepped to (the

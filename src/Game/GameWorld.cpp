@@ -6543,20 +6543,8 @@ float GameWorld::weaponDeviation(int id) const
 	return player && player->alive && player->deviation.present ? player->deviation.deviation() : 0.0f;
 }
 
-// A joined client's player (not ours, not a bot): its look comes from its
-// input, which its own recoil and sway already moved (0x005e0da0 nudges
-// PIMouseLook, which the client sends); the server adding them again
-// left its aim climbing over the client's.
-bool GameWorld::lookFromClient(const Player& player) const
-{
-	return !player.ai && &player != m_player;
-}
-
 void GameWorld::stepWeaponRecoil(Player& player, SoldierInput& turned)
 {
-	if (lookFromClient(player)) {
-		return;
-	}
 	if (player.recoil.hasRecoilForce && !player.recoilGraph.empty()) {
 		const int k = static_cast<int>(static_cast<int64_t>(m_ticks) - player.lastShotTick);
 		turned.turn += anim::recoilAt(player.recoilGraph, k, player.recoilForceLeftRight);
@@ -6582,7 +6570,7 @@ void GameWorld::stepWeaponFeel(Player& player, SoldierInput& turned, float secon
 	player.lastSwayPitch = turned.aimPitch;
 	float lookX = turned.turn / kDegreesPerUnit;
 	float lookY = -pitchChange / kDegreesPerUnit;
-	if (player.sway.present && !seated && !lookFromClient(player)) { // a seated look has no sway to take
+	if (player.sway.present && !seated) { // a seated look has no sway to take
 		// The nudge goes on the raw look input, which the soldier then scales by the zoom's
 		// look scale (0x0058ac51 calls 0x00586420); the port's turn is already scaled.
 		const float scale = player.lookScale > 0 ? player.lookScale : 1.0f;
@@ -10440,11 +10428,12 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 			loadRecoil(*held, remote.recoil, remote.recoilGraph, remote.recoilUp, remote.recoilLeftRight);
 		}
 	}
-	// Our own soldier's recoil kick (as stepWeaponRecoil): k ticks after the
-	// last shot the graph times the forces drawn, into our look.
+	// Our own soldier's recoil kick on its pitch (0x0058a6d0 adds 0x005861a0's
+	// to +0x270 on whichever machine steps the soldier, the server too): k
+	// ticks after the last shot the graph times the force drawn. The turn's
+	// part comes back from the server's soldier through the prediction.
 	if (state.own && remote.recoil.hasRecoilForce && !remote.recoilGraph.empty()) {
 		remote.ticksSinceShot = std::min(remote.ticksSinceShot + 1, 1000);
-		m_ownKickTurn += anim::recoilAt(remote.recoilGraph, remote.ticksSinceShot, remote.recoilForceLeftRight);
 		m_ownKickPitch -= anim::recoilAt(remote.recoilGraph, remote.ticksSinceShot, remote.recoilForceUp);
 	}
 	// stepAnimation's input from the networked state.
@@ -10529,7 +10518,6 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 			if (state.own && remote.recoil.hasRecoilForce) { // the shot's forces (0x005dd3f0)
 				const float zoomScale = state.zoomed ? remote.recoil.zoomModifier : 1.0f;
 				remote.recoilForceUp = remote.recoilUp.sample(m_random) * zoomScale;
-				remote.recoilForceLeftRight = remote.recoilLeftRight.sample(m_random) * zoomScale;
 				remote.ticksSinceShot = 0;
 			}
 			remote.nextRound = arm.roundsPerMinute > 0 ? 60.0f / static_cast<float>(arm.roundsPerMinute) : 0.1f;
