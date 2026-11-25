@@ -207,7 +207,15 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
 ## Missing tests
 
 ### Q-9. The tick-blend history and the soldier-eye camera aren't tested (low)
-- **Status:** open
+- **Status:** done (wave 3). `ObjectBlend`, `pruneObjectBlends` and
+  `sampleObjectBlend` moved to `src/Render/TickBlend.h` (syncObjects calls them);
+  `soldierEyeCarrier` and `composeSoldierEye` to `src/Main/MissileViewSmoothing.h`
+  (Viewer.cpp calls them, same arithmetic in the same order). Tests in
+  `tests/TickTimerTest.cpp`: `TickBlend_ObjectHistoryByIdAsSyncObjects` (a new id
+  unblended, a frame without a tick, a pruned id erased and starting afresh),
+  `TickBlend_ObjectHeightJumpSnaps` (3.9 / 4.0 blended, ±4.1 snapped),
+  `TickBlend_SoldierEyeComposition` (the carrier, the 0.2 eye step, the turn, the
+  85° pitch clamp).
 - **Where:** `LevelRenderer::syncObjects`, and `src/Main/Viewer.cpp` ~1005-1040
   (carrier yaw, `lookTurn`, eye step)
 - **Missing cases:** a new id starts unblended, a removed id is erased, a jump of

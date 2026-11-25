@@ -118,4 +118,37 @@ inline Mat4 blendTransform(const Mat4& from, const Mat4& to, float alpha)
 	return out;
 }
 
+// An object's transform at its last two ticks and as drawn.
+struct ObjectBlend {
+	Mat4 previous, current, drawn;
+};
+
+// LevelRenderer::syncObjects' history, by object id: first drop the ids
+// whose objects are gone, then sample each object. A new id starts
+// unblended (previous = current = drawn = its transform now); a known one
+// moves its current to previous on a ticked frame, takes the new current
+// and is drawn between them, or where it is now when its height changed by
+// more than 4 m (0x0043ef30 with *0x00920ca0).
+template <class Map, class Alive>
+void pruneObjectBlends(Map& blends, Alive alive)
+{
+	for (auto it = blends.begin(); it != blends.end();) {
+		it = alive(it->first) ? std::next(it) : blends.erase(it);
+	}
+}
+
+template <class Map>
+ObjectBlend& sampleObjectBlend(Map& blends, const typename Map::key_type& id, const Mat4& now, TickBlend blend)
+{
+	const auto [it, added] = blends.try_emplace(id, ObjectBlend {now, now, now});
+	ObjectBlend& o = it->second;
+	if (blend.ticked && !added) {
+		o.previous = o.current;
+	}
+	o.current = now;
+	o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
+		: blendTransform(o.previous, o.current, blend.alpha);
+	return o;
+}
+
 } // namespace dice::hfe::render

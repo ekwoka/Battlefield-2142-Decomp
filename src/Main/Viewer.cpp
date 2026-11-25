@@ -1022,20 +1022,17 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const bool soldierEye = firstPerson && view.soldierEye && !missileKey;
 				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch, camera.roll};
 				if (soldierEye) {
-					raw.position[1] -= view.eyeHeight;
-					raw.yaw = view.eyeCarrierYaw;
-					raw.eye = view.eyeHeight;
+					raw = soldierEyeCarrier(raw, view.eyeHeight, view.eyeCarrierYaw);
 				}
 				const auto smooth = viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
 				if (soldierEye) {
-					constexpr float kRadians = 3.14159265f / 180.0f;
-					// The eye's height between the ticks, then a step on
-					// towards the pose's (0x005890a0, 0.2 a call), undone after
-					// the frame (0x0043f610) like every blended matrix.
-					camera.position.y += smooth.eye + (view.eyeTarget - smooth.eye) * 0.2f; // *0x00a68e14
-					camera.yaw += smooth.yaw - view.eyeCarrierYaw + view.lookTurn * kRadians;
-					camera.pitch = std::clamp(camera.pitch + view.lookPitch * kRadians, -85 * kRadians, 85 * kRadians);
+					// MissileViewSmoothing.h composeSoldierEye.
+					const SoldierEyeView eye = composeSoldierEye(smooth, camera.yaw, camera.pitch, view.eyeCarrierYaw,
+						view.eyeTarget, view.lookTurn, view.lookPitch);
+					camera.position.y = eye.y;
+					camera.yaw = eye.yaw;
+					camera.pitch = eye.pitch;
 				} else {
 					camera.yaw = smooth.yaw;
 					camera.pitch = smooth.pitch;

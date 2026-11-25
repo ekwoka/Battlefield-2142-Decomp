@@ -2203,19 +2203,9 @@ void LevelRenderer::syncObjects(TickBlend blend)
 		m_gpu.flushUploads();
 	}
 	// Each object between its last two ticks (TickBlend.h); a new one where it is.
-	for (auto it = m_objectBlend.begin(); it != m_objectBlend.end();) {
-		it = objects.find(it->first) ? std::next(it) : m_objectBlend.erase(it);
-	}
+	pruneObjectBlends(m_objectBlend, [&objects](uint32_t id) { return objects.find(id) != nullptr; });
 	for (const auto& object : objects.objects()) {
-		const Mat4 now = objectTransform(object->position(), object->rotation());
-		const auto [it, added] = m_objectBlend.try_emplace(object->id(), ObjectBlend {now, now, now});
-		ObjectBlend& o = it->second;
-		if (blend.ticked && !added) {
-			o.previous = o.current;
-		}
-		o.current = now;
-		o.drawn = tickBlendJumped(o.previous.at(3, 1), o.current.at(3, 1)) ? o.current
-			: blendTransform(o.previous, o.current, blend.alpha);
+		sampleObjectBlend(m_objectBlend, object->id(), objectTransform(object->position(), object->rotation()), blend);
 	}
 	// The collision parts holding decals: children of their objects, drawn
 	// between their ticks in them (0x0043ef30 over the tree).

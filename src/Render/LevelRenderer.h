@@ -639,9 +639,7 @@ private:
 	mutable std::unordered_map<const world::ObjectTemplate*, bool> m_blendsBetweenTicks;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
 	// Each object's transform at the last two ticks and as drawn (TickBlend.h).
-	struct ObjectBlend {
-		Mat4 previous, current, drawn;
-	};
+	using ObjectBlend = render::ObjectBlend;
 	std::unordered_map<uint32_t, ObjectBlend> m_objectBlend;
 	std::unordered_map<uint32_t, ObjectBlend> m_placedBlend; // by PlacedTemplate::key
 	std::map<std::pair<uint32_t, int>, ObjectBlend> m_decalPartBlend; // collision parts holding decals, by (object, part)
