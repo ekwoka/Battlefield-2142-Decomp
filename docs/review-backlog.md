@@ -135,7 +135,10 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
 ## Performance
 
 ### Q-6. A template lookup for every child, every frame, in `collectParts` (medium)
-- **Status:** open
+- **Status:** done (wave 1). `LevelRenderer::blendsBetweenTicks` caches the
+  answer per `const ObjectTemplate*` (`m_blendsBetweenTicks`, like
+  `m_animatedUVLooks`); the uncached test is `templateBlendsBetweenTicks`, which
+  `markBlendedParts` still uses. No behaviour change.
 - **Commits:** 3443d51, 81bc213
 - **Where:** `src/Render/LevelRenderer.cpp` ~1121-1131
 - **Problem:** `blendsBetweenTicks(*childTemplate)` runs for every child of every
@@ -175,7 +178,17 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   them there.
 
 ### Q-10. A shader test only searches the source text (low)
-- **Status:** open
+- **Status:** done (wave 1). The fog and particle pixel math now live in
+  `src/Render/Shaders/fog_share.glsl` and `particle_color.glsl`, written in the
+  subset of GLSL that C++ also compiles. The shaders include them, and so does
+  `src/Render/ShaderMath.h`, which mirrors the few GLSL types and built-ins they
+  use. The `ShaderMath_` tests in `tests/ShaderUniformsTest.cpp` evaluate that
+  code against numbers worked out from RaCommon.fx `calcFog`, Particles.fx and
+  D3D9's fixed-function fog: the fog's share, the decision of which sprites fog
+  (A-8), the additive mask before the clamp, and ps_1_4's saturated output
+  before the fog. That last one was a fix: normal particles brighter than 1
+  were fogged before the clamp (red 1.2 at a 0.625 fog share gave 0.575;
+  retail gives 0.5).
 - **Commit:** 01bdaeb
 - **Where:** `tests/ShaderUniformsTest.cpp:178`, which greps for
   `clamp(outColor.rgb * outColor.a`
@@ -352,7 +365,28 @@ or gating behind a flag.
   as a shortcut. Widen it when it matters.
 
 ### A-8. Normal-blend particle sprites aren't fogged (round 2, high)
-- **Status:** verify
+- **Status:** done (wave 1). Confirmed in `RendDX9_ori.dll`'s disassembly:
+  - 0x1012fe20..0x1012fe38 loads `movzwl 0x90(%ecx)`, `setne %cl` and calls
+    0x1012f750.
+  - With CL clear and the shader quality (+0x8cb0) not 0, 0x1012f750 sets
+    render states 0x13/0x14 to 5/6 and 0x1c (FOGENABLE) to 1. Otherwise it sets
+    2/2 and fog 0. It sets them through the state manager `DAT_101f8e6c`, whose
+    slot 0x1c is SetRenderState.
+  - The ParticleLow/Medium/High passes don't set FogEnable.
+  - Additive templates (blend mode 1 or 2, 0x10138920) draw through
+    0x10130bd0 and 0x10130540 instead: ONE/ONE, fog 0, and AdditiveLow/High,
+    which set `FogEnable = FALSE`.
+
+  Fix: sprite groups get `fogged = spriteGroupFogged(additive, quality)`
+  (`src/Render/ParticleFog.h`). Normal-blend sprites no longer merge into a
+  placed (repeat) group. The comments are fixed.
+
+  Sub-question, vertex `oFog` or table fog: `oFog`. RendDX9 never sets
+  FOGTABLEMODE (0x23) or FOGVERTEXMODE (0x8c): no `push $0x23` in the binary,
+  and no FogTableMode in the shaders. With a vertex shader and no table mode,
+  D3D9 uses `oFog`, which is vsParticle's `calcFog(HPos.w)`. A screen-aligned
+  sprite's corners share their w, so particle.frag's per-pixel `fogAmount`
+  equals the per-vertex value.
 - **Commits:** 55214dc, then 01bdaeb and c5dd144
 - **Where:** `src/Render/LevelRenderer.cpp:3015` (sprite groups pushed with
   `fogged=false`); the claim is in `LevelRenderer.h:1011` and `particle.frag:5`
