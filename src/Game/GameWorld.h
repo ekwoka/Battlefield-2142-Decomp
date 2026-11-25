@@ -2543,9 +2543,21 @@ public:
 	// point, 2 an ammo giving point, 3 a driver assist, 4 a revive score. Null for
 	// the other kinds (5.. are the strategic and Titan attack scores).
 	static const char* replenishNotice(int kind);
-	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
-	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
+	// The AI runs on the server (AIDLL's interface 0xb47ce4 answers slot
+	// 0x18, its +4: its init, slot 4 = 0x10001740, succeeded).
 	void setAiRunning(bool on) { m_aiRunning = on; }
+	// A wreck's armour drains three times as fast (0x00652380, for every
+	// root that is no soldier: vehicles and Titans alike) when the AI runs
+	// (slot 0x18), the object is mobile (+0x14 & 8) and AIDLL's slot 0x20
+	// (its +6, 0x1008a9b0) is false. The server's level load (0x004aefe0)
+	// inits the AI with +6 = !(GSGameMode is sp1, gpm_sp or gpm_coop) and
+	// +7 = (it is sp1 or gpm_sp) (0x004af290 -> 0x10001740), so the x 3 is
+	// the single-player and co-op modes' alone: a Titan (gpm_ti) wreck or a
+	// conquest one drains at 1x with bots.
+	bool wreckDrainsFast() const
+	{
+		return m_aiRunning && (m_gameMode == "sp1" || m_gameMode == "gpm_sp" || m_gameMode == "gpm_coop");
+	}
 	// The ladder's camera (the LadderContainer's LadderContainerCamera,
 	// DummyObjects.con: 1.5 m over the container and 0.4 m behind it, the
 	// mouse's PIMouseLookX / Y within -130..140 and -60..60 degrees of the
@@ -3066,8 +3078,8 @@ private:
 		bool hideChildren = false;
 		bool destroyNow = false; // destroyOnSpectacularDeath (+0x251)
 		// The wreck: the time it has stood, how long its armour drains to
-		// -wreckHitPoints (timeToStayAsWreck, a third of it with the AI
-		// running: 0x00652380's x 3) and the fade after (timeToStayAfterDestroyed).
+		// -wreckHitPoints (timeToStayAsWreck, a third of it with
+		// wreckDrainsFast: 0x00652380's x 3) and the fade after (timeToStayAfterDestroyed).
 		float wreckAge = 0, wreckDrain = 0;
 		// Each seat gun's WeaponBasedRecoilComp slide (GunRecoil), by seat.
 		std::vector<GunRecoil> gunRecoil;

@@ -10746,7 +10746,8 @@ TEST(Vehicles_ParachuteLandsOnTheWater)
 #ifdef BF2142_RENDER_TESTS
 // The Titan's wreck (0x00652380): frames through gpm_ti's 25 s before the
 // round's end, the armour explosions (addArmorEffect -1 .. -36) and the core
-// explosion's flash (-38 %) over the hull. Bots running: 3 % a second.
+// explosion's flash (-38 %) over the hull. Bots running in gpm_ti: 1 % a
+// second (0x00652380's x 3 is the single-player and co-op modes' alone).
 TEST(Titan_WreckSequencePixelsOptIn)
 {
 	const char* output = std::getenv("BF2142_RENDER_TEST_DIR");

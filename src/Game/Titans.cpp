@@ -1975,9 +1975,11 @@ void GameWorld::stepTitanWreck(Titan& titan, float seconds)
 		if (m_time > titan.wreckedAt + titan.stayAsWreck || root.hitPoints <= -root.wreckHitPoints) {
 			titan.removeFrom = m_time;
 		} else if (titan.stayAsWreck > 0) {
-			// 1x even with bots: the x3 of 0x00652380 (0x00652594) is not seen on a Titan wreck in retail
-			// (its core explosion comes after ~36 s, past the 25 s sgl_endGame delay).
-			const float perTick = root.wreckHitPoints / (titan.stayAsWreck * 30.0f);
+			// 0x00652380 as for any wreck: x 3 only with the AI in a single-player
+			// or co-op mode (wreckDrainsFast; the Titan is mobile, hasMobilePhysics
+			// 1). In gpm_ti it is 1x with bots, so the core explosion (-38 %) comes
+			// after ~38 s, past the 25 s sgl_endGame delay.
+			const float perTick = root.wreckHitPoints / (titan.stayAsWreck * 30.0f) * (wreckDrainsFast() ? 3.0f : 1.0f);
 			titanDamage(titan.object, perTick * seconds * 30.0f, -1, true, true);
 		}
 	}

@@ -359,7 +359,20 @@ or gating behind a flag.
   and fix the test. 6830e6f's `pitchInputLost` path must keep working.
 
 ### A-3. Titan wreck drain: ×3 dropped for Titans only (round 2, medium)
-- **Status:** verify (blocked on AIDLL slot 0x20)
+- **Status:** done (wave 3). Slot 0x20 resolved. AIDLL's interface (vtable
+  `0x10107210`, constructor `0x10001030`: `+4` 0, `+5` 0, `+6` 1, `+7` 1) answers
+  slot 0x18 with `+4` (`0x1005cf30`), set only by its init (slot 4, `0x10001740`,
+  at `0x100017ba`), and slot 0x20 with `+6` (`0x1008a9b0`), which that init sets
+  from its first argument. The init's caller is the server's level load
+  (`0x004aefe0`, the call at `0x004af290`, through the copy of `DAT_00b47ce4` in a
+  local, which is why the earlier scan missed it): first argument
+  `!(GSGameMode is "sp1", "gpm_sp" or "gpm_coop")`, second `(it is "sp1" or
+  "gpm_sp")`. So the ×3 is the single-player and co-op modes' alone, for vehicles
+  and Titans alike; in gpm_ti (and conquest) a wreck drains at 1× with bots,
+  which is what the retail observation behind 5bbdb2d saw.
+  `GameWorld::wreckDrainsFast` (AI running and one of those modes) now drives
+  both `destroyVehicle` and `stepTitanWreck`. `GameWorld_WreckDrainsFasterWithBots`
+  checks six mode/AI legs; `Titan_SilosWearTheShieldThenTheHull` checks gpm_ti is 1×.
 - **Commit:** 5bbdb2d
 - **Where:** `src/Game/Titans.cpp:1978` `stepTitanWreck`; compare
   `src/Game/GameWorld.cpp:1607` for vehicles

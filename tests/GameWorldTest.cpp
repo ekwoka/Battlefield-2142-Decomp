@@ -6072,16 +6072,28 @@ TEST(GameWorld_VehicleInReachForTheHelp)
 }
 
 // The wreck (0x00652380): timeToStayAsWreck (20 by default) drains its
-// armour to -wreckHitPoints; with the AI running three times as fast, so a
-// 3 s wreck goes after 1 s.
+// armour to -wreckHitPoints; three times as fast with the AI running in a
+// single-player or co-op mode (AIDLL's slot 0x20 false: the level load's
+// init, 0x004af290, gives it !(sp1 / gpm_sp / gpm_coop)), so a 3 s wreck
+// goes after 1 s there. With bots in conquest or Titan mode, or without the
+// AI, it takes the full 3 s.
 TEST(GameWorld_WreckDrainsFasterWithBots)
 {
-	for (int ai = 0; ai < 2; ++ai) {
+	struct Leg {
+		const char* mode;
+		bool ai;
+		bool fast;
+	};
+	for (const Leg leg : {Leg {"gpm_sp", false, false}, Leg {"gpm_sp", true, true}, Leg {"sp1", true, true},
+			 Leg {"gpm_coop", true, true}, Leg {"gpm_cq", true, false}, Leg {"gpm_ti", true, false}}) {
 		ExitRange range;
 		range.jeep->settings()["armor.maxHitPoints"] = "100";
 		range.jeep->settings()["armor.wreckHitPoints"] = "50";
 		range.jeep->settings()["armor.timeToStayAsWreck"] = "3";
-		range.world->setAiRunning(ai != 0);
+		range.world->setGameMode(leg.mode);
+		range.world->setAiRunning(leg.ai);
+		CHECK(range.world->wreckDrainsFast() == leg.fast);
+		const int ai = leg.ai;
 		range.id = range.objects.create(range.jeep, {0, 1, 40})->id();
 		range.world->tick(1 / 30.0f);
 		range.world->applyDamage(range.id, 1000, -1);
@@ -6090,8 +6102,8 @@ TEST(GameWorld_WreckDrainsFasterWithBots)
 			range.world->tick(1 / 30.0f);
 			++ticks;
 		}
-		std::fprintf(stderr, "  ai %d: the wreck went after %d ticks\n", ai, ticks);
-		CHECK(ai ? (ticks >= 29 && ticks <= 32) : (ticks >= 89 && ticks <= 92));
+		std::fprintf(stderr, "  %s, ai %d: the wreck went after %d ticks\n", leg.mode, ai, ticks);
+		CHECK(leg.fast ? (ticks >= 29 && ticks <= 32) : (ticks >= 89 && ticks <= 92));
 	}
 }
 

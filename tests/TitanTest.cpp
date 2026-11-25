@@ -584,7 +584,11 @@ TEST(Titan_SilosWearTheShieldThenTheHull)
 	// -wreckHitPoints over timeToStayAsWreck (100 s), the explosion groups
 	// going off at their levels (-1 to -36 %), the core explosion event at
 	// -38 %; then the wreck is deleted. It coasts to a stop at its height.
-	level.world->setAiRunning(true); // bots on: a Titan wreck still drains at 1 %/s
+	// Bots on: in gpm_ti AIDLL's slot 0x20 is true (the level load's init,
+	// 0x004af290), so the wreck drains at 1x, 1 %/s, as any wreck outside
+	// sp1 / gpm_sp / gpm_coop.
+	level.world->setAiRunning(true);
+	CHECK(!level.world->wreckDrainsFast());
 	const uint32_t wreck = eu->object;
 	const float height = level.titan(2)->position.y;
 	float exploded = -1, gone = -1;

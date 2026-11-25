@@ -8826,8 +8826,8 @@ int runGame(Options& options, Session& session)
 			// navigation mesh) has no bots.
 			std::printf("no bots on this level (it has no AI navigation data)\n");
 		}
-		// The AI runs on this server (AIDLL's interface; a wreck's armour
-		// drains three times as fast, 0x00652380).
+		// The AI runs on this server (AIDLL's interface; in sp1, gpm_sp and
+		// gpm_coop a wreck's armour drains three times as fast, 0x00652380).
 		round.setAiRunning(bots.enabled() && options.bots > 0);
 		if (bots.enabled() && options.bots > 0) {
 			bots.prepareTitanGrids(); // the Titans stand after the first step

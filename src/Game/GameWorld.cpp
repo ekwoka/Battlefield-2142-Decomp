@@ -1622,15 +1622,15 @@ void GameWorld::destroyVehicle(Body& body, int attacker)
 	// The wreck (0x00652380): it stands timeToStayAsWreck (20 by default,
 	// the template's +0x158) while its armour drains to -wreckHitPoints by
 	// wreckHitPoints / (timeToStayAsWreck x 30) a tick, three times that
-	// with the AI running and the object mobile (AIDLL's *0x00b47ce4 slots
-	// 0x18 / 0x20; every vehicle body is); drained (or its time up) it
+	// with the AI running in a single-player or co-op mode and the object
+	// mobile (every vehicle body is; wreckDrainsFast); drained (or its time up) it
 	// fades for timeToStayAfterDestroyed (+0x15c, 0) and goes. With
 	// canBeDestroyed 0 or a time of -1 it never drains.
 	const float stay = number(t, "armor.timeToStayAsWreck", 20);
 	const float after = std::max(0.0f, number(t, "armor.timeToStayAfterDestroyed", 0));
 	const bool drains = number(t, "armor.canBeDestroyed", 1) != 0 && stay != -1;
 	body.wreckAge = 0;
-	body.wreckDrain = drains ? stay / (m_aiRunning ? 3.0f : 1.0f) : 0;
+	body.wreckDrain = drains ? stay / (wreckDrainsFast() ? 3.0f : 1.0f) : 0;
 	body.wreckTime = drains ? body.wreckDrain + after : 1e30f;
 	// A spectacular death (the killing hit's +0x250): with
 	// destroyOnSpectacularDeath (+0x165) the armour's next update starts
