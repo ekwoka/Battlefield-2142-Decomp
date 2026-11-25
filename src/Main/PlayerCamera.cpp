@@ -170,6 +170,7 @@ bool PlayerCamera::current(Me& me) const
 		me.stance = remote.stance;
 		me.firing = remote.firing;
 		me.reloading = remote.reloading;
+		me.remoteShots = remote.shots;
 		me.vehicle = remote.vehicle;
 		me.seat = remote.seat;
 		return true;
@@ -230,6 +231,7 @@ void PlayerCamera::resetSoldier()
 	m_seatGun = nullptr;
 	m_inSeat = false;
 	m_roundsWas = -1;
+	m_remoteShotsWas = -1;
 	m_reloadingWas = m_zoomMessageWas = m_reloadPulseNext = false;
 	m_springState = {};
 	m_springOffset = {};
@@ -1069,7 +1071,11 @@ void PlayerCamera::tick(float seconds)
 	// A joined game's shots aren't known before the server's state comes:
 	// the held fire input fires at the weapon's rate (fire.roundsPerMinute)
 	// as the client's own prediction.
-	if (m_remote && me.firing && weaponTemplate) {
+	if (m_remote && me.remoteShots >= 0) {
+		// On foot: the rounds our soldier's weapon fired (none empty or reloading).
+		fired = m_remoteShotsWas >= 0 && me.remoteShots != m_remoteShotsWas;
+		m_remoteShotsWas = me.remoteShots;
+	} else if (m_remote && me.firing && weaponTemplate) {
 		const float perMinute = number(*weaponTemplate, "fire.roundsPerMinute", 600);
 		const int interval = std::max(1, static_cast<int>(1800.0f / std::max(perMinute, 1.0f)));
 		if (m_tick - m_lastRemoteShot >= interval) {

@@ -5966,28 +5966,34 @@ void GameWorld::setAiDeviation(int id, float deviation)
 // Switching weapons: the one in hand goes back to the kit (keeping its
 // rounds), the slot's comes out, and the held object, the muzzle effect
 // and the weapon's animation system change with it.
+// A weapon's recoil (SoldierBasedRecoilComp, template 0x005dd730's defaults).
+static void loadRecoil(const world::ObjectTemplate& weapon, anim::RecoilSettings& recoil, std::vector<float>& graph,
+	RandomDistribution& up, RandomDistribution& side)
+{
+	const world::ObjectTemplate* t = &weapon;
+	recoil = {};
+	graph.clear();
+	if (std::find(t->components().begin(), t->components().end(), "SoldierBasedRecoilComp") != t->components().end()) {
+		recoil.hasRecoilForce = number(*t, "recoil.hasRecoilForce", 0) != 0;
+		recoil.goBackOnRecoil = number(*t, "recoil.goBackOnRecoil", 1) != 0;
+		recoil.zoomModifier = number(*t, "recoil.zoomModifier", 1);
+		recoil.graphFrameCount = static_cast<int>(number(*t, "recoil.recoilGraphFrameCount", 8));
+		recoil.graphExponent = number(*t, "recoil.recoilGraphExponent", 2);
+		recoil.graphTotalMovement = number(*t, "recoil.recoilGraphTotalMovement", 2);
+		graph = recoil.graph();
+		const auto u = t->settings().find("recoil.recoilForceUp");
+		const auto s = t->settings().find("recoil.recoilForceLeftRight");
+		up = u != t->settings().end() ? RandomDistribution::parse(u->second) : RandomDistribution::parse("1");
+		side = s != t->settings().end() ? RandomDistribution::parse(s->second) : RandomDistribution::parse("0");
+	}
+}
+
 // The held weapon's muzzle flash (its e_muzz child) and recoil.
 void GameWorld::weaponTraits(Player& player, const world::ObjectTemplate& weapon)
 {
 	const world::ObjectTemplate* t = &weapon;
-	// Its recoil (SoldierBasedRecoilComp, template 0x005dd730's defaults).
-	player.recoil = {};
-	player.recoilGraph.clear();
+	loadRecoil(weapon, player.recoil, player.recoilGraph, player.recoilUp, player.recoilLeftRight);
 	player.lastShotTick = -1000;
-	if (std::find(t->components().begin(), t->components().end(), "SoldierBasedRecoilComp") != t->components().end()) {
-		player.recoil.hasRecoilForce = number(*t, "recoil.hasRecoilForce", 0) != 0;
-		player.recoil.goBackOnRecoil = number(*t, "recoil.goBackOnRecoil", 1) != 0;
-		player.recoil.zoomModifier = number(*t, "recoil.zoomModifier", 1);
-		player.recoil.graphFrameCount = static_cast<int>(number(*t, "recoil.recoilGraphFrameCount", 8));
-		player.recoil.graphExponent = number(*t, "recoil.recoilGraphExponent", 2);
-		player.recoil.graphTotalMovement = number(*t, "recoil.recoilGraphTotalMovement", 2);
-		player.recoilGraph = player.recoil.graph();
-		const auto up = t->settings().find("recoil.recoilForceUp");
-		const auto side = t->settings().find("recoil.recoilForceLeftRight");
-		player.recoilUp = up != t->settings().end() ? RandomDistribution::parse(up->second) : RandomDistribution::parse("1");
-		player.recoilLeftRight =
-			side != t->settings().end() ? RandomDistribution::parse(side->second) : RandomDistribution::parse("0");
-	}
 	player.muzzles = fireBundles(m_templates, *t);
 	player.muzzleOffset = player.muzzles.empty() ? physics::Vec3 {} : player.muzzles.front().position;
 }
@@ -6537,8 +6543,20 @@ float GameWorld::weaponDeviation(int id) const
 	return player && player->alive && player->deviation.present ? player->deviation.deviation() : 0.0f;
 }
 
+// A joined client's player (not ours, not a bot): its look comes from its
+// input, which its own recoil and sway already moved (0x005e0da0 nudges
+// PIMouseLook, which the client sends); the server adding them again
+// left its aim climbing over the client's.
+bool GameWorld::lookFromClient(const Player& player) const
+{
+	return !player.ai && &player != m_player;
+}
+
 void GameWorld::stepWeaponRecoil(Player& player, SoldierInput& turned)
 {
+	if (lookFromClient(player)) {
+		return;
+	}
 	if (player.recoil.hasRecoilForce && !player.recoilGraph.empty()) {
 		const int k = static_cast<int>(static_cast<int64_t>(m_ticks) - player.lastShotTick);
 		turned.turn += anim::recoilAt(player.recoilGraph, k, player.recoilForceLeftRight);
@@ -6564,7 +6582,7 @@ void GameWorld::stepWeaponFeel(Player& player, SoldierInput& turned, float secon
 	player.lastSwayPitch = turned.aimPitch;
 	float lookX = turned.turn / kDegreesPerUnit;
 	float lookY = -pitchChange / kDegreesPerUnit;
-	if (player.sway.present && !seated) { // a seated look has no sway to take
+	if (player.sway.present && !seated && !lookFromClient(player)) { // a seated look has no sway to take
 		// The nudge goes on the raw look input, which the soldier then scales by the zoom's
 		// look scale (0x0058ac51 calls 0x00586420); the port's turn is already scaled.
 		const float scale = player.lookScale > 0 ? player.lookScale : 1.0f;
@@ -10419,7 +10437,15 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 			if (const anim::AnimationSystemTemplate* weapon = system(held)) {
 				remote.weapon = std::make_unique<anim::AnimationState>(*m_animationSystems, *weapon);
 			}
+			loadRecoil(*held, remote.recoil, remote.recoilGraph, remote.recoilUp, remote.recoilLeftRight);
 		}
+	}
+	// Our own soldier's recoil kick (as stepWeaponRecoil): k ticks after the
+	// last shot the graph times the forces drawn, into our look.
+	if (state.own && remote.recoil.hasRecoilForce && !remote.recoilGraph.empty()) {
+		remote.ticksSinceShot = std::min(remote.ticksSinceShot + 1, 1000);
+		m_ownKickTurn += anim::recoilAt(remote.recoilGraph, remote.ticksSinceShot, remote.recoilForceLeftRight);
+		m_ownKickPitch -= anim::recoilAt(remote.recoilGraph, remote.ticksSinceShot, remote.recoilForceUp);
 	}
 	// stepAnimation's input from the networked state.
 	anim::AnimationInput input;
@@ -10466,10 +10492,16 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 		// The server's rounds while it fires (0x00595c60 hands them to the
 		// firearm's magazine list): a reload done there ends ours.
 		if (state.firing && state.rounds >= 0) {
-			if (state.rounds > remote.rounds) {
-				remote.reloadLeft = 0;
+			if (state.own) {
+				// The server's count comes a round trip late: only fewer than
+				// ours counts (its reloads come as reloadRemoteSoldier).
+				remote.rounds = std::min(remote.rounds, state.rounds);
+			} else {
+				if (state.rounds > remote.rounds) {
+					remote.reloadLeft = 0;
+				}
+				remote.rounds = state.rounds;
 			}
-			remote.rounds = state.rounds;
 		}
 		bool pressed = state.firing && !remote.wasFiring;
 		if (state.firePresses >= 0 && remote.presses >= 0 && state.firePresses != remote.presses) {
@@ -10493,6 +10525,13 @@ void GameWorld::animateRemoteSoldier(uint32_t object, const RemoteSoldierState& 
 			input.pulses |= 1;
 			round(WeaponSoundEvent::Fire);
 			fireRemoteRound(remote, object, muzzle, turnTo, state.velocity);
+			++remote.shots;
+			if (state.own && remote.recoil.hasRecoilForce) { // the shot's forces (0x005dd3f0)
+				const float zoomScale = state.zoomed ? remote.recoil.zoomModifier : 1.0f;
+				remote.recoilForceUp = remote.recoilUp.sample(m_random) * zoomScale;
+				remote.recoilForceLeftRight = remote.recoilLeftRight.sample(m_random) * zoomScale;
+				remote.ticksSinceShot = 0;
+			}
 			remote.nextRound = arm.roundsPerMinute > 0 ? 60.0f / static_cast<float>(arm.roundsPerMinute) : 0.1f;
 			remote.burstLeft = std::max(0, remote.burstLeft - 1);
 			if (arm.magSize > 0 && remote.rounds > 0) {

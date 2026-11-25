@@ -128,6 +128,7 @@ public:
 		std::array<float, 3> velocity {};
 		float yaw = 0, aimPitch = 0; // degrees: the local look
 		bool reloading = false;      // our soldier's weapon (GameWorld::remoteSoldierReloading)
+		int64_t shots = -1;          // its rounds fired (GameWorld::remoteSoldierShots; -1 unknown)
 		int stance = 0;
 		bool firing = false; // the fire input held
 		// In a seat: the vehicle's object and the seat (the control
@@ -316,6 +317,7 @@ private:
 		bool firing = false; // remote: the fire input held
 		bool fired = false; // local: an accepted shot in the current simulation tick
 		uint32_t weaponPulses = 0, weaponMessages = 0;
+		int64_t remoteShots = -1; // remote: our soldier's rounds fired (-1 unknown)
 	};
 	bool current(Me& me) const;
 	// A seat that leaves the primary fire to the soldier's own weapon (the air
@@ -324,6 +326,7 @@ private:
 	std::function<bool(Remote&)> m_remote;
 	std::function<std::vector<uint32_t>()> m_remoteDriven;
 	int m_lastRemoteShot = -1000;
+	int64_t m_remoteShotsWas = -1;
 	void startWeaponEffects(int effect);
 
 	// The seat camera's view modes and the dead player's camera (Cameras.h).

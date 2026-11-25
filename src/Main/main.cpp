@@ -7325,6 +7325,7 @@ int runGame(Options& options, Session& session)
 				me.stance = remoteLook.stance;
 				me.firing = remoteLook.fire;
 				me.reloading = round.remoteSoldierReloading(soldier->id());
+				me.shots = round.remoteSoldierShots(soldier->id());
 				// The held weapon: the kit's firearm in the selected slot (the
 				// soldier's mask 0x2000; itemIndex, 3 the primary).
 				if (const net::RemotePlayer* player = world.player(world.localPlayer()); player && player->kitGhost) {
@@ -8060,6 +8061,8 @@ int runGame(Options& options, Session& session)
 					state.firing = remoteLook.fire;
 					state.firePresses = -1;
 					state.muzzleEffects = !playerCamera.insideView();
+					state.own = true;
+					state.zoomed = playerCamera.zoomLevel() > 0;
 				}
 				const auto kit = ghostObjects.find(p.kitGhost);
 				const world::Object* worn = p.kitGhost && kit != ghostObjects.end() ? objects.find(kit->second) : nullptr;
@@ -10791,7 +10794,8 @@ int runGame(Options& options, Session& session)
 				}
 				return true;
 			};
-			viewer.onPlayerInput = [&session, &scoreboardHeld, &options, &playerCamera, &remoteLook, &prediction, lastAimPitch = 0.0f,
+			viewer.takeAimKick = [&round] { return round.takeOwnKickPitch(); }; // our recoil, into the look we send
+			viewer.onPlayerInput = [&round, &session, &scoreboardHeld, &options, &playerCamera, &remoteLook, &prediction, lastAimPitch = 0.0f,
 										toggleCameraWas = false, cameraWas = 0, autoReloadTick = 0, stance = ProneToggle{},
 										stanceSteps = 0u](const ViewerOptions::PlayerInput& raw) mutable {
 				scoreboardHeld = options.scoreboard || raw.scoreboard;
@@ -10800,6 +10804,7 @@ int runGame(Options& options, Session& session)
 				}
 				ViewerOptions::PlayerInput in = raw;
 				itemListInput(in); // the HUD's pass first (0x00755d50)
+				in.turnDegrees += round.takeOwnKickTurn(); // our recoil goes to the server as look input
 				// The look as we turn it (the server's angles lag behind).
 				remoteLook.yaw = std::remainder(remoteLook.yaw + in.turnDegrees, 360.0f);
 				remoteLook.pitch = in.aimPitchDegrees;
