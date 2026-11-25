@@ -823,6 +823,7 @@ BotManager::BotManager(GameWorld& world, BotSettings settings) : m_world(world),
 		maxRange = w.maxRange;
 		return w.strength[static_cast<size_t>(strengthTypeOf(info))];
 	};
+	m_world.autoControllerRound = [this](const std::string& weapon, bool& indirect) { return roundModel(weapon, &indirect); };
 }
 
 namespace {
@@ -888,6 +889,7 @@ BotManager::~BotManager()
 {
 	m_world.autoControllerTemplate = {};
 	m_world.autoControllerStrength = {};
+	m_world.autoControllerRound = {};
 	if (m_navMesh) {
 		m_world.setAiSpawnTest({});
 	}

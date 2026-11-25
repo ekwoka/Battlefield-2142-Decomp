@@ -23,6 +23,7 @@
 // to use the spawner) is set by no shipped level.
 #pragma once
 
+#include "AI/Ballistics.h"
 #include "Animation/AnimationSystem.h"
 #include "Animation/FirstPerson.h"
 #include "Animation/Ik.h"
@@ -4422,6 +4423,9 @@ public:
 	// a player, with the weapon's maxRange.
 	std::function<bool(const std::string& name, AutoControl& out)> autoControllerTemplate;
 	std::function<float(const std::string& weapon, int player, float& maxRange)> autoControllerStrength;
+	// The round a weapon fires as the AI models it (BotManager::roundModel),
+	// with weaponTemplate.indirect (the high arc).
+	std::function<ai::RoundModel(const std::string& weapon, bool& indirect)> autoControllerRound;
 
 private:
 	struct Drone {
@@ -4498,6 +4502,7 @@ private:
 		float targetSeenAt = 0, fireFrom = 0, sensedAt = -1e9f;
 		float scanTurn = 1;     // the scan's way round (+1 or -1)
 		bool tapped = false;    // the trigger pressed last tick (a single-fire gun's tap)
+		ai::LeadSolver lead;    // the aim's ballistic lead (its launch angle persists)
 	};
 	std::vector<SeatController> m_seatControllers;
 	// The deployables' own animation systems (spawn_beacon, the hubs, the

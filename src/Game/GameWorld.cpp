@@ -17783,8 +17783,13 @@ void GameWorld::registerSeatControllers(const world::Object& vehicle)
 // 0x1004d470 -> 0x1004d140) and puts it back as they leave (slot 0x3c,
 // 0x1004d500). With autoControllerTemplateName the seat's input filter
 // cuts every input above EMP level 1 (0x005ca2e0, driverInputScale).
-// The rewrite's own: the gun fires once it points within 2 degrees, and
-// leads its target by the round's flight time.
+// The lead is the AI's ballistic solver (AI/Ballistics.h, 0x100fa060 /
+// 0x100fa6f0: the round's speed, drag and gravity, the high arc for an
+// indirect weapon), as the gunner bots' turret aim (0x100d9a60) takes it:
+// the Titans' ground cannons (75 m/s, gravityModifier 0.75) drop 60 m
+// over 300 m, so a straight aim put every shell short in one spot.
+// The rewrite's own: the gun fires once it points within 2 degrees of the
+// solved direction.
 void GameWorld::stepSeatControllers(float seconds)
 {
 	for (auto it = m_seatControllers.begin(); it != m_seatControllers.end();) {
@@ -17928,11 +17933,18 @@ void GameWorld::stepSeatControllers(float seconds)
 		bool onTarget = false;
 		if (c.target >= 0) {
 			physics::Vec3 want = c.seenAt;
-			const float speed = gun.weapon ? gun.weapon->settings().velocity : 0.0f;
-			if (speed > 0) {
-				const physics::Vec3 relative = c.seenVelocity - body->body.velocity;
-				for (int i = 0; i < 3; ++i) {
-					want = c.seenAt + relative * (std::sqrt(physics::lengthSquared(want - eye)) / speed);
+			bool indirect = false;
+			const ai::RoundModel round = autoControllerRound ? autoControllerRound(primary.weapon, indirect) : ai::RoundModel {};
+			if (round.speed > 0) {
+				const float yr = gunYaw * 0.017453292f, pr = aimPitch * 0.017453292f;
+				const physics::Vec3 forward = hull.transform({std::sin(yr) * std::cos(pr), std::sin(pr), std::cos(yr) * std::cos(pr)});
+				const physics::Vec3 offset = c.seenAt - eye;
+				const auto toAi = [](const physics::Vec3& v) { return ai::Vec3 {v.x, v.y, v.z}; };
+				c.lead.setup(toAi(offset), toAi(c.seenVelocity), toAi(body->body.velocity), toAi(forward), m_time, round);
+				const float reach = std::sqrt(physics::lengthSquared(offset));
+				ai::Vec3 direction = toAi(offset * (1 / std::max(reach, 1e-3f))), impact;
+				if (c.lead.solve(m_time, 0.5f, indirect, direction, impact)) {
+					want = eye + physics::Vec3 {direction.x, direction.y, direction.z} * reach;
 				}
 			}
 			float wantYaw = 0, wantPitch = 0;
