@@ -220,6 +220,34 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
     next scripted change sends a second lie press that inverts the stance. This
     only affects the test tool.
 
+## Enhancements
+
+### Q-14. The widescreen HUD is fixed to 16:9, wrong on ultrawide (UWQHD) screens (medium)
+- **Status:** open
+- **Where:** `src/Main/main.cpp` ~3886–3925 (`hudXScale`, the `enhanced.hudWidescreen` block)
+- **What works:** at 3440×1440 (21:9), with `+widescreen 1` (`src/Main/DisplayModes.h`),
+  the mode is offered. The 3D view widens correctly: `aspectFov`, RendDX9's
+  `0x10066ac0`, keeps the vertical FOV from 4:3 up to very wide screens.
+- **Problems:**
+  - Remaster's HUD fix (applied natively) and `enhanced.hudWidescreen` both squeeze
+    the 4:3 HUD by a fixed 12/16, which is only right at 16:9. The right squeeze is
+    (4/3) ÷ aspect, about 0.56 at 21:9. At 21:9 the HUD stays about 1.34× too wide,
+    so round gauges and the minimap come out oval.
+  - The side pieces move a fixed 120 units (`shiftNode` ±120), so on wider screens
+    they don't reach the edges.
+  - The full-screen gunner frames and filters are spanned to -134..1367
+    (`spanNode`), which covers 16:9 only. On 21:9 they likely leave bare strips at
+    the sides. This hasn't been looked at on screen.
+  - The Flash menus haven't been checked at 21:9.
+- **Fix:** under `enhanced.hudWidescreen`, derive the squeeze, the side offset and
+  the frame span from the window's real aspect ratio, and update them when the
+  window is resized. With Remaster's patch installed, the fixed 12/16 is retail
+  behaviour with the mod, so only replace it behind the enhanced flag. Check
+  32:9 as well.
+- **Done when:** at 3440×1440 and 5120×1440 the HUD keeps its 4:3 proportions,
+  the side pieces sit at the screen edges, and the gunner frames cover the
+  whole screen. Add a test of the computed values for 4:3, 16:9, 21:9 and 32:9.
+
 ## Retail parity: default behaviour that differs from retail
 
 Each of these needs the retail claim confirmed first (step 1), then matching retail
