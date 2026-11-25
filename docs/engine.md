@@ -15853,6 +15853,22 @@ slot (23). The weapon, kit and AI templates (`weaponTemplate.*`,
   UAVDrone and CP_CANNON values, which `BotSettings::autoController`
   holds. AutoControllers.ai's `scanningSpeedWhenFlippingOut` is no
   command.
+- **Seat auto controllers** (Project Remaster's Titan gun hubs:
+  SentryGunAA, SentryGunAApac, SentryGunCannon, Co_Auto): the spawn hands
+  each seat PlayerControlObject that names a template to the manager
+  (BF2142.exe `0x004a98c0` → slot 8 `0x1004dba0` → `0x1004d8e0`), which
+  enters a bot of its own; a person entering takes the seat over
+  (allowTakeOver read by the seat search `0x005a98e0` through slot `0x40`;
+  slots `0x38` / `0x3c` stop and restart the bot). The bot senses enemies
+  within viewDistance in its fov frustum, scores them by the seat
+  weapon's strength x max(0, 1 − d / (1.2 maxRange)), aims yaw and pitch
+  (maxTrackingInput tracking, scanningInputScale scanning, `0x100e5820`)
+  and fires after reactionTime. `accuracy` (+8) has no reader in either
+  of the template's two paths (bot slot `0x288`, the manager's entries).
+  The values come from the scripts (`BotManager` sets
+  `GameWorld::autoControllerTemplate` / `autoControllerStrength`); the
+  seat is stepped as a gunner's (`GameWorld::stepSeatControllers`,
+  `Titan_RemasterAAAutoControllerFiresAtTransport`).
 - **Not commands:** the shipped AIDefault.ai's `aiSettings.setAutoSpawnBots`
   (AIDLL's is `aiSettings.autoSpawnBots`), so autoSpawn stays off.
 - **Scripted bots** (`ai.*`): `botMoveTo <radius> <x/y/z> <bot>`

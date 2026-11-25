@@ -157,7 +157,8 @@ int fireMode(const world::ObjectTemplate* t)
 }
 
 // CombatStrengthType names (weaponTemplate.setStrength; the original's
-// parser 0x10059be0, which also takes a bare "Infantery").
+// parser 0x10059be0, which also takes "CSTInfantery" and a bare
+// "Infantery", as the Titans' Titan_GR_Cannon gives it).
 int strengthIndex(const std::string& name)
 {
 	static const char* names[] = {"infantry", "lightarmour", "heavyarmour", "navalarmour", "helicopter", "airplane", "titan",
@@ -168,7 +169,7 @@ int strengthIndex(const std::string& name)
 			return i;
 		}
 	}
-	return n == "cstinfantery" ? 0 : -1;
+	return n == "cstinfantery" || n == "infantery" ? 0 : -1;
 }
 
 // AIBehaviours.ai's sets, for when the scripts were not run.
@@ -789,6 +790,39 @@ BotManager::BotManager(GameWorld& world, BotSettings settings) : m_world(world),
 	if (m_settings.viewDistance <= 0) {
 		m_settings.viewDistance = gameViewDistance(m_settings.levelFog, m_settings.levelViewDistance);
 	}
+	// The seats' auto controllers (GameWorld::stepSeatControllers) are AIDLL
+	// bots: their templates and their weapons' strengths are the AI's.
+	m_world.autoControllerTemplate = [this](const std::string& name, GameWorld::AutoControl& out) {
+		const BotSettings::AutoControllerTemplate* t = m_settings.autoController(name);
+		if (!t) {
+			return false;
+		}
+		out.viewDistance = t->viewDistance;
+		out.discoverCloaked = t->discoverCloakedEnemiesDistance;
+		out.fov = t->fov;
+		out.scanningSpeed = t->scanningSpeed;
+		out.targetLostTimeout = t->targetLostTimeout;
+		out.reactionTime = t->reactionTime;
+		out.onlyAttackNetworkBattlefieldObjects = t->onlyAttackNetworkBattlefieldObjects;
+		out.neverAttackDeployer = t->neverAttackDeployer;
+		out.checkLineOfFire = t->checkLineOfFire;
+		out.flipOutAtHealth = t->flipOutAtHealth;
+		out.useSiren = t->useSiren;
+		out.reportEnemiesToTeam = t->reportEnemiesToTeam;
+		out.maxTrackingInput = t->maxTrackingInput;
+		out.scanningInputScale = t->scanningInputScale;
+		out.operatesAlone = t->operatesAlone;
+		return true;
+	};
+	m_world.autoControllerStrength = [this](const std::string& weapon, int player, float& maxRange) {
+		GameWorld::PlayerInfo info;
+		if (!m_world.playerInfo(player, info)) {
+			return 0.0f;
+		}
+		const WeaponAi w = weaponAi(weapon);
+		maxRange = w.maxRange;
+		return w.strength[static_cast<size_t>(strengthTypeOf(info))];
+	};
 }
 
 namespace {
@@ -852,6 +886,8 @@ void BotManager::setNavMesh(const ai::NavMesh* mesh)
 
 BotManager::~BotManager()
 {
+	m_world.autoControllerTemplate = {};
+	m_world.autoControllerStrength = {};
 	if (m_navMesh) {
 		m_world.setAiSpawnTest({});
 	}

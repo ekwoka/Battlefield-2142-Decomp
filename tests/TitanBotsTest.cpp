@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <map>
 #include <optional>
+#include <set>
 #include <vector>
 
 using namespace dice::hfe;
@@ -1489,5 +1490,176 @@ TEST(Bots_RemasterApcPodSeatsCountNoGun)
 			}
 			level.world->removePlayer(bot);
 		}
+	}
+}
+
+// Project Remaster's Titan gun hubs name an auto controller
+// (setAutoControllerTemplateName SentryGunAApac / SentryGunAA / Co_Auto /
+// SentryGunCannon, AI/AutoControllers.ai): with no one at the console, each
+// Titan's AA gun turns on an enemy transport hovering in reach and fires at
+// it (the AIDLL bot the manager puts in the seat, GameWorld::
+// stepSeatControllers), stops while a person holds the seat and starts again
+// once they leave; a ground cannon fires at an enemy soldier below.
+TEST(Titan_RemasterAAAutoControllerFiresAtTransport)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	const char* mod = "mods/Project_Remaster_v17_Final";
+	if (!gameDir || !test::runs(mod)) return;
+	for (const int team : {1, 2}) {
+		TitanLevel level(gameDir, "Highway_Tampa", 48, false, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) return;
+		game::BotSettings settings;
+		loadAircraftAi(level, settings);
+		CHECK(settings.autoController(team == 1 ? "SentryGunAApac" : "SentryGunAA") != nullptr);
+		game::BotManager bots(*level.world, settings); // before the spawn: the manager takes the hubs then
+		level.world->startRound();
+		level.run(0.5f);
+		const int enemy = 3 - team;
+		const uint32_t titan = level.world->titanOf(team);
+		CHECK(titan != 0);
+		if (!titan) return;
+		const auto seats = level.world->vehicleSeats(titan);
+		int aa = -1, ground = -1;
+		for (size_t i = 0; i < seats.size(); ++i) {
+			if (aa < 0 && seats[i].name.find("aacannon") != std::string::npos) aa = static_cast<int>(i);
+			if (ground < 0 && seats[i].name.find("groundcanon") != std::string::npos) ground = static_cast<int>(i);
+		}
+		CHECK(aa >= 0 && ground >= 0);
+		if (aa < 0 || ground < 0) return;
+		std::set<uint32_t> counted;
+		const auto rounds = [&](const physics::Vec3* near) {
+			int n = 0;
+			for (const auto& p : level.world->projectiles()) {
+				if (p.shooter == titan && p.player == -1 && (!near || physics::lengthSquared(p.origin - *near) < 8.0f * 8.0f)
+					&& counted.insert(p.serial).second) {
+					++n;
+				}
+			}
+			return n;
+		};
+		// No enemy about: the guns hold their fire.
+		int fired = 0;
+		level.afterTick = [&] { fired += rounds(nullptr); };
+		level.run(2);
+		CHECK(fired == 0);
+		// An enemy transport 300 m off the hub, 15 degrees up and off its aim.
+		physics::Vec3 eye;
+		physics::Mat3 hull;
+		float yaw = 0, pitch = 0;
+		CHECK(level.world->gunFrame(titan, aa, eye, hull) && level.world->gunAim(titan, aa, yaw, pitch));
+		const game::GameWorld::SeatLayout& seat = seats[static_cast<size_t>(aa)];
+		const float bearing = std::isfinite(seat.minYaw) ? seat.frameYaw + (seat.minYaw + seat.maxYaw) / 2 + 10 : yaw + 40;
+		const float up = 15 * 3.14159265f / 180, round = bearing * 3.14159265f / 180;
+		const physics::Vec3 at = eye + hull.transform({std::sin(round) * std::cos(up), std::sin(up), std::cos(round) * std::cos(up)}) * 300.0f;
+		world::Object* transport = level.objects.create(level.templates.find(team == 1 ? "eu_at" : "as_at"), {at.x, at.y, at.z});
+		CHECK(transport != nullptr);
+		if (!transport) return;
+		transport->setTeam(enemy);
+		const uint32_t transportId = transport->id();
+		level.run(2 / 30.0f);
+		level.world->setHitPoints(transportId, 1e9f); // it outlives the rounds
+		const int pilot = level.world->addPlayer("Pilot", enemy, false);
+		CHECK(level.world->spawnSoldier(pilot));
+		physics::Vec3 entry;
+		CHECK(level.world->entryPoint(transportId, entry));
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(pilot, info);
+		level.world->setSoldierPosition(info.soldier, {entry.x, entry.y - 1.0f, entry.z});
+		game::SoldierInput use;
+		use.use = true;
+		level.world->setInput(pilot, use);
+		level.run(1 / 30.0f);
+		level.world->setInput(pilot, {});
+		const auto pilotAboard = [&] {
+			game::GameWorld::PlayerInfo p;
+			return level.world->playerInfo(pilot, p) && p.alive && p.vehicle == transportId && level.objects.find(transportId);
+		};
+		CHECK(pilotAboard());
+		// The transport held where it hovers; the gun's own rounds counted.
+		float aimError = 1e9f;
+		level.afterTick = [&] {
+			level.world->setBodyVelocity(transportId, {});
+			physics::Vec3 from;
+			physics::Mat3 frame;
+			level.world->gunFrame(titan, aa, from, frame);
+			fired += rounds(&from);
+			for (const auto& p : level.world->projectiles()) {
+				if (p.shooter == titan && p.player == -1 && p.age < 0.1f && physics::lengthSquared(p.origin - from) < 8.0f * 8.0f) {
+					const physics::Vec3 to = physics::Vec3 {transport->position().x, transport->position().y, transport->position().z} - p.origin;
+					const float c = physics::dot(to, p.velocity) / std::sqrt(physics::lengthSquared(to) * physics::lengthSquared(p.velocity));
+					aimError = std::min(aimError, std::acos(std::clamp(c, -1.0f, 1.0f)) * 57.29578f);
+				}
+			}
+		};
+		fired = 0;
+		level.run(10);
+		CHECK(pilotAboard());
+		if (!pilotAboard()) return;
+		level.world->gunAim(titan, aa, yaw, pitch);
+		level.world->gunFrame(titan, aa, eye, hull);
+		const physics::Vec3 aim = hull.untransform(physics::Vec3 {transport->position().x, transport->position().y, transport->position().z} - eye);
+		const float wantYaw = std::atan2(aim.x, aim.z) * 57.29578f;
+		const float wantPitch = std::atan2(aim.y, std::sqrt(aim.x * aim.x + aim.z * aim.z)) * 57.29578f;
+		std::fprintf(stderr, "  %s: gun %.1f/%.1f, transport at %.1f/%.1f (%.0f m), %d rounds, nearest %.1f degrees off\n",
+			seat.name.c_str(), yaw, pitch + seat.restPitch, wantYaw, wantPitch, std::sqrt(physics::lengthSquared(aim)), fired, aimError);
+		CHECK(std::fabs(std::remainder(yaw - wantYaw, 360.0f)) < 3);
+		CHECK(std::fabs(pitch + seat.restPitch - wantPitch) < 3);
+		CHECK(fired > 0);
+		CHECK(aimError < 3);
+		// A gunner of the Titan takes the console: the auto controller stops.
+		const int gunner = level.world->addPlayer("Gunner", team, false);
+		CHECK(level.world->spawnSoldier(gunner));
+		level.world->playerInfo(gunner, info);
+		CHECK(level.world->setSoldierPosition(info.soldier, level.titan(team)->position + physics::Vec3 {0, 11, -30}));
+		float radius = 0;
+		int first = -1;
+		CHECK(level.world->titanGunEntry(gunner, entry, radius, first));
+		CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+		level.world->setInput(gunner, use);
+		level.run(0.1f);
+		game::SoldierInput input;
+		input.switchSeat = aa + 1;
+		level.world->setInput(gunner, input);
+		level.run(0.1f);
+		level.world->setInput(gunner, {});
+		CHECK(level.world->playerInfo(gunner, info) && info.vehicle == titan && info.seat == aa);
+		fired = 0;
+		level.run(3);
+		CHECK(fired == 0);
+		CHECK(pilotAboard());
+		// Out again: the auto controller takes the seat back and fires on.
+		level.world->setInput(gunner, use);
+		level.run(1 / 30.0f);
+		level.world->setInput(gunner, {});
+		CHECK(level.world->playerInfo(gunner, info) && info.vehicle != titan);
+		fired = 0;
+		level.run(3);
+		std::fprintf(stderr, "  after the gunner left: %d rounds\n", fired);
+		CHECK(fired > 0);
+		// A ground cannon and an enemy soldier on the ground in front of it.
+		level.world->removePlayer(pilot);
+		level.run(1);
+		CHECK(level.world->gunFrame(titan, ground, eye, hull) && level.world->gunAim(titan, ground, yaw, pitch));
+		const game::GameWorld::SeatLayout& cannon = seats[static_cast<size_t>(ground)];
+		const float side = std::isfinite(cannon.minYaw) ? cannon.frameYaw + (cannon.minYaw + cannon.maxYaw) / 2 : yaw;
+		const physics::Vec3 out = hull.transform({std::sin(side * 3.14159265f / 180), 0, std::cos(side * 3.14159265f / 180)});
+		const float across = std::sqrt(out.x * out.x + out.z * out.z);
+		const float x = eye.x + out.x / across * 400, z = eye.z + out.z / across * 400; // within the barrel's pitch limits
+		const int soldier = level.world->addPlayer("Infantry", enemy, false);
+		CHECK(level.world->spawnSoldier(soldier));
+		level.world->playerInfo(soldier, info);
+		CHECK(level.world->setSoldierPosition(info.soldier, {x, level.world->terrainHeight(x, z) + 0.1f, z}));
+		fired = 0;
+		level.afterTick = [&] {
+			physics::Vec3 from;
+			physics::Mat3 frame;
+			level.world->gunFrame(titan, ground, from, frame);
+			fired += rounds(&from);
+		};
+		level.run(8);
+		std::fprintf(stderr, "  %s at a soldier 400 m out (%.0f m below): %d rounds\n", cannon.name.c_str(),
+			eye.y - level.world->terrainHeight(x, z), fired);
+		CHECK(fired > 0);
 	}
 }

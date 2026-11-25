@@ -3018,6 +3018,7 @@ private:
 			float yawRate = 0, pitchRate = 0; // the bundles' speeds (0x00563bd0's +0x194), degrees a second, bundle sign
 			float aiDeviation = 0;     // the component's +0x28 (setAiDeviation)
 			bool manned = false;        // someone in its seat last tick (stepUnmannedGuns)
+			bool autoControlled = false; // its auto controller drove it this tick (stepSeatControllers)
 			float hullYaw = NAN;        // the hull's yaw at the last tick (ignoreParentRotation)
 			// The pitch bundle's ignoreParentRotation: the hull's rotation at
 			// the last tick and the pitch taken back so far, kept on top of
@@ -3454,6 +3455,9 @@ private:
 	bool disabled(const Body& body) const { return body.empLevel > 0 || body.wreckTime >= 0; }
 
 	void seatPlayer(Player& player, Body& body, int seat);
+	// The seat's firearms made on its first entry, and every group back at
+	// its first weapon (each entry's).
+	void enterSeatWeapons(Body& body, int seat, const SeatLayout& place);
 	// `groups`: which weapon groups fire (bit 0 PIFire, 1 PIAltFire, 2
 	// PIFlareFire); `aims`: the look turns the seat's bundles (not a
 	// pilot's, whose mouse flies the vehicle).
@@ -4390,7 +4394,16 @@ public:
 		float flipOutAtHealth = 0;                        // +0x30
 		bool useSiren = false;                            // +0x14
 		bool reportEnemiesToTeam = false;                 // +0x21
+		float maxTrackingInput = 4;                       // +0x24
+		float scanningInputScale = 1;                     // +0x34
+		bool operatesAlone = false;                       // +1
 	};
+	// The AI's side of the seats' auto controllers, set by the BotManager:
+	// a template of AI/AutoControllers.ai by name, and a weapon's strength
+	// (its weaponTemplate's, by the player's combat strength type) against
+	// a player, with the weapon's maxRange.
+	std::function<bool(const std::string& name, AutoControl& out)> autoControllerTemplate;
+	std::function<float(const std::string& weapon, int player, float& maxRange)> autoControllerStrength;
 
 private:
 	struct Drone {
@@ -4451,6 +4464,24 @@ private:
 	// The deployed sentry guns (a deployable with the SentryGun auto
 	// controller), by their deployed object.
 	std::vector<Drone> m_sentryGuns;
+	// A vehicle seat whose PlayerControlObject names an auto controller (the
+	// spawn's 0x004a98c0 hands the root's seats to the manager, AIDLL
+	// 0x1004dba0): an AIDLL bot with its own AI player sits in it
+	// (0x1004d8e0) and drives the seat's inputs; `player` stands in for
+	// that player, in no seat list, so a person can still take the seat.
+	struct SeatController {
+		uint32_t vehicle = 0;
+		int seat = -1;
+		AutoControl control;
+		std::unique_ptr<Player> player;
+		bool driving = false;   // its inputs went to the seat last tick
+		int target = -1;
+		physics::Vec3 seenAt, seenVelocity; // the target where it was last in sight
+		float targetSeenAt = 0, fireFrom = 0, sensedAt = -1e9f;
+		float scanTurn = 1;     // the scan's way round (+1 or -1)
+		bool tapped = false;    // the trigger pressed last tick (a single-fire gun's tap)
+	};
+	std::vector<SeatController> m_seatControllers;
 	// The deployables' own animation systems (spawn_beacon, the hubs, the
 	// portable shield, the sentry gun): objects that aren't bodies here but
 	// get the skeleton helper as every object does (the object base's
@@ -4682,6 +4713,10 @@ private:
 	void addSentryGun(const Player& player, const world::Object& placed);
 	const world::ObjectTemplate* autoControlledGun(const world::ObjectTemplate& t, float* height) const;
 	void stepSentryGuns(float seconds);
+	void registerSeatControllers(const world::Object& vehicle);
+	void stepSeatControllers(float seconds);
+	bool teammateInLineOfFire(const physics::Vec3& from, const physics::Vec3& to, int team, float discoverCloaked,
+		int targetPlayer) const;
 	// An auto controller's report of its target (IAIGame slot 0x68,
 	// 0x00895ab0, from its player) and the siren's press.
 	void autoControllerReport(Drone& drone, const Player& target);
