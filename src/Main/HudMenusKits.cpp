@@ -9,6 +9,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -17,6 +18,23 @@ namespace dice::hfe::menu {
 namespace {
 
 constexpr const char* kEmpty = "Ingame/GeneralIcons/empty.tga";
+
+bool hasAbilityComponent(const world::ObjectTemplate& t)
+{
+	for (const std::string& comp : t.components()) {
+		if (comp.size() == 7
+			&& std::equal(comp.begin(), comp.end(), "ability",
+				[](unsigned char a, unsigned char b) { return std::tolower(a) == b; })) {
+			return true;
+		}
+	}
+	for (const auto& [key, value] : t.settings()) {
+		if (key.rfind("ability.", 0) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
 
 int fieldBranch(const std::string& value)
 {
@@ -111,7 +129,7 @@ void KitMenu::bind(Console& console)
 		setKit(kit);
 		build(m_team);
 		const Item& it = m_grid[static_cast<size_t>(branch + 1)][static_cast<size_t>(level)];
-		if (!it.present || !it.available) {
+		if (!it.present || !it.available || it.passive) {
 			return false;
 		}
 		Pick& slot = m_slots[static_cast<size_t>(kit)][static_cast<size_t>(branch + 1)];
@@ -298,6 +316,7 @@ void KitMenu::build(int team)
 		item.container = child.name;
 		item.available = owns(child.name);
 		item.fieldUnlocked = std::find(m_fieldItems.begin(), m_fieldItems.end(), child.name) != m_fieldItems.end();
+		item.passive = hasAbilityComponent(*t) && std::atoi(setting(unlockItem, "itemIndex").c_str()) <= 0;
 	}
 	for (const Pick& p : m_slots[static_cast<size_t>(m_kit)]) {
 		Item* in = p.row >= 0 ? &m_grid[static_cast<size_t>(p.row)][static_cast<size_t>(p.index)] : nullptr;
@@ -473,7 +492,10 @@ void KitMenu::update(int team)
 			const std::string p = "Kit" + std::to_string(row) + "Item" + std::to_string(index);
 			m_hud.set(p + "Active", it.active ? 1 : 0);
 			m_hud.set(p + "FieldUnlocked", it.fieldUnlocked ? 1 : 0);
-			m_hud.set(p + "Show", it.present ? 1 : 0);
+			// Kit<row>Item<idx>Show gates whether an unlock sits in the
+			// draggable ITEMS grid (1: KitEquipSix/KitEquipSeven) or in
+			// PlayerInfo's passive-ability slots (0: PlayerInfo3/PlayerInfo4).
+			m_hud.set(p + "Show", (it.present && !it.passive) ? 1 : 0);
 			m_hud.setString(p + "Icon", orEmpty(it.icon));
 			m_hud.set(p + "Alpha", it.available ? 1.0f : 0.3f);
 		}
@@ -577,7 +599,7 @@ void KitMenu::chooseKitCustom(int row, int index)
 		return;
 	}
 	const Item& it = m_grid[static_cast<size_t>(row)][static_cast<size_t>(index)];
-	if (!it.present || !it.available) {
+	if (!it.present || !it.available || it.passive) {
 		return;
 	}
 	m_drag = {row, index};

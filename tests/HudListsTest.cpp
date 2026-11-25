@@ -601,6 +601,77 @@ TEST(HudLists_CustomizeDragClearsHiddenMapAndPreservesAllUnlocked)
 	CHECK(round.playerInfo(me, spawned) && spawned.cloaked);
 }
 
+// Passive booster-pack Ability upgrades (itemIndex 0 on an Ability container,
+// such as Recon's Ability_Active_Camo at Kit2Item3) must set Kit<r>Item<i>Show
+// to 0 so HudElementsKitsMenu.con routes them to PlayerInfo rather than the
+// draggable ITEMS grid, and must not be draggable into equipment slots.
+// Equippable gadgets (itemIndex > 0, even with an Ability component like
+// Remaster's Beacon) remain shown and draggable.
+TEST(HudLists_KitMenuPassiveAbilityNotInEquipGrid)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	const auto make = [&](const char* type, const char* name, std::vector<std::pair<const char*, const char*>> settings,
+						  std::vector<const char*> children = {}) {
+		world::ObjectTemplate* t = templates.create(type, name);
+		for (const auto& [key, value] : settings) {
+			t->settings()[key] = value;
+		}
+		for (const char* child : children) {
+			t->children().push_back({child, {}, {}});
+		}
+		return t;
+	};
+	make("GenericFireArm", "sniper", {{"itemIndex", "3"}, {"weaponHud.unlockIcon", "sniper.tga"}});
+	make("GenericFireArm", "carbine", {{"itemIndex", "3"}, {"weaponHud.unlockIcon", "carbine.tga"}});
+	make("GenericFireArm", "decoy", {{"itemIndex", "5"}, {"weaponHud.unlockIcon", "decoy.tga"}});
+	make("GenericFireArm", "camo_gadget", {{"itemIndex", "5"}, {"weaponHud.unlockIcon", "camo.tga"}});
+	make("GenericFireArm", "Ability_Active_Camo", {{"itemIndex", "0"}, {"weaponHud.unlockIcon", "ability_camo.tga"}});
+	make("GenericFireArm", "beacon", {{"itemIndex", "8"}, {"weaponHud.unlockIcon", "beacon.tga"}});
+	make("ItemContainer", "Sni3", {{"unlockLevel", "3"}, {"unlockBranch", "UB_First"}}, {"carbine"});
+	make("ItemContainer", "Sni4", {{"unlockLevel", "4"}, {"unlockBranch", "UB_First"}}, {"decoy"});
+	make("ItemContainer", "SpecOp2", {{"unlockLevel", "2"}, {"unlockBranch", "UB_Second"}}, {"camo_gadget"});
+	make("ItemContainer", "SpecOp3", {{"unlockLevel", "3"}, {"unlockBranch", "UB_Second"}}, {"carbine"});
+	auto* passiveCamo = make("ItemContainer", "SpecOp4",
+		{{"unlockLevel", "4"}, {"unlockBranch", "UB_Second"}, {"ability.setOverheatMod.list", "camo_gadget 0.72;"}},
+		{"Ability_Active_Camo"});
+	passiveCamo->components().push_back("Ability");
+	auto* slBeacon = make("ItemContainer", "Leader0", {{"unlockLevel", "0"}, {"unlockBranch", "UB_SquadLeader"}}, {"beacon"});
+	slBeacon->components().push_back("Ability");
+	make("Kit", "EU_Recon", {}, {"sniper", "Sni3", "Sni4", "SpecOp2", "SpecOp3", "SpecOp4", "Leader0"});
+
+	game::GameWorld round(templates, objects);
+	game::GameLogic logic;
+	logic.team(2).kits.push_back({"EU_Recon", "soldier", ""});
+	hud::HudManager hud = emptyHud();
+	menu::KitMenu kits(round, logic, templates, hud);
+	kits.setUnlocked({}, true);
+	kits.update(2);
+
+	// Kit1Item3 is decoy (equippable): Show=1. Kit2Item3 is Ability_Active_Camo (passive): Show=0.
+	CHECK(kits.item(1, 3).present && !kits.item(1, 3).passive && hud.number("Kit1Item3Show") == 1);
+	CHECK(kits.item(2, 3).present && kits.item(2, 3).passive && hud.number("Kit2Item3Show") == 0);
+	CHECK(kits.item(4, 0).present && !kits.item(4, 0).passive && hud.number("Kit4Item0Show") == 1);
+
+	// Attempting to drag the passive upgrade into slot 1 must be ignored.
+	kits.chooseKitCustom(2, 3);
+	kits.selectDroppedItem(1);
+	kits.update(2);
+	CHECK(!kits.item(2, 3).active && hud.string("KitCustom1Icon") == "Ingame/GeneralIcons/empty.tga");
+
+	// Active Camo gadget (2, 2), Decoy (1, 3), and Squad Leader Beacon (4, 0) remain draggable.
+	kits.chooseKitCustom(2, 2);
+	kits.selectDroppedItem(1);
+	kits.chooseKitCustom(1, 3);
+	kits.selectDroppedItem(2);
+	kits.chooseKitCustom(4, 0);
+	kits.selectDroppedItem(4);
+	kits.update(2);
+	CHECK(kits.item(2, 2).active && hud.string("KitCustom1Icon") == "camo.tga");
+	CHECK(kits.item(1, 3).active && hud.string("KitCustom2Icon") == "decoy.tga");
+	CHECK(kits.item(4, 0).active && hud.string("KitCustom4Icon") == "beacon.tga");
+}
+
 // The spawn screen's ability icons (0x00798b20, from the rebuild while
 // the soldier is dead): the player's ability block after the kit build
 // (0x00570ab0: each owned container's Ability), addExtraAmmoItem's flag,

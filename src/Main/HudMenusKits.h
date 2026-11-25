@@ -137,6 +137,7 @@ public:
 		bool available = false;
 		bool fieldUnlocked = false;
 		bool active = false;
+		bool passive = false; // container Ability with no carried itemIndex (not draggable into equipment slots)
 		std::string container; // the ItemContainer (empty for row 0)
 		std::string icon, abilityIcon, picture, description;
 	};
