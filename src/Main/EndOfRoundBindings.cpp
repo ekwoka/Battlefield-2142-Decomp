@@ -77,8 +77,87 @@ int rankExperience(int rank)
 // <map><name> Minsk </name><briefing locid="...">...</briefing><modes>
 // <mode type="gpm_cq"><maptype players="16" type="assault"
 // locid="GAMEMODE_DESCRIPTION_assault">...</maptype>...
-LevelDescription parseLevelDescription(const std::string& xml, const std::string& gameMode, int size)
+// BF2142.exe reads a .desc with TinyXML (0x00576b60 -> 0x0063fc40) and
+// keeps it whenever a root element was read (0x00576a80), even after a
+// parse error: the nodes read up to the error stay in the tree. An end tag
+// that does not close the open element, or whose name is not followed by
+// '>' (TIXML_ERROR_READING_END_TAG), ends the parse. This returns the text
+// up to that point with the still-open elements closed, which is what the
+// patterns below then read. (Camp_Gibraltar's Deathmatch "</maptype" with
+// no '>' loses the gpm_ti after it.)
+std::string tinyXmlKept(const std::string& xml)
 {
+	const auto nameChar = [](char c) {
+		return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == ':' || c == '.';
+	};
+	std::vector<std::string> open;
+	size_t p = 0;
+	while ((p = xml.find('<', p)) != std::string::npos) {
+		if (xml.compare(p, 4, "<!--") == 0) {
+			const size_t e = xml.find("-->", p);
+			if (e == std::string::npos) {
+				break;
+			}
+			p = e + 3;
+			continue;
+		}
+		if (xml.compare(p, 2, "<?") == 0 || xml.compare(p, 2, "<!") == 0) {
+			const size_t e = xml.find('>', p);
+			if (e == std::string::npos) {
+				break;
+			}
+			p = e + 1;
+			continue;
+		}
+		const bool end = xml.compare(p, 2, "</") == 0;
+		size_t nameEnd = p + (end ? 2 : 1);
+		while (nameEnd < xml.size() && nameChar(xml[nameEnd])) {
+			++nameEnd;
+		}
+		const std::string name = xml.substr(p + (end ? 2 : 1), nameEnd - p - (end ? 2 : 1));
+		if (end) {
+			size_t r = nameEnd;
+			while (r < xml.size() && std::isspace(static_cast<unsigned char>(xml[r]))) {
+				++r;
+			}
+			if (open.empty() || open.back() != name || r >= xml.size() || xml[r] != '>') {
+				std::string kept = xml.substr(0, p);
+				for (auto it = open.rbegin(); it != open.rend(); ++it) {
+					kept += "</" + *it + ">";
+				}
+				return kept;
+			}
+			open.pop_back();
+			p = r + 1;
+			continue;
+		}
+		// The start tag's end, past quoted attribute values.
+		size_t close = nameEnd;
+		char quote = 0;
+		for (; close < xml.size(); ++close) {
+			const char c = xml[close];
+			if (quote) {
+				quote = c == quote ? 0 : quote;
+			} else if (c == '"' || c == '\'') {
+				quote = c;
+			} else if (c == '>') {
+				break;
+			}
+		}
+		if (close >= xml.size()) {
+			break;
+		}
+		if (xml[close - 1] != '/') {
+			open.push_back(name);
+		}
+		p = close + 1;
+	}
+	return xml;
+}
+
+LevelDescription parseLevelDescription(const std::string& text, const std::string& gameMode, int size)
+{
+	const std::string xml = tinyXmlKept(text);
 	LevelDescription out;
 	std::smatch m;
 	if (std::regex_search(xml, m, std::regex(R"re(<name>\s*([^<]*?)\s*</name>)re"))) {
@@ -99,14 +178,16 @@ LevelDescription parseLevelDescription(const std::string& xml, const std::string
 	const std::regex locid(R"re(locid\s*=\s*"([^"]*)")re");
 	for (auto it = std::sregex_iterator(xml.begin(), xml.end(), mode); it != std::sregex_iterator(); ++it) {
 		out.modes.push_back((*it)[1]);
-		if ((*it)[1] != gameMode) {
-			continue;
-		}
+		out.modeSizes.emplace_back();
 		const std::string body = (*it)[2];
 		for (auto t = std::sregex_iterator(body.begin(), body.end(), mapType); t != std::sregex_iterator(); ++t) {
 			const std::string attributes = (*t)[1];
 			std::smatch a;
 			const int players_ = std::regex_search(attributes, a, players) ? std::stoi(a[1]) : 0;
+			out.modeSizes.back().push_back(players_);
+			if ((*it)[1] != gameMode) {
+				continue;
+			}
 			out.sizes.push_back(players_);
 			if ((players_ == size || out.gameModeKey.empty()) && std::regex_search(attributes, a, locid)) {
 				out.gameModeKey = a[1];

@@ -500,6 +500,7 @@ private:
 	struct LevelText {
 		std::string name, briefing, briefingKey;
 		std::vector<std::string> modes;
+		std::vector<std::vector<int>> sizes; // each mode's maptype players (+0x90 records' +0x20)
 	};
 	const LevelText* levelText(const std::string& level) const;
 	mutable std::map<std::string, std::optional<LevelText>> m_levelTexts;

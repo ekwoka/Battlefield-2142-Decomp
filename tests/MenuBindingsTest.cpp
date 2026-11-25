@@ -1630,6 +1630,54 @@ TEST(MenuBindings_CreateServerManyGameModes)
 	CHECK(menu.player.scriptErrors().empty());
 }
 
+// The maps a mode offers come from the levels' .desc files (0x00479e80
+// over 0x00462750's records), read as TinyXML keeps them: a level whose
+// server.zip has a mode its .desc doesn't list offers none, and a .desc
+// broken by an end tag without '>' loses every mode after it (Remaster's
+// Camp_Gibraltar: gpm_ti after its Deathmatch "</maptype").
+TEST(MenuBindings_AvailableMapsFromLevelDescriptions)
+{
+	const std::string broken = "<map><name>Camp</name><modes>"
+		"<mode type=\"gpm_cq\"><maptype players=\"16\">a</maptype><maptype players=\"32\">b</maptype></mode>"
+		"<mode type=\"Deathmatch\">\n<maptype players=\"12\" locid=\"x\">c</maptype\n</mode>"
+		"<mode type=\"gpm_ti\"><maptype players=\"48\">d</maptype></mode></modes></map>";
+	const menu::LevelDescription camp = menu::parseLevelDescription(broken, "Deathmatch", 12);
+	CHECK(camp.modes == std::vector<std::string>({"gpm_cq", "Deathmatch"}));
+	CHECK(camp.modeSizes.size() == 2 && camp.modeSizes[0] == std::vector<int>({16, 32}) && camp.modeSizes[1] == std::vector<int>({12}));
+	CHECK(camp.gameModeText == "c");
+	// A well-formed file is read whole (declarations, comments, quoted '>').
+	const std::string good = "<?xml version=\"1.0\"?><!-- x --><map a=\"1 > 0\"><modes><mode type=\"gpm_ti\">"
+		"<maptype players=\"48\"/></mode></modes></map>";
+	CHECK(menu::tinyXmlKept(good) == good);
+
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	avm1::Interpreter vm;
+	natives.install(vm);
+	// server.zip: Belgrade, Camp, Minsk and NoDesc all have gpm_ti 48.
+	bindings.setMaps({{"Belgrade", "gpm_cq", 32}, {"Belgrade", "gpm_ti", 48}, {"Camp", "gpm_cq", 16}, {"Camp", "gpm_ti", 48},
+		{"Minsk", "gpm_ti", 48}, {"NoDesc", "gpm_ti", 48}});
+	bindings.readFile = [&broken](const std::string& path, std::string& text) {
+		if (path == "Levels/Camp/Info/Camp.desc") {
+			text = broken;
+		} else if (path == "Levels/Belgrade/Info/Belgrade.desc") {
+			text = "<map><modes><mode type=\"gpm_cq\"><maptype players=\"16\"/><maptype players=\"32\"/></mode></modes></map>";
+		} else if (path == "Levels/Minsk/Info/Minsk.desc") {
+			text = "<map><modes><mode type=\"gpm_ti\"><maptype players=\"48\"/></mode></modes></map>";
+		} else {
+			return false;
+		}
+		return true;
+	};
+	const avm1::Value mp = vm.getMember(vm.getMember(vm.getMember(avm1::Value(vm.global()), "dice"), "bf2"), "Multiplay");
+	vm.callMember(mp, "setFilterGameMode", {avm1::Value("gpm_ti")});
+	CHECK(natives.listRows("mapListAvailable") == NativeRegistry::Rows({{"Minsk - 48"}, {"NoDesc - 48"}}));
+	vm.callMember(mp, "setFilterGameMode", {avm1::Value("gpm_cq")});
+	CHECK(natives.listRows("mapListAvailable")
+		== NativeRegistry::Rows({{"Belgrade - 16"}, {"Belgrade - 32"}, {"Camp - 16"}, {"Camp - 32"}}));
+}
+
 // The LAN server's rules in the info popup (0x10068150 / 0x10068380), the
 // lists' time cells (0x100657b0 / 0x1006a840), the credits' images, the
 // Profile equipment natives from the kit files and the hardware probes.
