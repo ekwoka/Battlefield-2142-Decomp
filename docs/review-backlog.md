@@ -90,7 +90,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   says it drops repeats.
 
 ### Q-4. The first-person rig blends from the wrong tick on multi-tick frames (low to medium)
-- **Status:** verify (see also A-12)
+- **Status:** verify (see also A-10)
 - **Commit:** 50e85c9
 - **Where:** `src/Animation/FirstPerson.cpp:179` (`m_previous = m_pose` every tick)
   and `FirstPerson.h:229` (`blend`)
@@ -429,6 +429,33 @@ or gating behind a flag.
   `0x005f06b0(this, dt, 1)`. No direct caller has been found yet.
 - **Fix:** until a per-frame retail caller is traced, gate the blend behind a new
   flag (for example `enhanced.firstPersonBlend`). Make the code and docs agree.
+
+### A-11. Squad order points ignore retail's ranked-server gate (wave 1, low)
+- **Status:** open
+- **Where:** `src/Game/GameWorld.cpp` `addSquadOrderPoints` and `setSquadOrderMax`;
+  `ScriptBridge`; the HUD's squad-order bar
+- **Retail:** the add (0x004c4c90) and set-max (0x004c4ea0) run only when squad
+  byte +0x184 is set, which happens only on a GameSpyRanked server in a standard
+  game mode (0x00430a00). Offline retail never shows the bar (`docs/coverage-5.md`).
+  The set-max also stores `(double)(int)` with no clamp, and the HUD shows the bar
+  only after a max message (event 0x56, value > -1).
+- **Port:** no ranked gate; the max is clamped at 0; the HUD shows the bar when
+  max > 0. Since wave 1 the default max is retail's 100, so points added before any
+  set-max would show the bar (the shipped `scoringCommon.py` always sets it first).
+- **Fix:** model the gate (off for offline and unranked games), drop the clamp, and
+  show the bar on retail's condition. If the bar is wanted offline, put it behind an
+  `enhanced.*` flag.
+
+### A-12. Additive trails and placed particles aren't fogged (wave 1, medium)
+- **Status:** verify
+- **Where:** `src/Render/LevelRenderer.cpp`, the placed-triangle path (`fogged = !additive`)
+- **Retail:** Trail.fx and NonScreenAlignedParticles.fx set `FogEnable = TRUE` in
+  every technique, additive ones included. (Screen-aligned additive sprites are
+  unfogged in retail, see A-8.)
+- **Port:** additive placed-triangle and trail groups are left unfogged. Placed
+  triangles also fog per pixel rather than per vertex (`oFog`), a small difference.
+- **Fix:** confirm in RendDX9 which path draws trails and placed quads and what fog
+  state it leaves set, then fog them as retail does.
 
 ## Open verification questions (no known bug yet)
 
