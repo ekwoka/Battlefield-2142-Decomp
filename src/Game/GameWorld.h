@@ -3115,6 +3115,9 @@ private:
 		bool reported = false;
 		// The wheels' parts' radius (their vehicle LOD's, slot 0x50), by wheel.
 		std::vector<float> wheelRadii;
+		// The wheels' parts' vehicle-LOD vertex materials (slot 0x44(1, i),
+		// through mapMaterial), by wheel: their probes' own material.
+		std::vector<std::array<uint32_t, 3>> wheelMaterials;
 		uint32_t material = 0; // the template's material
 		// Sleeping (the node's counter +0x68 and its history).
 		physics::SleepState sleep;

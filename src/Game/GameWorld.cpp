@@ -15538,23 +15538,33 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 	}
 	if (body.vehicle) {
 		// Each wheel's part radius: its geometry's vehicle LOD's (slot 0x50),
-		// and its material (its first face's, through mapMaterial).
+		// and its material (its first face's, through mapMaterial). The
+		// wheel's probes on objects take their vertex's own material
+		// (0x006bb050: slot 0x44(1, i) of the part's mesh, through
+		// mapMaterial), as the hull's vertices do: the FAVs' Rubber 4550,
+		// whose cells against the decks' and the terrain's materials have
+		// damageMod 0.
 		const auto& wheels = body.vehicle->wheels();
+		const auto mapped = [&materials](uint32_t index) { return index < materials.size() ? materials[index] : index; };
 		for (size_t w = 0; w < wheels.size(); ++w) {
 			const Vehicle::Wheel& wheel = wheels[w];
 			float radius = std::fabs(wheel.radius);
+			std::array<uint32_t, 3> pointMaterials {body.material, body.material, body.material};
 			if (wheel.collisionPart >= 0 && static_cast<size_t>(wheel.collisionPart) < mesh->geometries.size()) {
 				for (const auto& part : physics::collisionParts(*mesh, static_cast<size_t>(wheel.collisionPart))) {
 					if (const physics::CollisionLod* lod = physics::collisionLodFor(*mesh, part, 1)) {
 						radius = physics::boxRadius(lod->boundsMin, lod->boundsMax);
 						if (!lod->faces.empty()) {
-							const uint32_t index = lod->faces.front().material;
-							body.vehicle->setWheelMaterial(w, index < materials.size() ? materials[index] : index);
+							body.vehicle->setWheelMaterial(w, mapped(lod->faces.front().material));
+						}
+						for (size_t i = 0; i < pointMaterials.size() && i < lod->vertexMaterials.size(); ++i) {
+							pointMaterials[i] = mapped(lod->vertexMaterials[i]);
 						}
 					}
 				}
 			}
 			body.wheelRadii.push_back(radius);
+			body.wheelMaterials.push_back(pointMaterials);
 		}
 	}
 	return true;

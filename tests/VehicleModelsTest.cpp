@@ -9818,6 +9818,38 @@ TEST(Vehicles_WalkerStandsOnADeck)
 	CHECK(g.world->bodyAsleep(mech));
 }
 
+// The FAVs driving along Suez_Canal's big bridge take no collision damage.
+// Their wheels' probes on the deck (0x006bb050) carry the probe vertex's
+// material, the wheels' Rubber 4550 (mapMaterial 3), whose cell against the
+// deck's 21 / 78 has damageMod 0. With the template's material (0) instead,
+// the cell's damageMod 1 cost a FAV about 30 hit points per bump at speed.
+TEST(Vehicles_FavDrivesAlongADeckUnhurt)
+{
+	if (!gameDir()) {
+		return;
+	}
+	for (const char* name : {"eu_fav", "as_fav"}) {
+		Garage g(gameDir());
+		if (!g.loaded || !g.templates.find("bc_big_bridge_a") || !g.templates.find(name)) {
+			return;
+		}
+		g.objects.create(g.templates.find("bc_big_bridge_a"), {0, 20, 0}, {90, 0, 0});
+		const uint32_t fav = g.start(name, {0, 22, 0}, 3);
+		CHECK(g.enter(fav));
+		const float before = g.world->hitPoints(fav);
+		const physics::Vec3 a = g.position(fav);
+		game::SoldierInput go;
+		go.throttle = 1;
+		g.drive(go, 4);
+		const physics::Vec3 b = g.position(fav);
+		std::fprintf(stderr, "  %s: %.1f m along the deck at %.2f m, hit points %.1f -> %.1f\n", name, b.z - a.z, b.y,
+			before, g.world->hitPoints(fav));
+		CHECK(b.z - a.z > 40);
+		CHECK(b.y > 15); // still on the bridge (its deck 20.97 at rest at the start)
+		CHECK(g.world->hitPoints(fav) == before);
+	}
+}
+
 // Suez_Canal's industrial bridge (-512/47/-36): a walker stands on its deck
 // on the legs' sphere alone, its hull's vehicle LOD box (1.9 m under its
 // origin) above the deck's box. The legs object is a mover of its own with

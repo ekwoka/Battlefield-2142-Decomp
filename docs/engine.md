@@ -1306,7 +1306,12 @@ them; the contact's depth is how far the end lies behind that face,
   moves the wheel out along their mean normal by its push (0 to 1 m), so
   its spring and tyre (`0x006b8230`: the response's mean normal, point and
   velocity) treat another object's mesh as ground moving with it
-  (`Vehicle::touchObject`).
+  (`Vehicle::touchObject`). A probe's own material, in its contact and both
+  collision events, is its vertex's (`0x6bc764`: slot `0x44(1, i)` of the
+  wheel's mesh, through mapMaterial), the FAVs' Rubber 4550, whose cells
+  against the decks' materials have damageMod 0. (The rewrite took the
+  template's material, 0, whose cells have 1: a FAV lost about 30 hit
+  points a bump driving along a bridge, `Vehicles_FavDrivesAlongADeckUnhurt`.)
 
 - **The stuck push** (the solve `0x006ba7d0`, on the server: game logic
   slot `0x144`): a counter (`+0x118`, −1 each solve, held within −1..3)
