@@ -1117,6 +1117,36 @@ TEST(Weapons_GunshipMissileTapCadence)
 	CHECK(shots == 3); // at 0, 5 and 10 s: the magazine's reload, not the click rate, paces it
 }
 
+// A click between rounds: a SingleFireComp keeps it (0x005f1370's +0x6c)
+// and fires when the gun is ready; a MultiFireComp's (0x005d5d50) is lost,
+// up to and including the tick the round's interval ends.
+TEST(Weapons_MultiFireLosesClicksBetweenRounds)
+{
+	for (bool multi : {false, true}) {
+		game::FireArmSettings settings; // 600 a minute: 3 ticks a round
+		settings.fireRates = {game::kFireSingle};
+		settings.magSize = 10;
+		settings.multiFire = multi;
+		game::FireArm arm(settings);
+		std::vector<int> shots;
+		for (int i = 0; i < 12; ++i) {
+			if (arm.tick(1 / 30.0f, i % 3 == 0 || i == 1)) { // clicks at 0, 1 (held), 3, 6, 9
+				shots.push_back(i);
+			}
+		}
+		CHECK(shots == (multi ? std::vector<int> {0, 6} : std::vector<int> {0, 3, 6, 9}));
+		const std::vector<int> late = {0, 4, 8};
+		game::FireArm again(settings);
+		shots.clear();
+		for (int i = 0; i < 12; ++i) {
+			if (again.tick(1 / 30.0f, i % 4 == 0)) {
+				shots.push_back(i);
+			}
+		}
+		CHECK(shots == late); // a click after the interval goes at once either way
+	}
+}
+
 // The fire modes (0x005f28a0, 0x005f1370, 0x005f1820, 0x005f1da0): single
 // fire takes one round a press, burst burstSize a press (running on
 // released), automatic while held; the toggle steps through the rates.

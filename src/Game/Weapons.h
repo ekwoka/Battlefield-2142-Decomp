@@ -682,8 +682,8 @@ public:
 	// the trigger until it is out (the fire component's trigger 0x005f1370
 	// keeps the press at +0x6c; the round's count 0x005f1820 ends the burst
 	// at burstSize - 1, +0x24). A press that finds the gun busy (between
-	// rounds) waits for it; one that finds it reloading, overheated or
-	// empty is dropped.
+	// rounds) waits for it, except a MultiFireComp's, which is lost; one
+	// that finds it reloading, overheated or empty is dropped.
 	bool tick(float seconds, bool trigger, bool altTrigger = false);
 	// The power of the thrown round that left last (1 unless thrown soft).
 	float throwPower() const { return m_power; }
