@@ -3,6 +3,7 @@
 #include "BundledShadow.h"
 #include "DistanceFade.h"
 #include "OvergrowthLod.h"
+#include "ParticleFog.h"
 #include "Enhanced/EnhancedMath.h"
 #include "MeshLights.h"
 #include "Scene/EnhancedSettings.h"
@@ -1093,7 +1094,7 @@ static void markBlendedParts(const LevelSources& sources, const world::ObjectTem
 		const int index = part != t->settings().end() ? std::atoi(part->second.c_str()) : -1;
 		const bool isPart = index > 0 && static_cast<size_t>(index) < blended.size();
 		if (isPart) {
-			blended[static_cast<size_t>(index)] = blendsBetweenTicks(*t);
+			blended[static_cast<size_t>(index)] = templateBlendsBetweenTicks(*t);
 			parents[static_cast<size_t>(index)] = parent;
 		}
 		markBlendedParts(sources, *t, blended, parents, isPart ? index : parent, depth + 1);
@@ -3020,10 +3021,13 @@ void LevelRenderer::buildParticleBuffer(std::initializer_list<const effects::Eff
 					vertices.push_back(v);
 				}
 			}
-			if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive && !groups.back().fogged) {
+			// Normal-blend sprites fog, additive ones don't (RendDX9 0x1012f750, ParticleFog.h).
+			const bool fogged = spriteGroupFogged(additive, m_particleSettings.particleSystemShaderQuality);
+			if (!groups.empty() && groups.back().texture == image && groups.back().additive == additive
+				&& !groups.back().repeat && groups.back().fogged == fogged) {
 				groups.back().vertexCount += static_cast<uint32_t>(vertices.size()) - first;
 			} else {
-				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first});
+				groups.push_back({image, additive, first, static_cast<uint32_t>(vertices.size()) - first, false, nullptr, fogged});
 			}
 		});
 		// Non-screen-aligned quads and trails: placed already (a negative
@@ -3669,7 +3673,7 @@ void LevelRenderer::drawParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderP
 			const bool shade = shadowed && !group.additive;
 			SDL_BindGPUGraphicsPipeline(pass, shade ? m_gpu.enhancedPipelines().particle : m_gpu.particlePipeline(group.additive));
 			SDL_PushGPUVertexUniformData(commands, 0, &uniforms, sizeof(uniforms));
-			fog.material[3] = (group.fogged ? 1.0f : 0.0f) + (group.additive ? 2.0f : 0.0f); // particle.frag: fixed-function fog, additive mask
+			fog.material[3] = particleMaterialFlags(group.fogged, group.additive); // particle.frag: fixed-function fog, additive mask
 			SDL_PushGPUFragmentUniformData(commands, 0, &fog, sizeof(fog));
 			if (shade) {
 				SDL_PushGPUFragmentUniformData(commands, 1, &m_enh.shadows, sizeof(m_enh.shadows));

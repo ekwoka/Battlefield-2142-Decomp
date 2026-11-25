@@ -4,11 +4,11 @@
 // and the fourth value scaled by the view distance, Fog.h): (1 / (e - s),
 // -base / (e - s), -s / (e - s), e / (e - s)); FogColor.w is the fourth
 // value. `w` is the clip-space w (the view depth in metres), as the
-// shaders' calcFog(Out.Pos.w). Returns the fog's share (1 - calcFog).
+// shaders' calcFog(Out.Pos.w). Returns the fog's share (1 - calcFog;
+// fog_share.glsl, which the tests evaluate).
+#include "fog_share.glsl"
+
 float fogAmount(float w)
 {
-	vec2 fogVals = w * fogRange.xy + fogRange.zw;
-	float close = max(fogVals.y, fogColor.w);
-	float far = pow(max(fogVals.x, 0.0), 3.0);
-	return 1.0 - clamp(close - far, 0.0, 1.0);
+	return fogShare(w, fogRange, fogColor.w);
 }

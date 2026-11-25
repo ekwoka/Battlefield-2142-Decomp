@@ -1011,8 +1011,9 @@ private:
 		// technique 2, decalNormalMapName); null for the plain ones.
 		SDL_GPUTexture* normalMap = nullptr;
 		// Fixed-function fog: Trail.fx and NonScreenAlignedParticles.fx set
-		// FogEnable TRUE; Particles.fx's sprites never enable it (and its
-		// additive techniques, like Rain.fx, set it FALSE).
+		// FogEnable TRUE; RendDX9 0x1012f750 enables it for the normal-blend
+		// sprites (ParticleFog.h); the additive techniques, like Rain.fx, set
+		// it FALSE.
 		bool fogged = false;
 	};
 	SDL_GPUBuffer* m_particleVertices = nullptr;
