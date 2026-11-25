@@ -354,8 +354,15 @@ bool GameWorld::openParachute(Player& player)
 		return false;
 	}
 	// The round keeps its own velocity 0: a soldier opening his parachute is
-	// stopped dead and then glides down (reported against retail; unlike the
-	// pods, it takes nothing from its holder).
+	// stopped dead and then glides down. The launch (0x005f31d0) works out
+	// the speed plus the holder's root velocity, capped at *0x00a71d1c, but
+	// 0x005f2bb0 gives it only to a round answering 0x94c1 (a projectile:
+	// physics node +0x50, slot 0x5c). The Parachute (class 0xc5a8, the
+	// PlayerControlObject's QueryInterface 0x005cc940: no 0x94c1) takes the
+	// 0xc4c5 branch, which never reads that argument (0x005f2f29 reuses it);
+	// it is made at rest (0x005f18f0: the server's create, slot 0x120, with
+	// no velocity) and entering it only turns it (0x005cfaf0). The pods are
+	// projectiles and do take it.
 	body->body.velocity = {};
 	wake(*body);
 	Parachute chute;

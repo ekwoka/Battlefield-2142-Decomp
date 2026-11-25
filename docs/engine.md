@@ -1749,7 +1749,9 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   `GameWorld::parachuteRoom`, `canopyClear`; parachute.collisionmesh's
   24 vertices span −3.21..1.10 m about the start). Taken, it opens at his frame
   plus fire.projectileStartPosition (`0x005e4460`, slot 53: 0/2/0), the
-  round taking his velocity, and enterOnSpawn seats him. No press lets
+  round at rest (the launch's velocity, his own plus the speed, goes only
+  to a round answering 0x94c1, `0x005f2bb0`; the Parachute answers 0xc4c5
+  and is made with none, `0x005f18f0`), and enterOnSpawn seats him. No press lets
   it go: a weapon shown (its slot 10, `0x005c32f0`, while its fire test
   passes) calls its fire component's slot 33, which the
   SpawnObjectFireComp's `0x005e41e0` makes a fire (slot 0x90,

@@ -386,7 +386,18 @@ or gating behind a flag.
   ×3 everywhere and cite the observation.
 
 ### A-4. Parachute starts at rest without a retail citation (round 2, medium)
-- **Status:** verify
+- **Status:** rejected (wave 3): retail starts it at rest too. 0x005f31d0 works
+  out the velocity (speed plus the root's +0x50 slot 100, capped), but hands it to
+  0x005f2bb0, which applies it (`param_2[0x14]` slot 0x5c) only in the branch for a
+  round answering 0x94c1 (the QueryInterface at `0x005f2c15`). The Parachute
+  (class 0xc5a8, object vtable `0x0096e818`, slot 3 = the PlayerControlObject's
+  QueryInterface `0x005cc940`: 1, 0xc378, 0x3709a4ff, 0xc4c5, 0xc49e) has no
+  0x94c1, so it takes the 0xc4c5 branch (`0x005f2ec4`..`0x005f2fd0`: the owner's
+  collision grace `0x006b8de0` and the enter event), which overwrites the velocity
+  argument at `0x005f2f29` without reading it. The round is made by the fire comp's
+  slot 0x3c (`0x005f18f0`: the server's create, `DAT_00a1c170` slot 0x120, place
+  only), and entering (`0x005cfaf0`) only sets its transform. The port's at-rest
+  start (8ce120b) stays; its comment and engine.md now cite this.
 - **Commit:** 8ce120b
 - **Where:** `src/Game/Parachutes.cpp:356`
 - **Retail:** the base FireComp launch (0x005f31d0) adds the root node's velocity
