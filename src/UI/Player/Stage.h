@@ -145,7 +145,9 @@ public:
 	bool hasOwnMember(const std::string& name) const override;
 	bool specialMember(avm1::Interpreter& vm, const std::string& name, avm1::Value& out) override;
 	bool setSpecialMember(avm1::Interpreter& vm, const std::string& name, const avm1::Value& value) override;
-	// An edit text as a value is its text: the create page hands its fields to setServerName / setPassword.
+	// An edit text as a value is its text: SwiffPlayer.dll's as_value to-string (0x100aa6c0) takes
+	// an object's slot 0x1c, which the edit text answers with its text (0x100c2ab0, +0x124, the
+	// string "text" reads); the create page hands its fields to setServerName / setPassword.
 	bool defaultValue(avm1::Interpreter& vm, bool preferString, avm1::Value& out) override;
 	bool localBounds(swf::Rect& out) override;
 	bool hitLocal(swf::Point local, bool shape, bool includeHidden) override;

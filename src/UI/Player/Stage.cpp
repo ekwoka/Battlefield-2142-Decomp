@@ -228,7 +228,7 @@ bool DisplayObject::defaultValue(Interpreter& vm, bool preferString, Value& out)
 
 bool TextField::defaultValue(Interpreter&, bool, Value& out)
 {
-	out = Value(value);
+	out = Value(plainText()); // what "text" gives
 	return true;
 }
 
