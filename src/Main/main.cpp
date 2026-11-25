@@ -8509,6 +8509,12 @@ int runGame(Options& options, Session& session)
 				// (a demo's end drawn by --screenshot read it freed).
 				session.endedClient = std::move(session.client);
 				session.disconnect = true;
+				// The menu's "joining server" box (up since the join) gives way to
+				// the reason, as a refused join's does (MenuBindings::pollJoin).
+				if (session.menuBindings) {
+					const uint32_t reason = session.endedClient->disconnectReason();
+					session.menuBindings->raiseMessage(3, reason == 0x16 ? "banned" : "connection", static_cast<int>(reason));
+				}
 			}
 		};
 #if BF2142_HAS_PYTHON
