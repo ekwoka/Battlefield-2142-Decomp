@@ -645,6 +645,59 @@ TEST(Vehicles_WalkerStandsWalksAndTurns)
 	CHECK(std::fabs(g.objects.find(mech)->rotation().y) < 10 && std::fabs(g.objects.find(mech)->rotation().z) < 10);
 }
 
+// A walker walking into a teammate's way. Its foot meets him as a road
+// kill (the collision event, 0x005a4690 -> 0x005a43c0: from 3 m/s while
+// the walker is the faster, (speed - 3) x speed x the mass factor), whose
+// game logic damage (0x004c0e40) goes through the friendly fire
+// (0x005b7290 with the walker's team, its 19th argument 0): retail kills a
+// teammate at the default sv.soldierFriendlyFire 100 and spares him at 0,
+// an enemy either way. (The soldier physics' own run-over and crush,
+// 0x006c2e50 / 0x006c48c0, would ignore the friendly fire, their 19th
+// argument 1, but the foot's contact comes first.) Returns whether he lived.
+static bool walkerOverASoldier(float friendlyFire, int team)
+{
+	Garage g(gameDir());
+	if (!g.loaded) {
+		return true;
+	}
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	g.world->setFriendlyFire({friendlyFire, friendlyFire, friendlyFire, friendlyFire});
+	CHECK(g.enter(mech));
+	const int other = g.world->addPlayer("Other", team, false);
+	CHECK(g.world->spawnSoldier(other));
+	game::GameWorld::PlayerInfo info;
+	g.world->playerInfo(other, info);
+	const physics::Vec3 at = g.position(mech);
+	// In the path of its left foot (between the feet it passes over him).
+	CHECK(g.world->setSoldierPosition(info.soldier, {at.x + 2, 0, at.z + 9}));
+	g.run(0.5f);
+	game::SoldierInput input;
+	input.throttle = 1;
+	bool alive = true;
+	float nearest = 1e9f;
+	for (int i = 0; i < 4 * 30 && alive; ++i) {
+		g.drive(input, 1 / 30.0f);
+		g.world->playerInfo(other, info);
+		alive = info.alive;
+		const physics::Vec3 p = g.position(mech);
+		nearest = std::min(nearest, std::hypot(p.x - info.position.x, p.z - info.position.z));
+	}
+	std::fprintf(stderr, "  friendly fire %.0f, team %d: the soldier %s (the walker came within %.2f m)\n", friendlyFire, team,
+		alive ? "lived" : "died", nearest);
+	CHECK(nearest < 2.5f); // it reached him
+	return alive;
+}
+
+TEST(Vehicles_FriendlyWalkerStepsOnATeammate)
+{
+	if (!gameDir()) {
+		return;
+	}
+	CHECK(!walkerOverASoldier(100, 2)); // a teammate, friendly fire on (the default)
+	CHECK(walkerOverASoldier(0, 2));    // a teammate, friendly fire off
+	CHECK(!walkerOverASoldier(0, 1));   // an enemy
+}
+
 // A walker left standing falls asleep like any node; its legs' update
 // (0x00650e90, run while the node sleeps) wakes it in any state but
 // standing (+0x1bc, slot 0x160), so it turns on the spot from rest (the

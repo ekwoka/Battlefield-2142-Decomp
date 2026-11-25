@@ -1874,11 +1874,14 @@ TEST(Titan_FallingBotOpensItsParachute)
 // heavy moving object: a soldier running into it is neither squashed nor run
 // over (1000 damage, no attacker: "is no more").
 // The retail rule (0x005a4690 -> 0x005a43c0) runs over a soldier whose
-// contact with the held gunship tops 10 m/s; the rewrite's sprinting soldier
-// meets it at up to 11-12 m/s on the moving Titan's deck (his own velocity
-// spikes to 9.6-11 m/s at the contact), so with the retail rule an odd run
-// is fatal. enhanced.softLanding (the soldier the faster: the ground's rule)
-// keeps them all alive; the retail path's count is only reported.
+// contact with the held gunship tops 10 m/s. The runners that stay pile up
+// at it, and a sprinter pressed into the pile had his speed run away (the
+// pile's zero-velocity soldier contacts pull the mean contact velocity his
+// grip compares with towards 0) with the deck's grip, 3.05: 10-12 m/s at
+// the gunship, 20 m/s into the hull, dead. A soldier contact sets the grip
+// to 0x2f's against 0x2f (1) as retail's does (0x006c2620), and no run is
+// fatal with either rule. enhanced.softLanding (the soldier the faster: the
+// ground's rule) keeps them all alive as well.
 static void heldGunshipRunners(bool softLanding)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -1935,9 +1938,7 @@ static void heldGunshipRunners(bool softLanding)
 		}
 	}
 	std::fprintf(stderr, "  %s: %d of %d died\n", softLanding ? "softLanding" : "retail rule", deaths, tries);
-	if (softLanding) {
-		CHECK(deaths == 0);
-	}
+	CHECK(deaths == 0);
 }
 
 TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
@@ -5640,4 +5641,83 @@ TEST(Weapons_AirborneSoldierTakesStandModifier)
 	CHECK(std::fabs(stand - crouched) > 0.05f); // the weapon's modifiers differ
 	CHECK(airborne >= 5);
 	CHECK(std::fabs(air - stand) < 0.01f);
+}
+
+// Riders on a moving Titan: standing, crouched and prone on its deck, or
+// walking, sprinting and jumping about it, for 30 s. The Titan's node
+// sleeps (isSleeping 1) and nothing wakes it: its node's tick skips the
+// sleep test for a Titan (0x006c9060's start, 0x00561d90), a major actor
+// is woken by no minor one's mass shares (0x006b6cc0), and its
+// explosionForceMod 0 gives the blasts no push. So it is no heavy mover
+// for the soldier physics' crush and run-over (0x006c48c0, 0x006c2e50:
+// slot 0x14c), and a rider's own velocity is relative to it (the carry,
+// 0x006ca660 / 0x006ca3b0): none of its contacts is fast enough for a
+// road kill (0x005a43c0).
+static int ridersOnAMovingDeck(const char* map, int team, bool move)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return 0;
+	}
+	TitanLevel level(gameDir, map, 48);
+	if (!level.loaded) {
+		return 0;
+	}
+	CHECK(level.world->moveTitan(team, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	level.run(10);
+	const auto titan = *level.titan(team);
+	const world::Object* object = level.objects.find(titan.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	std::vector<int> ids;
+	// Over the spawn room's deck, 10.6 m up 35-50 m aft (Titan_BotsManHalfTheGuns).
+	for (const physics::Vec3& spot : {physics::Vec3 {0, 11.5f, -40}, {3, 11.5f, -45}, {-3, 11.5f, -35}, {0, 11.5f, -50}}) {
+		const int id = level.world->addPlayer("Rider", team, false);
+		level.world->setSpawnTitan(id, titan.object);
+		if (!level.world->spawnSoldier(id)) {
+			continue;
+		}
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(id, info);
+		CHECK(level.world->setSoldierPosition(info.soldier, titan.position + turn.transform(spot)));
+		ids.push_back(id);
+	}
+	CHECK(ids.size() == 4);
+	float travelled = 0;
+	for (int tick = 0; tick < 30 * 30; ++tick) {
+		for (size_t i = 0; i < ids.size(); ++i) {
+			game::SoldierInput in;
+			if (!move) {
+				in.pose = i == 1 ? game::SoldierPose::Crouch : i == 3 ? game::SoldierPose::Prone : game::SoldierPose::Stand;
+			} else if ((tick / 60) % 2 == 0) {
+				in.throttle = 1;
+				in.turn = i % 2 ? 2.0f : -2.0f;
+				in.sprint = i >= 2;
+				in.jump = tick % 45 == static_cast<int>(i) * 7;
+			}
+			level.world->setInput(ids[i], in);
+		}
+		const physics::Vec3 before = level.titan(team)->position;
+		level.world->tick(1 / 30.0f);
+		travelled += std::sqrt(physics::lengthSquared(level.titan(team)->position - before));
+	}
+	int deaths = 0;
+	for (const int id : ids) {
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(id, info);
+		deaths += info.alive ? 0 : 1;
+	}
+	std::fprintf(stderr, "  %s, team %d's Titan (%.1f m in 30 s, asleep %d), riders %s: %d of %zu died\n", map, team, travelled,
+		level.world->bodyAsleep(titan.object), move ? "moving" : "still", deaths, ids.size());
+	CHECK(travelled > 5); // it moved under them
+	CHECK(level.world->bodyAsleep(titan.object));
+	return deaths;
+}
+
+TEST(Titan_RidersSurviveAMovingDeck)
+{
+	for (const char* map : {"Minsk", "Suez_Canal"}) {
+		for (const bool move : {false, true}) {
+			CHECK(ridersOnAMovingDeck(map, map[0] == 'M' ? 1 : 2, move) == 0);
+		}
+	}
 }

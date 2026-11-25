@@ -12574,7 +12574,15 @@ stance's height: 1.7, 1.4 crouching or swimming, 0.8 prone) and whose
 origins are within twice the radius × the scale across push each other
 apart by the overlap (no velocity; along z when nearer than 0.01). The
 original adds both soldiers' contacts at once; the rewrite gives each its
-own when it steps.
+own when it steps. Each contact passes material `0x2f` for both sides to
+`0x006c24b0` (`0x006c2841`..`0x006c288a`), which sets the response's
+friction (`+0xd4`, the grip of the movement `0x006c2230`) to the pair's
+(Flare's 1): a soldier in a crowd grips with it until his next floor
+contact (`SoldierBody::touchSoldier`). Without it a sprinter pressed into
+a pile on a Titan's deck (veh_titan_armor 5, 3.05 against Human_body),
+whose zero-velocity soldier contacts pull the mean contact velocity the
+grip compares with towards 0, ran up to 20 m/s and was road-killed by the
+hull.
 
 **The solve** (slot `0x30`, `0x006c48c0`; constants static_init
 `0x008ede60`..`0x008ee020`): the contacts so far push the soldier out,
@@ -12608,6 +12616,19 @@ segment test: the origin's way since before the last integration, less
 each moving object's own motion, crossing a face of a soldier LOD from the
 front (mesh slot 22) kills (1000, no one credited) — also a prone soldier
 whose spheres pass under something its origin (a metre up) runs into.
+The crush's and the run-over's 1000 (`0x006c4dcd`, `0x006c32ff`) go with
+the game logic damage's 19th argument 1, so `0x004c0e40` leaves the
+friendly fire out (`0x005b7290`'s fifth argument): the object's team (its
+PlayerControlObject's, slot `0x9c`) doesn't matter, nor does the
+soldier's takeDamageFromOwnTeam (armour slot `0xbc`, template `+0xdc`, 1
+unless set; only the Titans' parts set 0). A vehicle's ordinary contact
+with a soldier (the road kill, `0x005a43c0`, argument 0) does take the
+friendly fire: a friendly walker's foot kills a teammate at the default
+`sv.soldierFriendlyFire` 100 and spares him at 0
+(`Vehicles_FriendlyWalkerStepsOnATeammate`). A Titan, asleep for good
+(isSleeping; `0x006c9060` skips the sleep test for a Titan, `0x00561d90`;
+a major actor wakes from no minor one's mass shares; explosionForceMod 0),
+is never the heavy mover these two need (`Titan_RidersSurviveAMovingDeck`).
 
 **The push** (`0x005ee2b0`): a hit's velocity × 2.5 (`*0x00a847b4`) kept
 16 ticks on the soldier (`+0x248`, the tick `+0x254`), which its ragdoll

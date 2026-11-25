@@ -11393,7 +11393,15 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 	}
 	// The hit's push a ragdoll starts with within 16 ticks (0x005ee2b0),
 	// and the solve's crush, run-over and segment kills (1000 through the
-	// game logic, slot 0xe4; the crushing object's driver credited).
+	// game logic, slot 0xe4; the crushing object's driver credited). The
+	// crush (0x006c4dcd) and the run-over (0x006c32ff) pass the damage's
+	// 19th argument as 1, so 0x004c0e40 hands it to 0x005b7290 without the
+	// friendly fire: the object's team (its PlayerControlObject's slot 0x9c,
+	// a friendly walker's) doesn't matter, and the soldier's armour
+	// (takeDamageFromOwnTeam, armour slot 0xbc = template +0xdc, 1 unless
+	// set; only the Titans' parts set 0) doesn't spare its own team either.
+	// (A friendly vehicle's ordinary contact goes by the road kill instead,
+	// 0x005a43c0, whose damage does take the friendly fire: roadKill.)
 	Player* self = &player;
 	player.body.onPush = [this, self](const physics::Vec3& push) {
 		self->hitPush = push;
