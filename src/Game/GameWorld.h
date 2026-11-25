@@ -1623,6 +1623,13 @@ public:
 		// under it); PICameraX / PICameraY bundles (hatches, AS_TANK_Cupola1)
 		// aren't the look's.
 		std::string yawBundle, pitchBundle;
+		// The armour whose EMP step scales each look bundle's input: the
+		// bundle input handler (0x00565180) walks from the bundle up its
+		// parents (+0x34) to the first with an armour (+0x48) and takes that
+		// one's (eu_tank's cupola, under EU_TANK_CupolaBase with none of its
+		// own, the tank's). Null: no armoured part above it.
+		const world::ObjectTemplate* yawArmour = nullptr;
+		const world::ObjectTemplate* pitchArmour = nullptr;
 		bool pitchUsesDriverInput = false; // PIPitch, filtered with the chassis controls
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
 		// The seat's first firearm's rest pitch under the pitch bundle (up

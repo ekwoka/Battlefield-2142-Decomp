@@ -87,6 +87,23 @@ physics::Vec3 parseVec3(const std::string& text)
 	return v;
 }
 
+// A template's collision mesh. ObjectTemplate.collisionMesh and
+// setCollisionMesh are two console methods on one setter: both executors
+// (0x00530de1, 0x0051c57b) hand the name to the active template's slot
+// 0x8c, whatever its class. The console keeps them under their own names,
+// so the last written wins as the .tweak's (run after the .con) does, as
+// Titans.cpp's collisionMeshOf. No shipped non-mobile template names two
+// different meshes (only Titan roots and mobile projectiles do).
+const std::string* collisionMeshName(const world::ObjectTemplate& t)
+{
+	const auto later = t.settings().find("setCollisionMesh");
+	if (later != t.settings().end()) {
+		return &later->second;
+	}
+	const auto it = t.settings().find("collisionMesh");
+	return it != t.settings().end() ? &it->second : nullptr;
+}
+
 // A SpawnPoint template's settings (dice.bf.SpawnPoint, class 0x948a,
 // made by 0x00635590; the console setters 0x00551e37..0x00552619 go
 // through its interface 0xc47d at +0x68, vtable 0x00982918): the offset
@@ -520,6 +537,14 @@ void GameWorld::addStaticObject(const world::Object& object)
 	if (!t || flag(*t, "hasMobilePhysics", false) || movesByScript(object.id())) {
 		return;
 	}
+	// A GenericFireArm root is the rewrite's stand-in for a soldier's weapon
+	// in hand (Player::weaponObject), which in the original hangs in the
+	// soldier's tree: never a static of its own. No shipped level places
+	// one. Most name a mesh (setCollisionMesh, collisionMeshName), so they
+	// would stand solid at the soldier's feet.
+	if (sameName(t->typeName(), "GenericFireArm")) {
+		return;
+	}
 	m_staticCollisionObjects.insert(object.id());
 	if (!object.destroyed()) {
 		addStaticCollision(*t, physics::Mat3::fromYawPitchRoll({object.rotation().x, object.rotation().y, object.rotation().z}),
@@ -577,20 +602,15 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 	if (depth > 8) {
 		return;
 	}
-	// A static naming its mesh only through setCollisionMesh (crate01_c) has it too (both call setter 0x0051c57b).
-	auto meshName = t.settings().find("collisionMesh");
-	// shortcut: only a childless SimpleObject; Titans, vehicles and parachutes handle theirs elsewhere.
-	if (meshName == t.settings().end() && depth == 0 && t.typeName() == "SimpleObject" && t.children().empty()) {
-		meshName = t.settings().find("setCollisionMesh");
-	}
+	const std::string* meshName = collisionMeshName(t);
 	std::vector<uint32_t> ownMaterials;
-	if (meshName != t.settings().end()) {
+	if (meshName) {
 		// A name no CollisionManager.createTemplate made is looked for beside
 		// the template's file, as the mesh loader's path (0x006d8740: the
 		// template's directory + name + ".collisionMesh").
 		const std::string& file = t.creationFile();
 		const size_t slash = file.find_last_of("/\\");
-		if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files,
+		if (const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(*meshName, *m_files,
 				slash == std::string::npos ? std::string() : file.substr(0, slash + 1))) {
 			ownMaterials = materialMap(t);
 			addStaticMesh(t, *mesh, ownMaterials, 0, rotation, position, owner, depth == 0);
@@ -631,7 +651,7 @@ void GameWorld::addStaticCollision(const world::ObjectTemplate& t, const physics
 		// that geometry, through the subtree (eu_aacannon's base, barrel and
 		// firearm on the Titans; static_aa's cockpit and gun; the missile
 		// silo's console and hatch; the commander assets' antennas).
-		if (childTemplate->settings().count("collisionMesh")) {
+		if (collisionMeshName(*childTemplate)) {
 			parts = nullptr;
 		} else if (parts && partMaterials) {
 			const auto part = childTemplate->settings().find("collisionPart");
@@ -757,19 +777,15 @@ void GameWorld::createFlagObjects(ControlPoint& point)
 	if (m_collisionTemplates && m_files) {
 		for (const world::ChildTemplate& child : t->children()) {
 			const world::ObjectTemplate* ct = m_templates.find(child.name);
-			auto meshName = ct ? ct->settings().find("collisionMesh") : std::map<std::string, std::string>::const_iterator();
-			if (ct && meshName == ct->settings().end()) {
-				// Several shipped bundles, including flagpole, author this as
-				// ObjectTemplate.setCollisionMesh, retained under its command name.
-				meshName = ct->settings().find("setCollisionMesh");
-			}
-			if (!ct || meshName == ct->settings().end()) {
+			// flagpole names its mesh with ObjectTemplate.setCollisionMesh.
+			const std::string* meshName = ct ? collisionMeshName(*ct) : nullptr;
+			if (!meshName) {
 				continue;
 			}
 			const std::string& source = ct->creationFile();
 			const size_t slash = source.find_last_of("/\\");
 			const std::string directory = slash == std::string::npos ? std::string() : source.substr(0, slash + 1);
-			const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(meshName->second, *m_files, directory);
+			const physics::CollisionMeshFile* mesh = m_collisionTemplates->mesh(*meshName, *m_files, directory);
 			physics::Vec3 low, high;
 			if (mesh && meshBox(*mesh, 0, low, high)) {
 				point.poleHeight = high.y + child.position.y;
@@ -1181,13 +1197,23 @@ void GameWorld::damage(uint32_t object, float amount, uint32_t projectileMateria
 		const Body::Cell* cell = nullptr;
 		const world::Object* o = m_objects.find(shieldCell(object, cellBody, cell) ? cellBody->object : object);
 		const int team = victim ? victim->team : o ? o->team() : 0;
-		// 0x005b7290 finds a PlayerControlObject up the victim's tree (0x0099889c)
-		// before any team test; a thrown hub (GenericProjectile) has none, so
-		// its owner's team destroys it at full damage whatever the server's setting.
-		const bool hasControl = !o || !o->objectTemplate() || !(sameName(o->objectTemplate()->typeName(), "GenericProjectile")
-			|| sameName(o->objectTemplate()->typeName(), "SupplyObject"));
+		// 0x005b7290 takes the victim's root (0x006f1d70) and walks up from
+		// it (+0x34) to the first object answering interface 0xc4c5: the
+		// classes whose QueryInterface does are PlayerControlObject
+		// (0x005cc940; Parachute, whose constructor 0x005cf900 builds on the
+		// PCO's 0x005cd9e0, with it), Soldier (0x00585af0),
+		// LadderContainer (0x0059d2d0) and FreeCamera (0x00616600). With
+		// none, nothing is scaled, so a team's own thrown hub
+		// (GenericProjectile), supply crate or teamed destructible
+		// (SimpleObject, Bundle) takes its full damage whatever the server's
+		// setting. The soldier percentages go to a root of class 0x9493
+		// (Soldier) or 0x9c46 (LadderContainer), the vehicle ones to the rest.
+		const std::string type = o && o->objectTemplate() ? o->objectTemplate()->typeName() : std::string();
+		const auto is = [&](const char* name) { return sameName(type, name); };
+		const bool hasControl = victim || is("PlayerControlObject") || is("Parachute") || is("Soldier")
+			|| is("LadderContainer") || is("FreeCamera");
 		if (team == from->team && hasControl) {
-			const bool soldier = victim || (o && o->objectTemplate() && sameName(o->objectTemplate()->typeName(), "Soldier"));
+			const bool soldier = victim || is("Soldier") || is("LadderContainer");
 			const float percent = soldier ? (splash ? m_friendlyFire.soldierSplash : m_friendlyFire.soldier)
 										  : (splash ? m_friendlyFire.vehicleSplash : m_friendlyFire.vehicle);
 			// The setters keep 0..100, under 1 as 0.
@@ -12277,12 +12303,20 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 	// Each child sits at its offset turned by its parents' rotations, and
 	// adds its own rotation (as Vehicle::fromTemplate places the wheels).
 	std::vector<std::pair<int, size_t>> yawParts; // the seats' moreYawBundles above the node walked
+	// The nearest node with an Armor component on the path to the node
+	// walked, itself included (SeatLayout::yawArmour).
+	const world::ObjectTemplate* armoured = nullptr;
 	const std::function<void(const world::ObjectTemplate&, physics::Vec3, physics::Mat3, int, int)> walk =
 		[&](const world::ObjectTemplate& t, physics::Vec3 at, physics::Mat3 turn, int seat, int depth) {
 			if (depth > 12) {
 				return;
 			}
 			const size_t yawPartsBefore = yawParts.size();
+			const world::ObjectTemplate* const armouredBefore = armoured;
+			if (std::any_of(t.components().begin(), t.components().end(),
+					[](const std::string& c) { return sameName(c, "Armor"); })) {
+				armoured = &t;
+			}
 			const auto& settings = t.settings();
 			places.emplace(t.name(), std::make_pair(at, turn));
 			const auto info = settings.find("seatInformation");
@@ -12504,6 +12538,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						anchorGun(owner);
 						yawHere = true;
 						owner.yawBundle = t.name();
+						owner.yawArmour = armoured;
 						owner.yawPivot = at;
 						owner.frameYaw = turn.yawPitchRoll().x;
 						owner.yawAxis = axis(0, true);
@@ -12547,6 +12582,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 						anchorGun(owner);
 						pitchHere = true;
 						owner.pitchBundle = t.name();
+						owner.pitchArmour = armoured;
 						owner.pitchUsesDriverInput = driverPitch;
 						owner.pitchAxis = axis(1, true);
 						owner.pitchFrame = turn;
@@ -12621,6 +12657,7 @@ const GameWorld::VehicleLayout& GameWorld::vehicleLayout(const world::ObjectTemp
 			carried = carriedBefore;
 			pitchSeat = pitchSeatBefore;
 			yawParts.resize(yawPartsBefore);
+			armoured = armouredBefore;
 		};
 	walk(vehicle, {}, physics::Mat3 {}, -1, 0);
 	// The object each seat's soldier sits on (SeatLayout::seatParent): found
@@ -14322,12 +14359,27 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		const bool yawBundled = !seat.yawBundle.empty() && moves(seat.yawAxis);
 		const bool pitchBundled = !player.ai && !seat.pitchBundle.empty() && moves(seat.pitchAxis);
 		// The bundles' input handler (0x00565180) puts every control input,
-		// the mouse looks (+0x10, +0x14) among them, times the owning
-		// armour's EMP step 1 - level / empDamageNumStep, so a turret and its
-		// barrel slow and stop under EMP; the PCO filter (0x005ca2e0) leaves
-		// those two inputs alone. A seat of its own PCO has no armour here.
-		const float empScale = player.seat == 0 ? driverInputScale(body.empLevel, -1, *object->objectTemplate()) : 1.0f;
-		float turn = (gun.yawBlocked ? 0.0f : yawBundled ? player.input.turn / 5.0f : player.input.turn) * empScale;
+		// the mouse looks (+0x10, +0x14) among them, times the EMP step
+		// 1 - level / empDamageNumStep of the first armour (+0x48) on the way
+		// up from the bundle through its parents (+0x34), so a turret and
+		// its barrel slow and stop under EMP; the PCO filter (0x005ca2e0)
+		// leaves those two inputs alone. The way up passes a seat's own PCO:
+		// no shipped seat PCO has an Armor component, so every gunner's
+		// bundles (eu_tank's cupola, the APCs' and FAVs' guns) take the
+		// vehicle's EMP. The other armoured parts above a look bundle (the
+		// Titans' gun hubs) don't take EMP damage.
+		const world::ObjectTemplate& root = *object->objectTemplate();
+		const auto bundleEmp = [&](const world::ObjectTemplate* armour) {
+			if (armour != &root || integer(root, "armor.takesEmpDamage", 0) == 0) {
+				return 1.0f;
+			}
+			const int level = static_cast<int>(std::ceil(body.empLevel));
+			const int steps = std::max(1, integer(root, "armor.empDamageNumStep", 3));
+			return level > 0 ? std::max(0.0f, 1 - static_cast<float>(level) / static_cast<float>(steps)) : 1.0f;
+		};
+		const float yawEmp = bundleEmp(seat.yawArmour);
+		const float pitchEmp = bundleEmp(seat.pitchArmour);
+		float turn = (gun.yawBlocked ? 0.0f : yawBundled ? player.input.turn / 5.0f : player.input.turn) * yawEmp;
 		// surpressPlayerInputVector (the input pass 0x00565700): while the
 		// seat's weapon is zoomed (its zoom component's index, slot 0xa0,
 		// not 0) each axis's input is times its component, 0 leaving it be.
@@ -14356,7 +14408,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 		const float low = -seat.maxPitch, high = -seat.minPitch;
 		// The PAC hover tank's barrel uses the filtered PIPitch axis (the
 		// chassis scale); mounts on PIMouseLookY take the bundle's EMP step.
-		const float pitchScale = seat.pitchUsesDriverInput ? driverScale : empScale;
+		const float pitchScale = seat.pitchUsesDriverInput ? driverScale : pitchEmp;
 		if (pitchBundled) {
 			// The bundle's own angle (down positive) takes this tick's look
 			// change and this tick's ignoreParentRotation take-back.
@@ -14374,7 +14426,7 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 			// and the rest stays lost (held back from the look, within the
 			// limits). A bot's pitch is the angle it wants: its step there
 			// this tick is the input, scaled the same way.
-			if (!continuing || (!seat.pitchUsesDriverInput && empScale == 1 && gun.pitchInputLost == 0)) {
+			if (!continuing || (!seat.pitchUsesDriverInput && pitchEmp == 1 && gun.pitchInputLost == 0)) {
 				gun.pitchInputLost = 0;
 			} else if (!player.ai && !gun.pitchBlocked) {
 				gun.pitchInputLost += lookPitchChange * (1 - pitchScale);

@@ -4773,18 +4773,22 @@ TEST(GameWorld_FriendlyFireScaling)
 	CHECK(enemy > 1 && std::fabs(half - enemy * 0.5f) < 0.01f && none == 0);
 }
 
-// 0x005b7290 scales damage by team only for a victim with a PlayerControlObject
-// up its tree: a deployed hub (GenericProjectile) is hurt by its own team in full.
+// 0x005b7290 scales damage by team only when the victim's root (0x006f1d70)
+// or a parent of it answers interface 0xc4c5 (PlayerControlObject, Parachute,
+// Soldier, LadderContainer, FreeCamera): a deployed hub (GenericProjectile),
+// a supply crate or a teamed destructible (SimpleObject, Bundle) is hurt by
+// its own team in full, a PlayerControlObject at the server's vehicle
+// percentage (0 here).
 TEST(GameWorld_FriendlyFireSparesNoHub)
 {
-	const auto lost = [](int attackerTeam) {
+	const auto lost = [](const char* type, int attackerTeam) {
 		Range range;
 		range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
 		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
 		blast->components().push_back("DefaultDetonationComp");
 		blast->settings()["detonation.explosionDamage"] = "40";
 		blast->settings()["detonation.explosionMaterial"] = "69";
-		auto* deployed = range.templates.create("GenericProjectile", "hub_deployed");
+		auto* deployed = range.templates.create(type, "hub_deployed");
 		makeMobile(*deployed, "hub_mesh");
 		deployed->settings()["armor.maxHitPoints"] = "100";
 		deployed->settings()["armor.hitPoints"] = "100";
@@ -4800,9 +4804,12 @@ TEST(GameWorld_FriendlyFireSparesNoHub)
 		CHECK(range.world->detonate("blast", {0.5f, 10, 0}, attacker));
 		return 100 - range.world->hitPoints(hub->id());
 	};
-	const float enemy = lost(1), own = lost(2);
-	std::fprintf(stderr, "  hub: %.2f from an enemy, %.2f from its own team at 0%% friendly fire\n", enemy, own);
-	CHECK(enemy > 1 && std::fabs(own - enemy) < 0.01f);
+	for (const char* type : {"GenericProjectile", "SupplyObject", "SimpleObject", "Bundle", "PlayerControlObject"}) {
+		const float enemy = lost(type, 1), own = lost(type, 2);
+		std::fprintf(stderr, "  %s: %.2f from an enemy, %.2f from its own team at 0%% friendly fire\n", type, enemy, own);
+		CHECK(enemy > 1);
+		CHECK(std::string(type) == "PlayerControlObject" ? own == 0 : std::fabs(own - enemy) < 0.01f);
+	}
 }
 
 // hasOnTimeEffect (0x005b62a0): a fused round whose time runs out goes off

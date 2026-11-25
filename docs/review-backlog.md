@@ -288,7 +288,14 @@ or gating behind a flag.
 - **Fix:** after a move, join the new bot to `chosen + 1`, and fix both tests.
 
 ### A-2. Turret EMP only scales seat 0 (round 2, high)
-- **Status:** verify
+- **Status:** done (wave 2). Confirmed: 0x00565180 walks the bundle and its
+  parents (+0x34) to the first with an armour (+0x48), stops there, and scales
+  inputs 0..5 by 1 - level / numSteps (armour slots 0x14c, template interface
+  0xc4aa slots 0x1bc / 0x1d4, as the PCO filter 0x005ca2e0). No shipped seat
+  PCO has an Armor component (the Titans' armoured gun hubs take no EMP), so
+  every gunner takes the vehicle's EMP. `SeatLayout::yawArmour` / `pitchArmour`
+  hold each look bundle's nearest armoured ancestor; the test now pins eu_tank's
+  cupola at x 1/2 and x 0 (12.0, 6.0, 0.0 degrees).
 - **Commit:** 8beeeb4
 - **Where:** `src/Game/GameWorld.cpp:14312` `stepGunner`
 - **Retail (0x00565180):** walks up the bundle's parents (+0x34) to the first one
@@ -326,7 +333,15 @@ or gating behind a flag.
   observation.
 
 ### A-5. Friendly fire uses a hand-picked type list (round 2, low)
-- **Status:** verify
+- **Status:** done (wave 2). Confirmed: 0x005b7290 takes the victim's root
+  (0x006f1d70) and walks up to the first object answering interface 0xc4c5,
+  whose QueryInterface answers it in PlayerControlObject (0x005cc940, and
+  Parachute, built on the PCO constructor), Soldier (0x00585af0),
+  LadderContainer (0x0059d2d0) and FreeCamera (0x00616600). None found: no
+  scaling. Soldier percentages for a root of class 0x9493 / 0x9c46. The damage
+  now scales only for those classes (not the `steerClosest` lambda, which keys
+  on occupancy); `GameWorld_FriendlyFireSparesNoHub` pins GenericProjectile,
+  SupplyObject, SimpleObject and Bundle at full damage and a PCO at 0%.
 - **Commit:** fa99915
 - **Where:** `src/Game/GameWorld.cpp:1147` damage
 - **Retail (0x005b7290):** scales friendly fire only when it finds an interface
@@ -357,7 +372,19 @@ or gating behind a flag.
 - **Branch:** ignores points ≤ 0 and does nothing while max is 0.
 
 ### A-7. `setCollisionMesh` fallback is narrower than retail (round 2, low)
-- **Status:** verify
+- **Status:** done (wave 2). Confirmed: the setCollisionMesh executor
+  (0x0051c57b) and the collisionMesh one (0x00530de1) both pass the name to
+  the active template's slot 0x8c, whatever its class. Shipped consequence:
+  the control points' `flagpole` (a Bundle with children) and depth-0 Bundles
+  and SimpleObjects with children placed on the install's community maps
+  (house_medium_05jb, chimney_02jbv3, bp1_floodlight_big_cb ...) had no
+  collision. The static path
+  now reads either (`collisionMeshName`, the later .tweak one first, as
+  Titans.cpp). Widening made the held weapon objects (GenericFireArm roots,
+  almost all named by setCollisionMesh) solid at the soldier's feet and broke
+  the parachute tests, so `addStaticObject` skips GenericFireArm roots: they
+  stand in for a weapon in the soldier's tree, and no shipped level places
+  one. `GameWorld_SetCollisionMeshServesEveryTemplate` pins the solid pole.
 - **Commit:** 090cca2
 - **Where:** `src/Game/GameWorld.cpp` `addStaticCollision`
 - **Retail:** the setter at 0x0051c57b serves every template.

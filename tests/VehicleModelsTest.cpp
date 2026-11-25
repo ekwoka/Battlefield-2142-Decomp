@@ -358,10 +358,30 @@ TEST(Vehicles_HoverTankThrustsAndStrafes)
 	CHECK(turned > 10);
 }
 
+// ObjectTemplate.setCollisionMesh and collisionMesh are one setter (both
+// executors, 0x0051c57b and 0x00530de1, call the active template's slot
+// 0x8c) for every class: the control points' flagpole, a Bundle with two
+// children naming its mesh only in its .tweak, is solid where it stands.
+TEST(GameWorld_SetCollisionMeshServesEveryTemplate)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	const world::ObjectTemplate* pole = g.templates.find("flagpole");
+	CHECK(g.loaded && pole);
+	if (!g.loaded || !pole) return;
+	CHECK(pole->typeName() == "Bundle" && !pole->children().empty());
+	CHECK(pole->settings().count("collisionMesh") == 0 && pole->settings().count("setCollisionMesh") == 1);
+	const uint32_t id = g.start("flagpole", {20, 0, 20}, 0.1f);
+	physics::CollisionWorld::Hit hit {};
+	CHECK(g.world->staticCollision().raycast({10, 2, 20}, {30, 2, 20}, hit) && hit.owner == id);
+	std::fprintf(stderr, "  flagpole: met at x %.2f\n", 10 + hit.fraction * 20);
+}
+
 // The EU turret's yaw is on PIMouseLookX: the bundle input handler (0x00565180)
-// scales it by the EMP step, the barrel's pitch likewise; the cupola seat has
-// no armour of its own and keeps its input; the turret takes up again from
-// where it stopped when the EMP ends.
+// scales it by the EMP step (eu_tank: 2 steps, so x 1/2 at level 1, x 0 at
+// level 2), the barrel's pitch likewise. The cupola's bundles walk up past
+// EU_TANK_CupolaBase (no Armor component) to the tank's armour and take the
+// same step. The turret takes up again from where it stopped when the EMP ends.
 TEST(Vehicles_TankTurretYawFollowsEmpStep)
 {
 	if (!gameDir()) return;
@@ -416,7 +436,7 @@ TEST(Vehicles_TankTurretYawFollowsEmpStep)
 			}
 		}
 		for (int level : {0, 1, 2}) {
-			// The cupola seat (no armour of its own): not scaled by the hull's EMP.
+			// The cupola seat: its PCO has no armour, so the tank's EMP scales it.
 			Garage g(gameDir(), mod);
 			const auto tank = g.start("eu_tank", {0, 4, 8});
 			CHECK(g.enter(tank));
@@ -427,8 +447,9 @@ TEST(Vehicles_TankTurretYawFollowsEmpStep)
 			if (level > 0) {
 				CHECK(g.world->detonate("static_aa_missile_projectile", g.position(tank) + physics::Vec3 {0, 0, level == 1 ? 2.2f : 0.0f}));
 			}
+			CHECK(g.world->empLevel(tank) == level);
 			float before = 0, pitch = 0, after = 0;
-			if (!g.world->gunAim(tank, 1, before, pitch)) continue;
+			CHECK(g.world->gunAim(tank, 1, before, pitch));
 			game::SoldierInput look;
 			look.turn = 5;
 			for (int i = 0; i < 4; ++i) {
@@ -442,7 +463,9 @@ TEST(Vehicles_TankTurretYawFollowsEmpStep)
 		CHECK(std::fabs(turnedAt[0]) > 2.0f);
 		CHECK(std::fabs(turnedAt[1] - turnedAt[0] * 0.5f) < std::fabs(turnedAt[0]) * 0.15f);
 		CHECK(std::fabs(turnedAt[2]) < 0.2f);
-		CHECK(std::fabs(cupolaAt[1] - cupolaAt[0]) < 0.3f && std::fabs(cupolaAt[2] - cupolaAt[0]) < 0.3f);
+		CHECK(std::fabs(cupolaAt[0]) > 2.0f);
+		CHECK(std::fabs(cupolaAt[1] - cupolaAt[0] * 0.5f) < std::fabs(cupolaAt[0]) * 0.15f);
+		CHECK(std::fabs(cupolaAt[2]) < 0.2f);
 	}
 }
 
