@@ -1402,8 +1402,11 @@ void updateSquadInfo(hud::HudManager& hud, bool known, const game::GameWorld::Pl
 	hud.set("ShowCommanderIcon", commanderIcon ? 1 : 0);
 	hud.set("ShowSquadIcon", squadIcon ? 1 : 0);
 	const bool hasUpgrade = known && me.fieldUnlockCredits > 0;
-	const bool showPoints = squadIcon && (me.squadOrderMax > 0 || hasUpgrade);
-	const double progress = me.squadOrderMax > 0 ? std::clamp(me.squadOrderPoints / me.squadOrderMax, 0.0, 1.0) : 0;
+	// 0x007a0f80: a squad member's bar (+0x2fd) is the 0x56 handler's +0x302
+	// (a maximum over -1 has come); its value 1 once the points reach the
+	// maximum, else their share of it, unclamped below.
+	const bool showPoints = squadIcon && me.squadOrderBar;
+	const double progress = me.squadOrderMax <= me.squadOrderPoints ? 1.0 : me.squadOrderPoints / me.squadOrderMax;
 	hud.set("SquadOrderInfoBarShow", showPoints ? 1 : 0);
 	hud.set("SquadInfoValue", static_cast<float>(progress));
 	hud.set("UnlockInfoBarShow", hasUpgrade ? 1 : 0);

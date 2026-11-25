@@ -501,6 +501,7 @@ The rest only change what you see or hear.
 | `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
 | `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
 | `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the 4:3 HUD squeezed to the window's aspect ((4/3) ÷ aspect: the hudfix's 12/16 at 16:9, about 0.56 at 21:9), with its side pieces moved out to match (120 at 16:9) and the gunner frames widened to cover the window. It is laid out again when the window is resized. Ignored when the hudfix's shader is already installed, whose fixed 16:9 layout stays. | no |
+| `squadOrderPoints` | on | gameplay | The squads' order points, their HUD bar and the field upgrades it awards work on any server, offline included. The original runs them only on a ranked GameSpy server, so offline it never shows the bar. | yes |
 | `singleplayAllModes` | on | interface | The singleplayer page lists every level's every mode and size (Titan, Assault Lines, conquest and the rest), each row naming its mode, not only its single-player layouts; the chosen map starts in its own mode. For testing: the bots may not play those modes (Titan bots need `botTitan` and `botCommander`). | no |
 
 `enhanced.enabled` on its own also turns on the enhanced audio (below), lets
@@ -559,7 +560,7 @@ feeds the simulation.
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
 (`botRecovery`, `botMovement`, `botTitan`, `botCommander`, `botPilots`, `guidedCameraEase`,
-`cornerSteer`, `passengerWeapons`, `softLanding`) turned off. It compares the state
+`cornerSteer`, `passengerWeapons`, `softLanding`, `squadOrderPoints`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
 simulation. Anything added to the enhanced mode either leaves the
 fingerprint alone or gets its own option, listed in the script.

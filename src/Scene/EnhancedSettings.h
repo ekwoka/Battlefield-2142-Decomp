@@ -9,7 +9,7 @@
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
 // (botRecovery, botMovement, botTitan, botCommander, botPilots, guidedCameraEase, cornerSteer,
-// passengerWeapons, softLanding, titanKitFloors): they change the simulation by design, so the check turns
+// passengerWeapons, softLanding, titanKitFloors, squadOrderPoints): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
 
@@ -44,6 +44,7 @@ struct EnhancedSettings {
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
 	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
 	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow); retail lets it fall through
+	bool squadOrderPoints = true; // enhanced.squadOrderPoints: the squads' order points, their HUD bar and its field upgrades work on any server (GameWorld::squadOrderPointsOn); retail runs them only on a ranked GameSpy server (0x00430a00), so never offline
 	// Interface, also only with enhanced.enabled:
 	bool chaseRoll = false; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); off by default, as retail keeps them level (0x006108e0 -> lookAt 0x006ae080, up (0, 1, 0))
 	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
@@ -101,6 +102,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.softLanding = v; });
 	bindProperty<bool>(console, "enhanced.titanKitFloors", ConsoleAccess::Anyone, [&settings] { return settings.titanKitFloors; },
 		[&settings](const bool& v) { settings.titanKitFloors = v; });
+	bindProperty<bool>(console, "enhanced.squadOrderPoints", ConsoleAccess::Anyone, [&settings] { return settings.squadOrderPoints; },
+		[&settings](const bool& v) { settings.squadOrderPoints = v; });
 	bindProperty<bool>(console, "enhanced.chaseRoll", ConsoleAccess::Anyone, [&settings] { return settings.chaseRoll; },
 		[&settings](const bool& v) { settings.chaseRoll = v; });
 	bindProperty<bool>(console, "enhanced.killWeaponNames", ConsoleAccess::Anyone, [&settings] { return settings.killWeaponNames; },

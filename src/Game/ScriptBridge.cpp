@@ -487,7 +487,8 @@ void ScriptBridge::setPlayerParam(const std::string& name, int index, const Scri
 		return;
 	}
 	if (name == "maxOrderPoint") {
-		m_world.setSquadOrderMax(index, static_cast<int>(std::clamp<int64_t>(value.asInt(), 0, INT32_MAX)));
+		// An int, as given (0x004c4ea0 stores (double)(int), no clamp).
+		m_world.setSquadOrderMax(index, static_cast<int>(std::clamp<int64_t>(value.asInt(), INT32_MIN, INT32_MAX)));
 		return;
 	}
 	if (name == "isInsideCP" && index == m_world.localPlayer()) {

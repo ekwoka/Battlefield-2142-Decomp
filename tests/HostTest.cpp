@@ -272,12 +272,13 @@ TEST(NetHost_FieldUpgradeCreditSpendAndEquip)
 	CHECK(pumpUntil(step, [&] { return client.world().roundStarted() && client.world().localPlayer() >= 0; }));
 	const int me = client.world().localPlayer();
 	CHECK(round.joinSquad(me, 1));
+	round.setSquadOrderGate(true); // a ranked server's squads (0x00430a00)
 	round.setSquadOrderMax(me, 10);
 	round.addSquadOrderPoints(me, 3.5);
 	round.giveFieldUnlock(me);
 	CHECK(pumpUntil(step, [&] {
 		return client.world().fieldUnlockCredits() == 1 && client.world().squadOrderPoints() == 3.5
-			&& client.world().squadOrderMax() == 10;
+			&& client.world().squadOrderMax() == 10 && client.world().squadOrderBar();
 	}));
 	client.sendEvent(net::makeFieldUnlock(me, 0, 0, 0));
 	CHECK(pumpUntil(step, [&] {
@@ -292,7 +293,7 @@ TEST(NetHost_FieldUpgradeCreditSpendAndEquip)
 	CHECK(!round.ownsKitUnlock(me, "Two"));
 	round.resetRound();
 	CHECK(pumpUntil(step, [&] {
-		return client.world().squadOrderMax() == 0 && client.world().fieldUnlockMasks()[0] == 0
+		return !client.world().squadOrderBar() && client.world().fieldUnlockMasks()[0] == 0
 			&& client.world().ownedUnlockMasks()[0] == 0;
 	}));
 }

@@ -307,6 +307,7 @@ TEST(ScriptHost_FieldUpgradeFromSquadScoring)
 		round.world->setEventSink([&](const std::string& event, const game::ScriptArgs& args) { host.raise(event, args); });
 		CHECK(host.startGameMode("gpm_cq"));
 		host.setGameStatus(game::GameStatus::Playing);
+		round.world->setSquadOrderGate(true); // a ranked server's squads (0x00430a00)
 		const int giver = round.world->addPlayer("Giver", 2, true);
 		const int mate = round.world->addPlayer("Mate", 2, true);
 		const int other = round.world->addPlayer("Other squad", 2, true);
@@ -337,8 +338,24 @@ TEST(ScriptHost_SquadOrderPointsAsRetail)
 	const int me = round.world->addPlayer("Me", 2, true);
 	CHECK(round.world->joinSquad(me, 1));
 	game::GameWorld::PlayerInfo info;
-	// No maximum set: the constructor's 100.
+	// Not a ranked game (the squad's +0x184 clear, 0x00430a00): the add and
+	// the set-max do nothing, and no bar shows.
+	CHECK(!round.world->squadOrderPointsOn());
+	round.world->setSquadOrderMax(me, 10);
+	round.world->addSquadOrderPoints(me, 200);
+	CHECK(filled == 0 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0 && info.squadOrderMax == 0);
+	CHECK(!info.squadOrderBar);
+	// enhanced.squadOrderPoints opens the gate only with enhanced.enabled.
+	bool enhanced = false, offline = true;
+	round.world->setSquadOrderPointsOffline(&enhanced, &offline);
+	CHECK(!round.world->squadOrderPointsOn());
+	enhanced = true;
+	CHECK(round.world->squadOrderPointsOn());
+	round.world->setSquadOrderPointsOffline(nullptr, nullptr);
+	round.world->setSquadOrderGate(true);
+	// No maximum set: the constructor's 100, and no bar yet.
 	round.world->addSquadOrderPoints(me, 99.5);
+	CHECK(round.world->playerInfo(me, info) && !info.squadOrderBar);
 	CHECK(filled == 0 && round.world->playerInfo(me, info) && info.squadOrderPoints == 99.5 && info.squadOrderMax == 100);
 	round.world->addSquadOrderPoints(me, 0.5);
 	CHECK(filled == 1 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
@@ -358,6 +375,13 @@ TEST(ScriptHost_SquadOrderPointsAsRetail)
 	CHECK(filled == 3 && round.world->playerInfo(me, info) && info.squadOrderPoints == -2);
 	round.world->addSquadOrderPoints(me, 2);
 	CHECK(filled == 4 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
+	CHECK(info.squadOrderBar);
+	// The set-max stores the int as given (no clamp); -1 or less hides the
+	// HUD's bar (0x007a2100 case 0x56), and every add then fills it.
+	round.world->setSquadOrderMax(me, -5);
+	CHECK(round.world->playerInfo(me, info) && info.squadOrderMax == -5 && !info.squadOrderBar);
+	round.world->addSquadOrderPoints(me, -4);
+	CHECK(filled == 5 && round.world->playerInfo(me, info) && info.squadOrderPoints == 0);
 }
 
 // The players' ranks (stats +0x20, -1 from 0x005a5fc0): stats.py gives

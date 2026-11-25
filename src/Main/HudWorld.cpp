@@ -169,6 +169,7 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 	if (p.local) {
 		out.squadOrderPoints = m_world.squadOrderPoints();
 		out.squadOrderMax = m_world.squadOrderMax();
+		out.squadOrderBar = m_world.squadOrderBar();
 		out.fieldUnlockCredits = m_world.fieldUnlockCredits();
 	}
 	out.squadLeader = p.squadLeader;

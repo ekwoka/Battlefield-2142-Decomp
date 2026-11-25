@@ -566,7 +566,25 @@ or gating behind a flag.
   flag (for example `enhanced.firstPersonBlend`). Make the code and docs agree.
 
 ### A-11. Squad order points ignore retail's ranked-server gate (wave 1, low)
-- **Status:** open
+- **Status:** done (wave 3). Confirmed: 0x004c4c90 and 0x004c4ea0 both start with
+  `if (+0x184)`; the server's squad constructor 0x004c87a0 sets `+0x184` from
+  0x00430a00 (gpm_cq/ti/sl/nv/ca, AIDLL slot 0x20 true when loaded, an internet
+  server with GameSpyRanked, then sv.ranked `+0x26d`). The set-max stores
+  `(double)(int)` and sends event 0x56 flag 0 to the squad. The HUD's 0x56
+  handler (0x007a2100) keeps points (flag 1) at `+0x310`; a maximum ≤ -1 clears
+  `+0x302`, else sets it and keeps the max at `+0x318` (100 by default); the
+  frame update (0x007a0f80) shows a member's bar (`+0x2fd`) from `+0x302` alone
+  and fills it 1 once points ≥ max, else points / max. Port: `GameWorld::
+  squadOrderPointsOn` gates the add and set-max (`setSquadOrderGate` for the
+  ranked answer, never true here), the set-max clamp is gone (also in
+  ScriptBridge and the 0x56 parser, which refused negatives), `PlayerInfo::
+  squadOrderBar` / `RemoteWorld::squadOrderBar` follow `+0x302`, the host sends
+  -1 until a set-max has run, and the HUD uses retail's show and fill (the
+  field-upgrade credit no longer shows the order bar). Offline the bar is kept
+  behind `enhanced.squadOrderPoints` (on, gameplay, in the parity check's off
+  list and README's table). Tests: `ScriptHost_SquadOrderPointsAsRetail` (gate
+  off, the flag, -5 kept and hiding the bar), `ScriptHost_FieldUpgradeFromSquadScoring`,
+  `HudLists_FieldUpgradeSelectionAndExpiry` (no bar before a set-max), `NetHost_FieldUpgradeCreditSpendAndEquip`.
 - **Where:** `src/Game/GameWorld.cpp` `addSquadOrderPoints` and `setSquadOrderMax`;
   `ScriptBridge`; the HUD's squad-order bar
 - **Retail:** the add (0x004c4c90) and set-max (0x004c4ea0) run only when squad

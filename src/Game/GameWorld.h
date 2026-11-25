@@ -575,6 +575,9 @@ public:
 		bool spectator = false; // player +0x404 (slots 0x3b8 / 0x3bc): setSpectator
 		bool alive = false;
 		double squadOrderPoints = 0, squadOrderMax = 0;
+		// The HUD's order bar (its +0x302, 0x007a2100 case 0x56): a set-max
+		// message of more than -1 has come for the squad.
+		bool squadOrderBar = false;
 		int fieldUnlockCredits = 0;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
 		// The kit the player's body still wears, living, down or a corpse yet
@@ -998,6 +1001,26 @@ public:
 	bool titanKitFloors() const
 	{
 		return m_enhancedKitFloors && *m_enhancedKitFloors && m_titanKitFloors && *m_titanKitFloors;
+	}
+	// The squads' order points (the squad's +0x184): the add (0x004c4c90)
+	// and the set-max (0x004c4ea0) do nothing without it. The server's squad
+	// constructor (0x004c87a0) sets it from 0x00430a00, a ranked game: gpm_cq,
+	// ti, sl, nv or ca on an internet server with GameSpyRanked and sv.ranked
+	// (and AIDLL's slot 0x20 true when it is loaded), which no LAN or offline
+	// host has, so the bar never shows offline. setSquadOrderGate is that
+	// ranked test's answer; enhanced.enabled with enhanced.squadOrderPoints,
+	// read live, open the gate on any server too. It changes the simulation
+	// (the bar's awards are field upgrades).
+	void setSquadOrderGate(bool ranked) { m_squadOrderRanked = ranked; }
+	void setSquadOrderPointsOffline(const bool* enhanced, const bool* on)
+	{
+		m_enhancedSquadOrder = enhanced;
+		m_squadOrderOffline = on;
+	}
+	bool squadOrderPointsOn() const
+	{
+		return m_squadOrderRanked
+			|| (m_enhancedSquadOrder && *m_enhancedSquadOrder && m_squadOrderOffline && *m_squadOrderOffline);
 	}
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
@@ -4025,6 +4048,7 @@ private:
 	struct SquadOrderScore {
 		double points = 0;
 		int maximum = 100; // the squad's constructor (0x004c87a0) sets +0x168 to 100.0
+		bool maxSent = false; // a set-max has gone to the squad (event 0x56, 0x004c4ea0)
 	};
 	std::map<std::pair<int, int>, SquadOrderScore> m_squadOrderScores;
 	float m_tinnitus = 0;
@@ -4265,6 +4289,9 @@ private:
 	const bool* m_softLanding = nullptr;
 	const bool* m_enhancedKitFloors = nullptr;       // setTitanKitFloors
 	const bool* m_titanKitFloors = nullptr;
+	bool m_squadOrderRanked = false;                 // setSquadOrderGate
+	const bool* m_enhancedSquadOrder = nullptr;      // setSquadOrderPointsOffline
+	const bool* m_squadOrderOffline = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);

@@ -5700,6 +5700,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	const auto score = m_squadOrderScores.find({player->team, player->squad});
 	info.squadOrderPoints = score == m_squadOrderScores.end() ? 0 : score->second.points;
 	info.squadOrderMax = score == m_squadOrderScores.end() ? 0 : score->second.maximum;
+	info.squadOrderBar = score != m_squadOrderScores.end() && score->second.maxSent && score->second.maximum > -1;
 	info.fieldUnlockCredits = fieldUnlocks(id);
 	info.cloaked = player->alive && player->cloaked;
 	info.rank = player->rank;
@@ -6768,13 +6769,21 @@ void GameWorld::setBattery(int id, float battery)
 
 void GameWorld::setSquadOrderMax(int id, int maximum)
 {
-	if (const Player* player = findPlayer(id); player && player->squad != 0) {
-		m_squadOrderScores[{player->team, player->squad}].maximum = std::max(0, maximum);
+	// 0x004c4ea0: only with the squad's +0x184 (squadOrderPointsOn); it
+	// stores (double)(int) as given, no clamp, and sends it to the squad as
+	// event 0x56 (flag 0), which shows the HUD's bar when over -1.
+	if (const Player* player = findPlayer(id); player && player->squad != 0 && squadOrderPointsOn()) {
+		auto& score = m_squadOrderScores[{player->team, player->squad}];
+		score.maximum = maximum;
+		score.maxSent = true;
 	}
 }
 
 void GameWorld::addSquadOrderPoints(int id, double points)
 {
+	if (!squadOrderPointsOn()) {
+		return; // 0x004c4c90 tests the squad's +0x184 first
+	}
 	const Player* player = findPlayer(id);
 	// 0x004c4c90 (squad vtable 0x929cd0 +0x3c) adds any amount, zero and
 	// negative too, then awards and resets (+0x40, 0x004c4dd0) unless the

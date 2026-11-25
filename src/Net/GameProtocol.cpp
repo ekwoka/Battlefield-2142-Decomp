@@ -1277,7 +1277,9 @@ bool parseSquadOrderPoints(const PostRemoteInfo& info, bool& progress, double& v
 	if (info.category != 2 || info.id != 0x56 || info.payload.size() != 12) return false;
 	progress = info.payload[0] != 0;
 	std::memcpy(&value, info.payload.data() + 4, sizeof(value));
-	return std::isfinite(value) && value >= 0;
+	// Any finite value: points go below 0, and a maximum of -1 or less hides
+	// the bar (0x007a2100 case 0x56).
+	return std::isfinite(value);
 }
 
 GameEvent makeFieldUnlock(int player, int credits, int kit, int branch)

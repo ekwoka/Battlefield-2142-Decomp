@@ -325,8 +325,12 @@ TEST(HudLists_FieldUpgradeSelectionAndExpiry)
 		kits.update(2);
 		menu::updateSquadInfo(hud, round, me, false, {});
 	};
-	round.setSquadOrderMax(me, 10);
+	round.setSquadOrderGate(true); // a ranked server's squads (0x00430a00)
 	round.addSquadOrderPoints(me, 4.5);
+	update();
+	// 0x007a2100: no bar before a set-max message.
+	CHECK(hud.number("SquadOrderInfoBarShow") == 0);
+	round.setSquadOrderMax(me, 10);
 	update();
 	CHECK(hud.number("SquadOrderInfoBarShow") == 1 && hud.number("SquadInfoValue") == 0.45f);
 	execute("UnlockInterface.showUnlockInterface 1");

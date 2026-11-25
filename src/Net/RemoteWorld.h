@@ -266,6 +266,7 @@ public:
 	int fieldUnlockCredits() const { return m_fieldUnlockCredits; }
 	double squadOrderPoints() const { return m_squadOrderPoints; }
 	double squadOrderMax() const { return m_squadOrderMax; }
+	bool squadOrderBar() const { return m_squadOrderBar; }
 	const std::array<uint8_t, 56>& ownedUnlockMasks() const { return m_ownedUnlockMasks; }
 	const std::array<uint8_t, 56>& fieldUnlockMasks() const { return m_fieldUnlockMasks; }
 	int localPlayer() const { return m_localPlayer; }
@@ -559,6 +560,7 @@ private:
 	uint32_t m_tick = 0;
 	int m_fieldUnlockCredits = 0;
 	double m_squadOrderPoints = 0, m_squadOrderMax = 0;
+	bool m_squadOrderBar = false; // the HUD's +0x302: a max message over -1 (0x007a2100 case 0x56)
 	std::array<uint8_t, 56> m_ownedUnlockMasks {}, m_fieldUnlockMasks {}, m_previousUnlockMasks {};
 	uint32_t m_gameState = 0;
 	bool m_roundStarted = false;

@@ -4896,6 +4896,7 @@ int runGame(Options& options, Session& session)
 		round.setGuidedCameraEase(&enhancedSettings.enabled, &enhancedSettings.guidedCameraEase);
 		round.setSoftLanding(&enhancedSettings.enabled, &enhancedSettings.softLanding);
 		round.setTitanKitFloors(&enhancedSettings.enabled, &enhancedSettings.titanKitFloors);
+		round.setSquadOrderPointsOffline(&enhancedSettings.enabled, &enhancedSettings.squadOrderPoints);
 		// The players as the HUD has them (HudWorld.h): a joined game's,
 		// the server's (g_remoteHud, set while one runs), else the round's.
 		const auto hudPlayer = [&round](int id, game::GameWorld::PlayerInfo& out) {

@@ -3757,9 +3757,12 @@ void HostedGame::syncFieldUnlocks(int id, Client& client, int kit, int branch)
 {
 	game::GameWorld::PlayerInfo player;
 	if (!m_round->playerInfo(client.player, player)) return;
-	if (player.squadOrderMax != client.squadOrderMax) {
-		client.squadOrderMax = player.squadOrderMax;
-		sendTo(id, net::makeSquadOrderPoints(false, player.squadOrderMax));
+	// The maximum goes out once a set-max has run (0x004c4ea0's event 0x56),
+	// else -1, which a client's HUD takes as no bar (0x007a2100).
+	const double maximum = player.squadOrderBar ? player.squadOrderMax : -1;
+	if (maximum != client.squadOrderMax) {
+		client.squadOrderMax = maximum;
+		sendTo(id, net::makeSquadOrderPoints(false, maximum));
 	}
 	if (player.squadOrderPoints != client.squadOrderPoints) {
 		client.squadOrderPoints = player.squadOrderPoints;
