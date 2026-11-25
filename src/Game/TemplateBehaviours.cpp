@@ -96,7 +96,8 @@ void GameWorld::stepUnmannedGuns(float seconds)
 		body.shieldLeft = std::max(0.0f, body.shieldLeft - seconds);
 		for (size_t seat = 0; seat < body.guns.size(); ++seat) {
 			Body::Gun& gun = body.guns[seat];
-			const bool manned = seat < body.occupants.size() && body.occupants[seat] >= 0;
+			// An auto controller's player sits in the seat it drives (AIDLL 0x1004d8e0).
+			const bool manned = (seat < body.occupants.size() && body.occupants[seat] >= 0) || gun.autoControlled;
 			if (manned) {
 				gun.manned = manned;
 				continue;

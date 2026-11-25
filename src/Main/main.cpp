@@ -4697,6 +4697,12 @@ int runGame(Options& options, Session& session)
 			botSettings.skill = options.botSkill;
 		}
 		std::printf("bots: skill %.2f, Fire weight %.1f\n", botSettings.skill, botSettings.modifier("Fire"));
+	} else if (!session.client) {
+		// A server without bots still runs the AI's multiplayer settings
+		// (BF2142.exe 0x004d3450 takes AIDefaultMultiplayer.ai in place of
+		// AIDefault.ai): no bots, but AutoControllers.ai for the auto
+		// controllers (the Titan gun hubs, GameWorld::stepSeatControllers).
+		run("AI/AIDefaultMultiplayer.ai");
 	}
 	templates.setLoading(true);
 	// The loading screen (endOfRound.dfm while a level loads) when the
@@ -4795,7 +4801,7 @@ int runGame(Options& options, Session& session)
 		levelMusic(session.menuMusic, loadingTrack, sounds);
 		loadingStep(0.1f);
 		std::printf("%zu template scripts run from Objects/\n",
-			world::loadObjectTemplates(console, files, "Objects/", options.bots > 0));
+			world::loadObjectTemplates(console, files, "Objects/", options.bots > 0 || !session.client)); // the AI's weapon templates
 		loadingStep(0.5f);
 		run("Common/Material/MaterialManagerSettings.con");
 		run((levelPath + "Init.con").c_str());

@@ -1011,7 +1011,10 @@ bool BotManager::podLanding(Bot& bot, const GameWorld::PlayerInfo& self, physics
 				continue;
 			}
 			const float d = r <= kReach ? horizontal(p - goal->position) : 1e5f + r;
-			if (d < best) {
+			// Nothing on it from above (the ray down meets a top's front faces):
+			// the terrain's mesh runs on under what stands there (a silo's
+			// frame, a roof), which would take the pod.
+			if (d < best && m_world.lineOfSight(p + physics::Vec3 {0, 300, 0}, p + physics::Vec3 {0, 0.5f, 0}, self.vehicle)) {
 				best = d;
 				spot = p;
 			}
@@ -1385,6 +1388,13 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		}
 		bot.behaviour = "TitanSortie";
 		input.use = over && std::fmod(m_time, 1.0f) < 0.1f;
+		if (input.use) {
+			// The pod it leaves in is steered to walkable ground, as one from the
+			// Titan's array (podLanding): dropped straight down over the silo it
+			// can come down on a roof (Molokai's command centre).
+			physics::Vec3 spot;
+			podLanding(bot, self, spot);
+		}
 		return true;
 	}
 	bot.titanSortieRider = 0;

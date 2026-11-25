@@ -408,6 +408,7 @@ void GameWorld::startRound()
 	m_spawners.clear();
 	m_titans.clear();
 	m_silos.clear();
+	m_seatControllers.clear();
 	m_pods.clear();
 	m_parachutes.clear();
 	m_titanObstacles.clear();
@@ -915,6 +916,7 @@ void GameWorld::tick(float seconds)
 				// returns at once in other modes), so Wake's static Titans keep their parts.
 				registerTitan(id, spawner->settings().controlPointId);
 				registerSilo(*m_objects.find(id));
+				registerSeatControllers(*m_objects.find(id));
 			}
 		}
 		holdSpawned(*spawner);
@@ -952,6 +954,7 @@ void GameWorld::tick(float seconds)
 	stepSilos(seconds);
 	stepDrones(seconds);
 	stepSentryGuns(seconds);
+	stepSeatControllers(seconds);
 	stepCommander(seconds);
 	stepTitans(seconds);
 	if (m_files) {
@@ -5484,6 +5487,7 @@ void GameWorld::resetRound()
 	}
 	m_drones.clear();
 	m_sentryGuns.clear();
+	m_seatControllers.clear();
 	for (const Pod& pod : m_pods) {
 		gone.push_back(pod.object);
 	}
@@ -13962,7 +13966,6 @@ void GameWorld::seatPlayer(Player& player, Body& body, int seat)
 	player.seat = seat;
 	player.seatedAt = m_time;
 	body.occupants[static_cast<size_t>(seat)] = player.id;
-	Body::Gun& gun = body.guns[static_cast<size_t>(seat)];
 	const SeatLayout& place = layout.seats[static_cast<size_t>(seat)];
 	// crewKitIndex (the enter 0x005cdd60: the seat's +0x47c when not -1,
 	// through the soldier's kit, 0x0056cf50).
@@ -13972,6 +13975,12 @@ void GameWorld::seatPlayer(Player& player, Body& body, int seat)
 			player.kitGeometry = crewKit;
 		}
 	}
+	enterSeatWeapons(body, seat, place);
+}
+
+void GameWorld::enterSeatWeapons(Body& body, int seat, const SeatLayout& place)
+{
+	Body::Gun& gun = body.guns[static_cast<size_t>(seat)];
 	if (gun.arms.empty() && !place.weapons.empty()) {
 		// Each of the seat's firearms, and each group's first as its active
 		// one (the add-weapon order, 0x005cc5e0).
@@ -17454,28 +17463,7 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	if (best && control.checkLineOfFire) {
 		const world::Object* targetBody = m_objects.find(best->object);
 		const physics::Vec3 to = targetBody ? physics::Vec3 {targetBody->position().x, targetBody->position().y, targetBody->position().z} : aim;
-		const physics::Vec3 line = to - drone.position;
-		const float length = std::sqrt(physics::lengthSquared(line));
-		const physics::Vec3 along = length > 0.0001f ? line * (1 / length) : line;
-		for (const auto& mate : m_players) {
-			if (!mate->alive || mate->vehicle || mate->team != drone.team || mate.get() == best) {
-				continue;
-			}
-			const world::Object* body = m_objects.find(mate->object);
-			if (!body) {
-				continue;
-			}
-			const physics::Vec3 rel = physics::Vec3 {body->position().x, body->position().y, body->position().z} - drone.position;
-			if (mate->cloaked && physics::lengthSquared(rel) > control.discoverCloaked * control.discoverCloaked) {
-				continue;
-			}
-			const float t = physics::dot(rel, along);
-			const float radius = 0.5f + 0.02f * t;
-			if (t >= 0 && t <= length && physics::lengthSquared(rel - along * t) < radius * radius) {
-				blocked = true;
-				break;
-			}
-		}
+		blocked = teammateInLineOfFire(drone.position, to, drone.team, control.discoverCloaked, best->id);
 	}
 	const bool want = flipping || (onTarget && !blocked && m_time >= drone.fireFrom);
 	drone.gunDeviation.update(want); // the auto controller holds the trigger while on target
@@ -17524,6 +17512,35 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 	m_projectiles.push_back(p);
 }
 
+// checkLineOfFire's test (0x100dad90): a teammate's soldier on foot, not
+// the target, within 0.5 + 0.02 t of the line from `from` to `to`, 0 <= t
+// <= its length; a cloaked one only within discoverCloaked of `from`.
+bool GameWorld::teammateInLineOfFire(const physics::Vec3& from, const physics::Vec3& to, int team, float discoverCloaked,
+	int targetPlayer) const
+{
+	const physics::Vec3 line = to - from;
+	const float length = std::sqrt(physics::lengthSquared(line));
+	const physics::Vec3 along = length > 0.0001f ? line * (1 / length) : line;
+	for (const auto& mate : m_players) {
+		if (!mate->alive || mate->vehicle || mate->team != team || mate->id == targetPlayer) {
+			continue;
+		}
+		const world::Object* body = m_objects.find(mate->object);
+		if (!body) {
+			continue;
+		}
+		const physics::Vec3 rel = physics::Vec3 {body->position().x, body->position().y, body->position().z} - from;
+		if (mate->cloaked && physics::lengthSquared(rel) > discoverCloaked * discoverCloaked) {
+			continue;
+		}
+		const float t = physics::dot(rel, along);
+		const float radius = 0.5f + 0.02f * t;
+		if (t >= 0 && t <= length && physics::lengthSquared(rel - along * t) < radius * radius) {
+			return true;
+		}
+	}
+	return false;
+}
 
 // The gun's DefaultAnimationComp (vtables 0x00973120 / 0x00973080, made by
 // 0x005e12e0 with the template 0x005e1260: useShiftAnimation +0x10,
@@ -17665,6 +17682,256 @@ void GameWorld::stepSentryGuns(float seconds)
 		if (sentry.weapon) {
 			fireSentry(sentry, seconds);
 		}
+	}
+}
+
+// The spawn's hand-over (BF2142.exe 0x004a98c0, from the spawner's
+// 0x004ab8a0): each PlayerControlObject of the vehicle's seat list (its
+// root's vt+0x64) whose template names an auto controller (template
+// +0x298 slot 0x110) goes to the manager's add (slot 8, AIDLL 0x1004dba0),
+// which takes the template by name (0x10033a80) and, the manager running,
+// activates it (0x1004d8e0): the Titans' gun hubs in Project Remaster. The
+// silos, the drones and the deployed sentry guns keep their own paths.
+// The activation enters the bot only with operatesAlone (+1, the bot's
+// active flag); else it waits for a player in another of the vehicle's
+// seats, which isn't done here.
+void GameWorld::registerSeatControllers(const world::Object& vehicle)
+{
+	const world::ObjectTemplate* t = vehicle.objectTemplate();
+	if (!t || !autoControllerTemplate || integer(*t, "isMissileSilo", 0) != 0) {
+		return;
+	}
+	const VehicleLayout& layout = vehicleLayout(*t);
+	for (size_t seat = 0; seat < layout.seats.size(); ++seat) {
+		const world::ObjectTemplate* pco = m_templates.find(layout.seats[seat].name);
+		const auto name = pco ? pco->settings().find("autoControllerTemplateName") : t->settings().end();
+		if (!pco || name == pco->settings().end() || name->second.empty()) {
+			continue;
+		}
+		const bool held = std::any_of(m_seatControllers.begin(), m_seatControllers.end(),
+			[&](const SeatController& c) { return c.vehicle == vehicle.id() && c.seat == static_cast<int>(seat); });
+		SeatController c;
+		if (held || !autoControllerTemplate(name->second, c.control) || !c.control.operatesAlone) {
+			continue;
+		}
+		c.vehicle = vehicle.id();
+		c.seat = static_cast<int>(seat);
+		c.player = std::make_unique<Player>();
+		c.player->id = -1; // no player of the round's: its rounds credit no one, as the silos'
+		c.player->name = "AutoController";
+		c.player->ai = true;
+		c.player->alive = true;
+		m_seatControllers.push_back(std::move(c));
+	}
+}
+
+// A seat's auto controller (an AIDLL bot, 0x100c8d20 with its +0x264 set)
+// drives the seat's inputs through the seat's own update (stepGunner):
+//   - sensing (0x100ed700): enemy players within viewDistance of the gun
+//     (+0x10, the agent's +0xbc), in a frustum of fov (+0xc) about its aim
+//     (0x100feea0), in line of sight; a cloaked one within
+//     discoverCloakedEnemiesDistance (+0x2c); a player in a vehicle by the
+//     vehicle;
+//   - the target (BBFire, 0x10075fb0): the weapon's strength against the
+//     target's type x max(0, 1 - d / (1.2 maxRange)), the best one,
+//     another taking over at 1.2 times the current's; one out of sight for
+//     targetLostTimeout (+0x1c) is dropped;
+//   - the aim (0x100e5820): yaw and pitch, each input at most
+//     maxTrackingInput (+0x24) while tracking, the yaw's scanningInputScale
+//     (+0x34) while scanning (0x100f9a90 / 0x100f9cf0: the point moves on
+//     at scanningSpeed, +4, and turns at the bundle's limits);
+//   - the trigger (0x100777a0 / BAPATrigger 0x100d3110): reactionTime
+//     (+0x18) after the target is taken, held for an automatic gun and
+//     tapped otherwise; with checkLineOfFire (+0x28) not through a
+//     teammate (0x100db150).
+// A person who enters the seat takes it over (allowTakeOver, +0x22, read
+// by the seat search 0x005a98e0 through the manager's slot 0x40): the
+// manager takes the AI player out and stops the bot (slot 0x38,
+// 0x1004d470 -> 0x1004d140) and puts it back as they leave (slot 0x3c,
+// 0x1004d500). With autoControllerTemplateName the seat's input filter
+// cuts every input above EMP level 1 (0x005ca2e0, driverInputScale).
+// The rewrite's own: the gun fires once it points within 2 degrees, and
+// leads its target by the round's flight time.
+void GameWorld::stepSeatControllers(float seconds)
+{
+	for (auto it = m_seatControllers.begin(); it != m_seatControllers.end();) {
+		const world::Object* object = m_objects.find(it->vehicle);
+		if (!object || !object->objectTemplate()) {
+			it = m_seatControllers.erase(it);
+			continue;
+		}
+		SeatController& c = *it++;
+		Body* body = findBody(c.vehicle);
+		const VehicleLayout& layout = vehicleLayout(*object->objectTemplate());
+		if (!body || static_cast<size_t>(c.seat) >= layout.seats.size()) {
+			continue;
+		}
+		const size_t index = static_cast<size_t>(c.seat);
+		const SeatLayout& place = layout.seats[index];
+		if (index < body->guns.size()) {
+			body->guns[index].autoControlled = false;
+		}
+		const world::ObjectTemplate* pco = m_templates.find(place.name);
+		const auto hp = m_hitPoints.find(c.vehicle);
+		const bool taken = index < body->occupants.size() && body->occupants[index] >= 0;
+		const bool works = pco && body->wreckTime < 0 && (hp == m_hitPoints.end() || hp->second > 0)
+			&& (!isTitan(c.vehicle) || titanGunWorks(c.vehicle, c.seat)) && driverInputScale(body->empLevel, -1, *pco) > 0;
+		if (taken || !works) {
+			c.driving = false;
+			c.target = -1;
+			continue;
+		}
+		Player& self = *c.player;
+		if (!c.driving) {
+			body->occupants.resize(std::max(body->occupants.size(), layout.seats.size()), -1);
+			body->guns.resize(std::max(body->guns.size(), layout.seats.size()));
+			body->looks.resize(std::max(body->looks.size(), layout.seats.size()));
+			enterSeatWeapons(*body, c.seat, place);
+			self.vehicle = c.vehicle;
+			self.seat = c.seat;
+			c.target = -1;
+			c.tapped = false;
+			c.driving = true;
+		}
+		self.team = object->team();
+		Body::Gun& gun = body->guns[index];
+		float gunYaw = 0, gunPitch = 0;
+		physics::Vec3 eye;
+		physics::Mat3 hull;
+		if (!gunAim(c.vehicle, c.seat, gunYaw, gunPitch) || !gunFrame(c.vehicle, c.seat, eye, hull)) {
+			continue;
+		}
+		const float aimPitch = gunPitch + place.restPitch;
+		const auto angles = [&](const physics::Vec3& at, float& yaw, float& pitch) {
+			const physics::Vec3 d = hull.untransform(at - eye);
+			yaw = std::atan2(d.x, d.z) * 57.29578f;
+			pitch = std::atan2(d.y, std::sqrt(d.x * d.x + d.z * d.z)) * 57.29578f;
+		};
+		const AutoControl& control = c.control;
+		const float half = control.fov * 0.5f;
+		const auto visible = [&](const Player& p, physics::Vec3& at, physics::Vec3& velocity, bool inView) {
+			if (!p.present || !p.alive || p.manDown || p.spectator || p.team == self.team) {
+				return false;
+			}
+			uint32_t ignore = p.object;
+			if (const Body* carrier = p.vehicle ? findBody(p.vehicle) : nullptr) {
+				at = carrier->body.worldCenterOfMass();
+				velocity = carrier->body.velocity;
+				ignore = p.vehicle;
+			} else if (const world::Object* soldier = p.vehicle ? nullptr : m_objects.find(p.object)) {
+				at = {soldier->position().x, soldier->position().y + 1.3f, soldier->position().z};
+				velocity = {};
+			} else {
+				return false;
+			}
+			const float distance2 = physics::lengthSquared(at - eye);
+			if (distance2 > control.viewDistance * control.viewDistance) {
+				return false;
+			}
+			if (inView) {
+				float yaw = 0, pitch = 0;
+				angles(at, yaw, pitch);
+				if (std::fabs(std::remainder(yaw - gunYaw, 360.0f)) > half || std::fabs(pitch - aimPitch) > half) {
+					return false;
+				}
+			}
+			if (p.cloaked && distance2 > control.discoverCloaked * control.discoverCloaked) {
+				return false;
+			}
+			return lineOfSight(eye, at, c.vehicle, ignore);
+		};
+		const SeatWeapon& primary = gun.active[0] >= 0 && static_cast<size_t>(gun.active[0]) < place.weapons.size()
+			? place.weapons[static_cast<size_t>(gun.active[0])]
+			: static_cast<const SeatWeapon&>(place);
+		if (const Player* held = c.target >= 0 ? findPlayer(c.target) : nullptr) {
+			if (visible(*held, c.seenAt, c.seenVelocity, false)) {
+				c.targetSeenAt = static_cast<float>(m_time);
+			} else if (m_time - c.targetSeenAt > control.targetLostTimeout) {
+				c.target = -1;
+			}
+		} else {
+			c.target = -1;
+		}
+		// The sensing and the choice, at the bots' planned decision interval.
+		if (autoControllerStrength && m_time - c.sensedAt >= 0.5) {
+			c.sensedAt = static_cast<float>(m_time);
+			const Player* best = nullptr;
+			float bestScore = 0, current = 0;
+			physics::Vec3 bestAt, bestVelocity;
+			for (const auto& p : m_players) {
+				float range = 0;
+				const float strength = p->team != self.team ? autoControllerStrength(primary.weapon, p->id, range) : 0.0f;
+				physics::Vec3 at, velocity;
+				if (strength <= 0 || range <= 0 || !visible(*p, at, velocity, p->id != c.target)) {
+					continue;
+				}
+				const float score = strength * std::max(0.0f, 1 - std::sqrt(physics::lengthSquared(at - eye)) / (1.2f * range));
+				if (p->id == c.target) {
+					current = score;
+				}
+				if (score > bestScore) {
+					best = p.get();
+					bestScore = score;
+					bestAt = at;
+					bestVelocity = velocity;
+				}
+			}
+			if (best && best->id != c.target && bestScore > 1.2f * current) {
+				c.target = best->id;
+				c.seenAt = bestAt;
+				c.seenVelocity = bestVelocity;
+				c.targetSeenAt = static_cast<float>(m_time);
+				c.fireFrom = static_cast<float>(m_time) + control.reactionTime;
+			}
+		}
+		SoldierInput& input = self.input;
+		input = {};
+		input.aimPitch = aimPitch;
+		const bool yawBundled = !place.yawBundle.empty() && (place.yawAxis.acceleration != 0 || place.yawAxis.continuousSpeed != 0);
+		const float yawSpeed = yawBundled ? place.yawAxis.maxSpeed : place.yawSpeed;
+		// A yaw input in the seat's units (stepGunner: 5 degrees a unit on a
+		// bundle, else degrees this tick).
+		const auto yawInput = [&](float unit) { return yawBundled ? unit * 5 : unit * yawSpeed * seconds; };
+		bool onTarget = false;
+		if (c.target >= 0) {
+			physics::Vec3 want = c.seenAt;
+			const float speed = gun.weapon ? gun.weapon->settings().velocity : 0.0f;
+			if (speed > 0) {
+				const physics::Vec3 relative = c.seenVelocity - body->body.velocity;
+				for (int i = 0; i < 3; ++i) {
+					want = c.seenAt + relative * (std::sqrt(physics::lengthSquared(want - eye)) / speed);
+				}
+			}
+			float wantYaw = 0, wantPitch = 0;
+			angles(want, wantYaw, wantPitch);
+			const float yawError = std::remainder(wantYaw - gunYaw, 360.0f);
+			const float pitchError = wantPitch - aimPitch;
+			const float limit = control.maxTrackingInput;
+			if (yawSpeed > 0 && seconds > 0) {
+				input.turn = yawInput(std::clamp(yawError / (yawSpeed * seconds), -limit, limit));
+			}
+			const float pitchStep = place.pitchAxis.maxSpeed > 0 ? limit * place.pitchAxis.maxSpeed * seconds : std::fabs(pitchError);
+			input.aimPitch = aimPitch + std::clamp(pitchError, -pitchStep, pitchStep);
+			onTarget = std::fabs(yawError) <= 2 && std::fabs(pitchError) <= 2;
+		} else if (control.scanningSpeed > 0 && yawSpeed > 0) {
+			if (std::isfinite(place.minYaw)) {
+				if (gun.yaw >= place.maxYaw - 0.5f) {
+					c.scanTurn = -1;
+				} else if (gun.yaw <= place.minYaw + 0.5f) {
+					c.scanTurn = 1;
+				}
+			}
+			const float most = control.scanningSpeed * 30 * 57.29578f / yawSpeed; // the scan point's own speed
+			input.turn = yawInput(c.scanTurn * std::min(control.scanningInputScale, most));
+		}
+		const bool want = onTarget && m_time >= c.fireFrom
+			&& !(control.checkLineOfFire && teammateInLineOfFire(eye, c.seenAt, self.team, control.discoverCloaked, c.target));
+		const bool automatic = gun.weapon && gun.weapon->fireMode() == kFireAutomatic;
+		input.fire = want && (automatic || !c.tapped);
+		c.tapped = input.fire;
+		self.lastLookPitch = input.aimPitch;
+		gun.autoControlled = true;
+		stepGunner(self, *body, seconds, true, 1u, 1.0f);
 	}
 }
 
