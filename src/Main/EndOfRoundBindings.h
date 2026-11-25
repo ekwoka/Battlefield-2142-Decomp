@@ -185,8 +185,11 @@ struct LevelDescription {
 	std::string gameModeText; // the size's maptype text (used without a locid)
 	std::vector<int> sizes;   // of the game mode
 	std::vector<std::string> modes; // every <mode type>, in the file's order
+	std::vector<std::vector<int>> modeSizes; // each mode's <maptype players>, in order
 };
+// Only what TinyXML keeps of a malformed file counts (tinyXmlKept).
 LevelDescription parseLevelDescription(const std::string& xml, const std::string& gameMode, int size);
+std::string tinyXmlKept(const std::string& xml);
 
 // The debriefing's records as BF2142.exe keeps them for the end-of-round
 // movie (SwiffHost's record, slot 0x180: +0x2d4 the kits, +0x370 the

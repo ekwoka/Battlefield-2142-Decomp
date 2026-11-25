@@ -2610,12 +2610,31 @@ void MenuBindings::setMaps(std::vector<MenuMap> maps)
 	showMapLists();
 }
 
+// SwiffHost's filter (slot 0x170, 0x00479e80): every level record's mode
+// named as the filter, one map per maptype size, from the level's .desc
+// (0x00462750) whatever its server.zip holds. A level with no readable
+// .desc has no record in the original; here it keeps its server.zip's
+// maps, as allGameModes keeps its modes.
 std::vector<MenuMap> MenuBindings::availableMaps() const
 {
 	std::vector<MenuMap> maps;
-	for (const MenuMap& map : m_maps) {
-		if (map.gameMode == m_filterGameMode) {
-			maps.push_back(map);
+	for (size_t i = 0; i < m_maps.size(); ++i) {
+		const std::string& level = m_maps[i].level;
+		if (i > 0 && m_maps[i - 1].level == level) {
+			continue; // sorted by level: each level once
+		}
+		const LevelText* text = levelText(level);
+		for (size_t m = 0; text && m < text->modes.size(); ++m) {
+			if (text->modes[m] == m_filterGameMode) {
+				for (const int size : text->sizes[m]) {
+					maps.push_back({level, text->modes[m], size});
+				}
+			}
+		}
+		for (size_t j = i; !text && j < m_maps.size() && m_maps[j].level == level; ++j) {
+			if (m_maps[j].gameMode == m_filterGameMode) {
+				maps.push_back(m_maps[j]);
+			}
 		}
 	}
 	return maps;

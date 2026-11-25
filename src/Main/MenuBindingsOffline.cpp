@@ -1223,6 +1223,9 @@ void MenuBindings::bindDemos()
 
 const MenuBindings::LevelText* MenuBindings::levelText(const std::string& level) const
 {
+	if (!readFile) {
+		return nullptr; // not cached: the files may be bound later (setMaps runs first)
+	}
 	auto it = m_levelTexts.find(level);
 	if (it == m_levelTexts.end()) {
 		std::optional<LevelText> text;
@@ -1231,7 +1234,7 @@ const MenuBindings::LevelText* MenuBindings::levelText(const std::string& level)
 			// 0x00462750: <name> (+0x1c), <briefing> (+0x38) and its locid
 			// (+0x54).
 			const LevelDescription desc = parseLevelDescription(xml, "", 0);
-			text = LevelText {desc.name, desc.briefing, desc.briefingKey, desc.modes};
+			text = LevelText {desc.name, desc.briefing, desc.briefingKey, desc.modes, desc.modeSizes};
 		}
 		it = m_levelTexts.emplace(level, text).first;
 	}
