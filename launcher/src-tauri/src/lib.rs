@@ -14,6 +14,8 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+mod levels;
+
 #[derive(Serialize, Clone)]
 struct Loaded {
     repo_root: String,
@@ -379,6 +381,23 @@ async fn pick_dir(app: AppHandle, start: String) -> Option<String> {
     })
 }
 
+// The levels of a mod in the BF2142 directory (mods/<mod>/Levels), for the map picker.
+#[tauri::command]
+async fn list_levels(game_dir: String, mod_name: String) -> Result<levels::LevelList, String> {
+    let dir = resolve(&game_dir);
+    if game_dir.trim().is_empty() {
+        return Err("no BF2142 directory".into());
+    }
+    levels::list_levels(&dir, mod_name.trim())
+}
+
+// A level's picture for a mode and size (Info/*.png), as a data: URL.
+#[tauri::command]
+async fn level_preview(game_dir: String, mod_name: String, level: String, mode: String, size: u32) -> Option<String> {
+    let mod_name = if mod_name.trim().is_empty() { "bf2142".to_string() } else { mod_name };
+    levels::preview(&resolve(&game_dir), mod_name.trim(), &level, &mode, size)
+}
+
 #[tauri::command]
 fn stop(jobs: State<Jobs>) -> Result<(), String> {
     if let Some(child) = jobs.child.lock().unwrap().as_mut() {
@@ -392,7 +411,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
-        .invoke_handler(tauri::generate_handler![load_options, binary_exists, build, run_game, pick_dir, stop])
+        .invoke_handler(tauri::generate_handler![load_options, binary_exists, build, run_game, pick_dir, stop, list_levels, level_preview])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");
 }

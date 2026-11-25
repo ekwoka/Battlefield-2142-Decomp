@@ -55,6 +55,68 @@ struct EnhancedFlag {
     description: String,
 }
 
+// A mod's levels (src-tauri/src/levels.rs).
+#[derive(Deserialize, Clone, PartialEq, Default)]
+struct LevelList {
+    mods: Vec<String>,
+    mod_name: String,
+    modes: Vec<ModeName>,
+    levels: Vec<Level>,
+}
+
+#[derive(Deserialize, Clone, PartialEq)]
+struct ModeName {
+    mode: String,
+    title: String,
+}
+
+#[derive(Deserialize, Clone, PartialEq)]
+struct Level {
+    name: String,
+    title: String,
+    description: String,
+    modes: Vec<LevelMode>,
+    navmesh: bool,
+    problems: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, PartialEq)]
+struct LevelMode {
+    mode: String,
+    title: String,
+    sizes: Vec<LevelSize>,
+}
+
+#[derive(Deserialize, Clone, PartialEq)]
+struct LevelSize {
+    players: u32,
+    playable: bool,
+    listed: bool,
+}
+
+impl Level {
+    fn playable(&self) -> bool {
+        self.modes.iter().any(|m| m.sizes.iter().any(|s| s.playable))
+    }
+}
+
+impl LevelMode {
+    fn playable(&self, players: u32) -> bool {
+        self.sizes.iter().any(|s| s.players == players && s.playable)
+    }
+
+    // The size to keep when this mode is chosen: the current one if the
+    // game can load it, else 32 (the game's default), else the first.
+    fn size_for(&self, current: u32) -> u32 {
+        [current, 32]
+            .into_iter()
+            .find(|&n| self.playable(n))
+            .or_else(|| self.sizes.iter().find(|s| s.playable).map(|s| s.players))
+            .or_else(|| self.sizes.first().map(|s| s.players))
+            .unwrap_or(current)
+    }
+}
+
 #[derive(Deserialize)]
 struct TauriEvent<T> {
     payload: T,
@@ -89,6 +151,23 @@ struct DirArgs {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LevelArgs {
+    game_dir: String,
+    mod_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewArgs {
+    game_dir: String,
+    mod_name: String,
+    level: String,
+    mode: String,
+    size: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RunArgs {
     build_dir: String,
     args: Vec<String>,
@@ -106,6 +185,133 @@ struct Saved {
     // What Run opens: "menu" (also when unset), "view" or "none".
     #[serde(default)]
     start: String,
+    // The map picker's choices.
+    #[serde(default)]
+    map: SavedMap,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
+struct SavedMap {
+    mod_name: String,
+    level: String,
+    game_mode: String,
+    map_size: u32,
+    bots: u32,
+    // 0..1 for aiSettings.setBotSkill; empty for the AI scripts' own.
+    bot_skill: String,
+    // Minutes; empty or 0 for none.
+    time_limit: String,
+    filter: String,
+    mode_filter: String,
+    navmesh_only: bool,
+}
+
+// The options the map picker gives itself; the option groups leave them out.
+const MAP_OPTIONS: &[&str] = &["+level", "+gameMode", "+mapSize", "+modPath", "--bots", "--time-limit"];
+
+// The map picker's state.
+#[derive(Clone, Copy)]
+struct MapChoice {
+    mod_name: RwSignal<String>,
+    level: RwSignal<String>,
+    game_mode: RwSignal<String>,
+    map_size: RwSignal<u32>,
+    bots: RwSignal<u32>,
+    bot_skill: RwSignal<String>,
+    time_limit: RwSignal<String>,
+    filter: RwSignal<String>,
+    mode_filter: RwSignal<String>,
+    navmesh_only: RwSignal<bool>,
+}
+
+impl MapChoice {
+    fn new(saved: &SavedMap) -> Self {
+        MapChoice {
+            mod_name: RwSignal::new(if saved.mod_name.is_empty() { "bf2142".to_string() } else { saved.mod_name.clone() }),
+            level: RwSignal::new(saved.level.clone()),
+            game_mode: RwSignal::new(saved.game_mode.clone()),
+            map_size: RwSignal::new(saved.map_size),
+            bots: RwSignal::new(saved.bots),
+            bot_skill: RwSignal::new(saved.bot_skill.clone()),
+            time_limit: RwSignal::new(saved.time_limit.clone()),
+            filter: RwSignal::new(saved.filter.clone()),
+            mode_filter: RwSignal::new(saved.mode_filter.clone()),
+            navmesh_only: RwSignal::new(saved.navmesh_only),
+        }
+    }
+
+    fn saved(&self) -> SavedMap {
+        SavedMap {
+            mod_name: self.mod_name.get(),
+            level: self.level.get(),
+            game_mode: self.game_mode.get(),
+            map_size: self.map_size.get(),
+            bots: self.bots.get(),
+            bot_skill: self.bot_skill.get(),
+            time_limit: self.time_limit.get(),
+            filter: self.filter.get(),
+            mode_filter: self.mode_filter.get(),
+            navmesh_only: self.navmesh_only.get(),
+        }
+    }
+
+    // The arguments for the mod and, unless the menu is to pick the map, a
+    // direct start into the chosen level.
+    fn args(&self, menu: bool) -> Vec<String> {
+        let mut args = Vec::new();
+        let mod_name = self.mod_name.get();
+        if !mod_name.is_empty() && mod_name != "bf2142" {
+            args.extend(["+modPath".to_string(), format!("mods/{mod_name}")]);
+        }
+        let level = self.level.get();
+        if menu || level.is_empty() {
+            return args;
+        }
+        args.extend(["+level".to_string(), level]);
+        let mode = self.game_mode.get();
+        if !mode.is_empty() {
+            args.extend(["+gameMode".to_string(), mode]);
+        }
+        let size = self.map_size.get();
+        if size > 0 {
+            args.extend(["+mapSize".to_string(), size.to_string()]);
+        }
+        let bots = self.bots.get();
+        if bots > 0 {
+            args.extend(["--bots".to_string(), bots.to_string()]);
+            if let Ok(skill) = self.bot_skill.get().trim().parse::<f32>() {
+                args.extend(["--console".to_string(), format!("aiSettings.setBotSkill {}", skill.clamp(0.0, 1.0))]);
+            }
+        }
+        if let Ok(minutes) = self.time_limit.get().trim().parse::<f32>()
+            && minutes > 0.0
+        {
+            args.extend(["--time-limit".to_string(), ((minutes * 60.0).round() as i64).to_string()]);
+        }
+        args
+    }
+
+    // Chooses a level: the current mode if it has the level, else its first
+    // the game can load; the size likewise.
+    fn choose(&self, level: &Level) {
+        self.level.set(level.name.clone());
+        let current = self.game_mode.get_untracked();
+        let mode = level
+            .modes
+            .iter()
+            .find(|m| m.mode.eq_ignore_ascii_case(&current) && m.sizes.iter().any(|s| s.playable))
+            .or_else(|| level.modes.iter().find(|m| m.sizes.iter().any(|s| s.playable)))
+            .or_else(|| level.modes.first());
+        if let Some(mode) = mode {
+            self.choose_mode(mode);
+        }
+    }
+
+    fn choose_mode(&self, mode: &LevelMode) {
+        self.game_mode.set(mode.mode.clone());
+        self.map_size.set(mode.size_for(self.map_size.get_untracked()));
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -206,6 +412,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
     let enhanced = RwSignal::new(saved.enhanced);
     let extra = RwSignal::new(saved.extra.clone());
     let start_with = RwSignal::new(if saved.start.is_empty() { "menu".to_string() } else { saved.start.clone() });
+    let map = MapChoice::new(&saved.map);
     let flags: Vec<FlagState> = loaded
         .enhanced
         .iter()
@@ -218,6 +425,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
             let options = g
                 .options
                 .iter()
+                .filter(|o| !MAP_OPTIONS.contains(&o.name.as_str()))
                 .map(|o| {
                     let kept = saved.options.get(&o.name).cloned().unwrap_or_else(|| SavedOpt { on: false, value: o.default_value.clone() });
                     OptState { opt: o.clone(), on: RwSignal::new(kept.on), value: RwSignal::new(kept.value) }
@@ -225,10 +433,12 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 .collect();
             (g.name.clone(), options)
         })
+        .filter(|(_, options): &(String, Vec<OptState>)| !options.is_empty())
         .collect();
     let options: Vec<OptState> = groups.iter().flat_map(|(_, o)| o.clone()).collect();
 
-    // The command line, in the order: the game, the options, enhanced, extra.
+    // The command line, in the order: the game, the start, the map, the
+    // options, enhanced, extra.
     let args = {
         let options = options.clone();
         let flags = flags.clone();
@@ -251,6 +461,9 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
             {
                 args.push(mode.to_string());
             }
+            // The mod, and the level to start in (not when the menu picks it).
+            let menu = mode == Some("--menu") || options.iter().any(|o| o.on.get() && o.opt.name == "--menu");
+            args.extend(map.args(menu));
             for o in &options {
                 if o.on.get() {
                     args.push(o.opt.name.clone());
@@ -288,6 +501,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 options: options.iter().map(|o| (o.opt.name.clone(), SavedOpt { on: o.on.get(), value: o.value.get() })).collect(),
                 extra: extra.get(),
                 start: start_with.get(),
+                map: map.saved(),
             });
         });
     }
@@ -377,7 +591,9 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
     });
 
     let command = move || {
-        let mut line = vec!["bf2142".to_string()];
+        // As run from the repository root.
+        let dir = build_dir.get();
+        let mut line = vec![shell_quote(&format!("{}/src/Main/bf2142", dir.trim().trim_end_matches('/')))];
         line.extend(args.get().iter().map(|a| shell_quote(a)));
         line.join(" ")
     };
@@ -459,6 +675,8 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                     }>"Choose…"</button>
                 </span>
             </label>
+
+            <MapPicker game_dir=game_dir start_with=start_with map=map />
 
             <fieldset>
                 <legend>
@@ -545,7 +763,10 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                     prop:value=move || extra.get() on:input=move |ev| extra.set(event_target_value(&ev)) />
             </label>
 
-            <h3>"Command"</h3>
+            <h3 class="row">
+                "Command"
+                <button on:click=move |_| copy_text(&command())>"Copy"</button>
+            </h3>
             <pre class="command">{command}</pre>
 
         </main>
@@ -579,5 +800,290 @@ fn OptionRow(o: OptState) -> impl IntoView {
             <small class="description">{o.opt.description.clone()}</small>
         </li>
     }
+}
+
+fn copy_text(text: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.navigator().clipboard().write_text(text);
+    }
+}
+
+// The levels of the BF2142 directory's mods: a filterable list, the chosen
+// level's modes and sizes (from its server.zip and Info/<level>.desc), its
+// picture, and the settings of a direct start.
+#[component]
+fn MapPicker(game_dir: RwSignal<String>, start_with: RwSignal<String>, map: MapChoice) -> impl IntoView {
+    // None while reading.
+    let list = RwSignal::new(None::<Result<LevelList, String>>);
+    let reads = StoredValue::new(0u32);
+    let reload = move || {
+        let args = LevelArgs { game_dir: game_dir.get_untracked(), mod_name: map.mod_name.get_untracked() };
+        let read = reads.get_value() + 1;
+        reads.set_value(read);
+        list.set(None);
+        spawn_local(async move {
+            let result = call::<_, LevelList>("list_levels", &args).await;
+            // Only the newest read counts (the directory may change as it's typed).
+            if reads.get_value() == read {
+                list.set(Some(result));
+            }
+        });
+    };
+    Effect::new(move |_| {
+        game_dir.track();
+        map.mod_name.track();
+        reload();
+    });
+
+    let listed = move || list.with(|l| l.as_ref().and_then(|r| r.as_ref().ok()).cloned());
+    let selected = Memo::new(move |_| {
+        let name = map.level.get();
+        list.with(|l| match l {
+            Some(Ok(list)) => list.levels.iter().find(|level| level.name == name).cloned(),
+            _ => None,
+        })
+    });
+    let visible = Memo::new(move |_| {
+        let filter = map.filter.get().trim().to_lowercase();
+        let mode = map.mode_filter.get();
+        let navmesh_only = map.navmesh_only.get();
+        list.with(|l| match l {
+            Some(Ok(list)) => list
+                .levels
+                .iter()
+                .filter(|level| {
+                    (filter.is_empty()
+                        || level.name.to_lowercase().contains(&filter)
+                        || level.title.to_lowercase().contains(&filter))
+                        && (mode.is_empty() || level.modes.iter().any(|m| m.mode.eq_ignore_ascii_case(&mode) && m.sizes.iter().any(|s| s.playable)))
+                        && (!navmesh_only || level.navmesh)
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+    });
+    let total = Memo::new(move |_| listed().map_or(0, |l| l.levels.len()));
+    let mods = Memo::new(move |_| listed().map(|l| l.mods).unwrap_or_default());
+    let modes = Memo::new(move |_| listed().map(|l| l.modes).unwrap_or_default());
+
+    // The picture for the chosen mode and size.
+    let preview = RwSignal::new(None::<String>);
+    let previews = StoredValue::new(0u32);
+    Effect::new(move |_| {
+        let args = PreviewArgs {
+            game_dir: game_dir.get(),
+            mod_name: map.mod_name.get(),
+            level: map.level.get(),
+            mode: map.game_mode.get(),
+            size: map.map_size.get(),
+        };
+        let read = previews.get_value() + 1;
+        previews.set_value(read);
+        if args.level.is_empty() {
+            preview.set(None);
+            return;
+        }
+        spawn_local(async move {
+            let picture = call::<_, Option<String>>("level_preview", &args).await.ok().flatten();
+            if previews.get_value() == read {
+                preview.set(picture);
+            }
+        });
+    });
+
+    let menu = move || start_with.get() == "menu";
+    let choose = move |level: &Level| {
+        map.choose(level);
+        // A level chosen is a direct start: the menu would pick its own.
+        if start_with.get_untracked() == "menu" {
+            start_with.set("view".to_string());
+        }
+    };
+
+    view! {
+        <fieldset class="maps">
+            <legend>"Map"</legend>
+            <p class="row wrap">
+                <label title="+modPath mods/<mod> (left out for bf2142)">
+                    "Mod "
+                    <select on:change=move |ev| map.mod_name.set(event_target_value(&ev))>
+                        {move || {
+                            let mut names = mods.get();
+                            let current = map.mod_name.get();
+                            if !names.contains(&current) {
+                                names.insert(0, current.clone());
+                            }
+                            names
+                                .into_iter()
+                                .map(|name| {
+                                    let chosen = name == current;
+                                    view! { <option value=name.clone() selected=chosen>{name.clone()}</option> }
+                                })
+                                .collect_view()
+                        }}
+                    </select>
+                </label>
+                <input type="search" placeholder="Filter levels" prop:value=move || map.filter.get()
+                    on:input=move |ev| map.filter.set(event_target_value(&ev)) />
+                <select on:change=move |ev| map.mode_filter.set(event_target_value(&ev))
+                    title="Only levels the game can load in this mode">
+                    <option value="" selected=move || map.mode_filter.get().is_empty()>"Any mode"</option>
+                    {move || modes.get().into_iter().map(|m| {
+                        let value = m.mode.clone();
+                        let chosen = move || map.mode_filter.get() == value;
+                        view! { <option value=m.mode.clone() selected=chosen>{format!("{} ({})", m.title, m.mode)}</option> }
+                    }).collect_view()}
+                </select>
+                <label title="Levels with AIPathFinding/Infantry.qtr: the game adds bots only there">
+                    <input type="checkbox" prop:checked=move || map.navmesh_only.get()
+                        on:change=move |ev| map.navmesh_only.set(event_target_checked(&ev)) />
+                    " With a bot navmesh"
+                </label>
+                <button on:click=move |_| reload()>"Reload"</button>
+                <span class="status">
+                    {move || match list.with(|l| l.as_ref().map(Result::is_ok)) {
+                        None => "Reading the levels…".to_string(),
+                        Some(false) => String::new(),
+                        Some(true) => format!("{} of {} levels", visible.with(Vec::len), total.get()),
+                    }}
+                </span>
+            </p>
+            {move || list.with(|l| match l {
+                Some(Err(e)) => Some(view! { <p class="error">"Couldn't list the levels: " {e.clone()}</p> }),
+                _ => None,
+            })}
+            <div class="map-picker">
+                <ul class="levels">
+                    <li class:chosen=move || map.level.get().is_empty() on:click=move |_| map.level.set(String::new())>
+                        <span class="title">"No level"</span>
+                        <small class="description">"the menu, or only the options below"</small>
+                    </li>
+                    {move || visible.get().into_iter().map(|level| {
+                        let name = level.name.clone();
+                        let chosen = move || map.level.get() == name;
+                        let modes = level
+                            .modes
+                            .iter()
+                            .filter(|m| m.sizes.iter().any(|s| s.playable))
+                            .map(|m| m.mode.trim_start_matches("gpm_").to_string())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let problems = level.problems.join("; ");
+                        let unplayable = !level.playable();
+                        let navmesh = level.navmesh;
+                        let has_problems = !problems.is_empty();
+                        let title = level.title.clone();
+                        view! {
+                            <li class:chosen=chosen class:unplayable=unplayable title=problems on:click=move |_| choose(&level)>
+                                <span class="title">{title}</span>
+                                {navmesh.then(|| view! { <span class="badge" title="Has an infantry navmesh (AIPathFinding/Infantry.qtr): bots play here">"nav"</span> })}
+                                {has_problems.then(|| view! { <span class="badge warn">"!"</span> })}
+                                <small class="description">{modes}</small>
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+                <div class="level">{move || level_details(map, selected, list.with(Option::is_none), preview)}</div>
+            </div>
+            <ul class="options map-settings" class:inactive=move || map.level.get().is_empty() || menu()>
+                <li>
+                    <label>
+                        <code>"--bots"</code>
+                        <input type="number" min="0" max="64" prop:value=move || map.bots.get().to_string()
+                            on:input=move |ev| map.bots.set(event_target_value(&ev).trim().parse().unwrap_or(0)) />
+                    </label>
+                    <small class="description">"AI players, alternately PAC and EU (0 for none). Only on levels with a navmesh (nav)."</small>
+                </li>
+                <li>
+                    <label>
+                        <code>"aiSettings.setBotSkill"</code>
+                        <input type="number" min="0" max="1" step="0.05" placeholder="the AI's own"
+                            prop:value=move || map.bot_skill.get()
+                            on:input=move |ev| map.bot_skill.set(event_target_value(&ev)) />
+                    </label>
+                    <small class="description">"Bot skill, 0 to 1, passed as --console \"aiSettings.setBotSkill <n>\" (empty: AI/AIDefault.ai's). Only with bots."</small>
+                </li>
+                <li>
+                    <label>
+                        <code>"--time-limit"</code>
+                        <input type="number" min="0" step="1" placeholder="minutes"
+                            prop:value=move || map.time_limit.get()
+                            on:input=move |ev| map.time_limit.set(event_target_value(&ev)) />
+                    </label>
+                    <small class="description">"The round's time limit in minutes, passed in seconds (empty for none)."</small>
+                </li>
+            </ul>
+            {move || (menu() && !map.level.get().is_empty()).then(|| view! {
+                <p class="hint">"With the menu, the menu picks the map: choose \"Level view\" or \"Only the options below\" to start in this level."</p>
+            })}
+        </fieldset>
+    }
+}
+
+// The chosen level: its modes and sizes to choose from, its problems, the
+// navmesh hint, its picture and briefing.
+fn level_details(map: MapChoice, selected: Memo<Option<Level>>, reading: bool, preview: RwSignal<Option<String>>) -> AnyView {
+    let name = map.level.get();
+    if name.is_empty() {
+        return view! {
+            <p class="muted">"No level: Run opens the menu (or, with \"Only the options below\", whatever they ask for). Pick a level to start straight into it."</p>
+        }
+        .into_any();
+    }
+    let Some(level) = selected.get() else {
+        return view! {
+            <p class:muted=reading class:error=!reading>
+                <code>{name}</code>
+                {if reading { " (reading the levels…)" } else { " isn't one of this mod's levels" }}
+            </p>
+        }
+        .into_any();
+    };
+    let modes = level.modes.clone();
+    let chosen_mode = Memo::new(move |_| {
+        let mode = map.game_mode.get();
+        modes.iter().find(|m| m.mode.eq_ignore_ascii_case(&mode)).cloned()
+    });
+    view! {
+        <h4>{level.title.clone()} " " <small><code>{level.name.clone()}</code></small></h4>
+        {(!level.problems.is_empty()).then(|| view! { <p class="error">{level.problems.join("; ")}</p> })}
+        <p class="choices">
+            <span class="label">"Mode"</span>
+            {level.modes.iter().map(|m| {
+                let mode = m.clone();
+                let id = m.mode.clone();
+                let playable = m.sizes.iter().any(|s| s.playable);
+                let tip = if playable { format!("+gameMode {}", m.mode) } else { format!("{}: server.zip has none of its sizes", m.mode) };
+                view! {
+                    <button class="chip" class:chosen=move || map.game_mode.get().eq_ignore_ascii_case(&id)
+                        class:unplayable=!playable title=tip on:click=move |_| map.choose_mode(&mode)>{m.title.clone()}</button>
+                }
+            }).collect_view()}
+        </p>
+        <p class="choices">
+            <span class="label">"Players"</span>
+            {move || chosen_mode.get().map(|m| m.sizes.iter().map(|s| {
+                let players = s.players;
+                let tip = match (s.playable, s.listed) {
+                    (true, true) => format!("+mapSize {players}"),
+                    (true, false) => format!("+mapSize {players} (in server.zip, not in the .desc)"),
+                    (false, _) => format!("in the .desc, but server.zip has no GameModes/{}/{players}/: the game can't load it", m.mode),
+                };
+                view! {
+                    <button class="chip" class:chosen=move || map.map_size.get() == players
+                        class:unplayable=!s.playable title=tip on:click=move |_| map.map_size.set(players)>{players}</button>
+                }
+            }).collect_view())}
+        </p>
+        {(!level.navmesh).then(|| view! {
+            <p class="hint">"No infantry navmesh (AIPathFinding/Infantry.qtr): the game adds no bots on this level."</p>
+        })}
+        <div class="level-body">
+            {move || preview.get().map(|src| view! { <img class="preview" src=src alt="" /> })}
+            <p class="briefing">{level.description.clone()}</p>
+        </div>
+    }
+    .into_any()
 }
 

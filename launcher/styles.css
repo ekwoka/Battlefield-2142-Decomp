@@ -153,3 +153,149 @@ details.inactive > :not(summary) {
 .picker input[type="text"] {
   flex: 1;
 }
+
+.row.wrap {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+h3.row {
+  gap: 10px;
+}
+
+h3.row button {
+  font-weight: normal;
+}
+
+select,
+input[type="search"],
+input[type="number"] {
+  font: inherit;
+}
+
+input[type="number"] {
+  width: 6em;
+}
+
+/* The map picker: the levels on the left, the chosen one on the right. */
+.map-picker {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 10px;
+  margin: 6px 0;
+}
+
+ul.levels,
+.level {
+  height: 320px;
+  overflow: auto;
+  min-width: 0;
+}
+
+ul.levels {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 4px;
+}
+
+ul.levels li {
+  padding: 3px 8px;
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+}
+
+ul.levels li .description {
+  flex-basis: 100%;
+  font-size: 11px;
+}
+
+ul.levels li:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+ul.levels li.chosen,
+.chip.chosen {
+  background: color-mix(in srgb, Highlight 40%, transparent);
+}
+
+.unplayable {
+  opacity: 0.5;
+}
+
+.badge {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.badge.warn {
+  color: #d55;
+  border-color: #d55;
+}
+
+.level h4 {
+  margin-top: 0;
+}
+
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0;
+}
+
+.choices .label {
+  min-width: 4.5em;
+}
+
+.chip {
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.hint {
+  font-size: 12px;
+  color: #c80;
+  margin: 4px 0;
+}
+
+.level-body {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.level-body .preview {
+  width: 160px;
+  height: 160px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex: none;
+}
+
+.briefing {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+ul.map-settings.inactive {
+  opacity: 0.45;
+}
+
+ul.map-settings li label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
