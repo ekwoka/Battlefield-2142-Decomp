@@ -634,6 +634,9 @@ private:
 	};
 	const AnimatedUVLook& animatedUVLook(const world::ObjectTemplate& objectTemplate) const;
 	mutable std::unordered_map<const world::ObjectTemplate*, AnimatedUVLook> m_animatedUVLooks;
+	// Whether retail blends a template's nodes between ticks (0x0043dc40), read once.
+	bool blendsBetweenTicks(const world::ObjectTemplate& objectTemplate) const;
+	mutable std::unordered_map<const world::ObjectTemplate*, bool> m_blendsBetweenTicks;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
 	// Each object's transform at the last two ticks and as drawn (TickBlend.h).
 	struct ObjectBlend {

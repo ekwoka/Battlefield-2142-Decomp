@@ -1057,7 +1057,7 @@ const LevelRenderer::AnimatedUVLook& LevelRenderer::animatedUVLook(const world::
 // LandingGear; Rotor and Spring don't), a part on a bone (boneIndex,
 // template slot 0xc8, not -1) or a free camera. The others keep their
 // tick's place in their (blended) parent.
-static bool blendsBetweenTicks(const world::ObjectTemplate& t)
+static bool templateBlendsBetweenTicks(const world::ObjectTemplate& t)
 {
 	static const char* const kTypes[] = {"Soldier", "RotationalBundle", "Camera", "Engine", "FloatingBundle", "Wing",
 		"LandingGear", "FreeCamera"};
@@ -1067,6 +1067,17 @@ static bool blendsBetweenTicks(const world::ObjectTemplate& t)
 	}
 	const auto bone = t.settings().find("boneIndex");
 	return bone != t.settings().end() && std::atoi(bone->second.c_str()) >= 0;
+}
+
+// collectParts asks for every child each frame: the type compares and the
+// settings lookup once per template.
+bool LevelRenderer::blendsBetweenTicks(const world::ObjectTemplate& objectTemplate) const
+{
+	const auto known = m_blendsBetweenTicks.find(&objectTemplate);
+	if (known != m_blendsBetweenTicks.end()) {
+		return known->second;
+	}
+	return m_blendsBetweenTicks.emplace(&objectTemplate, templateBlendsBetweenTicks(objectTemplate)).first->second;
 }
 
 // Each part's blend test and the nearest part above it (-1: the object).
