@@ -127,6 +127,7 @@ public:
 		std::array<float, 3> feet {};
 		std::array<float, 3> velocity {};
 		float yaw = 0, aimPitch = 0; // degrees: the local look
+		bool reloading = false;      // our soldier's weapon (GameWorld::remoteSoldierReloading)
 		int stance = 0;
 		bool firing = false; // the fire input held
 		// In a seat: the vehicle's object and the seat (the control

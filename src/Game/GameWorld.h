@@ -387,7 +387,7 @@ public:
 	// reload): the weapon in the remote soldier's hands starts its reload
 	// (the Reload sound, the reload message) unless it reloads already or
 	// its magazine is full.
-	void reloadRemoteSoldier(uint32_t object, int serverRounds);
+	void reloadRemoteSoldier(uint32_t object, int serverRounds, int player = -1); // player: its sound's (ours plays 1P)
 	// A server projectile's ghost on a joined client (a GenericProjectile
 	// with a networkable: the server's FireComp makes it, 0x005f31d0, and
 	// the client's leaves it to the ghost: 0x005f1440): it flies here as
@@ -416,6 +416,11 @@ public:
 	// The ghost gone, dead or in a vehicle: its animation and weapon go.
 	void removeRemoteSoldier(uint32_t object);
 	bool isRemoteSoldier(uint32_t object) const { return m_remoteSoldiers.count(object) != 0; }
+	bool remoteSoldierReloading(uint32_t object) const
+	{
+		const auto it = m_remoteSoldiers.find(object);
+		return it != m_remoteSoldiers.end() && it->second.reloadLeft > 0;
+	}
 	uint32_t remoteSoldierWeapon(uint32_t object) const
 	{
 		const auto it = m_remoteSoldiers.find(object);

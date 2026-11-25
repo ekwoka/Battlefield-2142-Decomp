@@ -169,6 +169,7 @@ bool PlayerCamera::current(Me& me) const
 		me.aimPitch = remote.aimPitch;
 		me.stance = remote.stance;
 		me.firing = remote.firing;
+		me.reloading = remote.reloading;
 		me.vehicle = remote.vehicle;
 		me.seat = remote.seat;
 		return true;

@@ -7324,6 +7324,7 @@ int runGame(Options& options, Session& session)
 				me.aimPitch = remoteLook.pitch;
 				me.stance = remoteLook.stance;
 				me.firing = remoteLook.fire;
+				me.reloading = round.remoteSoldierReloading(soldier->id());
 				// The held weapon: the kit's firearm in the selected slot (the
 				// soldier's mask 0x2000; itemIndex, 3 the primary).
 				if (const net::RemotePlayer* player = world.player(world.localPlayer()); player && player->kitGhost) {
@@ -8046,7 +8047,7 @@ int runGame(Options& options, Session& session)
 				state.rounds = p.fire[0].on ? p.fire[0].rounds : -1;
 				state.fireMode = p.fire[0].on ? p.fire[0].fireMode : -1;
 				if (p.local && prediction.active()) {
-					state.yaw = prediction.yaw();
+					state.yaw = remoteLook.yaw; // the view's (body + twist), where the rounds go
 					state.aimPitch = remoteLook.pitch; // the server's comes a round trip late
 					state.onGround = prediction.onGround();
 					const net::Vec3f v = prediction.velocity();
@@ -8081,14 +8082,14 @@ int runGame(Options& options, Session& session)
 				round.animateRemoteSoldier(found->second, state, 1.0f / 30.0f);
 				animated.insert(found->second);
 				// A reload pressed on the server (mask 0x10000): the weapon in
-				// its hands reloads (0x00590e10's message 10).
-				if (!p.local) {
+				// its hands reloads (0x00590e10's message 10); our own too.
+				{
 					uint32_t& reloads = reloadsSeen.try_emplace(p.id, p.reloads).first->second;
 					if (p.reloads < reloads) {
 						reloads = p.reloads; // a new level's player
 					} else if (p.reloads != reloads) {
 						reloads = p.reloads;
-						round.reloadRemoteSoldier(found->second, p.fire[0].rounds);
+						round.reloadRemoteSoldier(found->second, p.fire[0].rounds, p.id);
 					}
 				}
 				if (options.verbose && !p.local) {

@@ -10718,7 +10718,7 @@ void GameWorld::explodeEffects(const physics::Vec3& at, const ProjectileSettings
 	ambientExplosion(at); // the triggers' event 8 (0x005a6e70)
 }
 
-void GameWorld::reloadRemoteSoldier(uint32_t object, int serverRounds)
+void GameWorld::reloadRemoteSoldier(uint32_t object, int serverRounds, int player)
 {
 	const auto it = m_remoteSoldiers.find(object);
 	if (it == m_remoteSoldiers.end() || it->second.weaponName.empty()) {
@@ -10740,7 +10740,7 @@ void GameWorld::reloadRemoteSoldier(uint32_t object, int serverRounds)
 	const world::Object* soldier = m_objects.find(object);
 	const physics::Vec3 at = soldier ? physics::Vec3 {soldier->position().x, soldier->position().y, soldier->position().z}
 									 : physics::Vec3 {};
-	m_weaponSounds.push_back({WeaponSoundEvent::Reload, -1, object, remote.weaponName, at});
+	m_weaponSounds.push_back({WeaponSoundEvent::Reload, player, object, remote.weaponName, at});
 	if (m_weaponSounds.size() > 256) {
 		m_weaponSounds.erase(m_weaponSounds.begin(), m_weaponSounds.end() - 256);
 	}
