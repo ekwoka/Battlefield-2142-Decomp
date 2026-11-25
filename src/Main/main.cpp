@@ -4444,6 +4444,8 @@ int runGame(Options& options, Session& session)
 		clientOptions.playerName = options.playerName;
 		clientOptions.contentRoot = options.gameDir; // a pure server's content check (Net/ContentCheck.h)
 		clientOptions.modDirectory = options.modPath;
+		// The password the join sends: the menu's (its prompt or +password, joinCommandlineServer), else +password.
+		clientOptions.password = session.menuBindings && session.joinRequested ? session.menuBindings->joinPassword() : options.joinPassword;
 		if (clientOptions.playerName.empty() && session.menuBindings) {
 			clientOptions.playerName = session.menuBindings->soldierName(); // the soldier the menu plays as
 		}

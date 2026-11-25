@@ -452,6 +452,7 @@ public:
 	uint16_t joinedPort() const { return m_joinPort; }
 	// Its map as the server browser listed it (empty level when unknown).
 	const MenuMap& joinedMap() const { return m_joinMap; }
+	const std::string& joinPassword() const { return m_joinPassword; } // Multiplay.setJoinPassword
 	// The outcome of the last handshake probe ("" while none finished).
 	std::string joinOutcome() const;
 	// Waits for the jobs running now (tests).
