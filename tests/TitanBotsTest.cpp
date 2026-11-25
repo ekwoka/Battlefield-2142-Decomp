@@ -1668,3 +1668,76 @@ TEST(Titan_RemasterAAAutoControllerFiresAtTransport)
 		CHECK(fired > 0);
 	}
 }
+
+// A server without bots runs the AI's multiplayer settings in place of
+// AIDefault.ai (BF2142.exe 0x004d3450: AIDefaultMultiplayer.ai, no bots,
+// AutoControllers.ai) and the objects' AI templates, as main does then: the
+// PAC Titan's unmanned AA gun still fires at an enemy transport.
+TEST(Titan_RemasterAAAutoControllerWithoutBots)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	const char* mod = "mods/Project_Remaster_v17_Final";
+	if (!gameDir || !test::runs(mod)) return;
+	TitanLevel level(gameDir, "Highway_Tampa", 48, false, mod);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(level.console, settings);
+	std::string out;
+	CHECK(level.console.run("AI/AIDefaultMultiplayer.ai", {}, out));
+	for (const std::string& script : world::templateScripts(level.files, "Objects/", true)) {
+		if (script.size() > 3 && script.compare(script.size() - 3, 3, ".ai") == 0) {
+			level.console.run(script, {}, out);
+		}
+	}
+	CHECK(settings.maxBots == 0 && settings.autoController("SentryGunAApac") != nullptr);
+	game::BotManager bots(*level.world, settings);
+	level.afterTick = [&] { bots.update(1 / 30.0f); };
+	level.world->startRound();
+	level.run(0.5f);
+	const uint32_t titan = level.world->titanOf(1);
+	const auto seats = level.world->vehicleSeats(titan);
+	int aa = -1;
+	for (size_t i = 0; i < seats.size() && aa < 0; ++i) {
+		aa = seats[i].name.find("aacannon") != std::string::npos ? static_cast<int>(i) : -1;
+	}
+	physics::Vec3 eye;
+	physics::Mat3 hull;
+	float yaw = 0, pitch = 0;
+	CHECK(aa >= 0 && level.world->gunFrame(titan, aa, eye, hull) && level.world->gunAim(titan, aa, yaw, pitch));
+	if (aa < 0) return;
+	const float up = 15 * 3.14159265f / 180, round = (yaw + 40) * 3.14159265f / 180;
+	const physics::Vec3 at = eye + hull.transform({std::sin(round) * std::cos(up), std::sin(up), std::cos(round) * std::cos(up)}) * 300.0f;
+	world::Object* transport = level.objects.create(level.templates.find("eu_at"), {at.x, at.y, at.z});
+	CHECK(transport != nullptr);
+	if (!transport) return;
+	transport->setTeam(2);
+	const uint32_t transportId = transport->id();
+	level.run(2 / 30.0f);
+	level.world->setHitPoints(transportId, 1e9f);
+	const int pilot = level.world->addPlayer("Pilot", 2, false);
+	CHECK(level.world->spawnSoldier(pilot));
+	physics::Vec3 entry;
+	CHECK(level.world->entryPoint(transportId, entry));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(pilot, info);
+	level.world->setSoldierPosition(info.soldier, {entry.x, entry.y - 1.0f, entry.z});
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(pilot, use);
+	level.run(1 / 30.0f);
+	level.world->setInput(pilot, {});
+	CHECK(level.world->playerInfo(pilot, info) && info.vehicle == transportId);
+	std::set<uint32_t> rounds;
+	level.afterTick = [&] {
+		bots.update(1 / 30.0f);
+		level.world->setBodyVelocity(transportId, {});
+		for (const auto& p : level.world->projectiles()) {
+			if (p.shooter == titan && p.player == -1 && physics::lengthSquared(p.origin - eye) < 8.0f * 8.0f) rounds.insert(p.serial);
+		}
+	};
+	level.run(8);
+	std::fprintf(stderr, "  no bots: %zu players, %zu AA rounds at the transport\n", level.world->playerList().size(), rounds.size());
+	CHECK(level.world->playerList().size() == 1); // the pilot alone: no bot came
+	CHECK(!rounds.empty());
+}
