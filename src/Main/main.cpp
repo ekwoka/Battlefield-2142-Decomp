@@ -160,7 +160,8 @@ struct Options {
 	bool viewAsked = false; // --view given: keep the window even with --simulate
 	std::string screenshot;
 	std::string camera;
-	bool sound = false;          // create the audio engine (on with --view)
+	bool sound = false;          // create the audio engine (on with a window)
+	bool noSound = false;        // --nosound: no audio engine, even with a window
 	std::string playSound;       // play a named sound after start-up
 	std::vector<std::string> spawns; // "<template>@x/y/z[/yaw]" objects to add for viewing
 	std::string animation;       // .baf played by skinned objects in the viewer
@@ -277,7 +278,7 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.viewAsked = true;
 			options.sound = true;
 		} else if (arg == "--nosound") {
-			options.sound = false;
+			options.noSound = true;
 		} else if (arg == "--sound") {
 			options.sound = true; // the audio engine without a window (with --simulate or --screenshot)
 		} else if (arg == "--play-sound" && hasValue) {
@@ -490,6 +491,14 @@ bool parseOptions(int argc, char** argv, Options& options)
 		// else asked for the viewer (--play, --connect, --drive): only --view
 		// opens a window with it.
 		options.view = false;
+	}
+	// Every window has sound, not only --view's: --menu, --play, --connect and
+	// --demo open one too (run-windows.cmd passes no --view).
+	if (options.view) {
+		options.sound = true;
+	}
+	if (options.noSound) {
+		options.sound = false;
 	}
 	if (options.gameDir.empty() && options.rcon.empty()) {
 		std::fprintf(stderr, "usage: bf2142 --game <BF2142 install dir> [--api symbols/BF2142.exe.console.csv]\n");
