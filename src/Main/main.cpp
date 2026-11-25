@@ -10446,7 +10446,8 @@ int runGame(Options& options, Session& session)
 				}
 				return shown->frame();
 			};
-			if (menu.loaded() && options.playTeam == 0) {
+			// A joined game's soldier is the server's (playTeam is 0 there).
+			if (menu.loaded() && options.playTeam == 0 && !session.client) {
 				sources.overlay = nullptr; // no soldier: no HUD under the menu
 			}
 		}
@@ -10618,7 +10619,7 @@ int runGame(Options& options, Session& session)
 					return joinPending || (showMenu && menu.loaded()) || endOfRound.loaded();
 				};
 			}
-			if (startedGame) {
+			if (startedGame || (session.client && menu.loaded())) {
 				viewer.onEscape = [&showMenu, &joinPending] { if (joinPending) return; if (g_deploymentOpen) g_deploymentOpen = false; else showMenu = !showMenu; };
 			}
 			viewer.menuCursor = [&session, &showMenu] {
