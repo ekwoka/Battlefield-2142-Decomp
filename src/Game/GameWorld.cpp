@@ -5389,6 +5389,20 @@ int GameWorld::playerOf(uint32_t object) const
 	return -1;
 }
 
+bool GameWorld::isCloakedObject(uint32_t object) const
+{
+	if (object == 0) {
+		return false;
+	}
+	for (const auto& player : m_players) {
+		if (player->alive && player->cloaked
+			&& (player->object == object || player->weaponObject == object || player->kitObject == object)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void GameWorld::restartPlayers(float spawnIn)
 {
 	for (const auto& owned : m_players) {
@@ -11713,9 +11727,10 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 		const bool camouflage = std::find(components.begin(), components.end(), "CamouflageAmmoComp") != components.end();
 		if (camouflage) {
 			const bool on = input.fire && player.weapon && !player.weapon->overheated();
+			const bool ready = player.weapon && !player.weapon->readying();
 			player.weapon->tick(seconds, on);
 			const bool was = player.cloaked;
-			player.cloaked = on && !player.weapon->overheated();
+			player.cloaked = on && ready && !player.weapon->overheated();
 			if (was != player.cloaked) {
 				// Toggled: reported to each enemy squad leader's squad
 				// (0x005d92c0, type 2).
@@ -11725,6 +11740,13 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 					}
 				}
 			}
+			if (player.weapon && player.weapon->fireSoundThisTick()) {
+				if (WeaponSoundEvent* e = weaponSound(WeaponSoundEvent::Fire, player, player.object, player.weaponTemplate,
+						player.body.position + physics::Vec3 {0, 0.6f, 0})) {
+					e->fireHeld = player.weapon->fireSoundHeld();
+				}
+			}
+			player.triggerWas = input.fire;
 			object->setHidden(player.cloaked);
 			return; // no firing anything else while it is in hand
 		}

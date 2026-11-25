@@ -545,7 +545,7 @@ void LevelRenderer::renderEnhancedPrepass(SDL_GPUCommandBuffer* commands, const 
 		}
 		SDL_EndGPURenderPass(pass);
 
-		if (m_hasFirstPerson && m_sources) {
+		if (m_hasFirstPerson && !m_firstPerson.cloaked && m_sources) {
 			const FirstPersonScene& scene = m_firstPerson;
 			const Mat4 projection = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
 			color.load_op = SDL_GPU_LOADOP_LOAD;

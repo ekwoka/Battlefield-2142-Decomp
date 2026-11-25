@@ -736,6 +736,8 @@ public:
 	std::vector<TakeableChange> takeTakeableChanges() { return std::exchange(m_takeable, {}); }
 	// The player whose soldier (or vehicle) an object is, -1 for none.
 	int playerOf(uint32_t object) const;
+	// True when the object is a cloaked soldier or their held weapon / worn kit.
+	bool isCloakedObject(uint32_t object) const;
 	// An effect event N (0..9) of a player's held weapon's animation, as
 	// its animation system fires it (see startEffectsOn).
 	void weaponEffectEvent(int player, int effect);

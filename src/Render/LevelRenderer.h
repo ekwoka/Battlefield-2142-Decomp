@@ -130,6 +130,7 @@ struct FirstPersonScene {
 	float farPlane = 15.0f;
 	std::vector<FirstPersonModel> models;
 	bool weaponZoomed = false;
+	bool cloaked = false;
 	// Effects of the first-person models (the muzzle flash), drawn in the
 	// same pass; may be null.
 	const effects::EffectManager* effects = nullptr;
@@ -866,9 +867,11 @@ private:
 	bool postEnabled() const;
 	void ensurePostTargets(uint32_t width, uint32_t height);
 	void loadPostTextures(const LevelSources& sources);
-	// Draws the cloaked meshes into the mask (the world's depth loaded;
+	// Draws the cloaked meshes into the mask (third-person against the world's
+	// depth, first-person with its own cleared depth and projection;
 	// multisampled, into m_multisampleCamo resolved to the mask).
-	void drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* depth, const Mat4& viewProjection, float seconds);
+	void drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* depth, const Mat4& viewProjection, float seconds,
+		bool firstPerson, const Camera& camera, float aspect);
 
 	// The antialiasing (VideoSettings.setAntialiasing, GpuContext::
 	// setWorldSamples): with more than one sample the world, shimmer,

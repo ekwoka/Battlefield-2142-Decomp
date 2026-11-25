@@ -743,62 +743,123 @@ void LevelRenderer::fullscreenPass(SDL_GPUCommandBuffer* commands, SDL_GPUTextur
 }
 
 void LevelRenderer::drawCamouflage(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* depthTexture,
-	const Mat4& viewProjection, float seconds)
+	const Mat4& viewProjection, float seconds, bool firstPerson, const Camera& camera, float aspect)
 {
 	if (!m_camoMask) {
 		m_camoMask = m_gpu.createColorTexture(m_sceneSize[0], m_sceneSize[1]);
 	}
-	SDL_GPUColorTargetInfo colorTarget {};
-	colorTarget.texture = m_camoMask;
-	colorTarget.clear_color = {0, 0, 0, 0};
-	colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-	colorTarget.store_op = SDL_GPU_STOREOP_STORE;
-	if (m_gpu.worldSamples() > 1 && !m_multisampleCamo) {
+	const bool msaa = m_gpu.worldSamples() > 1;
+	if (msaa && !m_multisampleCamo) {
 		m_multisampleCamo = m_gpu.createMultisampleTarget(m_multisampleSize[0], m_multisampleSize[1], false);
 	}
-	if (m_gpu.worldSamples() > 1) {
-		if (!m_multisampleCamo) {
-			return;
-		}
-		// Antialiased: tested against the multisampled depth (SDL GPU
-		// resolves no depth), drawn at its sample count and resolved.
-		colorTarget.texture = m_multisampleCamo;
-		colorTarget.resolve_texture = m_camoMask;
-		colorTarget.store_op = SDL_GPU_STOREOP_RESOLVE;
+	if (msaa && !m_multisampleCamo) {
+		return;
 	}
-	SDL_GPUDepthStencilTargetInfo depth {};
-	depth.texture = depthTexture;
-	depth.load_op = SDL_GPU_LOADOP_LOAD;
-	depth.store_op = SDL_GPU_STOREOP_STORE;
-	depth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
-	depth.stencil_store_op = SDL_GPU_STOREOP_STORE;
-	SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depth);
-	SDL_BindGPUGraphicsPipeline(pass, m_gpu.camoPipeline());
-	for (const DrawItem& item : m_cloakedList) {
-		const Instance& instance = *item.instance;
-		const GpuMesh& gpuMesh = *item.mesh;
-		SDL_GPUBufferBinding vertexBinding {gpuMesh.vertices, 0};
-		SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
-		SDL_GPUBufferBinding indexBinding {gpuMesh.indices, 0};
-		SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-		TransformUniforms transforms {instance.world * viewProjection, instance.world, {1, 1, 0, 0}, {}};
-		for (size_t i = 0; i < instance.parts.size() && i < static_cast<size_t>(kMaxMeshParts); ++i) {
-			transforms.parts[i] = instance.parts[i];
+	const bool worldCloaked = !m_cloakedList.empty();
+	if (worldCloaked) {
+		SDL_GPUColorTargetInfo colorTarget {};
+		colorTarget.texture = msaa ? m_multisampleCamo : m_camoMask;
+		colorTarget.clear_color = {0, 0, 0, 0};
+		colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+		if (msaa && !firstPerson) {
+			// Antialiased: tested against the multisampled depth (SDL GPU
+			// resolves no depth), drawn at its sample count and resolved.
+			colorTarget.resolve_texture = m_camoMask;
+			colorTarget.store_op = SDL_GPU_STOREOP_RESOLVE;
+		} else {
+			colorTarget.store_op = SDL_GPU_STOREOP_STORE;
 		}
-		pushTransforms(commands, transforms);
-		const std::vector<anim::Matrix>* pose = gpuMesh.skinned ? &poseFor(instance, seconds) : nullptr;
-		for (const Submesh& submesh : gpuMesh.submeshes) {
-			if (gpuMesh.skinned) {
-				if (submesh.rig < 0 || pose->empty()) {
+		SDL_GPUDepthStencilTargetInfo depth {};
+		depth.texture = depthTexture;
+		depth.load_op = SDL_GPU_LOADOP_LOAD;
+		depth.store_op = SDL_GPU_STOREOP_STORE;
+		depth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
+		depth.stencil_store_op = SDL_GPU_STOREOP_STORE;
+		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depth);
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.camoPipeline());
+		for (const DrawItem& item : m_cloakedList) {
+			const Instance& instance = *item.instance;
+			const GpuMesh& gpuMesh = *item.mesh;
+			SDL_GPUBufferBinding vertexBinding {gpuMesh.vertices, 0};
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			SDL_GPUBufferBinding indexBinding {gpuMesh.indices, 0};
+			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+			TransformUniforms transforms {instance.world * viewProjection, instance.world, {1, 1, 0, 0}, {}};
+			for (size_t i = 0; i < instance.parts.size() && i < static_cast<size_t>(kMaxMeshParts); ++i) {
+				transforms.parts[i] = instance.parts[i];
+			}
+			pushTransforms(commands, transforms);
+			const std::vector<anim::Matrix>* pose = gpuMesh.skinned ? &poseFor(instance, seconds) : nullptr;
+			for (const Submesh& submesh : gpuMesh.submeshes) {
+				if (gpuMesh.skinned) {
+					if (submesh.rig < 0 || pose->empty()) {
+						continue;
+					}
+					skinPalette(gpuMesh, submesh, *pose, transforms);
+					pushTransforms(commands, transforms);
+				}
+				SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
+			}
+		}
+		SDL_EndGPURenderPass(pass);
+	}
+	// First-person arms and held device under active camouflage: drawn into the
+	// same camouflage mask with the first-person projection and a cleared depth
+	// buffer (retail RaShaderSMActiveCamo / RaShaderBMActiveCammo write only to
+	// the alpha mask so post-production refracts the scene behind them).
+	if (firstPerson && m_sources) {
+		SDL_GPUColorTargetInfo colorTarget {};
+		colorTarget.texture = msaa ? m_multisampleCamo : m_camoMask;
+		colorTarget.clear_color = {0, 0, 0, 0};
+		colorTarget.load_op = worldCloaked ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+		if (msaa) {
+			colorTarget.resolve_texture = m_camoMask;
+			colorTarget.store_op = SDL_GPU_STOREOP_RESOLVE;
+		} else {
+			colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+		}
+		SDL_GPUDepthStencilTargetInfo depth {};
+		depth.texture = depthTexture;
+		depth.clear_depth = 1.0f;
+		depth.load_op = SDL_GPU_LOADOP_CLEAR;
+		depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+		depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+		depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+		SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colorTarget, 1, &depth);
+		SDL_BindGPUGraphicsPipeline(pass, m_gpu.camoPipeline());
+		const FirstPersonScene& scene = m_firstPerson;
+		const Mat4 baseVp = camera.view() * Mat4::perspective(scene.fovY, aspect, scene.nearPlane, scene.farPlane);
+		const Mat4 fpViewProjection = m_enh.jittered ? baseVp * m_enh.jitter : baseVp;
+		for (const FirstPersonModel& model : scene.models) {
+			const GpuMesh* gpuMesh = mesh(*m_sources, model.geometry, model.geometryIndex, model.lod);
+			if (!gpuMesh) {
+				continue;
+			}
+			SDL_GPUBufferBinding vertexBinding {gpuMesh->vertices, 0};
+			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+			SDL_GPUBufferBinding indexBinding {gpuMesh->indices, 0};
+			SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+			TransformUniforms transforms {model.world * fpViewProjection, model.world, {1, 1, 0, 0}, {}};
+			for (size_t i = 0; i < model.parts.size() && i < static_cast<size_t>(kMaxMeshParts); ++i) {
+				transforms.parts[i] = model.parts[i];
+			}
+			pushTransforms(commands, transforms);
+			for (const Submesh& submesh : gpuMesh->submeshes) {
+				if (scene.weaponZoomed && submesh.skadiReticle) {
 					continue;
 				}
-				skinPalette(gpuMesh, submesh, *pose, transforms);
-				pushTransforms(commands, transforms);
+				if (gpuMesh->skinned) {
+					if (submesh.rig < 0 || model.pose.empty()) {
+						continue;
+					}
+					skinPalette(*gpuMesh, submesh, model.pose, transforms);
+					pushTransforms(commands, transforms);
+				}
+				SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 			}
-			SDL_DrawGPUIndexedPrimitives(pass, submesh.indexCount, 1, submesh.firstIndex, submesh.vertexOffset, 0);
 		}
+		SDL_EndGPURenderPass(pass);
 	}
-	SDL_EndGPURenderPass(pass);
 }
 
 PostUniforms LevelRenderer::preparePost(SDL_GPUCommandBuffer* commands, bool cloaked)

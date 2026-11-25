@@ -4670,15 +4670,18 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	m_enh.aoBound = m_enh.ssao; // the world's opaque draws take the AO
 	// The heat shimmer reads a copy of the scene: the world pass ends before it.
 	const bool shimmer = post && m_sceneColor && !m_shimmerGroups.empty() && m_gpu.shimmerPipeline();
-	if (!m_cloakedList.empty() || shimmer) {
+	const bool cloakedWorld = post && m_sceneColor && !m_cloakedList.empty();
+	const bool cloakedFirstPerson = post && m_sceneColor && m_hasFirstPerson && m_firstPerson.cloaked;
+	const bool cloaked = cloakedWorld || cloakedFirstPerson;
+	const bool drawFirstPersonColor = m_hasFirstPerson && !cloakedFirstPerson;
+	if (cloakedWorld || shimmer) {
 		depthTarget.store_op = SDL_GPU_STOREOP_STORE; // the camouflage mask tests against it
 		depthTarget.stencil_store_op = SDL_GPU_STOREOP_STORE;
 	}
 	// Multisampled, each part of the world pass resolves its colour as it
 	// ends, and keeps its samples too when another part follows (the
-	// shimmer's, the camouflage's or the first person's).
-	const bool cloaked = post && !m_cloakedList.empty();
-	int worldParts = 1 + (shimmer ? 1 : 0) + (cloaked ? 1 : 0) + (m_hasFirstPerson ? 1 : 0);
+	// shimmer's or the first person's).
+	int worldParts = 1 + (shimmer ? 1 : 0) + (drawFirstPersonColor ? 1 : 0);
 	const auto worldStore = [&]() {
 		return !multisampled ? SDL_GPU_STOREOP_STORE
 			: --worldParts > 0 ? SDL_GPU_STOREOP_RESOLVE_AND_STORE
@@ -5392,22 +5395,19 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &keepDepth);
 		drawShimmer(commands, pass, viewProjection, camera, target.width, target.height);
 	}
-	// The cloaked soldiers' mask, tested against the world's depth.
+	// The cloaked soldiers' and/or cloaked first-person view's mask.
 	if (cloaked) {
 		SDL_EndGPURenderPass(pass);
-		drawCamouflage(commands, depthTarget.texture, viewProjection, seconds);
-		SDL_GPUColorTargetInfo keepColor = colorTarget;
-		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
-		keepColor.store_op = worldStore();
-		SDL_GPUDepthStencilTargetInfo keepDepth = depthTarget;
-		keepDepth.load_op = SDL_GPU_LOADOP_LOAD;
-		keepDepth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
-		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &keepDepth);
+		pass = nullptr;
+		drawCamouflage(commands, depthTarget.texture, viewProjection, seconds, cloakedFirstPerson, camera, aspect);
 	}
 	// The first-person pass: the world's depth cleared, the weapon and arms
-	// drawn with their own projection.
-	if (m_hasFirstPerson) {
-		SDL_EndGPURenderPass(pass);
+	// drawn with their own projection (skipped when drawn into the camo mask).
+	if (drawFirstPersonColor) {
+		if (pass) {
+			SDL_EndGPURenderPass(pass);
+			pass = nullptr;
+		}
 		SDL_GPUColorTargetInfo keepColor = colorTarget;
 		keepColor.load_op = SDL_GPU_LOADOP_LOAD;
 		keepColor.store_op = worldStore();
@@ -5415,12 +5415,15 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 		clearDepth.store_op = SDL_GPU_STOREOP_DONT_CARE;
 		clearDepth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 		pass = SDL_BeginGPURenderPass(commands, &keepColor, 1, &clearDepth);
-		drawFirstPerson(commands, pass, camera, static_cast<float>(target.width) / target.height, lights);
+		drawFirstPerson(commands, pass, camera, aspect, lights);
 	}
 	// The post-production into the target (renderer.drawPostProduction),
 	// the HUD and menu over it.
 	if (post && m_sceneColor) {
-		SDL_EndGPURenderPass(pass);
+		if (pass) {
+			SDL_EndGPURenderPass(pass);
+			pass = nullptr;
+		}
 		m_postSource = m_sceneColor;
 		if (m_enh.taa) {
 			resolveTaa(commands); // m_postSource: the resolve

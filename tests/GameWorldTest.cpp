@@ -3191,6 +3191,84 @@ TEST(GameWorld_ActiveCamouflage)
 	CHECK(!me.cloaked && !range.objects.find(me.soldier)->hidden());
 }
 
+TEST(GameWorld_ActiveCamouflageSoundAndCloakedObjects)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	world::ObjectTemplate* camo = range.templates.create("GenericFireArm", "unl_active_camo");
+	camo->settings()["itemIndex"] = "5";
+	camo->settings()["ammo.magSize"] = "-1";
+	camo->settings()["fire.addFireRate"] = "2";
+	camo->settings()["delayToUse"] = "0.2";
+	camo->settings()["heatAddWhenFire"] = "0.02";
+	camo->settings()["coolDownPerSec"] = "0.08";
+	camo->settings()["overheatPenalty"] = "1.5";
+	camo->components().push_back("CamouflageAmmoComp");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"unl_active_camo", {}, {}});
+	CHECK(range.world->spawnPlayer(2) != nullptr);
+
+	game::SoldierInput input;
+	input.selectItem = 5;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	CHECK(range.objects.find(range.world->playerWeaponObject())->objectTemplate()->name() == "unl_active_camo");
+	(void)range.world->takeWeaponSounds(); // drain deploy sound
+
+	// Hold fire through the remaining 5 ticks of the 0.2 s (6 tick) deploy delay:
+	// no premature cloak or fire sound (1 tick elapsed on the select tick).
+	input = {};
+	input.fire = true;
+	int fireSoundsDuringDelay = 0;
+	for (int i = 0; i < 5; ++i) {
+		range.world->setPlayerInput(input);
+		range.world->tick(1 / 30.0f);
+		for (const game::GameWorld::WeaponSoundEvent& e : range.world->takeWeaponSounds()) {
+			if (e.kind == game::GameWorld::WeaponSoundEvent::Fire) {
+				++fireSoundsDuringDelay;
+			}
+		}
+	}
+	game::GameWorld::PlayerInfo me;
+	range.world->playerInfo(range.world->localPlayer(), me);
+	CHECK(fireSoundsDuringDelay == 0);
+	CHECK(!me.cloaked);
+
+	// Next tick: cloak engages and emits WeaponSoundEvent::Fire for active camo.
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	const auto events = range.world->takeWeaponSounds();
+	int fireSounds = 0;
+	for (const game::GameWorld::WeaponSoundEvent& e : events) {
+		if (e.kind == game::GameWorld::WeaponSoundEvent::Fire && e.weapon == "unl_active_camo" && e.object == me.soldier) {
+			++fireSounds;
+		}
+	}
+	range.world->playerInfo(range.world->localPlayer(), me);
+	CHECK(fireSounds == 1);
+	CHECK(me.cloaked);
+	CHECK(range.world->isCloakedObject(me.soldier));
+	CHECK(me.weapon != 0 && range.world->isCloakedObject(me.weapon));
+
+	// Releasing fire uncloaks immediately and stops emitting fire sound events.
+	input.fire = false;
+	range.world->setPlayerInput(input);
+	range.world->tick(1 / 30.0f);
+	int fireSoundsAfterRelease = 0;
+	for (const game::GameWorld::WeaponSoundEvent& e : range.world->takeWeaponSounds()) {
+		if (e.kind == game::GameWorld::WeaponSoundEvent::Fire) {
+			++fireSoundsAfterRelease;
+		}
+	}
+	range.world->playerInfo(range.world->localPlayer(), me);
+	CHECK(!me.cloaked);
+	CHECK(!range.world->isCloakedObject(me.soldier));
+	CHECK(!range.world->isCloakedObject(me.weapon));
+	CHECK(fireSoundsAfterRelease == 0);
+}
+
 TEST(GameWorld_GuidedMissileFollowsTheAim)
 {
 	// eu_av_missile: seek.targetType TTUnique, follow.maxYaw 0.45. Fired

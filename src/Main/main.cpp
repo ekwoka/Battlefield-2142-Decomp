@@ -9724,11 +9724,10 @@ int runGame(Options& options, Session& session)
 			view.height = g_overheadHeight;
 			return true;
 		};
-		// Cloaked soldiers (GameWorld hides them) drawn as active camouflage.
+		// Cloaked soldiers and their held weapon/kit (GameWorld hides them)
+		// drawn as active camouflage.
 		sources.cloaked = [&round](uint32_t object) {
-			game::GameWorld::PlayerInfo info;
-			const int id = round.playerOf(object);
-			return id >= 0 && round.playerInfo(id, info) && info.cloaked && info.soldier == object;
+			return round.isCloakedObject(object);
 		};
 		// What the post-production follows: the vehicle's EMP, a Titan's core
 		// exploding, and a zoomed vehicle weapon's camera effect
@@ -10520,7 +10519,7 @@ int runGame(Options& options, Session& session)
 			lod = cockpit.lod;
 			return true;
 		};
-		sources.firstPerson = [&playerCamera, &sources](render::FirstPersonScene& scene) {
+		sources.firstPerson = [&playerCamera, &round](render::FirstPersonScene& scene) {
 			const std::vector<PlayerCamera::Model> models = playerCamera.models();
 			if (models.empty()) {
 				return false;
@@ -10541,6 +10540,8 @@ int runGame(Options& options, Session& session)
 			}
 			scene.effects = &playerCamera.effects();
 			scene.weaponZoomed = playerCamera.zoomed();
+			game::GameWorld::PlayerInfo me;
+			scene.cloaked = round.playerInfo(round.localPlayer(), me) && me.alive && !me.vehicle && me.cloaked;
 			// The weapon and hands sit at the tick's eye; drawn through the
 			// blended view with its per-frame look, they are carried along
 			// (LevelRenderer: tickBlendViewAdjustment).
