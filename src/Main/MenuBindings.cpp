@@ -1858,6 +1858,7 @@ void MenuBindings::bindServerSettings()
 		{"ServerSettings.FriendlyFire", Value(sv.soldierFriendlyFire > 0)},
 		{"ServerSettings.AutoBalanceTeam", Value(sv.autoBalanceTeam)},
 		{"ServerSettings.ServerName", Value(sv.serverName)},
+		{"ServerSettings.Password", Value(sv.password)}, // "": not 0, which the masked box shows as "*"
 		{"ServerSettings.GameMode", Value("gpm_sp")},
 		{"GeneralSettings.MaxBots", Value(16)},
 		{"GeneralSettings.BotSkill", Value(0.5)},

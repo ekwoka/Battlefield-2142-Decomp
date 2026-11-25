@@ -157,6 +157,14 @@ std::string NativeList::rowPrefix(Interpreter& vm) const
 	return {};
 }
 
+int NativeList::selectBoxRows() const
+{
+	if (listId.compare(0, 9, "selectBox") != 0 || args.size() < 2) {
+		return -1;
+	}
+	return std::max(0, std::atoi(args[1].c_str()));
+}
+
 int NativeList::visibleRows(Interpreter& vm) const
 {
 	if (!holder) {
@@ -166,6 +174,11 @@ int NativeList::visibleRows(Interpreter& vm) const
 	int count = 0;
 	while (count < 1000 && vm.getMember(Value(holder), prefix + std::to_string(count)).isObject()) {
 		++count;
+	}
+	// The select boxes (0x100653f0's kinds, all built on 0x10065610) show
+	// the rows their arguments' second word gives (+0x1c), not every clip.
+	if (const int shown = selectBoxRows(); shown >= 0) {
+		return std::min(count, shown);
 	}
 	return count;
 }
@@ -598,6 +611,16 @@ void NativeRegistry::install(Interpreter& vm)
 			self->holder = c[0].object();
 			self->listId = c.size() > 1 ? vm.toString(c[1]) : std::string();
 			self->args = c.size() > 2 ? splitSpaces(vm.toString(c[2])) : std::vector<std::string>();
+			// 0x10065610: a select box hides its row clips from that count
+			// up to row11, so the drop-down's unused rows take no clicks.
+			if (const int shown = self->selectBoxRows(); shown >= 0 && self->holder) {
+				for (int i = shown; i < 12; ++i) {
+					const Value row = vm.getMember(Value(self->holder), "row" + std::to_string(i));
+					if (row.isObject()) {
+						vm.setMember(row, "_visible", Value(false));
+					}
+				}
+			}
 			log(vm, std::string(kListObject) + ":" + self->listId, "__constructor__", c.args, true);
 			return Value();
 		},
