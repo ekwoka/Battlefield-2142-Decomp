@@ -5743,3 +5743,269 @@ TEST(Titan_RidersSurviveAMovingDeck)
 		}
 	}
 }
+
+// An enemy soldier on a stationary Titan whose shield is down (the playtest:
+// "splattered" walking about its roof). Every hurt he takes is one of the two
+// retail rules, nothing from the walking itself:
+// - the vehicle bay's forcefield (as_titan_vb_shield, eu_forcefield_big: a
+//   SimpleObject child of the root, no armour, so the outer shield's wreck
+//   at 60 % leaves it standing) has no soldier LOD, so soldiers meet its
+//   vehicle LOD (the loader 0x006e4880 sets the soldier LOD index +0x18 to
+//   the vehicle's +0x14 when missing), every face of which is
+//   force_deathmat 0x29a; its collisionGroups (0x100 PAC, 0x200 EU) let
+//   only its own team through (0x006c3890: the soldier's team 1 against
+//   bit 0x100, 2 against 0x200). The contact is a road kill (0x005a43c0)
+//   whose material 0x29a skips the speed limit: dead at any speed. It is
+//   the wall between the roof and the rear deck;
+// - a drop onto the hull over 10 m/s (0x005a43c0's limit, *0x00a6a794;
+//   the Titan stands still, so not 3), (v - 10) x v x the mass factor
+//   (0x005a2ca0: both nodes mobile, slot 0x164 a class constant, 1 on the
+//   mobile node 0x006a10e0 even asleep, so the Titan's 1e6 over the
+//   soldier's 200, at most 3). With gravity 14.73 the roof-to-deck drop
+//   (6.6 m) meets it at 12-13 m/s: 80-120.
+// No fall height is kept anywhere (retail's damage is the contact's speed
+// only: 0x005a3db0 for the ground, 0x005a43c0 for objects), so nothing a
+// vehicle leaves behind carries over.
+namespace {
+
+struct WalkLog {
+	int deaths = 0, shieldDeaths = 0, falls = 0, crushes = 0, unexplained = 0;
+};
+
+// Walks player `id` about for `seconds`; every hurt is sorted by the
+// fastest the soldier went in the four ticks before it. `craft`: a
+// vehicle parked on the Titan, still settling (awake), which squashes
+// a soldier who walks into a gap under it faster than 3 m/s relative to
+// it and gets stuck there (the solve, 0x006c48c0, compares the heavy
+// mover's point velocity with the soldier's own: his own walk counts).
+void walkAbout(TitanLevel& level, int id, const game::GameWorld::TitanInfo& titan, const physics::Mat3& turn, float seconds,
+	int variant, WalkLog& log, const char* label, uint32_t craft = 0)
+{
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	float hp = info.alive ? level.world->hitPoints(info.soldier) : 0.0f;
+	float recent[4] = {};
+	for (int tick = 0; tick < static_cast<int>(seconds * 30) && info.alive; ++tick) {
+		game::SoldierInput in;
+		const int phase = (tick / 45) % 6;
+		in.throttle = phase == 3 ? -1.0f : phase == 4 ? 0.0f : 1.0f;
+		in.strafe = phase == 1 ? 1.0f : phase == 4 ? -1.0f : 0.0f;
+		in.sprint = phase == 2 || phase == 5;
+		in.turn = (variant % 2 ? 3.0f : -3.0f) * (phase == 2 ? 0.5f : 1.0f);
+		in.jump = tick % 97 == variant % 97;
+		level.world->setInput(id, in);
+		level.world->tick(1 / 30.0f);
+		level.world->playerInfo(id, info);
+		const float now = info.alive ? level.world->hitPoints(info.soldier) : 0.0f;
+		float fast = std::sqrt(physics::lengthSquared(info.velocity));
+		for (const float v : recent) {
+			fast = std::max(fast, v);
+		}
+		recent[tick % 4] = std::sqrt(physics::lengthSquared(info.velocity));
+		const physics::Vec3 at = turn.untransform(info.position - titan.position);
+		if (at.y < -25) {
+			break; // off the Titan, down to the ground
+		}
+		if (now > hp - 0.01f) {
+			hp = now;
+			continue;
+		}
+		const char* kind = "unexplained";
+		physics::Vec3 craftAt, craftVelocity;
+		const bool nearCraft = craft && level.world->bodyMotion(craft, craftAt, craftVelocity) && !level.world->bodyAsleep(craft)
+			&& physics::lengthSquared(craftAt - info.position) < 8 * 8;
+		if (fast >= 9.5f) {
+			++log.falls;
+			kind = "a drop";
+		} else if (!info.alive && nearCraft) {
+			++log.crushes;
+			kind = "squashed under the settling craft";
+		} else if (!info.alive && at.z < -45 && at.y > 8 && at.y < 19) {
+			++log.shieldDeaths;
+			kind = "the vehicle bay shield";
+		} else {
+			++log.unexplained;
+		}
+		std::fprintf(stderr, "    %s: %.0f -> %.0f at %.1f/%.1f/%.1f, up to %.1f m/s: %s\n", label, hp, now, at.x, at.y, at.z, fast, kind);
+		hp = now;
+	}
+	log.deaths += info.alive ? 0 : 1;
+}
+
+} // namespace
+
+TEST(Titan_EnemyWalksOnAStillTitan)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* map : {"Suez_Canal", "Minsk"}) {
+		for (const int titanTeam : {1, 2}) {
+			TitanLevel level(gameDir, map, 48);
+			CHECK(level.loaded && level.titan(titanTeam));
+			if (!level.loaded || !level.titan(titanTeam)) continue;
+			const auto titan = *level.titan(titanTeam);
+			level.world->setHitPoints(titan.object, titan.hitPoints * 0.5f);
+			level.run(1);
+			CHECK(!level.titan(titanTeam)->shield);
+			const world::Object* object = level.objects.find(titan.object);
+			const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+			const int enemy = titanTeam == 1 ? 2 : 1;
+			const auto local = [&](float x, float y, float z) { return titan.position + turn.transform({x, y, z}); };
+			// Set down 1 m over whatever is topmost over a grid across the hull.
+			std::vector<physics::Vec3> spots;
+			for (float z = -60; z <= 60; z += 15) {
+				for (float x = -12; x <= 12; x += 6) {
+					for (float y = 60; y > -20; y -= 0.25f) {
+						if (!level.world->soldierPathClear(enemy, local(x, y + 0.25f, z), local(x, y, z))) {
+							spots.push_back({x, y + 1.0f, z});
+							break;
+						}
+					}
+				}
+			}
+			CHECK(spots.size() > 20);
+			WalkLog log;
+			for (size_t s = 0; s < spots.size(); ++s) {
+				const int id = level.world->addPlayer("Walker", enemy, false);
+				CHECK(level.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo info;
+				level.world->playerInfo(id, info);
+				CHECK(level.world->setSoldierPosition(info.soldier, local(spots[s].x, spots[s].y, spots[s].z)));
+				walkAbout(level, id, titan, turn, 40, static_cast<int>(s), log, map);
+				level.world->removePlayer(id);
+			}
+			std::fprintf(stderr, "  %s, team %d's Titan: %zu walkers, %d died (%d at the vehicle bay shield), %d drops over 10 m/s, %d unexplained\n",
+				map, titanTeam, spots.size(), log.deaths, log.shieldDeaths, log.falls, log.unexplained);
+			CHECK(log.unexplained == 0);
+			CHECK(log.shieldDeaths > 0); // the shield stands with the Titan's down
+		}
+	}
+}
+
+// The playtest's own way there: a gunship or a transport set down on the
+// enemy Titan's roof (its shield down), the pilot gets out (the craft's
+// exit drops him 2-4 m onto the roof) and walks off, between its levels.
+TEST(Titan_PilotLandsOnTheEnemyRoof)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	WalkLog log;
+	int landed = 0;
+	for (const char* map : {"Minsk", "Suez_Canal"}) {
+		for (const char* craftName : {"us_ag", "eu_at"}) {
+			for (int heading = 0; heading < 4; ++heading) {
+				TitanLevel level(dir, map, 48);
+				world::ObjectTemplate* craftT = level.loaded ? level.templates.find(craftName) : nullptr;
+				CHECK(craftT != nullptr);
+				if (!craftT) continue;
+				const auto pac = *level.titan(1);
+				const world::Object* object = level.objects.find(pac.object);
+				const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+				level.world->setHitPoints(pac.object, pac.hitPoints * 0.5f);
+				level.run(0.5f);
+				const physics::Vec3 at = pac.position + turn.transform({0, 22.0f, -35});
+				world::Object* craft = level.objects.create(craftT, {at.x, at.y, at.z}, {object->rotation().x + heading * 90.0f, 0, 0});
+				craft->setTeam(2);
+				const uint32_t craftId = craft->id();
+				level.run(5);
+				if (level.world->hitPoints(craftId) <= 0) {
+					// Wrecked settling on the roof hump (it slides and tips there;
+					// not followed here).
+					std::fprintf(stderr, "  %s %s heading %d: the craft was wrecked settling\n", map, craftName, heading);
+					continue;
+				}
+				const int me = level.world->addPlayer("Me", 2, false);
+				CHECK(level.world->spawnSoldier(me));
+				game::GameWorld::PlayerInfo info;
+				level.world->playerInfo(me, info);
+				const physics::Vec3 rest {craft->position().x, craft->position().y, craft->position().z};
+				level.world->setSoldierPosition(info.soldier, {rest.x + 2.0f, rest.y - 1.0f, rest.z});
+				game::SoldierInput use;
+				use.use = true;
+				level.world->setInput(me, use);
+				level.run(0.1f);
+				level.world->setInput(me, {});
+				level.run(2);
+				level.world->playerInfo(me, info);
+				if (info.vehicle != craftId) {
+					// Wrecked while he got in (it slides and tips on the roof hump).
+					std::fprintf(stderr, "  %s %s heading %d: the craft didn't last (hit points %.0f)\n", map, craftName, heading, level.world->hitPoints(craftId));
+					continue;
+				}
+				level.world->setInput(me, use);
+				level.run(0.1f);
+				level.world->setInput(me, {});
+				level.run(1.5f);
+				level.world->playerInfo(me, info);
+				const physics::Vec3 out = turn.untransform(info.position - pac.position);
+				const float hp = info.alive ? level.world->hitPoints(info.soldier) : 0.0f;
+				std::fprintf(stderr, "  %s %s heading %d: out on the roof at %.1f/%.1f/%.1f, %.0f hit points\n", map, craftName, heading, out.x, out.y, out.z, hp);
+				if (level.world->hitPoints(craftId) <= 0) {
+					std::fprintf(stderr, "    the craft was wrecked with him aboard\n");
+					continue;
+				}
+				// Out alive on the roof; the exit's drop of up to 5 m onto the hull
+				// (soldierExitLocation, 0.5 m up) is a road kill over 10 m/s, x 3.
+				CHECK(info.alive && info.vehicle == 0 && out.y > 15);
+				++landed;
+				char label[64];
+				std::snprintf(label, sizeof label, "%s %s %d", map, craftName, heading);
+				walkAbout(level, me, pac, turn, 30, heading, log, label, craftId);
+			}
+		}
+	}
+	std::fprintf(stderr, "  %d pilots out on the roof: %d died (%d at the vehicle bay shield, %d under the craft), %d drops over 10 m/s, %d unexplained\n",
+		landed, log.deaths, log.shieldDeaths, log.crushes, log.falls, log.unexplained);
+	CHECK(landed >= 10);
+	CHECK(log.unexplained == 0);
+}
+
+// The vehicle bay shield alone: an enemy set down on it, a half metre
+// over its top at the rear of the roof, dies on the touch at a walk's
+// speed with the Titan's shield down; the Titan's own soldier falls
+// through it to the deck below.
+TEST(Titan_VehicleBayShieldOutlastsTheTitansShield)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const int titanTeam : {1, 2}) {
+		TitanLevel level(dir, "Suez_Canal", 48);
+		CHECK(level.loaded && level.titan(titanTeam));
+		if (!level.loaded || !level.titan(titanTeam)) continue;
+		const auto titan = *level.titan(titanTeam);
+		level.world->setHitPoints(titan.object, titan.hitPoints * 0.5f);
+		level.run(1);
+		CHECK(!level.titan(titanTeam)->shield);
+		const world::Object* object = level.objects.find(titan.object);
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+		const auto local = [&](float y) { return titan.position + turn.transform({0, y, -60}); };
+		const int enemy = titanTeam == 1 ? 2 : 1;
+		float top = -1, under = -1; // the topmost face for each team
+		for (float y = 30; y > 0 && (top < 0 || under < 0); y -= 0.1f) {
+			if (top < 0 && !level.world->soldierPathClear(enemy, local(y + 0.1f), local(y))) top = y;
+			if (under < 0 && !level.world->soldierPathClear(titanTeam, local(y + 0.1f), local(y))) under = y;
+		}
+		CHECK(top > 0 && under > 0 && top > under + 3); // the shield over the deck, for the enemy only
+		int enemyId = -1, ownId = -1;
+		for (const int team : {enemy, titanTeam}) {
+			const int id = level.world->addPlayer("Dropped", team, false);
+			CHECK(level.world->spawnSoldier(id));
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(id, info);
+			CHECK(level.world->setSoldierPosition(info.soldier, local((team == enemy ? top : under) + 0.5f)));
+			(team == enemy ? enemyId : ownId) = id;
+		}
+		float fastest = 0;
+		game::GameWorld::PlayerInfo e, o;
+		for (int tick = 0; tick < 60; ++tick) {
+			level.run(1 / 30.0f);
+			level.world->playerInfo(enemyId, e);
+			if (e.alive) fastest = std::max(fastest, std::sqrt(physics::lengthSquared(e.velocity)));
+		}
+		level.world->playerInfo(ownId, o);
+		std::fprintf(stderr, "  team %d's Titan, shield down: its vehicle bay shield's top %.1f over the deck %.1f; the enemy %s (at most %.1f m/s), its own soldier %s, %.0f hit points\n",
+			titanTeam, top, under, e.alive ? "lived" : "died", fastest, o.alive ? "lived" : "died", o.alive ? level.world->hitPoints(o.soldier) : 0.0f);
+		CHECK(!e.alive && fastest < 6);
+		CHECK(o.alive && level.world->hitPoints(o.soldier) == 100);
+	}
+}

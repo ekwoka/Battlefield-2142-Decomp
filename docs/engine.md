@@ -12630,6 +12630,29 @@ friendly fire: a friendly walker's foot kills a teammate at the default
 a major actor wakes from no minor one's mass shares; explosionForceMod 0),
 is never the heavy mover these two need (`Titan_RidersSurviveAMovingDeck`).
 
+**An enemy on a still Titan, shield down.** What hurts him there is retail's
+own: (1) the vehicle bay's forcefield (`as_titan_vb_shield`,
+`eu_forcefield_big`: a SimpleObject child of the root with no armour, so it
+stands after the outer shield's wreck at 60 %) is the wall between the roof
+and the rear deck. Its mesh has no soldier LOD, and the loader
+(`0x006e4880`: index `+0x18` taken from the vehicle's `+0x14` when -1)
+gives soldiers its vehicle LOD, every face `force_deathmat` 0x29a; its
+collisionGroups (256 PAC, 512 EU) let only its own team through
+(`0x006c3890`). The contact goes to the road kill (`0x005a43c0`), where
+0x29a skips the speed limit and its speed term is 1: dead at a walk
+(damageMod(0x29a, Human_body)). (2) A drop onto the hull over 10 m/s
+(`*0x00a6a794`; 3 only when the Titan outruns him) is (v − 10) × v × the
+mass factor (`0x005a2ca0`: both nodes mobile, slot `0x164` a class
+constant, `0x006a10e0` returns 1 on the mobile node classes even asleep;
+1e6 / 200 capped at 3). At gravity 14.73 the roof-to-deck drop (6.6 m)
+lands at 12-13 m/s: 80-120. No fall height is kept anywhere: the damage is
+the contact's speed alone (`0x005a3db0`, `0x005a43c0`), so nothing from a
+vehicle carries over. (3) A craft parked on the roof's hump that hasn't
+settled (awake) squashes a soldier wedged under it while he walks into it
+over 3 m/s: the solve compares the mover's point velocity with the
+soldier's own (`0x006c48c0`, `0x00a84748`). (`Titan_EnemyWalksOnAStillTitan`,
+`Titan_PilotLandsOnTheEnemyRoof`, `Titan_VehicleBayShieldOutlastsTheTitansShield`.)
+
 **The push** (`0x005ee2b0`): a hit's velocity × 2.5 (`*0x00a847b4`) kept
 16 ticks on the soldier (`+0x248`, the tick `+0x254`), which its ragdoll
 starts with instead of its own velocity when it dies by then (`0x005f0a00`):
