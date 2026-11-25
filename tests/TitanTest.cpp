@@ -2141,12 +2141,17 @@ static void walkerCrossesBridge(const char* mod, const char* tmpl, const BridgeC
 struct WalkResult {
 	bool entered = false;
 	float along = 0, lowest = 1e9f, hp = 0, hp0 = 0;
-	float stuckAlong = 1e9f, stuckLateral = 0; // where it stopped for over a second short of the far side
-	world::Vec3 stuckAt;
+	bool stopped = false; // held still for 5 s short of the far side
+	world::Vec3 stoppedAt;
 };
 
 // One walker driven over `bridge` on its lane in an already loaded level; the
-// walker is removed after, so the level serves the whole sweep.
+// walker is removed after, so the level serves the whole sweep. The driver
+// holds the lane (PIYaw, right positive): back towards its line, at most 20
+// degrees off its heading. Open-loop throttle didn't: a few degrees from a
+// bump at the start (the west yard's bc_yard_a, the east road's eu_ag_wreck)
+// carried the walker metres off its lane over the 300 m run, into the
+// towers' legs (x -303 and -187) and the railing posts.
 static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCrossing& bridge, bool sprint)
 {
 	WalkResult r;
@@ -2178,7 +2183,12 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 	r.along = -from;
 	r.hp0 = level.world->hitPoints(walker->id());
 	world::Vec3 window[30] = {};
+	int still = 0;
 	for (int i = 0; i < static_cast<int>(30 * (from + bridge.to) / 5) && r.along < bridge.to; ++i) {
+		const world::Vec3 q = walker->position();
+		const float off = (q.x - bridge.x) * dz - (q.z - bridge.z) * dx - bridge.lateral; // right of the lane
+		const float want = bridge.yaw - std::clamp(off * 10.0f, -20.0f, 20.0f);
+		drive.strafe = std::clamp(-std::remainder(walker->rotation().x - want, 360.0f) * 0.2f, -1.0f, 1.0f);
 		level.world->setInput(player, drive);
 		level.world->tick(1 / 30.0f);
 		const world::Vec3 p = walker->position();
@@ -2186,12 +2196,14 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 		if (std::fabs(r.along) < 15 || bridge.from > 100) {
 			r.lowest = std::min(r.lowest, p.y); // the heightmap is the canal bed far below
 		}
-		// Stopped: under 1 m moved in the last second, short of the far side.
+		// Under 1 m a second, for 5 seconds on end: stopped for good.
 		const world::Vec3 old = window[i % 30];
 		window[i % 30] = p;
-		if (i >= 90 && r.stuckAlong > 1e8f && r.along < bridge.to && std::hypot(p.x - old.x, p.z - old.z) < 1.0f) {
-			r.stuckAlong = r.along;
-			r.stuckAt = p;
+		still = i >= 30 && std::hypot(p.x - old.x, p.z - old.z) < 1.0f ? still + 1 : 0;
+		if (still >= 150) {
+			r.stopped = true;
+			r.stoppedAt = p;
+			break;
 		}
 	}
 	r.hp = level.world->hitPoints(walker->id());
@@ -2208,9 +2220,18 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 // 0x00854170). Lanes within 6 m of the axis; the vanilla mech in vanilla, the
 // Remaster's in Remaster. WALKER_SWEEP=1 logs every lane to 9 m, both mechs,
 // walking and sprinting, and where each stopped.
+//
+// Each lane crosses, or stops against the as_apc_wreck that StaticObjects.con
+// leaves on the big road's west span (-316.95/52.127/-38.817, yaw -138.4; a
+// Mesh with hasCollisionPhysics 1). Its faces there reach y 53.0 to 53.7: over
+// the bottom of the hull's vehicle LOD box (us_heavy_mech carries it 1.9 m
+// under its origin, which stands at 54.1 on the deck), so on lanes 3 to 6 m
+// south of the axis its side faces are a wall for the hull's Basic response,
+// and for the legs' sphere above stepHeight (1.4 of the legs' 2.8). From the
+// east on the lane 6 m south its sloped top faces meet the legs first, under
+// stepHeight, and the walker climbs it.
 TEST(Titan_WalkerSweepsTheSuezBridges)
 {
-	DISABLED("vanilla us_heavy_mech stops on the big road's spans; 2.5 to 8.5 minutes a run (docs/review-backlog.md Q-13)");
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) {
 		return;
@@ -2221,6 +2242,7 @@ TEST(Titan_WalkerSweepsTheSuezBridges)
 	};
 	const Span spans[] = {{65, -36, 90, 47.2f, 55, 40}, {-512, -36, 90, 47.2f, 55, 40}, {-99, -128, 0, 47.2f, 55, 40},
 		{-245, -32, 90, 50.8f, 175, 130}};
+	const world::Vec3 apcWreck {-316.95f, 52.127f, -38.817f};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
@@ -2243,21 +2265,20 @@ TEST(Titan_WalkerSweepsTheSuezBridges)
 							BridgeCrossing b {span.x, span.z, span.yaw + (back ? 180.0f : 0.0f), span.deckY, span.from, span.to, lane};
 							const WalkResult r = walkBridge(level, tmpl, b, sprint);
 							const bool crossed = r.along >= span.to && r.lowest > span.deckY + 2.0f;
-							if (all) {
-								std::fprintf(stderr, "SWEEP %s %s span(%.0f,%.0f) %s lane %+.0f %s: along %.1f lowest %.1f %s", mod ? "rem" : "van",
-									tmpl, span.x, span.z, back ? "back" : "fwd", lane, sprint ? "sprint" : "walk", r.along, r.lowest,
-									crossed ? "CROSSED" : "SHORT");
-								if (r.stuckAlong < 1e8f) {
-									std::fprintf(stderr, " stuck at along %.1f pos %.1f %.1f %.1f", r.stuckAlong, r.stuckAt.x, r.stuckAt.y, r.stuckAt.z);
+							const bool atWreck = !crossed && r.stopped && r.lowest > span.deckY + 2.0f
+								&& std::hypot(r.stoppedAt.x - apcWreck.x, r.stoppedAt.z - apcWreck.z) < 7.0f;
+							if (all || !crossed) {
+								std::fprintf(stderr, "%s %s %s span(%.0f,%.0f) %s lane %+.0f %s: along %.1f lowest %.1f %s", all ? "SWEEP" : " ",
+									mod ? "rem" : "van", tmpl, span.x, span.z, back ? "back" : "fwd", lane, sprint ? "sprint" : "walk", r.along,
+									r.lowest, crossed ? "CROSSED" : atWreck ? "AT-WRECK" : "SHORT");
+								if (r.stopped) {
+									std::fprintf(stderr, " stopped at %.1f %.1f %.1f", r.stoppedAt.x, r.stoppedAt.y, r.stoppedAt.z);
 								}
 								std::fprintf(stderr, "\n");
-							} else {
-								if (!crossed) {
-									std::fprintf(stderr, "  %s %s span(%.0f,%.0f) %s lane %+.0f: along %.1f lowest %.1f stuck at %.1f %.1f %.1f\n",
-										mod ? "rem" : "van", tmpl, span.x, span.z, back ? "back" : "fwd", lane, r.along, r.lowest,
-										r.stuckAt.x, r.stuckAt.y, r.stuckAt.z);
-								}
-								CHECK(crossed);
+							}
+							if (!all) {
+								CHECK(r.entered);
+								CHECK(crossed || atWreck);
 							}
 						}
 					}

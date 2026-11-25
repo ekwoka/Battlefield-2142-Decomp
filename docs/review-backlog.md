@@ -39,7 +39,6 @@ them against HEAD before working on an item.
    Test in the Release build. Use the Debug build (`build/native`, with sanitizers)
    only to re-run a failing test when you need the sanitizers or a debugger.
 
-   `Titan_WalkerSweepsTheSuezBridges` is disabled (Q-13); it reports as skipped.
    The Remaster mod isn't installed here, so its legs of the tests skip.
 
    Run only the tests your change touches, by filter, not the full suite. Run the
@@ -138,7 +137,28 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   drop) the frame's stats on the failed-acquire path; document the variable.
 
 ### Q-13. `Titan_WalkerSweepsTheSuezBridges` fails, and is disabled (medium)
-- **Status:** open
+- **Status:** done (wave 3). The test was wrong, not the walker physics. No
+  lane stopped at the spans' deck or the joint. The vanilla mech stopped
+  against objects that retail's `StaticObjects.con` places on and beside the
+  road, and that collide in retail too (`physicsType Mesh`,
+  `hasCollisionPhysics 1`):
+  - The open-loop throttle drive took a few degrees of heading from a bump at
+    the start: `bc_yard_a` on the west road, `eu_ag_wreck` (−76.3, −24.3) on the
+    east road. Over the 300 m run that put the walker metres off its lane, into
+    the towers' legs (x −303 and −187, z ≈ −20 / −44) or a railing post
+    (x −138.85). The scrape's friction then turned it into the obstacle.
+  - `as_apc_wreck` (−316.95/52.127/−38.817, yaw −138.4) sits on the west span.
+    Its faces reach y 53.0–53.7, above the bottom of the hull's vehicle-LOD box
+    (1.9 m under the origin, 54.1 on the deck). That makes it a wall for the
+    hull's Basic response. For the legs' sphere it's a wall above stepHeight
+    (`us_heavy_mech_MechLegs`: length 2.8, stepHeight 1.4; `0x006cec60`).
+    Lanes 3–6 m south of the axis meet it. Some stop there; others climb its
+    sloped top or scrape past.
+
+  The sweep now holds its lane as a driver would (PIYaw back to the lane's
+  line, at most 20° off). Each lane must cross, or stop within 7 m of that
+  wreck (with the default lanes, fwd +6 walk and back −3 sprint stop there).
+  A lane ends after 5 s stopped. 8 s a run, in the Release build.
 - **Where:** `tests/TitanTest.cpp` (`Titan_WalkerSweepsTheSuezBridges`, its first
   line `DISABLED(...)`)
 - **Problem:** the vanilla `us_heavy_mech` doesn't cross the big road's two
