@@ -7,6 +7,7 @@
 #include "UI/Dfm.h"
 #include "UI/Player/Draw.h"
 #include "UI/Player/Player.h"
+#include "UI/Player/Stage.h"
 #include "UI/Player/Stencil.h"
 
 #include <cctype>
@@ -414,6 +415,38 @@ TEST(SwfPlayer_SyntheticMovie)
 	CHECK(text(player, "w._x") == "300");
 	CHECK(text(player, "w._width") == "100");
 	CHECK(player.dumpDisplayList().find("clip #5 w") != std::string::npos);
+}
+
+// gameswf queues every goto (0x100cf5b0) and, taking the queue (0x100cfa40),
+// goes to its first frame and skips the entries after it equal to it: so
+// frames 1,1,2,2,1 are gone to as 1,2,1. The rewrite drops the repeats as
+// they are queued, and (not in retail) keeps only the last 64 of a script
+// that alternates frames in a loop, still ending on the last one asked for.
+TEST(SwfPlayer_QueuedFramesDropRepeatsAndAreCapped)
+{
+	Player player;
+	CHECK(player.load(testMovie()));
+	auto* box = dynamic_cast<player::Clip*>(player.evaluate("box").asObject().get());
+	CHECK(box != nullptr);
+	if (!box) {
+		return;
+	}
+	CHECK(box->frameCount() == 2 && box->queuedFrames.empty());
+	for (int frame : {0, 0, 1, 1, 0}) {
+		player.queueFrame(*box, frame, false);
+	}
+	CHECK((box->queuedFrames == std::vector<int> {0, 1, 0}));
+	player.applyQueuedFrames(*box);
+	CHECK(box->queuedFrames.empty() && box->frame == 0);
+	// gotoAndStop(i % 2 + 1) for i below 100000.
+	for (int i = 0; i < 100000; ++i) {
+		player.queueFrame(*box, i % 2, false);
+	}
+	CHECK(box->queuedFrames.size() == Player::kMaxQueuedFrames);
+	CHECK(box->queuedFrames.front() == 0 && box->queuedFrames.back() == 1);
+	player.applyQueuedFrames(*box);
+	CHECK(box->queuedFrames.empty() && box->frame == 1);
+	CHECK(text(player, "box._currentframe") == "2");
 }
 
 // Masks cut triangles to a rectangle, interpolating what they carry.

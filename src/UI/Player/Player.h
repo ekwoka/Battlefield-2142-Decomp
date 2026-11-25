@@ -178,7 +178,11 @@ public:
 	void gotoFrame(player::Clip& clip, int frame, bool play);
 	// gotoAndStop/gotoAndPlay's way: plays or stops now, goes to `frame`
 	// when the clip next advances (Clip::queuedFrames).
+	// A repeat of the last frame queued is dropped (as 0x100cfa40 does when
+	// it takes the queue); past kMaxQueuedFrames the oldest is dropped (a
+	// safeguard retail doesn't have).
 	void queueFrame(player::Clip& clip, int frame, bool play);
+	static constexpr size_t kMaxQueuedFrames = 64;
 	void applyQueuedFrames(player::Clip& clip);
 	void enterFrame(player::Clip& clip, int frame, bool runActions);
 	void advanceClip(player::Clip& clip);
