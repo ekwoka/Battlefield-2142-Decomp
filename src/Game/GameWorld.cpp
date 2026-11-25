@@ -11676,9 +11676,10 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 	}
 	SoldierInput& input = player.input;
 	// Alternate fire sets off the soldier's remote charges (C4) when holding
-	// an explosives weapon (or unarmed in tests); primary fire also triggers
-	// when the detonator itself is drawn.
-	const bool canDetonate = !player.weapon || player.weapon->settings().explosives || player.detonatorDrawn;
+	// an explosives / remote-charge weapon (or unarmed in tests); primary fire
+	// also triggers when the detonator itself is drawn.
+	const bool canDetonate = !player.weapon || player.weapon->settings().explosives
+		|| (player.projectile && player.projectile->remote) || player.detonatorDrawn;
 	const bool detonatePressed = (input.altFire && canDetonate) || (input.fire && player.detonatorDrawn);
 	if (detonatePressed) {
 		bool detonated = false;
