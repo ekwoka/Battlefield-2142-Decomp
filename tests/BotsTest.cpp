@@ -4867,6 +4867,55 @@ TEST(Bots_OnTargetWaitsForTheClosestApproach)
 	CHECK(!fired[0] && !fired[1] && !fired[2] && fired[3] && !fired[4]);
 }
 
+// The fire plan's trigger condition (0x100d91d0 with the plan's memos):
+// at the target's distance the gun may sit sqrt(0.2) r over the solution
+// but only sqrt(0.02) r under it (over: sqrt(0.02) r for a sniper); across
+// within r; a vehicle bot at a vehicle within 15 m, or with the explosive
+// bonus, is tested across only.
+TEST(Bots_AimOnTargetIsRetailsGate)
+{
+	using ai::Vec3;
+	const Vec3 solved {0, 0, 1};
+	const auto gun = [](float across, float up) { // metres off at 100 m
+		const Vec3 d {across / 100, up / 100, 1};
+		const float n = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+		return Vec3 {d.x / n, d.y / n, d.z / n};
+	};
+	const Vec3 far {0, 0, 100};
+	ai::AimGate gate;
+	gate.reach = 10;
+	gate.selfSoldier = true;
+	gate.targetSoldier = true;
+	CHECK(ai::aimOnTarget(gate, gun(0, 0), solved, far));
+	CHECK(ai::aimOnTarget(gate, gun(0, 4), solved, far));   // under sqrt(20) over
+	CHECK(!ai::aimOnTarget(gate, gun(0, 5), solved, far));
+	CHECK(ai::aimOnTarget(gate, gun(0, -1.3f), solved, far)); // under sqrt(2) below
+	CHECK(!ai::aimOnTarget(gate, gun(0, -1.6f), solved, far));
+	CHECK(ai::aimOnTarget(gate, gun(9, 0), solved, far));
+	CHECK(!ai::aimOnTarget(gate, gun(11, 0), solved, far));
+	gate.sniper = true;
+	CHECK(!ai::aimOnTarget(gate, gun(0, 2), solved, far));
+	CHECK(ai::aimOnTarget(gate, gun(0, 1.3f), solved, far));
+	// The angle: at 1 m, 0.9 m across passes r = 10 but not atan(0.2).
+	gate = {};
+	gate.reach = 10;
+	gate.selfSoldier = true;
+	CHECK(!ai::aimOnTarget(gate, gun(40, 0), solved, {0, 0, 2}));
+	// A vehicle at a vehicle within 15 m: across only.
+	gate.selfSoldier = false;
+	CHECK(ai::aimOnTarget(gate, gun(40, -60), solved, {0, 0, 10}));
+	CHECK(!ai::aimOnTarget(gate, gun(40, -60), solved, {0, 0, 20}));
+	CHECK(!ai::aimOnTarget(gate, gun(40, -60), solved, {0, 6, 10}));
+	// A vehicle's explosive bonus at a soldier: across only, within 1 m.
+	gate.reach = 1;
+	gate.targetSoldier = true;
+	gate.explosiveBonus = true;
+	CHECK(ai::aimOnTarget(gate, gun(0.5f, -5), solved, far));
+	CHECK(!ai::aimOnTarget(gate, gun(1.5f, 0), solved, far));
+	gate.selfSoldier = true; // a soldier's bonus doesn't loosen it
+	CHECK(!ai::aimOnTarget(gate, gun(0.5f, -5), solved, far));
+}
+
 // The bail_out radio in BBChange (0x1006c520 -> 0x100a5990): a driver
 // that takes the way out with its vehicle at or under the bot manager's
 // floor + 0.1 (+0xdc 0.3, slot 0x68: 0.4) says bail_out (type 0) on the

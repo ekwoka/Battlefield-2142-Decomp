@@ -284,4 +284,21 @@ bool OnTargetTest::test(bool solved, const LeadSolver& solver, const Vec3& direc
 	return false;
 }
 
+bool aimOnTarget(const AimGate& gate, const Vec3& gun, const Vec3& solved, const Vec3& toTarget)
+{
+	const float distance = std::sqrt(dot(toTarget, toTarget));
+	const bool closeVehicles = std::fabs(toTarget.y) < 5 && !gate.targetSoldier && !gate.selfSoldier && distance < 15;
+	const bool acrossOnly = closeVehicles || (!gate.selfSoldier && gate.explosiveBonus);
+	const float reach2 = std::max(gate.reach * gate.reach, 0.01f);
+	if (!gate.closeCombat && !acrossOnly
+		&& !(std::acos(std::clamp(dot(gun, solved), -1.0f, 1.0f)) < std::atan(0.02f * std::max(gate.reach, 0.1f)))) {
+		return false;
+	}
+	const Vec3 miss = (gun - solved) * distance;
+	const float up = miss.y * std::fabs(miss.y); // signed: the gun over the solution
+	const float below = 0.02f * reach2;
+	const float above = gate.sniper ? below : 0.2f * reach2;
+	return miss.x * miss.x + miss.z * miss.z < reach2 && (acrossOnly || (up < above && -below <= up));
+}
+
 } // namespace dice::hfe::ai

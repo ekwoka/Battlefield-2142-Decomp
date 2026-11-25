@@ -7323,16 +7323,16 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 		cur = hull.transform(cur);
 	}
 	const physics::Vec3 wantDir = (bot.lastAimPoint - eye) * (1 / std::max(std::sqrt(physics::lengthSquared(bot.lastAimPoint - eye)), 0.001f));
-	const float r = weapon.allowedDeviation;
-	const float across = (cur.x - wantDir.x) * (cur.x - wantDir.x) * distance * distance
-		+ (cur.z - wantDir.z) * (cur.z - wantDir.z) * distance * distance;
-	const float dy = (cur.y - wantDir.y) * distance;
-	const float upDown = weapon.type == WeaponAi::Sniper ? 0.02f : 0.2f;
-	bool onTarget = across < std::max(0.01f, r * r) && dy * dy < upDown * r * r && lobReach;
-	if (weapon.type != WeaponAi::CloseCombat) {
-		const float angle = std::acos(std::clamp(physics::dot(cur, wantDir), -1.0f, 1.0f));
-		onTarget = onTarget && angle < std::atan(0.02f * std::max(r, 0.1f));
-	}
+	// 0x100777a0's reach: the weapon's allowedDeviation, 1 m for a vehicle's
+	// explosive weapon at a soldier (the test: ai::aimOnTarget).
+	ai::AimGate gate;
+	gate.reach = vehicleOnSoldier ? 1.0f : weapon.allowedDeviation;
+	gate.sniper = weapon.type == WeaponAi::Sniper;
+	gate.closeCombat = weapon.type == WeaponAi::CloseCombat;
+	gate.selfSoldier = soldierBot;
+	gate.targetSoldier = targetSoldier;
+	gate.explosiveBonus = bot.explosive;
+	const bool onTarget = lobReach && ai::aimOnTarget(gate, toAi(cur), toAi(wantDir), toAi(targetAt - self.position));
 	// Teammates in the line of fire.
 	bool blocked = false;
 	for (const GameWorld::PlayerInfo& mate : m_players) {

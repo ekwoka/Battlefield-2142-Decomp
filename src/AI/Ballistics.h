@@ -97,6 +97,30 @@ private:
 	float m_angleStep = 0.017453292f; // +0x64: a degree to start with
 };
 
+// The fire plan's trigger condition (0x100777a0 builds it through
+// 0x100d9130 with the plan's memos, which the aim statement 0x100dbd10
+// writes: the solve's success, the solved direction and the target point;
+// vtable 0x1011aacc, its test 0x100d91d0). With the solve succeeded, and
+// L the distance from the bot's object to the target point, it holds when
+// the gun's forward lies off the solved direction by less than r across
+// (x and z, x L), by less than sqrt(0.2) r above it (sqrt(0.02) r for a
+// sniper) and sqrt(0.02) r below it, and within atan(0.02 max(r, 0.1))
+// (none for close combat); r squared at least 0.01. A vehicle bot at a
+// vehicle target within 15 m and 5 m of height, or a vehicle bot with the
+// explosive bonus, is tested across only.
+struct AimGate {
+	float reach = 0.5f;          // r: the weapon's allowedDeviation; 10 for an auto
+	                             // controller, 1 for a vehicle's explosive weapon at a soldier
+	bool sniper = false;         // +0x2c: the weapon's type 8
+	bool closeCombat = false;    // +0x2d: type 7
+	bool selfSoldier = false;    // the bot's object a soldier (flag bit 9)
+	bool targetSoldier = false;  // the target a soldier
+	bool explosiveBonus = false; // the bot's +0x249 (vt+0x264): the weapon choice's bonus
+};
+// `gun` and `solved` are unit vectors, `toTarget` the target point less the
+// bot's object's position.
+bool aimOnTarget(const AimGate& gate, const Vec3& gun, const Vec3& solved, const Vec3& toTarget);
+
 // The plan's on-target condition (0x100dcab0; its +8 the target, +0xc and
 // +0x10 the reach squared and the reach, +0x14 the aim, +0x18 the
 // closest-approach flag, +0x1c the best miss so far, +0x20 the angle). The
