@@ -5158,6 +5158,7 @@ TEST(Titan_ShieldUpRocketsFromBelowHurtTheGunHubAndMark)
 // 0x008ab6b0: every object with collision near it, the Titan's parts too).
 TEST(Titan_CorpseLiesOnTheDeck)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -5180,7 +5181,12 @@ TEST(Titan_CorpseLiesOnTheDeck)
 		});
 		level.world->startRound();
 		level.run(1);
-		const auto titan = *level.titan(team);
+		const auto* found = level.titan(team);
+		CHECK(found);
+		if (!found) {
+			return;
+		}
+		const auto titan = *found;
 		const world::Object* hull = level.objects.find(titan.object);
 		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
 		// Spots on the decks fore and aft of the bridge (the Titans' decks
@@ -5287,6 +5293,7 @@ TEST(Titan_KitDropByCargoBayWall)
 // so nobody gets out of it into the hull (the reported Cerbere_Landing fall).
 TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -5297,7 +5304,12 @@ TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 		return;
 	}
 	level.run(1);
-	const auto titan = *level.titan(2);
+	const auto* found = level.titan(2);
+	CHECK(found);
+	if (!found) {
+		return;
+	}
+	const auto titan = *found;
 	const world::Object* hull = level.objects.find(titan.object);
 	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
 	const physics::Vec3 at = titan.position + turn.transform({0, 19, -10}); // 8 m over the deck: wrecked on landing

@@ -409,7 +409,7 @@ bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 		TitanGrid& g = titanGrid(*titan, self.team);
 		const int cell = g.cellAt(m_world.titanToLocal(titan->object, self.position));
 		bool cut = true;
-		for (const GameWorld::TitanPartInfo& part : cell < 0 ? std::vector<GameWorld::TitanPartInfo> {} : m_world.titanParts(titan->team)) {
+		for (const GameWorld::TitanPartInfo& part : cell < 0 ? std::vector<GameWorld::TitanPartInfo> {} : m_world.titanParts(titan->team, titan->object)) {
 			if ((part.kind == GameWorld::TitanPartInfo::Console || part.kind == GameWorld::TitanPartInfo::Core) && !part.wreck
 				&& titanField(g, *titan, self.team, part.id, m_world.titanToLocal(titan->object, part.position))[static_cast<size_t>(cell)] < kInfinity) {
 				cut = false;
