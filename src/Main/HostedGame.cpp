@@ -1579,19 +1579,21 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			// An order: the leader's to his own squad (slot 0x48), the
 			// commander's to a squad (0x4c); on an object, at the object.
 			net::Vec3f at = order.point();
+			uint32_t target = 0;
 			if (order.object) {
 				size_t part = 0;
 				if (const Ghost* g = ghostOf(order.object, part)) {
 					if (const world::Object* o = m_round->objects().find(g->object)) {
 						at = {o->position().x, o->position().y, o->position().z};
+						target = o->id();
 					}
 				}
 			}
 			const auto type = game::GameWorld::orderTypeFromKind(order.kind);
 			if (order.store == 0 && me.squadLeader && me.squad == order.squad) {
-				m_round->issueSquadLeaderOrder(player, type, at.x, at.z);
+				m_round->issueSquadLeaderOrder(player, type, at.x, at.z, target);
 			} else if (order.store == 1 && m_round->commander(me.team) == player) {
-				m_round->issueOrder(me.team, order.squad, type, at.x, at.z, player);
+				m_round->issueOrder(me.team, order.squad, type, at.x, at.z, player, target);
 			}
 			return; // trackOrders sends it on
 		}
@@ -2063,7 +2065,7 @@ void HostedGame::trackOrders()
 			for (int store = 0; store < 2; ++store) {
 				const game::GameWorld::SquadOrder* o = orders[store];
 				if (o && o->type != game::GameWorld::OrderType::None) {
-					now[{team, squad, store}] = {static_cast<int>(o->type), o->position, o->accepted, o->serial};
+					now[{team, squad, store}] = {static_cast<int>(o->type), o->position, o->accepted, o->serial, o->object};
 				}
 			}
 		}
@@ -2072,7 +2074,8 @@ void HostedGame::trackOrders()
 		const auto [team, squad, store] = key;
 		const auto was = m_ordersSent.find(key);
 		const bool moved = was == m_ordersSent.end() || was->second.kind != order.kind
-			|| physics::lengthSquared(was->second.at - order.at) > 1e-4f || was->second.serial != order.serial;
+			|| physics::lengthSquared(was->second.at - order.at) > 1e-4f || was->second.serial != order.serial
+			|| was->second.object != order.object;
 		if (moved) {
 			net::SquadOrderInfo info;
 			info.team = team;
@@ -2082,6 +2085,7 @@ void HostedGame::trackOrders()
 			info.floats[0] = order.at.x;
 			info.floats[1] = order.at.y;
 			info.floats[2] = order.at.z;
+			info.object = order.object ? ghostOfObject(order.object) : 0; // 0x0050dfe0: the ghost in place of the point
 			sendToPlaying(net::makeSquadOrder(info));
 			if (store == 1) {
 				// 0x004c5530's member loop: 2/0x1a, the squad, to each of the

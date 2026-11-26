@@ -910,7 +910,8 @@ void sendRequestForOrder(const std::function<void(int channel, const std::string
 	}
 }
 
-RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tagTeam, float tagX, float tagZ, int team)
+RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tagTeam, float tagX, float tagZ, int team,
+	uint32_t tagObject)
 {
 	RoseOrder order;
 	if (hasTag) {
@@ -918,6 +919,7 @@ RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tag
 		order.valid = true;
 		order.x = tagX;
 		order.z = tagZ;
+		order.object = tagObject;
 		order.kind = tagTeam < 0 ? 4 : (tagTeam == team ? 6 : 5);
 	} else if (hasPoint) {
 		order.valid = true;
@@ -927,12 +929,12 @@ RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tag
 	return order;
 }
 
-bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind, float x, float z)>& place)
+bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind, float x, float z, uint32_t object)>& place)
 {
 	if (!order.valid || !place) {
 		return false;
 	}
-	place(order.kind, order.x, order.z);
+	place(order.kind, order.x, order.z, order.object);
 	return true;
 }
 

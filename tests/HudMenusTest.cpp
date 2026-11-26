@@ -1651,13 +1651,16 @@ TEST(HudMenus_CommanderRoseRows)
 	// tag under the crosshair an attack, a defend of the player's team, a move for no team.
 	int placedKind = -1;
 	float placedX = -1, placedZ = -1;
-	const auto place = [&](int k, float x, float z) { placedKind = k, placedX = x, placedZ = z; };
+	uint32_t placedObject = 0;
+	const auto place = [&](int k, float x, float z, uint32_t o) { placedKind = k, placedX = x, placedZ = z, placedObject = o; };
 	CHECK(!menu::issueSquadRequest(menu::prepareRoseOrder(false, 0, 0, false, 0, 0, 0, 1), place) && placedKind < 0);
 	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, false, 0, 0, 0, 1), place) && placedKind == 4
 		&& placedX == 30 && placedZ == 40);
 	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 2, 70, 80, 1), place) && placedKind == 5
 		&& placedX == 70 && placedZ == 80);
-	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 1, 70, 80, 1), place) && placedKind == 6);
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 1, 70, 80, 1, 55), place) && placedKind == 6
+		&& placedObject == 55);
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, false, 0, 0, 0, 1, 55), place) && placedObject == 0);
 	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 0, 70, 80, 1), place) && placedKind == 5); // neutral
 	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(false, 0, 0, true, -1, 70, 80, 1), place) && placedKind == 4);
 	CHECK(std::string(menu::leaderOrderVoice(5, false)) == "attack_position" && std::string(menu::leaderOrderVoice(5, true)) == "attack_object"

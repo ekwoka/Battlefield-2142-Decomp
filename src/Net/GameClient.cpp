@@ -562,7 +562,7 @@ void GameClient::answerRequest(int squad, int kind)
 	sendEvent(makeAcceptOrder(answer));
 }
 
-void GameClient::issueOrder(int store, int squad, int kind, const Vec3f& point)
+void GameClient::issueOrder(int store, int squad, int kind, const Vec3f& point, uint16_t ghost)
 {
 	const RemotePlayer* me = m_world.player(m_world.localPlayer());
 	SquadOrderInfo order;
@@ -572,6 +572,7 @@ void GameClient::issueOrder(int store, int squad, int kind, const Vec3f& point)
 	order.floats[0] = point.x;
 	order.floats[1] = point.y;
 	order.floats[2] = point.z;
+	order.object = ghost;
 	order.store = store;
 	sendEvent(makeSquadOrder(order));
 }

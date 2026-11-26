@@ -1139,7 +1139,7 @@ void GameWorld::stepCrates(float seconds)
 // 0x004c5530 → the squad's commander order, 0x004c3e40): the commander
 // hears HUD_HUD_SQUAD_ORDER_SENT_SQUAD (PostRemote 0x1b), the squad's
 // leader HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_COMMANDER (0x1a) and answers it.
-bool GameWorld::issueOrder(int team, int squad, OrderType type, float x, float z, int from)
+bool GameWorld::issueOrder(int team, int squad, OrderType type, float x, float z, int from, uint32_t object)
 {
 	if ((team != 1 && team != 2) || squadMembers(team, squad).empty()) {
 		return false;
@@ -1155,6 +1155,10 @@ bool GameWorld::issueOrder(int team, int squad, OrderType type, float x, float z
 	SquadOrder order;
 	order.type = type;
 	order.position = {x, m_ground.height ? m_ground.height(x, z) : 0.0f, z};
+	if (const world::Object* target = object ? m_objects.find(object) : nullptr) {
+		order.object = object;
+		order.position = {target->position().x, target->position().y, target->position().z};
+	}
 	order.fromCommander = true;
 	order.serial = ++m_orderSerial;
 	m_orders[key] = order;
@@ -1192,7 +1196,7 @@ void GameWorld::answerOrder(int player, bool yes)
 		return;
 	}
 	if (yes) {
-		issueSquadLeaderOrder(player, it->second.type, it->second.position.x, it->second.position.z);
+		issueSquadLeaderOrder(player, it->second.type, it->second.position.x, it->second.position.z, it->second.object);
 	}
 	m_orders.erase(it);
 }
@@ -1208,7 +1212,7 @@ const GameWorld::SquadOrder* GameWorld::squadOrder(int team, int squad) const
 // HUD sends it accepted (its +0x2b0 set before the send, 0x007d6ab0); the
 // members hear HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_SQUADLEADER (0x17), the
 // leader HUD_HUD_SQUAD_ORDER_SENT_MEMBERS (0x1c). None drops it.
-bool GameWorld::issueSquadLeaderOrder(int player, OrderType type, float x, float z)
+bool GameWorld::issueSquadLeaderOrder(int player, OrderType type, float x, float z, uint32_t object)
 {
 	const Player* p = findPlayer(player);
 	if (!p || !p->squadLeader || p->squad == 0 || (p->team != 1 && p->team != 2)) {
@@ -1222,6 +1226,10 @@ bool GameWorld::issueSquadLeaderOrder(int player, OrderType type, float x, float
 	SquadOrder order;
 	order.type = type;
 	order.position = {x, m_ground.height ? m_ground.height(x, z) : 0.0f, z};
+	if (const world::Object* target = object ? m_objects.find(object) : nullptr) {
+		order.object = object;
+		order.position = {target->position().x, target->position().y, target->position().z};
+	}
 	order.fromCommander = false;
 	order.accepted = true;
 	m_leaderOrders[key] = order;

@@ -298,9 +298,11 @@ struct RoseOrder {
 	bool valid = false;
 	int kind = 4;
 	float x = 0, z = 0;
+	uint32_t object = 0; // the tag's object (+0x288): the order is on it, not at a point
 };
-RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tagTeam, float tagX, float tagZ, int team);
-bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind, float x, float z)>& place);
+RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tagTeam, float tagX, float tagZ, int team,
+	uint32_t tagObject = 0);
+bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind, float x, float z, uint32_t object)>& place);
 // The leader's voice for his order on the squad's channel (0x007c7690 from the HUD's 2/0x1c, "order sent to
 // squadmembers"): attack_position (attack_object with an object) for kind 5, defend for 6, repair for 7, else move.
 const char* leaderOrderVoice(int kind, bool object);

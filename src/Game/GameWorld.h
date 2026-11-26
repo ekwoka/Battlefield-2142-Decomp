@@ -2532,11 +2532,15 @@ public:
 		// identical re-issue included, with its 2/0x1a): what a leader's
 		// question is for.
 		uint32_t serial = 0;
+		// The order's target object (the record's +4, 0x005b8b20: with one the order has no ground marker and its
+		// name tag is the object's), 0 for a point. The point is the object's position when the order was issued
+		// (0x0050e220 resolves it so as it is read).
+		uint32_t object = 0;
 	};
 	// The commander's order: false for a squad that doesn't exist or an
 	// order from someone else than the team's commander (-1 for none: the
 	// game itself).
-	bool issueOrder(int team, int squad, OrderType type, float x, float z, int from = -1);
+	bool issueOrder(int team, int squad, OrderType type, float x, float z, int from = -1, uint32_t object = 0);
 	void acceptOrder(int player, bool accept);
 	// The leader's answer to the question for the commander's order
 	// (0x0079d6e0 case 2): yes passes it on as his own order to the squad
@@ -2547,7 +2551,7 @@ public:
 	// false when the player leads no squad. The scripts' orderPosition,
 	// orderRadius and ifAccepted* read this one (squad slot 0x10,
 	// 0x004c2ee0), not the commander's.
-	bool issueSquadLeaderOrder(int player, OrderType type, float x, float z);
+	bool issueSquadLeaderOrder(int player, OrderType type, float x, float z, uint32_t object = 0);
 	const SquadOrder* squadLeaderOrder(int team, int squad) const;
 	// The squad leaders' requests to the commander (SquadRequests.cpp; the
 	// squad manager's slot 0x50, 0x004c5720, into the squad's record
