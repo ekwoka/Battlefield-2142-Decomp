@@ -9638,9 +9638,9 @@ void BotManager::updateStrategy(float seconds)
 				}
 				// The retail post goes to the game's commander order for any
 				// squad (IBFCommander 0x00897120 -> squad manager slot 0x4c,
-				// 0x004c5530; its 2/0x1a asks a human leader to accept it). The
-				// pick path (0x10062b80 -> 0x100ccc70) checks no human commander;
-				// only the request answer (0x10089fa0) does.
+				// 0x004c5530; its 2/0x1a asks a human leader to accept it).
+				// 0x10062b80 and 0x100ccc70 check no human commander (the request
+				// answer 0x10089fa0 does); 0x10062b80's caller is not traced.
 				// Here only a human leader's squad has it: the bot leaders answer
 				// in the AI (the side's orders) and the HUD shows none for them.
 				const int leader = squads[id].leader;
