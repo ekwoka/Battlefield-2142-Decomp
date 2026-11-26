@@ -467,6 +467,7 @@ private:
 	game::Votes m_votes;
 	void sendVoteReplies(const std::vector<game::Votes::Reply>& replies);
 	bool clientHas(int player) const;
+	int mapByte(float coordinate, int axis) const;
 	// The teams' networkable (ghost net::kTeamStateGhost): its state now.
 	net::TeamNetState teamStateOf() const;
 	// The spawn groups (CreateSpawnGroup / RemoveSpawnGroup) and the
