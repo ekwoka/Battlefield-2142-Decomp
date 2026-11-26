@@ -5041,6 +5041,11 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 	// RaShaderSTM getDiffuse*Lighting: + lightmap.r x SinglePointColor, the baked lamps.
 	// SinglePointColor fades to (1, 1, 1) with the inside-Titan blend (0x10028301).
 	for (LightingUniforms& u : uniformsFor[1]) {
+		// Their sun is StaticSunColor whatever LightManager.enableSun says: that
+		// only flags the sun light object (0x1014a540 -> +0x784's +0x14, skipped by
+		// the light lists, 0x1006a352), and retail's Tunis_Harbor_Assault (enableSun
+		// 0) shows its lightmapped quays sunlit with their baked shadows.
+		std::copy(lights.staticSunColor.begin(), lights.staticSunColor.end(), u.sunColor);
 		for (int i = 0; i < 3; ++i) {
 			u.hemiObject[i] = lights.singlePointColor[static_cast<size_t>(i)] + (1.0f - lights.singlePointColor[static_cast<size_t>(i)]) * m_titanBlend;
 		}
