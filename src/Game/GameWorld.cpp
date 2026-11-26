@@ -8477,18 +8477,23 @@ void GameWorld::fillKit(Player& player, world::ObjectTemplate* kitTemplate, worl
 					if (other && other->typeName() == "ItemContainer") {
 						for (const world::ChildTemplate& inner : other->children()) {
 							if (sameName(inner.name, item)) {
-								return (player.allUnlocked && !player.unlockChosen) || chosen(other->name());
+								return chosen(other->name());
 							}
 						}
 					}
 				}
 				return false;
 			};
-			bool applies = (player.allUnlocked && !player.unlockChosen) || dogtags || chosen(container->name());
+			// --unlock-all with nothing chosen applies every container, but not
+			// a firearm replacement: that one keeps the retail rule below (its
+			// rifle and the item it replaces are the player's, base or chosen),
+			// else every swap applied at once and the last one won.
+			const bool firearmReplacement = integer(*container, "isFirearmReplacement", 0) != 0;
+			bool applies = (player.allUnlocked && !player.unlockChosen && !firearmReplacement) || dogtags || chosen(container->name());
 			if (!applies && integer(*container, "replaceWithoutEquip", 0) != 0) {
 				applies = owned(container->name());
 			}
-			if (!applies && integer(*container, "isFirearmReplacement", 0) != 0) {
+			if (!applies && firearmReplacement) {
 				const auto replacement = container->settings().find("firearmReplacement");
 				const auto list = container->settings().find("replaceItem.list");
 				if (replacement != container->settings().end() && list != container->settings().end()) {

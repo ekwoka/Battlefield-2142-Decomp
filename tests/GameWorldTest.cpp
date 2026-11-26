@@ -5634,6 +5634,60 @@ TEST(GameWorld_ReplacementItemKeepsTheFreeSlot)
 	CHECK(slots.size() == 3 && slots[2] == std::make_pair(6, std::string("gauss_rocket")));
 }
 
+// --unlock-all with nothing chosen owns every unlock but must not apply
+// every firearm replacement: the kit build (0x00570ab0, 0x0056dc10) applies
+// one only when its firearmReplacement item and the first item it replaces
+// are the player's (a base item or its container chosen). The Gauss rocket
+// took the rocket slot of a player who never picked the Gauss rifle.
+TEST(GameWorld_UnlockAllAppliesNoFirearmReplacement)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	const auto firearm = [&](const char* name, int slot) {
+		world::ObjectTemplate* t = range.templates.create("GenericFireArm", name);
+		t->settings()["itemIndex"] = std::to_string(slot);
+	};
+	firearm("eu_ar_rocket", 5);
+	firearm("gauss_rifle", 3);
+	firearm("gauss_rocket", 5);
+	world::ObjectTemplate* rocket = range.templates.create("ItemContainer", "UnlockRocket");
+	rocket->children().push_back({"eu_ar_rocket", {}, {}});
+	world::ObjectTemplate* rifle = range.templates.create("ItemContainer", "UnlockGaussRifle");
+	rifle->children().push_back({"gauss_rifle", {}, {}});
+	world::ObjectTemplate* gauss = range.templates.create("ItemContainer", "UnlockGaussRocket");
+	gauss->children().push_back({"gauss_rocket", {}, {}});
+	gauss->settings()["isFirearmReplacement"] = "1";
+	gauss->settings()["firearmReplacement"] = "gauss_rifle";
+	gauss->settings()["replaceItem.list"] = "eu_ar_rocket;";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	for (const char* child : {"eu_ar_rifle", "UnlockRocket", "UnlockGaussRifle", "UnlockGaussRocket"}) {
+		kit->children().push_back({child, {}, {}});
+	}
+	const auto fiveSlot = [&](int player) {
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(player, info);
+		for (const auto& [slot, name] : info.carried) {
+			if (slot == 5) {
+				return name;
+			}
+		}
+		return std::string();
+	};
+	range.world->unlockAllByDefault = true;
+	const int all = range.world->addPlayer("All", 2, true);
+	range.world->setKit(all, "EU_Assault", "us_light_soldier");
+	CHECK(range.world->spawnSoldier(all));
+	CHECK(fiveSlot(all) == "eu_ar_rocket");
+	// Picked on the customise screen, the Gauss rifle's choice still swaps it.
+	const int picked = range.world->addPlayer("Picked", 2, true);
+	range.world->setKit(picked, "EU_Assault", "us_light_soldier");
+	range.world->setChosenUnlocks(picked, {"UnlockRocket", "UnlockGaussRifle"});
+	CHECK(range.world->spawnSoldier(picked));
+	CHECK(fiveSlot(picked) == "gauss_rocket");
+}
+
 // A lock-on weapon (target.targetSystem TSHeatSeeking): an enemy carrying
 // a TTHeat target object in the lock cone is locking at once and locked
 // after lockDelay; turned away, the lock holds for loseLockDelay, then
