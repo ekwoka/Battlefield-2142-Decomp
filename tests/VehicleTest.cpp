@@ -836,3 +836,126 @@ TEST(Vehicle_WreckCanKeepAuthoredWheelSupport)
 	CHECK(!car.vehicle->wheels()[0].contact);
 	CHECK(car.vehicle->wheels()[0].objectGround.count == 0);
 }
+
+#include "TitanLevel.h"
+
+namespace {
+
+struct HoverRun {
+	bool entered = false;
+	float rest = 0;            // the hull's origin over the surface, settled
+	float lowest = 1e9f;       // the same, lowest while driving
+	float highest = -1e9f;
+	float distance = 0;        // along its heading in the drive
+};
+
+// as_tank set down at (x, z) facing +z over a surface at `surfaceY` (the
+// heightmap or a static mesh), entered by a player, left to settle and then
+// driven forward (W) for `seconds`.
+HoverRun driveHoverTank(titantest::TitanLevel& level, float x, float z, float surfaceY, float seconds)
+{
+	HoverRun r;
+	world::Object* tank = level.objects.create(level.templates.find("as_tank"), {x, surfaceY + 2.5f, z});
+	tank->setTeam(2);
+	level.run(3);
+	r.rest = tank->position().y - surfaceY;
+	const int player = level.world->addPlayer("Hover", 2, false);
+	CHECK(level.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(player, info);
+	const world::Vec3 at = tank->position();
+	level.world->setSoldierPosition(info.soldier, {at.x + 3.0f, surfaceY + 0.2f, at.z});
+	level.run(0.5f);
+	game::SoldierInput use;
+	use.use = true;
+	level.world->setInput(player, use);
+	level.run(0.2f);
+	level.world->setInput(player, {});
+	level.run(0.5f);
+	level.world->playerInfo(player, info);
+	r.entered = info.vehicle == tank->id();
+	const world::Vec3 start = tank->position();
+	game::SoldierInput drive;
+	drive.throttle = 1;
+	for (int i = 0; i < static_cast<int>(seconds * 30); ++i) {
+		level.world->setInput(player, drive);
+		level.world->tick(1 / 30.0f);
+		const float c = tank->position().y - surfaceY;
+		r.lowest = std::min(r.lowest, c);
+		r.highest = std::max(r.highest, c);
+	}
+	r.distance = tank->position().z - start.z;
+	level.world->setInput(player, {});
+	level.objects.remove(tank->id());
+	level.run(0.2f);
+	return r;
+}
+
+} // namespace
+
+// The hover tank over a bridge deck (a static mesh) floats and drives as it
+// does over the heightmap. Its antigravs are Springs whose vehicle LODs probe
+// down into the deck (GameWorld::wheelProbes); their contacts' friction is
+// the antigrav part's material against the deck's (4351 veh_tank_hover,
+// friction 0.2 multiplied: 0.14 on the deck's concrete), as the vertex pass
+// records them (0x006bb050, A's vertex material), not the root template's
+// material 0 against it (0.725), which held it to a crawl over the deck.
+TEST(Vehicles_HoverTankFloatsOverABridgeDeck)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	titantest::TitanLevel level(gameDir, "Suez_Canal", 48, true, nullptr, true);
+	if (!level.loaded || !level.templates.find("as_tank")) {
+		return;
+	}
+	// The first surface under a point: a static mesh's or the heightmap's.
+	const auto surface = [&](float x, float z) {
+		float fraction = 1;
+		uint32_t object = 0;
+		return level.world->segmentHit({x, 100, z}, {x, 0, z}, 0, fraction, object) ? 100 - 100 * fraction : -1.0f;
+	};
+	// The reference: a flat 60 m run of bare heightmap.
+	float fx = 0, fz = 0;
+	bool found = false;
+	for (float z = -400; z < 400 && !found; z += 10) {
+		for (float x = -700; x < 700 && !found; x += 10) {
+			float lo = 1e9f, hi = -1e9f;
+			bool bare = true;
+			for (float d = -10; d <= 60 && bare; d += 2) {
+				for (float w = -6; w <= 6; w += 3) {
+					const float h = level.world->terrainHeight(x + w, z + d);
+					lo = std::min(lo, h);
+					hi = std::max(hi, h);
+					bare = bare && std::fabs(surface(x + w, z + d) - h) < 0.05f;
+				}
+			}
+			if (bare && hi - lo < 0.05f && lo > 5) {
+				fx = x, fz = z, found = true;
+			}
+		}
+	}
+	CHECK(found);
+	if (!found) {
+		return;
+	}
+	const HoverRun ground = driveHoverTank(level, fx, fz, level.world->terrainHeight(fx, fz), 4);
+	// bridge_industrial_01_c's deck over the canal (the span at -99, -128 of
+	// Titan_WalkerSweepsTheSuezBridges): 50.34 from z -160 to -95, the canal
+	// bed 5 m and more below it.
+	const float deckY = surface(-99, -150);
+	CHECK(deckY > level.world->terrainHeight(-99, -150) + 5);
+	const HoverRun deck = driveHoverTank(level, -99, -150, deckY, 4);
+	std::fprintf(stderr, "  as_tank on the heightmap at %.0f %.0f: rest %.2f, %.2f..%.2f driving, %.1f m in 4 s\n", fx, fz,
+		ground.rest, ground.lowest, ground.highest, ground.distance);
+	std::fprintf(stderr, "  as_tank on the deck at %.2f: rest %.2f, %.2f..%.2f driving, %.1f m in 4 s\n", deckY, deck.rest,
+		deck.lowest, deck.highest, deck.distance);
+	CHECK(ground.entered && deck.entered);
+	// It floats as high over the deck as over the ground, its hull clear of it...
+	CHECK(std::fabs(deck.rest - ground.rest) < 0.1f);
+	CHECK(deck.lowest > ground.rest - 0.3f);
+	// ...and drives off as fast.
+	CHECK(ground.distance > 15);
+	CHECK(deck.distance > 0.8f * ground.distance);
+}

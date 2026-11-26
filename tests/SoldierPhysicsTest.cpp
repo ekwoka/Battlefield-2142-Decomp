@@ -940,6 +940,51 @@ physics::CollisionMeshFile boxMesh(physics::Vec3 low, physics::Vec3 high)
 
 } // namespace
 
+// A soldier contact (0x006c2620) passes 0x2f for both materials to
+// 0x006c24b0 (0x006c2841..0x006c288a), which sets the response's friction
+// (+0xd4, the movement's grip, 0x006c2230) to the MaterialManager's of the
+// pair: two soldiers touching on a deck (a static mesh, the terrain far
+// under it) grip with 0x2f's against 0x2f, not with the deck's they met
+// before: the last contact's pair holds. Apart, the deck's stays.
+TEST(SoldierPhysics_SoldierContactSetsItsOwnFriction)
+{
+	const float dt = 1 / 30.0f;
+	physics::CollisionWorld deck;
+	deck.addMesh(boxMesh({-5, -1, -5}, {5, 0, 5}), physics::CollisionUser::Soldier, {}, {});
+	physics::Ground below = slope(0);
+	below.height = [](float, float) { return -100.0f; };
+	below.heightAndNormal = [](float, float, physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return -100.0f;
+	};
+	const auto frictionOf = [](uint32_t a, uint32_t b) {
+		return a == physics::kSoldierContactMaterial && b == physics::kSoldierContactMaterial ? 1.0f : 3.05f;
+	};
+	for (const float apart : {0.3f, 2.0f}) {
+		physics::SoldierBody a, b;
+		for (physics::SoldierBody* s : {&a, &b}) {
+			s->frictionOf = frictionOf;
+			s->world = &deck;
+		}
+		a.position = {0, 0.98f, 0};
+		b.position = {apart, 0.98f, 0};
+		for (int i = 0; i < 3; ++i) { // settled on the deck
+			a.step(dt, below);
+			b.step(dt, below);
+		}
+		CHECK(a.onGround() && a.friction == 3.05f && b.friction == 3.05f); // the deck's
+		a.soldiers = {{&b, false}};
+		b.soldiers = {{&a, true}};
+		a.moveNode(dt);
+		b.moveNode(dt);
+		a.pass(dt, below);
+		b.pass(dt, below);
+		const float expected = apart < 0.5f ? 1.0f : 3.05f;
+		CHECK(a.friction == expected);
+		CHECK(b.friction == 3.05f); // its own pass met the deck after: the last contact's pair holds
+	}
+}
+
 // The solve (0x006c48c0): a soldier caught between a wall and a heavy
 // moving object closer than its width can't be pushed out in eight
 // passes: it is put back where it was and, the object moving at it faster

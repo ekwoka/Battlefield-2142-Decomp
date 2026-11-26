@@ -584,7 +584,11 @@ TEST(Titan_SilosWearTheShieldThenTheHull)
 	// -wreckHitPoints over timeToStayAsWreck (100 s), the explosion groups
 	// going off at their levels (-1 to -36 %), the core explosion event at
 	// -38 %; then the wreck is deleted. It coasts to a stop at its height.
-	level.world->setAiRunning(true); // bots on: a Titan wreck still drains at 1 %/s
+	// Bots on: in gpm_ti AIDLL's slot 0x20 is true (the level load's init,
+	// 0x004af290), so the wreck drains at 1x, 1 %/s, as any wreck outside
+	// sp1 / gpm_sp / gpm_coop.
+	level.world->setAiRunning(true);
+	CHECK(!level.world->wreckDrainsFast());
 	const uint32_t wreck = eu->object;
 	const float height = level.titan(2)->position.y;
 	float exploded = -1, gone = -1;
@@ -1881,11 +1885,14 @@ TEST(Titan_FallingBotOpensItsParachute)
 // heavy moving object: a soldier running into it is neither squashed nor run
 // over (1000 damage, no attacker: "is no more").
 // The retail rule (0x005a4690 -> 0x005a43c0) runs over a soldier whose
-// contact with the held gunship tops 10 m/s; the rewrite's sprinting soldier
-// meets it at up to 11-12 m/s on the moving Titan's deck (his own velocity
-// spikes to 9.6-11 m/s at the contact), so with the retail rule an odd run
-// is fatal. enhanced.softLanding (the soldier the faster: the ground's rule)
-// keeps them all alive; the retail path's count is only reported.
+// contact with the held gunship tops 10 m/s. The runners that stay pile up
+// at it, and a sprinter pressed into the pile had his speed run away (the
+// pile's zero-velocity soldier contacts pull the mean contact velocity his
+// grip compares with towards 0) with the deck's grip, 3.05: 10-12 m/s at
+// the gunship, 20 m/s into the hull, dead. A soldier contact sets the grip
+// to 0x2f's against 0x2f (1) as retail's does (0x006c2620), and no run is
+// fatal with either rule. enhanced.softLanding (the soldier the faster: the
+// ground's rule) keeps them all alive as well.
 static void heldGunshipRunners(bool softLanding)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -1942,14 +1949,16 @@ static void heldGunshipRunners(bool softLanding)
 		}
 	}
 	std::fprintf(stderr, "  %s: %d of %d died\n", softLanding ? "softLanding" : "retail rule", deaths, tries);
-	if (softLanding) {
-		CHECK(deaths == 0);
-	}
+	CHECK(deaths == 0);
 }
 
-TEST(Titan_HeldGunshipDoesNotCrushSoldiers)
+TEST(Titan_HeldGunshipDoesNotCrushSoldiers_RetailRule)
 {
 	heldGunshipRunners(false);
+}
+
+TEST(Titan_HeldGunshipDoesNotCrushSoldiers_SoftLanding)
+{
 	heldGunshipRunners(true);
 }
 
@@ -2143,12 +2152,17 @@ static void walkerCrossesBridge(const char* mod, const char* tmpl, const BridgeC
 struct WalkResult {
 	bool entered = false;
 	float along = 0, lowest = 1e9f, hp = 0, hp0 = 0;
-	float stuckAlong = 1e9f, stuckLateral = 0; // where it stopped for over a second short of the far side
-	world::Vec3 stuckAt;
+	bool stopped = false; // held still for 5 s short of the far side
+	world::Vec3 stoppedAt;
 };
 
 // One walker driven over `bridge` on its lane in an already loaded level; the
-// walker is removed after, so the level serves the whole sweep.
+// walker is removed after, so the level serves the whole sweep. The driver
+// holds the lane (PIYaw, right positive): back towards its line, at most 20
+// degrees off its heading. Open-loop throttle didn't: a few degrees from a
+// bump at the start (the west yard's bc_yard_a, the east road's eu_ag_wreck)
+// carried the walker metres off its lane over the 300 m run, into the
+// towers' legs (x -303 and -187) and the railing posts.
 static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCrossing& bridge, bool sprint)
 {
 	WalkResult r;
@@ -2180,7 +2194,12 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 	r.along = -from;
 	r.hp0 = level.world->hitPoints(walker->id());
 	world::Vec3 window[30] = {};
+	int still = 0;
 	for (int i = 0; i < static_cast<int>(30 * (from + bridge.to) / 5) && r.along < bridge.to; ++i) {
+		const world::Vec3 q = walker->position();
+		const float off = (q.x - bridge.x) * dz - (q.z - bridge.z) * dx - bridge.lateral; // right of the lane
+		const float want = bridge.yaw - std::clamp(off * 10.0f, -20.0f, 20.0f);
+		drive.strafe = std::clamp(-std::remainder(walker->rotation().x - want, 360.0f) * 0.2f, -1.0f, 1.0f);
 		level.world->setInput(player, drive);
 		level.world->tick(1 / 30.0f);
 		const world::Vec3 p = walker->position();
@@ -2188,12 +2207,14 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 		if (std::fabs(r.along) < 15 || bridge.from > 100) {
 			r.lowest = std::min(r.lowest, p.y); // the heightmap is the canal bed far below
 		}
-		// Stopped: under 1 m moved in the last second, short of the far side.
+		// Under 1 m a second, for 5 seconds on end: stopped for good.
 		const world::Vec3 old = window[i % 30];
 		window[i % 30] = p;
-		if (i >= 90 && r.stuckAlong > 1e8f && r.along < bridge.to && std::hypot(p.x - old.x, p.z - old.z) < 1.0f) {
-			r.stuckAlong = r.along;
-			r.stuckAt = p;
+		still = i >= 30 && std::hypot(p.x - old.x, p.z - old.z) < 1.0f ? still + 1 : 0;
+		if (still >= 150) {
+			r.stopped = true;
+			r.stoppedAt = p;
+			break;
 		}
 	}
 	r.hp = level.world->hitPoints(walker->id());
@@ -2210,6 +2231,16 @@ static WalkResult walkBridge(TitanLevel& level, const char* tmpl, const BridgeCr
 // 0x00854170). Lanes within 6 m of the axis; the vanilla mech in vanilla, the
 // Remaster's in Remaster. WALKER_SWEEP=1 logs every lane to 9 m, both mechs,
 // walking and sprinting, and where each stopped.
+//
+// Each lane crosses, or stops against the as_apc_wreck that StaticObjects.con
+// leaves on the big road's west span (-316.95/52.127/-38.817, yaw -138.4; a
+// Mesh with hasCollisionPhysics 1). Its faces there reach y 53.0 to 53.7: over
+// the bottom of the hull's vehicle LOD box (us_heavy_mech carries it 1.9 m
+// under its origin, which stands at 54.1 on the deck), so on lanes 3 to 6 m
+// south of the axis its side faces are a wall for the hull's Basic response,
+// and for the legs' sphere above stepHeight (1.4 of the legs' 2.8). From the
+// east on the lane 6 m south its sloped top faces meet the legs first, under
+// stepHeight, and the walker climbs it.
 TEST(Titan_WalkerSweepsTheSuezBridges)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -2222,6 +2253,7 @@ TEST(Titan_WalkerSweepsTheSuezBridges)
 	};
 	const Span spans[] = {{65, -36, 90, 47.2f, 55, 40}, {-512, -36, 90, 47.2f, 55, 40}, {-99, -128, 0, 47.2f, 55, 40},
 		{-245, -32, 90, 50.8f, 175, 130}};
+	const world::Vec3 apcWreck {-316.95f, 52.127f, -38.817f};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
 		TitanLevel level(gameDir, "Suez_Canal", 48, true, mod, true);
@@ -2244,21 +2276,20 @@ TEST(Titan_WalkerSweepsTheSuezBridges)
 							BridgeCrossing b {span.x, span.z, span.yaw + (back ? 180.0f : 0.0f), span.deckY, span.from, span.to, lane};
 							const WalkResult r = walkBridge(level, tmpl, b, sprint);
 							const bool crossed = r.along >= span.to && r.lowest > span.deckY + 2.0f;
-							if (all) {
-								std::fprintf(stderr, "SWEEP %s %s span(%.0f,%.0f) %s lane %+.0f %s: along %.1f lowest %.1f %s", mod ? "rem" : "van",
-									tmpl, span.x, span.z, back ? "back" : "fwd", lane, sprint ? "sprint" : "walk", r.along, r.lowest,
-									crossed ? "CROSSED" : "SHORT");
-								if (r.stuckAlong < 1e8f) {
-									std::fprintf(stderr, " stuck at along %.1f pos %.1f %.1f %.1f", r.stuckAlong, r.stuckAt.x, r.stuckAt.y, r.stuckAt.z);
+							const bool atWreck = !crossed && r.stopped && r.lowest > span.deckY + 2.0f
+								&& std::hypot(r.stoppedAt.x - apcWreck.x, r.stoppedAt.z - apcWreck.z) < 7.0f;
+							if (all || !crossed) {
+								std::fprintf(stderr, "%s %s %s span(%.0f,%.0f) %s lane %+.0f %s: along %.1f lowest %.1f %s", all ? "SWEEP" : " ",
+									mod ? "rem" : "van", tmpl, span.x, span.z, back ? "back" : "fwd", lane, sprint ? "sprint" : "walk", r.along,
+									r.lowest, crossed ? "CROSSED" : atWreck ? "AT-WRECK" : "SHORT");
+								if (r.stopped) {
+									std::fprintf(stderr, " stopped at %.1f %.1f %.1f", r.stoppedAt.x, r.stoppedAt.y, r.stoppedAt.z);
 								}
 								std::fprintf(stderr, "\n");
-							} else {
-								if (!crossed) {
-									std::fprintf(stderr, "  %s %s span(%.0f,%.0f) %s lane %+.0f: along %.1f lowest %.1f stuck at %.1f %.1f %.1f\n",
-										mod ? "rem" : "van", tmpl, span.x, span.z, back ? "back" : "fwd", lane, r.along, r.lowest,
-										r.stuckAt.x, r.stuckAt.y, r.stuckAt.z);
-								}
-								CHECK(crossed);
+							}
+							if (!all) {
+								CHECK(r.entered);
+								CHECK(crossed || atWreck);
 							}
 						}
 					}
@@ -2345,55 +2376,65 @@ TEST(Titan_WalkerClimbsALedgeAndStopsAtAWall)
 	}
 }
 
-TEST(Titan_WalkerCrossesTheSuezBridges)
+// The canal bridges of StaticObjects.con: bridge_industrial_01_c (65, -36),
+// (-512, -36) and (-99, -128), bc_big_bridge_a (-185, -32) and (-303, -32).
+// Walking and sprinting, with the vanilla and the Remaster mech.
+// The two bc_big_bridge_a spans are one road across the canal, driven on
+// the lane at z -32 from the west bank to the east bank. A test per bridge
+// below (each crossing loads its own level).
+static void walkerCrossesTheSuezBridge(const BridgeCrossing& bridge)
 {
-	// The canal bridges of StaticObjects.con: bridge_industrial_01_c (65, -36),
-	// (-512, -36) and (-99, -128), bc_big_bridge_a (-185, -32) and (-303, -32).
-	// Walking and sprinting, with the vanilla and the Remaster mech.
-	// The two bc_big_bridge_a spans are one road across the canal, driven on
-	// the lane at z -32 from the west bank to the east bank.
-	const BridgeCrossing bridges[] = {{65, -36, 90, 47.2f}, {-512, -36, 90, 47.2f}, {-99, -128, 0, 47.2f}, {-245, -32, 90, 50.8f, 175, 130}};
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
-		for (const BridgeCrossing& bridge : bridges) {
-			for (const bool sprint : {false, true}) {
-				walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
-			}
+		for (const bool sprint : {false, true}) {
+			walkerCrossesBridge(mod, "us_heavy_mech", bridge, sprint);
 		}
 	}
 }
 
+TEST(Titan_WalkerCrossesTheSuezBridges_Industrial65) { walkerCrossesTheSuezBridge({65, -36, 90, 47.2f}); }
+TEST(Titan_WalkerCrossesTheSuezBridges_IndustrialMinus512) { walkerCrossesTheSuezBridge({-512, -36, 90, 47.2f}); }
+TEST(Titan_WalkerCrossesTheSuezBridges_IndustrialMinus99) { walkerCrossesTheSuezBridge({-99, -128, 0, 47.2f}); }
+TEST(Titan_WalkerCrossesTheSuezBridges_BigRoad) { walkerCrossesTheSuezBridge({-245, -32, 90, 50.8f, 175, 130}); }
+
 // Both shipped walker models must stay in contact with Suez bridge decks,
-// rather than alternate between the hull box and leg sphere.
-TEST(Titan_WalkerBridgeContactDoesNotOscillate)
+// rather than alternate between the hull box and leg sphere. A test per bridge
+// below (each crossing loads its own level).
+static void walkerBridgeContactDoesNotOscillate(const BridgeCrossing& bridge)
 {
 	for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
 		if (!test::runs(mod)) continue;
 		for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech"}) {
 			for (const bool sprint : {false, true}) {
-				for (const BridgeCrossing& bridge : {BridgeCrossing {65, -36, 90, 47.2f},
-						 BridgeCrossing {-512, -36, 90, 47.2f}, BridgeCrossing {-99, -128, 0, 47.2f},
-						 BridgeCrossing {-245, -32, 90, 50.8f, 175, 130}})
-					walkerCrossesBridge(mod, vehicle, bridge, sprint, false, false, false, true);
+				walkerCrossesBridge(mod, vehicle, bridge, sprint, false, false, false, true);
 			}
 		}
 	}
 }
 
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_Industrial65) { walkerBridgeContactDoesNotOscillate({65, -36, 90, 47.2f}); }
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_IndustrialMinus512) { walkerBridgeContactDoesNotOscillate({-512, -36, 90, 47.2f}); }
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_IndustrialMinus99) { walkerBridgeContactDoesNotOscillate({-99, -128, 0, 47.2f}); }
+TEST(Titan_WalkerBridgeContactDoesNotOscillate_BigRoad) { walkerBridgeContactDoesNotOscillate({-245, -32, 90, 50.8f, 175, 130}); }
+
 // Record vertical movement and progress with more actual vehicles and small
 // steering inputs. This survey records evidence; it is not a retail-motion
-// acceptance threshold. The long bridge has joints, ramps and props.
-TEST(Titan_SuezBridgeMotionSurvey)
+// acceptance threshold. The long bridge has joints, ramps and props. A test
+// per vehicle below (each crossing loads its own level).
+static void suezBridgeMotionSurvey(const char* vehicle)
 {
     const BridgeCrossing bridge {-245, -32, 90, 50.8f, 175, 130};
     for (const char* mod : {static_cast<const char*>(nullptr), "mods/Project_Remaster_v17_Final"}) {
         if (!test::runs(mod)) continue;
-        for (const char* vehicle : {"us_heavy_mech", "as_heavy_mech", "eu_tank", "eu_apc"}) {
-            for (bool steering : {false, true})
-                walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
-        }
+        for (bool steering : {false, true})
+            walkerCrossesBridge(mod, vehicle, bridge, false, steering, true);
     }
 }
+
+TEST(Titan_SuezBridgeMotionSurvey_UsHeavyMech) { suezBridgeMotionSurvey("us_heavy_mech"); }
+TEST(Titan_SuezBridgeMotionSurvey_AsHeavyMech) { suezBridgeMotionSurvey("as_heavy_mech"); }
+TEST(Titan_SuezBridgeMotionSurvey_EuTank) { suezBridgeMotionSurvey("eu_tank"); }
+TEST(Titan_SuezBridgeMotionSurvey_EuApc) { suezBridgeMotionSurvey("eu_apc"); }
 
 // Controlled collision survey with a second walker in the same lane.
 // It is not a substitute for bot routing through the pictured underpass.
@@ -2406,10 +2447,11 @@ TEST(Titan_SuezBridgeCrowdingSurvey)
         walkerCrossesBridge("mods/Project_Remaster_v17_Final", "us_heavy_mech", bridge, false, false, true, true);
 }
 
-// Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906, so a bot sent there cannot plan and walks
-// straight into the first wall. With enhanced.botTitan a foot bot standing 60 m from silo 906 (the nearest) must prefer one
-// it can plan to.
-TEST(Titan_BotsPreferSilosOnTheNavMesh)
+// Suez's vanilla infantry mesh has no polygon near silos 901, 905 and 906: retail's follower plans no way there.
+// With enhanced.botTitan a foot bot on the mesh 60 m from silo 906 (the nearest) still takes it as its objective,
+// walks the mesh to its edge nearest the silo and the terrain from there (BotManager::groundWalk), into the
+// silo's capture sphere.
+TEST(Titan_BotsWalkFromTheNavMeshToAnOffMeshSilo)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
 	if (!gameDir) return;
@@ -2451,16 +2493,16 @@ TEST(Titan_BotsPreferSilosOnTheNavMesh)
 	game::GameWorld::PlayerInfo info;
 	level.world->playerInfo(id, info);
 	level.world->setSoldierPosition(info.soldier, from);
-	for (int tick = 0; tick < 30 * 5; ++tick) {
+	float reached = -1;
+	for (int tick = 0; tick < 30 * 60 && reached < 0; ++tick) {
 		bots.update(1 / 30.0f);
 		level.world->tick(1 / 30.0f);
+		level.world->playerInfo(id, info);
+		if (std::sqrt(physics::lengthSquared(info.position - cp->position)) <= cp->radius) reached = tick / 30.0f;
 	}
-	const auto route = bots.route(id);
-	CHECK(!route.empty());
-	if (route.empty()) return;
-	const float toOffMesh = std::hypot(route.back().x - cp->position.x, route.back().z - cp->position.z);
-	std::fprintf(stderr, "  bot's goal is %.0f m from the off-mesh silo 906\n", toOffMesh);
-	CHECK(toOffMesh > 100.0f);
+	std::fprintf(stderr, "  in silo 906's sphere after %.0f s, from 60 m off (at %.0f %.0f, %.1f m from its point)\n", reached,
+		info.position.x, info.position.z, std::sqrt(physics::lengthSquared(info.position - cp->position)));
+	CHECK(reached >= 0);
 }
 
 // Rounds from above onto each part of a Titan (guns, consoles): which take
@@ -2858,14 +2900,14 @@ TEST(Titan_SuezCargoBayLandingUsesStaticNodeDamage)
 // as for every vehicle gun: retail 0x004ba440 / 0x004ba500 -> game logic slot
 // 0x128 -> 0x004ba070 hand the round's player on). A soldier and a gunship
 // stand 10 m ahead of the first round. Each seat gets a fresh level so no
-// earlier round is in flight.
-TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
+// earlier round is in flight. A test per kind of gun below.
+static void gunSeatRoundsRaiseTheHitmarker(const char* part)
 {
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
  if (!test::runs(mod)) continue;
- for (const char* part : {"aacannon", "groundcanone3"}) {
+ {
   for (int nth = 0; nth < 6; ++nth) for (const bool vehicle : {false, true}) {
    TitanLevel level(dir, "Minsk", 48, true, mod);
    CHECK(level.loaded);
@@ -2929,6 +2971,9 @@ TEST(Titan_GunSeatRoundsRaiseTheHitmarker)
  }
  }
 }
+
+TEST(Titan_GunSeatRoundsRaiseTheHitmarker_AACannon) { gunSeatRoundsRaiseTheHitmarker("aacannon"); }
+TEST(Titan_GunSeatRoundsRaiseTheHitmarker_GroundCannon) { gunSeatRoundsRaiseTheHitmarker("groundcanone3"); }
 
 // Both Titan AA positions share the firearm but own independent aim and fire.
 TEST(Titan_AASeatAimAndFireOwnership)
@@ -5026,14 +5071,15 @@ TEST(Titan_SoldiersMeetTheGunsCollisionParts)
 // damage dealt to an armoured object of a team. With the shield up the
 // rockets stop at the force field (rocket material 55 against its 4118: a
 // damage mod of 0, so 0x005a4dd0 never calls the damage and no marker); with
-// it down they hurt the gun and the pilot's marker lights.
-TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
+// it down they hurt the gun and the pilot's marker lights. A test for each
+// below (every attempt loads its own level).
+static void gunshipRocketsAtTheEnemyGunHub(const bool shieldDown)
 {
  const char* dir = std::getenv("BF2142_GAME_DIR");
  if (!dir) return;
  for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
   if (!test::runs(mod)) continue;
-  for (const bool shieldDown : {false, true}) {
+  {
    // The gun hub's collision is its small children: sweep the aim until a
    // rocket lands (shield up: all of them end on the force field).
    int landed = 0, marked = 0;
@@ -5098,6 +5144,9 @@ TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker)
  }
 }
 
+TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker_ShieldUp) { gunshipRocketsAtTheEnemyGunHub(false); }
+TEST(Titan_GunshipRocketsAtTheEnemyGunHubRaiseTheHitmarker_ShieldDown) { gunshipRocketsAtTheEnemyGunHub(true); }
+
 // The shield up: the underbelly gun hubs sit on the force field's skin (hub 0's
 // origin lies within a metre of it) and their collision hangs below it, so a
 // rocket from below meets the gun first, hurts it (the pilot rockets' material
@@ -5142,6 +5191,7 @@ TEST(Titan_ShieldUpRocketsFromBelowHurtTheGunHubAndMark)
 // 0x008ab6b0: every object with collision near it, the Titan's parts too).
 TEST(Titan_CorpseLiesOnTheDeck)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -5164,7 +5214,12 @@ TEST(Titan_CorpseLiesOnTheDeck)
 		});
 		level.world->startRound();
 		level.run(1);
-		const auto titan = *level.titan(team);
+		const auto* found = level.titan(team);
+		CHECK(found);
+		if (!found) {
+			return;
+		}
+		const auto titan = *found;
 		const world::Object* hull = level.objects.find(titan.object);
 		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
 		// Spots on the decks fore and aft of the bridge (the Titans' decks
@@ -5271,6 +5326,7 @@ TEST(Titan_KitDropByCargoBayWall)
 // so nobody gets out of it into the hull (the reported Cerbere_Landing fall).
 TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 {
+	REMASTER_ONLY();
 	const char* dir = std::getenv("BF2142_GAME_DIR");
 	if (!dir) {
 		return;
@@ -5281,7 +5337,12 @@ TEST(Titan_WreckedGunshipOnTheDeckCantBeBoarded)
 		return;
 	}
 	level.run(1);
-	const auto titan = *level.titan(2);
+	const auto* found = level.titan(2);
+	CHECK(found);
+	if (!found) {
+		return;
+	}
+	const auto titan = *found;
 	const world::Object* hull = level.objects.find(titan.object);
 	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({hull->rotation().x, hull->rotation().y, hull->rotation().z});
 	const physics::Vec3 at = titan.position + turn.transform({0, 19, -10}); // 8 m over the deck: wrecked on landing
@@ -5769,4 +5830,348 @@ TEST(PlayerCamera_FirstPersonCrouchAndProneScaleFootstepCadence)
 	CHECK(prone1p >= 5 && prone1p <= 9);
 	CHECK(crouch3p >= 6 && crouch3p <= 13);
 	CHECK(prone3p >= 5 && prone3p <= 12);
+}
+// Riders on a moving Titan: standing, crouched and prone on its deck, or
+// walking, sprinting and jumping about it, for 30 s. The Titan's node
+// sleeps (isSleeping 1) and nothing wakes it: its node's tick skips the
+// sleep test for a Titan (0x006c9060's start, 0x00561d90), a major actor
+// is woken by no minor one's mass shares (0x006b6cc0), and its
+// explosionForceMod 0 gives the blasts no push. So it is no heavy mover
+// for the soldier physics' crush and run-over (0x006c48c0, 0x006c2e50:
+// slot 0x14c), and a rider's own velocity is relative to it (the carry,
+// 0x006ca660 / 0x006ca3b0): none of its contacts is fast enough for a
+// road kill (0x005a43c0).
+static int ridersOnAMovingDeck(const char* map, int team, bool move)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return 0;
+	}
+	TitanLevel level(gameDir, map, 48);
+	if (!level.loaded) {
+		return 0;
+	}
+	CHECK(level.world->moveTitan(team, 300, -200) == game::GameWorld::TitanMove::Accepted);
+	level.run(10);
+	const auto titan = *level.titan(team);
+	const world::Object* object = level.objects.find(titan.object);
+	const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+	std::vector<int> ids;
+	// Over the spawn room's deck, 10.6 m up 35-50 m aft (Titan_BotsManHalfTheGuns).
+	for (const physics::Vec3& spot : {physics::Vec3 {0, 11.5f, -40}, {3, 11.5f, -45}, {-3, 11.5f, -35}, {0, 11.5f, -50}}) {
+		const int id = level.world->addPlayer("Rider", team, false);
+		level.world->setSpawnTitan(id, titan.object);
+		if (!level.world->spawnSoldier(id)) {
+			continue;
+		}
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(id, info);
+		CHECK(level.world->setSoldierPosition(info.soldier, titan.position + turn.transform(spot)));
+		ids.push_back(id);
+	}
+	CHECK(ids.size() == 4);
+	float travelled = 0;
+	for (int tick = 0; tick < 30 * 30; ++tick) {
+		for (size_t i = 0; i < ids.size(); ++i) {
+			game::SoldierInput in;
+			if (!move) {
+				in.pose = i == 1 ? game::SoldierPose::Crouch : i == 3 ? game::SoldierPose::Prone : game::SoldierPose::Stand;
+			} else if ((tick / 60) % 2 == 0) {
+				in.throttle = 1;
+				in.turn = i % 2 ? 2.0f : -2.0f;
+				in.sprint = i >= 2;
+				in.jump = tick % 45 == static_cast<int>(i) * 7;
+			}
+			level.world->setInput(ids[i], in);
+		}
+		const physics::Vec3 before = level.titan(team)->position;
+		level.world->tick(1 / 30.0f);
+		travelled += std::sqrt(physics::lengthSquared(level.titan(team)->position - before));
+	}
+	int deaths = 0;
+	for (const int id : ids) {
+		game::GameWorld::PlayerInfo info;
+		level.world->playerInfo(id, info);
+		deaths += info.alive ? 0 : 1;
+	}
+	std::fprintf(stderr, "  %s, team %d's Titan (%.1f m in 30 s, asleep %d), riders %s: %d of %zu died\n", map, team, travelled,
+		level.world->bodyAsleep(titan.object), move ? "moving" : "still", deaths, ids.size());
+	CHECK(travelled > 5); // it moved under them
+	CHECK(level.world->bodyAsleep(titan.object));
+	return deaths;
+}
+
+TEST(Titan_RidersSurviveAMovingDeck)
+{
+	for (const char* map : {"Minsk", "Suez_Canal"}) {
+		for (const bool move : {false, true}) {
+			CHECK(ridersOnAMovingDeck(map, map[0] == 'M' ? 1 : 2, move) == 0);
+		}
+	}
+}
+
+// An enemy soldier on a stationary Titan whose shield is down (the playtest:
+// "splattered" walking about its roof). Every hurt he takes is one of the two
+// retail rules, nothing from the walking itself:
+// - the vehicle bay's forcefield (as_titan_vb_shield, eu_forcefield_big: a
+//   SimpleObject child of the root, no armour, so the outer shield's wreck
+//   at 60 % leaves it standing) has no soldier LOD, so soldiers meet its
+//   vehicle LOD (the loader 0x006e4880 sets the soldier LOD index +0x18 to
+//   the vehicle's +0x14 when missing), every face of which is
+//   force_deathmat 0x29a; its collisionGroups (0x100 PAC, 0x200 EU) let
+//   only its own team through (0x006c3890: the soldier's team 1 against
+//   bit 0x100, 2 against 0x200). The contact is a road kill (0x005a43c0)
+//   whose material 0x29a skips the speed limit: dead at any speed. It is
+//   the wall between the roof and the rear deck;
+// - a drop onto the hull over 10 m/s (0x005a43c0's limit, *0x00a6a794;
+//   the Titan stands still, so not 3), (v - 10) x v x the mass factor
+//   (0x005a2ca0: both nodes mobile, slot 0x164 a class constant, 1 on the
+//   mobile node 0x006a10e0 even asleep, so the Titan's 1e6 over the
+//   soldier's 200, at most 3). With gravity 14.73 the roof-to-deck drop
+//   (6.6 m) meets it at 12-13 m/s: 80-120.
+// No fall height is kept anywhere (retail's damage is the contact's speed
+// only: 0x005a3db0 for the ground, 0x005a43c0 for objects), so nothing a
+// vehicle leaves behind carries over.
+namespace {
+
+struct WalkLog {
+	int deaths = 0, shieldDeaths = 0, falls = 0, crushes = 0, unexplained = 0;
+};
+
+// Walks player `id` about for `seconds`; every hurt is sorted by the
+// fastest the soldier went in the four ticks before it. `craft`: a
+// vehicle parked on the Titan, still settling (awake), which squashes
+// a soldier who walks into a gap under it faster than 3 m/s relative to
+// it and gets stuck there (the solve, 0x006c48c0, compares the heavy
+// mover's point velocity with the soldier's own: his own walk counts).
+void walkAbout(TitanLevel& level, int id, const game::GameWorld::TitanInfo& titan, const physics::Mat3& turn, float seconds,
+	int variant, WalkLog& log, const char* label, uint32_t craft = 0)
+{
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(id, info);
+	float hp = info.alive ? level.world->hitPoints(info.soldier) : 0.0f;
+	float recent[4] = {};
+	for (int tick = 0; tick < static_cast<int>(seconds * 30) && info.alive; ++tick) {
+		game::SoldierInput in;
+		const int phase = (tick / 45) % 6;
+		in.throttle = phase == 3 ? -1.0f : phase == 4 ? 0.0f : 1.0f;
+		in.strafe = phase == 1 ? 1.0f : phase == 4 ? -1.0f : 0.0f;
+		in.sprint = phase == 2 || phase == 5;
+		in.turn = (variant % 2 ? 3.0f : -3.0f) * (phase == 2 ? 0.5f : 1.0f);
+		in.jump = tick % 97 == variant % 97;
+		level.world->setInput(id, in);
+		level.world->tick(1 / 30.0f);
+		level.world->playerInfo(id, info);
+		const float now = info.alive ? level.world->hitPoints(info.soldier) : 0.0f;
+		float fast = std::sqrt(physics::lengthSquared(info.velocity));
+		for (const float v : recent) {
+			fast = std::max(fast, v);
+		}
+		recent[tick % 4] = std::sqrt(physics::lengthSquared(info.velocity));
+		const physics::Vec3 at = turn.untransform(info.position - titan.position);
+		if (at.y < -25) {
+			break; // off the Titan, down to the ground
+		}
+		if (now > hp - 0.01f) {
+			hp = now;
+			continue;
+		}
+		const char* kind = "unexplained";
+		physics::Vec3 craftAt, craftVelocity;
+		const bool nearCraft = craft && level.world->bodyMotion(craft, craftAt, craftVelocity) && !level.world->bodyAsleep(craft)
+			&& physics::lengthSquared(craftAt - info.position) < 8 * 8;
+		if (fast >= 9.5f) {
+			++log.falls;
+			kind = "a drop";
+		} else if (!info.alive && nearCraft) {
+			++log.crushes;
+			kind = "squashed under the settling craft";
+		} else if (!info.alive && at.z < -45 && at.y > 8 && at.y < 19) {
+			++log.shieldDeaths;
+			kind = "the vehicle bay shield";
+		} else {
+			++log.unexplained;
+		}
+		std::fprintf(stderr, "    %s: %.0f -> %.0f at %.1f/%.1f/%.1f, up to %.1f m/s: %s\n", label, hp, now, at.x, at.y, at.z, fast, kind);
+		hp = now;
+	}
+	log.deaths += info.alive ? 0 : 1;
+}
+
+} // namespace
+
+TEST(Titan_EnemyWalksOnAStillTitan)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* map : {"Suez_Canal", "Minsk"}) {
+		for (const int titanTeam : {1, 2}) {
+			TitanLevel level(gameDir, map, 48);
+			CHECK(level.loaded && level.titan(titanTeam));
+			if (!level.loaded || !level.titan(titanTeam)) continue;
+			const auto titan = *level.titan(titanTeam);
+			level.world->setHitPoints(titan.object, titan.hitPoints * 0.5f);
+			level.run(1);
+			CHECK(!level.titan(titanTeam)->shield);
+			const world::Object* object = level.objects.find(titan.object);
+			const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+			const int enemy = titanTeam == 1 ? 2 : 1;
+			const auto local = [&](float x, float y, float z) { return titan.position + turn.transform({x, y, z}); };
+			// Set down 1 m over whatever is topmost over a grid across the hull.
+			std::vector<physics::Vec3> spots;
+			for (float z = -60; z <= 60; z += 15) {
+				for (float x = -12; x <= 12; x += 6) {
+					for (float y = 60; y > -20; y -= 0.25f) {
+						if (!level.world->soldierPathClear(enemy, local(x, y + 0.25f, z), local(x, y, z))) {
+							spots.push_back({x, y + 1.0f, z});
+							break;
+						}
+					}
+				}
+			}
+			CHECK(spots.size() > 20);
+			WalkLog log;
+			for (size_t s = 0; s < spots.size(); ++s) {
+				const int id = level.world->addPlayer("Walker", enemy, false);
+				CHECK(level.world->spawnSoldier(id));
+				game::GameWorld::PlayerInfo info;
+				level.world->playerInfo(id, info);
+				CHECK(level.world->setSoldierPosition(info.soldier, local(spots[s].x, spots[s].y, spots[s].z)));
+				walkAbout(level, id, titan, turn, 40, static_cast<int>(s), log, map);
+				level.world->removePlayer(id);
+			}
+			std::fprintf(stderr, "  %s, team %d's Titan: %zu walkers, %d died (%d at the vehicle bay shield), %d drops over 10 m/s, %d unexplained\n",
+				map, titanTeam, spots.size(), log.deaths, log.shieldDeaths, log.falls, log.unexplained);
+			CHECK(log.unexplained == 0);
+			CHECK(log.shieldDeaths > 0); // the shield stands with the Titan's down
+		}
+	}
+}
+
+// The playtest's own way there: a gunship or a transport set down on the
+// enemy Titan's roof (its shield down), the pilot gets out (the craft's
+// exit drops him 2-4 m onto the roof) and walks off, between its levels.
+TEST(Titan_PilotLandsOnTheEnemyRoof)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	WalkLog log;
+	int landed = 0;
+	for (const char* map : {"Minsk", "Suez_Canal"}) {
+		for (const char* craftName : {"us_ag", "eu_at"}) {
+			for (int heading = 0; heading < 4; ++heading) {
+				TitanLevel level(dir, map, 48);
+				world::ObjectTemplate* craftT = level.loaded ? level.templates.find(craftName) : nullptr;
+				CHECK(craftT != nullptr);
+				if (!craftT) continue;
+				const auto pac = *level.titan(1);
+				const world::Object* object = level.objects.find(pac.object);
+				const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+				level.world->setHitPoints(pac.object, pac.hitPoints * 0.5f);
+				level.run(0.5f);
+				const physics::Vec3 at = pac.position + turn.transform({0, 22.0f, -35});
+				world::Object* craft = level.objects.create(craftT, {at.x, at.y, at.z}, {object->rotation().x + heading * 90.0f, 0, 0});
+				craft->setTeam(2);
+				const uint32_t craftId = craft->id();
+				level.run(5);
+				if (level.world->hitPoints(craftId) <= 0) {
+					// Wrecked settling on the roof hump (it slides and tips there;
+					// not followed here).
+					std::fprintf(stderr, "  %s %s heading %d: the craft was wrecked settling\n", map, craftName, heading);
+					continue;
+				}
+				const int me = level.world->addPlayer("Me", 2, false);
+				CHECK(level.world->spawnSoldier(me));
+				game::GameWorld::PlayerInfo info;
+				level.world->playerInfo(me, info);
+				const physics::Vec3 rest {craft->position().x, craft->position().y, craft->position().z};
+				level.world->setSoldierPosition(info.soldier, {rest.x + 2.0f, rest.y - 1.0f, rest.z});
+				game::SoldierInput use;
+				use.use = true;
+				level.world->setInput(me, use);
+				level.run(0.1f);
+				level.world->setInput(me, {});
+				level.run(2);
+				level.world->playerInfo(me, info);
+				if (info.vehicle != craftId) {
+					// Wrecked while he got in (it slides and tips on the roof hump).
+					std::fprintf(stderr, "  %s %s heading %d: the craft didn't last (hit points %.0f)\n", map, craftName, heading, level.world->hitPoints(craftId));
+					continue;
+				}
+				level.world->setInput(me, use);
+				level.run(0.1f);
+				level.world->setInput(me, {});
+				level.run(1.5f);
+				level.world->playerInfo(me, info);
+				const physics::Vec3 out = turn.untransform(info.position - pac.position);
+				const float hp = info.alive ? level.world->hitPoints(info.soldier) : 0.0f;
+				std::fprintf(stderr, "  %s %s heading %d: out on the roof at %.1f/%.1f/%.1f, %.0f hit points\n", map, craftName, heading, out.x, out.y, out.z, hp);
+				if (level.world->hitPoints(craftId) <= 0) {
+					std::fprintf(stderr, "    the craft was wrecked with him aboard\n");
+					continue;
+				}
+				// Out alive on the roof; the exit's drop of up to 5 m onto the hull
+				// (soldierExitLocation, 0.5 m up) is a road kill over 10 m/s, x 3.
+				CHECK(info.alive && info.vehicle == 0 && out.y > 15);
+				++landed;
+				char label[64];
+				std::snprintf(label, sizeof label, "%s %s %d", map, craftName, heading);
+				walkAbout(level, me, pac, turn, 30, heading, log, label, craftId);
+			}
+		}
+	}
+	std::fprintf(stderr, "  %d pilots out on the roof: %d died (%d at the vehicle bay shield, %d under the craft), %d drops over 10 m/s, %d unexplained\n",
+		landed, log.deaths, log.shieldDeaths, log.crushes, log.falls, log.unexplained);
+	CHECK(landed >= 10);
+	CHECK(log.unexplained == 0);
+}
+
+// The vehicle bay shield alone: an enemy set down on it, a half metre
+// over its top at the rear of the roof, dies on the touch at a walk's
+// speed with the Titan's shield down; the Titan's own soldier falls
+// through it to the deck below.
+TEST(Titan_VehicleBayShieldOutlastsTheTitansShield)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const int titanTeam : {1, 2}) {
+		TitanLevel level(dir, "Suez_Canal", 48);
+		CHECK(level.loaded && level.titan(titanTeam));
+		if (!level.loaded || !level.titan(titanTeam)) continue;
+		const auto titan = *level.titan(titanTeam);
+		level.world->setHitPoints(titan.object, titan.hitPoints * 0.5f);
+		level.run(1);
+		CHECK(!level.titan(titanTeam)->shield);
+		const world::Object* object = level.objects.find(titan.object);
+		const physics::Mat3 turn = physics::Mat3::fromYawPitchRoll({object->rotation().x, object->rotation().y, object->rotation().z});
+		const auto local = [&](float y) { return titan.position + turn.transform({0, y, -60}); };
+		const int enemy = titanTeam == 1 ? 2 : 1;
+		float top = -1, under = -1; // the topmost face for each team
+		for (float y = 30; y > 0 && (top < 0 || under < 0); y -= 0.1f) {
+			if (top < 0 && !level.world->soldierPathClear(enemy, local(y + 0.1f), local(y))) top = y;
+			if (under < 0 && !level.world->soldierPathClear(titanTeam, local(y + 0.1f), local(y))) under = y;
+		}
+		CHECK(top > 0 && under > 0 && top > under + 3); // the shield over the deck, for the enemy only
+		int enemyId = -1, ownId = -1;
+		for (const int team : {enemy, titanTeam}) {
+			const int id = level.world->addPlayer("Dropped", team, false);
+			CHECK(level.world->spawnSoldier(id));
+			game::GameWorld::PlayerInfo info;
+			level.world->playerInfo(id, info);
+			CHECK(level.world->setSoldierPosition(info.soldier, local((team == enemy ? top : under) + 0.5f)));
+			(team == enemy ? enemyId : ownId) = id;
+		}
+		float fastest = 0;
+		game::GameWorld::PlayerInfo e, o;
+		for (int tick = 0; tick < 60; ++tick) {
+			level.run(1 / 30.0f);
+			level.world->playerInfo(enemyId, e);
+			if (e.alive) fastest = std::max(fastest, std::sqrt(physics::lengthSquared(e.velocity)));
+		}
+		level.world->playerInfo(ownId, o);
+		std::fprintf(stderr, "  team %d's Titan, shield down: its vehicle bay shield's top %.1f over the deck %.1f; the enemy %s (at most %.1f m/s), its own soldier %s, %.0f hit points\n",
+			titanTeam, top, under, e.alive ? "lived" : "died", fastest, o.alive ? "lived" : "died", o.alive ? level.world->hitPoints(o.soldier) : 0.0f);
+		CHECK(!e.alive && fastest < 6);
+		CHECK(o.alive && level.world->hitPoints(o.soldier) == 100);
+	}
 }

@@ -18,6 +18,7 @@
 #pragma once
 
 #include "Game/GameWorld.h"
+#include "PlayerCamera.h"
 
 #include <cstdint>
 #include <functional>
@@ -49,6 +50,14 @@ public:
 
 	// Whether the game is a server's (a joined game).
 	virtual bool joined() const = 0;
+	// The player whose own HUD this is (localPlayer, soldier, vehicle,
+	// health, the weapons): the local player, or with viewedPlayer set a
+	// followed one's (enhanced.followFirstPerson, not retail: retail's
+	// spectator and demo cameras show no player's HUD). main.cpp sets it
+	// for the HUD's update only. A joined game knows another player's
+	// soldier, seat, weapon in hand and health from the ghosts, not his
+	// ammunition (rounds and magazines -1) nor his ability bar.
+	int viewedPlayer = -1;
 	virtual int localPlayer() const = 0;
 	virtual bool playerInfo(int player, PlayerInfo& out) const = 0;
 	virtual std::vector<PlayerInfo> playerList() const = 0;
@@ -203,6 +212,12 @@ public:
 		PlayerInfo me;
 		return playerInfo(localPlayer(), me) && me.alive && me.jumpHold;
 	}
+	// The item selection's dimmed kit slots (GameWorld::dimmedItems, 0x0079c290).
+	virtual std::vector<int> dimmedItems(int player) const
+	{
+		(void)player;
+		return {};
+	}
 };
 
 // A local round (also a hosting server's own player).
@@ -213,14 +228,14 @@ public:
 	std::function<int(int)> skillScoreOf; // the scripts' skillScore (else 0)
 
 	bool joined() const override { return false; }
-	int localPlayer() const override { return m_round.localPlayer(); }
+	int localPlayer() const override { return viewedPlayer >= 0 ? viewedPlayer : m_round.localPlayer(); }
 	bool playerInfo(int player, PlayerInfo& out) const override { return m_round.playerInfo(player, out); }
 	std::vector<PlayerInfo> playerList() const override { return m_round.playerList(); }
 	Scores scores(int player) const override;
 	float tickets(int team) const override;
 	int commander(int team) const override { return m_round.commander(team); }
 	std::vector<ControlPointInfo> controlPointList() const override { return m_round.controlPointList(); }
-	bool insideControlPoint() const override { return m_round.playerInsideControlPoint; }
+	bool insideControlPoint() const override { return viewedPlayer < 0 && m_round.playerInsideControlPoint; }
 	std::vector<int> spawnablePoints(int team) const override { return m_round.spawnablePoints(team); }
 	bool spawnGroupActive(int group, int player) const override { return m_round.spawnGroupActive(group, player); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
@@ -255,15 +270,16 @@ public:
 		}
 		return o != nullptr;
 	}
-	const world::Object* soldier() const override { return m_round.player(); }
-	const world::Object* vehicle() const override { return m_round.playerVehicle(); }
+	const world::Object* soldier() const override;
+	const world::Object* vehicle() const override;
 	float health() const override;
 	Weapon heldWeapon() const override;
 	Weapon seatGroupWeapon(int group) const override;
 	std::vector<int> revealedPlayers(int team) const override;
-	std::vector<uint32_t> spottedVehicles() const override { return m_round.mapSpottedVehicles(m_round.localPlayer()); }
+	std::vector<uint32_t> spottedVehicles() const override { return m_round.mapSpottedVehicles(localPlayer()); }
 	float combatAreaTimeLeft() const override;
-	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override { return m_round.abilityBar(m_round.localPlayer(), out); }
+	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override { return m_round.abilityBar(localPlayer(), out); }
+	std::vector<int> dimmedItems(int player) const override { return m_round.dimmedItems(player); }
 
 private:
 	game::GameWorld& m_round;
@@ -319,6 +335,9 @@ public:
 	// over maxHitPoints. Ammo progress is unavailable because other
 	// soldiers' reserve magazines are not synchronized.
 	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override;
+	// A joined game's: the squad's size and the squad leader's items from
+	// the players' ghosts (each weapon's ammunition is the server's).
+	std::vector<int> dimmedItems(int player) const override;
 	// Our hit indicator's alpha: 1 when our own state's flag comes
 	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
 	// (0x005912c0); PlayerInfo::hitIndicator of the local player.
@@ -383,6 +402,15 @@ public:
 	std::vector<int> squadReportedPlayers() const override;
 	float combatAreaTimeLeft() const override;
 
+	// A followed player as the ghosts have him, for his first person
+	// (enhanced.followFirstPerson; PlayerCamera::setRemote): his soldier's
+	// place, look (the body's yaw and the twist on it, the aim's pitch),
+	// pose, selected weapon and zoom (the soldier networkable's, 0x005fc1a0),
+	// his seat (EnterVehicle's ghost) and its vehicle, his fire state and
+	// reloads (the player networkable's, 0x005981a0). Not his exact shots
+	// (the held fire fires at the weapon's rate, as for our own soldier).
+	// False while he is dead or his soldier (or vehicle) has no object here.
+	bool followed(int player, PlayerCamera::Remote& me) const;
 	// The object of a ghost (0 none) and the ghost of an object.
 	uint32_t objectOf(uint16_t ghost) const;
 	uint16_t ghostOf(uint32_t object) const;
@@ -390,6 +418,8 @@ public:
 private:
 	void fill(const net::RemotePlayer& p, PlayerInfo& out) const;
 	std::vector<uint32_t> scanAbilityTargets(const PlayerInfo& me, float radius, bool ammo, bool whileFiring) const;
+	// The followed player's seat's active weapon in a group (its ghost's), -1 none.
+	int viewedSeatWeapon(int group) const;
 	struct AbilityScan {
 		bool active = false; // the tool works (abilityActive)
 		float timer = 0;

@@ -112,6 +112,13 @@ void SoldierBody::touchMaterial(uint32_t other)
 	}
 }
 
+void SoldierBody::touchSoldier()
+{
+	if (frictionOf) {
+		friction = frictionOf(kSoldierContactMaterial, kSoldierContactMaterial);
+	}
+}
+
 // 0x006c24b0: push out along the normal, stop motion into the surface.
 // `relative`: the soldier's velocity relative to what it touches.
 void SoldierBody::addContact(const Vec3& normal, float depth, const Vec3& relative)
@@ -197,7 +204,14 @@ void SoldierBody::collideWithObjects(float seconds)
 // under the origin, to its stance's height) and their origins are within
 // twice this soldier's radius x the scale across (x, z), each is pushed
 // away from the other by the overlap with no velocity (0x006c24b0 twice,
-// material 0x2f); 0.01 apart or nearer, along z. The other's push waits
+// material 0x2f both sides: 0x006c2841..0x006c288a); 0.01 apart or nearer,
+// along z. Each contact also sets both responses' friction (+0xd4, which
+// the movement 0x006c2230 grips with) to the MaterialManager's of 0x2f
+// against 0x2f (slot 0x88: Flare's 1), not the floor's: on a Titan's
+// deck (veh_titan_armor, 5: 3.05 against Human_body) a soldier pressed
+// into a crowd, whose zero-velocity contacts drag the mean contact
+// velocity the grip compares with the wanted one towards 0, was otherwise
+// thrown at 20 m/s and road-killed by the hull. The other's push waits
 // in its response for its next solve: this tick's if still to come, else
 // the next (only entering the world clears it, slot 0x1c 0x006c1ad0).
 // `pass`: only the soldiers whose pass is still to come.
@@ -223,6 +237,8 @@ void SoldierBody::collideWithSoldiers(float scale, bool pass)
 		away = distance >= 0.01f ? away * (1.0f / distance) : Vec3 {0, 0, 1};
 		addContact(away, reach - distance, {});
 		other.addContact(away * -1.0f, reach - distance, {});
+		touchSoldier();
+		other.touchSoldier();
 	}
 }
 

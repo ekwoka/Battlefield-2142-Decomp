@@ -83,7 +83,11 @@ void registerRendererConsoleMethods(Console& console, RendererSettings& settings
 			settings.tweakNearPlane1p = v;
 			settings.tweakNearPlane1pSet = true;
 		});
-	bindFloat("renderer.minCullDistance", settings.minCullDistance); // 0x10051a80, 0x10051ae0
+	bindProperty<float>(console, "renderer.minCullDistance", access, [&settings] { return settings.minCullDistance; }, // 0x10051a80, 0x10051ae0
+		[&settings](const float& v) {
+			settings.minCullDistance = v;
+			++settings.minCullDistanceWrites;
+		});
 	bindBool("renderer.hud", settings.hud); // 0x1004fb80, 0x1004fc70, 0x1004fcd0
 	bindBool("renderer.vsync", settings.vsync); // 0x1004be80, 0x1004bf70, 0x1004bfd0
 	bindBool("renderer.presentAsync", settings.presentAsync); // 0x1004c030, 0x1004c190, 0x1004c1f0

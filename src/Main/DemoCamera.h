@@ -232,6 +232,24 @@ inline void yawPitchOfRows(const float m[9], float& yaw, float& pitch)
 	pitch = std::atan2(m[7], std::sqrt(m[6] * m[6] + m[8] * m[8]));
 }
 
+// A free keyframe (mode 0, as 0x005f9630 writes a local player's view) of
+// a camera at `eye` looking at `at`: its rotation the yaw and pitch of
+// that look (no roll), its position the eye. enhanced.demoCamera writes
+// the director's view (Game/Director.h) this way.
+inline net::CameraKeyframe lookFrame(const float eye[3], const float at[3])
+{
+	net::CameraKeyframe frame;
+	frame.followed = 0xffffffffu;
+	const float d[3] = {at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]};
+	const float yaw = std::atan2(d[0], d[2]);
+	const float pitch = std::atan2(d[1], std::sqrt(d[0] * d[0] + d[2] * d[2]));
+	float rows[9];
+	rowsFromYawPitch(yaw, pitch, rows);
+	quaternionFromRows(rows, frame.rotation);
+	std::copy(eye, eye + 3, frame.position);
+	return frame;
+}
+
 // The camera object's four-frame ring (+0x68, 4 x 0x44 bytes, +0x64 the
 // count; constructor 0x005f93d0): every frame free at the origin, no
 // player followed.
@@ -418,6 +436,12 @@ struct DemoPlayback {
 	float fov = 90;        // degrees (demo.renderfieldofview)
 	float renderWidth = 400, renderHeight = 300;
 	DemoCamera camera;
+	// Not retail (enhanced.followFirstPerson): the followed player shown in
+	// his own first person (--demo-first-person, demo.toggleFirstPerson),
+	// and the player --demo-follow asks for (a name or an id), followed
+	// whenever he lives (followWanted: until then, and after each death).
+	bool firstPerson = false;
+	std::string followWanted;
 	// The demo's clock as the last frame left it: the tick and the
 	// fraction of the next (the demo's +0xf8, the camera's blend).
 	uint32_t tick = 0;

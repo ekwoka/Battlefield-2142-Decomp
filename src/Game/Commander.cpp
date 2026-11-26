@@ -551,6 +551,8 @@ void GameWorld::launchUavDrone(int team, const physics::Vec3& at)
 	}
 	CommanderTeam& side = m_commanders[team];
 	side.uavDrone = placed->id();
+	side.uavYawRate = rate;
+	side.uavSpeed = speed;
 	side.uavTurnRate = std::fabs(rate);
 	side.uavCircle = side.uavTurnRate > 0 ? speed / side.uavTurnRate : 0;
 	side.uavCentre = {at.x + radius - side.uavCircle, height, at.z};
@@ -558,12 +560,13 @@ void GameWorld::launchUavDrone(int team, const physics::Vec3& at)
 }
 
 // Each game-logic tick (0x004c0da0 -> 0x005a20c0 -> 0x005a1f70) a drone
-// is set a yaw rate and its forward x v as its velocity: plain
-// kinematics, round the circle from +x towards +z. It goes (0x005a1d90:
+// is set a yaw rate and its forward x v as its velocity, round the circle
+// from +x towards +z. It goes at once, where it flies (0x005a1d90:
 // ECGameLogicGLUAVVehicleDestroyed, the object deleted) when the UAV's
 // time is up (uavTime) or the team's RCUav assets are wrecked (their hit
 // points over their maxima, 0x005a2850; 1 without any), and when it is
-// shot down (the team's HUD hears ECHudHEUAVVehicleDestroyed,
+// shot down (its armour's wreck message 0x18, slot 64 0x005a2130; see
+// destroyVehicle; the team's HUD hears ECHudHEUAVVehicleDestroyed,
 // 0x005a1c90). The reveal is round the point either way (0x005a27c0).
 void GameWorld::flyUavDrones(float seconds)
 {
@@ -585,7 +588,28 @@ void GameWorld::flyUavDrones(float seconds)
 			maxHp += number(*object->objectTemplate(), "armor.maxHitPoints", 0);
 		}
 		const bool assetsStand = !anyAsset || maxHp <= 0 || hp > 0;
-		if (!drone || drone->destroyed() || !abilityState(team, CommanderAbility::Uav).active || !assetsStand) {
+		if (!drone || !abilityState(team, CommanderAbility::Uav).active || !assetsStand) {
+			removeUavDrone(team);
+			continue;
+		}
+		// eu_drone is a mobile Mesh node (hasMobilePhysics 1, physicsType
+		// Mesh): 0x005a1f70 sets its node's angular velocity (slot 0x6c,
+		// 0x006c9530) to (0, +0x188, 0) and its velocity (slot 0x5c,
+		// 0x006c5a90) to its forward (the matrix's third row, slot 0x34)
+		// x uavVehicleSpeed, and the node's own step moves it, gravity
+		// and all; so the body the rounds meet is where the drone flies.
+		// It does so for a wreck too, until the armour removes it
+		// (timeToStayAsWreck 0: at once).
+		if (Body* body = findBody(side.uavDrone)) {
+			body->body.angularVelocity = {0, side.uavYawRate, 0};
+			body->body.velocity = body->body.rotation.rows[2] * side.uavSpeed;
+			continue;
+		}
+		if (m_files && number(*drone->objectTemplate(), "hasMobilePhysics", 0) != 0) {
+			continue; // its node comes at the next addBodies
+		}
+		// Without physics: the same circle, placed.
+		if (drone->destroyed()) {
 			removeUavDrone(team);
 			continue;
 		}
@@ -905,6 +929,45 @@ void GameWorld::supplyObjectContact(uint32_t self, uint32_t other)
 	if (crate != m_crates.end()) {
 		crate->landed = true;
 	}
+}
+
+// The supply objects stepCrates would mend `vehicle` at (its team's or no one's, workOnVehicles, healing, its
+// vehicleCategory listed): each one's place and its reach for this vehicle (the radius and the body's own).
+std::vector<GameWorld::VehicleSupply> GameWorld::vehicleSupplies(uint32_t vehicle) const
+{
+	std::vector<VehicleSupply> out;
+	const Body* body = findBody(vehicle);
+	const world::Object* v = m_objects.find(vehicle);
+	const world::ObjectTemplate* vt = v ? v->objectTemplate() : nullptr;
+	if (!body || !body->vehicle || !vt) {
+		return out;
+	}
+	float own = 0;
+	for (const physics::Vec3& point : body->points) {
+		own = std::max(own, std::sqrt(physics::lengthSquared(point)));
+	}
+	const std::string category = std::to_string(vehicleCategory(*vt));
+	for (const Crate& crate : m_crates) {
+		const world::Object* object = m_objects.find(crate.object);
+		const world::ObjectTemplate* t = crate.settings ? crate.settings : object ? object->objectTemplate() : nullptr;
+		if (!object || !t || (crate.team != 0 && crate.team != v->team()) || integer(*t, "workOnVehicles", 0) == 0
+			|| number(*t, "healSpeed", 0) <= 0) {
+			continue;
+		}
+		if (const auto types = t->settings().find("addVehicleType.list"); types != t->settings().end()) {
+			std::istringstream list(types->second);
+			bool listed = false;
+			for (std::string type; list >> type;) {
+				listed = listed || type == category;
+			}
+			if (!listed) {
+				continue;
+			}
+		}
+		const world::Vec3 p = object->position();
+		out.push_back({{p.x, p.y, p.z}, number(*t, "radius", 2) + own});
+	}
+	return out;
 }
 
 void GameWorld::stepCrates(float seconds)

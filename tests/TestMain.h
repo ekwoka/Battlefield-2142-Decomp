@@ -45,6 +45,15 @@ inline void unsetEnv(const char* name)
 #endif
 }
 
+// A test switched off for now (it reports as skipped, with the reason):
+// known to fail, and tracked in docs/review-backlog.md.
+#define DISABLED(reason)                                         \
+	do {                                                         \
+		std::fprintf(stderr, "  disabled: %s\n", reason);        \
+		test::skipped() = true;                                  \
+		return;                                                  \
+	} while (0)
+
 // Project Remaster is a mod, not part of the game: its tests run only with
 // --remaster (or BF2142_REMASTER_TESTS=1) and then need it under the game's mods.
 inline bool& remaster()

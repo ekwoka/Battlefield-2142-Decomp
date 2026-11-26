@@ -166,16 +166,115 @@ TEST(ShaderUniforms_NoBlockOutrunsItsPush)
 	}
 }
 
+#endif
+
+// The shaders' own fog and particle math, compiled as C++ (Render/ShaderMath.h:
+// fog_share.glsl, particle_color.glsl), against numbers worked out from
+// retail's RaCommon.fx, Particles.fx and D3D9's fixed-function fog.
+#include "Render/Fog.h"
+#include "Render/ParticleFog.h"
+#include "Render/ShaderMath.h"
+
+#include <cmath>
+
+namespace {
+
+bool approx(float a, float b)
+{
+	return std::fabs(a - b) < 1e-5f;
+}
+
+bool approx(const dice::hfe::render::glsl::vec4& v, float x, float y, float z, float w)
+{
+	return approx(v.x, x) && approx(v.y, y) && approx(v.z, z) && approx(v.w, w);
+}
+
+} // namespace
+
+// RaCommon.fx calcFog(w) = max(w FogRange.y + FogRange.w, FogColor.w)
+// - (w FogRange.x + FogRange.z)^3, FogRange from 0x100355c0. Fog from 100 to
+// 500 m, base 1: at 300 m 0.5 - 0.5^3 = 0.375 shows (a 0.625 share of fog);
+// a near floor (FogColor.w) of 0.6 lifts that to 0.475; before the start
+// none, past the end all.
+TEST(ShaderMath_FogShareIsRetailsCalcFog)
+{
+	using namespace dice::hfe::render;
+	const std::array<float, 4> fog {100, 500, 1, 0};
+	const auto r = fogRange(fog);
+	const glsl::vec4 range(r[0], r[1], r[2], r[3]);
+	CHECK(approx(glsl::fogShare(300, range, 0), 0.625f));
+	CHECK(approx(glsl::fogShare(300, range, 0.6f), 0.525f));
+	CHECK(approx(glsl::fogShare(50, range, 0), 0));
+	CHECK(approx(glsl::fogShare(600, range, 0), 1));
+	// The CPU's copy (Fog.h) agrees.
+	for (float w : {0.0f, 50.0f, 150.0f, 300.0f, 450.0f, 600.0f}) {
+		CHECK(approx(glsl::fogShare(w, range, 0), 1 - fogVisibility(fog, w)));
+	}
+}
+
+// RendDX9 0x1012f750 (called by the sprite draw 0x1012fdf0 at 0x1012fe38):
+// the normal-blend sprites draw SRCALPHA / INVSRCALPHA with D3DRS_FOGENABLE
+// 1 at every shader quality but the overdraw view (0); the additive ones
+// (0x10130540, AdditiveLow/High) one/one with fog off.
+TEST(ShaderMath_NormalBlendSpritesFogAdditiveOnesDont)
+{
+	using namespace dice::hfe::render;
+	for (int quality = 1; quality <= 3; ++quality) {
+		CHECK(spriteGroupFogged(false, quality));
+		CHECK(!spriteGroupFogged(true, quality));
+	}
+	CHECK(!spriteGroupFogged(false, 0));
+	// particle.frag's material.w: 1 fog, + 2 the additive mask.
+	CHECK(particleMaterialFlags(true, false) == 1.0f);
+	CHECK(particleMaterialFlags(false, true) == 2.0f);
+	CHECK(particleMaterialFlags(false, false) == 0.0f);
+}
+
+// Trails and non-screen-aligned quads (RendDX9 0x10133d90 / 0x1012ebf0):
+// Trail.fx and NonScreenAlignedParticles.fx have no additive technique, and
+// every one sets SrcBlend SRCALPHA, DestBlend INVSRCALPHA, FogEnable TRUE;
+// the batch draws (0x10133000, 0x1012d720) leave those states alone. So a
+// trail template marked particleType Additive (em_excalibur_trail_TrailGlow)
+// draws normal-blend and fogged: at a 0.625 fog share its saturated
+// 1/0.6/0.2 goes to 0.5/0.475/0.45 toward the fog colour (the alpha blend's
+// source, not a one/one add), alpha untouched, unmasked by it.
+TEST(ShaderMath_TrailsAndPlacedQuadsAlwaysBlendAndFog)
+{
+	using namespace dice::hfe::render;
+	for (bool templateAdditive : {false, true}) {
+		const PlacedParticleDraw drawn = placedGroupDraw(templateAdditive);
+		CHECK(!drawn.additive);
+		CHECK(drawn.fogged);
+		CHECK(particleMaterialFlags(drawn.fogged, drawn.additive) == 1.0f);
+	}
+	const glsl::vec4 texel(0.8f, 0.6f, 0.4f, 0.5f), color(1.5f, 1.0f, 0.5f, 0.8f);
+	const auto r = fogRange({100, 500, 1, 0});
+	const float fog = glsl::fogShare(300, glsl::vec4(r[0], r[1], r[2], r[3]), 0);
+	const PlacedParticleDraw drawn = placedGroupDraw(true);
+	CHECK(approx(glsl::particleColor(texel, color, drawn.additive, fog, glsl::vec3(0.2f, 0.4f, 0.6f)), 0.5f, 0.475f, 0.45f, 0.4f));
+}
+
+// psParticleLow/Medium/High then the fog: texel x colour, saturated as
+// ps_1_4's output is (red 0.8 x 1.5 = 1.2 -> 1), then lerped toward FogColor
+// by the fog's share: 1 x 0.375 + 0.2 x 0.625 = 0.5 (not 0.575, as the
+// unsaturated colour would give). Alpha 0.5 x 0.8, untouched by the fog.
+TEST(ShaderMath_NormalParticlesSaturateThenFog)
+{
+	using namespace dice::hfe::render;
+	const glsl::vec4 texel(0.8f, 0.6f, 0.4f, 0.5f), color(1.5f, 1.0f, 0.5f, 0.8f);
+	const glsl::vec3 fogColor(0.2f, 0.4f, 0.6f);
+	CHECK(approx(glsl::particleColor(texel, color, false, 0, fogColor), 1, 0.6f, 0.2f, 0.4f));
+	const auto r = fogRange({100, 500, 1, 0});
+	const float fog = glsl::fogShare(300, glsl::vec4(r[0], r[1], r[2], r[3]), 0);
+	CHECK(approx(glsl::particleColor(texel, color, false, fog, fogColor), 0.5f, 0.475f, 0.45f, 0.4f));
+}
+
 // Particles.fx psParticleAdditive*: alpha masks the colour inside the shader and
 // the pixel output clamps before the one/one add, so a colour over 1 keeps its
 // blue (0.5/1.2/2 x 0.5 is 0.25/0.6/1, not the cyan 0.25/0.5/0.5 of clamp-then-mask).
-TEST(ShaderUniforms_AdditiveParticlesMaskBeforeClamp)
+TEST(ShaderMath_AdditiveParticlesMaskBeforeClamp)
 {
-	std::ifstream file(std::filesystem::path(__FILE__).parent_path().parent_path() / "src/Render/Shaders/particle.frag");
-	std::stringstream text;
-	text << file.rdbuf();
-	const std::string source = text.str();
-	const size_t mask = source.find("clamp(outColor.rgb * outColor.a");
-	CHECK(!source.empty() && mask != std::string::npos && source.find("material.w > 1.5") < mask);
+	using namespace dice::hfe::render;
+	const glsl::vec4 texel(1, 1, 1, 0.5f), color(0.5f, 1.2f, 2, 1);
+	CHECK(approx(glsl::particleColor(texel, color, true, 0, glsl::vec3(0.2f, 0.4f, 0.6f)), 0.25f, 0.6f, 1, 0.5f));
 }
-#endif

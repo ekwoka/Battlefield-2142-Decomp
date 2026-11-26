@@ -12,9 +12,9 @@ layout(location = 3) in vec4 inShadowAt;
 layout(location = 4) in vec3 inParticleTint;
 >>>>
 <<<<
-	outColor = vec4(mix(texel.rgb * inColor.rgb, fogColor.rgb, fog), texel.a * inColor.a);
+	outColor = particleColor(texel, inColor, material.w > 1.5, fog, fogColor.rgb);
 ====
 	float shade = (1.0 - shadowFactor(inShadowAt.xyz, true)) * inShadowAt.w;
 	vec3 color = inColor.rgb + inParticleTint * material.rgb * shade;
-	outColor = vec4(mix(texel.rgb * color, fogColor.rgb, fog), texel.a * inColor.a);
+	outColor = particleColor(texel, vec4(color, inColor.a), material.w > 1.5, fog, fogColor.rgb);
 >>>>

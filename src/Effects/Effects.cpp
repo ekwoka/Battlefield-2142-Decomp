@@ -298,23 +298,30 @@ void Emitter::place(const Vec3& position, const Mat3& rotation)
 	m_rotation = frameFor(*m_template, rotation);
 }
 
-void Emitter::bounds(Vec3& centre, float& radius) const
+void Emitter::box(Vec3& low, Vec3& high) const
 {
 	if (m_particles.empty()) {
-		centre = m_position;
-		radius = 0;
+		low = high = m_position;
 		return;
 	}
-	Vec3 lo = worldPosition(m_particles.front()), hi = lo;
+	low = worldPosition(m_particles.front());
+	high = low;
 	for (const Particle& p : m_particles) {
 		const Vec3 at = worldPosition(p);
-		lo = {std::min(lo.x, at.x), std::min(lo.y, at.y), std::min(lo.z, at.z)};
-		hi = {std::max(hi.x, at.x), std::max(hi.y, at.y), std::max(hi.z, at.z)};
+		low = {std::min(low.x, at.x), std::min(low.y, at.y), std::min(low.z, at.z)};
+		high = {std::max(high.x, at.x), std::max(high.y, at.y), std::max(high.z, at.z)};
 	}
 	const float grow = m_template->particleMaxSize; // the template's +0x14c
-	const Vec3 half = (hi - lo) * 0.5f + Vec3 {grow, grow, grow};
-	centre = (lo + hi) * 0.5f;
-	radius = std::sqrt(physics::lengthSquared(half));
+	low = low - Vec3 {grow, grow, grow};
+	high = high + Vec3 {grow, grow, grow};
+}
+
+void Emitter::bounds(Vec3& centre, float& radius) const
+{
+	Vec3 low, high;
+	box(low, high);
+	centre = (low + high) * 0.5f;
+	radius = std::sqrt(physics::lengthSquared((high - low) * 0.5f));
 }
 
 Vec3 Emitter::worldPosition(const Particle& p) const
@@ -770,26 +777,39 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 	if (!m_started) {
 		start(context);
 	}
-	// The distance LOD (0x101393e0): (1 - f)^2 plus the system's size on
-	// screen (+0x120: its particles' box radius, 0x1012ea30), between the
-	// template's floor and 1.
+	// The distance LOD (0x101393e0, RendDX9's frame 0x10098bf0): 1 with the
+	// camera inside the system's box (+0xfc, 0x10135be0, edges included);
+	// otherwise, measured from the box's centre (+0x114), (1 - f)^2 plus
+	// the box's radius (+0x120, 0x1012ea30) times a screen factor over the
+	// distance, between the template's floor and 1. The screen factor is
+	// 1.05 / (fov x tan(fov / 2)) for a box taller than it is wide and
+	// deep (y's extent above both x's and z's), else that times the view's
+	// height / width (RenderView +0x24, +0x34).
 	m_lodScale = 1;
 	if (context.settings && context.hasCamera) {
-		const scene::ParticleSystemSettings& s = *context.settings;
-		const float end = s.lodFractions[static_cast<size_t>(std::clamp(t.lodDistance, 0, 2))] * s.viewDistance;
-		const float fadeStart = s.startFadePercentageOfViewDistance * end;
-		const float distance = std::sqrt(physics::lengthSquared(m_position - context.camera));
-		float scale = 1;
-		if (distance > fadeStart && end > fadeStart) {
-			const float f = std::min((distance - fadeStart) / (end - fadeStart), 1.0f);
-			scale = (1 - f) * (1 - f);
+		Vec3 low, high;
+		box(low, high);
+		const Vec3& c = context.camera;
+		const bool inside = c.x >= low.x && c.y >= low.y && c.z >= low.z && c.x <= high.x && c.y <= high.y
+			&& c.z <= high.z;
+		if (!inside) {
+			const scene::ParticleSystemSettings& s = *context.settings;
+			const float end = s.lodFractions[static_cast<size_t>(std::clamp(t.lodDistance, 0, 2))] * s.viewDistance;
+			const float fadeStart = s.startFadePercentageOfViewDistance * end;
+			const Vec3 centre = (low + high) * 0.5f;
+			const Vec3 size = high - low;
+			const float radius = std::sqrt(physics::lengthSquared(size * 0.5f));
+			const float distance = std::sqrt(physics::lengthSquared(c - centre));
+			float scale = 1;
+			if (distance > fadeStart && end > fadeStart) {
+				const float f = std::min((distance - fadeStart) / (end - fadeStart), 1.0f);
+				scale = (1 - f) * (1 - f);
+			}
+			const float screen = 1.05f / (context.fov * std::tan(context.fov * 0.5f));
+			const bool tall = size.y > size.x && size.y > size.z;
+			scale += radius * (tall ? screen : screen * context.aspect) / std::max(distance, 1e-6f);
+			m_lodScale = std::clamp(scale, std::min(t.minEmitScale, 1.0f), 1.0f);
 		}
-		Vec3 centre;
-		float radius;
-		bounds(centre, radius);
-		// shortcut: retail's screen factor is 1.05 / (fov x tan(fov / 2)), picked by the box's longest axis; tan(fovY / 2) kept until the camera's fov getters are decoded.
-		scale += radius / std::max(distance * context.tanHalfFov, 1e-3f);
-		m_lodScale = std::clamp(scale, std::min(t.minEmitScale, 1.0f), 1.0f);
 	}
 	if (t.trail) {
 		// A point at emitFrequency while the system moves faster than

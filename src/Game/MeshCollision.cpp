@@ -1239,11 +1239,19 @@ void GameWorld::wheelProbes(Body& body, MeshActor& b, float seconds)
 			}
 			// The contact goes to the wheel's own response (its spring and
 			// tyre, Vehicle::touchObject: as deep as its depth share puts it),
-			// the mirror to B's.
+			// the mirror to B's. Its material, in the contact (and so its
+			// friction cell, 0x006ba4c0) and both collision events, is the
+			// probe's vertex's (0x6bc764: slot 0x44(1, i) of the wheel's mesh),
+			// not the template's material (0 for the cars, whose cell against
+			// a deck has damageMod 1): a FAV's tyre on a deck is Rubber 4550,
+			// which takes no damage from it, and a hover tank's air cushion
+			// 4351 veh_tank_hover, friction 0.2 multiplied (against 0.725, it
+			// crawled along the bridges).
+			const uint32_t own = w < body.wheelMaterials.size() ? body.wheelMaterials[w][static_cast<size_t>(i)] : body.material;
 			const physics::MassShares shares =
-				addMeshContact(a, b, hit.point, hit.normal, hit.depth, body.material, hit.material, false, false);
+				addMeshContact(a, b, hit.point, hit.normal, hit.depth, own, hit.material, false, false);
 			if (shares.velocityA != 0) {
-				const float grip = m_materials ? m_materials->friction(body.material, hit.material) : 0.8f;
+				const float grip = m_materials ? m_materials->friction(own, hit.material) : 0.8f;
 				// The wheel's response (0x006ba4c0): its push-out, and the
 				// root's as it stands now (contacts added later aren't in it);
 				// the Spring's solve takes the difference (0x006ba7d0).

@@ -365,6 +365,20 @@ bool GameWorld::raycastBody(const Body& body, const physics::Vec3& from, const p
 	if (partHit) {
 		*partHit = -1;
 	}
+	// The broad phase: a segment that passes outside the sphere about the origin holding the mesh's
+	// vertices and the posed parts meets neither (the scene's rays test the bodies' bounds first too).
+	if (body.projectileMesh && body.reachMeasured != body.projectileMesh) {
+		float reach = 0;
+		body.projectileMesh->forEachFace([&](const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c) {
+			reach = std::max({reach, physics::lengthSquared(a), physics::lengthSquared(b), physics::lengthSquared(c)});
+		});
+		body.projectileReach = std::sqrt(reach) + 0.01f;
+		body.reachMeasured = body.projectileMesh;
+	}
+	const float reach = std::max(body.projectileMesh ? body.projectileReach : 0.0f, body.partMeshes.empty() ? 0.0f : body.partReach);
+	if (segmentDistanceSquared(from, to, {}) > reach * reach) {
+		return false;
+	}
 	if (body.projectileMesh && cast(*body.projectileMesh, from, to, candidate)) {
 		best = candidate.fraction;
 		hit = candidate;

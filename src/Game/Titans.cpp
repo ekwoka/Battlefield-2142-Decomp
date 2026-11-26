@@ -28,6 +28,7 @@
 // (0x005aa0e0 sets the object's position and the node's velocity); with
 // sv.allowTitanMovement off it stands. It never turns.
 #include "CombatAreas.h"
+#include "TickProf.h"
 #include "GameWorld.h"
 
 #include "Physics/CollisionMeshFile.h"
@@ -274,6 +275,21 @@ bool GameWorld::titanGunWorks(uint32_t object, int seat) const
 	}
 	const TitanPart& armour = titan->parts[static_cast<size_t>(part)];
 	return armour.state == 0 || !armour.t || number(*armour.t, "armor.disableInputOnDestroy", 0) == 0;
+}
+
+bool GameWorld::titanSeatHub(uint32_t object, int seat, uint32_t& id, physics::Vec3& at, bool& wreck) const
+{
+	const Titan* titan = titanByObject(object);
+	const world::Object* o = m_objects.find(object);
+	if (!titan || !o || seat < 0 || static_cast<size_t>(seat) >= titan->seatParts.size() || titan->seatParts[static_cast<size_t>(seat)] < 0) {
+		return false;
+	}
+	const TitanPart& part = titan->parts[static_cast<size_t>(titan->seatParts[static_cast<size_t>(seat)])];
+	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	id = part.id;
+	at = physics::Vec3 {o->position().x, o->position().y, o->position().z} + rotation.transform(part.position);
+	wreck = part.state != 0 || part.hitPoints <= 0;
+	return true;
 }
 
 // The Titan's wreck puts its gunners out at their seats' exits (the hubs'
@@ -757,6 +773,15 @@ int wreckState(const physics::CollisionMeshFile& mesh, size_t geometry)
 	return geometry < mesh.geometries.size() && mesh.geometries[geometry].subGeometries.size() > 1 ? 1 : -1;
 }
 
+// Where the segment a-b comes nearest the point c, squared (as PartCollision.cpp's).
+float segmentDistanceSquared(const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c)
+{
+	const physics::Vec3 d = b - a;
+	const float span = physics::lengthSquared(d);
+	const float along = span > 0 ? std::clamp(physics::dot(c - a, d) / span, 0.0f, 1.0f) : 0.0f;
+	return physics::lengthSquared(a + d * along - c);
+}
+
 } // namespace
 
 // A part's wreck (0x00654120 -> 0x00654070) runs 0x006539f0(node, 1) over
@@ -781,6 +806,7 @@ int GameWorld::titanMeshState(const Titan& titan, const TitanMesh& m)
 // sub-geometry its parts' wrecks leave it (titanMeshState).
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
+	TP("rebuildTitanMeshes");
 	++titan.meshVersion;
 	// Unknown until the soldier faces are compared below.
 	titan.meshChanges.push_back({titan.meshVersion, false, true, {}, {}});
@@ -944,6 +970,11 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		}
 	}
 	titan.meshesLive = std::move(nowLive);
+	// The bots' shots at its parts (TitanCollision::shot, off the main thread) walk finer cells.
+	{
+		TP("w.titanFineIndex");
+		projectile->buildFineIndex(2.0f);
+	}
 	body->teamSoldierMesh[0] = teams[0];
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
@@ -1087,6 +1118,7 @@ std::vector<GameWorld::TitanInfo> GameWorld::titans() const
 
 bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
 {
+	TP("titanLocalRay");
 	fraction = 1;
 	const Body* body = findBody(titan);
 	if (!body) {
@@ -1105,6 +1137,7 @@ bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& fro
 
 uint32_t GameWorld::titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const
 {
+	TP("titanLocalShot");
 	const Body* body = findBody(titan);
 	physics::CollisionWorld::Hit hit {};
 	if (!body || !raycastBody(*body, from, to, hit)) {
@@ -1118,6 +1151,83 @@ uint32_t GameWorld::titanLocalShot(uint32_t titan, const physics::Vec3& from, co
 		const auto& settings = t->parts[static_cast<size_t>(index)].t->settings();
 		const auto armour = settings.find("armor.defaultMaterial");
 		if (armour == settings.end() || static_cast<uint32_t>(std::atoi(armour->second.c_str())) != hit.material) {
+			return titan;
+		}
+	}
+	return hit.owner ? hit.owner : titan;
+}
+
+std::shared_ptr<const GameWorld::TitanCollision> GameWorld::titanCollision(uint32_t titan) const
+{
+	const Body* body = findBody(titan);
+	if (!body) {
+		return nullptr;
+	}
+	auto made = std::make_shared<TitanCollision>();
+	made->titan = titan;
+	made->soldier = body->soldierMesh;
+	made->teamSoldier[0] = body->teamSoldierMesh[0];
+	made->teamSoldier[1] = body->teamSoldierMesh[1];
+	made->projectile = body->projectileMesh;
+	if (!body->partMeshes.empty()) {
+		poseCollisionParts(*body);
+		made->partReach = body->partReach;
+		for (const Body::PartMesh& part : body->partMeshes) {
+			const std::shared_ptr<const physics::CollisionWorld>& lod = part.lod[body->collisionWrecked || part.wrecked ? 1 : 0];
+			if (lod && !part.off) {
+				made->parts.push_back({lod, part.rotation, part.position, part.radius});
+			}
+		}
+	}
+	for (const Titan& t : m_titans) {
+		for (const TitanPart& part : t.parts) {
+			const auto& settings = part.t->settings();
+			const auto armour = settings.find("armor.defaultMaterial");
+			made->armour[part.id] = armour == settings.end() ? -1 : static_cast<int64_t>(static_cast<uint32_t>(std::atoi(armour->second.c_str())));
+		}
+	}
+	return made;
+}
+
+bool GameWorld::TitanCollision::ray(int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
+{
+	fraction = 1;
+	const physics::CollisionWorld* mesh = (team == 1 || team == 2) && teamSoldier[team - 1] ? teamSoldier[team - 1].get() : soldier.get();
+	physics::CollisionWorld::Hit hit {};
+	if (!mesh || !mesh->raycastShared(from, to, hit)) {
+		return false;
+	}
+	fraction = hit.fraction;
+	return true;
+}
+
+// titanLocalShot on the copy: raycastBody's root LOD and posed parts, then the armour's test.
+uint32_t GameWorld::TitanCollision::shot(const physics::Vec3& from, const physics::Vec3& to) const
+{
+	physics::CollisionWorld::Hit hit {}, candidate {};
+	float best = 2;
+	if (projectile && projectile->raycastShared(from, to, candidate)) {
+		best = candidate.fraction;
+		hit = candidate;
+	}
+	if (!parts.empty() && segmentDistanceSquared(from, to, {}) <= partReach * partReach) {
+		for (const Part& part : parts) {
+			if (segmentDistanceSquared(from, to, part.position) > part.radius * part.radius) {
+				continue;
+			}
+			const physics::Vec3 a = part.rotation.untransform(from - part.position);
+			const physics::Vec3 b = part.rotation.untransform(to - part.position);
+			if (part.lod->raycastShared(a, b, candidate) && candidate.fraction < best) {
+				best = candidate.fraction;
+				hit = candidate;
+			}
+		}
+	}
+	if (best > 1) {
+		return 0;
+	}
+	if (hit.owner && hit.owner != titan) {
+		if (const auto found = armour.find(hit.owner); found != armour.end() && found->second != static_cast<int64_t>(hit.material)) {
 			return titan;
 		}
 	}
@@ -1229,6 +1339,9 @@ std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team, uint32_t o
 			info.percent = titanPercent(part);
 			info.healthActivationLevel = part.healthActivationLevel;
 			info.nametagPushes = part.nametagPushes;
+			for (size_t s = 0; s < titan.seatParts.size(); ++s) {
+				info.seat = titan.seatParts[s] == static_cast<int>(i) ? static_cast<int>(s) : info.seat;
+			}
 			list.push_back(info);
 		}
 	}
@@ -1328,11 +1441,62 @@ void GameWorld::moveTitanBody(Titan& titan, const physics::Vec3& delta)
 		body->body.angularVelocity = {};
 		body->response = physics::ContactResponse {}; // the sync moves it, no contact does
 	}
+	// Moving (|vx| + |vz| at least *0x00a6afc4 = 1e-4), it wakes every
+	// node round it (0x006bfad0: the sphere query of its radius, 0x00562090,
+	// flags 0x1000108; slot 0x160 on each but itself and the major actors,
+	// slot 0x1c4), so what lies on its decks (a hub, a sentry gun, a
+	// shield) is a mover again and its contacts with the moving decks
+	// carry it along; asleep, the decks would slide out from under it.
+	if (std::fabs(titan.velocity.x) + std::fabs(titan.velocity.z) >= 1e-4f) {
+		const physics::Vec3 centre {object->position().x, object->position().y, object->position().z};
+		for (Body& other : m_bodies) {
+			if (other.object != titan.object && !other.majorActor && !other.held && other.sleep.asleep() && !isTitan(other.object)
+				&& physics::lengthSquared(other.body.position - centre) <= titan.radius * titan.radius) {
+				wake(other);
+			}
+		}
+	}
 	stepTitanSpawnPoints(titan);
+}
+
+void GameWorld::rideTitanIfOn(uint32_t object, uint32_t surfaceObject)
+{
+	const Titan* titan = surfaceObject ? titanByObject(surfaceObject) : nullptr;
+	const world::Object* placed = m_objects.find(object);
+	const Body* body = titan ? findBody(titan->object) : nullptr;
+	if (!body || !placed) {
+		return;
+	}
+	const physics::Vec3 at {placed->position().x, placed->position().y, placed->position().z};
+	m_titanRiders.push_back({object, titan->object, body->body.rotation.untransform(at - body->body.position)});
+}
+
+void GameWorld::stepTitanRiders()
+{
+	for (auto it = m_titanRiders.begin(); it != m_titanRiders.end();) {
+		world::Object* placed = m_objects.find(it->object);
+		const Body* titan = findBody(it->titan);
+		Body* own = findBody(it->object);
+		if (!placed || !titan || (own && !own->fixed)) {
+			if (own && !titan) {
+				own->fixed = false; // held by a Titan that has gone: it falls
+			}
+			it = m_titanRiders.erase(it);
+			continue;
+		}
+		const physics::Vec3 at = titan->body.position + titan->body.rotation.transform(it->offset);
+		placed->setPosition({at.x, at.y, at.z});
+		if (own) {
+			own->lastPosition = own->body.position;
+			own->body.position = at;
+		}
+		++it;
+	}
 }
 
 void GameWorld::stepTitans(float seconds)
 {
+	TP("stepTitans");
 	if (m_titans.empty()) {
 		return;
 	}
@@ -1975,9 +2139,11 @@ void GameWorld::stepTitanWreck(Titan& titan, float seconds)
 		if (m_time > titan.wreckedAt + titan.stayAsWreck || root.hitPoints <= -root.wreckHitPoints) {
 			titan.removeFrom = m_time;
 		} else if (titan.stayAsWreck > 0) {
-			// 1x even with bots: the x3 of 0x00652380 (0x00652594) is not seen on a Titan wreck in retail
-			// (its core explosion comes after ~36 s, past the 25 s sgl_endGame delay).
-			const float perTick = root.wreckHitPoints / (titan.stayAsWreck * 30.0f);
+			// 0x00652380 as for any wreck: x 3 only with the AI in a single-player
+			// or co-op mode (wreckDrainsFast; the Titan is mobile, hasMobilePhysics
+			// 1). In gpm_ti it is 1x with bots, so the core explosion (-38 %) comes
+			// after ~38 s, past the 25 s sgl_endGame delay.
+			const float perTick = root.wreckHitPoints / (titan.stayAsWreck * 30.0f) * (wreckDrainsFast() ? 3.0f : 1.0f);
 			titanDamage(titan.object, perTick * seconds * 30.0f, -1, true, true);
 		}
 	}
@@ -2991,7 +3157,24 @@ void GameWorld::stepPods(float seconds)
 				player->seat = -1;
 				if (soldier) {
 					soldier->setHidden(false);
-					const physics::Vec3 at = pod.position + physics::Vec3 {1.2f, 1.0f, 0};
+					// The place (0x005cea00's matrix: its translation from the
+					// interface's slot 0x50, 0x005cc9a0 -> object slot 0x184,
+					// 0x005c71a0 with 0): the template's soldierExitLocation
+					// (+0x308; zero: its root PlayerControlObject's) through the
+					// pod's matrix, 0.5 m up. The shipped pods set none, so the
+					// rider's feet are 0.5 m over the pod's origin, where the pod
+					// was (put out of the collision below).
+					physics::Vec3 offset;
+					const world::Object* podObject = m_objects.find(pod.object);
+					if (const world::ObjectTemplate* t = podObject ? podObject->objectTemplate() : nullptr) {
+						if (const auto found = t->settings().find("soldierExitLocation"); found != t->settings().end()) {
+							offset = vec3Of(found->second);
+						}
+					}
+					const physics::Mat3 frame = body ? body->body.rotation
+						: podObject ? physics::Mat3::fromYawPitchRoll({podObject->rotation().x, podObject->rotation().y, podObject->rotation().z})
+									: physics::Mat3 {};
+					const physics::Vec3 at = pod.position + frame.transform(offset) + physics::Vec3 {0, 0.5f + 1.0f, 0};
 					player->body.position = at;
 					// The rider takes the pod's velocity: retail puts him out at the
 					// landing timer's end (0x005d01c0 below 0 -> 0x005cff20 -> the
@@ -3018,6 +3201,16 @@ void GameWorld::stepPods(float seconds)
 					// exit placement or his first contact) wasn't found.
 					const float into = physics::dot(player->body.velocity - pod.landingSurfaceVelocity, pod.landingNormal);
 					if (pod.landing >= 0 && into < 0) player->body.velocity = player->body.velocity - pod.landingNormal * into;
+					// enhanced.podExitAtRest (not retail): the rider leaves a
+					// landed pod at rest on what it landed on, so a pod still
+					// sliding after a slanting approach (up to 5 m/s along the
+					// roof in Titan_PodRidersStayOnTheDeck, 12-17 m/s down the
+					// rear deck) doesn't throw him off the deck. On a Titan, which carries him from the next
+					// tick (SoldierBody::carry), his own velocity is relative to
+					// it: none; elsewhere it is the world's, the surface's.
+					if (pod.landing >= 0 && podExitAtRest()) {
+						player->body.velocity = pod.landingOnTitan ? physics::Vec3 {} : pod.landingSurfaceVelocity;
+					}
 					soldier->setPosition({at.x, at.y - 1.0f, at.z});
 				}
 				raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(pod.object)});

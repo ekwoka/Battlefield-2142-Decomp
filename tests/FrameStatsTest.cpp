@@ -61,3 +61,44 @@ TEST(FrameStats_NamesTheLoadsOfAFrameOver50ms)
 	// Only this frame's loads; the earlier frame's were dropped.
 	CHECK(hitch == "frame-hitch: 60.0 ms; sync 41.0 loads 40.0; 2 loads over 1 ms: rock.staticmesh 40.0, rock.dds 30.0");
 }
+// The variable: unset, empty, 0 or negative is off; a positive number is the
+// interval; set to anything else, every 5 s.
+TEST(FrameStats_IntervalFromTheVariable)
+{
+	CHECK(FrameStats::intervalFrom(nullptr) == 0.0);
+	CHECK(FrameStats::intervalFrom("") == 0.0);
+	CHECK(FrameStats::intervalFrom("0") == 0.0);
+	CHECK(FrameStats::intervalFrom("0.0") == 0.0);
+	CHECK(FrameStats::intervalFrom("-3") == 0.0);
+	CHECK(FrameStats::intervalFrom("2.5") == 2.5);
+	CHECK(FrameStats::intervalFrom("1") == 1.0);
+	CHECK(FrameStats::intervalFrom("yes") == 5.0);
+	CHECK(!FrameStats(FrameStats::intervalFrom("0")).enabled());
+}
+
+// A frame with no swapchain image is dropped: its stage times don't reach the
+// next frame, and the next frame is timed from the drop.
+TEST(FrameStats_DroppedFrameAddsNothing)
+{
+	const uint64_t ms = 1000000;
+	FrameStats stats(0.1);
+	uint64_t t = 1000 * ms;
+	CHECK(stats.endFrame(t).empty());
+	stats.add(FrameStats::Ticks, 30 * ms);
+	t += 40 * ms;
+	stats.dropFrame(t);
+	bool reported = false;
+	for (int i = 0; i < 10 && !reported; ++i) {
+		stats.add(FrameStats::Ticks, 2 * ms);
+		t += 10 * ms;
+		const std::string report = stats.endFrame(t);
+		CHECK(report.empty() == (i < 5)); // the window closes 100 ms after it opened
+		if (!report.empty()) {
+			reported = true;
+			CHECK(report.find("6 frames") != std::string::npos);
+			CHECK(report.find(" frame 10.00/10.00/10.0") != std::string::npos);
+			CHECK(report.find(" ticks 2.00/2.00/2.0") != std::string::npos);
+		}
+	}
+	CHECK(reported);
+}

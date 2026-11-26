@@ -1433,7 +1433,6 @@ TEST(GameWorld_UnlockAllAppliesOnlyTheChosenSelection)
 	}
 	game::GameLogic logic;
 	logic.team(2).kits = {{"EU_Assault", "us_light_soldier", ""}};
-	range.world->unlockAllByDefault = true;
 	CHECK(range.world->joinPlayer(2) >= 0);
 	range.world->setKitUnlockSelection(range.world->localPlayer(), logic, 0, {1, 4, 0, 0});
 	CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -2051,7 +2050,7 @@ TEST(GameWorld_GrenadesBounceAndGoOff)
 	kit->children().push_back({"UnlockEU_AssaultPlayer0", {}, {}});
 	const int bot = range.world->addPlayer("Bot", 1, true);
 	CHECK(range.world->spawnSoldier(bot));
-	range.world->unlockAllByDefault = true;
+	range.world->localPlayerUnlocks = {"UnlockEU_AssaultPlayer0"}; // equipped (owned unlocks apply only once chosen)
 	CHECK(range.world->spawnPlayer(2) != nullptr);
 	game::SoldierInput input;
 	input.selectItem = 7;
@@ -2892,6 +2891,88 @@ TEST(GameWorld_LeaderTakesBackTheBeacon)
 	CHECK(range.world->squadBeacon(2, 1) == 0 && range.objects.find(placed) == nullptr);
 	// Its round came back: another can be set down.
 	CHECK(throwBeacon() != 0);
+}
+
+// A squad leader's item (the kit's UB_SquadLeader container's first item)
+// is the squad leader's only (mayUseWeapon, 0x005921e0: player slot 0x150,
+// a bot's as well as a human's; 0x004d68d0 with 3), refused with no
+// message (takeSquadLeaderRefused, for enhanced.squadItemHints); his squad
+// must also have minimumSquadSizeForSelection members (0x005c3080, one
+// fewer for a bot). The item list dims what is refused (0x0079c290).
+TEST(GameWorld_SquadLeaderItemsNeedTheLeader)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	world::ObjectTemplate* beacon = range.templates.create("GenericFireArm", "beacon");
+	beacon->settings()["itemIndex"] = "8";
+	beacon->settings()["ammo.magSize"] = "1";
+	beacon->settings()["minimumSquadSizeForSelection"] = "2";
+	beacon->settings()["weaponHud.selectIcon"] = "beacon.tga";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* container = range.templates.create("ItemContainer", "UnlockEU_AssaultSquadLeader0");
+	container->children().push_back({"beacon", {}, {}});
+	container->settings()["unlockLevel"] = "0";
+	container->settings()["unlockBranch"] = "UB_SquadLeader";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"UnlockEU_AssaultSquadLeader0", {}, {}});
+
+	const int me = range.world->addPlayer("Me", 2, false);
+	const int mate = range.world->addPlayer("Mate", 2, false);
+	const int bot = range.world->addPlayer("Bot", 2, true);
+	for (int id : {me, mate}) {
+		range.world->setUnlocks(id, {"UnlockEU_AssaultSquadLeader0"}, false);
+	}
+	CHECK(range.world->spawnSoldier(me) && range.world->spawnSoldier(mate) && range.world->spawnSoldier(bot));
+	const auto inHand = [&](int id) {
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(id, info);
+		return info.inHandSlot;
+	};
+	const auto press = [&](int id, int item) {
+		game::SoldierInput input;
+		input.selectItem = item;
+		range.world->setInput(id, input);
+		range.world->tick(1 / 30.0f);
+		range.world->setInput(id, {});
+		range.world->tick(1 / 30.0f);
+	};
+	const auto dimmed = [&](int id) {
+		const std::vector<int> d = range.world->dimmedItems(id);
+		return std::find(d.begin(), d.end(), 8) != d.end();
+	};
+	CHECK(inHand(me) == 3 && inHand(mate) == 3);
+	// No squad: he leads none, so it isn't his (the squad's size isn't asked).
+	CHECK(range.world->squadLeaderOnly(me, *beacon) && !range.world->squadTooSmall(me, *beacon));
+	CHECK(dimmed(me));
+	press(me, 8);
+	CHECK(inHand(me) == 3 && range.world->takeSquadLeaderRefused(me) == 8 && range.world->takeSquadSizeRefused(me) == 0);
+	CHECK(range.world->takeSquadLeaderRefused(me) == 0); // once
+	// He leads a squad of one: his, but the squad is too small for it.
+	CHECK(range.world->joinSquad(me, 1));
+	CHECK(!range.world->squadLeaderOnly(me, *beacon) && range.world->squadTooSmall(me, *beacon));
+	CHECK(dimmed(me));
+	press(me, 8);
+	CHECK(inHand(me) == 3 && range.world->takeSquadSizeRefused(me) == 8 && range.world->takeSquadLeaderRefused(me) == 0);
+	CHECK(range.world->squadSizeFor(me, *beacon) == std::make_pair(1, 2));
+	// A member joins: the leader takes it; the member may not.
+	CHECK(range.world->joinSquad(mate, 1));
+	CHECK(!dimmed(me) && dimmed(mate));
+	press(me, 8);
+	CHECK(inHand(me) == 8);
+	press(mate, 8);
+	CHECK(inHand(mate) == 3 && range.world->takeSquadLeaderRefused(mate) == 8);
+	// A rifle is anyone's.
+	CHECK(!range.world->squadLeaderOnly(mate, *range.templates.find("eu_ar_rifle")));
+	// A bot leading a squad of one needs no one else (one fewer).
+	CHECK(range.world->joinSquad(bot, 2));
+	CHECK(range.world->squadSizeFor(bot, *beacon) == std::make_pair(1, 1));
+	CHECK(!range.world->squadLeaderOnly(bot, *beacon) && !range.world->squadTooSmall(bot, *beacon));
+	// The leader leaves: the member leads, alone now.
+	CHECK(range.world->joinSquad(me, 0));
+	CHECK(!range.world->squadLeaderOnly(mate, *beacon) && range.world->squadTooSmall(mate, *beacon));
+	CHECK(range.world->squadLeaderOnly(me, *beacon));
 }
 
 // The player's auto reload (GeneralSettings.setAutoReload, on by default:
@@ -4555,7 +4636,7 @@ TEST(GameWorld_CloakReportRevealsTagsForShowCloakedSquads)
 	kit->children().push_back({"net_cloak", {}, {}});
 	const int me = range.world->addPlayer("Me", 2, true);
 	const int mate = range.world->addPlayer("Mate", 2, false);
-	const int loner = range.world->addPlayer("Loner", 2, false);
+	const int loner = range.world->addPlayer("Loner", 2, true); // a bot: a human owns every unlock
 	const int enemy = range.world->addPlayer("Enemy", 1, false);
 	for (const int id : {me, mate, loner, enemy}) {
 		range.world->setKit(id, "EU_Assault", "us_light_soldier");
@@ -5033,18 +5114,22 @@ TEST(GameWorld_FriendlyFireScaling)
 	CHECK(enemy > 1 && std::fabs(half - enemy * 0.5f) < 0.01f && none == 0);
 }
 
-// 0x005b7290 scales damage by team only for a victim with a PlayerControlObject
-// up its tree: a deployed hub (GenericProjectile) is hurt by its own team in full.
+// 0x005b7290 scales damage by team only when the victim's root (0x006f1d70)
+// or a parent of it answers interface 0xc4c5 (PlayerControlObject, Parachute,
+// Soldier, LadderContainer, FreeCamera): a deployed hub (GenericProjectile),
+// a supply crate or a teamed destructible (SimpleObject, Bundle) is hurt by
+// its own team in full, a PlayerControlObject at the server's vehicle
+// percentage (0 here).
 TEST(GameWorld_FriendlyFireSparesNoHub)
 {
-	const auto lost = [](int attackerTeam) {
+	const auto lost = [](const char* type, int attackerTeam) {
 		Range range;
 		range.collisionTemplates.add("hub_mesh", boxMesh(0.2f));
 		world::ObjectTemplate* blast = range.templates.create("GenericProjectile", "blast");
 		blast->components().push_back("DefaultDetonationComp");
 		blast->settings()["detonation.explosionDamage"] = "40";
 		blast->settings()["detonation.explosionMaterial"] = "69";
-		auto* deployed = range.templates.create("GenericProjectile", "hub_deployed");
+		auto* deployed = range.templates.create(type, "hub_deployed");
 		makeMobile(*deployed, "hub_mesh");
 		deployed->settings()["armor.maxHitPoints"] = "100";
 		deployed->settings()["armor.hitPoints"] = "100";
@@ -5060,9 +5145,12 @@ TEST(GameWorld_FriendlyFireSparesNoHub)
 		CHECK(range.world->detonate("blast", {0.5f, 10, 0}, attacker));
 		return 100 - range.world->hitPoints(hub->id());
 	};
-	const float enemy = lost(1), own = lost(2);
-	std::fprintf(stderr, "  hub: %.2f from an enemy, %.2f from its own team at 0%% friendly fire\n", enemy, own);
-	CHECK(enemy > 1 && std::fabs(own - enemy) < 0.01f);
+	for (const char* type : {"GenericProjectile", "SupplyObject", "SimpleObject", "Bundle", "PlayerControlObject"}) {
+		const float enemy = lost(type, 1), own = lost(type, 2);
+		std::fprintf(stderr, "  %s: %.2f from an enemy, %.2f from its own team at 0%% friendly fire\n", type, enemy, own);
+		CHECK(enemy > 1);
+		CHECK(std::string(type) == "PlayerControlObject" ? own == 0 : std::fabs(own - enemy) < 0.01f);
+	}
 }
 
 // hasOnTimeEffect (0x005b62a0): a fused round whose time runs out goes off
@@ -5454,11 +5542,11 @@ TEST(GameWorld_FirearmReplacementAndOwnedUnlocks)
 	CHECK(range.world->spawnSoldier(har2));
 	std::fprintf(stderr, "  %s\n", carried(har2).c_str());
 	CHECK(carried(har2) == "3:unl_har_rifle 5:unl_har_shotgun 7:unl_grenade_frag ");
-	// The local player's owned set comes from its profile
-	// (localPlayerOwned, main.cpp: the soldier's stats unlocks), apart from
-	// the chosen ones the kit menu equips.
+	// The local player (a human) owns every unlock: with a selection of
+	// none chosen (--unlocks, the kit menu's equipped set) the owned
+	// replaceWithoutEquip frag grenade still applies, the HAR does not.
 	range.world->localPlayerUnlocks = {};
-	range.world->localPlayerOwned = {"UnlockPlayer0"};
+	range.world->localPlayerOwned = {};
 	CHECK(range.world->spawnPlayer(2) != nullptr);
 	const int local = range.world->localPlayer();
 	range.world->setKit(local, "EU_Assault", "us_light_soldier");
@@ -6325,16 +6413,28 @@ TEST(GameWorld_VehicleInReachForTheHelp)
 }
 
 // The wreck (0x00652380): timeToStayAsWreck (20 by default) drains its
-// armour to -wreckHitPoints; with the AI running three times as fast, so a
-// 3 s wreck goes after 1 s.
+// armour to -wreckHitPoints; three times as fast with the AI running in a
+// single-player or co-op mode (AIDLL's slot 0x20 false: the level load's
+// init, 0x004af290, gives it !(sp1 / gpm_sp / gpm_coop)), so a 3 s wreck
+// goes after 1 s there. With bots in conquest or Titan mode, or without the
+// AI, it takes the full 3 s.
 TEST(GameWorld_WreckDrainsFasterWithBots)
 {
-	for (int ai = 0; ai < 2; ++ai) {
+	struct Leg {
+		const char* mode;
+		bool ai;
+		bool fast;
+	};
+	for (const Leg leg : {Leg {"gpm_sp", false, false}, Leg {"gpm_sp", true, true}, Leg {"sp1", true, true},
+			 Leg {"gpm_coop", true, true}, Leg {"gpm_cq", true, false}, Leg {"gpm_ti", true, false}}) {
 		ExitRange range;
 		range.jeep->settings()["armor.maxHitPoints"] = "100";
 		range.jeep->settings()["armor.wreckHitPoints"] = "50";
 		range.jeep->settings()["armor.timeToStayAsWreck"] = "3";
-		range.world->setAiRunning(ai != 0);
+		range.world->setGameMode(leg.mode);
+		range.world->setAiRunning(leg.ai);
+		CHECK(range.world->wreckDrainsFast() == leg.fast);
+		const int ai = leg.ai;
 		range.id = range.objects.create(range.jeep, {0, 1, 40})->id();
 		range.world->tick(1 / 30.0f);
 		range.world->applyDamage(range.id, 1000, -1);
@@ -6343,8 +6443,8 @@ TEST(GameWorld_WreckDrainsFasterWithBots)
 			range.world->tick(1 / 30.0f);
 			++ticks;
 		}
-		std::fprintf(stderr, "  ai %d: the wreck went after %d ticks\n", ai, ticks);
-		CHECK(ai ? (ticks >= 29 && ticks <= 32) : (ticks >= 89 && ticks <= 92));
+		std::fprintf(stderr, "  %s, ai %d: the wreck went after %d ticks\n", leg.mode, ai, ticks);
+		CHECK(leg.fast ? (ticks >= 29 && ticks <= 32) : (ticks >= 89 && ticks <= 92));
 	}
 }
 
@@ -6499,21 +6599,37 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		// The unlock (an owned ItemContainer's Ability, 0x005706b0).
 		range.templates.create("ItemContainer", "repair_unlock")->settings()["ability.increasedRepairAbility"] = "1.25";
 		kit->children().push_back({"repair_unlock", {}, {}});
-		if (repairs >= 2) {
-			range.world->localPlayerOwned = {"repair_unlock"};
-		}
 		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
 		const uint32_t otherCar = range.objects.create(jeep, {5, 1, 3})->id();
 		range.world->startRound();
-		CHECK(range.world->spawnPlayer(2) != nullptr);
-		const int me = range.world->localPlayer();
+		// The local player (a human) owns every unlock; without it is a bot's
+		// case (a bot owns only what it is given).
+		const bool unlocked = repairs >= 2;
+		int me = -1;
+		if (unlocked) {
+			CHECK(range.world->spawnPlayer(2) != nullptr);
+			me = range.world->localPlayer();
+		} else {
+			me = range.world->addPlayer("Engineer", 2, true);
+			range.world->setKit(me, "EU_Assault", "us_light_soldier");
+			CHECK(range.world->spawnSoldier(me));
+		}
+		const auto press = [&](const game::SoldierInput& input) {
+			if (unlocked) {
+				range.world->setPlayerInput(input);
+			} else {
+				range.world->setInput(me, input);
+			}
+		};
+		game::GameWorld::PlayerInfo info;
+		CHECK(range.world->playerInfo(me, info));
+		range.world->setSoldierPosition(info.soldier, {0, 0, 0});
 		range.world->tick(1 / 30.0f);
 		game::SoldierInput use;
 		use.use = true;
-		range.world->setPlayerInput(use);
+		press(use);
 		range.world->tick(1 / 30.0f);
-		range.world->setPlayerInput({});
-		game::GameWorld::PlayerInfo info;
+		press({});
 		CHECK(range.world->playerInfo(me, info) && info.vehicle == car);
 		range.world->setHitPoints(car, 50);
 		range.world->setHitPoints(otherCar, 50);
@@ -6562,14 +6678,20 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 		kit->settings()["abilityInVehicleStrength"] = "0.35";
 		kit->settings()["ability.hasHealingAbility"] = "1";
 		range.templates.create("ItemContainer", "medic_unlock")->settings()["ability.increasedRepairAbility"] = "1.5";
-		if (unlocked) {
-			range.world->localPlayerOwned = {"medic_unlock"};
-		}
 		const uint32_t mine = range.objects.create(jeep, {0, 1, 3})->id();
 		const uint32_t other = range.objects.create(jeep, {4, 1, 3})->id();
 		range.world->startRound();
-		CHECK(range.world->spawnPlayer(2) != nullptr);
-		const int me = range.world->localPlayer();
+		// The local player (a human) owns every unlock; the medic without it
+		// is a bot (owning only what it is given).
+		int me = -1;
+		if (unlocked) {
+			CHECK(range.world->spawnPlayer(2) != nullptr);
+			me = range.world->localPlayer();
+		} else {
+			me = range.world->addPlayer("Medic", 2, true);
+			range.world->setKit(me, "EU_Assault", "us_light_soldier");
+			CHECK(range.world->spawnSoldier(me));
+		}
 		const int passenger = range.world->addPlayer("Passenger", 2, true);
 		const int rider = range.world->addPlayer("Rider", 2, true);
 		const int walker = range.world->addPlayer("Walker", 2, true);
@@ -6581,13 +6703,14 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 			range.world->tick(1 / 30.0f);
 			game::SoldierInput use;
 			use.use = true;
-			if (player == me) {
+			const bool local = player == me && unlocked;
+			if (local) {
 				range.world->setPlayerInput(use);
 			} else {
 				range.world->setInput(player, use);
 			}
 			range.world->tick(1 / 30.0f);
-			if (player == me) {
+			if (local) {
 				range.world->setPlayerInput({});
 			} else {
 				range.world->setInput(player, {});
@@ -6779,23 +6902,31 @@ TEST(GameWorld_KitAbilityInAVehicleRearmsOtherSeats)
 		kit->settings()["abilityInVehicleRadius"] = "7";
 		kit->settings()["abilityInVehicleStrength"] = "2";
 		range.templates.create("ItemContainer", "support_unlock")->settings()["ability.increasedRepairAbility"] = "1.15";
-		if (mode != 5) {
-			range.world->localPlayerOwned = {"support_unlock"};
-		}
 		const uint32_t mine = range.objects.create(jeep, {0, 1, 3})->id();
 		const uint32_t other = range.objects.create(jeep, {mode == 4 ? 30.0f : 6.0f, 1, 3})->id();
 		range.world->startRound();
-		CHECK(range.world->spawnPlayer(2));
-		const int giver = range.world->localPlayer();
+		// The giver owns the unlock as the local player (a human owns every
+		// one); mode 5's giver, without it, is a bot.
+		const bool human = mode != 5;
+		int giver = -1;
+		if (human) {
+			CHECK(range.world->spawnPlayer(2));
+			giver = range.world->localPlayer();
+		} else {
+			giver = range.world->addPlayer("Giver", 2, true);
+			range.world->setKit(giver, "EU_Assault", "us_light_soldier");
+			CHECK(range.world->spawnSoldier(giver));
+		}
 		const int driver = range.world->addPlayer("Driver", 2, true);
 		const int gunner = range.world->addPlayer("Gunner", 2, true);
 		CHECK(range.world->spawnSoldier(driver));
 		CHECK(range.world->spawnSoldier(gunner));
 		const auto input = [&](int player, const game::SoldierInput& value, int ticks = 1) {
-			if (player == giver) range.world->setPlayerInput(value);
+			const bool local = player == giver && human;
+			if (local) range.world->setPlayerInput(value);
 			else range.world->setInput(player, value);
 			for (int i = 0; i < ticks; ++i) range.world->tick(1 / 30.0f);
-			if (player == giver) range.world->setPlayerInput({});
+			if (local) range.world->setPlayerInput({});
 			else range.world->setInput(player, {});
 			range.world->tick(1 / 30.0f);
 		};

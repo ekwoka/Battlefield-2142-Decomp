@@ -397,3 +397,51 @@ TEST(SettingsObjects_RemoveFavouriteServer)
 	CHECK(!settings.removeFavouriteServer("127.0.0.1", 17567));
 	CHECK(settings.generalScript().find("17567") == std::string::npos);
 }
+
+// enhanced.singleplayBotCount's target lives in the rewrite's own
+// Enhanced.con (port addition), not in General.con, which stays as the
+// original writes it; the menu's setter writes it there and a new game
+// reads it back.
+TEST(SettingsObjects_EnhancedFile)
+{
+	Console console;
+	menu::SettingsObjects settings;
+	settings.registerConsole(console);
+	CHECK(settings.get("GeneralSettings.SingleplayBotCount") == "16");
+	CHECK(settings.enhancedScript() == "GeneralSettings.setSingleplayBotCount 16\n");
+	run(console, "GeneralSettings.setSingleplayBotCount 24");
+	CHECK(settings.get("GeneralSettings.SingleplayBotCount") == "24");
+	CHECK(settings.generalScript().find("SingleplayBotCount") == std::string::npos);
+	CHECK(settings.enhancedScript() == "GeneralSettings.setSingleplayBotCount 24\n");
+	settings.resetProfile();
+	CHECK(settings.get("GeneralSettings.SingleplayBotCount") == "16");
+
+	// The menu's slider: stored in the objects and saved at once.
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "bf2142_settings_enhanced_test";
+	std::filesystem::remove_all(dir);
+	settings.setDirectory(dir.string());
+	ui::NativeRegistry natives;
+	menu::MenuServices services;
+	services.checkOnline = [] { return false; };
+	services.fetchServers = [](std::string* error) {
+		*error = "offline";
+		return std::optional<net::ServerList>();
+	};
+	menu::MenuBindings bindings(natives, services);
+	bindings.setSettingsObjects(&settings);
+	CHECK(bindings.singleplayPlayers() == 16);
+	bindings.setSingleplayPlayers(40);
+	CHECK(settings.get("GeneralSettings.SingleplayBotCount") == "40");
+	CHECK(readFile(dir / "0001" / "Enhanced.con") == "GeneralSettings.setSingleplayBotCount 40\n");
+	CHECK(readFile(dir / "0001" / "General.con").find("SingleplayBotCount") == std::string::npos);
+	Console again;
+	menu::SettingsObjects loaded;
+	loaded.registerConsole(again);
+	loaded.setDirectory(dir.string());
+	CHECK(loaded.load(again));
+	CHECK(loaded.get("GeneralSettings.SingleplayBotCount") == "40");
+	menu::MenuBindings next(natives, services);
+	next.setSettingsObjects(&loaded);
+	CHECK(next.singleplayPlayers() == 40);
+	std::filesystem::remove_all(dir);
+}

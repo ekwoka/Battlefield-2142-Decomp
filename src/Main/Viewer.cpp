@@ -337,6 +337,9 @@ int screenshot(const render::LevelSources& sources, const ViewerOptions& options
 	printStats(level.stats());
 	render::Camera camera = level.suggestedCamera();
 	applyCameraOption(camera, options.camera);
+	if (options.windowSize) {
+		options.windowSize(options.width, options.height);
+	}
 	ViewerOptions::PlayerView view;
 	view.aspect = static_cast<float>(options.width) / static_cast<float>(options.height);
 	if (options.camera.empty() && options.playerView && options.playerView(view) && (view.firstPerson || view.external)) {
@@ -888,6 +891,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const float wheelSteps = playWheel.take();
 				const auto wheelTo = [&](const char* name) { return c.wheelPresses(map, name, wheelSteps); };
 				input.itemStep = wheelTo("c_PINextItem") ? 1 : wheelTo("c_PIPrevItem") ? -1 : 0;
+				input.directorHud = keys[SDL_SCANCODE_H];
+				input.followHud = keys[SDL_SCANCODE_J];
 				options.onPlayerInput(input);
 				turn = 0;
 			} else if (playing && options.onPlayerInput) {
@@ -938,6 +943,8 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				}
 				const float wheelSteps = playWheel.take();
 				input.itemStep = wheelSteps > 0 ? 1 : wheelSteps < 0 ? -1 : 0; // up the next item, down the previous
+				input.directorHud = keys[SDL_SCANCODE_H];
+				input.followHud = keys[SDL_SCANCODE_J];
 				options.onPlayerInput(input);
 				turn = 0;
 			}
@@ -963,6 +970,9 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				int w = 1, h = 1;
 				SDL_GetWindowSizeInPixels(window, &w, &h);
 				view.aspect = static_cast<float>(w) / static_cast<float>(std::max(h, 1));
+				if (options.windowSize) {
+					options.windowSize(w, h);
+				}
 			}
 			firstPerson = false;
 			if (playing && options.playerView(view) && view.firstPerson) {
@@ -1016,20 +1026,17 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const bool soldierEye = firstPerson && view.soldierEye && !missileKey;
 				MissileViewSmoothing::Pose raw {{camera.position.x, camera.position.y, camera.position.z}, camera.yaw, camera.pitch, camera.roll};
 				if (soldierEye) {
-					raw.position[1] -= view.eyeHeight;
-					raw.yaw = view.eyeCarrierYaw;
-					raw.eye = view.eyeHeight;
+					raw = soldierEyeCarrier(raw, view.eyeHeight, view.eyeCarrierYaw);
 				}
 				const auto smooth = viewSmoothing.sample(viewKey, elapsedTicks > 0, blendAlpha, raw, render::kTickBlendJump);
 				camera.position = {smooth.position[0], smooth.position[1], smooth.position[2]};
 				if (soldierEye) {
-					constexpr float kRadians = 3.14159265f / 180.0f;
-					// The eye's height between the ticks, then a step on
-					// towards the pose's (0x005890a0, 0.2 a call), undone after
-					// the frame (0x0043f610) like every blended matrix.
-					camera.position.y += smooth.eye + (view.eyeTarget - smooth.eye) * 0.2f; // *0x00a68e14
-					camera.yaw += smooth.yaw - view.eyeCarrierYaw + view.lookTurn * kRadians;
-					camera.pitch = std::clamp(camera.pitch + view.lookPitch * kRadians, -85 * kRadians, 85 * kRadians);
+					// MissileViewSmoothing.h composeSoldierEye.
+					const SoldierEyeView eye = composeSoldierEye(smooth, camera.yaw, camera.pitch, view.eyeCarrierYaw,
+						view.eyeTarget, view.lookTurn, view.lookPitch);
+					camera.position.y = eye.y;
+					camera.yaw = eye.yaw;
+					camera.pitch = eye.pitch;
 				} else {
 					camera.yaw = smooth.yaw;
 					camera.pitch = smooth.pitch;
@@ -1055,6 +1062,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 			}
 			if (!acquired) {
 				SDL_SubmitGPUCommandBuffer(commands);
+				stats.dropFrame(Stats::now()); // nothing drawn: not a frame
 				continue;
 			}
 			gpu->ensureDepth(target, width, height);
@@ -1603,7 +1611,8 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 				}
 				if ((step.op == "click" || step.op == "release") && viewer.onRelease) {
 					viewer.onRelease(x, y);
-				} else if (step.op == "rclick" && viewer.onRightClick) {
+				}
+				if (step.op == "rclick" && viewer.onRightClick) {
 					viewer.onRightClick(x, y);
 				}
 			} else if (step.op == "console" && hooks.console) {

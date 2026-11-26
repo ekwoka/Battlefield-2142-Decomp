@@ -3,8 +3,8 @@
 // Not retail: BF2142_FRAME_STATS=<seconds> logs the main thread's time per
 // frame stage (mean, 95th percentile and max, ms) every <seconds> (5 if not a
 // number), so a slow machine can say where its frame goes, and names the
-// meshes and textures loaded in each frame over 50 ms. Unset, each scope
-// costs one branch.
+// meshes and textures loaded in each frame over 50 ms. Unset, empty, 0 or
+// negative, it's off and each scope costs one branch.
 
 #include <algorithm>
 #include <array>
@@ -29,12 +29,23 @@ public:
 
 	static FrameStats& get()
 	{
-		static FrameStats stats([] {
-			const char* value = std::getenv("BF2142_FRAME_STATS");
-			const double seconds = value ? std::atof(value) : 0.0;
-			return value ? (seconds > 0 ? seconds : 5.0) : 0.0; // set but not a number: every 5 s
-		}());
+		static FrameStats stats(intervalFrom(std::getenv("BF2142_FRAME_STATS")));
 		return stats;
+	}
+
+	// The variable's value as an interval in seconds: unset, empty, 0 or negative
+	// is off (0); a positive number is itself; anything else is every 5 s.
+	static double intervalFrom(const char* value)
+	{
+		if (!value || !*value) {
+			return 0.0;
+		}
+		char* end = nullptr;
+		const double seconds = std::strtod(value, &end);
+		if (end == value) {
+			return 5.0; // set but not a number
+		}
+		return seconds > 0 ? seconds : 0.0;
 	}
 
 	static uint64_t now()
@@ -53,6 +64,19 @@ public:
 		}
 		if (ns >= 1000000 && m_loads.size() < 4096) {
 			m_loads.emplace_back(ns, what);
+		}
+	}
+
+	// Drops the frame in progress (no swapchain image, nothing drawn): its stage
+	// times go nowhere, and the next frame is timed from `nowNs`.
+	void dropFrame(uint64_t nowNs)
+	{
+		if (!enabled()) {
+			return;
+		}
+		m_current = {};
+		if (m_last != 0) {
+			m_last = nowNs;
 		}
 	}
 

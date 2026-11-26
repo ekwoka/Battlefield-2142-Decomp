@@ -221,9 +221,12 @@ struct RendererSettings {
 	bool tweakNearPlaneSet = false;
 	bool tweakNearPlane1pSet = false;
 	// renderer.minCullDistance (0x10051990: the renderer's slots 0x84 / 0x88,
-	// both the value): objects whose screen size falls under it are culled
-	// by the original's object drawer; kept, the rewrite culls by frustum.
+	// 0x10030890 / 0x100308a0): the renderer's +0x6b0, the objects' distance
+	// fade's minimum (DistanceFade.h CullMinimum), which the geometry quality
+	// also writes; the later write holds. `minCullDistanceWrites` counts the
+	// script's writes so the renderer sees one.
 	float minCullDistance = 0;
+	unsigned minCullDistanceWrites = 0;
 	// Kept for the console only: renderer.hud (+0x6a7, 0, read by its getter
 	// alone), renderer.vsync / presentAsync (the device's 0x1000adb0 /
 	// 0x1000adf0; the swapchain's present mode is the platform layer's),

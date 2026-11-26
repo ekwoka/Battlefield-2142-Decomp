@@ -1564,13 +1564,7 @@ void MenuBindings::bindLists()
 				rows.push_back({m_natives.localize("HEADER_all")});
 			}
 			for (const std::string& mode : modes) {
-				const std::string key = "TEXT_" + mode;
-				std::string text = m_natives.localize(key);
-				if (text == key) {
-					const std::string name = gameModeName ? gameModeName(mode) : std::string("N/A");
-					text = name == "N/A" ? mode : name;
-				}
-				rows.push_back({text});
+				rows.push_back({gameModeText(mode)});
 			}
 			m_natives.setListRows("gameModes", rows);
 			list.selectedIndex = 0;
@@ -1730,7 +1724,8 @@ bool MenuBindings::createServer()
 		return false;
 	}
 	log("create server: " + setup.maps.front().level + " " + setup.maps.front().gameMode + " "
-		+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots");
+		+ std::to_string(setup.maps.front().size) + ", " + std::to_string(setup.bots) + " bots"
+		+ (setup.playerTarget > 0 ? ", " + std::to_string(setup.playerTarget) + " players at most (enhanced)" : std::string()));
 	setCurrentGame(setup.maps.front(), setup.maxPlayers);
 	if (onStartGame) {
 		onStartGame(setup);
@@ -1811,7 +1806,26 @@ void MenuBindings::bindMultiplay()
 		std::istringstream words(vm.toString(arg(args, 0)));
 		std::string level, size;
 		words >> level >> size;
-		return Value("/Levels/" + level + "/Info/" + m_filterGameMode + "_" + size + "_preview.png");
+		// With enhanced.singleplayAllModes a level and size may have no
+		// gpm_sp layout: the picture of the first mode that has one.
+		std::string mode = m_filterGameMode;
+		if (listsAllModes()) {
+			const int players = std::atoi(size.c_str());
+			const auto has = [&](const std::string& m) {
+				return std::any_of(m_maps.begin(), m_maps.end(), [&](const MenuMap& map) {
+					return map.level == level && map.gameMode == m && map.size == players;
+				});
+			};
+			if (!has(mode)) {
+				for (const MenuMap& map : m_maps) {
+					if (map.level == level && map.size == players) {
+						mode = map.gameMode;
+						break;
+					}
+				}
+			}
+		}
+		return Value("/Levels/" + level + "/Info/" + mode + "_" + size + "_preview.png");
 	});
 	n.setFunction(kMultiplay, "getMapMovie", [](Interpreter&, const Args&) { return Value(""); });
 	n.setFunction(kMultiplay, "isMovieComplete", [](Interpreter&, const Args&) { return Value(true); });
@@ -2610,6 +2624,13 @@ void MenuBindings::setMaps(std::vector<MenuMap> maps)
 	showMapLists();
 }
 
+// enhanced.singleplayAllModes: only the singleplayer page's filter (the
+// create-server page's modes leave gpm_sp out, setGameModeIndex).
+bool MenuBindings::listsAllModes() const
+{
+	return m_filterGameMode == "gpm_sp" && singleplayAllModes && singleplayAllModes();
+}
+
 // SwiffHost's filter (slot 0x170, 0x00479e80): every level record's mode
 // named as the filter, one map per maptype size, from the level's .desc
 // (0x00462750) whatever its server.zip holds. A level with no readable
@@ -2617,6 +2638,9 @@ void MenuBindings::setMaps(std::vector<MenuMap> maps)
 // maps, as allGameModes keeps its modes.
 std::vector<MenuMap> MenuBindings::availableMaps() const
 {
+	if (listsAllModes()) {
+		return m_maps; // sorted by level, mode, then size (setMaps)
+	}
 	std::vector<MenuMap> maps;
 	for (size_t i = 0; i < m_maps.size(); ++i) {
 		const std::string& level = m_maps[i].level;
@@ -2640,15 +2664,33 @@ std::vector<MenuMap> MenuBindings::availableMaps() const
 	return maps;
 }
 
+std::string MenuBindings::gameModeText(const std::string& mode) const
+{
+	const std::string key = "TEXT_" + mode;
+	std::string text = m_natives.localize(key);
+	if (text == key) {
+		const std::string name = gameModeName ? gameModeName(mode) : std::string("N/A");
+		text = name == "N/A" ? mode : name;
+	}
+	return text;
+}
+
 // 0x100723c0 / 0x10072a70: "Level Name - size" (underscores as spaces).
+// With enhanced.singleplayAllModes the rows also name their mode, as the
+// list then holds a level's every mode.
 void MenuBindings::showMapLists()
 {
-	const auto rows = [](const std::vector<MenuMap>& maps) {
+	const bool allModes = listsAllModes();
+	const auto rows = [this, allModes](const std::vector<MenuMap>& maps) {
 		ui::NativeRegistry::Rows rows;
 		for (const MenuMap& map : maps) {
 			std::string name = map.level;
 			std::replace(name.begin(), name.end(), '_', ' ');
-			rows.push_back({name + " - " + std::to_string(map.size)});
+			std::string row = name + " - " + std::to_string(map.size);
+			if (allModes) {
+				row += " - " + gameModeText(map.gameMode);
+			}
+			rows.push_back({row});
 		}
 		return rows;
 	};
@@ -2680,7 +2722,96 @@ GameSetup MenuBindings::gameSetup() const
 			*field = it->second.asString();
 		}
 	}
+	if (m_singleplayStarting && singleplayBotCount && singleplayBotCount()) {
+		setup.playerTarget = singleplayPlayers();
+	}
 	return setup;
+}
+
+bool MenuBindings::startLevel(const LevelStart& start)
+{
+	const auto same = [](const std::string& a, const std::string& b) {
+		return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+			return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+		});
+	};
+	// The installed layouts of that level in that mode; the size asked
+	// for, else the nearest (the larger on a tie).
+	const MenuMap* chosen = nullptr;
+	bool levelFound = false;
+	for (const MenuMap& map : m_maps) {
+		if (!same(map.level, start.map.level)) {
+			continue;
+		}
+		levelFound = true;
+		if (!same(map.gameMode, start.map.gameMode)) {
+			continue;
+		}
+		const auto distance = [&start](const MenuMap& m) { return std::abs(m.size - start.map.size); };
+		if (!chosen || distance(map) < distance(*chosen) || (distance(map) == distance(*chosen) && map.size > chosen->size)) {
+			chosen = &map;
+		}
+	}
+	if (!chosen) {
+		log("start level: " + start.map.level + (levelFound ? " has no " + start.map.gameMode + " layout" : " is not installed"));
+		return false;
+	}
+	// The singleplayer page's start: its players target too, when
+	// enhanced.singleplayBotCount has one (gameSetup).
+	const bool starting = m_singleplayStarting;
+	m_singleplayStarting = true;
+	GameSetup setup = gameSetup();
+	m_singleplayStarting = starting;
+	setup.maps = {*chosen};
+	if (start.bots >= 0) {
+		// The command line's count: that many bots on every map.
+		setup.bots = start.bots;
+		setup.botsIncludeHumans = false;
+		setup.playerTarget = 0;
+		setup.maxPlayers = std::max(setup.maxPlayers, start.bots + 1);
+	}
+	if (start.botSkill >= 0) {
+		setup.botSkill = std::clamp(start.botSkill, 0.0f, 1.0f);
+	}
+	if (start.timeLimit >= 0) {
+		setup.timeLimit = start.timeLimit;
+	}
+	log("start level: " + chosen->level + " " + chosen->gameMode + " " + std::to_string(chosen->size) + ", "
+		+ std::to_string(playersForMap(setup, chosen->size).bots) + " bots");
+	setCurrentGame(*chosen, setup.maxPlayers);
+	if (onStartGame) {
+		onStartGame(setup);
+	}
+	return true;
+}
+
+int MenuBindings::singleplayPlayers() const
+{
+	const double players = setting("GeneralSettings.SingleplayBotCount", kSingleplayPlayersDefault);
+	return std::clamp(static_cast<int>(std::lround(players)), kSingleplayPlayersMin, kSingleplayPlayersMax);
+}
+
+void MenuBindings::setSingleplayPlayers(int players)
+{
+	players = std::clamp(players, kSingleplayPlayersMin, kSingleplayPlayersMax);
+	if (players != singleplayPlayers() || !m_appliedSettings.count("GeneralSettings.SingleplayBotCount")) {
+		storeSetting("GeneralSettings.SingleplayBotCount", Value(players));
+	}
+}
+
+MapPlayers playersForMap(const GameSetup& setup, int mapSize)
+{
+	MapPlayers out;
+	out.maxPlayers = setup.maxPlayers;
+	if (setup.playerTarget <= 0) {
+		out.bots = std::max(0, setup.bots - (setup.botsIncludeHumans ? 1 : 0));
+		return out;
+	}
+	const int room = mapSize > 0 ? mapSize : setup.playerTarget + 1; // with the player
+	out.bots = setup.botsIncludeHumans ? std::min(setup.playerTarget, room) - 1 : std::min(setup.playerTarget, room - 1);
+	out.bots = std::max(0, out.bots);
+	out.maxPlayers = std::max(setup.maxPlayers, out.bots + 1);
+	return out;
 }
 
 // --- SwiffHost and MenuTeamManager (the menu scripts' console objects)

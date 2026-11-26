@@ -139,10 +139,11 @@ public:
 	int rank() const;
 	int nextRankPoints() const;
 	float rankProgress() const;
-	// One credit per rank, less the unlocks chosen.
+	// None: every unlock is owned already.
 	int credits() const;
 	int unlocksTotal() const;
-	int unlocksSelected() const { return static_cast<int>(m_stats.unlocks.size()); }
+	// Every unlock is owned from the start (the record's own list is kept as it was).
+	int unlocksSelected() const { return unlocksTotal(); }
 	// The level owned in a branch (0 for none).
 	int branchLevel(int kit, int branch) const;
 	// 0x0045c030's table, then 0x1004e000: an available one shows as

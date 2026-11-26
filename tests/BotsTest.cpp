@@ -12,6 +12,7 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/Bots.h"
+#include "Game/Director.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
@@ -1971,9 +1972,13 @@ TEST(Bots_DriveAvoidingGivesWayExceptForAHuman)
 
 // AIDLL 0x10089000: a new bot joins its side's smallest non-empty squad
 // (the later of equals), and a squad of three or more first passes its
-// last member on to the empty squad after it. Eight bots of a side make
-// squads of 3, 3 and 2, not one full squad of six; the moved member leads.
-// Each bot spawns as it is added, as the round's start does.
+// last member on to the empty squad after it, where the new bot follows
+// him (esi becomes the next squad at 0x1008914c; append 0x100891e3, join
+// 0x100891ff). Eight bots of a side: bot 3 moves bot 2 on and joins him,
+// bot 4 takes the later of the two 2s, bot 5 squad 1, bot 6 moves bot 4 on
+// and joins him, bot 7 the later 2: squads of 3, 2 and 3, not one full
+// squad of six; the moved member leads. Each bot spawns as it is added, as
+// the round's start does.
 TEST(Bots_AddBotSpreadsSquadsAsRetail)
 {
 	Field field;
@@ -1992,14 +1997,14 @@ TEST(Bots_AddBotSpreadsSquadsAsRetail)
 		}
 		return in;
 	};
-	CHECK(members(1) == std::vector<int>({pac[0], pac[1], pac[3]}));
-	CHECK(members(2) == std::vector<int>({pac[2], pac[4], pac[6]}));
-	CHECK(members(3) == std::vector<int>({pac[5], pac[7]}));
+	CHECK(members(1) == std::vector<int>({pac[0], pac[1], pac[5]}));
+	CHECK(members(2) == std::vector<int>({pac[2], pac[3]}));
+	CHECK(members(3) == std::vector<int>({pac[4], pac[6], pac[7]}));
 	CHECK(members(4).empty());
 	game::GameWorld::PlayerInfo info;
 	CHECK(field.world->playerInfo(pac[0], info) && info.squadLeader);
 	CHECK(field.world->playerInfo(pac[2], info) && info.squadLeader);
-	CHECK(field.world->playerInfo(pac[5], info) && info.squadLeader);
+	CHECK(field.world->playerInfo(pac[4], info) && info.squadLeader);
 	CHECK(members(1, 2).size() == 3);
 }
 
@@ -2014,7 +2019,8 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		return world.playerInfo(id, info) ? std::make_pair(info.squad, info.squadLeader) : std::make_pair(-1, false);
 	};
 	{
-		// A human first in squad 1: the third bot moves the second bot on.
+		// A human first in squad 1: the third bot moves the second bot on
+		// and follows him (0x1008914c).
 		Field field;
 		Console console;
 		game::BotManager bots(*field.world, scriptedSettings(console));
@@ -2022,12 +2028,14 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		CHECK(field.world->joinSquad(human, 1));
 		const int b0 = bots.addBot("", 1), b1 = bots.addBot("", 1), b2 = bots.addBot("", 1);
 		CHECK(squadOf(*field.world, human) == std::make_pair(1, true));
-		CHECK(squadOf(*field.world, b0).first == 1 && squadOf(*field.world, b2).first == 1);
+		CHECK(squadOf(*field.world, b0) == std::make_pair(1, false));
 		CHECK(squadOf(*field.world, b1) == std::make_pair(2, true));
+		CHECK(squadOf(*field.world, b2) == std::make_pair(2, false));
 	}
 	{
 		// A human in the game before the bots but joining after two of them
-		// is the last to join: he moves on and leads.
+		// is the last to join: he moves on and leads, and the new bot
+		// follows him.
 		Field field;
 		Console console;
 		game::BotManager bots(*field.world, scriptedSettings(console));
@@ -2037,7 +2045,8 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		const int b2 = bots.addBot("", 1);
 		CHECK(squadOf(*field.world, human) == std::make_pair(2, true));
 		CHECK(squadOf(*field.world, b0) == std::make_pair(1, true));
-		CHECK(squadOf(*field.world, b1).first == 1 && squadOf(*field.world, b2).first == 1);
+		CHECK(squadOf(*field.world, b1) == std::make_pair(1, false));
+		CHECK(squadOf(*field.world, b2) == std::make_pair(2, false));
 	}
 	{
 		// A human's private squad (the only one with members) refuses the bot,
@@ -7473,4 +7482,257 @@ TEST(Bots_UnlocksTakeAPrimaryFromItsOwnPool)
 	}
 	std::fprintf(stderr, "  the primary taken %d of %d\n", primaries, runs);
 	CHECK(primaries > runs * 3 / 10 && primaries < runs * 7 / 10);
+}
+
+// enhanced.botLoneSeat (not retail): a bot alone in a gunner seat with nobody
+// driving. Retail's BBChange (0x1006c520) weighs its own gun seat (2 x 16 x
+// 0.77) over the empty driver's seat's move (4.5) and BBIdle (0x10069f50)
+// gives a passenger 0.5 with no timer, so it sits there for good (as with the
+// setting off below). With it on, after 2 s it takes the driver's seat
+// (loneSeat) and then keeps it (a lone driver no longer moves over to the
+// gun seat).
+TEST(Bots_LoneGunnerTakesTheDriversSeat)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const bool on : {true, false}) {
+		CarField field(gameDir);
+		const bool enhanced = true;
+		field.settings.enhanced = &enhanced;
+		field.settings.botLoneSeat = &on;
+		const uint32_t id = field.car("car", 3, 0);
+		const int bot = field.soldier("Bot", true, 0, 0);
+		field.ticks(90);
+		field.board(bot, 1);
+		CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 1);
+		game::BotManager bots(*field.world, field.settings);
+		float took = -1;
+		bool lone = false;
+		for (int tick = 0; tick < 30 * 8 && took < 0; ++tick) {
+			field.ticks(1, &bots);
+			lone = lone || bots.behaviour(bot) == "LoneSeat";
+			if (field.info(bot).vehicle == id && field.info(bot).seat == 0) {
+				took = static_cast<float>(tick + 1) / 30;
+			}
+		}
+		std::fprintf(stderr, "  botLoneSeat %d: the driver's seat after %.2f s (seat %d)\n", on, took, field.info(bot).seat);
+		if (!on) {
+			CHECK(took < 0 && !lone);
+			CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 1); // retail: there for good
+			continue;
+		}
+		CHECK(lone);
+		CHECK(took >= 1.9f && took < 4);
+		field.ticks(30 * 6, &bots);
+		CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 0);
+	}
+}
+
+// A gunner with a bot driving shoots at an enemy in its gun's reach: the
+// Fixed seat's Fire behaviour (BBFireInfantery) picks the seat's gun
+// (seatArmament) and the trigger fires it, the driver keeping its seat.
+TEST(Bots_GunnerWithABotDriverFires)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	const bool enhanced = true;
+	field.settings.enhanced = &enhanced;
+	field.settings.botLoneSeat = &enhanced;
+	field.templates.create("GenericProjectile", "bullet")->settings()["damage"] = "1";
+	field.addCar("car_c", "car_firearm_c");
+	world::ObjectTemplate* gun = field.templates.find("car_firearm_c");
+	gun->settings()["velocity"] = "300";
+	gun->settings()["fire.roundsPerMinute"] = "300";
+	gun->settings()["aiTemplate"] = "car_firearm_c";
+	std::string out;
+	for (const char* line : {"weaponTemplate.create car_firearm_c", "weaponTemplate.setStrength Infantry 5",
+			 "weaponTemplate.maxRange 100", "weaponTemplate.allowedDeviation 2", "aiSettings.setBehaviourModifier Fire 7.5",
+			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.setBehaviourModifier Change 1.0", "aiSettings.setBehaviourModifier Fire 1.0",
+			 "aiSettings.setVehicleBehaviour Fixed Fire BBFireInfantery BBPFireInfantery 4 UCUnion UnitWeights",
+			 "aiSettings.setViewDistance 200"}) {
+		field.console.execute(line, out);
+	}
+	const uint32_t id = field.car("car_c", 3, 0);
+	const int driver = field.soldier("Driver", true, 0, 0);
+	const int gunner = field.soldier("Gunner", true, 0, 1);
+	field.ticks(90);
+	field.board(driver, 0);
+	field.board(gunner, 1);
+	CHECK(field.info(driver).vehicle == id && field.info(driver).seat == 0);
+	CHECK(field.info(gunner).vehicle == id && field.info(gunner).seat == 1);
+	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	const int enemy = field.world->addPlayer("Enemy", 1, false);
+	field.world->spawnSoldier(enemy);
+	const physics::Vec3 at = field.info(gunner).position;
+	field.world->setSoldierPosition(field.info(enemy).soldier, {at.x + 12, 0, at.z + 16});
+	game::BotManager bots(*field.world, field.settings);
+	bool fought = false;
+	for (int tick = 0; tick < 30 * 10 && field.info(gunner).gunShots == 0; ++tick) {
+		field.ticks(1, &bots);
+		fought = fought || bots.behaviour(gunner) == "Fire";
+	}
+	std::fprintf(stderr, "  gunner %s, target %d, %u rounds; driver in seat %d\n", bots.behaviour(gunner).c_str(),
+		bots.target(gunner), field.info(gunner).gunShots, field.info(driver).seat);
+	CHECK(fought);
+	CHECK(field.info(gunner).gunShots > 0);
+	CHECK(field.info(gunner).vehicle == id && field.info(gunner).seat == 1);
+	CHECK(field.info(driver).vehicle == id && field.info(driver).seat == 0);
+}
+
+// --director (Game/Director.h) on a round of bots: one bot fights an enemy
+// in front of it, another stands alone far off. The director's observer sees
+// the fight (the fire, the enemy in sight and range) and the idling, and its
+// shots end on the fighting bot, leaving the idle one.
+TEST(Director_CutsFromIdleBotToFightingOne)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	const int idle = field.soldier(2, true, 300, 0); // nothing within its 120 m view
+	const int fighter = field.soldier(2, true, 0, 0);
+	const int enemy = field.soldier(1, false, 0, 30);
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(enemy, info);
+	field.world->setHitPoints(info.soldier, 1e6f); // keeps the fight going
+	// The idle bot first: it is the director's subject at the start, before anyone has fired.
+	game::director::Director director(*field.world, &bots);
+	std::vector<game::director::Cut> cuts;
+	director.onCut = [&cuts](const game::director::Cut& cut) { cuts.push_back(cut); };
+	int onFighter = 0, ticks = 0;
+	for (int tick = 0; tick < 30 * 16; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		director.tick(1 / 30.0f);
+		if (tick >= 30 * 10) {
+			++ticks;
+			onFighter += director.subject() == fighter;
+		}
+	}
+	const game::director::Sample* f = director.observer().find(fighter);
+	const game::director::Sample* i = director.observer().find(idle);
+	CHECK(f && i);
+	CHECK(director.observer().find(enemy) == nullptr); // a human isn't a subject
+	if (!f || !i) {
+		return;
+	}
+	std::printf("  fighter: interest %.1f (fired %.1f s ago, enemy in range %d); idle bot: %.1f, idle %.1f s; %zu cuts\n",
+		game::director::interest(*f), f->sinceFired, f->enemyInRange, game::director::interest(*i), i->idleFor, cuts.size());
+	std::printf("  idle bot: speed %.2f, behaviour idle %d, target %d, since fired %.1f, hit %.1f, in spawn %d, alive %.0f s\n", i->speed,
+		i->idleBehaviour, i->hasTarget, i->sinceFired, i->sinceHit, i->inSpawn, i->aliveFor);
+	for (const auto& c : cuts) {
+		std::printf("    %.1f s: player %d, %s, %s\n", c.time, c.subject, game::director::modeName(c.mode), c.reason.c_str());
+	}
+	CHECK(f->sinceFired < 2 && f->enemyInRange && f->hasTarget && game::director::engaged(*f));
+	CHECK(i->idleFor > 4 && !game::director::engaged(*i));
+	CHECK(game::director::interest(*f) > game::director::interest(*i) + 4);
+	CHECK(!cuts.empty() && cuts.back().subject == fighter);
+	CHECK(onFighter == ticks);
+	// The camera: on the fighter, a few metres from his eye at most (wide shots aside).
+	game::camera::Look look;
+	float fov = 0;
+	CHECK(director.view(look, fov) && fov > 0.5f);
+	field.world->playerInfo(fighter, info);
+	const float away = std::sqrt(physics::lengthSquared(look.eye - info.position));
+	CHECK(director.mode() == game::director::CameraMode::Wide ? away < 60 : away < 6);
+}
+
+// --director-mode kills with --director-first-person: the followed bot is
+// killed, the death view holds, then the camera travels to the killer (no
+// cut for the renderer, his first person and hidden body only on arrival);
+// the interest mode cuts to the next bot outright.
+TEST(Director_KillsTravelsFromTheDeathViewToTheKiller)
+{
+	for (const game::director::Policy policy : {game::director::Policy::Kills, game::director::Policy::Interest}) {
+		const bool kills = policy == game::director::Policy::Kills;
+		Field field;
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		game::BotManager bots(*field.world, settings); // (not run: the bots stand, nobody fires)
+		const int a = field.soldier(2, true, 0, 0);
+		const int b = field.soldier(1, true, 0, 60);
+		const int c = field.soldier(1, true, 60, 0);
+		game::director::Settings shots;
+		shots.policy = policy;
+		shots.firstPersonShare = 1; // --director-first-person
+		shots.wideShare = 0;
+		game::director::Director director(*field.world, &bots, shots);
+		std::vector<game::director::Cut> cuts;
+		director.onCut = [&cuts](const game::director::Cut& cut) { cuts.push_back(cut); };
+		const auto tick = [&] {
+			field.world->tick(1 / 30.0f);
+			director.tick(1 / 30.0f);
+		};
+		for (int i = 0; i < 30; ++i) {
+			tick();
+		}
+		const int victim = director.subject();
+		CHECK(victim >= 0);
+		if (victim < 0) {
+			return;
+		}
+		// Its killer: an enemy 60 m off.
+		const int killer = victim == a ? b : a;
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(victim, info);
+		field.world->applyDamage(info.soldier, 1000, killer);
+		const size_t before = cuts.size();
+		int cutTicks = 0, travelTicks = 0, shownWhileTravelling = 0, hiddenWhileFar = 0;
+		float startGap = -1;
+		bool arrived = false;
+		game::camera::Look look, deathView;
+		float fov = 0;
+		for (int i = 0; i < 30 * 8 && !arrived; ++i) {
+			const bool wasTravelling = director.travelling();
+			tick();
+			CHECK(director.view(look, fov));
+			if (cuts.size() == before) {
+				deathView = look;
+				continue;
+			}
+			if (director.cutLastTick()) {
+				++cutTicks;
+			}
+			if (director.travelling()) {
+				++travelTicks;
+				if (travelTicks == 1) {
+					startGap = std::sqrt(physics::lengthSquared(look.eye - deathView.eye)); // on from the death view
+				}
+				shownWhileTravelling += director.firstPersonShown();
+				field.world->playerInfo(director.subject(), info);
+				hiddenWhileFar += !director.hidden().empty() && physics::lengthSquared(look.eye - info.position) > 9;
+			} else if (wasTravelling || !kills) {
+				arrived = true;
+			}
+		}
+		CHECK(cuts.size() > before);
+		if (cuts.size() <= before) {
+			return;
+		}
+		const game::director::Cut& cut = cuts[before];
+		std::printf("  %s: %s cut to player %d (killer %d), %d travel ticks (from %.2f m off the death view), %d cut ticks\n",
+			game::director::policyName(policy), cut.reason.c_str(), cut.subject, killer, travelTicks, startGap, cutTicks);
+		CHECK(cut.reason == (kills ? "killer" : "death"));
+		if (kills) {
+			CHECK(cut.subject == killer);
+			// 60 m or so: 1.4 s or so of travel, never a cut.
+			CHECK(travelTicks > 30 && travelTicks < 60 && cutTicks == 0);
+			CHECK(shownWhileTravelling == 0 && hiddenWhileFar == 0);
+			CHECK(startGap >= 0 && startGap < 0.5f);
+		} else {
+			CHECK(travelTicks == 0 && cutTicks == 1);
+		}
+		// There: in the new subject's eye, his first person on.
+		CHECK(arrived);
+		field.world->playerInfo(director.subject(), info);
+		const float away = std::sqrt(physics::lengthSquared(look.eye - info.position));
+		CHECK(away < 2.5f && director.firstPersonShown() && !director.hidden().empty());
+		(void)c;
+	}
 }

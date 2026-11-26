@@ -49,6 +49,7 @@ void RemoteWorld::clear()
 	m_gameState = 0;
 	m_fieldUnlockCredits = 0;
 	m_squadOrderPoints = m_squadOrderMax = 0;
+	m_squadOrderBar = false;
 	m_ownedUnlockMasks = m_fieldUnlockMasks = m_previousUnlockMasks = {};
 	m_roundStarted = false;
 	m_round = {};
@@ -415,7 +416,16 @@ bool RemoteWorld::apply(const GameEvent& event)
 		bool progress = false;
 		double points = 0;
 		if (parseSquadOrderPoints(info, progress, points)) {
-			(progress ? m_squadOrderPoints : m_squadOrderMax) = points;
+			// 0x007a2100 case 0x56: points (flag 1) are kept; a maximum of
+			// -1 or less hides the bar, any other shows it and is kept.
+			if (progress) {
+				m_squadOrderPoints = points;
+			} else if (points <= -1) {
+				m_squadOrderBar = false;
+			} else {
+				m_squadOrderBar = true;
+				m_squadOrderMax = points;
+			}
 		}
 		if (info.category == kMsgGameCategory && info.id == 1) {
 			m_gameState = static_cast<uint32_t>(info.payloadInt());
@@ -505,6 +515,7 @@ bool RemoteWorld::apply(const GameEvent& event)
 		if (m_roundEnded) {
 			m_fieldUnlockCredits = 0;
 			m_squadOrderPoints = m_squadOrderMax = 0;
+			m_squadOrderBar = false;
 			for (size_t i = 0; i < m_ownedUnlockMasks.size(); ++i) {
 				m_ownedUnlockMasks[i] &= ~m_fieldUnlockMasks[i];
 			}
@@ -781,6 +792,11 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 				for (size_t g = 0; g < 3; ++g) {
 					if (n.fireMask & slots[g]) {
 						p.fire[g] = n.fire[g];
+						if (n.fire[g].rounds >= 0) {
+							const RemoteObject* soldier = p.soldierGhost ? object(p.soldierGhost) : nullptr;
+							p.knownRounds[g] = n.fire[g].rounds;
+							p.knownRoundsWeapon[g] = soldier ? soldier->weapon : -1;
+						}
 					}
 				}
 				if (n.firePresses >= 0) {
@@ -1612,6 +1628,7 @@ void RemoteWorld::onLevel(const std::string& data)
 		m_roundEnded = false;
 		m_fieldUnlockCredits = 0;
 		m_squadOrderPoints = m_squadOrderMax = 0;
+		m_squadOrderBar = false;
 		m_ownedUnlockMasks = m_fieldUnlockMasks = m_previousUnlockMasks = {};
 		// The old level's reports and spots, timed by its server ticks.
 		m_radar.clear();

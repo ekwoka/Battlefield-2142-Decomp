@@ -182,6 +182,13 @@ struct RemotePlayer {
 	// set by a c_PIReload press: 0x004bda00 -> 0x0059b330): each is a
 	// reload seen (the client's 0x00590e10: soldier input message 10).
 	uint32_t reloads = 0;
+	// The rounds in each group's magazine as last sent (the fire state's,
+	// which carries them only while firing or with mask 0x10000) and the
+	// soldier's selected weapon then (RemoteObject::weapon; -1 none): a
+	// followed player's HUD (enhanced.followFirstPerson) shows them while
+	// he holds that weapon. -1 unknown.
+	std::array<int, 3> knownRounds {-1, -1, -1};
+	std::array<int, 3> knownRoundsWeapon {-1, -1, -1};
 	// The time outside the combat area (player +0x294, the networkable's
 	// mask 0x800: whole seconds, 0 inside or after a respawn), the HUD's
 	// countdown (0x0044c7b0 through slot 0xf0).
@@ -266,6 +273,7 @@ public:
 	int fieldUnlockCredits() const { return m_fieldUnlockCredits; }
 	double squadOrderPoints() const { return m_squadOrderPoints; }
 	double squadOrderMax() const { return m_squadOrderMax; }
+	bool squadOrderBar() const { return m_squadOrderBar; }
 	const std::array<uint8_t, 56>& ownedUnlockMasks() const { return m_ownedUnlockMasks; }
 	const std::array<uint8_t, 56>& fieldUnlockMasks() const { return m_fieldUnlockMasks; }
 	int localPlayer() const { return m_localPlayer; }
@@ -576,6 +584,7 @@ private:
 	uint32_t m_tick = 0;
 	int m_fieldUnlockCredits = 0;
 	double m_squadOrderPoints = 0, m_squadOrderMax = 0;
+	bool m_squadOrderBar = false; // the HUD's +0x302: a max message over -1 (0x007a2100 case 0x56)
 	std::array<uint8_t, 56> m_ownedUnlockMasks {}, m_fieldUnlockMasks {}, m_previousUnlockMasks {};
 	uint32_t m_gameState = 0;
 	bool m_roundStarted = false;

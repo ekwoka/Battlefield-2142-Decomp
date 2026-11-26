@@ -130,8 +130,11 @@ void FirstPersonRig::setWeapon(const AnimationSystemTemplate* weapon)
 	}
 	m_weaponTemplate = weapon;
 	m_weapon = weapon ? std::make_unique<AnimationState>(m_systems, *weapon) : nullptr;
-	// The new weapon's clips start from the setup pose.
+	// The new weapon's clips start from the setup pose, and a frame drawn
+	// before the next tick shows it, not a blend from the old weapon's pose.
 	m_pose = setupPose(m_skeleton);
+	m_previous = m_pose;
+	m_world = worldMatrices(m_skeleton, m_pose);
 	m_snap = true;
 	combineSprings();
 }
@@ -176,7 +179,13 @@ void FirstPersonRig::update(const AnimationInput& input, float seconds, std::vec
 		m_weapon->update(input, seconds);
 		take(*m_weapon, true);
 	}
-	m_previous = m_pose;
+	// The drawn pose blends from where the last frame left the skeleton: the
+	// pose before the first tick since a draw. Later ticks of the same frame
+	// keep it, as the frame's alpha spans all its ticks (TickBlend.h).
+	if (m_drawn) {
+		m_previous = m_pose;
+		m_drawn = false;
+	}
 	std::vector<bool> touched;
 	if (m_soldier) {
 		m_soldier->apply(m_skeleton, m_pose, touched);
@@ -193,7 +202,8 @@ void FirstPersonRig::update(const AnimationInput& input, float seconds, std::vec
 
 void FirstPersonRig::blend(float alpha)
 {
-	alpha = std::clamp(alpha, 0.0f, 1.0f);
+	m_drawn = true;
+	alpha = std::clamp(alpha, kBlendAlphaMin, kBlendAlphaMax);
 	LocalPose drawn = m_pose;
 	for (size_t i = 0; i < drawn.rotations.size() && i < m_previous.rotations.size(); ++i) {
 		drawn.rotations[i] = slerp(m_previous.rotations[i], m_pose.rotations[i], alpha);

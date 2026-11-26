@@ -34,4 +34,38 @@ private:
 	uint32_t m_serial = 0;
 	Pose m_previous, m_current;
 };
+
+// The soldier's own eye (0x0043f170's local player). What is smoothed is
+// its carrier: the camera less the eye's height, turned by the carrier's
+// yaw (on foot the soldier's, seated the seat's), the eye's height kept
+// alongside.
+inline MissileViewSmoothing::Pose soldierEyeCarrier(MissileViewSmoothing::Pose camera, float eyeHeight, float carrierYaw)
+{
+	camera.position[1] -= eyeHeight;
+	camera.yaw = carrierYaw;
+	camera.eye = eyeHeight;
+	return camera;
+}
+
+// The drawn eye from the smoothed carrier: the eye's height between the
+// ticks, then a step on towards the pose's (0x005890a0, 0.2 a call,
+// *0x00a68e14), undone after the frame (0x0043f610) like every blended
+// matrix; the carrier's blended turn in place of its tick's; the look the
+// frame's, the tick's plus what the next tick will take (0x0058b5e0 ->
+// 0x005890a0), the pitch within 85 degrees. Radians, the look in degrees.
+struct SoldierEyeView {
+	float y = 0, yaw = 0, pitch = 0;
+};
+inline SoldierEyeView composeSoldierEye(const MissileViewSmoothing::Pose& smooth, float cameraYaw, float cameraPitch,
+	float carrierYaw, float eyeTarget, float lookTurnDegrees, float lookPitchDegrees)
+{
+	constexpr float kRadians = 3.14159265f / 180.0f;
+	SoldierEyeView eye;
+	eye.y = smooth.position[1];
+	eye.y += smooth.eye + (eyeTarget - smooth.eye) * 0.2f;
+	eye.yaw = cameraYaw;
+	eye.yaw += smooth.yaw - carrierYaw + lookTurnDegrees * kRadians;
+	eye.pitch = std::clamp(cameraPitch + lookPitchDegrees * kRadians, -85 * kRadians, 85 * kRadians);
+	return eye;
+}
 }

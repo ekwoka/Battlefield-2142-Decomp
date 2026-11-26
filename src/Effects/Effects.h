@@ -310,7 +310,10 @@ struct EmitContext {
 	float waterLevel = 0;
 	bool hasCamera = false;
 	Vec3 camera;
-	float tanHalfFov = 0.5f;
+	// The render view's field of view (vertical, radians, RendDX9
+	// RenderView +0x24) and its height / width (+0x34, slot 0x48).
+	float fov = 1.0f;
+	float aspect = 0.75f;
 	int* poolUsed = nullptr; // sprites alive in all systems
 	// The ground's height at a point (collisionEnable); none if empty.
 	std::function<float(float x, float z)> groundHeight;
@@ -388,6 +391,8 @@ public:
 	// the template's particleMaxSize, the system's place when it has none;
 	// 0x101407c0), as a centre and radius (0x1012ea80 / 0x1012ea30).
 	void bounds(Vec3& centre, float& radius) const;
+	// The same box as its corners.
+	void box(Vec3& low, Vec3& high) const;
 	// The distance LOD's emission scale now (+0x134).
 	float lodScale() const { return m_lodScale; }
 
@@ -894,11 +899,14 @@ public:
 	// view frustum, 0x101a4720). Const as setCamera: the draw's bookkeeping.
 	void markViewed(const std::function<bool(const Vec3& centre, float radius)>& inView) const;
 	uint32_t framesViewed() const { return m_context.frame; }
-	void setCamera(const Vec3& position, float tanHalfFov) const
+	// The camera the distance LOD measures from: its place, its vertical
+	// field of view (radians) and the view's height / width.
+	void setCamera(const Vec3& position, float fov, float aspect = 0.75f) const
 	{
 		m_context.hasCamera = true;
 		m_context.camera = position;
-		m_context.tanHalfFov = tanHalfFov;
+		m_context.fov = fov;
+		m_context.aspect = aspect;
 	}
 	// The bundle modifiers of an anchor's emitters spawned with `tag`
 	// (Wheel/AirDraftEffectBundle, 0x0061bd20 / 0x0061ce20).

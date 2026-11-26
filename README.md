@@ -57,6 +57,7 @@ to their owners and still need your own copy of the game.
 source/Battlefield 2142/   your game install, BF2142 1.51 + OpenSpy patch (git-ignored)
 build/                     build trees, Ghidra project, analysis output (git-ignored)
 reference/OpenBattlefield2/ the Refractor 2 reference implementation (git-ignored clone)
+launcher/                  a Tauri + Leptos app that builds and runs the port (development)
 src/                       the rewrite, laid out like DICE's Code/BF2 tree
   Platform/                OS abstraction (dialogs, dynamic libraries, ...)
   Memory/                  dice::hfe::memory (was Memory.dll)
@@ -113,17 +114,20 @@ brew install sdl3 glslang spirv-cross        # for the renderer (optional)
 brew install python@3                         # for the game-mode scripts (optional)
 # put your BF2142 1.51 install (OpenSpy-patched) at "source/Battlefield 2142"
 
-# Native (macOS) build and tests (ASan/UBSan enabled)
-cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
-ninja -C build/native && build/native/tests/bf2142_tests
-# tests run in parallel processes, one per core (the whole suite takes about
-# 16 min); -j N runs N at a time; a name runs only the tests containing it
+# Release build: for playing and for the tests
+cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C build/release
+BF2142_GAME_DIR="$PWD/source/Battlefield 2142" nice build/release/tests/bf2142_tests
+# the tests run in parallel processes, slowest first (the whole suite takes about
+# a minute): every core when run under nice, else at most 8; -j N runs N at a
+# time; a name runs only the tests containing it
 # --remaster (or BF2142_REMASTER_TESTS=1) adds the Project Remaster tests; they
 # need mods/Project_Remaster_v17_Final in the install (BF2142_GAME_DIR)
 
-# Release build for playing (much faster than the ASan debug build above)
-cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release
-ninja -C build/release src/Main/bf2142
+# Debug build with ASan/UBSan: only for investigating a failing test (several
+# times slower); run just the failing tests in it, by name
+cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined"
+ninja -C build/native && build/native/tests/bf2142_tests <failing test>
 
 # Optional: Steam Audio for the enhanced mode's occlusion (a 181 MB download)
 cmake -S . -B build/release -DBF2142_STEAM_AUDIO=ON && ninja -C build/release src/Main/bf2142
@@ -135,6 +139,13 @@ ninja -C build/win32
 # Ghidra analysis of the retail binaries
 DECOMPILE=1 tools/ghidra/analyze.sh BF2142Audio.dll
 ```
+
+Every build compiles with `-ffp-contract=off` (MSVC: `/fp:precise`), set in
+`CMakeLists.txt`. Clang otherwise fuses `a * b + c` into one multiply-add
+wherever the target has the instruction (always on arm64, on x86-64 only with
+`-march` flags), and the same round could then compute different floats, so a
+different state fingerprint, on Apple Silicon and on x86-64. Without the fused
+instructions a headless round runs about 2 to 3 % slower on Apple Silicon.
 
 ### Native Windows build
 
@@ -210,9 +221,14 @@ B=build/release/src/Main/bf2142
 G="source/Battlefield 2142"
 
 $B --game "$G" --menu --view                       # the main menu in a window: log in or play offline, then Singleplay
-$B --game "$G" +level Camp_Gibraltar --play --view # straight into a level as an EU soldier
+$B --game "$G" --menu +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15  # straight into a level, as the singleplayer page starts it
+$B --game "$G" +level Camp_Gibraltar --play --view # into a level as an EU soldier, without the menu
 $B --game "$G" +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15 --simulate 120   # a headless bot round
 ```
+
+For development there is also a small launcher app in [`launcher/`](launcher/README.md). Start it
+with `cargo tauri dev` from the repository root. It builds with ninja, runs the game, and lets you
+tick any of the options below and the enhanced options.
 
 ### How a run behaves
 
@@ -297,13 +313,14 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Option | What it does |
 |---|---|
 | `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
+| `--team <1\|2>` | The team to play for, with `--play` or with `--menu` and `+level` (EU, 2, without it). |
 | `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. It lands on whatever is under the spot (a roof, a deck or the terrain) when a 4 × 6 m footprint there is clear and level with the soldier; else on the nearest such spot round him, else on the nearest open ground within 60 m. A leading `goto:` in `--actions` places the soldier first (the rest run in the seat). |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
 | `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1), also on a server joined with `--play`. |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
 | `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 altfire:3 item:2 prone:20 jump"` (`altfire` also zooms, as the right button; `flare` is a seat's flares or active defence; `goto:x/y/z/yaw` puts the soldier at a spot facing a way). Each prints the weapon in hand (in a seat, each weapon group's), the soldier's place, hit points and battery, the objects new since the last, the rounds' hits since the last and the `--spawn` targets' hit points. |
-| `--unlock-all` | Every kit unlock. |
-| `--unlocks <a,b,…>` | Only these unlocks (ItemContainer names, e.g. `UnlockEU_SupportHeavy2`), chosen as the customise screen equips them. |
+| `--unlock-all` | Accepted and ignored: human players always own every unlock, in every mode (bots own only what they are given). |
+| `--unlocks <a,b,…>` | Equip only these unlocks (ItemContainer names, e.g. `UnlockEU_SupportHeavy2`), as the customise screen equips them; every other unlock stays owned. |
 | `--squad-leader` | Lead a squad of your own that the team's bots join (the squad leader's beacon and drones want members). |
 | `--scoreboard` / `--spawn-screen` / `--commander-screen` | Show the scoreboard; die first and show the spawn screen; take command and open the commander screen. |
 | `--hud-click x/y[/right\|/move]` | A click or pointer move on the HUD's 800 × 600 screen before a screenshot (repeatable). |
@@ -317,13 +334,21 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Option | What it does |
 |---|---|
 | `--bots <n>` | Add n AI players, alternately PAC and EU. Bots only move on levels with a navigation mesh. |
+| `--bot-skill <0..1>` | The bots' skill (as `aiSettings.setBotSkill`). Without it: the AI scripts' own, or with `--menu` and `+level` the profile's. |
 | `--simulate <s>` | Run s seconds of game time without a window, then print tickets, control points and each player's score. |
+| `--director` | A match of bots only, filmed by an automatic camera, for recording footage with an outside screen recorder (the game captures nothing itself). The local player joins as a spectator, so every soldier is a bot (with `--menu +level` the player's slot goes to a bot too). Rounds and maps cycle as usual. About every 0.5 s each living bot gets an interest score from what the AI and the world know. Firing, being hit, dealing damage, a recent kill, an enemy in sight and in range, vehicle and aircraft fights, capturing a point and assaulting the enemy Titan (or its core) raise it. Idling, a seat with nothing to shoot, the spawn and manning your own Titan's guns lower it. The camera cuts between bots. A shot lasts 6 to 20 s, ends early after about 4 s of idling, and holds 2 s on the subject's death (the death camera, turned to the killer). A new subject must beat the current one clearly, and bots watched in the last few shots lose close calls. Each shot is a chase of the soldier or vehicle, the bot's own eye at its aim (with `--enhanced`, `enhanced.followFirstPerson`, his first-person arms, weapon, zoom and, in a seat, the seat's camera: see `--director-first-person`), or now and then a slow wide orbit of the action. The aim is smoothed so it doesn't jitter. The HUD, name tags, map and crosshair are hidden: **H** shows them (in a first-person shot, the bot's own HUD), **J** shows only the followed bot's HUD in its first-person shots, **Space** cuts to the next shot. Each cut is logged (`director: <time> cut to <bot> ... <mode>, <reason>`), and `--simulate` ends with how often it cut and how often it watched an engaged bot. For example `--menu +level Verdun +gameMode gpm_ti --bots 63 --director`, or `+level Verdun +gameMode gpm_ti +mapSize 48 --bots 47 --director --view`. |
+| `--director-mode <interest\|kills\|kills-rotate>` | What `--director` follows. `interest` (the default) is the behaviour above. In every mode the crew of one vehicle counts as one subject: the camera never cuts between two gunners of the same transport, their interest is the most interesting crewmate's, and a crewmate's kill keeps the shot. `kills` follows the kills. It starts on the most interesting bot, with the usual interest shots, until a bot kills an enemy anywhere, then it cuts to that killer (`first-kill`). It stays on that bot: no cut for a better bot and none at the 20 s maximum, and its own kills keep it on screen. When the followed bot dies, the death camera holds 2 s, then the camera travels to its killer (`killer`, see `--director-travel`), and the chain goes on. A suicide, a team kill or a death to the environment goes back to the interest shots (`death`), as does a killer who leaves the match (`left`) or one idle for `--director-idle` seconds (`idle-long`). Several kills in one decision go to the killer with the highest interest, then the lowest player id. On a long follow the camera switches between the chase and first person every 12 s (now and then a wide orbit), logged as `angle`. A killer in a vehicle gets the chase, switching to a wide orbit every other time, never first person. `--simulate` adds the time on each subject, the follows and the chains to its summary. For example `+level Verdun +gameMode gpm_ti +mapSize 48 --bots 47 --director --director-mode kills --view`. |
+| `--director-travel <s\|off>` | With `--director-mode kills` or `kills-rotate`: instead of a hard cut, the camera flies from the old view to the new bot when it goes to a killer (`killer` after the death hold, `first-kill`) or off a death to another bot (`death`). The flight starts on the death view (or the old shot), eases in and out, rises on an arc (an eighth of the distance, at most 30 m, or higher to clear a hill in between) and stays a few metres over the ground, turns to look at the new bot early on and settles into the new shot's own view as it arrives, tracking the bot while it moves. It takes 0.75 s plus a second each 90 m, at least 1 s and at most the given seconds (default 3), so a typical 50 to 150 m hop takes 1.3 to 2.4 s. A new bot more than 400 m off is a hard cut (a flight across the map would be a long blur), as are the `idle-long`, `streak`, `left` and `angle` cuts and every cut in the `interest` mode. In a first-person shot (`--director-first-person`) the bot's own first person (arms, weapon, HUD) switches on only on arrival. `off` or 0 keeps the hard cuts. Each flight is logged (`director: <time> travel <m> m in <s> s`). The camera only reads the world, so the simulation is the same with or without it. |
+| `--director-idle <s>` | With `--director-mode kills`: how long the followed bot may go with no fire, no damage dealt or taken, no kill, no enemy in sight and range and no capture before the camera leaves it. The default is 25 s. That outlasts a reload, a dash between cover or the wait for the next enemy, but is shorter than a walk to the next control point. |
+| `kills-rotate` (a `--director-mode`) and `--director-streak <s>` | `kills-rotate` is `kills`, except that a followed bot in a vehicle that takes no damage for `--director-streak` seconds (default 40; a gun of its own Titan half that, 20) is left for the most interesting other bot (`streak`). The clock starts on the follow and restarts at any hit on the vehicle or when the bot is on foot. The vehicle and its crew are then benched for 60 s: their kills don't bring the camera back, nor does their interest, unless they are hit first. Without it, a tank or a Titan gun farming kills unopposed is the same shot for minutes. |
+| `--director-first-person` | With `--director`: every shot of a bot on foot is first person (and no wide shots). With `--enhanced` (`enhanced.followFirstPerson`) a first-person shot is the bot's own view as he would see it: his first-person arms and weapon, animated from his state (the weapon in hand and its deploy, firing, reloading, zooming, sprinting), his weapon's zoom field of view, his recoil and camera spring, and if he gets in a vehicle his seat's camera (inside view, cockpit, gun camera). The simulation is the same with it. |
+| `--follow-hud` | Start with the followed player's HUD shown in his first person (as **J** toggles it): `--director`'s first-person shots and `--demo-first-person`. The director's own clean-footage default (the HUD hidden until **H**) is otherwise kept. |
 
 **Menus**
 
 | Option | What it does |
 |---|---|
-| `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
+| `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. With `+level` in a window, the game starts that level at once as the singleplayer page does: it logs in on the menu's login page first (the last account, offline, its first soldier), skips the movies, and starts the round with the profile's settings (`--bots`, `--bot-skill`, `--time-limit` and `--team` override them). You get the deployment screen and the HUD, Esc opens the in-game menu on the singleplayer page, and its DISCONNECT goes back to the menu. |
 | `--offline` | The menu finds no account service, so it plays offline. |
 | `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. See [Enhanced mode](#enhanced-mode). |
 | `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |
@@ -358,9 +383,14 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--probe host[:port]` | Only shake hands and print what the server sends. |
 | `--servers` | List the servers the master server knows. |
 | `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |
-| `--demo <file>` | Play a recorded demo back. |
-| `--demo-camera <file.bf2142cam>` | With `--demo`: the camera follows a camera file (the original's `demo.cameramode playback`; `demo.recordDemo` on a hosted game writes `<name>-def.bf2142cam` beside the demo). The demo ends with the file. |
+| `--demo <file>` | Play a recorded demo back. A name with no extension that isn't a file there plays `./Demos/<name>.bf2142demo`, where `demo.recordDemo <name>` puts it. See [Demos](#demos). |
+| `--demo-camera <file.bf2142cam>` | With `--demo`: the camera follows a camera file (the original's `demo.cameramode playback`; recording with a local player writes `<name>-def.bf2142cam` beside the demo). The demo ends with the file. |
 | `--demo-record-camera <file.bf2142cam>` | With `--demo`: record the demo camera you steer into a camera file (`demo.cameramode record`). |
+| `--demo-follow <name\|id>` | With `--demo`: the demo camera follows that player (a name in any case, or a player id) whenever he lives, as `demo.togglePlayerDemo` would put it on him. Without `--demo-first-person` it is the original's follow camera behind him. |
+| `--demo-first-person` | With `--demo` and `--enhanced` (`enhanced.followFirstPerson`): the followed player is shown in his own first person, as he saw the game: his first-person arms and weapon, animated from what the demo carries (the weapon in hand, the fire, the reloads, the zoom, his movement), his weapon's zoom, and in a vehicle his seat's camera and cockpit. **J** (or `--follow-hud`) shows his HUD: health, the weapon and the rounds in its magazine, the item list, the crosshair, the minimap and the vehicle HUD. A demo doesn't carry another player's magazines (no clip count is shown), his ability battery, his exact shots (the held fire fires at the weapon's rate) nor, in a big round, every vehicle he rides (then the view falls back to the follow camera). The console's `demo.toggleFirstPerson` switches it while the demo plays. |
+| `--record-demo <name>` | Record the round from its start, as `demo.recordDemo <name>` does: `./Demos/<name>.bf2142demo` (and its camera file with a local player; with `--director`, or `--enhanced` in `--simulate`, the camera file films the bots: see `enhanced.demoCamera`). Works in singleplayer, with `--simulate` and with `--host`. |
+| `--demo-stats <file>` | Print a demo's ghost update rates (each soldier's updates a second and the gaps between them), its bandwidth and its size a minute, then quit. |
+| `+sv.<setting> <value>` | Set a server setting at start-up, over the config file, e.g. `+sv.demoQuality 10` or `+sv.autoRecord 1`. A local round (singleplayer, `--simulate`) has its own `sv.*` for its demo recorder. |
 
 **Network diagnostics**
 
@@ -398,6 +428,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `BF2142_CONFIG_DIR` | The folder for profiles, settings, stats and demos, instead of `~/Library/Application Support/bf2142-recomp` (`%APPDATA%\bf2142-recomp`, `~/.config/bf2142-recomp`). Point it at a scratch folder for test runs of the menu. |
 | `BF2142_ACCOUNT`, `BF2142_PASSWORD`, `BF2142_SOLDIER`, `BF2142_CDKEY` | Online credentials, instead of `bf2142-online.cfg`. |
 | `BF2142_FRAME_BENCH=<n>` | With `--screenshot`, print the mean cost of n rendered frames. |
+| `BF2142_FRAME_STATS=<seconds>` | Every `<seconds>` (5 if not a number; off when 0 or empty), print the main thread's time per frame stage (mean, 95th percentile and max, ms) and the frames over 50 ms. Also prints the GPU driver at startup. |
 | `BF2142_BOT_SEED=<n>` | The bots' random seed, to compare rounds. Without it the seed comes from the clock, as in the original, except under `--simulate`, whose rounds repeat. |
 | `BF2142_BOT_STATS=1` | Per-bot statistics at the end of a run. |
 | `BF2142_SOUND_LOG=1` | Print every sound played. |
@@ -433,6 +464,51 @@ $B --game "$G" --menu --menu-script "wait:12 click:500,283 type:Tester click:500
 $B --game "$G" --openspy-emulator --emulator-account tester:secret@Tester
 $B --game "$G" +level Camp_Gibraltar +gameMode gpm_cq --host --require-login --simulate 600
 $B --game "$G" --login tester:secret@Tester --connect 127.0.0.1 --play --view
+```
+
+### Demos
+
+Any round you play or simulate can be recorded, as the original's local
+games and servers can: singleplayer (the menu's or `+level`), `--simulate`
+and `--host`. A local round records through a server of its own that opens
+no socket and has no client but the demo's, so the round stays a local one.
+
+| How | What it does |
+|---|---|
+| `--record-demo <name>` | Record from the round's start. |
+| `demo.recordDemo <name>` / `demo.stopRecording` | The console commands (`--console`, the in-game console). |
+| `sv.autoRecord 1` | Record each round from when it plays to its end, as `<mod>/demos/auto_<date>.bf2142demo` (`./mods/bf2142/demos/` by default). A local round takes `+sv.autoRecord 1`; a server its settings file too. |
+| `sv.demoQuality <1..10>` | The original's rate: 4 to 20 packets a second (1 by default). With `--enhanced`, `enhanced.demoQuality` (on) records every tick instead. |
+
+Files go under the folder you run from: `demo.recordDemo match1` writes
+`./Demos/match1.bf2142demo` and, with a local player, its camera
+`./Demos/match1-def.bf2142cam` (an auto demo's camera is
+`<file>.bf2142demo-def.bf2142cam`). The camera file is written as the round
+goes, as the original writes it each tick, so a crash doesn't lose it.
+`--demo match1` plays `./Demos/match1.bf2142demo` back and `--demo-camera`
+plays a camera file with it. The dev launcher lists both folders. The
+camera file is the local player's view, as the original's; with
+`--director` it is the director's, and with `--enhanced`
+(`enhanced.demoCamera`) a `--simulate` recording's, or one while you are
+dead or on the spawn screen, follows the bots too.
+
+How a 64-player round (63 bots and you, Suez Canal conquest, a minute with
+`--enhanced`'s bots) records:
+
+| Setting | Each soldier's updates | Gaps between them (ticks) | Size |
+|---|---|---|---|
+| `sv.demoQuality 1` (the default) | under 0.05 a second | median 157 (5 s), 95% within 967 | 0.03 MB a minute |
+| `sv.demoQuality 10` | 16 a second | median 2, 95% within 3 | 2.4 MB a minute |
+| `enhanced.demoQuality` | 26 a second (every tick while it moves) | 1 | 3.6 MB a minute |
+
+`--demo-stats <file>` prints these figures for a demo. Recording adds
+about 1.2 ms a tick at 64 players and full rate (0.3 ms at
+`sv.demoQuality 1`), mostly the ghosts' snapshot a live server takes too.
+
+```sh
+# a simulated Cerbere Landing 32-player conquest round, recorded, then played back
+$B --game "$G" +level Cerbere_Landing +gameMode gpm_cq +mapSize 32 --bots 31 --play 1 --simulate 300 --enhanced --record-demo cerbere
+$B --game "$G" --demo cerbere --demo-camera Demos/cerbere-def.bf2142cam
 ```
 
 ## Enhanced mode
@@ -479,19 +555,37 @@ The rest only change what you see or hear.
 | `particleLights` | on | graphics | Smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps). | no |
 | `glowOcclusion` | on | graphics | A lamp's additive halo is skipped while the line from the camera to its centre is blocked; the original only depth-tests halos per pixel. | no |
 | `titanHullLods` | on | graphics | A Titan hull half drawn this frame takes its own LOD when the other half was culled, so a far Titan whose front half faded out draws whole; the original keeps the culled half's stale LOD. | no |
+| `actorRange` | on | graphics | Soldiers and vehicles are drawn out to the view distance and fade into the fog as the terrain does. The original drops them by their size on screen: unzoomed on high geometry a soldier is gone at about 176 m (141 m on medium, 106 m on low), well inside every level's fog and every weapon's reach, so from a Titan's ground guns, high above the ground, soldiers below barely show. What bots see is unchanged. | no |
 | `prepass` | off | graphics | The depth, normal and motion prepass even when neither `taa` nor `ssao` reads it. | no |
 | `tvEffect` | off | graphics | Experimental: a guided round's view gets the TVEffect pass (grey, rolled by noise bands, rows shifted sideways so vertical edges lean). The original's renderer never runs it and shows the plain view. | no |
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
 | `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
-| `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
-| `botPilots` | on | bots | A gunship's bot pilot picks the best target its guns can hurt (a vehicle, an infantry group, an aircraft, an enemy Titan's gun hubs) and flies shallow attack runs at it; the original's pilots mostly fly their waypoints and fire only when a target lines up. | yes |
+| `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core, man its guns and fire them at what the guns can reach (the shipped guns have no AI weapon, so they are fought with one made from their rounds, and the gunners see as far as the guns shoot); a transport's side gunners reach 220 m from its support station; in Titan mode bots head for the silos. A Titan gunner is seen and aimed at where its gun hangs under the hull, and fought as heavy armour (no shipped weapon has a strength against a Titan, so nobody ever fired at a manned Titan gun). | yes |
+| `botOffMesh` | on | bots | A bot on foot where the level's infantry navigation mesh doesn't reach walks the terrain to its goal or onto the mesh. Each level ships one mesh, made for its 16-player layout, so the bigger layouts' spawns and points can lie off it (Cerbere Landing's 32 and 64 PAC spawns); the original's bots stand there doing nothing. A bot heading for a vehicle there walks to it too, a walker included (Cerbere Landing's 32-player PAC walker at the Harbor, which the bots never took). A driver bringing a vehicle parked off the vehicle mesh onto it (with `botRecovery`) follows its way there as a car can: for the farthest step of it within 12 m, then on over the mesh's edge (the same layout's PAC FAV at the Harbor, 74 m off the mesh, which wandered the docks). | yes |
+| `botAsyncPaths` | on | bots | The bots' costly Titan-deck ways (to the consoles and the core, and the pods' landing spots) are made while the level loads, and after a Titan part goes down or comes back they are made anew on background threads while the bots keep walking the last ones; a parked vehicle's search for the vehicle mesh is spread over ticks. Big Titan-mode rounds no longer freeze for half a second at those moments. | yes |
+| `botPilots` | on | bots | A gunship's bot pilot picks the best target its guns can hurt (a vehicle, an infantry group, an aircraft, an enemy Titan's gun hubs), favouring those by its goal, the silos and, while the enemy's shield is down, the enemy Titan, and flies shallow attack runs at it: at a Titan gun straight out from the hull, a little under the gun, around the Titan rather than under it, breaking off rather than hanging under the hull. Locked on or hit hard it breaks away for a few seconds; badly damaged it flies to a supply point that mends it (its Titan's deck) and comes back. A deck gunship's take-off ends 300 m out or after 25 s rather than hovering over a silo the Titan stands by. The original's pilots mostly fly their waypoints and fire only when a target lines up. | yes |
 | `botCommander` | on | bots | In Titan mode a team with bots and no commander has its Titan moved and its commander's tools used for it. | yes |
+| `botLoneSeat` | on | bots | A bot left alone in a passenger or gunner seat of a vehicle nobody drives (its driver got out, or it spawned beside one who left) takes the free driver's seat after 2 s, or gets out after 6 s if it can't; a bot driving alone no longer moves over to its own vehicle's gun seat. The original's bots sit there for the rest of the round. | yes |
+| `botThreat` | on | bots | A player who has killed lately (a busy Titan gun, a tank, a gunship) draws more attention: each kill in the last minute weighs it half as much again (up to four times) in the target choice of every bot whose weapons can hurt it, gunship pilots included. The original's target choice knows nothing of kills. | yes |
+| `botTitanRepair` | on | bots | In Titan mode a bot respawning while its Titan has a gun down (or under half its hit points) and fewer than two engineers aboard takes the engineer kit and spawns aboard to mend it; a bot manning a gun that is wrecked under it gets out. The original's bots never board or mend a Titan. | yes |
 | `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
 | `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
 | `chaseRoll` | off | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
+| `followFirstPerson` | on | camera | A followed player's own first person: `--director`'s first-person shots of a bot and a demo's followed player (`--demo-first-person`) show his first-person arms and weapon animated from his state, his weapon's zoom, his seat's camera and cockpit in a vehicle, and with **J** (or `--follow-hud`) his HUD. The original's spectator and demo follow cameras are chases behind the player and show no HUD of his. | no |
 | `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
 | `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
-| `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the same 4:3 HUD (x scaled by 12/16) with its side pieces moved out by 120. Ignored when the hudfix's shader is already installed. | no |
+| `titanKitFloors` | on | gameplay | A kit dropped, or a beacon or shield placed, on a Titan stays on its walkable floor where the hull's bullet mesh has none (by the cargo bay's walls), and a portable shield or sentry gun set down on a Titan's deck starts standing on it. The original lets them fall through the hull. | yes |
+| `podExitAtRest` | on | gameplay | The rider of a landed drop pod gets out at rest on what it landed on. The original hands him the pod's own velocity, so a pod that came in at a slant and is still sliding over a Titan's deck throws him along it and off the edge. | yes |
+| `titanDeckMines` | on | gameplay | A Titan doesn't set off the mines lying on its own decks. The original's mine trigger takes the moving, driverless Titan for a vehicle running over them, so a motion or EMP mine on its deck goes off as soon as it moves. | yes |
+| `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the 4:3 HUD squeezed to the window's aspect ((4/3) ÷ aspect: the hudfix's 12/16 at 16:9, about 0.56 at 21:9), with its side pieces moved out to match (120 at 16:9) and the gunner frames widened to cover the window. It is laid out again when the window is resized. Ignored when the hudfix's shader is already installed, whose fixed 16:9 layout stays. | no |
+| `squadOrderPoints` | on | gameplay | The squads' order points, their HUD bar and the field upgrades it awards work on any server, offline included. The original runs them only on a ranked GameSpy server, so offline it never shows the bar. | yes |
+| `botSquadInvites` | on | gameplay | Offline, a bot you invite from the Manage Squad screen's invite list while you lead a squad joins it (unless it is full; a bot leading a squad hands that squad to its next member), so you can lead bots and use the squad leader's items, which need squad members. The original's bots never answer an invite, and join squads only when they are added at the start, so offline a squad you make stays yours alone. | yes |
+| `botTwinNav` | on | bots | A level that ships no AI navigation data but has a coop twin of the same map (Shuhia_Taiba, Minsk and Sidi_Power_Plant: `shuhia_taiba_coop`, `minsk_coop`, `sidi_power_plant_coop`, the same heightmap and nearly the same static objects) takes the twin's (`ai/AI.ai`, `AIPathFinding/`), so bots play its own layouts (Conquest, No Vehicles, Titan; the 16-player Conquest ones are tested). The original's AI reads only the level's own data and has no bots there; its singleplayer plays the twins' `gpm_sp` and `gpm_coop` layouts. Read as the level loads: set it with `+enhanced.botTwinNav 0`. | yes |
+| `squadItemHints` | on | interface | A weapon key that takes nothing because of the squad says why on the help line, every time: a squad leader's item (the beacon, the drones) when you lead no squad, or a squad too small for it, with the count ("(1/2)": members against the item's need). The original says nothing for the first, and for the second shows its "Your squad is not large enough" help once, only with help on and only to a squad leader. Either way the item is dimmed in the item list, as in the original. | no |
+| `singleplayAllModes` | on | interface | The singleplayer page lists every level's every mode and size (Titan, Assault Lines, conquest and the rest), each row naming its mode, not only its single-player layouts; the chosen map starts in its own mode. For testing: the bots may not play those modes (Titan bots need `botTitan` and `botCommander`). | no |
+| `demoQuality` | on | demos | A recorded demo's ghosts go out every tick (30 a second, retail's biggest packet: 4096 bytes, 255 updates), with more packets that tick when one is full, so a 64-player round plays back with every soldier updated every tick. The original's `sv.demoQuality` (1 to 10, 1 by default) sends 4 to 20 packets a second of 40 to 255 updates: at 1 a 64-player round's soldiers go seconds without an update; at 10 they get about a live client's 20 a second. See [Demos](#demos). The file stays readable by the original's reader (no payload over its 256 KB, no block over 255 updates). | no |
+| `demoCamera` | on | demos | A recorded demo's camera file (`<name>-def.bf2142cam`) films the bots with an automatic camera (`--director`'s, chases and wide shots) while the local player has no living soldier, and throughout a headless `--simulate` recording, where nobody plays the local player (a file is made then even without one). `--demo <name> --demo-camera Demos/<name>-def.bf2142cam` then shows the fighting. The original records the local player's own view: at the spawn screen, and from a soldier nobody steers, a fixed spot; with no local player no file. The frames are the original's free keyframes, readable by its reader. `--director` with `--record-demo` records the director's view into the file whatever this setting. | no |
+| `singleplayBotCount` | on | interface | The singleplayer page gets a MAX PLAYERS slider (1 to 64, default 16) beside the bot skill, kept in the profile. A playlist or instant action started from the page fills each map with that many players, you included, but never more than the map holds: with the slider at 64 a 32-player map gets 31 bots and the next 16-player map 15. The original's page starts every map with 16 players, you included, whatever its size, so at 16 the games are the original's. | no |
 
 `enhanced.enabled` on its own also turns on the enhanced audio (below), lets
 a sound the data names but never creates take its weapon event's defaults,
@@ -548,10 +642,12 @@ feeds the simulation.
 `tools/parity-check.sh [seconds] [extra game args...]` runs the same headless
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
-(`botRecovery`, `botMovement`, `botTitan`, `botCommander`, `botPilots`, `guidedCameraEase`,
-`cornerSteer`, `passengerWeapons`, `softLanding`) turned off. It compares the state
+(`botRecovery`, `botMovement`, `botTitan`, `botOffMesh`, `botAsyncPaths`, `botCommander`, `botPilots`, `botLoneSeat`, `botThreat`, `botTitanRepair`, `guidedCameraEase`,
+`cornerSteer`, `passengerWeapons`, `softLanding`, `titanKitFloors`, `titanDeckMines`, `podExitAtRest`, `squadOrderPoints`, `botSquadInvites`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
-simulation. Anything added to the enhanced mode either leaves the
+simulation. A fourth run records the enhanced round (`--record-demo`, at
+`enhanced.demoQuality`'s full rate) and must match it: recording a demo
+never changes the round. Anything added to the enhanced mode either leaves the
 fingerprint alone or gets its own option, listed in the script.
 
 ## Progress

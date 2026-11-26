@@ -1306,7 +1306,12 @@ them; the contact's depth is how far the end lies behind that face,
   moves the wheel out along their mean normal by its push (0 to 1 m), so
   its spring and tyre (`0x006b8230`: the response's mean normal, point and
   velocity) treat another object's mesh as ground moving with it
-  (`Vehicle::touchObject`).
+  (`Vehicle::touchObject`). A probe's own material, in its contact and both
+  collision events, is its vertex's (`0x6bc764`: slot `0x44(1, i)` of the
+  wheel's mesh, through mapMaterial), the FAVs' Rubber 4550, whose cells
+  against the decks' materials have damageMod 0. (The rewrite took the
+  template's material, 0, whose cells have 1: a FAV lost about 30 hit
+  points a bump driving along a bridge, `Vehicles_FavDrivesAlongADeckUnhurt`.)
 
 - **The stuck push** (the solve `0x006ba7d0`, on the server: game logic
   slot `0x144`): a counter (`+0x118`, −1 each solve, held within −1..3)
@@ -1744,7 +1749,9 @@ the Parachute `parachute` (class `0xc5a8`, vtables `0x0096e518` /
   `GameWorld::parachuteRoom`, `canopyClear`; parachute.collisionmesh's
   24 vertices span −3.21..1.10 m about the start). Taken, it opens at his frame
   plus fire.projectileStartPosition (`0x005e4460`, slot 53: 0/2/0), the
-  round taking his velocity, and enterOnSpawn seats him. No press lets
+  round at rest (the launch's velocity, his own plus the speed, goes only
+  to a round answering 0x94c1, `0x005f2bb0`; the Parachute answers 0xc4c5
+  and is made with none, `0x005f18f0`), and enterOnSpawn seats him. No press lets
   it go: a weapon shown (its slot 10, `0x005c32f0`, while its fire test
   passes) calls its fire component's slot 33, which the
   SpawnObjectFireComp's `0x005e41e0` makes a fire (slot 0x90,
@@ -2247,8 +2254,9 @@ at the bundle (`GameWorld::armorEffectMeshes`); the world-left groups'
 
 The wreck (`0x00652380`): timeToStayAsWreck (template `+0x158`, 20 by
 default) drains the armour to −wreckHitPoints by wreckHitPoints /
-(timeToStayAsWreck × 30) a tick, three times that with the AI running and
-the object mobile (as for the Titans); drained or its time up, it fades
+(timeToStayAsWreck × 30) a tick, three times that with the AI running in sp1,
+gpm_sp or gpm_coop (AIDLL's slot 0x20 false: the level load's init,
+`0x004af290`) and the object mobile (as for the Titans); drained or its time up, it fades
 for timeToStayAfterDestroyed (`+0x15c`, 0) and goes (`0x00651db0`).
 canBeDestroyed 0 or a time of −1: it never drains. A spectacular death
 (the killing hit's `+0x250`): with destroyOnSpectacularDeath (`+0x165`)
@@ -2984,9 +2992,27 @@ Sound stays at the tick: the sound manager steps with the ticks (slot
 source was not traced. A held weapon's node without a part keeps its template
 place, so folding it into the part below gives the same draw as blending
 each node. The name tags are projected at the objects' drawn positions
-(`LevelSources::drawnPositions`). Bone poses stay per tick, as retail's: the
-soldier's skeleton is stepped only in its tick update (`0x00586200` →
-`0x005ef250` with 1/30 s), and the blend moves objects, not bones.
+(`LevelSources::drawnPositions`).
+
+Retail steps the soldiers' animation systems in the frame, not the tick.
+The frame calls ObjectManager slot `0x2c` (`0x007002d0`) with the frame's
+seconds (clamped as above), which runs slot `0xa4` of every object in its
+frame set: the objects with update flag `0x2000` (`0x006f68f0` → manager
+slots `0xf8`/`0xfc`; the tick set is flag `0x800`, slot `0xa8`, run by
+manager slot `0x28`). The Soldier's constructor (`0x0058df00`) sets
+`0x3800`, so each frame `0x00586710` runs `0x005ef250` with the frame's
+time: the active system's update (third or first person by `+0x2f0`;
+slot `0xc`, `0x008baed0`) and the held weapon's. The Soldier's tick update
+(`0x0058d350`) doesn't step them. `0x00586200` → `0x005ef250` with 1/30 s
+is a side path (from `0x00586e50`, `0x006c1df0` and the scene ray
+`0x006fb610`), not the regular step. The pose is evaluated
+(`0x008b8880` → `0x008b8330`) in `0x005f06b0`, which the frame-time
+Soldier method `0x00585bf0` (slot `0xa0`) calls with its flag set; that
+slot's caller wasn't found. The port steps the systems in the tick. Its
+third-person bones stay per tick (the blend moves objects, not bones); the
+first-person skeleton is drawn blended between where the last frame left
+it and the tick's pose (`anim::FirstPersonRig::blend`), the closest the
+tick-stepped systems come to retail's per-frame step.
 
 ## The first-person view
 
@@ -6787,7 +6813,8 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   sum of turns lacked the spawn point's heading, so a client faced off by
   it and its rounds missed) and aim at a man-down soldier's body from the
   eyes the rounds leave from (1.6 m, `GameWorld::fire`). Checked on
-  127.0.0.1 (a host with `--unlock-all`): a medic (Assault, the
+  127.0.0.1 (a host whose players own every unlock, as every human player
+  now always does): a medic (Assault, the
   defibrillator in slot 6 behind the shotgun) downing a squad mate spawned
   on him with the rifle at 1.5 m, then `item:6 goto:<name> crouch fire`,
   revives him (the same soldier and ghost, full health, no respawn); a
@@ -11291,10 +11318,16 @@ Seeking projectiles (`seek.*`, `follow.*`):
 Unlocks are the kits' `ItemContainer` children, one per branch and level
 (`unlockLevel`). An unlocked container adds its items to free slots: the
 frag grenade at 7, and the shotgun, defibrillator, mines, C4 and EMP
-grenade at 5. The local player gets the containers of its soldier's chosen
-unlocks ([Soldier stats](#soldier-stats-ranks-and-unlocks)); `--unlock-all`
-unlocks everything. The customise screen's choice (below) gives the
-containers chosen.
+grenade at 5. Every human player owns every unlock, always and in every
+mode (retail compatibility too), with no option to turn it off
+(`GameWorld::Player::allUnlocked`, set by `addPlayer` for every player
+but a bot; `--unlock-all` is accepted and does nothing); a bot owns only
+what it is given (`setOwnedUnlocks`, `chooseBotUnlocks`). Only the chosen
+containers replace the kit's items (`unlockChosen`, set for every human
+from the start; none are chosen until the customise screen's equip below,
+a client's SelectKit masks or `--unlocks` pick some, so a new soldier has
+the default kit), the rest staying owned (replaceWithoutEquip and firearm
+replacements and the abilities still apply by ownership).
 The kit object prepares the build when it is made (Kit vtable
 `0x00963c78` slot 7, `0x00571220`): it hides its children, lists each
 with its ItemContainer (an unlock's items, the container's children of
@@ -11315,8 +11348,7 @@ online stats' flag (player `+0x403`), never set offline; then each owned
 container's Ability (`0x005706b0`). The owned set is the player's bit
 maps (player `+0x2b4`, read by slot `0x2a8` `0x00597760`, written by slot
 `0x2b0` `0x00597850`, which the field unlocks also set, `0x004baaf0`):
-offline the soldier profile's unlocks (`main.cpp`: `localPlayerOwned`,
-given with `localPlayerUnlocks` from `Stats::containersFor`); the kit
+here a human's is everything (above), a bot's its given lists; the kit
 menu's equip changes only the chosen set.
 
 **Drawing, magazines and the kit's slots.** The firearm's main object
@@ -11499,9 +11531,13 @@ The unlock screen (`UnlockInterface`, `0x007b8e60`–`0x007b9a20`)
 spends credits earned in the current round. The scoring script sets a
 squad's threshold and adds points through `Player.setMaxOrderPoint` and
 `Player.setOrderPoint` (`0x005920c0` and `0x00592030`).
-`GameWorld` tracks progress by team and squad. At the threshold the
-`SquadBarFilled` hook in the shipped stats script grants each member
-a credit, and the meter resets (`0x004c4c90` / `0x004c4dd0`).
+`GameWorld` tracks progress by team and squad. Any amount is added, zero
+and negative too, and once the sum isn't below the threshold (100 until
+the script sets one, `0x004c87a0`; 0 counts) the `SquadBarFilled` hook
+in the shipped stats script grants each member a credit, and the meter
+resets (`0x004c4c90` / `0x004c4dd0`). Both setters run only on a ranked
+server (the squad's `+0x184`, below), so offline only with
+`enhanced.squadOrderPoints`.
 
 The Field Upgrade tab opens when there are credits (`0x007b95a0`).
 A spend advances the selected branch for both factions. UB_Player and
@@ -11511,6 +11547,14 @@ expires on round reset. Hosted clients receive squad progress via
 PostRemote category 2, id `0x56`, and use the FieldUnlock, Unlock and
 SelectKit events to spend and equip. The host validates ownership when
 accepting loadout choices.
+
+Here every human owns every unlock, so has no field upgrade to take:
+`GameWorld::giveFieldUnlock` (the scripts' `pers_plrGiveFieldUnlock`)
+gives no credit to a player owning everything, so a human's credits stay
+0, the Field Upgrade tab doesn't open, and `UnlockInfoBarShow` and
+`KitUnlockArrow%iShow` stay off (a joined client is sent 0 credits and
+full owned masks). The squad's order bar still fills. A bot takes and
+spends credits as retail does (`spendFieldUnlock`).
 
 ### The kit and vehicle sweep (2026-11-12)
 
@@ -12484,7 +12528,8 @@ flag `0x00a00594` (n > 0) that makes `pmgr_setScore(p, "score", v)` raise
 `PlayerScore(player, change)` (`0x0056ae60`, the tuple of `0x0056a4b0`,
 event 0x20). `pers_plrGiveFieldUnlock(p)` (`0x00566850`, "no such player"
 unless valid) hands the game logic's slot `0x68` the player (the rewrite
-counts it: `GameWorld::fieldUnlocks`). `pers_plrRequestStats` /
+counts it: `GameWorld::fieldUnlocks`; none for a human, who owns every
+unlock). `pers_plrRequestStats` /
 `pers_plrRequestUnlocks` (`0x00566930`, `0x00567370`) queue a request to
 the stats server and return whether it went: 0 here (no server; the
 scripts only ask with `sv.globRank` / `globUnlocks`, off), and
@@ -12603,7 +12648,15 @@ stance's height: 1.7, 1.4 crouching or swimming, 0.8 prone) and whose
 origins are within twice the radius × the scale across push each other
 apart by the overlap (no velocity; along z when nearer than 0.01). The
 original adds both soldiers' contacts at once; the rewrite gives each its
-own when it steps.
+own when it steps. Each contact passes material `0x2f` for both sides to
+`0x006c24b0` (`0x006c2841`..`0x006c288a`), which sets the response's
+friction (`+0xd4`, the grip of the movement `0x006c2230`) to the pair's
+(Flare's 1): a soldier in a crowd grips with it until his next floor
+contact (`SoldierBody::touchSoldier`). Without it a sprinter pressed into
+a pile on a Titan's deck (veh_titan_armor 5, 3.05 against Human_body),
+whose zero-velocity soldier contacts pull the mean contact velocity the
+grip compares with towards 0, ran up to 20 m/s and was road-killed by the
+hull.
 
 **The solve** (slot `0x30`, `0x006c48c0`; constants static_init
 `0x008ede60`..`0x008ee020`): the contacts so far push the soldier out,
@@ -12637,6 +12690,42 @@ segment test: the origin's way since before the last integration, less
 each moving object's own motion, crossing a face of a soldier LOD from the
 front (mesh slot 22) kills (1000, no one credited) — also a prone soldier
 whose spheres pass under something its origin (a metre up) runs into.
+The crush's and the run-over's 1000 (`0x006c4dcd`, `0x006c32ff`) go with
+the game logic damage's 19th argument 1, so `0x004c0e40` leaves the
+friendly fire out (`0x005b7290`'s fifth argument): the object's team (its
+PlayerControlObject's, slot `0x9c`) doesn't matter, nor does the
+soldier's takeDamageFromOwnTeam (armour slot `0xbc`, template `+0xdc`, 1
+unless set; only the Titans' parts set 0). A vehicle's ordinary contact
+with a soldier (the road kill, `0x005a43c0`, argument 0) does take the
+friendly fire: a friendly walker's foot kills a teammate at the default
+`sv.soldierFriendlyFire` 100 and spares him at 0
+(`Vehicles_FriendlyWalkerStepsOnATeammate`). A Titan, asleep for good
+(isSleeping; `0x006c9060` skips the sleep test for a Titan, `0x00561d90`;
+a major actor wakes from no minor one's mass shares; explosionForceMod 0),
+is never the heavy mover these two need (`Titan_RidersSurviveAMovingDeck`).
+
+**An enemy on a still Titan, shield down.** What hurts him there is retail's
+own: (1) the vehicle bay's forcefield (`as_titan_vb_shield`,
+`eu_forcefield_big`: a SimpleObject child of the root with no armour, so it
+stands after the outer shield's wreck at 60 %) is the wall between the roof
+and the rear deck. Its mesh has no soldier LOD, and the loader
+(`0x006e4880`: index `+0x18` taken from the vehicle's `+0x14` when -1)
+gives soldiers its vehicle LOD, every face `force_deathmat` 0x29a; its
+collisionGroups (256 PAC, 512 EU) let only its own team through
+(`0x006c3890`). The contact goes to the road kill (`0x005a43c0`), where
+0x29a skips the speed limit and its speed term is 1: dead at a walk
+(damageMod(0x29a, Human_body)). (2) A drop onto the hull over 10 m/s
+(`*0x00a6a794`; 3 only when the Titan outruns him) is (v − 10) × v × the
+mass factor (`0x005a2ca0`: both nodes mobile, slot `0x164` a class
+constant, `0x006a10e0` returns 1 on the mobile node classes even asleep;
+1e6 / 200 capped at 3). At gravity 14.73 the roof-to-deck drop (6.6 m)
+lands at 12-13 m/s: 80-120. No fall height is kept anywhere: the damage is
+the contact's speed alone (`0x005a3db0`, `0x005a43c0`), so nothing from a
+vehicle carries over. (3) A craft parked on the roof's hump that hasn't
+settled (awake) squashes a soldier wedged under it while he walks into it
+over 3 m/s: the solve compares the mover's point velocity with the
+soldier's own (`0x006c48c0`, `0x00a84748`). (`Titan_EnemyWalksOnAStillTitan`,
+`Titan_PilotLandsOnTheEnemyRoof`, `Titan_VehicleBayShieldOutlastsTheTitansShield`.)
 
 **The push** (`0x005ee2b0`): a hit's velocity × 2.5 (`*0x00a847b4`) kept
 16 ticks on the soldier (`+0x248`, the tick `+0x254`), which its ragdoll
@@ -13763,7 +13852,9 @@ squad's points `+0x160` added by the squad's slot `0x3c`, `0x004c4c90`,
 and their maximum, `0x004c6c80`) runs only when the squad's `+0x184` is
 set, which needs `0x00430a00`: a GameSpyRanked server of gpm_cq / ti / sl
 / nv / ca with the settings' `+0x26d` (the online stats); offline it is
-never shown.
+never shown (here: `enhanced.squadOrderPoints` keeps it). The HUD shows a
+member's bar once a maximum over −1 has come (`0x007a2100` case 0x56,
+`+0x302`).
 
 The AI commander's answers to the requests are under Bots ("AI
 commander"); bot squad leaders send none (AIDLL never calls the store).
@@ -14268,7 +14359,35 @@ seats have AI templates of equipment type Fixed (eu_Titan_Cannon1–4AI,
 eu_Titan_Cannon_AA_01/02AI: a Unit with setHasExposedSoldier,
 Armament setIsAntiAircraft), which AIDLL's seat choice (BBChange) and
 behaviours cover, but no strategy of its sends a bot into a Titan (its nav
-meshes are on the ground). The rewrite's choice: while fewer than half its
+meshes are on the ground). The levels' infantry meshes are their Conquest and
+Co-op ones and stop short of Titan mode's ground: Suez_Canal's covers x
+-712..260, z -238..163, so the PAC base (the Outpost, x 550..620) and silos
+901, 905 and 906 lie 45 m and more off it, where retail's follower plans no
+way and the soldier stands. With `enhanced.botTitan`, a soldier on the ground
+in gpm_ti with itself or its goal off the mesh walks a 4 m terrain grid (A*;
+steps clear of obstacles at knee and chest height and half a metre to either
+side, under 40 degrees, out of water), from the mesh after the mesh's way to
+its point nearest the goal, onto the mesh when the goal is on it
+(`BotManager::groundWalk`); infantry no longer pass over off-mesh silos.
+The same holds outside Titan mode: each level ships one infantry mesh, made
+for its 16-player layout, and the bigger layouts put spawns and points off
+it. Cerbere_Landing's gpm_cq 32 has every PAC spawn (the Harbor's, z -190..-250)
+and the PAC Harbor and EU Command Center points off the mesh; its PAC bots all
+stood at their spawns. (The layout has no `ai/StrategicAreas.ai`, like every
+Cerbere layout but gpm_sp/gpm_coop 16; that is not the cause: the SAI then
+makes an area per control point, `ensureAreas`, and the PAC squads get their
+attack orders.) `enhanced.botOffMesh` gives every mode the grid walk. A
+step's check costs six `lineOfSight` rays (each tests the dynamic bodies its segment passes near), so
+the searches are bounded for 64 bots: one search runs a tick over all bots
+and checks at most 40 steps not checked before; the checks are kept for a
+minute by the step's cell on the world's 4 m grid, so a search cut off goes on
+at the next tick's turn over the steps known by then. Ways are kept by start
+and goal cell (bots leaving one spawn for one goal), a goal that moves on the
+mesh (a squad member's spot by its leader) keeps a way that ends on the mesh,
+another goal is searched for at most every 2 s, and after a search finds
+nothing the next waits 3 s, doubled each time to 96 s, and is made on the grid
+shifted half a cell (a gap one grid's steps cut obliquely, as out of Suez's
+PAC base towards silo 906, the other passes). The rewrite's choice: while fewer than half its
 Titan's guns are manned or claimed, a bot aboard approaches the nearest free
 working gun's console and takes it (`titanGunEntry`). With
 `enhanced.botTitan` enabled, it follows the Titan's collision-derived walk
@@ -14320,6 +14439,46 @@ so an unreachable defender cannot hold them. While enemies are aboard, bots
 without a Titan role respawn on their own Titan until there are two
 defenders on foot aboard for each boarder. This is native enhanced AI, not
 retail parity.
+
+What the Titan walk costs, and `enhanced.botAsyncPaths` (on). A field
+(`titanField`: each grid cell's cost to a spot that sees a console or the
+core) casts a round's segment (`titanLocalShot`) from every cell within
+14 m of the part's aim point, some 4000 of them, against the Titan's
+projectile LOD (about 130000 faces, over a thousand to each of the
+collision world's 8 m cells). A new grid (a part going down or coming
+back) dropped every field, so the next bots to ask made them all in one
+tick: on Verdun gpm_ti with 47 bots the first tick took 0.6 s (the
+consoles' fields of both Titans), the first pod drop 0.6 s
+(`titanLandingSpots`, all the enemy Titan's console fields for the
+attacking team at once), and every part change 0.5 s more. With the flag
+the consoles' and the core's fields and the landing cells of all four
+grids (two Titans, two teams) are made at the load, on the worker
+threads (`BotWorkers`: one for every four cores, one or two, below the
+main thread's priority). When a part changes, the new grid is made on a
+worker from the last one and a copy of the Titan's collision as it stands
+(`GameWorld::TitanCollision`: the meshes are shared, never changed once
+made, and queried without the collision world's query stamps; the posed
+parts' frames are copied). The bots walk the last grid meanwhile; 30 ticks
+on (`kTitanJobDelay`) the new grid is taken with the last one's fields
+carried over to its cells, the fields are made anew on the workers and
+taken 30 ticks after that, then the landing cells. A result not ready when
+it is due is waited for (or made on the main thread if no worker has
+started it), so a round plays the same whatever the threads' timing, or
+without threads. The workers' shots walk a second, 2 m index of the
+Titan's projectile LOD (`CollisionWorld::buildFineIndex`, made with the
+mesh; 3 ms a Titan), four times faster. `wayToVehicleMesh` (a parked
+vehicle's way back onto the vehicle mesh; a search that finds none casts
+65000 rays, 50 ms) runs one search at a time, at most 3000 rays a tick,
+and goes on when its spot is asked for again. The collision world's rays
+test a face only when its box meets the segment's box in that column, and
+`raycastBody` skips a body whose bounding sphere the segment misses: the
+same answers, twice as fast. The four grids themselves are made side by
+side at the load. Measured headless (`--simulate 240`, 47 bots): the worst
+tick 610 ms before, 23 ms after (the first tick's gun-console entry
+fields, 8 ms), p99.9 160 ms before, 8 ms after; the round ends the same.
+`BF2142_TICK_PROF=<ms>` prints every tick over that many milliseconds with
+its timers (`Game/TickProf.h`, `TP("name")`) and, after a `--simulate`
+run, the ticks' mean, percentiles and worst.
 
 Why nobody fires on Suez_Canal gpm_ti 48 (15 bots, 300 s: 0 rounds, the
 silos left neutral), and why retail is the same: the level load
@@ -16287,7 +16446,10 @@ the pause's stamp.
   (0x100f04a0): floor(U × 4), the four kits alike. Its unlocks
   (0x100efce0): for each of four unlock values, the most any human alive
   holds for that kit (the player's vt+0x98 of the kit and its vt+0x68(i),
-  i = 0..3), + 1, at most 4; with no humans 1 each. The value compared is
+  i = 0..3), + 1, at most 4; with no humans 1 each. (Here, where every
+  human owns every unlock, the masks are those of a human's recorded
+  unlocks, a profile's or a client's selection, not of that ownership,
+  which would give every bot 4: `GameWorld::chooseBotUnlocks`.) The value compared is
   the human's owned mask for the branch (the adaptor's slot 38 → player
   slot 0x2ac, `0x005977e0`: the bits of the levels owned for the kit's
   unlockIndex, `+0x2c4`), so a human owning levels 0 and 1 (3) gives the
@@ -16956,6 +17118,26 @@ ask whether it's done.
   menu runs alone; `createServer` closes it and loads the level as
   `+level … +gameMode … +mapSize …` would, with the bots, their skill and
   the ticket ratio from the menu.
+- **The page's bot count** (mainMenu.dfm sprite 913's frame script): its
+  `startServer`, which both START PLAYLIST (`this._parent.startServer()`)
+  and instant action call, sets `GeneralSettings.setUseBots(true)`,
+  `setMaxBots(16)`, `setMaxBotsIncludeHumans(true)` and
+  `ServerSettings.setMaxPlayers(16)` (with team ratio 100, friendly fire,
+  ticket ratio 200, no time or score limit, 15 s spawns, autobalance) before
+  `createServer`, so every map of a playlist plays with 16 players, you
+  included, whatever its size; `AI/AIDefault.ai` sets
+  `aiSettings.setMaxNBots 16` and `maxBotsIncludeHumans 1` to match (its
+  commented-out block with `overrideMenuSettings 1` is the shipped way to
+  more). The bot skill is a `dice.UIs.Forms.Slider` (linkage `Slider`)
+  placed as `mcBotSkill`, whose `callBackFunctionSpecial`
+  (`adjustBotSkill`) the slider calls on its `_parent` as it moves.
+  `enhanced.singleplayBotCount` (port addition, `Main/MenuSingleplayBots.h`)
+  attaches another `Slider` with a `TextContainer` header (the
+  create-server page's `MULTIPLAY_3_maxplayers`, MAX PLAYERS) and number
+  right of the bot skill, 1..64 players (default 16, kept in the profile's
+  own `Enhanced.con`), and wraps `startServer` so its `createServer` takes
+  the target: each map gets min(target, size) players, you included
+  (`playersForMap`), the server maximum and `setMaxNBots` raised to match.
 - **The create-server page** (`mc_local_create`): the GAME MODE box lists
   the mod's modes without `sp1` and `gpm_sp` (0x10069160), in ModInfo's
   order (+0x10c): the level scan (0x004643d0) lists `<mod>/Levels/` with
@@ -17415,18 +17597,28 @@ answers the menu itself; nothing is sent.
   the booster (`hasBoosterPack`, `0x1004a8e0`: offline, or the account's
   flag; `hasBoosterPatch` is always true). The credits were the server's
   (`Avcred`, the unlock info's `+0x18`, `getUnlocksCountUnselected`
-  `0x10049a40`); here a soldier has one per rank, less the unlocks chosen.
-  That is the published game's rule: the client only reads the count, and
-  the code that worked it out was GameSpy's stats back end (the `.aspx`
-  pages), which was never shipped. `selectUnlock(id, newRequest)` (`0x1004b250`) answers 0
-  (done), 1 (not available), 302 (invalid or Northern Strike without the
-  booster), 303 (selected already) or 304 (no credits), at once here (the
-  menu would poll on -1). `getUnlocksCountTotal` (`0x1004b190`) is 40 or
-  50, `getUnlocksProgress` (`0x1004de60`) the taken ones over that.
-- **In the game:** the chosen ids' ItemContainers of every kit of both
-  armies (`stats::unlockContainers`) are the local player's
-  (`GameWorld::localPlayerUnlocks`, given when it joins). A choice made
-  during a round counts from the next one. The spawn screen's kit buttons
+  `0x10049a40`; the published game gave one per rank, less the unlocks
+  chosen, worked out by GameSpy's stats back end, the `.aspx` pages, which
+  was never shipped). `selectUnlock(id, newRequest)` (`0x1004b250`)
+  answers 0 (done), 1 (not available), 302 (invalid or Northern Strike
+  without the booster), 303 (selected already) or 304 (no credits), at
+  once here (the menu would poll on -1). `getUnlocksCountTotal`
+  (`0x1004b190`) is 40 or 50, `getUnlocksProgress` (`0x1004de60`) the
+  taken ones over that.
+- **Here every unlock is owned from the start** (`stats::Soldier`), in
+  every mode and with no option to turn it off: `getUnlockInfo` answers 1
+  (taken) for every id (Northern Strike's 0 without the booster), the
+  credits (`getUnlocksCountUnselected`) are 0, `getUnlocksCountSelected`
+  is the total and `getUnlocksProgress` 1, and `selectUnlock` answers 303
+  (302 for an invalid id). Nothing is bought, so the record's list of
+  chosen ids stays as it was.
+- **In the game:** the local player (every human) owns every unlock's
+  ItemContainers of every kit of both armies
+  (the unlocks under [Map and spawn screen](#map-and-spawn-screen): only
+  those the kit menu, a client's SelectKit or `--unlocks` choose replace
+  the kit's items; the owned replaceWithoutEquip ones apply anyway); a profile's old chosen ids
+  (`stats::unlockContainers`) are given as `GameWorld::localPlayerUnlocks`
+  when it joins. The spawn screen's kit buttons
   show each kit's upgrades (Kit%iAbilityIcon%iShow / PathString, seven a
   kit, the HUD manager's variables of `0x0044f1a0`): the items of the
   kit's unlocked ItemContainers with a `weaponHud.specialAbilityIcon`

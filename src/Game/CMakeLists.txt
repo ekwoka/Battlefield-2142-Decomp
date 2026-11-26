@@ -1,9 +1,11 @@
 add_library(Game STATIC
 	Bots.cpp
 	BotsScript.cpp
+	BotsTwin.cpp
 	BotsSquad.cpp
 	BotsLook.cpp
 	BotsTitan.cpp
+	BotWorkers.cpp
 	BotsMines.cpp
 	BotsPilot.cpp
 	GameWorld.cpp
@@ -23,6 +25,7 @@ add_library(Game STATIC
 	ScriptBridge.cpp
 	TickTimer.cpp
 	Cameras.cpp
+	Director.cpp
 	Votes.cpp
 	SquadRequests.cpp
 	AmbientTriggers.cpp
@@ -35,4 +38,6 @@ add_library(Game STATIC
 	PartCollision.cpp
 )
 target_include_directories(Game PUBLIC ${PROJECT_SOURCE_DIR}/src)
+find_package(Threads REQUIRED)
 target_link_libraries(Game PUBLIC World Physics Effects Animation Console AI)
+target_link_libraries(Game PRIVATE Threads::Threads)

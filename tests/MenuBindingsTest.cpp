@@ -11,6 +11,8 @@
 #include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/MenuGameState.h"
+#include "Main/MenuSignIn.h"
+#include "Main/MenuSingleplayBots.h"
 #include "Main/SettingsObjects.h"
 #include "Net/Demo.h"
 #include "TestMain.h"
@@ -420,6 +422,153 @@ TEST(MenuBindings_StartGame)
 	}
 }
 
+// enhanced.singleplayAllModes: the singleplayer page lists every mode and
+// size, each row naming its mode, and a chosen map starts in its own mode.
+// Off (or on another page's filter) the page keeps to gpm_sp, as retail.
+TEST(MenuBindings_SingleplayAllModes)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	bool allModes = false;
+	bindings.singleplayAllModes = [&allModes] { return allModes; };
+	bindings.setMaps({{"Suez_Canal", "gpm_ti", 48}, {"Suez_Canal", "gpm_sp", 32}, {"Minsk", "gpm_cq", 16}});
+	avm1::Interpreter vm;
+	const auto& available = natives.listRows("mapListAvailable");
+	const auto image = [&](const char* id) {
+		return vm.toString(call(vm, natives, "dice.bf2.Multiplay", "getMapImage", {avm1::Value(id)}));
+	};
+
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_sp")});
+	CHECK(available.size() == 1 && available[0][0] == "Suez Canal - 32");
+
+	allModes = true;
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_sp")});
+	CHECK(available.size() == 3);
+	CHECK(available.size() == 3 && available[0][0] == "Minsk - 16 - gpm_cq");
+	CHECK(available.size() == 3 && available[1][0] == "Suez Canal - 32 - gpm_sp");
+	CHECK(available.size() == 3 && available[2][0] == "Suez Canal - 48 - gpm_ti");
+	CHECK(image("Suez_Canal 32") == "/Levels/Suez_Canal/Info/gpm_sp_32_preview.png");
+	CHECK(image("Suez_Canal 48") == "/Levels/Suez_Canal/Info/gpm_ti_48_preview.png");
+
+	call(vm, natives, "dice.bf2.Multiplay", "addMapIndexToMapList", {avm1::Value(2)});
+	CHECK(natives.listRows("mapListChosen").size() == 1 && natives.listRows("mapListChosen")[0][0] == "Suez Canal - 48 - gpm_ti");
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.Multiplay", "createServer")));
+	CHECK(started && started->maps.size() == 1);
+	if (started && !started->maps.empty()) {
+		CHECK(started->maps[0].level == "Suez_Canal" && started->maps[0].gameMode == "gpm_ti" && started->maps[0].size == 48);
+	}
+
+	// Another page's filter is left as it was.
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_cq")});
+	CHECK(available.size() == 1 && available[0][0] == "Minsk - 16");
+}
+
+// enhanced.singleplayBotCount's rule (playersForMap): min(target, the
+// map's size) players with you counted, so one bot less; per map. Without
+// a target, retail's MaxBots less you on every map.
+TEST(MenuBindings_SingleplayBotCountRule)
+{
+	menu::GameSetup setup;
+	const auto bots = [&setup](int size) { return menu::playersForMap(setup, size).bots; };
+	const auto maxPlayers = [&setup](int size) { return menu::playersForMap(setup, size).maxPlayers; };
+
+	// Retail (no target): the page's 16 with you, 16 players, every size.
+	setup.bots = 16;
+	setup.maxPlayers = 16;
+	setup.botsIncludeHumans = true;
+	for (int size : {16, 32, 64}) {
+		CHECK(bots(size) == 15 && maxPlayers(size) == 16);
+	}
+	setup.botsIncludeHumans = false;
+	CHECK(bots(64) == 16 && maxPlayers(64) == 16);
+	setup.botsIncludeHumans = true;
+
+	// A target above every size: each map full.
+	setup.playerTarget = 64;
+	CHECK(bots(16) == 15 && maxPlayers(16) == 16);
+	CHECK(bots(32) == 31 && maxPlayers(32) == 32);
+	CHECK(bots(64) == 63 && maxPlayers(64) == 64);
+	// Below: the target, whatever the size.
+	setup.playerTarget = 24;
+	CHECK(bots(16) == 15);
+	CHECK(bots(32) == 23 && maxPlayers(32) == 24);
+	CHECK(bots(64) == 23 && maxPlayers(64) == 24);
+	// The page's maximum is only raised, never lowered.
+	setup.maxPlayers = 64;
+	CHECK(bots(32) == 23 && maxPlayers(32) == 64);
+	setup.maxPlayers = 16;
+	// Just you: no bots.
+	setup.playerTarget = 1;
+	CHECK(bots(16) == 0 && bots(64) == 0 && maxPlayers(64) == 16);
+	// An unknown size caps nothing.
+	setup.playerTarget = 40;
+	CHECK(bots(0) == 39);
+
+	// Without MaxBotsIncludeHumans the target counts the bots alone, still
+	// with room for you on the map.
+	setup.botsIncludeHumans = false;
+	setup.playerTarget = 24;
+	CHECK(bots(16) == 15 && bots(32) == 24 && bots(64) == 24);
+	CHECK(maxPlayers(32) == 25);
+	setup.playerTarget = 64;
+	CHECK(bots(64) == 63 && maxPlayers(64) == 64);
+	CHECK(bots(0) == 64);
+}
+
+// The target's setter and getter (1..64, saved by name) and the setup it
+// feeds: only with the option on and only for the singleplayer page's
+// startServer (setSingleplayStarting); otherwise retail's.
+TEST(MenuBindings_SingleplayBotCountSetup)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	bindings.setMaps({{"Belgrade", "gpm_sp", 16}, {"Camp_Gibraltar_Coop", "gpm_sp", 32}});
+	avm1::Interpreter vm;
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+
+	CHECK(bindings.singleplayPlayers() == menu::MenuBindings::kSingleplayPlayersDefault);
+	bindings.setSingleplayPlayers(24);
+	CHECK(bindings.singleplayPlayers() == 24);
+	CHECK(bindings.setting("GeneralSettings.SingleplayBotCount", 0) == 24);
+	bindings.setSingleplayPlayers(0);
+	CHECK(bindings.singleplayPlayers() == 1);
+	bindings.setSingleplayPlayers(200);
+	CHECK(bindings.singleplayPlayers() == 64);
+	bindings.setSingleplayPlayers(24);
+
+	// The page's own settings at startServer.
+	call(vm, natives, "dice.bf2.GeneralSettings", "setMaxBots", {avm1::Value(16)});
+	call(vm, natives, "dice.bf2.ServerSettings", "setMaxPlayers", {avm1::Value(16)});
+	call(vm, natives, "dice.bf2.Multiplay", "setFilterGameMode", {avm1::Value("gpm_sp")});
+	call(vm, natives, "dice.bf2.Multiplay", "addMapIndexToMapList", {avm1::Value(1)});
+	call(vm, natives, "dice.bf2.Multiplay", "addMapIndexToMapList", {avm1::Value(0)});
+
+	// Off (unset): retail.
+	bindings.setSingleplayStarting(true);
+	CHECK(bindings.gameSetup().playerTarget == 0);
+	bool on = false;
+	bindings.singleplayBotCount = [&on] { return on; };
+	CHECK(bindings.gameSetup().playerTarget == 0);
+	// On, but not the singleplayer page's start (the create-server page).
+	on = true;
+	bindings.setSingleplayStarting(false);
+	CHECK(bindings.gameSetup().playerTarget == 0);
+	// On, from the page: the target, each map's count from its own size.
+	bindings.setSingleplayStarting(true);
+	CHECK(avm1::toBoolean(call(vm, natives, "dice.bf2.Multiplay", "createServer")));
+	bindings.setSingleplayStarting(false);
+	CHECK(started && started->playerTarget == 24 && started->bots == 16 && started->maps.size() == 2);
+	if (started && started->maps.size() == 2) {
+		CHECK(menu::playersForMap(*started, started->maps[0].size).bots == 23); // the 32
+		CHECK(menu::playersForMap(*started, started->maps[1].size).bots == 15); // the 16
+	}
+}
+
 // The shipped menu after an offline login, drawn with the engine's fonts:
 // the frames carry text, and a frame drawn twice is the same. With
 // $BF2142_MENU_BENCH set, prints the time Player::frame() takes.
@@ -611,6 +760,226 @@ TEST(MenuBindings_InstantAction)
 	menu.run(1);
 	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
 	CHECK(!menu.click("singleplay.mc_singleplayer.btnDisconnect2"));
+	for (const std::string& e : menu.player.scriptErrors()) {
+		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
+	}
+	CHECK(menu.player.scriptErrors().empty());
+}
+
+// --menu with +level: startLevel starts the installed spelling of the
+// level in its mode at the nearest size, the profile's settings with the
+// command line's bots, skill and time limit over them; a level or a mode
+// that isn't installed starts nothing.
+TEST(MenuBindings_StartLevel)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	bindings.setMaps({{"Cerbere_Landing", "gpm_sp", 16}, {"Cerbere_Landing", "gpm_sp", 32}, {"Cerbere_Landing", "gpm_cq", 64},
+		{"Minsk", "gpm_ti", 48}});
+	avm1::Interpreter vm;
+	call(vm, natives, "dice.bf2.GeneralSettings", "setMaxBots", {avm1::Value(8)});
+	call(vm, natives, "dice.bf2.GeneralSettings", "setBotSkill", {avm1::Value(0.25)});
+	call(vm, natives, "dice.bf2.ServerSettings", "setTicketRatio", {avm1::Value(150)});
+
+	menu::MenuBindings::LevelStart start;
+	start.map = {"nowhere", "gpm_cq", 16};
+	CHECK(!bindings.startLevel(start));
+	start.map = {"cerbere_landing", "gpm_ti", 16};
+	CHECK(!bindings.startLevel(start));
+	CHECK(!started);
+
+	// The profile's settings: MaxBots counts the player.
+	start.map = {"cerbere_landing", "GPM_SP", 20};
+	CHECK(bindings.startLevel(start));
+	CHECK(started && started->maps.size() == 1);
+	if (started && started->maps.size() == 1) {
+		CHECK(started->maps[0].level == "Cerbere_Landing" && started->maps[0].gameMode == "gpm_sp" && started->maps[0].size == 16);
+		CHECK(started->bots == 8 && started->botsIncludeHumans && started->botSkill == 0.25f && started->ticketRatio == 150);
+		CHECK(menu::playersForMap(*started, 16).bots == 7);
+	}
+
+	// The command line's: that many bots, its skill and time limit.
+	started.reset();
+	start.map = {"Cerbere_Landing", "gpm_sp", 28};
+	start.bots = 40;
+	start.botSkill = 0.75f;
+	start.timeLimit = 600;
+	CHECK(bindings.startLevel(start));
+	if (started && started->maps.size() == 1) {
+		CHECK(started->maps[0].size == 32);
+		const menu::MapPlayers players = menu::playersForMap(*started, 32);
+		CHECK(players.bots == 40 && players.maxPlayers >= 41);
+		CHECK(started->botSkill == 0.75f && started->timeLimit == 600);
+	}
+	start.bots = 0;
+	CHECK(bindings.startLevel(start));
+	CHECK(started && menu::playersForMap(*started, 32).bots == 0);
+}
+
+// The shipped menu for a direct start: the game logs in on the login page
+// (offline, the account's first soldier), opens the singleplayer page, and
+// the level it starts is the menu's game: DISCONNECT where instant action
+// was, and leaving the game gives the page back.
+TEST(MenuBindings_DirectStartSignIn)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Fake fake;
+	fake.reachable = false;
+	Menu menu;
+	menu::MenuBindings bindings(menu.player.natives(), fake.services());
+	bindings.setMaps({{"Belgrade", "gpm_sp", 16}, {"Cerbere_Landing", "gpm_sp", 16}});
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	CHECK(menu.load(gameDir));
+	CHECK(bindings.defaultLoginName().empty());
+	CHECK(menu::signInForDirectStart(menu.player, bindings, "Tester"));
+	CHECK(bindings.loggedIn() && bindings.offlineMode() && bindings.soldierName() == "Tester");
+	CHECK(bindings.defaultLoginName() == "Tester");
+	CHECK(menu::showSingleplayPage(menu.player));
+
+	menu::MenuBindings::LevelStart start;
+	start.map = {"cerbere_landing", "gpm_sp", 16};
+	start.bots = 5;
+	CHECK(bindings.startLevel(start));
+	CHECK(started && !started->maps.empty() && started->maps[0].level == "Cerbere_Landing");
+	menu::updateMenuGameState(menu.player, bindings, true);
+	menu.run(1);
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	bool disconnected = false;
+	bindings.onDisconnect = [&] { disconnected = true; };
+	CHECK(menu.click("singleplay.mc_singleplayer.btnDisconnect"));
+	menu.run(1);
+	CHECK(disconnected);
+	menu::updateMenuGameState(menu.player, bindings, false);
+	menu.run(1);
+	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	for (const std::string& e : menu.player.scriptErrors()) {
+		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
+	}
+	CHECK(menu.player.scriptErrors().empty());
+}
+
+// enhanced.singleplayBotCount on the shipped singleplayer page: off, the
+// page is retail's (no slider, 16 players); on, a MAX PLAYERS slider
+// beside the bot skill, dragged with the mouse, whose target the playlist
+// and instant action start with; off again, the page is retail's again.
+TEST(MenuBindings_SingleplayBotCountPage)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Fake fake;
+	fake.reachable = false;
+	Menu menu;
+	menu::MenuBindings bindings(menu.player.natives(), fake.services());
+	bindings.setMaps({{"Belgrade", "gpm_sp", 16}, {"Suez_Canal", "gpm_sp", 32}});
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	bool on = false;
+	bindings.singleplayBotCount = [&on] { return on; };
+	menu.player.setTickHook([&bindings](Player& player) { menu::updateSingleplayBotCount(player, bindings); });
+	CHECK(menu.load(gameDir));
+	menu.run(3);
+	CHECK(menu.click("login.mcAccountName.mcInput.inputField"));
+	menu.type("tester");
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(0.5);
+	bindings.finishJobs();
+	menu.run(2);
+	CHECK(menu.click("MessageHandler.btnOk"));
+	menu.run(2);
+	CHECK(menu.click("login.ScrollTainer.m_mcContainer.contents.holder_list.holder_list.row0"));
+	CHECK(menu.click("login.btnLogin"));
+	menu.run(5);
+	CHECK(menu.click("FlashMenu.btnSingleplay"));
+	menu.run(3);
+	const std::string page = "singleplay.mc_singleplayer";
+	const auto shown = [&] { return menu.player.evaluate(page + ".mcBotCount").isObject(); };
+	const auto thumb = [&]() -> std::optional<Player::Clickable> {
+		for (const auto& c : menu.player.clickables()) {
+			if (c.target == "_level0." + page + ".mcBotCount.mcSliderContainer.mcSlider") {
+				return c;
+			}
+		}
+		return std::nullopt;
+	};
+	avm1::Interpreter& vm = *menu.player.interpreter();
+	CHECK(!shown());
+	CHECK(!thumb());
+
+	on = true;
+	menu.run(0.1);
+	CHECK(shown());
+	CHECK(menu.text(page + ".mcBotCountNumber.m_mcLabel.labelTextField.text") == "16");
+	// Beside the bot skill: on its slider's line, right of it.
+	std::optional<Player::Clickable> skill;
+	for (const auto& c : menu.player.clickables()) {
+		if (c.target == "_level0." + page + ".mcBotSkill.mcSliderContainer.mcSlider") {
+			skill = c;
+		}
+	}
+	const std::optional<Player::Clickable> before = thumb();
+	CHECK(skill && before && std::fabs(before->y - skill->y) < 1 && before->x > skill->x + 150);
+
+	// Dragged to the right end with the mouse: 64 players.
+	if (before) {
+		const float x = before->x + before->width / 2, y = before->y + before->height / 2;
+		menu.player.mouseMove(x, y);
+		menu.player.mouseDown();
+		for (int k = 1; k <= 8; ++k) {
+			menu.run(0.05);
+			menu.player.mouseMove(x + k * 40, y);
+		}
+		menu.run(1);
+		menu.player.mouseUp();
+		menu.run(0.1);
+	}
+	CHECK(bindings.singleplayPlayers() == 64);
+	CHECK(menu.text(page + ".mcBotCountNumber.m_mcLabel.labelTextField.text") == "64");
+	// Set as the page sets its sliders: 24.
+	const avm1::Value slider = menu.player.evaluate(page + ".mcBotCount");
+	vm.callMember(slider, "setPercent", {avm1::Value(23.0 / 63.0)});
+	vm.callMember(menu.player.evaluate(page), "adjustBotCount", {});
+	CHECK(bindings.singleplayPlayers() == 24);
+	CHECK(menu.text(page + ".mcBotCountNumber.m_mcLabel.labelTextField.text") == "24");
+
+	// START PLAYLIST with the 32 map: the target goes with the game.
+	vm.callMember(menu.player.evaluate(page), "addMap", {avm1::Value(1)});
+	menu.run(0.5);
+	CHECK(menu.click(page + ".btnStartPlaylist"));
+	menu.run(1);
+	CHECK(started && started->playerTarget == 24 && !started->maps.empty());
+	if (started && !started->maps.empty()) {
+		CHECK(started->maps[0].level == "Suez_Canal" && menu::playersForMap(*started, started->maps[0].size).bots == 23);
+	}
+	// The create-server page's createServer, outside the page's start: retail.
+	CHECK(bindings.gameSetup().playerTarget == 0);
+	// Instant action (through the page's startServer too).
+	started.reset();
+	CHECK(menu.click(page + ".btnInstantAction"));
+	menu.run(1);
+	CHECK(menu.click("MessageHandler.btnOk"));
+	menu.run(1);
+	CHECK(started && started->playerTarget == 24);
+
+	// Off again: the slider goes and the page starts as retail's.
+	on = false;
+	menu.run(0.1);
+	CHECK(!shown());
+	CHECK(!thumb());
+	started.reset();
+	vm.callMember(menu.player.evaluate(page), "addMap", {avm1::Value(1)});
+	menu.run(0.5);
+	CHECK(menu.click(page + ".btnStartPlaylist"));
+	menu.run(1);
+	CHECK(started && started->playerTarget == 0 && started->bots == 16 && started->maxPlayers == 16);
 	for (const std::string& e : menu.player.scriptErrors()) {
 		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
 	}

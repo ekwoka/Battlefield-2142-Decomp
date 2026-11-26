@@ -72,6 +72,8 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 				continue; // degenerate
 			}
 			t.normal = n * (1.0f / length);
+			const Vec3 low = {std::min({t.a.x, t.b.x, t.c.x}), std::min({t.a.y, t.b.y, t.c.y}), std::min({t.a.z, t.b.z, t.c.z})};
+			const Vec3 high = {std::max({t.a.x, t.b.x, t.c.x}), std::max({t.a.y, t.b.y, t.c.y}), std::max({t.a.z, t.b.z, t.c.z})};
 			t.material = face.material < materials.size() ? materials[face.material] : face.material;
 			t.owner = owner;
 			t.staticNode = staticNode;
@@ -82,11 +84,12 @@ void CollisionWorld::addMesh(const CollisionMeshFile& mesh, CollisionUser user, 
 			for (int x = static_cast<int>(std::floor(minX / kCell)); x <= static_cast<int>(std::floor(maxX / kCell)); ++x) {
 				for (int z = static_cast<int>(std::floor(minZ / kCell)); z <= static_cast<int>(std::floor(maxZ / kCell));
 					 ++z) {
-					m_cells[cellKey(x, z)].push_back(index);
+					m_cells[cellKey(x, z)].push_back({index, low, high});
 				}
 			}
 		}
 	}
+	fileFine();
 }
 
 void CollisionWorld::append(const CollisionWorld& other)
@@ -99,18 +102,23 @@ void CollisionWorld::append(const CollisionWorld& other)
 	m_removed += other.m_removed;
 	// Each cell's indices stay in increasing order, as addMesh leaves them.
 	for (const auto& [key, indices] : other.m_cells) {
-		std::vector<uint32_t>& cell = m_cells[key];
-		for (const uint32_t index : indices) {
-			cell.push_back(offset + index);
+		std::vector<CellFace>& cell = m_cells[key];
+		for (const CellFace& face : indices) {
+			cell.push_back({offset + face.index, face.low, face.high});
 		}
 	}
+	fileFine();
 }
 
 bool CollisionWorld::raycast(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false); }
 
-bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore) const
+bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore, bool stamped) const
 {
-	++m_stamp;
+	const uint32_t stamp = stamped ? ++m_stamp : 0;
+	// The shared queries walk the finer cells when the world has them (buildFineIndex).
+	const bool fine = !stamped && m_fineCell > 0;
+	const auto& cells = fine ? m_fine : m_cells;
+	const float kCell = fine ? m_fineCell : CollisionWorld::kCell;
 	const Vec3 direction = to - from;
 	bool found = false;
 	hit.fraction = 1.0f;
@@ -138,19 +146,32 @@ bool CollisionWorld::trace(const Vec3& from, const Vec3& to, Hit& hit, bool fron
 			break;
 		}
 		const float za = from.z + direction.z * t0, zb = from.z + direction.z * t1;
+		// The part of the segment in this column, up to the crossing found so far: a face whose box
+		// misses its box (by a margin far over the test's rounding) is not met.
+		constexpr float kCull = 0.01f;
+		const Vec3 p0 = from + direction * t0, p1 = from + direction * std::min(t1, hit.fraction);
+		const Vec3 segLow {std::min(p0.x, p1.x) - kCull, std::min(p0.y, p1.y) - kCull, std::min(p0.z, p1.z) - kCull};
+		const Vec3 segHigh {std::max(p0.x, p1.x) + kCull, std::max(p0.y, p1.y) + kCull, std::max(p0.z, p1.z) + kCull};
 		const int z0 = static_cast<int>(std::floor((std::min(za, zb) - kEdge) / kCell));
 		const int z1 = static_cast<int>(std::floor((std::max(za, zb) + kEdge) / kCell));
 		for (int z = z0; z <= z1; ++z) {
-			const auto cell = m_cells.find(cellKey(x, z));
-			if (cell == m_cells.end()) {
+			const auto cell = cells.find(cellKey(x, z));
+			if (cell == cells.end()) {
 				continue;
 			}
-			for (uint32_t index : cell->second) {
-				const Triangle& t = m_triangles[index];
-				if (t.stamp == m_stamp) {
+			for (const CellFace& face : cell->second) {
+				// (Before the stamp: the face may yet lie on the segment in a later column.)
+				if (face.low.x > segHigh.x || face.high.x < segLow.x || face.low.y > segHigh.y || face.high.y < segLow.y
+					|| face.low.z > segHigh.z || face.high.z < segLow.z) {
 					continue;
 				}
-				t.stamp = m_stamp;
+				const Triangle& t = m_triangles[face.index];
+				if (stamped) {
+					if (t.stamp == stamp) {
+						continue;
+					}
+					t.stamp = stamp;
+				}
 				if (ignore != 0 && t.owner == ignore) {
 					continue;
 				}
@@ -543,11 +564,12 @@ size_t CollisionWorld::removeOwner(uint32_t owner)
 	}
 	m_removed += removed;
 	for (auto it = m_cells.begin(); it != m_cells.end();) {
-		std::vector<uint32_t>& indices = it->second;
+		std::vector<CellFace>& indices = it->second;
 		indices.erase(std::remove_if(indices.begin(), indices.end(), [&](uint32_t index) { return m_triangles[index].removed; }),
 			indices.end());
 		it = indices.empty() ? m_cells.erase(it) : std::next(it);
 	}
+	fileFine();
 	return removed;
 }
 
@@ -566,11 +588,39 @@ void CollisionWorld::compact()
 	}
 	m_triangles.resize(kept);
 	for (auto& [key, indices] : m_cells) {
-		for (uint32_t& index : indices) {
-			index = moved[index]; // the cells hold live faces only, still in increasing order
+		for (CellFace& face : indices) {
+			face.index = moved[face.index]; // the cells hold live faces only, still in increasing order
 		}
 	}
+	fileFine();
 	m_removed = 0;
+}
+
+void CollisionWorld::buildFineIndex(float cell)
+{
+	m_fineCell = cell;
+	fileFine();
+}
+
+void CollisionWorld::fileFine()
+{
+	m_fine.clear();
+	if (m_fineCell <= 0) {
+		return;
+	}
+	for (size_t i = 0; i < m_triangles.size(); ++i) {
+		const Triangle& t = m_triangles[i];
+		if (t.removed) {
+			continue;
+		}
+		const Vec3 low {std::min({t.a.x, t.b.x, t.c.x}), std::min({t.a.y, t.b.y, t.c.y}), std::min({t.a.z, t.b.z, t.c.z})};
+		const Vec3 high {std::max({t.a.x, t.b.x, t.c.x}), std::max({t.a.y, t.b.y, t.c.y}), std::max({t.a.z, t.b.z, t.c.z})};
+		for (int x = static_cast<int>(std::floor(low.x / m_fineCell)); x <= static_cast<int>(std::floor(high.x / m_fineCell)); ++x) {
+			for (int z = static_cast<int>(std::floor(low.z / m_fineCell)); z <= static_cast<int>(std::floor(high.z / m_fineCell)); ++z) {
+				m_fine[cellKey(x, z)].push_back({static_cast<uint32_t>(i), low, high});
+			}
+		}
+	}
 }
 
 } // namespace dice::hfe::physics

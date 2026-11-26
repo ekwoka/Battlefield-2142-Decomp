@@ -594,6 +594,9 @@ public:
 		bool spectator = false; // player +0x404 (slots 0x3b8 / 0x3bc): setSpectator
 		bool alive = false;
 		double squadOrderPoints = 0, squadOrderMax = 0;
+		// The HUD's order bar (its +0x302, 0x007a2100 case 0x56): a set-max
+		// message of more than -1 has come for the squad.
+		bool squadOrderBar = false;
 		int fieldUnlockCredits = 0;
 		uint32_t soldier = 0, vehicle = 0, kit = 0, weapon = 0;
 		// The kit the player's body still wears, living, down or a corpse yet
@@ -686,6 +689,9 @@ public:
 		int fireMode = 0;
 		bool reloading = false;
 		bool detonatorDrawn = false;
+		// The weapon's zoom level (setZoomed; 0 not zoomed): the soldier
+		// networkable's (0x005fc1a0), a followed player's first person.
+		int zoomLevel = 0;
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
@@ -934,6 +940,8 @@ public:
 	// 0x004c4c90 / 0x004c4ea0: the scripting setters address the player's squad.
 	void setSquadOrderMax(int player, int maximum);
 	void addSquadOrderPoints(int player, double points);
+	// A field upgrade credit (pers.plrGiveFieldUnlock): none for a player
+	// owning every unlock (every human), who would have nothing to pick.
 	void giveFieldUnlock(int player);
 	int fieldUnlocks(int player) const;
 	const std::vector<std::string>& fieldUnlockItems(int player) const;
@@ -1037,6 +1045,10 @@ public:
 	// (a dropped kit, a placed beacon or shield) also stops on a Titan's
 	// soldier-LOD floors, where the projectile LOD has none (the cargo bay's
 	// wall strips). Not retail: the scene ray reads the projectile LOD only.
+	// A deployable set down on a Titan's floor (the portable shield, the
+	// sentry gun) also starts with its lowest vertex on it (addBodies):
+	// set down by its origin, its bottom vertices start under the deck and
+	// the body falls through the hull, as retail's would.
 	// It changes the simulation. Null or false: retail.
 	void setTitanKitFloors(const bool* enhanced, const bool* floors)
 	{
@@ -1046,6 +1058,55 @@ public:
 	bool titanKitFloors() const
 	{
 		return m_enhancedKitFloors && *m_enhancedKitFloors && m_titanKitFloors && *m_titanKitFloors;
+	}
+	// enhanced.enabled and enhanced.titanDeckMines, read live: a Titan
+	// doesn't set off the mines lying on (or stuck to) its own decks.
+	// Retail's radius trigger (0x005e8aa0) has no Titan case, so a moving
+	// Titan, driverless and inside whose box the mine lies, sets off a
+	// motion or EMP mine on its deck as soon as it moves. It changes the
+	// simulation. Null or false: retail.
+	void setTitanDeckMines(const bool* enhanced, const bool* on)
+	{
+		m_enhancedDeckMines = enhanced;
+		m_titanDeckMines = on;
+	}
+	bool titanDeckMines() const
+	{
+		return m_enhancedDeckMines && *m_enhancedDeckMines && m_titanDeckMines && *m_titanDeckMines;
+	}
+	// enhanced.enabled and enhanced.podExitAtRest, read live: the rider of a
+	// landed pod leaves it at rest on what it landed on (a Titan's deck,
+	// the ground, a slow vehicle), not at the pod's velocity. Retail's
+	// occupant exit (0x005cfd70) gives the soldier's node (slot 0x5c,
+	// 0x006c5a90) the pod node's velocity (slot 0x58) as it is when the
+	// landing timer runs out (0x005d01c0), so a pod still sliding over a
+	// deck throws its rider along it, off the deck's edge. It changes the
+	// simulation. Null or false: retail.
+	void setPodExitAtRest(const bool* enhanced, const bool* on)
+	{
+		m_enhancedPodExit = enhanced;
+		m_podExitAtRest = on;
+	}
+	bool podExitAtRest() const { return m_enhancedPodExit && *m_enhancedPodExit && m_podExitAtRest && *m_podExitAtRest; }
+	// The squads' order points (the squad's +0x184): the add (0x004c4c90)
+	// and the set-max (0x004c4ea0) do nothing without it. The server's squad
+	// constructor (0x004c87a0) sets it from 0x00430a00, a ranked game: gpm_cq,
+	// ti, sl, nv or ca on an internet server with GameSpyRanked and sv.ranked
+	// (and AIDLL's slot 0x20 true when it is loaded), which no LAN or offline
+	// host has, so the bar never shows offline. setSquadOrderGate is that
+	// ranked test's answer; enhanced.enabled with enhanced.squadOrderPoints,
+	// read live, open the gate on any server too. It changes the simulation
+	// (the bar's awards are field upgrades).
+	void setSquadOrderGate(bool ranked) { m_squadOrderRanked = ranked; }
+	void setSquadOrderPointsOffline(const bool* enhanced, const bool* on)
+	{
+		m_enhancedSquadOrder = enhanced;
+		m_squadOrderOffline = on;
+	}
+	bool squadOrderPointsOn() const
+	{
+		return m_squadOrderRanked
+			|| (m_enhancedSquadOrder && *m_enhancedSquadOrder && m_squadOrderOffline && *m_squadOrderOffline);
 	}
 	// The bots' spawn test (IAIPathfindingCourier slot 0xc, *0x00b4bb94):
 	// each scattered spawn try of a bot (0x005b2200's AI flag) must pass it;
@@ -1128,8 +1189,11 @@ public:
 	// Whether the player looks through the weapon's zoom (the local
 	// player's camera; the deviation's devModZoom and the gun sway use it),
 	// and the look's scale (0x00586420: the field of view over the camera's
-	// times mouseSpeedMod zoomed in, else 1; crouched zoomed target speed).
-	void setZoomed(int player, bool zoomed, float lookScale = 1);
+	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
+	// limit, soldierAnimationSpeed).
+	// `level` is the zoom's level (the DefaultZoomComp's +0xc, 0..3: what the
+	// soldier networkable sends, 0x005fc1a0); -1: 1 zoomed, else 0. Not simulated.
+	void setZoomed(int player, bool zoomed, float lookScale = 1, int level = -1);
 	// The footsteps' walk cycle in a first-person view (0x005ef7f0 with the
 	// soldier's view +0x2f0 == 0): the held weapon's first-person system's,
 	// else the soldier's own (anim::FirstPersonRig::walkCycle). Taken by the
@@ -1190,6 +1254,16 @@ public:
 		int victim = -1, attacker = -1;
 	};
 	std::vector<AiHit> takeAiHits() { return std::exchange(m_aiHits, {}); }
+	// $BF2142_BOT_STATS's damage log (not retail): with it on, every hit's
+	// object (a Titan part's id for a part), attacker and amount, the last
+	// 1024 kept between takes.
+	struct DamageNote {
+		uint32_t object = 0;
+		int attacker = -1;
+		float amount = 0;
+	};
+	void noteDamage(bool on) { m_noteDamage = on; }
+	std::vector<DamageNote> takeDamageNotes() { return std::exchange(m_damageNotes, {}); }
 	// Players out of a vehicle by the use key (0x004bb570's AI event 3/3,
 	// posted once the soldier is out, with the seat's AI adaptor): the
 	// player and the vehicle's root; the last 64 kept.
@@ -1221,7 +1295,6 @@ public:
 	std::vector<AmbientEvent> takeAmbientEvents() { return std::exchange(m_ambientEvents, {}); }
 	void setAmbienceClient(bool client) { m_ambience.client = client; }
 	bool playAmbientEvent(size_t area, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt = nullptr);
-	bool unlockAllByDefault = false; // players joining from now on have everything
 	// The local player's auto reload (GeneralSettings.setAutoReload,
 	// +0xb6: on by default, 0x0049a170 from the constructor 0x0049bd20;
 	// the player's +0x3d0, set from GeneralSettings slot 0xdc by
@@ -1322,6 +1395,10 @@ public:
 	// first-person view draws them on its own weapon (the original's
 	// first-person weapon children, FireComp 0x005f31d0).
 	bool localMuzzleEffects = true;
+	// The same for a followed player in his own first person (main.cpp's
+	// g_follow, enhanced.followFirstPerson; -1 none): his flashes are the
+	// follow camera's. Effects only: nothing simulated reads them.
+	int firstPersonPlayer = -1;
 	bool playerInsideControlPoint = false; // set by the scripts (setIsInsideCP)
 	// The player's rounds fired and rounds that damaged something, by
 	// weapon template; `clear` starts counting again.
@@ -1521,6 +1598,8 @@ public:
 	// destroys the object.
 	void setHitPoints(uint32_t object, float hitPoints);
 	const FireArm* playerWeapon() const { return m_player && m_player->alive ? m_player->weapon.get() : nullptr; }
+	// Any living player's weapon in hand (a bot's for a followed first-person view), null otherwise.
+	const FireArm* playerWeapon(int player) const;
 	// The fire mode of the local player's weapon (the one in hand, or the
 	// seat's gun; FireMode), -1 without one: the HUD's fire-rate icon
 	// (0x007c1f10 with weaponHud.hasFireRate, firerate_<mode>.tga).
@@ -1697,6 +1776,13 @@ public:
 		// under it); PICameraX / PICameraY bundles (hatches, AS_TANK_Cupola1)
 		// aren't the look's.
 		std::string yawBundle, pitchBundle;
+		// The armour whose EMP step scales each look bundle's input: the
+		// bundle input handler (0x00565180) walks from the bundle up its
+		// parents (+0x34) to the first with an armour (+0x48) and takes that
+		// one's (eu_tank's cupola, under EU_TANK_CupolaBase with none of its
+		// own, the tank's). Null: no armoured part above it.
+		const world::ObjectTemplate* yawArmour = nullptr;
+		const world::ObjectTemplate* pitchArmour = nullptr;
 		bool pitchUsesDriverInput = false; // PIPitch, filtered with the chassis controls
 		float minPitch = -90, maxPitch = 90; // the pitch bundle's limits (its rotation's y; down positive)
 		// The seat's first firearm's rest pitch under the pitch bundle (up
@@ -1916,6 +2002,30 @@ public:
 	// at 0x004d2ea9: the local player's, the HUD's help message 0x52): the
 	// key, once; 0 none.
 	int takeSquadSizeRefused(int player);
+	// The squad leader's items (mayUseWeapon, 0x005921e0's last test): the
+	// weapon is one of the player's kit's UB_SquadLeader items and he leads
+	// no squad, so neither a weapon key nor c_PIToggleWeapon takes it.
+	bool squadLeaderOnly(int player, const world::ObjectTemplate& weapon) const;
+	// A weapon key that found its weapon refused by that test: the key,
+	// once; 0 none. Retail gives no feedback for it (enhanced.squadItemHints).
+	int takeSquadLeaderRefused(int player);
+	// For the refusal's hint: the squad's members (0 without a squad) and
+	// the members the weapon needs for the player (minimumSquadSizeForSelection,
+	// one fewer for a bot; 0 none).
+	std::pair<int, int> squadSizeFor(int player, const world::ObjectTemplate& weapon) const;
+	// The item selection's dimmed slots (0x0079c290: an entry's +8, its
+	// ItemSlot%iAlpha 0.4): the kit's weapons that can't be selected (slot
+	// 0x170: an empty one that can't be reloaded, a squad too small); and,
+	// for a weapon with a WeaponHud (template slot 0x5c with 0xc4ef) while
+	// the player leads no squad or is in none, every squad leader's item
+	// and no other (the test replaces slot 0x170's answer).
+	std::vector<int> dimmedItems(int player) const;
+	// 0x004d68d0's test on a kit template: one of its UB_SquadLeader item
+	// containers has the weapon as its first item.
+	static bool kitSquadLeaderItem(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& kit,
+		const std::string& weapon);
+	// A WeaponHud component (template slot 0x5c with 0xc4ef).
+	static bool hasWeaponHud(const world::ObjectTemplate& weapon);
 	// A seat gun's next round's start in the world and the hull's turn
 	// (the gun's yaw and pitch are in the hull's frame): what stepGunner
 	// fires from (seatGunOrigin, the next barrel), for the bots' aim.
@@ -2204,6 +2314,12 @@ public:
 	void stepLoneVehicle(LoneVehicle& vehicle, const VehicleInput& driver, float seconds);
 	// Deployed hubs (their objects).
 	std::vector<uint32_t> supplyObjects() const;
+	// The supply objects that would mend a vehicle (stepCrates' tests): where, and how near it must come.
+	struct VehicleSupply {
+		physics::Vec3 at;
+		float reach = 0;
+	};
+	std::vector<VehicleSupply> vehicleSupplies(uint32_t vehicle) const;
 	// Squad leaders' drones (a detonator whose projectile carries a
 	// ForceObject): the drone hovering by a player (its object, 0 for
 	// none), and whether it has strayed past its warningDistance (the
@@ -2610,9 +2726,21 @@ public:
 	// point, 2 an ammo giving point, 3 a driver assist, 4 a revive score. Null for
 	// the other kinds (5.. are the strategic and Titan attack scores).
 	static const char* replenishNotice(int kind);
-	// The AI runs on the server (AIDLL's interface 0xb47ce4, its slots 0x18
-	// and 0x20): a wreck's armour then drains three times as fast (0x00652380).
+	// The AI runs on the server (AIDLL's interface 0xb47ce4 answers slot
+	// 0x18, its +4: its init, slot 4 = 0x10001740, succeeded).
 	void setAiRunning(bool on) { m_aiRunning = on; }
+	// A wreck's armour drains three times as fast (0x00652380, for every
+	// root that is no soldier: vehicles and Titans alike) when the AI runs
+	// (slot 0x18), the object is mobile (+0x14 & 8) and AIDLL's slot 0x20
+	// (its +6, 0x1008a9b0) is false. The server's level load (0x004aefe0)
+	// inits the AI with +6 = !(GSGameMode is sp1, gpm_sp or gpm_coop) and
+	// +7 = (it is sp1 or gpm_sp) (0x004af290 -> 0x10001740), so the x 3 is
+	// the single-player and co-op modes' alone: a Titan (gpm_ti) wreck or a
+	// conquest one drains at 1x with bots.
+	bool wreckDrainsFast() const
+	{
+		return m_aiRunning && (m_gameMode == "sp1" || m_gameMode == "gpm_sp" || m_gameMode == "gpm_coop");
+	}
 	// The ladder's camera (the LadderContainer's LadderContainerCamera,
 	// DummyObjects.con: 1.5 m over the container and 0.4 m behind it, the
 	// mouse's PIMouseLookX / Y within -130..140 and -60..60 degrees of the
@@ -2715,6 +2843,7 @@ public:
 		float percent = 0;      // the armour's (vtable 0x40)
 		float healthActivationLevel = 100; // as TitanInfo's
 		int nametagPushes = 0;
+		int seat = -1; // the Titan gun seat whose armour it is (a gun hub), -1 for none
 	};
 	std::vector<TitanPartInfo> titanParts(int team, uint32_t objectId = 0) const;
 	// Where a part's meshes lie (world): its own node's and those of unarmoured nodes under it (a gun's control
@@ -2781,6 +2910,9 @@ public:
 	// the Titan's box; false for none.
 	// `seat` >= 0 asks for that seat only; `skip`: seats others are going to.
 	bool titanGunEntry(int player, physics::Vec3& entry, float& radius, int& seat, const std::vector<int>& skip = {}) const;
+	// A Titan gun seat's hub (the armour of its seat, TitanPartInfo::seat): its id, where it is in the
+	// world and whether it is a wreck. False for a seat without one.
+	bool titanSeatHub(uint32_t titan, int seat, uint32_t& part, physics::Vec3& at, bool& wreck) const;
 	// For the bots' Titan walk grid (BotsTitan.cpp): a ray in the Titan's
 	// own frame against what `team`'s soldiers meet of it (false when
 	// clear), the frame's two transforms, and a count that changes whenever
@@ -2790,6 +2922,27 @@ public:
 	// (its projectile LOD and posed collision parts): the owner of the first
 	// face (a part's id, the Titan's for the hull), 0 when it meets none.
 	uint32_t titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const;
+	// The same two queries on a copy of a Titan's collision as it stands now
+	// (enhanced.botAsyncPaths: the bots' Titan fields made off the main
+	// thread). The meshes are shared, not copied: a Titan's are never changed
+	// once made (rebuildTitanMeshes makes new ones), and the shared queries
+	// leave them alone; the parts' frames are copied as posed now.
+	struct TitanCollision {
+		uint32_t titan = 0;
+		std::shared_ptr<const physics::CollisionWorld> soldier, teamSoldier[2], projectile;
+		struct Part {
+			std::shared_ptr<const physics::CollisionWorld> lod;
+			physics::Mat3 rotation;
+			physics::Vec3 position;
+			float radius = 0;
+		};
+		std::vector<Part> parts;
+		float partReach = 0;
+		std::map<uint32_t, int64_t> armour; // each Titan part's id: its armor.defaultMaterial (-1 without one)
+		bool ray(int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
+		uint32_t shot(const physics::Vec3& from, const physics::Vec3& to) const;
+	};
+	std::shared_ptr<const TitanCollision> titanCollision(uint32_t titan) const;
 	// The middle of a part's faces in that LOD (the Titan's frame), to aim
 	// at; false without any.
 	bool titanPartAimPoint(uint32_t part, physics::Vec3& local) const;
@@ -2888,6 +3041,9 @@ private:
 		physics::ContactResponse legsResponse;
 		std::vector<physics::Vec3> points; // vehicle collision LOD
 		std::shared_ptr<physics::CollisionWorld> projectileMesh; // object space, projectile LOD
+		// The farthest of projectileMesh's vertices from the origin (raycastBody's broad phase), for the mesh it was measured on.
+		mutable std::shared_ptr<const physics::CollisionWorld> reachMeasured;
+		mutable float projectileReach = 0;
 		std::shared_ptr<physics::CollisionWorld> soldierMesh;    // object space, soldier LOD (ragdolls)
 		// The parts with a collisionPart (0x0063ccc0: a child whose template
 		// +0x74 is over 0 and whose physicsType is Mesh or MechLegs gets an
@@ -3134,8 +3290,8 @@ private:
 		bool hideChildren = false;
 		bool destroyNow = false; // destroyOnSpectacularDeath (+0x251)
 		// The wreck: the time it has stood, how long its armour drains to
-		// -wreckHitPoints (timeToStayAsWreck, a third of it with the AI
-		// running: 0x00652380's x 3) and the fade after (timeToStayAfterDestroyed).
+		// -wreckHitPoints (timeToStayAsWreck, a third of it with
+		// wreckDrainsFast: 0x00652380's x 3) and the fade after (timeToStayAfterDestroyed).
 		float wreckAge = 0, wreckDrain = 0;
 		// Each seat gun's WeaponBasedRecoilComp slide (GunRecoil), by seat.
 		std::vector<GunRecoil> gunRecoil;
@@ -3175,6 +3331,10 @@ private:
 		bool majorActor = false;
 		bool controlObject = false;
 		bool particle = false;
+		// A UAVVehicle (the commander's eu_drone): no vehicle of its own,
+		// but its Armor component wears, wrecks and removes it as a
+		// vehicle's does (armoured()).
+		bool uav = false;
 		std::shared_ptr<physics::CollisionWorld> trunk;
 		float trunkRadius = 0;
 		bool trunkFromTypeFour = false;
@@ -3190,6 +3350,9 @@ private:
 		bool reported = false;
 		// The wheels' parts' radius (their vehicle LOD's, slot 0x50), by wheel.
 		std::vector<float> wheelRadii;
+		// The wheels' parts' vehicle-LOD vertex materials (slot 0x44(1, i),
+		// through mapMaterial), by wheel: their probes' own material.
+		std::vector<std::array<uint32_t, 3>> wheelMaterials;
 		uint32_t material = 0; // the template's material
 		// Sleeping (the node's counter +0x68 and its history).
 		physics::SleepState sleep;
@@ -3288,6 +3451,9 @@ private:
 	static bool asleep(const Body& body) { return body.sleep.asleep() || body.held; }
 	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
+	// A body whose armour the vehicles' damage steps run: a vehicle's, or
+	// the UAV's.
+	static bool armoured(const Body& body) { return body.vehicle || body.uav; }
 	// The armour's wreck (0x00654120) sends its object message 0x18; the
 	// object's handler (0x0063c6a0) on the server, for an armoured object
 	// whose Radio part has destroyedGameEvent N (Radio template +0x1f8, -1
@@ -3441,6 +3607,8 @@ private:
 	void scanCloseTo(Player& player, CloseToScan& scan);
 	void clearCloseTo(int player, CloseToScan& scan);
 	std::vector<AiHit> m_aiHits;
+	std::vector<DamageNote> m_damageNotes;
+	bool m_noteDamage = false;
 	std::vector<UseKeyExit> m_useKeyExits;
 	std::vector<uint32_t> m_aiForgotten;
 	struct {
@@ -3489,6 +3657,8 @@ private:
 	// The player's may-use test (player slot 0x384, 0x005921e0; see
 	// GameWorld.cpp): `selectable` the weapon's slot 0x170.
 	bool mayUseWeapon(const Player& player, const std::string& weapon, bool selectable, bool forced) const;
+	// Whether the weapon is a squad leader's item of the player's kit (0x004d68d0 with 3).
+	bool squadLeaderItem(const Player& player, const std::string& weapon) const;
 	// Makes `index` its group's active weapon (0x005c9840): the old one's
 	// disable (slot 0x1a8), the new one's enable (0x1a4).
 	void activateSeatWeapon(Body& body, int seat, const SeatLayout& layout, int index);
@@ -3817,6 +3987,7 @@ private:
 		std::string kitTemplate, soldierTemplate; // the next spawn's kit (empty: the team's assault kit)
 		std::vector<std::string> unlocked; // ItemContainer templates chosen (equipped)
 		std::vector<std::string> owned;    // and owned but not chosen (replaceWithoutEquip's test)
+		// Every human player owns every kit unlock, always (no stats server ranks them up here).
 		bool allUnlocked = false;
 		// A kit selection arrived (SelectKit's unlock masks): only the chosen containers apply, the rest are owned.
 		bool unlockChosen = false;
@@ -3879,6 +4050,7 @@ private:
 		bool toggleFireWas = false; // c_PIToggleFireRate last tick
 		int seatItemSelect = 0;     // a seat weapon taken by its key, for the item selection (takeSeatItemSelect)
 		int squadSizeRefused = 0;   // a key whose weapon the squad is too small for (takeSquadSizeRefused)
+		int squadLeaderRefused = 0; // a key whose weapon is a squad leader's, he leading none (takeSquadLeaderRefused)
 		bool reloadWas = false;     // c_PIReload last tick
 		bool animationReloadWas = false;
 		uint32_t reloadPresses = 0; // its presses (PlayerInfo::reloadPresses)
@@ -3886,6 +4058,7 @@ private:
 		std::string feelFor;
 		bool zoomed = false;
 		float lookScale = 1; // setZoomed's
+		int zoomLevel = 0;   // setZoomed's level (PlayerInfo::zoomLevel)
 		// fire.useDistanceCounter's range mode (SingleFireComp +0x178 /
 		// +0x17c): metres, 0 off; and the zoom last tick.
 		int burstDistance = 0;
@@ -4091,7 +4264,8 @@ private:
 	std::map<int, FieldUnlocks> m_fieldUnlocks;
 	struct SquadOrderScore {
 		double points = 0;
-		int maximum = 0;
+		int maximum = 100; // the squad's constructor (0x004c87a0) sets +0x168 to 100.0
+		bool maxSent = false; // a set-max has gone to the squad (event 0x56, 0x004c4ea0)
 	};
 	std::map<std::pair<int, int>, SquadOrderScore> m_squadOrderScores;
 	float m_tinnitus = 0;
@@ -4334,6 +4508,13 @@ private:
 	const bool* m_sprintStrafe = nullptr;
 	const bool* m_enhancedKitFloors = nullptr;       // setTitanKitFloors
 	const bool* m_titanKitFloors = nullptr;
+	const bool* m_enhancedDeckMines = nullptr;
+	const bool* m_titanDeckMines = nullptr;
+	const bool* m_enhancedPodExit = nullptr;         // setPodExitAtRest
+	const bool* m_podExitAtRest = nullptr;
+	bool m_squadOrderRanked = false;                // setSquadOrderGate
+	const bool* m_enhancedSquadOrder = nullptr;      // setSquadOrderPointsOffline
+	const bool* m_squadOrderOffline = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
 	// Steps the view (its round gone: ended); true while it takes the input.
 	bool stepProjectileView(Player& player, float seconds);
@@ -4568,6 +4749,21 @@ private:
 		physics::Vec3 offset; // kit position - Titan position (no rotation: Titans never turn)
 	};
 	std::vector<DroppedKit> m_droppedKits;
+	// The placed items without a body here (the sonars, the decoy: retail's
+	// are mesh rigid bodies) set down on a Titan: they ride it as a body
+	// lying on its deck does (moveTitanBody's wake, then the contacts), at
+	// their place in its frame. One that has a body by now is the
+	// physics's (dropped from the list), unless enhanced.titanKitFloors
+	// holds it standing on the floor (a fixed body: the shield, the sentry
+	// gun; addBodies), when its body rides along too.
+	struct TitanRider {
+		uint32_t object = 0;
+		uint32_t titan = 0;
+		physics::Vec3 offset; // in the Titan's frame
+	};
+	std::vector<TitanRider> m_titanRiders;
+	void rideTitanIfOn(uint32_t object, uint32_t surfaceObject);
+	void stepTitanRiders();
 	bool m_reportedBlowUp = false;
 	// Stepping a LoneVehicle: no collision events or contact effects, no
 	// other bodies met.
@@ -4769,6 +4965,9 @@ private:
 	struct MeshLaunch {
 		uint32_t launcher;
 		physics::Vec3 velocity {};
+		// enhanced.titanKitFloors: set down on a Titan's floor, its body
+		// stands on its lowest vertices there, held (addBodies).
+		bool onTitanFloor = false;
 	};
 	std::map<uint32_t, MeshLaunch> m_meshLaunches;
 	// The box bottoms of templates with MechLegs (their +0x4c4, 0x005cd4f0),
@@ -4788,6 +4987,10 @@ private:
 		uint32_t uavDrone = 0;
 		physics::Vec3 uavCentre;
 		float uavCircle = 0, uavTurnRate = 0, uavAngle = 0;
+		// The drone's yaw rate as the exe keeps it (+0x188, signed:
+		// negative) and uavVehicleSpeed, which 0x005a1f70 sets on its
+		// physics node each tick.
+		float uavYawRate = 0, uavSpeed = 0;
 	};
 	void launchUavDrone(int team, const physics::Vec3& at);
 	void flyUavDrones(float seconds);
@@ -5260,6 +5463,7 @@ private:
 		float age = 0;
 		float landing = -1, removeIn = -1; // Parachute landing and removal timers
 		physics::Vec3 landingNormal {0, 1, 0}, landingSurfaceVelocity;
+		bool landingOnTitan = false; // what it landed on is a Titan, which carries the rider (his velocity relative to it)
 		// Its keepUp ForceObject (eu_pod_ForceObject: regulatePosX / Z
 		// -0.5/1 at 0/1.5/0; 0x0062b750 with the linear regulator
 		// 0x00667710): the couple Vehicle::updateForce gives a vehicle's.

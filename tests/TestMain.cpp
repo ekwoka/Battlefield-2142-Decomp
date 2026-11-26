@@ -1,16 +1,20 @@
 #include "TestMain.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
 #ifndef _WIN32
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -24,6 +28,13 @@ constexpr int kSkippedStatus = 77;
 
 enum class Result { Pass, Fail, Skip };
 
+// Each test's time in this run (not the skipped ones), for the times file.
+std::map<std::string, double>& measured()
+{
+	static std::map<std::string, double> times;
+	return times;
+}
+
 double secondsSince(Clock::time_point start)
 {
 	return std::chrono::duration<double>(Clock::now() - start).count();
@@ -33,12 +44,65 @@ double secondsSince(Clock::time_point start)
 void report(Result result, const char* name, double seconds)
 {
 	const char* word = result == Result::Pass ? "PASS" : result == Result::Fail ? "FAIL" : "SKIP";
+	if (result != Result::Skip) {
+		measured()[name] = seconds;
+	}
 	if (seconds >= 1.0) {
 		std::printf("%s %s (%.1f s)\n", word, name, seconds);
 	} else {
 		std::printf("%s %s\n", word, name);
 	}
 	std::fflush(stdout);
+}
+
+// The tests' last times, "<seconds> <name>" a line: BF2142_TEST_TIMES, else
+// test-times.txt beside the test binary (in the build directory).
+std::string timesPath(const char* argv0)
+{
+	if (const char* path = std::getenv("BF2142_TEST_TIMES"); path && *path) {
+		return path;
+	}
+	return (std::filesystem::path(argv0).parent_path() / "test-times.txt").string();
+}
+
+std::map<std::string, double> loadTimes(const std::string& path)
+{
+	std::map<std::string, double> times;
+	std::ifstream in(path);
+	double seconds = 0;
+	std::string name;
+	while (in >> seconds >> name) {
+		times[name] = seconds;
+	}
+	return times;
+}
+
+// This run's times over the file's (the tests not run keep theirs).
+void saveTimes(const std::string& path, std::map<std::string, double> times)
+{
+	for (const auto& [name, seconds] : measured()) {
+		times[name] = seconds;
+	}
+	std::ofstream out(path);
+	for (const auto& [name, seconds] : times) {
+		out << seconds << ' ' << name << '\n';
+	}
+}
+
+// The default for `-j`: every core when the run is niced to 10 or more (`nice`
+// alone gives 10), since it then yields to everything else on the machine;
+// otherwise at most 8, leaving the rest free.
+int defaultJobs()
+{
+	const int cores = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+#ifndef _WIN32
+	errno = 0;
+	const int niceness = getpriority(PRIO_PROCESS, 0);
+	if (errno == 0 && niceness >= 10) {
+		return cores;
+	}
+#endif
+	return std::min(cores, 8);
 }
 
 #ifndef _WIN32
@@ -106,12 +170,13 @@ int runParallel(const std::vector<const test::Case*>& cases, int jobs, int& skip
 
 // Runs every test, or those whose names contain the filter. Outside
 // Windows the tests run in their own processes, as many at once as there are
-// cores; `-j N` sets how many, `-j 1` runs them one after another in this one.
+// cores when niced to 10 or more (`nice bf2142_tests`), else at most 8; `-j N`
+// sets how many, `-j 1` runs them one after another in this one.
 // `--remaster` (or BF2142_REMASTER_TESTS=1) adds the Project Remaster tests.
 int main(int argc, char** argv)
 {
 	const char* filter = nullptr;
-	int jobs = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+	int jobs = defaultJobs();
 	const char* remasterEnv = std::getenv("BF2142_REMASTER_TESTS");
 	test::remaster() = remasterEnv && *remasterEnv && std::strcmp(remasterEnv, "0") != 0;
 	for (int i = 1; i < argc; ++i) {
@@ -139,6 +204,20 @@ int main(int argc, char** argv)
 		}
 	}
 
+	// Slowest first, by the last run's times (a test with none counts as the
+	// slowest: new ones start early): with N jobs the N slowest each start on
+	// a process of their own at once and the quick ones share the rest, so
+	// the run isn't left waiting on a long test that started last.
+	const std::string timesFile = timesPath(argv[0]);
+	const std::map<std::string, double> lastTimes = loadTimes(timesFile);
+	if (jobs > 1) {
+		const auto cost = [&lastTimes](const test::Case* c) {
+			const auto it = lastTimes.find(c->name);
+			return it == lastTimes.end() ? 1e9 : it->second;
+		};
+		std::stable_sort(cases.begin(), cases.end(), [&cost](const test::Case* a, const test::Case* b) { return cost(a) > cost(b); });
+	}
+
 	const Clock::time_point start = Clock::now();
 	int failed = 0;
 	int skipped = 0;
@@ -160,6 +239,7 @@ int main(int argc, char** argv)
 			report(skip ? Result::Skip : passed ? Result::Pass : Result::Fail, c->name, secondsSince(testStart));
 		}
 	}
+	saveTimes(timesFile, lastTimes);
 	std::printf("%zu tests, %d failed, %d skipped, %.1f s\n", cases.size(), failed, skipped, secondsSince(start));
 	return failed == 0 ? 0 : 1;
 }

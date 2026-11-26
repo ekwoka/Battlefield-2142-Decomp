@@ -11,6 +11,7 @@
 #include "Animation/Pose.h"
 #include "AnimatedUV.h"
 #include "Culling.h"
+#include "DistanceFade.h"
 #include "MeshLights.h"
 #include "EnvMaps.h"
 #include "Fog.h"
@@ -659,9 +660,7 @@ private:
 	mutable std::unordered_map<const world::ObjectTemplate*, std::vector<PartChild>> m_partChildren;
 	std::vector<AnimatedUVPart> m_animatedUVParts; // syncObjects' scratch
 	// Each object's transform at the last two ticks and as drawn (TickBlend.h).
-	struct ObjectBlend {
-		Mat4 previous, current, drawn;
-	};
+	using ObjectBlend = render::ObjectBlend;
 	std::unordered_map<uint32_t, ObjectBlend> m_objectBlend;
 	std::unordered_map<uint32_t, ObjectBlend> m_placedBlend; // by PlacedTemplate::key
 	std::map<std::pair<uint32_t, int>, ObjectBlend> m_decalPartBlend; // collision parts holding decals, by (object, part)
@@ -691,7 +690,7 @@ private:
 	int m_terrainCellsPerPatch = 0; // per side
 	float m_terrainLodSwitch = 0;   // this frame's LOD 0 distance (the culler's +0)
 	float m_terrainHeightAboveGround = 0; // the camera's (terrain +0x294)
-	float m_baseFovY = 0; // the view's first field of view: the zoom is against it (0x10066b30)
+	CullMinimum m_cullMinimum; // the object fade's minimum (renderer +0x6b0; DistanceFade.h)
 	float viewZoom(const Camera& camera) const;
 	// The secondary heightmaps around the level (the surrounding terrain).
 	void buildSurroundingTerrain(const LevelSources& sources);
@@ -1044,8 +1043,9 @@ private:
 		// technique 2, decalNormalMapName); null for the plain ones.
 		SDL_GPUTexture* normalMap = nullptr;
 		// Fixed-function fog: Trail.fx and NonScreenAlignedParticles.fx set
-		// FogEnable TRUE; Particles.fx's sprites never enable it (and its
-		// additive techniques, like Rain.fx, set it FALSE).
+		// FogEnable TRUE; RendDX9 0x1012f750 enables it for the normal-blend
+		// sprites (ParticleFog.h); the additive techniques, like Rain.fx, set
+		// it FALSE.
 		bool fogged = false;
 	};
 	SDL_GPUBuffer* m_particleVertices = nullptr;
@@ -1106,7 +1106,8 @@ private:
 	std::unique_ptr<FpsText> m_fpsText;
 	void appendFpsText(std::vector<hud::HudQuad>& quads);
 	std::vector<ParticleGroup> m_particleGroups;
-	void buildParticles(const Camera& camera);
+	// aspect: the view's height / width (the distance LOD's screen factor).
+	void buildParticles(const Camera& camera, float aspect);
 	// This frame's point lights (the effects' LightSources nearest the
 	// camera), copied into the lit shaders' uniforms.
 	std::vector<effects::PointLight> m_pointLights; // this frame's listed lights (collectPointLights)

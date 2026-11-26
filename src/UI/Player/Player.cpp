@@ -285,6 +285,10 @@ void Player::tick()
 	enterFrameEvents();
 	m_vm->advance(1000.0 / m_frameRate);
 	runActions();
+	if (m_tickHook) {
+		m_tickHook(*this);
+		runActions();
+	}
 	syncTextFields();
 }
 
@@ -1822,16 +1826,33 @@ void Player::queueFrame(Clip& clip, int frame, bool play)
 	if (clip.frameCount() == 0 || clip.image) {
 		return;
 	}
-	if (clip.queuedFrames.empty()) {
+	std::vector<int>& queue = clip.queuedFrames;
+	if (queue.empty()) {
 		m_queuedClips.push_back(std::static_pointer_cast<Clip>(clip.shared_from_this()));
 	}
-	clip.queuedFrames.push_back(std::clamp(frame, 0, clip.frameCount() - 1));
+	frame = std::clamp(frame, 0, clip.frameCount() - 1);
+	// gameswf appends every goto (0x100cf5b0) and, taking the queue
+	// (0x100cfa40), goes to its first frame and drops the entries after it
+	// that equal it: a repeat of the last frame queued is dropped here,
+	// with the same gotos as the result.
+	if (!queue.empty() && queue.back() == frame) {
+		return;
+	}
+	// Not in retail: gameswf's queue grows without limit (0x100048a0), so
+	// a script alternating two frames in a loop queues millions of gotos
+	// and each backward one replays the timeline. Here only the last
+	// kMaxQueuedFrames are kept, the oldest dropped; the clip still ends on
+	// the last frame asked for.
+	if (queue.size() >= kMaxQueuedFrames) {
+		queue.erase(queue.begin());
+	}
+	queue.push_back(frame);
 }
 
 void Player::applyQueuedFrames(Clip& clip)
 {
 	// Each queued frame in turn, a repeat of the one just gone to once
-	// (0x100cfa40).
+	// (0x100cfa40; queueFrame already drops repeats).
 	const std::vector<int> frames = std::move(clip.queuedFrames);
 	clip.queuedFrames.clear();
 	for (size_t i = 0; i < frames.size(); ++i) {

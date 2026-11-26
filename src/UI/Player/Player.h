@@ -99,6 +99,9 @@ public:
 	{
 		m_urlHandler = std::move(handler);
 	}
+	// Called at the end of every tick, after the scripts ran (the game's own
+	// additions to a page: Main/MenuSingleplayBots.h).
+	void setTickHook(std::function<void(Player&)> hook) { m_tickHook = std::move(hook); }
 
 	// Loads an uncompressed or compressed SWF and shows its first frame
 	// (DoInitActions and frame 1's actions have run).
@@ -178,7 +181,11 @@ public:
 	void gotoFrame(player::Clip& clip, int frame, bool play);
 	// gotoAndStop/gotoAndPlay's way: plays or stops now, goes to `frame`
 	// when the clip next advances (Clip::queuedFrames).
+	// A repeat of the last frame queued is dropped (as 0x100cfa40 does when
+	// it takes the queue); past kMaxQueuedFrames the oldest is dropped (a
+	// safeguard retail doesn't have).
 	void queueFrame(player::Clip& clip, int frame, bool play);
+	static constexpr size_t kMaxQueuedFrames = 64;
 	void applyQueuedFrames(player::Clip& clip);
 	void enterFrame(player::Clip& clip, int frame, bool runActions);
 	void advanceClip(player::Clip& clip);
@@ -303,6 +310,7 @@ private:
 	void advanceVideos(double seconds);
 	std::function<void(const std::string&)> m_traceHandler;
 	std::function<void(const std::string&, const std::string&)> m_urlHandler;
+	std::function<void(Player&)> m_tickHook;
 
 	std::vector<uint8_t> m_swf;
 	SwfMovie m_movie;

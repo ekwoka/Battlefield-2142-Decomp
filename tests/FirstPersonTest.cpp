@@ -338,6 +338,181 @@ TEST(FirstPerson_RenderedPoseBlendsBetweenTicks)
 	}
 }
 
+namespace {
+
+// The shipped soldier's and rifle's first-person systems on the first-person
+// skeleton (needs $BF2142_GAME_DIR).
+struct FirstPersonRifle {
+	io::FileManager files;
+	Console console {&files};
+	anim::AnimationSystems systems {[this](const std::string& path, std::vector<uint8_t>& data) {
+		return files.readFile(path, data);
+	}};
+	const anim::AnimationSystemTemplate* soldier = nullptr;
+	const anim::AnimationSystemTemplate* rifle = nullptr;
+	const anim::Skeleton* skeleton = nullptr;
+
+	explicit FirstPersonRifle(const char* gameDir)
+	{
+		files.setRootPath(gameDir);
+		files.addSearchPath("mods/bf2142");
+		bindMethod(console, "fileManager.mountArchive", ConsoleAccess::Anyone,
+			[this](std::string archive, std::string mountPoint, bool) { files.mountArchive(archive, mountPoint); }, 2);
+		std::string out;
+		console.run("ServerArchives.con", {}, out);
+		console.run("ClientArchives.con", {}, out);
+		anim::registerAnimationConsoleMethods(console, systems);
+		console.run("Objects/Soldiers/Common/Animations/ValueHolders.inc", {}, out);
+		const auto load = [&](const std::string& path) { return systems.get(path, [&] { console.run(path, {}, out); }); };
+		soldier = load("Objects/Soldiers/Common/Animations/AnimationSystem1p.inc");
+		rifle = load("Objects/Weapons/Handheld/eu_ar_rifle/AnimationSystem1p.inc");
+		skeleton = systems.skeleton("Objects/Soldiers/Common/Animations/1p_setup.ske");
+	}
+	bool loaded() const { return soldier && rifle && skeleton; }
+};
+
+anim::AnimationInput sprintInput()
+{
+	anim::AnimationInput sprint;
+	sprint.speed = 6;
+	sprint.forward = 1;
+	sprint.movementSeconds = 1 / 30.0f;
+	return sprint;
+}
+
+std::array<float, 3> cameraBonePosition(const anim::FirstPersonRig& rig)
+{
+	const anim::Matrix& m = rig.pose()[static_cast<size_t>(rig.cameraNode())];
+	return {m[12], m[13], m[14]};
+}
+
+} // namespace
+
+// A frame that ran several ticks (below 30 fps) draws the pose between where
+// the last frame left the skeleton and the last tick's, by the alpha that
+// spans all the frame's ticks (0x0043f170), as the world's objects are drawn:
+// not between the frame's last two ticks. alpha is clamped to -0.1 .. 1.1,
+// as the objects' is.
+TEST(FirstPerson_MultiTickFrameBlendsFromTheLastDraw)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	FirstPersonRifle data(gameDir);
+	CHECK(data.loaded());
+	if (!data.loaded()) {
+		return;
+	}
+	const float dt = 1 / 30.0f;
+	const anim::AnimationInput sprint = sprintInput();
+	anim::FirstPersonRig rig(data.systems, *data.skeleton, data.soldier);
+	rig.setWeapon(data.rifle);
+	for (int i = 0; i < 40; ++i) {
+		rig.update(sprint, dt);
+		rig.blend(1);
+	}
+	float lagged = 0; // how far the last tick's start is from the last draw
+	for (int frame = 0; frame < 10; ++frame) {
+		rig.blend(1);
+		const auto drawn = cameraBonePosition(rig); // where this frame starts
+		std::array<float, 3> secondLast {};
+		for (int tick = 0; tick < 3; ++tick) {
+			secondLast = cameraBonePosition(rig);
+			rig.update(sprint, dt);
+		}
+		const auto last = cameraBonePosition(rig);
+		rig.blend(0);
+		const auto from = cameraBonePosition(rig);
+		rig.blend(1);
+		const auto to = cameraBonePosition(rig);
+		rig.blend(0.5f);
+		const auto half = cameraBonePosition(rig);
+		rig.blend(1.1f);
+		const auto over = cameraBonePosition(rig);
+		rig.blend(3.0f); // clamped to 1.1
+		const auto clampedOver = cameraBonePosition(rig);
+		rig.blend(-0.1f);
+		const auto under = cameraBonePosition(rig);
+		rig.blend(-3.0f); // clamped to -0.1
+		const auto clampedUnder = cameraBonePosition(rig);
+		for (size_t k = 0; k < 3; ++k) {
+			CHECK(near(from[k], drawn[k], 1e-6f));
+			CHECK(near(to[k], last[k], 1e-6f));
+			CHECK(near(half[k], (drawn[k] + last[k]) * 0.5f, 1e-5f));
+			CHECK(near(over[k], drawn[k] + (last[k] - drawn[k]) * 1.1f, 1e-5f));
+			CHECK(near(clampedOver[k], over[k], 1e-6f));
+			CHECK(near(under[k], drawn[k] - (last[k] - drawn[k]) * 0.1f, 1e-5f));
+			CHECK(near(clampedUnder[k], under[k], 1e-6f));
+			lagged = std::max(lagged, std::fabs(secondLast[k] - drawn[k]));
+		}
+	}
+	CHECK(lagged > 1e-4f); // the frame's earlier ticks moved the bone: the check tells the two apart
+}
+
+// A weapon change (or holstering) draws the new weapon's start pose at once:
+// a frame drawn before the next tick and the frame after it blend nothing
+// from the old weapon's pose.
+TEST(FirstPerson_WeaponChangeDrawsTheNewPose)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	FirstPersonRifle data(gameDir);
+	CHECK(data.loaded());
+	if (!data.loaded()) {
+		return;
+	}
+	const float dt = 1 / 30.0f;
+	const anim::AnimationInput sprint = sprintInput();
+	anim::FirstPersonRig rig(data.systems, *data.skeleton, data.soldier);
+	rig.setWeapon(data.rifle);
+	for (int i = 0; i < 40; ++i) {
+		rig.update(sprint, dt);
+		rig.blend(0.5f);
+	}
+	const anim::LocalPose setup = anim::setupPose(*data.skeleton);
+	const std::vector<anim::Matrix> setupWorld = anim::worldMatrices(*data.skeleton, setup);
+	// Equal entries, a degenerate node's infinities and NaNs included (1p_setup.ske
+	// has a node whose setup matrix isn't finite until a blend normalises it).
+	const auto samePose = [](const std::vector<anim::Matrix>& a, const std::vector<anim::Matrix>& b) {
+		if (a.size() != b.size()) {
+			return false;
+		}
+		for (size_t i = 0; i < a.size(); ++i) {
+			for (size_t k = 0; k < 16; ++k) {
+				if (a[i][k] != b[i][k] && !(std::isnan(a[i][k]) && std::isnan(b[i][k])) && !near(a[i][k], b[i][k], 1e-5f)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+	CHECK(!samePose(rig.pose(), setupWorld)); // sprinting: the bones are off their setup pose
+	for (const anim::AnimationSystemTemplate* next : {static_cast<const anim::AnimationSystemTemplate*>(nullptr), data.rifle}) {
+		rig.setWeapon(next);
+		// Drawn before the next tick: the new start pose at any alpha.
+		CHECK(samePose(rig.pose(), setupWorld));
+		rig.blend(1);
+		const std::vector<anim::Matrix> start = rig.pose();
+		rig.blend(0);
+		CHECK(samePose(rig.pose(), start));
+		rig.blend(0.5f);
+		CHECK(samePose(rig.pose(), start));
+		// The first tick after it snaps: no blend from before the change.
+		rig.update(sprint, dt);
+		rig.blend(1);
+		const std::vector<anim::Matrix> tick = rig.pose();
+		rig.blend(0);
+		CHECK(samePose(rig.pose(), tick));
+		for (int i = 0; i < 10; ++i) {
+			rig.update(sprint, dt);
+			rig.blend(0.5f);
+		}
+	}
+}
+
 TEST(FirstPerson_FragComesBackInHandAfterTheThrow)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");

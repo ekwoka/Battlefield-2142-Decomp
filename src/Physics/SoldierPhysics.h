@@ -95,6 +95,8 @@ float stanceHeight(int stance);
 
 // The built-in soldier mesh's face material (0x006e4880: 0x18).
 constexpr uint32_t kSoldierMeshMaterial = 24;
+// The material both sides of a soldier-soldier contact pass (0x006c2620 -> 0x006c24b0: 0x2f, Flare).
+constexpr uint32_t kSoldierContactMaterial = 0x2f;
 
 class SoldierBody {
 public:
@@ -105,7 +107,8 @@ public:
 	// The MaterialManager's friction of a material pair (slot 0x88): each
 	// contact (0x006c24b0, its first material non-zero) sets `friction` from
 	// the soldier's material and the surface's (the terrain's material map
-	// under the point, or the mesh face's). Empty: `friction` stays.
+	// under the point, or the mesh face's; for another soldier, 0x2f against
+	// 0x2f, touchSoldier). Empty: `friction` stays.
 	std::function<float(uint32_t own, uint32_t other)> frictionOf;
 	// How deep the feet are under the water (node +0x5c, slot 0x140 / 0x144;
 	// 0 out of it), set by the ground pass.
@@ -291,6 +294,7 @@ private:
 	void collideWithSoldiers(float scale, bool pass); // 0x006c2620
 	void addContact(const Vec3& normal, float depth, const Vec3& velocity); // 0x006c24b0
 	void touchMaterial(uint32_t other);                                      // 0x006c24b0's friction
+	void touchSoldier();                                                    // 0x006c2620's friction (0x2f, 0x2f)
 	void solve(float seconds, const Ground& ground, float gravity); // 0x006c48c0
 	void runOver();                               // 0x006c2e50
 	void segmentTest(float seconds);              // 0x006c48c0's server part

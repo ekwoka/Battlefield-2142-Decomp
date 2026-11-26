@@ -217,16 +217,22 @@ public:
 		int id = 0;
 	};
 	void update(const AnimationInput& input, float seconds, std::vector<Event>* events = nullptr);
-	// Enhanced/native smoothing, retail mechanism unknown: the drawn pose is
-	// the last two ticks' poses blended by the frame's tick fraction (slerp
-	// rotations, lerp positions), as objects are tick-blended (TickBlend.h).
-	// Retail's first-person skeleton looks smooth at any frame rate; the
-	// traced animation path (Soldier 0x00586710 -> 0x005f06b0(1/30, 0)) is
-	// per tick, and 0x005f06b0 also takes a frame dt with its flag set from
-	// the Soldier method 0x00585bf0, caller not found. alpha 1 = the tick's
-	// pose; the tick's update() leaves it there. A weapon change or reset
-	// snaps (no blend from the old pose).
+	// The drawn pose between ticks. Retail steps the first-person systems
+	// once a frame with the frame's seconds, not in the tick: the frame
+	// (0x0040bd90) calls ObjectManager slot 0x2c (0x007002d0) with them
+	// (clamped to 1e-5 .. 1/15 s), which runs slot 0xa4 of every object
+	// flagged 0x2000 (the Soldier's constructor 0x0058df00 sets 0x3800):
+	// Soldier 0x00586710 -> 0x005ef250, the active system's update (slot
+	// 0xc, 0x008baed0) and the held weapon's, with that time. The port
+	// steps them in the tick (update()) and draws the pose blended from
+	// where the last frame left it (the pose before the frame's first tick)
+	// to the tick's by the frame's alpha (slerp rotations, lerp positions),
+	// alpha as the objects' (TickBlend.h, 0x0043f170: -0.1 .. 1.1). Smooth
+	// at any frame rate as retail is, up to a tick behind it. alpha 1 = the
+	// tick's pose; update() leaves it there. A weapon change or reset snaps
+	// (no blend from the old pose).
 	void blend(float alpha);
+	static constexpr float kBlendAlphaMin = -0.1f, kBlendAlphaMax = 1.1f; // 0x0043f170's clamp
 	const Skeleton& skeleton() const { return m_skeleton; }
 	const std::vector<Matrix>& pose() const { return m_world; } // as drawn (blend()), else the tick's
 	int cameraNode() const { return m_cameraNode; }
@@ -253,8 +259,9 @@ private:
 	std::unique_ptr<AnimationState> m_weapon;
 	const AnimationSystemTemplate* m_soldierTemplate = nullptr;
 	const AnimationSystemTemplate* m_weaponTemplate = nullptr;
-	LocalPose m_pose, m_previous; // this tick's and the last tick's
+	LocalPose m_pose, m_previous; // this tick's, and the pose before the first tick since the last draw
 	bool m_snap = true;           // the next update's pose has no previous to blend from
+	bool m_drawn = true;          // blend() ran since the last update: the next update starts a frame
 	std::vector<Matrix> m_world;
 	int m_cameraNode = -1;
 	CameraSpring m_spring;

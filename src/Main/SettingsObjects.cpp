@@ -200,6 +200,14 @@ const Field kProfile[] = {
 	{"LocalProfile.addDemoBookmark", "qqqi", "", true},
 };
 
+// The rewrite's own file in the profile, Enhanced.con (port addition): the
+// enhanced mode's menu settings, kept out of General.con so that file
+// stays as the original writes it (an unknown line there would be a
+// console error to the original).
+const Field kEnhanced[] = {
+	{"GeneralSettings.setSingleplayBotCount", "i", "16"}, // enhanced.singleplayBotCount's target (MenuBindings)
+};
+
 // "GeneralSettings.setMaxBots" -> "GeneralSettings.MaxBots",
 // "AudioSettings.voipEnabled" -> "AudioSettings.VoipEnabled".
 std::string keyOf(const std::string& method)
@@ -348,6 +356,7 @@ SettingsObjects::SettingsObjects()
 	defaults(kVideo);
 	defaults(kGlobal);
 	defaults(kProfile);
+	defaults(kEnhanced);
 }
 
 void SettingsObjects::resetProfile()
@@ -368,6 +377,7 @@ void SettingsObjects::resetProfile()
 	defaults(kAudio);
 	defaults(kVideo);
 	defaults(kProfile);
+	defaults(kEnhanced);
 }
 
 void SettingsObjects::registerConsole(Console& console)
@@ -434,6 +444,9 @@ void SettingsObjects::registerConsole(Console& console)
 		add(field);
 	}
 	for (const Field& field : kProfile) {
+		add(field);
+	}
+	for (const Field& field : kEnhanced) {
 		add(field);
 	}
 	// LocalProfile.save (0x00410af9): Profile.con.
@@ -567,6 +580,11 @@ std::string SettingsObjects::profileScript() const
 	return writeFields(*this, kProfile, m_lists);
 }
 
+std::string SettingsObjects::enhancedScript() const
+{
+	return writeFields(*this, kEnhanced, m_lists);
+}
+
 // The format of the shipped Settings/Usersettings.con (the
 // SettingsManager's save, 0x00676c10: the header, then each setting as
 // "SettingsManager.<type>Set <name> <value>").
@@ -625,7 +643,7 @@ bool SettingsObjects::load(Console& console)
 {
 	bool any = false;
 	for (const auto& [name, global] : std::vector<std::pair<const char*, bool>> {{"Global.con", true}, {"Usersettings.con", true},
-			 {"Profile.con", false}, {"General.con", false}, {"Audio.con", false}, {"Video.con", false}}) {
+			 {"Profile.con", false}, {"General.con", false}, {"Audio.con", false}, {"Video.con", false}, {"Enhanced.con", false}}) {
 		const std::string path = file(name, global);
 		std::ifstream in(path);
 		if (path.empty() || !in) {
@@ -661,6 +679,7 @@ bool SettingsObjects::save() const
 	ok = write(file("General.con"), generalScript()) && ok;
 	ok = write(file("Audio.con"), audioScript()) && ok;
 	ok = write(file("Video.con"), videoScript()) && ok;
+	ok = write(file("Enhanced.con"), enhancedScript()) && ok;
 	ok = saveProfile() && ok;
 	if (!m_game.empty()) {
 		ok = saveUserSettings() && ok;

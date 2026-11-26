@@ -227,7 +227,8 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		m_ammo = share;
 		hud.set(var("Ammo"), share);
 		hud.setString(var("AmmoString"), std::to_string(in.rounds));
-		hud.setString("Tot" + P + "AmmoString", "/ " + std::to_string((in.mags - 1) * in.magSize + in.rounds));
+		hud.setString("Tot" + P + "AmmoString",
+			in.magsKnown ? "/ " + std::to_string((in.mags - 1) * in.magSize + in.rounds) : std::string());
 		const bool single = in.magSize < 2;
 		setColor(hud, var("AmmoColor"), hudLevelColor(share, single ? 0.1f : 0.3f));
 		hud.set(var("SingleFireShow"), single ? 1 : 0);
@@ -250,7 +251,7 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		m_overheatPlayed = false;
 	}
 	// The clips (0x007be960).
-	if (showClips && magazine) {
+	if (showClips && magazine && in.magsKnown) {
 		const int spare = in.mags - 1;
 		hud.set(var("Clip1Show"), spare > 0 ? 1 : 0);
 		hud.set(var("Clip2Show"), spare > 1 ? 1 : 0);
@@ -738,7 +739,7 @@ void ItemSelection::update(hud::HudManager& hud, float dt)
 // --- The vehicle HUD ---
 
 std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
-	const std::function<const world::ObjectTemplate*(const std::string&)>& find)
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find, const std::vector<int>& dimmed)
 {
 	std::vector<SelectItem> items;
 	for (const auto& [slot, name] : carried) {
@@ -748,7 +749,7 @@ std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::str
 		if (slot == 9 && icon.empty()) {
 			continue;
 		}
-		items.push_back({slot, std::move(icon), true});
+		items.push_back({slot, std::move(icon), std::find(dimmed.begin(), dimmed.end(), slot) == dimmed.end()});
 	}
 	return items;
 }

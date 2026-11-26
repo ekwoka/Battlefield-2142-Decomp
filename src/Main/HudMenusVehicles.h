@@ -210,6 +210,9 @@ struct WeaponHudInput {
 	int rounds = 0;      // in the magazine (the firearm's slot 0xbc)
 	int magSize = 0;     // slot 0xb8; < 0: no magazine
 	int mags = 0;        // magazines with the one in the gun (slot 0xb0)
+	// Not known (a followed player's in a joined game: only the rounds in
+	// his magazine are sent, PlayerNetState::FireState): no clips or total.
+	bool magsKnown = true;
 	int nrOfMags = 0;    // slot 0xa8; < 0: endless
 	float reload = 0;    // the reload's progress, 0..1 (1 - slot 0x9c)
 	float heat = 0;      // slot 0x24
@@ -522,9 +525,10 @@ struct ItemListInput {
 // `carried`); with the seat's vehicleHud.useSelectionIcons (block +0xbc) and
 // a PIAltFire group (slot 0x70(1)) longer than that, the PIAltFire group
 // (the list's +0x10 = 1). `find` gives a weapon's template (its
-// weaponHud.selectIcon).
+// weaponHud.selectIcon). `dimmed`: the kit slots shown unusable
+// (GameWorld::dimmedItems: ItemSlot%iAlpha 0.4, skipped by the wheel).
 std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
-	const std::function<const world::ObjectTemplate*(const std::string&)>& find);
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find, const std::vector<int>& dimmed = {});
 std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
 	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
 	const std::vector<std::pair<int, std::string>>& carried);
