@@ -507,6 +507,7 @@ private:
 		physics::Vec3 at;
 		bool accepted = false;
 		uint32_t serial = 0; // the commander's order issued (0x004c5530 sends each one)
+		uint32_t object = 0; // its target object (sent as the ghost, no point)
 	};
 	std::map<std::tuple<int, int, int>, OrderSent> m_ordersSent; // (team, squad, store)
 	void trackOrders();

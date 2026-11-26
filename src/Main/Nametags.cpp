@@ -1175,7 +1175,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			}
 			std::array<float, 3> at {order->position.x, order->position.y + 1.5f, order->position.z};
 			const OrderTag& placed = m_orderTags[which];
-			if (placed.set && placed.order == std::array<float, 3> {order->position.x, order->position.y, order->position.z}) {
+			if (const world::Object* target = order->object ? objects.find(order->object) : nullptr) {
+				// An order on an object (0x005b8b20 -> slot 0x28, 0x100f4730): its tag is the object's, with the object.
+				const TagTemplate& tt = tagTemplate(target->objectTemplate());
+				const auto state = m_objectTags.find(target->id());
+				at = objectTagPoint({target->position().x, target->position().y, target->position().z}, tt.offset,
+					tt.useBoundingRadius, state != m_objectTags.end() ? state->second.radius : 0.0f);
+			} else if (placed.set && placed.order == std::array<float, 3> {order->position.x, order->position.y, order->position.z}) {
 				at = placed.tag; // by its marker (0x005b8b20)
 			}
 			const float dx = at[0] - eye.x, dy = at[1] - eye.y, dz = at[2] - eye.z;

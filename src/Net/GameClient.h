@@ -195,7 +195,7 @@ public:
 	// (slot 0x4c); kind the order kind (0..3 the issue-order menu's, 4..7
 	// placed on the map), at a point. The server takes it from the squad's
 	// leader or the team's commander (0x0050e3a0).
-	void issueOrder(int store, int squad, int kind, const Vec3f& point);
+	void issueOrder(int store, int squad, int kind, const Vec3f& point, uint16_t ghost = 0); // a ghost target goes in place of the point
 	// The squad leader's answer to the commander's order (SetAcceptOrder,
 	// store 1, the bit set for an accept; Commander.commRoseAccept).
 	void answerOrder(int squad, int kind, bool accept);

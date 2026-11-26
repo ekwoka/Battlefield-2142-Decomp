@@ -392,6 +392,10 @@ TEST(NetHost_HostedGameJoin)
 TEST(NetHost_JoinedHudStateAndRequests)
 {
 	dice::hfe::world::ObjectTemplateManager templates;
+	templates.registerType(1, "SupplyObject");
+	auto* targetTemplate = templates.create("SupplyObject", "order_target");
+	targetTemplate->settings()["sharedStorageSize"] = "500";
+	targetTemplate->settings()["networkableInfo"] = "BasicInfo";
 	dice::hfe::world::ObjectManager objects;
 	dice::hfe::game::GameWorld round(templates, objects);
 	dice::hfe::game::GameLogic logic;
@@ -492,6 +496,27 @@ TEST(NetHost_JoinedHudStateAndRequests)
 		step();
 	}
 	CHECK(round.takeNewOrderRequests().empty());
+	// A leader's order on an object (the record's object bit and ghost, no point): the host keeps the object and the
+	// object's position, and sends the ghost back to everyone.
+	{
+		dice::hfe::world::Object* target = objects.create(targetTemplate, {40, 0, 50});
+		CHECK(target != nullptr);
+		const uint32_t targetId = target ? target->id() : 0;
+		CHECK(pumpUntil(step, [&] { return hosted.ghostOfObject(targetId) != 0; }));
+		const uint16_t ghost = hosted.ghostOfObject(targetId);
+		CHECK(ghost != 0);
+		if (ghost != 0) {
+			client.issueOrder(0, 1, 5, {0, 0, 0}, ghost);
+			CHECK(pumpUntil(step, [&] {
+				const auto* o = round.squadLeaderOrder(1, 1);
+				return o && o->object == targetId && std::fabs(o->position.x - 40) < 0.01f;
+			}));
+			CHECK(pumpUntil(step, [&] {
+				const net::RemoteWorld::SquadOrder* o = client.world().squadOrder(1, 1, 0);
+				return o && o->object == ghost && o->kind == 5;
+			}));
+		}
+	}
 	// The host's own player's votes: its replies come to onVoteReply (here
 	// the bot stands in for the host's player: a kick vote, refused or
 	// started, answers it).

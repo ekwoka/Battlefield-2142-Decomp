@@ -998,6 +998,31 @@ TEST(Commander_SquadRequests)
 	CHECK(!requests.send(leader, 2, 40, 41) && personal.size() == 1 && personal[0] == "HUD_HUD_SQUAD_ALIVE_TO_REQUEST");
 }
 
+// An order on an object (the record's +4, 0x005b8b20): the order keeps the object and takes its position as the
+// point; a leader's and a commander's alike; one with no such object is a point order.
+TEST(Commander_OrderOnAnObject)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	const uint32_t station = field.place("commander_orbital_strike_64", 1, 120, 80);
+	const int leader = world.addPlayer("Lead", 1, false);
+	CHECK(world.spawnSoldier(leader));
+	world.joinSquad(leader, 1);
+	CHECK(world.issueSquadLeaderOrder(leader, game::GameWorld::OrderType::MapAttack, 5, 6, station));
+	const game::GameWorld::SquadOrder* order = world.squadLeaderOrder(1, 1);
+	CHECK(order && order->object == station && std::fabs(order->position.x - 120) < 0.01f && std::fabs(order->position.z - 80) < 0.01f);
+	CHECK(world.issueSquadLeaderOrder(leader, game::GameWorld::OrderType::MapMove, 5, 6));
+	order = world.squadLeaderOrder(1, 1);
+	CHECK(order && order->object == 0 && std::fabs(order->position.x - 5) < 0.01f);
+	CHECK(world.issueOrder(1, 1, game::GameWorld::OrderType::MapDefend, 0, 0, -1, station));
+	order = world.squadOrder(1, 1);
+	CHECK(order && order->object == station && order->type == game::GameWorld::OrderType::MapDefend);
+}
+
 // The AI commander's answers to the squad leaders' requests (AIDLL: the
 // store's AI event 3/0xf → IAIEventCourier 0x1004e6e0.. → the SAI's
 // 0x1009e020 artillery, 0x1009e200 orbital strike, 0x1009e3e0 UAV,

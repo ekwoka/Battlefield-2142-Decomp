@@ -5275,6 +5275,8 @@ int runGame(Options& options, Session& session)
 		std::function<bool(float, float)> placeAtWorld; // the same, at a world x/z (the comm rose's point)
 		std::optional<Ability> armedTool;
 		std::optional<game::GameWorld::OrderType> armedOrder;
+		uint32_t armedObject = 0;   // the armed order's target object (the HUD record's +0x288)
+		uint32_t mapMenuObject = 0; // what the right-click menu's point is on (the map node's +0xdc4, 0x00782d90)
 		const auto myTeam = [&] {
 			game::GameWorld::PlayerInfo me;
 			return hudPlayer(hudLocal(), me) && me.team == 1 ? 1 : 2;
@@ -5372,6 +5374,7 @@ int runGame(Options& options, Session& session)
 		const auto armOrder = [&](int kind, bool leader) {
 			const game::GameWorld::OrderType type = game::GameWorld::orderTypeFromKind(kind);
 			armedOrder = type == game::GameWorld::OrderType::None ? std::nullopt : std::optional(type);
+			armedObject = mapMenuPoint ? mapMenuObject : 0; // 0x00780820 -> 0x0077f460: the order record's object
 			leaderOrder = leader;
 			armedTool.reset();
 			if (mapMenuPoint && armedOrder && placeAt) {
@@ -5478,7 +5481,7 @@ int runGame(Options& options, Session& session)
 			const bool point = rosePoint(x, z);
 			const nametags::Nametags::SelectedTarget tag = g_nametags ? g_nametags->selectedTarget() : nametags::Nametags::SelectedTarget {};
 			roseOrder = dice::hfe::menu::prepareRoseOrder(point, x, z, tag.object != 0, tag.team, tag.position[0], tag.position[2],
-				hudPlayer(hudLocal(), me) ? me.team : 0);
+				hudPlayer(hudLocal(), me) ? me.team : 0, tag.object);
 		};
 		bindMethod(console, "SquadLeader.sendRequest", ConsoleAccess::Anyone, [&](int kind, int add) {
 			float x = 0, z = 0;
@@ -5692,12 +5695,13 @@ int runGame(Options& options, Session& session)
 		};
 		// An order to the squads (a joined game's to the server: the
 		// commander's IssueSquadOrder, store 1).
-		const auto orderSquad = [&](int squad, game::GameWorld::OrderType type, float x, float z) {
+		const auto orderSquad = [&](int squad, game::GameWorld::OrderType type, float x, float z, uint32_t object = 0) {
 			if (net::GameClient* server = joinedServer()) {
-				server->issueOrder(1, squad, static_cast<int>(type), {x, round.terrainHeight(x, z), z});
+				server->issueOrder(1, squad, static_cast<int>(type), {x, round.terrainHeight(x, z), z},
+					g_remoteHud && object ? g_remoteHud->ghostOf(object) : 0);
 				return;
 			}
-			round.issueOrder(myTeam(), squad, type, x, z, round.localPlayer());
+			round.issueOrder(myTeam(), squad, type, x, z, round.localPlayer(), object);
 		};
 		// The squad whose leader is nearest a point (the HUD's players).
 		const auto nearestSquad = [&](float x, float z) {
@@ -6516,9 +6520,10 @@ int runGame(Options& options, Session& session)
 		// 0x007d6820): the rose's order (+0x284 at +0x28c, as the T press
 		// prepared it), through sendOrder's handler.
 		bindMethod(console, "SquadLeader.issueSquadRequest", ConsoleAccess::Anyone, [&] {
-			dice::hfe::menu::issueSquadRequest(roseOrder, [&](int kind, float x, float z) {
+			dice::hfe::menu::issueSquadRequest(roseOrder, [&](int kind, float x, float z, uint32_t object) {
 				if (placeAtWorld) {
 					armedTool.reset();
+					armedObject = object;
 					armedOrder = game::GameWorld::orderTypeFromKind(kind);
 					leaderOrder = true;
 					placeAtWorld(x, z);
@@ -6624,24 +6629,26 @@ int runGame(Options& options, Session& session)
 					if (net::GameClient* server = joinedServer()) {
 						if (hudPlayer(hudLocal(), me) && me.squadLeader) {
 							server->issueOrder(0, me.squad, static_cast<int>(*armedOrder),
-								{worldX, round.terrainHeight(worldX, worldZ), worldZ});
+								{worldX, round.terrainHeight(worldX, worldZ), worldZ},
+								g_remoteHud && armedObject ? g_remoteHud->ghostOf(armedObject) : 0);
 						}
-					} else if (round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ)) {
+					} else if (round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ, armedObject)) {
 						// 0x00756b60 case 0x1c: the leader's own line and his voice (the squad's members hear it as 0x17).
 						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
-						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(*armedOrder), false), 0);
+						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(*armedOrder), armedObject != 0), 0);
 					}
 				} else if (!commanderMenu.selected().empty()) {
 					// The squads selected on the commander screen (0x007d6ab0).
 					for (const int squad : commanderMenu.selected()) {
-						orderSquad(squad, *armedOrder, worldX, worldZ);
+						orderSquad(squad, *armedOrder, worldX, worldZ, armedObject);
 					}
 				} else if (const int squad = nearestSquad(worldX, worldZ)) {
-					orderSquad(squad, *armedOrder, worldX, worldZ);
+					orderSquad(squad, *armedOrder, worldX, worldZ, armedObject);
 				}
 			}
 			armedTool.reset();
 			armedOrder.reset();
+			armedObject = 0;
 			return true;
 		};
 		placeAt = commanderClick;
@@ -6672,16 +6679,21 @@ int runGame(Options& options, Session& session)
 				return (px - worldX) * (px - worldX) + (pz - worldZ) * (pz - worldZ) < reach * reach;
 			};
 			int state = 7;
+			mapMenuObject = 0;
 			for (const int side : {me.team, 3 - me.team}) {
 				if (const world::Object* titan = round.objects().find(round.titanOf(side))) {
 					if (state == 7 && near(titan->position().x, titan->position().z)) {
 						state = side == me.team ? 2 : 3;
+						mapMenuObject = titan->id();
 					}
 				}
 			}
 			for (const auto& point : round.controlPointList()) {
 				if (state == 7 && near(point.position.x, point.position.z)) {
 					state = point.team == me.team ? 4 : point.team != 0 ? 5 : 6;
+					for (const auto& cp : round.controlPoints()) {
+						mapMenuObject = cp.id == point.id && cp.object ? cp.object->id() : mapMenuObject; // +0xdc4 (0x00782d90)
+					}
 				}
 			}
 			for (const Ability tool : {Ability::Artillery, Ability::Uav, Ability::Satellite, Ability::OrbitalStrike}) {
@@ -11125,7 +11137,7 @@ int runGame(Options& options, Session& session)
 				for (size_t i = 0; i < 2; ++i) {
 					OrderMarker want;
 					const int kind = orders[i] ? static_cast<int>(orders[i]->type) : -1;
-					if (kind >= 4 && kind <= 9) {
+					if (kind >= 4 && kind <= 9 && !orders[i]->object) { // an order on an object has no ground marker (0x005b8b20)
 						want.kind = kind;
 						want.at = orders[i]->position;
 					}
