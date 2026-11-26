@@ -26,6 +26,7 @@
 #include "World/ObjectTemplateManager.h"
 #include "World/TemplateFiles.h"
 #include "World/WorldConsole.h"
+#include "TitanLevel.h"
 
 #include <algorithm>
 #include <chrono>
@@ -38,6 +39,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <thread>
 #include <tuple>
 
@@ -1350,6 +1352,85 @@ TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
 	CHECK(round.spawnSoldier(leader));
 	for (int i = 0; i < 60; ++i) step();
 	CHECK(round.playerInfo(me, info) && !info.alive && cleared == 1);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
+{
+	using namespace dice::hfe;
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	titantest::TitanLevel level(gameDir, "Suez_Canal", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::GameLogic logic;
+	logic.startRound();
+	level.world->setSpawnTime(0);
+	level.world->autoRespawn = false;
+	host::HostSetup setup;
+	setup.level = "Suez_Canal";
+	setup.gameMode = "gpm_ti";
+	setup.gamePort = setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Titan deploy";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		level.world->tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int player = client.world().localPlayer();
+	client.selectTeam(1);
+	game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && info.team == 1; }));
+	std::map<uint32_t, int> titanGroups;
+	CHECK(pumpUntil(step, [&] {
+		titanGroups.clear();
+		for (const auto& titan : level.world->titans()) {
+			if (titan.team != 1 && titan.team != 2) continue;
+			const uint16_t ghost = hosted.ghostOfObject(titan.object);
+			for (const auto& [id, group] : client.world().spawnGroups()) {
+				if (group.ghost == ghost && group.team == titan.team) titanGroups[titan.object] = id;
+			}
+		}
+		return titanGroups.size() == 2;
+	}));
+	CHECK(titanGroups.size() == 2);
+	std::set<int> allocatedTitanGroups;
+	for (const auto& [object, group] : titanGroups) {
+		(void)object;
+		CHECK(group >= 0xc0 && group <= 0xff);
+		CHECK(allocatedTitanGroups.insert(group).second);
+	}
+	const auto titans = level.world->titans();
+	const auto pac = std::find_if(titans.begin(), titans.end(), [](const auto& titan) { return titan.team == 1; });
+	CHECK(pac != titans.end() && titanGroups.count(pac->object));
+	if (pac != titans.end() && titanGroups.count(pac->object)) {
+		const auto interiors = level.world->titanSpawnPoints(1);
+		for (int i = 0; i < 6; ++i) {
+			client.selectSpawnGroup(titanGroups[pac->object]);
+			CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && info.alive; }));
+			CHECK(level.world->spawnTitan(player) == pac->object);
+			float nearest = std::numeric_limits<float>::max();
+			for (uint32_t point : interiors) {
+				const world::Object* spawn = level.objects.find(point);
+				if (spawn) {
+					const physics::Vec3 at {spawn->position().x, spawn->position().y, spawn->position().z};
+					nearest = std::min(nearest, std::sqrt(physics::lengthSquared(info.position - at)));
+				}
+			}
+			CHECK(nearest < 2.0f);
+			if (i != 5) {
+				client.suicide();
+				CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && !info.alive; }));
+			}
+		}
+	}
 	client.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }

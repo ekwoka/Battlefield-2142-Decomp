@@ -8313,6 +8313,13 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	}
 	// The spawn menu's choice narrows them to one control point's.
 	std::vector<world::Object*> chosen;
+	const auto isTitanSpawn = [this](uint32_t id) {
+		return std::any_of(m_titans.begin(), m_titans.end(), [id](const Titan& titan) {
+			return std::any_of(titan.spawnPoints.begin(), titan.spawnPoints.end(), [id](const Titan::Spawn& spawn) {
+				return spawn.object == id;
+			});
+		});
+	};
 	if (selectedTitan) {
 		for (world::Object* point : points) {
 			if (std::any_of(selectedTitan->spawnPoints.begin(), selectedTitan->spawnPoints.end(),
@@ -8325,7 +8332,8 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 		}
 	} else if (selectedGroup && !selectedGroup->mobileObject) {
 		for (world::Object* point : points) {
-			if (std::find(selectedGroup->points.begin(), selectedGroup->points.end(), point->id()) != selectedGroup->points.end()) {
+			if (!isTitanSpawn(point->id())
+				&& std::find(selectedGroup->points.begin(), selectedGroup->points.end(), point->id()) != selectedGroup->points.end()) {
 				chosen.push_back(point);
 			}
 		}
@@ -8339,7 +8347,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 		for (world::Object* point : points) {
 			const world::ObjectTemplate* t = point->objectTemplate();
 			const int controlPoint = point->controlPointId() != -1 ? point->controlPointId() : integer(*t, "controlPointId", -1);
-			if (controlPoint == player.spawnChoice) {
+			if (controlPoint == player.spawnChoice && (player.ai || !isTitanSpawn(point->id()))) {
 				chosen.push_back(point);
 			}
 		}

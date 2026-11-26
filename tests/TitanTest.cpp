@@ -805,6 +805,25 @@ TEST(Titan_SuezDeploymentSelectsInteriorOnly)
 		}
 	}
 	CHECK(nearestInterior < 2.0f);
+	// The plain CP choice still carries this Titan's CP id in the native
+	// object metadata, but must keep its ground deployment points separate.
+	for (int i = 0; i < 6; ++i) {
+		const int ground = level.world->addPlayer("Ground CP deploy " + std::to_string(i), ownTeam, false);
+		level.world->setSpawnChoice(ground, titanControlPoint);
+		CHECK(level.world->spawnSoldier(ground));
+		game::GameWorld::PlayerInfo groundInfo;
+		CHECK(level.world->playerInfo(ground, groundInfo) && groundInfo.alive);
+		float nearestGroundPick = std::numeric_limits<float>::max();
+		for (uint32_t id : interiors) {
+			const world::Object* point = level.objects.find(id);
+			if (point) {
+				const physics::Vec3 at {point->position().x, point->position().y, point->position().z};
+				nearestGroundPick = std::min(nearestGroundPick,
+					std::sqrt(physics::lengthSquared(groundInfo.position - at)));
+			}
+		}
+		CHECK(nearestGroundPick > 2.0f);
+	}
 	const auto mobileGroups = level.world->spawnableGroups(ownTeam);
 	const auto titanGroup = std::find_if(mobileGroups.begin(), mobileGroups.end(), [ownTitan](const auto& group) {
 		return group.mobileObject == ownTitan;

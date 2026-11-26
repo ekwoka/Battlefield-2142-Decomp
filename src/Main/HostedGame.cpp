@@ -390,6 +390,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_spawnGroups.clear();
 	m_squadSpawnGroups.clear();
 	m_vehicleSpawnGroups.clear();
+	m_titanSpawnGroups.clear();
 	m_requestsSent.clear();
 	m_ordersSent.clear();
 	m_offerSent = {-1, -1, -1};
@@ -1375,6 +1376,12 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			for (const auto& [vehicle, id] : m_vehicleSpawnGroups) {
 				if (id == group) {
 					m_round->setSpawnVehicle(player, vehicle);
+					taken = true;
+				}
+			}
+			for (const auto& [titan, id] : m_titanSpawnGroups) {
+				if (id == group) {
+					m_round->setSpawnTitan(player, titan);
 					taken = true;
 				}
 			}
@@ -3310,6 +3317,20 @@ void HostedGame::trackSpawnGroups()
 		taken.insert(it->second);
 		++it;
 	}
+	std::map<uint32_t, int> titans;
+	for (int team = 1; team <= 2; ++team) {
+		for (const game::GameWorld::SpawnGroupInfo& group : m_round->spawnableGroups(team)) {
+			if (group.mobileObject && m_round->isTitan(group.mobileObject)) titans[group.mobileObject] = team;
+		}
+	}
+	for (auto it = m_titanSpawnGroups.begin(); it != m_titanSpawnGroups.end();) {
+		if (!titans.count(it->first)) {
+			it = m_titanSpawnGroups.erase(it);
+		} else {
+			taken.insert(it->second);
+			++it;
+		}
+	}
 	const auto add = [&](int id, int team, uint16_t ghost, uint32_t carrier) {
 		if (id >= 0 && ghost != 0) {
 			net::SpawnGroupInfo info;
@@ -3347,6 +3368,16 @@ void HostedGame::trackSpawnGroups()
 			it = m_vehicleSpawnGroups.emplace(vehicle, id).first;
 		}
 		add(it->second, team, ghostOfObject(vehicle), vehicle);
+	}
+	for (const auto& [titan, team] : titans) {
+		auto it = m_titanSpawnGroups.find(titan);
+		if (it == m_titanSpawnGroups.end()) {
+			const int id = freeSpawnGroupId(taken);
+			if (id < 0) continue;
+			taken.insert(id);
+			it = m_titanSpawnGroups.emplace(titan, id).first;
+		}
+		add(it->second, team, ghostOfObject(titan), titan);
 	}
 	for (const auto& [id, info] : m_spawnGroups) {
 		if (!now.count(id)) {
