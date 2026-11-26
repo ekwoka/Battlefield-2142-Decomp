@@ -482,6 +482,7 @@ private:
 	// spawn vehicle's (0x00635080). By (team, squad) and by the vehicle.
 	std::map<std::pair<int, int>, int> m_squadSpawnGroups;
 	std::map<uint32_t, int> m_vehicleSpawnGroups;
+	std::map<uint32_t, int> m_titanSpawnGroups;
 	int freeSpawnGroupId(const std::set<int>& taken) const;
 	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
 	void trackRequests();
