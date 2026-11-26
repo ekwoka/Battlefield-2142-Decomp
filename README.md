@@ -310,8 +310,8 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1), also on a server joined with `--play`. |
 | `--zoom` | A screenshot's soldier zooms in after firing. |
 | `--actions "<cmd> …"` | A screenshot's soldier's inputs before the shot, e.g. `"reload wait:60 firemode fire:10 altfire:3 item:2 prone:20 jump"` (`altfire` also zooms, as the right button; `flare` is a seat's flares or active defence; `goto:x/y/z/yaw` puts the soldier at a spot facing a way). Each prints the weapon in hand (in a seat, each weapon group's), the soldier's place, hit points and battery, the objects new since the last, the rounds' hits since the last and the `--spawn` targets' hit points. |
-| `--unlock-all` | Every kit unlock. |
-| `--unlocks <a,b,…>` | Only these unlocks (ItemContainer names, e.g. `UnlockEU_SupportHeavy2`), chosen as the customise screen equips them. |
+| `--unlock-all` | Accepted and ignored: human players always own every unlock, in every mode (bots own only what they are given). |
+| `--unlocks <a,b,…>` | Equip only these unlocks (ItemContainer names, e.g. `UnlockEU_SupportHeavy2`), as the customise screen equips them; every other unlock stays owned. |
 | `--squad-leader` | Lead a squad of your own that the team's bots join (the squad leader's beacon and drones want members). |
 | `--scoreboard` / `--spawn-screen` / `--commander-screen` | Show the scoreboard; die first and show the spawn screen; take command and open the commander screen. |
 | `--hud-click x/y[/right\|/move]` | A click or pointer move on the HUD's 800 × 600 screen before a screenshot (repeatable). |

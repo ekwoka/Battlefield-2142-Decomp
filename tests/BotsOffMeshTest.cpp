@@ -4,10 +4,10 @@
 #include "World/TemplateFiles.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <optional>
 #include <string>
 #include <vector>
@@ -16,6 +16,15 @@ using namespace dice::hfe;
 using titantest::TitanLevel;
 
 namespace {
+
+// The calling thread's CPU time: a bot update's own work, without the time other tests running
+// beside it in the suite take the core from it (or keep the low-priority workers from a job it waits on).
+double threadSeconds()
+{
+	timespec t {};
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+	return static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_nsec) * 1e-9;
+}
 
 // A level's layout with the bots' scripts and both meshes, as main loads them (the level's ai/AI.ai,
 // the default strategies, the layout's StrategicAreas.ai when it has one); botTitan with `titan`.
@@ -68,9 +77,9 @@ struct LevelBots {
 		bots->setNavMesh(mesh ? &*mesh : nullptr);
 		bots->setVehicleNavMesh(vehicleMesh ? &*vehicleMesh : nullptr);
 		level.afterTick = [this] {
-			const auto t0 = std::chrono::steady_clock::now();
+			const double t0 = threadSeconds();
 			bots->update(1 / 30.0f);
-			const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+			const double took = threadSeconds() - t0;
 			botSeconds += took;
 			ticks.push_back(took);
 			if (botUpdates >= 150 && took > worstTick) {

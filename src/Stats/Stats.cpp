@@ -154,7 +154,8 @@ int Soldier::nextRankPoints() const { return m_ranks.points(rank() + 1); }
 
 float Soldier::rankProgress() const { return m_ranks.progress(m_stats.experience); }
 
-int Soldier::credits() const { return std::max(0, rank() - unlocksSelected()); }
+// Every unlock is owned from the start, so there is nothing left to spend credits on.
+int Soldier::credits() const { return 0; }
 
 int Soldier::unlocksTotal() const
 {
@@ -178,17 +179,8 @@ UnlockStatus Soldier::status(int id) const
 	if (!isUnlockId(id)) {
 		return kUnlockLocked;
 	}
-	const int owned = branchLevel(unlockKit(id), unlockBranch(id));
-	UnlockStatus status = unlockLevel(id) <= owned ? kUnlockTaken
-		: unlockLevel(id) == owned + 1                ? kUnlockAvailable
-													  : kUnlockLocked;
-	if (status == kUnlockAvailable && credits() == 0) {
-		status = kUnlockLocked;
-	}
-	if (isBoosterUnlock(id) && !m_booster) {
-		status = kUnlockLocked;
-	}
-	return status;
+	// Every unlock is owned from the start; Northern Strike's need the booster's content.
+	return isBoosterUnlock(id) && !m_booster ? kUnlockLocked : kUnlockTaken;
 }
 
 SelectResult Soldier::select(int id)
@@ -196,18 +188,7 @@ SelectResult Soldier::select(int id)
 	if (!isUnlockId(id) || (isBoosterUnlock(id) && !m_booster)) {
 		return kSelectInvalid;
 	}
-	const int owned = branchLevel(unlockKit(id), unlockBranch(id));
-	if (unlockLevel(id) <= owned) {
-		return kSelectAlreadySelected;
-	}
-	if (unlockLevel(id) != owned + 1) {
-		return kSelectUnavailable;
-	}
-	if (credits() == 0) {
-		return kSelectNoCredits;
-	}
-	m_stats.unlocks.push_back(id);
-	return kSelectDone;
+	return kSelectAlreadySelected; // every unlock is owned from the start
 }
 
 bool Soldier::record(const RoundResult& round)

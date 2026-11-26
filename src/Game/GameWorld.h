@@ -898,6 +898,8 @@ public:
 	// 0x004c4c90 / 0x004c4ea0: the scripting setters address the player's squad.
 	void setSquadOrderMax(int player, int maximum);
 	void addSquadOrderPoints(int player, double points);
+	// A field upgrade credit (pers.plrGiveFieldUnlock): none for a player
+	// owning every unlock (every human), who would have nothing to pick.
 	void giveFieldUnlock(int player);
 	int fieldUnlocks(int player) const;
 	const std::vector<std::string>& fieldUnlockItems(int player) const;
@@ -1183,7 +1185,6 @@ public:
 	std::vector<AmbientEvent> takeAmbientEvents() { return std::exchange(m_ambientEvents, {}); }
 	void setAmbienceClient(bool client) { m_ambience.client = client; }
 	bool playAmbientEvent(size_t area, int index, const physics::Vec3& offset, const physics::Vec3* attachedAt = nullptr);
-	bool unlockAllByDefault = false; // players joining from now on have everything
 	// The local player's auto reload (GeneralSettings.setAutoReload,
 	// +0xb6: on by default, 0x0049a170 from the constructor 0x0049bd20;
 	// the player's +0x3d0, set from GeneralSettings slot 0xdc by
@@ -1208,6 +1209,9 @@ public:
 	// the soldier's profile; the kit build 0x00570ab0 applies the
 	// replaceWithoutEquip ones by them), given with localPlayerUnlocks.
 	std::vector<std::string> localPlayerOwned;
+	// Only localPlayerUnlocks apply (--unlocks, the customise screen's equipped set); otherwise
+	// every unlock does, since every one is owned.
+	bool localPlayerUnlocksChosen = false;
 	// The kit (and its soldier template) for the player's next spawn.
 	void setKit(int player, const std::string& kit, const std::string& soldier);
 	int spawnChoice(int player) const;
@@ -3799,6 +3803,7 @@ private:
 		std::string kitTemplate, soldierTemplate; // the next spawn's kit (empty: the team's assault kit)
 		std::vector<std::string> unlocked; // ItemContainer templates chosen (equipped)
 		std::vector<std::string> owned;    // and owned but not chosen (replaceWithoutEquip's test)
+		// Every human player owns every kit unlock, always (no stats server ranks them up here).
 		bool allUnlocked = false;
 		// A kit selection arrived (SelectKit's unlock masks): only the chosen containers apply, the rest are owned.
 		bool unlockChosen = false;

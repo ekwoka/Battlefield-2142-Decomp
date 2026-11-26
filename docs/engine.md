@@ -6779,7 +6779,8 @@ side in `HostedGame::event`; tests `NetHost_RadioCommanderToolsAndSquads`,
   sum of turns lacked the spawn point's heading, so a client faced off by
   it and its rounds missed) and aim at a man-down soldier's body from the
   eyes the rounds leave from (1.6 m, `GameWorld::fire`). Checked on
-  127.0.0.1 (a host with `--unlock-all`): a medic (Assault, the
+  127.0.0.1 (a host whose players own every unlock, as every human player
+  now always does): a medic (Assault, the
   defibrillator in slot 6 behind the shotgun) downing a squad mate spawned
   on him with the rifle at 1.5 m, then `item:6 goto:<name> crouch fire`,
   revives him (the same soldier and ghost, full health, no respawn); a
@@ -11283,10 +11284,16 @@ Seeking projectiles (`seek.*`, `follow.*`):
 Unlocks are the kits' `ItemContainer` children, one per branch and level
 (`unlockLevel`). An unlocked container adds its items to free slots: the
 frag grenade at 7, and the shotgun, defibrillator, mines, C4 and EMP
-grenade at 5. The local player gets the containers of its soldier's chosen
-unlocks ([Soldier stats](#soldier-stats-ranks-and-unlocks)); `--unlock-all`
-unlocks everything. The customise screen's choice (below) gives the
-containers chosen.
+grenade at 5. Every human player owns every unlock, always and in every
+mode (retail compatibility too), with no option to turn it off
+(`GameWorld::Player::allUnlocked`, set by `addPlayer` for every player
+but a bot; `--unlock-all` is accepted and does nothing); a bot owns only
+what it is given (`setOwnedUnlocks`, `chooseBotUnlocks`). With no
+selection every container of the kit applies; a selection (the customise
+screen's equip below, a client's SelectKit masks, `--unlocks`:
+`GameWorld::localPlayerUnlocksChosen`) makes only the chosen containers
+apply, the rest staying owned (replaceWithoutEquip and firearm
+replacements and the abilities still apply by ownership).
 The kit object prepares the build when it is made (Kit vtable
 `0x00963c78` slot 7, `0x00571220`): it hides its children, lists each
 with its ItemContainer (an unlock's items, the container's children of
@@ -11307,8 +11314,7 @@ online stats' flag (player `+0x403`), never set offline; then each owned
 container's Ability (`0x005706b0`). The owned set is the player's bit
 maps (player `+0x2b4`, read by slot `0x2a8` `0x00597760`, written by slot
 `0x2b0` `0x00597850`, which the field unlocks also set, `0x004baaf0`):
-offline the soldier profile's unlocks (`main.cpp`: `localPlayerOwned`,
-given with `localPlayerUnlocks` from `Stats::containersFor`); the kit
+here a human's is everything (above), a bot's its given lists; the kit
 menu's equip changes only the chosen set.
 
 **Drawing, magazines and the kit's slots.** The firearm's main object
@@ -11507,6 +11513,14 @@ expires on round reset. Hosted clients receive squad progress via
 PostRemote category 2, id `0x56`, and use the FieldUnlock, Unlock and
 SelectKit events to spend and equip. The host validates ownership when
 accepting loadout choices.
+
+Here every human owns every unlock, so has no field upgrade to take:
+`GameWorld::giveFieldUnlock` (the scripts' `pers_plrGiveFieldUnlock`)
+gives no credit to a player owning everything, so a human's credits stay
+0, the Field Upgrade tab doesn't open, and `UnlockInfoBarShow` and
+`KitUnlockArrow%iShow` stay off (a joined client is sent 0 credits and
+full owned masks). The squad's order bar still fills. A bot takes and
+spends credits as retail does (`spendFieldUnlock`).
 
 ### The kit and vehicle sweep (2026-11-12)
 
@@ -12480,7 +12494,8 @@ flag `0x00a00594` (n > 0) that makes `pmgr_setScore(p, "score", v)` raise
 `PlayerScore(player, change)` (`0x0056ae60`, the tuple of `0x0056a4b0`,
 event 0x20). `pers_plrGiveFieldUnlock(p)` (`0x00566850`, "no such player"
 unless valid) hands the game logic's slot `0x68` the player (the rewrite
-counts it: `GameWorld::fieldUnlocks`). `pers_plrRequestStats` /
+counts it: `GameWorld::fieldUnlocks`; none for a human, who owns every
+unlock). `pers_plrRequestStats` /
 `pers_plrRequestUnlocks` (`0x00566930`, `0x00567370`) queue a request to
 the stats server and return whether it went: 0 here (no server; the
 scripts only ask with `sv.globRank` / `globUnlocks`, off), and
@@ -16381,7 +16396,10 @@ the pause's stamp.
   (0x100f04a0): floor(U × 4), the four kits alike. Its unlocks
   (0x100efce0): for each of four unlock values, the most any human alive
   holds for that kit (the player's vt+0x98 of the kit and its vt+0x68(i),
-  i = 0..3), + 1, at most 4; with no humans 1 each. The value compared is
+  i = 0..3), + 1, at most 4; with no humans 1 each. (Here, where every
+  human owns every unlock, the masks are those of a human's recorded
+  unlocks, a profile's or a client's selection, not of that ownership,
+  which would give every bot 4: `GameWorld::chooseBotUnlocks`.) The value compared is
   the human's owned mask for the branch (the adaptor's slot 38 → player
   slot 0x2ac, `0x005977e0`: the bits of the levels owned for the kit's
   unlockIndex, `+0x2c4`), so a human owning levels 0 and 1 (3) gives the
@@ -17529,18 +17547,28 @@ answers the menu itself; nothing is sent.
   the booster (`hasBoosterPack`, `0x1004a8e0`: offline, or the account's
   flag; `hasBoosterPatch` is always true). The credits were the server's
   (`Avcred`, the unlock info's `+0x18`, `getUnlocksCountUnselected`
-  `0x10049a40`); here a soldier has one per rank, less the unlocks chosen.
-  That is the published game's rule: the client only reads the count, and
-  the code that worked it out was GameSpy's stats back end (the `.aspx`
-  pages), which was never shipped. `selectUnlock(id, newRequest)` (`0x1004b250`) answers 0
-  (done), 1 (not available), 302 (invalid or Northern Strike without the
-  booster), 303 (selected already) or 304 (no credits), at once here (the
-  menu would poll on -1). `getUnlocksCountTotal` (`0x1004b190`) is 40 or
-  50, `getUnlocksProgress` (`0x1004de60`) the taken ones over that.
-- **In the game:** the chosen ids' ItemContainers of every kit of both
-  armies (`stats::unlockContainers`) are the local player's
-  (`GameWorld::localPlayerUnlocks`, given when it joins). A choice made
-  during a round counts from the next one. The spawn screen's kit buttons
+  `0x10049a40`; the published game gave one per rank, less the unlocks
+  chosen, worked out by GameSpy's stats back end, the `.aspx` pages, which
+  was never shipped). `selectUnlock(id, newRequest)` (`0x1004b250`)
+  answers 0 (done), 1 (not available), 302 (invalid or Northern Strike
+  without the booster), 303 (selected already) or 304 (no credits), at
+  once here (the menu would poll on -1). `getUnlocksCountTotal`
+  (`0x1004b190`) is 40 or 50, `getUnlocksProgress` (`0x1004de60`) the
+  taken ones over that.
+- **Here every unlock is owned from the start** (`stats::Soldier`), in
+  every mode and with no option to turn it off: `getUnlockInfo` answers 1
+  (taken) for every id (Northern Strike's 0 without the booster), the
+  credits (`getUnlocksCountUnselected`) are 0, `getUnlocksCountSelected`
+  is the total and `getUnlocksProgress` 1, and `selectUnlock` answers 303
+  (302 for an invalid id). Nothing is bought, so the record's list of
+  chosen ids stays as it was.
+- **In the game:** the local player (every human) owns every unlock's
+  ItemContainers of every kit of both armies
+  (the unlocks under [Map and spawn screen](#map-and-spawn-screen): until
+  the kit menu, a client's SelectKit or `--unlocks` makes a selection,
+  every one applies); a profile's old chosen ids
+  (`stats::unlockContainers`) are given as `GameWorld::localPlayerUnlocks`
+  when it joins. The spawn screen's kit buttons
   show each kit's upgrades (Kit%iAbilityIcon%iShow / PathString, seven a
   kit, the HUD manager's variables of `0x0044f1a0`): the items of the
   kit's unlocked ItemContainers with a `weaponHud.specialAbilityIcon`

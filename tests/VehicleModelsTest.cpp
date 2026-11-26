@@ -5850,7 +5850,9 @@ TEST(Vehicles_HelipadRearmsAParkedGunshipByItsWholeLoad)
 // lets it reach other vehicles) drives an eu_apc beside an eu_tank whose
 // main gun is short and nobody drives: the teammate in the tank's cupola
 // is stamped; with the cupola set to useChildHud 1 (as the transports'
-// passenger seats are) the gun refills but he is not.
+// passenger seats are) the gun refills but he is not. The player owns every
+// unlock (a human); the teammate is a bot, owning none, so only the
+// player rearms.
 TEST(Vehicles_RearmStampsOccupantsButChildHudSeats)
 {
 	if (!gameDir()) {
@@ -5878,7 +5880,6 @@ TEST(Vehicles_RearmStampsOccupantsButChildHudSeats)
 		world::Object* apc = g.objects.create(g.templates.find("eu_apc"), {9, 2, 6}, {0, 0, 0});
 		apc->setTeam(2);
 		const uint32_t tank = g.start("eu_tank", {0, 2, 6});
-		g.world->localPlayerOwned = {"test_ammo_unlock"};
 		CHECK(g.enter(tank));
 		const int me = g.world->localPlayer();
 		const auto seats = g.world->vehicleSeats(tank);
@@ -5912,7 +5913,7 @@ TEST(Vehicles_RearmStampsOccupantsButChildHudSeats)
 		g.drive({}, 1);
 		CHECK(!g.world->playerVehicle());
 		// The teammate into the tank, over to the cupola: nobody drives.
-		const int mate = g.world->addPlayer("Mate", 2, false);
+		const int mate = g.world->addPlayer("Mate", 2, true);
 		g.world->setKit(mate, "EU_Assault", "us_light_soldier");
 		CHECK(g.world->spawnSoldier(mate));
 		game::GameWorld::PlayerInfo mateInfo;

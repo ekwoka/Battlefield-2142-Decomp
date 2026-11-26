@@ -1433,7 +1433,6 @@ TEST(GameWorld_UnlockAllAppliesOnlyTheChosenSelection)
 	}
 	game::GameLogic logic;
 	logic.team(2).kits = {{"EU_Assault", "us_light_soldier", ""}};
-	range.world->unlockAllByDefault = true;
 	CHECK(range.world->joinPlayer(2) >= 0);
 	range.world->setKitUnlockSelection(range.world->localPlayer(), logic, 0, {1, 4, 0, 0});
 	CHECK(range.world->spawnPlayer(2) != nullptr);
@@ -2051,7 +2050,6 @@ TEST(GameWorld_GrenadesBounceAndGoOff)
 	kit->children().push_back({"UnlockEU_AssaultPlayer0", {}, {}});
 	const int bot = range.world->addPlayer("Bot", 1, true);
 	CHECK(range.world->spawnSoldier(bot));
-	range.world->unlockAllByDefault = true;
 	CHECK(range.world->spawnPlayer(2) != nullptr);
 	game::SoldierInput input;
 	input.selectItem = 7;
@@ -4368,7 +4366,7 @@ TEST(GameWorld_CloakReportRevealsTagsForShowCloakedSquads)
 	kit->children().push_back({"net_cloak", {}, {}});
 	const int me = range.world->addPlayer("Me", 2, true);
 	const int mate = range.world->addPlayer("Mate", 2, false);
-	const int loner = range.world->addPlayer("Loner", 2, false);
+	const int loner = range.world->addPlayer("Loner", 2, true); // a bot: a human owns every unlock
 	const int enemy = range.world->addPlayer("Enemy", 1, false);
 	for (const int id : {me, mate, loner, enemy}) {
 		range.world->setKit(id, "EU_Assault", "us_light_soldier");
@@ -5201,11 +5199,12 @@ TEST(GameWorld_FirearmReplacementAndOwnedUnlocks)
 	CHECK(range.world->spawnSoldier(har2));
 	std::fprintf(stderr, "  %s\n", carried(har2).c_str());
 	CHECK(carried(har2) == "3:unl_har_rifle 5:unl_har_shotgun 7:unl_grenade_frag ");
-	// The local player's owned set comes from its profile
-	// (localPlayerOwned, main.cpp: the soldier's stats unlocks), apart from
-	// the chosen ones the kit menu equips.
+	// The local player (a human) owns every unlock: with a selection of
+	// none chosen (--unlocks, the kit menu's equipped set) the owned
+	// replaceWithoutEquip frag grenade still applies, the HAR does not.
 	range.world->localPlayerUnlocks = {};
-	range.world->localPlayerOwned = {"UnlockPlayer0"};
+	range.world->localPlayerOwned = {};
+	range.world->localPlayerUnlocksChosen = true;
 	CHECK(range.world->spawnPlayer(2) != nullptr);
 	const int local = range.world->localPlayer();
 	range.world->setKit(local, "EU_Assault", "us_light_soldier");
@@ -6258,21 +6257,37 @@ TEST(GameWorld_KitAbilityInAVehicle)
 		// The unlock (an owned ItemContainer's Ability, 0x005706b0).
 		range.templates.create("ItemContainer", "repair_unlock")->settings()["ability.increasedRepairAbility"] = "1.25";
 		kit->children().push_back({"repair_unlock", {}, {}});
-		if (repairs >= 2) {
-			range.world->localPlayerOwned = {"repair_unlock"};
-		}
 		const uint32_t car = range.objects.create(jeep, {0, 1, 3})->id();
 		const uint32_t otherCar = range.objects.create(jeep, {5, 1, 3})->id();
 		range.world->startRound();
-		CHECK(range.world->spawnPlayer(2) != nullptr);
-		const int me = range.world->localPlayer();
+		// The local player (a human) owns every unlock; without it is a bot's
+		// case (a bot owns only what it is given).
+		const bool unlocked = repairs >= 2;
+		int me = -1;
+		if (unlocked) {
+			CHECK(range.world->spawnPlayer(2) != nullptr);
+			me = range.world->localPlayer();
+		} else {
+			me = range.world->addPlayer("Engineer", 2, true);
+			range.world->setKit(me, "EU_Assault", "us_light_soldier");
+			CHECK(range.world->spawnSoldier(me));
+		}
+		const auto press = [&](const game::SoldierInput& input) {
+			if (unlocked) {
+				range.world->setPlayerInput(input);
+			} else {
+				range.world->setInput(me, input);
+			}
+		};
+		game::GameWorld::PlayerInfo info;
+		CHECK(range.world->playerInfo(me, info));
+		range.world->setSoldierPosition(info.soldier, {0, 0, 0});
 		range.world->tick(1 / 30.0f);
 		game::SoldierInput use;
 		use.use = true;
-		range.world->setPlayerInput(use);
+		press(use);
 		range.world->tick(1 / 30.0f);
-		range.world->setPlayerInput({});
-		game::GameWorld::PlayerInfo info;
+		press({});
 		CHECK(range.world->playerInfo(me, info) && info.vehicle == car);
 		range.world->setHitPoints(car, 50);
 		range.world->setHitPoints(otherCar, 50);
@@ -6321,14 +6336,20 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 		kit->settings()["abilityInVehicleStrength"] = "0.35";
 		kit->settings()["ability.hasHealingAbility"] = "1";
 		range.templates.create("ItemContainer", "medic_unlock")->settings()["ability.increasedRepairAbility"] = "1.5";
-		if (unlocked) {
-			range.world->localPlayerOwned = {"medic_unlock"};
-		}
 		const uint32_t mine = range.objects.create(jeep, {0, 1, 3})->id();
 		const uint32_t other = range.objects.create(jeep, {4, 1, 3})->id();
 		range.world->startRound();
-		CHECK(range.world->spawnPlayer(2) != nullptr);
-		const int me = range.world->localPlayer();
+		// The local player (a human) owns every unlock; the medic without it
+		// is a bot (owning only what it is given).
+		int me = -1;
+		if (unlocked) {
+			CHECK(range.world->spawnPlayer(2) != nullptr);
+			me = range.world->localPlayer();
+		} else {
+			me = range.world->addPlayer("Medic", 2, true);
+			range.world->setKit(me, "EU_Assault", "us_light_soldier");
+			CHECK(range.world->spawnSoldier(me));
+		}
 		const int passenger = range.world->addPlayer("Passenger", 2, true);
 		const int rider = range.world->addPlayer("Rider", 2, true);
 		const int walker = range.world->addPlayer("Walker", 2, true);
@@ -6340,13 +6361,14 @@ TEST(GameWorld_KitAbilityInAVehicleTreatsItsPassengers)
 			range.world->tick(1 / 30.0f);
 			game::SoldierInput use;
 			use.use = true;
-			if (player == me) {
+			const bool local = player == me && unlocked;
+			if (local) {
 				range.world->setPlayerInput(use);
 			} else {
 				range.world->setInput(player, use);
 			}
 			range.world->tick(1 / 30.0f);
-			if (player == me) {
+			if (local) {
 				range.world->setPlayerInput({});
 			} else {
 				range.world->setInput(player, {});
@@ -6538,23 +6560,31 @@ TEST(GameWorld_KitAbilityInAVehicleRearmsOtherSeats)
 		kit->settings()["abilityInVehicleRadius"] = "7";
 		kit->settings()["abilityInVehicleStrength"] = "2";
 		range.templates.create("ItemContainer", "support_unlock")->settings()["ability.increasedRepairAbility"] = "1.15";
-		if (mode != 5) {
-			range.world->localPlayerOwned = {"support_unlock"};
-		}
 		const uint32_t mine = range.objects.create(jeep, {0, 1, 3})->id();
 		const uint32_t other = range.objects.create(jeep, {mode == 4 ? 30.0f : 6.0f, 1, 3})->id();
 		range.world->startRound();
-		CHECK(range.world->spawnPlayer(2));
-		const int giver = range.world->localPlayer();
+		// The giver owns the unlock as the local player (a human owns every
+		// one); mode 5's giver, without it, is a bot.
+		const bool human = mode != 5;
+		int giver = -1;
+		if (human) {
+			CHECK(range.world->spawnPlayer(2));
+			giver = range.world->localPlayer();
+		} else {
+			giver = range.world->addPlayer("Giver", 2, true);
+			range.world->setKit(giver, "EU_Assault", "us_light_soldier");
+			CHECK(range.world->spawnSoldier(giver));
+		}
 		const int driver = range.world->addPlayer("Driver", 2, true);
 		const int gunner = range.world->addPlayer("Gunner", 2, true);
 		CHECK(range.world->spawnSoldier(driver));
 		CHECK(range.world->spawnSoldier(gunner));
 		const auto input = [&](int player, const game::SoldierInput& value, int ticks = 1) {
-			if (player == giver) range.world->setPlayerInput(value);
+			const bool local = player == giver && human;
+			if (local) range.world->setPlayerInput(value);
 			else range.world->setInput(player, value);
 			for (int i = 0; i < ticks; ++i) range.world->tick(1 / 30.0f);
-			if (player == giver) range.world->setPlayerInput({});
+			if (local) range.world->setPlayerInput({});
 			else range.world->setInput(player, {});
 			range.world->tick(1 / 30.0f);
 		};

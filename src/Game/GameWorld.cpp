@@ -5500,7 +5500,7 @@ int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 	player->name = name;
 	player->team = team;
 	player->ai = ai;
-	player->allUnlocked = unlockAllByDefault;
+	player->allUnlocked = !ai; // every human owns every unlock
 	player->created = m_playersMade++;
 	if (!ai) {
 		player->connectedAt = m_time; // 0x004a8460: slot 0x8c with 1 for a human
@@ -5614,6 +5614,7 @@ int GameWorld::joinPlayer(int team)
 		if (m_player) {
 			m_player->unlocked = localPlayerUnlocks;
 			m_player->owned = localPlayerOwned;
+			m_player->unlockChosen = localPlayerUnlocksChosen;
 		}
 	}
 	if (!m_player) {
@@ -6803,7 +6804,9 @@ void GameWorld::addSquadOrderPoints(int id, double points)
 
 void GameWorld::giveFieldUnlock(int id)
 {
-	if (findPlayer(id)) {
+	// Every unlock owned (every human): nothing to pick, so no credit, and the
+	// HUD shows no field upgrade to take.
+	if (const Player* player = findPlayer(id); player && !player->allUnlocked) {
 		auto& credits = m_fieldUnlocks[id].credits;
 		credits = std::min(credits + 1, 255); // FieldUnlock carries one byte.
 	}
@@ -6906,7 +6909,13 @@ void GameWorld::setUnlocks(int id, std::vector<std::string> containers, bool all
 {
 	if (Player* player = findPlayer(id)) {
 		player->unlocked = std::move(containers);
-		player->allUnlocked = all;
+		if (player->ai) {
+			player->allUnlocked = all;
+		} else {
+			// A human owns everything; a selection (all false) is what applies.
+			player->allUnlocked = true;
+			player->unlockChosen = !all;
+		}
 	}
 }
 
@@ -6970,7 +6979,12 @@ std::array<int, 4> GameWorld::chooseBotUnlocks(int id, const std::function<bool(
 		}
 		return list;
 	};
-	// 0x100efce0: the humans' owned masks for kits of this unlockIndex.
+	// 0x100efce0: the humans' owned masks for kits of this unlockIndex. Every
+	// human owns every unlock here (allUnlocked), so the masks are those of
+	// the humans' recorded unlocks (the owned and chosen lists: a profile's
+	// stats record, a client's masks), not that flag: the bots keep what
+	// they took before every unlock was owned, rather than all taking
+	// level 4.
 	const int unlockIndex = integer(*kit, "unlockIndex", 0);
 	std::array<unsigned, 4> best {0, 0, 0, 0};
 	for (const auto& owned : m_players) {
@@ -6983,8 +6997,7 @@ std::array<int, 4> GameWorld::chooseBotUnlocks(int id, const std::function<bool(
 				continue;
 			}
 			for (const world::ObjectTemplate* c : containersOf(*t)) {
-				const bool has = owned->allUnlocked
-					|| std::find(owned->owned.begin(), owned->owned.end(), c->name()) != owned->owned.end()
+				const bool has = std::find(owned->owned.begin(), owned->owned.end(), c->name()) != owned->owned.end()
 					|| std::find(owned->unlocked.begin(), owned->unlocked.end(), c->name()) != owned->unlocked.end();
 				const int level = integer(*c, "unlockLevel", -1);
 				const int b = branchOf(*c);

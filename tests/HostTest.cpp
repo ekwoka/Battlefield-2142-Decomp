@@ -275,26 +275,29 @@ TEST(NetHost_FieldUpgradeCreditSpendAndEquip)
 	round.setSquadOrderGate(true); // a ranked server's squads (0x00430a00)
 	round.setSquadOrderMax(me, 10);
 	round.addSquadOrderPoints(me, 3.5);
+	// A human owns every unlock: the owned masks are full (One level 0, Two
+	// level 1), a field upgrade credit isn't given (nothing to pick) and a
+	// spend request changes nothing.
 	round.giveFieldUnlock(me);
 	CHECK(pumpUntil(step, [&] {
-		return client.world().fieldUnlockCredits() == 1 && client.world().squadOrderPoints() == 3.5
-			&& client.world().squadOrderMax() == 10 && client.world().squadOrderBar();
+		return client.world().fieldUnlockCredits() == 0 && client.world().squadOrderPoints() == 3.5
+			&& client.world().squadOrderMax() == 10 && client.world().squadOrderBar()
+			&& client.world().ownedUnlockMasks()[0] == 3;
 	}));
+	CHECK(round.fieldUnlocks(me) == 0 && round.ownsKitUnlock(me, "One") && round.ownsKitUnlock(me, "Two"));
 	client.sendEvent(net::makeFieldUnlock(me, 0, 0, 0));
-	CHECK(pumpUntil(step, [&] {
-		return client.world().fieldUnlockCredits() == 0 && client.world().fieldUnlockMasks()[0] == 1;
-	}));
-	CHECK(round.ownsKitUnlock(me, "One") && !round.ownsKitUnlock(me, "Two"));
+	pumpUntil(step, [] { return false; }, 200);
+	CHECK(client.world().fieldUnlockCredits() == 0 && client.world().fieldUnlockMasks()[0] == 0);
+	CHECK(round.fieldUnlockItems(me).empty());
+	// The selection (SelectKit's masks) is what applies, of everything owned.
 	client.selectKit(0, {3, -1, -1, -1});
-	CHECK(pumpUntil(step, [&] { return round.unlocksOf(me, false) == std::vector<std::string> {"One"}; }));
-	client.sendEvent(net::makeFieldUnlock(me, 0, 0, 0));
+	CHECK(pumpUntil(step, [&] { return round.unlocksOf(me, false) == std::vector<std::string> {"One", "Two"}; }));
 	client.selectKit(0, {2, -1, -1, -1});
-	CHECK(pumpUntil(step, [&] { return round.unlocksOf(me, false).empty(); }));
-	CHECK(!round.ownsKitUnlock(me, "Two"));
+	CHECK(pumpUntil(step, [&] { return round.unlocksOf(me, false) == std::vector<std::string> {"Two"}; }));
 	round.resetRound();
 	CHECK(pumpUntil(step, [&] {
 		return !client.world().squadOrderBar() && client.world().fieldUnlockMasks()[0] == 0
-			&& client.world().ownedUnlockMasks()[0] == 0;
+			&& client.world().ownedUnlockMasks()[0] == 3;
 	}));
 }
 

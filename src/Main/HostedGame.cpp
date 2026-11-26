@@ -3775,7 +3775,7 @@ void HostedGame::syncFieldUnlocks(int id, Client& client, int kit, int branch)
 		client.fieldUnlocks = temporary;
 		auto names = permanent;
 		names.insert(names.end(), temporary.begin(), temporary.end());
-		const auto masks = game::kitUnlockMasks(*m_templates, *m_logic, names, m_round->unlockAllByDefault);
+		const auto masks = game::kitUnlockMasks(*m_templates, *m_logic, names, true);
 		net::GameEvent owned = eventOf(net::kEvUnlock, {2, static_cast<uint32_t>(client.player)});
 		owned.values.insert(owned.values.end(), masks.begin(), masks.end());
 		sendTo(id, owned);

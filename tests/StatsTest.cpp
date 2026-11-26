@@ -74,39 +74,31 @@ TEST(Stats_Unlocks)
 {
 	stats::SoldierStats record;
 	stats::Soldier soldier(record);
-	// A recruit: no credits, the first levels locked until there are some.
+	// Every unlock is owned from the start: a recruit has every one taken
+	// and no credits, as there is nothing left to spend them on.
 	CHECK(soldier.rank() == 0 && soldier.credits() == 0);
-	CHECK(soldier.status(111) == stats::kUnlockLocked);
-	CHECK(soldier.select(111) == stats::kSelectNoCredits);
+	CHECK(soldier.status(111) == stats::kUnlockTaken && soldier.status(114) == stats::kUnlockTaken
+		&& soldier.status(511) == stats::kUnlockTaken);
+	CHECK(soldier.select(111) == stats::kSelectAlreadySelected);
+	CHECK(soldier.unlocksSelected() == 50 && soldier.unlocksTotal() == 50);
 
-	// Three rounds: rank 3 (120 points), three credits.
+	// Three rounds: rank 3 (120 points), still no credits.
 	CHECK(soldier.record({50, 5, 2, 600, 1}));
 	CHECK(!soldier.record({20, 1, 4, 300, -1}));
 	CHECK(soldier.record({60, 3, 3, 900, 0}));
 	CHECK(record.experience == 130 && record.rounds == 3 && record.wins == 1 && record.losses == 1);
 	CHECK(record.kills == 9 && record.deaths == 9 && record.timePlayed == 1800 && record.bestRoundScore == 60);
-	CHECK(soldier.rank() == 3 && soldier.credits() == 3 && soldier.nextRankPoints() == 200);
-	CHECK(soldier.status(111) == stats::kUnlockAvailable && soldier.status(112) == stats::kUnlockLocked);
-
-	// A branch in order.
-	CHECK(soldier.select(112) == stats::kSelectUnavailable);
-	CHECK(soldier.select(111) == stats::kSelectDone);
-	CHECK(soldier.select(111) == stats::kSelectAlreadySelected);
-	CHECK(soldier.status(111) == stats::kUnlockTaken && soldier.status(112) == stats::kUnlockAvailable);
-	CHECK(soldier.select(112) == stats::kSelectDone);
-	CHECK(soldier.select(511) == stats::kSelectDone);
-	CHECK(soldier.credits() == 0 && soldier.unlocksSelected() == 3);
-	// No credits left: the next ones show as locked.
-	CHECK(soldier.status(113) == stats::kUnlockLocked && soldier.select(113) == stats::kSelectNoCredits);
-	CHECK(soldier.select(999) == stats::kSelectInvalid);
+	CHECK(soldier.rank() == 3 && soldier.credits() == 0 && soldier.nextRankPoints() == 200);
+	CHECK(soldier.select(112) == stats::kSelectAlreadySelected && soldier.select(511) == stats::kSelectAlreadySelected);
+	CHECK(record.unlocks.empty()); // nothing is bought
+	CHECK(soldier.status(999) == stats::kUnlockLocked && soldier.select(999) == stats::kSelectInvalid);
 
 	// Northern Strike's need the booster.
-	record.experience = 57700;
-	record.unlocks = {111, 112, 113, 114};
-	CHECK(soldier.status(115) == stats::kUnlockAvailable);
+	CHECK(soldier.status(115) == stats::kUnlockTaken);
 	stats::Soldier noBooster(record, stats::ranks(), false);
-	CHECK(noBooster.unlocksTotal() == 40 && soldier.unlocksTotal() == 50);
+	CHECK(noBooster.unlocksTotal() == 40 && soldier.unlocksTotal() == 50 && noBooster.unlocksSelected() == 40);
 	CHECK(noBooster.status(115) == stats::kUnlockLocked && noBooster.select(115) == stats::kSelectInvalid);
+	CHECK(noBooster.status(114) == stats::kUnlockTaken);
 }
 
 TEST(Stats_Store)
@@ -198,17 +190,19 @@ TEST(Stats_ProfileNatives)
 	CHECK(vm.toNumber(call("getCurrentRankId")) == 3 && vm.toNumber(call("getCurrentExp")) == 130);
 	CHECK(vm.toNumber(call("getNextRankExp")) == 200 && vm.toNumber(call("getRankProgress")) == 10.0 / 80.0);
 	CHECK(vm.toString(call("getCurrentRankString")) == "RANK_3" && vm.toString(call("getNextRankString")) == "RANK_4");
-	CHECK(vm.toNumber(call("getUnlocksCountUnselected")) == 3 && vm.toNumber(call("getUnlocksCountTotal")) == 50);
+	// Every unlock is owned from the start: no credits to spend.
+	CHECK(vm.toNumber(call("getUnlocksCountUnselected")) == 0 && vm.toNumber(call("getUnlocksCountTotal")) == 50);
 
-	// The unlock page: select (newRequest true) answers at once.
-	CHECK(vm.toNumber(call("getUnlockInfo", {ui::avm1::Value(211)})) == 2);
-	CHECK(vm.toNumber(call("selectUnlock", {ui::avm1::Value("211"), ui::avm1::Value(true)})) == 0);
-	CHECK(vm.toNumber(call("selectUnlock", {ui::avm1::Value("211"), ui::avm1::Value(true)})) == 303);
-	CHECK(vm.toNumber(call("selectUnlock", {ui::avm1::Value("213"), ui::avm1::Value(true)})) == 1);
+	// The unlock page: every one taken, a select (newRequest true) answers
+	// at once that it is selected already.
 	CHECK(vm.toNumber(call("getUnlockInfo", {ui::avm1::Value(211)})) == 1);
-	CHECK(vm.toNumber(call("getUnlocksCountSelected")) == 1 && vm.toNumber(call("getUnlocksCountUnselected")) == 2);
-	CHECK(vm.toNumber(call("getUnlocksProgress")) == 1.0 / 50.0);
-	CHECK(bindings.soldierUnlocks() == std::vector<int>({211}));
+	CHECK(vm.toNumber(call("getUnlockInfo", {ui::avm1::Value(213)})) == 1);
+	CHECK(vm.toNumber(call("selectUnlock", {ui::avm1::Value("211"), ui::avm1::Value(true)})) == 303);
+	CHECK(vm.toNumber(call("selectUnlock", {ui::avm1::Value("213"), ui::avm1::Value(true)})) == 303);
+	CHECK(vm.toNumber(call("selectUnlock", {ui::avm1::Value("999"), ui::avm1::Value(true)})) == 302);
+	CHECK(vm.toNumber(call("getUnlocksCountSelected")) == 50 && vm.toNumber(call("getUnlocksCountUnselected")) == 0);
+	CHECK(vm.toNumber(call("getUnlocksProgress")) == 1.0);
+	CHECK(bindings.soldierUnlocks().empty()); // nothing bought
 }
 
 TEST(Stats_KitContainers)

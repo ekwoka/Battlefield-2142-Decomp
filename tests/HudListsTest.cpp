@@ -308,7 +308,20 @@ TEST(HudLists_FieldUpgradeSelectionAndExpiry)
 	logic.team(2).kits.push_back({"EU", "soldier", ""});
 	logic.team(1).kits.push_back({"PAC", "soldier", ""});
 	round.startRound();
-	const int me = round.joinPlayer(2);
+	// A human owns every unlock, so has no field upgrade to take: the
+	// credit isn't given and the HUD shows none.
+	const int human = round.joinPlayer(2);
+	round.giveFieldUnlock(human);
+	CHECK(round.fieldUnlocks(human) == 0 && round.ownsKitUnlock(human, "EuUnlock") && round.ownsKitUnlock(human, "PacUnlock"));
+	{
+		hud::HudManager humanHud = emptyHud();
+		CHECK(round.joinSquad(human, 2));
+		menu::updateSquadInfo(humanHud, round, human, false, {});
+		CHECK(humanHud.number("UnlockInfoBarShow") == 0);
+	}
+	// The field upgrades' selection, on a bot (owning only what it is given)
+	// as the menu's player.
+	const int me = round.addPlayer("Bot", 2, true);
 	CHECK(round.joinSquad(me, 1));
 	round.setKit(me, "EU", "soldier");
 	hud::HudManager hud = emptyHud();

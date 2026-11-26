@@ -222,7 +222,6 @@ struct Options {
 	bool scoreboard = false;     // --scoreboard: show it (as Tab does)
 	bool spawnScreen = false;    // --spawn-screen: begin at deployment before creating a soldier
 	bool commanderScreen = false; // --commander-screen: take command and open its screen
-	bool unlockAll = false;      // --unlock-all: every kit unlock (no stats server to ask)
 	std::vector<std::string> unlocks; // --unlocks a,b: the ItemContainers chosen (the customise screen's)
 	bool squadLeader = false;    // --squad-leader: lead a squad the team's bots join
 	std::string menu;            // --menu [mainMenu|endOfRound]: the Flash menu over everything
@@ -355,7 +354,7 @@ bool parseOptions(int argc, char** argv, Options& options)
 		} else if (arg == "--menu-seconds" && hasValue) {
 			options.menuSeconds = static_cast<float>(std::atof(argv[++i]));
 		} else if (arg == "--unlock-all") {
-			options.unlockAll = true;
+			// Accepted for old scripts: every unlock is always owned.
 		} else if (arg == "--squad-leader") {
 			options.squadLeader = true;
 		} else if (arg == "--unlocks" && hasValue) {
@@ -1492,14 +1491,13 @@ void updateKitAbilities(hud::HudManager& hud, const game::GameWorld& round, cons
 {
 	const int team = round.playerTeam() == 1 ? 1 : 2;
 	const auto& kits = logic.team(team).kits;
-	const auto& unlocked = round.localPlayerUnlocks;
 	for (size_t kit = 0; kit < 5; ++kit) {
 		std::vector<std::string> icons;
 		const world::ObjectTemplate* kitTemplate = kit < kits.size() ? templates.find(kits[kit].name) : nullptr;
 		for (size_t c = 0; kitTemplate && c < kitTemplate->children().size(); ++c) {
 			const std::string& name = kitTemplate->children()[c].name;
 			const world::ObjectTemplate* container = templates.find(name);
-			if (!container || (!round.unlockAllByDefault && std::find(unlocked.begin(), unlocked.end(), name) == unlocked.end())) {
+			if (!container) { // every unlock is owned
 				continue;
 			}
 			for (const auto& item : container->children()) {
@@ -4957,7 +4955,6 @@ int runGame(Options& options, Session& session)
 		game::BotManager bots(round, botSettings);
 		bots.attach(botSettings); // the scripted-bot commands (ai.botMoveTo...)
 		bots.setServerMaxPlayers(options.maxPlayers); // AIMain's kick and fill (sv.maxPlayers when hosting)
-		round.unlockAllByDefault = options.unlockAll;
 		// The profile's auto reload (GeneralSettings.setAutoReload, taken by
 		// the local player through 0x00591e50).
 		round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0;
@@ -8905,7 +8902,7 @@ int runGame(Options& options, Session& session)
 			}
 		}
 		if (options.playTeam != 0) {
-			// The soldier's chosen unlocks (--unlock-all gives everything).
+			// The soldier's chosen unlocks (every unlock is owned anyway).
 			if (session.menuBindings) {
 				// The profile's unlocks are both the soldier's chosen ones and
 				// those it owns (player slot 0x2a8; the kit menu's equip below
@@ -8919,9 +8916,10 @@ int runGame(Options& options, Session& session)
 			const int local = enterDeploymentFirst ? round.joinPlayer(options.playTeam) : -1;
 			if (!options.unlocks.empty()) {
 				// --unlocks: these containers chosen and owned, as the customise
-				// screen's equipped unlocks (not every unlock, as --unlock-all).
+				// screen's equipped unlocks (the rest stay owned).
 				round.localPlayerUnlocks = options.unlocks;
 				round.localPlayerOwned = options.unlocks;
+				round.localPlayerUnlocksChosen = true;
 			}
 			const world::Object* player = enterDeploymentFirst ? nullptr : round.spawnPlayer(options.playTeam);
 			if (player && !options.kit.empty()) {
@@ -9948,7 +9946,7 @@ int runGame(Options& options, Session& session)
 				kitMenu.setUnlocked(remoteOwned, false);
 				kitMenu.setFieldUpgrades(kitPlayer.fieldUnlockCredits, remoteFieldItems);
 			} else {
-				kitMenu.setUnlocked(round.ownedKitUnlockItems(round.localPlayer()), round.unlockAllByDefault);
+				kitMenu.setUnlocked(round.ownedKitUnlockItems(round.localPlayer()), true);
 				kitMenu.setFieldUpgrades(kitPlayer.fieldUnlockCredits, round.fieldUnlockItems(round.localPlayer()));
 			}
 			if (kitPlayer.fieldUnlockCredits > previousFieldUnlockCredits) {
