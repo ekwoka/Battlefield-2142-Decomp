@@ -728,6 +728,15 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		const net::RemoteWorld::SquadOrder* o = b.world().squadOrder(team, 1, 1);
 		return orderNotices(messagesB) == 2 && o && o->serial != firstSerial && !o->accepted;
 	}));
+	// A client leader's yes (0x0079d6e0 case 2): his own order to the squad
+	// (store 0), then the commander's cleared (SetAcceptOrder 0): here and there.
+	b.issueOrder(0, 1, 6, {50, 0, 60});
+	b.answerOrder(1, 6, false);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = a.world().squadOrder(team, 1, 0);
+		return round.squadLeaderOrder(team, 1) && !round.squadOrder(team, 1) && o && o->kind == 6
+			&& !a.world().squadOrder(team, 1, 1);
+	}));
 	b.issueOrder(0, 1, 4, {-20, 0, 5});
 	CHECK(pumpUntil(step, [&] {
 		const net::RemoteWorld::SquadOrder* o = a.world().squadOrder(team, 1, 0);

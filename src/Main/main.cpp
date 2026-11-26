@@ -6190,12 +6190,14 @@ int runGame(Options& options, Session& session)
 					session.hosted->localVote(me.id, cast.kind, 4, cast.target, cast.choice);
 				}
 			} else if (q.kind == Q::CommanderOrder) {
-				// Kind 2 (0x0079d6e0): the leader takes the commander's order
-				// or turns it down (SetAcceptOrder, store 1, 0x004c2f60), the
-				// commander hearing roger_that / negative (TCPlayer, slot 0x78's
-				// commander; not for a timed-out one); a client's answer goes to
-				// the server with the Request event's 2 / 3 (slot 0x318,
-				// 0x00511f80). Only for the order asked about, and while we lead.
+				// Kind 2 (0x0079d6e0): yes passes the commander's order on as the
+				// leader's own to his squad (slot 0x48; a client sends the
+				// IssueSquadOrder, store 0), the commander hearing roger_that,
+				// no says negative to him (TCPlayer, slot 0x78's commander; not
+				// for a timed-out one); both then clear the commander's order
+				// (SetAcceptOrder, flag 0, store 1, slot 0x24) and a client sends
+				// the Request event's 2 / 3 (slot 0x318, 0x00511f80). Only for
+				// the order asked about, and while we lead.
 				game::GameWorld::PlayerInfo me;
 				game::GameWorld::SquadOrder order;
 				if (!hudPlayer(hudLocal(), me) || !me.squadLeader || !hudOrder(me.team, me.squad, order)
@@ -6203,15 +6205,25 @@ int runGame(Options& options, Session& session)
 					return;
 				}
 				orderPrompt.clear();
-				if (server) {
-					server->answerOrder(me.squad, static_cast<int>(order.type), yes);
-					server->squadRequest(yes ? 2 : 3);
-				} else {
-					round.acceptOrder(round.localPlayer(), yes);
-				}
+				int commander = -1;
 				for (const game::GameWorld::PlayerInfo& p : hudPlayers()) {
-					if (!quiet && p.team == me.team && p.commander) {
-						sayRadio(14, yes ? "roger_that" : "negative", p.id);
+					if (p.team == me.team && p.commander) {
+						commander = p.id;
+					}
+				}
+				if (server) {
+					if (yes) {
+						server->issueOrder(0, me.squad, static_cast<int>(order.type), {order.position.x, order.position.y, order.position.z});
+					}
+					if (!quiet && commander >= 0) {
+						sayRadio(14, yes ? "roger_that" : "negative", commander);
+					}
+					server->squadRequest(yes ? 2 : 3);
+					server->answerOrder(me.squad, static_cast<int>(order.type), false);
+				} else {
+					round.answerOrder(round.localPlayer(), yes);
+					if (!quiet && commander >= 0) {
+						sayRadio(14, yes ? "roger_that" : "negative", commander);
 					}
 				}
 			} else if (q.kind == Q::CommanderOffer) {

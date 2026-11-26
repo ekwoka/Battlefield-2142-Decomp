@@ -9636,10 +9636,12 @@ void BotManager::updateStrategy(float seconds)
 				if (const auto own = m_squads.find({team, id}); own != m_squads.end()) {
 					own->second.seenType = GameWorld::OrderType::None;
 				}
-				// The post goes to the game's commander order (the interface's
-				// 0x00897120 → squad manager slot 0x4c, 0x004c5530), whose 2/0x1a
-				// asks a human leader to accept it (the bot leaders answer in the
-				// AI: the side's orders).
+				// The retail post goes to the game's commander order for any
+				// squad (IBFCommander 0x00897120 -> squad manager slot 0x4c,
+				// 0x004c5530; its 2/0x1a asks a human leader to accept it), but
+				// only while no human commands (AIDLL 0x10089fa0, slot 0x4c).
+				// Here only a human leader's squad has it: the bot leaders answer
+				// in the AI (the side's orders) and the HUD shows none for them.
 				const int leader = squads[id].leader;
 				GameWorld::PlayerInfo leaderInfo;
 				if (leader >= 0 && m_world.playerInfo(leader, leaderInfo) && !leaderInfo.ai) {

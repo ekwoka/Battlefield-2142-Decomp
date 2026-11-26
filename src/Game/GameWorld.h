@@ -2527,6 +2527,10 @@ public:
 	// game itself).
 	bool issueOrder(int team, int squad, OrderType type, float x, float z, int from = -1);
 	void acceptOrder(int player, bool accept);
+	// The leader's answer to the question for the commander's order
+	// (0x0079d6e0 case 2): yes passes it on as his own order to the squad
+	// (slot 0x48), and both answers clear the commander's (SetAcceptOrder 0).
+	void answerOrder(int player, bool yes);
 	const SquadOrder* squadOrder(int team, int squad) const;
 	// A squad leader's order to his own squad (SquadLeader.sendOrder):
 	// false when the player leads no squad. The scripts' orderPosition,

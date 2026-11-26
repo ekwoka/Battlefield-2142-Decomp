@@ -1181,6 +1181,22 @@ void GameWorld::acceptOrder(int player, bool accept)
 	}
 }
 
+void GameWorld::answerOrder(int player, bool yes)
+{
+	const Player* p = findPlayer(player);
+	if (!p || !p->squadLeader) {
+		return;
+	}
+	const auto it = m_orders.find({p->team, p->squad});
+	if (it == m_orders.end()) {
+		return;
+	}
+	if (yes) {
+		issueSquadLeaderOrder(player, it->second.type, it->second.position.x, it->second.position.z);
+	}
+	m_orders.erase(it);
+}
+
 const GameWorld::SquadOrder* GameWorld::squadOrder(int team, int squad) const
 {
 	const auto it = m_orders.find({team, squad});
