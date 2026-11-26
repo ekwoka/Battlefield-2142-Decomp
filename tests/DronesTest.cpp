@@ -51,7 +51,7 @@ struct Field {
 				"fire.projectileStartPosition", "ammo.magSize", "ammo.nrOfMags", "ammo.reloadTime", "ammo.autoReload", "velocity",
 				"projectileTemplate", "itemIndex", "pulse.fov", "pulse.viewDistance", "pulse.revealTime", "damage",
 				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev",
-				"autoControllerTemplateName", "maxSpeed"});
+				"autoControllerTemplateName", "maxSpeed", "targetType"});
 		std::string out;
 		// The sentry drone's siren (Vehicles_server.zip's Car_horn_Alt, a
 		// root child of unl_drone_sentry before its gun): a GenericFireArm
@@ -264,6 +264,38 @@ static game::GameWorld::PlayerInfo me(Field& field, int player)
 // The sentry's camera head turns as its auto controller scans: its yaw
 // bundle is asked for a pose (partPose) and the drone is one that poses
 // parts, though no vehicle; the guns bundle under it only pitches.
+// The drone holds over its owner's TargetObject child (the soldiers' UAVTarget,
+// 0/1.5/0), the carrier's target for the detonator's ParentTargetComp
+// (0x005e3920), not over the soldier's physics origin: 1.5 m higher, whatever
+// the stance (the child is fixed to the soldier).
+TEST(Drones_HoldOverTheOwnersTargetObject)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	field.templates.registerType(7, "TargetObject");
+	world::ObjectTemplate* uav = field.templates.create("TargetObject", "UAVTarget");
+	uav->settings()["targetType"] = "TTUnique";
+	field.templates.find("us_light_soldier")->children().push_back({"UAVTarget", {0, 1.5f, 0}, {}});
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	game::GameWorld::PlayerInfo me;
+	field.run(6);
+	CHECK(field.world->playerInfo(leader, me));
+	const physics::Vec3 hover = field.at(drone);
+	// Feet + 1 (origin) + 1.5, a little under it against gravity.
+	CHECK(std::abs(hover.y - (me.position.y + 2.5f)) < 0.3f);
+	CHECK(across(hover, me.position) < 1.6f);
+	// Moved off, it keeps its height over the new spot, still 2.5 m up.
+	field.world->setSoldierPosition(me.soldier, {8, 0, 0});
+	field.run(6);
+	CHECK(field.world->playerInfo(leader, me));
+	CHECK(std::abs(field.at(drone).y - (me.position.y + 2.5f)) < 0.3f);
+}
+
 TEST(Drones_SentryHeadScansAsPosed)
 {
 	Field field;

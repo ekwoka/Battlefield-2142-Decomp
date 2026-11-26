@@ -16960,7 +16960,9 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	drone.velocity = physics::Vec3 {s, 0, c} * number(detonator, "velocity", 0);
 	drone.yaw = lookYaw(player);
 	drone.gunYaw = drone.yaw * 3.14159265f / 180.0f;
-	drone.hoverHeight = 1; // the soldier's physics origin over its feet (0x005f0a00)
+	if (const world::ObjectTemplate* carrier = soldier->objectTemplate()) {
+		drone.targetOffset = carrierTargetOffset(*carrier);
+	}
 	drone.control = &kUavDrone;
 	drone.yawBundle = autoYawBundle(t);
 	if (const world::ObjectTemplate* force = findInTree(m_templates, t, "ForceObject")) {
@@ -17157,9 +17159,12 @@ std::vector<int> GameWorld::revealedPlayers(int byTeam) const
 //   the target, or where the drone is when it is that near already; in
 //   height, the target's position, taken again only while the target is
 //   more than minHeightAdjustDistance off across the ground (0x1a8). The
-//   target's position is the soldier's physics origin, a metre over its
-//   feet (0x005f0a00 poses the skeleton 0/-1/0 from it; our soldier's
-//   object stands at its feet).
+//   target is the carrier's first TargetObject (ParentTargetComp's init,
+//   0x005e3920): the soldiers' UAVTarget, 1.5 m over the soldier's physics
+//   origin, itself a metre over its feet (0x005f0a00 poses the skeleton
+//   0/-1/0 from it; our soldier's object stands at its feet). The child is
+//   fixed to the soldier, so the drone holds as high standing as prone
+//   (carrierTargetOffset).
 // - Farther than destroyDistance from the goal the drone is destroyed;
 //   past warningDistance the owner hears "uav_warning" (0x1e9 while on).
 // - Each axis has a regulator (0x00667710, set up by 0x0062cf60 with the
@@ -17198,7 +17203,11 @@ void GameWorld::stepDrones(float seconds)
 		physics::Vec3 goal = drone.position;
 		bool held = true;
 		if (target) {
-			const physics::Vec3 at {target->position().x, target->position().y + drone.hoverHeight, target->position().z};
+			const float turn = target->rotation().x * 3.14159265f / 180.0f;
+			const float c = std::cos(turn), s = std::sin(turn);
+			const physics::Vec3& o = drone.targetOffset;
+			const physics::Vec3 at {target->position().x + o.x * c + o.z * s, target->position().y + o.y,
+				target->position().z - o.x * s + o.z * c};
 			const float dx = at.x - drone.position.x, dz = at.z - drone.position.z;
 			const float across = std::sqrt(dx * dx + dz * dz);
 			const float tolerance = drone.force.positionToleranceXZ;
@@ -17942,6 +17951,41 @@ const world::ObjectTemplate* GameWorld::autoControlledGun(const world::ObjectTem
 	};
 	find(t, 0, 0);
 	return gun;
+}
+
+// Where a squad leader's drone holds, against its owner's feet. The detonator's
+// ParentTargetComp (its init, 0x005e3920) takes the first TargetObject of the
+// carrying soldier's tree (0x005c63b0) as the target the drone's ForceObject
+// follows, so the drone holds over that child (the soldiers' UAVTarget, 1.5 m
+// over the physics origin, the same standing or prone), not over the origin
+// (a metre over the feet, 0x005f0a00), which is where it holds with no such
+// child (a carrier without one).
+// shortcut: child rotations are not applied; no shipped soldier turns the
+// child, upgrade if a mod does.
+physics::Vec3 GameWorld::carrierTargetOffset(const world::ObjectTemplate& carrier) const
+{
+	const physics::Vec3 origin {0, 1.0f, 0};
+	physics::Vec3 found = origin;
+	const std::function<bool(const world::ObjectTemplate&, const physics::Vec3&, int)> walk = [&](const world::ObjectTemplate& at,
+																								   const physics::Vec3& placed, int depth) {
+		for (const world::ChildTemplate& child : at.children()) {
+			const world::ObjectTemplate* c = depth < 8 ? m_templates.find(child.name) : nullptr;
+			if (!c) {
+				continue;
+			}
+			const physics::Vec3 here = placed + physics::Vec3 {child.position.x, child.position.y, child.position.z};
+			if (sameName(c->typeName(), "TargetObject")) {
+				found = origin + here;
+				return true;
+			}
+			if (walk(*c, here, depth + 1)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	walk(carrier, {}, 0);
+	return found;
 }
 
 // The bundle an auto controller's yaw turns: the outermost RotationalBundle

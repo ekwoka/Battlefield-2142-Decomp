@@ -4645,7 +4645,8 @@ private:
 		bool animated = false, loopingFire = false;
 		bool fireHeld = false, firePulse = false;
 		ForceSettings force;
-		float hoverHeight = 0; // the target's physics origin over its feet (see stepDrones)
+		// Where its target sits against the owner's feet, in the owner's frame (see stepDrones).
+		physics::Vec3 targetOffset {0, 1, 0};
 		physics::Vec3 position, velocity;
 		float yaw = 0;
 		float height = 0;      // the height it holds (0x1a8), kept while the owner is near
@@ -4943,6 +4944,7 @@ private:
 	void addSentryGun(const Player& player, const world::Object& placed);
 	const world::ObjectTemplate* autoControlledGun(const world::ObjectTemplate& t, float* height) const;
 	std::string autoYawBundle(const world::ObjectTemplate& t) const;
+	physics::Vec3 carrierTargetOffset(const world::ObjectTemplate& carrier) const;
 	void stepSentryGuns(float seconds);
 	void registerSeatControllers(const world::Object& vehicle);
 	void stepSeatControllers(float seconds);
