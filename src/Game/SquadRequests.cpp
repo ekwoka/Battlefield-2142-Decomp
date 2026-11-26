@@ -36,10 +36,19 @@ bool GameWorld::requestNewOrder(int player, int team, int squad, int type)
 	if (!leader && commander(team) != player) {
 		return false;
 	}
+	if (commander(team) == localPlayer()) {
+		m_orderStates[{team, squad}] = type; // 0x00512100 posts 2/0x19 to a commander on this machine
+	}
 	if (type == 1 && aiAnswersOrderRequests()) {
 		m_newOrderRequests.push_back({team, squad});
 	}
 	return true;
+}
+
+int GameWorld::squadOrderState(int team, int squad) const
+{
+	const auto it = m_orderStates.find({team, squad});
+	return it != m_orderStates.end() && !squadMembers(team, squad).empty() ? it->second : 0; // 0x0078f680 clears an empty squad's
 }
 
 void GameWorld::removeSquadRequest(int team, int squad, int kind)

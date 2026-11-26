@@ -2600,6 +2600,43 @@ TEST(Bots_StrategyOrdersAHumanLeadersSquadThroughTheCommander)
 	CHECK(!field.world->squadOrder(2, 1));
 }
 
+// No bot commander exists while a human commands (AIDLL 0x10089fa0's check of
+// the SAI's human-commander flag): the same field posts no order to the human
+// leader's squad.
+TEST(Bots_HumanCommanderGetsNoSaiOrderPosted)
+{
+	Field field;
+	world::ObjectTemplate* neutral = field.templates.create("ControlPoint", "cp_mid");
+	neutral->settings()["controlPointId"] = "3";
+	neutral->settings()["team"] = "0";
+	neutral->settings()["radius"] = "10";
+	field.objects.create(neutral, {0, 0, 60});
+	field.world = std::make_unique<game::GameWorld>(field.templates, field.objects);
+	field.world->enablePhysics(field.files, field.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	field.world->autoRespawn = false;
+	field.world->startRound();
+	field.world->setCommanderEnabled(true);
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	const int boss = field.world->addPlayer("Boss", 2, false);
+	CHECK(field.world->setCommander(2, boss));
+	const int human = field.world->addPlayer("Me", 2, false);
+	field.world->joinSquad(human, 1);
+	field.world->spawnSoldier(human);
+	for (int i = 0; i < 2; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+	}
+	settle(bots, 1);
+	CHECK(!field.world->squadOrder(2, 1));
+}
+
 namespace {
 
 // A round on Cerbere_Landing (gpm_sp, 16) with the game's own AI scripts:

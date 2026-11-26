@@ -5692,12 +5692,16 @@ int runGame(Options& options, Session& session)
 		};
 		// An order to the squads (a joined game's to the server: the
 		// commander's IssueSquadOrder, store 1).
+		// The commander's own 2/0x1b (0x00756b60 case 0x1b): set below, after sayRadio.
+		std::function<void(int squad, game::GameWorld::OrderType type)> orderSent;
 		const auto orderSquad = [&](int squad, game::GameWorld::OrderType type, float x, float z) {
 			if (net::GameClient* server = joinedServer()) {
 				server->issueOrder(1, squad, static_cast<int>(type), {x, round.terrainHeight(x, z), z});
 				return;
 			}
-			round.issueOrder(myTeam(), squad, type, x, z, round.localPlayer());
+			if (round.issueOrder(myTeam(), squad, type, x, z, round.localPlayer()) && orderSent) {
+				orderSent(squad, type); // the local round posts it to itself (0xff)
+			}
 		};
 		// The squad whose leader is nearest a point (the HUD's players).
 		const auto nearestSquad = [&](float x, float z) {
@@ -5945,6 +5949,24 @@ int runGame(Options& options, Session& session)
 		// The chat and kill lines, the say boxes, the squad name box, the map
 		// vote and the VOIP list (HudMenusChat.h).
 		dice::hfe::menu::HudChat chat(hudManager);
+		// 0x00756b60 case 0x1b, the commander's: "Order sent to <squad> squad", then
+		// his voice for the order (0x007c7690: TCPlayer to the squad's leader).
+		orderSent = [&, sayRadio](int squad, game::GameWorld::OrderType type) {
+			std::string sent = localization.text("HUD_HUD_SQUAD_ORDER_SENT_SQUAD");
+			if (const size_t at = sent.find("#SQUADNAME#"); at != std::string::npos) {
+				sent.replace(at, 11, dice::hfe::menu::squadName(squad));
+			}
+			chat.addPersonal(sent);
+			game::GameWorld::PlayerInfo me;
+			if (!hudPlayer(hudLocal(), me)) {
+				return;
+			}
+			for (const game::GameWorld::PlayerInfo& p : hudPlayers()) {
+				if (p.team == me.team && p.squad == squad && p.squadLeader) {
+					sayRadio(14, dice::hfe::menu::leaderOrderVoice(static_cast<int>(type), false), p.id);
+				}
+			}
+		};
 		chat.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		dice::hfe::menu::SquadNameBox squadNameBox(hudManager);
 		squadMenu.typedName = [&squadNameBox] { return squadNameBox.take(); };
@@ -6103,6 +6125,34 @@ int runGame(Options& options, Session& session)
 		// c_GIYes / c_GINo (0x0079e320); their answers (0x0079d6e0).
 		dice::hfe::menu::HudQuestions questions;
 		dice::hfe::menu::CommanderOrderPrompt orderPrompt;
+		// The auto-accepted order (0x00756b60 case 0x1a with +0x261 set; the
+		// c_GIAutoAccept key, 0x00754290): roger_that to the commander and
+		// SetAcceptOrder with flag 1, store 1 (the order stays the commander's,
+		// accepted); the key also passes it on to the squad (slot 0x48).
+		const auto autoAcceptOrder = [&](bool passOn) {
+			game::GameWorld::PlayerInfo me;
+			game::GameWorld::SquadOrder order;
+			if (!hudPlayer(hudLocal(), me) || !me.squadLeader || !hudOrder(me.team, me.squad, order)) {
+				return;
+			}
+			for (const game::GameWorld::PlayerInfo& p : hudPlayers()) {
+				if (p.team == me.team && p.commander) {
+					sayRadio(14, "roger_that", p.id);
+				}
+			}
+			if (net::GameClient* server = joinedServer()) {
+				server->answerOrder(me.squad, static_cast<int>(order.type), true);
+				if (passOn) {
+					server->issueOrder(0, me.squad, static_cast<int>(order.type), {order.position.x, order.position.y, order.position.z});
+				}
+				return;
+			}
+			round.acceptOrder(round.localPlayer(), true);
+			if (passOn && round.issueSquadLeaderOrder(round.localPlayer(), order.type, order.position.x, order.position.z)) {
+				chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+				sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+			}
+		};
 		// The prompts' '#GIYes#' / '#GINo#' as the bound keys (0x00752b70).
 		questions.localize = localizeWithKeys;
 		questions.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
@@ -8878,6 +8928,14 @@ int runGame(Options& options, Session& session)
 						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
 					}
 				}
+				if (message.category == 2 && message.id == 0x1b && orderSent) {
+					// Our order went to the squad (0x004c5530's 2/0x1b to the commander).
+					game::GameWorld::SquadOrder order;
+					const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
+					if (me && me->commander && g_remoteHud && g_remoteHud->squadOrder(me->team, message.payloadInt(0), true, order)) {
+						orderSent(message.payloadInt(0), order.type);
+					}
+				}
 				if (message.category == 2 && message.id == 0x1e && squadRequests.onPersonal) {
 					squadRequests.onPersonal(localization.text("HUD_HUD_SQUAD_REQUEST_TO_COMMANDER"));
 				} else if (message.category == 2 && message.id == 0x1d) {
@@ -11073,8 +11131,16 @@ int runGame(Options& options, Session& session)
 				const bool leader = hudPlayer(hudLocal(), me) && me.squadLeader && me.squad > 0;
 				if (orderPrompt.poll(joinedServer() != nullptr, leader, me.team, me.squad,
 						leader && hudOrder(me.team, me.squad, order) ? order.serial : 0)) {
-					questions.ask(dice::hfe::menu::HudQuestions::CommanderOrder, 1,
-						localization.text("HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_COMMANDER"));
+					if (orderPrompt.autoAccept) {
+						// 0x00756b60 case 0x1a with +0x261: both lines, the answer yes.
+						chat.addPersonal(localization.text("HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_COMMANDER"));
+						questions.onQuestion(questions.localize("HUD_HUD_SQUAD_RECIEVED_ACCEPT_REJECT"));
+						autoAcceptOrder(false);
+						orderPrompt.clear();
+					} else {
+						questions.ask(dice::hfe::menu::HudQuestions::CommanderOrder, 1,
+							localization.text("HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_COMMANDER"));
+					}
 				}
 			}
 			// The local round's offer of command to our player (offline the
@@ -12011,8 +12077,8 @@ int runGame(Options& options, Session& session)
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu, &startedGame,
-										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, &prepareRoseOrder, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
-										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false, fireHeldByMenu = false](const ViewerOptions::PlayerInput& in) mutable {
+										&questions, &orderPrompt, &autoAcceptOrder, &chat, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, &prepareRoseOrder, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										map3dWas = false, yesWas = false, noWas = false, autoAcceptWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false, fireHeldByMenu = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
 				game::GameWorld::PlayerInfo me;
@@ -12150,6 +12216,21 @@ int runGame(Options& options, Session& session)
 				if (in.no && !noWas) {
 					questions.answer(false);
 				}
+				// c_GIAutoAccept (0x00754290, with a commander order's question
+				// up): on, the order is taken at once and the later ones too;
+				// pressed while on, the latch drops with its line.
+				if (in.autoAccept && !autoAcceptWas && questions.has(dice::hfe::menu::HudQuestions::CommanderOrder)) {
+					const bool wasOn = orderPrompt.autoAccept;
+					orderPrompt.autoAccept = !wasOn;
+					questions.forget(dice::hfe::menu::HudQuestions::CommanderOrder);
+					orderPrompt.clear();
+					if (wasOn) {
+						chat.addPersonal("Autoaccept disabled");
+					} else {
+						autoAcceptOrder(true);
+					}
+				}
+				autoAcceptWas = in.autoAccept;
 				yesWas = in.yes;
 				noWas = in.no;
 				mapSizeWas = in.mapSize;

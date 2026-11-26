@@ -738,6 +738,12 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		});
 	};
 	CHECK(pumpUntil(step, [&] { return orderNotices(messagesB) == 1; }));
+	// The commander hears 2/0x1b with the squad (0x004c5530's order sent).
+	CHECK(pumpUntil(step, [&] {
+		return std::any_of(messagesA.begin(), messagesA.end(), [](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == 0x1b && m.payloadInt(0) == 1;
+		});
+	}));
 	const uint32_t firstSerial = b.world().squadOrder(team, 1, 1)->serial;
 	b.answerOrder(1, 6, true);
 	CHECK(pumpUntil(step, [&] {
@@ -751,6 +757,10 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		const net::RemoteWorld::SquadOrder* o = b.world().squadOrder(team, 1, 1);
 		return orderNotices(messagesB) == 2 && o && o->serial != firstSerial && !o->accepted;
 	}));
+	// The host relays a leader's Request to the commander as 2/0x19 (squad, -, state): B asks for
+	// orders (1), A's map node holds the state.
+	b.squadRequest(1);
+	CHECK(pumpUntil(step, [&] { return a.world().squadOrderState(1) == 1; }));
 	// A client leader's yes (0x0079d6e0 case 2): his own order to the squad
 	// (store 0), then the commander's cleared (SetAcceptOrder 0): here and there.
 	b.issueOrder(0, 1, 6, {50, 0, 60});

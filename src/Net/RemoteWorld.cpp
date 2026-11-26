@@ -64,6 +64,7 @@ void RemoteWorld::clear()
 	m_spawnGroups.clear();
 	m_requests.clear();
 	m_orders.clear();
+	m_orderStates.clear();
 	m_radar.clear();
 	m_radarVehicles.clear();
 	m_squadReports.clear();
@@ -426,6 +427,9 @@ bool RemoteWorld::apply(const GameEvent& event)
 				m_squadOrderBar = true;
 				m_squadOrderMax = points;
 			}
+		}
+		if (info.category == 2 && info.id == 0x19 && info.payload.size() >= 12) {
+			m_orderStates[info.payloadInt(0)] = info.payloadInt(2);
 		}
 		if (info.category == kMsgGameCategory && info.id == 1) {
 			m_gameState = static_cast<uint32_t>(info.payloadInt());

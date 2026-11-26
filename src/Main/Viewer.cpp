@@ -873,6 +873,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				input.deployment = c.pressed(map, "c_GIEnter", down);
 				input.yes = c.pressed(map, "c_GIYes", down);
 				input.no = c.pressed(map, "c_GINo", down);
+				input.autoAccept = c.pressed(map, "c_GIAutoAccept", down);
 				for (int item = 0; item < 9; ++item) {
 					if (c.pressed(map, "c_PIWeaponSelect" + std::to_string(item + 1), down)) {
 						input.item = item + 1;
@@ -1536,6 +1537,7 @@ void runKeyScript(const std::string& script, const ViewerOptions& viewer, const 
 			{"c_GITacticalComm", &ViewerOptions::PlayerInput::tacticalComm}, {"c_GIMapSize", &ViewerOptions::PlayerInput::mapSize},
 			{"c_GIMapZoom", &ViewerOptions::PlayerInput::mapZoom}, {"c_GI3dMap", &ViewerOptions::PlayerInput::map3d},
 			{"c_GIYes", &ViewerOptions::PlayerInput::yes}, {"c_GINo", &ViewerOptions::PlayerInput::no},
+			{"c_GIAutoAccept", &ViewerOptions::PlayerInput::autoAccept},
 			{"c_GIShowScoreboard", &ViewerOptions::PlayerInput::scoreboard},
 			{"c_GILeader", &ViewerOptions::PlayerInput::commanderScreen},
 			{"c_GIVoipPushToTalk", &ViewerOptions::PlayerInput::voipPushToTalk},
