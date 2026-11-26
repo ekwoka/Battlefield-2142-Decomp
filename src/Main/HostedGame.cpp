@@ -1612,6 +1612,11 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		}
 		return;
 	}
+	case net::kEvRequest: // 0x00512100: squad, team, type; the squad's leader or the team's commander
+		if (m_round->requestNewOrder(player, e.i(1), e.i(0), static_cast<int>(e.u(2))) && onLog) {
+			onLog("player " + std::to_string(player) + " asks squad " + std::to_string(e.i(0)) + " for request " + std::to_string(e.u(2)));
+		}
+		return;
 	case net::kEvSetAcceptOrder: { // 0x0050df60 with the sender's player
 		net::AcceptOrderInfo answer;
 		game::GameWorld::PlayerInfo me;
@@ -2069,6 +2074,15 @@ void HostedGame::trackOrders()
 			info.floats[1] = order.at.y;
 			info.floats[2] = order.at.z;
 			sendToPlaying(net::makeSquadOrder(info));
+		}
+		if (moved && store == 0) {
+			// 0x004c5360: each human member of the squad hears the leader's order, the leader 2/0x1c, the others 2/0x17 (the squad).
+			for (const auto& [id, c] : m_clients) {
+				game::GameWorld::PlayerInfo who;
+				if (c.player >= 0 && m_round->playerInfo(c.player, who) && who.team == team && who.squad == squad) {
+					sendTo(id, net::makePostRemote(2, who.squadLeader ? 0x1c : 0x17, net::int32Payload(squad)));
+				}
+			}
 		}
 		if (store == 1 && order.accepted && (moved || !was->second.accepted)) {
 			sendToPlaying(net::makeAcceptOrder({squad, team, true, store, order.kind}));

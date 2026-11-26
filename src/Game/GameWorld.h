@@ -2547,6 +2547,12 @@ public:
 	void removeSquadRequest(int team, int squad, int kind);
 	const SquadRequest* squadRequest(int team, int squad, int kind) const;
 	std::vector<SquadRequest> squadRequests(int team) const;
+	// The Request event (0x32, handler 0x00512100) of `type` for (team, squad) from `player`: taken from the squad's
+	// leader or the team's commander only. Type 1, a leader asking for a new order (SquadLeader.sendRequestForOrder,
+	// 0x007c7d50), where the AI answers (aiAnswersOrderRequests) posts AI event 3/0x10 (0x004c3d60) for the BotManager
+	// (takeNewOrderRequests: team, squad). True when accepted.
+	bool requestNewOrder(int player, int team, int squad, int type);
+	std::vector<std::pair<int, int>> takeNewOrderRequests() { return std::exchange(m_newOrderRequests, {}); }
 	// A request's tool.
 	static CommanderAbility requestAbility(int kind)
 	{
@@ -2737,7 +2743,10 @@ public:
 	// +7 = (it is sp1 or gpm_sp) (0x004af290 -> 0x10001740), so the x 3 is
 	// the single-player and co-op modes' alone: a Titan (gpm_ti) wreck or a
 	// conquest one drains at 1x with bots.
-	bool wreckDrainsFast() const
+	bool wreckDrainsFast() const { return aiAnswersOrderRequests(); }
+	// The same two slots, 0x18 true and 0x20 false, are what the Request event's server handler (0x00512100) tests
+	// before it posts the AI event 3/0x10.
+	bool aiAnswersOrderRequests() const
 	{
 		return m_aiRunning && (m_gameMode == "sp1" || m_gameMode == "gpm_sp" || m_gameMode == "gpm_coop");
 	}
@@ -3617,6 +3626,7 @@ private:
 	} m_lockTone;
 	void stepLockTone();
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_squadRequests; // (team, squad)
+	std::vector<std::pair<int, int>> m_newOrderRequests; // (team, squad) not yet seen by the AI
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);
 	// Titan mode: the soldier of a player inside the enemy Titan's hull

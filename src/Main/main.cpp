@@ -5429,11 +5429,21 @@ int runGame(Options& options, Session& session)
 		squadRequests.noCommanderNeeded = options.gameMode == "sp1" || options.gameMode == "gpm_sp" || options.gameMode == "gpm_coop";
 		// The rose's point (0x00753b40: the view's ray out to 1000 m, HUD
 		// slot 0x18c, into the order record's +0x28c): where the look meets
-		// the ground, else 1000 m along it.
+		// the scene (the heightmap, objects, a soldier: GameWorld::crosshairTarget,
+		// 0x0075bfe0), else the ground along the look, else 1000 m along it.
 		const auto rosePoint = [&round, &hudPlayer, &hudLocal](float& x, float& z) {
 			game::GameWorld::PlayerInfo me;
 			if (!hudPlayer(hudLocal(), me)) {
 				return false;
+			}
+			if (!g_remoteHud) {
+				physics::Vec3 hit {-4000, -4000, -4000};
+				round.crosshairTarget(round.localPlayer(), 1000, &hit);
+				if (hit.x > -3999.0f) {
+					x = hit.x;
+					z = hit.z;
+					return true;
+				}
 			}
 			const float yaw = me.yaw * 3.14159265f / 180, pitch = me.aimPitch * 3.14159265f / 180;
 			const float dx = std::sin(yaw) * std::cos(pitch), dy = std::sin(pitch), dz = std::cos(yaw) * std::cos(pitch);
@@ -5447,6 +5457,17 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			return true;
+		};
+		// The T press (0x00753b40, HUD slot 0x250): the tactical rose's order, taken then from the view and the object tag
+		// under the crosshair; SquadLeader.issueSquadRequest places it (0x007d6820).
+		dice::hfe::menu::RoseOrder roseOrder;
+		const auto prepareRoseOrder = [&] {
+			float x = 0, z = 0;
+			game::GameWorld::PlayerInfo me;
+			const bool point = rosePoint(x, z);
+			const nametags::Nametags::SelectedTarget tag = g_nametags ? g_nametags->selectedTarget() : nametags::Nametags::SelectedTarget {};
+			roseOrder = dice::hfe::menu::prepareRoseOrder(point, x, z, tag.object != 0, tag.team, tag.position[0], tag.position[2],
+				hudPlayer(hudLocal(), me) ? me.team : 0);
 		};
 		bindMethod(console, "SquadLeader.sendRequest", ConsoleAccess::Anyone, [&](int kind, int add) {
 			float x = 0, z = 0;
@@ -6407,15 +6428,23 @@ int runGame(Options& options, Session& session)
 				[&](int kind) {
 					if (net::GameClient* server = joinedServer()) {
 						server->squadRequest(kind);
+						return;
+					}
+					// A server's own player (0x007c7d50 applies the event at once): the same handler as a client's.
+					game::GameWorld::PlayerInfo me;
+					if (hudPlayer(hudLocal(), me)) {
+						round.requestNewOrder(round.localPlayer(), me.team, me.squad, kind);
 					}
 				});
 		});
 		// SquadLeader.issueSquadRequest (0x00770b5f -> slot 0x3b0,
-		// 0x007d6820): the armed order (+0x284) at the rose's point
-		// (+0x28c), through sendOrder's handler.
+		// 0x007d6820): the rose's order (+0x284 at +0x28c, as the T press
+		// prepared it), through sendOrder's handler.
 		bindMethod(console, "SquadLeader.issueSquadRequest", ConsoleAccess::Anyone, [&] {
-			dice::hfe::menu::issueSquadRequest(armedOrder.has_value(), rosePoint, [&](float x, float z) {
+			dice::hfe::menu::issueSquadRequest(roseOrder, [&](int kind, float x, float z) {
 				if (placeAtWorld) {
+					armedTool.reset();
+					armedOrder = game::GameWorld::orderTypeFromKind(kind);
 					leaderOrder = true;
 					placeAtWorld(x, z);
 				}
@@ -6522,8 +6551,10 @@ int runGame(Options& options, Session& session)
 							server->issueOrder(0, me.squad, static_cast<int>(*armedOrder),
 								{worldX, round.terrainHeight(worldX, worldZ), worldZ});
 						}
-					} else {
-						round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ);
+					} else if (round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ)) {
+						// 0x00756b60 case 0x1c: the leader's own line and his voice (the squad's members hear it as 0x17).
+						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(*armedOrder), false), 0);
 					}
 				} else if (!commanderMenu.selected().empty()) {
 					// The squads selected on the commander screen (0x007d6ab0).
@@ -8751,6 +8782,21 @@ int runGame(Options& options, Session& session)
 					case Notice::VictimSaysFriendlyFire:
 					case Notice::None:
 						break;
+					}
+				}
+				// A leader's order heard (0x00756b60 cases 0x17 / 0x1c from the squad manager's 0x004c5360): a member's line, the
+				// leader's line and his voice for it.
+				if (message.category == 2 && message.id == 0x17) {
+					const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
+					if (me && me->squad != 0 && !me->squadLeader) {
+						chat.addPersonal(localization.text("HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_SQUADLEADER"));
+					}
+				} else if (message.category == 2 && message.id == 0x1c) {
+					game::GameWorld::SquadOrder order;
+					const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
+					if (me && g_remoteHud && g_remoteHud->squadOrder(me->team, me->squad, false, order)) {
+						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
 					}
 				}
 				if (message.category == 2 && message.id == 0x1e && squadRequests.onPersonal) {
@@ -11874,7 +11920,7 @@ int runGame(Options& options, Session& session)
 			// The comm roses while their keys are held (Q the radio, T the
 			// tactical rose), with the pointer to pick an entry.
 			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &commRoses, &round, &hudPlayer, &hudLocal, &helpPopups, &hudManager, &playerCamera, &showMenu, &startedGame,
-										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
+										&questions, &session, &localKit, &membersShown, &kitMenu, &selectRemoteKit, &prepareRoseOrder, radioWas = false, tacticalWas = false, mapSizeWas = false, mapZoomWas = false,
 										map3dWas = false, yesWas = false, noWas = false, deploymentWas = false, rightMouseWas = false, manDownWas = false, spawnWasRequested = false, fireHeldByMenu = false](const ViewerOptions::PlayerInput& in) mutable {
 				g_ctrlHeld = in.ctrl;
 				g_shiftHeld = in.shift;
@@ -11972,6 +12018,7 @@ int runGame(Options& options, Session& session)
 					helpPopups.enableTutorial(0x35);
 				} else if (alive && in.tacticalComm && !tacticalWas) {
 					commRoses.openTactical(me.commander, me.squadLeader, me.squad != 0);
+					prepareRoseOrder(); // 0x00753b40 at the press
 					g_allSquads = me.commander || me.squad != 0;
 				} else if ((!in.radioComm && radioWas) || (!in.tacticalComm && tacticalWas) || !alive) {
 					// Releasing the rose key chooses the entry under the pointer, as a click would (the user's mouse clicks

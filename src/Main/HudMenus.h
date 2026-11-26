@@ -282,11 +282,24 @@ void showScoreboard(hud::HudManager& hud, bool shown);
 void sendRequestForOrder(const std::function<void(int channel, const std::string& voice)>& say,
 	const std::function<void(int kind)>& request);
 //   - SquadLeader.issueSquadRequest (0x00770b5f -> slot 0x3b0,
-//     0x007d6820): the armed order (+0x284) placed at the rose's point
-//     (+0x28c) through sendOrder's handler; nothing without an armed order
-//     or a point. True when placed.
-bool issueSquadRequest(bool armed, const std::function<bool(float& x, float& z)>& rosePoint,
-	const std::function<void(float x, float z)>& place);
+//     0x007d6820): the order the T press prepared (0x00753b40, slot 0x250:
+//     the kind +0x284 and the point +0x28c) through sendOrder's handler
+//     (slot 0x3f4, 0x007d6ab0) with no add. The press makes a move (map
+//     kind 4) at where the view's ray ends (1000 m); a type 3 tag (an
+//     object's: control point, Titan...) under the crosshair makes it at
+//     the tag's position, an attack (5) unless the tag's team is the
+//     player's (a defend, 6), a move when the tag has no team (< 0). There
+//     is no armed order: nothing else in the HUD sets +0x284 before it.
+struct RoseOrder {
+	bool valid = false;
+	int kind = 4;
+	float x = 0, z = 0;
+};
+RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tagTeam, float tagX, float tagZ, int team);
+bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind, float x, float z)>& place);
+// The leader's voice for his order on the squad's channel (0x007c7690 from the HUD's 2/0x1c, "order sent to
+// squadmembers"): attack_position (attack_object with an object) for kind 5, defend for 6, repair for 7, else move.
+const char* leaderOrderVoice(int kind, bool object);
 
 // The commander screen's squad list (list data 15, "CommanderSquadList";
 // CommanderMenu.singleClick, 0x007ab380): a row per squad of the team
