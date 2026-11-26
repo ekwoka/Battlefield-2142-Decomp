@@ -3187,6 +3187,21 @@ TEST(HudMenus_OrderMapIcons)
 	CHECK(menu::orderMapIcon(10, true).empty() && menu::orderMapIcon(-1, false).empty() && menu::orderMapIcon(11, false).empty());
 }
 
+TEST(HudMenus_SquadLeaderSpawnMarkerTextures)
+{
+	const menu::SquadSpawnMarkerStyle unselected = menu::squadSpawnMarkerStyle(false, true);
+	CHECK(unselected.label == "HUD_TEXT_MENU_SPAWN_PLAYER_SL");
+	CHECK(unselected.texture == "Ingame/Minimap/Icons/spawn_SquadUnSelected.dds");
+	const menu::SquadSpawnMarkerStyle selected = menu::squadSpawnMarkerStyle(true, true);
+	CHECK(selected.label == unselected.label && selected.texture == "Ingame/Minimap/Icons/spawn_SquadSelected.dds");
+	const menu::SquadSpawnMarkerStyle unavailable = menu::squadSpawnMarkerStyle(false, false);
+	CHECK(unavailable.label == unselected.label
+		&& unavailable.texture == "Ingame/Minimap/Icons/spawn_SquadUnSelectedInactive.dds");
+	const menu::SquadSpawnMarkerStyle selectedUnavailable = menu::squadSpawnMarkerStyle(true, false);
+	CHECK(selectedUnavailable.label == unselected.label
+		&& selectedUnavailable.texture == "Ingame/Minimap/Icons/spawn_SquadSelectedInactive.dds");
+}
+
 // The flares / active defence meter (0x007be490): ready full with the
 // countermeasure icon; the press drains it over one round's interval (the
 // ads' 5 s shield) with the icon blinking; the reload fills it with the

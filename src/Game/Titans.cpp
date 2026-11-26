@@ -352,6 +352,16 @@ void GameWorld::registerTitan(uint32_t id, int controlPoint)
 	titan.serial = m_titanSerial++;
 	m_titans.push_back(std::move(titan));
 	buildTitanParts(m_titans.back());
+	// Retail gives each mobile PCO with SpawnPoint children its own first-free
+	// id in 0xc0..0xff. The Titan's interior points leave their spawner CP's
+	// stationary group and follow the Titan as one group.
+	{
+		std::vector<uint32_t> points;
+		for (const Titan::Spawn& spawn : m_titans.back().spawnPoints) {
+			points.push_back(spawn.object);
+		}
+		registerMobileSpawnGroup(id, {}, {}, points);
+	}
 	// The Python component's onSpawnEvent (28, VehicleSpawn): gpm_ti.py
 	// sets the team's tickets from the Titan's armour, scoringCommon.py
 	// keeps it in its Titans' list.

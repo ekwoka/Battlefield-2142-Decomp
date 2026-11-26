@@ -76,6 +76,18 @@ namespace dice::hfe::menu {
 // The game's squad names (0x00b3df00; 0 is "Unassigned").
 const char* squadName(int squad);
 
+struct SquadSpawnMarkerStyle {
+	std::string texture;
+	std::string label;
+};
+
+inline SquadSpawnMarkerStyle squadSpawnMarkerStyle(bool selected, bool active)
+{
+	const char* texture = selected ? active ? "spawn_SquadSelected.dds" : "spawn_SquadSelectedInactive.dds"
+						   : active ? "spawn_SquadUnSelected.dds" : "spawn_SquadUnSelectedInactive.dds";
+	return {std::string("Ingame/Minimap/Icons/") + texture, "HUD_TEXT_MENU_SPAWN_PLAYER_SL"};
+}
+
 class SquadMenu {
 public:
 	SquadMenu(game::GameWorld& round, hud::HudManager& hud);
