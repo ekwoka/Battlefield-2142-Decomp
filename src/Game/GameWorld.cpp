@@ -6201,7 +6201,7 @@ int GameWorld::joinAiSquad(int id)
 	return requestJoinSquad(id, chosen) == SquadJoin::Joined ? chosen : 0;
 }
 
-bool GameWorld::joinSquad(int id, int squad)
+bool GameWorld::joinSquad(int id, int squad, bool kicked)
 {
 	Player* player = findPlayer(id);
 	if (!player || squad < 0 || squad > 9 || squad == player->squad) {
@@ -6224,12 +6224,17 @@ bool GameWorld::joinSquad(int id, int squad)
 	if (old != 0 && wasLeader) {
 		const std::vector<int> rest = squadMembers(player->team, old);
 		if (!rest.empty()) {
-			findPlayer(*std::min_element(rest.begin(), rest.end()))->squadLeader = true;
+			setSquadLeader(player->team, old, *std::min_element(rest.begin(), rest.end()));
 		}
 		if (const auto beacon = m_beacons.find({player->team, old}); beacon != m_beacons.end()) {
 			m_objects.remove(beacon->second);
 			m_beacons.erase(beacon);
 		}
+	}
+	// The leaver hears 2/0x15 (0x004c7bb0 sends it to the whole member
+	// set before erasing him; a kick, the leader's removal, sends 2/0x14).
+	if (old != 0 && !player->ai && !kicked) {
+		m_squadMessages[id].push_back({0x15, id});
 	}
 	// The squad left empty goes (0x004c6c80: slot 0x3c when the count is
 	// 0), its lock with it.
@@ -6270,8 +6275,19 @@ bool GameWorld::setSquadLeader(int team, int squad, int id)
 	if (!player || squad == 0 || player->team != team || player->squad != squad) {
 		return false;
 	}
-	for (int member : squadMembers(team, squad)) {
+	const std::vector<int> members = squadMembers(team, squad);
+	for (int member : members) {
 		findPlayer(member)->squadLeader = member == id; // slot 0x3c (0x004c7510 -> 0x004c2fd0)
+	}
+	// 0x004c7510 sends 2/0x18 (the new leader) to the squad's member set:
+	// a new squad's first member joins after it (its set is empty then).
+	// 0x004c2fd0's other work, the leaders' SquadLeaderSpawnPoint children
+	// (slots 0x20 / 0x24) and the SetBeacon broadcasts (slot 0x30), is
+	// spawnAtSquad's reading of the leader flag.
+	for (int member : members) {
+		if (!findPlayer(member)->ai) {
+			m_squadMessages[member].push_back({0x18, id});
+		}
 	}
 	return true;
 }

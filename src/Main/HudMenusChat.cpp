@@ -676,6 +676,13 @@ void HudQuestions::becameCommander()
 	answerAll(SquadLeader, false, true, true);
 }
 
+void HudQuestions::leftSquad()
+{
+	answerAll(CommanderOrder, false, true, false);
+	answerAll(Invite, false, true, false);
+	answerAll(JoinRequest, false, true, true);
+}
+
 void HudQuestions::answer(bool yes)
 {
 	const Question* q = front();

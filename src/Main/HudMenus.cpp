@@ -361,6 +361,30 @@ void SquadMenu::squadMessage(int id, int value)
 		onJoinRequest(value, fill(text("HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN"), "#PLAYERNAME#", asking.name));
 		break;
 	}
+	case 0x15: // the HUD's cleanup is for the player leaving (0x00757ed1)
+		if (value == localPlayer() && onLeftSquad) {
+			onLeftSquad();
+		}
+		break;
+	case 0x18: { // the new leader (0x00758033): ours says so to the squad, the others get his name
+		game::GameWorld::PlayerInfo leader;
+		if (!playerInfo(value, leader)) {
+			break;
+		}
+		if (value == me.id) {
+			const auto members = playerList();
+			const auto count = std::count_if(members.begin(), members.end(), [&](const game::GameWorld::PlayerInfo& p) {
+				return p.team == leader.team && p.squad == leader.squad && leader.squad != 0;
+			});
+			if (count > 1 && onNewLeaderRadio) {
+				onNewLeaderRadio();
+			}
+			say("HUD_HUD_SQUAD_SQUADLEADER");
+		} else if (onLine) {
+			onLine(fill(text("HUD_HUD_SQUAD_NEW_SQUADLEADER"), "#PLAYERNAME#", leader.name));
+		}
+		break;
+	}
 	case 0x24: // the HUD asks only the player it names (0x00756b60)
 		if (value == localPlayer() && onLeaderOffer) {
 			onLeaderOffer();
@@ -499,7 +523,7 @@ void SquadMenu::applyInviteList(int player)
 					m_remote.kick(id, me.squad); // LeaveSquad with the member (squad manager slot 0x38)
 				}
 			} else {
-				m_round.joinSquad(id, 0);
+				m_round.joinSquad(id, 0, true);
 			}
 		}
 	}

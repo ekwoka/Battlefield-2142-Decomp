@@ -317,6 +317,11 @@ public:
 	// then the squad leader questions (shown next); an offer of command
 	// (kind 3) stays.
 	void becameCommander();
+	// The local player left his squad (2/0x15 for him, 0x00757f01..27): the
+	// commander orders, squad invites and then join requests answered no,
+	// quietly, the next question shown after the last. Leadership offers
+	// (kind 4) stay.
+	void leftSquad();
 	void answer(bool yes);
 	void tick(float seconds);
 	const Question* front() const;

@@ -3022,16 +3022,78 @@ TEST(HudMenus_SquadLeaderOffer)
 	CHECK(offers == 1);
 	// Slot 0x3c: the leader before no longer leads.
 	CHECK(s.world.setSquadLeader(2, 1, me) && s.world.squadLeader(2, 1) == me);
-	// The leader (we) leaves: the lowest id left leads, with no message.
+	s.world.takeSquadMessages(me);
+	// The leader (we) leaves: the lowest id left leads, with no question
+	// (we hear only our own leaving, 2/0x15).
 	CHECK(s.world.joinSquad(me, 0) && s.world.squadLeader(2, 1) == std::min(botA, botB));
-	CHECK(s.world.takeSquadMessages(me).empty() && s.world.takeSquadMessages(botA).empty());
+	heard = s.world.takeSquadMessages(me);
+	CHECK(heard.size() == 1 && heard[0].id == 0x15 && heard[0].value == me && s.world.takeSquadMessages(botA).empty());
 	CHECK(s.world.joinSquad(std::min(botA, botB), 0) && s.world.squadLeader(2, 1) == std::max(botA, botB));
 	// A new squad's first member leads it and is asked nothing.
 	CHECK(s.world.joinSquad(me, 2) && s.world.squadLeader(2, 2) == me && s.world.takeSquadMessages(me).empty());
 	// Outside the co-op modes the AI's +6 is true: no offer.
 	CHECK(s.world.joinSquad(me, 0));
+	s.world.takeSquadMessages(me);
 	s.world.setGameMode("gpm_cq");
 	CHECK(s.world.joinSquad(me, 1) && s.world.takeSquadMessages(me).empty());
+}
+
+// The leader change notice (2/0x18, 0x00756b60 case 0x18, sent by slot
+// 0x3c 0x004c7510 to the squad's member set) and the leaving one (2/0x15):
+// the new leader hears himself named and says new_squadleader to the squad
+// when it has company, the others read his name; a new squad's first member
+// gets none, a bot none; the player leaving hears 2/0x15, which drops the
+// commander orders, invites and join requests (0x00757f01), not a kicked one.
+TEST(HudMenus_SquadLeaderNotice)
+{
+	Squads s;
+	s.world.spawnPlayer(2);
+	const int me = s.world.localPlayer();
+	const int other = s.world.addPlayer("Other", 2, false);
+	const int bot = s.world.addPlayer("Bot", 2, true);
+	s.squads.setLocalizer([](const std::string& key) -> std::string {
+		return key == "HUD_HUD_SQUAD_NEW_SQUADLEADER" ? "#PLAYERNAME# is the new Squad Leader" : key;
+	});
+	std::vector<std::string> lines;
+	int radios = 0, left = 0;
+	s.squads.onLine = [&](const std::string& line) { lines.push_back(line); };
+	s.squads.onNewLeaderRadio = [&] { ++radios; };
+	s.squads.onLeftSquad = [&] { ++left; };
+	CHECK(s.world.joinSquad(other, 1) && s.world.takeSquadMessages(other).empty()); // the first leads, no notice
+	CHECK(s.world.joinSquad(bot, 1) && s.world.joinSquad(me, 1));
+	s.world.takeSquadMessages(me);
+	s.world.takeSquadMessages(other);
+	// Slot 0x3c: every human member hears it, the bot nothing.
+	CHECK(s.world.setSquadLeader(2, 1, me));
+	auto toMe = s.world.takeSquadMessages(me);
+	auto toOther = s.world.takeSquadMessages(other);
+	CHECK(toMe.size() == 1 && toMe[0].id == 0x18 && toMe[0].value == me);
+	CHECK(toOther.size() == 1 && toOther[0].id == 0x18 && toOther[0].value == me);
+	CHECK(s.world.takeSquadMessages(bot).empty());
+	s.squads.squadMessage(toMe[0].id, toMe[0].value);
+	CHECK(radios == 1 && lines.size() == 1 && lines[0] == "HUD_HUD_SQUAD_SQUADLEADER");
+	// Another's lead: his name, no voice of ours.
+	CHECK(s.world.setSquadLeader(2, 1, other));
+	toMe = s.world.takeSquadMessages(me);
+	CHECK(toMe.size() == 1 && toMe[0].id == 0x18 && toMe[0].value == other);
+	s.squads.squadMessage(toMe[0].id, toMe[0].value);
+	CHECK(radios == 1 && lines.size() == 2 && lines[1] == "Other is the new Squad Leader");
+	// A leader leaving passes the lead on and tells those left; he hears his own leaving.
+	s.world.takeSquadMessages(other);
+	CHECK(s.world.joinSquad(other, 0));
+	toOther = s.world.takeSquadMessages(other);
+	CHECK(toOther.size() == 1 && toOther[0].id == 0x15 && toOther[0].value == other);
+	toMe = s.world.takeSquadMessages(me);
+	CHECK(toMe.size() == 1 && toMe[0].id == 0x18 && toMe[0].value == me); // the lowest id left (we)
+	// Our leaving drops the queued questions' kinds; a kick sends nothing.
+	s.squads.squadMessage(0x15, me + 1);
+	CHECK(left == 0);
+	s.squads.squadMessage(0x15, me);
+	CHECK(left == 1);
+	CHECK(s.world.joinSquad(me, 0, true) && s.world.takeSquadMessages(me).empty());
+	// Alone: the lead passes to nobody, and a squad of one has no voice.
+	CHECK(s.world.joinSquad(me, 2) && s.world.takeSquadMessages(me).empty());
+	CHECK(s.world.squadLeader(2, 2) == me);
 }
 
 // A private squad (the squad manager's join 0x004c7290, the HUD's
@@ -3351,6 +3413,30 @@ TEST(HudQuestions_NewCommanderRefusesPendingButKeepsTheOffer)
 	}
 	CHECK(questions.front() && questions.front()->kind == Q::CommanderOffer);
 	CHECK(!shown.empty() && shown.front() == "offer");
+}
+
+// Our own leaving (2/0x15, 0x00757f01..27): the commander order, invite and
+// join request questions are answered no, quietly, the leadership offer and
+// the commander's offer stay.
+TEST(HudQuestions_LeavingTheSquadRefusesPendingButKeepsTheOffers)
+{
+	using Q = menu::HudQuestions;
+	Q questions;
+	std::vector<std::tuple<Q::Kind, int, bool, bool>> answers;
+	questions.onAnswer = [&](const Q::Question& q, bool yes, bool quiet) { answers.emplace_back(q.kind, q.value, yes, quiet); };
+	questions.ask(Q::JoinRequest, 7, "join");
+	questions.ask(Q::Invite, 3, "invite");
+	questions.ask(Q::CommanderOrder, 1, "order");
+	questions.ask(Q::SquadLeader, 1, "leader");
+	questions.ask(Q::CommanderOffer, 2, "offer");
+	questions.leftSquad();
+	CHECK(answers.size() == 3);
+	if (answers.size() == 3) {
+		CHECK(answers[0] == std::make_tuple(Q::CommanderOrder, 1, false, true));
+		CHECK(answers[1] == std::make_tuple(Q::Invite, 3, false, true));
+		CHECK(answers[2] == std::make_tuple(Q::JoinRequest, 7, false, true));
+	}
+	CHECK(questions.front() != nullptr);
 }
 
 TEST(HudCommander_ApplicationAndResultFeedback)

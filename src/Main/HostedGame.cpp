@@ -1520,7 +1520,7 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		game::GameWorld::PlayerInfo me, other;
 		if (m_round->playerInfo(player, me) && me.squadLeader && me.squad == e.i(2) && m_round->playerInfo(e.i(1), other)
 			&& other.team == me.team && other.squad == me.squad) {
-			m_round->joinSquad(other.id, 0);
+			m_round->joinSquad(other.id, 0, true);
 		}
 		return;
 	}

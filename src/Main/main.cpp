@@ -6146,6 +6146,8 @@ int runGame(Options& options, Session& session)
 		squadMenu.onLeaderOffer = [&questions, &localization] {
 			questions.ask(dice::hfe::menu::HudQuestions::SquadLeader, 1, localization.text("HUD_HUD_SQUADLEADER_ACCEPTED")); // 0x00756d48
 		};
+		squadMenu.onLeftSquad = [&questions] { questions.leftSquad(); };
+		squadMenu.onNewLeaderRadio = [&sayRadio] { sayRadio(3, "new_squadleader", 0); }; // TCSquad, 0x007580e3
 		questions.onAnswer = [&](const dice::hfe::menu::HudQuestions::Question& q, bool yes, bool quiet) {
 			using Q = dice::hfe::menu::HudQuestions;
 			net::GameClient* server = joinedServer();
@@ -8779,10 +8781,11 @@ int runGame(Options& options, Session& session)
 				// question's kind 1 (HUD_HUD_SQUAD_INVITED_TO, #SQUADNAME#).
 				// The squad manager's join answers (0x004c7290: 2/0xb full,
 				// 2/0xc private; 2/0x11 to a private squad's leader) and a
-				// leader's answer handed on (0x004a5750: 2/0x12, 2/0x13).
+				// leader's answer handed on (0x004a5750: 2/0x12, 2/0x13), our
+				// own leaving (2/0x15) and a new leader (2/0x18, 0x004c7510).
 				if (message.category == 2
 					&& (message.id == 0xb || message.id == 0xc || message.id == 0x11 || message.id == 0x12 || message.id == 0x13
-					|| message.id == 0x24)) {
+					|| message.id == 0x15 || message.id == 0x18 || message.id == 0x24)) {
 					squadMenu.squadMessage(static_cast<int>(message.id), message.payloadInt(0));
 				}
 				// The dog tag (the game category's 0x13, 0x004cbea0): the

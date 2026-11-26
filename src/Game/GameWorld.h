@@ -1114,12 +1114,16 @@ public:
 	void setAiSpawnTest(std::function<bool(const physics::Vec3&)> test) { m_aiSpawnTest = std::move(test); }
 	// Joins a squad of the player's team (0 leaves), false when full;
 	// a new squad's first member leads it.
-	bool joinSquad(int player, int squad);
+	// `kicked`: the squad's leader removed him (the leaver's 2/0x15 is not
+	// sent; retail's 2/0x14 is not ported).
+	bool joinSquad(int player, int squad, bool kicked = false);
 	// The squad's leader (squad manager slot 0x40, 0x004c43a0; -1 none) and
 	// slot 0x3c (0x004c7510): the player leads it, the leader before not.
 	// A leader leaving passes the lead to the lowest id left with no
 	// question; a player that joins a squad of two or more that a bot
-	// leads, in the single-player and co-op modes, is asked (2/0x24).
+	// leads, in the single-player and co-op modes, is asked (2/0x24). Each
+	// change of leader (not a new squad's first) tells the squad's players
+	// 2/0x18 with the new leader; a player leaving hears 2/0x15.
 	int squadLeader(int team, int squad) const;
 	bool setSquadLeader(int team, int squad, int player);
 	// The squad manager's join (slot 0x34, 0x004c8460 -> 0x004c7290), as
