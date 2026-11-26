@@ -1123,6 +1123,93 @@ TEST(Commander_TitanAiDropsOneCrateAtATime)
 	CHECK(drops(silo) == 1);
 }
 
+// enhanced.botCommander's answers to the squad leaders' T-rose requests in gpm_ti (not retail: the decision is the
+// virtual commander's, the lines and flow are the commander's): with the switch off the refusal stands; on, a
+// request is stored and answered, accepted (the tool used at the point, "<tool>_accept" to the leader, "_deny" to
+// another squad's request of the kind) or turned down (the tool recharging: "_auto_deny"; its asset gone:
+// "_unavailable"), the lines said to the leader alone; with a human commander nothing changes.
+TEST(Commander_BotCommanderAnswersSquadRequests)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	game::GameWorld& world = *field.world;
+	world.setCommanderEnabled(true);
+	world.setGameMode("gpm_ti");
+	const int leader = world.addPlayer("Lead", 1, false);
+	CHECK(world.spawnSoldier(leader));
+	world.joinSquad(leader, 1);
+	const int other = world.addPlayer("Other", 1, false);
+	CHECK(world.spawnSoldier(other));
+	world.joinSquad(other, 2);
+	field.soldier(1, 60, 60); // the team has a bot
+	field.place("commander_uav_drone_control", 1, -200, -200); // a UAV trailer, no artillery
+	bool on = false;
+	const bool enhanced = true;
+	game::BotSettings settings;
+	settings.enhanced = &enhanced;
+	settings.botCommander = &on;
+	game::BotManager bots(world, settings);
+	menu::SquadRequests requests(world);
+	requests.maxRequests = 100;
+	const auto step = [&](float seconds) {
+		for (int i = 0; i < static_cast<int>(seconds * 30 + 0.5f); ++i) {
+			bots.update(1 / 30.0f);
+			world.tick(1 / 30.0f);
+		}
+	};
+	const auto heard = [&](const std::string& voice, int receiver) {
+		int n = 0;
+		for (const auto& h : world.takeRadioHeard()) {
+			n += h.voice == voice && h.receiver == receiver ? 1 : 0;
+		}
+		return n;
+	};
+	step(0.1f);
+	// The switch off: the refusal, nothing stored.
+	world.takeRadioHeard();
+	CHECK(!requests.send(leader, 2, 40, 41) && !world.squadRequest(1, 1, 2));
+	CHECK(heard("no_commander_available", leader) == 1);
+	// On: stored, no refusal, nothing before the 2 s, then used at the point and accepted; the other squad's
+	// UAV request is denied and taken off.
+	on = true;
+	step(0.1f);
+	CHECK(requests.send(leader, 2, 40, 41) && requests.send(other, 2, 90, 91));
+	CHECK(heard("no_commander_available", leader) == 0);
+	// Its own UAV leaves the tool to the request.
+	bots.titanCommandAssetsNow(1, {40, 0, 40}, false);
+	CHECK(world.abilityState(1, game::GameWorld::CommanderAbility::Uav).ready);
+	step(1.5f);
+	CHECK(world.squadRequest(1, 1, 2) && world.squadRequest(1, 2, 2));
+	step(0.8f);
+	CHECK(!world.squadRequest(1, 1, 2) && !world.squadRequest(1, 2, 2));
+	CHECK(!world.abilityState(1, game::GameWorld::CommanderAbility::Uav).ready);
+	const auto lines = world.takeRadioHeard();
+	const auto said = [&](const std::string& voice, int receiver) {
+		return std::count_if(lines.begin(), lines.end(),
+			[&](const game::GameWorld::RadioHeard& h) { return h.voice == voice && h.receiver == receiver; });
+	};
+	CHECK(said("uav_accept", leader) == 1 && said("uav_deny", other) == 1 && said("uav_accept", other) == 0);
+	// The UAV recharging: the turn-down after 4 s (the bots' own UAV can't take it meanwhile).
+	CHECK(requests.send(leader, 2, 40, 41));
+	step(3.5f);
+	CHECK(world.squadRequest(1, 1, 2));
+	step(0.7f);
+	CHECK(!world.squadRequest(1, 1, 2) && heard("uav_auto_deny", leader) == 1);
+	// No artillery standing in the mode's level: unavailable.
+	CHECK(requests.send(leader, 0, 40, 41));
+	step(4.3f);
+	CHECK(!world.squadRequest(1, 1, 0) && heard("artillery_unavailable", leader) == 1);
+	// A human commander answers for himself.
+	const int boss = world.addPlayer("Boss", 1, false);
+	world.setCommander(1, boss);
+	step(0.1f);
+	CHECK(requests.send(leader, 2, 40, 41));
+	step(6);
+	CHECK(world.squadRequest(1, 1, 2) && heard("uav_auto_deny", leader) == 0);
+}
+
 // Exercise the installed Remaster scripts through the same Sound console
 // registration and VFS used by the game. The null OpenAL driver still builds
 // and starts actual Sound instances; StartedSound counts alone did not prove

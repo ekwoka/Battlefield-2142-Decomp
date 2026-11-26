@@ -6729,6 +6729,71 @@ TEST(Bots_LeaderRequestsANewOrder)
 	CHECK(said() == 1);
 }
 
+// enhanced.botCommander in gpm_ti (not retail): a leader asking for a new order is answered by the virtual commander
+// as the co-op SAI answers one: the squad's order repeated as a map attack, "attack_position" 2 s on, said to the
+// leader (counted here as the AI says it: its bots' hearing takes a bot leader's radio). The switch off, or a human
+// commander, answers nothing.
+TEST(Bots_BotCommanderAnswersANewOrderRequest)
+{
+	Field field;
+	bool on = false;
+	const bool enhanced = true;
+	game::BotSettings settings;
+	settings.enhanced = &enhanced;
+	settings.botCommander = &on;
+	game::BotManager bots(*field.world, settings);
+	std::vector<int> team;
+	for (int i = 0; i < 3; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, 1);
+		field.world->spawnSoldier(id);
+		field.move(id, static_cast<float>(i) * 3, 0);
+		team.push_back(id);
+	}
+	const auto step = [&](float seconds) {
+		for (int tick = 0; tick < static_cast<int>(seconds * 30 + 0.5f); ++tick) {
+			bots.update(1 / 30.0f);
+			field.world->tick(1 / 30.0f);
+		}
+	};
+	step(18 * 7 / 30.0f);
+	const game::BotManager::Squad* squad = bots.squad(2, 1);
+	game::GameWorld& world = *field.world;
+	CHECK(squad && squad->state == 2 && squad->takenKind == 0 && squad->takenFromCommander);
+	world.setAiRunning(true);
+	world.setGameMode("gpm_ti");
+	const auto line = [&] {
+		return std::count_if(bots.commanderSaid().begin(), bots.commanderSaid().end(),
+			[](const game::BotManager::CommanderLine& l) { return l.team == 2 && l.squad == 1 && l.voice == "attack_position"; });
+	};
+	world.takeRadioHeard();
+	// The switch off: taken, nothing answers.
+	CHECK(world.requestNewOrder(team[0], 2, 1, 1));
+	step(3);
+	CHECK(!world.squadOrder(2, 1) && line() == 0 && !world.virtualCommander(2));
+	// On: the order, and the line 2 s on.
+	on = true;
+	step(0.1f);
+	CHECK(world.virtualCommander(2));
+	CHECK(world.requestNewOrder(team[0], 2, 1, 1));
+	step(0.1f);
+	const game::GameWorld::SquadOrder* order = world.squadOrder(2, 1);
+	CHECK(order && order->type == game::GameWorld::OrderType::MapAttack && order->fromCommander
+		&& std::fabs(order->position.x - squad->takenAt.x) < 0.01f && std::fabs(order->position.z - squad->takenAt.z) < 0.01f);
+	CHECK(line() == 0);
+	step(2.2f);
+	CHECK(line() == 1);
+	// A human commander answers for himself.
+	world.setCommanderEnabled(true);
+	const int boss = world.addPlayer("Boss", 2, false);
+	CHECK(world.setCommander(2, boss));
+	step(0.1f);
+	CHECK(!world.virtualCommander(2));
+	CHECK(world.requestNewOrder(team[0], 2, 1, 1));
+	step(3);
+	CHECK(line() == 1);
+}
+
 // A squad's strength (0x100c26d0): its members' strategic strengths
 // summed, + 0.5, rounded to nearest even. Three Remaster soldiers
 // (attack 2 each) are 6, not 2 x round(3 + 0.5) = 8 from the member count.

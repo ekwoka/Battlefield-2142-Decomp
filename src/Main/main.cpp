@@ -5506,7 +5506,9 @@ int runGame(Options& options, Session& session)
 				if (!squadRequests.count()) {
 					return;
 				}
-				if (!squadRequests.noCommanderNeeded && g_remoteHud->commander(me.team) < 0) {
+				// A native host's virtual commander (enhanced.botCommander in gpm_ti) answers: not refused when the switch is on here.
+				if (!squadRequests.noCommanderNeeded && g_remoteHud->commander(me.team) < 0
+					&& !(botSettings.titanCommander() && options.gameMode == "gpm_ti")) {
 					round.hearRadio(me.id, 2, "no_commander_available");
 					return;
 				}
