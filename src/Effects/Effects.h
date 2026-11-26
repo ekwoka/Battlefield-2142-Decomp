@@ -315,6 +315,9 @@ struct EmitContext {
 	float fov = 1.0f;
 	float aspect = 0.75f;
 	int* poolUsed = nullptr; // sprites alive in all systems
+	// The systems' intensity rolls: the C runtime's rand(), not RendDX9's
+	// particle random (0x10025420), so a stream of its own.
+	game::Random* intensityRandom = nullptr;
 	// The ground's height at a point (collisionEnable); none if empty.
 	std::function<float(float x, float z)> groundHeight;
 	// The frames drawn so far (the renderer's count, DAT_101f8e58 slot
@@ -425,6 +428,11 @@ private:
 	float m_preWarm = 0;   // pre-warm left (+0xf8)
 	float m_clock = 0, m_emitClock = 0, m_carry = 0; // +0xe8, +0xf0, +0xf4
 	float m_lodScale = 1;
+	// The particles' intensity (Particle::intensity): a sprite or
+	// non-screen-aligned system of particleShaderType 0 rolls rand() % 3600
+	// / 3600 once (constructors 0x1013f6a0 / 0x1013d32d, +0x230) and gives
+	// it to every particle (0x1013fec1, 0x1013d944); the heat shimmer 1.
+	float m_intensity = 1;
 	Vec3 m_previous;       // where it was at the last update (+0xc0)
 	Vec3 m_velocity;       // its own velocity (inherited by world particles)
 	Vec3 m_position;
@@ -1188,6 +1196,7 @@ private:
 
 	const world::ObjectTemplateManager& m_templates;
 	game::Random m_random;
+	game::Random m_intensityRandom {0x1a2b3c4d};
 	std::map<const world::ObjectTemplate*, std::unique_ptr<ParticleTemplate>> m_particleTemplates;
 	std::vector<std::unique_ptr<Emitter>> m_emitters;
 	std::map<uint32_t, Anchor> m_anchors;
