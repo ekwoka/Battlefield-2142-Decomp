@@ -1094,12 +1094,26 @@ void CommanderMenu::update(int player)
 	tabs.apply(m_hud);
 }
 
+bool RequestIconBlink::update(bool any, float seconds)
+{
+	if (!any) {
+		return m_on = false;
+	}
+	m_timer -= seconds;
+	if (m_timer <= 0) {
+		m_on = !m_on;
+		m_timer = 1.0f;
+	}
+	return m_on;
+}
+
 std::string CommanderMenu::orderPicture(int team, int squad) const
 {
-	// 0x007ab790: the squad's requests first (orderNew, +0x1a0: any of its
-	// four kinds, the squad's slot 0x18), else the commander's order by its
-	// kind (+0x174 + 4 kind: none for 0..3 and 8.., Move, Attack, Defend,
-	// Repair for 4..7, 0x007a8770's textures).
+	// 0x007ab790: the squad's requests first (orderNew, +0x1a0: any of its four kinds, the
+	// squad's slot 0x18); else the squad's own order, the leader's (squad slot 0x10, not the
+	// commander's 0x14) by its type (the table 0x00a0c594: 4 Move, 5 Attack, 6 Defend, 7 Repair,
+	// the first four Defend, 0x007a8770's textures); with no order of its own, orderNew while
+	// the map node's state for it is 1 (a leader asking for orders, 2/0x19).
 	for (int kind = 0; kind < game::GameWorld::kRequestKinds; ++kind) {
 		if (m_world) {
 			for (const auto& request : m_world->squadRequests(team)) {
@@ -1111,20 +1125,20 @@ std::string CommanderMenu::orderPicture(int team, int squad) const
 			return "Ingame/Commander/Orders/orderNew.tga";
 		}
 	}
-	// The map node's state 1, a leader asking for orders (2/0x19), while the squad has no order of
-	// its own (0x007ab790's +0x10 record).
 	game::GameWorld::SquadOrder own;
-	const bool ownOrder = m_world ? m_world->squadOrder(team, squad, false, own) : m_round.squadLeaderOrder(team, squad) != nullptr;
-	if (!ownOrder && (m_world ? m_world->squadOrderState(team, squad) : m_round.squadOrderState(team, squad)) == 1) {
-		return "Ingame/Commander/Orders/orderNew.tga";
-	}
-	const game::GameWorld::SquadOrder* order = m_round.squadOrder(team, squad);
-	game::GameWorld::SquadOrder remote;
+	const game::GameWorld::SquadOrder* order = m_round.squadLeaderOrder(team, squad);
 	if (m_world) {
-		order = m_world->squadOrder(team, squad, true, remote) ? &remote : nullptr;
+		order = m_world->squadOrder(team, squad, false, own) ? &own : nullptr;
+	}
+	if (!order || order->type == game::GameWorld::OrderType::None) {
+		const int state = m_world ? m_world->squadOrderState(team, squad) : m_round.squadOrderState(team, squad);
+		return state == 1 ? "Ingame/Commander/Orders/orderNew.tga" : std::string();
 	}
 	static const char* const kPictures[] = {"orderMove", "orderAttack", "orderDefend", "orderRepair"};
-	const int kind = order ? static_cast<int>(order->type) : -1;
+	const int kind = static_cast<int>(order->type);
+	if (kind >= 0 && kind < 4) {
+		return "Ingame/Commander/Orders/orderDefend.tga";
+	}
 	return kind >= 4 && kind <= 7 ? std::string("Ingame/Commander/Orders/") + kPictures[kind - 4] + ".tga" : std::string();
 }
 

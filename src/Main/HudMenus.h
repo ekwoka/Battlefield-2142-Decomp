@@ -319,6 +319,18 @@ bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind
 // squadmembers"): attack_position (attack_object with an object) for kind 5, defend for 6, repair for 7, else move.
 const char* leaderOrderVoice(int kind, bool object);
 
+// The commander's request icon (HUD variable ShowSquadLeaderRequestOrderIcon, +0x320 of 0x0079fe10):
+// while any of squads 1..9 asks for orders (the map node's state 1) or holds a request, it flips every
+// second (+0x324 from DAT_00a0c518, 1.0, down by the frame time; flipped at 0 or below); else it is off.
+class RequestIconBlink {
+public:
+	bool update(bool any, float seconds);
+
+private:
+	bool m_on = false;
+	float m_timer = 0;
+};
+
 // The commander screen's squad list (list data 15, "CommanderSquadList";
 // CommanderMenu.singleClick, 0x007ab380): a row per squad of the team
 // with members, its id in cell 13 and its kind (0) in cell 14 (0x007a9c90,

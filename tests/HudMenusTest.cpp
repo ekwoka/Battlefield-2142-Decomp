@@ -1206,6 +1206,18 @@ TEST(HudCommanderOrder_QuestionAndStaleAnswers)
 	CHECK(answers.size() == 2 && answers[1] == std::make_pair(false, true));
 }
 
+// The commander's request icon (0x0079fe10): off with nothing asking, then it flips every second.
+TEST(HudCommander_RequestIconBlinks)
+{
+	menu::RequestIconBlink blink;
+	CHECK(!blink.update(false, 0.1f));
+	CHECK(blink.update(true, 0.1f)); // the first frame flips it on
+	CHECK(blink.update(true, 0.4f) && blink.update(true, 0.4f)); // 0.2 s left
+	CHECK(!blink.update(true, 0.4f)); // flipped off
+	CHECK(!blink.update(false, 0.1f));
+	CHECK(!blink.update(true, 0.1f)); // the held timer runs on from 1 s
+}
+
 // The scoreboard's kick box (0x007bc590 types 10 / 11 -> 0x00573f20):
 // silent while a vote runs, else the start's checks (self, the host, the
 // wait after one's own start).
@@ -1275,6 +1287,10 @@ TEST(HudMenus_CommanderSquadPanelAndInfo)
 	CHECK(s.world.issueOrder(2, 4, game::GameWorld::OrderType::MapMove, 10, 10, me));
 	commander.update(me);
 	commander.click(me, 0, 4);
+	commander.update(me);
+	// The panel shows the squad's own (the leader's) order, not the commander's (0x007ab790, slot 0x10).
+	CHECK(s.hud.listCell(15, 0, 2).empty());
+	CHECK(s.world.issueSquadLeaderOrder(a, game::GameWorld::OrderType::MapMove, 10, 10));
 	commander.update(me);
 	CHECK(s.hud.listCell(15, 0, 2) == "Ingame/Commander/Orders/orderMove.tga");
 	CHECK(s.hud.string("SquadOrderPicturePathString") == "Ingame/Commander/Orders/orderMove.tga"
