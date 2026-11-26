@@ -6391,6 +6391,43 @@ uint32_t GameWorld::squadBeacon(int team, int squad) const
 	return it != m_beacons.end() && m_objects.find(it->second) ? it->second : 0;
 }
 
+bool GameWorld::squadLeaderSpawnActive(int playerId) const
+{
+	const Player* player = findPlayer(playerId);
+	if (!player || player->squad == 0) {
+		return false;
+	}
+	for (const int member : squadMembers(player->team, player->squad)) {
+		const Player* leader = findPlayer(member);
+		const Body* enterBody = nullptr;
+		int seat = -1;
+		if (leader && squadLeaderSpawnAvailable(*player, *leader, enterBody, seat)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool GameWorld::squadLeaderSpawnAvailable(const Player& player, const Player& leader, const Body*& enterBody,
+	int& enterSeat) const
+{
+	enterBody = nullptr;
+	enterSeat = -1;
+	if (player.squad == 0 || player.squad != leader.squad || player.team != leader.team || &player == &leader
+		|| !leader.squadLeader || !leader.alive || !m_objects.find(leader.object)) {
+		return false;
+	}
+	if (!leader.vehicle) {
+		// The on-foot scatter is attempted when selected; availability here
+		// follows the living-leader gate without consuming scatter RNG.
+		return true;
+	}
+	const world::Object* soldier = m_objects.find(leader.object);
+	const physics::Vec3 at {soldier->position().x, soldier->position().y, soldier->position().z};
+	enterBody = spawnSeat(player.team, at, player.ai ? 15.0f : 5.0f, leader.vehicle, enterSeat);
+	return enterBody != nullptr;
+}
+
 // Spawning with the squad: at the beacon, or a metre behind a living
 // leader on foot. In the engine the leader's soldier carries a
 // SquadLeaderSpawnPoint child (0x004c7f10 creates it, Common.con: a
@@ -6445,6 +6482,9 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 	for (const int member : squadMembers(player.team, player.squad)) {
 		const Player* leader = findPlayer(member);
 		if (leader && leader->squadLeader && leader->alive && leader != &player) {
+			const Body* enterBody = nullptr;
+			int selectedSeat = -1;
+			const bool available = squadLeaderSpawnAvailable(player, *leader, enterBody, selectedSeat);
 			at = m_objects.find(leader->object);
 			if (!at) {
 				return false;
@@ -6454,15 +6494,15 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 				// becomes enter-on-spawn while the leader's control object is a
 				// vehicle (0x004c7f10, 0x005b19a0). Its seat search is centred
 				// on that soldier and uses the human 5 m / bot 15 m radius.
-				const physics::Vec3 base {at->position().x, at->position().y, at->position().z};
-				const Body* body = spawnSeat(player.team, base, player.ai ? 15.0f : 5.0f, leader->vehicle, enterSeat);
-				if (!body) {
+				if (!available || !enterBody) {
 					at = nullptr; // no free seat: refuse, with no ground fallback
 					return true;
 				}
-				enterVehicle = body->object;
+				const physics::Vec3 base {at->position().x, at->position().y, at->position().z};
+				enterVehicle = enterBody->object;
 				position = base;
 				yaw = leader->body.yawDegrees;
+				enterSeat = selectedSeat;
 				return true;
 			}
 			bool prone = false;

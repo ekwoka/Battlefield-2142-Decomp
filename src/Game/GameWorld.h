@@ -1158,6 +1158,9 @@ public:
 	int joinAiSquad(int id);
 	// The squad's beacon object (0 for none).
 	uint32_t squadBeacon(int team, int squad) const;
+	// Whether this player has a living squad leader to spawn on; seated
+	// leaders require a free same-team seat within the spawn-point radius.
+	bool squadLeaderSpawnActive(int player) const;
 	// Unlocks: a kit's ItemContainer children (one per branch and level,
 	// unlockLevel) add their items once unlocked; a slot holds the first
 	// unlocked item for it (the customise screen's choice is not in yet).
@@ -4516,6 +4519,7 @@ private:
 	// `pod`: the vehicle a beacon spawn drops in (empty for none).
 	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod,
 		uint32_t& enterVehicle, int& enterSeat);
+	bool squadLeaderSpawnAvailable(const Player& player, const Player& leader, const Body*& enterBody, int& enterSeat) const;
 	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr, bool ai = false);
 	// `pod`: the spawn point's spawnInPod (+0x2b): the tries 150 m up
 	// (0x005b2200 / 0x005b1e70; see spawnAtSquad).

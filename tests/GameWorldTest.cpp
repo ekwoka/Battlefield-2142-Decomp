@@ -4037,6 +4037,7 @@ TEST(GameWorld_SquadMemberSpawnsIntoSeatedLeadersVehicle)
 	CHECK(range.world->joinSquad(member, 1));
 	CHECK(range.world->joinSquad(third, 1));
 	CHECK(range.world->spawnSoldier(leader));
+	CHECK(range.world->squadLeaderSpawnActive(member)); // living leader on foot
 	game::GameWorld::PlayerInfo info;
 	CHECK(range.world->playerInfo(leader, info));
 	world::Object* vehicle = range.objects.create(apc, {info.position.x, info.position.y, info.position.z + 3});
@@ -4051,12 +4052,14 @@ TEST(GameWorld_SquadMemberSpawnsIntoSeatedLeadersVehicle)
 	range.world->setInput(leader, {});
 	range.world->tick(1 / 30.0f);
 	CHECK(range.world->playerInfo(leader, info) && info.vehicle == vehicle->id());
+	CHECK(range.world->squadLeaderSpawnActive(member)); // human free-seat check, within 5 m
 
 	range.world->setSpawnChoice(member, game::GameWorld::kSpawnOnLeader);
 	CHECK(range.world->spawnSoldier(member));
 	CHECK(range.world->playerInfo(member, info) && info.vehicle == vehicle->id());
 	CHECK(info.seat >= 0);
 	CHECK(range.world->vehicleOccupants(vehicle->id()).size() == 2);
+	CHECK(!range.world->squadLeaderSpawnActive(third)); // full vehicle is inactive
 	range.world->setSpawnChoice(third, game::GameWorld::kSpawnOnLeader);
 	CHECK(!range.world->spawnSoldier(third));
 	CHECK(range.world->playerInfo(third, info) && !info.alive);

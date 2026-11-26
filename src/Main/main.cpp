@@ -1126,6 +1126,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const int legacyChosen = world.spawnChoice(me.id);
 	const int localGroupChoice = round.spawnGroupChoice(me.id);
 	const int chosen = world.joined() ? legacyChosen : localGroupChoice;
+	const int localChosen = legacyChosen;
 	const auto controlPoints = world.controlPointList();
 	// The spawn icons are drawn over the vehicles, silos and teammates (0x00796379
 	// after 0x00796143 and 0x0079629f), so they are collected and added below.
@@ -1207,12 +1208,31 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// The squad leader's beacon (the leader, to spawn on, is drawn with the team below).
 	if (spawning && me.squad != 0) {
 		if (const world::Object* beacon = round.objects().find(round.squadBeacon(me.team, me.squad))) {
-			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
-					(legacyChosen == game::GameWorld::kSpawnOnBeacon ? "spawn_SquadSelected.dds" : "spawn_SquadUnSelected.dds"),
+			const menu::SquadSpawnMarkerStyle style =
+				menu::squadSpawnMarkerStyle(localChosen == game::GameWorld::kSpawnOnBeacon, true);
+			hud::HudManager::MapMarker spawn {style.texture,
 				beacon->position().x, beacon->position().z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = kMarkerBeacon;
-			spawn.label = "HUD_TEXT_MENU_SPAWN_PLAYER_SL";
+			spawn.label = style.label;
 			spawnMarkers.push_back(spawn);
+		}
+	}
+	// The local squad's leader is its own spawn group, separate from any APC
+	// marker at the same position. Joined games keep their network group path.
+	if (spawning && !world.joined() && me.squad != 0) {
+		for (const auto& player : world.playerList()) {
+			if (!player.alive || player.team != me.team || player.squad != me.squad || !player.squadLeader || player.id == me.id) {
+				continue;
+			}
+			const bool selected = localChosen == game::GameWorld::kSpawnOnLeader;
+			const bool active = round.squadLeaderSpawnActive(me.id);
+			const menu::SquadSpawnMarkerStyle style = menu::squadSpawnMarkerStyle(selected, active);
+			hud::HudManager::MapMarker spawn {style.texture, player.position.x,
+				player.position.z, hud::HudManager::kSpawnMarkerSize};
+			spawn.id = kMarkerLeader;
+			spawn.label = style.label;
+			spawnMarkers.push_back(spawn);
+			break;
 		}
 	}
 	// The vehicles (Bf2MenuMapNode 0x00793b60; see HudMenusVehicles.h): by
@@ -1406,7 +1426,8 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		mate.clamp = true;
 		mate.iconAlpha = look.iconAlpha;
 		mate.upright = look.arrow || !in.call.empty(); // the heading is on the arrow, or there is none
-		const bool selectableSquadLeader = !local && spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad;
+		const bool selectableSquadLeader = world.joined() && !local && spawning && player.squadLeader && me.squad != 0
+			&& player.squad == me.squad;
 		if (selectableSquadLeader) {
 			mate.id = kMarkerLeader; // the spawn screen's selectable leader marker
 		}
