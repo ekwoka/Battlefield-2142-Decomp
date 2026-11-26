@@ -9639,13 +9639,13 @@ void BotManager::updateStrategy(float seconds)
 				// The retail post goes to the game's commander order for any
 				// squad (IBFCommander 0x00897120 -> squad manager slot 0x4c,
 				// 0x004c5530; its 2/0x1a asks a human leader to accept it).
-				// 0x10062b80 and 0x100ccc70 check no human commander (the request
-				// answer 0x10089fa0 does); 0x10062b80's caller is not traced.
+				// No bot commander exists while a human commands (as 0x10089fa0
+				// checks for the request answer), so nothing is posted then.
 				// Here only a human leader's squad has it: the bot leaders answer
 				// in the AI (the side's orders) and the HUD shows none for them.
 				const int leader = squads[id].leader;
 				GameWorld::PlayerInfo leaderInfo;
-				if (leader >= 0 && m_world.playerInfo(leader, leaderInfo) && !leaderInfo.ai) {
+				if (!humanCommands(team) && leader >= 0 && m_world.playerInfo(leader, leaderInfo) && !leaderInfo.ai) {
 					// Slot 0xc is the map attack (type 5), 0x14 the map defend (6).
 					const GameWorld::SquadOrder order = orderFor(area);
 					m_world.issueOrder(team, id,
