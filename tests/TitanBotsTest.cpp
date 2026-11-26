@@ -86,6 +86,13 @@ TEST(Titan_BotsReachGunConsolesFromSpawnRoom)
 // it off, and fly its transport to a silo with riders who drop in pods. The
 // same round runs for each half of the checks (a test each, below): the
 // gunship's, and the transport's and its pods'.
+// Bots on the deck: half the Titan's guns take three, the gunship a pilot and
+// a gunner, the transport a pilot and its two gunners; the pods need a
+// passenger after those. Which bots win which seat is a race, so the crew
+// holds more than the seats ahead of the pods (an arrangement that leaves
+// the gunner seats short of the pod seat is as valid as any other).
+constexpr int kDeckBots = 12;
+
 static void botsFlyDeckAircraftFromTitan(const bool gunship)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
@@ -99,6 +106,7 @@ static void botsFlyDeckAircraftFromTitan(const bool gunship)
 		// known as aircraft by their AI templates.
 		game::BotSettings settings;
 		loadAircraftAi(level, settings);
+		settings.maxBots = 2 * kDeckBots; // the default 16 would leave the second team's crew unmanaged
 		settings.viewDistance = 300; // No level fog is loaded by this fixture.
 		const bool enhanced = true;
 		settings.enhanced = &enhanced;
@@ -130,13 +138,13 @@ static void botsFlyDeckAircraftFromTitan(const bool gunship)
 				(name.find("_ag") != std::string::npos ? t.gunship : t.transport) = v.object;
 			}
 			CHECK(t.gunship && t.transport);
-			for (int i = 0; i < 8; ++i) {
+			for (int i = 0; i < kDeckBots; ++i) {
 				const int id = level.world->addPlayer("Air" + std::to_string(team) + std::to_string(i), team, true);
 				CHECK(level.world->spawnSoldier(id));
 				game::GameWorld::PlayerInfo info;
 				CHECK(level.world->playerInfo(id, info));
 				CHECK(level.world->setSoldierPosition(info.soldier,
-					level.world->titanToWorld(titan->object, {static_cast<float>(i * 2) - 7.5f, 11.5f, -40})));
+					level.world->titanToWorld(titan->object, {(static_cast<float>(i) - (kDeckBots - 1) / 2.0f) * 1.6f, 11.5f, -40.0f})));
 				t.crew.push_back(id);
 			}
 		}
