@@ -12378,7 +12378,8 @@ const physics::SoldierBody* GameWorld::soldierBody(int id) const
 
 bool GameWorld::posesParts(uint32_t object) const
 {
-	return m_bonedObjects.count(object) || vehicle(object) || isTitan(object)
+	return m_bonedObjects.count(object) || vehicle(object) || isTitan(object) || isDrone(object)
+		|| std::any_of(m_sentryGuns.begin(), m_sentryGuns.end(), [object](const Drone& d) { return d.object == object; })
 		|| std::any_of(m_pods.begin(), m_pods.end(), [object](const Pod& p) { return p.object == object; });
 }
 
@@ -12423,6 +12424,17 @@ bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& 
 			if (placed && placed->objectTemplate() && placed->objectTemplate()->name().compare(0, 12, "missile_silo") == 0) {
 				offset = {};
 				rotation = {0, -90, 0};
+				return true;
+			}
+		}
+	}
+	// A drone's or sentry's auto controller turns its yaw bundle: the gun's
+	// heading (fireSentry's gunYaw, a world heading) against the body's.
+	for (const std::vector<Drone>* list : {&m_drones, &m_sentryGuns}) {
+		for (const Drone& drone : *list) {
+			if (drone.object == object && !drone.yawBundle.empty() && sameName(drone.yawBundle, part)) {
+				offset = {};
+				rotation = {std::remainder(drone.gunYaw * 57.29578f - drone.yaw, 360.0f), 0, 0};
 				return true;
 			}
 		}
@@ -16950,6 +16962,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 	drone.gunYaw = drone.yaw * 3.14159265f / 180.0f;
 	drone.hoverHeight = 1; // the soldier's physics origin over its feet (0x005f0a00)
 	drone.control = &kUavDrone;
+	drone.yawBundle = autoYawBundle(t);
 	if (const world::ObjectTemplate* force = findInTree(m_templates, t, "ForceObject")) {
 		const char* axes[3] = {"regulatePosX", "regulatePosY", "regulatePosZ"};
 		for (int axis = 0; axis < 3; ++axis) {
@@ -17931,6 +17944,44 @@ const world::ObjectTemplate* GameWorld::autoControlledGun(const world::ObjectTem
 	return gun;
 }
 
+// The bundle an auto controller's yaw turns: the outermost RotationalBundle
+// above the gun whose maxSpeed has a yaw (x) component, as a seat's
+// yawBundle is (unl_drone_sentry_cam over unl_drone_sentry_guns, which only
+// pitches). Empty when the gun hangs on no such bundle.
+std::string GameWorld::autoYawBundle(const world::ObjectTemplate& t) const
+{
+	const world::ObjectTemplate* gun = autoControlledGun(t, nullptr);
+	std::string found;
+	const std::function<bool(const world::ObjectTemplate&, const std::string&, int)> walk = [&](const world::ObjectTemplate& at,
+																							   const std::string& yaw, int depth) {
+		for (const world::ChildTemplate& child : at.children()) {
+			const world::ObjectTemplate* c = depth < 8 ? m_templates.find(child.name) : nullptr;
+			if (!c) {
+				continue;
+			}
+			if (c == gun) {
+				found = yaw;
+				return true;
+			}
+			std::string next = yaw;
+			if (next.empty() && sameName(c->typeName(), "RotationalBundle")) {
+				const auto speed = c->settings().find("maxSpeed");
+				if (speed != c->settings().end() && parseVec3(speed->second).x != 0) {
+					next = c->name();
+				}
+			}
+			if (walk(*c, next, depth + 1)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	if (gun) {
+		walk(t, {}, 0);
+	}
+	return found;
+}
+
 // A deployed sentry gun (Unl_Deployer_Sentrygun's eu_sentrygun,
 // setAutoControllerTemplateName SentryGun): its PlayerControlObject is
 // run by the SentryGun auto controller as the sentry drone's is by
@@ -17962,6 +18013,7 @@ void GameWorld::addSentryGun(const Player& player, const world::Object& placed)
 	sentry.position = physics::Vec3 {placed.position().x, placed.position().y + sentry.gunHeight, placed.position().z};
 	sentry.yaw = placed.rotation().x;
 	sentry.gunYaw = sentry.yaw * 3.14159265f / 180.0f;
+	sentry.yawBundle = autoYawBundle(*t);
 	const FireArmSettings settings = FireArmSettings::fromTemplate(*gun);
 	sentry.weapon = std::make_unique<FireArm>(settings);
 	sentry.gunDeviation = DeviationBuildUp::fromTemplate(*gun);

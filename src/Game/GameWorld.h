@@ -4622,6 +4622,9 @@ private:
 		// target and when it was last seen; the trigger waits until
 		// fireFrom (the reaction time from the target's taking).
 		float gunYaw = 0;
+		// The RotationalBundle that yaw turns (partPose): the outermost
+		// bundle above the gun with a yaw speed (unl_drone_sentry_cam).
+		std::string yawBundle;
 		int target = -1;
 		float targetSeenAt = 0;
 		float fireFrom = 0;
@@ -4939,6 +4942,7 @@ private:
 	uint32_t gunMessages(uint32_t object, uint32_t& pulses) const;
 	void addSentryGun(const Player& player, const world::Object& placed);
 	const world::ObjectTemplate* autoControlledGun(const world::ObjectTemplate& t, float* height) const;
+	std::string autoYawBundle(const world::ObjectTemplate& t) const;
 	void stepSentryGuns(float seconds);
 	void registerSeatControllers(const world::Object& vehicle);
 	void stepSeatControllers(float seconds);

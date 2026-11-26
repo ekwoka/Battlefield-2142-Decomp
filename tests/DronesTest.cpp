@@ -51,7 +51,7 @@ struct Field {
 				"fire.projectileStartPosition", "ammo.magSize", "ammo.nrOfMags", "ammo.reloadTime", "ammo.autoReload", "velocity",
 				"projectileTemplate", "itemIndex", "pulse.fov", "pulse.viewDistance", "pulse.revealTime", "damage",
 				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev",
-				"autoControllerTemplateName"});
+				"autoControllerTemplateName", "maxSpeed"});
 		std::string out;
 		// The sentry drone's siren (Vehicles_server.zip's Car_horn_Alt, a
 		// root child of unl_drone_sentry before its gun): a GenericFireArm
@@ -259,6 +259,32 @@ static game::GameWorld::PlayerInfo me(Field& field, int player)
 	game::GameWorld::PlayerInfo info;
 	field.world->playerInfo(player, info);
 	return info;
+}
+
+// The sentry's camera head turns as its auto controller scans: its yaw
+// bundle is asked for a pose (partPose) and the drone is one that poses
+// parts, though no vehicle; the guns bundle under it only pitches.
+TEST(Drones_SentryHeadScansAsPosed)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	CHECK(field.world->posesParts(drone));
+	world::Vec3 offset, first, later;
+	field.run(3.0f); // settled over its owner: the body's heading steady
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_cam", offset, first));
+	CHECK(!field.world->partPose(drone, "unl_drone_sentry_guns", offset, later));
+	field.run(0.5f);
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_cam/unl_drone_sentry_cam", offset, later));
+	// scanningSpeed 0.13 x 30 = 3.9 rad/s: 0.5 s is 112 degrees (wrapped), the body steady.
+	float turned = std::fmod(later.x - first.x + 540.0f, 360.0f) - 180.0f;
+	CHECK(std::fabs(turned - 111.7f) < 3.0f);
+	CHECK(std::fabs(first.y) < 0.001f && std::fabs(first.z) < 0.001f);
 }
 
 TEST(Drones_SentryShootsEnemies)
