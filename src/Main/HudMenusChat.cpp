@@ -723,6 +723,31 @@ void HudQuestions::tick(float seconds)
 	}
 }
 
+bool CommanderOrderPrompt::poll(bool joined, bool leader, int team, int squad, uint32_t serial)
+{
+	const bool same = leader && m_leader && team == m_team && squad == m_squad;
+	bool ask = false;
+	if (!leader) {
+		m_notice = false; // only a squad leader takes the message (0x00756b60 case 0x1a)
+	} else if (joined) {
+		ask = m_notice && serial != 0;
+	} else {
+		ask = same && serial > m_serial;
+	}
+	if (ask) {
+		m_notice = false;
+		m_asked = true;
+		m_askedTeam = team;
+		m_askedSquad = squad;
+		m_askedSerial = serial;
+	}
+	m_leader = leader;
+	m_team = team;
+	m_squad = squad;
+	m_serial = serial;
+	return ask;
+}
+
 void CommanderMessages::line(const char* key, int team) const
 {
 	if (onLine) {

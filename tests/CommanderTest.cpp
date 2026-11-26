@@ -512,6 +512,7 @@ TEST(Commander_OrdersAndBots)
 	const game::GameWorld::SquadOrder* order = world.squadOrder(2, 1);
 	CHECK(order && order->type == game::GameWorld::OrderType::MapDefend && order->position.z == 160 && !order->accepted
 		&& order->radius == 80);
+	const uint32_t firstSerial = order->serial;
 	world.acceptOrder(member, true); // not the leader's
 	CHECK(!world.squadOrder(2, 1)->accepted);
 	world.acceptOrder(leader, true);
@@ -532,6 +533,10 @@ TEST(Commander_OrdersAndBots)
 		game::GameWorld::PlayerInfo info;
 		CHECK(world.playerInfo(member, info) && info.position.z > 5 && std::fabs(info.position.x) < 10); // beside its leader in the line (AIDLL 0x100f53a0: 6.9 m)
 	}
+	// An identical order issued again is a new one (0x004c5530 sends each):
+	// its serial moves on and the leader's answer is asked for again.
+	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
+	CHECK(world.squadOrder(2, 1)->serial > firstSerial && !world.squadOrder(2, 1)->accepted);
 	// Turned down, it goes.
 	world.acceptOrder(leader, false);
 	CHECK(world.squadOrder(2, 1) == nullptr);

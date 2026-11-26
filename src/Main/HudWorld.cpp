@@ -572,6 +572,7 @@ bool RemoteHudWorld::squadOrder(int team, int squad, bool fromCommander, SquadOr
 	}
 	out = {};
 	out.type = game::GameWorld::orderTypeFromKind(o->kind);
+	out.serial = o->serial;
 	out.position = {o->point.x, o->point.y, o->point.z};
 	if (const net::RemoteObject* on = o->object ? m_world.object(o->object) : nullptr; on && on->hasPosition) {
 		out.position = {on->position.x, on->position.y, on->position.z};

@@ -562,7 +562,7 @@ bool RemoteWorld::apply(const GameEvent& event)
 			// The squad's order (slot 0x48) or the commander's to it (0x4c),
 			// unanswered until the leader says (the commander's).
 			SquadOrder& order = m_orders[{info.team, info.squad, info.store}];
-			order = SquadOrder {info.team, info.squad, info.store, info.kind, info.object, info.point(), info.store == 0};
+			order = SquadOrder {info.team, info.squad, info.store, info.kind, info.object, info.point(), info.store == 0, ++m_orderSerial};
 			return true;
 		}
 		if (info.store != kSquadOrderStoreRequest) {

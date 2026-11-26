@@ -2049,7 +2049,7 @@ void HostedGame::trackOrders()
 			for (int store = 0; store < 2; ++store) {
 				const game::GameWorld::SquadOrder* o = orders[store];
 				if (o && o->type != game::GameWorld::OrderType::None) {
-					now[{team, squad, store}] = {static_cast<int>(o->type), o->position, o->accepted};
+					now[{team, squad, store}] = {static_cast<int>(o->type), o->position, o->accepted, o->serial};
 				}
 			}
 		}
@@ -2058,7 +2058,7 @@ void HostedGame::trackOrders()
 		const auto [team, squad, store] = key;
 		const auto was = m_ordersSent.find(key);
 		const bool moved = was == m_ordersSent.end() || was->second.kind != order.kind
-			|| physics::lengthSquared(was->second.at - order.at) > 1e-4f;
+			|| physics::lengthSquared(was->second.at - order.at) > 1e-4f || was->second.serial != order.serial;
 		if (moved) {
 			net::SquadOrderInfo info;
 			info.team = team;
@@ -2069,6 +2069,16 @@ void HostedGame::trackOrders()
 			info.floats[1] = order.at.y;
 			info.floats[2] = order.at.z;
 			sendToPlaying(net::makeSquadOrder(info));
+			if (store == 1) {
+				// 0x004c5530's member loop: 2/0x1a, the squad, to each of the
+				// squad's members (only its leader's HUD takes it).
+				for (const auto& [id, c] : m_clients) {
+					game::GameWorld::PlayerInfo member;
+					if (c.player >= 0 && m_round->playerInfo(c.player, member) && member.team == team && member.squad == squad) {
+						sendTo(id, net::makePostRemote(2, 0x1a, net::int32Payload(squad)));
+					}
+				}
+			}
 		}
 		if (store == 1 && order.accepted && (moved || !was->second.accepted)) {
 			sendToPlaying(net::makeAcceptOrder({squad, team, true, store, order.kind}));

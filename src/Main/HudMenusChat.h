@@ -41,6 +41,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -323,6 +324,33 @@ public:
 private:
 	void show() const;
 	std::array<std::optional<Question>, 7> m_questions {};
+};
+
+// The squad leader's question for the commander's order (kind 2), asked
+// on 2/0x1a (0x00756b60: only for a squad leader; 0x0079e440 with kind 2,
+// value 1, shown). 0x004c5530 sends it with every order it writes, an
+// identical re-issue included, and a new one replaces the question. The
+// answer is checked against the order it was asked for: a cancelled or
+// replaced order, or another squad, takes none.
+class CommanderOrderPrompt {
+public:
+	// A 2/0x1a received (a joined game; a local round has no messages).
+	void notice() { m_notice = true; }
+	// Each frame with the local player's squad store-1 order (`serial` 0:
+	// none). True: ask now. A joined game asks on a notice once the order
+	// is there (state and notice arrive separately); a local round asks
+	// when the order is issued again while we lead the squad.
+	bool poll(bool joined, bool leader, int team, int squad, uint32_t serial);
+	bool current(int team, int squad, uint32_t serial) const
+	{
+		return m_asked && m_askedTeam == team && m_askedSquad == squad && m_askedSerial == serial;
+	}
+	void clear() { m_asked = false; }
+
+private:
+	bool m_notice = false, m_leader = false, m_asked = false;
+	int m_team = 0, m_squad = 0, m_askedTeam = 0, m_askedSquad = 0;
+	uint32_t m_serial = 0, m_askedSerial = 0;
 };
 
 // Commander HUD notifications: the immediate application acknowledgement

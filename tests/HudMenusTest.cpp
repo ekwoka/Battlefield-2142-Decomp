@@ -1148,6 +1148,64 @@ TEST(HudVotes_VoterAnswersTheQuestion)
 	CHECK(!asked && !bobQuestions.front() && !bob.castVote(2, true, cast));
 }
 
+// The commander's order to a squad is the leader's question (2/0x1a,
+// 0x00756b60 case 0x1a -> 0x0079e440 with kind 2). A local round asks when
+// the order is issued while we lead the squad, an identical one again
+// included; a joined game on the message once the order is there (state and
+// message arrive in either order); a member hears nothing. The answer
+// takes the order asked about only.
+TEST(HudCommanderOrder_QuestionAndStaleAnswers)
+{
+	menu::CommanderOrderPrompt local;
+	// Leading, an order appears: asked. The same serial next frame: not again.
+	CHECK(!local.poll(false, true, 2, 1, 0));
+	CHECK(local.poll(false, true, 2, 1, 1));
+	CHECK(local.current(2, 1, 1));
+	CHECK(!local.poll(false, true, 2, 1, 1));
+	// An identical order issued again carries a new serial: a new question.
+	CHECK(local.poll(false, true, 2, 1, 2));
+	CHECK(!local.current(2, 1, 1) && local.current(2, 1, 2));
+	// Cancelled, then a new one: asked again; the old question is stale.
+	CHECK(!local.poll(false, true, 2, 1, 0));
+	CHECK(local.poll(false, true, 2, 1, 3));
+	CHECK(!local.current(2, 1, 2));
+	// Another squad's old order is not asked when we take the lead there,
+	// and the old question is no answer for it.
+	CHECK(!local.poll(false, false, 2, 1, 3));
+	CHECK(!local.poll(false, true, 2, 4, 9));
+	CHECK(!local.current(2, 4, 9));
+	CHECK(local.poll(false, true, 2, 4, 10) && local.current(2, 4, 10));
+
+	// A joined game: the message first, the order after.
+	menu::CommanderOrderPrompt joined;
+	joined.notice();
+	CHECK(!joined.poll(true, true, 1, 3, 0));
+	CHECK(joined.poll(true, true, 1, 3, 5) && joined.current(1, 3, 5));
+	CHECK(!joined.poll(true, true, 1, 3, 5)); // asked once
+	// The order first, the message after.
+	CHECK(!joined.poll(true, true, 1, 3, 6));
+	joined.notice();
+	CHECK(joined.poll(true, true, 1, 3, 6) && joined.current(1, 3, 6) && !joined.current(1, 3, 5));
+	// A member's HUD ignores the message (it does not wait for a promotion).
+	joined.notice();
+	CHECK(!joined.poll(true, false, 1, 3, 7));
+	CHECK(!joined.poll(true, true, 1, 3, 7));
+
+	// The question itself: kind 2, answered by c_GIYes, timed out unanswered.
+	menu::HudQuestions questions;
+	std::vector<std::pair<bool, bool>> answers;
+	questions.onAnswer = [&](const menu::HudQuestions::Question& q, bool yes, bool quiet) {
+		CHECK(q.kind == menu::HudQuestions::CommanderOrder);
+		answers.push_back({yes, quiet});
+	};
+	questions.ask(menu::HudQuestions::CommanderOrder, 1, "order");
+	questions.answer(true);
+	CHECK(answers.size() == 1 && answers[0] == std::make_pair(true, false) && !questions.front());
+	questions.ask(menu::HudQuestions::CommanderOrder, 1, "order");
+	questions.tick(31);
+	CHECK(answers.size() == 2 && answers[1] == std::make_pair(false, true));
+}
+
 // The scoreboard's kick box (0x007bc590 types 10 / 11 -> 0x00573f20):
 // silent while a vote runs, else the start's checks (self, the host, the
 // wait after one's own start).

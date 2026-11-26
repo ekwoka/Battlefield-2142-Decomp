@@ -2559,6 +2559,47 @@ TEST(Bots_StrategyOrdersSquadsToAttack)
 	CHECK(closer == 4);
 }
 
+// The SAI posts its order through IBFCommander (AIDLL 0x100ccc70 /
+// 0x100cccb0 -> 0x00897120 -> squad manager slot 0x4c, 0x004c5530), whose
+// 2/0x1a asks a human squad leader to accept it: the game's commander order
+// for the human-led squad (a map attack or defend), none for the bots' own.
+TEST(Bots_StrategyOrdersAHumanLeadersSquadThroughTheCommander)
+{
+	Field field;
+	world::ObjectTemplate* neutral = field.templates.create("ControlPoint", "cp_mid");
+	neutral->settings()["controlPointId"] = "3";
+	neutral->settings()["team"] = "0";
+	neutral->settings()["radius"] = "10";
+	field.objects.create(neutral, {0, 0, 60});
+	field.world = std::make_unique<game::GameWorld>(field.templates, field.objects);
+	field.world->enablePhysics(field.files, field.collisionTemplates,
+		{[](float, float) { return 0.0f; }, [](float, float, physics::Vec3& normal) {
+			 normal = {0, 1, 0};
+			 return 0.0f;
+		 }});
+	field.world->autoRespawn = false;
+	field.world->startRound();
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	const int human = field.world->addPlayer("Me", 2, false);
+	field.world->joinSquad(human, 1);
+	field.world->spawnSoldier(human);
+	for (int i = 0; i < 3; ++i) {
+		const int id = field.world->addPlayer("Eu", 2, true);
+		field.world->joinSquad(id, i < 1 ? 1 : 2);
+		field.world->spawnSoldier(id);
+	}
+	settle(bots, 1);
+	const game::GameWorld::SquadOrder* order = field.world->squadOrder(2, 1);
+	CHECK(order && order->type == game::GameWorld::OrderType::MapAttack && order->serial > 0 && !order->accepted);
+	CHECK(!field.world->squadOrder(2, 2)); // the bot leader's squad keeps the AI's order
+	CHECK(bots.squadOrder(2, 1) && bots.squadOrder(2, 2));
+	// The human turns it down: it goes.
+	field.world->acceptOrder(human, false);
+	CHECK(!field.world->squadOrder(2, 1));
+}
+
 namespace {
 
 // A round on Cerbere_Landing (gpm_sp, 16) with the game's own AI scripts:

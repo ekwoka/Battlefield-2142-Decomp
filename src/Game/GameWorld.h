@@ -2517,6 +2517,10 @@ public:
 		float radius = 80;
 		bool fromCommander = true;
 		bool accepted = false; // the squad leader's answer (Commander.commRoseAccept 1)
+		// Counts the commander's orders issued (0x004c5530 sends each one, an
+		// identical re-issue included, with its 2/0x1a): what a leader's
+		// question is for.
+		uint32_t serial = 0;
 	};
 	// The commander's order: false for a squad that doesn't exist or an
 	// order from someone else than the team's commander (-1 for none: the
@@ -5017,6 +5021,7 @@ private:
 	void removeUavDrone(int team);
 	CommanderTeam m_commanders[3];
 	std::map<std::pair<int, int>, SquadOrder> m_orders;       // (team, squad): the commander's
+	uint32_t m_orderSerial = 0;
 	std::map<std::pair<int, int>, SquadOrder> m_leaderOrders; // (team, squad): the leader's
 	// An asset: a placed object whose template holds a RemoteControlledObject.
 	struct CommanderAsset {

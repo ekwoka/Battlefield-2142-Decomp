@@ -9601,6 +9601,15 @@ void BotManager::updateStrategy(float seconds)
 				}
 			}
 		}
+		// The order a squad is given for an area: defend an owned area that
+		// is not contested, attack otherwise.
+		const auto orderFor = [&](int area) {
+			const AreaView& v = views[static_cast<size_t>(area)];
+			GameWorld::SquadOrder order;
+			order.type = v.point->team == team ? GameWorld::OrderType::Defend : GameWorld::OrderType::Attack;
+			order.position = {v.order.x, m_world.terrainHeight(v.order.x, v.order.z), v.order.z};
+			return order;
+		};
 		// Each chosen area short of its required strength takes the nearest
 		// squads with no order (0x10062b80 -> 0x10089730, which skips a squad of
 		// strength 0) until it holds more than it requires.
@@ -9627,6 +9636,19 @@ void BotManager::updateStrategy(float seconds)
 				if (const auto own = m_squads.find({team, id}); own != m_squads.end()) {
 					own->second.seenType = GameWorld::OrderType::None;
 				}
+				// The post goes to the game's commander order (the interface's
+				// 0x00897120 → squad manager slot 0x4c, 0x004c5530), whose 2/0x1a
+				// asks a human leader to accept it (the bot leaders answer in the
+				// AI: the side's orders).
+				const int leader = squads[id].leader;
+				GameWorld::PlayerInfo leaderInfo;
+				if (leader >= 0 && m_world.playerInfo(leader, leaderInfo) && !leaderInfo.ai) {
+					// Slot 0xc is the map attack (type 5), 0x14 the map defend (6).
+					const GameWorld::SquadOrder order = orderFor(area);
+					m_world.issueOrder(team, id,
+						order.type == GameWorld::OrderType::Defend ? GameWorld::OrderType::MapDefend : GameWorld::OrderType::MapAttack,
+						order.position.x, order.position.z);
+				}
 			}
 		}
 		// The orders: defend an owned area that is not contested, attack
@@ -9635,12 +9657,7 @@ void BotManager::updateStrategy(float seconds)
 		// AI's (Side::orders): the game's commander order, which the
 		// squad's HUD shows, is only ever a human commander's.
 		for (const auto& [id, area] : side.squadArea) {
-			const AreaView& v = views[static_cast<size_t>(area)];
-			const bool defend = v.point->team == team;
-			GameWorld::SquadOrder order;
-			order.type = defend ? GameWorld::OrderType::Defend : GameWorld::OrderType::Attack;
-			order.position = {v.order.x, m_world.terrainHeight(v.order.x, v.order.z), v.order.z};
-			side.orders[id] = order;
+			side.orders[id] = orderFor(area);
 			// The squad takes it at its next update (0x100c1eb0) and its bot
 			// leader answers (0x100c21b0, BotsSquad.cpp).
 		}
