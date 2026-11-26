@@ -5568,9 +5568,9 @@ int runGame(Options& options, Session& session)
 				if (!squadRequests.count()) {
 					return;
 				}
-				// A native host's virtual commander (enhanced.botCommander in gpm_ti) answers: not refused when the switch is on here.
-				if (!squadRequests.noCommanderNeeded && g_remoteHud->commander(me.team) < 0
-					&& !(botSettings.titanCommander() && options.gameMode == "gpm_ti")) {
+				// 0x007d6d20: refused here, by the client's own commander lookup. The host's virtual commander
+				// (enhanced.botCommander) is not known to a client, so it does not lift this.
+				if (!squadRequests.noCommanderNeeded && g_remoteHud->commander(me.team) < 0) {
 					round.hearRadio(me.id, 2, "no_commander_available");
 					return;
 				}
