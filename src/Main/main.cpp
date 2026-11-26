@@ -12098,17 +12098,31 @@ int runGame(Options& options, Session& session)
 				const bool done = hudManager.number("HudDone") != 0 || enterConfirms;
 				const auto action = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
-					kitMenu.commit();
+					bool joinedPickCanSubmit = true;
 					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
-						selectRemoteKit(*session.client, me.team, localKit);
-						session.client->selectSpawnGroup(joinedSpawnGroup(g_remoteHud->chosenSpawnMarker));
-						g_remoteHud->requestedSpawn = true;
+						const int group = joinedSpawnGroup(g_remoteHud->chosenSpawnMarker);
+						joinedPickCanSubmit = dice::main::joinedSpawnPickCanSubmit(true, group);
+						if (joinedPickCanSubmit) {
+							kitMenu.commit();
+							selectRemoteKit(*session.client, me.team, localKit);
+							session.client->selectSpawnGroup(group);
+							g_remoteHud->requestedSpawn = true;
+						}
 					} else if (!alive && !session.client) {
+						kitMenu.commit();
 						round.requestSpawn(round.localPlayer());
+					} else {
+						kitMenu.commit();
 					}
-					// setDone(true) closes even with no highlighted spawn group.
-					g_deploymentOpen = false;
-					if (!alive) g_spawnScreenHidden = true;
+					if (!joinedPickCanSubmit) {
+						// Dead players' deployment visibility is controlled by this
+						// flag, since g_deploymentOpen applies to living players.
+						g_spawnScreenHidden = false;
+					} else {
+						// setDone(true) closes even with no highlighted spawn group.
+						g_deploymentOpen = false;
+						if (!alive) g_spawnScreenHidden = true;
+					}
 				}
 				if ((deploymentPressed || done) && g_inputTrace) {
 					std::printf("deployment-input: enter=%d was-shown=%d confirms=%d alive=%d queued=%d\n",

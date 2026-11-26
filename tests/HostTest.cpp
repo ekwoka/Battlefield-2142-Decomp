@@ -1236,6 +1236,11 @@ TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
 	CHECK(round.spawnSoldier(leader));
 	for (int i = 0; i < 60; ++i) step();
 	CHECK(round.playerInfo(me, info) && !info.alive && cleared == 1);
+	// -1 is not a rejected pick: it asks the host for a random team spawn.
+	// The joined UI must therefore suppress it when an explicit marker fails
+	// to resolve, as covered by DeploymentScreen_UnmatchedJoinedPickStaysOpen.
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
 	client.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
