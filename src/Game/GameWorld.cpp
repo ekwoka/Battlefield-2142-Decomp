@@ -55,6 +55,16 @@ int integer(const world::ObjectTemplate& t, const char* name, int fallback)
 	return it == t.settings().end() ? fallback : std::atoi(it->second.c_str());
 }
 
+uint32_t unsignedInteger(const world::ObjectTemplate& t, const char* name, uint32_t fallback)
+{
+	const auto it = t.settings().find(name);
+	if (it == t.settings().end()) return fallback;
+	char* end = nullptr;
+	const unsigned long long value = std::strtoull(it->second.c_str(), &end, 10);
+	return end == it->second.c_str() || *end != '\0' || value > std::numeric_limits<uint32_t>::max()
+		? fallback : static_cast<uint32_t>(value);
+}
+
 bool flag(const world::ObjectTemplate& t, const char* name, bool fallback)
 {
 	return integer(t, name, fallback ? 1 : 0) != 0;
@@ -157,6 +167,27 @@ const world::ObjectTemplate* spawnPointChild(const world::ObjectTemplateManager&
 		}
 	}
 	return nullptr;
+}
+
+void spawnPointChildren(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& root,
+	std::vector<const world::ObjectTemplate*>& points, std::vector<physics::Vec3>& offsets,
+	const physics::Vec3& parentOffset = {}, const physics::Mat3& parentRotation = {}, int depth = 0)
+{
+	if (depth > 8) return;
+	for (const world::ChildTemplate& child : root.children()) {
+		const world::ObjectTemplate* c = templates.find(child.name);
+		if (!c) continue;
+		const physics::Mat3 childRotation = physics::Mat3::fromYawPitchRoll(
+			{child.rotation.x, child.rotation.y, child.rotation.z});
+		const physics::Vec3 offset = parentOffset + parentRotation.transform(
+			{child.position.x, child.position.y, child.position.z});
+		if (sameName(c->typeName(), "SpawnPoint")) {
+			points.push_back(c);
+			offsets.push_back(offset);
+		} else {
+			spawnPointChildren(templates, *c, points, offsets, offset, parentRotation * childRotation, depth + 1);
+		}
+	}
 }
 
 } // namespace
@@ -426,6 +457,13 @@ void GameWorld::startRound()
 	m_spawners.clear();
 	m_titans.clear();
 	m_silos.clear();
+	m_spawnGroups.clear();
+	m_spawnGroupIds.clear();
+	m_mobileSpawnGroupIds.clear();
+	m_nextSpawnGroupId = 1;
+	for (const auto& player : m_players) {
+		if (player && player->present) player->spawnGroupChoice = -1;
+	}
 	m_seatControllers.clear();
 	m_pods.clear();
 	m_parachutes.clear();
@@ -478,6 +516,19 @@ void GameWorld::startRound()
 			}
 		}
 	}
+	// Retail registers SpawnPoints in level object creation order. The key
+	// includes ObjectTemplate.setGroup (U32, default 0), not just the CP id.
+	for (const auto& owned : m_objects.objects()) {
+		if (owned->objectTemplate() && sameName(owned->objectTemplate()->typeName(), "SpawnPoint")) {
+			registerControlSpawnPoint(*owned);
+		}
+	}
+	for (const auto& owned : m_objects.objects()) {
+		if (owned->objectTemplate() && sameName(owned->objectTemplate()->typeName(), "PlayerControlObject")) {
+			registerMobileSpawnGroupsForObject(owned->id());
+		}
+	}
+	updateSpawnGroups();
 	m_state = RoundState::Playing;
 	buildStaticCollision();
 	linkAmbience();
@@ -932,6 +983,7 @@ void GameWorld::tick(float seconds)
 				// silos (Titans.cpp). Only the Titans' movement tick is gpm_ti's (0x00561e20
 				// returns at once in other modes), so Wake's static Titans keep their parts.
 				registerTitan(id, spawner->settings().controlPointId);
+				if (!titanByObject(id)) registerMobileSpawnGroupsForObject(id);
 				registerSilo(*m_objects.find(id));
 				registerSeatControllers(*m_objects.find(id));
 			}
@@ -1020,6 +1072,7 @@ void GameWorld::tick(float seconds)
 		b.reportedFrom = b.body.position;
 		b.reported = true;
 	}
+	updateSpawnGroups();
 }
 
 void GameWorld::weaponEffectEvent(int id, int effect)
@@ -5592,6 +5645,23 @@ void GameWorld::resetRound()
 			m_objects.remove(object);
 		}
 	}
+	m_spawnGroups.clear();
+	m_spawnGroupIds.clear();
+	m_mobileSpawnGroupIds.clear();
+	m_nextSpawnGroupId = 1;
+	for (const auto& player : m_players) {
+		if (player && player->present) player->spawnGroupChoice = -1;
+	}
+	for (const auto& owned : m_objects.objects()) {
+		if (owned->objectTemplate() && sameName(owned->objectTemplate()->typeName(), "SpawnPoint")) {
+			registerControlSpawnPoint(*owned);
+		}
+	}
+	for (const auto& owned : m_objects.objects()) {
+		if (owned->objectTemplate() && sameName(owned->objectTemplate()->typeName(), "PlayerControlObject")) {
+			registerMobileSpawnGroupsForObject(owned->id());
+		}
+	}
 	// The control points to the level's owners, the spawners to their start
 	// (0x005ae580) with their points' teams, as startRound sets them.
 	for (ControlPoint& point : m_controlPoints) {
@@ -5616,6 +5686,7 @@ void GameWorld::resetRound()
 		}
 	}
 	m_state = RoundState::Playing;
+	updateSpawnGroups();
 }
 
 void GameWorld::setPlayerName(int id, const std::string& name)
@@ -6391,6 +6462,43 @@ uint32_t GameWorld::squadBeacon(int team, int squad) const
 	return it != m_beacons.end() && m_objects.find(it->second) ? it->second : 0;
 }
 
+bool GameWorld::squadLeaderSpawnActive(int playerId) const
+{
+	const Player* player = findPlayer(playerId);
+	if (!player || player->squad == 0) {
+		return false;
+	}
+	for (const int member : squadMembers(player->team, player->squad)) {
+		const Player* leader = findPlayer(member);
+		const Body* enterBody = nullptr;
+		int seat = -1;
+		if (leader && squadLeaderSpawnAvailable(*player, *leader, enterBody, seat)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool GameWorld::squadLeaderSpawnAvailable(const Player& player, const Player& leader, const Body*& enterBody,
+	int& enterSeat) const
+{
+	enterBody = nullptr;
+	enterSeat = -1;
+	if (player.squad == 0 || player.squad != leader.squad || player.team != leader.team || &player == &leader
+		|| !leader.squadLeader || !leader.alive || !m_objects.find(leader.object)) {
+		return false;
+	}
+	if (!leader.vehicle) {
+		// The on-foot scatter is attempted when selected; availability here
+		// follows the living-leader gate without consuming scatter RNG.
+		return true;
+	}
+	const world::Object* soldier = m_objects.find(leader.object);
+	const physics::Vec3 at {soldier->position().x, soldier->position().y, soldier->position().z};
+	enterBody = spawnSeat(player.team, at, player.ai ? 15.0f : 5.0f, leader.vehicle, enterSeat);
+	return enterBody != nullptr;
+}
+
 // Spawning with the squad: at the beacon, or a metre behind a living
 // leader on foot. In the engine the leader's soldier carries a
 // SquadLeaderSpawnPoint child (0x004c7f10 creates it, Common.con: a
@@ -6410,9 +6518,12 @@ uint32_t GameWorld::squadBeacon(int team, int squad) const
 // (game server slot 0xa8): the member drops onto the beacon in a pod.
 // Without spawnInPod (no shipped beacon) the tries scatter round the
 // beacon as round a leader.
-bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod)
+bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod,
+	uint32_t& enterVehicle, int& enterSeat)
 {
 	pod.clear();
+	enterVehicle = 0;
+	enterSeat = -1;
 	if (player.squad == 0 || (player.spawnChoice != kSpawnOnLeader && player.spawnChoice != kSpawnOnBeacon)) {
 		return false;
 	}
@@ -6441,10 +6552,29 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 	}
 	for (const int member : squadMembers(player.team, player.squad)) {
 		const Player* leader = findPlayer(member);
-		if (leader && leader->squadLeader && leader->alive && !leader->vehicle && leader != &player) {
+		if (leader && leader->squadLeader && leader->alive && leader != &player) {
+			const Body* enterBody = nullptr;
+			int selectedSeat = -1;
+			const bool available = squadLeaderSpawnAvailable(player, *leader, enterBody, selectedSeat);
 			at = m_objects.find(leader->object);
 			if (!at) {
 				return false;
+			}
+			if (leader->vehicle) {
+				// Retail's SquadLeaderSpawnPoint is carried by the soldier and
+				// becomes enter-on-spawn while the leader's control object is a
+				// vehicle (0x004c7f10, 0x005b19a0). Its seat search is centred
+				// on that soldier and uses the human 5 m / bot 15 m radius.
+				if (!available || !enterBody) {
+					at = nullptr; // no free seat: refuse, with no ground fallback
+					return true;
+				}
+				const physics::Vec3 base {at->position().x, at->position().y, at->position().z};
+				enterVehicle = enterBody->object;
+				position = base;
+				yaw = leader->body.yawDegrees;
+				enterSeat = selectedSeat;
+				return true;
 			}
 			bool prone = false;
 			if (scatterOnLeader(*leader, position, yaw, &prone, player.ai)) {
@@ -7386,10 +7516,156 @@ void GameWorld::setKit(int id, const std::string& kit, const std::string& soldie
 	}
 }
 
+int GameWorld::registerControlSpawnPoint(world::Object& object)
+{
+	const world::ObjectTemplate* t = object.objectTemplate();
+	if (!t || !sameName(t->typeName(), "SpawnPoint")) {
+		return -1;
+	}
+	const int controlPoint = object.controlPointId() != -1 ? object.controlPointId() : integer(*t, "controlPointId", -1);
+	if (controlPoint < 0) {
+		return -1;
+	}
+	const uint32_t group = unsignedInteger(*t, "setGroup", unsignedInteger(*t, "group", 0));
+	const auto key = std::make_pair(controlPoint, group);
+	int id = 0;
+	const auto existing = m_spawnGroupIds.find(key);
+	if (existing != m_spawnGroupIds.end()) {
+		id = existing->second;
+	} else {
+		if (m_nextSpawnGroupId >= 0xc0) return -1;
+		id = m_nextSpawnGroupId++;
+		m_spawnGroupIds.emplace(key, id);
+		SpawnGroupInfo info;
+		info.id = id;
+		info.controlPoint = controlPoint;
+		info.templateGroup = group;
+		m_spawnGroups.emplace(id, std::move(info));
+	}
+	auto& points = m_spawnGroups.at(id).points;
+	if (std::find(points.begin(), points.end(), object.id()) == points.end()) {
+		points.push_back(object.id());
+	}
+	return id;
+}
+
+int GameWorld::registerMobileSpawnGroup(uint32_t owner, const std::vector<const world::ObjectTemplate*>& mobilePoints,
+	const std::vector<physics::Vec3>& offsets, const std::vector<uint32_t>& points)
+{
+	retireMissingMobileSpawnGroups();
+	const auto found = m_mobileSpawnGroupIds.find(owner);
+	if (found != m_mobileSpawnGroupIds.end()) {
+		SpawnGroupInfo& group = m_spawnGroups.at(found->second);
+		for (size_t i = 0; i < mobilePoints.size(); ++i) {
+			group.mobilePoints.push_back(mobilePoints[i]);
+			group.mobilePointOffsets.push_back(i < offsets.size() ? offsets[i] : physics::Vec3 {});
+		}
+		for (uint32_t point : points) {
+			if (std::find(group.points.begin(), group.points.end(), point) == group.points.end()) {
+				group.points.push_back(point);
+			}
+		}
+		return found->second;
+	}
+	for (int id = 0xc0; id <= 0xff; ++id) {
+		if (m_spawnGroups.count(id)) {
+			continue;
+		}
+		SpawnGroupInfo group;
+		group.id = id;
+		group.mobileObject = owner;
+		group.mobilePoints = mobilePoints;
+		group.mobilePointOffsets = offsets;
+		group.points = points;
+		m_spawnGroups.emplace(id, std::move(group));
+		m_mobileSpawnGroupIds.emplace(owner, id);
+		return id;
+	}
+	return -1;
+}
+
+void GameWorld::retireMissingMobileSpawnGroups()
+{
+	for (auto it = m_mobileSpawnGroupIds.begin(); it != m_mobileSpawnGroupIds.end();) {
+		if (m_objects.find(it->first)) {
+			++it;
+			continue;
+		}
+		const int id = it->second;
+		for (const auto& player : m_players) {
+			if (player && player->present && player->spawnGroupChoice == id) {
+				player->spawnGroupChoice = -1;
+				player->spawnRequested = false;
+			}
+		}
+		m_spawnGroups.erase(id);
+		it = m_mobileSpawnGroupIds.erase(it);
+	}
+}
+
+void GameWorld::registerMobileSpawnGroupsForObject(uint32_t owner)
+{
+	const world::Object* object = m_objects.find(owner);
+	if (!object || !object->objectTemplate()) return;
+	std::vector<const world::ObjectTemplate*> points;
+	std::vector<physics::Vec3> offsets;
+	spawnPointChildren(m_templates, *object->objectTemplate(), points, offsets);
+	if (!points.empty()) registerMobileSpawnGroup(owner, points, offsets);
+}
+
+void GameWorld::updateSpawnGroups()
+{
+	// Vehicle creation registers groups. Retire removed owners and invalidate
+	// pending choices before their first-free ids can be reused.
+	retireMissingMobileSpawnGroups();
+	for (auto& [id, group] : m_spawnGroups) {
+		(void)id;
+		physics::Vec3 sum;
+		size_t count = 0;
+		for (uint32_t objectId : group.points) {
+			const world::Object* point = m_objects.find(objectId);
+			if (!point) {
+				continue;
+			}
+			sum += {point->position().x, point->position().y, point->position().z};
+			++count;
+		}
+		if (count) {
+			const float divisor = static_cast<float>(count);
+			group.position = {sum.x / divisor, sum.y / divisor, sum.z / divisor};
+		} else if (group.mobileObject && !group.mobilePoints.empty()) {
+			const world::Object* root = m_objects.find(group.mobileObject);
+			if (root && root->objectTemplate()) {
+				const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll(
+					{root->rotation().x, root->rotation().y, root->rotation().z});
+				for (const physics::Vec3& offset : group.mobilePointOffsets) {
+					sum += physics::Vec3 {root->position().x, root->position().y, root->position().z} + rotation.transform(offset);
+					++count;
+				}
+				if (count) {
+					const float divisor = static_cast<float>(count);
+					group.position = {sum.x / divisor, sum.y / divisor, sum.z / divisor};
+				}
+			}
+		}
+	}
+}
+
 void GameWorld::setSpawnChoice(int id, int controlPoint)
 {
 	if (Player* player = findPlayer(id)) {
 		player->spawnChoice = controlPoint;
+		player->spawnGroupChoice = -1;
+	}
+}
+
+void GameWorld::setSpawnGroupChoice(int id, int group)
+{
+	if (Player* player = findPlayer(id)) {
+		player->spawnGroupChoice = group;
+		player->spawnChoice = -1;
+		player->spawnVehicle = 0;
+		player->spawnTitan = 0;
 	}
 }
 
@@ -7404,7 +7680,7 @@ void GameWorld::requireSpawnConfirmation(int id)
 bool GameWorld::requestSpawn(int id)
 {
 	Player* player = findPlayer(id);
-	if (!player || player->alive || player->spawnChoice == -1) return false;
+	if (!player || player->alive || (player->spawnChoice == -1 && player->spawnGroupChoice < 0)) return false;
 	player->spawnRequested = true;
 	return true;
 }
@@ -7424,6 +7700,12 @@ int GameWorld::spawnChoice(int id) const
 {
 	const Player* player = findPlayer(id);
 	return player ? player->spawnChoice : -1;
+}
+
+int GameWorld::spawnGroupChoice(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player ? player->spawnGroupChoice : -1;
 }
 
 uint32_t GameWorld::spawnTitan(int id) const
@@ -7450,6 +7732,106 @@ std::vector<int> GameWorld::spawnablePoints(int team) const
 	}
 	std::sort(ids.begin(), ids.end());
 	return ids;
+}
+
+bool GameWorld::spawnGroupAvailable(const SpawnGroupInfo& group, int team, const Player* player) const
+{
+	const auto holdsCp = [this, team](int id) {
+		return std::any_of(m_controlPoints.begin(), m_controlPoints.end(), [id, team](const ControlPoint& cp) {
+			return cp.id == id && cp.team == team;
+		});
+	};
+	if (!group.mobileObject) {
+		if (!holdsCp(group.controlPoint)) return false;
+		for (uint32_t pointId : group.points) {
+			const world::Object* point = m_objects.find(pointId);
+			if (!point || !point->objectTemplate()) continue;
+			const world::ObjectTemplate& t = *point->objectTemplate();
+			const int cp = point->controlPointId() != -1 ? point->controlPointId() : integer(t, "controlPointId", -1);
+			if (cp == group.controlPoint && (!player || spawnPointUsable(*point, *player, false))) return true;
+		}
+		return false;
+	}
+
+	const world::Object* root = m_objects.find(group.mobileObject);
+	const Titan* titan = titanByObject(group.mobileObject);
+	if (!root || root->destroyed() || root->team() != team || !teamHoldsControlPoint(team) || !spawnParentArmourHolds(*root)) {
+		return false;
+	}
+	if (titan && (m_gameMode != "gpm_ti" || titan->wrecked || titan->spawnPoints.empty() || !holdsCp(titan->controlPoint))) {
+		return false;
+	}
+	if (!player) {
+		if (!group.mobilePoints.empty()) return true;
+		return titan && std::any_of(titan->spawnPoints.begin(), titan->spawnPoints.end(), [this](const Titan::Spawn& spawn) {
+			return m_objects.find(spawn.object) != nullptr;
+		});
+	}
+	if (!group.mobilePoints.empty()) {
+		const Body* body = findBody(root->id());
+		if (!body || !body->vehicle) return false;
+		for (size_t i = 0; i < group.mobilePoints.size(); ++i) {
+			const SpawnPointFlags flags = SpawnPointFlags::of(*group.mobilePoints[i]);
+			if (player->ai ? flags.onlyForHuman : flags.onlyForAI) continue;
+			if (flags.enterOnSpawn || (player->ai && flags.aiEnterOnSpawn)) {
+				const physics::Vec3 at = body->body.position + body->body.rotation.transform(
+					i < group.mobilePointOffsets.size() ? group.mobilePointOffsets[i] : physics::Vec3 {});
+				int seat = -1;
+				if (!spawnSeat(team, at, player->ai ? 15.0f : 5.0f, root->id(), seat)) continue;
+			}
+			return true;
+		}
+		return false;
+	}
+	if (!titan) return false;
+	for (const Titan::Spawn& spawn : titan->spawnPoints) {
+		const world::Object* point = m_objects.find(spawn.object);
+		if (point && spawnPointUsable(*point, *player, false)) return true;
+	}
+	return false;
+}
+
+bool GameWorld::spawnGroupAvailable(int groupId, int playerId) const
+{
+	const auto group = m_spawnGroups.find(groupId);
+	const Player* player = findPlayer(playerId);
+	return group != m_spawnGroups.end() && player && spawnGroupAvailable(group->second, player->team, player);
+}
+
+std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnGroups(int team, int playerId) const
+{
+	std::vector<SpawnGroupInfo> result;
+	const Player* player = playerId >= 0 ? findPlayer(playerId) : nullptr;
+	const auto holdsCp = [this, team](int cpId) {
+		return std::any_of(m_controlPoints.begin(), m_controlPoints.end(), [team, cpId](const ControlPoint& cp) {
+			return cp.id == cpId && cp.team == team;
+		});
+	};
+	for (const auto& [id, registered] : m_spawnGroups) {
+		(void)id;
+		SpawnGroupInfo group = registered;
+		if (group.mobileObject) {
+			const world::Object* root = m_objects.find(group.mobileObject);
+			const Titan* titan = titanByObject(group.mobileObject);
+			if (!root || root->team() != team || !teamHoldsControlPoint(team)) continue;
+			if (titan && (titan->wrecked || titan->spawnPoints.empty() || !holdsCp(titan->controlPoint))) continue;
+			if (!titan && (root->destroyed() || !spawnParentArmourHolds(*root))) continue;
+		} else if (!holdsCp(group.controlPoint)) {
+			continue;
+		}
+		group.available = spawnGroupAvailable(group, team, player);
+		result.push_back(std::move(group));
+	}
+	return result;
+}
+
+std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnableGroups(int team, int playerId) const
+{
+	std::vector<SpawnGroupInfo> result;
+	for (SpawnGroupInfo& group : spawnGroups(team, playerId)) {
+		if (group.available) result.push_back(std::move(group));
+	}
+	return result;
 }
 
 bool GameWorld::spawnGroupActive(int controlPoint, int playerId) const
@@ -7927,6 +8309,16 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	const int team = player.team;
 	player.spawnedProne = false;
 	const Titan* selectedTitan = nullptr;
+	const SpawnGroupInfo* selectedGroup = nullptr;
+	if (player.spawnGroupChoice >= 0) {
+		const auto found = m_spawnGroups.find(player.spawnGroupChoice);
+		if (found == m_spawnGroups.end() || !spawnGroupAvailable(found->second, team, &player)) {
+			player.spawnRequested = false;
+			return nullptr;
+		}
+		selectedGroup = &found->second;
+		if (selectedGroup->mobileObject) selectedTitan = titanByObject(selectedGroup->mobileObject);
+	}
 	if (player.spawnChoice == kSpawnOnTitan) {
 		const auto it = std::find_if(m_titans.begin(), m_titans.end(), [&player, team](const Titan& titan) {
 			return titan.object == player.spawnTitan && titan.team == team && !titan.wrecked && !titan.parts.empty()
@@ -7965,7 +8357,19 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 		if (chosen.empty()) {
 			return nullptr; // the Titan died, lost its points, or its CP is no longer owned
 		}
-	} else if (player.spawnChoice >= 0) {
+	} else if (selectedGroup && !selectedGroup->mobileObject) {
+		for (world::Object* point : points) {
+			if (std::find(selectedGroup->points.begin(), selectedGroup->points.end(), point->id()) != selectedGroup->points.end()) {
+				chosen.push_back(point);
+			}
+		}
+	} else if (selectedTitan && selectedGroup) {
+		for (world::Object* point : points) {
+			if (std::find(selectedGroup->points.begin(), selectedGroup->points.end(), point->id()) != selectedGroup->points.end()) {
+				chosen.push_back(point);
+			}
+		}
+	} else if (player.spawnChoice >= 0 && player.spawnGroupChoice < 0) {
 		for (world::Object* point : points) {
 			const world::ObjectTemplate* t = point->objectTemplate();
 			const int controlPoint = point->controlPointId() != -1 ? point->controlPointId() : integer(*t, "controlPointId", -1);
@@ -7974,8 +8378,13 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			}
 		}
 	}
-	if (player.spawnConfirmationRequired && player.spawnChoice >= 0 && chosen.empty()) {
+	if (player.spawnConfirmationRequired && (player.spawnChoice >= 0 || player.spawnGroupChoice >= 0) && chosen.empty()
+		&& !(selectedGroup && !selectedGroup->mobilePoints.empty())) {
 		player.spawnRequested = false; // retail 0x004bff13 clears an unavailable group
+		return nullptr;
+	}
+	if (selectedGroup && selectedGroup->mobilePoints.empty() && chosen.empty()) {
+		player.spawnRequested = false;
 		return nullptr;
 	}
 	std::vector<world::Object*> choices = selectedTitan ? chosen : !chosen.empty() ? chosen : points.empty() ? fallback : points;
@@ -8014,7 +8423,9 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	physics::Vec3 squadPosition;
 	float squadYaw = 0;
 	std::string squadPod;
-	const bool withSquad = spawnAtSquad(player, squadAt, squadPosition, squadYaw, squadPod);
+	uint32_t squadEnterVehicle = 0;
+	int squadEnterSeat = -1;
+	const bool withSquad = spawnAtSquad(player, squadAt, squadPosition, squadYaw, squadPod, squadEnterVehicle, squadEnterSeat);
 	if (withSquad && !squadAt) {
 		return nullptr; // the leader's spawn point found no room
 	}
@@ -8022,13 +8433,39 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// on the vehicle now.
 	const world::ObjectTemplate* mobile = nullptr;
 	physics::Vec3 mobileAt;
-	if (!withSquad && player.spawnChoice == kSpawnInVehicle) {
-		const world::Object* vehicle = m_objects.find(player.spawnVehicle);
-		const Body* body = findBody(player.spawnVehicle);
+	if (!withSquad && ((selectedGroup && !selectedGroup->mobilePoints.empty()) || player.spawnChoice == kSpawnInVehicle)) {
+		uint32_t vehicleId = player.spawnVehicle;
+		if (selectedGroup && !selectedGroup->mobilePoints.empty()) {
+			vehicleId = selectedGroup->mobileObject;
+		}
+		const world::Object* vehicle = m_objects.find(vehicleId);
+		const Body* body = findBody(vehicleId);
 		physics::Vec3 offset;
+		const world::ObjectTemplate* selectedMobilePoint = nullptr;
+		std::vector<size_t> viable;
+		if (selectedGroup && !selectedGroup->mobilePoints.empty() && vehicle && body) {
+			for (size_t i = 0; i < selectedGroup->mobilePoints.size(); ++i) {
+				const SpawnPointFlags flags = SpawnPointFlags::of(*selectedGroup->mobilePoints[i]);
+				if (player.ai ? flags.onlyForHuman : flags.onlyForAI) continue;
+				const physics::Vec3 pointOffset = i < selectedGroup->mobilePointOffsets.size()
+					? selectedGroup->mobilePointOffsets[i] : physics::Vec3 {};
+				const physics::Vec3 at = body->body.position + body->body.rotation.transform(pointOffset);
+				if (flags.enterOnSpawn || (player.ai && flags.aiEnterOnSpawn)) {
+					int seat = -1;
+					if (!spawnSeat(team, at, player.ai ? 15.0f : 5.0f, vehicleId, seat)) continue;
+				}
+				viable.push_back(i);
+			}
+		}
+		if (selectedGroup && !selectedGroup->mobilePoints.empty() && !viable.empty()) {
+			const size_t index = viable[m_random.next() % viable.size()];
+			selectedMobilePoint = selectedGroup->mobilePoints[index];
+			if (index < selectedGroup->mobilePointOffsets.size()) offset = selectedGroup->mobilePointOffsets[index];
+		}
 		if (vehicle && body && body->vehicle && !vehicle->destroyed() && vehicle->team() == team && teamHoldsControlPoint(team)
 			&& spawnParentArmourHolds(*vehicle)
-			&& (mobile = spawnPointChild(m_templates, *vehicle->objectTemplate(), offset)) != nullptr) {
+			&& (mobile = selectedGroup && !selectedGroup->mobilePoints.empty()
+				? selectedMobilePoint : spawnPointChild(m_templates, *vehicle->objectTemplate(), offset)) != nullptr) {
 			mobileAt = body->body.position + body->body.rotation.transform(offset);
 			squadAt = const_cast<world::Object*>(vehicle);
 			// A full vehicle's enterOnSpawn point fails its test (0x005b24f0
@@ -8040,6 +8477,10 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 				mobile = nullptr;
 			}
 		}
+	}
+	if (selectedGroup && !selectedGroup->mobilePoints.empty() && !mobile) {
+		player.spawnRequested = false;
+		return nullptr; // an unavailable mobile group never falls through to ground
 	}
 	if (player.spawnConfirmationRequired && !withSquad && !mobile
 		&& (player.spawnChoice == kSpawnOnLeader || player.spawnChoice == kSpawnOnBeacon || player.spawnChoice == kSpawnInVehicle)) {
@@ -8084,6 +8525,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	const int fired = player.roundsFired, hits = player.roundsHit;
 	const bool confirmationRequired = player.spawnConfirmationRequired;
 	const int spawnChoice = player.spawnChoice;
+	const int spawnGroupChoice = player.spawnGroupChoice;
 	const uint32_t spawnVehicle = player.spawnVehicle;
 	const uint32_t spawnTitan = player.spawnTitan;
 	const bool spawnedProne = player.spawnedProne;
@@ -8108,6 +8550,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	player.roundsHit = hits;
 	player.spawnConfirmationRequired = confirmationRequired;
 	player.spawnChoice = spawnChoice;
+	player.spawnGroupChoice = spawnGroupChoice;
 	player.spawnVehicle = spawnVehicle;
 	player.spawnTitan = spawnTitan;
 	player.spawnedProne = spawnedProne;
@@ -8198,6 +8641,15 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	if (player.kitObject) {
 		player.battery = 0;
 	}
+	if (squadEnterVehicle) {
+		// The free seat was selected before creating the soldier. Seat it before
+		// any PickupKit / PlayerSpawn callback can occupy the vehicle or force a
+		// ground fallback after the squad spawn point accepted the spawn.
+		if (Body* body = findBody(squadEnterVehicle)) {
+			seatPlayer(player, *body, squadEnterSeat);
+			created->setHidden(true);
+		}
+	}
 	if (player.kitObject) {
 		raise("PickupKit", {ScriptValue::player(player.id), ScriptValue::object(player.kitObject)});
 	}
@@ -8208,6 +8660,9 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			player.weaponObject = held->id();
 		}
 	}
+	if (squadEnterVehicle) {
+		raise("EnterVehicle", {ScriptValue::player(player.id), ScriptValue::object(squadEnterVehicle)});
+	}
 	// setEnterOnSpawn (a human, 5 m) / setAIEnterOnSpawn (15 m): straight
 	// into the nearest free seat of a vehicle of the team near the point
 	// (0x005a98e0, which the point's test 0x005b24f0 also asks: no such
@@ -8216,7 +8671,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// aiEnterOnSpawn, for an AI only) searches 5 m for a human at an
 	// enterOnSpawn point and 15 m for a bot at either kind; a human at an
 	// aiEnterOnSpawn-only point stands.
-	if (!withSquad && (pointFlags.enterOnSpawn || (player.ai && pointFlags.aiEnterOnSpawn))) {
+	if (!squadEnterVehicle && !withSquad && (pointFlags.enterOnSpawn || (player.ai && pointFlags.aiEnterOnSpawn))) {
 		enterOnSpawn(player, *created, pointAt, player.ai ? 15.0f : 5.0f, mobile ? at->id() : 0);
 	}
 	// A beacon's pod (0x004bef90: the spawn point's slot 0x58, its vehicle
@@ -8357,6 +8812,7 @@ void GameWorld::setSpawnVehicle(int id, uint32_t vehicle)
 {
 	if (Player* player = findPlayer(id)) {
 		player->spawnChoice = kSpawnInVehicle;
+		player->spawnGroupChoice = -1;
 		player->spawnVehicle = vehicle;
 	}
 }
@@ -8365,6 +8821,7 @@ void GameWorld::setSpawnTitan(int id, uint32_t titan)
 {
 	if (Player* player = findPlayer(id)) {
 		player->spawnChoice = kSpawnOnTitan;
+		player->spawnGroupChoice = -1;
 		player->spawnTitan = titan;
 	}
 }

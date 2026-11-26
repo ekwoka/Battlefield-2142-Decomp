@@ -3277,12 +3277,12 @@ void HostedGame::trackSpawnGroups()
 		if (p.squad == 0 || !p.squadLeader) {
 			continue;
 		}
-		// Placed at the leader while he is up on foot (where the spawn
-		// screen shows him), else at his beacon; a member who picks it
+		// Placed at the living leader's soldier (on foot or seated), else at
+		// his beacon; a member who picks it
 		// spawns at the beacon when there is one (0x004c7f10 moves the
 		// squad's spawn point onto it).
 		uint16_t ghost = 0;
-		if (p.alive && !p.manDown && !p.vehicle && p.soldier) {
+		if (p.alive && !p.manDown && p.soldier) {
 			ghost = ghostOfObject(p.soldier);
 		} else if (const uint32_t beacon = m_round->squadBeacon(p.team, p.squad)) {
 			ghost = ghostOfObject(beacon);

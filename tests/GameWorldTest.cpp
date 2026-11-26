@@ -12,6 +12,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Main/DeploymentTeam.h"
+#include "Main/SpawnGroupMarkers.h"
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
@@ -73,6 +74,126 @@ struct Level {
 };
 
 } // namespace
+
+TEST(GameWorld_SpawnPointSetGroupProperty)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "SpawnPoint");
+	templates.registerType(2, "ControlPoint");
+	auto* point = templates.create("SpawnPoint", "sp_group");
+	auto* cp = templates.create("ControlPoint", "cp_group");
+	cp->settings()["controlPointId"] = "7";
+	cp->settings()["team"] = "2";
+	point->settings()["controlPointId"] = "7";
+	Console console;
+	world::registerWorldConsoleMethods(console, templates, objects);
+	std::string output;
+	CHECK(console.execute("ObjectTemplate.active sp_group", output) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.setGroup 4294967295", output) == ConsoleResult::Ok);
+	CHECK(console.execute("ObjectTemplate.group 23", output) == ConsoleResult::Ok);
+	const auto group = point->settings().find("setGroup");
+	CHECK(group != point->settings().end() && group->second == "23");
+	point->settings()["setGroup"] = "4294967295";
+	objects.create(cp);
+	objects.create(point);
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	const auto groups = round.spawnableGroups(2);
+	CHECK(groups.size() == 1);
+	if (groups.size() == 1) CHECK(groups[0].templateGroup == UINT32_MAX);
+}
+
+TEST(GameWorld_MobileSpawnGroupAveragesAllChildrenAndRetiresWithItsOwner)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "ControlPoint");
+	templates.registerType(2, "PlayerControlObject");
+	templates.registerType(3, "SpawnPoint");
+	auto* cp = templates.create("ControlPoint", "cp_mobile");
+	cp->settings()["controlPointId"] = "10";
+	cp->settings()["team"] = "2";
+	auto* ground = templates.create("SpawnPoint", "sp_ground");
+	ground->settings()["controlPointId"] = "10";
+	auto* first = templates.create("SpawnPoint", "sp_mobile_a");
+	first->settings()["setEnterOnSpawn"] = "1";
+	auto* second = templates.create("SpawnPoint", "sp_mobile_b");
+	second->settings()["setEnterOnSpawn"] = "1";
+	auto* mobile = templates.create("PlayerControlObject", "mobile_group_root");
+	mobile->settings()["armor.maxHitPoints"] = "100";
+	mobile->children().push_back({"sp_mobile_a", {8, 0, 0}, {}});
+	mobile->children().push_back({"sp_mobile_b", {0, 0, 12}, {}});
+	objects.create(cp);
+	objects.create(ground, {20, 0, 20});
+	auto* root = objects.create(mobile, {40, 2, 50}, {90, 0, 0});
+	root->setTeam(2);
+	const uint32_t rootId = root->id();
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	auto groups = round.spawnableGroups(2);
+	const auto moving = std::find_if(groups.begin(), groups.end(), [rootId](const auto& group) {
+		return group.mobileObject == rootId;
+	});
+	CHECK(moving != groups.end());
+	if (moving == groups.end()) return;
+	CHECK(moving->id == 0xc0);
+	CHECK(moving->mobilePoints.size() == 2);
+	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({90, 0, 0});
+	const physics::Vec3 expected = physics::Vec3 {40, 2, 50}
+		+ rotation.transform(physics::Vec3 {4, 0, 6});
+	CHECK(std::fabs(moving->position.x - expected.x) < 0.01f);
+	CHECK(std::fabs(moving->position.y - expected.y) < 0.01f);
+	CHECK(std::fabs(moving->position.z - expected.z) < 0.01f);
+	const int player = round.addPlayer("Pending mobile selection", 2, true);
+	round.setSpawnGroupChoice(player, moving->id);
+	objects.remove(rootId);
+	round.tick(1.0f / 30.0f);
+	groups = round.spawnableGroups(2);
+	CHECK(std::none_of(groups.begin(), groups.end(), [rootId](const auto& group) { return group.mobileObject == rootId; }));
+	CHECK(round.spawnGroupChoice(player) == -1);
+}
+
+TEST(SpawnGroupMarkersKeepInactiveSelectionAndPreF8Labels)
+{
+	game::GameWorld::SpawnGroupInfo group;
+	group.id = 5;
+	group.position = {12, 0, 34};
+	group.available = false;
+	const auto markers = main::spawnGroupMarkers({group}, group.id);
+	CHECK(markers.size() == 1);
+	CHECK(markers[0].selected);
+	CHECK(!markers[0].active);
+	CHECK(markers[0].x == 12 && markers[0].z == 34);
+
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	auto* vehicle = templates.create("PlayerControlObject", "eu_apc");
+	vehicle->settings()["vehicleHud.hudName"] = "\"HUD_TEXT_EU_APC\"";
+	world::ObjectManager objects;
+	const world::Object* vehicleObject = objects.create(vehicle);
+	game::GameWorld::ControlPointInfo cp {902, 2, {}, 10};
+	cp.name = "CPNAME_SC_Ti_InnerBridgeLock";
+	const std::vector<game::GameWorld::ControlPointInfo> cps {cp};
+	const std::vector<game::GameWorld::TitanInfo> noTitans;
+	group.controlPoint = cp.id;
+	CHECK(main::spawnGroupLabel(group, cps, noTitans, objects, {}) == "CPNAME_SC_Ti_InnerBridgeLock");
+	group.mobileObject = vehicleObject->id();
+	CHECK(main::spawnGroupLabel(group, cps, noTitans, objects, {}) == "HUD_TEXT_EU_APC");
+	vehicle->settings().erase("vehicleHud.hudName");
+	CHECK(main::spawnGroupLabel(group, cps, noTitans, objects, {}) == "eu_apc");
+	game::GameWorld::TitanInfo titan;
+	titan.object = group.mobileObject;
+	titan.team = 2;
+	titan.controlPoint = cp.id;
+	const std::vector<game::GameWorld::TitanInfo> titans {titan};
+	const auto localize = [](const std::string& name) {
+		return name == "CPNAME_SC_Ti_InnerBridgeLock" ? std::string("EU Titan") : name;
+	};
+	CHECK(main::spawnGroupLabel(group, cps, titans, objects, localize) == "EU Titan (inside)");
+	titan.team = 1;
+	CHECK(main::spawnGroupLabel(group, cps, {titan}, objects, localize) == "PAC Titan");
+}
 
 TEST(GameWorld_SpawnerSpawnsForItsControlPointsTeam)
 {
@@ -3891,6 +4012,58 @@ void makeMobile(world::ObjectTemplate& t, const char* mesh)
 }
 
 } // namespace
+
+TEST(GameWorld_SquadMemberSpawnsIntoSeatedLeadersVehicle)
+{
+	Range range;
+	range.templates.registerType(20, "PlayerControlObject");
+	range.templates.registerType(23, "Engine");
+	range.templates.create("Engine", "squad_apc_engine")->settings()["engineType"] = "c_ETCar";
+	range.collisionTemplates.add("squad_apc_mesh", boxMesh(1));
+	world::ObjectTemplate* apc = range.templates.create("PlayerControlObject", "squad_apc");
+	range.addEntry(*apc);
+	makeMobile(*apc, "squad_apc_mesh");
+	apc->settings()["armor.maxHitPoints"] = "100";
+	apc->settings()["seatInformation"] = "driver 0/0/0 0/0/0";
+	apc->children().push_back({"squad_apc_passenger", {}, {}});
+	range.templates.create("PlayerControlObject", "squad_apc_passenger")->settings()["seatInformation"] =
+		"passenger 0/0/0 0/0/0";
+	apc->children().push_back({"squad_apc_engine", {}, {}});
+
+	const int leader = range.world->addPlayer("Leader", 2, false);
+	const int member = range.world->addPlayer("Member", 2, false);
+	const int third = range.world->addPlayer("Third", 2, false);
+	CHECK(range.world->joinSquad(leader, range.world->openSquad(2)));
+	CHECK(range.world->joinSquad(member, 1));
+	CHECK(range.world->joinSquad(third, 1));
+	CHECK(range.world->spawnSoldier(leader));
+	CHECK(range.world->squadLeaderSpawnActive(member)); // living leader on foot
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(leader, info));
+	world::Object* vehicle = range.objects.create(apc, {info.position.x, info.position.y, info.position.z + 3});
+	vehicle->setTeam(2);
+	range.world->tick(1 / 30.0f);
+	range.world->setSoldierPosition(info.soldier, {vehicle->position().x, 0, vehicle->position().z - 3});
+	range.world->tick(1 / 30.0f);
+	game::SoldierInput enter;
+	enter.use = true;
+	range.world->setInput(leader, enter);
+	range.world->tick(1 / 30.0f);
+	range.world->setInput(leader, {});
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(leader, info) && info.vehicle == vehicle->id());
+	CHECK(range.world->squadLeaderSpawnActive(member)); // human free-seat check, within 5 m
+
+	range.world->setSpawnChoice(member, game::GameWorld::kSpawnOnLeader);
+	CHECK(range.world->spawnSoldier(member));
+	CHECK(range.world->playerInfo(member, info) && info.vehicle == vehicle->id());
+	CHECK(info.seat >= 0);
+	CHECK(range.world->vehicleOccupants(vehicle->id()).size() == 2);
+	CHECK(!range.world->squadLeaderSpawnActive(third)); // full vehicle is inactive
+	range.world->setSpawnChoice(third, game::GameWorld::kSpawnOnLeader);
+	CHECK(!range.world->spawnSoldier(third));
+	CHECK(range.world->playerInfo(third, info) && !info.alive);
+}
 
 TEST(GameWorld_ProjectileImpactUsesIncomingVelocityBeforePenetration)
 {

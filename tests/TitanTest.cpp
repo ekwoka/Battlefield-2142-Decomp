@@ -9,6 +9,8 @@
 #include "Game/Bots.h"
 #include "Hud/Hud.h"
 #include "Main/HudMenus.h"
+#include "Main/DeploymentLifecycle.h"
+#include "Main/SpawnGroupMarkers.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
 #include "Main/Nametags.h"
@@ -803,6 +805,29 @@ TEST(Titan_SuezDeploymentSelectsInteriorOnly)
 		}
 	}
 	CHECK(nearestInterior < 2.0f);
+	const auto mobileGroups = level.world->spawnableGroups(ownTeam);
+	const auto titanGroup = std::find_if(mobileGroups.begin(), mobileGroups.end(), [ownTitan](const auto& group) {
+		return group.mobileObject == ownTitan;
+	});
+	CHECK(titanGroup != mobileGroups.end());
+	if (titanGroup != mobileGroups.end()) {
+		CHECK(titanGroup->id >= 0xc0 && titanGroup->id <= 0xff);
+		CHECK(titanGroup->points.size() == interiors.size());
+		const int grouped = level.world->addPlayer("Titan group deploy", ownTeam, true);
+		level.world->setSpawnGroupChoice(grouped, titanGroup->id);
+		level.world->requireSpawnConfirmation(grouped);
+		CHECK(level.world->requestSpawn(grouped));
+		CHECK(level.world->spawnSoldier(grouped));
+		game::GameWorld::PlayerInfo info;
+		CHECK(level.world->playerInfo(grouped, info) && info.alive);
+		float nearest = std::numeric_limits<float>::max();
+		for (uint32_t id : interiors) {
+			const world::Object* point = level.objects.find(id);
+			if (point) nearest = std::min(nearest,
+				std::sqrt(physics::lengthSquared(info.position - physics::Vec3 {point->position().x, point->position().y, point->position().z})));
+		}
+		CHECK(nearest < 2.0f);
+	}
 
 	const int invalid = level.world->addPlayer("Invalid Titan deploy", ownTeam, true);
 	level.world->setSpawnTitan(invalid, 0xffffffffu);
@@ -818,6 +843,127 @@ TEST(Titan_SuezDeploymentSelectsInteriorOnly)
 	const int conquest = level.world->addPlayer("Conquest Titan deploy", ownTeam, true);
 	level.world->setSpawnTitan(conquest, ownTitan);
 	CHECK(!level.world->spawnSoldier(conquest)); // Conquest does not gain Titan deployment
+}
+
+TEST(GameWorld_SpawnGroupsSuez902SplitAverageSelectionAndRoundReset)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Suez_Canal", 48, true, "mods/Project_Remaster_v17_Final");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	int team = 0;
+	for (const auto& point : level.world->controlPointList()) {
+		if (point.id == 902) team = point.team;
+	}
+	CHECK(team == 1 || team == 2);
+	const auto groups = level.world->spawnableGroups(team);
+	std::vector<game::GameWorld::SpawnGroupInfo> cpGroups;
+	for (const auto& group : groups) {
+		if (group.controlPoint == 902) cpGroups.push_back(group);
+	}
+	std::sort(cpGroups.begin(), cpGroups.end(), [](const auto& a, const auto& b) { return a.templateGroup < b.templateGroup; });
+	CHECK(cpGroups.size() == 2);
+	if (cpGroups.size() != 2) return;
+	CHECK(cpGroups[0].templateGroup == 0 && cpGroups[0].points.size() >= 5);
+	CHECK(cpGroups[1].templateGroup == 5 && cpGroups[1].points.size() == 2);
+	for (int suffix = 1; suffix <= 5; ++suffix) {
+		const std::string expectedName = "CPNAME_SC_Ti_InnerBridgeLock_" + std::to_string(suffix) + "_0";
+		CHECK(std::any_of(cpGroups[0].points.begin(), cpGroups[0].points.end(), [&](uint32_t id) {
+			const world::Object* point = level.objects.find(id);
+			return point && point->objectTemplate() && point->objectTemplate()->name() == expectedName;
+		}));
+	}
+	for (const char* suffix : {"_7", "_8"}) {
+		CHECK(std::any_of(cpGroups[1].points.begin(), cpGroups[1].points.end(), [&](uint32_t id) {
+			const world::Object* point = level.objects.find(id);
+			if (!point || !point->objectTemplate()) return false;
+			const std::string& name = point->objectTemplate()->name();
+			const size_t length = std::char_traits<char>::length(suffix);
+			return name.size() >= length && name.compare(name.size() - length, length, suffix) == 0;
+		}));
+	}
+	for (const auto& group : cpGroups) {
+		physics::Vec3 mean;
+		for (uint32_t id : group.points) {
+			const world::Object* point = level.objects.find(id);
+			CHECK(point != nullptr);
+			if (point) mean += {point->position().x, point->position().y, point->position().z};
+		}
+		const float n = static_cast<float>(group.points.size());
+		mean = {mean.x / n, mean.y / n, mean.z / n};
+		CHECK(std::fabs(group.position.x - mean.x) < 0.01f);
+		CHECK(std::fabs(group.position.y - mean.y) < 0.01f);
+		CHECK(std::fabs(group.position.z - mean.z) < 0.01f);
+	}
+	CHECK(cpGroups[0].id == 1);
+	std::vector<game::GameWorld::SpawnGroupInfo> localCpGroups;
+	for (const auto& group : level.world->spawnGroups(team)) {
+		if (group.controlPoint == 902) localCpGroups.push_back(group);
+	}
+	std::sort(localCpGroups.begin(), localCpGroups.end(), [](const auto& a, const auto& b) { return a.templateGroup < b.templateGroup; });
+	CHECK(localCpGroups.size() == 2);
+	const auto markers = main::spawnGroupMarkers(localCpGroups, cpGroups[1].id);
+	CHECK(markers.size() == 2); // one local map marker for each available group on CP 902
+	CHECK(markers[0].id == cpGroups[0].id && !markers[0].selected);
+	CHECK(markers[1].id == cpGroups[1].id && markers[1].selected);
+	CHECK(markers[0].active && markers[1].active);
+	CHECK(std::fabs(markers[0].x - cpGroups[0].position.x) < 0.01f);
+	CHECK(std::fabs(markers[1].z - cpGroups[1].position.z) < 0.01f);
+	const auto controlPointNames = level.world->controlPointList();
+	const auto titanInfos = level.world->titans();
+	const std::string baseLabel = main::spawnGroupLabel(localCpGroups[0], controlPointNames, titanInfos, level.objects, {});
+	const std::string splitLabel = main::spawnGroupLabel(localCpGroups[1], controlPointNames, titanInfos, level.objects, {});
+	CHECK(!baseLabel.empty());
+	CHECK(baseLabel == splitLabel); // group suffixes do not change the localized CP marker label
+	const int player = level.world->addPlayer("Spawn group 5", team, false);
+	level.world->setSpawnGroupChoice(player, cpGroups[1].id);
+	level.world->requireSpawnConfirmation(player);
+	CHECK(level.world->spawnGroupAvailable(cpGroups[1].id, player));
+	CHECK(std::string(dice::main::deploymentSpawnInfo(level.world->spawnGroupChoice(player) >= 0,
+		false, 0, level.world->spawnGroupAvailable(level.world->spawnGroupChoice(player), player)))
+		== "HUD_CENTERINFOBOX_presstospawn");
+	CHECK(level.world->spawnGroupChoice(player) == cpGroups[1].id);
+	CHECK(level.world->requestSpawn(player));
+	CHECK(level.world->spawnSoldier(player));
+	game::GameWorld::PlayerInfo spawned;
+	CHECK(level.world->playerInfo(player, spawned) && spawned.alive);
+	float nearestGroupFive = std::numeric_limits<float>::max();
+	for (uint32_t id : cpGroups[1].points) {
+		const world::Object* point = level.objects.find(id);
+		if (point) nearestGroupFive = std::min(nearestGroupFive,
+			std::sqrt(physics::lengthSquared(spawned.position - physics::Vec3 {point->position().x, point->position().y, point->position().z})));
+	}
+	CHECK(nearestGroupFive < 2.0f);
+	float nearestBase = std::numeric_limits<float>::max();
+	for (uint32_t id : cpGroups[0].points) {
+		const world::Object* point = level.objects.find(id);
+		if (point) nearestBase = std::min(nearestBase,
+			std::sqrt(physics::lengthSquared(spawned.position - physics::Vec3 {point->position().x, point->position().y, point->position().z})));
+	}
+	CHECK(nearestBase > 2.0f);
+	const int second = level.world->addPlayer("Second spawn group 5", team, false);
+	level.world->setSpawnGroupChoice(second, cpGroups[1].id);
+	level.world->requireSpawnConfirmation(second);
+	CHECK(level.world->spawnGroupAvailable(cpGroups[1].id, second));
+	CHECK(level.world->requestSpawn(second));
+	CHECK(level.world->spawnSoldier(second));
+	const int third = level.world->addPlayer("Occupied spawn group 5", team, false);
+	level.world->setSpawnGroupChoice(third, cpGroups[1].id);
+	level.world->requireSpawnConfirmation(third);
+	CHECK(level.world->spawnGroupAvailable(cpGroups[1].id, third));
+	CHECK(level.world->requestSpawn(third));
+	CHECK(level.world->spawnSoldier(third)); // the explicit path retries from the group when both points are occupied
+	level.world->resetRound();
+	const auto resetGroups = level.world->spawnableGroups(team);
+	const auto base = std::find_if(resetGroups.begin(), resetGroups.end(), [](const auto& group) {
+		return group.controlPoint == 902 && group.templateGroup == 0;
+	});
+	const auto split = std::find_if(resetGroups.begin(), resetGroups.end(), [](const auto& group) {
+		return group.controlPoint == 902 && group.templateGroup == 5;
+	});
+	CHECK(base != resetGroups.end() && base->id == cpGroups[0].id);
+	CHECK(split != resetGroups.end() && split->id == cpGroups[1].id);
 }
 
 // Minsk_Titan16 (gpm_ti 16): its own archives' Titans and silos
