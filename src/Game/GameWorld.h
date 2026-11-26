@@ -2758,6 +2758,27 @@ public:
 	// (its projectile LOD and posed collision parts): the owner of the first
 	// face (a part's id, the Titan's for the hull), 0 when it meets none.
 	uint32_t titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const;
+	// The same two queries on a copy of a Titan's collision as it stands now
+	// (enhanced.botAsyncPaths: the bots' Titan fields made off the main
+	// thread). The meshes are shared, not copied: a Titan's are never changed
+	// once made (rebuildTitanMeshes makes new ones), and the shared queries
+	// leave them alone; the parts' frames are copied as posed now.
+	struct TitanCollision {
+		uint32_t titan = 0;
+		std::shared_ptr<const physics::CollisionWorld> soldier, teamSoldier[2], projectile;
+		struct Part {
+			std::shared_ptr<const physics::CollisionWorld> lod;
+			physics::Mat3 rotation;
+			physics::Vec3 position;
+			float radius = 0;
+		};
+		std::vector<Part> parts;
+		float partReach = 0;
+		std::map<uint32_t, int64_t> armour; // each Titan part's id: its armor.defaultMaterial (-1 without one)
+		bool ray(int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const;
+		uint32_t shot(const physics::Vec3& from, const physics::Vec3& to) const;
+	};
+	std::shared_ptr<const TitanCollision> titanCollision(uint32_t titan) const;
 	// The middle of a part's faces in that LOD (the Titan's frame), to aim
 	// at; false without any.
 	bool titanPartAimPoint(uint32_t part, physics::Vec3& local) const;
@@ -2856,6 +2877,9 @@ private:
 		physics::ContactResponse legsResponse;
 		std::vector<physics::Vec3> points; // vehicle collision LOD
 		std::shared_ptr<physics::CollisionWorld> projectileMesh; // object space, projectile LOD
+		// The farthest of projectileMesh's vertices from the origin (raycastBody's broad phase), for the mesh it was measured on.
+		mutable std::shared_ptr<const physics::CollisionWorld> reachMeasured;
+		mutable float projectileReach = 0;
 		std::shared_ptr<physics::CollisionWorld> soldierMesh;    // object space, soldier LOD (ragdolls)
 		// The parts with a collisionPart (0x0063ccc0: a child whose template
 		// +0x74 is over 0 and whose physicsType is Mesh or MechLegs gets an

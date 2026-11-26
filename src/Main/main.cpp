@@ -21,6 +21,7 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/CombatAreas.h"
+#include "Game/TickProf.h"
 #include "Game/GameLogic.h"
 #include "Game/KitUnlocks.h"
 #include "Hud/Hud.h"
@@ -3804,6 +3805,7 @@ int runGame(Options& options, Session& session)
 	botSettings.botMovement = &enhancedSettings.botMovement;
 	botSettings.botTitan = &enhancedSettings.botTitan;
 	botSettings.botOffMesh = &enhancedSettings.botOffMesh;
+	botSettings.botAsyncPaths = &enhancedSettings.botAsyncPaths;
 	botSettings.botCommander = &enhancedSettings.botCommander;
 	botSettings.botPilots = &enhancedSettings.botPilots;
 	botSettings.cornerSteer = &enhancedSettings.cornerSteer;
@@ -8689,7 +8691,14 @@ int runGame(Options& options, Session& session)
 				std::fflush(stdout);
 			}
 		};
+		long profTick = 0;
 		const auto step = [&] {
+			tickprof::beginTick();
+			struct TickEnd {
+				long& n;
+				~TickEnd() { tickprof::endTick(n++); }
+			} tickEnd {profTick};
+			tickprof::Scope tickTotal(0);
 			remoteStep();
 			if (hosted) {
 				hosted->tick();
@@ -8697,23 +8706,30 @@ int runGame(Options& options, Session& session)
 				voteMessages.setCommanding(round.playerInfo(round.localPlayer(), commanding) && commanding.commander);
 				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
 			}
-			bots.update(1.0f / 30.0f);
+			{ TP("bots"); bots.update(1.0f / 30.0f); }
 			round.localMuzzleEffects = !playerCamera.insideView();
 			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale());
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
-			round.tick(1.0f / 30.0f);
+			{ TP("round"); round.tick(1.0f / 30.0f); }
 			driveTrace();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
-			gameLogic.tick(1.0f / 30.0f);
-			scripts.update();
+			{ TP("logic"); gameLogic.tick(1.0f / 30.0f); }
+			{ TP("scripts"); scripts.update(); }
 			bridge.deliverStatsResponses();
 			session.adminScript.update(scripts);
 			stepSounds();
 		};
 #else
+		long profTick = 0;
 		const auto step = [&] {
+			tickprof::beginTick();
+			struct TickEnd {
+				long& n;
+				~TickEnd() { tickprof::endTick(n++); }
+			} tickEnd {profTick};
+			tickprof::Scope tickTotal(0);
 			remoteStep();
 			if (hosted) {
 				hosted->tick();
@@ -8721,14 +8737,14 @@ int runGame(Options& options, Session& session)
 				voteMessages.setCommanding(round.playerInfo(round.localPlayer(), commanding) && commanding.commander);
 				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
 			}
-			bots.update(1.0f / 30.0f);
+			{ TP("bots"); bots.update(1.0f / 30.0f); }
 			round.localMuzzleEffects = !playerCamera.insideView();
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
-			round.tick(1.0f / 30.0f);
+			{ TP("round"); round.tick(1.0f / 30.0f); }
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
-			gameLogic.tick(1.0f / 30.0f);
+			{ TP("logic"); gameLogic.tick(1.0f / 30.0f); }
 			stepSounds();
 		};
 #endif
@@ -9557,6 +9573,7 @@ int runGame(Options& options, Session& session)
 				}
 			}
 			std::printf("\n");
+			tickprof::report();
 			std::printf("  state fingerprint %016llx\n", static_cast<unsigned long long>(round.stateFingerprint()));
 			if (const auto lost = round.objectsOutOfWorld(); !lost.empty()) {
 				std::printf("  %zu objects out of the world\n", lost.size());

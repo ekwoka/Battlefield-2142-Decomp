@@ -6,6 +6,7 @@
 // trigger type and radius, not the remote C4) and taken off as it goes
 // (slot 0x10 0x1004b880). No team, no sighting: every bot's mesh gets them.
 #include "Bots.h"
+#include "TickProf.h"
 
 #include "AI/MineZones.h"
 
@@ -24,6 +25,7 @@ ai::Vec3 aiAt(const physics::Vec3& v) { return {v.x, v.y, v.z}; }
 // 0x00897c10) get their zones (0x1004ae90); gone ones are taken off.
 void BotManager::updateMines()
 {
+	TP("updateMines");
 	if (m_time < m_minesNext) {
 		return;
 	}

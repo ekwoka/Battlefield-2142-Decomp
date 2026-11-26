@@ -10,6 +10,8 @@
 // The grid is in the Titan's frame and is rebuilt when a part goes down
 // (the core's doors open the way to the core).
 #include "Bots.h"
+#include "BotWorkers.h"
+#include "TickProf.h"
 
 #include "Physics/MaterialManager.h"
 #include "World/Object.h"
@@ -22,6 +24,7 @@
 #include <cstdlib>
 #include <limits>
 #include <queue>
+#include <set>
 
 namespace dice::hfe::game {
 
@@ -63,6 +66,154 @@ const GameWorld::TitanInfo* titanOf(const std::vector<GameWorld::TitanInfo>& tit
 	return nullptr;
 }
 
+// titanField's arguments, kept with the field (enhanced.botAsyncPaths: made anew with them for a new grid).
+struct FieldSpec {
+	physics::Vec3 point;
+	bool nearestOnly = false;
+	float entryRadius = 0;
+	uint32_t around = 0;
+};
+
+// What making a field needs from the world, taken on the main thread: the part's aim point and the cells under
+// `around` (FieldSpec), so that makeField itself reads only the grid and its two ray queries.
+struct FieldQuery {
+	uint32_t part = 0;
+	physics::Vec3 point;
+	bool nearestOnly = false;
+	float entryRadius = 0;
+	bool aimed = false;
+	physics::Vec3 aim;
+	std::vector<char> blocked; // by cell; empty: none
+};
+
+// titanField's making: `shot(from, to)` is GameWorld::titanLocalShot's, `ray(from, to, fraction)` titanLocalRay's
+// for the grid's team (the live world's, or a TitanCollision copy's off the main thread).
+template <typename Grid, typename Shot, typename Ray>
+void makeField(const Grid& g, const FieldQuery& q, const Shot& shot, const Ray& ray, std::vector<float>& field)
+{
+	field.assign(g.cells.size(), kInfinity);
+	const auto blocked = [&](size_t c) { return !q.blocked.empty() && q.blocked[c] != 0; };
+	using Entry = std::pair<float, int>;
+	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+	float nearest = 1e9f;
+	int nearestCell = -1;
+	const physics::Vec3& point = q.point;
+	const physics::Vec3& aim = q.aim;
+	const bool aimed = q.aimed;
+	// A part none of whose spots meets that test (the core, walled in by the hull) is shot from any distance its rounds reach it.
+	for (int pass = 0; pass < (aimed ? 2 : 1) && open.empty(); ++pass) {
+		const bool shooting = aimed && pass == 0;
+		for (size_t c = 0; c < g.cells.size(); ++c) {
+			const physics::Vec3 eye = g.cells[c].at + physics::Vec3 {0, 1.5f, 0};
+			const float d = std::sqrt(physics::lengthSquared(point - eye));
+			if (blocked(c)) {
+				continue;
+			}
+			if (d < nearest && !g.cells[c].out.empty()) {
+				nearest = d;
+				nearestCell = static_cast<int>(c);
+			}
+			// Leave room for cellAt's snap: reaching a terminal cell must also
+			// put the actual soldier inside the interaction sphere.
+			const float reach = std::max(0.0f, q.entryRadius - kCell);
+			const bool inEntry = q.entryRadius > 0
+				&& physics::lengthSquared(point - (g.cells[c].at + physics::Vec3 {0, 1, 0})) <= reach * reach;
+			if (inEntry) {
+				field[c] = 0;
+				open.push({0, static_cast<int>(c)});
+				continue;
+			}
+			if (q.nearestOnly) {
+				continue; // (no spot that sees the point: the rays below are for the other fields)
+			}
+			float f = 1;
+			const float toAim = shooting ? std::sqrt(physics::lengthSquared(aim - eye)) : 0.0f;
+			// Pass 2 (a part walled in by the hull, the core): any distance its rounds reach it from.
+			const float nearLimit = pass == 0 ? kFireNear : 0.0f;
+			const float toAim2 = std::sqrt(physics::lengthSquared(aim - eye));
+			const bool sees = aimed && pass == 1 ? toAim2 >= 1.0f && toAim2 <= kFireFar
+					&& shot(eye, aim + (aim - eye) * (0.5f / toAim2)) == q.part
+				: shooting ? toAim >= nearLimit && toAim <= kFireFar && shot(eye, aim + (aim - eye) * (0.5f / toAim)) == q.part
+						   : d >= kFireNear && d <= kFireFar && (!ray(eye, point, f) || f * d > d - 1.0f);
+			if (sees) {
+				field[c] = 0;
+				open.push({0, static_cast<int>(c)});
+			}
+		}
+	}
+	if (open.empty() && nearestCell >= 0 && q.entryRadius <= 0) {
+		field[static_cast<size_t>(nearestCell)] = 0;
+		open.push({0, nearestCell});
+	}
+	while (!open.empty()) {
+		const auto [cost, c] = open.top();
+		open.pop();
+		if (cost > field[static_cast<size_t>(c)] || (blocked(static_cast<size_t>(c)) && cost > 0)) {
+			continue;
+		}
+		for (const auto& [from, step] : g.cells[static_cast<size_t>(c)].in) {
+			if (cost + step < field[static_cast<size_t>(from)]) {
+				field[static_cast<size_t>(from)] = cost + step;
+				open.push({cost + step, from});
+			}
+		}
+	}
+}
+
+template <typename Grid>
+FieldQuery fieldQuery(const GameWorld& world, const Grid& g, const GameWorld::TitanInfo& titan, uint32_t part, const FieldSpec& spec)
+{
+	FieldQuery q;
+	q.part = part;
+	q.point = spec.point;
+	q.nearestOnly = spec.nearestOnly;
+	q.entryRadius = spec.entryRadius;
+	if (physics::Vec3 low, high; spec.around && world.objectBox(spec.around, low, high)) {
+		q.blocked.assign(g.cells.size(), 0);
+		for (size_t c = 0; c < g.cells.size(); ++c) {
+			const physics::Vec3 at = world.titanToLocal(spec.around, world.titanToWorld(titan.object, g.cells[c].at + physics::Vec3 {0, 1, 0}));
+			q.blocked[c] = at.x > low.x - 0.5f && at.x < high.x + 0.5f && at.z > low.z - 0.5f && at.z < high.z + 0.5f
+				&& at.y > low.y - 2 && at.y < high.y + 1;
+		}
+	}
+	// A Titan part's spots are those its rounds reach: the first face of the
+	// projectile LOD on the way to the middle of its faces is its own (not a
+	// window's glass, a frame or the desk in front of it).
+	q.aimed = !spec.nearestOnly && spec.entryRadius <= 0 && world.titanPartAimPoint(part, q.aim);
+	return q;
+}
+
+// titanLandingSpots' cells: under the open sky (`ray` up clear), clear all round, from which a whole console (or
+// the core) can be walked to (`best`, the least of their fields), four cells (3 m) in from any edge or wall.
+template <typename Grid, typename Ray>
+std::vector<int> makeLanding(const Grid& g, const std::vector<float>& best, const Ray& ray)
+{
+	std::vector<int> landing;
+	for (size_t c = 0; c < g.cells.size(); ++c) {
+		float f = 1;
+		const physics::Vec3 at = g.cells[c].at;
+		if (best[c] < kInfinity && g.cells[c].out.size() >= 8 && !ray(at + physics::Vec3 {0, 0.4f, 0}, physics::Vec3 {at.x, kTop, at.z}, f)) {
+			landing.push_back(static_cast<int>(c));
+		}
+	}
+	// A pod comes down fast and wide.
+	for (int pass = 0; pass < 4; ++pass) {
+		std::vector<char> in(g.cells.size(), 0);
+		for (int c : landing) {
+			in[static_cast<size_t>(c)] = 1;
+		}
+		std::vector<int> kept;
+		for (int c : landing) {
+			const auto& out = g.cells[static_cast<size_t>(c)].out;
+			if (std::all_of(out.begin(), out.end(), [&](const auto& link) { return in[static_cast<size_t>(link.first)] != 0; })) {
+				kept.push_back(c);
+			}
+		}
+		landing.swap(kept);
+	}
+	return landing;
+}
+
 } // namespace
 
 struct BotManager::TitanGrid {
@@ -81,6 +232,29 @@ struct BotManager::TitanGrid {
 	std::map<uint32_t, std::pair<physics::Vec3, float>> seeds; // a moving thing's field (a boarder, a deck aircraft): where it was (Titan frame) and when it was made
 	// titanRepair's, by part: its armour's material and its meshes (the Titan's frame; titanPartMeshes).
 	std::map<uint32_t, std::pair<uint32_t, std::vector<physics::Vec3>>> repairParts;
+	// enhanced.botAsyncPaths: each field's making (titanField's arguments), and the fields and the
+	// landing cells being made anew off the main thread, taken at `applyAt` (applyTitanJobs). Until
+	// then the bots walk the last grid's fields, carried over to this grid's cells (carryTitanFields).
+	// The cells, columns and links are never changed once the grid is built: the jobs read them.
+	std::map<uint32_t, FieldSpec> specs;
+	struct Pending {
+		std::shared_ptr<BotWorkers::Job> job;
+		std::shared_ptr<std::vector<float>> field;
+		std::shared_ptr<std::vector<int>> landing;
+		long applyAt = 0;
+	};
+	std::map<uint32_t, Pending> pending;
+	Pending landingJob;
+	bool landingStale = false; // carried over: made anew once the fields are
+	// The next grid being made (a part went down or came back), and this one's cells in the last (made anew
+	// from it; -1 for a new cell), until its fields are carried over.
+	struct Rebuild {
+		std::shared_ptr<BotWorkers::Job> job;
+		std::shared_ptr<std::shared_ptr<TitanGrid>> grid;
+		uint32_t version = 0;
+		long applyAt = 0;
+	} rebuild;
+	std::vector<int> fromOld;
 
 	// Where that thing's field is made about: where it is, once it has moved 3 m and its field is a second old (dropped then).
 	const physics::Vec3& seedOf(uint32_t key, const physics::Vec3& at, float now)
@@ -88,6 +262,7 @@ struct BotManager::TitanGrid {
 		auto& [seed, made] = seeds[key];
 		if (!fields.count(key) || (now - made > 1 && physics::lengthSquared(at - seed) > 9)) {
 			fields.erase(key);
+			pending.erase(key);
 			seed = at;
 			made = now;
 		}
@@ -123,6 +298,7 @@ struct BotManager::TitanGrid {
 
 BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, int team)
 {
+	TP("titanGrid");
 	std::shared_ptr<TitanGrid>& held = m_titanGrids[{titan.object, team}];
 	const uint32_t version = m_world.titanMeshVersion(titan.object);
 	if (held && held->version == version) {
@@ -139,12 +315,39 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 		return *held;
 	}
 	const std::shared_ptr<const TitanGrid> old = known ? held : nullptr;
-	held = std::make_shared<TitanGrid>();
-	TitanGrid& g = *held;
+	if (held && m_settings.asyncPaths()) {
+		// enhanced.botAsyncPaths: the new grid is made off the main thread from this one and the Titan's
+		// collision as it stands now, and taken kTitanJobDelay ticks on (applyTitanJobs); the bots walk this
+		// one meanwhile. A later change asks for another.
+		if (held->rebuild.job && held->rebuild.version == version) {
+			return *held;
+		}
+		if (const auto collision = m_world.titanCollision(titan.object)) {
+			auto made = std::make_shared<std::shared_ptr<TitanGrid>>();
+			const float radius = titan.radius;
+			held->rebuild.grid = made;
+			held->rebuild.version = version;
+			held->rebuild.applyAt = m_tick + kTitanJobDelay;
+			held->rebuild.job = workers().post([made, old, low, high, radius, version, collision, team] {
+				*made = buildTitanGrid(old, low, high, radius, version,
+					[&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return collision->ray(team, a, b, f); });
+			});
+			return *held;
+		}
+	}
+	held = buildTitanGrid(old, low, high, titan.radius, version,
+		[&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return m_world.titanLocalRay(titan.object, team, a, b, f); });
+	return *held;
+}
+
+std::shared_ptr<BotManager::TitanGrid> BotManager::buildTitanGrid(const std::shared_ptr<const TitanGrid>& old, const physics::Vec3& low,
+	const physics::Vec3& high, float radius, uint32_t version, const std::function<bool(const physics::Vec3&, const physics::Vec3&, float&)>& ray)
+{
+	auto made = std::make_shared<TitanGrid>();
+	TitanGrid& g = *made;
 	g.version = version;
-	const auto ray = [&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return m_world.titanLocalRay(titan.object, team, a, b, f); };
 	// shortcut: a fixed 160 m half-extent (the info's radius is shorter than the hull); upgrade to the mesh's box.
-	const float r = std::max(titan.radius, 160.0f);
+	const float r = std::max(radius, 160.0f);
 	g.minX = g.minZ = -r;
 	g.nx = g.nz = static_cast<int>(2 * r / kCell) + 1;
 	g.columns.resize(static_cast<size_t>(g.nx) * g.nz);
@@ -243,7 +446,10 @@ BotManager::TitanGrid& BotManager::titanGrid(const GameWorld::TitanInfo& titan, 
 			g.cells[static_cast<size_t>(b)].in.push_back({static_cast<int>(a), cost});
 		}
 	}
-	return g;
+	if (reuse) {
+		g.fromOld = std::move(fromOld);
+	}
+	return made;
 }
 
 // The Titan a player on foot is aboard: the one whose grid is under him,
@@ -269,7 +475,34 @@ const GameWorld::TitanInfo* BotManager::titanUnder(const std::vector<GameWorld::
 
 void BotManager::prepareTitanGrids(uint32_t titanObject)
 {
+	TP("prepareTitanGrids");
 	if (m_settings.titanPlay() && m_world.gameMode() == "gpm_ti") {
+		if (m_settings.asyncPaths()) {
+			// enhanced.botAsyncPaths: the grids not made yet are made on the threads side by side (and here),
+			// as titanGrid would make them one after another (the shared queries give the same answers).
+			std::vector<std::pair<std::pair<uint32_t, int>, std::shared_ptr<BotWorkers::Job>>> jobs;
+			std::vector<std::shared_ptr<std::shared_ptr<TitanGrid>>> made;
+			for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+				const auto collision = titanObject && titan.object != titanObject ? nullptr : m_world.titanCollision(titan.object);
+				for (int team : {1, 2}) {
+					if (const auto held = m_titanGrids.find({titan.object, team}); !collision || (held != m_titanGrids.end() && held->second)) {
+						continue;
+					}
+					const uint32_t version = m_world.titanMeshVersion(titan.object);
+					const float radius = titan.radius;
+					auto grid = std::make_shared<std::shared_ptr<TitanGrid>>();
+					made.push_back(grid);
+					jobs.push_back({{titan.object, team}, workers().post([grid, collision, team, version, radius] {
+						*grid = buildTitanGrid(nullptr, {}, {}, radius, version,
+							[&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return collision->ray(team, a, b, f); });
+					})});
+				}
+			}
+			for (size_t i = 0; i < jobs.size(); ++i) {
+				workers().wait(jobs[i].second);
+				m_titanGrids[jobs[i].first] = *made[i];
+			}
+		}
 		for (const GameWorld::TitanInfo& titan : m_world.titans()) {
 			if (titanObject && titan.object != titanObject) {
 				continue;
@@ -278,6 +511,32 @@ void BotManager::prepareTitanGrids(uint32_t titanObject)
 				titanGrid(titan, team);
 			}
 		}
+		if (!m_settings.asyncPaths()) {
+			return;
+		}
+		// enhanced.botAsyncPaths: the consoles' and the core's fields and the landing cells too, made on the
+		// threads (and here) now rather than by the first bots to ask mid-round (the first tick, the first pod).
+		for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+			if ((titanObject && titan.object != titanObject) || titan.wreck) {
+				continue;
+			}
+			const auto collision = m_world.titanCollision(titan.object);
+			for (int team : {1, 2}) {
+				const std::shared_ptr<TitanGrid>& grid = m_titanGrids[{titan.object, team}];
+				if (!grid) {
+					continue;
+				}
+				for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan.team, titan.object)) {
+					if ((part.kind == GameWorld::TitanPartInfo::Console || part.kind == GameWorld::TitanPartInfo::Core) && !part.wreck
+						&& !grid->fields.count(part.id)) {
+						grid->specs[part.id] = {m_world.titanToLocal(titan.object, part.position)};
+						requestTitanField(grid, titan, team, part.id, collision, m_tick);
+					}
+				}
+				grid->landingStale = !grid->landingDone;
+			}
+		}
+		applyTitanJobs(true);
 	}
 }
 
@@ -292,85 +551,189 @@ const std::vector<float>& BotManager::titanField(TitanGrid& g, const GameWorld::
 {
 	const auto found = g.fields.find(part);
 	if (found != g.fields.end()) {
-		return found->second;
+		return found->second; // (enhanced.botAsyncPaths: perhaps the last grid's, until its new one is taken)
 	}
+	TP("titanField");
+	g.specs[part] = {point, nearestOnly, entryRadius, around};
+	const FieldQuery q = fieldQuery(m_world, g, titan, part, g.specs[part]);
 	std::vector<float>& field = g.fields[part];
-	field.assign(g.cells.size(), kInfinity);
-	std::vector<char> blocked(g.cells.size(), 0);
-	if (physics::Vec3 low, high; around && m_world.objectBox(around, low, high)) {
-		for (size_t c = 0; c < g.cells.size(); ++c) {
-			const physics::Vec3 at = m_world.titanToLocal(around, m_world.titanToWorld(titan.object, g.cells[c].at + physics::Vec3 {0, 1, 0}));
-			blocked[c] = at.x > low.x - 0.5f && at.x < high.x + 0.5f && at.z > low.z - 0.5f && at.z < high.z + 0.5f
-				&& at.y > low.y - 2 && at.y < high.y + 1;
-		}
+	makeField(
+		g, q, [&](const physics::Vec3& a, const physics::Vec3& b) { return m_world.titanLocalShot(titan.object, a, b); },
+		[&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return m_world.titanLocalRay(titan.object, team, a, b, f); }, field);
+	return field;
+}
+
+BotWorkers& BotManager::workers()
+{
+	if (!m_workers) {
+		m_workers = std::make_unique<BotWorkers>(m_workerThreads >= 0 ? m_workerThreads : BotWorkers::defaultThreads());
 	}
-	using Entry = std::pair<float, int>;
-	std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
-	float nearest = 1e9f;
-	int nearestCell = -1;
-	// A Titan part's spots are those its rounds reach: the first face of the
-	// projectile LOD on the way to the middle of its faces is its own (not a
-	// window's glass, a frame or the desk in front of it).
-	physics::Vec3 aim;
-	const bool aimed = !nearestOnly && entryRadius <= 0 && m_world.titanPartAimPoint(part, aim);
-	// A part none of whose spots meets that test (the core, walled in by the hull) is shot from any distance its rounds reach it.
-	for (int pass = 0; pass < (aimed ? 2 : 1) && open.empty(); ++pass) {
-	const bool shot = aimed && pass == 0;
-	for (size_t c = 0; c < g.cells.size(); ++c) {
-		const physics::Vec3 eye = g.cells[c].at + physics::Vec3 {0, 1.5f, 0};
-		const float d = std::sqrt(physics::lengthSquared(point - eye));
-		if (blocked[c]) {
-			continue;
-		}
-		if (d < nearest && !g.cells[c].out.empty()) {
-			nearest = d;
-			nearestCell = static_cast<int>(c);
-		}
-		float f = 1;
-		// Leave room for cellAt's snap: reaching a terminal cell must also
-		// put the actual soldier inside the interaction sphere.
-		const float reach = std::max(0.0f, entryRadius - kCell);
-		const bool inEntry = entryRadius > 0
-			&& physics::lengthSquared(point - (g.cells[c].at + physics::Vec3 {0, 1, 0})) <= reach * reach;
-		const float toAim = shot ? std::sqrt(physics::lengthSquared(aim - eye)) : 0.0f;
-		// Pass 2 (a part walled in by the hull, the core): any distance its rounds reach it from.
-		const float nearLimit = pass == 0 ? kFireNear : 0.0f;
-		const float toAim2 = std::sqrt(physics::lengthSquared(aim - eye));
-		const bool sees = aimed && pass == 1 ? toAim2 >= 1.0f && toAim2 <= kFireFar
-				&& m_world.titanLocalShot(titan.object, eye, aim + (aim - eye) * (0.5f / toAim2)) == part
-			: shot ? toAim >= nearLimit && toAim <= kFireFar
-				&& m_world.titanLocalShot(titan.object, eye, aim + (aim - eye) * (0.5f / toAim)) == part
-							   : d >= kFireNear && d <= kFireFar
-				&& (!m_world.titanLocalRay(titan.object, team, eye, point, f) || f * d > d - 1.0f);
-		if (inEntry || (!nearestOnly && sees)) {
-			field[c] = 0;
-			open.push({0, static_cast<int>(c)});
-		}
+	return *m_workers;
+}
+
+void BotManager::setPathWorkers(int threads)
+{
+	m_workers.reset();
+	m_workerThreads = threads;
+}
+
+// enhanced.botAsyncPaths: the field under `key` made anew off the main thread, on the grid as it is and the
+// Titan's collision as it stands now (`collision`, shared by a grid's jobs), taken kTitanJobDelay ticks on.
+void BotManager::requestTitanField(const std::shared_ptr<TitanGrid>& grid, const GameWorld::TitanInfo& titan, int team, uint32_t key,
+	const std::shared_ptr<const GameWorld::TitanCollision>& collision, long applyAt)
+{
+	TitanGrid& g = *grid;
+	const auto spec = g.specs.find(key);
+	if (spec == g.specs.end() || !collision) {
+		return;
 	}
+	auto query = std::make_shared<const FieldQuery>(fieldQuery(m_world, g, titan, key, spec->second));
+	auto field = std::make_shared<std::vector<float>>();
+	std::shared_ptr<const TitanGrid> cells = grid;
+	TitanGrid::Pending& p = g.pending[key];
+	p.field = field;
+	p.applyAt = applyAt;
+	p.job = workers().post([cells, query, collision, field, team] {
+		makeField(
+			*cells, *query, [&](const physics::Vec3& a, const physics::Vec3& b) { return collision->shot(a, b); },
+			[&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return collision->ray(team, a, b, f); }, *field);
+	});
+}
+
+// The landing cells made anew off the main thread from the fields as they are now.
+void BotManager::requestTitanLanding(const std::shared_ptr<TitanGrid>& grid, const GameWorld::TitanInfo& titan, int team,
+	const std::shared_ptr<const GameWorld::TitanCollision>& collision, long applyAt)
+{
+	TitanGrid& g = *grid;
+	if (!collision) {
+		return;
 	}
-	if (open.empty() && nearestCell >= 0 && entryRadius <= 0) {
-		field[static_cast<size_t>(nearestCell)] = 0;
-		open.push({0, nearestCell});
-	}
-	while (!open.empty()) {
-		const auto [cost, c] = open.top();
-		open.pop();
-		if (cost > field[static_cast<size_t>(c)] || (blocked[static_cast<size_t>(c)] && cost > 0)) {
-			continue;
-		}
-		for (const auto& [from, step] : g.cells[static_cast<size_t>(c)].in) {
-			if (cost + step < field[static_cast<size_t>(from)]) {
-				field[static_cast<size_t>(from)] = cost + step;
-				open.push({cost + step, from});
+	auto best = std::make_shared<std::vector<float>>(g.cells.size(), kInfinity);
+	for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan.team, titan.object)) {
+		if ((part.kind == GameWorld::TitanPartInfo::Console || part.kind == GameWorld::TitanPartInfo::Core) && !part.wreck) {
+			const std::vector<float>& f = titanField(g, titan, team, part.id, m_world.titanToLocal(titan.object, part.position));
+			for (size_t c = 0; c < f.size(); ++c) {
+				(*best)[c] = std::min((*best)[c], f[c]);
 			}
 		}
 	}
-	return field;
+	auto landing = std::make_shared<std::vector<int>>();
+	std::shared_ptr<const TitanGrid> cells = grid;
+	g.landingJob.landing = landing;
+	g.landingJob.applyAt = applyAt;
+	g.landingJob.job = workers().post([cells, best, collision, landing, team] {
+		*landing = makeLanding(*cells, *best, [&](const physics::Vec3& a, const physics::Vec3& b, float& f) { return collision->ray(team, a, b, f); });
+	});
+}
+
+// A new grid (a part went down or came back) starts with the last one's fields and landing cells, carried over
+// to its cells, and has them made anew off the main thread (enhanced.botAsyncPaths). `fromOld`: each cell's in
+// the last grid (-1 for a new one; empty: found by place).
+void BotManager::carryTitanFields(const TitanGrid& old, const std::shared_ptr<TitanGrid>& grid, const std::vector<int>& fromOld,
+	const GameWorld::TitanInfo& titan, int team)
+{
+	TitanGrid& g = *grid;
+	std::vector<int> map(g.cells.size(), -1);
+	std::vector<int> toNew(old.cells.size(), -1);
+	for (size_t c = 0; c < g.cells.size(); ++c) {
+		map[c] = fromOld.size() == g.cells.size() ? fromOld[c] : old.cellAt(g.cells[c].at);
+		if (map[c] >= 0 && static_cast<size_t>(map[c]) < old.cells.size()) {
+			toNew[static_cast<size_t>(map[c])] = static_cast<int>(c);
+		} else {
+			map[c] = -1;
+		}
+	}
+	// Not the wrecked parts' (no one walks to them now).
+	std::set<uint32_t> wrecked;
+	for (const GameWorld::TitanPartInfo& part : m_world.titanParts(titan.team, titan.object)) {
+		if (part.wreck) {
+			wrecked.insert(part.id);
+		}
+	}
+	const auto collision = m_world.titanCollision(titan.object);
+	for (const auto& [key, was] : old.fields) {
+		if (wrecked.count(key) || !old.specs.count(key)) {
+			continue;
+		}
+		std::vector<float>& f = g.fields[key];
+		f.assign(g.cells.size(), kInfinity);
+		for (size_t c = 0; c < g.cells.size(); ++c) {
+			if (map[c] >= 0 && static_cast<size_t>(map[c]) < was.size()) {
+				f[c] = was[static_cast<size_t>(map[c])];
+			}
+		}
+		g.specs[key] = old.specs.at(key);
+		requestTitanField(grid, titan, team, key, collision, m_tick + kTitanJobDelay);
+	}
+	g.seeds = old.seeds;
+	if (old.landingDone) {
+		g.landingDone = true;
+		for (int c : old.landing) {
+			if (toNew[static_cast<size_t>(c)] >= 0) {
+				g.landing.push_back(toNew[static_cast<size_t>(c)]);
+			}
+		}
+		g.landingStale = true;
+	}
+}
+
+// The jobs due by this tick (all of them with `all`) taken, waiting for any not done yet; a grid whose fields
+// are all new again has its landing cells made anew.
+void BotManager::applyTitanJobs(bool all)
+{
+	TP("applyTitanJobs");
+	for (bool more = true; more;) {
+		more = false;
+		for (auto& [key, grid] : m_titanGrids) {
+			if (!grid) {
+				continue;
+			}
+			if (grid->rebuild.job && (all || grid->rebuild.applyAt <= m_tick)) {
+				workers().wait(grid->rebuild.job);
+				const std::shared_ptr<TitanGrid> made = *grid->rebuild.grid;
+				grid->rebuild = {};
+				for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+					if (titan.object == key.first && made) {
+						carryTitanFields(*grid, made, made->fromOld, titan, key.second);
+						made->fromOld.clear();
+						grid = made;
+						more = all;
+					}
+				}
+			}
+			TitanGrid& g = *grid;
+			for (auto it = g.pending.begin(); it != g.pending.end();) {
+				if (!all && it->second.applyAt > m_tick) {
+					++it;
+					continue;
+				}
+				workers().wait(it->second.job);
+				g.fields[it->first] = std::move(*it->second.field);
+				it = g.pending.erase(it);
+			}
+			if (g.landingJob.job && (all || g.landingJob.applyAt <= m_tick)) {
+				workers().wait(g.landingJob.job);
+				g.landing = std::move(*g.landingJob.landing);
+				g.landingDone = true;
+				g.landingJob = {};
+			}
+			if (g.landingStale && g.pending.empty() && !g.landingJob.job) {
+				g.landingStale = false;
+				for (const GameWorld::TitanInfo& titan : m_world.titans()) {
+					if (titan.object == key.first && !titan.wreck) {
+						requestTitanLanding(grid, titan, key.second, m_world.titanCollision(titan.object), m_tick + kTitanJobDelay);
+						more = all;
+					}
+				}
+			}
+		}
+	}
 }
 
 bool BotManager::titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
 	const physics::Vec3& entry, float radius, uint32_t key, const char* behaviour)
 {
+	TP("titanGunWalk");
 	if (!m_settings.titanPlay()) {
 		return false;
 	}
@@ -388,6 +751,7 @@ bool BotManager::titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, Soldi
 
 bool BotManager::titanPlay(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
+	TP("titanPlay");
 	const float cutOffSince = bot.titanCutOffSince; // held only while each think finds it so
 	bot.titanCutOffSince = -1;
 	if (!m_settings.titanPlay() || self.vehicle || m_world.gameMode() != "gpm_ti") {
@@ -818,6 +1182,7 @@ bool BotManager::titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 // from which a whole console (or the core) can be walked to. World frame.
 std::vector<physics::Vec3> BotManager::titanLandingSpots(int titanTeam, int team)
 {
+	TP("titanLandingSpots");
 	std::vector<physics::Vec3> spots;
 	for (const GameWorld::TitanInfo& titan : m_world.titans()) {
 		if (titan.team != titanTeam || titan.wreck) {
@@ -835,29 +1200,9 @@ std::vector<physics::Vec3> BotManager::titanLandingSpots(int titanTeam, int team
 					}
 				}
 			}
-			for (size_t c = 0; c < g.cells.size(); ++c) {
-				float f = 1;
-				const physics::Vec3 at = g.cells[c].at;
-				if (best[c] < kInfinity && g.cells[c].out.size() >= 8
-					&& !m_world.titanLocalRay(titan.object, team, at + physics::Vec3 {0, 0.4f, 0}, {at.x, kTop, at.z}, f)) {
-					g.landing.push_back(static_cast<int>(c));
-				}
-			}
-			// Four cells (3 m) in from any edge or wall: a pod comes down fast and wide.
-			for (int pass = 0; pass < 4; ++pass) {
-				std::vector<char> in(g.cells.size(), 0);
-				for (int c : g.landing) {
-					in[static_cast<size_t>(c)] = 1;
-				}
-				std::vector<int> kept;
-				for (int c : g.landing) {
-					const auto& out = g.cells[static_cast<size_t>(c)].out;
-					if (std::all_of(out.begin(), out.end(), [&](const auto& link) { return in[static_cast<size_t>(link.first)] != 0; })) {
-						kept.push_back(c);
-					}
-				}
-				g.landing.swap(kept);
-			}
+			g.landing = makeLanding(g, best, [&](const physics::Vec3& a, const physics::Vec3& b, float& f) {
+				return m_world.titanLocalRay(titan.object, team, a, b, f);
+			});
 		}
 		for (int c : g.landing) {
 			spots.push_back(m_world.titanToWorld(titan.object, g.cells[static_cast<size_t>(c)].at));
@@ -1722,11 +2067,13 @@ void BotManager::titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierI
 
 const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Vec3& from, uint32_t ignore)
 {
+	TP("wayToVehicleMesh");
 	constexpr float kGrid = 4;
 	constexpr int kHalf = 22; // 88 m
 	const std::pair<int, int> key {static_cast<int>(std::floor(from.x / kGrid)), static_cast<int>(std::floor(from.z / kGrid))};
 	// The search walks the terrain: nothing for a vehicle parked above it (a Titan's deck, a roof).
-	if (static const std::vector<physics::Vec3> none; from.y - m_world.terrainHeight(from.x, from.z) > 5) {
+	static const std::vector<physics::Vec3> none;
+	if (from.y - m_world.terrainHeight(from.x, from.z) > 5) {
 		return none;
 	}
 	const auto known = m_meshWays.find(key);
@@ -1734,16 +2081,39 @@ const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Ve
 	if (known != m_meshWays.end() && (!known->second.second.empty() || m_time - known->second.first < 60)) {
 		return known->second.second;
 	}
-	m_meshWays[key].first = m_time;
-	const auto t0 = std::chrono::steady_clock::now();
-	std::vector<physics::Vec3>& way = m_meshWays[key].second;
-	way.clear();
 	if (!m_vehicleNavMesh) {
-		return way;
+		m_meshWays[key] = {m_time, {}};
+		return m_meshWays[key].second;
+	}
+	// enhanced.botAsyncPaths: one search at a time, kMeshRaysPerTick rays a tick (a failing one casts some
+	// 65000): an unfinished search goes on when its spot is asked for again, other spots get none meanwhile
+	// (and one not asked for in 5 s is dropped). Without it the whole search is made at once.
+	const bool spread = m_settings.asyncPaths();
+	MeshSearch& s = m_meshSearch;
+	if (s.active && s.key != key) {
+		if (spread && m_time - s.askedAt <= 5) {
+			return none;
+		}
+		s.active = false;
 	}
 	const int side = 2 * kHalf + 1;
+	const int start = kHalf * side + kHalf;
+	if (!s.active) {
+		s.active = true;
+		s.key = key;
+		s.from = from;
+		s.ignore = ignore;
+		s.seconds = 0;
+		s.cameFrom.assign(static_cast<size_t>(side * side), -1);
+		s.frontier = {};
+		s.cameFrom[static_cast<size_t>(start)] = start;
+		s.frontier.push(start);
+	}
+	s.askedAt = m_time;
+	const auto t0 = std::chrono::steady_clock::now();
+	const physics::Vec3 origin = s.from;
 	const auto at = [&](int i) {
-		physics::Vec3 p {from.x + (i % side - kHalf) * kGrid, 0, from.z + (i / side - kHalf) * kGrid};
+		physics::Vec3 p {origin.x + (i % side - kHalf) * kGrid, 0, origin.z + (i / side - kHalf) * kGrid};
 		p.y = m_world.terrainHeight(p.x, p.z);
 		return p;
 	};
@@ -1756,46 +2126,50 @@ const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Ve
 			for (const float up : {1.0f, 1.8f}) {
 				bool through = false;
 				const physics::Vec3 lift = across * aside + physics::Vec3 {0, up, 0};
-				if (!m_world.lineOfSight(a + lift, b + lift, ignore, through) || through) {
+				--m_meshRaysLeft;
+				if (!m_world.lineOfSight(a + lift, b + lift, s.ignore, through) || through) {
 					return false;
 				}
 			}
 		}
 		return std::fabs(d.y) < 0.6f * length; // not up a wall of terrain
 	};
-	std::vector<int> cameFrom(static_cast<size_t>(side * side), -1);
-	std::queue<int> frontier;
-	const int start = kHalf * side + kHalf;
-	cameFrom[static_cast<size_t>(start)] = start;
-	frontier.push(start);
 	int goal = -1;
-	while (!frontier.empty() && goal < 0) {
-		const int c = frontier.front();
-		frontier.pop();
-		const physics::Vec3 here = c == start ? physics::Vec3 {from.x, m_world.terrainHeight(from.x, from.z), from.z} : at(c);
+	while (!s.frontier.empty() && goal < 0 && (!spread || m_meshRaysLeft > 0)) {
+		const int c = s.frontier.front();
+		s.frontier.pop();
+		const physics::Vec3 here = c == start ? physics::Vec3 {origin.x, m_world.terrainHeight(origin.x, origin.z), origin.z} : at(c);
 		for (int dz = -1; dz <= 1 && goal < 0; ++dz) {
 			for (int dx = -1; dx <= 1; ++dx) {
 				const int x = c % side + dx, z = c / side + dz, n = z * side + x;
-				if ((!dx && !dz) || x < 0 || z < 0 || x >= side || z >= side || cameFrom[static_cast<size_t>(n)] >= 0 || !open(here, at(n))) {
+				if ((!dx && !dz) || x < 0 || z < 0 || x >= side || z >= side || s.cameFrom[static_cast<size_t>(n)] >= 0 || !open(here, at(n))) {
 					continue;
 				}
-				cameFrom[static_cast<size_t>(n)] = c;
+				s.cameFrom[static_cast<size_t>(n)] = c;
 				const physics::Vec3 p = at(n);
 				if (m_vehicleNavMesh->findPolygon(ai::Vec3 {p.x, p.y, p.z}) >= 0) {
 					goal = n;
 					break;
 				}
-				frontier.push(n);
+				s.frontier.push(n);
 			}
 		}
 	}
-	for (int c = goal; c >= 0 && c != start; c = cameFrom[static_cast<size_t>(c)]) {
+	const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	s.seconds += took;
+	m_groundStats.vehicleMaxSeconds = std::max(m_groundStats.vehicleMaxSeconds, took);
+	if (goal < 0 && !s.frontier.empty()) {
+		return none; // (the rest next tick)
+	}
+	s.active = false;
+	std::vector<physics::Vec3>& way = m_meshWays[key].second;
+	m_meshWays[key].first = m_time;
+	way.clear();
+	for (int c = goal; c >= 0 && c != start; c = s.cameFrom[static_cast<size_t>(c)]) {
 		way.insert(way.begin(), at(c));
 	}
-	const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 	++m_groundStats.vehicleSearches;
-	m_groundStats.vehicleSeconds += took;
-	m_groundStats.vehicleMaxSeconds = std::max(m_groundStats.vehicleMaxSeconds, took);
+	m_groundStats.vehicleSeconds += s.seconds;
 	return way;
 }
 
@@ -1904,6 +2278,7 @@ bool BotManager::meshExit(const physics::Vec3& to, physics::Vec3& exit)
 std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore,
 	bool* unfinished, bool offset) const
 {
+	TP("groundWay");
 	if (unfinished) {
 		*unfinished = false;
 	}
@@ -2154,6 +2529,35 @@ std::string BotManager::titanGridStats()
 	return out;
 }
 
+BotManager::TitanGridState BotManager::titanGridState(uint32_t titan, int team, uint32_t key) const
+{
+	TitanGridState s;
+	const auto found = m_titanGrids.find({titan, team});
+	if (found == m_titanGrids.end() || !found->second) {
+		return s;
+	}
+	const TitanGrid& g = *found->second;
+	s.exists = true;
+	s.version = g.version;
+	s.cells = g.cells.size();
+	s.fields = g.fields.size();
+	s.pending = g.pending.size();
+	s.rebuilding = g.rebuild.job != nullptr;
+	s.landingDone = g.landingDone;
+	s.landingPending = g.landingJob.job != nullptr || g.landingStale;
+	s.landingCells = g.landing.size();
+	if (const auto field = g.fields.find(key); field != g.fields.end()) {
+		s.hasField = true;
+		for (size_t c = 0; c < field->second.size(); ++c) {
+			if (field->second[c] < kInfinity) {
+				++s.reached;
+				s.fieldSum += static_cast<double>(field->second[c]) * static_cast<double>(c % 97 + 1);
+			}
+		}
+	}
+	return s;
+}
+
 // enhanced.botCommander (not retail): AIDLL's commander never moves a Titan
 // (its IBFCommander calls are the strikes, the UAV and the supply drop,
 // BotManager::command), and a Titan moves only on a commander's order
@@ -2234,6 +2638,7 @@ bool BotManager::titanOrderBlocksSilos(int team, const physics::Vec3& at) const
 
 void BotManager::titanCommand()
 {
+	TP("titanCommand");
 	if (!m_settings.titanCommander() || m_world.gameMode() != "gpm_ti") {
 		return;
 	}

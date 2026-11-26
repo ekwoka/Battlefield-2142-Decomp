@@ -1,4 +1,6 @@
 #include "Bots.h"
+#include "BotWorkers.h"
+#include "TickProf.h"
 
 #include "Console/ConsoleBinding.h"
 #include "World/Object.h"
@@ -1465,6 +1467,7 @@ std::string BotManager::aiTemplateOf(const std::string& objectTemplate) const
 // is now (its vehicle's position at the wheel, as drive() steers it).
 void BotManager::refreshFollowers()
 {
+	TP("refreshFollowers");
 	if (m_bots.empty()) {
 		return;
 	}
@@ -1492,6 +1495,9 @@ void BotManager::update(float seconds)
 {
 	m_time += seconds;
 	m_groundSearchesLeft = kGroundSearchesPerTick;
+	++m_tick;
+	m_meshRaysLeft = kMeshRaysPerTick;
+	applyTitanJobs(); // enhanced.botAsyncPaths: the fields due this tick
 	if (enabled()) {
 		population(); // AIMain's kick and fill (BotsSquad.cpp), before the lists are taken
 	}
@@ -2247,6 +2253,7 @@ bool BotManager::spotSighting(const GameWorld::PlayerInfo& self, const GameWorld
 // object's sphere tested against its six planes by 0x100feac0, 0x100f7340).
 void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
+	TP("sense");
 	// The view: R = viewDistance, candidates within R cos(fov/2) (a square
 	// frustum of half-angle fov/2), seen when one of
 	// clamp(round(30 radius / d), 1, 10) rays is clear.
@@ -2444,6 +2451,7 @@ void BotManager::sense(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 // squad's accessors 0x100c0e40, 0x100c0e50, 0x100c0ea0.)
 void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 {
+	TP("updateGoal");
 	ensureAreas();
 	// A scripted goal (ai.botMoveTo and the rest) takes the place of the
 	// SAI's orders: its head is the goal, with no areas on the way. A
@@ -2859,6 +2867,7 @@ void BotManager::updateGoal(Bot& bot, const GameWorld::PlayerInfo& self)
 // and the arbiter.
 void BotManager::think(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
+	TP("think");
 	const std::string equipment = equipmentOf(self);
 	if (bot.equipment != equipment) {
 		bot.equipment = equipment;
@@ -2916,6 +2925,7 @@ void BotManager::think(Bot& bot, const GameWorld::PlayerInfo& self, const std::v
 // (the time since this bot last ran).
 void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds)
 {
+	TP("act");
 	const std::string equipment = equipmentOf(self);
 	if (bot.equipment != equipment) {
 		// Into or out of a vehicle: a new behaviour set, nothing planned.
@@ -3864,6 +3874,7 @@ float BotManager::urgency(Bot& bot, const ai::BehaviourSetup& behaviour, float w
 // pattern's slot 7: bot.target here.)
 float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
+	TP("fireUrgency");
 	const physics::Vec3 eye = self.position + physics::Vec3 {0, kEyeHeight, 0};
 	float gunYaw = 0, gunPitch = 0;
 	const bool gunning = self.vehicle && (!self.driving || drivesGun(self)) && m_world.gunAim(self.vehicle, self.seat, gunYaw, gunPitch);
@@ -4151,6 +4162,7 @@ void BotManager::planFire(Bot& bot, const GameWorld::PlayerInfo& self, bool gunn
 // spot: fireKeepsToOrder, bot.orderMove).
 void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const std::vector<GameWorld::PlayerInfo>& players)
 {
+	TP("pickWeapon");
 	bot.explosive = false;
 	const auto known = std::find_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == bot.target; });
 	const auto target = std::find_if(players.begin(), players.end(), [&](const auto& p) { return p.id == bot.target; });
@@ -4932,6 +4944,7 @@ bool BotManager::threatened(const Bot& bot, const GameWorld::PlayerInfo& self) c
 // 0x1006c2b0.)
 float BotManager::changeUrgency(Bot& bot, const GameWorld::PlayerInfo& self, float weight)
 {
+	TP("changeUrgency");
 	constexpr float kReach = 75; // 0x42960000
 	const std::vector<GameWorld::VehicleInfo>& vehicles = m_vehicles;
 	const Bot::Radio* bailOut = heardFromHuman(bot, 0);
@@ -8743,6 +8756,7 @@ void BotManager::ensureAreas()
 // that player's orders.
 void BotManager::updateStrategy(float seconds)
 {
+	TP("updateStrategy");
 	(void)seconds;
 	ensureAreas();
 	updateKnowledge();
@@ -9221,6 +9235,7 @@ void BotManager::updateStrategy(float seconds)
 // own (the SAI orders the squads, updateStrategy).
 void BotManager::command(float seconds)
 {
+	TP("command");
 	(void)seconds;
 	using A = GameWorld::CommanderAbility;
 	const std::vector<GameWorld::PlayerInfo> players = m_world.playerList();

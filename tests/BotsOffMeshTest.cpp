@@ -22,11 +22,12 @@ namespace {
 struct LevelBots {
 	TitanLevel level;
 	game::BotSettings settings;
-	bool enhanced = true, offMesh = true, titan = false;
+	bool enhanced = true, offMesh = true, titan = false, asyncPaths = true;
 	std::optional<ai::NavMesh> mesh, vehicleMesh;
 	std::optional<game::BotManager> bots;
 	std::vector<int> players;
 	double botSeconds = 0, worstTick = 0;
+	std::vector<double> ticks; // each update's time
 	int botUpdates = 0, worstAt = 0;
 	LevelBots(const char* gameDir, const std::string& name, const char* mode, int size, bool walkOffMesh, bool titanPlay = false)
 		: level(gameDir, name, size, true, "mods/bf2142", true, nullptr, mode), offMesh(walkOffMesh), titan(titanPlay)
@@ -55,6 +56,7 @@ struct LevelBots {
 		settings.enhanced = &enhanced;
 		settings.botOffMesh = &offMesh;
 		settings.botTitan = &titan;
+		settings.botAsyncPaths = &asyncPaths;
 		bots.emplace(*level.world, settings);
 		for (const char* map : {"Infantry", "Vehicle"}) {
 			std::vector<uint8_t> qtr, clb;
@@ -70,6 +72,7 @@ struct LevelBots {
 			bots->update(1 / 30.0f);
 			const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 			botSeconds += took;
+			ticks.push_back(took);
 			if (botUpdates >= 150 && took > worstTick) {
 				worstTick = took; // after the first 5 s (botTitan makes its Titans' grids then)
 				worstAt = botUpdates;
@@ -190,7 +193,23 @@ TEST(Bots_OffMeshVerdunTitanCost)
 		world.playerInfo(id, info);
 		start.push_back(info.position);
 	}
-	round.level.run(90);
+	// A console of each Titan goes down at 30 s and another at 60 s: new grids and fields mid-round
+	// (enhanced.botAsyncPaths: made off the main thread while the bots walk the last ones).
+	const auto wreckConsole = [&] {
+		for (int team = 1; team <= 2; ++team) {
+			for (const auto& part : world.titanParts(team)) {
+				if (part.kind == game::GameWorld::TitanPartInfo::Console && !part.wreck) {
+					world.applyDamage(part.id, 1e6f, -1);
+					break;
+				}
+			}
+		}
+	};
+	round.level.run(30);
+	wreckConsole();
+	round.level.run(30);
+	wreckConsole();
+	round.level.run(30);
 	int moved = 0;
 	for (size_t i = 0; i < round.players.size(); ++i) {
 		game::GameWorld::PlayerInfo info;
@@ -209,5 +228,78 @@ TEST(Bots_OffMeshVerdunTitanCost)
 		stats.vehicleSearches ? 1000.0 * stats.vehicleSeconds / stats.vehicleSearches : 0.0, 1000.0 * stats.vehicleMaxSeconds);
 	CHECK(round.players.size() == 47);
 	CHECK(moved >= static_cast<int>(round.players.size()) / 2);
+	// No tick-long hitch: enhanced.botAsyncPaths makes the Titans' fields at the load and anew off the main
+	// thread when the consoles go down (each field some 40 ms of rays; a part change cost 0.5 s at once
+	// before), and spreads the vehicle-mesh search over ticks (50 ms for one that finds nothing).
+#ifdef NDEBUG
+	constexpr double kWorst = 0.1;
+#else
+	constexpr double kWorst = 1.0; // (a sanitizer build)
+#endif
+	std::vector<double> sorted(round.ticks.begin() + std::min<size_t>(150, round.ticks.size()), round.ticks.end());
+	std::sort(sorted.begin(), sorted.end());
+	const double p99 = sorted.empty() ? 0 : sorted[sorted.size() * 99 / 100];
+	std::fprintf(stderr, "    bot update p99 %.1f ms, worst %.1f ms\n", 1000.0 * p99, 1000.0 * round.worstTick);
+	CHECK(round.worstTick < kWorst);
 	CHECK(stats.searches <= round.botUpdates);
+}
+
+// enhanced.botAsyncPaths: the Titans' fields and grids made on worker threads are taken at fixed updates
+// (and waited for then if late), so the round plays the same with two threads, with none (each job made
+// on the main thread when it is due) and with two again: Verdun gpm_ti with 47 bots and a console of each
+// Titan going down at 15 s and 30 s, every bot's place and behaviour and the world's fingerprint at 45 s.
+TEST(Bots_AsyncPathsVerdunTitanSameRound)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	struct Outcome {
+		uint64_t fingerprint = 0;
+		std::vector<physics::Vec3> places;
+		std::vector<std::string> behaviours;
+	};
+	const auto play = [&](int threads) {
+		Outcome out;
+		LevelBots round(gameDir, "Verdun", "gpm_ti", 48, true, true);
+		if (!round.level.loaded || !round.mesh) return out;
+		round.bots->setPathWorkers(threads);
+		round.addBots(23);
+		round.addBots(1, 1);
+		round.bots->prepareTitanGrids();
+		auto& world = *round.level.world;
+		const auto wreckConsole = [&] {
+			for (int team = 1; team <= 2; ++team) {
+				for (const auto& part : world.titanParts(team)) {
+					if (part.kind == game::GameWorld::TitanPartInfo::Console && !part.wreck) {
+						world.applyDamage(part.id, 1e6f, -1);
+						break;
+					}
+				}
+			}
+		};
+		round.level.run(15);
+		wreckConsole();
+		round.level.run(15);
+		wreckConsole();
+		round.level.run(15);
+		out.fingerprint = world.stateFingerprint();
+		for (const int id : round.players) {
+			game::GameWorld::PlayerInfo info;
+			world.playerInfo(id, info);
+			out.places.push_back(info.position);
+			out.behaviours.push_back(round.bots->behaviour(id));
+		}
+		return out;
+	};
+	const Outcome two = play(2), none = play(0), again = play(2);
+	if (two.places.empty()) return;
+	std::fprintf(stderr, "  fingerprints %016llx %016llx %016llx\n", static_cast<unsigned long long>(two.fingerprint),
+		static_cast<unsigned long long>(none.fingerprint), static_cast<unsigned long long>(again.fingerprint));
+	CHECK(two.fingerprint == none.fingerprint);
+	CHECK(two.fingerprint == again.fingerprint);
+	CHECK(two.places.size() == none.places.size() && two.places.size() == again.places.size());
+	for (size_t i = 0; i < two.places.size() && i < none.places.size() && i < again.places.size(); ++i) {
+		CHECK(two.places[i].x == none.places[i].x && two.places[i].y == none.places[i].y && two.places[i].z == none.places[i].z);
+		CHECK(two.places[i].x == again.places[i].x && two.places[i].z == again.places[i].z);
+		CHECK(two.behaviours[i] == none.behaviours[i] && two.behaviours[i] == again.behaviours[i]);
+	}
 }

@@ -28,6 +28,7 @@
 // (0x005aa0e0 sets the object's position and the node's velocity); with
 // sv.allowTitanMovement off it stands. It never turns.
 #include "CombatAreas.h"
+#include "TickProf.h"
 #include "GameWorld.h"
 
 #include "Physics/CollisionMeshFile.h"
@@ -757,6 +758,15 @@ int wreckState(const physics::CollisionMeshFile& mesh, size_t geometry)
 	return geometry < mesh.geometries.size() && mesh.geometries[geometry].subGeometries.size() > 1 ? 1 : -1;
 }
 
+// Where the segment a-b comes nearest the point c, squared (as PartCollision.cpp's).
+float segmentDistanceSquared(const physics::Vec3& a, const physics::Vec3& b, const physics::Vec3& c)
+{
+	const physics::Vec3 d = b - a;
+	const float span = physics::lengthSquared(d);
+	const float along = span > 0 ? std::clamp(physics::dot(c - a, d) / span, 0.0f, 1.0f) : 0.0f;
+	return physics::lengthSquared(a + d * along - c);
+}
+
 } // namespace
 
 // A part's wreck (0x00654120 -> 0x00654070) runs 0x006539f0(node, 1) over
@@ -781,6 +791,7 @@ int GameWorld::titanMeshState(const Titan& titan, const TitanMesh& m)
 // sub-geometry its parts' wrecks leave it (titanMeshState).
 void GameWorld::rebuildTitanMeshes(Titan& titan)
 {
+	TP("rebuildTitanMeshes");
 	++titan.meshVersion;
 	// Unknown until the soldier faces are compared below.
 	titan.meshChanges.push_back({titan.meshVersion, false, true, {}, {}});
@@ -944,6 +955,11 @@ void GameWorld::rebuildTitanMeshes(Titan& titan)
 		}
 	}
 	titan.meshesLive = std::move(nowLive);
+	// The bots' shots at its parts (TitanCollision::shot, off the main thread) walk finer cells.
+	{
+		TP("w.titanFineIndex");
+		projectile->buildFineIndex(2.0f);
+	}
 	body->teamSoldierMesh[0] = teams[0];
 	body->teamSoldierMesh[1] = teams[1];
 	body->soldierMesh = soldier;
@@ -1087,6 +1103,7 @@ std::vector<GameWorld::TitanInfo> GameWorld::titans() const
 
 bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
 {
+	TP("titanLocalRay");
 	fraction = 1;
 	const Body* body = findBody(titan);
 	if (!body) {
@@ -1105,6 +1122,7 @@ bool GameWorld::titanLocalRay(uint32_t titan, int team, const physics::Vec3& fro
 
 uint32_t GameWorld::titanLocalShot(uint32_t titan, const physics::Vec3& from, const physics::Vec3& to) const
 {
+	TP("titanLocalShot");
 	const Body* body = findBody(titan);
 	physics::CollisionWorld::Hit hit {};
 	if (!body || !raycastBody(*body, from, to, hit)) {
@@ -1118,6 +1136,83 @@ uint32_t GameWorld::titanLocalShot(uint32_t titan, const physics::Vec3& from, co
 		const auto& settings = t->parts[static_cast<size_t>(index)].t->settings();
 		const auto armour = settings.find("armor.defaultMaterial");
 		if (armour == settings.end() || static_cast<uint32_t>(std::atoi(armour->second.c_str())) != hit.material) {
+			return titan;
+		}
+	}
+	return hit.owner ? hit.owner : titan;
+}
+
+std::shared_ptr<const GameWorld::TitanCollision> GameWorld::titanCollision(uint32_t titan) const
+{
+	const Body* body = findBody(titan);
+	if (!body) {
+		return nullptr;
+	}
+	auto made = std::make_shared<TitanCollision>();
+	made->titan = titan;
+	made->soldier = body->soldierMesh;
+	made->teamSoldier[0] = body->teamSoldierMesh[0];
+	made->teamSoldier[1] = body->teamSoldierMesh[1];
+	made->projectile = body->projectileMesh;
+	if (!body->partMeshes.empty()) {
+		poseCollisionParts(*body);
+		made->partReach = body->partReach;
+		for (const Body::PartMesh& part : body->partMeshes) {
+			const std::shared_ptr<const physics::CollisionWorld>& lod = part.lod[body->collisionWrecked || part.wrecked ? 1 : 0];
+			if (lod && !part.off) {
+				made->parts.push_back({lod, part.rotation, part.position, part.radius});
+			}
+		}
+	}
+	for (const Titan& t : m_titans) {
+		for (const TitanPart& part : t.parts) {
+			const auto& settings = part.t->settings();
+			const auto armour = settings.find("armor.defaultMaterial");
+			made->armour[part.id] = armour == settings.end() ? -1 : static_cast<int64_t>(static_cast<uint32_t>(std::atoi(armour->second.c_str())));
+		}
+	}
+	return made;
+}
+
+bool GameWorld::TitanCollision::ray(int team, const physics::Vec3& from, const physics::Vec3& to, float& fraction) const
+{
+	fraction = 1;
+	const physics::CollisionWorld* mesh = (team == 1 || team == 2) && teamSoldier[team - 1] ? teamSoldier[team - 1].get() : soldier.get();
+	physics::CollisionWorld::Hit hit {};
+	if (!mesh || !mesh->raycastShared(from, to, hit)) {
+		return false;
+	}
+	fraction = hit.fraction;
+	return true;
+}
+
+// titanLocalShot on the copy: raycastBody's root LOD and posed parts, then the armour's test.
+uint32_t GameWorld::TitanCollision::shot(const physics::Vec3& from, const physics::Vec3& to) const
+{
+	physics::CollisionWorld::Hit hit {}, candidate {};
+	float best = 2;
+	if (projectile && projectile->raycastShared(from, to, candidate)) {
+		best = candidate.fraction;
+		hit = candidate;
+	}
+	if (!parts.empty() && segmentDistanceSquared(from, to, {}) <= partReach * partReach) {
+		for (const Part& part : parts) {
+			if (segmentDistanceSquared(from, to, part.position) > part.radius * part.radius) {
+				continue;
+			}
+			const physics::Vec3 a = part.rotation.untransform(from - part.position);
+			const physics::Vec3 b = part.rotation.untransform(to - part.position);
+			if (part.lod->raycastShared(a, b, candidate) && candidate.fraction < best) {
+				best = candidate.fraction;
+				hit = candidate;
+			}
+		}
+	}
+	if (best > 1) {
+		return 0;
+	}
+	if (hit.owner && hit.owner != titan) {
+		if (const auto found = armour.find(hit.owner); found != armour.end() && found->second != static_cast<int64_t>(hit.material)) {
 			return titan;
 		}
 	}
@@ -1333,6 +1428,7 @@ void GameWorld::moveTitanBody(Titan& titan, const physics::Vec3& delta)
 
 void GameWorld::stepTitans(float seconds)
 {
+	TP("stepTitans");
 	if (m_titans.empty()) {
 		return;
 	}

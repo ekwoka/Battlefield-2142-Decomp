@@ -90,7 +90,9 @@
 #include <functional>
 #include <array>
 #include <map>
+#include <memory>
 #include <optional>
+#include <queue>
 #include <set>
 #include <string>
 #include <tuple>
@@ -518,6 +520,7 @@ void strategicAreaGuard(const std::vector<GuardArea>& areas, const physics::Vec3
 	const physics::Vec3& target, bool& hold, bool& targetInside);
 
 class BotManager;
+class BotWorkers;
 
 // The seed of the AI's random numbers (AIRandom, 0x100309a0). The word is
 // 0 at the AI's start, so the original takes the clock: the IBFTimer's
@@ -572,6 +575,11 @@ struct BotSettings {
 	// grid to it or back onto the mesh (groundWalk); not retail, whose follower finds no path and stands.
 	const bool* botOffMesh = nullptr;
 	bool offMeshWalk() const { return enhanced && *enhanced && botOffMesh && *botOffMesh; }
+	// enhanced.botAsyncPaths, also read live: a Titan's fields (the ways to its consoles and core) are made
+	// at the load and, after a part goes down or comes back, anew on worker threads while the bots walk the
+	// last ones (taken a second on); wayToVehicleMesh's search is spread over ticks. Not retail.
+	const bool* botAsyncPaths = nullptr;
+	bool asyncPaths() const { return enhanced && *enhanced && botAsyncPaths && *botAsyncPaths; }
 	// enhanced.botPilots, also read live: a gunship's pilot hunts targets
 	// and flies attack runs at them (BotsPilot.cpp); not retail.
 	const bool* botPilots = nullptr;
@@ -835,10 +843,22 @@ public:
 	// level's load (a second or two of rays each, else spent mid-round).
 	// With `titanObject`, that Titan's only (both teams' grids on it; the tests).
 	void prepareTitanGrids(uint32_t titanObject = 0);
+	// enhanced.botAsyncPaths' worker threads (BotWorkers; -1 the machine's default). 0: each job is made on the
+	// main thread when it is due, which must play the same round (the tests).
+	void setPathWorkers(int threads);
 	// Open-sky spots on `titanTeam`'s Titan from which `team`'s soldier can walk to a console (BotsTitan.cpp).
 	std::vector<physics::Vec3> titanLandingSpots(int titanTeam, int team);
 	// The grids' cells and links, a line each (and, for $BF2142_BOT_STATS, the vehicles).
 	std::string titanGridStats();
+	// One grid's state (the tests of enhanced.botAsyncPaths): its mesh version, its cells, its fields and those being
+	// made anew, a new grid being made; for `key`'s field the cells it reaches and a sum over their costs.
+	struct TitanGridState {
+		bool exists = false, rebuilding = false, landingDone = false, landingPending = false, hasField = false;
+		uint32_t version = 0;
+		size_t cells = 0, fields = 0, pending = 0, landingCells = 0, reached = 0;
+		double fieldSum = 0;
+	};
+	TitanGridState titanGridState(uint32_t titan, int team, uint32_t key = 0) const;
 	// The server's maximum of players (sv.maxPlayers; AIDLL reads the game's
 	// through DAT_10139454 slot 4) for AIMain's kick on a human's join and
 	// fill on a leave (BotsSquad.cpp's population); 0 for none.
@@ -1705,7 +1725,7 @@ private:
 		int searches = 0, reused = 0, deferred = 0, empty = 0, unfinished = 0, maxCells = 0;
 		long cells = 0, steps = 0; // cells expanded, steps checked anew
 		double seconds = 0, maxSeconds = 0;
-		int vehicleSearches = 0; // wayToVehicleMesh's, and their time
+		int vehicleSearches = 0; // wayToVehicleMesh's, their time and the longest call's (a search spread over ticks: one tick's part)
 		double vehicleSeconds = 0, vehicleMaxSeconds = 0;
 	} mutable m_groundStats;
 
@@ -2039,9 +2059,26 @@ private:
 	struct TitanGrid;
 	std::map<std::pair<uint32_t, int>, std::shared_ptr<TitanGrid>> m_titanGrids; // by Titan and team
 	TitanGrid& titanGrid(const GameWorld::TitanInfo& titan, int team);
+	static std::shared_ptr<TitanGrid> buildTitanGrid(const std::shared_ptr<const TitanGrid>& old, const physics::Vec3& low,
+		const physics::Vec3& high, float radius, uint32_t version,
+		const std::function<bool(const physics::Vec3&, const physics::Vec3&, float&)>& ray);
 	const GameWorld::TitanInfo* titanUnder(const std::vector<GameWorld::TitanInfo>& titans, const GameWorld::PlayerInfo& player);
 	const std::vector<float>& titanField(TitanGrid& grid, const GameWorld::TitanInfo& titan, int team, uint32_t part, const physics::Vec3& point,
 		bool nearest = false, float entryRadius = 0, uint32_t around = 0);
+	// enhanced.botAsyncPaths (BotsTitan.cpp): the fields made anew off the main thread and taken kTitanJobDelay
+	// ticks on (applyTitanJobs, at the top of each update; all of them at once with `all`).
+	static constexpr long kTitanJobDelay = 30;
+	void carryTitanFields(const TitanGrid& old, const std::shared_ptr<TitanGrid>& grid, const std::vector<int>& fromOld,
+		const GameWorld::TitanInfo& titan, int team);
+	void requestTitanField(const std::shared_ptr<TitanGrid>& grid, const GameWorld::TitanInfo& titan, int team, uint32_t key,
+		const std::shared_ptr<const GameWorld::TitanCollision>& collision, long applyAt);
+	void requestTitanLanding(const std::shared_ptr<TitanGrid>& grid, const GameWorld::TitanInfo& titan, int team,
+		const std::shared_ptr<const GameWorld::TitanCollision>& collision, long applyAt);
+	void applyTitanJobs(bool all = false);
+	BotWorkers& workers();
+	std::unique_ptr<BotWorkers> m_workers;
+	int m_workerThreads = -1; // -1: BotWorkers::defaultThreads
+	long m_tick = 0;          // the updates so far
 	bool titanGunWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds,
 		const physics::Vec3& entry, float radius, uint32_t key, const char* behaviour);
 	bool titanWalk(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input, float seconds, TitanGrid& grid,
@@ -2073,9 +2110,23 @@ private:
 	// enhanced.botRecovery (not retail): a mod's vehicle mesh may stop short of a base's vehicle pads (Remaster's
 	// Suez Titan layout leaves the fenced PAC base out). The way from such a spot to the mesh: a search over a 4 m
 	// grid within 90 m whose steps no obstacle crosses at hull height (fences count); empty for none. Kept by spot.
-	// (`ignore`: the vehicle itself. A spot with no way is tried again after 10 s: a parked vehicle may have been in it.)
+	// (`ignore`: the vehicle itself. A spot with no way is tried again after 60 s: a parked vehicle may have been in it.
+	// enhanced.botAsyncPaths: one search at a time, spread over ticks; empty until it is done.)
 	const std::vector<physics::Vec3>& wayToVehicleMesh(const physics::Vec3& from, uint32_t ignore);
 	std::map<std::pair<int, int>, std::pair<float, std::vector<physics::Vec3>>> m_meshWays;
+	// enhanced.botAsyncPaths: the search under way (one at a time, kMeshRaysPerTick rays a tick).
+	struct MeshSearch {
+		bool active = false;
+		std::pair<int, int> key;
+		physics::Vec3 from;
+		uint32_t ignore = 0;
+		float askedAt = 0;
+		double seconds = 0;
+		std::vector<int> cameFrom;
+		std::queue<int> frontier;
+	} m_meshSearch;
+	static constexpr int kMeshRaysPerTick = 3000;
+	int m_meshRaysLeft = kMeshRaysPerTick;
 	// Its driver along that way; false once the vehicle has been on the mesh.
 	bool driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	std::set<uint32_t> m_meshGaveUp; // vehicles a driver could not bring to the mesh in a minute: left, and not taken again

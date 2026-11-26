@@ -1,4 +1,5 @@
 #include "GameWorld.h"
+#include "TickProf.h"
 #include "KitUnlocks.h"
 
 #include <unordered_set>
@@ -930,10 +931,10 @@ void GameWorld::tick(float seconds)
 		m_spawners.push_back(std::move(made));
 	}
 	m_newSpawners.clear();
-	stepAbandoned();
-	stepProps();
+	{ TP("w.stepAbandoned"); stepAbandoned(); }
+	{ TP("w.stepProps"); stepProps(); }
 	if (m_files) {
-		syncStaticCollision();
+		{ TP("w.syncStaticCollision"); syncStaticCollision(); }
 	}
 	// The armours' memories of collisions (0x00654d80's part) run out.
 	for (auto it = m_collisionMemory.begin(); it != m_collisionMemory.end();) {
@@ -950,52 +951,52 @@ void GameWorld::tick(float seconds)
 	// response (slot 0x24, 0x006dd1b0): the soldiers' passes before the
 	// mesh group's turns, which solve as they go, and the soldiers' solves
 	// after them.
-	stepPlayersBefore(seconds);
+	{ TP("w.stepPlayersBefore"); stepPlayersBefore(seconds); }
 	if (m_files) {
-		addBodies();
+		{ TP("w.addBodies"); addBodies(); }
 	}
 	// The other objects that fire (the silos, the drones, the strikes'
 	// guns) update with the rest, before the nodes' move.
-	stepSilos(seconds);
-	stepDrones(seconds);
-	stepSentryGuns(seconds);
-	stepCommander(seconds);
-	stepTitans(seconds);
+	{ TP("w.stepSilos"); stepSilos(seconds); }
+	{ TP("w.stepDrones"); stepDrones(seconds); }
+	{ TP("w.stepSentryGuns"); stepSentryGuns(seconds); }
+	{ TP("w.stepCommander"); stepCommander(seconds); }
+	{ TP("w.stepTitans"); stepTitans(seconds); }
 	if (m_files) {
-		stepRemoteTitans();
-		stepPhysicsMove(seconds);
+		{ TP("w.stepRemoteTitans"); stepRemoteTitans(); }
+		{ TP("w.stepPhysicsMove"); stepPhysicsMove(seconds); }
 	}
-	stepSoldiersPhysics(seconds);
+	{ TP("w.stepSoldiersPhysics"); stepSoldiersPhysics(seconds); }
 	// The Point and RotationalPoint passes (0x006dc430, 0x006dc640) before
 	// the mesh group's turns: the rounds, this tick's too, meet the
 	// vehicles as moved.
-	stepProjectiles(seconds);
+	{ TP("w.stepProjectiles"); stepProjectiles(seconds); }
 	if (m_files) {
-		stepPhysicsCollide(seconds);
+		{ TP("w.stepPhysicsCollide"); stepPhysicsCollide(seconds); }
 	}
-	stepSoldiersSettle(seconds);
-	setRagDollLevels();
-	stepPlayersAfter(seconds);
-	stepPods(seconds);
-	stepParachutes(seconds);
-	stepSeatCorpses(seconds);
-	stepDroppedKits();
-	stepCorpses(seconds);
-	stepRemoteBodies(seconds);
-	stepAbilities(seconds);
-	stepCloseTo(seconds);
-	stepVehicleDamage(seconds);
-	stepUnmannedGuns(seconds);
-	stepSeatBehaviours(seconds);
-	followArmorEffects();
-	stepVehicleTeams();
-	stepCombatAreas(seconds);
-	stepTitanHullKills();
+	{ TP("w.stepSoldiersSettle"); stepSoldiersSettle(seconds); }
+	{ TP("w.setRagDollLevels"); setRagDollLevels(); }
+	{ TP("w.stepPlayersAfter"); stepPlayersAfter(seconds); }
+	{ TP("w.stepPods"); stepPods(seconds); }
+	{ TP("w.stepParachutes"); stepParachutes(seconds); }
+	{ TP("w.stepSeatCorpses"); stepSeatCorpses(seconds); }
+	{ TP("w.stepDroppedKits"); stepDroppedKits(); }
+	{ TP("w.stepCorpses"); stepCorpses(seconds); }
+	{ TP("w.stepRemoteBodies"); stepRemoteBodies(seconds); }
+	{ TP("w.stepAbilities"); stepAbilities(seconds); }
+	{ TP("w.stepCloseTo"); stepCloseTo(seconds); }
+	{ TP("w.stepVehicleDamage"); stepVehicleDamage(seconds); }
+	{ TP("w.stepUnmannedGuns"); stepUnmannedGuns(seconds); }
+	{ TP("w.stepSeatBehaviours"); stepSeatBehaviours(seconds); }
+	{ TP("w.followArmorEffects"); followArmorEffects(); }
+	{ TP("w.stepVehicleTeams"); stepVehicleTeams(); }
+	{ TP("w.stepCombatAreas"); stepCombatAreas(seconds); }
+	{ TP("w.stepTitanHullKills"); stepTitanHullKills(); }
 	// The minimap's radar sweep (0x00788600): 4 rad/s, wrapping at 2pi.
 	m_radarSweep = std::fmod(m_radarSweep + 4.0f * seconds, 6.2831853f);
-	placeTracers();
-	stepControlPoints(seconds);
-	stepAmbience(seconds);
+	{ TP("w.placeTracers"); placeTracers(); }
+	{ TP("w.stepControlPoints"); stepControlPoints(seconds); }
+	{ TP("w.stepAmbience"); stepAmbience(seconds); }
 	m_effects.update(seconds);
 	// The nodes' reported velocities (PhysicsNodeManager slot 0x20,
 	// 0x006daa00 -> 0x006c5920), at the tick's end.
@@ -7187,6 +7188,7 @@ bool GameWorld::spawnGroupActive(int controlPoint, int playerId) const
 
 bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore) const
 {
+	TP("lineOfSight");
 	physics::CollisionWorld::Hit hit {};
 	// A stationary gun (Body::fixed) is also in the static world: `ignore` leaves its faces out there too.
 	if (m_projectileCollision.raycastFront(from, to, hit, ignore)) {
@@ -7218,6 +7220,7 @@ bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, 
 
 bool GameWorld::lineOfSight(const physics::Vec3& from, const physics::Vec3& to, uint32_t ignore, bool& seenThrough, uint32_t alsoIgnore) const
 {
+	TP("lineOfSight2");
 	seenThrough = false;
 	// A mesh's faces from `a` to `b`, see-through ones passed (each pass
 	// starts a hair past the face it went through).

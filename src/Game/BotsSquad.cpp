@@ -19,6 +19,7 @@
 //     bridge repair, BBBridgeRepair 0x10084620; no broken bridges), the
 //     request for a new order (0x100c30f0) and the radio (0x100c2ee0).
 #include "Bots.h"
+#include "TickProf.h"
 
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
@@ -209,6 +210,7 @@ ai::AreaStatus BotManager::areaStatus(int area, int team) const
 // the cursor moving on after the second side (+0x20, +0x24).
 void BotManager::updateSquads()
 {
+	TP("updateSquads");
 	if (m_squads.empty()) {
 		for (int team = 1; team <= 2; ++team) {
 			for (int id = 1; id <= 9; ++id) {
@@ -283,6 +285,7 @@ void BotManager::updateSquads()
 // join and leave events; the rewrite sees the human players come and go.
 void BotManager::population()
 {
+	TP("population");
 	std::set<int> humans;
 	int bots = 0;
 	for (const GameWorld::PlayerInfo& p : m_world.playerList()) {

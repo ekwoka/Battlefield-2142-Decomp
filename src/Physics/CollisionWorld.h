@@ -127,6 +127,15 @@ public:
 	{
 		return trace(from, to, hit, true, ignore);
 	}
+	// raycast and raycastFront without the query stamps: any number of threads may run these on one
+	// world at once, beside the stamped queries, so long as no thread changes the world meanwhile
+	// (the same answers: a face met twice is tested twice).
+	bool raycastShared(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false, 0, false); }
+	bool raycastFrontShared(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, true, 0, false); }
+	// Files the faces a second time in `cell`-wide cells, which the shared queries walk instead (the same
+	// first face, but for faces met at the very same fraction): for a dense mesh many queries go to
+	// (a Titan's, some 130000 faces, over a thousand to an 8 m cell). Kept up as faces come and go.
+	void buildFineIndex(float cell);
 	// A moving mesh vertex against the faces (the mobile mesh physics'
 	// first pass, 0x006bb050 -> collision-mesh slot 22 0x006e5920): the
 	// vertex's segment from its last pose to now. The first face it
@@ -159,7 +168,7 @@ public:
 		const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const;
 
 private:
-	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore = 0) const;
+	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore = 0, bool stamped = true) const;
 	struct Triangle {
 		Vec3 a, b, c;
 		Vec3 normal;
@@ -177,7 +186,16 @@ private:
 	}
 
 	std::vector<Triangle> m_triangles;
-	std::unordered_map<int64_t, std::vector<uint32_t>> m_cells;
+	// A cell's faces: the index and, beside it for trace's cull, the face's box.
+	struct CellFace {
+		uint32_t index;
+		Vec3 low, high;
+		operator uint32_t() const { return index; }
+	};
+	std::unordered_map<int64_t, std::vector<CellFace>> m_cells;
+	std::unordered_map<int64_t, std::vector<CellFace>> m_fine; // buildFineIndex's
+	float m_fineCell = 0;
+	void fileFine();
 	mutable uint32_t m_stamp = 0;
 	size_t m_removed = 0;
 };

@@ -14328,7 +14328,7 @@ stood at their spawns. (The layout has no `ai/StrategicAreas.ai`, like every
 Cerbere layout but gpm_sp/gpm_coop 16; that is not the cause: the SAI then
 makes an area per control point, `ensureAreas`, and the PAC squads get their
 attack orders.) `enhanced.botOffMesh` gives every mode the grid walk. A
-step's check costs six `lineOfSight` rays (each tests every dynamic body), so
+step's check costs six `lineOfSight` rays (each tests the dynamic bodies its segment passes near), so
 the searches are bounded for 64 bots: one search runs a tick over all bots
 and checks at most 40 steps not checked before; the checks are kept for a
 minute by the step's cell on the world's 4 m grid, so a search cut off goes on
@@ -14390,6 +14390,46 @@ so an unreachable defender cannot hold them. While enemies are aboard, bots
 without a Titan role respawn on their own Titan until there are two
 defenders on foot aboard for each boarder. This is native enhanced AI, not
 retail parity.
+
+What the Titan walk costs, and `enhanced.botAsyncPaths` (on). A field
+(`titanField`: each grid cell's cost to a spot that sees a console or the
+core) casts a round's segment (`titanLocalShot`) from every cell within
+14 m of the part's aim point, some 4000 of them, against the Titan's
+projectile LOD (about 130000 faces, over a thousand to each of the
+collision world's 8 m cells). A new grid (a part going down or coming
+back) dropped every field, so the next bots to ask made them all in one
+tick: on Verdun gpm_ti with 47 bots the first tick took 0.6 s (the
+consoles' fields of both Titans), the first pod drop 0.6 s
+(`titanLandingSpots`, all the enemy Titan's console fields for the
+attacking team at once), and every part change 0.5 s more. With the flag
+the consoles' and the core's fields and the landing cells of all four
+grids (two Titans, two teams) are made at the load, on the worker
+threads (`BotWorkers`: one for every four cores, one or two, below the
+main thread's priority). When a part changes, the new grid is made on a
+worker from the last one and a copy of the Titan's collision as it stands
+(`GameWorld::TitanCollision`: the meshes are shared, never changed once
+made, and queried without the collision world's query stamps; the posed
+parts' frames are copied). The bots walk the last grid meanwhile; 30 ticks
+on (`kTitanJobDelay`) the new grid is taken with the last one's fields
+carried over to its cells, the fields are made anew on the workers and
+taken 30 ticks after that, then the landing cells. A result not ready when
+it is due is waited for (or made on the main thread if no worker has
+started it), so a round plays the same whatever the threads' timing, or
+without threads. The workers' shots walk a second, 2 m index of the
+Titan's projectile LOD (`CollisionWorld::buildFineIndex`, made with the
+mesh; 3 ms a Titan), four times faster. `wayToVehicleMesh` (a parked
+vehicle's way back onto the vehicle mesh; a search that finds none casts
+65000 rays, 50 ms) runs one search at a time, at most 3000 rays a tick,
+and goes on when its spot is asked for again. The collision world's rays
+test a face only when its box meets the segment's box in that column, and
+`raycastBody` skips a body whose bounding sphere the segment misses: the
+same answers, twice as fast. The four grids themselves are made side by
+side at the load. Measured headless (`--simulate 240`, 47 bots): the worst
+tick 610 ms before, 23 ms after (the first tick's gun-console entry
+fields, 8 ms), p99.9 160 ms before, 8 ms after; the round ends the same.
+`BF2142_TICK_PROF=<ms>` prints every tick over that many milliseconds with
+its timers (`Game/TickProf.h`, `TP("name")`) and, after a `--simulate`
+run, the ticks' mean, percentiles and worst.
 
 Why nobody fires on Suez_Canal gpm_ti 48 (15 bots, 300 s: 0 rounds, the
 silos left neutral), and why retail is the same: the level load

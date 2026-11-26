@@ -865,6 +865,90 @@ TEST(Titan_BotGridRebuiltAroundOpenedCoreDoors)
 	CHECK(kept.titanGridStats() == whole.titanGridStats());
 }
 
+// enhanced.botAsyncPaths: the consoles' and the core's fields are made at the
+// load; when a part goes down the bots keep the last grid and its fields
+// while the new grid is made off the main thread, take the new grid (with
+// the fields carried over to its cells) kTitanJobDelay (30) updates on, its
+// fields made anew 30 after that and the landing cells 30 after those. The
+// result matches a grid and fields made from scratch on the changed Titan,
+// with worker threads or without.
+TEST(Titan_BotAsyncFieldsStaleThenSwap)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const int threads : {2, 0}) {
+		TitanLevel level(gameDir, "Bridge_at_Remagen", 48, true, "mods/bf2142");
+		CHECK(level.loaded);
+		if (!level.loaded) return;
+		game::BotSettings settings;
+		const bool enhanced = true;
+		settings.enhanced = &enhanced;
+		settings.botTitan = &enhanced;
+		settings.botAsyncPaths = &enhanced;
+		const auto* found = level.titan(1);
+		CHECK(found != nullptr);
+		if (!found) return;
+		const uint32_t titan = found->object;
+		uint32_t core = 0, console = 0;
+		for (const auto& part : level.world->titanParts(1, titan)) {
+			core = part.kind == game::GameWorld::TitanPartInfo::Core ? part.id : core;
+			console = part.kind == game::GameWorld::TitanPartInfo::Console && !console ? part.id : console;
+		}
+		CHECK(core != 0 && console != 0);
+		game::BotManager bots(*level.world, settings);
+		bots.setPathWorkers(threads);
+		bots.prepareTitanGrids(titan);
+		const auto made = bots.titanGridState(titan, 2, core);
+		CHECK(made.exists && made.hasField && made.fields >= 2 && made.pending == 0 && !made.rebuilding);
+		CHECK(made.landingDone && !made.landingPending);
+		CHECK(made.reached > 0);
+		const uint32_t before = level.world->titanMeshVersion(titan);
+		CHECK(made.version == before);
+		const int attacker = level.world->addPlayer("Eu", 2, true);
+		level.world->applyDamage(console, 1e5f, attacker); // one console down: its mesh goes to its wreck's
+		level.run(1);
+		const uint32_t after = level.world->titanMeshVersion(titan);
+		CHECK(after != before);
+		// Asked for (the pods' landing spots): the new grid is being made, the last one is kept meanwhile.
+		const size_t spots = bots.titanLandingSpots(1, 2).size();
+		auto now = bots.titanGridState(titan, 2, core);
+		CHECK(now.version == before && now.rebuilding && now.fieldSum == made.fieldSum);
+		CHECK(spots == made.landingCells);
+		int updates = 0;
+		while (now.rebuilding && updates < 100) {
+			bots.update(1 / 30.0f);
+			++updates;
+			now = bots.titanGridState(titan, 2, core);
+			if (now.rebuilding) {
+				CHECK(now.version == before && now.fieldSum == made.fieldSum); // the stale grid and field, unchanged
+			}
+		}
+		CHECK(updates == 30);
+		// Taken: the new grid with the core's field carried over (the wrecked console's is dropped), made anew.
+		CHECK(now.version == after && now.hasField && now.pending > 0 && now.fields == made.fields - 1);
+		CHECK(now.landingPending && now.landingDone);
+		updates = 0;
+		while ((now.pending > 0 || now.landingPending) && updates < 200) {
+			bots.update(1 / 30.0f);
+			++updates;
+			now = bots.titanGridState(titan, 2, core);
+		}
+		CHECK(updates == 60); // the fields 30 on, the landing cells 30 after them
+		CHECK(now.pending == 0 && !now.landingPending);
+		// The same as made from scratch on the changed Titan.
+		game::BotManager whole(*level.world, settings);
+		whole.setPathWorkers(threads);
+		whole.prepareTitanGrids(titan);
+		const auto fresh = whole.titanGridState(titan, 2, core);
+		std::fprintf(stderr, "  %d threads: %zu cells, core field %zu cells (%.0f) before, %zu (%.0f) after, %zu (%.0f) made whole; landing %zu / %zu\n",
+			threads, now.cells, made.reached, made.fieldSum, now.reached, now.fieldSum, fresh.reached, fresh.fieldSum, now.landingCells,
+			fresh.landingCells);
+		CHECK(fresh.cells == now.cells);
+		CHECK(fresh.reached == now.reached && fresh.fieldSum == now.fieldSum);
+		CHECK(fresh.landingCells == now.landingCells);
+	}
+}
+
 // enhanced.botTitan: bots aboard their own Titan drop by pod; they aim the
 // array and steer the pod at dry, walkable ground towards their objective.
 // Each landing, with whether the infantry mesh is underfoot there (within

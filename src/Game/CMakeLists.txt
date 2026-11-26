@@ -4,6 +4,7 @@ add_library(Game STATIC
 	BotsSquad.cpp
 	BotsLook.cpp
 	BotsTitan.cpp
+	BotWorkers.cpp
 	BotsMines.cpp
 	BotsPilot.cpp
 	GameWorld.cpp
@@ -35,4 +36,6 @@ add_library(Game STATIC
 	PartCollision.cpp
 )
 target_include_directories(Game PUBLIC ${PROJECT_SOURCE_DIR}/src)
+find_package(Threads REQUIRED)
 target_link_libraries(Game PUBLIC World Physics Effects Animation Console AI)
+target_link_libraries(Game PRIVATE Threads::Threads)
