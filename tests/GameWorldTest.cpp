@@ -3093,6 +3093,60 @@ TEST(GameWorld_AutoReload)
 	CHECK(range.world->playerWeapon()->reloading()); // let go: the auto reload
 }
 
+// The EU assault's under-rifle launcher (eu_ar_rocket: busyUntilButtonRelease,
+// magazines linked with eu_ar_shotgun): its last round, the trigger let go,
+// starts the auto reload.
+TEST(GameWorld_AutoReloadLinkedLauncher)
+{
+	for (const bool linked : {false, true}) {
+		Range range;
+		range.templates.registerType(6, "Kit");
+		world::ObjectTemplate* rocket = range.templates.create("GenericFireArm", "eu_ar_rocket");
+		rocket->settings()["itemIndex"] = "3";
+		rocket->settings()["projectileTemplate"] = "bullet";
+		rocket->settings()["velocity"] = "50";
+		rocket->settings()["fire.roundsPerMinute"] = "100";
+		rocket->settings()["fire.busyUntilButtonRelease"] = "1";
+		rocket->settings()["ammo.magSize"] = "3";
+		rocket->settings()["ammo.nrOfMags"] = "5";
+		rocket->settings()["ammo.reloadTime"] = "3.75";
+		world::ObjectTemplate* shotgun = range.templates.create("GenericFireArm", "eu_ar_shotgun");
+		shotgun->settings()["itemIndex"] = "5";
+		shotgun->settings()["projectileTemplate"] = "bullet";
+		shotgun->settings()["velocity"] = "50";
+		shotgun->settings()["ammo.magSize"] = "3";
+		shotgun->settings()["ammo.nrOfMags"] = "5";
+		shotgun->settings()["ammo.reloadTime"] = "4.5";
+		if (linked) {
+			rocket->settings()["ammo.magLinkWeapon"] = "eu_ar_shotgun";
+			shotgun->settings()["ammo.magLinkWeapon"] = "eu_ar_rocket";
+		}
+		world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+		kit->children().push_back({"eu_ar_rocket", {}, {}});
+		kit->children().push_back({"eu_ar_shotgun", {}, {}});
+		CHECK(range.world->spawnPlayer(2) != nullptr);
+		for (int i = 0; i < 60; ++i) {
+			range.world->tick(1 / 30.0f);
+		}
+		game::SoldierInput click;
+		click.fire = true;
+		click.aimPitch = 45;
+		// A press and a release per round, the rate's wait between.
+		for (int i = 0; i < 200 && range.world->playerWeapon()->roundsInMag() > 0; ++i) {
+			range.world->setPlayerInput(i % 20 < 3 ? click : game::SoldierInput {});
+			range.world->tick(1 / 30.0f);
+		}
+		CHECK(range.world->playerWeapon()->roundsInMag() == 0);
+		bool reloaded = false;
+		for (int i = 0; i < 90 && !reloaded; ++i) {
+			range.world->setPlayerInput({});
+			range.world->tick(1 / 30.0f);
+			reloaded = range.world->playerWeapon()->reloading();
+		}
+		CHECK(reloaded);
+	}
+}
+
 // The ammo ability refills every firearm of the soldier's kit (0x004cf7b0:
 // the player's item containers' items through interface 0x94c0 slot 0x88,
 // 0x005f5110), not only the one in hand: a put-away rifle gets its
