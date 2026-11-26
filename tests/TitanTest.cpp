@@ -9,6 +9,7 @@
 #include "Game/Bots.h"
 #include "Hud/Hud.h"
 #include "Main/HudMenus.h"
+#include "Main/DeploymentLifecycle.h"
 #include "Main/SpawnGroupMarkers.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
@@ -896,15 +897,32 @@ TEST(GameWorld_SpawnGroupsSuez902SplitAverageSelectionAndRoundReset)
 		CHECK(std::fabs(group.position.z - mean.z) < 0.01f);
 	}
 	CHECK(cpGroups[0].id == 1);
-	const auto markers = main::spawnGroupMarkers(cpGroups, cpGroups[1].id);
+	std::vector<game::GameWorld::SpawnGroupInfo> localCpGroups;
+	for (const auto& group : level.world->spawnGroups(team)) {
+		if (group.controlPoint == 902) localCpGroups.push_back(group);
+	}
+	std::sort(localCpGroups.begin(), localCpGroups.end(), [](const auto& a, const auto& b) { return a.templateGroup < b.templateGroup; });
+	CHECK(localCpGroups.size() == 2);
+	const auto markers = main::spawnGroupMarkers(localCpGroups, cpGroups[1].id);
 	CHECK(markers.size() == 2); // one local map marker for each available group on CP 902
 	CHECK(markers[0].id == cpGroups[0].id && !markers[0].selected);
 	CHECK(markers[1].id == cpGroups[1].id && markers[1].selected);
+	CHECK(markers[0].active && markers[1].active);
 	CHECK(std::fabs(markers[0].x - cpGroups[0].position.x) < 0.01f);
 	CHECK(std::fabs(markers[1].z - cpGroups[1].position.z) < 0.01f);
-	const int player = level.world->addPlayer("Spawn group 5", team, true);
+	const auto controlPointNames = level.world->controlPointList();
+	const auto titanInfos = level.world->titans();
+	const std::string baseLabel = main::spawnGroupLabel(localCpGroups[0], controlPointNames, titanInfos, level.objects, {});
+	const std::string splitLabel = main::spawnGroupLabel(localCpGroups[1], controlPointNames, titanInfos, level.objects, {});
+	CHECK(!baseLabel.empty());
+	CHECK(baseLabel == splitLabel); // group suffixes do not change the localized CP marker label
+	const int player = level.world->addPlayer("Spawn group 5", team, false);
 	level.world->setSpawnGroupChoice(player, cpGroups[1].id);
 	level.world->requireSpawnConfirmation(player);
+	CHECK(level.world->spawnGroupAvailable(cpGroups[1].id, player));
+	CHECK(std::string(dice::main::deploymentSpawnInfo(level.world->spawnGroupChoice(player) >= 0,
+		false, 0, level.world->spawnGroupAvailable(level.world->spawnGroupChoice(player), player)))
+		== "HUD_CENTERINFOBOX_presstospawn");
 	CHECK(level.world->spawnGroupChoice(player) == cpGroups[1].id);
 	CHECK(level.world->requestSpawn(player));
 	CHECK(level.world->spawnSoldier(player));
@@ -924,6 +942,18 @@ TEST(GameWorld_SpawnGroupsSuez902SplitAverageSelectionAndRoundReset)
 			std::sqrt(physics::lengthSquared(spawned.position - physics::Vec3 {point->position().x, point->position().y, point->position().z})));
 	}
 	CHECK(nearestBase > 2.0f);
+	const int second = level.world->addPlayer("Second spawn group 5", team, false);
+	level.world->setSpawnGroupChoice(second, cpGroups[1].id);
+	level.world->requireSpawnConfirmation(second);
+	CHECK(level.world->spawnGroupAvailable(cpGroups[1].id, second));
+	CHECK(level.world->requestSpawn(second));
+	CHECK(level.world->spawnSoldier(second));
+	const int third = level.world->addPlayer("Occupied spawn group 5", team, false);
+	level.world->setSpawnGroupChoice(third, cpGroups[1].id);
+	level.world->requireSpawnConfirmation(third);
+	CHECK(level.world->spawnGroupAvailable(cpGroups[1].id, third));
+	CHECK(level.world->requestSpawn(third));
+	CHECK(level.world->spawnSoldier(third)); // the explicit path retries from the group when both points are occupied
 	level.world->resetRound();
 	const auto resetGroups = level.world->spawnableGroups(team);
 	const auto base = std::find_if(resetGroups.begin(), resetGroups.end(), [](const auto& group) {
