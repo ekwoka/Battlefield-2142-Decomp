@@ -1176,6 +1176,40 @@ TEST(Effects_AlphaCullIgnoresTheTransparencyGraph)
 	CHECK(sprites(manager).empty());
 }
 
+// A sprite system of particleShaderType 0 rolls its particles' intensity
+// once, rand() % 3600 / 3600 (RendDX9 0x1013f6a0 +0x230, read at birth by
+// 0x1013fec1): each system's sprites share one colour scale below 1, and
+// systems differ.
+TEST(Effects_SpriteSystemsRollTheirIntensity)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectTemplate* puff = addPuff(templates);
+	puff->settings()["color1"] = "0.5/0.5/0.5";
+	puff->settings()["color2"] = "0.5/0.5/0.5";
+	puff->settings()["emitSpeed"] = "0";
+	effects::EffectManager manager(templates);
+	for (uint32_t i = 0; i < 4; ++i) {
+		manager.setAnchor(10 + i, {static_cast<float>(i) * 100.0f, 0, 0}, {});
+		CHECK(manager.spawnAttached("e_puff", 10 + i, {}, {}, effects::EffectManager::View::Any, 1));
+	}
+	for (int i = 0; i < 6; ++i) {
+		manager.update(1 / 30.0f);
+	}
+	float scale[4] = {-1, -1, -1, -1};
+	for (const auto& s : sprites(manager)) {
+		const int system = static_cast<int>(std::lround(s.position.x / 100.0f));
+		CHECK(system >= 0 && system < 4);
+		const float c = s.color[0] / 0.5f;
+		CHECK(c >= 0 && c < 1);
+		if (scale[system] < 0) {
+			scale[system] = c;
+		}
+		CHECK(std::fabs(c - scale[system]) < 1e-5f); // one roll per system
+	}
+	CHECK(scale[0] >= 0 && scale[1] >= 0 && scale[2] >= 0 && scale[3] >= 0);
+	CHECK(scale[0] != scale[1] || scale[1] != scale[2] || scale[2] != scale[3]);
+}
+
 // An emit time of 0 isn't run down (RendDX9 0x10140590): an attached
 // system emits until its bundle stops (the jets' setStopOnEffects).
 TEST(Effects_ZeroEmitTimeEmitsUntilStopped)

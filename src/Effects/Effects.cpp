@@ -505,6 +505,7 @@ void Emitter::emit(game::Random& random, const Vec3& at, float age, const EmitCo
 	p.life = std::max(0.01f, t.timeToLive + unitRandom(random) * t.randomTimeToLive);
 	p.age = age + startAge; // the bundle's start age (+0xd8 / +0xe0)
 	p.alpha = alphaIntensity;
+	p.intensity = m_intensity;
 	// Size and speed share one random (0x1013fdc0's local_8).
 	const float shared = signedRandom(random);
 	p.sizeOffset = shared * t.randomSize;
@@ -775,6 +776,10 @@ void Emitter::update(float seconds, game::Random& random, const EmitContext& con
 {
 	const ParticleTemplate& t = *m_template;
 	if (!m_started) {
+		if (!t.mesh && !t.trail && !t.heatShimmer) {
+			game::Random& roll = context.intensityRandom ? *context.intensityRandom : random;
+			m_intensity = static_cast<float>(roll.next() % 3600) / 3600.0f;
+		}
 		start(context);
 	}
 	// The distance LOD (0x101393e0, RendDX9's frame 0x10098bf0): 1 with the
@@ -1724,6 +1729,7 @@ void EffectManager::stepEmitters(float seconds)
 		}
 	}
 	context.poolUsed = &m_poolUsed;
+	context.intensityRandom = &m_intensityRandom;
 	for (const auto& emitter : m_emitters) {
 		emitter->update(seconds, m_random, context);
 	}
