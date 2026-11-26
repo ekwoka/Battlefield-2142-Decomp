@@ -6240,7 +6240,7 @@ bool GameWorld::joinSquad(int id, int squad)
 	// The join's last step (0x004c6c80, only where AIDLL's +6 is false: sp1,
 	// gpm_sp, gpm_coop): a player that is no bot joining a squad of two or
 	// more that a bot leads hears 2/0x24, the HUD's question kind 4.
-	if (squad != 0 && !player->ai && wreckDrainsFast()) {
+	if (squad != 0 && !player->ai && aiAnswersOrderRequests()) {
 		const std::vector<int> members = squadMembers(player->team, squad);
 		const bool botLeads = std::any_of(members.begin(), members.end(), [this](int m) {
 			const Player* p = findPlayer(m);

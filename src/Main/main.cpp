@@ -6264,6 +6264,11 @@ int runGame(Options& options, Session& session)
 					server->answerOrder(me.squad, static_cast<int>(order.type), false);
 				} else {
 					round.answerOrder(round.localPlayer(), yes);
+					if (yes) {
+						// Slot 0x48's 2/0x1c to the leader himself (0x004c5360 -> 0x00756b60 case 0x1c), as a client hears it from the host.
+						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+					}
 					if (!quiet && commander >= 0) {
 						sayRadio(14, yes ? "roger_that" : "negative", commander);
 					}
