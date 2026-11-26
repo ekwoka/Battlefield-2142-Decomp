@@ -5500,7 +5500,10 @@ int GameWorld::addPlayer(const std::string& name, int team, bool ai)
 	player->name = name;
 	player->team = team;
 	player->ai = ai;
-	player->allUnlocked = !ai; // every human owns every unlock
+	// Every human owns every unlock; only the chosen ones (none until the kit or customise screen
+	// picks some) replace the kit's items, while the owned replaceWithoutEquip ones apply anyway.
+	player->allUnlocked = !ai;
+	player->unlockChosen = !ai;
 	player->created = m_playersMade++;
 	if (!ai) {
 		player->connectedAt = m_time; // 0x004a8460: slot 0x8c with 1 for a human
@@ -5614,7 +5617,6 @@ int GameWorld::joinPlayer(int team)
 		if (m_player) {
 			m_player->unlocked = localPlayerUnlocks;
 			m_player->owned = localPlayerOwned;
-			m_player->unlockChosen = localPlayerUnlocksChosen;
 		}
 	}
 	if (!m_player) {

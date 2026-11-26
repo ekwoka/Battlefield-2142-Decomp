@@ -11288,11 +11288,11 @@ grenade at 5. Every human player owns every unlock, always and in every
 mode (retail compatibility too), with no option to turn it off
 (`GameWorld::Player::allUnlocked`, set by `addPlayer` for every player
 but a bot; `--unlock-all` is accepted and does nothing); a bot owns only
-what it is given (`setOwnedUnlocks`, `chooseBotUnlocks`). With no
-selection every container of the kit applies; a selection (the customise
-screen's equip below, a client's SelectKit masks, `--unlocks`:
-`GameWorld::localPlayerUnlocksChosen`) makes only the chosen containers
-apply, the rest staying owned (replaceWithoutEquip and firearm
+what it is given (`setOwnedUnlocks`, `chooseBotUnlocks`). Only the chosen
+containers replace the kit's items (`unlockChosen`, set for every human
+from the start; none are chosen until the customise screen's equip below,
+a client's SelectKit masks or `--unlocks` pick some, so a new soldier has
+the default kit), the rest staying owned (replaceWithoutEquip and firearm
 replacements and the abilities still apply by ownership).
 The kit object prepares the build when it is made (Kit vtable
 `0x00963c78` slot 7, `0x00571220`): it hides its children, lists each
@@ -17564,9 +17564,9 @@ answers the menu itself; nothing is sent.
   chosen ids stays as it was.
 - **In the game:** the local player (every human) owns every unlock's
   ItemContainers of every kit of both armies
-  (the unlocks under [Map and spawn screen](#map-and-spawn-screen): until
-  the kit menu, a client's SelectKit or `--unlocks` makes a selection,
-  every one applies); a profile's old chosen ids
+  (the unlocks under [Map and spawn screen](#map-and-spawn-screen): only
+  those the kit menu, a client's SelectKit or `--unlocks` choose replace
+  the kit's items; the owned replaceWithoutEquip ones apply anyway); a profile's old chosen ids
   (`stats::unlockContainers`) are given as `GameWorld::localPlayerUnlocks`
   when it joins. The spawn screen's kit buttons
   show each kit's upgrades (Kit%iAbilityIcon%iShow / PathString, seven a

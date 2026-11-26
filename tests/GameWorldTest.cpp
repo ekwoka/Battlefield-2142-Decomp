@@ -2050,6 +2050,7 @@ TEST(GameWorld_GrenadesBounceAndGoOff)
 	kit->children().push_back({"UnlockEU_AssaultPlayer0", {}, {}});
 	const int bot = range.world->addPlayer("Bot", 1, true);
 	CHECK(range.world->spawnSoldier(bot));
+	range.world->localPlayerUnlocks = {"UnlockEU_AssaultPlayer0"}; // equipped (owned unlocks apply only once chosen)
 	CHECK(range.world->spawnPlayer(2) != nullptr);
 	game::SoldierInput input;
 	input.selectItem = 7;
@@ -5204,7 +5205,6 @@ TEST(GameWorld_FirearmReplacementAndOwnedUnlocks)
 	// replaceWithoutEquip frag grenade still applies, the HAR does not.
 	range.world->localPlayerUnlocks = {};
 	range.world->localPlayerOwned = {};
-	range.world->localPlayerUnlocksChosen = true;
 	CHECK(range.world->spawnPlayer(2) != nullptr);
 	const int local = range.world->localPlayer();
 	range.world->setKit(local, "EU_Assault", "us_light_soldier");

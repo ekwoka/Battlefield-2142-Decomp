@@ -8919,7 +8919,6 @@ int runGame(Options& options, Session& session)
 				// screen's equipped unlocks (the rest stay owned).
 				round.localPlayerUnlocks = options.unlocks;
 				round.localPlayerOwned = options.unlocks;
-				round.localPlayerUnlocksChosen = true;
 			}
 			const world::Object* player = enterDeploymentFirst ? nullptr : round.spawnPlayer(options.playTeam);
 			if (player && !options.kit.empty()) {

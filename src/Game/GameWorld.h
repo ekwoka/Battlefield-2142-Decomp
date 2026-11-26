@@ -1209,9 +1209,6 @@ public:
 	// the soldier's profile; the kit build 0x00570ab0 applies the
 	// replaceWithoutEquip ones by them), given with localPlayerUnlocks.
 	std::vector<std::string> localPlayerOwned;
-	// Only localPlayerUnlocks apply (--unlocks, the customise screen's equipped set); otherwise
-	// every unlock does, since every one is owned.
-	bool localPlayerUnlocksChosen = false;
 	// The kit (and its soldier template) for the player's next spawn.
 	void setKit(int player, const std::string& kit, const std::string& soldier);
 	int spawnChoice(int player) const;
