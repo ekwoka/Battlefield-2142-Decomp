@@ -1389,6 +1389,19 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				player.soldier ? world.objectHealth(player.soldier) : -1, magazines, nrOfMags, magSize);
 		}
 		const dice::hfe::menu::MateMarker look = dice::hfe::menu::mateMarker(in);
+		// 0x0078c250 (from 0x00791380, a teammate's soldier or vehicle but not our own): a 30 x 30
+		// mini_Squad_request in the state's colour (1: DAT_00a0c060, amber) under a squad leader whose
+		// squad asks for orders (the map node's state 1, 2/0x19), blinking half a second in each
+		// (+0xac0 0.5, +0xac4 1.0; 0x0078f680).
+		if (!local && player.squadLeader && player.squad > 0 && std::fmod(hud.clock(), 1.0f) <= 0.5f
+			&& world.squadOrderState(me.team, player.squad) == 1) {
+			hud::HudManager::MapMarker request {"Ingame/Player/Icons/Minimap/mini_Squad_request.tga", player.position.x,
+				player.position.z, 30};
+			request.color[0] = 1;
+			request.color[1] = 0.792157f;
+			request.color[2] = 0.043137f;
+			markers.push_back(request);
+		}
 		if (!look.drawn) {
 			continue; // seated: the vehicle's icon stands for him
 		}
@@ -5952,6 +5965,9 @@ int runGame(Options& options, Session& session)
 		// 0x00756b60 case 0x1b, the commander's: "Order sent to <squad> squad", then
 		// his voice for the order (0x007c7690: TCPlayer to the squad's leader).
 		orderSent = [&, sayRadio](int squad, game::GameWorld::OrderType type) {
+			if (spotRefused()) {
+				return; // player slot 0x340 (the radio's spam block, not counted) ends 0x00756b60 case 0x1b
+			}
 			std::string sent = localization.text("HUD_HUD_SQUAD_ORDER_SENT_SQUAD");
 			if (const size_t at = sent.find("#SQUADNAME#"); at != std::string::npos) {
 				sent.replace(at, 11, dice::hfe::menu::squadName(squad));
@@ -6125,6 +6141,7 @@ int runGame(Options& options, Session& session)
 		// c_GIYes / c_GINo (0x0079e320); their answers (0x0079d6e0).
 		dice::hfe::menu::HudQuestions questions;
 		dice::hfe::menu::CommanderOrderPrompt orderPrompt;
+		dice::hfe::menu::RequestIconBlink requestIconBlink;
 		// The auto-accepted order (0x00756b60 case 0x1a with +0x261 set; the
 		// c_GIAutoAccept key, 0x00754290): roger_that to the commander and
 		// SetAcceptOrder with flag 1, store 1 (the order stays the commander's,
@@ -6149,8 +6166,10 @@ int runGame(Options& options, Session& session)
 			}
 			round.acceptOrder(round.localPlayer(), true);
 			if (passOn && round.issueSquadLeaderOrder(round.localPlayer(), order.type, order.position.x, order.position.z)) {
-				chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
-				sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+				if (!spotRefused()) { // player slot 0x340 (0x00756b60 case 0x1c)
+					chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+					sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+				}
 			}
 		};
 		// The prompts' '#GIYes#' / '#GINo#' as the bound keys (0x00752b70).
@@ -6316,8 +6335,10 @@ int runGame(Options& options, Session& session)
 					round.answerOrder(round.localPlayer(), yes);
 					if (yes) {
 						// Slot 0x48's 2/0x1c to the leader himself (0x004c5360 -> 0x00756b60 case 0x1c), as a client hears it from the host.
-						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
-						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+						if (!spotRefused()) { // player slot 0x340 (0x00756b60 case 0x1c)
+							chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+							sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+						}
 					}
 					if (!quiet && commander >= 0) {
 						sayRadio(14, yes ? "roger_that" : "negative", commander);
@@ -6678,8 +6699,10 @@ int runGame(Options& options, Session& session)
 						}
 					} else if (round.issueSquadLeaderOrder(round.localPlayer(), *armedOrder, worldX, worldZ)) {
 						// 0x00756b60 case 0x1c: the leader's own line and his voice (the squad's members hear it as 0x17).
-						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
-						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(*armedOrder), false), 0);
+						if (!spotRefused()) { // player slot 0x340 (0x00756b60 case 0x1c)
+							chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+							sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(*armedOrder), false), 0);
+						}
 					}
 				} else if (!commanderMenu.selected().empty()) {
 					// The squads selected on the commander screen (0x007d6ab0).
@@ -8924,8 +8947,10 @@ int runGame(Options& options, Session& session)
 					game::GameWorld::SquadOrder order;
 					const net::RemotePlayer* me = client.world().player(client.world().localPlayer());
 					if (me && g_remoteHud && g_remoteHud->squadOrder(me->team, me->squad, false, order)) {
-						chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
-						sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+						if (!spotRefused()) { // player slot 0x340 (0x00756b60 case 0x1c)
+							chat.addPersonal(localization.text("HUD_HUD_SQUAD_ORDER_SENT_MEMBERS"));
+							sayRadio(3, dice::hfe::menu::leaderOrderVoice(static_cast<int>(order.type), false), 0);
+						}
 					}
 				}
 				if (message.category == 2 && message.id == 0x1b && orderSent) {
@@ -11123,6 +11148,19 @@ int runGame(Options& options, Session& session)
 			squadRequests.localPlayer = hudLocal();
 			squadRequests.tick(seconds);
 			questions.tick(seconds);
+			{
+				// 0x0079fe10: the commander's blinking request icon.
+				game::GameWorld::PlayerInfo me;
+				const host::HudWorld& shown = hudWorld();
+				bool any = false;
+				if (hudPlayer(hudLocal(), me) && me.commander) {
+					any = !shown.squadRequests(me.team).empty();
+					for (int squad = 1; squad < 10 && !any; ++squad) {
+						any = shown.squadOrderState(me.team, squad) == 1;
+					}
+				}
+				hudManager.set("ShowSquadLeaderRequestOrderIcon", requestIconBlink.update(any, seconds) ? 1.0f : 0.0f);
+			}
 			{
 				// The commander's order to our squad as the leader's question
 				// (2/0x1a: a joined game's message, a local round's order).
