@@ -132,6 +132,8 @@ public:
 	// commander's; false for none.
 	using SquadOrder = game::GameWorld::SquadOrder;
 	virtual bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const = 0;
+	// The squad's state on the commander's map (2/0x19): 1 asking for orders.
+	virtual int squadOrderState(int team, int squad) const = 0;
 	// The local player's soldier and the vehicle it sits in, as objects of
 	// the level (nullptr: none, or dead).
 	virtual const world::Object* soldier() const = 0;
@@ -262,6 +264,7 @@ public:
 	}
 	bool seatYaw(uint32_t vehicle, int seat, float& yaw) const override { return m_round.seatYaw(vehicle, seat, yaw); }
 	std::vector<SquadRequest> squadRequests(int team) const override { return m_round.squadRequests(team); }
+	int squadOrderState(int team, int squad) const override { return m_round.squadOrderState(team, squad); }
 	bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const override
 	{
 		const SquadOrder* o = fromCommander ? m_round.squadOrder(team, squad) : m_round.squadLeaderOrder(team, squad);
@@ -392,6 +395,7 @@ public:
 	bool seatYaw(uint32_t vehicle, int seat, float& yaw) const override;
 	std::vector<SquadRequest> squadRequests(int team) const override;
 	bool squadOrder(int team, int squad, bool fromCommander, SquadOrder& out) const override;
+	int squadOrderState(int team, int squad) const override;
 	const world::Object* soldier() const override;
 	const world::Object* vehicle() const override;
 	float health() const override;

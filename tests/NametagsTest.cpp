@@ -381,6 +381,7 @@ TEST(Nametags_JoinedWorld)
 		float hitPoints(uint32_t) const override { return 100; }
 		float objectHealth(uint32_t) const override { return 1; }
 		bool squadOrder(int, int, bool, SquadOrder&) const override { return false; }
+		int squadOrderState(int, int) const override { return 0; }
 		std::vector<SquadRequest> squadRequests(int) const override { return requests; }
 		const world::Object* soldier() const override { return nullptr; }
 		const world::Object* vehicle() const override { return nullptr; }

@@ -325,6 +325,8 @@ public:
 	void answer(bool yes);
 	void tick(float seconds);
 	const Question* front() const;
+	// 0x0079d170: whether the kind has a question.
+	bool has(Kind kind) const { return m_questions[static_cast<size_t>(kind)].has_value(); }
 	static float seconds(Kind kind);
 
 private:
@@ -352,6 +354,9 @@ public:
 		return m_asked && m_askedTeam == team && m_askedSquad == squad && m_askedSerial == serial;
 	}
 	void clear() { m_asked = false; }
+	// +0x261 of the HUD: the c_GIAutoAccept latch (0x00754290), set while a
+	// question is up; the next orders are taken without one.
+	bool autoAccept = false;
 
 private:
 	bool m_notice = false, m_leader = false, m_asked = false;

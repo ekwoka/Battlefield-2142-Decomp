@@ -537,6 +537,9 @@ TEST(Commander_OrdersAndBots)
 	// its serial moves on and the leader's answer is asked for again.
 	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
 	CHECK(world.squadOrder(2, 1)->serial > firstSerial && !world.squadOrder(2, 1)->accepted);
+	// The commander's map node (a local commander): the leader's request state, 0 for no member.
+	// (a commander on another machine keeps none here: the host relays it as 2/0x19)
+	CHECK(world.requestNewOrder(leader, 2, 1, 1) && world.squadOrderState(2, 1) == 0);
 	// The leader's answer to the question (0x0079d6e0 case 2): no clears the
 	// commander's order; yes passes it on as the leader's own and clears it.
 	world.issueSquadLeaderOrder(leader, game::GameWorld::OrderType::None, 0, 0); // (the bots' own, above)

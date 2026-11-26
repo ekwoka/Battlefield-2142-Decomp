@@ -2575,6 +2575,10 @@ public:
 	// 0x007c7d50), where the AI answers (aiAnswersOrderRequests) posts AI event 3/0x10 (0x004c3d60) for the BotManager
 	// (takeNewOrderRequests: team, squad). True when accepted.
 	bool requestNewOrder(int player, int team, int squad, int type);
+	// The squad's state on the local commander's map (the minimap node's case 0x19,
+	// 0x007918d0, from the Request event's relay 2/0x19): 1 asking for orders, 2 /
+	// 3 the leader's answer to the commander's order, 0 none.
+	int squadOrderState(int team, int squad) const;
 	std::vector<std::pair<int, int>> takeNewOrderRequests() { return std::exchange(m_newOrderRequests, {}); }
 	// enhanced.botCommander (not retail; BotManager sets it each look): the team's commander is the virtual one (gpm_ti,
 	// bots, no human commander), which answers the leaders' asset requests and requests for orders.
@@ -3660,6 +3664,7 @@ private:
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_squadRequests; // (team, squad)
 	bool m_virtualCommander[3] = {};
 	std::vector<std::pair<int, int>> m_newOrderRequests; // (team, squad) not yet seen by the AI
+	std::map<std::pair<int, int>, int> m_orderStates;
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);
 	// Titan mode: the soldier of a player inside the enemy Titan's hull

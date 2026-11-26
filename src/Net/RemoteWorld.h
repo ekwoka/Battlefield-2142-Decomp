@@ -524,6 +524,12 @@ public:
 	};
 	std::vector<SquadOrder> squadOrders(int team = 0) const;
 	const SquadOrder* squadOrder(int team, int squad, int store) const;
+	// The map node's squad state from 2/0x19 (squad, -, state; 0x007918d0): 1 asking for orders, 2 / 3 answered.
+	int squadOrderState(int squad) const
+	{
+		const auto it = m_orderStates.find(squad);
+		return it == m_orderStates.end() ? 0 : it->second;
+	}
 
 	// The local player's input, sent with each tick by the GameClient. The
 	// mouse look is a change, and a window reports one each frame: the
@@ -622,6 +628,7 @@ private:
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_requests; // (team, squad)
 	std::map<std::tuple<int, int, int>, SquadOrder> m_orders; // (team, squad, store)
 	uint32_t m_orderSerial = 0;
+	std::map<int, int> m_orderStates; // squad: the map node's state (2/0x19)
 };
 
 } // namespace dice::hfe::net

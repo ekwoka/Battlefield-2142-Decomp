@@ -1624,8 +1624,17 @@ void HostedGame::event(int id, const net::GameEvent& e)
 		return;
 	}
 	case net::kEvRequest: // 0x00512100: squad, team, type; the squad's leader or the team's commander
-		if (m_round->requestNewOrder(player, e.i(1), e.i(0), static_cast<int>(e.u(2))) && onLog) {
-			onLog("player " + std::to_string(player) + " asks squad " + std::to_string(e.i(0)) + " for request " + std::to_string(e.u(2)));
+		if (m_round->requestNewOrder(player, e.i(1), e.i(0), static_cast<int>(e.u(2)))) {
+			// 0x00512100: relayed to the team's commander as 2/0x19 (squad, -, state).
+			const int commander = m_round->commander(e.i(1));
+			for (const auto& [id, c] : m_clients) {
+				if (c.player >= 0 && c.player == commander) {
+					sendTo(id, net::makePostRemote(2, 0x19, net::int32Payload(e.i(0)) + net::int32Payload(0) + net::int32Payload(static_cast<int>(e.u(2)))));
+				}
+			}
+			if (onLog) {
+				onLog("player " + std::to_string(player) + " asks squad " + std::to_string(e.i(0)) + " for request " + std::to_string(e.u(2)));
+			}
 		}
 		return;
 	case net::kEvSetAcceptOrder: { // 0x0050df60 with the sender's player
@@ -2095,6 +2104,15 @@ void HostedGame::trackOrders()
 					if (c.player >= 0 && m_round->playerInfo(c.player, member) && member.team == team && member.squad == squad) {
 						sendTo(id, net::makePostRemote(2, 0x1a, net::int32Payload(squad)));
 					}
+				}
+			}
+		}
+		if (moved && store == 1) {
+			// 0x004c5530: 2/0x1b, the squad, to the commander (slot 0x78) who sent it.
+			const int commander = m_round->commander(team);
+			for (const auto& [id, c] : m_clients) {
+				if (c.player >= 0 && c.player == commander) {
+					sendTo(id, net::makePostRemote(2, 0x1b, net::int32Payload(squad)));
 				}
 			}
 		}

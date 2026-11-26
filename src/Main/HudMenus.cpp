@@ -1111,6 +1111,13 @@ std::string CommanderMenu::orderPicture(int team, int squad) const
 			return "Ingame/Commander/Orders/orderNew.tga";
 		}
 	}
+	// The map node's state 1, a leader asking for orders (2/0x19), while the squad has no order of
+	// its own (0x007ab790's +0x10 record).
+	game::GameWorld::SquadOrder own;
+	const bool ownOrder = m_world ? m_world->squadOrder(team, squad, false, own) : m_round.squadLeaderOrder(team, squad) != nullptr;
+	if (!ownOrder && (m_world ? m_world->squadOrderState(team, squad) : m_round.squadOrderState(team, squad)) == 1) {
+		return "Ingame/Commander/Orders/orderNew.tga";
+	}
 	const game::GameWorld::SquadOrder* order = m_round.squadOrder(team, squad);
 	game::GameWorld::SquadOrder remote;
 	if (m_world) {

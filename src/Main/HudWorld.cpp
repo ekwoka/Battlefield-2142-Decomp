@@ -583,6 +583,11 @@ bool RemoteHudWorld::squadOrder(int team, int squad, bool fromCommander, SquadOr
 	return true;
 }
 
+int RemoteHudWorld::squadOrderState(int, int squad) const
+{
+	return m_world.squadOrderState(squad);
+}
+
 const world::Object* RemoteHudWorld::soldier() const
 {
 	PlayerInfo me;
