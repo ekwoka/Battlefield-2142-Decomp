@@ -219,12 +219,13 @@ struct WeaponHudInput {
 	bool overheated = false; // slot 0x2c
 	int fireRate = -1;   // slot 0x14 (-1: none)
 	// The range finder's ray (hasRangeFinder): what it met and how far from
-	// the controlled object; the distance counter's projectile distance
-	// (hasDistanceCounter, -1 none); the scan (hasScanProgress, 0..1).
+	// the controlled object; the distance counter's airburst range (the
+	// fire component's +0x17c, GameWorld::burstDistance, 0 off; -1 none);
+	// the scan (hasScanProgress, 0..1).
 	bool rangeHit = false;
 	float targetDistance = 0;
 	std::array<float, 3> target {};
-	int travelled = -1;
+	int burstDistance = -1;
 	bool scanning = false;
 	float scan = 0;
 	float seconds = 0; // the frame's time (the blinks)

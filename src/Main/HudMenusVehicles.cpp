@@ -176,8 +176,9 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		hud.set("FireRateIconShow", rate >= 0 ? 1 : 0);
 		hud.setString("FireRateIconPathString",
 			rate >= 0 ? "Ingame/Weapons/Icons/Hud/firerate_" + std::to_string(rate) + ".tga" : "Ingame/Weapons/Icons/Hud/firerate_0");
-		// 0x007c1470: the distance counter (hasDistanceCounter: the
-		// projectile's distance, "999" (DAT_009b7910) without one) and the
+		// 0x007c1470: the distance counter (hasDistanceCounter: "999"
+		// (DAT_009b7910), then the fire component's set airburst range
+		// "%i" (its +0x18c from the base, 0x005d5440's +0x17c)) and the
 		// range finder (hasRangeFinder: the view ray's hit, 999 m out,
 		// DAT_00b2d148 slot 0x18c, its distance from the controlled object
 		// "%i" and the point "%i" x, -z, y; a miss "999"; not with a comm
@@ -197,7 +198,7 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		// Both features share this label. A projectile counter takes
 		// precedence so enabling the default ray doesn't replace it.
 		if (f.distanceCounter) {
-			hud.setString("TargetDistanceString", in.travelled >= 0 ? std::to_string(in.travelled) : "999");
+			hud.setString("TargetDistanceString", in.burstDistance >= 0 ? std::to_string(in.burstDistance) : "999");
 		}
 		// 0x007be380: the scan (hasScanProgress, the weapon's 0xc4f2 slots
 		// 0xf8 / 0xfc).

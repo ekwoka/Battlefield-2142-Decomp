@@ -919,6 +919,9 @@ int g_footItemKey = 0;
 // gets it; updateHud keeps what it needs.
 dice::hfe::menu::ItemListInput g_itemList;
 bool g_weaponZoomed = false;
+// The wheel's steps (PINextItem +1, PIPrevItem -1) since the HUD last took
+// them: a joined game's airburst range (updateHud).
+int g_burstWheel = 0;
 // The seat camera's view mode (game::camera::Mode; 1 Inside on foot): the
 // runtime VehicleHud's camera test (0x00657660).
 int g_cameraMode = 1;
@@ -931,6 +934,7 @@ void itemListInput(ViewerOptions::PlayerInput& in)
 {
 	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 	const std::string sound = g_itemList.apply(g_itemSelection, in.fire, in.item, in.itemStep, now);
+	g_burstWheel += in.itemStep;
 	if (!sound.empty() && g_hudSound) {
 		g_hudSound(sound);
 	}
@@ -2014,7 +2018,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			in.mags = held.mags >= 0 ? held.mags : 0;
 			in.magsKnown = held.mags >= 0; // (a followed player's: not sent)
 		}
-		// The range finder's ray and the distance counter's projectile
+		// The range finder's ray and the distance counter's airburst range
 		// (0x007c1470), only for the weapons with them (read once per
 		// template); the ray (999 m from the eye along the look, bisected
 		// against GameWorld::lineOfSight to a metre) at most ten times a
@@ -2029,31 +2033,39 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		}
 		game::GameWorld::PlayerInfo me;
 		// A joined game's the same: our soldier's look (the prediction's) and
-		// the level's sight lines; the distance counter's projectiles are
-		// the server's (a client's round has none).
+		// the level's sight lines; the distance counter's range is the
+		// server's (a client's round has no player, so 0).
 		if ((rangeFinder || distanceCounter) && world.playerInfo(world.localPlayer(), me) && me.alive) {
 			static float rangeAt = -1;
 			static bool rangeHit = false;
 			static float rangeDistance = 0;
 			static std::array<float, 3> rangePoint {};
+			const bool useView = rangeView && !me.vehicle;
+			const float yaw = useView ? rangeView->yaw : me.yaw * 3.14159265f / 180;
+			const float pitch = useView ? rangeView->pitch : me.aimPitch * 3.14159265f / 180;
+			const physics::Vec3 eye = useView
+				? physics::Vec3 {rangeView->position[0], rangeView->position[1], rangeView->position[2]}
+				: me.position + physics::Vec3 {0, 1.6f, 0};
+			const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+			const auto at = [&](float d) { return physics::Vec3 {eye.x + dir.x * d, eye.y + dir.y * d, eye.z + dir.z * d}; };
+			const uint32_t self = me.vehicle ? me.vehicle : me.soldier;
+			// The view ray's first hit, 999 m out, bisected to a metre (999 a miss).
+			const auto viewRay = [&]() -> float {
+				if (round.lineOfSight(eye, at(999), self)) {
+					return 999;
+				}
+				float lo = 0, hi = 999;
+				for (int i = 0; i < 10; ++i) {
+					const float mid = (lo + hi) / 2;
+					(round.lineOfSight(eye, at(mid), self) ? lo : hi) = mid;
+				}
+				return hi;
+			};
 			if (rangeFinder && (rangeWeaponChanged || now - rangeAt > 0.1f || now < rangeAt)) {
 				rangeAt = now;
-				const bool useView = rangeView && !me.vehicle;
-				const float yaw = useView ? rangeView->yaw : me.yaw * 3.14159265f / 180;
-				const float pitch = useView ? rangeView->pitch : me.aimPitch * 3.14159265f / 180;
-				const physics::Vec3 eye = useView
-					? physics::Vec3 {rangeView->position[0], rangeView->position[1], rangeView->position[2]}
-					: me.position + physics::Vec3 {0, 1.6f, 0};
-				const physics::Vec3 dir {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
-				const auto at = [&](float d) { return physics::Vec3 {eye.x + dir.x * d, eye.y + dir.y * d, eye.z + dir.z * d}; };
-				const uint32_t self = me.vehicle ? me.vehicle : me.soldier;
-				rangeHit = !round.lineOfSight(eye, at(999), self);
+				const float hi = viewRay();
+				rangeHit = hi < 999;
 				if (rangeHit) {
-					float lo = 0, hi = 999;
-					for (int i = 0; i < 10; ++i) {
-						const float mid = (lo + hi) / 2;
-						(round.lineOfSight(eye, at(mid), self) ? lo : hi) = mid;
-					}
 					const physics::Vec3 hit = at(hi);
 					rangePoint = {hit.x, hit.y, hit.z};
 					const float dx = hit.x - me.position.x, dy = hit.y - me.position.y - 1, dz = hit.z - me.position.z;
@@ -2063,17 +2075,30 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			in.rangeHit = rangeHit;
 			in.targetDistance = rangeDistance;
 			in.target = rangePoint;
-			if (distanceCounter) {
-				float newest = 1e9f;
-				for (const game::Projectile& p : round.projectiles()) {
-					if (p.alive && p.player == world.localPlayer() && p.shooter == (me.vehicle ? me.vehicle : me.soldier) && p.age < newest) {
-						newest = p.age;
-						const float dx = p.position.x - p.origin.x, dy = p.position.y - p.origin.y, dz = p.position.z - p.origin.z;
-						in.travelled = static_cast<int>(std::lround(std::sqrt(dx * dx + dy * dy + dz * dz)));
-					}
+			if (distanceCounter && !g_remoteHud) {
+				in.burstDistance = round.burstDistance(world.localPlayer());
+			} else if (distanceCounter) {
+				// A joined game's: the server keeps its own, so ours as the
+				// client's firearm's input handler (0x005d5440): zooming in
+				// takes the view ray's distance, the wheel steps it by
+				// distanceStep while zoomed, never below minimumDistance;
+				// zooming out turns it off (GameWorld::stepBurstRange).
+				static int burst = 0;
+				static bool zoomWas = false;
+				const int minimum = static_cast<int>(dice::hfe::menu::hudNumber(heldGunTemplate, "fire.minimumDistance", 0));
+				if (g_weaponZoomed && !zoomWas) {
+					burst = std::max(static_cast<int>(std::lround(viewRay())), minimum);
+				} else if (!g_weaponZoomed) {
+					burst = 0;
+				} else if (g_burstWheel != 0) {
+					const int step = static_cast<int>(dice::hfe::menu::hudNumber(heldGunTemplate, "fire.distanceStep", 0));
+					burst = std::max(burst + (g_burstWheel > 0 ? step : -step), minimum);
 				}
+				zoomWas = g_weaponZoomed;
+				in.burstDistance = burst;
 			}
 		}
+		g_burstWheel = 0; // taken (or not wanted) this frame
 		const std::string sound = g_weaponHud.update(hud, in);
 		if (g_inputTrace) {
 			static int lastRounds = -999, lastMags = -999;
@@ -9546,8 +9571,10 @@ int runGame(Options& options, Session& session)
 								step();
 							}
 							playerCamera.setAltFire(false);
-						} else if (op == "reload" || op == "firemode" || op == "jump" || op == "item" || op == "use") {
+						} else if (op == "reload" || op == "firemode" || op == "jump" || op == "item" || op == "use" || op == "nextitem"
+							|| op == "previtem") {
 							act.reload = op == "reload";
+							act.itemStep = op == "nextitem" ? 1 : op == "previtem" ? -1 : 0; // the wheel
 							act.toggleFireRate = op == "firemode";
 							act.jump = op == "jump";
 							act.use = op == "use";

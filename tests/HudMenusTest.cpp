@@ -981,7 +981,7 @@ TEST(HudWeapon_RangeFinderDefaultsOn)
 	world::ObjectTemplate launcher(1, "GenericFireArm", "launcher", 2);
 	launcher.settings()["weaponHud.hasDistanceCounter"] = "1";
 	in.weapon = &launcher;
-	in.travelled = 37;
+	in.burstDistance = 37;
 	weaponHud.update(hudManager, in);
 	CHECK(hudManager.string("TargetDistanceString") == "37");
 
