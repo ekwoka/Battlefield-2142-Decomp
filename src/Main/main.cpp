@@ -1092,8 +1092,9 @@ int joinedSpawnGroup(int marker)
 	}
 	for (const game::GameWorld::PlayerInfo& p : g_remoteHud->playerList()) {
 		if (p.squadLeader && p.team == me.team && p.squad == me.squad && p.id != me.id) {
-			const int group = g_remoteHud->spawnGroupAt(p.soldier);
-			return group >= 0 ? group : -1;
+			// The host carries the squad group on the leader's soldier. Looking
+			// up the vehicle is ambiguous when an independent APC group shares it.
+			return g_remoteHud->spawnGroupAt(p.soldier);
 		}
 	}
 	return -1;
@@ -1353,6 +1354,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	}
 	std::vector<dice::hfe::menu::MapCalls::Mate> drawnMates;
 	std::vector<hud::HudManager::MapMarker> callMarkers;
+	std::vector<hud::HudManager::MapMarker> squadLeaderSpawnMarkers;
 	for (const auto& player : world.playerList()) {
 		if (!player.alive || player.team != me.team || player.id == me.id) {
 			continue;
@@ -1420,10 +1422,15 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		mate.clamp = true;
 		mate.iconAlpha = look.iconAlpha;
 		mate.upright = look.arrow || !in.call.empty(); // the heading is on the arrow, or there is none
-		if (!local && spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad && !player.vehicle) {
+		const bool selectableSquadLeader = !local && spawning && player.squadLeader && me.squad != 0 && player.squad == me.squad;
+		if (selectableSquadLeader) {
 			mate.id = kMarkerLeader; // the spawn screen's selectable leader marker
 		}
-		list.push_back(mate);
+		if (selectableSquadLeader) {
+			squadLeaderSpawnMarkers.push_back(mate);
+		} else {
+			list.push_back(mate);
+		}
 	}
 	// The commander screen's mini-map tab (HudManager::drawMiniMap): the
 	// team's players as dots coloured by 0x007e7580 (the local player's
@@ -1522,6 +1529,9 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		spawn.upright = true;
 	}
 	markers.insert(markers.end(), spawnMarkers.begin(), spawnMarkers.end());
+	// The leader's selectable marker follows the spawn icons in both draw and
+	// hit-test order, so an overlapping APC marker can't capture its click.
+	markers.insert(markers.end(), squadLeaderSpawnMarkers.begin(), squadLeaderSpawnMarkers.end());
 	hud.setMapInVehicle(me.alive && me.vehicle != 0);
 	if (me.alive) {
 		// Retail's local view layer (0x0078e510), following the active camera.
