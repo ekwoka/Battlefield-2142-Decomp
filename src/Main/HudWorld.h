@@ -298,6 +298,12 @@ public:
 		: m_world(world), m_round(round), m_ghostObjects(ghostObjects)
 	{
 	}
+	void setTerrainExtent(float originX, float originZ, float extent)
+	{
+		m_terrainOrigin[0] = originX;
+		m_terrainOrigin[1] = originZ;
+		m_terrainExtent = extent;
+	}
 	// Our soldier's feet and look as the client has them (its prediction and
 	// the mouse's aim); false: the server's.
 	std::function<bool(physics::Vec3& feet, float& yaw, float& pitch)> ownLook;
@@ -428,6 +434,8 @@ private:
 	const net::RemoteWorld& m_world;
 	game::GameWorld& m_round;
 	const std::map<uint16_t, uint32_t>& m_ghostObjects;
+	float m_terrainOrigin[2] {};
+	float m_terrainExtent = 0;
 };
 
 // The view through a guided round's camera (useProjectileCamera,

@@ -7596,6 +7596,10 @@ int runGame(Options& options, Session& session)
 		std::optional<host::RemoteHudWorld> remoteHud;
 		if (session.client) {
 			remoteHud.emplace(session.client->world(), round, ghostObjects);
+			if (const terrain::Heightmap* primary = heightmaps.primary(); primary && primary->loaded()) {
+				remoteHud->setTerrainExtent(primary->originX(), primary->originZ(),
+					std::min(primary->worldWidth(), primary->worldDepth()));
+			}
 			// The vehicles' turrets as their ghosts turn them, for the seated
 			// players' mounts and hands (GameWorld::animateRemoteSeated).
 			round.setRemotePartPose([&session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
