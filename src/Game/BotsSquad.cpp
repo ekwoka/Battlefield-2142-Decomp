@@ -1780,12 +1780,19 @@ void BotManager::answerOrderRequests()
 {
 	for (const auto& [team, id] : m_world.takeNewOrderRequests()) {
 		const Squad* s = squad(team, id);
-		if (m_humanCommander[team] || !s || s->state == 0 || !s->takenFromCommander) {
+		if (m_humanCommander[team] || !s) {
 			continue;
 		}
-		const bool attack = s->takenKind == 0;
-		m_world.issueOrder(team, id, attack ? GameWorld::OrderType::MapAttack : GameWorld::OrderType::MapDefend, s->takenAt.x,
-			s->takenAt.z);
+		bool attack = s->takenKind == 0;
+		physics::Vec3 at = s->takenAt;
+		if (m_virtualCommander[team]) {
+			if (!virtualOrder(team, *s, attack, at)) { // enhanced.botCommander (BotsTitan.cpp)
+				continue;
+			}
+		} else if (s->state == 0 || !s->takenFromCommander) {
+			continue;
+		}
+		m_world.issueOrder(team, id, attack ? GameWorld::OrderType::MapAttack : GameWorld::OrderType::MapDefend, at.x, at.z);
 		const bool pending = std::any_of(m_orderAnswers.begin(), m_orderAnswers.end(),
 			[&](const OrderAnswer& a) { return a.team == team && a.squad == id; });
 		if (!pending) {
@@ -1797,8 +1804,14 @@ void BotManager::answerOrderRequests()
 			it = m_orderAnswers.erase(it);
 		} else if (m_time > it->due) {
 			const char* line = it->type == 0 ? "attack_position" : "defend";
-			if (const int local = m_world.localPlayer(); local >= 0) {
-				m_world.hearRadio(local, 2, line);
+			int to = m_world.localPlayer();
+			if (m_virtualCommander[it->team]) { // the requesting leader, who may be a joined client
+				const Squad* asked = squad(it->team, it->squad);
+				const GameWorld::PlayerInfo* leader = asked ? squadLeaderOf(*asked) : nullptr;
+				to = leader ? leader->id : -1;
+			}
+			if (to >= 0) {
+				m_world.hearRadio(to, 2, line);
 			}
 			m_commanderSaid.push_back({it->team, it->squad, line});
 			it = m_orderAnswers.erase(it);

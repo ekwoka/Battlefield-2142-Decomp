@@ -9738,8 +9738,11 @@ void BotManager::command(float seconds)
 			}
 		}
 		m_humanCommander[team] = human;
+		m_virtualCommander[team] = virtualCommands(team);
+		m_world.setVirtualCommander(team, m_virtualCommander[team]);
 	}
 	answerRequests();
+	answerVirtualRequests();
 	answerOrderRequests();
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
 	for (int team = 1; team <= 2; ++team) {
@@ -9835,8 +9838,8 @@ void BotManager::answerRequests()
 				continue;
 			}
 			seen = r.storedAt;
-			if (m_humanCommander[team]) {
-				continue; // 0x1009e020..0x1009e500 return with +0x241 set
+			if (m_humanCommander[team] || m_virtualCommander[team]) {
+				continue; // 0x1009e020..0x1009e500 return with +0x241 set; the virtual commander answers (BotsTitan.cpp)
 			}
 			const auto turnDown = [&](int type) {
 				// The time: (float)word x 2.3283064e-10 x 3 + now + 2.
@@ -9891,7 +9894,7 @@ void BotManager::answerRequests()
 	}
 	// 0x1009ce20: the turn-downs due.
 	for (auto it = m_turnDowns.begin(); it != m_turnDowns.end();) {
-		if (m_humanCommander[it->team]) {
+		if (m_humanCommander[it->team] || m_virtualCommander[it->team]) {
 			it = m_turnDowns.erase(it);
 			continue;
 		}

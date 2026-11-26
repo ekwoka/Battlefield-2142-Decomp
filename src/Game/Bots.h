@@ -2021,6 +2021,19 @@ private:
 	};
 	std::vector<OrderAnswer> m_orderAnswers;
 	void answerOrderRequests();
+	// enhanced.botCommander (BotsTitan.cpp): the team is commanded by the virtual commander (gpm_ti, bots, no human
+	// commander). It answers the leaders' asset requests (retail's commander flow: accept = use the tool at the point,
+	// "<tool>_accept" to the leader and "_deny" to the other squads' same kind, else the 4 s auto turn-down's line) and
+	// their requests for orders (toward its focus, else the squad's order), after kOrderLine / kAutoTurnDown.
+	bool virtualCommands(int team) const;
+	bool m_virtualCommander[3] = {};
+	struct VirtualAnswer {
+		int team = 0, squad = 0, kind = 0;
+		float storedAt = 0, due = 0;
+	};
+	std::vector<VirtualAnswer> m_virtualAnswers;
+	void answerVirtualRequests();
+	bool virtualOrder(int team, const Squad& squad, bool& attack, physics::Vec3& at) const;
 	bool m_humanCommander[3] = {}; // the team had a commander at the last look (AIDLL's +0x241)
 	GameWorld& m_world;
 	BotSettings m_settings;

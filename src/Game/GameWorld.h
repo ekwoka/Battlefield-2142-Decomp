@@ -2568,6 +2568,15 @@ public:
 	// (takeNewOrderRequests: team, squad). True when accepted.
 	bool requestNewOrder(int player, int team, int squad, int type);
 	std::vector<std::pair<int, int>> takeNewOrderRequests() { return std::exchange(m_newOrderRequests, {}); }
+	// enhanced.botCommander (not retail; BotManager sets it each look): the team's commander is the virtual one (gpm_ti,
+	// bots, no human commander), which answers the leaders' asset requests and requests for orders.
+	void setVirtualCommander(int team, bool on)
+	{
+		if (team >= 1 && team <= 2) {
+			m_virtualCommander[team] = on;
+		}
+	}
+	bool virtualCommander(int team) const { return team >= 1 && team <= 2 && m_virtualCommander[team]; }
 	// A request's tool.
 	static CommanderAbility requestAbility(int kind)
 	{
@@ -3641,6 +3650,7 @@ private:
 	} m_lockTone;
 	void stepLockTone();
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_squadRequests; // (team, squad)
+	bool m_virtualCommander[3] = {};
 	std::vector<std::pair<int, int>> m_newOrderRequests; // (team, squad) not yet seen by the AI
 	// The combat areas' rules each tick (0x004bbf60, 0x004bed00).
 	void stepCombatAreas(float seconds);

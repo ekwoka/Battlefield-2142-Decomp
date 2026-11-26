@@ -1248,7 +1248,7 @@ bool SquadRequests::send(int player, int kind, float x, float z)
 		return false;
 	}
 	const int commander = m_round.commander(me.team);
-	if (!noCommanderNeeded && commander < 0) {
+	if (!noCommanderNeeded && commander < 0 && !m_round.virtualCommander(me.team)) { // the virtual commander answers (BotsTitan.cpp)
 		m_round.hearRadio(player, 2, "no_commander_available");
 		return false;
 	}

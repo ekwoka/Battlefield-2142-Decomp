@@ -2699,6 +2699,8 @@ constexpr float kCommandEvery = 10;
 constexpr float kKeepFocus = 90;     // shortcut: a fixed hold; the Titan crosses ~95 m in it
 constexpr float kMissileClimb = 45;  // a silo missile's climb before it runs at the Titan (Suez, measured: 45 m up, turned within 40 m)
 constexpr float kSiloClearance = 10; // round the Titan's box
+constexpr float kOrderLine = 2;      // the commander's line after an order (0x10089e90): the virtual commander's answer to a usable request
+constexpr float kAutoTurnDown = 4;   // the HUD's turn-down of a request whose tool can't be used (0x007c8c00): its answer to the rest
 constexpr float kEmpEvery = 60;      // shortcut: the bots' own pace (Remaster's EMP is ready in 5 s; vanilla 115 s), tune by feel
 } // namespace
 
@@ -2883,10 +2885,104 @@ void BotManager::titanCommand()
 	}
 }
 
+bool BotManager::virtualCommands(int team) const
+{
+	return m_settings.titanCommander() && m_world.gameMode() == "gpm_ti" && m_world.commander(team) == -1
+		&& std::any_of(m_players.begin(), m_players.end(), [&](const GameWorld::PlayerInfo& p) { return p.ai && p.team == team; });
+}
+
+// The commander's answer (HudMenus.h, SquadRequests::answer / tick; 0x007c7e20, 0x007c8a60) to the squad leaders' asset
+// requests, said to the leader alone (as no_commander_available is). A request is answered 2 s on (kOrderLine) when
+// its tool is usable and 4 s on (kAutoTurnDown) when it isn't, by what the tool is then: used at the request's point
+// ("<tool>_accept" to the leader, "<tool>_deny" to every other squad's request of that kind, each taken off), or
+// turned down with 0x007c7a00's lines ("<tool>_auto_deny", "<tool>_unavailable"). The tool's own recharge is the
+// limit, and titanCommandAssets leaves a tool with a request standing to it.
+void BotManager::answerVirtualRequests()
+{
+	static const char* const kTools[] = {"artillery", "orbitalstrike", "uav", "supply"};
+	const auto say = [&](int team, int squad, const std::string& voice) {
+		for (const GameWorld::PlayerInfo& p : m_players) {
+			if (p.team == team && p.squad == squad && p.squadLeader) {
+				m_world.hearRadio(p.id, 2, voice);
+			}
+		}
+	};
+	for (int team = 1; team <= 2; ++team) {
+		if (!m_virtualCommander[team]) {
+			continue;
+		}
+		for (const GameWorld::SquadRequest& r : m_world.squadRequests(team)) {
+			if (std::none_of(m_virtualAnswers.begin(), m_virtualAnswers.end(), [&](const VirtualAnswer& a) {
+					return a.team == team && a.squad == r.squad && a.kind == r.kind && a.storedAt == r.storedAt;
+				})) {
+				const auto state = m_world.abilityState(team, GameWorld::requestAbility(r.kind));
+				m_virtualAnswers.push_back({team, r.squad, r.kind, r.storedAt, m_time + (state.available && state.ready ? kOrderLine : kAutoTurnDown)});
+			}
+		}
+	}
+	for (auto it = m_virtualAnswers.begin(); it != m_virtualAnswers.end();) {
+		const VirtualAnswer a = *it;
+		const GameWorld::SquadRequest* r = m_virtualCommander[a.team] ? m_world.squadRequest(a.team, a.squad, a.kind) : nullptr;
+		if (!r || r->storedAt != a.storedAt) {
+			it = m_virtualAnswers.erase(it); // answered elsewhere, taken off, or a new request since
+			continue;
+		}
+		if (m_time < a.due) {
+			++it;
+			continue;
+		}
+		it = m_virtualAnswers.erase(it);
+		const GameWorld::CommanderAbility ability = GameWorld::requestAbility(a.kind);
+		const std::string tool = kTools[a.kind];
+		if (m_world.commanderAction(a.team, ability, r->position.x, r->position.z, true)) {
+			if (ability == GameWorld::CommanderAbility::OrbitalStrike) {
+				m_titanCommands[a.team].empAt = m_time; // the same tool: its own EMP waits its pace again
+			}
+			for (int other = 1; other <= 9; ++other) {
+				if (m_world.squadRequest(a.team, other, a.kind)) {
+					m_world.removeSquadRequest(a.team, other, a.kind);
+					say(a.team, other, tool + (other == a.squad ? "_accept" : "_deny"));
+				}
+			}
+			continue;
+		}
+		const bool available = m_world.abilityState(a.team, ability).available;
+		m_world.removeSquadRequest(a.team, a.squad, a.kind);
+		say(a.team, a.squad, tool + (a.kind == 3 || available ? "_auto_deny" : "_unavailable")); // 0x007c7a00
+	}
+}
+
+// The virtual commander's order for a squad that asked for one: a map attack on the point it has the Titan for (a map
+// defend while it is the team's), else the squad's own order from the SAI (BotsSquad.cpp's answerOrderRequests); false
+// for none.
+bool BotManager::virtualOrder(int team, const Squad& squad, bool& attack, physics::Vec3& at) const
+{
+	if (const int focus = m_titanCommands[team].focus; focus > 0) {
+		for (const GameWorld::ControlPointInfo& p : m_world.controlPointList()) {
+			if (p.id == focus) {
+				attack = p.team != team;
+				at = p.position;
+				return true;
+			}
+		}
+	}
+	if (squad.state == 0 || !squad.takenFromCommander) {
+		return false;
+	}
+	attack = squad.takenKind == 0;
+	at = squad.takenAt;
+	return true;
+}
+
 void BotManager::titanCommandAssets(int team, const physics::Vec3& focus, bool silo)
 {
 	using A = GameWorld::CommanderAbility;
+	const std::vector<GameWorld::SquadRequest> asked = m_world.squadRequests(team);
 	const auto use = [&](A a, const physics::Vec3& p) {
+		// A leader's request for the tool stands: it has the tool first (answerVirtualRequests).
+		if (std::any_of(asked.begin(), asked.end(), [&](const GameWorld::SquadRequest& r) { return GameWorld::requestAbility(r.kind) == a; })) {
+			return false;
+		}
 		if (!m_world.abilityState(team, a).ready || !m_world.commanderAction(team, a, p.x, p.z, true)) {
 			return false;
 		}

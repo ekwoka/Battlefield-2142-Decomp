@@ -36,7 +36,7 @@ bool GameWorld::requestNewOrder(int player, int team, int squad, int type)
 	if (!leader && commander(team) != player) {
 		return false;
 	}
-	if (type == 1 && aiAnswersOrderRequests()) {
+	if (type == 1 && (aiAnswersOrderRequests() || virtualCommander(team))) {
 		m_newOrderRequests.push_back({team, squad});
 	}
 	return true;
