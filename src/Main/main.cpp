@@ -1483,16 +1483,38 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	} else if (me.squad) {
 		orderSquads.push_back(me.squad);
 	}
+	std::vector<hud::HudManager::MapMarker> orderLines;
 	for (const int squad : orderSquads) {
+		// The line's start (0x00779cc0): a commander's selected squad's leader, else our own soldier, or his squad's leader
+		// while we have none; no soldier, no line.
+		const game::GameWorld::PlayerInfo* from = nullptr;
+		const bool asCommander = known && commander == me.id;
+		if (!asCommander && me.alive) {
+			from = &me;
+		} else {
+			for (const auto& player : world.playerList()) {
+				if (player.alive && player.team == me.team && player.squad == squad && player.squadLeader) {
+					from = &player;
+				}
+			}
+		}
 		for (const bool fromCommander : {false, true}) {
 			game::GameWorld::SquadOrder order;
 			if (world.squadOrder(me.team, squad, fromCommander, order)) {
 				if (auto marker = dice::hfe::main::mapOrderMarker(static_cast<int>(order.type), fromCommander, order.position.x, order.position.z)) {
 					markers.push_back(*marker);
+					if (from) {
+						if (auto line = dice::hfe::main::mapOrderLine(static_cast<int>(order.type), order.accepted, from->position.x, from->position.z,
+								order.position.x, order.position.z)) {
+							orderLines.push_back(*line);
+						}
+					}
 				}
 			}
 		}
 	}
+	// The line goes on layer 8, under the pins and icons (0x00791090 -> 0x0078a110).
+	markers.insert(markers.begin(), orderLines.begin(), orderLines.end());
 	// Enemies a recon drone's pulse revealed to the team, in red.
 	// The satellite scan's enemies, shown to the commander only (0x0057cfb0).
 	std::vector<int> revealed = world.revealedPlayers(me.team);

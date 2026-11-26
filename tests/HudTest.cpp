@@ -964,6 +964,48 @@ TEST(Hud_MapOrderMarkerSizeAndAnchor)
 }
 
 
+// The order line (0x00791090 -> 0x0077bfd0, coloured by 0x0078b110): from the soldier to the order's point.
+TEST(Hud_MapOrderLine)
+{
+	Console console;
+	hud::HudManager manager(nullptr);
+	hud::registerHudConsoleMethods(console, manager);
+	std::string out;
+	for (const char* line : {
+			 "hudBuilder.createMapNode Global Minimap",
+			 "hudBuilder.setMaxiPos -122/-271",
+			 "hudBuilder.setMaxiSize 512/512",
+			 "hudBuilder.setMiniPos 245/-291",
+			 "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1",
+		 }) {
+		console.execute(line, out);
+	}
+	manager.setMap("Levels/x/Hud/Minimap/ingameMap.dds", -512, -512, 1024, 1024);
+	const auto accepted = main::mapOrderLine(5, true, 0, 0, 0, 100); // the leader's answered attack order, north
+	const auto waiting = main::mapOrderLine(4, false, 0, 0, 100, 0);  // an unanswered move order, east
+	CHECK(accepted && waiting && !main::mapOrderLine(10, true, 0, 0, 1, 1));
+	if (!accepted || !waiting) {
+		return;
+	}
+	CHECK(accepted->texture == "Ingame/Minimap/map_Line.tga" && accepted->size == 8);
+	CHECK(accepted->color[0] == 0.792f && accepted->color[1] == 0.2f && accepted->color[2] == 0.949f && accepted->color[3] == 1 && accepted->iconAlpha);
+	CHECK(waiting->color[0] == 0.7f && waiting->color[3] == 0.8f && !waiting->iconAlpha);
+	manager.setMapMarkers({*accepted, *waiting});
+	manager.set("MapFullSize", 1);
+	const auto quads = manager.frame(0);
+	CHECK(quads.size() == 3);
+	if (quads.size() == 3) {
+		// 0.5 px a metre about the map point (534, 285): 50 px long, 8 wide, centred on the midpoint of its ends.
+		const auto& north = quads[1];
+		const auto& east = quads[2];
+		CHECK(north.x1 - north.x0 == 8 && north.y1 - north.y0 == 50 && north.x0 == 530 && north.y0 == 235);
+		CHECK(std::abs(north.rotation) < 0.01f);
+		CHECK(east.x1 - east.x0 == 8 && east.y1 - east.y0 == 50 && east.x0 == 555 && east.y0 == 260);
+		CHECK(std::abs(east.rotation - 90) < 0.01f); // its top towards the point
+	}
+}
+
 TEST(Hud_ListBordersSelectionScrollbar)
 {
 	Console console;

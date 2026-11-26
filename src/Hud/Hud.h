@@ -262,6 +262,11 @@ public:
 		// while fading out, f = the pulse clock's phase (4 rad/s over 2 pi):
 		// side times f, alpha times 1 - f.
 		bool radar = false;
+		// A segment from (x, z) to (toX, toZ): the strip `size` wide, long
+		// as the two points are apart, its top end at the second point,
+		// turned with the map (0x0077bfd0, the order line of 0x00791090).
+		bool line = false;
+		float toX = 0, toZ = 0;
 	};
 	// BF2142.exe 0x0078e95d: spawn groups use a 16 x 16 HUD-unit icon.
 	static constexpr float kSpawnMarkerSize = 16.0f;

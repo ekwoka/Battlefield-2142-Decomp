@@ -2036,7 +2036,38 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 	m_mapView = {true, nx, ny, nx + nw, ny + nh, mapX, mapY, mapW, mapH, mapTurn, m_frameNumber};
 	std::vector<Hit> labelRects;
 	std::vector<HudQuad> tooltips; // drawn last, over the later markers' icons
+	// A world point on the screen: on the map, then turned with it about the node's centre.
+	const auto screenPoint = [&](float x, float z, float& sx, float& sy) {
+		sx = mapX + (x - m_mapOrigin[0]) / m_mapSize[0] * mapW;
+		sy = mapY + (1 - (z - m_mapOrigin[1]) / m_mapSize[1]) * mapH;
+		if (turnDegrees != 0) {
+			const float c = std::cos(mapTurn), s = std::sin(mapTurn);
+			const float dx = sx - centreX, dy = sy - centreY;
+			sx = centreX + dx * c + dy * s;
+			sy = centreY + dy * c - dx * s;
+		}
+	};
 	for (const MapMarker& marker : m_mapMarkers) {
+		if (marker.line) {
+			// 0x0077bfd0 / 0x0077c610: the strip on the midpoint of its two points, `size` wide by their distance,
+			// its top towards the second (0x0077bfd0 turns it -pi/2 - atan2 of the two, then 0x00791090 adds the map's turn).
+			float ax, ay, bx, by;
+			screenPoint(marker.x, marker.z, ax, ay);
+			screenPoint(marker.toX, marker.toZ, bx, by);
+			const float length = std::hypot(bx - ax, by - ay);
+			if (length < 1) {
+				continue;
+			}
+			const float side = std::floor(marker.size), tall = std::floor(length);
+			const float x0 = std::floor((ax + bx) * 0.5f - marker.size * 0.5f), y0 = std::floor((ay + by) * 0.5f - length * 0.5f);
+			HudQuad q {kTextureRoot + slashes(marker.texture), x0, y0, x0 + side, y0 + tall, 0, 0, 1, 1,
+				{marker.color[0], marker.color[1], marker.color[2], marker.color[3] * alpha * (marker.iconAlpha ? iconAlpha : 1.0f)},
+				std::atan2(bx - ax, ay - by) * 57.29578f};
+			if (clipTo(q, nx, ny, nx + nw, ny + nh)) {
+				out.push_back(q);
+			}
+			continue;
+		}
 		float u = (marker.x - m_mapOrigin[0]) / m_mapSize[0];
 		float v = 1 - (marker.z - m_mapOrigin[1]) / m_mapSize[1];
 		if (marker.clamp && m_mapZoomShown[1] > 0) {
