@@ -12428,14 +12428,28 @@ bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& 
 			}
 		}
 	}
-	// A drone's or sentry's auto controller turns its yaw bundle: the gun's
-	// heading (fireSentry's gunYaw, a world heading) against the body's.
+	// A drone's or sentry's parts: the auto controller turns its yaw bundle
+	// (fireSentry's gunYaw, a world heading, against the body's) and tilts
+	// its pitch bundle (down positive, as a seat gun's), and the rotor spins.
 	for (const std::vector<Drone>* list : {&m_drones, &m_sentryGuns}) {
 		for (const Drone& drone : *list) {
-			if (drone.object == object && !drone.yawBundle.empty() && sameName(drone.yawBundle, part)) {
+			if (drone.object != object) {
+				continue;
+			}
+			const bool yaws = !drone.yawBundle.empty() && sameName(drone.yawBundle, part);
+			const bool pitches = !drone.pitchBundle.empty() && sameName(drone.pitchBundle, part);
+			if (yaws || pitches) {
 				offset = {};
-				rotation = {std::remainder(drone.gunYaw * 57.29578f - drone.yaw, 360.0f), 0, 0};
+				rotation = {yaws ? std::remainder(drone.gunYaw * 57.29578f - drone.yaw, 360.0f) : 0.0f,
+					pitches ? drone.gunPitch : 0.0f, 0};
 				return true;
+			}
+			for (const Drone::Spin& spin : drone.spins) {
+				if (sameName(spin.bundle, part)) {
+					offset = {};
+					rotation = {spin.angle[0], spin.angle[1], spin.angle[2]};
+					return true;
+				}
 			}
 		}
 	}
@@ -16964,7 +16978,7 @@ void GameWorld::launchDrone(Player& player, const world::ObjectTemplate& detonat
 		drone.targetOffset = carrierTargetOffset(*carrier);
 	}
 	drone.control = &kUavDrone;
-	drone.yawBundle = autoYawBundle(t);
+	setUpDroneParts(t, drone);
 	if (const world::ObjectTemplate* force = findInTree(m_templates, t, "ForceObject")) {
 		const char* axes[3] = {"regulatePosX", "regulatePosY", "regulatePosZ"};
 		for (int axis = 0; axis < 3; ++axis) {
@@ -17265,6 +17279,7 @@ void GameWorld::stepDrones(float seconds)
 			body->body.velocity = drone.velocity;
 			body->body.rotation = physics::Mat3::fromYawPitchRoll({drone.yaw, 0, 0});
 		}
+		stepDroneParts(drone, seconds);
 		// Its weapon, run by its auto controller: the recon drone's
 		// (ReconDrone: simpleFirePlan) fires all the time; the sentry's
 		// (UAVDrone) at an enemy. Under EMP above level 1 the sentry's
@@ -17785,6 +17800,15 @@ void GameWorld::fireSentry(Drone& drone, float seconds)
 		const float most = control.yawSpeed * 3.14159265f / 180.0f * seconds;
 		drone.gunYaw += std::clamp(error, -most, most);
 		onTarget = std::fabs(error) <= most + 2 * 3.14159265f / 180.0f;
+		// Its pitch bundle tilts the guns to the target within the bundle's
+		// limits at its speed x maxTrackingInput (held while it scans).
+		if (drone.pitchSpeed != 0) {
+			const float across = std::hypot(aim.x - drone.position.x, aim.z - drone.position.z);
+			const float down = std::atan2(drone.position.y - aim.y, across) * 57.29578f;
+			const float step = std::fabs(drone.pitchSpeed) * control.maxTrackingInput * seconds;
+			const float want = std::clamp(down, drone.pitchMin, drone.pitchMax);
+			drone.gunPitch += std::clamp(want - drone.gunPitch, -step, step);
+		}
 	} else if (!flipping) {
 		drone.gunYaw = std::remainder(drone.gunYaw + control.scanningSpeed * 30 * seconds, 6.2831853f);
 	}
@@ -17988,42 +18012,100 @@ physics::Vec3 GameWorld::carrierTargetOffset(const world::ObjectTemplate& carrie
 	return found;
 }
 
-// The bundle an auto controller's yaw turns: the outermost RotationalBundle
-// above the gun whose maxSpeed has a yaw (x) component, as a seat's
-// yawBundle is (unl_drone_sentry_cam over unl_drone_sentry_guns, which only
-// pitches). Empty when the gun hangs on no such bundle.
-std::string GameWorld::autoYawBundle(const world::ObjectTemplate& t) const
+// The bundles of a drone's or sentry's parts that move (partPose). Above the
+// auto controller's gun: the outermost RotationalBundle whose maxSpeed has a
+// yaw (x) component is the one its yaw turns, the innermost with a pitch (y)
+// component the one its pitch tilts, as a seat's yawBundle and pitchBundle
+// are (unl_drone_sentry_cam over unl_drone_sentry_guns; eu_sentrygun's
+// EU_Sentrygun_rotation and EU_Sentrygun_gun). Anywhere in the tree, a
+// bundle with startAutoRotateOnEnter spins from the start: the auto
+// controller is what enters the object (the rotor).
+void GameWorld::setUpDroneParts(const world::ObjectTemplate& t, Drone& drone) const
 {
 	const world::ObjectTemplate* gun = autoControlledGun(t, nullptr);
-	std::string found;
-	const std::function<bool(const world::ObjectTemplate&, const std::string&, int)> walk = [&](const world::ObjectTemplate& at,
-																							   const std::string& yaw, int depth) {
+	std::vector<const world::ObjectTemplate*> bundles; // above the gun, outermost first
+	const std::function<bool(const world::ObjectTemplate&, int)> toGun = [&](const world::ObjectTemplate& at, int depth) {
 		for (const world::ChildTemplate& child : at.children()) {
 			const world::ObjectTemplate* c = depth < 8 ? m_templates.find(child.name) : nullptr;
 			if (!c) {
 				continue;
 			}
 			if (c == gun) {
-				found = yaw;
 				return true;
 			}
-			std::string next = yaw;
-			if (next.empty() && sameName(c->typeName(), "RotationalBundle")) {
-				const auto speed = c->settings().find("maxSpeed");
-				if (speed != c->settings().end() && parseVec3(speed->second).x != 0) {
-					next = c->name();
-				}
+			const bool bundle = sameName(c->typeName(), "RotationalBundle");
+			if (bundle) {
+				bundles.push_back(c);
 			}
-			if (walk(*c, next, depth + 1)) {
+			if (toGun(*c, depth + 1)) {
 				return true;
+			}
+			if (bundle) {
+				bundles.pop_back();
 			}
 		}
 		return false;
 	};
-	if (gun) {
-		walk(t, {}, 0);
+	const auto speedOf = [](const world::ObjectTemplate& b) {
+		const auto speed = b.settings().find("maxSpeed");
+		return speed == b.settings().end() ? physics::Vec3 {} : parseVec3(speed->second);
+	};
+	if (gun && toGun(t, 0)) {
+		for (const world::ObjectTemplate* b : bundles) {
+			if (speedOf(*b).x != 0) {
+				drone.yawBundle = b->name();
+				break;
+			}
+		}
+		for (auto it = bundles.rbegin(); it != bundles.rend(); ++it) {
+			if (const float speed = speedOf(**it).y; speed != 0) {
+				const auto low = (*it)->settings().find("minRotation"), high = (*it)->settings().find("maxRotation");
+				if (low != (*it)->settings().end() && high != (*it)->settings().end()
+					&& parseVec3(low->second).y < parseVec3(high->second).y) {
+					drone.pitchMin = parseVec3(low->second).y;
+					drone.pitchMax = parseVec3(high->second).y;
+				}
+				drone.pitchBundle = (*it)->name();
+				drone.pitchSpeed = speed;
+				break;
+			}
+		}
 	}
-	return found;
+	const std::function<void(const world::ObjectTemplate&, int)> spins = [&](const world::ObjectTemplate& at, int depth) {
+		for (const world::ChildTemplate& child : at.children()) {
+			const world::ObjectTemplate* c = depth < 8 ? m_templates.find(child.name) : nullptr;
+			if (!c) {
+				continue;
+			}
+			if (sameName(c->typeName(), "RotationalBundle") && number(*c, "startAutoRotateOnEnter", 0) != 0) {
+				Drone::Spin spin;
+				spin.bundle = c->name();
+				const physics::Vec3 speed = speedOf(*c);
+				const auto accel = c->settings().find("acceleration");
+				const physics::Vec3 a = accel == c->settings().end() ? physics::Vec3 {} : parseVec3(accel->second);
+				const float speeds[3] = {speed.x, speed.y, speed.z}, accels[3] = {a.x, a.y, a.z};
+				for (int axis = 0; axis < 3; ++axis) {
+					spin.axes[axis].maxSpeed = speeds[axis];
+					spin.axes[axis].acceleration = accels[axis];
+				}
+				drone.spins.push_back(std::move(spin));
+			}
+			spins(*c, depth + 1);
+		}
+	};
+	spins(t, 0);
+}
+
+// The auto-rotating bundles run up to their speed at their acceleration, input 1.
+void GameWorld::stepDroneParts(Drone& drone, float seconds)
+{
+	for (Drone::Spin& spin : drone.spins) {
+		for (int axis = 0; axis < 3; ++axis) {
+			if (spin.axes[axis].maxSpeed != 0) {
+				rotationAxisStep(spin.axes[axis], 1.0f, seconds, spin.angle[axis], spin.rate[axis]);
+			}
+		}
+	}
 }
 
 // A deployed sentry gun (Unl_Deployer_Sentrygun's eu_sentrygun,
@@ -18057,7 +18139,7 @@ void GameWorld::addSentryGun(const Player& player, const world::Object& placed)
 	sentry.position = physics::Vec3 {placed.position().x, placed.position().y + sentry.gunHeight, placed.position().z};
 	sentry.yaw = placed.rotation().x;
 	sentry.gunYaw = sentry.yaw * 3.14159265f / 180.0f;
-	sentry.yawBundle = autoYawBundle(*t);
+	setUpDroneParts(*t, sentry);
 	const FireArmSettings settings = FireArmSettings::fromTemplate(*gun);
 	sentry.weapon = std::make_unique<FireArm>(settings);
 	sentry.gunDeviation = DeviationBuildUp::fromTemplate(*gun);
@@ -18086,6 +18168,7 @@ void GameWorld::stepSentryGuns(float seconds)
 			continue;
 		}
 		Drone& sentry = *it++;
+		stepDroneParts(sentry, seconds);
 		const world::ObjectTemplate* t = object->objectTemplate();
 		if (sentry.empLevel > 0) {
 			sentry.empLevel = std::max(0.0f, sentry.empLevel - seconds / (t ? number(*t, "armor.empLevelTime", 5) : 5));

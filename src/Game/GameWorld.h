@@ -4623,8 +4623,21 @@ private:
 		// fireFrom (the reaction time from the target's taking).
 		float gunYaw = 0;
 		// The RotationalBundle that yaw turns (partPose): the outermost
-		// bundle above the gun with a yaw speed (unl_drone_sentry_cam).
-		std::string yawBundle;
+		// bundle above the gun with a yaw speed (unl_drone_sentry_cam), and
+		// the one its pitch tilts: the innermost with a pitch speed
+		// (unl_drone_sentry_guns), its limits (down positive, degrees) and
+		// speed (degrees a second). gunPitch is the tilt it holds.
+		std::string yawBundle, pitchBundle;
+		float pitchMin = -90, pitchMax = 90, pitchSpeed = 0, gunPitch = 0;
+		// The bundles that turn on startAutoRotateOnEnter (the rotor): the
+		// auto controller is what enters the drone or sentry, so they run
+		// from the start (RotationalBundle message 2, 0x00565600).
+		struct Spin {
+			std::string bundle;
+			RotationAxis axes[3];
+			float angle[3] {}, rate[3] {};
+		};
+		std::vector<Spin> spins;
 		int target = -1;
 		float targetSeenAt = 0;
 		float fireFrom = 0;
@@ -4943,7 +4956,8 @@ private:
 	uint32_t gunMessages(uint32_t object, uint32_t& pulses) const;
 	void addSentryGun(const Player& player, const world::Object& placed);
 	const world::ObjectTemplate* autoControlledGun(const world::ObjectTemplate& t, float* height) const;
-	std::string autoYawBundle(const world::ObjectTemplate& t) const;
+	void setUpDroneParts(const world::ObjectTemplate& t, Drone& drone) const;
+	static void stepDroneParts(Drone& drone, float seconds);
 	physics::Vec3 carrierTargetOffset(const world::ObjectTemplate& carrier) const;
 	void stepSentryGuns(float seconds);
 	void registerSeatControllers(const world::Object& vehicle);

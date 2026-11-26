@@ -51,7 +51,8 @@ struct Field {
 				"fire.projectileStartPosition", "ammo.magSize", "ammo.nrOfMags", "ammo.reloadTime", "ammo.autoReload", "velocity",
 				"projectileTemplate", "itemIndex", "pulse.fov", "pulse.viewDistance", "pulse.revealTime", "damage",
 				"minDamage", "distToStartLoseDamage", "distToMinDamage", "timeToLive", "material", "deviation.minDev",
-				"autoControllerTemplateName", "maxSpeed", "targetType"});
+				"autoControllerTemplateName", "maxSpeed", "targetType", "minRotation", "maxRotation", "acceleration",
+				"startAutoRotateOnEnter"});
 		std::string out;
 		// The sentry drone's siren (Vehicles_server.zip's Car_horn_Alt, a
 		// root child of unl_drone_sentry before its gun): a GenericFireArm
@@ -312,6 +313,55 @@ TEST(Drones_KeepTheirHeightOverAMovedOwner)
 	CHECK(std::abs(field.at(drone).y - (me.position.y + 2.5f)) < 0.3f);
 }
 
+// The head points where the gun does: tracking an enemy 20 m ahead, the cam
+// bundle's yaw plus the body's is the bearing to it (0 degrees: +z) and the
+// guns bundle tilts down to it, within its limits (-12 up to 40 down).
+TEST(Drones_SentryHeadTurnsToItsTarget)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	const int enemy = field.world->addPlayer("Pac", 1, true);
+	CHECK(field.world->spawnSoldier(enemy)); // 20 m ahead
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	field.run(1.5f);
+	field.world->reportBattlefieldObjects(leader, {enemy});
+	field.run(0.6f);
+	CHECK(field.world->drone(leader) == drone);
+	world::Vec3 offset, cam, guns;
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_cam", offset, cam));
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_guns", offset, guns));
+	const float body = field.objects.find(drone)->rotation().x;
+	CHECK(std::fabs(std::remainder(cam.x + body, 360.0f)) < 6.0f);
+	// From about 2.5 m up to the enemy's chest 20 m off: a few degrees down.
+	CHECK(guns.y > 0.5f && guns.y < 12.0f);
+}
+
+// The rotor runs from the start (startAutoRotateOnEnter): up to its 500
+// degrees a second.
+TEST(Drones_SentryRotorSpins)
+{
+	Field field;
+	if (!field.loaded) {
+		return;
+	}
+	const int leader = field.spawnLeader("unl_drone_sentry_detonator");
+	field.launch();
+	const uint32_t drone = field.world->drone(leader);
+	CHECK(drone != 0);
+	field.run(1.0f);
+	world::Vec3 offset, first, later;
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_rotor", offset, first));
+	field.run(0.1f);
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_rotor", offset, later));
+	const float turned = std::fmod(later.x - first.x + 540.0f, 360.0f) - 180.0f;
+	CHECK(std::fabs(turned - 50.0f) < 3.0f);
+}
+
 TEST(Drones_SentryHeadScansAsPosed)
 {
 	Field field;
@@ -326,7 +376,9 @@ TEST(Drones_SentryHeadScansAsPosed)
 	world::Vec3 offset, first, later;
 	field.run(3.0f); // settled over its owner: the body's heading steady
 	CHECK(field.world->partPose(drone, "unl_drone_sentry_cam", offset, first));
-	CHECK(!field.world->partPose(drone, "unl_drone_sentry_guns", offset, later));
+	// Scanning only turns the head: the guns bundle is posed, level.
+	CHECK(field.world->partPose(drone, "unl_drone_sentry_guns", offset, later));
+	CHECK(later.x == 0 && later.y == 0);
 	field.run(0.5f);
 	CHECK(field.world->partPose(drone, "unl_drone_sentry_cam/unl_drone_sentry_cam", offset, later));
 	// scanningSpeed 0.13 x 30 = 3.9 rad/s: 0.5 s is 112 degrees (wrapped), the body steady.

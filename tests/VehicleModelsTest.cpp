@@ -10315,6 +10315,11 @@ TEST(Vehicles_DeployedSentryGunFires)
 	}
 	CHECK(killed);
 	CHECK(firing);
+	// Its head is posed: the yaw bundle turns with the scan and the gun's
+	// pitch bundle tilts to the target, though the arms are bone parts.
+	world::Vec3 offset, yawed, pitched;
+	CHECK(g.world->partPose(sentry, "EU_Sentrygun_rotation", offset, yawed));
+	CHECK(g.world->partPose(sentry, "EU_Sentrygun_gun", offset, pitched));
 	// The target gone, the trigger lets go and the switch goes back.
 	g.run(1.5f);
 	const auto after = g.world->objectAnimation(sentry);
