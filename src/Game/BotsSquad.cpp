@@ -1765,4 +1765,47 @@ void BotManager::chooseRespawn(const GameWorld::PlayerInfo& self)
 	}
 }
 
+// A leader asking for a new order (GameWorld::requestNewOrder: the Request
+// event's kind 1, which BF2142.exe's handler 0x00512100 turns into AI event
+// 3/0x10 in sp1, gpm_sp and gpm_coop; 0x00894860 -> IAIEventCourier slot 0x4c
+// 0x1004e340 -> 0x10089fa0). With no human commander (+0x4c) and the squad
+// holding an order (+0x98 not 0) taken from the commander (+0x70), the AI
+// commander repeats it to the squad as the game's order (IBFCommander slot 0xc,
+// 0x008971c0: a map attack when the taken kind +0x60 is 0, else slot 0x14: a map
+// defend, 0x00897200, at the taken spot +0x54), then, 2 s on (0x10089e90, one
+// at a time a squad), says "attack_position" / "defend" in the commander's voice
+// (IBFCommander slots 0x18 / 0x1c, 0x008969b0 / 0x00896a60: the team's radio, as
+// the turn-downs' lines). 0x10088710 drops the list while a human commands.
+void BotManager::answerOrderRequests()
+{
+	for (const auto& [team, id] : m_world.takeNewOrderRequests()) {
+		const Squad* s = squad(team, id);
+		if (m_humanCommander[team] || !s || s->state == 0 || !s->takenFromCommander) {
+			continue;
+		}
+		const bool attack = s->takenKind == 0;
+		m_world.issueOrder(team, id, attack ? GameWorld::OrderType::MapAttack : GameWorld::OrderType::MapDefend, s->takenAt.x,
+			s->takenAt.z);
+		const bool pending = std::any_of(m_orderAnswers.begin(), m_orderAnswers.end(),
+			[&](const OrderAnswer& a) { return a.team == team && a.squad == id; });
+		if (!pending) {
+			m_orderAnswers.push_back({team, id, attack ? 0 : 1, m_time + 2.0f});
+		}
+	}
+	for (auto it = m_orderAnswers.begin(); it != m_orderAnswers.end();) {
+		if (m_humanCommander[it->team]) {
+			it = m_orderAnswers.erase(it);
+		} else if (m_time > it->due) {
+			const char* line = it->type == 0 ? "attack_position" : "defend";
+			if (const int local = m_world.localPlayer(); local >= 0) {
+				m_world.hearRadio(local, 2, line);
+			}
+			m_commanderSaid.push_back({it->team, it->squad, line});
+			it = m_orderAnswers.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
 } // namespace dice::hfe::game

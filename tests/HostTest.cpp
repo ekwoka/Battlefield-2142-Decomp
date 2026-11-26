@@ -469,6 +469,29 @@ TEST(NetHost_JoinedHudStateAndRequests)
 	CHECK(pumpUntil(step, [&] { return client.world().squadRequests(1).size() == 1; }));
 	round.removeSquadRequest(1, 1, 3);
 	CHECK(pumpUntil(step, [&] { return client.world().squadRequests(1).empty(); }));
+	// The leader's Request event of kind 1 (0x00512100): in a mode the AI answers (co-op) it reaches the AI as an event
+	// for his squad; in conquest nothing follows.
+	round.setAiRunning(true);
+	round.setGameMode("gpm_coop");
+	client.squadRequest(1);
+	std::vector<std::pair<int, int>> asked;
+	CHECK(pumpUntil(step, [&] {
+		for (const auto& a : round.takeNewOrderRequests()) {
+			asked.push_back(a);
+		}
+		return !asked.empty();
+	}));
+	CHECK(asked[0] == std::make_pair(1, 1));
+	round.setGameMode("gpm_cq");
+	for (int i = 0; i < 30; ++i) {
+		step();
+	}
+	round.takeNewOrderRequests();
+	client.squadRequest(1);
+	for (int i = 0; i < 60; ++i) {
+		step();
+	}
+	CHECK(round.takeNewOrderRequests().empty());
 	// The host's own player's votes: its replies come to onVoteReply (here
 	// the bot stands in for the host's player: a kick vote, refused or
 	// started, answers it).

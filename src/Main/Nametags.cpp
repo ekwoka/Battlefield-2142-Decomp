@@ -746,6 +746,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	if (!m_fontLoaded) {
 		m_selectedObject = 0;
 		m_selectedRequest = -1;
+		m_selectedTarget = {};
 		return out;
 	}
 	// The players, control points and requests: a joined game's (the
@@ -911,13 +912,17 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		size_t drawn;
 		int background; // -1: none (players, +0x58)
 		uint32_t object;
+		bool objectTag;           // a type 3 tag (the objects'; players are 0, requests 2)
+		int team;                 // the tag's +0x74
+		std::array<float, 3> at;  // its position (slot 0)
 	};
-	Candidate selection {0.08f, 0, -1, 0};
-	const auto consider = [&](float x, float y, int background, uint32_t object) {
+	Candidate selection {0.08f, 0, -1, 0, false, 0, {}};
+	const auto consider = [&](float x, float y, int background, uint32_t object, bool objectTag = false, int team = 0,
+							  const std::array<float, 3>& at = {}) {
 		const float nx = x / 400 - 1, ny = 1 - y / 300;
 		const float c = std::sqrt(nx * nx + ny * ny);
 		if (c > 0 && c < selection.centre) {
-			selection = {c, drawn.size(), background, object};
+			selection = {c, drawn.size(), background, object, objectTag, team, at};
 		}
 	};
 	const auto iconQuad = [](const IconRegistry::Icon& icon, float x, float y, const float colour[4]) {
@@ -1041,7 +1046,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 				m_font.write(text, std::round(x - m_font.width(text) / 2), std::round(y + 16), c, d.quads);
 			}
 			if (tt.selectable) {
-				consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
+				consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id, true, team,
+					{owned->position().x, owned->position().y, owned->position().z});
 			}
 			drawn.push_back(std::move(d));
 			continue;
@@ -1088,7 +1094,7 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 			continue;
 		}
 		if (tt.selectable) {
-			consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id);
+			consider(x, y, tt.selectedIcon < 0 ? 0x93 : 0x50 + tt.selectedIcon, id, true, owned->team(), {pos.x, pos.y, pos.z});
 		}
 		Drawn tagDrawn {distance, {iconQuad(*icon, x, y, c)}};
 		// The supply bar (objectTagBar): the hubs' and the MiniMed's storage.
@@ -1606,10 +1612,13 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 		out.insert(out.end(), squadIcons.begin(), squadIcons.end());
 		m_selectedObject = 0;
 		m_selectedRequest = -1;
+		m_selectedTarget = {};
 		return out;
 	}
 	// The selected tag's background under its icon (its first quad).
 	m_selectedObject = selection.centre < 0.08f ? selection.object : 0;
+	m_selectedTarget = selection.centre < 0.08f && selection.objectTag
+		? SelectedTarget {selection.object, selection.team, selection.at} : SelectedTarget {};
 	// A selected request shows its Selected icon instead (+0x58).
 	m_selectedRequest = -1;
 	if ((m_selectedObject & kRequestObject) != 0) {

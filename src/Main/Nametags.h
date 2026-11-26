@@ -418,6 +418,15 @@ public:
 	// The tag the crosshair selects now (0x100f16c0: the selectable tag
 	// nearest the screen's centre within 0.08), its object; 0 none.
 	uint32_t selected() const { return m_selectedObject; }
+	// The selected tag when it is an object's (retail tag type 3: control points, Titans, silos, hubs...; not a player's or
+	// a request's), with the team (the tag's +0x74) and the position (slot 0) the tactical rose orders against
+	// (0x00753b40); object 0 for none.
+	struct SelectedTarget {
+		uint32_t object = 0;
+		int team = 0;
+		std::array<float, 3> position {};
+	};
+	const SelectedTarget& selectedTarget() const { return m_selectedTarget; }
 	// The request tag the crosshair selects (the commander's), its id
 	// squad x 4 + kind; -1 none.
 	int selectedRequest() const { return m_selectedRequest; }
@@ -486,6 +495,7 @@ private:
 	std::vector<PendingCall> m_pendingCalls;
 	std::vector<int> m_pendingFlashes; // radioFlash's senders
 	uint32_t m_selectedObject = 0;
+	SelectedTarget m_selectedTarget;
 	int m_selectedRequest = -1;
 	bool m_shown = true;
 	static constexpr uint32_t kRequestObject = 0x80000000u; // a request's selection (the manager's id - 0x80000000)

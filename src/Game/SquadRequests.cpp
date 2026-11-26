@@ -25,6 +25,23 @@ bool GameWorld::storeSquadRequest(int team, int squad, int kind, const physics::
 	return true;
 }
 
+bool GameWorld::requestNewOrder(int player, int team, int squad, int type)
+{
+	// 0x00512100: the sender is the squad's leader (slot 0x40) or the team's commander (slot 0x78).
+	const Player* p = findPlayer(player);
+	if (!p || !p->present || (team != 1 && team != 2) || squad <= 0 || type < 0 || type > 3) {
+		return false;
+	}
+	const bool leader = p->team == team && p->squad == squad && p->squadLeader;
+	if (!leader && commander(team) != player) {
+		return false;
+	}
+	if (type == 1 && aiAnswersOrderRequests()) {
+		m_newOrderRequests.push_back({team, squad});
+	}
+	return true;
+}
+
 void GameWorld::removeSquadRequest(int team, int squad, int kind)
 {
 	const auto it = m_squadRequests.find({team, squad});

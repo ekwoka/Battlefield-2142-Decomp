@@ -1562,9 +1562,11 @@ private:
 		std::map<int, int> squadArea; // squad -> area index it attacks/defends
 		// The SAI's order per squad. It stays in AIDLL (the squad's order,
 		// 0x100c1eb0): the AI never sends the game a commander's order
-		// (IBFCommander's order slots 3..5, 0x008971c0.., are never called),
-		// so no player sees it; a bot leader taking it orders its squad
-		// (BotManager::acceptOrder).
+		// (IBFCommander's order slots 3..5, 0x008971c0.., are called only to
+		// repeat the taken order to a leader who asks for a new one,
+		// 0x10089fa0 and 0x10062b80 / 0x10062ce0 (the last two untraced),
+		// so otherwise no player sees it; a bot leader taking it orders its
+		// squad (BotManager::acceptOrder).
 		std::map<int, GameWorld::SquadOrder> orders;
 		std::vector<int> attacks, defences;
 		std::map<std::string, int> picks; // the strategy records' +0xc (ai::strategyTimeUp)
@@ -2011,6 +2013,14 @@ private:
 	std::vector<TurnDown> m_turnDowns; // the SAI's +0xa0
 	std::vector<CommanderLine> m_commanderSaid;
 	void answerRequests();
+	// A leader's new-order request (the Request event's kind 1, AI event 3/0x10): the squad manager's list at +0xcc
+	// (0x10089e90): type 0 attack_position, 1 defend, due 2 s on.
+	struct OrderAnswer {
+		int team = 0, squad = 0, type = 0;
+		float due = 0;
+	};
+	std::vector<OrderAnswer> m_orderAnswers;
+	void answerOrderRequests();
 	bool m_humanCommander[3] = {}; // the team had a commander at the last look (AIDLL's +0x241)
 	GameWorld& m_world;
 	BotSettings m_settings;

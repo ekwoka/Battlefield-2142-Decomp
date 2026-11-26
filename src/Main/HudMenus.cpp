@@ -862,15 +862,40 @@ void sendRequestForOrder(const std::function<void(int channel, const std::string
 	}
 }
 
-bool issueSquadRequest(bool armed, const std::function<bool(float& x, float& z)>& rosePoint,
-	const std::function<void(float x, float z)>& place)
+RoseOrder prepareRoseOrder(bool hasPoint, float x, float z, bool hasTag, int tagTeam, float tagX, float tagZ, int team)
 {
-	float x = 0, z = 0;
-	if (!armed || !place || !rosePoint || !rosePoint(x, z)) {
+	RoseOrder order;
+	if (hasTag) {
+		// 0x00753b40: the tag's position; its team (+0x74) against the player's (0xf8) picks 5 / 6.
+		order.valid = true;
+		order.x = tagX;
+		order.z = tagZ;
+		order.kind = tagTeam < 0 ? 4 : (tagTeam == team ? 6 : 5);
+	} else if (hasPoint) {
+		order.valid = true;
+		order.x = x;
+		order.z = z;
+	}
+	return order;
+}
+
+bool issueSquadRequest(const RoseOrder& order, const std::function<void(int kind, float x, float z)>& place)
+{
+	if (!order.valid || !place) {
 		return false;
 	}
-	place(x, z);
+	place(order.kind, order.x, order.z);
 	return true;
+}
+
+const char* leaderOrderVoice(int kind, bool object)
+{
+	switch (kind) {
+	case 5: return object ? "attack_object" : "attack_position";
+	case 6: return "defend";
+	case 7: return "repair";
+	default: return "move";
+	}
 }
 
 void CommanderMenu::deselect()

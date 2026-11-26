@@ -9739,6 +9739,7 @@ void BotManager::command(float seconds)
 		m_humanCommander[team] = human;
 	}
 	answerRequests();
+	answerOrderRequests();
 	const std::vector<GameWorld::ControlPointInfo> points = m_world.controlPointList();
 	for (int team = 1; team <= 2; ++team) {
 		const bool bots = std::any_of(players.begin(), players.end(), [&](const GameWorld::PlayerInfo& p) {

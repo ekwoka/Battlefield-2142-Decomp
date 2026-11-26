@@ -1647,13 +1647,21 @@ TEST(HudMenus_CommanderRoseRows)
 	menu::sendRequestForOrder([&voices](int channel, const std::string& voice) { voices.push_back(std::to_string(channel) + voice); },
 		[&kind](int k) { kind = k; });
 	CHECK(voices == std::vector<std::string> {"2req_new_order"} && kind == 1);
-	// issueSquadRequest: the armed order at the rose's point, nothing else.
+	// issueSquadRequest places the order the T press prepared (0x00753b40): a move at the view's point, or at an object
+	// tag under the crosshair an attack, a defend of the player's team, a move for no team.
+	int placedKind = -1;
 	float placedX = -1, placedZ = -1;
-	const auto place = [&](float x, float z) { placedX = x, placedZ = z; };
-	const auto point = [](float& x, float& z) { return x = 30, z = 40, true; };
-	CHECK(!menu::issueSquadRequest(false, point, place) && placedX < 0);
-	CHECK(!menu::issueSquadRequest(true, [](float&, float&) { return false; }, place) && placedX < 0);
-	CHECK(menu::issueSquadRequest(true, point, place) && placedX == 30 && placedZ == 40);
+	const auto place = [&](int k, float x, float z) { placedKind = k, placedX = x, placedZ = z; };
+	CHECK(!menu::issueSquadRequest(menu::prepareRoseOrder(false, 0, 0, false, 0, 0, 0, 1), place) && placedKind < 0);
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, false, 0, 0, 0, 1), place) && placedKind == 4
+		&& placedX == 30 && placedZ == 40);
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 2, 70, 80, 1), place) && placedKind == 5
+		&& placedX == 70 && placedZ == 80);
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 1, 70, 80, 1), place) && placedKind == 6);
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(true, 30, 40, true, 0, 70, 80, 1), place) && placedKind == 5); // neutral
+	CHECK(menu::issueSquadRequest(menu::prepareRoseOrder(false, 0, 0, true, -1, 70, 80, 1), place) && placedKind == 4);
+	CHECK(std::string(menu::leaderOrderVoice(5, false)) == "attack_position" && std::string(menu::leaderOrderVoice(5, true)) == "attack_object"
+		&& std::string(menu::leaderOrderVoice(6, false)) == "defend" && std::string(menu::leaderOrderVoice(4, false)) == "move");
 }
 
 // The squad panel's voice icons (0x007aaf10) and the tactical rose's
