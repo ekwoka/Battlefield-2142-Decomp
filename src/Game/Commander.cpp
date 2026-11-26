@@ -1156,6 +1156,7 @@ bool GameWorld::issueOrder(int team, int squad, OrderType type, float x, float z
 	order.type = type;
 	order.position = {x, m_ground.height ? m_ground.height(x, z) : 0.0f, z};
 	order.fromCommander = true;
+	order.serial = ++m_orderSerial;
 	m_orders[key] = order;
 	return true;
 }
@@ -1178,6 +1179,22 @@ void GameWorld::acceptOrder(int player, bool accept)
 	} else {
 		m_orders.erase(it);
 	}
+}
+
+void GameWorld::answerOrder(int player, bool yes)
+{
+	const Player* p = findPlayer(player);
+	if (!p || !p->squadLeader) {
+		return;
+	}
+	const auto it = m_orders.find({p->team, p->squad});
+	if (it == m_orders.end()) {
+		return;
+	}
+	if (yes) {
+		issueSquadLeaderOrder(player, it->second.type, it->second.position.x, it->second.position.z);
+	}
+	m_orders.erase(it);
 }
 
 const GameWorld::SquadOrder* GameWorld::squadOrder(int team, int squad) const

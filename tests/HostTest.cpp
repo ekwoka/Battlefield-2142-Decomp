@@ -545,7 +545,7 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 	options.playerName = "Bravo";
 	CHECK(b.connect("127.0.0.1", hosted.gamePort(), options));
 	std::vector<net::GameEvent> heardA, heardB;
-	std::vector<net::PostRemoteInfo> messagesA;
+	std::vector<net::PostRemoteInfo> messagesA, messagesB;
 	const auto step = [&] {
 		a.update();
 		b.update();
@@ -559,6 +559,9 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		}
 		for (const net::PostRemoteInfo& m : a.world().takeMessages()) {
 			messagesA.push_back(m);
+		}
+		for (const net::PostRemoteInfo& m : b.world().takeMessages()) {
+			messagesB.push_back(m);
 		}
 	};
 	CHECK(pumpUntil(step, [&] {
@@ -705,10 +708,34 @@ TEST(NetHost_RadioCommanderToolsAndSquads)
 		const net::RemoteWorld::SquadOrder* o = b.world().squadOrder(team, 1, 1);
 		return round.squadOrder(team, 1) && o && o->kind == 6 && std::abs(o->point.z - 60) < 0.01f && !o->accepted;
 	}));
+	// The squad's leader hears 2/0x1a with the squad (0x004c5530's member loop).
+	const auto orderNotices = [&](const std::vector<net::PostRemoteInfo>& heard) {
+		return std::count_if(heard.begin(), heard.end(), [](const net::PostRemoteInfo& m) {
+			return m.category == 2 && m.id == 0x1a && m.payloadInt(0) == 1;
+		});
+	};
+	CHECK(pumpUntil(step, [&] { return orderNotices(messagesB) == 1; }));
+	const uint32_t firstSerial = b.world().squadOrder(team, 1, 1)->serial;
 	b.answerOrder(1, 6, true);
 	CHECK(pumpUntil(step, [&] {
 		const net::RemoteWorld::SquadOrder* o = a.world().squadOrder(team, 1, 1);
 		return round.squadOrder(team, 1) && round.squadOrder(team, 1)->accepted && o && o->accepted;
+	}));
+	// An identical order issued again is a new one (retail sends it again):
+	// the answer is gone, the notice comes again.
+	a.issueOrder(1, 1, 6, {50, 0, 60});
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = b.world().squadOrder(team, 1, 1);
+		return orderNotices(messagesB) == 2 && o && o->serial != firstSerial && !o->accepted;
+	}));
+	// A client leader's yes (0x0079d6e0 case 2): his own order to the squad
+	// (store 0), then the commander's cleared (SetAcceptOrder 0): here and there.
+	b.issueOrder(0, 1, 6, {50, 0, 60});
+	b.answerOrder(1, 6, false);
+	CHECK(pumpUntil(step, [&] {
+		const net::RemoteWorld::SquadOrder* o = a.world().squadOrder(team, 1, 0);
+		return round.squadLeaderOrder(team, 1) && !round.squadOrder(team, 1) && o && o->kind == 6
+			&& !a.world().squadOrder(team, 1, 1);
 	}));
 	b.issueOrder(0, 1, 4, {-20, 0, 5});
 	CHECK(pumpUntil(step, [&] {

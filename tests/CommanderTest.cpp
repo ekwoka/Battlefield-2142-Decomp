@@ -512,6 +512,7 @@ TEST(Commander_OrdersAndBots)
 	const game::GameWorld::SquadOrder* order = world.squadOrder(2, 1);
 	CHECK(order && order->type == game::GameWorld::OrderType::MapDefend && order->position.z == 160 && !order->accepted
 		&& order->radius == 80);
+	const uint32_t firstSerial = order->serial;
 	world.acceptOrder(member, true); // not the leader's
 	CHECK(!world.squadOrder(2, 1)->accepted);
 	world.acceptOrder(leader, true);
@@ -532,7 +533,24 @@ TEST(Commander_OrdersAndBots)
 		game::GameWorld::PlayerInfo info;
 		CHECK(world.playerInfo(member, info) && info.position.z > 5 && std::fabs(info.position.x) < 10); // beside its leader in the line (AIDLL 0x100f53a0: 6.9 m)
 	}
+	// An identical order issued again is a new one (0x004c5530 sends each):
+	// its serial moves on and the leader's answer is asked for again.
+	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
+	CHECK(world.squadOrder(2, 1)->serial > firstSerial && !world.squadOrder(2, 1)->accepted);
+	// The leader's answer to the question (0x0079d6e0 case 2): no clears the
+	// commander's order; yes passes it on as the leader's own and clears it.
+	world.issueSquadLeaderOrder(leader, game::GameWorld::OrderType::None, 0, 0); // (the bots' own, above)
+	world.answerOrder(member, true); // not the leader's
+	CHECK(world.squadOrder(2, 1) && !world.squadLeaderOrder(2, 1));
+	world.answerOrder(leader, false);
+	CHECK(!world.squadOrder(2, 1) && !world.squadLeaderOrder(2, 1));
+	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
+	world.answerOrder(leader, true);
+	const game::GameWorld::SquadOrder* passedOn = world.squadLeaderOrder(2, 1);
+	CHECK(!world.squadOrder(2, 1) && passedOn && passedOn->type == game::GameWorld::OrderType::MapDefend
+		&& passedOn->position.z == 160 && !passedOn->fromCommander);
 	// Turned down, it goes.
+	CHECK(world.issueOrder(2, 1, game::GameWorld::OrderType::MapDefend, 0, 160, boss));
 	world.acceptOrder(leader, false);
 	CHECK(world.squadOrder(2, 1) == nullptr);
 }

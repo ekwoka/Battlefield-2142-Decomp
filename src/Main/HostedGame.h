@@ -506,6 +506,7 @@ private:
 		int kind = 0;
 		physics::Vec3 at;
 		bool accepted = false;
+		uint32_t serial = 0; // the commander's order issued (0x004c5530 sends each one)
 	};
 	std::map<std::tuple<int, int, int>, OrderSent> m_ordersSent; // (team, squad, store)
 	void trackOrders();

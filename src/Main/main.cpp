@@ -5182,6 +5182,17 @@ int runGame(Options& options, Session& session)
 		};
 		const auto hudLocal = [&round] { return g_remoteHud ? g_remoteHud->localPlayer() : round.localPlayer(); };
 		const auto hudPlayers = [&round] { return g_remoteHud ? g_remoteHud->playerList() : round.playerList(); };
+		// A squad's commander order (store 1), a joined game's or the round's.
+		const auto hudOrder = [&round](int team, int squad, game::GameWorld::SquadOrder& out) {
+			if (g_remoteHud) {
+				return g_remoteHud->squadOrder(team, squad, true, out);
+			}
+			const game::GameWorld::SquadOrder* o = round.squadOrder(team, squad);
+			if (o) {
+				out = *o;
+			}
+			return o != nullptr;
+		};
 		// The server of a joined game (nullptr: a local round, or a host).
 		const auto joinedServer = [&session]() -> net::GameClient* {
 			return g_remoteHud && session.client ? session.client.get() : nullptr;
@@ -6070,6 +6081,7 @@ int runGame(Options& options, Session& session)
 		// and the offer of command (2/0x23), answered with Radio.answer and
 		// c_GIYes / c_GINo (0x0079e320); their answers (0x0079d6e0).
 		dice::hfe::menu::HudQuestions questions;
+		dice::hfe::menu::CommanderOrderPrompt orderPrompt;
 		// The prompts' '#GIYes#' / '#GINo#' as the bound keys (0x00752b70).
 		questions.localize = localizeWithKeys;
 		questions.onLine = [&chat](const std::string& line) { chat.addPersonal(line); };
@@ -6197,6 +6209,43 @@ int runGame(Options& options, Session& session)
 					server->castVote(cast.kind, cast.target, cast.choice);
 				} else if (session.hosted && hudPlayer(hudLocal(), me)) {
 					session.hosted->localVote(me.id, cast.kind, 4, cast.target, cast.choice);
+				}
+			} else if (q.kind == Q::CommanderOrder) {
+				// Kind 2 (0x0079d6e0): yes passes the commander's order on as the
+				// leader's own to his squad (slot 0x48; a client sends the
+				// IssueSquadOrder, store 0), the commander hearing roger_that,
+				// no says negative to him (TCPlayer, slot 0x78's commander; not
+				// for a timed-out one); both then clear the commander's order
+				// (SetAcceptOrder, flag 0, store 1, slot 0x24) and a client sends
+				// the Request event's 2 / 3 (slot 0x318, 0x00511f80). Only for
+				// the order asked about, and while we lead.
+				game::GameWorld::PlayerInfo me;
+				game::GameWorld::SquadOrder order;
+				if (!hudPlayer(hudLocal(), me) || !me.squadLeader || !hudOrder(me.team, me.squad, order)
+					|| !orderPrompt.current(me.team, me.squad, order.serial)) {
+					return;
+				}
+				orderPrompt.clear();
+				int commander = -1;
+				for (const game::GameWorld::PlayerInfo& p : hudPlayers()) {
+					if (p.team == me.team && p.commander) {
+						commander = p.id;
+					}
+				}
+				if (server) {
+					if (yes) {
+						server->issueOrder(0, me.squad, static_cast<int>(order.type), {order.position.x, order.position.y, order.position.z});
+					}
+					if (!quiet && commander >= 0) {
+						sayRadio(14, yes ? "roger_that" : "negative", commander);
+					}
+					server->squadRequest(yes ? 2 : 3);
+					server->answerOrder(me.squad, static_cast<int>(order.type), false);
+				} else {
+					round.answerOrder(round.localPlayer(), yes);
+					if (!quiet && commander >= 0) {
+						sayRadio(14, yes ? "roger_that" : "negative", commander);
+					}
 				}
 			} else if (q.kind == Q::CommanderOffer) {
 				// Kind 3: squad manager slot 0x68 (take it) or 0x6c (pass it
@@ -8706,6 +8755,9 @@ int runGame(Options& options, Session& session)
 					const net::RemotePlayer* victim = client.world().player(message.payloadInt(0));
 					dogTags.collect(hudManager, message.payloadInt(0), victim ? victim->name : std::string(), false);
 				}
+				if (message.category == 2 && message.id == 0x1a) {
+					orderPrompt.notice(); // the commander's order (0x00756b60 case 0x1a)
+				}
 				if (message.category == 2 && message.id == 0x10) {
 					std::string line = localization.text("HUD_HUD_SQUAD_INVITED_TO");
 					if (const size_t at = line.find("#SQUADNAME#"); at != std::string::npos) {
@@ -10962,6 +11014,18 @@ int runGame(Options& options, Session& session)
 			squadRequests.localPlayer = hudLocal();
 			squadRequests.tick(seconds);
 			questions.tick(seconds);
+			{
+				// The commander's order to our squad as the leader's question
+				// (2/0x1a: a joined game's message, a local round's order).
+				game::GameWorld::PlayerInfo me;
+				game::GameWorld::SquadOrder order;
+				const bool leader = hudPlayer(hudLocal(), me) && me.squadLeader && me.squad > 0;
+				if (orderPrompt.poll(joinedServer() != nullptr, leader, me.team, me.squad,
+						leader && hudOrder(me.team, me.squad, order) ? order.serial : 0)) {
+					questions.ask(dice::hfe::menu::HudQuestions::CommanderOrder, 1,
+						localization.text("HUD_HUD_SQUAD_RECIEVED_NEW_ORDER_COMMANDER"));
+				}
+			}
 			// The local round's offer of command to our player (offline the
 			// game posts 2/0x23 itself, 0x004c5070).
 			if (!joinedServer() && round.localPlayer() >= 0) {
