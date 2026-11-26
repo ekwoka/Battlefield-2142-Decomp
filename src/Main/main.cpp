@@ -92,6 +92,7 @@
 #include "MapControlPointIcon.h"
 #include "MapPlayerMarker.h"
 #include "MapOrderMarker.h"
+#include "SpawnGroupMarkers.h"
 #include "MenuBindings.h"
 #include "MenuGameState.h"
 #include "MenuSignIn.h"
@@ -868,9 +869,6 @@ constexpr int kMarkerBeacon = 100001;
 constexpr int kMarkerVehicle = 200000;
 std::vector<uint32_t> g_spawnVehicles;
 uint32_t g_spawnVehicle = 0;
-// A Titan marker selects that Titan's moving interior SpawnPoint children.
-constexpr int kMarkerTitan = 300000;
-std::vector<uint32_t> g_spawnTitans;
 
 // The map: the minimap while playing, the big map with the spawn choices
 // while dead (the spawn screen). Markers: control points by owner (with
@@ -1124,7 +1122,9 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const auto folder = [&logic](int team) { return team == 0 ? std::string("Neutral") : logic.team(team).name; };
 	std::vector<hud::HudManager::MapMarker> markers;
 	const std::vector<int> spawnable = world.spawnablePoints(me.team);
-	const int chosen = world.spawnChoice(me.id);
+	const int legacyChosen = world.spawnChoice(me.id);
+	const int localGroupChoice = round.spawnGroupChoice(me.id);
+	const int chosen = world.joined() ? legacyChosen : localGroupChoice >= 0 ? localGroupChoice : legacyChosen;
 	// The spawn icons are drawn over the vehicles, silos and teammates (0x00796379
 	// after 0x00796143 and 0x0079629f), so they are collected and added below.
 	std::vector<hud::HudManager::MapMarker> spawnMarkers;
@@ -1139,7 +1139,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			flag.upright = true; // 0x0077c610 nets the map's turn out; the flag never sets an angle (+0x28)
 			markers.push_back(flag);
 		}
-		if (spawning && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
+		if (spawning && world.joined() && std::find(spawnable.begin(), spawnable.end(), point.id) != spawnable.end()) {
 			// 0x0078e9b0: the group's slot 0x28 picks the active texture (+0x9f4,
 			// +0xa04) or the Inactive one (+0x9f0, +0xa00).
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
@@ -1151,6 +1151,43 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			spawnMarkers.push_back(spawn);
 		}
 	}
+	// A local SpawnGroup is keyed by (control point, setGroup), and its marker
+	// sits at the mean of its points. Mobile APC and Titan groups use the same
+	// map path and their live group position.
+	if (spawning && !world.joined()) {
+		const auto groups = round.spawnableGroups(me.team, me.id);
+		for (const main::SpawnGroupMarker& mapped : main::spawnGroupMarkers(groups, chosen)) {
+			const auto found = std::find_if(groups.begin(), groups.end(), [&mapped](const auto& group) { return group.id == mapped.id; });
+			if (found == groups.end()) continue;
+			const game::GameWorld::SpawnGroupInfo& group = *found;
+			std::string label = group.mobileObject ? "Mobile spawn" : "CP " + std::to_string(group.controlPoint);
+			if (!group.mobileObject && group.controlPoint >= 0) {
+				for (const auto& point : world.controlPointList()) {
+					if (point.id == group.controlPoint && !point.name.empty()) {
+						label = point.name;
+						break;
+					}
+				}
+				const auto source = std::find_if(group.points.begin(), group.points.end(), [&round](uint32_t id) {
+					const world::Object* point = round.objects().find(id);
+					return point && point->objectTemplate();
+				});
+				if (source != group.points.end()) {
+					const world::Object* point = round.objects().find(*source);
+					const auto setting = point->objectTemplate()->settings().find("setGroup");
+					if (setting != point->objectTemplate()->settings().end() && setting->second != "0") {
+						label += " / " + setting->second;
+					}
+				}
+			}
+			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/")
+					+ (mapped.selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
+				mapped.x, mapped.z, hud::HudManager::kSpawnMarkerSize};
+			spawn.id = mapped.id;
+			spawn.label = std::move(label);
+			spawnMarkers.push_back(std::move(spawn));
+		}
+	}
 	// Mobile spawn points: the team's vehicles that carry a SpawnPoint
 	// (APCs, the AT and IFV spawn vehicles). The original's spawn map
 	// (0x0078e830) draws every group the spawn manager offers the team
@@ -1159,7 +1196,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// group at +0xa48), 16 HUD units, at the group's position; a vehicle's group
 	// moves with it.
 	g_spawnVehicles.clear();
-	if (spawning) {
+	if (spawning && world.joined()) {
 		g_spawnVehicles = world.spawnVehicles(me.team);
 		for (size_t i = 0; i < g_spawnVehicles.size(); ++i) {
 			const world::Object* vehicle = round.objects().find(g_spawnVehicles[i]);
@@ -1182,41 +1219,11 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			spawnMarkers.push_back(spawn);
 		}
 	}
-	// Titan interior points belong to their spawner's CP group. The local
-	// Titan selector narrows that mixed group to this Titan's own points.
-	g_spawnTitans.clear();
-	if (spawning && !world.joined() && round.gameMode() == "gpm_ti") {
-		const std::vector<int> available = world.spawnablePoints(me.team);
-		const std::vector<uint32_t> titanSpawns = round.titanSpawnPoints(me.team);
-		for (const game::GameWorld::TitanInfo& titan : round.titans()) {
-			if (titan.team != me.team || titan.wreck || titan.controlPoint < 0
-				|| std::find(available.begin(), available.end(), titan.controlPoint) == available.end()
-				|| titanSpawns.empty()) {
-				continue;
-			}
-			// The vehicle pass draws the authored miniMapIcon (mini_titan),
-			// including its size, offset and heading. The Titan status-panel
-			// artwork is not a map icon. Add only the normal spawn selector here.
-			const bool selected = chosen == game::GameWorld::kSpawnOnTitan && round.spawnTitan(me.id) == titan.object;
-			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
-					(selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
-				titan.position.x, titan.position.z, hud::HudManager::kSpawnMarkerSize};
-			spawn.label = titan.team == 1 ? "PAC Titan" : "EU Titan";
-			for (const auto& point : world.controlPointList()) {
-				if (point.id == titan.controlPoint) {
-					spawn.label = hud::titanSpawnLabel(spawn.label, g_localize ? g_localize(point.name) : point.name);
-				}
-			}
-			spawn.id = kMarkerTitan + static_cast<int>(g_spawnTitans.size());
-			g_spawnTitans.push_back(titan.object);
-			spawnMarkers.push_back(spawn);
-		}
-	}
 	// The squad leader's beacon (the leader, to spawn on, is drawn with the team below).
 	if (spawning && me.squad != 0) {
 		if (const world::Object* beacon = round.objects().find(round.squadBeacon(me.team, me.squad))) {
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/") +
-					(chosen == game::GameWorld::kSpawnOnBeacon ? "spawn_SquadSelected.dds" : "spawn_SquadUnSelected.dds"),
+					(legacyChosen == game::GameWorld::kSpawnOnBeacon ? "spawn_SquadSelected.dds" : "spawn_SquadUnSelected.dds"),
 				beacon->position().x, beacon->position().z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = kMarkerBeacon;
 			spawn.label = "HUD_TEXT_MENU_SPAWN_PLAYER_SL";
@@ -2364,8 +2371,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			};
 			if (seconds >= 0) hud.setString("SpawnInfoString", withTime("HUD_CENTERINFOBOX_timeuntildamage", seconds));
 			else if (respawnSeconds >= 0) {
-				const int selected = world.spawnChoice(world.localPlayer());
-				const auto available = world.spawnablePoints(respawnInfo.team);
+				const int localGroupChoice = round.spawnGroupChoice(world.localPlayer());
+				const int selected = world.joined() ? world.spawnChoice(world.localPlayer())
+					: localGroupChoice >= 0 ? localGroupChoice : world.spawnChoice(world.localPlayer());
+				std::vector<int> available = world.spawnablePoints(respawnInfo.team);
+				if (!world.joined()) {
+					available.clear();
+					for (const auto& group : round.spawnableGroups(respawnInfo.team, world.localPlayer())) available.push_back(group.id);
+				}
 				const bool valid = selected < 0 || std::find(available.begin(), available.end(), selected) != available.end();
 				hud.setString("SpawnInfoString", withTime(dice::main::deploymentSpawnInfo(selected != -1,
 					world.spawnRequested(world.localPlayer()), respawnInfo.respawnIn, valid), respawnSeconds));
@@ -11712,14 +11725,15 @@ int runGame(Options& options, Session& session)
 					// A mobile spawn point: spawn in that vehicle.
 					g_spawnVehicle = g_spawnVehicles[static_cast<size_t>(point - kMarkerVehicle)];
 					round.setSpawnVehicle(round.localPlayer(), g_spawnVehicle);
-				} else if (point >= kMarkerTitan && point - kMarkerTitan < static_cast<int>(g_spawnTitans.size())) {
-					// Select only the chosen Titan's moving interior SpawnPoints.
-					round.setSpawnTitan(round.localPlayer(), g_spawnTitans[static_cast<size_t>(point - kMarkerTitan)]);
 				} else if (point == kMarkerLeader || point == kMarkerBeacon) {
 					round.setSpawnChoice(round.localPlayer(),
 						point == kMarkerLeader ? game::GameWorld::kSpawnOnLeader : game::GameWorld::kSpawnOnBeacon);
 				} else if (point >= 0) {
-					round.setSpawnChoice(round.localPlayer(), point);
+					const auto groups = round.spawnableGroups(round.playerTeam(), round.localPlayer());
+					if (std::any_of(groups.begin(), groups.end(),
+							[point](const game::GameWorld::SpawnGroupInfo& group) { return group.id == point; })) {
+						round.setSpawnGroupChoice(round.localPlayer(), point);
+					}
 				} else {
 					hudManager.click(x, y);
 				}

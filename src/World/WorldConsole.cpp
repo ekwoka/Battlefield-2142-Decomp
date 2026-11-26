@@ -398,6 +398,19 @@ void registerWorldConsoleMethods(Console& console, ObjectTemplateManager& templa
 	};
 	console.registerMethod(setObjectTemplate);
 
+	// SpawnPoint grouping (ObjectTemplate.setGroup, U32 at template +0x80,
+	// default 0; 0x00551e74 -> 0x00551f32 -> interface slot 0x28).
+	bindMethod(console, "ObjectTemplate.setGroup", access, [&templates](uint32_t group) {
+		if (templates.active()) {
+			templates.active()->settings()["setGroup"] = std::to_string(group);
+		}
+	});
+	bindMethod(console, "ObjectTemplate.group", access, [&templates](uint32_t group) {
+		if (templates.active()) {
+			templates.active()->settings()["setGroup"] = std::to_string(group);
+		}
+	});
+
 	// AnimatedBundle and soldier skeleton paths are kept on the template for
 	// the renderer; the soldier paths retain their existing meaning.
 	for (const char* property : {"skeleton", "skeleton1P", "skeleton3P"}) {

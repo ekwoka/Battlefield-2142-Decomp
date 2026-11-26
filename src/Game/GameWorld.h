@@ -954,6 +954,9 @@ public:
 	// the team's): the spawn menu's choice. Held points the team owns
 	// with spawn points; anywhere else falls back to any.
 	void setSpawnChoice(int player, int controlPoint);
+	// Local deployment's explicit SpawnGroup choice. Unlike the CP choice
+	// retained by bots and scripts, this resolves only the group's points.
+	void setSpawnGroupChoice(int player, int group);
 	// Interactive deployment keeps a highlighted point separate from DONE's
 	// confirmed request (retail player +0xe8, HUD 0x0074e680).
 	void requireSpawnConfirmation(int player);
@@ -1322,9 +1325,22 @@ public:
 	// The kit (and its soldier template) for the player's next spawn.
 	void setKit(int player, const std::string& kit, const std::string& soldier);
 	int spawnChoice(int player) const;
+	int spawnGroupChoice(int player) const;
 	uint32_t spawnTitan(int player) const;
 	// The control points a team may spawn at (held, with spawn points).
 	std::vector<int> spawnablePoints(int team) const;
+	struct SpawnGroupInfo {
+		int id = 0;
+		int controlPoint = -1;
+		uint32_t templateGroup = 0;
+		uint32_t mobileObject = 0;
+		physics::Vec3 position;
+		std::vector<uint32_t> points;
+		std::vector<const world::ObjectTemplate*> mobilePoints;
+		std::vector<physics::Vec3> mobilePointOffsets;
+	};
+	// The local deployment map's available groups, in registration order.
+	std::vector<SpawnGroupInfo> spawnableGroups(int team, int player = -1) const;
 	// A control point's spawn group can take the player now (SpawnGroup slot
 	// 0x28, 0x00633060): one of its points passes spawnPointUsable.
 	bool spawnGroupActive(int controlPoint, int player) const;
@@ -3979,6 +3995,7 @@ private:
 		std::vector<HitBone> hitBones;
 		bool spawnConfirmationRequired = false, spawnRequested = false;
 		int spawnChoice = -1;
+		int spawnGroupChoice = -1;
 		uint32_t spawnVehicle = 0; // spawnChoice kSpawnInVehicle: the vehicle
 		uint32_t spawnTitan = 0; // spawnChoice kSpawnOnTitan: the Titan object
 		int squad = 0;
@@ -4442,11 +4459,21 @@ private:
 		const physics::Vec3* source = nullptr); // where the hit came from (the hit direction)
 	std::string m_damageWeapon; // the weapon template of the round being stepped
 	std::vector<std::unique_ptr<Player>> m_players; // by id
+	std::map<int, SpawnGroupInfo> m_spawnGroups;
+	std::map<std::pair<int, uint32_t>, int> m_spawnGroupIds;
+	std::map<uint32_t, int> m_mobileSpawnGroupIds;
+	int m_nextSpawnGroupId = 1;
 	Player* m_player = nullptr; // the local player
 	bool m_addingLocal = false; // spawnPlayer is adding it (addPlayer sets m_player before PlayerConnect)
 	SoldierInput m_playerInput;
 	float m_spawnTime = 15;
 	Player* findPlayer(int id) const;
+	int registerControlSpawnPoint(world::Object& point);
+	int registerMobileSpawnGroup(uint32_t owner, const std::vector<const world::ObjectTemplate*>& mobilePoints,
+		const std::vector<physics::Vec3>& offsets = {}, const std::vector<uint32_t>& points = {});
+	void registerMobileSpawnGroupsForObject(uint32_t owner);
+	void retireMissingMobileSpawnGroups();
+	void updateSpawnGroups();
 	bool carriesHealing(const Player& player) const; // TCLocalTeamMedic's receivers (Radio.cpp)
 	Player* soldierPlayer(uint32_t object) const;
 	world::Object* spawnSoldier(Player& player);
