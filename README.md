@@ -562,6 +562,7 @@ The rest only change what you see or hear.
 | `glowOcclusion` | on | graphics | A lamp's additive halo is skipped while the line from the camera to its centre is blocked; the original only depth-tests halos per pixel. | no |
 | `titanHullLods` | on | graphics | A Titan hull half drawn this frame takes its own LOD when the other half was culled, so a far Titan whose front half faded out draws whole; the original keeps the culled half's stale LOD. | no |
 | `actorRange` | on | graphics | Soldiers and vehicles are drawn out to the view distance and fade into the fog as the terrain does. The original drops them by their size on screen: unzoomed on high geometry a soldier is gone at about 176 m (141 m on medium, 106 m on low), well inside every level's fog and every weapon's reach, so from a Titan's ground guns, high above the ground, soldiers below barely show. What bots see is unchanged. | no |
+| `clearWater` | on | graphics | The sea is see-through, more so where it is shallow and seen from above; the original's opacity comes from the terrain lightmap and leaves open water opaque. | no |
 | `prepass` | off | graphics | The depth, normal and motion prepass even when neither `taa` nor `ssao` reads it. | no |
 | `tvEffect` | off | graphics | Experimental: a guided round's view gets the TVEffect pass (grey, rolled by noise bands, rows shifted sideways so vertical edges lean). The original's renderer never runs it and shows the plain view. | no |
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |

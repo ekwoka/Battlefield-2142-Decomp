@@ -137,6 +137,7 @@ struct WaterUniforms {
 	float specularColor[4];  // w: intensity
 	float parameters[4];     // alpha add, alpha height multiplier, specular power, has an env map
 	float animation[4];      // waterScroll xy, WaterCycleTime, 1 with the volume (the 3D variants)
+	float options[4];        // x: 1 with enhanced.clearWater
 };
 
 // Particle vertex shader uniforms.

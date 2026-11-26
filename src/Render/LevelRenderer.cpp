@@ -1772,23 +1772,23 @@ float LevelRenderer::overgrowthCloseDistance() const
 	return m_overgrowthCloseBase * m_overgrowthScriptScale * quality;
 }
 
-// The sea: a grid at sea level over each heightmap of the cluster (the
-// primary and the surrounding ones), each vertex carrying the water's depth
-// there (sea level minus the terrain's height) for its opacity, and a ring
-// of deep water beyond them to the horizon (RendDX9's WaterSurrounding and
-// WaterDistant shader variants draw those parts).
+// The sea: a grid at sea level over each terrain patch of the primary
+// heightmap, sampling that patch's lightmap, and over the surrounding
+// heightmaps and a ring beyond them to the horizon, without one.
 //
 // The original draws it per frame in terrain patches (DrawWater, 0x100b53c0):
 // each patch of the heightmap's grid that passes the view tests is a
 // quad at sea level (0x100b1f10), skipped where the patch's height (+0x98) is
-// above the water; outside the heightmap a patch takes WaterSurrounding,
-// beyond 40 m (+0x674) of the camera or with the camera over 40 m above the
-// sea WaterDistant, and near it the full Water technique only where one of
-// the light manager's +0x6f8 boxes meets the patch (slot 0xf8, 0x101a9b90;
-// else WaterDistant again). Those differ by USE_SHADOWS (the shade
-// the rewrite doesn't draw) against USE_HEIGHTALPHA, so the rewrite's grids
-// take one technique; their opacity from the depth stands in for the
-// lightmap's.
+// above the water, its LightMap the terrain patch's lightmap (+0x4c, passed to
+// 0x100b1f10; the terrain reads only its green and blue, the water its red
+// for opacity and green for shade); outside the heightmap a patch takes
+// WaterSurrounding (NO_LIGHTMAP: PointColor), beyond 40 m (+0x674) of the
+// camera or with the camera over 40 m above the sea WaterDistant, and near it
+// Water2D/3D/HighEnd3D where one of the light manager's +0x6f8 boxes meets the
+// patch (slot 0xf8, 0x101a9b90; else WaterDistant again; names by waterQuality
+// at 0x100b0fe0). Of those only WaterSurrounding3D defines USE_FRESNEL, and
+// they differ otherwise by USE_SHADOWS (the shade the rewrite doesn't draw),
+// so the rewrite's grids take one technique, fresnel only without a lightmap.
 void LevelRenderer::buildWater(const LevelSources& sources)
 {
 	const terrain::Heightmap* primary = sources.heightmaps.primary();
@@ -1805,7 +1805,10 @@ void LevelRenderer::buildWater(const LevelSources& sources)
 		}
 		return -1e4f;
 	};
-	const auto addGrid = [&](float x0, float z0, float x1, float z1, int cells) {
+	// A grid's texCoord is its lightmap's (0-1 over the patch, like the
+	// terrain's); lightmapCoord.x is 1 with a lightmap, .y the water's depth
+	// (sea level minus the ground's; enhanced.clearWater's opacity).
+	const auto addGrid = [&](float x0, float z0, float x1, float z1, int cells, SDL_GPUTexture* lightmap = nullptr) {
 		std::vector<Vertex> vertices;
 		vertices.reserve(static_cast<size_t>(cells + 1) * (cells + 1));
 		bool anyWater = false;
@@ -1816,8 +1819,11 @@ void LevelRenderer::buildWater(const LevelSources& sources)
 				v.position[1] = level;
 				v.position[2] = z0 + (z1 - z0) * y / cells;
 				v.normal[1] = 1;
-				v.texCoord[0] = std::min(level - groundAt(v.position[0], v.position[2]), 1000.0f);
-				anyWater = anyWater || v.texCoord[0] > -2.0f;
+				v.texCoord[0] = static_cast<float>(x) / cells;
+				v.texCoord[1] = static_cast<float>(y) / cells;
+				v.lightmapCoord[0] = lightmap ? 1.0f : 0.0f;
+				v.lightmapCoord[1] = std::min(level - groundAt(v.position[0], v.position[2]), 1000.0f);
+				anyWater = anyWater || v.lightmapCoord[1] > -2.0f;
 				vertices.push_back(v);
 			}
 		}
@@ -1837,6 +1843,7 @@ void LevelRenderer::buildWater(const LevelSources& sources)
 		block.indices = m_gpu.createBuffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
 			static_cast<uint32_t>(indices.size() * sizeof(uint16_t)));
 		block.indexCount = static_cast<uint32_t>(indices.size());
+		block.lightmap = lightmap;
 		block.boundsMin = {std::min(x0, x1), level - 1, std::min(z0, z1)};
 		block.boundsMax = {std::max(x0, x1), level + 1, std::max(z0, z1)};
 		m_waterBlocks.push_back(block);
@@ -1848,9 +1855,21 @@ void LevelRenderer::buildWater(const LevelSources& sources)
 		if (!heightmap->loaded()) {
 			continue;
 		}
-		const bool isPrimary = heightmap.get() == primary;
 		const float x0 = heightmap->originX(), z0 = heightmap->originZ();
-		addGrid(x0, z0, x0 + heightmap->worldWidth(), z0 + heightmap->worldDepth(), isPrimary ? 128 : 64);
+		if (heightmap.get() == primary && m_patchesPerSide > 0 && m_terrain.size() == static_cast<size_t>(m_patchesPerSide * m_patchesPerSide)) {
+			// The terrain's patches ("XXxYY" from the -x/-z corner, buildTerrain).
+			// One whose lightmap didn't load draws as if outside (NO_LIGHTMAP).
+			const int cells = std::max(128 / m_patchesPerSide, 1);
+			for (int py = 0; py < m_patchesPerSide; ++py) {
+				for (int px = 0; px < m_patchesPerSide; ++px) {
+					const float px0 = m_patchOrigin[0] + px * m_patchSize, pz0 = m_patchOrigin[1] + py * m_patchSize;
+					addGrid(px0, pz0, px0 + m_patchSize, pz0 + m_patchSize, cells,
+						m_terrain[static_cast<size_t>(py * m_patchesPerSide + px)].lightmap);
+				}
+			}
+		} else {
+			addGrid(x0, z0, x0 + heightmap->worldWidth(), z0 + heightmap->worldDepth(), heightmap.get() == primary ? 128 : 64);
+		}
 		lo[0] = std::min(lo[0], x0);
 		lo[1] = std::min(lo[1], z0);
 		hi[0] = std::max(hi[0], x0 + heightmap->worldWidth());
@@ -5339,6 +5358,7 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			{m_water->specularColor[0], m_water->specularColor[1], m_water->specularColor[2], m_water->specularColor[3]},
 			{m_water->alphaAdd, m_water->alphaHeightMul, m_water->specularPower, m_waterEnvMap ? 1.0f : 0.0f},
 			{m_water->scroll[0], m_water->scroll[1], cycle, m_waterVolume ? 1.0f : 0.0f},
+			{m_sources && m_sources->enhanced && m_sources->enhanced->enabled && m_sources->enhanced->clearWater ? 1.0f : 0.0f, 0, 0, 0},
 		};
 		SDL_PushGPUFragmentUniformData(commands, 1, &water, sizeof(water));
 		TransformUniforms waterTransforms {viewProjection, Mat4 {}, {1, 1, 0, 0}, {}};
@@ -5356,6 +5376,8 @@ void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, 
 			if (!frustum.containsBox(block.boundsMin, block.boundsMax)) {
 				continue;
 			}
+			const SDL_GPUTextureSamplerBinding lightmap {block.lightmap ? block.lightmap : flat, m_gpu.clampSampler()};
+			SDL_BindGPUFragmentSamplers(pass, 4, &lightmap, 1);
 			SDL_GPUBufferBinding vertexBinding {block.vertices, 0};
 			SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
 			SDL_GPUBufferBinding indexBinding {block.indices, 0};

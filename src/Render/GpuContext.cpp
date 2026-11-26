@@ -446,7 +446,7 @@ bool GpuContext::createPipelines(std::string& error, uint32_t samples, WorldPipe
 	}
 	info.depth_stencil_state.enable_depth_test = true;
 	world.water = build(k_water_vert_spv, k_water_vert_spv_size, k_water_vert_msl, k_water_vert_msl_size,
-		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 4, 2, "water");
+		k_water_frag_spv, k_water_frag_spv_size, k_water_frag_msl, k_water_frag_msl_size, 5, 2, "water");
 	// Roads: blended like water, pulled towards the camera over the terrain.
 	info.rasterizer_state.enable_depth_bias = true;
 	info.rasterizer_state.depth_bias_constant_factor = -1.0f;

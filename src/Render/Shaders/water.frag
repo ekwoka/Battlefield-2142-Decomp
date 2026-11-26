@@ -1,7 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // Sea water, after RaShaderWaterBase.fx's Water pixel shader (the PS_20
-// variant with USE_FRESNEL and USE_SPECULAR). The normal: in the 3D variants
+// variants, with USE_SPECULAR). The normal: in the 3D variants
 // (USE_3DTEXTURE) the volume Textures/watervolume.dds at
 //   xy = P.xz / (29.13, 31.81) + WaterScroll * cycle
 //   z = cycle * 10 + 0.7 x + 1.13 y
@@ -13,20 +13,25 @@
 //   specular = pow(saturate(dot(towards sun, normalize(R))), SpecularPower) * SpecularColor.a
 //   color = specular * SpecularColor * shade + lerp(WaterColor, env, 0.4 + m)
 //   m = -(1 - saturate(shade + 0.75))   (SHADOW_FACTOR)
-//   alpha = depth alpha * (1.5 - pow(dot(normalize(P - camera), up), 30)) + alpha add
-// where the original's lightmap gives the depth alpha (r) and the sun's
-// shade (g). The levels ship no water lightmaps, so the shader's
-// NO_LIGHTMAP lightmap is PointColor, (1, terrain.waterSunIntensity, 0.8,
-// 1) (0x100767e9): the shade is the sun intensity (waterColor.w here); the
-// depth alpha grows with the water's depth (renderer.waterAlphaHeightMul).
+//   alpha = lightmap.r + alpha add                  (in the heightmap)
+//   alpha = lightmap.r * (1.5 - pow(dot(normalize(P - camera), up), 30)) + alpha add
+//                                                   (WaterSurrounding3D, USE_FRESNEL)
+// where the lightmap is the terrain patch's (its red the water's opacity, its
+// green the sun's shade), and outside the heightmap the shader's NO_LIGHTMAP
+// PointColor, (1, terrain.waterSunIntensity, 0.8, 1) (0x100767e9; the sun
+// intensity is waterColor.w here). renderer.waterAlphaHeightMul reaches no
+// shader (USE_HEIGHTALPHA is never read). enhanced.clearWater (not retail)
+// instead makes it see-through by depth and angle:
+//   alpha = saturate(depth * max(waterAlphaHeightMul, 0.08)) * fresnel + alpha add
 layout(location = 0) in vec3 inWorldPosition;
-layout(location = 1) in float inWaterDepth;
+layout(location = 1) in vec4 inLightmap; // xy: coordinates, z: 1 with a lightmap, w: the water's depth
 layout(location = 2) in float inDepth;
 
 layout(set = 2, binding = 0) uniform sampler2D waterFrame0;
 layout(set = 2, binding = 1) uniform sampler2D waterFrame1;
 layout(set = 2, binding = 2) uniform samplerCube envMap;
 layout(set = 2, binding = 3) uniform sampler3D waterVolume;
+layout(set = 2, binding = 4) uniform sampler2D lightMap;
 
 layout(set = 3, binding = 0) uniform Lighting {
 	vec4 sunDirection;
@@ -44,6 +49,7 @@ layout(set = 3, binding = 1) uniform Water {
 	vec4 specularColor;  // w: intensity
 	vec4 parameters;     // x: alpha add, y: alpha height multiplier, z: specular power, w: 1 with an env map
 	vec4 animation;      // xy: WaterScroll, z: WaterCycleTime, w: 1 with the volume
+	vec4 options;        // x: 1 with enhanced.clearWater
 };
 
 layout(location = 0) out vec4 outColor;
@@ -64,12 +70,15 @@ void main()
 	vec3 reflected = reflect(lookup, normal);
 	vec3 env = parameters.w > 0.0 ? texture(envMap, reflected).rgb : fogColor.rgb;
 	float specular = pow(clamp(dot(sunDirection.xyz, normalize(reflected)), 0.0, 1.0), parameters.z) * specularColor.w;
-	float shade = waterColor.w;
+	const bool lightmapped = inLightmap.z > 0.5;
+	const vec2 lightmap = lightmapped ? texture(lightMap, inLightmap.xy).rg : vec2(1.0, waterColor.w);
+	float shade = lightmap.y;
 	float lerpMod = -(1.0 - clamp(shade + 0.75, 0.0, 1.0));
 	vec3 color = specular * specularColor.rgb * shade + mix(waterColor.rgb, env, 0.4 + lerpMod);
 	float fresnel = 1.5 - pow(abs(dot(normalize(lookup), vec3(0.0, 1.0, 0.0))), 30.0);
-	float depthAlpha = clamp(max(inWaterDepth, 0.0) * max(parameters.y, 0.08), 0.0, 1.0);
-	float alpha = clamp(depthAlpha * fresnel + parameters.x, 0.0, 1.0);
+	float opacity = options.x > 0.5 ? clamp(max(inLightmap.w, 0.0) * max(parameters.y, 0.08), 0.0, 1.0) * fresnel
+		: lightmap.x * (lightmapped ? 1.0 : fresnel);
+	float alpha = clamp(opacity + parameters.x, 0.0, 1.0);
 	float fog = fogAmount(inDepth);
 	outColor = vec4(mix(color, fogColor.rgb, fog), alpha);
 }

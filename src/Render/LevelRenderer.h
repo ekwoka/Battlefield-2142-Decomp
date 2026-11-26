@@ -1184,6 +1184,7 @@ private:
 		SDL_GPUBuffer* vertices = nullptr;
 		SDL_GPUBuffer* indices = nullptr;
 		uint32_t indexCount = 0;
+		SDL_GPUTexture* lightmap = nullptr; // the terrain patch's; none outside the primary heightmap
 		Vec3f boundsMin, boundsMax;
 	};
 	std::vector<WaterBlock> m_waterBlocks;
