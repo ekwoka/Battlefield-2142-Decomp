@@ -8,7 +8,7 @@
 // fingerprint (main.cpp, --simulate); tools/parity-check.sh runs the same
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
-// (botRecovery, botMovement, botTitan, botCommander, botPilots, guidedCameraEase, cornerSteer,
+// (botRecovery, botMovement, botTitan, botOffMesh, botCommander, botPilots, guidedCameraEase, cornerSteer,
 // passengerWeapons, softLanding, titanKitFloors, squadOrderPoints): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
@@ -37,6 +37,7 @@ struct EnhancedSettings {
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
 	bool botMovement = true; // enhanced.botMovement: bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target (Game/Bots.cpp, BotsLook.cpp)
 	bool botTitan = true; // enhanced.botTitan: bots aboard a Titan walk its decks to the consoles and the core; in gpm_ti bots head for the silos (Game/BotsTitan.cpp, Bots.cpp)
+	bool botOffMesh = true; // enhanced.botOffMesh: a bot on foot where the level's infantry mesh doesn't reach (the 32/64 layouts' spawns and points beyond the mesh made for the 16 one) walks a terrain grid to its goal or onto the mesh (Game/BotsTitan.cpp groundWalk); retail's bots stand there
 	bool botPilots = true; // enhanced.botPilots: a gunship's bot pilot picks the best target it can hurt (vehicles, infantry groups, aircraft, a Titan's gun hubs) and flies attack runs at it (Game/BotsPilot.cpp)
 	bool botCommander = true; // enhanced.botCommander: in gpm_ti a team with bots and no commander has its Titan moved and its commander's tools used for it (Game/BotsTitan.cpp)
 	bool guidedCameraEase = true; // enhanced.guidedCameraEase: a guided round's camera eases back to centre instead of snapping (Game/GameWorld.cpp)
@@ -89,6 +90,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.botMovement = v; });
 	bindProperty<bool>(console, "enhanced.botTitan", ConsoleAccess::Anyone, [&settings] { return settings.botTitan; },
 		[&settings](const bool& v) { settings.botTitan = v; });
+	bindProperty<bool>(console, "enhanced.botOffMesh", ConsoleAccess::Anyone, [&settings] { return settings.botOffMesh; },
+		[&settings](const bool& v) { settings.botOffMesh = v; });
 	bindProperty<bool>(console, "enhanced.botPilots", ConsoleAccess::Anyone, [&settings] { return settings.botPilots; },
 		[&settings](const bool& v) { settings.botPilots = v; });
 	bindProperty<bool>(console, "enhanced.botCommander", ConsoleAccess::Anyone, [&settings] { return settings.botCommander; },

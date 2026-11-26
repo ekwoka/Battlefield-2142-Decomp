@@ -1491,6 +1491,7 @@ void BotManager::refreshFollowers()
 void BotManager::update(float seconds)
 {
 	m_time += seconds;
+	m_groundSearchesLeft = kGroundSearchesPerTick;
 	if (enabled()) {
 		population(); // AIMain's kick and fill (BotsSquad.cpp), before the lists are taken
 	}

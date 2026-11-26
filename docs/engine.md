@@ -14319,7 +14319,26 @@ in gpm_ti with itself or its goal off the mesh walks a 4 m terrain grid (A*;
 steps clear of obstacles at knee and chest height and half a metre to either
 side, under 40 degrees, out of water), from the mesh after the mesh's way to
 its point nearest the goal, onto the mesh when the goal is on it
-(`BotManager::groundWalk`); infantry no longer pass over off-mesh silos. The rewrite's choice: while fewer than half its
+(`BotManager::groundWalk`); infantry no longer pass over off-mesh silos.
+The same holds outside Titan mode: each level ships one infantry mesh, made
+for its 16-player layout, and the bigger layouts put spawns and points off
+it. Cerbere_Landing's gpm_cq 32 has every PAC spawn (the Harbor's, z -190..-250)
+and the PAC Harbor and EU Command Center points off the mesh; its PAC bots all
+stood at their spawns. (The layout has no `ai/StrategicAreas.ai`, like every
+Cerbere layout but gpm_sp/gpm_coop 16; that is not the cause: the SAI then
+makes an area per control point, `ensureAreas`, and the PAC squads get their
+attack orders.) `enhanced.botOffMesh` gives every mode the grid walk. A
+step's check costs six `lineOfSight` rays (each tests every dynamic body), so
+the searches are bounded for 64 bots: one search runs a tick over all bots
+and checks at most 40 steps not checked before; the checks are kept for a
+minute by the step's cell on the world's 4 m grid, so a search cut off goes on
+at the next tick's turn over the steps known by then. Ways are kept by start
+and goal cell (bots leaving one spawn for one goal), a goal that moves on the
+mesh (a squad member's spot by its leader) keeps a way that ends on the mesh,
+another goal is searched for at most every 2 s, and after a search finds
+nothing the next waits 3 s, doubled each time to 96 s, and is made on the grid
+shifted half a cell (a gap one grid's steps cut obliquely, as out of Suez's
+PAC base towards silo 906, the other passes). The rewrite's choice: while fewer than half its
 Titan's guns are manned or claimed, a bot aboard approaches the nearest free
 working gun's console and takes it (`titanGunEntry`). With
 `enhanced.botTitan` enabled, it follows the Titan's collision-derived walk

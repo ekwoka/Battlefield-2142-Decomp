@@ -94,6 +94,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace dice::hfe {
@@ -566,6 +567,11 @@ struct BotSettings {
 	// their goal a silo over the squad's order (updateGoal); not retail.
 	const bool* botTitan = nullptr;
 	bool titanPlay() const { return enhanced && *enhanced && botTitan && *botTitan; }
+	// enhanced.botOffMesh, also read live: a soldier on foot where the level's infantry mesh doesn't reach
+	// (a 32- or 64-player layout's spawns and points beyond the mesh made for its 16 one) walks a terrain
+	// grid to it or back onto the mesh (groundWalk); not retail, whose follower finds no path and stands.
+	const bool* botOffMesh = nullptr;
+	bool offMeshWalk() const { return enhanced && *enhanced && botOffMesh && *botOffMesh; }
 	// enhanced.botPilots, also read live: a gunship's pilot hunts targets
 	// and flies attack runs at them (BotsPilot.cpp); not retail.
 	const bool* botPilots = nullptr;
@@ -1340,13 +1346,19 @@ private:
 		float meshAtTime = 0;
 		float meshBackUntil = 0;            // wedged: backing off until then
 		float meshSince = 0;                // when it took the wheel there
-		// groundWalk (enhanced.botTitan): the way over the terrain off the infantry mesh, to groundTo; where
-		// it last made 3 m of way and when; when the last search was made.
+		// groundWalk (enhanced.botOffMesh, enhanced.botTitan in gpm_ti): the way over the terrain off the
+		// infantry mesh, to groundTo; where it last made 3 m of way and when; when the last search was made.
 		std::vector<physics::Vec3> groundWay;
 		physics::Vec3 groundTo;
 		physics::Vec3 groundAt;
 		float groundAtTime = 0;
 		float groundPlannedAt = -1e9f;
+		bool groundToMesh = false; // the way ends where the mesh begins (groundTo was on it)
+		int groundFailures = 0;    // searches in a row that found no way: the next waits 3 s doubled each (to 96 s)
+		float groundRetryAt = -1e9f;
+		// Whether it and its goal stood on the infantry mesh where last looked up (again after a metre).
+		physics::Vec3 groundSelfAt {1e9f, 0, 0}, groundGoalAt {1e9f, 0, 0};
+		bool groundSelfOn = false, groundGoalOn = false;
 		uint32_t titanRide = 0;   // the vehicle with a free pod seat a boarder on foot walks to, looked for at titanRideAt
 		float titanRideAt = -1e9f;
 		physics::Vec3 titanAt;    // BotsTitan.cpp: where it last made a metre's way (in its Titan's frame), and when
@@ -1653,18 +1665,55 @@ private:
 	// which the sidestep doesn't step round.
 	bool steer(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, int goalId, float seconds,
 		SoldierInput& input, float radius = 0, uint32_t object = 0);
-	// enhanced.botTitan (not retail): a level's infantry mesh is its Conquest/Co-op one, and Titan mode
-	// places bases and silos off it (Suez_Canal's mesh ends at x 260: the PAC ground base and silos 901,
-	// 905 and 906 lie beyond it), where retail's follower finds no path and the soldier stands. A soldier
-	// on the ground in gpm_ti with itself or `to` off the mesh walks a terrain grid instead: to `to`, or
-	// onto the mesh when `to` is on it; from the mesh, the mesh's way to its point nearest `to` first
-	// (`meshTo`). True when the grid has the move: `point` is where to head.
+	// enhanced.botOffMesh, and enhanced.botTitan in gpm_ti (not retail): a level has one infantry mesh,
+	// made for its 16-player (or Conquest/Co-op) layout; the bigger layouts and Titan mode place spawns,
+	// bases and points off it (Cerbere_Landing's 32 and 64 PAC spawns at z -200..-250 lie south of
+	// its mesh; Suez_Canal's mesh ends at x 260, short of the PAC Titan base and silos 901, 905 and
+	// 906), where retail's follower finds no path and the soldier stands. A soldier on the ground with
+	// itself or `to` off the mesh walks a terrain grid instead: to `to`, or onto the mesh when `to` is
+	// on it; from the mesh, the mesh's way to its point nearest `to` first (`meshTo`). True when the
+	// grid has the move: `point` is where to head.
 	bool groundWalk(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, physics::Vec3& meshTo,
 		physics::Vec3& point);
 	// The grid's way (4 m cells, A*): steps no obstacle crosses at a soldier's knee and chest, not up a
 	// slope over 40 degrees or into water; to within 5 m of `to`, or (`toMesh`) to the first cell on
-	// the infantry mesh. Empty for none within its search.
-	std::vector<physics::Vec3> groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore) const;
+	// the infantry mesh. Empty for none within its search. A search checks at most kGroundNewSteps steps
+	// not checked before (m_groundEdges); past that it stops, empty, with `unfinished` set: the next
+	// search goes on over the steps known by then.
+	static constexpr int kGroundNewSteps = 40;
+	std::vector<physics::Vec3> groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore,
+		bool* unfinished = nullptr, bool offset = false) const;
+	// groundWay's ways kept by their start and end cells (4 m) for the bots that set off from the same
+	// spawn for the same goal; at most kGroundSearchesPerTick searches a tick over all bots (each at most
+	// kGroundNewSteps new checks; the rest keep their old way a tick longer), so a new order to a whole team spreads
+	// its searches out.
+	static constexpr int kGroundSearchesPerTick = 1;
+	struct GroundKey {
+		int fromX, fromZ, toX, toZ;
+		bool toMesh, offset;
+		bool operator<(const GroundKey& o) const
+		{
+			return std::tie(fromX, fromZ, toX, toZ, toMesh, offset) < std::tie(o.fromX, o.fromZ, o.toX, o.toZ, o.toMesh, o.offset);
+		}
+	};
+	std::map<GroundKey, std::vector<physics::Vec3>> m_groundWays;
+	// groundWay's step checks by the step's cell (the world's 4 m grid) and direction, kept a minute.
+	mutable std::unordered_map<uint64_t, bool> m_groundEdges;
+	mutable float m_groundEdgesAt = 0;
+	int m_groundSearchesLeft = kGroundSearchesPerTick;
+	struct GroundStats {
+		int searches = 0, reused = 0, deferred = 0, empty = 0, unfinished = 0, maxCells = 0;
+		long cells = 0, steps = 0; // cells expanded, steps checked anew
+		double seconds = 0, maxSeconds = 0;
+		int vehicleSearches = 0; // wayToVehicleMesh's, and their time
+		double vehicleSeconds = 0, vehicleMaxSeconds = 0;
+	} mutable m_groundStats;
+
+public:
+	// groundWalk's searches so far: made, reused from the cache, put off a tick, finding none; their time.
+	const GroundStats& groundStats() const { return m_groundStats; }
+
+private:
 	// The infantry mesh's point nearest `to` (within 200 m, on the terrain), kept by 4 m cell.
 	bool meshExit(const physics::Vec3& to, physics::Vec3& exit);
 	std::map<std::pair<int, int>, std::pair<bool, physics::Vec3>> m_meshExits;

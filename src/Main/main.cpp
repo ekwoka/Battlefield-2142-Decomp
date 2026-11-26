@@ -3803,6 +3803,7 @@ int runGame(Options& options, Session& session)
 	botSettings.botRecovery = &enhancedSettings.botRecovery;
 	botSettings.botMovement = &enhancedSettings.botMovement;
 	botSettings.botTitan = &enhancedSettings.botTitan;
+	botSettings.botOffMesh = &enhancedSettings.botOffMesh;
 	botSettings.botCommander = &enhancedSettings.botCommander;
 	botSettings.botPilots = &enhancedSettings.botPilots;
 	botSettings.cornerSteer = &enhancedSettings.cornerSteer;

@@ -16,6 +16,7 @@
 #include "World/ObjectTemplateManager.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1734,6 +1735,7 @@ const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Ve
 		return known->second.second;
 	}
 	m_meshWays[key].first = m_time;
+	const auto t0 = std::chrono::steady_clock::now();
 	std::vector<physics::Vec3>& way = m_meshWays[key].second;
 	way.clear();
 	if (!m_vehicleNavMesh) {
@@ -1790,6 +1792,10 @@ const std::vector<physics::Vec3>& BotManager::wayToVehicleMesh(const physics::Ve
 	for (int c = goal; c >= 0 && c != start; c = cameFrom[static_cast<size_t>(c)]) {
 		way.insert(way.begin(), at(c));
 	}
+	const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	++m_groundStats.vehicleSearches;
+	m_groundStats.vehicleSeconds += took;
+	m_groundStats.vehicleMaxSeconds = std::max(m_groundStats.vehicleMaxSeconds, took);
 	return way;
 }
 
@@ -1895,19 +1901,39 @@ bool BotManager::meshExit(const physics::Vec3& to, physics::Vec3& exit)
 	return found;
 }
 
-std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore) const
+std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, const physics::Vec3& to, bool toMesh, uint32_t ignore,
+	bool* unfinished, bool offset) const
 {
+	if (unfinished) {
+		*unfinished = false;
+	}
+	int newSteps = 0;
 	constexpr float kGrid = 4, kMargin = 80, kReach = 5;
 	constexpr int kMaxExpanded = 12000;
-	const int x0 = static_cast<int>(std::floor((std::min(from.x, to.x) - kMargin - from.x) / kGrid));
-	const int x1 = static_cast<int>(std::ceil((std::max(from.x, to.x) + kMargin - from.x) / kGrid));
-	const int z0 = static_cast<int>(std::floor((std::min(from.z, to.z) - kMargin - from.z) / kGrid));
-	const int z1 = static_cast<int>(std::ceil((std::max(from.z, to.z) + kMargin - from.z) / kGrid));
+	// The cells lie on the world's 4 m grid (the start is `from` itself, in the cell nearest it), or with
+	// `offset` on that grid moved half a cell (a gap the one grid's steps cut across obliquely the other
+	// may pass), so the steps' checks are kept for the next searches (m_groundEdges), for a minute: a
+	// vehicle parked across a step moves on.
+	if (m_time - m_groundEdgesAt > 60) {
+		m_groundEdges.clear();
+		m_groundEdgesAt = m_time;
+	}
+	const float shift = offset ? kGrid / 2 : 0;
+	const int ox = static_cast<int>(std::lround((from.x - shift) / kGrid)), oz = static_cast<int>(std::lround((from.z - shift) / kGrid));
+	const float cx = static_cast<float>(ox) * kGrid + shift, cz = static_cast<float>(oz) * kGrid + shift;
+	const int x0 = static_cast<int>(std::floor((std::min(from.x, to.x) - kMargin - cx) / kGrid));
+	const int x1 = static_cast<int>(std::ceil((std::max(from.x, to.x) + kMargin - cx) / kGrid));
+	const int z0 = static_cast<int>(std::floor((std::min(from.z, to.z) - kMargin - cz) / kGrid));
+	const int z1 = static_cast<int>(std::ceil((std::max(from.z, to.z) + kMargin - cz) / kGrid));
 	const int w = x1 - x0 + 1, h = z1 - z0 + 1;
 	const auto cellAt = [&](int i) {
-		physics::Vec3 p {from.x + static_cast<float>(i % w + x0) * kGrid, 0, from.z + static_cast<float>(i / w + z0) * kGrid};
+		physics::Vec3 p {cx + static_cast<float>(i % w + x0) * kGrid, 0, cz + static_cast<float>(i / w + z0) * kGrid};
 		p.y = m_world.terrainHeight(p.x, p.z);
 		return p;
+	};
+	const auto edgeKey = [&](int c, int dx, int dz) {
+		const uint64_t gx = static_cast<uint32_t>(ox + c % w + x0) & 0xffffffu, gz = static_cast<uint32_t>(oz + c / w + z0) & 0xffffffu;
+		return static_cast<uint64_t>(offset) << 52 | gx << 28 | gz << 4 | static_cast<uint64_t>((dz + 1) * 3 + dx + 1);
 	};
 	float water = -kInfinity;
 	m_world.waterLevel(water);
@@ -1962,7 +1988,30 @@ std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, cons
 				const int n = z * w + x;
 				const physics::Vec3 there = cellAt(n);
 				const float step = cost[static_cast<size_t>(c)] + std::sqrt(physics::lengthSquared(there - here));
-				if (closed[static_cast<size_t>(n)] || step >= cost[static_cast<size_t>(n)] || !open(here, there)) {
+				if (closed[static_cast<size_t>(n)] || step >= cost[static_cast<size_t>(n)]) {
+					continue;
+				}
+				bool through = false;
+				if (c == start) {
+					// (Soldiers aren't among the bodies lineOfSight meets, so `ignore` changes no kept check.)
+					through = open(here, there);
+				} else {
+					const uint64_t key = edgeKey(c, dx, dz);
+					const auto known = m_groundEdges.find(key);
+					if (known != m_groundEdges.end()) {
+						through = known->second;
+					} else if (unfinished && newSteps >= kGroundNewSteps) {
+						*unfinished = true;
+						m_groundStats.cells += expanded;
+						m_groundStats.steps += newSteps;
+						m_groundStats.maxCells = std::max(m_groundStats.maxCells, expanded);
+						return {};
+					} else {
+						++newSteps;
+						through = m_groundEdges[key] = open(here, there);
+					}
+				}
+				if (!through) {
 					continue;
 				}
 				cost[static_cast<size_t>(n)] = step;
@@ -1971,6 +2020,9 @@ std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, cons
 			}
 		}
 	}
+	m_groundStats.cells += expanded;
+	m_groundStats.steps += newSteps;
+	m_groundStats.maxCells = std::max(m_groundStats.maxCells, expanded);
 	std::vector<physics::Vec3> way;
 	for (int c = goal; c >= 0 && c != start; c = cameFrom[static_cast<size_t>(c)]) {
 		way.insert(way.begin(), cellAt(c));
@@ -1981,13 +2033,21 @@ std::vector<physics::Vec3> BotManager::groundWay(const physics::Vec3& from, cons
 bool BotManager::groundWalk(Bot& bot, const GameWorld::PlayerInfo& self, const physics::Vec3& to, physics::Vec3& meshTo,
 	physics::Vec3& point)
 {
-	if (!m_settings.titanPlay() || !m_navMesh || self.vehicle || m_world.gameMode() != "gpm_ti" || !onTerrain(self.position)
-		|| !onTerrain(to)) {
+	if (!(m_settings.offMeshWalk() || (m_settings.titanPlay() && m_world.gameMode() == "gpm_ti")) || !m_navMesh || self.vehicle
+		|| !onTerrain(self.position) || !onTerrain(to)) {
 		bot.groundWay.clear();
 		return false;
 	}
-	const bool selfOn = m_navMesh->findPolygon(ai::Vec3 {self.position.x, self.position.y, self.position.z}) >= 0;
-	const bool goalOn = m_navMesh->findPolygon(ai::Vec3 {to.x, to.y, to.z}) >= 0;
+	// The mesh's answers for the bot and its goal, looked up again after a metre.
+	if (physics::lengthSquared(self.position - bot.groundSelfAt) > 1) {
+		bot.groundSelfAt = self.position;
+		bot.groundSelfOn = m_navMesh->findPolygon(ai::Vec3 {self.position.x, self.position.y, self.position.z}) >= 0;
+	}
+	if (physics::lengthSquared(to - bot.groundGoalAt) > 1) {
+		bot.groundGoalAt = to;
+		bot.groundGoalOn = m_navMesh->findPolygon(ai::Vec3 {to.x, to.y, to.z}) >= 0;
+	}
+	const bool selfOn = bot.groundSelfOn, goalOn = bot.groundGoalOn;
 	if (selfOn && goalOn) {
 		bot.groundWay.clear();
 		return false;
@@ -2012,16 +2072,66 @@ bool BotManager::groundWalk(Bot& bot, const GameWorld::PlayerInfo& self, const p
 		bot.groundAt = self.position;
 		bot.groundAtTime = m_time;
 	}
-	// Searched again for another goal, after 6 s without 3 m made, or (3 s after the last search) with no way left short of it.
-	const bool other = horizontal(bot.groundTo - to) > 5;
+	// Searched again for another goal (2 s after the last search), after 6 s without 3 m made, or with no
+	// way left short of it (3 s after the last search). A goal moving on the mesh (a squad member's spot
+	// by its leader) keeps a way that ends on the mesh. After searches that found nothing the next waits
+	// longer (groundRetryAt), unless the goal is another 50 m off.
+	const float moved = horizontal(bot.groundTo - to);
+	const bool other = moved > 5 && !(goalOn && bot.groundToMesh && !bot.groundWay.empty())
+		&& m_time - bot.groundPlannedAt >= 2 && (m_time >= bot.groundRetryAt || moved > 50);
+	if (moved <= 5) {
+		bot.groundTo = to;
+	}
 	const bool stuck = m_time - bot.groundAtTime > 6;
 	const bool spent = bot.groundWay.empty() && horizontal(self.position - to) > 5;
-	if (other || ((stuck || spent) && m_time - bot.groundPlannedAt >= 3)) {
-		bot.groundWay = groundWay(self.position, to, goalOn, self.soldier);
-		bot.groundTo = to;
-		bot.groundPlannedAt = m_time;
-		bot.groundAtTime = m_time;
-		bot.groundAt = self.position;
+	if (other || ((stuck || spent) && m_time - bot.groundPlannedAt >= 3 && m_time >= bot.groundRetryAt)) {
+		constexpr float kCell = 4;
+		const auto cell = [](float v) { return static_cast<int>(std::floor(v / kCell)); };
+		// After a search found nothing the next is made on the other grid (offset), then back.
+		const bool offset = bot.groundFailures % 2 == 1;
+		const GroundKey key {cell(self.position.x), cell(self.position.z), cell(to.x), cell(to.z), goalOn, offset};
+		const auto known = m_groundWays.find(key);
+		// A way kept for this start and goal, unless it is the one the bot got stuck on (none kept is
+		// none again from the same cell).
+		const bool reuse = known != m_groundWays.end() && (!stuck || other || known->second.empty());
+		bool found = reuse;
+		if (reuse) {
+			bot.groundWay = known->second;
+			++m_groundStats.reused;
+		} else if (m_groundSearchesLeft > 0) {
+			--m_groundSearchesLeft;
+			const auto t0 = std::chrono::steady_clock::now();
+			bool unfinished = false;
+			std::vector<physics::Vec3> way = groundWay(self.position, to, goalOn, self.soldier, &unfinished, offset);
+			const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+			m_groundStats.seconds += took;
+			m_groundStats.maxSeconds = std::max(m_groundStats.maxSeconds, took);
+			++m_groundStats.searches;
+			if (unfinished) {
+				// Its steps' checks kept: the search goes on at the next tick's turn, the old way till then.
+				++m_groundStats.unfinished;
+			} else {
+				found = true;
+				m_groundStats.empty += way.empty();
+				if (m_groundWays.size() >= 1024) {
+					m_groundWays.clear();
+				}
+				m_groundWays[key] = way;
+				bot.groundWay = std::move(way);
+			}
+		} else {
+			// Over this tick's searches: the old way a tick longer (asked again the next).
+			++m_groundStats.deferred;
+		}
+		if (found) {
+			bot.groundFailures = bot.groundWay.empty() ? std::min(bot.groundFailures + 1, 6) : 0;
+			bot.groundRetryAt = bot.groundFailures ? m_time + 3.0f * static_cast<float>(1 << (bot.groundFailures - 1)) : m_time;
+			bot.groundTo = to;
+			bot.groundToMesh = goalOn;
+			bot.groundPlannedAt = m_time;
+			bot.groundAtTime = m_time;
+			bot.groundAt = self.position;
+		}
 	}
 	while (!bot.groundWay.empty() && horizontal(bot.groundWay.front() - self.position) < 2) {
 		bot.groundWay.erase(bot.groundWay.begin());
