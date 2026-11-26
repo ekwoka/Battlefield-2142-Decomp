@@ -1115,6 +1115,13 @@ public:
 	// Joins a squad of the player's team (0 leaves), false when full;
 	// a new squad's first member leads it.
 	bool joinSquad(int player, int squad);
+	// The squad's leader (squad manager slot 0x40, 0x004c43a0; -1 none) and
+	// slot 0x3c (0x004c7510): the player leads it, the leader before not.
+	// A leader leaving passes the lead to the lowest id left with no
+	// question; a player that joins a squad of two or more that a bot
+	// leads, in the single-player and co-op modes, is asked (2/0x24).
+	int squadLeader(int team, int squad) const;
+	bool setSquadLeader(int team, int squad, int player);
 	// The squad manager's join (slot 0x34, 0x004c8460 -> 0x004c7290), as
 	// the squad menu's JOIN (0x007a5410), an invite's yes and a client's
 	// JoinSquad ask for it: a squad of six takes nobody (the player hears

@@ -271,8 +271,9 @@ void updateVoipList(hud::HudManager& hud, const std::vector<VoipSpeaker>& talkin
 // leader's squad (HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN), 1 an invite to a squad
 // (message 2/0x10 with the squad: HUD_HUD_SQUAD_INVITED_TO, #SQUADNAME#),
 // 2 the commander's order to the leader, 3 the offer of command (message
-// 2/0x23: HUD_HUD_COMMANDER_ACCEPTED, #TEAMNAME#), 4 the squad's
-// leadership, 5 a team kill's forgive or punish, 6 a vote.
+// 2/0x23: HUD_HUD_COMMANDER_ACCEPTED, #TEAMNAME#), 4 the offer of a
+// bot-led squad's leadership (2/0x24 to a player who joined it,
+// HUD_HUD_SQUADLEADER_ACCEPTED; only a yes acts, 0x0079d6e0), 5 a team kill's forgive or punish, 6 a vote.
 // - ask (0x0079e440): the kind's question replaced by the new one, its
 //   time started; the front shown.
 // - The front (0x0079d1b0): the question with the least time left. Shown

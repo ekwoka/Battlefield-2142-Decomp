@@ -6110,9 +6110,30 @@ int runGame(Options& options, Session& session)
 		squadMenu.onJoinRequest = [&questions](int player, const std::string& line) {
 			questions.ask(dice::hfe::menu::HudQuestions::JoinRequest, player, line);
 		};
+		squadMenu.onLeaderOffer = [&questions, &localization] {
+			questions.ask(dice::hfe::menu::HudQuestions::SquadLeader, 1, localization.text("HUD_HUD_SQUADLEADER_ACCEPTED")); // 0x00756d48
+		};
 		questions.onAnswer = [&](const dice::hfe::menu::HudQuestions::Question& q, bool yes, bool quiet) {
 			using Q = dice::hfe::menu::HudQuestions;
 			net::GameClient* server = joinedServer();
+			if (q.kind == Q::SquadLeader) {
+				// Kind 4 (0x0079d6e0): only a yes, and only while a bot leads
+				// our squad and we do not: slot 0x3c (team, squad, us), the
+				// server's own at once, a client's as SetSquadLeader.
+				game::GameWorld::PlayerInfo me;
+				const auto& all = hudPlayers();
+				const bool botLeads = hudPlayer(hudLocal(), me) && std::any_of(all.begin(), all.end(), [&](const auto& p) {
+					return p.team == me.team && p.squad == me.squad && p.squadLeader && p.ai;
+				});
+				if (yes && botLeads && me.squad > 0 && !me.squadLeader) {
+					if (server) {
+						server->setSquadLeader(me.squad);
+					} else {
+						round.setSquadLeader(me.team, me.squad, me.id);
+					}
+				}
+				return;
+			}
 			if (q.kind == Q::JoinRequest) {
 				// Kind 0 (0x0079d6e0): the leader's answer to the player who
 				// asked: 2/0x13 or 2/0x12 with our squad to him (a client's
@@ -8675,7 +8696,8 @@ int runGame(Options& options, Session& session)
 				// 2/0xc private; 2/0x11 to a private squad's leader) and a
 				// leader's answer handed on (0x004a5750: 2/0x12, 2/0x13).
 				if (message.category == 2
-					&& (message.id == 0xb || message.id == 0xc || message.id == 0x11 || message.id == 0x12 || message.id == 0x13)) {
+					&& (message.id == 0xb || message.id == 0xc || message.id == 0x11 || message.id == 0x12 || message.id == 0x13
+					|| message.id == 0x24)) {
 					squadMenu.squadMessage(static_cast<int>(message.id), message.payloadInt(0));
 				}
 				// The dog tag (the game category's 0x13, 0x004cbea0): the

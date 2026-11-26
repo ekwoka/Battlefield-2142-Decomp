@@ -6218,11 +6218,13 @@ bool GameWorld::joinSquad(int id, int squad)
 	player->squad = squad;
 	player->squadJoinedAt = ++m_squadJoins;
 	player->squadLeader = squad != 0 && squadMembers(player->team, squad).size() == 1;
-	// A leader leaving hands the squad to the next member; its beacon goes.
+	// A leader leaving hands the squad on at once, no question, to a bot or
+	// a player: the lowest id left (the squad's member set's first,
+	// 0x004c7bb0 -> slot 0x3c); its beacon goes.
 	if (old != 0 && wasLeader) {
 		const std::vector<int> rest = squadMembers(player->team, old);
 		if (!rest.empty()) {
-			findPlayer(rest.front())->squadLeader = true;
+			findPlayer(*std::min_element(rest.begin(), rest.end()))->squadLeader = true;
 		}
 		if (const auto beacon = m_beacons.find({player->team, old}); beacon != m_beacons.end()) {
 			m_objects.remove(beacon->second);
@@ -6235,7 +6237,42 @@ bool GameWorld::joinSquad(int id, int squad)
 		m_privateSquads.erase({player->team, old});
 		m_squadOrderScores.erase({player->team, old});
 	}
+	// The join's last step (0x004c6c80, only where AIDLL's +6 is false: sp1,
+	// gpm_sp, gpm_coop): a player that is no bot joining a squad of two or
+	// more that a bot leads hears 2/0x24, the HUD's question kind 4.
+	if (squad != 0 && !player->ai && wreckDrainsFast()) {
+		const std::vector<int> members = squadMembers(player->team, squad);
+		const bool botLeads = std::any_of(members.begin(), members.end(), [this](int m) {
+			const Player* p = findPlayer(m);
+			return p->squadLeader && p->ai;
+		});
+		if (members.size() > 1 && botLeads) {
+			m_squadMessages[id].push_back({0x24, id});
+		}
+	}
 	raise("PlayerChangedSquad", {ScriptValue::player(id), ScriptValue::integer(old), ScriptValue::integer(squad)});
+	return true;
+}
+
+int GameWorld::squadLeader(int team, int squad) const
+{
+	for (int member : squadMembers(team, squad)) {
+		if (findPlayer(member)->squadLeader) {
+			return member;
+		}
+	}
+	return -1; // slot 0x40's 0xffffffff
+}
+
+bool GameWorld::setSquadLeader(int team, int squad, int id)
+{
+	const Player* player = findPlayer(id);
+	if (!player || squad == 0 || player->team != team || player->squad != squad) {
+		return false;
+	}
+	for (int member : squadMembers(team, squad)) {
+		findPlayer(member)->squadLeader = member == id; // slot 0x3c (0x004c7510 -> 0x004c2fd0)
+	}
 	return true;
 }
 

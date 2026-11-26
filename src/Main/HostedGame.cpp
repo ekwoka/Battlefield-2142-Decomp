@@ -1501,6 +1501,15 @@ void HostedGame::event(int id, const net::GameEvent& e)
 			m_round->requestJoinSquad(player, e.i(2));
 		}
 		return;
+	case net::kEvSetSquadLeader: { // team, player, squad: the sender takes the lead (0x0050d0a0)
+		// Only of a squad with no leader or himself the leader (slot 0x40),
+		// whatever the event's player says: a bot's squad refuses it.
+		const int leader = m_round->squadLeader(e.i(0), e.i(2));
+		if (leader < 0 || leader == player) {
+			m_round->setSquadLeader(e.i(0), e.i(2), player);
+		}
+		return;
+	}
 	case net::kEvLeaveSquad: { // team, player, squad, bit (0x004c9c50)
 		if (e.i(1) == player) {
 			m_round->joinSquad(player, 0);

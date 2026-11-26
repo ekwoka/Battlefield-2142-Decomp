@@ -165,6 +165,7 @@ public:
 	// squad is made by naming one without a leader (createSquad).
 	void joinSquad(int squad);                                    // JoinSquad (0x10; sent by 0x004c9bf0): team, player, squad
 	void leaveSquad(int squad, int player = -1, bool flag = false); // LeaveSquad (0x11; 0x004c9c50); another player: the leader kicks
+	void setSquadLeader(int squad);                               // SetSquadLeader (0x1c; slot 0x3c, 0x004c97f0): team, player, squad
 	void invite(int player, int squad, bool fromLeader = true);   // Invite (0x19; server 0x0050e700)
 	// A private squad's leader's answer to a player asking to join (the
 	// HUD's question kind 0, message 2/0x11): PostRemote 2/0x13 or 2/0x12

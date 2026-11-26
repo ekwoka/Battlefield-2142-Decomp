@@ -2928,6 +2928,46 @@ TEST(HudMenus_CreateSquadWithoutTheBox)
 	CHECK(s.squads.createSquad(me) && s.squadOf(me) == 2);
 }
 
+// The squad leader's offer (0x004c6c80's last step, 2/0x24, the HUD's
+// question kind 4, 0x00756b60): a player joining a squad of two or more
+// that a bot leads, in the co-op modes, is asked; a squad of one, a bot or
+// the other modes ask nothing. A leader leaving hands the lead on at once to
+// the lowest id left (0x004c7bb0), asking nobody.
+TEST(HudMenus_SquadLeaderOffer)
+{
+	Squads s;
+	s.world.setAiRunning(true);
+	s.world.setGameMode("gpm_coop");
+	const int botA = s.world.addPlayer("BotA", 2, true);
+	const int botB = s.world.addPlayer("BotB", 2, true);
+	s.world.spawnPlayer(2);
+	const int me = s.world.localPlayer();
+	CHECK(s.world.joinSquad(botB, 1) && s.world.joinSquad(botA, 1));
+	CHECK(s.world.squadLeader(2, 1) == botB); // the first to join leads
+	CHECK(s.world.takeSquadMessages(me).empty());
+	int offers = 0;
+	s.squads.onLeaderOffer = [&] { ++offers; };
+	CHECK(s.world.joinSquad(me, 1));
+	auto heard = s.world.takeSquadMessages(me);
+	CHECK(heard.size() == 1 && heard[0].id == 0x24 && heard[0].value == me);
+	s.squads.squadMessage(0x24, me + 1); // another player's: not ours
+	CHECK(offers == 0);
+	s.squads.squadMessage(heard[0].id, heard[0].value);
+	CHECK(offers == 1);
+	// Slot 0x3c: the leader before no longer leads.
+	CHECK(s.world.setSquadLeader(2, 1, me) && s.world.squadLeader(2, 1) == me);
+	// The leader (we) leaves: the lowest id left leads, with no message.
+	CHECK(s.world.joinSquad(me, 0) && s.world.squadLeader(2, 1) == std::min(botA, botB));
+	CHECK(s.world.takeSquadMessages(me).empty() && s.world.takeSquadMessages(botA).empty());
+	CHECK(s.world.joinSquad(std::min(botA, botB), 0) && s.world.squadLeader(2, 1) == std::max(botA, botB));
+	// A new squad's first member leads it and is asked nothing.
+	CHECK(s.world.joinSquad(me, 2) && s.world.squadLeader(2, 2) == me && s.world.takeSquadMessages(me).empty());
+	// Outside the co-op modes the AI's +6 is true: no offer.
+	CHECK(s.world.joinSquad(me, 0));
+	s.world.setGameMode("gpm_cq");
+	CHECK(s.world.joinSquad(me, 1) && s.world.takeSquadMessages(me).empty());
+}
+
 // A private squad (the squad manager's join 0x004c7290, the HUD's
 // category-2 lines 0x00756b60 and question kind 0): the leader's lock
 // (column 8, slot 0x20) is the round's; a player without the squad's bit

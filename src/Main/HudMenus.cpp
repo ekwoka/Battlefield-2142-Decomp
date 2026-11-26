@@ -361,6 +361,11 @@ void SquadMenu::squadMessage(int id, int value)
 		onJoinRequest(value, fill(text("HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN"), "#PLAYERNAME#", asking.name));
 		break;
 	}
+	case 0x24: // the HUD asks only the player it names (0x00756b60)
+		if (value == localPlayer() && onLeaderOffer) {
+			onLeaderOffer();
+		}
+		break;
 	default:
 		break;
 	}

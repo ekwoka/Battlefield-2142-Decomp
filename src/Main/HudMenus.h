@@ -118,6 +118,7 @@ public:
 	void squadMessage(int id, int value);
 	std::function<void(const std::string&)> onLine;
 	std::function<void(int player, const std::string&)> onJoinRequest;
+	std::function<void()> onLeaderOffer; // 2/0x24 for our player: the question's kind 4
 	std::function<std::string(int team)> teamName; // the team's localised name
 	// The leader's no to a request (0x0079d6e0 kind 0, answered, not timed
 	// out): the player goes on the menu's list (+0x120, 0x007a7d10), whose

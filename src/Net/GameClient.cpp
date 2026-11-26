@@ -482,6 +482,12 @@ void GameClient::joinSquad(int squad)
 	sendEvent(eventOf(kEvJoinSquad, {u8(me ? me->team : 0), u8(m_world.localPlayer()), u8(squad)}));
 }
 
+void GameClient::setSquadLeader(int squad)
+{
+	const RemotePlayer* me = m_world.player(m_world.localPlayer());
+	sendEvent(eventOf(kEvSetSquadLeader, {u8(me ? me->team : 0), u8(m_world.localPlayer()), u8(squad)}));
+}
+
 void GameClient::leaveSquad(int squad, int player, bool flag)
 {
 	const RemotePlayer* me = m_world.player(m_world.localPlayer());
