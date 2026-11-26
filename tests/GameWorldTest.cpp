@@ -12,6 +12,7 @@
 #include "Geometry/GeometryTemplateManager.h"
 #include "IO/File/FileManager.h"
 #include "Main/DeploymentTeam.h"
+#include "Main/SpawnGroupMarkers.h"
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
 #include "Main/PlayerCamera.h"
@@ -151,6 +152,47 @@ TEST(GameWorld_MobileSpawnGroupAveragesAllChildrenAndRetiresWithItsOwner)
 	groups = round.spawnableGroups(2);
 	CHECK(std::none_of(groups.begin(), groups.end(), [rootId](const auto& group) { return group.mobileObject == rootId; }));
 	CHECK(round.spawnGroupChoice(player) == -1);
+}
+
+TEST(SpawnGroupMarkersKeepInactiveSelectionAndPreF8Labels)
+{
+	game::GameWorld::SpawnGroupInfo group;
+	group.id = 5;
+	group.position = {12, 0, 34};
+	group.available = false;
+	const auto markers = main::spawnGroupMarkers({group}, group.id);
+	CHECK(markers.size() == 1);
+	CHECK(markers[0].selected);
+	CHECK(!markers[0].active);
+	CHECK(markers[0].x == 12 && markers[0].z == 34);
+
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "PlayerControlObject");
+	auto* vehicle = templates.create("PlayerControlObject", "eu_apc");
+	vehicle->settings()["vehicleHud.hudName"] = "\"HUD_TEXT_EU_APC\"";
+	world::ObjectManager objects;
+	const world::Object* vehicleObject = objects.create(vehicle);
+	game::GameWorld::ControlPointInfo cp {902, 2, {}, 10};
+	cp.name = "CPNAME_SC_Ti_InnerBridgeLock";
+	const std::vector<game::GameWorld::ControlPointInfo> cps {cp};
+	const std::vector<game::GameWorld::TitanInfo> noTitans;
+	group.controlPoint = cp.id;
+	CHECK(main::spawnGroupLabel(group, cps, noTitans, objects, {}) == "CPNAME_SC_Ti_InnerBridgeLock");
+	group.mobileObject = vehicleObject->id();
+	CHECK(main::spawnGroupLabel(group, cps, noTitans, objects, {}) == "HUD_TEXT_EU_APC");
+	vehicle->settings().erase("vehicleHud.hudName");
+	CHECK(main::spawnGroupLabel(group, cps, noTitans, objects, {}) == "eu_apc");
+	game::GameWorld::TitanInfo titan;
+	titan.object = group.mobileObject;
+	titan.team = 2;
+	titan.controlPoint = cp.id;
+	const std::vector<game::GameWorld::TitanInfo> titans {titan};
+	const auto localize = [](const std::string& name) {
+		return name == "CPNAME_SC_Ti_InnerBridgeLock" ? std::string("EU Titan") : name;
+	};
+	CHECK(main::spawnGroupLabel(group, cps, titans, objects, localize) == "EU Titan (inside)");
+	titan.team = 1;
+	CHECK(main::spawnGroupLabel(group, cps, {titan}, objects, localize) == "PAC Titan");
 }
 
 TEST(GameWorld_SpawnerSpawnsForItsControlPointsTeam)

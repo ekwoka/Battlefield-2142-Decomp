@@ -7623,60 +7623,102 @@ std::vector<int> GameWorld::spawnablePoints(int team) const
 	return ids;
 }
 
-std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnableGroups(int team, int playerId) const
+bool GameWorld::spawnGroupAvailable(const SpawnGroupInfo& group, int team, const Player* player) const
+{
+	const auto holdsCp = [this, team](int id) {
+		return std::any_of(m_controlPoints.begin(), m_controlPoints.end(), [id, team](const ControlPoint& cp) {
+			return cp.id == id && cp.team == team;
+		});
+	};
+	if (!group.mobileObject) {
+		if (!holdsCp(group.controlPoint)) return false;
+		for (uint32_t pointId : group.points) {
+			const world::Object* point = m_objects.find(pointId);
+			if (!point || !point->objectTemplate()) continue;
+			const world::ObjectTemplate& t = *point->objectTemplate();
+			const int cp = point->controlPointId() != -1 ? point->controlPointId() : integer(t, "controlPointId", -1);
+			if (cp == group.controlPoint && (!player || spawnPointUsable(*point, *player, false))) return true;
+		}
+		return false;
+	}
+
+	const world::Object* root = m_objects.find(group.mobileObject);
+	const Titan* titan = titanByObject(group.mobileObject);
+	if (!root || root->destroyed() || root->team() != team || !teamHoldsControlPoint(team) || !spawnParentArmourHolds(*root)) {
+		return false;
+	}
+	if (titan && (m_gameMode != "gpm_ti" || titan->wrecked || titan->spawnPoints.empty() || !holdsCp(titan->controlPoint))) {
+		return false;
+	}
+	if (!player) {
+		if (!group.mobilePoints.empty()) return true;
+		return titan && std::any_of(titan->spawnPoints.begin(), titan->spawnPoints.end(), [this](const Titan::Spawn& spawn) {
+			return m_objects.find(spawn.object) != nullptr;
+		});
+	}
+	if (!group.mobilePoints.empty()) {
+		const Body* body = findBody(root->id());
+		if (!body || !body->vehicle) return false;
+		for (size_t i = 0; i < group.mobilePoints.size(); ++i) {
+			const SpawnPointFlags flags = SpawnPointFlags::of(*group.mobilePoints[i]);
+			if (player->ai ? flags.onlyForHuman : flags.onlyForAI) continue;
+			if (flags.enterOnSpawn || (player->ai && flags.aiEnterOnSpawn)) {
+				const physics::Vec3 at = body->body.position + body->body.rotation.transform(
+					i < group.mobilePointOffsets.size() ? group.mobilePointOffsets[i] : physics::Vec3 {});
+				int seat = -1;
+				if (!spawnSeat(team, at, player->ai ? 15.0f : 5.0f, root->id(), seat)) continue;
+			}
+			return true;
+		}
+		return false;
+	}
+	if (!titan) return false;
+	for (const Titan::Spawn& spawn : titan->spawnPoints) {
+		const world::Object* point = m_objects.find(spawn.object);
+		if (point && spawnPointUsable(*point, *player, false)) return true;
+	}
+	return false;
+}
+
+bool GameWorld::spawnGroupAvailable(int groupId, int playerId) const
+{
+	const auto group = m_spawnGroups.find(groupId);
+	const Player* player = findPlayer(playerId);
+	return group != m_spawnGroups.end() && player && spawnGroupAvailable(group->second, player->team, player);
+}
+
+std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnGroups(int team, int playerId) const
 {
 	std::vector<SpawnGroupInfo> result;
 	const Player* player = playerId >= 0 ? findPlayer(playerId) : nullptr;
-	for (const auto& [id, group] : m_spawnGroups) {
-		bool available = false;
+	const auto holdsCp = [this, team](int cpId) {
+		return std::any_of(m_controlPoints.begin(), m_controlPoints.end(), [team, cpId](const ControlPoint& cp) {
+			return cp.id == cpId && cp.team == team;
+		});
+	};
+	for (const auto& [id, registered] : m_spawnGroups) {
+		(void)id;
+		SpawnGroupInfo group = registered;
 		if (group.mobileObject) {
 			const world::Object* root = m_objects.find(group.mobileObject);
 			const Titan* titan = titanByObject(group.mobileObject);
-			const bool titanControlHeld = !titan || std::any_of(m_controlPoints.begin(), m_controlPoints.end(),
-				[titan, team](const ControlPoint& cp) { return cp.id == titan->controlPoint && cp.team == team; });
-			available = root && !root->destroyed() && root->team() == team && teamHoldsControlPoint(team)
-				&& spawnParentArmourHolds(*root) && titanControlHeld
-				&& (!titan || (!titan->wrecked && !titan->spawnPoints.empty()));
-			if (available && player && !group.mobilePoints.empty()) {
-				available = false;
-				const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll(
-					{root->rotation().x, root->rotation().y, root->rotation().z});
-				for (size_t i = 0; i < group.mobilePoints.size(); ++i) {
-					const SpawnPointFlags flags = SpawnPointFlags::of(*group.mobilePoints[i]);
-					if (player->ai ? flags.onlyForHuman : flags.onlyForAI) continue;
-					if (flags.enterOnSpawn || (player->ai && flags.aiEnterOnSpawn)) {
-						const physics::Vec3 at = physics::Vec3 {root->position().x, root->position().y, root->position().z}
-							+ rotation.transform(i < group.mobilePointOffsets.size() ? group.mobilePointOffsets[i] : physics::Vec3 {});
-						int seat = -1;
-						if (!spawnSeat(team, at, player->ai ? 15.0f : 5.0f, root->id(), seat)) continue;
-					}
-					available = true;
-					break;
-				}
-			}
-			if (available && player && group.mobilePoints.empty() && !group.points.empty()) {
-				available = std::any_of(group.points.begin(), group.points.end(), [this, player](uint32_t pointId) {
-					const world::Object* point = m_objects.find(pointId);
-					return point && spawnPointUsable(*point, *player, true);
-				});
-			}
-		} else {
-			for (const ControlPoint& cp : m_controlPoints) {
-				if (cp.id == group.controlPoint && cp.team == team) {
-					available = true;
-					break;
-				}
-			}
-			if (available && player) {
-				available = std::any_of(group.points.begin(), group.points.end(), [this, player](uint32_t pointId) {
-					const world::Object* point = m_objects.find(pointId);
-					return point && spawnPointUsable(*point, *player, true);
-				});
-			}
+			if (!root || root->team() != team || !teamHoldsControlPoint(team)) continue;
+			if (titan && (titan->wrecked || titan->spawnPoints.empty() || !holdsCp(titan->controlPoint))) continue;
+			if (!titan && (root->destroyed() || !spawnParentArmourHolds(*root))) continue;
+		} else if (!holdsCp(group.controlPoint)) {
+			continue;
 		}
-		if (available) {
-			result.push_back(group);
-		}
+		group.available = spawnGroupAvailable(group, team, player);
+		result.push_back(std::move(group));
+	}
+	return result;
+}
+
+std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnableGroups(int team, int playerId) const
+{
+	std::vector<SpawnGroupInfo> result;
+	for (SpawnGroupInfo& group : spawnGroups(team, playerId)) {
+		if (group.available) result.push_back(std::move(group));
 	}
 	return result;
 }
@@ -8159,29 +8201,12 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	const SpawnGroupInfo* selectedGroup = nullptr;
 	if (player.spawnGroupChoice >= 0) {
 		const auto found = m_spawnGroups.find(player.spawnGroupChoice);
-		if (found == m_spawnGroups.end()) {
+		if (found == m_spawnGroups.end() || !spawnGroupAvailable(found->second, team, &player)) {
 			player.spawnRequested = false;
 			return nullptr;
 		}
 		selectedGroup = &found->second;
-		if (selectedGroup->mobileObject) {
-			selectedTitan = titanByObject(selectedGroup->mobileObject);
-			const world::Object* root = m_objects.find(selectedGroup->mobileObject);
-			if (!root || root->team() != team || root->destroyed() || !teamHoldsControlPoint(team)
-				|| !spawnParentArmourHolds(*root)
-				|| (selectedTitan && (m_gameMode != "gpm_ti" || selectedTitan->wrecked || selectedTitan->spawnPoints.empty()
-					|| std::none_of(m_controlPoints.begin(), m_controlPoints.end(), [selectedTitan, team](const ControlPoint& cp) {
-						return cp.id == selectedTitan->controlPoint && cp.team == team;
-					})))) {
-				player.spawnRequested = false;
-				return nullptr;
-			}
-		} else if (std::none_of(m_controlPoints.begin(), m_controlPoints.end(), [selectedGroup, team](const ControlPoint& cp) {
-				return cp.id == selectedGroup->controlPoint && cp.team == team;
-			})) {
-			player.spawnRequested = false;
-			return nullptr;
-		}
+		if (selectedGroup->mobileObject) selectedTitan = titanByObject(selectedGroup->mobileObject);
 	}
 	if (player.spawnChoice == kSpawnOnTitan) {
 		const auto it = std::find_if(m_titans.begin(), m_titans.end(), [&player, team](const Titan& titan) {

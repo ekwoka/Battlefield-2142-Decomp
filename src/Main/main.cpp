@@ -1125,12 +1125,13 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	const std::vector<int> spawnable = world.spawnablePoints(me.team);
 	const int legacyChosen = world.spawnChoice(me.id);
 	const int localGroupChoice = round.spawnGroupChoice(me.id);
-	const int chosen = world.joined() ? legacyChosen : localGroupChoice >= 0 ? localGroupChoice : legacyChosen;
+	const int chosen = world.joined() ? legacyChosen : localGroupChoice;
+	const auto controlPoints = world.controlPointList();
 	// The spawn icons are drawn over the vehicles, silos and teammates (0x00796379
 	// after 0x00796143 and 0x0079629f), so they are collected and added below.
 	std::vector<hud::HudManager::MapMarker> spawnMarkers;
 	const bool assaultLines = round.gameMode().find("sl") != std::string::npos; // 0x00796148
-	for (const auto& point : world.controlPointList()) {
+	for (const auto& point : controlPoints) {
 		// The flags only of the points with showOnMinimap (slot 0x44 in 0x0078bd00): the
 		// Titan maps' silo and Titan points have none. Their spawn icons stay.
 		if (point.showOnMinimap) {
@@ -1156,33 +1157,16 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// sits at the mean of its points. Mobile APC and Titan groups use the same
 	// map path and their live group position.
 	if (spawning && !world.joined()) {
-		const auto groups = round.spawnableGroups(me.team, me.id);
+		const auto groups = round.spawnGroups(me.team, me.id);
+		const auto titans = round.titans();
 		for (const main::SpawnGroupMarker& mapped : main::spawnGroupMarkers(groups, chosen)) {
 			const auto found = std::find_if(groups.begin(), groups.end(), [&mapped](const auto& group) { return group.id == mapped.id; });
 			if (found == groups.end()) continue;
 			const game::GameWorld::SpawnGroupInfo& group = *found;
-			std::string label = group.mobileObject ? "Mobile spawn" : "CP " + std::to_string(group.controlPoint);
-			if (!group.mobileObject && group.controlPoint >= 0) {
-				for (const auto& point : world.controlPointList()) {
-					if (point.id == group.controlPoint && !point.name.empty()) {
-						label = point.name;
-						break;
-					}
-				}
-				const auto source = std::find_if(group.points.begin(), group.points.end(), [&round](uint32_t id) {
-					const world::Object* point = round.objects().find(id);
-					return point && point->objectTemplate();
-				});
-				if (source != group.points.end()) {
-					const world::Object* point = round.objects().find(*source);
-					const auto setting = point->objectTemplate()->settings().find("setGroup");
-					if (setting != point->objectTemplate()->settings().end() && setting->second != "0") {
-						label += " / " + setting->second;
-					}
-				}
-			}
+			const std::string label = main::spawnGroupLabel(group, controlPoints, titans, round.objects(), g_localize);
 			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/")
-					+ (mapped.selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
+					+ (mapped.selected ? "spawn_Selected" : "spawn_UnSelected")
+					+ (mapped.active ? ".dds" : "Inactive.dds"),
 				mapped.x, mapped.z, hud::HudManager::kSpawnMarkerSize};
 			spawn.id = mapped.id;
 			spawn.label = std::move(label);
@@ -2382,15 +2366,14 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			if (seconds >= 0) hud.setString("SpawnInfoString", withTime("HUD_CENTERINFOBOX_timeuntildamage", seconds));
 			else if (respawnSeconds >= 0) {
 				const int localGroupChoice = round.spawnGroupChoice(world.localPlayer());
-				const int selected = world.joined() ? world.spawnChoice(world.localPlayer())
-					: localGroupChoice >= 0 ? localGroupChoice : world.spawnChoice(world.localPlayer());
-				std::vector<int> available = world.spawnablePoints(respawnInfo.team);
-				if (!world.joined()) {
-					available.clear();
-					for (const auto& group : round.spawnableGroups(respawnInfo.team, world.localPlayer())) available.push_back(group.id);
-				}
-				const bool valid = selected < 0 || std::find(available.begin(), available.end(), selected) != available.end();
-				hud.setString("SpawnInfoString", withTime(dice::main::deploymentSpawnInfo(selected != -1,
+				const int selected = world.spawnChoice(world.localPlayer());
+				const std::vector<int> availablePoints = world.spawnablePoints(respawnInfo.team);
+				const bool valid = world.joined()
+					? selected < 0 || std::find(availablePoints.begin(), availablePoints.end(), selected) != availablePoints.end()
+					: localGroupChoice >= 0 ? round.spawnGroupAvailable(localGroupChoice, world.localPlayer())
+						: selected < 0 || std::find(availablePoints.begin(), availablePoints.end(), selected) != availablePoints.end();
+				const bool hasSelection = selected != -1 || localGroupChoice >= 0;
+				hud.setString("SpawnInfoString", withTime(dice::main::deploymentSpawnInfo(hasSelection,
 					world.spawnRequested(world.localPlayer()), respawnInfo.respawnIn, valid), respawnSeconds));
 			}
 			else hud.setString("SpawnInfoString", std::string());
@@ -11741,7 +11724,7 @@ int runGame(Options& options, Session& session)
 				} else if (point >= 0) {
 					const auto groups = round.spawnableGroups(round.playerTeam(), round.localPlayer());
 					if (std::any_of(groups.begin(), groups.end(),
-							[point](const game::GameWorld::SpawnGroupInfo& group) { return group.id == point; })) {
+							[point](const game::GameWorld::SpawnGroupInfo& group) { return group.id == point && group.available; })) {
 						round.setSpawnGroupChoice(round.localPlayer(), point);
 					}
 				} else {

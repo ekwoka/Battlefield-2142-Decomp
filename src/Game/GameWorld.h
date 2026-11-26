@@ -1334,13 +1334,18 @@ public:
 		int controlPoint = -1;
 		uint32_t templateGroup = 0;
 		uint32_t mobileObject = 0;
+		bool available = false;
 		physics::Vec3 position;
 		std::vector<uint32_t> points;
 		std::vector<const world::ObjectTemplate*> mobilePoints;
 		std::vector<physics::Vec3> mobilePointOffsets;
 	};
+	// Every registered group, including inactive groups, for local marker rendering.
+	std::vector<SpawnGroupInfo> spawnGroups(int team, int player = -1) const;
 	// The local deployment map's available groups, in registration order.
 	std::vector<SpawnGroupInfo> spawnableGroups(int team, int player = -1) const;
+	// Whether the explicit selection path can deploy this player at the group.
+	bool spawnGroupAvailable(int group, int player) const;
 	// A control point's spawn group can take the player now (SpawnGroup slot
 	// 0x28, 0x00633060): one of its points passes spawnPointUsable.
 	bool spawnGroupActive(int controlPoint, int player) const;
@@ -4474,6 +4479,7 @@ private:
 	void registerMobileSpawnGroupsForObject(uint32_t owner);
 	void retireMissingMobileSpawnGroups();
 	void updateSpawnGroups();
+	bool spawnGroupAvailable(const SpawnGroupInfo& group, int team, const Player* player) const;
 	bool carriesHealing(const Player& player) const; // TCLocalTeamMedic's receivers (Radio.cpp)
 	Player* soldierPlayer(uint32_t object) const;
 	world::Object* spawnSoldier(Player& player);
