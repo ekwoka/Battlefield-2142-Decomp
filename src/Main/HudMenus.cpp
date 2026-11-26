@@ -361,11 +361,35 @@ void SquadMenu::squadMessage(int id, int value)
 		onJoinRequest(value, fill(text("HUD_HUD_SQUAD_HAS_ASKED_TO_JOIN"), "#PLAYERNAME#", asking.name));
 		break;
 	}
-	case 0x15: // the HUD's cleanup is for the player leaving (0x00757ed1)
-		if (value == localPlayer() && onLeftSquad) {
-			onLeftSquad();
+	case 0x14: { // kicked (0x00756b60 case 0x14): ours says so with the menu's "kicked", the others' name
+		game::GameWorld::PlayerInfo kicked;
+		if (!playerInfo(value, kicked)) {
+			break;
+		}
+		if (value == me.id) {
+			if (onLine) {
+				onLine(text("HUD_HUD_SQUAD_IS_KICKED"));
+			}
+			if (onSound) {
+				onSound("kicked");
+			}
+		} else if (onLine) {
+			onLine(fill(text("HUD_SQUAD_PLAYERKICKEDFROMSQUAD"), "#PLAYERNAME#", kicked.name));
 		}
 		break;
+	}
+	case 0x15: // the leaver's cleanup (0x00757ed1), the others' line while we are in a squad (0x00757e91)
+	case 0x16: { // joined: the same line for the others (0x00756b60 case 0x16), ours opens the squad (update())
+		game::GameWorld::PlayerInfo other;
+		if (value == me.id) {
+			if (id == 0x15 && onLeftSquad) {
+				onLeftSquad();
+			}
+		} else if (playerInfo(value, other) && me.squad != 0 && other.team == me.team && onLine) {
+			onLine(fill(text(id == 0x15 ? "HUD_HUD_SQUAD_HAS_LEFT" : "HUD_HUD_SQUAD_HAS_JOINED"), "#PLAYERNAME#", other.name));
+		}
+		break;
+	}
 	case 0x18: { // the new leader (0x00758033): ours says so to the squad, the others get his name
 		game::GameWorld::PlayerInfo leader;
 		if (!playerInfo(value, leader)) {

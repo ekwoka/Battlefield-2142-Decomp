@@ -6218,6 +6218,20 @@ bool GameWorld::joinSquad(int id, int squad, bool kicked)
 	player->squad = squad;
 	player->squadJoinedAt = ++m_squadJoins;
 	player->squadLeader = squad != 0 && squadMembers(player->team, squad).size() == 1;
+	// 0x004c7bb0 sends 2/0x15 (2/0x14 for a kick, the leader's removal) with
+	// the leaver to every member of the squad's set before erasing him: the
+	// squad's players and the leaver.
+	if (old != 0) {
+		const auto tell = [this](int to, int message, int value) {
+			if (const Player* p = findPlayer(to); p && !p->ai) {
+				m_squadMessages[to].push_back({message, value});
+			}
+		};
+		tell(id, kicked ? 0x14 : 0x15, id);
+		for (int member : squadMembers(player->team, old)) {
+			tell(member, kicked ? 0x14 : 0x15, id);
+		}
+	}
 	// A leader leaving hands the squad on at once, no question, to a bot or
 	// a player: the lowest id left (the squad's member set's first,
 	// 0x004c7bb0 -> slot 0x3c); its beacon goes.
@@ -6231,16 +6245,20 @@ bool GameWorld::joinSquad(int id, int squad, bool kicked)
 			m_beacons.erase(beacon);
 		}
 	}
-	// The leaver hears 2/0x15 (0x004c7bb0 sends it to the whole member
-	// set before erasing him; a kick, the leader's removal, sends 2/0x14).
-	if (old != 0 && !player->ai && !kicked) {
-		m_squadMessages[id].push_back({0x15, id});
-	}
 	// The squad left empty goes (0x004c6c80: slot 0x3c when the count is
 	// 0), its lock with it.
 	if (old != 0 && squadMembers(player->team, old).empty()) {
 		m_privateSquads.erase({player->team, old});
 		m_squadOrderScores.erase({player->team, old});
+	}
+	// The join (0x004c6c80) sends 2/0x16 with the joiner to every member of
+	// the set once he is in it, himself too: the squad's players.
+	if (squad != 0) {
+		for (int member : squadMembers(player->team, squad)) {
+			if (const Player* p = findPlayer(member); p && !p->ai) {
+				m_squadMessages[member].push_back({0x16, id});
+			}
+		}
 	}
 	// The join's last step (0x004c6c80, only where AIDLL's +6 is false: sp1,
 	// gpm_sp, gpm_coop): a player that is no bot joining a squad of two or

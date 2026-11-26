@@ -2059,7 +2059,8 @@ TEST(Bots_AddBotMovesTheLastJoinedAsRetail)
 		field.world->setSquadPrivate(1, 1, true);
 		const int bot = bots.addBot("", 1);
 		CHECK(squadOf(*field.world, bot).first == 0);
-		const auto messages = field.world->takeSquadMessages(human);
+		auto messages = field.world->takeSquadMessages(human);
+		messages.erase(messages.begin()); // his own join's 2/0x16
 		CHECK(messages.size() == 1 && messages.front().id == 0x11 && messages.front().value == bot);
 	}
 }

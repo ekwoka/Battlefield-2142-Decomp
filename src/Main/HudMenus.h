@@ -120,6 +120,7 @@ public:
 	std::function<void(int player, const std::string&)> onJoinRequest;
 	std::function<void()> onLeaderOffer; // 2/0x24 for our player: the question's kind 4
 	std::function<void()> onLeftSquad;   // 2/0x15 for our player: the question cleanup
+	std::function<void(const std::string&)> onSound; // a menu sound by name (DAT_00b43878 slot 0x2c): "kicked"
 	std::function<void()> onNewLeaderRadio; // 2/0x18 naming us, with company: "new_squadleader" on TCSquad
 	std::function<std::string(int team)> teamName; // the team's localised name
 	// The leader's no to a request (0x0079d6e0 kind 0, answered, not timed
