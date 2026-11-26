@@ -4481,7 +4481,8 @@ private:
 	std::map<std::pair<int, int>, std::string> m_beaconPods;
 	std::vector<int> squadMembers(int team, int squad) const;
 	// `pod`: the vehicle a beacon spawn drops in (empty for none).
-	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod);
+	bool spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod,
+		uint32_t& enterVehicle, int& enterSeat);
 	bool scatterOnLeader(const Player& leader, physics::Vec3& feet, float& yaw, bool* prone = nullptr, bool ai = false);
 	// `pod`: the spawn point's spawnInPod (+0x2b): the tries 150 m up
 	// (0x005b2200 / 0x005b1e70; see spawnAtSquad).

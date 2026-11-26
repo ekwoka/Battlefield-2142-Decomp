@@ -3892,6 +3892,55 @@ void makeMobile(world::ObjectTemplate& t, const char* mesh)
 
 } // namespace
 
+TEST(GameWorld_SquadMemberSpawnsIntoSeatedLeadersVehicle)
+{
+	Range range;
+	range.templates.registerType(20, "PlayerControlObject");
+	range.templates.registerType(23, "Engine");
+	range.templates.create("Engine", "squad_apc_engine")->settings()["engineType"] = "c_ETCar";
+	range.collisionTemplates.add("squad_apc_mesh", boxMesh(1));
+	world::ObjectTemplate* apc = range.templates.create("PlayerControlObject", "squad_apc");
+	range.addEntry(*apc);
+	makeMobile(*apc, "squad_apc_mesh");
+	apc->settings()["armor.maxHitPoints"] = "100";
+	apc->settings()["seatInformation"] = "driver 0/0/0 0/0/0";
+	apc->children().push_back({"squad_apc_passenger", {}, {}});
+	range.templates.create("PlayerControlObject", "squad_apc_passenger")->settings()["seatInformation"] =
+		"passenger 0/0/0 0/0/0";
+	apc->children().push_back({"squad_apc_engine", {}, {}});
+
+	const int leader = range.world->addPlayer("Leader", 2, false);
+	const int member = range.world->addPlayer("Member", 2, false);
+	const int third = range.world->addPlayer("Third", 2, false);
+	CHECK(range.world->joinSquad(leader, range.world->openSquad(2)));
+	CHECK(range.world->joinSquad(member, 1));
+	CHECK(range.world->joinSquad(third, 1));
+	CHECK(range.world->spawnSoldier(leader));
+	game::GameWorld::PlayerInfo info;
+	CHECK(range.world->playerInfo(leader, info));
+	world::Object* vehicle = range.objects.create(apc, {info.position.x, info.position.y, info.position.z + 3});
+	vehicle->setTeam(2);
+	range.world->tick(1 / 30.0f);
+	range.world->setSoldierPosition(info.soldier, {vehicle->position().x, 0, vehicle->position().z - 3});
+	range.world->tick(1 / 30.0f);
+	game::SoldierInput enter;
+	enter.use = true;
+	range.world->setInput(leader, enter);
+	range.world->tick(1 / 30.0f);
+	range.world->setInput(leader, {});
+	range.world->tick(1 / 30.0f);
+	CHECK(range.world->playerInfo(leader, info) && info.vehicle == vehicle->id());
+
+	range.world->setSpawnChoice(member, game::GameWorld::kSpawnOnLeader);
+	CHECK(range.world->spawnSoldier(member));
+	CHECK(range.world->playerInfo(member, info) && info.vehicle == vehicle->id());
+	CHECK(info.seat >= 0);
+	CHECK(range.world->vehicleOccupants(vehicle->id()).size() == 2);
+	range.world->setSpawnChoice(third, game::GameWorld::kSpawnOnLeader);
+	CHECK(!range.world->spawnSoldier(third));
+	CHECK(range.world->playerInfo(third, info) && !info.alive);
+}
+
 TEST(GameWorld_ProjectileImpactUsesIncomingVelocityBeforePenetration)
 {
 	Range range;

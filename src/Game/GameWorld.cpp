@@ -6339,9 +6339,12 @@ uint32_t GameWorld::squadBeacon(int team, int squad) const
 // (game server slot 0xa8): the member drops onto the beacon in a pod.
 // Without spawnInPod (no shipped beacon) the tries scatter round the
 // beacon as round a leader.
-bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod)
+bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& position, float& yaw, std::string& pod,
+	uint32_t& enterVehicle, int& enterSeat)
 {
 	pod.clear();
+	enterVehicle = 0;
+	enterSeat = -1;
 	if (player.squad == 0 || (player.spawnChoice != kSpawnOnLeader && player.spawnChoice != kSpawnOnBeacon)) {
 		return false;
 	}
@@ -6370,10 +6373,26 @@ bool GameWorld::spawnAtSquad(Player& player, world::Object*& at, physics::Vec3& 
 	}
 	for (const int member : squadMembers(player.team, player.squad)) {
 		const Player* leader = findPlayer(member);
-		if (leader && leader->squadLeader && leader->alive && !leader->vehicle && leader != &player) {
+		if (leader && leader->squadLeader && leader->alive && leader != &player) {
 			at = m_objects.find(leader->object);
 			if (!at) {
 				return false;
+			}
+			if (leader->vehicle) {
+				// Retail's SquadLeaderSpawnPoint is carried by the soldier and
+				// becomes enter-on-spawn while the leader's control object is a
+				// vehicle (0x004c7f10, 0x005b19a0). Its seat search is centred
+				// on that soldier and uses the human 5 m / bot 15 m radius.
+				const physics::Vec3 base {at->position().x, at->position().y, at->position().z};
+				const Body* body = spawnSeat(player.team, base, player.ai ? 15.0f : 5.0f, leader->vehicle, enterSeat);
+				if (!body) {
+					at = nullptr; // no free seat: refuse, with no ground fallback
+					return true;
+				}
+				enterVehicle = body->object;
+				position = base;
+				yaw = leader->body.yawDegrees;
+				return true;
 			}
 			bool prone = false;
 			if (scatterOnLeader(*leader, position, yaw, &prone, player.ai)) {
@@ -7943,7 +7962,9 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	physics::Vec3 squadPosition;
 	float squadYaw = 0;
 	std::string squadPod;
-	const bool withSquad = spawnAtSquad(player, squadAt, squadPosition, squadYaw, squadPod);
+	uint32_t squadEnterVehicle = 0;
+	int squadEnterSeat = -1;
+	const bool withSquad = spawnAtSquad(player, squadAt, squadPosition, squadYaw, squadPod, squadEnterVehicle, squadEnterSeat);
 	if (withSquad && !squadAt) {
 		return nullptr; // the leader's spawn point found no room
 	}
@@ -8127,6 +8148,15 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	if (player.kitObject) {
 		player.battery = 0;
 	}
+	if (squadEnterVehicle) {
+		// The free seat was selected before creating the soldier. Seat it before
+		// any PickupKit / PlayerSpawn callback can occupy the vehicle or force a
+		// ground fallback after the squad spawn point accepted the spawn.
+		if (Body* body = findBody(squadEnterVehicle)) {
+			seatPlayer(player, *body, squadEnterSeat);
+			created->setHidden(true);
+		}
+	}
 	if (player.kitObject) {
 		raise("PickupKit", {ScriptValue::player(player.id), ScriptValue::object(player.kitObject)});
 	}
@@ -8137,6 +8167,9 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			player.weaponObject = held->id();
 		}
 	}
+	if (squadEnterVehicle) {
+		raise("EnterVehicle", {ScriptValue::player(player.id), ScriptValue::object(squadEnterVehicle)});
+	}
 	// setEnterOnSpawn (a human, 5 m) / setAIEnterOnSpawn (15 m): straight
 	// into the nearest free seat of a vehicle of the team near the point
 	// (0x005a98e0, which the point's test 0x005b24f0 also asks: no such
@@ -8145,7 +8178,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 	// aiEnterOnSpawn, for an AI only) searches 5 m for a human at an
 	// enterOnSpawn point and 15 m for a bot at either kind; a human at an
 	// aiEnterOnSpawn-only point stands.
-	if (!withSquad && (pointFlags.enterOnSpawn || (player.ai && pointFlags.aiEnterOnSpawn))) {
+	if (!squadEnterVehicle && !withSquad && (pointFlags.enterOnSpawn || (player.ai && pointFlags.aiEnterOnSpawn))) {
 		enterOnSpawn(player, *created, pointAt, player.ai ? 15.0f : 5.0f, mobile ? at->id() : 0);
 	}
 	// A beacon's pod (0x004bef90: the spawn point's slot 0x58, its vehicle
