@@ -35,7 +35,10 @@ target_include_directories(zlibstatic PUBLIC ${zlib_SOURCE_DIR} ${zlib_BINARY_DI
 
 # Python 3 for the game's scripts (the retail game embeds Python 2.3 as
 # dice_py.dll). Optional; not used by the retail-compat build.
-if(NOT BF2142_RETAIL_COMPAT AND NOT CMAKE_CROSSCOMPILING)
+# The native Windows x64 build uses the host's matching x64 Python install,
+# even though CMake marks Clang/MinGW as cross-compiling. The 32-bit retail
+# compatibility build still omits Python, as do other cross-compiles.
+if(NOT BF2142_RETAIL_COMPAT AND (NOT CMAKE_CROSSCOMPILING OR (WIN32 AND CMAKE_HOST_WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)))
 	find_package(Python3 3.9 COMPONENTS Development.Embed)
 endif()
 

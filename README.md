@@ -163,13 +163,19 @@ run-windows.cmd --play-sound checkboxPress
 ```
 
 The local scripts expect CMake, LLVM-MinGW, SDL3, OpenAL Soft, glslang and
-SPIRV-Cross in the adjacent workspace `work/` directory. `build-windows.cmd` uses `Q:` as a
+SPIRV-Cross in the adjacent workspace `work/` directory. They also use the
+MSYS2 UCRT64 FFmpeg and pkgconf packages under `%USERPROFILE%\msys64` for Bink
+movies and dependency discovery. Install them in an MSYS2 UCRT64 shell with
+`pacman -S mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-pkgconf`. The
+Windows build links against patched OpenSSL 4.1.1-dev in
+`%USERPROFILE%\openssl-4.1.1-ucrt` for account-service TLS; the build and run
+scripts expect that user-level install.
+`build-windows.cmd` uses `Q:` as a
 temporary short path while compiling the embedded shaders; it removes that
-mapping when the build finishes. Windows builds may omit OpenSSL (account
-service login) and FFmpeg (Bink movies) if those libraries are not installed.
-The build also fetches Valve's pinned Steam Audio SDK (181 MB); pass `--enhanced`
-to use it for sound occlusion. Without `--enhanced`, the SDK is present but
-unused, and the game keeps retail sound obstruction.
+mapping when the build finishes. The build also fetches Valve's pinned Steam
+Audio SDK (181 MB); pass `--enhanced` to use it for sound occlusion. Without
+`--enhanced`, the SDK is present but unused, and the game keeps retail sound
+obstruction.
 
 Third-party libraries (libogg, libvorbis, zlib, Speex) are fetched and built by CMake;
 Valve's Steam Audio is fetched only when asked for (see below). OpenAL is
