@@ -52,6 +52,14 @@ TEST(DeploymentScreen_EnterClosesAndConfirmsWhileTimerRuns)
 	CHECK(dice::main::deploymentConfirmPressed(true, false, true, true)); // DONE closes either tab
 }
 
+TEST(DeploymentScreen_UnmatchedJoinedPickStaysOpen)
+{
+	using dice::main::joinedSpawnPickCanSubmit;
+	CHECK(joinedSpawnPickCanSubmit(false, -1)); // no explicit marker: retain default behavior
+	CHECK(joinedSpawnPickCanSubmit(true, 192));
+	CHECK(!joinedSpawnPickCanSubmit(true, -1)); // stale/unmatched marker: do not submit or close
+}
+
 TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)
 {
 	using dice::main::killedInfoShown;

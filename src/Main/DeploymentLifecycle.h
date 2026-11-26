@@ -38,6 +38,14 @@ namespace dice::main {
 		return doneButton || (enterPressed && screenShown && !squadTab);
 	}
 
+	// A visible joined marker is an explicit pick. If its group disappeared
+	// before submission, keep deployment open instead of sending -1 (the
+	// server's random-team-spawn request). No marker remains the legacy default.
+	constexpr bool joinedSpawnPickCanSubmit(bool hasExplicitPick, int group)
+	{
+		return !hasExplicitPick || group >= 0;
+	}
+
 	// Enter toggles the spawn screen (menu state 1, 0x00754d74 -> 0x0074fd90) alive or dead; the respawn
 	// timer is the server's (0x004bfe40) and never looks at the screen. Dead, it starts shown.
 	constexpr bool deploymentScreenShown(bool alive, bool open, bool hiddenWhileDead)
