@@ -12,6 +12,7 @@
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/SpawnGroupMarkers.h"
 #include "Main/HudWorld.h"
 #include "Render/TextureSuffix.h"
 #include "Console/ConsoleBinding.h"
@@ -3342,6 +3343,42 @@ TEST(HudMenus_SquadLeaderSpawnMarkerTextures)
 	const menu::SquadSpawnMarkerStyle selectedUnavailable = menu::squadSpawnMarkerStyle(true, false);
 	CHECK(selectedUnavailable.label == unselected.label
 		&& selectedUnavailable.texture == "Ingame/Minimap/Icons/spawn_SquadSelectedInactive.dds");
+}
+
+TEST(HudMenus_JoinedSpawnGroupMarkersUseNetworkedGroups)
+{
+	// The APC's carrying object can be out of scope; its received group remains
+	// visible at the group's networked position and keeps the compact id.
+	const std::vector<host::HudWorld::SpawnGroupInfo> groups {
+		{1, 2, -1, -40.0f, 12.0f, true},       // control-point group
+		{194, 2, 3, 25.0f, -8.0f, false},      // own squad, inactive, independent of seat
+		{192, 2, -1, 912.0f, 940.0f, false},   // out-of-scope APC, over 850 m away
+		{193, 1, -1, 0.0f, 0.0f, true},        // another team's group
+	};
+	const auto markers = main::joinedSpawnGroupMarkers(groups, 2, 3, 194);
+	CHECK(markers.size() == 3);
+	CHECK(markers[0].id == 1 && markers[0].x == -40.0f && markers[0].z == 12.0f);
+	CHECK(markers[0].active && !markers[0].selected && !markers[0].ownSquad);
+	CHECK(main::joinedSpawnGroupTexture(markers[0]) == "Ingame/Minimap/Icons/spawn_UnSelected.dds");
+	CHECK(markers[1].id == 192 && markers[1].x == 912.0f && markers[1].z == 940.0f);
+	CHECK(!markers[1].active && !markers[1].ownSquad);
+	CHECK(main::joinedSpawnGroupTexture(markers[1]) == "Ingame/Minimap/Icons/spawn_UnSelectedInactive.dds");
+	CHECK(markers[2].id == 194 && markers[2].selected && !markers[2].active && markers[2].ownSquad);
+	CHECK(main::joinedSpawnGroupTexture(markers[2]) == "Ingame/Minimap/Icons/spawn_SquadSelectedInactive.dds");
+	CHECK(main::joinedOwnSquadSpawnGroup(groups, 2, 3) == 194);
+	CHECK(main::joinedOwnSquadSpawnGroup(groups, 2, 0) == -1);
+	CHECK(main::joinedOwnSquadSpawnGroup(groups, 1, 3) == -1);
+
+	const std::vector<host::HudWorld::SpawnGroupInfo> overlap {
+		{194, 2, 3, 50.0f, 50.0f, false},
+		{192, 2, -1, 50.0f, 50.0f, true},
+	};
+	const auto overlappingMarkers = main::joinedSpawnGroupMarkers(overlap, 2, 3, 194);
+	CHECK(overlappingMarkers.size() == 2);
+	CHECK(overlappingMarkers[0].id == 192 && !overlappingMarkers[0].ownSquad);
+	CHECK(overlappingMarkers[1].id == 194 && overlappingMarkers[1].ownSquad);
+	CHECK(overlappingMarkers[0].x == overlappingMarkers[1].x
+		&& overlappingMarkers[0].z == overlappingMarkers[1].z);
 }
 
 // The flares / active defence meter (0x007be490): ready full with the

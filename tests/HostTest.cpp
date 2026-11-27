@@ -885,7 +885,7 @@ float distance(const net::Vec3f& a, const dice::hfe::physics::Vec3& b)
 } // namespace
 
 // CP groups use compact spawn-manager ids on the wire (the 6/6 key), while
-// retaining the CP ghost as the interim carrying object until F2.
+// using the group's own networkable position even when no carrying CP ghost is present.
 TEST(NetHost_ControlPointSpawnGroupsUseCompactIdsAndMapBytes)
 {
 	HostRange range;
@@ -945,9 +945,8 @@ TEST(NetHost_ControlPointSpawnGroupsUseCompactIdsAndMapBytes)
 	CHECK(client.world().spawnGroups().size() == 7);
 	std::map<uint16_t, uint32_t> ghostObjects;
 	host::RemoteHudWorld remoteHud(client.world(), round, ghostObjects);
-	remoteHud.setTerrainExtent(-512.0f, -512.0f, 1024.0f);
 	CHECK(remoteHud.spawnablePoints(2).size() == 7);
-	const auto remoteControlPoints = remoteHud.controlPointList();
+	const auto remoteGroups = remoteHud.spawnGroups();
 	const auto available = round.spawnableGroups(2);
 	for (const auto& entry : spawnAt) {
 		const int cpId = entry.first;
@@ -958,15 +957,15 @@ TEST(NetHost_ControlPointSpawnGroupsUseCompactIdsAndMapBytes)
 		const auto remote = client.world().spawnGroups().find(local->id);
 		CHECK(remote != client.world().spawnGroups().end());
 		if (remote == client.world().spawnGroups().end()) continue;
-		const auto mapped = std::find_if(remoteControlPoints.begin(), remoteControlPoints.end(), [id = local->id](const auto& cp) {
-			return cp.id == id;
+		const auto mapped = std::find_if(remoteGroups.begin(), remoteGroups.end(), [id = local->id](const auto& group) {
+			return group.id == id;
 		});
-		CHECK(mapped != remoteControlPoints.end());
-		if (mapped != remoteControlPoints.end()) {
+		CHECK(mapped != remoteGroups.end());
+		if (mapped != remoteGroups.end()) {
 			const float decodedX = -512.0f + remote->second.mapX / 255.0f * 1024.0f;
 			const float decodedZ = -512.0f + remote->second.mapZ / 255.0f * 1024.0f;
-			CHECK(mapped->team == 2 && std::abs(mapped->position.x - decodedX) < 0.01f
-				&& std::abs(mapped->position.z - decodedZ) < 0.01f);
+			CHECK(mapped->team == 2 && std::abs(mapped->x - decodedX) < 0.01f
+				&& std::abs(mapped->z - decodedZ) < 0.01f);
 		}
 		const auto expectedGroupAt = groupAt.at(cpId);
 		CHECK(remote->second.mapX == std::clamp(static_cast<int>((expectedGroupAt.x + 512.0f) / 1024.0f * 255), 0, 255));
