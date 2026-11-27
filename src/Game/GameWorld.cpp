@@ -1302,7 +1302,9 @@ bool GameWorld::takeHitIndicator(int id)
 
 void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 {
-
+	if (m_noteDamage && amount > 0 && m_damageNotes.size() < 1024) {
+		m_damageNotes.push_back({object, attacker, amount});
+	}
 	if (titanDamage(object, amount, attacker)) {
 		return; // a Titan's armour (0x004c0e40's Titan rules)
 	}

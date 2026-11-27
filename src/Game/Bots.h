@@ -592,6 +592,13 @@ struct BotSettings {
 	// the driver's seat or gets out (loneSeat), and a lone driver keeps its seat (changeUrgency); not retail.
 	const bool* botLoneSeat = nullptr;
 	bool loneSeatFix() const { return enhanced && *enhanced && botLoneSeat && *botLoneSeat; }
+	// enhanced.botThreat, also read live: a target's kills in the last minute raise its score (BotManager::threat); not retail.
+	const bool* botThreat = nullptr;
+	bool threatWeighs() const { return enhanced && *enhanced && botThreat && *botThreat; }
+	// enhanced.botTitanRepair, also read live: engineers respawn on their Titan to mend its downed guns, and a
+	// gunner leaves a wrecked gun (BotsTitan.cpp); not retail.
+	const bool* botTitanRepair = nullptr;
+	bool titanRepairs() const { return titanPlay() && botTitanRepair && *botTitanRepair; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
@@ -878,6 +885,18 @@ public:
 	// What a bot does now (for tests and debugging): the running
 	// behaviour's name (MoveTo, Idle, Fire, Change, Revive, Flee, ...).
 	std::string behaviour(int player) const;
+	// What a bot pilot's fly() did last (a hunt's leg, a plan's move, an evasion), "" for none.
+	std::string flyState(int player) const
+	{
+		const auto it = m_bots.find(player);
+		return it != m_bots.end() ? it->second.flyState : "";
+	}
+	// The enemy Titan gun hub a bot pilot hunts, 0 for none.
+	uint32_t huntedPart(int player) const
+	{
+		const auto it = m_bots.find(player);
+		return it != m_bots.end() ? it->second.huntPart : 0;
+	}
 	SoldierInput lastInputFor(int player) const;
 	// A bot's value of a seat (0x100d3e70; `vehicle` 0 for its soldier), as
 	// BBChange weighs it; 0 for no such bot.
@@ -1362,6 +1381,8 @@ private:
 		uint32_t titanRepair = 0;  // enhanced.botTitan: the part of its own Titan it is mending (titanRepair)
 		uint32_t titanSortieRider = 0;  // the deck sortie a passenger joined
 		int titanSortie = 0;       // transport: 0 waiting, 1 dropping riders, 2 supporting silos, 3 ordinary AI; gunship: 1 taking off
+		uint32_t titanSortieFor = 0; // enhanced.botPilots: the gunship whose deck sortie began at titanSortieAt
+		float titanSortieAt = -1e9f;
 		int titanSortieSilo = -1;  // that silo's control point
 		float titanSortieUntil = 0; // over the silo: wait for riders until then
 		int titanSupportSilo = -1, titanSupportStep = 0;
@@ -1448,8 +1469,24 @@ private:
 		int huntLeg = 0;
 		bool huntAway = false;
 		float huntSeating = -2e9f;
+		// The run in at a Titan's gun hub: its hit points at the last loss seen and the presses since (five with
+		// no loss: the rounds meet something else, and the hub is passed over for a time). Since when the run in
+		// has crawled (it breaks off rather than hang there).
+		float huntPartHitPoints = 0;
+		int huntPartPresses = 0;
+		float huntSlowSince = -1;
+		uint32_t huntSkipPart = 0;
+		float huntSkipUntil = -1e9f;
+		// enhanced.botPilots: the evasion (hunt's evade): since when, from where (the threat's place), its turn
+		// side; the health at the last look and when; when it last ended; and the retreat to repair.
+		float evadeSince = -1e9f, evadeUntil = -1e9f;
+		physics::Vec3 evadeFrom;
+		float evadeSide = 1;
+		float lastHealth = -1, lastHealthAt = -1e9f;
+		bool retreating = false, retreatDown = false;
 		float pilotFirstPressFor = -2e9f;
 		float heliSeating = -2e9f; // the seating counted in the pilot stats
+		const char* flyState = "";  // $BF2142_BOT_STATS: what fly() did this tick (fightStats)
 		float heliTapAt = -1e9f;
 		// When the bot last took a seat (BBChangeLandingCraft's x6 within 15 s).
 		float seatedAt = -1e9f;
@@ -1978,6 +2015,20 @@ private:
 	std::vector<GameWorld::PlayerInfo> m_players;   // as of this update
 	std::vector<GameWorld::VehicleInfo> m_vehicles; // as of this update
 	std::map<int, Bot> m_bots;
+	// enhanced.botThreat: each player's kills of the last 60 s (their times) and its kill count at the last
+	// update; threat() weighs a target by them.
+	std::map<int, std::vector<float>> m_killTimes;
+	std::map<int, int> m_killsSeen;
+	void noteKills();
+	float threat(int player) const;
+	// enhanced.botTitan: the Titan gunners of this update whose gun hub is whole (player -> its hub). Their
+	// m_players position is the hub's, less the metre the aim adds for a seated target (titanGunnerAt), so the
+	// bots see and aim at the gun under the hull rather than the Titan's middle; they are fought as
+	// HeavyArmour (no shipped weapon has a strength against a Titan, so nothing ever fired at a gunner).
+	std::map<int, uint32_t> m_titanGunners;
+	bool titanGunnerAt(GameWorld::PlayerInfo& p, uint32_t* hub = nullptr) const;
+	bool titanGunTarget(int player) const { return m_titanGunners.count(player) != 0; }
+	int targetStrengthType(const GameWorld::PlayerInfo& target) const;
 	void refreshFollowers();
 	size_t m_refreshCursor = 0; // the follower refresh's round robin (0x100c6cc0, +0xf4)
 	Side m_sides[3];
@@ -2014,6 +2065,28 @@ private:
 		std::map<std::string, std::pair<float, int>> hunted; // enhanced.botPilots: by target kind, seconds and presses
 	};
 	std::map<std::string, PilotStats> m_pilotStats;
+	// $BF2142_BOT_STATS's fight counts (BotsPilot.cpp fightStats): the
+	// gunships' seconds by what their pilot flew, their gunners' seconds and
+	// rounds; hits and damage by who dealt them (a gunship's seat, a Titan
+	// gun, a soldier, another vehicle) on what (a Titan gun, the rest of a
+	// Titan, a vehicle, an aircraft, a soldier); kills by who; the Titan
+	// guns' wrecks, repairs and downtime; and the enemy bots aiming at each
+	// Titan gun (its gunner, or its hub for a gunship), the busy ones (2
+	// kills or more in the last 60 s) apart.
+	struct FightStats {
+		std::map<std::string, float> gunshipFlight;
+		float gunnerSeated = 0, gunnerFiring = 0;
+		std::map<std::string, std::pair<int, float>> hits; // "who > what": hits, damage
+		std::map<std::string, int> kills;
+		std::map<int, int> lastKills; // per player, the kills seen last tick
+		std::map<uint32_t, float> gunDownAt; // Titan gun hub -> when it went down
+		int gunsDown = 0, gunsRepaired = 0;
+		float downtime = 0;
+		std::map<std::pair<uint32_t, int>, std::vector<float>> gunKillTimes; // (Titan, seat) -> kill times
+		float busyGunSeconds = 0, busyTargeted = 0, gunSeconds = 0, gunTargeted = 0;
+	} m_fight;
+	void fightStats(float seconds);
+	std::string fightStatsReport() const;
 	// The pilot's gun for a target (fly's choice, 0x100dd4a0).
 	struct PilotGun {
 		std::string gun;
@@ -2031,6 +2104,9 @@ private:
 	bool hunt(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, ai::HeliPilot& pilot,
 		const std::string& rootAi, float dt, float seconds, SoldierInput& input);
 	PilotGun pilotGunFor(Bot& bot, const GameWorld::PlayerInfo& self, int strengthType);
+	// enhanced.botPilots (BotsPilot.cpp): a gunship pilot locked on or hit hard turns away and dives for a few
+	// seconds, and one badly damaged flies to a supply object that mends it; false when neither (the hunt flies).
+	bool evade(Bot& bot, const GameWorld::PlayerInfo& self, const GameWorld::VehicleInfo& vehicle, ai::HeliPilot& pilot);
 	// $BF2142_BOT_STATS's engagements: seconds a bot ran Fire with a
 	// target, by where it sat, the target's CombatStrengthType and range;
 	// and of those on foot, the seconds zoomed in.
@@ -2149,6 +2225,11 @@ private:
 	bool driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	std::set<uint32_t> m_meshGaveUp; // vehicles a driver could not bring to the mesh in a minute: left, and not taken again
 	bool titanRespawn(const GameWorld::PlayerInfo& self);
+	// enhanced.botTitanRepair: whether a kit carries the repair tool; whether `team`'s Titan has a gun down (a wreck, or
+	// under half its hit points) with fewer than two engineers aboard or on the way (spawned there in the last 20 s).
+	bool kitRepairs(const std::string& kit) const;
+	bool titanWantsEngineer(int team);
+	std::array<std::vector<float>, 3> m_engineersSent;
 	const GameWorld::VehicleInfo* titanTransport(int team, const GameWorld::TitanInfo& home);
 	bool titanRideGoal(Bot& bot, const GameWorld::PlayerInfo& self, physics::Vec3& goal);
 	void titanRide(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);

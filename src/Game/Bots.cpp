@@ -1029,6 +1029,7 @@ BotManager::~BotManager()
 			std::fprintf(stderr, "    %-26s %6.1f s\n", pattern.c_str(), seconds);
 		}
 	}
+	std::fprintf(stderr, "%s", fightStatsReport().c_str());
 	std::fprintf(stderr, "bots stuck (30 s windows under 2 m): %.0f s over %zu bots\n", stuck, m_stuckPerBot.size());
 	for (const auto& [name, seconds] : m_stuckSeconds) {
 		std::fprintf(stderr, "  stuck %-34s %6.0f s\n", name.c_str(), seconds);
@@ -1652,6 +1653,62 @@ int BotManager::strengthTypeOf(const GameWorld::PlayerInfo& player) const
 	return 1;
 }
 
+// enhanced.botTitan (not retail: retail's bots never man a Titan gun). A Titan gunner as a target: at its gun's hub
+// (less the metre the aims add over a seated target's place), true while the hub is whole.
+bool BotManager::titanGunnerAt(GameWorld::PlayerInfo& p, uint32_t* hub) const
+{
+	if (!m_settings.titanPlay() || !p.alive || !p.vehicle || p.seat < 0 || !m_world.isTitan(p.vehicle)) {
+		return false;
+	}
+	uint32_t part = 0;
+	physics::Vec3 at;
+	bool wreck = false;
+	if (!m_world.titanSeatHub(p.vehicle, p.seat, part, at, wreck)) {
+		return false;
+	}
+	p.position = at - physics::Vec3 {0, 1, 0};
+	if (hub) {
+		*hub = part;
+	}
+	return !wreck;
+}
+
+// The strength type a bot weighs its weapons against `target` by: a Titan gunner at a whole hub (titanGunTarget)
+// as HeavyArmour, the gun's armour; else its own (strengthTypeOf).
+int BotManager::targetStrengthType(const GameWorld::PlayerInfo& target) const
+{
+	return titanGunTarget(target.id) ? 2 : std::clamp(strengthTypeOf(target), 0, 7);
+}
+
+// enhanced.botThreat (not retail: AIDLL's target scores, BBFire 0x10075fb0 and BBFire3d 0x1007d6c0, weigh a target
+// by strength, reach, motion, freshness and temperature, never by what it has done). Each kill a player made in the
+// last 60 s raises its weight by half, up to six: 1 to 4.
+void BotManager::noteKills()
+{
+	for (const GameWorld::PlayerInfo& p : m_players) {
+		int& seen = m_killsSeen[p.id];
+		if (p.kills > seen) {
+			std::vector<float>& times = m_killTimes[p.id];
+			times.insert(times.end(), static_cast<size_t>(std::min(p.kills - seen, 8)), m_time);
+		}
+		seen = p.kills;
+	}
+	for (auto it = m_killTimes.begin(); it != m_killTimes.end();) {
+		auto& times = it->second;
+		times.erase(times.begin(), std::find_if(times.begin(), times.end(), [this](float t) { return m_time - t < 60; }));
+		it = times.empty() ? m_killTimes.erase(it) : std::next(it);
+	}
+}
+
+float BotManager::threat(int player) const
+{
+	if (!m_settings.threatWeighs()) {
+		return 1;
+	}
+	const auto it = m_killTimes.find(player);
+	return it == m_killTimes.end() ? 1.0f : 1 + 0.5f * static_cast<float>(std::min<size_t>(it->second.size(), 6));
+}
+
 // An object template's AI template (ObjectTemplate.aiTemplate), "" for none.
 std::string BotManager::aiTemplateOf(const std::string& objectTemplate) const
 {
@@ -1731,9 +1788,15 @@ void BotManager::update(float seconds)
 	m_players = m_world.playerList();
 	m_vehicles = m_world.vehicleList();
 	m_playerIndex.clear();
+	m_titanGunners.clear();
 	for (size_t i = 0; i < m_players.size(); ++i) {
 		m_playerIndex[m_players[i].id] = i;
+		uint32_t hub = 0;
+		if (titanGunnerAt(m_players[i], &hub)) {
+			m_titanGunners[m_players[i].id] = hub;
+		}
 	}
+	noteKills();
 	m_vehicleTeams.clear();
 	for (const GameWorld::PlayerInfo& p : m_players) {
 		if (p.alive && p.vehicle) {
@@ -2032,6 +2095,19 @@ void BotManager::update(float seconds)
 			continue;
 		}
 		if (self->vehicle && m_world.isTitan(self->vehicle)) {
+			// enhanced.botTitanRepair: out of a gun that is a wreck (it fires nothing until mended; an engineer
+			// mends it from its station inside, titanRepair).
+			uint32_t hub = 0;
+			physics::Vec3 hubAt;
+			bool wreck = false;
+			if (m_settings.titanRepairs() && m_world.titanSeatHub(self->vehicle, self->seat, hub, hubAt, wreck) && wreck) {
+				input.use = !bot.usedLast;
+				bot.usedLast = input.use;
+				bot.behaviour = "TitanGunWrecked";
+				bot.lastInput = input;
+				m_world.setInput(self->id, input);
+				continue;
+			}
 			const auto seats = m_world.vehicleSeats(self->vehicle);
 			if (self->seat >= 0 && static_cast<size_t>(self->seat) < seats.size() && seats[self->seat].podLauncher) {
 				// In a pod array's seat: fire, which launches the pod (the bot's drop, as before).
@@ -2248,6 +2324,9 @@ void BotManager::update(float seconds)
 		Bot& bot = m_bots[senses[i].second->id];
 		sense(bot, *senses[i].second, players);
 		bot.senseAge = 0;
+	}
+	if (m_stats) {
+		fightStats(seconds);
 	}
 }
 
@@ -3554,6 +3633,7 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	const std::string& pattern = bot.pattern;
 	const int titanMode = bot.titanFlyMode; // BotsTitan.cpp's order for this tick
 	bot.titanFlyMode = 0;
+	bot.flyState = "other";
 	if (!titanMode && (pattern == "BBPChange" || pattern == "BBPChangeLandingCraft")) {
 		return false;
 	}
@@ -3624,17 +3704,22 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 	// enhanced.botPilots (BotsPilot.cpp): an armed pilot hunts, unless its
 	// Titan's sortie has it or it sits out the take-off wait.
 	const bool waiting = pattern.rfind("BBPGotoWaypoint", 0) == 0 && m_time < bot.heliWaitUntil;
-	const bool hunting = !titanMode && armed && self.seat == 0 && !waiting && m_settings.pilotsHunt()
-		&& hunt(bot, self, *vehicle, pilot, rootAi, dt, seconds, input);
+	// It evades a lock or a heavy hit and flies off to be mended first (BotsPilot.cpp evade).
+	const bool own = !titanMode && armed && self.seat == 0 && !waiting && m_settings.pilotsHunt();
+	const bool evading = own && (bot.heli.airborne || hag > 5) && evade(bot, self, *vehicle, pilot);
+	const bool hunting = evading || (own && hunt(bot, self, *vehicle, pilot, rootAi, dt, seconds, input));
 	if (hunting) {
 		bot.heliPlanned = false; // the plans start afresh after the hunt
 	} else if (titanMode == 2 || titanMode == 4) {
+		bot.flyState = "titan sortie";
 		pilot.flyTo(toAi(bot.titanFlyTo), titanMode == 4 ? 30.0f : 0.0f);
 	} else if (titanMode == 1) {
+		bot.flyState = "titan hold";
 		pilot.flyTo(toAi(at), 0);
 		bot.heli.controls.throttle = 0; // as the take-off wait below
 	} else if (titanMode) {
 		pilot.reset();
+		bot.flyState = "titan parked";
 	} else if (fighting) {
 		const PilotGun pg = pilotGunFor(bot, self, strengthTypeOf(target));
 		const WeaponAi& weapon = pg.weapon;
@@ -3682,6 +3767,7 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		const bool inside = m_world.insideCombatArea(self.id);
 		if (!inside) {
 			pilot.flyTo(toAi(target.position), 25);
+			bot.flyState = "plan attack (out)";
 		} else if (dist >= 20 && dist <= maxRange && physics::dot(dir, vehicle->forward) > 0.5f
 			&& m_world.lineOfSight(at + vehicle->forward * 4.0f, target.position + physics::Vec3 {0, 1, 0},
 				vehicle->object, seenThrough, target.vehicle) && !seenThrough) {
@@ -3692,15 +3778,18 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 			}
 			const bool ground = types ? (types & kITGround) != 0 : !target.vehicle; // a soldier is ITGround (Common/ai/Objects.ai)
 			pilotStrike(bot, *vehicle, pilot, pg, target.position, target.velocity, ground, 40, dt, seconds, input, stats);
+			bot.flyState = "plan attack (in)";
 		} else if (bot.heliRun == 0) {
 			// HeliMoveAwayFromObject: 100 m on at its own height, margin 40,
 			// until 150 m from the target.
 			physics::Vec3 away = at + flatUnit(vehicle->forward) * 100.0f;
 			pilot.flyTo(toAi(away), 40);
 			bot.heliRun = dist > 150 ? 1 : 0;
+			bot.flyState = "plan attack (away)";
 		} else {
 			pilot.flyTo(toAi(target.position), 50); // HeliMoveToObject, margin 50
 			bot.heliRun = dist < 30 ? 0 : 1;
+			bot.flyState = "plan attack (back)";
 		}
 	} else if (pattern.rfind("BBPGotoWaypoint", 0) == 0 && bot.hasGoal) {
 		if (!bot.heliPlanned) {
@@ -3731,9 +3820,11 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		}
 		if (m_time < bot.heliWaitUntil) {
 			pilot.flyTo(toAi(at), 0);
+			bot.flyState = "take-off wait";
 			bot.heli.controls.throttle = 0; // margin 0: the collective let go
 		} else {
 			pilot.flyTo(toAi(bot.heliHover), 25);
+			bot.flyState = "plan waypoint";
 			if (physics::lengthSquared(bot.heliHover - at) < 2.0f * 2.0f) {
 				bot.arbitration.replan = true; // the plan is done
 				bot.heliPlanned = false;
@@ -3743,12 +3834,15 @@ bool BotManager::fly(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 		const bool airborne = bot.heli.airborne || std::sqrt(physics::lengthSquared(vehicle->velocity)) > 3;
 		if (!airborne) {
 			pilot.reset();
+			bot.flyState = "grounded";
 		} else if (armed) {
 			physics::Vec3 ahead = at + (flatUnit(vehicle->forward) + vehicle->right) * 500.0f;
 			ahead.y = at.y;
 			pilot.flyTo(toAi(ahead), 25);
+			bot.flyState = "plan wander";
 		} else {
 			hover(bot.hasGoal ? bot.goal : at);
+			bot.flyState = "hover";
 		}
 	}
 	(void)hag;
@@ -4135,7 +4229,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 		if (other == players.end() || !other->alive) {
 			continue;
 		}
-		const int targetType = strengthTypeOf(*other);
+		const int targetType = targetStrengthType(*other);
 		const physics::Vec3 at = known.position + physics::Vec3 {0, kChestHeight, 0};
 		const float distance = std::max(std::sqrt(physics::lengthSquared(at - eye)), 1.0f);
 		const bool facing = std::cos(angleBetween(forward, headingTo(eye, at)) * kRadians) >= 0.9f;
@@ -4180,6 +4274,9 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 			for (const auto& [index, gun] : seatArmament(self)) {
 				WeaponAi w = seatWeaponAi(self, gun);
 				float score = w.strength[static_cast<size_t>(targetType)];
+				if (titanGunTarget(other->id) && m_world.isTitan(self.vehicle)) {
+					score = std::max(score, 4.0f); // enhanced.botTitan: a Titan's gun at the enemy's (where it reaches, below)
+				}
 				float range = w.maxRange;
 				if (!m_settings.weapons.count(lower(gun)) && !m_titanGunWeapons.count(lower(gun))) {
 					// No weaponTemplate for the gun (the vehicles' ai/Weapons.ai
@@ -4211,7 +4308,7 @@ float BotManager::fireUrgency(Bot& bot, const GameWorld::PlayerInfo& self, const
 			continue;
 		}
 		const float freshness = known.lostAt < 0 ? 1.0f : 1.0f / ((m_time - known.lostAt) * 0.05f + 1.5f);
-		const float score = std::max(0.0f, 1 - distance / (1.2f * maxRange)) * best * freshness * 5;
+		const float score = std::max(0.0f, 1 - distance / (1.2f * maxRange)) * best * freshness * 5 * threat(known.player);
 		if (known.player == bot.target) {
 			currentScore = score;
 		}
@@ -4435,7 +4532,7 @@ void BotManager::pickWeapon(Bot& bot, const GameWorld::PlayerInfo& self, const s
 		}
 		return nullptr;
 	};
-	const int targetType = std::clamp(strengthTypeOf(*target), 0, 7);
+	const int targetType = targetStrengthType(*target);
 	const physics::Vec3 at = known->position;
 	WeaponChoice c;
 	c.soldierBot = !self.vehicle;
@@ -5539,7 +5636,7 @@ float BotManager::fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 	};
 	const auto scoreOf = [&](const GameWorld::PlayerInfo* other, const physics::Vec3& position, float freshness,
 							 float alertAt) -> float {
-		const int type = std::clamp(strengthTypeOf(*other), 0, 7);
+		const int type = targetStrengthType(*other);
 		float strength = 0;
 		for (const WeaponAi& w : guns) {
 			strength = std::max(strength, w.strength[static_cast<size_t>(type)]);
@@ -5601,7 +5698,7 @@ float BotManager::fire3dUrgency(Bot& bot, const GameWorld::PlayerInfo& self, flo
 		const float score = facing * reach * 0.5f * temperature * motion * freshness * strength * recency;
 		const std::array<float, 8> units = battleArray(*other);
 		// Without the AI scripts (the tests) no unit has strengths: not scaled.
-		return m_settings.aiTemplates.empty() ? score : score * fire3dUnitScale(units[static_cast<size_t>(ownType)]);
+		return threat(other->id) * (m_settings.aiTemplates.empty() ? score : score * fire3dUnitScale(units[static_cast<size_t>(ownType)]));
 	};
 	float best = 0, currentScore = 0;
 	int bestTarget = -1;
@@ -7222,6 +7319,7 @@ void BotManager::fire(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput&
 	if (!m_world.playerInfo(bot.target, target) || !target.alive) {
 		return;
 	}
+	titanGunnerAt(target); // enhanced.botTitan: a Titan gunner at its gun's hub
 	const auto known = std::find_if(bot.known.begin(), bot.known.end(), [&](const Known& k) { return k.player == bot.target; });
 	const bool inSight = known != bot.known.end() && known->lostAt < 0;
 	if (known == bot.known.end()) {

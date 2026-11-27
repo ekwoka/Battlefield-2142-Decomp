@@ -277,6 +277,21 @@ bool GameWorld::titanGunWorks(uint32_t object, int seat) const
 	return armour.state == 0 || !armour.t || number(*armour.t, "armor.disableInputOnDestroy", 0) == 0;
 }
 
+bool GameWorld::titanSeatHub(uint32_t object, int seat, uint32_t& id, physics::Vec3& at, bool& wreck) const
+{
+	const Titan* titan = titanByObject(object);
+	const world::Object* o = m_objects.find(object);
+	if (!titan || !o || seat < 0 || static_cast<size_t>(seat) >= titan->seatParts.size() || titan->seatParts[static_cast<size_t>(seat)] < 0) {
+		return false;
+	}
+	const TitanPart& part = titan->parts[static_cast<size_t>(titan->seatParts[static_cast<size_t>(seat)])];
+	const physics::Mat3 rotation = physics::Mat3::fromYawPitchRoll({o->rotation().x, o->rotation().y, o->rotation().z});
+	id = part.id;
+	at = physics::Vec3 {o->position().x, o->position().y, o->position().z} + rotation.transform(part.position);
+	wreck = part.state != 0 || part.hitPoints <= 0;
+	return true;
+}
+
 // The Titan's wreck puts its gunners out at their seats' exits (the hubs'
 // soldierExitLocation, at the consoles inside).
 void GameWorld::titanSeatsOut(Titan& titan)
@@ -1324,6 +1339,9 @@ std::vector<GameWorld::TitanPartInfo> GameWorld::titanParts(int team, uint32_t o
 			info.percent = titanPercent(part);
 			info.healthActivationLevel = part.healthActivationLevel;
 			info.nametagPushes = part.nametagPushes;
+			for (size_t s = 0; s < titan.seatParts.size(); ++s) {
+				info.seat = titan.seatParts[s] == static_cast<int>(i) ? static_cast<int>(s) : info.seat;
+			}
 			list.push_back(info);
 		}
 	}

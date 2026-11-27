@@ -1173,6 +1173,16 @@ public:
 		int victim = -1, attacker = -1;
 	};
 	std::vector<AiHit> takeAiHits() { return std::exchange(m_aiHits, {}); }
+	// $BF2142_BOT_STATS's damage log (not retail): with it on, every hit's
+	// object (a Titan part's id for a part), attacker and amount, the last
+	// 1024 kept between takes.
+	struct DamageNote {
+		uint32_t object = 0;
+		int attacker = -1;
+		float amount = 0;
+	};
+	void noteDamage(bool on) { m_noteDamage = on; }
+	std::vector<DamageNote> takeDamageNotes() { return std::exchange(m_damageNotes, {}); }
 	// Players out of a vehicle by the use key (0x004bb570's AI event 3/3,
 	// posted once the soldier is out, with the seat's AI adaptor): the
 	// player and the vehicle's root; the last 64 kept.
@@ -2204,6 +2214,12 @@ public:
 	void stepLoneVehicle(LoneVehicle& vehicle, const VehicleInput& driver, float seconds);
 	// Deployed hubs (their objects).
 	std::vector<uint32_t> supplyObjects() const;
+	// The supply objects that would mend a vehicle (stepCrates' tests): where, and how near it must come.
+	struct VehicleSupply {
+		physics::Vec3 at;
+		float reach = 0;
+	};
+	std::vector<VehicleSupply> vehicleSupplies(uint32_t vehicle) const;
 	// Squad leaders' drones (a detonator whose projectile carries a
 	// ForceObject): the drone hovering by a player (its object, 0 for
 	// none), and whether it has strayed past its warningDistance (the
@@ -2727,6 +2743,7 @@ public:
 		float percent = 0;      // the armour's (vtable 0x40)
 		float healthActivationLevel = 100; // as TitanInfo's
 		int nametagPushes = 0;
+		int seat = -1; // the Titan gun seat whose armour it is (a gun hub), -1 for none
 	};
 	std::vector<TitanPartInfo> titanParts(int team, uint32_t objectId = 0) const;
 	// Where a part's meshes lie (world): its own node's and those of unarmoured nodes under it (a gun's control
@@ -2793,6 +2810,9 @@ public:
 	// the Titan's box; false for none.
 	// `seat` >= 0 asks for that seat only; `skip`: seats others are going to.
 	bool titanGunEntry(int player, physics::Vec3& entry, float& radius, int& seat, const std::vector<int>& skip = {}) const;
+	// A Titan gun seat's hub (the armour of its seat, TitanPartInfo::seat): its id, where it is in the
+	// world and whether it is a wreck. False for a seat without one.
+	bool titanSeatHub(uint32_t titan, int seat, uint32_t& part, physics::Vec3& at, bool& wreck) const;
 	// For the bots' Titan walk grid (BotsTitan.cpp): a ray in the Titan's
 	// own frame against what `team`'s soldiers meet of it (false when
 	// clear), the frame's two transforms, and a count that changes whenever
@@ -3478,6 +3498,8 @@ private:
 	void scanCloseTo(Player& player, CloseToScan& scan);
 	void clearCloseTo(int player, CloseToScan& scan);
 	std::vector<AiHit> m_aiHits;
+	std::vector<DamageNote> m_damageNotes;
+	bool m_noteDamage = false;
 	std::vector<UseKeyExit> m_useKeyExits;
 	std::vector<uint32_t> m_aiForgotten;
 	struct {

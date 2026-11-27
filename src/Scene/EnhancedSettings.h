@@ -8,7 +8,7 @@
 // fingerprint (main.cpp, --simulate); tools/parity-check.sh runs the same
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
-// (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, guidedCameraEase, cornerSteer,
+// (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, botThreat, botTitanRepair, guidedCameraEase, cornerSteer,
 // passengerWeapons, softLanding, titanKitFloors, titanDeckMines, squadOrderPoints, botSquadInvites): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
@@ -37,12 +37,14 @@ struct EnhancedSettings {
 	// Gameplay, also only with enhanced.enabled; changes the simulation:
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
 	bool botMovement = true; // enhanced.botMovement: bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target (Game/Bots.cpp, BotsLook.cpp)
-	bool botTitan = true; // enhanced.botTitan: bots aboard a Titan walk its decks to the consoles and the core, man its guns and fire them (Bots.cpp titanGunWeaponAi); in gpm_ti bots head for the silos (Game/BotsTitan.cpp, Bots.cpp)
+	bool botTitan = true; // enhanced.botTitan: bots aboard a Titan walk its decks to the consoles and the core, man its guns and fire them (Bots.cpp titanGunWeaponAi), and are fought at the gun's hub (titanGunnerAt); in gpm_ti bots head for the silos (Game/BotsTitan.cpp, Bots.cpp)
 	bool botOffMesh = true; // enhanced.botOffMesh: a bot on foot where the level's infantry mesh doesn't reach (the 32/64 layouts' spawns and points beyond the mesh made for the 16 one) walks a terrain grid to its goal or onto the mesh (Game/BotsTitan.cpp groundWalk); retail's bots stand there
 	bool botAsyncPaths = true; // enhanced.botAsyncPaths: the bots' costly Titan-deck ways (BotsTitan.cpp titanField) are made at the load and, when a part goes down or comes back, on worker threads while the bots walk the last ones; the vehicle-mesh search is spread over ticks. The round plays the same whatever the threads' timing
-	bool botPilots = true; // enhanced.botPilots: a gunship's bot pilot picks the best target it can hurt (vehicles, infantry groups, aircraft, a Titan's gun hubs) and flies attack runs at it (Game/BotsPilot.cpp)
+	bool botPilots = true; // enhanced.botPilots: a gunship's bot pilot picks the best target it can hurt (vehicles, infantry groups, aircraft, a Titan's gun hubs) and flies attack runs at it, evades a lock or a heavy hit and flies off to be mended when badly damaged (Game/BotsPilot.cpp)
 	bool botCommander = true; // enhanced.botCommander: in gpm_ti a team with bots and no commander has its Titan moved and its commander's tools used for it (Game/BotsTitan.cpp)
 	bool botLoneSeat = true; // enhanced.botLoneSeat: a bot left alone in a passenger or gunner seat of a vehicle with nobody driving takes the free driver's seat after 2 s, or gets out after 6 s; a bot driving alone doesn't move to its own vehicle's gun seat (Game/Bots.cpp loneSeat). Retail's sit there for good
+	bool botThreat = true; // enhanced.botThreat: a player who has killed lately (a busy Titan gun, a tank, a gunship) weighs more in the target choice of every bot whose weapons can hurt it, and of the gunship pilots' hunt (Game/Bots.cpp threat); retail's target scores know no kills
+	bool botTitanRepair = true; // enhanced.botTitanRepair: in gpm_ti an engineer bot respawns on its Titan while one of its guns is down and no engineer is aboard, and a gunner gets out of a gun that is a wreck (Game/BotsTitan.cpp); retail's bots never mend a Titan
 	bool guidedCameraEase = true; // enhanced.guidedCameraEase: a guided round's camera eases back to centre instead of snapping (Game/GameWorld.cpp)
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
@@ -109,6 +111,10 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.botCommander = v; });
 	bindProperty<bool>(console, "enhanced.botLoneSeat", ConsoleAccess::Anyone, [&settings] { return settings.botLoneSeat; },
 		[&settings](const bool& v) { settings.botLoneSeat = v; });
+	bindProperty<bool>(console, "enhanced.botThreat", ConsoleAccess::Anyone, [&settings] { return settings.botThreat; },
+		[&settings](const bool& v) { settings.botThreat = v; });
+	bindProperty<bool>(console, "enhanced.botTitanRepair", ConsoleAccess::Anyone, [&settings] { return settings.botTitanRepair; },
+		[&settings](const bool& v) { settings.botTitanRepair = v; });
 	bindProperty<bool>(console, "enhanced.guidedCameraEase", ConsoleAccess::Anyone, [&settings] { return settings.guidedCameraEase; },
 		[&settings](const bool& v) { settings.guidedCameraEase = v; });
 	bindProperty<bool>(console, "enhanced.cornerSteer", ConsoleAccess::Anyone, [&settings] { return settings.cornerSteer; },

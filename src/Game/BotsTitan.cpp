@@ -1655,6 +1655,11 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 		// toward the nearest silo the team doesn't hold, else ahead of the
 		// Titan), then the ordinary pilot's. On the deck that one waits
 		// while soldiers are near, and the Titan's crew always is.
+		// (Not while enhanced.botPilots has it back on the deck to be mended: evade's retreat.)
+		if (bot.retreating && m_settings.pilotsHunt()) {
+			bot.titanSortie = 0;
+			return false;
+		}
 		bot.titanSortie = self.driving && horizontal(self.position - home->position) < 200
 			&& (bot.titanSortie == 1 || aboard(*home, self.position)) ? 1 : 0;
 		if (!bot.titanSortie) {
@@ -1687,7 +1692,26 @@ bool BotManager::titanSortie(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 			}
 		}
 		bot.titanSortieSilo = best ? best->controlPoint : -1;
-		const physics::Vec3 to = best ? best->position : m_world.titanToWorld(home->object, {0, 0, 400});
+		physics::Vec3 to = best ? best->position : m_world.titanToWorld(home->object, {0, 0, 400});
+		// enhanced.botPilots: at least 300 m out from the Titan (a silo it stands over would hold the gunship
+		// hovering there for good, never 200 m clear), and the sortie over after 25 s.
+		if (m_settings.pilotsHunt()) {
+			physics::Vec3 out = to - home->position;
+			out.y = 0;
+			const float l = horizontal(out);
+			out = l > 1 ? out * (1 / l) : m_world.titanToWorld(home->object, {0, 0, 1}) - home->position;
+			if (l < 300) {
+				to = home->position + out * 300.0f;
+			}
+			if (bot.titanSortieFor != self.vehicle || !bot.heli.airborne) { // (from its take-off)
+				bot.titanSortieFor = self.vehicle;
+				bot.titanSortieAt = m_time;
+			}
+			if (bot.heli.airborne && m_time - bot.titanSortieAt > 25) {
+				bot.titanSortie = 0;
+				return false;
+			}
+		}
 		bot.behaviour = "TitanTakeoff";
 		bot.titanFlyTo = {to.x, std::max(m_world.terrainHeight(to.x, to.z) + 70, m_world.titanToWorld(home->object, {0, 40, 0}).y), to.z};
 		bot.titanFlyMode = 4;
@@ -1951,11 +1975,51 @@ const GameWorld::VehicleInfo* BotManager::titanTransport(int team, const GameWor
 	return nullptr;
 }
 
+// enhanced.botTitanRepair: whether a kit carries the repair tool (a child weapon of the Repair AI type).
+bool BotManager::kitRepairs(const std::string& kit) const
+{
+	const world::ObjectTemplate* t = const_cast<GameWorld&>(m_world).templates().find(kit);
+	if (!t) {
+		return false;
+	}
+	for (const auto& child : t->children()) {
+		if (weaponAi(child.name).type == WeaponAi::Repair) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool BotManager::titanWantsEngineer(int team)
+{
+	const std::vector<GameWorld::TitanInfo> titans = m_world.titans();
+	const GameWorld::TitanInfo* own = titanOf(titans, team);
+	if (!own || team < 1 || team > 2) {
+		return false;
+	}
+	bool down = false;
+	for (const GameWorld::TitanPartInfo& part : m_world.titanParts(team, own->object)) {
+		down = down || (part.kind == GameWorld::TitanPartInfo::Gun && (part.wreck || part.hitPoints < 0.5f * part.maxHitPoints));
+	}
+	if (!down) {
+		return false;
+	}
+	std::vector<float>& sent = m_engineersSent[static_cast<size_t>(team)];
+	sent.erase(std::remove_if(sent.begin(), sent.end(), [this](float t) { return m_time - t > 20; }), sent.end());
+	long engineers = static_cast<long>(sent.size());
+	for (const GameWorld::PlayerInfo& p : m_players) {
+		engineers += p.alive && p.team == team && !p.vehicle && aboard(*own, p.position) && kitSlot(p, WeaponAi::Repair) != 0;
+	}
+	return engineers < 2;
+}
+
 // Where a bot with a role spawns: a defender on its Titan; a boarder in a
 // spawn vehicle of the team within 200 m of the enemy's Titan (a transport
 // parked on its deck, an APC beside it), else on its own Titan while the
 // transport there has room; any other while enemies are aboard its Titan
-// and it has fewer than two on foot there for each. False: the SAI's choice
+// and it has fewer than two on foot there for each; enhanced.botTitanRepair:
+// one with the repair tool (chooseRespawn gave it the kit) aboard while its
+// Titan wants an engineer (titanWantsEngineer). False: the SAI's choice
 // stands.
 bool BotManager::titanRespawn(const GameWorld::PlayerInfo& self)
 {
@@ -1965,6 +2029,17 @@ bool BotManager::titanRespawn(const GameWorld::PlayerInfo& self)
 	const GameWorld::TitanInfo* enemy = titanOf(titans, 3 - self.team);
 	if (!own || !enemy) {
 		return false;
+	}
+	// enhanced.botTitanRepair: an engineer spawns aboard to mend a downed gun (chooseRespawn gave it the kit).
+	if (m_settings.titanRepairs() && role != 1 && titanWantsEngineer(self.team)) {
+		const auto r = m_respawn.find(self.id);
+		const auto& kits = m_teamKits[static_cast<size_t>(self.team)];
+		if (r != m_respawn.end() && r->second.kit >= 0 && static_cast<size_t>(r->second.kit) < kits.size()
+			&& kitRepairs(kits[static_cast<size_t>(r->second.kit)].first)) {
+			m_engineersSent[static_cast<size_t>(self.team)].push_back(m_time);
+			m_world.setSpawnTitan(self.id, own->object);
+			return true;
+		}
 	}
 	if (!role) {
 		if (!m_settings.titanPlay()) {

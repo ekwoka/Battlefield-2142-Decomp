@@ -1742,6 +1742,14 @@ void BotManager::chooseRespawn(const GameWorld::PlayerInfo& self)
 	// The kit (0x100f04a0).
 	const auto& kits = m_teamKits[static_cast<size_t>(self.team)];
 	r.kit = static_cast<int>(std::floor(random() * 4));
+	// enhanced.botTitanRepair (not retail): while its Titan has a gun down and too few engineers aboard, the kit with
+	// the repair tool (titanRespawn then spawns it aboard).
+	if (m_settings.titanRepairs() && static_cast<size_t>(r.kit) < kits.size() && !kitRepairs(kits[static_cast<size_t>(r.kit)].first)
+		&& titanRole(self) != 1 && titanWantsEngineer(self.team)) {
+		for (size_t k = 0; k < kits.size(); ++k) {
+			r.kit = kitRepairs(kits[k].first) ? static_cast<int>(k) : r.kit;
+		}
+	}
 	if (static_cast<size_t>(r.kit) < kits.size()) {
 		m_world.setKit(self.id, kits[static_cast<size_t>(r.kit)].first, kits[static_cast<size_t>(r.kit)].second);
 		// Its unlocks (0x100efce0 -> the bot's player vt+0xb0 -> vt+0xa0).

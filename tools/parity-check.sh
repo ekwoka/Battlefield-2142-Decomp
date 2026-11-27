@@ -2,7 +2,7 @@
 # Checks that the enhanced mode leaves the simulation alone: runs the same
 # headless bot round twice without --enhanced (the round must repeat),
 # then once with it, and compares the state fingerprints. The enhanced
-# gameplay additions (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, guidedCameraEase,
+# gameplay additions (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, botThreat, botTitanRepair, guidedCameraEase,
 # cornerSteer, passengerWeapons, softLanding, titanKitFloors, titanDeckMines, squadOrderPoints, botSquadInvites) change the simulation by
 # design and are turned off for the comparison. A fourth run records a demo
 # (--record-demo, enhanced.demoQuality) and must match the enhanced one.
@@ -22,7 +22,7 @@ run() {
 off1="$(run)"
 off2="$(run)"
 # The enhanced options that change the simulation by design, off.
-SIM_OFF=(--console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.botOffMesh 0" --console "enhanced.botAsyncPaths 0" --console "enhanced.botCommander 0" --console "enhanced.botPilots 0" --console "enhanced.botLoneSeat 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0" --console "enhanced.titanKitFloors 0" --console "enhanced.squadOrderPoints 0" --console "enhanced.titanDeckMines 0" --console "enhanced.botSquadInvites 0")
+SIM_OFF=(--console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.botOffMesh 0" --console "enhanced.botAsyncPaths 0" --console "enhanced.botCommander 0" --console "enhanced.botPilots 0" --console "enhanced.botLoneSeat 0" --console "enhanced.botThreat 0" --console "enhanced.botTitanRepair 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0" --console "enhanced.titanKitFloors 0" --console "enhanced.squadOrderPoints 0" --console "enhanced.titanDeckMines 0" --console "enhanced.botSquadInvites 0")
 on="$(run --enhanced "${SIM_OFF[@]}")"
 # enhanced.demoQuality (and recording at all) leaves the round alone: the
 # same enhanced round recorded at full rate.

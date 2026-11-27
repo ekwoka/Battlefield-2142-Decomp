@@ -931,6 +931,45 @@ void GameWorld::supplyObjectContact(uint32_t self, uint32_t other)
 	}
 }
 
+// The supply objects stepCrates would mend `vehicle` at (its team's or no one's, workOnVehicles, healing, its
+// vehicleCategory listed): each one's place and its reach for this vehicle (the radius and the body's own).
+std::vector<GameWorld::VehicleSupply> GameWorld::vehicleSupplies(uint32_t vehicle) const
+{
+	std::vector<VehicleSupply> out;
+	const Body* body = findBody(vehicle);
+	const world::Object* v = m_objects.find(vehicle);
+	const world::ObjectTemplate* vt = v ? v->objectTemplate() : nullptr;
+	if (!body || !body->vehicle || !vt) {
+		return out;
+	}
+	float own = 0;
+	for (const physics::Vec3& point : body->points) {
+		own = std::max(own, std::sqrt(physics::lengthSquared(point)));
+	}
+	const std::string category = std::to_string(vehicleCategory(*vt));
+	for (const Crate& crate : m_crates) {
+		const world::Object* object = m_objects.find(crate.object);
+		const world::ObjectTemplate* t = crate.settings ? crate.settings : object ? object->objectTemplate() : nullptr;
+		if (!object || !t || (crate.team != 0 && crate.team != v->team()) || integer(*t, "workOnVehicles", 0) == 0
+			|| number(*t, "healSpeed", 0) <= 0) {
+			continue;
+		}
+		if (const auto types = t->settings().find("addVehicleType.list"); types != t->settings().end()) {
+			std::istringstream list(types->second);
+			bool listed = false;
+			for (std::string type; list >> type;) {
+				listed = listed || type == category;
+			}
+			if (!listed) {
+				continue;
+			}
+		}
+		const world::Vec3 p = object->position();
+		out.push_back({{p.x, p.y, p.z}, number(*t, "radius", 2) + own});
+	}
+	return out;
+}
+
 void GameWorld::stepCrates(float seconds)
 {
 	constexpr float kTick = 0.2f;
