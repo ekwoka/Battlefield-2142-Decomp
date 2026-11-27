@@ -55,9 +55,10 @@ TEST(DeploymentScreen_EnterClosesAndConfirmsWhileTimerRuns)
 TEST(DeploymentScreen_UnmatchedJoinedPickStaysOpen)
 {
 	using dice::main::joinedSpawnPickCanSubmit;
-	CHECK(joinedSpawnPickCanSubmit(false, -1)); // no explicit marker: retain default behavior
-	CHECK(joinedSpawnPickCanSubmit(true, 192));
-	CHECK(!joinedSpawnPickCanSubmit(true, -1)); // stale/unmatched marker: do not submit or close
+	CHECK(joinedSpawnPickCanSubmit(false, -1, false)); // no explicit marker: no network submission
+	CHECK(joinedSpawnPickCanSubmit(true, 192, true));
+	CHECK(!joinedSpawnPickCanSubmit(true, 192, false)); // removed received ID: do not submit or close
+	CHECK(!joinedSpawnPickCanSubmit(true, -1, false)); // invalid explicit pick: do not submit or close
 }
 
 TEST(DeploymentScreen_KilledLinesShowOutsideTheSpawnScreen)

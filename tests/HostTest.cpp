@@ -1400,6 +1400,65 @@ TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 
+// A CP group removed from the client's received state is a genuinely stale
+// compact ID. Unlike an inactive squad group, it no longer exists in the map.
+TEST(NetHost_RemovedControlPointSpawnGroupDropsTheRequest)
+{
+	HostRange range;
+	dice::hfe::game::GameWorld& round = *range.round;
+	round.autoRespawn = false;
+	round.setManDownTime(0);
+	round.setSpawnTime(0);
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	CHECK(hosted.start());
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Removed group joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	int rejected = 0;
+	client.onEvent = [&rejected](const net::GameEvent& e) {
+		net::PostRemoteInfo post;
+		rejected += net::parsePostRemote(e, post) && post.category == net::kMsgNetworkCategory
+			&& post.id == net::kNeSelectSpawnGroup;
+	};
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	int staleGroup = -1;
+	CHECK(pumpUntil(step, [&] {
+		for (const auto& [id, group] : client.world().spawnGroups()) {
+			if (id < 0xc0 && group.team == 2) staleGroup = id;
+		}
+		return staleGroup >= 0;
+	}));
+	CHECK(client.world().spawnGroup(staleGroup) != nullptr);
+
+	// A neutral CP is not held by either playable team, so the host removes
+	// its compact group instead of retaining an inactive marker.
+	round.setControlPointTeam(2, 0);
+	CHECK(pumpUntil(step, [&] { return client.world().spawnGroup(staleGroup) == nullptr; }));
+	client.selectSpawnGroup(staleGroup);
+	CHECK(pumpUntil(step, [&] { return rejected == 1; }));
+	for (int i = 0; i < 60; ++i) step();
+	CHECK(round.playerInfo(me, info) && !info.alive);
+	CHECK(client.world().spawnGroup(staleGroup) == nullptr);
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
 {
 	using namespace dice::hfe;

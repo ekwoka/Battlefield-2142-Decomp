@@ -38,12 +38,13 @@ namespace dice::main {
 		return doneButton || (enterPressed && screenShown && !squadTab);
 	}
 
-	// A visible joined marker is an explicit pick. If its group disappeared
-	// before submission, keep deployment open instead of sending -1 (the
-	// server's random-team-spawn request). No marker remains the legacy default.
-	constexpr bool joinedSpawnPickCanSubmit(bool hasExplicitPick, int group)
+	// A visible joined marker is an explicit pick. Submit it only while its
+	// compact ID is still in the groups received from the host. If it vanished,
+	// keep deployment open instead of sending -1 (the server's random-team
+	// request). No marker remains the legacy default.
+	constexpr bool joinedSpawnPickCanSubmit(bool hasExplicitPick, int group, bool receivedForTeam)
 	{
-		return !hasExplicitPick || group >= 0;
+		return !hasExplicitPick || (group >= 0 && receivedForTeam);
 	}
 
 	// Enter toggles the spawn screen (menu state 1, 0x00754d74 -> 0x0074fd90) alive or dead; the respawn
