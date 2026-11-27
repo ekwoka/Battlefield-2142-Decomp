@@ -7411,3 +7411,104 @@ TEST(Bots_UnlocksTakeAPrimaryFromItsOwnPool)
 	std::fprintf(stderr, "  the primary taken %d of %d\n", primaries, runs);
 	CHECK(primaries > runs * 3 / 10 && primaries < runs * 7 / 10);
 }
+
+// enhanced.botLoneSeat (not retail): a bot alone in a gunner seat with nobody
+// driving. Retail's BBChange (0x1006c520) weighs its own gun seat (2 x 16 x
+// 0.77) over the empty driver's seat's move (4.5) and BBIdle (0x10069f50)
+// gives a passenger 0.5 with no timer, so it sits there for good (as with the
+// setting off below). With it on, after 2 s it takes the driver's seat
+// (loneSeat) and then keeps it (a lone driver no longer moves over to the
+// gun seat).
+TEST(Bots_LoneGunnerTakesTheDriversSeat)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	for (const bool on : {true, false}) {
+		CarField field(gameDir);
+		const bool enhanced = true;
+		field.settings.enhanced = &enhanced;
+		field.settings.botLoneSeat = &on;
+		const uint32_t id = field.car("car", 3, 0);
+		const int bot = field.soldier("Bot", true, 0, 0);
+		field.ticks(90);
+		field.board(bot, 1);
+		CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 1);
+		game::BotManager bots(*field.world, field.settings);
+		float took = -1;
+		bool lone = false;
+		for (int tick = 0; tick < 30 * 8 && took < 0; ++tick) {
+			field.ticks(1, &bots);
+			lone = lone || bots.behaviour(bot) == "LoneSeat";
+			if (field.info(bot).vehicle == id && field.info(bot).seat == 0) {
+				took = static_cast<float>(tick + 1) / 30;
+			}
+		}
+		std::fprintf(stderr, "  botLoneSeat %d: the driver's seat after %.2f s (seat %d)\n", on, took, field.info(bot).seat);
+		if (!on) {
+			CHECK(took < 0 && !lone);
+			CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 1); // retail: there for good
+			continue;
+		}
+		CHECK(lone);
+		CHECK(took >= 1.9f && took < 4);
+		field.ticks(30 * 6, &bots);
+		CHECK(field.info(bot).vehicle == id && field.info(bot).seat == 0);
+	}
+}
+
+// A gunner with a bot driving shoots at an enemy in its gun's reach: the
+// Fixed seat's Fire behaviour (BBFireInfantery) picks the seat's gun
+// (seatArmament) and the trigger fires it, the driver keeping its seat.
+TEST(Bots_GunnerWithABotDriverFires)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	CarField field(gameDir);
+	const bool enhanced = true;
+	field.settings.enhanced = &enhanced;
+	field.settings.botLoneSeat = &enhanced;
+	field.templates.create("GenericProjectile", "bullet")->settings()["damage"] = "1";
+	field.addCar("car_c", "car_firearm_c");
+	world::ObjectTemplate* gun = field.templates.find("car_firearm_c");
+	gun->settings()["velocity"] = "300";
+	gun->settings()["fire.roundsPerMinute"] = "300";
+	gun->settings()["aiTemplate"] = "car_firearm_c";
+	std::string out;
+	for (const char* line : {"weaponTemplate.create car_firearm_c", "weaponTemplate.setStrength Infantry 5",
+			 "weaponTemplate.maxRange 100", "weaponTemplate.allowedDeviation 2", "aiSettings.setBehaviourModifier Fire 7.5",
+			 "aiSettings.createBehaviourModifiers UnitWeights", "aiSettings.setBehaviourModifier Idle 1.0",
+			 "aiSettings.setBehaviourModifier Change 1.0", "aiSettings.setBehaviourModifier Fire 1.0",
+			 "aiSettings.setVehicleBehaviour Fixed Fire BBFireInfantery BBPFireInfantery 4 UCUnion UnitWeights",
+			 "aiSettings.setViewDistance 200"}) {
+		field.console.execute(line, out);
+	}
+	const uint32_t id = field.car("car_c", 3, 0);
+	const int driver = field.soldier("Driver", true, 0, 0);
+	const int gunner = field.soldier("Gunner", true, 0, 1);
+	field.ticks(90);
+	field.board(driver, 0);
+	field.board(gunner, 1);
+	CHECK(field.info(driver).vehicle == id && field.info(driver).seat == 0);
+	CHECK(field.info(gunner).vehicle == id && field.info(gunner).seat == 1);
+	field.templates.create("Soldier", "pac_light_soldier")->settings()["armor.maxHitPoints"] = "100";
+	const int enemy = field.world->addPlayer("Enemy", 1, false);
+	field.world->spawnSoldier(enemy);
+	const physics::Vec3 at = field.info(gunner).position;
+	field.world->setSoldierPosition(field.info(enemy).soldier, {at.x + 12, 0, at.z + 16});
+	game::BotManager bots(*field.world, field.settings);
+	bool fought = false;
+	for (int tick = 0; tick < 30 * 10 && field.info(gunner).gunShots == 0; ++tick) {
+		field.ticks(1, &bots);
+		fought = fought || bots.behaviour(gunner) == "Fire";
+	}
+	std::fprintf(stderr, "  gunner %s, target %d, %u rounds; driver in seat %d\n", bots.behaviour(gunner).c_str(),
+		bots.target(gunner), field.info(gunner).gunShots, field.info(driver).seat);
+	CHECK(fought);
+	CHECK(field.info(gunner).gunShots > 0);
+	CHECK(field.info(gunner).vehicle == id && field.info(gunner).seat == 1);
+	CHECK(field.info(driver).vehicle == id && field.info(driver).seat == 0);
+}

@@ -3806,6 +3806,7 @@ int runGame(Options& options, Session& session)
 	botSettings.botAsyncPaths = &enhancedSettings.botAsyncPaths;
 	botSettings.botCommander = &enhancedSettings.botCommander;
 	botSettings.botPilots = &enhancedSettings.botPilots;
+	botSettings.botLoneSeat = &enhancedSettings.botLoneSeat;
 	botSettings.cornerSteer = &enhancedSettings.cornerSteer;
 	game::registerBotConsoleMethods(console, botSettings);
 	// NetworkableInfo.* (Objects/Common/Networkables.con): the ghosts' infos.

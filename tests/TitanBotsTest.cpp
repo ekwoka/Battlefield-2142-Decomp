@@ -1766,3 +1766,96 @@ TEST(Titan_BotsWalkOffMeshToSuezSilos)
 		}
 	}
 }
+
+// enhanced.botTitan: a bot manning a Titan's ground cannon fights an enemy on
+// the ground in the gun's arc. The shipped guns' firearms name no
+// weaponTemplate (retail bots never man them), so without the AI weapon made
+// from the round (titanGunWeaponAi) the gunner scored no target and sat in
+// Idle; and the guns hang far over the ground, past the level's view, so the
+// sight reaches as far as the gun (sense). Bots.cpp: seatArmament,
+// titanGunReaches.
+TEST(Titan_BotGunnerFiresAtEnemyInRange)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Minsk", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::BotSettings settings;
+	loadAircraftAi(level, settings);
+	settings.viewDistance = 280; // about Verdun's
+	const bool enhanced = true;
+	settings.enhanced = &enhanced;
+	settings.botTitan = &enhanced;
+	const uint32_t eu = level.world->titanOf(2);
+	CHECK(eu != 0);
+	const std::vector<game::GameWorld::SeatLayout> seats = level.world->vehicleSeats(eu);
+	int ground = -1;
+	for (size_t i = 0; i < seats.size(); ++i) {
+		ground = seats[i].name == "eu_groundcanone3_01_hub" ? static_cast<int>(i) : ground;
+	}
+	CHECK(ground >= 0);
+	if (ground < 0) return;
+	// The bot into a gun at its console, then over to the rear ground cannon.
+	const int gunner = level.world->addPlayer("Gunner", 2, true);
+	CHECK(level.world->spawnSoldier(gunner));
+	game::GameWorld::PlayerInfo info;
+	level.world->playerInfo(gunner, info);
+	const auto titan = level.titan(2);
+	CHECK(level.world->setSoldierPosition(info.soldier, titan->position + physics::Vec3 {0, 11, -30}));
+	physics::Vec3 entry;
+	float radius = 0;
+	int seat = -1;
+	CHECK(level.world->titanGunEntry(gunner, entry, radius, seat));
+	CHECK(level.world->setSoldierPosition(info.soldier, entry - physics::Vec3 {0, 1, 0}));
+	game::SoldierInput input;
+	input.use = true;
+	level.world->setInput(gunner, input);
+	level.run(0.1f);
+	input = {};
+	input.switchSeat = ground + 1;
+	level.world->setInput(gunner, input);
+	level.run(0.1f);
+	level.world->setInput(gunner, {});
+	level.world->playerInfo(gunner, info);
+	CHECK(info.vehicle == eu && info.seat == ground);
+	// An enemy on the ground behind the Titan, in the rear cannon's arc, about
+	// as far off as the gun is high (45 degrees down).
+	physics::Vec3 origin;
+	physics::Mat3 hull;
+	CHECK(level.world->gunFrame(eu, ground, origin, hull));
+	const float frame = seats[static_cast<size_t>(ground)].frameYaw * 3.14159265f / 180;
+	physics::Vec3 way = hull.transform({std::sin(frame), 0, std::cos(frame)});
+	way.y = 0;
+	way = way * (1 / std::sqrt(physics::lengthSquared(way)));
+	const float height = origin.y - level.world->terrainHeight(origin.x, origin.z);
+	physics::Vec3 at = origin + way * std::clamp(height, 120.0f, 300.0f);
+	at.y = level.world->terrainHeight(at.x, at.z);
+	const int enemy = level.world->addPlayer("Enemy", 1, false);
+	CHECK(level.world->spawnSoldier(enemy));
+	game::GameWorld::PlayerInfo target;
+	level.world->playerInfo(enemy, target);
+	CHECK(level.world->setSoldierPosition(target.soldier, at));
+	std::fprintf(stderr, "  gun %.0f m over the ground, the enemy %.0f m off\n", height, std::sqrt(physics::lengthSquared(at - origin)));
+	game::BotManager bots(*level.world, settings);
+	level.afterTick = [&] { bots.update(1 / 30.0f); };
+	bool targeted = false;
+	const float ran = level.runUntil(30, [&] {
+		level.world->playerInfo(gunner, info);
+		targeted = targeted || bots.target(gunner) == enemy;
+		return info.gunShots > 0;
+	}, 0.5f);
+	level.world->playerInfo(gunner, info);
+	std::fprintf(stderr, "  after %.1f s: behaviour %s, target %d, %u rounds\n", ran, bots.behaviour(gunner).c_str(), bots.target(gunner), info.gunShots);
+	CHECK(info.vehicle == eu && info.seat == ground);
+	CHECK(targeted);
+	CHECK(info.gunShots > 0);
+	// The setting off (retail's bots): the gun scores no target.
+	const bool off = false;
+	game::BotSettings retail = settings;
+	retail.botTitan = &off;
+	game::BotManager plain(*level.world, retail);
+	level.afterTick = [&] { plain.update(1 / 30.0f); };
+	level.run(8);
+	CHECK(plain.target(gunner) != enemy);
+}

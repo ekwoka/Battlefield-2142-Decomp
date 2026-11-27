@@ -588,6 +588,10 @@ struct BotSettings {
 	// and uses its commander's tools (BotsTitan.cpp, titanCommand); not retail.
 	const bool* botCommander = nullptr;
 	bool titanCommander() const { return enhanced && *enhanced && botCommander && *botCommander; }
+	// enhanced.botLoneSeat, also read live: a bot alone in a passenger or gunner seat with nobody driving takes
+	// the driver's seat or gets out (loneSeat), and a lone driver keeps its seat (changeUrgency); not retail.
+	const bool* botLoneSeat = nullptr;
+	bool loneSeatFix() const { return enhanced && *enhanced && botLoneSeat && *botLoneSeat; }
 	// enhanced.cornerSteer (off by default), also read live: see BotManager::drive.
 	const bool* cornerSteer = nullptr;
 	bool cornerSteering() const { return enhanced && *enhanced && cornerSteer && *cornerSteer; }
@@ -1224,6 +1228,7 @@ private:
 		float abandonedAt = -1e9f;
 		uint32_t approachExitRequested = 0;
 		uint32_t stuckExit = 0; // enhanced: the vehicle a stuck driver is getting out of
+		float loneSince = -1; // enhanced.botLoneSeat: since when the bot sits in a passenger seat with nobody driving
 		// enhanced.botRecovery's own no-progress watch for a driver, kept
 		// across route requests: where it last got 4 m further, since when,
 		// and when it was last driving with input (Bots.cpp drive).
@@ -1868,6 +1873,8 @@ private:
 	// as a gunner's, MouseTurretAimAt and Trigger among their interpreter
 	// entries).
 	bool drivesGun(const GameWorld::PlayerInfo& self) const;
+	// enhanced.botLoneSeat: a bot alone in a passenger or gunner seat takes the wheel or gets out.
+	bool loneSeat(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& input);
 	std::string seatWeaponName(const GameWorld::PlayerInfo& self, int index) const; // -1: the active one
 	std::string weaponName(const GameWorld::PlayerInfo& self, int slot) const;
 	float projectileSpeed(const std::string& weapon) const;
@@ -1877,6 +1884,15 @@ private:
 	std::string equipmentOf(const GameWorld::PlayerInfo& self) const;
 	std::string aiTemplateOf(const std::string& objectTemplate) const;
 	WeaponAi weaponAi(const std::string& name) const;
+	// enhanced.botTitan: the AI weapon a Titan gun's firearm is fought with. The shipped guns'
+	// firearms name no weaponTemplate (retail bots never man them), so seatArmament makes one
+	// from the gun's round for each it meets (m_titanGunWeapons), and weaponAi hands that out.
+	WeaponAi titanGunWeaponAi(const std::string& weapon) const;
+	mutable std::unordered_map<std::string, WeaponAi> m_titanGunWeapons; // by lower-case firearm name
+	// A seat gun's AI weapon for the bot in that seat (enhanced.botTitan: the transports' side guns reach farther).
+	WeaponAi seatWeaponAi(const GameWorld::PlayerInfo& self, const std::string& gun) const;
+	bool titanTransportGun(const GameWorld::PlayerInfo& self, const GameWorld::SeatLayout& seat) const;
+	bool titanGunReaches(const GameWorld::PlayerInfo& self, const std::string& gun, const physics::Vec3& at) const;
 	int strengthTypeOf(const GameWorld::PlayerInfo& player) const;
 	int areaOfControlPoint(int controlPoint) const;
 	void ensureAreas();

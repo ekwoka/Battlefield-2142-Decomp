@@ -492,11 +492,12 @@ The rest only change what you see or hear.
 | `tvEffect` | off | graphics | Experimental: a guided round's view gets the TVEffect pass (grey, rolled by noise bands, rows shifted sideways so vertical edges lean). The original's renderer never runs it and shows the plain view. | no |
 | `botRecovery` | on | bots | Bots get out of a vehicle that makes no progress. | yes |
 | `botMovement` | on | bots | Bots on foot lie down only for far targets and don't walk sideways to look about; a gunner's aim starts afresh on a new target. | yes |
-| `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core; in Titan mode bots head for the silos. | yes |
+| `botTitan` | on | bots | Bots aboard a Titan walk its decks to the consoles and the core, man its guns and fire them at what the guns can reach (the shipped guns have no AI weapon, so they are fought with one made from their rounds, and the gunners see as far as the guns shoot); a transport's side gunners reach 220 m from its support station; in Titan mode bots head for the silos. | yes |
 | `botOffMesh` | on | bots | A bot on foot where the level's infantry navigation mesh doesn't reach walks the terrain to its goal or onto the mesh. Each level ships one mesh, made for its 16-player layout, so the bigger layouts' spawns and points can lie off it (Cerbere Landing's 32 and 64 PAC spawns); the original's bots stand there doing nothing. | yes |
 | `botAsyncPaths` | on | bots | The bots' costly Titan-deck ways (to the consoles and the core, and the pods' landing spots) are made while the level loads, and after a Titan part goes down or comes back they are made anew on background threads while the bots keep walking the last ones; a parked vehicle's search for the vehicle mesh is spread over ticks. Big Titan-mode rounds no longer freeze for half a second at those moments. | yes |
 | `botPilots` | on | bots | A gunship's bot pilot picks the best target its guns can hurt (a vehicle, an infantry group, an aircraft, an enemy Titan's gun hubs) and flies shallow attack runs at it; the original's pilots mostly fly their waypoints and fire only when a target lines up. | yes |
 | `botCommander` | on | bots | In Titan mode a team with bots and no commander has its Titan moved and its commander's tools used for it. | yes |
+| `botLoneSeat` | on | bots | A bot left alone in a passenger or gunner seat of a vehicle nobody drives (its driver got out, or it spawned beside one who left) takes the free driver's seat after 2 s, or gets out after 6 s if it can't; a bot driving alone no longer moves over to its own vehicle's gun seat. The original's bots sit there for the rest of the round. | yes |
 | `cornerSteer` | off | bots | Experimental: a bot driver that keeps refusing a corner for lack of room steers wider (cars and tanks). | yes |
 | `guidedCameraEase` | on | camera | A guided round's camera eases back to centre instead of snapping. | yes |
 | `chaseRoll` | off | camera | A flying vehicle's chase and front-chase views bank with its hull; the original keeps them level. | no |
@@ -562,7 +563,7 @@ feeds the simulation.
 `tools/parity-check.sh [seconds] [extra game args...]` runs the same headless
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
-(`botRecovery`, `botMovement`, `botTitan`, `botOffMesh`, `botAsyncPaths`, `botCommander`, `botPilots`, `guidedCameraEase`,
+(`botRecovery`, `botMovement`, `botTitan`, `botOffMesh`, `botAsyncPaths`, `botCommander`, `botPilots`, `botLoneSeat`, `guidedCameraEase`,
 `cornerSteer`, `passengerWeapons`, `softLanding`, `squadOrderPoints`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
 simulation. Anything added to the enhanced mode either leaves the
