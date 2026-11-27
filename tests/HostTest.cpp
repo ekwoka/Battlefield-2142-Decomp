@@ -941,6 +941,7 @@ TEST(NetHost_ControlPointSpawnGroupsUseCompactIdsAndMapBytes)
 		round.tick(1.0f / 30);
 	};
 	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	client.world().setTerrainBounds(-512.0f, -512.0f, 1024.0f, 1024.0f);
 	CHECK(client.world().spawnGroups().size() == 7);
 	std::map<uint16_t, uint32_t> ghostObjects;
 	host::RemoteHudWorld remoteHud(client.world(), round, ghostObjects);
@@ -970,7 +971,7 @@ TEST(NetHost_ControlPointSpawnGroupsUseCompactIdsAndMapBytes)
 		const auto expectedGroupAt = groupAt.at(cpId);
 		CHECK(remote->second.mapX == std::clamp(static_cast<int>((expectedGroupAt.x + 512.0f) / 1024.0f * 255), 0, 255));
 		CHECK(remote->second.mapZ == std::clamp(static_cast<int>((expectedGroupAt.z + 512.0f) / 1024.0f * 255), 0, 255));
-		CHECK(remote->second.ghost == 0); // CPs are outside the host's object-ghost set; group still arrives.
+		CHECK(remote->second.netId == net::spawnGroupNetId(local->id));
 	}
 	const int me = client.world().localPlayer();
 	dice::hfe::game::GameWorld::PlayerInfo info;
@@ -1254,6 +1255,7 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 		++ticks;
 	};
 	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	client.world().setTerrainBounds(-512.0f, -512.0f, 1024.0f, 1024.0f);
 	const int me = client.world().localPlayer();
 	dice::hfe::game::GameWorld::PlayerInfo info;
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.name == "Joiner"; }));
@@ -1273,22 +1275,21 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
 	client.joinSquad(1);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
-	uint16_t leaderGhost = 0;
 	int group = -1;
 	CHECK(pumpUntil(step, [&] {
-		for (const net::RemotePlayer& p : client.world().playerList()) {
-			leaderGhost = p.name == "Leader" ? p.soldierGhost : leaderGhost;
-		}
 		for (const auto& [id, g] : client.world().spawnGroups()) {
-			group = leaderGhost && g.ghost == leaderGhost && g.team == 2 ? id : group;
+			group = g.squad == 1 && g.team == 2 ? id : group;
 		}
 		return group >= 0;
 	}));
+	CHECK(pumpUntil(step, [&] { const auto* g = client.world().spawnGroup(group); return g && g->active; }));
 	CHECK(group >= 0xc0 && group <= 0xff);
 	const auto initialMobileGroup = client.world().spawnGroups().find(group);
 	CHECK(initialMobileGroup != client.world().spawnGroups().end());
 	CHECK(initialMobileGroup != client.world().spawnGroups().end()
-		&& initialMobileGroup->second.mapX == 127 && initialMobileGroup->second.mapZ == 127);
+		&& initialMobileGroup->second.mapX == 127 && initialMobileGroup->second.mapZ == 127
+		&& initialMobileGroup->second.netId == net::spawnGroupNetId(group)
+		&& initialMobileGroup->second.squad == 1 && initialMobileGroup->second.active);
 	leaderWalks = true;
 	for (int i = 0; i < 30 * 6; ++i) {
 		step();
@@ -1297,7 +1298,11 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	dice::hfe::game::GameWorld::PlayerInfo lead;
 	CHECK(round.playerInfo(leader, lead) && lead.alive && lead.squadLeader);
 	CHECK(std::hypot(lead.position.x, lead.position.z) > 12);
-	// The squad's group, at the leader's soldier ghost.
+	// The squad's own networkable follows its leader's position.
+	CHECK(client.world().spawnGroup(group) != nullptr);
+	CHECK(client.world().spawnGroup(group)
+		&& distance({client.world().spawnGroup(group)->position.x, client.world().spawnGroup(group)->position.y,
+			client.world().spawnGroup(group)->position.z}, lead.position) < 8);
 	client.selectSpawnGroup(group);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
 	round.playerInfo(leader, lead);
@@ -1364,14 +1369,10 @@ TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
 	client.joinSquad(1);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
-	uint16_t leaderGhost = 0;
 	int group = -1;
 	CHECK(pumpUntil(step, [&] {
-		for (const net::RemotePlayer& p : client.world().playerList()) {
-			leaderGhost = p.name == "Leader" ? p.soldierGhost : leaderGhost;
-		}
 		for (const auto& [id, g] : client.world().spawnGroups()) {
-			group = leaderGhost && g.ghost == leaderGhost && g.team == 2 ? id : group;
+			group = g.squad == 1 && g.team == 2 ? id : group;
 		}
 		return group >= 0;
 	}));
@@ -1381,7 +1382,11 @@ TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
 	round.setHitPoints(lead.soldier, 0);
 	CHECK(round.playerInfo(leader, lead) && !lead.alive);
 	client.selectSpawnGroup(group);
-	CHECK(pumpUntil(step, [&] { return cleared == 1; })); // 6/6 back: the group is gone
+	CHECK(pumpUntil(step, [&] { return cleared == 1; })); // 6/6 back: the group is unavailable
+	CHECK(pumpUntil(step, [&] {
+		const auto* inactive = client.world().spawnGroup(group);
+		return inactive && !inactive->active;
+	})); // inactive groups keep their marker and identity
 	CHECK(round.playerInfo(me, info) && !info.alive);
 	// Back, the leader isn't spawned on: the request went with the group.
 	CHECK(round.spawnSoldier(leader));
@@ -1504,6 +1509,7 @@ TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
 		level.world->tick(1.0f / 30);
 	};
 	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	client.world().setTerrainBounds(-1024.0f, -1024.0f, 2048.0f, 2048.0f);
 	const int player = client.world().localPlayer();
 	client.selectTeam(1);
 	game::GameWorld::PlayerInfo info;
@@ -1513,9 +1519,17 @@ TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
 		titanGroups.clear();
 		for (const auto& titan : level.world->titans()) {
 			if (titan.team != 1 && titan.team != 2) continue;
-			const uint16_t ghost = hosted.ghostOfObject(titan.object);
+			const auto localGroups = level.world->spawnGroups(titan.team);
+			const auto local = std::find_if(localGroups.begin(), localGroups.end(), [&](const auto& entry) {
+				return entry.mobileObject == titan.object;
+			});
+			if (local == localGroups.end()) continue;
 			for (const auto& [id, group] : client.world().spawnGroups()) {
-				if (group.ghost == ghost && group.team == titan.team) titanGroups[titan.object] = id;
+				const float dx = group.position.x - local->position.x;
+				const float dz = group.position.z - local->position.z;
+				if (id >= 0xc0 && group.team == titan.team && group.squad < 0 && dx * dx + dz * dz < 100.0f) {
+					titanGroups[titan.object] = id;
+				}
 			}
 		}
 		return titanGroups.size() == 2;
@@ -1534,9 +1548,16 @@ TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
 		const auto networkGroup = client.world().spawnGroups().find(selectedGroup->second);
 		CHECK(networkGroup != client.world().spawnGroups().end());
 		if (networkGroup != client.world().spawnGroups().end()) {
-			const int expectedX = std::clamp(static_cast<int>((titan.position.x + 1024.0f) / 2048.0f * 255), 0, 255);
-			const int expectedZ = std::clamp(static_cast<int>((titan.position.z + 1024.0f) / 2048.0f * 255), 0, 255);
-			CHECK(networkGroup->second.mapX == expectedX && networkGroup->second.mapZ == expectedZ);
+			const auto localGroups = level.world->spawnGroups(titan.team);
+			const auto local = std::find_if(localGroups.begin(), localGroups.end(), [&](const auto& entry) {
+				return entry.mobileObject == titan.object;
+			});
+			CHECK(local != localGroups.end());
+			if (local != localGroups.end()) {
+				const int expectedX = std::clamp(static_cast<int>((local->position.x + 1024.0f) / 2048.0f * 255), 0, 255);
+				const int expectedZ = std::clamp(static_cast<int>((local->position.z + 1024.0f) / 2048.0f * 255), 0, 255);
+				CHECK(networkGroup->second.mapX == expectedX && networkGroup->second.mapZ == expectedZ);
+			}
 		}
 	}
 	const auto pac = std::find_if(titans.begin(), titans.end(), [](const auto& titan) { return titan.team == 1; });

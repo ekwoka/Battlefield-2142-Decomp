@@ -2145,19 +2145,100 @@ TEST(Net_SquadRequestSpawnGroupAndTeamEvents)
 	CHECK(roundTrip(net::makeAcceptOrder(answer), back) && net::parseAcceptOrder(back, answered));
 	CHECK(answered.squad == 3 && answered.team == 2 && answered.store == 2 && answered.kind == 1 && !answered.flag);
 	net::SpawnGroupInfo group;
-	group.id = 201;
+	group.id = 0x3f;
 	group.team = 1;
-	group.ghost = 600;
+	group.netId = net::spawnGroupNetId(group.id);
+	group.hasPoints = true;
 	net::SpawnGroupInfo got;
 	CHECK(roundTrip(net::makeCreateSpawnGroup(group), back) && net::parseSpawnGroup(back, got));
-	CHECK(got.id == 201 && got.team == 1 && got.ghost == 600);
+	CHECK(got.id == 0x3f && got.team == 1 && got.netId == 0x241);
+	CHECK(net::spawnGroupNetId(0xc0) == 0x242);
+	net::SpawnGroupInfo mobileGroup;
+	mobileGroup.id = 0xc0;
+	mobileGroup.team = 1;
+	mobileGroup.netId = net::spawnGroupNetId(mobileGroup.id);
+	net::SpawnGroupInfo mobileGot;
+	CHECK(roundTrip(net::makeCreateSpawnGroup(mobileGroup), back) && net::parseSpawnGroup(back, mobileGot));
+	CHECK(mobileGot.id == 0xc0 && mobileGot.netId == 0x242);
+	CHECK(net::spawnGroupNetId(0x40) == 0);
+	CHECK(net::spawnGroupNetId(0xbf) == 0);
+	net::SpawnGroupInfo stateInfo;
+	stateInfo.mapX = 18;
+	stateInfo.mapZ = 229;
+	stateInfo.squad = 3;
+	stateInfo.hasPoints = true;
+	stateInfo.pointFlag = false;
+	net::BitWriter groupState;
+	CHECK(net::encodeSpawnGroupState(groupState, stateInfo));
+	net::BitReader groupStateInput(groupState.data().data(), groupState.data().size());
+	groupStateInput.limit(groupState.bits());
+	net::SpawnGroupInfo stateBack;
+	stateBack.hasPoints = true;
+	CHECK(net::decodeSpawnGroupState(groupStateInput, stateBack));
+	CHECK(groupStateInput.position() == groupState.bits());
+	CHECK(stateBack.mapX == 18 && stateBack.mapZ == 229 && stateBack.squad == 3 && stateBack.active);
 
 	net::RemoteWorld world;
-	CHECK(world.apply(net::makeCreateSpawnGroup(group)) && world.spawnGroups().count(201) == 1);
+	world.setTerrainBounds(-512, -256, 1024, 512);
+	CHECK(world.apply(net::makeCreateSpawnGroup(group)) && world.spawnGroups().count(0x3f) == 1);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->netId == 0x241);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->position.x == -512 && world.spawnGroup(0x3f)->position.z == -256);
+	// A group update is keyed by its own reserved netId and survives when its
+	// former carrier object is absent from RemoteWorld.
+	stateInfo.netId = 0x241;
+	net::BitWriter movingGroup;
+	CHECK(net::encodeSpawnGroupState(movingGroup, stateInfo));
+	net::GhostBlock groupBlock;
+	groupBlock.present = true;
+	groupBlock.tick = 1;
+	net::GhostUpdate groupUpdate;
+	groupUpdate.kind = 1;
+	groupUpdate.ghost = 0x241;
+	groupUpdate.state = movingGroup.data();
+	groupUpdate.stateBits = movingGroup.bits();
+	groupBlock.updates.push_back(groupUpdate);
+	world.apply(groupBlock);
+	CHECK(world.object(0x241) == nullptr);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->position.x > -512
+		&& world.spawnGroup(0x3f)->position.z > -256 && world.spawnGroup(0x3f)->squad == 3);
+	CHECK(world.apply(net::makeRemoveSpawnGroup(0x3f, 0x241)));
+	CHECK(world.apply(net::makeCreateSpawnGroup(group)));
+	groupBlock.tick = 1; // a delayed pre-removal update must not move the re-created group
+	world.apply(groupBlock);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->position.x == -512);
+	groupBlock.tick = 2;
+	world.apply(groupBlock);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->position.x > -512);
+	stateInfo.mapX = 80;
+	stateInfo.mapZ = 90;
+	net::BitWriter newestGroupState;
+	CHECK(net::encodeSpawnGroupState(newestGroupState, stateInfo));
+	groupBlock.updates[0].state = newestGroupState.data();
+	groupBlock.updates[0].stateBits = newestGroupState.bits();
+	groupBlock.tick = 3;
+	world.apply(groupBlock);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->mapX == 80 && world.spawnGroup(0x3f)->mapZ == 90);
+	groupBlock.updates[0].state = movingGroup.data(); // An older block arriving after the newer state cannot roll the group back.
+	groupBlock.updates[0].stateBits = movingGroup.bits();
+	groupBlock.tick = 2;
+	world.apply(groupBlock);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->mapX == 80 && world.spawnGroup(0x3f)->mapZ == 90);
+	groupBlock.updates[0].state = movingGroup.data();
+	groupBlock.updates[0].stateBits = 20; // Malformed after mapX: decode must not partially mutate the stored group.
+	groupBlock.tick = 4;
+	world.apply(groupBlock);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->mapX == 80 && world.spawnGroup(0x3f)->mapZ == 90);
 	order.object = 0;
 	CHECK(world.apply(net::makeSquadOrder(order)) && world.squadRequests(2).size() == 1 && world.squadRequests(1).empty());
 	CHECK(world.apply(net::makeAcceptOrder(answer)) && world.squadRequests(2).empty());
-	CHECK(world.apply(net::makeRemoveSpawnGroup(201, 600)) && world.spawnGroups().empty());
+	CHECK(world.apply(net::makeRemoveSpawnGroup(0x3f, 0x241)) && world.spawnGroups().empty());
+	world.clear();
+	CHECK(world.apply(net::makeCreateSpawnGroup(group)));
+	groupBlock.updates[0].state = movingGroup.data();
+	groupBlock.updates[0].stateBits = movingGroup.bits();
+	groupBlock.tick = 1; // A new remote round may restart at a lower tick.
+	world.apply(groupBlock);
+	CHECK(world.spawnGroup(0x3f) && world.spawnGroup(0x3f)->mapX == 18 && world.spawnGroup(0x3f)->mapZ == 229);
 	// Tickets: the bits 0x400 / 0x400000, sign + 17 bits each; an update
 	// with one team keeps the other's.
 	CHECK(world.tickets(1) == -1);

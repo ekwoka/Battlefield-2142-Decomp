@@ -171,7 +171,15 @@ public:
 	{
 		m_terrainOrigin[0] = originX;
 		m_terrainOrigin[1] = originZ;
-		m_terrainExtent = extent;
+		m_terrainExtent[0] = extent;
+		m_terrainExtent[1] = extent;
+	}
+	void setTerrainBounds(float originX, float originZ, float sizeX, float sizeZ)
+	{
+		m_terrainOrigin[0] = originX;
+		m_terrainOrigin[1] = originZ;
+		m_terrainExtent[0] = sizeX;
+		m_terrainExtent[1] = sizeZ;
 	}
 	// A team's overhead camera object (MultiPlayerOverheadCamera, class
 	// 0x948c), 0 before its commander first moved it.
@@ -359,7 +367,7 @@ private:
 	void moveOverheadCamera(int team, float x, float z);
 	uint32_t m_overheadCameras[3] {};
 	float m_terrainOrigin[2] {};
-	float m_terrainExtent = 0;
+	float m_terrainExtent[2] {};
 	void sendBattlefieldReports();
 	void sendRadioSpots();
 	const game::Projectile* projectileOf(const Ghost& ghost) const;
@@ -534,8 +542,10 @@ private:
 		const net::GhostPartLayout* layout = nullptr; // an object part's
 		int player = -1;                              // a player's networkable
 		bool team = false;                            // the teams'
+		bool spawnGroup = false;
 		std::vector<net::NetworkableState> states;    // per group
 		net::TeamNetState teamState;
+		net::SpawnGroupInfo spawnGroupState;
 	};
 	const GhostNow* ghostNow(uint16_t ghost);
 	// The frame's snapshot (0x0067aec0 -> 0x004a91c0): each ghost's fields
@@ -586,9 +596,9 @@ private:
 	std::map<uint32_t, std::unique_ptr<std::vector<net::GhostPartLayout>>> m_layouts; // by template id
 	std::map<uint32_t, Ghost> m_ghosts; // by object id
 	uint16_t m_nextGhost = kFirstGhost;
-	// The teams' networkable takes 0x201 first (0x0042b8b0), so the ghost
-	// manager hands out ids from 0x202 (0x00678610).
-	static constexpr uint16_t kFirstGhost = net::kTeamStateGhost + 1;
+	// Native allocation choice: reserve retail's 0x202..0x281 group range;
+	// T4 showed the retail allocator does not skip it automatically.
+	static constexpr uint16_t kFirstGhost = 0x282;
 	void syncFieldUnlocks(int id, Client& client, int kit = -1, int branch = -1);
 	std::map<int, Client> m_clients;
 	std::map<int, PlayerSeen> m_players; // by player id
@@ -601,7 +611,9 @@ private:
 	struct GhostSeen {
 		std::vector<net::NetworkableFields> groups;
 		net::TeamNetState team;
+		net::SpawnGroupInfo spawnGroup;
 		bool hasTeam = false;
+		bool hasSpawnGroup = false;
 	};
 	std::map<uint16_t, GhostSeen> m_snapshot;
 	std::map<int, uint32_t> m_reloadsSeen;

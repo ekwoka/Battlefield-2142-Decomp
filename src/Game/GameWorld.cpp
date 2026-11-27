@@ -461,6 +461,7 @@ void GameWorld::startRound()
 	m_spawnGroupIds.clear();
 	m_mobileSpawnGroupIds.clear();
 	m_nextSpawnGroupId = 1;
+	m_spawnGroupLimitLogged = false;
 	for (const auto& player : m_players) {
 		if (player && player->present) player->spawnGroupChoice = -1;
 	}
@@ -5649,6 +5650,7 @@ void GameWorld::resetRound()
 	m_spawnGroupIds.clear();
 	m_mobileSpawnGroupIds.clear();
 	m_nextSpawnGroupId = 1;
+	m_spawnGroupLimitLogged = false;
 	for (const auto& player : m_players) {
 		if (player && player->present) player->spawnGroupChoice = -1;
 	}
@@ -7533,7 +7535,14 @@ int GameWorld::registerControlSpawnPoint(world::Object& object)
 	if (existing != m_spawnGroupIds.end()) {
 		id = existing->second;
 	} else {
-		if (m_nextSpawnGroupId >= 0xc0) return -1;
+		// shortcut: retail behaviour past 63 CP groups not traced; no shipped map exceeds 20
+		if (m_nextSpawnGroupId > 0x3f) {
+			if (!m_spawnGroupLimitLogged) {
+				std::fprintf(stderr, "spawn: ignoring CP spawn groups after compact id 63\n");
+				m_spawnGroupLimitLogged = true;
+			}
+			return -1;
+		}
 		id = m_nextSpawnGroupId++;
 		m_spawnGroupIds.emplace(key, id);
 		SpawnGroupInfo info;

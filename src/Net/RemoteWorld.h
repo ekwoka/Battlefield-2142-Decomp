@@ -502,6 +502,12 @@ public:
 	int tickets(int team) const { return m_teamState.tickets(team); }
 	// The spawn groups the server offers (CreateSpawnGroup / RemoveSpawnGroup), by id.
 	const std::map<int, SpawnGroupInfo>& spawnGroups() const { return m_spawnGroups; }
+	const SpawnGroupInfo* spawnGroup(int compactId) const
+	{
+		const auto it = m_spawnGroups.find(compactId);
+		return it == m_spawnGroups.end() ? nullptr : &it->second;
+	}
+	void setTerrainBounds(float originX, float originZ, float sizeX, float sizeZ);
 	// The squads' requests to their commander (IssueSquadOrder with store 2,
 	// kept one a kind per squad as the squad's record does, 0x004c3f20;
 	// SetAcceptOrder for store 2 takes one off). team 0: every team's.
@@ -625,6 +631,10 @@ private:
 	PlayerInput m_input;
 	TeamNetState m_teamState;
 	std::map<int, SpawnGroupInfo> m_spawnGroups;
+	std::map<uint16_t, uint32_t> m_spawnGroupCreatedAfterTick;
+	std::map<uint16_t, uint32_t> m_spawnGroupLatestStateTick;
+	std::map<uint16_t, uint32_t> m_spawnGroupRetiredAtTick;
+	float m_terrainOriginX = 0, m_terrainOriginZ = 0, m_terrainSizeX = 0, m_terrainSizeZ = 0;
 	std::map<std::pair<int, int>, std::array<std::optional<SquadRequest>, 4>> m_requests; // (team, squad)
 	std::map<std::tuple<int, int, int>, SquadOrder> m_orders; // (team, squad, store)
 	uint32_t m_orderSerial = 0;

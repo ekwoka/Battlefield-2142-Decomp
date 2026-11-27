@@ -7383,8 +7383,7 @@ int runGame(Options& options, Session& session)
 			// The terrain the teams' overhead cameras stay over (0x005f8170).
 			const auto overheadTerrain = [&heightmaps](host::HostedGame& host) {
 				if (const terrain::Heightmap* primary = heightmaps.primary(); primary && primary->loaded()) {
-					host.setTerrainExtent(primary->originX(), primary->originZ(),
-						std::min(primary->worldWidth(), primary->worldDepth()));
+					host.setTerrainBounds(primary->originX(), primary->originZ(), primary->worldWidth(), primary->worldDepth());
 				}
 			};
 			if (session.hosted) {

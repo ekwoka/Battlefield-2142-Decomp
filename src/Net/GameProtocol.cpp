@@ -1224,12 +1224,54 @@ bool parseCommanderToolUse(const GameEvent& e, CommanderToolUse& out)
 	}
 }
 
+uint16_t spawnGroupNetId(int id)
+{
+	if (id >= 1 && id <= 0x3f) {
+		return static_cast<uint16_t>(0x202 + id);
+	}
+	if (id >= 0xc0 && id <= 0xff) {
+		return static_cast<uint16_t>(0x202 + id - 0x80);
+	}
+	return 0;
+}
+
+bool encodeSpawnGroupState(BitWriter& out, const SpawnGroupInfo& info, uint32_t mask)
+{
+	if (mask & ~0x31u) return false;
+	out.write(mask, 6);
+	if (mask & 0x10u) out.write(info.pointFlag ? 1u : 0u, 1);
+	if (mask & 0x01u) {
+		out.write(static_cast<uint32_t>(info.mapX) & 0xffu, 8);
+		out.write(static_cast<uint32_t>(info.mapZ) & 0xffu, 8);
+	}
+	if (mask & 0x20u) out.write(static_cast<uint32_t>(std::clamp(info.squad + 1, 0, 255)), 8);
+	return true;
+}
+
+bool decodeSpawnGroupState(BitReader& in, SpawnGroupInfo& info)
+{
+	const uint32_t mask = in.read(6);
+	if (in.bad()) return false;
+	if (mask & 0x10u) info.pointFlag = in.read(1) != 0;
+	if (mask & 0x02u) info.unused14 = in.read(4) != 0;
+	if (mask & 0x04u) in.read(1);
+	if (mask & 0x08u) in.read(1);
+	if (mask & 0x01u) {
+		info.mapX = static_cast<int>(in.read(8));
+		info.mapZ = static_cast<int>(in.read(8));
+	}
+	if (mask & 0x20u) info.squad = static_cast<int>(in.read(8)) - 1;
+	if (in.bad()) return false;
+	info.active = info.hasPoints && !info.pointFlag;
+	return true;
+}
+
 bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out)
 {
 	out = {};
 	if (e.type == kEvRemoveSpawnGroup && e.values.size() >= 2) {
 		out.id = e.i(0);
-		out.ghost = static_cast<uint16_t>(e.u(1));
+		out.netId = static_cast<uint16_t>(e.u(1));
 		return true;
 	}
 	if (e.type != kEvCreateSpawnGroup || e.values.size() < 8) {
@@ -1242,7 +1284,8 @@ bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out)
 	out.hasPoints = e.u(4) != 0;
 	out.mapX = e.i(5);
 	out.mapZ = e.i(6);
-	out.ghost = static_cast<uint16_t>(e.u(7));
+	out.netId = static_cast<uint16_t>(e.u(7));
+	out.active = out.hasPoints && !out.pointFlag;
 	return true;
 }
 
@@ -1252,15 +1295,15 @@ GameEvent makeCreateSpawnGroup(const SpawnGroupInfo& info)
 	e.type = kEvCreateSpawnGroup;
 	e.values = {static_cast<uint32_t>(info.id) & 0xff, static_cast<uint32_t>(info.team) & 0xf, info.unused14 ? 1u : 0u,
 		info.pointFlag ? 1u : 0u, info.hasPoints ? 1u : 0u, static_cast<uint32_t>(info.mapX) & 0xff,
-		static_cast<uint32_t>(info.mapZ) & 0xff, info.ghost};
+		static_cast<uint32_t>(info.mapZ) & 0xff, info.netId};
 	return e;
 }
 
-GameEvent makeRemoveSpawnGroup(int id, uint16_t ghost)
+GameEvent makeRemoveSpawnGroup(int id, uint16_t netId)
 {
 	GameEvent e;
 	e.type = kEvRemoveSpawnGroup;
-	e.values = {static_cast<uint32_t>(id) & 0xff, ghost};
+	e.values = {static_cast<uint32_t>(id) & 0xff, netId};
 	return e;
 }
 

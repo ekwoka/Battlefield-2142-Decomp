@@ -508,8 +508,8 @@ bool parseStrikeFire(const GameEvent& e, StrikeFireInfo& out);
 // kEvRemoveSpawnGroup (0x3a; read 0x00512880, written 0x005128e0, handled
 // 0x00512970 → slot 0x48 with the id): a spawn group the spawn screen
 // offers: its id (8 bits), team (4), three bits and two bytes, and the
-// ghost of the object it is at (16 bits: a control point, or a vehicle
-// carrying a SpawnPoint). The server's sender (0x00632e50, the constructor
+// spawn group's own networkable id (16 bits, allocated in 0x202..0x281;
+// the protocol field is named `ghost` in retail). The server's sender (0x00632e50, the constructor
 // 0x00512570) fills the bits and bytes from the group (SpawnManager.cpp):
 // +0x14 always 0 (the client passes it to the group's slot 0x24), +0x15 the
 // group's +0x8e (its spawn points' slot 0x4c flag: set by the first point
@@ -523,11 +523,21 @@ struct SpawnGroupInfo {
 	int id = 0, team = 0;
 	bool unused14 = false, pointFlag = false, hasPoints = false;
 	int mapX = 0, mapZ = 0;
-	uint16_t ghost = 0;
+	uint16_t netId = 0; // the group's own networkable id, not a carrying object's ghost
+	Vec3f position;     // reconstructed from mapX/mapZ and current level bounds
+	int squad = -1;     // T3 state field, -1 when no squad is associated
+	bool active = true; // native mapping from pointFlag; retail client usability is player-specific
 };
+// Retail's spawn group networkables occupy 0x202..0x281: CP compact IDs
+// 1..0x3f map to 0x202+id; mobile IDs 0xc0..0xff map to 0x202+id-0x80.
+uint16_t spawnGroupNetId(int id);
+// The group's 6-bit state mask (T3): pointFlag at 0x10, map bytes at 0x01,
+// and squad+1 at 0x20. Other retail fields are preserved only when traced.
+bool encodeSpawnGroupState(BitWriter& out, const SpawnGroupInfo& info, uint32_t mask = 0x31);
+bool decodeSpawnGroupState(BitReader& in, SpawnGroupInfo& info);
 bool parseSpawnGroup(const GameEvent& e, SpawnGroupInfo& out);
 GameEvent makeCreateSpawnGroup(const SpawnGroupInfo& info);
-GameEvent makeRemoveSpawnGroup(int id, uint16_t ghost);
+GameEvent makeRemoveSpawnGroup(int id, uint16_t netId);
 
 // kEvPostRemote (0x005096a0, built 0x00509990): a message for the event
 // manager (0x00a7d06c) on the other side: category (4 bits), id (32 bits),

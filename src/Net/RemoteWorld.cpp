@@ -62,12 +62,29 @@ void RemoteWorld::clear()
 	m_inData = m_inString = false;
 	m_teamState = {};
 	m_spawnGroups.clear();
+	m_spawnGroupCreatedAfterTick.clear();
+	m_spawnGroupLatestStateTick.clear();
+	m_spawnGroupRetiredAtTick.clear();
 	m_requests.clear();
 	m_orders.clear();
 	m_orderStates.clear();
 	m_radar.clear();
 	m_radarVehicles.clear();
 	m_squadReports.clear();
+}
+
+void RemoteWorld::setTerrainBounds(float originX, float originZ, float sizeX, float sizeZ)
+{
+	m_terrainOriginX = originX;
+	m_terrainOriginZ = originZ;
+	m_terrainSizeX = sizeX;
+	m_terrainSizeZ = sizeZ;
+	for (auto& [id, group] : m_spawnGroups) {
+		(void)id;
+		group.position.x = m_terrainOriginX + static_cast<float>(group.mapX & 0xff) / 255.0f * m_terrainSizeX;
+		group.position.y = 0;
+		group.position.z = m_terrainOriginZ + static_cast<float>(group.mapZ & 0xff) / 255.0f * m_terrainSizeZ;
+	}
 }
 
 std::vector<RemoteWorld::SquadRequest> RemoteWorld::squadRequests(int team) const
@@ -551,9 +568,23 @@ bool RemoteWorld::apply(const GameEvent& event)
 			return false;
 		}
 		if (event.type == kEvCreateSpawnGroup) {
+			if (const auto retired = m_spawnGroupRetiredAtTick.find(info.netId); retired != m_spawnGroupRetiredAtTick.end()) {
+				m_spawnGroupCreatedAfterTick[info.netId] = retired->second;
+				m_spawnGroupRetiredAtTick.erase(retired);
+			} else {
+				m_spawnGroupCreatedAfterTick.erase(info.netId);
+			}
+			info.position.x = m_terrainOriginX + static_cast<float>(info.mapX & 0xff) / 255.0f * m_terrainSizeX;
+			info.position.y = 0;
+			info.position.z = m_terrainOriginZ + static_cast<float>(info.mapZ & 0xff) / 255.0f * m_terrainSizeZ;
 			m_spawnGroups[info.id] = info;
 		} else {
-			m_spawnGroups.erase(info.id);
+			const auto found = m_spawnGroups.find(info.id);
+			if (found != m_spawnGroups.end() && found->second.netId == info.netId) {
+				m_spawnGroups.erase(found);
+				m_spawnGroupRetiredAtTick[info.netId] = m_tick;
+				m_spawnGroupCreatedAfterTick.erase(info.netId);
+			}
 		}
 		return true;
 	}
@@ -814,6 +845,41 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 					++p.reloads;
 				}
 			}
+			continue;
+		}
+		const auto spawnGroup = std::find_if(m_spawnGroups.begin(), m_spawnGroups.end(), [&u](const auto& entry) {
+			return entry.second.netId == u.ghost;
+		});
+		if (spawnGroup != m_spawnGroups.end()) {
+			SpawnGroupInfo& group = spawnGroup->second;
+			if (const auto created = m_spawnGroupCreatedAfterTick.find(u.ghost);
+				created != m_spawnGroupCreatedAfterTick.end() && ghosts.tick <= created->second) {
+				continue; // Ignore a late state from the previous group using this mobile netId.
+			}
+			if (const auto latest = m_spawnGroupLatestStateTick.find(u.ghost);
+				latest != m_spawnGroupLatestStateTick.end() && ghosts.tick < latest->second) {
+				continue; // State blocks can arrive late; never roll a reused netId back.
+			}
+			BitReader in(u.state.data(), (u.stateBits + 7) / 8);
+			in.limit(u.stateBits);
+			SpawnGroupInfo decodedGroup = group;
+			const bool decoded = decodeSpawnGroupState(in, decodedGroup) && in.position() == u.stateBits;
+			if (decoded) {
+				group = decodedGroup;
+				group.position.x = m_terrainOriginX + static_cast<float>(group.mapX & 0xff) / 255.0f * m_terrainSizeX;
+				group.position.y = 0;
+				group.position.z = m_terrainOriginZ + static_cast<float>(group.mapZ & 0xff) / 255.0f * m_terrainSizeZ;
+				m_spawnGroupLatestStateTick[u.ghost] = ghosts.tick;
+			}
+			if (onProblem && (!decoded || in.position() != u.stateBits)) {
+				onProblem("spawn group state", "group " + std::to_string(group.id) + " netId " + std::to_string(u.ghost)
+					+ ": " + describeBits(in.position(), u.stateBits) + (decoded ? "" : ", not decoded"));
+			}
+			if (decoded) m_spawnGroupCreatedAfterTick.erase(u.ghost);
+			continue;
+		}
+		if (u.ghost >= 0x202 && u.ghost <= 0x281) {
+			if (onProblem) onProblem("unknown spawn group", "state for unregistered netId " + std::to_string(u.ghost));
 			continue;
 		}
 		if (onProblem && !m_objects.count(u.ghost)) {

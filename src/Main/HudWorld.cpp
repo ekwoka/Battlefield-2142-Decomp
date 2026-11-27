@@ -382,7 +382,8 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 			}
 		}
 		for (const auto& [id, group] : m_world.spawnGroups()) {
-			if (group.ghost == o.ghost) {
+			// Transitional until F3 replaces the joined carrier-object marker path.
+			if (group.netId == o.ghost) {
 				cp.id = id;
 				representedGroups.insert(id);
 				break; // the interim CP marker represents the first group at this CP
@@ -396,7 +397,7 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 			continue; // the F1 fallback is only for compact control-point groups
 		}
 		ControlPointInfo cp;
-		if (const auto known = controlPointsByGhost.find(received.ghost); known != controlPointsByGhost.end()) {
+		if (const auto known = controlPointsByGhost.find(received.netId); known != controlPointsByGhost.end()) {
 			cp = known->second; // retain the authored/localized CP label when its ghost is known
 		}
 		cp.id = id;
@@ -426,7 +427,8 @@ std::vector<uint32_t> RemoteHudWorld::spawnVehicles(int team) const
 {
 	std::vector<uint32_t> out;
 	for (const auto& [id, group] : m_world.spawnGroups()) {
-		const world::Object* object = group.team == team ? m_round.objects().find(objectOf(group.ghost)) : nullptr;
+		// Transitional until F3 replaces the joined carrier-object marker path.
+		const world::Object* object = group.team == team ? m_round.objects().find(objectOf(group.netId)) : nullptr;
 		if (object && object->objectTemplate() && object->objectTemplate()->typeName() == "PlayerControlObject") {
 			out.push_back(object->id());
 		}
@@ -437,7 +439,8 @@ std::vector<uint32_t> RemoteHudWorld::spawnVehicles(int team) const
 int RemoteHudWorld::spawnGroupAt(uint32_t object) const
 {
 	for (const auto& [id, group] : m_world.spawnGroups()) {
-		if (object != 0 && objectOf(group.ghost) == object) {
+		// Transitional until F3 replaces the joined carrier-object marker path.
+		if (object != 0 && objectOf(group.netId) == object) {
 			return id;
 		}
 	}
