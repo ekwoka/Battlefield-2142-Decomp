@@ -3167,6 +3167,10 @@ private:
 		bool majorActor = false;
 		bool controlObject = false;
 		bool particle = false;
+		// A UAVVehicle (the commander's eu_drone): no vehicle of its own,
+		// but its Armor component wears, wrecks and removes it as a
+		// vehicle's does (armoured()).
+		bool uav = false;
 		std::shared_ptr<physics::CollisionWorld> trunk;
 		float trunkRadius = 0;
 		bool trunkFromTypeFour = false;
@@ -3283,6 +3287,9 @@ private:
 	static bool asleep(const Body& body) { return body.sleep.asleep() || body.held; }
 	void stepSleep(Body& body, float seconds);
 	void destroyVehicle(Body& body, int attacker);
+	// A body whose armour the vehicles' damage steps run: a vehicle's, or
+	// the UAV's.
+	static bool armoured(const Body& body) { return body.vehicle || body.uav; }
 	// The armour's wreck (0x00654120) sends its object message 0x18; the
 	// object's handler (0x0063c6a0) on the server, for an armoured object
 	// whose Radio part has destroyedGameEvent N (Radio template +0x1f8, -1
@@ -4727,6 +4734,10 @@ private:
 		uint32_t uavDrone = 0;
 		physics::Vec3 uavCentre;
 		float uavCircle = 0, uavTurnRate = 0, uavAngle = 0;
+		// The drone's yaw rate as the exe keeps it (+0x188, signed:
+		// negative) and uavVehicleSpeed, which 0x005a1f70 sets on its
+		// physics node each tick.
+		float uavYawRate = 0, uavSpeed = 0;
 	};
 	void launchUavDrone(int team, const physics::Vec3& at);
 	void flyUavDrones(float seconds);

@@ -1341,7 +1341,7 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 	// The hit's spectacular flag (0x00656320 -> 0x006525f0, armour +0x250):
 	// for a hit with a giver (the rewrite: an attacker), else off.
 	Body* hitBody = findBody(object);
-	if (hitBody && hitBody->vehicle) {
+	if (hitBody && armoured(*hitBody)) {
 		const world::Object* o = m_objects.find(object);
 		hitBody->spectacular = attacker >= 0 && o && o->objectTemplate()
 			&& spectacularHit(object, left, now, armorEffectList(*o->objectTemplate()).hitPoints);
@@ -1360,7 +1360,7 @@ void GameWorld::loseHitPoints(uint32_t object, float amount, int attacker)
 		kill(*victim, findPlayer(attacker), 0);
 		return;
 	}
-	if (Body* body = findBody(object); body && body->vehicle) {
+	if (Body* body = findBody(object); body && armoured(*body)) {
 		destroyVehicle(*body, attacker);
 		return;
 	}
@@ -1673,6 +1673,20 @@ void GameWorld::destroyVehicle(Body& body, int attacker)
 	if (blast.explosionRadius > 0) {
 		explode(body.body.position, blast, attacker, 0, body.object);
 	}
+	// The UAV's wreck: 0x00654120 sends the object message 0x18 (slot
+	// 0x100), and UAVVehicle's handler (slot 64, 0x005a2130) has the UAV
+	// manager delete it (0x005a1d90: ECGameLogicGLUAVVehicleDestroyed, the
+	// object manager's slot 0x14), so it neither falls nor drains as a
+	// wreck: no wreck blast, no level -100. The armour's level effects of
+	// the wreck (0x00653d40 at the function's end: level 0,
+	// e_sfx_exp_close and e_vexp_generic_small) are left in the world
+	// where it was. The rewrite deletes it in this tick's armour step, as
+	// destroyNow does (a spectacular death with destroyOnSpectacularDeath,
+	// which returns before the message and goes the same way through
+	// 0x00654d80; the manager lets it go, 0x005a20f0, slot 8).
+	if (body.uav) {
+		body.destroyNow = true;
+	}
 }
 
 // The engine's generator step pair (0x0042b230: two rounds of a
@@ -1885,7 +1899,7 @@ void GameWorld::armorEffectMeshes(std::vector<PlacedMesh>& out) const
 void GameWorld::followArmorEffects()
 {
 	for (Body& body : m_bodies) {
-		if (!body.vehicle) {
+		if (!armoured(body)) {
 			continue;
 		}
 		const auto known = m_hitPoints.find(body.object);
@@ -2086,14 +2100,16 @@ void GameWorld::stepVehicleDamage(float seconds)
 	}
 	for (Body& body : m_bodies) {
 		world::Object* object = m_objects.find(body.object);
-		if (!object || !body.vehicle) {
+		if (!object || !armoured(body)) {
 			continue;
 		}
 		const world::ObjectTemplate& t = *object->objectTemplate();
 		if (body.empLevel > 0) {
 			// 0x00652910: one step every empLevelTime (default 5 s).
 			body.empLevel = std::max(0.0f, body.empLevel - seconds / number(t, "armor.empLevelTime", 5));
-			body.vehicle->setInput({});
+			if (body.vehicle) {
+				body.vehicle->setInput({});
+			}
 		}
 		if (body.destroyNow) {
 			// destroyOnSpectacularDeath: the effects of the hit points now,
@@ -15565,6 +15581,7 @@ bool GameWorld::buildBody(const world::ObjectTemplate& tRef, uint32_t id, const 
 	body.controlObject = sameName(t->typeName(), "PlayerControlObject") || sameName(t->typeName(), "Parachute");
 	body.commanderCrate = sameName(t->typeName(), "SupplyObject") && sameName(t->name(), "supply_crate");
 	body.particle = sameName(t->typeName(), "Particle");
+	body.uav = sameName(t->typeName(), "UAVVehicle");
 	body.material = static_cast<uint32_t>(integer(*t, "material", 0));
 	body.collisionGroups = static_cast<uint32_t>(integer(*t, "collisionGroups", 0));
 	// otherCollisionLod (+0xec, -1 by default: 1; MeshCollision.cpp).

@@ -11266,3 +11266,167 @@ TEST(Vehicles_WalkerCannonStartsBarrelMuzzles)
 		CHECK(attached >= 2);
 	}
 }
+
+namespace {
+
+// The commander's UAV called in over (x, z) for `team`: the trailer
+// (commander_uav_drone_control) set down for it far off, the team's
+// commander named. The drone (eu_drone), or 0.
+uint32_t callUav(Garage& g, int team, float x, float z)
+{
+	world::Object* trailer = g.objects.create(g.templates.find("commander_uav_drone_control"), {-200, 0, -200});
+	trailer->setTeam(team);
+	g.world->setCommanderEnabled(true);
+	g.world->setCommander(team, g.world->addPlayer("Boss", team, false));
+	g.run(1.2f); // the assets are looked through once a second
+	if (!g.world->commanderAction(team, game::GameWorld::CommanderAbility::Uav, x, z)) {
+		return 0;
+	}
+	return g.world->uavDrone(team);
+}
+
+} // namespace
+
+// eu_drone is a mobile Mesh node (hasMobilePhysics 1, physicsType Mesh):
+// the UAV manager (0x005a1f70) sets its node's yaw rate and its forward x
+// uavVehicleSpeed each tick, and the node flies it, so the body the rounds
+// meet is the drone. Its Armor (1000) takes the hits; at 0 the wreck's
+// message 0x18 has the manager delete it at once (UAVVehicle slot 64,
+// 0x005a2130 -> 0x005a1d90): it doesn't fall as a wreck. The UAV's
+// reveal runs on round its point (0x005a27c0).
+TEST(Vehicles_UavDroneIsHitAndShotDown)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_drone") || !g.templates.find("eu_aa_missile")) return;
+	g.start("commander_uav_drone_control", {-200, 0, -220}, 0.5f);
+	const uint32_t drone = callUav(g, 2, 0, 0);
+	CHECK(drone != 0);
+	if (!drone) return;
+	g.run(3);
+	physics::Vec3 at = g.position(drone);
+	std::fprintf(stderr, "  eu_drone after 3 s at %.1f %.1f %.1f, %.1f m round the point\n", at.x, at.y, at.z,
+		std::sqrt(at.x * at.x + at.z * at.z));
+	CHECK(at.y > 66 && at.y < 70.1f);                                     // 70 m up, its node's gravity a sag
+	CHECK(std::fabs(std::sqrt(at.x * at.x + at.z * at.z) - 39.8f) < 1.5f); // circling the point
+	// A rocket straight down onto it: it hits the drone's mesh.
+	const float before = g.world->hitPoints(drone);
+	CHECK(before == 1000);
+	CHECK(g.world->launchProjectile("eu_aa_missile", {at.x, at.y + 20, at.z}, {0, -200, 0}));
+	g.run(0.5f);
+	const float hit = g.world->hitPoints(drone);
+	std::fprintf(stderr, "  eu_drone hit: %.0f -> %.0f hit points\n", before, hit);
+	CHECK(hit < before && hit > 0);
+	CHECK(g.objects.find(drone) && g.world->uavDrone(2) == drone);
+	// Shot down: gone at once, where it flew.
+	bool gone = false;
+	float lastHeight = 0;
+	for (int shot = 0; shot < 4 && !gone; ++shot) {
+		at = g.position(drone);
+		CHECK(g.world->launchProjectile("eu_aa_missile", {at.x, at.y + 20, at.z}, {0, -200, 0}));
+		for (int i = 0; i < 15 && !gone; ++i) {
+			lastHeight = g.position(drone).y;
+			const bool wrecked = g.world->hitPoints(drone) <= 0;
+			g.world->tick(1 / 30.0f);
+			gone = !g.objects.find(drone);
+			CHECK(!wrecked || gone); // no tick as a wreck
+		}
+	}
+	std::fprintf(stderr, "  eu_drone shot down %s at %.1f m\n", gone ? "and gone" : "but still here", lastHeight);
+	CHECK(gone && lastHeight > 60);
+	g.world->tick(1 / 30.0f);
+	CHECK(g.world->uavDrone(2) == 0);
+	physics::Vec3 point;
+	float radius = 0;
+	CHECK(g.world->uavArea(2, point, radius));
+}
+
+// The UAV's time (gameLogic uavTime, 30 s): the manager's tick
+// (0x005a1f70) finds the UAV over (0x005a27c0 false) and deletes the drone
+// at once (0x005a1d90, the object manager's slot 0x14) where it flies: no
+// fall, no wreck.
+TEST(Vehicles_UavDroneGoesAtOnceWhenItsTimeIsUp)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_drone")) return;
+	g.start("commander_uav_drone_control", {-200, 0, -220}, 0.5f);
+	const uint32_t drone = callUav(g, 2, 50, 50);
+	CHECK(drone != 0);
+	if (!drone) return;
+	float lowest = 1e9f, lastSpeed = 0;
+	physics::Vec3 last = g.position(drone);
+	int ticks = 0;
+	for (; ticks < 40 * 30 && g.objects.find(drone); ++ticks) {
+		g.world->tick(1 / 30.0f);
+		if (const world::Object* o = g.objects.find(drone)) {
+			const physics::Vec3 now {o->position().x, o->position().y, o->position().z};
+			lastSpeed = std::sqrt(physics::lengthSquared(now - last)) * 30;
+			last = now;
+			lowest = std::min(lowest, now.y);
+		}
+	}
+	std::fprintf(stderr, "  eu_drone gone after %.2f s, lowest %.1f m, last %.1f m/s\n", ticks / 30.0f, lowest, lastSpeed);
+	CHECK(std::fabs(ticks / 30.0f - 30) < 0.2f);
+	CHECK(lowest > 60);
+	CHECK(lastSpeed > 13 && lastSpeed < 15); // flying at uavVehicleSpeed to the end
+	CHECK(g.world->uavDrone(2) == 0);
+}
+
+// The stationary AA's lock (MultiFireArmTargetComp, TSHeatSeeking: the
+// drone's HeatObject) takes the enemy UAV, and its locked missile meets
+// the drone in the air.
+TEST(Vehicles_StaticAALocksOnUavAndItsMissileReachesIt)
+{
+	if (!gameDir()) return;
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("eu_drone") || !g.templates.find("static_aa")) return;
+	const uint32_t aa = g.start("static_aa", {0, 2, 8}, 3, 0, -10000, 0);
+	// PAC's UAV ahead along the AA's sight (30 degrees up): it starts at
+	// x + 40 heading away along +z.
+	const uint32_t drone = callUav(g, 1, -40, 100);
+	CHECK(drone != 0);
+	if (!drone) return;
+	CHECK(g.enter(aa));
+	const int me = g.world->localPlayer();
+	game::SoldierInput aim;
+	int state = 0;
+	for (int i = 0; i < 90 && state != 2; ++i) {
+		g.world->setPlayerInput(aim);
+		g.world->tick(1 / 30.0f);
+		state = g.world->weaponLock(me).state;
+	}
+	const auto lock = g.world->weaponLock(me);
+	std::fprintf(stderr, "  static_aa at the UAV: lock state %d on %s\n", lock.state, lock.target == drone ? "it" : "other/none");
+	CHECK(lock.state == 2 && lock.target == drone);
+	aim.altFire = true;
+	uint32_t round = 0, roundTarget = 0;
+	for (int i = 0; i < 30 && !round; ++i) {
+		g.world->setPlayerInput(aim);
+		g.world->tick(1 / 30.0f);
+		for (const auto& p : g.world->projectiles()) {
+			if (p.alive && p.shooter == aa && p.settings && p.settings->name == "static_aa_missile_projectile") {
+				round = p.serial;
+				roundTarget = p.lockedOn;
+			}
+		}
+	}
+	aim.altFire = false;
+	CHECK(round != 0 && roundTarget == drone);
+	float nearest = 1e9f;
+	bool flying = true;
+	for (int i = 0; i < 150 && flying && g.objects.find(drone); ++i) {
+		g.world->setPlayerInput(aim);
+		g.world->tick(1 / 30.0f);
+		flying = false;
+		for (const auto& p : g.world->projectiles()) {
+			if (p.alive && p.serial == round) {
+				flying = true;
+				nearest = std::min(nearest, std::sqrt(physics::lengthSquared(p.position - g.position(drone))));
+			}
+		}
+	}
+	std::fprintf(stderr, "  static_aa missile: %s, %.1f m from the drone at the nearest\n", flying ? "still flying" : "gone off",
+		nearest);
+	CHECK(!flying && nearest < 6);
+}
