@@ -7767,7 +7767,8 @@ bool GameWorld::spawnGroupAvailable(const SpawnGroupInfo& group, int team, const
 	if (!root || root->destroyed() || root->team() != team || !teamHoldsControlPoint(team) || !spawnParentArmourHolds(*root)) {
 		return false;
 	}
-	if (titan && (m_gameMode != "gpm_ti" || titan->wrecked || titan->spawnPoints.empty() || !holdsCp(titan->controlPoint))) {
+	if (titan && ((m_gameMode != "gpm_ti" && player && player->ai) || titan->wrecked || titan->spawnPoints.empty()
+			|| !holdsCp(titan->controlPoint))) {
 		return false;
 	}
 	if (!player) {
@@ -8333,7 +8334,7 @@ world::Object* GameWorld::spawnSoldier(Player& player)
 			return titan.object == player.spawnTitan && titan.team == team && !titan.wrecked && !titan.parts.empty()
 				&& !titan.spawnPoints.empty();
 		});
-		if (m_gameMode != "gpm_ti" || player.spawnTitan == 0 || it == m_titans.end()) {
+		if ((m_gameMode != "gpm_ti" && player.ai) || player.spawnTitan == 0 || it == m_titans.end()) {
 			player.spawnRequested = false;
 			return nullptr; // never turn a failed Titan choice into an ordinary spawn
 		}

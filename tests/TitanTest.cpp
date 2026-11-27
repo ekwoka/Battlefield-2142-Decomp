@@ -985,6 +985,56 @@ TEST(GameWorld_SpawnGroupsSuez902SplitAverageSelectionAndRoundReset)
 	CHECK(split != resetGroups.end() && split->id == cpGroups[1].id);
 }
 
+TEST(GameWorld_RemasterShuhiaSinglePlayerTitanSpawnGroup)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Shuhia_Taiba", 48, true, "mods/Project_Remaster_v17_Final", false, nullptr, "gpm_sp");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	const auto titans = level.world->titans();
+	for (int team : {1, 2}) {
+		const auto ownTitan = std::find_if(titans.begin(), titans.end(), [team](const auto& titan) { return titan.team == team; });
+		CHECK(ownTitan != titans.end());
+		if (ownTitan == titans.end()) continue;
+		const int player = level.world->addPlayer("Human Titan group deploy", team, false);
+		const auto groups = level.world->spawnGroups(team, player);
+		const auto group = std::find_if(groups.begin(), groups.end(), [ownTitan](const auto& candidate) {
+			return candidate.mobileObject == ownTitan->object && candidate.id >= 0xc0 && candidate.id <= 0xff;
+		});
+		CHECK(group != groups.end());
+		if (group == groups.end()) continue;
+		CHECK(group->available);
+		CHECK(level.world->spawnGroupAvailable(group->id, player));
+		CHECK(group->points.size() == 7);
+		const int bot = level.world->addPlayer("Titan bot deploy", team, true);
+		CHECK(!level.world->spawnGroupAvailable(group->id, bot));
+		level.world->setSpawnGroupChoice(player, group->id);
+		level.world->requireSpawnConfirmation(player);
+		CHECK(level.world->requestSpawn(player));
+		CHECK(level.world->spawnSoldier(player));
+		game::GameWorld::PlayerInfo info;
+		CHECK(level.world->playerInfo(player, info) && info.alive);
+		float nearest = std::numeric_limits<float>::max();
+		for (uint32_t id : group->points) {
+			const world::Object* point = level.objects.find(id);
+			if (point) nearest = std::min(nearest,
+				std::sqrt(physics::lengthSquared(info.position - physics::Vec3 {point->position().x, point->position().y, point->position().z})));
+		}
+		CHECK(nearest < 2.0f);
+		if (team == 1) {
+			const int legacy = level.world->addPlayer("Human legacy Titan deploy", team, false);
+			level.world->setSpawnTitan(legacy, ownTitan->object);
+			CHECK(level.world->spawnSoldier(legacy));
+			game::GameWorld::PlayerInfo legacyInfo;
+			CHECK(level.world->playerInfo(legacy, legacyInfo) && legacyInfo.alive);
+			const int botLegacy = level.world->addPlayer("Titan bot legacy deploy", team, true);
+			level.world->setSpawnTitan(botLegacy, ownTitan->object);
+			CHECK(!level.world->spawnSoldier(botLegacy));
+		}
+	}
+}
+
 // Minsk_Titan16 (gpm_ti 16): its own archives' Titans and silos
 // (missile_silo_v22) work the same way.
 TEST(Titan_MinskTitan16)
