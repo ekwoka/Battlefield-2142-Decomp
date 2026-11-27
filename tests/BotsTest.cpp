@@ -7571,3 +7571,97 @@ TEST(Director_CutsFromIdleBotToFightingOne)
 	const float away = std::sqrt(physics::lengthSquared(look.eye - info.position));
 	CHECK(director.mode() == game::director::CameraMode::Wide ? away < 60 : away < 6);
 }
+
+// --director-mode kills with --director-first-person: the followed bot is
+// killed, the death view holds, then the camera travels to the killer (no
+// cut for the renderer, his first person and hidden body only on arrival);
+// the interest mode cuts to the next bot outright.
+TEST(Director_KillsTravelsFromTheDeathViewToTheKiller)
+{
+	for (const game::director::Policy policy : {game::director::Policy::Kills, game::director::Policy::Interest}) {
+		const bool kills = policy == game::director::Policy::Kills;
+		Field field;
+		Console console;
+		game::BotSettings settings = scriptedSettings(console);
+		game::BotManager bots(*field.world, settings); // (not run: the bots stand, nobody fires)
+		const int a = field.soldier(2, true, 0, 0);
+		const int b = field.soldier(1, true, 0, 60);
+		const int c = field.soldier(1, true, 60, 0);
+		game::director::Settings shots;
+		shots.policy = policy;
+		shots.firstPersonShare = 1; // --director-first-person
+		shots.wideShare = 0;
+		game::director::Director director(*field.world, &bots, shots);
+		std::vector<game::director::Cut> cuts;
+		director.onCut = [&cuts](const game::director::Cut& cut) { cuts.push_back(cut); };
+		const auto tick = [&] {
+			field.world->tick(1 / 30.0f);
+			director.tick(1 / 30.0f);
+		};
+		for (int i = 0; i < 30; ++i) {
+			tick();
+		}
+		const int victim = director.subject();
+		CHECK(victim >= 0);
+		if (victim < 0) {
+			return;
+		}
+		// Its killer: an enemy 60 m off.
+		const int killer = victim == a ? b : a;
+		game::GameWorld::PlayerInfo info;
+		field.world->playerInfo(victim, info);
+		field.world->applyDamage(info.soldier, 1000, killer);
+		const size_t before = cuts.size();
+		int cutTicks = 0, travelTicks = 0, shownWhileTravelling = 0, hiddenWhileFar = 0;
+		float startGap = -1;
+		bool arrived = false;
+		game::camera::Look look, deathView;
+		float fov = 0;
+		for (int i = 0; i < 30 * 8 && !arrived; ++i) {
+			const bool wasTravelling = director.travelling();
+			tick();
+			CHECK(director.view(look, fov));
+			if (cuts.size() == before) {
+				deathView = look;
+				continue;
+			}
+			if (director.cutLastTick()) {
+				++cutTicks;
+			}
+			if (director.travelling()) {
+				++travelTicks;
+				if (travelTicks == 1) {
+					startGap = std::sqrt(physics::lengthSquared(look.eye - deathView.eye)); // on from the death view
+				}
+				shownWhileTravelling += director.firstPersonShown();
+				field.world->playerInfo(director.subject(), info);
+				hiddenWhileFar += !director.hidden().empty() && physics::lengthSquared(look.eye - info.position) > 9;
+			} else if (wasTravelling || !kills) {
+				arrived = true;
+			}
+		}
+		CHECK(cuts.size() > before);
+		if (cuts.size() <= before) {
+			return;
+		}
+		const game::director::Cut& cut = cuts[before];
+		std::printf("  %s: %s cut to player %d (killer %d), %d travel ticks (from %.2f m off the death view), %d cut ticks\n",
+			game::director::policyName(policy), cut.reason.c_str(), cut.subject, killer, travelTicks, startGap, cutTicks);
+		CHECK(cut.reason == (kills ? "killer" : "death"));
+		if (kills) {
+			CHECK(cut.subject == killer);
+			// 60 m or so: 1.4 s or so of travel, never a cut.
+			CHECK(travelTicks > 30 && travelTicks < 60 && cutTicks == 0);
+			CHECK(shownWhileTravelling == 0 && hiddenWhileFar == 0);
+			CHECK(startGap >= 0 && startGap < 0.5f);
+		} else {
+			CHECK(travelTicks == 0 && cutTicks == 1);
+		}
+		// There: in the new subject's eye, his first person on.
+		CHECK(arrived);
+		field.world->playerInfo(director.subject(), info);
+		const float away = std::sqrt(physics::lengthSquared(look.eye - info.position));
+		CHECK(away < 2.5f && director.firstPersonShown() && !director.hidden().empty());
+		(void)c;
+	}
+}

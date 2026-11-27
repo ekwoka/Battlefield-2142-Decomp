@@ -17,6 +17,7 @@
 #include "Game/Cameras.h"
 #include "Physics/RigidBody.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -138,6 +139,13 @@ struct Settings {
 	float streak = 40;
 	float titanGunStreak = 20;
 	float benchFor = 60;
+	// Policy::Kills and KillsRotate: a cut to a killer ("killer", "first-kill")
+	// or off a dead subject ("death") travels there instead of jumping
+	// (CameraTravel): at most `travel` seconds (--director-travel; 0, "off":
+	// hard cuts), a hard cut when the new shot is more than travelFar metres
+	// off (across the map a flight is a long blur).
+	float travel = 3;
+	float travelFar = 400;
 };
 
 // A cut: when, to whom, how, and why. Policy::Interest: "start", "better",
@@ -271,17 +279,63 @@ private:
 	camera::Look m_last;
 };
 
+// Whether a cut travels (Settings::travel): in the kills policies, a cut to
+// another subject for a kill ("killer", "first-kill") or off a death
+// ("death"). Policy::Interest, angle changes, idle and streak cuts jump.
+bool travels(const Settings& settings, const Cut& cut);
+// How long a travel of `distance` metres takes: 0.75 s plus a second each
+// 90 m, from 1 s (or Settings::travel if shorter) to Settings::travel; 0 (a
+// hard cut) when travel is off or the distance over Settings::travelFar.
+float travelSeconds(const Settings& settings, float distance);
+
+// The camera's travel from one view to a new shot's: the position eases in
+// and out (smootherstep) from where the old view was to where the new shot's
+// camera is now (it moves: the target is tracked each step), rising on an arc
+// (an eighth of the way's length, at most 30 m, or as high as clears the
+// ground under the way by kClearance) and kept over the ground; the look turns from the old view's towards the new
+// subject in the first 40 %, keeps on it, and settles into the new shot's own
+// in the last 40 %; the field of view eases across. It ends exactly on the new
+// shot's view. Pure, like DirectorCamera.
+class CameraTravel {
+public:
+	void start(const camera::Look& from, float fromFov, float seconds);
+	void stop() { m_seconds = 0; }
+	bool active() const { return m_seconds > 0; }
+	// `seconds` on, towards `to` (the new shot's view this tick); the view and
+	// its field of view. The last step (the time up) is `to` itself and ends it.
+	camera::Look step(const camera::Look& to, float toFov, float seconds, const camera::Ground& ground, float& fovY);
+	// The share of the time gone, and of the way (eased).
+	float elapsed() const { return m_seconds > 0 ? std::min(m_time / m_seconds, 1.0f) : 1.0f; }
+	static float eased(float share);
+	float duration() const { return m_seconds; }
+
+	static constexpr float kClearance = 2; // metres over the ground mid-way
+	static constexpr float kArcShare = 0.125f, kArcMax = 30;
+
+private:
+	camera::Look m_from;
+	float m_fromFov = 1, m_seconds = 0, m_time = 0, m_arc = -1;
+};
+
 // The director as main runs it: the observer every tick, a decision every
-// Settings::sampleEvery, the camera each tick.
+// Settings::sampleEvery, the camera each tick (on a travelling cut,
+// CameraTravel between the old view and the new shot's).
 class Director {
 public:
 	Director(GameWorld& world, const BotManager* bots, Settings settings = {}, uint32_t seed = 0x2142u);
 	void tick(float seconds);
 	// The view now (false before there is a subject).
 	bool view(camera::Look& look, float& fovY) const;
-	// Whether the last tick cut (no blending into the new view).
+	// Whether the last tick cut (no blending into the new view). A travelling
+	// cut doesn't: the view moves on from the old one, tick by tick.
 	bool cutLastTick() const { return m_cutLastTick; }
-	// What the view leaves out (the subject's soldier and weapon in first person).
+	// On the way to a new shot (CameraTravel).
+	bool travelling() const { return m_travel.active(); }
+	// The view is the subject's own eye: a first-person shot of him alive,
+	// arrived (not travelling there, not his death view). main shows his
+	// first person (enhanced.followFirstPerson) only then.
+	bool firstPersonShown() const;
+	// What the view leaves out (the subject's soldier and weapon in first person, once there).
 	std::vector<uint32_t> hidden() const;
 	void forceCut() { m_shots.forceCut(); }
 	int subject() const { return m_shots.subject(); }
@@ -289,6 +343,8 @@ public:
 	const std::vector<Cut>& cuts() const { return m_cuts; }
 	const Observer& observer() const { return m_observer; }
 	std::function<void(const Cut&)> onCut;
+	// A travelling cut's travel starts: its seconds and metres (0 seconds: too far, a hard cut).
+	std::function<void(float seconds, float metres)> onTravel;
 	// Statistics: the decisions made, and those whose subject was engaged.
 	int decisions = 0, engagedDecisions = 0;
 	float time() const { return m_time; }
@@ -300,9 +356,12 @@ private:
 	Observer m_observer;
 	ShotDirector m_shots;
 	DirectorCamera m_camera;
+	CameraTravel m_travel;
 	float m_time = 0, m_nextSample = 0;
 	bool m_hasView = false, m_cutLastTick = false, m_dying = false;
+	bool m_travelPending = false; // a travelling cut this tick: the travel starts on the new shot's first view
 	camera::Look m_look;
+	camera::Look m_shot; // the shot's own view (a travel's destination)
 	float m_fov = 1;
 	uint32_t m_body = 0;
 	std::vector<Cut> m_cuts;

@@ -669,3 +669,145 @@ TEST(Director_TreatsAVehicleCrewAsOneSubject)
 	}
 	CHECK(left > 20 && left < 24);
 }
+
+// The kills modes travel from the old view to the new subject on a cut to a
+// killer (or off a death); the interest mode, angle changes and the cuts
+// that leave a bot (idle, streak) jump.
+TEST(Director_TravelsOnlyTheKillsModesCutsToANewBot)
+{
+	using game::director::Policy;
+	using game::director::Settings;
+	const auto cut = [](const char* reason, int subject = 2) {
+		Cut c;
+		c.reason = reason;
+		c.previous = 1;
+		c.subject = subject;
+		return c;
+	};
+	Settings kills;
+	kills.policy = Policy::Kills;
+	Settings rotate = kills;
+	rotate.policy = Policy::KillsRotate;
+	for (const Settings& s : {kills, rotate}) {
+		CHECK(game::director::travels(s, cut("killer")));
+		CHECK(game::director::travels(s, cut("first-kill")));
+		CHECK(game::director::travels(s, cut("death")));
+		CHECK(!game::director::travels(s, cut("killer", 1))); // the same bot: no cut at all
+		for (const char* reason : {"idle-long", "streak", "left", "angle", "start", "better", "max", "forced"}) {
+			CHECK(!game::director::travels(s, cut(reason)));
+		}
+	}
+	const Settings interest;
+	for (const char* reason : {"death", "better", "idle", "max", "lost", "forced", "start"}) {
+		CHECK(!game::director::travels(interest, cut(reason)));
+	}
+	Settings off = kills;
+	off.travel = 0; // --director-travel off
+	CHECK(!game::director::travels(off, cut("killer")));
+}
+
+// The travel's length: from a second for a short hop to Settings::travel
+// (3 s) for a long one; past travelFar (400 m) a hard cut.
+TEST(Director_TravelTimeScalesWithDistanceAndIsBounded)
+{
+	game::director::Settings s;
+	s.policy = game::director::Policy::Kills;
+	const auto at = [&s](float metres) { return game::director::travelSeconds(s, metres); };
+	std::printf("  travel: 5 m %.2f s, 50 m %.2f s, 100 m %.2f s, 200 m %.2f s, 400 m %.2f s, 401 m %.2f s\n", at(5), at(50),
+		at(100), at(200), at(400), at(401));
+	CHECK(std::fabs(at(0) - 1) < 1e-4f && std::fabs(at(5) - 1) < 1e-4f);
+	CHECK(at(50) > 1.2f && at(50) < 1.5f);
+	CHECK(at(100) > at(50) && at(200) > at(100));
+	CHECK(std::fabs(at(300) - 3) < 1e-4f && std::fabs(at(400) - 3) < 1e-4f);
+	CHECK(at(401) == 0 && at(5000) == 0);
+	s.travel = 1.5f;
+	CHECK(std::fabs(at(5) - 1) < 1e-4f && std::fabs(at(200) - 1.5f) < 1e-4f);
+	s.travel = 0.5f;
+	CHECK(std::fabs(at(5) - 0.5f) < 1e-4f);
+	s.travel = 0;
+	CHECK(at(5) == 0);
+}
+
+// CameraTravel: it starts on the old view, follows the moving new shot and
+// ends exactly on it; eased (slow at both ends), over the ground (a hill
+// between the two), looking at the new subject on the way.
+TEST(Director_TravelEasesFromTheOldViewOntoTheMovingNewShot)
+{
+	using game::camera::Look;
+	using game::camera::normalized;
+	using game::director::CameraTravel;
+	using physics::Vec3;
+	// A 25 m hill mid-way between the views (x 40..80), flat ground elsewhere.
+	const game::camera::Ground ground {[](float x, float) { return x > 40 && x < 80 ? 25.0f : 0.0f; }, {}};
+	Look from; // the death view: a few metres off a body at the origin, looking at it
+	from.eye = {-3, 2, -3};
+	from.at = {0, 0.5f, 0};
+	Look to; // the new shot: a first-person eye 120 m on, looking along +z, walking along +z
+	to.eye = {120, 1.47f, 0};
+	to.at = to.eye + Vec3 {0, 0, 1};
+	CameraTravel travel;
+	travel.start(from, 1.05f, 2);
+	CHECK(travel.active());
+	const float dt = 1 / 30.0f;
+	std::vector<Look> path;
+	std::vector<float> fovs;
+	float minClear = 1e9f;
+	int ticks = 0;
+	while (travel.active() && ticks < 300) {
+		to.eye.z += 3 * dt;
+		to.at = to.eye + Vec3 {0, 0, 1};
+		float fov = 0;
+		path.push_back(travel.step(to, 1.0f, dt, ground, fov));
+		fovs.push_back(fov);
+		++ticks;
+		if (travel.active()) {
+			const Vec3& e = path.back().eye;
+			minClear = std::min(minClear, e.y - ground.terrainAt(e.x, e.z));
+		}
+	}
+	const auto length = [](const Vec3& v) { return std::sqrt(physics::lengthSquared(v)); };
+	CHECK(path.size() > 3);
+	if (path.size() <= 3) {
+		return;
+	}
+	const Look& first = path.front();
+	const Look& last = path.back();
+	const Look& middle = path[path.size() / 2];
+	const float firstMove = length(first.eye - from.eye);
+	const float midMove = length(middle.eye - path[path.size() / 2 - 1].eye);
+	const float lastMove = length(last.eye - path[path.size() - 2].eye);
+	std::printf("  travel: %d ticks; moved %.3f m the first tick, %.2f m mid-way, %.3f m the last; mid-way at %.0f/%.0f/%.0f "
+				"(%.1f m over the ground at least)\n",
+		ticks, firstMove, midMove, lastMove, middle.eye.x, middle.eye.y, middle.eye.z, minClear);
+	CHECK(ticks == 60);                           // bounded: the duration
+	CHECK(firstMove < 0.05f);                     // eased in: starts on the old view
+	CHECK(midMove > 3 && lastMove < midMove / 4); // fast mid-way, eased out
+	// Ends exactly on the new shot (where it is now, having moved).
+	CHECK(length(last.eye - to.eye) < 1e-4f && length(last.at - to.at) < 1e-4f && fovs.back() == 1.0f);
+	CHECK(std::fabs(fovs.front() - 1.05f) < 0.01f);
+	// Over the hill, and over the ground all the way.
+	CHECK(minClear > 0.5f);
+	for (const Look& l : path) {
+		if (l.eye.x > 40 && l.eye.x < 80) {
+			CHECK(l.eye.y >= 25 + 1.9f);
+		}
+	}
+	// Mid-way between the two, up on the arc, looking at the new subject.
+	CHECK(middle.eye.x > 30 && middle.eye.x < 90 && middle.eye.y > 12);
+	CHECK(physics::dot(normalized(middle.at - middle.eye), normalized(to.at - middle.eye)) > 0.95f);
+	// The look starts as the old view's.
+	CHECK(physics::dot(normalized(first.at - first.eye), normalized(from.at - from.eye)) > 0.99f);
+	// Each tick's look turns smoothly (no snap where the turns join).
+	float worstTurn = 0;
+	for (size_t i = 1; i < path.size(); ++i) {
+		const float d = physics::dot(normalized(path[i].at - path[i].eye), normalized(path[i - 1].at - path[i - 1].eye));
+		worstTurn = std::max(worstTurn, std::acos(std::clamp(d, -1.0f, 1.0f)) * 57.2958f);
+	}
+	std::printf("  travel: the look turns %.1f degrees a tick at most\n", worstTurn);
+	CHECK(worstTurn < 12);
+	// Ended: a step is the new shot itself.
+	float fov = 0;
+	const Look after = travel.step(to, 1.0f, dt, ground, fov);
+	CHECK(!travel.active() && length(after.eye - to.eye) < 1e-6f);
+	CHECK(CameraTravel::eased(0) == 0 && CameraTravel::eased(1) == 1 && std::fabs(CameraTravel::eased(0.5f) - 0.5f) < 1e-5f);
+}

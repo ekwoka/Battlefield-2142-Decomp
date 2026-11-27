@@ -766,6 +766,122 @@ camera::Look DirectorCamera::death(const physics::Vec3* body, const physics::Vec
 	return m_last;
 }
 
+// --- CameraTravel
+
+bool travels(const Settings& settings, const Cut& cut)
+{
+	if (settings.policy == Policy::Interest || settings.travel <= 0 || cut.subject == cut.previous) {
+		return false;
+	}
+	return cut.reason == "killer" || cut.reason == "first-kill" || cut.reason == "death";
+}
+
+float travelSeconds(const Settings& settings, float distance)
+{
+	if (settings.travel <= 0 || !(distance <= settings.travelFar)) {
+		return 0;
+	}
+	return std::clamp(0.75f + distance / 90.0f, std::min(1.0f, settings.travel), settings.travel);
+}
+
+namespace {
+
+float lengthOf(const physics::Vec3& v) { return std::sqrt(physics::lengthSquared(v)); }
+
+// The unit direction `t` of the way from unit `a` to unit `b` along the great circle.
+physics::Vec3 slerpDirection(const physics::Vec3& a, const physics::Vec3& b, float t)
+{
+	const float d = std::clamp(physics::dot(a, b), -1.0f, 1.0f);
+	if (d > 0.9995f) {
+		return camera::normalized(a + (b - a) * t);
+	}
+	physics::Vec3 ortho = b - a * d;
+	if (physics::lengthSquared(ortho) < 1e-8f) {
+		// Opposite: round over the top (or, looking straight up or down, sideways).
+		ortho = std::fabs(a.y) < 0.9f ? physics::Vec3 {0, 1, 0} - a * a.y : physics::Vec3 {1, 0, 0} - a * a.x;
+	}
+	ortho = camera::normalized(ortho);
+	const float angle = std::acos(d) * t;
+	return a * std::cos(angle) + ortho * std::sin(angle);
+}
+
+float smoothstep(float x)
+{
+	x = std::clamp(x, 0.0f, 1.0f);
+	return x * x * (3 - 2 * x);
+}
+
+} // namespace
+
+float CameraTravel::eased(float share)
+{
+	const float x = std::clamp(share, 0.0f, 1.0f);
+	return x * x * x * (x * (x * 6 - 15) + 10); // smootherstep: no jerk at either end
+}
+
+void CameraTravel::start(const camera::Look& from, float fromFov, float seconds)
+{
+	m_from = from;
+	m_fromFov = fromFov;
+	m_seconds = std::max(seconds, 0.0f);
+	m_time = 0;
+	m_arc = -1; // measured on the first step
+}
+
+camera::Look CameraTravel::step(const camera::Look& to, float toFov, float seconds, const camera::Ground& ground, float& fovY)
+{
+	if (!active()) {
+		fovY = toFov;
+		return to;
+	}
+	m_time += seconds;
+	if (m_time >= m_seconds - 1e-4f) {
+		m_seconds = 0; // arrived: the new shot itself
+		fovY = toFov;
+		return to;
+	}
+	// The arc's height: an eighth of the way (at most kArcMax), or what clears
+	// the ground under the way by kClearance (sampled along it from the old
+	// view to where the new shot is now), so it rises over a hill in time
+	// rather than jumping up its side. It only grows, and eases there.
+	const physics::Vec3 way = to.eye - m_from.eye;
+	float arc = std::min(lengthOf(way) * kArcShare, kArcMax);
+	constexpr int kSamples = 24;
+	for (int k = 1; k < kSamples; ++k) {
+		const float s = static_cast<float>(k) / kSamples, bell = std::sin(kPi * s);
+		if (bell < 0.3f) {
+			continue; // near the ends the views keep their own height (the clamp below lifts them)
+		}
+		const physics::Vec3 at = m_from.eye + way * s;
+		const float floor = std::max(ground.terrainAt(at.x, at.z), ground.seaAt(at.x, at.z)) + kClearance * std::min(1.0f, 2.5f * bell) + 0.25f;
+		arc = std::max(arc, (floor - at.y) / bell);
+	}
+	arc = std::min(arc, 150.0f);
+	m_arc = m_arc < 0 ? arc : std::max(m_arc, m_arc + (arc - m_arc) * ease(seconds, 0.15f));
+	const float share = m_time / m_seconds;
+	const float p = eased(share);
+	camera::Look look;
+	look.eye = m_from.eye + way * p;
+	// Up over the way (an arc that is 0 at both ends), and clear of the
+	// ground in between (no clearance at the ends: the views are their own).
+	const float bell = std::sin(kPi * p);
+	look.eye.y += m_arc * bell;
+	keepAbove(look.eye, ground, kClearance * std::min(1.0f, 2.5f * bell));
+	// The look: the old view's, turning to the new subject (the new shot's
+	// look-at point), then settling into the new shot's own direction.
+	const physics::Vec3 fromDir = camera::normalized(m_from.at - m_from.eye);
+	const physics::Vec3 toDir = camera::normalized(to.at - to.eye);
+	const physics::Vec3 toward = to.at - look.eye;
+	const physics::Vec3 aim = physics::lengthSquared(toward) > 0.25f ? camera::normalized(toward) : toDir;
+	const physics::Vec3 turned = slerpDirection(fromDir, aim, smoothstep(share / 0.4f));
+	const physics::Vec3 dir = slerpDirection(turned, toDir, smoothstep((share - 0.6f) / 0.4f));
+	const float reach = lengthOf(m_from.at - m_from.eye) + (lengthOf(to.at - to.eye) - lengthOf(m_from.at - m_from.eye)) * p;
+	look.at = look.eye + dir * std::max(reach, 0.5f);
+	look.up = {0, 1, 0};
+	fovY = m_fromFov + (toFov - m_fromFov) * p;
+	return look;
+}
+
 // --- Director
 
 Director::Director(GameWorld& world, const BotManager* bots, Settings settings, uint32_t seed)
@@ -846,8 +962,12 @@ void Director::tick(float seconds)
 			}
 			if (cut->subject != cut->previous || cut->mode != was) {
 				m_camera.cut(); // not for a waiting shot's own bot's kill: that shot goes on
-				m_cutLastTick = true;
 				m_dying = false;
+				m_travel.stop();
+				// A travelling cut moves on from the view now (no cut for the
+				// renderer's blending); it starts on the new shot's first view.
+				m_travelPending = m_hasView && travels(m_shots.settings(), *cut);
+				m_cutLastTick = !m_travelPending;
 			}
 		}
 		if (const Sample* s = m_observer.find(m_shots.subject()); s && s->alive) {
@@ -863,7 +983,13 @@ void Director::tick(float seconds)
 	const bool alive = m_world.playerInfo(subject->player, info) && info.alive;
 	const camera::Ground g = ground();
 	if (!alive) {
-		// The death view: on the body (or the wreck), towards the killer.
+		// The death view: on the body (or the wreck), towards the killer. (A
+		// travel there ends: the death view starts on the body, as it does from a shot.)
+		if (m_travelPending || m_travel.active()) {
+			m_travelPending = false;
+			m_travel.stop();
+			m_cutLastTick = true;
+		}
 		physics::Vec3 body = subject->position;
 		if (!m_dying) {
 			m_dying = true;
@@ -887,9 +1013,28 @@ void Director::tick(float seconds)
 		return;
 	}
 	m_dying = false;
-	m_look = m_camera.update(m_shots.mode(), poseOf(*subject), seconds, g);
-	m_fov = DirectorCamera::fov(info.vehicle && m_shots.mode() == CameraMode::FirstPerson ? CameraMode::Chase : m_shots.mode());
+	m_shot = m_camera.update(m_shots.mode(), poseOf(*subject), seconds, g);
+	const float shotFov = DirectorCamera::fov(info.vehicle && m_shots.mode() == CameraMode::FirstPerson ? CameraMode::Chase : m_shots.mode());
+	if (std::exchange(m_travelPending, false)) {
+		const float length = distance(m_look.eye, m_shot.eye);
+		if (const float travel = travelSeconds(m_shots.settings(), length); travel > 0) {
+			m_travel.start(m_look, m_fov, travel);
+		} else {
+			m_cutLastTick = true; // too far: a hard cut after all
+		}
+		if (onTravel) {
+			onTravel(m_travel.duration(), length);
+		}
+	}
+	m_look = m_travel.step(m_shot, shotFov, seconds, g, m_fov);
 	m_hasView = true;
+}
+
+bool Director::firstPersonShown() const
+{
+	GameWorld::PlayerInfo info;
+	return m_shots.mode() == CameraMode::FirstPerson && !m_travel.active() && !m_travelPending && !m_dying
+		&& m_world.playerInfo(m_shots.subject(), info) && info.alive;
 }
 
 bool Director::view(camera::Look& look, float& fovY) const
@@ -905,8 +1050,11 @@ bool Director::view(camera::Look& look, float& fovY) const
 std::vector<uint32_t> Director::hidden() const
 {
 	GameWorld::PlayerInfo info;
-	if (m_shots.mode() != CameraMode::FirstPerson || m_dying || !m_world.playerInfo(m_shots.subject(), info) || !info.alive
-		|| info.vehicle) {
+	// Travelling into a first-person shot: his body is left out in the last
+	// metres (the camera goes into his head), his arms only once there.
+	const bool arriving = m_travel.active() && m_shots.mode() == CameraMode::FirstPerson && !m_dying
+		&& distance(m_look.eye, m_shot.eye) < 1.5f;
+	if (!(firstPersonShown() || arriving) || !m_world.playerInfo(m_shots.subject(), info) || !info.alive || info.vehicle) {
 		return {};
 	}
 	return {info.soldier, info.weapon, info.kit};

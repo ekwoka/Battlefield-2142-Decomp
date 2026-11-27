@@ -13,6 +13,7 @@
 //               [--play [team]] [--drive <vehicle template>]
 //               [--director] (with --bots N: a match of bots, a spectator camera cutting between them)
 //               [--director-mode interest|kills|kills-rotate] [--director-idle <seconds>] [--director-streak <seconds>]
+//               [--director-travel <seconds|off>]
 //               [--record-demo <name>] [--demo <file|name>] [--demo-stats <file>]
 //               [--director-first-person] [--follow-hud] [--demo-follow <player>] [--demo-first-person]
 // --view opens a window showing the level (needs a build with SDL3);
@@ -22,7 +23,9 @@
 // worth watching (fighting, capturing, assaulting a Titan; not idling or in
 // spawn), in chase, first-person and wide shots, for an outside screen
 // recorder; the HUD is hidden (H shows it), Space cuts to the next shot,
-// and each cut is logged.
+// and each cut is logged. In the kills modes a cut to a killer (or off a
+// death) travels there instead, eased over 1 to 3 s (--director-travel: the
+// longest, or off), a hard cut when the new shot is over 400 m off.
 // --record-demo records the round (singleplayer, --simulate or --host) as
 // demo.recordDemo does, into ./Demos/<name>.bf2142demo; --demo plays one
 // back (a bare name from ./Demos/).
@@ -513,6 +516,9 @@ bool parseOptions(int argc, char** argv, Options& options)
 		} else if (arg == "--director-streak" && hasValue) {
 			options.directorSettings.streak = static_cast<float>(std::atof(argv[++i]));
 			options.directorSettings.titanGunStreak = options.directorSettings.streak / 2;
+		} else if (arg == "--director-travel" && hasValue) {
+			const std::string value = argv[++i];
+			options.directorSettings.travel = value == "off" ? 0.0f : std::max(static_cast<float>(std::atof(value.c_str())), 0.0f);
 		} else if (arg == "--director-first-person") {
 			options.directorFirstPerson = true;
 		} else if (arg == "--follow-hud") {
@@ -8813,7 +8819,7 @@ int runGame(Options& options, Session& session)
 			}
 			int subject = -1;
 			if (enhancedSettings.enabled && enhancedSettings.followFirstPerson) {
-				if (director && director->mode() == game::director::CameraMode::FirstPerson) {
+				if (director && director->firstPersonShown()) { // (not while it travels there)
 					game::GameWorld::PlayerInfo info;
 					if (round.playerInfo(director->subject(), info) && info.alive) {
 						subject = info.id;
@@ -9282,6 +9288,14 @@ int runGame(Options& options, Session& session)
 				std::printf("director: %7.1f s cut to %s (player %d%s) %s, %s, interest %.1f%s\n", cut.time,
 					known ? who.name.c_str() : "?", cut.subject, in.c_str(), game::director::modeName(cut.mode),
 					cut.reason.c_str(), cut.score, cut.engaged ? ", engaged" : "");
+				std::fflush(stdout);
+			};
+			director->onTravel = [&director](float seconds, float metres) {
+				if (seconds > 0) {
+					std::printf("director: %7.1f s travel %.0f m in %.1f s\n", director->time(), metres, seconds);
+				} else {
+					std::printf("director: %7.1f s cut (%.0f m: too far to travel)\n", director->time(), metres);
+				}
 				std::fflush(stdout);
 			};
 			std::printf("director: player %d spectates; %d bots play; following %s\n", local, bots.enabled() ? options.bots : 0,
