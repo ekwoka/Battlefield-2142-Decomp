@@ -214,7 +214,8 @@ B=build/release/src/Main/bf2142
 G="source/Battlefield 2142"
 
 $B --game "$G" --menu --view                       # the main menu in a window: log in or play offline, then Singleplay
-$B --game "$G" +level Camp_Gibraltar --play --view # straight into a level as an EU soldier
+$B --game "$G" --menu +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15  # straight into a level, as the singleplayer page starts it
+$B --game "$G" +level Camp_Gibraltar --play --view # into a level as an EU soldier, without the menu
 $B --game "$G" +level Cerbere_Landing +gameMode gpm_sp +mapSize 16 --bots 15 --simulate 120   # a headless bot round
 ```
 
@@ -305,6 +306,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Option | What it does |
 |---|---|
 | `--play [1\|2]` | Spawn and control a soldier of team 1 (PAC) or 2 (EU, the default). |
+| `--team <1\|2>` | The team to play for, with `--play` or with `--menu` and `+level` (EU, 2, without it). |
 | `--drive <vehicle>` | Put a vehicle (e.g. `eu_fav`) in front of the soldier and get in. It lands on whatever is under the spot (a roof, a deck or the terrain) when a 4 × 6 m footprint there is clear and level with the soldier; else on the nearest such spot round him, else on the nearest open ground within 60 m. A leading `goto:` in `--actions` places the soldier first (the rest run in the seat). |
 | `--seat <n>` | With `--drive`, stay in seat n (1 is the driver). |
 | `--kit <name\|n>` | Spawn with that kit of the team's list (e.g. `EU_Anti-Vehicle`, or its number from 1), also on a server joined with `--play`. |
@@ -325,13 +327,14 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | Option | What it does |
 |---|---|
 | `--bots <n>` | Add n AI players, alternately PAC and EU. Bots only move on levels with a navigation mesh. |
+| `--bot-skill <0..1>` | The bots' skill (as `aiSettings.setBotSkill`). Without it: the AI scripts' own, or with `--menu` and `+level` the profile's. |
 | `--simulate <s>` | Run s seconds of game time without a window, then print tickets, control points and each player's score. |
 
 **Menus**
 
 | Option | What it does |
 |---|---|
-| `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. |
+| `--menu [mainMenu\|endOfRound]` | Show the Flash menu (no level needed). With `--screenshot`, it plays for `--menu-seconds` (default 10) first. With `+level` in a window, the game starts that level at once as the singleplayer page does: it logs in on the menu's login page first (the last account, offline, its first soldier), skips the movies, and starts the round with the profile's settings (`--bots`, `--bot-skill`, `--time-limit` and `--team` override them). You get the deployment screen and the HUD, Esc opens the in-game menu on the singleplayer page, and its DISCONNECT goes back to the menu. |
 | `--offline` | The menu finds no account service, so it plays offline. |
 | `--enhanced` | Start in the enhanced mode (`enhanced.enabled 1`): additions that aren't in the original game. Off by default; while off the engine behaves as retail. `tools/parity-check.sh [seconds]` checks that the switch leaves the simulation alone. See [Enhanced mode](#enhanced-mode). |
 | `--menu-script "<steps>"` | Drive the menu without a window: `wait:<s>` (`realwait:<s>` in real time, for searches and probes), `click:<x>,<y>`, `drag:<x>,<y>,<x2>,<y2>`, `press:<clip path's end>` (the middle of that clickable), `type:<text>`, `key:<Flash key code>`, `call:<clip>.<method>,<args>` (a result other than undefined printed); for checks `print:<path>` (a value from `_root`), `clickables[:<part>]` and `unbound` (natives called that nothing binds) print on stdout. |

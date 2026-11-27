@@ -11,6 +11,7 @@
 #include "Main/DisplayModes.h"
 #include "Main/MenuBindings.h"
 #include "Main/MenuGameState.h"
+#include "Main/MenuSignIn.h"
 #include "Main/MenuSingleplayBots.h"
 #include "Main/SettingsObjects.h"
 #include "Net/Demo.h"
@@ -759,6 +760,105 @@ TEST(MenuBindings_InstantAction)
 	menu.run(1);
 	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
 	CHECK(!menu.click("singleplay.mc_singleplayer.btnDisconnect2"));
+	for (const std::string& e : menu.player.scriptErrors()) {
+		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
+	}
+	CHECK(menu.player.scriptErrors().empty());
+}
+
+// --menu with +level: startLevel starts the installed spelling of the
+// level in its mode at the nearest size, the profile's settings with the
+// command line's bots, skill and time limit over them; a level or a mode
+// that isn't installed starts nothing.
+TEST(MenuBindings_StartLevel)
+{
+	Fake fake;
+	NativeRegistry natives;
+	menu::MenuBindings bindings(natives, fake.services());
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	bindings.setMaps({{"Cerbere_Landing", "gpm_sp", 16}, {"Cerbere_Landing", "gpm_sp", 32}, {"Cerbere_Landing", "gpm_cq", 64},
+		{"Minsk", "gpm_ti", 48}});
+	avm1::Interpreter vm;
+	call(vm, natives, "dice.bf2.GeneralSettings", "setMaxBots", {avm1::Value(8)});
+	call(vm, natives, "dice.bf2.GeneralSettings", "setBotSkill", {avm1::Value(0.25)});
+	call(vm, natives, "dice.bf2.ServerSettings", "setTicketRatio", {avm1::Value(150)});
+
+	menu::MenuBindings::LevelStart start;
+	start.map = {"nowhere", "gpm_cq", 16};
+	CHECK(!bindings.startLevel(start));
+	start.map = {"cerbere_landing", "gpm_ti", 16};
+	CHECK(!bindings.startLevel(start));
+	CHECK(!started);
+
+	// The profile's settings: MaxBots counts the player.
+	start.map = {"cerbere_landing", "GPM_SP", 20};
+	CHECK(bindings.startLevel(start));
+	CHECK(started && started->maps.size() == 1);
+	if (started && started->maps.size() == 1) {
+		CHECK(started->maps[0].level == "Cerbere_Landing" && started->maps[0].gameMode == "gpm_sp" && started->maps[0].size == 16);
+		CHECK(started->bots == 8 && started->botsIncludeHumans && started->botSkill == 0.25f && started->ticketRatio == 150);
+		CHECK(menu::playersForMap(*started, 16).bots == 7);
+	}
+
+	// The command line's: that many bots, its skill and time limit.
+	started.reset();
+	start.map = {"Cerbere_Landing", "gpm_sp", 28};
+	start.bots = 40;
+	start.botSkill = 0.75f;
+	start.timeLimit = 600;
+	CHECK(bindings.startLevel(start));
+	if (started && started->maps.size() == 1) {
+		CHECK(started->maps[0].size == 32);
+		const menu::MapPlayers players = menu::playersForMap(*started, 32);
+		CHECK(players.bots == 40 && players.maxPlayers >= 41);
+		CHECK(started->botSkill == 0.75f && started->timeLimit == 600);
+	}
+	start.bots = 0;
+	CHECK(bindings.startLevel(start));
+	CHECK(started && menu::playersForMap(*started, 32).bots == 0);
+}
+
+// The shipped menu for a direct start: the game logs in on the login page
+// (offline, the account's first soldier), opens the singleplayer page, and
+// the level it starts is the menu's game: DISCONNECT where instant action
+// was, and leaving the game gives the page back.
+TEST(MenuBindings_DirectStartSignIn)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	Fake fake;
+	fake.reachable = false;
+	Menu menu;
+	menu::MenuBindings bindings(menu.player.natives(), fake.services());
+	bindings.setMaps({{"Belgrade", "gpm_sp", 16}, {"Cerbere_Landing", "gpm_sp", 16}});
+	std::optional<menu::GameSetup> started;
+	bindings.onStartGame = [&started](const menu::GameSetup& setup) { started = setup; };
+	CHECK(menu.load(gameDir));
+	CHECK(bindings.defaultLoginName().empty());
+	CHECK(menu::signInForDirectStart(menu.player, bindings, "Tester"));
+	CHECK(bindings.loggedIn() && bindings.offlineMode() && bindings.soldierName() == "Tester");
+	CHECK(bindings.defaultLoginName() == "Tester");
+	CHECK(menu::showSingleplayPage(menu.player));
+
+	menu::MenuBindings::LevelStart start;
+	start.map = {"cerbere_landing", "gpm_sp", 16};
+	start.bots = 5;
+	CHECK(bindings.startLevel(start));
+	CHECK(started && !started->maps.empty() && started->maps[0].level == "Cerbere_Landing");
+	menu::updateMenuGameState(menu.player, bindings, true);
+	menu.run(1);
+	CHECK(!menu.click("singleplay.mc_singleplayer.btnInstantAction"));
+	bool disconnected = false;
+	bindings.onDisconnect = [&] { disconnected = true; };
+	CHECK(menu.click("singleplay.mc_singleplayer.btnDisconnect"));
+	menu.run(1);
+	CHECK(disconnected);
+	menu::updateMenuGameState(menu.player, bindings, false);
+	menu.run(1);
+	CHECK(menu.click("singleplay.mc_singleplayer.btnInstantAction"));
 	for (const std::string& e : menu.player.scriptErrors()) {
 		std::fprintf(stderr, "mainMenu script error: %s\n", e.c_str());
 	}

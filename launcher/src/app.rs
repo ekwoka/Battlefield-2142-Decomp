@@ -182,12 +182,26 @@ struct Saved {
     enhanced_flags: BTreeMap<String, bool>,
     options: BTreeMap<String, SavedOpt>,
     extra: String,
-    // What Run opens: "menu" (also when unset), "view" or "none".
+    // What Run opens: "play", "menu", "view" or "none" (start_with_saved).
     #[serde(default)]
+    start_mode: String,
+    // The older launchers' choice ("menu", "view" or "none"), read once: their
+    // "view" was what choosing a level picked, now "play".
+    #[serde(default, skip_serializing)]
     start: String,
     // The map picker's choices.
     #[serde(default)]
     map: SavedMap,
+}
+
+// What Run opens, from the saved choices: "menu" when unset.
+fn start_with_saved(saved: &Saved) -> String {
+    match (saved.start_mode.as_str(), saved.start.as_str()) {
+        ("", "view") => "play".to_string(),
+        ("", "none") => "none".to_string(),
+        ("", _) => "menu".to_string(),
+        (mode, _) => mode.to_string(),
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -202,13 +216,61 @@ struct SavedMap {
     bot_skill: String,
     // Minutes; empty or 0 for none.
     time_limit: String,
+    // The team to play for: 1 PAC, 2 EU (also when 0, unset).
+    team: u32,
     filter: String,
     mode_filter: String,
     navmesh_only: bool,
 }
 
+impl SavedMap {
+    fn team(&self) -> u32 {
+        if self.team == 1 { 1 } else { 2 }
+    }
+
+    // The arguments for the mod and the level. `start` is what Run opens:
+    // "menu" passes only the mod (the menu picks the map); "play" starts the
+    // level as the menu's singleplayer page would (--menu +level: the bots,
+    // even none, and the team always given); "view" and "none" load the level
+    // with the bots, if any, and no player.
+    fn args(&self, start: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        if !self.mod_name.is_empty() && self.mod_name != "bf2142" {
+            args.extend(["+modPath".to_string(), format!("mods/{}", self.mod_name)]);
+        }
+        if start == "menu" || self.level.is_empty() {
+            return args;
+        }
+        let play = start == "play";
+        args.extend(["+level".to_string(), self.level.clone()]);
+        if !self.game_mode.is_empty() {
+            args.extend(["+gameMode".to_string(), self.game_mode.clone()]);
+        }
+        if self.map_size > 0 {
+            args.extend(["+mapSize".to_string(), self.map_size.to_string()]);
+        }
+        if play || self.bots > 0 {
+            args.extend(["--bots".to_string(), self.bots.to_string()]);
+        }
+        if (play || self.bots > 0)
+            && let Ok(skill) = self.bot_skill.trim().parse::<f32>()
+        {
+            args.extend(["--bot-skill".to_string(), skill.clamp(0.0, 1.0).to_string()]);
+        }
+        if let Ok(minutes) = self.time_limit.trim().parse::<f32>()
+            && minutes > 0.0
+        {
+            args.extend(["--time-limit".to_string(), ((minutes * 60.0).round() as i64).to_string()]);
+        }
+        if play {
+            args.extend(["--team".to_string(), self.team().to_string()]);
+        }
+        args
+    }
+}
+
 // The options the map picker gives itself; the option groups leave them out.
-const MAP_OPTIONS: &[&str] = &["+level", "+gameMode", "+mapSize", "+modPath", "--bots", "--time-limit"];
+const MAP_OPTIONS: &[&str] = &["+level", "+gameMode", "+mapSize", "+modPath", "--bots", "--bot-skill", "--time-limit", "--team"];
 
 // The map picker's state.
 #[derive(Clone, Copy)]
@@ -220,6 +282,7 @@ struct MapChoice {
     bots: RwSignal<u32>,
     bot_skill: RwSignal<String>,
     time_limit: RwSignal<String>,
+    team: RwSignal<u32>,
     filter: RwSignal<String>,
     mode_filter: RwSignal<String>,
     navmesh_only: RwSignal<bool>,
@@ -235,6 +298,7 @@ impl MapChoice {
             bots: RwSignal::new(saved.bots),
             bot_skill: RwSignal::new(saved.bot_skill.clone()),
             time_limit: RwSignal::new(saved.time_limit.clone()),
+            team: RwSignal::new(saved.team()),
             filter: RwSignal::new(saved.filter.clone()),
             mode_filter: RwSignal::new(saved.mode_filter.clone()),
             navmesh_only: RwSignal::new(saved.navmesh_only),
@@ -250,46 +314,16 @@ impl MapChoice {
             bots: self.bots.get(),
             bot_skill: self.bot_skill.get(),
             time_limit: self.time_limit.get(),
+            team: self.team.get(),
             filter: self.filter.get(),
             mode_filter: self.mode_filter.get(),
             navmesh_only: self.navmesh_only.get(),
         }
     }
 
-    // The arguments for the mod and, unless the menu is to pick the map, a
-    // direct start into the chosen level.
-    fn args(&self, menu: bool) -> Vec<String> {
-        let mut args = Vec::new();
-        let mod_name = self.mod_name.get();
-        if !mod_name.is_empty() && mod_name != "bf2142" {
-            args.extend(["+modPath".to_string(), format!("mods/{mod_name}")]);
-        }
-        let level = self.level.get();
-        if menu || level.is_empty() {
-            return args;
-        }
-        args.extend(["+level".to_string(), level]);
-        let mode = self.game_mode.get();
-        if !mode.is_empty() {
-            args.extend(["+gameMode".to_string(), mode]);
-        }
-        let size = self.map_size.get();
-        if size > 0 {
-            args.extend(["+mapSize".to_string(), size.to_string()]);
-        }
-        let bots = self.bots.get();
-        if bots > 0 {
-            args.extend(["--bots".to_string(), bots.to_string()]);
-            if let Ok(skill) = self.bot_skill.get().trim().parse::<f32>() {
-                args.extend(["--console".to_string(), format!("aiSettings.setBotSkill {}", skill.clamp(0.0, 1.0))]);
-            }
-        }
-        if let Ok(minutes) = self.time_limit.get().trim().parse::<f32>()
-            && minutes > 0.0
-        {
-            args.extend(["--time-limit".to_string(), ((minutes * 60.0).round() as i64).to_string()]);
-        }
-        args
+    // The arguments for the mod and the level (SavedMap::args).
+    fn args(&self, start: &str) -> Vec<String> {
+        self.saved().args(start)
     }
 
     // Chooses a level: the current mode if it has the level, else its first
@@ -411,7 +445,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
     let build_dir = RwSignal::new(saved.build_dir.clone().unwrap_or_else(|| "build/release".to_string()));
     let enhanced = RwSignal::new(saved.enhanced);
     let extra = RwSignal::new(saved.extra.clone());
-    let start_with = RwSignal::new(if saved.start.is_empty() { "menu".to_string() } else { saved.start.clone() });
+    let start_with = RwSignal::new(start_with_saved(&saved));
     let map = MapChoice::new(&saved.map);
     let flags: Vec<FlagState> = loaded
         .enhanced
@@ -450,8 +484,11 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 args.push(dir.trim().to_string());
             }
             // Without --menu, --view, --play or --connect the game opens no
-            // window: it loads, prints its summary and exits.
-            let mode = match start_with.get().as_str() {
+            // window: it loads, prints its summary and exits. Playing the map
+            // is the menu with the level (the game starts it as the
+            // singleplayer page would).
+            let start = start_with.get();
+            let mode = match start.as_str() {
                 "view" => Some("--view"),
                 "none" => None,
                 _ => Some("--menu"),
@@ -462,8 +499,9 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 args.push(mode.to_string());
             }
             // The mod, and the level to start in (not when the menu picks it).
-            let menu = mode == Some("--menu") || options.iter().any(|o| o.on.get() && o.opt.name == "--menu");
-            args.extend(map.args(menu));
+            let ticked_menu = options.iter().any(|o| o.on.get() && o.opt.name == "--menu");
+            let start = if start != "play" && ticked_menu { "menu" } else { start.as_str() };
+            args.extend(map.args(start));
             for o in &options {
                 if o.on.get() {
                     args.push(o.opt.name.clone());
@@ -500,7 +538,8 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 enhanced_flags: flags.iter().map(|f| (f.flag.name.clone(), f.on.get())).collect(),
                 options: options.iter().map(|o| (o.opt.name.clone(), SavedOpt { on: o.on.get(), value: o.value.get() })).collect(),
                 extra: extra.get(),
-                start: start_with.get(),
+                start_mode: start_with.get(),
+                start: String::new(),
                 map: map.saved(),
             });
         });
@@ -639,8 +678,12 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 <select
                     on:change=move |ev| start_with.set(event_target_value(&ev))
                     title="Without one of these the game opens no window">
+                    <option value="play" selected=move || start_with.get() == "play"
+                        title="--menu +level: logs in, starts the chosen map as the singleplayer page would (deployment, HUD, Esc menu)">
+                        "Play the map (--menu +level)"</option>
                     <option value="menu" selected=move || start_with.get() == "menu">"Menu (--menu)"</option>
-                    <option value="view" selected=move || start_with.get() == "view">"Level view (--view)"</option>
+                    <option value="view" selected=move || start_with.get() == "view"
+                        title="--view +level: the level with a free camera, no player">"Free camera, no player (--view)"</option>
                     <option value="none" selected=move || start_with.get() == "none">"Only the options below"</option>
                 </select>
                 <button on:click=move |_| start("run")
@@ -893,11 +936,12 @@ fn MapPicker(game_dir: RwSignal<String>, start_with: RwSignal<String>, map: MapC
     });
 
     let menu = move || start_with.get() == "menu";
+    let play = move || start_with.get() == "play";
     let choose = move |level: &Level| {
         map.choose(level);
-        // A level chosen is a direct start: the menu would pick its own.
+        // A level chosen is one to play: the menu would pick its own.
         if start_with.get_untracked() == "menu" {
-            start_with.set("view".to_string());
+            start_with.set("play".to_string());
         }
     };
 
@@ -997,12 +1041,22 @@ fn MapPicker(game_dir: RwSignal<String>, start_with: RwSignal<String>, map: MapC
                 </li>
                 <li>
                     <label>
-                        <code>"aiSettings.setBotSkill"</code>
-                        <input type="number" min="0" max="1" step="0.05" placeholder="the AI's own"
+                        <code>"--bot-skill"</code>
+                        <input type="number" min="0" max="1" step="0.05" placeholder="default"
                             prop:value=move || map.bot_skill.get()
                             on:input=move |ev| map.bot_skill.set(event_target_value(&ev)) />
                     </label>
-                    <small class="description">"Bot skill, 0 to 1, passed as --console \"aiSettings.setBotSkill <n>\" (empty: AI/AIDefault.ai's). Only with bots."</small>
+                    <small class="description">"Bot skill, 0 to 1 (empty: the profile's when playing the map, else AI/AIDefault.ai's). Only with bots."</small>
+                </li>
+                <li class:inactive=move || !play()>
+                    <label>
+                        <code>"--team"</code>
+                        <select on:change=move |ev| map.team.set(if event_target_value(&ev) == "1" { 1 } else { 2 })>
+                            <option value="2" selected=move || map.team.get() != 1>"EU (2)"</option>
+                            <option value="1" selected=move || map.team.get() == 1>"PAC (1)"</option>
+                        </select>
+                    </label>
+                    <small class="description">"The team you play for (Play the map only; the deployment screen can switch it)."</small>
                 </li>
                 <li>
                     <label>
@@ -1015,7 +1069,10 @@ fn MapPicker(game_dir: RwSignal<String>, start_with: RwSignal<String>, map: MapC
                 </li>
             </ul>
             {move || (menu() && !map.level.get().is_empty()).then(|| view! {
-                <p class="hint">"With the menu, the menu picks the map: choose \"Level view\" or \"Only the options below\" to start in this level."</p>
+                <p class="hint">"With the menu, the menu picks the map: choose \"Play the map\" to start in this level."</p>
+            })}
+            {move || (start_with.get() == "view" && !map.level.get().is_empty()).then(|| view! {
+                <p class="hint">"Free camera: the level with no player of yours. Choose \"Play the map\" to play it."</p>
             })}
         </fieldset>
     }
@@ -1027,7 +1084,7 @@ fn level_details(map: MapChoice, selected: Memo<Option<Level>>, reading: bool, p
     let name = map.level.get();
     if name.is_empty() {
         return view! {
-            <p class="muted">"No level: Run opens the menu (or, with \"Only the options below\", whatever they ask for). Pick a level to start straight into it."</p>
+            <p class="muted">"No level: Run opens the menu (or, with \"Only the options below\", whatever they ask for). Pick a level to play it straight away."</p>
         }
         .into_any();
     }
@@ -1085,5 +1142,69 @@ fn level_details(map: MapChoice, selected: Memo<Option<Level>>, reading: bool, p
         </div>
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cerbere() -> SavedMap {
+        SavedMap {
+            mod_name: "bf2142".into(),
+            level: "Cerbere_Landing".into(),
+            game_mode: "gpm_sp".into(),
+            map_size: 16,
+            bot_skill: "0.7".into(),
+            time_limit: "10".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn play_starts_the_level_through_the_menu() {
+        let map = SavedMap { team: 1, ..cerbere() };
+        assert_eq!(
+            map.args("play"),
+            [
+                "+level", "Cerbere_Landing", "+gameMode", "gpm_sp", "+mapSize", "16", "--bots", "0", "--bot-skill", "0.7",
+                "--time-limit", "600", "--team", "1"
+            ]
+        );
+        // The team defaults to EU.
+        assert!(cerbere().args("play").ends_with(&["--team".to_string(), "2".to_string()]));
+    }
+
+    #[test]
+    fn the_menu_picks_its_own_map() {
+        let map = SavedMap { mod_name: "Project_Remaster".into(), bots: 8, ..cerbere() };
+        assert_eq!(map.args("menu"), ["+modPath", "mods/Project_Remaster"]);
+        // No level: the menu, whatever was asked.
+        assert!(SavedMap { level: String::new(), ..cerbere() }.args("play").is_empty());
+    }
+
+    #[test]
+    fn the_free_camera_has_no_player() {
+        let args = cerbere().args("view");
+        assert_eq!(args, ["+level", "Cerbere_Landing", "+gameMode", "gpm_sp", "+mapSize", "16", "--time-limit", "600"]);
+        let with_bots = SavedMap { bots: 6, ..cerbere() }.args("view");
+        assert!(with_bots.windows(2).any(|w| w == ["--bots", "6"]));
+        assert!(with_bots.windows(2).any(|w| w == ["--bot-skill", "0.7"]));
+        assert!(!with_bots.iter().any(|a| a == "--team" || a == "--console"));
+    }
+
+    #[test]
+    fn saved_starts() {
+        let saved = |start_mode: &str, start: &str| Saved { start_mode: start_mode.into(), start: start.into(), ..Default::default() };
+        assert_eq!(start_with_saved(&saved("", "")), "menu");
+        assert_eq!(start_with_saved(&saved("", "menu")), "menu");
+        // The old launchers' level view was what choosing a level picked.
+        assert_eq!(start_with_saved(&saved("", "view")), "play");
+        assert_eq!(start_with_saved(&saved("", "none")), "none");
+        assert_eq!(start_with_saved(&saved("view", "view")), "view");
+        assert_eq!(start_with_saved(&saved("play", "")), "play");
+        // The old field isn't written any more.
+        let text = serde_json::to_string(&saved("play", "view")).unwrap();
+        assert!(text.contains("\"start_mode\":\"play\"") && !text.contains("\"start\""));
+    }
 }
 

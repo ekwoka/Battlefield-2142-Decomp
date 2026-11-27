@@ -318,6 +318,22 @@ public:
 	// The setup createServer would start now.
 	GameSetup gameSetup() const;
 
+	// A level started from the command line (--menu with +level): what the
+	// singleplayer page's instant action starts with that one map chosen,
+	// the profile's settings for the rest, and the command line's bots,
+	// bot skill and time limit over them where given.
+	struct LevelStart {
+		MenuMap map;          // the level (any case), its mode and size
+		int bots = -1;        // AI players, the player not counted; -1: the profile's
+		float botSkill = -1;  // 0..1; -1: the profile's
+		int timeLimit = -1;   // seconds; -1: the profile's
+	};
+	// Starts it as createServer does (onStartGame), with the installed
+	// map's spelling, in its mode, at that size or the nearest the level
+	// has. False (and nothing started) when the level or the mode isn't
+	// installed.
+	bool startLevel(const LevelStart& start);
+
 	// A message for the menu to show (dice.MessageHandler).
 	void raiseMessage(int type, const std::string& text, int code = 0);
 
@@ -487,6 +503,9 @@ public:
 	bool offlineMode() const { return m_offline; }
 	const std::string& accountName() const { return m_account.name; }
 	const std::string& soldierName() const { return m_soldier; }
+	// The account a login would start from: the last one logged in to,
+	// else the first kept for offline play ("" none).
+	std::string defaultLoginName() const { return !m_lastUser.empty() || m_local.empty() ? m_lastUser : m_local.front().name; }
 	// The soldier's online login (profile id 0 when offline or not logged in).
 	const AccountReply& soldierLogin() const { return m_soldierLogin; }
 	size_t serverCount() const { return m_servers.size(); }

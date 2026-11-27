@@ -2703,6 +2703,63 @@ GameSetup MenuBindings::gameSetup() const
 	return setup;
 }
 
+bool MenuBindings::startLevel(const LevelStart& start)
+{
+	const auto same = [](const std::string& a, const std::string& b) {
+		return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+			return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+		});
+	};
+	// The installed layouts of that level in that mode; the size asked
+	// for, else the nearest (the larger on a tie).
+	const MenuMap* chosen = nullptr;
+	bool levelFound = false;
+	for (const MenuMap& map : m_maps) {
+		if (!same(map.level, start.map.level)) {
+			continue;
+		}
+		levelFound = true;
+		if (!same(map.gameMode, start.map.gameMode)) {
+			continue;
+		}
+		const auto distance = [&start](const MenuMap& m) { return std::abs(m.size - start.map.size); };
+		if (!chosen || distance(map) < distance(*chosen) || (distance(map) == distance(*chosen) && map.size > chosen->size)) {
+			chosen = &map;
+		}
+	}
+	if (!chosen) {
+		log("start level: " + start.map.level + (levelFound ? " has no " + start.map.gameMode + " layout" : " is not installed"));
+		return false;
+	}
+	// The singleplayer page's start: its players target too, when
+	// enhanced.singleplayBotCount has one (gameSetup).
+	const bool starting = m_singleplayStarting;
+	m_singleplayStarting = true;
+	GameSetup setup = gameSetup();
+	m_singleplayStarting = starting;
+	setup.maps = {*chosen};
+	if (start.bots >= 0) {
+		// The command line's count: that many bots on every map.
+		setup.bots = start.bots;
+		setup.botsIncludeHumans = false;
+		setup.playerTarget = 0;
+		setup.maxPlayers = std::max(setup.maxPlayers, start.bots + 1);
+	}
+	if (start.botSkill >= 0) {
+		setup.botSkill = std::clamp(start.botSkill, 0.0f, 1.0f);
+	}
+	if (start.timeLimit >= 0) {
+		setup.timeLimit = start.timeLimit;
+	}
+	log("start level: " + chosen->level + " " + chosen->gameMode + " " + std::to_string(chosen->size) + ", "
+		+ std::to_string(playersForMap(setup, chosen->size).bots) + " bots");
+	setCurrentGame(*chosen, setup.maxPlayers);
+	if (onStartGame) {
+		onStartGame(setup);
+	}
+	return true;
+}
+
 int MenuBindings::singleplayPlayers() const
 {
 	const double players = setting("GeneralSettings.SingleplayBotCount", kSingleplayPlayersDefault);

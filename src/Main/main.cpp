@@ -76,6 +76,7 @@
 #include "MapOrderMarker.h"
 #include "MenuBindings.h"
 #include "MenuGameState.h"
+#include "MenuSignIn.h"
 #include "MenuSingleplayBots.h"
 #include "SettingsObjects.h"
 #include "PlayerCamera.h"
@@ -170,6 +171,7 @@ struct Options {
 	std::string drive;           // --drive <vehicle>: put one before the player and drive it
 	std::string kit;             // --kit <name|n>: the player's kit (the team's kit list, by name or from 1)
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
+	bool botsGiven = false;      // --bots given (a direct start from the menu takes it over the profile's)
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
 	bool enhanced = false;       // --enhanced: start with enhanced.enabled 1 (Scene/EnhancedSettings.h)
 	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
@@ -326,6 +328,16 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.language = argv[++i]; // German, Russian, Chinese_Simplified, ... (strings.csv's header)
 		} else if (arg == "--bots" && hasValue) {
 			options.bots = std::atoi(argv[++i]);
+			options.botsGiven = true;
+		} else if (arg == "--bot-skill" && hasValue) {
+			options.botSkill = std::clamp(static_cast<float>(std::atof(argv[++i])), 0.0f, 1.0f);
+		} else if (arg == "--team" && hasValue) {
+			// The team the player joins (--play's, or a direct start's from the menu).
+			const int team = std::atoi(argv[++i]);
+			if (team == 1 || team == 2) {
+				options.playTeam = team;
+				options.playTeamGiven = true;
+			}
 		} else if (arg == "--menu") {
 			options.menu = hasValue && argv[i + 1][0] != '-' && argv[i + 1][0] != '+' ? argv[++i] : "mainMenu";
 			options.view = options.screenshot.empty();
@@ -395,7 +407,9 @@ bool parseOptions(int argc, char** argv, Options& options)
 		} else if (arg == "--spawn" && hasValue) {
 			options.spawns.push_back(argv[++i]);
 		} else if (arg == "--play") {
-			options.playTeam = 2;
+			if (!options.playTeamGiven) {
+				options.playTeam = 2; // else --team's
+			}
 			if (hasValue && (std::string(argv[i + 1]) == "1" || std::string(argv[i + 1]) == "2")) {
 				options.playTeam = std::atoi(argv[++i]);
 				options.playTeamGiven = true;
@@ -4347,9 +4361,52 @@ int runGame(Options& options, Session& session)
 			}
 		}
 	}
+	// --menu with +level in a window: the level starts at once, as the
+	// singleplayer page's instant action would start it with that map
+	// chosen (the profile's settings; --bots, --bot-skill and --time-limit
+	// over them). The game is then the menu's: Esc opens the in-game menu,
+	// the end of round goes on to the next round, and leaving the game
+	// returns to the main menu. A screenshot or a menu script keeps the
+	// menu over the level instead.
+	if (menu.loaded() && session.menuBindings && !startedGame && !options.level.empty() && options.menu == "mainMenu" &&
+		options.view && options.screenshot.empty() && options.menuScript.empty() && options.connect.empty() && !options.host &&
+		!options.dedicated && !session.client && !session.hosted) {
+		// First the login a player would make (MenuSignIn.h): the last
+		// account, offline, its first soldier. Without one the game still
+		// starts, and Esc shows the login page.
+		std::string account = session.menuBindings->defaultLoginName();
+		if (account.empty()) {
+			account = "Player";
+		}
+		if (dice::hfe::menu::signInForDirectStart(menu, *session.menuBindings, account)) {
+			std::printf("logged in as %s (account %s%s)\n", session.menuBindings->soldierName().c_str(),
+				session.menuBindings->accountName().c_str(), session.menuBindings->offlineMode() ? ", offline" : "");
+			// Esc then shows the singleplayer page, as for a game it started.
+			if (!dice::hfe::menu::showSingleplayPage(menu)) {
+				std::printf("the menu's singleplayer page didn't open: Esc shows the main page\n");
+			}
+		} else {
+			std::printf("no login for the direct start: the menu's login page stays\n");
+		}
+		dice::hfe::menu::MenuBindings::LevelStart start;
+		start.map = {options.level, options.gameMode, options.mapSize};
+		start.bots = options.botsGiven ? std::max(options.bots, 0) : -1;
+		start.botSkill = options.botSkill;
+		start.timeLimit = options.timeLimitGiven ? std::max(options.timeLimit, 0) : -1;
+		if (!session.menuBindings->startLevel(start)) {
+			std::fprintf(stderr, "cannot start %s (%s, %d): the main menu instead\n", options.level.c_str(), options.gameMode.c_str(),
+				options.mapSize);
+		}
+		session.playlist.clear();
+		options.level.clear(); // the menu's game below (or the menu alone)
+		// No start-up movies, now or when the game returns to the menu.
+		while (!session.movies.empty()) {
+			session.movies.takeNext();
+		}
+	}
 	// The menu before any level: it runs alone until it quits or starts a
 	// game (Multiplay.createServer), which then loads like +level.
-	if (menu.loaded() && options.level.empty() && (!options.menuScript.empty() || (options.screenshot.empty() && options.view))) {
+	if (menu.loaded() && !startedGame && options.level.empty() && (!options.menuScript.empty() || (options.screenshot.empty() && options.view))) {
 		const auto over = [&] { return menuQuit || startedGame.has_value() || session.joinRequested; };
 		if (!options.menuScript.empty()) {
 			runMenuScript(menu, options.menuScript, over);
@@ -11536,6 +11593,14 @@ int runGame(Options& options, Session& session)
 			session.window = Window::open(viewer.width, viewer.height);
 			if (session.window) {
 				session.window->setScript(options.inputScript);
+				if (session.menuBindings) {
+					// A game started without the menu's own window first (--menu
+					// with +level): the in-game menu's video page gets the modes,
+					// and the profile's resolution applies, as the menu's would.
+					session.menuBindings->setDisplayModes(session.window->displayModes(options.wideScreen));
+					session.menuBindings->setAntialiasingModes(session.window->antialiasingModes());
+					applySettings();
+				}
 			}
 		}
 		return session.window ? runViewer(sources, viewer, session.window.get()) : 1;
