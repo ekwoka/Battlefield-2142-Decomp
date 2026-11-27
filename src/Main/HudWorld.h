@@ -46,6 +46,11 @@ public:
 	using ControlPointInfo = game::GameWorld::ControlPointInfo;
 	using VehicleInfo = game::GameWorld::VehicleInfo;
 	using SquadRequest = game::GameWorld::SquadRequest;
+	struct SpawnGroupInfo {
+		int id = -1, team = 0, squad = -1;
+		float x = 0, z = 0;
+		bool active = false;
+	};
 	virtual ~HudWorld() = default;
 
 	// Whether the game is a server's (a joined game).
@@ -81,13 +86,13 @@ public:
 	// The control points a team may spawn at (the spawn manager's groups)
 	// and the one a player picked.
 	virtual std::vector<int> spawnablePoints(int team) const = 0;
+	virtual std::vector<SpawnGroupInfo> spawnGroups() const { return {}; }
 	// Not greyed out (spawn_*Inactive, 0x0078e9b0). A joined client's
 	// group finds no server interface (0x918c30) and answers true (0x006330ee).
 	virtual bool spawnGroupActive(int /*group*/, int /*player*/) const { return true; }
 	virtual int spawnChoice(int player) const = 0;
 	virtual bool spawnRequested(int /*player*/) const { return false; }
 	// The team's mobile spawn points (GameWorld::spawnVehicles): vehicles.
-	virtual std::vector<uint32_t> spawnVehicles(int) const { return {}; }
 	virtual std::vector<VehicleInfo> vehicleList() const = 0;
 	virtual std::vector<int> vehicleOccupants(uint32_t vehicle) const = 0;
 	// Local pilot's requested thrust, not engine output.
@@ -242,7 +247,6 @@ public:
 	bool spawnGroupActive(int group, int player) const override { return m_round.spawnGroupActive(group, player); }
 	int spawnChoice(int player) const override { return m_round.spawnChoice(player); }
 	bool spawnRequested(int player) const override { return m_round.spawnRequested(player); }
-	std::vector<uint32_t> spawnVehicles(int team) const override { return m_round.spawnVehicles(team); }
 	// The vehicle bodies and the map's other PlayerControlObjects (the
 	// sentry gun, the drones, the pods: GameWorld::mapObjects), as the
 	// game's list of them holds both (0x00793b60).
@@ -291,7 +295,7 @@ private:
 
 // A joined game: the server's players (CreatePlayer and their
 // networkables), tickets (ghost 0x201), control points (their ghosts:
-// position, team; the ids of the spawn groups at them), spawn groups,
+// position, team), spawn groups,
 // requests, and our own soldier (the control-object record, our player's
 // own state), the ghosts as the level's objects (`ghostObjects`: ghost ->
 // object, kept by main.cpp's remote step).
@@ -300,12 +304,6 @@ public:
 	RemoteHudWorld(const net::RemoteWorld& world, game::GameWorld& round, const std::map<uint16_t, uint32_t>& ghostObjects)
 		: m_world(world), m_round(round), m_ghostObjects(ghostObjects)
 	{
-	}
-	void setTerrainExtent(float originX, float originZ, float extent)
-	{
-		m_terrainOrigin[0] = originX;
-		m_terrainOrigin[1] = originZ;
-		m_terrainExtent = extent;
 	}
 	// Our soldier's feet and look as the client has them (its prediction and
 	// the mouse's aim); false: the server's.
@@ -382,15 +380,9 @@ public:
 	std::vector<ControlPointInfo> controlPointList() const override;
 	bool insideControlPoint() const override;
 	std::vector<int> spawnablePoints(int team) const override;
+	std::vector<SpawnGroupInfo> spawnGroups() const override;
 	int spawnChoice(int player) const override { return player == localPlayer() ? chosenSpawn : -1; }
 	bool spawnRequested(int player) const override { return player == localPlayer() && requestedSpawn; }
-	// The vehicles the server's spawn groups ride (their ghosts' objects).
-	std::vector<uint32_t> spawnVehicles(int team) const override;
-	// The server's spawn group placed at an object here (a squad leader's
-	// soldier or a vehicle: the groups the spawn manager makes as the round
-	// goes, ids from 0xc0), -1 none: what the spawn screen's squad leader
-	// and vehicle markers ask for (6/6).
-	int spawnGroupAt(uint32_t object) const;
 	std::vector<VehicleInfo> vehicleList() const override;
 	std::vector<int> vehicleOccupants(uint32_t vehicle) const override;
 	float pilotThrust(uint32_t vehicle) const override;
@@ -438,8 +430,6 @@ private:
 	const net::RemoteWorld& m_world;
 	game::GameWorld& m_round;
 	const std::map<uint16_t, uint32_t>& m_ghostObjects;
-	float m_terrainOrigin[2] {};
-	float m_terrainExtent = 0;
 };
 
 // The view through a guided round's camera (useProjectileCamera,

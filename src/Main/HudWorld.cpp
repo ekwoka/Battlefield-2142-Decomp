@@ -341,13 +341,10 @@ bool RemoteHudWorld::insideControlPoint() const
 
 std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 {
-	// The control points' ghosts (ControlPoint networkables: team, flag);
-	// the id of a spawn group at one names it (the id the spawn screen
-	// asks for), else 1000 + the ghost. CP groups whose carried CP ghost is
-	// absent are positioned from their map bytes.
+	// The control points' ghosts (ControlPoint networkables: position, team,
+	// flag). Spawn groups are separate networkables and are exposed by
+	// spawnGroups(); their compact ids must not replace control-point ids.
 	std::vector<ControlPointInfo> out;
-	std::set<int> representedGroups;
-	std::map<uint16_t, ControlPointInfo> controlPointsByGhost;
 	for (const net::RemoteObject& o : m_world.objectList()) {
 		const world::Object* object = m_round.objects().find(objectOf(o.ghost));
 		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
@@ -381,33 +378,7 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 				}
 			}
 		}
-		for (const auto& [id, group] : m_world.spawnGroups()) {
-			// Transitional until F3 replaces the joined carrier-object marker path.
-			if (group.netId == o.ghost) {
-				cp.id = id;
-				representedGroups.insert(id);
-				break; // the interim CP marker represents the first group at this CP
-			}
-		}
-		controlPointsByGhost[o.ghost] = cp;
 		out.push_back(cp);
-	}
-	for (const auto& [id, received] : m_world.spawnGroups()) {
-		if (id >= 0xc0 || representedGroups.count(id) || m_terrainExtent <= 0) {
-			continue; // the F1 fallback is only for compact control-point groups
-		}
-		ControlPointInfo cp;
-		if (const auto known = controlPointsByGhost.find(received.netId); known != controlPointsByGhost.end()) {
-			cp = known->second; // retain the authored/localized CP label when its ghost is known
-		}
-		cp.id = id;
-		cp.team = received.team;
-		cp.position.x = m_terrainOrigin[0] + (received.mapX & 0xff) / 255.0f * m_terrainExtent;
-		cp.position.z = m_terrainOrigin[1] + (received.mapZ & 0xff) / 255.0f * m_terrainExtent;
-		if (cp.name.empty()) cp.name = "CP " + std::to_string(id);
-		cp.showOnMinimap = false;
-		out.push_back(std::move(cp));
-		representedGroups.insert(id);
 	}
 	return out;
 }
@@ -423,28 +394,14 @@ std::vector<int> RemoteHudWorld::spawnablePoints(int team) const
 	return out;
 }
 
-std::vector<uint32_t> RemoteHudWorld::spawnVehicles(int team) const
+std::vector<HudWorld::SpawnGroupInfo> RemoteHudWorld::spawnGroups() const
 {
-	std::vector<uint32_t> out;
+	std::vector<HudWorld::SpawnGroupInfo> out;
+	out.reserve(m_world.spawnGroups().size());
 	for (const auto& [id, group] : m_world.spawnGroups()) {
-		// Transitional until F3 replaces the joined carrier-object marker path.
-		const world::Object* object = group.team == team ? m_round.objects().find(objectOf(group.netId)) : nullptr;
-		if (object && object->objectTemplate() && object->objectTemplate()->typeName() == "PlayerControlObject") {
-			out.push_back(object->id());
-		}
+		out.push_back({id, group.team, group.squad, group.position.x, group.position.z, group.active});
 	}
 	return out;
-}
-
-int RemoteHudWorld::spawnGroupAt(uint32_t object) const
-{
-	for (const auto& [id, group] : m_world.spawnGroups()) {
-		// Transitional until F3 replaces the joined carrier-object marker path.
-		if (object != 0 && objectOf(group.netId) == object) {
-			return id;
-		}
-	}
-	return -1;
 }
 
 std::vector<HudWorld::VehicleInfo> RemoteHudWorld::vehicleList() const
