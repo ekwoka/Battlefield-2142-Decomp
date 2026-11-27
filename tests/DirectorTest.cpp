@@ -539,3 +539,133 @@ TEST(Director_KillsFirstPersonOnlyKeepsTheEye)
 	}
 	CHECK(inVehicle >= 1);
 }
+
+// --director-mode kills-rotate: a followed bot on a gun of its own Titan,
+// killing and never hit, is left after titanGunStreak ("streak") and isn't
+// taken back for its next kill while benched; plain kills mode stays on it.
+TEST(Director_KillsRotateLeavesAnUnharmedTitanGun)
+{
+	const auto match = [](float t) {
+		Sample two = fighting(2);
+		two.vehicle = 42;
+		two.ownTitan = true;
+		two.sinceHit = game::director::kNever;
+		Sample four = t < 30 ? living(4) : killedBy(living(4), 2);
+		return std::vector<Sample> {t < 1 ? fighting(1) : killedBy(fighting(1), 2), two, fighting(3), four};
+	};
+	game::director::Settings settings = killsSettings();
+	settings.policy = game::director::Policy::KillsRotate;
+	ShotDirector shots(settings);
+	const std::vector<Cut> cuts = subjectCuts(run(shots, 80, match));
+	float followed = -1, left = -1;
+	for (const Cut& c : cuts) {
+		if (c.subject == 2 && followed < 0) {
+			followed = c.time;
+		}
+		if (c.reason == "streak") {
+			CHECK(c.previous == 2 && c.subject != 2);
+			left = c.time;
+		}
+		if (left >= 0 && c.time > left) {
+			CHECK(c.subject != 2); // benched through its kill at 30 s
+		}
+	}
+	CHECK(followed >= 0 && followed <= 3);
+	CHECK(left >= followed + settings.titanGunStreak && left <= followed + settings.titanGunStreak + 1);
+	ShotDirector plain(killsSettings());
+	for (const Cut& c : run(plain, 80, match)) {
+		CHECK(c.reason != "streak");
+	}
+	CHECK(plain.subject() == 2 && plain.following());
+}
+
+// kills-rotate: a vehicle hit now and then, or a bot on foot, keeps its
+// follow (the streak is time in a vehicle without taking damage); an
+// unharmed tank is left after Settings::streak.
+TEST(Director_KillsRotateKeepsAVehicleUnderFire)
+{
+	game::director::Settings settings = killsSettings();
+	settings.policy = game::director::Policy::KillsRotate;
+	const auto runWith = [&](float hitEvery, bool inVehicle) {
+		ShotDirector shots(settings);
+		return subjectCuts(run(shots, 150, [=](float t) {
+			Sample two = fighting(2);
+			two.vehicle = inVehicle ? 42 : 0;
+			two.sinceHit = hitEvery > 0 ? std::fmod(t, hitEvery) : game::director::kNever;
+			return std::vector<Sample> {t < 1 ? fighting(1) : killedBy(fighting(1), 2), two, fighting(3)};
+		}));
+	};
+	const auto streaks = [](const std::vector<Cut>& cuts) {
+		return std::count_if(cuts.begin(), cuts.end(), [](const Cut& c) { return c.reason == "streak"; });
+	};
+	CHECK(streaks(runWith(30, true)) == 0);
+	CHECK(streaks(runWith(0, false)) == 0);
+	const std::vector<Cut> tank = runWith(0, true);
+	CHECK(streaks(tank) >= 1);
+	for (const Cut& c : tank) {
+		if (c.reason == "streak") {
+			CHECK(c.time >= settings.streak && c.time <= settings.streak + 4);
+			break;
+		}
+	}
+}
+
+TEST(Director_PolicyNames)
+{
+	game::director::Policy policy = game::director::Policy::Interest;
+	CHECK(game::director::parsePolicy("kills-rotate", policy) && policy == game::director::Policy::KillsRotate);
+	CHECK(std::string(game::director::policyName(policy)) == "kills-rotate");
+	CHECK(!game::director::parsePolicy("rotate", policy) && policy == game::director::Policy::KillsRotate);
+}
+
+// Two gunners of one transport are one subject: the interest never cuts
+// between them as their fire comes and goes, a crewmate's kill doesn't take
+// the kills follow from one to the other, and a streak benches the crew.
+TEST(Director_TreatsAVehicleCrewAsOneSubject)
+{
+	const auto crew = [](float t) {
+		// Players 1 and 3 (one team) gun vehicle 9 in turn, 5 s each; player 5 idles about.
+		const bool first = std::fmod(t, 10.0f) < 5;
+		Sample one = first ? fighting(1) : living(1), three = first ? living(3) : fighting(3);
+		one.vehicle = three.vehicle = 9;
+		one.speed = three.speed = 8;
+		one.sinceHit = three.sinceHit = game::director::kNever;
+		return std::vector<Sample> {one, three, idling(5, t)};
+	};
+	const auto noCrewCut = [](const std::vector<Cut>& cuts) {
+		for (const Cut& c : cuts) {
+			const bool between = (c.previous == 1 && c.subject == 3) || (c.previous == 3 && c.subject == 1);
+			CHECK(!between);
+		}
+	};
+	ShotDirector interest;
+	noCrewCut(run(interest, 60, crew));
+	// Kills: the crew kills player 2 at 2 s and player 4 at 30 s (by the other gunner).
+	const auto killing = [&](float t) {
+		std::vector<Sample> all = crew(t);
+		all.push_back(t < 2 ? living(2) : killedBy(living(2), 1));
+		all.push_back(t < 30 ? living(4) : killedBy(living(4), 3));
+		return all;
+	};
+	ShotDirector kills(killsSettings());
+	const std::vector<Cut> followed = subjectCuts(run(kills, 60, killing));
+	noCrewCut(followed);
+	CHECK(kills.following() && (kills.subject() == 1 || kills.subject() == 3));
+	// kills-rotate: after the streak the crew is benched; its second kill (30 s) brings neither gunner back.
+	game::director::Settings settings = killsSettings();
+	settings.policy = game::director::Policy::KillsRotate;
+	settings.streak = 20;
+	ShotDirector rotate(settings);
+	const std::vector<Cut> rotated = subjectCuts(run(rotate, 60, killing));
+	noCrewCut(rotated);
+	float left = -1;
+	for (const Cut& c : rotated) {
+		if (c.reason == "streak") {
+			left = c.time;
+			CHECK(c.subject != 1 && c.subject != 3);
+		} else if (left >= 0) {
+			CHECK(c.subject != 1 && c.subject != 3);
+		}
+	}
+	CHECK(left > 20 && left < 24);
+}

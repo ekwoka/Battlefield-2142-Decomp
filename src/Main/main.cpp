@@ -12,7 +12,7 @@
 //               [--nosound] [--sound] [--play-sound <name>]
 //               [--play [team]] [--drive <vehicle template>]
 //               [--director] (with --bots N: a match of bots, a spectator camera cutting between them)
-//               [--director-mode interest|kills] [--director-idle <seconds>]
+//               [--director-mode interest|kills|kills-rotate] [--director-idle <seconds>] [--director-streak <seconds>]
 //               [--record-demo <name>] [--demo <file|name>] [--demo-stats <file>]
 //               [--director-first-person] [--follow-hud] [--demo-follow <player>] [--demo-first-person]
 // --view opens a window showing the level (needs a build with SDL3);
@@ -205,7 +205,7 @@ struct Options {
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
 	bool spectate = false;       // --spectate: on a server, join as a spectator (the menu's SPECTATOR)
 	bool director = false;       // --director: a match of bots only, the camera cutting between them (Game/Director.h)
-	game::director::Settings directorSettings; // --director-mode interest|kills, --director-idle <s>
+	game::director::Settings directorSettings; // --director-mode interest|kills|kills-rotate, --director-idle <s>, --director-streak <s>
 	bool directorFirstPerson = false; // --director-first-person: every infantry shot in first person (Settings::firstPersonShare 1, no wide shots)
 	bool followHud = false;      // --follow-hud: a first-person follow (enhanced.followFirstPerson) shows the followed player's HUD from the start (J toggles it)
 	std::string demoFollow;      // --demo-follow <player name|id>: the demo camera follows that player
@@ -505,11 +505,14 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.view = options.screenshot.empty();
 		} else if (arg == "--director-mode" && hasValue) {
 			if (!game::director::parsePolicy(argv[++i], options.directorSettings.policy)) {
-				std::fprintf(stderr, "--director-mode: interest or kills, not %s\n", argv[i]);
+				std::fprintf(stderr, "--director-mode: interest, kills or kills-rotate, not %s\n", argv[i]);
 				return false;
 			}
 		} else if (arg == "--director-idle" && hasValue) {
 			options.directorSettings.followIdle = static_cast<float>(std::atof(argv[++i]));
+		} else if (arg == "--director-streak" && hasValue) {
+			options.directorSettings.streak = static_cast<float>(std::atof(argv[++i]));
+			options.directorSettings.titanGunStreak = options.directorSettings.streak / 2;
 		} else if (arg == "--director-first-person") {
 			options.directorFirstPerson = true;
 		} else if (arg == "--follow-hud") {

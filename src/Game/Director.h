@@ -23,6 +23,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dice::hfe::game {
@@ -99,8 +100,10 @@ private:
 
 // What the director follows: the most interesting bot (cutting between them
 // by interest), or the kills (--director-mode kills: the killer of the
-// followed bot, held until it idles long; see ShotDirector).
-enum class Policy { Interest, Kills };
+// followed bot, held until it idles long; see ShotDirector), or the kills
+// rotating (--director-mode kills-rotate: the same, but a vehicle or a Titan
+// gun on a long streak without taking damage is left; see ShotDirector).
+enum class Policy { Interest, Kills, KillsRotate };
 const char* policyName(Policy policy);
 bool parsePolicy(const std::string& name, Policy& policy);
 
@@ -125,13 +128,24 @@ struct Settings {
 	// 20 s), shorter than a walk across the map to the next point.
 	float followIdle = 25;
 	float angleEvery = 12; // and its camera changes (chase, first person) this often, the subject kept
+	// Policy::KillsRotate: a followed bot in a vehicle that takes no damage for
+	// this long (--director-streak; counted from the follow, its last hit or its
+	// getting in) is left ("streak"): a tank or gunship farming kills unopposed
+	// is the same shot over and over. A gun of its own Titan, safer still and
+	// with one fixed view, is left after titanGunStreak. The bot left is not
+	// followed again (as a killer or a first kill, nor picked by interest) for
+	// benchFor, unless it is hit first (then it is in a fight worth watching).
+	float streak = 40;
+	float titanGunStreak = 20;
+	float benchFor = 60;
 };
 
 // A cut: when, to whom, how, and why. Policy::Interest: "start", "better",
 // "idle", "max", "death", "lost", "forced". Policy::Kills adds "killer" (to
 // the followed bot's killer), "first-kill" (to a bot that killed, while
 // waiting), "idle-long" (off a killer idle Settings::followIdle), "left" (the
-// subject left the match) and "angle" (the same subject, another camera).
+// subject left the match) and "angle" (the same subject, another camera);
+// Policy::KillsRotate "streak" (off a vehicle on a long unharmed streak).
 struct Cut {
 	float time = 0;
 	int subject = -1, previous = -1;
@@ -154,6 +168,11 @@ struct Cut {
 // followIdle without action ("idle-long") or if it leaves ("left"). Kills in
 // the same decision: the killer with the highest interest, then the lowest
 // player id.
+//
+// Policy::KillsRotate: Policy::Kills, and a followed bot in a vehicle that
+// takes no damage for Settings::streak (a gun of its own Titan:
+// titanGunStreak) is left ("streak") for the most interesting other bot,
+// and benched (see Settings::benchFor).
 class ShotDirector {
 public:
 	explicit ShotDirector(Settings settings = {}, uint32_t seed = 0x2142u);
@@ -185,10 +204,16 @@ private:
 	float m_shotStart = 0;
 	float m_deathAt = -1;
 	bool m_forced = false;
-	std::deque<int> m_recent;
+	std::deque<std::pair<int, uint32_t>> m_recent; // the last subjects (player, its vehicle then)
 	bool m_following = false;
 	float m_lastActive = 0, m_angleAt = 0;
 	std::map<int, bool> m_alive; // each player's at the last decision
+	// Policy::KillsRotate.
+	bool rotates() const { return m_settings.policy == Policy::KillsRotate; }
+	bool benched(const Sample& sample) const;
+	float m_now = 0, m_lastThreat = 0;
+	std::map<int, float> m_benched; // a player left on a streak: when
+	std::map<uint32_t, float> m_benchedVehicles; // and its vehicle (the crew with it)
 };
 
 // Statistics over a run's cuts, for the end of --simulate. A shot is the

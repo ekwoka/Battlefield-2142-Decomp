@@ -63,6 +63,36 @@ bool isFlying(GameWorld& world, uint32_t vehicle)
 	return category == 2 || category == 3; // VCAir, VCHelicopter
 }
 
+// Two living players in the same vehicle: one subject to the director (one
+// shot, one interest), so it never cuts between a transport's gunners.
+bool together(const Sample& a, const Sample& b)
+{
+	return a.alive && b.alive && a.vehicle && a.vehicle == b.vehicle;
+}
+
+const Sample* findPlayer(const std::vector<Sample>& samples, int player)
+{
+	for (const Sample& s : samples) {
+		if (s.player == player) {
+			return &s;
+		}
+	}
+	return nullptr;
+}
+
+// A subject's vehicle as a whole: the most interesting of its crew, the
+// last action of any of them.
+float crewInterest(const std::vector<Sample>& samples, const Sample& subject)
+{
+	float value = interest(subject);
+	for (const Sample& s : samples) {
+		if (together(s, subject)) {
+			value = std::max(value, interest(s));
+		}
+	}
+	return value;
+}
+
 } // namespace
 
 const char* modeName(CameraMode mode)
@@ -74,13 +104,22 @@ const char* modeName(CameraMode mode)
 	}
 }
 
-const char* policyName(Policy policy) { return policy == Policy::Kills ? "kills" : "interest"; }
+const char* policyName(Policy policy)
+{
+	switch (policy) {
+	case Policy::Kills: return "kills";
+	case Policy::KillsRotate: return "kills-rotate";
+	default: return "interest";
+	}
+}
 
 bool parsePolicy(const std::string& name, Policy& policy)
 {
-	if (name == "interest" || name == "kills") {
-		policy = name == "kills" ? Policy::Kills : Policy::Interest;
-		return true;
+	for (const Policy p : {Policy::Interest, Policy::Kills, Policy::KillsRotate}) {
+		if (name == policyName(p)) {
+			policy = p;
+			return true;
+		}
 	}
 	return false;
 }
@@ -381,16 +420,33 @@ float ShotDirector::random()
 	return static_cast<float>(m_seed % 100000u) / 100000.0f;
 }
 
+// Policy::KillsRotate: left on a streak less than benchFor ago, and not hit since.
+bool ShotDirector::benched(const Sample& s) const
+{
+	if (!rotates()) {
+		return false;
+	}
+	const auto on = [&](const auto& benches, auto key) {
+		const auto it = benches.find(key);
+		return it != benches.end() && m_now - it->second < m_settings.benchFor && s.sinceHit >= m_now - it->second;
+	};
+	return on(m_benched, s.player) || (s.vehicle && on(m_benchedVehicles, s.vehicle));
+}
+
 const Sample* ShotDirector::best(const std::vector<Sample>& samples, int exclude, float& score) const
 {
 	const Sample* chosen = nullptr;
+	const Sample* excluded = findPlayer(samples, exclude);
 	score = 0;
 	for (const Sample& s : samples) {
-		if (!s.alive || s.player == exclude) {
-			continue;
+		if (!s.alive || s.player == exclude || (excluded && together(*excluded, s)) || benched(s)) {
+			continue; // (not the subject's own crewmates: the same shot)
 		}
 		float value = interest(s);
-		if (std::find(m_recent.begin(), m_recent.end(), s.player) != m_recent.end()) {
+		const bool recent = std::any_of(m_recent.begin(), m_recent.end(), [&](const auto& r) {
+			return r.first == s.player || (s.vehicle && r.second == s.vehicle);
+		});
+		if (recent) {
 			value -= m_settings.variety + m_settings.varietyShare * value;
 		}
 		if (!chosen || value > score) {
@@ -426,7 +482,7 @@ Cut ShotDirector::cutTo(float now, const Sample* to, const char* reason)
 	cut.mode = m_mode;
 	m_shotStart = now;
 	m_deathAt = -1;
-	m_recent.push_back(to->player);
+	m_recent.emplace_back(to->player, to->vehicle);
 	while (static_cast<int>(m_recent.size()) > std::max(m_settings.history, 0)) {
 		m_recent.pop_front();
 	}
@@ -442,7 +498,7 @@ const Sample* ShotDirector::killerOf(const std::vector<Sample>& samples, const S
 	}
 	for (const Sample& s : samples) {
 		if (s.player == victim.killer) {
-			return s.alive && s.team != victim.team ? &s : nullptr;
+			return s.alive && s.team != victim.team && !benched(s) ? &s : nullptr;
 		}
 	}
 	return nullptr;
@@ -485,20 +541,43 @@ Cut ShotDirector::follow(float now, const Sample* to, const char* reason)
 	}
 	cut.mode = m_mode;
 	m_following = true;
-	m_lastActive = m_angleAt = now;
+	m_lastActive = m_angleAt = m_lastThreat = now;
 	return cut;
 }
 
 std::optional<Cut> ShotDirector::keepFollowing(float now, const Sample& s, const std::vector<Sample>& samples)
 {
-	const bool active = s.enemyInRange || s.capturing || s.titanCore;
-	const float since = std::min({s.sinceFired, s.sinceHit, s.sinceDamage, s.sinceKill});
+	// A vehicle's crew as one: any of them fighting keeps the follow, a hit on
+	// any of them (the vehicle) restarts the streak.
+	bool active = false;
+	float since = kNever, sinceHit = kNever;
+	for (const Sample& c : samples) {
+		if (c.player == s.player || together(c, s)) {
+			active = active || c.enemyInRange || c.capturing || c.titanCore;
+			since = std::min({since, c.sinceFired, c.sinceHit, c.sinceDamage, c.sinceKill});
+			sinceHit = std::min(sinceHit, c.sinceHit);
+		}
+	}
 	m_lastActive = std::max(m_lastActive, active ? now : now - since);
 	if (now - m_lastActive >= m_settings.followIdle) {
 		m_following = false; // waiting again
 		float score = 0;
 		const Sample* to = best(samples, m_subject, score);
 		return to ? std::optional<Cut>(cutTo(now, to, "idle-long")) : std::nullopt;
+	}
+	if (rotates()) {
+		// The streak counts vehicle time without a hit: on foot, or hit, it starts again.
+		m_lastThreat = s.vehicle ? std::max(m_lastThreat, now - sinceHit) : now;
+		const float limit = s.ownTitan ? m_settings.titanGunStreak : m_settings.streak;
+		if (s.vehicle && now - m_lastThreat >= limit) {
+			m_benched[m_subject] = now;
+			m_benchedVehicles[s.vehicle] = now; // and its crew
+			m_following = false; // waiting again, for another bot's kill
+			float score = 0;
+			if (const Sample* to = best(samples, m_subject, score)) {
+				return cutTo(now, to, "streak");
+			}
+		}
 	}
 	CameraMode next = m_mode;
 	if (s.vehicle && m_mode == CameraMode::FirstPerson) {
@@ -530,14 +609,13 @@ std::optional<Cut> ShotDirector::keepFollowing(float now, const Sample& s, const
 
 std::optional<Cut> ShotDirector::update(float now, const std::vector<Sample>& samples)
 {
+	m_now = now;
 	const bool forced = std::exchange(m_forced, false);
-	const bool kills = m_settings.policy == Policy::Kills;
+	const bool kills = m_settings.policy != Policy::Interest;
 	const Sample* kill = kills ? newKill(samples) : nullptr;
-	const Sample* current = nullptr;
-	for (const Sample& s : samples) {
-		if (s.player == m_subject) {
-			current = &s;
-		}
+	const Sample* current = findPlayer(samples, m_subject);
+	if (kill && current && together(*kill, *current)) {
+		kill = current; // a crewmate's kill: the vehicle's, the same shot
 	}
 	float score = 0;
 	if (!current) {
@@ -579,7 +657,7 @@ std::optional<Cut> ShotDirector::update(float now, const std::vector<Sample>& sa
 	}
 	m_following = false;
 	const float age = now - m_shotStart;
-	const float mine = interest(*current);
+	const float mine = crewInterest(samples, *current);
 	const Sample* to = best(samples, m_subject, score);
 	if (!to) {
 		return std::nullopt;
