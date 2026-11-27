@@ -4,7 +4,8 @@
 # then once with it, and compares the state fingerprints. The enhanced
 # gameplay additions (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, guidedCameraEase,
 # cornerSteer, passengerWeapons, softLanding, titanKitFloors, squadOrderPoints) change the simulation by
-# design and are turned off for the comparison.
+# design and are turned off for the comparison. A fourth run records a demo
+# (--record-demo, enhanced.demoQuality) and must match the enhanced one.
 #   tools/parity-check.sh [seconds] [extra game args...]
 set -uo pipefail
 B="${BF2142_BIN:-build/release/src/Main/bf2142}"
@@ -20,13 +21,23 @@ run() {
 
 off1="$(run)"
 off2="$(run)"
-on="$(run --enhanced --console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.botOffMesh 0" --console "enhanced.botAsyncPaths 0" --console "enhanced.botCommander 0" --console "enhanced.botPilots 0" --console "enhanced.botLoneSeat 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0" --console "enhanced.titanKitFloors 0" --console "enhanced.squadOrderPoints 0")"
-echo "off: $off1 / $off2, on: $on"
+# The enhanced options that change the simulation by design, off.
+SIM_OFF=(--console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.botOffMesh 0" --console "enhanced.botAsyncPaths 0" --console "enhanced.botCommander 0" --console "enhanced.botPilots 0" --console "enhanced.botLoneSeat 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0" --console "enhanced.titanKitFloors 0" --console "enhanced.squadOrderPoints 0")
+on="$(run --enhanced "${SIM_OFF[@]}")"
+# enhanced.demoQuality (and recording at all) leaves the round alone: the
+# same enhanced round recorded at full rate.
+demo_dir="$(mktemp -d)"
+recorded="$(run --enhanced "${SIM_OFF[@]}" --record-demo "$demo_dir/parity.bf2142demo")"
+[[ -s "$demo_dir/parity.bf2142demo" ]] || recorded="no demo written"
+rm -rf "$demo_dir"
+echo "off: $off1 / $off2, on: $on, on and recording: $recorded"
 if [[ -z "$off1" ]]; then
 	echo "FAIL: no fingerprint printed"; exit 1
 elif [[ "$off1" != "$off2" ]]; then
 	echo "FAIL: the round doesn't repeat with the switch off, so the check can't tell"; exit 1
 elif [[ "$off1" != "$on" ]]; then
 	echo "FAIL: --enhanced changed the simulation"; exit 1
+elif [[ "$on" != "$recorded" ]]; then
+	echo "FAIL: recording a demo (enhanced.demoQuality) changed the simulation"; exit 1
 fi
 echo "PASS"

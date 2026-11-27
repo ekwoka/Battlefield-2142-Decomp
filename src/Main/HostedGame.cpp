@@ -8,6 +8,7 @@
 #include "Console/ConsoleBinding.h"
 #include "Console/Vars.h"
 #include "Game/GameLogic.h"
+#include "Game/TickProf.h"
 #include "Net/BitStream.h"
 #include "Net/GameClient.h"
 #include "Net/GameProtocol.h"
@@ -383,6 +384,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_reloadsSeen.clear();
 	m_stateCache.clear();
 	m_nextGhost = kFirstGhost;
+	m_ghostIndexSize = ~size_t {0}; // ghostOf's index anew
 	m_spawnGroups.clear();
 	m_squadSpawnGroups.clear();
 	m_vehicleSpawnGroups.clear();
@@ -782,13 +784,52 @@ bool HostedGame::recordDemo(const std::string& path, const std::string& cameraPa
 		onLog("recording demo " + path);
 	}
 	// 0x005172f0: with a local player, the camera too (0x005171f0).
-	net::CameraKeyframe probe;
-	if (!cameraPath.empty() && localCamera && localCamera(probe)) {
-		m_cameraPath = cameraPath;
-		m_cameraRecorder.restart();
-		m_recordingCamera = true;
-	}
+	startCamera(cameraPath);
 	return true;
+}
+
+bool HostedGame::startCamera(const std::string& cameraPath)
+{
+	net::CameraKeyframe probe;
+	if (cameraPath.empty() || !localCamera || !localCamera(probe)) {
+		return false; // no local player
+	}
+	m_cameraPath = cameraPath;
+	m_cameraRecorder.restart();
+	m_cameraWritten = 0;
+	m_recordingCamera = m_cameraFile.open(cameraPath);
+	if (!m_recordingCamera && onLog) {
+		onLog("cannot write " + cameraPath);
+	}
+	return m_recordingCamera;
+}
+
+void HostedGame::prime()
+{
+	m_stateCache.clear();
+	trackObjects();
+	trackProjectiles();
+	trackPlayers();
+	trackSpawnGroups();
+	trackRequests();
+	trackOrders();
+	trackCommanderOffers();
+}
+
+bool HostedGame::idle() const
+{
+	// sv.autoRecord's demo starts as the round turns to playing (tick).
+	const bool autoPending = m_setup.settings && m_setup.settings->autoRecord && m_autoDemo.empty()
+		&& m_lastRoundState != 3 && !m_logic->ended();
+	return !m_demo.isOpen() && !autoPending;
+}
+
+net::DemoRates HostedGame::demoRatesNow() const
+{
+	if (enhancedDemo()) {
+		return net::EnhancedDemoRates();
+	}
+	return net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1);
 }
 
 // The AutoRecorder's file name (0x00585620): strftime("%Y-%m-%d %H:%M:%S")
@@ -821,8 +862,17 @@ void HostedGame::startAutoDemo()
 	const std::string path = autoDemoPath(m_setup.modDirectory, std::time(nullptr));
 	std::error_code ignored;
 	std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ignored);
-	if (recordDemo(path)) {
+	// 0x00585860 records through demo.recordDemo's 0x00432cc0, which with
+	// a local player keeps <file>-def.bf2142cam too (the name has its
+	// extension, so beside it as given).
+	if (recordDemo(path, demoCameraPath(path))) {
 		m_autoDemo = path;
+		// The rewrite's local player joins after the round's first tick
+		// (retail's exists from the level's load): its camera starts when
+		// it is there.
+		if (!m_recordingCamera) {
+			m_autoCameraPending = demoCameraPath(path);
+		}
 	}
 }
 
@@ -909,11 +959,10 @@ void HostedGame::stopDemo()
 		return;
 	}
 	m_demo.close(static_cast<int32_t>(m_tick));
+	m_autoCameraPending.clear();
 	if (m_recordingCamera) {
 		m_recordingCamera = false;
-		if (!net::writeCameraFile(m_cameraPath, m_cameraRecorder.frames()) && onLog) {
-			onLog("cannot write " + m_cameraPath);
-		}
+		m_cameraFile.close(); // its frames went in as they came
 	}
 	m_clients.erase(kDemoClient);
 	m_demoEvents.clear();
@@ -926,6 +975,10 @@ void HostedGame::flushDemo(int32_t time, bool ghosts)
 {
 	// 0x004b02a0's demo branch: the payload goes to the file, not the
 	// socket, and counts as delivered at once (0x0057ab30): no resends.
+	// enhanced.demoQuality: more ghost payloads of the same time while the
+	// last one was full (net::EnhancedDemoRates).
+	const net::DemoRates rates = demoRatesNow();
+	int ghostPayloads = ghosts ? (enhancedDemo() ? net::EnhancedDemoRates().packetsPerSend : 1) : 0;
 	for (int guard = 0; guard < 64; ++guard) {
 		net::GamePayload payload;
 		const std::optional<net::ReliableEventBlock> block = m_demoEvents.next();
@@ -936,12 +989,20 @@ void HostedGame::flushDemo(int32_t time, bool ghosts)
 			m_demoEvents.sent(m_demoSequence, block->sequence);
 			m_demoEvents.acknowledge(m_demoSequence, 1);
 		}
-		if (ghosts) {
-			const net::DemoRates rates = net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1);
+		bool full = false;
+		if (ghostPayloads > 0) {
+			--ghostPayloads;
 			const size_t used = net::writeGamePayload(payload).size() * 8;
 			const size_t cap = static_cast<size_t>(rates.packetBytes) * 8;
 			const size_t demoBits = cap > used ? cap - used : 0;
 			payload.ghosts = ghostsFor(kDemoClient, demoBits);
+			if (ghostPayloads > 0) {
+				// Full: at the update count, or nearly out of room.
+				net::BitWriter w;
+				net::writeGhostBlock(w, payload.ghosts, net::kDemoGhostStateLengthBits);
+				full = payload.ghosts.updates.size() >= static_cast<size_t>(rates.maxUpdates)
+					|| w.bits() + net::kGhostMinimumBitsLeft + 256 > demoBits;
+			}
 		}
 		if (!block && !ghosts) {
 			return;
@@ -950,7 +1011,7 @@ void HostedGame::flushDemo(int32_t time, bool ghosts)
 		if (!bytes.empty()) { // 0x00516950 writes no empty payload
 			m_demo.write(time, bytes);
 		}
-		if (ghosts || m_demoEvents.idle()) {
+		if (ghosts ? !(full && ghostPayloads > 0) : m_demoEvents.idle()) {
 			return;
 		}
 	}
@@ -2854,8 +2915,10 @@ const HostedGame::GhostNow* HostedGame::ghostNow(uint16_t ghost)
 		now.team = true;
 		now.teamState = teamStateOf();
 	} else {
+		size_t objectPart = 0;
+		const Ghost* object = ghostOf(ghost, objectPart); // an object's part (the players' ids are apart)
 		for (const auto& [player, seen] : m_players) {
-			if (seen.ghost == ghost) {
+			if (!object && seen.ghost == ghost) {
 				now.player = player;
 			}
 		}
@@ -3043,10 +3106,24 @@ net::PlayerOwnState HostedGame::ownState(int player) const
 
 const HostedGame::Ghost* HostedGame::ghostOf(uint16_t id, size_t& part) const
 {
-	for (const auto& [object, ghost] : m_ghosts) {
-		if (id >= ghost.first && id < ghost.first + ghost.layout->size()) {
-			part = id - ghost.first;
-			return &ghost;
+	// By the ghosts' first ids (rebuilt when a ghost came or went: each
+	// new one moves m_nextGhost on; changeLevel forces it). The live
+	// ghosts' ids don't overlap, so the one holding `id` is the last first
+	// id at or under it.
+	if (m_ghostIndexSize != m_ghosts.size() || m_ghostIndexNext != m_nextGhost) {
+		m_ghostIndex.clear();
+		for (const auto& [object, ghost] : m_ghosts) {
+			m_ghostIndex[ghost.first] = object;
+		}
+		m_ghostIndexSize = m_ghosts.size();
+		m_ghostIndexNext = m_nextGhost;
+	}
+	if (auto at = m_ghostIndex.upper_bound(id); at != m_ghostIndex.begin()) {
+		--at;
+		const auto found = m_ghosts.find(at->second);
+		if (found != m_ghosts.end() && id >= found->second.first && id < found->second.first + found->second.layout->size()) {
+			part = id - found->second.first;
+			return &found->second;
 		}
 	}
 	return nullptr;
@@ -3444,15 +3521,16 @@ net::GhostBlock HostedGame::ghostsFor(int id, size_t budgetBits)
 	const bool demo = id == kDemoClient;
 	const unsigned lengthBits = demo ? net::kDemoGhostStateLengthBits : net::kGhostStateLengthBits;
 	const size_t maxUpdates = demo
-		? static_cast<size_t>(net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1).maxUpdates)
+		? static_cast<size_t>(demoRatesNow().maxUpdates)
 		: net::kGhostEntriesPerPacket;
 	// The rescore (connection +0x20: at most every 0.1 s).
 	if (client.rescoreIn <= 0) {
+		TP("host.rescore");
 		rescore(client);
 		client.rescoreIn = net::kGhostRescoreSeconds;
 	}
 	// What changed this frame, into every client's masks.
-	snapshotGhosts();
+	{ TP("host.snapshot"); snapshotGhosts(); }
 	// What the block has used: the header and the record.
 	size_t used = kGhostHeaderBits;
 	if (block.control) {
@@ -3862,15 +3940,15 @@ void HostedGame::tick()
 			static_cast<uint32_t>(a.index) & 0xff, ghost, bits(a.offset.x), bits(a.offset.y), bits(a.offset.z)}));
 	}
 	applyMoves();
-	trackObjects();
-	trackProjectiles();
+	{ TP("host.trackObjects"); trackObjects(); }
+	{ TP("host.trackProjectiles"); trackProjectiles(); }
 	for (auto& [id, client] : m_clients) {
 		if (client.stage == Client::Stage::Playing) syncFieldUnlocks(id, client);
 	}
 	sendBattlefieldReports();
 	sendRadioSpots();
-	trackPlayers();
-	trackSpawnGroups();
+	{ TP("host.trackPlayers"); trackPlayers(); }
+	{ TP("host.trackSpawnGroups"); trackSpawnGroups(); }
 	trackRequests();
 	trackCommanderOffers();
 	trackOrders();
@@ -3921,6 +3999,9 @@ void HostedGame::tick()
 		client.rescoreIn -= kTickSeconds;
 	}
 	m_server.sendPaced([this](int client, size_t bits) { return ghostsFor(client, bits); }, kTickSeconds);
+	if (!m_autoCameraPending.empty() && m_demo.isOpen() && !m_recordingCamera && startCamera(m_autoCameraPending)) {
+		m_autoCameraPending.clear();
+	}
 	if (m_recordingCamera) {
 		// 0x00432680 -> 0x00516b20 -> 0x005f9630, a frame each tick.
 		net::CameraKeyframe frame;
@@ -3930,14 +4011,23 @@ void HostedGame::tick()
 			frame.position[1] = 100;
 		}
 		m_cameraRecorder.record(1, m_tick, frame);
+		// Into the file as it goes (0x005f8d30), a sync point each second.
+		const std::vector<net::CameraKeyframe>& frames = m_cameraRecorder.frames();
+		for (; m_cameraWritten < frames.size(); ++m_cameraWritten) {
+			m_cameraFile.write(frames[m_cameraWritten]);
+		}
+		if (m_tick % 30 == 0) {
+			m_cameraFile.flush();
+		}
 	}
 	if (m_demo.isOpen()) {
 		// The demo connection is paced by sv.demoQuality's rate too
 		// (0x004b02a0 adds 1 / its packets a second).
 		m_demoSendIn -= kTickSeconds;
 		if (m_demoSendIn <= 0) {
-			const net::DemoRates rates = net::demoRates(m_setup.settings ? m_setup.settings->demoQuality : 1);
+			const net::DemoRates rates = demoRatesNow();
 			m_demoSendIn += 1.0f / static_cast<float>(rates.packetsPerSecond);
+			TP("host.flushDemo");
 			flushDemo(static_cast<int32_t>(m_tick), true);
 		}
 	}

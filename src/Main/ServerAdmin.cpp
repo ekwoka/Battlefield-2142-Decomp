@@ -263,22 +263,28 @@ std::string ServerAdmin::rconInvoke(Console& console, const std::string& command
 	return output;
 }
 
+void registerServerSettingsConsole(Console& console, net::ServerSettings& settings)
+{
+	net::ServerSettings* s = &settings;
+	for (const std::string& name : net::ServerSettings::names()) {
+		bindProperty<std::string>(
+			console, "sv." + name, ConsoleAccess::Anyone,
+			[s, name]() {
+				std::string value;
+				s->get(name, value);
+				return value;
+			},
+			[s, name](const std::string& value) { s->set(name, value); });
+	}
+}
+
 void ServerAdmin::registerConsole(Console& console)
 {
 	constexpr uint32_t access = ConsoleAccess::Anyone;
 	ServerAdmin* a = this;
 
 	// --- sv.*
-	for (const std::string& name : net::ServerSettings::names()) {
-		bindProperty<std::string>(
-			console, "sv." + name, access,
-			[a, name]() {
-				std::string value;
-				a->settings.get(name, value);
-				return value;
-			},
-			[a, name](const std::string& value) { a->settings.set(name, value); });
-	}
+	registerServerSettingsConsole(console, settings);
 	bindMethod(console, "sv.load", access, [a, &console]() { return a->loadSettings(console); });
 	bindMethod(console, "sv.save", access, [a]() { return a->saveSettings(); });
 

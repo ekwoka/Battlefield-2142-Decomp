@@ -27,6 +27,11 @@ class Console;
 
 namespace dice::hfe::host {
 
+// sv.<setting> for every server setting, onto `settings` (ServerAdmin's,
+// or a local round's own: retail's singleplayer runs a local gameServer
+// with the same object, so sv.demoQuality and sv.autoRecord are there).
+void registerServerSettingsConsole(Console& console, net::ServerSettings& settings);
+
 // What admin.* asks of the game running now (main sets these each round).
 struct AdminHooks {
 	struct Player {

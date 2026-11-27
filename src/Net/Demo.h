@@ -100,6 +100,48 @@ struct DemoRates {
 };
 DemoRates demoRates(int quality);
 
+// enhanced.demoQuality (Scene/EnhancedSettings.h; not retail): the demo
+// connection sends every tick (30 a second) with retail's largest packet
+// (4096 bytes, 255 updates: the ghost block's 8-bit count), and when one
+// packet can't hold what changed, up to `packetsPerSend` payloads that
+// tick (records of the same time, which playback, ours and 0x00516c80,
+// takes in one go). A 64-player round then plays back at about a client's
+// rate instead of starving most ghosts (sv.demoQuality 10 tops at 20 x
+// 255 updates a second).
+struct EnhancedDemoRates : DemoRates {
+	int packetsPerSend = 6;
+	EnhancedDemoRates()
+	{
+		packetsPerSecond = 30;
+		packetBytes = 4096;
+		maxUpdates = 255;
+	}
+};
+
+// A demo's ghost traffic (demo.recordDemo's quality): from its records'
+// ghost blocks, each ghost's updates by the record's time; the soldiers'
+// ghosts are those the HandlePickup events name.
+struct DemoStats {
+	size_t records = 0, bytes = 0; // the timed records and their payloads' bytes
+	int firstTick = 0, lastTick = 0;
+	size_t ghosts = 0, updates = 0, soldierGhosts = 0;
+	size_t soldierUpdates = 0; // the soldiers' ghosts' updates
+	// The gaps (ticks) between a ghost's updates while it lives, over the
+	// soldiers' and over every ghost: the median, the 95th percentile and
+	// the largest, and the share of soldier gaps over 3 ticks (a tenth of
+	// a second).
+	double soldierMedian = 0, soldierP95 = 0, soldierMax = 0, soldierOver3 = 0;
+	double allMedian = 0, allP95 = 0;
+	double seconds() const { return (lastTick - firstTick) / 30.0; }
+	// Each soldier's updates a second (30: every tick).
+	double soldierUpdateRate() const
+	{
+		return soldierGhosts && seconds() > 0 ? static_cast<double>(soldierUpdates) / static_cast<double>(soldierGhosts) / seconds() : 0;
+	}
+};
+DemoStats demoStats(const std::vector<DemoRecord>& records);
+std::string formatDemoStats(const DemoStats& stats, size_t fileBytes);
+
 // A demo camera file's keyframe (.bf2142cam; the camera object 0x005f93d0:
 // written once a tick by 0x005f8d30 from 0x005f9630, read by 0x005f91f0;
 // the same zlib stream wrapper as a demo, no header). recordDemo writes
@@ -127,6 +169,24 @@ bool decodeCameraKeyframes(const std::vector<uint8_t>& inflated, std::vector<Cam
 bool writeCameraFile(const std::string& path, const std::vector<CameraKeyframe>& frames);
 bool readCameraFile(const std::string& path, std::vector<CameraKeyframe>& frames);
 
+// A camera file written as it goes (0x005f8d30 writes each keyframe into
+// the camera's zlib stream once a tick), flushed now and then so a crash
+// leaves what was recorded readable.
+class CameraFileWriter {
+public:
+	CameraFileWriter();
+	~CameraFileWriter();
+	bool open(const std::string& path);
+	bool isOpen() const;
+	void write(const CameraKeyframe& frame);
+	void flush(); // a sync point: everything so far inflates
+	void close();
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> m_impl;
+};
+
 // A file name's extension (0x0065b5c0): the text after its last '.', none
 // when that '.' past the second character follows another '.' (so "a/../x"
 // has none, "../x" has "/x"); slashes aren't looked at.
@@ -135,5 +195,10 @@ std::string fileExtension(const std::string& name);
 // demo.recordDemo's name (0x00432cc0): '\\' as '/', and with no extension
 // Demos/<name>.bf2142demo.
 std::string demoPath(const std::string& name);
+
+// --demo's file: the name as given when that file exists, else where
+// demo.recordDemo puts that name (demoPath: a bare "match1" plays
+// Demos/match1.bf2142demo), all relative to the working folder.
+std::string demoFileToPlay(const std::string& name);
 
 } // namespace dice::hfe::net

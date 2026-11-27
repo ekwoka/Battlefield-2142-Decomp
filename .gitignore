@@ -6,6 +6,11 @@ reference/
 __pycache__/
 *.pyc
 
+# recorded demos, from runs in the repository root: demo.recordDemo /
+# --record-demo (Demos/) and sv.autoRecord (mods/bf2142/demos/)
+/Demos/
+/mods/
+
 # local online credentials (never commit)
 bf2142-online.cfg
 .claude/worktrees

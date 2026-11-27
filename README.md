@@ -370,9 +370,12 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--probe host[:port]` | Only shake hands and print what the server sends. |
 | `--servers` | List the servers the master server knows. |
 | `--lan <address>` | Where the menu's LOCAL search probes (default 255.255.255.255; `127.0.0.1` keeps it on this machine). |
-| `--demo <file>` | Play a recorded demo back. |
-| `--demo-camera <file.bf2142cam>` | With `--demo`: the camera follows a camera file (the original's `demo.cameramode playback`; `demo.recordDemo` on a hosted game writes `<name>-def.bf2142cam` beside the demo). The demo ends with the file. |
+| `--demo <file>` | Play a recorded demo back. A name with no extension that isn't a file there plays `./Demos/<name>.bf2142demo`, where `demo.recordDemo <name>` puts it. See [Demos](#demos). |
+| `--demo-camera <file.bf2142cam>` | With `--demo`: the camera follows a camera file (the original's `demo.cameramode playback`; recording with a local player writes `<name>-def.bf2142cam` beside the demo). The demo ends with the file. |
 | `--demo-record-camera <file.bf2142cam>` | With `--demo`: record the demo camera you steer into a camera file (`demo.cameramode record`). |
+| `--record-demo <name>` | Record the round from its start, as `demo.recordDemo <name>` does: `./Demos/<name>.bf2142demo` (and its camera file with a local player). Works in singleplayer, with `--simulate` and with `--host`. |
+| `--demo-stats <file>` | Print a demo's ghost update rates (each soldier's updates a second and the gaps between them), its bandwidth and its size a minute, then quit. |
+| `+sv.<setting> <value>` | Set a server setting at start-up, over the config file, e.g. `+sv.demoQuality 10` or `+sv.autoRecord 1`. A local round (singleplayer, `--simulate`) has its own `sv.*` for its demo recorder. |
 
 **Network diagnostics**
 
@@ -448,6 +451,47 @@ $B --game "$G" +level Camp_Gibraltar +gameMode gpm_cq --host --require-login --s
 $B --game "$G" --login tester:secret@Tester --connect 127.0.0.1 --play --view
 ```
 
+### Demos
+
+Any round you play or simulate can be recorded, as the original's local
+games and servers can: singleplayer (the menu's or `+level`), `--simulate`
+and `--host`. A local round records through a server of its own that opens
+no socket and has no client but the demo's, so the round stays a local one.
+
+| How | What it does |
+|---|---|
+| `--record-demo <name>` | Record from the round's start. |
+| `demo.recordDemo <name>` / `demo.stopRecording` | The console commands (`--console`, the in-game console). |
+| `sv.autoRecord 1` | Record each round from when it plays to its end, as `<mod>/demos/auto_<date>.bf2142demo` (`./mods/bf2142/demos/` by default). A local round takes `+sv.autoRecord 1`; a server its settings file too. |
+| `sv.demoQuality <1..10>` | The original's rate: 4 to 20 packets a second (1 by default). With `--enhanced`, `enhanced.demoQuality` (on) records every tick instead. |
+
+Files go under the folder you run from: `demo.recordDemo match1` writes
+`./Demos/match1.bf2142demo` and, with a local player, its camera
+`./Demos/match1-def.bf2142cam` (an auto demo's camera is
+`<file>.bf2142demo-def.bf2142cam`). The camera file is written as the round
+goes, as the original writes it each tick, so a crash doesn't lose it.
+`--demo match1` plays `./Demos/match1.bf2142demo` back and `--demo-camera`
+plays a camera file with it. The dev launcher lists both folders.
+
+How a 64-player round (63 bots and you, Suez Canal conquest, a minute with
+`--enhanced`'s bots) records:
+
+| Setting | Each soldier's updates | Gaps between them (ticks) | Size |
+|---|---|---|---|
+| `sv.demoQuality 1` (the default) | under 0.05 a second | median 157 (5 s), 95% within 967 | 0.03 MB a minute |
+| `sv.demoQuality 10` | 16 a second | median 2, 95% within 3 | 2.4 MB a minute |
+| `enhanced.demoQuality` | 26 a second (every tick while it moves) | 1 | 3.6 MB a minute |
+
+`--demo-stats <file>` prints these figures for a demo. Recording adds
+about 1.2 ms a tick at 64 players and full rate (0.3 ms at
+`sv.demoQuality 1`), mostly the ghosts' snapshot a live server takes too.
+
+```sh
+# a simulated Cerbere Landing 32-player conquest round, recorded, then played back
+$B --game "$G" +level Cerbere_Landing +gameMode gpm_cq +mapSize 32 --bots 31 --play 1 --simulate 300 --enhanced --record-demo cerbere
+$B --game "$G" --demo cerbere --demo-camera Demos/cerbere-def.bf2142cam
+```
+
 ## Enhanced mode
 
 The enhanced mode holds the rewrite's additions that aren't in the original
@@ -511,6 +555,7 @@ The rest only change what you see or hear.
 | `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the 4:3 HUD squeezed to the window's aspect ((4/3) ÷ aspect: the hudfix's 12/16 at 16:9, about 0.56 at 21:9), with its side pieces moved out to match (120 at 16:9) and the gunner frames widened to cover the window. It is laid out again when the window is resized. Ignored when the hudfix's shader is already installed, whose fixed 16:9 layout stays. | no |
 | `squadOrderPoints` | on | gameplay | The squads' order points, their HUD bar and the field upgrades it awards work on any server, offline included. The original runs them only on a ranked GameSpy server, so offline it never shows the bar. | yes |
 | `singleplayAllModes` | on | interface | The singleplayer page lists every level's every mode and size (Titan, Assault Lines, conquest and the rest), each row naming its mode, not only its single-player layouts; the chosen map starts in its own mode. For testing: the bots may not play those modes (Titan bots need `botTitan` and `botCommander`). | no |
+| `demoQuality` | on | demos | A recorded demo's ghosts go out every tick (30 a second, retail's biggest packet: 4096 bytes, 255 updates), with more packets that tick when one is full, so a 64-player round plays back with every soldier updated every tick. The original's `sv.demoQuality` (1 to 10, 1 by default) sends 4 to 20 packets a second of 40 to 255 updates: at 1 a 64-player round's soldiers go seconds without an update; at 10 they get about a live client's 20 a second. See [Demos](#demos). The file stays readable by the original's reader (no payload over its 256 KB, no block over 255 updates). | no |
 | `singleplayBotCount` | on | interface | The singleplayer page gets a MAX PLAYERS slider (1 to 64, default 16) beside the bot skill, kept in the profile. A playlist or instant action started from the page fills each map with that many players, you included, but never more than the map holds: with the slider at 64 a 32-player map gets 31 bots and the next 16-player map 15. The original's page starts every map with 16 players, you included, whatever its size, so at 16 the games are the original's. | no |
 
 `enhanced.enabled` on its own also turns on the enhanced audio (below), lets
@@ -571,7 +616,9 @@ the round repeats, and once with it, with the simulation options above
 (`botRecovery`, `botMovement`, `botTitan`, `botOffMesh`, `botAsyncPaths`, `botCommander`, `botPilots`, `botLoneSeat`, `guidedCameraEase`,
 `cornerSteer`, `passengerWeapons`, `softLanding`, `squadOrderPoints`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
-simulation. Anything added to the enhanced mode either leaves the
+simulation. A fourth run records the enhanced round (`--record-demo`, at
+`enhanced.demoQuality`'s full rate) and must match it: recording a demo
+never changes the round. Anything added to the enhanced mode either leaves the
 fingerprint alone or gets its own option, listed in the script.
 
 ## Progress

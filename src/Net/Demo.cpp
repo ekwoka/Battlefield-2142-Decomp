@@ -1,5 +1,7 @@
 #include "Demo.h"
 
+#include "GameProtocol.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -8,6 +10,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
+#include <set>
 #include <system_error>
 
 namespace dice::hfe::net {
@@ -412,6 +416,172 @@ DemoRates demoRates(int quality)
 	r.packetBytes = 0x104 - static_cast<int>(f * -3836.0f);
 	r.maxUpdates = static_cast<int>(std::floor(static_cast<double>(f * 215.0f))) + 40;
 	return r;
+}
+
+struct CameraFileWriter::Impl {
+	std::FILE* file = nullptr;
+	z_stream z {};
+	void put(const std::vector<uint8_t>& bytes, int flush)
+	{
+		z.next_in = const_cast<Bytef*>(bytes.data());
+		z.avail_in = static_cast<uInt>(bytes.size());
+		uint8_t out[4096];
+		int result = Z_OK;
+		do {
+			z.next_out = out;
+			z.avail_out = sizeof out;
+			result = deflate(&z, flush);
+			std::fwrite(out, 1, sizeof out - z.avail_out, file);
+		} while (z.avail_out == 0 || (flush == Z_FINISH && result == Z_OK));
+	}
+};
+
+CameraFileWriter::CameraFileWriter() : m_impl(std::make_unique<Impl>()) {}
+
+CameraFileWriter::~CameraFileWriter() { close(); }
+
+bool CameraFileWriter::isOpen() const { return m_impl->file != nullptr; }
+
+bool CameraFileWriter::open(const std::string& path)
+{
+	close();
+	makeParent(path);
+	m_impl->file = std::fopen(path.c_str(), "wb");
+	if (!m_impl->file) {
+		return false;
+	}
+	m_impl->z = {};
+	deflateInit(&m_impl->z, 3);
+	return true;
+}
+
+void CameraFileWriter::write(const CameraKeyframe& frame)
+{
+	if (isOpen()) {
+		m_impl->put(encodeCameraKeyframes({frame}), Z_NO_FLUSH);
+	}
+}
+
+void CameraFileWriter::flush()
+{
+	if (isOpen()) {
+		m_impl->put({}, Z_SYNC_FLUSH);
+		std::fflush(m_impl->file);
+	}
+}
+
+void CameraFileWriter::close()
+{
+	if (!isOpen()) {
+		return;
+	}
+	m_impl->put({}, Z_FINISH);
+	deflateEnd(&m_impl->z);
+	std::fclose(m_impl->file);
+	m_impl->file = nullptr;
+}
+
+std::string demoFileToPlay(const std::string& name)
+{
+	std::error_code error;
+	if (std::filesystem::is_regular_file(name, error)) {
+		return name;
+	}
+	return demoPath(name);
+}
+
+DemoStats demoStats(const std::vector<DemoRecord>& records)
+{
+	DemoStats s;
+	std::map<uint16_t, std::vector<int>> updates; // each ghost's update times, -1 at a removal
+	std::set<uint16_t> soldiers;
+	bool first = true;
+	for (const DemoRecord& r : records) {
+		if (r.time == -2 || r.payload.empty()) {
+			continue;
+		}
+		GamePayload payload;
+		const bool read = readGamePayload(r.payload, payload, kDemoGhostStateLengthBits);
+		for (const GameEvent& e : payload.events.events) { // the join's (-1) too: its database
+			if (e.type == kEvHandlePickup && e.u(2)) {
+				soldiers.insert(static_cast<uint16_t>(e.u(2)));
+			}
+		}
+		if (r.time < 0) {
+			continue;
+		}
+		++s.records;
+		s.bytes += r.payload.size();
+		if (first) {
+			s.firstTick = r.time;
+			first = false;
+		}
+		s.lastTick = r.time;
+		if (!read) {
+			continue;
+		}
+		for (const GhostUpdate& u : payload.ghosts.updates) {
+			if (u.kind == 1) {
+				updates[u.ghost].push_back(r.time);
+				++s.updates;
+			} else if (u.kind == 3) {
+				updates[u.ghost].push_back(-1);
+			}
+		}
+	}
+	std::vector<int> soldierGaps, allGaps;
+	for (const auto& [ghost, times] : updates) {
+		const bool soldier = soldiers.count(ghost) != 0;
+		if (soldier) {
+			s.soldierUpdates += static_cast<size_t>(std::count_if(times.begin(), times.end(), [](int t) { return t >= 0; }));
+		}
+		for (size_t i = 1; i < times.size(); ++i) {
+			if (times[i] < 0 || times[i - 1] < 0) {
+				continue; // removed in between: a new life
+			}
+			const int gap = times[i] - times[i - 1];
+			if (gap <= 0) {
+				continue; // two records of one tick
+			}
+			allGaps.push_back(gap);
+			if (soldier) {
+				soldierGaps.push_back(gap);
+			}
+		}
+	}
+	s.ghosts = updates.size();
+	s.soldierGhosts = soldiers.size();
+	const auto percentile = [](std::vector<int>& v, double p) {
+		if (v.empty()) {
+			return 0.0;
+		}
+		std::sort(v.begin(), v.end());
+		return static_cast<double>(v[std::min(v.size() - 1, static_cast<size_t>(p * static_cast<double>(v.size())))]);
+	};
+	s.soldierMedian = percentile(soldierGaps, 0.5);
+	s.soldierP95 = percentile(soldierGaps, 0.95);
+	s.soldierMax = soldierGaps.empty() ? 0 : soldierGaps.back();
+	s.soldierOver3 = soldierGaps.empty() ? 0
+		: static_cast<double>(std::count_if(soldierGaps.begin(), soldierGaps.end(), [](int g) { return g > 3; }))
+			/ static_cast<double>(soldierGaps.size());
+	s.allMedian = percentile(allGaps, 0.5);
+	s.allP95 = percentile(allGaps, 0.95);
+	return s;
+}
+
+std::string formatDemoStats(const DemoStats& s, size_t fileBytes)
+{
+	const double seconds = std::max(s.seconds(), 1.0 / 30);
+	char text[1024];
+	std::snprintf(text, sizeof text,
+		"%.1f s, %zu records (%.1f a second), %zu ghosts updated (%zu soldiers), %.0f updates a second\n"
+		"payloads %.1f KB/s, file %zu bytes (%.2f MB a minute)\n"
+		"each soldier %.1f updates a second; soldier update gaps (ticks): median %.0f, p95 %.0f, max %.0f, %.1f%% over 3; every ghost: median %.0f, p95 %.0f",
+		seconds, s.records, static_cast<double>(s.records) / seconds, s.ghosts, s.soldierGhosts,
+		static_cast<double>(s.updates) / seconds, static_cast<double>(s.bytes) / 1024.0 / seconds, fileBytes,
+		static_cast<double>(fileBytes) / (1024.0 * 1024.0) / seconds * 60.0, s.soldierUpdateRate(), s.soldierMedian, s.soldierP95, s.soldierMax,
+		s.soldierOver3 * 100, s.allMedian, s.allP95);
+	return text;
 }
 
 } // namespace dice::hfe::net

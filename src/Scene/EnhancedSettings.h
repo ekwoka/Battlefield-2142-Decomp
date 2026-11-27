@@ -54,6 +54,7 @@ struct EnhancedSettings {
 	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 	bool singleplayAllModes = true; // enhanced.singleplayAllModes: the singleplayer page lists every level's every mode and size (Titan, Assault Lines, ...), not only its gpm_sp layouts (Main/MenuBindings.cpp); the bots may not play them. Retail lists gpm_sp only
+	bool demoQuality = true; // enhanced.demoQuality: a recorded demo's ghosts go every tick, several packets a tick when one is full (net::EnhancedDemoRates), so a 64-player round plays back smoothly; retail's sv.demoQuality 1..10 sends 4..20 packets a second of 40..255 updates, which starves most ghosts of a big round. The file stays readable (a payload under the reader's 256 KB, at most 255 updates a block)
 	bool singleplayBotCount = true; // enhanced.singleplayBotCount: the singleplayer page gets a players slider beside the bot skill (Main/MenuSingleplayBots.h) and a game it starts fills each map with min(target, the map's size) players, you included (Main/MenuBindings.cpp playersForMap). Retail's page plays 16 on every map
 	// Drawing, also only with enhanced.enabled; experimental, off by default:
 	bool tvEffect = false; // enhanced.tvEffect: the guided round's view gets the TVEffect pass (grey, rolled by noise bands, shifting rows sideways so vertical edges lean); RendDX9 never runs it, retail shows the plain view
@@ -127,6 +128,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.singleplayAllModes = v; });
 	bindProperty<bool>(console, "enhanced.singleplayBotCount", ConsoleAccess::Anyone, [&settings] { return settings.singleplayBotCount; },
 		[&settings](const bool& v) { settings.singleplayBotCount = v; });
+	bindProperty<bool>(console, "enhanced.demoQuality", ConsoleAccess::Anyone, [&settings] { return settings.demoQuality; },
+		[&settings](const bool& v) { settings.demoQuality = v; });
 	bindProperty<bool>(console, "enhanced.tvEffect", ConsoleAccess::Anyone, [&settings] { return settings.tvEffect; },
 		[&settings](const bool& v) { settings.tvEffect = v; });
 }

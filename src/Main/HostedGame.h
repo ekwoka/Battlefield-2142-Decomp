@@ -307,6 +307,24 @@ public:
 	// (0x00585620), then handed to sv.autoDemoHook.
 	const std::string& autoDemo() const { return m_autoDemo; }
 	const std::string& lastAutoDemo() const { return m_lastAutoDemo; }
+	// A local round's recorder (main.cpp: a singleplayer or --simulate
+	// round, retail's local gameServer): never start()ed, so no socket, no
+	// query port and no clients but the demo's. prime() takes the round's
+	// objects, players and spawn groups as they are, so a recording begun
+	// mid-round starts from them (its database) instead of telling them
+	// as news on the next tick.
+	void prime();
+	// Neither recording nor waiting for sv.autoRecord's round start: a
+	// local recorder can go.
+	bool idle() const;
+	// enhanced.demoQuality (net::EnhancedDemoRates) over sv.demoQuality
+	// while *enabled && *flag; null: retail's rates.
+	void setEnhancedDemo(const bool* enabled, const bool* flag)
+	{
+		m_enhanced = enabled;
+		m_enhancedDemo = flag;
+	}
+	bool enhancedDemo() const { return m_enhanced && m_enhancedDemo && *m_enhanced && *m_enhancedDemo; }
 
 private:
 	struct Ghost {
@@ -425,6 +443,13 @@ private:
 	bool m_recordingCamera = false;
 	std::string m_cameraPath;
 	DemoCameraRecorder m_cameraRecorder;
+	net::CameraFileWriter m_cameraFile; // the frames as they come (0x005f8d30)
+	size_t m_cameraWritten = 0;          // the recorder's frames in the file
+	std::string m_autoCameraPending;     // an auto demo's camera file, waiting for the local player
+	bool startCamera(const std::string& cameraPath); // with a local player
+	const bool* m_enhanced = nullptr;
+	const bool* m_enhancedDemo = nullptr;
+	net::DemoRates demoRatesNow() const;
 	net::EventChannel m_demoEvents;
 	uint32_t m_demoSequence = 0;
 	float m_demoSendIn = 0; // the demo connection's pacing (sv.demoQuality)
@@ -522,6 +547,9 @@ private:
 		unsigned mode) const;
 	net::PlayerOwnState ownState(int player) const;
 	const Ghost* ghostOf(uint16_t ghost, size_t& part) const;
+	mutable std::map<uint16_t, uint32_t> m_ghostIndex; // ghostOf's: first id -> m_ghosts' key
+	mutable size_t m_ghostIndexSize = ~size_t {0};
+	mutable uint16_t m_ghostIndexNext = 0;
 	// The player networkable's state; everyGroup: with mask 0x10000 (a
 	// reload's every weapon group).
 	net::NetworkableState playerStateOf(int player, bool everyGroup = false) const;

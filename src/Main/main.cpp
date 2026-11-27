@@ -12,6 +12,7 @@
 //               [--nosound] [--sound] [--play-sound <name>]
 //               [--play [team]] [--drive <vehicle template>]
 //               [--director] (with --bots N: a match of bots, a spectator camera cutting between them)
+//               [--record-demo <name>] [--demo <file|name>] [--demo-stats <file>]
 // --view opens a window showing the level (needs a build with SDL3);
 // --screenshot renders one frame to a PNG instead.
 // --director runs a match of bots only (the local player spectates) and
@@ -20,6 +21,9 @@
 // spawn), in chase, first-person and wide shots, for an outside screen
 // recorder; the HUD is hidden (H shows it), Space cuts to the next shot,
 // and each cut is logged.
+// --record-demo records the round (singleplayer, --simulate or --host) as
+// demo.recordDemo does, into ./Demos/<name>.bf2142demo; --demo plays one
+// back (a bare name from ./Demos/).
 // The install directory defaults to $BF2142_GAME_DIR. The API tables are
 // symbols/*.console.csv (one --api each): methods listed there but not
 // implemented are registered as stubs with the original's argument counts.
@@ -191,6 +195,9 @@ struct Options {
 	std::string demo;            // --demo <file.bf2142demo>: play a recorded game back (Net/Demo.h)
 	std::string demoCamera;      // --demo-camera <file.bf2142cam>: the demo's camera from a file (demo.cameramode playback)
 	std::string demoRecordCamera; // --demo-record-camera <file.bf2142cam>: record the demo's camera (demo.cameramode record)
+	std::string recordDemo;      // --record-demo <name>: demo.recordDemo <name> as the round starts (singleplayer, --simulate, --host)
+	std::string demoStats;       // --demo-stats <file>: print a demo's ghost update rates and size, then quit
+	std::vector<std::string> serverSettings; // +sv.<setting> <value>: set once sv.* is bound (a local round's own too)
 	bool host = false;           // --host: serve the local game to other clients (HostedGame.h)
 	bool playTeamGiven = false;  // --play 1|2: on a server, ask for that team (PostRemote 6/7)
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
@@ -315,6 +322,10 @@ bool parseOptions(int argc, char** argv, Options& options)
 		} else if (arg == "--demo-record-camera" && hasValue) {
 			// demo.cameramode record (0x00517490 -> 0x005171f0).
 			options.demoRecordCamera = argv[++i];
+		} else if (arg == "--record-demo" && hasValue) {
+			options.recordDemo = argv[++i];
+		} else if (arg == "--demo-stats" && hasValue) {
+			options.demoStats = argv[++i];
 		} else if (arg == "--probe" && hasValue) {
 			options.probe = argv[++i];
 		} else if (arg == "--net-log" && hasValue) {
@@ -505,6 +516,8 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.dedicated = std::atoi(argv[++i]) != 0;
 		} else if (arg.rfind("+enhanced.", 0) == 0 && hasValue) {
 			options.enhancedSettings.push_back(arg.substr(1) + " " + argv[++i]);
+		} else if (arg.rfind("+sv.", 0) == 0 && hasValue) {
+			options.serverSettings.push_back(arg.substr(1) + " " + argv[++i]);
 		} else if (arg[0] == '+' && hasValue) {
 			++i; // other "+setting value" options are not used yet
 		} else {
@@ -2867,6 +2880,9 @@ struct Session {
 	// its admin script (the remote console), kept from map to map
 	// (ServerAdmin.h, AdminScript.h); the installed maps the map list names.
 	std::unique_ptr<host::ServerAdmin> admin;
+	// A local round's sv.* (retail's singleplayer is a local gameServer):
+	// sv.demoQuality and sv.autoRecord for its demo recorder.
+	net::ServerSettings localSettings;
 #if BF2142_HAS_PYTHON
 	host::AdminScript adminScript;
 #endif
@@ -2931,6 +2947,20 @@ int main(int argc, char** argv)
 	}
 	if (!options.movie.empty()) {
 		return runMovieCommand(options);
+	}
+	if (!options.demoStats.empty()) {
+		// A demo's ghost traffic (net::demoStats): the update gaps, the rate, the size.
+		net::DemoHeader header;
+		std::vector<net::DemoRecord> records;
+		const std::string file = net::demoFileToPlay(options.demoStats);
+		if (!net::readDemo(file, header, records)) {
+			std::printf("%s: not a demo\n", file.c_str());
+			return 1;
+		}
+		std::error_code size;
+		std::printf("%s: %s (%s)\n%s\n", file.c_str(), header.level.c_str(), header.gameMode.c_str(),
+			net::formatDemoStats(net::demoStats(records), static_cast<size_t>(std::filesystem::file_size(file, size))).c_str());
+		return 0;
 	}
 	if (options.host) {
 		std::setvbuf(stdout, nullptr, _IOLBF, 0); // a server's log as it happens
@@ -3867,6 +3897,12 @@ int runGame(Options& options, Session& session)
 		if (options.dedicated) {
 			console.setExitHandler([] { g_stopServer = true; });
 		}
+	} else {
+		host::registerServerSettingsConsole(console, session.localSettings);
+	}
+	for (const std::string& line : options.serverSettings) { // +sv.<setting> <value>
+		std::string output;
+		console.execute(line, output);
 	}
 	// The settings and profile objects (after the systems that bind some of
 	// their methods themselves: help pop-ups, bloom, shadows).
@@ -4586,6 +4622,7 @@ int runGame(Options& options, Session& session)
 		} else if (!options.demo.empty()) {
 			net::DemoHeader header;
 			std::vector<net::DemoRecord> records;
+			options.demo = net::demoFileToPlay(options.demo); // a bare name: Demos/<name>.bf2142demo
 			if (!net::readDemo(options.demo, header, records)) {
 				std::printf("%s: not a demo\n", options.demo.c_str());
 				session.client.reset();
@@ -6927,6 +6964,7 @@ int runGame(Options& options, Session& session)
 					hosted->onVoteReply = nullptr;
 					hosted->radioIndex = nullptr;
 					hosted->radioVoice = nullptr;
+					hosted->setEnhancedDemo(nullptr, nullptr);
 				}
 			}
 		} detachHosted {hosted};
@@ -7047,24 +7085,71 @@ int runGame(Options& options, Session& session)
 				}
 			};
 			admin.hooks.sayAll = [hosted](const std::string& text) { hosted->sayAll(text); };
-			// demo.recordDemo <name> / demo.stopRecording (0x004246fb ->
-			// 0x00432cc0 -> the server's 0x004afcc0; 0x00403080 -> 0x004afdb0).
-			bindMethod(console, "demo.recordDemo", ConsoleAccess::Anyone, [hosted, &console](std::string name) {
-				const std::string path = net::demoPath(name);
-				if (hosted->recordingDemo()) {
-					return std::string("already recording");
-				}
-				if (!hosted->recordDemo(path, host::demoCameraPath(name))) {
-					return "Failed to record demo. Maybe the demo '" + path + "' already exists.";
-				}
-				if (hosted->recordingCamera()) {
-					std::string output; // 0x005172f0: the user's camera settings
-					console.run("Settings/demo-recordcam.con", {}, output);
-				}
-				return "recording demo " + path;
-			});
-			bindMethod(console, "demo.stopRecording", ConsoleAccess::Anyone, [hosted] { hosted->stopDemo(); });
 			admin.hooks.sayTeam = [hosted](int team, const std::string& text) { hosted->sayTeam(team, text); };
+		}
+		// Demo recording (demo.recordDemo <name> / demo.stopRecording,
+		// 0x004246fb -> 0x00432cc0 -> the server's 0x004afcc0; 0x00403080 ->
+		// 0x004afdb0; sv.autoRecord). A local round (singleplayer,
+		// --simulate) is its own server in retail, so it records too:
+		// through a HostedGame never start()ed (no socket, no clients but
+		// the demo's), made when a recording starts and gone when it ends.
+		// It is never session.hosted: the chat, radio, votes and the rest
+		// stay a local round's.
+		std::unique_ptr<host::HostedGame> localRecorder;
+		std::function<bool(net::CameraKeyframe&)> demoLocalCamera; // the local player's view (set below)
+		const auto demoHost = [&]() -> host::HostedGame* {
+			if (hosted || session.client) {
+				return hosted;
+			}
+			if (!localRecorder) {
+				host::HostSetup setup;
+				setup.serverName = "bf2142-recomp local game";
+				setup.level = options.level;
+				setup.gameMode = options.gameMode;
+				setup.mapSize = options.mapSize;
+				setup.modDirectory = options.modPath;
+				setup.settings = &session.localSettings;
+				localRecorder = std::make_unique<host::HostedGame>(round, gameLogic, templates, setup);
+				localRecorder->setStaticObjects(levelObjects);
+				if (const terrain::Heightmap* primary = heightmaps.primary(); primary && primary->loaded()) {
+					localRecorder->setTerrainExtent(primary->originX(), primary->originZ(),
+						std::min(primary->worldWidth(), primary->worldDepth()));
+				}
+				localRecorder->onLog = [](const std::string& line) { std::printf("demo: %s\n", line.c_str()); };
+				localRecorder->localCamera = [&demoLocalCamera](net::CameraKeyframe& f) { return demoLocalCamera && demoLocalCamera(f); };
+				localRecorder->prime();
+			}
+			localRecorder->setEnhancedDemo(&enhancedSettings.enabled, &enhancedSettings.demoQuality);
+			return localRecorder.get();
+		};
+		const auto recordDemo = [&](const std::string& name) {
+			host::HostedGame* recorder = demoHost();
+			if (!recorder) {
+				return std::string("no game to record");
+			}
+			const std::string path = net::demoPath(name);
+			if (recorder->recordingDemo()) {
+				return std::string("already recording");
+			}
+			if (!recorder->recordDemo(path, host::demoCameraPath(name))) {
+				return "Failed to record demo. Maybe the demo '" + path + "' already exists.";
+			}
+			if (recorder->recordingCamera()) {
+				std::string output; // 0x005172f0: the user's camera settings
+				console.run("Settings/demo-recordcam.con", {}, output);
+			}
+			return "recording demo " + path;
+		};
+		bindMethod(console, "demo.recordDemo", ConsoleAccess::Anyone, [recordDemo](std::string name) { return recordDemo(name); });
+		bindMethod(console, "demo.stopRecording", ConsoleAccess::Anyone, [&hosted, &localRecorder] {
+			if (host::HostedGame* recorder = hosted ? hosted : localRecorder.get()) {
+				recorder->stopDemo();
+			}
+		});
+		if (hosted) {
+			hosted->setEnhancedDemo(&enhancedSettings.enabled, &enhancedSettings.demoQuality); // cleared by detachHosted
+		} else if (!session.client && session.localSettings.autoRecord) {
+			demoHost(); // sv.autoRecord: the recorder starts the demo as the round plays
 		}
 		struct ClearHooks {
 			host::ServerAdmin* admin;
@@ -8791,6 +8876,12 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo commanding;
 				voteMessages.setCommanding(round.playerInfo(round.localPlayer(), commanding) && commanding.commander);
 				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
+			} else if (localRecorder) { // a local round's demo
+				TP("demo");
+				localRecorder->tick();
+				if (localRecorder->idle()) {
+					localRecorder.reset();
+				}
 			}
 			{ TP("bots"); bots.update(1.0f / 30.0f); }
 			round.localMuzzleEffects = !playerCamera.insideView();
@@ -8823,6 +8914,12 @@ int runGame(Options& options, Session& session)
 				game::GameWorld::PlayerInfo commanding;
 				voteMessages.setCommanding(round.playerInfo(round.localPlayer(), commanding) && commanding.commander);
 				voteMessages.tick(1.0f / 30.0f); // the host's own vote object
+			} else if (localRecorder) { // a local round's demo
+				TP("demo");
+				localRecorder->tick();
+				if (localRecorder->idle()) {
+					localRecorder.reset();
+				}
 			}
 			{ TP("bots"); bots.update(1.0f / 30.0f); }
 			round.localMuzzleEffects = !playerCamera.insideView();
@@ -9546,12 +9643,12 @@ int runGame(Options& options, Session& session)
 		// demo.recordDemo records the local player's camera too.)
 		nametags::Nametags::View tagView;
 		bool tagViewSeen = false; // a frame drawn (tagView is the camera's)
-		if (hosted) {
+		{
 			// The demo's camera file on a server with a local player
 			// (0x005f9630): the player's view as last drawn; without a
 			// window its soldier's eye, looking its way; without a control
-			// object (0, 100, 0) unturned.
-			hosted->localCamera = [&round, &tagView, &tagViewSeen](net::CameraKeyframe& frame) {
+			// object (0, 100, 0) unturned. A local round's recorder too.
+			demoLocalCamera = [&round, &tagView, &tagViewSeen](net::CameraKeyframe& frame) {
 				const int local = round.localPlayer();
 				if (local < 0) {
 					return false;
@@ -9577,15 +9674,20 @@ int runGame(Options& options, Session& session)
 				return true;
 			};
 		}
+		if (hosted) {
+			hosted->localCamera = demoLocalCamera;
+		}
 		struct LocalCameraReset {
 			host::HostedGame* hosted;
+			std::function<bool(net::CameraKeyframe&)>& local;
 			~LocalCameraReset()
 			{
 				if (hosted) {
 					hosted->localCamera = nullptr;
 				}
+				local = nullptr;
 			}
-		} localCameraReset {hosted};
+		} localCameraReset {hosted, demoLocalCamera};
 		// --console "<command>" runs now, "<seconds>:<command>" once the round
 		// is that old.
 		for (const std::string& command : options.console) {
@@ -9598,6 +9700,10 @@ int runGame(Options& options, Session& session)
 			std::string output;
 			console.execute(command, output, ConsoleAccess::Anyone);
 			std::printf("console: %s%s%s\n", command.c_str(), output.empty() ? "" : " -> ", output.c_str());
+		}
+		if (!options.recordDemo.empty() && !session.client && !options.level.empty()) {
+			// --record-demo <name>: demo.recordDemo <name> as the first round starts.
+			std::printf("--record-demo: %s\n", recordDemo(std::exchange(options.recordDemo, {})).c_str());
 		}
 		// A dedicated server (--host --dedicated) runs on until stopped, or
 		// for --simulate seconds over all its maps.
