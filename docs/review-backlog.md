@@ -766,6 +766,54 @@ or gating behind a flag.
 - **Fix:** confirm in RendDX9 which path draws trails and placed quads and what fog
   state it leaves set, then fog them as retail does.
 
+## Playtest bugs to investigate
+
+Reported from playing, not from review. Reproduce first, then check what retail does
+before deciding whether the fix is a parity fix or an `enhanced.*` change.
+
+### P-1. Leaving a pod onto an enemy Titan's deck can throw the player off the rear (high)
+- **Status:** open.
+- **Report:** sometimes, coming out of a drop pod that has landed on an enemy Titan's
+  deck launches the soldier toward the rear of the Titan and off the deck.
+- **Suspects to check:**
+  - The pod's velocity, or the Titan's own motion, carried into the soldier on exit.
+    The Titan moves, so a soldier placed in world space rather than in the Titan's frame
+    gets the relative speed. A velocity taken from the pod's last integration step could
+    be large if it hit the shield or the hull.
+  - The exit position overlapping the hull or the pod, so the collision push-out shoves
+    the soldier out. Rearward suggests the Titan's forward motion.
+  - Exit on a moving support: whether the soldier's ground contact takes the deck's
+    velocity on the first tick (`surfaceBelow`, the Titan floors, `enhanced.titanKitFloors`).
+- **Retail:** how the pod's exit places the soldier and what velocity it gives him
+  (the pod's exit and the soldier's spawn on a moving object); check whether retail
+  had the same fling.
+- **Done when:** a headless test lands pods on a moving enemy Titan's deck from several
+  approach angles and every exiting soldier stays on the deck, as retail does or behind
+  a flag if retail also flung them.
+
+### P-2. Fall damage is taken too often, above all on Titans and leaving a pod (high)
+- **Status:** open.
+- **Report:** fall damage seems to start too easily. Dropping from the upper deck to the
+  lower deck at the back of a Titan causes considerable damage, and so does coming out
+  of a pod.
+- **Suspects to check:**
+  - The fall speed measured in world space rather than relative to the moving Titan's
+    deck, so the Titan's own vertical motion (its walk bob, or climbing) is added to the
+    soldier's.
+  - The pod exit starting with the pod's downward speed, so the first landing counts as
+    a long fall (see P-1).
+  - The fall damage thresholds and curve against retail: the soldier template's
+    fall-damage settings (minimum speed, damage scale), and how retail measures the
+    impact speed.
+  - `enhanced.softLanding` (`GameWorld::softLanding`, `Game/MeshCollision.cpp`) only
+    covers landing on a slower object, not this.
+- **Measure:** the impact speed and damage for the Titan's rear deck drop (its height),
+  a pod exit, and a flat-ground drop of the same height. Compare with retail's numbers
+  for that height.
+- **Done when:** the same drop does the same damage on a moving Titan as on still
+  ground, a pod exit does no fall damage unless retail's does, and the thresholds match
+  retail's.
+
 ## Open verification questions (no known bug yet)
 
 | ID | Commit | Question |
