@@ -170,7 +170,6 @@ struct Options {
 	std::string drive;           // --drive <vehicle>: put one before the player and drive it
 	std::string kit;             // --kit <name|n>: the player's kit (the team's kit list, by name or from 1)
 	int bots = 0;                // --bots N: AI players, alternately PAC and EU
-	bool menuBotTarget = false;  // enhanced.singleplayBotCount set `bots`: AIDefault.ai's setMaxNBots 16 doesn't cap them
 	int simulate = 0;            // --simulate N: run N seconds headless, then show the scores
 	bool enhanced = false;       // --enhanced: start with enhanced.enabled 1 (Scene/EnhancedSettings.h)
 	std::string language = "English"; // --language: the registry's Language (0x00405360), strings.csv's column
@@ -4435,7 +4434,6 @@ int runGame(Options& options, Session& session)
 		const dice::hfe::menu::MapPlayers players = dice::hfe::menu::playersForMap(*startedGame, map.size);
 		options.maxPlayers = players.maxPlayers;
 		options.bots = players.bots;
-		options.menuBotTarget = startedGame->playerTarget > 0;
 		options.botSkill = startedGame->botSkill;
 		options.ticketRatio = startedGame->ticketRatio;
 		options.timeLimit = startedGame->timeLimit;
@@ -4706,11 +4704,10 @@ int runGame(Options& options, Session& session)
 		if (options.botSkill >= 0) {
 			botSettings.skill = options.botSkill;
 		}
-		if (options.menuBotTarget) {
-			// enhanced.singleplayBotCount: AIDefault.ai's setMaxNBots 16 would
-			// leave the bots past 16 unactivated (BotManager's refusal).
-			botSettings.maxBots = std::max(botSettings.maxBots, options.bots);
-		}
+		// The count asked for (the singleplayer page's players slider, enhanced.singleplayBotCount,
+		// or --bots) all play: AIDefault.ai's setMaxNBots 16 would leave the bots past 16
+		// unactivated (BotManager's refusal). Retail has no --bots; its menu plays 16.
+		botSettings.maxBots = std::max(botSettings.maxBots, options.bots);
 		std::printf("bots: skill %.2f, Fire weight %.1f\n", botSettings.skill, botSettings.modifier("Fire"));
 	}
 	templates.setLoading(true);
