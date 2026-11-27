@@ -467,6 +467,7 @@ private:
 	game::Votes m_votes;
 	void sendVoteReplies(const std::vector<game::Votes::Reply>& replies);
 	bool clientHas(int player) const;
+	int mapByte(float coordinate, int axis) const;
 	// The teams' networkable (ghost net::kTeamStateGhost): its state now.
 	net::TeamNetState teamStateOf() const;
 	// The spawn groups (CreateSpawnGroup / RemoveSpawnGroup) and the
@@ -481,6 +482,7 @@ private:
 	// spawn vehicle's (0x00635080). By (team, squad) and by the vehicle.
 	std::map<std::pair<int, int>, int> m_squadSpawnGroups;
 	std::map<uint32_t, int> m_vehicleSpawnGroups;
+	std::map<uint32_t, int> m_titanSpawnGroups;
 	int freeSpawnGroupId(const std::set<int>& taken) const;
 	std::map<std::tuple<int, int, int>, physics::Vec3> m_requestsSent;
 	void trackRequests();

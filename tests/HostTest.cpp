@@ -26,6 +26,7 @@
 #include "World/ObjectTemplateManager.h"
 #include "World/TemplateFiles.h"
 #include "World/WorldConsole.h"
+#include "TitanLevel.h"
 
 #include <algorithm>
 #include <chrono>
@@ -38,6 +39,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <thread>
 #include <tuple>
 
@@ -882,6 +884,114 @@ float distance(const net::Vec3f& a, const dice::hfe::physics::Vec3& b)
 
 } // namespace
 
+// CP groups use compact spawn-manager ids on the wire (the 6/6 key), while
+// retaining the CP ghost as the interim carrying object until F2.
+TEST(NetHost_ControlPointSpawnGroupsUseCompactIdsAndMapBytes)
+{
+	HostRange range;
+	dice::hfe::world::ObjectManager objects;
+	auto* spawn = range.templates.find("sp");
+	CHECK(spawn != nullptr);
+	std::map<int, dice::hfe::physics::Vec3> spawnAt;
+	std::map<int, dice::hfe::physics::Vec3> groupAt;
+	dice::hfe::physics::Vec3 second905;
+	for (int i = 0; i < 7; ++i) {
+		const int cpId = 901 + i;
+		const float x = -300.0f + 100.0f * i;
+		const float z = 250.0f - 50.0f * i;
+		auto* cp = range.templates.create("ControlPoint", "suez_cp_" + std::to_string(cpId));
+		cp->settings()["controlPointId"] = std::to_string(cpId);
+		cp->settings()["team"] = "2";
+		cp->settings()["unableToChangeTeam"] = "1";
+		objects.create(cp, {x, 0, z});
+		objects.create(spawn, {x + 3.0f, 0, z + 5.0f})->setControlPointId(cpId);
+		spawnAt[cpId] = {x + 3.0f, 0, z + 5.0f};
+		groupAt[cpId] = spawnAt[cpId];
+		if (cpId == 905) {
+			second905 = {x + 7.0f, 0, z + 9.0f};
+			objects.create(spawn, {second905.x, second905.y, second905.z})->setControlPointId(cpId);
+			groupAt[cpId] = {x + 5.0f, 0, z + 7.0f};
+		}
+	}
+	dice::hfe::game::GameWorld round(range.templates, objects);
+	dice::hfe::physics::Ground ground;
+	ground.height = [](float, float) { return 0.0f; };
+	ground.heightAndNormal = [](float, float, dice::hfe::physics::Vec3& normal) {
+		normal = {0, 1, 0};
+		return 0.0f;
+	};
+	round.enablePhysics(range.files, range.collisionTemplates, ground);
+	round.startRound();
+	range.logic.startRound();
+	host::HostSetup setup;
+	setup.level = "Suez_Canal";
+	setup.gameMode = "gpm_ti";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	hosted.setTerrainExtent(-512.0f, -512.0f, 1024.0f);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "CP group joiner";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	CHECK(client.world().spawnGroups().size() == 7);
+	std::map<uint16_t, uint32_t> ghostObjects;
+	host::RemoteHudWorld remoteHud(client.world(), round, ghostObjects);
+	remoteHud.setTerrainExtent(-512.0f, -512.0f, 1024.0f);
+	CHECK(remoteHud.spawnablePoints(2).size() == 7);
+	const auto remoteControlPoints = remoteHud.controlPointList();
+	const auto available = round.spawnableGroups(2);
+	for (const auto& entry : spawnAt) {
+		const int cpId = entry.first;
+		const auto local = std::find_if(available.begin(), available.end(),
+			[cpId](const auto& group) { return group.controlPoint == cpId; });
+		CHECK(local != available.end());
+		if (local == available.end()) continue;
+		const auto remote = client.world().spawnGroups().find(local->id);
+		CHECK(remote != client.world().spawnGroups().end());
+		if (remote == client.world().spawnGroups().end()) continue;
+		const auto mapped = std::find_if(remoteControlPoints.begin(), remoteControlPoints.end(), [id = local->id](const auto& cp) {
+			return cp.id == id;
+		});
+		CHECK(mapped != remoteControlPoints.end());
+		if (mapped != remoteControlPoints.end()) {
+			const float decodedX = -512.0f + remote->second.mapX / 255.0f * 1024.0f;
+			const float decodedZ = -512.0f + remote->second.mapZ / 255.0f * 1024.0f;
+			CHECK(mapped->team == 2 && std::abs(mapped->position.x - decodedX) < 0.01f
+				&& std::abs(mapped->position.z - decodedZ) < 0.01f);
+		}
+		const auto expectedGroupAt = groupAt.at(cpId);
+		CHECK(remote->second.mapX == std::clamp(static_cast<int>((expectedGroupAt.x + 512.0f) / 1024.0f * 255), 0, 255));
+		CHECK(remote->second.mapZ == std::clamp(static_cast<int>((expectedGroupAt.z + 512.0f) / 1024.0f * 255), 0, 255));
+		CHECK(remote->second.ghost == 0); // CPs are outside the host's object-ghost set; group still arrives.
+	}
+	const int me = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo info;
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
+	const auto availableToPlayer = round.spawnableGroups(2, me);
+	const auto target = std::find_if(availableToPlayer.begin(), availableToPlayer.end(),
+		[](const auto& group) { return group.controlPoint == 905; });
+	CHECK(target != availableToPlayer.end());
+	if (target != availableToPlayer.end()) {
+		client.selectSpawnGroup(target->id);
+		CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
+		if (info.alive) {
+			const net::Vec3f landed {info.position.x, info.position.y, info.position.z};
+			CHECK(std::min(distance(landed, spawnAt.at(905)), distance(landed, second905)) < 4.0f);
+		}
+	}
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 // PlayerHealth on the local game's HUD (0x007a0f80): the soldier's hit
 // points over its maxHitPoints, not a constant full bar.
 TEST(Host_LocalHudHealthIsTheSoldiers)
@@ -1120,6 +1230,7 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	setup.gamePort = 0;
 	setup.queryPort = 0;
 	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	hosted.setTerrainExtent(-512.0f, -512.0f, 1024.0f);
 	CHECK(hosted.start());
 	// The squad's leader, a bot of team 2, walks away from the team's spawn
 	// point (0, 0, 0).
@@ -1132,7 +1243,7 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	options.playerName = "Joiner";
 	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
 	int ticks = 0;
-	bool leaderWalks = true;
+	bool leaderWalks = false;
 	const auto step = [&] {
 		client.update();
 		dice::hfe::game::SoldierInput walk;
@@ -1162,14 +1273,6 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.team == 2; }));
 	client.joinSquad(1);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.squad == 1; }));
-	for (int i = 0; i < 30 * 6; ++i) {
-		step();
-	}
-	leaderWalks = false;
-	dice::hfe::game::GameWorld::PlayerInfo lead;
-	CHECK(round.playerInfo(leader, lead) && lead.alive && lead.squadLeader);
-	CHECK(std::hypot(lead.position.x, lead.position.z) > 12);
-	// The squad's group, at the leader's soldier ghost.
 	uint16_t leaderGhost = 0;
 	int group = -1;
 	CHECK(pumpUntil(step, [&] {
@@ -1182,6 +1285,19 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 		return group >= 0;
 	}));
 	CHECK(group >= 0xc0 && group <= 0xff);
+	const auto initialMobileGroup = client.world().spawnGroups().find(group);
+	CHECK(initialMobileGroup != client.world().spawnGroups().end());
+	CHECK(initialMobileGroup != client.world().spawnGroups().end()
+		&& initialMobileGroup->second.mapX == 127 && initialMobileGroup->second.mapZ == 127);
+	leaderWalks = true;
+	for (int i = 0; i < 30 * 6; ++i) {
+		step();
+	}
+	leaderWalks = false;
+	dice::hfe::game::GameWorld::PlayerInfo lead;
+	CHECK(round.playerInfo(leader, lead) && lead.alive && lead.squadLeader);
+	CHECK(std::hypot(lead.position.x, lead.position.z) > 12);
+	// The squad's group, at the leader's soldier ghost.
 	client.selectSpawnGroup(group);
 	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
 	round.playerInfo(leader, lead);
@@ -1271,6 +1387,181 @@ TEST(NetHost_RejectedSpawnGroupDropsTheRequest)
 	CHECK(round.spawnSoldier(leader));
 	for (int i = 0; i < 60; ++i) step();
 	CHECK(round.playerInfo(me, info) && !info.alive && cleared == 1);
+	// -1 is not a rejected pick: it asks the host for a random team spawn.
+	// The joined UI must therefore suppress it when an explicit marker fails
+	// to resolve, as covered by DeploymentScreen_UnmatchedJoinedPickStaysOpen.
+	client.selectSpawnGroup(-1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(me, info) && info.alive; }));
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
+{
+	using namespace dice::hfe;
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	titantest::TitanLevel level(gameDir, "Suez_Canal", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::GameLogic logic;
+	logic.startRound();
+	level.world->setSpawnTime(0);
+	level.world->autoRespawn = false;
+	host::HostSetup setup;
+	setup.level = "Suez_Canal";
+	setup.gameMode = "gpm_ti";
+	setup.gamePort = setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Titan deploy";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		level.world->tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int player = client.world().localPlayer();
+	client.selectTeam(1);
+	game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && info.team == 1; }));
+	std::map<uint32_t, int> titanGroups;
+	CHECK(pumpUntil(step, [&] {
+		titanGroups.clear();
+		for (const auto& titan : level.world->titans()) {
+			if (titan.team != 1 && titan.team != 2) continue;
+			const uint16_t ghost = hosted.ghostOfObject(titan.object);
+			for (const auto& [id, group] : client.world().spawnGroups()) {
+				if (group.ghost == ghost && group.team == titan.team) titanGroups[titan.object] = id;
+			}
+		}
+		return titanGroups.size() == 2;
+	}));
+	CHECK(titanGroups.size() == 2);
+	std::set<int> allocatedTitanGroups;
+	for (const auto& [object, group] : titanGroups) {
+		(void)object;
+		CHECK(group >= 0xc0 && group <= 0xff);
+		CHECK(allocatedTitanGroups.insert(group).second);
+	}
+	const auto titans = level.world->titans();
+	const auto pac = std::find_if(titans.begin(), titans.end(), [](const auto& titan) { return titan.team == 1; });
+	CHECK(pac != titans.end() && titanGroups.count(pac->object));
+	if (pac != titans.end() && titanGroups.count(pac->object)) {
+		const auto interiors = level.world->titanSpawnPoints(1);
+		for (int i = 0; i < 6; ++i) {
+			client.selectSpawnGroup(titanGroups[pac->object]);
+			CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && info.alive; }));
+			CHECK(level.world->spawnTitan(player) == pac->object);
+			float nearest = std::numeric_limits<float>::max();
+			for (uint32_t point : interiors) {
+				const world::Object* spawn = level.objects.find(point);
+				if (spawn) {
+					const physics::Vec3 at {spawn->position().x, spawn->position().y, spawn->position().z};
+					nearest = std::min(nearest, std::sqrt(physics::lengthSquared(info.position - at)));
+				}
+			}
+			CHECK(nearest < 2.0f);
+			if (i != 5) {
+				client.suicide();
+				CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && !info.alive; }));
+			}
+		}
+	}
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
+TEST(NetHost_TitanMobileSpawnGroupsAndInteriorSelection)
+{
+	using namespace dice::hfe;
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	titantest::TitanLevel level(gameDir, "Suez_Canal", 48);
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	game::GameLogic logic;
+	logic.startRound();
+	level.world->setSpawnTime(0);
+	level.world->autoRespawn = false;
+	host::HostSetup setup;
+	setup.level = "Suez_Canal";
+	setup.gameMode = "gpm_ti";
+	setup.gamePort = setup.queryPort = 0;
+	host::HostedGame hosted(*level.world, logic, level.templates, setup);
+	hosted.setTerrainExtent(-1024.0f, -1024.0f, 2048.0f);
+	CHECK(hosted.start());
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Titan deploy";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		level.world->tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int player = client.world().localPlayer();
+	client.selectTeam(1);
+	game::GameWorld::PlayerInfo info;
+	CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && info.team == 1; }));
+	std::map<uint32_t, int> titanGroups;
+	CHECK(pumpUntil(step, [&] {
+		titanGroups.clear();
+		for (const auto& titan : level.world->titans()) {
+			if (titan.team != 1 && titan.team != 2) continue;
+			const uint16_t ghost = hosted.ghostOfObject(titan.object);
+			for (const auto& [id, group] : client.world().spawnGroups()) {
+				if (group.ghost == ghost && group.team == titan.team) titanGroups[titan.object] = id;
+			}
+		}
+		return titanGroups.size() == 2;
+	}));
+	CHECK(titanGroups.size() == 2);
+	std::set<int> allocatedTitanGroups;
+	for (const auto& [object, group] : titanGroups) {
+		(void)object;
+		CHECK(group >= 0xc0 && group <= 0xff);
+		CHECK(allocatedTitanGroups.insert(group).second);
+	}
+	const auto titans = level.world->titans();
+	for (const auto& titan : titans) {
+		const auto selectedGroup = titanGroups.find(titan.object);
+		if (selectedGroup == titanGroups.end()) continue;
+		const auto networkGroup = client.world().spawnGroups().find(selectedGroup->second);
+		CHECK(networkGroup != client.world().spawnGroups().end());
+		if (networkGroup != client.world().spawnGroups().end()) {
+			const int expectedX = std::clamp(static_cast<int>((titan.position.x + 1024.0f) / 2048.0f * 255), 0, 255);
+			const int expectedZ = std::clamp(static_cast<int>((titan.position.z + 1024.0f) / 2048.0f * 255), 0, 255);
+			CHECK(networkGroup->second.mapX == expectedX && networkGroup->second.mapZ == expectedZ);
+		}
+	}
+	const auto pac = std::find_if(titans.begin(), titans.end(), [](const auto& titan) { return titan.team == 1; });
+	CHECK(pac != titans.end() && titanGroups.count(pac->object));
+	if (pac != titans.end() && titanGroups.count(pac->object)) {
+		const auto interiors = level.world->titanSpawnPoints(1);
+		for (int i = 0; i < 6; ++i) {
+			client.selectSpawnGroup(titanGroups[pac->object]);
+			CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && info.alive; }));
+			CHECK(level.world->spawnTitan(player) == pac->object);
+			float nearest = std::numeric_limits<float>::max();
+			for (uint32_t point : interiors) {
+				const world::Object* spawn = level.objects.find(point);
+				if (spawn) {
+					const physics::Vec3 at {spawn->position().x, spawn->position().y, spawn->position().z};
+					nearest = std::min(nearest, std::sqrt(physics::lengthSquared(info.position - at)));
+				}
+			}
+			CHECK(nearest < 2.0f);
+			if (i != 5) {
+				client.suicide();
+				CHECK(pumpUntil(step, [&] { return level.world->playerInfo(player, info) && !info.alive; }));
+			}
+		}
+	}
 	client.disconnect();
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }

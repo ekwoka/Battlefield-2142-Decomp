@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <set>
 
 namespace dice::hfe::host {
 
@@ -342,8 +343,11 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 {
 	// The control points' ghosts (ControlPoint networkables: team, flag);
 	// the id of a spawn group at one names it (the id the spawn screen
-	// asks for), else 1000 + the ghost.
+	// asks for), else 1000 + the ghost. CP groups whose carried CP ghost is
+	// absent are positioned from their map bytes.
 	std::vector<ControlPointInfo> out;
+	std::set<int> representedGroups;
+	std::map<uint16_t, ControlPointInfo> controlPointsByGhost;
 	for (const net::RemoteObject& o : m_world.objectList()) {
 		const world::Object* object = m_round.objects().find(objectOf(o.ghost));
 		const world::ObjectTemplate* t = object ? object->objectTemplate() : nullptr;
@@ -380,9 +384,29 @@ std::vector<HudWorld::ControlPointInfo> RemoteHudWorld::controlPointList() const
 		for (const auto& [id, group] : m_world.spawnGroups()) {
 			if (group.ghost == o.ghost) {
 				cp.id = id;
+				representedGroups.insert(id);
+				break; // the interim CP marker represents the first group at this CP
 			}
 		}
+		controlPointsByGhost[o.ghost] = cp;
 		out.push_back(cp);
+	}
+	for (const auto& [id, received] : m_world.spawnGroups()) {
+		if (id >= 0xc0 || representedGroups.count(id) || m_terrainExtent <= 0) {
+			continue; // the F1 fallback is only for compact control-point groups
+		}
+		ControlPointInfo cp;
+		if (const auto known = controlPointsByGhost.find(received.ghost); known != controlPointsByGhost.end()) {
+			cp = known->second; // retain the authored/localized CP label when its ghost is known
+		}
+		cp.id = id;
+		cp.team = received.team;
+		cp.position.x = m_terrainOrigin[0] + (received.mapX & 0xff) / 255.0f * m_terrainExtent;
+		cp.position.z = m_terrainOrigin[1] + (received.mapZ & 0xff) / 255.0f * m_terrainExtent;
+		if (cp.name.empty()) cp.name = "CP " + std::to_string(id);
+		cp.showOnMinimap = false;
+		out.push_back(std::move(cp));
+		representedGroups.insert(id);
 	}
 	return out;
 }

@@ -869,6 +869,9 @@ constexpr int kMarkerBeacon = 100001;
 constexpr int kMarkerVehicle = 200000;
 std::vector<uint32_t> g_spawnVehicles;
 uint32_t g_spawnVehicle = 0;
+constexpr int kMarkerTitan = 300000;
+std::vector<uint32_t> g_spawnTitans;
+uint32_t g_spawnTitan = 0;
 
 // The map: the minimap while playing, the big map with the spawn choices
 // while dead (the spawn screen). Markers: control points by owner (with
@@ -1081,6 +1084,11 @@ int joinedSpawnGroup(int marker)
 	if (!g_remoteHud || marker < kMarkerLeader) {
 		return marker;
 	}
+	if (marker >= kMarkerTitan) {
+		const size_t i = static_cast<size_t>(marker - kMarkerTitan);
+		g_spawnTitan = i < g_spawnTitans.size() ? g_spawnTitans[i] : 0;
+		return g_remoteHud->spawnGroupAt(g_spawnTitan);
+	}
 	if (marker >= kMarkerVehicle) {
 		const size_t i = static_cast<size_t>(marker - kMarkerVehicle);
 		g_spawnVehicle = i < g_spawnVehicles.size() ? g_spawnVehicles[i] : 0;
@@ -1182,8 +1190,12 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// group at +0xa48), 16 HUD units, at the group's position; a vehicle's group
 	// moves with it.
 	g_spawnVehicles.clear();
+	g_spawnTitans.clear();
 	if (spawning && world.joined()) {
-		g_spawnVehicles = world.spawnVehicles(me.team);
+		for (const uint32_t object : world.spawnVehicles(me.team)) {
+			if (round.isTitan(object)) g_spawnTitans.push_back(object);
+			else g_spawnVehicles.push_back(object);
+		}
 		for (size_t i = 0; i < g_spawnVehicles.size(); ++i) {
 			const world::Object* vehicle = round.objects().find(g_spawnVehicles[i]);
 			if (!vehicle) {
@@ -1203,6 +1215,30 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 				}
 			}
 			spawnMarkers.push_back(spawn);
+		}
+	}
+	if (spawning && world.joined()) {
+		const auto titans = round.titans();
+		const auto titanControlPoints = round.controlPointList();
+		for (size_t i = 0; i < g_spawnTitans.size(); ++i) {
+			const uint32_t titanObject = g_spawnTitans[i];
+			const auto titan = std::find_if(titans.begin(), titans.end(), [titanObject](const auto& entry) {
+				return entry.object == titanObject;
+			});
+			const world::Object* object = round.objects().find(titanObject);
+			if (!object || titan == titans.end()) continue;
+			const auto cp = std::find_if(titanControlPoints.begin(), titanControlPoints.end(), [&titan](const auto& point) {
+				return point.id == titan->controlPoint;
+			});
+			const std::string label = main::spawnGroupTitanLabel(titan->team,
+				cp == titanControlPoints.end() ? std::string() : cp->name, g_localize);
+			const bool selected = chosen == game::GameWorld::kSpawnOnTitan && g_spawnTitan == titanObject;
+			hud::HudManager::MapMarker spawn {std::string("Ingame/Minimap/Icons/")
+					+ (selected ? "spawn_Selected.dds" : "spawn_UnSelected.dds"),
+				object->position().x, object->position().z, hud::HudManager::kSpawnMarkerSize};
+			spawn.id = kMarkerTitan + static_cast<int>(i);
+			spawn.label = label;
+			spawnMarkers.push_back(std::move(spawn));
 		}
 	}
 	// The squad leader's beacon (the leader, to spawn on, is drawn with the team below).
@@ -7708,6 +7744,10 @@ int runGame(Options& options, Session& session)
 		std::optional<host::RemoteHudWorld> remoteHud;
 		if (session.client) {
 			remoteHud.emplace(session.client->world(), round, ghostObjects);
+			if (const terrain::Heightmap* primary = heightmaps.primary(); primary && primary->loaded()) {
+				remoteHud->setTerrainExtent(primary->originX(), primary->originZ(),
+					std::min(primary->worldWidth(), primary->worldDepth()));
+			}
 			// The vehicles' turrets as their ghosts turn them, for the seated
 			// players' mounts and hands (GameWorld::animateRemoteSeated).
 			round.setRemotePartPose([&session, &ghostObjects](uint32_t object, const std::string& part, world::Vec3& offset,
@@ -11848,6 +11888,7 @@ int runGame(Options& options, Session& session)
 					g_remoteHud->chosenSpawnMarker = point;
 					g_remoteHud->chosenSpawn = point == kMarkerLeader ? game::GameWorld::kSpawnOnLeader
 						: point == kMarkerBeacon ? game::GameWorld::kSpawnOnBeacon
+						: point >= kMarkerTitan ? game::GameWorld::kSpawnOnTitan
 						: point >= kMarkerVehicle ? game::GameWorld::kSpawnInVehicle : point;
 				} else {
 					hudManager.click(x, y);
@@ -12243,17 +12284,31 @@ int runGame(Options& options, Session& session)
 				const bool done = hudManager.number("HudDone") != 0 || enterConfirms;
 				const auto action = dice::main::deploymentDoneAction(done, playerPresent, alive, g_initialDeploymentPending, me.respawnIn);
 				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
-					kitMenu.commit();
+					bool joinedPickCanSubmit = true;
 					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
-						selectRemoteKit(*session.client, me.team, localKit);
-						session.client->selectSpawnGroup(joinedSpawnGroup(g_remoteHud->chosenSpawnMarker));
-						g_remoteHud->requestedSpawn = true;
+						const int group = joinedSpawnGroup(g_remoteHud->chosenSpawnMarker);
+						joinedPickCanSubmit = dice::main::joinedSpawnPickCanSubmit(true, group);
+						if (joinedPickCanSubmit) {
+							kitMenu.commit();
+							selectRemoteKit(*session.client, me.team, localKit);
+							session.client->selectSpawnGroup(group);
+							g_remoteHud->requestedSpawn = true;
+						}
 					} else if (!alive && !session.client) {
+						kitMenu.commit();
 						round.requestSpawn(round.localPlayer());
+					} else {
+						kitMenu.commit();
 					}
-					// setDone(true) closes even with no highlighted spawn group.
-					g_deploymentOpen = false;
-					if (!alive) g_spawnScreenHidden = true;
+					if (!joinedPickCanSubmit) {
+						// Dead players' deployment visibility is controlled by this
+						// flag, since g_deploymentOpen applies to living players.
+						g_spawnScreenHidden = false;
+					} else {
+						// setDone(true) closes even with no highlighted spawn group.
+						g_deploymentOpen = false;
+						if (!alive) g_spawnScreenHidden = true;
+					}
 				}
 				if ((deploymentPressed || done) && g_inputTrace) {
 					std::printf("deployment-input: enter=%d was-shown=%d confirms=%d alive=%d queued=%d\n",

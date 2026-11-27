@@ -390,6 +390,7 @@ void HostedGame::changeLevel(game::GameWorld& round, game::GameLogic& logic, wor
 	m_spawnGroups.clear();
 	m_squadSpawnGroups.clear();
 	m_vehicleSpawnGroups.clear();
+	m_titanSpawnGroups.clear();
 	m_requestsSent.clear();
 	m_ordersSent.clear();
 	m_offerSent = {-1, -1, -1};
@@ -1378,8 +1379,16 @@ void HostedGame::event(int id, const net::GameEvent& e)
 					taken = true;
 				}
 			}
+			for (const auto& [titan, id] : m_titanSpawnGroups) {
+				if (id == group) {
+					m_round->setSpawnTitan(player, titan);
+					taken = true;
+				}
+			}
 			if (!taken) {
-				m_round->setSpawnChoice(player, group);
+				// Control-point 6/6 ids are the spawn manager's compact group
+				// ids (0x00634e00), not the control point's authored id.
+				m_round->setSpawnGroupChoice(player, group);
 			}
 			client.spawnRequested = true;
 			if (onLog) {
@@ -3217,14 +3226,19 @@ net::TeamNetState HostedGame::teamStateOf() const
 	return state;
 }
 
+int HostedGame::mapByte(float coordinate, int axis) const
+{
+	if (m_terrainExtent <= 0 || axis < 0 || axis > 1) {
+		return 0;
+	}
+	return std::clamp(static_cast<int>((coordinate - m_terrainOrigin[axis]) / m_terrainExtent * 255), 0, 255);
+}
+
 std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
 {
-	// The control points a team may spawn at (the spawn manager's groups
-	// the team's spawn screen offers, 0x0078e830): a group each, its id the
-	// point's (what the client's 6/6 picks, setSpawnChoice), at the point's
-	// ghost, with spawn points (hasPoints). The map bytes stay 0: the
-	// rewrite's clients place a group by its ghost's object, and its points'
-	// slot 0x4c flag (pointFlag) isn't kept.
+	// Control-point groups use the compact ids allocated by GameWorld in
+	// SpawnPoint registration order (0x00634e00). Their carried object is
+	// still the control-point object's ghost (zero if it has no ghost yet).
 	std::vector<net::SpawnGroupInfo> out;
 	std::map<int, uint16_t> ghosts;
 	for (const game::ControlPoint& cp : m_round->controlPoints()) {
@@ -3232,19 +3246,30 @@ std::vector<net::SpawnGroupInfo> HostedGame::spawnGroupsNow() const
 			ghosts[cp.id] = ghostOfObject(cp.object->id());
 		}
 	}
+	constexpr size_t kMaxControlPointGroups = 0x40;
+	std::map<int, std::pair<int, game::GameWorld::SpawnGroupInfo>> cpGroups;
 	for (int team = 1; team <= 2; ++team) {
-		for (const int id : m_round->spawnablePoints(team)) {
-			const auto ghost = ghosts.find(id);
-			if (ghost == ghosts.end() || ghost->second == 0 || id < 0 || id > 0xff) {
-				continue;
+		for (const game::GameWorld::SpawnGroupInfo& group : m_round->spawnableGroups(team)) {
+			if (group.id > 0 && group.id < 0xc0) {
+				cpGroups.emplace(group.id, std::make_pair(team, group));
 			}
-			net::SpawnGroupInfo info;
-			info.id = id;
-			info.team = team;
-			info.ghost = ghost->second;
-			info.hasPoints = true;
-			out.push_back(info);
 		}
+	}
+	for (const auto& [id, teamAndGroup] : cpGroups) {
+		if (out.size() >= kMaxControlPointGroups) {
+			break;
+		}
+		const int team = teamAndGroup.first;
+		const game::GameWorld::SpawnGroupInfo& group = teamAndGroup.second;
+		const auto ghost = ghosts.find(group.controlPoint);
+		net::SpawnGroupInfo info;
+		info.id = id;
+		info.team = team;
+		info.ghost = ghost == ghosts.end() ? 0 : ghost->second;
+		info.hasPoints = true;
+		info.mapX = mapByte(group.position.x, 0);
+		info.mapZ = mapByte(group.position.z, 1);
+		out.push_back(info);
 	}
 	return out;
 }
@@ -3272,7 +3297,7 @@ void HostedGame::trackSpawnGroups()
 	for (const auto& [id, info] : now) {
 		taken.insert(id);
 	}
-	std::map<std::pair<int, int>, uint16_t> squads;
+	std::map<std::pair<int, int>, std::pair<uint16_t, uint32_t>> squads;
 	for (const game::GameWorld::PlayerInfo& p : m_round->playerList()) {
 		if (p.squad == 0 || !p.squadLeader) {
 			continue;
@@ -3282,12 +3307,15 @@ void HostedGame::trackSpawnGroups()
 		// spawns at the beacon when there is one (0x004c7f10 moves the
 		// squad's spawn point onto it).
 		uint16_t ghost = 0;
+		uint32_t carrier = 0;
 		if (p.alive && !p.manDown && p.soldier) {
-			ghost = ghostOfObject(p.soldier);
+			carrier = p.soldier;
+			ghost = ghostOfObject(carrier);
 		} else if (const uint32_t beacon = m_round->squadBeacon(p.team, p.squad)) {
-			ghost = ghostOfObject(beacon);
+			carrier = beacon;
+			ghost = ghostOfObject(carrier);
 		}
-		squads[{p.team, p.squad}] = ghost;
+		squads[{p.team, p.squad}] = {ghost, carrier};
 	}
 	std::map<uint32_t, int> vehicles;
 	for (int team = 1; team <= 2; ++team) {
@@ -3311,17 +3339,35 @@ void HostedGame::trackSpawnGroups()
 		taken.insert(it->second);
 		++it;
 	}
-	const auto add = [&](int id, int team, uint16_t ghost) {
+	std::map<uint32_t, int> titans;
+	for (int team = 1; team <= 2; ++team) {
+		for (const game::GameWorld::SpawnGroupInfo& group : m_round->spawnableGroups(team)) {
+			if (group.mobileObject && m_round->isTitan(group.mobileObject)) titans[group.mobileObject] = team;
+		}
+	}
+	for (auto it = m_titanSpawnGroups.begin(); it != m_titanSpawnGroups.end();) {
+		if (!titans.count(it->first)) {
+			it = m_titanSpawnGroups.erase(it);
+		} else {
+			taken.insert(it->second);
+			++it;
+		}
+	}
+	const auto add = [&](int id, int team, uint16_t ghost, uint32_t carrier) {
 		if (id >= 0 && ghost != 0) {
 			net::SpawnGroupInfo info;
 			info.id = id;
 			info.team = team;
 			info.ghost = ghost;
 			info.hasPoints = true;
+			if (const world::Object* object = m_round->objects().find(carrier)) {
+				info.mapX = mapByte(object->position().x, 0);
+				info.mapZ = mapByte(object->position().z, 1);
+			}
 			now.emplace(id, info);
 		}
 	};
-	for (const auto& [squad, ghost] : squads) {
+	for (const auto& [squad, carrierInfo] : squads) {
 		auto it = m_squadSpawnGroups.find(squad);
 		if (it == m_squadSpawnGroups.end()) {
 			const int id = freeSpawnGroupId(taken);
@@ -3331,7 +3377,7 @@ void HostedGame::trackSpawnGroups()
 			taken.insert(id);
 			it = m_squadSpawnGroups.emplace(squad, id).first;
 		}
-		add(it->second, squad.first, ghost);
+		add(it->second, squad.first, carrierInfo.first, carrierInfo.second);
 	}
 	for (const auto& [vehicle, team] : vehicles) {
 		auto it = m_vehicleSpawnGroups.find(vehicle);
@@ -3343,7 +3389,17 @@ void HostedGame::trackSpawnGroups()
 			taken.insert(id);
 			it = m_vehicleSpawnGroups.emplace(vehicle, id).first;
 		}
-		add(it->second, team, ghostOfObject(vehicle));
+		add(it->second, team, ghostOfObject(vehicle), vehicle);
+	}
+	for (const auto& [titan, team] : titans) {
+		auto it = m_titanSpawnGroups.find(titan);
+		if (it == m_titanSpawnGroups.end()) {
+			const int id = freeSpawnGroupId(taken);
+			if (id < 0) continue;
+			taken.insert(id);
+			it = m_titanSpawnGroups.emplace(titan, id).first;
+		}
+		add(it->second, team, ghostOfObject(titan), titan);
 	}
 	for (const auto& [id, info] : m_spawnGroups) {
 		if (!now.count(id)) {
