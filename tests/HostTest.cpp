@@ -1326,6 +1326,136 @@ TEST(NetHost_NameSquadSpawnAndSpawnWait)
 	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
 }
 
+// A thrown squad beacon takes over the squad spawn point when its leader
+// dies (0x004c7f10). The member chooses that same group through 6/6 and
+// lands beside the beacon, even though the leader's corpse is elsewhere.
+TEST(NetHost_SquadBeaconGroupMovesAfterLeaderDies)
+{
+	HostRange range;
+	range.templates.registerType(4, "GenericFireArm");
+	range.templates.registerType(5, "GenericProjectile");
+	range.templates.registerType(6, "Kit");
+	auto* beaconWeapon = range.templates.create("GenericFireArm", "test_beacon");
+	beaconWeapon->settings()["itemIndex"] = "8";
+	beaconWeapon->settings()["projectileTemplate"] = "test_spawn_beacon";
+	beaconWeapon->settings()["ammo.magSize"] = "1";
+	range.templates.create("GenericProjectile", "test_spawn_beacon")->settings()["armor.holdsSlBeacon"] = "1";
+	auto* kit = range.templates.create("Kit", "test_beacon_kit");
+	kit->children().push_back({"test_beacon", {}, {}});
+	auto& round = *range.round;
+	round.autoRespawn = false;
+	round.setManDownTime(0);
+	round.setSpawnTime(0);
+	host::HostSetup setup;
+	setup.level = "Range";
+	setup.gameMode = "gpm_cq";
+	setup.gamePort = 0;
+	setup.queryPort = 0;
+	host::HostedGame hosted(round, range.logic, range.templates, setup);
+	hosted.setTerrainExtent(-512.0f, -512.0f, 1024.0f);
+	CHECK(hosted.start());
+	const int leader = round.addPlayer("Leader", 2, true);
+	CHECK(round.joinSquad(leader, 1));
+	round.setKit(leader, "test_beacon_kit", "us_light_soldier");
+	CHECK(round.spawnSoldier(leader));
+	dice::hfe::game::GameWorld::PlayerInfo lead;
+	CHECK(round.playerInfo(leader, lead));
+	round.setSoldierPosition(lead.soldier, {100, 0, 100});
+
+	net::GameClient client;
+	net::GameClientOptions options;
+	options.playerName = "Beacon member";
+	CHECK(client.connect("127.0.0.1", hosted.gamePort(), options));
+	client.world().setTerrainBounds(-512.0f, -512.0f, 1024.0f, 1024.0f);
+	const auto step = [&] {
+		client.update();
+		hosted.tick();
+		round.tick(1.0f / 30);
+	};
+	CHECK(pumpUntil(step, [&] { return client.world().gameState() == 1 && client.world().localPlayer() >= 0; }, 6000));
+	const int member = client.world().localPlayer();
+	dice::hfe::game::GameWorld::PlayerInfo mate;
+	client.selectTeam(2);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(member, mate) && mate.team == 2; }));
+	client.joinSquad(1);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(member, mate) && mate.squad == 1; }));
+
+	dice::hfe::game::SoldierInput input;
+	input.selectItem = 8;
+	round.setInput(leader, input);
+	step();
+	round.setInput(leader, {});
+	step();
+	input = {};
+	input.fire = true;
+	round.setInput(leader, input);
+	step();
+	round.setInput(leader, {});
+	step();
+	const uint32_t beaconId = round.squadBeacon(2, 1);
+	CHECK(beaconId != 0);
+	const dice::hfe::world::Object* beacon = round.objects().find(beaconId);
+	CHECK(beacon != nullptr);
+	if (!beacon) {
+		client.disconnect();
+		return;
+	}
+	const auto beaconWorldPosition = beacon->position();
+	const dice::hfe::physics::Vec3 beaconPosition {
+		beaconWorldPosition.x, beaconWorldPosition.y, beaconWorldPosition.z};
+	// Move the leader far enough that a successful landing cannot be mistaken
+	// for a spawn on the leader.
+	round.setSoldierPosition(lead.soldier, {300, 0, 300});
+	CHECK(pumpUntil(step, [&] {
+		for (const auto& [id, group] : client.world().spawnGroups()) {
+			if (id >= 0xc0 && group.team == 2 && group.squad == 1 && group.active) return true;
+		}
+		return false;
+	}));
+	int squadGroup = -1;
+	for (const auto& [id, group] : client.world().spawnGroups()) {
+		if (id >= 0xc0 && group.team == 2 && group.squad == 1) squadGroup = id;
+	}
+	CHECK(squadGroup >= 0xc0);
+	const net::SpawnGroupInfo* initialGroup = client.world().spawnGroup(squadGroup);
+	CHECK(initialGroup != nullptr);
+	if (initialGroup) {
+		CHECK(initialGroup->netId == static_cast<uint16_t>(0x202 + squadGroup - 0x80));
+		CHECK(initialGroup->active && initialGroup->squad == 1);
+	}
+	round.suicide(lead.soldier);
+	CHECK(pumpUntil(step, [&] {
+		return round.playerInfo(leader, lead) && !lead.alive;
+	}));
+	// F2 replicates the moving group's own position and state. Its map bytes
+	// and decoded position should point to the beacon after the leader dies.
+	const auto expectedByte = [](float coordinate) {
+		return std::clamp(static_cast<int>((coordinate + 512.0f) / 1024.0f * 255), 0, 255);
+	};
+	CHECK(pumpUntil(step, [&] {
+		const net::SpawnGroupInfo* group = client.world().spawnGroup(squadGroup);
+		return group && group->mapX == expectedByte(beaconPosition.x)
+			&& group->mapZ == expectedByte(beaconPosition.z)
+			&& std::abs(group->position.x - (-512.0f + group->mapX / 255.0f * 1024.0f)) < 0.01f
+			&& std::abs(group->position.z - (-512.0f + group->mapZ / 255.0f * 1024.0f)) < 0.01f
+			&& group->squad == 1 && group->active;
+	}));
+	const net::SpawnGroupInfo* beaconGroup = client.world().spawnGroup(squadGroup);
+	CHECK(beaconGroup != nullptr);
+	if (beaconGroup) {
+		CHECK(beaconGroup->netId == static_cast<uint16_t>(0x202 + squadGroup - 0x80));
+		CHECK(distance(beaconGroup->position, beaconPosition) < 5.0f);
+	}
+	client.selectSpawnGroup(squadGroup);
+	CHECK(pumpUntil(step, [&] { return round.playerInfo(member, mate) && mate.alive; }));
+	if (mate.alive) {
+		CHECK(distance({mate.position.x, mate.position.y, mate.position.z}, beaconPosition) < 10.0f);
+		CHECK(distance({mate.position.x, mate.position.y, mate.position.z}, lead.position) > 100.0f);
+	}
+	client.disconnect();
+	CHECK(pumpUntil(step, [&] { return hosted.clientCount() == 0; }));
+}
+
 // A group that can't be spawned at drops the request: 0x004bfe40 sets the
 // player's group to 0 (0x004bff13) and posts 6/6 back, so a squad member
 // who asked for his dead leader doesn't spawn on him once he's back.
