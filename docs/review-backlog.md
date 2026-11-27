@@ -408,6 +408,55 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   options, with no Flash movie loaded, by mouse, keyboard or gamepad; with it off
   nothing changes. Later stages are their own items once the first lands.
 
+### Q-16. A spatial grid for per-soldier work, for games with far more than 64 players (medium)
+- **Status:** open.
+- **Why:** headless runs of Verdun gpm_ti with every bot active (`--bots N`, `BF2142_TICK_PROF=50`,
+  180 s, 2026-11-27). Mean tick per subsystem:
+
+  | | 47 bots | 127 bots | 255 bots |
+  |---|---|---|---|
+  | whole tick (mean / p99) | 3.7 / 6.6 ms | 8.1 / 14.5 ms | 18.0 / 35.5 ms |
+  | `w.stepPlayersAfter` | 0.49 ms | 1.7 ms | 3.6 ms |
+  | `w.stepCloseTo` | 0.25 ms | 0.78 ms | 1.8 ms (worst 25 ms) |
+  | `w.stepSoldiersSettle` | — | 0.54 ms | 1.6 ms (worst 12 ms) |
+  | `w.stepSoldiersPhysics` | — | 0.51 ms | 1.2 ms |
+
+  Doubling 127 → 255 costs 2.2–3× in these, so they scale faster than the player count:
+  soldier-against-soldier loops. At 255 bots the simulation alone uses about 18 ms of the 33 ms
+  tick, and 86 ticks in 5400 go over 33 ms.
+- **Where:** `GameWorld::stepCloseTo` (`src/Game/Radio.cpp` ~594), `stepSoldiersSettle` and
+  `stepPlayersAfter` (`src/Game/GameWorld.cpp` ~11171–11182); also the bots' sensing in
+  `BotManager::sense` and the soldier-to-soldier checks in soldier physics.
+- **Fix:** a uniform grid (or a shared broadphase) of soldiers and other players' objects, rebuilt
+  or updated once a tick. Each soldier queries only its neighbouring cells, sized to the largest
+  radius each user needs: close-to range, settle or push distance, sight range in coarse cells.
+  Retail iterates every pair, so keep results identical: same pairs found, same order where the
+  order matters. Check with the parity fingerprint (`tools/parity-check.sh`); no flag is needed if
+  it matches.
+- **Done when:** at 255 bots these four subsystems scale about linearly (≤ 2.2× from 127 to 255
+  combined, the worst ticks gone); results are unchanged at 47 bots; there's a cost test like
+  `Bots_OffMeshVerdunTitanCost` with many bots.
+
+### Q-17. Stagger bot thinking, and spread the round-start Titan gun work, for very large bot counts (medium)
+- **Status:** open.
+- **Why:** in the same runs, bot AI (`bots`) is 1.3 / 2.2 / 5.6 ms mean per tick at 47 / 127 / 255
+  bots: 2.6× for 2× the bots. The first tick of the round at 255 bots is 66 ms:
+  `titanGunWalk` 13.5 ms over 67 calls, `titanField` 13.2 ms over 10, soldier settling 12.2 ms,
+  all at once.
+- **Fix:**
+  - Above a threshold (say 64 bots), run each bot's think (goal, behaviour scoring, sensing) every
+    2nd–4th tick, staggered by bot id. Steering, aiming and firing still run every tick on the last
+    decision. This goes behind an `enhanced.*` flag, since retail thinks every bot every tick (with
+    its own timers).
+  - Spread the first `titanGunWalk`/`titanField` requests over the first second of the round, or
+    make them at load in `prepareTitanGrids` with `enhanced.botAsyncPaths`.
+  - Results should stay deterministic (bot order and stagger from ids, not timing).
+- **Done when:** at 255 bots, bot AI is ≤ 3 ms mean, no tick after round start exceeds 33 ms in the
+  headless run, and at ≤ 64 bots nothing changes.
+- **Related:** spawns. Layouts have spawn points for their own size, so at 2–5× the players most
+  bots stack up and fight little; combat load wasn't measured (11 kills in 3 min at 255). Rendering
+  wasn't measured either (headless only). Online play with retail clients stays capped at 64.
+
 ## Retail parity: default behaviour that differs from retail
 
 Each of these needs the retail claim confirmed first (step 1), then matching retail
