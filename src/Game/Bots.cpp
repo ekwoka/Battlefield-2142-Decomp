@@ -8966,6 +8966,44 @@ physics::Vec3 BotManager::moveTarget(Bot& bot, const GameWorld::PlayerInfo& self
 // (createFromControlPoint <name> <id> 50), each the neighbour of all the
 // others. Without AIDefaultStrategies.ai (it always runs in the game; the
 // tests): its strategies.
+//
+// A shipped StrategicAreas.ai gives each area an order position per map
+// (setOrderPosition Infantry / Vehicle), put on that map's mesh; a control
+// point's own position often isn't: the flag stands in a hole the meshes
+// leave round it (the vehicle mesh misses all five of Verdun's gpm_cq 16
+// flags by 1-3 m), or on a roof (Cerbere_Landing's Command Center, 12 m
+// over the street the vehicle mesh covers). A driver heads for the order
+// position itself (updateGoal), and a goal off the mesh fails its path
+// request (AIDLL 0x100966c0), so with the flag as the order Verdun's gpm_cq
+// 16 drivers stood at their bases all round with their passengers aboard
+// (no round fired without --enhanced). So the made-up areas, a deviation
+// already, get order positions too: where
+// the point is when it lies on that map's mesh, else the nearest spot on
+// it within 40 m (within 5 m of the flag's height, else 25 m).
+namespace {
+
+bool nearestOnMesh(const ai::NavMesh& mesh, const physics::Vec3& at, physics::Vec3& out)
+{
+	for (const float tolerance : {5.0f, 25.0f}) {
+		for (int ring = 0; ring <= 40; ++ring) {
+			const int steps = ring == 0 ? 1 : 32;
+			for (int k = 0; k < steps; ++k) {
+				const float angle = static_cast<float>(k) * 6.2831853f / static_cast<float>(steps);
+				const physics::Vec3 p {at.x + std::sin(angle) * static_cast<float>(ring), at.y,
+					at.z + std::cos(angle) * static_cast<float>(ring)};
+				float offset = 0;
+				if (mesh.findPolygon(toAi(p), tolerance, nullptr, &offset) >= 0) {
+					out = {p.x, p.y + offset, p.z};
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+} // namespace
+
 void BotManager::ensureAreas()
 {
 	ai::StrategySettings& s = m_settings.strategy;
@@ -8985,6 +9023,16 @@ void BotManager::ensureAreas()
 		for (const GameWorld::ControlPointInfo& other : points) {
 			if (other.id != point.id) {
 				area.neighbours.push_back("cp" + std::to_string(other.id));
+			}
+		}
+		const ai::NavMesh* meshes[2] = {m_navMesh, m_vehicleNavMesh};
+		for (int m = 0; m < 2; ++m) {
+			physics::Vec3 at;
+			if (meshes[m] && nearestOnMesh(*meshes[m], point.position, at)) {
+				area.hasOrderPosition[m] = true;
+				area.orderPosition[m][0] = at.x;
+				area.orderPosition[m][1] = at.y;
+				area.orderPosition[m][2] = at.z;
 			}
 		}
 		s.areas.push_back(area);

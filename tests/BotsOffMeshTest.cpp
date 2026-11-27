@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -179,6 +180,84 @@ TEST(Bots_OffMeshCerbere32PacLeaveSpawn)
 		if (teams == 1) {
 			CHECK(reached >= 0);
 		}
+	}
+}
+
+// A 16-player Conquest round without --enhanced, loaded as main loads it: Verdun's and
+// Cerbere_Landing's gpm_cq 16 layouts have no strategic areas (Verdun's StrategicAreas.ai is a
+// comment, Cerbere's is missing), so ensureAreas makes them from the control points. Their flags lie
+// off the vehicle mesh (all five of Verdun's by 1-3 m; Cerbere's Command Center on a roof), and a
+// driver heads for the area's order position itself: with the flag as that position the drivers'
+// path requests failed and every bot sat in a vehicle at its base all round (Verdun: no round fired).
+// The made-up areas' order positions lie on each map's mesh now: the vehicles leave their bases,
+// the bots fire and stand in points to take them.
+TEST(Bots_RetailConquest16Plays)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const char* name : {"Verdun", "Cerbere_Landing"}) {
+		LevelBots round(gameDir, name, "gpm_cq", 16, false);
+		if (!round.level.loaded || !round.mesh) return;
+		round.enhanced = false; // retail's bots: no enhanced.* switch on
+		auto& world = *round.level.world;
+		round.addBots(8);
+		CHECK(round.players.size() == 16);
+		round.level.run(1);
+		const auto& areas = round.bots->settings().strategy.areas;
+		CHECK(areas.size() == world.controlPointList().size());
+		int placed = 0;
+		for (const ai::StrategicArea& area : areas) {
+			for (int m = 0; m < 2; ++m) {
+				const ai::NavMesh& mesh = m == 0 ? *round.mesh : *round.vehicleMesh;
+				const auto& o = area.orderPosition[m];
+				placed += area.hasOrderPosition[m] && mesh.findPolygon({o[0], o[1], o[2]}) >= 0;
+			}
+		}
+		CHECK(placed == static_cast<int>(areas.size()) * 2); // each area's order position on both meshes
+		std::vector<physics::Vec3> start;
+		for (const int id : round.players) {
+			game::GameWorld::PlayerInfo info;
+			world.playerInfo(id, info);
+			start.push_back(info.position);
+		}
+		std::map<uint32_t, physics::Vec3> vehicleStart;
+		for (const auto& v : world.vehicleList()) vehicleStart[v.object] = v.position;
+		// Every second: the bots inside a capturable point their team doesn't hold (the game mode's
+		// script, which hands the point over, doesn't run here), and how far the vehicles got.
+		int capturing = 0;
+		float driven = 0;
+		round.level.runUntil(180, [&] {
+			for (const auto& p : world.controlPointList()) {
+				if (!p.capturable) continue;
+				for (const int id : round.players) {
+					game::GameWorld::PlayerInfo info;
+					capturing += world.playerInfo(id, info) && info.alive && info.team != p.team
+						&& std::sqrt(physics::lengthSquared(info.position - p.position)) <= std::max(p.radius, 10.0f);
+				}
+			}
+			for (const auto& v : world.vehicleList()) {
+				if (const auto it = vehicleStart.find(v.object); it != vehicleStart.end()) {
+					driven = std::max(driven, std::sqrt(physics::lengthSquared(v.position - it->second)));
+				}
+			}
+			return false;
+		});
+		int moved = 0, fired = 0;
+		for (size_t i = 0; i < round.players.size(); ++i) {
+			game::GameWorld::PlayerInfo info;
+			world.playerInfo(round.players[i], info);
+			moved += !info.alive || physics::lengthSquared(info.position - start[i]) > 20 * 20;
+			const auto rounds = world.playerRounds(round.players[i], false, false);
+			fired += rounds.empty() ? 0 : rounds[0].count;
+		}
+		std::fprintf(stderr,
+			"  %s gpm_cq 16: %d of 16 bots moved over 20 m, %d rounds fired, %d bot-seconds in points to take,"
+			" a vehicle %.0f m from its spawn\n",
+			name, moved, fired, capturing, driven);
+		CHECK(moved >= 8);
+		CHECK(fired > 0);
+		CHECK(capturing >= 10);
+		CHECK(driven > 50);
 	}
 }
 
