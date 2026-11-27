@@ -46,6 +46,17 @@ and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unkno
   picks the map. The option groups below leave out the flags the map picker
   owns. Ticket ratio and spawn time aren't offered: the binary takes them only
   from the menu or a hosted server's settings, not from the command line.
+- **Demos.** "Record a demo" with a name passes `--record-demo <name>` for
+  whatever Run starts (playing the map, the options' `--simulate` or `--host`):
+  the round goes to `Demos/<name>.bf2142demo` under the repository root, the
+  game's working folder. Below it the recorded demos are listed, the newest
+  first: `Demos/*.bf2142demo` and the auto-recordings
+  (`sv.autoRecord`) in `mods/<mod>/demos/`. Choosing one sets Run to
+  **Play back a demo**, which passes `--demo <file>` (no level: the demo has
+  its own), and, with "With its camera" ticked, `--demo-camera` with the
+  camera file beside it (`<name>-def.bf2142cam`, or an auto demo's
+  `<file>-def.bf2142cam`). The option groups leave out `--demo`,
+  `--demo-camera` and `--record-demo`.
 - **Enhanced.** "Enhanced mode" passes `--enhanced`. Its options sit in one
   collapsible group whose "All" box selects all, none or some of them. Only the
   options you change from their defaults are passed, as `+enhanced.<name> 0|1`.
@@ -68,6 +79,7 @@ and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unkno
     `--play` or `--connect` the game opens no window, it loads, prints a
     summary and exits (with `--simulate <s>` from "Bots and headless rounds",
     a headless round).
+  - **Play back a demo** (`--demo`): the demo chosen under Demos, in a window.
 
   A "Level view" kept by an older launcher becomes "Play the map". Stop ends
   whichever build or run is going.

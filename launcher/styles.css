@@ -227,6 +227,13 @@ ul.levels li.chosen,
   opacity: 0.5;
 }
 
+/* The recorded demos: shorter than the level list. */
+ul.levels.demo-list {
+  height: auto;
+  max-height: 200px;
+  margin: 6px 0;
+}
+
 .badge {
   font-size: 10px;
   padding: 0 4px;

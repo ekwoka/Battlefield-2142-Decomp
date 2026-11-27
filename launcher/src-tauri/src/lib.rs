@@ -170,6 +170,9 @@ fn parse_readme(text: &str) -> Vec<Group> {
             if !(name.starts_with("--") || name.starts_with('+')) || name == "--game" || name == "--enhanced" {
                 continue;
             }
+            if name.contains('<') {
+                continue; // a family of flags ("+sv.<setting> <value>"), for the extra arguments
+            }
             if !seen.insert(name.clone()) {
                 continue; // a flag listed again under a later group
             }
@@ -398,6 +401,65 @@ async fn level_preview(game_dir: String, mod_name: String, level: String, mode: 
     levels::preview(&resolve(&game_dir), mod_name.trim(), &level, &mode, size)
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct DemoFile {
+    // From the repository root, as --demo takes it ("Demos/match1.bf2142demo").
+    path: String,
+    bytes: u64,
+    // Seconds since 1970, for the newest first.
+    modified: u64,
+    // Its camera file when there is one beside it: demo.recordDemo's
+    // "<name>-def.bf2142cam" or an auto demo's "<file>-def.bf2142cam".
+    camera: Option<String>,
+}
+
+// The recorded demos under the repository root, where the game (run from
+// there) writes them: Demos/*.bf2142demo (demo.recordDemo, --record-demo)
+// and mods/<mod>/demos/*.bf2142demo (sv.autoRecord), the newest first.
+fn find_demos(root: &Path) -> Vec<DemoFile> {
+    let mut dirs = vec![PathBuf::from("Demos")];
+    if let Ok(mods) = std::fs::read_dir(root.join("mods")) {
+        let mut names: Vec<_> = mods.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name()).collect();
+        names.sort();
+        dirs.extend(names.into_iter().map(|m| Path::new("mods").join(m).join("demos")));
+    }
+    let mut demos = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(root.join(&dir)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".bf2142demo") else { continue };
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            let camera = [format!("{stem}-def.bf2142cam"), format!("{name}-def.bf2142cam")]
+                .into_iter()
+                .map(|cam| dir.join(cam))
+                .find(|cam| root.join(cam).is_file())
+                .map(|cam| cam.to_string_lossy().replace('\\', "/"));
+            demos.push(DemoFile {
+                path: dir.join(&name).to_string_lossy().replace('\\', "/"),
+                bytes: meta.len(),
+                modified,
+                camera,
+            });
+        }
+    }
+    demos.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
+    demos
+}
+
+#[tauri::command]
+async fn list_demos() -> Vec<DemoFile> {
+    find_demos(&repo_root())
+}
+
 #[tauri::command]
 fn stop(jobs: State<Jobs>) -> Result<(), String> {
     if let Some(child) = jobs.child.lock().unwrap().as_mut() {
@@ -411,7 +473,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Jobs::default())
-        .invoke_handler(tauri::generate_handler![load_options, binary_exists, build, run_game, pick_dir, stop, list_levels, level_preview])
+        .invoke_handler(tauri::generate_handler![load_options, binary_exists, build, run_game, pick_dir, stop, list_levels, level_preview, list_demos])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");
 }
@@ -461,5 +523,41 @@ mod tests {
         assert!(groups.iter().flat_map(|g| &g.options).any(|o| o.name == "+level"));
         let flags = parse_enhanced(&std::fs::read_to_string(root.join("src/Scene/EnhancedSettings.h")).unwrap());
         assert!(flags.iter().any(|f| f.name == "singleplayAllModes" && f.default));
+        let all: Vec<_> = groups.iter().flat_map(|g| &g.options).collect();
+        assert!(all.iter().any(|o| o.name == "--record-demo"));
+        assert!(!all.iter().any(|o| o.name.contains('<'))); // "+sv.<setting>" isn't one flag
+    }
+
+    #[test]
+    fn demos_and_their_cameras() {
+        let root = std::env::temp_dir().join(format!("bf2142-launcher-demos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Demos")).unwrap();
+        std::fs::create_dir_all(root.join("mods/bf2142/demos")).unwrap();
+        for file in [
+            "Demos/match1.bf2142demo",
+            "Demos/match1-def.bf2142cam",
+            "Demos/plain.bf2142demo",
+            "Demos/notes.txt",
+            "mods/bf2142/demos/auto_2026_11_27_10_00_00.bf2142demo",
+            "mods/bf2142/demos/auto_2026_11_27_10_00_00.bf2142demo-def.bf2142cam",
+        ] {
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+        let demos = find_demos(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        let mut paths: Vec<_> = demos.iter().map(|d| (d.path.as_str(), d.camera.as_deref())).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                ("Demos/match1.bf2142demo", Some("Demos/match1-def.bf2142cam")),
+                ("Demos/plain.bf2142demo", None),
+                (
+                    "mods/bf2142/demos/auto_2026_11_27_10_00_00.bf2142demo",
+                    Some("mods/bf2142/demos/auto_2026_11_27_10_00_00.bf2142demo-def.bf2142cam")
+                ),
+            ]
+        );
     }
 }

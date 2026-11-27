@@ -192,6 +192,84 @@ struct Saved {
     // The map picker's choices.
     #[serde(default)]
     map: SavedMap,
+    // Recording and playing back demos.
+    #[serde(default)]
+    demo: SavedDemo,
+}
+
+// A recorded demo (src-tauri's list_demos), from the repository root.
+#[derive(Deserialize, Clone, PartialEq)]
+struct DemoFile {
+    path: String,
+    bytes: u64,
+    modified: u64,
+    camera: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+#[serde(default)]
+struct SavedDemo {
+    // --record-demo <name> when a game starts (any start but playback).
+    record: bool,
+    record_name: String,
+    // The demo "Play back a demo" plays (--demo), and its camera file
+    // (--demo-camera) when one is beside it and use_camera is ticked.
+    file: String,
+    camera_file: String,
+    use_camera: bool,
+}
+
+impl SavedDemo {
+    // The demo arguments for what Run opens: playback's --demo (and
+    // --demo-camera), else --record-demo when ticked.
+    fn args(&self, start: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        if start == "demo" {
+            if !self.file.is_empty() {
+                args.extend(["--demo".to_string(), self.file.clone()]);
+                if self.use_camera && !self.camera_file.is_empty() {
+                    args.extend(["--demo-camera".to_string(), self.camera_file.clone()]);
+                }
+            }
+        } else if self.record && !self.record_name.trim().is_empty() {
+            args.extend(["--record-demo".to_string(), self.record_name.trim().to_string()]);
+        }
+        args
+    }
+}
+
+// The options the demo panel gives itself; the option groups leave them out.
+const DEMO_OPTIONS: &[&str] = &["--demo", "--demo-camera", "--record-demo"];
+
+#[derive(Clone, Copy)]
+struct DemoChoice {
+    record: RwSignal<bool>,
+    record_name: RwSignal<String>,
+    file: RwSignal<String>,
+    camera_file: RwSignal<String>,
+    use_camera: RwSignal<bool>,
+}
+
+impl DemoChoice {
+    fn new(saved: &SavedDemo) -> Self {
+        DemoChoice {
+            record: RwSignal::new(saved.record),
+            record_name: RwSignal::new(saved.record_name.clone()),
+            file: RwSignal::new(saved.file.clone()),
+            camera_file: RwSignal::new(saved.camera_file.clone()),
+            use_camera: RwSignal::new(saved.use_camera),
+        }
+    }
+
+    fn saved(&self) -> SavedDemo {
+        SavedDemo {
+            record: self.record.get(),
+            record_name: self.record_name.get(),
+            file: self.file.get(),
+            camera_file: self.camera_file.get(),
+            use_camera: self.use_camera.get(),
+        }
+    }
 }
 
 // What Run opens, from the saved choices: "menu" when unset.
@@ -238,8 +316,8 @@ impl SavedMap {
         if !self.mod_name.is_empty() && self.mod_name != "bf2142" {
             args.extend(["+modPath".to_string(), format!("mods/{}", self.mod_name)]);
         }
-        if start == "menu" || self.level.is_empty() {
-            return args;
+        if start == "menu" || start == "demo" || self.level.is_empty() {
+            return args; // the menu picks the map; a demo names its own
         }
         let play = start == "play";
         args.extend(["+level".to_string(), self.level.clone()]);
@@ -447,6 +525,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
     let extra = RwSignal::new(saved.extra.clone());
     let start_with = RwSignal::new(start_with_saved(&saved));
     let map = MapChoice::new(&saved.map);
+    let demo = DemoChoice::new(&saved.demo);
     let flags: Vec<FlagState> = loaded
         .enhanced
         .iter()
@@ -459,7 +538,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
             let options = g
                 .options
                 .iter()
-                .filter(|o| !MAP_OPTIONS.contains(&o.name.as_str()))
+                .filter(|o| !MAP_OPTIONS.contains(&o.name.as_str()) && !DEMO_OPTIONS.contains(&o.name.as_str()))
                 .map(|o| {
                     let kept = saved.options.get(&o.name).cloned().unwrap_or_else(|| SavedOpt { on: false, value: o.default_value.clone() });
                     OptState { opt: o.clone(), on: RwSignal::new(kept.on), value: RwSignal::new(kept.value) }
@@ -490,7 +569,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
             let start = start_with.get();
             let mode = match start.as_str() {
                 "view" => Some("--view"),
-                "none" => None,
+                "none" | "demo" => None, // --demo opens its own window
                 _ => Some("--menu"),
             };
             if let Some(mode) = mode
@@ -500,8 +579,9 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
             }
             // The mod, and the level to start in (not when the menu picks it).
             let ticked_menu = options.iter().any(|o| o.on.get() && o.opt.name == "--menu");
-            let start = if start != "play" && ticked_menu { "menu" } else { start.as_str() };
+            let start = if start != "play" && start != "demo" && ticked_menu { "menu" } else { start.as_str() };
             args.extend(map.args(start));
+            args.extend(demo.saved().args(start));
             for o in &options {
                 if o.on.get() {
                     args.push(o.opt.name.clone());
@@ -541,6 +621,7 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                 start_mode: start_with.get(),
                 start: String::new(),
                 map: map.saved(),
+                demo: demo.saved(),
             });
         });
     }
@@ -685,6 +766,8 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
                     <option value="view" selected=move || start_with.get() == "view"
                         title="--view +level: the level with a free camera, no player">"Free camera, no player (--view)"</option>
                     <option value="none" selected=move || start_with.get() == "none">"Only the options below"</option>
+                    <option value="demo" selected=move || start_with.get() == "demo"
+                        title="--demo: the demo chosen under Demos, in a window">"Play back a demo (--demo)"</option>
                 </select>
                 <button on:click=move |_| start("run")
                     disabled=move || running.get().is_some() || !built.get()>"Run"</button>
@@ -720,6 +803,8 @@ fn Launcher(loaded: Loaded) -> impl IntoView {
             </label>
 
             <MapPicker game_dir=game_dir start_with=start_with map=map />
+
+            <DemoPanel start_with=start_with demo=demo />
 
             <fieldset>
                 <legend>
@@ -848,6 +933,117 @@ fn OptionRow(o: OptState) -> impl IntoView {
 fn copy_text(text: &str) {
     if let Some(window) = web_sys::window() {
         let _ = window.navigator().clipboard().write_text(text);
+    }
+}
+
+// Demos: recording the game Run starts (--record-demo <name>, into
+// ./Demos/<name>.bf2142demo under the repository root), and the recorded
+// demos (./Demos and the auto-recordings in ./mods/<mod>/demos) to play
+// back with "Play back a demo", with the camera file beside one if wanted.
+#[component]
+fn DemoPanel(start_with: RwSignal<String>, demo: DemoChoice) -> impl IntoView {
+    let demos = RwSignal::new(None::<Vec<DemoFile>>);
+    let reload = move || {
+        demos.set(None);
+        spawn_local(async move {
+            demos.set(Some(call::<_, Vec<DemoFile>>("list_demos", &NoArgs {}).await.unwrap_or_default()));
+        });
+    };
+    reload();
+    let playback = move || start_with.get() == "demo";
+    let choose = move |d: &DemoFile| {
+        demo.file.set(d.path.clone());
+        demo.camera_file.set(d.camera.clone().unwrap_or_default());
+        start_with.set("demo".to_string());
+    };
+    // The chosen demo's camera file, as the list has it now (kept for
+    // --demo-camera once the list is read).
+    let camera = move || {
+        let file = demo.file.get();
+        demos.with(|l| l.as_ref().and_then(|l| l.iter().find(|d| d.path == file)).and_then(|d| d.camera.clone()))
+    };
+    Effect::new(move |_| {
+        if demos.with(Option::is_some) {
+            demo.camera_file.set(camera().unwrap_or_default());
+        }
+    });
+    view! {
+        <fieldset class="demos">
+            <legend>"Demos"</legend>
+            <ul class="options" class:inactive=playback>
+                <li>
+                    <label>
+                        <input type="checkbox" prop:checked=move || demo.record.get()
+                            on:change=move |ev| demo.record.set(event_target_checked(&ev)) />
+                        " Record a demo " <code>"--record-demo"</code>
+                    </label>
+                    <input type="text" placeholder="name" prop:value=move || demo.record_name.get()
+                        on:input=move |ev| {
+                            let v = event_target_value(&ev);
+                            if !v.trim().is_empty() {
+                                demo.record.set(true);
+                            }
+                            demo.record_name.set(v);
+                        } />
+                    <small class="description">
+                        "Records the round Run starts (playing the map, --simulate, --host) from its start into "
+                        <code>{move || format!("Demos/{}.bf2142demo", demo.record_name.get().trim())}</code>
+                        ", with its camera file when you play. Tick Enhanced mode for a full-rate demo (enhanced.demoQuality)."
+                    </small>
+                </li>
+            </ul>
+            <p class="row">
+                <strong>"Play back"</strong>
+                <button on:click=move |_| reload()>"Reload"</button>
+                <span class="status">{move || match demos.get() {
+                    None => "Reading the demos…".to_string(),
+                    Some(l) => format!("{} demos in Demos/ and mods/*/demos/", l.len()),
+                }}</span>
+            </p>
+            <ul class="levels demo-list">
+                {move || demos.get().unwrap_or_default().into_iter().map(|d| {
+                    let path = d.path.clone();
+                    let chosen = move || demo.file.get() == path;
+                    let size = if d.bytes >= 1 << 20 {
+                        format!("{:.1} MB", d.bytes as f64 / f64::from(1 << 20))
+                    } else {
+                        format!("{} KB", d.bytes.div_ceil(1024))
+                    };
+                    let note = if d.camera.is_some() { format!("{size}, with a camera file") } else { size };
+                    let title = d.path.clone();
+                    view! {
+                        <li class:chosen=chosen on:click=move |_| choose(&d)>
+                            <span class="title">{title}</span>
+                            <small class="description">{note}</small>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+            <ul class="options" class:inactive=move || !playback()>
+                <li>
+                    <label>
+                        <code>"--demo"</code>
+                        <input type="text" placeholder="Demos/<name>.bf2142demo" prop:value=move || demo.file.get()
+                            on:input=move |ev| demo.file.set(event_target_value(&ev)) />
+                    </label>
+                    <small class="description">"The demo \"Play back a demo\" plays (a bare name plays Demos/<name>.bf2142demo)."</small>
+                </li>
+                <li class:inactive=move || camera().is_none()>
+                    <label>
+                        <input type="checkbox" prop:checked=move || demo.use_camera.get()
+                            prop:disabled=move || camera().is_none()
+                            on:change=move |ev| demo.use_camera.set(event_target_checked(&ev)) />
+                        " With its camera " <code>"--demo-camera"</code>
+                    </label>
+                    <small class="description">{move || camera().map_or_else(
+                        || "No camera file beside this demo.".to_string(),
+                        |c| format!("The camera follows {c}, as recorded."))}</small>
+                </li>
+            </ul>
+            {move || (playback() && demo.file.get().is_empty()).then(|| view! {
+                <p class="hint">"Choose a demo to play it back."</p>
+            })}
+        </fieldset>
     }
 }
 
@@ -1190,6 +1386,35 @@ mod tests {
         assert!(with_bots.windows(2).any(|w| w == ["--bots", "6"]));
         assert!(with_bots.windows(2).any(|w| w == ["--bot-skill", "0.7"]));
         assert!(!with_bots.iter().any(|a| a == "--team" || a == "--console"));
+    }
+
+    #[test]
+    fn demos_record_and_play_back() {
+        let demo = SavedDemo {
+            record: true,
+            record_name: " match1 ".into(),
+            file: "Demos/old.bf2142demo".into(),
+            camera_file: "Demos/old-def.bf2142cam".into(),
+            use_camera: true,
+        };
+        // Any start but playback records.
+        for start in ["play", "menu", "view", "none"] {
+            assert_eq!(demo.args(start), ["--record-demo", "match1"]);
+        }
+        assert!(SavedDemo { record: false, ..demo.clone() }.args("play").is_empty());
+        assert!(SavedDemo { record_name: " ".into(), ..demo.clone() }.args("none").is_empty());
+        // Playback: the demo and its camera, nothing recorded, no level.
+        assert_eq!(demo.args("demo"), ["--demo", "Demos/old.bf2142demo", "--demo-camera", "Demos/old-def.bf2142cam"]);
+        assert_eq!(SavedDemo { use_camera: false, ..demo.clone() }.args("demo"), ["--demo", "Demos/old.bf2142demo"]);
+        assert_eq!(SavedDemo { camera_file: String::new(), ..demo.clone() }.args("demo"), ["--demo", "Demos/old.bf2142demo"]);
+        assert!(SavedDemo { file: String::new(), ..demo.clone() }.args("demo").is_empty());
+        assert!(cerbere().args("demo").is_empty());
+        // Kept with the other choices.
+        let saved = Saved { demo: demo.clone(), ..Default::default() };
+        let back: Saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(back.demo == demo);
+        let old: Saved = serde_json::from_str("{\"enhanced\":false,\"enhanced_flags\":{},\"options\":{},\"extra\":\"\"}").unwrap();
+        assert!(old.demo == SavedDemo::default());
     }
 
     #[test]
