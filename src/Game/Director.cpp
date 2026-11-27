@@ -505,6 +505,8 @@ std::optional<Cut> ShotDirector::keepFollowing(float now, const Sample& s, const
 		next = CameraMode::Chase; // a vehicle: the chase (a seat's own view isn't the director's)
 	} else if (s.vehicle && now - m_angleAt >= m_settings.angleEvery) {
 		next = m_mode == CameraMode::Chase ? CameraMode::Wide : CameraMode::Chase; // now and then an orbit of it
+	} else if (!s.vehicle && m_settings.firstPersonShare >= 1) {
+		next = CameraMode::FirstPerson; // --director-first-person: on foot, only his own eye
 	} else if (!s.vehicle && now - m_angleAt >= m_settings.angleEvery) {
 		next = m_mode == CameraMode::Chase ? CameraMode::FirstPerson : CameraMode::Chase;
 		if (m_mode != CameraMode::Wide && random() < m_settings.wideShare) {

@@ -510,3 +510,32 @@ TEST(Director_KillsChasesAVehicleAndVariesTheAngle)
 		CHECK(c.reason != "angle" && c.reason != "killer" && c.reason != "first-kill");
 	}
 }
+
+// --director-first-person with --director-mode kills: a followed killer on
+// foot stays in his own eye (no chase or orbit angle changes); in a vehicle
+// the chase and orbit still alternate.
+TEST(Director_KillsFirstPersonOnlyKeepsTheEye)
+{
+	game::director::Settings settings = killsSettings();
+	settings.firstPersonShare = 1;
+	settings.wideShare = 0;
+	ShotDirector shots(settings);
+	std::vector<Cut> cuts = run(shots, 120, [](float t) {
+		Sample two = fighting(2);
+		if (t >= 60) {
+			two.vehicle = 42;
+		}
+		return std::vector<Sample> {t < 1 ? fighting(1) : killedBy(fighting(1), 2), two};
+	});
+	int inVehicle = 0;
+	for (const Cut& c : cuts) {
+		if (c.subject == 2 && c.time < 60) {
+			CHECK(c.mode == CameraMode::FirstPerson);
+		}
+		if (c.reason == "angle" && c.time >= 60) {
+			++inVehicle;
+			CHECK(c.mode != CameraMode::FirstPerson);
+		}
+	}
+	CHECK(inVehicle >= 1);
+}
