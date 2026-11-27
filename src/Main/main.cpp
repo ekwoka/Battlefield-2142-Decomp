@@ -14,6 +14,7 @@
 //               [--director] (with --bots N: a match of bots, a spectator camera cutting between them)
 //               [--director-mode interest|kills] [--director-idle <seconds>]
 //               [--record-demo <name>] [--demo <file|name>] [--demo-stats <file>]
+//               [--director-first-person] [--follow-hud] [--demo-follow <player>] [--demo-first-person]
 // --view opens a window showing the level (needs a build with SDL3);
 // --screenshot renders one frame to a PNG instead.
 // --director runs a match of bots only (the local player spectates) and
@@ -205,6 +206,10 @@ struct Options {
 	bool spectate = false;       // --spectate: on a server, join as a spectator (the menu's SPECTATOR)
 	bool director = false;       // --director: a match of bots only, the camera cutting between them (Game/Director.h)
 	game::director::Settings directorSettings; // --director-mode interest|kills, --director-idle <s>
+	bool directorFirstPerson = false; // --director-first-person: every infantry shot in first person (Settings::firstPersonShare 1, no wide shots)
+	bool followHud = false;      // --follow-hud: a first-person follow (enhanced.followFirstPerson) shows the followed player's HUD from the start (J toggles it)
+	std::string demoFollow;      // --demo-follow <player name|id>: the demo camera follows that player
+	bool demoFirstPerson = false; // --demo-first-person: the demo's followed player in his own first person (enhanced.followFirstPerson)
 	// --remote-actions "<s>:<op> ...": on a server without a window, the
 	// inputs from that second of the round on (crouch, prone, stand, fire,
 	// hold (stop firing), reload, forward, stop, turn:<deg a tick>,
@@ -505,6 +510,14 @@ bool parseOptions(int argc, char** argv, Options& options)
 			}
 		} else if (arg == "--director-idle" && hasValue) {
 			options.directorSettings.followIdle = static_cast<float>(std::atof(argv[++i]));
+		} else if (arg == "--director-first-person") {
+			options.directorFirstPerson = true;
+		} else if (arg == "--follow-hud") {
+			options.followHud = true;
+		} else if (arg == "--demo-follow" && hasValue) {
+			options.demoFollow = argv[++i];
+		} else if (arg == "--demo-first-person") {
+			options.demoFirstPerson = true;
 		} else if (arg == "--spectate") {
 			options.spectate = true;
 		} else if (arg == "--maps" && hasValue) {
@@ -995,6 +1008,18 @@ bool g_initialDeploymentPending = false;
 bool g_spawnScreenHidden = false;
 // --director: the HUD shown (H toggles it; hidden for clean footage).
 bool g_directorHud = false;
+// enhanced.followFirstPerson (not retail; PlayerCamera::setSubject): the
+// view is a followed player's own first person this tick (the director's
+// first-person shot of a bot, a demo's followed player with
+// --demo-first-person), drawn by the follow camera; `player` is his id.
+// g_followHud (J, --follow-hud) shows his HUD then, even while the
+// director's HUD is hidden: footage with or without it.
+struct FollowView {
+	bool active = false;
+	int player = -1;
+};
+FollowView g_follow;
+bool g_followHud = false;
 // The gui index the vehicle HUD shows (the HUD manager's +0xa0; 0 on foot),
 // which the seat's post-processing asks with (0x007a0080).
 int g_guiIndex = 0;
@@ -1588,6 +1613,7 @@ void updateSecondaryWeapon(hud::HudManager& hud, const host::HudWorld& world, co
 	in.nrOfMags = gun.nrOfMags;
 	in.rounds = second.rounds;
 	in.mags = second.mags >= 0 ? second.mags : 0;
+	in.magsKnown = second.gun || second.mags >= 0;
 	if (const game::FireArm* arm = second.gun) {
 		in.reload = arm->reloading() && gun.reloadTime > 0 ? 1 - arm->reloadLeft() / gun.reloadTime : 0;
 		in.heat = gun.heatAddWhenFire > 0 ? arm->heat() : 0;
@@ -1818,7 +1844,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			heldGun = held.gun;
 			heldGunTemplate = held.weapon;
 			dice::hfe::menu::updateSoldierWeaponHud(hud, held.weapon,
-				world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer()),
+				world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(world.localPlayer()),
 				g_weaponZoomed, false, crosshairActive);
 		}
 		// The gui index (0x007a01e0 -> the runtime VehicleHud's 0x00657660,
@@ -1840,7 +1866,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			gui.sprintTest = dice::hfe::menu::guiSprintTest(look.sprinting, g_hudWeaponFlag);
 			g_guiIndex = kitSeat
 				? dice::hfe::menu::updateSoldierWeaponHud(hud, held.weapon,
-					world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer()),
+					world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(world.localPlayer()),
 					g_weaponZoomed, false, crosshairActive)
 				: dice::hfe::menu::vehicleGuiIndex(gui);
 			g_guiSecondWeapon = gui.second;
@@ -1963,6 +1989,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		} else {
 			in.rounds = held.rounds;
 			in.mags = held.mags >= 0 ? held.mags : 0;
+			in.magsKnown = held.mags >= 0; // (a followed player's: not sent)
 		}
 		// The range finder's ray and the distance counter's projectile
 		// (0x007c1470), only for the weapons with them (read once per
@@ -2429,7 +2456,7 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 			// (GameWorld::weaponDeviation: the turn, speed, stance and
 			// firing), its minimum without one.
 			// min/maxVisualDeviation move nothing (menu::crosshairParts).
-			const float now = world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(round.localPlayer());
+			const float now = world.joined() ? std::max(g_remoteDeviation, 0.0f) : round.weaponDeviation(world.localPlayer());
 			dice::hfe::menu::updateSoldierWeaponHud(hud, rifle, now, false,
 				sprintTest, hud.number("CrosshairIconShow") != 0);
 		}
@@ -4744,6 +4771,15 @@ int runGame(Options& options, Session& session)
 				[playback, eligible](bool next) { playback->camera.step(next ? 1 : -1, eligible); });
 			bindMethod(console, "demo.toggleCameraDemo", ConsoleAccess::Anyone,
 				[playback, eligible] { playback->camera.toggle(eligible); });
+			// Not retail (enhanced.followFirstPerson): the followed player in
+			// his own first person (--demo-first-person), and whom to follow
+			// (--demo-follow: a name or an id, followed once he lives).
+			playback->firstPerson = options.demoFirstPerson;
+			playback->followWanted = options.demoFollow;
+			bindMethod(console, "demo.toggleFirstPerson", ConsoleAccess::Anyone, [playback] {
+				playback->firstPerson = !playback->firstPerson;
+				std::printf("demo: the followed player in %s\n", playback->firstPerson ? "first person" : "the follow camera");
+			});
 		} else {
 			client.connect(host, port, clientOptions);
 		}
@@ -6502,6 +6538,36 @@ int runGame(Options& options, Session& session)
 		PlayerCamera playerCamera(round, animationSystems, loadAnimationSystem);
 		playerCamera.setChaseRoll(&enhancedSettings.enabled, &enhancedSettings.chaseRoll);
 		playerCamera.firstPerson = playerCamera.spawnFirstPerson = options.cameraMode != "third";
+		// enhanced.followFirstPerson: a followed player's own first person
+		// (g_follow, PlayerCamera::setSubject), drawn instead of the local
+		// player's camera while g_follow.active (the view, the first-person
+		// pass, the cockpit, the HUD's zoom and camera mode).
+		PlayerCamera followCamera(round, animationSystems, loadAnimationSystem);
+		g_follow = {};
+		g_followHud = options.followHud;
+		const auto shownCamera = [&]() -> PlayerCamera& { return g_follow.active ? followCamera : playerCamera; };
+		// The followed player's first person for the viewer: his eye or his
+		// seat's camera at the tick, blended between ticks as a seat's view
+		// is (not as the local soldier's eye, which the local mouse turns).
+		const auto followView = [&followCamera](ViewerOptions::PlayerView& view) {
+			followCamera.setBlend(view.blendAlpha);
+			PlayerCamera::View eye;
+			if (!g_follow.active || !followCamera.view(eye, view.aspect)) {
+				return false;
+			}
+			const float aspect = view.aspect, alpha = view.blendAlpha;
+			view = {eye.position[0], eye.position[1], eye.position[2], eye.yaw * 57.29578f};
+			view.aspect = aspect;
+			view.blendAlpha = alpha;
+			view.firstPerson = true;
+			std::copy(eye.position.begin(), eye.position.end(), view.eye);
+			view.eyeYaw = eye.yaw;
+			view.eyePitch = eye.pitch;
+			view.fovY = eye.fovY;
+			view.eyeRoll = eye.roll;
+			view.eyeHeight = view.eyeTarget = eye.eyeHeight;
+			return true;
+		};
 		// FreeCam.* (the HUD manager's slots 0x130 / 0x134, 0x00752050 /
 		// 0x00752150): the next player to follow, the free and following
 		// cameras swapped.
@@ -6839,6 +6905,7 @@ int runGame(Options& options, Session& session)
 			for (const auto& sound : playerCamera.takeSounds()) {
 				gameAudio.effectSound(sound.name, {sound.position.x, sound.position.y, sound.position.z});
 			}
+			followCamera.takeSounds(); // (a followed player's bundles sound in the world already: his third person's)
 			for (const auto& sound : objectEffects.takeSounds()) {
 				gameAudio.effectSound(sound.name, {sound.position.x, sound.position.y, sound.position.z});
 			}
@@ -7522,6 +7589,11 @@ int runGame(Options& options, Session& session)
 					}
 				}
 				return true;
+			});
+			// enhanced.followFirstPerson: a demo's followed player (g_follow)
+			// as the ghosts have him (RemoteHudWorld::followed).
+			followCamera.setRemote([](PlayerCamera::Remote& me) {
+				return g_remoteHud && g_follow.player >= 0 && g_remoteHud->followed(g_follow.player, me);
 			});
 		}
 		std::map<uint16_t, uint32_t> ragdollUpdates; // ghost -> the ragdoll update last applied
@@ -8234,6 +8306,9 @@ int runGame(Options& options, Session& session)
 					state.firePresses = -1;
 					state.muzzleEffects = !playerCamera.insideView();
 				}
+				if (g_follow.active && p.id == g_follow.player) {
+					state.muzzleEffects = false; // a followed player in his first person: the follow camera's own
+				}
 				const auto kit = ghostObjects.find(p.kitGhost);
 				const world::Object* worn = p.kitGhost && kit != ghostObjects.end() ? objects.find(kit->second) : nullptr;
 				if (worn && worn->objectTemplate()) {
@@ -8695,6 +8770,73 @@ int runGame(Options& options, Session& session)
 				playerCamera.direct(look, fovY, director->cutLastTick(), director->hidden());
 			}
 		};
+		// enhanced.followFirstPerson (g_follow): whom the view shows in his
+		// own first person this tick, after the world, the director and the
+		// local camera: the director's first-person subject while he lives,
+		// or a demo's followed player (--demo-first-person). The follow
+		// camera only reads the round (no simulation state changes with it).
+		const auto stepFollow = [&] {
+			if (g_demo && !g_demo->followWanted.empty() && session.client) {
+				// --demo-follow: the demo camera on that player (by name, any
+				// case, or id) whenever he lives, as demo.togglePlayerDemo's
+				// follow (0x005f9e30) would put it.
+				const std::string& wanted = g_demo->followWanted;
+				const auto named = [&wanted](const net::RemotePlayer& p) {
+					if (std::to_string(p.id) == wanted) {
+						return true;
+					}
+					return p.name.size() == wanted.size()
+						&& std::equal(p.name.begin(), p.name.end(), wanted.begin(), [](char a, char b) {
+							   return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+						   });
+				};
+				for (const net::RemotePlayer& p : session.client->world().playerList()) {
+					if (named(p) && p.alive && p.soldierGhost
+						&& !(g_demo->camera.mode == host::DemoCamera::Mode::Follow && g_demo->camera.followed == p.id)) {
+						g_demo->camera.mode = host::DemoCamera::Mode::Follow;
+						g_demo->camera.followed = p.id;
+						std::printf("demo: following %s (player %d)%s\n", p.name.c_str(), p.id,
+							g_demo->firstPerson ? " in first person" : "");
+						break;
+					}
+				}
+			}
+			static bool hinted = false;
+			if (!hinted && !(enhancedSettings.enabled && enhancedSettings.followFirstPerson)
+				&& ((director && options.directorFirstPerson) || (g_demo && g_demo->firstPerson))) {
+				hinted = true;
+				std::printf("follow: a followed player's own first person (arms, weapon, seat camera, HUD) needs --enhanced "
+							"(enhanced.followFirstPerson)\n");
+			}
+			int subject = -1;
+			if (enhancedSettings.enabled && enhancedSettings.followFirstPerson) {
+				if (director && director->mode() == game::director::CameraMode::FirstPerson) {
+					game::GameWorld::PlayerInfo info;
+					if (round.playerInfo(director->subject(), info) && info.alive) {
+						subject = info.id;
+					}
+				} else if (g_demo && g_demo->firstPerson && g_demo->camera.mode == host::DemoCamera::Mode::Follow
+					&& session.client) {
+					const net::RemotePlayer* p = session.client->world().player(g_demo->camera.followed);
+					if (p && p->alive && p->soldierGhost) {
+						subject = p->id;
+					}
+				}
+			}
+			g_follow.player = subject;
+			if (subject < 0) {
+				g_follow.active = false;
+				followCamera.setSubject(-1); // the next follow starts afresh (his deploy, no stale shakes)
+				return;
+			}
+			// The bots' zoom (BotManager::zoomLevel); a demo's comes with the ghosts.
+			followCamera.setSubject(subject, session.client ? std::function<int(int)> {}
+															: std::function<int(int)> {[&bots](int id) { return bots.zoomLevel(id); }});
+			followCamera.cameraShake = playerCamera.cameraShake;
+			followCamera.tick(1.0f / 30.0f);
+			PlayerCamera::View eye;
+			g_follow.active = followCamera.view(eye, 4.0f / 3.0f);
+		};
 #if BF2142_HAS_PYTHON
 		// The game mode's Python script runs the round (python/bf2 and
 		// mods/<mod>/python/game/gamemodes/<mode>.py).
@@ -8899,13 +9041,15 @@ int runGame(Options& options, Session& session)
 			}
 			{ TP("bots"); bots.update(1.0f / 30.0f); }
 			round.localMuzzleEffects = !playerCamera.insideView();
-			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale());
+			round.firstPersonPlayer = g_follow.active ? g_follow.player : -1;
+			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale(), playerCamera.zoomLevel());
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			{ TP("round"); round.tick(1.0f / 30.0f); }
 			stepDirector();
 			driveTrace();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
+			stepFollow();
 			stepObjectEffects();
 			{ TP("logic"); gameLogic.tick(1.0f / 30.0f); }
 			{ TP("scripts"); scripts.update(); }
@@ -8937,11 +9081,13 @@ int runGame(Options& options, Session& session)
 			}
 			{ TP("bots"); bots.update(1.0f / 30.0f); }
 			round.localMuzzleEffects = !playerCamera.insideView();
+			round.firstPersonPlayer = g_follow.active ? g_follow.player : -1;
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			{ TP("round"); round.tick(1.0f / 30.0f); }
 			stepDirector();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
+			stepFollow();
 			stepObjectEffects();
 			{ TP("logic"); gameLogic.tick(1.0f / 30.0f); }
 			stepSounds();
@@ -9117,7 +9263,14 @@ int runGame(Options& options, Session& session)
 			if (!bots.enabled() || options.bots <= 0) {
 				std::printf("director: no bots to watch (give --bots N on a level with AI navigation data)\n");
 			}
-			director.emplace(round, &bots, options.directorSettings);
+			game::director::Settings shots = options.directorSettings;
+			if (options.directorFirstPerson) {
+				// Every infantry shot in the bot's own eye (with
+				// enhanced.followFirstPerson, his arms and weapon); no orbits.
+				shots.firstPersonShare = 1;
+				shots.wideShare = 0;
+			}
+			director.emplace(round, &bots, shots);
 			director->onCut = [&round](const game::director::Cut& cut) {
 				game::GameWorld::PlayerInfo who;
 				const bool known = round.playerInfo(cut.subject, who);
@@ -9991,9 +10144,9 @@ int runGame(Options& options, Session& session)
 			round.setImpactView({position.x, position.y, position.z}, farDistance);
 		};
 		// The seat camera's static interior sun (PlayerCamera::insideSun).
-		sources.insideSun = [&playerCamera](render::InsideSun& sun) {
+		sources.insideSun = [&shownCamera](render::InsideSun& sun) {
 			PlayerCamera::InsideSun inside;
-			if (!playerCamera.insideSun(inside)) {
+			if (!shownCamera().insideSun(inside)) {
 				return false;
 			}
 			sun.dynamicLights = inside.dynamicLights;
@@ -10035,20 +10188,21 @@ int runGame(Options& options, Session& session)
 		// What the post-production follows: the vehicle's EMP, a Titan's core
 		// exploding, and a zoomed vehicle weapon's camera effect
 		// (weaponHud.enablePostProcessingOnGuiIndex naming the HUD shown).
-		sources.postEffects = [&round, &playerCamera, &enhancedSettings, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
+		sources.postEffects = [&round, &shownCamera, &enhancedSettings, cores = std::vector<uint32_t> {}](render::PostEffects& effects) mutable {
 			game::GameWorld::PlayerInfo me;
+			const int shown = g_follow.active ? g_follow.player : round.localPlayer(); // a followed player's own (enhanced.followFirstPerson)
 			// The soldier's own EMP on foot, and a tinnitus from an explosion near.
-			if (round.playerInfo(round.localPlayer(), me) && me.alive && !me.vehicle) {
+			if (round.playerInfo(shown, me) && me.alive && !me.vehicle) {
 				effects.soldierEmpLevel = me.empLevel;
 			}
 			effects.tinnitusSeconds = round.takeTinnitus();
 			// Through a guided round's camera (useProjectileCamera): the
 			// TVEffect pass (RendDX9 0x10048f80, PostProduction's "TVEffect"),
 			// which retail never runs: only with enhanced.tvEffect.
-			host::roundCameraEffects(round, round.localPlayer(), effects,
+			host::roundCameraEffects(round, shown, effects,
 				enhancedSettings.enabled && enhancedSettings.tvEffect);
-			effects.viewTinted = playerCamera.viewColor(effects.viewTint, effects.viewSaturation);
-			if (round.playerInfo(round.localPlayer(), me) && me.alive && me.vehicle) {
+			effects.viewTinted = shownCamera().viewColor(effects.viewTint, effects.viewSaturation);
+			if (round.playerInfo(shown, me) && me.alive && me.vehicle) {
 				effects.vehicleEmpLevel = round.empLevel(me.vehicle);
 				const auto seats = round.vehicleSeats(me.vehicle);
 				const world::ObjectTemplate* gun = me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()
@@ -10056,7 +10210,7 @@ int runGame(Options& options, Session& session)
 					: nullptr;
 				// The seat's or its guns' enablePostProcessingOnGuiIndex naming
 				// the gui index shown (HudMenusVehicles.h seatPostProcessing).
-				if (playerCamera.insideView()) {
+				if (shownCamera().insideView()) {
 					effects.cameraEffect =
 						dice::hfe::menu::seatPostProcessing(controlledTemplate(round, me), gun, g_guiSecondWeapon, g_guiIndex);
 				}
@@ -10275,15 +10429,27 @@ int runGame(Options& options, Session& session)
 			}
 			localHud.scoreOf = scoreOf;
 			localHud.skillScoreOf = skillScoreOf;
-			g_weaponZoomed = playerCamera.zoomLevel() > 0; // the firearm's slot 300 (its zoom)
+			// enhanced.followFirstPerson: in a followed player's first person
+			// the HUD is his (HudWorld::viewedPlayer) for this update, with his
+			// camera's zoom and mode.
+			host::HudWorld& hudShown = session.client && remoteHud ? static_cast<host::HudWorld&>(*remoteHud) : localHud;
+			// Shown with J (g_followHud), or the director's whole HUD (H) in his shot.
+			const bool followHudShown = g_follow.active && (g_followHud || (director && g_directorHud));
+			hudShown.viewedPlayer = followHudShown ? g_follow.player : -1;
+			struct Unview {
+				host::HudWorld& world;
+				~Unview() { world.viewedPlayer = -1; }
+			} unview {hudShown};
+			PlayerCamera& hudCamera = followHudShown ? followCamera : playerCamera;
+			g_weaponZoomed = hudCamera.zoomLevel() > 0; // the firearm's slot 300 (its zoom)
 			// The seat camera's mode; a third-person choice not yet given to
 			// the seat's camera (it starts in Chase, PlayerCamera.h) is Chase.
-			g_cameraMode = static_cast<int>(playerCamera.mode());
-			if (!playerCamera.firstPerson && playerCamera.mode() == game::camera::Mode::Inside) {
+			g_cameraMode = static_cast<int>(hudCamera.mode());
+			if (!hudCamera.firstPerson && hudCamera.mode() == game::camera::Mode::Inside) {
 				g_cameraMode = static_cast<int>(game::camera::Mode::Chase);
 			}
 			float gunHeading = 0;
-			const std::optional<float> mapHeading = playerCamera.seatMapHeading(gunHeading)
+			const std::optional<float> mapHeading = hudCamera.seatMapHeading(gunHeading)
 				? std::optional<float>(gunHeading) : std::nullopt;
 			// Loss of command also arrives through votes, team changes or
 			// disconnects, without a resignation notification. Close the
@@ -10298,7 +10464,7 @@ int runGame(Options& options, Session& session)
 			// screen's overhead picture leaves the camera the player's.
 			const uint32_t insideTitan = tagViewSeen ? round.cameraTitan({eye[0], eye[1], eye[2]}) : 0;
 			updateHud(hudManager, hudWorld(), round, gameLogic, scoreboardHeld, commanderScreen, mapHeading, insideTitan,
-				tagViewSeen && playerCamera.firstPerson ? &tagView : nullptr);
+				tagViewSeen && hudCamera.firstPerson ? &tagView : nullptr);
 			// The minimap's combat-area layer and framing (HudCombatArea.h):
 			// the areas that apply to the local player's team and the
 			// category of what he controls (0 on foot).
@@ -10360,7 +10526,7 @@ int runGame(Options& options, Session& session)
 					help.squad = known ? self.squad : 0;
 					help.squadLeader = known && self.squadLeader;
 					help.roundTime = round.roundTime();
-					help.zoomed = playerCamera.zoomed();
+					help.zoomed = hudCamera.zoomed();
 					// The menu state (0x007b8b80: the spawn screen's members half
 					// 0x12 for a squad leader, 0x13 for the rest; the kits 1).
 					// The commander screen is 0x10, its artillery's and orbital
@@ -10507,6 +10673,9 @@ int runGame(Options& options, Session& session)
 				}
 				helpPopups.update(hudManager, help, seconds);
 				if (!help.spawnScreen) helpPopups.tutorial(hudManager, help, seconds);
+				if (followHudShown) {
+					hudManager.set("IngameHelpShow", 0); // (a followed player's HUD: the local help is no one's)
+				}
 				dogTags.tick(hudManager, seconds);
 				importantMessage.tick(hudManager, seconds);
 				// The lock tones (GameWorld::takeLockTones, 0x00657ce0).
@@ -10684,9 +10853,13 @@ int runGame(Options& options, Session& session)
 			hudManager.set("MembersShow", membersShown ? 1 : 0);
 			// Zoomed in, the weapon's zoomed HUD (weaponHud.altGuiIndex: the
 			// scopes' dots and reticles).
-			if (playerCamera.zoomed() && !round.playerVehicle()) {
-				if (const world::Object* held = round.objects().find(round.playerWeaponObject())) {
-					const auto& settings = held->objectTemplate()->settings();
+			const world::Object* zoomedHeld = !followHudShown ? round.objects().find(round.playerWeaponObject()) : nullptr;
+			const world::ObjectTemplate* zoomedGun = zoomedHeld ? zoomedHeld->objectTemplate()
+				: followHudShown                                ? hudShown.heldWeapon().weapon // a followed player's
+																: nullptr;
+			if (hudCamera.zoomed() && !(followHudShown ? hudShown.vehicle() : round.playerVehicle())) {
+				if (zoomedGun) {
+					const auto& settings = zoomedGun->settings();
 					const auto alt = settings.find("weaponHud.altGuiIndex");
 					if (alt != settings.end()) {
 						hudManager.set("GuiIndex", static_cast<float>(std::atoi(alt->second.c_str())));
@@ -10738,8 +10911,8 @@ int runGame(Options& options, Session& session)
 			if (hud::HudQuad dragged; hudManager.dragQuad(dragged)) {
 				quads.push_back(dragged); // the kit screen's taken item
 			}
-			if (director && !g_directorHud) {
-				quads.clear(); // --director: clean footage (no HUD, name tags, map or crosshair) until H
+			if (director && !g_directorHud && !followHudShown) {
+				quads.clear(); // --director: clean footage (no HUD, name tags, map or crosshair) until H (or J in a bot's first person)
 			}
 			return quads;
 		};
@@ -10795,13 +10968,13 @@ int runGame(Options& options, Session& session)
 		};
 		// The first-person pass: the arms and the weapon at the eye, the
 		// player's own soldier left out of the world.
-		sources.hiddenInView = [&playerCamera](uint32_t object) { return playerCamera.hides(object); };
-		sources.cockpitVehicle = [&playerCamera]() -> uint32_t {
+		sources.hiddenInView = [&shownCamera](uint32_t object) { return shownCamera().hides(object); };
+		sources.cockpitVehicle = [&shownCamera]() -> uint32_t {
 			PlayerCamera::Cockpit cockpit;
-			return playerCamera.cockpit(cockpit) ? cockpit.vehicle : 0;
+			return shownCamera().cockpit(cockpit) ? cockpit.vehicle : 0;
 		};
 		// Inside a vehicle in first person its cockpit geometry (0x00612880).
-		sources.geometryFor = [&playerCamera, &round, &objects](uint32_t object, const std::string& source, int& geometry, int& lod) {
+		sources.geometryFor = [&shownCamera, &round, &objects](uint32_t object, const std::string& source, int& geometry, int& lod) {
 			// A kit on the ground: its template's geometry.dropGeom.
 			const world::Object* kit = round.isDroppedKit(object) ? objects.find(object) : nullptr;
 			if (kit && kit->objectTemplate()) {
@@ -10836,15 +11009,15 @@ int runGame(Options& options, Session& session)
 				return true;
 			}
 			PlayerCamera::Cockpit cockpit;
-			if (!playerCamera.cockpit(cockpit, object) || !PlayerCamera::cockpitCovers(cockpit, source)) {
+			if (!shownCamera().cockpit(cockpit, object) || !PlayerCamera::cockpitCovers(cockpit, source)) {
 				return false;
 			}
 			geometry = cockpit.subGeometry;
 			lod = cockpit.lod;
 			return true;
 		};
-		sources.firstPerson = [&playerCamera, &sources](render::FirstPersonScene& scene) {
-			const std::vector<PlayerCamera::Model> models = playerCamera.models();
+		sources.firstPerson = [&shownCamera, &sources](render::FirstPersonScene& scene) {
+			const std::vector<PlayerCamera::Model> models = shownCamera().models();
 			if (models.empty()) {
 				return false;
 			}
@@ -10862,14 +11035,14 @@ int runGame(Options& options, Session& session)
 				}
 				scene.models.push_back(std::move(drawn));
 			}
-			scene.effects = &playerCamera.effects();
-			scene.weaponZoomed = playerCamera.zoomed();
+			scene.effects = &shownCamera().effects();
+			scene.weaponZoomed = shownCamera().zoomed();
 			// The weapon and hands sit at the tick's eye; drawn through the
 			// blended view with its per-frame look, they are carried along
 			// (LevelRenderer: tickBlendViewAdjustment).
 			{
 				PlayerCamera::View eye;
-				if (playerCamera.view(eye, 4.0f / 3.0f)) {
+				if (shownCamera().view(eye, 4.0f / 3.0f)) {
 					render::Camera placement;
 					placement.position = {eye.position[0], eye.position[1], eye.position[2]};
 					placement.yaw = eye.yaw;
@@ -10895,10 +11068,12 @@ int runGame(Options& options, Session& session)
 			round.setEffectsPerFrame(true);
 			objectEffects.setParticlesPerFrame(true); // the objects' own (engines, exhausts, wakes)
 			playerCamera.setEffectsPerFrame(true);
-			viewer.onFrame = [&round, &objectEffects, &playerCamera](float seconds, float alpha) {
+			followCamera.setEffectsPerFrame(true);
+			viewer.onFrame = [&round, &objectEffects, &playerCamera, &followCamera](float seconds, float alpha) {
 				round.frameEffects(seconds, alpha);
 				objectEffects.frame(seconds, alpha);
 				playerCamera.frameEffects(seconds);
+				followCamera.frameEffects(seconds);
 			};
 		}
 		// Before the first spawn the view is the level's before-spawn camera
@@ -10994,8 +11169,11 @@ int runGame(Options& options, Session& session)
 			// object (in first person at its eye, PlayerCamera::Remote), the
 			// keys go up as moves, a click on a spawn point asks for it (with
 			// the first kit).
-			viewer.playerView = [&session, &playerCamera, &ownFeet](ViewerOptions::PlayerView& view) {
+			viewer.playerView = [&session, &playerCamera, &ownFeet, &followView](ViewerOptions::PlayerView& view) {
 				playerCamera.setBlend(view.blendAlpha); // the first-person skeleton between its ticks
+				if (followView(view)) {
+					return true; // a demo's followed player in his own first person (--demo-first-person)
+				}
 				// A demo's camera following a player (0x005f8f40), with the
 				// demo's fov (0x00434610); free, the viewer's own camera.
 				// A camera file played (0x005fa4a0 -> 0x005fa210): its free
@@ -11387,8 +11565,11 @@ int runGame(Options& options, Session& session)
 				return std::exchange(g_pointerWarp, false);
 			};
 			viewer.takeAimKick = [&round] { return round.takeAimKick(round.localPlayer()); };
-			viewer.playerView = [&round, &playerCamera, &hudPlayer, &hudLocal](ViewerOptions::PlayerView& view) {
+			viewer.playerView = [&round, &playerCamera, &hudPlayer, &hudLocal, &followView](ViewerOptions::PlayerView& view) {
 				playerCamera.setBlend(view.blendAlpha); // the first-person skeleton between its ticks
+				if (followView(view)) {
+					return true; // a followed bot's own first person (enhanced.followFirstPerson)
+				}
 				// The soldier and its vehicle as the HUD has them (a joined
 				// game's: the server's ghosts as the level's objects).
 				const world::Object* player = g_remoteHud ? g_remoteHud->soldier() : round.player();
@@ -11704,7 +11885,20 @@ int runGame(Options& options, Session& session)
 				ViewerOptions::PlayerInput idle;
 				idle.scoreboard = in.scoreboard;
 				idle.aimPitchDegrees = in.aimPitchDegrees;
+				idle.followHud = in.followHud;
 				inner(idle);
+			};
+		}
+		if ((director || g_demo) && viewer.onPlayerInput) {
+			// enhanced.followFirstPerson: J shows or hides the followed
+			// player's HUD in his first person (g_followHud).
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, followWas = false](const ViewerOptions::PlayerInput& in) mutable {
+				if (in.followHud && !followWas) {
+					g_followHud = !g_followHud;
+					std::printf("follow: the followed player's HUD %s\n", g_followHud ? "shown" : "hidden");
+				}
+				followWas = in.followHud;
+				inner(in);
 			};
 		}
 		std::array<int, 3> remoteTicketState {-1, -1, -1}; // a joined game's last seen team +0x8c

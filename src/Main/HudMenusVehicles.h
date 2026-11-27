@@ -210,6 +210,9 @@ struct WeaponHudInput {
 	int rounds = 0;      // in the magazine (the firearm's slot 0xbc)
 	int magSize = 0;     // slot 0xb8; < 0: no magazine
 	int mags = 0;        // magazines with the one in the gun (slot 0xb0)
+	// Not known (a followed player's in a joined game: only the rounds in
+	// his magazine are sent, PlayerNetState::FireState): no clips or total.
+	bool magsKnown = true;
 	int nrOfMags = 0;    // slot 0xa8; < 0: endless
 	float reload = 0;    // the reload's progress, 0..1 (1 - slot 0x9c)
 	float heat = 0;      // slot 0x24

@@ -227,7 +227,8 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		m_ammo = share;
 		hud.set(var("Ammo"), share);
 		hud.setString(var("AmmoString"), std::to_string(in.rounds));
-		hud.setString("Tot" + P + "AmmoString", "/ " + std::to_string((in.mags - 1) * in.magSize + in.rounds));
+		hud.setString("Tot" + P + "AmmoString",
+			in.magsKnown ? "/ " + std::to_string((in.mags - 1) * in.magSize + in.rounds) : std::string());
 		const bool single = in.magSize < 2;
 		setColor(hud, var("AmmoColor"), hudLevelColor(share, single ? 0.1f : 0.3f));
 		hud.set(var("SingleFireShow"), single ? 1 : 0);
@@ -250,7 +251,7 @@ std::string WeaponHud::update(hud::HudManager& hud, const WeaponHudInput& in, bo
 		m_overheatPlayed = false;
 	}
 	// The clips (0x007be960).
-	if (showClips && magazine) {
+	if (showClips && magazine && in.magsKnown) {
 		const int spare = in.mags - 1;
 		hud.set(var("Clip1Show"), spare > 0 ? 1 : 0);
 		hud.set(var("Clip2Show"), spare > 1 ? 1 : 0);

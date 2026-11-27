@@ -792,6 +792,11 @@ void RemoteWorld::apply(const GhostBlock& ghosts)
 				for (size_t g = 0; g < 3; ++g) {
 					if (n.fireMask & slots[g]) {
 						p.fire[g] = n.fire[g];
+						if (n.fire[g].rounds >= 0) {
+							const RemoteObject* soldier = p.soldierGhost ? object(p.soldierGhost) : nullptr;
+							p.knownRounds[g] = n.fire[g].rounds;
+							p.knownRoundsWeapon[g] = soldier ? soldier->weapon : -1;
+						}
 					}
 				}
 				if (n.firePresses >= 0) {

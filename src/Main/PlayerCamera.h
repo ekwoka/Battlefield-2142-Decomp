@@ -102,6 +102,18 @@ public:
 	void direct(const game::camera::Look& look, float fovY, bool cut, std::vector<uint32_t> hidden = {});
 	void stopDirecting() { m_directed = false; }
 	bool directed() const { return m_directed; }
+	// A followed player's own first person (enhanced.followFirstPerson, not
+	// retail: BF2142.exe's spectator follow, 0x00614d00, and its demo
+	// camera's, 0x005f8f40, are chases behind the player): this camera
+	// shows `player` as it shows the local player, his arms and weapon
+	// animated from his state, his zoom and his seat's camera. -1: the
+	// local player. On a local round his state is the round's; with a
+	// remote source (setRemote, a demo's ghosts) the source's, `player`
+	// naming him. `zoomOf` gives his weapon's zoom level (the bots', which
+	// the local player's alternate fire stands for); none, he never zooms.
+	// It only reads the round: the simulation is the same with it.
+	void setSubject(int player, std::function<int(int)> zoomOf = {});
+	int subject() const { return m_subject; }
 
 	// The alternate fire as held now (its press cycles the zoom).
 	void setAltFire(bool held) {
@@ -143,6 +155,11 @@ public:
 		// and the seat gun's zoom works the same (stepSeatZoom).
 		uint32_t vehicle = 0;
 		int seat = -1;
+		// A followed player's (setSubject): his weapon's zoom level (the
+		// soldier ghost's, -1 unknown: the alternate fire's) and the
+		// reloads seen of him (each new one plays the reload).
+		int zoomLevel = -1;
+		uint32_t reloads = 0;
 	};
 	void setRemote(std::function<bool(Remote&)> source) { m_remote = std::move(source); }
 	// A joined game's vehicles (object ids) whose driver seat is taken, for the
@@ -323,8 +340,16 @@ private:
 		bool firing = false; // remote: the fire input held
 		bool fired = false; // local: an accepted shot in the current simulation tick
 		uint32_t weaponPulses = 0, weaponMessages = 0;
+		int zoomLevel = -1;   // a followed player's (Remote::zoomLevel, setSubject's zoomOf)
+		uint32_t reloads = 0; // Remote::reloads
 	};
 	bool current(Me& me) const;
+	// The player shown: the subject (setSubject), else the local player.
+	int self() const;
+	int m_subject = -1;
+	std::function<int(int)> m_zoomOf;
+	uint32_t m_reloadsWas = 0;
+	bool m_reloadsKnown = false;
 	// A seat that leaves the primary fire to the soldier's own weapon (the air
 	// transports' passenger seats): his arms and weapon are drawn in it.
 	bool kitSeat(const Me& me) const;

@@ -56,9 +56,27 @@ float LocalHudWorld::objectHealth(uint32_t object) const
 
 // PlayerHealth (0x007a0f80): the soldier's armour's hit points (slot
 // 0x3c) over its maxHitPoints (slot 0x8c).
+const world::Object* LocalHudWorld::soldier() const
+{
+	if (viewedPlayer < 0) {
+		return m_round.player();
+	}
+	PlayerInfo p;
+	return m_round.playerInfo(viewedPlayer, p) && p.alive ? m_round.objects().find(p.soldier) : nullptr;
+}
+
+const world::Object* LocalHudWorld::vehicle() const
+{
+	if (viewedPlayer < 0) {
+		return m_round.playerVehicle();
+	}
+	PlayerInfo p;
+	return m_round.playerInfo(viewedPlayer, p) && p.alive && p.vehicle ? m_round.objects().find(p.vehicle) : nullptr;
+}
+
 float LocalHudWorld::health() const
 {
-	const world::Object* soldier = m_round.player();
+	const world::Object* soldier = this->soldier();
 	const float fraction = soldier ? objectHealth(soldier->id()) : -1;
 	return fraction >= 0 ? std::clamp(fraction, 0.0f, 1.0f) : 1.0f;
 }
@@ -84,8 +102,10 @@ float LocalHudWorld::tickets(int team) const
 HudWorld::Weapon LocalHudWorld::heldWeapon() const
 {
 	Weapon w;
-	w.gun = m_round.playerWeapon();
-	if (const world::Object* rifle = m_round.objects().find(m_round.playerWeaponObject())) {
+	PlayerInfo p;
+	const bool viewed = viewedPlayer >= 0 && m_round.playerInfo(viewedPlayer, p);
+	w.gun = viewedPlayer < 0 ? m_round.playerWeapon() : m_round.playerWeapon(viewedPlayer);
+	if (const world::Object* rifle = m_round.objects().find(viewedPlayer < 0 ? m_round.playerWeaponObject() : viewed ? p.weapon : 0)) {
 		w.weapon = rifle->objectTemplate();
 	}
 	if (w.gun) {
@@ -99,7 +119,7 @@ HudWorld::Weapon LocalHudWorld::seatGroupWeapon(int group) const
 {
 	Weapon w;
 	PlayerInfo me;
-	if (!m_round.playerInfo(m_round.localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0) {
+	if (!m_round.playerInfo(localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0) {
 		return w;
 	}
 	const int index = m_round.seatWeaponIndex(me.vehicle, me.seat, group);
@@ -123,7 +143,7 @@ float LocalHudWorld::combatAreaTimeLeft() const
 	if (m_logic.ended() || m_logic.roundState() != 3) {
 		return -1;
 	}
-	return m_round.combatAreaTimeLeft(m_round.localPlayer());
+	return m_round.combatAreaTimeLeft(localPlayer());
 }
 
 // --- a joined game
@@ -146,7 +166,7 @@ uint16_t RemoteHudWorld::ghostOf(uint32_t object) const
 
 int RemoteHudWorld::localPlayer() const
 {
-	return m_world.localPlayer();
+	return viewedPlayer >= 0 ? viewedPlayer : m_world.localPlayer();
 }
 
 void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
@@ -228,7 +248,10 @@ void RemoteHudWorld::fill(const net::RemotePlayer& p, PlayerInfo& out) const
 		if (const net::ControlState* state = m_world.controlState(); state && state->hasOwn) {
 			out.manDown = state->own.manDown;
 		}
-		// The kit's weapons by slot (their itemIndex), for the item selection.
+	}
+	// The kit's weapons by slot (their itemIndex), for the item selection:
+	// ours, and a followed player's (viewedPlayer).
+	if (p.local || (viewedPlayer >= 0 && p.id == viewedPlayer)) {
 		if (const world::Object* kit = m_round.objects().find(out.kit); kit && kit->objectTemplate()) {
 			for (const world::ChildTemplate& child : kit->objectTemplate()->children()) {
 				const world::ObjectTemplate* t = m_round.templates().find(child.name);
@@ -553,6 +576,9 @@ bool RemoteHudWorld::squadOrder(int team, int squad, bool fromCommander, SquadOr
 const world::Object* RemoteHudWorld::soldier() const
 {
 	PlayerInfo me;
+	if (viewedPlayer >= 0) {
+		return playerInfo(viewedPlayer, me) && me.alive ? m_round.objects().find(me.soldier) : nullptr; // his soldier ghost
+	}
 	if (!playerInfo(localPlayer(), me) || !me.alive || !m_world.hasControlObject() || !m_world.controlInLastBlock()) {
 		return nullptr;
 	}
@@ -561,6 +587,10 @@ const world::Object* RemoteHudWorld::soldier() const
 
 const world::Object* RemoteHudWorld::vehicle() const
 {
+	if (viewedPlayer >= 0) {
+		PlayerInfo him;
+		return playerInfo(viewedPlayer, him) && him.alive && him.vehicle ? m_round.objects().find(him.vehicle) : nullptr; // his seat ghost's
+	}
 	if (!m_world.hasControlObject() || !m_world.controlInLastBlock() || !m_world.controlObject().vehicle) {
 		return nullptr;
 	}
@@ -571,7 +601,7 @@ float RemoteHudWorld::health() const
 {
 	// Our player's own state (its soldier's hit points over maxHitPoints),
 	// else the soldier ghost's fraction.
-	if (const net::ControlState* state = m_world.controlState(); state && state->hasOwn) {
+	if (const net::ControlState* state = m_world.controlState(); state && state->hasOwn && viewedPlayer < 0) {
 		return std::clamp(state->own.health, 0.0f, 1.0f);
 	}
 	const net::RemotePlayer* me = m_world.player(localPlayer());
@@ -598,12 +628,16 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 		if (me.seat >= 0 && static_cast<size_t>(me.seat) < seats.size()) {
 			const auto& seat = seats[static_cast<size_t>(me.seat)];
 			w.weapon = m_round.templates().find(seat.weapon);
-			// The server's PIFire group's active weapon (its place in the group).
+			// The server's PIFire group's active weapon (its place in the group):
+			// our own state's, a followed player's from his seat's ghost.
 			const net::ControlState* state = m_world.controlState();
-			if (state && state->hasOwn && state->own.weapons[0].index >= 0) {
+			const int active = viewedPlayer >= 0 ? viewedSeatWeapon(0)
+				: state && state->hasOwn            ? state->own.weapons[0].index
+													: -1;
+			if (active >= 0) {
 				int place = 0;
 				for (const auto& candidate : seat.weapons) {
-					if (candidate.group == 0 && place++ == state->own.weapons[0].index) {
+					if (candidate.group == 0 && place++ == active) {
 						w.weapon = m_round.templates().find(candidate.weapon);
 						break;
 					}
@@ -627,8 +661,20 @@ HudWorld::Weapon RemoteHudWorld::heldWeapon() const
 		}
 		w.weapon = w.weapon ? w.weapon : first;
 	}
+	// A followed player's rounds in the magazine, as his player state's
+	// fire state carries them for every player while he fires (PIFire's
+	// group: the weapon in hand or the seat's gun; 0x005981a0), the last
+	// sent for the weapon he holds; his magazines aren't sent.
+	if (viewedPlayer >= 0) {
+		const net::RemotePlayer* p = m_world.player(viewedPlayer);
+		const net::RemoteObject* body = p ? m_world.object(p->soldierGhost) : nullptr;
+		if (p && w.weapon && (!kitHeld || (body && body->weapon == p->knownRoundsWeapon[0]))) {
+			w.rounds = p->knownRounds[0];
+		}
+		return w;
+	}
 	// The rounds and magazines of the active weapon group (PlayerOwnState).
-	if (const net::ControlState* state = m_world.controlState(); state && state->hasOwn) {
+	if (const net::ControlState* state = m_world.controlState(); state && state->hasOwn && viewedPlayer < 0) {
 		for (const auto& g : state->own.weapons) {
 			if (g.active && g.ammo >= 0) {
 				w.rounds = g.ammo;
@@ -753,8 +799,8 @@ std::vector<int> RemoteHudWorld::dimmedItems(int player) const
 bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
 {
 	PlayerInfo me;
-	if (!playerInfo(localPlayer(), me)) {
-		return false;
+	if (viewedPlayer >= 0 || !playerInfo(localPlayer(), me)) {
+		return false; // (a followed player's battery and gifts aren't sent)
 	}
 	out = {};
 	out.alive = me.alive && !me.manDown; // slots 0x74 and 0x114
@@ -809,30 +855,44 @@ float RemoteHudWorld::combatAreaTimeLeft() const
 	return std::max(0.0f, areas->timerFor(category, car == nullptr) - static_cast<float>(me->outsideSeconds));
 }
 
+int RemoteHudWorld::viewedSeatWeapon(int group) const
+{
+	const net::RemotePlayer* p = viewedPlayer >= 0 ? m_world.player(viewedPlayer) : nullptr;
+	const net::RemoteObject* seat = p && p->vehicleGhost ? m_world.object(p->vehicleGhost) : nullptr;
+	return seat && group >= 0 && group < 3 ? seat->seatWeapon[group] : -1;
+}
+
 HudWorld::Weapon RemoteHudWorld::seatGroupWeapon(int group) const
 {
 	Weapon w;
 	PlayerInfo me;
 	const net::ControlState* state = m_world.controlState();
-	if (group < 0 || group > 2 || !playerInfo(localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0 || !state
-		|| !state->hasOwn) {
+	const bool viewed = viewedPlayer >= 0;
+	if (group < 0 || group > 2 || !playerInfo(localPlayer(), me) || !me.alive || !me.vehicle || me.seat < 0
+		|| (!viewed && (!state || !state->hasOwn))) {
 		return w;
 	}
-	const auto& own = state->own.weapons[group];
+	// Ours from our own state; a followed player's from his seat's ghost
+	// (its active weapon per group), without its ammunition.
+	const int index = viewed ? viewedSeatWeapon(group) : state->own.weapons[group].index;
 	const auto seats = m_round.vehicleSeats(me.vehicle);
-	if (own.index < 0 || static_cast<size_t>(me.seat) >= seats.size()) {
+	if (index < 0 || static_cast<size_t>(me.seat) >= seats.size()) {
 		return w;
 	}
 	int place = 0;
 	for (const auto& candidate : seats[static_cast<size_t>(me.seat)].weapons) {
-		if (candidate.group == group && place++ == own.index) {
+		if (candidate.group == group && place++ == index) {
 			w.weapon = m_round.templates().find(candidate.weapon);
 			break;
 		}
 	}
-	if (w.weapon) {
+	if (w.weapon && !viewed) {
+		const auto& own = state->own.weapons[group];
 		w.rounds = own.ammo;
 		w.mags = own.magazines;
+	} else if (w.weapon) {
+		const net::RemotePlayer* p = m_world.player(viewedPlayer);
+		w.rounds = p ? p->knownRounds[static_cast<size_t>(group)] : -1; // (his fire state's last; no magazines)
 	}
 	return w;
 }
@@ -843,7 +903,7 @@ std::vector<int> LocalHudWorld::revealedPlayers(int team) const
 {
 	std::vector<int> out = m_round.revealedPlayers(team);
 	game::GameWorld::PlayerInfo me;
-	if (m_round.playerInfo(m_round.localPlayer(), me) && me.team == team) {
+	if (m_round.playerInfo(localPlayer(), me) && me.team == team) {
 		for (const int id : m_round.mapSpottedPlayers(me.id)) {
 			if (std::find(out.begin(), out.end(), id) == out.end()) {
 				out.push_back(id);
@@ -872,6 +932,66 @@ std::vector<uint32_t> RemoteHudWorld::spottedVehicles() const
 		}
 	}
 	return out;
+}
+
+bool RemoteHudWorld::followed(int player, PlayerCamera::Remote& me) const
+{
+	const net::RemotePlayer* p = player >= 0 ? m_world.player(player) : nullptr;
+	const net::RemoteObject* body = p ? m_world.object(p->soldierGhost) : nullptr;
+	const world::Object* soldier = p ? m_round.objects().find(objectOf(p->soldierGhost)) : nullptr;
+	if (!p || !p->alive || !body || !soldier || !soldier->objectTemplate()) {
+		return false;
+	}
+	me = {};
+	me.alive = true;
+	me.soldier = soldier->id();
+	me.soldierTemplate = soldier->objectTemplate();
+	me.firing = p->fire[0].on;
+	me.reloads = p->reloads;
+	me.zoomLevel = body->weaponZoom;
+	if (body->hasAngles) {
+		me.yaw = body->yaw + body->pitch; // the body's and the head's twist on it (+0x25c, +0x278)
+		me.aimPitch = body->aimPitch;
+	}
+	me.stance = std::clamp(body->pose, 0, 3);
+	if (const net::RemoteObject* seat = p->vehicleGhost ? m_world.object(p->vehicleGhost) : nullptr) {
+		const uint16_t rootGhost = seat->rootGhost ? seat->rootGhost : seat->ghost;
+		const world::Object* vehicle = m_round.objects().find(objectOf(rootGhost));
+		if (!vehicle) {
+			return false; // (a demo's vehicle the recording never placed)
+		}
+		me.vehicle = vehicle->id();
+		me.seat = seat->part;
+		me.feet = {vehicle->position().x, vehicle->position().y, vehicle->position().z};
+		if (const net::RemoteObject* root = m_world.object(rootGhost); root && root->hasVelocity) {
+			me.velocity = {root->velocity.x, root->velocity.y, root->velocity.z};
+		}
+		return true;
+	}
+	me.feet = {soldier->position().x, soldier->position().y, soldier->position().z};
+	if (body->hasVelocity) {
+		me.velocity = {body->velocity.x, body->velocity.y, body->velocity.z};
+	}
+	me.weapon = m_round.remoteSoldierWeapon(soldier->id());
+	// The weapon in hand: the kit's firearm in the selected slot (the
+	// soldier's mask 0x2000; itemIndex, 3 the primary), as heldWeapon.
+	if (const world::Object* kit = m_round.objects().find(objectOf(p->kitGhost)); kit && kit->objectTemplate()) {
+		me.kit = kit->id();
+		const int wanted = body->weapon >= 0 ? body->weapon : 3;
+		const world::ObjectTemplate* first = nullptr;
+		for (const world::ChildTemplate& child : kit->objectTemplate()->children()) {
+			const world::ObjectTemplate* t = m_round.templates().find(child.name);
+			if (!t || t->typeName() != "GenericFireArm") {
+				continue;
+			}
+			if (static_cast<int>(templateNumber(t, "itemIndex", -1)) == wanted) {
+				me.weaponTemplate = t;
+			}
+			first = first ? first : t;
+		}
+		me.weaponTemplate = me.weaponTemplate ? me.weaponTemplate : first;
+	}
+	return true;
 }
 
 void roundCameraEffects(game::GameWorld& round, int player, render::PostEffects& effects, bool tvEffect)

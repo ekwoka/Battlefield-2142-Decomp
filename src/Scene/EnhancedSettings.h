@@ -55,6 +55,7 @@ struct EnhancedSettings {
 	bool botSquadInvites = true; // enhanced.botSquadInvites: offline, a bot the squad leader invites (SquadMenu.applyInviteList) joins his squad, so a human can lead bots and use the squad leader's items; retail's bots never answer an invite (0x004c3190 only sets a mask bit) and join squads only as they are added
 	// Interface, also only with enhanced.enabled:
 	bool chaseRoll = false; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); off by default, as retail keeps them level (0x006108e0 -> lookAt 0x006ae080, up (0, 1, 0))
+	bool followFirstPerson = true; // enhanced.followFirstPerson: --director's first-person shots and a demo's followed player (--demo-first-person) show that player's own first person: his arms and weapon animated from his state, his zoom, his seat's camera and cockpit, and (J / --follow-hud) his HUD (Main/PlayerCamera.h setSubject, HudWorld::viewedPlayer); retail's spectator (0x00614d00) and demo (0x005f8f40) follow cameras are chases behind the player and show no HUD of his
 	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
 	bool squadItemHints = true; // enhanced.squadItemHints: a weapon key refused for the squad says why on the help line each time (Main/HudAlerts.h squadItemRefusal): a squad leader's item for one who leads no squad, or a squad too small for it with its count, "(1/2)"; retail is silent for the first and shows the second (help message 0x52) once, with help on
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
@@ -133,6 +134,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.botSquadInvites = v; });
 	bindProperty<bool>(console, "enhanced.chaseRoll", ConsoleAccess::Anyone, [&settings] { return settings.chaseRoll; },
 		[&settings](const bool& v) { settings.chaseRoll = v; });
+	bindProperty<bool>(console, "enhanced.followFirstPerson", ConsoleAccess::Anyone, [&settings] { return settings.followFirstPerson; },
+		[&settings](const bool& v) { settings.followFirstPerson = v; });
 	bindProperty<bool>(console, "enhanced.killWeaponNames", ConsoleAccess::Anyone, [&settings] { return settings.killWeaponNames; },
 		[&settings](const bool& v) { settings.killWeaponNames = v; });
 	bindProperty<bool>(console, "enhanced.squadItemHints", ConsoleAccess::Anyone, [&settings] { return settings.squadItemHints; },

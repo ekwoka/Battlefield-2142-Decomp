@@ -418,6 +418,12 @@ struct DemoPlayback {
 	float fov = 90;        // degrees (demo.renderfieldofview)
 	float renderWidth = 400, renderHeight = 300;
 	DemoCamera camera;
+	// Not retail (enhanced.followFirstPerson): the followed player shown in
+	// his own first person (--demo-first-person, demo.toggleFirstPerson),
+	// and the player --demo-follow asks for (a name or an id), followed
+	// whenever he lives (followWanted: until then, and after each death).
+	bool firstPerson = false;
+	std::string followWanted;
 	// The demo's clock as the last frame left it: the tick and the
 	// fraction of the next (the demo's +0xf8, the camera's blend).
 	uint32_t tick = 0;

@@ -77,6 +77,7 @@ struct ViewerOptions {
 		bool deployment = false; // c_GIEnter: toggle the deployment screen
 		bool yes = false, no = false; // c_GIYes / c_GINo: the HUD's questions (0x00754290 → 0x0079e320)
 		bool directorHud = false; // held: H, --director's HUD toggle (the raw key)
+		bool followHud = false;   // held: J, the followed player's HUD in a first-person follow (enhanced.followFirstPerson)
 	};
 	struct PlayerView {
 		float x = 0, y = 0, z = 0; // the soldier's feet

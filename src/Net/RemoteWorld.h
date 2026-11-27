@@ -182,6 +182,13 @@ struct RemotePlayer {
 	// set by a c_PIReload press: 0x004bda00 -> 0x0059b330): each is a
 	// reload seen (the client's 0x00590e10: soldier input message 10).
 	uint32_t reloads = 0;
+	// The rounds in each group's magazine as last sent (the fire state's,
+	// which carries them only while firing or with mask 0x10000) and the
+	// soldier's selected weapon then (RemoteObject::weapon; -1 none): a
+	// followed player's HUD (enhanced.followFirstPerson) shows them while
+	// he holds that weapon. -1 unknown.
+	std::array<int, 3> knownRounds {-1, -1, -1};
+	std::array<int, 3> knownRoundsWeapon {-1, -1, -1};
 	// The time outside the combat area (player +0x294, the networkable's
 	// mask 0x800: whole seconds, 0 inside or after a respawn), the HUD's
 	// countdown (0x0044c7b0 through slot 0xf0).

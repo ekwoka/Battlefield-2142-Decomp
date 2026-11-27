@@ -669,6 +669,9 @@ public:
 		int roundsInMag = -1;
 		int fireMode = 0;
 		bool reloading = false;
+		// The weapon's zoom level (setZoomed; 0 not zoomed): the soldier
+		// networkable's (0x005fc1a0), a followed player's first person.
+		int zoomLevel = 0;
 	};
 	std::vector<PlayerInfo> playerList() const;
 	bool playerInfo(int player, PlayerInfo& info) const;
@@ -1123,7 +1126,9 @@ public:
 	// and the look's scale (0x00586420: the field of view over the camera's
 	// times mouseSpeedMod zoomed in, else 1; the crouched animation speed's
 	// limit, soldierAnimationSpeed).
-	void setZoomed(int player, bool zoomed, float lookScale = 1);
+	// `level` is the zoom's level (the DefaultZoomComp's +0xc, 0..3: what the
+	// soldier networkable sends, 0x005fc1a0); -1: 1 zoomed, else 0. Not simulated.
+	void setZoomed(int player, bool zoomed, float lookScale = 1, int level = -1);
 	// The distance counter (fire.useDistanceCounter, the rocket launchers'
 	// airburst): the range set (0: off), and the wheel's steps
 	// (PINextItem +1, PIPrevItem -1) while it is on.
@@ -1314,6 +1319,10 @@ public:
 	// first-person view draws them on its own weapon (the original's
 	// first-person weapon children, FireComp 0x005f31d0).
 	bool localMuzzleEffects = true;
+	// The same for a followed player in his own first person (main.cpp's
+	// g_follow, enhanced.followFirstPerson; -1 none): his flashes are the
+	// follow camera's. Effects only: nothing simulated reads them.
+	int firstPersonPlayer = -1;
 	bool playerInsideControlPoint = false; // set by the scripts (setIsInsideCP)
 	// The player's rounds fired and rounds that damaged something, by
 	// weapon template; `clear` starts counting again.
@@ -1504,6 +1513,8 @@ public:
 	// destroys the object.
 	void setHitPoints(uint32_t object, float hitPoints);
 	const FireArm* playerWeapon() const { return m_player && m_player->alive ? m_player->weapon.get() : nullptr; }
+	// Any living player's weapon in hand (a bot's for a followed first-person view), null otherwise.
+	const FireArm* playerWeapon(int player) const;
 	// The fire mode of the local player's weapon (the one in hand, or the
 	// seat's gun; FireMode), -1 without one: the HUD's fire-rate icon
 	// (0x007c1f10 with weaponHud.hasFireRate, firerate_<mode>.tga).
@@ -3945,6 +3956,7 @@ private:
 		std::string feelFor;
 		bool zoomed = false;
 		float lookScale = 1; // setZoomed's
+		int zoomLevel = 0;   // setZoomed's level (PlayerInfo::zoomLevel)
 		// fire.useDistanceCounter's range mode (SingleFireComp +0x178 /
 		// +0x17c): metres, 0 off; and the zoom last tick.
 		int burstDistance = 0;

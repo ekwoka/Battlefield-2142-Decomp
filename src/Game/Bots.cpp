@@ -4104,7 +4104,8 @@ void BotManager::stepZoom(Bot& bot, const GameWorld::PlayerInfo& self, float sec
 	bot.zoom.tick();
 	bot.fov.update(seconds);
 	m_world.setZoomed(self.id, bot.zoom.level() > 0,
-		!self.vehicle && bot.zoom.level() > 0 ? bot.fov.current / kBaseFieldOfView * bot.zoomSettings.mouseSpeedMod : 1.0f);
+		!self.vehicle && bot.zoom.level() > 0 ? bot.fov.current / kBaseFieldOfView * bot.zoomSettings.mouseSpeedMod : 1.0f,
+		bot.zoom.level());
 }
 
 // BBPIdleInfantery's plan (0x1006a500): Parallel(Idle) under While(True).

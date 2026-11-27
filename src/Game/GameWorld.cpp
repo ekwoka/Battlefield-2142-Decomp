@@ -2699,7 +2699,7 @@ void GameWorld::fire(const Player& player, float aimPitch)
 	// gun (their anchor is the weapon object, moved in followSoldier while
 	// they burn); the systems shown in third person. Without a posed
 	// skeleton, at the eyes along the aim.
-	if (!player.muzzles.empty() && (localMuzzleEffects || &player != m_player)) {
+	if (!player.muzzles.empty() && (localMuzzleEffects || &player != m_player) && player.id != firstPersonPlayer) {
 		physics::Vec3 at;
 		physics::Mat3 rotation;
 		const bool placed = player.weaponObject && weaponPlace(player, at, rotation);
@@ -5786,6 +5786,7 @@ bool GameWorld::playerInfo(int id, PlayerInfo& info) const
 	info.stamina = player->control.stamina().stamina();
 	info.sprinting = player->control.stamina().sprinting();
 	info.jumpHold = player->control.jumpHold();
+	info.zoomLevel = player->alive ? player->zoomLevel : 0;
 	if (player->alive && player->vehicle) {
 		const FireArm* seatGun = gun(player->vehicle, player->seat);
 		info.heat = seatGun ? seatGun->heat() : 0.0f;
@@ -6459,11 +6460,12 @@ int GameWorld::burstDistance(int id) const
 	return player ? player->burstDistance : 0;
 }
 
-void GameWorld::setZoomed(int id, bool zoomed, float lookScale)
+void GameWorld::setZoomed(int id, bool zoomed, float lookScale, int level)
 {
 	if (Player* player = findPlayer(id)) {
 		player->zoomed = zoomed;
 		player->lookScale = lookScale;
+		player->zoomLevel = level >= 0 ? level : zoomed ? 1 : 0;
 	}
 }
 
@@ -12151,6 +12153,12 @@ const physics::SoldierBody* GameWorld::soldierBody(int id) const
 {
 	const Player* player = findPlayer(id);
 	return player && player->alive ? &player->body : nullptr;
+}
+
+const FireArm* GameWorld::playerWeapon(int id) const
+{
+	const Player* player = findPlayer(id);
+	return player && player->alive ? player->weapon.get() : nullptr;
 }
 
 bool GameWorld::partPose(uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation, int preferredSeat) const

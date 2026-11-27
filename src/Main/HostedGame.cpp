@@ -2587,6 +2587,12 @@ net::NetworkableState HostedGame::soldierState(uint32_t soldier, const world::Ob
 		s.mask |= 0x2000;
 		s.weapon = info.inHandSlot; // the item index in hand (+0x218)
 	}
+	if (known) {
+		// The weapon's zoom level (its DefaultZoomComp +0xc, 0x005fc1a0's
+		// always-sent field), which a client's third person and a demo's
+		// follow (enhanced.followFirstPerson) read.
+		s.weaponZoom = info.zoomLevel;
+	}
 	const game::SoldierControl* control = known ? m_round->soldierControl(player) : nullptr;
 	const physics::SoldierBody* body = known ? m_round->soldierBody(player) : nullptr;
 	if (known) {
