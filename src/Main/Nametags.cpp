@@ -9,6 +9,7 @@
 #include "Geometry/MeshFile.h"
 #include "IO/File/FileManager.h"
 #include "Render/Culling.h"
+#include "Render/DistanceFade.h"
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
@@ -764,12 +765,8 @@ std::vector<hud::HudQuad> Nametags::frame(game::GameWorld& world, const world::O
 	const Vec forward = forwardOf(view);
 	const physics::Vec3 eyeP {eye.x, eye.y, eye.z};
 	// The view's zoom for the meshes' LODs (RenderView +0x1c, 0x10066b30:
-	// tan(first fov / 2) / tan(fov / 2)).
-	if (m_baseFovY <= 0) {
-		m_baseFovY = view.fovY;
-	}
-	const float zoomTan = std::tan(view.fovY * 0.5f);
-	const float zoom = zoomTan > 1e-6f ? std::tan(m_baseFovY * 0.5f) / zoomTan : 1.0f;
+	// tan(first fov / 2) / tan(fov / 2), the first fov any view was given).
+	const float zoom = render::firstFov().zoom(view.fovY);
 	const auto kitTypeOf = [&](uint32_t kit) -> std::string {
 		const world::Object* o = kit ? objects.find(kit) : nullptr;
 		const std::string* type = setting(o ? o->objectTemplate() : nullptr, "kitType");

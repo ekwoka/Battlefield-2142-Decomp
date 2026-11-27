@@ -156,4 +156,58 @@ inline float stepDistanceFade(float fade, float radius, float centreDistanceSqua
 	return fade;
 }
 
+
+// enhanced.actorRange (not retail): a soldier's or vehicle's record without
+// the area test, so actors stay drawn to the view distance (+ R) and fade
+// with the fog as the terrain does; the zoom-aware mesh LODs still apply.
+// Retail drops them by their screen area (a soldier at ~176 m unzoomed on
+// high geometry), well inside every level's fog and every weapon's reach.
+inline CullRecord actorRangeRecord(CullRecord record)
+{
+	record.minArea = 1e30f;
+	return record;
+}
+
+// The view's zoom (RendDX9 0x10066b30): tan(first fov / 2) / tan(fov / 2),
+// where the first fov is the first one any view was ever given (the
+// process-wide DAT_101ffbf8, taken once behind DAT_101f5c60); not reset by
+// a new level or renderer.
+struct FirstFov {
+	float fov = 0; // 0: none given yet
+	float zoom(float fovY)
+	{
+		if (fov <= 0) {
+			fov = fovY;
+		}
+		const float t = std::tan(fovY * 0.5f);
+		return t > 1e-6f ? std::tan(fov * 0.5f) / t : 1.0f;
+	}
+};
+inline FirstFov& firstFov()
+{
+	static FirstFov first;
+	return first;
+}
+
+// The manager's minimum (+0x148) from the renderer's +0x6b0, which both
+// the geometry quality (0x10010040: 40 / 60 / 80) and renderer.minCullDistance
+// (0x10051ae0 -> slot 0x84, 0x10030890) write: the later write holds.
+struct CullMinimum {
+	int quality = -1;          // the geometry quality last applied
+	unsigned scriptWrites = 0; // renderer.minCullDistance's writes seen
+	float value = 100;         // the renderer's constructor's (0x1002aba0)
+	float update(int geometryQuality, unsigned writes, float written)
+	{
+		if (geometryQuality != quality) {
+			quality = geometryQuality;
+			value = objectCullScales(geometryQuality).minimum;
+		}
+		if (writes != scriptWrites) {
+			scriptWrites = writes;
+			value = written;
+		}
+		return value;
+	}
+};
+
 } // namespace dice::hfe::render

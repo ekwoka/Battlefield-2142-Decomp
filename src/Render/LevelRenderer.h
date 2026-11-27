@@ -11,6 +11,7 @@
 #include "Animation/Pose.h"
 #include "AnimatedUV.h"
 #include "Culling.h"
+#include "DistanceFade.h"
 #include "MeshLights.h"
 #include "EnvMaps.h"
 #include "Fog.h"
@@ -668,7 +669,7 @@ private:
 	int m_terrainCellsPerPatch = 0; // per side
 	float m_terrainLodSwitch = 0;   // this frame's LOD 0 distance (the culler's +0)
 	float m_terrainHeightAboveGround = 0; // the camera's (terrain +0x294)
-	float m_baseFovY = 0; // the view's first field of view: the zoom is against it (0x10066b30)
+	CullMinimum m_cullMinimum; // the object fade's minimum (renderer +0x6b0; DistanceFade.h)
 	float viewZoom(const Camera& camera) const;
 	// The secondary heightmaps around the level (the surrounding terrain).
 	void buildSurroundingTerrain(const LevelSources& sources);

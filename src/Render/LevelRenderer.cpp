@@ -1459,10 +1459,8 @@ bool LevelRenderer::buildTerrainLods(const LevelSources& sources, int quads)
 
 float LevelRenderer::viewZoom(const Camera& camera) const
 {
-	// RenderView +0x1c (0x10066b30): tan(first fov / 2) / tan(fov / 2).
-	const float base = m_baseFovY > 0 ? m_baseFovY : camera.fovY;
-	const float t = std::tan(camera.fovY * 0.5f);
-	return t > 1e-6f ? std::tan(base * 0.5f) / t : 1.0f;
+	// RenderView +0x1c (0x10066b30): against the first fov any view was given (DistanceFade.h).
+	return firstFov().zoom(camera.fovY);
 }
 
 // The terrain culler's frame (TerrainLod.h): visibility, LODs, stitches.
@@ -3837,10 +3835,16 @@ void LevelRenderer::prepareInstances(const Camera& camera, const Mat4& viewProje
 	// The object manager's distance fade (DistanceFade.h): the geometry
 	// quality's scales, the view distance GSViewDistance x the view
 	// distance scale, the frame's seconds.
-	const ObjectCullScales cullScales = objectCullScales(m_sources && m_sources->quality ? m_sources->quality->geometry : 3);
+	ObjectCullScales cullScales = objectCullScales(m_sources && m_sources->quality ? m_sources->quality->geometry : 3);
+	// The minimum is the renderer's +0x6b0: the quality's or renderer.minCullDistance's, whichever came last.
+	cullScales.minimum = m_cullMinimum.update(m_sources && m_sources->quality ? m_sources->quality->geometry : 3,
+		renderer.minCullDistanceWrites, renderer.minCullDistance);
 	const float viewFar = viewFarDistance(m_sources && m_sources->viewDistance ? m_sources->viewDistance() : 500.0f, m_viewDistanceScale);
 	const CullRecord cullRoot = cullRecord(cullScales, zoom, viewFar, false, overgrowthSeconds);
-	const CullRecord cullActor = cullRecord(cullScales, zoom, viewFar, true, overgrowthSeconds);
+	const CullRecord retailActor = cullRecord(cullScales, zoom, viewFar, true, overgrowthSeconds);
+	// enhanced.actorRange (not retail): soldiers and vehicles drawn to the view distance, into the fog.
+	const bool actorRange = m_sources && m_sources->enhanced && m_sources->enhanced->enabled && m_sources->enhanced->actorRange;
+	const CullRecord cullActor = actorRange ? actorRangeRecord(retailActor) : retailActor;
 	for (Instance& instance : m_instances) {
 		const bool forceCloak = cloakAll && instance.mesh->skinned && !instance.hidden;
 		if ((instance.hidden || forceCloak) && instance.object != 0 && m_sources &&
@@ -4317,9 +4321,7 @@ void LevelRenderer::hemiObjectFor(const Instance& instance, const GpuMesh& mesh,
 void LevelRenderer::draw(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* color, GpuContext::Target& target,
 	const Camera& viewCamera, const scene::LightSettings& lights)
 {
-	if (m_baseFovY <= 0) {
-		m_baseFovY = viewCamera.fovY; // the zoom is against the view's first fov (0x10066b30)
-	}
+	firstFov().zoom(viewCamera.fovY); // the first fov a view is given (0x10066b30)
 	// The commander's overhead view takes the player's (0x00779680).
 	OverheadView overhead;
 	const bool overheadOn = m_sources && m_sources->overheadView && m_sources->overheadView(overhead);

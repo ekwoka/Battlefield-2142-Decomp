@@ -502,7 +502,6 @@ private:
 	};
 	std::array<OrderTag, 2> m_orderTags;
 	std::function<const MeshLods*(const world::ObjectTemplate&)> m_meshLods;
-	float m_baseFovY = 0; // the first view's fov: the zoom is against it (RenderView +0x1c, 0x10066b30)
 	TagFont m_font;
 	bool m_fontLoaded = false;
 	std::map<int, Tag> m_players; // by player id

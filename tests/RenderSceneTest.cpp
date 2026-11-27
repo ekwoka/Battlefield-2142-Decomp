@@ -127,6 +127,47 @@ TEST(RenderScene_SoldierDistanceFadeUsesTheSkinnedMeshRadius)
 	CHECK(far > 150 && far < 200);
 }
 
+// enhanced.actorRange: a soldier is no longer dropped by his screen area at
+// ~176 m but stays drawn to the view distance (plus his radius); things
+// that aren't actors keep retail's rule.
+TEST(RenderScene_ActorRangeKeepsSoldiersToTheViewDistance)
+{
+	const float radius = render::soldierCullRadius() * 2.5f;
+	const auto cutoff = [&](const render::CullRecord& record) {
+		float d = 1;
+		while (d < 2000 && render::stepDistanceFade(1, radius, d * d, record) > 0) d += 1;
+		return d;
+	};
+	const render::CullRecord retail = render::cullRecord(render::objectCullScales(3), 1, 330, true, 0);
+	CHECK(cutoff(retail) > 170 && cutoff(retail) < 180);
+	const float far = cutoff(render::actorRangeRecord(retail));
+	CHECK(far > 330 && far < 340); // the view distance + R
+	CHECK(render::stepDistanceFade(0, radius, 300.0f * 300.0f, render::actorRangeRecord(retail)) == 1);
+}
+
+// The view's zoom is against the first fov any view was ever given
+// (RendDX9 0x10066b30's DAT_101ffbf8), not the current renderer's.
+TEST(RenderScene_ZoomIsAgainstTheFirstFovEverGiven)
+{
+	render::FirstFov first;
+	CHECK(std::fabs(first.zoom(1.0f) - 1.0f) < 1e-6f);
+	CHECK(first.zoom(0.5f) > 2.0f);                   // zoomed in
+	CHECK(std::fabs(first.zoom(1.0f) - 1.0f) < 1e-6f); // back: the first fov held
+	CHECK(first.zoom(1.2f) < 1.0f);                    // a wider fov later zooms out
+}
+
+// renderer.minCullDistance and the geometry quality both write the
+// renderer's +0x6b0, the distance fade's minimum: the later write holds.
+TEST(RenderScene_MinCullDistanceWritesTheFadeMinimum)
+{
+	render::CullMinimum minimum;
+	CHECK(minimum.update(3, 0, 0) == 80);  // high geometry's
+	CHECK(minimum.update(3, 1, 30) == 30); // a script's write
+	CHECK(minimum.update(3, 1, 30) == 30); // held
+	CHECK(minimum.update(1, 1, 30) == 40); // the quality applied again
+	CHECK(minimum.update(1, 2, 90) == 90);
+}
+
 TEST(RenderScene_TreeMaterialDispatch)
 {
 	using render::TreeMaterial;

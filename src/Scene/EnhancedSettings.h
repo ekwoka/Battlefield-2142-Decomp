@@ -32,6 +32,7 @@ struct EnhancedSettings {
 	bool particleLights = true; // enhanced.particleLights: smoke and dust are lit by the frame's point lights (explosions, muzzle flashes, lamps)
 	bool glowOcclusion = true; // enhanced.glowOcclusion: a supportsGlow lamp's additive halo is skipped while the line from the camera to its centre is blocked (Render/LevelRenderer.cpp); retail depth-tests halos per pixel only
 	bool titanHullLods = true; // enhanced.titanHullLods: a Titan hull half drawn this frame takes its own LOD when the other half was culled, so a far Titan whose front half faded out draws whole (Render/TitanParts.h); retail keeps the culled half's stale LOD
+	bool actorRange = true; // enhanced.actorRange: soldiers and vehicles are drawn out to the view distance and fade with the fog (Render/DistanceFade.h actorRangeRecord); retail drops them by their screen area, a soldier at ~176 m unzoomed, inside every level's fog and every weapon's reach
 	bool prepass = false; // enhanced.prepass: the depth/normal/motion prepass even when neither taa nor ssao reads it
 	// Gameplay, also only with enhanced.enabled; changes the simulation:
 	bool botRecovery = true; // enhanced.botRecovery: bots get out of a vehicle that makes no progress (Game/Bots.cpp)
@@ -84,6 +85,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.glowOcclusion = v; });
 	bindProperty<bool>(console, "enhanced.titanHullLods", ConsoleAccess::Anyone, [&settings] { return settings.titanHullLods; },
 		[&settings](const bool& v) { settings.titanHullLods = v; });
+	bindProperty<bool>(console, "enhanced.actorRange", ConsoleAccess::Anyone, [&settings] { return settings.actorRange; },
+		[&settings](const bool& v) { settings.actorRange = v; });
 	bindProperty<bool>(console, "enhanced.prepass", ConsoleAccess::Anyone, [&settings] { return settings.prepass; },
 		[&settings](const bool& v) { settings.prepass = v; });
 	bindProperty<bool>(console, "enhanced.botRecovery", ConsoleAccess::Anyone, [&settings] { return settings.botRecovery; },
