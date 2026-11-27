@@ -981,6 +981,7 @@ void GameWorld::tick(float seconds)
 	{ TP("w.stepParachutes"); stepParachutes(seconds); }
 	{ TP("w.stepSeatCorpses"); stepSeatCorpses(seconds); }
 	{ TP("w.stepDroppedKits"); stepDroppedKits(); }
+	{ TP("w.stepTitanRiders"); stepTitanRiders(); }
 	{ TP("w.stepCorpses"); stepCorpses(seconds); }
 	{ TP("w.stepRemoteBodies"); stepRemoteBodies(seconds); }
 	{ TP("w.stepAbilities"); stepAbilities(seconds); }
@@ -4622,7 +4623,13 @@ void GameWorld::stepProjectiles(float seconds)
 		}
 		if (p.resting && !p.stuck && p.lyingOn) {
 			const Body* under = findBody(p.lyingOn);
-			if (!under || physics::lengthSquared(under->body.position + under->body.rotation.transform(p.stuckLocal) - p.position) > 0.0025f) {
+			if (under && (isTitan(p.lyingOn) || isRemoteTitan(p.lyingOn))) {
+				// On a Titan's deck it goes with the deck. The mines and
+				// sonars are mesh rigid bodies in the engine, which the
+				// moving Titan keeps awake (0x005aa0e0 -> 0x006bfad0) and
+				// its decks' contacts carry, as they carry a hub here.
+				p.position = under->body.position + under->body.rotation.transform(p.stuckLocal);
+			} else if (!under || physics::lengthSquared(under->body.position + under->body.rotation.transform(p.stuckLocal) - p.position) > 0.0025f) {
 				p.resting = false; // the vehicle moved from under it
 				p.lyingOn = 0;
 			}
@@ -4744,6 +4751,14 @@ void GameWorld::stepProjectiles(float seconds)
 					}
 					const Player* driver = !body.occupants.empty() ? findPlayer(body.occupants.front()) : nullptr;
 					if (spared(driver)) {
+						continue;
+					}
+					// The test has no Titan case: a moving Titan (no driver to
+					// spare, its node's speed over the motion mine's 0.01 and
+					// about the EMP mine's 1, the mine inside its box) sets off
+					// the mines lying on its own decks. enhanced.titanDeckMines
+					// spares them.
+					if (titanDeckMines() && (p.lyingOn == body.object || p.stuckTo == body.object) && isTitan(body.object)) {
 						continue;
 					}
 					// The sphere query: its bounds within the radius.
@@ -5420,6 +5435,7 @@ void GameWorld::resetRound()
 		gone.push_back(kit.object);
 	}
 	m_droppedKits.clear();
+	m_titanRiders.clear();
 	for (const Supply& supply : m_supplies) {
 		gone.push_back(supply.object);
 	}
@@ -11926,7 +11942,11 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 			}
 			const float yaw = lookYaw(player) * 3.14159265f / 180.0f;
 			physics::Vec3 at = player.body.position + physics::Vec3 {std::sin(yaw), 0, std::cos(yaw)};
-			at.y = restHeight(player, at.x, at.z);
+			float surface = 0;
+			uint32_t under = 0;
+			at.y = surfaceBelow({at.x, player.body.position.y, at.z}, player.object, surface, under)
+				? surface
+				: restHeight(player, at.x, at.z);
 			// Its frame as the ThrownFireComp's launch leaves it (0x005e5720,
 			// after the fire 0x005f31d0): fire.projectileStartRotation
 			// (+0xb4..+0xbc) turns the fire frame in the object's own frame
@@ -11941,7 +11961,19 @@ void GameWorld::stepSoldierWeapon(Player& player, float seconds)
 			if (world::Object* placed = m_objects.create(deployable, {at.x, at.y, at.z}, {frame.x, frame.y, frame.z})) {
 				placed->setTeam(player.team);
 				m_deployed[key] = placed->id();
-				m_meshLaunches[placed->id()] = {player.object};
+				// Set down by its origin on a Titan's floor, the shield's and
+				// the sentry gun's lowest vehicle-LOD vertices start 0.28 /
+				// 0.21 m under it and the mesh test (each vertex traced from
+				// the centre of mass, 0.2 / 0.25 m under the origin) never
+				// meets the deck: the body falls through the hull.
+				// enhanced.titanKitFloors stands it on the floor, held there
+				// (addBodies). An item without a body here (the sonars, the
+				// decoy) rides the Titan either way (stepTitanRiders).
+				const bool titanFloor = under && titanByObject(under);
+				m_meshLaunches[placed->id()] = {player.object, {}, titanFloor && titanKitFloors()};
+				if (titanFloor) {
+					rideTitanIfOn(placed->id(), under);
+				}
 				addSentryGun(player, *placed);
 			}
 		} else if (!gadget && player.projectile) {
@@ -15852,6 +15884,30 @@ void GameWorld::addBodies()
 				body.ignored = body.launcher;
 				body.ignoreUntil = m_ticks + 2;
 				body.ignoreSet = true;
+			}
+			if (launch.mapped().onTitanFloor && !body.points.empty()) {
+				// Standing on its lowest vertices and held there, riding the
+				// Titan (stepTitanRiders): the mesh test can't hold the sentry
+				// gun on a deck however it starts (its centre of mass, 0.25 m
+				// under its origin, lies under its feet, and each vertex is
+				// traced from it), so it would sink through as soon as it
+				// rested.
+				float lowest = 0;
+				for (const physics::Vec3& p : body.points) {
+					lowest = std::min(lowest, body.body.rotation.transform(p).y);
+				}
+				body.body.position.y -= lowest;
+				body.body.velocity = body.body.averageVelocity = body.body.angularVelocity = {};
+				body.lastPosition = body.body.position;
+				body.fixed = true;
+				object.setPosition({object.position().x, body.body.position.y, object.position().z});
+				for (TitanRider& rider : m_titanRiders) {
+					if (rider.object == object.id()) {
+						if (const Body* titan = findBody(rider.titan)) {
+							rider.offset = titan->body.rotation.untransform(body.body.position - titan->body.position);
+						}
+					}
+				}
 			}
 		}
 		m_bodies.push_back(std::move(body));

@@ -1423,7 +1423,57 @@ void GameWorld::moveTitanBody(Titan& titan, const physics::Vec3& delta)
 		body->body.angularVelocity = {};
 		body->response = physics::ContactResponse {}; // the sync moves it, no contact does
 	}
+	// Moving (|vx| + |vz| at least *0x00a6afc4 = 1e-4), it wakes every
+	// node round it (0x006bfad0: the sphere query of its radius, 0x00562090,
+	// flags 0x1000108; slot 0x160 on each but itself and the major actors,
+	// slot 0x1c4), so what lies on its decks (a hub, a sentry gun, a
+	// shield) is a mover again and its contacts with the moving decks
+	// carry it along; asleep, the decks would slide out from under it.
+	if (std::fabs(titan.velocity.x) + std::fabs(titan.velocity.z) >= 1e-4f) {
+		const physics::Vec3 centre {object->position().x, object->position().y, object->position().z};
+		for (Body& other : m_bodies) {
+			if (other.object != titan.object && !other.majorActor && !other.held && other.sleep.asleep() && !isTitan(other.object)
+				&& physics::lengthSquared(other.body.position - centre) <= titan.radius * titan.radius) {
+				wake(other);
+			}
+		}
+	}
 	stepTitanSpawnPoints(titan);
+}
+
+void GameWorld::rideTitanIfOn(uint32_t object, uint32_t surfaceObject)
+{
+	const Titan* titan = surfaceObject ? titanByObject(surfaceObject) : nullptr;
+	const world::Object* placed = m_objects.find(object);
+	const Body* body = titan ? findBody(titan->object) : nullptr;
+	if (!body || !placed) {
+		return;
+	}
+	const physics::Vec3 at {placed->position().x, placed->position().y, placed->position().z};
+	m_titanRiders.push_back({object, titan->object, body->body.rotation.untransform(at - body->body.position)});
+}
+
+void GameWorld::stepTitanRiders()
+{
+	for (auto it = m_titanRiders.begin(); it != m_titanRiders.end();) {
+		world::Object* placed = m_objects.find(it->object);
+		const Body* titan = findBody(it->titan);
+		Body* own = findBody(it->object);
+		if (!placed || !titan || (own && !own->fixed)) {
+			if (own && !titan) {
+				own->fixed = false; // held by a Titan that has gone: it falls
+			}
+			it = m_titanRiders.erase(it);
+			continue;
+		}
+		const physics::Vec3 at = titan->body.position + titan->body.rotation.transform(it->offset);
+		placed->setPosition({at.x, at.y, at.z});
+		if (own) {
+			own->lastPosition = own->body.position;
+			own->body.position = at;
+		}
+		++it;
+	}
 }
 
 void GameWorld::stepTitans(float seconds)

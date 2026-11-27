@@ -9,7 +9,7 @@
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
 // (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, guidedCameraEase, cornerSteer,
-// passengerWeapons, softLanding, titanKitFloors, squadOrderPoints, botSquadInvites): they change the simulation by design, so the check turns
+// passengerWeapons, softLanding, titanKitFloors, titanDeckMines, squadOrderPoints, botSquadInvites): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
 
@@ -47,7 +47,8 @@ struct EnhancedSettings {
 	bool cornerSteer = false; // enhanced.cornerSteer: experimental; a driver refusing a corner for room steers wider (Game/Bots.cpp)
 	bool passengerWeapons = true; // enhanced.passengerWeapons: an air transport's passengers fire their own weapons, the pod on the exit key only (GameWorld::passengerWeapon)
 	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
-	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow); retail lets it fall through
+	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow), and a shield or sentry gun set down on a Titan's floor starts with its bottom on it (GameWorld::addBodies); retail lets them fall through
+	bool titanDeckMines = true; // enhanced.titanDeckMines: a Titan doesn't set off the mines lying on its own decks (GameWorld::stepProjectiles); retail's radius trigger (0x005e8aa0) takes the driverless moving Titan for a vehicle, so a motion or EMP mine on its deck goes off when it moves
 	bool squadOrderPoints = true; // enhanced.squadOrderPoints: the squads' order points, their HUD bar and its field upgrades work on any server (GameWorld::squadOrderPointsOn); retail runs them only on a ranked GameSpy server (0x00430a00), so never offline
 	bool botSquadInvites = true; // enhanced.botSquadInvites: offline, a bot the squad leader invites (SquadMenu.applyInviteList) joins his squad, so a human can lead bots and use the squad leader's items; retail's bots never answer an invite (0x004c3190 only sets a mask bit) and join squads only as they are added
 	// Interface, also only with enhanced.enabled:
@@ -118,6 +119,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.softLanding = v; });
 	bindProperty<bool>(console, "enhanced.titanKitFloors", ConsoleAccess::Anyone, [&settings] { return settings.titanKitFloors; },
 		[&settings](const bool& v) { settings.titanKitFloors = v; });
+	bindProperty<bool>(console, "enhanced.titanDeckMines", ConsoleAccess::Anyone, [&settings] { return settings.titanDeckMines; },
+		[&settings](const bool& v) { settings.titanDeckMines = v; });
 	bindProperty<bool>(console, "enhanced.squadOrderPoints", ConsoleAccess::Anyone, [&settings] { return settings.squadOrderPoints; },
 		[&settings](const bool& v) { settings.squadOrderPoints = v; });
 	bindProperty<bool>(console, "enhanced.botSquadInvites", ConsoleAccess::Anyone, [&settings] { return settings.botSquadInvites; },

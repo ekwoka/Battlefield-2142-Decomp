@@ -994,6 +994,10 @@ public:
 	// (a dropped kit, a placed beacon or shield) also stops on a Titan's
 	// soldier-LOD floors, where the projectile LOD has none (the cargo bay's
 	// wall strips). Not retail: the scene ray reads the projectile LOD only.
+	// A deployable set down on a Titan's floor (the portable shield, the
+	// sentry gun) also starts with its lowest vertex on it (addBodies):
+	// set down by its origin, its bottom vertices start under the deck and
+	// the body falls through the hull, as retail's would.
 	// It changes the simulation. Null or false: retail.
 	void setTitanKitFloors(const bool* enhanced, const bool* floors)
 	{
@@ -1003,6 +1007,21 @@ public:
 	bool titanKitFloors() const
 	{
 		return m_enhancedKitFloors && *m_enhancedKitFloors && m_titanKitFloors && *m_titanKitFloors;
+	}
+	// enhanced.enabled and enhanced.titanDeckMines, read live: a Titan
+	// doesn't set off the mines lying on (or stuck to) its own decks.
+	// Retail's radius trigger (0x005e8aa0) has no Titan case, so a moving
+	// Titan, driverless and inside whose box the mine lies, sets off a
+	// motion or EMP mine on its deck as soon as it moves. It changes the
+	// simulation. Null or false: retail.
+	void setTitanDeckMines(const bool* enhanced, const bool* on)
+	{
+		m_enhancedDeckMines = enhanced;
+		m_titanDeckMines = on;
+	}
+	bool titanDeckMines() const
+	{
+		return m_enhancedDeckMines && *m_enhancedDeckMines && m_titanDeckMines && *m_titanDeckMines;
 	}
 	// The squads' order points (the squad's +0x184): the add (0x004c4c90)
 	// and the set-max (0x004c4ea0) do nothing without it. The server's squad
@@ -4349,6 +4368,8 @@ private:
 	const bool* m_softLanding = nullptr;
 	const bool* m_enhancedKitFloors = nullptr;       // setTitanKitFloors
 	const bool* m_titanKitFloors = nullptr;
+	const bool* m_enhancedDeckMines = nullptr;
+	const bool* m_titanDeckMines = nullptr;
 	bool m_squadOrderRanked = false;                 // setSquadOrderGate
 	const bool* m_enhancedSquadOrder = nullptr;      // setSquadOrderPointsOffline
 	const bool* m_squadOrderOffline = nullptr;
@@ -4555,6 +4576,21 @@ private:
 		physics::Vec3 offset; // kit position - Titan position (no rotation: Titans never turn)
 	};
 	std::vector<DroppedKit> m_droppedKits;
+	// The placed items without a body here (the sonars, the decoy: retail's
+	// are mesh rigid bodies) set down on a Titan: they ride it as a body
+	// lying on its deck does (moveTitanBody's wake, then the contacts), at
+	// their place in its frame. One that has a body by now is the
+	// physics's (dropped from the list), unless enhanced.titanKitFloors
+	// holds it standing on the floor (a fixed body: the shield, the sentry
+	// gun; addBodies), when its body rides along too.
+	struct TitanRider {
+		uint32_t object = 0;
+		uint32_t titan = 0;
+		physics::Vec3 offset; // in the Titan's frame
+	};
+	std::vector<TitanRider> m_titanRiders;
+	void rideTitanIfOn(uint32_t object, uint32_t surfaceObject);
+	void stepTitanRiders();
 	bool m_reportedBlowUp = false;
 	// Stepping a LoneVehicle: no collision events or contact effects, no
 	// other bodies met.
@@ -4742,6 +4778,9 @@ private:
 	struct MeshLaunch {
 		uint32_t launcher;
 		physics::Vec3 velocity {};
+		// enhanced.titanKitFloors: set down on a Titan's floor, its body
+		// stands on its lowest vertices there, held (addBodies).
+		bool onTitanFloor = false;
 	};
 	std::map<uint32_t, MeshLaunch> m_meshLaunches;
 	// The box bottoms of templates with MechLegs (their +0x4c4, 0x005cd4f0),
