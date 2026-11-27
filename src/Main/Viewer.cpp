@@ -891,6 +891,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				const float wheelSteps = playWheel.take();
 				const auto wheelTo = [&](const char* name) { return c.wheelPresses(map, name, wheelSteps); };
 				input.itemStep = wheelTo("c_PINextItem") ? 1 : wheelTo("c_PIPrevItem") ? -1 : 0;
+				input.directorHud = keys[SDL_SCANCODE_H];
 				options.onPlayerInput(input);
 				turn = 0;
 			} else if (playing && options.onPlayerInput) {
@@ -941,6 +942,7 @@ int interactive(const render::LevelSources& sources, const ViewerOptions& option
 				}
 				const float wheelSteps = playWheel.take();
 				input.itemStep = wheelSteps > 0 ? 1 : wheelSteps < 0 ? -1 : 0; // up the next item, down the previous
+				input.directorHud = keys[SDL_SCANCODE_H];
 				options.onPlayerInput(input);
 				turn = 0;
 			}

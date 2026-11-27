@@ -1,0 +1,233 @@
+// --director: an automatic camera director for recording footage of a match
+// of bots (not retail: a tool of the rewrite). The local player spectates;
+// the director scores each living bot's interest from what the AI and the
+// world know (its fire, hits, kills, a target in sight and range, vehicle
+// and aircraft fights, control point captures, the Titan assault; idling,
+// seats without a target and the spawn lower it), cuts between them with
+// minimum and maximum shot lengths, hysteresis and variety, holds on a
+// death, and places a smoothed camera: a chase, the bot's own eye, or a
+// slow wide orbit. It records no video: an outside screen recorder does.
+//
+// Three layers, each testable without a window: Observer (the world and
+// the bots to Samples), ShotDirector (Samples to cuts; pure) and
+// DirectorCamera (a subject's pose to a camera Look; pure, on Cameras.h's
+// follow and death views). Director runs them together each tick.
+#pragma once
+
+#include "Game/Cameras.h"
+#include "Physics/RigidBody.h"
+
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace dice::hfe::game {
+class GameWorld;
+class BotManager;
+}
+
+namespace dice::hfe::game::director {
+
+enum class CameraMode { Chase, FirstPerson, Wide };
+const char* modeName(CameraMode mode);
+
+constexpr float kNever = 1e9f;
+
+// What the director knows of a player at a sample.
+struct Sample {
+	int player = -1;
+	std::string name;
+	int team = 0;
+	bool alive = false;
+	physics::Vec3 position; // the soldier's feet (in a vehicle, the vehicle's)
+	physics::Vec3 focus;    // where its action is: between it and its target, else itself
+	float speed = 0;        // metres a second over the last sample
+	uint32_t soldier = 0, vehicle = 0;
+	int seat = -1;
+	bool flying = false;        // in an aircraft (VCAir, VCHelicopter)
+	bool ownTitan = false;      // manning a gun of its own Titan (a fixed, far chase: worth less)
+	bool hasTarget = false;     // the AI fights an enemy
+	bool enemyInRange = false;  // that enemy is in sight and within its weapon's range
+	bool idleBehaviour = false; // the AI's behaviour is Idle (or none)
+	bool capturing = false;     // inside an enemy or neutral control point's radius
+	bool titanAssault = false;  // gpm_ti: on or close to the enemy Titan
+	bool titanCore = false;     // inside the enemy Titan with its core exposed
+	bool inSpawn = false;       // just spawned, or idle in its own base
+	// Seconds since it last fired, was hit, dealt damage, killed (kNever: not yet).
+	float sinceFired = kNever, sinceHit = kNever, sinceDamage = kNever, sinceKill = kNever;
+	float idleFor = 0;  // seconds idle (slow and without a target, or an idle behaviour)
+	float aliveFor = 0; // seconds since it spawned
+	int killer = -1;    // dead: who killed it
+};
+
+// The interest of a living sample (higher is more worth watching; 0 for the dead).
+float interest(const Sample& sample);
+// Fighting now: fire, hits, damage or a kill in the last few seconds, or an enemy in sight and range.
+bool engaged(const Sample& sample);
+
+// The world and the bots to samples. observe() each tick (fire, hits and
+// kills are short); sample() about every 0.5 s builds the samples.
+class Observer {
+public:
+	Observer(GameWorld& world, const BotManager* bots);
+	void observe(float now);
+	void sample(float now);
+	const std::vector<Sample>& samples() const { return m_samples; }
+	const Sample* find(int player) const;
+
+private:
+	struct Memory {
+		float lastFired = -kNever, lastHit = -kNever, lastDamage = -kNever, lastKill = -kNever;
+		float idleSince = -1, aliveSince = 0;
+		float hitPoints = -1; // its control object's (soldier or vehicle) last seen
+		uint32_t object = 0;
+		int kills = 0;
+		uint32_t gunShots = 0, hits = 0;
+		bool alive = false;
+		physics::Vec3 position, sampledPosition;
+		float sampledAt = -1;
+	};
+	GameWorld& m_world;
+	const BotManager* m_bots;
+	std::map<int, Memory> m_memory;
+	std::vector<Sample> m_samples;
+};
+
+struct Settings {
+	float minShot = 6;      // seconds a shot lasts at least (an idle subject or a death cuts sooner)
+	float maxShot = 20;     // and at most
+	float idleCut = 4;      // the subject idle this long: cut early to a better one
+	float deathHold = 2;    // the subject died: hold on its death view this long
+	float margin = 2;       // a candidate must beat the subject's interest by this much
+	float marginShare = 0.25f; // or by this share of it, if more
+	int history = 4;        // the last subjects variety avoids
+	float variety = 1;      // their penalty (plus varietyShare of their interest), so a fresh face wins when scores are close
+	float varietyShare = 0.15f;
+	float wideShare = 0.12f;        // of the cuts, wide shots
+	float firstPersonShare = 0.35f; // of the infantry cuts, first person
+	float sampleEvery = 0.5f;       // seconds between decisions
+};
+
+// A cut: when, to whom, how, and why ("start", "better", "idle", "max", "death", "lost", "forced").
+struct Cut {
+	float time = 0;
+	int subject = -1, previous = -1;
+	CameraMode mode = CameraMode::Chase;
+	std::string reason;
+	float score = 0;
+	bool engaged = false;
+};
+
+// The shot director: which bot to watch and how, from the samples.
+class ShotDirector {
+public:
+	explicit ShotDirector(Settings settings = {}, uint32_t seed = 0x2142u);
+	// One decision; the cut when it made one.
+	std::optional<Cut> update(float now, const std::vector<Sample>& samples);
+	void forceCut() { m_forced = true; }
+	int subject() const { return m_subject; }
+	CameraMode mode() const { return m_mode; }
+	bool holdingDeath() const { return m_deathAt >= 0; }
+	float shotStart() const { return m_shotStart; }
+	const Settings& settings() const { return m_settings; }
+
+private:
+	const Sample* best(const std::vector<Sample>& samples, int exclude, float& score) const;
+	CameraMode chooseMode(const Sample& sample);
+	float random();
+	Cut cutTo(float now, const Sample* to, const char* reason);
+	Settings m_settings;
+	uint32_t m_seed;
+	int m_subject = -1;
+	CameraMode m_mode = CameraMode::Chase;
+	float m_shotStart = 0;
+	float m_deathAt = -1;
+	bool m_forced = false;
+	std::deque<int> m_recent;
+};
+
+// The subject's pose for the camera.
+struct Pose {
+	physics::Vec3 eye;        // the soldier's eye
+	float yaw = 0, pitch = 0; // degrees: its aim (yaw 0 along +z, pitch up positive)
+	bool inVehicle = false;
+	camera::Frame vehicle;    // the vehicle's frame
+	float radius = 1;         // the vehicle's (or the soldier's) bounding radius
+	bool flying = false;
+	physics::Vec3 velocity;
+	physics::Vec3 focus;      // the action's centre (the wide shot's)
+};
+
+// The camera for a shot: the chase (Cameras.h's follow behind the aim or
+// the vehicle), the eye at the aim, a slow orbit of the action; the death
+// view (Cameras.h's) when the subject dies. Aim jitter is smoothed (yaw and
+// pitch ease with a time constant a few ticks long), never across a cut.
+class DirectorCamera {
+public:
+	void cut() { m_fresh = true; }
+	camera::Look update(CameraMode mode, const Pose& pose, float seconds, const camera::Ground& ground);
+	// The subject died: the death camera starts on its body (or wreck).
+	void startDeath(const physics::Vec3& body, float radius);
+	camera::Look death(const physics::Vec3* body, const physics::Vec3* killer, float seconds, const camera::Ground& ground);
+	// The vertical field of view (radians) for a mode.
+	static float fov(CameraMode mode);
+	const camera::Look& last() const { return m_last; }
+	float yaw() const { return m_yaw; }
+	float pitch() const { return m_pitch; }
+
+	// The smoothing's time constants, seconds.
+	static constexpr float kEyeSmoothing = 0.15f, kChaseSmoothing = 0.35f, kFocusSmoothing = 1.0f;
+	static constexpr float kOrbitDegreesPerSecond = 7;
+
+private:
+	bool m_fresh = true;
+	float m_yaw = 0, m_pitch = 0, m_eyeHeight = 0;
+	physics::Vec3 m_focus;
+	float m_orbit = 0;
+	camera::FollowState m_follow;
+	camera::DeathState m_death;
+	camera::Look m_last;
+};
+
+// The director as main runs it: the observer every tick, a decision every
+// Settings::sampleEvery, the camera each tick.
+class Director {
+public:
+	Director(GameWorld& world, const BotManager* bots, Settings settings = {}, uint32_t seed = 0x2142u);
+	void tick(float seconds);
+	// The view now (false before there is a subject).
+	bool view(camera::Look& look, float& fovY) const;
+	// Whether the last tick cut (no blending into the new view).
+	bool cutLastTick() const { return m_cutLastTick; }
+	// What the view leaves out (the subject's soldier and weapon in first person).
+	std::vector<uint32_t> hidden() const;
+	void forceCut() { m_shots.forceCut(); }
+	int subject() const { return m_shots.subject(); }
+	CameraMode mode() const;
+	const std::vector<Cut>& cuts() const { return m_cuts; }
+	const Observer& observer() const { return m_observer; }
+	std::function<void(const Cut&)> onCut;
+	// Statistics: the decisions made, and those whose subject was engaged.
+	int decisions = 0, engagedDecisions = 0;
+	float time() const { return m_time; }
+
+private:
+	Pose poseOf(const Sample& sample) const;
+	camera::Ground ground() const;
+	GameWorld& m_world;
+	Observer m_observer;
+	ShotDirector m_shots;
+	DirectorCamera m_camera;
+	float m_time = 0, m_nextSample = 0;
+	bool m_hasView = false, m_cutLastTick = false, m_dying = false;
+	camera::Look m_look;
+	float m_fov = 1;
+	uint32_t m_body = 0;
+	std::vector<Cut> m_cuts;
+};
+
+} // namespace dice::hfe::game::director

@@ -12,6 +12,7 @@
 #include "Console/Console.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/Bots.h"
+#include "Game/Director.h"
 #include "Game/GameWorld.h"
 #include "IO/File/FileManager.h"
 #include "Physics/CollisionTemplateManager.h"
@@ -7511,4 +7512,62 @@ TEST(Bots_GunnerWithABotDriverFires)
 	CHECK(field.info(gunner).gunShots > 0);
 	CHECK(field.info(gunner).vehicle == id && field.info(gunner).seat == 1);
 	CHECK(field.info(driver).vehicle == id && field.info(driver).seat == 0);
+}
+
+// --director (Game/Director.h) on a round of bots: one bot fights an enemy
+// in front of it, another stands alone far off. The director's observer sees
+// the fight (the fire, the enemy in sight and range) and the idling, and its
+// shots end on the fighting bot, leaving the idle one.
+TEST(Director_CutsFromIdleBotToFightingOne)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings = scriptedSettings(console);
+	game::BotManager bots(*field.world, settings);
+	const int idle = field.soldier(2, true, 300, 0); // nothing within its 120 m view
+	const int fighter = field.soldier(2, true, 0, 0);
+	const int enemy = field.soldier(1, false, 0, 30);
+	game::GameWorld::PlayerInfo info;
+	field.world->playerInfo(enemy, info);
+	field.world->setHitPoints(info.soldier, 1e6f); // keeps the fight going
+	// The idle bot first: it is the director's subject at the start, before anyone has fired.
+	game::director::Director director(*field.world, &bots);
+	std::vector<game::director::Cut> cuts;
+	director.onCut = [&cuts](const game::director::Cut& cut) { cuts.push_back(cut); };
+	int onFighter = 0, ticks = 0;
+	for (int tick = 0; tick < 30 * 16; ++tick) {
+		bots.update(1 / 30.0f);
+		field.world->tick(1 / 30.0f);
+		director.tick(1 / 30.0f);
+		if (tick >= 30 * 10) {
+			++ticks;
+			onFighter += director.subject() == fighter;
+		}
+	}
+	const game::director::Sample* f = director.observer().find(fighter);
+	const game::director::Sample* i = director.observer().find(idle);
+	CHECK(f && i);
+	CHECK(director.observer().find(enemy) == nullptr); // a human isn't a subject
+	if (!f || !i) {
+		return;
+	}
+	std::printf("  fighter: interest %.1f (fired %.1f s ago, enemy in range %d); idle bot: %.1f, idle %.1f s; %zu cuts\n",
+		game::director::interest(*f), f->sinceFired, f->enemyInRange, game::director::interest(*i), i->idleFor, cuts.size());
+	std::printf("  idle bot: speed %.2f, behaviour idle %d, target %d, since fired %.1f, hit %.1f, in spawn %d, alive %.0f s\n", i->speed,
+		i->idleBehaviour, i->hasTarget, i->sinceFired, i->sinceHit, i->inSpawn, i->aliveFor);
+	for (const auto& c : cuts) {
+		std::printf("    %.1f s: player %d, %s, %s\n", c.time, c.subject, game::director::modeName(c.mode), c.reason.c_str());
+	}
+	CHECK(f->sinceFired < 2 && f->enemyInRange && f->hasTarget && game::director::engaged(*f));
+	CHECK(i->idleFor > 4 && !game::director::engaged(*i));
+	CHECK(game::director::interest(*f) > game::director::interest(*i) + 4);
+	CHECK(!cuts.empty() && cuts.back().subject == fighter);
+	CHECK(onFighter == ticks);
+	// The camera: on the fighter, a few metres from his eye at most (wide shots aside).
+	game::camera::Look look;
+	float fov = 0;
+	CHECK(director.view(look, fov) && fov > 0.5f);
+	field.world->playerInfo(fighter, info);
+	const float away = std::sqrt(physics::lengthSquared(look.eye - info.position));
+	CHECK(director.mode() == game::director::CameraMode::Wide ? away < 60 : away < 6);
 }

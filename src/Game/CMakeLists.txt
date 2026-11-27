@@ -24,6 +24,7 @@ add_library(Game STATIC
 	ScriptBridge.cpp
 	TickTimer.cpp
 	Cameras.cpp
+	Director.cpp
 	Votes.cpp
 	SquadRequests.cpp
 	AmbientTriggers.cpp

@@ -891,6 +891,8 @@ public:
 	std::string equipment(int player) const;
 	// Whether it knows of an enemy (seen, or still remembered).
 	bool knows(int player, int enemy) const;
+	// Whether it sees that enemy now (in sight by its own senses, not only remembered or told).
+	bool sees(int player, int enemy) const;
 	// The points MoveTo passes on the way to its goal (strategic waypoints
 	// and areas), then the goal.
 	std::vector<physics::Vec3> route(int player) const;

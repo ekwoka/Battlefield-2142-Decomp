@@ -1103,6 +1103,20 @@ bool BotManager::knows(int player, int enemy) const
 	return false;
 }
 
+bool BotManager::sees(int player, int enemy) const
+{
+	const auto it = m_bots.find(player);
+	if (it == m_bots.end()) {
+		return false;
+	}
+	for (const Known& k : it->second.known) {
+		if (k.player == enemy && k.everSeen && k.lostAt < 0 && !k.secondHand) {
+			return true;
+		}
+	}
+	return false;
+}
+
 std::vector<physics::Vec3> BotManager::route(int player) const
 {
 	std::vector<physics::Vec3> points;

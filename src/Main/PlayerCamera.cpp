@@ -625,10 +625,28 @@ game::camera::Look followLookOf(game::GameWorld& round, game::camera::FollowStat
 
 } // namespace
 
+void PlayerCamera::direct(const game::camera::Look& look, float fovY, bool cut, std::vector<uint32_t> hidden)
+{
+	m_directedPrevious = cut || !m_directed ? look : m_directedLook;
+	m_directedLook = look;
+	m_directedFov = fovY;
+	m_directedHidden = std::move(hidden);
+	m_directed = true;
+}
+
 void PlayerCamera::stepViews(float seconds)
 {
 	using namespace game::camera;
 	m_hasExternal = false;
+	if (m_directed) {
+		// --director: its shot over every other view.
+		m_external = m_directedLook;
+		m_externalFov = m_directedFov;
+		m_externalRoll = 0;
+		m_lastLook = m_external;
+		m_hasExternal = true;
+		return;
+	}
 	if (m_remote) {
 		// A joined game's views stay the first person and the chase; a
 		// spectator flies the free camera (following another needs the
@@ -848,6 +866,18 @@ bool PlayerCamera::externalView(View& view, float aspect) const
 {
 	if (!m_hasExternal) {
 		return false;
+	}
+	if (m_directed) {
+		// Between the last two ticks (the objects are drawn so too).
+		const float a = std::clamp(m_blendAlpha, 0.0f, 1.0f);
+		game::camera::Look look;
+		look.eye = m_directedPrevious.eye + (m_directedLook.eye - m_directedPrevious.eye) * a;
+		look.at = m_directedPrevious.at + (m_directedLook.at - m_directedPrevious.at) * a;
+		view.position = {look.eye.x, look.eye.y, look.eye.z};
+		game::camera::anglesOf(look, view.yaw, view.pitch);
+		view.fovY = aspectFov(m_directedFov, aspect);
+		view.roll = 0;
+		return true;
 	}
 	view.position = {m_external.eye.x, m_external.eye.y, m_external.eye.z};
 	game::camera::anglesOf(m_external, view.yaw, view.pitch);
@@ -1608,6 +1638,9 @@ std::vector<PlayerCamera::Model> PlayerCamera::models() const
 
 bool PlayerCamera::hides(uint32_t object) const
 {
+	if (m_directed) {
+		return object != 0 && std::find(m_directedHidden.begin(), m_directedHidden.end(), object) != m_directedHidden.end();
+	}
 	if (!insideView() || object == 0) {
 		return false;
 	}

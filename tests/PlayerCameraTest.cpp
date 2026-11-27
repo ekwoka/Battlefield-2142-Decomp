@@ -483,3 +483,39 @@ TEST(PlayerCamera_TurnedSeatFacesItsPlacement)
 		CHECK(std::fabs(seats[1].position.y - 0.92f) < 1e-4f && std::fabs(seats[1].position.z + 1.42f) < 1e-4f);
 	}
 }
+
+// --director's shot (PlayerCamera::direct): drawn as the external view over
+// the spectator's own, blended between the last two ticks except across a
+// cut, and the first-person subject's soldier left out of the world pass.
+TEST(PlayerCamera_DirectedViewBlendsBetweenTicksButNotAcrossCuts)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(round, systems, nullptr);
+	camera.spectator = true;
+	PlayerCamera::View view;
+	CHECK(!camera.externalView(view, 4.0f / 3));
+	game::camera::Look look;
+	look.eye = {0, 10, 0};
+	look.at = {0, 10, 1};
+	camera.direct(look, 1.0f, true, {42});
+	camera.tick(1 / 30.0f);
+	CHECK(camera.externalView(view, 4.0f / 3) && view.position[1] == 10);
+	CHECK(camera.hides(42) && !camera.hides(43) && !camera.hides(0));
+	look.eye = {0, 12, 0};
+	look.at = {0, 12, 1};
+	camera.direct(look, 1.0f, false);
+	camera.tick(1 / 30.0f);
+	camera.setBlend(0.5f);
+	CHECK(camera.externalView(view, 4.0f / 3) && std::fabs(view.position[1] - 11) < 1e-4f && std::fabs(view.pitch) < 1e-4f);
+	CHECK(!camera.hides(42));
+	look.eye = {100, 0, 0};
+	look.at = {100, 0, 1};
+	camera.direct(look, 1.0f, true); // a cut: straight there
+	camera.tick(1 / 30.0f);
+	CHECK(camera.externalView(view, 4.0f / 3) && view.position[0] == 100);
+	camera.stopDirecting();
+	CHECK(!camera.directed());
+}

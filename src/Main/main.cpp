@@ -11,8 +11,15 @@
 //               [--view | --screenshot out.png] [--camera x/y/z/yaw/pitch]
 //               [--nosound] [--sound] [--play-sound <name>]
 //               [--play [team]] [--drive <vehicle template>]
+//               [--director] (with --bots N: a match of bots, a spectator camera cutting between them)
 // --view opens a window showing the level (needs a build with SDL3);
 // --screenshot renders one frame to a PNG instead.
+// --director runs a match of bots only (the local player spectates) and
+// places the camera itself (Game/Director.h): it cuts between the bots most
+// worth watching (fighting, capturing, assaulting a Titan; not idling or in
+// spawn), in chase, first-person and wide shots, for an outside screen
+// recorder; the HUD is hidden (H shows it), Space cuts to the next shot,
+// and each cut is logged.
 // The install directory defaults to $BF2142_GAME_DIR. The API tables are
 // symbols/*.console.csv (one --api each): methods listed there but not
 // implemented are registered as stubs with the original's argument counts.
@@ -45,6 +52,7 @@
 #include "AI/NavMesh.h"
 #include "Console/ConsoleBinding.h"
 #include "Game/Bots.h"
+#include "Game/Director.h"
 #include "UI/Player/Player.h"
 #include "IO/Localization/Localization.h"
 #include "HostedGame.h"
@@ -187,6 +195,7 @@ struct Options {
 	bool playTeamGiven = false;  // --play 1|2: on a server, ask for that team (PostRemote 6/7)
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
 	bool spectate = false;       // --spectate: on a server, join as a spectator (the menu's SPECTATOR)
+	bool director = false;       // --director: a match of bots only, the camera cutting between them (Game/Director.h)
 	// --remote-actions "<s>:<op> ...": on a server without a window, the
 	// inputs from that second of the round on (crouch, prone, stand, fire,
 	// hold (stop firing), reload, forward, stop, turn:<deg a tick>,
@@ -473,6 +482,9 @@ bool parseOptions(int argc, char** argv, Options& options)
 			options.host = true;
 		} else if (arg == "--walk") {
 			options.walk = true;
+		} else if (arg == "--director") {
+			options.director = true;
+			options.view = options.screenshot.empty();
 		} else if (arg == "--spectate") {
 			options.spectate = true;
 		} else if (arg == "--maps" && hasValue) {
@@ -959,6 +971,8 @@ bool g_deploymentOpen = false;
 bool g_initialDeploymentPending = false;
 // Dead: Enter hid the spawn screen; the respawn timer runs on (0x00754d74, 0x004bfe40).
 bool g_spawnScreenHidden = false;
+// --director: the HUD shown (H toggles it; hidden for clean footage).
+bool g_directorHud = false;
 // The gui index the vehicle HUD shows (the HUD manager's +0xa0; 0 on foot),
 // which the seat's post-processing asks with (0x007a0080).
 int g_guiIndex = 0;
@@ -3258,6 +3272,9 @@ int main(int argc, char** argv)
 			// enhanced.singleplayBotCount: this map's own count (playersForMap).
 			const dice::hfe::menu::MapPlayers players = dice::hfe::menu::playersForMap(*session.startedGame, map.size);
 			options.bots = players.bots;
+			if (options.director && (session.startedGame->botsIncludeHumans || session.startedGame->playerTarget > 0)) {
+				++options.bots; // --director: the spectator's place goes to a bot too
+			}
 			options.maxPlayers = players.maxPlayers;
 		}
 		std::printf("next map: %s (%s, %d)\n", options.level.c_str(), options.gameMode.c_str(), options.mapSize);
@@ -4491,6 +4508,9 @@ int runGame(Options& options, Session& session)
 		const dice::hfe::menu::MapPlayers players = dice::hfe::menu::playersForMap(*startedGame, map.size);
 		options.maxPlayers = players.maxPlayers;
 		options.bots = players.bots;
+		if (options.director && (startedGame->botsIncludeHumans || startedGame->playerTarget > 0)) {
+			++options.bots; // --director: the player only spectates, so his place is a bot's too
+		}
 		options.botSkill = startedGame->botSkill;
 		options.ticketRatio = startedGame->ticketRatio;
 		options.timeLimit = startedGame->timeLimit;
@@ -8562,6 +8582,20 @@ int runGame(Options& options, Session& session)
 				session.disconnect = true;
 			}
 		};
+		// --director (Game/Director.h): made once the bots are in; each tick,
+		// after the world's, it places the spectator's camera.
+		std::optional<game::director::Director> director;
+		const auto stepDirector = [&director, &playerCamera] {
+			if (!director) {
+				return;
+			}
+			director->tick(1.0f / 30.0f);
+			game::camera::Look look;
+			float fovY = 1;
+			if (director->view(look, fovY)) {
+				playerCamera.direct(look, fovY, director->cutLastTick(), director->hidden());
+			}
+		};
 #if BF2142_HAS_PYTHON
 		// The game mode's Python script runs the round (python/bf2 and
 		// mods/<mod>/python/game/gamemodes/<mode>.py).
@@ -8763,6 +8797,7 @@ int runGame(Options& options, Session& session)
 			round.setZoomed(round.localPlayer(), playerCamera.zoomLevel() > 0, playerCamera.mouseScale());
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			{ TP("round"); round.tick(1.0f / 30.0f); }
+			stepDirector();
 			driveTrace();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
@@ -8793,6 +8828,7 @@ int runGame(Options& options, Session& session)
 			round.localMuzzleEffects = !playerCamera.insideView();
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			{ TP("round"); round.tick(1.0f / 30.0f); }
+			stepDirector();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepObjectEffects();
@@ -8956,7 +8992,34 @@ int runGame(Options& options, Session& session)
 				std::fprintf(stderr, "no spawn point for bot %d (team %d)\n", i + 1, team);
 			}
 		}
-		if (options.playTeam != 0) {
+		if (options.director && session.client) {
+			std::printf("director: only for a game of our own (not on a server): --spectate there\n");
+		}
+		if (options.director && !session.client) {
+			// --director: the local player joins as a spectator (JoinAsSpectator's
+			// flag: no soldier, left out of the teams' lists), so every soldier
+			// is a bot's; the director then follows them.
+			const int local = round.joinPlayer(options.playTeam == 1 ? 1 : 2);
+			round.setSpectator(local, true);
+			playerCamera.spectator = true;
+			g_spawnScreenHidden = true;
+			if (!bots.enabled() || options.bots <= 0) {
+				std::printf("director: no bots to watch (give --bots N on a level with AI navigation data)\n");
+			}
+			director.emplace(round, &bots);
+			director->onCut = [&round](const game::director::Cut& cut) {
+				game::GameWorld::PlayerInfo who;
+				const bool known = round.playerInfo(cut.subject, who);
+				const world::Object* vehicle = known && who.vehicle ? round.objects().find(who.vehicle) : nullptr;
+				const std::string in = vehicle && vehicle->objectTemplate() ? ", in " + vehicle->objectTemplate()->name() : "";
+				std::printf("director: %7.1f s cut to %s (player %d%s) %s, %s, interest %.1f%s\n", cut.time,
+					known ? who.name.c_str() : "?", cut.subject, in.c_str(), game::director::modeName(cut.mode),
+					cut.reason.c_str(), cut.score, cut.engaged ? ", engaged" : "");
+				std::fflush(stdout);
+			};
+			std::printf("director: player %d spectates; %d bots play\n", local, bots.enabled() ? options.bots : 0);
+		}
+		if (options.playTeam != 0 && !options.director) {
 			// The soldier's chosen unlocks (every unlock is owned anyway).
 			if (session.menuBindings) {
 				// The profile's unlocks are both the soldier's chosen ones and
@@ -9626,6 +9689,25 @@ int runGame(Options& options, Session& session)
 			}
 			std::printf("\n");
 			tickprof::report();
+			if (director) {
+				// --director: how often it cut and how much it watched a fight.
+				const auto& cuts = director->cuts();
+				const size_t engagedCuts = static_cast<size_t>(std::count_if(cuts.begin(), cuts.end(), [](const auto& c) { return c.engaged; }));
+				std::map<std::string, int> reasons, modes;
+				for (const auto& c : cuts) {
+					++reasons[c.reason];
+					++modes[game::director::modeName(c.mode)];
+				}
+				std::printf("director: %zu cuts in %.0f s (a shot every %.1f s), %zu (%.0f %%) to an engaged bot; "
+							"the subject engaged at %.0f %% of %d decisions; reasons:",
+					cuts.size(), director->time(), cuts.empty() ? 0.0 : director->time() / cuts.size(), engagedCuts,
+					cuts.empty() ? 0.0 : 100.0 * engagedCuts / cuts.size(),
+					director->decisions ? 100.0 * director->engagedDecisions / director->decisions : 0.0, director->decisions);
+				for (const auto& [reason, n] : reasons) std::printf(" %s %d", reason.c_str(), n);
+				std::printf("; modes:");
+				for (const auto& [mode, n] : modes) std::printf(" %s %d", mode.c_str(), n);
+				std::printf("\n");
+			}
 			std::printf("  state fingerprint %016llx\n", static_cast<unsigned long long>(round.stateFingerprint()));
 			if (const auto lost = round.objectsOutOfWorld(); !lost.empty()) {
 				std::printf("  %zu objects out of the world\n", lost.size());
@@ -10509,6 +10591,9 @@ int runGame(Options& options, Session& session)
 			if (hud::HudQuad dragged; hudManager.dragQuad(dragged)) {
 				quads.push_back(dragged); // the kit screen's taken item
 			}
+			if (director && !g_directorHud) {
+				quads.clear(); // --director: clean footage (no HUD, name tags, map or crosshair) until H
+			}
 			return quads;
 		};
 		// A game started from the menu shows it on Esc (Logic.isGameRunning).
@@ -10673,7 +10758,7 @@ int runGame(Options& options, Session& session)
 		// (GameLogic.setBeforeSpawnCamera); a joined game's soldier is the
 		// server's control object, which the view follows once it has one.
 		// (Not a demo's: its own camera, or a camera file, is the view.)
-		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player() && !g_demo &&
+		if (viewer.camera.empty() && gameLogic.beforeSpawnCamera.set && !round.player() && !g_demo && !director &&
 			!(session.client && session.client->world().hasControlObject())) {
 			const auto& c = gameLogic.beforeSpawnCamera;
 			char text[128];
@@ -11452,6 +11537,27 @@ int runGame(Options& options, Session& session)
 					return;
 				}
 				inner(in);
+			};
+		}
+		if (director && viewer.onPlayerInput) {
+			// --director: H shows or hides the HUD, Space cuts to the next shot;
+			// the spectator's own keys reach nothing else (its camera is the director's).
+			viewer.onPlayerInput = [inner = viewer.onPlayerInput, &director, hudWas = false, cutWas = false](const ViewerOptions::PlayerInput& in) mutable {
+				if (in.directorHud && !hudWas) {
+					g_directorHud = !g_directorHud;
+					std::printf("director: HUD %s\n", g_directorHud ? "shown" : "hidden");
+				}
+				if (in.jump && !cutWas && director) {
+					director->forceCut();
+				}
+				hudWas = in.directorHud;
+				cutWas = in.jump;
+				g_spawnScreenHidden = true;
+				g_deploymentOpen = false;
+				ViewerOptions::PlayerInput idle;
+				idle.scoreboard = in.scoreboard;
+				idle.aimPitchDegrees = in.aimPitchDegrees;
+				inner(idle);
 			};
 		}
 		std::array<int, 3> remoteTicketState {-1, -1, -1}; // a joined game's last seen team +0x8c
