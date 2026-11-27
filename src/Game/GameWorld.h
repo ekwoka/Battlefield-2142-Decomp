@@ -4519,6 +4519,7 @@ private:
 	std::map<std::pair<int, uint32_t>, int> m_spawnGroupIds;
 	std::map<uint32_t, int> m_mobileSpawnGroupIds;
 	int m_nextSpawnGroupId = 1;
+	bool m_spawnGroupLimitLogged = false;
 	Player* m_player = nullptr; // the local player
 	bool m_addingLocal = false; // spawnPlayer is adding it (addPlayer sets m_player before PlayerConnect)
 	SoldierInput m_playerInput;

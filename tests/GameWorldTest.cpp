@@ -104,6 +104,30 @@ TEST(GameWorld_SpawnPointSetGroupProperty)
 	if (groups.size() == 1) CHECK(groups[0].templateGroup == UINT32_MAX);
 }
 
+TEST(GameWorld_CapsControlSpawnGroupsAtCompactId63)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	templates.registerType(1, "SpawnPoint");
+	templates.registerType(2, "ControlPoint");
+	auto* cp = templates.create("ControlPoint", "cp_group_cap");
+	cp->settings()["controlPointId"] = "7";
+	cp->settings()["team"] = "2";
+	objects.create(cp);
+	for (int i = 0; i < 64; ++i) {
+		auto* point = templates.create("SpawnPoint", "sp_group_cap_" + std::to_string(i));
+		point->settings()["controlPointId"] = "7";
+		point->settings()["setGroup"] = std::to_string(i);
+		objects.create(point, {static_cast<float>(i), 0, 0});
+	}
+	game::GameWorld round(templates, objects);
+	round.startRound();
+	const auto groups = round.spawnGroups(2);
+	CHECK(groups.size() == 63);
+	CHECK(std::any_of(groups.begin(), groups.end(), [](const auto& group) { return group.id == 63; }));
+	CHECK(std::none_of(groups.begin(), groups.end(), [](const auto& group) { return group.id >= 64; }));
+}
+
 TEST(GameWorld_MobileSpawnGroupAveragesAllChildrenAndRetiresWithItsOwner)
 {
 	world::ObjectTemplateManager templates;
