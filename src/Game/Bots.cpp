@@ -3510,7 +3510,18 @@ void BotManager::act(Bot& bot, const GameWorld::PlayerInfo& self, SoldierInput& 
 			for (const GameWorld::VehicleInfo& vehicle : m_vehicles) {
 				reach = vehicle.object == bot.vehicleTarget ? vehicleBox(vehicle).radius + kSoldierRadius + 1 : reach;
 			}
-			steer(bot, self, at, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
+			// enhanced.botOffMesh: the walk to a vehicle standing on the terrain with its origin 3 m or more
+			// up (a walker: as_heavy_mech's 3.3 m) goes to the ground under it. The terrain grid takes no goal
+			// that high (groundWalk: a roof or a deck), so a soldier off the mesh never set off for it
+			// (Cerbere_Landing gpm_cq 32: PAC's walker at the Harbor, Bots_CerbereWalkerJoinsTheFight).
+			physics::Vec3 walkTo = at;
+			if (target && m_settings.offMeshWalk()) {
+				const float ground = m_world.terrainHeight(at.x, at.z);
+				if (at.y - ground >= 3 && at.y + std::min(0.0f, target->boxMin.y) - ground < 3) {
+					walkTo.y = ground;
+				}
+			}
+			steer(bot, self, walkTo, 200000 + static_cast<int>(bot.vehicleTarget), seconds, input, 0, bot.vehicleTarget);
 			if (physics::lengthSquared(at - self.position) < reach * reach) {
 				input.use = !bot.usedLast && working; // a press
 			}

@@ -391,3 +391,82 @@ TEST(Bots_AsyncPathsVerdunTitanSameRound)
 		CHECK(two.behaviours[i] == none.behaviours[i] && two.behaviours[i] == again.behaviours[i]);
 	}
 }
+
+// Cerbere_Landing gpm_cq 32 puts PAC's one walker (CPNAME_CL_32_Harbor_Mech: as_heavy_mech) at the
+// Harbor, 13.4/36.1/-253.8, off both meshes made for the 16-player layout (the vehicle mesh's nearest
+// point 82 m north). Retail's BBChange (AIDLL 0x1006c520) passes over a ground vehicle whose spot on its
+// map has no polygon, so retail's bots leave it there. enhanced.botRecovery weighs it (a terrain way
+// from it to the vehicle mesh, wayToVehicleMesh) and a bot picks it, but the walker's origin stands
+// 3.3 m over the terrain, too high for the terrain grid's goal (groundWalk), so its would-be driver,
+// off the infantry mesh as well, stood at its spawn and the walker never fought (the playtest, with
+// --director-mode kills). enhanced.botOffMesh now walks the soldier to the ground under it: a bot gets
+// in, drives it onto the vehicle mesh (driveToMesh) and on into the fight.
+TEST(Bots_CerbereWalkerJoinsTheFight)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	for (const uint32_t seed : {0u, 7u, 1234u}) {
+		for (const bool enhanced : {false, true}) {
+			if (!enhanced && seed) continue; // retail's once
+			if (seed) {
+				setenv("BF2142_BOT_SEED", std::to_string(seed).c_str(), 1); // (each test runs in its own process)
+			} else {
+				unsetenv("BF2142_BOT_SEED");
+			}
+			LevelBots round(gameDir, "Cerbere_Landing", "gpm_cq", 32, enhanced);
+			if (!round.level.loaded || !round.mesh) return;
+			round.enhanced = enhanced;
+			auto& world = *round.level.world;
+			round.addBots(15);
+			round.addBots(1, 1); // 16 PAC, 15 EU: the playtest's 31 bots
+			uint32_t mech = 0;
+			physics::Vec3 spawn {};
+			for (const auto& v : world.vehicleList()) {
+				const world::Object* o = world.objects().find(v.object);
+				if (o && o->objectTemplate() && o->objectTemplate()->name() == "as_heavy_mech") {
+					mech = v.object;
+					spawn = v.position;
+				}
+			}
+			CHECK(mech != 0);
+			if (!mech) return;
+			CHECK(round.vehicleMesh->findPolygon({spawn.x, spawn.y, spawn.z}) < 0); // off the vehicle mesh
+			CHECK(spawn.y - world.terrainHeight(spawn.x, spawn.z) > 3);          // its origin over groundWalk's 3 m
+			float boarded = -1, onMesh = -1, farthest = 0, t = 0;
+			int kills = 0;
+			std::map<int, int> killsAt;
+			round.level.runUntil(240, [&] {
+				t += 1;
+				for (const auto& v : world.vehicleList()) {
+					if (v.object != mech) continue;
+					farthest = std::max(farthest, std::hypot(v.position.x - spawn.x, v.position.z - spawn.z));
+					if (onMesh < 0 && round.vehicleMesh->findPolygon({v.position.x, v.position.y, v.position.z}) >= 0) onMesh = t;
+				}
+				for (const int id : round.players) {
+					game::GameWorld::PlayerInfo info;
+					if (!world.playerInfo(id, info)) continue;
+					if (info.vehicle == mech) {
+						if (boarded < 0) boarded = t;
+						kills += info.kills - (killsAt.count(id) ? killsAt[id] : info.kills); // made aboard
+					}
+					killsAt[id] = info.kills;
+				}
+				return false;
+			});
+			std::fprintf(stderr,
+				"  seed %u, enhanced %d: walker boarded at %.0f s, on the vehicle mesh at %.0f s, at most %.0f m from its spawn;"
+				" %d kills made aboard; bots %.3f ms a tick\n",
+				seed, enhanced, boarded, onMesh, farthest, kills, 1000.0 * round.botSeconds / round.botUpdates);
+			if (!enhanced) {
+				CHECK(boarded < 0); // retail's bots pass it over
+				CHECK(farthest < 1);
+				continue;
+			}
+			CHECK(boarded >= 0 && boarded < 90);
+			CHECK(onMesh >= 0 && onMesh < 150);
+			CHECK(farthest > 150); // the South Town Center is 220 m north
+			CHECK(kills >= 1);
+		}
+	}
+	unsetenv("BF2142_BOT_SEED");
+}
