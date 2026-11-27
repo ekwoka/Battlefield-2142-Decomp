@@ -721,6 +721,35 @@ std::vector<uint32_t> RemoteHudWorld::scanAbilityTargets(const PlayerInfo& me, f
 	return found;
 }
 
+std::vector<int> RemoteHudWorld::dimmedItems(int player) const
+{
+	std::vector<int> dimmed;
+	PlayerInfo me;
+	if (!playerInfo(player, me)) {
+		return dimmed;
+	}
+	int members = 0;
+	for (const PlayerInfo& other : playerList()) {
+		members += me.squad != 0 && other.team == me.team && other.squad == me.squad ? 1 : 0;
+	}
+	const world::Object* kit = m_round.objects().find(me.kit);
+	for (const auto& [slot, name] : me.carried) {
+		const world::ObjectTemplate* t = m_round.templates().find(name);
+		if (!t) {
+			continue;
+		}
+		const int needed = static_cast<int>(templateNumber(t, "minimumSquadSizeForSelection", 0)) - (me.ai ? 1 : 0);
+		bool usable = me.squad == 0 || needed <= 0 || members >= needed;
+		if (game::GameWorld::hasWeaponHud(*t) && (!me.squadLeader || me.squad == 0)) {
+			usable = !(kit && kit->objectTemplate() && game::GameWorld::kitSquadLeaderItem(m_round.templates(), *kit->objectTemplate(), name));
+		}
+		if (!usable) {
+			dimmed.push_back(slot);
+		}
+	}
+	return dimmed;
+}
+
 bool RemoteHudWorld::abilityBar(game::GameWorld::AbilityBarInfo& out) const
 {
 	PlayerInfo me;

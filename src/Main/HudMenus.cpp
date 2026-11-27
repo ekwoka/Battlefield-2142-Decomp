@@ -500,11 +500,24 @@ void SquadMenu::applyInviteList(int player)
 	}
 	// The invitations (slot 0x30: Invite); a client's player answers his.
 	// Offline the only one asked would be a bot, and no bot answers.
+	// enhanced.botSquadInvites (not retail): offline, an invited bot of the
+	// team comes over to the leader's squad (as a join, so a full squad
+	// refuses him; a leader's squad passes to its next member).
+	const bool botsCome = !m_remote.world && me.squadLeader && botsTakeInvites && botsTakeInvites();
 	for (const int id : m_selected) {
 		game::GameWorld::PlayerInfo other;
-		if (m_remote.world && !m_unselected.count(id) && playerInfo(id, other) && other.squad != me.squad
-			&& m_remote.invite) {
-			m_remote.invite(id, me.squad);
+		if (m_unselected.count(id) || !playerInfo(id, other) || other.squad == me.squad) {
+			continue;
+		}
+		if (m_remote.world) {
+			if (m_remote.invite) {
+				m_remote.invite(id, me.squad);
+			}
+			continue;
+		}
+		m_round.setSquadInvite(id, me.squad, true); // slot 0x30's bit (a private squad's join takes him; the join clears it)
+		if (botsCome && other.ai && other.team == me.team && !other.commander) {
+			m_round.requestJoinSquad(id, me.squad);
 		}
 	}
 	m_inviteShow = false;

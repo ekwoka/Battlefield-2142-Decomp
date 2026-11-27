@@ -252,6 +252,18 @@ private:
 // ammo); "" when the template has none.
 std::string abilitySound(const world::ObjectTemplate& receiver, int what);
 
+// enhanced.squadItemHints (not retail): the help line's text for a weapon
+// key that took nothing because of the squad. Retail is silent for a
+// squad leader's item when the player leads no squad (mayUseWeapon), and
+// has no string for it: the text is ours. A squad too small for the item
+// gets the retail help text 0x52 (HUD_HELP_WORLD_PLAYER_Squadleader_
+// inventory_selectunlock, which retail shows once, with help on, to a squad
+// leader) and the squad's count against the item's need, "(1/2)".
+// `localize` gives a string id's text (the id itself when it has none).
+std::string squadItemRefusal(bool leaderOnly, bool inSquad, int members, int needed,
+	const std::function<std::string(const std::string&)>& localize);
+constexpr float kSquadItemHintSeconds = 4;
+
 // The dog tags. A knife kill's tag is the stats script's
 // (python/bf2/stats/stats.py, onPlayerKilled: a kill whose weapon's type is
 // WEAPON_TYPE_KNIFE, "knife" / "knife_unlock", counts in the attacker's

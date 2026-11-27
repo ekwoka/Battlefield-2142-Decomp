@@ -141,6 +141,9 @@ public:
 	// The name typed in the create box (SquadMenu.setSquadNameSelect, edit
 	// data 2): the squad createSquad makes takes it (ChangeSquadName, 0x16).
 	std::function<std::string()> typedName;
+	// enhanced.botSquadInvites: whether an offline invite brings the bot
+	// over (applyInviteList); unset or false, retail's silence.
+	std::function<bool()> botsTakeInvites;
 	std::string squadLabel(int team, int squad) const;
 	// A squad's lock (its leader's; the squad manager's slot 0x20, the
 	// squad's flag the toggle 0x007a5a60 reads): the round's

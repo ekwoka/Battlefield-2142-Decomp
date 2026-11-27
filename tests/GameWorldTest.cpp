@@ -2805,6 +2805,88 @@ TEST(GameWorld_LeaderTakesBackTheBeacon)
 	CHECK(throwBeacon() != 0);
 }
 
+// A squad leader's item (the kit's UB_SquadLeader container's first item)
+// is the squad leader's only (mayUseWeapon, 0x005921e0: player slot 0x150,
+// a bot's as well as a human's; 0x004d68d0 with 3), refused with no
+// message (takeSquadLeaderRefused, for enhanced.squadItemHints); his squad
+// must also have minimumSquadSizeForSelection members (0x005c3080, one
+// fewer for a bot). The item list dims what is refused (0x0079c290).
+TEST(GameWorld_SquadLeaderItemsNeedTheLeader)
+{
+	Range range;
+	range.templates.registerType(6, "Kit");
+	range.templates.registerType(7, "ItemContainer");
+	world::ObjectTemplate* beacon = range.templates.create("GenericFireArm", "beacon");
+	beacon->settings()["itemIndex"] = "8";
+	beacon->settings()["ammo.magSize"] = "1";
+	beacon->settings()["minimumSquadSizeForSelection"] = "2";
+	beacon->settings()["weaponHud.selectIcon"] = "beacon.tga";
+	range.templates.find("eu_ar_rifle")->settings()["itemIndex"] = "3";
+	world::ObjectTemplate* container = range.templates.create("ItemContainer", "UnlockEU_AssaultSquadLeader0");
+	container->children().push_back({"beacon", {}, {}});
+	container->settings()["unlockLevel"] = "0";
+	container->settings()["unlockBranch"] = "UB_SquadLeader";
+	world::ObjectTemplate* kit = range.templates.create("Kit", "EU_Assault");
+	kit->children().push_back({"eu_ar_rifle", {}, {}});
+	kit->children().push_back({"UnlockEU_AssaultSquadLeader0", {}, {}});
+
+	const int me = range.world->addPlayer("Me", 2, false);
+	const int mate = range.world->addPlayer("Mate", 2, false);
+	const int bot = range.world->addPlayer("Bot", 2, true);
+	for (int id : {me, mate}) {
+		range.world->setUnlocks(id, {"UnlockEU_AssaultSquadLeader0"}, false);
+	}
+	CHECK(range.world->spawnSoldier(me) && range.world->spawnSoldier(mate) && range.world->spawnSoldier(bot));
+	const auto inHand = [&](int id) {
+		game::GameWorld::PlayerInfo info;
+		range.world->playerInfo(id, info);
+		return info.inHandSlot;
+	};
+	const auto press = [&](int id, int item) {
+		game::SoldierInput input;
+		input.selectItem = item;
+		range.world->setInput(id, input);
+		range.world->tick(1 / 30.0f);
+		range.world->setInput(id, {});
+		range.world->tick(1 / 30.0f);
+	};
+	const auto dimmed = [&](int id) {
+		const std::vector<int> d = range.world->dimmedItems(id);
+		return std::find(d.begin(), d.end(), 8) != d.end();
+	};
+	CHECK(inHand(me) == 3 && inHand(mate) == 3);
+	// No squad: he leads none, so it isn't his (the squad's size isn't asked).
+	CHECK(range.world->squadLeaderOnly(me, *beacon) && !range.world->squadTooSmall(me, *beacon));
+	CHECK(dimmed(me));
+	press(me, 8);
+	CHECK(inHand(me) == 3 && range.world->takeSquadLeaderRefused(me) == 8 && range.world->takeSquadSizeRefused(me) == 0);
+	CHECK(range.world->takeSquadLeaderRefused(me) == 0); // once
+	// He leads a squad of one: his, but the squad is too small for it.
+	CHECK(range.world->joinSquad(me, 1));
+	CHECK(!range.world->squadLeaderOnly(me, *beacon) && range.world->squadTooSmall(me, *beacon));
+	CHECK(dimmed(me));
+	press(me, 8);
+	CHECK(inHand(me) == 3 && range.world->takeSquadSizeRefused(me) == 8 && range.world->takeSquadLeaderRefused(me) == 0);
+	CHECK(range.world->squadSizeFor(me, *beacon) == std::make_pair(1, 2));
+	// A member joins: the leader takes it; the member may not.
+	CHECK(range.world->joinSquad(mate, 1));
+	CHECK(!dimmed(me) && dimmed(mate));
+	press(me, 8);
+	CHECK(inHand(me) == 8);
+	press(mate, 8);
+	CHECK(inHand(mate) == 3 && range.world->takeSquadLeaderRefused(mate) == 8);
+	// A rifle is anyone's.
+	CHECK(!range.world->squadLeaderOnly(mate, *range.templates.find("eu_ar_rifle")));
+	// A bot leading a squad of one needs no one else (one fewer).
+	CHECK(range.world->joinSquad(bot, 2));
+	CHECK(range.world->squadSizeFor(bot, *beacon) == std::make_pair(1, 1));
+	CHECK(!range.world->squadLeaderOnly(bot, *beacon) && !range.world->squadTooSmall(bot, *beacon));
+	// The leader leaves: the member leads, alone now.
+	CHECK(range.world->joinSquad(me, 0));
+	CHECK(!range.world->squadLeaderOnly(mate, *beacon) && range.world->squadTooSmall(mate, *beacon));
+	CHECK(range.world->squadLeaderOnly(me, *beacon));
+}
+
 // The player's auto reload (GeneralSettings.setAutoReload, on by default:
 // 0x0049a170; player +0x3d0 from 0x00591e50): the input (0x00594280)
 // presses c_PIReload while the weapon in hand's magazine is empty, it

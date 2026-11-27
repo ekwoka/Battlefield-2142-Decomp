@@ -203,6 +203,12 @@ public:
 		PlayerInfo me;
 		return playerInfo(localPlayer(), me) && me.alive && me.jumpHold;
 	}
+	// The item selection's dimmed kit slots (GameWorld::dimmedItems, 0x0079c290).
+	virtual std::vector<int> dimmedItems(int player) const
+	{
+		(void)player;
+		return {};
+	}
 };
 
 // A local round (also a hosting server's own player).
@@ -264,6 +270,7 @@ public:
 	std::vector<uint32_t> spottedVehicles() const override { return m_round.mapSpottedVehicles(m_round.localPlayer()); }
 	float combatAreaTimeLeft() const override;
 	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override { return m_round.abilityBar(m_round.localPlayer(), out); }
+	std::vector<int> dimmedItems(int player) const override { return m_round.dimmedItems(player); }
 
 private:
 	game::GameWorld& m_round;
@@ -319,6 +326,9 @@ public:
 	// over maxHitPoints. Ammo progress is unavailable because other
 	// soldiers' reserve magazines are not synchronized.
 	bool abilityBar(game::GameWorld::AbilityBarInfo& out) const override;
+	// A joined game's: the squad's size and the squad leader's items from
+	// the players' ghosts (each weapon's ammunition is the server's).
+	std::vector<int> dimmedItems(int player) const override;
 	// Our hit indicator's alpha: 1 when our own state's flag comes
 	// (0x00596ed0 -> player slot 0x20c(1)), falling 3 a second
 	// (0x005912c0); PlayerInfo::hitIndicator of the local player.

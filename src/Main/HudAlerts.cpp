@@ -488,6 +488,24 @@ void HelpPopups::update(hud::HudManager& hud, const Context& context, float seco
 	}
 }
 
+std::string squadItemRefusal(bool leaderOnly, bool inSquad, int members, int needed,
+	const std::function<std::string(const std::string&)>& localize)
+{
+	if (leaderOnly) {
+		return inSquad ? "Squad leader item: only your squad leader can use it."
+					   : "Squad leader item: create a squad (Manage Squad) and lead it to use this.";
+	}
+	static const std::string key = "HUD_HELP_WORLD_PLAYER_Squadleader_inventory_selectunlock";
+	std::string text = localize ? localize(key) : std::string();
+	if (text.empty() || text == key) {
+		text = "Your squad is not large enough to use this item.  Invite new squad members via the Manage Squad interface.";
+	}
+	if (needed > 0) {
+		text += " (" + std::to_string(members) + "/" + std::to_string(needed) + ")";
+	}
+	return text;
+}
+
 std::string abilitySound(const world::ObjectTemplate& receiver, int what)
 {
 	static const char* const kKeys[] = {"abilityHud.healingSound", "abilityHud.repairingSound", "abilityHud.ammoSound"};

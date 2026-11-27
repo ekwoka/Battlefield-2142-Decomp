@@ -522,9 +522,10 @@ struct ItemListInput {
 // `carried`); with the seat's vehicleHud.useSelectionIcons (block +0xbc) and
 // a PIAltFire group (slot 0x70(1)) longer than that, the PIAltFire group
 // (the list's +0x10 = 1). `find` gives a weapon's template (its
-// weaponHud.selectIcon).
+// weaponHud.selectIcon). `dimmed`: the kit slots shown unusable
+// (GameWorld::dimmedItems: ItemSlot%iAlpha 0.4, skipped by the wheel).
 std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
-	const std::function<const world::ObjectTemplate*(const std::string&)>& find);
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find, const std::vector<int>& dimmed = {});
 std::vector<SelectItem> seatSelectItems(const game::GameWorld::SeatLayout& seat, const world::ObjectTemplate* seatTemplate,
 	const std::function<const world::ObjectTemplate*(const std::string&)>& find,
 	const std::vector<std::pair<int, std::string>>& carried);

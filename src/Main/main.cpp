@@ -2085,8 +2085,9 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	g_itemList.items.clear();
 	g_itemList.inHand = -1;
 	if (game::GameWorld::PlayerInfo me; world.playerInfo(world.localPlayer(), me) && me.alive && !inVehicle) {
-		auto items = dice::hfe::menu::kitSelectItems(me.carried,
-			[&round](const std::string& name) { return round.templates().find(name); });
+		auto items = dice::hfe::menu::kitSelectItems(
+			me.carried, [&round](const std::string& name) { return round.templates().find(name); },
+			world.dimmedItems(world.localPlayer()));
 		if (g_inHandSlot >= 0 && me.inHandSlot != g_inHandSlot) {
 			const world::ObjectTemplate* now = nullptr;
 			for (const auto& [slot, name] : me.carried) {
@@ -5779,6 +5780,7 @@ int runGame(Options& options, Session& session)
 		chat.setLocalizer([&localization](const std::string& id) { return localization.text(id); });
 		dice::hfe::menu::SquadNameBox squadNameBox(hudManager);
 		squadMenu.typedName = [&squadNameBox] { return squadNameBox.take(); };
+		squadMenu.botsTakeInvites = [&enhancedSettings] { return enhancedSettings.enabled && enhancedSettings.botSquadInvites; };
 		bindMethod(console, "SquadMenu.setSquadNameSelect", ConsoleAccess::Anyone, [&squadNameBox] { squadNameBox.select(); });
 		dice::hfe::menu::MapVoteList mapVote(hudManager);
 		using Box = dice::hfe::menu::HudChat::Box;
@@ -10397,7 +10399,28 @@ int runGame(Options& options, Session& session)
 					// minimumSquadSizeForSelection) lets through 0x52
 					// Squadleader_inventory_selectunlock (shown to a squad
 					// leader, case 22).
-					if (round.takeSquadSizeRefused(round.localPlayer()) > 0) {
+					// A squad leader's item for one who leads no squad
+					// (mayUseWeapon, 0x005921e0) is refused with nothing shown.
+					// enhanced.squadItemHints (not retail): either refusal says
+					// why on the help line, each time, instead.
+					const int sizeKey = round.takeSquadSizeRefused(round.localPlayer());
+					const int leaderKey = round.takeSquadLeaderRefused(round.localPlayer());
+					if (enhancedSettings.enabled && enhancedSettings.squadItemHints && (sizeKey > 0 || leaderKey > 0)) {
+						const int key = sizeKey > 0 ? sizeKey : leaderKey;
+						const world::ObjectTemplate* item = nullptr;
+						for (const auto& [slot, name] : self.carried) {
+							item = slot == key ? round.templates().find(name) : item;
+						}
+						if (item) {
+							// Too small and no leader either: the leadership is
+							// what's missing first.
+							const bool leaderOnly = leaderKey > 0 || round.squadLeaderOnly(round.localPlayer(), *item);
+							const auto [members, needed] = round.squadSizeFor(round.localPlayer(), *item);
+							helpPopups.showText(hudManager,
+								dice::hfe::menu::squadItemRefusal(leaderOnly, self.squad != 0, members, needed, localizeWithKeys),
+								dice::hfe::menu::kSquadItemHintSeconds);
+						}
+					} else if (sizeKey > 0) {
 						helpPopups.enableTutorial(0x52);
 					}
 					// The commander HUD's asset updates (0x007aa9b0 each frame):

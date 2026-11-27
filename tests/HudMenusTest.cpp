@@ -6,6 +6,7 @@
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
 #include "Main/DemoCamera.h"
+#include "Main/HudAlerts.h"
 #include "Main/HudCombatArea.h"
 #include "Main/HudMenus.h"
 #include "Main/HudMenusChat.h"
@@ -355,6 +356,61 @@ TEST(HudMenus_InviteList)
 	// invite (nothing in BF2142.exe or AIDLL reads a bot's invite mask but a
 	// private squad's join, 0x004c7290); the other stays in his squad.
 	CHECK(s.squadOf(mate) == 0 && s.squadOf(loner) == 0 && s.squadOf(other) == 3 && !s.squads.inviteListShown());
+	// The invite's mask bit is set all the same (0x004c3190).
+	CHECK((s.world.squadInvites(loner) & (1u << 1)) != 0);
+}
+
+// enhanced.botSquadInvites (not retail): offline the invited bots come over
+// to the leader's squad, a bot leader's squad passing to its next member;
+// a full squad takes no more; a human is only invited.
+TEST(HudMenus_InviteListBotsJoin)
+{
+	Squads s;
+	bool on = true;
+	s.squads.botsTakeInvites = [&on] { return on; };
+	const int me = s.world.addPlayer("Me", 2, false);
+	const int lead = s.world.addPlayer("Lead", 2, true);
+	const int follower = s.world.addPlayer("Follower", 2, true);
+	const int human = s.world.addPlayer("Human", 2, false);
+	s.world.joinSquad(lead, 2);
+	s.world.joinSquad(follower, 2);
+	s.world.joinSquad(me, 1);
+	const auto rowOf = [&](int id) {
+		for (int r = 0; r < 16; ++r) {
+			if (s.hud.listCell(8, r, 2) == std::to_string(id)) {
+				return r;
+			}
+		}
+		return -1;
+	};
+	const auto invite = [&](std::initializer_list<int> ids) {
+		s.squads.setShowInviteList(me, true);
+		s.squads.update(me);
+		for (int id : ids) {
+			s.squads.clickInviteList(me, rowOf(id));
+		}
+		s.squads.applyInviteList(me);
+	};
+	invite({lead, human});
+	game::GameWorld::PlayerInfo info;
+	s.world.playerInfo(follower, info);
+	CHECK(s.squadOf(lead) == 1 && s.squadOf(human) == 0 && info.squad == 2 && info.squadLeader);
+	s.world.playerInfo(me, info);
+	CHECK(info.squadLeader);
+	// Off: retail's silence.
+	on = false;
+	invite({follower});
+	CHECK(s.squadOf(follower) == 2);
+	// Four more fill it to six; a full squad takes no more.
+	on = true;
+	std::vector<int> more;
+	for (int i = 0; i < 5; ++i) {
+		more.push_back(s.world.addPlayer("Bot" + std::to_string(i), 2, true));
+	}
+	invite({more[0], more[1], more[2], more[3]});
+	CHECK(s.squadOf(more[0]) == 1 && s.squadOf(more[3]) == 1);
+	invite({more[4]});
+	CHECK(s.squadOf(more[4]) == 0);
 }
 
 TEST(HudMenus_ListClicks)
@@ -2052,6 +2108,35 @@ TEST(HudItemSelection_SquadSizeRefusal)
 	s.world.joinSquad(bot, 1);
 	CHECK(!s.world.squadTooSmall(me, beacon));
 	CHECK(s.world.takeSquadSizeRefused(me) == 0);
+}
+
+// The item list's dimmed kit slots (0x0079c290: ItemSlot%iAlpha 0.4) and
+// enhanced.squadItemHints' text: ours for a squad leader's item when the
+// player leads no squad (retail has none), retail's help text 0x52 with the
+// count for a squad too small.
+TEST(HudItemSelection_SquadItemDimmedAndHint)
+{
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	templates.create("GenericFireArm", "rifle")->settings()["weaponHud.selectIcon"] = "rifle.tga";
+	templates.create("GenericFireArm", "beacon")->settings()["weaponHud.selectIcon"] = "beacon.tga";
+	const auto find = [&templates](const std::string& name) -> const world::ObjectTemplate* { return templates.find(name); };
+	auto items = menu::kitSelectItems({{3, "rifle"}, {8, "beacon"}}, find, {8});
+	CHECK(items.size() == 2 && items[0].usable && !items[1].usable && items[1].icon == "beacon.tga");
+	menu::ItemSelection list;
+	hud::HudManager hud(nullptr);
+	list.open(items, 3);
+	list.update(hud, 0);
+	CHECK(hud.number("ItemSlot0Alpha") + hud.number("ItemSlot1Alpha") > 1.39f
+		&& hud.number("ItemSlot0Alpha") + hud.number("ItemSlot1Alpha") < 1.41f);
+
+	const auto localize = [](const std::string& id) {
+		return id == "HUD_HELP_WORLD_PLAYER_Squadleader_inventory_selectunlock" ? std::string("Squad too small.") : id;
+	};
+	CHECK(menu::squadItemRefusal(false, true, 1, 2, localize) == "Squad too small. (1/2)");
+	CHECK(menu::squadItemRefusal(false, true, 2, 4, {}).rfind("Your squad is not large enough", 0) == 0);
+	CHECK(menu::squadItemRefusal(true, true, 3, 2, localize).find("only your squad leader") != std::string::npos);
+	CHECK(menu::squadItemRefusal(true, false, 0, 2, localize).find("create a squad") != std::string::npos);
 }
 
 // The other seats' turrets (0x007a2b50 → 0x007a07c0): one other seat's

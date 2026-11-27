@@ -738,7 +738,7 @@ void ItemSelection::update(hud::HudManager& hud, float dt)
 // --- The vehicle HUD ---
 
 std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::string>>& carried,
-	const std::function<const world::ObjectTemplate*(const std::string&)>& find)
+	const std::function<const world::ObjectTemplate*(const std::string&)>& find, const std::vector<int>& dimmed)
 {
 	std::vector<SelectItem> items;
 	for (const auto& [slot, name] : carried) {
@@ -748,7 +748,7 @@ std::vector<SelectItem> kitSelectItems(const std::vector<std::pair<int, std::str
 		if (slot == 9 && icon.empty()) {
 			continue;
 		}
-		items.push_back({slot, std::move(icon), true});
+		items.push_back({slot, std::move(icon), std::find(dimmed.begin(), dimmed.end(), slot) == dimmed.end()});
 	}
 	return items;
 }

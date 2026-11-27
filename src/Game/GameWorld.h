@@ -1873,6 +1873,30 @@ public:
 	// at 0x004d2ea9: the local player's, the HUD's help message 0x52): the
 	// key, once; 0 none.
 	int takeSquadSizeRefused(int player);
+	// The squad leader's items (mayUseWeapon, 0x005921e0's last test): the
+	// weapon is one of the player's kit's UB_SquadLeader items and he leads
+	// no squad, so neither a weapon key nor c_PIToggleWeapon takes it.
+	bool squadLeaderOnly(int player, const world::ObjectTemplate& weapon) const;
+	// A weapon key that found its weapon refused by that test: the key,
+	// once; 0 none. Retail gives no feedback for it (enhanced.squadItemHints).
+	int takeSquadLeaderRefused(int player);
+	// For the refusal's hint: the squad's members (0 without a squad) and
+	// the members the weapon needs for the player (minimumSquadSizeForSelection,
+	// one fewer for a bot; 0 none).
+	std::pair<int, int> squadSizeFor(int player, const world::ObjectTemplate& weapon) const;
+	// The item selection's dimmed slots (0x0079c290: an entry's +8, its
+	// ItemSlot%iAlpha 0.4): the kit's weapons that can't be selected (slot
+	// 0x170: an empty one that can't be reloaded, a squad too small); and,
+	// for a weapon with a WeaponHud (template slot 0x5c with 0xc4ef) while
+	// the player leads no squad or is in none, every squad leader's item
+	// and no other (the test replaces slot 0x170's answer).
+	std::vector<int> dimmedItems(int player) const;
+	// 0x004d68d0's test on a kit template: one of its UB_SquadLeader item
+	// containers has the weapon as its first item.
+	static bool kitSquadLeaderItem(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& kit,
+		const std::string& weapon);
+	// A WeaponHud component (template slot 0x5c with 0xc4ef).
+	static bool hasWeaponHud(const world::ObjectTemplate& weapon);
 	// A seat gun's next round's start in the world and the hull's turn
 	// (the gun's yaw and pitch are in the hull's frame): what stepGunner
 	// fires from (seatGunOrigin, the next barrel), for the bots' aim.
@@ -3480,6 +3504,8 @@ private:
 	// The player's may-use test (player slot 0x384, 0x005921e0; see
 	// GameWorld.cpp): `selectable` the weapon's slot 0x170.
 	bool mayUseWeapon(const Player& player, const std::string& weapon, bool selectable, bool forced) const;
+	// Whether the weapon is a squad leader's item of the player's kit (0x004d68d0 with 3).
+	bool squadLeaderItem(const Player& player, const std::string& weapon) const;
 	// Makes `index` its group's active weapon (0x005c9840): the old one's
 	// disable (slot 0x1a8), the new one's enable (0x1a4).
 	void activateSeatWeapon(Body& body, int seat, const SeatLayout& layout, int index);
@@ -3870,6 +3896,7 @@ private:
 		bool toggleFireWas = false; // c_PIToggleFireRate last tick
 		int seatItemSelect = 0;     // a seat weapon taken by its key, for the item selection (takeSeatItemSelect)
 		int squadSizeRefused = 0;   // a key whose weapon the squad is too small for (takeSquadSizeRefused)
+		int squadLeaderRefused = 0; // a key whose weapon is a squad leader's, he leading none (takeSquadLeaderRefused)
 		bool reloadWas = false;     // c_PIReload last tick
 		bool animationReloadWas = false;
 		uint32_t reloadPresses = 0; // its presses (PlayerInfo::reloadPresses)

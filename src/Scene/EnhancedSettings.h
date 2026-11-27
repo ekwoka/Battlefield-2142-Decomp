@@ -9,7 +9,7 @@
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
 // (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, guidedCameraEase, cornerSteer,
-// passengerWeapons, softLanding, titanKitFloors, squadOrderPoints): they change the simulation by design, so the check turns
+// passengerWeapons, softLanding, titanKitFloors, squadOrderPoints, botSquadInvites): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
 
@@ -49,9 +49,11 @@ struct EnhancedSettings {
 	bool softLanding = true; // enhanced.softLanding: a soldier landing on or walking into a slower object takes the ground's fall damage, not a road kill (Game/MeshCollision.cpp)
 	bool titanKitFloors = true; // enhanced.titanKitFloors: a kit dropped (or a beacon or shield placed) on a Titan stays on its walkable floor where the projectile mesh has none, as by the cargo bay's walls (GameWorld::surfaceBelow); retail lets it fall through
 	bool squadOrderPoints = true; // enhanced.squadOrderPoints: the squads' order points, their HUD bar and its field upgrades work on any server (GameWorld::squadOrderPointsOn); retail runs them only on a ranked GameSpy server (0x00430a00), so never offline
+	bool botSquadInvites = true; // enhanced.botSquadInvites: offline, a bot the squad leader invites (SquadMenu.applyInviteList) joins his squad, so a human can lead bots and use the squad leader's items; retail's bots never answer an invite (0x004c3190 only sets a mask bit) and join squads only as they are added
 	// Interface, also only with enhanced.enabled:
 	bool chaseRoll = false; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); off by default, as retail keeps them level (0x006108e0 -> lookAt 0x006ae080, up (0, 1, 0))
 	bool killWeaponNames = true; // enhanced.killWeaponNames: a kill from a vehicle without a hudName (a Titan's gun hubs) names the seat's gun (Main/main.cpp); retail prints empty brackets
+	bool squadItemHints = true; // enhanced.squadItemHints: a weapon key refused for the squad says why on the help line each time (Main/HudAlerts.h squadItemRefusal): a squad leader's item for one who leads no squad, or a squad too small for it with its count, "(1/2)"; retail is silent for the first and shows the second (help message 0x52) once, with help on
 	bool hudWidescreen = false; // enhanced.hudWidescreen: a mod without Remaster's hudfix gets its 4:3 HUD and side moves (Main/main.cpp)
 	bool singleplayAllModes = true; // enhanced.singleplayAllModes: the singleplayer page lists every level's every mode and size (Titan, Assault Lines, ...), not only its gpm_sp layouts (Main/MenuBindings.cpp); the bots may not play them. Retail lists gpm_sp only
 	bool demoQuality = true; // enhanced.demoQuality: a recorded demo's ghosts go every tick, several packets a tick when one is full (net::EnhancedDemoRates), so a 64-player round plays back smoothly; retail's sv.demoQuality 1..10 sends 4..20 packets a second of 40..255 updates, which starves most ghosts of a big round. The file stays readable (a payload under the reader's 256 KB, at most 255 updates a block)
@@ -118,10 +120,14 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.titanKitFloors = v; });
 	bindProperty<bool>(console, "enhanced.squadOrderPoints", ConsoleAccess::Anyone, [&settings] { return settings.squadOrderPoints; },
 		[&settings](const bool& v) { settings.squadOrderPoints = v; });
+	bindProperty<bool>(console, "enhanced.botSquadInvites", ConsoleAccess::Anyone, [&settings] { return settings.botSquadInvites; },
+		[&settings](const bool& v) { settings.botSquadInvites = v; });
 	bindProperty<bool>(console, "enhanced.chaseRoll", ConsoleAccess::Anyone, [&settings] { return settings.chaseRoll; },
 		[&settings](const bool& v) { settings.chaseRoll = v; });
 	bindProperty<bool>(console, "enhanced.killWeaponNames", ConsoleAccess::Anyone, [&settings] { return settings.killWeaponNames; },
 		[&settings](const bool& v) { settings.killWeaponNames = v; });
+	bindProperty<bool>(console, "enhanced.squadItemHints", ConsoleAccess::Anyone, [&settings] { return settings.squadItemHints; },
+		[&settings](const bool& v) { settings.squadItemHints = v; });
 	bindProperty<bool>(console, "enhanced.hudWidescreen", ConsoleAccess::Anyone, [&settings] { return settings.hudWidescreen; },
 		[&settings](const bool& v) { settings.hudWidescreen = v; });
 	bindProperty<bool>(console, "enhanced.singleplayAllModes", ConsoleAccess::Anyone, [&settings] { return settings.singleplayAllModes; },

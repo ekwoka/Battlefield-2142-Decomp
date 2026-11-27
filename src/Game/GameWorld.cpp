@@ -5952,6 +5952,13 @@ void GameWorld::equip(Player& player, int slot)
 		player.squadSizeRefused = slot;
 		return;
 	}
+	// The player's may-use test (0x004d2a50 at 0x004d2d70: player slot
+	// 0x384, mayUseWeapon): a squad leader's item for one who leads no
+	// squad is refused, with no message.
+	if (!mayUseWeapon(player, player.carried[static_cast<size_t>(index)].name, true, false)) {
+		player.squadLeaderRefused = slot;
+		return;
+	}
 	if (player.inHand >= 0) {
 		player.previousSlot = player.carried[static_cast<size_t>(player.inHand)].slot;
 		player.carried[static_cast<size_t>(player.inHand)].weapon = std::move(player.weapon);
@@ -11423,7 +11430,7 @@ void GameWorld::stepSoldier(Player& player, float seconds)
 			const Player::Carried& item = player.carried[next];
 			const auto* wanted = m_templates.find(item.name);
 			if (!wanted || (item.slot == 9 && parachuteLauncher(player, launched, launchAt))
-				|| squadTooSmall(player.id, *wanted)) {
+				|| squadTooSmall(player.id, *wanted) || !mayUseWeapon(player, item.name, true, false)) {
 				continue;
 			}
 			equip(player, item.slot);
@@ -14576,34 +14583,57 @@ void GameWorld::stepGunner(Player& player, Body& body, float seconds, bool aims,
 // The player's may-use test (player vtable 0x00966cd8 slot 0x384,
 // 0x005921e0(weapon, forced)): none without the weapon interface 0x94c0
 // or, unless `forced`, when it can't be selected (slot 0x170). Then,
-// unless the game's slot 0xe4 holds: on a client, another player's
-// weapons pass; and a human player's (not slot 0x150's AI) fail when the
-// game logic's slot 0x2c4 (0x004d68d0 with 3) finds the weapon among the
-// player's kit's item containers (the kit's +0x1ac set) of unlockBranch 3
-// (UB_SquadLeader, +0x2b0) by name (the template's slot 0x28). A vehicle's
-// guns are never a kit's: every seat weapon passes for every player.
+// unless the game's slot 0xe4 holds (the client's 0x004b3170, a demo
+// playing; the server's 0x006a10f0 returns 0): on a client, another
+// player's weapons pass; and a player who doesn't lead a squad (slot
+// 0x150, 0x0059b3d0: +0x10d, the networkable's "isql"; a bot as much as a
+// human) fails when the game logic's slot 0x2c4 (0x004d68d0 with 3) finds
+// the weapon a squad leader's item (squadLeaderItem). A vehicle's guns are
+// never a kit's: every seat weapon passes for every player.
 bool GameWorld::mayUseWeapon(const Player& player, const std::string& weapon, bool selectable, bool forced) const
 {
 	if (!selectable && !forced) {
 		return false;
 	}
-	if (player.ai || player.kitTemplate.empty()) {
-		return true;
+	return player.squadLeader || !squadLeaderItem(player, weapon);
+}
+
+// 0x004d68d0(player, weapon, 3): the player's controlled object's soldier
+// interface (slot 0xb4, 0xc4d7) and its kit (slot 0x58); each of the kit's
+// item containers (the map +0x1ac the kit's constructor 0x00571220 fills)
+// of unlockBranch 3 (UB_SquadLeader, template +0x2b0) whose first item
+// (the template's +0x23c list, slot 0x20 with 0: what
+// ObjectTemplate.addTemplate reads back, 0x00520d30) is the weapon by
+// name (0x0065ba00, without case). Shipped: the Beacon and the two drone
+// detonators (UnlockEU_AssaultSquadLeader0..2 and the like). In a vehicle
+// (no soldier interface) nothing is.
+bool GameWorld::squadLeaderItem(const Player& player, const std::string& weapon) const
+{
+	if (player.vehicle) {
+		return false;
 	}
-	const world::ObjectTemplate* kit = m_templates.find(player.kitTemplate);
-	if (!kit) {
-		return true;
-	}
-	for (const world::ChildTemplate& child : kit->children()) {
-		const world::ObjectTemplate* c = m_templates.find(child.name);
-		if (c && c->typeName() == "ItemContainer" && sameName(c->name(), weapon)) {
-			const auto branch = c->settings().find("unlockBranch");
-			if (branch != c->settings().end() && (branch->second == "3" || sameName(branch->second, "UB_SquadLeader"))) {
-				return false;
-			}
+	// The kit worn (its object's template), else the one the next spawn takes.
+	const world::Object* worn = player.kitObject ? m_objects.find(player.kitObject) : nullptr;
+	const world::ObjectTemplate* kit = worn && worn->objectTemplate() ? worn->objectTemplate()
+		: player.kitTemplate.empty()                                 ? nullptr
+																	 : m_templates.find(player.kitTemplate);
+	return kit && kitSquadLeaderItem(m_templates, *kit, weapon);
+}
+
+bool GameWorld::kitSquadLeaderItem(const world::ObjectTemplateManager& templates, const world::ObjectTemplate& kit,
+	const std::string& weapon)
+{
+	for (const world::ChildTemplate& child : kit.children()) {
+		const world::ObjectTemplate* c = templates.find(child.name);
+		if (!c || c->typeName() != "ItemContainer" || c->children().empty() || !sameName(c->children().front().name, weapon)) {
+			continue;
+		}
+		const auto branch = c->settings().find("unlockBranch");
+		if (branch != c->settings().end() && (branch->second == "3" || sameName(branch->second, "UB_SquadLeader"))) {
+			return true;
 		}
 	}
-	return true;
+	return false;
 }
 
 void GameWorld::selectSeatWeapons(Player& player, Body& body, const SeatLayout& seat)
@@ -15070,6 +15100,70 @@ int GameWorld::takeSquadSizeRefused(int player)
 {
 	Player* p = findPlayer(player);
 	return p ? std::exchange(p->squadSizeRefused, 0) : 0;
+}
+
+bool GameWorld::squadLeaderOnly(int player, const world::ObjectTemplate& weapon) const
+{
+	const Player* p = findPlayer(player);
+	return p && !mayUseWeapon(*p, weapon.name(), true, false);
+}
+
+int GameWorld::takeSquadLeaderRefused(int player)
+{
+	Player* p = findPlayer(player);
+	return p ? std::exchange(p->squadLeaderRefused, 0) : 0;
+}
+
+std::pair<int, int> GameWorld::squadSizeFor(int player, const world::ObjectTemplate& weapon) const
+{
+	const Player* p = findPlayer(player);
+	if (!p) {
+		return {0, 0};
+	}
+	const int members = p->squad == 0 ? 0 : static_cast<int>(squadMembers(p->team, p->squad).size());
+	const auto it = weapon.settings().find("minimumSquadSizeForSelection");
+	const int needed = it == weapon.settings().end() ? 0 : std::max(0, std::atoi(it->second.c_str()) - (p->ai ? 1 : 0));
+	return {members, needed};
+}
+
+// 0x0079c290 (the item selection's fill): each kit weapon's +8 is its slot
+// 0x170 (0x005c1150: selectable, its ammo, the squad's size 0x188); then
+// with a WeaponHud component (template slot 0x5c, 0xc4ef) and the local
+// player (the object manager's slot 0x30) not a squad leader (slot 0x150)
+// or in no squad (slot 0x120), it is instead whether the game logic's
+// slot 0x2c4 (0x004d68d0 with 3) finds it no squad leader's item. Dimmed
+// (alpha 0.4, 0x3ecccccd) when false.
+std::vector<int> GameWorld::dimmedItems(int player) const
+{
+	std::vector<int> dimmed;
+	const Player* p = findPlayer(player);
+	if (!p) {
+		return dimmed;
+	}
+	for (const Player::Carried& item : p->carried) {
+		const world::ObjectTemplate* t = m_templates.find(item.name);
+		if (!t) {
+			continue;
+		}
+		const FireArm* arm = p->inHand >= 0 && &p->carried[static_cast<size_t>(p->inHand)] == &item ? p->weapon.get()
+																									 : item.weapon.get();
+		bool usable = (!arm || arm->selectable() || arm->settings().explosives) && !squadTooSmall(p->id, *t);
+		if (hasWeaponHud(*t) && (!p->squadLeader || p->squad == 0)) {
+			usable = !squadLeaderItem(*p, item.name);
+		}
+		if (!usable) {
+			dimmed.push_back(item.slot);
+		}
+	}
+	return dimmed;
+}
+
+bool GameWorld::hasWeaponHud(const world::ObjectTemplate& weapon)
+{
+	const auto& components = weapon.components();
+	return std::any_of(components.begin(), components.end(), [](const std::string& c) { return sameName(c, "WeaponHud"); })
+		|| std::any_of(weapon.settings().begin(), weapon.settings().end(),
+			[](const auto& s) { return s.first.size() > 10 && sameName(s.first.substr(0, 10), "weaponHud."); });
 }
 
 bool GameWorld::gunFrame(uint32_t vehicle, int seat, physics::Vec3& origin, physics::Mat3& hull) const
