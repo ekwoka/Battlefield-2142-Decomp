@@ -74,6 +74,61 @@ const char* modeName(CameraMode mode)
 	}
 }
 
+const char* policyName(Policy policy) { return policy == Policy::Kills ? "kills" : "interest"; }
+
+bool parsePolicy(const std::string& name, Policy& policy)
+{
+	if (name == "interest" || name == "kills") {
+		policy = name == "kills" ? Policy::Kills : Policy::Interest;
+		return true;
+	}
+	return false;
+}
+
+Summary summarize(const std::vector<Cut>& cuts, float end)
+{
+	Summary summary;
+	std::vector<float> shots;
+	float following = 0, total = 0;
+	bool lastFollow = false;
+	int chain = 0;
+	for (size_t i = 0; i < cuts.size(); ++i) {
+		if (cuts[i].reason == "angle") {
+			++summary.angles;
+			continue;
+		}
+		size_t next = i + 1;
+		while (next < cuts.size() && cuts[next].reason == "angle") {
+			++next;
+		}
+		const float length = std::max((next < cuts.size() ? cuts[next].time : end) - cuts[i].time, 0.0f);
+		shots.push_back(length);
+		total += length;
+		const bool isFollow = cuts[i].reason == "killer" || cuts[i].reason == "first-kill";
+		if (isFollow) {
+			++summary.follows;
+			following += length;
+			summary.longestFollow = std::max(summary.longestFollow, length);
+			const bool chained = lastFollow && cuts[i].reason == "killer";
+			summary.chained += chained ? 1 : 0;
+			chain = chained ? chain + 1 : 1;
+			summary.longestChain = std::max(summary.longestChain, chain);
+		}
+		lastFollow = isFollow;
+	}
+	summary.shots = static_cast<int>(shots.size());
+	if (!shots.empty()) {
+		summary.meanShot = total / shots.size();
+		summary.longestShot = *std::max_element(shots.begin(), shots.end());
+		std::sort(shots.begin(), shots.end());
+		const size_t half = shots.size() / 2;
+		summary.medianShot = shots.size() % 2 ? shots[half] : (shots[half - 1] + shots[half]) / 2;
+	}
+	summary.meanFollow = summary.follows ? following / summary.follows : 0;
+	summary.followShare = total > 0 ? following / total : 0;
+	return summary;
+}
+
 float interest(const Sample& s)
 {
 	if (!s.alive) {
@@ -378,9 +433,104 @@ Cut ShotDirector::cutTo(float now, const Sample* to, const char* reason)
 	return cut;
 }
 
+// The victim's killer, if it counts: a living bot of the other team (not a
+// suicide, a team kill or the environment).
+const Sample* ShotDirector::killerOf(const std::vector<Sample>& samples, const Sample& victim) const
+{
+	if (victim.killer < 0 || victim.killer == victim.player) {
+		return nullptr;
+	}
+	for (const Sample& s : samples) {
+		if (s.player == victim.killer) {
+			return s.alive && s.team != victim.team ? &s : nullptr;
+		}
+	}
+	return nullptr;
+}
+
+// The killer of a death since the last decision; of several, the most
+// interesting (then the lowest id), so the choice is deterministic.
+const Sample* ShotDirector::newKill(const std::vector<Sample>& samples)
+{
+	const Sample* chosen = nullptr;
+	float score = 0;
+	for (const Sample& s : samples) {
+		const auto was = m_alive.find(s.player);
+		const bool died = was != m_alive.end() && was->second && !s.alive;
+		m_alive[s.player] = s.alive;
+		const Sample* killer = died ? killerOf(samples, s) : nullptr;
+		if (!killer) {
+			continue;
+		}
+		const float value = interest(*killer);
+		if (!chosen || value > score || (value == score && killer->player < chosen->player)) {
+			chosen = killer;
+			score = value;
+		}
+	}
+	return chosen;
+}
+
+Cut ShotDirector::follow(float now, const Sample* to, const char* reason)
+{
+	const bool same = to->player == m_subject;
+	const CameraMode was = m_mode;
+	const float started = m_shotStart;
+	Cut cut = cutTo(now, to, reason);
+	if (same) {
+		m_mode = was; // a kill by the waiting shot's own bot: the shot goes on
+		m_shotStart = started;
+	} else {
+		m_mode = !to->vehicle && random() < m_settings.firstPersonShare ? CameraMode::FirstPerson : CameraMode::Chase;
+	}
+	cut.mode = m_mode;
+	m_following = true;
+	m_lastActive = m_angleAt = now;
+	return cut;
+}
+
+std::optional<Cut> ShotDirector::keepFollowing(float now, const Sample& s, const std::vector<Sample>& samples)
+{
+	const bool active = s.enemyInRange || s.capturing || s.titanCore;
+	const float since = std::min({s.sinceFired, s.sinceHit, s.sinceDamage, s.sinceKill});
+	m_lastActive = std::max(m_lastActive, active ? now : now - since);
+	if (now - m_lastActive >= m_settings.followIdle) {
+		m_following = false; // waiting again
+		float score = 0;
+		const Sample* to = best(samples, m_subject, score);
+		return to ? std::optional<Cut>(cutTo(now, to, "idle-long")) : std::nullopt;
+	}
+	CameraMode next = m_mode;
+	if (s.vehicle && m_mode == CameraMode::FirstPerson) {
+		next = CameraMode::Chase; // a vehicle: the chase (a seat's own view isn't the director's)
+	} else if (s.vehicle && now - m_angleAt >= m_settings.angleEvery) {
+		next = m_mode == CameraMode::Chase ? CameraMode::Wide : CameraMode::Chase; // now and then an orbit of it
+	} else if (!s.vehicle && now - m_angleAt >= m_settings.angleEvery) {
+		next = m_mode == CameraMode::Chase ? CameraMode::FirstPerson : CameraMode::Chase;
+		if (m_mode != CameraMode::Wide && random() < m_settings.wideShare) {
+			next = CameraMode::Wide;
+		}
+	}
+	if (next == m_mode) {
+		return std::nullopt;
+	}
+	m_angleAt = now;
+	m_mode = next;
+	Cut cut;
+	cut.time = now;
+	cut.subject = cut.previous = m_subject;
+	cut.mode = next;
+	cut.reason = "angle";
+	cut.score = interest(s);
+	cut.engaged = engaged(s);
+	return cut;
+}
+
 std::optional<Cut> ShotDirector::update(float now, const std::vector<Sample>& samples)
 {
 	const bool forced = std::exchange(m_forced, false);
+	const bool kills = m_settings.policy == Policy::Kills;
+	const Sample* kill = kills ? newKill(samples) : nullptr;
 	const Sample* current = nullptr;
 	for (const Sample& s : samples) {
 		if (s.player == m_subject) {
@@ -389,11 +539,15 @@ std::optional<Cut> ShotDirector::update(float now, const std::vector<Sample>& sa
 	}
 	float score = 0;
 	if (!current) {
+		m_following = false;
+		if (kill) {
+			return follow(now, kill, "first-kill");
+		}
 		const Sample* to = best(samples, -1, score);
 		if (!to) {
 			return std::nullopt;
 		}
-		return cutTo(now, to, m_subject < 0 ? "start" : "lost");
+		return cutTo(now, to, m_subject < 0 ? "start" : kills ? "left" : "lost");
 	}
 	if (m_deathAt >= 0) {
 		if (current->alive && !forced) {
@@ -401,6 +555,10 @@ std::optional<Cut> ShotDirector::update(float now, const std::vector<Sample>& sa
 		} else if (now - m_deathAt < m_settings.deathHold && !forced) {
 			return std::nullopt;
 		} else {
+			if (const Sample* killer = kills && !forced ? killerOf(samples, *current) : nullptr) {
+				return follow(now, killer, "killer");
+			}
+			m_following = false;
 			const Sample* to = best(samples, m_subject, score);
 			return to ? std::optional<Cut>(cutTo(now, to, "death")) : std::nullopt;
 		}
@@ -409,6 +567,15 @@ std::optional<Cut> ShotDirector::update(float now, const std::vector<Sample>& sa
 		m_deathAt = now; // the death view holds
 		return std::nullopt;
 	}
+	if (kills && !forced) {
+		if (m_following) {
+			return keepFollowing(now, *current, samples);
+		}
+		if (kill) {
+			return follow(now, kill, "first-kill");
+		}
+	}
+	m_following = false;
 	const float age = now - m_shotStart;
 	const float mine = interest(*current);
 	const Sample* to = best(samples, m_subject, score);
@@ -591,14 +758,17 @@ void Director::tick(float seconds)
 	if (m_time >= m_nextSample) {
 		m_nextSample = m_time + m_shots.settings().sampleEvery;
 		m_observer.sample(m_time);
+		const CameraMode was = m_shots.mode();
 		if (const std::optional<Cut> cut = m_shots.update(m_time, m_observer.samples())) {
 			m_cuts.push_back(*cut);
 			if (onCut) {
 				onCut(*cut);
 			}
-			m_camera.cut();
-			m_cutLastTick = true;
-			m_dying = false;
+			if (cut->subject != cut->previous || cut->mode != was) {
+				m_camera.cut(); // not for a waiting shot's own bot's kill: that shot goes on
+				m_cutLastTick = true;
+				m_dying = false;
+			}
 		}
 		if (const Sample* s = m_observer.find(m_shots.subject()); s && s->alive) {
 			++decisions;

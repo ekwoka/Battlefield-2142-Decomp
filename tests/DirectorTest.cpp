@@ -322,3 +322,191 @@ TEST(Director_CameraSmoothsAimJitterWithoutLagging)
 	const float turned = std::remainder(std::atan2(later.eye.x - 10, later.eye.z - 10) - angle, 6.2831853f) * 57.29578f;
 	CHECK(turned > 3 && turned < 15);
 }
+
+// --- --director-mode kills (Policy::Kills)
+
+namespace {
+
+game::director::Settings killsSettings()
+{
+	game::director::Settings settings;
+	settings.policy = game::director::Policy::Kills;
+	return settings;
+}
+
+Sample killedBy(Sample s, int killer)
+{
+	s.alive = false;
+	s.killer = killer;
+	return s;
+}
+
+// The cuts that changed the subject (not the "angle" ones).
+std::vector<Cut> subjectCuts(const std::vector<Cut>& cuts)
+{
+	std::vector<Cut> out;
+	for (const Cut& c : cuts) {
+		if (c.reason != "angle") {
+			out.push_back(c);
+		}
+	}
+	return out;
+}
+
+} // namespace
+
+// The subject's death: after the hold, its killer. The killer is followed
+// past maxShot while it fights, against a far better candidate and through
+// its own kills and kills elsewhere; after followIdle without action it is
+// left, and the next bot to kill is followed.
+TEST(Director_KillsFollowsTheKillerPastTheMaximum)
+{
+	ShotDirector shots(killsSettings());
+	// Teams: odd players 2, even 1. Bot 1 fights; bot 2 kills it at 3 s and
+	// fights on to 40 s, then idles; bot 3 is a star from 10 s; bot 2 kills bot 4
+	// at 15 s, bot 5 kills bot 6 at 20 s (elsewhere); bot 7 kills bot 8 at 80 s.
+	const std::vector<Cut> all = run(shots, 90, [](float t) {
+		Sample one = t < 3 ? fighting(1) : killedBy(fighting(1), 2);
+		Sample two = t < 40 ? fighting(2) : idling(2, t - 40);
+		Sample three = t < 10 ? living(3) : fighting(3);
+		if (t >= 10) {
+			three.sinceKill = three.sinceDamage = 0.5f;
+			three.titanAssault = three.titanCore = true;
+		}
+		Sample four = t < 15 ? living(4) : killedBy(living(4), 2);
+		Sample five = living(5), six = t < 20 ? living(6) : killedBy(living(6), 5);
+		Sample seven = living(7), eight = t < 80 ? living(8) : killedBy(living(8), 7);
+		return std::vector<Sample> {one, two, three, four, five, six, seven, eight};
+	});
+	const std::vector<Cut> cuts = subjectCuts(all);
+	for (const Cut& c : all) {
+		std::printf("  %5.1f s: %d -> %d %s, %s\n", c.time, c.previous, c.subject, game::director::modeName(c.mode), c.reason.c_str());
+	}
+	CHECK(cuts.size() == 4);
+	CHECK(cuts.size() == 4 && cuts[0].subject == 1 && cuts[0].reason == "start");
+	// The death hold (2 s), then the killer.
+	CHECK(cuts.size() == 4 && cuts[1].subject == 2 && cuts[1].reason == "killer" && cuts[1].time == 5.0f);
+	// Kept to 39.5 s (its last fight) plus followIdle: no "better" for bot 3, no "max" at 25 s.
+	CHECK(cuts.size() == 4 && cuts[2].reason == "idle-long" && cuts[2].previous == 2 && cuts[2].time == 64.5f);
+	// Waiting again, then the next kill anywhere.
+	CHECK(cuts.size() == 4 && cuts[3].subject == 7 && cuts[3].reason == "first-kill" && cuts[3].time == 80.0f);
+	CHECK(shots.subject() == 7 && shots.following());
+	// The long follow changed camera now and then (angleEvery, 12 s), the subject kept.
+	int angles = 0;
+	for (const Cut& c : all) {
+		if (c.reason == "angle") {
+			++angles;
+			CHECK(c.subject == 2 && c.previous == 2 && c.time > 5 && c.time < 64.5f);
+		}
+	}
+	CHECK(angles >= 4 && angles <= 5);
+	// The summary: two follows (the killer's, the first kill's) and the shots' lengths.
+	const game::director::Summary sum = game::director::summarize(all, 90);
+	CHECK(sum.shots == 4 && sum.angles == angles && sum.follows == 2 && sum.chained == 0 && sum.longestChain == 1);
+	CHECK(std::fabs(sum.longestFollow - 59.5f) < 1e-3f && std::fabs(sum.meanFollow - (59.5f + 10) / 2) < 1e-3f);
+	CHECK(std::fabs(sum.meanShot - 90.0f / 4) < 1e-3f && std::fabs(sum.followShare - 69.5f / 90) < 1e-3f);
+}
+
+// From the start the interest rules choose the waiting shots (cut at maxShot,
+// not held); the first kill anywhere takes the camera, and of two in one
+// decision the killer with the higher interest (then the lower id) wins.
+TEST(Director_KillsWaitsThenTakesTheFirstKiller)
+{
+	const auto match = [](int fastKiller) {
+		return [fastKiller](float t) {
+			Sample three = living(3), five = living(5);
+			if (fastKiller == 5) {
+				five.enemyInRange = true;
+			}
+			Sample four = t < 25 ? living(4) : killedBy(living(4), 3);
+			Sample six = t < 25 ? living(6) : killedBy(living(6), 5);
+			return std::vector<Sample> {fighting(1), fighting(2), three, four, five, six};
+		};
+	};
+	ShotDirector shots(killsSettings());
+	std::vector<Cut> cuts = run(shots, 30, match(0));
+	CHECK(cuts.size() == 3);
+	CHECK(cuts.size() == 3 && cuts[0].reason == "start" && cuts[1].reason == "max" && cuts[1].time == 20.0f);
+	CHECK(cuts.size() == 3 && cuts[2].reason == "first-kill" && cuts[2].time == 25.0f && cuts[2].subject == 3);
+	CHECK(!cuts.empty() && cuts.back().mode != CameraMode::Wide && shots.following());
+	ShotDirector other(killsSettings());
+	cuts = run(other, 30, match(5));
+	CHECK(cuts.size() == 3 && cuts[2].subject == 5 && cuts[2].reason == "first-kill");
+	// The same again: the same pick (deterministic).
+	ShotDirector again(killsSettings());
+	const std::vector<Cut> repeat = run(again, 30, match(5));
+	CHECK(repeat.size() == cuts.size() && repeat.back().subject == cuts.back().subject && repeat.back().mode == cuts.back().mode);
+	// A kill by the waiting shot's own bot: it is followed, without a new shot.
+	ShotDirector own(killsSettings());
+	cuts = run(own, 10, [](float t) {
+		Sample two = t < 4 ? living(2) : killedBy(living(2), 1);
+		return std::vector<Sample> {fighting(1), two, living(3)};
+	});
+	CHECK(cuts.size() == 2 && cuts[1].subject == 1 && cuts[1].previous == 1 && cuts[1].reason == "first-kill");
+	CHECK(cuts.size() == 2 && cuts[1].mode == cuts[0].mode && own.following() && own.shotStart() == 0.0f);
+}
+
+// A suicide, a team kill or an environment death of the subject: the next
+// shot by interest ("death"), waiting; a team kill elsewhere is no first
+// kill; a followed killer leaving the match: "left".
+TEST(Director_KillsFallsBackOnASuicideOrTeamKill)
+{
+	for (const int killer : {1, 3, -1}) { // bot 1 itself, bot 3 (its team), nobody
+		ShotDirector shots(killsSettings());
+		std::vector<Cut> cuts = run(shots, 10, [killer](float t) {
+			Sample one = fighting(1);
+			one.sinceKill = 0;
+			Sample four = t < 2 ? living(4) : killedBy(living(4), 6); // 6 and 4: team 1
+			return std::vector<Sample> {t < 4 ? one : killedBy(one, killer), living(2), living(3), four, living(6)};
+		});
+		CHECK(cuts.size() == 2);
+		CHECK(cuts.size() == 2 && cuts[0].subject == 1 && cuts[1].reason == "death" && cuts[1].time == 6.0f);
+		CHECK(!shots.following());
+	}
+	// Following bot 2 (bot 1's killer), which then leaves.
+	ShotDirector shots(killsSettings());
+	std::vector<Cut> cuts = run(shots, 10, [](float t) {
+		std::vector<Sample> samples {t < 1 ? fighting(1) : killedBy(fighting(1), 2), living(3)};
+		if (t < 7) {
+			samples.push_back(fighting(2));
+		}
+		return samples;
+	});
+	cuts = subjectCuts(cuts);
+	CHECK(cuts.size() == 3 && cuts[1].reason == "killer" && cuts[1].subject == 2);
+	CHECK(cuts.size() == 3 && cuts[2].reason == "left" && cuts[2].time == 7.0f && cuts[2].subject == 3 && !shots.following());
+}
+
+// A followed killer in a vehicle: the chase, every other angleEvery a wide
+// orbit, never first person. On foot the camera alternates chase and first
+// person every angleEvery; the default policy never makes an "angle" cut.
+TEST(Director_KillsChasesAVehicleAndVariesTheAngle)
+{
+	ShotDirector shots(killsSettings());
+	std::vector<Cut> cuts = run(shots, 120, [](float t) {
+		Sample two = fighting(2);
+		if (t >= 60) {
+			two.vehicle = 42;
+		}
+		return std::vector<Sample> {t < 1 ? fighting(1) : killedBy(fighting(1), 2), two};
+	});
+	int onFoot = 0, inVehicle = 0;
+	CameraMode last = CameraMode::Chase;
+	for (const Cut& c : cuts) {
+		if (c.reason == "angle") {
+			(c.time < 60 ? onFoot : inVehicle) += 1;
+			CHECK(c.time < 60 || c.mode != CameraMode::FirstPerson);
+			CHECK(c.time < 60 || c.mode == CameraMode::Chase || last == CameraMode::Chase); // the orbit, then back
+		}
+		last = c.mode;
+	}
+	CHECK(subjectCuts(cuts).size() == 2 && shots.subject() == 2 && shots.mode() != CameraMode::FirstPerson);
+	CHECK(onFoot >= 3 && onFoot <= 4 && inVehicle >= 4 && inVehicle <= 6);
+	ShotDirector plain;
+	cuts = run(plain, 120, [](float t) {
+		return std::vector<Sample> {t < 1 ? fighting(1) : killedBy(fighting(1), 2), fighting(2), fighting(3)};
+	});
+	for (const Cut& c : cuts) {
+		CHECK(c.reason != "angle" && c.reason != "killer" && c.reason != "first-kill");
+	}
+}

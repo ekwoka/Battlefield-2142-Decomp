@@ -12,6 +12,7 @@
 //               [--nosound] [--sound] [--play-sound <name>]
 //               [--play [team]] [--drive <vehicle template>]
 //               [--director] (with --bots N: a match of bots, a spectator camera cutting between them)
+//               [--director-mode interest|kills] [--director-idle <seconds>]
 //               [--record-demo <name>] [--demo <file|name>] [--demo-stats <file>]
 // --view opens a window showing the level (needs a build with SDL3);
 // --screenshot renders one frame to a PNG instead.
@@ -203,6 +204,7 @@ struct Options {
 	bool walk = false;           // --walk: on a server without a window, walk and turn (the prediction's check)
 	bool spectate = false;       // --spectate: on a server, join as a spectator (the menu's SPECTATOR)
 	bool director = false;       // --director: a match of bots only, the camera cutting between them (Game/Director.h)
+	game::director::Settings directorSettings; // --director-mode interest|kills, --director-idle <s>
 	// --remote-actions "<s>:<op> ...": on a server without a window, the
 	// inputs from that second of the round on (crouch, prone, stand, fire,
 	// hold (stop firing), reload, forward, stop, turn:<deg a tick>,
@@ -496,6 +498,13 @@ bool parseOptions(int argc, char** argv, Options& options)
 		} else if (arg == "--director") {
 			options.director = true;
 			options.view = options.screenshot.empty();
+		} else if (arg == "--director-mode" && hasValue) {
+			if (!game::director::parsePolicy(argv[++i], options.directorSettings.policy)) {
+				std::fprintf(stderr, "--director-mode: interest or kills, not %s\n", argv[i]);
+				return false;
+			}
+		} else if (arg == "--director-idle" && hasValue) {
+			options.directorSettings.followIdle = static_cast<float>(std::atof(argv[++i]));
 		} else if (arg == "--spectate") {
 			options.spectate = true;
 		} else if (arg == "--maps" && hasValue) {
@@ -9108,7 +9117,7 @@ int runGame(Options& options, Session& session)
 			if (!bots.enabled() || options.bots <= 0) {
 				std::printf("director: no bots to watch (give --bots N on a level with AI navigation data)\n");
 			}
-			director.emplace(round, &bots);
+			director.emplace(round, &bots, options.directorSettings);
 			director->onCut = [&round](const game::director::Cut& cut) {
 				game::GameWorld::PlayerInfo who;
 				const bool known = round.playerInfo(cut.subject, who);
@@ -9119,7 +9128,8 @@ int runGame(Options& options, Session& session)
 					cut.reason.c_str(), cut.score, cut.engaged ? ", engaged" : "");
 				std::fflush(stdout);
 			};
-			std::printf("director: player %d spectates; %d bots play\n", local, bots.enabled() ? options.bots : 0);
+			std::printf("director: player %d spectates; %d bots play; following %s\n", local, bots.enabled() ? options.bots : 0,
+				game::director::policyName(options.directorSettings.policy));
 		}
 		if (options.playTeam != 0 && !options.director) {
 			// The soldier's chosen unlocks (every unlock is owned anyway).
@@ -9818,6 +9828,11 @@ int runGame(Options& options, Session& session)
 				std::printf("; modes:");
 				for (const auto& [mode, n] : modes) std::printf(" %s %d", mode.c_str(), n);
 				std::printf("\n");
+				const game::director::Summary sum = game::director::summarize(cuts, director->time());
+				std::printf("director: %d shots on a subject, %.1f s on average (median %.1f, longest %.1f), %d angle changes; "
+							"%d follows of a killer, %.1f s on average (longest %.1f, %.0f %% of the time), %d chained, longest chain %d\n",
+					sum.shots, sum.meanShot, sum.medianShot, sum.longestShot, sum.angles, sum.follows, sum.meanFollow,
+					sum.longestFollow, 100 * sum.followShare, sum.chained, sum.longestChain);
 			}
 			std::printf("  state fingerprint %016llx\n", static_cast<unsigned long long>(round.stateFingerprint()));
 			if (const auto lost = round.objectsOutOfWorld(); !lost.empty()) {

@@ -97,7 +97,15 @@ private:
 	std::vector<Sample> m_samples;
 };
 
+// What the director follows: the most interesting bot (cutting between them
+// by interest), or the kills (--director-mode kills: the killer of the
+// followed bot, held until it idles long; see ShotDirector).
+enum class Policy { Interest, Kills };
+const char* policyName(Policy policy);
+bool parsePolicy(const std::string& name, Policy& policy);
+
 struct Settings {
+	Policy policy = Policy::Interest;
 	float minShot = 6;      // seconds a shot lasts at least (an idle subject or a death cuts sooner)
 	float maxShot = 20;     // and at most
 	float idleCut = 4;      // the subject idle this long: cut early to a better one
@@ -110,9 +118,20 @@ struct Settings {
 	float wideShare = 0.12f;        // of the cuts, wide shots
 	float firstPersonShare = 0.35f; // of the infantry cuts, first person
 	float sampleEvery = 0.5f;       // seconds between decisions
+	// Policy::Kills: a followed killer is left after this long without fire,
+	// damage dealt or taken, a kill, an enemy in sight and range or a capture
+	// (--director-idle). 25 s: longer than a reload, a dash between cover or
+	// the wait for the next enemy to come round (the bots' fights pause 10 to
+	// 20 s), shorter than a walk across the map to the next point.
+	float followIdle = 25;
+	float angleEvery = 12; // and its camera changes (chase, first person) this often, the subject kept
 };
 
-// A cut: when, to whom, how, and why ("start", "better", "idle", "max", "death", "lost", "forced").
+// A cut: when, to whom, how, and why. Policy::Interest: "start", "better",
+// "idle", "max", "death", "lost", "forced". Policy::Kills adds "killer" (to
+// the followed bot's killer), "first-kill" (to a bot that killed, while
+// waiting), "idle-long" (off a killer idle Settings::followIdle), "left" (the
+// subject left the match) and "angle" (the same subject, another camera).
 struct Cut {
 	float time = 0;
 	int subject = -1, previous = -1;
@@ -123,6 +142,18 @@ struct Cut {
 };
 
 // The shot director: which bot to watch and how, from the samples.
+//
+// Policy::Kills: while waiting (the start, or after an idle killer, a
+// suicide, a team kill or an environment death) the interest rules pick
+// the shots; the first kill anywhere (a living bot of the other team killed
+// another) cuts to the killer ("first-kill"), which is then followed: no
+// cut for a better bot or at maxShot, its own kills keep it, and every
+// angleEvery its camera alternates (chase, first person, now and then wide;
+// in a vehicle the chase and a wide orbit in turn). Its death holds deathHold, then the cut
+// goes to its killer ("killer"), followed in turn; it is left after
+// followIdle without action ("idle-long") or if it leaves ("left"). Kills in
+// the same decision: the killer with the highest interest, then the lowest
+// player id.
 class ShotDirector {
 public:
 	explicit ShotDirector(Settings settings = {}, uint32_t seed = 0x2142u);
@@ -132,6 +163,8 @@ public:
 	int subject() const { return m_subject; }
 	CameraMode mode() const { return m_mode; }
 	bool holdingDeath() const { return m_deathAt >= 0; }
+	// Policy::Kills: following a killer (not waiting).
+	bool following() const { return m_following; }
 	float shotStart() const { return m_shotStart; }
 	const Settings& settings() const { return m_settings; }
 
@@ -140,6 +173,11 @@ private:
 	CameraMode chooseMode(const Sample& sample);
 	float random();
 	Cut cutTo(float now, const Sample* to, const char* reason);
+	// Policy::Kills.
+	const Sample* killerOf(const std::vector<Sample>& samples, const Sample& victim) const;
+	const Sample* newKill(const std::vector<Sample>& samples);
+	Cut follow(float now, const Sample* to, const char* reason);
+	std::optional<Cut> keepFollowing(float now, const Sample& subject, const std::vector<Sample>& samples);
 	Settings m_settings;
 	uint32_t m_seed;
 	int m_subject = -1;
@@ -148,7 +186,22 @@ private:
 	float m_deathAt = -1;
 	bool m_forced = false;
 	std::deque<int> m_recent;
+	bool m_following = false;
+	float m_lastActive = 0, m_angleAt = 0;
+	std::map<int, bool> m_alive; // each player's at the last decision
 };
+
+// Statistics over a run's cuts, for the end of --simulate. A shot is the
+// time from a cut (not an "angle" one) to the next; a follow is a shot that
+// began with "killer" or "first-kill"; a chained follow began with "killer"
+// right after a follow (the followed bot was killed, its killer followed).
+struct Summary {
+	int shots = 0, angles = 0;
+	float meanShot = 0, medianShot = 0, longestShot = 0;
+	int follows = 0, chained = 0, longestChain = 0; // longestChain: follows linked by "killer" cuts
+	float meanFollow = 0, longestFollow = 0, followShare = 0; // followShare: of the time
+};
+Summary summarize(const std::vector<Cut>& cuts, float end);
 
 // The subject's pose for the camera.
 struct Pose {
