@@ -1066,20 +1066,6 @@ const world::ObjectTemplate* controlledTemplate(game::GameWorld& round, const ga
 	return vehicle->objectTemplate();
 }
 
-// A joined deployment marker carries the compact group id received from the
-// server. Keep this validation for the Done path until F7 takes it over.
-int joinedSpawnGroup(int marker)
-{
-	if (!g_remoteHud || marker < 0) return -1;
-	const auto groups = g_remoteHud->spawnGroups();
-	game::GameWorld::PlayerInfo me;
-	if (!g_remoteHud->playerInfo(g_remoteHud->localPlayer(), me)) return -1;
-	const auto group = std::find_if(groups.begin(), groups.end(), [marker, &me](const auto& candidate) {
-		return candidate.id == marker && candidate.team == me.team;
-	});
-	return group == groups.end() ? -1 : marker;
-}
-
 void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, const game::GameLogic& logic,
 	bool commanderScreen, std::optional<float> viewHeading, uint32_t insideTitan)
 {
@@ -12192,8 +12178,11 @@ int runGame(Options& options, Session& session)
 				if ((done && alive) || action != dice::main::DeploymentDoneAction::None) {
 					bool joinedPickCanSubmit = true;
 					if (!alive && session.client && g_remoteHud && g_remoteHud->chosenSpawnMarker >= 0) {
-						const int group = joinedSpawnGroup(g_remoteHud->chosenSpawnMarker);
-						joinedPickCanSubmit = dice::main::joinedSpawnPickCanSubmit(true, group);
+						// F3 stores the compact id directly from the clicked received group.
+						const int group = g_remoteHud->chosenSpawnMarker;
+						const net::SpawnGroupInfo* received = session.client->world().spawnGroup(group);
+						joinedPickCanSubmit = dice::main::joinedSpawnPickCanSubmit(true, group,
+							received && received->team == me.team);
 						if (joinedPickCanSubmit) {
 							kitMenu.commit();
 							selectRemoteKit(*session.client, me.team, localKit);
