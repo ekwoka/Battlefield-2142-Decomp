@@ -146,7 +146,9 @@ std::string formatDemoStats(const DemoStats& stats, size_t fileBytes);
 // written once a tick by 0x005f8d30 from 0x005f9630, read by 0x005f91f0;
 // the same zlib stream wrapper as a demo, no header). recordDemo writes
 // <name>-def.bf2142cam beside the demo only with a local player (a
-// dedicated server makes none). Each keyframe, little-endian:
+// dedicated server makes none; not retail: --director's view, and with
+// enhanced.demoCamera a director's of its own, go in as free frames when
+// nobody plays the local player). Each keyframe, little-endian:
 //   u32 tick, u32 mode (follow when exactly 1 on reading), u8 attached,
 //   u8 override (the reader then takes mode 0);
 //   mode 0, attached or override: 7 floats, a quaternion x, y, z, w then

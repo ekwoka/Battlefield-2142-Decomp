@@ -5,7 +5,7 @@
 # gameplay additions (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, botThreat, botTitanRepair, guidedCameraEase,
 # cornerSteer, passengerWeapons, softLanding, titanKitFloors, titanDeckMines, podExitAtRest, squadOrderPoints, botSquadInvites) change the simulation by
 # design and are turned off for the comparison. A fourth run records a demo
-# (--record-demo, enhanced.demoQuality) and must match the enhanced one.
+# (--record-demo, enhanced.demoQuality, enhanced.demoCamera) and must match the enhanced one.
 #   tools/parity-check.sh [seconds] [extra game args...]
 set -uo pipefail
 B="${BF2142_BIN:-build/release/src/Main/bf2142}"
@@ -24,7 +24,7 @@ off2="$(run)"
 # The enhanced options that change the simulation by design, off.
 SIM_OFF=(--console "enhanced.botRecovery 0" --console "enhanced.botMovement 0" --console "enhanced.botTitan 0" --console "enhanced.botOffMesh 0" --console "enhanced.botAsyncPaths 0" --console "enhanced.botCommander 0" --console "enhanced.botPilots 0" --console "enhanced.botLoneSeat 0" --console "enhanced.botThreat 0" --console "enhanced.botTitanRepair 0" --console "enhanced.guidedCameraEase 0" --console "enhanced.cornerSteer 0" --console "enhanced.passengerWeapons 0" --console "enhanced.softLanding 0" --console "enhanced.titanKitFloors 0" --console "enhanced.squadOrderPoints 0" --console "enhanced.titanDeckMines 0" --console "enhanced.podExitAtRest 0" --console "enhanced.botSquadInvites 0")
 on="$(run --enhanced "${SIM_OFF[@]}")"
-# enhanced.demoQuality (and recording at all) leaves the round alone: the
+# enhanced.demoQuality, enhanced.demoCamera (its camera director) and recording at all leave the round alone: the
 # same enhanced round recorded at full rate.
 demo_dir="$(mktemp -d)"
 recorded="$(run --enhanced "${SIM_OFF[@]}" --record-demo "$demo_dir/parity.bf2142demo")"
@@ -38,6 +38,6 @@ elif [[ "$off1" != "$off2" ]]; then
 elif [[ "$off1" != "$on" ]]; then
 	echo "FAIL: --enhanced changed the simulation"; exit 1
 elif [[ "$on" != "$recorded" ]]; then
-	echo "FAIL: recording a demo (enhanced.demoQuality) changed the simulation"; exit 1
+	echo "FAIL: recording a demo (enhanced.demoQuality, demoCamera) changed the simulation"; exit 1
 fi
 echo "PASS"

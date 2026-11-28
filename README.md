@@ -388,7 +388,7 @@ pushing a stick. A gamepad reads as an Xbox 360 pad.
 | `--demo-record-camera <file.bf2142cam>` | With `--demo`: record the demo camera you steer into a camera file (`demo.cameramode record`). |
 | `--demo-follow <name\|id>` | With `--demo`: the demo camera follows that player (a name in any case, or a player id) whenever he lives, as `demo.togglePlayerDemo` would put it on him. Without `--demo-first-person` it is the original's follow camera behind him. |
 | `--demo-first-person` | With `--demo` and `--enhanced` (`enhanced.followFirstPerson`): the followed player is shown in his own first person, as he saw the game: his first-person arms and weapon, animated from what the demo carries (the weapon in hand, the fire, the reloads, the zoom, his movement), his weapon's zoom, and in a vehicle his seat's camera and cockpit. **J** (or `--follow-hud`) shows his HUD: health, the weapon and the rounds in its magazine, the item list, the crosshair, the minimap and the vehicle HUD. A demo doesn't carry another player's magazines (no clip count is shown), his ability battery, his exact shots (the held fire fires at the weapon's rate) nor, in a big round, every vehicle he rides (then the view falls back to the follow camera). The console's `demo.toggleFirstPerson` switches it while the demo plays. |
-| `--record-demo <name>` | Record the round from its start, as `demo.recordDemo <name>` does: `./Demos/<name>.bf2142demo` (and its camera file with a local player). Works in singleplayer, with `--simulate` and with `--host`. |
+| `--record-demo <name>` | Record the round from its start, as `demo.recordDemo <name>` does: `./Demos/<name>.bf2142demo` (and its camera file with a local player; with `--director`, or `--enhanced` in `--simulate`, the camera file films the bots: see `enhanced.demoCamera`). Works in singleplayer, with `--simulate` and with `--host`. |
 | `--demo-stats <file>` | Print a demo's ghost update rates (each soldier's updates a second and the gaps between them), its bandwidth and its size a minute, then quit. |
 | `+sv.<setting> <value>` | Set a server setting at start-up, over the config file, e.g. `+sv.demoQuality 10` or `+sv.autoRecord 1`. A local round (singleplayer, `--simulate`) has its own `sv.*` for its demo recorder. |
 
@@ -486,7 +486,11 @@ Files go under the folder you run from: `demo.recordDemo match1` writes
 `<file>.bf2142demo-def.bf2142cam`). The camera file is written as the round
 goes, as the original writes it each tick, so a crash doesn't lose it.
 `--demo match1` plays `./Demos/match1.bf2142demo` back and `--demo-camera`
-plays a camera file with it. The dev launcher lists both folders.
+plays a camera file with it. The dev launcher lists both folders. The
+camera file is the local player's view, as the original's; with
+`--director` it is the director's, and with `--enhanced`
+(`enhanced.demoCamera`) a `--simulate` recording's, or one while you are
+dead or on the spawn screen, follows the bots too.
 
 How a 64-player round (63 bots and you, Suez Canal conquest, a minute with
 `--enhanced`'s bots) records:
@@ -579,6 +583,7 @@ The rest only change what you see or hear.
 | `squadItemHints` | on | interface | A weapon key that takes nothing because of the squad says why on the help line, every time: a squad leader's item (the beacon, the drones) when you lead no squad, or a squad too small for it, with the count ("(1/2)": members against the item's need). The original says nothing for the first, and for the second shows its "Your squad is not large enough" help once, only with help on and only to a squad leader. Either way the item is dimmed in the item list, as in the original. | no |
 | `singleplayAllModes` | on | interface | The singleplayer page lists every level's every mode and size (Titan, Assault Lines, conquest and the rest), each row naming its mode, not only its single-player layouts; the chosen map starts in its own mode. For testing: the bots may not play those modes (Titan bots need `botTitan` and `botCommander`). | no |
 | `demoQuality` | on | demos | A recorded demo's ghosts go out every tick (30 a second, retail's biggest packet: 4096 bytes, 255 updates), with more packets that tick when one is full, so a 64-player round plays back with every soldier updated every tick. The original's `sv.demoQuality` (1 to 10, 1 by default) sends 4 to 20 packets a second of 40 to 255 updates: at 1 a 64-player round's soldiers go seconds without an update; at 10 they get about a live client's 20 a second. See [Demos](#demos). The file stays readable by the original's reader (no payload over its 256 KB, no block over 255 updates). | no |
+| `demoCamera` | on | demos | A recorded demo's camera file (`<name>-def.bf2142cam`) films the bots with an automatic camera (`--director`'s, chases and wide shots) while the local player has no living soldier, and throughout a headless `--simulate` recording, where nobody plays the local player (a file is made then even without one). `--demo <name> --demo-camera Demos/<name>-def.bf2142cam` then shows the fighting. The original records the local player's own view: at the spawn screen, and from a soldier nobody steers, a fixed spot; with no local player no file. The frames are the original's free keyframes, readable by its reader. `--director` with `--record-demo` records the director's view into the file whatever this setting. | no |
 | `singleplayBotCount` | on | interface | The singleplayer page gets a MAX PLAYERS slider (1 to 64, default 16) beside the bot skill, kept in the profile. A playlist or instant action started from the page fills each map with that many players, you included, but never more than the map holds: with the slider at 64 a 32-player map gets 31 bots and the next 16-player map 15. The original's page starts every map with 16 players, you included, whatever its size, so at 16 the games are the original's. | no |
 
 `enhanced.enabled` on its own also turns on the enhanced audio (below), lets

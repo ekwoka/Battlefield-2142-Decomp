@@ -5,8 +5,10 @@
 #include "TestMain.h"
 #include "TitanLevel.h"
 
+#include "Game/Director.h"
 #include "Game/GameLogic.h"
 #include "Game/GameWorld.h"
+#include "Main/DemoCamera.h"
 #include "Main/HostedGame.h"
 #include "Net/Demo.h"
 #include "Net/GameClient.h"
@@ -14,6 +16,7 @@
 #include "World/Object.h"
 #include "World/ObjectTemplateManager.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -305,4 +308,86 @@ TEST(Demo_SixtyFourPlayersUpdateRate)
 	CHECK(played.finished && played.viewer.world().playerList().size() == 64);
 	std::remove(enhancedPath.c_str());
 	std::remove(retailPath.c_str());
+}
+
+// enhanced.demoCamera: with nobody at the local player's controls the camera
+// file films the bots (main.cpp: a director's view as free keyframes,
+// demo_camera::lookFrame). A frame of a look, recorded (0x005f9630's ring)
+// and played (0x005fa210), puts the camera at the look's eye facing its
+// target; a director's chase of a living soldier, so filed, stays a few
+// metres from him and looks at him.
+TEST(Demo_DirectedCameraFilmsTheBots)
+{
+	{
+		const float eye[3] = {10, 50, -20}, at[3] = {13, 49, -16};
+		host::DemoCameraRecorder recorder;
+		const net::CameraKeyframe frame = host::demo_camera::lookFrame(eye, at);
+		CHECK(frame.free() && frame.mode == 0);
+		for (uint32_t tick = 0; tick < 20; ++tick) {
+			recorder.record(1, tick, frame);
+		}
+		host::DemoCameraTrack track(recorder.frames());
+		host::DemoCamera camera;
+		host::DemoCameraTrack::Pose pose;
+		CHECK(track.update(10, 0, camera, pose) && !pose.follow);
+		float rows[9], yaw = 0, pitch = 0;
+		host::demo_camera::rowsFromQuaternion(pose.rotation, rows);
+		host::demo_camera::yawPitchOfRows(rows, yaw, pitch);
+		CHECK(std::fabs(pose.position[0] - 10) < 1e-3f && std::fabs(pose.position[1] - 50) < 1e-3f && std::fabs(pose.position[2] + 20) < 1e-3f);
+		CHECK(std::fabs(yaw - std::atan2(3.0f, 4.0f)) < 1e-3f);
+		CHECK(std::fabs(pitch - std::atan2(-1.0f, 5.0f)) < 1e-3f);
+	}
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) {
+		return;
+	}
+	titantest::TitanLevel level(gameDir, "Cerbere_Landing", 32, true, nullptr, false, nullptr, "gpm_cq");
+	CHECK(level.loaded);
+	if (!level.loaded) {
+		return;
+	}
+	game::GameWorld& round = *level.world;
+	std::vector<int> players;
+	for (int i = 0; i < 4; ++i) {
+		const int id = round.addPlayer("B" + std::to_string(i), 1 + i % 2, true);
+		players.push_back(id);
+		round.spawnSoldier(id);
+	}
+	level.run(0.5f);
+	game::director::Settings shots;
+	shots.firstPersonShare = 0; // as main's demo director: chases and wide shots
+	shots.wideShare = 0;
+	game::director::Director director(round, nullptr, shots);
+	host::DemoCameraRecorder recorder;
+	for (uint32_t tick = 0; tick < 90; ++tick) {
+		for (const int id : players) {
+			game::SoldierInput input;
+			input.throttle = 1;
+			round.setInput(id, input);
+		}
+		round.tick(1.0f / 30);
+		director.tick(1.0f / 30);
+		game::camera::Look look;
+		float fovY = 1;
+		if (director.view(look, fovY)) {
+			const float eye[3] = {look.eye.x, look.eye.y, look.eye.z}, at[3] = {look.at.x, look.at.y, look.at.z};
+			recorder.record(1, tick, host::demo_camera::lookFrame(eye, at));
+		}
+	}
+	CHECK(recorder.frames().size() > 60);
+	game::GameWorld::PlayerInfo subject;
+	CHECK(director.subject() >= 0 && round.playerInfo(director.subject(), subject) && subject.alive);
+	host::DemoCameraTrack track(recorder.frames());
+	host::DemoCamera camera;
+	host::DemoCameraTrack::Pose pose;
+	CHECK(track.update(recorder.frames().back().tick - 3, 0, camera, pose) && !pose.follow);
+	const float d[3] = {subject.position.x - pose.position[0], subject.position.y - pose.position[1], subject.position.z - pose.position[2]};
+	const float distance = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+	std::printf("  the camera %.1f m from %s\n", distance, subject.name.c_str());
+	CHECK(distance > 1 && distance < 15);
+	float rows[9], yaw = 0, pitch = 0;
+	host::demo_camera::rowsFromQuaternion(pose.rotation, rows);
+	host::demo_camera::yawPitchOfRows(rows, yaw, pitch);
+	const float forward[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
+	CHECK((forward[0] * d[0] + forward[1] * d[1] + forward[2] * d[2]) / distance > 0.8f); // facing him
 }

@@ -4709,10 +4709,19 @@ int runGame(Options& options, Session& session)
 				std::string output;
 				console.run("Settings/demo-recordcam.con", {}, output);
 			}
-			client.playDemo([player, started, ticked, playback, carry](std::vector<uint8_t>& payload) {
+			const net::GameClient* reader = &client;
+			client.playDemo([player, started, ticked, playback, carry, reader](std::vector<uint8_t>& payload) {
+				// Past the level block the records wait for the game's loop
+				// (the original reads the demo a frame at a time, 0x00432ee0,
+				// once the level is loaded): read during the load, the round's
+				// first ghosts were made before this level's templates could
+				// name them and lay out their state, and never moved.
 				if (!playback->running) { // loading: the clock waits (DemoPlayback::running)
 					*started = std::chrono::steady_clock::now()
 						- std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(*ticked / 30.0));
+					if (reader->world().hasLevel()) {
+						return 0;
+					}
 				}
 				const auto elapsed = std::chrono::steady_clock::now() - *started;
 				int due = !playback->running ? *ticked
@@ -8780,6 +8789,25 @@ int runGame(Options& options, Session& session)
 				playerCamera.direct(look, fovY, director->cutLastTick(), director->hidden());
 			}
 		};
+		// enhanced.demoCamera: a director of its own for a demo's camera file
+		// (demoLocalCamera below) while one records and --director isn't on.
+		// It only reads the world, and only the file takes its view.
+		std::optional<game::director::Director> demoDirector;
+		const auto stepDemoDirector = [&] {
+			const bool recording = (hosted && hosted->recordingCamera()) || (localRecorder && localRecorder->recordingCamera());
+			if (director || !recording || !enhancedSettings.enabled || !enhancedSettings.demoCamera) {
+				demoDirector.reset();
+				return;
+			}
+			if (!demoDirector) {
+				// Chases and wide shots only: a camera file can't hide the
+				// followed soldier's body nor show his first person.
+				game::director::Settings shots;
+				shots.firstPersonShare = 0;
+				demoDirector.emplace(round, &bots, shots);
+			}
+			demoDirector->tick(1.0f / 30.0f);
+		};
 		// enhanced.followFirstPerson (g_follow): whom the view shows in his
 		// own first person this tick, after the world, the director and the
 		// local camera: the director's first-person subject while he lives,
@@ -9056,6 +9084,7 @@ int runGame(Options& options, Session& session)
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			{ TP("round"); round.tick(1.0f / 30.0f); }
 			stepDirector();
+			stepDemoDirector();
 			driveTrace();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
@@ -9095,6 +9124,7 @@ int runGame(Options& options, Session& session)
 			g_autoReload = round.autoReload = session.settings.number("GeneralSettings.AutoReload", 1) != 0; // the settings page may change it
 			{ TP("round"); round.tick(1.0f / 30.0f); }
 			stepDirector();
+			stepDemoDirector();
 			playerCamera.cameraShake = session.settings.number("GeneralSettings.CameraShake", 1) != 0; // GSCameraShake
 			playerCamera.tick(1.0f / 30.0f);
 			stepFollow();
@@ -9834,15 +9864,34 @@ int runGame(Options& options, Session& session)
 			// (0x005f9630): the player's view as last drawn; without a
 			// window its soldier's eye, looking its way; without a control
 			// object (0, 100, 0) unturned. A local round's recorder too.
-			demoLocalCamera = [&round, &tagView, &tagViewSeen](net::CameraKeyframe& frame) {
+			// Not retail: with --director (the local player spectates) the
+			// file takes the director's view, what the screen shows; with
+			// enhanced.demoCamera the demo's own director's while the local
+			// player has no living soldier, and throughout a headless
+			// --simulate (nobody plays the local player; with none at all
+			// the file is made too).
+			demoLocalCamera = [&](net::CameraKeyframe& frame) {
 				const int local = round.localPlayer();
-				if (local < 0) {
+				const bool directed = enhancedSettings.enabled && enhancedSettings.demoCamera;
+				const bool headless = options.simulate > 0 && !options.view && !options.dedicated;
+				if (local < 0 && !(directed && headless)) {
 					return false;
+				}
+				game::GameWorld::PlayerInfo info;
+				const bool alive = local >= 0 && round.playerInfo(local, info) && info.alive;
+				if (director || (directed && (!alive || headless))) {
+					const game::director::Director* filming = director ? &*director : demoDirector ? &*demoDirector : nullptr;
+					game::camera::Look look;
+					float fovY = 1;
+					if (filming && filming->view(look, fovY)) {
+						const float eye[3] = {look.eye.x, look.eye.y, look.eye.z}, at[3] = {look.at.x, look.at.y, look.at.z};
+						frame = host::demo_camera::lookFrame(eye, at);
+						return true;
+					}
 				}
 				frame = {};
 				frame.followed = 0xffffffffu;
-				game::GameWorld::PlayerInfo info;
-				if (!round.playerInfo(local, info) || !info.alive) {
+				if (!alive) {
 					frame.position[1] = 100;
 					return true;
 				}

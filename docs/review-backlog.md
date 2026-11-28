@@ -848,6 +848,22 @@ before deciding whether the fix is a parity fix or an `enhanced.*` change.
   ground, a pod exit does no fall damage unless retail's does, and the thresholds match
   retail's.
 
+### P-3. A `--simulate` demo's camera file shows nothing (medium)
+- **Status:** done ("Film the bots in a demo's camera file when nobody plays").
+- **Report:** `--record-demo` in a `--simulate` round writes a camera file that stares
+  at an empty spot, so `--demo-camera` playback shows nothing.
+- **Cause:** retail's writer (`0x005f9630`) records the local player's control
+  object's view, (0, 100, 0) unturned without one, and makes no file without a local
+  player. In `--simulate` nobody plays him: with `--play` he stands at his spawn, without
+  it there is no file. Separately, every playback froze the round's first ghosts: the
+  client read the demo's first records while the level loaded, before the level's
+  templates named those ghosts, so their updates were never decoded.
+- **Fix:** `enhanced.demoCamera` (on) files a director's view (`Game/Director.h`,
+  chases and wide shots) as retail's free keyframes while the local player has no
+  living soldier, and throughout a headless `--simulate`. `--director` records its own
+  view. Playback holds the records past the level block until the game loop runs, as
+  retail's per-frame reader (`0x00432ee0`) does. Test `Demo_DirectedCameraFilmsTheBots`.
+
 ## Open verification questions (no known bug yet)
 
 | ID | Commit | Question |
