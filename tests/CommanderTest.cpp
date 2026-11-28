@@ -686,7 +686,7 @@ TEST(Commander_Artillery)
 	CHECK(std::fabs(world.abilityState(1, Ability::Artillery).timeUntilReady - (85 - 20.1f)) < 0.2f);
 }
 
-TEST(Commander_UavAndScanReveal)
+TEST(Commander_UavAndSatelliteDoNotCreateOrdinarySpots)
 {
 	Field field;
 	if (!field.loaded) {
@@ -695,8 +695,8 @@ TEST(Commander_UavAndScanReveal)
 	game::GameWorld& world = *field.world;
 	world.setCommanderEnabled(true);
 	world.setCommander(2, world.addPlayer("Boss", 2, false));
-	const int inside = field.soldier(1, 300, 330);
-	const int outside = field.soldier(1, 300, 450);
+	field.soldier(1, 300, 330);
+	field.soldier(1, 300, 450);
 	CHECK(!world.commanderAction(2, Ability::Uav, 300, 300)); // no UAV trailer
 	field.place("commander_uav_drone_control", 2, -200, -200);
 	if (!field.templates.find("eu_drone")) {
@@ -723,12 +723,12 @@ TEST(Commander_UavAndScanReveal)
 	physics::Vec3 at;
 	float radius = 0;
 	CHECK(world.uavArea(2, at, radius) && at.x == 300 && radius == 100);
-	CHECK(world.isRevealed(inside, 2) && !world.isRevealed(outside, 2) && !world.isRevealed(inside, 1));
+	CHECK(world.revealedPlayers(2).empty() && world.revealedPlayers(1).empty());
 	// It stays 30 s and is ready again 5 s later.
 	field.run(24);
-	CHECK(world.isRevealed(inside, 2) && world.uavDrone(2) == drone);
+	CHECK(world.revealedPlayers(2).empty() && world.uavDrone(2) == drone);
 	field.run(1.5f);
-	CHECK(!world.isRevealed(inside, 2) && !world.uavArea(2, at, radius) && !world.abilityReady(2, Ability::Uav));
+	CHECK(!world.uavArea(2, at, radius) && !world.abilityReady(2, Ability::Uav));
 	CHECK(world.uavDrone(2) == 0 && !field.objects.find(drone)); // gone with the UAV's time
 	field.run(5);
 	CHECK(world.abilityReady(2, Ability::Uav));
@@ -741,7 +741,7 @@ TEST(Commander_UavAndScanReveal)
 	CHECK(world.abilityState(2, Ability::Satellite).satelliteSweep == 0.0f);
 	field.run(0.1f);
 	const std::vector<int> seen = world.scannedPlayers(world.commander(2));
-	CHECK(seen.size() == 2 && world.scannedPlayers(mate).empty() && !world.isRevealed(outside, 2));
+	CHECK(seen.size() == 2 && world.scannedPlayers(mate).empty() && world.revealedPlayers(2).empty());
 	field.run(5.4f);
 	const auto halfway = world.abilityState(2, Ability::Satellite).satelliteSweep;
 	CHECK(halfway && std::abs(*halfway - 0.5f) < 0.01f);
@@ -793,6 +793,9 @@ TEST(Commander_SupplyDrop)
 	field.run(240);
 	CHECK(world.supplyCrates().size() == 1);
 	field.run(10);
+	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
+}
+
 TEST(Commander_UavOrbitKeepsItsCollisionMesh)
 {
 	if (!std::getenv("BF2142_GAME_DIR")) return;
@@ -838,9 +841,6 @@ TEST(Commander_UavOrbitKeepsItsCollisionMesh)
 		object = field.objects.find(drone);
 		CHECK(object && std::fabs(object->position().y - 70) < 0.01f);
 	}
-}
-
-	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
 }
 
 TEST(Commander_MapMarkersUseOwningTeamAndToolTint)

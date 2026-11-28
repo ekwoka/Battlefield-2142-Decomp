@@ -18,6 +18,7 @@
 #include <functional>
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace dice::hfe::menu {
 
@@ -1421,47 +1422,69 @@ bool vehicleMarker(const world::ObjectTemplate& vehicle, MapRelation relation, b
 	return true;
 }
 
+namespace {
+
+std::optional<RadarMarker> radarVehicleMarker(game::GameWorld& round, uint32_t id)
+{
+	const world::Object* vehicle = round.objects().find(id);
+	if (!vehicle || !vehicle->objectTemplate() || vehicle->destroyed()) {
+		return std::nullopt;
+	}
+	const MapIcons& icons = mapIcons(*vehicle->objectTemplate());
+	if (icons.icon.empty()) {
+		return std::nullopt;
+	}
+	return RadarMarker {icons.icon, vehicle->position().x, vehicle->position().z, 16, vehicle->rotation().x};
+}
+
+} // namespace
+
+std::optional<RadarMarker> radarContactMarker(game::GameWorld& round, const game::GameWorld::PlayerInfo& contact)
+{
+	if (contact.vehicle) {
+		return radarVehicleMarker(round, contact.vehicle);
+	}
+	physics::Vec3 position = contact.position;
+	physics::Vec3 decoy;
+	if (round.decoyOf(contact.id, decoy)) {
+		const float dx = decoy.x - position.x, dz = decoy.z - position.z;
+		if (dx * dx + dz * dz <= 60.0f * 60.0f) {
+			position = decoy;
+		}
+	}
+	RadarMarker marker {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", position.x, position.z, 16, contact.yaw};
+	const world::Object* kit = round.objects().find(contact.kit);
+	if (kit && kit->objectTemplate()) {
+		const MapIcons& icons = mapIcons(*kit->objectTemplate());
+		if (!icons.spotted.empty()) {
+			marker.texture = icons.spotted;
+			marker.size = icons.spottedSize;
+		} else if (!icons.icon.empty()) {
+			marker.texture = icons.icon;
+			marker.size = icons.size[0];
+		}
+	}
+	return marker;
+}
+
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed)
 {
 	std::vector<RadarMarker> out;
+	std::unordered_set<uint32_t> drawnVehicles;
 	for (const int id : revealed) {
 		game::GameWorld::PlayerInfo enemy;
-		if (!world.playerInfo(id, enemy) || !enemy.alive) {
+		if (!world.playerInfo(id, enemy) || !enemy.alive || (enemy.vehicle && !drawnVehicles.insert(enemy.vehicle).second)) {
 			continue;
 		}
-		// His own decoy (0x0075bd30 matches the TargetObject's player; a
-		// thrown round here, GameWorld::decoyOf), within 60 m across.
-		physics::Vec3 decoy;
-		if (!enemy.vehicle && round.decoyOf(enemy.id, decoy)) {
-			const float dx = decoy.x - enemy.position.x, dz = decoy.z - enemy.position.z;
-			if (dx * dx + dz * dz <= 60.0f * 60.0f) {
-				enemy.position = decoy;
-			}
+		if (auto marker = radarContactMarker(round, enemy)) {
+			out.push_back(std::move(*marker));
 		}
-		RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", enemy.position.x, enemy.position.z, 16, enemy.yaw};
-		const world::Object* kit = enemy.kit ? round.objects().find(enemy.kit) : nullptr;
-		if (kit && kit->objectTemplate()) {
-			const MapIcons& icons = mapIcons(*kit->objectTemplate());
-			if (!icons.spotted.empty()) {
-				m.texture = icons.spotted;
-				m.size = icons.spottedSize;
-			} else if (!icons.icon.empty()) {
-				m.texture = icons.icon;
-				m.size = icons.size[0];
-			}
-		}
-		out.push_back(std::move(m));
 	}
 	for (const uint32_t id : world.spottedVehicles()) {
-		if (const world::Object* vehicle = round.objects().find(id)) {
-			RadarMarker m {"Ingame/Player/Icons/Minimap/mini_Soldier.dds", vehicle->position().x, vehicle->position().z, 16, vehicle->rotation().x};
-			if (vehicle->objectTemplate()) {
-				const MapIcons& icons = mapIcons(*vehicle->objectTemplate());
-				if (!icons.icon.empty()) {
-					m.texture = icons.icon;
-				}
+		if (drawnVehicles.insert(id).second) {
+			if (auto marker = radarVehicleMarker(round, id)) {
+				out.push_back(std::move(*marker));
 			}
-			out.push_back(std::move(m));
 		}
 	}
 	return out;

@@ -3,13 +3,46 @@
 #include "Game/GameWorld.h"
 #include "Hud/Hud.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/HudWorld.h"
 #include "World/Object.h"
 
 #include <algorithm>
 #include <array>
+#include <unordered_set>
 #include <vector>
 
 namespace dice::hfe::main {
+
+inline bool appendCommanderUavContacts(hud::HudManager& hud, const host::HudWorld& world, game::GameWorld& round, int team)
+{
+	physics::Vec3 center {};
+	float radius = 0;
+	const bool active = round.uavArea(team, center, radius);
+	std::vector<hud::HudManager::UavTarget> targets;
+	if ((team == 1 || team == 2) && (active || hud.hasUavContacts())) {
+		std::unordered_set<uint32_t> seen;
+		const int enemyTeam = team == 1 ? 2 : 1;
+		for (const auto& player : world.playerList()) {
+			if (!player.alive || player.manDown || player.team != enemyTeam) {
+				continue;
+			}
+			const uint32_t id = player.vehicle ? player.vehicle : player.soldier;
+			const world::Object* object = round.objects().find(id);
+			if (!object || object->destroyed() || !seen.insert(id).second) {
+				continue;
+			}
+			const world::ObjectTemplate* t = object->objectTemplate();
+			if (menu::hudNumber(t, "vehicleHud.alwaysShowOnMinimap", 0) != 0
+				|| menu::hudNumber(t, "vehicleHud.canBeSpotted", 1) == 0) {
+				continue;
+			}
+			if (const auto marker = menu::radarContactMarker(round, player)) {
+				targets.push_back({id, {marker->texture, marker->x, marker->z, marker->size, marker->yaw}});
+			}
+		}
+	}
+	return hud.appendUavContacts(team, round.roundTime(), center.x, center.z, radius, targets);
+}
 
 inline void appendCommanderMapMarkers(std::vector<hud::HudManager::MapMarker>& markers, game::GameWorld& round, int team)
 {

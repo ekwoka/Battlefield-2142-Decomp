@@ -2476,7 +2476,7 @@ public:
 	// counts from now in this (the client's) round, as the exe's client
 	// keeps its tools' reload times itself (0x007d81d0: the tool's +0x5c
 	// and +0x60 = now + its reload time). abilityState then has it.
-	void noteCommanderUse(int team, CommanderAbility ability);
+	void noteCommanderUse(int team, CommanderAbility ability, float x, float z);
 	// The team's UAV while it is up: where, and how far it reveals.
 	bool uavArea(int team, physics::Vec3& at, float& radius) const;
 	bool satelliteScanActive(int team) const;
@@ -3782,12 +3782,12 @@ private:
 	// bundles of its own (the Shepherd gunners') is not under the gun's.
 	bool seatCameraFrame(const Body& body, int seat, int cameraId, physics::Vec3& at, physics::Mat3& turn);
 	std::optional<SeatMount> seatCameraFrame(const world::Object& vehicle, const VehicleLayout& layout, int seat,
-	std::optional<SeatMount> seatFirearmFrame(const world::Object& vehicle, int seat, const SeatMount& hull,
-		const SeatWeapon& weapon, bool remote) const;
 		int cameraId, const SeatMount& hull, bool remote) const;
 	SeatMount posedSeatChild(uint32_t object, int seat, const SeatMount& parent, const world::ChildTemplate& child, bool remote) const;
 	std::optional<SeatMount> seatWeaponFrame(const world::Object& vehicle, int seat, const SeatMount& hull,
 		const SeatWeapon& weapon, int& barrel, bool remote) const;
+	std::optional<SeatMount> seatFirearmFrame(const world::Object& vehicle, int seat, const SeatMount& hull,
+		const SeatWeapon& weapon, bool remote) const;
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, Body::Gun& gun, int& barrel);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel);
 	Body* findBody(uint32_t object);
@@ -5124,13 +5124,13 @@ private:
 		// physics node each tick.
 		float uavYawRate = 0, uavSpeed = 0;
 	};
+	void launchUavDrone(int team, const physics::Vec3& at);
+	void flyUavDrones(float seconds);
+	void removeUavDrone(int team);
 	bool isCommanderUav(uint32_t object) const
 	{
 		return object != 0 && (m_commanders[1].uavDrone == object || m_commanders[2].uavDrone == object);
 	}
-	void launchUavDrone(int team, const physics::Vec3& at);
-	void flyUavDrones(float seconds);
-	void removeUavDrone(int team);
 	CommanderTeam m_commanders[3];
 	std::map<std::pair<int, int>, SquadOrder> m_orders;       // (team, squad): the commander's
 	uint32_t m_orderSerial = 0;

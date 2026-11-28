@@ -474,7 +474,7 @@ bool GameWorld::commanderAction(int team, CommanderAbility ability, float x, flo
 	return true;
 }
 
-void GameWorld::noteCommanderUse(int team, CommanderAbility ability)
+void GameWorld::noteCommanderUse(int team, CommanderAbility ability, float x, float z)
 {
 	if (team != 1 && team != 2) {
 		return;
@@ -487,6 +487,9 @@ void GameWorld::noteCommanderUse(int team, CommanderAbility ability)
 	const int index = static_cast<int>(ability);
 	side.minTime[index] = commanderRecharge(team, ability);
 	side.lastUse[index] = m_time;
+	if (ability == CommanderAbility::Uav) {
+		side.uavAt = {x, terrainHeight(x, z), z};
+	}
 }
 
 // The UAV's drone (the UAV manager, ctor 0x005a1a00, vtable 0x00967f68).
@@ -845,28 +848,6 @@ void GameWorld::stepCommander(float seconds)
 		}
 	}
 	flyUavDrones(seconds);
-	for (int team = 1; team <= 2; ++team) {
-		physics::Vec3 at;
-		float radius = 0;
-		if (!uavArea(team, at, radius)) {
-			continue;
-		}
-		for (const auto& owned : m_players) {
-			const Player& player = *owned;
-			if (!player.alive || player.team == team) {
-				continue;
-			}
-			const world::Object* object = m_objects.find(player.vehicle ? player.vehicle : player.object);
-			if (!object) {
-				continue;
-			}
-			const physics::Vec3 p {object->position().x, object->position().y, object->position().z};
-			if (physics::lengthSquared(p - at) <= radius * radius) {
-				float& left = m_revealed[{player.id, team}];
-				left = std::max(left, 2 * seconds);
-			}
-		}
-	}
 	stepCrates(seconds);
 }
 

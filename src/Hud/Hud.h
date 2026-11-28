@@ -290,6 +290,12 @@ public:
 	const std::string& mapLayer() const { return m_mapLayer; }
 	void setMapMarkers(std::vector<MapMarker> markers) { m_mapMarkers = std::move(markers); }
 	void setSatelliteSweep(std::optional<float> progress) { m_satelliteSweep = progress; }
+	struct UavTarget {
+		uint32_t object;
+		MapMarker marker;
+	};
+	bool hasUavContacts() const { return !m_uavContacts.empty(); }
+	bool appendUavContacts(int team, double now, float x, float z, float radius, const std::vector<UavTarget>& targets);
 	// The map's turn with the player (the map node's update 0x0078f680).
 	// setMapHeading is 0x00778ea0: the camera's heading (radians clockwise
 	// from north, atan2 of its direction's x and z; 0 when the local player
@@ -531,6 +537,8 @@ private:
 	float m_mapFocus[2] = {0, 0};
 	std::vector<MapMarker> m_mapMarkers;
 	std::optional<float> m_satelliteSweep;
+	std::map<uint32_t, double> m_uavContacts;
+	int m_uavTeam = 0;
 	struct Hit {
 		float x0, y0, x1, y1;
 		int id;

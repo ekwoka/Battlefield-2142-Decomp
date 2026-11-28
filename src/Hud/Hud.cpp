@@ -29,6 +29,7 @@ std::string slashes(std::string s)
 }
 
 const char* kTextureRoot = "Menu/HUD/Texture/";
+constexpr float kMapPulsePeriod = 3.14159265f * 0.5f;
 
 enum NodeType {
 	kSplit,
@@ -1506,10 +1507,44 @@ void HudManager::drawCell(const Node& node, const std::string& text, float x, fl
 void HudManager::setMap(const std::string& texture, float originX, float originZ, float width, float depth)
 {
 	m_mapTexture = texture;
+	m_uavContacts.clear();
 	m_mapOrigin[0] = originX;
 	m_mapOrigin[1] = originZ;
 	m_mapSize[0] = std::max(width, 1.0f);
 	m_mapSize[1] = std::max(depth, 1.0f);
+}
+
+bool HudManager::appendUavContacts(int team, double now, float x, float z, float radius, const std::vector<UavTarget>& targets)
+{
+	if (team != m_uavTeam) {
+		m_uavContacts.clear();
+		m_uavTeam = team;
+	}
+	for (auto it = m_uavContacts.begin(); it != m_uavContacts.end();) {
+		if (it->second <= now) {
+			it = m_uavContacts.erase(it);
+		} else {
+			++it;
+		}
+	}
+	// 0x00791660: use the same expanding ground ring as drawMap.
+	// The marker holds for 0.3 s, then fades over 0.5 s.
+	const float edge = radius * m_mapPulseTime / kMapPulsePeriod;
+	bool detected = false;
+	for (const UavTarget& target : targets) {
+		const float distance = std::hypot(target.marker.x - x, target.marker.z - z);
+		if (radius > 0 && distance <= radius && std::fabs(distance - edge) < 2.5f) {
+			detected |= m_uavContacts.try_emplace(target.object, now + 0.8).second;
+		}
+		const auto hit = m_uavContacts.find(target.object);
+		if (hit != m_uavContacts.end()) {
+			MapMarker marker = target.marker;
+			marker.color[1] = marker.color[2] = 0;
+			marker.color[3] = std::min(1.0, (hit->second - now) / 0.5);
+			m_mapMarkers.push_back(std::move(marker));
+		}
+	}
+	return detected;
 }
 
 // The left button's release: the mouse-over nodes under the pointer run
@@ -1699,7 +1734,7 @@ void HudManager::tickMapTurn(float seconds, bool alive)
 {
 	// The pulse clock (+0xaa4, 4 rad/s): wrapped at its period, as the
 	// exe's fmod and its reset past 100 s keep it small.
-	m_mapPulseTime = std::fmod(m_mapPulseTime + seconds, 3.14159265f * 0.5f);
+	m_mapPulseTime = std::fmod(m_mapPulseTime + seconds, kMapPulsePeriod);
 	const bool settled = m_mapSizeSettled; // the update's local copy of +0x816
 	// MapStatic's change (the map's event 10, 0x00779890): the angles to 0.
 	const bool isStatic = number("MapStatic") != 0;
@@ -2093,7 +2128,7 @@ void HudManager::drawMap(const Node& node, float alpha, float seconds, std::vect
 		const float scaleX = marker.zoomWithMap ? 0.7f * mapW / m_mapReference[0] : 1.0f;
 		const float scaleY = marker.zoomWithMap ? 0.7f * mapH / m_mapReference[1] : 1.0f;
 		// shortcut: the ring's phase is the map's pulse clock, not one reset when the UAV goes up (retail +0xb5c); the same 4 rad/s.
-		const float radar = marker.radar ? 4 * m_mapPulseTime / 6.2831853f : 1.0f;
+		const float radar = marker.radar ? m_mapPulseTime / kMapPulsePeriod : 1.0f;
 		const float pulse = (marker.pulse ? mapPulseScale() : 1.0f) * radar;
 		const float pixels = (marker.worldSize > 0 ? marker.worldSize / m_mapSize[0] * mapW : marker.size * scaleX) * pulse;
 		const float height = marker.height > 0 ? marker.height * scaleY * pulse : pixels;

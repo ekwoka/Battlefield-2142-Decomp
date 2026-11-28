@@ -1909,6 +1909,9 @@ void updateHud(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 		const float yaw = known && me.alive ? seen - 360.0f * std::floor(seen / 360.0f + 0.5f) : 0.0f;
 		hud.setMapHeading(yaw * 3.14159265f / 180.0f);
 		hud.tickMapTurn(dt, known && me.alive && !me.manDown);
+		if (dice::hfe::main::appendCommanderUavContacts(hud, world, round, known ? me.team : 0) && g_hudSound) {
+			g_hudSound("HUD_Uav_target");
+		}
 		hud.set("MinimapDelayedMapAngle", heading(hud.mapDelayedAngle() * 57.29578f));
 	}
 	hud.set("PlayerHealthShow", alive ? 1 : 0);
@@ -5287,7 +5290,7 @@ int runGame(Options& options, Session& session)
 					return false;
 				}
 				server->commanderTool(toolOf(ability), x, z);
-				round.noteCommanderUse(myTeam(), ability);
+				round.noteCommanderUse(myTeam(), ability, x, z);
 				return true;
 			}
 			return round.commanderAction(myTeam(), ability, x, z);

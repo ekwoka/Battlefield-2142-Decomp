@@ -885,20 +885,13 @@ std::string iconFrame(const std::string& icon, int frame);
 // to go; 0 when loaded or for a neutral one.
 float reloadSweep(float reloadLeft, float reloadTime, MapRelation relation);
 
-// The squad radar's markers on the minimap (drawn in red, (1, 0.3, 0.3)):
-//   - each enemy in `revealed` alive: what spotting shows, its kit's
-//     spottedIcon at spottedIconSize (0x0077dfe0 -> 0x0077dd70 with the
-//     spotted flag: the kits' mini_Soldier), else the kit's own map icon,
-//     else mini_Soldier at 16; one on foot within 60 m across of a decoy (a
-//     TargetObject of targetType TTDecoy, the Bp1_Decoy; 0x00508590 through
-//     HudManager slot 0x70, 0x0075bd30) is drawn at the decoy instead;
-//   - the vehicles the battlefield reports spotted (2/0x2e: the map node's
-//     markers, 0x00790d60, 16 x 16) by their miniMapIcon (mini_Soldier
-//     without one).
+// Red radar and spot markers: the kit's spotted icon on foot, or the
+// occupied vehicle's authored map icon once for its whole crew.
 struct RadarMarker {
 	std::string texture;
 	float x = 0, z = 0, size = 16, yaw = 0;
 };
+std::optional<RadarMarker> radarContactMarker(game::GameWorld& round, const game::GameWorld::PlayerInfo& contact);
 std::vector<RadarMarker> radarMarkers(const host::HudWorld& world, game::GameWorld& round, const std::vector<int>& revealed);
 
 // The radio calls on the map (Bf2MenuMapNode's marker list +0xa94, its

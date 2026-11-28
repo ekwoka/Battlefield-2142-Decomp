@@ -12,6 +12,7 @@
 #include "Main/HudMenusChat.h"
 #include "Main/HudMenusComm.h"
 #include "Main/HudMenusVehicles.h"
+#include "Main/MapCommanderMarkers.h"
 #include "Main/SpawnGroupMarkers.h"
 #include "Main/HudWorld.h"
 #include "Render/TextureSuffix.h"
@@ -1813,7 +1814,7 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	CHECK(markers.size() == 4);
 	if (markers.size() == 4) {
 		CHECK(markers[0].x == 40 && markers[0].z == 10); // at his decoy
-		CHECK(markers[1].x == 20 && markers[1].z == 10); // in a vehicle: his own place
+		CHECK(markers[1].x == 100 && markers[1].z == 100 && markers[1].texture == "Ingame/mini_tank.tga");
 		CHECK(markers[2].x == -200);                     // too far from his
 		CHECK(markers[3].x == 30);                       // the decoys aren't his
 		CHECK(markers[0].texture == "Ingame/Player/Icons/Minimap/mini_Soldier.dds" && markers[0].size == 16);
@@ -1821,9 +1822,77 @@ TEST(HudRadar_DecoyAndVehicleMarkers)
 	}
 	// The reports' vehicle.
 	world.vehicles = {car};
-	markers = menu::radarMarkers(world, round, {});
+	auto gunner = riding;
+	gunner.id = 61;
+	world.players.push_back(gunner);
+	markers = menu::radarMarkers(world, round, {riding.id, gunner.id});
 	CHECK(markers.size() == 1 && markers[0].texture == "Ingame/mini_tank.tga" && markers[0].x == 100 && markers[0].size == 16);
 	CHECK(markers.size() == 1 && markers[0].yaw == 135);
+}
+
+TEST(HudRadar_CommanderUavShowsOneWalkerWhenThePulseCrosses)
+{
+	world::ObjectTemplateManager templates;
+	world::ObjectManager objects;
+	game::GameWorld round(templates, objects);
+	templates.registerType(1, "PlayerControlObject");
+	auto* mech = templates.create("PlayerControlObject", "as_heavy_mech");
+	const std::string icon = "Ingame/Vehicles/Icons/Minimap/mini_mech.tga";
+	mech->settings()["vehicleHud.miniMapIcon"] = icon;
+	const uint32_t walker = objects.create(mech, {250, 120, 100}, {135, 0, 0})->id();
+	const uint32_t outside = objects.create(mech, {305, 0, 100})->id();
+	RadarWorld world;
+	game::GameWorld::PlayerInfo driver;
+	driver.id = 1;
+	driver.alive = true;
+	driver.team = 1;
+	driver.vehicle = walker;
+	driver.position = {240, 120, 100};
+	auto gunner = driver;
+	gunner.id = 2;
+	gunner.position = {260, 120, 100};
+	auto other = driver;
+	other.id = 3;
+	other.vehicle = outside;
+	world.players = {driver, gunner, other};
+	round.noteCommanderUse(2, game::GameWorld::CommanderAbility::Uav, 200, 100);
+
+	Console console;
+	hud::HudManager hud(nullptr);
+	hud::registerHudConsoleMethods(console, hud);
+	std::string out;
+	for (const char* line : {"hudBuilder.createMapNode Global Minimap", "hudBuilder.setMaxiPos -300/-300",
+			 "hudBuilder.setMaxiSize 600/600", "hudBuilder.setMiniPos 245/-291", "hudBuilder.setMiniSize 146/146",
+			 "hudBuilder.setNodeLogicShowVariable NOT AffectedByEMPShow 1"}) {
+		console.execute(line, out);
+	}
+	hud.setMap("map.dds", -512, -512, 1024, 1024);
+	hud.set("MapFullSize", 1);
+	const auto sample = [&](float dt, bool expectBeep, int team) {
+		round.tick(dt);
+		hud.tickMapTurn(dt, false);
+		hud.setMapMarkers({});
+		CHECK(main::appendCommanderUavContacts(hud, world, round, team) == expectBeep);
+		std::vector<hud::HudQuad> contacts;
+		for (const auto& quad : hud.frame(0)) {
+			CHECK(quad.texture.find("mini_Soldier") == std::string::npos);
+			if (quad.texture == "Menu/HUD/Texture/" + icon) {
+				contacts.push_back(quad);
+			}
+		}
+		return contacts;
+	};
+	CHECK(sample(0.2f, false, 2).empty());
+	const auto hit = sample(0.5854f, true, 2);
+	CHECK(hit.size() == 1);
+	if (hit.size() == 1) {
+		CHECK(hit[0].rotation == 135 && hit[0].color[0] == 1 && hit[0].color[1] == 0 && hit[0].color[2] == 0);
+	}
+	const auto fade = sample(0.55f, false, 2);
+	CHECK(fade.size() == 1 && std::fabs(fade[0].color[3] - 0.5f) < 0.01f);
+	CHECK(sample(0.26f, false, 2).empty());
+	CHECK(sample(0.75f, true, 2).size() == 1);
+	CHECK(sample(0, false, 1).empty());
 }
 
 // The gunships' horizon (0x007a2b50) and climb arrow: a banked, pitched
