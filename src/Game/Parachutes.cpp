@@ -459,6 +459,7 @@ void GameWorld::parachuteCollision(uint32_t self, uint32_t other, const physics:
 		pod->landingNormal = other ? normal : physics::Vec3 {0, 1, 0};
 		const Body* surface = other ? findBody(other) : nullptr;
 		pod->landingSurfaceVelocity = surface ? surface->body.velocity : physics::Vec3 {};
+		pod->landingOnTitan = other != 0 && titanByObject(other) != nullptr;
 	}
 	*landing = kLandingTime;
 }

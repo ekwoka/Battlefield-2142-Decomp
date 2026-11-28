@@ -3157,7 +3157,24 @@ void GameWorld::stepPods(float seconds)
 				player->seat = -1;
 				if (soldier) {
 					soldier->setHidden(false);
-					const physics::Vec3 at = pod.position + physics::Vec3 {1.2f, 1.0f, 0};
+					// The place (0x005cea00's matrix: its translation from the
+					// interface's slot 0x50, 0x005cc9a0 -> object slot 0x184,
+					// 0x005c71a0 with 0): the template's soldierExitLocation
+					// (+0x308; zero: its root PlayerControlObject's) through the
+					// pod's matrix, 0.5 m up. The shipped pods set none, so the
+					// rider's feet are 0.5 m over the pod's origin, where the pod
+					// was (put out of the collision below).
+					physics::Vec3 offset;
+					const world::Object* podObject = m_objects.find(pod.object);
+					if (const world::ObjectTemplate* t = podObject ? podObject->objectTemplate() : nullptr) {
+						if (const auto found = t->settings().find("soldierExitLocation"); found != t->settings().end()) {
+							offset = vec3Of(found->second);
+						}
+					}
+					const physics::Mat3 frame = body ? body->body.rotation
+						: podObject ? physics::Mat3::fromYawPitchRoll({podObject->rotation().x, podObject->rotation().y, podObject->rotation().z})
+									: physics::Mat3 {};
+					const physics::Vec3 at = pod.position + frame.transform(offset) + physics::Vec3 {0, 0.5f + 1.0f, 0};
 					player->body.position = at;
 					// The rider takes the pod's velocity: retail puts him out at the
 					// landing timer's end (0x005d01c0 below 0 -> 0x005cff20 -> the
@@ -3184,6 +3201,16 @@ void GameWorld::stepPods(float seconds)
 					// exit placement or his first contact) wasn't found.
 					const float into = physics::dot(player->body.velocity - pod.landingSurfaceVelocity, pod.landingNormal);
 					if (pod.landing >= 0 && into < 0) player->body.velocity = player->body.velocity - pod.landingNormal * into;
+					// enhanced.podExitAtRest (not retail): the rider leaves a
+					// landed pod at rest on what it landed on, so a pod still
+					// sliding after a slanting approach (up to 5 m/s along the
+					// roof in Titan_PodRidersStayOnTheDeck, 12-17 m/s down the
+					// rear deck) doesn't throw him off the deck. On a Titan, which carries him from the next
+					// tick (SoldierBody::carry), his own velocity is relative to
+					// it: none; elsewhere it is the world's, the surface's.
+					if (pod.landing >= 0 && podExitAtRest()) {
+						player->body.velocity = pod.landingOnTitan ? physics::Vec3 {} : pod.landingSurfaceVelocity;
+					}
 					soldier->setPosition({at.x, at.y - 1.0f, at.z});
 				}
 				raise("ExitVehicle", {ScriptValue::player(player->id), ScriptValue::object(pod.object)});

@@ -571,6 +571,7 @@ The rest only change what you see or hear.
 | `passengerWeapons` | on | gameplay | An air transport's passengers fire their own weapons (the pod only on the exit key). | yes |
 | `softLanding` | on | gameplay | A soldier landing on or walking into a slower object takes the ground's fall damage instead of a road kill. | yes |
 | `titanKitFloors` | on | gameplay | A kit dropped, or a beacon or shield placed, on a Titan stays on its walkable floor where the hull's bullet mesh has none (by the cargo bay's walls), and a portable shield or sentry gun set down on a Titan's deck starts standing on it. The original lets them fall through the hull. | yes |
+| `podExitAtRest` | on | gameplay | The rider of a landed drop pod gets out at rest on what it landed on. The original hands him the pod's own velocity, so a pod that came in at a slant and is still sliding over a Titan's deck throws him along it and off the edge. | yes |
 | `titanDeckMines` | on | gameplay | A Titan doesn't set off the mines lying on its own decks. The original's mine trigger takes the moving, driverless Titan for a vehicle running over them, so a motion or EMP mine on its deck goes off as soon as it moves. | yes |
 | `hudWidescreen` | off | interface | A mod without Project Remaster's hudfix gets the 4:3 HUD squeezed to the window's aspect ((4/3) ÷ aspect: the hudfix's 12/16 at 16:9, about 0.56 at 21:9), with its side pieces moved out to match (120 at 16:9) and the gunner frames widened to cover the window. It is laid out again when the window is resized. Ignored when the hudfix's shader is already installed, whose fixed 16:9 layout stays. | no |
 | `squadOrderPoints` | on | gameplay | The squads' order points, their HUD bar and the field upgrades it awards work on any server, offline included. The original runs them only on a ranked GameSpy server, so offline it never shows the bar. | yes |
@@ -636,7 +637,7 @@ feeds the simulation.
 bot round (Cerbere Landing, 15 bots) twice without `--enhanced`, to make sure
 the round repeats, and once with it, with the simulation options above
 (`botRecovery`, `botMovement`, `botTitan`, `botOffMesh`, `botAsyncPaths`, `botCommander`, `botPilots`, `botLoneSeat`, `botThreat`, `botTitanRepair`, `guidedCameraEase`,
-`cornerSteer`, `passengerWeapons`, `softLanding`, `titanKitFloors`, `titanDeckMines`, `squadOrderPoints`, `botSquadInvites`) turned off. It compares the state
+`cornerSteer`, `passengerWeapons`, `softLanding`, `titanKitFloors`, `titanDeckMines`, `podExitAtRest`, `squadOrderPoints`, `botSquadInvites`) turned off. It compares the state
 fingerprints each run prints and fails if `--enhanced` changed the
 simulation. A fourth run records the enhanced round (`--record-demo`, at
 `enhanced.demoQuality`'s full rate) and must match it: recording a demo

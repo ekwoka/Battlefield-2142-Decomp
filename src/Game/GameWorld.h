@@ -1026,6 +1026,20 @@ public:
 	{
 		return m_enhancedDeckMines && *m_enhancedDeckMines && m_titanDeckMines && *m_titanDeckMines;
 	}
+	// enhanced.enabled and enhanced.podExitAtRest, read live: the rider of a
+	// landed pod leaves it at rest on what it landed on (a Titan's deck,
+	// the ground, a slow vehicle), not at the pod's velocity. Retail's
+	// occupant exit (0x005cfd70) gives the soldier's node (slot 0x5c,
+	// 0x006c5a90) the pod node's velocity (slot 0x58) as it is when the
+	// landing timer runs out (0x005d01c0), so a pod still sliding over a
+	// deck throws its rider along it, off the deck's edge. It changes the
+	// simulation. Null or false: retail.
+	void setPodExitAtRest(const bool* enhanced, const bool* on)
+	{
+		m_enhancedPodExit = enhanced;
+		m_podExitAtRest = on;
+	}
+	bool podExitAtRest() const { return m_enhancedPodExit && *m_enhancedPodExit && m_podExitAtRest && *m_podExitAtRest; }
 	// The squads' order points (the squad's +0x184): the add (0x004c4c90)
 	// and the set-max (0x004c4ea0) do nothing without it. The server's squad
 	// constructor (0x004c87a0) sets it from 0x00430a00, a ranked game: gpm_cq,
@@ -4404,7 +4418,9 @@ private:
 	const bool* m_titanKitFloors = nullptr;
 	const bool* m_enhancedDeckMines = nullptr;
 	const bool* m_titanDeckMines = nullptr;
-	bool m_squadOrderRanked = false;                 // setSquadOrderGate
+	const bool* m_enhancedPodExit = nullptr;         // setPodExitAtRest
+	const bool* m_podExitAtRest = nullptr;
+	bool m_squadOrderRanked = false;                // setSquadOrderGate
 	const bool* m_enhancedSquadOrder = nullptr;      // setSquadOrderPointsOffline
 	const bool* m_squadOrderOffline = nullptr;
 	void startProjectileView(const Player& player, const Projectile& round, const world::ObjectTemplate& firearm);
@@ -5311,6 +5327,7 @@ private:
 		float age = 0;
 		float landing = -1, removeIn = -1; // Parachute landing and removal timers
 		physics::Vec3 landingNormal {0, 1, 0}, landingSurfaceVelocity;
+		bool landingOnTitan = false; // what it landed on is a Titan, which carries the rider (his velocity relative to it)
 		// Its keepUp ForceObject (eu_pod_ForceObject: regulatePosX / Z
 		// -0.5/1 at 0/1.5/0; 0x0062b750 with the linear regulator
 		// 0x00667710): the couple Vehicle::updateForce gives a vehicle's.

@@ -5095,6 +5095,7 @@ int runGame(Options& options, Session& session)
 		round.setSoftLanding(&enhancedSettings.enabled, &enhancedSettings.softLanding);
 		round.setTitanKitFloors(&enhancedSettings.enabled, &enhancedSettings.titanKitFloors);
 		round.setTitanDeckMines(&enhancedSettings.enabled, &enhancedSettings.titanDeckMines);
+		round.setPodExitAtRest(&enhancedSettings.enabled, &enhancedSettings.podExitAtRest);
 		round.setSquadOrderPointsOffline(&enhancedSettings.enabled, &enhancedSettings.squadOrderPoints);
 		// The players as the HUD has them (HudWorld.h): a joined game's,
 		// the server's (g_remoteHud, set while one runs), else the round's.
