@@ -4991,6 +4991,9 @@ void GameWorld::stepProjectiles(float seconds)
 				shieldHit = true;
 			}
 		}
+		// Retail Point projectiles pass a one-sided query to the mesh
+		// instance (0x006c0b7b). Closed shells can have inward-facing faces.
+		const bool frontOnly = !p.settings->rotationalPoint && !p.settings->basicNode;
 		for (const Body& body : m_bodies) {
 			if (!body.projectileMesh || body.object == p.shooter) {
 				continue;
@@ -4998,7 +5001,7 @@ void GameWorld::stepProjectiles(float seconds)
 			const physics::Vec3 localFrom = body.body.rotation.untransform(from - body.body.position);
 			const physics::Vec3 localTo = body.body.rotation.untransform(to - body.body.position);
 			int part = -1;
-			if (raycastBody(body, localFrom, localTo, candidate, &part) && candidate.fraction < best) {
+			if (raycastBody(body, localFrom, localTo, candidate, &part, frontOnly) && candidate.fraction < best) {
 				best = candidate.fraction;
 				hitBody = &body;
 				hitPart = part;

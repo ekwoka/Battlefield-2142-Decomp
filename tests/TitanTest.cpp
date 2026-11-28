@@ -5400,6 +5400,44 @@ TEST(Titan_ShieldUpRocketsFromBelowHurtTheGunHubAndMark)
  }
 }
 
+TEST(Titan_PointProjectileRespectsShieldFaceDirection)
+{
+	const char* dir = std::getenv("BF2142_GAME_DIR");
+	if (!dir) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		TitanLevel level(dir, "Suez_Canal", 48, true, mod);
+		CHECK(level.loaded);
+		if (!level.loaded) continue;
+		level.run(2);
+		const int shooter = level.world->joinPlayer(2);
+		int tested = 0;
+		for (const auto& gun : level.world->titanParts(1)) {
+			if (gun.kind != game::GameWorld::TitanPartInfo::Gun ||
+				gun.name.find("as_aacannon") == std::string::npos) continue;
+			++tested;
+			// At both mounts, 1.45 m above the gun origin is between the
+			// inward-facing inner shell and outward-facing outer shell.
+			auto fire = [&](float height, float speed) {
+				const auto at = gun.position + physics::Vec3 {0, height, 0};
+				const bool launched = level.world->launchProjectile("US_AG_PilotWeapon_Projectile", at, {0, speed, 0}, shooter);
+				CHECK(launched);
+				if (!launched) return false;
+				const auto serial = level.world->projectiles().back().serial;
+				level.run(0.1f);
+				return std::any_of(level.world->projectiles().begin(), level.world->projectiles().end(),
+					[serial](const auto& projectile) { return projectile.serial == serial; });
+			};
+			CHECK(fire(1.45f, 200)); // the outer shell's back face lets this through
+			const auto impactCount = level.world->impacts().size();
+			CHECK(!fire(6, -200)); // the same shell's front face stops this
+			const auto& impacts = level.world->impacts();
+			CHECK(impacts.size() > impactCount && impacts[impactCount].material == 4118);
+		}
+		CHECK(tested == 2);
+	}
+}
+
 // A soldier standing on his own Titan's deck dies there (the reported
 // Cerbere_Landing session, Remaster, the EU Titan): the body lies on the
 // deck, not through the Titan on the ground below (the ragdoll's world,
