@@ -15657,22 +15657,13 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 	const physics::Mat3 pitchFrame = seat.hasPitchFrame ? seat.pitchFrame : physics::Mat3 {};
 	const physics::Mat3 yawTurn = physics::Mat3::fromYawPitchRoll({gun.yaw, 0, 0});
 	physics::Vec3 direction = (pitchFrame * yawTurn * mount.turn * body.body.rotation).transform(local);
-	// With fireInCameraDof the fire frame is the seat camera's (0x005f1a20:
-	// the control object's camera, slot 0x1b4, its object's matrix): a
-	// camera riding the gun's bundles looks along the aim; one off them
-	// (the gunship's TV missile camera, as_ag_TAD_GuidedMissile_Camera, 10
-	// degrees down under the seat) along its own rest facing, turned by
-	// its look when it is the seat's mouse-look camera (as partPose turns
-	// it). The round flies off along it (the TV missile at rest, velocity
-	// 0, its engine pushing along the nose).
+	// Unlocked camera fire uses the posed camera's entire world frame
+	// (MultiFireComp 0x005d5fb0). A shared gun axis does not make the
+	// camera's pivot or its other axes the same as the gun's.
 	const SeatLayout::SeatCamera* camera = w.fireInCameraDof ? fireCamera(seat, w) : nullptr;
-	// A camera that is no child of the gun's bundles turns by bundles of its
-	// own (the Shepherd gunners' eu_at_L_gun_cameraBase chain, the TV
-	// missile camera's look): the round follows its posed frame, from its
-	// place plus projectileStartPosition in it.
 	physics::Vec3 cameraAt;
 	physics::Mat3 cameraTurn;
-	const bool cameraFrame = camera && !camera->ridesGun
+	const bool cameraFrame = camera && !w.fireInCameraDofLocked
 		&& seatCameraFrame(body, player.seat, std::max(w.startCameraId, 0), cameraAt, cameraTurn);
 	if (cameraFrame) {
 		direction = cameraTurn.rows[2] * (1 / std::sqrt(physics::lengthSquared(cameraTurn.rows[2]))); // the hull's drift
@@ -15684,19 +15675,6 @@ void GameWorld::fireSeatWeapon(Player& player, Body& body, const SeatLayout& sea
 			facing = physics::Mat3::fromYawPitchRoll({look.yaw, look.pitch, 0}) * facing;
 		}
 		direction = (facing * mount.turn * body.body.rotation).rows[2];
-	} else if (camera && !seat.camera.empty() && sameName(seat.camera, camera->name)
-		&& static_cast<size_t>(player.seat) < body.looks.size()) {
-		// A camera riding the gun's bundles that is also the seat's mouse-look
-		// camera (the cupola gunners'): its Camera object's matrix carries the
-		// look (partPose), which the round follows (0x005f1a20 -> 0x004b9db0,
-		// slot 0x78). Posed through the tree: the as_apc pod cannons' camera
-		// pitches by its own axis beside the barrel's bundle and turns with a
-		// second yaw bundle (AS_APC_barrelN_base) the gun's yaw doesn't count.
-		physics::Vec3 at;
-		physics::Mat3 turn;
-		if (seatCameraFrame(body, player.seat, std::max(w.startCameraId, 0), at, turn)) {
-			direction = turn.rows[2] * (1 / std::sqrt(physics::lengthSquared(turn.rows[2])));
-		}
 	}
 	const physics::Vec3 straight = direction;
 	// The rounds stray by the deviation (0x005f5540): (minDev + the

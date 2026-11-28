@@ -3405,16 +3405,16 @@ TEST(Vehicles_GroundDriverAimsAndFires)
 // object, its own look included), not the gun's. eu_tank's cupola camera
 // leans with the mouse (eu_tank_cupola_Camera: +-1 yaw), so a turning
 // gunner's rounds go off the barrel by the lean.
-TEST(Vehicles_CameraDofRoundsFollowTheCamera)
+static void checkCameraDofGunner(const char* mod, const char* vehicle, const char* cameraName)
 {
 	if (!gameDir()) {
 		return;
 	}
-	Garage g(gameDir());
+	Garage g(gameDir(), mod);
 	if (!g.loaded) {
 		return;
 	}
-	const uint32_t tank = g.start("eu_tank", {0, 2, 6});
+	const uint32_t tank = g.start(vehicle, {0, 2, 6});
 	CHECK(g.enter(tank));
 	game::SoldierInput move;
 	move.switchSeat = 2;
@@ -3436,8 +3436,17 @@ TEST(Vehicles_CameraDofRoundsFollowTheCamera)
 		return;
 	}
 	const game::Projectile& p = g.world->projectiles()[before];
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(*g.world, systems, nullptr);
+	camera.tick(1 / 30.0f);
+	PlayerCamera::View eye;
+	CHECK(camera.view(eye, 4.0f / 3.0f));
+	const physics::Vec3 at {eye.position[0], eye.position[1], eye.position[2]};
+	const physics::Vec3 forward {std::sin(eye.yaw) * std::cos(eye.pitch), std::sin(eye.pitch),
+		std::cos(eye.yaw) * std::cos(eye.pitch)};
+	CHECK(physics::lengthSquared(p.origin - at - forward) < 0.01f);
 	world::Vec3 offset, look;
-	CHECK(g.world->partPose(tank, "eu_tank_cupola_Camera", offset, look, 1));
+	CHECK(g.world->partPose(tank, cameraName, offset, look, 1));
 	physics::Vec3 origin;
 	physics::Mat3 hull;
 	float yaw = 0, pitch = 0;
@@ -3449,10 +3458,19 @@ TEST(Vehicles_CameraDofRoundsFollowTheCamera)
 	const physics::Vec3 local = hull.untransform(way);
 	const float roundYaw = std::atan2(local.x, local.z) * 57.29578f;
 	const float off = std::acos(std::clamp(static_cast<double>(physics::dot(way, barrel)), -1.0, 1.0)) * 57.29578;
-	std::fprintf(stderr, "  cupola gun %.2f, camera lean %.2f/%.2f, round %.2f (off the barrel %.2f)\n", yaw, look.x, look.y,
+	std::fprintf(stderr, "  %s gun %.2f, camera lean %.2f/%.2f, round %.2f (off the barrel %.2f)\n", vehicle, yaw, look.x, look.y,
 		roundYaw, off);
 	CHECK(std::fabs(look.x) > 0.5f);
 	CHECK(std::fabs(std::remainder(roundYaw - (yaw + look.x), 360.0f)) < 0.15f);
+}
+
+TEST(Vehicles_CameraDofRoundsFollowTheCamera)
+{
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		checkCameraDofGunner(mod, "eu_tank", "eu_tank_cupola_Camera");
+		checkCameraDofGunner(mod, "as_fav", "as_fav_GunnerCamera");
+	}
 }
 
 // The heavy mech's guns ride its torso bone (AS_heavy_mech_torsospring,
@@ -4818,7 +4836,29 @@ TEST(Vehicles_ApcPodGunsFireAtTheCrosshair)
 					camera.tick(1 / 30.0f);
 					CHECK(camera.view(sight, 16.0f / 9.0f));
 					g.world->setPlayerInput(fire);
+					const size_t beforeImpacts = g.world->impactsTotal();
 					g.world->tick(1 / 30.0f);
+					const auto events = g.world->takeWeaponSounds();
+					if (g.world->impactsTotal() != beforeImpacts) {
+						// The down-left F5 ray crosses onto the raised wheel pad within
+						// its first tick. The terrain snaps the impact's Y to the
+						// surface, so only its horizontal direction measures aim.
+						const auto launch = std::find_if(events.begin(), events.end(), [&](const auto& event) {
+							return event.kind == game::GameWorld::WeaponSoundEvent::Fire && event.object == apc;
+						});
+						if (launch != events.end()) {
+							const auto& hit = g.world->impacts().back();
+							const physics::Vec3 eye {sight.position[0], sight.position[1], sight.position[2]};
+							const physics::Vec3 look {std::sin(sight.yaw) * std::cos(sight.pitch), std::sin(sight.pitch),
+								std::cos(sight.yaw) * std::cos(sight.pitch)};
+							CHECK(hit.object == 0);
+							CHECK(physics::lengthSquared(launch->position - eye - look) < 0.01f);
+							const physics::Vec3 travel = hit.point - launch->position;
+							const float yawError = std::remainder(std::atan2(travel.x, travel.z) - sight.yaw, 6.2831853f);
+							CHECK(std::fabs(yawError) < 0.0174533f);
+							fired = true;
+						}
+					}
 					for (size_t n = before; n < g.world->projectiles().size() && !fired; ++n) {
 						const game::Projectile& p = g.world->projectiles()[n];
 						if (p.shooter != apc) continue;
@@ -11650,6 +11690,60 @@ TEST(Vehicles_StaticAALocksOnUavAndItsMissileReachesIt)
 	std::fprintf(stderr, "  static_aa missile: %s, %.1f m from the drone at the nearest\n", flying ? "still flying" : "gone off",
 		nearest);
 	CHECK(!flying && nearest < 6);
+}
+
+// A round can hit the ground during its launch tick. Check the impact
+// against the rendered sightline at both close-range depression angles.
+TEST(Vehicles_WalkerMinigunHitsAtTheCrosshairWhenAimedDown)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const float aim : {-40.0f, -80.0f}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded);
+			if (!g.loaded) continue;
+			Animations animations(g);
+			const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+			animations.attach(g);
+			CHECK(g.enter(mech));
+			g.drive({}, 3);
+			game::SoldierInput input;
+			for (int tick = 1; tick <= 90; ++tick) {
+				input.aimPitch = aim * tick / 90.0f;
+				g.world->setPlayerInput(input);
+				g.world->tick(1 / 30.0f);
+			}
+			g.drive(input, 1);
+			anim::AnimationSystems systems(nullptr);
+			PlayerCamera camera(*g.world, systems, nullptr);
+			input.fire = true;
+			int hits = 0;
+			for (int tick = 0; tick < 30; ++tick) {
+				const size_t before = g.world->impactsTotal();
+				g.world->setPlayerInput(input);
+				g.world->tick(1 / 30.0f);
+				camera.tick(1 / 30.0f);
+				PlayerCamera::View eye;
+				CHECK(camera.view(eye, 4.0f / 3.0f));
+				const auto& impacts = g.world->impacts();
+				const size_t fresh = std::min(g.world->impactsTotal() - before, impacts.size());
+				for (size_t i = impacts.size() - fresh; i < impacts.size(); ++i) {
+					const auto& hit = impacts[i];
+					CHECK(hit.object == 0);
+					const physics::Vec3 travel = hit.point - physics::Vec3 {eye.position[0], eye.position[1], eye.position[2]};
+					const float pitch = std::atan2(travel.y, std::hypot(travel.x, travel.z));
+					CHECK(std::fabs(pitch - eye.pitch) < 0.00872665f);
+					++hits;
+				}
+			}
+			const float expectedPitch = aim == -40.0f ? -20.0f : -35.0f;
+			PlayerCamera::View eye;
+			CHECK(camera.view(eye, 4.0f / 3.0f));
+			CHECK(std::fabs(eye.pitch * 57.29578f - expectedPitch) < 0.1f);
+			CHECK(hits >= 4);
+		}
+	}
 }
 
 // The EU walker's minigun barrels (US_heavy_mech_minigun_*_barrels,
