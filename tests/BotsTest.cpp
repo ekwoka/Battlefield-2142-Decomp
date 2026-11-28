@@ -282,6 +282,31 @@ TEST(Bots_ForgottenMineLeavesAtOnce)
 	CHECK(Access::mines(bots) == 1);
 }
 
+TEST(Bots_ConsoleSkillUpdatesRunningManager)
+{
+	Field field;
+	Console console;
+	game::BotSettings settings;
+	game::registerBotConsoleMethods(console, settings);
+	std::string output;
+	console.execute("aiSettings.setBotSkill 0.5", output);
+	CHECK(near(settings.skill, 0.5f));
+	{
+		game::BotManager bots(*field.world, settings);
+		bots.attach(settings);
+		CHECK(near(bots.settings().skill, 0.5f));
+
+		console.execute("aiSettings.setBotSkill 2", output);
+		CHECK(near(bots.settings().skill, 1.0f));
+		CHECK(near(settings.skill, 1.0f));
+
+		console.execute("aiSettings.setBotSkill -1", output);
+		CHECK(near(bots.settings().skill, 0.0f));
+		CHECK(near(settings.skill, 0.0f));
+	}
+	CHECK(settings.manager == nullptr);
+}
+
 // A driver's order at an area's Vehicle order position, far from its
 // flag, still has that area: retail looks the order's area up by the
 // areas' score at that position (AIDLL 0x10078570 -> 0x10034a10, area slot

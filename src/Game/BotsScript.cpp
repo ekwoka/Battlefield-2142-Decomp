@@ -655,7 +655,11 @@ void registerBotScriptMethods(Console& console, BotSettings& settings)
 	bindMethod(console, "aiSettings.getInformationGridDimension", access, [s]() { return s->informationGridDimension; });
 	bindMethod(console, "aiSettings.setNSides", access, [s](int n) { s->sides = n; });
 	bindMethod(console, "aiSettings.getNSides", access, [s]() { return s->sides; });
-	bindMethod(console, "aiSettings.getBotSkill", access, [s]() { return s->skill; });
+	bindMethod(console, "aiSettings.setBotSkill", access, [s](float skill) {
+		const float clamped = std::clamp(skill, 0.0f, 1.0f);
+		both(s, [clamped](BotSettings& settings) { settings.skill = clamped; });
+	});
+	bindMethod(console, "aiSettings.getBotSkill", access, [s]() { return s->manager ? s->manager->settings().skill : s->skill; });
 	bindMethod(console, "aiSettings.setSAIUpdateFrequency", access, [s](float f) { s->saiUpdateFrequency = f; });
 	bindMethod(console, "aiSettings.getSAIUpdateFrequency", access, [s]() { return s->saiUpdateFrequency; });
 	bindMethod(console, "aiSettings.setRespawnAllowed", access, [s](bool on) { s->respawnAllowed = on; });

@@ -9918,7 +9918,6 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings)
 {
 	const uint32_t access = ConsoleAccess::Anyone;
 	BotSettings* s = &settings;
-	bindMethod(console, "aiSettings.setBotSkill", access, [s](float skill) { s->skill = std::clamp(skill, 0.0f, 1.0f); });
 	bindMethod(console, "aiSettings.setMaxNBots", access, [s](int count) { s->maxBots = count; });
 	bindMethod(console, "aiSettings.setDiscoverCloakedEnemiesDistance", access,
 		[s](float distance) { s->discoverCloakedDistance = distance; });
