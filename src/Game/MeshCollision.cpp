@@ -193,6 +193,7 @@ GameWorld::MeshActor GameWorld::actorOf(Body& body) const
 	a.file = body.meshFile;
 	a.materials = &body.meshMaterials;
 	a.state = body.meshState;
+	a.fixed = isCommanderUav(body.object);
 	return a;
 }
 
@@ -294,7 +295,7 @@ void GameWorld::collideBodies(float seconds)
 	for (size_t i = 0; i < m_bodies.size(); ++i) {
 		Body& body = m_bodies[i];
 		body.rootSolvedBeforeWheels = false;
-		if (!findDrone(body.object) && !isTitan(body.object) && !isRemoteTitan(body.object) && !body.fixed
+		if (!isCommanderUav(body.object) && !findDrone(body.object) && !isTitan(body.object) && !isRemoteTitan(body.object) && !body.fixed
 			&& m_objects.find(body.object) && !asleep(body)) {
 			collideMover(body, i, seconds);
 			if (m_objects.find(body.object)) {
@@ -474,7 +475,7 @@ bool GameWorld::collideCandidates(Body& mover, size_t index, MeshActor& m, Colli
 		if (j == index || findDrone(other.object) || !m_objects.find(other.object)) {
 			continue;
 		}
-		const bool moved = j < index && !asleep(other);
+		const bool moved = j < index && !asleep(other) && !isCommanderUav(other.object);
 		// Its parts in their pose now (partActors), each a candidate with
 		// a response of its own.
 		partActors(other, parts);

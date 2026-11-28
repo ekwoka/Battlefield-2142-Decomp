@@ -52,6 +52,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 #ifdef BF2142_RENDER_TESTS
 #include "Render/LevelRenderer.h"
@@ -9640,6 +9641,61 @@ TEST(Vehicles_WalkerRocketsAccelerateToMaxSpeed)
 			CHECK(first > 34 && first < 40);
 			CHECK(half > 80 && half < 90); // 35 + 100 x 0.5
 			CHECK(top >= 125 && top < 128.4f); // the last push starts just under maxSpeed
+		}
+	}
+}
+
+TEST(Vehicles_GunshipPilotLockUsesTheFirearmAndHeatObject)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		for (const char* gunship : {"as_ag", "us_ag"}) {
+			Garage g(gameDir(), mod);
+			CHECK(g.loaded && g.templates.find("HeatObject"));
+			if (!g.loaded || !g.templates.find("HeatObject")) continue;
+			auto* targetTemplate = g.templates.create("UAVVehicle", "gunship_lock_test_uav");
+			// The target root is out of the cone. Its authored heat source is inside.
+			targetTemplate->children().push_back({"HeatObject", {-4, 0, 0}, {}});
+			const uint32_t ship = g.start(gunship, {0, 4, 8});
+			CHECK(g.enter(ship));
+			g.run(3);
+			const auto* hull = g.objects.find(ship);
+			auto* target = g.objects.create(targetTemplate);
+			const auto& r = hull->rotation();
+			const auto turn = physics::Mat3::fromYawPitchRoll({r.x, r.y, r.z});
+			const auto& p = hull->position();
+			const bool eu = std::string(gunship) == "us_ag";
+			const physics::Vec3 root {p.x, p.y, p.z};
+			const physics::Vec3 firearm = root + turn.transform({0, eu ? -1.7f : 0, eu ? 3.5f : 0});
+			for (const auto& [degrees, distance, team, locks] : {
+					 std::tuple {14.0f, 22.0f, 1, true}, {16.0f, 22.0f, 1, false},
+					 {0.0f, 27.0f, 1, false}, {0.0f, 20.0f, 2, true}, {90.0f, 14.0f, 2, false}}) {
+				const float angle = degrees * 0.0174532925f;
+				const auto pos = firearm + turn.transform({4 + std::sin(angle) * distance, 0, std::cos(angle) * distance});
+				target->setPosition({pos.x, pos.y, pos.z});
+				target->setRotation(r);
+				target->setTeam(team);
+				g.run(0.4f);
+				const auto lock = g.world->weaponLock(g.world->localPlayer());
+				CHECK(lock.state == (locks ? 2 : 0));
+				CHECK(lock.target == (locks ? target->id() : 0));
+			}
+			bool fired = false, tracked = false;
+			for (int tick = 0; tick < 6; ++tick) {
+				game::SoldierInput input;
+				input.fire = tick == 0;
+				g.drive(input, 1 / 30.0f);
+				for (const auto& round : g.world->projectiles()) {
+					if (round.shooter == ship) {
+						fired = true;
+						tracked = tracked || round.lockedOn == target->id();
+					}
+				}
+			}
+			std::fprintf(stderr, "  %s %s with friendly UAV at 90 degrees: fired=%d acquired=%d\n",
+				mod, gunship, fired, tracked);
+			CHECK(fired && tracked);
 		}
 	}
 }

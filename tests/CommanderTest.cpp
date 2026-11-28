@@ -793,6 +793,53 @@ TEST(Commander_SupplyDrop)
 	field.run(240);
 	CHECK(world.supplyCrates().size() == 1);
 	field.run(10);
+TEST(Commander_UavOrbitKeepsItsCollisionMesh)
+{
+	if (!std::getenv("BF2142_GAME_DIR")) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		Field field(mod, true, nullptr, true);
+		CHECK(field.loaded);
+		std::string output;
+		field.console.run("Objects/Weapons/stationary/eu_drone/eu_drone.con", {}, output);
+		CHECK(field.templates.find("eu_drone"));
+		if (!field.loaded || !field.templates.find("eu_drone")) continue;
+
+		auto& world = *field.world;
+		world.setCommanderEnabled(true);
+		world.setCommander(2, world.addPlayer("Commander", 2, false));
+		field.place("commander_uav_drone_control", 2, -200, -200);
+		CHECK(world.commanderAction(2, Ability::Uav, 300, 300));
+		const uint32_t drone = world.uavDrone(2);
+		CHECK(drone != 0);
+		field.run(1);
+		const auto* object = field.objects.find(drone);
+		CHECK(object && world.projectileCollision(drone));
+		if (!object) continue;
+		const auto at = object->position();
+		CHECK(std::fabs(at.y - 70) < 0.01f && at.z > 313 && at.z < 314);
+		std::vector<physics::SoldierBody::Mover> movers;
+		world.soldierMovers({at.x, at.y, at.z}, 1, 0, 0, movers);
+		CHECK(std::any_of(movers.begin(), movers.end(), [drone](const auto& mover) {
+			return mover.owner == drone && std::fabs(mover.position.y - 70) < 0.01f
+				&& std::fabs(std::sqrt(physics::lengthSquared(mover.velocity)) - 14) < 0.01f;
+		}));
+
+		// An ordinary small-arms hit through the authored projectile LOD.
+		auto& round = field.templates.create("GenericProjectile", "uav_orbit_test_bullet")->settings();
+		round["material"] = "38";
+		round["damage"] = "30";
+		round["timeToLive"] = "1";
+		round["gravityModifier"] = "0";
+		CHECK(world.launchProjectile("uav_orbit_test_bullet", {at.x, at.y + 10, at.z}, {0, -900, 0}));
+		field.run(0.1f);
+		CHECK(world.hitPoints(drone) == 970);
+		field.run(4);
+		object = field.objects.find(drone);
+		CHECK(object && std::fabs(object->position().y - 70) < 0.01f);
+	}
+}
+
 	CHECK(world.supplyCrates().empty() && field.objects.find(crate) == nullptr);
 }
 

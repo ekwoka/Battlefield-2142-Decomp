@@ -123,15 +123,15 @@ public:
 	}
 	// The first face the segment crosses from the front (the scene rays'
 	// mesh test 0x006bd070 without its two-sided flag).
-	bool raycastFront(const Vec3& from, const Vec3& to, Hit& hit, uint32_t ignore = 0) const
+	bool raycastFront(const Vec3& from, const Vec3& to, Hit& hit, uint32_t ignore = 0, uint32_t alsoIgnore = 0) const
 	{
-		return trace(from, to, hit, true, ignore);
+		return trace(from, to, hit, true, ignore, alsoIgnore);
 	}
 	// raycast and raycastFront without the query stamps: any number of threads may run these on one
 	// world at once, beside the stamped queries, so long as no thread changes the world meanwhile
 	// (the same answers: a face met twice is tested twice).
-	bool raycastShared(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false, 0, false); }
-	bool raycastFrontShared(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, true, 0, false); }
+	bool raycastShared(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, false, 0, 0, false); }
+	bool raycastFrontShared(const Vec3& from, const Vec3& to, Hit& hit) const { return trace(from, to, hit, true, 0, 0, false); }
 	// Files the faces a second time in `cell`-wide cells, which the shared queries walk instead (the same
 	// first face, but for faces met at the very same fraction): for a dense mesh many queries go to
 	// (a Titan's, some 130000 faces, over a thousand to an 8 m cell). Kept up as faces come and go.
@@ -168,7 +168,8 @@ public:
 		const std::function<void(const Vec3& a, const Vec3& b, const Vec3& c, uint32_t material, uint32_t owner)>& visit) const;
 
 private:
-	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore = 0, bool stamped = true) const;
+	bool trace(const Vec3& from, const Vec3& to, Hit& hit, bool frontOnly, uint32_t ignore = 0,
+		uint32_t alsoIgnore = 0, bool stamped = true) const;
 	struct Triangle {
 		Vec3 a, b, c;
 		Vec3 normal;

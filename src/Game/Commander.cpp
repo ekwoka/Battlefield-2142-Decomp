@@ -615,8 +615,22 @@ void GameWorld::flyUavDrones(float seconds)
 		}
 		side.uavAngle += side.uavTurnRate * seconds;
 		const float c = std::cos(side.uavAngle), s = std::sin(side.uavAngle);
-		drone->setPosition({side.uavCentre.x + side.uavCircle * c, side.uavCentre.y, side.uavCentre.z + side.uavCircle * s});
-		drone->setRotation({std::atan2(-s, c) * 57.29578f, 0, 0}); // along (-sin, cos)
+		const physics::Vec3 at {side.uavCentre.x + side.uavCircle * c, side.uavCentre.y,
+			side.uavCentre.z + side.uavCircle * s};
+		const float yaw = std::atan2(-s, c) * 57.29578f;
+		// The commander supplies the flight motion before the soldier and
+		// projectile collision passes. Their meshes use the same pose.
+		if (Body* body = findBody(side.uavDrone)) {
+			const float speed = side.uavCircle * side.uavTurnRate;
+			body->lastPosition = body->body.position;
+			body->body.position = at;
+			body->body.rotation = physics::Mat3::fromYawPitchRoll({yaw, 0, 0});
+			body->body.velocity = body->body.averageVelocity = {-s * speed, 0, c * speed};
+			body->body.angularVelocity = {0, -side.uavTurnRate, 0};
+			body->partsPosed = 0xffffffffu;
+		}
+		drone->setPosition({at.x, at.y, at.z});
+		drone->setRotation({yaw, 0, 0});
 	}
 }
 

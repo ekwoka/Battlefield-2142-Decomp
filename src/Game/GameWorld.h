@@ -3782,6 +3782,8 @@ private:
 	// bundles of its own (the Shepherd gunners') is not under the gun's.
 	bool seatCameraFrame(const Body& body, int seat, int cameraId, physics::Vec3& at, physics::Mat3& turn);
 	std::optional<SeatMount> seatCameraFrame(const world::Object& vehicle, const VehicleLayout& layout, int seat,
+	std::optional<SeatMount> seatFirearmFrame(const world::Object& vehicle, int seat, const SeatMount& hull,
+		const SeatWeapon& weapon, bool remote) const;
 		int cameraId, const SeatMount& hull, bool remote) const;
 	SeatMount posedSeatChild(uint32_t object, int seat, const SeatMount& parent, const world::ChildTemplate& child, bool remote) const;
 	std::optional<SeatMount> seatWeaponFrame(const world::Object& vehicle, int seat, const SeatMount& hull,
@@ -4650,11 +4652,18 @@ private:
 	// The first TargetObject template of a tree (the root's own or a
 	// child's) whose targetType is type (TTNone 0 .. TTPod 7; -1 any),
 	// nullptr if none.
-	const world::ObjectTemplate* targetObjectOf(const world::ObjectTemplate& t, int type = -1, int depth = 0) const;
+	const world::ObjectTemplate* targetObjectOf(const world::ObjectTemplate& t, int type = -1) const;
+	struct TargetAttachment {
+		const world::ObjectTemplate* object = nullptr;
+		physics::Vec3 offset;
+	};
+	const TargetAttachment& targetAttachment(const world::ObjectTemplate& t, int type) const;
+	TargetAttachment findTargetAttachment(const world::ObjectTemplate& t, int type, int depth) const;
+	physics::Vec3 targetPosition(const world::Object& root, int type) const;
 	// Whether a target root's TargetObject of that type is enabled
 	// (0x0058eba0): disableWhenWreck and disableWhenEmptyVehicle(Delay).
 	bool targetEnabled(const world::Object& root, int type = -1);
-	mutable std::map<std::pair<const world::ObjectTemplate*, int>, const world::ObjectTemplate*> m_targetObjects;
+	mutable std::map<std::pair<const world::ObjectTemplate*, int>, TargetAttachment> m_targetObjects;
 	FireArmSettings withExtraAmmo(const Player& player, const world::ObjectTemplate& item) const;
 	// Takes the carried weapon of a slot in hand.
 	void equip(Player& player, int slot);
@@ -5115,6 +5124,10 @@ private:
 		// physics node each tick.
 		float uavYawRate = 0, uavSpeed = 0;
 	};
+	bool isCommanderUav(uint32_t object) const
+	{
+		return object != 0 && (m_commanders[1].uavDrone == object || m_commanders[2].uavDrone == object);
+	}
 	void launchUavDrone(int team, const physics::Vec3& at);
 	void flyUavDrones(float seconds);
 	void removeUavDrone(int team);
