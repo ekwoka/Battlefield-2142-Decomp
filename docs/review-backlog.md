@@ -887,6 +887,23 @@ before deciding whether the fix is a parity fix or an `enhanced.*` change.
   for smaller layouts, as retail's would; with `--enhanced` (`botOffMesh`) the bots move in
   all 24 (half to all of them, most firing).
 
+### P-5. Cerbere_Landing gpm_cq 32: PAC's Harbor FAV never reaches the vehicle mesh (medium)
+- **Status:** done ("Steer an off-mesh car along its way to the vehicle mesh").
+- **Cause:** the FAV (`as_fav`, 104.4/36.7/-223.6) spawns 74 m from the vehicle mesh, made for
+  the 16-player layout. Retail's BBChange (AIDLL `0x1006c520`: a candidate whose map spot has no
+  polygon, `local_b8 == -1`, is skipped) never takes it: not a parity bug. With `--enhanced`
+  a bot did get in (botRecovery's `wayToVehicleMesh`, botOffMesh's walk), but `driveToMesh`
+  steered for the way's next 4 m grid step: the car overran each step, turned back for it and
+  wandered the docks for its minute, then was given up off the mesh.
+- **Fix:** under `enhanced.botOffMesh`, the way up to the step nearest the car counts as gone
+  by, the car steers for the farthest step within 12 m, and at the last step on 8 m past the
+  mesh's edge. Test `Bots_CerbereHarborFavReachesTheMesh`: seeds 0 and 1234 bring it onto the
+  mesh at 56-57 s and 158-232 m into the town; seed 7 gets within 4.4 m of the ramp's top,
+  where its driver is lost in the fighting. Retail's bots still leave it.
+- **Open:** cars still stall a few seconds against Cerbere's Harbor commander-asset spawner
+  (73.5/-218.9), which the way's sight rays don't see; a way round wedged spots was tried and
+  made the runs worse, so it was left out.
+
 ## Open verification questions (no known bug yet)
 
 | ID | Commit | Question |

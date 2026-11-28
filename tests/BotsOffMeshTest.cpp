@@ -517,3 +517,82 @@ TEST(Bots_CerbereWalkerJoinsTheFight)
 	}
 	unsetenv("BF2142_BOT_SEED");
 }
+
+// Cerbere_Landing gpm_cq 32 also puts PAC's FAV (as_fav) at the Harbor, 104.4/36.7/-223.6, 74 m from the
+// vehicle mesh's nearest point. Retail's BBChange (AIDLL 0x1006c520: a candidate whose spot on its map has
+// no polygon, local_b8 == -1, goes on to LAB_1006d3da, the next) passes it over. enhanced.botRecovery
+// weighs it (a terrain way to the mesh, wayToVehicleMesh: west along the docks and up the ramp at
+// 33/-172) and, with botOffMesh walking a bot there, one gets in; but driveToMesh steered for the way's
+// next 4 m step: the car ran past each one, turned back for it and wandered the docks (seed 0: 86 m from
+// its spawn, parked 19 m short of the ramp's top) until the minute ran out. enhanced.botOffMesh now
+// counts the way up to the step nearest the car as gone by, steers for the farthest step within 12 m and
+// on over the mesh's edge at the last: the FAV comes up the ramp onto the mesh and on into the town. (Seed
+// 7's driver reaches the ramp but is lost there in the fighting before its top.)
+TEST(Bots_CerbereHarborFavReachesTheMesh)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	int reached = 0;
+	for (const uint32_t seed : {0u, 7u, 1234u}) {
+		for (const bool enhanced : {false, true}) {
+			if (!enhanced && seed) continue; // retail's once
+			if (seed) {
+				setenv("BF2142_BOT_SEED", std::to_string(seed).c_str(), 1);
+			} else {
+				unsetenv("BF2142_BOT_SEED");
+			}
+			LevelBots round(gameDir, "Cerbere_Landing", "gpm_cq", 32, enhanced);
+			if (!round.level.loaded || !round.mesh) return;
+			round.enhanced = enhanced;
+			auto& world = *round.level.world;
+			round.addBots(15);
+			round.addBots(1, 1); // 16 PAC, 15 EU
+			uint32_t fav = 0;
+			physics::Vec3 spawn {};
+			for (const auto& v : world.vehicleList()) {
+				const world::Object* o = world.objects().find(v.object);
+				if (o && o->objectTemplate() && o->objectTemplate()->name() == "as_fav") {
+					fav = v.object;
+					spawn = v.position;
+				}
+			}
+			CHECK(fav != 0);
+			if (!fav) return;
+			CHECK(round.vehicleMesh->findPolygon({spawn.x, spawn.y, spawn.z}) < 0); // off the vehicle mesh
+			float boarded = -1, onMesh = -1, farthest = 0, t = 0, ramp = 1e9f;
+			round.level.runUntil(240, [&] {
+				t += 1;
+				for (const auto& v : world.vehicleList()) {
+					if (v.object != fav) continue;
+					farthest = std::max(farthest, std::hypot(v.position.x - spawn.x, v.position.z - spawn.z));
+					ramp = std::min(ramp, std::hypot(v.position.x - 33.3f, v.position.z + 172.5f)); // the way's end
+					if (onMesh < 0 && round.vehicleMesh->findPolygon({v.position.x, v.position.y, v.position.z}) >= 0) onMesh = t;
+				}
+				for (const int id : round.players) {
+					game::GameWorld::PlayerInfo info;
+					if (boarded < 0 && world.playerInfo(id, info) && info.vehicle == fav) boarded = t;
+				}
+				return false;
+			});
+			std::fprintf(stderr,
+				"  seed %u, enhanced %d: the FAV boarded at %.0f s, on the vehicle mesh at %.0f s, at most %.0f m from its spawn,"
+				" %.1f m from the ramp's top\n",
+				seed, enhanced, boarded, onMesh, farthest, ramp);
+			if (!enhanced) {
+				CHECK(boarded < 0); // retail's bots pass it over
+				CHECK(farthest < 1);
+				continue;
+			}
+			CHECK(boarded >= 0 && boarded < 90);
+			CHECK(ramp < 6); // driven the 75 m along the docks to the ramp
+			if (onMesh >= 0) {
+				++reached;
+				CHECK(onMesh < 150);
+				CHECK(farthest > 120); // and on into the town
+			}
+		}
+	}
+	CHECK(reached >= 2);
+	unsetenv("BF2142_BOT_SEED");
+}
+

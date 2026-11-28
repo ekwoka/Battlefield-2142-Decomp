@@ -2302,7 +2302,35 @@ bool BotManager::driveToMesh(Bot& bot, const GameWorld::PlayerInfo& self, Soldie
 	if (bot.meshWay.empty()) {
 		return false;
 	}
-	const physics::Vec3 d = bot.meshWay.front() - here;
+	physics::Vec3 aim = bot.meshWay.front();
+	if (m_settings.offMeshWalk()) {
+		// enhanced.botOffMesh: a car can't turn onto a point 4 m off (the grid's steps), so it ran past the way's
+		// next point, turned back for it and wandered (Cerbere_Landing gpm_cq 32: PAC's FAV at the Harbor, 74 m
+		// from the vehicle mesh, drove about for the minute and was given up). The way up to the step nearest
+		// the vehicle counts as gone by, and it steers for the farthest step within 12 m ahead.
+		size_t nearest = 0;
+		for (size_t i = 1; i < bot.meshWay.size(); ++i) {
+			if (horizontal(bot.meshWay[i] - here) < horizontal(bot.meshWay[nearest] - here)) {
+				nearest = i;
+			}
+		}
+		bot.meshWay.erase(bot.meshWay.begin(), bot.meshWay.begin() + static_cast<std::ptrdiff_t>(nearest));
+		size_t ahead = 0;
+		for (size_t i = 0; i < bot.meshWay.size() && horizontal(bot.meshWay[i] - here) <= 12; ++i) {
+			ahead = i;
+		}
+		aim = bot.meshWay[ahead];
+		// The last step is the mesh's edge: on past it, 8 m on along the way's last leg (else it circles the edge).
+		if (ahead + 1 == bot.meshWay.size()) {
+			const physics::Vec3 from = bot.meshWay.size() > 1 ? bot.meshWay[ahead - 1] : here;
+			const physics::Vec3 leg = aim - from;
+			const float length = horizontal(leg);
+			if (length > 0.5f) {
+				aim = aim + physics::Vec3 {leg.x, 0, leg.z} * (8 / length);
+			}
+		}
+	}
+	const physics::Vec3 d = aim - here;
 	const float off = std::remainder((std::atan2(d.x, d.z) - std::atan2(vehicle->forward.x, vehicle->forward.z)) * 57.29578f, 360.0f);
 	if (m_settings.moveInterpreter(equipmentOf(self)) == "FloatingTankMoveTo") {
 		// The hover tank slides: PIYaw is sideways on it, so it goes straight at the point as it stands.
