@@ -423,8 +423,9 @@ struct FireArmSettings {
 	int batchSize = 1;
 	// A PulseMeterAmmoComp (the handheld pulse meter): each round starts its
 	// scan (0x005d9cf0 sets +0x58), which runs pulse-meter-scan-step (1, a
-	// tweakable of 0x008e..: DAT_00a6e194) a second until it is through
-	// (0x005d99e0, then both cleared): the HUD's HudScanProgress through
+	// tweakable of 0x008e..: DAT_00a6e194) per ammo update, twice a tick
+	// (0x005c58a0), so two a second, until it is through (0x005d99e0, then
+	// both cleared): the HUD's HudScanProgress through
 	// the ammo component's 0xc4f2 slots 0xf8 / 0xfc (0x007be380).
 	bool pulseScan = false;
 	// ammo.reloadWithoutPlayer (the ammo template's +0x41): a gun not held

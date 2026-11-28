@@ -1535,28 +1535,56 @@ TEST(Weapons_GunRecoil)
 	CHECK(recoil.slide(209) == 0 && recoil.slide(400) == 0);
 }
 
-// The handheld pulse meter's scan (PulseMeterAmmoComp: 0x005d9cf0 starts
-// it with a round, 0x005d99e0 runs it at pulse-meter-scan-step a second
-// and clears it at 1), which the weapon HUD's HudScanProgress shows.
+// The handheld pulse meter's scan (Unl_Pulse_Meter: PulseMeterAmmoComp,
+// 0x005d9cf0 starts it with a round, 0x005d99e0 runs it at
+// pulse-meter-scan-step, 1, times the tick's seconds and clears it at 1),
+// which the weapon HUD's HudScanProgress shows. The firearm's update
+// (0x005c58a0) runs the ammo component's update twice a tick (0x005c5d87
+// before the fire component's update, 0x005c6018 after it), so the scan is
+// through in half a second: the round's own tick counts once, then two a
+// tick. The heat cools once a tick (0x005c1fe0, from the tick count, not
+// in the ammo component): the round's heatAddWhenFire 20 over 1 makes
+// overheatPenalty 6, which at coolDownPerSec 1 lets the next round go 5 s
+// later.
 TEST(Weapons_PulseMeterScan)
 {
-	game::FireArmSettings s;
-	s.magSize = -1;
-	s.nrOfMags = -1;
-	s.roundsPerMinute = 60;
-	s.pulseScan = true;
+	world::ObjectTemplateManager templates;
+	templates.registerType(1, "GenericFireArm");
+	world::ObjectTemplate* t = templates.create("GenericFireArm", "unl_pulse_meter");
+	t->components().push_back("SingleFireComp");
+	t->components().push_back("PulseMeterAmmoComp");
+	t->settings()["fire.addFireRate"] = "0";
+	t->settings()["ammo.nrOfMags"] = "-1";
+	t->settings()["ammo.magSize"] = "-1";
+	t->settings()["ammo.reloadTime"] = "0";
+	t->settings()["ammo.autoReload"] = "1";
+	t->settings()["ammo.reloadWithoutPlayer"] = "1";
+	t->settings()["heatAddWhenFire"] = "20";
+	t->settings()["coolDownPerSec"] = "1";
+	t->settings()["overheatPenalty"] = "6";
+	const game::FireArmSettings s = game::FireArmSettings::fromTemplate(*t);
+	CHECK(s.pulseScan);
 	game::FireArm meter(s);
 	CHECK(!meter.scanning() && meter.scan() == 0);
 	CHECK(meter.tick(1 / 30.0f, true));
-	CHECK(meter.scanning() && meter.scan() == 0);
-	for (int i = 0; i < 15; ++i) {
+	CHECK(meter.scanning() && std::fabs(meter.scan() - 1 / 30.0f) < 1e-6f);
+	CHECK(meter.overheated() && meter.heat() == 1); // (shown up to 1; held at 6)
+	int ticks = 1; // since the round, its own tick counted
+	for (; ticks < 8; ++ticks) {
 		meter.tick(1 / 30.0f, false);
 	}
 	CHECK(meter.scanning() && std::fabs(meter.scan() - 0.5f) < 1e-3f);
-	for (int i = 0; i < 15; ++i) {
+	while (meter.scanning() && ticks < 60) {
 		meter.tick(1 / 30.0f, false);
+		++ticks;
 	}
-	CHECK(!meter.scanning() && meter.scan() == 0);
+	CHECK(ticks == 16); // the 30th step on the 16th tick (the first of its two)
+	CHECK(meter.scan() == 0);
+	// The heat: 6 cools below 1 in 5 s, the trigger held throughout.
+	while (!meter.tick(1 / 30.0f, true) && ticks < 400) {
+		++ticks;
+	}
+	CHECK(ticks >= 150 && ticks <= 152);
 	game::FireArmSettings plain = s;
 	plain.pulseScan = false;
 	game::FireArm gun(plain);

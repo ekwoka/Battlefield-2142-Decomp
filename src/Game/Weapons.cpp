@@ -911,13 +911,22 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	const bool altPressed = altTrigger && !m_altWas;
 	m_altWas = altTrigger;
 	// The pulse meter's scan runs on (0x005d99e0, after the ammo's update).
-	if (m_scanning) {
-		m_scan += seconds * kPulseScanStep;
-		if (m_scan >= 1) {
-			m_scan = 0;
-			m_scanning = false;
+	// The firearm's update (0x005c58a0) runs the ammo component's update
+	// (+0x1c4 slot 0x18) twice a tick, each with the tick's seconds: once
+	// before the fire component's (0x005c5d87) and once after it
+	// (0x005c6018). So the scan advances twice a tick, through in half a
+	// second (15 ticks), and a round's own tick (the fire component's
+	// 0x005d9cf0 starts it between the two) already counts once.
+	const auto stepScan = [this, seconds] {
+		if (m_scanning) {
+			m_scan += seconds * kPulseScanStep;
+			if (m_scan >= 1) {
+				m_scan = 0;
+				m_scanning = false;
+			}
 		}
-	}
+	};
+	stepScan();
 	bool fired = false;
 	// 0x005e5610: shown again once the ticks from the reload's start are past.
 	if (m_showIn >= 0 && m_showIn-- == 0) {
@@ -959,6 +968,7 @@ bool FireArm::tick(float seconds, bool trigger, bool altTrigger)
 	if (fired && m_settings.pulseScan) {
 		m_scanning = true; // 0x005d9cf0
 	}
+	stepScan(); // the second ammo update (0x005c6018)
 	if (fired && m_settings.thrown) {
 		m_hidden = true; // the launch (0x005e5720) puts the firearm away
 	}
