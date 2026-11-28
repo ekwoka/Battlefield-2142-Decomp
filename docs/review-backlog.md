@@ -443,7 +443,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   nothing changes. Later stages are their own items once the first lands.
 
 ### Q-16. A spatial grid for per-soldier work, for games with far more than 64 players (medium)
-- **Status:** open.
+- **Status:** open, low priority: the user ran 128 bots on Suez Canal Titan mode without hitches (2026-11-28), which fits the 127-bot numbers below. This matters from about 200 bots. See Q-19 for what limits large matches first.
 - **Why:** headless runs of Verdun gpm_ti with every bot active (`--bots N`, `BF2142_TICK_PROF=50`,
   180 s, 2026-11-27). Mean tick per subsystem:
 
@@ -472,7 +472,7 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
   `Bots_OffMeshVerdunTitanCost` with many bots.
 
 ### Q-17. Stagger bot thinking, and spread the round-start Titan gun work, for very large bot counts (medium)
-- **Status:** open.
+- **Status:** open, low priority: as Q-16, 128 bots already run without hitches; this is for about 200 and more.
 - **Why:** in the same runs, bot AI (`bots`) is 1.3 / 2.2 / 5.6 ms mean per tick at 47 / 127 / 255
   bots: 2.6× for 2× the bots. The first tick of the round at 255 bots is 66 ms:
   `titanGunWalk` 13.5 ms over 67 calls, `titanField` 13.2 ms over 10, soldier settling 12.2 ms,
@@ -490,6 +490,22 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
 - **Related:** spawns. Layouts have spawn points for their own size, so at 2–5× the players most
   bots stack up and fight little; combat load wasn't measured (11 kills in 3 min at 255). Rendering
   wasn't measured either (headless only). Online play with retail clients stays capped at 64.
+
+### Q-19. Spread spawns for matches with more players than the layout was made for (medium)
+- **Status:** open.
+- **Why:** the user played 128 bots on Suez Canal Titan mode without hitches (2026-11-28), so
+  performance isn't what limits large matches up to there (see Q-16 and Q-17, which matter from
+  about 200 bots). What limits them is the maps: a layout has spawn points for its own size, so
+  at 2–5× the players most bots stack up at a few points and fight little (11 kills in 3 minutes
+  at 255 bots on Verdun gpm_ti), and the bots' choices look poor in the crowd.
+- **Fix (ideas):** behind an `enhanced.*` flag, above the layout's player count: spread a spawn
+  group's soldiers over more ground (around the point's spawners, on the nav mesh, not inside
+  objects), stagger the first wave, and let bots pick among more spawn points and vehicles
+  (bigger layouts' spawners where the level ships them). Measure fights, not just movement:
+  kills a minute and the share of bots that fire.
+- **Done when:** at 127 bots on a 64-player layout, bots don't spawn inside one another, and
+  kills a minute per bot are close to the 63-bot round's; nothing changes at or under the
+  layout's size.
 
 ## Retail parity: default behaviour that differs from retail
 
@@ -903,6 +919,43 @@ before deciding whether the fix is a parity fix or an `enhanced.*` change.
 - **Open:** cars still stall a few seconds against Cerbere's Harbor commander-asset spawner
   (73.5/-218.9), which the way's sight rays don't see; a way round wedged spots was tried and
   made the runs worse, so it was left out.
+
+### P-6. Enemy pods rest on the PAC Titan's rear bay forcefield, and their riders die on it (medium)
+- **Status:** open.
+- **Report:** found while testing P-1 (`Titan_PodRidersStayOnTheDeck`). An enemy pod that comes
+  down on the forcefield of the PAC Titan's rear vehicle bay (about 52–69 m aft) settles on it
+  instead of being destroyed. Its rider then gets out and dies touching the field (material 0x29a).
+- **To check:** what retail does when a pod (or any enemy object) touches a Titan's bay
+  forcefield: destroyed on contact, passed through, or stopped as here. Whether the pod's contact
+  with the field should be deadly to the pod, as the soldier's is to him.
+- **Done when:** a headless test drops enemy pods on the bay field and they end as retail's do,
+  with no pod resting on it.
+
+### P-7. Minsk gpm_cq 16 with `enhanced.botTwinNav`: bots fight but never capture a point (low)
+- **Status:** open.
+- **Report:** with the coop twin's AI data (P-4), Minsk's bots move and fight at the first point
+  (cp 103) but took no point in 3 to 6 minutes, so `Bots_TwinNavConquest16Plays` skips the
+  capture check there. Its points are 300 to 700 m from PAC's base, and cp 104 is more than 40 m
+  from the vehicle mesh.
+- **To check:** whether the made-up strategic areas' order positions sit on the mesh for every
+  point (as 6bf5827 did for Cerbere), whether bots stand inside the capture radius or stop short
+  of it, and whether a longer round captures. Compare with minsk_coop's own gpm_sp layout.
+- **Done when:** a bot team takes a point on Minsk gpm_cq 16 within the test's time, and the
+  test's capture check covers Minsk.
+
+### P-8. Cars snag on the Harbor's commander-asset spawner on Cerbere_Landing (low)
+- **Status:** open.
+- **Report:** from P-5. A car driving the docks to the ramp stalls for a few seconds against the
+  Harbor commander-asset spawner at 73.5/-218.9, which the path search's sight rays don't see.
+  In `Bots_CerbereHarborFavReachesTheMesh` one seed of three stops short of the ramp (seed 7
+  before the fused multiply-add change, 4.4 m; seed 1234 after it, 6.0 m; the test's limit was
+  loosened to 8 m in 5dbc6e4).
+- **Tried:** blocking wedged spots and re-planning around them made all three seeds miss the
+  mesh, so it was left out.
+- **To check:** why the spawner is missing from the off-mesh path's obstacle test (its collision
+  mesh or type), rather than recovering after the snag.
+- **Done when:** all three seeds reach the vehicle mesh and the test's ramp limit is back to 6 m
+  or the "2 of 3" rule is 3 of 3.
 
 ## Open verification questions (no known bug yet)
 
