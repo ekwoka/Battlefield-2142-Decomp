@@ -4783,6 +4783,117 @@ TEST(Vehicles_StaticAAFireFollowsItsCamera)
 	}
 }
 
+// The AA cannon uses its alternating barrel objects, not the seat camera.
+TEST(Vehicles_StaticAACannonLaunchesFromPosedBarrels)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		Garage g(gameDir(), mod);
+		const uint32_t aa = g.start("static_aa", {0, 2, 8});
+		g.animate();
+		CHECK(g.enter(aa));
+		PlayerCamera camera(*g.world, *g.systems, nullptr);
+		game::SoldierInput input;
+		for (int tick = 1; tick <= 90; ++tick) {
+			input.turn = 2;
+			input.aimPitch = 60.0f * tick / 90.0f;
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+		}
+		input.turn = 0;
+		g.drive(input, 1);
+		camera.tick(1 / 30.0f);
+		PlayerCamera::View eye;
+		CHECK(camera.view(eye, 4.0f / 3.0f));
+		CHECK(eye.pitch > 0.17f);
+		const physics::Vec3 at {eye.position[0], eye.position[1], eye.position[2]};
+		const physics::Vec3 forward {std::sin(eye.yaw) * std::cos(eye.pitch), std::sin(eye.pitch),
+			std::cos(eye.yaw) * std::cos(eye.pitch)};
+		const physics::Vec3 right {std::cos(eye.yaw), 0, -std::sin(eye.yaw)};
+		const physics::Vec3 up = physics::cross(forward, right);
+		// The camera and firearm share Static_aa_Gun. Subtract the camera's
+		// authored offset from each barrel position and include the 1 m start.
+		const auto expectedMuzzle = [&](int barrel) {
+			const float side = barrel == 0 ? 0.51301f : -0.51301f;
+			return at + right * side - up * 0.299869f + forward * 2.684586f;
+		};
+		g.world->setRemotePartPose([&](uint32_t object, const std::string& part, world::Vec3& offset, world::Vec3& rotation) {
+			return g.world->partPose(object, part, offset, rotation);
+		});
+		int barrel = 0, tracer = 0;
+		for (int i = 0; i < 2; ++i) {
+			physics::Vec3 remoteMuzzle;
+			g.world->fireRemoteSeatRound(aa, 0, "static_aa_cannon_firearm", {}, barrel, tracer, &remoteMuzzle);
+			CHECK(physics::lengthSquared(remoteMuzzle - expectedMuzzle(i)) < 0.0025f);
+		}
+		g.world->setRemotePartPose({});
+		input.fire = true;
+		int shots = 0;
+		for (int tick = 0; tick < 30 && shots < 2; ++tick) {
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			for (const auto& event : g.world->takeWeaponSounds()) {
+				if (event.kind != game::GameWorld::WeaponSoundEvent::Fire || event.object != aa
+					|| event.weapon != "static_aa_cannon_firearm") continue;
+				const physics::Vec3 error = event.position - expectedMuzzle(shots);
+				std::fprintf(stderr, "  %s AA barrel %d: muzzle error %.3f m (world Y %+.3f)\n",
+					mod, shots, std::sqrt(physics::lengthSquared(error)), error.y);
+				CHECK(physics::lengthSquared(error) < 0.0025f);
+				++shots;
+			}
+		}
+		CHECK(shots == 2);
+	}
+}
+
+// The stationary Rorsch uses its seat camera with an authored lateral,
+// vertical and forward start offset.
+TEST(Vehicles_StaticRailgunUsesItsCameraOffset)
+{
+	if (!gameDir()) return;
+	for (const char* mod : {"mods/bf2142", "mods/Project_Remaster_v17_Final"}) {
+		if (!test::runs(mod)) continue;
+		Garage g(gameDir(), mod);
+		const uint32_t gun = g.start("static_av", {0, 0.5f, 8});
+		g.animate();
+		CHECK(g.enter(gun));
+		PlayerCamera camera(*g.world, *g.systems, nullptr);
+		game::SoldierInput input;
+		for (int tick = 1; tick <= 60; ++tick) {
+			input.turn = 2;
+			input.aimPitch = 20.0f * tick / 60.0f;
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			camera.tick(1 / 30.0f);
+		}
+		input.turn = 0;
+		g.drive(input, 1);
+		camera.tick(1 / 30.0f);
+		PlayerCamera::View eye;
+		CHECK(camera.view(eye, 4.0f / 3.0f));
+		const physics::Vec3 at {eye.position[0], eye.position[1], eye.position[2]};
+		const physics::Vec3 forward {std::sin(eye.yaw) * std::cos(eye.pitch), std::sin(eye.pitch),
+			std::cos(eye.yaw) * std::cos(eye.pitch)};
+		const physics::Vec3 right {std::cos(eye.yaw), 0, -std::sin(eye.yaw)};
+		const physics::Vec3 expected = at + right * 0.3f - physics::cross(forward, right) * 0.15f + forward * 0.75f;
+		g.world->setZoomed(g.world->localPlayer(), true); // isolate the launch frame from authored spread
+		input.fire = true;
+		bool fired = false;
+		for (int tick = 0; tick < 90 && !fired; ++tick) {
+			g.world->setPlayerInput(input);
+			g.world->tick(1 / 30.0f);
+			for (const auto& projectile : g.world->projectiles()) {
+				if (projectile.shooter != gun) continue;
+				CHECK(physics::lengthSquared(projectile.origin - expected) < 0.0025f);
+				CHECK(physics::dot(projectile.heading, forward) > 0.9998f);
+				fired = true;
+			}
+		}
+		CHECK(fired);
+	}
+}
+
 // The PAC APC's pod-seat guns (as_apc_pods F3..F6: as_apc_PodcannonN_gun,
 // fire.fireInCameraDof) turn by two nested yaw bundles on PIMouseLookX
 // (AS_APC_PodcannonN, AS_APC_barrelN_base) and pitch the barrel and the

@@ -1776,7 +1776,12 @@ public:
 		// (+0x5c) in that frame. Positions in the vehicle's frame at rest.
 		bool fireInCameraDof = false;
 		bool fireInCameraDofLocked = false; // +0x45: the gun's frame x the camera's pose at setup
-		std::vector<physics::Vec3> barrels;
+		struct Barrel {
+			physics::Vec3 restAt;
+			size_t childIndex;
+		};
+		std::vector<size_t> weaponPath;
+		std::vector<Barrel> barrels;
 		bool hasStartPosition = false;
 		physics::Vec3 startPosition;
 	};
@@ -3773,6 +3778,11 @@ private:
 	// tree as PlayerCamera::findSeatCamera poses it. A camera that turns by
 	// bundles of its own (the Shepherd gunners') is not under the gun's.
 	bool seatCameraFrame(const Body& body, int seat, int cameraId, physics::Vec3& at, physics::Mat3& turn);
+	std::optional<SeatMount> seatCameraFrame(const world::Object& vehicle, const VehicleLayout& layout, int seat,
+		int cameraId, const SeatMount& hull, bool remote) const;
+	SeatMount posedSeatChild(uint32_t object, int seat, const SeatMount& parent, const world::ChildTemplate& child, bool remote) const;
+	std::optional<SeatMount> seatWeaponFrame(const world::Object& vehicle, int seat, const SeatMount& hull,
+		const SeatWeapon& weapon, int& barrel, bool remote) const;
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, Body::Gun& gun, int& barrel);
 	static physics::Vec3 seatGunOrigin(const SeatLayout& seat, const SeatWeapon& weapon, float gunYaw, float gunPitch, int& barrel);
 	Body* findBody(uint32_t object);

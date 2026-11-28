@@ -7355,7 +7355,7 @@ TEST(GameWorld_SeatGunBarrelsAndCameraFrame)
 	if (seats.size() == 1) {
 		const auto& seat = seats[0];
 		CHECK(seat.barrels.size() == 2 && seat.cameras.size() == 1 && !seat.fireInCameraDof && seat.hasStartPosition);
-		CHECK(seat.barrels.size() == 2 && seat.barrels[0].x == 1 && seat.barrels[1].x == -1 && seat.barrels[0].z == 1);
+		CHECK(seat.barrels.size() == 2 && seat.barrels[0].restAt.x == 1 && seat.barrels[1].restAt.x == -1 && seat.barrels[0].restAt.z == 1);
 		CHECK(!seat.cameras.empty() && std::fabs(seat.cameras[0].at.y - 3) < 1e-6f && !seat.cameras[0].ridesGun);
 		CHECK(std::fabs(seat.yawPivot.y - 2) < 1e-6f);
 	}
