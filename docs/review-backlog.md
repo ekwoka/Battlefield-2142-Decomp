@@ -280,6 +280,40 @@ anything), `pending-commit` (fixed in the working tree but not yet committed).
     next scripted change sends a second lie press that inverts the stance. This
     only affects the test tool.
 
+### Q-18. Floating-point contraction made rounds machine-dependent (medium)
+- **Status:** done (see the commit that adds `-ffp-contract=off`)
+- **Problem:** no build set `-ffp-contract`, so Apple clang used its C++ default
+  (`on`) and fused `a * b + c` into one rounding on arm64: 6457 scalar
+  `fmadd`/`fmsub`/`fnmadd`/`fnmsub` in the Release objects under `src/`. An
+  x86-64 build without `-march` (llvm-mingw's Windows build, a plain Linux
+  build) has no FMA, so the same round rounds differently there, and
+  bots' decisions, demos and state fingerprints can part (not yet compared
+  on an x86-64 machine).
+- **Fix:** `CMakeLists.txt` adds `-ffp-contract=off` to every non-MSVC build
+  (clang, llvm-mingw, the i686 mingw-gcc retail-compat build) and `/fp:precise`
+  (MSVC's default, which doesn't contract) to MSVC. Four fused instructions
+  remain, in clang's inlined `std::fmod` / `std::remainder` (exact either
+  way). README explains the flag.
+- **Measured** (Apple Silicon, Release):
+  - Fingerprints change, as expected: the parity-check round (`gpm_sp` 16, 15
+    bots, 60 s) 922368f291fa1232 -> 533449b790693c43; `Cerbere_Landing gpm_cq`
+    32 with 31 bots, 300 s: e00a43bfdf06e606 -> f4c8bc0eb70571ae. Each still
+    repeats, and `tools/parity-check.sh` passes.
+  - Speed: that 300 s round, seeds 1 to 5 (`BF2142_BOT_SEED`), run twice each in
+    both orders: 8.24 to 8.33 s user time with contraction, 8.47 to 8.51 s
+    without, about 2 to 3 % slower. (The rounds diverge, so this compares similar,
+    not identical, work.)
+  - Tests: the full suite passes. One comparison widened its tolerance:
+    `Vehicles_DriveOverSuezHills_EuFav`'s airborne ticks (faceted vs smooth
+    terrain normals, out of 240) were 9 -> 12 with contraction, right at the
+    `+3` limit, and 5 -> 9 without; the limit is now `+4`. No retail-pinned value
+    moved.
+- **Still open:** matching across machines also needs the same `libm`
+  (`sin`, `cos`, `atan2`, `exp` differ between Apple's, glibc's and the UCRT's),
+  and the i686 retail-compat build computes in x87 extended precision unless it
+  uses `-msse2 -mfpmath=sse`. Neither has been compared on a second machine: run
+  the parity-check round on an x86-64 build and compare the fingerprint.
+
 ## Enhancements
 
 ### Q-14. The widescreen HUD is fixed to 16:9, wrong on ultrawide (UWQHD) screens (medium)

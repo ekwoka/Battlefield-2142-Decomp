@@ -140,6 +140,13 @@ ninja -C build/win32
 DECOMPILE=1 tools/ghidra/analyze.sh BF2142Audio.dll
 ```
 
+Every build compiles with `-ffp-contract=off` (MSVC: `/fp:precise`), set in
+`CMakeLists.txt`. Clang otherwise fuses `a * b + c` into one multiply-add
+wherever the target has the instruction (always on arm64, on x86-64 only with
+`-march` flags), and the same round could then compute different floats, so a
+different state fingerprint, on Apple Silicon and on x86-64. Without the fused
+instructions a headless round runs about 2 to 3 % slower on Apple Silicon.
+
 ### Native Windows build
 
 This checkout also builds the native port for Windows with LLVM-MinGW. Run

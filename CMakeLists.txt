@@ -15,10 +15,16 @@ else()
 endif()
 option(BF2142_RETAIL_COMPAT "Build drop-in replacements for the retail DLLs" ${BF2142_RETAIL_COMPAT_DEFAULT})
 
+# No fused multiply-adds: clang contracts a * b + c into one rounding by
+# default (-ffp-contract=on), and does so where the target has FMA (arm64
+# always, x86-64 only with -march flags), so the same round would compute
+# different floats on Apple Silicon and on x86-64. Off, every target rounds
+# each operation, and the simulation (demos, state fingerprints) matches
+# across machines. MSVC's /fp:precise doesn't contract either.
 if(MSVC)
-	add_compile_options(/W4)
+	add_compile_options(/W4 /fp:precise)
 else()
-	add_compile_options(-Wall -Wextra)
+	add_compile_options(-Wall -Wextra -ffp-contract=off)
 endif()
 
 include(cmake/Dependencies.cmake)
