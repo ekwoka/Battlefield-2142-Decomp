@@ -864,6 +864,29 @@ before deciding whether the fix is a parity fix or an `enhanced.*` change.
   view. Playback holds the records past the level block until the game loop runs, as
   retail's per-frame reader (`0x00432ee0`) does. Test `Demo_DirectedCameraFilmsTheBots`.
 
+### P-4. Shuhia_Taiba, Minsk and Sidi_Power_Plant have no bots in 16-player Conquest (medium)
+- **Status:** done ("Give three conquest maps their coop twins' AI data").
+- **Cause:** these levels ship no AI data at all (no `AIPathFinding/`, no `ai/AI.ai`, no
+  strategic areas). Their AI lives in the separate `shuhia_taiba_coop`, `minsk_coop` and
+  `sidi_power_plant_coop` levels (`gpm_sp` and `gpm_coop` 16/32/64), which are what the
+  singleplayer list plays; those have bots that move and fight. Retail's AIDLL reads only
+  the level's own `AIPathFinding` (`QuadTreeManager` `0x100ae4e0`), so it has no bots there
+  either: not a parity bug.
+- **Fix:** `enhanced.botTwinNav` (on, read at load) takes the coop twin's AI data when the
+  twin is the same map (`HeightmapPrimary.raw` identical; 98 % of the static placements
+  shared: Shuhia's and Sidi's are the same file, minsk_coop lacks 22 of Minsk's 2279 trees
+  and floors). Strategic areas come from `ensureAreas` as on Cerbere. Test
+  `Bots_TwinNavConquest16Plays`. Minsk's points are 300-700 m from PAC's base; in 3 minutes
+  its bots fight at cp 103 but don't stand in it yet.
+- **Sweep:** every level with AI navigation data, every layout (273), 60 s without
+  `--enhanced`: every one spawns bots. 24 layouts had under a quarter of their bots move
+  20 m and no round fired: the 32/64 Conquest/No Vehicles layouts of
+  2142t_road_to_jalalabad, Belgrade, Suez_Canal, tgw_sharqi_peninsula and Verdun,
+  air_bavaria and Liberation_of_Leipzig `gpm_sl`, hamburg_harbour_coop `gpm_cq` 16 and
+  Close_Encounter `Deathmatch` 12 (a mode with no script). Their spawns lie off meshes made
+  for smaller layouts, as retail's would; with `--enhanced` (`botOffMesh`) the bots move in
+  all 24 (half to all of them, most firing).
+
 ## Open verification questions (no known bug yet)
 
 | ID | Commit | Question |

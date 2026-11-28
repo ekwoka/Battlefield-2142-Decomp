@@ -2273,6 +2273,22 @@ void registerBotConsoleMethods(Console& console, BotSettings& settings);
 // registerBotConsoleMethods.
 void registerBotScriptMethods(Console& console, BotSettings& settings);
 
+// enhanced.botTwinNav (src/Game/BotsTwin.cpp): a level under `levelsDir`
+// that ships no AI navigation data (Shuhia_Taiba, Minsk and
+// Sidi_Power_Plant) whose `<level>_coop` twin (in any case) has it for the
+// same map: its HeightmapPrimary.raw byte for byte and its static objects
+// (sameStatics): that twin's directory name, else "". Retail's AIDLL reads
+// only the level's own AIPathFinding (0x100ae4e0), so its bots can't play
+// there.
+std::string aiTwinLevel(const std::string& levelsDir, const std::string& level);
+// A StaticObjects.con's placements: each Object.create's template (lower
+// case) and its Object.absolutePosition to 0.1 m.
+std::multiset<std::string> staticPlacements(const std::vector<uint8_t>& script);
+// Two StaticObjects.con place the same objects, 98 % of them at least
+// (minsk_coop leaves out 22 of Minsk's 2279, trees and two floors; the
+// Shuhia_Taiba and Sidi_Power_Plant twins' are the same file).
+bool sameStatics(const std::vector<uint8_t>& level, const std::vector<uint8_t>& twin);
+
 // The game's view distance for the bots (IAIGame vt+0x58, BF2142.exe
 // 0x008959f0): the distance into the fog where its density reaches 0.8
 // (t from 0 in steps of 0.01 while density(t) < 0.8, density(t) = t x base

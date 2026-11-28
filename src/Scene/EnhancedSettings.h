@@ -9,7 +9,7 @@
 // round with the switch off and on and fails if the fingerprints differ.
 // The exceptions are the gameplay additions with their own switches below
 // (botRecovery, botMovement, botTitan, botOffMesh, botAsyncPaths, botCommander, botPilots, botLoneSeat, botThreat, botTitanRepair, guidedCameraEase, cornerSteer,
-// passengerWeapons, softLanding, titanKitFloors, titanDeckMines, podExitAtRest, squadOrderPoints, botSquadInvites): they change the simulation by design, so the check turns
+// passengerWeapons, softLanding, titanKitFloors, titanDeckMines, podExitAtRest, squadOrderPoints, botSquadInvites, botTwinNav): they change the simulation by design, so the check turns
 // them off (cornerSteer is off by default).
 #pragma once
 
@@ -54,6 +54,7 @@ struct EnhancedSettings {
 	bool titanDeckMines = true; // enhanced.titanDeckMines: a Titan doesn't set off the mines lying on its own decks (GameWorld::stepProjectiles); retail's radius trigger (0x005e8aa0) takes the driverless moving Titan for a vehicle, so a motion or EMP mine on its deck goes off when it moves
 	bool squadOrderPoints = true; // enhanced.squadOrderPoints: the squads' order points, their HUD bar and its field upgrades work on any server (GameWorld::squadOrderPointsOn); retail runs them only on a ranked GameSpy server (0x00430a00), so never offline
 	bool botSquadInvites = true; // enhanced.botSquadInvites: offline, a bot the squad leader invites (SquadMenu.applyInviteList) joins his squad, so a human can lead bots and use the squad leader's items; retail's bots never answer an invite (0x004c3190 only sets a mask bit) and join squads only as they are added
+	bool botTwinNav = true; // enhanced.botTwinNav: a level that ships no AI navigation data (Shuhia_Taiba, Minsk, Sidi_Power_Plant) takes its <level>_coop twin's (ai/AI.ai, AIPathFinding/) when the twin is the same map, its heightmap and static objects byte for byte (Game/BotsTwin.cpp aiTwinLevel), so bots play its conquest layouts; retail's AIDLL reads only the level's own (0x100ae4e0) and has no bots there. Read as the level loads (+enhanced.botTwinNav 0 at start-up)
 	// Interface, also only with enhanced.enabled:
 	bool chaseRoll = false; // enhanced.chaseRoll: a flying vehicle's chase and front-chase views bank with its hull (Main/PlayerCamera.cpp); off by default, as retail keeps them level (0x006108e0 -> lookAt 0x006ae080, up (0, 1, 0))
 	bool followFirstPerson = true; // enhanced.followFirstPerson: --director's first-person shots and a demo's followed player (--demo-first-person) show that player's own first person: his arms and weapon animated from his state, his zoom, his seat's camera and cockpit, and (J / --follow-hud) his HUD (Main/PlayerCamera.h setSubject, HudWorld::viewedPlayer); retail's spectator (0x00614d00) and demo (0x005f8f40) follow cameras are chases behind the player and show no HUD of his
@@ -154,6 +155,8 @@ inline void registerEnhancedConsoleMethods(Console& console, EnhancedSettings& s
 		[&settings](const bool& v) { settings.demoQuality = v; });
 	bindProperty<bool>(console, "enhanced.demoCamera", ConsoleAccess::Anyone, [&settings] { return settings.demoCamera; },
 		[&settings](const bool& v) { settings.demoCamera = v; });
+	bindProperty<bool>(console, "enhanced.botTwinNav", ConsoleAccess::Anyone, [&settings] { return settings.botTwinNav; },
+		[&settings](const bool& v) { settings.botTwinNav = v; });
 	bindProperty<bool>(console, "enhanced.tvEffect", ConsoleAccess::Anyone, [&settings] { return settings.tvEffect; },
 		[&settings](const bool& v) { settings.tvEffect = v; });
 }

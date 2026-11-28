@@ -4960,11 +4960,26 @@ int runGame(Options& options, Session& session)
 		session.client->loadingLevel(); // pings answered while the level loads
 	}
 	std::set<uint32_t> levelObjects; // the static objects, before the game mode's
+	// The level whose AI data the bots take (ai/AI.ai, AIPathFinding/): this
+	// one, or with enhanced.botTwinNav its coop twin's (game::aiTwinLevel).
+	std::string aiLevel = options.level;
 	// Level loading, after FUN_004d3450: the level's archives are mounted at
 	// its directory, then materials, static objects and the game mode's
 	// gameplay objects are created.
 	if (!options.level.empty()) {
 		const std::string levelPath = "Levels/" + options.level + "/";
+		if (options.bots > 0 && enhancedSettings.enabled && enhancedSettings.botTwinNav) {
+			const std::string twin =
+				game::aiTwinLevel((std::filesystem::path(options.gameDir) / options.modPath / "Levels").string(), options.level);
+			if (!twin.empty()) {
+				files.setMountingAllowed(true);
+				if (files.mountArchive("Levels/" + twin + "/server.zip", "Levels/" + twin + "/")) {
+					aiLevel = twin;
+					std::printf("bots: %s's AI navigation data, the same map's (enhanced.botTwinNav)\n", twin.c_str());
+				}
+				files.setMountingAllowed(false);
+			}
+		}
 		// Mounting stays allowed (file manager slot 0x78) across the
 		// level's own archive lists: server.zip, ServerArchives.con, then
 		// client.zip and ClientArchives.con on a game with a view, and only
@@ -5029,8 +5044,9 @@ int runGame(Options& options, Session& session)
 			// The level's AI settings (ai/AI.ai: ai.init and the pathfinding
 			// maps' slope and step limits), then the bots' strategies and the
 			// level's strategic areas.
-			if (files.exists(levelPath + "ai/AI.ai")) {
-				run((levelPath + "ai/AI.ai").c_str());
+			const std::string aiPath = "Levels/" + aiLevel + "/ai/AI.ai";
+			if (files.exists(aiPath)) {
+				run(aiPath.c_str());
 			}
 			run("AI/AIDefaultStrategies.ai");
 			run("AI/AIDefaultStrategiesAdd.ai");
@@ -6525,7 +6541,7 @@ int runGame(Options& options, Session& session)
 		std::optional<ai::NavMesh> navMesh, vehicleNavMesh;
 		if (options.bots > 0) {
 			std::vector<uint8_t> qtr, clb;
-			const std::string base = "Levels/" + options.level + "/AIPathFinding/Infantry";
+			const std::string base = "Levels/" + aiLevel + "/AIPathFinding/Infantry";
 			if (files.readFile(base + ".qtr", qtr) && files.readFile(base + ".clb", clb)) {
 				std::string error;
 				navMesh = ai::parseNavMesh(qtr, clb, &error);
@@ -6534,7 +6550,7 @@ int runGame(Options& options, Session& session)
 				std::printf("navigation mesh: none for this level\n");
 			}
 			bots.setNavMesh(navMesh ? &*navMesh : nullptr);
-			const std::string vehicleBase = "Levels/" + options.level + "/AIPathFinding/Vehicle";
+			const std::string vehicleBase = "Levels/" + aiLevel + "/AIPathFinding/Vehicle";
 			if (files.readFile(vehicleBase + ".qtr", qtr) && files.readFile(vehicleBase + ".clb", clb)) {
 				vehicleNavMesh = ai::parseNavMesh(qtr, clb);
 			}
