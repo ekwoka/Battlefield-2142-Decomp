@@ -17164,6 +17164,29 @@ std::vector<std::string> GameWorld::objectAnimation(uint32_t object) const
 // One body's own step in stepPhysics (before the bodies meet): the sleep
 // test, its engines and wheels, the drag, the integration, a walker's
 // legs, the ground and the water. False while it sleeps.
+void GameWorld::setSeatTriggers(Body& b)
+{
+	const world::Object* object = m_objects.find(b.object);
+	if (!b.vehicle || !object || !object->objectTemplate()) {
+		return;
+	}
+	const VehicleLayout& layout = vehicleLayout(*object->objectTemplate());
+	const std::vector<std::string>& controllers = b.vehicle->controllers();
+	for (size_t c = 0; c < controllers.size(); ++c) {
+		bool fire = false, altFire = false;
+		for (size_t s = 0; s < b.occupants.size() && s < layout.seats.size(); ++s) {
+			if (b.occupants[s] < 0 || !sameName(layout.seats[s].name, controllers[c])) {
+				continue;
+			}
+			if (const Player* player = findPlayer(b.occupants[s])) {
+				fire = player->input.fire;
+				altFire = player->input.altFire;
+			}
+		}
+		b.vehicle->setTriggers(c, fire, altFire);
+	}
+}
+
 bool GameWorld::stepBody(Body& b, float seconds)
 {
 	physics::RigidBody& body = b.body;
@@ -17192,6 +17215,7 @@ bool GameWorld::stepBody(Body& b, float seconds)
 		// stops a startAutoRotateOnEnter part (and puts it back) at rest too.
 		if (b.vehicle) {
 			b.vehicle->setOccupied(!b.occupants.empty() && b.occupants[0] >= 0);
+			setSeatTriggers(b);
 			b.vehicle->tickParts(body, seconds);
 		}
 		return false;
@@ -17212,6 +17236,7 @@ bool GameWorld::stepBody(Body& b, float seconds)
 		// The root PCO's own seat, the pilot's: the engines' thrust (0x0064df20), the ForceObjects
 		// (0x0062c920) and the input regulator ask it with 0 (0x005c87b0), not the other seats.
 		b.vehicle->setOccupied(!b.occupants.empty() && b.occupants[0] >= 0);
+		setSeatTriggers(b);
 		if (b.animation) {
 			b.vehicle->setLegsAnimation(b.animation->blocksInput(), b.animation->speedFactor());
 		}
@@ -17345,6 +17370,7 @@ void GameWorld::stepPhysicsMove(float seconds)
 			// the forces go nowhere.
 			if (it->vehicle) {
 				it->vehicle->setOccupied(!it->occupants.empty() && it->occupants[0] >= 0);
+				setSeatTriggers(*it);
 				it->vehicle->tick(body, m_ground, seconds, 0.8f);
 			}
 			body.velocity = body.angularVelocity = body.acceleration = body.torque = {};

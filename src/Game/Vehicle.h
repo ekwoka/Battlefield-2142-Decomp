@@ -178,6 +178,9 @@ struct VehicleInput {
 
 // The player inputs a template names (inputToYaw PIThrottle, ...): an index
 // into VehicleInput, -1 for none (or one the vehicle doesn't read).
+// PIFire / PIAltFire: the trigger of the seat whose PlayerControlObject the
+// part hangs under (Vehicle::setTriggers), not the driver's VehicleInput.
+constexpr int kVehicleInputFire = 6, kVehicleInputAltFire = 7;
 int vehicleInputIndex(const std::string& name);
 float vehicleInputValue(const VehicleInput& input, int index);
 
@@ -259,6 +262,7 @@ public:
 		physics::Mat3 base;
 		std::array<RotationAxis, 3> axes;
 		std::array<int, 3> inputs {-1, -1, -1};
+		int controller = 0; // its PlayerControlObject: an index into controllers()
 		std::array<float, 3> angle {}, rate {}, excess {};
 		bool rememberExcess = false; // 0x30a: input over 1 is kept for later ticks (+-40; emptied by an input against it, 0x00563bd0)
 		bool canReverse = true;      // an Engine's 0x744: an input against the axis's acceleration is 0
@@ -552,6 +556,24 @@ public:
 	float clutch() const { return m_clutch; }
 
 	void setInput(const VehicleInput& input) { m_input = input; }
+	// The PlayerControlObjects of the tree, the root first, and each one's
+	// player's fire / alternate fire this tick: each takes its own player's
+	// input, which its bundles copy (a walker driver's minigun barrels, an
+	// AT gunner's).
+	const std::vector<std::string>& controllers() const { return m_controllers; }
+	void setTriggers(size_t controller, bool fire, bool altFire)
+	{
+		if (controller < m_triggers.size()) {
+			m_triggers[controller] = {fire, altFire};
+		}
+	}
+	float trigger(int controller, bool alt) const
+	{
+		return controller >= 0 && static_cast<size_t>(controller) < m_triggers.size()
+				&& m_triggers[static_cast<size_t>(controller)][alt ? 1 : 0]
+			? 1.0f
+			: 0.0f;
+	}
 	// A probe of wheel `index` met an object's face, pushing the wheel by
 	// `push` while the root's push-out stood at `rootPush` (see
 	// Wheel::objectGround); taken by the next tick.
@@ -634,6 +656,8 @@ private:
 	// on the hull's angular velocity about its own x, y, z.
 	std::array<Regulator, 3> m_rotational;
 	bool m_occupied = false;
+	std::vector<std::string> m_controllers;
+	std::vector<std::array<bool, 2>> m_triggers;
 	float m_objectRadius = 1;
 	float m_sprintFactor = 2.5f; // the PCO template's (+0x464; the constructor's 2.5)
 	SprintStamina m_sprint;

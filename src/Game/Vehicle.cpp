@@ -295,6 +295,7 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 		Mat3 rotation;
 		int oldEngine = -1;
 		bool newCar2 = false;
+		int controller = 0; // the PlayerControlObject above it (Vehicle::controllers)
 	};
 	const auto axisOf = [](const world::ObjectTemplate& t, Part& part) {
 		const Vec3 lo = vector(t, "minRotation"), hi = vector(t, "maxRotation"), speed = vector(t, "maxSpeed");
@@ -343,6 +344,7 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 			if (isPart) {
 				Part part;
 				part.parent = place.part;
+				part.controller = place.controller;
 				part.name = t.name();
 				part.type = type;
 				part.offset = place.offset;
@@ -354,6 +356,10 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 				place.part = static_cast<int>(vehicle->m_parts.size()) - 1;
 				place.offset = {};
 				place.rotation = {};
+			}
+			if (depth > 0 && type == "PlayerControlObject") {
+				vehicle->m_controllers.push_back(t.name());
+				place.controller = static_cast<int>(vehicle->m_controllers.size()) - 1;
 			}
 			const int self = place.part;
 			if (type == "Engine") {
@@ -522,7 +528,9 @@ std::unique_ptr<Vehicle> Vehicle::fromTemplate(const world::ObjectTemplate& root
 					depth + 1);
 			}
 		};
+	vehicle->m_controllers = {root.name()};
 	visit(root, {}, {}, {}, {}, 0);
+	vehicle->m_triggers.assign(vehicle->m_controllers.size(), {});
 	const bool newCar2Wheels = std::any_of(
 		vehicle->m_wheels.begin(), vehicle->m_wheels.end(), [](const Wheel& w) { return w.newCar2; });
 	const bool flies = accept == Accept::Flight && !vehicle->m_wings.empty();

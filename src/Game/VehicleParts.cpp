@@ -63,6 +63,14 @@ int vehicleInputIndex(const std::string& name)
 	if (n == "PISprint") {
 		return 5;
 	}
+	// The bundle's input pass (0x005653a7..0x00565472) copies any input
+	// below 64 by its number: the triggers too (spinning gun barrels).
+	if (n == "PIFire") {
+		return kVehicleInputFire;
+	}
+	if (n == "PIAltFire") {
+		return kVehicleInputAltFire;
+	}
 	return -1;
 }
 
@@ -289,9 +297,12 @@ void Vehicle::updateParts(float seconds)
 				if (part.axes[axis].maxSpeed == 0 && part.axes[axis].continuousSpeed == 0) {
 					continue;
 				}
+				const int input = part.inputs[axis];
 				float in = part.autoRotating ? 1.0f
-					: part.inputs[axis] >= 0  ? vehicleInputValue(m_regulated, part.inputs[axis])
-											  : 0.0f;
+					: input == kVehicleInputFire || input == kVehicleInputAltFire
+					? trigger(part.controller, input == kVehicleInputAltFire)
+					: input >= 0 ? vehicleInputValue(m_regulated, input)
+								 : 0.0f;
 				if (part.liftRegulated) {
 					in = part.liftRegulator; // 0x0064fd40: +0x1a4 = +0x24c before the step
 				}

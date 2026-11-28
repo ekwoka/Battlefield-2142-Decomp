@@ -11651,3 +11651,76 @@ TEST(Vehicles_StaticAALocksOnUavAndItsMissileReachesIt)
 		nearest);
 	CHECK(!flying && nearest < 6);
 }
+
+// The EU walker's minigun barrels (US_heavy_mech_minigun_*_barrels,
+// setInputToRoll PIFire): the bundle's input pass (0x005653a7) copies any
+// input under 64, so the driver's trigger spins them up (850 deg/s at 5000)
+// and they run down on release. fireInCameraDof: each round leaves along
+// the view it was fired under (0x005f1a20), at any range.
+TEST(Vehicles_WalkerMinigunBarrelsSpinOnFire)
+{
+	if (!gameDir()) {
+		return;
+	}
+	Garage g(gameDir());
+	if (!g.loaded || !g.templates.find("us_heavy_mech")) {
+		return;
+	}
+	Animations a(g);
+	const uint32_t mech = g.start("us_heavy_mech", {0, 4, 6});
+	a.attach(g);
+	CHECK(g.enter(mech));
+	g.drive({}, 3);
+	const auto roll = [&] {
+		world::Vec3 offset, turn;
+		CHECK(g.world->partPose(mech, "US_heavy_mech_minigun_right_barrels", offset, turn));
+		return turn.z;
+	};
+	const float rest = roll();
+	anim::AnimationSystems systems(nullptr);
+	PlayerCamera camera(*g.world, systems, nullptr);
+	camera.tick(1 / 30.0f);
+	const size_t before = g.world->projectiles().size();
+	game::SoldierInput fire;
+	fire.fire = true;
+	float turned = 0, last = rest;
+	PlayerCamera::View eye;
+	std::vector<PlayerCamera::View> eyes; // the view each round left under
+	for (int tick = 0; tick < 30; ++tick) {
+		g.world->setPlayerInput(fire);
+		g.world->tick(1 / 30.0f);
+		camera.tick(1 / 30.0f);
+		const float now = roll();
+		turned += std::fabs(std::remainder(now - last, 360.0f));
+		last = now;
+		CHECK(camera.view(eye, 4.0f / 3.0f));
+		while (eyes.size() < g.world->projectiles().size() - before) {
+			eyes.push_back(eye);
+		}
+	}
+	g.world->setPlayerInput({});
+	std::fprintf(stderr, "  barrels turned %.0f degrees in 1 s of fire\n", turned);
+	CHECK(turned > 200);
+	CHECK(g.world->projectiles().size() >= before + 4);
+	for (size_t i = before; i < g.world->projectiles().size() && i < before + 4; ++i) {
+		const game::Projectile& p = g.world->projectiles()[i];
+		const PlayerCamera::View& e = eyes[i - before];
+		const physics::Vec3 at {e.position[0], e.position[1], e.position[2]};
+		const physics::Vec3 look {std::sin(e.yaw) * std::cos(e.pitch), std::sin(e.pitch), std::cos(e.yaw) * std::cos(e.pitch)};
+		const physics::Vec3 v = p.heading * (1 / std::sqrt(physics::lengthSquared(p.heading)));
+		for (const float range : {10.0f, 30.0f, 100.0f}) {
+			const physics::Vec3 aim = at + look * range;
+			// where the round's line passes the plane through `aim` across the look
+			const float t = physics::dot(aim - p.origin, look) / physics::dot(v, look);
+			const physics::Vec3 hit = p.origin + v * t;
+			const physics::Vec3 miss = hit - aim;
+			std::fprintf(stderr, "  round %zu at %3.0f m: off the view %.2f m (up %.2f)\n", i - before, range,
+				std::sqrt(physics::lengthSquared(miss)), miss.y);
+			CHECK(std::sqrt(physics::lengthSquared(miss)) < range * 0.006f); // within minDev 0.15 (0.35 deg)
+		}
+	}
+	g.run(3);
+	const float stopped = roll();
+	g.run(0.5f);
+	CHECK(std::fabs(std::remainder(roll() - stopped, 360.0f)) < 0.01f);
+}

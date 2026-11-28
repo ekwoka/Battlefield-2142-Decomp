@@ -3810,6 +3810,9 @@ private:
 	bool raycastBody(const Body& body, const physics::Vec3& localFrom, const physics::Vec3& localTo,
 		physics::CollisionWorld::Hit& hit, int* part = nullptr, bool frontOnly = false) const;
 	bool stepBody(Body& body, float seconds);
+	// Each seat's PlayerControlObject takes its player's fire and alternate
+	// fire this tick (Vehicle::setTriggers); an empty seat's are off.
+	void setSeatTriggers(Body& b);
 	void stepPhysics(float seconds);        // stepPhysicsMove, then stepPhysicsCollide
 	void stepPhysicsMove(float seconds);    // the nodes' move (0x006daa70)
 	void stepPhysicsCollide(float seconds); // the mesh group's turns and the responses (0x006dd1b0)
