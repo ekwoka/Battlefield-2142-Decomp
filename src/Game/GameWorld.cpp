@@ -7838,6 +7838,29 @@ std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnGroups(int team, int play
 	return result;
 }
 
+std::vector<GameWorld::SpawnGroupInfo> GameWorld::humanSpawnGroups(int team, int playerId) const
+{
+	std::vector<SpawnGroupInfo> groups = spawnGroups(team, playerId);
+	const auto allResolvedPointsAreAiOnly = [this](const SpawnGroupInfo& group) {
+		const auto isAiOnly = [](const world::ObjectTemplate* t) {
+			return t && SpawnPointFlags::of(*t).onlyForAI;
+		};
+		if (!group.mobilePoints.empty()) {
+			return std::all_of(group.mobilePoints.begin(), group.mobilePoints.end(), isAiOnly);
+		}
+		return !group.points.empty() && std::all_of(group.points.begin(), group.points.end(), [this, &isAiOnly](uint32_t id) {
+			const world::Object* point = m_objects.find(id);
+			return point && isAiOnly(point->objectTemplate());
+		});
+	};
+	const Player* player = findPlayer(playerId);
+	if (!player || player->ai) return groups;
+	groups.erase(std::remove_if(groups.begin(), groups.end(), [&allResolvedPointsAreAiOnly](const SpawnGroupInfo& group) {
+		return allResolvedPointsAreAiOnly(group);
+	}), groups.end());
+	return groups;
+}
+
 std::vector<GameWorld::SpawnGroupInfo> GameWorld::spawnableGroups(int team, int playerId) const
 {
 	std::vector<SpawnGroupInfo> result;

@@ -1356,6 +1356,9 @@ public:
 	};
 	// Every registered group, including inactive groups, for local marker rendering.
 	std::vector<SpawnGroupInfo> spawnGroups(int team, int player = -1) const;
+	// Human deployment-map groups: keeps human-eligible inactive groups visible,
+	// but omits groups whose points are all restricted to AI.
+	std::vector<SpawnGroupInfo> humanSpawnGroups(int team, int player) const;
 	// The local deployment map's available groups, in registration order.
 	std::vector<SpawnGroupInfo> spawnableGroups(int team, int player = -1) const;
 	// Whether the explicit selection path can deploy this player at the group.

@@ -1112,7 +1112,7 @@ void updateMap(hud::HudManager& hud, const host::HudWorld& world, game::GameWorl
 	// sits at the mean of its points. Mobile APC and Titan groups use the same
 	// map path and their live group position.
 	if (spawning && !world.joined()) {
-		const auto groups = round.spawnGroups(me.team, me.id);
+		const auto groups = round.humanSpawnGroups(me.team, me.id);
 		const auto titans = round.titans();
 		for (const main::SpawnGroupMarker& mapped : main::spawnGroupMarkers(groups, chosen)) {
 			const auto found = std::find_if(groups.begin(), groups.end(), [&mapped](const auto& group) { return group.id == mapped.id; });

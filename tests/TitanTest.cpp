@@ -985,6 +985,50 @@ TEST(GameWorld_SpawnGroupsSuez902SplitAverageSelectionAndRoundReset)
 	CHECK(split != resetGroups.end() && split->id == cpGroups[1].id);
 }
 
+TEST(GameWorld_SuezSP16HidesAiOnlyHumanMarkers)
+{
+	const char* gameDir = std::getenv("BF2142_GAME_DIR");
+	if (!gameDir) return;
+	TitanLevel level(gameDir, "Suez_Canal", 16, true, "mods/Project_Remaster_v17_Final", false, nullptr, "gpm_sp");
+	CHECK(level.loaded);
+	if (!level.loaded) return;
+	level.world->setControlPointTeam(601, 2);
+	const int human = level.world->addPlayer("Human spawn map", 2, false);
+	const int bot = level.world->addPlayer("AI spawn map", 2, true);
+	const auto allHumanViewGroups = level.world->spawnGroups(2, human);
+	const auto humanGroups = level.world->humanSpawnGroups(2, human);
+	const auto botGroups = level.world->humanSpawnGroups(2, bot);
+	const auto isRefugeeGroupOne = [](const auto& group) { return group.controlPoint == 601 && group.templateGroup == 1; };
+	const auto isRefugeeGroupZero = [](const auto& group) { return group.controlPoint == 601 && group.templateGroup == 0; };
+	CHECK(std::any_of(allHumanViewGroups.begin(), allHumanViewGroups.end(), isRefugeeGroupOne));
+	CHECK(std::none_of(humanGroups.begin(), humanGroups.end(), isRefugeeGroupOne));
+	CHECK(std::any_of(humanGroups.begin(), humanGroups.end(), isRefugeeGroupZero));
+	CHECK(std::any_of(botGroups.begin(), botGroups.end(), isRefugeeGroupOne));
+	const auto aiGroup = std::find_if(botGroups.begin(), botGroups.end(), isRefugeeGroupOne);
+	CHECK(aiGroup != botGroups.end() && aiGroup->available);
+	const auto humanBase = std::find_if(humanGroups.begin(), humanGroups.end(), isRefugeeGroupZero);
+	CHECK(humanBase != humanGroups.end());
+	if (humanBase == humanGroups.end()) return;
+	for (uint32_t id : humanBase->points) {
+		world::Object* point = level.objects.find(id);
+		CHECK(point && point->objectTemplate());
+		if (!point || !point->objectTemplate()) continue;
+		world::ObjectTemplate* pointTemplate = level.templates.find(point->objectTemplate()->name());
+		CHECK(pointTemplate != nullptr);
+		if (pointTemplate) pointTemplate->settings()["setEnterOnSpawn"] = "1";
+		point->setPosition({100000, 50, 100000}); // no vehicle seat can serve these human-eligible points
+	}
+	const auto blockedGroups = level.world->humanSpawnGroups(2, human);
+	const auto blockedBase = std::find_if(blockedGroups.begin(), blockedGroups.end(), isRefugeeGroupZero);
+	CHECK(blockedBase != blockedGroups.end());
+	if (blockedBase != blockedGroups.end()) {
+		CHECK(!blockedBase->available);
+		const auto markers = main::spawnGroupMarkers({*blockedBase}, blockedBase->id);
+		CHECK(markers.size() == 1);
+		if (markers.size() == 1) CHECK(!markers.front().active); // human-eligible, temporarily unavailable groups stay visible
+	}
+}
+
 TEST(GameWorld_RemasterShuhiaSinglePlayerTitanSpawnGroup)
 {
 	const char* gameDir = std::getenv("BF2142_GAME_DIR");
